@@ -49,6 +49,7 @@
 #include "../common/guard.h"
 #include "../common/log.h"
 #include "../common/periodic_work.h"
+#include "../common/runtime_profile.h"  // runtimeFlatProfile: the flat profile's half of the key (panels, the flat layer)
 #include "../common/temporal_mode.h"
 
 #include <windows.h>
@@ -109,6 +110,7 @@ bool g_crispStoodDown = false;  // the HDR HUD path alone (a failure of its own)
 std::string g_keyText = "?";
 bool g_keyNoted = false;
 bool g_aliasNoted = false;  // the old spelling's note, once a session
+bool g_flatAaNoted = false; // the flat profile's anti-aliasing as the key's line last said it (uiLayerConfigure)
 
 // The layer's size target is fix.ui_quality's value; the HDR HUD layer and
 // the 8-bit layer it tonemaps into share a size by construction (the HDR
@@ -2813,7 +2815,12 @@ void uiLayerConfigure(Config& cfg) {
     // instruments with them.
     uiSurfacesSetTarget(target);
     uiPanelScaleSetTarget(target);
-    if (!changed) return;
+    // The flat profile's panel factor (ui_panel_scale.cpp) needs its anti-aliasing on: the mode is read around the gate
+    // (fix.temporal_aa is refused there, which is what keeps this file's per-eye layer inert in flat).
+    const bool flatAa = runtimeFlatProfile() && temporalModeEnabled(cfg.requestedTemporalMode());
+    if (runtimeFlatProfile()) uiPanelScaleSetFlatTemporal(flatAa);
+    if (!changed && (!runtimeFlatProfile() || flatAa == g_flatAaNoted)) return;
+    g_flatAaNoted = flatAa;
     g_keyNoted = true;
     if (!recognized) {
         Log::get().note("ui quality: fix.ui_quality = '%s' is not off, 100 or 125 -- off.",
@@ -2823,6 +2830,16 @@ void uiLayerConfigure(Config& cfg) {
     if (target <= 0.0f) {
         Log::get().note("ui quality: off -- the game's UI surfaces and composites are drawn as "
                         "they always were.");
+        return;
+    }
+    if (runtimeFlatProfile()) {
+        Log::get().note(
+            "ui quality: %s (flat) -- panels: %s",
+            uiQualityLabel(target),
+            flatAa ? "the game's own panel formula makes every render-to-texture panel at the display's size times "
+                     "the target, whatever the render size, from the next panel init or view change (the \"ui quality: "
+                     "panels (flat)\" lines give the factor)."
+                   : "wait -- anti-aliasing is off, and the panels stay at the game's own size until it is on.");
         return;
     }
     float hmd = 0.0f;
@@ -4595,7 +4612,11 @@ void uiLayerFrameBoundary(ID3D11DeviceContext* ctx) {
     if (!g_winStartMs) g_winStartMs = now;
     if (now - g_winStartMs < kTotalsMs) return;
     const bool anything = g_win.redirected || g_win.composites || g_win.compositeRefused;
-    if (g_target > 0.0f || anything) {
+    if (runtimeFlatProfile()) {
+        // The flat profile: this file's per-eye layer is never live there (fix.temporal_aa reads off through the flat
+        // gate), so its totals would only say so. The panel half's line is the key's 30 s account in flat.
+        uiPanelScaleLog();
+    } else if (g_target > 0.0f || anything) {
         uint64_t samples = 0;  // what logTotals is about to sort
         for (const RouteStats& r : g_routeStats) samples += r.n;
         PeriodicWorkScope timing(g_workTotals, samples);

@@ -311,12 +311,12 @@ private:
 };
 
 // ---- the words -------------------------------------------------------------------------
-// Twelve lines: the flat page has three rows, so a blank line and twelve of these are the card's sixteen (menu_panel.h's
-// kMenuMaxLines; menu.cpp static_asserts it). The two paragraphs take up to six at the panel's width (40 characters a
-// line in the rig's ruler), the third (EDVR's TAA above the output) four more: ten at worst, and the two spare are for a
-// ruler wider than the rig's rather than a cut-off sentence.
+// Eleven lines: the flat page has four rows (UI quality joined it 2026-10-09), so a blank line and eleven of these are the
+// card's sixteen (menu_panel.h's kMenuMaxLines; menu.cpp static_asserts it). The two paragraphs take up to six at the
+// panel's width (40 characters a line in the rig's ruler), the third (EDVR's TAA above the output) four more: ten at worst,
+// and the one spare is for a ruler wider than the rig's rather than a cut-off sentence.
 struct FlatSettingsWarning {
-    static constexpr int kMaxLines = 12;
+    static constexpr int kMaxLines = 11;
     char line[kMaxLines][160] = {};
     int count = 0;
 };

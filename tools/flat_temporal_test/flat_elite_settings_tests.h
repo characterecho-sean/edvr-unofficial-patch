@@ -543,8 +543,8 @@ inline int flatEliteSettingsTests() {
                !flatWarningCause(false, true, true, true, true, 2176, 1224, 2560, 1600).structureAdmission,
                "frames not refused: no condition holds, whatever the runtime published");
 
-        // At the panel's width it wraps onto the card: every variant fits the lines it has (twelve allowed), each line fits the width, and
-        // the flat page's three rows and a blank line still leave the card room (menu.cpp static_asserts the same sum).
+        // At the panel's width it wraps onto the card: every variant fits the lines it has (eleven allowed), each line fits the width, and
+        // the flat page's four rows and a blank line still leave the card room (menu.cpp static_asserts the same sum).
         bool fits = true;
         const FlatWarningCause causes[] = {shape, taa, flatWarningCause(true, true, false, true, true, 1200, 750, 2560, 1600),
                                            flatWarningCause(true, false, false, false, true, 0, 0, 0, 0)};
@@ -556,7 +556,7 @@ inline int flatEliteSettingsTests() {
                     if (elite_settings_test::ruler(w.line[i], nullptr) > elite_settings_test::kPanelWidthPx) fits = false;
             }
         expect(fits, "wrapped to the panel's width every variant fits the lines it has");
-        expect(3 + 1 + FlatSettingsWarning::kMaxLines <= 16, "the flat page's rows, a blank line and a full warning fit the card's 16 lines");
+        expect(4 + 1 + FlatSettingsWarning::kMaxLines <= 16, "the flat page's rows, a blank line and a full warning fit the card's 16 lines");
 
         // The key moves with every condition and with the sizes the words name, so the panel and the log update live as Elite's
         // resolution or supersampling changes; with no cause it is what it was.

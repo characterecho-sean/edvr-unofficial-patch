@@ -229,6 +229,7 @@ int uiDepthEyeOfTarget(const void* res, uint32_t, uint32_t, uint32_t) {
 }
 int uiDepthEyeOfTargetReadOnly(const void* res) { return uiDepthEyeOfTarget(res, 0, 0, 0); }
 void uiPanelScaleSetTarget(float) {}
+void uiPanelScaleSetFlatTemporal(bool) {}
 void uiPanelScaleFrameBoundary() {}
 void uiPanelScaleLog() {}
 void orbitalWidthLog(const char*) {}

@@ -63,6 +63,14 @@ namespace edvr {
 // the game's own values until the factor's inputs are known).
 void uiPanelScaleSetTarget(float target);
 
+// THE FLAT PROFILE (2026-10-09; ui_sizing_math.h's uiFlatPanelPlanFor). In flat the game's panel formula reads the scene's
+// render size R with k = 1, so the same four operands take f = (R / D) / T: the panels at the display's size D times the
+// target, whatever the Supersampling. The inputs are the flat runtime's own measurement of R and D
+// (flatRuntimeSceneSizes), no HMD Quality, frustum or .fxcfg. The factor is made only while the flat profile's
+// anti-aliasing is on (this call, from uiLayerConfigure): with it off nothing reconstructs the larger panels and the
+// scene would only shrink them back, so the floats hold the game's own 1080 and 1920.
+void uiPanelScaleSetFlatTemporal(bool on);
+
 // Once a frame, on the render thread (uiLayerFrameBoundary): the factor from
 // its inputs, written when they have settled on a new value.
 void uiPanelScaleFrameBoundary();

@@ -370,6 +370,61 @@ inline bool uiPanelFactor(const UiPanelInputs& in, double* f, UiPanelClamp* clam
     return ok;
 }
 
+// ------------------------------------------------------------ the flat profile's factor (2026-10-09) --
+//
+// In the flat profile the panel formula's (c, d) are the UI screen record's width and height with k = 1
+// (FUN_142842A70 asks the VR manager for k only in the VR modes): the scene's render size R, Supersampling already in
+// it. Measured on the 2026-10-09 09:36 Epic flight (771bb99a, D 3840x2160 throughout): the same rtt-init panel was
+// created 1920x960 while R was 3840x2160 and 960x480 once R was 1920x1080 -- the panels follow R, not the display D.
+// The game divides by 1080 when c/d is not below 16/9 (the comiss/jb at both sites), by 1920 when it is; the ratio is
+// taken on that axis. The patch makes s' = s / f, so for panels at D x T:
+//     f = (R / D) / T                (on the axis the game divides; R and D must have one aspect)
+// clamped and budgeted by the same uiPanelSolve with no Supersampling term (it is in R already). The widest panel the
+// formula can ask for is the 1920 stage's: c at f = 1 on the width axis, 1920 x d / 1080 on the height axis.
+struct UiFlatPanelInputs {
+    uint32_t renderW = 0, renderH = 0;  // R: the scene the game renders (the flat runtime's own measurement)
+    uint32_t outputW = 0, outputH = 0;  // D: the swap chain's back buffer
+    float target = 0.0f;                // T: 1.0 or 1.25
+};
+enum class UiFlatPanelRefuse : uint8_t { kNone = 0, kUnknown, kAspect };
+inline const char* uiFlatPanelRefuseName(UiFlatPanelRefuse r) {
+    return r == UiFlatPanelRefuse::kUnknown ? "the render or display size is not known yet"
+           : r == UiFlatPanelRefuse::kAspect ? "the render size is not the display's shape (a non-scene frame, or a resolution unlike the screen's)"
+                                             : "none";
+}
+// The axis the game divides on: height (1080) unless R is narrower than 16:9. Exact integer compare, as the game's
+// float compare at 16:9 itself is not below.
+inline bool uiFlatPanelHeightAxis(uint32_t renderW, uint32_t renderH) {
+    return static_cast<uint64_t>(renderW) * 9u >= static_cast<uint64_t>(renderH) * 16u;
+}
+inline UiFlatPanelRefuse uiFlatPanelPlanFor(const UiFlatPanelInputs& in, UiPanelPlan* out) {
+    if (out) *out = UiPanelPlan{};
+    if (!in.renderW || !in.renderH || !in.outputW || !in.outputH || !(in.target > 0.0f)) return UiFlatPanelRefuse::kUnknown;
+    // One shape: R x D's height against R's height x D's width, within 1% (the game's rounding of R is a pixel or two).
+    const double rd = static_cast<double>(in.renderW) * in.outputH, dr = static_cast<double>(in.renderH) * in.outputW;
+    if (std::fabs(rd - dr) > 0.01 * (rd > dr ? rd : dr)) return UiFlatPanelRefuse::kAspect;
+    const bool height = uiFlatPanelHeightAxis(in.renderW, in.renderH);
+    const double ratio = height ? static_cast<double>(in.renderH) / in.outputH : static_cast<double>(in.renderW) / in.outputW;
+    const double formula = ratio / static_cast<double>(in.target);
+    const double base = height ? 1920.0 * static_cast<double>(in.renderH) / 1080.0 : static_cast<double>(in.renderW);
+    uiPanelSolve(formula, base, UiPanelBase::kScene, 1.0f, out);
+    return UiFlatPanelRefuse::kNone;
+}
+// The game's Supersampling setter moved from ssFrom to ssTo before the render size has followed (the setter thunk):
+// R scales with it, so the formula and the base do. ssFrom is the live value the plan was made beside.
+inline bool uiFlatPanelMove(double formula, double base, float ssFrom, float ssTo, UiPanelPlan* out) {
+    if (!(formula > 0.0) || !(base > 0.0) || !(ssFrom > 0.0f) || !(ssTo > 0.0f)) return false;
+    const double r = static_cast<double>(ssTo) / static_cast<double>(ssFrom);
+    uiPanelSolve(formula * r, base * r, UiPanelBase::kScene, 1.0f, out);
+    return true;
+}
+// The panel the game makes from a stage on the height axis: trunc(stage x (R_h / 1080 x f)), its own arithmetic.
+inline uint32_t uiFlatPanelSizeHeightAxis(uint32_t stage, uint32_t renderH, float divisor1080) {
+    if (!(divisor1080 > 0.0f)) return 0;
+    const float s = static_cast<float>(renderH) / divisor1080;
+    return static_cast<uint32_t>(static_cast<float>(stage) * s);
+}
+
 // The game window's size from DisplaySettings.xml's text: <ScreenWidth> and <ScreenHeight>. False unless both
 // are there and sane (a window of 320 to 16384 a side).
 inline bool uiDisplaySizeFromXml(const char* text, size_t n, uint32_t* w, uint32_t* h) {

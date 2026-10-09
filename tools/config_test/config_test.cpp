@@ -2124,6 +2124,11 @@ int main(int argc, char** argv) {
             if (Config::get().getBool("advanced.input_gate", true))
                 ok("flat input_gate uses true default when absent");
             else fail("flat input_gate default", "missing key was not true");
+            // The interface quality (2026-10-09): a flat panel row, 100 by default. Refused, the default would read off and an
+            // edvr-flat.ini with no line (every one written before the row) would get today's interface with nothing said.
+            if (Config::get().getString("fix.ui_quality", "100") == "100")
+                ok("flat ui_quality uses the 100 default when absent");
+            else fail("flat ui_quality default", "missing key was not 100");
         }
     }
     Config::get().set("advanced.input_gate", "off");
@@ -2149,6 +2154,12 @@ int main(int argc, char** argv) {
     Config::get().set("advanced.temporal_aa_debug", "motion_source");
     expectStr("advanced.temporal_aa_debug", "motion_source", "flat scope permits the refusal view's key");
     Config::get().set("advanced.temporal_aa_debug", "off");
+    // The flat panel's UI quality row reads fix.ui_quality through getString: it must pass the gate both ways.
+    Config::get().set("fix.ui_quality", "125");
+    expectStr("fix.ui_quality", "125", "flat scope permits the UI quality key");
+    Config::get().set("fix.ui_quality", "off");
+    expectStr("fix.ui_quality", "off", "flat scope reads the UI quality key off");
+    Config::get().set("fix.ui_quality", "100");
     // The flat jitter cycle's length (advanced.temporal_aa_jitter_phases): the flat runtime reads it through getInt with an 8 default.
     // Unlisted in runtimeProfileAllowsKey, a refused key answers 0 whatever the file says, which the reader takes for out of range and
     // reads as 8: a user who wrote 32 would fly 8, with a log line naming a value they never wrote.

@@ -1048,6 +1048,82 @@ void testPanelScale() {
           "...and the shape occurs exactly twice in .text, at the two sites");
 }
 
+// The flat profile's factor (ui_sizing_math.h's uiFlatPanelPlanFor, 2026-10-09): f = (R / D) / T on the axis the game
+// divides, the panels at D x T whatever the Supersampling. The 09:36 Epic flight's numbers: D 3840x2160, an rtt-init panel
+// 1920x960 at R 3840x2160 and 960x480 at R 1920x1080 -- the same 960x480 stage at s = R_h / 1080.
+void testFlatPanelScale() {
+    auto plan = [](uint32_t rw, uint32_t rh, uint32_t dw, uint32_t dh, float t, UiPanelPlan* p) {
+        UiFlatPanelInputs in;
+        in.renderW = rw;
+        in.renderH = rh;
+        in.outputW = dw;
+        in.outputH = dh;
+        in.target = t;
+        return uiFlatPanelPlanFor(in, p);
+    };
+    UiPanelPlan p;
+    // The flight's state: 0.5 Supersampling on a 4K screen.
+    check(plan(1920, 1080, 3840, 2160, 1.0f, &p) == UiFlatPanelRefuse::kNone && std::fabs(p.f - 0.5) < 1e-12 &&
+              p.clamp == UiPanelClamp::kNone && !p.budgetActs && p.ss == 1.0,
+          "flat R 1920x1080 on D 3840x2160 at 100: f = 0.5 (the panels x2), no Supersampling term, no clamp");
+    float d1080 = 0.0f, d1920 = 0.0f;
+    uiPanelDivisors(p.f, &d1080, &d1920);
+    check(d1080 == 540.0f && d1920 == 960.0f, "...the operands read 540 and 960");
+    check(uiFlatPanelSizeHeightAxis(960, 1080, 1080.0f) == 960 && uiFlatPanelSizeHeightAxis(480, 1080, 1080.0f) == 480,
+          "the flight's stage 960x480 at R 1920x1080 and the game's own divisor is the logged 960x480");
+    check(uiFlatPanelSizeHeightAxis(960, 2160, 1080.0f) == 1920 && uiFlatPanelSizeHeightAxis(480, 2160, 1080.0f) == 960,
+          "...and at R 3840x2160 the logged 1920x960: the panels follow R, which is what the factor divides out");
+    check(uiFlatPanelSizeHeightAxis(960, 1080, d1080) == 1920 && uiFlatPanelSizeHeightAxis(480, 1080, d1080) == 960,
+          "...so at R 1920x1080 with f 0.5 the panel is the display's 1920x960");
+    check(std::fabs(p.largest - 1920.0 / 0.5) < 1e-9, "the widest panel the formula can ask for is the 1920 stage at D: 3840 px");
+    check(plan(1920, 1080, 3840, 2160, 1.25f, &p) == UiFlatPanelRefuse::kNone && std::fabs(p.f - 0.4) < 1e-12 &&
+              p.clamp == UiPanelClamp::kNone && std::fabs(p.largest - 4800.0) < 1e-9,
+          "...at 125: f = 0.4 (x2.5), the widest 4800 px");
+    uiPanelDivisors(p.f, &d1080, &d1920);
+    check(uiFlatPanelSizeHeightAxis(960, 1080, d1080) == 2400 && uiFlatPanelSizeHeightAxis(480, 1080, d1080) == 1200,
+          "...the 960x480 stage comes out 2400x1200: the display's size x 1.25");
+    // Supersampling 1 and above: at or above D x T the game's own panels stand.
+    check(plan(3840, 2160, 3840, 2160, 1.0f, &p) == UiFlatPanelRefuse::kNone && p.f == 1.0,
+          "R = D at 100: f = 1, the game's own operands");
+    check(plan(3840, 2160, 3840, 2160, 1.25f, &p) == UiFlatPanelRefuse::kNone && std::fabs(p.f - 0.8) < 1e-12,
+          "R = D at 125: f = 0.8 (x1.25)");
+    check(plan(5760, 3240, 3840, 2160, 1.25f, &p) == UiFlatPanelRefuse::kNone && p.f == 1.0 && p.clamp == UiPanelClamp::kFloor,
+          "Supersampling 1.5 at 125: the game's panels are already 1.5x D, f = 1 (the floor): never smaller than the game makes them");
+    // Other shapes: the axis the game divides on.
+    check(uiFlatPanelHeightAxis(1920, 1080) && uiFlatPanelHeightAxis(3440, 1440) && !uiFlatPanelHeightAxis(2560, 1600),
+          "the height (1080) axis at 16:9 and wider, the width (1920) axis below 16:9");
+    check(plan(1280, 800, 2560, 1600, 1.0f, &p) == UiFlatPanelRefuse::kNone && std::fabs(p.f - 0.5) < 1e-12 &&
+              std::fabs(p.base - 1280.0) < 1e-9,
+          "16:10 at half: f 0.5 on the width axis, the base the render width");
+    check(plan(1720, 720, 3440, 1440, 1.0f, &p) == UiFlatPanelRefuse::kNone && std::fabs(p.f - 0.5) < 1e-12 &&
+              std::fabs(p.base - 1280.0) < 1e-9,
+          "21:9 at half: f 0.5 on the height axis, the base the 1920 stage at R's height (1280 px)");
+    check(plan(1919, 1080, 3840, 2160, 1.0f, &p) == UiFlatPanelRefuse::kNone,
+          "a pixel of rounding in R is the same shape");
+    // The cap and the budget: an 8K screen at a quarter render.
+    check(plan(1920, 1080, 7680, 4320, 1.25f, &p) == UiFlatPanelRefuse::kNone && p.f == 0.25 && p.clamp == UiPanelClamp::kCap &&
+              p.largest <= kUiPanelBudget,
+          "R a quarter of an 8K D at 125 would be x5: capped at x4, the widest 7680 px, inside the budget");
+    // Refusals: no factor, the floats hold.
+    check(plan(512, 512, 3840, 2160, 1.0f, &p) == UiFlatPanelRefuse::kAspect,
+          "the flight's 512x512 frames (a render unlike the screen's shape) make no factor");
+    check(plan(0, 0, 3840, 2160, 1.0f, &p) == UiFlatPanelRefuse::kUnknown &&
+              plan(1920, 1080, 0, 0, 1.0f, &p) == UiFlatPanelRefuse::kUnknown &&
+              plan(1920, 1080, 3840, 2160, 0.0f, &p) == UiFlatPanelRefuse::kUnknown,
+          "an unknown size or the key off: no factor");
+    // The setter thunk's move: R follows the Supersampling, so the plan scales with it.
+    UiPanelPlan base;
+    plan(1920, 1080, 3840, 2160, 1.0f, &base);
+    check(uiFlatPanelMove(base.formula, base.base, 0.5f, 1.0f, &p) && p.f == 1.0,
+          "the thunk: Supersampling 0.5 -> 1.0 moves f 0.5 -> 1 before R follows");
+    check(uiFlatPanelMove(base.formula, base.base, 0.5f, 0.75f, &p) && std::fabs(p.f - 0.75) < 1e-12,
+          "...0.5 -> 0.75: f 0.75, R's own 2880x1620 over D");
+    UiPanelPlan direct;
+    plan(2880, 1620, 3840, 2160, 1.0f, &direct);
+    check(std::fabs(direct.f - p.f) < 1e-12, "...the same f the frame boundary makes once R is 2880x1620 (so it writes nothing more)");
+    check(!uiFlatPanelMove(base.formula, base.base, 0.0f, 1.0f, &p), "...and no move without the value the plan was made at");
+}
+
 // The family rule (ui_layer_math.h's uiLayerFamilyFor, which vscreen.cpp's
 // uiLayerFamilyOf feeds): the 13:23 flight lost the menu panel when the FOV
 // trim, adopted at the main menu, had the game re-create its interface
@@ -2836,6 +2912,7 @@ int main(int argc, char** argv) {
     testHudParity();
     testChains();
     testPanelScale();
+    testFlatPanelScale();
     panelbudget::testAll();
     panelbudget::testWiring();
     Gpu g;

@@ -130,10 +130,13 @@ struct ChainSeen {
     UiChainVerdict verdict;
 };
 constexpr uint32_t kChainLines = 32;  // the flights' 13 GUI sizes, doubled by depth
+// The flat census's own cap (2026-10-09): its 32 were spent within two minutes of the 09:36 flight, before the cockpit's
+// panels had all been made, and with fix.ui_quality on each panel is made at a new size the line must name.
+constexpr uint32_t kChainLinesFlat = 96;
 
 // Everything below g_lock.
 struct State {
-    ChainSeen chains[kChainLines];
+    ChainSeen chains[kChainLinesFlat];
     uint32_t chainCount = 0;
     bool chainOverflowNoted = false;
 };
@@ -209,8 +212,9 @@ void uiSurfacesSetTarget(float target) {
 }
 
 namespace {
-// The flat profile watches without the key (the key is off there): see uiSurfacesObserveTick.
-bool observing() { return runtimeFlatProfile() && !g_on.load(std::memory_order_acquire); }
+// The flat profile watches whatever the key says (uiSurfacesObserveTick), and its chain line is the census's own, with the
+// panel factor beside it when the engine is sizing (2026-10-09): the VR line's W, tangents and k have no meaning in flat.
+bool observing() { return runtimeFlatProfile(); }
 
 // The census's chain line: one per distinct size and kind, no render-size filter (the flat profile has no native
 // temporal sizes) and none of the VR formulas -- the size the game made, who made it, and what D, R and Supersampling were.
@@ -218,10 +222,10 @@ void noteChainObserve(const D3D11_TEXTURE2D_DESC& d) {
     const bool depth = (d.BindFlags & D3D11_BIND_DEPTH_STENCIL) != 0;
     Lock lock;
     if (chainFor(d.Width, d.Height, depth)) return;
-    if (g_s.chainCount >= kChainLines) {
+    if (g_s.chainCount >= kChainLinesFlat) {
         if (!g_s.chainOverflowNoted) {
             g_s.chainOverflowNoted = true;
-            Log::get().note("flat ui census: panel sizes: %u sizes logged; further sizes are not logged.", kChainLines);
+            Log::get().note("flat ui census: panel sizes: %u sizes logged; further sizes are not logged.", kChainLinesFlat);
         }
         return;
     }
@@ -234,15 +238,22 @@ void noteChainObserve(const D3D11_TEXTURE2D_DESC& d) {
     uint32_t dw = 0, dh = 0, rw = 0, rh = 0;
     flatUiCensusSizes(&dw, &dh, &rw, &rh);
     if (uiSurfacesSupersampling() <= 0.0f) hmdRefreshOffThread();
-    char rvas[160], verdict[320];
+    char rvas[160], verdict[320], sized[160] = "panel factor off (the game's own divisors)";
     uiChainFormat(c.chain, rvas, sizeof(rvas));
     uiChainVerdictText(c.verdict, verdict, sizeof(verdict));
+    // Under the engine's sizing an rtt panel is made x1/f: at the game's own divisors it would have been about W x f.
+    if (uiPanelScaleLive()) {
+        const double f = uiPanelScaleFactor();
+        std::snprintf(sized, sizeof(sized), "panel factor x%.4f (f %.4f): an rtt panel's unpatched size about %ux%u",
+                      1.0 / f, f, static_cast<unsigned>(std::lround(d.Width * f)),
+                      static_cast<unsigned>(std::lround(d.Height * f)));
+    }
     Log::get().note(
         "flat ui census: panel %u: frame %llu, a %ux%u %s surface (DXGI format %u, bind 0x%X), D %ux%u R %ux%u, "
-        "Supersampling %.2f (0 = not read yet), HMD Quality %.2f; %u game frames, innermost first: %s; verdict %s.",
+        "Supersampling %.2f (0 = not read yet), HMD Quality %.2f, %s; %u game frames, innermost first: %s; verdict %s.",
         g_s.chainCount, static_cast<unsigned long long>(flatUiCensusFrameNo()), d.Width, d.Height,
         depth ? "depth" : "colour", static_cast<unsigned>(d.Format), d.BindFlags, dw, dh, rw, rh,
-        static_cast<double>(uiSurfacesSupersampling()), static_cast<double>(hmdCached()), c.chain.n,
+        static_cast<double>(uiSurfacesSupersampling()), static_cast<double>(hmdCached()), sized, c.chain.n,
         c.chain.n ? rvas : "none", verdict);
 }
 }  // namespace
