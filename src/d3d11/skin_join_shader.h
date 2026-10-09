@@ -242,17 +242,6 @@ void join(uint tid : SV_GroupIndex) {
  }
 }
 
-// F16 (gpu_census.h, FrameSkinJoinClearProbe): the join's 3-table clear loop (phase 0 above) ALONE, dispatched on scratch buffers on the census section's turn
-// only, so the clear can be priced apart from the rest of the join (a kernel cannot be timed from inside). Nothing the join reads is bound to it.
-[numthreads(256,1,1)]
-void joinClearProbe(uint tid : SV_GroupIndex) {
- [loop] for (uint i = tid; i < SJ_MAX_ROWS; i += 256u) {
-  JoinOut[i] = 0u;
-  Info.Store2(i * 8u, uint2(0u, 0u));
-  Owner.Store(i * 4u, 0xFFFFFFFFu);
- }
-}
-
 // ---- the pose table ----
 // b0: records (the pool copy's), rows, nRanges (listed draws), instFirst (the entry index the copied span starts at), flags (bit 0: the CPU says
 // the draw list is complete), instEntries (entries in the copied span).

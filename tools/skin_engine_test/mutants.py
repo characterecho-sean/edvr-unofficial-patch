@@ -222,11 +222,6 @@ MUTANTS = [
       "the join dispatch is not begun in the census"),
     M("pose-uncensused", "L14", "gpu", [("    GpuCensusScope poseCensus(ctx, GpuCensusSection::FrameSkinPose);   // (F16: nested in the engine velocity span; priced on the second skin's line)\n", "")],
       "the pose table build is not begun in the census"),
-    M("probe-slot-uncounted", "L14", "gpu", [("        if (gpuCensusBegin(ctx, GpuCensusSection::FrameSkinJoinClearProbe)) runClearProbe(s, ctx);\n        gpuCensusEnd(ctx, GpuCensusSection::FrameSkinJoinClearProbe);\n", "")],
-      "the join-clear probe's slot is never begun: the census line would print - for it however often the join ran"),
-    M("probe-clears-the-real-join-table", "L14", "gpu", [("ID3D11UnorderedAccessView* uavs[4] = {s.probeJoinUav.Get(), s.probeInfoUav.Get(), nullptr, s.probeOwnerUav.Get()};",
-                                                         "ID3D11UnorderedAccessView* uavs[4] = {s.joinUav.Get(), s.probeInfoUav.Get(), nullptr, s.probeOwnerUav.Get()};")],
-      "the census probe writes the join's real table: every character seen on a probed frame loses its history, the instrument changes what it measures"),
 ]
 
 if __name__ == "__main__":

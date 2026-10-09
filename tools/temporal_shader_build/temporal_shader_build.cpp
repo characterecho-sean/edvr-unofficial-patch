@@ -380,8 +380,6 @@ static int generateTemporal(const Options& o) {
         {"kSkinPoseScatterRestBytecode", "skin_pose_scatter_rest_cs", "poseScatterRest", nullptr, {}, false, edvr::kSkinJoinCsHlsl},
         {"kSkinPoseVerifyBytecode", "skin_pose_verify_cs", "poseVerify", nullptr, {}, false, edvr::kSkinJoinCsHlsl},
         {"kSkinPoseFinishBytecode", "skin_pose_finish_cs", "poseFinish", nullptr, {}, false, edvr::kSkinJoinCsHlsl},
-        // F16: the join's 3-table clear loop alone, for the GPU census to time on scratch buffers (gpu_census.h, FrameSkinJoinClearProbe).
-        {"kSkinJoinClearProbeBytecode", "skin_join_clear_probe_cs", "joinClearProbe", nullptr, {}, false, edvr::kSkinJoinCsHlsl},
         {"kTemporalMvFastBytecode", "temporal_mv_fast_cs", "mv", fast, {}},
         {"kTemporalMvBytecode", "temporal_mv_cs", "mv", diagnostic, {}},
         {"kTemporalMvTraceBytecode", "temporal_mv_trace_cs", "mv", trace, {}},
