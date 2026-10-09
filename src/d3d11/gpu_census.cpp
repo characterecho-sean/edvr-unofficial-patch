@@ -60,7 +60,7 @@ constexpr const char* kAlteredFixSumName = "other fix-wrapped draws";
 // The fix names, in AlteredFix's order: fixed strings, never built from a draw.
 constexpr const char* kAlteredFixNames[kAlteredFixCount] = {
     "panel distance", "RemLok overlay", "loading hologram", "target indicator", "night vision", "intro panel",
-    "sun glare clamp", "sun glare steady", "particles", "FSS panel", "FSS reveal", "FSS dump",
+    "sun glare clamp", "sun glare steady", "particles", "FSS panel", "FSS reveal",
     "scanner-body resolve", "loading scrim", "menu backdrop", "unnamed fix"
 };
 static_assert(kAlteredClassSections == 2, "one name for each altered-draw class");

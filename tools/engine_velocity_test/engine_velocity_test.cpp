@@ -48,7 +48,6 @@
 #include "emit_tests.h"
 #include "math_tests.h"
 #include "consumer_tests.h"
-#include "capture_tests.h"
 #include "primary_copy_tests.h"
 #include "panel_tests.h"
 #include "corpus_identity.h"
@@ -211,7 +210,7 @@ void corpus(ID3D11Device* device, ID3D11DeviceContext* context, const std::wstri
         // Eye run 055427 (2026-09-26, parked close to a coriolis port): the
         // station's close-range stock pixel shaders -- the hull's pixel path
         // while the keyed pairs of the same families draw nothing. Dumped by
-        // the 2026-09-27 glare_shader_dump flight, harnessed, keyed.
+        // the 2026-09-27 shader-dump flight, harnessed, keyed.
         {L"vs_436193B352A2897E", L"ps_51EE1F922FD220B0", false},
         {L"vs_889A5279E68F0672", L"ps_D31DCAFA7C05CB47", false},
         // Epic 20260929, the Krait's main-menu F10 capture: the hull plating's stock
@@ -410,7 +409,6 @@ int wmain(int argc, wchar_t** argv) {
     consumer_tests::run({device.Get(), context.Get(), &check});
     for (const auto& primary : emit_tests::g_joinedPrimary)
         consumer_tests::run({device.Get(), context.Get(), &check},primary.data(),101);
-    capture_tests::run(device.Get(),context.Get(),&check);
     primary_copy_tests::run(device.Get(),context.Get(),&check);
     panel_tests::run({device.Get(), context.Get(), &check});
     lifecycle_tests::run({device.Get(), context.Get(), &check});

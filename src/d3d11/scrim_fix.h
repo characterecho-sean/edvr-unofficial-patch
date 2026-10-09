@@ -74,8 +74,8 @@ namespace edvr {
 
 class Config;
 
-// Reads fix.loading_dim (stock | off) and advanced.loading_dim_level.
-// Both paths, install and reload; both live.
+// Reads fix.loading_dim (stock | off).
+// Both paths, install and reload; live.
 void scrimConfigure(Config& cfg);
 
 // False in stock mode, which keeps the per-draw path free when off.

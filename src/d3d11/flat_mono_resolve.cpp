@@ -9,7 +9,7 @@
 #include <limits>
 #include <vector>
 #include "../common/log.h"
-#include "flat_context_isolation.h"
+#include "flat_isolation_mode.h"
 #include "flat_context_state.h"
 #include "flat_cpu.h"
 #include "flat_hdr_crumbs.h"
@@ -57,7 +57,7 @@ struct Image {
 struct State {
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext1> context;
-    // The game's state is isolated one of two ways (flat_context_isolation.h), chosen at initialisation: by swapping in this fresh
+    // The game's state is isolated one of two ways (flat_isolation_mode.h), chosen at initialisation: by swapping in this fresh
     // state object (every device but DXMT's), or by the explicit capture (capture true, no state object made), whose slot ranges
     // are this device's.
     ComPtr<ID3DDeviceContextState> isolated;
@@ -118,7 +118,7 @@ bool firstPersonBoundLogged=false, firstPersonRefusedLogged=false;
 // loader lock.
 std::vector<unsigned char>& g_testPrepBytecode=*new std::vector<unsigned char>;
 std::vector<unsigned char>& g_testTaaBytecode=*new std::vector<unsigned char>;
-// advanced.flat_context_isolation (flatMonoResolveSetIsolation): what the next initialisation is asked for; and the renderer's
+// What the next initialisation is asked for (flatMonoResolveSetIsolation, test rigs only; Auto in production): what the next initialisation is asked for; and the renderer's
 // initialisations that said which isolation they chose, in the log, at most kIsolationLogCap a session.
 FlatContextIsolation g_isolationRequest=FlatContextIsolation::Auto;
 uint32_t isolationLogged=0;
@@ -145,7 +145,7 @@ bool g_steadyFailureLogged=false;
 struct Constants { float camera[6][4], previous[6][4]; uint32_t size[4], flags[4]; float jitter[4], rowsJitter[4]; uint32_t route[4], debug[4]; float foregroundDepth[4]; };
 static_assert(sizeof(Constants)==304, "HLSL cbuffer layout");
 // The game's pipeline state out of the way for the resolver's own work and its backends', and back on every exit. Two ways
-// (flat_context_isolation.h says which a device gets): the context state swap, which every device but DXMT's has always had and
+// (flat_isolation_mode.h says which a device gets): the context state swap, which every device but DXMT's has always had and
 // which is unchanged, or the explicit capture (flat_context_state.h) for DXMT, whose SwapDeviceContextState aborts the process.
 // Either way the context is ClearState()d after the game's state is out and before it goes back, so the work starts from the
 // defaults and leaves nothing bound for the game to inherit.
@@ -299,7 +299,7 @@ bool initialize(ID3D11Device* device,ID3D11DeviceContext* context,const char** r
     ComPtr<ID3D11Device1> d1;
     if(FAILED(context->QueryInterface(IID_PPV_ARGS(g.context.GetAddressOf()))))
         return fail(reason,"flat-resolve-requires-context-state-isolation");
-    // Which isolation this device gets, said once in the log with the reason (flat_context_isolation.h): the key's if it forces
+    // Which isolation this device gets, said once in the log with the reason (flat_isolation_mode.h): a test's if it forces
     // one, else the device's, and a device that calls itself DXMT gets the explicit capture, whose swap aborts the process.
     const FlatDxmtDetection dxmt=flatDetectDxmt(device,context);
     const FlatContextIsolationChoice choice=flatChooseContextIsolation(g_isolationRequest,dxmt);

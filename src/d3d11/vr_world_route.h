@@ -2,7 +2,7 @@
 // The pure half is vr_world_route_math.h; this file is what the rest of the VR pipeline calls.
 //
 // THE SHAPE OF THE ROUTE. On foot Elite draws the world once, flat, into the 2D screen's target and shows the screen to
-// each eye with one composite draw. With experimental.temporal_aa_on_foot_world = auto the route (1) watches the game's
+// each eye with one composite draw. The route (1) watches the game's
 // draws for the flat HDR route's trigger, the tone (vrWorldRouteDraw), and resolves the HDR scene image H there with
 // flatMonoResolve, into H itself, on its own upscaler slot; (2) once it has treated kVrWorldWarmFrames frames in a row
 // OWNS the world: the eye shift is off (native_temporal begin), and on every frame it treats the UI layer re-issues each
@@ -72,6 +72,8 @@ void vrWorldRouteFrameBoundary();
 // ---- what the rest of the pipeline asks -----------------------------------------------------------------------------
 // The key is auto (as read at the last boundary). Render thread.
 bool vrWorldRouteEnabled();
+// The rigs' off switch: they start a scenario from a cleared route by switching it off for a boundary. Always on in the DLL.
+void vrWorldRouteSetEnabledForTest(bool on);
 // The state the last boundary left. Render thread.
 VrWorldState vrWorldRouteState();
 // The eye shift stays off for the frame about to begin: the last boundary left the route Owned. LOCK-FREE and callable

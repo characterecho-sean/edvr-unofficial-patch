@@ -301,7 +301,7 @@ def describe(sig):
     if vh is not None:
         # The vertex shader's content hash: the one key two draws running
         # different code cannot share, and the blob's file name under
-        # edvr_logs\shaders when glare_shader_dump was on.
+        # edvr_logs\shaders when a shader dump was on.
         parts.append('vshader=%s' % vh)
     return '  '.join(parts)
 

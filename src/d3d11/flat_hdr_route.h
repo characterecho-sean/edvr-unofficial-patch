@@ -30,11 +30,8 @@
 namespace edvr {
 
 // ---- the key --------------------------------------------------------------------------
-// experimental.temporal_aa_before_post: auto (the HDR route where it applies) or off (the copy route only; the
-// trigger still runs, observing). Sean's decision (a): off until it had flown, then the default becomes auto; it flew
-// on 2026-09-30 and the default is auto since (design section 81). A key that is absent reads as the default; a value
-// that is present and is not "auto" reads as off, so a typo leaves the copy route every frame had before the route
-// existed and never switches the route on by accident.
+// The route's setting: auto (the HDR route where it applies) or off (the copy route only; the trigger still runs,
+// observing). The runtime sets auto at its first Present (design section 81); a text that is not "auto" reads as off.
 enum class FlatHdrKey : uint8_t { Off, Auto };
 inline FlatHdrKey flatHdrKeyFromText(const char* text) {
     if (!text) return FlatHdrKey::Off;
@@ -633,7 +630,7 @@ inline int flatHdrFormatLatched(char* out, size_t size, uint64_t frame, const Fl
     return std::snprintf(out, size,
         "flat hdr route: turned off at frame=%llu after %u treated frame(s) wrote the scene HDR after the resolve "
         "(the latest: %u draw(s), %u dispatch(es), %u explicit write(s), first VS=%016llX PS=%016llX); the copy "
-        "route treats from here until experimental.temporal_aa_before_post is set off and auto again",
+        "route treats from here for the rest of the session",
         static_cast<unsigned long long>(frame), frames, f.lateDraws, f.lateDispatches, f.lateExplicit,
         static_cast<unsigned long long>(f.lateVs), static_cast<unsigned long long>(f.latePs));
 }

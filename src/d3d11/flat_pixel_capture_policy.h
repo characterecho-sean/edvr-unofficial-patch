@@ -8,7 +8,7 @@ namespace edvr {
 // draw capture's two frames held constants no live frame has -- camera rows with
 // no phase in them -- and the pixel capture's first sample was a reset frame).
 // `phaseExpected` is false when the jitter is switched off on purpose
-// (experimental.temporal_aa_jitter = off): phase 0 is then what a live frame is.
+// (a test seam): phase 0 is then what a live frame is.
 constexpr bool flatCaptureFrameLive(bool reset, bool phaseNonzero, bool phaseExpected = true) {
     return !reset && (phaseNonzero || !phaseExpected);
 }

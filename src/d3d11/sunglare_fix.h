@@ -29,34 +29,20 @@ void sunglareConfigure(Config& cfg);
 // there is no single scalar load here for the header to fold.
 bool sunglareWantsDraws();
 
-// sunglareWorldActive and sunglareProbeActive read these from the header
-// with no call: sunglareWorldActive is asked per draw, and the build has no
-// /GL to fold a cross-TU getter.
+// sunglareWorldActive reads this from the header with no call: it is asked
+// per draw, and the build has no /GL to fold a cross-TU getter.
 namespace detail {
-extern bool g_sunglareProbe;
 extern int  g_sunglareWorld;
 }  // namespace detail
 inline bool sunglareWorldActive() { return detail::g_sunglareWorld != 0; }
-// advanced.sun_glare_probe: the debug instruments run in EVERY mode,
-// stock included, so a stock-vs-mode record diff is one hot swap apart.
-inline bool sunglareProbeActive() { return detail::g_sunglareProbe; }
 SunglareAction sunglareOnEyeDraw(char kind, uint32_t count,
                                  uint32_t instances);
 uint32_t sunglareKeep();
 
 // The wrap around a matched train draw: the world shader (fix.sun_glare
-// realistic or vivid) swapped in for this one draw, and the probe's
-// instruments; restored after. (The corner-rotation steady path that also
-// lived here was retired with its keys and removed on 2026-09-23.)
+// realistic or vivid) swapped in for this one draw; restored after.
 void sunglareBegin(ID3D11DeviceContext* ctx);
 void sunglareEnd(ID3D11DeviceContext* ctx);
-
-// This draw's DrawInstanced window, set by the thunk before the begin:
-// the 2026-08-22 sweep pass showed the instance buffer multiplexes
-// SEVERAL glare trains at different instance offsets, so telemetry must
-// name each draw's own (start, count) window rather than the buffer
-// head.
-void sunglareDrawArgs(uint32_t instances, uint32_t startInstance);
 
 // The true scene-camera feed: the glare system runs on the game's
 // head-look camera, which clamps at 45 degrees from ship-forward, so
@@ -70,7 +56,6 @@ void sunglareDrawArgs(uint32_t instances, uint32_t startInstance);
 void  sunglareSceneCb(void* cb);
 void* sunglareSceneCbTarget();
 void  sunglareSceneRows(const void* data, uint32_t bytes);
-void  sunglareSceneDump(const void* data, uint32_t bytes);
 
 // The train's identity test. One matcher for the family: two matchers for
 // one family is how the witchstar era learned wrong things.

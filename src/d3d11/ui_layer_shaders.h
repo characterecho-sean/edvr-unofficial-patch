@@ -107,7 +107,7 @@ constexpr float kUiLayerMultClear[4] = {1.0f, 1.0f, 1.0f, 1.0f};
 // footprint (ui_layer_math.h's uiLayerFootprint, separable, at most 4x4
 // taps), then out = L.rgb + F.rgb * L.a * M.rgb in the stored (UNORM-view)
 // space the game's own composite blended in, the frame's alpha kept. mode 1
-// is the `advanced.temporal_aa_debug = ui_layer` view: the layer over black,
+// is a debug view (not selected by any setting): the layer over black,
 // with a dark blue wash where it covers or tints anything, so a translucent
 // backing that is nearly black still shows as covered.
 

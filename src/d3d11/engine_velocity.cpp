@@ -100,7 +100,7 @@ std::atomic<const ID3D11Resource*> watch[kWatchSlots] = {};
 // pairs at this range -- vs_4361 through ps_51EE1F922FD220B0, vs_889A through
 // ps_D31DCAFA7C05CB47, both stock -- so most of the hull kept the camera term
 // while it moved. All three keyed: ps_4504 from the 09-06 dump, ps_51EE and
-// ps_D31D dumped by the 2026-09-27 glare_shader_dump flight at the port; each
+// ps_D31D dumped by the 2026-09-27 shader-dump flight at the port; each
 // pair through the corpus identity harness (40,960 texels, 0 mismatches;
 // MRT6 8192 checked, 0 bad). ps_BBDE4E71FB78528A (vs_66DE) keyed from the
 // 15:46 session's dumps the same day. Provenance correction, 2026-09-28:
@@ -2195,7 +2195,7 @@ void summaryLocked(uint64_t now, ID3D11DeviceContext* ctx) {
                     r(g_emit.gapsUnevaluated),
                     g_diagnosticsWanted.load(std::memory_order_relaxed)
                         ? "" : " (the census is off: it runs only with engine motion's diagnostics -- "
-                               "advanced.temporal_aa_diagnostics or an eye run; these zeros are not counts)");
+                               "the diagnostics switch; these zeros are not counts)");
     uint64_t invalid = 0;
     for (uint64_t v : g_draw.invalid) invalid += v;
     std::string invalidText, refusedText;
@@ -2296,7 +2296,7 @@ void summaryLocked(uint64_t now, ID3D11DeviceContext* ctx) {
                         u(g_draw.pixelReads));
     else
         Log::get().note("engine motion: pixels: not counted this window -- the counts come from the instrumented DLSS/FSR "
-                        "motion shader only (advanced.temporal_aa_diagnostics = 1, or a debug view) with the engine inputs "
+                        "motion shader only (with diagnostics on) with the engine inputs "
                         "bound; this is not a zero count.");
     // On foot: the source pass and the screen shader that carries its
     // pixels through the panel (docs/kinematic-motion-injection-2026-09-19.md,
@@ -2347,8 +2347,8 @@ void summaryLocked(uint64_t now, ID3D11DeviceContext* ctx) {
                         double(p[4]) / draws, double(p[5]) / draws, u(g_draw.panelDraws[mode]), sampleNote);
         } else {
             _snprintf_s(pixels, _TRUNCATE, "panel pixels: none counted this window (sampled one frame in %u while the "
-                        "source's views are given; every pixel with advanced.temporal_aa_diagnostics = 1 or the "
-                        "motion_source view; not a zero count)", kPanelSampleFrames);
+                        "source's views are given; every pixel with diagnostics on; "
+                        "not a zero count)", kPanelSampleFrames);
         }
         // Three lines and, when another camera moved the rows, a fourth (the logger cuts a line at about 1167 characters and this one was 1,554
         // with its lists): the first keeps the key `engine motion: on foot:`; the camera rule's figures, then the other camera's, then the panel's

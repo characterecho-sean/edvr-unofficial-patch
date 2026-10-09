@@ -4,14 +4,14 @@
 // shows it to each eye through one composite draw. The layer's world-screen gate (ui_layer_math.h: the journal's on-foot
 // reading OR the screen's own busy depth) keeps that screen in the eye route, where the temporal pass filters it with
 // motion the world camera supplies -- and no world camera names a map. So a dragged map is filtered as a still picture
-// at infinity and smears. With experimental.on_foot_maps_sharp = on the question changes: the panel is the world only
+// at infinity and smears. With the maps gate on (it always is) the question changes: the panel is the world only
 // while a draw that reads the world camera NAMES it (screen_motion.cpp: the world's own terrain or pool draw into the
 // screen-sized depth names the camera and depth screen motion maps to eye pixels). Anything else the 2D screen shows,
 // a map or a menu, is not the world: the layer takes the composite, sharp, after the upscaler, and the eye that holds
 // nothing else skips the upscaler altogether (the layer-only door the VR world route already uses).
 //
 // WHAT IS HERE, all pure (tools\on_foot_maps_test drives every function, with a mutation list for the rules):
-//   - the key, experimental.on_foot_maps_sharp: on (the default since 2026-10-01) or off, and a typo reads as off;
+//   - the gate's setting: on (always, since 2026-10-01) or off, and a typo reads as off;
 //   - the step: 2 frames in a row that named the source hold the panel as the world, 3 in a row that did not release it
 //     (3 is the VR world route's grace, kVrWorldGraceFrames: the route lets go on the same boundary);
 //   - the gate's combine: with the key off the gate is today's byJournal || byDepth for every input;
@@ -31,8 +31,7 @@
 namespace edvr {
 
 // ---- the key ----------------------------------------------------------------------------------------------------------
-// experimental.on_foot_maps_sharp: on or off. On by default since 2026-10-01 (off is kept for one release candidate as the way
-// back). A key that is absent reads as the default and a value that is present and is not "on" reads as off, so a typo
+// The gate's setting: on or off. On since 2026-10-01. A text that is not "on" reads as off, so a typo
 // leaves on-foot VR exactly as it was before the gate.
 enum class UiMapsKey : uint8_t { Off, On };
 inline UiMapsKey uiMapsKeyFromText(const char* text) {
@@ -139,7 +138,7 @@ struct UiMapsWindow {
 // The reader (tools\edvr_log.py --maps-sharp) parses these; the first words of each are its anchors.
 inline int uiMapsFormatOn(char* out, size_t size, uint64_t frame, bool carriedWorld, const char* journal) {
     return std::snprintf(out, size,
-        "on foot maps sharp: ON at frame=%llu (experimental.on_foot_maps_sharp = on): the 2D screen is the world only while a world "
+        "on foot maps sharp: ON at frame=%llu (the maps gate is on): the 2D screen is the world only while a world "
         "camera's draw names its source (%u frames in a row hold it, %u release it); anything else it shows, a map or a menu, is "
         "taken by the UI layer, sharp, after the upscaler. The gate starts as the journal's and the screen's own depth left it: %s "
         "(the journal: %s).",
@@ -175,7 +174,7 @@ inline int uiMapsFormatNamedWhy(char* out, size_t size, uint32_t namedRun) {
 }
 inline int uiMapsFormatNotLive(char* out, size_t size, const char* why) {
     return std::snprintf(out, size,
-        "on foot maps sharp: experimental.on_foot_maps_sharp is on but the 2D screen's gate stays the journal's and the screen's own "
+        "on foot maps sharp: the maps gate is on but the 2D screen's gate stays the journal's and the screen's own "
         "depth, as without the key: %s.",
         why ? why : "?");
 }

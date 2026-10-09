@@ -68,7 +68,6 @@ uint64_t testVs=0,testPs=0;ID3D11RenderTargetView* testRtv=nullptr;
 Log& Log::get(){static Log l;return l;}Log::~Log()=default;void Log::note(const char*,...){}
 std::string Config::getString(const char*,const char*)const{return "dlss";}
 bool Config::getBool(const char* key,bool def)const{
-    if(!strcmp(key,"advanced.temporal_aa_diagnostics"))return false;   // the engine counts (engine_velocity_test drives them)
     check(!strcmp(key,"fix.weapon_stability")&&def,"weapon temporal motion uses existing live toggle");return true;
 }
 // engine_velocity.cpp is not linked here: the on-foot engine path is driven

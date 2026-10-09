@@ -44,7 +44,7 @@ bool flatRuntimeNativeScale();
 // warning). Any thread; false with a treated, transiently refused or merely slow-to-start
 // session, and with the mode off. The caller checks that a temporal mode is selected.
 bool flatRuntimeStructuralRefusal(const char** reasonName, bool* standingDown);
-// Whether the route's key (experimental.temporal_aa_before_post) is auto, so the game's final copy is admitted by its
+// Whether the HDR route is on (it always is), so the game's final copy is admitted by its
 // structure and Bloom and Depth of field never cause a refusal (flat_copy_structure.h, design section 83): published with the
 // refusal state, so it is meaningful only while flatRuntimeStructuralRefusal is true. The F8 warning drops the Bloom and Depth
 // of field advice while it holds.

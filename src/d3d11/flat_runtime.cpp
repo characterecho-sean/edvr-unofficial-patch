@@ -5,7 +5,6 @@
 #include "flat_hdr_route.h"
 #include "flat_copy_structure.h"
 #include "flat_hdr_crumbs.h"
-#include "flat_context_isolation.h"
 #include "flat_context_state.h"
 #include "flat_mono_resolve.h"
 #include "flat_projection_recipes.h"
@@ -302,10 +301,8 @@ struct State {
         // refusal would have lost (design section 104, the grenade hold).
         uint64_t coveredDraws=0,hCoveredFrames=0;
     } foregroundCounts;
-    // The prep's refusal census in flat: sampled while the motion-source view is on, and for a bounded window after the census key
-    // (NumLock), so the per-class line names what the finish shows raw instead of the backend's result.
-    bool motionSourceView = false;
-    bool debugKeysRead = false;  // the view's key has been read once (and said once)
+    // The prep's refusal census in flat: sampled for a bounded window after the census key (NumLock), so the per-class
+    // line names what the finish shows raw instead of the backend's result.
     uint32_t refusalCensusFrames = 0;
     // The camera term's translation precision (design doc section 104): row 275 is the render origin the camera term subtracts
     // frame to frame (cameraBefore, flat_mono_shader_source.h). One 5 s window over the non-reset frames handed to the resolver.
@@ -384,7 +381,7 @@ struct State {
     uint64_t namingVetoes = 0, namingVetoReleases = 0;
     FlatMonoFrame previous{}; bool havePrevious = false, treated = false;
     std::string mode; FlatMonoResolveMode engine = FlatMonoResolveMode::Taa;
-    unsigned preset = ~0u, foveaPreset = ~0u;
+    unsigned preset = ~0u;
     uint64_t lastMs = 0, lastReport = 0, accepted = 0, refused = 0;
     uint64_t acceptedResetWindow = 0, acceptedHistoryWindow = 0;
     uint64_t resetMissingWindow = 0, resetGapWindow = 0, resetDepthWindow = 0;
@@ -462,7 +459,7 @@ struct State {
     uint64_t spatialFallbacks = 0, spatialFallbackFailures = 0;
     FlatLivePhase phase;
     Ptr<ID3D11Resource> phaseDepth,phaseHdr;
-    bool jitterWanted = false, frameCoverage = true, temporalAccepted = false;
+    bool jitterWanted = true, frameCoverage = true, temporalAccepted = false;
     // advanced.temporal_aa_jitter_phases as of the last read (8 to 64, default 8), and the one value the log has said it could not use,
     // so a bad value is said once and not every frame. The count a frame runs is flatCameraPhaseCount(route, jitterPhases).
     uint32_t jitterPhases = kTemporalJitterCount;
@@ -496,7 +493,6 @@ struct State {
     // local refusal invalidates the frame's history and returns the runtime
     // to observation until a refusal-free frame requalifies the contract;
     // it is never claimed as treated. See docs/design-flat-temporal-aa-2026-09-23.md.
-    bool partialWanted = true;
     // The returned-to-observation state: set by a per-draw-local refusal,
     // cleared by a refusal-free frame. While set, frames run unjittered and
     // the copy-draw treatment is skipped; the contract observation that
@@ -559,10 +555,8 @@ struct State {
     bool enginePaused = false;   // engine motion is configured off for the stand-down
 
     // --- The HDR route (flat_hdr_route.h, design section 81) ------------------------------------
-    // experimental.temporal_aa_before_post, read at every Present. The trigger detector runs on every watched frame
-    // whatever the key says: with it off the route only OBSERVES (the window census, a first-trigger line, late-write
-    // accounting) and the copy route treats exactly as before; with it auto the route treats at its trigger and the
-    // copy stage leaves the frame to it. Nothing here touches a D3D object.
+    // Set at the first Present (the route is always on). The trigger detector runs on every watched frame and the route
+    // treats at its trigger; the copy stage leaves the frame to it. Nothing here touches a D3D object.
     FlatHdrKey hdrKey = FlatHdrKey::Off;
     bool hdrKeyRead = false;
     FlatHdrFrame hdr{};              // this frame's detector state, reset at the Present that starts the frame
@@ -601,7 +595,6 @@ struct State {
     int gpuFrameOpen = -1, gpuResolveOpen = -1;   // the timer holding this frame's open span
     bool gpuFrameTried = false;                   // this frame already tried to open its span
     bool censusHooked = false;                    // the resolver's span hooks are installed
-    bool isolationRead = false;                   // advanced.flat_context_isolation is handed to the resolver (once, before its first call)
     bool crumbGateRead = false;                   // the HDR route's breadcrumbs gate has been set from the DXMT markers (once, first)
 };
 // Driver objects retire on the owner Present; never release under loader lock.
@@ -1920,8 +1913,7 @@ FlatShaderPairClassification classifyFlatProjectionPair(State& s, uint64_t vs, u
 // draw still goes out unjittered (the proxy cannot stop the game's own
 // draw); the frame's history is invalidated and the runtime returns to
 // observation until a refusal-free frame requalifies the contract. It is
-// never claimed as treated. experimental.temporal_aa_partial=off is the
-// previous behaviour: failPhase per frame, retrying every frame.
+// never claimed as treated.
 
 // Part B per-pair breakdown of the top locally refused (VS,PS,reason)
 // triples this window. Overflow past this fixed table only drops out of the
@@ -1959,7 +1951,7 @@ void refuseDraw(State& s, const char* reason) {
     // jittered yet, the spatial fallback otherwise -- never a mixed-phase
     // temporal evaluation.
     failPhase(s, reason);
-    if (s.partialWanted && !s.observing) {
+    if (!s.observing) {
         s.observing = true;
         ++s.covObservationEntries;
         Log::get().note("flat coverage: returned to observation at frame=%llu reason=%s VS=%016llX PS=%016llX; treatment resumes after a refusal-free frame",
@@ -2662,44 +2654,30 @@ void flatTraceDumpToLogDir(State& s, uint64_t frame) {
         shortWrite || bytes != expected ? " SHORT WRITE -- capture unusable" : "");
 }
 // --- The HDR route's runtime half (flat_hdr_route.h holds the pure logic and the log lines) -----------------
-// experimental.temporal_aa_before_post, read at every Present; auto when the file has no line (the default since the
-// route flew, design section 81, and the shipped edvr.ini says the same: config_test holds the two to one answer).
-// A change wakes the stand-down (a user who sets it to auto to escape a refusal gets the route at once), rearms the
-// latch when it goes off, and starts history afresh: the backends' feature keys carry the route, so the next frame
-// remakes what it needs. The key is also the final copy's admission by structure (section 83): auto admits a copy the
-// whitelist refused for its tone pass wherever the route does not serve the frame (render below the output, EDVR's TAA
-// above it); off is the whitelist alone, as before the route existed.
+// The route is always on (design section 81), set at the first Present. It is also the final copy's admission by
+// structure (section 83): it admits a copy the whitelist refused for its tone pass wherever the route does not serve the
+// frame (render below the output, EDVR's TAA above it).
 static void hdrReadKey(State& s, uint64_t frame) {
-    const FlatHdrKey key = flatHdrKeyFromText(Config::get().getString("experimental.temporal_aa_before_post", "auto").c_str());
-    if (s.hdrKeyRead && key == s.hdrKey) return;
-    const bool first = !s.hdrKeyRead;
+    if (s.hdrKeyRead) return;
+    const FlatHdrKey key = FlatHdrKey::Auto;
     s.hdrKey = key; s.hdrKeyRead = true;
-    if(first)Log::get().note("flat late overlay blend diagnostic: event=armed ready=1 sample-limit=1-per-5s-window; actual bindings and GetDesc only on dual-source-blend refusal; acceptance unchanged");
-    if (key == FlatHdrKey::Off) s.hdrLatch.reset();
+    Log::get().note("flat late overlay blend diagnostic: event=armed ready=1 sample-limit=1-per-5s-window; actual bindings and GetDesc only on dual-source-blend refusal; acceptance unchanged");
     // The crash-safe trail's first line (flat_hdr_crumbs.h): proof, in edvr_breadcrumbs.txt itself, that this build has the
     // crumbs and that the route is on, so a trail without an "admitted" after it is a session that ended before the route
     // took a frame, and a file without it came from a build that has none or from a device that is not DXMT's (the gate: this
     // writes nothing, and the log says nothing, off DXMT). The log says so too, for whoever reads it first.
-    if (key == FlatHdrKey::Auto && hdrCrumbArmed(flatHdrKeyName(key)))
+    if (hdrCrumbArmed(flatHdrKeyName(key)))
         Log::get().note("flat hdr route: crash-safe trail on: edvr_breadcrumbs.txt gets a line before and after every step of the first "
                         "%u frames that reach the resolver, at most %u lines a session; if the process ends inside the treatment, the last "
                         "'gfx: hdr-treat' line there names the step",
             static_cast<unsigned>(kHdrCrumbFrames), static_cast<unsigned>(kHdrCrumbCap));
-    Log::get().note("flat hdr route: experimental.temporal_aa_before_post=%s%s at frame=%llu: %s",
-        flatHdrKeyName(key), first ? " (read at startup)" : " (changed)", static_cast<unsigned long long>(frame),
-        key == FlatHdrKey::Auto
-            ? "the route resolves the game's HDR scene target before its bloom, depth of field and tone where the "
+    Log::get().note("flat hdr route: %s (read at startup) at frame=%llu: %s",
+        flatHdrKeyName(key), static_cast<unsigned long long>(frame),
+            "the route resolves the game's HDR scene target before its bloom, depth of field and tone where the "
               "render size is at least the output's and the target is R11G11B10F; every other frame keeps the copy route, "
               "which admits the game's final copy by its structure (an R-sized R8G8B8A8 image made after the scene HDR's "
               "first consumer, uniformly scaled to the output) when no whitelisted tone pass wrote it, so bloom, depth of "
-              "field and the tone variant do not matter below the output either"
-            : "the trigger detector only observes (a census line every 5 s); the copy route treats every frame as before, "
-              "by the whitelist alone (a frame with no scene, or a render size that does not fit the output, is still named "
-              "as such)");
-    if (!first) {
-        endStandDown(s, frame, "experimental.temporal_aa_before_post changed");
-        s.phase.resetHistory(); reset();
-    }
+              "field and the tone variant do not matter below the output either");
 }
 // The frame that just ended, as the route saw it: the census token (every watched frame, the key off included), the
 // late-write accounting with its latch, and, only with the key auto, the chain verdict of a frame that had an HDR
@@ -3284,7 +3262,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     // prefix clears its identity. A resize flush sees no pending frame twice.
     finishPhaseCensusFrame(s);
     // Part B coverage census: close out the frame that just ended. Always
-    // on, independent of jitterWanted/partialWanted -- see the 5s report
+    // on, independent of jitterWanted -- see the 5s report
     // below.
     ++s.covFrames;
     if (s.observing) ++s.covFramesObserving;
@@ -3294,21 +3272,9 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     const bool enabled = temporalModeEnabled(mode);
     const auto model = Config::get().getString("fix.temporal_aa_model", "k");
     const auto preset = temporalPresetFor(model);
-    // advanced.temporal_aa_debug = motion_source paints the prep's per-pixel classes into H, as on the VR route: what the finish
-    // shows raw instead of the backend's result is painted by its refusal (white, yellow, red), so a jagged edge says why.
-    // The view is said on its first read as well as on every change, so the log always names the value that was read: a key the flat
-    // profile refused once read its silent "off" for a whole flight (runtimeProfileAllowsKey, section 104).
-    const bool firstDebugRead = !s.debugKeysRead;
-    s.debugKeysRead = true;
-    const bool motionSourceView = _stricmp(Config::get().getString("advanced.temporal_aa_debug", "off").c_str(), "motion_source") == 0;
-    if (motionSourceView != s.motionSourceView || firstDebugRead) {
-        s.motionSourceView = motionSourceView;
-        Log::get().note("flat runtime: refusal view %s (advanced.temporal_aa_debug = motion_source): %s", motionSourceView ? "on" : "off",
-            flatMonoViewLegend());
-    }
-    if (s.preset != preset.full || s.foveaPreset != preset.fovea) {
-        s.preset = preset.full; s.foveaPreset = preset.fovea;
-        dlaaSetPreset(preset.full, preset.fovea);
+    if (s.preset != preset.full) {
+        s.preset = preset.full;
+        dlaaSetPreset(preset.full);
         if (temporalEngineFor(mode) == TemporalEngine::Nvidia) {
             s.haveResolvePlan=false;s.resolvePreflight={};s.resolvePreflightRetryMs=0;
             reset();s.phase.resetHistory();
@@ -3362,16 +3328,10 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
             traceWindow(s);flatTraceBeginFrame(s.traceRing,frame+1,s.drawPacketOutput.Get(),d.Width,d.Height,d.Format);}
         return;
     }
-    static bool bounceKeyRead=false;
-    if (!bounceKeyRead) {
-        bounceKeyRead=true;
-        const std::string key=Config::get().getString("advanced.flat_cb_map_cache","auto");
-        const flatmap::Mode mode=_stricmp(key.c_str(),"on")==0 ? flatmap::Mode::On :
-            _stricmp(key.c_str(),"off")==0 ? flatmap::Mode::Off : flatmap::Mode::Auto;
-        if (_stricmp(key.c_str(),"auto")!=0 && _stricmp(key.c_str(),"on")!=0 &&
-            _stricmp(key.c_str(),"off")!=0)
-            Log::get().note("flat map bounce: invalid advanced.flat_cb_map_cache=%s; using auto",key.c_str());
-        mapBounce().setMode(mode);
+    static bool bounceModeSet=false;
+    if (!bounceModeSet) {
+        bounceModeSet=true;
+        mapBounce().setMode(flatmap::Mode::Auto);
     }
     FlatComputeInternalScope guard;
     Ptr<ID3D11Device> actualDevice; swap->GetDevice(IID_PPV_ARGS(&actualDevice));
@@ -3390,8 +3350,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
         engineVelocityConfigure(enabled && !s.enginePaused);
     };
     // The HDR route's breadcrumbs are DXMT's alone (flat_hdr_crumbs.h, THE GATE): the markers decide, once, here, with the device
-    // in hand and before the key's first read arms the trail. Only the detection decides: advanced.flat_context_isolation is not
-    // asked, so forcing the capture on a Windows device writes no crumb. The 5 s line's step counts below do not depend on it.
+    // in hand and before the key's first read arms the trail. Only the detection decides, so a Windows device writes no crumb. The 5 s line's step counts below do not depend on it.
     if (!s.crumbGateRead) {
         s.crumbGateRead = true;
         hdrCrumbEnable(flatCrumbsWantedFor(flatDetectDxmt(s.device.Get(), s.context.Get())));
@@ -3411,12 +3370,6 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     // the GPU spans that finished are read (never waited for), and every 5 s the window is
     // printed, zeros included. Instrument only: nothing below reads any of it.
     if (!s.censusHooked) { flatMonoResolveSetSpanHooks(&resolveSpanBegin, &resolveSpanEnd); s.censusHooked = true; }
-    // advanced.flat_context_isolation (auto, swap, capture): how the resolver isolates the game's state from its own work. Read
-    // once, here, before anything of the resolver's has run: the device is known and no frame has reached it (flat_context_isolation.h).
-    if (!s.isolationRead) {
-        s.isolationRead = true;
-        flatMonoResolveSetIsolation(flatContextIsolationFromText(Config::get().getString("advanced.flat_context_isolation", "auto").c_str()));
-    }
     {
         static const int64_t censusFreq = flatcpu::qpcFrequency();
         const int64_t censusNow = EDVR_FLATCPU_NOW();
@@ -3466,10 +3419,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     // A frame with a verdict feeds the spell tracker (flat_source_spell.h): refused for no source, treated, and whether it carried a phase.
     if(endedSeen!=FlatFrameSeen::None)
         s.sourceSpell.frame(endedReason==FlatMonoReason::NoSupportedSource,endedSeen==FlatFrameSeen::Treatable,s.frameHadPhase);
-    const bool wanted=Config::get().getBool("experimental.temporal_aa_jitter",true);
-    if(wanted!=s.jitterWanted) { s.phase.resetHistory();reset(); }
-    s.jitterWanted=wanted;
-    // The jitter cycle's length, read live beside the key above (advanced.temporal_aa_jitter_phases: a whole number from 8 to 64, default 8).
+    // The jitter cycle's length, read live (advanced.temporal_aa_jitter_phases: a whole number from 8 to 64, default 8).
     // A value the cycle cannot use reads as 8: one Config could not parse says so itself (once), and one outside the range is said here, once
     // per value. A change starts a new cycle, so the phase and the resolver's history restart as the jitter toggle's do, and the log names it.
     {
@@ -3492,17 +3442,6 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
             s.jitterPhases=phases;
         }
     }
-    // Partial temporal AA: read live, same idiom as jitter above. Unlike
-    // jitter, toggling it does not change any projection math, so it needs
-    // no history reset -- it only gates refuseDraw, checked fresh on every
-    // draw from here on. The on->off transition ends observation explicitly:
-    // off's per-frame retry resumes (reviews/flat-temporal-main-review-2026-09-26.md).
-    const bool partialWanted=Config::get().getBool("experimental.temporal_aa_partial",true);
-    const bool observingAfterToggle = flatObservationToggle(s.observing, s.partialWanted, partialWanted);
-    if (s.observing && !observingAfterToggle)
-        Log::get().note("flat coverage: observation ended by setting change at frame=%llu; per-frame attempts resume",
-            (unsigned long long)frame);
-    s.observing = observingAfterToggle; s.partialWanted = partialWanted;
     // Local refusal's observation exit: a positively qualified handoff on a
     // completely covered frame (the same coverage trio phase.finish used
     // above) requalifies the contract and resumes warm-up. Empty, failed,
@@ -3515,7 +3454,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     }
     // Legacy projection readiness exists in Full frames only: a stand-down releases it and
     // a resume creates it fresh here, as after a resize.
-    if(wanted && !s.projection && s.work == FlatWork::Full) {
+    if(!s.projection && s.work == FlatWork::Full) {
         s.projection.reset(new(std::nothrow) FlatProjectionRuntime);
         if (s.projection) s.projection->setBounceSampleHooks(
             &flatRuntimeMapBounceSamplePending,&flatRuntimeMapBounceObserveCopy);
@@ -3661,14 +3600,13 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     flatCameraInjectFrame(frame + 1,enabled);
     if(flatCameraInjectTakeHistoryReset()) {s.phase.resetHistory();reset();}
     const FlatCameraRoute phaseRoute=flatCameraInjectRoute();
-    s.phase.beginFrame(flatCameraPhaseEnabled(phaseRoute,wanted,s.observing,s.projection!=nullptr),
+    s.phase.beginFrame(flatCameraPhaseEnabled(phaseRoute,true,s.observing,s.projection!=nullptr),
         compatible,s.phaseWidth,s.phaseHeight,flatCameraPhaseCount(phaseRoute,s.jitterPhases));
     s.frameHadPhase=nonzeroPhase(s);
     flatCameraInjectArm(); // the phase is chosen: the injector's frame window opens
     s.frameCoverage=true;s.temporalAccepted=false;
     s.jitterReason=nonzeroPhase(s)?"live":"warming";
     if(s.projection)s.projection->enableColdReadback(!nonzeroPhase(s));
-    if(!wanted && !s.projectionFrames) {s.projection.reset();s.projectionContext.Reset();}
     for (auto& r : s.colors) r.Reset(); for (auto& r : s.depths) r.Reset();
     // A Paused frame (stand-down) is not watched: no prefix to clear -- the frame's one
     // large reset -- and no trace slot to rotate, so the ring keeps the last watched
@@ -3774,7 +3712,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
                     (unsigned long long)steady.asked,(unsigned long long)steady.sampled,(unsigned long long)steady.frames,
                     (unsigned long long)steady.dropped,steady.every,steady.width,steady.height,(unsigned long long)steady.pixels,
                     (unsigned long long)refused,steady.pixels?100.0*double(refused)/double(steady.pixels):0.0,
-                    (unsigned long long)steady.counts[kFlatMonoRefusalStaleKept],s.motionSourceView?"on":"off",
+                    (unsigned long long)steady.counts[kFlatMonoRefusalStaleKept],"off",
                     used?classes:"none",usedReasons?reasons:"none");
             }
             // The camera term's translation precision (section 104): float32 spacing at row 275's size against its per-frame step.
@@ -3928,7 +3866,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
         Log::get().note("flat coverage 5s: partial=%s observing=%u scene-draws=%llu exact=%llu generic=%llu inert=%llu "
             "unchanged=%llu local-refused=%llu frames=%llu frames-locally-refused=%llu "
             "returned-to-observation=%llu frames-observing=%llu memo-evictions=%llu",
-            s.partialWanted?"on":"off", s.observing?1u:0u,
+            "on", s.observing?1u:0u,
             static_cast<unsigned long long>(s.covSceneDraws), static_cast<unsigned long long>(s.covExact),
             static_cast<unsigned long long>(s.covGeneric), static_cast<unsigned long long>(s.covInert),
             static_cast<unsigned long long>(s.covUnchanged), static_cast<unsigned long long>(s.covLocalRefused),
@@ -5539,9 +5477,9 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     }
     FlatMonoResolveFrame f{}; f.color = original; f.depth = s.depthView.Get(); f.renderWidth = selected.renderWidth; f.renderHeight = selected.renderHeight;
     f.outputWidth = selected.outputWidth; f.outputHeight = selected.outputHeight; f.frame = s.prefix.frame; f.mode = s.engine;
-    // The refusal view and census on the copy route too (render below the output: DLSS or FSR upscaling), as on the HDR route.
-    f.refusalView = s.motionSourceView ? 1u : 0u;
-    f.refusalCensus = s.motionSourceView || s.refusalCensusFrames > 0;
+    // The refusal census on the copy route too (render below the output: DLSS or FSR upscaling), as on the HDR route.
+    f.refusalView = 0u;
+    f.refusalCensus = s.refusalCensusFrames > 0;
     if (s.refusalCensusFrames) --s.refusalCensusFrames;
     nativeScale.store(f.renderWidth >= f.outputWidth && f.renderHeight >= f.outputHeight,
                       std::memory_order_release);
@@ -5886,8 +5824,8 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
         return false;
     };
     FlatMonoResolveFrame f{}; f.color = hdrView.Get(); f.depth = s.depthView.Get(); f.hdr = true;
-    f.refusalView = s.motionSourceView ? 1u : 0u;
-    f.refusalCensus = s.motionSourceView || s.refusalCensusFrames > 0;
+    f.refusalView = 0u;
+    f.refusalCensus = s.refusalCensusFrames > 0;
     if (s.refusalCensusFrames) --s.refusalCensusFrames;
     if(selected.mixedCamera) {
         f.untrustedCameraCoverage=s.untrusted.view();

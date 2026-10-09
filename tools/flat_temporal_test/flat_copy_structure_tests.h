@@ -237,7 +237,7 @@ inline std::string flatUpscaleFixtureText() {
     auto push = [&](const char* ts, const char* text) { segment.emplace_back(ts, text); };
     auto marker = [&](const char* name) { flush(); out += "# episode: "; out += name; out += "\n"; };
     push("15:12:00.100", "version v0.18.0-rc.5-26-g5ec0de01 (build 5EC0DE01) -- this DLL was linked 2026-10-01 20:05:44 UTC");
-    push("15:12:02.151", "flat hdr route: experimental.temporal_aa_before_post=auto (read at startup) at frame=1: the route resolves the game's HDR scene "
+    push("15:12:02.151", "flat hdr route: auto (read at startup) at frame=1: the route resolves the game's HDR scene "
                          "target before its bloom, depth of field and tone where the render size is at least the output's and the target is R11G11B10F; "
                          "every other frame keeps the copy route, which admits the game's final copy by its structure (an R-sized R8G8B8A8 image made after "
                          "the scene HDR's first consumer, uniformly scaled to the output) when no whitelisted tone pass wrote it, so bloom, depth of field and "
@@ -874,7 +874,7 @@ inline int flatCopyStructureTests() {
         expect(std::string(line).find("declines=a1:1,a2:1,a3:1,a4:1,a5:1,a6:1,other:2") != std::string::npos, "causes past the table are counted as other");
 
         flatCopyFormatFirstAdmission(line, sizeof(line), 4711, diag, "trained-upscale");
-        expectText(line, "flat copy structure: first admission at frame=4711 (experimental.temporal_aa_before_post=auto): the game's final "
+        expectText(line, "flat copy structure: first admission at frame=4711 (the HDR route is on): the game's final "
                                     "copy reads a 3840x2160 R8G8B8A8 image written by one pass, VS=00000000000000F9 PS=00000000000000FE, after the "
                                     "scene HDR's first consumer (VS=00000000000000F9 PS=00000000000000FE), with no other R-sized image pass in "
                                     "between; no whitelisted tone pass wrote it (the whitelist said no-known-tone-pass); the scene is 3840x2160 on a "
@@ -946,10 +946,8 @@ inline int flatCopyStructureTests() {
                "the three accessors the panel reads");
         // The key's own words say what auto does now, and what off still names.
         expect(count(runtime, "which admits the game's final copy by its structure") == 1 &&
-                   count(runtime, "Log::get().note(\"flat hdr route: experimental.temporal_aa_before_post=%s%s at frame=%llu: %s\",") == 1,
+                   count(runtime, "Log::get().note(\"flat hdr route: %s (read at startup) at frame=%llu: %s\",") == 1,
                "the key's log line says the copy route admits by structure below the output");
-        expect(count(runtime, "by the whitelist alone (a frame with no scene, or a render size that does not fit the output, is still named ") == 1,
-               "the key off's log line says the whitelist decides, and that no-3d-scene and the render size are still named");
         // The startup spell is silent even when a handful of draws into an HDR-shaped target is a candidate: the route's no-consumer
         // verdict does not overwrite a frame the copy stage found no scene in.
         expect(count(runtime, "s.frameSeen <= FlatFrameSeen::Structural && s.frameReason != FlatMonoReason::NoScene) {") == 1,

@@ -7,9 +7,9 @@
 //            SwapDeviceContextState is UNIMPLEMENTED() and so abort()s the process (CrossOver's log: "SwapDeviceContextState
 //            is not implemented.", then raise(22), then LdrShutdownProcess; no SEH filter sees it).
 //
-// advanced.flat_context_isolation = auto | swap | capture. auto is the shipped value and picks capture when the device is
-// DXMT. swap and capture force one or the other, for testing; swap on a DXMT device ends the process, and capture on Windows
-// works and costs a few dozen calls a frame.
+// The resolver always asks for Auto, which picks capture when the device is DXMT and swap otherwise. Swap and Capture exist as
+// forced requests for the test rigs only (flatMonoResolveSetIsolation); swap on a DXMT device ends the process, and capture on
+// Windows works and costs a few dozen calls a frame.
 //
 // HOW A DXMT DEVICE IS KNOWN. By what DXMT itself says, read from its source (github.com/3Shain/dxmt), so that a rename or a
 // vendor spoof does not matter. Four independent markers, all asked together, and the line in the log names each that answered:
@@ -50,12 +50,6 @@ inline const char* flatContextIsolationName(FlatContextIsolation mode) {
     case FlatContextIsolation::Capture: return "capture";
     default: return "auto";
     }
-}
-// The key's text; anything else, null included, is auto.
-inline FlatContextIsolation flatContextIsolationFromText(const char* text) {
-    if (text && _stricmp(text, "swap") == 0) return FlatContextIsolation::Swap;
-    if (text && _stricmp(text, "capture") == 0) return FlatContextIsolation::Capture;
-    return FlatContextIsolation::Auto;
 }
 
 // github.com/3Shain/dxmt, src/d3d11/d3d11_interfaces.hpp.
@@ -153,9 +147,9 @@ inline FlatDxmtDetection flatDetectDxmt(IUnknown* device, IUnknown* context) {
 
 struct FlatContextIsolationChoice {
     FlatContextIsolation mode = FlatContextIsolation::Swap;   // Swap or Capture, never Auto
-    bool forced = false;                                      // the key said so; the device was not consulted
+    bool forced = false;                                      // a test forced it; the device was not consulted
 };
-// The decision. A forced mode is honoured as asked; auto is capture for a device any marker called DXMT, swap for the rest.
+// The decision. A forced mode (test rigs only) is honoured as asked; auto is capture for a device any marker called DXMT, swap for the rest.
 inline FlatContextIsolationChoice flatChooseContextIsolation(FlatContextIsolation request, const FlatDxmtDetection& d) {
     FlatContextIsolationChoice c;
     if (request == FlatContextIsolation::Swap || request == FlatContextIsolation::Capture) {
@@ -168,8 +162,8 @@ inline FlatContextIsolationChoice flatChooseContextIsolation(FlatContextIsolatio
 }
 
 // The HDR route's breadcrumbs (flat_hdr_crumbs.h) are DXMT's alone: a device that any marker calls DXMT opens their gate, and
-// nothing else does. The isolation request is deliberately not an argument: advanced.flat_context_isolation=capture on a Windows
-// device changes how the resolver isolates the game's state, and turns no crumb on.
+// nothing else does. The isolation request is deliberately not an argument: forcing the capture on a Windows device changes how
+// the resolver isolates the game's state, and turns no crumb on.
 inline bool flatCrumbsWantedFor(const FlatDxmtDetection& d) { return d.dxmt(); }
 
 // "device interface IMTLD3D11DeviceExt, context interface IMTLD3D11ContextExt, module version resource ProductName=DXMT,
@@ -197,9 +191,9 @@ inline size_t flatFormatDxmtMarkers(const FlatDxmtDetection& d, char* out, size_
 
 // The one log line of a renderer initialisation: the mode, and why.
 //   flat resolver: context isolation by explicit state capture (DXMT: device interface IMTLD3D11DeviceExt, ...)
-//   flat resolver: context isolation by explicit state capture (advanced.flat_context_isolation=capture; DXMT markers: none)
+//   flat resolver: context isolation by explicit state capture (forced capture; DXMT markers: none)
 //   flat resolver: context isolation by context state swap (no DXMT marker)
-//   flat resolver: context isolation by context state swap (advanced.flat_context_isolation=swap; DXMT markers: ...)
+//   flat resolver: context isolation by context state swap (forced swap; DXMT markers: ...)
 inline size_t flatFormatContextIsolationLine(const FlatContextIsolationChoice& c, const FlatDxmtDetection& d, char* out, size_t cap) {
     if (!out || !cap) return 0;
     char markers[320];
@@ -207,7 +201,7 @@ inline size_t flatFormatContextIsolationLine(const FlatContextIsolationChoice& c
     const char* how = c.mode == FlatContextIsolation::Capture ? "explicit state capture" : "context state swap";
     int n;
     if (c.forced)
-        n = _snprintf_s(out, cap, _TRUNCATE, "flat resolver: context isolation by %s (advanced.flat_context_isolation=%s; DXMT markers: %s%s)", how,
+        n = _snprintf_s(out, cap, _TRUNCATE, "flat resolver: context isolation by %s (forced %s; DXMT markers: %s%s)", how,
                         flatContextIsolationName(c.mode), markers,
                         (c.mode == FlatContextIsolation::Swap && d.dxmt()) ? "; DXMT aborts in the swap" : "");
     else if (c.mode == FlatContextIsolation::Capture)

@@ -87,11 +87,6 @@ struct State {
 } g;
 constexpr unsigned kTerrainHoldFrames=2;     // a terrain naming this recent keeps the fallback off
 constexpr unsigned kUnnamedNoteFrames=90;    // screen frames with no naming before the log says so
-// What the screen shader does with the source's engine data beyond using it
-// (screenMotionConfigure): count its kinds (advanced.temporal_aa_diagnostics or
-// the motion_source view) and hand them to the view (motion_source). Outside
-// State: State resets must not forget a setting until the next config poll.
-bool g_countKinds=false,g_paintKinds=false;
 constexpr unsigned kPanelKinds=7;   // joined, masked, not a rig record, stale, corrupt, stale stamp, and (inside joined) the skinned characters' exact motion
 
 constexpr uint64_t kGpuWindowFrames=1800;
@@ -232,9 +227,6 @@ void screenMotionConfigure(Config& cfg) {
     if(weapon!=g.weapon)g_gpu.close();
     g.weapon=weapon;
     weaponMotionConfigure(detail::g_screenMotionEnabled && g.weapon);
-    const std::string debug=cfg.getString("advanced.temporal_aa_debug","off");
-    g_paintKinds=_stricmp(debug.c_str(),"motion_source")==0;
-    g_countKinds=g_paintKinds || cfg.getBool("advanced.temporal_aa_diagnostics",false);
 }
 bool screenMotionRecognize() {
     bool matched=detail::g_screenMotionEnabled && !detail::g_screenMotionFailed && bindingShaderHash(BindSlot::Vs)==0x5C36AF051B98B9F1ull &&
@@ -442,15 +434,14 @@ void screenMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned co
         EngineVelocityViews ev{};
         const bool engine=engineVelocitySourceViews(g.depth.Get(),&ev);
         const bool skin=engine && ev.skin;   // F2 on foot: the source's target 7, once a skinned draw wrote it this frame
-        // The kinds counted: every eye pixel of every frame with diagnostics
-        // or motion_source; otherwise a sample -- one frame in
+        // The kinds counted: a sample -- one frame in
         // kPanelSampleFrames, one eye pixel in kPanelSampleStride^2 (engine.z
         // carries the grid's stride) -- so the on-foot line always has them.
-        const unsigned countGrid=g_countKinds?1u:kPanelSampleStride;
-        const bool counting=engine && (g_countKinds || g.frame%kPanelSampleFrames==0) &&
+        const unsigned countGrid=kPanelSampleStride;
+        const bool counting=engine && (g.frame%kPanelSampleFrames==0) &&
                             (g.countFrame!=g.frame || g.countStride==countGrid) && prepareCounts(dev.Get());
         float data[12]={e.shape[0],e.shape[1],e.shape[2],e.shape[3],float(e.width),float(e.height),ui?1.0f:0.0f,weapon?1.0f:0.0f,
-                        engine?1.0f:0.0f,engine && g_paintKinds?1.0f:0.0f,counting?float(countGrid):0.0f,skin?1.0f:0.0f};
+                        engine?1.0f:0.0f,0.0f,counting?float(countGrid):0.0f,skin?1.0f:0.0f};
         {
             GpuCensusScope census(ctx,GpuCensusSection::FrameScreenMotion);
             ctx->UpdateSubresource(e.settings.Get(),0,nullptr,data,0,0);
@@ -501,7 +492,7 @@ void screenMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned co
         for(auto* p:savedRt)if(p)p->Release();for(auto* p:savedCb)if(p)p->Release();for(auto* p:savedSrv)if(p)p->Release();for(UINT i=0;i<nc;++i)classes[i]->Release();
         if(ev.slots)ev.slots->Release();if(ev.pool)ev.pool->Release();if(ev.sceneNow)ev.sceneNow->Release();if(ev.scenePrev)ev.scenePrev->Release();
         if(ev.gameMark)ev.gameMark->Release();if(ev.skin)ev.skin->Release();
-        if(engine && !g.engineNoted){g.engineNoted=true;Log::get().note("screen motion: the source pass's engine data is bound: certified rig records carry their own engine motion to their previous source UV before the panel mapping; masked ones keep no history%s.",g_countKinds?", counted per eye pixel":", counted on a sample (one frame in 300, one eye pixel in 16)");}
+        if(engine && !g.engineNoted){g.engineNoted=true;Log::get().note("screen motion: the source pass's engine data is bound: certified rig records carry their own engine motion to their previous source UV before the panel mapping; masked ones keep no history%s.",", counted on a sample (one frame in 300, one eye pixel in 16)");}
         e.written=true;
         if(weapon && !g.weaponNoted){g.weaponNoted=true;Log::get().note("screen motion: first-person stencil selects original-vertex weapon motion where the weapon map covers a texel or it is within first-person reach; uncovered or invalid history there is rejected, and a stencil texel beyond reach that the map does not cover (a character) takes the world path.");}
         if(!g.noted){g.noted=true;Log::get().note("screen motion: source camera/depth projected through the actual screen mesh at %ux%u per eye; GPU-only history, no source colour copies.",e.width,e.height);}

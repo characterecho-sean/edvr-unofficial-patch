@@ -1,4 +1,3 @@
-#include "../common/vr_census.h"
 #include "device_hook.h"
 #include "ui_layer.h"
 #include "gpu_timing.h"
@@ -229,11 +228,7 @@ struct State {
     bool         samplerBiasAuto = false;    // derived from Elite's own multiplier
     float        samplerBiasMult = 0.0f;     // ...and the multiplier it was derived from
     bool         samplerForceNoted = false;
-    // The shader-swap arc's dump mode: while armed, every vertex and pixel
-    // shader blob the game creates is written to <logdir>\shaders by hash,
-    // and the glare draw logs which two hashes it binds -- the pair to
-    // disassemble. Diagnostic; costs file writes on the streaming threads.
-    bool         shaderDump = false;
+    // The flat shader capture's directory: <logdir>\shaders.
     std::wstring shaderDumpDir;
     std::atomic<bool> shaderDumpDirMade{false};
     std::atomic<uint32_t> flatShaderCaptureAttempted{0};
@@ -713,7 +708,6 @@ HRESULT STDMETHODCALLTYPE hookedCreateVS(ID3D11Device* self, const void* bytecod
         EyeTonemapSnapshot::rememberShader(hash, bytecode, static_cast<size_t>(len));
         EyePanelSnapshot::rememberShader(hash,bytecode,static_cast<size_t>(len),static_cast<ID3D11VertexShader*>(*out));
         GuiDrawSnapshot::rememberShader(hash,bytecode,static_cast<size_t>(len));
-        if (g_state->shaderDump) dumpShaderBlob(L"vs", hash, bytecode, len);
     });
     return hr;
 }
@@ -755,7 +749,6 @@ HRESULT STDMETHODCALLTYPE hookedCreatePS(ID3D11Device* self, const void* bytecod
         EyeTonemapSnapshot::rememberShader(hash,bytecode,static_cast<size_t>(len));
         EyePanelSnapshot::rememberShader(hash,bytecode,static_cast<size_t>(len),static_cast<ID3D11PixelShader*>(*out));
         GuiDrawSnapshot::rememberShader(hash,bytecode,static_cast<size_t>(len));
-        if (g_state->shaderDump) dumpShaderBlob(L"ps", hash, bytecode, len);
     });
     return hr;
 }
@@ -1077,21 +1070,7 @@ HRESULT STDMETHODCALLTYPE hookedCreateCS(ID3D11Device* self, const void* bytecod
         if (FAILED(hr) || !bytecode || len == 0 || !out || !*out) return;
         const uint64_t hash = fnv1a64(bytecode, len);
         registerShaderHash(*out, hash);
-        // COMPUTE shaders dump too (2026-09-07), and they had to start.
         rememberFlatProbeShader('c', hash, bytecode, len);
-        //
-        // This hook has registered their hashes since it was written, so a
-        // census could NAME a dispatch -- and the dump wrote only vs_ and
-        // ps_, so nothing could ever read one. That gap bit twice in one
-        // day. The per-object motion work found the game reading the scene
-        // depth's STENCIL plane from compute (5998146D464F5C0E and
-        // EB0245DE0BB23BB6, the amortized tile renderer of
-        // docs/fss-scanner.md), which is a consumer a stencil tag must not
-        // disturb and which the draw-level so= column cannot see, because a
-        // compute shader has no depth-stencil state to record. And the
-        // temporal pass's own dispatch hash changes whenever its shader
-        // does, which a dump makes checkable instead of inferable.
-        if (g_state->shaderDump) dumpShaderBlob(L"cs", hash, bytecode, len);
     });
     return hr;
 }
@@ -1679,8 +1658,6 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
     const uint64_t traceBegan = hookEnter ? edvrNativeTraceUs(hookEnter) : 0;
     const uint64_t traceToken = self == g_state->swapChain ?
         nativeTimingPresentBegin(g_state->device, traceBegan, GetCurrentThreadId()) : 0;
-    VrCensusScope census(VrCensusEvent::PresentEnter, VrCensusEvent::PresentExit,
-                          self, self == g_state->swapChain ? 1 : 0);
     // Not our swapchain: forward and do no frame work. A second swapchain
     // (an overlay's, a mod's) shares this vtable and its Present is not our
     // frame boundary. See vtable_hook.h.
@@ -2544,16 +2521,9 @@ void hookDevice(ID3D11Device* device) {
     }
     breadcrumb("gfx: arming d3d11 hooks");
 
-    s.shaderDump = sentinelCfg.getBool("advanced.glare_shader_dump", false);
     s.shaderDumpDir = sentinelCfg.logDir() + L"\\shaders";
     if (runtimeFlatProfile())
         Log::get().note("flat shader capture: armed targets=%u stages=VS,PS directory=%ls; watching successful creations, one attempt per exact stage/hash per device; absent attempted lines mean no capture attempt", unsigned(kFlatShaderCaptureCount), s.shaderDumpDir.c_str());
-    if (s.shaderDump) {
-        Log::get().note("shader dump ARMED: every vertex and pixel shader "
-                        "the game creates is written to edvr_logs\\shaders "
-                        "by hash. Set glare_shader_dump = 0 afterwards -- "
-                        "this costs file writes during loading.");
-    }
     s.deviceHook.replace(kDevCreateVertexShader, &hookedCreateVS,
                          reinterpret_cast<void**>(&s.realCreateVS));
     s.deviceHook.replace(kDevCreateInputLayout,&hookedCreateLayout,reinterpret_cast<void**>(&s.realCreateLayout));

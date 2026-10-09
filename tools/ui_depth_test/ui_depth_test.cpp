@@ -220,7 +220,7 @@ int main(int argc, char** argv) {
         detail::g_uiDepthOn = true; detail::g_uiDepthMode = menu ? Mode::kReissue : Mode::kReissueScene;
         g_reissueShader = &g_depthShaders[2]; g_drawEye = 0; g_reissueMaskSlot = 1;
         g_rebindW = g_rebindH = 8; g_wantRebind = menu; g_rebindEye = 0;
-        g_wantMask = mark; g_reactive = .5f;
+        g_wantMask = mark;
         check(uiDepthReissueBegin(ctx.Get()), "production coverage begins");
         ctx->Draw(3, 0); uiDepthReissueEnd(ctx.Get());
         ComPtr<ID3D11Buffer> cb; ctx->PSGetConstantBuffers(13, 1, &cb);
@@ -247,7 +247,7 @@ int main(int argc, char** argv) {
     for (float v : read(dev.Get(), ctx.Get(), color.Get())) check(v == 1, "later smoke has no rectangular hole");
     // Positive control: reproduce the defect with coverage on the live DSV.
     ctx->OMSetDepthStencilState(reissueState(ctx.Get()), 0); ctx->PSSetShader(g_depthShaders[2].shader,nullptr,0);
-    ID3D11Buffer* floor = floorBuffer(ctx.Get(),1,0); ctx->PSSetConstantBuffers(13,1,&floor);
+    ID3D11Buffer* floor = floorBuffer(ctx.Get(),1); ctx->PSSetConstantBuffers(13,1,&floor);
     setZ(.6f); ctx->Draw(3,0); bind(scene.dsv.Get()); setZ(.3f);
     ctx->ClearRenderTargetView(rtv.Get(), zero); ctx->Draw(3,0);
     values = read(dev.Get(), ctx.Get(), color.Get());
@@ -337,13 +337,8 @@ int main(int argc, char** argv) {
     // TEXCOORD6 only (docs/ui-layer-2026-09-23.md, 2026-10-01), so any stand-in bound to it would be drawn through a mismatched signature. The
     // layer takes these panels out of the scene instead; a draw it does not take is left alone, as before.
     {
-        const bool variants=g_variants;
-        for(bool on:{true,false}) {
-            g_variants=on;
-            check(depthShaderFor(ctx.Get(),kHoloGuiFxOffPs,kHoloGuiFxOffVs,2)==nullptr && depthShaderFor(ctx.Get(),kHoloGuiFxOffPs,kHoloGuiFxOffVs,1)==nullptr,
-                  "the Disable-GUI-effects holo pair has no depth stand-in, with or without the variant fallback (its output signature is not the stand-in's input)");
-        }
-        g_variants=variants;
+        check(depthShaderFor(ctx.Get(),kHoloGuiFxOffPs,kHoloGuiFxOffVs,2)==nullptr && depthShaderFor(ctx.Get(),kHoloGuiFxOffPs,kHoloGuiFxOffVs,1)==nullptr,
+              "the Disable-GUI-effects holo pair has no depth stand-in, by vertex family or by slot (its output signature is not the stand-in's input)");
         check(depthShaderFor(ctx.Get(),kHoloLitPs,kHoloPanel,2)!=nullptr,"(control) the stock holo pair still has its stand-in");
     }
     surface[3]=1;
@@ -455,9 +450,9 @@ o.tc9.w=1;o.tc13.w=1;o.tc17.x=v.z;o.tc18=float3(.5,0,0);return o;}
                 actualAlpha=read(dev.Get(),ctx.Get(),reference.Get(),3);
                 std::printf("HUD reference case %d: alpha %.6f\n",kind,actualAlpha[0]);
             }
-            detail::g_uiDepthOn=true;g_trained=trained;g_reactive=0;g_alphaFloor=.5f;
+            detail::g_uiDepthOn=true;g_trained=trained;
             detail::g_uiDepthMode=Mode::kReissueScene;g_reissueShader=&g_depthShaders[1];g_drawEye=0;
-            g_reissueMaskSlot=2;g_reissueMaskOffset=0;g_rebindW=g_rebindH=8;g_wantMask=true;
+            g_reissueMaskSlot=2;g_rebindW=g_rebindH=8;g_wantMask=true;
             check(uiDepthReissueBegin(ctx.Get()),"HUD coverage at zero reactivity begins");
             ctx->Draw(3,0);uiDepthReissueEnd(ctx.Get());ctx->OMSetRenderTargets(0,nullptr,nullptr);
             ComPtr<ID3D11ShaderResourceView> restoredHudSrv;
@@ -466,7 +461,6 @@ o.tc9.w=1;o.tc13.w=1;o.tc17.x=v.z;o.tc18=float3(.5,0,0);return o;}
             ID3D11Texture2D* mask=nullptr;
             check(uiDepthCoverageMask(8,8,0,&mask)&&mask,"motion coverage remains available at zero reactivity");
             auto maskValues=read(dev.Get(),ctx.Get(),mask);
-            check(!uiDepthReactiveMask(8,8,0,&mask)&&!mask,"zero reactivity supplies no NVIDIA bias texture");
             for(size_t j=0;j<maskValues.size();++j) {
                 if(kind<6)check(std::lround(maskValues[j]*255)==(kind==0?1:kind==1?2:0),"HUD coverage ignores transparent strokes and preserves opaque motion classification");
                 if(gameHud)check((maskValues[j]>0)==(actualAlpha[j]>=.7f),"coverage matches installed shader opacity, including noise and density");
@@ -502,8 +496,8 @@ o.pos=float4((p*float2(2,-2)+float2(-1,1))*v.x,abs(v.x),v.x);o.tc0=p;return o;}
             const float actualScene=read(dev.Get(),ctx.Get(),target.tex.Get())[1];
             bind(target.dsv.Get());setZ(metres);ctx->VSSetShader(spriteVs.Get(),nullptr,0);
             ctx->PSSetShaderResources(2,1,surfSrv.GetAddressOf());
-            detail::g_uiDepthOn=true;g_trained=trained;g_reactive=0;detail::g_uiDepthMode=Mode::kReissueScene;
-            g_reissueShader=&g_depthShaders[5];g_drawEye=0;g_reissueMaskSlot=1;g_reissueMaskOffset=0;
+            detail::g_uiDepthOn=true;g_trained=trained;detail::g_uiDepthMode=Mode::kReissueScene;
+            g_reissueShader=&g_depthShaders[5];g_drawEye=0;g_reissueMaskSlot=1;
             g_rebindW=g_rebindH=8;g_wantRebind=false;g_wantMask=true;
             check(uiDepthReissueBegin(ctx.Get()),"sprite coverage begins");ctx->Draw(3,0);uiDepthReissueEnd(ctx.Get());
             ComPtr<ID3D11ShaderResourceView> restored;ctx->PSGetShaderResources(2,1,&restored);
@@ -941,7 +935,7 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
         for(unsigned f=0;f<3;++f) {
             uiDepthFrameBoundary(ctx.Get());ctx->ClearDepthStencilView(scene.dsv.Get(),D3D11_CLEAR_DEPTH,0,0);
             bind(scene.dsv.Get());setZ(.6f);ctx->PSSetShaderResources(0,1,uiView.GetAddressOf());
-            detail::g_uiDepthOn=true;g_reactive=0;detail::g_uiDepthMode=Mode::kReissueScene;g_reissueShader=&g_depthShaders[5];g_drawEye=0;g_reissueMaskSlot=1;
+            detail::g_uiDepthOn=true;detail::g_uiDepthMode=Mode::kReissueScene;g_reissueShader=&g_depthShaders[5];g_drawEye=0;g_reissueMaskSlot=1;
             g_rebindW=g_rebindH=8;g_wantMask=true;g_wantRebind=false;
             check(uiDepthReissueBegin(ctx.Get()),"scrolling sprite coverage begins");ctx->Draw(3,0);uiDepthReissueEnd(ctx.Get());ctx->OMSetRenderTargets(0,nullptr,nullptr);
             auto mark=valuesOf(g_mask[0].srv),edit=valuesOf(uiDepthContentChanges(8,8,0));
@@ -1133,7 +1127,7 @@ UN[id.xy]=uiEvidence(id.xy);Result[id.xy]=adaptiveUiReactive(id.xy,float2(id.xy)
                 // tests below assume without re-asserting it themselves.
                 colour.assign(w*h*4,0);edit.assign(w*h,0);
             }
-            // The corona-smear hold (advanced.corona_smear_level, issue 36): faint,
+            // The corona-smear hold (issue 36): faint,
             // flat, non-UI pixels are pulled back within one step of the raw
             // 2x2 range, the way UI pixels already are above. jit is zero
             // and ow==w/oh==h here, so corner==centre==(ox,oy) at the cell,

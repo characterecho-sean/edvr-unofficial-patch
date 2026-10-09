@@ -33,7 +33,7 @@ namespace edvr {
 // function with only a code gets the old note without the location.
 //
 // The two-argument signature is deliberate and load-bearing: three test rigs
-// (depth_scene_pick_test, hologram_depth_test, ui_depth_test) define their own
+// (depth_scene_pick_test, hologram_depth_test and the ui depth rig) define their own
 // stub of exactly this function instead of linking guard.cpp, so changing it
 // would break their link.
 int guardFilter(unsigned long code, const char* site);

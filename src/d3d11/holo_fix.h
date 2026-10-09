@@ -33,8 +33,8 @@ namespace edvr {
 
 class Config;
 
-// Read fix.holo_pattern (stock | steady) and advanced.holo_pattern_level.
-// Both paths, install and reload; both live.
+// Read fix.holo_pattern (stock | steady).
+// Both paths, install and reload; live.
 void holoConfigure(Config& cfg);
 
 // False in stock mode, which keeps the per-draw path free when off.

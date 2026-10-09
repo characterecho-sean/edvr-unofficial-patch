@@ -52,8 +52,7 @@ namespace edvr {
 
 class Config;
 
-// Reads experimental.target_indicator (stock | sharp) and the shader pin
-// advanced.target_indicator_vs. Install and reload; live.
+// Reads experimental.target_indicator (stock | sharp). Install and reload; live.
 void targetSharpConfigure(Config& cfg);
 
 // False in stock mode and once stood down, which keeps the draw path free.

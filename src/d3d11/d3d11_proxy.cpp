@@ -9,7 +9,6 @@
 // theirs and point advanced.real_dll at it in edvr.ini. Ours will load and forward
 // through it, and both mods keep working.
 #include <windows.h>
-#include "../common/vr_census.h"
 
 #include <d3d11.h>
 #include <dxgi.h>
@@ -31,7 +30,6 @@
 #include "flat_wrapper_note.h"
 #include "format_support_log.h"
 #include "input_gate.h"
-#include "intro_probe.h"   // the device stamp the intro probe's clock reads
 #include "oculus_route.h"
 
 extern "C" const EdvrNativeStartupRouting edvrNativeStartupRouting = {
@@ -84,15 +82,6 @@ void logDeviceCreation(ID3D11Device* device, D3D_DRIVER_TYPE driverType, UINT fl
     edvr::Log::get().note(
         "D3D11 device %p created: featureLevel=0x%04X flags=0x%08X driverType=%d hr=0x%08lX",
         static_cast<void*>(device), level, created, static_cast<int>(driverType), hr);
-    if (device && edvr::vrCensusEnabled()) {
-        LUID luid{};
-        const bool known = edvr::d3d11AdapterLuid(device, &luid);
-        edvr::Log::get().note(
-            "VR device census: created=%p adapterLuid=%08lX:%08lX known=%u "
-            "thread=%lu publishedBefore=%p (adapter identity is not device identity)",
-            static_cast<void*>(device), static_cast<unsigned long>(luid.HighPart),
-            luid.LowPart, known ? 1u : 0u, GetCurrentThreadId(), edvr::gameDevice());
-    }
 }
 
 void attachToDevice(ID3D11Device* device, IDXGISwapChain* swapChain,
@@ -136,12 +125,6 @@ void attachToDevice(ID3D11Device* device, IDXGISwapChain* swapChain,
         if (!edvr::gameDevice()) {
             device->AddRef();
             edvr::publishGameDevice(device);
-            // The intro probe's clock base: the same moment as the "D3D11
-            // device ... created" line just above, on this half's own clock.
-            edvr::introProbeNoteDevice();
-            if (edvr::vrCensusEnabled()) edvr::Log::get().note("VR device census: first device published=%p; "
-                                  "compare with validated eye texture devices in the vr log.",
-                                  static_cast<void*>(device));
         }
         edvr::hookDevice(device);
         if (swapChain) {
@@ -353,7 +336,6 @@ BOOL CALLBACK initOnceCallback(PINIT_ONCE, PVOID, PVOID*) {
     const DWORD n = g_realModule ? GetModuleFileNameW(g_realModule, realPath, MAX_PATH) : 0;
     if (n == 0 || n >= MAX_PATH) wcscpy_s(realPath, L"(unknown)");
     edvr::Log::get().note("forwarding to %S", realPath);
-    edvr::vrCensusConfigure();
     edvr::breadcrumb("gfx: log open");
     // From here on an unhandled exception names the module it came from
     // instead of leaving the trail blank. Faults on our own frame path do not

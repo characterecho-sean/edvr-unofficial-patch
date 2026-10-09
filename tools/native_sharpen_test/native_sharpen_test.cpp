@@ -33,18 +33,12 @@ extern "C" void* edvrSharpen(void* source,int eye,const float* bounds,float valu
 // into the layer this frame. Stubbed: null by default, so every contract
 // above holds unchanged; `layeredOut` makes it answer a texture.
 unsigned doorSeen=0,composites=0; uint64_t doorSeq=0; unsigned doorEye=9;
-unsigned finalCalls=0; ID3D11Texture2D* finalTexture=nullptr;
-uint64_t finalSequence=0;uint32_t finalEye=9,finalRegion[4]{};
-bool finalComposite=false,finalFlipU=false,finalFlipV=false;
 ID3D11Texture2D* layeredOut=nullptr; ID3D11Texture2D* lastFrame=nullptr; uint32_t lastRegion[4]{}; float lastUv[4]{};
 namespace edvr {
 void breadcrumb(const char*) {} // production guard.cpp's crash-channel dependency
-void temporalPassCaptureFinalEye(uint64_t seq,uint32_t eye,ID3D11Texture2D* texture,const uint32_t region[4],bool composite,bool flipU,bool flipV){
-  ++finalCalls;finalSequence=seq;finalEye=eye;finalTexture=texture;std::memcpy(finalRegion,region,sizeof(finalRegion));finalComposite=composite;finalFlipU=flipU;finalFlipV=flipV;
-}
 void uiLayerDoorSeen(uint64_t seq,uint32_t eye,ID3D11Texture2D*){++doorSeen;doorSeq=seq;doorEye=eye;}
 // The layer's one predicate for a layer-only eye (src/d3d11/ui_layer.h): the VR world route's re-issued world or, with
-// experimental.on_foot_maps_sharp, a map's or menu's 2D screen the layer took. The door cannot tell which, and a stub answers for both.
+// the on-foot maps gate, a map's or menu's 2D screen the layer took. The door cannot tell which, and a stub answers for both.
 bool uiLayerDoorLayerOnly(uint32_t eye,uint64_t seq){return eye<2&&layerOnlyEye[eye]&&seq!=0&&layerOnlySeq==seq;}
 ID3D11Texture2D* uiLayerComposite(uint64_t,uint32_t,ID3D11Texture2D* frame,const uint32_t region[4],const float layerUv[4]) {
   ++composites; order+='C'; lastFrame=frame; std::memcpy(lastRegion,region,sizeof(lastRegion)); std::memcpy(lastUv,layerUv,sizeof(lastUv));
@@ -72,7 +66,6 @@ struct Device {
     require(SUCCEEDED(device->CreateTexture2D(&d,nullptr,&t)),"texture"); return t;
   }
 };
-#include "eye_final_capture_test.h"
 EdvrNativeSharpenTable acquire(Device& d,uint64_t generation) {
   EdvrNativeSharpenRequest request{sizeof(request),1,d.device.Get(),generation};
   EdvrNativeSharpenTable table{sizeof(table),1};
@@ -94,12 +87,10 @@ HRESULT treat(EdvrNativeSharpenTable& t,uint64_t sequence,unsigned eye,ID3D11Tex
 }
 void run() {
   Device device,foreignDevice;
-  runFinalCaptureTests(device,foreignDevice);
   auto source=device.texture(), foreign=foreignDevice.texture(), staging=device.texture(true);
   auto& cfg=edvr::Config::get(); cfg.set("fix.render_sharpness","0.7");
   auto t=acquire(device,9); check(edvr::nativeSharpenActive(),"native availability after acquire");
   check(treat(t,1,1,source.Get())==S_OK&&lastEye==1&&std::fabs(strength-.7f)<1e-5f,"right first uses setting");
-  check(finalTexture==source.Get()&&finalSequence==1&&finalEye==1&&!finalComposite,"sharpened passthrough final hook receives actual returned frame");
   cfg.set("fix.render_sharpness","0.1");
   check(treat(t,1,0,source.Get())==S_OK&&std::fabs(strength-.7f)<1e-5f,"setting frozen across stereo pair");
   check(treat(t,1,1,source.Get())==E_INVALIDARG,"duplicate eye rejected");
@@ -158,7 +149,6 @@ void run() {
     check(lastFrame==source.Get()&&lastRegion[0]==0&&lastRegion[1]==0&&lastRegion[2]==32&&lastRegion[3]==24,
           "the composite is handed the sharpened, region-sized texture whole");
     check(refs(layer.Get())==2,"the provider returns exactly one owned reference to the layered frame");
-    check(finalTexture==layer.Get()&&finalComposite&&finalSequence==1&&finalEye==0,"sharpened composite final hook captures layered output");
     if(out)out->Release(); out=nullptr;
     cfg.set("fix.render_sharpness","0");
     check(door.treatEye(door.context,1,1,source.Get(),nullptr,&out,box)==S_OK&&out==layer.Get(),
@@ -168,28 +158,16 @@ void run() {
     check(door.treatEye(door.context,2,0,source.Get(),half,&out,box)==S_OK&&out==layer.Get()&&lastFrame==source.Get()&&
           lastRegion[0]==0&&lastRegion[2]==16&&lastRegion[3]==24,"sharpening off: the layer lands on the frame as it arrived, over its region");
     check(lastUv[0]==0&&lastUv[1]==0&&lastUv[2]==.5f&&lastUv[3]==1,"the layer's rectangle is the rounded region over the source's size");
-    check(finalTexture==layer.Get()&&finalComposite&&finalRegion[0]==0&&finalRegion[2]==16,"off composite final hook uses returned cropped output coordinates");
     if(out)out->Release(); out=nullptr;
     check(doorSeen==seenBefore+3&&doorSeq==2&&doorEye==0&&composites==compositesBefore+3,"the door is noted for every eye, before its composite");
     layeredOut=nullptr;
     check(door.treatEye(door.context,2,1,source.Get(),nullptr,&out,box)==S_FALSE&&!out,
           "nothing in the layer and sharpening off: the eye passes through exactly as before");
-    check(finalTexture==source.Get()&&!finalComposite&&finalRegion[2]==32,"off empty-layer final hook captures unchanged source");
     const auto seenInvalid=doorSeen;
-    const auto finalInvalid=finalCalls;
     check(door.treatEye(door.context,2,1,source.Get(),nullptr,&out,box)==E_INVALIDARG&&doorSeen==seenInvalid,
           "a rejected eye never reaches the door");
-    check(finalCalls==finalInvalid,"rejected door does not issue a final capture callback");
     check(door.close(door.context)==S_OK,"door close");
     cfg.set("fix.render_sharpness","0.5");   // the client section below sharpens
-  }
-  {
-    auto door=acquire(device,14);auto layer=device.texture();passSucceeds=false;layeredOut=layer.Get();
-    const float reversed[4]={.75f,1,.25f,0};ID3D11Texture2D* out=nullptr;float box[4]{};
-    check(door.treatEye(door.context,1,0,source.Get(),reversed,&out,box)==S_OK&&out==layer.Get()&&finalTexture==layer.Get()&&finalComposite&&finalFlipU&&finalFlipV&&finalRegion[2]==16,"shader refusal still captures actual composed final result and flipped bounds");
-    if(out)out->Release();out=nullptr;layeredOut=nullptr;
-    check(door.treatEye(door.context,1,1,source.Get(),reversed,&out,box)==S_FALSE&&!out&&finalTexture==source.Get()&&!finalComposite&&finalRegion[0]==8&&finalRegion[2]==24,"stood-down empty layer captures passthrough original region");
-    check(door.close(door.context)==S_OK,"final hook fault branch session closes");passSucceeds=true;
   }
   // The VR world route's layer-only eye (src/d3d11/vr_world_route.h): the frame at this door is the black one the temporal
   // door handed on and the layer holds the WHOLE eye, so the layer is composited FIRST and RCAS runs over the composited
@@ -206,14 +184,13 @@ void run() {
     if(out)out->Release();out=nullptr;
     // an eye the route took: the composite first, RCAS over its output
     layerOnlyEye[0]=layerOnlyEye[1]=true;layerOnlySeq=2;order.clear();sharpenSource=nullptr;
-    const auto doorsBefore=doorSeen,finalsBefore=finalCalls;
+    const auto doorsBefore=doorSeen;
     check(door.treatEye(door.context,2,0,black.Get(),nullptr,&out,box)==S_OK&&out==layer.Get(),"a layer-only eye: S_OK with the composited frame");
     check(order=="CS"&&lastFrame==black.Get()&&sharpenSource==layer.Get(),
           "...the UI layer is composited FIRST (over the black frame the door handed on) and RCAS runs over the composited eye");
     check(box[0]==0&&box[1]==0&&box[2]==1&&box[3]==1&&lastRegion[0]==0&&lastRegion[2]==32&&lastRegion[3]==24,"...full bounds, the whole region");
     check(refs(layer.Get())==2,"...and the provider returns exactly one owned reference to the frame");
-    check(finalTexture==layer.Get()&&finalComposite&&finalSequence==2&&finalEye==0&&finalCalls==finalsBefore+1&&doorSeen==doorsBefore+1,
-          "...the door is noted first, and the final hook captures the composited, sharpened eye");
+    check(doorSeen==doorsBefore+1,"...the door is noted first");
     if(out)out->Release();out=nullptr;
     // the strength rules are unchanged: off -> only the composite
     cfg.set("fix.render_sharpness","0");
@@ -232,8 +209,8 @@ void run() {
     if(out)out->Release();out=nullptr;
     // the composite did not run for an eye that is nothing but the layer: S_FALSE, the black frame -- and counted loudly
     layeredOut=nullptr;layerOnlySeq=5;order.clear();
-    check(door.treatEye(door.context,5,0,black.Get(),nullptr,&out,box)==S_FALSE&&!out&&order=="C"&&finalTexture==black.Get()&&!finalComposite,
-          "no composite for a layer-only eye: nothing is sharpened (there is nothing to sharpen), S_FALSE, the black frame is what the final hook sees");
+    check(door.treatEye(door.context,5,0,black.Get(),nullptr,&out,box)==S_FALSE&&!out&&order=="C",
+          "no composite for a layer-only eye: nothing is sharpened (there is nothing to sharpen), S_FALSE, the black frame");
     // a take in another sequence is not this frame's
     layeredOut=layer.Get();layerOnlyEye[0]=true;layerOnlySeq=99;order.clear();
     check(door.treatEye(door.context,6,0,black.Get(),nullptr,&out,box)==S_OK&&order=="C",

@@ -99,8 +99,7 @@ inline bool uiLayerLive() { return detail::g_uiLayerLive; }
 // session either way.
 inline bool uiLayerIssueBlocked() { return detail::g_uiLayerIssueBlocked; }
 
-// Reads fix.ui_quality, fix.temporal_aa and advanced.temporal_aa_debug
-// (value ui_layer). Live: an "off" composites the frame in flight and
+// Reads fix.ui_quality and fix.temporal_aa. Live: an "off" composites the frame in flight and
 // redirects nothing from the next draw.
 void uiLayerConfigure(Config& cfg);
 
@@ -217,7 +216,7 @@ void uiLayerCrispToneEnd(ID3D11DeviceContext* ctx);
 // With fix.panel_curvature above 0 the game's draw is the curve substitution's strip (panel_curve.h) and the second draw is that
 // strip too: vscreen.cpp issues panelCurveReissue between Begin and End, the same helper that bound the strip for the game's draw,
 // so the layer's bend and placement are the game's (the plan accepts a substituted draw as it does a flat one).
-// With experimental.temporal_aa_on_foot_world off none of this ever happens (the route never owns a frame): the
+// On a frame the route does not own none of this ever happens: the
 // decision, the draws, the jitter and the door are what they were.
 //
 // The on-foot world-screen gate the layer computes at its frame boundary (the journal's on-foot reading or the
@@ -268,7 +267,7 @@ struct UiLayerWorldStats {
 };
 UiLayerWorldStats uiLayerWorldStats();
 
-// ---- the on-foot maps gate (experimental.on_foot_maps_sharp; ui_maps_math.h; docs/design-world-camera-motion-2026-09-30.md) ----
+// ---- the on-foot maps gate (ui_maps_math.h; docs/design-world-camera-motion-2026-09-30.md) ----
 //
 // With the key on, the layer's world-screen gate is decided by the world camera alone: the 2D screen is the world only while
 // a draw that reads the world camera names its source (screen_motion.cpp), 2 frames in a row to hold, 3 to release. A map or a
@@ -278,6 +277,8 @@ UiLayerWorldStats uiLayerWorldStats();
 // The key is on, the layer and screen motion are live, so the naming decides the gate (latched at the frame boundary, so every
 // draw of a frame sees one answer). One load.
 inline bool uiLayerMapsOn() { return detail::g_uiLayerMapsOn; }
+// The rigs' switch for the gate (it is on in production, always): the gate-off path is driven with it.
+void uiLayerSetMapsGateForTest(bool on);
 // screen_motion.cpp, once, at the draw that names the screen's source for the frame in flight (the world camera's terrain or
 // scene draw, or the pool-family fallback): the gate judges the frame that ends at the next boundary by it. Attributed to the
 // layer's own frame count, so it is right whichever boundary runs first. Two loads and a store.

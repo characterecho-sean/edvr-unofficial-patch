@@ -357,7 +357,7 @@ namespace {
 // The route's conditions as the configuration states them -- the same three the world
 // route needs at run time, read from the ini the way each owner reads it, because at
 // launch (and in the menu, for the next one) no owner has run yet:
-//   * experimental.temporal_aa_on_foot_world: vr_world_route.cpp's boundary, default auto
+//   * the on-foot world route: always on (vr_world_route.cpp's boundary)
 //   * (the curved screen is not a condition: the route re-issues a curved screen through
 //     the same strip the game's draw is substituted with, panel_curve.h panelCurveReissue)
 //   * the UI layer: ui_layer.cpp's uiLayerConfigure -- fix.ui_quality (default 100), a
@@ -374,16 +374,13 @@ namespace {
 vscreenfit::RouteFacts routeFactsFromConfig(Config& cfg) {
     vscreenfit::RouteFacts f;
     f.flatProfile = runtimeFlatProfile();
-    f.keyAuto = vscreenfit::keyTextIsAuto(
-        cfg.getString("experimental.temporal_aa_on_foot_world", "auto").c_str());
+    f.keyAuto = true;
 
     const std::string quality = cfg.getString("fix.ui_quality", "100");
     bool recognized = true;
     const float target = uiQualityParse(quality.c_str(), &recognized, nullptr);
     const bool temporal = temporalModeEnabled(cfg.getString("fix.temporal_aa", "off"));
-    const bool jitterAsShipped =
-        _stricmp(cfg.getString("advanced.temporal_aa_jitter_sign", "as_is").c_str(), "as_is") == 0 &&
-        !(cfg.getFloat("advanced.temporal_aa_jitter_lag", 0.0f) >= 0.5f);
+    const bool jitterAsShipped = true;
     f.layerWhy = uiLayerNotLiveReasonFor(target, temporal, jitterAsShipped, /*stoodDown=*/false);
 
     switch (vrRuntime()) {

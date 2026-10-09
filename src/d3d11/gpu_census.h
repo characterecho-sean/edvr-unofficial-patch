@@ -25,7 +25,7 @@ namespace edvr {
 // subtracts that pair's own mean cost from the real one's, floored at zero.
 // How many fixes wrap Elite's draws and are named in the census (AlteredFix below: one for each
 // verdict that can reach the altered-draw site, and a last one for "unnamed").
-constexpr int kAlteredFixCount = 16;
+constexpr int kAlteredFixCount = 15;
 
 enum class GpuCensusSection : uint8_t {
     // Door: once or twice a frame, at Submit. K = 2 (both eyes) while active.
@@ -56,9 +56,9 @@ enum class GpuCensusSection : uint8_t {
                               // Seeder's passes into the layer's own target (ui_layer.cpp seedLayerDepth), counted
                               // once for each seed and only for that layer (GpuCensusSeedScope below)
     // The VR on-foot world route's own GPU work (vr_world_route.cpp, design doc section 82), EDVR's cost like the
-    // sections above. They run only while experimental.temporal_aa_on_foot_world is auto and the route works; the
+    // sections above. They run only while the on-foot world route works; the
     // rotation gives a turn to none of the three until one has been called (nextTurnOwner, gpu_census.cpp), so with
-    // the key off the census samples exactly as it did before they existed.
+    // the route idle the census samples exactly as it did before they existed.
     FrameWorldResolve,        // the route's resolve at the tone: the input copy, prep, upscaler and the finish into H
     FrameWorldMips,           // the screen texture's copy into the mipped texture and its GenerateMips
     FrameWorldLayer,          // the layer's re-issue of each eye's screen draw with the resolved, mipped screen
@@ -120,7 +120,6 @@ enum class AlteredFix : uint8_t {
     Particle,      // the particle billboards (kParticle)
     FssPanel,      // the FSS panel composite (kFssPanel)
     FssReveal,     // the FSS body composite at one dissolve moment (kFssReveal)
-    FssDump,       // the FSS dump pass (kFssDump)
     ResolveBind,   // the deferred lighting resolve with the scanner-body input lend (kResolveBind)
     Scrim,         // the loader dialog's dimming wash (kScrim)
     Backdrop,      // the menu backdrop blit (kBackdrop)

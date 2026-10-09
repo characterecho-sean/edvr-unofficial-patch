@@ -257,7 +257,6 @@ inline void runConsumer(const Harness& h) {
     floats("dR1", 0, 1, 0, 0);
     floats("dR2", 0, 0, 1, 0);
     floats("knobs", 0, 1, .025f, 0);
-    floats("movers", 0, 0, 0, 0);
     floats("holoJitter", 0, 0, 1, 0);
     ComPtr<ID3D11Buffer> pCb;
     { D3D11_BUFFER_DESC d{}; d.ByteWidth = pd.Size; d.Usage = D3D11_USAGE_DEFAULT; d.BindFlags = D3D11_BIND_CONSTANT_BUFFER; h.device->CreateBuffer(&d, nullptr, &pCb); }

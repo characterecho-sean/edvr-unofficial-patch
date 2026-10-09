@@ -26,7 +26,7 @@ constexpr float kDepthB = 0.025f;        // knobs.z: written depth = knobs.x + k
 constexpr float kSplit = 60.0f;          // split.x: the ship's radius, metres
 constexpr UINT kStatsN = 64;
 
-// The cbuffer P, as temporal_pass.cpp's PassParams lays it out (528 bytes, 33 rows); checked against the compiled shader's reflection.
+// The cbuffer P, as temporal_pass.cpp's PassParams lays it out (448 bytes, 28 rows); checked against the compiled shader's reflection.
 struct Params {
     int32_t region[4];
     int32_t size[2];
@@ -35,9 +35,9 @@ struct Params {
     float cand[4][3][4];
     float blend, gamma;
     int32_t haveHistory, candMask;
-    float knobs[4], tvUsed[4], tvCand[4], tvCam[4], split[4], fovea0[4], fovea1[4], movers[4], probe[4], holoJitter[4], skip[4], lead[4];
+    float knobs[4], tvUsed[4], tvCand[4], tvCam[4], split[4], probe[4], holoJitter[4];
 };
-static_assert(sizeof(Params) == 528, "the cbuffer is 33 16-byte rows");
+static_assert(sizeof(Params) == 448, "the cbuffer is 28 16-byte rows");
 
 struct Variant {
     const char* name;
@@ -527,7 +527,7 @@ void all(const Fixture& fx) {
         hr(D3DReflect(v[1].code->GetBufferPointer(), v[1].code->GetBufferSize(), __uuidof(ID3D11ShaderReflection), reinterpret_cast<void**>(refl.GetAddressOf())), "D3DReflect");
         ID3D11ShaderReflectionConstantBuffer* cbr = refl->GetConstantBufferByName("P");
         D3D11_SHADER_BUFFER_DESC bd{};
-        check(cbr && SUCCEEDED(cbr->GetDesc(&bd)) && bd.Size == sizeof(Params), "cbuffer P is 528 bytes, as PassParams");
+        check(cbr && SUCCEEDED(cbr->GetDesc(&bd)) && bd.Size == sizeof(Params), "cbuffer P is 448 bytes, as PassParams");
         std::map<std::string, UINT> off;
         for (UINT i = 0; i < bd.Variables; ++i) {
             D3D11_SHADER_VARIABLE_DESC vd{};

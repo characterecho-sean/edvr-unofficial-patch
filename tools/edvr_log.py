@@ -2905,7 +2905,7 @@ MAPS_BACK_RE = re.compile(r"^on foot maps sharp: the layer HANDS BACK the 2D scr
                           r"upscaler because the game drew something else into them\): (?P<why>.*)\.$")
 MAPS_NOTEMPTY_RE = re.compile(r"^on foot maps sharp: the layer took the 2D screen for eye (?P<eye>\d) \(sequence (?P<seq>\d+)\) but the "
                               r"game drew (?P<draws>\d+) draw\(s\) into eye-sized targets this frame and the layer took (?P<taken>\d+): ")
-MAPS_NOTLIVE_RE = re.compile(r"^on foot maps sharp: experimental\.on_foot_maps_sharp is on but .*: (?P<why>[^:]*)\.$")
+MAPS_NOTLIVE_RE = re.compile(r"^on foot maps sharp: the maps gate is on but .*: (?P<why>[^:]*)\.$")
 MAPS_WINDOW_RE = re.compile(r"^on foot maps sharp 5s: key=on (?P<secs>[0-9.]+) s mode=(?P<mode>\w+) gate=(?P<gate>world|panel) "
                             r"frames=(?P<frames>\d+) named=(?P<named>\d+) unnamed=(?P<unnamed>\d+) world-frames=(?P<world>\d+) "
                             r"panel-frames=(?P<panel>\d+) holds=(?P<holds>\d+) releases=(?P<releases>\d+) "
@@ -4532,11 +4532,11 @@ def print_vscreen_fit(text):
 # formatters to tools\flat_upscale_fixture.log (a good flight and three episodes), the file this reader's self-test reads.
 # ---------------------------------------------------------------------------------------------------------------------------------------
 FLATU_TS = r"^(?:\[(?P<ts>[0-9:.]+)\] )?"
-FLATU_KEY_RE = re.compile(FLATU_TS + r"flat hdr route: experimental\.temporal_aa_before_post=(?P<key>\w+) \((?P<when>read at startup|changed)\) at frame=(?P<frame>\d+)")
+FLATU_KEY_RE = re.compile(FLATU_TS + r"flat hdr route: (?:experimental\.temporal_aa_before_post=)?(?P<key>\w+) \((?P<when>read at startup|changed)\) at frame=(?P<frame>\d+)")
 FLATU_TRIGGER_RE = re.compile(FLATU_TS + r"flat hdr route: first trigger at frame=(?P<frame>\d+)")
 FLATU_WINDOW_RE = re.compile(FLATU_TS + r"flat copy structure 5s: (?P<rest>.*)$")
 FLATU_FIRST_RE = re.compile(
-    FLATU_TS + r"flat copy structure: first admission at frame=(?P<frame>\d+) \(experimental\.temporal_aa_before_post=auto\): the game's final copy reads a "
+    FLATU_TS + r"flat copy structure: first admission at frame=(?P<frame>\d+) \((?:experimental\.temporal_aa_before_post=auto|the HDR route is on)\): the game's final copy reads a "
     r"(?P<w>\d+)x(?P<h>\d+) R8G8B8A8 image written by one pass, VS=(?P<vs>[0-9A-F]+) PS=(?P<ps>[0-9A-F]+), after the scene HDR's first consumer "
     r"\(VS=(?P<tvs>[0-9A-F]+) PS=(?P<tps>[0-9A-F]+)\), .*?\(the whitelist said (?P<wl>[\w-]+)\); the scene is (?P<sw>\d+)x(?P<sh>\d+) on a "
     r"(?P<ow>\d+)x(?P<oh>\d+) output(?P<menu> \(the 3D menu\))?, route=(?P<route>[\w-]+);")
@@ -10228,7 +10228,7 @@ def self_test_flat_upscale():
     got, _ = statuses(no_windows)
     if got.get("ADMISSION") != "STOP" or rc != 0 or got.get("UPSCALE") != "STOP":
         fail("a flight with no admission window should say ADMISSION STOP and (nothing admitted below the output) UPSCALE STOP, exit 0: %r rc=%d" % (got, rc))
-    want_statuses(sub(base, "temporal_aa_before_post=auto (read at startup)", "temporal_aa_before_post=off (read at startup)"), {"KEY": "WARN"}, "the key off")
+    want_statuses(sub(base, "flat hdr route: auto (read at startup)", "flat hdr route: off (read at startup)"), {"KEY": "WARN"}, "the key off")
     no_key = "\n".join(l for l in base.splitlines() if "flat hdr route:" not in l) + "\n"
     want_statuses(no_key, {"KEY": "n/a", "ADMISSION": "PASS"}, "no key line")
     # Windows that never ruled on a final copy: the admission ran and had nothing to say, which is not a PASS.
@@ -10265,7 +10265,7 @@ def self_test_flat_upscale():
     runtime_cpp = os.path.join(os.path.dirname(here), "src", "d3d11", "flat_runtime.cpp")
     if os.path.isfile(runtime_cpp):
         r = read_text(runtime_cpp)
-        if "flat hdr route: experimental.temporal_aa_before_post=%s%s at frame=%llu: %s" not in r:
+        if "flat hdr route: %s (read at startup) at frame=%llu: %s" not in r:
             fail("src\\d3d11\\flat_runtime.cpp no longer writes the key line this reader parses")
     else:
         fail("src\\d3d11\\flat_runtime.cpp is not where the self-test looks for it (%s)" % runtime_cpp)
@@ -10647,7 +10647,7 @@ def self_test_maps_sharp():
     # at the first ")": a real flight (edvr_gfx_20261001_085519.log, fix.temporal_aa off) lost its OFF line as "unknown". The list is held to the DLL's
     # sources, so a reason that is reworded fails here and not in the ten minutes after a flight.
     reasons = ["the key went off", "screen motion is not live", "fix.ui_quality is off", "no temporal mode is on (fix.temporal_aa is off)",
-               "the eye jitter is not as shipped (advanced.temporal_aa_jitter_sign or _lag is set)", "the layer stood down for the session",
+               "the eye jitter is not as shipped", "the layer stood down for the session",
                "screen motion is not live (fix.temporal_aa is off, or it stood down)", "the UI layer is not live"]
     reason_src = ""
     for rel in ("src/d3d11/ui_layer_math.h", "src/d3d11/ui_layer.cpp"):
@@ -10661,7 +10661,7 @@ def self_test_maps_sharp():
         pr = parse_maps_sharp(
             "[16:23:45.000] on foot maps sharp: OFF at frame=32500 (%s): the 2D screen is the world by the journal's reading or the screen's own "
             "depth again, as without the key.\n"
-            "[16:23:46.000] on foot maps sharp: experimental.on_foot_maps_sharp is on but the 2D screen's gate stays the journal's and the screen's "
+            "[16:23:46.000] on foot maps sharp: the maps gate is on but the 2D screen's gate stays the journal's and the screen's "
             "own depth, as without the key: %s.\n" % (why, why))
         got = [(e["kind"], e.get("why")) for e in pr["events"]]
         if got != [("off", why), ("notlive", why)] or pr["unparsed"]:

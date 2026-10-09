@@ -17,7 +17,7 @@
 // (a) fsr3Available on WARP.
 // (b) two eye contexts create and dispatch FFX_OK at a real per-eye size
 //     (2064x2208 -> 2064x2208), and AMD's own ENABLE_DEBUG_CHECKING
-//     (advanced.temporal_aa_diagnostics=1) says nothing about this rig's
+//     (off in the shipped engine, so nothing here can say anything about this rig's
 //     well-formed input (fsr3TestMessageCount, test-only -- deliberately
 //     absent from fsr3_engine.h; forward-declared here instead).
 // (c) a static (camera-still, jitter-still-cycling) synthetic frame
@@ -450,7 +450,7 @@ void testContextCreateAndSilence(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     }
     check(ok0, "(b) eye 0 dispatched FFX_OK at 2064x2208");
     check(ok1, "(b) eye 1 dispatched FFX_OK at 2064x2208");
-    std::printf("info: (b) fpMessage count before=%u after=%u (advanced.temporal_aa_diagnostics on)\n",
+    std::printf("info: (b) fpMessage count before=%u after=%u (debug checking is off)\n",
                 before, after);
     // `made` is in the test on purpose: with no textures, nothing dispatches,
     // before and after are both 0, and this printed as a clean pass while
@@ -1147,7 +1147,7 @@ void testHdrRoute(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         // always made with, or that set plus the two HDR bits (this rig runs with AMD's debug checking on, which is
         // the same bit in both). Read from the engine's own record of desc.flags, so a flag that never reached the
         // port, or a flip that did not remake the context, shows here and nowhere a constant field could.
-        const bool diagnostics = edvr::Config::get().getBool("advanced.temporal_aa_diagnostics", false);
+        const bool diagnostics = false;
         const uint32_t ldrFlags = edvr::flatFsrCreateFlags(false, diagnostics, false);
         const uint32_t hdrFlags = edvr::flatFsrCreateFlags(false, diagnostics, true);
         const uint32_t messagesBefore = edvr::fsr3TestMessageCount();
@@ -1299,7 +1299,7 @@ void testUpscalerSlots(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             ctx->UpdateSubresource(hc, 0, nullptr, field.data(), hw * 4, 0);
             SlotRig hdrRig = eyeRig;
             hdrRig.colour = hc; hdrRig.out = ho;
-            const bool diagnostics = edvr::Config::get().getBool("advanced.temporal_aa_diagnostics", false);
+            const bool diagnostics = false;
             const uint32_t ldrFlags = edvr::flatFsrCreateFlags(false, diagnostics, false);
             const uint32_t hdrFlags = edvr::flatFsrCreateFlags(false, diagnostics, true);
             const uint32_t before0 = created(0), before1 = created(1), before2 = created(world);
@@ -1645,8 +1645,7 @@ void testUpscaleRegistration(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 // createMs rather than by scraping the log -- a warm that MADE a context
 // reports the time it took, and one that found it already made reports zero.
 // The same instrument proves the two things the engine now promises about
-// the context key: a live advanced.temporal_aa_diagnostics flip remakes it
-// (F8), and fsr3ReleaseFeatures really frees it (F7).
+// the context key: fsr3ReleaseFeatures really frees it (F7).
 void testWarmAndRelease(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     const UINT w = 960, h = 800, oW = 1440, oH = 1200;   // a key no other case uses
     double ms = -1.0;
@@ -1705,23 +1704,6 @@ void testWarmAndRelease(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         if (out) out->Release();
     }
 
-    // advanced.temporal_aa_diagnostics is part of the key now: flipping it
-    // live must remake the context instead of doing nothing until a size
-    // moves. The rig runs with it ON (run(), below), so turn it off here and
-    // put it back afterwards.
-    edvr::Config::get().set("advanced.temporal_aa_diagnostics", "0");
-    double flipped = -1.0;
-    const bool afterFlip = edvr::fsr3Warm(ctx, w, h, oW, oH, &flipped, &why);
-    edvr::Config::get().set("advanced.temporal_aa_diagnostics", "1");
-    std::printf("info: (i) after flipping advanced.temporal_aa_diagnostics the warm cost %.0f ms\n",
-                flipped);
-    check(afterFlip && flipped > 0.0,
-          "(i) flipping advanced.temporal_aa_diagnostics live remakes the context");
-
-    double back = -1.0;
-    const bool restored = edvr::fsr3Warm(ctx, w, h, oW, oH, &back, &why);
-    check(restored && back > 0.0, "(i) flipping it back remakes the context again");
-
     edvr::fsr3ReleaseFeatures();
     double afterRelease = -1.0;
     const bool remade = edvr::fsr3Warm(ctx, w, h, oW, oH, &afterRelease, &why);
@@ -1733,7 +1715,7 @@ void testWarmAndRelease(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
 }
 
 // (j) The reactive mask, null at every call site until now, so
-// advanced.temporal_aa_fsr_reactive was untested end to end. The seam hands
+// it was untested end to end. The seam hands
 // FSR an R8_UNORM mask at render size (temporal_pass.cpp's e.dlMask); the
 // shape is what is checked here, not the picture.
 void testReactiveMask(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
@@ -1868,13 +1850,6 @@ void testVramQuery(ID3D11Device* dev) {
 }
 
 int run() {
-    // Enables AMD's own ENABLE_DEBUG_CHECKING context flag (fsr3_engine.cpp's
-    // ensureContext reads this at every context creation, not through
-    // Fsr3Settings) for the whole rig, not only test (b) -- Config::get().set
-    // is the sanctioned in-memory test-injection mechanism used elsewhere
-    // (e.g. native_frame_test.cpp), no file I/O.
-    edvr::Config::get().set("advanced.temporal_aa_diagnostics", "1");
-
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> context;
     if (!createWarpDevice(device, context)) {

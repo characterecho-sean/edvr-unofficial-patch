@@ -22,7 +22,7 @@
 #include "../../src/d3d11/transition_flash_eye_base.h"
 #pragma comment(linker, "/EXPORT:edvrAcquireNativeTemporal")
 using Microsoft::WRL::ComPtr;
-unsigned checks=0,failures=0,dumps=0;
+unsigned checks=0,failures=0;
 void check(bool x,const char* why){++checks;if(!x){++failures;std::printf("FAIL: %s\n",why);}}
 void require(bool x,const char* why){check(x,why);if(!x)throw std::runtime_error(why);}
 bool closeFloat(float a,float b,float epsilon=1e-5f){return std::fabs(a-b)<=epsilon;}
@@ -62,7 +62,6 @@ extern "C" void* edvrTemporalAa(void* source,int eye,const float*,const float* n
   if(swapped)std::memcpy(c.swapped,swapped,12);std::memcpy(c.tanNow,now,16);std::memcpy(c.tanPrev,previous,16);
   calls.push_back(c);return passSucceeds?source:nullptr; // borrowed; provider AddRefs
 }
-extern "C" void edvrEyeCaptureUntreated(void*,int,const float*){++dumps;}
 // fix.ui_quality's door hook (src/d3d11/ui_layer.cpp): the pass tells the
 // layer which eyes it handed on, so the layer arms only behind a treated
 // frame. Recorded here, asserted below.
@@ -99,7 +98,7 @@ unsigned gapCalls=0,rawClears=0;ID3D11Texture2D* gapFrame=nullptr;
 namespace edvr{
 bool vrWorldRouteOwnsNextFrame(){return routeOwns;}
 // The layer's one predicate for a layer-only eye (src/d3d11/ui_layer.h): the route's re-issued world, or a map's or menu's 2D screen
-// the layer took under experimental.on_foot_maps_sharp. The door cannot tell which, so one stub answers for both.
+// the layer took under the on-foot maps gate. The door cannot tell which, so one stub answers for both.
 bool uiLayerDoorLayerOnly(uint32_t eye,uint64_t seq){return eye<2&&routeTookEye[eye]&&seq!=0&&routeTookSeq==seq;}
 int uiLayerWorldDoorGap(uint64_t,uint32_t,ID3D11Texture2D* frame){++gapCalls;gapFrame=frame;return gapAnswer;}
 void vScreenClearRenderTargetViewRaw(ID3D11DeviceContext* c,ID3D11RenderTargetView* v,const float colour[4]){++rawClears;c->ClearRenderTargetView(v,colour);}
@@ -337,24 +336,12 @@ void run(){
   check(closeFloat(c.delta[0],0)&&closeFloat(c.delta[2],-1)&&closeFloat(c.delta[6],1)&&closeFloat(c.delta[8],0),"changing cant composes both eye rotations");
   check(closeFloat(c.translation[0],0)&&closeFloat(c.translation[2],1)&&closeFloat(c.headDeg,0),"translation in previous canted eye frame");
   edvr::Config::get().set("fix.temporal_aa","off");check(treat(fresh,3,1,source.Get())==S_OK,"current pair freezes AA setting");
-  f=frame(12,4);p=begin(fresh,f);const auto before=dumps;check(treat(fresh,4,0,source.Get())==S_FALSE&&dumps==before+1,"next frame AA off captures untreated eyes");check(p.tangentShift[0][0]==0,"AA off zeros jitter");check(fresh.close(fresh.context)==S_OK,"fresh close");
+  f=frame(12,4);p=begin(fresh,f);check(treat(fresh,4,0,source.Get())==S_FALSE,"next frame AA off passes the eye through");check(p.tangentShift[0][0]==0,"AA off zeros jitter");check(fresh.close(fresh.context)==S_OK,"fresh close");
   auto dlss=acquire(d,13,"dlss");f=frame(13,1);begin(dlss,f);check(treat(dlss,1,0,source.Get())==S_OK,"DLSS call");c=calls.back();check(c.outW==480&&c.outH==360&&(c.flags&2),"DLSS requests recommended size");
   f=frame(13,2);begin(dlss,f);passSucceeds=false;const unsigned notesBefore=uiLayerNotes;check(treat(dlss,2,0,source.Get())==S_FALSE,"filter refusal preserves raw pixels");passSucceeds=true;
   check(uiLayerNotes==notesBefore,"a refused eye is not noted to the UI layer (it must not arm behind raw pixels)");
   f=frame(13,3);p=begin(dlss,f);check(p.tangentShift[0][0]==0&&p.tangentShift[0][1]==0,"refusal disables future jitter");check(dlss.close(dlss.context)==S_OK,"DLSS close");
   auto unknown=acquire(d,14,"invalid-mode");f=frame(14,1);begin(unknown,f);check(treat(unknown,1,0,source.Get())==S_FALSE,"unknown mode is off");check(unknown.close(unknown.context)==S_OK,"unknown close");
-  edvr::Config::get().set("advanced.temporal_aa_jitter_sign","flip_both");
-  edvr::Config::get().set("advanced.temporal_aa_jitter_lag","1");
-  auto diagnostic=acquire(d,16);f=frame(16,1);begin(diagnostic,f);
-  check(treat(diagnostic,1,1,source.Get())==S_OK&&treat(diagnostic,1,0,source.Get())==S_OK,"diagnostic baseline pair");
-  f=frame(16,2);const auto p2=begin(diagnostic,f);
-  check(treat(diagnostic,2,1,source.Get())==S_OK&&closeFloat(calls.back().jx,0)&&closeFloat(calls.back().jy,0),"lag consumes previous frame zero jitter");
-  check(treat(diagnostic,2,0,source.Get())==S_OK&&closeFloat(calls.back().jx,0),"lag is per eye, independent of submit order");
-  f=frame(16,3);begin(diagnostic,f);check(treat(diagnostic,3,0,source.Get())==S_OK,"lag third frame");
-  c=calls.back();check(closeFloat(c.jx,p2.tangentShift[0][0]*320/1.9f)&&closeFloat(c.jy,-p2.tangentShift[0][1]*240/2),"sign and lag affect consumer pixels only");
-  check(p2.tangentShift[0][0]<0,"game jitter keeps original sign despite diagnostic flip");
-  check(diagnostic.close(diagnostic.context)==S_OK,"diagnostic close");
-  edvr::Config::get().set("advanced.temporal_aa_jitter_sign","as_is");edvr::Config::get().set("advanced.temporal_aa_jitter_lag","0");
   edvr::Config::get().set("fix.temporal_aa","on");edvr::openxr::NativeTemporalClient client;
   require(client.acquire(GetModuleHandleW(nullptr),d.device.Get(),15)==S_OK,"actual client validates provider table");
   edvr::openxr::GeometryInput g{};g.generation=1;g.sequence=1;g.displayTime=1;g.headPose.orientation.w=1;
@@ -464,7 +451,7 @@ void run(){
   }
 
   // ---- the VR world route: the eye shift and the layer-only door (design doc section 82) ----------------------------
-  // With experimental.temporal_aa_on_foot_world off the route owns nothing and took no eye, which is every case above.
+  // While the route is idle it owns nothing and took no eye, which is every case above.
   // Here it owns the next frame, or took an eye's screen draw into the UI layer, and the door answers for it.
   {
     const auto shifted=[](const EdvrNativeTemporalProjection& p){

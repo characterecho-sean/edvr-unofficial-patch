@@ -23,7 +23,7 @@
 //
 // v1 reprojects ROTATION only -- the head's, from the runtime's pose, or the
 // game's own camera, from the view rows it writes into its scene constants
-// (an experiment, advanced.temporal_aa_motion) -- and needs no depth buffer.
+// (an experiment, the motion source) -- and needs no depth buffer.
 // Translation parallax (head motion against the cockpit, the ship against
 // near terrain) is left to the clamp, which is where every injected TAA
 // lives before it has depth; the depth reprojection is v2, gated on Phase 0
@@ -51,11 +51,11 @@ namespace edvr {
 class Config;
 
 // Reads fix.temporal_aa (the warm compile and the camera capture want to
-// know) and the pass's [advanced] keys.
+// know).
 void temporalPassConfigure(Config& cfg);
 
 // Once per frame, from the frame boundary: the warm compile when wanted,
-// and the NGX warm-up (advanced.temporal_aa_warm) once its gates open.
+// and the NGX warm-up once its gates open.
 void temporalPassTick(ID3D11DeviceContext* ctx);
 
 // The native temporal channel's game device and render thread, once one
@@ -94,15 +94,10 @@ void temporalPassFrameBoundary();
 // write was the block bound at the scene's first draw. Valid at any boundary that runs before temporalPassFrameBoundary (the census's does); render thread.
 bool temporalPassChosenRows(float rows[12], bool* bound);
 
-// hotkey.dump_eyes, and the settings menu's "Dump both eyes as seen": the
-// sixteen paired raw/treated left-eye crops, a whole treated overview,
-// and per-eye motion metadata in edvr_logs\eyes. The paired run is the
-// default; advanced.eye_run_paired=0 keeps the older single-run selection.
+// hotkey.dump_eyes, and the settings menu's "Dump both eyes as seen": arms the
+// diagnostics that ride one armed frame (the draw census, the object ledger,
+// the pixel probe). No eye images are written.
 void temporalPassArmEyeDump();
-// Active eye-run diagnostic only, after the final crisp composition and before
-// the runtime's menu. region is the actual returned texture's unflipped bounds.
-void temporalPassCaptureFinalEye(uint64_t sequence, uint32_t eye, ID3D11Texture2D* texture,
-                                 const uint32_t region[4], bool composite, bool flipU, bool flipV);
 
 // The pass wants the scanner-chrome tracker (vscreen.cpp, beginPanelOverride)
 // running whenever it is on: the FSS's interface takes the head's path
@@ -188,27 +183,23 @@ bool temporalPassUiResolveTotals(uint64_t* dispatches, uint64_t lacked[3]);
 bool temporalPassTrainedTotals(uint32_t* frames, double* avgMs, double* maxMs, uint32_t* resets,
                                const char** engineLabel, bool* amd);
 
-// The same price, split by which of the three independent NGX features
-// paid it (the full frame, the fovea's centre crop, the steady periphery)
-// and by eye (0 left, 1 right), so a display can show a real per-eye
-// figure instead of the pooled average above mislabeled as one. False
-// when that role/eye has not evaluated yet.
+// The same price, split by eye (0 left, 1 right), so a display can show a
+// real per-eye figure instead of the pooled average above mislabeled as one.
+// False when that eye has not evaluated yet.
 bool temporalPassDlaaFullTotals(int eye, uint32_t* frames, double* avgMs, double* maxMs);
-bool temporalPassDlaaCentreTotals(int eye, uint32_t* frames, double* avgMs, double* maxMs);
-bool temporalPassDlaaPeripheryTotals(int eye, uint32_t* frames, double* avgMs, double* maxMs);
 
-// Stage 0 price report (docs/foveated-dlss-design-2026-09-14.md): the last
+// Stage 0 price report: the last
 // CLOSED window's per-region median milliseconds, stereo-pair-summed, in
-// the fixed order prep/reduce/periphery/centre/full/compose/ui -- the same
+// the fixed order prep/full/ui -- the same
 // order as kRegionNames in temporal_pass.cpp -- plus "other" (the pair's
-// total less the sum of those seven), how many stereo pairs the window
+// total less the sum of those three), how many stereo pairs the window
 // covered, and how many pairs/calls it dropped before pricing (unmeasured
 // pairs, lone eyes, no-slot frames and region-lease failures, summed).
 // A window closes every 600 pairs, or sooner on a treatment, output
 // size/format, or live temporal_aa_* setting change. False until one
-// window has closed this session; regionMedianMs must hold 7 doubles.
+// window has closed this session; regionMedianMs must hold 3 doubles.
 // droppedTotal may be null.
-bool temporalPassPriceWindow(double regionMedianMs[7], double* otherMedianMs,
+bool temporalPassPriceWindow(double regionMedianMs[3], double* otherMedianMs,
                               uint32_t* pairs, uint32_t* droppedTotal);
 
 // The scene's near and far planes the last treat decoded depth with (the
@@ -240,8 +231,7 @@ extern "C" {
 //            far right and down from the unjittered grid). The current
 //            sample is a small jitter-aware Gaussian over the 3x3 around
 //            the pixel, and the clip's moments are weighted the same way
-//            (the shader says why); advanced.temporal_aa_current = raw
-//            restores the point sample for an A/B.
+//            (the shader says why).
 // deltaHead: 9 floats, row-major, the rotation taking this frame's view
 //            directions to last frame's (temporalHeadDelta); may be null.
 // headTrans: 3 floats, the translation term of the depth reprojection for

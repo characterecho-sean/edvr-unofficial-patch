@@ -1,6 +1,6 @@
 // The resolver's explicit context-state block: the game's whole pipeline state taken out of the context by Get calls and put
 // back by Set calls, for a device whose ID3D11DeviceContext1::SwapDeviceContextState aborts the process (DXMT, the D3D11-to-Metal
-// layer under CrossOver). docs\macos-dxmt-2026-09-30.md has the evidence; flat_context_isolation.h decides which isolation a
+// layer under CrossOver). docs\macos-dxmt-2026-09-30.md has the evidence; flat_isolation_mode.h decides which isolation a
 // device gets and how a DXMT device is told.
 //
 // WHY. The resolver isolates the game's state from its own work and from its backends' (NGX's DLSS, the FSR 3.1 port): the

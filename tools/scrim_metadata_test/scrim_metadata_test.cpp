@@ -125,7 +125,6 @@ int main() {
 
         edvr::Config& config = edvr::Config::get();
         config.set("fix.loading_dim", "screen");
-        config.set("advanced.loading_dim_level", "0");
         edvr::scrimConfigure(config);
         check(edvr::scrimWantsDraws(), "scrim enabled");
 

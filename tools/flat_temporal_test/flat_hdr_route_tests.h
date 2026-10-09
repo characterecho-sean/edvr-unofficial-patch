@@ -1596,8 +1596,6 @@ inline int flatHdrRouteTests() {
         const std::string runtime = slurpSource("src/d3d11/flat_runtime.cpp");
         const std::string menu = slurpSource("src/d3d11/menu.cpp");
         expect(!runtime.empty() && !menu.empty(), "the runtime and menu sources are readable from the repo root");
-        expect(count(runtime, "Config::get().getString(\"experimental.temporal_aa_before_post\", \"auto\")") == 1,
-               "the route's key falls back to auto when the file has no line");
         expect(count(runtime, "flatHdrTriggerSeen(sel,") == 1 &&
                    count(runtime, "sel.mixedCamera?FlatMonoResolveMode::Taa:s.engine);") == 0 &&
                    count(runtime, "flatFrameSeenFor(") == 1 &&

@@ -22,7 +22,6 @@
 #include <algorithm>
 #include <mutex>
 
-extern "C" void edvrEyeCaptureUntreated(void*, int, const float*);
 
 namespace {
 
@@ -165,17 +164,8 @@ Settings readConfig() {
   // runtime's size, an upscale when the game renders smaller. "dlaa" stays
   // pinned to 1:1 on purpose (menu.cpp's "DLAA, even below HMD Quality 1").
   s.upscale=_stricmp(mode.c_str(),"dlss")==0||_stricmp(mode.c_str(),"fsr")==0;
-  // getBool, as the flat profile reads it (flat_runtime.cpp): 0/false/no/off all mean off in both.
-  s.jitter=c.getBool("experimental.temporal_aa_jitter",true);
-  s.blend=c.getFloat("experimental.temporal_aa_blend",.90f); if(!std::isfinite(s.blend))s.blend=.90f;
-  s.clamp=c.getFloat("experimental.temporal_aa_clamp",1.f); if(!std::isfinite(s.clamp))s.clamp=1.f;
-  s.blend=(std::max)(.5f,(std::min)(.95f,s.blend)); s.clamp=(std::max)(.5f,(std::min)(3.f,s.clamp));
-  const auto m=c.getString("advanced.temporal_aa_motion","depth");
-  s.motion=_stricmp(m.c_str(),"none")==0?0:_stricmp(m.c_str(),"head")==0?1:3;
-  const auto sign=c.getString("advanced.temporal_aa_jitter_sign","as_is"); s.signX=s.signY=1;
-  if(_stricmp(sign.c_str(),"flip_x")==0)s.signX=-1; else if(_stricmp(sign.c_str(),"flip_y")==0)s.signY=-1;
-  else if(_stricmp(sign.c_str(),"flip_both")==0)s.signX=s.signY=-1;
-  s.lag=c.getFloat("advanced.temporal_aa_jitter_lag",0)>=.5f; return s;
+  // The shipped values: jitter on, blend .90, clamp 1.0, depth-derived motion, the jitter sign as is, no lag.
+  s.jitter=true; s.blend=.90f; s.clamp=1.f; s.motion=3; s.signX=s.signY=1; s.lag=false; return s;
 }
 void reset(State& s) {
   for(auto& h:s.history) h={}; s.treated[0]=s.treated[1]=false;
@@ -283,7 +273,7 @@ ID3D11Texture2D* blankFrame(State& s,unsigned eye,uint32_t w,uint32_t h,DXGI_FOR
   mine.texture=texture;mine.w=w;mine.h=h;mine.format=format;return texture;
 }
 // The layer-only door: the UI layer holds this eye's whole picture this frame -- the VR world route's layer re-issued the
-// eye's screen draw, or (experimental.on_foot_maps_sharp) the layer took a map's or a menu's 2D screen and nothing else was
+// eye's screen draw, or (the on-foot maps path) the layer took a map's or a menu's 2D screen and nothing else was
 // drawn into an eye-sized target (uiLayerDoorLayerOnly asks both) -- so no upscaler runs for it: the door hands on a black
 // frame of the size the upscaler's output would have had, tells the layer it was the pass's (so the layer arms for the
 // next frame), and leaves the eye's history alone (a later eye-route frame sees the continuity broken and resets it).
@@ -312,7 +302,7 @@ bool layerOnlyTreat(State& s,uint64_t seq,unsigned eye,uint32_t outW,uint32_t ou
   edvr::uiLayerNoteTemporal(seq,eye,frame);
   ++s.layerOnly;
   if(!s.layerOnlyNoted){s.layerOnlyNoted=true;edvr::Log::get().note("native temporal: LAYER-ONLY engaged, eye %u, sequence %llu: the UI layer "
-      "holds the whole eye (the VR world route's resolved world, or a map's or a menu's 2D screen under experimental.on_foot_maps_sharp), "
+      "holds the whole eye (the VR world route's resolved world, or a map's or a menu's 2D screen on foot), "
       "so no upscaler runs for it -- a black %ux%u frame is handed on and the layer is composited over it (the eye's history is left "
       "alone).",eye,(unsigned long long)seq,outW,outH);}
   return true;
@@ -352,7 +342,7 @@ HRESULT WINAPI begin(void* p,const EdvrNativeTemporalFrame* f,EdvrNativeTemporal
   // The eye shift is advertised every frame -- except while the VR world route owns the world (vr_world_route.h: a
   // lock-free read of what the last frame boundary left): an owned world is resolved once, in the game's flat
   // image, the layer holds each eye's screen, and an eye shift with no eye pass to resolve it would be a shimmer.
-  // With experimental.temporal_aa_on_foot_world off the route never owns anything and this is what it always was.
+  // While the route owns nothing this is what it always was.
   if(s->currentSettings.on&&!s->standDown&&s->currentSettings.jitter&&!edvr::vrWorldRouteOwnsNextFrame()) for(int e=0;e<2;++e) if(s->width[e]&&s->height[e]&&!s->flipped[e]) {
     edvr::temporalJitter(s->frameCounter,&jx,&jy); float dx=0,dy=0;
     edvr::temporalJitterToTangents(jx,jy,s->frusta[e],s->width[e],s->height[e],&dx,&dy);
@@ -403,7 +393,7 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
     if(!s->flippedNoted){s->flippedNoted=true;edvr::Log::get().note("native temporal: flipped eye bounds pass through; temporal reprojection for flipped inputs remains pending.");}
     s->history[eye]={};
   }
-  if(!s->currentSettings.on||s->standDown||flipU||flipV){edvrEyeCaptureUntreated(source,int(eye),b);s->treated[eye]=true;return S_FALSE;}
+  if(!s->currentSettings.on||s->standDown||flipU||flipV){s->treated[eye]=true;return S_FALSE;}
   if(!s->projectionKnown[eye]||s->projectionSequence[eye]!=seq){
     if(s->missingProjections++<4)edvr::Log::get().note("native temporal: eye %u sequence %llu has no matrix query for this frame; history invalidated.",eye,(unsigned long long)seq);
     s->treated[eye]=true;s->history[eye]={};

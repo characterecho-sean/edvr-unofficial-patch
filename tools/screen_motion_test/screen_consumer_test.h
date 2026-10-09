@@ -67,9 +67,6 @@ void testScreenConsumers(ID3D11Device* dev,ID3D11DeviceContext* ctx) {
     floats("dR0",1,0,0,0);floats("dR1",0,1,0,0);floats("dR2",0,0,1,0);
     floats("knobs",0,1,.025f,0);floats("jit",.25f,-.375f,0,.5f);
     floats("holoJitter",.25f,-.375f,1,0);
-    // A deliberately wrong eye-space depth predecessor would reject every
-    // screen pixel if its mover mask survived the screen override.
-    floats("movers",1,.1f,1,0);
     D3D11_BUFFER_DESC bd{};bd.ByteWidth=pd.Size;bd.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
     ComPtr<ID3D11Buffer> cb;hr(dev->CreateBuffer(&bd,nullptr,&cb));
     auto texture=[&](UINT n,DXGI_FORMAT fmt,UINT bind){
@@ -120,7 +117,7 @@ void testScreenConsumers(ID3D11Device* dev,ID3D11DeviceContext* ctx) {
             float mx=screen?(valid!=2?1.0f:16.0f):0.0f,my=screen?(valid!=2?-1.0f:16.0f):0.0f;
             check(std::fabs(m[2*i]-mx)<1e-5f && std::fabs(m[2*i+1]-my)<1e-5f,"DLSS consumes screen motion once with correct jitter and coverage");
             check(std::fabs(d[i]-(screen?.005f:.25f))<1e-6f,"DLSS consumes exact source depth only inside screen");
-            if(screen)check(k[i]==0,"screen bypasses unrelated eye-space mover rejection");
+            if(screen)check(k[i]==0,"screen pixels keep a clear reject mask");
             const UINT bits=UINT(decisions[4*i+3]+.5f);
             if(screen) {
                 check((bits&15u)==10u,"trace labels the final screen path");
@@ -167,7 +164,6 @@ void testScreenConsumers(ID3D11Device* dev,ID3D11DeviceContext* ctx) {
     std::vector<float> coveragePixels(16*16*2,0);
     coveragePixels[(7*16+6)*2]=1;coveragePixels[(7*16+6)*2+1]=.000025f;
     ctx->UpdateSubresource(coverage.Get(),0,nullptr,coveragePixels.data(),16*8,0);
-    floats("movers",0,.03f,1,0);
     floats("dR0",1,0,-.5f,0); // two input pixels horizontally
     floats("holoJitter",.75f,.25f,1,1);
     for(int variant=0;variant<3;++variant) {

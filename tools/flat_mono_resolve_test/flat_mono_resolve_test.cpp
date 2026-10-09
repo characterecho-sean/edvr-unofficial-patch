@@ -6,7 +6,7 @@
 #include "../../src/d3d11/fsr3_engine.h"
 #include "../../src/d3d11/engine_velocity_emit.h"
 #include "../../src/d3d11/flat_hdr_crumbs.h"
-#include "../../src/d3d11/flat_context_isolation.h"
+#include "../../src/d3d11/flat_isolation_mode.h"
 #include "../../src/d3d11/flat_context_state.h"
 #include "../hdr_crumb_trail.h"
 #include <d3d11_1.h>
@@ -29,7 +29,7 @@ bool backendFail=false,backendReset=false,infiniteSeen=false;
 std::vector<std::string> resetEvents;
 // What the HDR route's breadcrumbs (flat_hdr_crumbs.h) were handed to breadcrumb(), in order: the lines edvr_breadcrumbs.txt would hold.
 std::vector<std::string> crumbLines;
-// The resolver's one log line per initialisation that says which isolation it chose (flat_context_isolation.h), in order.
+// The resolver's one log line per initialisation that says which isolation it chose (flat_isolation_mode.h), in order.
 std::vector<std::string> isolationLines;
 // Set by flat_context_isolation_gpu_tests.h: what the stub backend leaves bound, after its own ClearState. Null dirties nothing.
 void (*backendDirtyHook)(ID3D11DeviceContext*)=nullptr;

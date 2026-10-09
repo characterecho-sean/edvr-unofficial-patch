@@ -152,7 +152,7 @@ void calibrationMathCases() {
 // ---- 2/3: rotation (one active section, the K cap) and a real WARP round trip
 void rotationAndRealTimerCase(Device& d) {
     check(gpuTimingBind(d.dev.Get(), d.ctx.Get()), "bind canonical WARP timer owner");
-    check(occurrenceCapFor(GpuCensusSection::DoorSharpen) == 4, "K cap: a door section caps at 4 (both eyes, two fovea crops each)");
+    check(occurrenceCapFor(GpuCensusSection::DoorSharpen) == 4, "K cap: a door section caps at 4 (both eyes, two occurrences each)");
     check(occurrenceCapFor(GpuCensusSection::FrameUiLayerReissues) == 8, "K cap: a per-draw section caps at 8");
     check(isDoorSection(GpuCensusSection::DoorFssHeal), "section split: the last door section is still door");
     check(!isDoorSection(GpuCensusSection::FrameHologramPasses), "section split: the first in-frame section is not door");

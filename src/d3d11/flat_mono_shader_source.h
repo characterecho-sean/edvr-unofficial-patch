@@ -384,7 +384,7 @@ void taa(uint3 id:SV_DispatchThreadID) {
     float3 mixed=lerp(cur,clamp(history,lo,hi),weight);
     OutColor[id.xy]=float4(hdr?hdrExpand(mixed):mixed,current.a);
 }
-// The refusal view (advanced.temporal_aa_debug = motion_source; debug.y): the prep's class, painted in the eye path's colours
+// The refusal view (debug.y): the prep's class, painted in the eye path's colours
 // (temporal_shader_source.h, the motion_source view), by the HDR route's finish and by the copy route's. On the HDR route the
 // picture is H, which the game's tone pass reads next, so each colour is scaled by the pixel's own level (twice its luma, never below
 // .04): the hue survives the tone pass, the absolute value does not. green 1 joined, red 2 masked, blue 3 not a rig record, yellow 4

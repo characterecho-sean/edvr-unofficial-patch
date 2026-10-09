@@ -504,7 +504,7 @@ struct Scene {
     const char* name = "";
     uint32_t seed = 0;
     int regX = 0, regY = 0; // this eye's region inside the texture: never the origin
-    bool ui = false;        // UM, UP and ZP bound, coverage on, mover mask on, DLSS depth history valid
+    bool ui = false;        // UM, UP and ZP bound, coverage on, DLSS depth history valid
     float depthA = 0.0f;    // knobs.x
     std::vector<float> s, z, tz;        // texture-sized (s is RGBA)
     std::vector<uint32_t> ti;           // texture-sized
@@ -904,12 +904,11 @@ struct Cfg {
     int knobsY;    // knobs.y: 1 = depth bound
     int tvCamW;    // tvCam.w: 1 = the world (camera) path is on
     int probeW;    // probe.w bits (never 8 in the A/B)
-    int splitY;    // split.y: the debug view
 };
 
 std::string cfgText(const Cfg& c) {
     char b[96];
-    std::snprintf(b, sizeof(b), "knobs.y=%d tvCam.w=%d probe.w=%d split.y=%d", c.knobsY, c.tvCamW, c.probeW, c.splitY);
+    std::snprintf(b, sizeof(b), "knobs.y=%d tvCam.w=%d probe.w=%d", c.knobsY, c.tvCamW, c.probeW);
     return b;
 }
 
@@ -953,26 +952,19 @@ std::vector<char> buildParams(const Layout& L, const Scene& sc, const Cfg& c) {
     f4("tvUsed", 0.012f, -0.007f, 0.020f, 1.0f);     // non-trivial head translation; w = 1: main uses depth
     f4("tvCand", -0.030f, 0.002f, 0.010f, 0.0f);
     f4("tvCam", 0.35f, -0.12f, 0.90f, static_cast<float>(c.tvCamW));
-    f4("split", kSplitMetres, static_cast<float>(c.splitY), 0.0f, 0.0f);
-    f4("fovea0", 0, 0, 0, 0);                        // fovea off, skip empty
-    f4("fovea1", 0, 0, 0, 0);
-    f4("movers", sc.ui ? 1.0f : 0.0f, 0.05f, 0.8f, 1.0f);   // w = 1: main writes ZC
+    f4("split", kSplitMetres, 0.0f, 0.0f, 0.0f);
     f4("probe", 1.0f, 1.0f, sc.ui ? 1.0f : 0.0f, static_cast<float>(c.probeW));
     f4("holoJitter", sc.ui ? 0.15f : 0.0f, sc.ui ? -0.10f : 0.0f, sc.ui ? 1.0f : 0.0f, sc.ui ? 1.0f : 0.0f);
-    f4("skip", 0, 0, 0, 0);
-    f4("lead", 0, 0, 0, 0);
     return cb;
 }
 
 std::vector<Cfg> makeConfigs(const Scene& sc, bool isMain) {
     std::vector<int> bits = {0, 1, 2, 128};     // bit 8 is clear in every one
     if (sc.ui) { bits.push_back(4 | 2); bits.push_back(4 | 2 | 1); bits.push_back(4 | 128); }
-    const std::vector<int> views = isMain ? std::vector<int>{1, 2, 3, 6} : std::vector<int>{1, 3, 6};
     std::vector<Cfg> v;
     for (int ky : {1, 0})
         for (int tw : {1, 0}) {
-            for (int pw : bits) v.push_back({ky, tw, pw, 0});
-            for (int sy : views) v.push_back({ky, tw, 0, sy});
+            for (int pw : bits) v.push_back({ky, tw, pw});
         }
     return v;
 }
@@ -1026,7 +1018,6 @@ void abMatrix(Rig& R, const char* label, Scene& sc, bool isMain, bool diagnostic
     bindScene(R, sc);
     const std::vector<Cfg> cfgs = makeConfigs(sc, isMain);
     const auto t0 = Clock::now();
-    int moverSeen = 0;
     std::string facts;   // what the first configuration's counters say the shader did
     for (const Cfg& c : cfgs) {
         require((c.probeW & 8) == 0, "the A/B runs with probe.w bit 8 clear");
@@ -1048,7 +1039,6 @@ void abMatrix(Rig& R, const char* label, Scene& sc, bool isMain, bool diagnostic
             const bool world = c.knobsY == 1 && c.tvCamW == 1;
             check((statAt(a, 15) > 0) == world, where + ": the world path's pixel count (Stats[15] = " + std::to_string(statAt(a, 15)) +
                                                      ") does not match what the configuration asks for");
-            if (sc.ui && statAt(a, 28) > 0) ++moverSeen;
             if (facts.empty()) {   // the first configuration: knobs.y 1, tvCam.w 1, probe.w 0
                 char b[256];
                 const unsigned probes = statAt(a, 20) + statAt(a, 23) + statAt(a, 32);
@@ -1057,15 +1047,13 @@ void abMatrix(Rig& R, const char* label, Scene& sc, bool isMain, bool diagnostic
                                                 "%u bright, %u registration probes",
                                   statAt(a, 15), kW * kH, statAt(a, 0), statAt(a, 1), statAt(a, 16), probes);
                 else
-                    std::snprintf(b, sizeof(b), "       first configuration: %u of %d pixels on the world path, mover mask on %u, %u bright, "
+                    std::snprintf(b, sizeof(b), "       first configuration: %u of %d pixels on the world path, %u bright, "
                                                 "%u registration probes",
-                                  statAt(a, 15), kW * kH, statAt(a, 28), statAt(a, 16), probes);
+                                  statAt(a, 15), kW * kH, statAt(a, 16), probes);
                 facts = b;
             }
         }
     }
-    if (diagnostics && sc.ui)
-        check(moverSeen > 0, std::string(label) + " scene " + sc.name + ": the mover mask never fired (Stats[28] stayed 0)");
     std::printf("  %-10s scene %-2s %3zu configs x (NEW, NEW again, OLD) x 8 outputs: OLD == NEW bit for bit  [%.1f s]\n",
                 label, sc.name, cfgs.size(), secondsSince(t0));
     if (!facts.empty()) std::printf("%s\n", facts.c_str());
@@ -1080,7 +1068,7 @@ void terrainControl(Rig& R, Scene& sc, bool isMain, const Shaders& sh, const Lay
     double worst = 0.0;
     for (int tw : {1, 0}) {
         for (int base : {0, 1}) {
-            const Cfg off{1, tw, base, 0}, on{1, tw, base | 8, 0};
+            const Cfg off{1, tw, base}, on{1, tw, base | 8};
             const std::vector<char> pOff = buildParams(L, sc, off), pOn = buildParams(L, sc, on);
             const Outputs a = run(R, sh.oldCs.Get(), pOff);
             const Outputs b = run(R, sh.oldCs.Get(), pOn);
@@ -1352,7 +1340,7 @@ int main(int argc, char** argv) {
         std::printf("  scene %s: seed 0x%X, %dx%d region at (%d, %d) in a %dx%d texture, knobs.x %g; TI != 0 on %zu of %zu pixels, "
                     "the old gate admits %zu%s\n",
                     sc.name, sc.seed, kW, kH, sc.regX, sc.regY, kTexW, kTexH, static_cast<double>(sc.depthA), terrain,
-                    static_cast<size_t>(kW) * kH, gate, sc.ui ? "; UM, UP, ZP bound, mover mask on, DLSS depth history valid" : "");
+                    static_cast<size_t>(kW) * kH, gate, sc.ui ? "; UM, UP, ZP bound, DLSS depth history valid" : "");
     }
     std::fflush(stdout);
 

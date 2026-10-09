@@ -1643,42 +1643,25 @@ void buildStatus(MenuContent& c) {
         uint32_t n = 0, resets = 0;
         double avg = 0.0, mx = 0.0, rej = 0.0, clip = 0.0;
         uint32_t rn = 0;
-        double rmx = 0.0, fullL = 0.0, fullR = 0.0, centreL = 0.0, centreR = 0.0,
-               periphL = 0.0, periphR = 0.0;
+        double rmx = 0.0, fullL = 0.0, fullR = 0.0;
         const bool haveFull = temporalPassDlaaFullTotals(0, &rn, &fullL, &rmx) &&
                               temporalPassDlaaFullTotals(1, &rn, &fullR, &rmx);
-        const bool haveCentre = temporalPassDlaaCentreTotals(0, &rn, &centreL, &rmx) &&
-                                temporalPassDlaaCentreTotals(1, &rn, &centreR, &rmx);
-        const bool havePeriph = temporalPassDlaaPeripheryTotals(0, &rn, &periphL, &rmx) &&
-                                temporalPassDlaaPeripheryTotals(1, &rn, &periphR, &rmx);
-        // The current engine, not whichever one has a count (F6). The three
-        // per-role figures above are NGX's alone, and they keep answering
+        // The current engine, not whichever one has a count (F6). The
+        // per-eye figures above are NGX's alone, and they keep answering
         // after a live switch to fsr -- so they are shown only while NVIDIA
         // is the engine in force.
         const char* engineWord = "NVIDIA";
         bool amdEngine = false;
         const bool haveTrained =
             temporalPassTrainedTotals(&n, &avg, &mx, &resets, &engineWord, &amdEngine) && n;
-        if (!amdEngine && (haveFull || haveCentre || havePeriph)) {
-            // Per role, per eye: the pooled figure below mixed roles and eyes
+        if (!amdEngine && haveFull) {
+            // Per eye: the pooled figure below mixed eyes
             // into one number and called it "ms/eye", which it was not.
             size_t len = static_cast<size_t>(snprintf(buf, sizeof(buf), "%s, NVIDIA", mode.c_str()));
             if (len >= sizeof(buf)) len = sizeof(buf) - 1;
-            if (haveFull) {
-                len += static_cast<size_t>(snprintf(buf + len, sizeof(buf) - len,
-                                                    " L %.2f R %.2f ms", fullL, fullR));
-                if (len >= sizeof(buf)) len = sizeof(buf) - 1;
-            }
-            if (haveCentre) {
-                len += static_cast<size_t>(snprintf(buf + len, sizeof(buf) - len,
-                                                    " centre L %.2f R %.2f ms", centreL, centreR));
-                if (len >= sizeof(buf)) len = sizeof(buf) - 1;
-            }
-            if (havePeriph) {
-                len += static_cast<size_t>(snprintf(buf + len, sizeof(buf) - len,
-                                                    " periphery L %.2f R %.2f ms", periphL, periphR));
-                if (len >= sizeof(buf)) len = sizeof(buf) - 1;
-            }
+            len += static_cast<size_t>(snprintf(buf + len, sizeof(buf) - len,
+                                                " L %.2f R %.2f ms", fullL, fullR));
+            if (len >= sizeof(buf)) len = sizeof(buf) - 1;
         } else if (haveTrained) {
             snprintf(buf, sizeof(buf), "%s, %s %.2f ms/eye", mode.c_str(), engineWord, avg);
         } else if (temporalPassTotals(&n, &avg, &mx, &rej, &clip) && n) {
@@ -1689,21 +1672,18 @@ void buildStatus(MenuContent& c) {
         statusLine(c, "Temporal AA", buf);
     }
     {
-        // Stage 0 price report (docs/foveated-dlss-design-2026-09-14.md):
-        // the last CLOSED window's per-region median, stereo-pair-summed.
+        // Stage 0 price report: the last CLOSED window's per-region median, stereo-pair-summed.
         // Absent until 600 pairs have run once, or a treatment/size/format/
         // setting change closed a shorter window early.
-        double regionMs[7] = {};
+        double regionMs[3] = {};
         double otherMs = 0.0;
         uint32_t pairs = 0;
         uint32_t dropped = 0;
         if (temporalPassPriceWindow(regionMs, &otherMs, &pairs, &dropped)) {
             snprintf(buf, sizeof(buf),
-                     "%u pairs, median ms prep %.2f reduce %.2f periphery %.2f "
-                     "centre %.2f full %.2f compose %.2f ui %.2f other %.2f, "
+                     "%u pairs, median ms prep %.2f full %.2f ui %.2f other %.2f, "
                      "%u dropped",
-                     pairs, regionMs[0], regionMs[1], regionMs[2], regionMs[3],
-                     regionMs[4], regionMs[5], regionMs[6], otherMs, dropped);
+                     pairs, regionMs[0], regionMs[1], regionMs[2], otherMs, dropped);
             statusLine(c, "Temporal AA price", buf);
         }
     }

@@ -36,8 +36,8 @@ second — so tune by eye from there.
   edges come nearer rather than the middle moving away. The image itself is
   untouched — the same texels, on bent geometry.
 
-**With the VR on-foot world route** (`experimental.temporal_aa_on_foot_world =
-auto`, its default since 2026-10-01; design-flat-temporal-aa-2026-09-23.md,
+**With the VR on-foot world route** (always selected automatically since the
+2026-10 key cull; design-flat-temporal-aa-2026-09-23.md,
 section 82, "The curved route") the curve stays on. The route hands each eye its own resolved copy of
 the screen through the UI layer, and for a curved screen the layer draws that
 copy through the very same bent strip the game's own draw uses, by the same code,

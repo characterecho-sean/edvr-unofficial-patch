@@ -29,9 +29,7 @@ namespace edvr {
 class Config;
 
 // Reads fix.temporal_aa (the gate: the interface depth has no key of its own,
-// fix.ui_depth having been retired into it) and the nine advanced.ui_depth_*
-// keys (families, exclude, menus, variants, alpha, reactive, planes, eyes,
-// test). Install and reload; all live.
+// fix.ui_depth having been retired into it). Install and reload; all live.
 void uiDepthConfigure(Config& cfg);
 
 // True while the key is on, the pass is on and nothing stood down: the
@@ -57,7 +55,7 @@ extern bool g_uiDepthOn;
 extern bool g_uiDepthStoodDown;
 extern bool g_uiDepthPlanetPending;
 extern bool g_uiDepthPlanetSolarPending;
-// advanced.temporal_aa_hologram_depth: the generic contribution-based
+// The generic contribution-based
 // coverage below, independent of g_uiDepthOn's own per-family shaders.
 extern bool g_holoDepthOn;
 // Whether the eye draw uiDepthOnEyeDraw last classified samples a learned
@@ -100,7 +98,7 @@ void uiDepthNoteOffscreenDraw(ID3D11DeviceContext* ctx);
 //     -1 for none -- always -1 while this pass is off or stood down, since
 //     it learns nothing then;
 //   - which eye a colour target is: eyeIndexFor's per-frame table, first
-//     target of a shape = left, advanced.ui_depth_eyes = swapped applied --
+//     target of a shape = left --
 //     SHARED, so the layer and this pass can never disagree about an eye.
 //     -1 for a third target of one shape, or a full table.
 int uiDepthSampledSurfaceSlot();
@@ -116,7 +114,7 @@ int uiDepthEyeOfTarget(const void* res, uint32_t w, uint32_t h, uint32_t fmt);
 int uiDepthEyeOfTargetReadOnly(const void* res);
 // ...and a third: is this vertex shader on the interface pass's exclude list
 // (the null-output mesh B018D143700AB803 that samples a stale surface
-// binding, plus advanced.ui_depth_exclude)? A draw this pass will never treat
+// binding)? A draw this pass will never treat
 // as interface is not the layer's either.
 bool uiDepthIsExcluded(uint64_t vsHash);
 
@@ -204,20 +202,14 @@ bool uiDepthPlanetBegin(ID3D11DeviceContext* ctx);
 void uiDepthPlanetEnd(ID3D11DeviceContext* ctx);
 void uiDepthReissueEnd(ID3D11DeviceContext* ctx);
 
-// Coverage also supports UI history decisions. It is marked at zero fixed
-// bias and under native TAA. The temporal pass keeps per-eye raw UI colour
-// and coverage, aligns it with UI motion, and rejects detected changes.
-// Stable strokes can accumulate; new, erased or recoloured strokes favour
-// the current frame. This is independent of the legacy fixed NVIDIA bias.
+// Coverage supports UI history decisions. The temporal pass keeps per-eye
+// raw UI colour and coverage, aligns it with UI motion, and rejects detected
+// changes. Stable strokes can accumulate; new, erased or recoloured strokes
+// favour the current frame. There is no fixed NVIDIA bias.
 //
-// The legacy fixed-bias texture: null at zero strength, with no marked
-// coverage, or when the requested dimensions do not match.
-bool uiDepthReactiveMask(uint32_t w, uint32_t h, int eye, ID3D11Texture2D** tex);
-
-// Motion classification exists independently of NVIDIA reactivity. The
-// R8 value's low two bits are 1 floating UI, 2 attached UI, 3 smoke;
-// its upper six bits carry fixed bias. Classification remains at zero
-// fixed bias and under native TAA. Smoke is not adaptive UI evidence.
+// Motion classification: the R8 value's low two bits are 1 floating UI,
+// 2 attached UI, 3 smoke; its upper six bits are zero. Smoke is not
+// adaptive UI evidence.
 bool uiDepthCoverageMask(uint32_t w, uint32_t h, int eye, ID3D11Texture2D** tex);
 // Borrowed current-frame R8 edit coverage for the post-DLSS UI resolve.
 ID3D11ShaderResourceView* uiDepthContentChanges(uint32_t w, uint32_t h, int eye);
@@ -264,23 +256,16 @@ inline void uiDepthMotionResourceWritten(ID3D11Resource* resource,uint64_t first
         uiDepthMotionResourceWrittenImpl(resource, first, end);
 }
 
-// The strength the interface proper is marked at (advanced.ui_depth_reactive;
-// 0 = no fixed NVIDIA bias; motion classification and adaptive history remain).
-// HUD strokes use half this strength. Coverage shaders choose motion class
-// separately: opaque HUD cores drawn at a surface can ride its motion.
-float uiDepthReactive();
-
-// The post-DLSS UI-resolve clamp's bound tolerance (advanced.ui_ghost_tolerance),
-// in 8-bit colour steps (0..64, default 12). The temporal pass widens the
+// The post-DLSS UI-resolve clamp's bound tolerance (12),
+// in 8-bit colour steps. The temporal pass widens the
 // exact 2x2 raw bound by this much so an ordinary DLSS reconstruction offset
 // on the star corona does not trip the clamp, while a departed glyph well
 // beyond the tolerance is still pulled back to within it (issue 36). Zero
-// like uiDepthReactive() when the pass is off or stood down.
+// when the pass is off or stood down.
 float uiDepthGhostTolerance();
 
-// The corona-smear hold's brightness limit (advanced.corona_smear_level),
-// normalised to [0,1], 0 = off; always on under the temporal pass,
-// advanced.corona_smear_level = 0 turns it off. The post-DLSS UI
+// The corona-smear hold's brightness limit (64 colour steps),
+// normalised to [0,1]; always on under the temporal pass. The post-DLSS UI
 // resolve holds faint, flat, non-UI pixels within one step of the raw 2x2
 // range up to this brightness, the way uiDepthGhostTolerance() already
 // holds UI pixels near the frame's own colours (issue 36). Zero like

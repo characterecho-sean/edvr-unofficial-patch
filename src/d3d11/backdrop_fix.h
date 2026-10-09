@@ -78,10 +78,7 @@ namespace edvr {
 
 class Config;
 
-// Reads fix.menu_backdrop (stock | smooth | splash),
-// advanced.menu_backdrop_threshold
-// and advanced.menu_backdrop_dither. Install and reload; the tunables are
-// live, and changing either rebuilds the still at the next matched draw.
+// Reads fix.menu_backdrop (stock | smooth | splash). Install and reload.
 void backdropConfigure(Config& cfg);
 
 // False in stock mode, which keeps the per-draw path free when off.

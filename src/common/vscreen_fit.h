@@ -9,7 +9,7 @@
 // WHY. On foot Elite draws the world once, flat, into the 2D screen's target and shows it to each eye as a panel. That
 // target's size is fix.vscreen_res_width: 5040x2835 on a 4032 px eye (125% of the eye, the legacy rule). The 125%
 // oversample exists because nothing anti-aliases the on-foot world before it reaches the panel. With the VR world route
-// running (experimental.temporal_aa_on_foot_world = auto) the world is RESOLVED at the screen's size and shown to the eye
+// running the world is RESOLVED at the screen's size and shown to the eye
 // through mips, so a width past what the eye can show only costs: the game renders every on-foot pixel of it (G-buffer,
 // depth, HDR, HUD) and the route resolves and mips it. Sean flew 4032 ("looks fine") and 3504 ("looks great still")
 // with the route on. So when the route will run, the width is a share of the screen's own footprint in eye pixels, A: the
@@ -33,9 +33,7 @@
 // rig the 3504 he chose.
 //
 // THE ROUTE'S CONDITIONS at launch (all three, plus what the layer itself needs):
-//   * experimental.temporal_aa_on_foot_world is auto (its default since 2026-10-01; the resolver's fallback in
-//     vscreen_res.cpp, the route's in vr_world_route.cpp and the shipped edvr.ini say the same, and tools\config_test and
-//     tools\vscreen_fit_test hold them to one answer)
+//   * the on-foot world route is on (it always is now; the fact stays so the verdict keeps its shape)
 //   * the UI layer is live: fix.ui_quality is not off, and a temporal mode is on (the layer composites at that pass's door)
 //   * the runtime is EDVR's own OpenXR (not Elite's native Oculus back end, not a foreign openvr_api.dll)
 // and the flat profile never fits (the world route is a VR route).
@@ -157,10 +155,7 @@ inline double sanitizeDistance(double d) {
 inline bool plausibleFraction(double f) { return f >= kMinFraction && f <= kMaxFraction && std::isfinite(f); }
 
 // ---- the route's conditions ----------------------------------------------------------------------------------------------
-// experimental.temporal_aa_on_foot_world reads "auto" exactly the way vr_world_route_math.h's vrWorldKeyFromText reads it:
-// the text is "auto" in any case and nothing else (a typo is off, never auto). Spelled out here rather than included so the
-// resolver's translation unit does not pull the route's header chain in; tools\vscreen_fit_test compares the two over a
-// table of spellings, so a change to either one fails the build.
+// A setting text reads "auto" when it is "auto" in any case and nothing else (a typo is never auto).
 inline bool keyTextIsAuto(const char* text) {
     if (!text) return false;
     const char* a = "auto";
@@ -181,7 +176,7 @@ enum class RuntimeKind : uint8_t {
 
 struct RouteFacts {
     bool flatProfile = false;
-    bool keyAuto = false;            // experimental.temporal_aa_on_foot_world reads "auto"
+    bool keyAuto = false;            // the on-foot world route is on
     const char* layerWhy = nullptr;  // nullptr: the UI layer would be live; else uiLayerNotLiveReasonFor's line
     RuntimeKind runtime = RuntimeKind::NotLoadedYet;
 };
@@ -203,7 +198,7 @@ inline void addWhy(RouteVerdict& v, const char* text) {
 inline RouteVerdict routeVerdict(const RouteFacts& f) {
     RouteVerdict v;
     if (f.flatProfile) addWhy(v, "this is the flat profile (the world route is a VR route)");
-    if (!f.keyAuto) addWhy(v, "experimental.temporal_aa_on_foot_world is not auto");
+    if (!f.keyAuto) addWhy(v, "the on-foot world route is off");
     if (f.layerWhy && f.layerWhy[0]) addWhy(v, f.layerWhy);
     if (f.runtime == RuntimeKind::OculusNative)
         addWhy(v, "this session is on Elite's native Oculus back end (EDVR's OpenXR runtime is not driving it)");

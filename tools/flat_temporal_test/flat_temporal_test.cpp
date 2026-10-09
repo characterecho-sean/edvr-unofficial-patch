@@ -2561,7 +2561,7 @@ void testStandDownWiring() {
          "Update's camera witness is Full-only"},
         // Legacy projection readiness, coverage, jitter preparation: released, and created in Full only.
         {&runtimeCpp, "if (s.projection) s.projection.reset();", 1, "the stand-down releases legacy projection readiness"},
-        {&runtimeCpp, "if(wanted && !s.projection && s.work == FlatWork::Full) {", 1,
+        {&runtimeCpp, "if(!s.projection && s.work == FlatWork::Full) {", 1,
          "the Present creates legacy projection readiness in Full frames only"},
         // Engine motion, the camera hook, the discovery observers.
         {&runtimeCpp, "engineVelocityConfigure(enabled && !enginePausedThen);", 1, "the Present hands the pause to engine motion"},

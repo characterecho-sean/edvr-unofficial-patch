@@ -132,8 +132,6 @@ CFG_SPLASH = "    g_matchSplash = mode.screen;\n"
 CFG_SIZE = "    g_size = mode.screen ? 0.0f : 1.0f;   // derived at readback when on\n"
 CFG_LOCK = "    g_worldLock = mode.worldLock;\n"
 CFG_FIRST = "    const float wasSize = g_size;\n"
-DIST_LO = "    if (g_screenDist < 1.0f) g_screenDist = 1.0f;\n"
-DIST_HI = "    if (g_screenDist > 20.0f) g_screenDist = 20.0f;\n"
 FIRST = "    if (!introPanelWants() || !ctx) return false;\n"
 SHAPE = "    if (kind != 'X' || count != 6 || instances != 1) return false;\n"
 RECENTRE = "    if (!g_recentreRequested && !sceneArrived()) {\n"
@@ -208,7 +206,7 @@ MUTANTS = [
     # ---- golden: the bytes of cb2 -----------------------------------------------------------------------------------------------
     M("half-width-4", "golden", [(HALF_W, "constexpr float kScreenHalfW = 4.0f;\n")], "the panel's half-width is 4 units, not the splash's 4.44444"),
     M("half-height-2", "golden", [(HALF_H, "constexpr float kScreenHalfH = 2.0f;\n")], "the panel's half-height is 2 units, not the splash's 2.5"),
-    M("distance-default-3", ("golden", "distance"), [(DIST_DEFAULT, "constexpr float kScreenDistDefault = 3.0f;\n")], "the default distance is 3 m, not 3.35"),
+    M("distance-default-3", ("golden",), [(DIST_DEFAULT, "constexpr float kScreenDistDefault = 3.0f;\n")], "the default distance is 3 m, not 3.35"),
     M("half-ipd-doubled", "golden", [(HALF_IPD, "constexpr float kHalfIpd = 0.063f;\n")], "the eye offset is twice the half-IPD"),
     M("x-axis-mirrored", "golden", [(CX, "        cx[i] = At(i, 0) * kScreenHalfW;\n")], "the panel's +x points to the viewer's right: the picture comes out mirrored"),
     M("y-axis-flipped", "golden", [(CY, "        cy[i] = At(i, 1) * -kScreenHalfH;\n")], "the panel's +y is flipped: the picture comes out upside down"),
@@ -298,8 +296,6 @@ MUTANTS = [
     M("head-locks", ("head", "curved-head"), [(CFG_LOCK, "    g_worldLock = true;\n")], "head mode still holds the panel on the world"),
     M("wants-needs-both", "config", [(WANTS_R, "    return (wantsTransform && introUpscaleWants()) && !g_retired;\n")], "the transform and the resampler must both be wanted"),
     M("wants-ignores-retirement", ("retire-used", "retire-unseen"), [(WANTS_R, "    return (wantsTransform || introUpscaleWants());\n")], "the panel is still wanted after the intro is over"),
-    M("distance-floor-removed", "distance", [(DIST_LO, "")], "the distance may be under a metre"),
-    M("distance-ceiling-removed", "distance", [(DIST_HI, "")], "the distance may be over twenty metres"),
     # ---- stock-off, gates, scene-arrived: what reaches the work ------------------------------------------------------------------
     M("wants-not-asked", "stock-off", [(FIRST, "    if (!ctx) return false;\n")], "an unwanted panel still works the composite"),
     M("null-context", "gates", [(FIRST, "    if (!introPanelWants()) return false;\n")], "a null context reaches the resampler"),

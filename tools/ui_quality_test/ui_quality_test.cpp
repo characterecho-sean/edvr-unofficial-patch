@@ -1228,21 +1228,16 @@ void testFlatLayerRules() {
         flatUiToneProofHud(q, 21, &h2);
         check(!flatUiToneProven(q, 21, &h2), "an H alternating between frames is unproven (identity, not relation: safe, never swallowed)");
     }
-    // Live with the default config (the 2026-10-09 11:08 flight: dead because the flat gate refuses
-    // advanced.temporal_aa_jitter_sign, whose refused getString answers "off", read as "not as shipped").
-    const bool flatShipped = uiLayerJitterAsShippedFor(true, "off", 0.0f);
-    check(flatShipped && uiLayerLiveFor(1.0f, true, flatShipped, false) && !uiLayerNotLiveReasonFor(1.0f, true, flatShipped, false),
-          "flat layer: ui_quality 100 + flat AA with the refused jitter keys reading off -> live, no reason");
-    check(uiLayerJitterAsShippedFor(false, "as_is", 0.0f) && !uiLayerJitterAsShippedFor(false, "off", 0.0f) &&
-              !uiLayerJitterAsShippedFor(false, "flip", 0.0f) && !uiLayerJitterAsShippedFor(false, "as_is", 1.0f) &&
-              !uiLayerJitterAsShippedFor(false, nullptr, 0.0f),
-          "VR: the jitter switches as before (as_is and no lag only)");
+    // Live with the default config (the 2026-10-09 11:08 flight: the flat layer was dead because a refused jitter
+    // key read as "not as shipped"; the jitter is now always as shipped).
+    check(uiLayerLiveFor(1.0f, true, true, false) && !uiLayerNotLiveReasonFor(1.0f, true, true, false),
+          "flat layer: ui_quality 100 + flat AA with the jitter as shipped -> live, no reason");
     {
         std::ifstream layerSrc("src/d3d11/ui_layer.cpp", std::ios::binary), adapterSrc("src/d3d11/flat_ui_layer.cpp", std::ios::binary);
         const std::string layer((std::istreambuf_iterator<char>(layerSrc)), std::istreambuf_iterator<char>());
         const std::string adapter((std::istreambuf_iterator<char>(adapterSrc)), std::istreambuf_iterator<char>());
-        check(!layer.empty() && layer.find("const bool jitterAsShipped = uiLayerJitterAsShippedFor(runtimeFlatProfile(),") != std::string::npos,
-              "wiring: uiLayerConfigure reads the jitter switches through uiLayerJitterAsShippedFor with the flat profile");
+        check(!layer.empty() && layer.find("constexpr bool g_jitterAsShipped = true;") != std::string::npos,
+              "wiring: the layer's jitter is always as shipped");
         check(!adapter.empty() && adapter.find("const char* why = uiLayerNotLiveReason();") != std::string::npos &&
                   adapter.find("strstr") == std::string::npos,
               "wiring: the flat layer's state names the shared not-live reason verbatim (no relabelling)");

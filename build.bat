@@ -328,7 +328,6 @@ python "tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --extra-export edvr_selftest_graphics_bridge ^
     --extra-export edvrFssHealLeft ^
     --extra-export edvrTemporalAa ^
-    --extra-export edvrEyeCaptureUntreated ^
     --extra-export edvrTemporalAaNoteHead ^
     --extra-export edvrSharpen ^
     --extra-export edvrDepthProbeSelftest ^
@@ -544,7 +543,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\fss_res.cpp" ^
     "src\d3d11\fss_panel.cpp" ^
     "src\d3d11\fss_reveal.cpp" ^
-    "src\d3d11\fss_dump.cpp" "src\d3d11\fss_heal.cpp" ^
+    "src\d3d11\fss_heal.cpp" ^
     "src\d3d11\resolve_bind_fix.cpp" ^
     "src\d3d11\xinput_watch.cpp" ^
     "src\d3d11\fss_panel_rect.cpp" ^
@@ -558,7 +557,6 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\backdrop_fix.cpp" ^
     "src\d3d11\scrim_fix.cpp" ^
     "src\d3d11\quad_probe.cpp" ^
-    "src\d3d11\intro_probe.cpp" ^
     "src\d3d11\intro_panel.cpp" ^
     "src\d3d11\intro_curve.cpp" ^
     "src\d3d11\intro_skip.cpp" ^
@@ -2866,7 +2864,6 @@ python "tools\dxbc_disasm.py" --self-test || exit /b 1
 python "tools\eye_bmp_to_png.py" --self-test || exit /b 1
 python "tools\diff_eye_dump.py" --self-test || exit /b 1
 python "tools\eye_run_fit.py" --self-test || exit /b 1
-python "tools\eye_run_shimmer.py" --self-test || exit /b 1
 python "tools\eye_run_spin.py" --self-test || exit /b 1
 exit /b 0
 

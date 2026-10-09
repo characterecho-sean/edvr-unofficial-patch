@@ -388,8 +388,8 @@ inline int flatHdrCrumbWiringTests() {
            "treatHdr admits once, declines through one place and reaches the resolver at its two calls, counting the frame once");
     // -- the route's key and its 5 s census --
     const std::string readKey = body(runtime, "static void hdrReadKey(State& s, uint64_t frame) {");
-    ordered(readKey, {"s.hdrKey = key; s.hdrKeyRead = true;", "if (key == FlatHdrKey::Auto && hdrCrumbArmed(flatHdrKeyName(key)))",
-                      "Log::get().note(\"flat hdr route: crash-safe trail on:", "Log::get().note(\"flat hdr route: experimental.temporal_aa_before_post="},
+    ordered(readKey, {"s.hdrKey = key; s.hdrKeyRead = true;", "if (hdrCrumbArmed(flatHdrKeyName(key)))",
+                      "Log::get().note(\"flat hdr route: crash-safe trail on:", "Log::get().note(\"flat hdr route: %s (read at startup)"},
             "the trail's armed line, and the log's line that says where to look, are written when the key is read as auto, at startup or after a change");
     ordered(body(runtime, "void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT flags) {"),
             {"const FlatMonoResolveStats rs = flatMonoResolveStats();", "gained.captured = rs.hdrCaptured - seen.captured;",
@@ -451,11 +451,6 @@ inline int flatHdrCrumbWiringTests() {
                    "Log::get().note(\"%s\",line);", "if(!g.capture && FAILED(device->QueryInterface(IID_PPV_ARGS(d1.GetAddressOf()))))", "if(g.capture) {",
                    "} else {", "\"create-context-state\"", "d1->CreateDeviceContextState(", "flat-resolve-context-state-create-failed"},
             "the renderer decides its isolation, says so in one log line, and makes the swap's state object only when it is the swap");
-    // The key is handed to the resolver once, before anything of the resolver's runs.
-    ordered(runtime, {"flatMonoResolveSetSpanHooks(&resolveSpanBegin, &resolveSpanEnd);", "if (!s.isolationRead) {",
-                      "flatMonoResolveSetIsolation(flatContextIsolationFromText(Config::get().getString(\"advanced.flat_context_isolation\", \"auto\").c_str()));",
-                      "flatMonoResolvePreflight(s.device.Get(),s.context.Get(),s.plannedResolve)"},
-            "advanced.flat_context_isolation is read once, at the first frame-end with a mode on, before the first preflight or resolve");
     // The explicit block: no swap in it, every stage's calls, in the order the groups are written.
     const std::string blockSrc = slurp("src/d3d11/flat_context_state.h");
     expect(!blockSrc.empty() && count(blockSrc, "->SwapDeviceContextState(") == 0 && count(blockSrc, "->CreateDeviceContextState(") == 0,
@@ -548,7 +543,7 @@ inline int flatHdrCrumbWiringTests() {
 
     // -- THE DEVICE GATE (flat_hdr_crumbs.h): the crumbs are DXMT's alone --
     const std::string crumbs = slurp("src/d3d11/flat_hdr_crumbs.h");
-    const std::string isolation = slurp("src/d3d11/flat_context_isolation.h");
+    const std::string isolation = slurp("src/d3d11/flat_isolation_mode.h");
     expect(!crumbs.empty() && !isolation.empty(), "the crumbs and the isolation headers are readable from the repo root");
     // The one writer and the three entry points test the gate first, before any state moves; the gate is the first thing each does.
     ordered(body(crumbs, "inline void hdrCrumbEmit("), {"if (!hdrCrumbEnabled()) return;", "c.written.fetch_add("},
@@ -589,7 +584,7 @@ inline int flatHdrCrumbWiringTests() {
         const std::string gate = (g == std::string::npos || gEnd == std::string::npos) ? std::string() : runtime.substr(g, gEnd - g);
         expect(!gate.empty() && gate.find("isolation") == std::string::npos && gate.find("Isolation") == std::string::npos &&
                    gate.find("getString") == std::string::npos && gate.find("Config") == std::string::npos,
-               "the gate is the detection alone: forcing the capture on Windows (advanced.flat_context_isolation) cannot open it");
+               "the gate is the detection alone: forcing the capture on Windows cannot open it");
     }
     expect(count(runtime, "hdrCrumbEnable(") == 1 && count(slurp("src/d3d11/device_hook.cpp"), "hdrCrumbEnable(") == 0,
            "the runtime opens the gate in one place, and nothing else does");

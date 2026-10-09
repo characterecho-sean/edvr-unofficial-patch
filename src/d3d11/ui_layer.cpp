@@ -76,7 +76,7 @@ bool g_uiLayerIssueBlocked = false;
 bool g_uiLayerCrispOn = false;      // the HDR HUD take/re-issue armed this frame (with the layer)
 bool g_uiLayerCrispPending = false; // a tonemap draw was admitted; its re-issue follows its draw
 bool g_uiLayerWorldReissue = false; // the VR world route: the screen composite just decided is re-issued after the game's draw
-bool g_uiLayerMapsOn = false;       // experimental.on_foot_maps_sharp: on, the layer and screen motion live -- naming decides the gate
+bool g_uiLayerMapsOn = false;       // the on-foot maps gate: the layer and screen motion live -- naming decides the gate
 uint64_t g_uiLayerGateFrame = 0;    // frame boundaries the layer has seen: what a naming is attributed to (ui_layer.h)
 uint64_t g_uiLayerNamedAt = ~0ull;  // the gate frame in which a draw last named the screen's source (never: ~0)
 }  // namespace detail
@@ -103,8 +103,7 @@ constexpr uint32_t kCrispHdrMissFrames = 30;
 
 float g_target = 0.0f;     // 0 off, 1.0 (the file's 100), 1.25 (125)
 bool g_temporal = false;   // a temporal mode is on (the layer's door exists)
-bool g_debugView = false;  // advanced.temporal_aa_debug = ui_layer
-bool g_jitterAsShipped = true;  // advanced.temporal_aa_jitter_sign/lag at their defaults
+constexpr bool g_jitterAsShipped = true;  // the eye jitter is always as shipped
 bool g_stoodDown = false;
 bool g_crispStoodDown = false;  // the HDR HUD path alone (a failure of its own); the LDR take stays
 std::string g_keyText = "?";
@@ -486,7 +485,7 @@ struct Window {
     uint64_t viewportRemaps = 0, scissorRemaps = 0, jitterCancels = 0, clears = 0;
     uint64_t multiplies = 0, writeBacks = 0, dsTested = 0, seeds = 0, seedFailures = 0;
     uint64_t lostLayers = 0, doors = 0, treated = 0, composites = 0, overGameImage = 0;
-    uint64_t compositeRefused = 0, afterWrites = 0, afterReads = 0, debugComposites = 0;
+    uint64_t compositeRefused = 0, afterWrites = 0, afterReads = 0;
     // afterWrites' own breakdown: taken into the layer after the UI (kept
     // over it), left as a post pass (an eye-sized input), or refused at
     // issue (decide-time, via decided[kAfterUi][...], plus begin-time below).
@@ -564,11 +563,10 @@ int8_t g_screenHeld = -1;  // -1 never read; 0 the screen is taken; 1 it is the 
 uint64_t g_heldSinceMs = 0;
 bool g_journalOffNoted = false;
 
-// The on-foot maps gate (ui_maps_math.h; experimental.on_foot_maps_sharp). The key is read where the layer's other keys are
-// (uiLayerConfigure, live) and latched at the frame boundary into detail::g_uiLayerMapsOn, so every draw of a frame sees one
-// answer. With the key off none of this is touched but the one load of keyCfg at the boundary.
+// The on-foot maps gate (ui_maps_math.h). It is latched at the frame boundary into detail::g_uiLayerMapsOn, so every draw of a
+// frame sees one answer.
 struct Maps {
-    UiMapsKey keyCfg = UiMapsKey::Off;    // the ini's value as last read
+    UiMapsKey keyCfg = UiMapsKey::On;     // the gate is always on
     bool active = false;                  // the world camera's naming decided the gate at the last boundary
     UiMapsGate gate;                      // the step's state (carried from today's gate when the feature switches in)
     uint64_t episodeFrames = 0;           // frames in the current world period, or panel period
@@ -614,7 +612,7 @@ uint64_t g_routeLatestSeq = 0;              // the newest frame a stage began in
 constexpr size_t kStages = static_cast<size_t>(UiRouteStage::kCount);
 constexpr size_t kRouteTotal = kStages;     // the stats slot of the whole route's sum
 constexpr size_t kRouteWithMoved = kStages + 1;
-bool g_hdrDrawTimingOn = false;  // advanced.temporal_aa_diagnostics, read at configure only
+constexpr bool g_hdrDrawTimingOn = false;  // the per-draw timing census is off
 UiSeedCensus g_seedCensus;
 UiHdrSeedGpuProbe g_hdrSeedGpu;
 UiHdrSeedGpuProbe::Token g_hdrSeedActive = 0; // explicit outer-guard recovery for SEH
@@ -2070,7 +2068,7 @@ ID3D11Texture2D* compositeInner(Eye& e, uint32_t eye, ID3D11Texture2D* frame,
     p.layerSize[1] = static_cast<float>(e.h);
     p.outSize[0] = rw;
     p.outSize[1] = rh;
-    p.mode = g_debugView ? 1u : 0u;
+    p.mode = 0u;
     p.useMult = useMult ? 1u : 0u;
     D3D11_MAPPED_SUBRESOURCE m{};
     if (FAILED(ctx->Map(g_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m)) || !m.pData) {
@@ -2125,7 +2123,6 @@ ID3D11Texture2D* compositeInner(Eye& e, uint32_t eye, ID3D11Texture2D* frame,
 
     ++g_win.composites;
     if (!e.doorFromPass) ++g_win.overGameImage;
-    if (g_debugView) ++g_win.debugComposites;
     if (!g_compositeNoted) {
         g_compositeNoted = true;
         Log::get().note(
@@ -2137,9 +2134,7 @@ ID3D11Texture2D* compositeInner(Eye& e, uint32_t eye, ID3D11Texture2D* frame,
             eye == 0 ? "left" : "right", e.w, e.h, rw, rh, viewName(view),
             static_cast<double>(uv[0]), static_cast<double>(uv[2]), static_cast<double>(uv[1]),
             static_cast<double>(uv[3]),
-            g_debugView ? " -- the ui_layer debug view is on: the layer over black, a blue "
-                          "wash where it covers"
-                        : "");
+            "");
     }
     ID3D11Texture2D* out = e.out.Get();
     out->AddRef();
@@ -2402,7 +2397,7 @@ void onFootGateTick() {
                                   "2D screen is taken on foot too, where it is the world");
     }
     const int8_t before = g_screenHeld;
-    // Today's verdict, unless experimental.on_foot_maps_sharp is on and screen motion runs: then the world camera's naming
+    // Today's verdict, unless screen motion runs: then the world camera's naming
     // decides and says so in its own lines (mapsGate), and the lines below -- which speak of the journal and the depth -- stay quiet.
     bool decidedByNaming = false;
     const bool held = mapsGate(now, gateFrame, byJournal || byDepth, known, onFoot, &decidedByNaming);
@@ -2479,7 +2474,7 @@ void logWorldScreen() {
                          [static_cast<size_t>(UiLayerDecision::kWorldScreen)]),
         static_cast<unsigned long long>(g_win.worldReissued),
         focus.empty() ? "nothing counted" : focus.c_str(),
-        g_maps.active ? " -- the gate is decided by experimental.on_foot_maps_sharp (the world camera's naming), not by these two "
+        g_maps.active ? " -- the gate is decided by the world camera's naming, not by these two "
                         "signals; see the \"on foot maps sharp 5s:\" line"
                       : "");
 }
@@ -2681,8 +2676,8 @@ void logTotals(double seconds) {
         "ui quality: layer: %.0f s, %llu frames, %ux%u per eye + composite output %ux%u; %.2f draws "
         "a frame redirected (%s), %.2f multiplies, %.2f depth/stencil write-backs, %.2f tested "
         "against a seeded copy (%llu seeds, %llu failed, %llu stale); per frame %.2f viewport remaps, "
-        "%.2f scissor remaps, %.2f jitter cancels; %llu composites (%llu over the game's own image, "
-        "%llu in the ui_layer debug view); GPU ms per eye-frame, median/p95 (eye-frames): %s.",
+        "%.2f scissor remaps, %.2f jitter cancels; %llu composites (%llu over the game's own image); "
+        "GPU ms per eye-frame, median/p95 (eye-frames): %s.",
         seconds, static_cast<unsigned long long>(g_win.frames), l.w, l.h, l.outW, l.outH,
         static_cast<double>(g_win.redirected) / frames, taken.empty() ? "none" : taken.c_str(),
         static_cast<double>(g_win.multiplies) / frames,
@@ -2695,8 +2690,7 @@ void logTotals(double seconds) {
         static_cast<double>(g_win.scissorRemaps) / frames,
         static_cast<double>(g_win.jitterCancels) / frames,
         static_cast<unsigned long long>(g_win.composites),
-        static_cast<unsigned long long>(g_win.overGameImage),
-        static_cast<unsigned long long>(g_win.debugComposites), price.c_str());
+        static_cast<unsigned long long>(g_win.overGameImage), price.c_str());
     std::string moved, combined;
     const size_t movedStage = static_cast<size_t>(UiRouteStage::kHdrMovedDraw);
     appendPrice(moved, movedStage);
@@ -2841,10 +2835,6 @@ bool crispTakeReady(ID3D11DeviceContext* ctx, int eye);
 // --------------------------------------------------------------- the API
 
 void uiLayerConfigure(Config& cfg) {
-    // The on-foot maps gate's key, live: the boundary latches it. On for an ini with no line (the shipped default since 2026-10-01,
-    // which tools\config_test holds the fallback to); a value that is not "on" reads as off.
-    g_maps.keyCfg = uiMapsKeyFromText(cfg.getString("experimental.on_foot_maps_sharp", "on").c_str());
-    g_hdrDrawTimingOn = cfg.getBool("advanced.temporal_aa_diagnostics", false);
     detail::g_uiSeedDiagnostics = g_hdrDrawTimingOn;
     g_seedCensus.configure(g_hdrDrawTimingOn);
     // The fallback, for an ini with no such line (a hand-copied DLL over an old
@@ -2865,21 +2855,10 @@ void uiLayerConfigure(Config& cfg) {
     // HUD families through the mono adapter, flat_ui_layer.cpp -- and its panel factor arm with the flat anti-aliasing.
     const bool flatAa = runtimeFlatProfile() && temporalModeEnabled(cfg.requestedTemporalMode());
     const bool temporal = runtimeFlatProfile() ? flatAa : temporalVr;
-    const bool debugView = _stricmp(cfg.getString("advanced.temporal_aa_debug", "off").c_str(),
-                                    "ui_layer") == 0;
-    // The cancel follows the shipped jitter convention (as_is, no lag); the
-    // two switches that re-read it are diagnostics of the pass's reading,
-    // and while either is set the game's pixels may sit where the cancel
-    // does not expect them -- the layer waits rather than guess. The flat profile has neither switch: both keys are
-    // refused by its gate (runtimeProfileAllowsKey), where a refused getString answers "off" -- which read as "not as
-    // shipped" and kept the flat layer dead on its first flight (2026-10-09 11:08, build 130f62b0). Its jitter is the
+    // The cancel follows the shipped jitter convention (as_is, no lag), always. The flat profile's jitter is the
     // flat phase machine's, read per draw from the camera rows (flat_ui_layer.cpp): as shipped by construction.
-    const bool jitterAsShipped = uiLayerJitterAsShippedFor(runtimeFlatProfile(),
-        cfg.getString("advanced.temporal_aa_jitter_sign", "as_is").c_str(),
-        cfg.getFloat("advanced.temporal_aa_jitter_lag", 0.0f));
     const bool changed = !g_keyNoted || text != g_keyText || target != g_target ||
-                         temporal != g_temporal || debugView != g_debugView ||
-                         jitterAsShipped != g_jitterAsShipped;
+                         temporal != g_temporal;
     // A live change of the key re-arms a stood-down layer, either half of it
     // (the LDR take's or the HDR HUD path's): the player asked.
     if (g_keyNoted && (text != g_keyText || target != g_target)) {
@@ -2889,8 +2868,6 @@ void uiLayerConfigure(Config& cfg) {
     g_keyText = text;
     g_target = target;
     g_temporal = temporal;
-    g_debugView = debugView;
-    g_jitterAsShipped = jitterAsShipped;
     refreshLive();
     // The panels follow the same key -- one setting, both halves -- and the
     // instruments with them.
@@ -2937,10 +2914,7 @@ void uiLayerConfigure(Config& cfg) {
         uiQualityLabel(target), hmdText, static_cast<double>(target),
         !temporal ? "waits -- fix.temporal_aa is off, and the layer is composited at that "
                     "pass's door."
-        : !jitterAsShipped
-            ? "waits -- advanced.temporal_aa_jitter_sign or _lag is set, and the layer cancels "
-              "the jitter by the shipped convention only."
-            : "the game's post-tonemap UI (the 2D screen, the menus, the loading screen) is drawn "
+        : "the game's post-tonemap UI (the 2D screen, the menus, the loading screen) is drawn "
               "by its own shaders into a per-eye layer at that size times the door's output, "
               "unjittered, and composited after the upscale and RCAS, before EDVR's menu -- "
               "except the 2D screen while it shows the world -- on foot, or a 3D map -- where it "
@@ -2954,10 +2928,6 @@ void uiLayerConfigure(Config& cfg) {
               "upscaled frame; the \"crisp hud\" lines report it). Draws the layer takes get no "
               "UI depth and no "
               "reactive mask.");
-    if (debugView && temporal) {
-        Log::get().note("ui quality: advanced.temporal_aa_debug = ui_layer -- the layer is shown "
-                        "over black.");
-    }
 }
 
 int uiLayerTargetKind() {
@@ -3155,7 +3125,7 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
     // The world-screen gate, as this frame's boundary read it.
     f.worldScreen = g_screenHeld == 1;
     // The VR world route owns this frame's world: the 2D screen composite is re-issued into the layer, not taken
-    // (asked for that family alone; false with experimental.temporal_aa_on_foot_world off, always).
+    // (asked for that family alone).
     f.worldRoute = family == UiLayerFamily::kScreen && vrWorldRouteLayerMayTake();
     if (family == UiLayerFamily::kScreen) ++g_win.screenAsked;
     const int kind = uiLayerTargetKind();
@@ -4127,6 +4097,8 @@ const char* uiLayerNotLiveReason() {
     return uiLayerNotLiveReasonFor(g_target, g_temporal, g_jitterAsShipped, g_stoodDown);
 }
 
+void uiLayerSetMapsGateForTest(bool on) { g_maps.keyCfg = on ? UiMapsKey::On : UiMapsKey::Off; }
+
 void uiLayerWorldReissueAbandon() {
     g_reissue.pending = false;
     detail::g_uiLayerWorldReissue = false;
@@ -4610,24 +4582,9 @@ ID3D11Texture2D* uiLayerComposite(uint64_t sequence, uint32_t eye, ID3D11Texture
     Eye& e = g_eye[eye];
     if (!e.srv || !e.rtv || e.compositedSeq == sequence) return nullptr;
     const bool hasUi = e.seq == sequence && e.draws;
-    // The ui_layer debug view shows the layer on every frame the key is
-    // live, an empty one included -- black, so a frame whose UI the layer
-    // did not take reads as missing, never as the ordinary picture.
-    const bool debugEmpty = !hasUi && g_debugView && detail::g_uiLayerLive;
-    if (!hasUi && !debugEmpty) return nullptr;
+    if (!hasUi) return nullptr;
     e.compositedSeq = sequence;
-    if (debugEmpty) {
-        Ptr<ID3D11Device> dev;
-        frame->GetDevice(&dev);
-        Ptr<ID3D11DeviceContext> ctx;
-        if (dev) dev->GetImmediateContext(&ctx);
-        if (!ctx) return nullptr;
-        vScreenClearRenderTargetViewRaw(ctx.Get(), e.rtv.Get(), kUiLayerClear);
-        e.seq = sequence;
-        e.draws = 0;
-        e.target = nullptr;
-        e.chainOpen = false;
-    } else {
+    {
         // The eye check: did the UI this layer holds leave the target the
         // game submitted (or copied into what it submitted) for THIS eye?
         const void* mine = e.submittedSeq == sequence ? e.submitted : nullptr;
@@ -4641,13 +4598,12 @@ ID3D11Texture2D* uiLayerComposite(uint64_t sequence, uint32_t eye, ID3D11Texture
             // The game's Submit says this UI belongs to the other eye: every
             // frame from here would invert the disparity of every menu. Stand
             // down at once -- the UI goes back into the game's frame, in the
-            // right eyes -- and say how to flip the order rule.
+            // right eyes.
             ++g_win.eyeSwapped;
             Log::get().note(
                 "ui quality: layer: the %s eye's layer holds UI from the target the game "
                 "submitted for the %s eye -- the eye rule (first target of a frame = left) is "
-                "backwards on this rig. advanced.ui_depth_eyes = swapped flips it (and the UI "
-                "depth's with it); then turn fix.ui_quality off and on.",
+                "backwards on this rig.",
                 eye == 0 ? "left" : "right", eye == 0 ? "right" : "left");
             standDown("the eye check found the layer's eyes swapped");
             return nullptr;
@@ -4656,7 +4612,7 @@ ID3D11Texture2D* uiLayerComposite(uint64_t sequence, uint32_t eye, ID3D11Texture
         }
     }
     if (graphicsRuntimeDisabled()) return nullptr;
-    const bool useMult = hasUi && e.mSrv && e.mSeq == sequence;
+    const bool useMult = e.mSrv && e.mSeq == sequence;
     ID3D11Texture2D* result = nullptr;
     const char* why = nullptr;
     const bool ran = guardedBudget(g_compositeBudget, [&] {
@@ -4665,19 +4621,8 @@ ID3D11Texture2D* uiLayerComposite(uint64_t sequence, uint32_t eye, ID3D11Texture
     if (!result) {
         ++g_win.compositeRefused;
         // The UI of this frame is in the layer and will not reach the eye:
-        // once, then the draws go back into the game's frame. (An empty
-        // debug frame lost nothing, and only says why.)
-        if (hasUi || !ran) {
-            standDown(!ran ? "a fault in the composite" : (why ? why : "the composite refused"));
-        } else {
-            static bool debugRefusalNoted = false;
-            if (!debugRefusalNoted) {
-                debugRefusalNoted = true;
-                Log::get().note("ui quality: layer: the debug view's empty frame was not "
-                                "composited -- %s.",
-                                why ? why : "a refusal");
-            }
-        }
+        // once, then the draws go back into the game's frame.
+        standDown(!ran ? "a fault in the composite" : (why ? why : "the composite refused"));
     }
     return result;
 }

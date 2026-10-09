@@ -11,7 +11,6 @@
 #include "../common/intro_mode.h"
 #include "../common/log.h"
 #include "../common/timing.h"
-#include "intro_probe.h"   // the device stamp the watch's "+X.XXX s" reads
 
 namespace edvr {
 namespace {
@@ -28,11 +27,6 @@ using PFN_GetFileAttributesExA = BOOL(WINAPI*)(LPCSTR, GET_FILEEX_INFO_LEVELS, L
 // Read on whatever thread the game opens files from. Everything else below
 // belongs to the render thread, which is where configure and tick run.
 std::atomic<bool> g_armed{false};
-// The WATCH (advanced.intro_probe, with the movie not skipped): the same
-// hooks, installed forwarding, so the first open of an ident is timed
-// against the device line. It refuses nothing, ever. Off whenever the skip
-// is armed -- the refusal lines say what opened then.
-std::atomic<bool> g_watching{false};
 bool     g_installTried = false;
 bool     g_installed = false;
 bool     g_armedSaid = false;     // the ARMED line has been said this session
@@ -42,21 +36,11 @@ HMODULE g_reader = nullptr;
 
 std::atomic<uint32_t> g_refused{0};          // ident opens and attribute reads refused
 std::atomic<uint32_t> g_otherMovieOpens{0};  // Movies\ paths that were not idents, forwarded
-std::atomic<uint32_t> g_identOpens{0};       // ident opens seen by the WATCH, forwarded
-// The "the game opened" line's once-guard, per API family (N5, 2026-09-15):
-// a GetFileAttributes* existence check must not consume the line the
-// DirectShow reader's actual CreateFile* open (the decoder-clock proxy)
-// earns. g_identOpens above still counts every touch, across both families.
-std::atomic<bool> g_identOpenNotedCreate{false};
-std::atomic<bool> g_identOpenNotedAttr{false};
 std::atomic<uint32_t> g_refusalLines{0};     // the log lines spent on refusals
 std::atomic<uint32_t> g_movieDrew{0};        // frames the movie's fill drew
 uint64_t g_armedAtMs = 0;
 bool     g_drewSaid = false;
 bool     g_verdictSaid = false;
-bool     g_watchRetired = false;  // the watch's scene-frame account has been said
-bool     g_sceneSeen = false;     // the first rendered scene has passed the tick
-bool     g_watchLateSaid = false; // the watch was asked for too late; said once
 
 enum class MoviePath { none, other, ident };
 
@@ -106,84 +90,18 @@ void noteRefusal(const char* api, const char* path) {
                     "found', as a renamed file would be.", api, path);
 }
 
-// The file name alone, for the watch line: the path the game hands over is
-// the full install path, and the name is what identifies the ident.
-template <class C>
-const C* baseName(const C* p) {
-    const C* name = p;
-    for (const C* c = p; *c; ++c) {
-        if (*c == '\\' || *c == '/') name = c + 1;
-    }
-    return name;
-}
-
-// True for the GetFileAttributes* family (an existence check), false for
-// CreateFile* (an actual open, including the DirectShow reader's own). The
-// two families get separate once-guards below, so an existence check
-// cannot consume the line the real open earns.
-bool isAttrApi(const char* api) {
-    return std::strncmp(api, "GetFileAttributes", 17) == 0;
-}
-
-// The WATCH's line: the first ident open, timed against the device -- once
-// per API family (N5, 2026-09-15), so a GetFileAttributes* existence check
-// cannot swallow the DirectShow reader's actual CreateFile* open (the
-// decoder-clock proxy). Runs inside the game's CreateFileW on whatever
-// thread opens the movie, so it is bounded and touches nothing but the log.
-// g_identOpens counts every touch, across both families; the exchange below
-// is the per-family once-guard.
-void noteWatchedOpen(const char* api, const wchar_t* path) {
-    g_identOpens.fetch_add(1, std::memory_order_relaxed);
-    std::atomic<bool>& noted = isAttrApi(api) ? g_identOpenNotedAttr : g_identOpenNotedCreate;
-    if (noted.exchange(true, std::memory_order_relaxed)) return;
-    double since = 0.0;
-    if (introProbeSinceDevice(&since)) {
-        Log::get().note("intro probe: the game opened %ls at +%.3f s after the device "
-                        "(thread %lu, through %s); the movie's clock starts about here.",
-                        baseName(path), since, GetCurrentThreadId(), api);
-    } else {
-        Log::get().note("intro probe: the game opened %ls before any D3D11 device existed "
-                        "(thread %lu, through %s; read this line's timestamp against the "
-                        "device line); the movie's clock starts about here.",
-                        baseName(path), GetCurrentThreadId(), api);
-    }
-}
-void noteWatchedOpen(const char* api, const char* path) {
-    g_identOpens.fetch_add(1, std::memory_order_relaxed);
-    std::atomic<bool>& noted = isAttrApi(api) ? g_identOpenNotedAttr : g_identOpenNotedCreate;
-    if (noted.exchange(true, std::memory_order_relaxed)) return;
-    double since = 0.0;
-    if (introProbeSinceDevice(&since)) {
-        Log::get().note("intro probe: the game opened %s at +%.3f s after the device "
-                        "(thread %lu, through %s); the movie's clock starts about here.",
-                        baseName(path), since, GetCurrentThreadId(), api);
-    } else {
-        Log::get().note("intro probe: the game opened %s before any D3D11 device existed "
-                        "(thread %lu, through %s; read this line's timestamp against the "
-                        "device line); the movie's clock starts about here.",
-                        baseName(path), GetCurrentThreadId(), api);
-    }
-}
-
 // True when the call is to be answered "not found": the skip is armed and
-// the path is an ident. Counts what it sees either way, so the verdict can
-// say whether this table carries the game's movie opens at all. The WATCH
-// takes the same walk and never returns true: an ident it sees is noted
-// and forwarded.
+// the path is an ident. Counts what it sees, so the verdict can say whether
+// this table carries the game's movie opens at all.
 template <class C>
 bool refuse(const C* path, const char* api) {
-    const bool armed = g_armed.load(std::memory_order_relaxed);
-    if (!armed && !g_watching.load(std::memory_order_relaxed)) return false;
+    if (!g_armed.load(std::memory_order_relaxed)) return false;
     const MoviePath kind = classify(path);
     if (kind == MoviePath::other) {
         g_otherMovieOpens.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
     if (kind != MoviePath::ident) return false;
-    if (!armed) {
-        noteWatchedOpen(api, path);
-        return false;
-    }
     g_refused.fetch_add(1, std::memory_order_relaxed);
     if (g_refusalLines.fetch_add(1, std::memory_order_relaxed) < 4) noteRefusal(api, path);
     return true;
@@ -254,11 +172,9 @@ BOOL WINAPI hookGetFileAttributesExA(LPCSTR name, GET_FILEEX_INFO_LEVELS level, 
 
 const char* state(const IatPatch& p) { return p.applied ? "patched" : "not imported"; }
 
-// The executable's own import slots, once, for the skip or for the watch --
-// whichever asks first; the other finds them in place. Said before g_armed
-// or g_watching goes true, so the ARMED or watching line precedes any
-// refusal or open line in the log. `consequence` is what a failure means to
-// the caller, since the two want different things from the hooks.
+// The executable's own import slots, once, for the skip. Said before g_armed
+// goes true, so the ARMED line precedes any refusal line in the log.
+// `consequence` is what a failure means to the caller.
 void install(const char* consequence) {
     g_installTried = true;
     iatHookInstall("kernel32.dll", "CreateFileW", reinterpret_cast<void*>(&hookCreateFileW),
@@ -315,25 +231,10 @@ void sayArmed() {
         state(g_attrExA), state(g_readerCreateW), mod);
 }
 
-void sayWatching() {
-    char mod[64] = "?";
-    entryModule(mod, sizeof(mod));
-    Log::get().note(
-        "intro probe: watching the movie's open -- the file hooks are installed and "
-        "forwarding (executable CreateFileW %s, CreateFileA %s; DirectShow reader CreateFileW "
-        "%s; original entry in %s). Nothing is refused. The first open of Movies\\Ident_*.webm "
-        "or intro_temp.webm is timed against the device line; a session with this line and "
-        "no 'the game opened' line opened the movie by a route these hooks do not see.",
-        state(g_createW), state(g_createA), state(g_readerCreateW), mod);
-}
-
 }  // namespace
 
 void introSkipConfigure(Config& cfg) {
     const IntroVideoMode mode = introVideoParse(cfg.getString("fix.intro_video", "screen"));
-    // The watch is the probe's, and stands aside whenever the skip is armed:
-    // a refused open is already a line of its own.
-    const bool watch = cfg.getBool("advanced.intro_probe", false) && !mode.skip;
     const bool was = g_armed.load(std::memory_order_relaxed);
     if (mode.skip != was) {
         if (mode.skip) {
@@ -356,34 +257,6 @@ void introSkipConfigure(Config& cfg) {
                             g_refused.load(std::memory_order_relaxed));
         }
     }
-    const bool wasWatching = g_watching.load(std::memory_order_relaxed);
-    if (watch == wasWatching) return;
-    if (!watch) {
-        g_watching.store(false, std::memory_order_release);
-        Log::get().note("intro probe: the movie's open is no longer watched (%u ident "
-                        "open(s) seen).",
-                        g_identOpens.load(std::memory_order_relaxed));
-        return;
-    }
-    // Asked for once the movie's open is behind us -- a reload after the
-    // movie drew, or after the first rendered scene -- the watch has nothing
-    // to see this launch, and installing it would let the scene edge print
-    // 'NO ident was opened' about hooks that were not there at the open.
-    // Declined, said once; the next launch reads the key at startup.
-    const bool late = g_sceneSeen || g_movieDrew.load(std::memory_order_relaxed) != 0;
-    if (late) {
-        if (!g_watchLateSaid) {
-            g_watchLateSaid = true;
-            Log::get().note("intro probe: the movie's open watch was asked for after %s; "
-                            "the movie is decided at launch, so it matters at the next one.",
-                            g_sceneSeen ? "the first rendered scene"
-                                        : "the movie had already drawn");
-        }
-        return;
-    }
-    if (!g_installTried) install("The intro probe cannot see the game's movie opens.");
-    g_watching.store(g_installed, std::memory_order_release);
-    if (g_installed) sayWatching();
 }
 
 void introSkipNoteMovieDrew() {
@@ -412,40 +285,6 @@ void introSkipNoteMovieDrew() {
 
 void introSkipTick(bool sceneFrame) {
     if (!sceneFrame) return;
-    g_sceneSeen = true;
-    // The watch's account, once, at the same edge the verdict uses. Every
-    // outcome is a line: an ident open with its count, or NO open, which is
-    // Flight 09:43's shape and the finding the watch exists to name -- read
-    // with the fill witness, since NO open and NO fill is the game skipping
-    // the movie by itself, not a route the hooks miss.
-    if (!g_watchRetired && g_watching.load(std::memory_order_relaxed)) {
-        g_watchRetired = true;
-        const uint32_t idents = g_identOpens.load(std::memory_order_relaxed);
-        const uint32_t other = g_otherMovieOpens.load(std::memory_order_relaxed);
-        const uint32_t drew = g_movieDrew.load(std::memory_order_relaxed);
-        if (idents) {
-            Log::get().note("intro probe: the movie's open watch retires at the first "
-                            "rendered scene -- %u ident open(s) and %u other Movies\\ "
-                            "open(s) reached the hooks, all forwarded; the movie drew %u "
-                            "frame(s).",
-                            idents, other, drew);
-        } else if (drew) {
-            Log::get().note("intro probe: the movie's open watch retires at the first "
-                            "rendered scene -- NO ident was opened through the executable "
-                            "or DirectShow reader imports (%u other Movies\\ open(s) "
-                            "were), yet the movie drew %u frame(s): it was opened by a "
-                            "route these hooks do not see.",
-                            other, drew);
-        } else {
-            Log::get().note("intro probe: the movie's open watch retires at the first "
-                            "rendered scene -- NO ident was opened through the executable "
-                            "or DirectShow reader imports (%u other Movies\\ open(s) "
-                            "were) and the movie never drew: the game skipped it by "
-                            "itself this launch, or played it by a route neither the "
-                            "hooks nor the fill detection covers.",
-                            other);
-        }
-    }
     if (g_verdictSaid || !g_armed.load(std::memory_order_relaxed)) return;
     g_verdictSaid = true;
     const uint32_t refused = g_refused.load(std::memory_order_relaxed);
@@ -476,7 +315,6 @@ void introSkipTick(bool sceneFrame) {
 
 void introSkipShutdown() {
     g_armed.store(false, std::memory_order_release);
-    g_watching.store(false, std::memory_order_release);
     iatHookUninstall(&g_readerCreateW);
     if (g_reader) { FreeLibrary(g_reader); g_reader = nullptr; }
     iatHookUninstall(&g_attrExA);
@@ -495,14 +333,12 @@ void introSkipShutdown() {
 // could plausibly hand it, and the refusal's shape through the hook bodies
 // themselves. A wrong predicate would not crash a flight, it would spend one
 // -- the log would say "no ident was asked for" and mean nothing -- so the
-// cells run before any flight does. Bits: 1 predicate, 2 refusal, 4 watch.
+// cells run before any flight does. Bits: 1 predicate, 2 refusal.
 extern "C" __declspec(dllexport) unsigned edvrIntroSkipSelftest() {
     using namespace edvr;
     unsigned bits = 0;
     bool ok = true;
     auto want = [&](bool cond) { ok = ok && cond; };
-    const bool wasWatching = g_watching.exchange(false, std::memory_order_acq_rel);
-    const uint32_t identsBefore = g_identOpens.load(std::memory_order_relaxed);
     // The predicate.
     want(classify(L"C:\\Steam\\steamapps\\common\\Elite Dangerous\\Products\\"
                   L"elite-dangerous-odyssey-64\\Movies\\Ident_Frontier_EliteNeutral.webm") ==
@@ -555,37 +391,10 @@ extern "C" __declspec(dllexport) unsigned edvrIntroSkipSelftest() {
     want(!refuse(L"C:\\Games\\Elite\\Movies\\Ident_Frontier_Arena.webm", "cell"));
     want(g_refused.load(std::memory_order_relaxed) == refusedBefore + 4);
     if (ok) bits |= 2u;
-    // The watch, disarmed: an ident is counted and NEVER refused, in either
-    // width; the front end's loop is counted as "other"; a second ident
-    // open (same "cell" API, so the same family's once-guard) adds to the
-    // count without a second line. The refusal counter must not move.
-    ok = true;
-    g_identOpens.store(0, std::memory_order_relaxed);
-    const uint32_t otherBefore = g_otherMovieOpens.load(std::memory_order_relaxed);
-    g_watching.store(true, std::memory_order_release);
-    want(!refuse(L"C:\\Games\\Elite\\Movies\\Ident_Frontier_Arena.webm", "cell"));
-    want(g_identOpens.load(std::memory_order_relaxed) == 1);
-    want(!refuse("Movies/intro_temp.webm", "cell"));
-    want(g_identOpens.load(std::memory_order_relaxed) == 2);
-    want(!refuse(L"C:\\Games\\Elite\\Movies\\FrontEnd0.webm", "cell"));
-    want(g_otherMovieOpens.load(std::memory_order_relaxed) == otherBefore + 1);
-    want(g_refused.load(std::memory_order_relaxed) == refusedBefore + 4);
-    // Armed AND watching cannot both be true from configure, but the hook
-    // must refuse if it ever were: the skip wins.
-    g_armed.store(true, std::memory_order_release);
-    want(refuse(L"C:\\Games\\Elite\\Movies\\Ident_Frontier_Arena.webm", "cell"));
-    want(g_refused.load(std::memory_order_relaxed) == refusedBefore + 5);
-    g_armed.store(false, std::memory_order_release);
-    g_watching.store(false, std::memory_order_release);
-    want(!refuse(L"C:\\Games\\Elite\\Movies\\Ident_Frontier_Arena.webm", "cell"));
-    want(g_identOpens.load(std::memory_order_relaxed) == 2);
-    if (ok) bits |= 4u;
     // Leave the session's counters as they were found.
     g_refused.store(refusedBefore, std::memory_order_relaxed);
     g_refusalLines.store(0, std::memory_order_relaxed);
     g_otherMovieOpens.store(0, std::memory_order_relaxed);
-    g_identOpens.store(identsBefore, std::memory_order_relaxed);
     g_armed.store(wasArmed, std::memory_order_release);
-    g_watching.store(wasWatching, std::memory_order_release);
     return bits;
 }

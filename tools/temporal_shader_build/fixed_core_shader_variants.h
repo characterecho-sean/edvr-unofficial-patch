@@ -32,8 +32,6 @@ static std::vector<Variant> coreVariants(const std::string& core) {
         {"kWeaponMotionPsBytecode", "weapon motion", "main", nullptr, {}, false, edvr::kWeaponMotionPs, "ps_5_0"},
         {"kWeaponIdentityBytecode", "weapon identity", "main", nullptr, {}, false, edvr::kWeaponIdentityCs, "cs_5_0"},
         {"kPlanetCoverageBytecode", "planet coverage", "main", nullptr, {}, false, edvr::kPlanetCoverageHlsl, "ps_5_0"},
-        {"kTemporalFoveaBytecode", "temporal_fovea_cs", "fovea", nullptr, {}, false, edvr::kFoveaCsHlsl, "cs_5_0"},
-        {"kTemporalDownBytecode", "temporal_down_cs", "down", nullptr, {}, false, edvr::kDownCsHlsl, "cs_5_0"},
     };
 }
 
@@ -106,7 +104,5 @@ static std::vector<LegacyContract> coreLegacyContracts() {
         {"weapon motion", "main", "ps_5_0", nullptr, 0xF948E51A2E036952ull},
         {"weapon identity", "main", "cs_5_0", nullptr, 0x10E05DE79500471Dull},
         {"planet coverage", "main", "ps_5_0", nullptr, 0xAC1BF855670403D4ull},
-        {"temporal_fovea_cs", "fovea", "cs_5_0", nullptr, 0xE05D6C08CF233167ull},
-        {"temporal_down_cs", "down", "cs_5_0", nullptr, 0x446A3A4BBB585FFAull},
     };
 }
