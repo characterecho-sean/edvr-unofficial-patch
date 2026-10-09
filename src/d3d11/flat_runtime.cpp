@@ -3332,6 +3332,9 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     if (s.device && actualDevice.Get() != s.device.Get()) { flatRuntimeResize(); s.thread = GetCurrentThreadId(); }
     if (!s.device) { swap->GetDevice(IID_PPV_ARGS(&s.device)); if (s.device) s.device->GetImmediateContext(&s.context); }
     if (!s.device || !s.context) return;
+    // fix.ui_quality's flat layer: a device the layer has not seen (the actual-device-change branch above, or a device
+    // adopted after a resize cleared the old one) releases every device child the shared layer keeps; same device, nothing.
+    flatUiLayerNoteDevice(s.device.Get());
     // Stand-down (flat_standdown.h): what the frame that just ended showed about its
     // chain, and the mode of the frame that starts now. Before anything below reads s.work.
     bool engineConfiguredPaused = enginePausedThen;

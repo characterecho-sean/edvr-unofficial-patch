@@ -305,6 +305,28 @@ void flatUiLayerAtCopy(ID3D11DeviceContext* ctx, uint64_t frame, bool treated, u
     }
 }
 
+namespace {
+Ptr<ID3D11Device> g_device;  // the device the shared layer's children were made on (identity; held so it cannot recur)
+}  // namespace
+
+void flatUiLayerNoteDevice(ID3D11Device* device) {
+    if (!device || device == g_device.Get()) return;
+    if (g_device) {
+        g_proof = FlatUiToneProof{};
+        g_view.Reset();
+        g_viewTex = nullptr;
+        g_viewFmt = DXGI_FORMAT_UNKNOWN;
+        {
+            FlatComputeInternalScope internal;
+            uiLayerDeviceReset();
+        }
+        Log::get().note("flat ui layer: the D3D11 device changed -- every device child of the shared layer (blend cache, "
+                        "seeder, deferred contexts, coverage and composite shaders, parameter buffer, timers, layers) "
+                        "released; they are made again on the new device at their next use.");
+    }
+    g_device = device;
+}
+
 void flatUiLayerRelease() {
     g_proof = FlatUiToneProof{};  // a fresh chain proves itself again
     g_view.Reset();

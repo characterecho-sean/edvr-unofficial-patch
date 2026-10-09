@@ -3211,6 +3211,29 @@ if errorlevel 1 ( echo [edvr] ERROR: ui layer world test build failed & exit /b 
 "%OBJ%\uilayerworld\ui_layer_world_test.exe" --self-test || exit /b 1
 exit /b 0
 
+:rig_ui_layer_device_test
+echo [edvr] === ui_layer_device_test.exe ===
+REM The shared UI layer across a D3D11 device change (review 2026-10-09, P2): src\d3d11\ui_layer.cpp compiled WHOLE (through
+REM tools\ui_layer_device_test\ui_layer_device_bridge.cpp, which only exposes which device each retained cache belongs to) with the
+REM world rig's neighbour stubs, on two WARP devices. A frame on device A (door, the crisp take's dependencies, a HUD frame through
+REM the production coverage pass, the production composite, read back), the production device-change reset (uiLayerDeviceReset),
+REM the same frame on device B: every retained child -- blend cache, coverage shaders and deferred context, seeder context,
+REM composite shader and parameter buffer, both layers, the composite output -- is B's, the pixels are the HUD over the frame,
+REM the caller's bindings come back. Then a same-device resize (uiLayerFlatRelease) at another size: the pixel again, nothing
+REM device-bound rebuilt. Built outside build\ like the world rig.
+if not exist "%OBJ%\uilayerdevice" mkdir "%OBJ%\uilayerdevice"
+cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE ^
+    /Fo"%OBJ%\uilayerdevice\\" /Fe"%OBJ%\uilayerdevice\ui_layer_device_test.exe" ^
+    "tools\ui_layer_device_test\ui_layer_device_test.cpp" "tools\ui_layer_device_test\ui_layer_device_bridge.cpp" ^
+    "src\common\config.cpp" "src\common\log.cpp" "src\common\guard.cpp" ^
+    "third_party\dxbc_hash\DxilHash.cpp" ^
+    /link /INCREMENTAL:NO d3dcompiler.lib user32.lib
+if errorlevel 1 ( echo [edvr] ERROR: ui layer device test build failed & exit /b 1 )
+"%OBJ%\uilayerdevice\ui_layer_device_test.exe" --dry-run || exit /b 1
+"%OBJ%\uilayerdevice\ui_layer_device_test.exe" --self-test || exit /b 1
+exit /b 0
+
 :rig_on_foot_maps_test
 echo [edvr] === on_foot_maps_test.exe ===
 REM The on-foot maps gate (experimental.on_foot_maps_sharp; docs\design-world-camera-motion-2026-09-30.md, Phase 1): the pure

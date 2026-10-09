@@ -4829,6 +4829,62 @@ bool uiLayerFlatRelease() {
     return any;
 }
 
+namespace {
+// Every child of the device the shared layer holds -- the layers and their depth targets, the composite's output and
+// frame views, the route's timers, the blend cache, the depth seeder and its deferred context, the coverage pass's
+// shaders and deferred context, the composite shader and its parameter buffer, the hologram remap's prepared shaders
+// -- released, and every creation attempt and format-support answer forgotten, so the next use builds them on the
+// device it is handed. uiLayerShutdown's, and uiLayerDeviceReset's (the flat profile's actual device change).
+void releaseDeviceObjects() {
+    if (g_draw.active) releaseSaved();
+    g_holoBinding.clear();
+    g_holoCache.reset();
+    g_hdrSeedGpu.reset();  // release-only; the old device may already be gone
+    g_hdrSeedActive = 0;
+    releaseLayers();
+    for (RouteSlot& s : g_route) {
+        s.timer.reset();
+        s.inUse = false;
+    }
+    g_routeHead = g_routeTail = 0;
+    for (uint32_t i = 0; i < g_blendCount; ++i) g_blends[i] = BlendEntry{};
+    g_blendCount = 0;
+    g_seeder.reset();
+    g_deferred.Reset();
+    g_seederTried = false;
+    g_crispDeferred.Reset();
+    g_crispDeferredTried = false;
+    if (g_covVs) {
+        g_covVs->Release();
+        g_covVs = nullptr;
+    }
+    if (g_covPs) {
+        g_covPs->Release();
+        g_covPs = nullptr;
+    }
+    g_covTried = false;
+    if (g_cb) {
+        g_cb->Release();
+        g_cb = nullptr;
+    }
+    if (g_cs) {
+        g_cs->Release();
+        g_cs = nullptr;
+    }
+    g_csTried = false;
+    for (int i = 0; i < 2; ++i) g_fmtChecked[i] = g_fmtOk[i] = false;
+}
+}  // namespace
+
+void uiLayerDeviceReset() {
+    releaseDeviceObjects();
+    uiLayerFlatRelease();  // the door, the target cache and the per-draw facts, as on a same-device resize
+    g_draw = Draw{};
+    g_crispSave = CrispToneSave{};
+    detail::g_uiLayerRedirecting = false;
+    detail::g_uiLayerWatching = false;
+}
+
 void uiLayerShutdown() {
     g_holoBinding.clear(); g_holoCache.reset();
     detail::g_uiLayerIssueBlocked = false;
@@ -4847,41 +4903,12 @@ void uiLayerShutdown() {
     g_maps = Maps{};
     g_frameTakenDraws = 0;
     detail::g_uiLayerMapsOn = false;
-    releaseLayers();
-    for (RouteSlot& s : g_route) {
-        s.timer.reset();
-        s.inUse = false;
-    }
-    g_routeHead = g_routeTail = 0;
+    releaseDeviceObjects();
     for (auto& totals : g_routeTotals) totals = UiRouteFrameTotals{};
     g_routeCoverage = UiRouteCoverage{};
     g_routeCombinedArmedPending = 0;
     g_routeHdrMovedPending = 0;
-    for (uint32_t i = 0; i < g_blendCount; ++i) g_blends[i] = BlendEntry{};
-    g_blendCount = 0;
-    g_seeder.reset();
-    g_deferred.Reset();
-    g_seederTried = false;
-    g_crispDeferred.Reset();
-    g_crispDeferredTried = false;
-    if (g_covVs) {
-        g_covVs->Release();
-        g_covVs = nullptr;
-    }
-    if (g_covPs) {
-        g_covPs->Release();
-        g_covPs = nullptr;
-    }
-    g_covTried = false;
     g_crispToneSeenCount = 0;
-    if (g_cb) {
-        g_cb->Release();
-        g_cb = nullptr;
-    }
-    if (g_cs) {
-        g_cs->Release();
-        g_cs = nullptr;
-    }
     if (g_sessionRedirected) {
         Log::get().note("ui quality: layer: %llu draws redirected this session.",
                         static_cast<unsigned long long>(g_sessionRedirected));

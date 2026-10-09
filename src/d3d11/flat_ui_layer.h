@@ -29,6 +29,7 @@
 
 #include <cstdint>
 
+struct ID3D11Device;
 struct ID3D11DeviceContext;
 struct ID3D11ShaderResourceView;
 
@@ -90,8 +91,11 @@ void flatUiLayerNoteSceneDraw(ID3D11DeviceContext* ctx, uint32_t count, uint32_t
 void flatUiLayerAtCopy(ID3D11DeviceContext* ctx, uint64_t frame, bool treated, uint32_t outW, uint32_t outH,
                        ID3D11ShaderResourceView** original, bool* replaced);
 
-// ResizeBuffers or a device change: every reference the layer holds, released.
+// ResizeBuffers on the same device: every per-size reference the layer holds, released (shaders and contexts kept).
 void flatUiLayerRelease();
+// Once a frame with the device the flat runtime adopted: when it is not the device the layer last saw, the shared
+// layer's device children are all released first (uiLayerDeviceReset). The device is held for identity until then.
+void flatUiLayerNoteDevice(ID3D11Device* device);
 
 // Once a frame from the flat runtime's frame boundary: every 30 s the "flat ui layer" lines (flatUiLayerReport), zeros
 // included, every window of the flat profile -- a log without them is a build that never ran the adapter.

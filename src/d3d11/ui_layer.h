@@ -388,6 +388,12 @@ void uiLayerNoteSceneDraw(ID3D11DeviceContext* ctx, uint32_t count, uint32_t ins
 // The swap chain is resizing (or the device went): every layer, depth target, composite output and frame view released,
 // the door forgotten, so the next armed frame is a fresh door's. True when anything was held.
 bool uiLayerFlatRelease();
+// The D3D11 device itself changed (the flat profile's adoption of a new device; review 2026-10-09 P2): everything
+// uiLayerFlatRelease lets go of, and every device child the shared layer keeps across a same-device resize -- the blend
+// cache, the depth seeder and its deferred context, the coverage pass's shaders and deferred context, the composite
+// shader and its parameter buffer, the route's timers, the hologram remap's prepared shaders -- released, with their
+// creation-attempt and format-support flags reset, so the next use builds them on the new device. Never on a resize.
+void uiLayerDeviceReset();
 
 // Once per frame, from vScreenFrameBoundary: first, the settle of a fence a
 // failed hologram restore raised (uiLayerIssueBlocked above); then the
