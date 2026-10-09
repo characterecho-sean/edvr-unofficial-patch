@@ -63,11 +63,18 @@ ABI's version 6 carried only the two keys and never left the branch, so it is
 deleted (a half built from the test build steps down to version 5 through the
 ladder).
 
-**Still to come: the real canted flight** (Pimax 8KX, parallel projection OFF in
-the Pimax software, issue 24) on a build with the fix as behaviour. It shows
-whether the vendor runtime hands EDVR canted views and whether the pixel saving
-measured below arrives. Open side question: EDVR's temporal AA and FSS under a
-real cant (FSS guards itself off on canted panels).
+**REAL CANTED FLIGHT PASSED 2026-10-09 (issue 24, Houndmux):** Pimax 8KX via
+PimaxXR, FOV Wide, default panel resolution, HMD Quality 0.5, test build
+v0.18.3-90-gbbca39a6 (the fix on, as now shipped). Parallel projection OFF: "It
+works! No projection issues." His log shows the eyes located at ±10.00° and
+handed to Elite in its handedness; recommended size 5016x3160 (8268x3948 with
+PP on). FSR, PP on -> off: station 55.5 -> 81.4 fps (GPU 15.9 -> 11.0 ms, -31%),
+space near a star 77.0 -> 89.1 fps (GPU 10.8 -> 9.6 ms), planet 62.5 -> 84.9 fps
+(GPU 13.7 -> 10.0 ms, -27%). Side finding, not this fix: with PP ON at FOV Wide
+the 8268-wide eye is refused by DLSS (0xBAD00005, all-zero mode ranges) and
+EDVR falls back to its own history at half size -- a blurry image; PP off (5016
+wide) runs DLSS normally. A DLSS output ceiling is a separate task. Open side
+question: EDVR's temporal AA and FSS under a real cant (FSS guards itself off).
 
 ## What OpenVR says about a canted headset
 
