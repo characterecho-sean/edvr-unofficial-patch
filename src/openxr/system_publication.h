@@ -14,7 +14,7 @@ class SystemPublication {
     if(active_||generation_==(std::numeric_limits<uint64_t>::max)())return 0;
     metadata.generation=++generation_;metadata.geometry={};metadata.geometryValid=false;
     metadata.optics={};metadata.opticsValid=false;
-    metadata.hiddenMasks.reset();metadata.hiddenMasksCompatible=true;metadata.cantedEyeFix=false;metadata.cullProbe=0;
+    metadata.hiddenMasks.reset();metadata.hiddenMasksCompatible=true;metadata.cantedEyeFix=false;
     // The game may query this metadata before any valid pose is available.
     // Normalize here as well as on live updates so startup cannot cache an
     // odd size while temporal rendering later uses an even output target.
@@ -69,13 +69,6 @@ class SystemPublication {
   void setCantedEyeFix(bool on) {
     std::lock_guard<std::mutex> lock(mutex_);
     state_.cantedEyeFix=on;
-  }
-  // advanced.cull_probe, as decided for the frame being published (a CullProbe
-  // code, 0 when it is not acting). Like the correction above it rides beside the
-  // geometry, so a bad tracking sample never drops it.
-  void setCullProbe(uint32_t group) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    state_.cullProbe=group;
   }
   void invalidate(uint64_t generation) {
     std::lock_guard<std::mutex> lock(mutex_);

@@ -7,7 +7,6 @@
     python tools/edvr_log.py --target steam --tail 80
     python tools/edvr_log.py --target frontier --tally vh
     python tools/edvr_log.py --target frontier --tally vh --frame 1
-    python tools/edvr_log.py --target steam --tally cull --max-head 20
     python tools/edvr_log.py --target steam --tally pose
     python tools/edvr_log.py --target frontier --tally periodic --expect-build HEAD
     python tools/edvr_log.py --target frontier --tally periodic --window-ms 250
@@ -60,10 +59,6 @@ the totals row. The census caps its log output at 16384 lines
 (draw_census.cpp), so a long census keeps per-draw detail only for the
 first frames; --tally says which frames survive only as summaries
 rather than printing an empty table.
-
---tally cull tables the terrain-culling arc's probe cycle (advanced.cull_probe = cycle): every `cull cycle:` window line in the graphics
-log by group, and each group paired against the two off windows beside it, mean +/- sd over n pairs; --max-head (deg/s, default 20)
-leaves out the windows in which the head moved. Exit 1 when the log has no window line (the status lines say why the cycle did not run).
 
 --tally pose tables the pose-gap diagnostic: every `pose gap:` line in the RUNTIME log (it reads --tag openxr unless you name a tag or a file) by
 caller (thread, return address): how far a head pose is located from the drawn frame's display time, how far it is turned from the drawn pose, and the
@@ -613,78 +608,6 @@ def print_vh_tally(text, frame):
     return 0
 
 
-# --tally cull: the terrain-culling arc's automatic probe cycle (advanced.cull_probe = cycle; src/d3d11/cull_cycle.h writes every line
-# and tools\native_frame_test holds tools\cull_cycle_fixture.log to exactly what it writes, which this script's --self-test reads):
-#
-#   cull cycle: running -- 2.0 s windows, off, all, off, camera, ...; the first 30 frames of each discarded; planet-terrain draws counted per eye
-#   cull cycle: <group> window N: frames F, terrain draws L/R mean a/b, indices L/R mean c/d, head x.x deg/s
-#   cull cycle: measure[guard <stage>] window N: ...   (advanced.cull_probe = measure: no lies, the cull guard's stage in the group's place)
-#   cull cycle: cycle K, <group> vs off: draws L/R +a/+b, indices L/R +c/+d (windows A, B, C)
-#   cull cycle: ignored while the cull guard runs | standing down -- not build 332841 | stopped after N windows
-#
-# The cycle's last group is `mono` (the mono camera's aspect times 1.30, through the hook in src/d3d11/mono_camera_hook.cpp); with that hook
-# live a window line ends ", mono reads N" (calls to the mono camera's aspect getter from the mono filler over its counted frames), and
-# these lines are printed as they stand, the hook's own account of itself:
-#
-#   cull probe: mono windows multiply the mono camera's aspect by 1.30 (hook live | hook inert: <why>)
-#   cull probe: mono -- the mono camera's aspect is multiplied by 1.30 on every frame | mono ignored ... | mono standing down ... | mono stopped
-#   mono camera: aspect writer observe live (up to 50 calls logged) | observe inert: <why>
-#   mono camera: aspect getter called from exe+0xRVA (caller N)[ -- the mono filler]
-#   mono camera: aspect writer call N: width W, height H, min aspect X, out A -> B, return exe+0xRVA
-#
-# A window's means are per frame per eye over its counted frames (the first 30 are discarded). The report is the table of those
-# windows by group and the PAIRED difference of every non-off window against the mean of the two off windows beside it (N-1 and N+1
-# of the same run), which cancels the slow drift in what the scene shows. A window whose head moved faster than --max-head
-# (default 20 deg/s), or that counted no frames, is left out, and so is every pair it would have been part of.
-
-CULL_GROUPS = ("off", "all", "camera", "ui", "sky", "sizes", "other", "mono")
-CULL_STAGES = ("off", "waiting", "adopting", "live")
-CULL_WINDOW_RE = re.compile(
-    r"cull cycle: (?P<group>\w+)(?:\[guard (?P<stage>\w+)\])? window (?P<n>\d+): frames (?P<frames>\d+), "
-    r"terrain draws L/R mean (?P<dl>[-+0-9.]+)/(?P<dr>[-+0-9.]+), "
-    r"indices L/R mean (?P<il>[-+0-9.]+)/(?P<ir>[-+0-9.]+), head (?P<head>[-+0-9.]+) deg/s(?:, mono reads (?P<reads>\d+))?")
-CULL_STATUS_RE = re.compile(
-    r"cull cycle: (?P<what>running --|measuring --|ignored while the cull guard runs|standing down -- not build 332841|stopped after \d+ windows)")
-# The mono camera hooks' own lines (src/d3d11/mono_camera_core.h writes them): the lazy install's verdict, the steady mode's status, the
-# first sight of each caller of the aspect getter and each call of the aspect writer.
-MONO_LINE_RE = re.compile(r"(?:cull probe: mono |mono camera: )\S.*$")
-
-
-def parse_cull_cycle(text):
-    """Every `cull cycle:` window line, in order, with the run it belongs to (a `running --` line starts a new run, so window numbers
-    that restart do not pair across runs), and the status lines. Returns (windows, statuses); a window is a dict of group ("measure"
-    for a measure window), stage (the cull guard's, measure windows only), n, run, frames, draws (L, R), indices (L, R), head and
-    reads (the mono hook's count over the window's counted frames, None when the line has no such field)."""
-    windows = []
-    statuses = []
-    run = 0
-    for line in text.splitlines():
-        m = CULL_WINDOW_RE.search(line)
-        if m:
-            windows.append({
-                "group": m.group("group"), "stage": m.group("stage"), "n": int(m.group("n")), "run": run, "frames": int(m.group("frames")),
-                "draws": (float(m.group("dl")), float(m.group("dr"))),
-                "indices": (float(m.group("il")), float(m.group("ir"))), "head": float(m.group("head")),
-                "reads": int(m.group("reads")) if m.group("reads") is not None else None})
-            continue
-        s = CULL_STATUS_RE.search(line)
-        if s:
-            if s.group("what").startswith(("running", "measuring")):
-                run += 1
-            statuses.append(line.split("cull cycle:", 1)[1].strip())
-    return windows, statuses
-
-
-def parse_mono_camera(text):
-    """The mono camera hooks' own lines (MONO_LINE_RE), in order, each without its timestamp."""
-    lines = []
-    for line in text.splitlines():
-        m = MONO_LINE_RE.search(line)
-        if m:
-            lines.append(m.group(0).strip())
-    return lines
-
-
 def _mean_sd(values):
     n = len(values)
     if not n:
@@ -694,154 +617,12 @@ def _mean_sd(values):
     return mean, sd
 
 
-def _welch(a, b):
-    """The difference of two sets of windows' means and the standard error of that difference (sqrt(sd_a^2/n_a + sd_b^2/n_b)); the
-    error is None when either set has fewer than two windows, and both are None when either is empty."""
-    ma, sa = _mean_sd(a)
-    mb, sb = _mean_sd(b)
-    if ma is None or mb is None:
-        return None, None
-    if sa is None or sb is None:
-        return ma - mb, None
-    return ma - mb, math.sqrt(sa * sa / len(a) + sb * sb / len(b))
-
-
-def tally_cull(windows, max_head):
-    """The --tally cull numbers. Returns a dict: used (the windows kept), head_excluded, empty (no counted frames), rows (group ->
-    {n, draws (L, R), indices (L, R)} each a (mean, sd) pair), pairs (group -> {n, draws, indices} the same, over the paired
-    differences against the two adjacent off windows). A window is kept when it counted frames and its head moved at most
-    max_head deg/s; a pair needs all three of its windows kept."""
-    empty = [w for w in windows if w["frames"] <= 0]
-    head_excluded = [w for w in windows if w["frames"] > 0 and w["head"] > max_head]
-    used = [w for w in windows if w["frames"] > 0 and w["head"] <= max_head]
-    rows = {}
-    for g in CULL_GROUPS:
-        ws = [w for w in used if w["group"] == g]
-        rows[g] = {"n": len(ws),
-                   "draws": tuple(_mean_sd([w["draws"][e] for w in ws]) for e in (0, 1)),
-                   "indices": tuple(_mean_sd([w["indices"][e] for w in ws]) for e in (0, 1)),
-                   "reads": _mean_sd([w["reads"] for w in ws if w.get("reads") is not None])}
-    by_key = {(w["run"], w["n"]): w for w in used}
-    diffs = {g: {"draws": ([], []), "indices": ([], [])} for g in CULL_GROUPS if g != "off"}
-    for w in used:
-        if w["group"] == "off" or w["group"] not in diffs:
-            continue
-        before = by_key.get((w["run"], w["n"] - 1))
-        after = by_key.get((w["run"], w["n"] + 1))
-        if not before or not after or before["group"] != "off" or after["group"] != "off":
-            continue
-        for what in ("draws", "indices"):
-            for e in (0, 1):
-                diffs[w["group"]][what][e].append(
-                    w[what][e] - 0.5 * (before[what][e] + after[what][e]))
-    pairs = {}
-    for g, d in diffs.items():
-        pairs[g] = {"n": len(d["draws"][0]),
-                    "draws": tuple(_mean_sd(d["draws"][e]) for e in (0, 1)),
-                    "indices": tuple(_mean_sd(d["indices"][e]) for e in (0, 1))}
-    # The positive control (advanced.cull_probe = measure): windows grouped by the cull guard's stage, no lie told. Only off and
-    # live enter the difference; the waiting and adopting windows (the guard staging, the game rebuilding its targets) and every
-    # window the head moved in are out of it.
-    measure = {}
-    by_stage = {}
-    for st in CULL_STAGES:
-        ws = [w for w in used if w["group"] == "measure" and w["stage"] == st]
-        by_stage[st] = ws
-        measure[st] = {"n": len(ws),
-                       "draws": tuple(_mean_sd([w["draws"][e] for w in ws]) for e in (0, 1)),
-                       "indices": tuple(_mean_sd([w["indices"][e] for w in ws]) for e in (0, 1))}
-    live, quiet = by_stage["live"], by_stage["off"]
-    live_minus_off = {"n_live": len(live), "n_off": len(quiet),
-                      "draws": tuple(_welch([w["draws"][e] for w in live], [w["draws"][e] for w in quiet]) for e in (0, 1)),
-                      "indices": tuple(_welch([w["indices"][e] for w in live], [w["indices"][e] for w in quiet]) for e in (0, 1))}
-    return {"used": used, "head_excluded": head_excluded, "empty": empty, "rows": rows, "pairs": pairs,
-            "measure": measure, "live_minus_off": live_minus_off}
-
-
-def _cull_cell(ms, signed, digits):
+def _mean_sd_cell(ms, signed, digits):
     mean, sd = ms
     if mean is None:
         return "-"
     fmt = "%%%s.%df" % ("+" if signed else "", digits)
     return (fmt % mean) + (" +/- " + ("%.*f" % (digits, sd)) if sd is not None else "")
-
-
-def print_cull_tally(text, max_head):
-    """The --tally cull report. Returns the process exit code."""
-    windows, statuses = parse_cull_cycle(text)
-    mono = parse_mono_camera(text)
-    for s in statuses:
-        print("[edvr] cull cycle: %s" % s)
-    for line in mono:
-        print("[edvr] %s" % line)
-    if not windows:
-        if mono:
-            print("[edvr] no `cull cycle:` window lines in this log (a steady `mono` run writes none); the mono camera lines above are "
-                  "what the hooks logged.")
-            return 0
-        print("[edvr] no `cull cycle:` window lines in this log. advanced.cull_probe = cycle writes them once it is running: "
-              "it needs fix.cull_guard off and Elite build 332841, and the status lines above say when it did not run.")
-        return 1
-    t = tally_cull(windows, max_head)
-    runs = len({w["run"] for w in windows})
-    print("[edvr] tally cull: %d window line(s) in %d run(s); %d used, %d left out for a head faster than %.1f deg/s, %d with no counted frames"
-          % (len(windows), runs, len(t["used"]), len(t["head_excluded"]), max_head, len(t["empty"])))
-    print("[edvr] per group, mean +/- sd of the windows' per-frame means (L = left eye, R = right):")
-    print("%-7s %4s  %-18s %-18s %-22s %-22s" % ("group", "n", "draws L", "draws R", "indices L", "indices R"))
-    for g in CULL_GROUPS:
-        r = t["rows"][g]
-        if not r["n"]:
-            continue
-        print("%-7s %4d  %-18s %-18s %-22s %-22s"
-              % (g, r["n"], _cull_cell(r["draws"][0], False, 2), _cull_cell(r["draws"][1], False, 2),
-                 _cull_cell(r["indices"][0], False, 1), _cull_cell(r["indices"][1], False, 1)))
-    print("[edvr] paired: each group's window less the mean of the two off windows beside it, mean +/- sd over n pairs:")
-    print("%-7s %4s  %-18s %-18s %-22s %-22s" % ("group", "n", "draws L", "draws R", "indices L", "indices R"))
-    for g in CULL_GROUPS:
-        if g == "off":
-            continue
-        p = t["pairs"][g]
-        if not p["n"]:
-            print("%-7s %4d  (no complete pair)" % (g, 0))
-            continue
-        print("%-7s %4d  %-18s %-18s %-22s %-22s"
-              % (g, p["n"], _cull_cell(p["draws"][0], True, 2), _cull_cell(p["draws"][1], True, 2),
-                 _cull_cell(p["indices"][0], True, 1), _cull_cell(p["indices"][1], True, 1)))
-    print("[edvr] a group that feeds the culler shows a clear positive difference in draws and indices; one n is not a result, and a "
-          "sd as large as the mean is noise.")
-    if any(t["rows"][g]["reads"][0] is not None for g in CULL_GROUPS):
-        print("[edvr] mono reads (calls to the mono camera's aspect getter from the mono filler, over a window's counted frames), mean +/- sd by "
-              "group; a mono window with none means the lie had nothing to act on:")
-        print("%-7s %4s  %-18s" % ("group", "n", "reads"))
-        for g in CULL_GROUPS:
-            r = t["rows"][g]
-            if r["reads"][0] is None:
-                continue
-            print("%-7s %4d  %-18s" % (g, r["n"], _cull_cell(r["reads"], False, 1)))
-    if any(t["measure"][st]["n"] for st in CULL_STAGES):
-        print("[edvr] measure (no lies told), by the cull guard's stage; waiting and adopting are the guard staging and are not used below:")
-        print("%-8s %4s  %-18s %-18s %-22s %-22s" % ("stage", "n", "draws L", "draws R", "indices L", "indices R"))
-        for st in CULL_STAGES:
-            r = t["measure"][st]
-            if not r["n"]:
-                continue
-            print("%-8s %4d  %-18s %-18s %-22s %-22s"
-                  % (st, r["n"], _cull_cell(r["draws"][0], False, 2), _cull_cell(r["draws"][1], False, 2),
-                     _cull_cell(r["indices"][0], False, 1), _cull_cell(r["indices"][1], False, 1)))
-        d = t["live_minus_off"]
-        if not d["n_live"] or not d["n_off"]:
-            print("[edvr] live minus off: needs windows of both (live n=%d, off n=%d; none left out by --max-head %.1f)"
-                  % (d["n_live"], d["n_off"], max_head))
-        else:
-            print("[edvr] live minus off, the difference of the stage means +/- the standard error of the difference (n live=%d, n off=%d):"
-                  % (d["n_live"], d["n_off"]))
-            print("%-8s %-18s %-18s %-22s %-22s" % ("", "draws L", "draws R", "indices L", "indices R"))
-            print("%-8s %-18s %-18s %-22s %-22s"
-                  % ("live-off", _cull_cell(d["draws"][0], True, 2), _cull_cell(d["draws"][1], True, 2),
-                     _cull_cell(d["indices"][0], True, 1), _cull_cell(d["indices"][1], True, 1)))
-            print("[edvr] the guard is the known fix: if the counter is not clearly higher live than off, it cannot see the squares and the "
-                  "probe cycle would say nothing.")
-    return 0
 
 
 # --tally pose: the pose-gap diagnostic (src/openxr/pose_gap.h writes every line, and tools\openxr_pose_test holds tools\pose_gap_fixture.log, which this
@@ -938,7 +719,7 @@ def print_pose_tally(text):
           % ("tid", "from", "n", "calls", "failed", "gap ms (target-disp)", "angle deg (to drawn)", "head deg/s", "r(angle,head)"))
     for r in rows:
         print("%7d %-14s %4d %7d %6d  %-20s %-22s %-11s %s"
-              % (r["tid"], r["frm"], r["n"], r["calls"], r["failed"], _cull_cell(r["gap"], True, 2), _cull_cell(r["angle"], False, 3),
+              % (r["tid"], r["frm"], r["n"], r["calls"], r["failed"], _mean_sd_cell(r["gap"], True, 2), _mean_sd_cell(r["angle"], False, 3),
                  ("%.1f" % r["head"][0]) if r["head"][0] is not None else "n/a", ("%+.2f" % r["r"]) if r["r"] is not None else "n/a"))
     for r in rows:
         if r["fallbacks"]:
@@ -9760,20 +9541,15 @@ def main(argv=None):
                     help="print only lines matching this regular expression")
     ap.add_argument("--tail", type=int, default=None,
                     help="print only the last N lines (after --grep)")
-    ap.add_argument("--tally", choices=["vh", "periodic", "cull", "pose"], default=None,
+    ap.add_argument("--tally", choices=["vh", "periodic", "pose"], default=None,
                     help="aggregate instead of dumping: pose tables the `pose gap:` "
-                         "lines of the runtime log by caller; cull tables the `cull cycle:` "
-                         "windows of advanced.cull_probe = cycle by group, with each "
-                         "group paired against its adjacent off windows (--max-head); "
+                         "lines of the runtime log by caller; "
                          "vh counts eye-texture "
                          "DC lines per vh= hash, split by r= render-target "
                          "token, with the DC frame summaries as totals; "
                          "periodic lays the `periodic work:` timing against "
                          "the flight's long frames (graphics log plus its "
                          "runtime log)")
-    ap.add_argument("--max-head", type=float, default=20.0,
-                    help="with --tally cull, leave out the windows whose mean head "
-                         "angular speed is above this many deg/s (default 20)")
     ap.add_argument("--frame", type=int, default=None,
                     help="with --tally vh, restrict to this census frame "
                          "ordinal; frames past the census line cap have no "
@@ -9993,8 +9769,6 @@ def main(argv=None):
         return print_freezes(path, text, ver, want, args, native_dirs)
     if args.tally == "periodic":
         return print_periodic_report(path, text, ver, want, args, native_dirs)
-    if args.tally == "cull":
-        return print_cull_tally(text, args.max_head)
     if args.tally == "pose":
         return print_pose_tally(text)
     if args.tally:
@@ -10445,8 +10219,6 @@ def self_test():
         ok = False
     if not self_test_terrain_checkerboard():
         ok = False
-    if not self_test_cull():
-        ok = False
     if not self_test_pose():
         ok = False
 
@@ -10455,199 +10227,6 @@ def self_test():
 
 
 FLATU_FIXTURE = "flat_upscale_fixture.log"
-
-
-CULL_FIXTURE = "cull_cycle_fixture.log"
-
-
-def self_test_cull():
-    """--tally cull on tools\\cull_cycle_fixture.log (which tools\\native_frame_test holds to exactly what src/d3d11/cull_cycle.h and
-    mono_camera_core.h write for the scripted flight: the mono camera hook's own lines (its install, three callers, two writer calls, a
-    steady mono run), then 29 windows over two cycles of seven groups and the first window of a third, the head at 3 deg/s except 40 deg/s
-    through the first ui window, the hook live (", mono reads N" on every window), then a measure run -- the positive control -- the cull
-    guard off, waiting, adopting and live (18 windows, 3 dropped by a stage change, no hook), then on lines altered to break each thing
-    the report depends on. Returns ok."""
-    ok = True
-
-    def fail(message):
-        nonlocal ok
-        print("self_test_cull: %s" % message)
-        ok = False
-
-    import contextlib
-    import io
-    fixture = os.path.join(os.path.dirname(os.path.abspath(__file__)), CULL_FIXTURE)
-    if not os.path.isfile(fixture):
-        fail("the fixture %s is missing beside this script" % CULL_FIXTURE)
-        return False
-    text = read_text(fixture)
-    windows, statuses = parse_cull_cycle(text)
-    if len(windows) != 47 or {w["run"] for w in windows} != {1, 2}:
-        fail("the fixture parsed to %d windows in runs %r, want 47 in runs 1 and 2" % (len(windows), sorted({w["run"] for w in windows})))
-        return False
-    if len(statuses) != 4 or not statuses[0].startswith("running --") or statuses[1] != "stopped after 29 windows" \
-            or not statuses[2].startswith("measuring --") or statuses[3] != "stopped after 18 windows":
-        fail("the status lines -> %r" % statuses)
-    w2 = windows[1]
-    if (w2["group"], w2["n"], w2["frames"], w2["draws"], w2["indices"], w2["reads"]) != ("all", 2, 170, (16.0, 13.0), (36864.0, 29952.0), 340) \
-            or abs(w2["head"] - 3.0) > 0.05 or abs(windows[5]["head"] - 40.0) > 0.5:
-        fail("window 2 / window 6 parsed to %r / head %r" % (w2, windows[5]["head"]))
-    w14 = windows[13]
-    if (w14["group"], w14["n"], w14["draws"], w14["reads"]) != ("mono", 14, (13.0, 10.0), 510):
-        fail("window 14 (the first mono window) parsed to %r" % (w14,))
-    if any(w["reads"] is None for w in windows if w["group"] != "measure") or any(w["reads"] is not None for w in windows if w["group"] == "measure"):
-        fail("the cycle's windows carry ', mono reads N' and the measure run's (no hook) do not")
-    monoLines = parse_mono_camera(text)
-    if len(monoLines) != 9 or monoLines[0] != "cull probe: mono windows multiply the mono camera's aspect by 1.30 (hook live)" \
-            or monoLines[3] != "mono camera: aspect getter called from exe+0x2871D89 (caller 2) -- the mono filler" \
-            or not monoLines[6].startswith("mono camera: aspect writer call 2: width 0, height 0, min aspect 0.000000, out unreadable") \
-            or monoLines[8] != "cull probe: mono stopped":
-        fail("the fixture's mono camera lines -> %r" % (monoLines,))
-
-    t = tally_cull(windows, 20.0)
-    if len(t["used"]) != 46 or len(t["head_excluded"]) != 1 or t["head_excluded"][0]["n"] != 6 or t["empty"]:
-        fail("--max-head 20 kept %d, left out %r" % (len(t["used"]), [w["n"] for w in t["head_excluded"]]))
-
-    def close(a, b, eps=0.01):
-        return a is not None and abs(a - b) <= eps
-
-    off = t["rows"]["off"]
-    if off["n"] != 15 or not close(off["draws"][0][0], 10.0) or not close(off["draws"][1][0], 9.0) or not close(off["draws"][0][1], 0.0) \
-            or not close(off["reads"][0], 340.0) or not close(t["rows"]["mono"]["reads"][0], 510.0) or not close(t["rows"]["mono"]["reads"][1], 0.0):
-        fail("the off row -> %r (mono reads %r)" % (off, t["rows"]["mono"]["reads"]))
-    allrow = t["rows"]["all"]
-    if allrow["n"] != 2 or not close(allrow["draws"][0][0], 17.0) or not close(allrow["draws"][0][1], 2 ** 0.5) or not close(allrow["draws"][1][0], 13.0):
-        fail("the all row -> %r" % (allrow,))
-    if t["rows"]["ui"]["n"] != 1:
-        fail("the ui row kept %d windows, want 1 (the 40 deg/s one is out)" % t["rows"]["ui"]["n"])
-    p = t["pairs"]
-    if p["all"]["n"] != 2 or not close(p["all"]["draws"][0][0], 7.0) or not close(p["all"]["draws"][0][1], 2 ** 0.5) \
-            or not close(p["all"]["draws"][1][0], 4.0) or not close(p["all"]["indices"][0][0], 16128.0) \
-            or not close(p["all"]["indices"][0][1], 4608.0 / 2 ** 0.5, 0.1) or not close(p["all"]["indices"][1][0], 9216.0):
-        fail("the all pairs -> %r" % (p["all"],))
-    if p["camera"]["n"] != 2 or not close(p["camera"]["draws"][0][0], 0.0) or p["sky"]["n"] != 2 or not close(p["sky"]["draws"][1][0], 0.0):
-        fail("the camera / sky pairs -> %r / %r" % (p["camera"], p["sky"]))
-    if p["sizes"]["n"] != 2 or not close(p["sizes"]["draws"][0][0], 4.0) or not close(p["sizes"]["draws"][1][0], 3.0) \
-            or not close(p["sizes"]["indices"][0][0], 9216.0) or not close(p["sizes"]["indices"][1][0], 6912.0):
-        fail("the sizes pairs -> %r" % (p["sizes"],))
-    if p["other"]["n"] != 2 or not close(p["other"]["draws"][0][0], 1.0) or not close(p["other"]["indices"][0][0], 2304.0):
-        fail("the other pairs -> %r" % (p["other"],))
-    if p["mono"]["n"] != 2 or not close(p["mono"]["draws"][0][0], 3.0) or not close(p["mono"]["draws"][1][0], 1.0) \
-            or not close(p["mono"]["indices"][0][0], 6912.0) or not close(p["mono"]["indices"][1][0], 2304.0) or not close(p["mono"]["draws"][0][1], 0.0):
-        fail("the mono pairs -> %r (the last window of a cycle pairs with the next cycle's first off)" % (p["mono"],))
-    # The head-moving ui window is left out of its pair, so the ui pairs come from the second cycle alone.
-    if p["ui"]["n"] != 1 or not close(p["ui"]["draws"][0][0], 2.0) or p["ui"]["draws"][0][1] is not None:
-        fail("the ui pairs -> %r (the 40 deg/s window must not pair)" % (p["ui"],))
-    # The writer's own pair lines (cycle 1) agree with the reader's arithmetic on the same windows.
-    pair_re = re.compile(r"cull cycle: cycle (\d+), (\w+) vs off: draws L/R ([-+0-9.]+)/([-+0-9.]+), indices L/R ([-+0-9.]+)/([-+0-9.]+) "
-                         r"\(windows (\d+), (\d+), (\d+)\)")
-    checked = 0
-    by_n = {w["n"]: w for w in windows if w["group"] != "measure" and w["run"] == 1}
-    for m in pair_re.finditer(text):
-        before, mid, after = by_n[int(m.group(7))], by_n[int(m.group(8))], by_n[int(m.group(9))]
-        for e in (0, 1):
-            d = mid["draws"][e] - 0.5 * (before["draws"][e] + after["draws"][e])
-            i = mid["indices"][e] - 0.5 * (before["indices"][e] + after["indices"][e])
-            if not close(d, float(m.group(3 + e))) or not close(i, float(m.group(5 + e)), 0.1):
-                fail("the writer's pair line %r disagrees with the reader's arithmetic (%.2f, %.1f)" % (m.group(0), d, i))
-        checked += 1
-    if checked != 14:
-        fail("the fixture carries %d pair lines, want 14 (two cycles of seven groups)" % checked)
-
-    # --max-head: raising it admits the ui window; lowering it below the quiet windows' 3 deg/s leaves nothing.
-    # The positive control: the cull guard's stages, and live minus off from the live and off windows alone.
-    ms = t["measure"]
-    if [ms[s]["n"] for s in CULL_STAGES] != [8, 1, 1, 8] or not close(ms["off"]["draws"][0][0], 10.0) or not close(ms["live"]["draws"][0][0], 17.0) \
-            or not close(ms["live"]["draws"][0][1], (8.0 / 7.0) ** 0.5) or not close(ms["adopting"]["draws"][0][0], 12.0):
-        fail("the measure rows -> %r" % (ms,))
-    d = t["live_minus_off"]
-    if d["n_live"] != 8 or d["n_off"] != 8 or not close(d["draws"][0][0], 7.0) or not close(d["draws"][0][1], (1.0 / 7.0) ** 0.5) \
-            or not close(d["draws"][1][0], 5.0) or not close(d["draws"][1][1], 0.0) or not close(d["indices"][0][0], 16128.0) \
-            or not close(d["indices"][0][1], 2304.0 / 7 ** 0.5, 0.1) or not close(d["indices"][1][0], 11520.0):
-        fail("live minus off -> %r (the waiting and adopting windows must not enter it)" % (d,))
-    # A live window the head moved in leaves the difference; so does a log with no live window at all.
-    moved = re.sub(r"(measure\[guard live\] window 12: .*?head )[0-9.]+( deg/s)", r"\g<1>50.0\2", text)
-    tm = tally_cull(parse_cull_cycle(moved)[0], 20.0)
-    if tm["live_minus_off"]["n_live"] != 7 or len(tm["head_excluded"]) != 2:
-        fail("a live window with the head at 50 deg/s -> n_live %r, head-excluded %r" % (tm["live_minus_off"]["n_live"], len(tm["head_excluded"])))
-    no_live = "".join(l + "\n" for l in text.splitlines() if "measure[guard live]" not in l)
-    tn = tally_cull(parse_cull_cycle(no_live)[0], 20.0)
-    if tn["live_minus_off"]["n_live"] != 0 or tn["live_minus_off"]["draws"][0][0] is not None:
-        fail("no live window -> %r" % (tn["live_minus_off"],))
-
-    t100 = tally_cull(windows, 100.0)
-    if len(t100["used"]) != 47 or t100["pairs"]["ui"]["n"] != 2:
-        fail("--max-head 100 -> %d used, ui pairs %r" % (len(t100["used"]), t100["pairs"]["ui"]["n"]))
-    t2 = tally_cull(windows, 2.0)
-    if t2["used"] or any(v["n"] for v in t2["pairs"].values()):
-        fail("--max-head 2 kept %d windows" % len(t2["used"]))
-    # A window with no counted frames, and a pair needs all three windows.
-    broken = text.replace("cull cycle: sizes window 10: frames 170", "cull cycle: sizes window 10: frames 0")
-    tb = tally_cull(parse_cull_cycle(broken)[0], 20.0)
-    if tb["pairs"]["sizes"]["n"] != 1 or len(tb["empty"]) != 1:
-        fail("a window with no counted frames -> sizes pairs %r, empty %r" % (tb["pairs"]["sizes"]["n"], len(tb["empty"])))
-    # Window numbers that restart (a second run) must not pair across runs.
-    two_runs = text + text
-    tr = tally_cull(parse_cull_cycle(two_runs)[0], 20.0)
-    if len(parse_cull_cycle(two_runs)[0]) != 94 or tr["pairs"]["all"]["n"] != 4 or tr["pairs"]["mono"]["n"] != 4:
-        fail("two runs -> %d windows, all pairs %r, mono pairs %r (want 94, 4, 4)" % (len(parse_cull_cycle(two_runs)[0]), tr["pairs"]["all"]["n"], tr["pairs"]["mono"]["n"]))
-
-    # Through main(), on a directory the tool discovers on its own.
-    import shutil
-    tmp = tempfile.mkdtemp(prefix="edvr_cull_selftest_")
-    try:
-        logs = os.path.join(tmp, "edvr_logs")
-        os.makedirs(logs)
-        with open(os.path.join(logs, "edvr_gfx_20261009_120000.log"), "wb") as f:
-            f.write(("[00:00:00.001] version 0.18.3-1-gabcdef0 (build 68C0A1F2) -- this DLL was linked 2026-10-09 12:00:00 UTC\n" + text).encode("utf-8"))
-
-        def run(argv):
-            buf = io.StringIO()
-            with contextlib.redirect_stdout(buf):
-                rc = main(argv)
-            return rc, buf.getvalue()
-
-        rc, out = run(["--dir", logs, "--tally", "cull"])
-        for want in ("tally cull: 47 window line(s) in 2 run(s); 46 used, 1 left out for a head faster than 20.0 deg/s, 0 with no counted frames",
-                     "paired:", "+7.00 +/- 1.41", "+4.00 +/- 0.00", "+16128.0 +/- 3258.3", "+2.00 ", "cull cycle: running --", "stopped after 29 windows",
-                     "cull cycle: measuring --", "stopped after 18 windows", "live minus off", "(n live=8, n off=8)", "live-off", "+7.00 +/- 0.38",
-                     "+5.00 +/- 0.00", "+16128.0 +/- 870.8", "+11520.0 +/- 0.0", "adopting", "waiting",
-                     "[edvr] cull probe: mono windows multiply the mono camera's aspect by 1.30 (hook live)",
-                     "[edvr] mono camera: aspect getter called from exe+0x2871D89 (caller 2) -- the mono filler",
-                     "[edvr] mono camera: aspect writer call 1: width 3840",
-                     "mono reads (calls to the mono camera's aspect getter", "340.0 +/- 0.0", "510.0 +/- 0.0",
-                     "mono       2  +3.00 +/- 0.00", "+6912.0 +/- 0.0", "mono       2  510.0 +/- 0.0"):
-            if want not in out:
-                fail("--tally cull output lacks %r:\n%s" % (want, out))
-        if rc != 0:
-            fail("--tally cull exited %d" % rc)
-        rc, out = run(["--dir", logs, "--tally", "cull", "--max-head", "100"])
-        if rc != 0 or "47 used, 0 left out" not in out:
-            fail("--max-head 100 -> rc %d:\n%s" % (rc, out))
-        rc, out = run(["--dir", logs, "--tally", "cull", "--max-head", "2"])
-        if rc != 0 or "0 used, 47 left out" not in out or "(no complete pair)" not in out:
-            fail("--max-head 2 -> rc %d:\n%s" % (rc, out))
-        # A log in which the cycle never ran says so, and exits 1; one in which it was refused says why.
-        with open(os.path.join(logs, "edvr_gfx_20261009_130000.log"), "wb") as f:
-            f.write(b"[00:00:00.001] version 0.18.3-1-gabcdef0 (build 68C0A1F2) -- x\n[00:00:01.000] nothing here\n")
-        rc, out = run(["--dir", logs, "--tally", "cull", "--nth", "0"])
-        if rc != 1 or "no `cull cycle:` window lines" not in out:
-            fail("a log with no cycle -> rc %d:\n%s" % (rc, out))
-        with open(os.path.join(logs, "edvr_gfx_20261009_140000.log"), "wb") as f:
-            f.write(b"[00:00:00.001] version 0.18.3-1-gabcdef0 (build 68C0A1F2) -- x\n[00:00:01.000] cull cycle: standing down -- not build 332841\n")
-        rc, out = run(["--dir", logs, "--tally", "cull", "--nth", "0"])
-        if rc != 1 or "cull cycle: standing down -- not build 332841" not in out:
-            fail("a log where the cycle stood down -> rc %d:\n%s" % (rc, out))
-        # A steady `mono` run writes no windows, only the hooks' lines: those are the evidence, so the tool shows them and does not call it empty.
-        with open(os.path.join(logs, "edvr_gfx_20261009_150000.log"), "wb") as f:
-            f.write(b"[00:00:00.001] version 0.18.3-1-gabcdef0 (build 68C0A1F2) -- x\n"
-                    b"[00:00:01.000] cull probe: mono windows multiply the mono camera's aspect by 1.30 (hook inert: not build 332841)\n")
-        rc, out = run(["--dir", logs, "--tally", "cull", "--nth", "0"])
-        if rc != 0 or "(hook inert: not build 332841)" not in out or "a steady `mono` run writes none" not in out:
-            fail("a log with only the mono hook's lines -> rc %d:\n%s" % (rc, out))
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
-    return ok
 
 
 POSE_FIXTURE = "pose_gap_fixture.log"

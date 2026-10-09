@@ -32,13 +32,6 @@
 // them, and a runtime that asks version 6 of a d3d11.dll that refuses the shape
 // steps down and reads both as off (no correction, no simulated cant).
 #define EDVR_NATIVE_FRAME_VERSION_6 6u
-// Version 7 adds cullProbe to the END and nothing else (the terrain-culling
-// arc's selective-lie probe, docs\terrain-culling.md), under the same
-// hand-copied-DLLs rule: a version 1 to 6 caller never learns of it, and a
-// runtime that asks version 7 of a d3d11.dll that refuses the shape steps down
-// and reads the probe as off. Version 6 was already on main, so it is not
-// extended in place.
-#define EDVR_NATIVE_FRAME_VERSION_7 7u
 
 // The game producer owns the device and generation passed at acquire. The
 // methods in the table are CPU-only and are called by the XR owner after the
@@ -100,11 +93,6 @@ struct EdvrNativeFrameOutput {
     // Version 6 and later (TEMPORARY). Degrees of outward cant the runtime
     // gives the located eyes (advanced.simulate_cant), 0..15; 0 is off.
     float simulateCantDeg;
-    // Version 7 and later (TEMPORARY, the terrain-culling arc). Which callers of
-    // GetProjectionRaw are answered with the per-axis symmetric superset
-    // (advanced.cull_probe): 0 off, 1 all, 2 camera, 3 ui, 4 sky, 5 sizes,
-    // 6 other. Anything else reads as off.
-    uint32_t cullProbe;
 };
 
 // The size the fields through resubmitEnabled occupy, which is what a
@@ -129,10 +117,6 @@ struct EdvrNativeFrameOutput {
 // caller's struct is, with no tail padding before cantedEyeFix.
 #define EDVR_NATIVE_FRAME_OUTPUT_SIZE_5 \
     ((uint32_t)offsetof(EdvrNativeFrameOutput, cantedEyeFix))
-// The size the fields through simulateCantDeg occupy, which is what a version 6
-// caller's struct is, with no tail padding before cullProbe.
-#define EDVR_NATIVE_FRAME_OUTPUT_SIZE_6 \
-    ((uint32_t)offsetof(EdvrNativeFrameOutput, cullProbe))
 
 struct EdvrNativeFrameDecision {
     uint32_t size, version;

@@ -209,7 +209,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   NativeFrameClient features;
   NativeFssClient fss;
   NativeCullGuard cullGuard;
-  EdvrNativeFrameOutput featureFrame{sizeof(featureFrame),EDVR_NATIVE_FRAME_VERSION_7};
+  EdvrNativeFrameOutput featureFrame{sizeof(featureFrame),EDVR_NATIVE_FRAME_VERSION_6};
   EdvrNativeFrameDecision featureDecision{sizeof(featureDecision),EDVR_NATIVE_FRAME_VERSION_1};
   bool featureFrameKnown=false;
   uint64_t fssHealedEyes[2]{},featureChanges=0;
@@ -391,12 +391,6 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     std::atomic<uint32_t> epoch{0};
     std::atomic<uint32_t> eyeNoted[2]{};
   } cantTest;
-  // The terrain-culling arc's selective-lie probe (docs\terrain-culling.md), read
-  // in the d3d11 half and told through EdvrNativeFrameOutput version 7. What was
-  // asked for and what came of it, so a change is noted once. Remove with the arc.
-  struct CullProbeNote {
-    bool noted=false;CullProbe requested=CullProbe::Off;CullProbeStatus status=CullProbeStatus::Off;
-  } cullProbeNote;
   XrResult lastCompositorResult=XR_SUCCESS;
   uint64_t compositorWaits=0,compositorSubmits=0,compositorHandoffs=0,validGamePoses=0;
   uint64_t poseFailures=0;
@@ -709,7 +703,6 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       double(m[0][0]),double(m[0][1]),double(m[0][2]),double(m[0][3]),double(m[1][0]),double(m[1][1]),double(m[1][2]),double(m[1][3]),
       double(m[2][0]),double(m[2][1]),double(m[2][2]),double(m[2][3]),double(forwardYawDegrees(given)),double(forwardYawDegrees(located)));
   }
-  void noteCallerLine(const char* line) noexcept override {nativeTracePuts(line);}
   void noteFrequencyQuery(const SystemRead& s,vr::TrackedDeviceIndex_t index,
       vr::ETrackedPropertyError error,float value,unsigned sample) noexcept override {
     const auto stack=edvr::captureGameCallStack();
@@ -923,21 +916,6 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
                          :"canted eyes: correction off -- Elite is given each eye's rotation as the runtime located it");
     }
     geometry.setCantedEyeFix(fix);
-  }
-  // The probe as asked for in the ini and as it can act: only with no cull guard
-  // configured, and only on build 332841 (the groups are that build's return
-  // addresses). The census runs whatever this says. A change is noted once and
-  // summarises the callers counted under the old setting first. Published to the
-  // game's reads every frame, like the correction above.
-  void publishCullProbe() {
-    const CullProbe requested=cullProbeFromCode(featureFrame.cullProbe);
-    const CullProbeStatus status=cullProbeStatus(requested,featureFrame.cullMode!=0,isBuild332841(systemInterface.callers().module()));
-    if(!cullProbeNote.noted||requested!=cullProbeNote.requested||status!=cullProbeNote.status) {
-      if(cullProbeNote.noted)systemInterface.callerSummary("before a probe change");
-      cullProbeNote.noted=true;cullProbeNote.requested=requested;cullProbeNote.status=status;
-      char line[96];nativeTracePuts(cullProbeLine(status,requested,line));
-    }
-    geometry.setCullProbe(status==CullProbeStatus::Active?static_cast<uint32_t>(requested):0u);
   }
   // The frame the game now holds, for Elite's "now" pose calls to be located at and measured against, and the pose-gap instrument's
   // window: counted here, written here, so the lines come from the one thread that already logs per frame.
@@ -1223,14 +1201,13 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       gameGeometry.width[eye]=dims.width;gameGeometry.height[eye]=dims.height;
     }
     if(features.acquired()) {
-      EdvrNativeFrameOutput next{sizeof(next),EDVR_NATIVE_FRAME_VERSION_7};
+      EdvrNativeFrameOutput next{sizeof(next),EDVR_NATIVE_FRAME_VERSION_6};
       if(features.begin(located,poses.read().originGeneration,next)!=S_OK) {
         boundary.clear();return fail(XR_ERROR_VALIDATION_FAILURE);
       }
       if(featureFrameKnown&&next.resubmitEnabled!=featureFrame.resubmitEnabled)previousPairValid=false;
       featureFrame=next;featureFrameKnown=true;
       publishCantedEyeFix(featureFrame.cantedEyeFix!=0);
-      publishCullProbe();
       if(locatedValid) {
         NativeCullSettings settings{};settings.mode=static_cast<NativeCullMode>(featureFrame.cullMode);
         settings.percent=featureFrame.cullPercent;settings.horizontalFraction=featureFrame.cullHorizontalFraction;

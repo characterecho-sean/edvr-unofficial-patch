@@ -111,11 +111,8 @@ private:
 //
 // NOT a disassembler, and deliberately not: it understands the shapes that
 // actually begin a compiled function -- register moves, stack adjustment,
-// pushes, the load of a parameter into shadow space, the rip-relative
-// access to a global, and a scalar float load or store (`movss`, F3 0F 10/11,
-// which is all there is to a one-field getter) -- and answers 0 for everything
-// else. F3 is accepted ONLY as that prefix; a rep prefix, `pause` or any other
-// SSE form behind it is refused.
+// pushes, the load of a parameter into shadow space, and the rip-relative
+// access to a global -- and answers 0 for everything else.
 //
 // RIP-RELATIVE INSTRUCTIONS ARE MEASURED, NOT REFUSED, and the first function
 // this was ever pointed at is why. It began `FF 05 …` -- an increment of a

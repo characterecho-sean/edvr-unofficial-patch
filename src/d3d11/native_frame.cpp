@@ -1,8 +1,5 @@
 #include "../common/native_frame.h"
 
-#include "cull_cycle.h"
-#include "mono_camera_core.h"
-#include "mono_camera_hook.h"
 #include "../common/comfort_fade.h"
 #include "../common/config.h"
 #include "../common/frame_flag.h"
@@ -117,18 +114,6 @@ uint32_t cullChannel(const std::string& value) {
     return 0;
 }
 
-// advanced.cull_probe (the terrain-culling arc, docs\terrain-culling.md): 0 off,
-// 1 all, 2 camera, 3 ui, 4 sky, 5 sizes, 6 other. Anything else is off: cycle,
-// measure and mono are this half's own (cull_cycle.h, mono_camera_core.h) and the
-// runtime is never told them.
-uint32_t cullProbe(const std::string& value) {
-    static const char* const kNames[] = {"off", "all", "camera", "ui", "sky", "sizes", "other"};
-    for (uint32_t i = 0; i < sizeof(kNames) / sizeof(kNames[0]); ++i) {
-        if (_stricmp(value.c_str(), kNames[i]) == 0) return i;
-    }
-    return 0;
-}
-
 bool parseSignature(const std::string& token, uint32_t* width,
                     uint32_t* height) {
     if (!width || !height) return false;
@@ -183,34 +168,6 @@ float clampFraction(float value) {
     if (!std::isfinite(value)) return 1.0f;
     if (value < 0.0f) return 0.0f;
     return value > 1.0f ? 1.0f : value;
-}
-
-// The cull cycle's clock, microseconds of QPC (a rig sets the override), and whether
-// the executable is build 332841 (a rig sets the override), read once.
-uint64_t cycleClockUs() {
-    const uint64_t forced = edvr::cullcycle::g_clockOverrideUs.load(std::memory_order_relaxed);
-    if (forced) return forced;
-    LARGE_INTEGER frequency{}, counter{};
-    QueryPerformanceFrequency(&frequency);
-    QueryPerformanceCounter(&counter);
-    const uint64_t f = static_cast<uint64_t>(frequency.QuadPart), c = static_cast<uint64_t>(counter.QuadPart);
-    return (c / f) * 1000000ull + (c % f) * 1000000ull / f;
-}
-
-bool eliteIsBuild332841() {
-    const int forced = edvr::cullcycle::g_buildOverride.load(std::memory_order_relaxed);
-    if (forced >= 0) return forced == 1;
-    static const bool known = [] {
-        const auto base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
-        if (!base) return false;
-        const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
-        if (dos->e_magic != IMAGE_DOS_SIGNATURE) return false;
-        const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
-        return nt->Signature == IMAGE_NT_SIGNATURE &&
-               nt->FileHeader.TimeDateStamp == edvr::cullcycle::kBuildStamp &&
-               nt->OptionalHeader.SizeOfImage == edvr::cullcycle::kBuildImageSize;
-    }();
-    return known;
 }
 
 // advanced.simulate_cant: degrees of outward cant, 0 (off) to 15.
@@ -357,49 +314,44 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
                           EdvrNativeFrameOutput* output) {
     std::lock_guard<std::mutex> lock(g_mutex);
     State* state = identify(context);
-    // A version 1, 2, 3, 4, 5 or 6 caller is an openvr_api.dll from before the
-    // cull probe (or, earlier, the canted-display test keys, the comfort fade,
-    // the channel probe, turbo pacing or the field-of-view trim) existed. Each
-    // gets exactly the fields it knows about, and whatever it cannot carry
-    // stays out of its struct entirely.
-    const bool wantsProbe = output &&
-        output->version == EDVR_NATIVE_FRAME_VERSION_7 &&
-        output->size == sizeof(*output);
-    const bool wantsCant = output && !wantsProbe &&
+    // A version 1, 2, 3, 4 or 5 caller is an openvr_api.dll from before the
+    // canted-display test keys (or, earlier, the comfort fade, the channel
+    // probe, turbo pacing or the field-of-view trim) existed. Each gets
+    // exactly the fields it knows about, and whatever it cannot carry stays
+    // out of its struct entirely.
+    const bool wantsCant = output &&
         output->version == EDVR_NATIVE_FRAME_VERSION_6 &&
-        output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_6;
-    const bool wantsFade = output && !wantsProbe && !wantsCant &&
+        output->size == sizeof(*output);
+    const bool wantsFade = output && !wantsCant &&
         output->version == EDVR_NATIVE_FRAME_VERSION_5 &&
         output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_5;
-    const bool wantsChannel = output && !wantsProbe && !wantsCant && !wantsFade &&
+    const bool wantsChannel = output && !wantsCant && !wantsFade &&
         output->version == EDVR_NATIVE_FRAME_VERSION_4 &&
         output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_4;
-    const bool wantsPacing = output && !wantsProbe && !wantsCant && !wantsFade && !wantsChannel &&
+    const bool wantsPacing = output && !wantsCant && !wantsFade && !wantsChannel &&
         output->version == EDVR_NATIVE_FRAME_VERSION_3 &&
         output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_3;
-    const bool wantsTrim = output && !wantsProbe && !wantsCant && !wantsFade && !wantsChannel && !wantsPacing &&
+    const bool wantsTrim = output && !wantsCant && !wantsFade && !wantsChannel && !wantsPacing &&
         output->version == EDVR_NATIVE_FRAME_VERSION_2 &&
         output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_2;
-    const bool legacy = output && !wantsProbe && !wantsCant && !wantsFade && !wantsChannel && !wantsPacing && !wantsTrim &&
+    const bool legacy = output && !wantsCant && !wantsFade && !wantsChannel && !wantsPacing && !wantsTrim &&
         output->version == EDVR_NATIVE_FRAME_VERSION_1 &&
         output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_1;
     if (!state || state != g_current || !state->active || !input || !output ||
         input->size != sizeof(*input) || input->version != EDVR_NATIVE_FRAME_VERSION_1 ||
-        (!wantsProbe && !wantsCant && !wantsFade && !wantsChannel && !wantsPacing && !wantsTrim && !legacy) ||
+        (!wantsCant && !wantsFade && !wantsChannel && !wantsPacing && !wantsTrim && !legacy) ||
         input->generation != state->generation || input->referenceGeneration == 0 ||
         input->sequence == 0 || input->sequence <= state->sequenceFloor ||
         input->valid > 1 || (input->valid && !rigidPose(input->physicalHead))) return E_INVALIDARG;
 
     EdvrNativeFrameOutput result{};
-    result.size = wantsProbe ? sizeof(result)
-                 : wantsCant ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_6
+    result.size = wantsCant ? sizeof(result)
                  : wantsFade ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_5
                  : wantsChannel ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_4
                  : wantsPacing ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_3
                  : wantsTrim  ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_2
                               : EDVR_NATIVE_FRAME_OUTPUT_SIZE_1;
-    result.version = wantsProbe ? EDVR_NATIVE_FRAME_VERSION_7
-                    : wantsCant ? EDVR_NATIVE_FRAME_VERSION_6
+    result.version = wantsCant ? EDVR_NATIVE_FRAME_VERSION_6
                     : wantsFade ? EDVR_NATIVE_FRAME_VERSION_5
                     : wantsChannel ? EDVR_NATIVE_FRAME_VERSION_4
                     : wantsPacing ? EDVR_NATIVE_FRAME_VERSION_3
@@ -431,35 +383,6 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
         "advanced.canted_eye_fix", true) ? 1u : 0u;
     result.simulateCantDeg = clampCantDegrees(edvr::Config::get().getFloat(
         "advanced.simulate_cant", 0.0f));
-    // The terrain-culling arc's selective-lie probe (docs\terrain-culling.md);
-    // only a version 7 caller has the slot. `cycle` is this half's own: it
-    // drives the groups on a schedule (cull_cycle.h) and sends the active one
-    // here, the same field, the same frame; it parses as off to cullProbe().
-    const std::string probeText = edvr::Config::get().getString(
-        "advanced.cull_probe", "off");
-    result.cullProbe = cullProbe(probeText);
-    const bool cycleRequested = wantsProbe && _stricmp(probeText.c_str(), "cycle") == 0;
-    // `measure` is the same counting with no lies, labelled by the cull guard's stage: 0 off (not configured), then what the
-    // runtime last told this half through setCullState -- 0 waiting, 1 adopting, 2 live.
-    const bool measureRequested = wantsProbe && _stricmp(probeText.c_str(), "measure") == 0;
-    const uint32_t guardState = edvr::decodeCullGuardState(edvr::cullGuardStatePacked()).stage;
-    const uint32_t guardStage = result.cullMode == 0 ? 0u : 1u + (guardState > 2u ? 2u : guardState);
-    // `mono` is the steady form of the cycle's seventh group: the mono camera's aspect is multiplied by 1.30 on every frame
-    // (mono_camera_core.h). It is this half's own, never sent to the runtime, which reads it as off.
-    const bool monoRequested = wantsProbe && _stricmp(probeText.c_str(), "mono") == 0;
-    const auto logLine = [](const char* line) { edvr::Log::get().note("%s", line); };
-    // The mono camera hooks go in on the first frame any of the three keys is set (and only then), before the driver reads their
-    // counter; their relay gate follows the key afterwards.
-    edvr::monocam::frame(cycleRequested || measureRequested || monoRequested, logLine);
-    const uint32_t cycleGroup = edvr::cullcycle::g_driver.frame(
-        cycleRequested, measureRequested, result.cullMode != 0, eliteIsBuild332841(), guardStage, cycleClockUs(),
-        physicalValid ? input->physicalHead : nullptr, logLine);
-    const bool steadyMono = edvr::cullcycle::g_steadyMono.frame(
-        monoRequested, result.cullMode != 0, eliteIsBuild332841(), logLine);
-    const bool cycleMono = cycleRequested && cycleGroup == edvr::cullcycle::kMonoGroup;
-    // The runtime is told group 0 for a mono window; the mono camera's lie is this half's switch.
-    if (cycleRequested) result.cullProbe = cycleMono ? 0u : cycleGroup;
-    edvr::monocam::g_lie.store(cycleMono || steadyMono, std::memory_order_relaxed);
     // The worn headset's entry in each of the three lists, resolved from the
     // last render-settings query's labels and cached between changes.
     uint32_t trim[kTrimCount] = {0, 0, 0};

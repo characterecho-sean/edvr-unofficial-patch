@@ -513,7 +513,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\flat_camera_producer_probe.cpp" "src\d3d11\flat_camera_inject.cpp" ^
     "src\d3d11\vr_world_route.cpp" "src\d3d11\vr_world_mips.cpp" "src\d3d11\vr_camera_census.cpp" ^
     "src\d3d11\native_sharpen.cpp" ^
-    "src\d3d11\native_frame.cpp" "src\d3d11\mono_camera_hook.cpp" ^
+    "src\d3d11\native_frame.cpp" ^
     "src\d3d11\native_fss.cpp" ^
     "src\d3d11\native_timing.cpp" ^
     "src\d3d11\map_wait.cpp" ^
@@ -888,7 +888,6 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE ^
     /Fo"%OBJ%\native_frame\\" /Fe"%BUILD%\native_frame_test.exe" ^
     "tools\native_frame_test\native_frame_test.cpp" "src\d3d11\native_frame.cpp" ^
-    "src\d3d11\mono_camera_hook.cpp" "src\common\code_hook.cpp" "src\common\guard.cpp" ^
     "src\d3d11\native_render_settings.cpp" "src\common\vscreen_auto_state.cpp" ^
     "src\common\config.cpp" "src\common\frame_flag.cpp" "src\common\log.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib dxgi.lib

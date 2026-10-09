@@ -6,20 +6,12 @@
 #include <atomic>
 #include <cmath>
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <mutex>
-#include <string>
 #include <utility>
 #include <thread>
-#include <vector>
 extern "C" vr::IVRSystem* openxrAbiCaller(vr::IVRSystem*);
-extern "C" int openxrAbiCallRaw(vr::IVRSystem*, vr::EVREye, float*);   // out[0..3] = left, right, top, bottom; out[4] spare
-extern "C" int openxrAbiOuterRaw(vr::IVRSystem*, vr::EVREye, float*);   // calls openxrAbiCallRaw
-extern "C" int openxrAbiCallSize(vr::IVRSystem*, unsigned*, unsigned*);
-extern "C" int openxrAbiCallMatrix(vr::IVRSystem*, vr::EVREye, vr::HmdMatrix44_t*);
-extern "C" int openxrAbiCallEyeToHead(vr::IVRSystem*, vr::EVREye, vr::HmdMatrix34_t*);
 // (windows.h stays out of this rig: its `near` macro breaks the headers the rig includes.)
 extern "C" __declspec(dllimport) unsigned long __stdcall GetCurrentThreadId(void);
 extern "C" int openxrAbiCallPose(vr::IVRSystem*, vr::ETrackingUniverseOrigin, float, vr::TrackedDevicePose_t*, uint32_t);
@@ -81,10 +73,6 @@ struct FakeSource final : SystemSource {
   void noteProjectionQuery(const SystemRead&,unsigned,float,float,vr::EGraphicsAPIConvention,
       bool accepted,const vr::HmdMatrix44_t&,const void*) noexcept override {
     std::lock_guard<std::mutex> lock(mutex);if(accepted)++queryAccepted;else ++queryRejected;
-  }
-  std::vector<std::string> callerLines;
-  void noteCallerLine(const char* line) noexcept override {
-    std::lock_guard<std::mutex> lock(mutex);callerLines.emplace_back(line);
   }
   unsigned eyeNotes=0;unsigned notedEyeIndex=99;vr::HmdMatrix34_t notedGiven{},notedLocated{};
   void noteEyeToHead(const SystemRead&,unsigned eye,const vr::HmdMatrix34_t& given,const vr::HmdMatrix34_t& located) noexcept override {
@@ -466,197 +454,13 @@ void oddRecommendationTest() {
         !source.state.recommendedHeight[0], "retirement clears recommendations");
 }
 
-// The terrain-culling arc's census and selective-lie probe, through the historical virtual ABI (docs\terrain-culling.md): frame 1 is the immediate caller in the
-// game's image and not an adapter in this DLL, the probe answers exactly the callers it is asked to and nobody else, and a tracking shift rides along.
-__declspec(noinline) void callerCensusTests(vr::IVRSystem* system, FakeSource& source, edvr::openxr::OpenVRSystem& concrete) {
-  using edvr::openxr::CullProbe;
+// Elite's "now" head pose, through the historical virtual ABI (docs/terrain-culling.md): which GetDeviceToAbsoluteTrackingPose calls are flagged for the drawn
+// frame's display time, judged by a return address inside the executable and a prediction under 5 ms either way, and what reaches the source.
+__declspec(noinline) void headPoseTests(vr::IVRSystem* system, FakeSource& source, edvr::openxr::OpenVRSystem& concrete) {
   using edvr::openxr::ExeModule;
-  using edvr::openxr::ProjectionCallers;
-  namespace rva = edvr::openxr::cull_rva;
-  const ExeModule real = concrete.callers().module();
-  check(real.base != 0 && real.size != 0, "the census knows the executable it reports RVAs against");
-  float truth[5]{};
-  // ---- frame 1 is the caller, directly ----
-  const unsigned linesBefore = [&] { std::lock_guard<std::mutex> lock(source.mutex); return unsigned(source.callerLines.size()); }();
-  openxrAbiOuterRaw(system, vr::Eye_Left, truth);
-  ProjectionCallers::Entry entries[ProjectionCallers::kCapacity];
-  unsigned n = concrete.callers().snapshot(entries, ProjectionCallers::kCapacity);
-  const uintptr_t callerFunction = reinterpret_cast<uintptr_t>(&openxrAbiCallRaw);
-  const ProjectionCallers::Entry* direct = nullptr;
-  for (unsigned i = 0; i < n; ++i)
-    if (entries[i].method == ProjectionCallers::Raw && entries[i].eye == 0 && entries[i].rva1 < edvr::openxr::kFrameUnknown &&
-        real.base + entries[i].rva1 > callerFunction && real.base + entries[i].rva1 - callerFunction < 0x100) direct = &entries[i];
-  check(direct != nullptr, "the vtable call lands in OpenVRSystem itself: frame 1 is a return address a few bytes into the game-side caller, not an adapter in between");
-  if (!direct) return;
-  const uintptr_t outer = reinterpret_cast<uintptr_t>(&openxrAbiOuterRaw), me = reinterpret_cast<uintptr_t>(&callerCensusTests);
-  check(direct->rva2 < edvr::openxr::kFrameUnknown && real.base + direct->rva2 > outer && real.base + direct->rva2 - outer < 0x100,
-        "...and the first-sight stack capture gives frame 2: the return address in the function that called that caller");
-  {
-    // Frame 3 is checked on the line the census logged: the return address in this test, one function further up.
-    std::lock_guard<std::mutex> lock(source.mutex);
-    const std::string line = source.callerLines.size() > linesBefore ? source.callerLines[linesBefore] : std::string();
-    const size_t last = line.rfind("<- exe+0x");
-    const unsigned long rva3 = last == std::string::npos ? 0ul : std::strtoul(line.c_str() + last + 9, nullptr, 16);
-    const bool inOuter = real.base + rva3 > outer && real.base + rva3 - outer < 0x100;
-    check(rva3 != 0 && rva3 != direct->rva2 && !inOuter && real.base + rva3 > me && real.base + rva3 - me < 0x10000, "...and frame 3: the return address in the test, one function further up");
-  }
-  {
-    std::lock_guard<std::mutex> lock(source.mutex);
-    const std::string* line = source.callerLines.size() > linesBefore ? &source.callerLines[linesBefore] : nullptr;
-    check(line && line->rfind("projection callers: GetProjectionRaw exe+0x", 0) == 0 && line->find(" <- exe+0x") != std::string::npos && line->find("outside") == std::string::npos &&
-          line->find(" eye 0 tid ") != std::string::npos, "...and one first-sight line says so");
-  }
-  vr::HmdMatrix44_t matrix{};
-  vr::HmdMatrix34_t head{};
-  openxrAbiCallMatrix(system, vr::Eye_Left, &matrix);
-  openxrAbiCallEyeToHead(system, vr::Eye_Right, &head);
-  n = concrete.callers().snapshot(entries, ProjectionCallers::kCapacity);
-  bool matrixSeen = false, eyeSeen = false;
-  for (unsigned i = 0; i < n; ++i) {
-    matrixSeen = matrixSeen || (entries[i].method == ProjectionCallers::Matrix && entries[i].eye == 0 && real.base + entries[i].rva1 - reinterpret_cast<uintptr_t>(&openxrAbiCallMatrix) < 0x100);
-    eyeSeen = eyeSeen || (entries[i].method == ProjectionCallers::EyeToHead && entries[i].eye == 1 && real.base + entries[i].rva1 - reinterpret_cast<uintptr_t>(&openxrAbiCallEyeToHead) < 0x100);
-  }
-  check(matrixSeen && eyeSeen, "GetProjectionMatrix and GetEyeToHeadTransform are recorded with their own callers and eyes");
-  // A call made before there is any geometry to answer with is a caller all the same.
-  {
-    const SystemRead keptState = source.state;
-    const uintptr_t eyeCaller = reinterpret_cast<uintptr_t>(&openxrAbiCallEyeToHead);
-    const auto countFrom = [&] {
-      ProjectionCallers::Entry e[ProjectionCallers::kCapacity];
-      const unsigned m = concrete.callers().snapshot(e, ProjectionCallers::kCapacity);
-      unsigned total = 0;
-      for (unsigned i = 0; i < m; ++i)
-        if (e[i].method == ProjectionCallers::EyeToHead && e[i].eye == 1 && e[i].rva1 < edvr::openxr::kFrameUnknown && real.base + e[i].rva1 > eyeCaller && real.base + e[i].rva1 - eyeCaller < 0x100)
-          total += unsigned(e[i].count);
-      return total;
-    };
-    const unsigned countBefore = countFrom();
-    source.state.opticsValid = false; source.state.geometryValid = false;
-    vr::HmdMatrix34_t none{};
-    openxrAbiCallEyeToHead(system, vr::Eye_Right, &none);
-    check(allZero(&none, sizeof(none)) && countFrom() == countBefore + 1, "a GetEyeToHeadTransform call with no geometry yet answers zeros and is still counted");
-    source.state = keptState;
-  }
-  // ---- the probe ----
-  source.state.tangentShift[0][0] = 0.01f; source.state.tangentShift[0][1] = -0.02f;   // a jitter shift in the answer the probe starts from
-  source.state.cullProbe = 0;
-  openxrAbiCallMatrix(system, vr::Eye_Left, &matrix);
-  openxrAbiCallEyeToHead(system, vr::Eye_Right, &head);
-  float honest[5]{}, honestRight[5]{};
-  openxrAbiCallRaw(system, vr::Eye_Left, honest);
-  openxrAbiCallRaw(system, vr::Eye_Right, honestRight);
-  const float h = std::fmax(std::fabs(honest[0]), std::fabs(honest[1])), v = std::fmax(std::fabs(honest[2]), std::fabs(honest[3]));
-  const float wide[4] = {-h, h, -v, v};
-  const auto sameAs = [](const float* got, const float* want) { return std::memcmp(got, want, 4 * sizeof(float)) == 0; };
-  const auto ask = [&](uint32_t group, float* out) { source.state.cullProbe = group; std::memset(out, 0, 5 * sizeof(float)); openxrAbiCallRaw(system, vr::Eye_Left, out); };
-  check(near(honest[0], -.6841368f + 0.01f) && near(honest[1], .8422884f + 0.01f) && h > std::fabs(honest[0]) && v > 0.0f,
-        "(the starting answer carries the jitter shift, and is asymmetric, so the superset differs from it)");
-  // Pretend the game image starts so that this call site is one of the named ones, and ask every group about it.
-  const uintptr_t callSite = real.base + direct->rva1;
-  struct Site { uint32_t rva; bool camera, ui, sky, sizes, other; };
-  const Site sites[] = {
-    {rva::kSkyFov, false, false, true, false, false},
-    {rva::kSizes[0], false, false, false, true, false}, {rva::kSizes[3], false, false, false, true, false},
-    {rva::kEyeFov, false, false, false, false, true},   // frame 2 here is neither the camera setter nor the ui scale: other
-    {0x5000, false, false, false, false, true},
-  };
-  for (const Site& site : sites) {
-    concrete.callers().useModule(ExeModule{callSite - site.rva, 0x40000000, edvr::openxr::kBuild332841Stamp, edvr::openxr::kBuild332841ImageSize});
-    float got[5]{};
-    ask(1, got);
-    check(sameAs(got, wide), "all: the superset of the answer it would have had, the shift included");
-    ask(0, got);
-    check(sameAs(got, honest), "off: exactly the honest answer");
-    ask(2, got); const bool camera = sameAs(got, wide);
-    ask(3, got); const bool ui = sameAs(got, wide);
-    ask(4, got); const bool sky = sameAs(got, wide);
-    ask(5, got); const bool sizes = sameAs(got, wide);
-    ask(6, got); const bool other = sameAs(got, wide);
-    check(camera == site.camera && ui == site.ui && sky == site.sky && sizes == site.sizes && other == site.other,
-          "each group is answered wide for exactly its own callers, and every other caller gets its honest answer, bit for bit");
-    ask(0, got);
-  }
-  // The right eye, and an invalid eye, through the same caller.
-  concrete.callers().useModule(ExeModule{callSite - rva::kSkyFov, 0x40000000, edvr::openxr::kBuild332841Stamp, edvr::openxr::kBuild332841ImageSize});
-  source.state.cullProbe = 4;
-  float rightWide[5]{}, invalid[5]{};
-  openxrAbiCallRaw(system, vr::Eye_Right, rightWide);
-  openxrAbiCallRaw(system, static_cast<vr::EVREye>(9), invalid);
-  const float rh = std::fmax(std::fabs(honestRight[0]), std::fabs(honestRight[1])), rv = std::fmax(std::fabs(honestRight[2]), std::fabs(honestRight[3]));
-  const float rightWant[4] = {-rh, rh, -rv, rv};
-  check(sameAs(rightWide, rightWant), "the right eye is widened from its own answer");
-  check(allZero(invalid, 4 * sizeof(float)), "an invalid eye still zeroes its outputs under the probe (a zero stays +0)");
-  // ---- the probe's second lie: the aspect the fov getter asks for (GetRecommendedRenderTargetSize at kAspectCall) ----
-  {
-    concrete.callers().useModule(real);   // (the probe cells above left the image remapped)
-    source.state.cullProbe = 0;   // (the jitter shift set above is still in: the told aspect is made from the true tangents, before it)
-    unsigned honestW = 0, honestH = 0;
-    const size_t sizeLinesBefore = [&] { std::lock_guard<std::mutex> lock(source.mutex); return source.callerLines.size(); }();
-    openxrAbiCallSize(system, &honestW, &honestH);
-    {
-      // A caller of GetRecommendedRenderTargetSize is a lead now: its first-sight line carries all three frames, like the others.
-      std::lock_guard<std::mutex> lock(source.mutex);
-      const std::string line = source.callerLines.size() > sizeLinesBefore ? source.callerLines[sizeLinesBefore] : std::string();
-      size_t arrows = 0;
-      for (size_t at = line.find(" <- exe+0x"); at != std::string::npos; at = line.find(" <- exe+0x", at + 1)) ++arrows;
-      check(line.rfind("projection callers: GetRecommendedRenderTargetSize exe+0x", 0) == 0 && arrows == 2 && line.find('?') == std::string::npos && line.find("outside") == std::string::npos,
-            "GetRecommendedRenderTargetSize' first-sight line carries frames 1, 2 and 3 like the other methods");
-    }
-    check(honestW == 1128 && honestH == 786, "(the honest answer is the larger eye's size)");
-    n = concrete.callers().snapshot(entries, ProjectionCallers::kCapacity);
-    const uintptr_t sizeCaller = reinterpret_cast<uintptr_t>(&openxrAbiCallSize);
-    const ProjectionCallers::Entry* sizeEntry = nullptr;
-    for (unsigned i = 0; i < n; ++i)
-      if (entries[i].method == ProjectionCallers::RenderSize && entries[i].rva1 < edvr::openxr::kFrameUnknown && real.base + entries[i].rva1 > sizeCaller &&
-          real.base + entries[i].rva1 - sizeCaller < 0x100) sizeEntry = &entries[i];
-    check(sizeEntry != nullptr, "GetRecommendedRenderTargetSize is recorded with its own caller (a fourth method), landing directly in OpenVRSystem");
-    if (sizeEntry) {
-      const uintptr_t sizeSite = real.base + sizeEntry->rva1;
-      const double aspect = std::tan(0.7) / std::tan(0.5);   // the eyes'' largest horizontal tangent over their largest vertical one, from the located fov
-      const unsigned wantWidth = unsigned(2.0 * std::floor(786.0 * aspect * 0.5 + 0.5));
-      check(wantWidth == 1212, "(by hand: tan 0.7 / tan 0.5 = 1.5418, times a height of 786 is 1211.9, which is 1212)");
-      struct At { uint32_t rva; bool wideAll, wideCamera, wideUi, wideOther; };
-      const At sites[] = {{rva::kAspectCall, true, false, false, true},   // the real chain''s frame 2 is neither the camera setter nor the ui scale: other
-                          {rva::kAspectCall - 1, false, false, false, false}, {rva::kAspectCall + 1, false, false, false, false},
-                          {0x5000, false, false, false, false}, {rva::kEyeFov, false, false, false, false}};
-      const size_t linesBefore = [&] { std::lock_guard<std::mutex> lock(source.mutex); return source.callerLines.size(); }();
-      for (const At& at : sites) {
-        concrete.callers().useModule(ExeModule{sizeSite - at.rva, 0x40000000, edvr::openxr::kBuild332841Stamp, edvr::openxr::kBuild332841ImageSize});
-        bool exact = true, honestHeight = true;
-        for (uint32_t group = 0; group <= 6; ++group) {
-          source.state.cullProbe = group;
-          const bool wide = group == 1 ? at.wideAll : group == 2 ? at.wideCamera : group == 3 ? at.wideUi : group == 6 ? at.wideOther : false;
-          for (int again = 0; again < 2; ++again) {
-            unsigned w = 0, h = 0;
-            openxrAbiCallSize(system, &w, &h);
-            exact = exact && (wide ? w == wantWidth : (w == honestW)) && h == honestH;
-            honestHeight = honestHeight && h == honestH;
-          }
-        }
-        check(exact && honestHeight,
-              at.wideAll ? "at 0x4E2FBE the real chain is answered under all and other (a width of 1212, the height kept) and bit-identically honest under camera, ui, sky, sizes and off"
-                         : "at 0x4E2FBE +-1, an unlisted RVA and the fov getter's raw site, every probe leaves GetRecommendedRenderTargetSize exactly honest, the height always");
-      }
-      source.state.cullProbe = 0;
-      unsigned back = 0, backH = 0;
-      openxrAbiCallSize(system, &back, &backH);
-      check(back == honestW && backH == honestH, "...and off is the honest answer again");
-      std::lock_guard<std::mutex> lock(source.mutex);
-      unsigned told = 0;
-      bool exactLine = false;
-      for (size_t i = linesBefore; i < source.callerLines.size(); ++i) {
-        if (source.callerLines[i].find("also told aspect") != std::string::npos) {
-          ++told;
-          exactLine = exactLine || source.callerLines[i] == "cull probe: all also told aspect 1.5420 (true 1.4351) at the fov getter";
-        }
-      }
-      check(told == 2 && exactLine, "the aspect is said once per change of group (all, then other), as 'cull probe: all also told aspect 1.5420 (true 1.4351) at the fov getter'");
-    }
-    concrete.callers().useModule(real);
-  }
   // ---- Elite's "now" head pose: which GetDeviceToAbsoluteTrackingPose calls are answered at the drawn frame's display time ----
   {
-    const ExeModule realExe = concrete.callers().module();
+    const ExeModule realExe = concrete.exeModule();
     concrete.useExeModule(realExe);
     vr::TrackedDevicePose_t poses[3]{};
     const auto lastCall = [&] { std::lock_guard<std::mutex> lock(source.mutex); return source.lastCall; };
@@ -724,17 +528,6 @@ __declspec(noinline) void callerCensusTests(vr::IVRSystem* system, FakeSource& s
     source.state.connected = wasConnected;
     concrete.useExeModule(realExe);
   }
-  // Nothing else changes: not the matrix, not the eye transform.
-  vr::HmdMatrix44_t matrixWide{};
-  vr::HmdMatrix34_t headWide{};
-  source.state.cullProbe = 1;
-  openxrAbiCallMatrix(system, vr::Eye_Left, &matrixWide);
-  openxrAbiCallEyeToHead(system, vr::Eye_Right, &headWide);
-  check(std::memcmp(&matrix, &matrixWide, sizeof(matrix)) == 0 && std::memcmp(&head, &headWide, sizeof(head)) == 0,
-        "GetProjectionMatrix and GetEyeToHeadTransform answer the same under any probe, bit for bit");
-  source.state.cullProbe = 0;
-  source.state.tangentShift[0][0] = source.state.tangentShift[0][1] = 0;
-  concrete.callers().useModule(real);
 }
 int selfTest() {
   publicationTest();
@@ -841,7 +634,7 @@ int selfTest() {
           "no live geometry: the cached optics are corrected the same way");
     source.state = keptState; source.state.cantedEyeFix = false;
   }
-  callerCensusTests(system, source, concrete);
+  headPoseTests(system, source, concrete);
   for(const auto e:{vr::Eye_Left,vr::Eye_Right})for (const auto api : {vr::API_DirectX, vr::API_OpenGL}) for (const auto planes : {std::pair<float,float>{.025f,50000.f}, {.1f,1000.f}, {1.f,50000.f}}) {
     const auto m = system->GetProjectionMatrix(e, planes.first, planes.second, api);
     const float left=std::tan(-.6f), right=std::tan(.7f), top=std::tan(-.4f), bottom=std::tan(.5f);

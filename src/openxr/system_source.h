@@ -44,11 +44,6 @@ struct SystemRead {
   // It changes that one answer and nothing here: geometry and optics above keep
   // the located transform, which the native frame tables and the layer use.
   bool cantedEyeFix=false;
-  // advanced.cull_probe (TEMPORARY, docs\terrain-culling.md), as the host decided
-  // it for this frame: the CullProbe group whose GetProjectionRaw callers are
-  // answered with the symmetric superset, 0 when off, ignored (a cull guard is
-  // configured) or stood down (not build 332841).
-  uint32_t cullProbe=0;
 };
 
 // Who called GetDeviceToAbsoluteTrackingPose and which instant it is to be located at. Taken on the CALLER's thread before the hop to
@@ -99,8 +94,6 @@ class SystemSource {
   // runtime's own transform that answer was made from. Bounded, as above.
   virtual void noteEyeToHead(const SystemRead&,unsigned,const vr::HmdMatrix34_t&,
       const vr::HmdMatrix34_t&) noexcept {}
-  // One finished log line of the projection-caller census (projection_callers.h).
-  virtual void noteCallerLine(const char*) noexcept {}
   virtual void noteFrequencyQuery(const SystemRead&,vr::TrackedDeviceIndex_t,
       vr::ETrackedPropertyError,float,unsigned) noexcept {}
   virtual void notePropertyQuery(unsigned,vr::TrackedDeviceIndex_t,

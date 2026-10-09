@@ -57,19 +57,12 @@ size_t codeInstructionLength(const uint8_t* code, size_t available,
 
     // Prefixes. Only the operand-size prefix and REX are expected in a
     // prologue; a segment, lock or rep prefix means this is not the sort of
-    // instruction being decoded and the answer is 0. The one exception is F3,
-    // taken ahead of REX for `movss` alone (below): a getter that is a single
-    // `movss xmm0,[rcx+disp]` and a return is all prologue there is.
-    bool movss = false;
-    if (i < available && code[i] == 0xF3) { movss = true; ++i; }
-    else if (i < available && code[i] == 0x66) ++i;
+    // instruction being decoded and the answer is 0.
+    if (i < available && code[i] == 0x66) ++i;
     if (i < available && isRexPrefix(code[i])) ++i;
     if (i >= available) return 0;
 
     const uint8_t op = code[i++];
-    // An F3 prefix is only ever the start of `F3 [REX] 0F 10/11`; on anything else
-    // it is a rep prefix or an SSE form this decoder does not know.
-    if (movss && op != 0x0F) return 0;
     switch (op) {
         // push/pop r64 -- the classic prologue register saves.
         case 0x50: case 0x51: case 0x52: case 0x53:
@@ -142,19 +135,6 @@ size_t codeInstructionLength(const uint8_t* code, size_t available,
         case 0x90:
             return i;
         case 0x0F: {
-            // movss xmm, m32 and movss m32, xmm (F3 0F 10 /r and F3 0F 11 /r). The memory operand is measured like any other, so a
-            // rip-relative one reports its displacement offset and a register-register form is just the opcode and ModRM.
-            if (movss && i < available && (code[i] == 0x10 || code[i] == 0x11)) {
-                ++i;
-                if (i >= available) return 0;
-                bool rip = false;
-                size_t extra = 0;
-                if (!modrmSize(code[i], &rip, &extra)) return 0;
-                if (rip && ripDispOffset) *ripDispOffset = i + 1;
-                i += extra;
-                return i <= available ? i : 0;
-            }
-            if (movss) return 0;   // F3 0F anything else: addss, cvtsi2ss, pause, ...
             if (i < available && code[i] == 0x1F) {
                 ++i;
                 if (i >= available) return 0;
