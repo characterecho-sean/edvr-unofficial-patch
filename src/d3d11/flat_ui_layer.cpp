@@ -78,12 +78,10 @@ const char* flatUiLayerState() {
     if (!runtimeFlatProfile()) return "off (not the flat profile)";
     if (uiLayerCrispOn()) return "live";
     if (uiLayerLive()) return "off (the HDR HUD path stood down; see its line)";
+    // The shared layer's own reason, verbatim (2026-10-09: a relabelled reason hid the refused jitter key that kept the
+    // first flight's layer dead). In flat, "no temporal mode is on (fix.temporal_aa is off)" means the flat AA mode is off.
     const char* why = uiLayerNotLiveReason();
-    if (!why) return "off";
-    if (std::strstr(why, "ui_quality")) return "off (fix.ui_quality is off)";
-    if (std::strstr(why, "temporal")) return "off (anti-aliasing is off)";
-    if (std::strstr(why, "stood down")) return "off (the layer stood down; see its line)";
-    return "off (the jitter switches are set)";
+    return why ? why : "off (no reason given)";
 }
 
 FlatUiLayerAsk flatUiLayerDecide(ID3D11DeviceContext* ctx, const FlatUiLayerDraw& d) {

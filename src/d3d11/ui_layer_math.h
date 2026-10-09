@@ -1338,6 +1338,12 @@ inline int uiWorldFormatRefusal(char* out, size_t size, int eye, uint16_t id) {
 // reading) runs today: fix.ui_quality on, a temporal mode on, the jitter switches as shipped, and the layer not
 // stood down -- ui_layer.cpp's refreshLive() evaluates it through this, and the route must not run without it. The
 // reason is the one line the route's log gives for a layer that is not; null when the layer is live.
+// The jitter switches are as shipped: advanced.temporal_aa_jitter_sign as_is and no lag. The flat profile has neither
+// switch (its gate refuses both keys, and a refused getString answers "off", which is not as_is): always as shipped there.
+inline bool uiLayerJitterAsShippedFor(bool flatProfile, const char* sign, float lag) {
+    if (flatProfile) return true;
+    return sign && _stricmp(sign, "as_is") == 0 && !(lag >= 0.5f);
+}
 inline bool uiLayerLiveFor(float target, bool temporal, bool jitterAsShipped, bool stoodDown) {
     return target > 0.0f && temporal && jitterAsShipped && !stoodDown;
 }

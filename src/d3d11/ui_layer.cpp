@@ -2833,10 +2833,13 @@ void uiLayerConfigure(Config& cfg) {
     // The cancel follows the shipped jitter convention (as_is, no lag); the
     // two switches that re-read it are diagnostics of the pass's reading,
     // and while either is set the game's pixels may sit where the cancel
-    // does not expect them -- the layer waits rather than guess.
-    const bool jitterAsShipped =
-        _stricmp(cfg.getString("advanced.temporal_aa_jitter_sign", "as_is").c_str(), "as_is") == 0 &&
-        !(cfg.getFloat("advanced.temporal_aa_jitter_lag", 0.0f) >= 0.5f);
+    // does not expect them -- the layer waits rather than guess. The flat profile has neither switch: both keys are
+    // refused by its gate (runtimeProfileAllowsKey), where a refused getString answers "off" -- which read as "not as
+    // shipped" and kept the flat layer dead on its first flight (2026-10-09 11:08, build 130f62b0). Its jitter is the
+    // flat phase machine's, read per draw from the camera rows (flat_ui_layer.cpp): as shipped by construction.
+    const bool jitterAsShipped = uiLayerJitterAsShippedFor(runtimeFlatProfile(),
+        cfg.getString("advanced.temporal_aa_jitter_sign", "as_is").c_str(),
+        cfg.getFloat("advanced.temporal_aa_jitter_lag", 0.0f));
     const bool changed = !g_keyNoted || text != g_keyText || target != g_target ||
                          temporal != g_temporal || debugView != g_debugView ||
                          jitterAsShipped != g_jitterAsShipped;
@@ -2872,8 +2875,11 @@ void uiLayerConfigure(Config& cfg) {
     }
     if (runtimeFlatProfile()) {
         Log::get().note(
-            "ui quality: %s (flat) -- %s",
+            "ui quality: %s (flat; the layer is %s) -- %s",
             uiQualityLabel(target),
+            detail::g_uiLayerCrispOn ? "live" : uiLayerNotLiveReasonFor(g_target, g_temporal, g_jitterAsShipped, g_stoodDown)
+                                              ? uiLayerNotLiveReasonFor(g_target, g_temporal, g_jitterAsShipped, g_stoodDown)
+                                              : "not live: the HDR HUD path stood down",
             flatAa ? "panels: the game's own panel formula makes every render-to-texture panel at the display's size "
                      "times the target, whatever the render size, from the next panel init or view change (the \"ui "
                      "quality: panels (flat)\" lines give the factor); cockpit HUD: the holo panels, the flight HUD, the "

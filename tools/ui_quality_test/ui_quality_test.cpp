@@ -1171,6 +1171,26 @@ void testFlatLayerRules() {
           "flat layer: at a 3840x2160 door the layer is 3840x2160 at 100 and 4800x2700 at 125");
     for (size_t i = 0; i < static_cast<size_t>(FlatUiRefuse::kCount); ++i)
         check(std::strcmp(flatUiRefuseName(static_cast<FlatUiRefuse>(i)), "?") != 0, "flat layer: every refusal has a name");
+
+    // Live with the default config (the 2026-10-09 11:08 flight: dead because the flat gate refuses
+    // advanced.temporal_aa_jitter_sign, whose refused getString answers "off", read as "not as shipped").
+    const bool flatShipped = uiLayerJitterAsShippedFor(true, "off", 0.0f);
+    check(flatShipped && uiLayerLiveFor(1.0f, true, flatShipped, false) && !uiLayerNotLiveReasonFor(1.0f, true, flatShipped, false),
+          "flat layer: ui_quality 100 + flat AA with the refused jitter keys reading off -> live, no reason");
+    check(uiLayerJitterAsShippedFor(false, "as_is", 0.0f) && !uiLayerJitterAsShippedFor(false, "off", 0.0f) &&
+              !uiLayerJitterAsShippedFor(false, "flip", 0.0f) && !uiLayerJitterAsShippedFor(false, "as_is", 1.0f) &&
+              !uiLayerJitterAsShippedFor(false, nullptr, 0.0f),
+          "VR: the jitter switches as before (as_is and no lag only)");
+    {
+        std::ifstream layerSrc("src/d3d11/ui_layer.cpp", std::ios::binary), adapterSrc("src/d3d11/flat_ui_layer.cpp", std::ios::binary);
+        const std::string layer((std::istreambuf_iterator<char>(layerSrc)), std::istreambuf_iterator<char>());
+        const std::string adapter((std::istreambuf_iterator<char>(adapterSrc)), std::istreambuf_iterator<char>());
+        check(!layer.empty() && layer.find("const bool jitterAsShipped = uiLayerJitterAsShippedFor(runtimeFlatProfile(),") != std::string::npos,
+              "wiring: uiLayerConfigure reads the jitter switches through uiLayerJitterAsShippedFor with the flat profile");
+        check(!adapter.empty() && adapter.find("const char* why = uiLayerNotLiveReason();") != std::string::npos &&
+                  adapter.find("strstr") == std::string::npos,
+              "wiring: the flat layer's state names the shared not-live reason verbatim (no relabelling)");
+    }
 }
 
 // The family rule (ui_layer_math.h's uiLayerFamilyFor, which vscreen.cpp's
