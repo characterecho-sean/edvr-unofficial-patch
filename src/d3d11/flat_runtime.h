@@ -137,9 +137,8 @@ struct FlatRuntimeDrawScope {
     bool untrustedPlanned = false, untrustedStarted = false, untrustedEnded = false;
     // fix.ui_quality's flat layer (flat_ui_layer.h): a cockpit HUD draw the shared decision took (uiTake; uiTaken once
     // Begin bound the layer), the game's tonemap admitted for its re-issue (uiTone), the output copy that composites
-    // (uiComposite); uiCensusRow is the draw's census row, for the layer's answer.
+    // (uiComposite).
     bool uiTake=false,uiTaken=false,uiEnded=false,uiTone=false,uiComposite=false;
-    int uiCensusRow=-1;
     uint64_t uiVs=0,uiPs=0;
     bool domainPlanned=false,domainStarted=false,domainForeign=false,domainPool=false;
     bool domainProtectedOverlay=false;

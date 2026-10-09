@@ -52,7 +52,7 @@
 #include "device_hook.h"
 #include "dlaa.h"
 #include "flat_sharpen.h"
-#include "flat_ui_census.h"
+#include "flat_ui_layer_math.h"   // fix.ui_quality's flat layer: the target class and family rule its decision asks
 #include "../common/config.h"
 #include "../common/log.h"
 #include "../common/runtime_profile.h"
@@ -3660,12 +3660,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     s.phaseCensusPending=s.jitterWanted && s.work != FlatWork::Paused;
     s.phaseCensusFailed=false;
     s.prefix.output = output.Get(); s.prefix.width = d.Width; s.prefix.height = d.Height; s.prefix.format = d.Format;
-    {   // The interface census (flat_ui_census.h): observation only. s.treated / s.hdrTreated still hold the frame that ended.
-        uint32_t censusRw = 0, censusRh = 0, censusOw = 0, censusOh = 0;
-        flatRuntimeSceneSizes(&censusRw, &censusRh, &censusOw, &censusOh);
-        flatUiCensusFrame(frame + 1, s.work == FlatWork::Paused, d.Width, d.Height, censusRw, censusRh,
-            flatMonoResolveModeName(s.engine), flatCameraInjectUpstreamOwns(), s.hdrTreated, s.treated && !s.hdrTreated);
-    }
+    flatUiLayerFrame();   // fix.ui_quality's flat layer: its 30 s lines (flat_ui_layer.h)
     if(s.namingVetoedThisFrame) {
         // A frame that vetoed a draw: if the world was named anyway the veto did its work; if nothing named it, the reference may be the
         // one that is wrong, and the third such frame in a row gives it up (the next naming and the next H select a new one).
@@ -4894,14 +4889,6 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         if(admitted) overlaySuffixActive.store(true,std::memory_order_release);
         else { overlayPlanned=false; overlayHdr=nullptr; overlayDsv=nullptr; }
     }
-    {   // The interface census (flat_ui_census.h): observation only, before this draw's own resolve work.
-        FlatUiDrawFacts census;
-        census.vs = k.vs; census.ps = k.ps; census.color = k.color; census.output = s.prefix.output;
-        census.width = k.width; census.height = k.height; census.format = k.format; census.hasDepth = k.depth != nullptr;
-        census.tone = tone; census.copy = copy; census.resolved = s.treated || s.hdrTreated;
-        census.jittered = nonzeroPhase(s); census.overlayProtected = overlayPlanned;
-        uiCensusRow = flatUiCensusDraw(ctx, census);
-    }
     if(!s.overlayFailureNoted)for(uint32_t i=0;i<s.prefix.targetsUsed;++i) {
         const auto& target=s.prefix.targets[i];
         if(target.overlayOpen && target.hdrBad) {
@@ -5380,12 +5367,12 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
                            overlayPlanned || foregroundPlanned || untrustedPlanned || domainPlanned ||
                            weaponFootprintStarted || d.overlayProtected || d.alternateHdr;
             ui.upstream = flatCameraInjectUpstreamOwns();
-            static_assert(sizeof(ui.rows) <= kFlatCameraBytes, "the camera rows the census copies hold the six rows");
+            static_assert(sizeof(ui.rows) <= kFlatCameraBytes, "the camera table's rows hold the six rows");
             if (k.camera) { ui.haveRows = true; std::memcpy(ui.rows, d.camera, sizeof(ui.rows)); }
             ui.phaseX = s.phase.currentX; ui.phaseY = s.phase.currentY;
             ask = flatUiLayerDecide(ctx, ui);   // a cockpit HUD family's draw, or kNotAsked
             if (ask == FlatUiLayerAsk::kDecided) { uiTake = true; uiVs = k.vs; uiPs = k.ps; }
-            else if (ask == FlatUiLayerAsk::kRefused) flatUiCensusLayer(uiCensusRow, false);
+            else if (ask == FlatUiLayerAsk::kRefused) {}   // a HUD draw left in H: never also a tone candidate
             // The game's tone pass by its known pair, whatever its vertex count (the 11:32 flight's HDR route read a copy of
             // H, which the structural rule below never matched): the next frame's proof, and this frame's admission.
             else if (tone) {
@@ -6010,7 +5997,6 @@ void FlatRuntimeDrawScope::beginActualDraw(ID3D11Buffer* indirectArgs,UINT indir
     if(uiTake) {
         uiTaken=flatUiLayerBegin(ctx);
         flatUiLayerNoteIssue(uiVs,uiPs,uiTaken);
-        flatUiCensusLayer(uiCensusRow,uiTaken);
     }
     if(uiComposite) {
         auto& s=state();

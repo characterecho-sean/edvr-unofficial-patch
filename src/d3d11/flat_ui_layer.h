@@ -44,7 +44,7 @@ struct FlatUiLayerDraw {
     const void* color = nullptr;       // its colour target (identity only)
     uint32_t width = 0, height = 0;    // its colour target
     uint32_t format = 0;
-    bool hdrTarget = false;            // that target is the scene's HDR target (flat_ui_census.h's kHdr class)
+    bool hdrTarget = false;            // that target is the scene's HDR target (flat_ui_layer_math.h FlatUiTarget::kHdr)
     bool otherWork = false;            // the scope does something else with the draw (a capture, an overlay, a substitution)
     bool upstream = false;             // the camera injector owns the jitter
     bool haveRows = false;             // `rows` are the draw's camera rows
@@ -93,9 +93,11 @@ void flatUiLayerAtCopy(ID3D11DeviceContext* ctx, uint64_t frame, bool treated, u
 // ResizeBuffers or a device change: every reference the layer holds, released.
 void flatUiLayerRelease();
 
-// The 30 s lines (from the census's window): "flat ui layer: ...", zeros included, every window of the flat profile.
+// Once a frame from the flat runtime's frame boundary: every 30 s the "flat ui layer" lines (flatUiLayerReport), zeros
+// included, every window of the flat profile -- a log without them is a build that never ran the adapter.
+void flatUiLayerFrame();
 void flatUiLayerReport(uint64_t windowSeconds);
-// The layer's state for the census header: "live", or "off (why)".
+// The layer's state for the 30 s line: "live", or the shared not-live reason verbatim.
 const char* flatUiLayerState();
 
 }  // namespace edvr

@@ -2,30 +2,40 @@
 
 ## Status
 
-- **State (2026-10-09):** BUILT, NOT FLOWN, on branch
-  `claude/flat-display-crash-ui-smearing-f1d96a`: phase 1 `3923a773` (key,
-  F8 row, panel factor), phase 2 (the flat UI layer) on top. See the
-  2026-10-09 entry at the end.
-- **Decision (Sean, overrides the design's "no setting"):** flat reads
-  `fix.ui_quality = off | 100 | 125`, default 100, an F8 row. 100: the
-  interface at display size D and out of temporal history whatever the render
-  scale; 125: the same 1.25x larger; off: today's frame.
-- **Evidence in hand:** the 09:36 census (771bb99a, Epic, DLSS, R 1920x1080 on
-  D 3840x2160): the holo panels, flight HUD, target sprite and holograms are
-  drawn into H before the resolve, jittered; the same rtt panel was made
-  1920x960 at R 3840x2160 and 960x480 at R 1920x1080 (panels follow R).
-- **Open hypotheses (next flight decides):** (a) the HUD draws' camera rows
-  carry the frame's phase (else `other-shift` / `no-camera-rows` refusals);
-  (b) the game's tonemap is admitted by the shared structural rule in flat
-  (`tone-admitted` = frames); (c) the resolve output is an 8-bit UNORM frame
-  the composite accepts (else "not an 8-bit UNORM eye; the layer is not armed").
-- **Ruled-out pointer:** VR's retired deferred UI replay
-  ([crisp-ui-handoff.md](crisp-ui-handoff.md)). Flat post-copy UI already
-  bypasses EDVR AA.
-- **Temporary config keys:** none (`fix.ui_quality` is a user key).
-- **Next flight:** install, `--expect-build HEAD`, Epic flat, DLSS at SS 0.5,
-  cockpit and a station menu; then 125, then AA off. Read the "ui quality:
-  panels (flat)", "flat ui census: panel", "flat ui layer" lines.
+- **State: SHIPPED (2026-10-09).** Flown OK on Epic flat. Branch
+  `claude/flat-display-crash-ui-smearing-f1d96a`; the census was removed in the
+  commit that follows the flown build.
+  - SS 1.0 at 125%, HDR route: build `eced5813`, Sean: "Looks great!". In the
+    three steady cockpit windows, frames = copies = door-armed = tone-admitted =
+    composites = 8046; no back-offs, no declines.
+  - SS 0.5 at 100%, copy route: flown OK on `75cd495c` (every window 2700 on
+    every counter, Sean: "works great"). Copy route last flown on 75cd495c;
+    eced5813's flat admission change not yet flown there.
+  - Not flown: 100% at SS 1.0.
+- **The key:** `fix.ui_quality = off | 100 | 125`, default 100 in flat (the
+  code's fallback and the flat ini template), the fourth flat F8 row. 100: the
+  panels at display size and the cockpit HUD out of temporal history, whatever
+  the render scale; 125: the same 1.25x larger; off: today's frame. The panels
+  and the cockpit HUD layer need the flat anti-aliasing on.
+- **What ships:** the panel factor `f = (R/D)/T` (ui_panel_scale.cpp, "ui
+  quality: panels (flat)" lines); the flat UI layer (flat_ui_layer.{h,cpp}, a
+  mono adapter over ui_layer.cpp) for the holo panels, flight HUD, target
+  sprite and holograms, its "flat ui layer" 30 s lines and refusal counters.
+- **Removed:** the flat UI census (flat_ui_census.{h,cpp}), a temporary
+  instrument; its target-class and family rules live on in
+  flat_ui_layer_math.h.
+- **Known leftovers:**
+  - six hologram pairs carry no camera rows that flat's camera table reads
+    (9B34C331902DC1ED, DF3503CD07F9B10C, 5453D19B6D362364, A2C2D5510BF1926D,
+    9611A454527F7FEB, B932058F26B76691); they stay in the frame (`no-camera-rows`);
+  - flight HUD `other-shift`: rare, a camera shift of 2x the frame's y phase;
+    left in the frame;
+  - the flat resize-loop fix (771bb99a) has not been exercised (see its entry).
+- **Ruled-out pointer:** the 2026-10-09 entries below; VR's retired deferred
+  UI replay ([crisp-ui-handoff.md](crisp-ui-handoff.md)).
+- **Temporary config keys:** none.
+- **Next:** fly SS 0.5 on the shipped build (the copy route under eced5813's
+  admission change) and 100% at SS 1.0.
 
 Bring VR's source-panel quality and separate UI composition to flat Elite:
 retain fine text below display-resolution world rendering; avoid UI history
@@ -313,3 +323,44 @@ measured twice the frame's y phase (other-shift).
 Not done: draws after the HUD inside H (VR's known inversion applies: an
 untaken draw issued after a taken HUD draw is now under it). The after-UI take
 is not run in flat. The VR lines the shared code prints still say "left eye".
+
+## 2026-10-09: the flights, and what each ruled out
+
+All on Epic flat, D 3840x2160, DLSS/DLAA, EDHM chained (3Dmigoto,
+`d3d11_edhm.dll` via `real_dll`).
+
+- 09:36, 771bb99a (census only): the cockpit HUD families are drawn into H
+  before the resolve, jittered; rtt panels follow R. ruled out: EDHM as the
+  cause of the smear, because the census matched stock family hashes and the
+  layer gate was the blocker.
+- 11:08, 130f62b0: the layer never went live. Cause: the flat gate refuses
+  `advanced.temporal_aa_jitter_sign`, a refused key reads "off", so the jitter
+  switches read as set (the dead gate). Fixed in 2ec58b96
+  (uiLayerJitterAsShippedFor; the not-live reason logged verbatim).
+- 11:32, 2ec58b96: live; holograms taken at R = D on the HDR route, no
+  tonemap admitted, session stand-down after 30 frames. Cause: on that route
+  the tone reads a plain copy of H, and the flat path offered only 3-vertex
+  draws to the structural rule (the tone copy). ruled out: tone variant list
+  (c), because admission is structural. Fixed in 75cd495c (admission by flat's
+  tone pairs, H or its copy; takes only behind a proven tone; back-off instead
+  of stand-down; tone candidates logged).
+- 12:04, 75cd495c: SS 0.5 copy route OK on every frame (2700/2700). SS 1.0
+  HDR route: the first re-issue declined "bindings ... not the admitted
+  draw's" (vs/ps 0) and backed off 30 s. Cause: the resolve runs inside the
+  tone draw's scope and the binding shadow no longer names the draw's
+  bindings (the HDR-route binding shadow). Fixed in eced5813 (flat drift check
+  reads the context; the admission carries the scope's pair; escalating
+  back-off 2-30 s). ruled out: per-frame route alternation at R = D, because
+  the mixed window straddled the SS switch.
+- 12:46, eced5813: SS 1.0 at 125%, HDR route, OK (8046 = frames = copies =
+  door-armed = tone-admitted = composites in the steady windows; the loading
+  window's 235 composites match its 235 tone-proven frames, nothing lost).
+  Sean: "Looks great!". Then the census was removed.
+
+## 2026-10-09: the flat resize loop
+
+The game retried a refused ResizeBuffers every frame. The held back-buffer
+reference was the draw-packet capture's `s.drawPacketOutput`; it is released
+in flatRuntimeResize, and the loop's reports are rate-limited (771bb99a). Not
+yet exercised: a borderless resolution change does not call ResizeBuffers. The
+exit crash at +0x4d78c51 is tracked separately.

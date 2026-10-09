@@ -10,6 +10,34 @@
 
 namespace edvr {
 
+// The colour target's class (from the retired flat UI census, 2026-10-09). Scene-sized means the render size R or the
+// output size D; a size that is neither is an offscreen target. Float formats are the HDR scene.
+enum class FlatUiTarget : uint8_t { kHdr = 0, kLdr, kBackBuffer, kOffscreen, kOther, kCount };
+inline bool flatUiIs8bit(uint32_t f) { return f == 28 || f == 29 || f == 87 || f == 91 || f == 88 || f == 93; }
+inline bool flatUiIsFloat(uint32_t f) { return f == 26 || f == 10 || f == 11; }
+inline FlatUiTarget flatUiTargetClass(bool isBackBuffer, uint32_t w, uint32_t h, uint32_t format, uint32_t dW, uint32_t dH,
+                                      uint32_t rW, uint32_t rH) {
+    if (isBackBuffer) return FlatUiTarget::kBackBuffer;
+    const bool sceneSized = (w == dW && h == dH) || (rW && w == rW && h == rH);
+    if (!sceneSized) return FlatUiTarget::kOffscreen;
+    if (flatUiIsFloat(format)) return FlatUiTarget::kHdr;
+    if (flatUiIs8bit(format)) return FlatUiTarget::kLdr;
+    return FlatUiTarget::kOther;
+}
+
+// The shared family rule, asked both ways (an HDR eye target, then the post-tonemap one) with no learned surface:
+// ui_layer_math.h's shader-pair recognitions, not a second hash table.
+inline UiLayerFamily flatUiFamilyOf(uint64_t vs, uint64_t ps) {
+    UiFamilyFacts f;
+    f.vs = vs;
+    f.ps = ps;
+    f.targetKind = 1;
+    UiLayerFamily out = uiLayerFamilyFor(f);
+    if (out != UiLayerFamily::kNone) return out;
+    f.targetKind = 2;
+    return uiLayerFamilyFor(f);
+}
+
 // The families the flat layer asks the shared decision for: the cockpit HUD families the 2026-10-09 09:36 census found
 // drawn into the scene's HDR target before the resolve, jittered (the holo panels, the flight HUD, the target sprite,
 // the holograms). The scene lines the VR layer also takes for density (the orbit lines, the supercruise bars, the

@@ -10,9 +10,8 @@
 #include "device_hook.h"      // deviceHookHmdQuality: the .fxcfg's HMD Quality
 #include "ui_panel_scale.h"   // uiPanelScaleLive/Factor: a chain's stage under the engine's sizing
 
-#include "flat_ui_census.h"   // the flat profile's observation of the chain lines: frame, D and R
 #include "../common/log.h"
-#include "../common/runtime_profile.h"
+#include "../common/runtime_profile.h"  // the VR instruments do not run in the flat profile
 
 #include <windows.h>
 
@@ -34,6 +33,10 @@ struct Lock {
 };
 
 std::atomic<bool> g_on{false};
+
+// The chain, atlas and HMD Quality instruments are VR's: the flat profile's panel factor reads the flat runtime's own
+// render and display sizes (ui_panel_scale.cpp), and its 2026-10-09 census observation is retired.
+bool instrumentsOn() { return g_on.load(std::memory_order_acquire) && !runtimeFlatProfile(); }
 
 // HMD Quality, cached (review P3-2): read from the game's newest .fxcfg --
 // a folder scan and a file read -- on configure, and while the key is on
@@ -130,13 +133,10 @@ struct ChainSeen {
     UiChainVerdict verdict;
 };
 constexpr uint32_t kChainLines = 32;  // the flights' 13 GUI sizes, doubled by depth
-// The flat census's own cap (2026-10-09): its 32 were spent within two minutes of the 09:36 flight, before the cockpit's
-// panels had all been made, and with fix.ui_quality on each panel is made at a new size the line must name.
-constexpr uint32_t kChainLinesFlat = 96;
 
 // Everything below g_lock.
 struct State {
-    ChainSeen chains[kChainLinesFlat];
+    ChainSeen chains[kChainLines];
     uint32_t chainCount = 0;
     bool chainOverflowNoted = false;
 };
@@ -207,61 +207,8 @@ uint32_t g_atlasNotes = 0;  // creation lines (under g_lock), capped
 void uiSurfacesSetTarget(float target) {
     // Configure is the one place HMD Quality is read on this thread: it runs
     // when the ini changes, not every frame.
-    if (target > 0.0f) hmdReadNow();
+    if (target > 0.0f && !runtimeFlatProfile()) hmdReadNow();
     g_on.store(target > 0.0f, std::memory_order_release);
-}
-
-namespace {
-// The flat profile watches whatever the key says (uiSurfacesObserveTick), and its chain line is the census's own, with the
-// panel factor beside it when the engine is sizing (2026-10-09): the VR line's W, tangents and k have no meaning in flat.
-bool observing() { return runtimeFlatProfile(); }
-
-// The census's chain line: one per distinct size and kind, no render-size filter (the flat profile has no native
-// temporal sizes) and none of the VR formulas -- the size the game made, who made it, and what D, R and Supersampling were.
-void noteChainObserve(const D3D11_TEXTURE2D_DESC& d) {
-    const bool depth = (d.BindFlags & D3D11_BIND_DEPTH_STENCIL) != 0;
-    Lock lock;
-    if (chainFor(d.Width, d.Height, depth)) return;
-    if (g_s.chainCount >= kChainLinesFlat) {
-        if (!g_s.chainOverflowNoted) {
-            g_s.chainOverflowNoted = true;
-            Log::get().note("flat ui census: panel sizes: %u sizes logged; further sizes are not logged.", kChainLinesFlat);
-        }
-        return;
-    }
-    ChainSeen& c = g_s.chains[g_s.chainCount++];
-    c.w = d.Width;
-    c.h = d.Height;
-    c.depth = depth;
-    c.chain = captureChain();
-    c.verdict = uiChainVerdict(c.chain);
-    uint32_t dw = 0, dh = 0, rw = 0, rh = 0;
-    flatUiCensusSizes(&dw, &dh, &rw, &rh);
-    if (uiSurfacesSupersampling() <= 0.0f) hmdRefreshOffThread();
-    char rvas[160], verdict[320], sized[160] = "panel factor off (the game's own divisors)";
-    uiChainFormat(c.chain, rvas, sizeof(rvas));
-    uiChainVerdictText(c.verdict, verdict, sizeof(verdict));
-    // Under the engine's sizing an rtt panel is made x1/f: at the game's own divisors it would have been about W x f.
-    if (uiPanelScaleLive()) {
-        const double f = uiPanelScaleFactor();
-        std::snprintf(sized, sizeof(sized), "panel factor x%.4f (f %.4f): an rtt panel's unpatched size about %ux%u",
-                      1.0 / f, f, static_cast<unsigned>(std::lround(d.Width * f)),
-                      static_cast<unsigned>(std::lround(d.Height * f)));
-    }
-    Log::get().note(
-        "flat ui census: panel %u: frame %llu, a %ux%u %s surface (DXGI format %u, bind 0x%X), D %ux%u R %ux%u, "
-        "Supersampling %.2f (0 = not read yet), HMD Quality %.2f, %s; %u game frames, innermost first: %s; verdict %s.",
-        g_s.chainCount, static_cast<unsigned long long>(flatUiCensusFrameNo()), d.Width, d.Height,
-        depth ? "depth" : "colour", static_cast<unsigned>(d.Format), d.BindFlags, dw, dh, rw, rh,
-        static_cast<double>(uiSurfacesSupersampling()), static_cast<double>(hmdCached()), sized, c.chain.n,
-        c.chain.n ? rvas : "none", verdict);
-}
-}  // namespace
-
-void uiSurfacesObserveTick() {
-    if (!observing()) return;
-    hmdRefreshOffThread();
-    uiSurfacesLogAtlas();
 }
 
 bool uiSurfacesWantsChain(const D3D11_TEXTURE2D_DESC& d, bool initialData) {
@@ -269,7 +216,7 @@ bool uiSurfacesWantsChain(const D3D11_TEXTURE2D_DESC& d, bool initialData) {
     // render size (read only past this): single mip, no MSAA, no initial
     // data, and neither side a power of two (atlases, icon caches and
     // shadow maps are) or a sliver.
-    return (g_on.load(std::memory_order_acquire) || runtimeFlatProfile()) && !initialData && d.ArraySize == 1 &&
+    return instrumentsOn() && !initialData && d.ArraySize == 1 &&
            d.SampleDesc.Count == 1 && d.MipLevels <= 1 &&
            (d.BindFlags & (D3D11_BIND_RENDER_TARGET | D3D11_BIND_DEPTH_STENCIL)) != 0 && d.Width >= 16 &&
            d.Height >= 16 && (d.Width & (d.Width - 1)) != 0 && (d.Height & (d.Height - 1)) != 0;
@@ -278,7 +225,6 @@ bool uiSurfacesWantsChain(const D3D11_TEXTURE2D_DESC& d, bool initialData) {
 // Inside the game's create: the line for a panel-shaped create of a size and
 // kind not seen yet this session -- a hit and a miss read alike.
 void uiSurfacesNoteChain(const D3D11_TEXTURE2D_DESC& d) {
-    if (observing()) { noteChainObserve(d); return; }
     const Basis b = readBasis();
     // Smaller than the render size on both axes (the eye targets and the
     // 3840x2160 2D screen are not), when the render size is known.
@@ -402,7 +348,7 @@ bool g_uiAtlasWatching = false;
 }
 
 bool uiSurfacesWantsAtlas(const D3D11_TEXTURE2D_DESC& d) {
-    return (g_on.load(std::memory_order_acquire) || runtimeFlatProfile()) && d.Format == DXGI_FORMAT_A8_UNORM &&
+    return instrumentsOn() && d.Format == DXGI_FORMAT_A8_UNORM &&
            (d.Width >= 1024 || d.Height >= 1024);
 }
 
@@ -478,7 +424,7 @@ void uiSurfacesLogAtlas() {
 
 void uiSurfacesFrameBoundary() {
     g_frameNo.fetch_add(1, std::memory_order_relaxed);
-    if (!g_on.load(std::memory_order_acquire)) return;
+    if (!instrumentsOn()) return;
     // The render thread's own: HMD Quality for the next five seconds, read on
     // a pool thread (review P3-2: no folder scan on the render thread).
     static uint64_t lastTickMs = 0;

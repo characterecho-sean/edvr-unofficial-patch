@@ -5,7 +5,6 @@
 
 #include "flat_camera_phase.h"     // flatCameraMeasureRowShift: the jitter a draw's camera rows carry
 #include "flat_compute_readback.h" // FlatComputeInternalScope
-#include "flat_ui_census.h"        // flatUiFamilyOf: the census's own family rule
 #include "flat_ui_layer_math.h"
 #include "ui_layer.h"
 
@@ -30,7 +29,7 @@ constexpr size_t kFamilies = static_cast<size_t>(UiLayerFamily::kCount);
 constexpr size_t kDecisions = static_cast<size_t>(UiLayerDecision::kCount);
 constexpr size_t kRefusals = static_cast<size_t>(FlatUiRefuse::kCount);
 
-// One 30 s window of the adapter's counts (the census's window).
+// One 30 s window of the adapter's counts (flatUiLayerFrame).
 struct Window {
     uint64_t asked[kFamilies] = {}, decided[kFamilies] = {}, taken[kFamilies] = {}, atIssue[kFamilies] = {};
     uint64_t refused[kRefusals] = {};
@@ -159,7 +158,7 @@ void flatUiLayerWriteBackEnd(ID3D11DeviceContext* ctx) {
     uiLayerWriteBackEnd(ctx);
 }
 
-// The take's outcome, for the window: Begin's answer per family (the census rows carry the same per shader pair).
+// The take's outcome, for the window: Begin's answer per family.
 void flatUiLayerNoteIssue(uint64_t vs, uint64_t ps, bool taken) {
     const size_t fi = static_cast<size_t>(flatUiFamilyOf(vs, ps));
     if (fi >= kFamilies) return;
@@ -315,6 +314,16 @@ void flatUiLayerRelease() {
     if (uiLayerFlatRelease())
         Log::get().note("flat ui layer: the swap chain is resizing -- every layer, depth target and composite output "
                         "released; the next frame EDVR resolves arms a fresh door.");
+}
+
+void flatUiLayerFrame() {
+    if (!runtimeFlatProfile()) return;
+    static uint64_t windowStartMs = 0;
+    const uint64_t now = GetTickCount64();
+    if (!windowStartMs) windowStartMs = now;
+    if (now - windowStartMs < 30000) return;
+    flatUiLayerReport((now - windowStartMs) / 1000);
+    windowStartMs = now;
 }
 
 void flatUiLayerReport(uint64_t windowSeconds) {

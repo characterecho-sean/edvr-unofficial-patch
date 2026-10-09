@@ -858,7 +858,7 @@ void flatFrameBoundary(float target) {
         "0x%X/0x%X and 0x%X/0x%X read 1080 -> %.2f, 1920 -> %.2f): f %.4f = render %ux%u / display %ux%u on the %s "
         "axis / target %.0f%%%s. A panel the game made WxH at the game's own divisors is now made about %.2fW x %.2fH; "
         "the widest the formula can ask for is %.0f px (D3D11's limit %.0f, EDVR's budget %.0f). From the next panel "
-        "init or view change; the \"flat ui census: panel\" lines name each size the game then makes.",
+        "init or view change.",
         1.0 / plan.f, kUiPanelSiteRva[0] + kUiPanel1080Disp, kUiPanelSiteRva[0] + kUiPanel1920Disp,
         kUiPanelSiteRva[1] + kUiPanel1080Disp, kUiPanelSiteRva[1] + kUiPanel1920Disp, static_cast<double>(d1080),
         static_cast<double>(d1920), plan.f, in.renderW, in.renderH, in.outputW, in.outputH,
