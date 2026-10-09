@@ -728,6 +728,44 @@ void caseRandomPose(Pair& p) {
 }
 }  // namespace
 
+// ---- G8: the census probe of the join's 3-table clear (F16: gpu_census.h FrameSkinJoinClearProbe) ---------------------------------
+// The kernel joinClearProbe is the join's phase-0 loop alone. Bound to scratch tables it must leave them in the join's cleared state (JoinOut 0, Info 0, Owner all ones)
+// and touch nothing else: a table the join reads or the pose table, bound to nothing here, keeps what it held.
+void caseClearProbe(Pair& p) {
+    Gpu& g = p.gpu;
+    auto code = g.compile("joinClearProbe");
+    ComPtr<ID3D11ComputeShader> probe;
+    check(code && SUCCEEDED(g.dev->CreateComputeShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, &probe)), "G8.a the probe kernel compiles and makes a compute shader");
+    if (!probe) return;
+    const std::vector<uint32_t> scratch(kMaxRows * 2, 0xA5A5A5A5u), bystander(kMaxRows * 8, 0x5A5A5A5Au);   // (a row of the pose table is 32 bytes)
+    g.ctx->UpdateSubresource(g.joinTable.Get(), 0, nullptr, scratch.data(), 0, 0);
+    g.ctx->UpdateSubresource(g.info[0].Get(), 0, nullptr, scratch.data(), 0, 0);
+    g.ctx->UpdateSubresource(g.owner.Get(), 0, nullptr, scratch.data(), 0, 0);
+    g.ctx->UpdateSubresource(g.info[1].Get(), 0, nullptr, bystander.data(), 0, 0);
+    g.ctx->UpdateSubresource(g.pose[0].Get(), 0, nullptr, bystander.data(), 0, 0);
+    ID3D11UnorderedAccessView* uavs[4] = {g.joinUav.Get(), g.infoUav[0].Get(), nullptr, g.ownerUav.Get()};
+    g.ctx->CSSetShader(probe.Get(), nullptr, 0);
+    g.ctx->CSSetUnorderedAccessViews(0, 4, uavs, nullptr);
+    g.ctx->Dispatch(1, 1, 1);
+    ID3D11UnorderedAccessView* none[4] = {};
+    g.ctx->CSSetUnorderedAccessViews(0, 4, none, nullptr);
+    const auto joinBytes = g.read(g.joinTable.Get(), kMaxRows * 4), infoBytes = g.read(g.info[0].Get(), kMaxRows * 8), ownerBytes = g.read(g.owner.Get(), kMaxRows * 4);
+    const auto otherInfo = g.read(g.info[1].Get(), kMaxRows * 8);
+    const auto words = [](const std::vector<uint8_t>& b, uint32_t want) {
+        if (b.empty()) return false;
+        const uint32_t* w = reinterpret_cast<const uint32_t*>(b.data());
+        for (size_t i = 0; i < b.size() / 4; ++i) if (w[i] != want) return false;
+        return true;
+    };
+    check(words(joinBytes, 0u) && words(infoBytes, 0u) && words(ownerBytes, 0xFFFFFFFFu),
+          "G8.b the probe leaves the three tables as the join's own phase 0 does: the join table 0, the by-base table 0, the owner table all ones, every row");
+    check(words(otherInfo, 0x5A5A5A5Au), "G8.c and a table it was not bound to is untouched");
+    const auto poseBytes = g.read(g.pose[0].Get(), kMaxRows * 32);
+    bool poseSame = !poseBytes.empty();
+    for (size_t i = 0; poseSame && i < poseBytes.size() / 4 && i < kMaxRows * 2; ++i) poseSame = reinterpret_cast<const uint32_t*>(poseBytes.data())[i] == 0x5A5A5A5Au;
+    check(poseSame, "G8.d nor is the pose table");
+}
+
 int main(int argc, char** argv) {
     bool selfTest = false;
     for (int i = 1; i < argc; ++i) {
@@ -755,6 +793,7 @@ int main(int argc, char** argv) {
     casePose(posePair);
     caseResolve(posePair);
     caseRandomPose(posePair);
+    caseClearProbe(posePair);
     if (g_failures) {
         std::printf("FAIL: skin join gpu: %u of %u checks failed\n", g_failures, g_checks);
         return 1;

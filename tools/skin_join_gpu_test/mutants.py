@@ -66,8 +66,11 @@ MUTANTS = [
       "the previous buffer's capacity is read from the wrong plan word"),
     M("duplicates-not-counted", ALL, "shader", [("else dupFails += 1u;", "else dupFails += 0u;")], "a second job on a base is not counted"),
     M("cap-failures-not-counted", ALL, "shader", [("capFails += 1u; continue;", "continue;")], "a job past the tables is not counted"),
-    M("join-table-not-cleared", ALL, "shader", [("  JoinOut[i] = 0u;\n", "")], "last frame's joins survive into this frame"),
-    M("by-base-table-not-cleared", ALL, "shader", [("  Info.Store2(i * 8u, uint2(0u, 0u));\n", "")], "last frame's by-base entries survive into this frame"),
+    M("join-table-not-cleared", ALL, "shader", [(" // 0: clear the tables\n [loop] for (uint i = tid; i < SJ_MAX_ROWS; i += 256u) {\n  JoinOut[i] = 0u;\n", " // 0: clear the tables\n [loop] for (uint i = tid; i < SJ_MAX_ROWS; i += 256u) {\n")], "last frame's joins survive into this frame"),
+    M("by-base-table-not-cleared", ALL, "shader", [(" // 0: clear the tables\n [loop] for (uint i = tid; i < SJ_MAX_ROWS; i += 256u) {\n  JoinOut[i] = 0u;\n  Info.Store2(i * 8u, uint2(0u, 0u));\n", " // 0: clear the tables\n [loop] for (uint i = tid; i < SJ_MAX_ROWS; i += 256u) {\n  JoinOut[i] = 0u;\n")], "last frame's by-base entries survive into this frame"),
+    # G8: the census probe of the join's clear (joinClearProbe; the join's own loop is followed by more code, the probe's ends the kernel)
+    M("probe-owner-not-cleared", ("G8",), "shader", [("  Owner.Store(i * 4u, 0xFFFFFFFFu);\n }\n}\n", "  Owner.Store(i * 4u, 0u);\n }\n}\n")], "the probe leaves the owner table at zero, not the join's all-ones"),
+    M("probe-by-base-not-cleared", ("G8",), "shader", [("  Info.Store2(i * 8u, uint2(0u, 0u));\n  Owner.Store(i * 4u, 0xFFFFFFFFu);\n }\n}\n", "  Owner.Store(i * 4u, 0xFFFFFFFFu);\n }\n}\n")], "the probe does not clear the by-base table"),
     M("verification-always-remembered", ALL, "shader", [("Stats.Store(SJ_STAT_PREV_HOOK_OK * 4u, (offered && gMismatch == 0u) ? 1u : 0u);", "Stats.Store(SJ_STAT_PREV_HOOK_OK * 4u, 1u);")],
       "the frame after a disagreement trusts the hook"),
     M("no-history-still-joins", ALL, "shader", [("if (history) {\n  [loop] for (uint jd = tid;", "if (true) {\n  [loop] for (uint jd = tid;")], "without certified history jobs are joined anyway"),

@@ -86,6 +86,10 @@ bool g_hookGate = false;
 std::vector<uint32_t> g_hookChainJobs;   // the job counts the chain dispatches told the (stubbed) hook, one per chain dispatch the join took
 bool g_hookArmed = false;
 const edvr::skinjoin::Snapshot* g_hookSnap = nullptr;
+// The GPU census stub (below) records every Begin per section: the F16 census slots (gpu_census.h, FrameSkin*) are read from here, to see which the engine path
+// fills and which stay empty. g_censusTimeProbe makes the stub answer "timed" for the join-clear probe's section, so the production probe dispatch runs on WARP.
+unsigned g_censusBegins[static_cast<unsigned>(edvr::GpuCensusSection::Count)] = {};
+bool g_censusTimeProbe = false;
 }  // namespace lifecycle_fake
 
 // --- The stubs engine_velocity.cpp links against -------------------------------
@@ -177,8 +181,11 @@ int64_t qpcNow() { LARGE_INTEGER t{}; QueryPerformanceCounter(&t); return t.Quad
 int64_t qpcFrequency() { LARGE_INTEGER f{}; QueryPerformanceFrequency(&f); return f.QuadPart; }
 // The GPU census (issue #38) is cross-cutting; this rig is about the draw
 // half's own state machine, not the census's rotation or its calibration
-// (tools/gpu_census_test covers those), so it is stubbed out.
-bool gpuCensusBegin(ID3D11DeviceContext*, GpuCensusSection) noexcept { return false; }
+// (tools/gpu_census_test covers those), so it is stubbed out -- except that it counts the Begins per section and can answer "timed" for the join-clear probe.
+bool gpuCensusBegin(ID3D11DeviceContext*, GpuCensusSection section) noexcept {
+    if (section < GpuCensusSection::Count) ++lifecycle_fake::g_censusBegins[static_cast<unsigned>(section)];
+    return lifecycle_fake::g_censusTimeProbe && section == GpuCensusSection::FrameSkinJoinClearProbe;
+}
 void gpuCensusEnd(ID3D11DeviceContext*, GpuCensusSection) noexcept {}
 }  // namespace edvr
 

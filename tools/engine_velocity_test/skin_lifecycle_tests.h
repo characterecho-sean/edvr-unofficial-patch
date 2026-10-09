@@ -29,6 +29,8 @@
 //   L13 the on-foot source (F2 on foot, the first-person panel): the source pass's skinned draws write the source's own target 7, handed to the screen shader and
 //       the world route (EngineVelocityViews::skin) only while a skinned draw wrote it this frame, cleared at each frame's first skinned draw, E exact, no history
 //       as valid 0 and E 0, never in the eyes' views, and never in the flat profile (no target 7 is created there)
+//   L14 the GPU census slots the second skin fills (F16): the source's and the eyes' target 7 clears, the join, the join-clear probe and the pose table are each begun
+//       by the work they price and by nothing else, and the probe leaves the join's tables as the join wrote them
 
 #include <algorithm>
 #include <cmath>
@@ -1144,6 +1146,76 @@ inline void run(const lt::Harness& h) {
                 "L13.l in the flat profile a skinned family's draw is the game's own: no target 7 bound, no patched vertex shader, none of the three skin views");
         if (lt::logged("target 7 created", flatMark)) std::fprintf(stderr, "  flat profile made a target 7\n");
         (void)flatViews;
+    }
+    single();
+    {
+        sct::Rng rng(31);
+        sct::Vertex scratch[3];
+        sct::makeVertices(rng, 3, scratch);
+        f.state = sct::makeState(rng, 3, f.base);
+    }
+    for (int i = 0; i < 3; ++i) f.frame([&] {});
+
+    // L14: the GPU census slots the second skin fills (F16: gpu_census.h FrameSkinSourceClear..FrameSkinPose). The census stub counts the Begins per section, so
+    // this reads which slots the engine path fills and which stay empty: each is begun by the work it prices and by nothing else, and the probe of the join's
+    // 3-table clear, when the census times it, runs on scratch tables and changes nothing the join wrote.
+    {
+        using CS = edvr::GpuCensusSection;
+        const auto begun = [](CS s) { return lifecycle_fake::g_censusBegins[static_cast<unsigned>(s)]; };
+        struct Seen5 { unsigned src, eye, join, probe, pose; };
+        const auto take = [&] { return Seen5{begun(CS::FrameSkinSourceClear), begun(CS::FrameSkinEyeClear), begun(CS::FrameSkinJoin), begun(CS::FrameSkinJoinClearProbe), begun(CS::FrameSkinPose)}; };
+        single();
+        {
+            sct::Rng rng(31);
+            sct::Vertex scratch[3];
+            sct::makeVertices(rng, 3, scratch);
+            f.state = sct::makeState(rng, 3, f.base);
+        }
+        settle();
+        // a frame with no pool draw and no chain dispatch does none of the second skin's work: nothing is begun
+        Seen5 a = take();
+        g.beginFrame();
+        g.endFrame();
+        Seen5 b = take();
+        h.check(b.src == a.src && b.eye == a.eye && b.join == a.join && b.probe == a.probe && b.pose == a.pose,
+                "L14.a a frame with no pool draw and no chain dispatch begins none of the second skin's census slots");
+        // an eye frame with the skinned pair in both eyes: each eye's target 7 clear, the join once, the pose table once, the probe's Begin with the join; never the source's clear
+        a = take();
+        f.frame([&] {});
+        b = take();
+        h.check(b.eye - a.eye == 2 && b.join - a.join == 1 && b.probe - a.probe == 1 && b.pose - a.pose == 1 && b.src == a.src,
+                "L14.b an eye frame begins the eye clear once for each eye, and the join, the probe's slot and the pose table once; the source's clear not at all");
+        if (!(b.eye - a.eye == 2 && b.join - a.join == 1 && b.probe - a.probe == 1 && b.pose - a.pose == 1 && b.src == a.src))
+            std::fprintf(stderr, "  L14.b: eye %u join %u probe %u pose %u src %u\n", b.eye - a.eye, b.join - a.join, b.probe - a.probe, b.pose - a.pose, b.src - a.src);
+        // a source frame with the skinned pair: the source's clear once, no eye clear
+        a = take();
+        f.sourceFrame([&] {});
+        f.sourceFrame([&] {});
+        b = take();
+        h.check(b.src - a.src == 2 && b.eye == a.eye && b.join - a.join == 2,
+                "L14.c two source frames begin the source's target 7 clear once each, the join once each, and no eye's clear");
+        if (!(b.src - a.src == 2 && b.eye == a.eye && b.join - a.join == 2))
+            std::fprintf(stderr, "  L14.c: src %u eye %u join %u\n", b.src - a.src, b.eye - a.eye, b.join - a.join);
+        // a source frame that draws only a rigid record: no skinned draw, so the source's clear is not begun
+        a = take();
+        f.sourceRigidFrame([&] {});
+        b = take();
+        h.check(b.src == a.src && b.eye == a.eye,
+                "L14.d a source frame with only a rigid pool draw begins neither the source's clear nor an eye's");
+        // the census times the probe (the stub answers "timed"): the production probe dispatch runs on scratch tables, and what the join wrote is exactly what it was
+        lifecycle_fake::g_censusTimeProbe = true;
+        Fixture::Eye probed;
+        for (int i = 0; i < 3; ++i) f.frame([&] {});
+        f.frame([&] { probed = f.read(0); });
+        lifecycle_fake::g_censusTimeProbe = false;
+        const Judged pj = judge(probed, zero);
+        h.check(probed.given && pj.drawn > 20 && pj.valid == pj.drawn && pj.worst == 0.0,
+                "L14.e with the census timing the join-clear probe, the join's table is untouched: a steady character still has history, valid 1 and E exactly zero");
+        // and without the census asking, a frame does no probe work at all: the same frames, the same result
+        Fixture::Eye plain;
+        f.frame([&] { plain = f.read(0); });
+        const Judged pp = judge(plain, zero);
+        h.check(plain.given && pp.drawn == pj.drawn && pp.valid == pp.drawn && pp.worst == 0.0, "L14.f the same frame with the probe off gives the same result");
     }
     single();
     {
