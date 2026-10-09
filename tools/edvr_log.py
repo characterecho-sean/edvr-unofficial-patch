@@ -8986,7 +8986,7 @@ def self_test_slow_regime():
                 % (seq, ms, period, ms - 5.0, ms - 5.1, ms - 5.1))
 
     def phases_line(window, first, last, end_p50, pacer_p50=0.0001, wait_p50=0.0, dispatch_p50=0.158):
-        return ("native_submit_phases,window=%d,first=%d,last=%d,output=2325x2392/2325x2392,treatments=6/6,feature_epoch=8,cull_stage=3,cull_factors=1.08488/1.00000,pacing=1,"
+        return ("native_submit_phases,window=%d,first=%d,last=%d,output=2325x2392/2325x2392,treatments=6/6,feature_epoch=8,trim_stage=3,trim_factors=0.90000/0.95000,pacing=1,"
                 "separate=1,producer_dispatch=%.4f/0.2701/0.3418/0.3961,producer_acquire=0.0765/0.1489/0.1674/0.1714,producer_flush=0.0330/0.1032/0.1267/0.1953,"
                 "consumer_acquire=0.0636/0.1304/0.1787/0.2020,consumer_flush=0.0281/0.0999/0.1065/0.1209,receive=0.1266/0.1833/0.2516/0.2953,xr_acquire=0.0014/0.0018/0.0021/0.0131,"
                 "xr_wait=0.0003/0.0004/0.0006/0.0006,xr_draw_submit=0.0794/0.1203/0.1579/0.1726,xr_release=0.0007/0.0010/0.0012/0.0014,"

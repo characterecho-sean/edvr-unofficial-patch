@@ -468,7 +468,7 @@ struct Window {
 };
 Window g_win;
 
-// A change of the door's size (a FOV trim or cull-guard adoption, an HMD
+// A change of the door's size (a FOV-trim adoption, an HMD
 // Quality change, a per-eye width): the families the layer took in the two
 // seconds before it are watched for their first draw after it -- said, with
 // the delay -- and any not taken again within two seconds is named as

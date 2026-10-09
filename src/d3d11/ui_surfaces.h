@@ -70,8 +70,8 @@ void uiSurfacesLogAtlas();
 
 // Defined in native_temporal.cpp, lock-free: the size, max over eyes, the
 // runtime's beginFrame says the frame being drawn was rendered for
-// (fix.openxr_resolution, the FOV trim and the cull guard included) --
-// during a cull-guard or FOV-trim adoption the previous ask, one rebuild
+// (fix.openxr_resolution and the FOV trim included) --
+// during a FOV-trim adoption the previous ask, one rebuild
 // behind what the game is told (review P3-1). False before the first
 // beginFrame, after an invalidate, or with no native temporal channel.
 bool nativeTemporalRecommended(uint32_t* w, uint32_t* h);
@@ -84,7 +84,7 @@ bool nativeTemporalVerticalTangents(float* up, float* down);
 // 13:23 menu flight). False when the host does not say. Lock-free.
 bool nativeTemporalAsked(uint32_t* w, uint32_t* h);
 // ...and the TRUE display frustum's vertical tangents (eye 0, magnitudes):
-// the headset's own, before a cull guard or a trim -- the engine-side panel
+// the headset's own, before a trim -- the engine-side panel
 // sizing's untrimmed k (ui_panel_scale.h). Lock-free.
 bool nativeTemporalTrueVerticalTangents(float* up, float* down);
 

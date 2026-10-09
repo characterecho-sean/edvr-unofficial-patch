@@ -1416,7 +1416,7 @@ inline bool uiLayerLateFor(const UiLayerDoorState& d, uint64_t sequence) {
 // whole-pixel rectangle supersampleRegionFromBounds made of the Submit
 // bounds, already unflipped (the frame and the layer store the eye in the
 // same orientation) -- over its source's size. From the ROUNDED region and
-// not the raw bounds: a cull-guard crop is an arbitrary fraction, and the
+// not the raw bounds: submitted bounds can be an arbitrary fraction, and the
 // half-pixel between the two would shift the UI and straddle every texel.
 inline void uiLayerUvFromRegion(const uint32_t region[4], uint32_t sourceW, uint32_t sourceH,
                                 float uv[4]) {

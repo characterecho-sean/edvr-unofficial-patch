@@ -46,6 +46,10 @@
   props (`fix.static_prop_updates`) and settlement detail
   (`fix.settlement_detail`) no longer exist; the plugin tables below that list
   them are the 2026-09-30 design, not the code.
+- **Removed 2026-10-09 (terrain guard):** the cull guard (`fix.cull_guard`,
+  its four sibling keys and `advanced.cull_guard_channel`) no longer exists; the
+  tables below that list it are the 2026-09-30 design, not the code. The FOV
+  trim stays, on its own engine (`native_fov_trim.h`).
 - **Ruled out while designing:** loading every DLL found in a folder (DLL
   planting; the installer's receipts already know what it installed), a
   stable ABI for first-party plugins (they ship with the core; freezing

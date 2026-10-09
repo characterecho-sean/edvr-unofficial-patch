@@ -4081,7 +4081,7 @@ bool uiDepthCoverageMask(uint32_t w, uint32_t h, int eye, ID3D11Texture2D** tex)
             g_maskSizeNoted = true;
             Log::get().note("ui depth: the reactive mask is %ux%u but the pass treats "
                             "%ux%u, so it is not handed to NVIDIA. The interface's "
-                            "depth is unaffected; this is the cull guard's crop or a "
+                            "depth is unaffected; this is a "
                             "size change.",
                             m.w, m.h, w, h);
         }

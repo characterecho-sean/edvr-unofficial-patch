@@ -1058,6 +1058,10 @@ static void iniNameScan(const std::wstring& root) {
 // implicit tally, the scene-block fingerprint and the later controller, neck, fade and skeleton instruments behind the same key), was removed
 // 2026-10-09 when the arc's flights were done. No live key contains its name, so the bare name holds. An old line in a user's ini is carried over by
 // the installer under "no longer used by this version" and is never read by the DLL.
+//
+// The six keys of the terrain guard, removed 2026-10-09 (fix.cull_guard, its _percent, _fraction_h, _fraction_v and _headsets, and advanced.cull_guard_channel),
+// are held out the same way, the one bare name covering all six. The cause the guard worked around was found: Elite culled with a head pose 42 ms older than
+// the one it drew with, and EDVR now answers its "now" request at the drawn frame's display time (docs/terrain-culling.md). Nothing is left to keep permanent.
 static const char* const kRetiredKeys[] = {
     "temporal_aa_on_foot_world_jitter",
     "temporal_aa_on_foot_world_steady_detail",
@@ -1081,6 +1085,8 @@ static const char* const kRetiredKeys[] = {
     "hold_frames_on_external_cam",
     // The Explorer Cam redesign's temporary probe, 2026-10-09.
     "explorer_cam_probe",
+    // The terrain guard, 2026-10-09: all six keys begin with this.
+    "cull_guard",
 };
 static const int kRetiredKeyCount = int(sizeof(kRetiredKeys) / sizeof(kRetiredKeys[0]));
 
@@ -1283,6 +1289,13 @@ int main(int argc, char** argv) {
     expectStr("advanced.settlement_detail_max", "<unset>", "...and so is its ceiling");
     expectStr("advanced.settlement_detail_observe", "<unset>", "...and its observe-only switch");
     expectStr("fix.static_prop_updates", "<unset>", "the removed static prop gate's key is absent");
+    // The terrain guard was removed 2026-10-09: its six keys are gone, not merely off.
+    expectStr("fix.cull_guard", "<unset>", "the removed terrain guard key is absent");
+    expectStr("fix.cull_guard_percent", "<unset>", "...and so is its percent margin");
+    expectStr("fix.cull_guard_fraction_h", "<unset>", "...its horizontal fraction");
+    expectStr("fix.cull_guard_fraction_v", "<unset>", "...its vertical fraction");
+    expectStr("fix.cull_guard_headsets", "<unset>", "...its headset list");
+    expectStr("advanced.cull_guard_channel", "<unset>", "...and its channel probe");
     // ui_quality (docs/ui-layer-2026-09-23.md) is one key for both halves:
     // the interface panels made at the target's size, and the game's
     // post-tonemap UI drawn into a per-eye layer after the upscale. Values

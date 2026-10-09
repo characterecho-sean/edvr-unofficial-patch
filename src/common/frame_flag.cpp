@@ -85,18 +85,11 @@ struct Shared {
                                      // RIGHT eye's -- the renderer
                                      // stitches the two images, each
                                      // clean on its temporal side
-    // cullGuard  the cull guard's stage and margin, packed as
-    //            (stage << 24) | (hPerMille << 12) | vPerMille, written by
-    //            openvr_api.dll at its stage transitions
-    //
-    // The second openvr -> d3d11 field, and eyeSize's disciplines carry over
-    // whole: one packed word so no reader tears a pair, zero is "no answer"
-    // and must be read as guard-off, and a mismatched build pair is made
-    // inert by the mapping version rather than subtly wrong by the layout.
-    // What it exists for -- attribution of detector churn to the guard's
-    // margin, never a decision -- is documented at the header declaration
-    // and in SPEC-FLASH-FALSE-POSITIVES §1g.
-    volatile LONG cullGuard;
+    // RESERVED. It carried the terrain guard's stage and margin (openvr ->
+    // d3d11), for the transition-flash detector's attribution, until the guard
+    // was removed 2026-10-09. Nothing reads or writes it; the slot stays so the
+    // layout, and the mapping version that names it, do not change.
+    volatile LONG reservedGuardWord;
     // eyeTangents  the true horizontal frustum of one eye, packed as
     //              (outerMilli << 16) | innerMilli -- tangent magnitudes
     //              times 1000 -- written by openvr_api.dll as it observes
@@ -125,8 +118,8 @@ struct Shared {
     // the bias keep every published value nonzero.
     volatile LONG headForward;
     // gameDev  the game's own ID3D11Device, written by d3d11.dll at device
-    //          creation. Read by openvr_api.dll's cull guard as the test for
-    //          a d3d11 half being installed at all.
+    //          creation. Read as the test for a d3d11 half being installed
+    //          at all.
     //
     // The one field published before the openvr half has run at all. It
     // joined for the early VR handover (removed 2026-09-13), which needed a
@@ -138,8 +131,7 @@ struct Shared {
     // is the precedent.
     volatile LONG64 gameDev;
     // sceneArrived  latched by d3d11 at its scene boundary; read by the
-    //               cull guard so it does not lie about the frustum while
-    //               the intro is still on screen. See frame_flag.h.
+    //               native frame provider (sceneReady). See frame_flag.h.
     volatile LONG sceneArrived;
     // The settings menu (docs/settings-menu.md): the anchor pose the panel
     // was summoned at (d3d11 -> openvr, headPose's layout, seq as presence
@@ -278,7 +270,7 @@ struct Shared {
 // reverse pairing would have a new reader trusting a stamp nobody writes.
 // Separate mappings make both pairings inert instead of subtly wrong.
 //
-// eyeSize and cullGuard are built to survive that pairing on their own as
+// eyeSize is built to survive that pairing on its own as
 // well: an unmatched reader sees 0, which every caller is required to read as
 // "no answer" and fall back on. Mismatched halves therefore behave exactly
 // like a session with no openvr proxy installed, which is a supported
@@ -563,38 +555,6 @@ bool eyeTextureSize(uint32_t* width, uint32_t* height) {
     if (width) *width = v >> 16;
     if (height) *height = v & 0xFFFFu;
     return true;
-}
-
-void announceCullGuardState(uint32_t stage, float factorH, float factorV) {
-    Shared* s = map();
-    if (!s) return;
-    // Stage 0 clears the whole word: "off" and "no answer" are deliberately
-    // the same value, because every reader must treat them identically.
-    if (stage == 0) {
-        InterlockedExchange(&s->cullGuard, 0);
-        return;
-    }
-    // Clamped rather than refused, unlike eyeSize's packing check, and the
-    // difference is what the field is FOR. A refused eye size would make an
-    // equality test miss real targets; this is attribution, where a margin
-    // saturated at +409.5% still names the right frames, while a refusal
-    // would stamp a live guard as "off" -- a lie in the data the channel
-    // exists to make honest.
-    auto perMille = [](float factor) -> uint32_t {
-        if (!(factor > 1.0f)) return 0;                    // NaN lands here too
-        const float pm = (factor - 1.0f) * 1000.0f + 0.5f;
-        if (pm >= 4095.0f) return 4095u;
-        return static_cast<uint32_t>(pm);
-    };
-    const uint32_t packed = ((stage > 2 ? 2u : stage) << 24) |
-                            (perMille(factorH) << 12) | perMille(factorV);
-    InterlockedExchange(&s->cullGuard, static_cast<LONG>(packed));
-}
-
-uint32_t cullGuardStatePacked() {
-    Shared* s = map();
-    if (!s) return 0;
-    return static_cast<uint32_t>(InterlockedCompareExchange(&s->cullGuard, 0, 0));
 }
 
 void announceEyeTangents(float outerMag, float innerMag) {

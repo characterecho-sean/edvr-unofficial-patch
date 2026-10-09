@@ -209,9 +209,5 @@ template<class Check> void runFeatureHostCases(Check check) {
   h.sceneFinished(true,XR_SUCCESS);check(h.replayedPairs==1&&h.previousPairValid,"replay does not overwrite saved stereo pair");
   h.sceneFinished(true,XR_ERROR_RUNTIME_FAILURE);check(!h.previousPairValid,"failed endFrame cannot commit a replay pair");
   h.previousPairValid=true;h.invalidateOrigin("feature_fixture");check(!h.previousPairValid,"reference reset retires transition image");
-  const vr::VRTextureBounds_t reversed{.9f,.8f,.1f,.2f};
-  const auto crop=nativeCropBounds(&reversed,.25f,.1f,.75f,.9f);
-  check(std::fabs(crop.uMin-.7f)<.0001f&&std::fabs(crop.uMax-.3f)<.0001f&&std::fabs(crop.vMin-.74f)<.0001f&&std::fabs(crop.vMax-.26f)<.0001f,
-    "guard crop composes within original subrect and preserves both flips");
 }
 } // namespace edvr::openxr::test

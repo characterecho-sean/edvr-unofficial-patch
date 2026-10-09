@@ -239,17 +239,12 @@ template<class Check> void runCantedDisplayCases(Check&& check) {
     h.cantTest.pending=false;
     h.featureFrame.simulateCantDeg=0.0f;GeometryInput fourth=untouched;
     check(!h.applySimulatedCant(fourth)&&bitwiseEqual(fourth.views[0],untouched.views[0])&&h.cantTest.pending&&h.cantTest.outcome==CantOutcome::Off,"back to 0: off again, noted");
-    // The runtime's hidden-area mesh is cut for the located frustum, so a simulated cant withholds it exactly as a cull guard or a trim does.
+    // The runtime's hidden-area mesh is cut for the located frustum, so a simulated cant withholds it exactly as a trim does.
     {
       Fixture g2;auto& k=g2.host;
       check(k.hiddenMeshCompatible(false)&&!k.hiddenMeshCompatible(true),"no provider answer yet: the hidden-area mesh is served, and withheld while a cant is applied");
       k.featureFrameKnown=true;
-      check(k.hiddenMeshCompatible(false)&&!k.hiddenMeshCompatible(true),"...an answer with no guard and no trim says the same");
-      for(const uint32_t mode:{1u,2u}) {
-        k.featureFrame.cullMode=mode;
-        check(!k.hiddenMeshCompatible(false)&&!k.hiddenMeshCompatible(true),"...a cull guard (symmetric or percent) still withholds it with no cant");
-      }
-      k.featureFrame.cullMode=0;
+      check(k.hiddenMeshCompatible(false)&&!k.hiddenMeshCompatible(true),"...an answer with no trim says the same");
       float* const trims[3]={&k.featureFrame.trimOuterDeg,&k.featureFrame.trimNasalDeg,&k.featureFrame.trimVerticalDeg};
       for(float* trim:trims) {
         *trim=3.0f;

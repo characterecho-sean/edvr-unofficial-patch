@@ -29,8 +29,8 @@
 // lives before it has depth; the depth reprojection is v2, gated on Phase 0
 // item 3.
 //
-// Runs FIRST at the door: on the game's texture, at render size, wide under
-// the cull guard, before the crop and the sharpen. Everything
+// Runs FIRST at the door: on the game's texture, at render size, before the
+// sharpen. Everything
 // downstream sees a temporally settled frame. Off by default; every refusal
 // stands the pass down for the session with one line.
 #pragma once
@@ -232,7 +232,7 @@ extern "C" {
 // bounds:    the Submit's uMin, vMin, uMax, vMax naming this eye's region of
 //            srcTex, or null for the whole texture.
 // tanNow:    l, r, t, b -- the frustum the game rendered THIS frame
-//            through, jitter excluded (the lied tangents under the guard).
+//            through, jitter excluded (the trimmed tangents under a FOV trim).
 // tanPrev:   the same for the frame whose history is being sampled.
 // jxNow/jyNow: this frame's jitter in render pixels (the content sits that
 //            far right and down from the unjittered grid). The current

@@ -63,8 +63,7 @@ bool poseReaderWatchOn();
 bool poseReaderTakeSwapTrigger(uint32_t* frameOut);
 
 // This frame's reader mask and positioner-call counts, read once per ring-
-// write site (glitch_frame.cpp's RingEntry) -- cullGuardStatePacked()'s
-// pattern: a cheap snapshot of what happened during the frame that just
+// write site (glitch_frame.cpp's RingEntry): a cheap snapshot of what happened during the frame that just
 // closed, taken at the boundary and reset there for the next one.
 struct PoseReaderFrameSnapshot {
     uint32_t readerMask = 0;      // bit N: unique-reader table id N fired this frame

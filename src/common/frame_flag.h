@@ -83,8 +83,8 @@ void* submittedTexture(int eye);
 // it is published BEFORE the openvr half has been called at all. Measured on
 // the field rig, the device is created 1.20 s before openvr_api.dll is first
 // asked for an interface. It was published for the early VR handover
-// (removed 2026-09-13); what reads it now is the cull guard, as the test
-// for whether a d3d11 half is installed at all.
+// (removed 2026-09-13); what reads it now is the native frame provider and the
+// graphics bridge, as the test for whether a d3d11 half is installed at all.
 //
 // Null means no d3d11 half, or a device the proxy never saw. Every reader
 // must treat that as "stand down", not as a reason to wait.
@@ -95,11 +95,8 @@ void* submittedTexture(int eye);
 // any of those fixes are switched on, so this is a fact about the GAME and
 // not about EDVR's configuration.
 //
-// Read by the cull guard, which must not start lying about the frustum while
-// the movie and the menu are up: the intro panel is placed from the TRUE
-// tangents while the game would be rendering the widened ones, and the two
-// disagree by the whole margin. Terrain culling is a flight concern and has
-// nothing to do for a movie, so holding costs the guard nothing.
+// Read by the native frame provider, which hands it to the runtime as sceneReady
+// (the frame-cycle statistics count a frame's producer only once it is set).
 //
 // False also means "nobody has said yet". A reader must pair it with
 // gameDevice() to tell "the intro is still up" from "no d3d11 half is
@@ -406,54 +403,6 @@ uint32_t menuDrawnValue();
 // "40 up still puts it below my eye line" -- both predicted to the degree
 // by that arithmetic). A bias must fit in the field it is masked into.
 constexpr int32_t kHeadLockBias = 1800;
-
-// The cull guard's state, published by openvr_api.dll at its stage
-// transitions and read by d3d11.dll once per frame boundary.
-//
-// WHY THE DETECTOR NEEDS IT (SPEC-FLASH-FALSE-POSITIVES §1g, EVIDENCE 6bp):
-// the guard tells the game a wider frustum than the headset shows, the wider
-// frustum admits more near-surface render passes, and the transition-flash
-// detector's recognition machinery churns in proportion -- 29 recognitions at
-// guard-off against 3,277 at half margin, with the learning tax felt as
-// judder. Whether that churn is table thrash, genuine novelty, or an
-// identifiable camera population is exactly what nobody has measured, so this
-// channel carries ATTRIBUTION: the detector stamps its ring and splits its
-// counters by what the guard was doing, and changes no decision on it.
-//
-// The eyeSize disciplines apply unchanged. One packed value, so a reader
-// cannot catch half a pair. Zero means "no answer", and every reader must
-// treat it exactly like guard-off -- openvr_api.dll absent, its guard never
-// armed, or a mismatched build pair (the mapping version isolates those) all
-// look identical, and all of them are states in which no lie is being told.
-//
-// stage is 0 (off), 1 (the game is asked for BIGGER render targets but still
-// told true projections -- supersampling only), or 2 (the projection lie is
-// live). The factors are the per-axis span ratios lied/true, carried as
-// per-mille above 1.0 -- +6.1% renders as 61. Stage 1 is published
-// distinctly on purpose: it changes pixel count but not the reported
-// frustum, so detector churn moving at stage 1 alone would be a finding
-// about resolution-dependent pass composition, not noise.
-void announceCullGuardState(uint32_t stage, float factorH, float factorV);
-
-// The packed value as last published, or 0 for "no answer". Packing, also
-// relied on by decodeCullGuardState below: bits 25..24 stage, 23..12
-// horizontal per-mille, 11..0 vertical per-mille.
-uint32_t cullGuardStatePacked();
-
-// The unpacked reading. Header-only and pure, like SubmitPairLatch and for
-// the same reason: both halves and every test decode one way.
-struct CullGuardState {
-    uint32_t stage;      // 0 off, 1 size-only, 2 lie live
-    uint32_t hPerMille;  // (span ratio - 1) * 1000, horizontal
-    uint32_t vPerMille;
-};
-inline CullGuardState decodeCullGuardState(uint32_t packed) {
-    CullGuardState s;
-    s.stage = (packed >> 24) & 0x3u;
-    s.hPerMille = (packed >> 12) & 0xFFFu;
-    s.vPerMille = packed & 0xFFFu;
-    return s;
-}
 
 // ONE VERDICT PER FRAME, over a channel that carries no frame identity.
 //

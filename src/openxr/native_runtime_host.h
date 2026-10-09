@@ -35,8 +35,7 @@
 #include "native_sharpen_client.h"
 #include "native_frame_client.h"
 #include "native_fss_client.h"
-#include "native_cull_guard.h"
-#include "native_feature_pose.h"
+#include "native_fov_trim.h"
 #include "native_timing_client.h"
 #include "device_gpu_timing.h"
 #include "producer_gpu_timing.h"
@@ -208,7 +207,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   uint64_t previousReference=0,withheldPairs=0,replayedPairs=0,emptyWithholds=0;
   NativeFrameClient features;
   NativeFssClient fss;
-  NativeCullGuard cullGuard;
+  NativeFovTrim fovTrim;
   EdvrNativeFrameOutput featureFrame{sizeof(featureFrame),EDVR_NATIVE_FRAME_VERSION_6};
   EdvrNativeFrameDecision featureDecision{sizeof(featureDecision),EDVR_NATIVE_FRAME_VERSION_1};
   bool featureFrameKnown=false;
@@ -433,8 +432,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   // Reads that handed the game a recommended size (GetRecommendedRenderTarget-
   // Size, and the extended display's two, which report the same size), from
   // any thread, for the life of this host, which is one VR_Init. While it is
-  // 0 the cull guard can tell a trim as the game's first ask
-  // (NativeCullRoute::FirstAsk): the startup frames run inside VR_Init,
+  // 0 the trim can tell itself as the game's first ask
+  // (NativeTrimRoute::FirstAsk): the startup frames run inside VR_Init,
   // before the game holds an interface to ask through.
   mutable std::atomic<uint64_t> sizeAsks{0};
   unsigned originInvalidationNotes=0;
@@ -879,7 +878,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   }
   // The simulated cant (canted_display.h), applied to a frame's located views
   // the moment xrLocateViews returns, so that everything after this -- the
-  // temporal and cull-guard frusta, the game's GetProjectionRaw and
+  // temporal and trim frusta, the game's GetProjectionRaw and
   // GetProjectionMatrix, the eye-to-head transform, the layer's pose and fov
   // at xrEndFrame -- sees one canted headset. The value is the previous
   // frame's (the first frame is not canted). True while a cant is applied.
@@ -932,13 +931,13 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     poseGap.flushIfDue(nowMs,sink);
   }
   // Whether the runtime's hidden-area mesh may be handed to the game this frame.
-  // It is cut for the runtime's own frustum and Elite reads it once, so a cull
-  // guard or a trim, which change that frustum, withhold it -- keyed on what is
+  // It is cut for the runtime's own frustum and Elite reads it once, so a trim,
+  // which changes that frustum, withholds it -- keyed on what is
   // configured, not on the stage, because there is no second read. A simulated
   // cant withholds it the same way: the mesh is cut in the real display's frame,
   // which is no longer the frame the game renders in.
   bool hiddenMeshCompatible(bool cantApplied) const {
-    return (!featureFrameKnown||(featureFrame.cullMode==0&&featureFrame.trimOuterDeg<=0&&
+    return (!featureFrameKnown||(featureFrame.trimOuterDeg<=0&&
       featureFrame.trimNasalDeg<=0&&featureFrame.trimVerticalDeg<=0))&&!cantApplied;
   }
   // A change of either test key counts as one only once the frame carrying it is
@@ -1069,7 +1068,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         cycleShape.generation=runtimeGeneration;cycleShape.featureEpoch=featureChanges;cycleShape.pacing=unsigned(lastPacing);
         cycleShape.shouldRender=boundary.frame().shouldRender?1u:0u;
         cycleShape.sceneReady=featureFrameKnown&&featureFrame.sceneReady?1u:0u;
-        for(unsigned i=0;i<2;++i){const auto submitted=cullGuard.lastSubmitted(i);cycleShape.width[i]=submitted.width;cycleShape.height[i]=submitted.height;cycleShape.outputWidth[i]=sizes[i].recommendedImageRectWidth;cycleShape.outputHeight[i]=sizes[i].recommendedImageRectHeight;}
+        for(unsigned i=0;i<2;++i){const auto submitted=fovTrim.lastSubmitted(i);cycleShape.width[i]=submitted.width;cycleShape.height[i]=submitted.height;cycleShape.outputWidth[i]=sizes[i].recommendedImageRectWidth;cycleShape.outputHeight[i]=sizes[i].recommendedImageRectHeight;}
         frameCycles.waitOwnerEnd(cycleToken,frameCycleUs());frameCycleWaitToken.store(0,std::memory_order_release);
       });
       // Start after the route returns so the dispatch/rendezvous is outside
@@ -1193,7 +1192,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     const bool locatedValid=makeGeometrySnapshot(located,temporalGeometry);
     auto gameGeometry=located;
     // This is the geometry exposed to Elite and the temporal provider. Keep
-    // runtime `located` dimensions raw for XR/cull accounting, but make every
+    // runtime `located` dimensions raw for XR accounting, but make every
     // game-facing path even so Elite's quality multiplier cannot truncate an
     // odd width or height below NGX's legal input range.
     for(unsigned eye=0;eye<2;++eye) {
@@ -1209,14 +1208,10 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       featureFrame=next;featureFrameKnown=true;
       publishCantedEyeFix(featureFrame.cantedEyeFix!=0);
       if(locatedValid) {
-        NativeCullSettings settings{};settings.mode=static_cast<NativeCullMode>(featureFrame.cullMode);
-        settings.percent=featureFrame.cullPercent;settings.horizontalFraction=featureFrame.cullHorizontalFraction;
-        settings.verticalFraction=featureFrame.cullVerticalFraction;settings.signatureCount=featureFrame.cullSignatureCount;
+        NativeTrimSettings settings{};
         settings.trimOuterDeg=featureFrame.trimOuterDeg;settings.trimNasalDeg=featureFrame.trimNasalDeg;
-        settings.trimVerticalDeg=featureFrame.trimVerticalDeg;settings.channel=featureFrame.cullChannel;
-        for(unsigned i=0;i<(std::min)(settings.signatureCount,8u);++i)
-          settings.signatures[i]={featureFrame.cullSignatures[i][0],featureFrame.cullSignatures[i][1]};
-        NativeCullFrustum frusta[2]{};NativeCullDimensions dimensions[2]{};
+        settings.trimVerticalDeg=featureFrame.trimVerticalDeg;
+        NativeTrimFrustum frusta[2]{};NativeTrimDimensions dimensions[2]{};
         for(unsigned e=0;e<2;++e) {
           const auto& raw=temporalGeometry.raw[e];frusta[e]={raw.left,raw.right,raw.top,raw.bottom};
           dimensions[e]={located.width[e],located.height[e]};
@@ -1225,36 +1220,34 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         // below), so 0 means no read the game made could have seen anything
         // but what this frame tells it.
         const uint64_t asks=sizeAsks.load(std::memory_order_relaxed);
-        cullGuard.beginFrame(settings,frusta,dimensions,featureFrame.sceneReady!=0,poses.read().originGeneration,asks!=0);
-        if(cullGuard.changed()) {
+        fovTrim.beginFrame(settings,frusta,dimensions,poses.read().originGeneration,asks!=0);
+        if(fovTrim.changed()) {
           invalidateEyeTreatments();menu.invalidate();previousPairValid=false;++featureChanges;
           // Eye 0's, as they stand at this stage: the frustum the treated
           // image will hold and where it sits in the eye's full field, which
           // are the runtime's own and identity until the stage goes live. A
           // clamped trim shows as an applied value below the one asked for.
-          // route= says why the stage was entered as it was (NativeCullRoute):
-          // scene for a widening, held until a rendered scene (scene=1);
-          // first_ask for a trim alone told before the game read any size
-          // (asked=0, scene=0), promoted by the first pair; rebuild for a trim
-          // alone after an earlier ask, landed by the game's rebuild without
-          // waiting for the scene.
-          const auto target=cullGuard.contentFrustum(0);const auto place=cullGuard.placementBounds(0);
-          nativeTracePrintf("native_cull,stage=%u,factors=%.5f/%.5f,recommended=%ux%u,trim=%.1f/%.1f/%.1f,"
-            "target=%.4f/%.4f/%.4f/%.4f,placement=%.4f/%.4f/%.4f/%.4f,route=%s,scene=%u,asked=%llu\n",unsigned(cullGuard.stage()),
-            cullGuard.factorWidth(),cullGuard.factorHeight(),cullGuard.recommended(0).width,cullGuard.recommended(0).height,
-            cullGuard.appliedOuterDeg(0),cullGuard.appliedNasalDeg(0),cullGuard.appliedVerticalDeg(0),
+          // route= says why the stage was entered as it was (NativeTrimRoute):
+          // first_ask for a trim told before the game read any size (asked=0),
+          // promoted by the first pair; rebuild for a trim told after an
+          // earlier ask, landed by the game's rebuild.
+          const auto target=fovTrim.contentFrustum(0);const auto place=fovTrim.placementBounds(0);
+          nativeTracePrintf("native_trim,stage=%u,factors=%.5f/%.5f,recommended=%ux%u,trim=%.1f/%.1f/%.1f,"
+            "target=%.4f/%.4f/%.4f/%.4f,placement=%.4f/%.4f/%.4f/%.4f,route=%s,scene=%u,asked=%llu\n",unsigned(fovTrim.stage()),
+            fovTrim.factorWidth(),fovTrim.factorHeight(),fovTrim.recommended(0).width,fovTrim.recommended(0).height,
+            fovTrim.appliedOuterDeg(0),fovTrim.appliedNasalDeg(0),fovTrim.appliedVerticalDeg(0),
             target.left,target.right,target.down,target.up,place.left,place.top,place.right,place.bottom,
-            nativeCullRouteName(cullGuard.route()),unsigned(featureFrame.sceneReady!=0),(unsigned long long)asks);
-          // Once per entry into Adopting: what the guard decided about the
-          // game's own rebuild (NativeCullGuard::startNudge and the
-          // NativeCullNudge names). `told` is the height the game reads from
+            nativeTrimRouteName(fovTrim.route()),unsigned(featureFrame.sceneReady!=0),(unsigned long long)asks);
+          // Once per entry into Adopting: what the trim decided about the
+          // game's own rebuild (NativeFovTrim::startNudge and the
+          // NativeTrimNudge names). `told` is the height the game reads from
           // here on, `asked` the height before any nudge, `floor` the lowest
           // height told since the rebuild last seen. `started` expects
           // stage=3 within seconds without an apply; `taller` and `capped`
           // expect it only at the next apply.
-          if(cullGuard.nudge()!=NativeCullNudge::None)
-            nativeTracePrintf("native_cull_nudge,%s,told=%u,asked=%u,floor=%u\n",nativeCullNudgeName(cullGuard.nudge()),
-              cullGuard.recommended(0).height,cullGuard.trueRecommended(0).height,cullGuard.nudgeFloor());
+          if(fovTrim.nudge()!=NativeTrimNudge::None)
+            nativeTracePrintf("native_trim_nudge,%s,told=%u,asked=%u,floor=%u\n",nativeTrimNudgeName(fovTrim.nudge()),
+              fovTrim.recommended(0).height,fovTrim.trueRecommended(0).height,fovTrim.nudgeFloor());
         }
         // While a rebuild is awaited, say what is waited for, so a stall
         // reads as numbers rather than as a stage 2 line with no stage 3
@@ -1263,33 +1256,27 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         // rendered for, `ask` what the game is told now, `last` the newest
         // complete pair. A first ask has no baseline (0x0): its `for` is the
         // ask itself, and it waits only for the game's first complete pair.
-        const bool firstAsk=cullGuard.route()==NativeCullRoute::FirstAsk;
-        if(cullGuard.stage()==NativeCullStage::Adopting&&(cullGuard.baselineReady()||firstAsk)&&(cullGuard.adoptingFrames()%180u)==2u) {
-          const auto b=cullGuard.baseline(0),f=firstAsk?cullGuard.treatedFor(0):cullGuard.baselineAsk(0),a=cullGuard.recommended(0),l=cullGuard.lastSubmitted(0);
-          nativeTracePrintf("native_cull_adopting,frames=%u,route=%s,baseline=%ux%u,for=%ux%u,ask=%ux%u,last=%ux%u\n",
-            cullGuard.adoptingFrames(),nativeCullRouteName(cullGuard.route()),b.width,b.height,f.width,f.height,a.width,a.height,l.width,l.height);
+        const bool firstAsk=fovTrim.route()==NativeTrimRoute::FirstAsk;
+        if(fovTrim.stage()==NativeTrimStage::Adopting&&(fovTrim.baselineReady()||firstAsk)&&(fovTrim.adoptingFrames()%180u)==2u) {
+          const auto b=fovTrim.baseline(0),f=firstAsk?fovTrim.treatedFor(0):fovTrim.baselineAsk(0),a=fovTrim.recommended(0),l=fovTrim.lastSubmitted(0);
+          nativeTracePrintf("native_trim_adopting,frames=%u,route=%s,baseline=%ux%u,for=%ux%u,ask=%ux%u,last=%ux%u\n",
+            fovTrim.adoptingFrames(),nativeTrimRouteName(fovTrim.route()),b.width,b.height,f.width,f.height,a.width,a.height,l.width,l.height);
         }
-        const auto stage=cullGuard.stage();
-        features.cull(stage==NativeCullStage::Live?2u:stage==NativeCullStage::Adopting?1u:0u,
-            cullGuard.widenFactorWidth(),cullGuard.widenFactorHeight());
         for(unsigned e=0;e<2;++e) {
-          const auto matrix=cullGuard.gameFrustumMatrix(e);const auto dims=cullGuard.recommended(e);
-          const auto query=cullGuard.gameFrustumRaw(e);
-          gameGeometry.views[e].fov={std::atan(matrix.left),std::atan(matrix.right),std::atan(matrix.up),std::atan(matrix.down)};
-          gameGeometry.queryFov[e]={std::atan(query.left),std::atan(query.right),std::atan(query.up),std::atan(query.down)};
+          const auto frustum=fovTrim.gameFrustum(e);const auto dims=fovTrim.recommended(e);
+          gameGeometry.views[e].fov={std::atan(frustum.left),std::atan(frustum.right),std::atan(frustum.up),std::atan(frustum.down)};
           gameGeometry.width[e]=dims.width;gameGeometry.height[e]=dims.height;
         }
-        gameGeometry.queryFovValid=true;
       }
     }
     if(locatedValid) geometry.recommend(gameGeometry.width,gameGeometry.height);
     // The temporal pass is sized by what the frame it is handed was rendered
     // for, which while a rebuild is awaited is the previous ask and not the
-    // one the game is told now (NativeCullGuard::treatedFor). The frusta are
+    // one the game is told now (NativeFovTrim::treatedFor). The frusta are
     // the game-facing ones either way.
     auto treatedGeometry=gameGeometry;
     if(features.acquired()&&locatedValid) for(unsigned e=0;e<2;++e) {
-      const auto dims=cullGuard.treatedFor(e);
+      const auto dims=fovTrim.treatedFor(e);
       treatedGeometry.width[e]=dims.width;treatedGeometry.height[e]=dims.height;
     }
     for(unsigned eye=0;eye<2;++eye) {
@@ -1306,8 +1293,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       // ...and what the game is told now, which leads that during an
       // adoption: fix.ui_quality's surfaces size a panel the game makes for
       // the new ask by it (the P3-1 lag, flight 2026-09-23 13:23).
-      // ...and the true display frustum (the located views, before a cull
-      // guard or trim), which the engine-side panel sizing takes k_out from.
+      // ...and the true display frustum (the located views, before a
+      // trim), which the engine-side panel sizing takes k_out from.
       const auto begun=temporal.begin(treatedGeometry,poses.read().originGeneration,frameTangentShift,&render.pose.mDeviceToAbsoluteTracking,
           (std::max)(gameGeometry.width[0],gameGeometry.width[1]),(std::max)(gameGeometry.height[0],gameGeometry.height[1]),
           std::fabs(temporalGeometry.raw[0].top),std::fabs(temporalGeometry.raw[0].bottom));
@@ -1317,7 +1304,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(fss.acquired()&&locatedValid&&frame.shouldRender && fss.begin(gameGeometry,poses.read().originGeneration)!=S_OK) {
       boundary.clear();return fail(XR_ERROR_VALIDATION_FAILURE);
     }
-    // The hidden-area mesh is withheld on a guard, a trim or a simulated cant
+    // The hidden-area mesh is withheld on a trim or a simulated cant
     // (hiddenMeshCompatible).
     const bool geometryValid=geometry.publish(gameGeometry,false,false,frameTangentShift,hiddenMeshCompatible(cantApplied));
     commitCantTestChange();
@@ -1725,12 +1712,12 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     // pixels are placed inside the full field instead and the rest is black.
     // Without a trim the image still holds the located projection, and both
     // the menu and the layer keep the located angles untouched.
-    const bool placed=cullGuard.stage()==NativeCullStage::Live&&cullGuard.trimmed();
+    const bool placed=fovTrim.stage()==NativeTrimStage::Live&&fovTrim.trimmed();
     if(placed) {
-      const auto content=cullGuard.contentFrustum(unsigned(eye));
+      const auto content=fovTrim.contentFrustum(unsigned(eye));
       frameContentViews[unsigned(eye)].fov={std::atan(content.left),std::atan(content.right),
         std::atan(content.up),std::atan(content.down)};
-      const auto place=cullGuard.placementBounds(unsigned(eye));
+      const auto place=fovTrim.placementBounds(unsigned(eye));
       framePlacement[unsigned(eye)]={place.left,place.top,place.right,place.bottom};
     }
     if(!temporalOutput) {
@@ -1745,7 +1732,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
           // The jittered pixels sit a fraction of the eye's own span away
           // from where the placement put them. Move the rectangle, so the
           // layer keeps the located field it is composed against.
-          const auto full=cullGuard.runtimeFrustum(unsigned(eye));
+          const auto full=fovTrim.runtimeFrustum(unsigned(eye));
           const float du=full.right-full.left,dv=full.up-full.down;
           if(!(du>1e-4f&&dv>1e-4f)){timingInvalidate();return vr::VRCompositorError_InvalidTexture;}
           auto& place=framePlacement[unsigned(eye)];
@@ -1759,12 +1746,6 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     const vr::VRTextureBounds_t fullBounds{0,0,1,1};
     auto* sharpenSource=healed?healed.Get():temporalOutput?temporalOutput.Get():submittedSource;
     const auto* sharpenBounds=healed?&fullBounds:temporalOutput?&temporalBounds:bounds;
-    vr::VRTextureBounds_t croppedBounds{};
-    if(cullGuard.stage()==NativeCullStage::Live) {
-      const auto crop=cullGuard.cropBounds(unsigned(eye));
-      croppedBounds=nativeCropBounds(sharpenBounds,crop.left,crop.top,crop.right,crop.bottom);
-      sharpenBounds=&croppedBounds;
-    }
     Microsoft::WRL::ComPtr<ID3D11Texture2D> sharpenOutput;
     vr::VRTextureBounds_t sharpenedBounds{};
     if(sharpen.acquired()) {
@@ -1822,14 +1803,14 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       frameDecisionReady=true;frameWithheld=featureDecision.withhold!=0;
       if(frameWithheld){fss.invalidate();++withheldPairs;}
     }
-    // Dimensions describe Elite's ROI before upscaling or a guard crop.
+    // Dimensions describe Elite's ROI before upscaling.
     Microsoft::WRL::ComPtr<ID3D11Texture2D> submittedSource;
     if(FAILED(static_cast<IUnknown*>(texture->handle)->QueryInterface(IID_PPV_ARGS(&submittedSource))))
       return vr::VRCompositorError_InvalidTexture;
     D3D11_TEXTURE2D_DESC submittedDesc{};submittedSource->GetDesc(&submittedDesc);
     const auto submittedWidth=uint32_t(std::lround(submittedDesc.Width*(bounds?std::fabs(bounds->uMax-bounds->uMin):1.f)));
     const auto submittedHeight=uint32_t(std::lround(submittedDesc.Height*(bounds?std::fabs(bounds->vMax-bounds->vMin):1.f)));
-    cullGuard.noteSubmittedSize(unsigned(eye),submittedWidth,submittedHeight);
+    fovTrim.noteSubmittedSize(unsigned(eye),submittedWidth,submittedHeight);
     submitSample.width[unsigned(eye)]=submittedWidth;submitSample.height[unsigned(eye)]=submittedHeight;
     timingFrame.inputWidth[unsigned(eye)]=submittedWidth;
     timingFrame.inputHeight[unsigned(eye)]=submittedHeight;
@@ -2266,10 +2247,10 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     phase("xr_end_frame",&SubmissionStats::Sample::endFrameMs);
     phase("wait_frame",&SubmissionStats::Sample::waitFrameMs);
     phase("pacer_block",&SubmissionStats::Sample::pacerBlockMs);
-    nativeTracePrintf("native_submit_phases,window=%llu,first=%llu,last=%llu,output=%ux%u/%ux%u,treatments=%u/%u,feature_epoch=%llu,cull_stage=%u,cull_factors=%.5f/%.5f,pacing=%u,separate=%u%s,percentiles=50/95/99/max,units=wall_ms,nested=1,gpu=0,frame_end_overlap=%u\n",
+    nativeTracePrintf("native_submit_phases,window=%llu,first=%llu,last=%llu,output=%ux%u/%ux%u,treatments=%u/%u,feature_epoch=%llu,trim_stage=%u,trim_factors=%.5f/%.5f,pacing=%u,separate=%u%s,percentiles=50/95/99/max,units=wall_ms,nested=1,gpu=0,frame_end_overlap=%u\n",
       (unsigned long long)submitStats.window(),(unsigned long long)first.sequence,(unsigned long long)last.sequence,
       last.outputWidth[0],last.outputHeight[0],last.outputWidth[1],last.outputHeight[1],last.treatments[0],last.treatments[1],
-      (unsigned long long)last.featureEpoch,unsigned(cullGuard.stage()),cullGuard.factorWidth(),cullGuard.factorHeight(),
+      (unsigned long long)last.featureEpoch,unsigned(fovTrim.stage()),fovTrim.factorWidth(),fovTrim.factorHeight(),
       unsigned(last.deferred),unsigned(separateGraphics()),phases,
       // last.deferred==0 is FramePacing::Runtime, the only pacing this
       // window's last sample could have taken the overlapped path under.
@@ -2598,9 +2579,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(FAILED(temporal.close()))return clean=false;
     if(FAILED(sharpen.close()))return clean=false;
     if(FAILED(fss.close())||FAILED(features.close()))return clean=false;
-    if(tracing)nativeTracePrintf("native_features_summary,changes=%llu,fss_healed=%llu/%llu,fss_deferred=%llu,withheld=%llu,replayed=%llu,empty=%llu,cull_stage=%u\n",
+    if(tracing)nativeTracePrintf("native_features_summary,changes=%llu,fss_healed=%llu/%llu,fss_deferred=%llu,withheld=%llu,replayed=%llu,empty=%llu,trim_stage=%u\n",
       (unsigned long long)featureChanges,(unsigned long long)fssHealedEyes[0],(unsigned long long)fssHealedEyes[1],
-      (unsigned long long)fssDeferredEyes,(unsigned long long)withheldPairs,(unsigned long long)replayedPairs,(unsigned long long)emptyWithholds,unsigned(cullGuard.stage()));
+      (unsigned long long)fssDeferredEyes,(unsigned long long)withheldPairs,(unsigned long long)replayedPairs,(unsigned long long)emptyWithholds,unsigned(fovTrim.stage()));
     if(tracing)nativeTracePrintf("native_pacing_summary,changes=%llu,deferred=%llu,synthesized=%llu,ready_at_wait=%llu,kicks=%llu,drained_frames=%llu,drained_waits=%llu,late_frames=%llu,perf_settings_events=%llu\n",
       (unsigned long long)pacingChanges,(unsigned long long)boundary.deferredFrames(),(unsigned long long)boundary.synthesized(),
       (unsigned long long)boundary.readyAtWait(),(unsigned long long)boundary.kicks(),(unsigned long long)boundary.drainedFrames(),

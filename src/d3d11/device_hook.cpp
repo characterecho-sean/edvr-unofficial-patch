@@ -1416,7 +1416,7 @@ void tickFrameFlagPeer() {
                     "shared channel's v%u, the VR runtime half beside it with v%u. They "
                     "come from different EDVR builds, so the channel between them is "
                     "refused: everything that crosses it (the transition-flash hold, "
-                    "the on-foot camera, the cull guard, the intro recentre, the "
+                    "the on-foot camera, the intro recentre, the "
                     "settings menu's door) is absent this session. Reinstall EDVR so "
                     "both halves match.",
                     kFrameFlagVersion, theirs);

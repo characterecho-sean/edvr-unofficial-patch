@@ -482,7 +482,7 @@ static void testShippedIni(const std::wstring& root) {
         "fov_trim_outer = oculus/meta-quest-3:7\r\n"
         "fov_trim_nasal =\r\n"
         "[advanced]\r\n"
-        "cull_guard_percent = 20.0\r\n";
+        "transition_flash_units = 1500\r\n";
     MergeReport moveRep;
     const std::string migrated = mergeIni(shipped, oldLayout, nullptr, {}, &moveRep);
     expectEq(iniValue(migrated, "experimental.fss_panel_distance"), "1.0",
@@ -493,7 +493,7 @@ static void testShippedIni(const std::wstring& root) {
              "nothing is left under the old name for the reader to shadow");
     expectEq(iniValue(migrated, "fix.fss_eye_sync"), "on",
              "the retired pair of keys lands merged on the one new key");
-    expectEq(iniValue(migrated, "advanced.cull_guard_percent"), "20.0",
+    expectEq(iniValue(migrated, "advanced.transition_flash_units"), "1500",
              "an unmoved tuned value still lands in its own section");
     check(iniValue(migrated, "fix.fss_eye_glue") == "stock",
           "a key this version never shipped is carried, with its note");
@@ -963,6 +963,143 @@ static void testShippedIni(const std::wstring& root) {
             const std::string fresh = mergeIni(shipped, shipped, &previous, {}, &freshRep);
             check(fresh == shipped && freshRep.retired.empty() && freshRep.carried.empty(),
                   "a file without the four lines carries nothing: the new file stands as shipped");
+        }
+    }
+
+    // 2026-10-09: the terrain guard removed, six keys: fix.cull_guard (off | symmetric | percent; shipped LIVE as `off` in [fix], so every
+    // install of the previous version has the line written out), fix.cull_guard_fraction_h, _fraction_v, _headsets and _percent (commented
+    // templates in [fix]) and advanced.cull_guard_channel (a commented template in [advanced]). The pose fix answers the cause, and Elite's
+    // own culling is what runs. A line somebody set is carried with its value, reported as retired and not as a key this version never
+    // shipped, and not adopted; the settings beside the blocks keep their tuned values; no documentation block is resurrected; a second
+    // merge adds no copy. At run time the config audit names a carried line in the log (config.cpp: "name settings this build does not
+    // read ... a retired setting").
+    check(shipped.find("cull_guard") == std::string::npos,
+          "the shipped ini documents none of the six removed terrain guard keys");
+    {
+        // The previous version's file: the shipped one with the [fix] block put back after the hologram setting and the [advanced]
+        // template after the pixel probe, where each sat.
+        const std::string afterHolo = "\nholo_pattern = steady" + eol;
+        const std::string afterProbe = "\n#pixel_probe =" + eol;
+        const size_t atHolo = shipped.find(afterHolo);
+        const size_t atProbe = shipped.find(afterProbe);
+        const bool anchored = atHolo != std::string::npos && atProbe != std::string::npos && atHolo < atProbe;
+        check(anchored, "the shipped ini still has the two lines the removed-terrain-guard fixture anchors on, in this order");
+        if (anchored) {
+            std::string previous = shipped;
+            // Back to front, so the earlier offset stays valid.
+            previous.insert(atProbe + afterProbe.size(),
+                eol + "# Developer instrument, and NOT a way to fly. Which of the game's two projection query channels the" + eol +
+                "# terrain guard's widened frustum is told through. Live." + eol +
+                "# dev: choices both, raw, matrix" + eol +
+                "#cull_guard_channel = both" + eol);
+            previous.insert(atHolo + afterHolo.size(),
+                eol + "# The terrain fix" + eol +
+                "# Fill in the black squares of missing planet terrain at the edges of view. Costs GPU time." + eol +
+                "# ui: Fill terrain gaps at view edges | choices off, symmetric | menu" + eol +
+                "cull_guard = off" + eol +
+                eol + "# How much of the shortfall to cover, 0..1 per axis." + eol +
+                "#cull_guard_fraction_h = 0.25" + eol +
+                "#cull_guard_fraction_v = 0" + eol +
+                eol + "# Run the guard only for these headsets: comma-separated FOV signatures." + eol +
+                "#cull_guard_headsets =" + eol +
+                eol + "# Percent mode's margin, in percent of every edge. Diagnostic." + eol +
+                "#cull_guard_percent = 8.0" + eol);
+
+            const auto setLine = [&](std::string text, const std::string& oldLine, const std::string& newLine) {
+                const size_t p = text.find("\n" + oldLine + eol);
+                if (p != std::string::npos) text.replace(p + 1, oldLine.size(), newLine);
+                return text;
+            };
+            const auto copies = [](const std::string& text, const std::string& needle) {
+                size_t n = 0, from = 0;
+                while ((from = text.find(needle, from)) != std::string::npos) {
+                    ++n;
+                    from += 1;
+                }
+                return n;
+            };
+            const std::string carriedNote = "# carried over from your edvr.ini; this version no longer uses it";
+            const auto carriedAs = [&](const std::string& merged, const std::string& line) {
+                return merged.find(carriedNote + "\n" + line) != std::string::npos ||
+                       merged.find(carriedNote + "\r\n" + line) != std::string::npos;
+            };
+            // The settings beside the blocks, tuned, to show the merge leaves them alone.
+            const auto tuned = [&](std::string text) {
+                text = setLine(text, "holo_pattern = steady", "holo_pattern = stock");
+                text = setLine(text, "#pixel_probe =", "pixel_probe = 0.5,0.5");
+                return text;
+            };
+
+            // 1. The previous version's own file: only the live cull_guard line is there to carry.
+            {
+                MergeReport rep;
+                const std::string merged = mergeIni(shipped, tuned(previous), &previous, {}, &rep);
+                expectEq(iniValue(merged, "fix.cull_guard"), "off", "the previous version's own terrain guard line is carried, not eaten");
+                check(rep.retired.size() == 1 && rep.carried.empty(),
+                      "...reported as a retired setting, not as a key this version never shipped",
+                      std::to_string(rep.retired.size()) + " retired, " + std::to_string(rep.carried.size()) + " carried");
+                check(carriedAs(merged, "cull_guard = off"), "...after a note saying this version no longer uses it");
+                expectEq(iniValue(merged, "fix.holo_pattern"), "stock", "the setting before the removed block keeps its tuned value");
+                expectEq(iniValue(merged, "advanced.pixel_probe"), "0.5,0.5", "...and so does the one after it");
+                check(iniValue(merged, "fix.cull_guard_fraction_h", "<unset>") == "<unset>" &&
+                          iniValue(merged, "fix.cull_guard_headsets", "<unset>") == "<unset>" &&
+                          iniValue(merged, "advanced.cull_guard_channel", "<unset>") == "<unset>",
+                      "the commented templates carry nothing");
+            }
+
+            // 2. A rig that flew all six: every line is carried with its value.
+            {
+                std::string flown = tuned(previous);
+                flown = setLine(flown, "cull_guard = off", "cull_guard = symmetric");
+                flown = setLine(flown, "#cull_guard_fraction_h = 0.25", "cull_guard_fraction_h = 0.5");
+                flown = setLine(flown, "#cull_guard_fraction_v = 0", "cull_guard_fraction_v = 0.25");
+                flown = setLine(flown, "#cull_guard_headsets =", "cull_guard_headsets = 94x99");
+                flown = setLine(flown, "#cull_guard_percent = 8.0", "cull_guard_percent = 12.0");
+                flown = setLine(flown, "#cull_guard_channel = both", "cull_guard_channel = raw");
+                MergeReport rep;
+                const std::string merged = mergeIni(shipped, flown, &previous, {}, &rep);
+                expectEq(iniValue(merged, "fix.cull_guard"), "symmetric", "a flown terrain guard mode is carried with its value");
+                expectEq(iniValue(merged, "fix.cull_guard_fraction_h"), "0.5", "...and so is each margin");
+                expectEq(iniValue(merged, "fix.cull_guard_fraction_v"), "0.25", "...both of them");
+                expectEq(iniValue(merged, "fix.cull_guard_headsets"), "94x99", "...the headset list");
+                expectEq(iniValue(merged, "fix.cull_guard_percent"), "12.0", "...the percent margin");
+                expectEq(iniValue(merged, "advanced.cull_guard_channel"), "raw", "...and the channel probe");
+                check(rep.retired.size() == 6 && rep.carried.empty(),
+                      "all six are reported as retired settings, none as a key this version never shipped",
+                      std::to_string(rep.retired.size()) + " retired, " + std::to_string(rep.carried.size()) + " carried");
+                check(carriedAs(merged, "cull_guard = symmetric") && carriedAs(merged, "cull_guard_fraction_h = 0.5") &&
+                          carriedAs(merged, "cull_guard_fraction_v = 0.25") && carriedAs(merged, "cull_guard_headsets = 94x99") &&
+                          carriedAs(merged, "cull_guard_percent = 12.0") && carriedAs(merged, "cull_guard_channel = raw"),
+                      "each carried line follows a note saying this version no longer uses it");
+                expectEq(iniValue(merged, "fix.holo_pattern"), "stock", "the setting before the removed block keeps its tuned value");
+                expectEq(iniValue(merged, "advanced.pixel_probe"), "0.5,0.5", "...and so does the one after it");
+                check(merged.find("Fill in the black squares") == std::string::npos &&
+                          merged.find("# ui: Fill terrain gaps") == std::string::npos &&
+                          merged.find("Which of the game's two projection query channels") == std::string::npos,
+                      "the removed settings' documentation blocks and menu row are not resurrected");
+
+                // The merge is idempotent on the carried lines.
+                MergeReport again;
+                const std::string twice = mergeIni(shipped, merged, &shipped, {}, &again);
+                check(copies(twice, "cull_guard = symmetric") == 1 && copies(twice, "cull_guard_fraction_h = 0.5") == 1 &&
+                          copies(twice, "cull_guard_channel = raw") == 1,
+                      "a second merge does not duplicate a carried line");
+
+                // Hand-installed, no base copy: the same six lines are still carried and still inert, only the note differs.
+                MergeReport bareRep;
+                const std::string bare = mergeIni(shipped, flown, nullptr, {}, &bareRep);
+                check(iniValue(bare, "fix.cull_guard") == "symmetric" && iniValue(bare, "fix.cull_guard_headsets") == "94x99" &&
+                          iniValue(bare, "advanced.cull_guard_channel") == "raw",
+                      "with no base copy the removed settings are still carried with their values");
+                check(bareRep.carried.size() == 6 && bareRep.retired.empty(),
+                      "and reported as keys this version never shipped (the merge cannot know they once did)");
+            }
+
+            // A file with none of the lines (installed from this version, or the lines deleted) carries nothing.
+            MergeReport freshRep;
+            const std::string fresh = mergeIni(shipped, shipped, &previous, {}, &freshRep);
+            check(fresh == shipped && freshRep.retired.empty() && freshRep.carried.empty(),
+                  "a file without the six lines carries nothing: the new file stands as shipped");
         }
     }
 }

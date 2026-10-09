@@ -25,7 +25,7 @@ namespace edvr::openxr {
 // projection hands over. A narrower one leaves the rest of the image black:
 // the layer still advertises the runtime's full field, because a runtime
 // that ignores a narrower layer FOV (the Oculus one does) would stretch a
-// trimmed image across the lens instead. Deliberately not the guard's own
+// trimmed image across the lens instead. Deliberately not the trim's own
 // bounds type -- this header stays free of the native feature headers.
 struct StereoPlacement { float left = 0, top = 0, right = 1, bottom = 1; };
 

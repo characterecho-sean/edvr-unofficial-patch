@@ -159,9 +159,10 @@ instead of standing in the world, or sized for a screen you are not looking at.
   and not sent, so the runtime holds the previous frame.
 - For shimmer and frame time there is DLSS or FSR, under [Upscaling: DLSS and
   FSR](#upscaling-dlss-and-fsr).
-- Over planets, Elite culls against a narrower frustum than it renders, so
-  squares of ground at the edges of view go undrawn. The fix is off by default
-  and costs about 6% GPU at the tested values.
+- Over planets, Elite culled terrain with a head pose about 42 ms older than
+  the one it drew with, so squares of ground at the edges of view went undrawn
+  when you moved your head. EDVR answers the game's request for the head pose
+  "now" at the instant of the frame being drawn. There is no setting.
 - On foot, the grey surround is made properly black, the screen is moved, bent
   and raised above its forced 1920x1080, and Explorer Cam gives you a real
   stereo view from your commander's head in the free camera.
@@ -192,15 +193,6 @@ key presses, and how your commander's avatar is drawn, on your machine only,
 and gives them back when you leave; it touches nothing shared.
 [docs/explorer-cam.md](docs/explorer-cam.md) covers setting it up and what it
 does under the hood, safeguards included.
-
-## The terrain fix (cull guard)
-
-This is for Frontier issue
-[72609](https://issues.frontierstore.net/issue-detail/72609), "Culling of
-planet surface in VR too aggressive": the black squares at the edges of view
-over planets. It is off by default because it costs GPU time, and turning it on
-takes three settings in `edvr.ini`, which
-[docs/fixes.md](docs/fixes.md#over-a-planet) walks through.
 
 ## Settings
 

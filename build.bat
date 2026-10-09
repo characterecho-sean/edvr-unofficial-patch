@@ -922,15 +922,15 @@ if errorlevel 1 ( echo [edvr] ERROR: native FSS shader test build failed & exit 
 "%BUILD%\native_fss_gpu_test.exe" --self-test || exit /b 1
 exit /b 0
 
-:rig_native_cull_test
-echo [edvr] === native_cull_test.exe ===
-if not exist "%OBJ%\native_cull" mkdir "%OBJ%\native_cull"
+:rig_native_trim_test
+echo [edvr] === native_trim_test.exe ===
+if not exist "%OBJ%\native_trim" mkdir "%OBJ%\native_trim"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
-    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\native_cull\\" /Fe"%BUILD%\native_cull_test.exe" ^
-    "tools\native_cull_test\native_cull_test.cpp" /link /INCREMENTAL:NO
-if errorlevel 1 ( echo [edvr] ERROR: native cull policy test build failed & exit /b 1 )
-"%BUILD%\native_cull_test.exe" --dry-run || exit /b 1
-"%BUILD%\native_cull_test.exe" --self-test || exit /b 1
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\native_trim\\" /Fe"%BUILD%\native_trim_test.exe" ^
+    "tools\native_trim_test\native_trim_test.cpp" /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: native FOV trim policy test build failed & exit /b 1 )
+"%BUILD%\native_trim_test.exe" --dry-run || exit /b 1
+"%BUILD%\native_trim_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_dlaa_mode_test

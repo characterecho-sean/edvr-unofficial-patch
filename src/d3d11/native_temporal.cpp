@@ -111,7 +111,7 @@ std::atomic<uint64_t> g_recommended{0};
 // (ui_quality_math.h's rule). 0 at the same times as g_recommended.
 std::atomic<uint64_t> g_vertical{0};
 // ...and what the game is told now (the host's ask), which leads the
-// recommendation above through a cull-guard or FOV-trim adoption: the game
+// recommendation above through a FOV-trim adoption: the game
 // re-creates its surfaces for it before a frame of it arrives (review P3-1,
 // flight 2026-09-23 13:23). 0 when the host does not say.
 std::atomic<uint64_t> g_asked{0};
@@ -562,9 +562,9 @@ bool nativeTemporalEyeGeometry(uint32_t eye, uint64_t* sequence, float frustum[4
 }
 // fix.ui_quality's panels and instruments (ui_surfaces.h): the size, max over eyes, the
 // runtime's beginFrame says the frame being drawn was rendered for (the
-// host's treatedGeometry: the FOV trim and the cull guard included). Outside
+// host's treatedGeometry: the FOV trim included). Outside
 // an adoption that is what GetRecommendedRenderTargetSize answers; DURING a
-// cull-guard or FOV-trim adoption it is the previous ask, one rebuild behind
+// FOV-trim adoption it is the previous ask, one rebuild behind
 // the game (review P3-1, open). Read from inside CreateTexture2D -- EDVR's
 // own creates in treat() included -- so from g_recommended, never the lock.
 bool nativeTemporalRecommended(uint32_t* w, uint32_t* h) {

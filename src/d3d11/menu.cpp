@@ -803,25 +803,12 @@ std::string openxrResolutionTooltip(const ResolutionView& v) {
             body += " = " + eyeDimensions(v.sizing, v.requested) + " per eye " + afterRestartFacts(v) + ".";
         }
         body += "\nActive: " + activeDimensions(v.sizing) + ".";
-        // What Elite submits, against the size it was GIVEN: while the
-        // cull guard is adopting or live the host recommends the active
-        // size times the guard's factor (native_cull_guard.h:98-102), so
-        // dividing by the active size alone would read x1.24 at HMD
-        // Quality 1.0. The factor is named rather than folded so both
-        // numbers can be checked against the Status page's guard line.
+        // What Elite submits, against the size it was GIVEN (the active size).
         uint32_t ew = 0, eh = 0;
         if (eyeTextureSize(&ew, &eh) && ew && v.sizing.activeWidth[0]) {
-            const CullGuardState g = decodeCullGuardState(cullGuardStatePacked());
-            const double guard = g.stage ? 1.0 + g.hPerMille / 1000.0 : 1.0;
-            const double given = static_cast<double>(v.sizing.activeWidth[0]) * guard;
             char line[120];
-            if (guard > 1.0005) {
-                snprintf(line, sizeof(line), "\nElite submits %ux%u (x%.2f of what it was given; guard x%.2f).",
-                         ew, eh, static_cast<double>(ew) / given, guard);
-            } else {
-                snprintf(line, sizeof(line), "\nElite submits %ux%u (x%.2f of the active size).", ew, eh,
-                         static_cast<double>(ew) / given);
-            }
+            snprintf(line, sizeof(line), "\nElite submits %ux%u (x%.2f of the active size).", ew, eh,
+                     static_cast<double>(ew) / static_cast<double>(v.sizing.activeWidth[0]));
             body += line;
         }
     }
@@ -1613,16 +1600,6 @@ void buildStatus(MenuContent& c) {
         snprintf(buf, sizeof(buf), "not published yet");
     }
     statusLine(c, "Eye texture", buf);
-    {
-        const CullGuardState g = decodeCullGuardState(cullGuardStatePacked());
-        if (g.stage == 0) {
-            snprintf(buf, sizeof(buf), "off");
-        } else {
-            snprintf(buf, sizeof(buf), "stage %u, +%.1f%% / +%.1f%%", g.stage, g.hPerMille / 10.0,
-                     g.vPerMille / 10.0);
-        }
-        statusLine(c, "Terrain guard", buf);
-    }
     {
         const std::string mode = Config::get().getString("fix.temporal_aa", "off");
         uint32_t n = 0, resets = 0;
