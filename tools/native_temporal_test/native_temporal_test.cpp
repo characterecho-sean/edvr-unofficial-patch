@@ -83,9 +83,13 @@ void vrWorldRouteNoteSceneReset(){++worldRouteSceneResets;}}
 // way might, so the rule's first cut misses and NGX's answer must step it
 // down; a nonzero `onlyW` answers for that output width alone.
 bool ngxAnswers=true,stingy=false;unsigned rangeQueries=0;uint32_t onlyW=0;
-namespace edvr{bool dlssModeRanges(ID3D11Device*,uint32_t outW,uint32_t outH,DlssModeRange modes[kDlssModeCount]){
+// A nonzero `ceilingSide` is NVIDIA's side limit (2026-10-09 probe: 8192 on each axis): past it every mode answers ok with
+// every size zero, the flight's "success with zeros".
+uint32_t ceilingSide=0;
+namespace edvr{bool dlssModeRanges(ID3D11Device*,uint32_t outW,uint32_t outH,DlssModeRange modes[kDlssModeCount],bool){
   ++rangeQueries;for(int k=0;k<kDlssModeCount;++k)modes[k]=DlssModeRange{};
   if(!ngxAnswers||!outW||!outH||(onlyW&&outW!=onlyW))return false;
+  if(ceilingSide&&(outW>ceilingSide||outH>ceilingSide)){for(int k=0;k<kDlssModeCount;++k)modes[k].ok=true;return true;}
   const unsigned extra=stingy&&outW<4000?3u:0u,hw=(outW+1)/2+extra,hh=(outH+1)/2+extra;
   const unsigned optW[3]={(outW*2+1)/3,(outW*58+50)/100,hw},optH[3]={(outH*2+1)/3,(outH*58+50)/100,hh};
   for(int k=0;k<3;++k){auto& m=modes[k];m.ok=true;m.optW=optW[k];m.optH=optH[k];m.minW=hw;m.minH=hh;m.maxW=outW;m.maxH=outH;}
@@ -455,6 +459,12 @@ void run(){
     stingy=false;
     onlyW=4074;ask(floorT,18,4074,4076,1829,1830,4074,4076,"NGX silent at the cut: the door's output stands, the pass decides as before");onlyW=0;
     ngxAnswers=false;ask(floorT,18,4000,4000,1600,1600,4000,4000,"NGX will not say at all: the door's output stands, as before this existed");ngxAnswers=true;
+    // NVIDIA's ceiling (dlss_floor.h): 8268x3948 answers zeros, so the output is cut to the largest it answers, 8192x3910, and the
+    // 4134x1974 input clears that cap's floor (4096x1955). A small input under the cap's floor is cut at the cap, not the door.
+    ceilingSide=8192;
+    ask(floorT,18,8268,3948,4134,1974,8192,3910,"NVIDIA's side limit: 8268x3948 is cut to the ceiling, 8192x3910, and the input serves there");
+    ask(floorT,18,8268,3948,2000,1000,4000,2000,"under the cap's floor: twice the input at the cap, 4000x2000");
+    ceilingSide=0;
     check(floorT.close(floorT.context)==S_OK,"floor channel close");
     // Only NVIDIA's ranges are the floor: fsr is asked for the door's output.
     auto fsr=acquire(d,19,"fsr");seq=0;const auto q=rangeQueries;

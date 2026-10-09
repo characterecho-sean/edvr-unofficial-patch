@@ -942,6 +942,8 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
 if errorlevel 1 ( echo [edvr] ERROR: dlaa_mode_test build failed & exit /b 1 )
 "%BUILD%\dlaa_mode_test.exe" --dry-run || exit /b 1
 "%BUILD%\dlaa_mode_test.exe" --self-test || exit /b 1
+REM tools\dlaa_mode_test\mutants.py --self-test holds the mutation list to the sources as they are; --run builds the rig against each edit.
+python "tools\dlaa_mode_test\mutants.py" --self-test || exit /b 1
 exit /b 0
 
 :rig_format_support_test
