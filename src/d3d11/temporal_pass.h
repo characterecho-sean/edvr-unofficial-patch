@@ -63,6 +63,8 @@ void temporalPassTick(ID3D11DeviceContext* ctx);
 // on, which the NGX warm-up must match before it touches the device. No
 // AddRef on the device; compare it by identity only. False until acquired.
 bool nativeTemporalWarmTarget(ID3D11Device** dev, unsigned long* thread);
+// The omission counters of the current native temporal channel (native_temporal.cpp), for tests.
+bool nativeTemporalOmissionCounters(uint64_t* skipped, uint64_t* historyKept, uint64_t* returnedResets, uint64_t* unjudgedResets);
 
 // The camera capture for the `camera` motion source. Every write of the
 // game's big scene-constants block passes through here (the Unmap tee

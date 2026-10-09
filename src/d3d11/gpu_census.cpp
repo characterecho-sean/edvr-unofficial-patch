@@ -75,7 +75,7 @@ constexpr size_t kWorldSections = static_cast<size_t>(GpuCensusSection::FrameWor
 constexpr size_t kSkinFirst = static_cast<size_t>(GpuCensusSection::FrameSkinSourceClear);
 constexpr size_t kSkinSections = static_cast<size_t>(GpuCensusSection::FrameSkinPose) - kSkinFirst + 1;
 constexpr const char* kSkinNames[] = {
-    "source target 7 clear", "eye target 7 clear", "join dispatch (3-table clear included)", "join 3-table clear alone (probe on scratch buffers)", "pose table"
+    "source target 7 clear", "eye target 7 clear", "join 3-table clear pass", "join dispatch (clear pass not included)", "pose table"
 };
 static_assert(kAlteredFirst == kDoorSections + kFrameSections + kSkinSections, "one name for each in-frame section, and the altered sections follow them");
 static_assert(kSeedSection + 1 == kWorldFirst && kWorldFirst + kWorldSections == kSkinFirst && kSkinFirst + kSkinSections == kAlteredFirst && kWorldSections == 3 &&
@@ -293,8 +293,8 @@ void formatSkinDetail(char* out, size_t n, const Snapshot (&items)[kSkinSections
     for (size_t i = 0; i < kSkinSections; ++i) appendItem(list, kSkinNames[i], items[i]);
     std::snprintf(out, n,
                   "EDVR GPU census, the second skin's GPU work (F2); each item is already inside the engine velocity figure above, so none of it is added to EDVR ~%.3f: "
-                  "%s; the join dispatch holds its 3-table clear as the first phase of it, and the clear alone is timed on scratch buffers (the same loop) on its own turn, "
-                  "so the rest of the join is the join minus the probe; \"-\" means that work did not run this window.",
+                  "%s; the clear pass is issued right before the join dispatch and is not part of it (before F17 the join's first phase was the clear: 0.015 of its 0.030 ms); "
+                  "\"-\" means that work did not run this window.",
                   edvrTotal, list.c_str());
 }
 
