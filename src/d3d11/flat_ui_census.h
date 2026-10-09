@@ -14,6 +14,11 @@
 //
 // Log lines (prefix "flat ui census:"): "armed" once at startup, then a window header and up to 16 rows every 30 s.
 // Their absence means the instrument never ran; "armed" with draws-seen=0 means it ran and the hook was not reached.
+//
+// Since 2026-10-09 fix.ui_quality's flat layer (flat_ui_layer.h) reads its family rule (flatUiFamilyOf) and rides its
+// window: the header names the layer's state (ui-layer=), each row counts the draws the layer took and left
+// (layer-taken=, layer-left=), and the layer's own "flat ui layer" lines follow the rows. The census itself still
+// changes nothing; removing it now means giving the layer those three things.
 #pragma once
 
 #include "ui_layer_math.h"
@@ -91,6 +96,7 @@ struct FlatUiRow {
     FlatUiPhase phase = FlatUiPhase::kBeforeResolve;
     UiLayerFamily family = UiLayerFamily::kNone;
     uint64_t draws = 0, jittered = 0, protectedOverlay = 0;
+    uint64_t layerTaken = 0, layerRefused = 0;  // fix.ui_quality's flat layer (flat_ui_layer.h): drawn into it, or left
 };
 
 // Fixed table, linear probe by key: a window holds a few dozen distinct rows.
@@ -99,7 +105,8 @@ struct FlatUiRows {
     FlatUiRow row[kCap];
     uint32_t used = 0;
     uint64_t overflow = 0;
-    void note(const FlatUiRow& key, bool jittered, bool protectedOverlay) {
+    // The row's index, or -1 when the table is full (counted as overflow).
+    int note(const FlatUiRow& key, bool jittered, bool protectedOverlay) {
         for (uint32_t i = 0; i < used; ++i) {
             FlatUiRow& r = row[i];
             if (r.vs == key.vs && r.ps == key.ps && r.target == key.target && r.phase == key.phase &&
@@ -107,15 +114,22 @@ struct FlatUiRows {
                 ++r.draws;
                 r.jittered += jittered ? 1u : 0u;
                 r.protectedOverlay += protectedOverlay ? 1u : 0u;
-                return;
+                return static_cast<int>(i);
             }
         }
-        if (used >= kCap) { ++overflow; return; }
+        if (used >= kCap) { ++overflow; return -1; }
         FlatUiRow& r = row[used++];
         r = key;
         r.draws = 1;
         r.jittered = jittered ? 1u : 0u;
         r.protectedOverlay = protectedOverlay ? 1u : 0u;
+        return static_cast<int>(used - 1);
+    }
+    // The layer's answer for a draw this window's row `index` counted (a stale or -1 index is ignored).
+    void noteLayer(int index, bool taken) {
+        if (index < 0 || static_cast<uint32_t>(index) >= used) return;
+        if (taken) ++row[index].layerTaken;
+        else ++row[index].layerRefused;
     }
     void clear() { used = 0; overflow = 0; }
     // Indices of the n busiest rows, busiest first. Returns the count written.
@@ -141,8 +155,11 @@ struct FlatUiRows {
 void flatUiCensusFrame(uint64_t frame, bool paused, uint32_t outW, uint32_t outH, uint32_t renderW, uint32_t renderH,
                        const char* backend, bool injectorOwnsJitter, bool prevHdrRoute, bool prevCopyRoute);
 // Once per watched draw, from the flat draw scope after the late-overlay plan is known. Reads the context only for a
-// candidate unknown pair (OMGetBlendState).
-void flatUiCensusDraw(ID3D11DeviceContext* ctx, const FlatUiDrawFacts& facts);
+// candidate unknown pair (OMGetBlendState). Returns the draw's row in this window, or -1 (not counted, or table full).
+int flatUiCensusDraw(ID3D11DeviceContext* ctx, const FlatUiDrawFacts& facts);
+// fix.ui_quality's flat layer took the draw counted at `row` (taken), or left it in the game's frame. Same draw, same
+// window: the scope that counted it asks, before the frame boundary can start a new window.
+void flatUiCensusLayer(int row, bool taken);
 // The frame the census last saw (ui_surfaces.cpp's panel lines carry it), and D / R for the same lines.
 uint64_t flatUiCensusFrameNo();
 void flatUiCensusSizes(uint32_t* outW, uint32_t* outH, uint32_t* renderW, uint32_t* renderH);

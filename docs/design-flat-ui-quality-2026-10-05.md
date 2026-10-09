@@ -2,21 +2,30 @@
 
 ## Status
 
-- **State:** design only, 2026-10-05; source baseline `7bc87490`. No rendering
-  change, build or flight is claimed by this document.
-- **Decision:** automatically render supported flat UI at display resolution
-  below 1x supersampling and at the game's actual supersampled size above 1x.
-  Keep its colour out of temporal history and world sharpening. No new setting.
-- **Open evidence:** flat panel sizing and recreation ownership; which UI
-  families precede AA on each route; unjittered depth and background sampling;
-  composition order relative to native UI and graphics mods.
-- **Ruled-out pointer:** VR's retired deferred UI replay is recorded in
-  [crisp-ui-handoff.md](crisp-ui-handoff.md). Reuse the current immediate draw
-  handling, not that replay. Flat post-copy UI already bypasses EDVR AA.
-- **Temporary config keys:** none proposed.
-- **Next session:** capture the combined evidence in Evidence before changes,
-  on an exact-build flat run. Do not implement a classifier or sizing patch
-  from a presumed VR equivalent. Append findings to this document.
+- **State (2026-10-09):** BUILT, NOT FLOWN, on branch
+  `claude/flat-display-crash-ui-smearing-f1d96a`: phase 1 `3923a773` (key,
+  F8 row, panel factor), phase 2 (the flat UI layer) on top. See the
+  2026-10-09 entry at the end.
+- **Decision (Sean, overrides the design's "no setting"):** flat reads
+  `fix.ui_quality = off | 100 | 125`, default 100, an F8 row. 100: the
+  interface at display size D and out of temporal history whatever the render
+  scale; 125: the same 1.25x larger; off: today's frame.
+- **Evidence in hand:** the 09:36 census (771bb99a, Epic, DLSS, R 1920x1080 on
+  D 3840x2160): the holo panels, flight HUD, target sprite and holograms are
+  drawn into H before the resolve, jittered; the same rtt panel was made
+  1920x960 at R 3840x2160 and 960x480 at R 1920x1080 (panels follow R).
+- **Open hypotheses (next flight decides):** (a) the HUD draws' camera rows
+  carry the frame's phase (else `other-shift` / `no-camera-rows` refusals);
+  (b) the game's tonemap is admitted by the shared structural rule in flat
+  (`tone-admitted` = frames); (c) the resolve output is an 8-bit UNORM frame
+  the composite accepts (else "not an 8-bit UNORM eye; the layer is not armed").
+- **Ruled-out pointer:** VR's retired deferred UI replay
+  ([crisp-ui-handoff.md](crisp-ui-handoff.md)). Flat post-copy UI already
+  bypasses EDVR AA.
+- **Temporary config keys:** none (`fix.ui_quality` is a user key).
+- **Next flight:** install, `--expect-build HEAD`, Epic flat, DLSS at SS 0.5,
+  cockpit and a station menu; then 125, then AA off. Read the "ui quality:
+  panels (flat)", "flat ui census: panel", "flat ui layer" lines.
 
 Bring VR's source-panel quality and separate UI composition to flat Elite:
 retain fine text below display-resolution world rendering; avoid UI history
@@ -226,3 +235,48 @@ temporal accumulation: removing temporal smearing does not prove all shimmer is
 eliminated. Preserve the extra samples above 1x and diagnose remaining aliasing
 from the captured geometry and raster phase. Record measured cost and every
 remaining family gap before describing the feature as complete.
+
+## 2026-10-09: implementation (built, not flown)
+
+Environment: flat profile (no VR runtime), any backend (TAA, DLSS/DLAA, FSR),
+game build 332841 (the panel patch is build-keyed), Epic test bed at D
+3840x2160. Nothing below is flown.
+
+**Phase 1, the panels (`3923a773`).** `fix.ui_quality` passes the flat gate
+and is the fourth flat F8 row (the settings warning gives up one spare line:
+11, ten needed). In flat the panel formula's c is the record's size with
+k = 1, i.e. R with Supersampling in it; the census measured it (an rtt-init
+panel 1920x960 at R 3840x2160, 960x480 at R 1920x1080). So the same four DIVSS
+operands take `f = (R / D) / T` on the axis the game divides (height at 16:9
+and wider, width below), solved by `uiPanelSolve` with no Supersampling term:
+same [1/4, 1] clamp and 14336 px budget. At D 3840x2160, R 1920x1080:
+T 1.0 -> f 0.5 (operands 540/960, panels x2, widest 3840 px); T 1.25 -> f 0.4
+(432/768, x2.5, widest 4800 px). R at or above D x T -> f 1 (the floor). Frames
+whose R is not D's shape (the 512x512 preview frames) make no factor. The
+factor needs the flat anti-aliasing on (with it off the scene would only
+minify larger panels, unfiltered). The Supersampling setter thunk scales the
+flat plan by the setter's move. Orbit-line widths stay VR-only (gated on the
+VR profile): in flat the lines are scene geometry upscaled with the world.
+
+**Phase 2, the layer.** `flat_ui_layer.{h,cpp}` is a mono adapter over the VR
+layer's own take, tonemap re-issue, door and composite (ui_layer.cpp, eye 0);
+`flat_ui_layer_math.h` holds its pure rules (pinned in ui_quality_test). The
+VR layer is live in flat with the key on and the flat AA on. The adapter hands
+in what native_temporal and vScreen give VR: the flat frame number, the
+draw's jitter, R. The families: holo panels, flight HUD, target sprite,
+holograms (not the scene lines). Jitter: the draw's own camera rows are
+measured (flatCameraMeasureRowShift); the frame's phase is cancelled when the
+rows carry it, nothing when they carry zero, and anything else is refused
+(`other-shift`). The door arms frame N+1 only when frame N was resolved by
+EDVR to a D-sized picture; the layer is then D x T (VR's rule: the door's size
+times the target, 125 box-filtered down by the composite). The composite runs
+at the game's output copy after the resolve and RCAS, over whatever that copy
+reads, so a frame armed and then refused still shows its HUD (over the game's
+own R picture). The HDR route needs nothing of its own: it resolves H before
+the tonemap, the HUD is out of H either way, and the composite runs at the
+same copy. Every refusal leaves the draw in H as stock, counted by reason;
+resize releases every layer reference (none is the back buffer).
+
+Not done: draws after the HUD inside H (VR's known inversion applies: an
+untaken draw issued after a taken HUD draw is now under it). The after-UI take
+is not run in flat. The VR lines the shared code prints still say "left eye".

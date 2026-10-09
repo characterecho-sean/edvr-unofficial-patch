@@ -110,7 +110,6 @@ bool g_crispStoodDown = false;  // the HDR HUD path alone (a failure of its own)
 std::string g_keyText = "?";
 bool g_keyNoted = false;
 bool g_aliasNoted = false;  // the old spelling's note, once a session
-bool g_flatAaNoted = false; // the flat profile's anti-aliasing as the key's line last said it (uiLayerConfigure)
 
 // The layer's size target is fix.ui_quality's value; the HDR HUD layer and
 // the 8-bit layer it tonemaps into share a size by construction (the HDR
@@ -160,6 +159,38 @@ void standDown(const char* why) {
         "the game's frame as before (and gets the UI depth and reactive mask again); the "
         "panels stay as they are. Turning fix.ui_quality off and on re-arms it.",
         why ? why : "a refusal");
+}
+
+// ------------------------------------------------- the flat profile's mono adapter (flat_ui_layer.cpp)
+//
+// The flat profile has one picture, no native temporal channel and no vScreen eye size. Its adapter hands the shared
+// machinery below what those two would: before each decision and each tonemap admission, the flat frame's number (the
+// sequence the door and the layer key on), the raster phase that draw's camera carries in render pixels (where the
+// game put its pixels, right and down, as nativeTemporalDrawJitter reports the eye's), and the scene's render size R
+// (the "eye-sized" target). Eye 0 only. In the VR profiles none of it is read.
+struct FlatDraw {
+    bool valid = false;
+    uint64_t seq = 0;
+    float jx = 0.0f, jy = 0.0f;
+    uint32_t renderW = 0, renderH = 0;
+};
+FlatDraw g_flatDraw;
+int g_lastDecision = 0;  // the last uiLayerDecide's UiLayerDecision, for the flat adapter's refusal names
+
+bool layerDrawJitter(uint32_t eye, uint64_t* seq, float* jx, float* jy, uint32_t* w, uint32_t* h) {
+    if (!runtimeFlatProfile()) return nativeTemporalDrawJitter(eye, seq, jx, jy, w, h);
+    if (!g_flatDraw.valid || eye != 0) return false;
+    if (seq) *seq = g_flatDraw.seq;
+    if (jx) *jx = g_flatDraw.jx;
+    if (jy) *jy = g_flatDraw.jy;
+    if (w) *w = g_flatDraw.renderW;
+    if (h) *h = g_flatDraw.renderH;
+    return true;
+}
+
+bool layerEyeSized(uint32_t w, uint32_t h) {
+    if (!runtimeFlatProfile()) return vScreenIsEyeSized(w, h);
+    return g_flatDraw.renderW && w == g_flatDraw.renderW && h == g_flatDraw.renderH;
 }
 
 // ------------------------------------------------------------------ per eye
@@ -2290,6 +2321,12 @@ bool mapsGate(uint64_t now, uint64_t gateFrame, bool today, bool known, bool onF
 void onFootGateTick() {
     // The frame that is ending: a draw that names the screen's source attributes itself to this count (ui_layer.h).
     const uint64_t gateFrame = detail::g_uiLayerGateFrame++;
+    // A VR question: the flat profile's half takes no 2D screen, so its frames run the gate as a layer that is not live
+    // always has (no journal or depth reading, no lines).
+    if (runtimeFlatProfile()) {
+        mapsLayerNotLive(gateFrame);
+        return;
+    }
     if (!detail::g_uiLayerLive) {
         mapsLayerNotLive(gateFrame);
         return;
@@ -2786,7 +2823,11 @@ void uiLayerConfigure(Config& cfg) {
                         "ui_quality = %s -- the old one is read for this release only.",
                         text.c_str(), newSpelling, uiQualityLabel(target), newSpelling);
     }
-    const bool temporal = temporalModeEnabled(cfg.getString("fix.temporal_aa", "off"));
+    const bool temporalVr = temporalModeEnabled(cfg.getString("fix.temporal_aa", "off"));
+    // The flat profile reads its mode around the gate (fix.temporal_aa reads off there): its half of the layer -- the cockpit
+    // HUD families through the mono adapter, flat_ui_layer.cpp -- and its panel factor arm with the flat anti-aliasing.
+    const bool flatAa = runtimeFlatProfile() && temporalModeEnabled(cfg.requestedTemporalMode());
+    const bool temporal = runtimeFlatProfile() ? flatAa : temporalVr;
     const bool debugView = _stricmp(cfg.getString("advanced.temporal_aa_debug", "off").c_str(),
                                     "ui_layer") == 0;
     // The cancel follows the shipped jitter convention (as_is, no lag); the
@@ -2815,12 +2856,9 @@ void uiLayerConfigure(Config& cfg) {
     // instruments with them.
     uiSurfacesSetTarget(target);
     uiPanelScaleSetTarget(target);
-    // The flat profile's panel factor (ui_panel_scale.cpp) needs its anti-aliasing on: the mode is read around the gate
-    // (fix.temporal_aa is refused there, which is what keeps this file's per-eye layer inert in flat).
-    const bool flatAa = runtimeFlatProfile() && temporalModeEnabled(cfg.requestedTemporalMode());
+    // The flat profile's panel factor (ui_panel_scale.cpp) needs its anti-aliasing on too.
     if (runtimeFlatProfile()) uiPanelScaleSetFlatTemporal(flatAa);
-    if (!changed && (!runtimeFlatProfile() || flatAa == g_flatAaNoted)) return;
-    g_flatAaNoted = flatAa;
+    if (!changed) return;
     g_keyNoted = true;
     if (!recognized) {
         Log::get().note("ui quality: fix.ui_quality = '%s' is not off, 100 or 125 -- off.",
@@ -2834,12 +2872,16 @@ void uiLayerConfigure(Config& cfg) {
     }
     if (runtimeFlatProfile()) {
         Log::get().note(
-            "ui quality: %s (flat) -- panels: %s",
+            "ui quality: %s (flat) -- %s",
             uiQualityLabel(target),
-            flatAa ? "the game's own panel formula makes every render-to-texture panel at the display's size times "
-                     "the target, whatever the render size, from the next panel init or view change (the \"ui quality: "
-                     "panels (flat)\" lines give the factor)."
-                   : "wait -- anti-aliasing is off, and the panels stay at the game's own size until it is on.");
+            flatAa ? "panels: the game's own panel formula makes every render-to-texture panel at the display's size "
+                     "times the target, whatever the render size, from the next panel init or view change (the \"ui "
+                     "quality: panels (flat)\" lines give the factor); cockpit HUD: the holo panels, the flight HUD, the "
+                     "target sprite and the holograms are drawn unjittered into an HDR layer at the display's size times "
+                     "the target, tonemapped by the game's own tonemap draw re-issued over it, and composited after the "
+                     "resolve and the sharpening, at the game's output copy (the \"flat ui layer\" lines count them)."
+                   : "waits: anti-aliasing is off, so the panels stay at the game's own size and the cockpit HUD in the "
+                     "game's frame until it is on.");
         return;
     }
     float hmd = 0.0f;
@@ -2883,7 +2925,7 @@ int uiLayerTargetKind() {
     void* rtv = bindingGet(BindSlot::Rtv0);
     ResourceInfo info;
     if (!rtv || !bindingResolve(rtv, &info) || !info.isTexture2D ||
-        !vScreenIsEyeSized(info.a, info.b)) {
+        !layerEyeSized(info.a, info.b)) {
         return 0;
     }
     D3D11_RENDER_TARGET_VIEW_DESC d{};
@@ -3040,6 +3082,7 @@ void worldRestoreSources(ID3D11DeviceContext* ctx, const WorldReissue& plan) {
 
 bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards,
                    bool substituted, int knownEye) {
+    g_lastDecision = 0;
     g_draw.decided = false;
     g_draw.counted = false;
     g_draw.hdr = false;
@@ -3099,7 +3142,7 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
         f.eye = knownEye >= 0 ? knownEye
                               : uiDepthEyeOfTarget(g_tc.info.resource, g_tc.info.a, g_tc.info.b, g_tc.info.fmt);
         if (f.eye >= 0 &&
-            nativeTemporalDrawJitter(static_cast<uint32_t>(f.eye), &seq, &jx, &jy, &sw, &sh)) {
+            layerDrawJitter(static_cast<uint32_t>(f.eye), &seq, &jx, &jy, &sw, &sh)) {
             // The map sends the whole target onto the layer: only right when
             // the target IS the region the game submits for that eye.
             f.targetMatchesEye = !sw || !sh || (sw == g_tc.info.a && sh == g_tc.info.b);
@@ -3254,6 +3297,7 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
             if (r) r->Release();
         if (dsv) dsv->Release();
     }
+    g_lastDecision = static_cast<int>(d);
     if (uiLayerWorldRouteMode(family, f.worldScreen, f.worldRoute)) {
         // The route's mode: never a take. A draw that passed every test is held for the re-issue after the game's
         // own issue (counted when it lands, as a re-issue -- not as "redirected": the layer took nothing from the
@@ -3635,7 +3679,7 @@ bool uiLayerCrispNoteEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count
     float jx = 0.0f, jy = 0.0f;
     uint32_t jw = 0, jh = 0;
     // The frame's sequence (the per-eye jitter is not read here).
-    if (!nativeTemporalDrawJitter(0, &seq, &jx, &jy, &jw, &jh)) return false;
+    if (!layerDrawJitter(0, &seq, &jx, &jy, &jw, &jh)) return false;
     bool content = false;
     for (UINT s = 0; s < 4 && eye < 0; ++s) {
         Ptr<ID3D11ShaderResourceView> srv;
@@ -4181,15 +4225,10 @@ bool uiLayerDoorLayerOnly(uint32_t eye, uint64_t sequence) {
     return false;
 }
 
-bool uiLayerNoteOther(ID3D11DeviceContext* ctx, uint32_t count, bool verdictForwards, bool substituted,
-                      bool excluded, bool panelSized, uint32_t instances, uint32_t verdict, char drawKind) {
-    if (!ctx) return false;
-    const void* taken[2] = {nullptr, nullptr};
-    for (int e = 0; e < 2; ++e) {
-        if (g_eye[e].seq == g_lastRedirectSeq && g_eye[e].draws) taken[e] = g_eye[e].target;
-    }
-    // A game draw that writes the depth target a seed copied, after the seed:
-    // the layer's copy is stale, and the next tested draw seeds again.
+namespace {
+// A game draw that writes the depth target a seed copied, after the seed: the layer's copy is stale, and the next
+// tested draw seeds again. uiLayerNoteOther's first step, and the whole of uiLayerNoteSceneDraw (the flat profile).
+void seedWritersCheck(ID3D11DeviceContext* ctx, uint32_t count, uint32_t instances, uint32_t verdict, char drawKind) {
     for (uint32_t eye = 0; eye < 2; ++eye) {
         Eye& e = g_eye[eye];
         for (LayerDs* l : {&e.ds, &e.hdrDs}) {
@@ -4226,6 +4265,21 @@ bool uiLayerNoteOther(ID3D11DeviceContext* ctx, uint32_t count, bool verdictForw
             }
         }
     }
+}
+}  // namespace
+
+void uiLayerNoteSceneDraw(ID3D11DeviceContext* ctx, uint32_t count, uint32_t instances, char drawKind) {
+    if (ctx) seedWritersCheck(ctx, count, instances, 0, drawKind);
+}
+
+bool uiLayerNoteOther(ID3D11DeviceContext* ctx, uint32_t count, bool verdictForwards, bool substituted,
+                      bool excluded, bool panelSized, uint32_t instances, uint32_t verdict, char drawKind) {
+    if (!ctx) return false;
+    const void* taken[2] = {nullptr, nullptr};
+    for (int e = 0; e < 2; ++e) {
+        if (g_eye[e].seq == g_lastRedirectSeq && g_eye[e].draws) taken[e] = g_eye[e].target;
+    }
+    seedWritersCheck(ctx, count, instances, verdict, drawKind);
     if (!taken[0] && !taken[1]) return false;
     char kind = 0;
     int takenEye = -1;
@@ -4581,6 +4635,8 @@ void uiLayerFrameBoundary(ID3D11DeviceContext* ctx) {
     g_hdrSeedGpu.poll(ctx);
     // The next frame's answer to "is the 2D screen the world?".
     onFootGateTick();
+    // The flat adapter's per-draw facts belong to the frame that ended.
+    g_flatDraw.valid = false;
     // A door size change's watch: the dropped line, two seconds on.
     sizeChangeTick();
     // The engine-side panel sizing's factor, written when its inputs settle.
@@ -4629,6 +4685,36 @@ void uiLayerFrameBoundary(ID3D11DeviceContext* ctx) {
         r.seen = 0;  // the reservoir restarts with the window
     }
     g_winStartMs = now;
+}
+
+// ---- the flat profile's mono adapter (ui_layer.h; flat_ui_layer.cpp) ----
+
+void uiLayerFlatSetDraw(uint64_t frame, float jx, float jy, uint32_t renderW, uint32_t renderH) {
+    g_flatDraw.valid = frame != 0 && renderW && renderH;
+    g_flatDraw.seq = frame;
+    g_flatDraw.jx = jx;
+    g_flatDraw.jy = jy;
+    if (g_flatDraw.renderW != renderW || g_flatDraw.renderH != renderH) g_tc = TargetCache{};  // the eye size moved
+    g_flatDraw.renderW = renderW;
+    g_flatDraw.renderH = renderH;
+}
+
+int uiLayerLastDecision() { return g_lastDecision; }
+
+bool uiLayerFlatRelease() {
+    const bool any = releaseLayers();
+    for (Eye& e : g_eye) {
+        e.door = UiLayerDoorState{};
+        e.temporalOut = nullptr;
+        e.temporalOutSeq = 0;
+        e.doorFromPass = false;
+        e.compositedSeq = 0;
+    }
+    g_tc = TargetCache{};
+    g_flatDraw = FlatDraw{};
+    g_crispPending = CrispTonePending{};
+    detail::g_uiLayerCrispPending = false;
+    return any;
 }
 
 void uiLayerShutdown() {

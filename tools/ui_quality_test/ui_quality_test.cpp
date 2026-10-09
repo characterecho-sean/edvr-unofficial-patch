@@ -80,6 +80,8 @@
 
 #include "../../src/common/system_d3d11.h"
 #include "../../src/common/temporal_math.h"
+#include "../../src/d3d11/flat_projection_math.h"  // flatProjectionJitter: the flat layer's jitter rule is its inverse
+#include "../../src/d3d11/flat_ui_layer_math.h"    // the flat layer's adapter rules
 #include "../../src/d3d11/orbital_width.h"  // the orbit lines' width decision, for the panel factor's Supersampling term
 #include "../../src/d3d11/ui_layer_seed.h"
 #include "../../src/d3d11/ui_layer_seed_census.h"
@@ -1122,6 +1124,53 @@ void testFlatPanelScale() {
     plan(2880, 1620, 3840, 2160, 1.0f, &direct);
     check(std::fabs(direct.f - p.f) < 1e-12, "...the same f the frame boundary makes once R is 2880x1620 (so it writes nothing more)");
     check(!uiFlatPanelMove(base.formula, base.base, 0.0f, 1.0f, &p), "...and no move without the value the plan was made at");
+}
+
+// The flat layer's adapter rules (flat_ui_layer_math.h, 2026-10-09): the families it asks for, the jitter a draw's camera
+// rows carry, the door.
+void testFlatLayerRules() {
+    check(flatUiLayerTakesFamily(UiLayerFamily::kHolo) && flatUiLayerTakesFamily(UiLayerFamily::kFlightHud) &&
+              flatUiLayerTakesFamily(UiLayerFamily::kSprite) && flatUiLayerTakesFamily(UiLayerFamily::kHoloGeneric),
+          "flat layer: the four cockpit HUD families the census found in H are asked for");
+    check(!flatUiLayerTakesFamily(UiLayerFamily::kOrbitLines) && !flatUiLayerTakesFamily(UiLayerFamily::kSupercruiseBars) &&
+              !flatUiLayerTakesFamily(UiLayerFamily::kSpaceDust) && !flatUiLayerTakesFamily(UiLayerFamily::kScreen) &&
+              !flatUiLayerTakesFamily(UiLayerFamily::kPanel) && !flatUiLayerTakesFamily(UiLayerFamily::kGuiDirect) &&
+              !flatUiLayerTakesFamily(UiLayerFamily::kNone) && !flatUiLayerTakesFamily(UiLayerFamily::kAfterUi),
+          "flat layer: the scene lines, the 2D screen, the menus, the panels' rasterisation and the after-UI take are not");
+    for (UiLayerFamily f : {UiLayerFamily::kHolo, UiLayerFamily::kFlightHud, UiLayerFamily::kSprite, UiLayerFamily::kHoloGeneric})
+        check(uiLayerFamilyTakesHdr(f), "flat layer: every family it asks for is one the shared HDR take draws");
+    // The jitter: rows that carry the phase (0.25, -0.375) px at 1920x1080 measure ndc (2 x 0.25 / 1920, -2 x -0.375 / 1080).
+    const uint32_t w = 1920, h = 1080;
+    const float px = 0.25f, py = -0.375f;
+    FlatProjectionJitter pj{};
+    check(flatProjectionJitter(px, py, w, h, pj), "flat layer: the projection jitter of the phase");
+    FlatUiJitterRead r = flatUiLayerJitterOf(true, pj.ndcX, pj.ndcY, w, h, px, py);
+    check(r.kind == FlatUiJitter::kPhase && r.jx == px && r.jy == py && std::fabs(r.mx - px) < 1e-4 && std::fabs(r.my - py) < 1e-4,
+          "flat layer: rows that carry the frame's phase are cancelled by exactly that phase (right and down, render pixels)");
+    r = flatUiLayerJitterOf(true, 0.0, 0.0, w, h, px, py);
+    check(r.kind == FlatUiJitter::kZero && r.jx == 0.0f && r.jy == 0.0f, "flat layer: unjittered rows cancel nothing");
+    r = flatUiLayerJitterOf(true, -pj.ndcX, -pj.ndcY, w, h, px, py);
+    check(r.kind == FlatUiJitter::kOther, "flat layer: the phase with the wrong sign is neither, and is not guessed at");
+    r = flatUiLayerJitterOf(true, pj.ndcX + 2.0 * 0.5 / w, pj.ndcY, w, h, px, py);
+    check(r.kind == FlatUiJitter::kOther && std::fabs(r.mx - 0.75) < 1e-4, "flat layer: an off-centre camera half a pixel over is neither");
+    r = flatUiLayerJitterOf(true, pj.ndcX + 2.0 * 0.005 / w, pj.ndcY, w, h, px, py);
+    check(r.kind == FlatUiJitter::kPhase, "flat layer: a measurement within the 0.01 px tolerance is the phase");
+    check(flatUiLayerJitterOf(false, 0.0, 0.0, w, h, px, py).kind == FlatUiJitter::kNoRows &&
+              flatUiLayerJitterOf(true, 0.0, 0.0, 0, h, px, py).kind == FlatUiJitter::kNoRows,
+          "flat layer: no measurement (or no size) reads nothing");
+    r = flatUiLayerJitterOf(true, 0.0, 0.0, w, h, 0.0f, 0.0f);
+    check(r.kind == FlatUiJitter::kPhase && r.jx == 0.0f, "flat layer: a zero phase and zero rows are the phase, cancelling 0");
+    // The door.
+    check(flatUiLayerDoorArms(true, 3840, 2160, 3840, 2160), "flat layer: a resolved D-sized picture arms the next frame");
+    check(!flatUiLayerDoorArms(false, 3840, 2160, 3840, 2160), "flat layer: a refused frame arms nothing");
+    check(!flatUiLayerDoorArms(true, 1920, 1080, 3840, 2160), "flat layer: a picture at the render size (an E below D) arms nothing");
+    check(!flatUiLayerDoorArms(true, 0, 0, 0, 0), "flat layer: no display size arms nothing");
+    // The layer's size at the door, VR's own rule: D at 100, 1.25 D at 125.
+    const UiLayerSize s100 = uiLayerSize(3840, 2160, 1.0f), s125 = uiLayerSize(3840, 2160, 1.25f);
+    check(s100.w == 3840 && s100.h == 2160 && s125.w == 4800 && s125.h == 2700,
+          "flat layer: at a 3840x2160 door the layer is 3840x2160 at 100 and 4800x2700 at 125");
+    for (size_t i = 0; i < static_cast<size_t>(FlatUiRefuse::kCount); ++i)
+        check(std::strcmp(flatUiRefuseName(static_cast<FlatUiRefuse>(i)), "?") != 0, "flat layer: every refusal has a name");
 }
 
 // The family rule (ui_layer_math.h's uiLayerFamilyFor, which vscreen.cpp's
@@ -2913,6 +2962,7 @@ int main(int argc, char** argv) {
     testChains();
     testPanelScale();
     testFlatPanelScale();
+    testFlatLayerRules();
     panelbudget::testAll();
     panelbudget::testWiring();
     Gpu g;

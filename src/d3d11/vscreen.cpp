@@ -4433,6 +4433,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstancedIndirect(
         if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw(args, off);
         g_state->realDrawIndexedInstancedIndirect(self, args, off);
         if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
+        flatDraw.uiReissue([&] { g_state->realDrawIndexedInstancedIndirect(self, args, off); });
         return;
     }
     if (g_vrWorldInternal) { g_state->realDrawIndexedInstancedIndirect(self, args, off); return; }
@@ -4464,6 +4465,7 @@ void STDMETHODCALLTYPE hookedDrawInstancedIndirect(ID3D11DeviceContext* self,
         if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw(args, off);
         g_state->realDrawInstancedIndirect(self, args, off);
         if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
+        flatDraw.uiReissue([&] { g_state->realDrawInstancedIndirect(self, args, off); });
         return;
     }
     if (g_vrWorldInternal) { g_state->realDrawInstancedIndirect(self, args, off); return; }
@@ -4764,6 +4766,7 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
         if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw();
         g_state->realDraw(self, count, start);
         if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
+        flatDraw.uiReissue([&] { g_state->realDraw(self, count, start); });
         return;
     }
     if (g_vrWorldInternal) { g_state->realDraw(self, count, start); return; }   // the world route's own draw (vr_world_route.h)
@@ -4799,6 +4802,7 @@ void STDMETHODCALLTYPE hookedDrawAuto(ID3D11DeviceContext* self) {
         if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw();
         g_state->realDrawAuto(self);
         if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
+        flatDraw.uiReissue([&] { g_state->realDrawAuto(self); });
         return;
     }
     if (g_vrWorldInternal) { g_state->realDrawAuto(self); return; }
@@ -4817,6 +4821,7 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
         if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw();
         g_state->realDrawIndexed(self, count, startIndex, baseVertex);
         if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
+        flatDraw.uiReissue([&] { g_state->realDrawIndexed(self, count, startIndex, baseVertex); });
         return;
     }
     if (g_vrWorldInternal) { g_state->realDrawIndexed(self, count, startIndex, baseVertex); return; }
@@ -4857,6 +4862,7 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
         if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw();
         g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance);
         if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
+        flatDraw.uiReissue([&] { g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance); });
         return;
     }
     if (g_vrWorldInternal) { g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance); return; }
@@ -4913,6 +4919,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
         g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex,
                                           baseVertex, startInstance);
         if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
+        flatDraw.uiReissue([&] { g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex, baseVertex, startInstance); });
         return;
     }
     if (g_vrWorldInternal) { g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex, baseVertex, startInstance); return; }

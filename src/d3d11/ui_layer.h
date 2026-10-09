@@ -365,6 +365,24 @@ void uiLayerDoorSeen(uint64_t sequence, uint32_t eye, ID3D11Texture2D* source);
 ID3D11Texture2D* uiLayerComposite(uint64_t sequence, uint32_t eye, ID3D11Texture2D* frame,
                                   const uint32_t region[4], const float layerUv[4]);
 
+// ---- the flat profile's mono adapter (flat_ui_layer.h; docs/design-flat-ui-quality-2026-10-05.md) ----
+//
+// The flat profile drives the same take, tonemap re-issue, door and composite above for eye 0, from its own draw scope
+// (flat_runtime.cpp) through flat_ui_layer.cpp. It is live with fix.ui_quality on and the flat anti-aliasing on
+// (uiLayerConfigure reads the flat mode around the gate). What the VR profiles get from native_temporal (the frame's
+// sequence and the draw's jitter) and from vScreen (the eye's size) the adapter hands in here, before each decision and
+// each tonemap admission: the flat frame's number, the raster phase the draw's camera carries in render pixels (right and
+// down), and the scene's render size R. Read only in the flat profile; cleared at the frame boundary.
+void uiLayerFlatSetDraw(uint64_t frame, float jx, float jy, uint32_t renderW, uint32_t renderH);
+// The UiLayerDecision (as an int) the last uiLayerDecide came to: the adapter names its refusals by it.
+int uiLayerLastDecision();
+// A game draw the layer did not take, while watching: a write of the depth-stencil buffer a seed copied makes the seed
+// stale (uiLayerNoteOther's first step, alone -- the flat profile has no after-the-UI take).
+void uiLayerNoteSceneDraw(ID3D11DeviceContext* ctx, uint32_t count, uint32_t instances, char drawKind);
+// The swap chain is resizing (or the device went): every layer, depth target, composite output and frame view released,
+// the door forgotten, so the next armed frame is a fresh door's. True when anything was held.
+bool uiLayerFlatRelease();
+
 // Once per frame, from vScreenFrameBoundary: first, the settle of a fence a
 // failed hologram restore raised (uiLayerIssueBlocked above); then the
 // shader's warm compile, the 30-second totals, the per-frame watch reset.

@@ -4,6 +4,7 @@
 #include "flat_ui_census.h"
 
 #include "flat_compute_readback.h"
+#include "flat_ui_layer.h"   // fix.ui_quality's flat layer: its state on the header, its lines with the window
 #include "ui_surfaces.h"
 #include "../common/log.h"
 
@@ -42,12 +43,12 @@ void report(Census& c, uint64_t nowMs) {
     const double frames = c.frames ? static_cast<double>(c.frames) : 1.0;
     Log::get().note(
         "flat ui census: window=%llus frames=%u (paused %u) D=%ux%u R=%ux%u backend=%s resolve-route hdr=%u copy=%u "
-        "untreated=%u jitter-owner=%s draws-seen=%llu counted=%llu (known-family %llu, unknown "
+        "untreated=%u jitter-owner=%s ui-layer=%s draws-seen=%llu counted=%llu (known-family %llu, unknown "
         "blended %llu) blend-queries=%llu hdr-depth-unknown-skipped=%llu rows=%u (overflow %llu); rows below: busiest "
         "%u, per-frame averages",
         static_cast<unsigned long long>((nowMs - c.windowStartMs) / 1000), c.frames, c.pausedFrames, c.outW, c.outH,
         c.renderW, c.renderH, c.backend, c.hdrRouteFrames, c.copyRouteFrames, c.untreatedFrames,
-        c.injectorOwns ? "camera-injector" : "phase-machine",
+        c.injectorOwns ? "camera-injector" : "phase-machine", flatUiLayerState(),
         static_cast<unsigned long long>(c.drawsSeen), static_cast<unsigned long long>(c.counted),
         static_cast<unsigned long long>(c.known), static_cast<unsigned long long>(c.unknownBlended),
         static_cast<unsigned long long>(c.blendQueries), static_cast<unsigned long long>(c.blendSkippedHdrDepth),
@@ -60,14 +61,18 @@ void report(Census& c, uint64_t nowMs) {
         if (r.target == FlatUiTarget::kOffscreen) std::snprintf(size, sizeof(size), " %ux%u", r.w, r.h);
         Log::get().note(
             "flat ui census row %u: vs=%016llX ps=%016llX family=%s target=%s%s phase=%s draws=%llu per-frame=%.2f "
-            "jittered=%llu unjittered=%llu late-overlay-protected=%llu",
+            "jittered=%llu unjittered=%llu late-overlay-protected=%llu layer-taken=%llu layer-left=%llu",
             i + 1, static_cast<unsigned long long>(r.vs), static_cast<unsigned long long>(r.ps),
             r.family == UiLayerFamily::kNone ? "unknown-blended" : uiLayerFamilyName(r.family),
             flatUiTargetName(r.target), size, flatUiPhaseName(r.phase), static_cast<unsigned long long>(r.draws),
             static_cast<double>(r.draws) / frames, static_cast<unsigned long long>(r.jittered),
-            static_cast<unsigned long long>(r.draws - r.jittered), static_cast<unsigned long long>(r.protectedOverlay));
+            static_cast<unsigned long long>(r.draws - r.jittered), static_cast<unsigned long long>(r.protectedOverlay),
+            static_cast<unsigned long long>(r.layerTaken), static_cast<unsigned long long>(r.layerRefused));
     }
     if (n == 0) Log::get().note("flat ui census row: none counted this window");
+    // fix.ui_quality's flat layer, every window (zeros included, its state on the first line): a window with no such
+    // lines is a build that never ran the adapter.
+    flatUiLayerReport((nowMs - c.windowStartMs) / 1000);
     c.windowStartMs = nowMs;
     c.frames = c.pausedFrames = c.hdrRouteFrames = c.copyRouteFrames = c.untreatedFrames = 0;
     c.drawsSeen = c.counted = c.known = c.unknownBlended = c.blendQueries = c.blendSkippedHdrDepth = 0;
@@ -125,14 +130,16 @@ void flatUiCensusFrame(uint64_t frame, bool paused, uint32_t outW, uint32_t outH
     }
 }
 
-void flatUiCensusDraw(ID3D11DeviceContext* ctx, const FlatUiDrawFacts& f) {
+void flatUiCensusLayer(int row, bool taken) { g_c.rows.noteLayer(row, taken); }
+
+int flatUiCensusDraw(ID3D11DeviceContext* ctx, const FlatUiDrawFacts& f) {
     Census& c = g_c;
     ++c.drawsSeen;
     if (f.copy) {
         c.copyDone = true;
-        return;
+        return -1;
     }
-    if (f.tone) return;
+    if (f.tone) return -1;
     const FlatUiTarget target = flatUiTargetClass(f.color && f.color == f.output, f.width, f.height, f.format, c.outW,
                                                   c.outH, c.renderW, c.renderH);
     const UiLayerFamily family = flatUiFamilyOf(f.vs, f.ps);
@@ -141,18 +148,18 @@ void flatUiCensusDraw(ID3D11DeviceContext* ctx, const FlatUiDrawFacts& f) {
     if (!known) {
         const bool scene = target == FlatUiTarget::kHdr || target == FlatUiTarget::kLdr ||
                            target == FlatUiTarget::kBackBuffer;
-        if (!scene) return;
+        if (!scene) return -1;
         // World geometry draws into H with a depth buffer by the thousand; an unknown pair there is not asked.
         if (target == FlatUiTarget::kHdr && f.hasDepth) {
             ++c.blendSkippedHdrDepth;
-            return;
+            return -1;
         }
         FlatComputeInternalScope guard;
         ++c.blendQueries;
         blended = blendedNow(ctx);
-        if (!blended) return;
+        if (!blended) return -1;
     }
-    if (!flatUiCounted(known, target, blended)) return;
+    if (!flatUiCounted(known, target, blended)) return -1;
     const FlatUiPhase phase = c.copyDone ? FlatUiPhase::kAfterCopy
                               : f.resolved ? FlatUiPhase::kAfterResolve : FlatUiPhase::kBeforeResolve;
     FlatUiRow key;
@@ -168,7 +175,7 @@ void flatUiCensusDraw(ID3D11DeviceContext* ctx, const FlatUiDrawFacts& f) {
     ++c.counted;
     if (known) ++c.known;
     else ++c.unknownBlended;
-    c.rows.note(key, f.jittered, f.overlayProtected);
+    return c.rows.note(key, f.jittered, f.overlayProtected);
 }
 
 uint64_t flatUiCensusFrameNo() { return g_frameNo.load(std::memory_order_relaxed); }

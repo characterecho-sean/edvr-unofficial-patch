@@ -2498,6 +2498,9 @@ void flatRuntimeResize() {
     untrustedCoverageActive.store(false,std::memory_order_release);
     s.overlayFailureNoted=false;
     s.weaponFootprint.cancel("resize-or-stop");flatMonoResolveReset();
+    // fix.ui_quality's flat layer: its layers, depth targets, composite output and the views over the pictures it
+    // composited (none of them the back buffer, all of them released), and the door, so a fresh one arms the layer.
+    flatUiLayerRelease();
     s.drawPackets.cancel();
     // A reset (or the mode turned off) ends a stand-down: the new contract may well be
     // one the selector recognises, and every paused piece restarts with it.
@@ -4897,7 +4900,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         census.width = k.width; census.height = k.height; census.format = k.format; census.hasDepth = k.depth != nullptr;
         census.tone = tone; census.copy = copy; census.resolved = s.treated || s.hdrTreated;
         census.jittered = nonzeroPhase(s); census.overlayProtected = overlayPlanned;
-        flatUiCensusDraw(ctx, census);
+        uiCensusRow = flatUiCensusDraw(ctx, census);
     }
     if(!s.overlayFailureNoted)for(uint32_t i=0;i<s.prefix.targetsUsed;++i) {
         const auto& target=s.prefix.targets[i];
@@ -5357,6 +5360,39 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     // The HDR route treats at its trigger (key auto, the selection selected): the game's pass that reads H next sees the
     // anti-aliased image with its own bindings untouched, and the copy stage below leaves the frame to the route.
     if (hdrTrigger && s.hdrKey == FlatHdrKey::Auto && s.hdrSelected.selected()) treatHdr(s.hdrSelected, s.hdr.trigger.srvSlot);
+    // fix.ui_quality's flat layer (flat_ui_layer.h): the cockpit HUD families out of H and into the shared layer as eye 0,
+    // the game's tonemap re-issued over it, and at the output copy the door and the composite. Every decision is made
+    // here, after the scope has planned everything else it does with this draw (a draw it does anything else with is
+    // refused, and stays in H as stock).
+    if (flatUiLayerOn()) {
+        FlatUiLayerAsk ask = FlatUiLayerAsk::kNotAsked;
+        if (copy) {
+            uiComposite = true;
+        } else {
+            uint32_t sceneRw = 0, sceneRh = 0, sceneOw = 0, sceneOh = 0;
+            flatRuntimeSceneSizes(&sceneRw, &sceneRh, &sceneOw, &sceneOh);
+            FlatUiLayerDraw ui;
+            ui.frame = s.prefix.frame; ui.vs = k.vs; ui.ps = k.ps; ui.width = k.width; ui.height = k.height; ui.format = k.format;
+            ui.hdrTarget = flatUiTargetClass(k.color && k.color == s.prefix.output, k.width, k.height, k.format,
+                                             s.prefix.width, s.prefix.height, sceneRw, sceneRh) == FlatUiTarget::kHdr;
+            ui.otherWork = producer || (projection && projection->active()) || drawCaptureStarted || drawPacket ||
+                           overlayPlanned || foregroundPlanned || untrustedPlanned || domainPlanned ||
+                           weaponFootprintStarted || d.overlayProtected || d.alternateHdr;
+            ui.upstream = flatCameraInjectUpstreamOwns();
+            static_assert(sizeof(ui.rows) <= kFlatCameraBytes, "the camera rows the census copies hold the six rows");
+            if (k.camera) { ui.haveRows = true; std::memcpy(ui.rows, d.camera, sizeof(ui.rows)); }
+            ui.phaseX = s.phase.currentX; ui.phaseY = s.phase.currentY;
+            ask = flatUiLayerDecide(ctx, ui);   // a cockpit HUD family's draw, or kNotAsked
+            if (ask == FlatUiLayerAsk::kDecided) { uiTake = true; uiVs = k.vs; uiPs = k.ps; }
+            else if (ask == FlatUiLayerAsk::kRefused) flatUiCensusLayer(uiCensusRow, false);
+            // Any other full-screen triangle may be the game's tonemap: admitted for the re-issue when this frame's HUD is
+            // in the HDR layer (the shared admission, by structure and by the HUD source it reads).
+            else if (count == 3 && instances == 1 && (kind == 'D' || kind == 'N'))
+                uiTone = flatUiLayerToneAdmit(ctx, s.prefix.frame, k.width, k.height, kind, count, instances, startInstance);
+        }
+        // A draw the layer leaves, while it holds this frame's HUD: a write of the depth buffer a seed copied makes it stale.
+        if (!uiTake && !copy) flatUiLayerNoteSceneDraw(ctx, count, instances, kind);
+    }
     if (!copy) return;
     if (s.hdrTreated) {
         // The frame was treated before the post chain, so nothing here resolves again (the contract observation above
@@ -5958,6 +5994,17 @@ static void __stdcall foregroundOriginalDraw(ID3D11DeviceContext* ctx,UINT count
 void FlatRuntimeDrawScope::beginActualDraw(ID3D11Buffer* indirectArgs,UINT indirectOffset) {
     if(!ctx)return;
     if(drawPacketOnly){FlatComputeInternalScope internal;state().drawPackets.execution(ctx,drawPacket,indirectArgs,indirectOffset,"capture-only-AA-off-or-paused");return;}
+    // fix.ui_quality's flat layer (flat_ui_layer.h), right before the game's issue: a taken HUD draw is bound into the
+    // layer (false: it goes to H as always), and the output copy gets this frame's HUD composited over what it reads.
+    if(uiTake) {
+        uiTaken=flatUiLayerBegin(ctx);
+        flatUiLayerNoteIssue(uiVs,uiPs,uiTaken);
+        flatUiCensusLayer(uiCensusRow,uiTaken);
+    }
+    if(uiComposite) {
+        auto& s=state();
+        flatUiLayerAtCopy(ctx,s.prefix.frame,s.treated||s.hdrTreated,s.prefix.width,s.prefix.height,&original,&replaced);
+    }
     if(domainPlanned && !producer) {
         FlatComputeInternalScope internal;flatcpu::Scope captureCost(flatcpu::kForegroundCapture);
         Ptr<ID3D11VertexShader> vs;Ptr<ID3D11PixelShader> ps;
@@ -6227,6 +6274,8 @@ void FlatRuntimeDrawScope::beginActualDraw(ID3D11Buffer* indirectArgs,UINT indir
         weaponDrawStartInstance,indirectArgs,indirectOffset);
 }
 void FlatRuntimeDrawScope::endActualDraw() {
+    // The game's state back from the layer first, before anything else here reads the context.
+    if(uiTaken&&!uiEnded&&ctx){flatUiLayerEnd(ctx);uiEnded=true;}
     if(drawPacket&&ctx){FlatComputeInternalScope internal;state().drawPackets.after(ctx,drawPacket);drawPacketExecuted=true;}
     if(drawPacketOnly)return;
     if(domainProtectedOverlay && !overlayStarted && !overlayReplayPending)
@@ -6271,7 +6320,10 @@ FlatRuntimeDrawScope::~FlatRuntimeDrawScope() {
         }
     }
     if(drawPacket&&!drawPacketExecuted)state().drawPackets.abandoned(drawPacket);
-    if (!ctx) return; FlatComputeInternalScope guard;
+    if (!ctx) return;
+    // A taken HUD draw whose End never ran (the hook did not reach endActualDraw): the game's state back from the layer.
+    if(uiTaken&&!uiEnded){flatUiLayerEnd(ctx);uiEnded=true;}
+    FlatComputeInternalScope guard;
     if(domainStarted){
         engineVelocityFlatDomainEndDraw(ctx);domainStarted=false;
         if(auto* candidate=domainCandidate(state(),domainDepth))candidate->motion.fail("foreground-abandoned-writer");
