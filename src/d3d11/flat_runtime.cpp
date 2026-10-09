@@ -2461,7 +2461,20 @@ bool flatRuntimeSceneSizes(uint32_t* renderWidth, uint32_t* renderHeight, uint32
 }
 
 void flatRuntimeResize() {
-    reportDrawIngress("resize-or-stop");
+    // The game retries a refused ResizeBuffers every frame: thousands of calls in seconds with no Present between
+    // them (2026-10-09 Epic logs). The reports below say it once per 5 s with the count of the calls they skipped.
+    static ULONGLONG lastResizeReportMs = 0;
+    static uint32_t resizeReportsSuppressed = 0;
+    const ULONGLONG resizeNowMs = GetTickCount64();
+    const bool reportResize = lastResizeReportMs == 0 || resizeNowMs - lastResizeReportMs >= 5000;
+    if (reportResize) {
+        if (resizeReportsSuppressed)
+            Log::get().note("flat resize-or-stop reports: %u further resize-or-stop calls since the last report were not reported (one report per 5 s)",
+                resizeReportsSuppressed);
+        resizeReportsSuppressed = 0;
+        lastResizeReportMs = resizeNowMs;
+        reportDrawIngress("resize-or-stop");
+    } else ++resizeReportsSuppressed;
     g_flatRuntimeLive.store(false, std::memory_order_release);
     nativeScale.store(false, std::memory_order_release);
     // The swap chain or the device went: engine motion's bound state (the game's render targets among it, held by
@@ -2492,13 +2505,17 @@ void flatRuntimeResize() {
     gpuReset(s);
     flatCameraInjectReset(); // history and the decision do not survive a resize; injected cameras stay known for the flush
     finishPhaseCensusFrame(s);
-    if(s.phaseCensusFrames || s.phaseFailuresUsed || s.phaseOverflowCalls)
+    if(reportResize && (s.phaseCensusFrames || s.phaseFailuresUsed || s.phaseOverflowCalls))
         reportPhaseCensus(s,"resize-or-stop");
-    if (s.projection) { reportProjection(s,"resize-or-stop"); s.projection.reset(); s.projectionContext.Reset(); s.projectionFrames=0; }
+    if (s.projection) { if (reportResize) reportProjection(s,"resize-or-stop"); s.projection.reset(); s.projectionContext.Reset(); s.projectionFrames=0; }
     s.haveResolvePlan=false; s.resolvePreflight={}; s.resolvePreflightRetryMs=0;
     s.phase.resetHistory();s.phaseDepth.Reset();s.phaseHdr.Reset();s.temporalAccepted=false;
     s.phaseWidth=s.phaseHeight=0;s.frameCoverage=true;
     s.havePrevious = false; s.previousColor.Reset(); s.output.Reset(); s.sceneDepth.Reset(); s.depthView.Reset();
+    // The draw-packet capture's references: the back buffer (set every frame at the frame boundary) and the context.
+    // A counted reference to the back buffer makes the game's ResizeBuffers fail with DXGI_ERROR_INVALID_CALL,
+    // and the game retries it every frame (the 2026-10-09 resize loop).
+    s.drawPacketOutput.Reset(); s.drawPacketContext.Reset();
     for (auto& v : s.views) v = View{};
     for (auto& r : s.colors) r.Reset(); for (auto& r : s.depths) r.Reset();
     for (auto& r : s.uavs) r.Reset();
@@ -3640,6 +3657,12 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     s.phaseCensusPending=s.jitterWanted && s.work != FlatWork::Paused;
     s.phaseCensusFailed=false;
     s.prefix.output = output.Get(); s.prefix.width = d.Width; s.prefix.height = d.Height; s.prefix.format = d.Format;
+    {   // The interface census (flat_ui_census.h): observation only. s.treated / s.hdrTreated still hold the frame that ended.
+        uint32_t censusRw = 0, censusRh = 0, censusOw = 0, censusOh = 0;
+        flatRuntimeSceneSizes(&censusRw, &censusRh, &censusOw, &censusOh);
+        flatUiCensusFrame(frame + 1, s.work == FlatWork::Paused, d.Width, d.Height, censusRw, censusRh,
+            flatMonoResolveModeName(s.engine), flatCameraInjectUpstreamOwns(), s.hdrTreated, s.treated && !s.hdrTreated);
+    }
     if(s.namingVetoedThisFrame) {
         // A frame that vetoed a draw: if the world was named anyway the veto did its work; if nothing named it, the reference may be the
         // one that is wrong, and the third such frame in a row gives it up (the next naming and the next H select a new one).
@@ -3657,12 +3680,6 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     const auto now = GetTickCount64();
     if (now - s.lastReport >= 5000) {
         reportDrawIngress("progress", false);
-    {   // The interface census (flat_ui_census.h): observation only. s.treated / s.hdrTreated still hold the frame that ended.
-        uint32_t censusRw = 0, censusRh = 0, censusOw = 0, censusOh = 0;
-        flatRuntimeSceneSizes(&censusRw, &censusRh, &censusOw, &censusOh);
-        flatUiCensusFrame(frame + 1, s.work == FlatWork::Paused, d.Width, d.Height, censusRw, censusRh,
-            flatMonoResolveModeName(s.engine), flatCameraInjectUpstreamOwns(), s.hdrTreated, s.treated && !s.hdrTreated);
-    }
         reportMapBounce(frame,now,true);
         reportPhaseCensus(s,"5s");
         if(s.projectionFrames)reportProjection(s,"progress");
@@ -4874,6 +4891,14 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         if(admitted) overlaySuffixActive.store(true,std::memory_order_release);
         else { overlayPlanned=false; overlayHdr=nullptr; overlayDsv=nullptr; }
     }
+    {   // The interface census (flat_ui_census.h): observation only, before this draw's own resolve work.
+        FlatUiDrawFacts census;
+        census.vs = k.vs; census.ps = k.ps; census.color = k.color; census.output = s.prefix.output;
+        census.width = k.width; census.height = k.height; census.format = k.format; census.hasDepth = k.depth != nullptr;
+        census.tone = tone; census.copy = copy; census.resolved = s.treated || s.hdrTreated;
+        census.jittered = nonzeroPhase(s); census.overlayProtected = overlayPlanned;
+        flatUiCensusDraw(ctx, census);
+    }
     if(!s.overlayFailureNoted)for(uint32_t i=0;i<s.prefix.targetsUsed;++i) {
         const auto& target=s.prefix.targets[i];
         if(target.overlayOpen && target.hdrBad) {
@@ -4891,14 +4916,6 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         flatcpu::Scope hdrScope(flatcpu::kHdrRoute);
         if (flatHdrCouldConsume(s.hdr, k)) {
             for (uint32_t slot = 0; slot < 4; ++slot)
-    {   // The interface census (flat_ui_census.h): observation only, before this draw's own resolve work.
-        FlatUiDrawFacts census;
-        census.vs = k.vs; census.ps = k.ps; census.color = k.color; census.output = s.prefix.output;
-        census.width = k.width; census.height = k.height; census.format = k.format; census.hasDepth = k.depth != nullptr;
-        census.tone = tone; census.copy = copy; census.resolved = s.treated || s.hdrTreated;
-        census.jittered = nonzeroPhase(s); census.overlayProtected = overlayPlanned;
-        flatUiCensusDraw(ctx, census);
-    }
                 hdrSrv[slot] = view(static_cast<BindSlot>(static_cast<uint32_t>(BindSlot::PsSrv0) + slot), 2 + slot).resource;
             hdrSrvKnown = true;
         }

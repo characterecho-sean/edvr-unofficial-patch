@@ -1097,13 +1097,70 @@ HRESULT STDMETHODCALLTYPE hookedCreateCS(ID3D11Device* self, const void* bytecod
     return hr;
 }
 
+// The flat ResizeBuffers instrument. ResizeBuffers fails with DXGI_ERROR_INVALID_CALL while any counted reference to a
+// back buffer is alive, and Elite answers a failure by calling again every frame (the 2026-10-09 Epic logs: thousands of
+// resize-or-stop reports in seconds, no Present). Before the real call, after EDVR let go of its own, the back buffer's
+// remaining count is read; after it, one "flat resize:" line says what was asked, what came back and that count.
+// Rate limit: the first 8 calls, every failure up to 32 lines, then one summary line per 5 s.
+long flatResizeBackBufferRefs(IDXGISwapChain* swap) {
+    if (!swap) return -1;
+    ID3D11Texture2D* back = nullptr;
+    if (FAILED(swap->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&back))) || !back) return -1;
+    const ULONG withProbe = back->AddRef();   // the probe's two references (GetBuffer's and this AddRef's) are the count's floor
+    back->Release();
+    back->Release();
+    return static_cast<long>(withProbe) - 2;
+}
+struct FlatResizeLog {
+    std::atomic<uint64_t> calls{0}, fails{0}, failLines{0}, windowCalls{0}, windowFails{0}, windowStartMs{0};
+};
+FlatResizeLog g_flatResizeLog;
+void flatResizeNote(const char* api, UINT count, UINT width, UINT height, DXGI_FORMAT format, UINT flags, HRESULT hr,
+                    long refsBefore) {
+    FlatResizeLog& l = g_flatResizeLog;
+    const uint64_t n = l.calls.fetch_add(1, std::memory_order_relaxed) + 1;
+    const bool failed = FAILED(hr);
+    if (failed) l.fails.fetch_add(1, std::memory_order_relaxed);
+    l.windowCalls.fetch_add(1, std::memory_order_relaxed);
+    if (failed) l.windowFails.fetch_add(1, std::memory_order_relaxed);
+    const uint64_t now = GetTickCount64();
+    if (!l.windowStartMs.load(std::memory_order_relaxed)) l.windowStartMs.store(now, std::memory_order_relaxed);
+    const bool failLine = failed && l.failLines.load(std::memory_order_relaxed) < 32;
+    if (n <= 8 || failLine) {
+        if (failLine) l.failLines.fetch_add(1, std::memory_order_relaxed);
+        Log::get().note("flat resize: call=%llu api=%s result=%s requested=%ux%u format=%u buffers=%u flags=0x%X hresult=0x%08lX "
+                        "back-buffer-refs-before=%ld (counted references besides the probe's own; -1 = unreadable; a failure "
+                        "with refs above 0 names a holder)",
+            static_cast<unsigned long long>(n), api, failed ? "FAILED" : "ok", width, height,
+            static_cast<unsigned>(format), count, flags, static_cast<unsigned long>(hr), refsBefore);
+        return;
+    }
+    if (now - l.windowStartMs.load(std::memory_order_relaxed) >= 5000) {
+        Log::get().note("flat resize: summary 5s: calls=%llu failed=%llu (total calls=%llu failed=%llu); last api=%s result=%s "
+                        "hresult=0x%08lX back-buffer-refs-before=%ld; individual lines are the first 8 calls and the first 32 failures",
+            static_cast<unsigned long long>(l.windowCalls.exchange(0, std::memory_order_relaxed)),
+            static_cast<unsigned long long>(l.windowFails.exchange(0, std::memory_order_relaxed)),
+            static_cast<unsigned long long>(n), static_cast<unsigned long long>(l.fails.load(std::memory_order_relaxed)),
+            api, failed ? "FAILED" : "ok", static_cast<unsigned long>(hr), refsBefore);
+        l.windowStartMs.store(now, std::memory_order_relaxed);
+    }
+}
+
 HRESULT STDMETHODCALLTYPE hookedFlatResizeBuffers(IDXGISwapChain* self, UINT count, UINT width, UINT height, DXGI_FORMAT format, UINT flags) {
-    if (self == g_state->swapChain) { menuFlatResize(); flatRuntimeResize(); }
-    return g_state->realResizeBuffers(self, count, width, height, format, flags);
+    const bool ours = self == g_state->swapChain;
+    long refs = -1;
+    if (ours) { menuFlatResize(); flatRuntimeResize(); refs = flatResizeBackBufferRefs(self); }
+    const HRESULT hr = g_state->realResizeBuffers(self, count, width, height, format, flags);
+    if (ours) flatResizeNote("ResizeBuffers", count, width, height, format, flags, hr, refs);
+    return hr;
 }
 HRESULT STDMETHODCALLTYPE hookedFlatResizeBuffers1(IDXGISwapChain3* self, UINT count, UINT width, UINT height, DXGI_FORMAT format, UINT flags, const UINT* masks, IUnknown* const* queues) {
-    if (static_cast<IDXGISwapChain*>(self) == g_state->swapChain) { menuFlatResize(); flatRuntimeResize(); }
-    return g_state->realResizeBuffers1(self, count, width, height, format, flags, masks, queues);
+    const bool ours = static_cast<IDXGISwapChain*>(self) == g_state->swapChain;
+    long refs = -1;
+    if (ours) { menuFlatResize(); flatRuntimeResize(); refs = flatResizeBackBufferRefs(self); }
+    const HRESULT hr = g_state->realResizeBuffers1(self, count, width, height, format, flags, masks, queues);
+    if (ours) flatResizeNote("ResizeBuffers1", count, width, height, format, flags, hr, refs);
+    return hr;
 }
 
 // ---- THE FRAME BOUNDARY, ONE FAULT BUDGET PER TICK -------------------------------
