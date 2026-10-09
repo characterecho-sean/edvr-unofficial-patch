@@ -5,7 +5,8 @@ The rig (explorer_cam_fade_test.cpp) drives the pure comfort timeline (src\\d3d1
 an entry that is otherwise ready fades in at once when the motion is live (M1), holds black until the views have run three frames in a row (M2), gives up
 one second after it was otherwise ready and says which condition was missing (M3), does not wait for the second skin's join in a scene with no skinned jobs
 (M4), waits for nothing when the engine's motion is not armed (M5), never delays an exit (M6), waits on a re-attach like an entry (M7), starts the hold over
-when it stops being otherwise ready (M8), leaves the 3 s cap from the press as it was (M9), and the lines (M10). Every failure carries a label
+when it stops being otherwise ready (M8), leaves the 3 s cap from the press as it was (M9), and the lines (M10); the clock it is fed: the QPC-to-microsecond
+conversion that does not wrap and its two call sites in explorer_cam.cpp, read as text (M11), and a clock that steps back (M12). Every failure carries a label
 "M<case>.<what>". A rig that passes proves little until it is seen to FAIL on a source that breaks the rule it pins: for each mutation below the machinery
 (tools\\rig_mutants_lib.py) copies the header into a temp directory OUTSIDE the repo, applies the edit, rebuilds the rig against the copy and requires a FAIL
 on a check of the case that belongs to the rule.
@@ -26,17 +27,22 @@ import rig_mutants_lib as lib  # noqa: E402
 ROOT = HERE.parents[1]
 FILES = {
     "fade": ROOT / "src" / "d3d11" / "explorer_cam_fade_core.h",
+    "glue": ROOT / "src" / "d3d11" / "explorer_cam.cpp",   # read by the rig as text (M11.p): the two places that convert the counter
 }
 TREE_EXTRA = [("src/d3d11/explorer_cam_core.h", ROOT / "src" / "d3d11" / "explorer_cam_core.h")]
 CONFIG = lib.Config(
-    here=__file__, files=FILES, header_keys=("fade",), pin_keys=(), rig=HERE / "explorer_cam_fade_test.cpp",
+    here=__file__, files=FILES, header_keys=("fade",), pin_keys=("glue",), rig=HERE / "explorer_cam_fade_test.cpp",
     rig_label=":rig_explorer_cam_fade_test", rig_source_in_bat="tools\\explorer_cam_fade_test\\explorer_cam_fade_test.cpp", rig_exe_in_bat="explorer_cam_fade_test.exe",
-    case_prefix="M", include_dirs=("src/d3d11",), min_mutants=14, run_timeout=120.0, tree_extra=TREE_EXTRA)
+    case_prefix="M", include_dirs=("src/d3d11",), min_mutants=28, run_timeout=120.0, tree_extra=TREE_EXTRA)
 
 KIND_GATE = "if (m_kind != ComfortKind::Exit && in.motionArmed) {"
 FADE_IN_NOW = "if (motionUnmet == 0) {\n                beginIn(ComfortEv::FadeIn, ComfortWhy::None, 0, in, out);"
 HOLD_END = "if (in.nowUs > m_motionHoldUs && in.nowUs - m_motionHoldUs >= static_cast<uint64_t>(kFadeMotionHoldMs) * 1000u)"
 TIMED_OUT = "beginIn(ComfortEv::MotionTimedOut, ComfortWhy::None, motionUnmet, in, out);"
+QPC_FN = "return (ticks / freq) * 1000000ull + (ticks % freq) * 1000000ull / freq;"
+REBASE = "if (m_have && raw.nowUs + m_shiftUs < m_lastUs) m_shiftUs = m_lastUs - raw.nowUs;"
+REALNOW = "return ecm::qpcTicksToUs(qpcNow(), freq);"
+BOUNDARY = "in.nowUs = ecm::qpcTicksToUs(static_cast<uint64_t>(t.QuadPart), freq);"
 
 M = lib.M
 MUTANTS = [
@@ -90,6 +96,17 @@ MUTANTS = [
       "a fade in that was ready does not report the engine's motion as it stood"),
     M("start-line-silent", "M10", "fade", [("(then, if the engine's motion is not live yet, up to %u ms more)", "(then more)")],
       "the Start line does not say the hold exists or how long it can last"),
+    # ---- the clock the timeline is fed ----
+    M("qpc-multiply-first", "M11", "fade", [(QPC_FN, "return ticks * 1000000ull / freq;")],
+      "the old conversion: the product wraps a uint64 after about 21 days of counter and the clock jumps back below every stored deadline"),
+    M("qpc-remainder-dropped", "M11", "fade", [(QPC_FN, "return (ticks / freq) * 1000000ull;")],
+      "the conversion keeps whole seconds only: the clock stands still between them"),
+    M("realnow-call-site-old", "M11", "glue", [(REALNOW, "return qpcNow() * 1000000ull / freq;")],
+      "realNowUs (the follow smoothing's clock) is left on the multiply-first arithmetic"),
+    M("boundary-call-site-old", "M11", "glue", [(BOUNDARY, "in.nowUs = static_cast<uint64_t>(t.QuadPart) * 1000000ull / freq;")],
+      "the frame boundary's input to the comfort fade is left on the multiply-first arithmetic: the review's black screen"),
+    M("backwards-clock-not-rebased", "M12", "fade", [(REBASE, "(void)0;")],
+      "a clock that steps back leaves the press and the hold in the future of now: the 3 s cap and the motion hold stop firing"),
 ]
 
 if __name__ == "__main__":

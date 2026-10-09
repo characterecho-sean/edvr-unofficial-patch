@@ -609,7 +609,7 @@ uint64_t realNowUs() {
         QueryPerformanceFrequency(&f);
         return static_cast<uint64_t>(f.QuadPart > 0 ? f.QuadPart : 1);
     }();
-    return qpcNow() * 1000000ull / freq;
+    return ecm::qpcTicksToUs(qpcNow(), freq);   // the overflow-safe conversion: the multiply-first form wraps after about 21 days of counter and the clock jumps back
 }
 uint64_t (*g_followNowUs)() = &realNowUs;   // the rig scripts the clock the smoothing reads
 void atomicMaxU32(std::atomic<uint32_t>& a, uint32_t v) noexcept {
@@ -2471,7 +2471,7 @@ void explorerCamFrameBoundary(uint32_t frameNo) {
         }();
         LARGE_INTEGER t;
         QueryPerformanceCounter(&t);
-        in.nowUs = static_cast<uint64_t>(t.QuadPart) * 1000000ull / freq;
+        in.nowUs = ecm::qpcTicksToUs(static_cast<uint64_t>(t.QuadPart), freq);   // the one overflow-safe conversion (explorer_cam_fade_core.h), as realNowUs uses
     }
     in.motion = engineMotionReady();   // what the entry fade waits for besides the placement (the engine's motion for the eye path)
     boundaryAt(frameNo, GetTickCount64(), in, sink);

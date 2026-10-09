@@ -40,6 +40,15 @@ constexpr uint32_t kFadeClosedUpdates = 10;          // controller updates at mo
 constexpr uint32_t kFadeDeadFrames = 6;              // frames with no pending request and no session before a released entry is called refused
 constexpr uint32_t kFadeGoneFrames = 2;              // frames without a session, once it was seen, before a transition is called aborted
 
+// QPC ticks to microseconds, for the clock the timeline is fed (ComfortInputs::nowUs). The product ticks * 1000000 wraps a uint64 at tick 18,446,744,073,710
+// (about 21 days of counter at 10 MHz, the interval depends on the frequency), and a time that wraps jumps back below every deadline the timeline stored. So
+// the whole seconds are converted first and only the remainder, under one second of ticks, is multiplied: exact for every tick count a machine can reach.
+// Both of explorer_cam.cpp's conversions (the boundary's input and realNowUs) call this one; tools\explorer_cam_fade_test pins them to it.
+inline uint64_t qpcTicksToUs(uint64_t ticks, uint64_t freq) {
+    if (freq == 0) freq = 1;
+    return (ticks / freq) * 1000000ull + (ticks % freq) * 1000000ull / freq;
+}
+
 enum class ComfortKind : uint8_t { None = 0, Enter, Exit, Reattach };
 enum class ComfortPhase : uint8_t { Clear = 0, Out, Black, In };
 enum ComfortUnmet : uint32_t {
@@ -120,8 +129,15 @@ public:
     bool busy() const { return m_kind != ComfortKind::None || m_phase != ComfortPhase::Clear; }
     void reset() { *this = ComfortTimeline(); }
 
-    ComfortStep step(const ComfortInputs& in) {
+    ComfortStep step(const ComfortInputs& raw) {
         ComfortStep out;
+        // The timeline runs on a clock that never goes backwards. The deadlines it stores (the press, the motion hold) are readings of that clock; one that
+        // stepped back (a counter that wrapped in a conversion, a source swapped under it) would leave them in the future of "now", heldMs would read 0, and
+        // the 3 s cap and the motion hold would not fire until the clock caught up, which can be never. A step back is taken as no time passing, and the clock
+        // goes on from the reading it was at: the cap is the time that really passed, not the time the caller's clock claims.
+        ComfortInputs in = raw;
+        if (m_have && raw.nowUs + m_shiftUs < m_lastUs) m_shiftUs = m_lastUs - raw.nowUs;
+        in.nowUs = raw.nowUs + m_shiftUs;
         double dtMs = m_have && in.nowUs > m_lastUs ? static_cast<double>(in.nowUs - m_lastUs) / 1000.0 : 0.0;
         m_have = true;
         m_lastUs = in.nowUs;
@@ -331,6 +347,8 @@ private:
 
     bool m_have = false;
     uint64_t m_lastUs = 0, m_startUs = 0;
+    uint64_t m_shiftUs = 0;   // what the caller's clock has been stepped back by, summed: nowUs + this is the timeline's own, monotonic clock (a reset
+                              // that goes on running sets m_lastUs to a reading of that clock, which is how the next step finds the shift again)
     ComfortPhase m_phase = ComfortPhase::Clear;
     ComfortKind m_kind = ComfortKind::None;
     float m_x = 0.0f;

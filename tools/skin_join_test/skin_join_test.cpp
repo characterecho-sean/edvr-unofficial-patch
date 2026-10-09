@@ -88,6 +88,26 @@ void caseSnapshots() {
         Built b = good; b.snap.end = kMaxRows + 1;
         check(!checkSnapshot(b.snap), "J1.k an end beyond the tables is refused");
     }
+    {
+        Built b = good; b.snap.flags = kSnapImplausible;
+        const char* w = nullptr;
+        check(!checkSnapshot(b.snap, &w) && w && std::strcmp(w, "walk flags") == 0, "J1.l a walk that met a value it could not believe (kSnapImplausible) is refused, as the flag documents");
+    }
+    {
+        // A base near 2^32 with a bone count that carries dst + count past 2^32: the 32-bit sum wraps to 16, under any `next`, so a sum test accepts it.
+        Built b = good; b.snap.e[2].dst = 0xFFFFFFF0u; b.snap.e[2].count = 32;
+        check(!checkSnapshot(b.snap), "J1.m a last entry whose dst + count wraps 32 bits (0xFFFFFFF0 + 32) is refused");
+    }
+    {
+        Built b = good; b.snap.e[1].dst = 0xFFFFFFF0u; b.snap.e[1].count = 32;
+        check(!checkSnapshot(b.snap), "J1.m2 ...and so is a middle entry whose dst + count wraps");
+    }
+    {
+        Built b = good; b.snap.e[1].count = b.snap.e[2].dst - b.snap.e[1].dst;   // the primary job fills its range exactly
+        check(checkSnapshot(b.snap), "J1.n a primary job that exactly fills its range is accepted (the overflow-safe test keeps the boundary)");
+        b.snap.e[1].count += 1;
+        check(!checkSnapshot(b.snap), "J1.n2 ...and one bone more is refused");
+    }
 }
 
 // ---- J2 ------------------------------------------------------------------------------------------------------------------
