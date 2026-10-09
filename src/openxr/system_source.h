@@ -39,6 +39,11 @@ struct SystemRead {
   vr::HmdMatrix34_t seatedToStanding{}, rawToStanding{};
   // Game-facing per-eye tangent offsets. Cached optics remains unjittered.
   float tangentShift[2][2]{};
+  // advanced.canted_eye_fix (TEMPORARY, docs\canted-projection.md): the answer
+  // to GetEyeToHeadTransform is S*E*S, the rotation in Elite's own handedness.
+  // It changes that one answer and nothing here: geometry and optics above keep
+  // the located transform, which the native frame tables and the layer use.
+  bool cantedEyeFix=false;
 };
 
 // The source outlives the concrete IVRSystem object and protects its resources
@@ -67,6 +72,10 @@ class SystemSource {
   }
   virtual void noteProjectionQuery(const SystemRead&,unsigned,float,float,
       vr::EGraphicsAPIConvention,bool,const vr::HmdMatrix44_t&,const void*) noexcept {}
+  // GetEyeToHeadTransform handed the game `given` for an eye; `located` is the
+  // runtime's own transform that answer was made from. Bounded, as above.
+  virtual void noteEyeToHead(const SystemRead&,unsigned,const vr::HmdMatrix34_t&,
+      const vr::HmdMatrix34_t&) noexcept {}
   virtual void noteFrequencyQuery(const SystemRead&,vr::TrackedDeviceIndex_t,
       vr::ETrackedPropertyError,float,unsigned) noexcept {}
   virtual void notePropertyQuery(unsigned,vr::TrackedDeviceIndex_t,

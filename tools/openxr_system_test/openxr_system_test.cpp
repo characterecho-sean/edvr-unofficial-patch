@@ -71,6 +71,10 @@ struct FakeSource final : SystemSource {
       bool accepted,const vr::HmdMatrix44_t&,const void*) noexcept override {
     std::lock_guard<std::mutex> lock(mutex);if(accepted)++queryAccepted;else ++queryRejected;
   }
+  unsigned eyeNotes=0;unsigned notedEyeIndex=99;vr::HmdMatrix34_t notedGiven{},notedLocated{};
+  void noteEyeToHead(const SystemRead&,unsigned eye,const vr::HmdMatrix34_t& given,const vr::HmdMatrix34_t& located) noexcept override {
+    std::lock_guard<std::mutex> lock(mutex);++eyeNotes;notedEyeIndex=eye;notedGiven=given;notedLocated=located;
+  }
   std::atomic<unsigned> unsupportedCalls{0};
 
   explicit FakeSource() {
@@ -489,6 +493,57 @@ int selfTest() {
   check(allZero(rawAfter, sizeof(rawAfter)), "invalid raw eye zeros outputs");
   auto eye0 = system->GetEyeToHeadTransform(vr::Eye_Left); auto eye1 = system->GetEyeToHeadTransform(vr::Eye_Right);
   check(near(eye0.m[2][3], -.06f) && near(eye1.m[2][3], .06f), "both eye transforms returned by value");
+  {
+    // advanced.canted_eye_fix (docs\canted-projection.md): the answer to the game is S*E*S, S = diag(1,1,-1), and nothing else moves. The located transform the
+    // snapshot holds (the native frame tables and the layer read it there) is never touched, and the IPD property is made from the located one.
+    const GeometrySnapshot kept = source.state.geometry;
+    const SystemRead keptState = source.state;
+    unsigned before = source.eyeNotes;
+    source.state.cantedEyeFix = false;
+    auto off0 = system->GetEyeToHeadTransform(vr::Eye_Left);
+    check(std::memcmp(&off0, &kept.eyeToHead[0], sizeof(off0)) == 0 && source.eyeNotes == before + 1 && source.notedEyeIndex == 0 &&
+          std::memcmp(&source.notedGiven, &source.notedLocated, sizeof(source.notedGiven)) == 0,
+          "canted_eye_fix off: the game is given the located transform, and the note says given == located");
+    vr::ETrackedPropertyError ipdError = vr::TrackedProp_Success;
+    const float ipdOff = system->GetFloatTrackedDeviceProperty(0, vr::Prop_UserIpdMeters_Float, &ipdError);
+    source.state.cantedEyeFix = true;
+    auto on0 = system->GetEyeToHeadTransform(vr::Eye_Left); auto on1 = system->GetEyeToHeadTransform(vr::Eye_Right);
+    check(near(on0.m[2][3], .06f) && near(on1.m[2][3], -.06f) && near(on0.m[0][3], kept.eyeToHead[0].m[0][3]) && near(on0.m[1][3], kept.eyeToHead[0].m[1][3]),
+          "canted_eye_fix on: only tz changes sign for a pure translation (x and y stay)");
+    check(source.notedEyeIndex == 1 && std::memcmp(&source.notedGiven, &on1, sizeof(on1)) == 0 && std::memcmp(&source.notedLocated, &kept.eyeToHead[1], sizeof(on1)) == 0,
+          "...and the note carries the given and the located transform of that call");
+    check(std::memcmp(&source.state.geometry, &kept, sizeof(kept)) == 0 && std::memcmp(&source.state.optics, &keptState.optics, sizeof(keptState.optics)) == 0,
+          "...while the snapshot and the cached optics are bit-identical afterwards (nothing reads the game-facing answer back)");
+    check(std::fabs(system->GetFloatTrackedDeviceProperty(0, vr::Prop_UserIpdMeters_Float, &ipdError) - ipdOff) < 1e-7f && ipdOff > 0.1f,
+          "...and the IPD property is the same on and off (made from the located transform)");
+    // A yawed, pitched eye shows the rotation entries: exactly R02, R12, R20, R21 and tz change sign.
+    vr::HmdMatrix34_t yawed{};
+    const double a = 10.0*3.14159265358979323846/180.0, p = 4.0*3.14159265358979323846/180.0;
+    const double ry[3][3] = {{std::cos(a),0,std::sin(a)},{0,1,0},{-std::sin(a),0,std::cos(a)}};
+    const double rx[3][3] = {{1,0,0},{0,std::cos(p),-std::sin(p)},{0,std::sin(p),std::cos(p)}};
+    for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j) { double v = 0; for (int k = 0; k < 3; ++k) v += ry[i][k]*rx[k][j]; yawed.m[i][j] = float(v); }
+    yawed.m[0][3] = -.032f; yawed.m[1][3] = .004f; yawed.m[2][3] = -.011f;
+    source.state.geometry.eyeToHead[0] = yawed;
+    auto given = system->GetEyeToHeadTransform(vr::Eye_Left);
+    bool flipped = true, kept2 = true;
+    for (int i = 0; i < 3; ++i) for (int j = 0; j < 4; ++j) {
+      const bool flips = (i == 2) != (j == 2);   // S*E*S: one index on the z row/column, not both (and the translation's z)
+      if (flips) flipped = flipped && given.m[i][j] == 0.0f - yawed.m[i][j];
+      else kept2 = kept2 && given.m[i][j] == yawed.m[i][j];
+    }
+    check(flipped && kept2 && yawed.m[0][2] != 0 && yawed.m[1][2] != 0 && yawed.m[2][0] != 0 && yawed.m[2][1] != 0,
+          "a yawed and pitched eye: R02, R12, R20, R21 and tz are negated, the other seven entries are not");
+    auto again = system->GetEyeToHeadTransform(vr::Eye_Left);
+    check(std::memcmp(&again, &given, sizeof(given)) == 0 && std::memcmp(&source.state.geometry.eyeToHead[0], &yawed, sizeof(yawed)) == 0,
+          "...asking again gives the same answer (the correction is not accumulated into the snapshot)");
+    // With the tracking sample gone the cached optics answer, and are corrected the same way.
+    source.state.geometry = kept; source.state.geometryValid = false;
+    source.state.optics.eyeToHead[1] = yawed;
+    auto cached = system->GetEyeToHeadTransform(vr::Eye_Right);
+    check(cached.m[0][2] == 0.0f - yawed.m[0][2] && cached.m[2][3] == 0.0f - yawed.m[2][3] && cached.m[0][0] == yawed.m[0][0] && cached.m[0][3] == yawed.m[0][3],
+          "no live geometry: the cached optics are corrected the same way");
+    source.state = keptState; source.state.cantedEyeFix = false;
+  }
   for(const auto e:{vr::Eye_Left,vr::Eye_Right})for (const auto api : {vr::API_DirectX, vr::API_OpenGL}) for (const auto planes : {std::pair<float,float>{.025f,50000.f}, {.1f,1000.f}, {1.f,50000.f}}) {
     const auto m = system->GetProjectionMatrix(e, planes.first, planes.second, api);
     const float left=std::tan(-.6f), right=std::tan(.7f), top=std::tan(-.4f), bottom=std::tan(.5f);

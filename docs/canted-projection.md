@@ -20,6 +20,43 @@ Everything below was measured through EDVR's `openvr_api.dll` proxy, which
 records what the game asks the VR runtime. No game file, game memory or game
 code is touched at any point.
 
+## Status
+
+**State (2026-10-09): REOPENED on new evidence.** Offline disassembly of Elite
+build 332841 (`analysis\decomp\verify_20261009_cant_*`) finds the eye rotation
+is **not** dropped:
+
+- Wrapper slots 16 (RVA 0x4E25A0) and 26 (RVA 0x4E2350) call
+  `GetEyeToHeadTransform` and build a full 4x4 from the 3x4 via 0x4E4EF0.
+- That 4x4 is multiplied with the head pose, which 0x4E3690 first converts into
+  the game's z-negated space (`S*H*S`, S = diag(1,1,-1)).
+- The eye matrix goes in raw. The correct game-space matrix is `S*E*S`. Raw E
+  inverts the cant's yaw and pitch (2 theta per eye), which is invisible on
+  parallel panels, where the rotation is identity and tz = 0.
+
+The 2026-09-12 closure assumed a dropped rotation. The field symptoms fit an
+inverted rotation equally well. The fold experiment and the remap arithmetic
+below still stand.
+
+**Open hypotheses.** *H-inv* (handedness): fix is the runtime returning `S*E*S`,
+no engine patch. *H-drop*: the rotation is lost somewhere the disassembly
+missed (the cull-plane writer and the renderer's tangent extraction were not
+found). **Ruled out:** nothing yet; *What was tried* stands as measured.
+
+**Temporary keys (remove when the arc closes)**, `edvr.ini` `[advanced]`:
+`canted_eye_fix` (default on, live) answers Elite's eye-to-head query with
+`S*E*S`; `simulate_cant` (degrees, 0 off, live) gives a parallel-panel headset
+a synthetic outward cant at the geometry source.
+
+**Next flight**, on a parallel headset (Quest 3 via Virtual Desktop, Pimax
+Crystal Super via Pimax OpenXR): `simulate_cant = 10` from launch, then
+`canted_eye_fix` on, off, on, live.
+
+- A fused, stable world with on and a split with off confirms H-inv.
+- Neither fusing means H-drop.
+- EDVR's temporal AA artifacts under the cant are a separate observation, not
+  the verdict.
+- Then a real 8KX flight with parallel projection off.
 ## What OpenVR says about a canted headset
 
 A canted headset is described in two separate places, and this split is the
@@ -342,3 +379,62 @@ headsets has canted panels, and both report exactly 0.00°, so every
 cant-aware line in EDVR had never once been exercised against a real angle
 before this — and the fold could only ever have been tested in his cockpit.
 The answer is a negative one, and it is his.
+
+## 2026-10-09 — the rotation is not dropped; it is composed in the wrong handedness
+
+Offline disassembly of Elite build 332841 (the Epic exe the reporters run);
+dumps in `analysis\decomp\verify_20261009_cant_*`. **READ** is what the
+instructions say, emulated results included; **INFERRED** is what follows from
+them.
+
+**READ**
+
+- Slots 16 (0x4E25A0) and 26 (0x4E2350) call `[rax+0x20]` (sites 0x1404E25FB
+  and 0x1404E23AF), which is `GetEyeToHeadTransform`, and pass the 3x4 to
+  0x4E4EF0, which reads all 12 floats.
+- Slot 28 (0x4E29B0, site 0x1404E2A5C) reads only `|m[0][3]|` for an IPD
+  scalar; it has one caller, 0x1428219D0. The `S*E*S` conjugation leaves
+  `m[0][3]` untouched.
+- The chain: per-frame job 0x2868C30, driver 0x28431D0, composer 0x283D4C0
+  (which calls adapter slot +0xB0), then the eye pose times the base 4x4 with
+  the full 3x3, then the camera setter 0x2878DC0. It takes forward = normalised
+  row 2, right = row 1 x row 2, up = forward x right, position = row 3.
+- The head conversion in 0x4E3690 (from 0x1404E38ED), emulated on three
+  synthetic poses, equals `S*H*S` to about 1e-6. The slot 16 product, emulated,
+  is `E @ H` to 6e-8.
+- The camera stores `GetProjectionMatrix`'s 4x4 verbatim (projType 5,
+  0x142878F71).
+
+**INFERRED**
+
+- The head pose is conjugated into game space and the eye matrix is not, so the
+  composed eye rotation is wrong by `S`. For `E = Ry(theta)` that is `Ry(-theta)`
+  in game space, 2 theta off per eye. Identity rotation with tz = 0 makes
+  `S*E*S = E`, which is every parallel-panel headset, so nothing shows there.
+- The 2026-09-12 closure assumed a dropped rotation; the field symptoms fit an
+  inverted one equally well. The fold experiment and the remap arithmetic are
+  measurements and still stand.
+
+**Not found:** the cull-plane writer. The renderer's tangent extraction. The
+four-tangent rebuild seen in the fold experiment is downstream of the camera
+and was not traced.
+
+**What the test build does**, so one flight separates the two hypotheses on a
+headset with parallel panels:
+
+- `advanced.simulate_cant` turns each located eye outward by the asked angle
+  (left eye `orientation * Ry(+theta)`, right `Ry(-theta)`, positions
+  untouched) and widens its fov to the bounding box of the turned frustum in
+  the new tangent plane, right after `xrLocateViews`. Everything downstream
+  sees one canted headset: the game's projection and eye-to-head answers, the
+  temporal and cull-guard frusta, and the pose and fov submitted at
+  `xrEndFrame`. The hidden-area mesh is withheld while it is on. The render
+  size is left alone, so the pixels are not square.
+- `advanced.canted_eye_fix` changes only the answer to Elite's
+  `GetEyeToHeadTransform`, to `S*E*S` (negating `m[0][2]`, `m[1][2]`,
+  `m[2][0]`, `m[2][1]`, `m[2][3]`). EDVR's own consumers read the located
+  transform from the geometry snapshot, not from that answer.
+- The runtime log carries `canted test:` lines for the cant (per eye, with the
+  told and the true tangents) and `canted eyes:` lines for the correction and
+  for the 3x4 actually returned to Elite with the signed yaw of each eye's
+  forward axis. A log without them means the instrument never ran.

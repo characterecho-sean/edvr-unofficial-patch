@@ -1,4 +1,5 @@
 #include "openvr_system.h"
+#include "canted_display.h"
 #include "native_cpu_trace.h"
 #include <algorithm>
 #include <cmath>
@@ -207,7 +208,14 @@ DistortionCoordinates_t OpenVRSystem::ComputeDistortion(EVREye,float,float) { un
 HmdMatrix34_t OpenVRSystem::GetEyeToHeadTransform(EVREye e) {
   const auto s=source_.read();source_.noteGeometryQuery(4,s);
   const bool liveGeometry=geometryValid(s);
-  return opticsAvailable(s)&&eyeValid(e)?(liveGeometry?s.geometry.eyeToHead[unsigned(e)]:s.optics.eyeToHead[unsigned(e)]):HmdMatrix34_t{};
+  if(!opticsAvailable(s)||!eyeValid(e))return HmdMatrix34_t{};
+  // The located transform stays what the snapshot holds: the native frame
+  // tables and the layer read it there. Only this answer to the game changes,
+  // and nothing reads it back.
+  const HmdMatrix34_t located=liveGeometry?s.geometry.eyeToHead[unsigned(e)]:s.optics.eyeToHead[unsigned(e)];
+  const HmdMatrix34_t given=s.cantedEyeFix?gameHandedness(located):located;
+  source_.noteEyeToHead(s,unsigned(e),given,located);
+  return given;
 }
 bool OpenVRSystem::GetTimeSinceLastVsync(float* seconds,uint64_t* frame) {
   NativeCpuTraceSpan trace(EdvrCpuGetTimeSinceLastVsync);

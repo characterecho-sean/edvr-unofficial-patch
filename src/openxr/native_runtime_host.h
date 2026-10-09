@@ -54,6 +54,7 @@
 #include "d3d11_stereo.h"
 #include "projection_math.h"
 #include "geometry_locator.h"
+#include "canted_display.h"
 #include "openvr_system.h"
 #include "system_publication.h"
 #include "head_locator.h"
@@ -207,7 +208,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   NativeFrameClient features;
   NativeFssClient fss;
   NativeCullGuard cullGuard;
-  EdvrNativeFrameOutput featureFrame{sizeof(featureFrame),EDVR_NATIVE_FRAME_VERSION_5};
+  EdvrNativeFrameOutput featureFrame{sizeof(featureFrame),EDVR_NATIVE_FRAME_VERSION_6};
   EdvrNativeFrameDecision featureDecision{sizeof(featureDecision),EDVR_NATIVE_FRAME_VERSION_1};
   bool featureFrameKnown=false;
   uint64_t fssHealedEyes[2]{},featureChanges=0;
@@ -377,6 +378,18 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   CompositorPublication poses;uint64_t compositorGeneration=0;
   OpenVRCompositor compositorInterface{this};
   GeometryInput frameGeometry{};bool frameGeometryAvailable=false;
+  // The canted-display arc's two temporary test keys (docs\canted-projection.md),
+  // read in the d3d11 half and told through EdvrNativeFrameOutput version 6.
+  // `epoch` counts a change of either, once the frame carrying it is published
+  // (`pending` holds it until then), so the first GetEyeToHeadTransform call
+  // per eye after one logs what the game was handed (noteEyeToHead). Remove
+  // with the arc.
+  struct CantTest {
+    bool simNoted=false,fixNoted=false,fix=false,pending=false;
+    CantOutcome outcome=CantOutcome::Off;float appliedDeg=0;
+    std::atomic<uint32_t> epoch{0};
+    std::atomic<uint32_t> eyeNoted[2]{};
+  } cantTest;
   XrResult lastCompositorResult=XR_SUCCESS;
   uint64_t compositorWaits=0,compositorSubmits=0,compositorHandoffs=0,validGamePoses=0;
   uint64_t poseFailures=0;
@@ -668,6 +681,16 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       eye,double(nearZ),double(farZ),unsigned(convention),unsigned(accepted),unsigned(s.geometryValid),unsigned(s.opticsValid),
       (unsigned long long)s.geometry.native.sequence,caller,double(m.m[0][0]),double(m.m[1][1]),double(m.m[0][2]),double(m.m[1][2]),double(m.m[2][2]),double(m.m[2][3]));
   }
+  void noteEyeToHead(const SystemRead&,unsigned eye,const vr::HmdMatrix34_t& given,
+      const vr::HmdMatrix34_t& located) noexcept override {
+    const uint32_t epoch=cantTest.epoch.load(std::memory_order_acquire);
+    if(eye>1||!epoch||cantTest.eyeNoted[eye].exchange(epoch,std::memory_order_acq_rel)==epoch)return;
+    const auto& m=given.m;
+    nativeTracePrintf("canted eyes: GetEyeToHeadTransform eye %u gave Elite [%.5f %.5f %.5f %.5f | %.5f %.5f %.5f %.5f | %.5f %.5f %.5f %.5f]; "
+      "that eye's forward axis is yawed %+.2f degrees from the head's (+ is toward +x), as located %+.2f\n",eye,
+      double(m[0][0]),double(m[0][1]),double(m[0][2]),double(m[0][3]),double(m[1][0]),double(m[1][1]),double(m[1][2]),double(m[1][3]),
+      double(m[2][0]),double(m[2][1]),double(m[2][2]),double(m[2][3]),double(forwardYawDegrees(given)),double(forwardYawDegrees(located)));
+  }
   void noteFrequencyQuery(const SystemRead& s,vr::TrackedDeviceIndex_t index,
       vr::ETrackedPropertyError error,float value,unsigned sample) noexcept override {
     const auto stack=edvr::captureGameCallStack();
@@ -842,6 +865,63 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     const auto r=loadingStep();
     if(r!=XR_SUCCESS)publishFatalFailure(boundary.failed()?boundary.lastResult():r,"loading_frame");
   }
+  // The simulated cant (canted_display.h), applied to a frame's located views
+  // the moment xrLocateViews returns, so that everything after this -- the
+  // temporal and cull-guard frusta, the game's GetProjectionRaw and
+  // GetProjectionMatrix, the eye-to-head transform, the layer's pose and fov
+  // at xrEndFrame -- sees one canted headset. The value is the previous
+  // frame's (the first frame is not canted). True while a cant is applied.
+  bool applySimulatedCant(GeometryInput& located) {
+    if(!featureFrameKnown)return false;
+    const float degrees=sanitizeSimulatedCant(featureFrame.simulateCantDeg);
+    CantReport report{};
+    const auto outcome=simulateCant(located.views,degrees,&report);
+    if(!cantTest.simNoted||outcome!=cantTest.outcome||degrees!=cantTest.appliedDeg) {
+      cantTest.simNoted=true;cantTest.outcome=outcome;cantTest.appliedDeg=degrees;
+      cantTest.pending=true;
+      if(outcome==CantOutcome::Applied) {
+        for(unsigned eye=0;eye<2;++eye) {
+          const auto& told=report.toldFov[eye];const auto& truth=report.trueFov[eye];
+          nativeTracePrintf("canted test: simulating a %.1f degree outward cant; %s eye told l=%.4f r=%.4f t=%.4f b=%.4f (true l=%.4f r=%.4f t=%.4f b=%.4f)\n",
+            double(degrees),eye?"right":"left",
+            std::tan(double(told.angleLeft)),std::tan(double(told.angleRight)),std::tan(double(told.angleUp)),std::tan(double(told.angleDown)),
+            std::tan(double(truth.angleLeft)),std::tan(double(truth.angleRight)),std::tan(double(truth.angleUp)),std::tan(double(truth.angleDown)));
+        }
+      } else if(outcome==CantOutcome::StoodDown) {
+        nativeTracePrintf("canted test: standing down at %.1f degrees -- a corner ray falls behind the canted eye, so the located geometry passes through unchanged\n",double(degrees));
+      } else nativeTracePuts("canted test: off");
+    }
+    return outcome==CantOutcome::Applied;
+  }
+  // The handedness correction as of the frame being published (the answer to
+  // GetEyeToHeadTransform; the located transform is never touched). Published
+  // to the game's reads every frame, so a new session generation gets it too.
+  void publishCantedEyeFix(bool fix) {
+    if(!cantTest.fixNoted||cantTest.fix!=fix) {
+      cantTest.fixNoted=true;cantTest.fix=fix;
+      cantTest.pending=true;
+      nativeTracePuts(fix?"canted eyes: correction on -- Elite is given each eye's rotation in its own handedness"
+                         :"canted eyes: correction off -- Elite is given each eye's rotation as the runtime located it");
+    }
+    geometry.setCantedEyeFix(fix);
+  }
+  // Whether the runtime's hidden-area mesh may be handed to the game this frame.
+  // It is cut for the runtime's own frustum and Elite reads it once, so a cull
+  // guard or a trim, which change that frustum, withhold it -- keyed on what is
+  // configured, not on the stage, because there is no second read. A simulated
+  // cant withholds it the same way: the mesh is cut in the real display's frame,
+  // which is no longer the frame the game renders in.
+  bool hiddenMeshCompatible(bool cantApplied) const {
+    return (!featureFrameKnown||(featureFrame.cullMode==0&&featureFrame.trimOuterDeg<=0&&
+      featureFrame.trimNasalDeg<=0&&featureFrame.trimVerticalDeg<=0))&&!cantApplied;
+  }
+  // A change of either test key counts as one only once the frame carrying it is
+  // published, when the game's reads can see it, so the first eye-to-head call
+  // after it logs the new answer and not the old one.
+  void commitCantTestChange() {
+    if(!cantTest.pending)return;
+    cantTest.pending=false;cantTest.epoch.fetch_add(1,std::memory_order_release);
+  }
   XrResult loadingStep() {
     if(GetCurrentThreadId()!=ownerThread||state.frameOpen())return XR_ERROR_CALL_ORDER_INVALID;
     const auto work=loading.work(false);
@@ -863,6 +943,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     GeometryInput located{};
     r=locateGeometry({api.locateViews,api.locateSpace},binding,frame,geometryGeneration,sizes,located,nullptr,frameSpace);
     if(r!=XR_SUCCESS){if(!XR_FAILED(r))boundary.clear();return r;}
+    applySimulatedCant(located);
     GeometrySnapshot snapshot{};
     const bool valid=makeGeometrySnapshot(located,snapshot);
     frameViews[0]=located.views[0];frameViews[1]=located.views[1];
@@ -1068,6 +1149,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     GeometryInput located{};XrSpaceVelocity velocity{XR_TYPE_SPACE_VELOCITY};
     auto r=locateGeometry({api.locateViews,api.locateSpace},binding,frame,geometryGeneration,sizes,located,&velocity,frameSpace);
     if(r!=XR_SUCCESS){if(!XR_FAILED(r))boundary.clear();return fail(r);}
+    const bool cantApplied=applySimulatedCant(located);
     TimedHeadPose render{},game{};
     if(!makeHeadPose(located.headPose,located.headFlags,velocity.velocityFlags,velocity.linearVelocity,velocity.angularVelocity,true,render))
       {boundary.clear();return fail(XR_ERROR_POSE_INVALID);}
@@ -1093,12 +1175,13 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       gameGeometry.width[eye]=dims.width;gameGeometry.height[eye]=dims.height;
     }
     if(features.acquired()) {
-      EdvrNativeFrameOutput next{sizeof(next),EDVR_NATIVE_FRAME_VERSION_5};
+      EdvrNativeFrameOutput next{sizeof(next),EDVR_NATIVE_FRAME_VERSION_6};
       if(features.begin(located,poses.read().originGeneration,next)!=S_OK) {
         boundary.clear();return fail(XR_ERROR_VALIDATION_FAILURE);
       }
       if(featureFrameKnown&&next.resubmitEnabled!=featureFrame.resubmitEnabled)previousPairValid=false;
       featureFrame=next;featureFrameKnown=true;
+      publishCantedEyeFix(featureFrame.cantedEyeFix!=0);
       if(locatedValid) {
         NativeCullSettings settings{};settings.mode=static_cast<NativeCullMode>(featureFrame.cullMode);
         settings.percent=featureFrame.cullPercent;settings.horizontalFraction=featureFrame.cullHorizontalFraction;
@@ -1208,13 +1291,10 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(fss.acquired()&&locatedValid&&frame.shouldRender && fss.begin(gameGeometry,poses.read().originGeneration)!=S_OK) {
       boundary.clear();return fail(XR_ERROR_VALIDATION_FAILURE);
     }
-    // The runtime's hidden-area mesh is cut for the runtime's own frustum and
-    // Elite reads it once. A trim changes that frustum exactly as the guard's
-    // widening does, so it withholds the mesh on the same terms -- keyed on
-    // what is configured, not on the stage, because there is no second read.
-    const bool geometryValid=geometry.publish(gameGeometry,false,false,frameTangentShift,
-        !featureFrameKnown||(featureFrame.cullMode==0&&featureFrame.trimOuterDeg<=0&&
-          featureFrame.trimNasalDeg<=0&&featureFrame.trimVerticalDeg<=0));
+    // The hidden-area mesh is withheld on a guard, a trim or a simulated cant
+    // (hiddenMeshCompatible).
+    const bool geometryValid=geometry.publish(gameGeometry,false,false,frameTangentShift,hiddenMeshCompatible(cantApplied));
+    commitCantTestChange();
     boundary.setGeometryReady(geometryValid);
     frameGeometry=located;frameGeometryAvailable=true;
     frameViews[0]=located.views[0];frameViews[1]=located.views[1];
