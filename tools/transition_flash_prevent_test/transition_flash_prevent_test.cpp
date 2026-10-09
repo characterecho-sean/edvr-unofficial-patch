@@ -1533,6 +1533,140 @@ void caseCorrectViewColumnMajor() {
           "correctViewColumnMajor: a non-orthonormal result refuses to write");
 }
 
+// --- CHANGE 18 (Build 1): the HMDCamera handle word, the gap stretch, the
+// dry-run gate and the tick comparison.
+
+void caseHandleWordDecode() {
+    // Bits 1-3 the state, the high 32 bits the generation; bit 0 and the rest
+    // of the low dword are not part of either.
+    check(tfeb::handleState(0x0ull) == tfeb::kHandleStateNone, "handleState: 0 is none");
+    check(tfeb::handleState(0x2ull) == tfeb::kHandleStateActive, "handleState: bit 1 is active (1)");
+    check(tfeb::handleState(0x4ull) == tfeb::kHandleStatePending, "handleState: bit 2 is pending (2)");
+    check(tfeb::handleState(0x00000007ull << 29) == 0, "handleState: bits above 3 do not leak in");
+    check(tfeb::handleState(0xFFFFFFFF0000000Dull) == 6, "handleState: low-dword bits 1-3 only (0xD -> 6)");
+    check(tfeb::handleState(0x1ull) == 0, "handleState: bit 0 alone is state 0");
+    check(tfeb::handleGeneration(0x0000002A00000004ull) == 42, "handleGeneration: the high dword");
+    check(tfeb::handleGeneration(0x00000000FFFFFFFFull) == 0, "handleGeneration: a full low dword is not generation");
+    check(tfeb::handleStateBucket(0) == 0 && tfeb::handleStateBucket(1) == 1 && tfeb::handleStateBucket(2) == 2 &&
+              tfeb::handleStateBucket(3) == 3 && tfeb::handleStateBucket(7) == 3,
+          "handleStateBucket: none/active/pending, everything else together");
+    check(std::strcmp(tfeb::handleStateText(2), "pending") == 0 && std::strcmp(tfeb::handleStateText(5), "other") == 0,
+          "handleStateText: names pending, calls an unknown state other");
+}
+
+void caseGapConsumeAndStretch() {
+    check(tfeb::isHmdGapConsume(2, true, 0), "gap: mode 2, reset mailbox, no tick = gap");
+    check(!tfeb::isHmdGapConsume(2, true, 1), "gap: a tick ran (the writer refused) is not a gap");
+    check(!tfeb::isHmdGapConsume(2, false, 0), "gap: a refilled mailbox is not a gap");
+    check(!tfeb::isHmdGapConsume(1, true, 0) && !tfeb::isHmdGapConsume(3, true, 0),
+          "gap: only mode 2 consumes count");
+
+    tfeb::GapStretch s;
+    check(tfeb::updateGapStretch(s, false, 10, 0) == tfeb::GapEdge::None, "stretch: no gap, none open = no edge");
+    check(tfeb::updateGapStretch(s, true, 11, 2) == tfeb::GapEdge::Start && s.active && s.startFrame == 11 &&
+              s.length == 1 && s.hstate == 2,
+          "stretch: the first gap consume starts it and records the frame and handle state");
+    check(tfeb::updateGapStretch(s, true, 12, 0) == tfeb::GapEdge::Continue && s.length == 2 && s.hstate == 2,
+          "stretch: later gap consumes continue it and keep the start's handle state");
+    check(tfeb::updateGapStretch(s, true, 13, 0) == tfeb::GapEdge::Continue && s.length == 3,
+          "stretch: length counts consumes");
+    check(tfeb::updateGapStretch(s, false, 14, 0) == tfeb::GapEdge::End && !s.active && s.length == 3 &&
+              s.startFrame == 11,
+          "stretch: the first non-gap consume ends it and leaves the length for the line");
+    check(tfeb::updateGapStretch(s, false, 15, 0) == tfeb::GapEdge::None, "stretch: after the end, no further edge");
+    check(tfeb::updateGapStretch(s, true, 16, 0) == tfeb::GapEdge::Start && s.length == 1 && s.hstate == 0,
+          "stretch: a new stretch resets length and handle state (a supercruise stretch is hstate 0)");
+    // A single-frame skip is a stretch of length 1 with both edges.
+    tfeb::GapStretch one;
+    check(tfeb::updateGapStretch(one, true, 5, 2) == tfeb::GapEdge::Start &&
+              tfeb::updateGapStretch(one, false, 6, 0) == tfeb::GapEdge::End && one.length == 1,
+          "stretch: a one-frame skip starts and ends with length 1");
+    // The length saturates rather than wrapping.
+    tfeb::GapStretch big;
+    tfeb::updateGapStretch(big, true, 1, 0);
+    big.length = 0xFFFFFFFFu;
+    tfeb::updateGapStretch(big, true, 2, 0);
+    check(big.length == 0xFFFFFFFFu, "stretch: the length saturates");
+}
+
+void caseDryRunGate() {
+    using S = tfeb::DryRunState;
+    check(tfeb::dryRunGate(true, 2, 0, false) == S::Go, "dryRunGate: valid ctrl, pending handle = go");
+    check(tfeb::dryRunGate(true, 1, 0, false) == S::Go, "dryRunGate: an active handle also goes");
+    check(tfeb::dryRunGate(true, 0, 0, false) == S::SkipHandleNone,
+          "dryRunGate: handle state 0 (supercruise) is skipped");
+    check(tfeb::dryRunGate(false, 2, 0, false) == S::SkipNoCtrl, "dryRunGate: no valid ctrl is skipped");
+    check(tfeb::dryRunGate(true, 2, tfeb::kMaxDryRunsPerSession - 1, false) == S::Go,
+          "dryRunGate: the 40th attempt still goes");
+    check(tfeb::dryRunGate(true, 2, tfeb::kMaxDryRunsPerSession, false) == S::SkipCap,
+          "dryRunGate: the 41st is capped");
+    check(tfeb::dryRunGate(true, 2, 0, true) == S::SkipStoodDown, "dryRunGate: a fault stands it down");
+    check(tfeb::dryRunGate(false, 0, 99, true) == S::SkipStoodDown,
+          "dryRunGate: stood down is named first");
+    check(tfeb::dryRunGate(false, 0, 99, false) == S::SkipNoCtrl,
+          "dryRunGate: no ctrl is named before handle state and cap");
+    check(tfeb::kMaxDryRunsPerSession == 40, "dryRunGate: the spec's cap is 40");
+    // Every state has its own text (a missing case would print "?").
+    for (int i = 0; i <= static_cast<int>(S::Faulted); ++i) {
+        check(std::strcmp(tfeb::dryRunStateText(static_cast<S>(i)), "?") != 0, "dryRunStateText: every state named");
+    }
+    check(static_cast<int>(S::Faulted) == 9, "dryRunState: the cpp's counter array is sized for 10 states");
+}
+
+void caseClassifyTickMailbox() {
+    using S = tfeb::DryRunState;
+    float m[16];
+    std::memcpy(m, tfeb::kResetMailbox, sizeof(m));
+    check(tfeb::classifyTickMailbox(m) == S::NotWritten, "tickMailbox: still the identity = the writer wrote nothing");
+    m[12] = 1234.5f; m[13] = -6.0f; m[14] = 7.0f;
+    check(tfeb::classifyTickMailbox(m) == S::Wrote, "tickMailbox: a real base = wrote");
+    m[13] = NAN;
+    check(tfeb::classifyTickMailbox(m) == S::WroteImplausible, "tickMailbox: NaN in it = wrote an implausible base");
+    m[13] = 0.0f; m[12] = 5e7f;
+    check(tfeb::classifyTickMailbox(m) == S::WroteImplausible, "tickMailbox: a 5e7 m translation is implausible");
+    std::memcpy(m, tfeb::kResetMailbox, sizeof(m));
+    m[3] = -0.0f;
+    check(tfeb::classifyTickMailbox(m) == S::Wrote, "tickMailbox: a -0.0 where the identity holds +0.0 has been written");
+}
+
+void caseTickComparison() {
+    const float a[3] = {1.0f, 2.0f, 3.0f};
+    const float b[3] = {1.0f, 2.0f, 3.05f};
+    check(std::fabs(tfeb::distance3(a, b) - 0.05f) < 1e-5f, "distance3: the Euclidean distance");
+    check(tfeb::tickMatchesChosen(0.099f) && !tfeb::tickMatchesChosen(0.10f) && !tfeb::tickMatchesChosen(1614.0f),
+          "tickMatchesChosen: under 0.10 m matches, 0.10 m and a 1614 m scene-old miss do not");
+    check(!tfeb::tickMatchesChosen(NAN), "tickMatchesChosen: NaN never matches");
+    const float nan3[3] = {NAN, NAN, NAN};
+    check(std::isnan(tfeb::distance3(nan3, a)), "distance3: a NaN candidate gives NaN (n/a, not 0)");
+    check(tfeb::distance3(a, a) == 0.0f, "distance3: identical points are 0");
+
+    using SC = tfeb::SceneChoice;
+    check(tfeb::tickChosenSource(1, SC::Old, false, true) == 1 && tfeb::tickChosenSource(2, SC::New, true, false) == 2,
+          "tickChosenSource: a latched base wins over the boundary choice");
+    check(tfeb::tickChosenSource(0, SC::New, true, true) == 1, "tickChosenSource: boundary scene-new = live");
+    check(tfeb::tickChosenSource(0, SC::Old, true, true) == 2, "tickChosenSource: boundary scene-old = held (22726)");
+    check(tfeb::tickChosenSource(0, SC::Unclear, true, true) == 0, "tickChosenSource: unclear = no referee");
+    check(tfeb::tickChosenSource(0, SC::New, false, true) == 0, "tickChosenSource: scene-new without a live probe = none");
+    check(tfeb::tickChosenSource(0, SC::Old, true, false) == 0, "tickChosenSource: scene-old without a held base = none");
+    // The comparison as the sim line does it: B_tick and the chosen base are
+    // both premultiplied onto the same head-only P, so equal bases give 0 and
+    // a translation apart gives that distance.
+    float bTick[16], bChosen[16];
+    std::memcpy(bTick, tfeb::kResetMailbox, sizeof(bTick));
+    std::memcpy(bChosen, tfeb::kResetMailbox, sizeof(bChosen));
+    bTick[12] = 100.0f; bTick[13] = -40.0f; bTick[14] = 7.0f;
+    bChosen[12] = 100.0f; bChosen[13] = -40.0f; bChosen[14] = 7.0f;
+    const float P[3] = {0.05f, 0.1f, -0.2f};
+    float eT[3], eC[3];
+    tfeb::patchEyeOrigin(bTick, P, eT);
+    tfeb::patchEyeOrigin(bChosen, P, eC);
+    check(tfeb::tickMatchesChosen(tfeb::distance3(eT, eC)), "tick comparison: equal bases agree");
+    bChosen[14] = 1621.0f;   // the held base 1614 m off (flight 134813's skip 22726)
+    tfeb::patchEyeOrigin(bChosen, P, eC);
+    check(!tfeb::tickMatchesChosen(tfeb::distance3(eT, eC)) && std::fabs(tfeb::distance3(eT, eC) - 1614.0f) < 0.01f,
+          "tick comparison: a base 1614 m apart is a miss of 1614 m");
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -1604,6 +1738,11 @@ int wmain(int argc, wchar_t** argv) {
     caseViewOriginMatch();
     caseLocateSceneCBView();
     caseCorrectViewColumnMajor();
+    caseHandleWordDecode();
+    caseGapConsumeAndStretch();
+    caseDryRunGate();
+    caseClassifyTickMailbox();
+    caseTickComparison();
     std::printf("transition_flash_prevent_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }

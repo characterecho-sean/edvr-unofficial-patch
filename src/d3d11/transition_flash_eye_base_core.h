@@ -760,5 +760,147 @@ inline bool projLike4x4(const float m[16]) noexcept {
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// CHANGE 18 (2026-10-09, "Build 1": the catch-up tick's instrument). The
+// review (reviews\transition-flash-engine-fix-build1-2026-10-09.md) holds
+// that a flash is the HMDCamera tick (FUN_1410730a0) not running on a frame
+// whose consume still happens: the camera's job-system handle is PENDING
+// (activated after the tick phase) and the mailbox reaches the consumer as
+// the reset identity. Build 1 measures that, and measures what the tick WOULD
+// have written (a dry run), without acting. Pure parts below.
+
+// The job-system handle word at ctrl+0x150 (Activate FUN_14109a1d0 passes
+// ctrl+0x150 to FUN_1410a9d20; the destructor tests `(low dword >> 1) & 7`):
+// bits 1-3 are the state (0 none, 1 active, 2 pending), the high 32 bits the
+// generation.
+inline constexpr uint32_t kHandleStateNone = 0;
+inline constexpr uint32_t kHandleStateActive = 1;
+inline constexpr uint32_t kHandleStatePending = 2;
+
+inline uint32_t handleState(uint64_t word) noexcept {
+    return static_cast<uint32_t>(word >> 1) & 7u;
+}
+inline uint32_t handleGeneration(uint64_t word) noexcept {
+    return static_cast<uint32_t>(word >> 32);
+}
+inline const char* handleStateText(uint32_t state) noexcept {
+    switch (state) {
+    case kHandleStateNone:    return "none";
+    case kHandleStateActive:  return "active";
+    case kHandleStatePending: return "pending";
+    }
+    return "other";
+}
+// The summary's per-state bucket: 0 none, 1 active, 2 pending, 3 anything else.
+inline uint32_t handleStateBucket(uint32_t state) noexcept { return state <= 2u ? state : 3u; }
+
+// A "gap" consume: the mode-2 consume read the reset identity AND the
+// controller tick did not run since the previous mode-2 consume. (A reset
+// mailbox with a tick in between is a tick whose writer refused -- the review's
+// candidate 2 -- a different thing.)
+inline bool isHmdGapConsume(int32_t gameMode, bool mailboxIsReset, uint32_t ticksSinceLastConsume) noexcept {
+    return gameMode == 2 && mailboxIsReset && ticksSinceLastConsume == 0;
+}
+
+// A stretch is a run of consecutive gap consumes. The log gets one line at
+// its start and one at its end, never one per consume (a supercruise stretch
+// is thousands of consumes long). Only mode-2 consumes are fed in.
+enum class GapEdge : uint8_t { None, Start, Continue, End };
+
+struct GapStretch {
+    bool active = false;
+    uint32_t startFrame = 0;
+    uint32_t length = 0;      // consumes in the stretch; final after End
+    uint32_t hstate = 0;      // the handle state read at Start
+};
+
+inline GapEdge updateGapStretch(GapStretch& s, bool gap, uint32_t frame, uint32_t hstateNow) noexcept {
+    if (gap) {
+        if (!s.active) {
+            s.active = true; s.startFrame = frame; s.length = 1; s.hstate = hstateNow;
+            return GapEdge::Start;
+        }
+        if (s.length < 0xFFFFFFFFu) ++s.length;
+        return GapEdge::Continue;
+    }
+    if (s.active) { s.active = false; return GapEdge::End; }
+    return GapEdge::None;
+}
+
+// What the dry run did (or why it did not) at a consume. NoGap: no gap
+// stretch started at this consume, so there was nothing to try.
+enum class DryRunState : uint8_t {
+    NoGap, Go, Wrote, NotWritten, WroteImplausible,
+    SkipNoCtrl, SkipHandleNone, SkipCap, SkipStoodDown, Faulted
+};
+
+inline const char* dryRunStateText(DryRunState s) noexcept {
+    switch (s) {
+    case DryRunState::NoGap:            return "no-gap";
+    case DryRunState::Go:               return "go";
+    case DryRunState::Wrote:            return "wrote";
+    case DryRunState::NotWritten:       return "not-written";
+    case DryRunState::WroteImplausible: return "implausible";
+    case DryRunState::SkipNoCtrl:       return "skip:no-ctrl";
+    case DryRunState::SkipHandleNone:   return "skip:hstate0";
+    case DryRunState::SkipCap:          return "skip:cap";
+    case DryRunState::SkipStoodDown:    return "skip:stood-down";
+    case DryRunState::Faulted:          return "FAULT";
+    }
+    return "?";
+}
+
+inline constexpr uint32_t kMaxDryRunsPerSession = 40;
+
+// The first-gap-consume gate for the dry run: a valid (not destroyed)
+// controller, a handle that is not state 0, under the session cap, and no
+// earlier fault. The order is the order the reasons are checked in, so the
+// log names the first one that failed.
+inline DryRunState dryRunGate(bool ctrlValid, uint32_t handleStateNow, uint32_t attemptedSoFar,
+                              bool stoodDown) noexcept {
+    if (stoodDown) return DryRunState::SkipStoodDown;
+    if (!ctrlValid) return DryRunState::SkipNoCtrl;
+    if (handleStateNow == kHandleStateNone) return DryRunState::SkipHandleNone;
+    if (attemptedSoFar >= kMaxDryRunsPerSession) return DryRunState::SkipCap;
+    return DryRunState::Go;
+}
+
+// What the mailbox read back after the tick means: still the reset identity =
+// the writer wrote nothing (the tick's own gates, or the writer's name gate,
+// refused); otherwise a base, usable only if it passes the same plausibility
+// gate the live-mailbox probe uses.
+inline DryRunState classifyTickMailbox(const float after[16]) noexcept {
+    if (isResetMailbox(after)) return DryRunState::NotWritten;
+    return mailboxPlausible(after) ? DryRunState::Wrote : DryRunState::WroteImplausible;
+}
+
+// The comparison threshold the flight's pass criterion uses.
+inline constexpr float kTickMatchMeters = 0.10f;
+
+inline float distance3(const float a[3], const float b[3]) noexcept {
+    const float dx = a[0] - b[0], dy = a[1] - b[1], dz = a[2] - b[2];
+    return std::sqrt(dx * dx + dy * dy + dz * dz);
+}
+// NaN (no tick candidate, or no chosen candidate) never matches and never
+// counts as a mismatch: the caller counts those separately.
+inline bool tickMatchesChosen(float distanceMeters) noexcept {
+    return !std::isnan(distanceMeters) && distanceMeters < kTickMatchMeters;
+}
+
+// Which candidate the tick is compared against: the act latch's base when the
+// event latched one (1 live, 2 held), otherwise the base the boundary-time
+// selector would pick (the same rule the latch applies), so a watched event
+// still has a referee. 0 = none.
+inline uint8_t tickChosenSource(uint8_t latchedBase, SceneChoice boundaryChoice, bool haveLive,
+                                bool haveHeld) noexcept {
+    if (latchedBase == 1 || latchedBase == 2) return latchedBase;
+    switch (choosePatchBase(boundaryChoice, haveLive, haveHeld)) {
+    case PatchBaseChoice::UseLive: return 1;
+    case PatchBaseChoice::UseHeld: return 2;
+    case PatchBaseChoice::NoPatch: break;
+    }
+    return 0;
+}
+
 }  // namespace tfeb
 }  // namespace edvr
