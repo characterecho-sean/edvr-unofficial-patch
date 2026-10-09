@@ -3,6 +3,7 @@
 #include "flat_capture_policy.h"
 #include "flat_runtime_model.h"
 #include "flat_hdr_route.h"
+#include "holo_families.h"
 #include "flat_copy_structure.h"
 #include "flat_hdr_crumbs.h"
 #include "flat_context_isolation.h"
@@ -276,6 +277,10 @@ struct State {
     FlatSourceSpell sourceSpell;
     FlatMonoSourceless sourcelessLast;
     uint64_t sourcelessLastFrame=0;
+    // What a SOURCE-FREE frame (selected, no pool draw: section 104) held on the scene's depth, and the 5 s window's tally of how many of
+    // those frames held nothing but hologram-family draws (the loading screen's hologram ghost, docs\design-flat-ui-quality-2026-10-05.md).
+    FlatMonoSourceless sourceFreeLast;
+    uint64_t sourceFreeLastFrame=0, sourceFreeSeenWindow=0, sourceFreeEmptyWindow=0, sourceFreeHoloOnlyWindow=0, sourceFreeOtherWindow=0;
     bool frameSourceFree=false;   // this frame's selection took no motion source and named the world from itself (nameSourceFree)
     uint32_t admissionLines=0;uint64_t lastAdmissionMs=0;   // the overlay admission trace's line budget (see beginActualDraw)
     const void* foregroundSelectedDepth=nullptr;
@@ -771,8 +776,41 @@ static void reportForegroundNoCandidate(State& s,const FlatForegroundMotion::Cap
 }
 // Section 104, the training mission's turned-left view: the 5 s window of the source spells and the pairs the last frame refused for no
 // source held on the scene's depth (flat_source_spell.h), annotated with what only the runtime knows of each pair.
+// A selected frame with no pool draw: the draws on its scene depth, classed. empty = nothing drew on that depth; holo-only = every draw there is a
+// hologram family's (kHoloFamiliesBuiltIn, by vertex shader); other = something else drew (a real world: ground, sky, a settlement).
+// summarizeSourceless names only the top four pairs, so the class counts draws from those plus the total: holo-only needs the four to
+// cover every distinct pair.
+static void noteSourceFreeContent(State& s, const FlatMonoFrame& sel) {
+    if(!sel.selected() || !sel.sourceFree) return;
+    if(s.sourceFreeLastFrame==s.prefix.frame) return;   // the copy and HDR selections of one frame count once
+    s.sourceFreeLast=sel.sourceless; s.sourceFreeLastFrame=s.prefix.frame; ++s.sourceFreeSeenWindow;
+    const auto& n=sel.sourceless;
+    if(!n.draws) { ++s.sourceFreeEmptyWindow; return; }
+    uint32_t holoDraws=0;
+    for(uint32_t i=0;i<n.topCount;++i)
+        for(uint64_t h:kHoloFamiliesBuiltIn) if(h==n.top[i].vs) { holoDraws+=n.top[i].draws; break; }
+    if(n.distinctPairs<=n.topCount && holoDraws==n.draws) ++s.sourceFreeHoloOnlyWindow; else ++s.sourceFreeOtherWindow;
+}
 static void reportSourceSpell(State& s) {
     const FlatSourceSpellWindow w=s.sourceSpell.take();
+    if(s.sourceFreeSeenWindow) {
+        // The source-free frames' content, one line: the counts, the last frame's tally, and its top pairs (flat_source_spell.h's formatter).
+        char pairs[1200]; size_t at=0; pairs[0]=0;
+        for(uint32_t i=0;i<s.sourceFreeLast.topCount && i<4;++i) {
+            const auto& p=s.sourceFreeLast.top[i];
+            const int k=std::snprintf(pairs+at,sizeof(pairs)-at,"%s[VS=%016llX PS=%016llX draws=%u same-camera=%u pool-kind=%u]",i?" ":"",
+                (unsigned long long)p.vs,(unsigned long long)p.ps,p.draws,p.sameCamera?1u:0u,p.pool?1u:0u);
+            if(k<0 || at+size_t(k)>=sizeof(pairs)) break;
+            at+=size_t(k);
+        }
+        if(!at) std::snprintf(pairs,sizeof(pairs),"none");
+        Log::get().note("flat source-free content 5s: frames=%llu empty-scene-depth=%llu hologram-only=%llu other-draws=%llu; last frame=%llu: "
+            "records-on-scene-depth=%u draws=%u same-camera-draws=%u distinct-pairs=%u; top: %s",
+            (unsigned long long)s.sourceFreeSeenWindow,(unsigned long long)s.sourceFreeEmptyWindow,(unsigned long long)s.sourceFreeHoloOnlyWindow,
+            (unsigned long long)s.sourceFreeOtherWindow,(unsigned long long)s.sourceFreeLastFrame,
+            s.sourceFreeLast.records,s.sourceFreeLast.draws,s.sourceFreeLast.sameCameraDraws,s.sourceFreeLast.distinctPairs,pairs);
+        s.sourceFreeSeenWindow=s.sourceFreeEmptyWindow=s.sourceFreeHoloOnlyWindow=s.sourceFreeOtherWindow=0;
+    }
     FlatSourcelessPairNote notes[4]{};
     for(uint32_t i=0;i<s.sourcelessLast.topCount && i<4;++i) {
         notes[i].familyVs=engineVelocityPoolFamilyVs(s.sourcelessLast.top[i].vs);
@@ -2989,6 +3027,7 @@ static void hdrSelectAtTrigger(State& s) {
         witnessSample?hdrAmbiguousSourceReport:nullptr,witnessSample?&s:nullptr,
         qualifiedUntrustedSource,&s);
     s.untrustedSupportedAlternate=sel.selected() && sel.mixedCamera;
+    noteSourceFreeContent(s, sel);
     // The camera H selected is the world's: the reference for the frames after, whatever naming left (State::namingVetoedThisFrame).
     if(sel.selected()) {
         const auto reference=flatDomainWorldReference(sel.camera);
@@ -4987,6 +5026,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         if (seen >= s.frameSeen) { s.frameSeen = seen; s.frameReason = selected.reason; }
         // What the view held when it had no motion source (section 104); the line names it.
         if (selected.reason == FlatMonoReason::NoSupportedSource) { s.sourcelessLast = selected.sourceless; s.sourcelessLastFrame = s.prefix.frame; }
+        noteSourceFreeContent(s, selected);
     }
     // The HDR route's selection at its trigger (and, with the key auto, its verdict into the stand-down): a Probe frame
     // runs it too, so a probe that finds the route's consumer ends the stand-down, as a probe that selects a copy does.
