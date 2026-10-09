@@ -109,6 +109,9 @@ struct EyeFeature {
     // The flat HDR route's input is HDR with automatic exposure (section 81). The flags are creation-time, so
     // the feature key carries the bit: a route flip remakes the feature and its history starts again.
     bool              hdr = false;
+    // Temporary A/B (advanced.flat_dlss_exposure = fixed): created without AutoExposure, evaluated with the 1x1 exposure
+    // texture of 1.0. Part of the key on the HDR route only; the LDR copy route never reads it.
+    bool              exposureFixed = false;
 };
 
 // The flag set is hdr_backend_flags.h's, pure so a rig can pin it; every constant is checked against the SDK's own
@@ -141,6 +144,12 @@ static_assert(flatDlssCreateFlags(false) == static_cast<uint32_t>(NVSDK_NGX_DLSS
 unsigned g_preset = 11;        // the full frame's and the periphery's, every mode
 unsigned g_presetFovea = 12;   // the fovea crop's, when it upscales
 uint64_t g_presetGen = 1;
+// advanced.flat_dlss_exposure (temporary A/B, the 2026-10-09 DLAA dimming entry): false = auto (the shipped flags),
+// true = fixed. Set at the flat frame boundary by dlaaSetHdrExposureFixed; a change remakes the HDR route's feature.
+bool g_hdrExposureFixed = false;
+// The fixed mode's exposure input: NVIDIA's "1x1 texture containing the final exposure scale", R32_FLOAT 1.0, made on
+// the first fixed evaluation. H is the pre-tonemap radiance the game's own tone pass exposes later, so the scale is 1.
+ID3D11Texture2D* g_exposureOne = nullptr;
 
 const char* presetName(unsigned p) {
     switch (p) {
@@ -363,7 +372,7 @@ bool ensureFeature(ID3D11DeviceContext* ctx, int eye, uint32_t w, uint32_t h,
     }
     EyeFeature& f = g_feature[eye];
     if (!f.handle || f.w != w || f.h != h || f.outW != outW || f.outH != outH ||
-        f.presetGen != g_presetGen || f.hdr != hdr) {
+        f.presetGen != g_presetGen || f.hdr != hdr || (hdr && f.exposureFixed != g_hdrExposureFixed)) {
         if (f.handle) {
             NVSDK_NGX_D3D11_ReleaseFeature(f.handle);
             f.handle = nullptr;
@@ -464,7 +473,7 @@ bool ensureFeature(ID3D11DeviceContext* ctx, int eye, uint32_t w, uint32_t h,
         // LDR colour (HDR with automatic exposure on the flat HDR route: hdr_backend_flags.h);
         // motion vectors at the render size, unjittered (the pass computes them on the unjittered
         // grid); reversed-Z depth.
-        cp.InFeatureCreateFlags = static_cast<int>(flatDlssCreateFlags(hdr));
+        cp.InFeatureCreateFlags = static_cast<int>(flatDlssCreateFlags(hdr, !(hdr && g_hdrExposureFixed)));
         cp.InEnableOutputSubrects = false;
         applyPresetHints();
         // An event with a duration for the monitor's drop attribution: the
@@ -498,10 +507,14 @@ bool ensureFeature(ID3D11DeviceContext* ctx, int eye, uint32_t w, uint32_t h,
         f.outH = outH;
         f.presetGen = g_presetGen;
         f.hdr = hdr;
+        f.exposureFixed = hdr && g_hdrExposureFixed;
         if (hdr)
-            Log::get().note("dlss: the feature for %s was created for the flat HDR route: HDR input and "
-                            "automatic exposure (IsHDR | AutoExposure with MVLowRes | DepthInverted); the "
-                            "history starts here.", upscalerSlotLabel(eye));
+            Log::get().note("dlss: the feature for %s was created for the flat HDR route: HDR input and %s; the "
+                            "history starts here. advanced.flat_dlss_exposure=%s", upscalerSlotLabel(eye),
+                            f.exposureFixed ? "a fixed exposure of 1.0 (IsHDR with MVLowRes | DepthInverted, no AutoExposure; "
+                                              "a 1x1 exposure texture of 1.0 at evaluation)"
+                                            : "automatic exposure (IsHDR | AutoExposure with MVLowRes | DepthInverted)",
+                            f.exposureFixed ? "fixed" : "auto");
         // Build point 5, 2026-09-23: a create success resets the shared
         // reason, so a caller that reads it later (dlaaAvailable's *reason,
         // which just echoes g_reason once NGX has initialised) is not shown
@@ -746,6 +759,25 @@ bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
     ep.InMVScaleY = 1.0f;
     ep.InPreExposure = 1.0f;
     ep.InExposureScale = 1.0f;
+    if (hdr && f.exposureFixed) {
+        if (!g_exposureOne) {
+            ID3D11Device* exposureDev = nullptr;
+            ctx->GetDevice(&exposureDev);
+            if (exposureDev) {
+                D3D11_TEXTURE2D_DESC td{};
+                td.Width = td.Height = 1; td.MipLevels = td.ArraySize = 1; td.Format = DXGI_FORMAT_R32_FLOAT;
+                td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_IMMUTABLE; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+                const float one = 1.0f;
+                D3D11_SUBRESOURCE_DATA init{&one, sizeof(one), 0};
+                const HRESULT hrExposure = exposureDev->CreateTexture2D(&td, &init, &g_exposureOne);
+                Log::get().note("dlss: the fixed exposure texture (1x1 R32_FLOAT = 1.0) %s (hr=0x%08X)",
+                                SUCCEEDED(hrExposure) ? "was made" : "was REFUSED; the evaluation runs without it",
+                                static_cast<unsigned>(hrExposure));
+                exposureDev->Release();
+            }
+        }
+        ep.pInExposureTexture = g_exposureOne;
+    }
     // The frame delta the SDK asks for ("helps in determining the amount
     // to denoise or anti-alias based on the speed of the object"); zero
     // when unknown, which the runtime treats as unstated.
@@ -994,6 +1026,14 @@ bool dlaaEvaluatePeriphery(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* c
 #endif
 }
 
+void dlaaSetHdrExposureFixed(bool fixed) {
+#ifdef EDVR_HAVE_NGX
+    g_hdrExposureFixed = fixed;   // ensureFeature compares it on the HDR route: the next evaluation remakes the feature
+#else
+    (void)fixed;
+#endif
+}
+
 void dlaaSetPreset(unsigned preset, unsigned foveaPreset) {
 #ifdef EDVR_HAVE_NGX
     if (preset != g_preset || foveaPreset != g_presetFovea) {
@@ -1036,6 +1076,7 @@ bool dlaaPeripheryTotals(int eye, uint32_t* evaluations, double* avgMs, double* 
 void dlaaShutdown() {
 #ifdef EDVR_HAVE_NGX
     releaseFeatures();
+    if (g_exposureOne) { g_exposureOne->Release(); g_exposureOne = nullptr; }
     for (QuerySlot& q : g_qring) releaseQuerySlot(q);
     if (g_params) {
         NVSDK_NGX_D3D11_DestroyParameters(g_params);

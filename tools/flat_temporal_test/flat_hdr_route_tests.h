@@ -8,6 +8,7 @@
 #include "../../src/d3d11/flat_camera_phase.h"
 #include "../../src/d3d11/flat_trace.h"
 #include "../../src/d3d11/hdr_backend_flags.h"
+#include "../../src/d3d11/flat_hdr_luma.h"
 #include "../../src/d3d11/flat_standdown.h"
 #include "flat_standdown_tests.h"
 #include <cstdio>
@@ -364,6 +365,30 @@ inline int flatHdrRouteTests() {
     expect(flatDlssCreateFlags(true) == (1u << 0 | 1u << 1 | 1u << 3 | 1u << 6) && flatDlssCreateFlags(true) == 0x4Bu &&
            (flatDlssCreateFlags(true) & kDlssFlagMvJittered) == 0,
            "DLSS HDR adds IsHDR and AutoExposure, keeps MVLowRes and DepthInverted, and never sets MVJittered");
+    expect(flatDlssCreateFlags(true, false) == 0x0Bu && flatDlssCreateFlags(false, false) == 0x0Au &&
+           flatDlssCreateFlags(true, true) == flatDlssCreateFlags(true),
+           "the temporary fixed-exposure A/B drops only AutoExposure on the HDR route and leaves the LDR set alone");
+    {
+        // The luminance census's decode (flat_hdr_luma.h, temporary): the layout the shader writes, read back.
+        std::vector<uint32_t> words(kFlatHdrLumaWords, 0u);
+        words[32] = 990; words[40] = 9; words[50] = 1;   // 1000 pixels: 990 at bin 32 (luma ~1.4), 9 at bin 40, 1 at bin 50
+        const float half = 500.0f, rest = 500.0f, mx = 1234.5f;
+        std::memcpy(&words[kFlatHdrLumaSums + 0], &half, 4); std::memcpy(&words[kFlatHdrLumaSums + 1023], &rest, 4);
+        std::memcpy(&words[kFlatHdrLumaMax], &mx, 4);
+        words[kFlatHdrLumaStarsA] = 7; words[kFlatHdrLumaStarsB] = 8; words[kFlatHdrLumaPeaks] = 9; words[kFlatHdrLumaBad] = 0;
+        const FlatHdrLumaSample d = flatHdrLumaDecode(words.data(), 40, 25);
+        expect(d.mean > 0.999 && d.mean < 1.001 && d.max > 1234.4 && d.max < 1234.6 &&
+               d.starsA == 7 && d.starsB == 8 && d.peaks == 9,
+               "the luma census decodes the mean from the group sums, the max from its bits, and the three star counts");
+        expect(d.p99 == flatHdrLumaBinUpper(32) && d.p999 == flatHdrLumaBinUpper(40) &&
+               flatHdrLumaPercentile(words.data(), 1.0) == flatHdrLumaBinUpper(50),
+               "the luma census's percentiles are the upper edges of the bins that hold them");
+        expect(flatHdrLumaBinUpper(31) == 1.0 && kFlatHdrLumaWords == 72u + 1024u,
+               "the luma histogram's bins are half stops ending at 1.0 on bin 31, and the layout is 72 header words and 1024 sums");
+        words[kFlatHdrLumaBad] = 500;
+        const FlatHdrLumaSample bad = flatHdrLumaDecode(words.data(), 40, 25);
+        expect(bad.mean > 1.999 && bad.mean < 2.001, "skipped non-finite pixels leave the mean's denominator");
+    }
     expect(flatFsrCreateFlags(false, false, false) == (1u << 3) &&
            flatFsrCreateFlags(true, false, false) == (1u << 3 | 1u << 4) &&
            flatFsrCreateFlags(true, true, false) == (1u << 3 | 1u << 4 | 1u << 8) &&
@@ -1555,8 +1580,8 @@ inline int flatHdrRouteTests() {
             return n;
         };
         const std::string dlaa = slurpSource("src/d3d11/dlaa.cpp");
-        expect(!dlaa.empty() && count(dlaa, "cp.InFeatureCreateFlags = static_cast<int>(flatDlssCreateFlags(hdr));") == 1 &&
-                   count(dlaa, "flatDlssCreateFlags(hdr)") == 1,
+        expect(!dlaa.empty() && count(dlaa, "cp.InFeatureCreateFlags = static_cast<int>(flatDlssCreateFlags(hdr, !(hdr && g_hdrExposureFixed)));") == 1 &&
+                   count(dlaa, "flatDlssCreateFlags(hdr") == 1,
                "dlaa.cpp creates the DLSS feature with exactly the flags hdr_backend_flags.h names for the route, in one place");
         expect(count(dlaa, "f.presetGen != g_presetGen || f.hdr != hdr") == 1 && count(dlaa, "f.hdr = hdr;") == 1,
                "dlaa.cpp keys the feature on the route's bit and stores it when the feature is made, so a flip remakes it");

@@ -21,8 +21,11 @@ constexpr uint32_t kDlssFlagAutoExposure = 1u << 6;
 // DLSS: motion vectors at the render size and unjittered (the prep pass computes them on the unjittered grid),
 // reversed-Z depth. The HDR route adds IsHDR and AutoExposure (Sean's decision (b): take the game's own exposure
 // later, only if highlights look wrong). MVJittered stays off in both: the vectors exclude the raster phase.
-inline constexpr uint32_t flatDlssCreateFlags(bool hdr) {
-    return kDlssFlagMvLowRes | kDlssFlagDepthInverted | (hdr ? (kDlssFlagIsHdr | kDlssFlagAutoExposure) : 0u);
+// autoExposure false is the temporary A/B advanced.flat_dlss_exposure = fixed (docs/design-flat-temporal-aa-2026-09-23.md,
+// the 2026-10-09 DLAA dimming entry): IsHDR without AutoExposure, with a 1x1 exposure texture of 1.0 at evaluation.
+inline constexpr uint32_t flatDlssCreateFlags(bool hdr, bool autoExposure = true) {
+    return kDlssFlagMvLowRes | kDlssFlagDepthInverted |
+           (hdr ? (kDlssFlagIsHdr | (autoExposure ? kDlssFlagAutoExposure : 0u)) : 0u);
 }
 
 // FfxFsr3UpscalerInitializationFlagBits (FidelityFX-SDK-DX11 fork, ffx_fsr3upscaler.h).

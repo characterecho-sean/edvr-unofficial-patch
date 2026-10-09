@@ -21,9 +21,10 @@
   Mixed cameras must not downgrade DLAA/FSR to TAA. Share math/backends where
   cheap; separate scheduling/capture when it saves copies/sync/per-draw work.
   Defer broad core extraction until flat capture establishes the boundary.
-- **Recommendation:** two installer artifacts, one graphics implementation, one
-  temporal pipeline, separate VR and mono frame adapters. Flat installs enable
-  only temporal AA and its required support services.
+- **Recommendation:** two installers, one graphics implementation, one temporal
+  pipeline, separate VR/mono adapters; flat enables only temporal AA + support.
+- **106 (10-09, NOT FLOWN), TEMPORARY until it closes:** `advanced.flat_dlss_exposure`
+  (auto|fixed) and the `flat hdr luma:` probe (flat_hdr_luma.cpp). A-D open.
 - **Open:** station/on-foot projection coverage and mixed-camera HDR ownership,
   corona-smear regression and mod effect ordering. Scene/depth identity, camera
   encoding and handoff have flight evidence; correct motion for every rendered
@@ -41,8 +42,7 @@
   87's native FSR comparison, 83's open items and high-G motion; do not repeat
   qualified PS91/BFE or stale-resize hypotheses.
   Menu hangar-floor P1 open; VR tests, `d9f86b09`: main/openxr-perf-gaps.
-- **Test target (Sean):** all in-game tests on the Epic install under
-  `C:\Program Files\Epic Games\EliteDangerous\Products`; keep its INI.
+- **Test target (Sean):** in-game tests on the Epic install; keep its INI.
 - **Field reports (79-83):** users 1-2 refused every frame, 3 at 7-13 fps, 4
   lost ~23 ms (ReShade). 80-81 flown. 82: (f') CONFIRMED; fix FLOWN, DEFAULT ON.
   10-01 BUILT, NOT FLOWN: the vscreen auto-fit (3504 on Sean's rig: m 0.70 on
@@ -14483,3 +14483,38 @@ order before attributing the refusal or changing rendering code. Pixel
 captures expired with zero copies; their absence does not measure motion.
 Newer weapon/history fixes are not yet a demonstrated cure for this report.
 No source, settings, build or installation changed in this investigation.
+
+## 106. Flat DLAA dims the HDR route and loses stars (2026-10-09)
+
+Report (Sean): DLAA at SS 1.0 (the HDR route, H resolved before the tone)
+dims the whole picture and loses stars against EDVR's TAA; DLSS at SS 0.5
+(the copy route) keeps the stars. Code facts: the HDR route creates NVIDIA's
+feature with IsHDR | AutoExposure (hdr_backend_flags.h) and evaluates with
+InPreExposure = InExposureScale = 1 and no exposure texture; section 81's
+AutoExposure risk was left to a flight and the exposure was never logged.
+
+Hypotheses: A, AutoExposure with no exposure input rescales the output; B,
+DLSS removes sub-pixel points whatever the route or ratio; C, preset K's HDR
+handling; D, motion/jitter rejection on the HDR route at R = D.
+
+Flight build (BUILT, NOT FLOWN), both TEMPORARY:
+- `flat hdr luma:` every 5 s, from a 1 Hz compute pass over H before the
+  resolve (what the backend is handed) and after it (finishHdr's write-back),
+  read back through two staging slots without a stall. In/out mean and ratio,
+  p99/p99.9 (half-stop histogram edges), max, and three local-maximum counts:
+  `stars` above 4x the last input mean, `stars-scaled-out` above that times
+  the last out/in ratio (survives a uniform dimming), `peaks` above twice
+  their neighbours' mean (scale-free). Runs for TAA, DLSS, DLAA and FSR alike.
+- `advanced.flat_dlss_exposure = auto | fixed` (edvr-flat.ini [advanced]),
+  live: fixed creates the HDR route's feature without AutoExposure and hands
+  NVIDIA a 1x1 R32_FLOAT exposure texture of 1.0 (the SDK's "final exposure
+  scale"; H is pre-tonemap radiance the game exposes later). The key is part
+  of the feature key; a change remakes the feature and logs it.
+
+Predictions in the `flat hdr luma:` lines: A, DLAA auto ratio well below 1
+and stars below stars-in while stars-scaled-out and peaks hold, and fixed
+brings the ratio to about 1; B, peaks-out well below peaks-in on both
+routes and both exposures, ratio near 1; C, the deficit changes with K/J;
+D, peaks-out falls under motion and recovers on a static view, and TAA on
+the same route shows no deficit.
+
