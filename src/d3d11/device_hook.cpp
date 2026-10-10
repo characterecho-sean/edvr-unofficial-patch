@@ -1281,6 +1281,8 @@ void tickHotkeys() {
     if (g_state->censusKey.pressed()) {
         if (runtimeFlatProfile()) {
             flatTemporalArm((GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0);
+            // The flat profile's draw census, both tiers: every draw, offscreen included, for two frames (draw_census.h).
+            drawCensusFlatRequest();
         } else {
             drawCensusRequest();
             // Same key: the census says WHAT was drawn, the quad probe says

@@ -55,6 +55,15 @@ inline bool drawCensusArmed() {
 // capture.
 void drawCensusRequest();
 
+// The flat profile's NumLock request (device_hook.cpp), with the census's own parameters fixed in code: it records EVERY draw, offscreen
+// included, for kFlatCensusFrames whole frames up to kFlatCensusLines lines. Neither advanced.census_frames nor advanced.census_lines
+// nor advanced.census_offscreen is read for it, because the flat profile refuses those keys and no key is added for it. The eye gate is
+// not needed: a draw outside the eye textures takes the offscreen record, and an eye draw takes the eye record. A press while armed is
+// refused with a note, as drawCensusRequest does. VR never calls this, and drawCensusRequest's behaviour is unchanged.
+constexpr uint32_t kFlatCensusFrames = 2;
+constexpr uint32_t kFlatCensusLines = 16384;
+void drawCensusFlatRequest();
+
 // The automatic arm, for builds too brief to catch by hand (2026-08-25, the
 // FSS ring split). The FSS body "tiles in" over the first frames after a
 // zoom, and those frames are the only ones the bug exists in: a keypress

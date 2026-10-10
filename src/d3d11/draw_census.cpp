@@ -133,6 +133,10 @@ bool     g_forceOffscreen = false; // the auto arm's rider: this census records
                                  // because it exists to watch an offscreen build
 uint32_t g_framesWanted = kCensusFrames;  // this census's length, from config
 uint32_t g_maxLines = kMaxLines; // this census's line cap, from config
+// The flat NumLock request (drawCensusFlatRequest): when set, the next census takes its length and cap from these, not from config.
+bool     g_flatRequest = false;
+uint32_t g_flatFrames = 0;
+uint32_t g_flatLines = 0;
 uint32_t g_offThisFrame = 0;     // offscreen draws this frame, for the line index
 uint32_t g_offDraws = 0;         // offscreen draws this census, for the end line
 uint32_t g_copiesThisFrame = 0;  // copies this frame, for the line index
@@ -734,6 +738,22 @@ void drawCensusRequest() {
     Log::get().note("DC: census armed -- the next whole frames of eye-texture "
                     "draws will be logged. Diff two of these with "
                     "tools/diff_draw_census.py.");
+}
+
+void drawCensusFlatRequest() {
+    if (drawCensusArmed()) {
+        Log::get().note("flat draw census: the NumLock press came while a census is already running; ignored. One at a time.");
+        return;
+    }
+    detail::g_drawCensusPending = true;
+    g_flatRequest = true;
+    g_flatFrames = kFlatCensusFrames;
+    g_flatLines = kFlatCensusLines;
+    // The offscreen rider: the same switch the auto arm uses, so the census records the non-eye draws whatever the ini says.
+    g_forceOffscreen = true;
+    drawGateArm();
+    Log::get().note("flat draw census: armed by NumLock; census #%u records every draw, offscreen included, for %u frames (cap %u lines)",
+                    g_censusNo + 1, kFlatCensusFrames, kFlatCensusLines);
 }
 
 void drawCensusAutoRequest() {
@@ -1614,12 +1634,19 @@ void drawCensusFrameBoundary(uint32_t frameNo) {
         // Latched here, not read per draw: a census must record one
         // configuration throughout, and the draw path is the last place that
         // should touch a settings map.
-        g_framesWanted = static_cast<uint32_t>(Config::get().getIntInRange(
-            "advanced.census_frames", static_cast<int>(kCensusFrames), 1,
-            static_cast<int>(kCensusFramesMax)));
-        g_maxLines = static_cast<uint32_t>(Config::get().getIntInRange(
-            "advanced.census_lines", static_cast<int>(kMaxLines), 256,
-            static_cast<int>(kMaxLinesCeiling)));
+        if (g_flatRequest) {
+            // The flat NumLock census: its length and cap were fixed by drawCensusFlatRequest, and the flat profile refuses these keys.
+            g_flatRequest = false;
+            g_framesWanted = g_flatFrames;
+            g_maxLines = g_flatLines;
+        } else {
+            g_framesWanted = static_cast<uint32_t>(Config::get().getIntInRange(
+                "advanced.census_frames", static_cast<int>(kCensusFrames), 1,
+                static_cast<int>(kCensusFramesMax)));
+            g_maxLines = static_cast<uint32_t>(Config::get().getIntInRange(
+                "advanced.census_lines", static_cast<int>(kMaxLines), 256,
+                static_cast<int>(kMaxLinesCeiling)));
+        }
         detail::g_drawCensusFramesLeft = g_framesWanted;
         g_frameOrdinal = 0;
         g_draws = 0;
