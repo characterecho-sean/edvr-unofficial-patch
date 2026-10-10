@@ -45,6 +45,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "ui_surfaces.h"   // the glyph atlas and sizing chain instruments
 #include "ui_panel_scale.h" // uiPanelScaleShutdown: the panel operands put back
 #include "ui_sizing_math.h" // uiDisplaySizeFromXml: DisplaySettings.xml, for the panel budget
+#include "vr_ssaa_gate.h"   // the step-1 Supersampling gate instruments (log only)
 #include "orbital_width.h" // orbitalWidthRememberVs: the orbit lines' shader, captured at its creation
 #include "xinput_watch.h"
 #include "joy_watch.h"
@@ -1687,6 +1688,7 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
     if (self != g_state->swapChain) {
         return g_state->realPresent(self, syncInterval, flags);
     }
+    vrSsaaGateNotePresent();  // log only: the first Present's place in the order of the Supersampling lines
     // The frame-tick chain starts here (frame_ticks.h): what follows, to this
     // hook's return, is EDVR's or the driver's; what came before it is the game's.
     g_frameTicks.enter(hookEnter);
@@ -2265,6 +2267,10 @@ bool eliteHmdMultiplier(float* mult, float* ssaa, char* fileOut, size_t fileLen)
     return gotMult;
 }
 
+bool deviceHookFxcfgMultipliers(float* mult, float* ssaa, char* fileOut, size_t fileLen) {
+    return eliteHmdMultiplier(mult, ssaa, fileOut, fileLen);
+}
+
 // The reduction type lives in bits 7-8 of a D3D11_FILTER: 0 standard,
 // 1 comparison, 2 minimum, 3 maximum. Only a standard filter is ours to
 // touch, and only a linear or anisotropic one -- promoting a point
@@ -2584,6 +2590,7 @@ void hookDevice(ID3D11Device* device) {
     EDVR_HOOK_DEV_CREATE(kDevCreateRtv, true);
     EDVR_HOOK_DEV_CREATE(kDevCreateDsv, true);
 #undef EDVR_HOOK_DEV_CREATE
+    vrSsaaGateStartup();  // log only: the 3D mode file, the .fxcfg's Supersampling and HMD Quality, once per process
     {
         const int aniso = sentinelCfg.getIntInRange("advanced.texture_anisotropy", 0, 0, 16);
         const bool temporal = temporalModeEnabled(sentinelCfg.getString("fix.temporal_aa", "off"));

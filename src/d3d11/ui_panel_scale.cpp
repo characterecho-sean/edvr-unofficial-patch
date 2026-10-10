@@ -7,6 +7,7 @@
 #include "ui_sizing_math.h"
 #include "ui_surfaces.h"      // native temporal's lock-free accessors, uiSurfacesHmdQuality/Supersampling/DisplayWidth
 #include "vscreen_res.h"      // vscreenModeAppliedWidth: one of the widths the panel budget starts from
+#include "vr_ssaa_gate.h"     // the step-1 instruments: log only
 
 #include "../common/log.h"
 #include "../common/native_render_settings.h"  // edvrQueryNativeRenderSizing: W_out
@@ -382,6 +383,8 @@ void setterBeforeImpl(void* self, float x) {
     if (!readGame(reinterpret_cast<const uint8_t*>(self) + kUiSsCtxFromThis, &ctx, sizeof(ctx)) || !ctx) return;
     noteCtx(ctx);
     g_setterCalls.fetch_add(1, std::memory_order_relaxed);
+    float beforeCur = 0.0f;
+    vrSsaaGateNoteSetterBefore(readFloatAt(ctx + kUiSsOffCur, &beforeCur) ? beforeCur : NAN);  // log only
     if (g_patch.load(std::memory_order_acquire) != kApplied || !g_live.load(std::memory_order_acquire) ||
         !(g_target.load(std::memory_order_acquire) > 0.0f))
         return;
@@ -394,13 +397,14 @@ void setterBeforeImpl(void* self, float x) {
 }
 
 // After it: what the game really stored (the same unless the model of its clamp is off), and the factor for it.
-void setterAfterImpl(void* self) {
+void setterAfterImpl(void* self, float passed) {
     uintptr_t ctx = 0;
     float cur = 0.0f, lo = 0.0f, hi = 0.0f;
-    if (!readGame(reinterpret_cast<const uint8_t*>(self) + kUiSsCtxFromThis, &ctx, sizeof(ctx)) || !ctx ||
-        !readFloatAt(ctx + kUiSsOffCur, &cur) || !readFloatAt(ctx + kUiSsOffMin, &lo) ||
-        !readFloatAt(ctx + kUiSsOffMax, &hi) || !uiLiveSupersamplingValid(cur, lo, hi, nullptr))
-        return;
+    if (!readGame(reinterpret_cast<const uint8_t*>(self) + kUiSsCtxFromThis, &ctx, sizeof(ctx)) || !ctx) return;
+    const bool readOk = readFloatAt(ctx + kUiSsOffCur, &cur) && readFloatAt(ctx + kUiSsOffMin, &lo) &&
+                        readFloatAt(ctx + kUiSsOffMax, &hi);
+    vrSsaaGateNoteSetterAfter(passed, readOk ? cur : NAN, readOk ? lo : 0.0f, readOk ? hi : 0.0f);  // log only
+    if (!readOk || !uiLiveSupersamplingValid(cur, lo, hi, nullptr)) return;
     if (g_patch.load(std::memory_order_acquire) == kApplied && g_live.load(std::memory_order_acquire) &&
         g_target.load(std::memory_order_acquire) > 0.0f)
         moveFactorTo(cur);
@@ -410,6 +414,8 @@ void getterNoteImpl(void* self) {
     uintptr_t ctx = 0;
     if (readGame(reinterpret_cast<const uint8_t*>(self) + kUiSsCtxFromThis, &ctx, sizeof(ctx))) noteCtx(ctx);
     g_getterSeen.store(true, std::memory_order_relaxed);
+    float cur = 0.0f;  // log only: the first getter read's value (the getter returns ctx+0x3564)
+    if (ctx && vrSsaaGateGetterPending() && readFloatAt(ctx + kUiSsOffCur, &cur)) vrSsaaGateNoteGetter(cur);
 }
 
 // SEH around each (no destructors in any of them; a fault in the game's memory must not become the game's crash).
@@ -426,7 +432,7 @@ std::atomic<SetterFn> g_origSetter{nullptr};
 std::atomic<GetterFn> g_origGetter{nullptr};
 
 void setterBeforeThunk(void* self, float x) { setterBeforeImpl(self, x); }
-void setterAfterThunk(void* self, float) { setterAfterImpl(self); }
+void setterAfterThunk(void* self, float x) { setterAfterImpl(self, x); }
 void getterNoteThunk(void* self, float) { getterNoteImpl(self); }
 
 void __fastcall hookedSetter(void* self, float x) {

@@ -120,6 +120,10 @@ bool deviceHookHmdQuality(float* multiplier);
 // while unknown; the return is true when HMD Quality was read.
 bool deviceHookPanelSettings(float* hmd, float* ssaa, uint32_t* displayW, uint32_t* displayH);
 
+// The newest Options\Graphics\*.fxcfg's HMDRenderTargetMultiplier (*mult) and SSAAMultiplier (*ssaa), each 0 when absent,
+// and its file name (fileOut). The one reader eliteHmdMultiplier, for vr_ssaa_gate's startup line only. Not per frame.
+bool deviceHookFxcfgMultipliers(float* mult, float* ssaa, char* fileOut, size_t fileLen);
+
 // The FSS mode latch: true while the player is (believed to be) in the Full
 // System Scanner -- keyed by their own FSS bindings for frame-exact edges,
 // reconciled against the game's GuiFocus. Read by the panel rect's chrome
