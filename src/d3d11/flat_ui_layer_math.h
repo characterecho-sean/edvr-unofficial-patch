@@ -76,6 +76,42 @@ inline uint32_t flatUiMapToneSlotOf(uint64_t vs, uint64_t ps) {
     return vs == kFlatUiMapToneVs && ps == kFlatUiMapTonePs ? 0u : ~0u;  // the scene is SRV slot 0
 }
 
+// TEMPORAL AA OFF ON THE GALAXY MAP AND THE ORRERY (maintainer's decision, 2026-10-10). Their scenes have no non-zero depth, so
+// no motion exists for the temporal history, and the grid and line draws (census: depth off, additive or multiply, drawn
+// before the map composites) smear through accumulation. While GuiFocus is 6 or 8 the frame runs no temporal resolve and no
+// jitter (the copy route's spatial recovery stands in, flat_runtime.cpp); the UI layer keeps the map's text and markers. The
+// System Map (7) is not in it. GuiFocus unknown is not in it either.
+inline bool flatUiMapTemporalOff(bool known, uint32_t focus) { return known && (focus == 6 || focus == 8); }
+inline const char* flatUiMapTemporalName(uint32_t focus) { return focus == 8 ? "the Orrery" : "the Galaxy Map"; }
+
+// The map line's temporal-AA counts (2026-10-10), as pure state so the rig pins them. A frame is `temporalOff` when the
+// mechanism is armed at the frame boundary; `jitterZeroed` when that frame would otherwise have jittered. A frame whose copy
+// ran the spatial recovery counts `spatial`, one whose copy refused it counts `spatialRefused`, and one that armed the
+// mechanism but never reached its copy counts `noCopy` (counted at the NEXT frame's boundary, so a frame the mechanism did
+// not reach is visible, not silent). `resets` counts each exit from the mechanism (history restarts once there).
+struct FlatUiMapAaTally {
+    bool engaged = false, pending = false;
+    uint64_t temporalOff = 0, jitterZeroed = 0, spatial = 0, spatialRefused = 0, noCopy = 0, resets = 0;
+    void frame(bool on, bool jitterWanted) {
+        if (pending) ++noCopy;
+        pending = on;
+        if (on) {
+            ++temporalOff;
+            if (jitterWanted) ++jitterZeroed;
+        } else if (engaged) {
+            ++resets;
+        }
+        engaged = on;
+    }
+    void copy(bool ok) {
+        if (!pending) return;
+        pending = false;
+        if (ok) ++spatial;
+        else ++spatialRefused;
+    }
+    void clearCounts() { temporalOff = jitterZeroed = spatial = spatialRefused = noCopy = resets = 0; }
+};
+
 // The families the flat layer asks the shared decision for: the cockpit HUD families the 2026-10-09 09:36 census found
 // drawn into the scene's HDR target before the resolve, jittered (the holo panels, the flight HUD, the target sprite),
 // and since 2026-10-10 the System Map's two (the map canvas and the map sprites, flatUiMapFamilyOf: asked only while a map

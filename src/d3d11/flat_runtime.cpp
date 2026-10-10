@@ -613,6 +613,8 @@ struct MapPlaneWatch {
     bool frameKnown = false;    // this frame's read: the watcher reported a GuiFocus
     uint32_t frameFocus = 0;    // ...and its value, while known
     uint32_t noted = 0;         // transition lines written
+    bool temporalOff = false;   // temporal AA is off this frame (GuiFocus 6 or 8: flat_ui_layer_math.h flatUiMapTemporalOff)
+    uint32_t aaNoted = 0;       // the temporal AA transition lines written
 };
 MapPlaneWatch& mapPlaneWatch() { static MapPlaneWatch* p = new MapPlaneWatch; return *p; }
 constexpr uint32_t kMapPlaneNoteCap = 64;
@@ -636,9 +638,26 @@ void flatRuntimeMapFocusFrame() {
                 Log::get().note("flat map motion: the System Map is closed (GuiFocus unknown); pixels with no depth are at infinity again");
         }
     }
+    // Temporal AA off on the Galaxy Map and the Orrery (flat_ui_layer_math.h): its own transition lines, once each, capped.
+    const bool off = flatUiMapTemporalOff(known, focus);
+    if (off != w.temporalOff) {
+        w.temporalOff = off;
+        if (w.aaNoted < kMapPlaneNoteCap) {
+            ++w.aaNoted;
+            if (off)
+                Log::get().note("flat map aa: temporal AA off on %s (GuiFocus %u): no accumulation, no jitter; the UI layer keeps the map's "
+                                "text and markers", flatUiMapTemporalName(focus), focus);
+            else if (known)
+                Log::get().note("flat map aa: temporal AA on again (GuiFocus %u)", focus);
+            else
+                Log::get().note("flat map aa: temporal AA on again (GuiFocus unknown)");
+        }
+    }
 }
 // The System Map's plane, this frame (the frame's read).
 bool flatRuntimeMapPlaneFrame() { return mapPlaneWatch().open; }
+// Temporal AA is off this frame: the Galaxy Map or the Orrery is open (the frame's read).
+bool flatRuntimeMapTemporalOff() { return mapPlaneWatch().temporalOff; }
 // The Galaxy Map (6), the System Map (7) or the Orrery (8) is open, this frame (the frame's read): the map families' gate.
 bool flatRuntimeMapOpenFrame() {
     const MapPlaneWatch& w = mapPlaneWatch();
@@ -3645,7 +3664,13 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     flatCameraInjectFrame(frame + 1,enabled);
     if(flatCameraInjectTakeHistoryReset()) {s.phase.resetHistory();reset();}
     const FlatCameraRoute phaseRoute=flatCameraInjectRoute();
-    s.phase.beginFrame(flatCameraPhaseEnabled(phaseRoute,true,s.observing,s.projection!=nullptr),
+    // The frame's one GuiFocus read (flatRuntimeMapFocusFrame) comes first: on the Galaxy Map and the Orrery temporal AA is off, and
+    // this frame's phase is zero (no jitter, the history restarts). A frame that would have jittered is counted jitter-zeroed.
+    flatRuntimeMapFocusFrame();
+    const bool phaseWanted = flatCameraPhaseEnabled(phaseRoute,true,s.observing,s.projection!=nullptr);
+    const bool temporalOff = flatRuntimeMapTemporalOff();
+    flatUiLayerMapAaFrame(temporalOff, phaseWanted);
+    s.phase.beginFrame(phaseWanted && !temporalOff,
         compatible,s.phaseWidth,s.phaseHeight,flatCameraPhaseCount(phaseRoute,s.jitterPhases));
     s.frameHadPhase=nonzeroPhase(s);
     flatCameraInjectArm(); // the phase is chosen: the injector's frame window opens
@@ -3692,7 +3717,6 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     s.phaseCensusPending=s.work != FlatWork::Paused;
     s.phaseCensusFailed=false;
     s.prefix.output = output.Get(); s.prefix.width = d.Width; s.prefix.height = d.Height; s.prefix.format = d.Format;
-    flatRuntimeMapFocusFrame();                   // the frame's one GuiFocus read: the map plane and the map families answer from it
     flatUiLayerFrame(flatRuntimeMapOpenFrame());  // fix.ui_quality's flat layer: its 30 s lines (flat_ui_layer.h)
     if(s.namingVetoedThisFrame) {
         // A frame that vetoed a draw: if the world was named anyway the veto did its work; if nothing named it, the reference may be the
@@ -5406,7 +5430,10 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     if(projection && projection->active() && flatCameraInjectUpstreamOwns())++s.rows.legacyAppliedUnderUpstream;
     // The HDR route treats at its trigger (key auto, the selection selected): the game's pass that reads H next sees the
     // anti-aliased image with its own bindings untouched, and the copy stage below leaves the frame to the route.
-    if (hdrTrigger && s.hdrKey == FlatHdrKey::Auto && s.hdrSelected.selected()) treatHdr(s.hdrSelected, s.hdr.trigger.srvSlot);
+    // Temporal AA off on the Galaxy Map and the Orrery (flat_ui_layer_math.h): the HDR route's temporal resolve does not run, so
+    // the frame goes to the copy route, which runs the spatial recovery in place of it (flatRuntimeMapTemporalOff).
+    if (hdrTrigger && s.hdrKey == FlatHdrKey::Auto && s.hdrSelected.selected() && !flatRuntimeMapTemporalOff())
+        treatHdr(s.hdrSelected, s.hdr.trigger.srvSlot);
     // fix.ui_quality's flat layer (flat_ui_layer.h): the cockpit HUD families out of H and into the shared layer as eye 0,
     // the game's tonemap re-issued over it, and at the output copy the door and the composite. Every decision is made
     // here, after the scope has planned everything else it does with this draw (a draw it does anything else with is
@@ -5722,6 +5749,27 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
                 Log::get().note("%s", text);
             }
         }
+    }
+    // Temporal AA off on the Galaxy Map and the Orrery (flat_ui_layer_math.h flatUiMapTemporalOff): no temporal resolve. The
+    // frame is the spatial recovery's, at the route's own grid (the same size the resolve would have made, so the UI layer's
+    // door arms from it as from a treated frame), with no history and the zero phase the boundary gave it. Treated, so the
+    // door arms; the history is not kept, so the first frame after the map restarts it (one reset, the resolver's own).
+    if (flatRuntimeMapTemporalOff()) {
+        const char* spatialReason=nullptr;
+        if (flatMonoResolveSpatialFallback(s.device.Get(),ctx,f,&outputView,&spatialReason)) {
+            ID3D11ShaderResourceView* spatial=flatSharpenView(ctx,outputView.Get());
+            ctx->PSSetShaderResources(0,1,&spatial);replaced=true;
+            s.treated=true;s.temporalAccepted=false;s.havePrevious=false;s.reason="map-temporal-off";
+            flatUiLayerMapAaCopy(true);
+        } else {
+            s.reason=spatialReason?spatialReason:"map-temporal-off-refused";
+            refuse(s);
+            flatUiLayerMapAaCopy(false);
+            static uint32_t mapAaRefusedLogged=0;
+            if(mapAaRefusedLogged++<8)Log::get().note("flat map aa: the spatial recovery refused on the map (%s); the frame stays the game's (frame %llu)",
+                spatialReason?spatialReason:"unknown",(unsigned long long)s.prefix.frame);
+        }
+        return;
     }
     if (!flatMonoResolve(s.device.Get(), ctx, f, &outputView, &s.reason)) {
         const char* temporalReason=s.reason;

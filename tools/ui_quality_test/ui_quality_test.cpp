@@ -1241,6 +1241,32 @@ void testFlatLayerRules() {
         check(std::strcmp(flatUiToneMatchWhy(p, 6, h), "no (no recorded target this frame)") == 0,
               "map tone reason: a proof state from another frame names no recorded target");
     }
+    // Temporal AA off on the Galaxy Map (6) and the Orrery (8) only (2026-10-10, maintainer's decision): the System Map (7), any
+    // other screen and an unknown GuiFocus keep temporal AA on.
+    check(flatUiMapTemporalOff(true, 6) && flatUiMapTemporalOff(true, 8) && !flatUiMapTemporalOff(true, 7) &&
+              !flatUiMapTemporalOff(true, 1) && !flatUiMapTemporalOff(false, 6) && !flatUiMapTemporalOff(false, 8),
+          "temporal AA off: exactly GuiFocus 6 and 8 while the focus is known (not 7, not another screen, not unknown)");
+    check(std::strcmp(flatUiMapTemporalName(6), "the Galaxy Map") == 0 && std::strcmp(flatUiMapTemporalName(8), "the Orrery") == 0,
+          "temporal AA off: the log names the Galaxy Map (6) and the Orrery (8)");
+    // The map line's temporal counts: a frame that armed the mechanism and never reached its copy is counted, not silent.
+    {
+        FlatUiMapAaTally t;
+        t.frame(true, true);   // armed, would have jittered
+        t.copy(true);          // the spatial recovery ran
+        check(t.temporalOff == 1 && t.jitterZeroed == 1 && t.spatial == 1 && t.noCopy == 0 && t.resets == 0 && !t.pending,
+              "temporal AA tally: an armed frame whose copy ran the spatial recovery counts as temporal-off, jitter-zeroed and spatial");
+        t.frame(true, false);  // armed, no jitter wanted, and its copy never came
+        t.frame(false, true);  // the exit: the no-copy frame is counted at the next boundary, and the exit is one reset
+        check(t.temporalOff == 2 && t.jitterZeroed == 1 && t.noCopy == 1 && t.resets == 1 && !t.engaged,
+              "temporal AA tally: a frame armed without a copy is counted as no-copy at the next boundary; the exit is one reset");
+        t.frame(true, true);
+        t.copy(false);         // the copy ran but the spatial recovery refused
+        t.frame(false, false);
+        check(t.spatialRefused == 1 && t.resets == 2 && t.temporalOff == 3,
+              "temporal AA tally: a refused spatial recovery counts as spatial-refused, and each exit is one reset");
+        t.copy(true);          // no frame pending: nothing counted
+        check(t.spatial == 1 && t.spatialRefused == 1, "temporal AA tally: a copy with no armed frame counts nothing");
+    }
     // The jitter: rows that carry the phase (0.25, -0.375) px at 1920x1080 measure ndc (2 x 0.25 / 1920, -2 x -0.375 / 1080).
     const uint32_t w = 1920, h = 1080;
     const float px = 0.25f, py = -0.375f;

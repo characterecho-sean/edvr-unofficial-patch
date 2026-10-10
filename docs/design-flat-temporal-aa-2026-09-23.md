@@ -22,7 +22,7 @@
   cheap; separate scheduling/capture when it saves copies/sync/per-draw work.
   Defer broad core extraction until flat capture establishes the boundary.
 - **Recommendation:** two installers, one graphics implementation, one temporal pipeline, separate VR/mono adapters; flat enables only temporal AA + support.
-- **10-10 System Map arc (section below):** depth-0 map pixels take the map plane's motion at GuiFocus 7; branch only, not built, not flown.
+- **10-10 map arcs (section below):** System Map (GuiFocus 7): depth-0 pixels take the map plane's motion. Galaxy Map (6) and Orrery (8): temporal AA OFF, no jitter; the UI layer keeps the map's text and markers. Branch only, not built, not flown.
 - **106 (10-09):** fixed exposure 1.0 SHIPS on the flat HDR route (flown by eye:
   brighter, stars back); temporary key and luma probe REMOVED. VR keeps auto.
 - **Open:** station/on-foot projection coverage and mixed-camera HDR ownership,
@@ -42,7 +42,6 @@
   87's native FSR comparison, 83's open items and high-G motion; do not repeat
   qualified PS91/BFE or stale-resize hypotheses.
   Menu hangar-floor P1 open; VR tests, `d9f86b09`: main/openxr-perf-gaps.
-- **Test target (Sean):** in-game tests on the Epic install; keep its INI.
 - **Field reports (79-83):** users 1-2 refused every frame, 3 at 7-13 fps, 4
   lost ~23 ms (ReShade). 80-81 flown. 82: (f') CONFIRMED; fix FLOWN, DEFAULT ON.
   10-01 BUILT, NOT FLOWN: the vscreen auto-fit (3504 on Sean's rig: m 0.70 on
@@ -57,10 +56,12 @@
   identical). ROOT CAUSE of the VR hills shimmer, ruled in: Elite's terrain
   checkerboard rendering (halves distant terrain's horizontal samples; turning
   it off fixed it). EDVR now says so in VR (BUILT, NOT FLOWN).
-- **Compatibility:** detail below. **PR72 A/B switches:** retired with `on`
-  fixed (section 86). Landing-time building shimmer is unqualified (section 88).
 
 ## Status detail (moved out of Status 2026-09-29)
+
+- **Test target (Sean), moved 2026-10-10:** in-game tests on the Epic install; keep its INI.
+- **Compatibility (moved 2026-10-10):** detail below. **PR72 A/B switches:** retired with `on`
+  fixed (section 86). Landing-time building shimmer is unqualified (section 88).
 
 *Note: the section 75 sentence below ("awaiting the confirming flight") is
 superseded by section 75's own same-day addendum (the 13:00 flight ran
@@ -14629,3 +14630,51 @@ Flight 073159 (build 375e6ba3, log edvr_gfx_20261010_073159.log):
   auto draws are not recorded.
 - open: the 065817 flight's focus=unknown is not explained. The same reader logic
   was in place; it was not reproduced on 073159.
+
+### 2026-10-10: Galaxy Map and Orrery: temporal AA off, the UI layer keeps the text (built, not flown)
+
+Flight on build 5347652c (Epic flat) proved the map tone on the first Galaxy frame and took
+the map canvas (108562 of 108636) and sprites (424553 of 424571) into the UI layer. The grid and the lines still blur. They are other scene
+draws, not taken: depth off, additive or multiply, drawn before the map composites and, on the System Map, interleaved with the planets.
+Their identity is uncertain. Census (every map census): the Galaxy grid candidate 3028E7C6E0E097F9 / E53096E7D424FB2B; the Galaxy line and
+star candidates 41C518698DAAC9F4 and 7D26BC16E55F3107 with PS 50A57473E63190D0; the Orrery 94BE4AC45C140CEE / C4FEA43814407472; the System
+Map selector candidates E79BF32685B4E888 / 4724A8C9973F51CB, 9FFA5D5E79F04873 / 8134D09E3462E904, 3530A6FD15EDE145 / 5517EF92E0FDAB71.
+The Galaxy Map and the Orrery have no non-zero depth, so the temporal history has no motion to reproject, and accumulation smears those
+draws. The System Map has depth and is handled by its plane motion (GuiFocus 7, above) and DLAA: it is unchanged here.
+
+Decision (maintainer, 2026-10-10): while GuiFocus is 6 (Galaxy Map) or 8 (Orrery), temporal AA is off for the scene: no accumulation and no
+jitter. The UI layer keeps taking and compositing the map's text and markers at the UI-quality scale.
+- Alternative (B), rejected: decline the temporal resolve and still arm the UI door. The door arms only from a treated frame whose picture
+  is the display size (flat_ui_layer.cpp flatUiLayerDoorArms). With DLSS below native the untreated picture is the render size, so the door
+  would refuse and the map would be lost in that mode. (B) also needs a composite path for untreated frames.
+- Chosen (A), built: the frame stays treated, but its output is the spatial recovery's, with zero phase and no history.
+
+How (A) is built (src\d3d11\flat_runtime.cpp unless noted):
+- The one GuiFocus read (flatRuntimeMapFocusFrame) moved to the frame boundary, before the phase begins. temporalOff =
+  flatUiMapTemporalOff(known, focus) (flat_ui_layer_math.h): 6 or 8 only.
+- Phase: `s.phase.beginFrame(phaseWanted && !temporalOff, ...)`. A disabled phase is zero and restarts the history (flat_live_phase.h).
+- HDR route: treatHdr is not called on a temporal-off frame, so the frame goes to the copy route.
+- Copy route: the temporal resolve is replaced by flatMonoResolveSpatialFallback (flat_mono_resolve.cpp:1263): no history, output on the
+  route's evaluation grid. That grid is D for TAA, DLSS below native and FSR below native, and R for the supersample routes (flat_mono_resolve.h
+  flatResolveRoute), the same size the temporal resolve writes, so the door behaves as on a temporal frame. The frame is treated and the door arms.
+  s.havePrevious and s.temporalAccepted are cleared, so the first frame after the map resets the temporal history once.
+- A refused spatial recovery leaves the frame to the game (refuse), as a refused resolve does: the frame is not black.
+- Other GuiFocus values, the System Map (7) included, take the code path they took before. The new branches test flatRuntimeMapTemporalOff only.
+
+Logs and counts. Once per change: "flat map aa: temporal AA off on the Galaxy Map (GuiFocus 6): no accumulation, no jitter; the UI layer
+keeps the map's text and markers" (the Orrery for 8), and "flat map aa: temporal AA on again (GuiFocus N)". Up to 8 refusals of the spatial
+recovery are named: "flat map aa: the spatial recovery refused on the map (reason); the frame stays the game's". The 30 s "flat ui layer map:"
+line gains: temporal-off (frames armed), jitter-zeroed (armed frames that would have jittered), spatial (copies that ran the recovery),
+spatial-refused, no-copy (armed frames whose copy never came, counted at the next boundary), resets (exits, one each). A frame the mechanism
+did not reach shows as no-copy, not as silence (FlatUiMapAaTally, flat_ui_layer_math.h).
+
+Checks for the flight: the grid and lines blur less; the text and markers unchanged; spatial equals temporal-off frames on the map line with
+no-copy and spatial-refused at zero; resets 1 per exit; door-refused-size stays 0 on a DLSS-below-native map, which is what the E = D rule
+predicts. Not checked: the spatial recovery's image quality against the temporal resolve on the map.
+
+Rig: ui_quality_test pins flatUiMapTemporalOff (6 and 8 on; 7, another screen and an unknown GuiFocus off), the two screen names, and the
+FlatUiMapAaTally counts (armed and spatial, no-copy at the next boundary, refused spatial, exits as resets, a copy with no armed frame).
+Not covered: the runtime wiring (the boundary order, the phase gate, the HDR guard and the copy branch), which needs the D3D draw scope, and
+the spatial recovery's output on the map. Those are the flight's.
+
+Next: an Epic flat flight on the Galaxy Map, the Orrery and the System Map in one session, reading the map line and the grid.

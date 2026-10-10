@@ -57,6 +57,7 @@ UiLayerFamily g_decidedFamily = UiLayerFamily::kNone;  // the family of the last
 bool g_mapCanvasNoted = false, g_mapSpriteNoted = false;  // the once-only first take of each map family
 bool g_mapToneNoted = false;                              // the once-only first proof from a map frame's tonemap
 bool g_mapFirstToneNoted = false;                         // the once-only first map-tone candidate line (proved or not)
+FlatUiMapAaTally g_mapAa;                                 // temporal AA off on the Galaxy Map and the Orrery: the map line's counts
 uint64_t g_mapAskFrame = 0, g_mapAsksFrame = 0;           // the frame of the last map ask, and how many map asks it has had
 FlatUiToneProof g_proof;
 uint32_t g_candidateLines = 0;  // eight tone candidates logged, re-armed after a route, render-size or swap-chain change
@@ -462,6 +463,12 @@ void flatUiLayerRelease() {
                         "released; the next frame EDVR resolves arms a fresh door.");
 }
 
+void flatUiLayerMapAaFrame(bool engaged, bool jitterWanted) {
+    if (!runtimeFlatProfile()) return;
+    g_mapAa.frame(engaged, jitterWanted);
+}
+void flatUiLayerMapAaCopy(bool ok) { g_mapAa.copy(ok); }
+
 void flatUiLayerFrame(bool mapOpen) {
     if (!runtimeFlatProfile()) return;
     if (mapOpen) ++g_w.mapOpenFrames;
@@ -517,13 +524,18 @@ void flatUiLayerReport(uint64_t windowSeconds) {
     // refusals by reason (the adapter's and the shared decision's; "at-issue" is a refusal at the game's issue). Zeros print.
     Log::get().note(
         "flat ui layer map: open-frames=%llu; canvas asked=%llu taken=%llu refused=%llu (%s); sprite asked=%llu taken=%llu "
-        "refused=%llu (%s); tone-candidates-map=%llu tone-matched-map=%llu",
+        "refused=%llu (%s); tone-candidates-map=%llu tone-matched-map=%llu; temporal-off=%llu jitter-zeroed=%llu spatial=%llu "
+        "spatial-refused=%llu no-copy=%llu resets=%llu",
         static_cast<unsigned long long>(w.mapOpenFrames), static_cast<unsigned long long>(w.asked[fc]),
         static_cast<unsigned long long>(w.taken[fc]), static_cast<unsigned long long>(mapRefusedTotal(w, 0, w.atIssue[fc])),
         mapReasons(w, 0, w.atIssue[fc]).c_str(), static_cast<unsigned long long>(w.asked[fs]),
         static_cast<unsigned long long>(w.taken[fs]), static_cast<unsigned long long>(mapRefusedTotal(w, 1, w.atIssue[fs])),
         mapReasons(w, 1, w.atIssue[fs]).c_str(), static_cast<unsigned long long>(w.mapToneCandidates),
-        static_cast<unsigned long long>(w.mapToneMatched));
+        static_cast<unsigned long long>(w.mapToneMatched), static_cast<unsigned long long>(g_mapAa.temporalOff),
+        static_cast<unsigned long long>(g_mapAa.jitterZeroed), static_cast<unsigned long long>(g_mapAa.spatial),
+        static_cast<unsigned long long>(g_mapAa.spatialRefused), static_cast<unsigned long long>(g_mapAa.noCopy),
+        static_cast<unsigned long long>(g_mapAa.resets));
+    g_mapAa.clearCounts();
     char declined[400] = "";
     size_t used = 0;
     for (size_t d = 0; d < kDecisions && used < sizeof(declined); ++d) {

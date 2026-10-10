@@ -101,6 +101,11 @@ void flatUiLayerRelease();
 // layer's device children are all released first (uiLayerDeviceReset). The device is held for identity until then.
 void flatUiLayerNoteDevice(ID3D11Device* device);
 
+// Temporal AA off on the Galaxy Map and the Orrery (2026-10-10, flat_ui_layer_math.h FlatUiMapAaTally): once per frame at the
+// boundary (engaged: the mechanism is armed; jitterWanted: the frame would have jittered), and once per copy that ran it (ok:
+// the spatial recovery produced the frame). The map line prints the counts.
+void flatUiLayerMapAaFrame(bool engaged, bool jitterWanted);
+void flatUiLayerMapAaCopy(bool ok);
 // Once a frame from the flat runtime's frame boundary (mapOpen: this frame's map answer, counted as an open-map frame):
 // every 30 s the "flat ui layer" lines (flatUiLayerReport), zeros included, every window of the flat profile -- a log
 // without them is a build that never ran the adapter.
