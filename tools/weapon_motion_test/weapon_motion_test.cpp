@@ -1,6 +1,6 @@
 // Production post-VS history, animated perspective projection and state
 // restoration. No game assets or CPU readback exists in the production path.
-#include "../../src/d3d11/weapon_motion.cpp"
+#include "../../src/plugins/on_foot_panel/weapon_motion.cpp"
 #include "../../src/d3d11/flat_animated_identity_ledger.h"
 #include "../../src/d3d11/flat_foreground_motion.h"
 #include "../../src/d3d11/flat_foreground_phase.h"

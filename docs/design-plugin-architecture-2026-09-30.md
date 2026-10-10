@@ -12,17 +12,17 @@
   generated manifests/config ownership, subscription-driven dispatch and a
   C-compatible interface. The add-on tier follows Phase 1. Graphics-only VR is
   a separate phase; supported settings remain owned by one plugin.
-- **Current integration:** main `a1609f2b` is merged. Exposure actions
-  and installer selection-record groundwork pass 158 full-build jobs
-  plus config, export and installer gates; receipt `a3b59a22` matches
-  the source. Steam retains measured `6ab758d2`.
-- **Module progress:** intro implementations and staged lifecycle
-  dispatch build in `plugin_intro.lib`. `plugin_exposure.lib` owns
-  classification, eye pairing, verdict expiry, sharing and damping. Core
-  retains exposure hooks, guards, config and resource lifetime.
-  Installer records can preserve optional versioned selection metadata.
-  Remaining registry/group migration, draw claims, selection UI and
-  runtime gating stay open; availability is unchanged.
+- **Current integration:** main `a1609f2b` is merged. Exposure lifecycle
+  and three group ownership moves pass 158 full-build jobs plus config,
+  export and installer gates; receipt `66c97d72` matches the source.
+  Last measured Steam build: `6ab758d2`; Sean must approve any install
+  (2026-10-10).
+- **Module progress:** Intro and Exposure have archive/lifecycle
+  ownership. Weapon motion, FSS eye heal and transition-flash eye base
+  build in their on-foot, scanner and comfort archives through existing
+  core APIs. Installer records preserve versioned selections. Remaining
+  group/draw-claim migration, selection UI/runtime gating remain open;
+  availability is unchanged.
 
 - **Offline evidence:** FSS site 1 has a frozen legacy selector oracle,
   version-16 facts, seven-base-fact capacity and terminal X/6 action fixtures.
@@ -4169,3 +4169,115 @@ lifecycle/group migrations, draw claims, selection UI/runtime gating,
 whole-ladder replay and runtime CPU/GPU shipping acceptance remain
 required. The feature branch stays isolated from main, and the final
 matched performance comparison remains at rendering-code freeze.
+
+### 2026-10-10 — offline gate dependency failure
+
+The first full offline attempt stopped before compilation because the
+pending Status update counted 61 lines against the 60-line limit. The
+compacted Status then passed the sanctioned checker across all 76
+blocks. The next absolute full build reached the test pool and ran 109
+of 158 jobs before Exposure cost-rig linking failed. Its
+actual-production action translation unit now references
+`Config::getFloat` through the relocated damping configure helper, but
+the fixture link supplies no configuration reader. Evidence:
+`build/full-plugin-ownership-offline-link-failure-20261010.log`,
+`LNK2019` from `exposure_cost_test.obj` referencing
+`exposurePluginConfigure`, followed by `LNK1120`.
+
+ruled out: `/Gy` plus `/OPT:REF` discarding that configuration
+dependency, because the actual link still requires `Config::getFloat`.
+Source-only review's discard inference was insufficient. The repair is
+limited to the offline fixture's dependency; production ownership,
+rendering behavior and configuration defaults remain as reviewed. A
+fresh full build must pass before commit. No Steam install, live INI
+edit or flight occurred; installation remains on Sean's explicit
+approval.
+
+### 2026-10-10 — Exposure lifecycle and three group ownership moves
+
+Luna 6 agents implemented Exposure lifecycle ownership, its offline
+fixtures and three archive ownership moves in parallel. Each Exposure
+State embeds its lifecycle record pointing at the existing action-state
+subobject, without an additional allocation. Registration follows
+successful hook commit and precedes the existing configure call. Both
+failed-install paths remain unpublished and delete/null the failed
+State. Rejected registration retains direct module calls. Runtime
+damping configuration moves with its unchanged clamps, transition/reset
+behavior and log strings. Initial shader pin, enabled state and
+copy-direction initialization stay at their original core install
+position.
+
+The private lifecycle record appends a stateful configuration callback
+after the existing staged callbacks. Extent checks preserve the legacy
+prefix and partial staged records; normal configure dispatch prefers a
+present stateful callback and otherwise uses the legacy callback.
+Records without either are rejected. Exposure uses real module work
+through this callback, with no global core-state back-edge or dummy
+configure implementation. The production dispatch adapter retains its
+captured-state damping gate and separate fresh global-state projections
+for Share and Damp.
+
+Frame dispatch uses two fixed-index lifecycle stages to retain pairing
+reset, core dispatch-occurrence reset, negative-verdict expiry and core
+compute-frame/give-up accounting in that order. Core hook guards, real
+forwards, census/skip/skin routing, reclaim cadence and the original
+frame wrapper remain in place. Explicit shutdown detaches the lifecycle
+entry before module staging cleanup, followed by the original hook
+uninstall and shader-registry end. Generic draw-registry shutdown still
+preserves lifecycle entries. Successful State lifetime is unchanged, and
+repeated resource cleanup sees nulled slots.
+
+The full weapon-motion implementation and its private cost-site header
+move mechanically into `plugin_on_foot_panel.lib`; only required include
+paths change. The core-facing API, callsites, state, defaults, logs,
+API-cost IDs and generated shader include remain unchanged. Production,
+predicate-rig and flat benchmark links consume the archive. The existing
+WARP rig includes the relocated actual implementation, and structural
+gates require the plugin source. On-foot metadata remains catalog-only
+with no selectable profiles; its rig list now records weapon-motion
+coverage. Exposure is lifecycle-only and also remains unavailable for
+selection. These ownership steps do not complete either group or
+activate installer selection.
+
+Scanner eye heal moves into `plugin_scanners.lib` while its public
+header, exported `edvrFssHealLeft` ABI and core native-FSS session
+wrapper remain unchanged. Comfort's transition-flash eye-base
+implementation moves into `plugin_comfort.lib` while its public and pure
+classifier headers, existing callback order, CodeHook state and
+glitch-frame handshake remain unchanged. Both moves compare exactly with
+their originals after only relative include rewrites. The production
+DLL, predicate binary and flat benchmark proxy link both archives; the
+native FSS GPU and native-temporal rigs compile the moved production
+sources. The intentionally mocked wrapper/detector seams stay as before.
+Metadata records the relevant rigs while keeping both groups
+catalog-only and unavailable. Remaining scanner draw classification and
+Explorer Cam ownership are separate work.
+
+The native gate exposed a cost-fixture dependency missed by source-only
+review: its included production action code still required
+`Config::getFloat` despite `/Gy` and `/OPT:REF`. The repaired fixture
+supplies an explicit configuration service, seeds the existing 0.5/45
+settings through the real module configure helper, and runs production
+shutdown on real WARP staging textures. Independent texture anchors
+remain usable after repeated cleanup, while the registry fixture
+separately verifies exact fake COM Release counts. No production code,
+behavior or build command changed for this repair. The failed link
+inference is recorded in the preceding entry; it is not evidence of
+runtime parity.
+
+The source-order and mutation gates, actual Exposure module fixtures,
+lifecycle ABI extent tests, weapon-motion WARP checks, native FSS GPU
+rig and native-temporal fixture cover the changed offline behavior.
+Independent review found no actionable issues after source gates were
+rerun with generated includes and workspace temporary storage; the
+initial cheap boundary/catalog failures were invocation and sandbox-temp
+issues. The full absolute validation build passed all 158 jobs, config,
+export and self-contained installer gates. Receipt:
+`66c97d72cb4d0e33636ea97ff3637de1fcf57b315fb3ad11d69513ab6d34f014`.
+These checks do not establish live hook execution or runtime CPU/GPU
+shipping acceptance. No Steam install, live settings edit or flight
+occurred. Sean's explicit approval is required before any Steam
+installation while he tests other work. The branch remains isolated from
+main; final matched performance comparison stays at rendering-code
+freeze. Remaining group/draw-claim migrations, selection UI/runtime
+gating and whole-ladder replay remain required.

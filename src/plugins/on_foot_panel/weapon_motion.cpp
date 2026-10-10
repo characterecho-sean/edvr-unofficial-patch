@@ -1,16 +1,16 @@
 #include "temporal_shader_bytecode.h"
-#include "weapon_motion.h"
+#include "../../d3d11/weapon_motion.h"
 #include "weapon_motion_cost_sites.h"
-#include "animated_vertex_history.h"
+#include "../../d3d11/animated_vertex_history.h"
 #include <cstring>
 #include <d3d11.h>
 #include <wrl/client.h>
 #include <vector>
 #include <algorithm>
-#include "gpu_interval.h"
-#include "shader_swap.h"
-#include "vscreen.h"
-#include "../common/log.h"
+#include "../../d3d11/gpu_interval.h"
+#include "../../d3d11/shader_swap.h"
+#include "../../d3d11/vscreen.h"
+#include "../../common/log.h"
 namespace edvr { namespace weapon_motion_detail {
 template<class T>using Ptr=Microsoft::WRL::ComPtr<T>;
 constexpr unsigned maxVertices=AnimatedVertexHistory::maxVertices;

@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstring>
 
+#include "../../common/config.h"
 #include "../../common/log.h"
 #include "../../common/plugin_cost.h"
 #include "../../common/timing.h"
@@ -395,6 +396,43 @@ void exposurePluginDamp(ExposureActionState* s, ID3D11DeviceContext* ctx,
     s->dampPrevValid = true;
     if (resA) resA->Release();
     resB->Release();
+}
+
+void exposurePluginConfigure(ExposureActionState* s, Config& cfg) {
+    if (!s) return;
+
+    const float wasK = s->dampK;
+    float k = cfg.getFloat("experimental.exposure_damping", 0.0f);
+    if (k < 0.0f) k = 0.0f;
+    if (k > 1.0f) k = 1.0f;
+    s->dampK = k;
+    float tau = cfg.getFloat("experimental.exposure_damping_tau", 45.0f);
+    if (tau < 1.0f) tau = 1.0f;
+    if (tau > 600.0f) tau = 600.0f;
+    s->dampTau = tau;
+    if (s->dampK != wasK) {
+        if (s->dampK > 0.0f) {
+            Log::get().note("exposure damping: ON, k=%.2f -- the adaptation "
+                            "swing is compressed to %.0f%% about a slow "
+                            "running mean. 0 restores stock; 1 holds the "
+                            "mean outright.",
+                            s->dampK, (1.0f - s->dampK) * 100.0f);
+        } else {
+            Log::get().note("exposure damping: off; the game's adaptation "
+                            "is stock from the next frame.");
+            s->dampPrevValid = false;
+            s->dampHaveMean = false;
+        }
+    }
+}
+
+void exposurePluginShutdownResources(ExposureActionState* s) {
+    if (!s) return;
+    for (ID3D11Texture2D*& staging : s->dampStaging) {
+        if (!staging) continue;
+        staging->Release();
+        staging = nullptr;
+    }
 }
 
 }  // namespace edvr::plugins::exposure

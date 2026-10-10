@@ -6,6 +6,8 @@
 
 #include "exposure_dispatch.h"
 
+namespace edvr { class Config; }
+
 namespace edvr::plugins::exposure {
 
 // Action state is embedded in the core's one Exposure State allocation. It
@@ -41,5 +43,7 @@ void exposurePluginShareExposure(
 void exposurePluginDamp(ExposureActionState* state,
                         ID3D11DeviceContext* context,
                         ID3D11UnorderedAccessView* firstEyeStrip);
+void exposurePluginConfigure(ExposureActionState* state, Config& config);
+void exposurePluginShutdownResources(ExposureActionState* state);
 
 }  // namespace edvr::plugins::exposure

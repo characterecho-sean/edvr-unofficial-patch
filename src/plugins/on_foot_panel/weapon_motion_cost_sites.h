@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../common/plugin_cost.h"
+#include "../../common/plugin_cost.h"
 
 namespace edvr { namespace weapon_motion_cost {
 

@@ -63,7 +63,7 @@ EXPECTED_PROFILES = {
 EXPECTED_IMPLEMENTATION = {
     'temporal-aa': 'catalog-only',
     'cockpit-visuals': 'phase1-pilot',
-    'exposure': 'catalog-only',
+    'exposure': 'phase1-lifecycle',
     'scanners': 'catalog-only',
     'intro': 'phase1-lifecycle',
     'on-foot-panel': 'catalog-only',
@@ -72,7 +72,12 @@ EXPECTED_IMPLEMENTATION = {
     'diagnostics': 'catalog-only',
 }
 EXPECTED_HOOK_POINTS = {
+    'exposure': ('lifecycle.configure', 'lifecycle.frame', 'lifecycle.shutdown'),
     'intro': ('lifecycle.configure', 'lifecycle.frame', 'lifecycle.shutdown'),
+}
+EXPECTED_RIGS = {
+    'exposure': ('exposure_dispatch_test', 'exposure_cost_test', 'plugin_dispatch_test'),
+    'intro': ('plugin_dispatch_test', 'intro_lifecycle_test'),
 }
 DEFAULT_INSTALL = {
     'vr': frozenset(EXPECTED_IDS[:-1]),
@@ -364,14 +369,15 @@ def validate_manifest(data, documented_keys=None):
             problems.append('%s.hookPoints must be %s' %
                             (pid, ', '.join(EXPECTED_HOOK_POINTS[pid])))
         rigs = _string_list(plugin.get('rigs'), pid + '.rigs', problems)
-        if pid == 'intro' and tuple(rigs) != ('plugin_dispatch_test', 'intro_lifecycle_test'):
-            problems.append('intro rigs must name plugin_dispatch_test and intro_lifecycle_test')
+        if pid in EXPECTED_RIGS and tuple(rigs) != EXPECTED_RIGS[pid]:
+            problems.append('%s rigs must name %s' %
+                            (pid, ' and '.join(EXPECTED_RIGS[pid])))
         claims = plugin.get('claims')
         if not isinstance(claims, list):
             problems.append(pid + '.claims must be an array')
             claims = []
-        if pid == 'intro' and claims:
-            problems.append('intro phase1-lifecycle implementation cannot declare draw claims')
+        if status == 'phase1-lifecycle' and claims:
+            problems.append('%s phase1-lifecycle implementation cannot declare draw claims' % pid)
         claim_ids = set()
         for ci, claim in enumerate(claims):
             clabel = '%s.claims[%d]' % (pid, ci)
@@ -785,6 +791,24 @@ def self_test():
               intro['claims'] == [] and
               all(rig in intro['rigs'] for rig in
                   ('plugin_dispatch_test', 'intro_lifecycle_test')))
+        exposure_index = EXPECTED_IDS.index('exposure')
+        exposure = original['plugins'][exposure_index]
+        check('exposure lifecycle is implemented while remaining non-selectable',
+              exposure['implementationStatus'] == 'phase1-lifecycle' and
+              exposure['selectionAvailableProfiles'] == [] and
+              tuple(exposure['hookPoints']) == EXPECTED_HOOK_POINTS['exposure'] and
+              exposure['claims'] == [] and
+              all(rig in exposure['rigs'] for rig in EXPECTED_RIGS['exposure']))
+        bad = copy.deepcopy(original)
+        bad['plugins'][exposure_index]['selectionAvailableProfiles'] = ['vr']
+        check('exposure lifecycle remains unavailable for selection',
+              any('exposure selection is not available during Phase 1' in p
+                  for p in validate_manifest(bad, documented)))
+        bad = copy.deepcopy(original)
+        bad['plugins'][exposure_index]['hookPoints'] = ['draw.classify']
+        check('exposure lifecycle rejects unexpected hook metadata',
+              any('exposure.hookPoints must be lifecycle.configure, lifecycle.frame, lifecycle.shutdown' in p
+                  for p in validate_manifest(bad, documented)))
         for missing_rig in ('plugin_dispatch_test', 'intro_lifecycle_test'):
             bad = copy.deepcopy(original)
             bad['plugins'][intro_index]['rigs'].remove(missing_rig)
@@ -994,6 +1018,13 @@ def self_test():
               'k_intro_hook_points[] = {\n    "lifecycle.configure",\n    "lifecycle.frame",\n    "lifecycle.shutdown",' in content and
               'k_intro_claims, 0' in content and 'k_intro_rigs, 2' in content and
               'k_intro_rigs[] = {\n    "plugin_dispatch_test",\n    "intro_lifecycle_test",' in content)
+        exposure_record = next((line for line in content.splitlines()
+                                if '"exposure"' in line and '"phase1-lifecycle"' in line), '')
+        check('generated exposure metadata stays lifecycle-only and non-selectable',
+              '"phase1-lifecycle"' in exposure_record and '0x0u' in exposure_record and
+              'k_exposure_hook_points[] = {\n    "lifecycle.configure",\n    "lifecycle.frame",\n    "lifecycle.shutdown",' in content and
+              'k_exposure_claims, 0' in content and 'k_exposure_rigs, 3' in content and
+              'k_exposure_rigs[] = {\n    "exposure_dispatch_test",\n    "exposure_cost_test",\n    "plugin_dispatch_test",' in content)
     except Exception as exc:
         failures.append('unexpected exception: %s' % exc)
 

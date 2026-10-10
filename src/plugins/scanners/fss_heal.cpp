@@ -1,15 +1,15 @@
 #include "temporal_shader_bytecode.h"
-#include "fss_heal.h"
-#include "graphics_runtime.h"
+#include "../../d3d11/fss_heal.h"
+#include "../../d3d11/graphics_runtime.h"
 
 #include <windows.h>
 
 #include <d3d11.h>
 
-#include "../common/guard.h"
-#include "../common/log.h"
-#include "shader_swap.h"
-#include "gpu_census.h"   // issue #38: the per-feature GPU cost census
+#include "../../common/guard.h"
+#include "../../common/log.h"
+#include "../../d3d11/shader_swap.h"
+#include "../../d3d11/gpu_census.h"   // issue #38: the per-feature GPU cost census
 
 namespace edvr {
 namespace {

@@ -25,6 +25,7 @@
                           // because slot 41 is already ours and a second
                           // patch on it would be a second thing to reclaim
 #include "../plugins/exposure/exposure_actions.h"
+#include "../plugins/exposure/exposure_lifecycle.h"
 
 namespace edvr {
 namespace {
@@ -84,6 +85,8 @@ typedef void(STDMETHODCALLTYPE* PFN_CSSetUAVs)(ID3D11DeviceContext*, UINT, UINT,
 typedef void(STDMETHODCALLTYPE* PFN_ClearState)(ID3D11DeviceContext*);
 
 struct State : plugins::exposure::ExposureActionState {
+    EdvrPluginLifecycleOps lifecycleOps{};
+    bool lifecycleRegistered = false;
     VTableHook    hook;
     // The context these hooks were installed for. Identity only -- compared,
     // never dereferenced. In-place vtable patching hooks the class, so
@@ -441,36 +444,25 @@ void exposureConfigure(Config& cfg) {
         }
     }
 
-    const float wasK = s->dampK;
-    float k = cfg.getFloat("experimental.exposure_damping", 0.0f);
-    if (k < 0.0f) k = 0.0f;
-    if (k > 1.0f) k = 1.0f;
-    s->dampK = k;
-    float tau = cfg.getFloat("experimental.exposure_damping_tau", 45.0f);
-    if (tau < 1.0f) tau = 1.0f;
-    if (tau > 600.0f) tau = 600.0f;
-    s->dampTau = tau;
-    if (s->dampK != wasK) {
-        if (s->dampK > 0.0f) {
-            Log::get().note("exposure damping: ON, k=%.2f -- the adaptation "
-                            "swing is compressed to %.0f%% about a slow "
-                            "running mean. 0 restores stock; 1 holds the "
-                            "mean outright.",
-                            s->dampK, (1.0f - s->dampK) * 100.0f);
-        } else {
-            Log::get().note("exposure damping: off; the game's adaptation "
-                            "is stock from the next frame.");
-            s->dampPrevValid = false;
-            s->dampHaveMean = false;
-        }
+    auto* state = static_cast<plugins::exposure::ExposureActionState*>(s);
+    if (s->lifecycleRegistered) {
+        pluginRegistryConfigureLifecycle(plugins::kPluginExposure, &cfg);
+    } else {
+        plugins::exposure::exposurePluginConfigure(state, cfg);
     }
 }
 
 void exposureFixFrameBoundary() {
     State* s = g_state;
     if (!s) return;
-    exposurePluginResetDispatchFrame(
-        static_cast<plugins::exposure::ExposureDispatchObserverState*>(s));
+    auto* observer =
+        static_cast<plugins::exposure::ExposureDispatchObserverState*>(s);
+    if (!s->lifecycleRegistered ||
+        !pluginRegistryFrameLifecycleStage(
+            plugins::kPluginExposure,
+            plugins::exposure::kExposureLifecycleResetPairing, nullptr, 0)) {
+        exposurePluginResetDispatchFrame(observer);
+    }
     // The skip probe counts occurrences per frame.
     for (uint32_t i = 0; i < 4; ++i) s->dispatchOccSeen[i] = 0;
 
@@ -493,8 +485,12 @@ void exposureFixFrameBoundary() {
     //
     // Yes answers are kept: those are confirmed across frames anyway, and a
     // shader that matched the shape once does not stop having matched it.
-    exposurePluginExpireDispatchVerdicts(
-        static_cast<plugins::exposure::ExposureDispatchObserverState*>(s));
+    if (!s->lifecycleRegistered ||
+        !pluginRegistryFrameLifecycleStage(
+            plugins::kPluginExposure,
+            plugins::exposure::kExposureLifecycleExpireVerdicts, nullptr, 0)) {
+        exposurePluginExpireDispatchVerdicts(observer);
+    }
 
     // Say so when detection comes up empty. Otherwise a build where the shape
     // stopped matching produces a log identical to one where the user never got
@@ -551,6 +547,9 @@ void installExposureFix(ID3D11Device* device, HookMode mode) {
     if (!ctx) return;
 
     g_state = new State();
+    plugins::exposure::initializeExposureLifecycleOps(
+        &g_state->lifecycleOps,
+        static_cast<plugins::exposure::ExposureActionState*>(g_state));
     shaderRegistryBegin();
     // An empty hash means "find it yourself", which is the default and the
     // reason this survives a game update.
@@ -654,6 +653,8 @@ void installExposureFix(ID3D11Device* device, HookMode mode) {
     // need it too and never ran this function; see logContextTableVariants.
     logContextTableVariants(s.hook.originalVTable(), s.hook.executablePrefix(),
                             "exposure context");
+    s.lifecycleRegistered =
+        pluginRegistryRegisterLifecycle(&s.lifecycleOps);
     exposureConfigure(cfg);
     ctx->Release();
 }
@@ -707,11 +708,13 @@ void exposureFixReclaimTick() {
 void shutdownExposureFix() {
     if (!g_state) return;
     g_state->enabled = false;
-    for (int i = 0; i < 2; ++i) {
-        if (g_state->dampStaging[i]) {
-            g_state->dampStaging[i]->Release();
-            g_state->dampStaging[i] = nullptr;
-        }
+    if (g_state->lifecycleRegistered) {
+        pluginRegistryShutdownLifecycle(plugins::kPluginExposure);
+        g_state->lifecycleRegistered = false;
+    } else {
+        // Profile rejection retains the old direct module shutdown path.
+        plugins::exposure::exposurePluginShutdownResources(
+            static_cast<plugins::exposure::ExposureActionState*>(g_state));
     }
     g_state->hook.uninstall();
     shaderRegistryEnd();

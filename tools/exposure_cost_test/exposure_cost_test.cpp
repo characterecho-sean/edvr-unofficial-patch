@@ -215,6 +215,14 @@ uint64_t sunglareLastSeenMs() { return g_sunSeen; }
 Log& Log::get() { static Log logger; return logger; }
 Log::~Log() = default;
 void Log::note(const char*, ...) {}
+// Keep configuration IO outside this WARP API-cost fixture, while satisfying
+// the production action module's Config service dependency explicitly.
+Config& Config::get() { static Config config; return config; }
+float Config::getFloat(const char* key, float def) const {
+    if (std::strcmp(key, "experimental.exposure_damping") == 0) return 0.5f;
+    if (std::strcmp(key, "experimental.exposure_damping_tau") == 0) return 45.0f;
+    return def;
+}
 } // namespace edvr
 
 int main(int argc, char** argv) {
@@ -277,8 +285,9 @@ int main(int argc, char** argv) {
 
     edvr::g_clockForTest = &fixtureClock;
     edvr::State state{};
-    state.dampK = 0.5f;
-    state.dampTau = 45.0f;
+    edvr::plugins::exposure::exposurePluginConfigure(&state, edvr::Config::get());
+    check(state.dampK == 0.5f && state.dampTau == 45.0f,
+          "production configure reads the WARP fixture's damper settings");
     edvr::g_state = &state;
 
     ID3D11UnorderedAccessView* firstUavs[4] = {viewA.Get(), nullptr, nullptr, nullptr};
@@ -376,8 +385,27 @@ int main(int argc, char** argv) {
     edvr::g_state = nullptr;
     edvr::g_clockForTest = nullptr;
     g_boundStrip = nullptr;
-    for (auto*& staging : state.dampStaging) {
-        if (staging) { staging->Release(); staging = nullptr; }
+    check(state.dampStaging[0] != nullptr && state.dampStaging[1] != nullptr,
+          "damper lifecycle owns the real WARP staging pair before shutdown");
+    // Keep independent resource references to check real texture usability
+    // after shutdown, without relying on driver-specific COM refcount values.
+    ComPtr<ID3D11Texture2D> stagingAnchors[2];
+    stagingAnchors[0] = state.dampStaging[0];
+    stagingAnchors[1] = state.dampStaging[1];
+    edvr::plugins::exposure::exposurePluginShutdownResources(&state);
+    check(state.dampStaging[0] == nullptr && state.dampStaging[1] == nullptr,
+          "production shutdown clears both real WARP staging handles");
+    edvr::plugins::exposure::exposurePluginShutdownResources(&state);
+    check(state.dampStaging[0] == nullptr && state.dampStaging[1] == nullptr,
+          "repeated production shutdown keeps the staging pair clear");
+    for (const auto& staging : stagingAnchors) {
+        D3D11_TEXTURE2D_DESC stagingDesc{};
+        if (staging) staging->GetDesc(&stagingDesc);
+        check(stagingDesc.Width == 6 && stagingDesc.Height == 1 &&
+                  stagingDesc.Format == DXGI_FORMAT_R32_FLOAT &&
+                  stagingDesc.Usage == D3D11_USAGE_STAGING &&
+                  stagingDesc.CPUAccessFlags == D3D11_CPU_ACCESS_READ,
+              "independently retained WARP staging texture survives repeated cleanup");
     }
     std::printf("exposure_cost_test: %s (%u checks)\n",
                 g_failures ? "FAILED" : "PASS", g_checks);

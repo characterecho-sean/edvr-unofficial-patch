@@ -35,6 +35,9 @@ def plan(root: Path, env: dict[str, str]) -> tuple[list[str], Path]:
         ("cockpit visuals", objdir / "plugins" / "cockpit_visuals" / "plugin_cockpit_visuals.lib"),
         ("intro", objdir / "plugins" / "intro" / "plugin_intro.lib"),
         ("exposure", objdir / "plugins" / "exposure" / "plugin_exposure.lib"),
+        ("on-foot-panel", objdir / "plugins" / "on_foot_panel" / "plugin_on_foot_panel.lib"),
+        ("scanners", objdir / "plugins" / "scanners" / "plugin_scanners.lib"),
+        ("comfort", objdir / "plugins" / "comfort" / "plugin_comfort.lib"),
     )
     bench = objdir / "flat_sdk_bench_proxy"
     output = build / "flat_sdk_bench_proxy.dll"
@@ -109,6 +112,9 @@ def self_test() -> None:
             "cockpit visuals": root / "build" / "obj" / "plugins" / "cockpit_visuals" / "plugin_cockpit_visuals.lib",
             "intro": root / "build" / "obj" / "plugins" / "intro" / "plugin_intro.lib",
             "exposure": root / "build" / "obj" / "plugins" / "exposure" / "plugin_exposure.lib",
+            "on-foot-panel": root / "build" / "obj" / "plugins" / "on_foot_panel" / "plugin_on_foot_panel.lib",
+            "scanners": root / "build" / "obj" / "plugins" / "scanners" / "plugin_scanners.lib",
+            "comfort": root / "build" / "obj" / "plugins" / "comfort" / "plugin_comfort.lib",
         }
         for library in plugin_libs.values():
             library.parent.mkdir(parents=True)

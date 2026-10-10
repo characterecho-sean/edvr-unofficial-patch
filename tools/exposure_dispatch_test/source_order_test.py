@@ -16,6 +16,8 @@ MODULE = ROOT / "src/plugins/exposure/exposure_dispatch.cpp"
 HEADER = ROOT / "src/plugins/exposure/exposure_dispatch.h"
 ACTION = ROOT / "src/plugins/exposure/exposure_actions.cpp"
 ACTION_HEADER = ROOT / "src/plugins/exposure/exposure_actions.h"
+LIFECYCLE = ROOT / "src/plugins/exposure/exposure_lifecycle.cpp"
+LIFECYCLE_HEADER = ROOT / "src/plugins/exposure/exposure_lifecycle.h"
 
 
 def code_only(source):
@@ -116,7 +118,8 @@ def ordered(body, *parts):
     return True
 
 
-def pins(core_source, module_source, header_source, action_source, action_header_source):
+def pins(core_source, module_source, header_source, action_source, action_header_source,
+         lifecycle_source, lifecycle_header_source):
     failures = set()
 
     def require(condition, label):
@@ -128,6 +131,8 @@ def pins(core_source, module_source, header_source, action_source, action_header
     header = code_only(header_source)
     action = code_only(action_source)
     action_header = code_only(action_header_source)
+    lifecycle = code_only(lifecycle_source)
+    lifecycle_header = code_only(lifecycle_header_source)
     try:
         hook = function(core, "hookedDispatch")
         flat = block(hook, r"\bif\s*\(\s*runtimeFlatProfile\s*\(\s*\)\s*\)")
@@ -220,14 +225,57 @@ def pins(core_source, module_source, header_source, action_source, action_header
                 "share-resource-compatibility-and-direction")
 
         frame = function(core, "exposureFixFrameBoundary")
-        reset = occurrences(frame, "exposurePluginResetDispatchFrame")
-        expire = occurrences(frame, "exposurePluginExpireDispatchVerdicts")
-        require(len(reset) == 1 and len(expire) == 1, "frame-call-count")
-        require(ordered(frame,
-                        r"exposurePluginResetDispatchFrame\s*\(\s*static_cast\s*<\s*plugins::exposure::ExposureDispatchObserverState\s*\*\s*>\s*\(\s*s\s*\)\s*\)\s*;",
+        reset_stage = r"pluginRegistryFrameLifecycleStage\s*\(\s*plugins::kPluginExposure\s*,\s*plugins::exposure::kExposureLifecycleResetPairing"
+        expire_stage = r"pluginRegistryFrameLifecycleStage\s*\(\s*plugins::kPluginExposure\s*,\s*plugins::exposure::kExposureLifecycleExpireVerdicts"
+        require(len(occurrences(frame, "pluginRegistryFrameLifecycleStage")) == 2,
+                "lifecycle-frame-stage-count")
+        require(ordered(frame, reset_stage,
                         r"\bs->dispatchOccSeen\s*\[\s*i\s*\]\s*=\s*0\s*;",
-                        r"exposurePluginExpireDispatchVerdicts\s*\(\s*static_cast\s*<\s*plugins::exposure::ExposureDispatchObserverState\s*\*\s*>\s*\(\s*s\s*\)\s*\)\s*;"),
-                "frame-order")
+                        expire_stage,
+                        r"if\s*\(\s*s->computeThisFrame\s*\)\s*\+\+s->frames\s*;",
+                        r"Log::get\(\)\.note\s*\("),
+                "lifecycle-frame-order")
+        require(len(occurrences(frame, "Log::get().note")) == 1,
+                "lifecycle-frame-log-count")
+        require(bool(re.search(r"!s->lifecycleRegistered\s*\|\|\s*!pluginRegistryFrameLifecycleStage\s*\([^;]*kExposureLifecycleResetPairing[^;]*\)\s*\)\s*\{\s*exposurePluginResetDispatchFrame\s*\(\s*observer\s*\)", frame, re.S)) and
+                bool(re.search(r"!s->lifecycleRegistered\s*\|\|\s*!pluginRegistryFrameLifecycleStage\s*\([^;]*kExposureLifecycleExpireVerdicts[^;]*\)\s*\)\s*\{\s*exposurePluginExpireDispatchVerdicts\s*\(\s*observer\s*\)", frame, re.S)),
+                "lifecycle-frame-fallback")
+
+        lifecycle_frame = function(lifecycle, "frame")
+        require(ordered(lifecycle_frame, r"kExposureLifecycleResetPairing",
+                        r"kExposureLifecycleExpireVerdicts"),
+                "lifecycle-module-frame-order")
+        lifecycle_init = function(lifecycle, "initializeExposureLifecycleOps")
+        require(bool(re.search(r"configureState", lifecycle_init)) and
+                bool(re.search(r"nullptr\s*,\s*frame\s*,\s*shutdown", lifecycle_init)) and
+                "EdvrPluginLifecycleOps" in lifecycle_header,
+                "lifecycle-module-ops")
+        lifecycle_config = function(lifecycle, "configureState")
+        require(bool(re.search(r"exposurePluginConfigure\s*\(\s*static_cast\s*<\s*ExposureActionState\s*\*>\s*\(\s*rawState\s*\)", lifecycle_config)),
+                "lifecycle-stateful-config")
+        lifecycle_shutdown = function(lifecycle, "shutdown")
+        require(bool(re.search(r"exposurePluginShutdownResources\s*\(", lifecycle_shutdown)),
+                "lifecycle-resource-shutdown")
+
+        configure = function(core, "exposureConfigure")
+        require(ordered(configure,
+                        r"if\s*\(\s*s->lifecycleRegistered\s*\)",
+                        r"pluginRegistryConfigureLifecycle\s*\(\s*plugins::kPluginExposure\s*,\s*&cfg\s*\)",
+                        r"exposurePluginConfigure\s*\(\s*state\s*,\s*cfg\s*\)"),
+                "lifecycle-configure-fallback")
+        install = function(core, "installExposureFix")
+        commit_block = block(install, r"\bif\s*\(\s*!s\.hook\.commit\s*\(\s*\)\s*\)")
+        register_call = re.search(r"pluginRegistryRegisterLifecycle\s*\(\s*&s\.lifecycleOps\s*\)", install)
+        require(bool(register_call) and
+                not occurrences(commit_block[2], "pluginRegistryRegisterLifecycle") and
+                register_call.start() > commit_block[1], "lifecycle-register-after-commit")
+        shutdown = function(core, "shutdownExposureFix")
+        require(ordered(shutdown,
+                        r"pluginRegistryShutdownLifecycle\s*\(\s*plugins::kPluginExposure\s*\)",
+                        r"g_state->lifecycleRegistered\s*=\s*false",
+                        r"exposurePluginShutdownResources\s*\(",
+                        r"g_state->hook\.uninstall\s*\(\s*\)"),
+                "lifecycle-shutdown-fallback-order")
 
         module_complete = function(module, "exposurePluginCompleteDispatch")
         require(bool(re.search(r"\bif\s*\(\s*!state\s*\|\|\s*!ticket\.target\s*\)\s*return\s*;", module_complete)) and
@@ -248,7 +296,8 @@ def replace_once(source, old, new):
     return source.replace(old, new, 1)
 
 
-def self_test(core, module, header, action, action_header):
+def self_test(core, module, header, action, action_header, lifecycle_source,
+              lifecycle_header):
     mutations = [
         ("flat-return", "core", "        g_state->realDispatch(self, x, y, z);\n        return;\n",
          "        g_state->realDispatch(self, x, y, z);\n"),
@@ -263,10 +312,6 @@ def self_test(core, module, header, action, action_header):
          "    guardedBudget(g_budget, [&] {});\n    ticket = exposurePluginBeginDispatch(\n        static_cast<plugins::exposure::ExposureDispatchObserverState*>(s));"),
         ("forward-outside-guards", "core", "        ticket = exposurePluginBeginDispatch(\n",
          "        s->realDispatch(self, x, y, z);\n        ticket = exposurePluginBeginDispatch(\n"),
-        ("frame-call-count", "core", "    exposurePluginResetDispatchFrame(\n",
-         "    exposurePluginResetDispatchFrame(static_cast<plugins::exposure::ExposureDispatchObserverState*>(s));\n    exposurePluginResetDispatchFrame(\n"),
-        ("frame-call-count", "core", "    exposurePluginExpireDispatchVerdicts(\n",
-         "    exposurePluginExpireDispatchVerdicts(static_cast<plugins::exposure::ExposureDispatchObserverState*>(s));\n    exposurePluginExpireDispatchVerdicts(\n"),
         ("bridge-state", "core", "    State* s = static_cast<State*>(observer);",
          "    State* s = g_state;"),
         ("bridge-share-state", "core",
@@ -303,7 +348,8 @@ def self_test(core, module, header, action, action_header):
         changed = replace_once({"core": core, "module": module, "action": action}[target], old, new)
         failures = pins(changed if target == "core" else core,
                         changed if target == "module" else module, header,
-                        changed if target == "action" else action, action_header)
+                        changed if target == "action" else action, action_header,
+                        lifecycle_source, lifecycle_header)
         if label not in failures:
             raise AssertionError("mutation escaped %s: %s" % (label, sorted(failures)))
 
@@ -315,31 +361,67 @@ def self_test(core, module, header, action, action_header):
     moved = replace_once(core, begin, "")
     moved = replace_once(moved, "    if (s->dispatchSkipCount) {\n",
                          "    if (s->dispatchSkipCount) {\n" + begin)
-    if "skip-before-ticket" not in pins(moved, module, header, action, action_header):
+    if "skip-before-ticket" not in pins(moved, module, header, action, action_header,
+                                        lifecycle_source, lifecycle_header):
         raise AssertionError("Begin inside the whole skip block escaped")
 
     # Add a forward inside the Complete guard as well as the Begin guard above.
     complete = "        exposurePluginCompleteDispatch(\n"
     changed = replace_once(core, complete, "        s->realDispatch(self, x, y, z);\n" + complete)
-    if "forward-outside-guards" not in pins(changed, module, header, action, action_header):
+    if "forward-outside-guards" not in pins(changed, module, header, action, action_header,
+                                            lifecycle_source, lifecycle_header):
         raise AssertionError("forward inside Complete guard escaped")
 
     # Rearranging frame calls around skip-counter clearing must fail even
     # though each call is still present exactly once.
-    reset = ("    exposurePluginResetDispatchFrame(\n"
-             "        static_cast<plugins::exposure::ExposureDispatchObserverState*>(s));\n")
-    moved = replace_once(core, reset, "")
-    moved = replace_once(moved, "    for (uint32_t i = 0; i < 4; ++i) s->dispatchOccSeen[i] = 0;\n",
-                         "    for (uint32_t i = 0; i < 4; ++i) s->dispatchOccSeen[i] = 0;\n" + reset)
-    if "frame-order" not in pins(moved, module, header, action, action_header):
-        raise AssertionError("reset after skip-counter clear escaped")
-    expire = ("    exposurePluginExpireDispatchVerdicts(\n"
-              "        static_cast<plugins::exposure::ExposureDispatchObserverState*>(s));\n")
-    moved = replace_once(core, expire, "")
-    moved = replace_once(moved, reset, reset + expire)
-    if "frame-order" not in pins(moved, module, header, action, action_header):
-        raise AssertionError("expiry before skip-counter clear escaped")
-    return len(mutations) + 4
+    moved = replace_once(core,
+        "plugins::exposure::kExposureLifecycleResetPairing",
+        "__EXPOSURE_LIFECYCLE_STAGE_TEMP__")
+    moved = replace_once(moved,
+        "plugins::exposure::kExposureLifecycleExpireVerdicts",
+        "plugins::exposure::kExposureLifecycleResetPairing")
+    moved = replace_once(moved, "__EXPOSURE_LIFECYCLE_STAGE_TEMP__",
+        "plugins::exposure::kExposureLifecycleExpireVerdicts")
+    if "lifecycle-frame-order" not in pins(moved, module, header, action, action_header,
+                                           lifecycle_source, lifecycle_header):
+        raise AssertionError("pairing reset after skip-counter clear escaped")
+    reversed_frame = replace_once(lifecycle_source,
+        "    frameStage(state, kExposureLifecycleResetPairing, nullptr, 0);\n"
+        "    frameStage(state, kExposureLifecycleExpireVerdicts, nullptr, 0);",
+        "    frameStage(state, kExposureLifecycleExpireVerdicts, nullptr, 0);\n"
+        "    frameStage(state, kExposureLifecycleResetPairing, nullptr, 0);")
+    if "lifecycle-module-frame-order" not in pins(core, module, header, action,
+            action_header, reversed_frame, lifecycle_header):
+        raise AssertionError("lifecycle expiry before pairing reset escaped")
+
+    for label, anchor in (
+            ("lifecycle-frame-fallback", "        exposurePluginResetDispatchFrame(observer);"),
+            ("lifecycle-frame-fallback", "        exposurePluginExpireDispatchVerdicts(observer);"),
+            ("lifecycle-shutdown-fallback-order", "        plugins::exposure::exposurePluginShutdownResources(\n")):
+        changed = replace_once(core, anchor, "")
+        if label not in pins(changed, module, header, action, action_header,
+                             lifecycle_source, lifecycle_header):
+            raise AssertionError("lifecycle fallback removal escaped: " + label)
+
+    registration = ("    s.lifecycleRegistered =\n"
+                    "        pluginRegistryRegisterLifecycle(&s.lifecycleOps);\n")
+    moved = replace_once(core, registration, "")
+    moved = replace_once(moved, "    if (!s.hook.commit()) {\n",
+                         registration + "    if (!s.hook.commit()) {\n")
+    if "lifecycle-register-after-commit" not in pins(
+            moved, module, header, action, action_header,
+            lifecycle_source, lifecycle_header):
+        raise AssertionError("lifecycle registration before hook commit escaped")
+    frame_reset = ("    if (!s->lifecycleRegistered ||\n"
+                   "        !pluginRegistryFrameLifecycleStage(\n"
+                   "            plugins::kPluginExposure,\n"
+                   "            plugins::exposure::kExposureLifecycleResetPairing, nullptr, 0)) {")
+    moved = replace_once(core, frame_reset, "    Log::get().note();\n" + frame_reset)
+    if "lifecycle-frame-log-count" not in pins(
+            moved, module, header, action, action_header,
+            lifecycle_source, lifecycle_header):
+        raise AssertionError("frame lifecycle log before verdict expiry escaped")
+    return len(mutations) + 8
 
 
 def main():
@@ -348,15 +430,18 @@ def main():
     mode.add_argument("--dry-run", action="store_true", help="check source pins without writing")
     mode.add_argument("--self-test", action="store_true", help="also run in-memory mutations")
     args = parser.parse_args()
-    core, module, header, action, action_header = (
-        p.read_text(encoding="utf-8") for p in (CORE, MODULE, HEADER, ACTION, ACTION_HEADER))
-    failures = pins(core, module, header, action, action_header)
+    core, module, header, action, action_header, lifecycle_source, lifecycle_header = (
+        p.read_text(encoding="utf-8") for p in
+        (CORE, MODULE, HEADER, ACTION, ACTION_HEADER, LIFECYCLE, LIFECYCLE_HEADER))
+    failures = pins(core, module, header, action, action_header,
+                    lifecycle_source, lifecycle_header)
     if failures:
         for failure in sorted(failures):
             print("FAIL:", failure)
         return 1
     if args.self_test:
-        count = self_test(core, module, header, action, action_header)
+        count = self_test(core, module, header, action, action_header,
+                          lifecycle_source, lifecycle_header)
         print("PASS: exposure dispatch source order (%d in-memory mutations; no writes)" % count)
     else:
         print("PASS: exposure dispatch source order (dry run; no writes)")

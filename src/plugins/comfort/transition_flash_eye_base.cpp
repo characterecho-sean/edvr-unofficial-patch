@@ -1,9 +1,9 @@
-#include "transition_flash_eye_base.h"
-#include "transition_flash_eye_base_core.h"
-#include "glitch_frame.h"
-#include "../common/code_hook.h"
-#include "../common/config.h"
-#include "../common/log.h"
+#include "../../d3d11/transition_flash_eye_base.h"
+#include "../../d3d11/transition_flash_eye_base_core.h"
+#include "../../d3d11/glitch_frame.h"
+#include "../../common/code_hook.h"
+#include "../../common/config.h"
+#include "../../common/log.h"
 
 #include <windows.h>
 #include <atomic>

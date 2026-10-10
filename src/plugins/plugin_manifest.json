@@ -211,11 +211,19 @@
         "experimental.exposure_damping_tau",
         "fix.share_exposure"
       ],
-      "hookPoints": [],
+      "hookPoints": [
+        "lifecycle.configure",
+        "lifecycle.frame",
+        "lifecycle.shutdown"
+      ],
       "claims": [],
       "costNote": "Per-plugin cost not measured; see the design document census baseline.",
-      "rigs": [],
-      "implementationStatus": "catalog-only",
+      "rigs": [
+        "exposure_dispatch_test",
+        "exposure_cost_test",
+        "plugin_dispatch_test"
+      ],
+      "implementationStatus": "phase1-lifecycle",
       "selectionAvailableProfiles": [],
       "costBudget": {
         "state": "unmeasured",
@@ -267,7 +275,9 @@
       "hookPoints": [],
       "claims": [],
       "costNote": "Per-plugin cost not measured; see the design document census baseline.",
-      "rigs": [],
+      "rigs": [
+        "native_fss_gpu_test"
+      ],
       "implementationStatus": "catalog-only",
       "selectionAvailableProfiles": [],
       "costBudget": {
@@ -394,7 +404,9 @@
       "hookPoints": [],
       "claims": [],
       "costNote": "Per-plugin cost not measured; see the design document census baseline.",
-      "rigs": [],
+      "rigs": [
+        "weapon_motion_test"
+      ],
       "implementationStatus": "catalog-only",
       "selectionAvailableProfiles": [],
       "costBudget": {
@@ -455,7 +467,10 @@
       "hookPoints": [],
       "claims": [],
       "costNote": "Per-plugin cost not measured; see the design document census baseline.",
-      "rigs": [],
+      "rigs": [
+        "native_temporal_test",
+        "transition_flash_prevent_test"
+      ],
       "implementationStatus": "catalog-only",
       "selectionAvailableProfiles": [],
       "costBudget": {

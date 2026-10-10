@@ -1,6 +1,9 @@
 #include "../../src/d3d11/plugin_dispatch.h"
 #include "../../src/d3d11/plugin_registry.h"
 #include "../../src/d3d11/binding_shadow.h"
+#include "../../src/plugins/exposure/exposure_dispatch.h"
+#include "../../src/plugins/exposure/exposure_lifecycle.h"
+#include "../../src/common/config.h"
 #include "../../src/common/runtime_profile.h"
 #include "../../src/common/log.h"
 
@@ -31,6 +34,24 @@ constexpr edvr::plugins::dispatch::ShaderClaimKey kClaims[] = {
      kManifestNightVisionClaim.shaderPairs[0].pixelShaderHash},
 };
 uint32_t checks = 0;
+float exposureDampingConfig = 0.0f;
+float exposureTauConfig = 45.0f;
+uint32_t fakeExposureReleases = 0;
+
+struct FakeTexture final {
+    const struct FakeTextureVtable* vtable;
+};
+ULONG STDMETHODCALLTYPE fakeTextureRelease(IUnknown*) {
+    ++fakeExposureReleases;
+    return 0;
+}
+struct FakeTextureVtable final {
+    HRESULT (STDMETHODCALLTYPE* query)(IUnknown*, REFIID, void**);
+    ULONG (STDMETHODCALLTYPE* addRef)(IUnknown*);
+    ULONG (STDMETHODCALLTYPE* release)(IUnknown*);
+};
+const FakeTextureVtable kFakeTextureVtable{nullptr, nullptr,
+                                           &fakeTextureRelease};
 
 // Frozen public prefix from before trace-only callbacks were appended.
 struct LegacyEdvrPluginOpsPrefix final {
@@ -77,6 +98,16 @@ struct FrameStageLifecycleOpsPrefix final {
     EdvrPluginConfigureStageFn configureStage;
     EdvrPluginFrameStageFn frameStage;
 };
+struct ShutdownStageLifecycleOpsPrefix final {
+    LegacyEdvrPluginLifecycleOpsPrefix legacy;
+    EdvrPluginConfigureStageFn configureStage;
+    EdvrPluginFrameStageFn frameStage;
+    EdvrPluginShutdownStageFn shutdownStage;
+};
+struct ConfigureStateLifecycleOpsPrefix final {
+    ShutdownStageLifecycleOpsPrefix staged;
+    EdvrPluginConfigureStateFn configureState;
+};
 static_assert(sizeof(LegacyEdvrPluginLifecycleOpsPrefix) ==
                   offsetof(EdvrPluginLifecycleOps, configureStage),
               "staged lifecycle fields must append after the exact legacy prefix");
@@ -86,6 +117,12 @@ static_assert(sizeof(ConfigureStageLifecycleOpsPrefix) ==
 static_assert(sizeof(FrameStageLifecycleOpsPrefix) ==
                   offsetof(EdvrPluginLifecycleOps, shutdownStage),
               "frame-stage fixture must end at the shutdownStage boundary");
+static_assert(sizeof(ShutdownStageLifecycleOpsPrefix) ==
+                  offsetof(EdvrPluginLifecycleOps, configureState),
+              "configureState must append after the staged lifecycle ABI");
+static_assert(sizeof(ConfigureStateLifecycleOpsPrefix) ==
+                  sizeof(EdvrPluginLifecycleOps),
+              "configureState fixture must end at the new ABI boundary");
 static_assert(offsetof(EdvrPluginLifecycleOps, configure) ==
                   offsetof(LegacyEdvrPluginLifecycleOpsPrefix, configure) &&
               offsetof(EdvrPluginLifecycleOps, frame) ==
@@ -117,11 +154,13 @@ struct LifecycleState {
     bool reenterShutdown = false;
     uint32_t manifestIndex = 0;
     uint32_t configureStageCalls = 0;
+    uint32_t configureStateCalls = 0;
     uint32_t frameStageCalls = 0;
     uint32_t shutdownStageCalls = 0;
     uint32_t lastStage = 0;
     void* lastState = nullptr;
     void* lastConfig = nullptr;
+    void* lastStateConfig = nullptr;
     ID3D11DeviceContext* lastContext = nullptr;
     uint32_t lastStageSceneFrame = 0;
 };
@@ -221,6 +260,12 @@ void lifecycleConfigureStage(void* state, uint32_t stage, void* config) {
     s->lastState = state;
     s->lastStage = stage;
     s->lastConfig = config;
+}
+void lifecycleConfigureState(void* state, void* config) {
+    auto* s = static_cast<LifecycleState*>(state);
+    ++s->configureStateCalls;
+    s->lastState = state;
+    s->lastStateConfig = config;
 }
 void lifecycleFrameStage(void* state, uint32_t stage,
                          ID3D11DeviceContext* context, uint32_t sceneFrame) {
@@ -730,6 +775,69 @@ void lifecycleRegistryDispatch() {
               lifecycleState.shutdownStageCalls == 0,
           "frameStage-only page-boundary record does not read shutdownStage");
     edvr::pluginRegistryShutdownLifecycle(kIntro);
+
+    lifecycleState = {};
+    lifecycleState.manifestIndex = kIntro;
+    auto* const shutdownPrefix = new (static_cast<uint8_t*>(pageEnd) -
+                                      sizeof(ShutdownStageLifecycleOpsPrefix))
+        ShutdownStageLifecycleOpsPrefix{
+            {offsetof(EdvrPluginLifecycleOps, configureState), kIntro, "intro",
+             &lifecycleState, &lifecycleConfigure, &lifecycleFrame,
+             &lifecycleShutdown},
+            &lifecycleConfigureStage, &lifecycleFrameStage,
+            &lifecycleShutdownStage};
+    const auto* shutdownOnlyOps = reinterpret_cast<
+        const EdvrPluginLifecycleOps*>(shutdownPrefix);
+    check(edvr::pluginRegistryRegisterLifecycle(shutdownOnlyOps),
+          "staged legacy record registers when configureState is outside structSize");
+    bool legacyConfig = true;
+    edvr::pluginRegistryConfigureLifecycle(kIntro, &legacyConfig);
+    check(lifecycleState.configureCalls == 1 &&
+              lifecycleState.configureStateCalls == 0,
+          "normal configure never reads the appended callback past declared extent");
+    edvr::pluginRegistryShutdownLifecycle(kIntro);
+
+    auto* const truncatedNoConfigure = reinterpret_cast<EdvrPluginLifecycleOps*>(
+        shutdownPrefix);
+    truncatedNoConfigure->configure = nullptr;
+    check(!edvr::pluginRegistryRegisterLifecycle(truncatedNoConfigure) &&
+              !edvr::pluginRegistryHasLifecycle(kIntro),
+          "truncated stateful-only record is rejected without publishing a slot");
+
+    lifecycleState = {};
+    lifecycleState.manifestIndex = kIntro;
+    auto* const configureStatePrefix = new (
+        static_cast<uint8_t*>(pageEnd) - sizeof(ConfigureStateLifecycleOpsPrefix))
+        ConfigureStateLifecycleOpsPrefix{
+            {{sizeof(EdvrPluginLifecycleOps), kIntro, "intro", &lifecycleState,
+              nullptr, &lifecycleFrame, &lifecycleShutdown},
+             nullptr, nullptr, nullptr},
+            &lifecycleConfigureState};
+    const auto* configureStateOps = reinterpret_cast<
+        const EdvrPluginLifecycleOps*>(configureStatePrefix);
+    check(edvr::pluginRegistryRegisterLifecycle(configureStateOps),
+          "stateful-only lifecycle record registers at its declared boundary");
+    bool statefulConfig = true;
+    edvr::pluginRegistryConfigureLifecycle(kIntro, &statefulConfig);
+    check(lifecycleState.configureStateCalls == 1 &&
+              lifecycleState.lastState == &lifecycleState &&
+              lifecycleState.lastStateConfig == &statefulConfig &&
+              lifecycleState.configureCalls == 0,
+          "stateful configure forwards registered state and config through normal dispatch");
+    edvr::pluginRegistryShutdownLifecycle(kIntro);
+
+    auto statefulPreferred = *configureStateOps;
+    statefulPreferred.configure = &lifecycleConfigure;
+    lifecycleState = {};
+    lifecycleState.manifestIndex = kIntro;
+    check(edvr::pluginRegistryRegisterLifecycle(&statefulPreferred),
+          "lifecycle registry accepts stateful and legacy configure callbacks together");
+    edvr::pluginRegistryConfigureLifecycle(kIntro, &statefulConfig);
+    check(lifecycleState.configureStateCalls == 1 &&
+              lifecycleState.configureCalls == 0 &&
+              lifecycleState.lastState == &lifecycleState,
+          "normal configure prefers the stateful callback when both are present");
+    edvr::pluginRegistryShutdownLifecycle(kIntro);
     check(VirtualFree(guardPages, 0, MEM_RELEASE) != 0,
           "guard-page lifecycle fixture releases its storage");
 
@@ -748,8 +856,13 @@ void lifecycleRegistryDispatch() {
     invalid.frame = nullptr;
     check(!edvr::pluginRegistryRegisterLifecycle(&invalid),
           "lifecycle registry requires configure, frame, and shutdown callbacks");
+    invalid = ops;
+    invalid.configure = nullptr;
+    invalid.configureState = nullptr;
+    check(!edvr::pluginRegistryRegisterLifecycle(&invalid),
+          "lifecycle registry rejects records with neither configure callback");
     EdvrPluginLifecycleOps catalogOnly = {
-        sizeof(EdvrPluginLifecycleOps), kExposure, "exposure", &lifecycleState,
+        sizeof(EdvrPluginLifecycleOps), edvr::plugins::kPluginScanners, "scanners", &lifecycleState,
         &lifecycleConfigure, &lifecycleFrame, &lifecycleShutdown};
     check(!edvr::pluginRegistryRegisterLifecycle(&catalogOnly),
           "lifecycle registry rejects catalog-only implementations");
@@ -870,6 +983,72 @@ void lifecycleRegistryDispatch() {
           "invalid runtime profile rejects lifecycle registration");
     edvr::g_runtimeProfile = savedProfile;
 }
+
+void exposureLifecycleRegistryDispatch() {
+    constexpr uint32_t kExposure = edvr::plugins::kPluginExposure;
+    edvr::pluginRegistryShutdownLifecycle(kExposure);
+    edvr::plugins::exposure::ExposureActionState state;
+    state.dampPrevValid = true;
+    state.dampHaveMean = true;
+    EdvrPluginLifecycleOps ops{};
+    edvr::plugins::exposure::initializeExposureLifecycleOps(&ops, &state);
+    check(ops.state == &state && ops.manifestIndex == kExposure &&
+              ops.configure == nullptr && ops.configureState != nullptr,
+          "production Exposure lifecycle record binds its embedded stateful callback");
+
+    const auto savedProfile = edvr::g_runtimeProfile;
+    edvr::g_runtimeProfile = edvr::RuntimeProfile::Flat;
+    check(!edvr::pluginRegistryRegisterLifecycle(&ops) &&
+              !edvr::pluginRegistryHasLifecycle(kExposure),
+          "Exposure lifecycle profile rejection publishes no registry state");
+    edvr::g_runtimeProfile = savedProfile;
+    check(edvr::pluginRegistryRegisterLifecycle(&ops) &&
+              edvr::pluginRegistryRegisterLifecycle(&ops) &&
+              edvr::pluginRegistryHasLifecycle(kExposure),
+          "production Exposure lifecycle registers and retries idempotently");
+
+    exposureDampingConfig = 4.0f;
+    exposureTauConfig = 0.0f;
+    edvr::pluginRegistryConfigureLifecycle(kExposure, &edvr::Config::get());
+    check(state.dampK == 1.0f && state.dampTau == 1.0f,
+          "registered Exposure configure clamps damping high and tau low");
+
+    exposureDampingConfig = -2.0f;
+    exposureTauConfig = 900.0f;
+    edvr::pluginRegistryConfigureLifecycle(kExposure, &edvr::Config::get());
+    check(state.dampK == 0.0f && state.dampTau == 600.0f &&
+              !state.dampPrevValid && !state.dampHaveMean,
+          "registered Exposure configure clamps values and resets damper state when disabled");
+
+    state.detectStreak = 3;
+    state.seenThisFrame = 2;
+    state.shapeVerdict.emplace(0xE001, false);
+    state.shapeVerdict.emplace(0xE002, true);
+    state.everExamined.emplace(0xE001);
+    state.firstEye[0] = reinterpret_cast<ID3D11UnorderedAccessView*>(
+        static_cast<uintptr_t>(0xE100));
+    edvr::pluginRegistryFrameLifecycle(kExposure, 123);
+    check(state.detectStreak == 4 && state.seenThisFrame == 0 &&
+              state.firstEye[0] == nullptr &&
+              state.shapeVerdict.count(0xE001) == 0 &&
+              state.shapeVerdict.count(0xE002) == 1 &&
+              state.everExamined.count(0xE001) == 1,
+          "production lifecycle frame resets pairing before expiring only negative verdicts");
+
+    FakeTexture first{&kFakeTextureVtable};
+    FakeTexture second{&kFakeTextureVtable};
+    state.dampStaging[0] = reinterpret_cast<ID3D11Texture2D*>(&first);
+    state.dampStaging[1] = reinterpret_cast<ID3D11Texture2D*>(&second);
+    fakeExposureReleases = 0;
+    edvr::pluginRegistryShutdownLifecycle(kExposure);
+    check(!edvr::pluginRegistryHasLifecycle(kExposure) &&
+              state.dampStaging[0] == nullptr && state.dampStaging[1] == nullptr &&
+              fakeExposureReleases == 2,
+          "production Exposure shutdown detaches and releases/nulls each staging texture");
+    edvr::pluginRegistryShutdownLifecycle(kExposure);
+    check(fakeExposureReleases == 2,
+          "repeated Exposure shutdown does not release staging textures twice");
+}
 }
 
 namespace edvr {
@@ -877,6 +1056,23 @@ Log& Log::get() { static Log log; return log; }
 Log::~Log() = default;
 void Log::note(const char*, ...) { ++loggerNoteCalls; }
 void breadcrumb(const char*) {}
+Config& Config::get() { static Config config; return config; }
+float Config::getFloat(const char* key, float def) const {
+    if (std::strcmp(key, "experimental.exposure_damping") == 0)
+        return exposureDampingConfig;
+    if (std::strcmp(key, "experimental.exposure_damping_tau") == 0)
+        return exposureTauConfig;
+    return def;
+}
+uint64_t lookupShaderHash(void*) { return 0; }
+void exposureDispatchApplyPair(void*, ID3D11DeviceContext*,
+                               ID3D11UnorderedAccessView**,
+                               ID3D11UnorderedAccessView**) {}
+uint64_t sunglareLastSeenMs() { return 0; }
+}
+
+namespace edvr::plugins::exposure {
+bool shapeLooksLikeExposure() { return false; }
 }
 
 int main(int argc, char** argv) {
@@ -889,6 +1085,7 @@ int main(int argc, char** argv) {
     disabledAndCacheCases();
     registryLifecycle();
     lifecycleRegistryDispatch();
+    exposureLifecycleRegistryDispatch();
     std::printf("PASS: plugin dispatch (%u checks)\n", checks);
     return 0;
 }

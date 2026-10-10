@@ -301,9 +301,13 @@ python "tools\check_plugin_boundaries.py" --quiet --require-plugin cockpit_visua
     --require-source src\plugins\intro\backdrop_fix.cpp ^
     --require-source src\plugins\intro\loader_panel.cpp ^
     --require-source src\plugins\intro\splash_dim.cpp ^
+    --require-plugin on_foot_panel --require-source src\plugins\on_foot_panel\weapon_motion.cpp ^
+    --require-plugin scanners --require-source src\plugins\scanners\fss_heal.cpp ^
+    --require-plugin comfort --require-source src\plugins\comfort\transition_flash_eye_base.cpp ^
     --require-plugin exposure --require-source src\plugins\exposure\exposure_shape.cpp ^
     --require-source src\plugins\exposure\exposure_dispatch.cpp ^
     --require-source src\plugins\exposure\exposure_actions.cpp ^
+    --require-source src\plugins\exposure\exposure_lifecycle.cpp ^
     --include-dir "%GEN%" || exit /b 1
 
 if not exist "%OBJ%\plugins\cockpit_visuals" mkdir "%OBJ%\plugins\cockpit_visuals"
@@ -314,6 +318,33 @@ if errorlevel 1 ( echo [edvr] ERROR: cockpit visuals plugin compile failed & exi
 lib.exe /nologo /OUT:"%OBJ%\plugins\cockpit_visuals\plugin_cockpit_visuals.lib" ^
     "%OBJ%\plugins\cockpit_visuals\night_vision.obj"
 if errorlevel 1 ( echo [edvr] ERROR: cockpit visuals plugin library failed & exit /b 1 )
+
+if not exist "%OBJ%\plugins\on_foot_panel" mkdir "%OBJ%\plugins\on_foot_panel"
+del /q "%OBJ%\plugins\on_foot_panel\*.obj" 2>nul
+cl.exe %CFLAGS% /Fo"%OBJ%\plugins\on_foot_panel\\" ^
+    "src\plugins\on_foot_panel\weapon_motion.cpp"
+if errorlevel 1 ( echo [edvr] ERROR: on-foot-panel plugin compile failed & exit /b 1 )
+lib.exe /nologo /OUT:"%OBJ%\plugins\on_foot_panel\plugin_on_foot_panel.lib" ^
+    "%OBJ%\plugins\on_foot_panel\weapon_motion.obj"
+if errorlevel 1 ( echo [edvr] ERROR: on-foot-panel plugin library failed & exit /b 1 )
+
+if not exist "%OBJ%\plugins\scanners" mkdir "%OBJ%\plugins\scanners"
+del /q "%OBJ%\plugins\scanners\*.obj" 2>nul
+cl.exe %CFLAGS% /Fo"%OBJ%\plugins\scanners\\" ^
+    "src\plugins\scanners\fss_heal.cpp"
+if errorlevel 1 ( echo [edvr] ERROR: scanners plugin compile failed & exit /b 1 )
+lib.exe /nologo /OUT:"%OBJ%\plugins\scanners\plugin_scanners.lib" ^
+    "%OBJ%\plugins\scanners\fss_heal.obj"
+if errorlevel 1 ( echo [edvr] ERROR: scanners plugin library failed & exit /b 1 )
+
+if not exist "%OBJ%\plugins\comfort" mkdir "%OBJ%\plugins\comfort"
+del /q "%OBJ%\plugins\comfort\*.obj" 2>nul
+cl.exe %CFLAGS% /Fo"%OBJ%\plugins\comfort\\" ^
+    "src\plugins\comfort\transition_flash_eye_base.cpp"
+if errorlevel 1 ( echo [edvr] ERROR: comfort plugin compile failed & exit /b 1 )
+lib.exe /nologo /OUT:"%OBJ%\plugins\comfort\plugin_comfort.lib" ^
+    "%OBJ%\plugins\comfort\transition_flash_eye_base.obj"
+if errorlevel 1 ( echo [edvr] ERROR: comfort plugin library failed & exit /b 1 )
 
 if not exist "%OBJ%\plugins\intro" mkdir "%OBJ%\plugins\intro"
 del /q "%OBJ%\plugins\intro\*.obj" 2>nul
@@ -340,11 +371,11 @@ if not exist "%OBJ%\plugins\exposure" mkdir "%OBJ%\plugins\exposure"
 del /q "%OBJ%\plugins\exposure\*.obj" 2>nul
 cl.exe %CFLAGS% /Fo"%OBJ%\plugins\exposure\\" ^
     "src\plugins\exposure\exposure_shape.cpp" "src\plugins\exposure\exposure_dispatch.cpp" ^
-    "src\plugins\exposure\exposure_actions.cpp"
+    "src\plugins\exposure\exposure_actions.cpp" "src\plugins\exposure\exposure_lifecycle.cpp"
 if errorlevel 1 ( echo [edvr] ERROR: exposure plugin compile failed & exit /b 1 )
 lib.exe /nologo /OUT:"%OBJ%\plugins\exposure\plugin_exposure.lib" ^
     "%OBJ%\plugins\exposure\exposure_shape.obj" "%OBJ%\plugins\exposure\exposure_dispatch.obj" ^
-    "%OBJ%\plugins\exposure\exposure_actions.obj"
+    "%OBJ%\plugins\exposure\exposure_actions.obj" "%OBJ%\plugins\exposure\exposure_lifecycle.obj"
 if errorlevel 1 ( echo [edvr] ERROR: exposure plugin library failed & exit /b 1 )
 
 echo [edvr] === d3d11.dll ===
@@ -589,7 +620,6 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\render_boundary.cpp" ^
     "src\d3d11\exposure_fix.cpp" "src\d3d11\shader_registry.cpp" "src\d3d11\vscreen.cpp" "src\d3d11\plugin_registry.cpp" "src\d3d11\plugin_cost.cpp" ^
     "src\d3d11\glitch_frame.cpp" ^
-    "src\d3d11\transition_flash_eye_base.cpp" ^
     "src\d3d11\explorer_cam.cpp" ^
     "src\d3d11\vscreen_res.cpp" "src\common\vscreen_auto_state.cpp" "src\d3d11\vscreen_footprint.cpp" ^
     "src\d3d11\binding_shadow.cpp" ^
@@ -607,11 +637,10 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\fss_res.cpp" ^
     "src\d3d11\fss_panel.cpp" ^
     "src\d3d11\fss_reveal.cpp" ^
-    "src\d3d11\fss_heal.cpp" ^
     "src\d3d11\vertex_resync_hook.cpp" ^
     "src\d3d11\xinput_watch.cpp" ^
     "src\d3d11\fss_panel_rect.cpp" ^
-    "src\d3d11\panel_curve.cpp" "src\d3d11\screen_motion.cpp" "src\d3d11\weapon_motion.cpp" ^
+    "src\d3d11\panel_curve.cpp" "src\d3d11\screen_motion.cpp" ^
     "src\d3d11\remlok_fix.cpp" "src\d3d11\holo_fix.cpp" ^
     "src\d3d11\target_sharp.cpp" ^
     "src\d3d11\wake_pulse.cpp" ^
@@ -658,6 +687,8 @@ link.exe /nologo /DLL /MACHINE:X64 /INCREMENTAL:NO %EDVR_CPU_LINK% /PDB:"%BUILD%
     /DEF:"%GEN%\edvr_d3d11.def" /OUT:"%BUILD%\d3d11.dll" ^
     "%OBJ%\d3d11\*.obj" "%OBJ%\plugins\cockpit_visuals\plugin_cockpit_visuals.lib" ^
     "%OBJ%\plugins\intro\plugin_intro.lib" "%OBJ%\plugins\exposure\plugin_exposure.lib" ^
+    "%OBJ%\plugins\on_foot_panel\plugin_on_foot_panel.lib" ^
+    "%OBJ%\plugins\scanners\plugin_scanners.lib" "%OBJ%\plugins\comfort\plugin_comfort.lib" ^
     "%OBJ%\d3d11\dxbc_notice.res" "%OBJ%\d3d11\version.res" kernel32.lib user32.lib gdi32.lib version.lib d3dcompiler.lib %NGXLIB% %FSRLIB%
 if errorlevel 1 ( echo [edvr] ERROR: link failed & exit /b 1 )
 
@@ -973,7 +1004,7 @@ echo [edvr] === native_fss_gpu_test.exe ===
 if not exist "%OBJ%\native_fss_gpu" mkdir "%OBJ%\native_fss_gpu"
 cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\native_fss_gpu\\" /Fe"%BUILD%\native_fss_gpu_test.exe" ^
-    "tools\native_fss_test\native_fss_gpu_test.cpp" "src\d3d11\native_fss.cpp" "src\d3d11\fss_heal.cpp" ^
+    "tools\native_fss_test\native_fss_gpu_test.cpp" "src\d3d11\native_fss.cpp" "src\plugins\scanners\fss_heal.cpp" ^
     "src\common\config.cpp" "src\common\frame_flag.cpp" "src\common\log.cpp" "src\common\guard.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib dxgi.lib d3dcompiler.lib
 if errorlevel 1 ( echo [edvr] ERROR: native FSS shader test build failed & exit /b 1 )
@@ -1032,7 +1063,7 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /I"third_party\openxr\include" ^
     /Fo"%OBJ%\native_temporal\\" /Fe"%BUILD%\native_temporal_test.exe" ^
     "tools\native_temporal_test\native_temporal_test.cpp" "src\d3d11\native_temporal.cpp" ^
-    "src\d3d11\glitch_frame.cpp" "src\d3d11\vr_runtime.cpp" "src\d3d11\transition_flash_eye_base.cpp" ^
+    "src\d3d11\glitch_frame.cpp" "src\d3d11\vr_runtime.cpp" "src\plugins\comfort\transition_flash_eye_base.cpp" ^
     "src\common\code_hook.cpp" "src\common\guard.cpp" ^
     "src\common\config.cpp" "src\common\frame_flag.cpp" "src\common\log.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib dxgi.lib
@@ -1718,6 +1749,8 @@ cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNO
     /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\plugindispatch\\" ^
     /Fe"%BUILD%\plugin_dispatch_test.exe" "tools\plugin_dispatch_test\plugin_dispatch_test.cpp" ^
     "src\d3d11\plugin_registry.cpp" "src\d3d11\binding_shadow.cpp" "src\d3d11\plugin_cost.cpp" "src\common\guard.cpp" ^
+    "src\plugins\exposure\exposure_actions.cpp" "src\plugins\exposure\exposure_dispatch.cpp" ^
+    "src\plugins\exposure\exposure_lifecycle.cpp" ^
     /link /INCREMENTAL:NO
 if errorlevel 1 ( echo [edvr] ERROR: plugin dispatch rig build failed & exit /b 1 )
 "%BUILD%\plugin_dispatch_test.exe" --self-test || (
@@ -2888,6 +2921,8 @@ link.exe /nologo /MACHINE:X64 /INCREMENTAL:NO /OPT:REF ^
     @"%OBJ%\vscreenpredicate\production_objects.rsp" ^
     "%OBJ%\plugins\cockpit_visuals\plugin_cockpit_visuals.lib" ^
     "%OBJ%\plugins\intro\plugin_intro.lib" "%OBJ%\plugins\exposure\plugin_exposure.lib" ^
+    "%OBJ%\plugins\on_foot_panel\plugin_on_foot_panel.lib" ^
+    "%OBJ%\plugins\scanners\plugin_scanners.lib" "%OBJ%\plugins\comfort\plugin_comfort.lib" ^
     kernel32.lib user32.lib gdi32.lib version.lib d3dcompiler.lib %NGXLIB% %FSRLIB%
 if errorlevel 1 ( echo [edvr] ERROR: VScreen predicate test build failed & exit /b 1 )
 "%BUILD%\vscreen_predicate_test.exe" --dry-run || exit /b 1

@@ -40,6 +40,7 @@ typedef void (*EdvrPluginFrameStageFn)(void* state, uint32_t stage,
                                        ID3D11DeviceContext* context,
                                        uint32_t sceneFrame);
 typedef void (*EdvrPluginShutdownStageFn)(void* state, uint32_t stage);
+typedef void (*EdvrPluginConfigureStateFn)(void* state, void* config);
 
 // Separate lifecycle registration for modules whose lifetime is owned by a
 // specific core callsite. The legacy draw registry has a partial-host lifetime:
@@ -60,11 +61,18 @@ struct EdvrPluginLifecycleOps {
     EdvrPluginConfigureStageFn configureStage;
     EdvrPluginFrameStageFn frameStage;
     EdvrPluginShutdownStageFn shutdownStage;
+    // Appended after staged callbacks so the legacy lifecycle prefix and
+    // existing staged-record extents remain valid.
+    EdvrPluginConfigureStateFn configureState;
 };
 static_assert(offsetof(EdvrPluginLifecycleOps, configureStage) ==
                   offsetof(EdvrPluginLifecycleOps, shutdown) +
                       sizeof(EdvrPluginShutdownFn),
               "staged callbacks must remain after the legacy lifecycle prefix");
+static_assert(offsetof(EdvrPluginLifecycleOps, configureState) ==
+                  offsetof(EdvrPluginLifecycleOps, shutdownStage) +
+                      sizeof(EdvrPluginShutdownStageFn),
+              "stateful configure must append after every staged callback");
 
 struct EdvrPluginOps {
     uint32_t structSize;
