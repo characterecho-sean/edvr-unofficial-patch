@@ -645,12 +645,14 @@ bool dlaaWarm(ID3D11DeviceContext* ctx, uint32_t w, uint32_t h,
     // NVIDIA's ceiling (dlss_floor.h): a size it names no usable range for has no 1:1 feature either -- the 2026-10-09 flight's
     // 8268x3948 failed its create -- so the warm-up stands aside there, quietly. The first upscaled frame cuts its output to the
     // ceiling and makes its own feature; the loading frames at this size stand aside too (temporal_pass.cpp).
+    bool features = true;   // the key cull dropped dlaaWarm's parameter of this name; main's ceiling check below still clears it
     if (ok && features && dev) {
         DlssModeRange modes[kDlssModeCount];
         if (!dlssModeRanges(dev, w, h, modes) || !dlssRangesAnswered(modes)) features = false;
     }
     if (dev) dev->Release();
     if (!ok) return false;
+    if (!features) return true;
     for (int eye = 0; eye < 2; ++eye) {
         if (!ensureFeature(ctx, eye, w, h, w, h, reason, createMs ? &createMs[eye] : nullptr)) {
             return false;
