@@ -371,6 +371,10 @@ void engineVelocityFlatFlush(ID3D11DeviceContext* ctx, EngineVelocityFlushCause 
 // owner-thread and exact owner-context gates. Other flush causes keep the
 // original NoApi entry above.
 void engineVelocityFlatFlushOtherDrawSampledBoundary(ID3D11DeviceContext* ctx);
+// The explicit-domain marker path has its own validated kOtherDraw boundary.
+// Keep its original direct flush available for callers that do not qualify
+// for API sampling.
+void engineVelocityFlatDomainEntrySampledBoundary(ID3D11DeviceContext* ctx);
 void engineVelocityFlatAbandon() noexcept;
 // The frame ends, after the Present's flush: what the bracket kept for it (the game's render-target set, its blend state, the
 // accepted binding; flat_query_cut.h) is released. A no-op while EDVR's state is still bound: the flush is owed first.

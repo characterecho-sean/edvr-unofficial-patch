@@ -3091,7 +3091,7 @@ bool engineVelocityFlatDomainBeginDraw(ID3D11DeviceContext* ctx,ID3D11Texture2D*
         if(!writerToken || writerToken>0xffffffu)return fail("flat-domain-writer-token-unavailable");
         if(!primitiveCount || primitiveCount>0xffffffu)return fail("flat-domain-primitive-overflow");
     }
-    engineVelocityFlatFlush(ctx,EngineVelocityFlushCause::kOtherDraw);
+    engineVelocityFlatDomainEntrySampledBoundary(ctx);
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
     if(g_flatDomainSaved.context)return fail("flat-domain-nested-bracket");
     FlatDomainSaved saved; saved.context=ctx;
@@ -3268,11 +3268,26 @@ void engineVelocityFlatFlush(ID3D11DeviceContext* ctx, EngineVelocityFlushCause 
     flatFlushLocked(ctx, cause);
 }
 
-// Only the flat runtime's owner-context kOtherDraw boundary calls this. Keep
-// the existing public flush's NoApi contract intact for domain entry, frame,
-// shutdown and every other cause. The pending recheck avoids asking the plugin
-// sampler for work after a prior flush already consumed the held state.
+// Only the flat runtime's owner-context ordinary kOtherDraw boundary calls
+// this. The explicit-domain path has its own validated boundary below; frame,
+// shutdown and every other cause still use the public NoApi flush. The pending
+// recheck avoids asking the plugin sampler after a prior flush consumed state.
 void engineVelocityFlatFlushOtherDrawSampledBoundary(ID3D11DeviceContext* ctx) {
+    if (!g_flatPending.load(std::memory_order_acquire)) return;
+    if (live.load(std::memory_order_acquire) && plugin_cost::apiSampleHint() &&
+        edvrPluginCostApiSampleContext(ctx) != 0) {
+        std::lock_guard<std::recursive_mutex> lock(g_mutex);
+        flatFlushLocked<plugin_cost::SampledApi<>>(ctx, EngineVelocityFlushCause::kOtherDraw);
+    } else {
+        engineVelocityFlatFlush(ctx, EngineVelocityFlushCause::kOtherDraw);
+    }
+}
+
+// Domain entry is a distinct validated restore boundary from the flat runtime's
+// ordinary OtherDraw hook. Keep the pending check before consulting the plugin
+// sampler, then select the API policy once for the restore. Invalid or
+// unsampled contexts retain the original NoApi flush behavior.
+void engineVelocityFlatDomainEntrySampledBoundary(ID3D11DeviceContext* ctx) {
     if (!g_flatPending.load(std::memory_order_acquire)) return;
     if (live.load(std::memory_order_acquire) && plugin_cost::apiSampleHint() &&
         edvrPluginCostApiSampleContext(ctx) != 0) {

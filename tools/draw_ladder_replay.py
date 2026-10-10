@@ -4403,6 +4403,38 @@ def _forward_draw_end(draw):
     return [_forward_action(17, 3, 2, draw, 0)]
 
 
+def _flat_bypass_action_plan(draw):
+    """Replay the flat profile's direct original call from recorded draw facts."""
+    kind = draw["kind"]
+    call = {ord("D"): 1, ord("I"): 2, ord("N"): 3, ord("X"): 4,
+            ord("A"): 5, ord("Z"): 6, ord("Y"): 7}[kind]
+    action_id = {ord("D"): 2, ord("I"): 2, ord("N"): 2, ord("X"): 2,
+                 ord("A"): 18, ord("Z"): 19, ord("Y"): 20}[kind]
+    count, instances = draw["count"], draw["instances"]
+    args = draw["args"]
+    if kind in (ord("D"), ord("N")):
+        start = args["base"] & 0xffffffff
+        start_instance, base_vertex = args["startInstance"], 0
+    elif kind in (ord("I"), ord("X")):
+        start, start_instance, base_vertex = args["start"], args["startInstance"], args["base"]
+    elif kind in (ord("Y"), ord("Z")):
+        start, start_instance, base_vertex = draw["argumentByteOffset"], 0, 0
+    else:
+        start, start_instance, base_vertex = 0, 0, 0
+
+    def action(action_id, phase, outcome, flags, issue_count):
+        return {"id": action_id, "phase": phase, "outcome": outcome, "call": call,
+                "flags": flags, "issueCount": issue_count, "issueCountKnown": True,
+                "count": count, "instances": instances, "start": start,
+                "startInstance": start_instance, "baseVertex": base_vertex}
+
+    gpu_args_unavailable = (FLAG_BITS["action"]["gpuDrawArgsUnavailable"]
+                            if kind in (ord("A"), ord("Y"), ord("Z")) else 0)
+    return [action(1, 1, 2, 0, 0),
+            action(action_id, 2, 2, gpu_args_unavailable, 1),
+            action(17, 3, 2, 0, 0)]
+
+
 def validate_trace(data, expected_log=None, expected_build_stamp=None):
     if not isinstance(data, dict):
         raise TraceError("sidecar root must be an object")
@@ -4590,6 +4622,9 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
         }.get(kind)
         if expected_route and route != 7 and (route, sequence) != expected_route:
             raise TraceError(label + " bypass command does not match its route")
+        if (route == 7 and kind in (ord("A"), ord("Y"), ord("Z")) and
+                (draw["count"] != 0 or draw["instances"] != 0)):
+            raise TraceError(label + " flat Auto/indirect source counts must be zero")
         if kind in (ord("D"), ord("I"), ord("N"), ord("X")) and route in (8, 9, 10):
             raise TraceError(label + " classifier command uses a bypass route")
         if (kind in (ord("A"), ord("Y"), ord("Z"))) and draw_parameters_known:
@@ -4794,6 +4829,8 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
                                        ord("Y"): 20}.get(kind)
             if expected_command_action and original["id"] != expected_command_action:
                 raise TraceError(label + " bypass action ID does not match command")
+        if route == 7 and actions != _flat_bypass_action_plan(draw):
+            raise TraceError(label + " flat bypass actions disagree with recorded draw arguments")
         if facts is not None and facts.get("issueBlocked") == "yes" and forward_input_version != 1:
             blocked = [action for action in actions
                        if action["id"] == 3 and action["phase"] == 2]
@@ -5336,6 +5373,8 @@ def self_test():
 
     no_op = json.loads(json.dumps(base))
     no_op["draws"][0]["instances"] = 0
+    for action in no_op["draws"][0]["actions"]:
+        action["instances"] = 0
     try:
         validate_trace(no_op)
     except Exception as exc:
@@ -6368,6 +6407,13 @@ def self_test():
     except TraceError:
         pass
 
+    def literal_flat_action(action_id, phase, outcome, call, flags, issue_count,
+                            count, instances, start, start_instance, base_vertex):
+        return {"id": action_id, "phase": phase, "outcome": outcome, "call": call,
+                "flags": flags, "issueCount": issue_count, "issueCountKnown": True,
+                "count": count, "instances": instances, "start": start,
+                "startInstance": start_instance, "baseVertex": base_vertex}
+
     bypass_cases = [
         (ord("A"), 7, 5, 72, 5, 18, False, "flat bypass/actions"),
         (ord("Z"), 7, 5, 72, 6, 19, True, "flat bypass/actions"),
@@ -6408,6 +6454,18 @@ def self_test():
              "baseVertex": 0},
             dict({"id": 17, "phase": 3, "outcome": 2, "call": call}, **call_args),
         ]
+        if route == 7:
+            unavailable = FLAG_BITS["action"]["gpuDrawArgsUnavailable"] if kind in (
+                ord("A"), ord("Y"), ord("Z")) else 0
+            action_start = draw["argumentByteOffset"] if kind in (ord("Y"), ord("Z")) else 0
+            draw["actions"] = [
+                literal_flat_action(1, 1, 2, call, 0, 0, draw["count"], draw["instances"],
+                                    action_start, 0, 0),
+                literal_flat_action(action_id, 2, 2, call, unavailable, 1,
+                                    draw["count"], draw["instances"], action_start, 0, 0),
+                literal_flat_action(17, 3, 2, call, 0, 0, draw["count"], draw["instances"],
+                                    action_start, 0, 0),
+            ]
         try:
             summary = validate_trace(bypass)
             if scope_text not in summary["scope"]:
@@ -6415,6 +6473,45 @@ def self_test():
         except Exception as exc:
             print("draw-ladder bypass fixture rejected for kind %r: %s" % (kind, exc))
             return 1
+        if route == 7 and kind == ord("Y"):
+            missing_gpu_args_flag = json.loads(json.dumps(bypass))
+            missing_gpu_args_flag["draws"][0]["actions"][1]["flags"] = 0
+            try:
+                validate_trace(missing_gpu_args_flag)
+                print("draw-ladder flat indirect action accepted available GPU arguments")
+                return 1
+            except TraceError as exc:
+                if "GPU-argument availability disagrees with call kind" not in str(exc):
+                    print("draw-ladder flat indirect flag failed outside its structural guard: %s" % exc)
+                    return 1
+        if route == 7 and kind in (ord("A"), ord("Y"), ord("Z")):
+            for field in ("count", "instances"):
+                bad_source_count = json.loads(json.dumps(bypass))
+                bad_draw = bad_source_count["draws"][0]
+                bad_draw[field] = 1
+                for action in bad_draw["actions"]:
+                    action[field] = 1
+                try:
+                    validate_trace(bad_source_count)
+                    print("draw-ladder flat %s fixture accepted nonzero source %s" %
+                          (chr(kind), field))
+                    return 1
+                except TraceError as exc:
+                    if "flat Auto/indirect source counts must be zero" not in str(exc):
+                        print("draw-ladder flat %s source-count guard failed unexpectedly: %s" %
+                              (chr(kind), exc))
+                        return 1
+        if route == 7 and kind in (ord("Y"), ord("Z")):
+            changed_offset_action = json.loads(json.dumps(bypass))
+            changed_offset_action["draws"][0]["actions"][1]["start"] += 4
+            try:
+                validate_trace(changed_offset_action)
+                print("draw-ladder flat indirect replay accepted a changed byte-offset action")
+                return 1
+            except TraceError as exc:
+                if "flat bypass actions disagree" not in str(exc):
+                    print("draw-ladder indirect offset failed outside replay comparison: %s" % exc)
+                    return 1
         if route in (8, 9, 10):
             blocked = json.loads(json.dumps(bypass))
             blocked_draw = blocked["draws"][0]
@@ -6444,6 +6541,80 @@ def self_test():
                 return 1
             except TraceError:
                 pass
+
+    # Frozen route-7 values from the direct hook arguments. These literals are
+    # deliberately independent of _flat_bypass_action_plan.
+    flat_direct_cases = (
+        (ord("D"), 1, 321, 1, {"start": 0, "base": -19088744, "startInstance": 0},
+         0xfedcba98, 0, 0),
+        (ord("I"), 2, 321, 1, {"start": 0x87654321, "base": -123456789, "startInstance": 0},
+         0x87654321, 0, -123456789),
+        (ord("N"), 3, 321, 5, {"start": 0, "base": -19088744, "startInstance": 0x76543210},
+         0xfedcba98, 0x76543210, 0),
+        (ord("X"), 4, 321, 5, {"start": 0x87654321, "base": -123456789, "startInstance": 0x76543210},
+         0x87654321, 0x76543210, -123456789),
+    )
+    flat_x_fixture = None
+    for (kind, call, count, instances, source_args, expected_start,
+         expected_start_instance, expected_base) in flat_direct_cases:
+        flat = json.loads(json.dumps(base))
+        draw = flat["draws"][0]
+        draw.update(kind=kind, command=DRAW_COMMANDS[kind], count=count,
+                    instances=instances, args=source_args)
+        expected = [
+            literal_flat_action(1, 1, 2, call, 0, 0, count, instances,
+                                expected_start, expected_start_instance, expected_base),
+            literal_flat_action(2, 2, 2, call, 0, 1, count, instances,
+                                expected_start, expected_start_instance, expected_base),
+            literal_flat_action(17, 3, 2, call, 0, 0, count, instances,
+                                expected_start, expected_start_instance, expected_base),
+        ]
+        draw["actions"] = expected
+        try:
+            validate_trace(flat)
+        except Exception as exc:
+            print("draw-ladder flat direct action fixture failed for %s: %s" %
+                  (chr(kind), exc))
+            return 1
+        if kind == ord("X"):
+            flat_x_fixture = flat
+
+    # Every original-action draw argument is checked against the captured
+    # inputs, even when the mutation remains a valid serialized integer.
+    for field in ("count", "instances", "start", "startInstance", "baseVertex"):
+        changed = json.loads(json.dumps(flat_x_fixture))
+        changed["draws"][0]["actions"][1][field] += 1
+        try:
+            validate_trace(changed)
+            print("draw-ladder flat action replay accepted changed original %s" % field)
+            return 1
+        except TraceError as exc:
+            if "flat bypass actions disagree" not in str(exc):
+                print("draw-ladder original %s failed outside replay comparison: %s" %
+                      (field, exc))
+                return 1
+    for action_index, field in ((0, "count"), (2, "startInstance")):
+        changed = json.loads(json.dumps(flat_x_fixture))
+        changed["draws"][0]["actions"][action_index][field] += 1
+        try:
+            validate_trace(changed)
+            print("draw-ladder flat action replay accepted changed envelope %s" % field)
+            return 1
+        except TraceError as exc:
+            if "flat bypass actions disagree" not in str(exc):
+                print("draw-ladder envelope %s failed outside replay comparison: %s" %
+                      (field, exc))
+                return 1
+    wrong_flat_call = json.loads(json.dumps(flat_x_fixture))
+    wrong_flat_call["draws"][0]["actions"][1]["call"] = 3
+    try:
+        validate_trace(wrong_flat_call)
+        print("draw-ladder flat action replay accepted a wrong original call kind")
+        return 1
+    except TraceError as exc:
+        if "bypass original action call kind is wrong" not in str(exc):
+            print("draw-ladder wrong call failed outside its structural guard: %s" % exc)
+            return 1
 
     def reverse_vr_sites(data):
         draw = data["draws"][0]

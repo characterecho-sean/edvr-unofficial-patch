@@ -39,6 +39,7 @@
 #include "native_benchmark_collector.h"
 #include "native_render_labels.h"
 #include "draw_cpu_window.h"
+#include "plugin_cost_boundary.h"
 #include "../common/native_render_settings.h"
 #include "../common/config.h"
 
@@ -50,7 +51,6 @@ namespace edvr {
 // sixteen. Set at the frame boundary, from the same expression as before.
 namespace detail {
 bool g_perfMonitorSampleDraws = false;
-bool g_pluginCostApiSampleFrame = false;
 }  // namespace detail
 
 static_assert(plugin_cost::kOwnerCount == plugins::kPluginIndexCount + 1,
@@ -75,7 +75,8 @@ constexpr float kMatchWindowS = 0.2f;
 constexpr uint64_t kSlowEveryMs = 1000;
 constexpr uint64_t kGraceMs = 2000;
 // One frame in sixteen samples the draw hooks.
-constexpr uint32_t kDrawSampleEvery = 16;
+constexpr uint32_t kDrawSampleEvery = plugin_cost::kPresentSampleEvery;
+plugin_cost::PresentBoundary g_pluginCostBoundary;
 // The drop log line: at most one every five seconds, sixty a session.
 constexpr uint64_t kDropLogEveryMs = 5000;
 constexpr uint32_t kDropLogMax = 60;
@@ -1130,19 +1131,7 @@ void perfMonitorFrame(ID3D11Device* dev) {
         s.nativeBenchmarkMetadataMs = 0;
         s.nativeBenchmarkMetadata = {};
     }
-    // Close the fixed-memory plugin-cost sample before resetting the existing
-    // draw totals or publishing the next frame's sample flags. The collector
-    // owns the trace-suppression latch set by the one selected draw in a replay
-    // frame; no trace query or logging is added to ordinary draw sites.
     const bool nextSampleFrame = (s.frameNo % kDrawSampleEvery) == 0;
-    const bool closedCpuSampleFrame = detail::g_perfMonitorSampleDraws;
-    const bool closedApiSampleFrame = detail::g_pluginCostApiSampleFrame;
-    EdvrPluginCostWindowV2 pluginCostWindow;
-    const bool pluginCostWindowReady = edvrPluginCostFrameBoundaryV2(
-        s.frameNo, closedCpuSampleFrame ? 1u : 0u,
-        closedApiSampleFrame ? 1u : 0u, nextSampleFrame ? 1u : 0u, 0u,
-        &pluginCostWindow) != 0;
-    detail::g_pluginCostApiSampleFrame = nextSampleFrame;
 
     // EDVR's part: the events of the frame just ending.
     const uint32_t ev = s.events.exchange(0);
@@ -1195,79 +1184,6 @@ void perfMonitorFrame(ID3D11Device* dev) {
         char refreshLine[320];
         formatConfigRefreshWindow(refreshLine, sizeof(refreshLine), s.frameNo, reloads, reloadMs, reloadMaxMs, edits);
         Log::get().note("%s", refreshLine);
-    }
-    if (pluginCostWindowReady) {
-        const auto countMaskBits = [](uint64_t bits) {
-            unsigned count = 0;
-            while (bits != 0) {
-                bits &= bits - 1;
-                ++count;
-            }
-            return count;
-        };
-        Log::get().note(
-            "plugin cost V2: window %u..%u (%u frames), profile 0x%X; CPU %llu sampled frames, %llu replay-suppressed; API %llu sampled frames. CPU rows cover timed draw-classifier handlers only (partial module coverage); API rows cover explicitly annotated calls only (partial source coverage). Missing rows mean no timed/annotated work was observed. Logical owner attribution does not report module selection or a numeric budget.",
-            pluginCostWindow.firstFrame, pluginCostWindow.lastFrame,
-            pluginCostWindow.windowFrames, pluginCostWindow.profileBit,
-            static_cast<unsigned long long>(pluginCostWindow.completedCpuSampleFrames),
-            static_cast<unsigned long long>(pluginCostWindow.cpuTraceSuppressedFrames),
-            static_cast<unsigned long long>(pluginCostWindow.completedApiSampleFrames));
-        for (unsigned i = 0; i < plugin_cost::kOwnerCount; ++i) {
-            const EdvrPluginCostOwnerV2& owner = pluginCostWindow.owners[i];
-            if (!owner.cpuObserved && !owner.apiObserved) continue;
-            const char* ownerName = i < plugins::kPluginCount
-                ? plugins::kManifest[i].id : "core";
-            const unsigned coveredCpuSites =
-                countMaskBits(owner.cpuSiteMask[0]) + countMaskBits(owner.cpuSiteMask[1]);
-            if (owner.cpuObserved) {
-                if (pluginCostWindow.completedCpuSampleFrames < 2) {
-                    Log::get().note(
-                        "plugin cost CPU: %s; %.4f ms mean per sampled frame (stddev unavailable; fewer than two sampled frames); confidence interval unavailable; %llu timed classifier-handler scopes, %u distinct reached site IDs; reached %llu, invoked %llu, not-eligible %llu. This is partial source coverage.",
-                        ownerName, owner.cpuMeanMs,
-                        static_cast<unsigned long long>(owner.cpuTimedScopes), coveredCpuSites,
-                        static_cast<unsigned long long>(owner.cpuReached),
-                        static_cast<unsigned long long>(owner.cpuInvoked),
-                        static_cast<unsigned long long>(owner.cpuNotEligible));
-                } else {
-                    Log::get().note(
-                        "plugin cost CPU: %s; %.4f ms mean per sampled frame (%.4f ms stddev); confidence interval unavailable; %llu timed classifier-handler scopes, %u distinct reached site IDs; reached %llu, invoked %llu, not-eligible %llu. This is partial source coverage.",
-                        ownerName, owner.cpuMeanMs, owner.cpuStdDevMs,
-                        static_cast<unsigned long long>(owner.cpuTimedScopes), coveredCpuSites,
-                        static_cast<unsigned long long>(owner.cpuReached),
-                        static_cast<unsigned long long>(owner.cpuInvoked),
-                        static_cast<unsigned long long>(owner.cpuNotEligible));
-                }
-            }
-            if (owner.apiObserved) {
-                const double apiSampleFrames = pluginCostWindow.completedApiSampleFrames != 0
-                    ? static_cast<double>(pluginCostWindow.completedApiSampleFrames) : 1.0;
-                Log::get().note(
-                    "plugin cost API V2: %s; work %llu (%.3f/sample frame), transfer %llu (%.3f/sample frame), state %llu (%.3f/sample frame), read/query %llu (%.3f/sample frame), instrumentation %llu (%.3f/sample frame); %u distinct annotated call-site IDs; raw calls across %llu sampled frames, annotated-call coverage only.",
-                    ownerName,
-                    static_cast<unsigned long long>(owner.apiCalls[0]),
-                    static_cast<double>(owner.apiCalls[0]) / apiSampleFrames,
-                    static_cast<unsigned long long>(owner.apiCalls[1]),
-                    static_cast<double>(owner.apiCalls[1]) / apiSampleFrames,
-                    static_cast<unsigned long long>(owner.apiCalls[2]),
-                    static_cast<double>(owner.apiCalls[2]) / apiSampleFrames,
-                    static_cast<unsigned long long>(owner.apiCalls[3]),
-                    static_cast<double>(owner.apiCalls[3]) / apiSampleFrames,
-                    static_cast<unsigned long long>(owner.apiCalls[4]),
-                    static_cast<double>(owner.apiCalls[4]) / apiSampleFrames,
-                    countMaskBits(owner.apiSiteMask[0]) + countMaskBits(owner.apiSiteMask[1]) +
-                        countMaskBits(owner.apiSiteMask[2]) + countMaskBits(owner.apiSiteMask[3]),
-                    static_cast<unsigned long long>(pluginCostWindow.completedApiSampleFrames));
-                Log::get().note(
-                    "plugin cost API sites V2: %s; IDs 0-63=0x%016llX, IDs 64-127=0x%016llX, IDs 128-191=0x%016llX, IDs 192-255=0x%016llX; %u distinct annotated call-site IDs. Four words cover stable site IDs 0-255.",
-                    ownerName,
-                    static_cast<unsigned long long>(owner.apiSiteMask[0]),
-                    static_cast<unsigned long long>(owner.apiSiteMask[1]),
-                    static_cast<unsigned long long>(owner.apiSiteMask[2]),
-                    static_cast<unsigned long long>(owner.apiSiteMask[3]),
-                    countMaskBits(owner.apiSiteMask[0]) + countMaskBits(owner.apiSiteMask[1]) +
-                        countMaskBits(owner.apiSiteMask[2]) + countMaskBits(owner.apiSiteMask[3]));
-            }
-        }
     }
     f.cpuDrawsMs = s.drawsMsRunning;
     s.drawWholeTicks = s.drawRealTicks = 0;
@@ -1349,8 +1265,95 @@ void perfMonitorNotePresentWait(double ms) {
 
 // perfMonitorSampleDraws is inline in the header now (perf_monitor.h).
 
+// The owner-Present boundary is shared by VR and flat. The menu's VR
+// perfMonitorFrame has already rotated its own draw clock by this point, so
+// the caller supplies the just-closed CPU flag captured before menuTick.
+// API sampling follows owned Presents even when that menu clock is absent.
+void perfMonitorPluginCostFrameBoundary(uint32_t frameNo, bool closedCpuSampleFrame) {
+    EdvrPluginCostWindowV2 pluginCostWindow;
+    const bool pluginCostWindowReady =
+        g_pluginCostBoundary.close(frameNo, closedCpuSampleFrame, &pluginCostWindow);
+    if (pluginCostWindowReady) {
+        const auto countMaskBits = [](uint64_t bits) {
+            unsigned count = 0;
+            while (bits != 0) {
+                bits &= bits - 1;
+                ++count;
+            }
+            return count;
+        };
+        Log::get().note(
+            "plugin cost V2: window %u..%u (%u frames), profile 0x%X; CPU %llu sampled frames, %llu replay-suppressed; API %llu sampled frames. CPU rows cover timed draw-classifier handlers only (partial module coverage); API rows cover explicitly annotated calls only (partial source coverage). Missing rows mean no timed/annotated work was observed. Logical owner attribution does not report module selection or a numeric budget.",
+            pluginCostWindow.firstFrame, pluginCostWindow.lastFrame,
+            pluginCostWindow.windowFrames, pluginCostWindow.profileBit,
+            static_cast<unsigned long long>(pluginCostWindow.completedCpuSampleFrames),
+            static_cast<unsigned long long>(pluginCostWindow.cpuTraceSuppressedFrames),
+            static_cast<unsigned long long>(pluginCostWindow.completedApiSampleFrames));
+        for (unsigned i = 0; i < plugin_cost::kOwnerCount; ++i) {
+            const EdvrPluginCostOwnerV2& owner = pluginCostWindow.owners[i];
+            if (!owner.cpuObserved && !owner.apiObserved) continue;
+            const char* ownerName = i < plugins::kPluginCount
+                ? plugins::kManifest[i].id : "core";
+            const unsigned coveredCpuSites =
+                countMaskBits(owner.cpuSiteMask[0]) + countMaskBits(owner.cpuSiteMask[1]);
+            if (owner.cpuObserved) {
+                if (pluginCostWindow.completedCpuSampleFrames < 2) {
+                    Log::get().note(
+                        "plugin cost CPU: %s; %.4f ms mean per sampled frame (stddev unavailable; fewer than two sampled frames); confidence interval unavailable; %llu timed classifier-handler scopes, %u distinct reached site IDs; reached %llu, invoked %llu, not-eligible %llu. This is partial source coverage.",
+                        ownerName, owner.cpuMeanMs,
+                        static_cast<unsigned long long>(owner.cpuTimedScopes), coveredCpuSites,
+                        static_cast<unsigned long long>(owner.cpuReached),
+                        static_cast<unsigned long long>(owner.cpuInvoked),
+                        static_cast<unsigned long long>(owner.cpuNotEligible));
+                } else {
+                    Log::get().note(
+                        "plugin cost CPU: %s; %.4f ms mean per sampled frame (%.4f ms stddev); confidence interval unavailable; %llu timed classifier-handler scopes, %u distinct reached site IDs; reached %llu, invoked %llu, not-eligible %llu. This is partial source coverage.",
+                        ownerName, owner.cpuMeanMs, owner.cpuStdDevMs,
+                        static_cast<unsigned long long>(owner.cpuTimedScopes), coveredCpuSites,
+                        static_cast<unsigned long long>(owner.cpuReached),
+                        static_cast<unsigned long long>(owner.cpuInvoked),
+                        static_cast<unsigned long long>(owner.cpuNotEligible));
+                }
+            }
+            if (owner.apiObserved) {
+                const double apiSampleFrames = pluginCostWindow.completedApiSampleFrames != 0
+                    ? static_cast<double>(pluginCostWindow.completedApiSampleFrames) : 1.0;
+                Log::get().note(
+                    "plugin cost API V2: %s; work %llu (%.3f/sample frame), transfer %llu (%.3f/sample frame), state %llu (%.3f/sample frame), read/query %llu (%.3f/sample frame), instrumentation %llu (%.3f/sample frame); %u distinct annotated call-site IDs; raw calls across %llu sampled frames, annotated-call coverage only.",
+                    ownerName,
+                    static_cast<unsigned long long>(owner.apiCalls[0]),
+                    static_cast<double>(owner.apiCalls[0]) / apiSampleFrames,
+                    static_cast<unsigned long long>(owner.apiCalls[1]),
+                    static_cast<double>(owner.apiCalls[1]) / apiSampleFrames,
+                    static_cast<unsigned long long>(owner.apiCalls[2]),
+                    static_cast<double>(owner.apiCalls[2]) / apiSampleFrames,
+                    static_cast<unsigned long long>(owner.apiCalls[3]),
+                    static_cast<double>(owner.apiCalls[3]) / apiSampleFrames,
+                    static_cast<unsigned long long>(owner.apiCalls[4]),
+                    static_cast<double>(owner.apiCalls[4]) / apiSampleFrames,
+                    countMaskBits(owner.apiSiteMask[0]) + countMaskBits(owner.apiSiteMask[1]) +
+                        countMaskBits(owner.apiSiteMask[2]) + countMaskBits(owner.apiSiteMask[3]),
+                    static_cast<unsigned long long>(pluginCostWindow.completedApiSampleFrames));
+                Log::get().note(
+                    "plugin cost API sites V2: %s; IDs 0-63=0x%016llX, IDs 64-127=0x%016llX, IDs 128-191=0x%016llX, IDs 192-255=0x%016llX; %u distinct annotated call-site IDs. Four words cover stable site IDs 0-255.",
+                    ownerName,
+                    static_cast<unsigned long long>(owner.apiSiteMask[0]),
+                    static_cast<unsigned long long>(owner.apiSiteMask[1]),
+                    static_cast<unsigned long long>(owner.apiSiteMask[2]),
+                    static_cast<unsigned long long>(owner.apiSiteMask[3]),
+                    countMaskBits(owner.apiSiteMask[0]) + countMaskBits(owner.apiSiteMask[1]) +
+                        countMaskBits(owner.apiSiteMask[2]) + countMaskBits(owner.apiSiteMask[3]));
+            }
+        }
+    }
+}
+
+uint32_t perfMonitorFrameSerial() {
+    return g_s.frameNo;
+}
+
 void perfMonitorPluginCostConfigure(uint8_t profileBit) {
-    detail::g_pluginCostApiSampleFrame = false;
+    g_pluginCostBoundary.reset();
     const int64_t frequency = qpcFrequency();
     edvrPluginCostConfigure(profileBit,
                             frequency > 0 ? static_cast<uint64_t>(frequency) : 0u);
@@ -1361,7 +1364,7 @@ void perfMonitorPluginCostConfigure(uint8_t profileBit) {
 
 void perfMonitorPluginCostShutdown() {
     edvrPluginCostShutdown();
-    detail::g_pluginCostApiSampleFrame = false;
+    g_pluginCostBoundary.reset();
 }
 
 void perfMonitorDrawTicks(int64_t wholeTicks, int64_t realTicks) {

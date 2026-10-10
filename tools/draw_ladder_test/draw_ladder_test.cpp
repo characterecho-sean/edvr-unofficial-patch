@@ -1303,6 +1303,49 @@ ladder::DrawCallKind directCallKind(char kind) {
     }
 }
 
+// Match the arguments passed through withFlatBypassTrace and actionDrawArgs:
+// the begin, original, and end records all describe the same direct call.
+void fillFlatBypassAction(ladder::ActionRecord& action, const trace::DrawFacts& facts) {
+    const char kind = static_cast<char>(facts.kind);
+    action.call = directCallKind(kind);
+    action.count = facts.count;
+    action.instances = facts.instances;
+    switch (kind) {
+    case 'D':
+    case 'N':
+        action.start = static_cast<std::uint32_t>(facts.args.base);
+        action.startInstance = facts.args.startInstance;
+        break;
+    case 'I':
+    case 'X':
+        action.start = facts.args.start;
+        action.startInstance = facts.args.startInstance;
+        action.baseVertex = facts.args.base;
+        break;
+    case 'Y':
+    case 'Z':
+        action.start = facts.argumentByteOffset;
+        break;
+    case 'A':
+        break;
+    }
+}
+
+template <ladder::ActionId Id>
+void appendFlatBypassAction(trace::TracePolicy& policy, const trace::DrawFacts& facts,
+                            ladder::ActionPhase phase, std::uint16_t issueCount = 0,
+                            std::uint16_t flags = 0) {
+    ladder::recordAction<trace::TracePolicy, Id>(policy, [&] {
+        ladder::ActionRecord action;
+        action.phase = phase;
+        action.outcome = ladder::ActionOutcome::Applied;
+        action.issueCount = issueCount;
+        action.flags = flags;
+        fillFlatBypassAction(action, facts);
+        return action;
+    });
+}
+
 template <ladder::ActionId Id, class TracePolicy>
 void appendTestIssue(TracePolicy& policy, ladder::DrawCallKind call,
                      std::uint16_t flags = 0, std::uint32_t instances = 1,
@@ -1590,6 +1633,12 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
         facts.instances = 1;
     }
     if (countOverride) facts.count = countOverride;
+    if (route == ladder::RouteId::kFlatRuntimeBypass &&
+        (facts.kind == 'A' || facts.kind == 'Y' || facts.kind == 'Z')) {
+        // The direct Auto/indirect hooks have no CPU-visible draw counts.
+        facts.count = 0;
+        facts.instances = 0;
+    }
     if (facts.kind == 'D' || facts.kind == 'N') {
         facts.args.base = 17;
         facts.args.startInstance = facts.kind == 'N' ? 5 : 0;
@@ -1630,13 +1679,17 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
         action.startInstance = facts.args.startInstance;
         action.baseVertex = facts.kind == 'D' || facts.kind == 'N' ? 0 : facts.args.base;
     };
-    ladder::recordAction<trace::TracePolicy, ladder::ActionId::kDrawBegin>(policy, [&] {
-        ladder::ActionRecord action;
-        action.phase = ladder::ActionPhase::Begin;
-        action.outcome = ladder::ActionOutcome::Applied;
-        if (normalizedForwardEnvelope) fillForwardTuple(action);
-        return action;
-    });
+    if (route == ladder::RouteId::kFlatRuntimeBypass)
+        appendFlatBypassAction<ladder::ActionId::kDrawBegin>(
+            policy, facts, ladder::ActionPhase::Begin);
+    else
+        ladder::recordAction<trace::TracePolicy, ladder::ActionId::kDrawBegin>(policy, [&] {
+            ladder::ActionRecord action;
+            action.phase = ladder::ActionPhase::Begin;
+            action.outcome = ladder::ActionOutcome::Applied;
+            if (normalizedForwardEnvelope) fillForwardTuple(action);
+            return action;
+        });
 
     ModelVisitor visitor{scenario};
     CandidateInterest interest;
@@ -1926,19 +1979,20 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
     }
     if (route == ladder::RouteId::kFlatRuntimeBypass) {
         if (kind == 'A') {
-            appendTestIssue<ladder::ActionId::kAutoDraw>(policy,
-                ladder::DrawCallKind::Auto, ladder::kActionGpuDrawArgsUnavailable, instances);
+            appendFlatBypassAction<ladder::ActionId::kAutoDraw>(
+                policy, facts, ladder::ActionPhase::Issue, 1,
+                ladder::kActionGpuDrawArgsUnavailable);
         } else if (kind == 'Z') {
-            appendTestIssue<ladder::ActionId::kDrawIndexedInstancedIndirect>(policy,
-                ladder::DrawCallKind::DrawIndexedInstancedIndirect,
-                ladder::kActionGpuDrawArgsUnavailable, instances);
+            appendFlatBypassAction<ladder::ActionId::kDrawIndexedInstancedIndirect>(
+                policy, facts, ladder::ActionPhase::Issue, 1,
+                ladder::kActionGpuDrawArgsUnavailable);
         } else if (kind == 'Y') {
-            appendTestIssue<ladder::ActionId::kDrawInstancedIndirect>(policy,
-                ladder::DrawCallKind::DrawInstancedIndirect,
-                ladder::kActionGpuDrawArgsUnavailable, instances);
+            appendFlatBypassAction<ladder::ActionId::kDrawInstancedIndirect>(
+                policy, facts, ladder::ActionPhase::Issue, 1,
+                ladder::kActionGpuDrawArgsUnavailable);
         } else {
-            appendTestIssue<ladder::ActionId::kOriginalDraw>(policy,
-                directCallKind(kind), 0, instances);
+            appendFlatBypassAction<ladder::ActionId::kOriginalDraw>(
+                policy, facts, ladder::ActionPhase::Issue, 1);
         }
     } else if (route == ladder::RouteId::kAutoBypass) {
         if (scenario.exitSubsite != 0) {
@@ -2027,13 +2081,17 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
                 (malformedGenerated ? 0 : ladder::kActionGeneratedDrawArgsUnavailable), 0,
             ladder::ActionOutcome::Applied, 0);
     }
-    ladder::recordAction<trace::TracePolicy, ladder::ActionId::kDrawEnd>(policy, [&] {
-        ladder::ActionRecord action;
-        action.phase = ladder::ActionPhase::End;
-        action.outcome = ladder::ActionOutcome::Applied;
-        if (normalizedForwardEnvelope) fillForwardTuple(action);
-        return action;
-    });
+    if (route == ladder::RouteId::kFlatRuntimeBypass)
+        appendFlatBypassAction<ladder::ActionId::kDrawEnd>(
+            policy, facts, ladder::ActionPhase::End);
+    else
+        ladder::recordAction<trace::TracePolicy, ladder::ActionId::kDrawEnd>(policy, [&] {
+            ladder::ActionRecord action;
+            action.phase = ladder::ActionPhase::End;
+            action.outcome = ladder::ActionOutcome::Applied;
+            if (normalizedForwardEnvelope) fillForwardTuple(action);
+            return action;
+        });
     const bool overflowBeforeFinish = trace::overflowed();
     trace::finishDraw(token, static_cast<std::int16_t>(terminal), verdict);
     if (!overflowBeforeFinish && trace::overflowed())
@@ -2109,12 +2167,8 @@ bool traceWriterChecks(const char* rootArg) {
     const trace::Token token = trace::beginDraw(draw);
     ok &= check(token.valid(), "armed owner draw receives a trace token");
     auto policy = trace::makePolicy(token);
-    ladder::recordAction<trace::TracePolicy, ladder::ActionId::kDrawBegin>(policy, [] {
-        ladder::ActionRecord action;
-        action.phase = ladder::ActionPhase::Begin;
-        action.outcome = ladder::ActionOutcome::Applied;
-        return action;
-    });
+    appendFlatBypassAction<ladder::ActionId::kDrawBegin>(
+        policy, draw, ladder::ActionPhase::Begin);
     FlatBypassWriter writer;
     CandidateInterest interest;
     const auto selectorFlow = ladder::visitOrdered(ladder::FlatRuntimeBypassSequence{},
@@ -2122,22 +2176,10 @@ bool traceWriterChecks(const char* rootArg) {
     ok &= check(selectorFlow == ladder::Flow::Stop && interest.legacyMaskLoads == 0 &&
                 interest.candidateQueries == 0 && interest.candidateLoads == 0,
                 "real writer records selector-driven flat bypass without VR interest reads");
-    ladder::recordAction<trace::TracePolicy, ladder::ActionId::kOriginalDraw>(policy, [&] {
-        ladder::ActionRecord action;
-        action.phase = ladder::ActionPhase::Issue;
-        action.outcome = ladder::ActionOutcome::Applied;
-        action.call = ladder::DrawCallKind::DrawIndexedInstanced;
-        action.issueCount = 1;
-        action.count = 240;
-        action.instances = 1;
-        return action;
-    });
-    ladder::recordAction<trace::TracePolicy, ladder::ActionId::kDrawEnd>(policy, [] {
-        ladder::ActionRecord action;
-        action.phase = ladder::ActionPhase::End;
-        action.outcome = ladder::ActionOutcome::Applied;
-        return action;
-    });
+    appendFlatBypassAction<ladder::ActionId::kOriginalDraw>(
+        policy, draw, ladder::ActionPhase::Issue, 1);
+    appendFlatBypassAction<ladder::ActionId::kDrawEnd>(
+        policy, draw, ladder::ActionPhase::End);
     trace::finishDraw(token, static_cast<std::int16_t>(ladder::SiteId::kFlatRuntimeBypass),
                       static_cast<std::int16_t>(ladder::VerdictOrdinal::kNone));
     trace::frameEnd(12);
@@ -2382,6 +2424,11 @@ bool traceWriterChecks(const char* rootArg) {
         true, kFrozenEye, 31, ladder::VrEyeSequence{}, 2, false, false,
         edvr::SunglareTraceMode::kStock, true, false, 0);
     const ladder::SiteId oneSite[] = {ladder::SiteId::kFlatRuntimeBypass};
+    for (const char directKind : {'D', 'I', 'N'})
+        matrixOk &= writeTerminalCase(ladder::RouteId::kFlatRuntimeBypass,
+            ladder::SequenceId::kFlatRuntimeBypass, directKind,
+            ladder::SiteId::kFlatRuntimeBypass, false, oneSite, 1,
+            ladder::FlatRuntimeBypassSequence{});
     matrixOk &= writeTerminalCase(ladder::RouteId::kFlatRuntimeBypass,
         ladder::SequenceId::kFlatRuntimeBypass, 'X', ladder::SiteId::kFlatRuntimeBypass,
         false, oneSite, 1, ladder::FlatRuntimeBypassSequence{});

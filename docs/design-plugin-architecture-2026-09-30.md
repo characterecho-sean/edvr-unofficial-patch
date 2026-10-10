@@ -2,7 +2,7 @@
 
 ## Status
 
-- **State (2026-10-09):** Phase 1 implementation continues on
+- **State (2026-10-10):** Phase 1 implementation continues on
   `codex/plugin-architecture`; no merge to main until Sean is ready to ship.
   Review and remaining gates: section 11.
 - **Goal (Sean):** every fix/performance item belongs to one plugin, grouped
@@ -12,16 +12,16 @@
   generated manifests/config ownership, subscription-driven dispatch and a
   C-compatible interface. The add-on tier follows Phase 1. Graphics-only VR is
   a separate phase; existing supported settings remain owned by one plugin.
-- **Current integration:** Sean requests latest main and conflict resolution.
-  Merge cut: `7960f016`, after `b321722f`. Main's key/feature retirements, skin
-  and vertex resync, head-pose timing, flat UI/device lifecycle, fixed
-  rendering behavior and test/build changes must survive together with the
-  plugin pilot, typed NoApi/API routes, ownership/cost reporting and
-  independent NV replay. Luna agents resolved draw/runtime, temporal/UI and
-  build/catalog/log seams; root reviewed and escalated repairs. Full validation
-  passes 155 jobs, the 125-key config contract, exports and installer checks.
-  New receipt `755886c9` verifies the resolved source. Git stays on the feature
-  branch.
+- **Current integration:** main `7960f016` is merged at feature commit
+  `9c5d3a4a`; upstream fixes and retirements remain in place. The next offline
+  slice closes plugin-cost windows after menu, binding, exposure and vScreen
+  work in the shared owned-Present path, including flat and unavailable-menu
+  cases. API cadence follows Presents; VR CPU observations require the menu
+  clock to advance. Validated flat domain entry now accounts for sampled held
+  restores. Independent flat-bypass replay checks literal call arguments.
+  Focused collector and EngineVelocity WARP gates pass. Full validation passes
+  155 jobs, config/export/installer gates and receipt `1a4198c5`. Git
+  stays on `codex/plugin-architecture`.
 - **Historical gates:** the previous candidate passes 149 jobs and installer
   checks, 344 focused census checks and 17 scoped assembly gates. Its
   main-based control `405b14cd` passes 129 jobs. Those source/assembly receipts
@@ -35,7 +35,7 @@
   and on-foot source pixels rise 4.175%. Normalization cannot establish
   causality or non-regression. The cold raw sample/calibration reader stays in
   the branch; measured-helper estimates do not establish accepted-work latency.
-- **Open:** domain/frame/lifecycle accounting and held-boundary frame cost;
+- **Open:** remaining frame/lifecycle accounting and held-boundary frame cost;
   full-ladder/action replay before wider migration; matched runtime CPU/GPU
   acceptance. No Phase 1 acceptance or shipping.
 - **Upstream retirements:** static props/settlement detail and terrain guard no
@@ -3416,3 +3416,106 @@ resolved source. Previous assembly/receipt and control/candidate performance
 results are historical for this new source tree. Steam remains on `405b14cd`;
 this integration requests no install or test flight. Phase 1 accounting and
 matched CPU/GPU acceptance remain open.
+
+### 2026-10-10 — shared Present cost windows and validated domain restore
+
+Main remains at `7960f01682d552947a6203e2999352685cc3d304`, already merged into
+the feature at `9c5d3a4a348ea341525d2b99c79ebec9e9afbb28`. This is an offline
+follow-up on that resolved source, with Luna implementation/review and
+escalated fixture repairs. No feature-to-main merge, Steam install or flight.
+
+The confirmed collector gap was source-visible: flat `menuTick` returns before
+`perfMonitorFrame`, while the old collector close lived in that function. The
+old VR close also preceded binding, exposure and vScreen boundary work. The
+collector now closes once after those boundaries in the shared owned-Present
+path. A production `PresentBoundary` helper preserves one-in-sixteen API
+sampling and reads back the collector's actual published flag. Configure and
+shutdown reset its local flag. The existing VR timing ring, CPU sample cadence
+and draw counters remain in `perfMonitorFrame`; the caller captures the old CPU
+flag and accepts an observation only if the menu clock advanced. Flat and
+unavailable-menu intervals do not invent a whole-draw CPU observation. Window
+frame labels now follow the owned-Present counter rather than the menu counter,
+so startup offsets can differ from older logs.
+
+The first full build then caught a real integration fault at `gate_test`:
+capture and close had been placed outside Present's fault-budget ticks. They
+now use separate `BoundaryTick` guards. The capture commits its owned-Present
+stamp last; close accepts CPU state only from the current Present, so a partial
+capture, fault or stood-down capture tick cannot reuse old observations. The
+strict outside-tick gate remains unchanged.
+
+The next four-job full run stopped at 95 of 155 jobs on unchanged terrain
+watcher fixture T5c, which did not observe its final version/raise in time.
+That rig links unchanged terrain/common sources; its unchecked replacement
+return and lack of timeout values leave the original cause unresolved. An
+isolated rerun passes 188 checks and the 102-mutation fixture gate
+(`build/focused-terrain-gate-20261010.log`). No terrain edit was made. The full
+validation below uses two jobs rather than four.
+
+That two-job run passed the terrain gate and reached the final draw-ladder
+replay gate. The stricter independent reader rejected the native synthetic
+flat-bypass action arguments, despite the ordered selector assertions passing.
+The failed trace was preserved in
+`build/draw_ladder_test-trace-pre-flat-args-20261010` for source/fixture
+comparison; the reader's argument check was not relaxed. The confirmed fixture
+gap was its X draw: facts described 240 indices while begin/end actions
+retained default Draw/zero arguments, unlike production's literal arguments on
+all three phases. The terminal matrix also fabricated 240/1 CPU counts for
+A/Y/Z, whose production hooks record unknown GPU counts as 0/0; Y/Z actions
+carry the known byte offset. Only native fixtures changed. The focused wrapper
+then omitted `EDVR_VER`, embedding an empty build version. The preserved
+full-build trace had a valid version, discriminating a wrapper defect. The
+ignored wrapper now exports the same Git version as the full build; reader and
+production validation remain unchanged. The focused replay rerun passes
+(`build/focused-plugin-replay-20261010-r3.log`), including all seven draw kinds
+and expected malformed-trace rejections.
+
+The rig exercises the actual shared helper/backend for VR, flat, unavailable
+menu, zero-work, context refusal, reset/shutdown and complete 1800-frame
+windows. Source mutations pin capture/close/report order and reject a missing
+API publish statement. The first focused run exposed two fixture faults: the
+collector count helper was out of scope, and the EngineVelocity mutator
+searched for a globally unique body although two functions shared that body.
+The repair selects a unique signature and balanced body range, with independent
+controls for duplicate bodies, outside matches and ambiguous/missing inputs.
+
+The explicit flat-domain entry now selects sampled held-state restore only
+after its existing context, depth, writer-token and primitive validations. The
+pending-first/live/hint/owner-context gates match the ordinary OtherDraw
+boundary. The direct public flush remains NoApi. WARP checks distinguish the
+held restore (blend, then render targets) from the subsequent domain bracket;
+they check exact setter counts/order, generation suppression, unqualified
+fallbacks and shutdown without requiring a new marker. Frame/end/abandon and
+other lifecycle accounting remain open, as does held-event frame attribution.
+
+Flat-bypass replay now derives begin/original/end action arguments
+independently from the recorded source facts for all seven draw-call kinds.
+Positive cases include nonzero fields, signed indexed bases and indirect byte
+offsets; mutations reject changed action arguments. Indirect GPU draw arguments
+remain unknown rather than fabricated. This extends the existing independent
+reader; it does not establish full-ladder action coverage or accepted-work
+latency.
+
+Focused rerun: `build/focused-plugin-lifecycle-20261010-r3.log`, collector
+PASS, strict boundary guard gate PASS, EngineVelocity 18698 checks and mutant
+gate PASS. Full build: `build/full-plugin-lifecycle-20261010-r4.log`, 155 jobs
+with config, export, production DLL, test-rig and self-contained
+installer/resource gates. New full-pass receipt `1a4198c589d4b8d9c14c90bf7d973121021ea3afa3b9ed72ae8e7cbb8242f00d` verifies this
+source. Earlier scoped assembly and caller diagnostics remain historical; this
+slice does not claim fresh whole-caller code-generation proof or runtime
+CPU/GPU acceptance. Steam still holds historical control `405b14cd`; the fresh
+matched control below uses the same main cut. The previous NV blur remains a
+baseline observation.
+
+The fresh matched-control source is `e16dbb54f515793c7990b46bfb085c010cd25013`
+on `codex/plugin-telemetry-control-7960`, based on main `7960f016`. Luna
+authored a selective three-file census patch; root and the escalated reviewer
+checked the owner map and raw-row placement. Existing main rendering,
+timer/span code, skin details and census lines are preserved. No API collector
+or registry was backported. The focused census rig passes 338 checks; the full
+control passes 132 rigs, the 124-key contract, exports and installer/resource
+checks, with receipt
+`fc0a87f6fc1a3834b57ab32e48cf5554fb5ff5df5f39dbe4941d12c8bce81dff`. The branch
+is pushed and its clean-version DLL promotion passes. Use the feature reader
+for raw V1 rows; main's reader does not parse that schema. Steam has not
+changed in this offline slice.

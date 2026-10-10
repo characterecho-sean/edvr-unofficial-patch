@@ -4,6 +4,7 @@
 #include "../../src/d3d11/binding_cost_sites.h"
 #include "../../src/d3d11/panel_distance_cost_sites.h"
 #include "../../src/d3d11/draw_cpu_window.h"
+#include "../../src/d3d11/plugin_cost_boundary.h"
 
 #include <algorithm>
 #include <atomic>
@@ -13,6 +14,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <initializer_list>
 #include <set>
 #include <sstream>
 #include <string>
@@ -483,6 +485,13 @@ std::string functionBody(const std::string& source, const std::string& signature
     return {};
 }
 
+std::size_t countIn(const std::string& text, const char* needle) {
+    std::size_t count = 0;
+    for (std::size_t pos = text.find(needle); pos != std::string::npos;
+         pos = text.find(needle, pos + 1)) ++count;
+    return count;
+}
+
 bool productionCpuRouteChecks() {
     std::ifstream input("src/d3d11/vscreen.cpp", std::ios::binary);
     if (!input) return check(false, "vScreen source is available for CPU policy route verification");
@@ -569,12 +578,6 @@ bool productionCpuRouteChecks() {
         ? source.substr(outerDispatch, outerOpen - outerDispatch) : std::string{};
     const std::size_t forceInlineCleanup = source.find(
         "#undef EDVR_VSCREEN_FORCEINLINE", outerDispatch);
-    const auto countIn = [](const std::string& text, const char* needle) {
-        std::size_t count = 0;
-        for (std::size_t pos = text.find(needle); pos != std::string::npos;
-             pos = text.find(needle, pos + 1)) ++count;
-        return count;
-    };
     const std::size_t firstIf = apiChooser.find("if (");
     const std::size_t gateEnd = apiChooser.find('{', firstIf);
     std::string gate;
@@ -709,28 +712,146 @@ bool collectorHotPathChecks() {
     return ok;
 }
 
+bool boundarySourceOrder(const std::string& perf, const std::string& hook,
+                         const std::string& menu, const std::string& boundary) {
+    const auto compact = [](std::string text) {
+        text.erase(std::remove_if(text.begin(), text.end(),
+            [](unsigned char c) { return std::isspace(c) != 0; }), text.end());
+        return text;
+    };
+    const std::string frame = functionBody(perf, "void perfMonitorFrame(");
+    const std::string serial = functionBody(perf, "uint32_t perfMonitorFrameSerial(");
+    const std::string close = functionBody(perf, "void perfMonitorPluginCostFrameBoundary(");
+    const std::string present = functionBody(hook, "void presentFrameBoundary(");
+    const std::string menuTick = functionBody(menu, "void menuTick(");
+    const std::string sharedClose = functionBody(boundary, "bool close(");
+    const std::size_t capture = present.find("tkPluginCostCapture.run(");
+    const std::string captureBody = compact(functionBody(present, "tkPluginCostCapture.run("));
+    const std::string closeBody = compact(functionBody(present, "tkPluginCostClose.run("));
+    const std::size_t menuCall = present.find("tkMenu.run(");
+    const std::size_t binding = present.find("tkBindingBoundary.run(");
+    const std::size_t exposure = present.find("tkExposureBoundary.run(");
+    const std::size_t screen = present.find("tkVscreenRest.run(");
+    const std::size_t menuAdvanced = present.find("const bool pluginCostCpuObserved =");
+    const std::size_t collector = present.find("perfMonitorPluginCostFrameBoundary(");
+    const std::size_t drain = sharedClose.find("edvrPluginCostFrameBoundaryV2(");
+    const std::size_t publish = sharedClose.find("apiSampleFrame = edvrPluginCostApiSampleFrame() != 0;");
+    const std::size_t reportReady = close.find("if (pluginCostWindowReady)");
+    return !frame.empty() && !serial.empty() && !close.empty() && !present.empty() &&
+           !menuTick.empty() && !sharedClose.empty() &&
+           publish != std::string::npos &&
+           hook.find("uint64_t pluginCostCapturedPresent = 0;") != std::string::npos &&
+           countIn(hook, "EDVR_BOUNDARY_TICK(tkPluginCostCapture, \"plugin_cost_capture\");") == 1 &&
+           countIn(hook, "EDVR_BOUNDARY_TICK(tkPluginCostClose, \"plugin_cost_close\");") == 1 &&
+           countIn(present, "tkPluginCostCapture.run(") == 1 &&
+           countIn(present, "tkPluginCostClose.run(") == 1 &&
+           captureBody == "{constboolpluginCostClosedCpuSampleFrame=!runtimeFlatProfile()&&perfMonitorSampleDraws();"
+               "constuint32_tpluginCostMenuFrameBefore=perfMonitorFrameSerial();"
+               "g_state->pluginCostClosedCpuSampleFrame=pluginCostClosedCpuSampleFrame;"
+               "g_state->pluginCostMenuFrameBefore=pluginCostMenuFrameBefore;"
+               "g_state->pluginCostCapturedPresent=g_state->frameCounter;}" &&
+           closeBody == "{constboolpluginCostCpuObserved="
+               "g_state->pluginCostCapturedPresent==g_state->frameCounter&&"
+               "g_state->pluginCostClosedCpuSampleFrame&&"
+               "perfMonitorFrameSerial()!=g_state->pluginCostMenuFrameBefore;"
+               "perfMonitorPluginCostFrameBoundary(static_cast<uint32_t>(g_state->frameCounter),pluginCostCpuObserved);}" &&
+           frame.find("++s.frameNo;") != std::string::npos &&
+           serial.find("return g_s.frameNo;") != std::string::npos &&
+           frame.find("edvrPluginCostFrameBoundaryV2(") == std::string::npos &&
+           frame.find("g_pluginCostBoundary.close(") == std::string::npos &&
+           capture < menuCall && menuCall < binding && binding < exposure &&
+           exposure < screen && screen < menuAdvanced && menuAdvanced < collector &&
+           present.find("!runtimeFlatProfile() && perfMonitorSampleDraws();", capture) < menuCall &&
+           present.find("const uint32_t pluginCostMenuFrameBefore = perfMonitorFrameSerial();", capture) < menuCall &&
+           screen < present.find("tkPluginCostClose.run(") &&
+           present.find("perfMonitorFrameSerial() != g_state->pluginCostMenuFrameBefore;", menuAdvanced) < collector &&
+           present.find("static_cast<uint32_t>(g_state->frameCounter), pluginCostCpuObserved)", collector)
+               != std::string::npos &&
+           countIn(present, "perfMonitorPluginCostFrameBoundary(") == 1 &&
+           close.find("g_pluginCostBoundary.close(frameNo, closedCpuSampleFrame, &pluginCostWindow)") <
+               reportReady &&
+           close.find("EdvrPluginCostWindowV2 pluginCostWindow;") != std::string::npos &&
+           close.find("EdvrPluginCostWindowV2 pluginCostWindow{};") == std::string::npos &&
+           reportReady < close.find("pluginCostWindow.firstFrame", reportReady) &&
+           close.find("partial module coverage") != std::string::npos &&
+           close.find("annotated-call coverage only") != std::string::npos &&
+           sharedClose.find("frameNo % kPresentSampleEvery") < drain &&
+           drain < sharedClose.find("apiSampleFrame ? 1u : 0u") &&
+           sharedClose.find("apiSampleFrame ? 1u : 0u") < publish &&
+           drain < publish && countIn(sharedClose, "edvrPluginCostFrameBoundaryV2(") == 1 &&
+           menuTick.find("if (runtimeFlatProfile())") <
+               menuTick.find("return;", menuTick.find("if (runtimeFlatProfile())")) &&
+           menuTick.find("return;", menuTick.find("if (runtimeFlatProfile())")) <
+               menuTick.find("perfMonitorFrame(dev);") &&
+           menuTick.find("perfMonitorPluginCostFrameBoundary(") == std::string::npos;
+}
+
 bool collectorLifecycleChecks() {
     std::ifstream perfInput("src/d3d11/perf_monitor.cpp", std::ios::binary);
+    std::ifstream hookInput("src/d3d11/device_hook.cpp", std::ios::binary);
+    std::ifstream menuInput("src/d3d11/menu.cpp", std::ios::binary);
+    std::ifstream boundaryInput("src/d3d11/plugin_cost_boundary.h", std::ios::binary);
     std::ifstream screenInput("src/d3d11/vscreen.cpp", std::ios::binary);
-    if (!perfInput || !screenInput)
+    if (!perfInput || !hookInput || !menuInput || !boundaryInput || !screenInput)
         return check(false, "production lifecycle sources are available for collector wiring checks");
     const std::string perf((std::istreambuf_iterator<char>(perfInput)), std::istreambuf_iterator<char>());
+    const std::string hook((std::istreambuf_iterator<char>(hookInput)), std::istreambuf_iterator<char>());
+    const std::string menu((std::istreambuf_iterator<char>(menuInput)), std::istreambuf_iterator<char>());
+    const std::string boundary((std::istreambuf_iterator<char>(boundaryInput)), std::istreambuf_iterator<char>());
     const std::string screen((std::istreambuf_iterator<char>(screenInput)), std::istreambuf_iterator<char>());
     bool ok = true;
 
-    const std::string frame = functionBody(perf, "void perfMonitorFrame(");
-    const std::size_t drain = frame.find("edvrPluginCostFrameBoundaryV2(");
-    const std::size_t publish = frame.find("detail::g_pluginCostApiSampleFrame = nextSampleFrame;");
-    const std::size_t reset = frame.find("s.drawWholeTicks = s.drawRealTicks = 0;");
-    const std::size_t reportReady = frame.find("if (pluginCostWindowReady)");
-    const std::size_t reportRead = frame.find("pluginCostWindow.firstFrame", reportReady);
-    ok &= check(!frame.empty() && drain < publish && publish < reset &&
-                frame.find("const bool closedCpuSampleFrame = detail::g_perfMonitorSampleDraws;") < drain &&
-                frame.find("const bool closedApiSampleFrame = detail::g_pluginCostApiSampleFrame;") < drain &&
-                frame.find("EdvrPluginCostWindowV2 pluginCostWindow;") != std::string::npos &&
-                frame.find("EdvrPluginCostWindowV2 pluginCostWindow{};") == std::string::npos &&
-                reportReady < reportRead,
-                "frame boundary drains V2 once, and fully written report data is read only after success");
+    ok &= check(boundarySourceOrder(perf, hook, menu, boundary),
+                "one shared VR/flat Present close follows vScreen, preserves old CPU flag, and reads only completed V2 reports");
+    std::string movedEarly = hook;
+    const std::string closeCall = "tkPluginCostClose.run([] " +
+        functionBody(hook, "tkPluginCostClose.run(") + ");";
+    const std::string screenCall = "tkVscreenRest.run([] { vScreenFrameBoundary(); });";
+    const auto closePos = movedEarly.find(closeCall);
+    const auto screenPos = movedEarly.find(screenCall);
+    if (closePos != std::string::npos && screenPos != std::string::npos) {
+        movedEarly.replace(closePos, closeCall.size(), screenCall);
+        movedEarly.replace(screenPos, screenCall.size(), closeCall);
+    }
+    std::string nextFlagOnly = boundary;
+    const std::string actualFlag = "apiSampleFrame = edvrPluginCostApiSampleFrame() != 0;";
+    const auto flagPos = nextFlagOnly.find(actualFlag);
+    if (flagPos != std::string::npos)
+        nextFlagOnly.replace(flagPos, actualFlag.size(), "apiSampleFrame = nextSampleFrame;");
+    std::string missingCapture = hook;
+    const std::string oldFlag = "!runtimeFlatProfile() && perfMonitorSampleDraws();";
+    const auto oldPos = missingCapture.find(oldFlag);
+    if (oldPos != std::string::npos)
+        missingCapture.replace(oldPos, oldFlag.size(), "false;");
+    ok &= check(!boundarySourceOrder(perf, movedEarly, menu, boundary) &&
+                !boundarySourceOrder(perf, hook, menu, nextFlagOnly) &&
+                !boundarySourceOrder(perf, missingCapture, menu, boundary),
+                "independent source mutants reject early close, unverified API publish and lost CPU sample capture");
+    const auto replaceSourceOnce = [](std::string text, const char* from, const char* to) {
+        if (countIn(text, from) == 1) text.replace(text.find(from), std::strlen(from), to);
+        return text;
+    };
+    const char* captureCommit = "g_state->pluginCostCapturedPresent = g_state->frameCounter;";
+    const char* captureCpu = "g_state->pluginCostClosedCpuSampleFrame = pluginCostClosedCpuSampleFrame;";
+    const std::string earlyCommit = std::string(captureCommit) + "\n        " + captureCpu;
+    const std::string commitFirst = replaceSourceOnce(
+        replaceSourceOnce(hook, captureCommit, ""), captureCpu, earlyCommit.c_str());
+    ok &= check(!boundarySourceOrder(perf, commitFirst, menu, boundary) &&
+                !boundarySourceOrder(perf, replaceSourceOnce(hook,
+                    "g_state->pluginCostCapturedPresent == g_state->frameCounter &&", ""), menu, boundary) &&
+                !boundarySourceOrder(perf, replaceSourceOnce(hook,
+                    "tkPluginCostCapture.run([]", "unguardedCapture([]"), menu, boundary) &&
+                !boundarySourceOrder(perf, replaceSourceOnce(hook,
+                    "tkPluginCostClose.run([]", "unguardedClose([]"), menu, boundary),
+                "source mutants reject early capture commit, stale captures and either unguarded collector tick");
+
+    const std::string configureBody = functionBody(perf, "void perfMonitorPluginCostConfigure(");
+    const std::string shutdownBody = functionBody(perf, "void perfMonitorPluginCostShutdown(");
+    ok &= check(configureBody.find("g_pluginCostBoundary.reset();") <
+                    configureBody.find("edvrPluginCostConfigure(") &&
+                shutdownBody.find("edvrPluginCostShutdown();") <
+                    shutdownBody.find("g_pluginCostBoundary.reset();"),
+                "configure and shutdown reset the local API flag alongside the collector");
 
     const std::string install = functionBody(screen, "void installVScreenFixes(");
     const std::size_t commit = install.find("if (!s.hook.commit())");
@@ -746,6 +867,119 @@ bool collectorLifecycleChecks() {
     const std::size_t stop = shutdown.find("perfMonitorPluginCostShutdown();", uninstall);
     ok &= check(!shutdown.empty() && uninstall < stop,
                 "collector shutdown follows hook uninstall and clears owner registration after callbacks quiesce");
+    return ok;
+}
+
+bool ownedPresentBoundaryChecks() {
+    bool ok = true;
+    constexpr uint8_t owner = static_cast<uint8_t>(pc::Owner::Core);
+    // 3/4: capture faults/stands down; 5/6: faults after either state write,
+    // before its last (Present stamp) write. Prime a valid sampled capture first.
+    for (const unsigned scenario : {0u, 1u, 2u, 3u, 4u, 5u, 6u}) {
+        const bool flat = scenario == 1;
+        const bool menuAvailable = scenario != 1 && scenario != 2;
+        const bool annotateWork = scenario != 2;
+        int ownerContext = 0;
+        int foreignContext = 0;
+        pc::PresentBoundary boundary;
+        EdvrPluginCostWindowV2 window{};
+        edvrPluginCostShutdown();
+        edvrPluginCostConfigure(flat ? 2u : 1u, 1000000u);
+        edvrPluginCostSetOwnerContext(&ownerContext);
+        boundary.reset();
+        bool cpuSampleFrame = scenario == 2; // stale VR flag in the no-menu case
+        uint32_t perfSerial = 0;
+        uint64_t capturedPresent = 0;
+        bool capturedCpuFlag = false;
+        uint32_t capturedMenuSerial = 0;
+        unsigned reports = 0;
+        unsigned acceptedApiFrames = 0;
+        for (uint32_t frame = 1; frame <= pc::kWindowFrameCount + 1; ++frame) {
+            // This is the owned Present call order: capture the old draw flag,
+            // then menu may rotate it, then later boundary notes, then close.
+            const bool oldCpuFlag = !flat && cpuSampleFrame;
+            const uint32_t serialBeforeMenu = perfSerial;
+            const bool captureInterrupted = scenario >= 3 && frame > pc::kPresentSampleEvery + 1;
+            if (!captureInterrupted || scenario >= 5) capturedCpuFlag = oldCpuFlag;
+            if (!captureInterrupted || scenario == 6) capturedMenuSerial = serialBeforeMenu;
+            if (!captureInterrupted) capturedPresent = frame; // completion commits last
+            if (menuAvailable) {
+                ++perfSerial;
+                cpuSampleFrame = frame % pc::kPresentSampleEvery == 0;
+            }
+            const bool closedCpu = capturedPresent == frame && capturedCpuFlag &&
+                perfSerial != capturedMenuSerial;
+            if (menuAvailable && frame == pc::kPresentSampleEvery)
+                ok &= check(!closedCpu && cpuSampleFrame,
+                            "the newly armed draw flag cannot count as the just-closed CPU frame");
+            if (menuAvailable && frame == pc::kPresentSampleEvery + 1)
+                ok &= check(closedCpu && !cpuSampleFrame,
+                            "the old sampled draw flag survives menu rotation until collector close");
+            if (scenario == 2 && frame == 1)
+                ok &= check(!closedCpu && cpuSampleFrame,
+                            "a skipped VR menu cannot turn a stale draw flag into a CPU observation");
+            if (captureInterrupted)
+                ok &= check(!closedCpu && capturedPresent == pc::kPresentSampleEvery + 1,
+                            "faulted, stood-down and partially written captures cannot observe a later Present");
+            if (captureInterrupted && frame == 2 * pc::kPresentSampleEvery + 1)
+                ok &= check(capturedCpuFlag && perfSerial != capturedMenuSerial && !closedCpu,
+                            "stale-capture control would observe CPU without the current-Present completion guard");
+            if (annotateWork && closedCpu) {
+                edvrPluginCostNoteSite(owner, 7u, static_cast<uint8_t>(pc::SiteEvent::Invoked));
+                edvrPluginCostNoteCpuTicks(owner, 7u, 100u);
+            }
+            if (annotateWork && boundary.apiSampleFrame) {
+                const bool accepted = edvrPluginCostApiSampleContext(&ownerContext) != 0;
+                ok &= check(accepted &&
+                            edvrPluginCostApiSampleContext(&foreignContext) == 0,
+                            "only the registered owner context accepts API work before the shared close");
+                if (accepted) {
+                    edvrPluginCostNoteD3dCall(owner, 9u,
+                        static_cast<uint8_t>(pc::ApiClass::Work));
+                    ++acceptedApiFrames;
+                }
+            }
+            const bool ready = boundary.close(frame, closedCpu, &window);
+            if (ready) ++reports;
+            ok &= check(ready == (frame == pc::kWindowFrameCount + 1),
+                        "first configured close is discarded and each profile completes one Present window");
+            ok &= check(boundary.apiSampleFrame ==
+                            (frame % pc::kPresentSampleEvery == 0),
+                        "VR, flat and no-menu Presents rotate the actual collector API flag");
+        }
+        const auto& row = window.owners[owner];
+        const uint64_t expectedSamples = pc::kWindowFrameCount / pc::kPresentSampleEvery;
+        const uint64_t expectedCpuSamples = !menuAvailable ? 0u :
+            (scenario >= 3 ? 1u : expectedSamples);
+        ok &= check(reports == 1 && window.firstFrame == 2u &&
+                    window.lastFrame == pc::kWindowFrameCount + 1 &&
+                    window.windowFrames == pc::kWindowFrameCount &&
+                    window.completedApiSampleFrames == expectedSamples &&
+                    window.completedCpuSampleFrames == expectedCpuSamples,
+                    "shared boundary reports one complete window with honest VR/flat CPU denominators");
+        ok &= check(row.apiCalls[static_cast<uint8_t>(pc::ApiClass::Work)] ==
+                        acceptedApiFrames &&
+                    acceptedApiFrames == (annotateWork ? expectedSamples : 0u) &&
+                    row.apiObserved == (annotateWork ? 1u : 0u) &&
+                    row.cpuObserved == (menuAvailable ? 1u : 0u),
+                    "later boundary annotations close into the current interval; zero-work windows remain unobserved");
+
+        // Reconfigure drops the current partial interval and makes its next
+        // close the new discard, even when a menu clock is unavailable.
+        ok &= check(!boundary.close(pc::kWindowFrameCount + 2, false, &window),
+                    "a new partial window can begin after a completed report");
+        edvrPluginCostConfigure(flat ? 2u : 1u, 1000000u);
+        boundary.reset();
+        ok &= check(!boundary.close(1808u, false, &window) &&
+                    boundary.apiSampleFrame,
+                    "reconfigure discards its first close while publishing the next API sample");
+        edvrPluginCostShutdown();
+        boundary.reset();
+        ok &= check(!boundary.close(1824u, false, &window) &&
+                    !boundary.apiSampleFrame && !pc::apiSampleHint() &&
+                    edvrPluginCostApiSampleContext(&ownerContext) == 0,
+                    "shutdown keeps the shared Present flag and owner gates cold");
+    }
     return ok;
 }
 
@@ -1316,6 +1550,7 @@ bool run(bool full) {
         ok &= productionCpuRouteChecks();
         ok &= collectorHotPathChecks();
         ok &= collectorLifecycleChecks();
+        ok &= ownedPresentBoundaryChecks();
         ok &= ownerContextChecks();
         ok &= staleApiHintTransferChecks();
         ok &= panelDistanceApiPolicyChecks();
