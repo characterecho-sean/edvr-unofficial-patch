@@ -83,6 +83,7 @@
 #include "../../src/common/temporal_math.h"
 #include "../../src/d3d11/flat_projection_math.h"  // flatProjectionJitter: the flat layer's jitter rule is its inverse
 #include "../../src/d3d11/flat_ui_layer_math.h"    // the flat layer's adapter rules
+#include "../../src/d3d11/flat_map_star_choice.h" // the System Map's stars choice: the prep shader's rule, mirrored
 #include "../../src/d3d11/orbital_width.h"  // the orbit lines' width decision, for the panel factor's Supersampling term
 #include "../../src/d3d11/ui_layer_seed.h"
 #include "../../src/d3d11/ui_layer_seed_census.h"
@@ -1266,6 +1267,49 @@ void testFlatLayerRules() {
               "temporal AA tally: a refused spatial recovery counts as spatial-refused, and each exit is one reset");
         t.copy(true);          // no frame pending: nothing counted
         check(t.spatial == 1 && t.spatialRefused == 1, "temporal AA tally: a copy with no armed frame counts nothing");
+    }
+    // The map families take no cancel (2026-10-10, the cursor's pulse): whatever their rows measured, zero; the HUD families keep it.
+    {
+        const FlatUiJitterRead phaseRead = flatUiLayerJitterOf(true, 2.0 * 0.25 / 1920.0, -2.0 * -0.375 / 1080.0, 1920, 1080, 0.25f, -0.375f);
+        const FlatUiJitterRead zeroRead = flatUiLayerJitterOf(true, 0.0, 0.0, 1920, 1080, 0.25f, -0.375f);
+        const FlatUiJitterRead noRows = flatUiLayerJitterOf(false, 0.0, 0.0, 1920, 1080, 0.25f, -0.375f);
+        check(phaseRead.kind == FlatUiJitter::kPhase && flatUiLayerNoCancel(UiLayerFamily::kMapCanvas) &&
+                  flatUiLayerNoCancel(UiLayerFamily::kMapSprite) && !flatUiLayerNoCancel(UiLayerFamily::kHolo) &&
+                  !flatUiLayerNoCancel(UiLayerFamily::kFlightHud) && !flatUiLayerNoCancel(UiLayerFamily::kSprite),
+              "map cancel: the map families are the no-cancel pair; the holo, flight HUD and target sprite are not");
+        for (UiLayerFamily f : {UiLayerFamily::kMapCanvas, UiLayerFamily::kMapSprite}) {
+            const FlatUiJitterRead a = flatUiLayerCancelOf(f, phaseRead);
+            const FlatUiJitterRead b = flatUiLayerCancelOf(f, zeroRead);
+            const FlatUiJitterRead c = flatUiLayerCancelOf(f, noRows);
+            check(a.jx == 0.0f && a.jy == 0.0f && a.kind == FlatUiJitter::kZero && b.jx == 0.0f && b.jy == 0.0f &&
+                      c.jx == 0.0f && c.jy == 0.0f && c.kind == FlatUiJitter::kZero,
+                  "map cancel: a map family's draw is cancelled by nothing, whatever its rows measured (phase, zero or no rows)");
+        }
+        const FlatUiJitterRead hudA = flatUiLayerCancelOf(UiLayerFamily::kHolo, phaseRead);
+        const FlatUiJitterRead hudB = flatUiLayerCancelOf(UiLayerFamily::kFlightHud, phaseRead);
+        const FlatUiJitterRead hudC = flatUiLayerCancelOf(UiLayerFamily::kSprite, zeroRead);
+        check(hudA.kind == FlatUiJitter::kPhase && hudA.jx == phaseRead.jx && hudA.jy == phaseRead.jy &&
+                  hudB.jx == 0.25f && hudB.jy == -0.375f && hudC.kind == FlatUiJitter::kZero && hudC.jx == 0.0f,
+              "map cancel: the HUD families keep the measured phase (the holo panels, the flight HUD) and the measured zero");
+        check(flatUiJitterSlot(FlatUiJitter::kPhase) == 0 && flatUiJitterSlot(FlatUiJitter::kZero) == 1 &&
+                  flatUiJitterSlot(FlatUiJitter::kOther) == 2 && flatUiJitterSlot(FlatUiJitter::kNoRows) == 3,
+              "map cancel: the per-family counts' slots are phase, zero, other, no rows, in the order the log prints them");
+    }
+    // The stars' choice (2026-10-10): the CPU mirror of the prep shader's rule (flat_map_star_choice.h). The shader's bilinear taps and its
+    // validity tests are not mirrored, so this pins the pick alone.
+    check(flatStarPick(0.5f, 0.2f) == FlatStarPick::Still, "stars choice: a still term whose 3x3 matches the previous frame better is chosen");
+    check(flatStarPick(0.2f, 0.5f) == FlatStarPick::Plane, "stars choice: the plane is chosen where it matches the previous frame better");
+    check(flatStarPick(0.2f, 0.2f) == FlatStarPick::Plane, "stars choice: an equal pair is not a still choice (the plane stands)");
+    check(flatStarPick(0.01f, 0.02f) == FlatStarPick::Tie, "stars choice: both under the tie epsilon (flat black sky) is a tie, which keeps the plane");
+    check(flatStarPick(0.04f, 0.5f) == FlatStarPick::Plane, "stars choice: one under the epsilon alone is not a tie");
+    check(flatStarPick(std::nanf(""), 0.1f) == FlatStarPick::Plane && flatStarPick(0.1f, std::nanf("")) == FlatStarPick::Plane,
+          "stars choice: a non-finite sum keeps the plane");
+    {
+        const float black[9] = {}, same[9] = {0.4f, 0.4f, 0.4f, 0.4f, 0.4f, 0.4f, 0.4f, 0.4f, 0.4f};
+        check(flatStarSad(black, black) == 0.0f && flatStarPick(flatStarSad(black, black), flatStarSad(black, black)) == FlatStarPick::Tie,
+              "stars choice: an identical flat sky is a zero-error tie");
+        check(flatStarSad(same, black) > 0.0f && std::isfinite(flatStarLog(0.0f, 0.0f, 0.0f)),
+              "stars choice: a black pixel's log luminance is finite (the clamp), and a difference sums to a positive error");
     }
     // The jitter: rows that carry the phase (0.25, -0.375) px at 1920x1080 measure ndc (2 x 0.25 / 1920, -2 x -0.375 / 1080).
     const uint32_t w = 1920, h = 1080;

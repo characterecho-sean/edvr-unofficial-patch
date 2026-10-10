@@ -184,6 +184,25 @@ inline FlatUiJitterRead flatUiLayerJitterOf(bool measured, double ndcX, double n
     return r;
 }
 
+// THE MAP FAMILIES TAKE NO CANCEL (2026-10-10, the map cursor's pulse). The cursor is a screen-centred reticle whose vertex
+// shader does not read the camera rows the frame's jitter rides in (the cursor pulses only with temporal AA on, and it is
+// absent from the scene), so cancelling the rows' phase moves it by -phase each frame. The rows are still measured for the
+// 30 s line's per-family counts; the draw is taken with zero cancel and is never refused for its rows. The HUD families keep
+// the measured cancel (kPhase: the phase; kZero: none).
+inline bool flatUiLayerNoCancel(UiLayerFamily f) { return f == UiLayerFamily::kMapCanvas || f == UiLayerFamily::kMapSprite; }
+inline FlatUiJitterRead flatUiLayerCancelOf(UiLayerFamily f, const FlatUiJitterRead& j) {
+    if (!flatUiLayerNoCancel(f)) return j;
+    FlatUiJitterRead z = j;
+    z.kind = FlatUiJitter::kZero;
+    z.jx = 0.0f;
+    z.jy = 0.0f;
+    return z;
+}
+// The per-family counts' slot for a measured kind: 0 phase, 1 zero, 2 other, 3 no rows.
+inline int flatUiJitterSlot(FlatUiJitter k) {
+    return k == FlatUiJitter::kPhase ? 0 : k == FlatUiJitter::kZero ? 1 : k == FlatUiJitter::kOther ? 2 : 3;
+}
+
 // The take's certainty (2026-10-09). A HUD draw of frame N is taken only when (a) frame N-1's tone pass was seen
 // reading THAT draw's target -- or a plain copy of it -- and (b) frame N has not yet copied that target or tonemapped it. Per target
 // (13:23 flight, ea04a8a5: the first ask of a frame was a hologram whose target the tone never read, and one target

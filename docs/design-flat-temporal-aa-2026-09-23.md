@@ -22,7 +22,7 @@
   cheap; separate scheduling/capture when it saves copies/sync/per-draw work.
   Defer broad core extraction until flat capture establishes the boundary.
 - **Recommendation:** two installers, one graphics implementation, one temporal pipeline, separate VR/mono adapters; flat enables only temporal AA + support.
-- **10-10 map arcs (section below):** System Map (GuiFocus 7): depth-0 pixels take the map plane's motion. Galaxy Map (6) and Orrery (8): temporal AA OFF, no jitter; the UI layer keeps the map's text and markers. Branch only, not built, not flown.
+- **10-10 map arcs (section below):** System Map (7): depth-0 pixels take the plane's motion, the stars choose per pixel (built, not flown), and the cursor takes no cancel (built, not flown). Galaxy Map (6) and Orrery (8): temporal AA OFF, no jitter (built, not flown).
 - **106 (10-09):** fixed exposure 1.0 SHIPS on the flat HDR route (flown by eye:
   brighter, stars back); temporary key and luma probe REMOVED. VR keeps auto.
 - **Open:** station/on-foot projection coverage and mixed-camera HDR ownership,
@@ -14678,3 +14678,37 @@ Not covered: the runtime wiring (the boundary order, the phase gate, the HDR gua
 the spatial recovery's output on the map. Those are the flight's.
 
 Next: an Epic flat flight on the Galaxy Map, the Orrery and the System Map in one session, reading the map line and the grid.
+
+### 2026-10-10: System Map cursor and stars: two fixes in one build (built, not flown)
+
+Evidence (one Epic flat capture on 327f62dd, the coordinator's measurements):
+- Stars: depth 0 but nearly static, <= 1.6 px a frame measured. The grid and route lines (also depth 0) pan with the plane, and the plane's
+  motion vectors are right within 1-2 px. Giving the stars the plane motion as well (the GuiFocus 7 plane fix) gives them the full pan: 75 px
+  and 14 px of error, which is the star ghosting. Lines within 1.9 px and 0.9 px.
+- Cursor: a screen-centred reticle. It pulses under TAA and DLAA and not with AA off, and it is absent from the HDR scene in captures, so the
+  UI layer takes it (a map canvas or sprite draw). Its vertex shader does not read the camera rows the jitter rides in; the layer cancels
+  the rows' phase from it, so it moves by -phase every frame. (The first-draw line of 112303 printed a cancel of (-0.000, -0.000) on a
+  zero-phase frame, so it does not decide the question.)
+
+FIX 1, the cursor (flat_ui_layer_math.h flatUiLayerNoCancel, flatUiLayerCancelOf; flat_ui_layer.cpp decide): the map families are taken
+with zero cancel, whatever their rows measured, and are never refused for their rows. The rows are still measured: the map line counts each
+family's measured kind (phase, zero, other, no rows). The HUD families keep the measured cancel. Rig: flatUiLayerCancelOf pins the map pair
+(phase, zero and no rows all cancel to zero) and the HUD families (the holo and flight HUD keep the phase, the target sprite keeps zero).
+
+FIX 2, the stars (flat_mono_shader_source.h, prep; flat_mono_resolve.cpp; src\d3d11\flat_map_star_choice.h): per pixel, on a map-plane frame
+whose previous resolve call copied its input (the consecutive map frames). The depth-0, kind-0 pixel has two candidates: A, the plane motion
+(as today), and B, the rotation-only term it had before the plane (the pre-fix motion). Each names the surface's previous UV. The previous
+frame's input colour (an EDVR-owned copy of g.color, made after the prep on each map frame, bound at t19) is sampled bilinearly there, with the
+same 3x3 as the current input, in log luminance (log(Rec.709 + 1e-4)). The lower sum of absolute differences wins; a tie (both under 0.05, a
+flat sky) keeps A. Motion only: the expected depth, the history depth tests, the depth writes and every non-map frame are unchanged. A
+candidate whose previous UV is not finite, or whose B lies outside the raster, is not a candidate. The counts are per group: one add per
+group and counter (no per-pixel atomics), on the choice frames only, into four words at u6 (the census and the map-range reduction bind u6
+elsewhere). The flat map motion 5s line gains chose-plane, chose-still, ties (kept at A), not-chosen (no still term) and no-previous (map
+frames with no usable previous colour: the first map frame, the one after a reset, a size change or a call that did not copy).
+
+Rig: flat_map_star_choice.h's flatStarPick and flatStarSad are pinned in ui_quality_test (still, plane, equal, tie, one-under-epsilon,
+non-finite, identical flat sky, black log luminance finite). Not covered: the shader itself (the bilinear taps, the candidate tests and the
+group reduction) and the copy/bind/readback in flat_mono_resolve.cpp. Those need the D3D dispatch and the flight.
+
+Flight checks: the stars hold still on the System Map (the ghosting gone); the lines still pan; the cursor does not pulse under TAA or DLAA; the
+5s line's chose-still share is high where the sky is and low on the lines; no-previous is one per map start and per reset.

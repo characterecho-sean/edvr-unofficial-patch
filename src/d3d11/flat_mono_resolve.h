@@ -319,6 +319,11 @@ struct FlatMonoMapPlane {
     bool haveWords = false;
     uint32_t nearWord = 0, farWord = 0;
     float midpoint() const { return 0.5f * (minDepth + maxDepth); }
+    // The stars' choice (2026-10-10, flat_mono_shader_source.h starChoice), since the last take: the pixels of the choice frames read back,
+    // by what they chose (plane A, still B, a tie that kept A, and pixels not chosen: no still term), and the map frames that ran without a
+    // previous colour (no choice at all: the first map frame, or the one after a reset or a size change).
+    uint64_t chosePlane = 0, choseStill = 0, ties = 0, unchosen = 0;
+    uint64_t noPrevious = 0;
 };
 FlatMonoMapPlane flatMonoResolveTakeMapPlane();
 // Owner thread, before rasterization. Validates planned dimensions/mode/source

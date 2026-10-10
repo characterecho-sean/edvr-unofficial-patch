@@ -3815,10 +3815,15 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
                 // The watcher's own state, ungated by profile (journalRawStatus): whether it runs, how many Status.json reads parsed, and the last
                 // sample's GuiFocus. statusSamples=0 with watcher=active is the file never being read; gui-known=0 is the field absent.
                 const JournalRawStatus raw=journalRawStatus();
+                // The stars' choice (2026-10-10): the depth-0 pixels of the choice frames by what they chose (plane, still, tie kept at the
+                // plane, and not chosen), and the map frames that had no previous colour to choose with (no-previous frames).
                 Log::get().note("flat map motion 5s: focus=%s map-frames=%llu reductions=%llu plane=%s words=%s empty=%llu watcher=%s status-samples=%u "
-                                "gui-known=%d gui=%u; the System Map's pixels with no depth take the plane's motion while it is open",
+                                "gui-known=%d gui=%u; the System Map's pixels with no depth take the plane's motion while it is open; "
+                                "chose-plane=%llu chose-still=%llu ties=%llu not-chosen=%llu no-previous=%llu",
                     focus,(unsigned long long)plane.frames,(unsigned long long)plane.reductions,range,words,(unsigned long long)plane.empty,
-                    raw.active?"active":"inactive",raw.statusSamples,raw.guiKnown?1:0,raw.gui);
+                    raw.active?"active":"inactive",raw.statusSamples,raw.guiKnown?1:0,raw.gui,
+                    (unsigned long long)plane.chosePlane,(unsigned long long)plane.choseStill,(unsigned long long)plane.ties,
+                    (unsigned long long)plane.unchosen,(unsigned long long)plane.noPrevious);
             }
         }
         // The census of unkeyed pairs, every window while a temporal mode runs (empty

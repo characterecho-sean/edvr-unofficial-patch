@@ -50,6 +50,9 @@ struct Window {
     uint64_t mapDeclined[2][kDecisions] = {};
     // The map tonemap's candidates (flatUiMapToneSlotOf): the tone reads the candidate branch saw, and those that proved.
     uint64_t mapToneCandidates = 0, mapToneMatched = 0;
+    // The map families' draws by the kind their camera rows measured (flatUiJitterSlot: phase, zero, other, no rows), before
+    // the no-cancel rule takes the cancel away (2026-10-10).
+    uint64_t mapJitter[2][4] = {};
 };
 Window g_w;
 FlatUiLayerAsk g_lastAsk = FlatUiLayerAsk::kNotAsked;
@@ -161,24 +164,33 @@ FlatUiLayerAsk flatUiLayerDecide(ID3D11DeviceContext* ctx, const FlatUiLayerDraw
     if (flatUiToneConsumed(g_proof, d.frame, d.color)) return refuse(FlatUiRefuse::kAfterTone);
     if (!flatUiToneProven(g_proof, d.frame, d.color)) return refuse(FlatUiRefuse::kToneUnproven);
     if (!d.upstream) return refuse(FlatUiRefuse::kNotUpstream);
-    if (!d.haveRows) return refuse(FlatUiRefuse::kNoRows);
+    // The map families take no cancel and are never refused for their rows (flatUiLayerCancelOf): the rows are measured for
+    // the per-family counts, and the draw is taken unjittered.
+    const bool noCancel = flatUiLayerNoCancel(family);
+    if (!d.haveRows && !noCancel) return refuse(FlatUiRefuse::kNoRows);
     double ndcX = 0.0, ndcY = 0.0;
-    const bool measured = flatCameraMeasureRowShift(d.rows, ndcX, ndcY);
-    const FlatUiJitterRead j = flatUiLayerJitterOf(measured, ndcX, ndcY, d.width, d.height, d.phaseX, d.phaseY);
-    if (j.kind == FlatUiJitter::kNoRows) return refuse(FlatUiRefuse::kNoRows);
-    if (j.kind == FlatUiJitter::kOther) {
-        g_w.otherX = j.mx;
-        g_w.otherY = j.my;
-        if (!g_otherShiftNoted) {
-            g_otherShiftNoted = true;
-            Log::get().note("flat ui layer: a %s draw (vs %016llX ps %016llX) carries a camera shift of (%.4f, %.4f) render "
-                            "pixels, neither the frame's phase (%.4f, %.4f) nor zero: left in the game's frame (counted as "
-                            "other-shift; said once).",
-                            uiLayerFamilyName(family), static_cast<unsigned long long>(d.vs),
-                            static_cast<unsigned long long>(d.ps), j.mx, j.my, static_cast<double>(d.phaseX),
-                            static_cast<double>(d.phaseY));
+    const bool measured = d.haveRows && flatCameraMeasureRowShift(d.rows, ndcX, ndcY);
+    FlatUiJitterRead j = flatUiLayerJitterOf(measured, ndcX, ndcY, d.width, d.height, d.phaseX, d.phaseY);
+    if (!d.haveRows) j.kind = FlatUiJitter::kNoRows;
+    if (noCancel) {
+        if (ms >= 0) ++g_w.mapJitter[ms][flatUiJitterSlot(j.kind)];
+        j = flatUiLayerCancelOf(family, j);
+    } else {
+        if (j.kind == FlatUiJitter::kNoRows) return refuse(FlatUiRefuse::kNoRows);
+        if (j.kind == FlatUiJitter::kOther) {
+            g_w.otherX = j.mx;
+            g_w.otherY = j.my;
+            if (!g_otherShiftNoted) {
+                g_otherShiftNoted = true;
+                Log::get().note("flat ui layer: a %s draw (vs %016llX ps %016llX) carries a camera shift of (%.4f, %.4f) render "
+                                "pixels, neither the frame's phase (%.4f, %.4f) nor zero: left in the game's frame (counted as "
+                                "other-shift; said once).",
+                                uiLayerFamilyName(family), static_cast<unsigned long long>(d.vs),
+                                static_cast<unsigned long long>(d.ps), j.mx, j.my, static_cast<double>(d.phaseX),
+                                static_cast<double>(d.phaseY));
+            }
+            return refuse(FlatUiRefuse::kOtherShift);
         }
-        return refuse(FlatUiRefuse::kOtherShift);
     }
     if (j.kind == FlatUiJitter::kPhase) ++g_w.jitterPhase;
     else ++g_w.jitterZero;
@@ -525,7 +537,8 @@ void flatUiLayerReport(uint64_t windowSeconds) {
     Log::get().note(
         "flat ui layer map: open-frames=%llu; canvas asked=%llu taken=%llu refused=%llu (%s); sprite asked=%llu taken=%llu "
         "refused=%llu (%s); tone-candidates-map=%llu tone-matched-map=%llu; temporal-off=%llu jitter-zeroed=%llu spatial=%llu "
-        "spatial-refused=%llu no-copy=%llu resets=%llu",
+        "spatial-refused=%llu no-copy=%llu resets=%llu; canvas rows phase=%llu zero=%llu other=%llu no-rows=%llu; sprite rows "
+        "phase=%llu zero=%llu other=%llu no-rows=%llu",
         static_cast<unsigned long long>(w.mapOpenFrames), static_cast<unsigned long long>(w.asked[fc]),
         static_cast<unsigned long long>(w.taken[fc]), static_cast<unsigned long long>(mapRefusedTotal(w, 0, w.atIssue[fc])),
         mapReasons(w, 0, w.atIssue[fc]).c_str(), static_cast<unsigned long long>(w.asked[fs]),
@@ -534,7 +547,11 @@ void flatUiLayerReport(uint64_t windowSeconds) {
         static_cast<unsigned long long>(w.mapToneMatched), static_cast<unsigned long long>(g_mapAa.temporalOff),
         static_cast<unsigned long long>(g_mapAa.jitterZeroed), static_cast<unsigned long long>(g_mapAa.spatial),
         static_cast<unsigned long long>(g_mapAa.spatialRefused), static_cast<unsigned long long>(g_mapAa.noCopy),
-        static_cast<unsigned long long>(g_mapAa.resets));
+        static_cast<unsigned long long>(g_mapAa.resets),
+        static_cast<unsigned long long>(w.mapJitter[0][0]), static_cast<unsigned long long>(w.mapJitter[0][1]),
+        static_cast<unsigned long long>(w.mapJitter[0][2]), static_cast<unsigned long long>(w.mapJitter[0][3]),
+        static_cast<unsigned long long>(w.mapJitter[1][0]), static_cast<unsigned long long>(w.mapJitter[1][1]),
+        static_cast<unsigned long long>(w.mapJitter[1][2]), static_cast<unsigned long long>(w.mapJitter[1][3]));
     g_mapAa.clearCounts();
     char declined[400] = "";
     size_t used = 0;

@@ -47,6 +47,9 @@ Texture2D<float4> OverlayColor : register(t16);         // HDR finish only, boun
                                                          // drawn (t0 is then the CLEAN H, the image the backend was handed)
 ByteAddressBuffer MapPlaneRange : register(t18);         // prep only, bound when debug.w bit 3: the frame's nearest and farthest non-zero depth
                                                          // as two uint words (asuint), from mapPlaneDepth; read only on that bit
+// The previous map frame's input colour (2026-10-10, the stars' choice: starChoice in prep). An EDVR-owned copy made after the prep
+// on each map-plane frame, bound at t19 only on a frame whose debug.w bit 4 says it holds the last frame's input.
+Texture2D<float4> PrevColor : register(t19);
 SamplerState LinearClamp : register(s0);
 RWTexture2D<float> OutDepth : register(u0);
 RWTexture2D<float2> OutMotion : register(u1);
@@ -189,9 +192,41 @@ uint engineBefore(int2 q,float2 uv,float depth,out float4 before,out uint cls) {
 }
 )HLSL"
 R"HLSL(
+// THE STARS' CHOICE (2026-10-10). On the System Map a depth-0 pixel with a valid plane motion (candidate A, the map plane's camera term)
+// may be a still background (the stars move <= 1.6 px a frame) or a moving line (the grid pans with the plane). Candidate B is the
+// rotation-only term the pixel had before the plane (the pre-fix motion). Each candidate says where the surface was a frame ago; the
+// previous frame's input colour is sampled there (bilinear, the same 3x3 neighbourhood as now), and the lower sum of absolute
+// differences of log luminance wins. Both under kStarTieEpsilon (flat black sky, a tie) keeps A, as the bulk did before. CPU mirror:
+// flat_map_star_choice.h (the same constant and rule).
+static const float kStarTieEpsilon=0.05;
+float starLog(float3 c){return log(max(dot(c,float3(0.2126,0.7152,0.0722)),0.0)+1e-4);}
+// 0: candidate A (plane), 1: candidate B (still), 2: a tie (A).
+uint starChoice(int2 q,float4 planeMotion,float4 stillMotion){
+    const float2 pa=planeMotion.xy/planeMotion.w*float2(.5,-.5)+.5;   // the surface's previous UV under A
+    const float2 pb=stillMotion.xy/stillMotion.w*float2(.5,-.5)+.5;   // ...under B
+    if(!all(isfinite(pa))||!all(isfinite(pb))||any(pb<0)||any(pb>1))return 0;
+    float sa=0,sb=0;
+    for(int j=-1;j<=1;++j)for(int i=-1;i<=1;++i){
+        const int2 o=int2(i,j);
+        const float cur=starLog(Color.Load(int3(clamp(q+o,int2(0,0),int2(size.xy)-1),0)).rgb);
+        const float2 d=float2(o)/float2(size.xy);
+        sa+=abs(cur-starLog(PrevColor.SampleLevel(LinearClamp,pa+d,0).rgb));
+        sb+=abs(cur-starLog(PrevColor.SampleLevel(LinearClamp,pb+d,0).rgb));
+    }
+    if(!isfinite(sa)||!isfinite(sb))return 0;
+    if(sa<kStarTieEpsilon&&sb<kStarTieEpsilon)return 2;
+    return sb<sa?1:0;
+}
+// The choice counts of one group (0 plane, 1 still, 2 tie, 3 not chosen: no previous colour or no still term), added to the
+// four words of u6 once per group on a choice frame (debug.w bit 4).
+groupshared uint gChoice[4];
 [numthreads(8,8,1)]
-void prep(uint3 id:SV_DispatchThreadID) {
-    if(any(id.xy>=size.xy))return;
+void prep(uint3 id:SV_DispatchThreadID,uint gi:SV_GroupIndex) {
+    // No early return: every thread reaches the group barrier. An out-of-range thread's writes are discarded by the UAVs, its loads
+    // read zero, and it counts nothing (inside is false).
+    const bool inside=all(id.xy<uint2(size.xy));
+    if(gi==0){for(uint k=0;k<4;++k)gChoice[k]=0;}
+    GroupMemoryBarrierWithGroupSync();
     int2 q=int2(id.xy); float2 uv=(float2(q)+.5)/float2(size.xy);
     // The depth belongs to the raster pixel q. Both raw camera and engine
     // rows describe the same surface at its unjittered screen coordinate.
@@ -280,6 +315,8 @@ void prep(uint3 id:SV_DispatchThreadID) {
         // the frame's non-zero depth range instead, the map plane's own depth. Only the MOTION comes from that call: `before`, and with it expected
         // depth, is the call above, so every history depth test and output is what it was. Without the bit the range is not bound and not read.
         float4 motionBefore=before;
+        const bool beforeValid=valid;   // candidate B: the rotation-only term above (the pre-fix motion)
+        bool planeApplied=false;
         if(kind==0 && depth==0 && (debug.w&8)!=0) {
             // The range as mapPlaneDecode (flat_map_plane_range.h) reads it: word 0 the nearest depth, word 1 the inverted farthest. An empty
             // or bad range (a NaN, an inverted pair, a depth outside (0, 1]) takes today's call.
@@ -288,8 +325,17 @@ void prep(uint3 id:SV_DispatchThreadID) {
             if(isfinite(lo) && isfinite(hi) && lo>0 && lo<=hi && hi<=1) {
                 const float mid=0.5*(lo+hi);
                 float4 plane;
-                if(isfinite(mid) && cameraBefore(rawUv,mid,plane)) {motionBefore=plane;valid=true;}
+                if(isfinite(mid) && cameraBefore(rawUv,mid,plane)) {motionBefore=plane;valid=true;planeApplied=true;}
             }
+        }
+        // THE STARS' CHOICE (debug.w bit 4, with the plane). A choice of B takes the rotation-only term as the motion; the history
+        // checks below read the chosen term exactly as they read A, and `before` (so expected depth) is unchanged.
+        if(planeApplied && inside) {
+            if((debug.w&16)!=0 && beforeValid) {
+                const uint pick=starChoice(q,motionBefore,before);
+                InterlockedAdd(gChoice[pick],1);
+                if(pick==1)motionBefore=before;
+            } else InterlockedAdd(gChoice[3],1);
         }
         if(valid) {
             float2 prev=motionBefore.xy/motionBefore.w*float2(.5,-.5)+.5;
@@ -314,6 +360,11 @@ void prep(uint3 id:SV_DispatchThreadID) {
     if(flags.z!=0)OutExpected[q]=expected;
     // The refusal census and view: one byte, the class and (bit 7) whether this pixel's history was refused.
     if(debug.x!=0 || debug.y!=0)OutClass[q]=cls|(reject!=0?0x80u:0u);
+    // The choice counts: one add per group and counter, on a choice frame only (the census's pattern: no per-pixel atomics).
+    GroupMemoryBarrierWithGroupSync();
+    if(gi==0 && (debug.w&16)!=0) {
+        for(uint k=0;k<4;++k)if(gChoice[k]!=0)RefusalCounts.InterlockedAdd(4*k,gChoice[k]);
+    }
 }
 )HLSL"
 R"HLSL(
