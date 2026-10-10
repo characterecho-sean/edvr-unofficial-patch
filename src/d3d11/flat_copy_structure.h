@@ -116,8 +116,10 @@ inline FlatWeaponRoute flatWeaponRoute(bool keyAuto, bool routeLatched, FlatMono
                                        uint32_t renderW, uint32_t renderH, uint32_t outputW, uint32_t outputH) {
     if (keyAuto && !routeLatched && flatHdrRouteEvaluatesAtRender(mode, renderW, renderH, outputW, outputH))
         return FlatWeaponRoute::Hdr;
-    return mode == FlatMonoResolveMode::Dlss || mode == FlatMonoResolveMode::Fsr ? FlatWeaponRoute::Copy
-                                                                                : FlatWeaponRoute::Unchanged;
+    // MetalFX shares the trained-upscaler route and needs the same upstream foreground contract.
+    return mode == FlatMonoResolveMode::Dlss || mode == FlatMonoResolveMode::Fsr ||
+           mode == FlatMonoResolveMode::Mfx ? FlatWeaponRoute::Copy
+                                            : FlatWeaponRoute::Unchanged;
 }
 
 // ---- the admission --------------------------------------------------------------------------------------------

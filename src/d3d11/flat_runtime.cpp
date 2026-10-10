@@ -3291,7 +3291,8 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
         s.phase.resetHistory();
         s.engine = _stricmp(mode.c_str(), "fsr") == 0 ? FlatMonoResolveMode::Fsr :
             _stricmp(mode.c_str(), "dlss") == 0 ? FlatMonoResolveMode::Dlss :
-            _stricmp(mode.c_str(), "dlaa") == 0 ? FlatMonoResolveMode::Dlaa : FlatMonoResolveMode::Taa;
+            _stricmp(mode.c_str(), "dlaa") == 0 ? FlatMonoResolveMode::Dlaa :
+            _stricmp(mode.c_str(), "mfx") == 0 ? FlatMonoResolveMode::Mfx : FlatMonoResolveMode::Taa;
         if(s.engine==FlatMonoResolveMode::Taa) {
             s.foregroundRoute.clear();for(auto& candidate:s.foregroundCandidates)retireDomainCandidate(s,candidate);
             s.foregroundSelectedDepth=nullptr;s.foregroundLastH={};

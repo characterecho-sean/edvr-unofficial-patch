@@ -8,11 +8,24 @@ namespace edvr {
 
 // Every temporal mode needs the same depth and rigid-object motion inputs.
 // Keep their producers coupled to the mode, including live on/off changes.
+//
+// "mfx" belongs here for exactly the reason "fsr" does: a temporal mode that is
+// not enabled here is stood down before the resolver is ever asked, so the whole
+// pass -- discovery, jitter, motion, the backend's own availability probe --
+// never runs.
+//
+// Note that it is here and NOT in temporalEngineFor() below. That function asks
+// a different question -- whose trained upscaler runs the frame -- and EDVR owns
+// no external engine for MetalFX: DXMT encodes the scaler itself and keeps its
+// history inside the cached MTLFXTemporalScaler, so there is no AMD- or
+// NVIDIA-shaped coupling to make, and the pass's own history semantics are right.
+// Adding mfx there would wrongly claim UI-depth reach through an external engine.
 inline bool temporalModeEnabled(const std::string& mode) {
     return _stricmp(mode.c_str(), "on") == 0 ||
            _stricmp(mode.c_str(), "dlaa") == 0 ||
            _stricmp(mode.c_str(), "dlss") == 0 ||
-           _stricmp(mode.c_str(), "fsr") == 0;
+           _stricmp(mode.c_str(), "fsr") == 0 ||
+           _stricmp(mode.c_str(), "mfx") == 0;
 }
 
 struct TemporalPresetSelection {

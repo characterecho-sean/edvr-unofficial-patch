@@ -91,7 +91,14 @@ int main() {
     for (float scale : {0.0f, -1.0f, NAN, INFINITY}) {
         if (strcmp(edvr::temporalNvidiaLabel(scale), "DLSS / DLAA")) { ++g_fails; puts("FAIL: unknown scale label"); }
     }
-    for (const char* mode : {"on", "ON", "dlaa", "DLAA", "dlss", "DLSS"}) {
+    // The modes the shared frontend gate must recognise. "mfx" is here
+    // because the gate stands a mode down before the resolver is asked anything,
+    // so a mode missing from it never reaches mfxAvailable() at
+    // all -- a flight reported the mode routed, a repeated refusal reason, and
+    // no MFX line anywhere.
+    // check_metal_fx_backend.py holds the same fact statically; this is the one
+    // that compiles the gate and asks it.
+    for (const char* mode : {"on", "ON", "dlaa", "DLAA", "dlss", "DLSS", "mfx", "MFX"}) {
         if (!edvr::temporalModeEnabled(mode)) { ++g_fails; printf("FAIL: bundled temporal mode %s\n", mode); }
     }
     for (const char* mode : {"off", "OFF", "", "bogus"}) {

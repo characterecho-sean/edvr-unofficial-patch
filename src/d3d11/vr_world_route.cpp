@@ -152,6 +152,12 @@ FlatMonoResolveMode resolveModeFromConfig(bool* known) {
     if (_stricmp(m.c_str(), "fsr") == 0) return FlatMonoResolveMode::Fsr;
     if (_stricmp(m.c_str(), "dlss") == 0) return FlatMonoResolveMode::Dlss;
     if (_stricmp(m.c_str(), "dlaa") == 0) return FlatMonoResolveMode::Dlaa;
+    // mfx falls through to Taa here, and that is deliberate: this is the VR
+    // ON-FOOT WORLD route, which resolves the world's HDR scene image with EDVR's own
+    // history and never runs the flat trained backend at all, so naming a trained
+    // upscaler here would select a mode this route cannot honour. `known` still
+    // carries the real answer -- temporalModeEnabled above does name mfx -- so the
+    // census and the UI see mfx as enabled; only the backend chosen here differs.
     return FlatMonoResolveMode::Taa;
 }
 
