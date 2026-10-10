@@ -634,9 +634,10 @@ def _mean_sd_cell(ms, signed, digits):
 #
 # One line is one caller (thread, return RVA) over a window of WaitGetPoses; "target-minus-display" is the instant its pose was located at less the
 # latest frame's predictedDisplayTime, "angle-to-drawn" the angle between the pose it got and the pose that frame was drawn with, "head" the render
-# pose's angular speed. Any of the three reads n/a when none of the window's calls had it. Elite's own request for "now" is answered at the display
-# time since the head-pose fix (docs\terrain-culling.md), so for it the gap reads 0; a caller that passes a real prediction, or is not in the game's
-# image, is located at the wall clock and shows the true lag.
+# pose's angular speed. Any of the three reads n/a when none of the window's calls had it. Elite's own request for "now" is answered one display
+# period after the latest frame's display time since the head-pose fix (docs\terrain-culling.md), so for it the gap reads about one period (+11 ms at
+# 90 Hz) and the angle to the drawn pose about head speed times that period; a caller that passes a real prediction, or is not in the game's image,
+# is located at the wall clock and shows the true lag.
 
 POSE_GAP_RE = re.compile(
     r"pose gap: tid (?P<tid>\d+) calls (?P<calls>\d+) from (?P<frm>exe\+0x[0-9A-Fa-f]+|outside|\?) "
@@ -723,8 +724,8 @@ def print_pose_tally(text):
                  ("%.1f" % r["head"][0]) if r["head"][0] is not None else "n/a", ("%+.2f" % r["r"]) if r["r"] is not None else "n/a"))
     for r in rows:
         if r["fallbacks"]:
-            print("[edvr] tid %d: %d call(s) could not be located at the display time (no frame yet, or no positive display time) and were located at "
-                  "now + prediction." % (r["tid"], r["fallbacks"]))
+            print("[edvr] tid %d: %d call(s) could not be given a target one display period after the display time (no frame yet, a stale frame, no "
+                  "period, or a reference-space change in between) and were located at now + prediction." % (r["tid"], r["fallbacks"]))
     for r in rows:
         if r["gap"][0] is None:
             continue
@@ -735,8 +736,10 @@ def print_pose_tally(text):
               "angle against head speed r = %s over %d window(s)."
               % (r["frm"], r["tid"], r["gap"][0], ("%.3f" % r["angle"][0]) if r["angle"][0] is not None else "n/a", spread,
                  ("%+.2f" % r["r"]) if r["r"] is not None else "n/a", r["n"]))
-    print("[edvr] Elite's own \"now\" request should read a gap of 0 ms and a small angle that does not grow with head speed; a caller with a real "
-          "prediction, or outside the game's image, shows the true lag (before the fix Elite's was 41-44 ms and up to 4.1 degrees, r = +0.98).")
+    print("[edvr] Elite's own \"now\" request should read a gap of about one display period (+11 ms at 90 Hz, +14 ms at 72 Hz) and an angle to the "
+          "drawn pose of about head speed times that period (r near +1: it is one period ahead by design). A gap near 0 means the answer is not "
+          "acting (or is the earlier display-time answer); +40 ms or more is the lag it replaced. A caller with a real prediction, or outside the "
+          "game's image, shows the true lag (before the fix Elite's was 41-44 ms and up to 4.1 degrees, r = +0.98).")
     return 0
 
 # --camera-census: the VR camera census (advanced.vr_camera_census), one flight
@@ -10249,9 +10252,10 @@ POSE_FIXTURE = "pose_gap_fixture.log"
 
 def self_test_pose():
     """--tally pose on tools\\pose_gap_fixture.log (which tools\\openxr_pose_test holds to exactly what src/openxr/pose_gap.h writes for the scripted
-    flight: 24 lines -- twelve 60-second windows of Elite's own "now" request (thread 24212, answered at the display time: gap 0, a small flat
-    angle, one fallback call in window 2, three failed in window 5) and of another caller (thread 7001, outside the image, a real prediction: gap 9.5
-    ms, an angle of 0.02 degrees per deg/s of head speed)), then on lines altered to break each thing the report depends on. Returns ok."""
+    flight: 24 lines -- twelve 60-second windows of Elite's own "now" request (thread 24212, answered one display period after the display time: gap
+    +11.11 ms, an angle of 0.0111 degrees per deg/s of head speed, one fallback call in window 2, three failed in window 5) and of another caller
+    (thread 7001, outside the image, a real prediction: gap 9.5 ms, an angle of 0.02 degrees per deg/s of head speed)), then on lines altered to
+    break each thing the report depends on. Returns ok."""
     ok = True
 
     def fail(message):
@@ -10273,7 +10277,7 @@ def self_test_pose():
         return False
     w0, w1 = windows[0], windows[1]
     if (w0["tid"], w0["calls"], w0["frm"], w0["waits"], w0["failed"], w0["fb"]) != (24212, 120, "exe+0x4E3881", 5400, 0, 0) \
-            or w0["pred"] != 0.0 or w0["gm"] != 0.0 or w0["gmin"] != 0.0 or w0["gmax"] != 0.0 or w0["am"] != 0.05 or w0["amax"] != 0.05 or w0["head"] != 10.0:
+            or w0["pred"] != 0.0 or w0["gm"] != 11.11 or w0["gmin"] != 11.11 or w0["gmax"] != 11.11 or w0["am"] != 0.111 or w0["amax"] != 0.111 or w0["head"] != 10.0:
         fail("window 1 parsed to %r" % (w0,))
     if (w1["tid"], w1["calls"], w1["frm"]) != (7001, 60, "outside") or w1["pred"] != 11.0 or w1["gm"] != 9.5 or w1["gmin"] != 9.0 or w1["gmax"] != 10.0:
         fail("window 2 (the other caller, outside the image, prediction 11 ms) parsed to %r" % (w1,))
@@ -10287,9 +10291,9 @@ def self_test_pose():
         return False
     elite = rows[24212]
     if elite["frm"] != "exe+0x4E3881" or elite["n"] != 12 or elite["calls"] != 1440 or elite["failed"] != 3 or elite["fallbacks"] != 1 \
-            or not close(elite["gap"][0], 0.0) or not close(elite["gap"][1], 0.0) or not close(elite["angle"][0], 0.055) \
-            or not close(elite["head"][0], 65.0) or elite["angle_range"] != (0.05, 0.06) or elite["r"] is None or abs(elite["r"]) > 0.4:
-        fail("Elite's own request -> %r (a gap of 0 and an angle that does not follow head speed)" % (elite,))
+            or not close(elite["gap"][0], 11.11) or not close(elite["gap"][1], 0.0) or not close(elite["angle"][0], 0.7215) \
+            or not close(elite["head"][0], 65.0) or elite["angle_range"] != (0.111, 1.332) or elite["r"] is None or not close(elite["r"], 1.0, 1e-6):
+        fail("Elite's own request -> %r (a gap of one period and an angle of head speed times that period)" % (elite,))
     other = rows[7001]
     if other["frm"] != "outside" or other["n"] != 12 or other["calls"] != 720 or not close(other["gap"][0], 9.5) or not close(other["angle"][0], 1.3) \
             or not close(other["angle"][1], 0.7, 0.05) or not close(other["head"][0], 65.0) or other["r"] is None or not close(other["r"], 1.0, 1e-9):
@@ -10304,12 +10308,12 @@ def self_test_pose():
     if _pearson([(1.0, 1.0), (2.0, 4.0), (3.0, 9.0)]) is None or abs(_pearson([(1.0, 3.0), (2.0, 2.0), (3.0, 1.0)]) + 1.0) > 1e-9:
         fail("_pearson of a rising and a falling line")
     # A line altered: n/a figures parse as None and stay out of every mean.
-    altered = text.replace("target-minus-display mean 0.00 ms (min 0.00 max 0.00)", "target-minus-display n/a", 1)
+    altered = text.replace("target-minus-display mean 11.11 ms (min 11.11 max 11.11)", "target-minus-display n/a", 1)
     aw, _ = parse_pose_gap(altered)
     if aw[0]["gm"] is not None or aw[0]["gmin"] is not None or aw[0]["gmax"] is not None:
         fail("an n/a gap parsed as a number: %r" % (aw[0],))
     ar = {r["tid"]: r for r in tally_pose(aw)}[24212]
-    if ar["n"] != 12 or not close(ar["gap"][0], 0.0):
+    if ar["n"] != 12 or not close(ar["gap"][0], 11.11):
         fail("an n/a window changed the gap mean -> %r" % (ar,))
     # The over-the-limit line is a note, not a window.
     more = text + "[00:00:00.000] pose gap: more than 16 callers in a window; 4 calls not counted\n"
@@ -10335,13 +10339,15 @@ def self_test_pose():
         rc, out = run(["--dir", logs, "--tally", "pose"])
         for want in ("tally pose: 24 window line(s) over 2 caller row(s)",
                      "   7001 outside          12     720      0  +9.50 +/- 0.00",
-                     " 24212 exe+0x4E3881     12    1440      3  +0.00 +/- 0.00",
+                     " 24212 exe+0x4E3881     12    1440      3  +11.11 +/- 0.00",
                      "1.300 +/- 0.7", "+1.00",
-                     "exe+0x4E3881, tid 24212: its pose is located +0.00 ms from the drawn frame's display time, and is turned 0.055 deg from the drawn pose "
-                     "(0.050 to 0.060 across windows)",
+                     "exe+0x4E3881, tid 24212: its pose is located +11.11 ms from the drawn frame's display time, and is turned 0.722 deg from the drawn pose "
+                     "(0.111 to 1.332 across windows)",
                      "outside, tid 7001: its pose is located +9.50 ms from the drawn frame's display time, and is turned 1.300 deg from the drawn pose "
                      "(0.200 to 2.400 across windows); angle against head speed r = +1.00 over 12 window(s).",
-                     "tid 24212: 1 call(s) could not be located at the display time", "before the fix Elite's was 41-44 ms"):
+                     "tid 24212: 1 call(s) could not be given a target one display period after the display time",
+                     "a gap of about one display period (+11 ms at 90 Hz, +14 ms at 72 Hz) and an angle to the drawn pose of about head speed times that period",
+                     "before the fix Elite's was 41-44 ms"):
             if want not in out:
                 fail("--tally pose output lacks %r:\n%s" % (want, out))
         if rc != 0:

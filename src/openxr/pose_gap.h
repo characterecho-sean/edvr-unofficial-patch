@@ -4,12 +4,13 @@
 // line per caller (thread, return RVA) every 60 s, written from the WaitGetPoses publish point.
 //
 // WHAT IT MEASURES. Elite's game thread asks IVRSystem::GetDeviceToAbsoluteTrackingPose for "now"; the render thread draws the pose
-// WaitGetPoses gave it, located at the frame's predictedDisplayTime. The gap between the two instants is the lag Elite's terrain culling was
-// working with (41-44 ms before the fix, flight 3); the fix (head_pose_time.h) answers Elite's own "now" at the display time, so under it the
-// gap reads 0 for Elite and shows the true lag for any other caller. Per call this records who asked (thread, return RVA), the prediction
-// passed, the located instant minus the latest frame's display time, the angle between the pose handed back and the pose that frame was
-// drawn with, and how fast the head was turning. It is a diagnostic that stays: a caller that appears after a game update, or a fix that
-// stops acting, shows here.
+// WaitGetPoses gave it, located at the frame's predictedDisplayTime. The gap between the two instants was the lag Elite's terrain culling was
+// working with (41-44 ms before the fix, flight 3); the fix (head_pose_time.h) answers Elite's own "now" one display period after the latest
+// frame's display time, the instant the next frame is drawn at, so under it the gap reads about one period (+11 ms at 90 Hz) for Elite and the
+// angle to the drawn pose about head speed times that period (r near +1: one period ahead by design), and shows the true lag for any other caller. Per
+// call this records who asked (thread, return RVA), the prediction passed, the located instant minus the latest frame's display time, the
+// angle between the pose handed back and the pose that frame was drawn with, and how fast the head was turning. It is a diagnostic that
+// stays: a caller that appears after a game update, or a fix that stops acting, shows here.
 //
 // Pure: the clock and the sink are passed in, so tools\openxr_pose_test drives every case and holds tools\pose_gap_fixture.log to exactly
 // what this writes (tools\edvr_log.py --tally pose reads it).

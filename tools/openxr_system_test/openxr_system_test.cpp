@@ -454,7 +454,7 @@ void oddRecommendationTest() {
 // frame's display time, judged by a return address inside the executable and a prediction under 5 ms either way, and what reaches the source.
 __declspec(noinline) void headPoseTests(vr::IVRSystem* system, FakeSource& source, edvr::openxr::OpenVRSystem& concrete) {
   using edvr::openxr::ExeModule;
-  // ---- Elite's "now" head pose: which GetDeviceToAbsoluteTrackingPose calls are answered at the drawn frame's display time ----
+  // ---- Elite's "now" head pose: which GetDeviceToAbsoluteTrackingPose calls are answered one display period after the drawn frame's display time ----
   {
     const ExeModule realExe = concrete.exeModule();
     concrete.useExeModule(realExe);

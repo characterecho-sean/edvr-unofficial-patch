@@ -44,7 +44,7 @@ struct SystemRead {
 // Who called GetDeviceToAbsoluteTrackingPose and which instant it is to be located at. Taken on the CALLER's thread before the hop to
 // the owner thread, since the owner is the wrong place to ask "who called". `rva` is the game executable's return RVA (or
 // kFrameOutside/kFrameUnknown); `display` is the filter's verdict (head_pose_time.h answeredAtDisplayTime): Elite's own request for
-// "now" is located at the latest frame's display time, everyone else at now + prediction.
+// "now" is located one display period past the latest frame's display time, everyone else at now + prediction.
 struct HeadCall {
   uint32_t thread=0,rva=0;
   bool display=false;
@@ -60,8 +60,8 @@ class SystemSource {
   virtual SystemRead read() const =0;
   virtual bool locateHead(uint64_t generation,vr::ETrackingUniverseOrigin origin,
                           float prediction,vr::TrackedDevicePose_t& out)=0;
-  // The same, for a caller that is known: the instrument records `call`, and a call with `display` set is located at the latest frame's
-  // display time instead of now + prediction. The default is the plain call, so a source with no use for either keeps working unchanged.
+  // The same, for a caller that is known: the instrument records `call`, and a call with `display` set is located one display period past the
+  // latest frame's display time instead of now + prediction. The default is the plain call, so a source with no use for either keeps working unchanged.
   virtual bool locateHeadFor(uint64_t generation,vr::ETrackingUniverseOrigin origin,
                              float prediction,const HeadCall& call,vr::TrackedDevicePose_t& out) {
     (void)call;return locateHead(generation,origin,prediction,out);

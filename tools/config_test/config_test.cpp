@@ -1061,7 +1061,7 @@ static void iniNameScan(const std::wstring& root) {
 //
 // The six keys of the terrain guard, removed 2026-10-09 (fix.cull_guard, its _percent, _fraction_h, _fraction_v and _headsets, and advanced.cull_guard_channel),
 // are held out the same way, the one bare name covering all six. The cause the guard worked around was found: Elite culled with a head pose 42 ms older than
-// the one it drew with, and EDVR now answers its "now" request at the drawn frame's display time (docs/terrain-culling.md). Nothing is left to keep permanent.
+// the one it drew with, and EDVR now answers its "now" request one display period after the drawn frame's display time (docs/terrain-culling.md). Nothing is left to keep permanent.
 static const char* const kRetiredKeys[] = {
     "temporal_aa_on_foot_world_jitter",
     "temporal_aa_on_foot_world_steady_detail",

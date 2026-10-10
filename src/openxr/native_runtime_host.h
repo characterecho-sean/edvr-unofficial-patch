@@ -383,7 +383,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   DWORD ownerThread=GetCurrentThreadId();
   XrResult lastHeadResult=XR_SUCCESS;XrTime lastHeadTime=0;
   // The head-pose answer and its diagnostic (head_pose_time.h, pose_gap.h; docs\terrain-culling.md). `latestPoseFrame` is the frame the game
-  // was last given by WaitGetPoses -- the pose that is drawn -- kept for Elite's "now" pose calls to be located at and measured against.
+  // was last given by WaitGetPoses -- the pose that is drawn -- kept for Elite's "now" pose calls to be located from (one display period past its
+  // display time) and measured against.
   // Written and read on the owner thread only. It is the frame of the CURRENT session and origin: every place that invalidates the origin, the
   // session or the geometry publication drops it (dropPoseFrame), and a display time that has fallen more than one period behind now is not
   // used (displayTimeFresh), so nothing the game was told earlier outlives the state it was told in.
@@ -394,7 +395,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     double speedDegPerSec=0;
   } latestPoseFrame;
   void dropPoseFrame() {latestPoseFrame=PoseFrame{};}
-  // The clock Elite's "now" pose calls read (a rig substitutes its own so "now" is a number it chooses), and the display-time locates the runtime
+  // The clock Elite's "now" pose calls read (a rig substitutes its own so "now" is a number it chooses), and the explicit-time locates the runtime
   // refused with XR_ERROR_TIME_INVALID and that were located at now + prediction instead.
   CounterNow headClock=counterNow;
   uint64_t displayTimeRefusals=0;
@@ -2249,15 +2250,16 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     poseGap.note(sample);
     return located;
   }
-  // The instant an Elite "now" call is located at: the latest frame's display time; false when there is none (no frame waited since the origin,
-  // session or geometry was last invalidated, a display time that is not positive) or when it has fallen more than one display period behind
-  // `now` (displayTimeFresh), and the call is located at now + prediction as it always was.
+  // The instant an Elite "now" call is located at: the latest frame's display time PLUS that frame's display period (head_pose_time.h answerTime;
+  // the arithmetic of the game-pose array, space_pose.h nextPredictionTime). False when there is none -- no frame waited since the origin, session
+  // or geometry was last invalidated, a display time that is not positive, the cached frame more than one display period behind `now`
+  // (displayTimeFresh, judged on the cached frame, not on the target), a frame that reports no period, or a reference-space change between the
+  // display time and the target -- and the call is located at now + prediction as it always was.
   bool poseTargetFor(bool display,XrTime now,XrTime& target) {
     if(!display||!latestPoseFrame.valid)return false;
-    int64_t at=0;
-    if(!displayTimeTarget(latestPoseFrame.displayTime,&at))return false;
-    if(!displayTimeFresh(at,latestPoseFrame.period,now))return false;
-    target=at;return true;
+    return answerTime(latestPoseFrame.displayTime,latestPoseFrame.period,now,
+      [](int64_t shown,int64_t period,int64_t& out){return nextPredictionTime(shown,period,out);},
+      [&](int64_t from,int64_t to){return changes.crosses(from,to);},&target);
   }
   bool locateHeadOwned(uint64_t generation,vr::ETrackingUniverseOrigin origin,float prediction,const HeadCall& call,vr::TrackedDevicePose_t& out,
                        PoseGapStats::Sample& sample) {
@@ -2271,7 +2273,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     HeadLocatorStage headLocateStage=HeadLocatorStage::None;
     XrTime explicitTarget=0;
     const LocatorDispatch dispatch{api.convertTime,api.locateSpace};
-    // "Now" is read once, and only for a call the display time could answer: it decides whether the cached display time is still good, and if
+    // "Now" is read once, and only for a call an explicit instant could answer: it decides whether the cached display time is still good, and if
     // it is not (or the runtime refuses it) it is the instant the call falls back to. A clock that cannot be read leaves the plain path, which
     // reads it again and fails the way it always did.
     XrTime now=0;

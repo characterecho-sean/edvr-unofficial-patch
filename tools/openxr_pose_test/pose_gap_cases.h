@@ -31,9 +31,10 @@ inline PoseGapStats::Sample sample(uint32_t tid,uint32_t rva,float prediction,do
 }
 
 // tools\pose_gap_fixture.log: twelve 60-second windows, written by the aggregator the host uses. Elite's own "now" request (thread 24212, return
-// 0x4E3881, answered at the display time) reads a gap of 0 and a small, flat angle whatever the head does, with one fallback call in the
-// second window and three failed ones in the fifth; another caller (thread 7001, outside the image, a real prediction of 11 ms) is located
-// at the wall clock and reads the true gap, an angle that grows with head speed (0.02 degrees per deg/s).
+// 0x4E3881, answered one display period after the display time) reads a gap of one period (+11.11 ms) and an angle to the drawn pose of head
+// speed times that period (0.0111 degrees per deg/s), with one fallback call in the second window and three failed ones in the fifth; another
+// caller (thread 7001, outside the image, a real prediction of 11 ms) is located at the wall clock and reads the true gap, an angle that grows
+// with head speed (0.02 degrees per deg/s).
 inline std::string fixtureLog() {
   PoseGapStats stats;
   Lines lines;
@@ -42,7 +43,7 @@ inline std::string fixtureLog() {
   for(int w=1;w<=12;++w) {
     const double speed=10.0*w;
     for(int i=0;i<120;++i) {
-      auto s=sample(kGameThread,0x4E3881,0.0f,0.0,0.05+0.01*(w%2==0),speed);
+      auto s=sample(kGameThread,0x4E3881,0.0f,11.11,0.0111*speed,speed);
       s.fallback=(w==2&&i==0);
       if(w==5&&i<3){s.located=false;s.gapKnown=false;s.angleKnown=false;}
       stats.note(s);
@@ -177,9 +178,9 @@ void runPoseGapCases(Check&& check) {
     check(!fixture.empty(),"tools/pose_gap_fixture.log is readable from the repo root");
     check(normalised==built,"the log tool's fixture file is what the aggregator writes for the scripted flight, byte for byte (python tools\\edvr_log.py --tally pose reads it; regenerate with --print-pose-fixture)");
     size_t lineCount=0;for(char ch:built)if(ch=='\n')++lineCount;
-    check(lineCount==24&&built.find("pose gap: tid 24212 calls 120 from exe+0x4E3881 prediction 0.0 ms target-minus-display mean 0.00 ms (min 0.00 max 0.00)")!=std::string::npos&&
+    check(lineCount==24&&built.find("pose gap: tid 24212 calls 120 from exe+0x4E3881 prediction 0.0 ms target-minus-display mean 11.11 ms (min 11.11 max 11.11)")!=std::string::npos&&
               built.find("failed 3")!=std::string::npos&&built.find("fallback 1")!=std::string::npos&&built.find("from outside prediction 11.0 ms")!=std::string::npos,
-          "...and it carries 24 lines: twelve windows of Elite's own request (gap 0) and of another caller (gap 9.5 ms)");
+          "...and it carries 24 lines: twelve windows of Elite's own request (gap one period, +11.11 ms) and of another caller (gap 9.5 ms)");
   }
 }
 }  // namespace pose_gap_cases
