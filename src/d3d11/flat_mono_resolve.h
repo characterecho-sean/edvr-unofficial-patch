@@ -122,6 +122,14 @@ struct FlatMonoResolveFrame {
     // records, corrupt slots, the sky and the first-person pixels are untouched. staticScene (the menu's blanket form) wins when both are
     // set. False (the default) leaves every pixel, every resource and the prep's arithmetic exactly as before the field.
     bool steadyDetail = false;
+    // The System Map is open (Status.json GuiFocus 7; flat_runtime.cpp sets it on both treat sites, from flatRuntimeMapPlaneFrame). A pixel
+    // with no depth (depth exactly 0: the map's route lines, grid and backdrop write none) is a slot nothing drew, and its camera term at
+    // depth 0 is rotation-only, so the map's pure translation gives it motion 0 while the content moves. While this is set the resolver
+    // reduces the frame's non-zero depth to its nearest and farthest value (one dispatch, before the prep) and the prep gives such a pixel
+    // the camera term at the midpoint of that range: the map plane's motion. Its history depth, expected depth and output stay exactly as
+    // they were. A reset frame runs no reduction. False (the default, and every frame with the map closed) leaves the prep's arithmetic and
+    // every resource exactly as before the field.
+    bool mapPlane = false;
     // The VR world route's refusal census and view (design doc section 82, stage 2 experiment build; flat_mono_refusal.h).
     // Both default to off, the flat profile never sets either, and a frame that asks for neither runs the prep and the finish
     // exactly as before (no class texture is made, bound or written, no census pass is dispatched).
@@ -297,6 +305,18 @@ bool flatMonoResolveLastReset();
 // it also polls the readback ring, with the resolver's own immediate context, before it hands the sums over. A census nobody asked
 // for hands back zeros.
 FlatMonoRefusalCensus flatMonoResolveTakeRefusalCensus();
+// The System Map plane's counts since the last take (FlatMonoResolveFrame::mapPlane), and the last range read back, which a take does not clear.
+// A zero count is a real zero: the counts start at 0 and only the resolver's own calls move them.
+struct FlatMonoMapPlane {
+    uint64_t frames = 0;        // resolves that had the flag set (the reduction ran or was due)
+    uint64_t reductions = 0;    // reduction dispatches recorded
+    uint64_t readbacks = 0;     // reduction results read back since the last take
+    uint64_t empty = 0;         // read-backs with no non-zero depth in the frame (nothing to take a midpoint of)
+    bool haveRange = false;     // the last read-back had a range (the range below is its)
+    float minDepth = 0, maxDepth = 0;
+    float midpoint() const { return 0.5f * (minDepth + maxDepth); }
+};
+FlatMonoMapPlane flatMonoResolveTakeMapPlane();
 // Owner thread, before rasterization. Validates planned dimensions/mode/source
 // metadata, allocates renderer resources including the spatial fallback output,
 // then checks external backend availability. A Ready result proves fallback

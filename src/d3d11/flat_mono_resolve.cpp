@@ -87,6 +87,15 @@ struct State {
     bool refusalPending[4]={false,false,false,false};
     uint32_t refusalWidth[4]={0,0,0,0}, refusalHeight[4]={0,0,0,0};
     uint32_t refusalWrite=0;
+    // The System Map's plane range (FlatMonoResolveFrame::mapPlane): the reduction's two words (u6 in its own dispatch, bound at t18 to the prep
+    // as a raw view), the compute shader, and a four-slot staging ring read back without waiting, the refusal census's pattern.
+    ComPtr<ID3D11ComputeShader> planeScan;
+    ComPtr<ID3D11Buffer> planeRange;
+    ComPtr<ID3D11UnorderedAccessView> planeRangeUav;
+    ComPtr<ID3D11ShaderResourceView> planeRangeSrv;
+    ComPtr<ID3D11Buffer> planeStaging[4];
+    bool planePending[4]={false,false,false,false};
+    uint32_t planeWrite=0;
     Image color, rawOverlay, depth[2], motion, rejection, expected, output[2], outputDomain[2];
     uint32_t width=0, height=0, outWidth=0, outHeight=0, evalWidth=0, evalHeight=0, current=0;
     // The steady-detail depth check's previous depth (FlatMonoResolveFrame::steadyDetail). TAA keeps last frame's depth in depth[current^1]
@@ -132,6 +141,9 @@ FlatContextState& g_contextBlock=*new FlatContextState;
 FlatMonoRefusalCensus& g_refusal=*new FlatMonoRefusalCensus;
 uint64_t g_refusalCadence=0;
 bool g_refusalFailureLogged=false;
+// The System Map plane's counts since the last take, and its last range read back (a take clears the counts, not the range). Leaked on purpose.
+FlatMonoMapPlane& g_mapPlane=*new FlatMonoMapPlane;
+bool g_planeFailureLogged=false;
 // The steady-detail rule's second depth image could not be made: said once, and the frames that ask run as if they had not (refused as before).
 bool g_steadyFailureLogged=false;
 // rowsJitter: the NDC shift the camera rows themselves carry (current xy, previous zw), the shader removes it; all zero
@@ -519,6 +531,61 @@ void pollRefusalCensus(ID3D11DeviceContext* context) {
 }
 // The ring is consumed in order, so the next sample may be taken only if the slot it would write is not still waiting to be read.
 bool refusalSlotFree() { return !g.refusalPending[g.refusalWrite]; }
+// The System Map's plane range (FlatMonoResolveFrame::mapPlane): the reduction, its two-word raw buffer with a raw UAV (the dispatch) and a raw SRV
+// (the prep, t18), and the staging ring its result is read back from. Made on the first map frame that is not a reset; nothing else makes it.
+bool ensureMapPlaneRange() {
+    if(g.planeScan && g.planeRange && g.planeRangeUav && g.planeRangeSrv && g.planeStaging[0] && g.planeStaging[1] && g.planeStaging[2] && g.planeStaging[3])
+        return true;
+    ID3D11Device* device=g.device.Get();
+    if(!device)return false;
+    if(!g.planeScan && FAILED(device->CreateComputeShader(kFlatMonoMapPlaneBytecode,sizeof(kFlatMonoMapPlaneBytecode),nullptr,g.planeScan.GetAddressOf())))
+        return false;
+    if(!g.planeRange) {
+        D3D11_BUFFER_DESC bd{};bd.ByteWidth=8;bd.Usage=D3D11_USAGE_DEFAULT;bd.BindFlags=D3D11_BIND_UNORDERED_ACCESS|D3D11_BIND_SHADER_RESOURCE;
+        bd.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
+        if(FAILED(device->CreateBuffer(&bd,nullptr,g.planeRange.GetAddressOf())))return false;
+    }
+    if(!g.planeRangeUav) {
+        D3D11_UNORDERED_ACCESS_VIEW_DESC ud{};ud.Format=DXGI_FORMAT_R32_TYPELESS;ud.ViewDimension=D3D11_UAV_DIMENSION_BUFFER;
+        ud.Buffer.NumElements=2;ud.Buffer.Flags=D3D11_BUFFER_UAV_FLAG_RAW;
+        if(FAILED(device->CreateUnorderedAccessView(g.planeRange.Get(),&ud,g.planeRangeUav.GetAddressOf())))return false;
+    }
+    if(!g.planeRangeSrv) {
+        D3D11_SHADER_RESOURCE_VIEW_DESC sd{};sd.Format=DXGI_FORMAT_R32_TYPELESS;sd.ViewDimension=D3D11_SRV_DIMENSION_BUFFEREX;
+        sd.BufferEx.NumElements=2;sd.BufferEx.Flags=D3D11_BUFFEREX_SRV_FLAG_RAW;
+        if(FAILED(device->CreateShaderResourceView(g.planeRange.Get(),&sd,g.planeRangeSrv.GetAddressOf())))return false;
+    }
+    for(auto& staging:g.planeStaging) {
+        if(staging)continue;
+        D3D11_BUFFER_DESC bd{};bd.ByteWidth=8;bd.Usage=D3D11_USAGE_STAGING;bd.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+        if(FAILED(device->CreateBuffer(&bd,nullptr,staging.GetAddressOf())))return false;
+    }
+    return true;
+}
+// Reads back the ranges the GPU has finished, oldest first, without waiting (the refusal census's ring, the same order rule).
+void pollMapPlane(ID3D11DeviceContext* context) {
+    if(!context)return;
+    for(uint32_t k=0;k<4;++k) {
+        const uint32_t i=(g.planeWrite+k)%4;
+        if(!g.planePending[i])continue;
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        if(context->Map(g.planeStaging[i].Get(),0,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&mapped)!=S_OK)break;
+        const uint32_t* words=static_cast<const uint32_t*>(mapped.pData);
+        const uint32_t nearBits=words[0],farBits=words[1];
+        context->Unmap(g.planeStaging[i].Get(),0);
+        g.planePending[i]=false;
+        ++g_mapPlane.readbacks;
+        // asuint of positive floats orders as the floats do, so min > max is the reduction's "no non-zero depth in this frame".
+        if(nearBits>farBits) {
+            ++g_mapPlane.empty;
+            g_mapPlane.haveRange=false;
+        } else {
+            std::memcpy(&g_mapPlane.minDepth,&nearBits,sizeof(float));
+            std::memcpy(&g_mapPlane.maxDepth,&farBits,sizeof(float));
+            g_mapPlane.haveRange=true;
+        }
+    }
+}
 // The first-person inputs (FlatMonoResolveFrame::firstPersonMotion and firstPersonStencil, section 82), checked the way
 // inputTexture checks the colour and depth views, and answered by name: null when the view is fit to bind, else a static
 // reason. The reason goes to stats.firstPersonRefusal and the log; a refusal never refuses the frame, it only drops the pair.
@@ -629,6 +696,12 @@ FlatMonoRefusalCensus flatMonoResolveTakeRefusalCensus() {
     if(g.context)pollRefusalCensus(g.context.Get());
     FlatMonoRefusalCensus out=g_refusal;
     g_refusal=FlatMonoRefusalCensus{};
+    return out;
+}
+FlatMonoMapPlane flatMonoResolveTakeMapPlane() {
+    if(g.context)pollMapPlane(g.context.Get());
+    FlatMonoMapPlane out=g_mapPlane;
+    g_mapPlane.frames=g_mapPlane.reductions=g_mapPlane.readbacks=g_mapPlane.empty=0;   // the range stays: it is the last one read back
     return out;
 }
 // The preflight proper; the public entry below puts the route's crumbs around it.
@@ -803,6 +876,7 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     if(!initialize(device,context,reason))return false;
     if(hdr && !initializeHdr(device,reason))return false;
     pollRefusalCensus(context);   // the samples the GPU finished since the last call (nothing pending: one flag test per slot)
+    pollMapPlane(context);        // the same for the System Map plane's ranges
     ComPtr<ID3D11Texture2D> color,depth,cleanColor,overlayMask,untrustedMask;
     const bool overlay=f.cleanColor || f.overlayCoverage;
     if(overlay && (!hdr || !f.cleanColor || !f.overlayCoverage))
@@ -957,6 +1031,19 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     }
     const bool depthCheck=steadyAvailable && !reset;
     if(steady && !reset) {if(depthCheck)++g_refusal.checked;else ++g_refusal.skipped;}
+    // The System Map's plane (FlatMonoResolveFrame::mapPlane): a map frame that is not a reset reduces the frame's depth to its range before the
+    // prep, which then reads it at t18 (debug.w bit 3). A reset frame refuses every pixel anyway, so it runs nothing. If the resources cannot be
+    // made the frame runs as if the map were closed, and says so once.
+    bool planeOn=f.mapPlane && !reset;
+    if(planeOn && !ensureMapPlaneRange()) {
+        planeOn=false;
+        if(!g_planeFailureLogged) {
+            g_planeFailureLogged=true;
+            Log::get().note("flat resolve: the System Map plane's resources could not be made (reduction, range buffer or readback ring); the map "
+                            "frames run as if the map were closed");
+        }
+    }
+    if(planeOn)++g_mapPlane.frames;
     Constants constants{};std::memcpy(constants.camera,f.camera,sizeof(f.camera));
     std::memcpy(constants.previous,reset?f.camera:f.previousCamera,sizeof(f.previousCamera));
     constants.size[0]=f.renderWidth;constants.size[1]=f.renderHeight;constants.size[2]=evalW;constants.size[3]=evalH;
@@ -965,7 +1052,7 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     constants.route[2]=firstPersonMap?1u:0u;constants.route[3]=firstPersonMap?f.firstPersonPhaseMode:0u;
     constants.debug[0]=sampleNow?1u:0u;constants.debug[1]=paintNow?1u:0u;
     constants.debug[2]=overlay?1u:0u;
-    constants.debug[3]=(foreground?2u:(untrusted?1u:0u))|(skin?4u:0u);
+    constants.debug[3]=(foreground?2u:(untrusted?1u:0u))|(skin?4u:0u)|(planeOn?8u:0u);
     constants.foregroundDepth[0]=sdkDepthScale;
     constants.jitter[0]=f.jitterX;constants.jitter[1]=f.jitterY;
     constants.jitter[2]=f.previousJitterX;constants.jitter[3]=f.previousJitterY;
@@ -984,6 +1071,26 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     HdrCrumbSpan prepStep(g_crumbOn,"prep","groups=%ux%u",(f.renderWidth+7)/8,(f.renderHeight+7)/8);
     ID3D11Buffer* cb[]={g.constants.Get(),f.engine.sceneNow,f.engine.scenePrev};
     context->CSSetConstantBuffers(0,3,cb);
+    // The System Map's plane reduction (planeOn): the range cleared to empty, the frame's depth read (t1, as the prep reads it, b0 bound
+    // above for the size), one dispatch, and the result copied to the next free staging slot. A slot still waiting to be read is skipped
+    // for this frame's copy, not for the dispatch: the prep needs this frame's range whatever the readback does.
+    if(planeOn) {
+        const UINT emptyRange[4]={0xFFFFFFFFu,0u,0u,0u};
+        context->ClearUnorderedAccessViewUint(g.planeRangeUav.Get(),emptyRange);
+        ID3D11ShaderResourceView* depthView=f.depth;context->CSSetShaderResources(1,1,&depthView);
+        ID3D11UnorderedAccessView* range=g.planeRangeUav.Get();context->CSSetUnorderedAccessViews(6,1,&range,nullptr);
+        context->CSSetShader(g.planeScan.Get(),nullptr,0);
+        context->Dispatch((f.renderWidth+7)/8,(f.renderHeight+7)/8,1);
+        ID3D11UnorderedAccessView* noRange=nullptr;context->CSSetUnorderedAccessViews(6,1,&noRange,nullptr);
+        ID3D11ShaderResourceView* noDepth=nullptr;context->CSSetShaderResources(1,1,&noDepth);
+        const uint32_t slot=g.planeWrite;
+        if(!g.planePending[slot]) {
+            context->CopyResource(g.planeStaging[slot].Get(),g.planeRange.Get());
+            g.planePending[slot]=true;
+            g.planeWrite=(slot+1)%4;
+        }
+        ++g_mapPlane.reductions;
+    }
     // t4..t7 are the later kernels' (motion, rejection, expected depth, history): null for prep. t8 is the later kernels' history depth
     // and the prep's too, but only on a frame whose steady-detail check runs (last frame's depth). t9 and t10 are the first-person map and
     // stencil, null unless the pair was accepted above.
@@ -992,6 +1099,9 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
         nullptr,nullptr,f.untrustedCameraCoverage,nullptr,foreground?f.foregroundMotion:nullptr,nullptr,skin?f.engine.skin:nullptr};
     const UINT prepViewCount=skin?18:(foreground?16:14);
     context->CSSetShaderResources(0,prepViewCount,prepViews);
+    // t18 is the System Map's plane range, bound (and cleared again) only on a frame that reduced it; the prep never reads it otherwise.
+    ID3D11ShaderResourceView* planeView=g.planeRangeSrv.Get();
+    if(planeOn)context->CSSetShaderResources(18,1,&planeView);
     // u5 is the refusal census's class texture, bound only on a frame that samples or paints (u4 is the later kernels' OutColor).
     ID3D11UnorderedAccessView* prepOutputs[]={g.depth[depthIndex].uav.Get(),g.motion.uav.Get(),g.rejection.uav.Get(),g.expected.uav.Get(),
         nullptr,needClass?g.klass.uav.Get():nullptr};
@@ -1000,6 +1110,7 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     context->Dispatch((f.renderWidth+7)/8,(f.renderHeight+7)/8,1);
     ID3D11UnorderedAccessView* nullUavs[6]={};ID3D11ShaderResourceView* nullViews[18]={};
     context->CSSetUnorderedAccessViews(0,6,nullUavs,nullptr);context->CSSetShaderResources(0,prepViewCount,nullViews);
+    if(planeOn) {ID3D11ShaderResourceView* noPlane=nullptr;context->CSSetShaderResources(18,1,&noPlane);}
     if(hdr)++stats.hdrPrepped;
     prepStep.close();
     if(sampleNow) {

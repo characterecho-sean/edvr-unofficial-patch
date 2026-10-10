@@ -15,6 +15,7 @@
 
 #include "../common/config.h"
 #include "../common/guard.h"
+#include "../common/runtime_profile.h"
 #include "../common/log.h"
 #include "../common/periodic_work.h"
 
@@ -872,6 +873,13 @@ void journalWatchConfigure() {
     // Release: the session's fields above are what the first tick reads once
     // it sees the watcher active.
     g_v.active.store(true, std::memory_order_release);
+    if (runtimeFlatProfile()) {
+        // The flat profile's one reader is the System Map's GuiFocus (journalFlatGuiFocus). The accessors above answer flat with
+        // the no-journal values, so this line is the only place the watcher says it runs there.
+        Log::get().note("journal: flat profile -- Status.json is read for the System Map's GuiFocus (flat map motion). The journal's "
+                        "events are tailed but not used in flat.");
+        return;
+    }
     Log::get().note("journal: watching the game's own event stream for the "
                     "boundaries it states outright -- gameplay starting "
                     "(LoadGame), on-foot sessions beginning (Disembark), and "
@@ -915,7 +923,11 @@ void journalWatchTick() {
     applyPublished(latest);
 }
 
-bool journalWatchActive() { return g_v.active.load(std::memory_order_acquire); }
+// THE FLAT PROFILE. The watcher runs there for one reader: the System Map's
+// GuiFocus, through journalFlatGuiFocus below. Every other accessor answers in
+// flat with the value a stopped watcher gives (false, or 0), which is what the
+// flat consumers got before the watcher ran there, so none of them changes.
+bool journalWatchActive() { return !runtimeFlatProfile() && g_v.active.load(std::memory_order_acquire); }
 
 void journalWatchSetEagerStatus(bool eager) {
     if (g_eager.exchange(eager, std::memory_order_relaxed) == eager) return;
@@ -930,15 +942,21 @@ bool journalGuiFocus(uint32_t* focus) {
     if (focus) *focus = peek(g_v.guiFocus);
     return true;
 }
+bool journalFlatGuiFocus(uint32_t* focus) {
+    if (!runtimeFlatProfile() || !g_v.active.load(std::memory_order_acquire) || !peek(g_v.fssFocusKnown)) return false;
+    if (focus) *focus = peek(g_v.guiFocus);
+    return true;
+}
 bool journalSupercruiseKnown() {
     return journalWatchActive() && peek(g_v.supercruiseKnown);
 }
 bool journalSupercruise() { return journalWatchActive() && peek(g_v.supercruise); }
-bool journalGameplay() { return peek(g_v.gameplay); }
-uint32_t journalDisembarks() { return peek(g_v.disembarks); }
-uint32_t journalEmbarks() { return peek(g_v.embarks); }
+bool journalGameplay() { return !runtimeFlatProfile() && peek(g_v.gameplay); }
+uint32_t journalDisembarks() { return runtimeFlatProfile() ? 0u : peek(g_v.disembarks); }
+uint32_t journalEmbarks() { return runtimeFlatProfile() ? 0u : peek(g_v.embarks); }
 
 bool journalInJumpTunnel() {
+    if (runtimeFlatProfile()) return false;
     const uint64_t armed = peek(g_v.jumpArmedMs);
     if (!armed) return false;
     // A cancelled hyperspace charge emits no resolving event, so an armed
@@ -957,10 +975,10 @@ bool journalInJumpTunnel() {
     return stampMs() - armed > 5500;
 }
 bool journalOnFootKnown() { return journalWatchActive() && peek(g_v.onFootKnown); }
-bool journalOnFoot() { return peek(g_v.onFoot); }
+bool journalOnFoot() { return !runtimeFlatProfile() && peek(g_v.onFoot); }
 bool journalSeatedKnown() { return journalWatchActive() && peek(g_v.seatedKnown); }
-bool journalSeated() { return peek(g_v.seated); }
-uint32_t journalStatusSamples() { return peek(g_v.statusSamples); }
+bool journalSeated() { return !runtimeFlatProfile() && peek(g_v.seated); }
+uint32_t journalStatusSamples() { return runtimeFlatProfile() ? 0u : peek(g_v.statusSamples); }
 
 void journalWatchShutdown() {
     g_stopped.store(true);

@@ -21,8 +21,8 @@
   Mixed cameras must not downgrade DLAA/FSR to TAA. Share math/backends where
   cheap; separate scheduling/capture when it saves copies/sync/per-draw work.
   Defer broad core extraction until flat capture establishes the boundary.
-- **Recommendation:** two installers, one graphics implementation, one temporal
-  pipeline, separate VR/mono adapters; flat enables only temporal AA + support.
+- **Recommendation:** two installers, one graphics implementation, one temporal pipeline, separate VR/mono adapters; flat enables only temporal AA + support.
+- **10-10 System Map arc (section below):** depth-0 map pixels take the map plane's motion at GuiFocus 7; branch only, not built, not flown.
 - **106 (10-09):** fixed exposure 1.0 SHIPS on the flat HDR route (flown by eye:
   brighter, stars back); temporary key and luma probe REMOVED. VR keeps auto.
 - **Open:** station/on-foot projection coverage and mixed-camera HDR ownership,
@@ -14541,3 +14541,65 @@ fixed, against what Sean saw.
 - Temporary debt closed: `advanced.flat_dlss_exposure` and the
   `flat hdr luma:` probe (flat_hdr_luma.*, its shader and hooks) are removed.
 
+### 2026-10-10: System Map smear under DLAA (code on branch, NOT built, NOT flown)
+
+Symptom: flat profile, fix.temporal_aa = dlaa or dlss. While the System Map pans,
+the route lines, grid and backdrop smear and leave trails. EDVR's own TAA and
+FSR do not.
+
+Capture evidence (one pixel capture during a pan):
+- The map's route lines, grid and backdrop write no depth: depth is exactly 0
+  on 84-94% of the frame (reversed-Z, 0 = far).
+- The prep's kind-0 camera term treats depth 0 as infinitely far and reprojects
+  it rotation-only (flat_mono_shader_source.h, prep). The map camera only
+  translates, so those pixels get motion 0 while the map content moves rigidly
+  by the same amount: 30 and 77 px per frame in the capture.
+- Map bodies do write depth (0.00113-0.00119). Their camera-term motion matches
+  the content motion within 1-4%.
+- The rejection texture was 0 everywhere in the smear, so these pixels take the
+  "slot unwritten" branch (engineBefore returns 0, kind 0), not the "slot
+  written, depth 0" sentinel.
+- ruled out: DLSS ignoring EDVR's rejection mask, because the refusal census read
+  refused=0 (0.0000%) and the rejection texture was 0 everywhere during the smear.
+- ruled out: map bodies drawn with a camera that moves differently, because all
+  content moved rigidly by one horizontal shift and body motion matched it within
+  1-4%.
+
+Cause: depth-0 kind-0 pixels get a rotation-only camera term, so the map plane's
+translation is missing from their motion. DLSS trusts motion 0 and keeps stale
+history: trails behind the route lines, and on the background a planet uncovers.
+
+Fix (decided by the maintainer; no config key):
+- While GuiFocus is 7, a flat resolve whose frame is not a reset reduces the
+  frame's depth to its nearest and farthest value in (0, 1] (mapPlaneDepth, one
+  dispatch before the prep, two words written by one InterlockedMin and one
+  InterlockedMax per group).
+- The prep gives a kind-0 pixel with depth 0 the camera term evaluated at the
+  midpoint of that range. Only the motion comes from that call. Expected depth
+  and every history depth test still come from the call at depth 0, so TAA's
+  history check and all outputs are unchanged.
+- Every other frame and pixel: the same arithmetic as before (debug.w bit 3 is
+  clear and t18 is not read).
+- Journal: flat now runs the watcher for GuiFocus only. The accessors in
+  journal_watch.cpp answer flat with the no-journal values, so the flat
+  consumers (vscreen FSS and gameplay reads, Explorer Cam, ui_layer world gate,
+  backdrop_fix, temporal_pass foot split, native_frame) see no change. The one
+  new reader is journalFlatGuiFocus. Eager Status polling (100 ms) is on in flat.
+
+New log lines:
+- "journal: flat profile -- Status.json is read for the System Map's GuiFocus..."
+  once, at configure.
+- "flat map motion: the System Map is open (Status.json GuiFocus 7); ..." and
+  "flat map motion: the System Map is closed (GuiFocus N); ..." on each change
+  (at most 64).
+- "flat map motion 5s: focus=<last known or unknown> map-frames=<n>
+  reductions=<n> plane=<min>..<max> (midpoint <m>) empty=<n>", every 5 s, zeros
+  included. The plane is the last read-back; "none" means no read-back had a
+  non-zero range yet.
+- "flat resolve: the System Map plane's resources could not be made" once, if
+  creation fails (the map frames then run as if the map were closed).
+
+Next: Epic flight, DLAA and DLSS, System Map pan; Shift+NumLock during a pan.
+Expect depth-0 motion close to body motion in the capture, and "flat map motion
+5s" with map-frames above 0 and a plane between 0.0011 and 0.0012. Galaxy map
+(GuiFocus 6) and Orrery (8) are unmeasured.

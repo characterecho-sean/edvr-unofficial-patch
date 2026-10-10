@@ -18,7 +18,8 @@ cbuffer Mono : register(b0) {
     uint4 debug; // x/y: refusal census/view, z: late overlay. w: flat HDR TAA has a conservative alternate-camera
                  // fragment union at t13 and output-domain history at t14/u7 (bit 0).
                  // Bit 1: qualified flat SDK foreground map at t15. Bit 2 (value 4): the VR on-foot source's target 7 is bound at t17 (F2; only
-                 // the VR world route sets it, never the flat profile). Zero leaves the old shader path unchanged.
+                 // the VR world route sets it, never the flat profile). Bit 3 (value 8): the System Map is open and the plane range is bound at
+                 // t18 (prep: a depth-0 pixel's camera term takes the range's midpoint; FlatMonoResolveFrame::mapPlane). Zero leaves the old path unchanged.
     float4 foregroundDepth; // SDK common-near/world-near scale, only read with debug.w bit 1
 };
 cbuffer EngineNow : register(b1) { float4 EN[277]; };   // EN[276].x: the frame stamp
@@ -44,6 +45,8 @@ Texture2D<float4> SkinE : register(t17);                // prep only, bound when
                                                          // position in centimetres, w 1 valid / 0 none, at the slot target's size; read at the pixel's own texel
 Texture2D<float4> OverlayColor : register(t16);         // HDR finish only, bound in overlay frames: the raw H with the protected late overlays
                                                          // drawn (t0 is then the CLEAN H, the image the backend was handed)
+ByteAddressBuffer MapPlaneRange : register(t18);         // prep only, bound when debug.w bit 3: the frame's nearest and farthest non-zero depth
+                                                         // as two uint words (asuint), from mapPlaneDepth; read only on that bit
 SamplerState LinearClamp : register(s0);
 RWTexture2D<float> OutDepth : register(u0);
 RWTexture2D<float2> OutMotion : register(u1);
@@ -51,7 +54,8 @@ RWTexture2D<float> OutRejection : register(u2);
 RWTexture2D<float> OutExpected : register(u3);
 RWTexture2D<float4> OutColor : register(u4);
 RWTexture2D<uint> OutClass : register(u5);            // prep only, bound when debug.x or debug.y: what the pixel is and whether its history was refused
-RWByteAddressBuffer RefusalCounts : register(u6);     // the census kernel's: 16 stripes of 25 counters, 16 by class, 8 by weapon-refused reason and the accepted skinned pixels (flat_mono_refusal.h)
+RWByteAddressBuffer RefusalCounts : register(u6);     // the census kernel's: 16 stripes of 25 counters, 16 by class, 8 by weapon-refused reason and the accepted skinned pixels (flat_mono_refusal.h).
+                                                       // The same slot is the map plane's range in mapPlaneDepth's own dispatch (two words): one entry per dispatch, each binds its own buffer.
 RWTexture2D<float> OutOutputDomain : register(u7);    // TAA only: 1 when all current colour taps are trusted world
 
 // The pixel classes (flat_mono_refusal.h kFlatMonoClass*, which tools\flat_mono_resolve_test holds these to). The byte the prep writes is the
@@ -271,8 +275,20 @@ void prep(uint3 id:SV_DispatchThreadID) {
         // out parameter in || would overwrite the exact engine result.
         bool valid=kind==1;
         if(kind==0||kind==3)valid=cameraBefore(rawUv,depth,before);
+        // THE SYSTEM MAP'S PLANE (FlatMonoResolveFrame::mapPlane). A pixel nothing drew (depth 0, kind 0: its slot is unwritten) has a rotation-only
+        // camera term at infinity, which the map's translation does not move. While the map is open it takes the camera term at the midpoint of
+        // the frame's non-zero depth range instead, the map plane's own depth. Only the MOTION comes from that call: `before`, and with it expected
+        // depth, is the call above, so every history depth test and output is what it was. Without the bit the range is not bound and not read.
+        float4 motionBefore=before;
+        if(kind==0 && depth==0 && (debug.w&8)!=0) {
+            const uint2 span=MapPlaneRange.Load2(0);
+            if(span.x<=span.y) {
+                float4 plane;
+                if(cameraBefore(rawUv,0.5*(asfloat(span.x)+asfloat(span.y)),plane)) {motionBefore=plane;valid=true;}
+            }
+        }
         if(valid) {
-            float2 prev=before.xy/before.w*float2(.5,-.5)+.5;
+            float2 prev=motionBefore.xy/motionBefore.w*float2(.5,-.5)+.5;
             // SDK vectors exclude both raster phases; the backend receives
             // the actual current phase separately and tracks its own history.
             motion=(prev-rawUv)*float2(size.xy);
@@ -323,6 +339,24 @@ void census(uint3 id:SV_DispatchThreadID,uint3 gid:SV_GroupID,uint gi:SV_GroupIn
     }
     GroupMemoryBarrierWithGroupSync();
     if(gi<25 && gRefusal[gi]!=0)RefusalCounts.InterlockedAdd(((gid.x&15u)*25u+gi)*4u,gRefusal[gi]);
+}
+
+// THE SYSTEM MAP'S PLANE RANGE (FlatMonoResolveFrame::mapPlane), one dispatch over the frame's depth on a frame whose map is open, before the
+// prep. Per group the smallest and largest non-zero depth are taken in shared memory, and each group makes ONE InterlockedMin and ONE
+// InterlockedMax into the two words of its buffer (u6, RefusalCounts' slot). asuint of a positive float orders as the float does, so the words
+// are the frame's nearest and farthest non-zero depth. Cleared to 0xFFFFFFFF and 0 first: a frame with no non-zero depth leaves min > max, which
+// the prep reads as no range. No early return: every thread reaches both barriers.
+groupshared uint gPlaneNear, gPlaneFar;
+[numthreads(8,8,1)]
+void mapPlaneDepth(uint3 id:SV_DispatchThreadID,uint gi:SV_GroupIndex) {
+    if(gi==0){gPlaneNear=0xFFFFFFFFu;gPlaneFar=0u;}
+    GroupMemoryBarrierWithGroupSync();
+    if(all(id.xy<size.xy)) {
+        const float d=SceneDepth.Load(int3(id.xy,0));
+        if(d>0 && d<=1){InterlockedMin(gPlaneNear,asuint(d));InterlockedMax(gPlaneFar,asuint(d));}
+    }
+    GroupMemoryBarrierWithGroupSync();
+    if(gi==0){RefusalCounts.InterlockedMin(0,gPlaneNear);RefusalCounts.InterlockedMax(4,gPlaneFar);}
 }
 
 // The HDR route accumulates in a bounded space, c / (1 + max3(c)), and inverts it on output: a sun disc or a hot

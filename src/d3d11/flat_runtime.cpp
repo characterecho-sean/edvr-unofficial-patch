@@ -49,6 +49,7 @@
 #include "binding_shadow.h"
 #include "exposure_fix.h"
 #include "device_hook.h"
+#include "journal_watch.h"   // the System Map's GuiFocus for the map-plane motion (flatRuntimeMapPlaneFrame)
 #include "dlaa.h"
 #include "flat_sharpen.h"
 #include "flat_ui_layer_math.h"   // fix.ui_quality's flat layer: the target class and family rule its decision asks
@@ -599,6 +600,37 @@ struct State {
 };
 // Driver objects retire on the owner Present; never release under loader lock.
 State& state() { static State* p = new State; return *p; }
+// THE SYSTEM MAP'S PLANE (FlatMonoResolveFrame::mapPlane). Status.json's GuiFocus 7 is the System Map. The flat runtime asks the journal watcher's
+// flat reader (journalFlatGuiFocus) once per resolve, which is once per frame that reaches the resolver, and logs each change of answer once.
+// The flag is what the resolver's map-plane reduction and the prep's midpoint motion wait on; nothing else reads it.
+struct MapPlaneWatch {
+    bool open = false;          // the last answer
+    bool focusKnown = false;    // the watcher has reported GuiFocus at least once this session
+    uint32_t focus = 0;         // the last GuiFocus it reported, while known
+    uint32_t noted = 0;         // transition lines written
+};
+MapPlaneWatch& mapPlaneWatch() { static MapPlaneWatch* p = new MapPlaneWatch; return *p; }
+constexpr uint32_t kMapPlaneNoteCap = 64;
+bool flatRuntimeMapPlaneFrame() {
+    MapPlaneWatch& w = mapPlaneWatch();
+    uint32_t focus = 0;
+    const bool known = journalFlatGuiFocus(&focus);
+    if (known) { w.focusKnown = true; w.focus = focus; }
+    const bool open = known && focus == 7;
+    if (open != w.open) {
+        w.open = open;
+        if (w.noted < kMapPlaneNoteCap) {
+            ++w.noted;
+            if (open)
+                Log::get().note("flat map motion: the System Map is open (Status.json GuiFocus 7); pixels with no depth take the map plane's motion");
+            else if (known)
+                Log::get().note("flat map motion: the System Map is closed (GuiFocus %u); pixels with no depth are at infinity again", focus);
+            else
+                Log::get().note("flat map motion: the System Map is closed (GuiFocus unknown); pixels with no depth are at infinity again");
+        }
+    }
+    return open;
+}
 // Row 275's size and its frame-to-frame step (design doc section 104). The float32 spacing at that size is the finest step the camera
 // term can see: a walking step near it reaches the upscaler quantised.
 static void noteCameraOrigin(State& s, const FlatMonoResolveFrame& f) {
@@ -3727,6 +3759,21 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
                     o.maxStep,o.minStep);
             }
             s.origin={};
+            // The System Map's plane (FlatMonoResolveFrame::mapPlane), every window, zeros included: map-frames the reduction ran for, its
+            // dispatches, the last range read back and how many read-backs had no non-zero depth. "map-frames=0" with the map open is the
+            // flag never reaching the resolver; "reductions" above map-frames is a reduction that never ran; a range with a midpoint near
+            // 0.0011-0.0012 is the map plane (the body depths are 0.00113-0.00119).
+            {
+                const FlatMonoMapPlane plane=flatMonoResolveTakeMapPlane();
+                const MapPlaneWatch& w=mapPlaneWatch();
+                char focus[16]="unknown";
+                if(w.focusKnown)std::snprintf(focus,sizeof(focus),"%u",w.focus);
+                char range[96]="none";
+                if(plane.haveRange)std::snprintf(range,sizeof(range),"%.6f..%.6f (midpoint %.6f)",plane.minDepth,plane.maxDepth,plane.midpoint());
+                Log::get().note("flat map motion 5s: focus=%s map-frames=%llu reductions=%llu plane=%s empty=%llu; the System Map's pixels with no "
+                                "depth take the plane's motion while it is open",
+                    focus,(unsigned long long)plane.frames,(unsigned long long)plane.reductions,range,(unsigned long long)plane.empty);
+            }
         }
         // The census of unkeyed pairs, every window while a temporal mode runs (empty
         // included: an absent line is what "this block never ran" looks like). A pair
@@ -5491,6 +5538,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     f.staticScene=flatFrameThroughMenuCopy(s.prefix,selected.hdr);
     if(f.staticScene)++s.staticSceneFrames;
     f.steadyDetail=true;   // the depth-validated steady detail: always on, no key (the 3D menu's blanket rule above is separate and wins where it applies)
+    f.mapPlane=flatRuntimeMapPlaneFrame();   // the System Map open: depth-0 pixels take the map plane's motion (flat_mono_resolve.h)
     // Metadata is frozen from the qualified handoff for a future frame's
     // preflight. It cannot authorize jitter in this already rendered frame.
     Ptr<ID3D11Texture2D> colorTexture;
@@ -5845,6 +5893,7 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
     f.staticScene = flatFrameThroughMenuCopy(s.prefix, selected.hdr);
     if (f.staticScene) ++s.staticSceneFrames;
     f.steadyDetail = true;   // the depth-validated steady detail: always on, no key (the 3D menu's blanket rule above is separate and wins where it applies)
+    f.mapPlane = flatRuntimeMapPlaneFrame();   // the System Map open: depth-0 pixels take the map plane's motion (flat_mono_resolve.h)
     // The plan, frozen from the qualified trigger for the next frame's preflight, as the copy route freezes its own.
     Ptr<ID3D11Texture2D> colorTexture;
     if (s.projection && SUCCEEDED(hdrResource.As(&colorTexture))) {

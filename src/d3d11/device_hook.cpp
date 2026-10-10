@@ -1615,7 +1615,7 @@ void presentFrameBoundary() {
             configureDiagnosticHotkeys();
             g_state->fssModeLatchWanted =
                 eyeSyncFromConfig(Config::get()).any();
-            journalWatchSetEagerStatus(g_state->fssModeLatchWanted);
+            journalWatchSetEagerStatus(g_state->fssModeLatchWanted || runtimeFlatProfile());
         });
         tkFrameFlagPeer.run(tickFrameFlagPeer);
         // The liveness pass, on the same once-a-second cadence. In-place
@@ -2104,7 +2104,8 @@ State& ensureState() {
         journalWatchConfigure();
         g_state->fssModeLatchWanted =
             eyeSyncFromConfig(Config::get()).any();
-        journalWatchSetEagerStatus(g_state->fssModeLatchWanted);
+        // Flat reads the System Map's GuiFocus from Status.json for the map-plane motion, at the same 100 ms the FSS latch wants.
+        journalWatchSetEagerStatus(g_state->fssModeLatchWanted || runtimeFlatProfile());
     }
     return *g_state;
 }
