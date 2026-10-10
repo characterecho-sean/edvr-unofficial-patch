@@ -4771,7 +4771,10 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         drawCaptureStarted=s.drawCapture.before(ctx,instances,kind,count,start,base,startInstance,
             k.vs,k.ps,bindingGet(BindSlot::Vs),bindingGet(BindSlot::Ps),motionEligible);
     }
-    if (tone || copy) for (uint32_t slot = 0; slot < 2; ++slot) {
+    // The map tonemap (flatUiMapToneSlotOf, the UI layer's own table) reads the scene in slot 0 like a registry tone: its slots are
+    // captured for the UI layer's candidate. Its readers (flat_runtime_model.h copy-pair branches, flat_copy_structure.h, the
+    // mono selector's registry-keyed tone) gate on their own pairs, so none of them sees this draw as a copy or a tone.
+    if (tone || copy || flatUiMapToneSlotOf(k.vs, k.ps) != ~0u) for (uint32_t slot = 0; slot < 2; ++slot) {
         const auto bind = static_cast<BindSlot>(static_cast<uint32_t>(BindSlot::PsSrv0) + slot);
         k.srvView[slot] = bindingGet(bind); k.srvResource[slot] = view(bind, 2 + slot).resource;
     }

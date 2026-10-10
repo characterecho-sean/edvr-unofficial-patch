@@ -1223,6 +1223,24 @@ void testFlatLayerRules() {
               flatUiMapToneSlotOf(0xF9CFC798F21E9AEAull, 0xFEE777E92850B390ull) == ~0u,
           "map tone: a neighbouring PS on CFA918, the same PS on another VS, and the registry's own pair are not this table's "
           "(the bloom composite FA01CD writes the scene and is named by neither: its exact hash is not in the repo)");
+    // The first map-tone candidate's log reason (flatUiToneMatchWhy): what a tone read proves, and the three ways it does not.
+    {
+        static int kTargetA = 0, kTargetB = 0;
+        const void* h = &kTargetA;
+        const void* other = &kTargetB;
+        FlatUiToneProof p;
+        check(std::strcmp(flatUiToneMatchWhy(p, 5, h), "no (no recorded target this frame)") == 0,
+              "map tone reason: nothing recorded yet names no recorded target");
+        flatUiToneProofHud(p, 5, h);
+        check(std::strcmp(flatUiToneMatchWhy(p, 5, h), "yes") == 0 && flatUiToneProofTone(p, 5, h) == h,
+              "map tone reason: the recorded target read by the tone matches, and the proof function agrees");
+        check(std::strcmp(flatUiToneMatchWhy(p, 5, nullptr), "no (null input)") == 0,
+              "map tone reason: a null tone input (the 1d8d8212 flight's slot 0 read) is named as null");
+        check(std::strcmp(flatUiToneMatchWhy(p, 5, other), "no (pointer mismatch)") == 0,
+              "map tone reason: a tone reading another target is a pointer mismatch");
+        check(std::strcmp(flatUiToneMatchWhy(p, 6, h), "no (no recorded target this frame)") == 0,
+              "map tone reason: a proof state from another frame names no recorded target");
+    }
     // The jitter: rows that carry the phase (0.25, -0.375) px at 1920x1080 measure ndc (2 x 0.25 / 1920, -2 x -0.375 / 1080).
     const uint32_t w = 1920, h = 1080;
     const float px = 0.25f, py = -0.375f;

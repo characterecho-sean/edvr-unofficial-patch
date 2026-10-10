@@ -525,3 +525,15 @@ saw it, and no proof was recorded.
 - Not covered: the bloom composite CFA918 / FA01CD writes the scene and stays out. Its full hash is not in the repo, so the rig pins a neighbouring PS on the
   same VS instead.
 - Next: the Epic flat flight with the three maps open, reading that line and the map line's tone-unproven count.
+
+### Follow-up 2: the candidate read a null input (1d8d8212 flight, log 094919)
+
+The candidate branch did run on the map tonemap (candidate lines 2685-2692: "vs CFA918 ps C89DD4, HDR slot t0 reads 0000000000000000"). Its input
+was null because the runtime captured SRV slots only for registry tones and copies (flat_runtime.cpp, the capture gate before the UI block). Now
+the capture also runs for the map tonemap. Its readers were audited: the copy-pair branches (flat_runtime_model.h), the menu and image copies, the
+mono selector (keyed on the registry), flat_copy_structure.h, and flatContractMatches (fed only by the temporal observation, which already fills
+every draw). The frame-contract hash (flat_frame_contract.h) mixes the slots into a trace header for the F10 dump, not a decision.
+- The first map-tone candidate is said once, proved or not: "flat ui layer: first map-tone candidate -- frame N, input <ptr>, recorded targets
+  <list or none>, match yes|no (reason), map asks this frame n; said once." The reason is flatUiToneMatchWhy (flat_ui_layer_math.h, rig-pinned).
+- The map line gains tone-candidates-map and tone-matched-map (zeros print).
+- No rig drives the runtime's candidate branch (it needs the D3D draw scope); the pure reason function is pinned instead.

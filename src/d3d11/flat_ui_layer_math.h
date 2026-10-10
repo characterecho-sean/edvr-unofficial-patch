@@ -220,6 +220,15 @@ inline const void* flatUiToneProofTone(FlatUiToneProof& p, uint64_t frame, const
     }
     return matched;
 }
+// Why a tone read does or does not prove this frame's targets: the same test flatUiToneProofTone applies, named (the
+// first map-tone candidate's log line, flat_ui_layer.cpp). A pure reading of the proof state; it changes nothing.
+inline const char* flatUiToneMatchWhy(const FlatUiToneProof& p, uint64_t frame, const void* input) {
+    if (!input) return "no (null input)";
+    if (p.frame != frame || p.count == 0) return "no (no recorded target this frame)";
+    for (uint32_t i = 0; i < p.count; ++i)
+        if (input == p.hud[i] || input == p.alias[i]) return "yes";
+    return "no (pointer mismatch)";
+}
 inline bool flatUiToneProven(const FlatUiToneProof& p, uint64_t frame, const void* target) {
     if (frame <= 1 || p.provenFrame + 1 != frame || !target) return false;
     for (uint32_t i = 0; i < p.provenCount; ++i)

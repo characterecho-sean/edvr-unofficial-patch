@@ -48,12 +48,16 @@ struct Window {
     uint64_t mapOpenFrames = 0;
     uint64_t mapRefused[2][kRefusals] = {};
     uint64_t mapDeclined[2][kDecisions] = {};
+    // The map tonemap's candidates (flatUiMapToneSlotOf): the tone reads the candidate branch saw, and those that proved.
+    uint64_t mapToneCandidates = 0, mapToneMatched = 0;
 };
 Window g_w;
 FlatUiLayerAsk g_lastAsk = FlatUiLayerAsk::kNotAsked;
 UiLayerFamily g_decidedFamily = UiLayerFamily::kNone;  // the family of the last kDecided draw (flatUiLayerNoteIssue's)
 bool g_mapCanvasNoted = false, g_mapSpriteNoted = false;  // the once-only first take of each map family
 bool g_mapToneNoted = false;                              // the once-only first proof from a map frame's tonemap
+bool g_mapFirstToneNoted = false;                         // the once-only first map-tone candidate line (proved or not)
+uint64_t g_mapAskFrame = 0, g_mapAsksFrame = 0;           // the frame of the last map ask, and how many map asks it has had
 FlatUiToneProof g_proof;
 uint32_t g_candidateLines = 0;  // eight tone candidates logged, re-armed after a route, render-size or swap-chain change
 char g_candidateRoute[48] = "";
@@ -138,6 +142,10 @@ FlatUiLayerAsk flatUiLayerDecide(ID3D11DeviceContext* ctx, const FlatUiLayerDraw
     if (!flatUiLayerTakesFamily(family)) return g_lastAsk;
     const size_t fi = static_cast<size_t>(family);
     const int ms = mapSlot(family);
+    if (ms >= 0) {  // the map asks this frame, counted as they come (the first map-tone candidate reports how many came before it)
+        if (g_mapAskFrame != d.frame) { g_mapAskFrame = d.frame; g_mapAsksFrame = 0; }
+        ++g_mapAsksFrame;
+    }
     ++g_w.asked[fi];
     g_lastAsk = FlatUiLayerAsk::kRefused;
     const auto refuse = [&](FlatUiRefuse r) {
@@ -281,6 +289,21 @@ bool flatUiLayerToneCandidate(ID3D11DeviceContext* ctx, uint64_t frame, uint32_t
         if (g_takenFrame == frame && g_proof.hud[i] == g_takenTarget) takenAlias = g_proof.alias[i];
     const bool proven = flatUiToneProofTone(g_proof, frame, input) != nullptr;
     if (proven) ++g_w.toneProven;
+    // The map tonemap's candidates (flatUiMapToneSlotOf), counted every time, and the first one said once, proved or not, with
+    // the pointer it compared and the targets recorded this frame: a null input, no recorded target or a pointer mismatch
+    // is then visible in the log, not silent.
+    if (flatUiMapToneSlotOf(vs, ps) != ~0u && flatUiMapToneSlotOf(vs, ps) == static_cast<uint32_t>(hdrSlot)) {
+        ++g_w.mapToneCandidates;
+        if (proven) ++g_w.mapToneMatched;
+        if (!g_mapFirstToneNoted) {
+            g_mapFirstToneNoted = true;
+            Log::get().note("flat ui layer: first map-tone candidate -- frame %llu, input %p, recorded targets %s, match %s, map "
+                            "asks this frame %llu; said once.",
+                            static_cast<unsigned long long>(frame), input, used ? targets : "none",
+                            flatUiToneMatchWhy(g_proof, frame, input),
+                            static_cast<unsigned long long>(g_mapAskFrame == frame ? g_mapAsksFrame : 0));
+        }
+    }
     // The first proof a map frame's tonemap records (flatUiMapToneSlotOf: the UI layer's own table): said once, with its frame.
     if (proven && !g_mapToneNoted && flatUiMapToneSlotOf(vs, ps) == static_cast<uint32_t>(hdrSlot)) {
         g_mapToneNoted = true;
@@ -494,12 +517,13 @@ void flatUiLayerReport(uint64_t windowSeconds) {
     // refusals by reason (the adapter's and the shared decision's; "at-issue" is a refusal at the game's issue). Zeros print.
     Log::get().note(
         "flat ui layer map: open-frames=%llu; canvas asked=%llu taken=%llu refused=%llu (%s); sprite asked=%llu taken=%llu "
-        "refused=%llu (%s)",
+        "refused=%llu (%s); tone-candidates-map=%llu tone-matched-map=%llu",
         static_cast<unsigned long long>(w.mapOpenFrames), static_cast<unsigned long long>(w.asked[fc]),
         static_cast<unsigned long long>(w.taken[fc]), static_cast<unsigned long long>(mapRefusedTotal(w, 0, w.atIssue[fc])),
         mapReasons(w, 0, w.atIssue[fc]).c_str(), static_cast<unsigned long long>(w.asked[fs]),
         static_cast<unsigned long long>(w.taken[fs]), static_cast<unsigned long long>(mapRefusedTotal(w, 1, w.atIssue[fs])),
-        mapReasons(w, 1, w.atIssue[fs]).c_str());
+        mapReasons(w, 1, w.atIssue[fs]).c_str(), static_cast<unsigned long long>(w.mapToneCandidates),
+        static_cast<unsigned long long>(w.mapToneMatched));
     char declined[400] = "";
     size_t used = 0;
     for (size_t d = 0; d < kDecisions && used < sizeof(declined); ++d) {
