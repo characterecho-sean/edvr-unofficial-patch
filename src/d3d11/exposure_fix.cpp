@@ -5,9 +5,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
-#include <iterator>
-#include <unordered_map>
-#include <unordered_set>
 
 #include "../common/config.h"
 #include "../common/guard.h"
@@ -30,7 +27,7 @@
                           // because slot 41 is already ours and a second
                           // patch on it would be a second thing to reclaim
 #include "sunglare_fix.h"  // sunglareLastSeenMs, the damper's sun scope
-#include "../plugins/exposure/exposure_shape.h"
+#include "../plugins/exposure/exposure_dispatch.h"
 
 namespace edvr {
 namespace {
@@ -119,7 +116,7 @@ typedef void(STDMETHODCALLTYPE* PFN_CSSetUAVs)(ID3D11DeviceContext*, UINT, UINT,
                                                const UINT*);
 typedef void(STDMETHODCALLTYPE* PFN_ClearState)(ID3D11DeviceContext*);
 
-struct State {
+struct State : plugins::exposure::ExposureDispatchObserverState {
     VTableHook    hook;
     // The context these hooks were installed for. Identity only -- compared,
     // never dereferenced. In-place vtable patching hooks the class, so
@@ -150,9 +147,6 @@ struct State {
     uint32_t thunkHits[kHitCount] = {};
     uint8_t  quietPasses[kHitCount] = {};
 
-    bool     enabled = false;
-    uint64_t targetHash = 0;      // pinned by config, or learned by detection
-    bool     pinned = false;      // true if the hash came from config
     uint32_t copyMask = 0xF;
     bool     copyBtoA = false;
 
@@ -174,34 +168,12 @@ struct State {
     bool     dispatchSkipNoted = false;
     char     dispatchSkipSpec[96] = {};   // raw spec, to log only on change
 
-    // Shape detection.
-    //
-    // A bytecode hash identifies one compiled shader and changes whenever the
-    // game's shaders are rebuilt, so pinning one means the fix breaks on every
-    // update until somebody re-derives it. The pass's SHAPE is far more stable:
-    // it writes a small structured buffer of exposure state and a tiny
-    // parameter texture, and it runs once per eye. Detecting that costs one
-    // evaluation per distinct compute shader and then nothing.
-    std::unordered_map<uint64_t, bool> shapeVerdict;
-    // Hashes the shape test has ever run on. A counter cannot do this job: the
-    // prune below removes negatives every frame, so the map "forgets" a shader
-    // and the next frame's probe counts it again -- the give-up notice, which
-    // calls itself the thing to report, would print tens of thousands where it
-    // means a handful. This set is never pruned; it holds one 64-bit hash per
-    // distinct compute shader the game creates.
-    std::unordered_set<uint64_t> everExamined;
-    uint32_t detectStreak = 0;    // consecutive frames the candidate ran twice
-    bool     announced = false;
     uint64_t frames = 0;
-    bool     gaveUpNotice = false;
 
-    uint32_t seenThisFrame = 0;
     // Whether the game did ANY compute work this frame. The give-up notice
     // counts these frames rather than all frames -- see exposureFixFrameBoundary.
     bool     computeThisFrame = false;
-    ID3D11UnorderedAccessView* firstEye[4] = {nullptr, nullptr, nullptr, nullptr};
     uint64_t applied = 0;
-    bool     rejected = false;
 
     // The damper. The exposure peek's sweep (the retired measurement
     // instrument, removed 2026-09-23) decoded the 8-byte state buffer: float
@@ -240,10 +212,6 @@ struct State {
     uint64_t       dampWritesAtNote = 0;
     uint64_t       dampLastNoteMs = 0;
 };
-
-// Consecutive frames a detected candidate must run exactly twice before the
-// fix acts on it.
-constexpr uint32_t kConfirmFrames = 5;
 
 // The damper's constants. The strip as measured 2026-08-21: 6x1, R32
 // float, texels [raw luminance, smoothed luminance, gain, gain again,
@@ -675,30 +643,7 @@ void STDMETHODCALLTYPE hookedClearState(ID3D11DeviceContext* self) {
     g_state->realClearState(self);
 }
 
-// Is this dispatch the exposure pass? Pinned hash if configured, otherwise
-// shape detection, cached per shader so the cost is one evaluation each.
-bool isExposureDispatch() {
-    State* s = g_state;
-    if (!s->enabled || s->rejected) return false;
-
-    const uint64_t h = hashOf(bindingGet(BindSlot::Cs));
-    if (h == 0) return false;
-    if (s->targetHash != 0) return h == s->targetHash;
-    if (s->pinned) return false;   // pinned but not matching: do nothing
-
-    auto it = s->shapeVerdict.find(h);
-    if (it != s->shapeVerdict.end()) return it->second;
-
-    const bool match = plugins::exposure::shapeLooksLikeExposure();
-    s->everExamined.insert(h);
-    s->shapeVerdict[h] = match;
-    if (match) {
-        Log::get().note("exposure fix: candidate compute shader %016llX matches the "
-                        "exposure-state shape; confirming across frames",
-                        static_cast<unsigned long long>(h));
-    }
-    return match;
-}
+// Exposure target classification lives in the strongly linked plugin observer.
 
 // Record-only: the census names GPU-driven compute (group counts live in
 // the argument buffer, so n= cannot be known CPU-side), and everything else
@@ -813,8 +758,11 @@ void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y,
     // views, and the probe would run on them with no SEH at all. The budget is
     // the same one the copy uses: if we cannot classify, we cannot act, so
     // there is nothing to keep alive separately.
-    bool isTarget = false;
-    guardedBudget(g_budget, [&] { isTarget = isExposureDispatch(); });
+    ExposureDispatchTicket ticket{};
+    guardedBudget(g_budget, [&] {
+        ticket = exposurePluginBeginDispatch(
+            static_cast<plugins::exposure::ExposureDispatchObserverState*>(s));
+    });
 
     // Any compute work at all means the game is rendering a scene, which is the
     // only condition under which the exposure pass could appear. Menus and
@@ -822,46 +770,27 @@ void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y,
     s->computeThisFrame = true;
 
     s->realDispatch(self, x, y, z);
-    if (!isTarget) return;
+    if (!ticket.target) return;
 
     guardedBudget(g_budget, [&] {
-        ++s->seenThisFrame;
-        if (s->seenThisFrame == 1) {
-            for (uint32_t i = 0; i < 4; ++i) {
-                s->firstEye[i] = static_cast<ID3D11UnorderedAccessView*>(
-                    bindingGet(uavSlot(i)));
-            }
-        } else if (s->seenThisFrame == 2) {
-            // Running exactly twice a frame is the other half of the signature:
-            // once per eye. A shader that merely has the right resource shape
-            // but runs once, or five times, is something else. Detection waits
-            // for a few consecutive frames of that before touching anything;
-            // a pinned hash is trusted immediately.
-            if (!s->pinned && s->detectStreak < kConfirmFrames) return;
-
-            ID3D11UnorderedAccessView* second[4];
-            for (uint32_t i = 0; i < 4; ++i) {
-                second[i] = static_cast<ID3D11UnorderedAccessView*>(bindingGet(uavSlot(i)));
-            }
-            if (!s->announced) {
-                s->announced = true;
-                // The key is advanced.exposure_shader. It said fix.b1_exposure_cs,
-                // which is this repo's predecessor's name for it and is read by
-                // nothing here -- so anyone following the instruction was
-                // silently ignored, on the support path where it matters most.
-                Log::get().note("exposure fix: confirmed compute shader %016llX runs "
-                                "once per eye. Pin it with exposure_shader under "
-                                "[advanced] in %s if you want to skip detection.",
-                                static_cast<unsigned long long>(hashOf(bindingGet(BindSlot::Cs))),
-                                Config::get().iniName());
-            }
-            shareExposure(self, s->firstEye, second);
-            if (s->dampK > 0.0f) exposureDamp(self, s->firstEye[1]);
-        }
+        exposurePluginCompleteDispatch(
+            static_cast<plugins::exposure::ExposureDispatchObserverState*>(s),
+            ticket, self);
     });
 }
 
 }  // namespace
+
+void exposureDispatchApplyPair(void* observerState,
+                               ID3D11DeviceContext* context,
+                               ID3D11UnorderedAccessView** first,
+                               ID3D11UnorderedAccessView** second) {
+    auto* observer = static_cast<plugins::exposure::ExposureDispatchObserverState*>(
+        observerState);
+    State* s = static_cast<State*>(observer);
+    shareExposure(context, first, second);
+    if (s->dampK > 0.0f) exposureDamp(context, first[1]);
+}
 
 void exposureConfigure(Config& cfg) {
     State* s = g_state;
@@ -964,15 +893,8 @@ void exposureConfigure(Config& cfg) {
 void exposureFixFrameBoundary() {
     State* s = g_state;
     if (!s) return;
-    // Exactly two dispatches means one per eye. Anything else breaks the streak,
-    // so a shader that only sometimes runs twice never gets promoted.
-    if (s->seenThisFrame == 2) {
-        if (s->detectStreak < kConfirmFrames) ++s->detectStreak;
-    } else if (s->seenThisFrame != 0) {
-        s->detectStreak = 0;
-    }
-    s->seenThisFrame = 0;
-    for (uint32_t i = 0; i < 4; ++i) s->firstEye[i] = nullptr;
+    exposurePluginResetDispatchFrame(
+        static_cast<plugins::exposure::ExposureDispatchObserverState*>(s));
     // The skip probe counts occurrences per frame.
     for (uint32_t i = 0; i < 4; ++i) s->dispatchOccSeen[i] = 0;
 
@@ -995,11 +917,8 @@ void exposureFixFrameBoundary() {
     //
     // Yes answers are kept: those are confirmed across frames anyway, and a
     // shader that matched the shape once does not stop having matched it.
-    if (!s->announced && !s->gaveUpNotice && s->targetHash == 0) {
-        for (auto it = s->shapeVerdict.begin(); it != s->shapeVerdict.end();) {
-            it = it->second ? std::next(it) : s->shapeVerdict.erase(it);
-        }
-    }
+    exposurePluginExpireDispatchVerdicts(
+        static_cast<plugins::exposure::ExposureDispatchObserverState*>(s));
 
     // Say so when detection comes up empty. Otherwise a build where the shape
     // stopped matching produces a log identical to one where the user never got

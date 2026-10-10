@@ -12,16 +12,17 @@
   generated manifests/config ownership, subscription-driven dispatch and a
   C-compatible interface. The add-on tier follows Phase 1. Graphics-only VR is
   a separate phase; supported settings remain owned by one plugin.
-- **Current integration:** main `a1609f2b` is merged. The staged intro
-  lifecycle checkpoint passes 157 full-build jobs plus config, export
-  and installer gates; receipt `96e5cf03` matches the source. Steam
-  retains measured `6ab758d2`.
+- **Current integration:** main `a1609f2b` is merged. The exposure
+  dispatch observer checkpoint passes 158 full-build jobs plus config,
+  export and installer gates; receipt `9bc60c52` matches the source.
+  Steam retains measured `6ab758d2`.
 - **Module progress:** all intro implementations build in
-  `plugin_intro.lib`. Configure, frame and shutdown dispatch now use
-  direct registry slots at their original callsites and fault budgets;
-  draw actions remain in the legacy ladder. Remaining registry/group
-  migration, the exposure dispatch observer and installer selection are
-  open; availability is unchanged.
+  `plugin_intro.lib`, with staged configure/frame/shutdown dispatch at
+  the original callsites and budgets. `plugin_exposure.lib` owns shape
+  classification, target dispatch accounting, eye pairing and verdict
+  expiry. Core retains exposure hooks, guards, config, frame scheduling
+  and D3D actions. Remaining registry/group migration, draw claims and
+  installer selection stay open; availability is unchanged.
 
 - **Offline evidence:** FSS site 1 has a frozen legacy selector oracle,
   version-16 facts, seven-base-fact capacity and terminal X/6 action fixtures.
@@ -4055,3 +4056,56 @@ selection availability remain open. Remaining group migrations,
 installer selection, whole-ladder replay and runtime CPU/GPU shipping
 acceptance are still required. Feature work may continue on the branch;
 the final matched performance pair remains at rendering-code freeze.
+
+### 2026-10-10 — exposure dispatch observer ownership
+
+Luna 6 agents implemented and cross-reviewed Exposure dispatch
+observation in `plugin_exposure.lib`. Direct opaque-state Begin and
+Complete entrypoints replace the old inline classification and
+pair-accounting bodies. Begin runs at the original pre-forward
+fault-budget position after all profile, VR-world, foreign-context and
+dispatch-skip exits. The real Dispatch remains outside both guards.
+Complete consumes the pre-forward verdict after forwarding and reads the
+post-forward binding shadow. It does not add an enabled/rejected or
+shader-freshness recheck. The second target dispatch still applies
+immediately once pinned or confirmed; a third target dispatch preserves
+that already-issued action and breaks the streak at frame end.
+Zero-target frames retain the old detection streak.
+
+The core State carries the observer fields through a private base
+subobject in the existing allocation. Explicit projection passes that
+same state through both entrypoints and the core pair bridge. The bridge
+uses the captured State to retain the old damp condition, shares first
+and damps second. D3D helper bodies, UAV borrowing, config
+names/defaults, log text, hook ownership and shutdown policy stay
+intact. Failed installs uninstall before deleting State; successful
+shutdown retains the disabled state as before. Frame Reset stays before
+skip-counter clearing; negative verdict expiry stays after it and before
+compute-frame/give-up scheduling. No registry scans, per-dispatch
+service table, new state allocation or config key were introduced.
+
+The new C++ fixture links the actual observer module with fake shader,
+binding, logger, config and pair-action services. It covers
+classification gates, positive/negative caching, expiry, ticket
+authority, post-forward UAV/context/state identity, confirmation timing,
+first/second/third dispatch behavior and zero/one/two/three-dispatch
+frame resets. It verifies the module's request for GPU work; it does not
+execute the runtime hook or GPU helper. The existing WARP exposure-cost
+rig retains real damper coverage. The source-order gate parses complete
+skip and bypass blocks and both real budget lambdas, pins forwarding
+outside guards, frame order and captured-state sharing before damping.
+Fifteen in-memory mutations check these pins and borrowed-pointer
+ownership. Its dry run and self-test write nothing. A malformed Python
+write was caught offline and repaired by a mid-tier agent before native
+validation; the repaired gate supersedes the earlier fixture report's
+premature Python-pass statements.
+
+The full absolute build passed all 158 jobs, the 125-key config
+contract, exports and self-contained installer gates. Receipt:
+`9bc60c521faef96db1c5597e542e7a2bfa4dba9265ece43f89d09ce53c0ea282`. No
+Steam install, live settings edit or flight occurred. Exposure remains a
+partial ownership migration with catalog availability unchanged.
+Remaining lifecycle/group migrations, draw claims, installer selection,
+whole-ladder replay and runtime CPU/GPU shipping acceptance remain
+required. Feature work may continue on this branch; the final matched
+performance comparison remains at rendering-code freeze.

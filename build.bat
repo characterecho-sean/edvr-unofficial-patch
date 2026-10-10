@@ -302,6 +302,7 @@ python "tools\check_plugin_boundaries.py" --quiet --require-plugin cockpit_visua
     --require-source src\plugins\intro\loader_panel.cpp ^
     --require-source src\plugins\intro\splash_dim.cpp ^
     --require-plugin exposure --require-source src\plugins\exposure\exposure_shape.cpp ^
+    --require-source src\plugins\exposure\exposure_dispatch.cpp ^
     --include-dir "%GEN%" || exit /b 1
 
 if not exist "%OBJ%\plugins\cockpit_visuals" mkdir "%OBJ%\plugins\cockpit_visuals"
@@ -336,9 +337,11 @@ if errorlevel 1 ( echo [edvr] ERROR: intro plugin library failed & exit /b 1 )
 
 if not exist "%OBJ%\plugins\exposure" mkdir "%OBJ%\plugins\exposure"
 del /q "%OBJ%\plugins\exposure\*.obj" 2>nul
-cl.exe %CFLAGS% /Fo"%OBJ%\plugins\exposure\\" "src\plugins\exposure\exposure_shape.cpp"
+cl.exe %CFLAGS% /Fo"%OBJ%\plugins\exposure\\" ^
+    "src\plugins\exposure\exposure_shape.cpp" "src\plugins\exposure\exposure_dispatch.cpp"
 if errorlevel 1 ( echo [edvr] ERROR: exposure plugin compile failed & exit /b 1 )
-lib.exe /nologo /OUT:"%OBJ%\plugins\exposure\plugin_exposure.lib" "%OBJ%\plugins\exposure\exposure_shape.obj"
+lib.exe /nologo /OUT:"%OBJ%\plugins\exposure\plugin_exposure.lib" ^
+    "%OBJ%\plugins\exposure\exposure_shape.obj" "%OBJ%\plugins\exposure\exposure_dispatch.obj"
 if errorlevel 1 ( echo [edvr] ERROR: exposure plugin library failed & exit /b 1 )
 
 echo [edvr] === d3d11.dll ===
@@ -1777,6 +1780,21 @@ cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 /Gy ^
 if errorlevel 1 ( echo [edvr] ERROR: exposure cost test build failed & exit /b 1 )
 "%BUILD%\exposure_cost_test.exe" --dry-run || exit /b 1
 "%BUILD%\exposure_cost_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_exposure_dispatch_test
+echo [edvr] === exposure_dispatch_test.exe ===
+python "tools\exposure_dispatch_test\source_order_test.py" --dry-run || exit /b 1
+python "tools\exposure_dispatch_test\source_order_test.py" --self-test || exit /b 1
+if not exist "%OBJ%\exposuredispatch" mkdir "%OBJ%\exposuredispatch"
+cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\exposuredispatch\\" /Fe"%BUILD%\exposure_dispatch_test.exe" ^
+    "tools\exposure_dispatch_test\exposure_dispatch_test.cpp" ^
+    "src\plugins\exposure\exposure_dispatch.cpp" /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: exposure dispatch test build failed & exit /b 1 )
+"%BUILD%\exposure_dispatch_test.exe" --dry-run || exit /b 1
+"%BUILD%\exposure_dispatch_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_witchspace_stars_test
