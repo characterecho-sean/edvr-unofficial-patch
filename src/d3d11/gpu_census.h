@@ -87,6 +87,55 @@ enum class GpuCensusSection : uint8_t {
     Count = AlteredFixFirst + kAlteredFixCount
 };
 
+// Stable logical owners for matched cost evidence. These identify the feature
+// area that owns a legacy census scope; they do not imply module selection.
+enum class GpuCensusOwner : uint8_t {
+    TemporalAa = 0,
+    CockpitVisuals = 1,
+    Exposure = 2,
+    Scanners = 3,
+    Intro = 4,
+    OnFootPanel = 5,
+    Comfort = 6,
+    Performance = 7,
+    Diagnostics = 8,
+    Core = 9,
+    Count = 10
+};
+
+enum class GpuCensusAttribution : uint8_t {
+    Direct = 0,
+    NestedBreakdown,
+    WrappedGameDraw,
+    Unowned
+};
+
+enum class GpuCensusImplementation : uint8_t { Legacy = 0 };
+
+struct GpuCensusOwnership {
+    GpuCensusOwner owner;
+    GpuCensusAttribution attribution;
+    GpuCensusImplementation implementation;
+    const char* sharedConsumer;
+};
+
+constexpr const char* gpuCensusOwnerName(GpuCensusOwner owner) noexcept {
+    switch (owner) {
+    case GpuCensusOwner::TemporalAa: return "temporal-aa";
+    case GpuCensusOwner::CockpitVisuals: return "cockpit-visuals";
+    case GpuCensusOwner::Exposure: return "exposure";
+    case GpuCensusOwner::Scanners: return "scanners";
+    case GpuCensusOwner::Intro: return "intro";
+    case GpuCensusOwner::OnFootPanel: return "on-foot-panel";
+    case GpuCensusOwner::Comfort: return "comfort";
+    case GpuCensusOwner::Performance: return "performance";
+    case GpuCensusOwner::Diagnostics: return "diagnostics";
+    case GpuCensusOwner::Core: return "core";
+    case GpuCensusOwner::Count: break;
+    }
+    return "unknown";
+}
+
 // Which of the classes above a draw of Elite's is, decided where forwardWithVerdict
 // issues the game's own draw. One class per draw, in this priority: a pool-family
 // draw (only when no verdict claimed it, as engineVelocityBeforeDraw is), a UI-layer
@@ -126,6 +175,90 @@ enum class AlteredFix : uint8_t {
     Count
 };
 static_assert(static_cast<int>(AlteredFix::Count) == kAlteredFixCount, "one census section for each named fix");
+
+static_assert(static_cast<uint8_t>(AlteredFix::Panel) == 0 &&
+              static_cast<uint8_t>(AlteredFix::Remlok) == 1 &&
+              static_cast<uint8_t>(AlteredFix::Holo) == 2 &&
+              static_cast<uint8_t>(AlteredFix::TargetSharp) == 3 &&
+              static_cast<uint8_t>(AlteredFix::NightVision) == 4 &&
+              static_cast<uint8_t>(AlteredFix::IntroPanel) == 5 &&
+              static_cast<uint8_t>(AlteredFix::GlareClamp) == 6 &&
+              static_cast<uint8_t>(AlteredFix::GlareSteady) == 7 &&
+              static_cast<uint8_t>(AlteredFix::Particle) == 8 &&
+              static_cast<uint8_t>(AlteredFix::FssPanel) == 9 &&
+              static_cast<uint8_t>(AlteredFix::FssReveal) == 10 &&
+              static_cast<uint8_t>(AlteredFix::Scrim) == 11 &&
+              static_cast<uint8_t>(AlteredFix::Backdrop) == 12 &&
+              static_cast<uint8_t>(AlteredFix::Unnamed) == 13,
+              "gpuCensusOwnership's explicit wrapped-section ordinals must track AlteredFix");
+
+constexpr GpuCensusOwnership gpuCensusOwnership(GpuCensusSection section) noexcept {
+    using O = GpuCensusOwner;
+    using A = GpuCensusAttribution;
+    constexpr GpuCensusImplementation legacy = GpuCensusImplementation::Legacy;
+    if (section >= GpuCensusSection::AlteredFixFirst && section < GpuCensusSection::Count) {
+        switch (static_cast<AlteredFix>(static_cast<uint8_t>(section) -
+                                        static_cast<uint8_t>(GpuCensusSection::AlteredFixFirst))) {
+        case AlteredFix::Panel:       return {O::OnFootPanel, A::WrappedGameDraw, legacy, ""};
+        case AlteredFix::Remlok:      return {O::CockpitVisuals, A::WrappedGameDraw, legacy, ""};
+        case AlteredFix::Holo:        return {O::Intro, A::WrappedGameDraw, legacy, ""};
+        case AlteredFix::TargetSharp: return {O::CockpitVisuals, A::WrappedGameDraw, legacy, ""};
+        case AlteredFix::NightVision: return {O::CockpitVisuals, A::WrappedGameDraw, legacy, ""};
+        case AlteredFix::IntroPanel:  return {O::Intro, A::WrappedGameDraw, legacy, ""};
+        case AlteredFix::GlareClamp:  return {O::CockpitVisuals, A::WrappedGameDraw, legacy, ""};
+        case AlteredFix::GlareSteady: return {O::CockpitVisuals, A::WrappedGameDraw, legacy, ""};
+        case AlteredFix::Particle:    return {O::CockpitVisuals, A::WrappedGameDraw, legacy, ""};
+        case AlteredFix::FssPanel:    return {O::Scanners, A::WrappedGameDraw, legacy, ""};
+        case AlteredFix::FssReveal:   return {O::Scanners, A::WrappedGameDraw, legacy, ""};
+        case AlteredFix::Scrim:       return {O::Intro, A::WrappedGameDraw, legacy, ""};
+        case AlteredFix::Backdrop:    return {O::Intro, A::WrappedGameDraw, legacy, ""};
+        case AlteredFix::Unnamed:     return {O::Core, A::WrappedGameDraw, legacy, ""};
+        case AlteredFix::Count:       break;
+        }
+    }
+    switch (section) {
+    case GpuCensusSection::DoorTemporalWhole:
+    case GpuCensusSection::DoorSharpen:
+    case GpuCensusSection::DoorUiLayerComposite:
+        return {O::TemporalAa, A::Direct, legacy, ""};
+    case GpuCensusSection::DoorUpscaler:
+    case GpuCensusSection::DoorMotionPrep:
+    case GpuCensusSection::DoorHologramResolve:
+    case GpuCensusSection::DoorUiResolve:
+        return {O::TemporalAa, A::NestedBreakdown, legacy, ""};
+    case GpuCensusSection::DoorMenu:
+        return {O::Core, A::Direct, legacy, ""};
+    case GpuCensusSection::DoorFssHeal:
+        return {O::Scanners, A::Direct, legacy, ""};
+    case GpuCensusSection::FrameHologramPasses:
+    case GpuCensusSection::FrameUiDepthCoverage:
+    case GpuCensusSection::FramePlanet:
+    case GpuCensusSection::FrameScreenMotion:
+    case GpuCensusSection::FrameWeaponMotion:
+    case GpuCensusSection::FrameEngineVelocity:
+    case GpuCensusSection::FrameUiLayerReissues:
+    case GpuCensusSection::FrameUiLayerHdrSeed:
+    case GpuCensusSection::FrameWorldResolve:
+    case GpuCensusSection::FrameWorldMips:
+    case GpuCensusSection::FrameWorldLayer:
+        return {O::TemporalAa, A::Direct, legacy,
+                section == GpuCensusSection::FrameWeaponMotion ? "on-foot-panel" : ""};
+    case GpuCensusSection::FrameSkinSourceClear:
+    case GpuCensusSection::FrameSkinEyeClear:
+    case GpuCensusSection::FrameSkinJoinClear:
+    case GpuCensusSection::FrameSkinJoin:
+    case GpuCensusSection::FrameSkinPose:
+        return {O::TemporalAa, A::NestedBreakdown, legacy, ""};
+    case GpuCensusSection::AlteredPoolFamily:
+    case GpuCensusSection::AlteredUiLayer:
+        return {O::TemporalAa, A::WrappedGameDraw, legacy, ""};
+    case GpuCensusSection::AlteredFixFirst:
+    case GpuCensusSection::Count:
+    default:
+        break;
+    }
+    return {O::Core, A::Unowned, legacy, ""};
+}
 
 // What the scope is told about a draw: its class, and for the Verdict class the fix that wraps it.
 struct AlteredDraw {

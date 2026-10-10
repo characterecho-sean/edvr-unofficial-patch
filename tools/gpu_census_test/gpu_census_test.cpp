@@ -22,6 +22,7 @@
 #include <cstring>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -102,6 +103,94 @@ const GpuCensusSeedTarget kSeedAt100 = {4032, 3896, 8, 3024, 2922, "D32_FLOAT_S8
 constexpr const char* kSeedDetailPrefix = "EDVR GPU census, the HDR HUD depth-stencil seed above";
 
 // ---- 1: the estimator math, as a pure function -------------------------
+struct ExpectedGpuOwner final {
+    GpuCensusSection section;
+    GpuCensusOwner owner;
+    GpuCensusAttribution attribution;
+    const char* sharedConsumer;
+};
+
+void ownershipMapCases() {
+    using O = GpuCensusOwner;
+    using A = GpuCensusAttribution;
+    const ExpectedGpuOwner expected[] = {
+        {GpuCensusSection::DoorTemporalWhole, O::TemporalAa, A::Direct, ""},
+        {GpuCensusSection::DoorUpscaler, O::TemporalAa, A::NestedBreakdown, ""},
+        {GpuCensusSection::DoorMotionPrep, O::TemporalAa, A::NestedBreakdown, ""},
+        {GpuCensusSection::DoorHologramResolve, O::TemporalAa, A::NestedBreakdown, ""},
+        {GpuCensusSection::DoorUiResolve, O::TemporalAa, A::NestedBreakdown, ""},
+        {GpuCensusSection::DoorSharpen, O::TemporalAa, A::Direct, ""},
+        {GpuCensusSection::DoorMenu, O::Core, A::Direct, ""},
+        {GpuCensusSection::DoorUiLayerComposite, O::TemporalAa, A::Direct, ""},
+        {GpuCensusSection::DoorFssHeal, O::Scanners, A::Direct, ""},
+        {GpuCensusSection::FrameHologramPasses, O::TemporalAa, A::Direct, ""},
+        {GpuCensusSection::FrameUiDepthCoverage, O::TemporalAa, A::Direct, ""},
+        {GpuCensusSection::FramePlanet, O::TemporalAa, A::Direct, ""},
+        {GpuCensusSection::FrameScreenMotion, O::TemporalAa, A::Direct, ""},
+        {GpuCensusSection::FrameWeaponMotion, O::TemporalAa, A::Direct, "on-foot-panel"},
+        {GpuCensusSection::FrameEngineVelocity, O::TemporalAa, A::Direct, ""},
+        {GpuCensusSection::FrameUiLayerReissues, O::TemporalAa, A::Direct, ""},
+        {GpuCensusSection::FrameUiLayerHdrSeed, O::TemporalAa, A::Direct, ""},
+        {GpuCensusSection::FrameWorldResolve, O::TemporalAa, A::Direct, ""},
+        {GpuCensusSection::FrameWorldMips, O::TemporalAa, A::Direct, ""},
+        {GpuCensusSection::FrameWorldLayer, O::TemporalAa, A::Direct, ""},
+        {GpuCensusSection::FrameSkinSourceClear, O::TemporalAa, A::NestedBreakdown, ""},
+        {GpuCensusSection::FrameSkinEyeClear, O::TemporalAa, A::NestedBreakdown, ""},
+        {GpuCensusSection::FrameSkinJoinClear, O::TemporalAa, A::NestedBreakdown, ""},
+        {GpuCensusSection::FrameSkinJoin, O::TemporalAa, A::NestedBreakdown, ""},
+        {GpuCensusSection::FrameSkinPose, O::TemporalAa, A::NestedBreakdown, ""},
+        {GpuCensusSection::AlteredPoolFamily, O::TemporalAa, A::WrappedGameDraw, ""},
+        {GpuCensusSection::AlteredUiLayer, O::TemporalAa, A::WrappedGameDraw, ""},
+        {alteredFixSectionOf(AlteredFix::Panel), O::OnFootPanel, A::WrappedGameDraw, ""},
+        {alteredFixSectionOf(AlteredFix::Remlok), O::CockpitVisuals, A::WrappedGameDraw, ""},
+        {alteredFixSectionOf(AlteredFix::Holo), O::Intro, A::WrappedGameDraw, ""},
+        {alteredFixSectionOf(AlteredFix::TargetSharp), O::CockpitVisuals, A::WrappedGameDraw, ""},
+        {alteredFixSectionOf(AlteredFix::NightVision), O::CockpitVisuals, A::WrappedGameDraw, ""},
+        {alteredFixSectionOf(AlteredFix::IntroPanel), O::Intro, A::WrappedGameDraw, ""},
+        {alteredFixSectionOf(AlteredFix::GlareClamp), O::CockpitVisuals, A::WrappedGameDraw, ""},
+        {alteredFixSectionOf(AlteredFix::GlareSteady), O::CockpitVisuals, A::WrappedGameDraw, ""},
+        {alteredFixSectionOf(AlteredFix::Particle), O::CockpitVisuals, A::WrappedGameDraw, ""},
+        {alteredFixSectionOf(AlteredFix::FssPanel), O::Scanners, A::WrappedGameDraw, ""},
+        {alteredFixSectionOf(AlteredFix::FssReveal), O::Scanners, A::WrappedGameDraw, ""},
+        {alteredFixSectionOf(AlteredFix::Scrim), O::Intro, A::WrappedGameDraw, ""},
+        {alteredFixSectionOf(AlteredFix::Backdrop), O::Intro, A::WrappedGameDraw, ""},
+        {alteredFixSectionOf(AlteredFix::Unnamed), O::Core, A::WrappedGameDraw, ""},
+    };
+    static_assert(sizeof(expected) / sizeof(expected[0]) == kSections,
+                  "every census section must have an explicit ownership expectation");
+    static_assert(static_cast<uint8_t>(O::TemporalAa) == 0 &&
+                  static_cast<uint8_t>(O::CockpitVisuals) == 1 &&
+                  static_cast<uint8_t>(O::Exposure) == 2 &&
+                  static_cast<uint8_t>(O::Scanners) == 3 &&
+                  static_cast<uint8_t>(O::Intro) == 4 &&
+                  static_cast<uint8_t>(O::OnFootPanel) == 5 &&
+                  static_cast<uint8_t>(O::Comfort) == 6 &&
+                  static_cast<uint8_t>(O::Performance) == 7 &&
+                  static_cast<uint8_t>(O::Diagnostics) == 8 &&
+                  static_cast<uint8_t>(O::Core) == 9 &&
+                  static_cast<uint8_t>(O::Count) == 10,
+                  "logical owner ordinals must stay aligned with feature telemetry");
+    for (size_t i = 0; i < kSections; ++i) {
+        const auto& want = expected[i];
+        const auto got = gpuCensusOwnership(static_cast<GpuCensusSection>(i));
+        check(static_cast<size_t>(want.section) == i, "ownership expectations follow census section ordinals");
+        check(got.owner == want.owner && got.attribution == want.attribution &&
+              got.implementation == GpuCensusImplementation::Legacy &&
+              std::strcmp(got.sharedConsumer, want.sharedConsumer) == 0,
+              "every current census section has its expected owner and attribution");
+    }
+    const char* ownerNames[] = {"temporal-aa", "cockpit-visuals", "exposure", "scanners", "intro",
+                                "on-foot-panel", "comfort", "performance", "diagnostics", "core"};
+    for (uint8_t i = 0; i < static_cast<uint8_t>(O::Count); ++i)
+        check(std::strcmp(gpuCensusOwnerName(static_cast<O>(i)), ownerNames[i]) == 0,
+              "logical owner names preserve stable ordinal labels");
+    for (GpuCensusSection invalid : {GpuCensusSection::Count, static_cast<GpuCensusSection>(255)}) {
+        const auto got = gpuCensusOwnership(invalid);
+        check(got.owner == O::Core && got.attribution == A::Unowned,
+              "sentinel and out-of-range census sections stay visible as unowned core");
+    }
+}
+
 void estimatorMathCases() {
     SectionState st;
     {
@@ -473,6 +562,185 @@ const std::string* lineWith(const char* prefix) {
         if (l.rfind(prefix, 0) == 0) return &l;
     return nullptr;
 }
+void rawPluginCostEvidenceCases() {
+    const uint64_t start = 100;
+    freshWindow(start);
+    auto& measured = g_section[static_cast<size_t>(GpuCensusSection::DoorTemporalWhole)];
+    measured.occurrences = 3;
+    measured.baseSamples = 2;
+    measured.baseMs = 0.25;
+    measured.sampler.totals.samples = 5;
+    measured.sampler.totals.ms = 1.25;
+    measured.nullBaseSamples = 1;
+    measured.nullBaseMs = 0.10;
+    measured.nullSampler.totals.samples = 3;
+    measured.nullSampler.totals.ms = 0.30;
+
+    auto& late = g_section[static_cast<size_t>(GpuCensusSection::DoorSharpen)];
+    late.occurrences = 0; // Its completed timer can arrive after the sample occurred.
+    late.baseSamples = 4;
+    late.baseMs = 0.50;
+    late.sampler.totals.samples = 5;
+    late.sampler.totals.ms = 0.60;
+    late.nullBaseSamples = 2;
+    late.nullBaseMs = 0.10;
+    late.nullSampler.totals.samples = 3;
+    late.nullSampler.totals.ms = 0.20; // At the null floor.
+
+    auto& uncalibrated = g_section[static_cast<size_t>(GpuCensusSection::DoorMenu)];
+    uncalibrated.occurrences = 2;
+    uncalibrated.baseSamples = 0;
+    uncalibrated.baseMs = 0.0;
+    uncalibrated.sampler.totals.samples = 1;
+    uncalibrated.sampler.totals.ms = 0.05;
+
+    auto& unmeasured = g_section[static_cast<size_t>(GpuCensusSection::DoorFssHeal)];
+    unmeasured.occurrences = 1;
+
+    logPluginCostEvidence(200, 10);
+    const auto* measuredLine = lineWith("EDVR plugin cost v1: window_start_ms=100 window_end_ms=200 scope=0 owner=0 attribution=0 ");
+    check(measuredLine && measuredLine->find("frames=10 occurrences=3 completed_samples=3 raw_sample_ms=1 null_samples=2 null_ms=0.19999999999999998 status=measured") != std::string::npos,
+          "raw V1 measured row preserves reader schema and cumulative timer deltas");
+    const auto* lateLine = lineWith("EDVR plugin cost v1: window_start_ms=100 window_end_ms=200 scope=5 owner=0 attribution=0 ");
+    check(lateLine && lateLine->find("frames=10 occurrences=0 completed_samples=1") != std::string::npos &&
+          lateLine->find("status=null-floor") != std::string::npos,
+          "completed late samples remain reportable with zero occurrences and null-floor status");
+    const auto* uncalibratedLine = lineWith("EDVR plugin cost v1: window_start_ms=100 window_end_ms=200 scope=6 owner=9 attribution=0 ");
+    check(uncalibratedLine && uncalibratedLine->find("status=uncalibrated") != std::string::npos,
+          "timed work without a null sample is marked uncalibrated");
+    const auto* unmeasuredLine = lineWith("EDVR plugin cost v1: window_start_ms=100 window_end_ms=200 scope=8 owner=3 attribution=0 ");
+    check(unmeasuredLine && unmeasuredLine->find("completed_samples=0") != std::string::npos &&
+          unmeasuredLine->find("status=unmeasured") != std::string::npos,
+          "observed work without completed timing is marked unmeasured");
+    check(lineWith("EDVR plugin cost v1: window_start_ms=100 window_end_ms=200 scope=7 ") == nullptr,
+          "quiet scopes with no completed sample emit no manufactured zero row");
+
+    freshWindow(start);
+    auto& regressed = g_section[static_cast<size_t>(GpuCensusSection::DoorTemporalWhole)];
+    regressed.baseSamples = 2;
+    regressed.sampler.totals.samples = 1;
+    regressed.occurrences = 1;
+    auto& nonfinite = g_section[static_cast<size_t>(GpuCensusSection::DoorSharpen)];
+    nonfinite.baseMs = 0.1;
+    nonfinite.sampler.totals.ms = std::numeric_limits<double>::quiet_NaN();
+    nonfinite.occurrences = 1;
+    auto& nullRegressed = g_section[static_cast<size_t>(GpuCensusSection::DoorMenu)];
+    nullRegressed.nullBaseSamples = 2;
+    nullRegressed.nullSampler.totals.samples = 1;
+    nullRegressed.occurrences = 1;
+    auto& nullNonfinite = g_section[static_cast<size_t>(GpuCensusSection::DoorFssHeal)];
+    nullNonfinite.nullSampler.totals.samples = 1;
+    nullNonfinite.nullSampler.totals.ms = std::numeric_limits<double>::quiet_NaN();
+    nullNonfinite.occurrences = 1;
+    auto& sampleRegressed = g_section[static_cast<size_t>(GpuCensusSection::DoorUiLayerComposite)];
+    sampleRegressed.baseMs = 0.2;
+    sampleRegressed.sampler.totals.ms = 0.1;
+    sampleRegressed.occurrences = 1;
+    logPluginCostEvidence(200, 10);
+    check(lineWith("EDVR plugin cost invalid v1: window_start_ms=100 window_end_ms=200 scope=0 owner=0 attribution=0 reason=sample-counter-regressed") != nullptr,
+          "sample counter regression produces the reader's fail-closed diagnostic");
+    check(lineWith("EDVR plugin cost invalid v1: window_start_ms=100 window_end_ms=200 scope=5 owner=0 attribution=0 reason=sample-ms-nonfinite") != nullptr,
+          "nonfinite timer totals produce the reader's fail-closed diagnostic");
+    check(lineWith("EDVR plugin cost invalid v1: window_start_ms=100 window_end_ms=200 scope=6 owner=9 attribution=0 reason=null-counter-regressed") != nullptr,
+          "null counter regression produces the reader's fail-closed diagnostic");
+    check(lineWith("EDVR plugin cost invalid v1: window_start_ms=100 window_end_ms=200 scope=8 owner=3 attribution=0 reason=null-ms-nonfinite") != nullptr,
+          "nonfinite null totals produce the reader's fail-closed diagnostic");
+    check(lineWith("EDVR plugin cost invalid v1: window_start_ms=100 window_end_ms=200 scope=7 owner=0 attribution=0 reason=sample-ms-regressed") != nullptr,
+          "regressed timer totals produce the reader's fail-closed diagnostic");
+}
+
+std::string rawPluginCostFunctionBody(const std::string& source, const char* signature) {
+    const size_t start = source.find(signature);
+    if (start == std::string::npos || source.find(signature, start + 1) != std::string::npos) return {};
+    const size_t open = source.find('{', start + std::strlen(signature));
+    if (open == std::string::npos) return {};
+    unsigned depth = 0;
+    for (size_t i = open; i < source.size(); ++i) {
+        if (source[i] == '/' && i + 1 < source.size() && source[i + 1] == '/') {
+            i = source.find('\n', i + 2);
+            if (i == std::string::npos) return {};
+            continue;
+        }
+        if (source[i] == '/' && i + 1 < source.size() && source[i + 1] == '*') {
+            const size_t end = source.find("*/", i + 2);
+            if (end == std::string::npos) return {};
+            i = end + 1;
+            continue;
+        }
+        if (source[i] == '"' || source[i] == '\'') {
+            const char quote = source[i];
+            bool closed = false;
+            while (++i < source.size()) {
+                if (source[i] == '\\' && i + 1 < source.size()) { ++i; continue; }
+                if (source[i] == quote) { closed = true; break; }
+            }
+            if (!closed) return {};
+            continue;
+        }
+        if (source[i] == '{') ++depth;
+        else if (source[i] == '}' && --depth == 0)
+            return source.substr(open, i - open + 1);
+    }
+    return {};
+}
+
+bool rawPluginCostSourceOrderValid(const std::string& source) {
+    constexpr const char* callText = "logPluginCostEvidence(now, frames);";
+    const size_t definition = source.find("void logPluginCostEvidence(");
+    const size_t close = source.find("void logAndResetWindow(");
+    if (definition == std::string::npos || close == std::string::npos ||
+        definition >= close || source.find(callText) == std::string::npos ||
+        source.find(callText, source.find(callText) + 1) != std::string::npos) return false;
+    const std::string body = rawPluginCostFunctionBody(source, "void logAndResetWindow(");
+    const size_t frames = body.find("const uint64_t frames = g_windowFrames;");
+    const size_t call = body.find(callText);
+    const size_t baseline = body.find("for (auto& st : g_section)");
+    return !body.empty() && frames != std::string::npos && call != std::string::npos &&
+           baseline != std::string::npos && frames < call && call < baseline &&
+           body.find(callText, call + 1) == std::string::npos;
+}
+
+void rawPluginCostSourceOrderCases() {
+    std::ifstream in("src/d3d11/gpu_census.cpp", std::ios::binary);
+    check(bool(in), "plugin-cost wiring: census source opens from the repository root");
+    const std::string source((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    constexpr const char* callText = "logPluginCostEvidence(now, frames);";
+    constexpr const char* closeText = "void logAndResetWindow(";
+    const size_t call = source.find(callText);
+    const size_t close = source.find(closeText);
+    const size_t baselineEnd = source.find("    resetSeedNotes();", close);
+    check(rawPluginCostSourceOrderValid(source),
+          "plugin-cost wiring: exactly one raw report runs inside census close after frame capture and before baselines advance");
+    check(call != std::string::npos && close != std::string::npos &&
+          baselineEnd != std::string::npos,
+          "plugin-cost wiring mutants have their production anchors");
+    if (call == std::string::npos || close == std::string::npos ||
+        baselineEnd == std::string::npos) return;
+
+    std::string missing = source;
+    missing.erase(call, std::strlen(callText));
+    check(!rawPluginCostSourceOrderValid(missing),
+          "plugin-cost wiring mutant: missing report fails");
+    std::string duplicate = source;
+    duplicate.insert(call + std::strlen(callText), callText);
+    check(!rawPluginCostSourceOrderValid(duplicate),
+          "plugin-cost wiring mutant: duplicate report fails");
+    std::string outside = missing;
+    outside.insert(outside.find(closeText), std::string(callText) + "\n");
+    check(!rawPluginCostSourceOrderValid(outside),
+          "plugin-cost wiring mutant: a report outside the close body fails");
+    std::string beforeFrames = missing;
+    const size_t bodyOpen = beforeFrames.find('{', beforeFrames.find(closeText));
+    beforeFrames.insert(bodyOpen + 1, std::string(callText) + "\n");
+    check(!rawPluginCostSourceOrderValid(beforeFrames),
+          "plugin-cost wiring mutant: a report before the frame capture fails");
+    std::string afterBaseline = missing;
+    afterBaseline.insert(afterBaseline.find("    resetSeedNotes();", afterBaseline.find(closeText)),
+                         std::string(callText) + "\n");
+    check(!rawPluginCostSourceOrderValid(afterBaseline),
+          "plugin-cost wiring mutant: a report after baseline advancement fails");
+}
+
 void gapCases() {
     const uint64_t start = GetTickCount64() - 30000;
 
@@ -1457,6 +1725,9 @@ void lineLengths() {
 }
 
 void run() {
+    ownershipMapCases();
+    rawPluginCostEvidenceCases();
+    rawPluginCostSourceOrderCases();
     estimatorMathCases();
     calibrationMathCases();
     logFormatCase();
