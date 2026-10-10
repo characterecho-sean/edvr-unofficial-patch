@@ -116,6 +116,9 @@ inline bool runtimeProfileAllowsKey(const char* key) {
         std::strcmp(key, "fix.ui_quality") == 0 ||
         // The flat jitter cycle's length (flat_runtime.cpp, FlatLivePhase::phaseCount; temporal_math.h). Developer tier, no flat panel
         // row. Unlisted, getInt answers 0 here whatever the file says, which the reader takes for out of range and reads as 8.
-        std::strcmp(key, "advanced.temporal_aa_jitter_phases") == 0);
+        std::strcmp(key, "advanced.temporal_aa_jitter_phases") == 0 ||
+        // The game's own vertex-buffer cache repair (vertex_resync_hook.cpp): installed at startup in BOTH profiles, because the stale cache is Frontier's, not VR's.
+        // TEMPORARY, for the scanner-body A/B flight. Unlisted, getString answers "off" here whatever the file says, and the A/B would be a comparison of one thing.
+        std::strcmp(key, "advanced.vertex_resync") == 0);
 }
 } // namespace edvr
