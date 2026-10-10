@@ -12,19 +12,16 @@
   generated manifests/config ownership, subscription-driven dispatch and a
   C-compatible interface. The add-on tier follows Phase 1. Graphics-only VR is
   a separate phase; existing supported settings remain owned by one plugin.
-- **Current integration:** main `7960f016` is merged at `9c5d3a4a`; the guarded
-  Present collector/domain/replay checkpoint is pushed at `55bd3ae8`. Runtime
-  flat restore causes now select sampled accounting after the existing owner
-  and exact-context gates; actual owed restores remain attributable after
-  engine stand-down. Direct NoApi and abandon behavior remain intact. A
-  separate WARP variant links the real collector and verifies physical restore
-  calls in the sampled 1800-frame window. Runtime caller routing remains
-  source-pinned; this does not establish full-frame held-event cost. Normal
-  WARP, collector, strict boundary and real-backend gates pass. Candidate
-  `6ab758d2` passes 156 jobs, config/export/installer gates and receipt
-  `44fba17c`. The reader-only exponent repair also passes full validation;
-  refreshed source receipt `eea6ad9a` is verified.
-  Git stays on `codex/plugin-architecture`.
+- **Current integration:** main `a1609f2b` is merged; its latest changes update
+  installer dry-run pruning. The guarded collector/domain/replay checkpoint
+  remains `55bd3ae8`. Runtime flat restores select sampled accounting after
+  owner and exact-context gates; owed work stays attributable after engine
+  stand-down. Direct NoApi and abandon behavior remain intact. Real-backend
+  WARP verifies physical restores and collector rows; runtime callers stay
+  source-pinned and full held-frame cost remains open. The main merge passes
+  156 jobs, config, export and installer gates; source receipt `453e2f92` is
+  verified. Steam retains measured candidate `6ab758d2`. Git stays on
+  `codex/plugin-architecture`.
 - **Matched flights:** control `e16dbb54` and candidate `6ab758d2` match Pimax
   OpenXR, 4032x3898 per eye, 90 Hz and graphics ownership. Control was on foot
   first; candidate was carrier first. Candidate on-foot AA off overlaps another
@@ -38,11 +35,10 @@
   audit establishes what further evidence is needed.
 - **Frozen flight evidence:** `7bbe7d90` control / `6c63f6aa` candidate,
   matched Pimax OpenXR environment, no visual change. NV-on sampled hook time
-  per timed draw is 15.0% lower; other CPU ranges overlap. Carrier DLSS/NV-off
-  estimated EDVR GPU cost rises 2.9%, above the control range; workload varies
-  and on-foot source pixels rise 4.175%. Normalization cannot establish
-  causality or non-regression. The cold raw sample/calibration reader stays in
-  the branch; measured-helper estimates do not establish accepted-work latency.
+  per timed draw is 15.0% lower; other CPU ranges overlap. Historical helper
+  estimates and differing workloads remain in the journal. The current
+  attribution-aware pair governs cost review; no causal benefit or GPU
+  non-regression is accepted from these historical runs.
 - **Open:** remaining frame/lifecycle accounting and held-boundary frame cost;
   full-ladder/action replay before wider migration; matched runtime CPU/GPU
   acceptance. No Phase 1 acceptance or shipping.
@@ -3779,3 +3775,22 @@ the receipt refresh does not change its payload. Remaining held-frame/lifecycle
 accounting, whole-ladder replay and matched performance acceptance remain open.
 The offline audit must identify a discriminating next measurement before
 requesting another flight. No feature-to-main merge or shipping acceptance.
+
+### 2026-10-10 — integrate main's installer dry-run planning
+
+After recording the frozen `e16dbb54` / `6ab758d2` pair, main advances from
+`7960f016` to `a1609f2b` (installer change `f1bde200`). The only incoming file
+is `tools/install_edvr.py`: a dry run plans pruning against the backup files
+and receipt that its install would write, while preserving the no-write dry-run
+contract. The merge is conflict-free. It changes no rendering source and does
+not require repeating the frozen pair for a rendering comparison.
+
+The guarded absolute full build `build/full-plugin-main-a1609f2b-20261010.log`
+passes 149 pooled and 7 quiet jobs, the 125-key config contract, exports and
+self-contained installer checks. Full-pass source receipt
+`453e2f92d44f4c78ab19314dd443185dd86a96bebf242c0f9452da0c2fe82020` is verified
+before committing the merge. Steam remains the measured `6ab758d2`; no
+promotion, install or settings edit is performed. Next offline slices are
+schema-16 FSS chrome-skip replay and the existing sampled CPU scope around
+frame-end retained-reference cleanup. Performance acceptance, complete
+held-frame accounting and whole-ladder replay remain open; no merge to main.
