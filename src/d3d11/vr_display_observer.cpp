@@ -90,6 +90,8 @@ LONG g_cw = 0, g_ch = 0;
 
 void vrDisplayCallerText(void* addr, char* out, size_t n) { callerText(addr, out, n); }
 
+void* vrDisplayGameWindow() { return g_hwnd.load(std::memory_order_acquire); }
+
 void vrDisplayObserveInstalled(bool setFullscreenState, bool resizeTarget, const char* why) {
     if (setFullscreenState && resizeTarget) {
         Log::get().note("vr ssaa gate: display observer installed (SetFullscreenState, ResizeTarget)");

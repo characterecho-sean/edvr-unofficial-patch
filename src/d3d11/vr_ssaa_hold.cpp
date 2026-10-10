@@ -65,6 +65,12 @@ std::atomic<uint8_t> g_watchWhy{0};      // 1 a setter call, 2 a mode change
 std::atomic<uint32_t> g_watchLines{0};
 constexpr uint32_t kWatchLines = 96;
 constexpr double kWatchSeconds = 3.0;
+// The settings watch (read-only, H8): the loader object's SS field and the render context's, once per Present.
+std::atomic<int64_t> g_lastSetterTicks{0};  // QPC ticks of the last setter call (0: none yet)
+uint32_t g_watchSettingsBits = 0, g_watchFieldBits = 0;
+bool g_watchSeen = false;
+std::atomic<uint32_t> g_watchWatchLines{0};
+constexpr uint32_t kWatchWatchCap = 128;
 // The loader's repeated runs (the presets, then Custom): a run logs only when its request or mode changes, and counts the rest.
 std::atomic<uint32_t> g_loaderRuns{0};
 std::atomic<uint32_t> g_loaderLastReq{0};
@@ -347,6 +353,7 @@ int vrSsaaHoldLastMode(bool* known) {
 }
 
 float vrSsaaHoldSetterValue(float requested) {
+    g_lastSetterTicks.store(holdTicksNow(), std::memory_order_release);  // the settings watch's "after the last setter call"
     if (g_slotState.load(std::memory_order_acquire) != 1 || !g_holdAllowed.load(std::memory_order_acquire)) return requested;
     const ssaahold::Decision d = ssaahold::decide(true, g_modeKnown.load(std::memory_order_acquire),
                                                   g_mode.load(std::memory_order_acquire), requested);
@@ -411,6 +418,39 @@ void vrSsaaHoldFrameBoundary() {
 
 void vrSsaaHoldNoteContext(uintptr_t ctx) {
     if (ctx) g_ctx.store(ctx, std::memory_order_release);
+}
+
+// The settings watch (H8): read-only, once per Present, on the render thread. Logs a change of the loader object's SS field
+// (+0x13C) or of the render context's (+0x3564), with the time since the last setter call. Writes nothing.
+void vrSsaaHoldWatchSettings(uint32_t frame) {
+    if (g_slotState.load(std::memory_order_acquire) != 1) return;
+    const uintptr_t obj = g_loaderObj.load(std::memory_order_acquire);
+    const uintptr_t ctx = g_ctx.load(std::memory_order_acquire);
+    if (!obj && !ctx) return;
+    float settings = 0.0f, field = 0.0f;
+    const bool haveS = obj && readFloatGuarded(obj + kSsFieldOff, &settings);
+    const bool haveF = ctx && readFloatGuarded(ctx + kCtxSsOff, &field);
+    const uint32_t sb = haveS ? bitsOf(settings) : 0xFFFFFFFFu;
+    const uint32_t fb = haveF ? bitsOf(field) : 0xFFFFFFFFu;
+    if (g_watchSeen && sb == g_watchSettingsBits && fb == g_watchFieldBits) return;
+    const bool first = !g_watchSeen;
+    const uint32_t prevSb = g_watchSettingsBits;
+    g_watchSeen = true;
+    const uint32_t lines = g_watchWatchLines.fetch_add(1, std::memory_order_relaxed);
+    g_watchSettingsBits = sb;
+    g_watchFieldBits = fb;
+    if (lines >= kWatchWatchCap) return;
+    char oldS[24] = "unknown", newS[24] = "unknown", newF[24] = "unknown", since[32] = "no setter call yet";
+    if (haveS) std::snprintf(newS, sizeof(newS), "%.4f", static_cast<double>(settings));
+    if (haveF) std::snprintf(newF, sizeof(newF), "%.4f", static_cast<double>(field));
+    if (!first && prevSb != 0xFFFFFFFFu) std::snprintf(oldS, sizeof(oldS), "%.4f", static_cast<double>(floatOf(prevSb)));
+    const int64_t last = g_lastSetterTicks.load(std::memory_order_acquire);
+    if (last)
+        std::snprintf(since, sizeof(since), "%.1f ms", 1000.0 * static_cast<double>(holdTicksNow() - last) /
+                                                          static_cast<double>(holdTicksPerSecond()));
+    Log::get().note("vr ssaa gate: watch: settings field %s -> %s (loader object+0x13C), ctx+0x3564 %s, frame %u, %s after the last "
+                    "setter call",
+                    first ? "first read" : oldS, newS, newF, frame, since);
 }
 
 void vrSizingWatchTexture(uint32_t w, uint32_t h, uint32_t format, uint32_t bind) {

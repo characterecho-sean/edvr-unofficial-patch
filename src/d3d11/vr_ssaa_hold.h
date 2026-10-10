@@ -65,4 +65,8 @@ void vrSsaaHoldNoteContext(uintptr_t ctx);
 // game render or depth-stencil target is logged with its size, format, bind flags and the callers. One flag test when not armed.
 void vrSizingWatchTexture(uint32_t w, uint32_t h, uint32_t format, uint32_t bind);
 
+// The settings watch (H8): once per Present, read-only. Logs a change of the loader object's SS field (+0x13C) or the render
+// context's (+0x3564) with the time since the last setter call. Writes nothing. Does nothing until the hooks are in.
+void vrSsaaHoldWatchSettings(uint32_t frame);
+
 }  // namespace edvr

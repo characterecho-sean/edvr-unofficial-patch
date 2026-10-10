@@ -16,6 +16,7 @@
   - H7 OPEN: which game code sized the 2227 targets. Test: the sizing watch's `vr sizing:` lines (callers as game RVAs) after a menu change.
   - H8 OPEN: does the startup hold reach ctx+0x3564? Test: the first setter call's `before` value in a flight that changes nothing in the menu before it. 0.85 means no; 1.0 means yes. The copy from loader table to render context is not located.
   - H9 mode 4: what it is (the menu's 3D mode name for it).
+- **H6 DECISION (maintainer):** when 3D turns on, Elite keeps the user's display mode (for example borderless 3840x2160 from DisplaySettings.xml) and does not switch to windowed 1280x768, accepting the unmeasured GPU cost of the 4K desktop swapchain in VR. No behaviour change in this build. The fix is designed after the window-apply observer flight shows which path produces kind 0: the kind 1 -> 0 foreground override in 0x7E9D50, or another request writer.
 - **Ruled out:** a static-address read of the 3D mode (step 1: virtual calls on heap objects). H4 (same-object relation), above.
 - **Next flight (VR, Frontier, the step-4 commit):** (a) menu Supersampling change: read `vr sizing:` lines and their callers (H7). (b) 3D Off to HMD: read `vr window:` lines (who restyles, H6) and `vr sizing:` lines. (c) start with the .fxcfg at 0.85, then the first setter call's `before` (H8). Then `python tools\edvr_log.py --target frontier --expect-build HEAD --vr-supersampling`.
 - **Doc rule:** dated entries below; keep this block current.
@@ -58,6 +59,34 @@ Frontier exe, build 332841 (PE stamp 1788384820, image 104894464). Byte scans an
 - `vr window: SetWindowPos(...)`, `SetWindowLongPtrW(...)`, `ShowWindow(...)`, `MoveWindow(...)`, `AdjustWindowRect(Ex)(...)`, each with arguments, result, a chain of up to 4 callers, the frame (cap 64 each)
 - `vr display: SetFullscreenState(...)`, `ResizeTarget ...`, `ResizeBuffers ...` (VR and flat), `game window ...` (step 3; unchanged)
 - `vr ssaa gate: display observer installed (SetFullscreenState, ResizeTarget)`
+
+## Sizing chain (read-only disassembly, 2026-10-10; PROVEN from the bytes)
+
+- E = 0x6C7C40 copies its request descriptor from [r10+0x00..0x7C] (r10 = [rcx+0x10]) and calls G4 = 0x6C7A90 at 0x6C7D2D (return 0x6C7D32). E has about 25 callers, at 0x28AA8xx..0x28AAD36, 0x2875B79..0x2875BB1, 0x5A7140 and 0x36BBDAB.
+- G4 = 0x6C7A90 calls G3 = 0x518421 (return 0x6C7B50).
+- G3 = 0x518421 zeroes [rbx+0x158] (qword, 0x51858E) and calls G2 = 0x50EA10 at 0x5185AE (return 0x5185B3).
+- G2 = 0x50EA10 copies the dwords [rbx+0x158], [+0x15C], [+0x160], [+0x164] of its argument object O (0x50EA96..0x50EABC) and calls G1 at 0x50EC69.
+- G1 = 0x51AC80..0x51B1D8 creates the render targets. Its CreateTexture2D calls are through [rax+0x28] at 0x51AF68, 0x51AFE7 and 0x51B0E6. The descriptor dimensions come from r9 = O: [r9+0x158] (0x51AEF1), [+0x15C] (0x51AF05), [+0x160] (0x51AEFB), [+0x164] (0x51AF0F), and [+0xD8] (0x51AF19), [+0xDC] (0x51AF23).
+- No instruction in E, G4, G3, G2 or G1 reads render context +0x3564. The disp32 reads of 0x3564 are at 0x284CC69, 0x2887517 and 0x288E4B8, in other functions.
+- The setter (0x28767D0, store at 0x28767EF) is the only disp32 store to +0x3564 in the image. It has no direct callers: only the vtable slot 0x52E90B0 refers to it. So the second writer of 0.85 is a pointer-based or memcpy write, not found.
+- Not located: the writer of O's dwords +0x158..0x164 (the 2227 and 3264 inputs), and where 0.85 enters trunc(2620 x 0.85).
+
+## Settings watch (H8 test, read-only)
+
+- `vr ssaa gate: watch: settings field <old|first read> -> <new> (loader object+0x13C), ctx+0x3564 <v|unknown>, frame N, <ms|no setter call yet> after the last setter call`. Logged on any change of either field, once per Present, capped at 128.
+- Reading the result: the settings field becoming 0.85 right after a menu apply supports the hypothesis that the apply writes the settings object, which the game then copies into ctx+0x3564 and O. If the settings field stays at its held 1.0 across the apply while ctx+0x3564 becomes 0.85, the second writer is outside the settings object.
+- If the settings field does NOT change at the apply: the next instrument is the observe-only trampoline at G2's entry (0x50EA10), logging O's address and the four dwords on each call, to read the 2227 and 3264 values and O's identity at runtime.
+- If the settings field does become 0.85: the fix candidate is to keep loader object+0x13C at 1.0 while held (re-write on change at the frame boundary and inside the setter hook). Not implemented.
+
+## Window-mode path (H6, read-only disassembly, build 332841; the trampolines are observe only)
+
+- 0x5589B0 is the window-apply wrapper (rcx = window object, rdx = state). It calls SetWindowLongPtrA(GWL_STYLE) at 0x558A13, AdjustWindowRectEx at 0x558A88 and SetWindowPos at 0x558AF9 (flags 0x44). State: [state+0x20] = kind (0 windowed, using the client size in [state+0x18]/[state+0x1C]; 1 or 2 use the monitor rect from table global 0x5F1B3F8, entry [state+0x28], with a popup style).
+- 0x7E9D50 builds the state and calls the wrapper at 0x7EA046 (rcx = [rbx+0x5F8]). Its request is rdx (mode index [rdx], kind [rdx+0x20], mode table [rbx+0x498]). It contains an override: if kind == 1 and the window is not foreground or focused (test function 0x54B7D0: GetForegroundWindow or GetFocus == [obj+0x50], gated by the flag [obj+0x501]), the kind becomes 0 (windowed).
+- The chain: 0x5D6960, then a vtable call at 0x5D6A7E into 0x7FD990 (runs when [rbx+0x500] is pending), which calls 0x7E9D50 with rdx = &[rbx+0x4D0].
+- MAINTAINER DECISION (H6): when 3D turns on, keep the user's display mode (borderless 3840x2160 from DisplaySettings.xml), not windowed 1280x768, accepting the unmeasured 4K desktop swapchain cost in VR. No behaviour change in this build. The fix follows the window-apply observer flight, which shows which path produces kind 0.
+- H6 hypothesis, OPEN: the 1280x768 windowed switch comes from the kind-1-to-0 override when the game window is not foreground at the request. Test: the `vr window: mode request` and `vr window: apply` lines (kind, foreground, StereoscopicMode) at the 0 -> 4 switch.
+- The trampolines (vr_window_trampolines.cpp, CodeHook from src/common/code_hook.h) install after the build gate. Each target's first 11 bytes are pinned to build 332841, and CodeHook refuses a prologue it cannot relocate.
+- Lines (capped at 64 each): `vr window: mode request (0x7E9D50): window <p>, mode index <n|unreadable>, kind <k|unreadable>; StereoscopicMode <m|unknown>; game window foreground <yes|no|no game window yet>; frame N`; `vr window: apply (0x5589B0): window <p>, kind <k>, client <w> x <h>, monitor entry <0x...>; StereoscopicMode <m>; game window foreground <...>; frame N`; and the startup line `vr window: trampolines: 0x7E9D50 (mode request) installed|not installed; 0x5589B0 (window apply) installed|not installed; observe only`, with a refusal line before it when CodeHook refuses. The mode table's entry layout is not verified, so the mode's w/h are not logged.
 
 ## Verified in the build
 

@@ -551,7 +551,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\panel_curve.cpp" "src\d3d11\screen_motion.cpp" "src\d3d11\weapon_motion.cpp" ^
     "src\d3d11\remlok_fix.cpp" "src\d3d11\holo_fix.cpp" ^
     "src\d3d11\target_sharp.cpp" "src\d3d11\night_vision.cpp" ^
-    "src\d3d11\wake_pulse.cpp" "src\d3d11\vr_ssaa_gate.cpp" "src\d3d11\vr_ssaa_hold.cpp" "src\d3d11\vr_display_observer.cpp" ^
+    "src\d3d11\wake_pulse.cpp" "src\d3d11\vr_ssaa_gate.cpp" "src\d3d11\vr_ssaa_hold.cpp" "src\d3d11\vr_display_observer.cpp" "src\d3d11\vr_window_trampolines.cpp" ^
     "src\d3d11\ui_depth.cpp" ^
     "src\d3d11\ui_layer.cpp" "src\d3d11\ui_surfaces.cpp" "src\d3d11\ui_panel_scale.cpp" "src\d3d11\orbital_width.cpp" "src\d3d11\supercruise_bars.cpp" ^
     "third_party\dxbc_hash\DxilHash.cpp" ^

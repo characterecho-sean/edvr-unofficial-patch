@@ -27,6 +27,9 @@ void vrDisplayNoteResizeTarget(uint32_t width, uint32_t height, uint32_t refresh
 void vrDisplayNoteResizeBuffers(const char* api, uint32_t width, uint32_t height, uint32_t format, uint32_t flags, void* ret,
                                 long hr, bool ours);
 
+// The game window (the swap chain's output window), or null before the swap chain is hooked.
+void* vrDisplayGameWindow();
+
 // An address as text: "game RVA 0x..." inside the game's image, else "<module>+0x...". Shared with the sizing watch.
 void vrDisplayCallerText(void* addr, char* out, size_t n);
 
