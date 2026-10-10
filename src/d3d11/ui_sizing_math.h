@@ -506,6 +506,86 @@ private:
     uint32_t atW_ = 0, atH_ = 0, waited_ = 0;
 };
 
+// THE TWO CRITICAL SECTIONS (the follow-up review of dbbbcf03, finding 2). The boundary (render thread) reads the setter's epoch and the factor in the floats, decides, and
+// writes; the setter thunk (a game thread) writes its factor and then publishes a new epoch. Taken one load and one store at a time, a setter that landed between the
+// boundary's epoch read and its write was overwritten (epoch 0 read, setter 0.400 and epoch 1, factor read as 0.400, the settled old plan 0.800 written back, then a hold on
+// the overwritten value), and so was a boundary that read the factor between the setter's write and its epoch. Each is therefore ONE operation under one lock, the same lock
+// that serialises the floats' writes: the boundary from its epoch read to the end of its write, the setter from its read of the published plan to its epoch. They are
+// templates over an Env so that the production glue (ui_panel_scale.cpp's PanelEnv) and the rig's model run THESE statements; the rig injects a setter or a boundary at each
+// UiFlatSeam (a no-op in production) and a thread that arrives while the lock is held waits for it, as the real one does.
+//
+// What runs under the lock, and only this: the settle's arithmetic (UiFlatPanelSettle::step), uiFlatPanelMove / uiPanelSolve, loads and stores of atomics, the one atomic load of
+// the scene's size, and the floats' write (two VirtualProtect calls and two float stores, which were under this lock before). Not under it: reading the game's context for
+// the live Supersampling (done before the lock and handed in), the log, the counters, any call into the game's code, any wait on another lock.
+enum class UiFlatSeam : uint8_t {
+    kBeforeLock = 0,   // the boundary, before it takes the lock
+    kEpochRead,        // the boundary, holding the lock, after it read the epoch and the size
+    kDecided,          // ...after the settle decided
+    kPublished,        // ...after it published the plan, before it writes
+    kWritten,          // ...after it wrote
+    kSetterWritten     // the setter, holding the lock, after it wrote its factor and before it published the epoch
+};
+
+template <class Env>
+struct UiLockGuard {
+    explicit UiLockGuard(Env& e) : env(e) { env.lock(); }
+    ~UiLockGuard() { env.unlock(); }
+    UiLockGuard(const UiLockGuard&) = delete;
+    UiLockGuard& operator=(const UiLockGuard&) = delete;
+    Env& env;
+};
+
+// The plan the render thread last published for the setter thunk (the believable live Supersampling it was made beside, and the scene size).
+struct UiPublishedPlan {
+    bool ready = false, flat = false;
+    double formula = 0.0, base = 0.0;
+    float ss = 0.0f;
+    uint64_t dims = 0;
+};
+
+// The boundary, after it has a plan for the scene it sees (nowW x nowH): the epoch, the decision, the publish and the write, as one operation. `*wrote` is true when the
+// floats were written. Env: lock(), unlock(), seam(UiFlatSeam), setterEpoch(), setterAt(), isLive(), factorNow(), publish(plan, w, h), writeFactors(f, lineF, ss) -> bool.
+template <class Env>
+UiFlatPanelSettle::Step uiFlatPanelBoundarySection(UiFlatPanelSettle& settle, Env& env, const UiPanelPlan& plan, uint32_t nowW, uint32_t nowH, bool* wrote) {
+    *wrote = false;
+    env.seam(UiFlatSeam::kBeforeLock);
+    UiLockGuard<Env> guard(env);
+    const uint32_t epoch = env.setterEpoch();
+    const uint64_t at = env.setterAt();
+    env.seam(UiFlatSeam::kEpochRead);
+    const UiFlatPanelSettle::Step s = settle.step(plan.f, env.isLive(), env.factorNow(), epoch, static_cast<uint32_t>(at >> 32),
+                                                  static_cast<uint32_t>(at & 0xFFFFFFFFu), nowW, nowH);
+    env.seam(UiFlatSeam::kDecided);
+    if (s.act == UiFlatPanelSettle::Act::kHold || s.act == UiFlatPanelSettle::Act::kWait) return s;
+    if (s.publish) env.publish(plan, nowW, nowH);
+    env.seam(UiFlatSeam::kPublished);
+    if (s.act == UiFlatPanelSettle::Act::kWrite) *wrote = env.writeFactors(plan.f, plan.lineF, 1.0);
+    env.seam(UiFlatSeam::kWritten);
+    return s;
+}
+
+// The setter thunk's move to the Supersampling `newSs`: the factor from the published plan, written if it is not there, and (flat) the count that tells the boundary there is
+// a factor to hold, as one operation. True when it moved the factor. Env: lock(), unlock(), seam(UiFlatSeam), published() -> UiPublishedPlan, factorNow(), lineFactorNow(),
+// writeFactors(f, lineF, ss) -> bool, noteMove(flat, publishedDims).
+template <class Env>
+bool uiPanelSetterSection(Env& env, float newSs) {
+    UiLockGuard<Env> guard(env);
+    const UiPublishedPlan pub = env.published();
+    if (!pub.ready || !(pub.formula > 0.0) || !(pub.base > 0.0)) return false;
+    UiPanelPlan p;
+    if (pub.flat) {
+        // Flat: R carries the Supersampling, so the plan scales by its move.
+        if (!uiFlatPanelMove(pub.formula, pub.base, pub.ss, newSs, &p)) return false;
+    } else {
+        uiPanelSolve(pub.formula, pub.base, UiPanelBase::kObserved, newSs, &p);
+    }
+    if (std::fabs(p.f - env.factorNow()) <= 1e-9 && std::fabs(p.lineF - env.lineFactorNow()) <= 1e-9) return false;
+    if (!env.writeFactors(p.f, p.lineF, p.ss)) return false;
+    env.seam(UiFlatSeam::kSetterWritten);
+    env.noteMove(pub.flat, pub.dims);
+    return true;
+}
+
 // The panel the game makes from a stage on the height axis: trunc(stage x (R_h / 1080 x f)), its own arithmetic.
 inline uint32_t uiFlatPanelSizeHeightAxis(uint32_t stage, uint32_t renderH, float divisor1080) {
     if (!(divisor1080 > 0.0f)) return 0;

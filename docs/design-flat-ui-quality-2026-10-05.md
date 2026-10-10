@@ -37,7 +37,8 @@
 - **Ruled-out pointer:** the 2026-10-09 entries below; VR's retired deferred
   UI replay ([crisp-ui-handoff.md](crisp-ui-handoff.md)).
 - **0.19.0 review (10-09), finding 3:** the Supersampling setter's panel factor is
-  held until the scene's size follows it (last entry; built, not flown).
+  held until the scene's size follows it, its epoch check and write one operation
+  under the floats' lock (last entry; built, not flown).
 - **Temporary config keys:** none.
 - **Next:** fly SS 0.5 on the shipped build (the copy route under eced5813's
   admission change) and 100% at SS 1.0.
@@ -453,3 +454,4 @@ for the right factor. The review's scratch check shows the reversed factor; it d
   controls. Fifteen one-edit mutants of the class and the glue, run by hand against the rig, are each caught (hold ignored, epoch ignored, arrival through the settle,
   arrival unsettled, no timeout, timeout off by one, no restart, hold publishes, forget keeps the hold, keep tolerance zero, refused frame does not unsettle, arrival
   ignores the size, and three glue edits).
+- 2026-10-09, follow-up review of dbbbcf03, finding 2 (built, not flown): a setter that landed between the boundary's epoch read and its write was overwritten (epoch 0 read, setter 0.400 and epoch 1, 0.800 written back, then a hold on it). The boundary's epoch read, decision, publish and write (`uiFlatPanelBoundarySection`) and the setter's published-plan read, factor write and epoch (`uiPanelSetterSection`) are now each ONE operation under `g_floatLock`, the floats' lock; under it only atomics, `UiFlatPanelSettle::step`, the move arithmetic, the floats' write (`writeFloatsUnlocked`) and one load of the scene's size; the live Supersampling is read before it and the log written after. Tests: `testRace` injects a setter at each point of the boundary's section (including a boundary that writes 0.533), before its lock, and a boundary into the setter's; mutants that drop either lock, read the epoch outside it, or lock only the write fail them.

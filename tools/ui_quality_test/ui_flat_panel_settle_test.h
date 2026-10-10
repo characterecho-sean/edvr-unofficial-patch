@@ -19,7 +19,9 @@
 //   * a frame with no plan (a loading screen) neither writes nor ends the hold; the key off or the anti-aliasing off forgets it;
 //   * the wiring (ui_panel_scale.cpp, by source scan, with controls): the boundary asks the class, returns on a hold and on a wait before it publishes or writes, the thunk
 //     records the epoch and the scene's size, the plan publishes the size it was made at, and the key off, the anti-aliasing off and a refused frame tell the class.
-// Every mutation of the class is seen to fail one of these cases (the 2026-10-09 entry of the design doc lists them).
+//   * the two sections as ONE operation under the floats' lock (the follow-up review of dbbbcf03, finding 2): the setter landing at each point of the boundary's section, a
+//     boundary that has decided to write included, and the boundary landing in the setter's, never overwrite the setter's factor (testRace);
+// Every mutation of the class and of the sections is seen to fail one of these cases (the design doc's entries list them).
 
 namespace flatsettle {
 
@@ -32,7 +34,9 @@ using Act = UiFlatPanelSettle::Act;
 constexpr uint64_t pack(uint32_t w, uint32_t h) { return (static_cast<uint64_t>(w) << 32) | h; }
 bool isNear(double a, double b, double tol = 1e-9) { return std::fabs(a - b) <= tol; }
 
-// The thunk and the boundary around the class, as ui_panel_scale.cpp has them (moveFactorTo's flat branch, flatFrameBoundary after the refusal).
+// The thunk and the boundary around the class, as ui_panel_scale.cpp has them: THESE are the production statements (ui_sizing_math.h's uiFlatPanelBoundarySection and
+// uiPanelSetterSection), run over this Env. The Env's lock is a depth count: a thread that arrives while it is held (an injected setter or boundary, see injectAt) waits for it
+// and runs when the holder lets go, as the real one does.
 struct World {
     UiFlatPanelSettle settle;
     uint32_t renderW = 3840, renderH = 2160;   // the scene's size as the flat runtime's last copy measured it
@@ -40,31 +44,82 @@ struct World {
     float target = 1.25f;                      // fix.ui_quality 125
     float ss = 1.0f;                           // the game's live Supersampling
     bool live = false;                         // a factor has been written
-    double floatsF = 1.0;                      // the factor in the floats
+    double floatsF = 1.0, floatsLine = 1.0;    // the factor in the floats, and the orbit lines' beside it
     std::vector<double> written;               // every factor put in the floats, the thunk's and the boundary's, in order
     bool pubReady = false;                     // the render thread's published plan (the thunk's input)
     double pubFormula = 0.0, pubBase = 0.0;
     float pubSs = 0.0f;
+    uint64_t pubDims = 0;
     uint32_t epoch = 0;                        // the thunk's record
     uint64_t at = 0;
     unsigned publishes = 0, refused = 0, held = 0, arrivals = 0, timeouts = 0;
     double worstLargest = 0.0;                 // the widest panel any plan or move could ask for
     UiFlatPanelSettle::Step last;
 
+    // ---- the Env of the two sections ----
+    int depth = 0;                                          // the floats' lock: held while above 0
+    std::vector<std::function<void()>> deferred;            // threads that arrived while it was held
+    struct Injection { bool armed = false; edvr::UiFlatSeam where = edvr::UiFlatSeam::kBeforeLock; std::function<void()> action; } inj;
+    void lock() { ++depth; }
+    void unlock() {
+        if (--depth != 0) return;
+        while (!deferred.empty()) {   // the waiting thread takes the lock now (and may be injected into in its turn)
+            std::function<void()> next = deferred.front();
+            deferred.erase(deferred.begin());
+            next();
+        }
+    }
+    // An injection point: the armed action fires once, at this seam. Holding the lock, it waits for it; not holding it (the lock was left out), it runs on the spot.
+    void seam(edvr::UiFlatSeam where) {
+        if (!inj.armed || inj.where != where) return;
+        inj.armed = false;
+        if (depth > 0) deferred.push_back(inj.action);
+        else inj.action();
+    }
+    void injectAt(edvr::UiFlatSeam where, std::function<void()> action) { inj.armed = true; inj.where = where; inj.action = std::move(action); }
+    uint32_t setterEpoch() const { return epoch; }
+    uint64_t setterAt() const { return at; }
+    bool isLive() const { return live; }
+    double factorNow() const { return floatsF; }
+    double lineFactorNow() const { return floatsLine; }
+    void publish(const UiPanelPlan& plan, uint32_t w, uint32_t h) {   // published: the plan, and the Supersampling it was made beside
+        pubReady = true;
+        pubFormula = plan.formula;
+        pubBase = plan.base;
+        pubSs = ss;
+        pubDims = pack(w, h);
+        ++publishes;
+    }
+    bool writeFactors(double f, double lineF, double) {
+        floatsF = f;
+        floatsLine = lineF;
+        written.push_back(f);
+        return true;
+    }
+    edvr::UiPublishedPlan published() const {
+        edvr::UiPublishedPlan r;
+        r.ready = pubReady;
+        r.flat = true;
+        r.formula = pubFormula;
+        r.base = pubBase;
+        r.ss = pubSs;
+        r.dims = pubDims;
+        return r;
+    }
+    void noteMove(bool flat, uint64_t publishedDims) {
+        if (!flat) return;
+        at = renderW && renderH ? pack(renderW, renderH) : publishedDims;
+        ++epoch;
+    }
+
     void copy(uint32_t w, uint32_t h) { renderW = w; renderH = h; }
 
-    // The game's setter: the thunk makes the factor for the new value from the plan last published and writes it if it is not there already.
+    // The game's setter: the thunk makes the factor for the new value from the plan last published and writes it if it is not there already; the game stores the value after.
     void setter(float newSs) {
-        ss = newSs;
-        if (!pubReady) return;
         UiPanelPlan p;
-        if (!edvr::uiFlatPanelMove(pubFormula, pubBase, pubSs, newSs, &p)) return;
-        worstLargest = std::max(worstLargest, p.largest);
-        if (std::fabs(p.f - floatsF) <= 1e-9) return;
-        floatsF = p.f;
-        written.push_back(p.f);
-        at = pack(renderW, renderH);
-        ++epoch;
+        if (pubReady && edvr::uiFlatPanelMove(pubFormula, pubBase, pubSs, newSs, &p)) worstLargest = std::max(worstLargest, p.largest);
+        edvr::uiPanelSetterSection(*this, newSs);
+        ss = newSs;
     }
 
     UiFlatPanelSettle::Step boundary() {
@@ -78,21 +133,13 @@ struct World {
             return last;
         }
         worstLargest = std::max(worstLargest, plan.largest);
-        const UiFlatPanelSettle::Step s = settle.step(plan.f, live, floatsF, epoch, static_cast<uint32_t>(at >> 32), static_cast<uint32_t>(at & 0xFFFFFFFFu), renderW, renderH);
+        bool wrote = false;
+        const UiFlatPanelSettle::Step s = edvr::uiFlatPanelBoundarySection(settle, *this, plan, renderW, renderH, &wrote);
         last = s;
         arrivals += s.arrived ? 1u : 0u;
         timeouts += s.timedOut ? 1u : 0u;
-        if (s.act == Act::kHold) { ++held; return s; }
-        if (s.act == Act::kWait) return s;
-        pubReady = true;                       // published: the plan, and the Supersampling it was made beside
-        pubFormula = plan.formula;
-        pubBase = plan.base;
-        pubSs = ss;
-        ++publishes;
-        if (s.act == Act::kKeep) return s;
-        floatsF = plan.f;
-        live = true;
-        written.push_back(plan.f);
+        if (s.act == Act::kHold) ++held;
+        if (wrote) live = true;
         return s;
     }
     unsigned run(unsigned n) { for (unsigned i = 0; i < n; ++i) boundary(); return n; }
@@ -115,6 +162,7 @@ bool onlyThese(const std::vector<double>& written, std::initializer_list<double>
 }
 
 void testWiring();
+void testRace();
 
 void testAll() {
     // ---- the settle as it was --------------------------------------------------------------------------------------------------
@@ -308,7 +356,91 @@ void testAll() {
         check(!w.settle.holding(), "...and forgotten when the key is turned off (the floats are the game's own then; nothing carries to the next time it is on)");
     }
 
+    testRace();
     testWiring();
+}
+
+// ---- the deterministic interleavings (the follow-up review of dbbbcf03, finding 2) ---------------------------------------------------------
+// The review's order: the boundary reads the epoch (0), the setter writes 0.400 and publishes epoch 1, the boundary reads the factor (0.400) and decides on a settled plan of
+// 0.800, writes it, and the next boundary holds the overwritten value. The sections are one operation under the floats' lock now, so the thread that arrives in the middle of
+// the other waits for it (World::seam defers it to the holder's unlock, or runs it on the spot where the lock was left out). The setter lands at each point inside the
+// boundary's section, the boundary at the point inside the setter's, and before the boundary takes the lock.
+
+const char* seamName(edvr::UiFlatSeam s) {
+    switch (s) {
+        case edvr::UiFlatSeam::kBeforeLock: return "before the boundary takes the lock";
+        case edvr::UiFlatSeam::kEpochRead: return "between the boundary's epoch read and its decision";
+        case edvr::UiFlatSeam::kDecided: return "between the boundary's decision and its publish";
+        case edvr::UiFlatSeam::kPublished: return "between the boundary's publish and its write";
+        case edvr::UiFlatSeam::kWritten: return "after the boundary's write";
+        case edvr::UiFlatSeam::kSetterWritten: return "in the setter, between its write and its epoch";
+    }
+    return "?";
+}
+
+void testRace() {
+    using edvr::UiFlatSeam;
+    const UiFlatSeam inside[] = {UiFlatSeam::kEpochRead, UiFlatSeam::kDecided, UiFlatSeam::kPublished, UiFlatSeam::kWritten};
+    char msg[420];
+    // A. The review's case: the plan is settled at 0.800 and the boundary keeps it; the setter (0.5) lands in the boundary's section.
+    for (const UiFlatSeam where : inside) {
+        World w = steady();
+        w.injectAt(where, [&w] { w.setter(0.5f); });
+        const UiFlatPanelSettle::Step s = w.boundary();
+        const bool landed = !w.inj.armed && w.depth == 0 && w.deferred.empty();
+        std::snprintf(msg, sizeof(msg), "flat panel race: a setter that lands %s waits for the section and then writes 0.400; the settled 0.800 is never written over it", seamName(where));
+        check(landed && s.act == Act::kKeep && isNear(w.floatsF, 0.4) && w.epoch == 1 && onlyThese(w.written, {0.8, 0.4}), msg);
+        const UiFlatPanelSettle::Step next = w.boundary();
+        std::snprintf(msg, sizeof(msg), "...and the next boundary sees the epoch and holds 0.400, as designed (%s)", seamName(where));
+        check(next.act == Act::kHold && w.settle.holding() && isNear(w.floatsF, 0.4) && onlyThese(w.written, {0.8, 0.4}), msg);
+        w.run(3);
+        w.copy(1920, 1080);
+        const UiFlatPanelSettle::Step arrived = w.boundary();
+        std::snprintf(msg, sizeof(msg), "...and the new size arriving is accepted at once with nothing written (%s)", seamName(where));
+        check(arrived.arrived && arrived.act == Act::kKeep && w.held == 4 && onlyThese(w.written, {0.8, 0.4}), msg);
+    }
+    // B. The setter lands after the boundary has decided to write (a window resize settled at 0.533): the write goes first, then the setter moves the factor from the plan
+    //    the boundary has just published. Nothing writes over the setter.
+    for (const UiFlatSeam where : inside) {
+        World w = steady();
+        w.copy(2560, 1440);
+        w.run(10);   // the new size has held ten boundaries: the next one writes its factor
+        const double resized = (1440.0 / 2160.0) / 1.25, moved = resized * 0.5;
+        w.injectAt(where, [&w] { w.setter(0.5f); });
+        const UiFlatPanelSettle::Step s = w.boundary();
+        std::snprintf(msg, sizeof(msg), "flat panel race: a setter that lands %s a boundary that writes 0.533 waits for it; the factor ends at the setter's 0.267, never 0.533 over it", seamName(where));
+        check(s.act == Act::kWrite && isNear(w.floatsF, moved, 1e-6) && w.epoch == 1 && onlyThese(w.written, {0.8, resized, moved}) && w.depth == 0 && w.deferred.empty(), msg);
+        const UiFlatPanelSettle::Step next = w.boundary();
+        std::snprintf(msg, sizeof(msg), "...and the next boundary holds it (%s)", seamName(where));
+        check(next.act == Act::kHold && isNear(w.floatsF, moved, 1e-6) && onlyThese(w.written, {0.8, resized, moved}), msg);
+        w.copy(1280, 720);
+        const UiFlatPanelSettle::Step arrived = w.boundary();
+        std::snprintf(msg, sizeof(msg), "...and the size it was moved for arrives: 0.267, kept (%s)", seamName(where));
+        check(arrived.arrived && arrived.act == Act::kKeep && onlyThese(w.written, {0.8, resized, moved}), msg);
+    }
+    // C. The setter ran before the boundary took the lock: the boundary sees the epoch and holds, whether its plan is the settled 0.800 or a resize's 0.533 about to be written.
+    {
+        World w = steady();
+        w.injectAt(UiFlatSeam::kBeforeLock, [&w] { w.setter(0.5f); });
+        const UiFlatPanelSettle::Step s = w.boundary();
+        check(s.act == Act::kHold && isNear(w.floatsF, 0.4) && onlyThese(w.written, {0.8, 0.4}), "flat panel race: a setter that completed before the boundary took the lock is seen: the boundary holds 0.400");
+    }
+    {
+        World w = steady();
+        w.copy(2560, 1440);
+        w.run(10);
+        w.injectAt(UiFlatSeam::kBeforeLock, [&w] { w.setter(0.5f); });
+        const UiFlatPanelSettle::Step s = w.boundary();
+        check(s.act == Act::kHold && isNear(w.floatsF, 0.4) && onlyThese(w.written, {0.8, 0.4}), "...and so is one whose resize plan was about to be written: 0.533 is not written over the setter's 0.400");
+    }
+    // D. The other direction: a boundary arrives in the setter's section, between its write and its epoch. It waits, then sees the epoch with the factor it goes with.
+    {
+        World w = steady();
+        w.injectAt(UiFlatSeam::kSetterWritten, [&w] { w.boundary(); });
+        w.setter(0.5f);
+        check(w.depth == 0 && w.deferred.empty() && w.held == 1 && w.last.act == Act::kHold && w.settle.holding() && isNear(w.floatsF, 0.4) && w.epoch == 1 && onlyThese(w.written, {0.8, 0.4}),
+              "flat panel race: a boundary that arrives in the setter's section (its 0.400 written, its epoch not yet) waits for it, then holds 0.400 under epoch 1 (it used to write 0.800 back)");
+    }
 }
 
 // ---- the wiring, by source scan ----------------------------------------------------------------------------------------------------
@@ -325,23 +457,40 @@ std::vector<Pin> pins(const std::string& scale) {
         std::string b;
         return functionBody(scale, signature, &b) ? squeeze(b) : std::string();
     };
+    // PanelEnv is a struct, whose closing brace is "};" in column 0
+    std::string env;
+    {
+        const size_t s = scale.find("struct PanelEnv {");
+        const size_t e = s == std::string::npos ? s : scale.find("\n};\n", s);
+        if (e != std::string::npos) env = squeeze(scale.substr(s, e - s + 3));
+    }
     const std::string frame = body("void flatFrameBoundary(float target) {");
     const std::string move = body("void moveFactorTo(float ss) {");
+    const std::string locked = body("bool writeFloats(double f, double lineF = 1.0, double ss = 1.0) {");
+    const std::string unlocked = body("bool writeFloatsUnlocked(double f, double lineF, double ss) {");
     std::vector<Pin> out;
-    out.push_back({"boundary-asks", has(frame, "g_flatSettle.step(plan.f,g_live.load(std::memory_order_acquire),uiPanelScaleFactor(),setterEpoch,") &&
-                                        has(frame, "in.renderW,in.renderH);") && !has(frame, "++g_settle") && !has(frame, "g_pending=plan.f"),
-                   "the flat boundary asks UiFlatPanelSettle with the plan, whether a factor is live, the factor in the floats, the setter's epoch and size, and the scene's size; it keeps no settle of its own"});
-    out.push_back({"hold-before-publish", inOrder(frame, {"step.act==UiFlatPanelSettle::Act::kHold", "return;", "step.act==UiFlatPanelSettle::Act::kWait", "return;",
-                                                          "readLiveSupersampling(&cur,&lo,&hi)", "g_pubFlatSsBits.store(sb,", "step.act==UiFlatPanelSettle::Act::kKeep", "return;",
-                                                          "writeFloats(plan.f,plan.lineF,1.0)"}),
-                   "a held factor and an unsettled plan return before anything is published or written; a kept one returns after the publish and before the write"});
-    out.push_back({"epoch-then-size", inOrder(frame, {"g_flatSetterEpoch.load(std::memory_order_acquire)", "g_flatSetterAt.load(std::memory_order_acquire)", "g_flatSettle.step("}),
-                   "the boundary reads the setter's epoch before the size it was recorded with"});
-    out.push_back({"publishes-size", has(frame, "g_pubFlatDims.store((static_cast<uint64_t>(in.renderW)<<32)|in.renderH,std::memory_order_release);"),
+    out.push_back({"boundary-section", has(frame, "uiFlatPanelBoundarySection(g_flatSettle,env,plan,in.renderW,in.renderH,&wrote);") && !has(frame, "g_flatSettle.step(") &&
+                                           !has(frame, "g_flatSetterEpoch") && !has(frame, "writeFloats(plan") && !has(frame, "++g_settle") && !has(frame, "g_pending=plan.f"),
+                   "the flat boundary's epoch read, decision, publish and write are ONE call, uiFlatPanelBoundarySection, under the floats' lock; the boundary itself reads no epoch, decides nothing and writes nothing"});
+    out.push_back({"live-before-lock-log-after", inOrder(frame, {"readLiveSupersampling(&cur,&lo,&hi)", "uiFlatPanelBoundarySection(", "Log::get().note("}),
+                   "the game's live Supersampling is read before the section, and the log is written after it"});
+    out.push_back({"hold-then-wait-return", inOrder(frame, {"step.act==UiFlatPanelSettle::Act::kHold", "return;", "step.act==UiFlatPanelSettle::Act::kWait", "step.act==UiFlatPanelSettle::Act::kKeep",
+                                                            "return;", "if(!wrote)return;", "g_written=plan.f;"}),
+                   "a held factor, an unsettled plan and a kept one return, and the boundary's bookkeeping follows only a write that happened"});
+    out.push_back({"env-lock", has(env, "voidlock(){AcquireSRWLockExclusive(&g_floatLock);}") && has(env, "voidunlock(){ReleaseSRWLockExclusive(&g_floatLock);}"),
+                   "the sections' lock is the floats' lock, the one writeFloats has always taken"});
+    out.push_back({"env-nothing-slow", !env.empty() && !has(env, "Log::") && !has(env, "readLiveSupersampling(") && !has(env, "writeFloats(") && !has(env, "readGame(") &&
+                                           !has(env, "Sleep") && !has(env, "WaitFor") && has(env, "boolwriteFactors(doublef,doublelineF,doubless){returnwriteFloatsUnlocked(f,lineF,ss);}"),
+                   "under the lock the Env does atomic loads and stores, the floats' write without the lock again, and one load of the scene's size: no log, no read of the game's context, no wait"});
+    out.push_back({"write-split", !has(unlocked, "SRWLock") && has(unlocked, "VirtualProtect(") && inOrder(locked, {"AcquireSRWLockExclusive(&g_floatLock);", "writeFloatsUnlocked(f,lineF,ss);", "ReleaseSRWLockExclusive(&g_floatLock);"}),
+                   "writeFloats is the lock around writeFloatsUnlocked, which takes none (the sections call the second under the lock they hold)"});
+    out.push_back({"move-through-section", has(move, "PanelEnvenv;") && has(move, "uiPanelSetterSection(env,ss);") && !has(move, "writeFloats("),
+                   "the setter thunk's move is uiPanelSetterSection: the published plan, the factor, its write and the epoch as one operation"});
+    out.push_back({"thunk-records", inOrder(env, {"voidnoteMove(boolflat,uint64_tpublishedDims){", "flatRuntimeSceneSizes(&w,&h,&ow,&oh)", "g_flatSetterAt.store(at,std::memory_order_release);",
+                                                  "g_flatSetterEpoch.fetch_add(1,std::memory_order_acq_rel);"}),
+                   "the setter's move records the scene's size and then counts itself"});
+    out.push_back({"publishes-size", has(env, "g_pubFlatDims.store((static_cast<uint64_t>(renderW)<<32)|renderH,std::memory_order_release);"),
                    "the published plan carries the scene size it was made at (the thunk's fallback when the runtime cannot say)"});
-    out.push_back({"thunk-records", inOrder(move, {"if(writeFloats(p.f,p.lineF,p.ss)){", "if(g_pubFlat.load(std::memory_order_acquire)){", "flatRuntimeSceneSizes(&w,&h,&ow,&oh)",
-                                                   "g_flatSetterAt.store(at,std::memory_order_release);", "g_flatSetterEpoch.fetch_add(1,std::memory_order_acq_rel);"}),
-                   "the setter thunk, after it writes a flat factor, records the scene's size and then counts the move"});
     out.push_back({"refused-unsettles", has(frame, "++g_flatRefusedFrames;g_flatSettle.unsettle();return;"),
                    "a refused frame restarts the settle and leaves the held factor alone"});
     out.push_back({"forgets", countOf(scale, "g_flatSettle.forget();") == 2,
@@ -361,16 +510,21 @@ void testWiring() {
     // CONTROLS: one edit each that puts a likely slip back; the pin named must fail.
     struct Control { const char* pin; const char* from; const char* to; };
     const Control controls[] = {
-        {"boundary-asks", "g_flatSettle.step(plan.f,", "g_flatSettle.stepOnce(plan.f,"},
-        {"boundary-asks", "uiPanelScaleFactor(), setterEpoch,", "1.0, setterEpoch,"},
-        {"hold-before-publish", "if (step.act == UiFlatPanelSettle::Act::kHold) {\n        ++g_flatHeldFrames;\n        return;\n    }", "++g_flatHeldFrames;"},
-        {"hold-before-publish", "if (step.act == UiFlatPanelSettle::Act::kWait) return;", ""},
-        {"hold-before-publish", "if (step.act == UiFlatPanelSettle::Act::kKeep) return;", ""},
-        {"epoch-then-size", "g_flatSetterEpoch.load(std::memory_order_acquire);\n    const uint64_t setterAt = g_flatSetterAt.load(std::memory_order_acquire);",
-                            "0;\n    const uint64_t setterAt = g_flatSetterAt.load(std::memory_order_acquire);"},
-        {"publishes-size", "g_pubFlatDims.store((static_cast<uint64_t>(in.renderW) << 32) | in.renderH, std::memory_order_release);", ""},
+        {"boundary-section", "uiFlatPanelBoundarySection(g_flatSettle, env,", "uiFlatPanelBoundaryUnlocked(g_flatSettle, env,"},
+        {"boundary-section", "bool wrote = false;\n", "bool wrote = false;\n    const uint32_t again = g_flatSetterEpoch.load(std::memory_order_acquire);\n"},
+        {"live-before-lock-log-after", "env.liveOk = readLiveSupersampling(&cur, &lo, &hi) == UiSsRead::kOk && uiLiveSupersamplingValid(cur, lo, hi, nullptr);", "env.liveOk = false;"},
+        {"hold-then-wait-return", "if (step.act == UiFlatPanelSettle::Act::kHold) {\n        ++g_flatHeldFrames;\n        return;\n    }", "++g_flatHeldFrames;"},
+        {"hold-then-wait-return", "if (step.act == UiFlatPanelSettle::Act::kWait || step.act == UiFlatPanelSettle::Act::kKeep) return;", ""},
+        {"hold-then-wait-return", "if (!wrote) return;", ""},
+        {"env-lock", "void lock() { AcquireSRWLockExclusive(&g_floatLock); }", "void lock() {}"},
+        {"env-nothing-slow", "bool writeFactors(double f, double lineF, double ss) { return writeFloatsUnlocked(f, lineF, ss); }",
+                             "bool writeFactors(double f, double lineF, double ss) { return writeFloats(f, lineF, ss); }"},
+        {"env-nothing-slow", "    void noteMove(bool flat, uint64_t publishedDims) {\n", "    void noteMove(bool flat, uint64_t publishedDims) {\n        Log::get().note(\"moved\");\n"},
+        {"write-split", "    const bool ok = writeFloatsUnlocked(f, lineF, ss);\n    ReleaseSRWLockExclusive(&g_floatLock);", "    const bool ok = writeFloatsUnlocked(f, lineF, ss);"},
+        {"move-through-section", "uiPanelSetterSection(env, ss);", ""},
         {"thunk-records", "g_flatSetterEpoch.fetch_add(1, std::memory_order_acq_rel);", ""},
         {"thunk-records", "g_flatSetterAt.store(at, std::memory_order_release);", ""},
+        {"publishes-size", "g_pubFlatDims.store((static_cast<uint64_t>(renderW) << 32) | renderH, std::memory_order_release);", ""},
         {"refused-unsettles", "g_flatSettle.unsettle();", ""},
         {"forgets", "g_flatSettle.forget();", ""},
     };
