@@ -368,7 +368,8 @@ def native_install(root, target, receipt_path, tag, dry_run=False, keep_backups=
         print("               replace -> %s" % os.path.basename(backups[key]))
     print("       receipt  %s" % (receipt_path or "(not requested in dry run)"))
     if dry_run:
-        _prune_quietly(target, keep_backups, dry_run=True)
+        _prune_quietly(target, keep_backups, dry_run=True,
+                       plan={"receipt": receipt_path, "backups": list(backups.values())})
         print("[edvr] dry run: wrote nothing.")
         return 0
 
@@ -849,11 +850,15 @@ def backup_name(dst, tag, now=None):
 # them. After a good install the newest KEEP_BACKUPS of each file stay and the
 # rest go. Only names of exactly the scheme above are ever touched, and only in
 # the directories an install writes to.
+def _real_path(path):
+    return os.path.normcase(os.path.realpath(path))
+
+
 def _backup_dirs(target):
     return [target, os.path.join(target, "Openvr", "win64")]
 
 
-def _backup_families(directory):
+def _backup_families(directory, planned=()):
     """{live file name, lowercased: [(stamp, n, path), ...]} for the files in
     `directory` whose names are exactly the backup scheme -- not directories,
     not links, not a name whose stamp is no real date."""
@@ -874,16 +879,24 @@ def _backup_families(directory):
             continue
         families.setdefault(match.group("file").lower(), []).append(
             (stamp, int(match.group("n") or 0), entry.path))
+    for path in planned:
+        # A backup an install is about to write counts as already written.
+        match = BACKUP_FILE.match(os.path.basename(path))
+        if match is None or _real_path(os.path.dirname(path)) != _real_path(directory):
+            continue
+        stamp = datetime.datetime.strptime(match.group("stamp"), "%Y%m%d-%H%M%S")
+        families.setdefault(match.group("file").lower(), []).append(
+            (stamp, int(match.group("n") or 0), path))
     return families
 
 
-def _current_receipts(target, extra=()):
+def _current_receipts(target, extra=(), planned=()):
     """The receipt files that are current: the newest of each kind in
     `target` (a second install writes its receipt under the backup scheme's
     name, so the newest of `edvr_native_receipt.json` and its `.pre-` siblings
     is the latest install's), plus any receipt path the caller names."""
     current = [os.path.abspath(path) for path in extra if path]
-    families = _backup_families(target)
+    families = _backup_families(target, planned)
     for name in RECEIPT_NAMES:
         newest = sorted(families.get(name, ()), reverse=True)[:1]
         base = os.path.join(target, name)
@@ -894,13 +907,19 @@ def _current_receipts(target, extra=()):
     return current
 
 
-def _protected_by_receipts(receipts):
+def _protected_by_receipts(receipts, plan=None):
     """(paths, readable): the normalized real paths of every backup the
     receipts name, and the receipts themselves. `readable` is False when a
-    receipt cannot be read, since then what it names is not known."""
-    protected = set()
+    receipt cannot be read, since then what it names is not known. The
+    planned receipt (see prune_backups) is not written yet, so it is not
+    read; the backups it will name are the plan's own."""
+    plan = plan or {}
+    planned_receipt = _real_path(plan["receipt"]) if plan.get("receipt") else None
+    protected = {_real_path(path) for path in plan.get("backups") or ()}
     for receipt in receipts:
-        protected.add(os.path.normcase(os.path.realpath(receipt)))
+        protected.add(_real_path(receipt))
+        if _real_path(receipt) == planned_receipt:
+            continue
         try:
             with open(receipt, "r", encoding="utf-8") as stream:
                 journal = json.load(stream)
@@ -910,30 +929,39 @@ def _protected_by_receipts(receipts):
             for entry in entries:
                 backup = entry.get("backup") if isinstance(entry, dict) else None
                 if backup:
-                    protected.add(os.path.normcase(os.path.realpath(backup)))
+                    protected.add(_real_path(backup))
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
             return protected, False
     return protected, True
 
 
-def prune_backups(target, keep=KEEP_BACKUPS, dry_run=False, receipts=()):
+def prune_backups(target, keep=KEEP_BACKUPS, dry_run=False, receipts=(), plan=None):
     """Remove all but the newest `keep` backups of each file in the game
     directory and Openvr\\win64 (never fewer than one is kept; a file with
     only one backup keeps it). A backup the current receipt names is kept
     whatever its age, and when a current receipt cannot be read nothing is
     pruned. Says what it removed (with dry_run, what it would remove, and
-    removes nothing) and returns those paths."""
+    removes nothing) and returns those paths.
+
+    `plan` is what an install is about to write: {"receipt": path or None,
+    "backups": [paths]}. A dry run passes it, because the real run prunes
+    after writing those files, so the plan must count them as already there.
+    Without it a dry run would see one backup fewer per file and name nothing."""
     keep = max(1, int(keep))
-    protected, readable = _protected_by_receipts(_current_receipts(target, receipts))
+    plan = plan or {}
+    planned_receipt = plan.get("receipt")
+    planned = list(plan.get("backups") or ()) + ([planned_receipt] if planned_receipt else [])
+    current = _current_receipts(target, list(receipts) + ([planned_receipt] if planned_receipt else []), planned)
+    protected, readable = _protected_by_receipts(current, plan)
     if not readable:
         print("[edvr] NOTE: a current receipt could not be read, so no old backups were pruned.")
         return []
     doomed = []
     for directory in _backup_dirs(target):
-        for _, items in sorted(_backup_families(directory).items()):
+        for _, items in sorted(_backup_families(directory, planned).items()):
             items.sort(reverse=True)          # newest first: stamp, then collision counter
             doomed += [path for _, _, path in items[keep:]
-                       if os.path.normcase(os.path.realpath(path)) not in protected]
+                       if _real_path(path) not in protected]
     if not doomed:
         return []
     removed = []
@@ -953,11 +981,11 @@ def prune_backups(target, keep=KEEP_BACKUPS, dry_run=False, receipts=()):
     return removed
 
 
-def _prune_quietly(target, keep, dry_run=False, receipts=()):
+def _prune_quietly(target, keep, dry_run=False, receipts=(), plan=None):
     """prune_backups for the end of an install: a failure to prune is said
     and never fails an install that has already landed."""
     try:
-        prune_backups(target, keep, dry_run, receipts)
+        prune_backups(target, keep, dry_run, receipts, plan)
     except (OSError, ValueError) as exc:
         print("[edvr] NOTE: old backups were not pruned: %s" % exc)
 
@@ -1311,7 +1339,8 @@ def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
         print("       seed     %s (from edvr.ini; a new file, so no backup)" % _ini_target(target, "flat"))
     print("       receipt  %s" % receipt)
     if dry_run:
-        _prune_quietly(target, keep_backups, dry_run=True)
+        _prune_quietly(target, keep_backups, dry_run=True,
+                       plan={"receipt": receipt, "backups": [e["backup"] for e in entries if e["backup"]]})
         print("[edvr] dry run: wrote nothing."); return 0
     journal = {"version": 2, "kind": NATIVE_KIND if native else FLAT_KIND, "target": os.path.abspath(target),
                "root": os.path.abspath(root), "state": "staging", "files": entries}
@@ -1655,6 +1684,19 @@ def _prune_self_test():
             result = function(*args, **kwargs)
         return result, out.getvalue()
 
+    def pruned(text):
+        """The names a prune printed under its header, sorted; None without a header."""
+        lines = text.splitlines()
+        header = [i for i, line in enumerate(lines) if "old backup(s)" in line]
+        if not header:
+            return None
+        names = []
+        for line in lines[header[0] + 1:]:
+            if not line.startswith("       "):
+                break
+            names.append(line.strip())
+        return sorted(names)
+
     def named(*paths):
         """The text of a receipt whose entries name these backups (and one that names none)."""
         return json.dumps({"files": [{"key": "graphics", "backup": path} for path in paths]
@@ -1810,8 +1852,10 @@ def _prune_self_test():
         try:
             before = tree(egame)
             code, text = quiet(main, ["--root", sroot, "--target", egame, "--tag", "e2e", "--dry-run"])
-            check(code == 0 and tree(egame) == before and "would prune 3 old backup(s)" in text
-                  and "nothing removed" in text, "an install dry run lists the prune and writes nothing: %r" % text)
+            dry_pruned = pruned(text)
+            check(code == 0 and tree(egame) == before and "would prune 5 old backup(s)" in text
+                  and "nothing removed" in text and dry_pruned and len(dry_pruned) == 5,
+                  "an install dry run lists the five backups the real run prunes and writes nothing: %r" % text)
             try:
                 with contextlib.redirect_stderr(io.StringIO()):
                     main(["--root", sroot, "--target", egame, "--keep-backups", "0"])
@@ -1819,8 +1863,9 @@ def _prune_self_test():
             except SystemExit as error:
                 check(error.code == 2 and tree(egame) == before, "--keep-backups 0 is a usage error that writes nothing")
             code, text = quiet(main, ["--root", sroot, "--target", egame, "--tag", "e2e"])
-            check(code == 0 and "pruned 5 old backup(s), keeping the newest 5" in text,
-                  "a good install ends by pruning, and says so: %d %r" % (code, text[-500:]))
+            check(code == 0 and "pruned 5 old backup(s), keeping the newest 5" in text
+                  and pruned(text) == dry_pruned,
+                  "a good install ends by pruning what its dry run named: %d %r" % (code, text[-500:]))
             runtime_family = sorted(name for name in os.listdir(exr) if name.startswith("openvr_api.dll.pre-"))
             config_family = sorted(name for name in os.listdir(exr) if name.startswith("edvr_openxr.ini.pre-"))
             check(len(runtime_family) == 5 and len(config_family) == 5
@@ -1838,6 +1883,44 @@ def _prune_self_test():
         finally:
             (_prune_loader.verify, _prune_pe.validate_native_pair, globals()["validate_elite_game"],
              globals()["strict_game_running"]) = saved
+
+        # --- through main(), flat profile: five backups of each file, one more written ---
+        fgame, fxr = new_game()
+        fsroot = os.path.join(tmp, "flat-repo")
+        os.makedirs(os.path.join(fsroot, "build"))
+        touch(os.path.join(fsroot, "build"), "d3d11.dll", b"FLAT-GRAPHICS")
+        touch(fgame, GAME_EXE, b"GAME")
+        touch(fgame, "d3d11.dll", b"OLD-GRAPHICS")
+        touch(fgame, PROFILE_FILE, profile_bytes("flat"))
+        touch(fgame, "edvr_flat_receipt.json", b"OLD-RECEIPT")
+        flat_files = ("d3d11.dll", PROFILE_FILE, "edvr_flat_receipt.json")
+        for live in flat_files:
+            backups(fgame, live, 5, tag="old", day="20250101")
+        flat_saved = (_prune_pe.Image, _prune_pe._exports, globals()["validate_elite_game"],
+                      globals()["strict_game_running"])
+        _prune_pe.Image = lambda data: data                  # the live d3d11.dll reads as an EDVR build
+        _prune_pe._exports = lambda image: ({0: "edvr_graphics"}, None)
+        globals()["validate_elite_game"] = lambda path: None
+        globals()["strict_game_running"] = lambda *args: (True, False)
+        try:
+            flat_args = ["--root", fsroot, "--target", fgame, "--profile", "flat", "--tag", "flat2"]
+            before = tree(fgame)
+            code, text = quiet(main, flat_args + ["--dry-run"])
+            dry_pruned = pruned(text)
+            oldest = sorted("%s.pre-old-20250101-000001.bak" % live for live in flat_files)
+            check(code == 0 and tree(fgame) == before and dry_pruned == oldest,
+                  "a flat dry run names the oldest backup of each file, which the real run prunes, and writes nothing: %r"
+                  % text)
+            code, text = quiet(main, flat_args)
+            check(code == 0 and pruned(text) == oldest,
+                  "the flat real run prunes exactly what its dry run named: %r" % text)
+            check(all(not os.path.exists(os.path.join(fgame, name)) for name in oldest)
+                  and all(os.path.isfile(os.path.join(fgame, "%s.pre-old-20250101-%06d.bak" % (live, second)))
+                          for live in flat_files for second in range(2, 6)),
+                  "the oldest of each file is gone and the newest four stay")
+        finally:
+            (_prune_pe.Image, _prune_pe._exports, globals()["validate_elite_game"],
+             globals()["strict_game_running"]) = flat_saved
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     return not problems
