@@ -126,7 +126,7 @@ pass's chosen rows against the calls' view axes, then the facts for H1, H2 and H
 `== the detour's CPU ==` (the observer halves' sampled cost). A log with none of those
 lines reports exactly as before.
 
---maps-sharp reads a flight with experimental.on_foot_maps_sharp = on (design-world-
+--maps-sharp reads a flight of the on-foot maps gate, always on in a current build (design-world-
 camera-motion-2026-09-30.md, Phase 1). It prints each map or menu the UI layer held as
 a panel period (the TAKES line and the HANDS BACK line that closed it: when, how many
 frames, how many eyes went through the layer-only door and how many kept the upscaler,
@@ -196,8 +196,8 @@ carrying them is a STOP). A log with none of the lines means the reader never st
 OFF or an unknown read writes a line too. Its verdict does not change the exit code either.
 
 --route-curve reads a flight with the curved VR world route (design doc section 82,
-"The curved route": fix.panel_curvature above 0, experimental.temporal_aa_on_foot_world
-= auto). It reads the route's `vr world route 5s:` lines by token (`curve=`: off,
+"The curved route": fix.panel_curvature above 0; the route itself is always on now).
+It reads the route's `vr world route 5s:` lines by token (`curve=`: off,
 pending, stood-down or curvature/columns/gain; `curve-reissues=`: the strips the layer
 drew), the OWNS lines, the `panel curvature:` notes and the layer's `vr world route
 layer:` refusals, prints the windows by ownership and curve, and judges CURVE (what
@@ -3019,7 +3019,7 @@ def print_camera_census(text):
     return 0
 
 
-# --maps-sharp: the on-foot maps gate (experimental.on_foot_maps_sharp, docs/design-world-camera-motion-2026-09-30.md, Phase 1).
+# --maps-sharp: the on-foot maps gate (always on now; it was experimental.on_foot_maps_sharp, docs/design-world-camera-motion-2026-09-30.md, Phase 1).
 # The lines it reads are written by src/d3d11/ui_maps_math.h's formatters (their wording is the anchors below); the rig
 # tools/on_foot_maps_test compares tools/maps_sharp_fixture.log to those formatters byte for byte, and this reader's self-test
 # parses the same file, so a formatter that drifts fails in the build rather than in the ten minutes after a flight.
@@ -3285,8 +3285,9 @@ def print_maps_sharp(text):
     """--maps-sharp: the on-foot maps gate's flight in one report; exit 0 (PASS or WARN), 1 (STOP), 3 (no line of the feature in the log)."""
     p = parse_maps_sharp(text)
     if not p["events"] and not p["windows"]:
-        print("[edvr] maps-sharp: no 'on foot maps sharp' line in this log. The key experimental.on_foot_maps_sharp was off, the UI layer "
-              "was not live, or this build does not have the feature; with the key on and the layer live the feature prints an ON line and "
+        print("[edvr] maps-sharp: no 'on foot maps sharp' line in this log. The maps gate is always on in a current build (there is no setting "
+              "for it), so the UI layer was not live, this was not a VR flight, or the build is older than the feature or predates the gate "
+              "becoming unconditional (it was a switch in the ini then); with the layer live the feature prints an ON line and "
               "a 5 s line, zeros included.")
         return 3
     eps = maps_sharp_episodes(p)
@@ -4668,7 +4669,7 @@ def print_vscreen_fit(text):
 # formatters to tools\flat_upscale_fixture.log (a good flight and three episodes), the file this reader's self-test reads.
 # ---------------------------------------------------------------------------------------------------------------------------------------
 FLATU_TS = r"^(?:\[(?P<ts>[0-9:.]+)\] )?"
-FLATU_KEY_RE = re.compile(FLATU_TS + r"flat hdr route: (?:experimental\.temporal_aa_before_post=)?(?P<key>\w+) \((?P<when>read at startup|changed)\) at frame=(?P<frame>\d+)")
+FLATU_KEY_RE = re.compile(FLATU_TS + r"flat hdr route: (?P<legacy>experimental\.temporal_aa_before_post=)?(?P<key>\w+) \((?P<when>read at startup|changed)\) at frame=(?P<frame>\d+)")
 FLATU_TRIGGER_RE = re.compile(FLATU_TS + r"flat hdr route: first trigger at frame=(?P<frame>\d+)")
 FLATU_WINDOW_RE = re.compile(FLATU_TS + r"flat copy structure 5s: (?P<rest>.*)$")
 FLATU_FIRST_RE = re.compile(
@@ -4705,7 +4706,7 @@ def parse_flat_upscale(text):
             m = FLATU_KEY_RE.match(raw)
             if m:
                 f["flat"] = True
-                f["keys"].append({"ts": m.group("ts") or "", "key": m.group("key"), "when": m.group("when")})
+                f["keys"].append({"ts": m.group("ts") or "", "key": m.group("key"), "when": m.group("when"), "legacy": bool(m.group("legacy"))})
                 continue
             m = FLATU_TRIGGER_RE.match(raw)
             if m:
@@ -4810,10 +4811,16 @@ def flat_upscale_verdict(f):
     # KEY
     if f["keys"]:
         last = f["keys"][-1]
-        if last["key"] == "auto":
-            add("KEY", "PASS", "experimental.temporal_aa_before_post=auto (%s): the game's final copy is admitted by structure where the HDR route does not serve the frame" % last["when"])
+        if last["legacy"]:
+            # A log from before the key was retired: its line names the setting that was read.
+            if last["key"] == "auto":
+                add("KEY", "PASS", "experimental.temporal_aa_before_post=auto (%s; a build that still read the key): the game's final copy is admitted by structure where the HDR route does not serve the frame" % last["when"])
+            else:
+                add("KEY", "WARN", "experimental.temporal_aa_before_post=%s (%s; a build that still read the key): the copy route is the whitelist alone; nothing is admitted by structure" % (last["key"], last["when"]))
+        elif last["key"] == "auto":
+            add("KEY", "PASS", "the flat HDR route is always on in this build, not a setting (%s): the game's final copy is admitted by structure where the route does not serve the frame" % last["when"])
         else:
-            add("KEY", "WARN", "experimental.temporal_aa_before_post=%s (%s): the copy route is the whitelist alone; nothing is admitted by structure" % (last["key"], last["when"]))
+            add("KEY", "WARN", "the route line reads %s (%s): a current build always logs auto, so this log is from before the route became unconditional (when it followed the retired key experimental.temporal_aa_before_post); the copy route was the whitelist alone and nothing was admitted by structure" % (last["key"], last["when"]))
     else:
         add("KEY", "n/a", "no `flat hdr route:` key line (a build that predates the route, or a session that never reached a Present)")
 
@@ -4939,7 +4946,7 @@ def print_flat_upscale(text):
     print("[edvr] flat upscale: %d key line(s), %d copy-structure window(s), %d route line(s), %d stand-down line(s), %d warning line(s), %d decline line(s)"
           % (len(f["keys"]), len(wins), len(f["routes"]), len(f["stand"]), len(f["warns"]), len(f["declines"])))
     for k in f["keys"]:
-        print("key %s: experimental.temporal_aa_before_post=%s (%s)" % (k["ts"] or "?", k["key"], k["when"]))
+        print("key %s: %s%s (%s)" % (k["ts"] or "?", "experimental.temporal_aa_before_post=" if k["legacy"] else "flat hdr route ", k["key"], k["when"]))
     for r in f["routes"]:
         print("route %s: %s R=%dx%d E=%dx%d D=%dx%d" % (r["ts"] or "?", r["name"], r["r"][0], r["r"][1], r["e"][0], r["e"][1], r["d"][0], r["d"][1]))
     if f["first"]:
@@ -6023,8 +6030,9 @@ def print_route_curve(text, path=None):
     p = parse_route_curve(text)
     ws = p["windows"]
     if not (ws or p["owns"] or p["layer"] or p["layer_unknown"]):
-        print("[edvr] route-curve: no `vr world route` line in this log. The key experimental.temporal_aa_on_foot_world was not auto, the UI layer was not "
-              "live (the route stays off then), or this is not a VR flight; with the key auto the route prints a 5 s line every window, zeros included.")
+        print("[edvr] route-curve: no `vr world route` line in this log. The route is always requested in a current build (there is no setting "
+              "for it), so the UI layer was not live (the route stays off then), this is not a VR flight, or the build predates the route "
+              "becoming unconditional (it followed an ini switch then); with the layer live the route prints a 5 s line every window, zeros included.")
         return 3
     ver = version_line(text)[1]
     print("[edvr] route-curve: %sbuild %s; %d route window(s), %d owned; %d OWNS line(s), %d `panel curvature:` note(s), %d layer refusal line(s)"
@@ -6323,6 +6331,11 @@ def self_test_route_curve():
         with contextlib.redirect_stdout(buf):
             rc = print_route_curve(text, path)
         return rc, buf.getvalue()
+
+    # A current-build log with no route line: the advice never recommends or blames a retired ini key (the route has no setting now).
+    rc0, out0 = run("[10:00:00.000] edvr 0.19.0 build deadbeef\n")
+    if rc0 != 3 or "experimental." in out0 or "temporal_aa_on_foot_world" in out0 or "key " in out0.lower():
+        fail("the no-line advice names a setting that no longer exists (rc=%d):\n%s" % (rc0, out0))
 
     def case(what, text, rc_want, verdict, *has, absent=()):
         rc, out = run(text)
@@ -9570,8 +9583,7 @@ def main(argv=None):
                          "detour's CPU, and the stage 2 verdict (PASS / WARN / "
                          "STOP) on the world route's injected phase")
     ap.add_argument("--maps-sharp", action="store_true",
-                    help="report an on-foot maps gate flight (experimental.on_foot_maps_sharp "
-                         "= on): every map or menu the layer took and handed back "
+                    help="report an on-foot maps gate flight (the gate is always on): every map or menu the layer took and handed back "
                          "(when, how long, how many eyes skipped the upscaler), the 5 s "
                          "counters summed, whether the VR world route let go and "
                          "re-owned with the gate, and a PASS / WARN / STOP verdict")
@@ -9607,8 +9619,8 @@ def main(argv=None):
                          "CHANGES / LIMIT / HEADSET / FLAT lines. No line at all means the reader never started, which is not "
                          "\"read, off\"")
     ap.add_argument("--route-curve", action="store_true",
-                    help="report a curved VR world route flight (fix.panel_curvature above 0 "
-                         "with experimental.temporal_aa_on_foot_world = auto): the route's 5 s "
+                    help="report a curved VR world route flight (fix.panel_curvature above 0; "
+                         "the route is always on): the route's 5 s "
                          "lines by token (curve=, curve-reissues=), its OWNS lines, the `panel "
                          "curvature:` notes and the layer's refusals, and a PASS / WARN / STOP "
                          "verdict (strips drawn against eye takes, pending, stood-down, a stale "
@@ -10489,14 +10501,14 @@ def self_test_flat_upscale():
     flat = re.sub(r"[ ]+", " ", out)
     for want in (
             "[edvr] flat upscale: 1 key line(s), 5 copy-structure window(s), 1 route line(s), 2 stand-down line(s), 0 warning line(s), 0 decline line(s)",
-            "key 15:12:02.151: experimental.temporal_aa_before_post=auto (read at startup)",
+            "key 15:12:02.151: flat hdr route auto (read at startup)",
             "route 15:12:18.913: trained-upscale R=2880x1620 E=3840x2160 D=3840x2160",
             "first admission 15:12:18.914 at frame 1919: a 2880x1620 image, scene 2880x1620 on a 3840x2160 output, route trained-upscale; the whitelist said no-known-tone-pass",
             "window 15:12:21.149: key=auto copies 331 (whitelist 0, admitted 331, declined 0, selector-refused 0, no-3d-scene 0, render-size 0, route-serves 0, key-off 0); last admitted; "
             "scene 2880x1620 output 3840x2160 source 2880x1620; longest chain 0",
             "stand-down 15:12:08.368: entered for no-3d-scene",
             "stand-down 15:12:18.903: resumed",
-            "PASS (KEY) experimental.temporal_aa_before_post=auto (read at startup)",
+            "PASS (KEY) the flat HDR route is always on in this build, not a setting (read at startup)",
             "PASS (ADMISSION) 5 window(s): copies 1753, whitelist 0, admitted 1009, declined 0, selector-refused 0, no-3d-scene 744, render-size 0, route-serves 0, key-off 0; first admission at frame 1919",
             "PASS (TREATED) 1009 frame(s) treated over the log (the counter went 0 -> 1009)",
             "PASS (UPSCALE) below the output (trained-upscale R=2880x1620 D=3840x2160): 1009 frame(s) admitted by structure, treated",
@@ -10510,6 +10522,20 @@ def self_test_flat_upscale():
             fail("the good flight's report lacks %r:\n%s" % (want, out))
     if rc != 0:
         fail("the good flight reported exit %d" % rc)
+    # The current build's line (no key name on it) never recommends or reports the retired key as a setting; a log from before the
+    # retirement (its line names the key) is still read as that key's setting.
+    if "experimental.temporal_aa_before_post" in out:
+        fail("the current build's flat report names the retired key experimental.temporal_aa_before_post:\n%s" % out)
+    legacy_line = base.replace("flat hdr route: auto (", "flat hdr route: experimental.temporal_aa_before_post=auto (", 1)
+    if legacy_line == base:
+        fail("the fixture has no `flat hdr route: auto (` line to rewrite for the legacy check")
+    _, lout = report(legacy_line)
+    if "PASS (KEY) experimental.temporal_aa_before_post=auto (read at startup; a build that still read the key)" not in re.sub(r"[ ]+", " ", lout):
+        fail("a pre-retirement log's key line was not read as the key's setting:\n%s" % lout)
+    off_line = base.replace("flat hdr route: auto (", "flat hdr route: off (", 1)
+    _, oout = report(off_line)
+    if "WARN (KEY) the route line reads off" not in re.sub(r"[ ]+", " ", oout):
+        fail("a route line reading off was not flagged as a pre-unconditional log:\n%s" % oout)
 
     # ---- the episodes ----
     want_statuses(with_episode("render-size"), {"KEY": "PASS", "ADMISSION": "PASS", "TREATED": "PASS", "STAND-DOWN": "WARN", "F8 WARNING": "WARN", "CHAIN": "PASS", "ADVICE": "PASS"},
@@ -10852,6 +10878,11 @@ def self_test_maps_sharp():
         with contextlib.redirect_stdout(buf):
             rc = print_maps_sharp(text)
         return rc, buf.getvalue()
+
+    # A current-build log with no feature line: the advice never recommends or blames a retired ini key (the gate has no setting now).
+    rc, out = run("[10:00:00.000] edvr 0.19.0 build deadbeef\n")
+    if rc != 3 or "experimental." in out or "on_foot_maps_sharp" in out or "key" in out.lower().replace("keys", ""):
+        fail("the no-line advice names a setting that no longer exists (rc=%d):\n%s" % (rc, out))
 
     # The fixture as it is: a 4-frame panel period is a flap (STOP), the not-empty eyes are a WARN, and the report says all of it.
     rc, out = run(base)
