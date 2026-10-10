@@ -16,6 +16,9 @@
   - H7 OPEN: which game code sized the 2227 targets. Test: the sizing watch's `vr sizing:` lines (callers as game RVAs) after a menu change.
   - H8 OPEN: does the startup hold reach ctx+0x3564? Test: the first setter call's `before` value in a flight that changes nothing in the menu before it. 0.85 means no; 1.0 means yes. The copy from loader table to render context is not located.
   - H9 mode 4: what it is (the menu's 3D mode name for it).
+- **Flight 58a54aa5 (edvr_gfx_20261010_114456.log):** both window trampolines REFUSED (CodeHook: target more than 2 GB from the replacement). Fixed here with a near relay (the kinematic-eval pattern). The settings watch was INVALID: the "loader object" is a stack temporary (H8, below), so its reads are dead stack; its change test also logged 0.0000 -> 0.0000 every frame. Removed; the watch is now ctx+0x3564 only.
+- **H8 (corrected):** the startup hold works by writing the loader's temporary before the game copies it. The temporary is not the render context's field, and reads of it after the loader returns are dead stack.
+- **H7 test (new, this build):** a hardware write watchpoint on ctx+0x3564 (DR0/DR7 on every thread, a vectored handler, 16 writes at most), which names the writer's instruction. See the dated section.
 - **H6 DECISION (maintainer):** when 3D turns on, Elite keeps the user's display mode (for example borderless 3840x2160 from DisplaySettings.xml) and does not switch to windowed 1280x768, accepting the unmeasured GPU cost of the 4K desktop swapchain in VR. No behaviour change in this build. The fix is designed after the window-apply observer flight shows which path produces kind 0: the kind 1 -> 0 foreground override in 0x7E9D50, or another request writer.
 - **Ruled out:** a static-address read of the 3D mode (step 1: virtual calls on heap objects). H4 (same-object relation), above.
 - **Next flight (VR, Frontier, the step-4 commit):** (a) menu Supersampling change: read `vr sizing:` lines and their callers (H7). (b) 3D Off to HMD: read `vr window:` lines (who restyles, H6) and `vr sizing:` lines. (c) start with the .fxcfg at 0.85, then the first setter call's `before` (H8). Then `python tools\edvr_log.py --target frontier --expect-build HEAD --vr-supersampling`.
@@ -87,6 +90,23 @@ Frontier exe, build 332841 (PE stamp 1788384820, image 104894464). Byte scans an
 - H6 hypothesis, OPEN: the 1280x768 windowed switch comes from the kind-1-to-0 override when the game window is not foreground at the request. Test: the `vr window: mode request` and `vr window: apply` lines (kind, foreground, StereoscopicMode) at the 0 -> 4 switch.
 - The trampolines (vr_window_trampolines.cpp, CodeHook from src/common/code_hook.h) install after the build gate. Each target's first 11 bytes are pinned to build 332841, and CodeHook refuses a prologue it cannot relocate.
 - Lines (capped at 64 each): `vr window: mode request (0x7E9D50): window <p>, mode index <n|unreadable>, kind <k|unreadable>; StereoscopicMode <m|unknown>; game window foreground <yes|no|no game window yet>; frame N`; `vr window: apply (0x5589B0): window <p>, kind <k>, client <w> x <h>, monitor entry <0x...>; StereoscopicMode <m>; game window foreground <...>; frame N`; and the startup line `vr window: trampolines: 0x7E9D50 (mode request) installed|not installed; 0x5589B0 (window apply) installed|not installed; observe only`, with a refusal line before it when CodeHook refuses. The mode table's entry layout is not verified, so the mode's w/h are not logged.
+
+## Flight 58a54aa5 and this build (defects and the write watch)
+
+- DEFECT 1, fixed: the trampolines' replacements were more than 2 GB from the targets (0x7E9D50 and 0x5589B0), so CodeHook's five-byte jump could not reach them. The replacement is now a relay within 2 GB of each target (`jmp qword ptr [rip+0]` plus the replacement's address, allocated the way kinematic_eval_hook.cpp allocates its relays).
+- DEFECT 2, fixed: the settings watch read the loader's object, which is a stack temporary (H8). Removed. The watch reads ctx+0x3564 only, and logs a change of its bits (a failed read is "unknown").
+- H7 TEST, new (vr_context_watch.cpp, log only): armed once, from the first setter or getter that names the render context, on ctx+0x3564 (DR0, DR7 write, 4 bytes), set on every other thread of the process by a worker thread (SuspendThread, GetThreadContext and SetThreadContext with CONTEXT_DEBUG_REGISTERS, ResumeThread). A vectored handler catches the single step (DR6 bit 0), logs, clears DR6 and continues. Other single steps are passed on. After 16 writes the render thread disarms it. Shutdown disarms it. Threads created later have no debug register (stated in the arming line).
+- Writer RIP: the instruction after the write, as a game RVA (or module+offset). Labels: the setter's own store (RVA 0x28767D0..0x2876800), game code, or EDVR or another module (our own writes are labelled that way). Callers are a stack scan of the game image's return addresses (a heuristic, not an unwind).
+- Lines (cap as stated): see below.
+- The flight: VR with 3D on; change Supersampling to 0.85 and apply; then 3D off and back on. The watch shows the writer of ctx+0x3564 at the apply, and the window trampolines show the mode request and apply.
+
+Lines:
+- `vr ssaa gate: write watch armed on ctx+0x3564 0x<addr>: <n> thread(s) set, <f> could not be stopped or set; 16 writes at most, then disarmed; threads created after this have no debug register`
+- `vr ssaa gate: write watch not armed on ctx+0x3564 0x<addr>: no thread took a debug register (<f> could not be stopped or set)` (refusal)
+- `vr ssaa gate: write watch not armed: AddVectoredExceptionHandler failed (<e>)` / `...: CreateThread failed (<e>)` / `...: the field 0x<addr> is not a 4-byte aligned address`
+- `vr ssaa gate: write watch hit <n>: writer <game RVA 0x... | module+0x...> (the instruction after the write); value <v>; thread <tid>; frame <N>; label <the setter's own store | game code | EDVR or another module>; callers (stack scan) <chain | none in the game image>`
+- `vr ssaa gate: write watch disarmed (16 writes logged, the cap | shutdown): <n> write(s) seen; <k> thread(s) cleared, <f> could not be`
+- `vr ssaa gate: watch: ctx+0x3564 <first read | old> -> <new>, frame <N>, <ms | no setter call yet> after the last setter call` (change only, cap 128)
 
 ## Verified in the build
 

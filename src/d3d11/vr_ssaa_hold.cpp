@@ -3,6 +3,7 @@
 
 #include "vr_ssaa_hold_math.h"
 #include "vr_display_observer.h"  // vrDisplayCallerText: the sizing watch's callers
+#include "vr_context_watch.h"     // the hardware write watch on the context's field (armed from the first context)
 #include "ui_panel_scale.h"  // uiPanelScaleEarlyHooks: the setter and getter hooks, installed at DLL load
 #include "ui_sizing_math.h"  // kUiPanelStamp, kUiPanelImageSize: build 332841
 
@@ -67,7 +68,7 @@ constexpr uint32_t kWatchLines = 96;
 constexpr double kWatchSeconds = 3.0;
 // The settings watch (read-only, H8): the loader object's SS field and the render context's, once per Present.
 std::atomic<int64_t> g_lastSetterTicks{0};  // QPC ticks of the last setter call (0: none yet)
-uint32_t g_watchSettingsBits = 0, g_watchFieldBits = 0;
+uint32_t g_watchFieldBits = 0;
 bool g_watchSeen = false;
 std::atomic<uint32_t> g_watchWatchLines{0};
 constexpr uint32_t kWatchWatchCap = 128;
@@ -340,6 +341,7 @@ void vrSsaaHoldReport() {
 }
 
 void vrSsaaHoldShutdown() {
+    vrContextWatchShutdown();  // the write watch's debug registers and handler, if armed
     if (!g_slotWritten) return;
     const uint8_t* base = reinterpret_cast<const uint8_t*>(GetModuleHandleW(nullptr));
     // The slot goes back only if the write lands; if it does not, the flag stays set (the game's own slot is still ours).
@@ -417,40 +419,39 @@ void vrSsaaHoldFrameBoundary() {
 }
 
 void vrSsaaHoldNoteContext(uintptr_t ctx) {
-    if (ctx) g_ctx.store(ctx, std::memory_order_release);
+    if (!ctx) return;
+    // The first context arms the write watch on its Supersampling field (H7/H8); later calls only store the pointer.
+    if (g_ctx.exchange(ctx, std::memory_order_acq_rel) == 0) vrContextWatchArm(ctx + kCtxSsOff);
 }
 
 // The settings watch (H8): read-only, once per Present, on the render thread. Logs a change of the loader object's SS field
 // (+0x13C) or of the render context's (+0x3564), with the time since the last setter call. Writes nothing.
+// Only the render context's field: the loader's object is a stack temporary that the game copies from afterwards, so reads of it after
+// the loader returns are dead stack (H8). The change test compares the bits this watch last saw, and a read that fails is "unknown",
+// never a value.
 void vrSsaaHoldWatchSettings(uint32_t frame) {
     if (g_slotState.load(std::memory_order_acquire) != 1) return;
-    const uintptr_t obj = g_loaderObj.load(std::memory_order_acquire);
     const uintptr_t ctx = g_ctx.load(std::memory_order_acquire);
-    if (!obj && !ctx) return;
-    float settings = 0.0f, field = 0.0f;
-    const bool haveS = obj && readFloatGuarded(obj + kSsFieldOff, &settings);
-    const bool haveF = ctx && readFloatGuarded(ctx + kCtxSsOff, &field);
-    const uint32_t sb = haveS ? bitsOf(settings) : 0xFFFFFFFFu;
+    if (!ctx) return;
+    float field = 0.0f;
+    const bool haveF = readFloatGuarded(ctx + kCtxSsOff, &field);
     const uint32_t fb = haveF ? bitsOf(field) : 0xFFFFFFFFu;
-    if (g_watchSeen && sb == g_watchSettingsBits && fb == g_watchFieldBits) return;
+    if (g_watchSeen && fb == g_watchFieldBits) return;
     const bool first = !g_watchSeen;
-    const uint32_t prevSb = g_watchSettingsBits;
+    const uint32_t prevFb = g_watchFieldBits;
     g_watchSeen = true;
-    const uint32_t lines = g_watchWatchLines.fetch_add(1, std::memory_order_relaxed);
-    g_watchSettingsBits = sb;
     g_watchFieldBits = fb;
+    const uint32_t lines = g_watchWatchLines.fetch_add(1, std::memory_order_relaxed);
     if (lines >= kWatchWatchCap) return;
-    char oldS[24] = "unknown", newS[24] = "unknown", newF[24] = "unknown", since[32] = "no setter call yet";
-    if (haveS) std::snprintf(newS, sizeof(newS), "%.4f", static_cast<double>(settings));
+    char oldF[24] = "unknown", newF[24] = "unknown", since[32] = "no setter call yet";
     if (haveF) std::snprintf(newF, sizeof(newF), "%.4f", static_cast<double>(field));
-    if (!first && prevSb != 0xFFFFFFFFu) std::snprintf(oldS, sizeof(oldS), "%.4f", static_cast<double>(floatOf(prevSb)));
+    if (!first && prevFb != 0xFFFFFFFFu) std::snprintf(oldF, sizeof(oldF), "%.4f", static_cast<double>(floatOf(prevFb)));
     const int64_t last = g_lastSetterTicks.load(std::memory_order_acquire);
     if (last)
         std::snprintf(since, sizeof(since), "%.1f ms", 1000.0 * static_cast<double>(holdTicksNow() - last) /
                                                           static_cast<double>(holdTicksPerSecond()));
-    Log::get().note("vr ssaa gate: watch: settings field %s -> %s (loader object+0x13C), ctx+0x3564 %s, frame %u, %s after the last "
-                    "setter call",
-                    first ? "first read" : oldS, newS, newF, frame, since);
+    Log::get().note("vr ssaa gate: watch: ctx+0x3564 %s -> %s, frame %u, %s after the last setter call",
+                    first ? "first read" : oldF, newF, frame, since);
 }
 
 void vrSizingWatchTexture(uint32_t w, uint32_t h, uint32_t format, uint32_t bind) {
