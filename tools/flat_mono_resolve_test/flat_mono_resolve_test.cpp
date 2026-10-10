@@ -715,17 +715,20 @@ int main(int argc,char** argv) {
             for(size_t i=0;i<goldenCalls;++i)std::printf("    0x%016llxull,\n",static_cast<unsigned long long>(motionHashLog[i]));}
         // Recorded from the unmodified shader and resolver (HEAD c4bbe484 + this rig's instrumentation only), twice, identical.
         // NOTE (mfx port): the MetalFX scenario above adds two backend calls (reset + continuation) after the FSR
-        // frame, so this list must be re-recorded on the Windows build machine with --print-goldens before the
-        // rig is green: the two inserted hashes cannot be computed without D3D11. Every other entry must be
-        // byte-identical -- a CHANGED hash is a changed shader and must be read, not re-recorded.
+        // frame, so this list was re-recorded on the Windows build machine with --print-goldens (2026-10-10, WARP;
+        // the two inserted hashes below read 0xe89185888929db83, 0x76f8f8abfd180d47 on two identical runs, and every
+        // other entry is byte-identical to the pre-MFX list): the two inserted hashes cannot be computed without
+        // D3D11. Every other entry must be byte-identical -- a CHANGED hash is a changed shader and must be read,
+        // not re-recorded.
         static const uint64_t kGolden[]={
             0xec545fd1f6ed4083ull,0xaf68111fd1178583ull,0xaf68111fd1178583ull,0x27944b19cf418803ull,
             0x117bdfd748229fd8ull,0x117bdfd748229fd8ull,0x117bdfd748229fd8ull,0x117bdfd748229fd8ull,
+            0xec545fd1f6ed4083ull,0xec545fd1f6ed4083ull,0xe89185888929db83ull,0x76f8f8abfd180d47ull,
             0xec545fd1f6ed4083ull,0xec545fd1f6ed4083ull,0xec545fd1f6ed4083ull,0xec545fd1f6ed4083ull,
-            0xec545fd1f6ed4083ull,0xec545fd1f6ed4083ull,0xec545fd1f6ed4083ull,0xec545fd1f6ed4083ull,
-            0x037fdbc33a15f783ull,0x037fdbc33a15f783ull,0xbaa48aa2dedcd883ull,0xbaa48aa2dedcd883ull,
-            0xbaa48aa2dedcd883ull,0xbaa48aa2dedcd883ull,0xec545fd1f6ed4083ull,
-            0x364745529d928d5dull,0xbc8fb70f9acf9b13ull,0x64db0bd0d891cf3eull};
+            0xec545fd1f6ed4083ull,0xec545fd1f6ed4083ull,0x037fdbc33a15f783ull,0x037fdbc33a15f783ull,
+            0xbaa48aa2dedcd883ull,0xbaa48aa2dedcd883ull,0xbaa48aa2dedcd883ull,0xbaa48aa2dedcd883ull,
+            0xec545fd1f6ed4083ull,0x364745529d928d5dull,0xbc8fb70f9acf9b13ull,
+            0x64db0bd0d891cf3eull};
         check(goldenCalls==sizeof(kGolden)/sizeof(kGolden[0]),"key-off: the scenarios make the same backend calls as when the goldens were recorded");
         for(size_t i=0;i<goldenCalls && i<sizeof(kGolden)/sizeof(kGolden[0]);++i)
             if(motionHashLog[i]!=kGolden[i]){std::printf("FAIL: key-off golden %zu: got 0x%016llx want 0x%016llx\n",i,
