@@ -281,10 +281,14 @@ void prep(uint3 id:SV_DispatchThreadID) {
         // depth, is the call above, so every history depth test and output is what it was. Without the bit the range is not bound and not read.
         float4 motionBefore=before;
         if(kind==0 && depth==0 && (debug.w&8)!=0) {
+            // The range as mapPlaneDecode (flat_map_plane_range.h) reads it: word 0 the nearest depth, word 1 the inverted farthest. An empty
+            // or bad range (a NaN, an inverted pair, a depth outside (0, 1]) takes today's call.
             const uint2 span=MapPlaneRange.Load2(0);
-            if(span.x<=span.y) {
+            const float lo=asfloat(span.x), hi=asfloat(~span.y);
+            if(isfinite(lo) && isfinite(hi) && lo>0 && lo<=hi && hi<=1) {
+                const float mid=0.5*(lo+hi);
                 float4 plane;
-                if(cameraBefore(rawUv,0.5*(asfloat(span.x)+asfloat(span.y)),plane)) {motionBefore=plane;valid=true;}
+                if(isfinite(mid) && cameraBefore(rawUv,mid,plane)) {motionBefore=plane;valid=true;}
             }
         }
         if(valid) {
@@ -342,21 +346,22 @@ void census(uint3 id:SV_DispatchThreadID,uint3 gid:SV_GroupID,uint gi:SV_GroupIn
 }
 
 // THE SYSTEM MAP'S PLANE RANGE (FlatMonoResolveFrame::mapPlane), one dispatch over the frame's depth on a frame whose map is open, before the
-// prep. Per group the smallest and largest non-zero depth are taken in shared memory, and each group makes ONE InterlockedMin and ONE
-// InterlockedMax into the two words of its buffer (u6, RefusalCounts' slot). asuint of a positive float orders as the float does, so the words
-// are the frame's nearest and farthest non-zero depth. Cleared to 0xFFFFFFFF and 0 first: a frame with no non-zero depth leaves min > max, which
-// the prep reads as no range. No early return: every thread reaches both barriers.
-groupshared uint gPlaneNear, gPlaneFar;
+// prep. Each group keeps the smallest asuint of the non-zero depths in (0, 1] and the smallest ~asuint, in shared memory, and makes ONE
+// InterlockedMin into each of the two words of its buffer (u6, RefusalCounts' slot). Word 0 is then the nearest depth; word 1 the inverted
+// farthest (flat_map_plane_range.h has the encoding). Both words are cleared to 0xFFFFFFFF before the dispatch, which is the empty state for
+// both. Both reduce by InterlockedMin, so the clear value is the identity whatever the driver does with it. No early return: every thread
+// reaches both barriers.
+groupshared uint gPlaneNear, gPlaneFarInv;
 [numthreads(8,8,1)]
 void mapPlaneDepth(uint3 id:SV_DispatchThreadID,uint gi:SV_GroupIndex) {
-    if(gi==0){gPlaneNear=0xFFFFFFFFu;gPlaneFar=0u;}
+    if(gi==0){gPlaneNear=0xFFFFFFFFu;gPlaneFarInv=0xFFFFFFFFu;}
     GroupMemoryBarrierWithGroupSync();
     if(all(id.xy<size.xy)) {
         const float d=SceneDepth.Load(int3(id.xy,0));
-        if(d>0 && d<=1){InterlockedMin(gPlaneNear,asuint(d));InterlockedMax(gPlaneFar,asuint(d));}
+        if(d>0 && d<=1){const uint b=asuint(d);InterlockedMin(gPlaneNear,b);InterlockedMin(gPlaneFarInv,~b);}
     }
     GroupMemoryBarrierWithGroupSync();
-    if(gi==0){RefusalCounts.InterlockedMin(0,gPlaneNear);RefusalCounts.InterlockedMax(4,gPlaneFar);}
+    if(gi==0){RefusalCounts.InterlockedMin(0,gPlaneNear);RefusalCounts.InterlockedMin(4,gPlaneFarInv);}
 }
 
 // The HDR route accumulates in a bounded space, c / (1 + max3(c)), and inverts it on output: a sun disc or a hot

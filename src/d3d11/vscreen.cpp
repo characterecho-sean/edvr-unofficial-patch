@@ -4652,12 +4652,25 @@ struct DrawClock {
     }
 };
 
+// The flat profile's draws never reach beginPanelOverride: its thunks take the flat branch first, and the census's per-draw record
+// lives there. So the flat branch records the draw itself, before FlatRuntimeDrawScope substitutes any binding. Every flat draw is
+// recorded as an offscreen (DCO) line: flat has no eye textures to count, and the census arms its offscreen record for flat.
+// Armed is one bool load; the record is drawCensusOffDraw's own gate (frames left and offscreen), so an unarmed census costs nothing.
+static void flatCensusDraw(ID3D11DeviceContext* self, char kind, uint32_t count, uint32_t instances, const DrawArgs& args) {
+    if (drawCensusArmed()) drawCensusOffDraw(self, kind, count, instances, args);
+}
+
 void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT start) {
     if (runtimeFlatProfile()) {
         ++g_state->thunkHits[kHitDraw];
         // Capture original game bindings before the temporal scope substitutes
         // the engine-motion PS/MRT or the output-copy SRV.
         if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(self, count, 1);
+        {
+            DrawArgs args;
+            args.base = static_cast<int32_t>(start);
+            flatCensusDraw(self, 'D', count, 1, args);
+        }
         FlatRuntimeDrawScope flatDraw(self, 1, 'D', count, 0, static_cast<int32_t>(start));
         if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw();
         g_state->realDraw(self, count, start);
@@ -4712,6 +4725,12 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
     if (runtimeFlatProfile()) {
         ++g_state->thunkHits[kHitDrawIndexed];
         if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(self, count, 1);
+        {
+            DrawArgs args;
+            args.start = startIndex;
+            args.base = baseVertex;
+            flatCensusDraw(self, 'I', count, 1, args);
+        }
         FlatRuntimeDrawScope flatDraw(self, 1, 'I', count, startIndex, baseVertex);
         if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw();
         g_state->realDrawIndexed(self, count, startIndex, baseVertex);
@@ -4751,6 +4770,12 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
     if (runtimeFlatProfile()) {
         if (self == g_state->ownerCtx && flatTemporalCapturing())
             flatTemporalDraw(self, perInstance, instances);
+        {
+            DrawArgs args;
+            args.base = static_cast<int32_t>(startVertex);
+            args.startInstance = startInstance;
+            flatCensusDraw(self, 'N', perInstance, instances, args);
+        }
         FlatRuntimeDrawScope flatDraw(self, instances, 'N', perInstance, 0,
                                       static_cast<int32_t>(startVertex), startInstance);
         if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw();
@@ -4802,6 +4827,13 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     if (runtimeFlatProfile()) {
         if (self == g_state->ownerCtx && flatTemporalCapturing())
             flatTemporalDraw(self, perInstance, instances);
+        {
+            DrawArgs args;
+            args.start = startIndex;
+            args.base = baseVertex;
+            args.startInstance = startInstance;
+            flatCensusDraw(self, 'X', perInstance, instances, args);
+        }
         FlatRuntimeDrawScope flatDraw(self, instances, 'X', perInstance, startIndex,
                                       baseVertex, startInstance);
         if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw();

@@ -1,4 +1,5 @@
 #include "flat_mono_resolve.h"
+#include "flat_map_plane_range.h"   // the System Map plane's range encoding (the reduction's words and their decode)
 #include "dlaa.h"
 #include "fsr3_engine.h"
 #include "temporal_shader_bytecode.h"
@@ -571,17 +572,22 @@ void pollMapPlane(ID3D11DeviceContext* context) {
         D3D11_MAPPED_SUBRESOURCE mapped{};
         if(context->Map(g.planeStaging[i].Get(),0,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&mapped)!=S_OK)break;
         const uint32_t* words=static_cast<const uint32_t*>(mapped.pData);
-        const uint32_t nearBits=words[0],farBits=words[1];
+        const uint32_t nearWord=words[0],farWord=words[1];
         context->Unmap(g.planeStaging[i].Get(),0);
         g.planePending[i]=false;
         ++g_mapPlane.readbacks;
-        // asuint of positive floats orders as the floats do, so min > max is the reduction's "no non-zero depth in this frame".
-        if(nearBits>farBits) {
+        g_mapPlane.nearWord=nearWord;
+        g_mapPlane.farWord=farWord;
+        g_mapPlane.haveWords=true;
+        // The decode refuses an empty frame, a NaN, an inverted pair and a depth outside (0, 1]: such a read-back is an empty one, and the
+        // range printed is the last valid one, never a NaN.
+        const MapPlaneRange range=mapPlaneDecode(nearWord,farWord);
+        if(!range.valid) {
             ++g_mapPlane.empty;
             g_mapPlane.haveRange=false;
         } else {
-            std::memcpy(&g_mapPlane.minDepth,&nearBits,sizeof(float));
-            std::memcpy(&g_mapPlane.maxDepth,&farBits,sizeof(float));
+            g_mapPlane.minDepth=range.lo;
+            g_mapPlane.maxDepth=range.hi;
             g_mapPlane.haveRange=true;
         }
     }
@@ -1075,7 +1081,9 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     // above for the size), one dispatch, and the result copied to the next free staging slot. A slot still waiting to be read is skipped
     // for this frame's copy, not for the dispatch: the prep needs this frame's range whatever the readback does.
     if(planeOn) {
-        const UINT emptyRange[4]={0xFFFFFFFFu,0u,0u,0u};
+        // Both words to the empty state, every element: a clear that replicates its first value, or one that leaves the second word alone,
+        // must read back the same (flat_map_plane_range.h).
+        const UINT emptyRange[4]={kMapPlaneEmpty,kMapPlaneEmpty,kMapPlaneEmpty,kMapPlaneEmpty};
         context->ClearUnorderedAccessViewUint(g.planeRangeUav.Get(),emptyRange);
         ID3D11ShaderResourceView* depthView=f.depth;context->CSSetShaderResources(1,1,&depthView);
         ID3D11UnorderedAccessView* range=g.planeRangeUav.Get();context->CSSetUnorderedAccessViews(6,1,&range,nullptr);

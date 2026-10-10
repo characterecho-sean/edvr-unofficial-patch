@@ -3768,14 +3768,18 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
                 const MapPlaneWatch& w=mapPlaneWatch();
                 char focus[16]="unknown";
                 if(w.focusKnown)std::snprintf(focus,sizeof(focus),"%u",w.focus);
+                // The decoded range is printed only when it is valid (never NaN); the raw words always, so a bad clear or a bad read is visible as
+                // words=FFFFFFFF/FFFFFFFF or an empty plane=none beside them. Word 1 is the inverted far depth (flat_map_plane_range.h).
                 char range[96]="none";
                 if(plane.haveRange)std::snprintf(range,sizeof(range),"%.6f..%.6f (midpoint %.6f)",plane.minDepth,plane.maxDepth,plane.midpoint());
+                char words[24]="none";
+                if(plane.haveWords)std::snprintf(words,sizeof(words),"%08X/%08X",plane.nearWord,plane.farWord);
                 // The watcher's own state, ungated by profile (journalRawStatus): whether it runs, how many Status.json reads parsed, and the last
                 // sample's GuiFocus. statusSamples=0 with watcher=active is the file never being read; gui-known=0 is the field absent.
                 const JournalRawStatus raw=journalRawStatus();
-                Log::get().note("flat map motion 5s: focus=%s map-frames=%llu reductions=%llu plane=%s empty=%llu watcher=%s status-samples=%u "
+                Log::get().note("flat map motion 5s: focus=%s map-frames=%llu reductions=%llu plane=%s words=%s empty=%llu watcher=%s status-samples=%u "
                                 "gui-known=%d gui=%u; the System Map's pixels with no depth take the plane's motion while it is open",
-                    focus,(unsigned long long)plane.frames,(unsigned long long)plane.reductions,range,(unsigned long long)plane.empty,
+                    focus,(unsigned long long)plane.frames,(unsigned long long)plane.reductions,range,words,(unsigned long long)plane.empty,
                     raw.active?"active":"inactive",raw.statusSamples,raw.guiKnown?1:0,raw.gui);
             }
         }

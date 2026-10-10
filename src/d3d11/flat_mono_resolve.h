@@ -312,8 +312,12 @@ struct FlatMonoMapPlane {
     uint64_t reductions = 0;    // reduction dispatches recorded
     uint64_t readbacks = 0;     // reduction results read back since the last take
     uint64_t empty = 0;         // read-backs with no non-zero depth in the frame (nothing to take a midpoint of)
-    bool haveRange = false;     // the last read-back had a range (the range below is its)
+    bool haveRange = false;     // the last read-back had a valid range (the range below is its)
     float minDepth = 0, maxDepth = 0;
+    // The last read-back's raw words, as the reduction stored them (word 1 is the inverted far depth; flat_map_plane_range.h). haveWords is
+    // false until the first read-back.
+    bool haveWords = false;
+    uint32_t nearWord = 0, farWord = 0;
     float midpoint() const { return 0.5f * (minDepth + maxDepth); }
 };
 FlatMonoMapPlane flatMonoResolveTakeMapPlane();

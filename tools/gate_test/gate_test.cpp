@@ -33,6 +33,7 @@
 // issue #19 found arithmetic bugs in it (and in a sibling decision since
 // removed), every one of which is one line of table here.
 #include "../../src/d3d11/journal_watch.h"
+#include "../../src/d3d11/flat_map_plane_range.h"
 // Same reason: eyeShapedAtScale is the recogniser rule that decides whether
 // the gate is fed at all, and it is inline in the header so this file can
 // assert it against the sizes a real rig produced.
@@ -1556,6 +1557,41 @@ int journalWorkerChecks() {
                "flat: the VR accessors still answer the no-journal values");
         g_runtimeProfile = savedProfile;
         stopWorker();
+    }
+
+    // ------------------------------------- 9. the System Map plane's range words (flat_map_plane_range.h)
+    // The reduction's two words, emulated on the CPU as the shader makes them (InterlockedMin on each word, the far one inverted), and
+    // the decode the prep and the read-back both use. The flight of 2026-10-10 read back plane=0.001131..-nan from a clear that left the
+    // far word at its empty value; each shape of bad word must be refused, and the good one must decode.
+    {
+        const float samples[] = {0.0f, 0.001203f, 0.001131f, 0.00115f, 1.5f, -0.2f, 0.0f};
+        uint32_t nearWord = kMapPlaneEmpty, farWord = kMapPlaneEmpty;   // the clear, both words empty
+        for (const float d : samples) {
+            if (!(d > 0.0f && d <= 1.0f)) continue;
+            const uint32_t b = mapPlaneBits(d);
+            if (b < nearWord) nearWord = b;
+            const uint32_t inv = mapPlaneFarWord(d);
+            if (inv < farWord) farWord = inv;
+        }
+        const MapPlaneRange good = mapPlaneDecode(nearWord, farWord);
+        verify(good.valid && good.lo == 0.001131f && good.hi == 0.001203f,
+               "the plane range decodes: the nearest and farthest non-zero depth of the samples, zeros and out-of-range values left out");
+        verify(good.valid && std::fabs(good.midpoint() - 0.5f * (0.001131f + 0.001203f)) < 1e-9f,
+               "the midpoint is the mean of the decoded pair");
+        verify(!mapPlaneDecode(kMapPlaneEmpty, kMapPlaneEmpty).valid,
+               "both words cleared to the empty state (no non-zero depth in the frame) decode as no range");
+        verify(!mapPlaneDecode(nearWord, 0u).valid,
+               "a far word cleared to 0 (the stored value that inverts to all ones, NaN) is refused, not decoded as a depth");
+        verify(!mapPlaneDecode(mapPlaneBits(std::nanf("")), farWord).valid,
+               "a NaN near word is refused");
+        verify(!mapPlaneDecode(mapPlaneBits(0.5f), mapPlaneFarWord(0.1f)).valid,
+               "an inverted pair (nearest above farthest) is refused");
+        verify(!mapPlaneDecode(mapPlaneBits(0.5f), mapPlaneFarWord(1.5f)).valid,
+               "a depth above 1 is refused");
+        verify(!mapPlaneDecode(mapPlaneBits(0.0f), mapPlaneFarWord(0.5f)).valid,
+               "a zero near depth is refused: the prep only takes depths in (0, 1]");
+        const MapPlaneRange one = mapPlaneDecode(mapPlaneBits(0.00115f), mapPlaneFarWord(0.00115f));
+        verify(one.valid && one.lo == one.hi, "a frame with one depth decodes as a degenerate range");
     }
 
     // ------------------------------------------------------------------- done

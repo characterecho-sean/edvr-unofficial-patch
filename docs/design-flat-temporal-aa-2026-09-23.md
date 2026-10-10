@@ -14603,3 +14603,29 @@ Next: Epic flight, DLAA and DLSS, System Map pan; Shift+NumLock during a pan.
 Expect depth-0 motion close to body motion in the capture, and "flat map motion
 5s" with map-frames above 0 and a plane between 0.0011 and 0.0012. Galaxy map
 (GuiFocus 6) and Orrery (8) are unmeasured.
+
+Flight 073159 (build 375e6ba3, log edvr_gfx_20261010_073159.log):
+- GuiFocus arrives: "journal: Status.json GuiFocus present=1 value=6/7/8", and
+  "flat map motion: the System Map is open (Status.json GuiFocus 7)" 15 ms after
+  the read. map-frames=240 and 391 with reductions equal.
+- DEFECT, NaN range: the read-back showed "plane=0.001131..-nan". The reduction
+  stored the far depth as a max. The reading that fits the NaN: the clear value
+  was {0xFFFFFFFF,0,0,0}, and the raw UAV clear wrote its first element to both
+  words, so the far max started at 0xFFFFFFFF (not verified on the GPU; the
+  all-ones clear and the decode make the case moot). A max of 0xFFFFFFFF is NaN,
+  and the prep's test passed it, so
+  depth-0 kind-0 pixels on the map took NaN motion. Fix: the far word stores
+  ~asuint and both words reduce by InterlockedMin (flat_map_plane_range.h); the
+  clear is all 0xFFFFFFFF; the prep takes the plane only when the decoded pair is
+  finite, 0 < lo <= hi <= 1, with a finite midpoint. The 5 s line prints the raw
+  words beside the decoded range.
+- DEFECT, census drew nothing: "DC begin ... offscreen=yes", then "DC end ...
+  draws=0 off=0 copies=144". The flat draw thunks (vscreen.cpp hookedDraw,
+  hookedDrawIndexed, hookedDrawInstanced, hookedDrawIndexedInstanced) take their
+  flat branch first, and beginPanelOverride, where the census's draw record
+  lives, is not on that path. Copies were counted: the copy hooks are not behind
+  that branch. Fix: the flat branch records each draw as a DCO line before the
+  flat scope substitutes bindings (flatCensusDraw, vscreen.cpp). Indirect and
+  auto draws are not recorded.
+- open: the 065817 flight's focus=unknown is not explained. The same reader logic
+  was in place; it was not reproduced on 073159.
