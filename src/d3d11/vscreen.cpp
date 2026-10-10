@@ -533,7 +533,7 @@ struct State {
         // enough to catch the plume deleted the terrain. Two draws
         // running different code cannot share a hash, so this is the one
         // term that always separates them -- and the hash names the blob
-        // on disk when a shader dump was on, so a confirmed skip
+        // on disk when glare_shader_dump was on, so a confirmed skip
         // hands over the bytecode to read.
         uint64_t vsHash;
     };

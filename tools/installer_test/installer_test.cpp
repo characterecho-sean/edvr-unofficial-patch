@@ -1183,7 +1183,7 @@ static void testCullRetiredKeys(const std::wstring& root) {
         "temporal_aa_fovea_bottom", "temporal_aa_fovea_outer", "temporal_aa_fovea_nasal", "temporal_aa_periphery",
         "temporal_aa_periphery_scale", "temporal_aa_periphery_calm", "temporal_aa_jitter", "temporal_aa_partial", "temporal_aa_movers",
         "temporal_aa_blend", "temporal_aa_clamp", "temporal_aa_on_foot_world", "temporal_aa_before_post", "on_foot_maps_sharp",
-        "sun_glare_variant", "sun_glare_probe", "glare_shader_dump", "target_indicator_vs", "target_indicator_scale_probe",
+        "sun_glare_variant", "sun_glare_probe", "target_indicator_vs", "target_indicator_scale_probe",
         "wake_pulse_indices", "fss_eye_dump", "fss_eye_series", "particle_probe", "intro_probe", "openvr_census", "ui_depth_eyes",
         "ui_depth_test", "dispatch_pair_sync", "dispatch_cb1_lend", "dispatch_cb1_strip", "ui_depth_menus", "ui_depth_variants",
         "ui_depth_alpha", "ui_depth_planes", "ui_depth_families", "ui_depth_exclude", "menu_backdrop_threshold", "menu_backdrop_dither",
