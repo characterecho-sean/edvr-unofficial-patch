@@ -14,6 +14,8 @@ ROOT = Path(__file__).resolve().parents[2]
 CORE = ROOT / "src/d3d11/exposure_fix.cpp"
 MODULE = ROOT / "src/plugins/exposure/exposure_dispatch.cpp"
 HEADER = ROOT / "src/plugins/exposure/exposure_dispatch.h"
+ACTION = ROOT / "src/plugins/exposure/exposure_actions.cpp"
+ACTION_HEADER = ROOT / "src/plugins/exposure/exposure_actions.h"
 
 
 def code_only(source):
@@ -114,7 +116,7 @@ def ordered(body, *parts):
     return True
 
 
-def pins(core_source, module_source, header_source):
+def pins(core_source, module_source, header_source, action_source, action_header_source):
     failures = set()
 
     def require(condition, label):
@@ -124,6 +126,8 @@ def pins(core_source, module_source, header_source):
     core = code_only(core_source)
     module = code_only(module_source)
     header = code_only(header_source)
+    action = code_only(action_source)
+    action_header = code_only(action_header_source)
     try:
         hook = function(core, "hookedDispatch")
         flat = block(hook, r"\bif\s*\(\s*runtimeFlatProfile\s*\(\s*\)\s*\)")
@@ -185,14 +189,35 @@ def pins(core_source, module_source, header_source):
             require(first[1] < second[0], "guard-order")
 
         bridge = function(core, "exposureDispatchApplyPair")
-        require(not re.search(r"\bg_state\b", bridge) and
+        require(
                 bool(re.search(r"\bobserver\s*=\s*static_cast\s*<\s*plugins::exposure::ExposureDispatchObserverState\s*\*\s*>\s*\(\s*observerState\s*\)", bridge)) and
                 bool(re.search(r"\bState\s*\*\s*s\s*=\s*static_cast\s*<\s*State\s*\*\s*>\s*\(\s*observer\s*\)", bridge)),
                 "bridge-state")
         require(ordered(bridge,
-                        r"\bshareExposure\s*\(\s*context\s*,\s*first\s*,\s*second\s*\)\s*;",
-                        r"\bif\s*\(\s*s->dampK\s*>\s*0\.0f\s*\)\s*exposureDamp\s*\(\s*context\s*,\s*first\s*\[\s*1\s*\]\s*\)\s*;"),
+                        r"exposurePluginShareExposure\s*\(",
+                        r"if\s*\(\s*s->dampK\s*>\s*0\.0f\s*\)",
+                        r"exposurePluginDamp\s*\("),
                 "bridge-action-order")
+        require(bool(re.search(r"exposurePluginShareExposure\s*\(\s*static_cast\s*<\s*plugins::exposure::ExposureActionState\s*\*>\s*\(\s*g_state\s*\)", bridge)),
+                "bridge-share-state")
+        require(bool(re.search(r"if\s*\(\s*s->dampK\s*>\s*0\.0f\s*\)", bridge)),
+                "bridge-damp-condition")
+        require(bool(re.search(r"exposurePluginDamp\s*\(\s*static_cast\s*<\s*plugins::exposure::ExposureActionState\s*\*>\s*\(\s*g_state\s*\)", bridge)),
+                "bridge-damp-state")
+
+        action_damp = function(action, "exposurePluginDamp")
+        action_share = function(action, "exposurePluginShareExposure")
+        require(bool(re.search(r"struct\s+ExposureActionState\s*:\s*ExposureDispatchObserverState", action_header)),
+                "action-state-inheritance")
+        require(bool(re.search(r"DampGetDevice\s*=\s*96.*?DampCopyReadback\s*=\s*97.*?DampMapReadback\s*=\s*98.*?DampUnmapReadback\s*=\s*99.*?DampWriteFirstEye\s*=\s*100.*?DampWriteSecondEye\s*=\s*101", action, re.S)),
+                "damp-api-site-ids")
+        require(ordered(action_damp,
+                        r"DampGetDevice", r"DampCopyReadback", r"DampMapReadback",
+                        r"DampUnmapReadback", r"DampWriteFirstEye", r"DampWriteSecondEye"),
+                "damp-api-site-order")
+        require(bool(re.search(r"copyCompatible\s*\(\s*a\s*,\s*b\s*\)", action_share) and
+                re.search(r"if\s*\(\s*s->copyBtoA\s*\)\s*ctx->CopyResource\s*\(\s*a\s*,\s*b\s*\)\s*;\s*else\s*ctx->CopyResource\s*\(\s*b\s*,\s*a\s*\)", action_share)),
+                "share-resource-compatibility-and-direction")
 
         frame = function(core, "exposureFixFrameBoundary")
         reset = occurrences(frame, "exposurePluginResetDispatchFrame")
@@ -223,7 +248,7 @@ def replace_once(source, old, new):
     return source.replace(old, new, 1)
 
 
-def self_test(core, module, header):
+def self_test(core, module, header, action, action_header):
     mutations = [
         ("flat-return", "core", "        g_state->realDispatch(self, x, y, z);\n        return;\n",
          "        g_state->realDispatch(self, x, y, z);\n"),
@@ -244,15 +269,41 @@ def self_test(core, module, header):
          "    exposurePluginExpireDispatchVerdicts(static_cast<plugins::exposure::ExposureDispatchObserverState*>(s));\n    exposurePluginExpireDispatchVerdicts(\n"),
         ("bridge-state", "core", "    State* s = static_cast<State*>(observer);",
          "    State* s = g_state;"),
-        ("bridge-action-order", "core", "    shareExposure(context, first, second);\n    if (s->dampK > 0.0f) exposureDamp(context, first[1]);",
-         "    if (s->dampK > 0.0f) exposureDamp(context, first[1]);\n    shareExposure(context, first, second);"),
+        ("bridge-share-state", "core",
+         "        static_cast<plugins::exposure::ExposureActionState*>(g_state), context,\n        first, second);",
+         "        static_cast<plugins::exposure::ExposureActionState*>(s), context,\n        first, second);"),
+        ("bridge-action-order", "core",
+         "    plugins::exposure::exposurePluginShareExposure(\n"
+         "        static_cast<plugins::exposure::ExposureActionState*>(g_state), context,\n"
+         "        first, second);\n"
+         "    if (s->dampK > 0.0f) {\n"
+         "        plugins::exposure::exposurePluginDamp(\n"
+         "            static_cast<plugins::exposure::ExposureActionState*>(g_state),\n"
+         "            context, first[1]);\n"
+         "    }",
+         "    if (s->dampK > 0.0f) {\n"
+         "        plugins::exposure::exposurePluginDamp(\n"
+         "            static_cast<plugins::exposure::ExposureActionState*>(g_state),\n"
+         "            context, first[1]);\n"
+         "    }\n"
+         "    plugins::exposure::exposurePluginShareExposure(\n"
+         "        static_cast<plugins::exposure::ExposureActionState*>(g_state), context,\n"
+         "        first, second);"),
+        ("bridge-damp-state", "core",
+         "            static_cast<plugins::exposure::ExposureActionState*>(g_state),\n            context, first[1]);",
+         "            static_cast<plugins::exposure::ExposureActionState*>(s),\n            context, first[1]);"),
+        ("bridge-damp-condition", "core", "        first, second);\n    if (s->dampK > 0.0f) {\n",
+         "        first, second);\n    if (g_state->dampK > 0.0f) {\n"),
+        ("damp-api-site-ids", "action", "    DampGetDevice = 96,",
+         "    DampGetDevice = 95,"),
         ("borrowed-pointers", "module", "    ++s->seenThisFrame;",
          "    context->AddRef();\n    ++s->seenThisFrame;"),
     ]
     for label, target, old, new in mutations:
-        changed = replace_once({"core": core, "module": module}[target], old, new)
+        changed = replace_once({"core": core, "module": module, "action": action}[target], old, new)
         failures = pins(changed if target == "core" else core,
-                        changed if target == "module" else module, header)
+                        changed if target == "module" else module, header,
+                        changed if target == "action" else action, action_header)
         if label not in failures:
             raise AssertionError("mutation escaped %s: %s" % (label, sorted(failures)))
 
@@ -264,13 +315,13 @@ def self_test(core, module, header):
     moved = replace_once(core, begin, "")
     moved = replace_once(moved, "    if (s->dispatchSkipCount) {\n",
                          "    if (s->dispatchSkipCount) {\n" + begin)
-    if "skip-before-ticket" not in pins(moved, module, header):
+    if "skip-before-ticket" not in pins(moved, module, header, action, action_header):
         raise AssertionError("Begin inside the whole skip block escaped")
 
     # Add a forward inside the Complete guard as well as the Begin guard above.
     complete = "        exposurePluginCompleteDispatch(\n"
     changed = replace_once(core, complete, "        s->realDispatch(self, x, y, z);\n" + complete)
-    if "forward-outside-guards" not in pins(changed, module, header):
+    if "forward-outside-guards" not in pins(changed, module, header, action, action_header):
         raise AssertionError("forward inside Complete guard escaped")
 
     # Rearranging frame calls around skip-counter clearing must fail even
@@ -280,13 +331,13 @@ def self_test(core, module, header):
     moved = replace_once(core, reset, "")
     moved = replace_once(moved, "    for (uint32_t i = 0; i < 4; ++i) s->dispatchOccSeen[i] = 0;\n",
                          "    for (uint32_t i = 0; i < 4; ++i) s->dispatchOccSeen[i] = 0;\n" + reset)
-    if "frame-order" not in pins(moved, module, header):
+    if "frame-order" not in pins(moved, module, header, action, action_header):
         raise AssertionError("reset after skip-counter clear escaped")
     expire = ("    exposurePluginExpireDispatchVerdicts(\n"
               "        static_cast<plugins::exposure::ExposureDispatchObserverState*>(s));\n")
     moved = replace_once(core, expire, "")
     moved = replace_once(moved, reset, reset + expire)
-    if "frame-order" not in pins(moved, module, header):
+    if "frame-order" not in pins(moved, module, header, action, action_header):
         raise AssertionError("expiry before skip-counter clear escaped")
     return len(mutations) + 4
 
@@ -297,14 +348,15 @@ def main():
     mode.add_argument("--dry-run", action="store_true", help="check source pins without writing")
     mode.add_argument("--self-test", action="store_true", help="also run in-memory mutations")
     args = parser.parse_args()
-    core, module, header = (p.read_text(encoding="utf-8") for p in (CORE, MODULE, HEADER))
-    failures = pins(core, module, header)
+    core, module, header, action, action_header = (
+        p.read_text(encoding="utf-8") for p in (CORE, MODULE, HEADER, ACTION, ACTION_HEADER))
+    failures = pins(core, module, header, action, action_header)
     if failures:
         for failure in sorted(failures):
             print("FAIL:", failure)
         return 1
     if args.self_test:
-        count = self_test(core, module, header)
+        count = self_test(core, module, header, action, action_header)
         print("PASS: exposure dispatch source order (%d in-memory mutations; no writes)" % count)
     else:
         print("PASS: exposure dispatch source order (dry run; no writes)")

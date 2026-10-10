@@ -4,6 +4,7 @@
 #define EDVR_BINDING_SHADOW_EXTERNAL 1
 #define EDVR_EXPOSURE_DAMP_TEST 1
 #include "../../src/d3d11/exposure_fix.cpp"
+#include "../../src/plugins/exposure/exposure_actions.cpp"
 #include "../../src/d3d11/shader_registry.cpp"
 #include "../../src/common/system_d3d11.h"
 
@@ -279,15 +280,28 @@ int main(int argc, char** argv) {
     state.dampK = 0.5f;
     state.dampTau = 45.0f;
     edvr::g_state = &state;
+
+    ID3D11UnorderedAccessView* firstUavs[4] = {viewA.Get(), nullptr, nullptr, nullptr};
+    ID3D11UnorderedAccessView* secondUavs[4] = {viewB.Get(), nullptr, nullptr, nullptr};
+    state.copyMask = 1;
     openWindow(ownerCtx, true);
-    edvr::exposureDamp(ownerCtx, viewA.Get()); // no sun
+    edvr::plugins::exposure::exposurePluginShareExposure(
+        &state, ownerCtx, firstUavs, secondUavs);
+    check(owner.calls.copy == 1 && state.applied == 1 && !state.rejected,
+          "production share action copies a compatible resource pair");
+    verifyWindow(closeWindow(true), 0, 0, 0,
+                 "resource sharing is outside Exposure damper API sites");
+    owner.calls = {};
+
+    openWindow(ownerCtx, true);
+    edvr::plugins::exposure::exposurePluginDamp(&state, ownerCtx, viewA.Get()); // no sun
     check(owner.calls.getDevice == 0 && owner.calls.copy == 0 &&
           owner.calls.map == 0, "sun decline avoids the measured D3D calls");
     g_sunSeen = g_now;
-    edvr::exposureDamp(ownerCtx, nullptr); // missing first eye
-    edvr::exposureDamp(ownerCtx, viewA.Get()); // identity changes
+    edvr::plugins::exposure::exposurePluginDamp(&state, ownerCtx, nullptr); // missing first eye
+    edvr::plugins::exposure::exposurePluginDamp(&state, ownerCtx, viewA.Get()); // identity changes
     g_now += 1000;
-    edvr::exposureDamp(ownerCtx, viewA.Get()); // identity not settled
+    edvr::plugins::exposure::exposurePluginDamp(&state, ownerCtx, viewA.Get()); // identity not settled
     check(owner.calls.getDevice == 0 && owner.calls.copy == 0 &&
           owner.calls.map == 0, "UAV and settle declines avoid the measured D3D calls");
     verifyWindow(closeWindow(true), 0, 0, 0,
@@ -296,7 +310,7 @@ int main(int argc, char** argv) {
     g_now += 1000;
     owner.calls = {};
     openWindow(ownerCtx, true);
-    edvr::exposureDamp(ownerCtx, viewA.Get()); // allocate staging, queue first copy
+    edvr::plugins::exposure::exposurePluginDamp(&state, ownerCtx, viewA.Get()); // allocate staging, queue first copy
     check(owner.calls.getDevice == 1 && owner.calls.copy == 1 &&
           owner.calls.map == 0 && owner.calls.unmap == 0 &&
           owner.calls.update == 0 && state.dampPrevValid,
@@ -307,7 +321,7 @@ int main(int argc, char** argv) {
     g_now += 16;
     owner.calls = {};
     openWindow(ownerCtx, true);
-    edvr::exposureDamp(ownerCtx, viewA.Get());
+    edvr::plugins::exposure::exposurePluginDamp(&state, ownerCtx, viewA.Get());
     check(owner.calls.getDevice == 0 && owner.calls.copy == 1 &&
           owner.calls.map == 1 && owner.calls.unmap == 1 &&
           owner.calls.update == 2 && state.dampWrites == 1,
@@ -319,7 +333,7 @@ int main(int argc, char** argv) {
     owner.failMap = true;
     owner.calls = {};
     openWindow(ownerCtx, true);
-    edvr::exposureDamp(ownerCtx, viewA.Get());
+    edvr::plugins::exposure::exposurePluginDamp(&state, ownerCtx, viewA.Get());
     check(owner.calls.copy == 1 && owner.calls.map == 1 &&
           owner.calls.unmap == 0 && owner.calls.update == 0 &&
           state.dampWrites == 1,
@@ -330,7 +344,7 @@ int main(int argc, char** argv) {
 
     owner.calls = {};
     openWindow(ownerCtx, false);
-    edvr::exposureDamp(ownerCtx, viewA.Get());
+    edvr::plugins::exposure::exposurePluginDamp(&state, ownerCtx, viewA.Get());
     check(owner.calls.copy == 1 && owner.calls.map == 1 &&
           owner.calls.unmap == 1 && owner.calls.update == 2,
           "unsampled owner still executes the production damper");
@@ -339,7 +353,7 @@ int main(int argc, char** argv) {
 
     foreign.calls = {};
     openWindow(ownerCtx, true);
-    edvr::exposureDamp(foreignCtx, viewA.Get());
+    edvr::plugins::exposure::exposurePluginDamp(&state, foreignCtx, viewA.Get());
     check(foreign.calls.copy == 1 && foreign.calls.map == 1 &&
           foreign.calls.unmap == 1 && foreign.calls.update == 2,
           "foreign context still executes the production damper");
@@ -348,7 +362,9 @@ int main(int argc, char** argv) {
 
     owner.calls = {};
     openWindow(ownerCtx, true);
-    std::thread worker([&] { edvr::exposureDamp(ownerCtx, viewA.Get()); });
+    std::thread worker([&] {
+        edvr::plugins::exposure::exposurePluginDamp(&state, ownerCtx, viewA.Get());
+    });
     worker.join();
     check(owner.calls.copy == 1 && owner.calls.map == 1 &&
           owner.calls.unmap == 1 && owner.calls.update == 2,

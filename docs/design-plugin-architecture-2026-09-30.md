@@ -12,17 +12,17 @@
   generated manifests/config ownership, subscription-driven dispatch and a
   C-compatible interface. The add-on tier follows Phase 1. Graphics-only VR is
   a separate phase; supported settings remain owned by one plugin.
-- **Current integration:** main `a1609f2b` is merged. The exposure
-  dispatch observer checkpoint passes 158 full-build jobs plus config,
-  export and installer gates; receipt `9bc60c52` matches the source.
-  Steam retains measured `6ab758d2`.
-- **Module progress:** all intro implementations build in
-  `plugin_intro.lib`, with staged configure/frame/shutdown dispatch at
-  the original callsites and budgets. `plugin_exposure.lib` owns shape
-  classification, target dispatch accounting, eye pairing and verdict
-  expiry. Core retains exposure hooks, guards, config, frame scheduling
-  and D3D actions. Remaining registry/group migration, draw claims and
-  installer selection stay open; availability is unchanged.
+- **Current integration:** main `a1609f2b` is merged. Exposure actions
+  and installer selection-record groundwork pass 158 full-build jobs
+  plus config, export and installer gates; receipt `a3b59a22` matches
+  the source. Steam retains measured `6ab758d2`.
+- **Module progress:** intro implementations and staged lifecycle
+  dispatch build in `plugin_intro.lib`. `plugin_exposure.lib` owns
+  classification, eye pairing, verdict expiry, sharing and damping. Core
+  retains exposure hooks, guards, config and resource lifetime.
+  Installer records can preserve optional versioned selection metadata.
+  Remaining registry/group migration, draw claims, selection UI and
+  runtime gating stay open; availability is unchanged.
 
 - **Offline evidence:** FSS site 1 has a frozen legacy selector oracle,
   version-16 facts, seven-base-fact capacity and terminal X/6 action fixtures.
@@ -4109,3 +4109,63 @@ Remaining lifecycle/group migrations, draw claims, installer selection,
 whole-ladder replay and runtime CPU/GPU shipping acceptance remain
 required. Feature work may continue on this branch; the final matched
 performance comparison remains at rendering-code freeze.
+
+### 2026-10-10 — exposure actions and installer selection records
+
+Luna 6 agents implemented Exposure action ownership and optional
+installer selection-record groundwork in parallel. The existing single
+core State allocation now derives from the private Exposure action
+state, which derives from the observer state. Copy parameters,
+application count and damping fields retain their defaults. Resource
+compatibility, sharing and damping bodies, constants, timing and
+API-cost IDs 96–101 move into `plugin_exposure.lib`. The core adapter
+passes a fresh global-state projection to sharing, tests damping on the
+captured State, then passes another fresh global-state projection to
+damping. This preserves the old helpers' separate state reads and
+share-before-damp ordering. Core keeps
+hook/forward/guard/skip/census/skin routing, configuration, the
+damping-active accessor, frame scheduling, failed-install deletion and
+successful-shutdown staging releases. No resource destructor or state
+allocation was added.
+
+The WARP fixture executes the moved production action code while
+preserving its fake clock, binding/glare services and real resources.
+The host source-order gate retains the whole skip block,
+profile/world/foreign exits, both original guards and the real Dispatch
+outside them. Its bridge checks now require captured-state gating and
+the separate current-state arguments. The existing observer fixture
+remains a production-module test with fake pair actions. These offline
+checks establish the covered semantics; they do not execute the live
+hook or establish runtime CPU/GPU acceptance.
+
+Installer records distinguish absent plugin metadata, supported
+version-1 selections and opaque metadata. Supported records carry
+catalog schema 2, resolved IDs and an independent VR/flat selection
+profile. The independent profile prevents a copied record from silently
+rebinding a previous selection when the installer changes the installed
+edition. Explicit empty selection differs from legacy absence. Partial,
+malformed, duplicate, unsupported and unknown-key records remain opaque
+and preserve their plugin-section bytes when serialized. The existing
+component inventory, legacy record presence, settings flows and
+no-plugin serialization remain unchanged. The planner still does not
+create selections; UI and runtime consumption stay open. Tests cover
+codec compatibility, empty/nonempty records, opaque preservation and
+profile-switch copying. This groundwork does not make any catalog row
+available for selection.
+
+The initial full build passed, but independent review identified a
+malformed-header scope edge that its byte-only fixture did not cover: an
+unterminated plugin header is a comment to the INI reader, and following
+keys could acquire native-section meaning if moved after the generated
+native record. A mid-tier repair preserves the original bytes with an
+explicit plugin-section context guard when needed. Its fixtures check
+unchanged install-state meaning, edition changes and stable
+serialization after that first guard. The repaired source then passed
+the full absolute build: all 158 jobs, the 125-key config contract,
+exports and self-contained installer gates. Receipt:
+`a3b59a22b32c7e7fa7f6415dbbd78419ad59b1db753add73f140c5f251bf642f`. No
+Steam install, live settings edit or flight occurred. Remaining
+lifecycle/group migrations, draw claims, selection UI/runtime gating,
+whole-ladder replay and runtime CPU/GPU shipping acceptance remain
+required. The feature branch stays isolated from main, and the final
+matched performance comparison remains at rendering-code freeze.

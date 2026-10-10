@@ -303,6 +303,7 @@ python "tools\check_plugin_boundaries.py" --quiet --require-plugin cockpit_visua
     --require-source src\plugins\intro\splash_dim.cpp ^
     --require-plugin exposure --require-source src\plugins\exposure\exposure_shape.cpp ^
     --require-source src\plugins\exposure\exposure_dispatch.cpp ^
+    --require-source src\plugins\exposure\exposure_actions.cpp ^
     --include-dir "%GEN%" || exit /b 1
 
 if not exist "%OBJ%\plugins\cockpit_visuals" mkdir "%OBJ%\plugins\cockpit_visuals"
@@ -338,10 +339,12 @@ if errorlevel 1 ( echo [edvr] ERROR: intro plugin library failed & exit /b 1 )
 if not exist "%OBJ%\plugins\exposure" mkdir "%OBJ%\plugins\exposure"
 del /q "%OBJ%\plugins\exposure\*.obj" 2>nul
 cl.exe %CFLAGS% /Fo"%OBJ%\plugins\exposure\\" ^
-    "src\plugins\exposure\exposure_shape.cpp" "src\plugins\exposure\exposure_dispatch.cpp"
+    "src\plugins\exposure\exposure_shape.cpp" "src\plugins\exposure\exposure_dispatch.cpp" ^
+    "src\plugins\exposure\exposure_actions.cpp"
 if errorlevel 1 ( echo [edvr] ERROR: exposure plugin compile failed & exit /b 1 )
 lib.exe /nologo /OUT:"%OBJ%\plugins\exposure\plugin_exposure.lib" ^
-    "%OBJ%\plugins\exposure\exposure_shape.obj" "%OBJ%\plugins\exposure\exposure_dispatch.obj"
+    "%OBJ%\plugins\exposure\exposure_shape.obj" "%OBJ%\plugins\exposure\exposure_dispatch.obj" ^
+    "%OBJ%\plugins\exposure\exposure_actions.obj"
 if errorlevel 1 ( echo [edvr] ERROR: exposure plugin library failed & exit /b 1 )
 
 echo [edvr] === d3d11.dll ===

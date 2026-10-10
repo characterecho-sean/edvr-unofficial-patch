@@ -61,8 +61,8 @@ void exposurePluginCompleteDispatch(void* state, ExposureDispatchTicket ticket,
 void exposurePluginResetDispatchFrame(void* state);
 void exposurePluginExpireDispatchVerdicts(void* state);
 
-// Core-owned D3D actions remain behind this direct bridge so the observer
-// module owns dispatch classification/pairing without owning the damper.
+// The core adapter preserves the original hook state/lifetime seam, then calls
+// the exposure action module directly for sharing and damping.
 void exposureDispatchApplyPair(void* state, ID3D11DeviceContext* context,
                                ID3D11UnorderedAccessView** first,
                                ID3D11UnorderedAccessView** second);
