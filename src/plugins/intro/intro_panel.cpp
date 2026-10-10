@@ -1,4 +1,4 @@
-#include "intro_panel.h"
+#include "../../d3d11/intro_panel.h"
 
 #include <windows.h>
 
@@ -9,15 +9,15 @@
 
 #include <string>
 
-#include "../common/config.h"
-#include "../common/intro_mode.h"
-#include "../common/guard.h"
-#include "../common/log.h"
-#include "../common/frame_flag.h"   // headForward / eyeTangents, from the vr half
-#include "binding_shadow.h"
-#include "intro_curve_math.h"   // introCbLooksScreenSpace: the screen-space test, one rule for the movie's refusal and the splash's reading
-#include "intro_upscale.h"
-#include "panel_curve.h"        // fix.panel_curvature, and whether the surface strip is wanted
+#include "../../common/config.h"
+#include "../../common/intro_mode.h"
+#include "../../common/guard.h"
+#include "../../common/log.h"
+#include "../../common/frame_flag.h"   // headForward / eyeTangents, from the vr half
+#include "../../d3d11/binding_shadow.h"
+#include "../../d3d11/intro_curve_math.h"   // introCbLooksScreenSpace: the screen-space test, one rule for the movie's refusal and the splash's reading
+#include "../../d3d11/intro_upscale.h"
+#include "../../d3d11/panel_curve.h"        // fix.panel_curvature, and whether the surface strip is wanted
 
 namespace edvr {
 namespace {

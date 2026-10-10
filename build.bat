@@ -296,6 +296,11 @@ python "tools\check_plugin_boundaries.py" --quiet --require-plugin cockpit_visua
     --require-plugin intro --require-source src\plugins\intro\intro_skip.cpp ^
     --require-source src\plugins\intro\intro_upscale.cpp ^
     --require-source src\plugins\intro\intro_lifecycle.cpp ^
+    --require-source src\plugins\intro\intro_panel.cpp ^
+    --require-source src\plugins\intro\intro_curve.cpp ^
+    --require-source src\plugins\intro\backdrop_fix.cpp ^
+    --require-source src\plugins\intro\loader_panel.cpp ^
+    --require-source src\plugins\intro\splash_dim.cpp ^
     --require-plugin exposure --require-source src\plugins\exposure\exposure_shape.cpp ^
     --include-dir "%GEN%" || exit /b 1
 
@@ -312,11 +317,21 @@ if not exist "%OBJ%\plugins\intro" mkdir "%OBJ%\plugins\intro"
 del /q "%OBJ%\plugins\intro\*.obj" 2>nul
 cl.exe %CFLAGS% /Fo"%OBJ%\plugins\intro\\" ^
     "src\plugins\intro\intro_skip.cpp" "src\plugins\intro\intro_upscale.cpp" ^
-    "src\plugins\intro\intro_lifecycle.cpp"
+    "src\plugins\intro\intro_lifecycle.cpp" ^
+    "src\plugins\intro\intro_panel.cpp" ^
+    "src\plugins\intro\intro_curve.cpp" ^
+    "src\plugins\intro\backdrop_fix.cpp" ^
+    "src\plugins\intro\loader_panel.cpp" ^
+    "src\plugins\intro\splash_dim.cpp"
 if errorlevel 1 ( echo [edvr] ERROR: intro plugin compile failed & exit /b 1 )
 lib.exe /nologo /OUT:"%OBJ%\plugins\intro\plugin_intro.lib" ^
     "%OBJ%\plugins\intro\intro_skip.obj" "%OBJ%\plugins\intro\intro_upscale.obj" ^
-    "%OBJ%\plugins\intro\intro_lifecycle.obj"
+    "%OBJ%\plugins\intro\intro_lifecycle.obj" ^
+    "%OBJ%\plugins\intro\intro_panel.obj" ^
+    "%OBJ%\plugins\intro\intro_curve.obj" ^
+    "%OBJ%\plugins\intro\backdrop_fix.obj" ^
+    "%OBJ%\plugins\intro\loader_panel.obj" ^
+    "%OBJ%\plugins\intro\splash_dim.obj"
 if errorlevel 1 ( echo [edvr] ERROR: intro plugin library failed & exit /b 1 )
 
 if not exist "%OBJ%\plugins\exposure" mkdir "%OBJ%\plugins\exposure"
@@ -597,11 +612,8 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\ui_depth.cpp" ^
     "src\d3d11\ui_layer.cpp" "src\d3d11\ui_surfaces.cpp" "src\d3d11\ui_panel_scale.cpp" "src\d3d11\orbital_width.cpp" "src\d3d11\supercruise_bars.cpp" ^
     "third_party\dxbc_hash\DxilHash.cpp" ^
-    "src\d3d11\backdrop_fix.cpp" ^
     "src\d3d11\scrim_fix.cpp" ^
     "src\d3d11\quad_probe.cpp" ^
-    "src\d3d11\intro_panel.cpp" ^
-    "src\d3d11\intro_curve.cpp" ^
     "src\d3d11\temporal_pass.cpp" ^
     "src\d3d11\depth_probe.cpp" ^
     "src\d3d11\luma_probe.cpp" ^
@@ -610,8 +622,6 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\fsr3_engine.cpp" ^
     "src\d3d11\sharpen_pass.cpp" ^
     "src\d3d11\flat_sharpen.cpp" "src\d3d11\flat_ui_layer.cpp" ^
-    "src\d3d11\loader_panel.cpp" ^
-    "src\d3d11\splash_dim.cpp" ^
     "src\d3d11\billboard_fix.cpp" ^
     "src\d3d11\particle_fix.cpp" "src\d3d11\shader_swap.cpp" "src\d3d11\sunglare_fix.cpp"
 if errorlevel 1 ( echo [edvr] ERROR: compile failed & exit /b 1 )
@@ -2842,7 +2852,7 @@ cl.exe /I"%GEN%" /nologo /c /O2 /Gy /Gw /MT /std:c++17 /EHsc /W4 /GR- ^
     /DEDVR_VSCREEN_PREDICATE_TEST /DEDVR_VERSION_STRING=\"%EDVR_VER%\" %NGXFLAGS% %FSRFLAGS% ^
     /Fo"%OBJ%\vscreenpredicate\\" ^
     "tools\vscreen_predicate_test\vscreen_predicate_test.cpp" ^
-    "src\d3d11\vscreen.cpp" "src\d3d11\ui_layer.cpp" "src\d3d11\draw_ladder_trace.cpp" "src\d3d11\loader_panel.cpp" "src\d3d11\target_sharp.cpp" "src\d3d11\sunglare_fix.cpp"
+    "src\d3d11\vscreen.cpp" "src\d3d11\ui_layer.cpp" "src\d3d11\draw_ladder_trace.cpp" "src\plugins\intro\loader_panel.cpp" "src\d3d11\target_sharp.cpp" "src\d3d11\sunglare_fix.cpp"
 if errorlevel 1 ( echo [edvr] ERROR: VScreen predicate test compile failed & exit /b 1 )
 > "%OBJ%\vscreenpredicate\production_objects.rsp" (
     for %%F in ("%OBJ%\d3d11\*.obj") do (
@@ -2871,7 +2881,7 @@ cl.exe /I"%GEN%" /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
     /DEDVR_VERSION_STRING=\"%EDVR_VER%\" ^
     /Fo"%OBJ%\loaderpanelapi\\" /Fe"%BUILD%\loader_panel_api_test.exe" ^
     "tools\loader_panel_api_test\loader_panel_api_test.cpp" ^
-    "src\d3d11\loader_panel.cpp" "src\d3d11\plugin_cost.cpp" ^
+    "src\plugins\intro\loader_panel.cpp" "src\d3d11\plugin_cost.cpp" ^
     "src\common\guard.cpp" ^
     "src\common\vtable_hook.cpp" "src\common\code_hook.cpp" ^
     /link /INCREMENTAL:NO /OPT:REF kernel32.lib user32.lib version.lib
@@ -2902,7 +2912,7 @@ cl.exe /I"%GEN%" /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
     /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
     /Fo"%OBJ%\splashdimapi\\" /Fe"%BUILD%\splash_dim_api_test.exe" ^
     "tools\splash_dim_api_test\splash_dim_api_test.cpp" ^
-    "src\d3d11\splash_dim.cpp" "src\d3d11\binding_shadow.cpp" ^
+    "src\plugins\intro\splash_dim.cpp" "src\d3d11\binding_shadow.cpp" ^
     "src\d3d11\shader_swap.cpp" "src\d3d11\plugin_cost.cpp" ^
     "src\common\guard.cpp" "src\common\vtable_hook.cpp" "src\common\code_hook.cpp" ^
     /link /INCREMENTAL:NO /OPT:REF d3dcompiler.lib
@@ -4287,12 +4297,12 @@ exit /b 0
 
 :rig_intro_curve_test
 echo [edvr] === intro_curve_test.exe ===
-REM src\d3d11\intro_panel.cpp for real (movie world lock, splash refusal, screen-space test, config, retirement) on WARP, goldens bit for bit;
+REM src\plugins\intro\intro_panel.cpp for real (movie world lock, splash refusal, screen-space test, config, retirement) on WARP, goldens bit for bit;
 REM one process per scenario because the module's latches cannot be reset. tools\intro_curve_test\mutants.py --self-test holds the mutation list to the module.
 if not exist "%OBJ%\introcurve" mkdir "%OBJ%\introcurve"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /I"%GEN%" /I"src\d3d11" ^
     /Fo"%OBJ%\introcurve\\" /Fe"%OBJ%\introcurve\intro_curve_test.exe" ^
-    "tools\intro_curve_test\intro_curve_test.cpp" "src\d3d11\intro_panel.cpp" "src\d3d11\panel_curve.cpp" ^
+    "tools\intro_curve_test\intro_curve_test.cpp" "src\plugins\intro\intro_panel.cpp" "src\d3d11\panel_curve.cpp" ^
     "src\common\config.cpp" "src\common\log.cpp" "src\common\guard.cpp" "src\common\proxy.cpp" ^
     /link /INCREMENTAL:NO user32.lib version.lib
 if errorlevel 1 ( echo [edvr] ERROR: intro_curve_test build failed & exit /b 1 )
@@ -4325,7 +4335,7 @@ exit /b 0
 
 :rig_intro_curve_module_test
 echo [edvr] === intro_curve_module_test.exe ===
-REM The splash's recogniser (src\d3d11\intro_curve.cpp; fix.panel_curvature, the game-placed composite the movie's vertex shader draws)
+REM The splash's recogniser (src\plugins\intro\intro_curve.cpp; fix.panel_curvature, the game-placed composite the movie's vertex shader draws)
 REM compiled for real with the real Config, Log, fault guard and the real strip (panel_curve.cpp's surface API, drawing through a
 REM recording draw function), on a WARP device with the game's state bound: 80-byte constant buffers at VS slot 2 holding the game's
 REM two real splash captures and the movie's stock constants, decoys in the slots round them, the sampled surface in the binding
@@ -4343,7 +4353,7 @@ if not exist "%OBJ%\introcurvemodule" mkdir "%OBJ%\introcurvemodule"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /DEDVR_INTRO_CURVE_RIG ^
     /DINTRO_CURVE_RIG_REAL_STRIP /I"%GEN%" /I"src\d3d11" ^
     /Fo"%OBJ%\introcurvemodule\\" /Fe"%OBJ%\introcurvemodule\intro_curve_module_test.exe" ^
-    "tools\intro_curve_module_test\intro_curve_module_test.cpp" "src\d3d11\intro_curve.cpp" "src\d3d11\panel_curve.cpp" ^
+    "tools\intro_curve_module_test\intro_curve_module_test.cpp" "src\plugins\intro\intro_curve.cpp" "src\d3d11\panel_curve.cpp" ^
     "src\common\config.cpp" "src\common\log.cpp" "src\common\guard.cpp" "src\common\proxy.cpp" ^
     /link /INCREMENTAL:NO user32.lib version.lib
 if errorlevel 1 ( echo [edvr] ERROR: intro_curve_module_test build failed & exit /b 1 )
@@ -4367,7 +4377,7 @@ REM Built under obj\ and taking System32's device through src\common\system_d3d1
 if not exist "%OBJ%\surfacestrip" mkdir "%OBJ%\surfacestrip"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /I"%GEN%" /I"src\d3d11" ^
     /Fo"%OBJ%\surfacestrip\\" /Fe"%OBJ%\surfacestrip\surface_strip_render_test.exe" ^
-    "tools\surface_strip_render_test\surface_strip_render_test.cpp" "src\d3d11\intro_panel.cpp" "src\d3d11\intro_curve.cpp" "src\d3d11\panel_curve.cpp" ^
+    "tools\surface_strip_render_test\surface_strip_render_test.cpp" "src\plugins\intro\intro_panel.cpp" "src\plugins\intro\intro_curve.cpp" "src\d3d11\panel_curve.cpp" ^
     "src\common\config.cpp" "src\common\log.cpp" "src\common\guard.cpp" "src\common\proxy.cpp" ^
     /link /INCREMENTAL:NO user32.lib version.lib d3dcompiler.lib
 if errorlevel 1 ( echo [edvr] ERROR: surface_strip_render_test build failed & exit /b 1 )

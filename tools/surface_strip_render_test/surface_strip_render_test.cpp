@@ -1,4 +1,5 @@
 // The surface strip, RENDERED (job 4, the mirror fix; docs/intro-video.md).
+// This rig links src/plugins/intro/intro_panel.cpp and intro_curve.cpp with src/d3d11/panel_curve.cpp.
 //
 // Every other rig pins the strip's numbers: its bytes, its flags, its state. None of them draws a picture, and the first flight of the curved movie and
 // splash came out MIRRORED left to right with every one of those numbers right: the strip's u ran with its x, and the intro composite's placement has

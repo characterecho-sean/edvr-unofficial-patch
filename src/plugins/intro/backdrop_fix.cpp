@@ -1,17 +1,17 @@
 #include "temporal_shader_bytecode.h"
-#include "backdrop_fix.h"
+#include "../../d3d11/backdrop_fix.h"
 
 #include <windows.h>
 
 #include <d3d11.h>
 
-#include "../common/config.h"
-#include "../common/intro_mode.h"
-#include "../common/guard.h"
-#include "../common/log.h"
-#include "binding_shadow.h"
-#include "journal_watch.h"
-#include "shader_swap.h"
+#include "../../common/config.h"
+#include "../../common/intro_mode.h"
+#include "../../common/guard.h"
+#include "../../common/log.h"
+#include "../../d3d11/binding_shadow.h"
+#include "../../d3d11/journal_watch.h"
+#include "../../d3d11/shader_swap.h"
 
 namespace edvr {
 

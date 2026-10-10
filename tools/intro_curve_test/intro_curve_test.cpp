@@ -1,4 +1,4 @@
-// The intro movie's world-lock path and the splash, as src/d3d11/intro_panel.cpp does them TODAY (characterisation, written before the
+// The intro movie's world-lock path and the splash, as src/plugins/intro/intro_panel.cpp does them TODAY (characterisation, written before the
 // panels follow fix.panel_curvature; docs/intro-video.md, docs/frontier-intro-video-report.md).
 //
 // The change to come must leave this module byte-identical at curvature 0, so this rig pins what the real module does now, on a WARP

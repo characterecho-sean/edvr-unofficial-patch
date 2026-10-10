@@ -1,4 +1,4 @@
-#include "loader_panel.h"
+#include "../../d3d11/loader_panel.h"
 
 #include <windows.h>
 
@@ -9,12 +9,12 @@
 #include <string>
 #include <vector>
 
-#include "../common/config.h"
-#include "../common/runtime_profile.h"
-#include "../common/intro_mode.h"
-#include "../common/guard.h"
-#include "../common/log.h"
-#include "loader_panel_cost_sites.h"
+#include "../../common/config.h"
+#include "../../common/runtime_profile.h"
+#include "../../common/intro_mode.h"
+#include "../../common/guard.h"
+#include "../../common/log.h"
+#include "../../d3d11/loader_panel_cost_sites.h"
 
 namespace edvr {
 

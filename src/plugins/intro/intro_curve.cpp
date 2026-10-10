@@ -1,4 +1,4 @@
-#include "intro_curve.h"
+#include "../../d3d11/intro_curve.h"
 
 #include <windows.h>
 
@@ -8,11 +8,11 @@
 #include <cstring>
 #include <new>
 
-#include "../common/guard.h"
-#include "../common/log.h"
-#include "binding_shadow.h"
-#include "intro_curve_math.h"
-#include "panel_curve.h"
+#include "../../common/guard.h"
+#include "../../common/log.h"
+#include "../../d3d11/binding_shadow.h"
+#include "../../d3d11/intro_curve_math.h"
+#include "../../d3d11/panel_curve.h"
 
 namespace edvr {
 namespace {

@@ -13,14 +13,14 @@
   C-compatible interface. The add-on tier follows Phase 1. Graphics-only VR is
   a separate phase; supported settings remain owned by one plugin.
 - **Current integration:** main `a1609f2b` is merged. The intro
-  lifecycle checkpoint passes 157 full-build jobs plus config, export
-  and installer gates; receipt `d689c2a8` matches the source. Steam
+  ownership checkpoint passes 157 full-build jobs plus config, export
+  and installer gates; receipt `bb56131d` matches the source. Steam
   retains measured `6ab758d2`.
-- **Module progress:** intro skip/upscale configure, frame and teardown
-  now use direct registry slots at their original core callsites.
-  Intro/exposure libraries and the core shader registry are validated;
-  the offline selection model rejects unavailable plugins. Remaining
-  group ownership and installer selection are open; availability is
+- **Module progress:** intro video, panel, curve, backdrop, loading
+  hologram and splash dim implementations build in `plugin_intro.lib`.
+  Video lifecycle uses direct registry slots; other callsites keep their
+  original order. Remaining registry/group migration, the exposure
+  dispatch observer and installer selection are open; availability is
   unchanged.
 
 - **Offline evidence:** FSS site 1 has a frozen legacy selector oracle,
@@ -3948,3 +3948,56 @@ ownership, remaining groups, installer selection, whole-ladder replay
 and runtime CPU/GPU shipping acceptance remain open. Feature development
 can use the branch; the final matched performance pair remains scheduled
 for rendering-code freeze.
+
+### 2026-10-10 — remaining intro source ownership
+
+Luna 6 moved `intro_panel.cpp`, `intro_curve.cpp`, `backdrop_fix.cpp`,
+`loader_panel.cpp` and `splash_dim.cpp` from graphics core to
+`src/plugins/intro/`. Root preservation checks compare each against
+`3ecf2ae9`: the complete implementation matches after resolving include
+paths, and each public header remains unchanged. Both generated shader
+includes stay unqualified for `build/gen`. The build requires all
+migrated paths, compiles them into `plugin_intro.lib` and links the
+archive through the existing production/benchmark graph. Specialized
+rigs compile the same relocated sources, including the macro-enabled
+loading producer in the actual VScreen predicate fixture. No hook, draw
+predicate, configure order, config value or census field changed.
+
+The three intro/surface mutation harnesses now find the relocated
+modules. Their temporary source copies resolve public/core headers
+through include directories while retaining mutated sibling headers
+first. All three Python self-tests and dry-run snapshots pass. Native
+controls and one selected header mutation per harness also pass: the
+control survives and the mutation is caught for `ss-always-true`,
+`math-gate-dropped-unknown-armed` and `xdir-rule-sign-flipped`. This
+checks actual copied-source compilation and header precedence, rather
+than relying on self-test source assertions alone. Existing WARP pixel,
+curvature, loading API, lifecycle and VScreen producer fixtures remain
+in the full gate.
+
+The exposure review identified a provisional direct begin/complete
+dispatch observer seam for the next behavioral ownership move. Begin
+must classify inside the existing guard after census/probes/skin/skip
+handling; Complete must count eyes and capture first-eye UAVs only after
+the real game dispatch, then preserve sharing/damping order. Root review
+corrected an initial pre-dispatch capture suggestion using the current
+hook's post-forward block as evidence. Core retains
+flat/internal/foreign forwarding, hook ownership and unrelated
+observers. Lifecycle must preserve current allocation-before-attach,
+failure delete/null edges, successful commit/config order and
+retained-but-disabled shutdown state. An actual observer-path fixture
+and retained skin/flat order pins are required before that move; the
+existing damper WARP rig does not exercise this observer chain. No
+exposure behavioral code changed in this checkpoint.
+
+The full absolute build passed all 157 jobs, the 125-key config
+contract, exports and the self-contained installer. Receipt:
+`bb56131d5abf5975b4da403ac6cfa00b1a2ca66231851426dcc3bd962cf869e4`. The
+three selected native header mutations were caught before the full gate.
+No Steam install, live settings edit or flight occurred. Physical source
+ownership is further along; Intro still has only partial registry
+lifecycle support and no selection availability. Remaining
+registry/group migrations, installer selection, whole-ladder replay and
+runtime CPU/GPU shipping acceptance stay open. Feature work can continue
+on this branch; the final matched performance pair remains at
+rendering-code freeze.

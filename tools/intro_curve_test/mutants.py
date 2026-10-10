@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The mutation proof for tools\\intro_curve_test: the rig fails when a rule of the intro panel's module is flipped.
 
-The rig (intro_curve_test.cpp) runs the REAL src\\d3d11\\intro_panel.cpp on a WARP device, one process per scenario (the module's latches
+The rig (intro_curve_test.cpp) runs the REAL src\\plugins\\intro\\intro_panel.cpp on a WARP device, one process per scenario (the module's latches
 cannot be reset), and prints "FAIL: <scenario>.<what>" for every check that breaks. A rig that passes proves little until it is seen to FAIL
 on a module that breaks the rule it pins. This tool does that: for each mutation below it copies intro_panel.cpp into a temp directory OUTSIDE
 the repo, applies one textual edit (or a few that belong together), compiles the module against that copy, links the rig with the unmutated
@@ -40,7 +40,9 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 SRC = ROOT / "src" / "d3d11"
-MODULE = SRC / "intro_panel.cpp"
+INTRO = ROOT / "src" / "plugins" / "intro"
+COMMON_HEADERS = ROOT / "src" / "common"
+MODULE = INTRO / "intro_panel.cpp"
 MATH_H = SRC / "intro_curve_math.h"   # the screen-space rule lives here now (S1's pure header); its mutations edit this copy, beside the module's
 FILES = {"cpp": MODULE, "h": MATH_H}
 RIG = HERE / "intro_curve_test.cpp"
@@ -395,6 +397,13 @@ def read_source(path):
     return path.read_bytes().decode("utf-8").replace("\r\n", "\n")
 
 
+def fixture_source(text):
+    # The production file now names core headers relative to src/plugins/intro.
+    # A fixture copy lives outside the checkout, so resolve those names through
+    # include directories while keeping its sibling mutated header first.
+    return text.replace('../../d3d11/', '').replace('../../common/', '')
+
+
 def fail_labels(output):
     """Every check label the rig printed on a 'FAIL: <scenario>.<what>' line (the text up to ' -- ', ' [' or the end of the line); the
     rig's summary lines ('FAIL: golden: 3 of 143 checks failed', 'FAIL: intro curve: ...') are not labels."""
@@ -524,12 +533,12 @@ def run_all(only=None, jobs=None, keep=False, dry_run=False, verbose=False, out=
     gen = find_gen()
     tc = Toolchain()
     sources = {k: read_source(p) for k, p in FILES.items()}
-    module_text = sources["cpp"]
+    module_text = fixture_source(sources["cpp"])
     work = Path(tempfile.mkdtemp(prefix="icm_"))
     workers = jobs or min(4, os.cpu_count() or 2)
     try:
         # The control: the unmutated module and the rig, built the way every mutation is, and every common source compiled once.
-        base_inc = ([gen] if gen else []) + [SRC]
+        base_inc = ([gen] if gen else []) + [SRC, COMMON_HEADERS]
         common_dir = work / "c"
         common_dir.mkdir()
         control_dir = work / "k"
@@ -564,8 +573,8 @@ def run_all(only=None, jobs=None, keep=False, dry_run=False, verbose=False, out=
                 return m, "badedit", str(error)
             d = work / ("m%02d" % index)
             d.mkdir()
-            # the module is compiled from this directory, and a mutated header sits beside it: a quoted include finds it before src\d3d11's
-            (d / "intro_panel.cpp").write_text(mutated if m.file == "cpp" else module_text, encoding="utf-8", newline="\n")
+            # the fixture module and mutated header sit together: a quoted include finds the mutated sibling before checkout include directories
+            (d / "intro_panel.cpp").write_text(fixture_source(mutated) if m.file == "cpp" else module_text, encoding="utf-8", newline="\n")
             if m.file == "h":
                 (d / MATH_H.name).write_text(mutated, encoding="utf-8", newline="\n")
             code, text, mobj = compile_obj(tc, d / "intro_panel.cpp", d, [d] + base_inc)
@@ -652,7 +661,7 @@ def self_test(build_bat=BUILD_BAT):
     # the module still has the sources and headers the rig stubs against
     check(MODULE.is_file() and MATH_H.is_file() and (SRC / "intro_panel.h").is_file() and (SRC / "intro_upscale.h").is_file() and (SRC / "panel_curve.h").is_file() and
           (SRC / "screen_motion.h").is_file(), "the module's headers are where the rig includes them from")
-    check('#include "intro_curve_math.h"' in sources["cpp"], "intro_panel.cpp includes intro_curve_math.h (the screen-space rule's mutations edit a copy of that header beside the module)")
+    check('#include "../../d3d11/intro_curve_math.h"' in sources["cpp"] and '#include "intro_curve_math.h"' in fixture_source(sources["cpp"]), "the moved module resolves its production header and fixture copies still prefer the mutated sibling header")
 
     # build.bat compiles the rig the way this tool does, and runs this tool's self-test
     bat = Path(build_bat).read_bytes().decode("utf-8", errors="replace")
@@ -663,7 +672,7 @@ def self_test(build_bat=BUILD_BAT):
         cl = next((l for l in block if l.strip().lower().startswith("cl.exe")), "")
         for flag in CL_FLAGS:
             check(flag in cl, "build.bat's rig compile has %s" % flag)
-        for src in ("tools\\intro_curve_test\\intro_curve_test.cpp", "src\\d3d11\\intro_panel.cpp", "src\\d3d11\\panel_curve.cpp", "src\\common\\config.cpp",
+        for src in ("tools\\intro_curve_test\\intro_curve_test.cpp", "src\\plugins\\intro\\intro_panel.cpp", "src\\d3d11\\panel_curve.cpp", "src\\common\\config.cpp",
                     "src\\common\\log.cpp", "src\\common\\guard.cpp", "src\\common\\proxy.cpp"):
             check(src in cl, "build.bat's rig compile has %s (the sources this tool links)" % src)
         check('/I"src\\d3d11"' in cl, "build.bat's rig compile finds the headers through /I src\\d3d11")
