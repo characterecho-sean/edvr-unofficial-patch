@@ -1154,7 +1154,7 @@ static void retiredKeyScan(const std::wstring& root) {
     const std::string live =
         "advanced.temporal_aa_jitter_phases = 8\n"           // the live flat jitter cycle: a retired name starts it
         "advanced.texture_lod_bias = 0\n"
-        "advanced.cull_guard_channel = 0\n";
+        "advanced.vr_camera_census = 0\n";   // (cull_guard_channel stood here while it was live; main retired it)
     if (found == kRetiredKeyCount && !spellsRetiredKey(live))
         ok(("the retired-key scan finds each of the " + std::to_string(kRetiredKeyCount) +
             " names in a read, a message and a comment, and passes the live keys beside them").c_str());
