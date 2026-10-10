@@ -38,11 +38,14 @@ system scanners the body renders as a featureless black disc in the right eye
 and correctly in the left — silhouette intact, markers and scanner UI fine in
 both (Frontier issue
 [78021](https://issues.frontierstore.net/issue-detail/78021)). The game issues
-the second eye's lighting draw with one of its inputs missing. EDVR lends that
-draw the input the first eye just used, for that one draw, put back exactly as
-found. Present on some machines and absent on others; on a machine without the
-bug it never engages. `fix.scanner_body = on`.
-*[scanner-body.md](scanner-body.md).*
+the second eye's lighting draw with its vertex buffer missing, because the
+game's own cache of what it last bound goes stale after two draws that use no
+vertex buffer. EDVR makes that cache agree with what the game asked for, at the
+entry of the game's own input-assembler flush, before the flush binds it. Always
+on, no setting; present on some machines and absent on others, and on a machine
+without the bug it finds nothing to repair. The log says `vertex resync: ...`
+(first sightings, a count every minute while it is not zero, and a line every
+ten minutes saying it is armed). *[scanner-body.md](scanner-body.md).*
 
 **The FSS showing each eye a different scan.** In the Full System Scanner the
 zoomed body's not-yet-resolved tiles can be hard black in one eye and already
@@ -147,71 +150,20 @@ door; 0.3 to 0.5 is where to start. `fix.render_sharpness = 0.0` (off).
 
 ## Over a planet
 
-**Terrain missing at the edges of view.** *Off by default.* Over planets Elite
-culls terrain against a narrower frustum than it renders, so squares of ground
-at the edges of your view are simply not drawn — black tiles popping in and out
-as you look around (Frontier issue
-[72609](https://issues.frontierstore.net/issue-detail/72609)). EDVR tells the
-game your headset shows a little more than it does and hands the runtime only
-the part you really see, so those tiles get drawn. It costs GPU time — about 6%
-at the values tested on a Quest 3, more if you leave the margin at full — which
-is why it is off. `fix.cull_guard = off`.
+**Terrain missing at the edges of view.** *Fixed; there is no setting.* Over
+planets Elite culled terrain with a head pose 41 to 44 ms older than the
+display time of the frame it drew, so squares of ground at the edges of your
+view were not drawn while you moved your head — black tiles popping in and out
+as you looked around (Frontier issue
+[72609](https://issues.frontierstore.net/issue-detail/72609)). EDVR now answers
+the game's own request for the head pose "now" at the display time of the frame
+being drawn, which stopped the squares in the flight that tested it. An
+earlier build tried to cover them instead, with a setting that told the game
+your headset shows more than it does (about 6% GPU at the values tested on a
+Quest 3); that setting and its five siblings are gone, and a line for one in an
+old `edvr.ini` is carried over by the installer under "no longer used by this
+version" and does nothing.
 *[terrain-culling.md](terrain-culling.md).*
-
-Turning it on takes three settings in `edvr.ini`, and it wants to be gated to
-your headset:
-
-1. Turn it on. Like every other cull-guard setting, this one is live:
-
-   ```
-   [fix]
-   cull_guard = symmetric
-   ```
-
-2. Limit it to your headset (recommended). The `vr` log prints your headset's
-   signature (`cull guard: this headset's signature is 94x99`); copy that value
-   in:
-
-   ```
-   cull_guard_headsets = 94x99
-   ```
-
-   The guard then runs only on that headset, so on a rig that swaps headsets
-   the other one pays nothing and you edit nothing when you swap.
-
-3. Pick the margin. Left alone, the guard covers the full shortfall, which is
-   guaranteed wherever the fix works at all and is the most expensive choice
-   (~48% more rendered pixels on a Quest 3). The values tested on a Quest 3
-   keep the edges clean at about 6%:
-
-   ```
-   cull_guard_fraction_h = 0.25
-   cull_guard_fraction_v = 0
-   ```
-
-   Both are live, so save the file mid-flight and the guard picks them up. If
-   black squares persist on your headset, raise `_h` in steps; the log's `cull
-   guard margins` line names what each step leaves uncovered.
-
-When the guard is working, the `vr` log says `cull guard stage 1`, then two
-`cull guard LIVE` lines. `cull guard INERT` means the runtime shapes its
-projections in a way the guard refuses to edit; the game runs normally, and
-that log is worth attaching to an issue. The guard has been checked in the
-field on Quest 3 via Virtual Desktop, where the missing tiles reproduced and
-are now gone, and on Pimax via PiOpenXR. Real SteamVR is unmeasured so far, so
-a log from there is a useful report whether the guard works or not.
-
-**Frame rate dropping at busy settlements.** *Off by default.* At a crowded
-settlement Elite draws tens of thousands of small parts a frame, enough on its
-own to hold the frame over the headset's refresh rate — the cheapest thing to
-give back is distant detail. `auto` lowers settlement detail only while the
-frame runs long, a step at a time, and gives it back once there is headroom;
-back to the game's own detail the moment you leave the settlement. `reduced`
-keeps detail down the whole time you are at a settlement, whether or not the
-frame is running long. Parts beyond about 100 m thin out and can pop as it
-steps; cockpit only for now. Measured at one settlement: 45-50 fps to 70-80,
-with no visible change from the cockpit. `fix.settlement_detail = game`
-(default, the game's own detail), `auto` or `reduced`.
 
 ---
 
@@ -245,12 +197,13 @@ memory: read [What the fixes touch](#what-the-fixes-touch) first.
 `fix.vscreen_res_width = auto` (default); `1920` turns it off, same as stock.
 
 **On foot not being in 3D — Explorer Cam.** First person on foot is a flat image
-shown to both eyes; the external camera renders real stereo. Explorer Cam puts
-your viewpoint at your commander's head while you are in that camera, so the
-surface, your ship and the room have depth. It cannot make first person 3D and
-does not try, and it gives you no capability you do not already have. Off until
-you configure it, and worth the few minutes:
-[Explorer Cam](explorer-cam.md). `fix.head_offset_*`, unset.
+shown to both eyes; the free camera renders real stereo. Press F5 on foot, and
+Explorer Cam puts your viewpoint at your commander's head and
+locks it to them, so the surface, your ship and the room have depth. It cannot
+make first person 3D and does not try, and it gives you no capability you do not
+already have. On by default in VR; the commander's head is still visible from
+inside: [Explorer Cam](explorer-cam.md). `hotkey.explorer_cam` (default `F5`) arms it and clearing it turns it off;
+`fix.explorer_cam_eye_up`, `_eye_forward`, `_eye_right` set the fallback eye.
 
 ---
 
@@ -329,9 +282,9 @@ update (build 332753) moved the second of them and left the first alone;
   fix disables itself and says so. It also switches off for the session if it
   ever withholds continuously, because permanent judder would be worse than the
   flash.
-- Explorer Cam's camera marker will also move on update, and did in 332753.
-  Reading the preset is now off by default and Explorer Cam counts key presses
-  instead; [explorer-cam.md](explorer-cam.md) says what that costs.
+- Explorer Cam is built for one game build (332841). On any other build it
+  leaves the game untouched and the log says so;
+  [explorer-cam.md](explorer-cam.md) has the detail.
 
 The transition flash fix also recognises recurring false jumps and leaves them
 alone. Flying low over terrain, the game alternates between shadow cameras
@@ -340,9 +293,9 @@ recurring for eight minutes, each withhold felt as judder). A jump that keeps
 recurring at the same size is a distance between render passes, not a
 transition, because real transitions vary as real motion does. So the first
 jump of a size is withheld and matching ones are left alone.
-`transition_flash_repeat_percent` controls this. Raising
-`transition_flash_units` cannot help, because the false jumps are *larger* than
-real ones. Both eyes of a frame follow one verdict, decided at whichever eye
+Raising the jump threshold cannot help, because the false jumps are *larger*
+than real ones. (This detector is now only the fallback when the engine fix
+cannot arm; the tuning keys are gone and it runs on fixed values.) Both eyes of a frame follow one verdict, decided at whichever eye
 submits first. When something changes, a `transition flash so far:` line counts
 withheld and recognised jumps separately; if there is no such line, the fix
 never fired.
@@ -373,7 +326,7 @@ off by default) each run one GPU pass over the game's finished frame into a
 texture EDVR owns, and the runtime receives that copy. The game's texture is
 read and never written, and no answer the game asks for changes. The temporal
 pass also shifts the projection the game is told by a fraction of a pixel each
-frame, the way the terrain fix shifts it by a margin.
+frame.
 
 For moving objects the temporal pass goes further, and only while `temporal_aa`
 is on. It hooks Elite's own functions that update and pack moving ships,
@@ -388,26 +341,21 @@ EDVR owns. What they draw into the game's own targets is unchanged, bit for
 bit.
 
 Other fixes do more too, and each is described in full. The resolution fix
-(below) rewrites twelve numbers in the game's code. The settlement detail fix,
-set to `auto` or `reduced`, hooks the game's own detail setter and changes one
-number, the game's level-of-detail distance. `ui_quality` (100 by default;
-`off` leaves the panels alone) sizes panels inside the game's own panel code,
-and `static_prop_updates` (off by default) hooks the game's update of
-settlement structures and props and skips it for those that have not
-changed. `intro_video = skip` answers the
+(below) rewrites twelve numbers in the game's code. `ui_quality` (100 by
+default; `off` leaves the panels alone) sizes panels inside the game's own
+panel code. `intro_video = skip` answers the
 game's open of the launch movie with "not found" through its import table; the
 default, `screen`, does not. Some advanced settings, all off by default, hook
 the game for diagnosis or experiments, and `edvr.ini` describes each. Explorer
 Cam ([explorer-cam.md](explorer-cam.md)) changes the headset position the game
 is told about, and it reads nothing from the game's memory: it counts your
-camera-key presses. The cull guard
-([above](#over-a-planet)) changes the field of view the game is told the
-headset shows; the game then draws the wider view itself, and EDVR submits only
-the true region, copied from the game's own frame. The cull guard edits
-answers, never memory, so the runtime and anything else that asks always
-receive the truth, and before changing anything it validates the runtime's
-projection against the shape it expects, standing down loudly on a mismatch.
-Explorer Cam and the cull guard do nothing until you configure them.
+camera-key presses. The field-of-view trim
+(`experimental.fov_trim_*`) changes the field of view the game is told the
+headset shows; the game then draws the narrower view itself, and EDVR places it
+back inside the eye's full field, copied from the game's own frame. The trim
+edits answers, never memory, so the runtime and anything else that asks always
+receive the truth. It does nothing until you configure it. Explorer Cam works
+when you press F5 on foot.
 
 Two changes are always made, and no setting turns them off. At load EDVR
 redirects two of the game's imports in memory: `LoadLibraryW`, so that Elite's
@@ -446,7 +394,6 @@ follows at 16:9. These safeguards are the reason to trust it:
 
 If you would rather EDVR changed as little of the game as possible, set
 `vscreen_res_width` to `1920` (the stock size, meaning "do not patch"), keep
-`settlement_detail` at `game` and `intro_video` at `screen`, and leave
-`temporal_aa`, `ui_quality`, `static_prop_updates` and the advanced settings
-off. The two import redirects above still apply, because they are how EDVR
+`intro_video` at `screen`, and leave `temporal_aa`, `ui_quality` and the
+advanced settings off. The two import redirects above still apply, because they are how EDVR
 takes over VR startup and the menu's keyboard.

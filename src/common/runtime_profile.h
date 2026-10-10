@@ -107,19 +107,13 @@ inline bool runtimeProfileAllowsKey(const char* key) {
     return runtimeFlatProfile() && (std::strcmp(key, "advanced.d3d11_fixes") == 0 ||
         std::strcmp(key, "advanced.input_gate") == 0 ||
         std::strcmp(key, "advanced.flat_camera_producer_probe") == 0 ||
-        std::strcmp(key, "advanced.flat_cb_map_cache") == 0 ||
         std::strcmp(key, "hotkey.menu") == 0 ||
         std::strcmp(key, "fix.temporal_aa_model") == 0 ||
         std::strcmp(key, "hotkey.dump_draws") == 0 ||
         std::strcmp(key, "fix.render_sharpness") == 0 ||
-        std::strcmp(key, "experimental.temporal_aa_jitter") == 0 ||
-        std::strcmp(key, "experimental.temporal_aa_partial") == 0 ||
-        // The HDR route's key (flat_hdr_route.h, design doc section 81; auto by default); developer tier, no flat panel row.
-        std::strcmp(key, "experimental.temporal_aa_before_post") == 0 ||
-        // The flat refusal view (advanced.temporal_aa_debug = motion_source; flat_runtime.cpp, design doc section 104). Developer
-        // tier, no flat panel row. The other readers of temporal_aa_debug (the eye pass, screen motion, the UI layer) stay inert in
-        // flat: each is gated on a key this function refuses.
-        std::strcmp(key, "advanced.temporal_aa_debug") == 0 ||
+        // The interface quality (flat panel row; ui_panel_scale.cpp's flat factor and the flat UI layer). The VR layer reads it
+        // too, but stays inert in flat: it is live only with fix.temporal_aa on through this gate, which refuses that key.
+        std::strcmp(key, "fix.ui_quality") == 0 ||
         // The flat jitter cycle's length (flat_runtime.cpp, FlatLivePhase::phaseCount; temporal_math.h). Developer tier, no flat panel
         // row. Unlisted, getInt answers 0 here whatever the file says, which the reader takes for out of range and reads as 8.
         std::strcmp(key, "advanced.temporal_aa_jitter_phases") == 0);

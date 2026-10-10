@@ -22,12 +22,12 @@ Texture2D<float4> S : register(t0);      // this frame, the game's own texture (
 Texture2D<float4> H : register(t1);      // the history, region-sized, on the unjittered grid
 Texture2D<float> Z : register(t2);       // the scene's depth, the game's own, when the pass has it
 SamplerState L : register(s0);           // bilinear, clamp
-RWTexture2D<float4> O : register(u0);    // the output: region-sized in the game's format for main, and for mv's debug views the trained runtime's OUTPUT texture, which is LARGER under DLSS -- paintDebug, not O[id.xy]
+RWTexture2D<float4> O : register(u0);    // the output: region-sized in the game's format (main)
 RWTexture2D<float4> N : register(u1);    // the new history
-RWStructuredBuffer<uint> Stats : register(u2);   // 0 rejected, 1 clipped, 2 the clips' size (luma/255, summed); then the same three per candidate, four of them; 15 pixels on the world path, 16 bright pixels, 17 bright pixels with no depth; 18-20 the registration probes on the world path (sum dx*100, sum dy*100, count) and 21-23 on the ship; 24-27 world pixels, world clipped, ship pixels, ship clipped; 28 the mover mask's pixels; 29 unused (the body path's, retired 2026-09-23); 30-32 the registration probes on the sky (the far plane: sum dx*100, sum dy*100, count); 33-34 the probes' sum resid.mv*100 and sum mv.mv*100 on the sky, 35-36 on the world with a depth, 37-38 on the ship; 39 the pixels that took the celestial path (decision 12; mv only), 40-49 unused (the estimated ship, second-body and stepped-part paths' counters, retired 2026-09-23); 50-55 the engine path's pixel kinds (mv only, gCount 48-53)
+RWStructuredBuffer<uint> Stats : register(u2);   // 0 rejected, 1 clipped, 2 the clips' size (luma/255, summed); then the same three per candidate, four of them; 15 pixels on the world path, 16 bright pixels, 17 bright pixels with no depth; 18-20 the registration probes on the world path (sum dx*100, sum dy*100, count) and 21-23 on the ship; 24-27 world pixels, world clipped, ship pixels, ship clipped; 28 unused (the mover mask's, retired); 29 unused (the body path's, retired 2026-09-23); 30-32 the registration probes on the sky (the far plane: sum dx*100, sum dy*100, count); 33-34 the probes' sum resid.mv*100 and sum mv.mv*100 on the sky, 35-36 on the world with a depth, 37-38 on the ship; 39 the pixels that took the celestial path (decision 12; mv only), 40-49 unused (the estimated ship, second-body and stepped-part paths' counters, retired 2026-09-23); 50-55 the engine path's pixel kinds (mv only, gCount 48-53)
 RWTexture2D<float2> MV : register(u3);   // for a trained pass: motion vectors, pixels, current -> previous
-RWTexture2D<float>  ZC : register(u4);   // and the depth, copied as it is (both entries, when the mover mask wants last frame's)
-Texture2D<float> ZP : register(t3);      // last frame's ZC; movers.x or holoJitter.w validates it
+RWTexture2D<float>  ZC : register(u4);   // and the depth, copied as it is (the mv entry)
+Texture2D<float> ZP : register(t3);      // last frame's ZC; holoJitter.w validates it
 Texture2D<float> UM : register(t4);      // the interface's reactive mask (ui_depth.h), folded into MK when probe.z says it is bound
 Texture2D<float> ZS : register(t6);      // the drives' smoke's own depth (ui_depth.h, uiDepthSmokeDepth), the scene depth's size; unbound = none this frame, and reads as the far value
 Texture2D<float> ZUI : register(t7);     // private UI depth; never used by game draws
@@ -42,7 +42,7 @@ StructuredBuffer<HoloRecord> HR : register(t13);
 #define EDVR_CELESTIAL 1
 #endif
 #if EDVR_CELESTIAL
-struct CelestialRecord { float4 m0; float4 m1; float4 m2; float4 box; float4 span; };
+struct CelestialRecord { float4 m0; float4 m1; float4 m2; float4 box; float4 span; float4 ctr; };
 StructuredBuffer<CelestialRecord> CR : register(t15);   // planet patch motion: one record per body, this eye (probe.w bit 8192)
 #endif
 )HLSL"
@@ -149,9 +149,13 @@ bool engineRecordMoved(EnginePoolRecord r) {
 // and 275 of the scene constants the pool draw read, b0..b3 and bCam last
 // frame's. False when either frame's rows are not the pool families'
 // encoding (constant clip z, zero z column) or are degenerate.
-bool engineReprojectRows(EnginePoolRecord r, float2 ndc, float zr,
-                         float4 n0, float4 n1, float4 n2, float4 n3, float3 nCam,
-                         float4 b0, float4 b1, float4 b2, float4 b3, float3 bCam, out float4 before) {
+// skinned (F2, the second skin): the record is a skinned character's and its own motion is NOT the two pose blocks' (it has none): the vertex
+// shader computed the surface's exact previous position from last frame's palette and pose and exported its difference from the current one,
+// skinMove = previous - current, in metres, both relative to this frame's camera origin. The point under the pixel then goes back to
+// world + (nCam - bCam) + skinMove: the camera term of a point that did not move, plus the point's own motion. Everything else is shared.
+bool engineReprojectRowsE(EnginePoolRecord r, bool skinned, float3 skinMove, float2 ndc, float zr,
+                          float4 n0, float4 n1, float4 n2, float4 n3, float3 nCam,
+                          float4 b0, float4 b1, float4 b2, float4 b3, float3 bCam, out float4 before) {
     before = 0;
     if (n0.z != 0.0 || n1.z != 0.0 || n2.z != 0.0 || n3.w != 0.0 || !(n3.z > 0.0) ||
         b0.z != 0.0 || b1.z != 0.0 || b2.z != 0.0 || b3.w != 0.0 || !(zr > 0.0))
@@ -168,7 +172,9 @@ bool engineReprojectRows(EnginePoolRecord r, float2 ndc, float zr,
     const float3 rhs = float3(ndc * z - n3.xy, z);
     const float3 world = (ca * rhs.x + cb * rhs.y + cc * rhs.z) / det;   // less nCam
     float3 prevWorld;                                                    // less bCam
-    if (!engineRecordMoved(r)) {
+    if (skinned) {
+        prevWorld = world + (nCam - bCam) + skinMove;                    // the exact motion of the skinned surface
+    } else if (!engineRecordMoved(r)) {
         prevWorld = world + (nCam - bCam);                               // did not move: the camera term
     } else {
         const float scaleNow = asfloat(r.data[0].y), scalePrev = asfloat(r.data[19].y);
@@ -185,6 +191,11 @@ bool engineReprojectRows(EnginePoolRecord r, float2 ndc, float zr,
     }
     before = prevWorld.x * b0 + prevWorld.y * b1 + prevWorld.z * b2 + b3;
     return before.w > 0.0 && all(isfinite(before));
+}
+bool engineReprojectRows(EnginePoolRecord r, float2 ndc, float zr,
+                         float4 n0, float4 n1, float4 n2, float4 n3, float3 nCam,
+                         float4 b0, float4 b1, float4 b2, float4 b3, float3 bCam, out float4 before) {
+    return engineReprojectRowsE(r, false, float3(0, 0, 0), ndc, zr, n0, n1, n2, n3, nCam, b0, b1, b2, b3, bCam, before);
 }
 // ENGINE_MOTION_CORE_END
 Texture2D<float2> ES : register(t21);
@@ -206,16 +217,19 @@ bool engineReproject(EnginePoolRecord r, float2 ndc, float zr, out float4 before
     return engineReprojectRows(r, ndc, zr, EN[270], EN[271], EN[272], EN[273], EN[275].xyz,
                                EB[270], EB[271], EB[272], EB[273], EB[275].xyz, before);
 }
+// F2: a skinned record's own motion, centimetres in, from the pixel's target-7 texel (see engineReprojectRowsE).
+bool engineReprojectSkinned(EnginePoolRecord r, float3 skinCm, float2 ndc, float zr, out float4 before) {
+    return engineReprojectRowsE(r, true, skinCm * 0.01, ndc, zr, EN[270], EN[271], EN[272], EN[273], EN[275].xyz,
+                                EB[270], EB[271], EB[272], EB[273], EB[275].xyz, before);
+}
 // ENGINE_MOTION_HLSL_END
 )HLSL"
 R"HLSL(
 Texture2D<float4> Screen : register(t14);
 RWTexture2D<float4> UN : register(u6);   // this frame's UI evidence, separate from accumulated colour
-RWTexture2D<float> MK : register(u5);    // for a trained pass: the mover mask, NVIDIA's bias-current-colour input (ONE texture: the interface's mask is folded in)
+RWTexture2D<float> MK : register(u5);    // for a trained pass: NVIDIA's bias-current-colour input (ONE texture: the interface's mask is folded in)
 #if EDVR_TEMPORAL_TRACE
 RWTexture2D<float4> DT : register(u7);   // capture-only final path decision: physical motion xy, predicted previous depth z, integer flags w
-#else
-RWTexture2D<float2> ML : register(u7);   // the fovea crop's own copy of MV, plus lead.xy (the head lead): bound ONLY on the fovea prep's dispatch, and read only by NVIDIA's crop
 #endif
 cbuffer P : register(b0) {
     int4   region;      // x0 y0 x1 y1: this eye's pixels in S (x1, y1 exclusive)
@@ -223,7 +237,7 @@ cbuffer P : register(b0) {
     int2   texSize;     // S's size, for the sampler's uv
     float4 tanNow;      // l r t b this frame, jitter excluded
     float4 tanPrev;     // l r t b for the frame the history holds
-    float4 jit;         // xy this frame's jitter in pixels; z 1 = filter the current sample; w the history kernel's C
+    float4 jit;         // xy this frame's jitter in pixels; z unused; w the history kernel's C
     float4 dR0;         // rows of the rotation taking this frame's view
     float4 dR1;         // directions to last frame's (xyz; w unused)
     float4 dR2;
@@ -247,14 +261,9 @@ cbuffer P : register(b0) {
     float4 tvUsed;      // xyz the translation term for the used delta (depth motion), w unused
     float4 tvCand;      // xyz the same for the instrument's swapped-eyes candidate
     float4 tvCam;       // xyz the translation term for the camera rows (the world path); w 1 = the world path is on
-    float4 split;       // x the ship's radius in metres (nearer: the head's delta; farther and the far plane: the camera's); y the debug view (1 motion, 2 error, 3 depth); z a depth in metres for depthless pixels in a menu-like scene (0 off); w 1 = menu-like scene
-    float4 fovea0;      // xy the fovea centre in output pixels, z the inner radius (px) where the periphery calming starts, w 1/(the ramp width in px)
-    float4 fovea1;      // x the periphery calm strength (0..1), w 1 = the fovea is on (else no modulation)
-    float4 movers;      // x 1 = the mover mask is on (ZP holds last frame's depth for this frustum); y the depth tolerance, a fraction; z the strength, how much history a masked pixel loses (0..1); w 1 = main writes ZC
+    float4 split;       // x the ship's radius in metres (nearer: the head's delta; farther and the far plane: the camera's); yzw unused
     float4 probe;       // x history scale, y registration probes, z coverage bound; w bits: 1 fixed bias, 2 prior UI valid, 4 adaptive UI, 8 (retired 2026-10-01: terrain), 16 holo, 32 screen, 128 the scanner's screen is up (its interface takes the head's path), 8192 the celestial records are bound (t15)
     float4 holoJitter; // current minus previous raster jitter; z = consecutive treated frames; w = valid DLSS depth history
-    float4 skip;        // the fovea's own-resolve early-out: x0 y0 x1 y1 in THIS render, all zero = no skip
-    float4 lead;        // xy: how far the fovea crop's base slid THIS frame (render pixels, base_now - base_prev), added to the vectors written to ML for NVIDIA's crop alone; zero on every other dispatch. zw unused
 };
 float3 rgbToYcocg(float3 c) {
     return float3(0.25 * c.r + 0.5 * c.g + 0.25 * c.b,
@@ -282,7 +291,7 @@ float3 clipToBox(float3 mn, float3 mx, float3 q) {
 // low-pass whose losses compound through the exponential average: at a
 // third of a cycle per pixel Catmull-Rom keeps about half of the
 // contrast after that compounding at a 0.9 blend, and a sharper kernel
-// keeps more. advanced.temporal_aa_history_sharp sets C, live.
+// keeps more.
 float4 catmullRom(float2 uv, float2 tsize) {
     float C = jit.w;
     float2 sp = uv * tsize;
@@ -333,58 +342,6 @@ float zSceneAt(int2 q) {
     return max(max(Z.Load(int3(q, 0)), ZS.Load(int3(q, 0))), ZUI.Load(int3(q, 0)));
 }
 float zAt(int2 q) { return zSceneAt(q); }
-// Tier 1 of docs/per-object-motion.md: the mover mask from depth
-// consistency (2026-09-08). The reprojection says where this pixel's
-// surface WAS if it moved with the camera alone -- at pp, at view depth
-// zPred metres -- and last frame's depth copy says what actually was at
-// pp. Where the two disagree the surface is either a mover (something the
-// camera's vectors cannot follow: a station's rim, a ship crossing the
-// view) or a disocclusion (the history at pp shows what was in front a
-// frame ago), and both deserve less history: a moving edge stops trailing
-// a ghost, and the far side of a pillar you move past stops showing the
-// pillar. It compares against the RANGE of last frame's 3x3 around pp,
-// not one texel: the jitter shifts the sample grid half a pixel between
-// frames, and at a depth edge a single-texel compare fires on every
-// silhouette every frame whether anything moved or not (the same reason
-// the reprojection dilates). The far plane is consistent only with the
-// far plane, so a pixel that is sky now where a hull was last frame -- a
-// mover's trail -- is masked too. What it cannot see is a mover's
-// INTERIOR at constant depth, which passes; that is the later tiers'
-// work, and this is the floor under them. temporalMoverTest in
-// temporal_math.h is the reference the test pins; this transcribes it.
-// zPred <= 0 means the pixel has no depth now (the far plane, or none).
-// `thick`: at least six of the nine texels around the pixel have a depth
-// NOW. The "surface where only sky was" rule is for a hull's leading edge
-// arriving over empty space; a THIN feature -- a text stroke the interface
-// wrote depth under, a wire, a railing -- reprojects onto texels that had
-// no depth last frame on every frame the head moves, and the rule called
-// every one of them a mover (2026-09-08: the interface's text swam again
-// with the mask on, the very thing ui_depth had fixed). A thin feature
-// gets the range test alone.
-float moverAt(float2 pp, float zPred, bool thick) {
-    int2 pq = int2(round(pp));
-    float zmin = 1e30;
-    float zmax = 0.0;
-    bool anyFar = false;
-    [unroll] for (int oy = -1; oy <= 1; ++oy) {
-        [unroll] for (int ox = -1; ox <= 1; ++ox) {
-            int2 q = clamp(pq + int2(ox, oy), int2(0, 0), size - 1);
-            float zr = ZP.Load(int3(q, 0));
-            float den = zr - knobs.x;   // depth = A + B / z: z = B / (depth - A)
-            if (zr <= 0.0 || den <= 0.0) {
-                anyFar = true;
-            } else {
-                float z = knobs.z / den;
-                zmin = min(zmin, z);
-                zmax = max(zmax, z);
-            }
-        }
-    }
-    if (zPred <= 0.0) return anyFar ? 0.0 : 1.0;   // sky now: consistent only with sky then
-    if (zmax <= 0.0) return thick ? 1.0 : 0.0;     // a surface now where only sky was: a hull's edge, not a stroke's
-    float tol = movers.y;
-    return (zPred < zmin * (1.0 - tol) || zPred > zmax * (1.0 + tol)) ? 1.0 : 0.0;
-}
 // The interface's pixel, by ui_depth's coverage mask when it is bound
 // (probe.z), as far as the surface paths are concerned. The mask's value is
 // NVIDIA's reactive strength, and its QUANTUM'S PARITY is ui_depth's word
@@ -514,24 +471,38 @@ R"HLSL(
 // translation (normal space) or not (supercruise, where they lose it and a planet closes at km a frame). Where two
 // volumes hold a pixel the one with the narrower depth span wins -- a moon in front of its planet. d is the pixel's
 // ray (d.z = -1) and z its depth in metres; dp comes back as the pixel's point in last frame's view.
+// A record whose span.w (rMax) is above 0 also holds a pixel only where its view-space point P lies between ctr.w (rMin) and
+// span.w (rMax) from the body's centre ctr.xyz (2026-10-08). Those are the records of a body whose patch boxes reach the eye
+// plane: their volume is the whole eye from depth 0, which holds a hangar's wall as much as the planet, and the shell is what
+// tells them apart -- the planet's surface lies at its own radius from its centre, the wall at the eye's distance from it.
+// FLOAT32: the centre can be 1.7e7 m away (a 4,478 km planet seen from 12,000 km), where one ulp is 1-2 m, so P - ctr and its
+// length are good to a few metres and the shell is a percent of the radius (tens of km) wide: metres of error, not kilometres.
+// The shell is widened by three pixels' footprint at the pixel's own depth (slack): a pixel beside the silhouette carries the
+// nearest depth of its 3x3 (the body's), so its ray is up to 1.4 pixels off the point that depth belongs to, and at planetary
+// range a pixel is tens of km across -- more than the percent. At a hangar wall's 30 m the same slack is a metre.
 bool celestialPixel(float2 p, float3 d, float z, out float3 dp) {
     dp = 0;
     if ((uint(probe.w + 0.5) & 8192u) == 0u) return false;
     int hit = -1;
     float narrow = 3.0e38;
+    float3 P = d * z;
     [loop] for (int i = 0; i < 16; ++i) {
         CelestialRecord r = CR[i];
         if (r.span.z == 0.0) break;
         float span = r.span.y - r.span.x;
         if (p.x >= r.box.x && p.x <= r.box.z && p.y >= r.box.y && p.y <= r.box.w &&
             z >= r.span.x && z <= r.span.y && span < narrow) {
+            if (r.span.w > 0.0) {
+                float slack = 3.0 * z * max((tanNow.y - tanNow.x) / float(size.x), (tanNow.w - tanNow.z) / float(size.y));
+                float radial = length(P - r.ctr.xyz);
+                if (!(radial >= r.ctr.w - slack && radial <= r.span.w + slack)) continue;
+            }
             hit = i;
             narrow = span;
         }
     }
     if (hit < 0) return false;
     CelestialRecord r = CR[hit];
-    float3 P = d * z;
     dp = float3(dot(r.m0.xyz, P) + r.m0.w, dot(r.m1.xyz, P) + r.m1.w, dot(r.m2.xyz, P) + r.m2.w);
     return all(isfinite(dp));
 }
@@ -562,8 +533,16 @@ R"HLSL(
 // read from its depth tile at region.xy + id, which is q -- so it is not
 // loaded again (the performance review's conditional shader change);
 // jittered callers load it here.
+// F2 (the second skin, probe.w bit 16384): SK t23 is target 7 of the substituted pool draws (xyz = the skinned surface's previous - current
+// position in centimetres, w = 1 valid / 0 none), cleared to zero each eye-frame. The two statics tell the caller what the call took (per
+// thread): gSkinKind 0 not a skinned record, 1 its exact motion was taken, 2 masked (no valid E); gSkinMagnitudeCm the |E| of kind 1.
+Texture2D<float4> SK : register(t23);
+static uint gSkinKind = 0u;
+static float gSkinMagnitudeCm = -1.0;
 uint enginePixelZ(float2 p, float2 offset, bool haveZ, float knownZ, out float2 pp, out float zp) {
     pp = 0; zp = 0;
+    gSkinKind = 0u;
+    gSkinMagnitudeCm = -1.0;
     if ((uint(probe.w + 0.5) & 2048u) == 0u || holoJitter.z == 0) return 0u;
     const int2 q = region.xy + int2(round(p + offset));
     const float zr = haveZ ? knownZ : zSceneAt(q);
@@ -595,6 +574,26 @@ uint enginePixelZ(float2 p, float2 offset, bool haveZ, float knownZ, out float2 
     if (slot >= count) return 0u;
     const EnginePoolRecord r = EP[slot];
     const uint token = asuint(EN[276].x);
+    if ((uint(probe.w + 0.5) & 16384u) != 0u && r.data[0].x != 0u) {
+        // A skinned record (a nonzero palette base): it has no pose blocks to carry, but its vertex shader computed the surface's exact
+        // previous position from last frame's palette and pose. A pixel with no valid E (no joined history, a pair that exports none)
+        // keeps no history, the same answer a rigid record EDVR could not follow gets.
+        gSkinKind = 2u;
+        const float4 sk = SK.Load(int3(q, 0));
+        if (!(sk.w > 0.5) || !all(isfinite(sk.xyz))) return 2u;
+        uint skw, skh;
+        ES.GetDimensions(skw, skh);
+        const float2 skDims = float2(skw, skh);
+        const float2 skNdc = (p + offset + region.xy + 0.5) / skDims * float2(2, -2) + float2(-1, 1);
+        float4 skBefore;
+        if (!engineReprojectSkinned(r, sk.xyz, skNdc, zr, skBefore)) return 2u;
+        pp = (skBefore.xy / skBefore.w * float2(0.5, -0.5) + 0.5) * skDims - 0.5 - region.xy + holoJitter.xy - offset;
+        zp = skBefore.w;
+        if (!all(isfinite(pp))) return 2u;
+        gSkinKind = 1u;
+        gSkinMagnitudeCm = length(sk.xyz);
+        return 1u;
+    }
     const uint kind = engineRecordKind(r, token);
     if (kind == 2u) return 2u;
     if (kind != 1u) return engineStaleStampKind(r, token);
@@ -670,10 +669,10 @@ bool backgroundHistoryHidden(int2 local,float2 p,float2 motion,float zraw,float 
 )HLSL"
 R"HLSL(
 // zPred: the predicted view depth of this pixel's surface in last frame's
-// eye space, metres, for the mover mask -- 0 when the pixel took no real
-// depth (the far plane, the menu's assumed depth, no depth bound).
-// depthN: how many of the 3x3 around the pixel have a depth now, for the
-// mask's thick-or-thin verdict (moverAt says); 0 when no depth was read.
+// eye space, metres -- 0 when the pixel took no real depth (the far plane, no
+// depth bound).
+// depthN: how many of the 3x3 around the pixel have a depth now; 0 when no
+// depth was read.
 bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
                    bool useDepth, bool allowWorld, out uint world, out float2 mvOut,
                    out float zPred, out uint depthN, out float3 hy) {
@@ -750,13 +749,6 @@ bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
         } else if (useDepth && !far) {
             dp = dp * z + tv;
             zPred = -dp.z;
-        } else if (useDepth && far && split.w != 0.0 && split.z > 0.0) {
-            // A menu-like scene's depthless pixels (the main menu's hangar
-            // wall reads no depth and reprojected as the far plane, so it
-            // detached under head translation): an assumed depth, the
-            // player's choice, better than infinity for a wall a few metres
-            // off. advanced.temporal_aa_menu_metres.
-            dp = dp * split.z + tv;
         }
     }
     hy = 0.0;
@@ -814,39 +806,10 @@ R"HLSL(
 // counts (joined, masked, a pool record that is not a rig record, stale
 // slot, corrupt slot code, stale stamp), flushed to Stats 50..55 (48/49 were
 // the stepped-part path's, retired 2026-09-23).
-groupshared uint gCount[54];
+groupshared uint gCount[88];
+// 54 and 55 are F2's skinned pixels the compose took as joined and as masked, 56..87 the joined |E| in 32 log bins (bin 0 exactly zero,
+// bin 1 under 0.0178 cm, bin k from 0.01 * 10^((k - 1) / 4) cm; clamped at 31), flushed to Stats 56..89.
 #endif
-// A debug view's pixel, painted into the OUTPUT rather than at this
-// thread's own index.
-//
-// The mv entry is dispatched over the RENDER size, because that is what it
-// computes; its debug views are painted into O, which on this path is the
-// trained runtime's OUTPUT texture. Those two are the same size under DLAA
-// and are not under DLSS, and writing O[id.xy] put the whole frame in the
-// top-left corner -- the view "skewed up and left" at 2x, and every debug
-// view under DLSS wrong since the trained path was written (Sean,
-// 2026-09-08). So each render pixel paints the block of output pixels that
-// belongs to it: [ceil(id*s), ceil((id+1)*s)), which is exactly the set of
-// output pixels that map back to this one, so the block tiles the output
-// with no seam and no overlap. Four each way covers every ratio a trained
-// runtime offers (ultra performance is three); at 1:1 it is one write, as
-// before.
-void paintDebug(uint2 idx, int2 sz, float3 c) {
-    uint ow = 0, oh = 0;
-    O.GetDimensions(ow, oh);
-    if (ow == 0 || oh == 0 || sz.x <= 0 || sz.y <= 0) return;
-    float2 s = float2(float(ow) / float(sz.x), float(oh) / float(sz.y));
-    int2 lo = int2(ceil(float2(idx) * s));
-    int2 hi = int2(ceil((float2(idx) + 1.0) * s));
-    [unroll] for (int dy = 0; dy < 4; ++dy) {
-        [unroll] for (int dx = 0; dx < 4; ++dx) {
-            int2 q = lo + int2(dx, dy);
-            if (q.x < hi.x && q.y < hi.y && q.x < int(ow) && q.y < int(oh)) {
-                O[q] = float4(c, 1.0);
-            }
-        }
-    }
-}
 )HLSL"
 // (adjacent literals: MSVC caps one at 16 KB)
 R"HLSL(
@@ -869,13 +832,13 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
     }
     GroupMemoryBarrierWithGroupSync();
 #if EDVR_TEMPORAL_DIAGNOSTICS
-    if (gi < 54) gCount[gi] = 0;
+    for (uint zeroed = gi; zeroed < 88u; zeroed += 64u) gCount[zeroed] = 0;
     GroupMemoryBarrierWithGroupSync();
 #endif
     // Three counters, not forty. This pass writes 15, 16 and 17 and no
     // others, and a forty-element local array costs forty registers of
     // occupancy on a dispatch that covers the whole eye.
-    uint count15 = 0, count16 = 0, count17 = 0, count28 = 0;
+    uint count15 = 0, count16 = 0, count17 = 0;
 #if EDVR_CELESTIAL
     uint count39 = 0;   // pixels that took decision path 12
 #endif
@@ -889,7 +852,7 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         float3 dp = float3(dot(dR0.xyz, d), dot(dR1.xyz, d), dot(dR2.xyz, d));
         float zraw = mvDepthTile[(local.y + 2) * 12 + local.x + 2];
         const float sceneZraw = zraw;
-        float zPred = 0.0;   // for the mover mask: the surface's predicted depth last frame, 0 = none
+        float zPred = 0.0;   // the surface's predicted depth last frame, 0 = none
         uint depthN = 0;     // ...and how many of the 3x3 have a depth now (thick or thin)
         if (knobs.y != 0.0) {
             float zr = 0.0;
@@ -924,8 +887,6 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
             } else if (!far) {
                 dp = dp * z + tvUsed.xyz;
                 zPred = -dp.z;
-            } else if (split.w != 0.0 && split.z > 0.0) {
-                dp = dp * split.z + tvUsed.xyz;   // the menu's assumed depth (fetchHistoryT says)
             }
             float luma = rgbToYcocg(S.Load(int3(region.xy + int2(p), 0)).rgb).x;
             if (luma > 0.6) {
@@ -934,7 +895,6 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
             }
         }
         float2 motion = 0.0;
-        float mover = 0.0;
         bool trackedForeground = false;
         uint decisionPath = 0u;
         bool projectionValid = false;
@@ -958,13 +918,6 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
                 trackedForeground=true;
                 decisionPath=8u;
             }
-            // The mover mask, where the prediction lands on last frame's
-            // image (off it NVIDIA has no history to bias against anyway).
-            if (movers.x != 0.0 && pp.x >= 0.0 && pp.y >= 0.0 &&
-                pp.x <= float(size.x) - 1.0 && pp.y <= float(size.y) - 1.0) {
-                mover = moverAt(pp, zPred, depthN >= 6);
-                if (mover != 0.0) count28 = 1;
-            }
         }
         if((uint(probe.w+.5)&32u)!=0u) {
             float4 s=Screen.Load(int3(region.xy+int2(p),0));
@@ -972,9 +925,6 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
                 motion=s.w!=2?s.xy+holoJitter.xy:float2(size)*2;zraw=s.z;
                 trackedForeground=true;
                 decisionPath=10u;projectionValid=s.w!=2;
-                // The eye-space prediction above is not source-scene depth.
-                // Do not apply its mover rejection to screen pixels.
-                mover=0;
             }
         }
 )HLSL"
@@ -990,15 +940,21 @@ R"HLSL(
         const uint engineKind = enginePixelZ(p, 0, true, sceneZraw, engineP, engineZ);
 #if EDVR_TEMPORAL_DIAGNOSTICS
         if (engineKind != 0u) InterlockedAdd(gCount[47u + engineKind], 1u);
+        if (gSkinKind == 1u) {
+            InterlockedAdd(gCount[54], 1u);
+            uint skinBin = 0u;
+            if (gSkinMagnitudeCm > 0.0) skinBin = uint(clamp(1.0 + floor(4.0 * log10(max(gSkinMagnitudeCm, 1e-6) / 0.01)), 1.0, 31.0));
+            InterlockedAdd(gCount[56u + skinBin], 1u);
+        } else if (gSkinKind == 2u) {
+            InterlockedAdd(gCount[55], 1u);
+        }
 #endif
         if (engineKind == 1u) {
             motion = engineP - p; zPred = engineZ;
             trackedForeground = true;
             decisionPath = 11u; projectionValid = true;
-            mover = 0;
         } else if (engineKind == 2u) {
             engineMasked = true;
-            mover = 0;
         }
         // Combine detected UI changes and the optional fixed UI bias.
         // World-mover rejection must not override stable marked UI.
@@ -1015,14 +971,6 @@ R"HLSL(
         // history lookup is invalidated, as with new source-screen pixels.
         float2 written = hidden ? float2(size)*2 : motion;
         MV[id.xy] = written;
-        // The fovea's head lead: NVIDIA's crop history is CROP-LOCAL, so a
-        // crop whose base slid by lead.xy since the frame that history came
-        // from must have that slide added to every vector it reads
-        // (previous = current + mv, so crop-local previous = mv + base_now -
-        // base_prev). ML is a second texture, not this one: the periphery's
-        // reduction, its DLAA and the UI resolve all read MV whole and must
-        // see the unshifted vectors. Unbound (and lead zero) on every other
-        // dispatch, where the store is dropped.
 #if EDVR_TEMPORAL_TRACE
         // depthValid is a usable non-screen sample on the final route. Screen
         // z uses its source projection's private encoding, so bit 256 stays
@@ -1039,12 +987,10 @@ R"HLSL(
             (trackedForeground?512u:0u) | (projectionValid?1024u:0u) |
             ((engineKind & 7u) << 12); // capture-only ownership result, bits 12..14; exactly representable as float
         DT[id.xy]=float4(decisionMotion,decisionDepth,float(decisionFlags));
-#else
-        ML[id.xy] = written + lead.xy;
 #endif
 )HLSL"
 R"HLSL(
-        MK[id.xy] = engineMasked ? 1.0 : max(adaptive, uiHere ? ui : max(ui, mover * movers.z));
+        MK[id.xy] = engineMasked ? 1.0 : max(adaptive, ui);
         // The registration probes on the trained path (2026-09-08): main's
         // 5x5 luma SAD search, transcribed, against NVIDIA's PREVIOUS output
         // -- the history as the runtime accumulated it, bound at t1 in place
@@ -1121,62 +1067,12 @@ R"HLSL(
 #endif
 )HLSL"
 R"HLSL(
-        // The motion view on the trained path: painted into the output in
-        // NVIDIA's place (the pass skips its evaluation that frame).
-        if (split.y == 1.0) {
-            paintDebug(id.xy, size,
-                       float3(saturate(0.5 + motion.x / 16.0), saturate(0.5 + motion.y / 16.0),
-                              count15 != 0 ? 1.0 : 0.0));
-        } else if (split.y == 3.0) {
-            float zs3 = zSceneAt(region.xy + int2(p));
-            float3 o3;
-            if (knobs.y == 0.0) {
-                o3 = float3(0.25, 0.0, 0.25);
-            } else if (zs3 > 0.0) {
-                float m3 = knobs.z / (zs3 - knobs.x);
-                float g3 = saturate(1.0 - log2(max(m3, 0.5)) / 8.0);
-                o3 = g3.xxx;
-            } else {
-                o3 = float3(1.0, 0.0, 1.0);
-            }
-            paintDebug(id.xy, size, o3);
-        } else if (split.y == 6.0) {
-            // The motion-source view (with fix.temporal_aa): green where a rig
-            // record's certified previous pose gave the pixel its exact motion
-            // (kind 1) -- moving OR still, a still record yielding the camera
-            // term through the record, so green is not a mover count; red
-            // where a rig record was masked (no history), blue for a pool
-            // surface that is not a rig record (the camera term), yellow for a
-            // slot whose recorded depth is not the pixel's (stale: a later
-            // draw changed it), magenta for a slot code arithmetic reached
-            // (declined), orange for a joined marker stamped with an older
-            // frame (its pose pair is stale: the camera term); the frame
-            // dimmed elsewhere (the camera term). On
-            // foot the same colours come through the panel: the screen map's
-            // validity carries 16 + the SOURCE-space kind under this view
-            // (screen_motion.h), and an eye pixel showing the 2D screen is
-            // painted by the kind of the source pixel it shows.
-            float3 o6 = S.Load(int3(region.xy + int2(p), 0)).rgb * 0.25;
-            uint k6 = engineKind;
-            if (k6 == 0u && (uint(probe.w + 0.5) & 32u) != 0u) {
-                const float sw6 = Screen.Load(int3(region.xy + int2(p), 0)).w;
-                if (sw6 >= 16.0) k6 = uint(sw6) - 16u;
-            }
-            if (k6 == 1u) o6 = float3(0.0, 1.0, 0.0);
-            else if (k6 == 2u) o6 = float3(1.0, 0.0, 0.0);
-            else if (k6 == 3u) o6 = float3(0.0, 0.3, 1.0);
-            else if (k6 == 4u) o6 = float3(1.0, 1.0, 0.0);
-            else if (k6 == 5u) o6 = float3(1.0, 0.0, 1.0);
-            else if (k6 == 6u) o6 = float3(1.0, 0.5, 0.0);
-            paintDebug(id.xy, size, o6);
-        }
         ZC[id.xy] = knobs.y != 0.0 ? zraw : 0.0;
     }
 #if EDVR_TEMPORAL_DIAGNOSTICS
     if (count15 != 0) InterlockedAdd(gCount[15], count15);
     if (count16 != 0) InterlockedAdd(gCount[16], count16);
     if (count17 != 0) InterlockedAdd(gCount[17], count17);
-    if (count28 != 0) InterlockedAdd(gCount[28], count28);
 #if EDVR_CELESTIAL
     if (count39 != 0) InterlockedAdd(gCount[39], count39);
 #endif
@@ -1190,7 +1086,8 @@ R"HLSL(
     // a set of numbers that only a log line reads. 48..53 are engine-record
     // motion's, at Stats 50..55.
 #if EDVR_TEMPORAL_DIAGNOSTICS
-    if (gi < 54 && gCount[gi] != 0) InterlockedAdd(Stats[gi < 48u ? gi : gi + 2u], gCount[gi]);
+    for (uint flushed = gi; flushed < 88u; flushed += 64u)
+        if (gCount[flushed] != 0) InterlockedAdd(Stats[flushed < 48u ? flushed : flushed + 2u], gCount[flushed]);
 #endif
 }
 )HLSL"
@@ -1203,42 +1100,12 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
     GroupMemoryBarrierWithGroupSync();
 #endif
     uint count[48] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-    // The fovea's compose overwrites this rectangle every pixel at weight 1
-    // (temporal_pass.cpp only ever sets skip when it has verified that), so
-    // an in-skip pixel skips the colour resolve below and takes the short
-    // branch after it instead, which still makes the three writes the next
-    // frame reads back. Neither branch ever `return`s, so every thread in
-    // the group reaches the SAME barriers at the tail -- a return here would
-    // make that divergent within a group. skip.zw both zero (the default)
-    // means no skip, so this never fires when the fovea is off.
-    const bool inSkip = skip.z > skip.x && skip.w > skip.y &&
-                        id.x >= (uint)skip.x && id.x < (uint)skip.z &&
-                        id.y >= (uint)skip.y && id.y < (uint)skip.w;
-    if (id.x < (uint)size.x && id.y < (uint)size.y && !inSkip) {
+    if (id.x < (uint)size.x && id.y < (uint)size.y) {
         float2 p = float2(id.xy);
         int2 ci = int2(id.xy);
         if ((uint(probe.w + 0.5) & 4u) != 0u) UN[id.xy] = uiEvidence(ci);
-        // Foveation-aware periphery (docs/performance.md feature 6, the
-        // sharp periphery only): toward the frame's edge the history's
-        // WEIGHT is eased down and the fallback sample is blurred a little
-        // more. A lighter history cuts the motion smear (a heavier one
-        // smears -- the 2026-09-05 field lesson); the wider Gaussian holds
-        // the flicker down spatially without the lag a heavier history
-        // adds. Mild, because with a fixed centre the player looks straight
-        // at the periphery whenever the eyes move; the ramp starts at the
-        // fovea's edge (outside the blend band) and reaches full strength at
-        // the farthest frame corner. ecc is exactly 0 when the fovea is off
-        // (fovea1.w == 0), so the full-frame pass is unchanged (blend >= 0.5
-        // never reaches the 0.40 floor at ecc 0).
-        float ecc = 0.0;
-        if (fovea1.w != 0.0) {
-            float dist = length(p - fovea0.xy);
-            ecc = saturate((dist - fovea0.z) * fovea0.w) * fovea1.x;
-        }
-        float blEff = blend - ecc * 0.30;                // history: LIGHTER toward the edge
-        if (blEff < 0.40) blEff = 0.40;
-        float gEff = gamma;                              // clamp unchanged
-        float curK = 2.29 / (1.0 + ecc * 1.5);           // the fallback Gaussian widens (spatial low-pass), mildly
+        float blEff = blend;
+        float gEff = gamma;
         // This frame's sample and its neighbourhood, in one pass over the
         // 3x3 around the pixel. The sample the game rendered at q sits at
         // q - jit on the unjittered grid, so each is weighted by its
@@ -1254,8 +1121,7 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         // with the head still, against 11% by 0.5 before). The plain 3x3
         // it is. At 3096 wide before a 1.5x resolve the filter's
         // softening is a third of an output pixel; the sharpen recovers
-        // the rest. advanced.temporal_aa_current = raw gives the point
-        // sample back for an A/B.
+        // the rest.
         float4 cur = 0.0;
         float wsum = 0.0;
         float3 m1 = 0.0;
@@ -1266,8 +1132,7 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
                 int2 q = clamp(ci + int2(dx, dy), int2(0, 0), size - 1);
                 float4 sq = S.Load(int3(region.xy + q, 0));
                 float2 dpos = float2(dx, dy) - jit.xy;
-                float w = jit.z != 0.0 ? exp(-curK * dot(dpos, dpos))
-                                       : ((dx == 0 && dy == 0) ? 1.0 : 0.0);
+                float w = exp(-2.29 * dot(dpos, dpos));
                 float wm = 1.0;
                 cur += sq * w;
                 wsum += w;
@@ -1298,8 +1163,6 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         bool used = false;
         uint worldTaken = 0;
         float2 mvUsed = 0.0;
-        float errUsed = 0.0;
-        float mover = 0.0;
         if (haveHistory != 0) {
             float3 hy;
             float zPred = 0.0;
@@ -1308,20 +1171,8 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
                               knobs.y != 0.0 && tvUsed.w != 0.0, true, worldTaken, mvUsed, zPred,
                               depthN, hy)) {
                 if (worldTaken != 0) count[15] = 1;
-                // The mover mask (moverAt says): a masked pixel keeps less
-                // of its history, by the strength -- at 1 it is the fresh
 )HLSL"
 R"HLSL(
-                // frame alone, spatially settled by the filter above.
-                uint uiKind = probe.z != 0.0 ? uint(UM.Load(int3(ci,0))*255.0+0.5)&3u : 0u;
-                if (movers.x != 0.0 && uiKind != 1u && uiKind != 2u) {
-                    mover = moverAt(p + mvUsed, zPred, depthN >= 6);
-                    if (mover != 0.0) {
-                        count[28] = 1;
-                        blEff *= 1.0 - movers.z;
-                    }
-                }
-                errUsed = saturate(abs(hy.x - rgbToYcocg(cur.rgb).x) * 4.0);
                 blEff *= 1.0 - adaptiveUiReactive(int2(round(p+jit.xy)), p + mvUsed + jit.xy - holoJitter.xy);
                 float3 hc = clipToBox(boxMin, boxMax, hy);
                 if (any(abs(hc - hy) > 1e-4)) {
@@ -1454,70 +1305,7 @@ R"HLSL(
         if (!used) count[0] = 1;
         float3 o = saturate(outc);
         N[id.xy] = float4(o, 1.0);
-        // This frame's depth, kept for next frame's mover mask (movers.w):
-        // the trained path's mv entry writes the same copy for NVIDIA.
-        if (movers.w != 0.0) ZC[id.xy] = zAt(region.xy + ci);
-        // The debug views (advanced.temporal_aa_debug): the history keeps
-        // accumulating as normal, only what leaves changes. motion paints
-        // the used reprojection -- +x red, +y green, around mid-grey with
-        // 16 px to the rail -- and the world path in blue; error paints
-        // how far the fetched history sat from this frame's sample, in
-        // luma, four times over. A skybox that leads or trails its true
-        // motion shows as a colour that disagrees with the ship's turn.
-        if (split.y == 1.0) {
-            o = float3(saturate(0.5 + mvUsed.x / 16.0), saturate(0.5 + mvUsed.y / 16.0),
-                       worldTaken != 0 ? 1.0 : 0.0);
-        } else if (split.y == 2.0) {
-            o = errUsed.xxx;
-        } else if (split.y == 3.0) {
-            // The depth view: where each pixel's depth comes from -- the
-            // scene's in grey by distance (near bright, log scale to
-            // 256 m), none in magenta, no depth bound at all in dark
-            // purple. HUD text shows magenta: it has no depth of its own
-            // and reprojects by what is behind it.
-            float zs3 = zSceneAt(region.xy + ci);
-            if (knobs.y == 0.0) {
-                o = float3(0.25, 0.0, 0.25);
-            } else if (zs3 > 0.0) {
-                float m3 = knobs.z / (zs3 - knobs.x);
-                float g3 = saturate(1.0 - log2(max(m3, 0.5)) / 8.0);
-                o = g3.xxx;
-            } else {
-                o = float3(1.0, 0.0, 1.0);
-            }
-        } else if (split.y == 6.0) {
-            // The motion-source view, as the mv entry paints it (the panel's
-            // source-space kind included).
-            float2 eP6; float eZ6;
-            uint ek6 = enginePixel(float2(ci), jit.xy, eP6, eZ6);
-            if (ek6 == 0u && (uint(probe.w + 0.5) & 32u) != 0u) {
-                const float sw6 = Screen.Load(int3(region.xy + ci, 0)).w;
-                if (sw6 >= 16.0) ek6 = uint(sw6) - 16u;
-            }
-            o = ek6 == 1u ? float3(0.0, 1.0, 0.0) : ek6 == 2u ? float3(1.0, 0.0, 0.0)
-              : ek6 == 3u ? float3(0.0, 0.3, 1.0) : ek6 == 4u ? float3(1.0, 1.0, 0.0)
-              : ek6 == 5u ? float3(1.0, 0.0, 1.0) : ek6 == 6u ? float3(1.0, 0.5, 0.0) : cur.rgb * 0.25;
-        }
         O[id.xy] = float4(o, cur.a);
-    }
-    // The skipped interior: only the colour RESOLVE above is skipped there,
-    // never the three writes the NEXT frame reads back. The UI evidence
-    // (UN/u6) and the mover mask's depth carry (ZC/u4) are written under the
-    // same two tests as above, and the colour history is refreshed from the
-    // RAW current frame -- the resolve's own centre tap, stored the way the
-    // resolve stores a pure pass-through (saturate of the RGB it loaded), so
-    // it is the history's own encoding and nothing here can go stale. No O
-    // write: the compose overwrites this rectangle at weight 1, so it never
-    // reads the periphery inside it, and the composite is what is submitted
-    // whenever temporal_pass.cpp arms the skip. Sibling of the block above,
-    // not nested in it, and barrier-free: every thread in the group still
-    // reaches the SAME tail barriers whichever branch it took.
-    if (inSkip && id.x < (uint)size.x && id.y < (uint)size.y) {
-        int2 ci = int2(id.xy);
-        if ((uint(probe.w + 0.5) & 4u) != 0u) UN[id.xy] = uiEvidence(ci);
-        float4 cur = S.Load(int3(region.xy + ci, 0));
-        N[id.xy] = float4(saturate(cur.rgb), 1.0);
-        if (movers.w != 0.0) ZC[id.xy] = zAt(region.xy + ci);
     }
     // One atomic per group per counter, not per pixel -- and none at all
     // for a counter that did not move, which is most of them in most

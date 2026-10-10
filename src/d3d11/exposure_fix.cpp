@@ -1,5 +1,4 @@
-﻿#include "../common/vr_census.h"
-#include "exposure_fix.h"
+﻿#include "exposure_fix.h"
 
 #include <windows.h>
 
@@ -19,13 +18,15 @@
 #include "binding_shadow.h"
 #include "device_hook.h"  // contextHookModeFor
 #include "draw_census.h"  // drawCensusDispatch: the census records compute
+#include "engine_velocity.h"  // F2: the palette chain's dispatch feeds the second skin's join
+#include "skin_join.h"        // kChainHash
 #include "flat_runtime.h"
 #include "flat_temporal.h"  // flat discovery and capture-only dispatch forwarding
+#include "object_probe.h"   // objectProbeNoteDispatch: the skin ledger's view of the palette chain (armed eye runs only)
 #include "vr_world_route.h"  // g_vrWorldInternal: the VR world route's own dispatches pass straight through
 #include "../common/runtime_profile.h"
 #include "../common/plugin_cost.h"
 #include "gpu_frame_timing.h"
-#include "fss_dump.h"     // the reconstruction bracket, round 30
                           // writers through THIS module's Dispatch hook,
                           // because slot 41 is already ours and a second
                           // patch on it would be a second thing to reclaim
@@ -172,57 +173,6 @@ struct State {
     uint64_t dispatchSkipped = 0;
     bool     dispatchSkipNoted = false;
     char     dispatchSkipSpec[96] = {};   // raw spec, to log only on change
-
-    // The pair-sync experiment (experimental.dispatch_pair_sync): for one
-    // compute shader that runs twice a frame -- once per eye, the exposure
-    // pass's own signature -- copy the FIRST occurrence's UAV0 resource over
-    // the SECOND's after it runs, so both eyes read identical data. Built
-    // 2026-08-25 for the FSS black squares: the per-eye 16x16-tile masks are
-    // measured (ch=22786F6DE290C577 and its 543x536 feeder), their consumer
-    // is not, and equalising the products decides their relevance and IS the
-    // fix if they are. ":r" reverses the copy (first gets the second's), for
-    // when the healthy eye turns out to be the second one.
-    uint64_t pairSyncHash = 0;
-    bool     pairSyncReverse = false;
-    // ":all" -- run outside the FSS scanner too.
-    //
-    // The mode latch was right for the pair this was built for and wrong for
-    // the one that needs it now. The black-planet hunt (2026-08-30) localised
-    // its loss with the eye-split dump: the body's surface reaches BOTH eyes'
-    // geometry buffers and one eye loses it during lighting, which puts the
-    // clustered light-culling dispatches -- game-wide, nothing to do with the
-    // scanner -- squarely in frame. Equalising their b1 INPUT healed nothing;
-    // this equalises their OUTPUT, which is the half never tested.
-    //
-    // Off by default, so the latch still guards every use that predates this.
-    bool     pairSyncAllModes = false;
-    uint8_t  pairSyncSeen = 0;            // occurrences this frame
-    void*    pairSyncFirstUav = nullptr;  // occurrence 1's UAV0 view -- the
-                                          // firstEye[] bargain: identity held
-                                          // within the frame, resolved at use
-    uint64_t pairSyncCopies = 0;
-    bool     pairSyncNoted = false;
-    char     pairSyncSpec[48] = {};
-
-    // The CS b1 equaliser (experimental.dispatch_cb1_lend / _strip): round
-    // fifteen of the FSS black squares. The round-fourteen census caught the
-    // first hard per-eye difference of the whole hunt -- the mask builder
-    // (ch=22786F6DE290C577) dispatches with CS b1 BOUND for one eye (a
-    // 480-byte parameter block) and UNBOUND for the other, 30/30 frames; an
-    // unbound constant buffer reads as zeros, so one eye's masks are built
-    // with default parameters. Lend: a dispatch of the named shader that
-    // arrives with b1 empty is given the buffer the same shader most
-    // recently ran WITH (learned bound, AddRef held), restored to empty
-    // after. Strip: a dispatch arriving with b1 bound runs without it,
-    // restored after. One of the two makes the eyes match; which one heals
-    // is the answer.
-    uint64_t       cb1LendHash = 0;
-    uint64_t       cb1StripHash = 0;
-    ID3D11Buffer*  cb1Remembered = nullptr;
-    bool           cb1LendNoted = false;
-    bool           cb1StripNoted = false;
-    char           cb1LendSpec[48] = {};
-    char           cb1StripSpec[48] = {};
 
     // Shape detection.
     //
@@ -803,7 +753,6 @@ void STDMETHODCALLTYPE hookedDispatchIndirect(ID3D11DeviceContext* self,
     }
     if (g_vrWorldInternal) { g_state->realDispatchIndirect(self, args, off); return; }   // the world route's own (vr_world_route.h)
     gpuFrameCommand(self);
-    if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::DispatchIndirect, self, static_cast<int>(self->GetType()));
     State* s = g_state;
     if (drawCensusArmed()) {
         drawCensusDispatch(self, 0, 0, 0, foreignContext(self), args, off);
@@ -811,6 +760,16 @@ void STDMETHODCALLTYPE hookedDispatchIndirect(ID3D11DeviceContext* self,
     if (!foreignContext(self)) s->computeThisFrame = true;
 
     s->realDispatchIndirect(self, args, off);
+}
+
+// F2: is the bound compute shader the skinning palette chain (skin_join.h kChainHash)? Asked of every owner dispatch while the second skin
+// is wanted, so the verdict is kept by shader object AND by the registry's generation (skinjoin::ChainVerdicts): an address a registration has since
+// re-used is asked again, and a steady dispatch is a map hit and an atomic load, never the registry's lock. Owner context only.
+bool skinChainBound() {
+    void* cs = bindingGet(BindSlot::Cs);
+    if (!cs) return false;
+    static skinjoin::ChainVerdicts verdicts;
+    return verdicts.bound(cs, shaderRegistryGeneration(), [](const void* shader) { return hashOf(const_cast<void*>(shader)); });
 }
 
 void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y, UINT z) {
@@ -823,7 +782,6 @@ void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y,
     }
     if (g_vrWorldInternal) { g_state->realDispatch(self, x, y, z); return; }   // the world route's own: not the game's exposure pass
     gpuFrameCommand(self);
-    if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::Dispatch, self, static_cast<int>(self->GetType()));
     State* s = g_state;
     ++s->thunkHits[kHitDispatch];
     if (g_vrWorldWatchWrites && !foreignContext(self)) vrWorldRouteNoteDispatch();   // a UAV write into H after the resolve is the latch's
@@ -836,6 +794,7 @@ void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y,
         // the record is honest for any context; only the fixes and probes
         // below stay owner-only.
         if (drawCensusArmed()) drawCensusDispatch(self, x, y, z, true, nullptr, 0);
+        if (objectProbeLedgerActive()) objectProbeNoteDispatch(self, x, y, z, true);   // the skin ledger: one bool unarmed
         s->realDispatch(self, x, y, z);
         return;
     }
@@ -848,6 +807,12 @@ void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y,
     // exists because the FSS body could legally be built by a compute writer
     // and no capture before 2026-08-25 could have seen it.
     if (drawCensusArmed()) drawCensusDispatch(self, x, y, z, false, nullptr, 0);
+    // The skin ledger (skin_ledger.h) reads the palette chain's inputs here, before the game's dispatch runs: an
+    // armed eye run only, one bool load otherwise, and what it copies is the game's own state, untouched.
+    if (objectProbeLedgerActive()) objectProbeNoteDispatch(self, x, y, z, false);
+    // F2 (the second skin, VR only): the palette chain's dispatch feeds the identity join before the game's dispatch runs. One atomic load
+    // when the feature is off; the shader test is a lookup kept by shader object.
+    if (engineVelocitySkinWanted() && skinChainBound()) engineVelocityNoteChainDispatch(self, x);
 
     // The dispatch-skip probe, after the census record (a census taken
     // while probing must record what the game SUBMITTED -- the draw skips'
@@ -874,111 +839,6 @@ void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y,
         }
     }
 
-    // The CS b1 equaliser, before pair-sync so the two cannot both act on
-    // one dispatch (arm one at a time; this one wins ties). The census above
-    // records the game's OWN bindings -- engagement is receipted by the
-    // lent/stripped notes, not by census tokens.
-    if (s->cb1LendHash || s->cb1StripHash) {
-        const uint64_t h = hashOf(bindingGet(BindSlot::Cs));
-        if (h && (h == s->cb1LendHash || h == s->cb1StripHash)) {
-            s->computeThisFrame = true;
-            bool handled = false;
-            guardedBudget(g_budget, [&] {
-                ID3D11Buffer* b = nullptr;
-                self->CSGetConstantBuffers(1, 1, &b);
-                if (b) {
-                    if (h == s->cb1LendHash && s->cb1Remembered != b) {
-                        // Learn the newest bound buffer; the ref from
-                        // CSGetConstantBuffers transfers to the remembered
-                        // slot, alive across frames on AddRef's bargain.
-                        if (s->cb1Remembered) s->cb1Remembered->Release();
-                        s->cb1Remembered = b;
-                        b = nullptr;
-                    } else if (h == s->cb1StripHash) {
-                        ID3D11Buffer* none = nullptr;
-                        self->CSSetConstantBuffers(1, 1, &none);
-                        handled = true;
-                        s->realDispatch(self, x, y, z);
-                        self->CSSetConstantBuffers(1, 1, &b);
-                        if (!s->cb1StripNoted) {
-                            s->cb1StripNoted = true;
-                            Log::get().note(
-                                "dispatch cb1 strip: engaged -- ch=%016llX "
-                                "now runs with CS b1 EMPTY wherever the game "
-                                "bound one, restored after each dispatch.",
-                                static_cast<unsigned long long>(h));
-                        }
-                    }
-                } else if (h == s->cb1LendHash && s->cb1Remembered) {
-                    ID3D11Buffer* lend = s->cb1Remembered;
-                    self->CSSetConstantBuffers(1, 1, &lend);
-                    handled = true;
-                    s->realDispatch(self, x, y, z);
-                    ID3D11Buffer* none = nullptr;
-                    self->CSSetConstantBuffers(1, 1, &none);
-                    if (!s->cb1LendNoted) {
-                        s->cb1LendNoted = true;
-                        Log::get().note(
-                            "dispatch cb1 lend: engaged -- ch=%016llX "
-                            "arrived with CS b1 EMPTY and now runs with the "
-                            "buffer it last ran bound WITH, restored to "
-                            "empty after each dispatch.",
-                            static_cast<unsigned long long>(h));
-                    }
-                }
-                if (b) b->Release();
-            });
-            if (handled) return;
-        }
-    }
-
-    // The pair-sync experiment: occurrence 1 of the named shader lends its
-    // UAV0; occurrence 2 runs its own dispatch and is then overwritten by a
-    // CopyResource from the first -- both eyes read one eye's product. The
-    // view pointer is held across the frame on the firstEye[] bargain: the
-    // context keeps its own reference to anything bound, the boundary
-    // clears it, and the resolve happens under the guard.
-    if (s->pairSyncHash &&
-        (s->pairSyncAllModes || deviceHookFssModeLatch()) &&
-        hashOf(bindingGet(BindSlot::Cs)) == s->pairSyncHash) {
-        ++s->pairSyncSeen;
-        if (s->pairSyncSeen == 1) {
-            s->pairSyncFirstUav = bindingGet(BindSlot::CsUav0);
-        } else if (s->pairSyncSeen == 2 && s->pairSyncFirstUav) {
-            void* secondUav = bindingGet(BindSlot::CsUav0);
-            s->computeThisFrame = true;
-            s->realDispatch(self, x, y, z);
-            guardedBudget(g_budget, [&] {
-                ID3D11Resource* a = nullptr;
-                ID3D11Resource* b = nullptr;
-                static_cast<ID3D11UnorderedAccessView*>(s->pairSyncFirstUav)
-                    ->GetResource(&a);
-                if (secondUav) {
-                    static_cast<ID3D11UnorderedAccessView*>(secondUav)
-                        ->GetResource(&b);
-                }
-                if (a && b && a != b) {
-                    if (s->pairSyncReverse) {
-                        self->CopyResource(a, b);
-                    } else {
-                        self->CopyResource(b, a);
-                    }
-                    ++s->pairSyncCopies;
-                    if (!s->pairSyncNoted) {
-                        s->pairSyncNoted = true;
-                        Log::get().note(
-                            "dispatch pair sync: first copy made -- the two "
-                            "occurrences' UAV0 resources are distinct and "
-                            "one now mirrors the other, every frame.");
-                    }
-                }
-                if (a) a->Release();
-                if (b) b->Release();
-            });
-            return;   // forwarded above
-        }
-    }
-
     // Classification runs INSIDE the guard.
     //
     // It was called here, bare, one line above the guarded region it feeds.
@@ -997,9 +857,7 @@ void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y,
     // loading screens do not count -- see the frame counter at the boundary.
     s->computeThisFrame = true;
 
-    if (fssDumpWantsDraws()) fssDumpDispatchPre(self);
     s->realDispatch(self, x, y, z);
-    if (fssDumpWantsDraws()) fssDumpDispatchPost(self);
     if (!isTarget) return;
 
     guardedBudget(g_budget, [&] {
@@ -1116,130 +974,6 @@ void exposureConfigure(Config& cfg) {
         }
     }
 
-    // The pair-sync experiment's spec: one hash, ":r" to reverse the copy.
-    {
-        const std::string spec =
-            cfg.getString("experimental.dispatch_pair_sync", "");
-        if (spec.length() < sizeof(s->pairSyncSpec) &&
-            spec != s->pairSyncSpec) {
-            memcpy(s->pairSyncSpec, spec.c_str(), spec.length() + 1);
-            const uint64_t hadCopies = s->pairSyncCopies;
-            s->pairSyncHash = 0;
-            s->pairSyncReverse = false;
-            s->pairSyncAllModes = false;
-            s->pairSyncNoted = false;
-            if (!spec.empty()) {
-                char* end = nullptr;
-                const unsigned long long h =
-                    _strtoui64(spec.c_str(), &end, 16);
-                bool ok = end != spec.c_str() && h != 0;
-                // Suffixes are peeled one at a time and in any order, rather
-                // than matched as one fixed tail. ":r" was the only one when
-                // this was written, so it was compared whole; a second
-                // suffix makes that shape wrong twice over -- ":r:all" and
-                // ":all:r" both mean the same thing, and a user who writes
-                // the second and gets a silent refusal has met exactly the
-                // failure this hunt lost three rounds to.
-                while (ok && *end == ':') {
-                    const char* tok = end + 1;
-                    const char* stop = tok;
-                    while (*stop && *stop != ':') ++stop;
-                    const size_t len = static_cast<size_t>(stop - tok);
-                    if (len == 1 && (tok[0] == 'r' || tok[0] == 'R')) {
-                        s->pairSyncReverse = true;
-                    } else if (len == 3 && _strnicmp(tok, "all", 3) == 0) {
-                        s->pairSyncAllModes = true;
-                    } else {
-                        ok = false;
-                    }
-                    end = const_cast<char*>(stop);
-                }
-                if (ok && *end != '\0') ok = false;
-                if (!ok) {
-                    s->pairSyncReverse = false;
-                    s->pairSyncAllModes = false;
-                    Log::get().note(
-                        "dispatch pair sync: \"%s\" is not one 16-digit hex "
-                        "hash with optional :r and :all suffixes; refused.",
-                        spec.c_str());
-                } else {
-                    s->pairSyncHash = h;
-                    Log::get().note(
-                        "dispatch pair sync ARMED: ch=%016llX runs per eye, "
-                        "and the %s occurrence's UAV0 is copied over the "
-                        "%s's each frame -- both eyes read one eye's data. "
-                        "Engages %s. Clear the setting to restore.",
-                        static_cast<unsigned long long>(h),
-                        s->pairSyncReverse ? "SECOND" : "FIRST",
-                        s->pairSyncReverse ? "first" : "second",
-                        s->pairSyncAllModes
-                            ? "EVERYWHERE (:all) -- the scanner mode gate is "
-                              "off, so this acts in normal flight too"
-                            : "only while the FSS scanner is up");
-                }
-            } else {
-                Log::get().note(
-                    "dispatch pair sync: cleared (%llu copies were made "
-                    "while it was set).",
-                    static_cast<unsigned long long>(hadCopies));
-            }
-        }
-    }
-
-    // The CS b1 equaliser's specs: one hash each, no suffixes.
-    {
-        const std::string lendSpec =
-            cfg.getString("experimental.dispatch_cb1_lend", "");
-        const std::string stripSpec =
-            cfg.getString("experimental.dispatch_cb1_strip", "");
-        struct Arm {
-            const char*        key;
-            const std::string* got;
-            char*              spec;
-            size_t             specLen;
-            uint64_t*          hash;
-            bool*              noted;
-            const char*        verb;
-        } arms[] = {
-            {"dispatch_cb1_lend", &lendSpec, s->cb1LendSpec,
-             sizeof(s->cb1LendSpec), &s->cb1LendHash, &s->cb1LendNoted,
-             "an EMPTY CS b1 filled with the buffer it last ran bound with"},
-            {"dispatch_cb1_strip", &stripSpec, s->cb1StripSpec,
-             sizeof(s->cb1StripSpec), &s->cb1StripHash, &s->cb1StripNoted,
-             "a BOUND CS b1 emptied"},
-        };
-        for (Arm& a : arms) {
-            const std::string& spec = *a.got;
-            if (spec.length() >= a.specLen || spec == a.spec) continue;
-            memcpy(a.spec, spec.c_str(), spec.length() + 1);
-            *a.hash = 0;
-            *a.noted = false;
-            if (spec.empty()) {
-                Log::get().note("%s: cleared.", a.key);
-                continue;
-            }
-            char* end = nullptr;
-            const unsigned long long h = _strtoui64(spec.c_str(), &end, 16);
-            if (end == spec.c_str() || h == 0 || *end != '\0') {
-                Log::get().note("%s: \"%s\" is not one 16-digit hex hash; "
-                                "refused.", a.key, spec.c_str());
-                continue;
-            }
-            *a.hash = h;
-            Log::get().note(
-                "dispatch cb1 ARMED: ch=%016llX dispatches with %s, restored "
-                "after every dispatch. Round fifteen: the mask builder runs "
-                "b1-bound for one eye and b1-empty for the other, and "
-                "whichever equalisation heals the squares names the good "
-                "state. Clear the setting to restore.",
-                static_cast<unsigned long long>(h), a.verb);
-        }
-        if (!s->cb1LendHash && s->cb1Remembered) {
-            s->cb1Remembered->Release();
-            s->cb1Remembered = nullptr;
-        }
-    }
-
     const float wasK = s->dampK;
     float k = cfg.getFloat("experimental.exposure_damping", 0.0f);
     if (k < 0.0f) k = 0.0f;
@@ -1295,11 +1029,8 @@ void exposureFixFrameBoundary() {
     }
     s->seenThisFrame = 0;
     for (uint32_t i = 0; i < 4; ++i) s->firstEye[i] = nullptr;
-    // The probe and the pair sync count occurrences per frame; the lent UAV
-    // pointer dies at the boundary exactly as firstEye[] does.
+    // The skip probe counts occurrences per frame.
     for (uint32_t i = 0; i < 4; ++i) s->dispatchOccSeen[i] = 0;
-    s->pairSyncSeen = 0;
-    s->pairSyncFirstUav = nullptr;
 
     // Forget what was bound, once a frame.
     //
@@ -1553,10 +1284,6 @@ void shutdownExposureFix() {
             g_state->dampStaging[i]->Release();
             g_state->dampStaging[i] = nullptr;
         }
-    }
-    if (g_state->cb1Remembered) {
-        g_state->cb1Remembered->Release();
-        g_state->cb1Remembered = nullptr;
     }
     g_state->hook.uninstall();
     if (g_state->lockReady) {

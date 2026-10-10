@@ -46,12 +46,12 @@
 //   eyes-alike, eyes-symmetric, eyes-near-symmetric, eyes-faint-known, eyes-swapped
 //                         the eye is read from the game's own cb2[4].x; two buffers that do not tell the eyes apart are refused
 //   retire-used, retire-settling, retire-unseen   the first rendered scene stands everything down for the session
-//   shutdown-relearn, third-buffer, small-cb, distance, gates, scene-arrived   the rest of what is observable
+//   shutdown-relearn, third-buffer, small-cb, gates, scene-arrived   the rest of what is observable
 //   curved                curvature 0.3, 48 columns, five poses (A, B, C, D, I): every one bends the movie (bytes to the bit against the curved
 //                         goldens, the flat panel's floats everywhere but cb2[3], the strip armed at the draw and not after); the gain, the
 //                         first-armed line, the retirement line's count of armed draws, no line about an edge
 //   curved-asymmetric     the Quest-like vertical frustum: the shear of the z column (m12)
-//   curved-no-edge-test   the worst places for a test of the bent edges that is not there: distance at its 1 m floor with curvature 1.0 and a
+//   curved-no-edge-test   the worst places for a test of the bent edges that is not there: curvature 1.0 and a
 //                         head yawed 40 degrees, one at 0.3 and 25 degrees, both ways round, the centre in front: armed, cb2[3] = col(cz), every
 //                         time (the rig's own arithmetic shows a nearer edge would be behind the eye in each)
 //   curved-unknown-xdir   (the mirror fix) a placement whose +x cannot be told to run left or right (a head rolled a quarter turn; the panel seen
@@ -1000,10 +1000,9 @@ void setPose(const float* p) { std::memcpy(stub::pose, p, sizeof(stub::pose)); }
 // to the intro module (which reads only its own keys), as the DLL's config reload does.
 const char* g_curvature = nullptr;
 double g_liveCurvature = 0.0;   // what fix.panel_curvature was last set to (0 until it is): what boundFrame expects the module to bend by
-void configure(const char* video, const char* distance = nullptr, const char* curvature = nullptr, const char* segments = nullptr) {
+void configure(const char* video, const char* curvature = nullptr, const char* segments = nullptr) {
     Config& c = Config::get();
     if (video) c.set("fix.intro_video", video);
-    if (distance) c.set("advanced.intro_video_distance", distance);
     if (!curvature) curvature = g_curvature;
     if (curvature) {
         c.set("fix.panel_curvature", curvature);
@@ -1034,7 +1033,7 @@ void goldenBody(Gpu& g, bool zeroKey) {
     ID3D11DeviceContext* ctx = g.ctx.Get();
     setPose(kPoseA);
     check(beginLog(), lab("log"), "the scratch log opens");
-    configure(nullptr, nullptr, zeroKey ? "0" : nullptr);   // fix.intro_video absent: the default is screen; the distance default 3.35
+    configure(nullptr, zeroKey ? "0" : nullptr);   // fix.intro_video absent: the default is screen; the distance default 3.35
     check(introPanelWants(), lab("wants"), "the default (fix.intro_video absent) is screen: the panel is wanted");
 
     // The settle frames: the first composite of each buffer starts the readback and the module answers false, leaving VS b2 the game's.
@@ -1542,7 +1541,7 @@ void scnRetireUnseen(Gpu& g) {
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------
-// shutdown-relearn, third-buffer, small-cb, distance, gates, scene-arrived.
+// shutdown-relearn, third-buffer, small-cb, gates, scene-arrived.
 // ---------------------------------------------------------------------------------------------------------------------------------
 void scnShutdownRelearn(Gpu& g) {
     setPose(kPoseA);
@@ -1594,32 +1593,6 @@ void scnSmallCb(Gpu& g) {
     check(introPanelWants(), lab("wants"), "a buffer too small for cb2 is not a refusal of the session");
     const std::string log = endLog();
     check(!has(log, "read the movie panel's own constants") && !has(log, "do not read as"), lab("log-clean"), "a 64-byte buffer was read or judged");
-}
-
-void scnDistance(Gpu& g) {
-    setPose(kPoseI);
-    check(beginLog(), lab("log"), "the scratch log opens");
-    configure("screen");
-    settle(g, "settle");
-    struct Row {
-        const char* value;   // advanced.intro_video_distance; nullptr is the default
-        double want;
-    };
-    // the default 3.35; metres otherwise, held to 1..20; a value that is not a number is the default
-    const Row rows[] = {{nullptr, 3.35}, {"5", 5.0}, {"0.5", 1.0}, {"50", 20.0}, {"banana", 3.35}, {"2.5", 2.5}};
-    for (const Row& r : rows) {
-        Config::get().set("advanced.intro_video_distance", r.value ? r.value : "");
-        introPanelConfigure(Config::get());
-        g_note = std::string("distance ") + (r.value ? r.value : "(default)");
-        FrameResult fr = boundFrame(g, kPoseI, "bound", r.want);
-        float w = 0.0f, z = 0.0f;
-        if (fr.eye[0].bound && fr.eye[0].draw.cb2Bytes.size() == 80) {
-            std::memcpy(&z, fr.eye[0].draw.cb2Bytes.data() + 72, 4);
-            std::memcpy(&w, fr.eye[0].draw.cb2Bytes.data() + 76, 4);
-        }
-        check(w == static_cast<float>(r.want) && z == 0.5f * static_cast<float>(r.want), lab("distance"), fmt("cb2[4].w = %.9g, z = %.9g, want %.9g and half of it", w, z, r.want));
-    }
-    g_note.clear();
 }
 
 void scnGates(Gpu& g) {
@@ -1717,7 +1690,7 @@ void expectNoEdgeLine(const std::string& log) {
 void scnCurved(Gpu& g) {
     ID3D11DeviceContext* ctx = g.ctx.Get();
     check(beginLog(), lab("log"), "the scratch log opens");
-    configure("screen", nullptr, "0.3", "48");
+    configure("screen", "0.3", "48");
     check(introPanelWants(), lab("wants"), "the panel is wanted");
     check(introPanelStripGain() == 4.44444f, lab("gain"), fmt("introPanelStripGain() is %.9g, want the panel's half-width 4.44444", static_cast<double>(introPanelStripGain())));
     check(!introPanelStripArmed(), lab("armed-idle"), "the strip is armed before any composite");
@@ -1768,7 +1741,7 @@ void scnCurvedAsymmetric(Gpu& g) {
     stub::top = 1.4281f;
     stub::bot = 0.9657f;
     check(beginLog(), lab("log"), "the scratch log opens");
-    configure("screen", nullptr, "0.3");
+    configure("screen", "0.3");
     settle(g, "settle");
     std::map<std::string, std::vector<uint8_t>> emit;
     for (int k = 0; k < 2; ++k) {
@@ -1794,41 +1767,46 @@ void scnCurvedAsymmetric(Gpu& g) {
 // the centre's (the 'behind' scenarios). Round 2 had a test of the edges (view z below -0.05); it popped the whole bend off at about 20 degrees of
 // head yaw and could differ between the eyes near its threshold. These are the worst places for it: where the rig's own arithmetic puts a nearer
 // edge at or behind the eye (and the centre still in front), every row is bound and ARMED in both eyes with cb2[3] = col(cz), bytes to the
-// arithmetic -- the distance at its 1 m floor with curvature 1.0 (a closed cylinder, both edges 2.83 m toward the viewer) and a head yawed 40
-// degrees either way and straight ahead; curvature 0.3 with a head yawed 25 degrees either way, at the default distance and at 1 m.
+// arithmetic -- curvature 1.0 (a closed cylinder, both edges toward the viewer) with a head yawed 40
+// degrees either way and straight ahead; curvature 0.3 with a head yawed 25 degrees either way, all at the panel's one distance.
 void scnCurvedNoEdgeTest(Gpu& g) {
     check(beginLog(), lab("log"), "the scratch log opens");
-    configure("screen", nullptr, "0.3");
+    configure("screen", "0.3");
     setPose(kPoseI);
     settle(g, "settle");
     struct Row {
         const char* name;
         const float* pose;
         const char* curvature;
-        const char* distance;
     };
     const Row rows[] = {
-        {"closed-1m-yaw40-pos", kPoseYaw40Pos, "1.0", "1"},        {"closed-1m-yaw40-neg", kPoseYaw40Neg, "1.0", "1"},
-        {"closed-1m-identity", kPoseI, "1.0", "1"},                 {"gentle-default-yaw25-pos", kPoseYaw25Pos, "0.3", "3.35"},
-        {"gentle-default-yaw25-neg", kPoseYaw25Neg, "0.3", "3.35"}, {"gentle-1m-yaw25-pos", kPoseYaw25Pos, "0.3", "1"},
-        {"gentle-1m-yaw25-neg", kPoseYaw25Neg, "0.3", "1"},
+        {"closed-yaw40-pos", kPoseYaw40Pos, "1.0"},        {"closed-yaw40-neg", kPoseYaw40Neg, "1.0"},
+        {"closed-identity", kPoseI, "1.0"},                 {"gentle-yaw25-pos", kPoseYaw25Pos, "0.3"},
+        {"gentle-yaw25-neg", kPoseYaw25Neg, "0.3"},
     };
+    int worstRows = 0;
+    double firstCurvature = 0.0;
     for (const Row& r : rows) {
-        configure(nullptr, r.distance, r.curvature);   // advanced.intro_video_distance and fix.panel_curvature, live
-        const double c = std::atof(r.curvature), dist = std::atof(r.distance);
-        g_note = fmt("%s: curvature %s, distance %s m", r.name, r.curvature, r.distance);
+        configure(nullptr, r.curvature);   // fix.panel_curvature, live
+        const double c = std::atof(r.curvature), dist = 3.35;
+        g_note = fmt("%s: curvature %s, distance %.2f m", r.name, r.curvature, dist);
+        // At the panel's one distance some of these poses no longer put a nearer edge behind the eye: such a row would show nothing
+        // about the edge test, so it is skipped (and at least one row must remain).
+        bool worstCase = true;
         for (int e = 0; e < 2; ++e) {
             check(expectedBasis(r.pose, e == 0, dist).c0[2] < 0.0, lab("fixture-centre"),
                   "the rig's own arithmetic puts the CENTRE behind the eye: the centre's test would refuse this draw, which is not what this row is about");
-            check(nearerEdgeViewZ(r.pose, e == 0, dist, c) >= -0.05, lab("fixture-edge"),
-                  "the rig's own arithmetic puts the nearer edge in front of the eye by a margin: a test of the edges would pass this row, so it shows nothing");
+            if (!(nearerEdgeViewZ(r.pose, e == 0, dist, c) >= -0.05)) worstCase = false;
         }
+        if (!worstCase) continue;
+        if (worstRows++ == 0) firstCurvature = c;
         boundFrame(g, r.pose, "frame", dist, true, c);   // bound and armed in both eyes, cb2[3] = col(cz), bytes against the arithmetic
     }
     g_note.clear();
+    check(worstRows >= 1, lab("fixture-rows"), "no row puts a nearer edge behind the eye: the scenario shows nothing");
     const std::string log = endLog();
     expectNoEdgeLine(log);
-    check(count(log, "intro video curve: the movie is drawn as a 64-column strip at curvature 1.000, gain 4.444 m") == 1, lab("log-armed"),
+    check(count(log, fmt("intro video curve: the movie is drawn as a 64-column strip at curvature %.3f, gain 4.444 m", firstCurvature)) == 1, lab("log-armed"),
           "the first-armed line is not written once, at the first row's curvature");
 }
 
@@ -1839,7 +1817,7 @@ void scnCurvedNoEdgeTest(Gpu& g) {
 void scnCurvedUnknownXDir(Gpu& g) {
     ID3D11DeviceContext* ctx = g.ctx.Get();
     check(beginLog(), lab("log"), "the scratch log opens");
-    configure("screen", nullptr, "0.3");
+    configure("screen", "0.3");
     setPose(kPoseI);
     settle(g, "settle");
     struct Row {
@@ -1890,7 +1868,7 @@ void scnCurvedUnknownXDir(Gpu& g) {
 void scnCurvedRightRunning(Gpu& g) {
     ID3D11DeviceContext* ctx = g.ctx.Get();
     check(beginLog(), lab("log"), "the scratch log opens");
-    configure("screen", nullptr, "0.3");
+    configure("screen", "0.3");
     setPose(kPoseMirror);
     settle(g, "settle");
     const float* const poses[] = {kPoseMirror, kPoseMirrorYaw, kPoseMirror};
@@ -1925,7 +1903,7 @@ void scnCurvedRightRunning(Gpu& g) {
 void scnCurvedLive(Gpu& g) {
     ID3D11DeviceContext* ctx = g.ctx.Get();
     check(beginLog(), lab("log"), "the scratch log opens");
-    configure("screen", nullptr, "0");
+    configure("screen", "0");
     setPose(kPoseC);
     settle(g, "settle");
     unsigned binds = 0, armedBinds = 0;
@@ -1941,7 +1919,7 @@ void scnCurvedLive(Gpu& g) {
         tally(fr);
         for (int e = 0; e < 2; ++e) flatC[static_cast<size_t>(e)] = fr.eye[e].draw.cb2Bytes;
     }
-    configure(nullptr, nullptr, "0.3");
+    configure(nullptr, "0.3");
     {
         FrameResult fr = boundFrame(g, kPoseC, "bent");
         tally(fr);
@@ -1952,7 +1930,7 @@ void scnCurvedLive(Gpu& g) {
                   "switching the curvature on changed more than cb2[3], or left it zero");
         }
     }
-    configure(nullptr, nullptr, "0");
+    configure(nullptr, "0");
     {
         FrameResult fr = boundFrame(g, kPoseC, "flat-again");
         tally(fr);
@@ -1961,13 +1939,13 @@ void scnCurvedLive(Gpu& g) {
             check(fr.eye[e].draw.cb2Bytes == flatC[static_cast<size_t>(e)], lab("flat-again-bytes"), "back at curvature 0 the bytes are not the first flat frame's, to the bit");
         }
     }
-    configure(nullptr, nullptr, "0.5");
+    configure(nullptr, "0.5");
     tally(boundFrame(g, kPoseC, "bent-0.5"));   // pose C bends at 0.5 as at 0.3: the curvature decides whether, not how far, and no pose keeps it flat
-    configure(nullptr, nullptr, "0.7");
+    configure(nullptr, "0.7");
     FrameResult at07 = boundFrame(g, kPoseI, "bent-0.7");
     tally(at07);
     for (int e = 0; e < 2; ++e) bentI07[static_cast<size_t>(e)] = at07.eye[e].draw.cb2Bytes;
-    configure(nullptr, nullptr, "1.0");
+    configure(nullptr, "1.0");
     FrameResult at10 = boundFrame(g, kPoseI, "bent-1.0");
     tally(at10);
     for (int e = 0; e < 2; ++e) {
@@ -1989,7 +1967,7 @@ void scnCurvedLive(Gpu& g) {
 void scnCurvedStoodDown(Gpu& g) {
     ID3D11DeviceContext* ctx = g.ctx.Get();
     check(beginLog(), lab("log"), "the scratch log opens");
-    configure("screen", nullptr, "0.3");
+    configure("screen", "0.3");
     setPose(kPoseI);
     settle(g, "settle");
     boundFrame(g, kPoseI, "bent");   // bent, by the arithmetic at curvature 0.3
@@ -2003,7 +1981,7 @@ void scnCurvedStoodDown(Gpu& g) {
         g_note = fmt("frame %d after the stand-down", f);
         boundFrame(g, kPoseI, "flat", 3.35, true, 0.0);
     }
-    configure("screen", nullptr, "0.7");   // a reload does not bring it back
+    configure("screen", "0.7");   // a reload does not bring it back
     boundFrame(g, kPoseI, "flat-reconfigured", 3.35, true, 0.0);
     g_note.clear();
     check(introPanelStripGain() == 4.44444f, lab("gain"), "the gain moved");
@@ -2021,7 +1999,7 @@ void scnCurvedStoodDown(Gpu& g) {
 void scnCurvedArmedScope(Gpu& g) {
     ID3D11DeviceContext* ctx = g.ctx.Get();
     check(beginLog(), lab("log"), "the scratch log opens");
-    configure("screen", nullptr, "0.3");
+    configure("screen", "0.3");
     setPose(kPoseI);
     settle(g, "settle");
     introPanelNoteFill(kFillW, kFillH);
@@ -2044,7 +2022,7 @@ void scnCurvedArmedScope(Gpu& g) {
 // retry (what was missing is published) bends it.
 void scnCurvedRefused(Gpu& g) {
     check(beginLog(), lab("log"), "the scratch log opens");
-    configure("screen", nullptr, "0.3");
+    configure("screen", "0.3");
     setPose(kPoseI);
     settle(g, "settle");
     const int which[] = {0, 1, 4, 6};   // no pose, no tangents, behind, a degenerate viewport (kRefusals above)
@@ -2118,7 +2096,6 @@ const Scenario kScenarios[] = {
     {"shutdown-relearn", scnShutdownRelearn},
     {"third-buffer", scnThirdBuffer},
     {"small-cb", scnSmallCb},
-    {"distance", scnDistance},
     {"gates", scnGates},
     {"scene-arrived", scnSceneArrived},
     {"curved", scnCurved},

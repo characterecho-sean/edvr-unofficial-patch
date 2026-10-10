@@ -83,7 +83,7 @@ o.b=o.p.xyw;o.c=float3(0,0,100);o.uv=v.uv;return o;}
         Capture results[2];
         for(int enabled=0;enabled<2;++enabled) {
             ctx->ClearState();uiDepthFrameBoundary(ctx);g_holoMotion[0]=HoloMotion{};
-            detail::g_uiDepthOn=true;detail::g_uiDepthStoodDown=false;g_smokeOn=true;g_reactive=0;g_smokeReactive=1;g_smokeFloor=.08f;
+            detail::g_uiDepthOn=true;detail::g_uiDepthStoodDown=false;g_smokeOn=true;
             std::vector<float> art(8*8*4,fringe?.005f:.5f);ctx->UpdateSubresource(streak.Get(),0,nullptr,art.data(),8*16,0);
             bind(12);check(g_holoMotion[0].prepare(ctx,scene.tex.Get(),{'X',3,1,0,0,0},1,4,0),"seed affine surface record before corona");
             auto* hc=g_holoMotion[0].target();
@@ -96,7 +96,7 @@ o.b=o.p.xyw;o.c=float3(0,0,100);o.uv=v.uv;return o;}
             for(UINT channel=0;channel<4;++channel)colourBefore[channel]=read(dev,ctx,colour.Get(),channel);
             bind(44);
             g_coronaPending=enabled!=0;g_coronaMotion=false;g_holoDraw={'X',3,1,0,0,0};detail::g_uiDepthMode=Mode::kReissueScene;
-            g_reissueShader=&g_depthShaders[4];g_drawEye=0;g_reissueMaskSlot=3;g_reissueMaskOffset=0;
+            g_reissueShader=&g_depthShaders[4];g_drawEye=0;g_reissueMaskSlot=3;
             g_rebindW=g_rebindH=8;g_wantRebind=false;g_wantMask=true;
             check(uiDepthReissueBegin(ctx),"production smoke/corona coverage begins");
             check(g_coronaMotion==(enabled!=0),"corona test actually selects the optional production motion shader");
@@ -121,10 +121,10 @@ o.b=o.p.xyw;o.c=float3(0,0,100);o.uv=v.uv;return o;}
                 check(ids[at]==(replace?2.f:x<4?1.f:0.f),"visible corona replaces coverage; hidden cores and fringes preserve sun/sky");
                 check(depths[at]==(replace?.025f/100:x<4?.0005f:0.f),"corona coverage preserves exact old depth or stores its actual view depth");
                 check(results[enabled].smoke[at]==(fringe?0.f:.025f/100),"coverage test exercises every core and fringe raster sample");
-                check(results[enabled].mask[at]==(fringe?7.f/255:1.f),"fringe has nonzero reactivity and reaches the preservation blend");
+                check(results[enabled].mask[at]==(fringe?0.f:3.f/255),"the core is marked class 3 (smoke); the fringe stays unmarked");
             }
         }
         check(results[0].smoke==results[1].smoke&&results[0].mask==results[1].mask,"motion extension preserves legacy private depth and classification bit for bit");
     }
-    ctx->ClearState();uiDepthFrameBoundary(ctx);g_smokeReactive=0;g_coronaPending=g_coronaMotion=false;g_holoDraw={};
+    ctx->ClearState();uiDepthFrameBoundary(ctx);g_coronaPending=g_coronaMotion=false;g_holoDraw={};
 }

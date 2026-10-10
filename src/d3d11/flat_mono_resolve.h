@@ -9,7 +9,7 @@ struct ID3D11DeviceContext;
 struct ID3D11ShaderResourceView;
 
 namespace edvr {
-// How the resolver isolates the game's pipeline state (flat_context_isolation.h has the definition): the context state swap, or
+// How the resolver isolates the game's pipeline state (flat_isolation_mode.h has the definition): the context state swap, or
 // the explicit state capture a DXMT device gets.
 enum class FlatContextIsolation : uint8_t;
 enum class FlatMonoResolveMode { Taa, Dlaa, Dlss, Fsr };
@@ -271,8 +271,8 @@ struct FlatMonoResolveStats {
     // (FlatHdrSteps, flat_hdr_route.h): the game's state swapped out, H copied into the private input, the prep dispatch,
     // the backend's success, the draw into H, the game's state put back. Counted whatever the breadcrumbs are doing.
     uint64_t hdrCaptured = 0, hdrCopied = 0, hdrPrepped = 0, hdrBackend = 0, hdrFinished = 0, hdrRestored = 0;
-    // Which isolation each call used (flat_context_isolation.h): the context state swap, which is every device but DXMT's, or the
-    // explicit state capture (DXMT, or advanced.flat_context_isolation=capture); and the name of the one the renderer was last
+    // Which isolation each call used (flat_isolation_mode.h): the context state swap, which is every device but DXMT's, or the
+    // explicit state capture (DXMT, or forced by a test rig); and the name of the one the renderer was last
     // initialised for ("swap" or "capture", static text; null before its first initialisation).
     uint64_t isolationSwaps = 0, isolationCaptures = 0;
     const char* isolation = nullptr;
@@ -329,10 +329,9 @@ void flatMonoResolveSetSpanHooks(FlatMonoResolveSpanFn begin, FlatMonoResolveSpa
 // device or allocation failure by itself.
 bool flatMonoResolveSpatialFallback(ID3D11Device*, ID3D11DeviceContext*, const FlatMonoResolveFrame&,
                                     ID3D11ShaderResourceView** output, const char** reason);
-// advanced.flat_context_isolation (auto, swap or capture): what the renderer's next initialisation is asked for. Auto, the
-// default, takes the swap everywhere but on a device that calls itself DXMT, where SwapDeviceContextState aborts the process
-// and the explicit capture runs instead. Read once by the flat runtime before its first resolve; flatMonoResolveReset() makes
-// the next call initialise again, which a rig uses to change it.
+// What the renderer's next initialisation is asked for (auto, swap or capture); test rigs only, production never calls it. Auto,
+// the default, takes the swap everywhere but on a device that calls itself DXMT, where SwapDeviceContextState aborts the process
+// and the explicit capture runs instead. flatMonoResolveReset() makes the next call initialise again, which a rig uses to change it.
 void flatMonoResolveSetIsolation(FlatContextIsolation request);
 // Owner thread: release renderer resources/history. Does not shut down shared SDKs.
 void flatMonoResolveReset();

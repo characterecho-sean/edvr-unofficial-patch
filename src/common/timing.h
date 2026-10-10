@@ -24,7 +24,7 @@
 //   - budgets over frames the game actually RENDERED (glitch_frame's give-up
 //     counters, exposure_fix's), which are measures of work done and are
 //     specifically designed to ignore loading screens;
-//   - counters compared across the two DLLs (head_offset's staleness), where
+//   - counters compared across the two DLLs (the shared channel's stamps), where
 //     both halves tick on the same event and a shared stall must not age it;
 //   - evidence counts, where one frame is one independent sample of the camera;
 //   - short debounces whose unit is the composite itself.

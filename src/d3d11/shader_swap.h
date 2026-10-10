@@ -69,15 +69,13 @@ ID3D11GeometryShader* shaderSwapCreateGs(ID3D11DeviceContext* ctx,
 // HLSL macros are the USER'S SETTINGS and so cannot be known at build time:
 //   * fss_panel.cpp: EDVR_FSS_DIST, from experimental.fss_panel_distance (any
 //     float from 0.2 to 3.0; the fix is off at 1.0, the default);
-//   * target_sharp.cpp: EDVR_RCAS_SHARP and EDVR_SCALE_PROBE, from
-//     advanced.target_indicator_sharpen (off, or any float from 0 to 2) and
-//     advanced.target_indicator_scale_probe (experimental.target_indicator is
-//     stock, off, by default).
+//   * target_sharp.cpp: EDVR_RCAS_SHARP, from the indicator's fixed RCAS
+//     sharpness (experimental.target_indicator is stock, off, by default).
 // These two are the only things in the proxy that load d3dcompiler_47.dll, and
 // only in those opt-in configurations (LoadLibraryW on demand: the proxy has no
 // static import of it, which the build's PE gate holds). The compute form was
 // removed on 2026-10-01: nothing called it -- the FSS series reducer, its last
-// user, has been a precompiled shader (kFssSeriesBytecode) for some time.
+// user, has been a precompiled shader for some time.
 //
 // Compile HLSL and create a vertex shader from it, or return null having
 // said why in the log. `who` names the caller in those messages ("sun

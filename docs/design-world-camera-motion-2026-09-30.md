@@ -16,10 +16,9 @@
   section 82; `edvr_gfx_20260930_161545.log`, v0.18.0-rc.4-104-gbde47f81).
   Sean's direction: every view's temporal-AA motion comes from the game camera
   that renders it, not head heuristics.
-- **Keys:** `experimental.on_foot_maps_sharp = off|on` (default ON since 2026-10-01;
-  off is the way back; covers menus too, a better name is `on_foot_panels_sharp`)
-  and `advanced.vr_camera_census` (episodes, naming runs and the detour's CPU ride
-  it). No other key. Key off is today's gate for every input, pinned.
+- **Keys:** the maps gate and the world route lost their switches in the
+  2026-10 cull (always on; no "off" leg). `advanced.vr_camera_census`
+  (episodes, naming runs, the detour's CPU) is the one key left.
 - **Trigger (Sean's correction):** the maps smear when dragged ON FOOT,
   where the game draws them into the 2D panel. The gate keeps the panel in
   the eye route (the journal says on foot), nothing names its camera, and
@@ -39,18 +38,19 @@
   cockpit maps are fine because kind-5 eye cameras' rows drive the world
   path (code reading).
 - **Ruled out:** end of section 1.
-- **Next flight:** the plan in section 9: census on, Phase 1's key toggled
-  live in its own on-foot leg, route off and then auto, plus the arrival leg
-  (load into on-foot play with the key off, then on). Read with `python
-  tools\edvr_log.py --target frontier --expect-build HEAD --maps-sharp` and
-  `--camera-census`.
+- **Next flight:** what can still be measured (section 9's off/on legs cannot
+  be flown: the key and the route switch are gone): census on, one on-foot leg
+  with the gate and the route as built, and the arrival leg (load into on-foot
+  play), judged against the logged baselines in this doc rather than a live
+  comparison. Read with `python tools\edvr_log.py --target frontier
+  --expect-build HEAD --maps-sharp` and `--camera-census`.
 - **Open (2026-10-01, corrected):** the arrival spell, not Cinema mode. After
   a load into on-foot play every frame is declined for 27 s
   (`edvr_gfx_20261001_074129.log`, 07:42:53-07:43:20) to 62 s
   (`..._060011.log`, 06:00:58-06:02:00): the gate open (journal: no Flags2;
   screen depth 4 draws a frame), the screen black at every luma stage; then the
   world appears and the route owns 0.30 s later. Section 8.6 says what the
-  build does there with the key off and on. No fix for the spell is built.
+  build did there with the key off and on (the key is gone; the "on" behaviour is the build's). No fix for the spell is built.
 - **Environment:** EDVR's OpenXR runtime; Pimax Crystal Super, 90 Hz, HMD
   quality 0.65 (eye 2620x2533, output 4032x3898); 2D screen 5040x2835 in
   flight 1 (`fix.vscreen_res_width` auto, the legacy rule; main's auto-fit,

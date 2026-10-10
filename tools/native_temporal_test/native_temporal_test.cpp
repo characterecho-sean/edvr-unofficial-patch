@@ -18,6 +18,8 @@
 #include "../../src/d3d11/dlss_floor.h"
 #include "../../src/openxr/native_temporal_client.h"
 #include "../../src/common/system_d3d11.h"
+#include "../../src/d3d11/glitch_frame.h"
+#include "../../src/d3d11/transition_flash_eye_base.h"
 #pragma comment(linker, "/EXPORT:edvrAcquireNativeTemporal")
 using Microsoft::WRL::ComPtr;
 unsigned checks=0,failures=0,dumps=0;
@@ -68,6 +70,8 @@ unsigned uiLayerNotes=0;uint64_t uiLayerNoteSeq=0;uint32_t uiLayerNoteEye=9;cons
 unsigned uiLayerSubmits=0;const void* uiLayerSubmitted[2]{};
 // The VR world route's scene reset (src/d3d11/vr_world_route.cpp, docs section 82): skipEye tells it a withheld frame.
 unsigned worldRouteSceneResets=0;
+// guard.cpp's crash breadcrumb (src/common/proxy.cpp in the product): the glue cases link guard.cpp for CodeHook.
+namespace edvr{void breadcrumb(const char*){}}
 namespace edvr{void uiLayerNoteTemporal(uint64_t seq,uint32_t eye,const void* out){++uiLayerNotes;uiLayerNoteSeq=seq;uiLayerNoteEye=eye;uiLayerNoteOut=out;}
 void uiLayerNoteSubmitted(uint64_t,uint32_t eye,const void* submitted){++uiLayerSubmits;if(eye<2)uiLayerSubmitted[eye]=submitted;}
 void vrWorldRouteNoteSceneReset(){++worldRouteSceneResets;}}
@@ -79,9 +83,13 @@ void vrWorldRouteNoteSceneReset(){++worldRouteSceneResets;}}
 // way might, so the rule's first cut misses and NGX's answer must step it
 // down; a nonzero `onlyW` answers for that output width alone.
 bool ngxAnswers=true,stingy=false;unsigned rangeQueries=0;uint32_t onlyW=0;
-namespace edvr{bool dlssModeRanges(ID3D11Device*,uint32_t outW,uint32_t outH,DlssModeRange modes[kDlssModeCount]){
+// A nonzero `ceilingSide` is NVIDIA's side limit (2026-10-09 probe: 8192 on each axis): past it every mode answers ok with
+// every size zero, the flight's "success with zeros".
+uint32_t ceilingSide=0;
+namespace edvr{bool dlssModeRanges(ID3D11Device*,uint32_t outW,uint32_t outH,DlssModeRange modes[kDlssModeCount],bool){
   ++rangeQueries;for(int k=0;k<kDlssModeCount;++k)modes[k]=DlssModeRange{};
   if(!ngxAnswers||!outW||!outH||(onlyW&&outW!=onlyW))return false;
+  if(ceilingSide&&(outW>ceilingSide||outH>ceilingSide)){for(int k=0;k<kDlssModeCount;++k)modes[k].ok=true;return true;}
   const unsigned extra=stingy&&outW<4000?3u:0u,hw=(outW+1)/2+extra,hh=(outH+1)/2+extra;
   const unsigned optW[3]={(outW*2+1)/3,(outW*58+50)/100,hw},optH[3]={(outH*2+1)/3,(outH*58+50)/100,hh};
   for(int k=0;k<3;++k){auto& m=modes[k];m.ok=true;m.optW=optW[k];m.optH=optH[k];m.minW=hw;m.minH=hh;m.maxW=outW;m.maxH=outH;}
@@ -95,7 +103,7 @@ unsigned gapCalls=0,rawClears=0;ID3D11Texture2D* gapFrame=nullptr;
 namespace edvr{
 bool vrWorldRouteOwnsNextFrame(){return routeOwns;}
 // The layer's one predicate for a layer-only eye (src/d3d11/ui_layer.h): the route's re-issued world, or a map's or menu's 2D screen
-// the layer took under experimental.on_foot_maps_sharp. The door cannot tell which, so one stub answers for both.
+// the layer took under the on-foot maps gate. The door cannot tell which, so one stub answers for both.
 bool uiLayerDoorLayerOnly(uint32_t eye,uint64_t seq){return eye<2&&routeTookEye[eye]&&seq!=0&&routeTookSeq==seq;}
 int uiLayerWorldDoorGap(uint64_t,uint32_t,ID3D11Texture2D* frame){++gapCalls;gapFrame=frame;return gapAnswer;}
 void vScreenClearRenderTargetViewRaw(ID3D11DeviceContext* c,ID3D11RenderTargetView* v,const float colour[4]){++rawClears;c->ClearRenderTargetView(v,colour);}
@@ -129,6 +137,126 @@ HRESULT treat(EdvrNativeTemporalTable& t,uint64_t seq,unsigned eye,ID3D11Texture
   else check(!output&&box[0]==0&&box[1]==0&&box[2]==0&&box[3]==0,"passthrough/failure clears output");
   if(output)output->Release();return result;
 }
+
+// ---- The glue rig (review of 33ffc76e, finding F) ---------------------------------------------------------------------------
+// The chain no other rig covers end to end, on the production pieces: the engine fix's consume classifier -> event ->
+// the detector's camera-buffer Unmap tap (glitch_frame.cpp's glitchFrameObserve) -> the hold mark -> the two eye submits as
+// native_frame.cpp's latchSubmit hands them to the temporal channel (marked -> skipEye with the verdict word read at that
+// moment, otherwise treat) -> the frame boundary that owes the verdict -> the first resumed treat. Linked: glitch_frame.cpp,
+// transition_flash_eye_base.cpp, frame_flag.cpp, native_temporal.cpp. Not linked: the game hooks (the consume is fed a
+// synthetic mailbox through transitionFlashEyeBaseConsumeForTest) and native_frame.cpp's latch, which the step below mirrors.
+float g_glueCbHead[1344], g_glueCbWorld[1344];   // 5376-byte scene CBs: row 275 head-only / a world-space eye
+const float kGlueReset[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,0};
+const float kGlueRefilled[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 5,0,0,1};
+struct GlueRig {
+  EdvrNativeTemporalTable* t=nullptr;ID3D11Texture2D* src=nullptr;uint64_t gen=0,seq=0;unsigned boundary=0;
+  unsigned marks=0,skippedEyes=0,resets=0,treated=0;
+};
+// One frame period, in the order the flights showed: native begin (clears the mark), the consume, the render taps, the
+// two submits, Present's boundary.
+void glueStep(GlueRig& r,bool consumeReset,unsigned headFills,unsigned worldFills){
+  ++r.seq;auto f=frame(r.gen,r.seq);begin(*r.t,f);edvr::clearGlitchFrame();
+  edvr::transitionFlashEyeBaseConsumeForTest(1,kGlueReset);   // the mode-1 peek: carries no information
+  edvr::transitionFlashEyeBaseConsumeForTest(2,consumeReset?kGlueReset:kGlueRefilled);
+  for(unsigned i=0;i<worldFills;++i)edvr::glitchFrameObserve(g_glueCbWorld,5376,reinterpret_cast<const void*>(0x7001));
+  for(unsigned i=0;i<headFills;++i)edvr::glitchFrameObserve(g_glueCbHead,5376,reinterpret_cast<const void*>(0x7002));
+  const bool marked=edvr::glitchFrameMarked();const uint32_t verdict=edvr::jumpVerdictPacked();   // latchSubmit, once per frame
+  if(marked)++r.marks;
+  for(unsigned eye=0;eye<2;++eye){
+    if(marked){check(r.t->skipEye(r.t->context,r.seq,eye,1,verdict)==S_OK,"glue: the held eye is skipped");++r.skippedEyes;}
+    else{check(treat(*r.t,r.seq,eye,r.src)==S_OK,"glue: an unheld eye is treated");++r.treated;if(calls.back().flags&1)++r.resets;}
+  }
+  edvr::glitchFrameBoundary(0);
+  edvr::transitionFlashEyeBaseFrameBoundary(++r.boundary);
+}
+void glueSettle(GlueRig& r){for(unsigned i=0;i<8;++i)glueStep(r,false,0,1);}
+struct GlueNums{uint64_t events,held,noHead,notHonoured,skipped,kept,returned,unjudged;};
+GlueNums glueNums(){
+  GlueNums n{};edvr::transitionFlashEyeBaseCountersForTest(&n.events,&n.held,&n.noHead,&n.notHonoured);
+  edvr::nativeTemporalOmissionCounters(&n.skipped,&n.kept,&n.returned,&n.unjudged);return n;
+}
+void glue(EdvrNativeTemporalTable& t,ID3D11Texture2D* source,uint64_t gen,uint64_t seq0){
+  std::memset(g_glueCbHead,0,sizeof(g_glueCbHead));std::memset(g_glueCbWorld,0,sizeof(g_glueCbWorld));
+  g_glueCbHead[1100]=0.05f;g_glueCbHead[1101]=-0.016f;g_glueCbHead[1102]=0.016f;      // the bad frame's row 275 (flight 060955)
+  g_glueCbWorld[1100]=6.119f;g_glueCbWorld[1101]=-3.432f;g_glueCbWorld[1102]=11.511f; // an ordinary eye origin
+  edvr::Config::get().set("fix.transition_flash","1");
+  edvr::installGlitchFrameFix();
+  char why[256]="";
+  check(edvr::glitchFrameEngineTapAvailable(why,sizeof(why)),"glue: the tap is available with the default buffer");
+  edvr::transitionFlashEyeBaseArmForTest();
+  edvr::announceGlitchConsumer();
+  GlueRig r;r.t=&t;r.src=source;r.gen=gen;r.seq=seq0;   // the channel the omission cases above used (the pool of 16 is spent)
+  glueSettle(r);
+  const unsigned baseResets=r.resets;
+
+  { // a one-frame gap
+    const GlueNums a=glueNums();const unsigned m0=r.marks;
+    glueStep(r,true,0,1);        // S: the consume reads the reset mailbox -> an event
+    glueStep(r,false,3,2);       // S+1: the bad render; three duplicate head-only fills among world fills
+    glueStep(r,false,0,1);       // S+2: resumed
+    glueSettle(r);
+    const GlueNums b=glueNums();
+    check(b.events==a.events+1,"glue: one-frame gap: one event");
+    check(r.marks==m0+1&&b.held==a.held+1,"glue: one-frame gap: exactly one mark, despite three head-only fills");
+    check(b.skipped==a.skipped+2&&b.kept==a.kept+2&&b.unjudged==a.unjudged,"glue: one-frame gap: both eyes skipped once, both histories kept, no unjudged reset");
+    check(r.resets==baseResets,"glue: one-frame gap: the first resumed treat does not reset history");
+    check(b.notHonoured==a.notHonoured,"glue: one-frame gap: the compositor honoured the hold");
+  }
+  { // a two-frame gap
+    const GlueNums a=glueNums();const unsigned m0=r.marks;
+    glueStep(r,true,0,1);        // S
+    glueStep(r,true,2,1);        // S+1: still a gap consume; the first bad render
+    glueStep(r,false,2,1);       // S+2: the second bad render (its consume S+1 was a gap consume)
+    glueStep(r,false,0,1);       // S+3: resumed
+    glueSettle(r);
+    const GlueNums b=glueNums();
+    check(r.marks==m0+2&&b.held==a.held+2,"glue: two-frame gap: two frames held, no more");
+    check(b.skipped==a.skipped+4&&b.kept==a.kept+2&&b.unjudged==a.unjudged,"glue: two-frame gap: four eyes skipped, one kept run per eye, no unjudged reset");
+    check(r.resets==baseResets,"glue: two-frame gap: history survives");
+  }
+  { // a gap longer than two frames holds two frames and no more
+    const GlueNums a=glueNums();const unsigned m0=r.marks;
+    glueStep(r,true,0,1);glueStep(r,true,2,1);glueStep(r,true,2,1);glueStep(r,true,2,1);glueStep(r,false,2,1);
+    glueSettle(r);
+    const GlueNums b=glueNums();
+    check(r.marks==m0+2&&b.held==a.held+2,"glue: a long gap holds two frames, never more");
+    check(r.resets==baseResets&&b.unjudged==a.unjudged,"glue: a long gap leaves the history intact");
+  }
+  { // a non-head-only fill, and an event with no head-only fill at all
+    const GlueNums a=glueNums();const unsigned m0=r.marks;
+    glueStep(r,true,0,1);glueStep(r,false,0,3);glueStep(r,false,0,1);glueSettle(r);
+    const GlueNums b=glueNums();
+    check(r.marks==m0&&b.held==a.held,"glue: world-space fills alone are never held");
+    check(b.events==a.events+1&&b.noHead==a.noHead+1,"glue: the event whose window held no head-only fill is counted as such");
+    check(b.skipped==a.skipped,"glue: nothing was skipped");
+  }
+  { // overlapping events: a second ENTRY two frames after the first replaces it
+    const GlueNums a=glueNums();const unsigned m0=r.marks;
+    glueStep(r,true,0,1);glueStep(r,false,2,1);   // event A: S, S+1 (held)
+    glueStep(r,true,0,1);glueStep(r,false,2,1);   // event B replaces A at S+2; its bad render S+3 (held)
+    glueStep(r,false,0,1);glueSettle(r);
+    const GlueNums b=glueNums();
+    check(b.events==a.events+2&&r.marks==m0+2&&b.held==a.held+2,"glue: overlapping events: two events, one hold each");
+    check(b.skipped==a.skipped+4&&b.kept==a.kept+4&&b.unjudged==a.unjudged&&r.resets==baseResets,"glue: overlapping events: histories kept across both holds");
+  }
+  { // the window closes: fills after retirement are not delivered to the tap
+    const GlueNums a=glueNums();const unsigned m0=r.marks;
+    glueSettle(r);glueStep(r,false,4,0);glueStep(r,false,4,0);
+    const GlueNums b=glueNums();
+    check(r.marks==m0&&b.held==a.held,"glue: head-only fills outside any event are ignored");
+  }
+  { // failed activation: the engine fix is not armed, so nothing is held and nothing is counted
+    edvr::transitionFlashEyeBaseDisarmForTest();
+    const GlueNums a=glueNums();const unsigned m0=r.marks;
+    glueStep(r,true,0,1);glueStep(r,false,3,1);glueStep(r,false,0,1);glueSettle(r);
+    const GlueNums b=glueNums();
+    check(r.marks==m0&&b.held==a.held&&b.events==a.events,"glue: an unarmed engine fix arms no event and marks no frame");
+    check(b.skipped==a.skipped&&r.resets==baseResets,"glue: an unarmed engine fix leaves the temporal pass alone");
+    edvr::transitionFlashEyeBaseArmForTest();
+  }
+  edvr::shutdownGlitchFrameFix();
+}
+
 void run(){
   // N9: the warm target is the channel's raw pointer, not a live reference --
   // false with no channel acquired, the acquiring thread and device once one
@@ -219,18 +347,6 @@ void run(){
   check(uiLayerNotes==notesBefore,"a refused eye is not noted to the UI layer (it must not arm behind raw pixels)");
   f=frame(13,3);p=begin(dlss,f);check(p.tangentShift[0][0]==0&&p.tangentShift[0][1]==0,"refusal disables future jitter");check(dlss.close(dlss.context)==S_OK,"DLSS close");
   auto unknown=acquire(d,14,"invalid-mode");f=frame(14,1);begin(unknown,f);check(treat(unknown,1,0,source.Get())==S_FALSE,"unknown mode is off");check(unknown.close(unknown.context)==S_OK,"unknown close");
-  edvr::Config::get().set("advanced.temporal_aa_jitter_sign","flip_both");
-  edvr::Config::get().set("advanced.temporal_aa_jitter_lag","1");
-  auto diagnostic=acquire(d,16);f=frame(16,1);begin(diagnostic,f);
-  check(treat(diagnostic,1,1,source.Get())==S_OK&&treat(diagnostic,1,0,source.Get())==S_OK,"diagnostic baseline pair");
-  f=frame(16,2);const auto p2=begin(diagnostic,f);
-  check(treat(diagnostic,2,1,source.Get())==S_OK&&closeFloat(calls.back().jx,0)&&closeFloat(calls.back().jy,0),"lag consumes previous frame zero jitter");
-  check(treat(diagnostic,2,0,source.Get())==S_OK&&closeFloat(calls.back().jx,0),"lag is per eye, independent of submit order");
-  f=frame(16,3);begin(diagnostic,f);check(treat(diagnostic,3,0,source.Get())==S_OK,"lag third frame");
-  c=calls.back();check(closeFloat(c.jx,p2.tangentShift[0][0]*320/1.9f)&&closeFloat(c.jy,-p2.tangentShift[0][1]*240/2),"sign and lag affect consumer pixels only");
-  check(p2.tangentShift[0][0]<0,"game jitter keeps original sign despite diagnostic flip");
-  check(diagnostic.close(diagnostic.context)==S_OK,"diagnostic close");
-  edvr::Config::get().set("advanced.temporal_aa_jitter_sign","as_is");edvr::Config::get().set("advanced.temporal_aa_jitter_lag","0");
   edvr::Config::get().set("fix.temporal_aa","on");edvr::openxr::NativeTemporalClient client;
   require(client.acquire(GetModuleHandleW(nullptr),d.device.Get(),15)==S_OK,"actual client validates provider table");
   edvr::openxr::GeometryInput g{};g.generation=1;g.sequence=1;g.displayTime=1;g.headPose.orientation.w=1;
@@ -258,6 +374,38 @@ void run(){
     f=frame(17,seq);begin(omitted,f);check(treat(omitted,seq,0,source.Get())==S_OK,"deferred verdict frame");
     check(bool(calls.back().flags&1)==(seq==12),"unknown verdict resets on fourth treat only");
   }
+  // The engine fix's exact withhold (docs Build 2c, flight 091951). The verdict word is latched when the eye is withheld
+  // (native_frame passes jumpVerdictPacked() to skipEye) and a CHANGE since is the verdict. Published BEFORE the latch it is
+  // no change: the fourth treat resets the history (the unjudged blink). Published AFTER, at the frame boundary behind the
+  // withheld frame's submit, it is a change and the history is kept -- through a second withheld frame too.
+  uint64_t cSkipped0=0,cKept0=0,cReturned0=0,cUnjudged0=0;
+  check(edvr::nativeTemporalOmissionCounters(&cSkipped0,&cKept0,&cReturned0,&cUnjudged0),"omission counters are readable");
+  f=frame(17,13);begin(omitted,f);edvr::noteJumpVerdict(2);
+  omitted.skipEye(omitted.context,13,0,1,edvr::jumpVerdictPacked());
+  for(unsigned seq=14;seq<=17;++seq) {
+    f=frame(17,seq);begin(omitted,f);check(treat(omitted,seq,0,source.Get())==S_OK,"verdict published before the latch: treat");
+    check(bool(calls.back().flags&1)==(seq==17),"verdict published before the latch is no verdict: history resets (the blink)");
+  }
+  uint64_t cSkipped1=0,cKept1=0,cReturned1=0,cUnjudged1=0;
+  edvr::nativeTemporalOmissionCounters(&cSkipped1,&cKept1,&cReturned1,&cUnjudged1);
+  check(cSkipped1==cSkipped0+1&&cKept1==cKept0&&cUnjudged1==cUnjudged0+1&&cReturned1==cReturned0,
+        "verdict before the latch: one omitted eye, no history kept, one unjudged reset");
+  f=frame(17,18);begin(omitted,f);
+  omitted.skipEye(omitted.context,18,0,1,edvr::jumpVerdictPacked());   // frame 1 held: latch the word as it stands
+  edvr::noteJumpVerdict(2);                                           // the boundary behind it
+  f=frame(17,19);begin(omitted,f);
+  omitted.skipEye(omitted.context,19,0,1,edvr::jumpVerdictPacked());   // frame 2 held (the gap lasted two frames)
+  edvr::noteJumpVerdict(2);
+  f=frame(17,20);begin(omitted,f);
+  check(treat(omitted,20,0,source.Get())==S_OK&&!(calls.back().flags&1),"verdict published after the latch keeps history across two held frames");
+  // The counters' contract (review of 33ffc76e): skipped counts one per omitted eye per omitted frame, history_kept
+  // once per resolved omission RUN per eye. Two consecutive holds of one eye = skipped +2, history_kept +1, no unjudged
+  // reset. A flight is judged on unjudged_resets == 0 and on runs per eye, never on held frames == history_kept.
+  uint64_t cSkipped2=0,cKept2=0,cReturned2=0,cUnjudged2=0;
+  edvr::nativeTemporalOmissionCounters(&cSkipped2,&cKept2,&cReturned2,&cUnjudged2);
+  check(cSkipped2==cSkipped1+2&&cKept2==cKept1+1&&cUnjudged2==cUnjudged1&&cReturned2==cReturned1,
+        "two consecutive holds of one eye: skipped +2, history_kept +1 (one run), unjudged_resets +0");
+  glue(omitted,source.Get(),17,20);
   omitted.close(omitted.context);
 
   // ---- the served floor (2026-09-23) ----------------------------------------
@@ -299,6 +447,12 @@ void run(){
     stingy=false;
     onlyW=4074;ask(floorT,18,4074,4076,1829,1830,4074,4076,"NGX silent at the cut: the door's output stands, the pass decides as before");onlyW=0;
     ngxAnswers=false;ask(floorT,18,4000,4000,1600,1600,4000,4000,"NGX will not say at all: the door's output stands, as before this existed");ngxAnswers=true;
+    // NVIDIA's ceiling (dlss_floor.h): 8268x3948 answers zeros, so the output is cut to the largest it answers, 8192x3910, and the
+    // 4134x1974 input clears that cap's floor (4096x1955). A small input under the cap's floor is cut at the cap, not the door.
+    ceilingSide=8192;
+    ask(floorT,18,8268,3948,4134,1974,8192,3910,"NVIDIA's side limit: 8268x3948 is cut to the ceiling, 8192x3910, and the input serves there");
+    ask(floorT,18,8268,3948,2000,1000,4000,2000,"under the cap's floor: twice the input at the cap, 4000x2000");
+    ceilingSide=0;
     check(floorT.close(floorT.context)==S_OK,"floor channel close");
     // Only NVIDIA's ranges are the floor: fsr is asked for the door's output.
     auto fsr=acquire(d,19,"fsr");seq=0;const auto q=rangeQueries;
@@ -308,7 +462,7 @@ void run(){
   }
 
   // ---- the VR world route: the eye shift and the layer-only door (design doc section 82) ----------------------------
-  // With experimental.temporal_aa_on_foot_world off the route owns nothing and took no eye, which is every case above.
+  // While the route is idle it owns nothing and took no eye, which is every case above.
   // Here it owns the next frame, or took an eye's screen draw into the UI layer, and the door answers for it.
   {
     const auto shifted=[](const EdvrNativeTemporalProjection& p){

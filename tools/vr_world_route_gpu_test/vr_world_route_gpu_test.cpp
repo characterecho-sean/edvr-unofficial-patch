@@ -19,7 +19,7 @@
 //     keeps its contract: a window the route opens once a frame, closes at the trigger, counters the route reads): the
 //     window opens only while the route is Warming or Owned AND the last frame named the screen's source (so a map frame's
 //     refreshes inject nothing, through the grace frames too), the phase reaches the resolver only when a scene call took
-//     it, the global jitter key (experimental.temporal_aa_jitter; the route has no jitter key of its own) zeroes it, a hook that
+//     it, a hook that
 //     is not live leaves the world unjittered, a STOP fires on an injection on a frame the route shut and on an injected kind
 //     other than 3, and the key off leaves the injector alone;
 //   - the depth-checked steady detail is always on: the resolver's depth check counts the route's resolves with no key set.
@@ -396,7 +396,7 @@ std::string ownsLine() {
     return n == 1 ? out : std::string();
 }
 void configure(bool routeOn) {
-    Config::get().set("experimental.temporal_aa_on_foot_world", routeOn ? "auto" : "off");
+    vrWorldRouteSetEnabledForTest(routeOn);
     Config::get().set("fix.temporal_aa", "dlss");
 }
 void reset(World& w) {
@@ -407,7 +407,6 @@ void reset(World& w) {
     for (int i = 0; i < 4; ++i) { gameWorldRefreshes(); vrWorldRouteFrameBoundary(); }
     g_log.clear(); g_calls.clear(); g_backendCalls = 0; g_mipsResets = 0;
     g_inj = InjectorModel{}; g_game = GameCameras{};
-    Config::get().set("experimental.temporal_aa_jitter", "on");
     g_gate = g_layerLive = g_named = g_rowsKnown = g_viewsReady = true;
     g_panelW = kW; g_panelH = kH; g_realMismatch = false;
     g_namedDepth = w.depth.Get();
@@ -931,51 +930,6 @@ void stage2(World& w) {
           "STOP: an injected kind-5 (eye) call is a STOP: only kind 3 may be injected");
     frame(w);
     check(!lastCallInject(), "STOP: and the injector is off for the session");
-
-    // C. THE GLOBAL JITTER KEY. The route has no jitter key of its own (retired 2026-10-01): with the route on and nothing else set, the
-    // world it owns is jittered (A, B and every scenario above prove it), and experimental.temporal_aa_jitter off is the one setting
-    // that keeps the route and zeroes the world phase. Off from the start: the route owns the world and resolves it unjittered, exactly
-    // flight 1's behaviour, and the injector is never touched.
-    reset(w);
-    Config::get().set("experimental.temporal_aa_jitter", "off");
-    configure(true);
-    vrWorldRouteFrameBoundary();
-    for (int i = 0; i < int(kVrWorldWarmFrames) + 6; ++i) frame(w);
-    {
-        float maxAbs = 0.0f;
-        for (const auto& c : g_calls) maxAbs = std::fmax(maxAbs, std::fabs(c.jx) + std::fabs(c.jy));
-        check(vrWorldRouteState() == VrWorldState::Owned && g_backendCalls >= int(kVrWorldWarmFrames) + 6 && maxAbs == 0.0f,
-              "global key: with experimental.temporal_aa_jitter off the route owns the world and resolves it unjittered, exactly flight 1's behaviour");
-    }
-    check(g_inj.frameCalls == 0 && g_inj.closeCalls == 0,
-          "global key: with it off from the start the injector is never installed, stepped or closed");
-    {
-        float x = 9.0f, y = 9.0f;
-        check(!vrWorldRouteWorldPhase(&x, &y) && x == 0.0f && y == 0.0f, "global key: worldPhase() is false and zero");
-    }
-    Config::get().set("experimental.temporal_aa_jitter", "on");   // flipped live, from the menu
-    for (int i = 0; i < 6; ++i) frame(w);
-    check(vrWorldRouteState() == VrWorldState::Owned && g_inj.injectCalls > 0 && lastCallInject() && phaseOfLastCall() != 0.0f,
-          "global key: flipped on live while owned, the next boundary opens the window and, after the warm-up, the phase is non-zero");
-    {
-        float maxAbs = 0.0f;
-        for (size_t i = g_calls.size() - 2; i < g_calls.size(); ++i) maxAbs = std::fmax(maxAbs, std::fabs(g_calls[i].jx) + std::fabs(g_calls[i].jy));
-        check(maxAbs > 0.0f, "global key: and the resolver sees it (the world is jittered with no other setting touched)");
-    }
-    Config::get().set("experimental.temporal_aa_jitter", "off");   // flipped off live
-    frame(w);   // the frame that was running when the key flipped: its window was already open (the key is read at the boundary)
-    check(!lastCallInject() && vrWorldRouteState() == VrWorldState::Owned,
-          "global key: flipped off live, the boundary shuts the next frame's window at once, and the route still owns the world");
-    frame(w);
-    check(g_calls.back().jx == 0.0f && g_calls.back().jy == 0.0f && lastEnded().sceneInjected == 0,
-          "global key: and that frame is unjittered: the resolver's phase is zero again and nothing was injected");
-    const int afterOff = g_inj.frameCalls;
-    for (int i = 0; i < 5; ++i) frame(w);
-    check(g_inj.frameCalls == afterOff + 0 && !g_inj.injecting && !g_inj.pendingFlush && !g_inj.gateOpen,
-          "global key: the injector was passed through until what it wrote was restored, then its relay gate was closed and it was left alone (no further steps)");
-    Config::get().set("experimental.temporal_aa_jitter", "on");
-    for (int i = 0; i < 6; ++i) frame(w);
-    check(lastCallInject() && phaseOfLastCall() != 0.0f, "global key: on again: the world is jittered again, with nothing else to switch");
 
     // D. THE HOOK IS NOT LIVE: the world stays unjittered and says so once.
     reset(w);

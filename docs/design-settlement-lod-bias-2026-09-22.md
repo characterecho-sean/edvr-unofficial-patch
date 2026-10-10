@@ -8,6 +8,12 @@ flown once, refined, shipped as the default). Capture: eye run 165433
 
 ## Status
 
+- **REMOVED (2026-10-08, branch claude/remove-settlement-detail):** the
+  governor is gone, with `fix.settlement_detail`,
+  `advanced.settlement_detail_max`, `advanced.settlement_detail_observe`,
+  `lod_governor.{h,cpp}`, its setter hook (FUN_142819D90) and its rig. The
+  rest of this document is history. The cull gate probe's version 3 LOD
+  tables and `tools/cull_gate_probe.py --lod-bias` stay.
 - **Default OFF (2026-09-24, Sean):** the shipped and compiled default is now
   `game` (the game's own detail, nothing observed or changed); `auto` and
   `reduced` are opt-in. Everything below about `auto` still holds when chosen.

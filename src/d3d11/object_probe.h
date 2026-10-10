@@ -61,6 +61,10 @@ void objectProbeOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, u
 // The caller establishes that the target is an eye. Record the original
 // shader in an active ledger, without probing its unrelated instance pool.
 inline bool objectProbeLedgerActive() { return detail::g_objectProbeLedgerOn; }
+// One compute Dispatch, before it is forwarded, while an eye run's ledger is armed (the skin ledger,
+// skin_ledger.h: the palette chain's inputs). Ask objectProbeLedgerActive() first; this returns at its first line
+// when unarmed or outside the run's 20 frames. `foreign` marks a deferred context.
+void objectProbeNoteDispatch(ID3D11DeviceContext* ctx, uint32_t x, uint32_t y, uint32_t z, bool foreign);
 void objectProbeSourceDrawEnd(ID3D11DeviceContext* ctx);
 // Around only the native draw, after Begin substitutions and before private
 // depth/motion reissues. Inactive outside an explicitly armed eye capture.

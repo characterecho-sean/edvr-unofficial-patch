@@ -35,9 +35,8 @@ constexpr char     kKind = 'X';
 constexpr uint32_t kIndices = 6;
 constexpr uint32_t kInstances = 1;
 
-// vs E508648660A352B2, measured on game build 332753. Pinnable from the ini
-// because a game update can recompile a shader without changing what it
-// does, and the alternative -- matching on shape alone -- would catch every
+// vs E508648660A352B2, measured on game build 332753. Matched by hash
+// because the alternative -- matching on shape alone -- would catch every
 // other 6-index quad that samples one non-eye-sized texture.
 constexpr uint64_t kVsHash = 0xE508648660A352B2ull;
 
@@ -99,21 +98,6 @@ const char kPsCommon[] =
     "    return acc;\n"
     "}\n"
     "\n"
-    "// The scale probe's legend. tpp is TEXELS OF THE SURFACE PER OUTPUT\n"
-    "// PIXEL: below 1 the source is magnified and a reconstruction kernel\n"
-    "// is the right tool; above 1 it is minified, and what it wants is\n"
-    "// averaging over the footprint instead. Flat colours rather than a\n"
-    "// gradient, because the question is which side of 1 we are on and a\n"
-    "// gradient read through a headset is a guess.\n"
-    "float3 scaleRamp(float tpp)\n"
-    "{\n"
-    "    if (tpp < 0.5) return float3(0.0, 0.3, 1.0);   // blue    2x+ magnified\n"
-    "    if (tpp < 1.5) return float3(0.0, 1.0, 0.2);   // green   about 1:1\n"
-    "    if (tpp < 3.0) return float3(1.0, 1.0, 0.0);   // yellow  up to 3x minified\n"
-    "    if (tpp < 6.0) return float3(1.0, 0.0, 0.0);   // red     3-6x minified\n"
-    "    return float3(1.0, 0.0, 1.0);                  // magenta 6x+ minified\n"
-    "}\n"
-    "\n"
     "float4 shade(float3 rgb, float a)\n"
     "{\n"
     "    float3 c = rgb * rgb;\n"
@@ -126,17 +110,6 @@ const char kPsCommon[] =
     "    o.z = c.x * g_cb1[85].z + c.y * g_cb1[86].z + c.z * g_cb1[87].z;\n"
     "    return float4(o * g_cb1[90].y, a);\n"
     "}\n"
-    "\n"
-    "// The probe's colours, painted at the HUD's OWN magnitude. The eye\n"
-    "// target is a float HDR buffer and shade() scales by cb2[0].x (16 on\n"
-    "// the measured rig) and three more factors, so a flat 0..1 colour lands\n"
-    "// far too dim to read through a headset -- which is exactly what the\n"
-    "// first build of this probe did, and it reported as no change at all.\n"
-    "// shade() of white IS that scale, so it is measured, not guessed.\n"
-    "float probeGain()\n"
-    "{\n"
-    "    float3 w = shade(float3(1.0, 1.0, 1.0), 1.0).rgb;\n"
-    "    return max(max(w.r, max(w.g, w.b)), 1.0);\n"
     "}\n";
 
 // The fallback, for a rig where EASU will not compile. A cubic is a smaller
@@ -145,11 +118,6 @@ const char kPsCommon[] =
 const char kPsCubicMain[] =
     "float4 main(float2 uv : TEXCOORD0) : SV_TARGET\n"
     "{\n"
-    "    float2 size;\n"
-    "    g_tex.GetDimensions(size.x, size.y);\n"
-    "    // Read while the quad is whole, before any discard.\n"
-    "    float2 dxt = ddx(uv) * size;\n"
-    "    float2 dyt = ddy(uv) * size;\n"
     "    float4 s = fetchCubic(uv);\n"
     "    // A cubic kernel overshoots. rgb is SQUARED in shade(), so a\n"
     "    // negative channel would come back as a bright one; alpha gates a\n"
@@ -157,10 +125,6 @@ const char kPsCubicMain[] =
     "    s.rgb = max(s.rgb, 0.0);\n"
     "    s.a = saturate(s.a);\n"
     "    if (s.a - 0.00001 < 0.0) discard;\n"
-    "#if EDVR_SCALE_PROBE\n"
-    "    return float4(scaleRamp(max(length(dxt), length(dyt))) *\n"
-    "                  probeGain(), s.a);\n"
-    "#endif\n"
     "    return shade(s.rgb, s.a);\n"
     "}\n";
 
@@ -224,14 +188,6 @@ const char kPsEasuMain[] =
     "    float a = saturate(fetchCubic(uv).a);\n"
     "    if (a - 0.00001 < 0.0) discard;\n"
     "\n"
-    "#if EDVR_SCALE_PROBE\n"
-    "    // The derivatives above, in texels. Painted flat and NOT through\n"
-    "    // shade(): that applies the HUD colour matrix, which maps every\n"
-    "    // hue onto the commander's HUD colour and would erase the answer.\n"
-    "    float tpp = max(length(g_dx * g_size), length(g_dy * g_size));\n"
-    "    return float4(scaleRamp(tpp) * probeGain(), a);\n"
-    "#endif\n"
-    "\n"
     "    AF3 c;\n"
     "#if EDVR_RCAS\n"
     "    FsrRcasF(c.r, c.g, c.b, AU2(0, 0),\n"
@@ -254,15 +210,13 @@ std::string joinChunks(const char* const* chunks) {
 
 enum class Mode { kOff, kCubic, kEasu };
 
-uint64_t g_vsHash = kVsHash;
-float    g_sharpen = 0.25f;   // RCAS stops; negative = RCAS off
-bool     g_scaleProbe = false;   // paint the local scale instead of the art
+constexpr uint64_t g_vsHash = kVsHash;
+constexpr float g_sharpen = 0.25f;   // RCAS stops (AMD's unit: stops of sharpness reduction, 0 the sharpest)
 Mode     g_running = Mode::kOff;
 
 ID3D11PixelShader* g_ps = nullptr;
 float              g_psSharpen = 0.0f;
 bool               g_psHadRcas = false;
-bool               g_psHadProbe = false;
 
 bool               g_engaged = false;
 bool               g_costSample = false;
@@ -271,8 +225,7 @@ uint64_t           g_applied = 0;
 
 ID3D11PixelShader* replacement(ID3D11DeviceContext* ctx) {
     const bool wantRcas = g_sharpen >= 0.0f;
-    if (g_ps && g_psHadRcas == wantRcas && g_psSharpen == g_sharpen &&
-        g_psHadProbe == g_scaleProbe) {
+    if (g_ps && g_psHadRcas == wantRcas && g_psSharpen == g_sharpen) {
         return g_ps;
     }
     if (detail::g_targetSharpFailed) return nullptr;
@@ -290,7 +243,6 @@ ID3D11PixelShader* replacement(ID3D11DeviceContext* ctx) {
     }
     const SwapMacro macros[] = {{"EDVR_RCAS", wantRcas ? "1" : "0"},
                                 {"EDVR_RCAS_SHARP", sharpBuf},
-                                {"EDVR_SCALE_PROBE", g_scaleProbe ? "1" : "0"},
                                 {nullptr, nullptr}};
 
     const std::string easu = std::string(kGpuPrologue) +
@@ -326,22 +278,11 @@ ID3D11PixelShader* replacement(ID3D11DeviceContext* ctx) {
     }
     g_psHadRcas = wantRcas;
     g_psSharpen = g_sharpen;
-    g_psHadProbe = g_scaleProbe;
     Log::get().note(
         "target indicator: running %s%s.",
         g_running == Mode::kEasu ? "EASU (AMD's own, vendored)"
                                  : "the bicubic (Catmull-Rom)",
         (g_running == Mode::kEasu && wantRcas) ? ", then RCAS-sharpened" : "");
-    if (g_scaleProbe) {
-        Log::get().note(
-            "target indicator: SCALE PROBE ON -- the indicator is painted a "
-            "flat colour for how many surface texels fall on one output "
-            "pixel, not its own art. blue = magnified 2x or more, green = "
-            "about 1:1, yellow = up to 3x minified, red = 3 to 6x, magenta = "
-            "more than 6x. Magnified is what a reconstruction kernel is for; "
-            "minified wants averaging over the footprint instead. Set "
-            "target_indicator_scale_probe = 0 to see the indicator again.");
-    }
     return g_ps;
 }
 
@@ -359,40 +300,6 @@ void targetSharpConfigure(Config& cfg) {
         detail::g_targetSharpSharp = false;
         Log::get().note("target_indicator \"%s\" is not stock or sharp; "
                         "running stock.", m.c_str());
-    }
-
-    // AMD's unit: stops of sharpness reduction, 0 the sharpest. "off" runs
-    // EASU with no sharpening pass at all.
-    const std::string s = cfg.getString("advanced.target_indicator_sharpen",
-                                        "0.25");
-    if (s == "off") {
-        g_sharpen = -1.0f;
-    } else {
-        g_sharpen = static_cast<float>(atof(s.c_str()));
-        if (g_sharpen < 0.0f) g_sharpen = 0.0f;
-        if (g_sharpen > 2.0f) g_sharpen = 2.0f;
-    }
-
-    g_scaleProbe = cfg.getBool("advanced.target_indicator_scale_probe",
-                               false);
-
-    // The pin, for a build where the shader was recompiled. Empty keeps the
-    // measured hash; a value that will not parse is refused out loud rather
-    // than silently matching nothing.
-    const std::string pin = cfg.getString("advanced.target_indicator_vs", "");
-    if (pin.empty()) {
-        g_vsHash = kVsHash;
-    } else {
-        char* end = nullptr;
-        const uint64_t h = _strtoui64(pin.c_str(), &end, 16);
-        if (end && *end == '\0' && h != 0) {
-            g_vsHash = h;
-        } else {
-            g_vsHash = kVsHash;
-            Log::get().note("target_indicator_vs \"%s\" is not a hex shader "
-                            "hash; the measured one is used instead.",
-                            pin.c_str());
-        }
     }
 
     if (was != detail::g_targetSharpSharp) {
@@ -531,11 +438,9 @@ bool targetSharpOnEyeDrawObserved(ID3D11DeviceContext* ctx, char kind,
 }
 
 #if defined(EDVR_VSCREEN_PREDICATE_TEST)
-void targetSharpPredicateTestSeed(bool sharp, bool failed,
-                                  std::uint64_t configuredHash) noexcept {
+void targetSharpPredicateTestSeed(bool sharp, bool failed) noexcept {
     detail::g_targetSharpSharp = sharp;
     detail::g_targetSharpFailed = failed;
-    g_vsHash = configuredHash;
 }
 
 std::uint64_t targetSharpPredicateTestConfiguredHash() noexcept {

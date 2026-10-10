@@ -413,9 +413,7 @@ bool runGuardedFaultWindow(ID3D11DeviceContext* ctx,
     edvr::bindingSet(edvr::BindSlot::Rtv0, eyeView);
     configureCollector(ctx, 6000);
 
-    // Slot 74 is the SDK ID3D11DeviceContext::PSGetShader vtable entry. The
-    // repository's resolve_bind_test independently pins the same slot while
-    // compiling against the typed C++ interface.
+    // Slot 74 is the SDK ID3D11DeviceContext::PSGetShader vtable entry.
     constexpr size_t kPsGetShaderSlot = 74;
     edvr::VTableHook hook;
     const bool attached = hook.attach(ctx, 128);

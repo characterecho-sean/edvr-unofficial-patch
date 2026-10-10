@@ -7,6 +7,7 @@
     python tools/edvr_log.py --target steam --tail 80
     python tools/edvr_log.py --target frontier --tally vh
     python tools/edvr_log.py --target frontier --tally vh --frame 1
+    python tools/edvr_log.py --target steam --tally pose
     python tools/edvr_log.py --target frontier --tally periodic --expect-build HEAD
     python tools/edvr_log.py --target frontier --tally periodic --window-ms 250
     python tools/edvr_log.py --target frontier --tally periodic --infer-runs
@@ -59,6 +60,10 @@ the totals row. The census caps its log output at 16384 lines
 (draw_census.cpp), so a long census keeps per-draw detail only for the
 first frames; --tally says which frames survive only as summaries
 rather than printing an empty table.
+
+--tally pose tables the pose-gap diagnostic: every `pose gap:` line in the RUNTIME log (it reads --tag openxr unless you name a tag or a file) by
+caller (thread, return address): how far a head pose is located from the drawn frame's display time, how far it is turned from the drawn pose, and the
+correlation of that angle with head speed across the windows (docs\terrain-culling.md). Exit 1 when the log has no such line.
 
 --tally periodic answers one question about one flight: which periodic work
 coincides with long frames. It reads the graphics log and the runtime log
@@ -122,7 +127,7 @@ pass's chosen rows against the calls' view axes, then the facts for H1, H2 and H
 `== the detour's CPU ==` (the observer halves' sampled cost). A log with none of those
 lines reports exactly as before.
 
---maps-sharp reads a flight with experimental.on_foot_maps_sharp = on (design-world-
+--maps-sharp reads a flight of the on-foot maps gate, always on in a current build (design-world-
 camera-motion-2026-09-30.md, Phase 1). It prints each map or menu the UI layer held as
 a panel period (the TAKES line and the HANDS BACK line that closed it: when, how many
 frames, how many eyes went through the layer-only door and how many kept the upscaler,
@@ -192,8 +197,8 @@ carrying them is a STOP). A log with none of the lines means the reader never st
 OFF or an unknown read writes a line too. Its verdict does not change the exit code either.
 
 --route-curve reads a flight with the curved VR world route (design doc section 82,
-"The curved route": fix.panel_curvature above 0, experimental.temporal_aa_on_foot_world
-= auto). It reads the route's `vr world route 5s:` lines by token (`curve=`: off,
+"The curved route": fix.panel_curvature above 0; the route itself is always on now).
+It reads the route's `vr world route 5s:` lines by token (`curve=`: off,
 pending, stood-down or curvature/columns/gain; `curve-reissues=`: the strips the layer
 drew), the OWNS lines, the `panel curvature:` notes and the layer's `vr world route
 layer:` refusals, prints the windows by ownership and curve, and judges CURVE (what
@@ -925,6 +930,140 @@ def print_vh_tally(text, frame):
     return 0
 
 
+def _mean_sd(values):
+    n = len(values)
+    if not n:
+        return None, None
+    mean = sum(values) / float(n)
+    sd = statistics.stdev(values) if n > 1 else None
+    return mean, sd
+
+
+def _mean_sd_cell(ms, signed, digits):
+    mean, sd = ms
+    if mean is None:
+        return "-"
+    fmt = "%%%s.%df" % ("+" if signed else "", digits)
+    return (fmt % mean) + (" +/- " + ("%.*f" % (digits, sd)) if sd is not None else "")
+
+
+# --tally pose: the pose-gap diagnostic (src/openxr/pose_gap.h writes every line, and tools\openxr_pose_test holds tools\pose_gap_fixture.log, which this
+# script's --self-test reads, to exactly what it writes). The lines are in the RUNTIME log, one per caller every 60 s:
+#
+#   pose gap: tid T calls n from exe+0xRVA prediction p ms target-minus-display mean a ms (min b max c) angle-to-drawn mean d max e deg
+#       head f deg/s waitgetposes w failed k[ fallback f]
+#   pose gap: more than 16 callers in a window; N calls not counted
+#
+# One line is one caller (thread, return RVA) over a window of WaitGetPoses; "target-minus-display" is the instant its pose was located at less the
+# latest frame's predictedDisplayTime, "angle-to-drawn" the angle between the pose it got and the pose that frame was drawn with, "head" the render
+# pose's angular speed. Any of the three reads n/a when none of the window's calls had it. Elite's own request for "now" is answered one display
+# period after the latest frame's display time since the head-pose fix (docs\terrain-culling.md), so for it the gap reads about one period (+11 ms at
+# 90 Hz) and the angle to the drawn pose about head speed times that period; a caller that passes a real prediction, or is not in the game's image,
+# is located at the wall clock and shows the true lag.
+
+POSE_GAP_RE = re.compile(
+    r"pose gap: tid (?P<tid>\d+) calls (?P<calls>\d+) from (?P<frm>exe\+0x[0-9A-Fa-f]+|outside|\?) "
+    r"prediction (?P<pred>[-+0-9.]+) ms target-minus-display "
+    r"(?:mean (?P<gm>[-+0-9.]+) ms \(min (?P<gmin>[-+0-9.]+) max (?P<gmax>[-+0-9.]+)\)|n/a) "
+    r"angle-to-drawn (?:mean (?P<am>[-+0-9.]+) max (?P<amax>[-+0-9.]+) deg|n/a) "
+    r"head (?:(?P<head>[-+0-9.]+) deg/s|n/a) waitgetposes (?P<waits>\d+) failed (?P<failed>\d+)(?: fallback (?P<fb>\d+))?")
+POSE_GAP_MORE_RE = re.compile(r"pose gap: more than (?P<limit>\d+) callers in a window; (?P<dropped>\d+) calls not counted")
+
+
+def parse_pose_gap(text):
+    """Every `pose gap:` line, in order. Returns (windows, notes): a window is a dict of tid, calls, frm, pred (ms), gm/gmin/gmax (ms) and am/amax
+    (deg) and head (deg/s) each None when the line said n/a, waits, failed, fb; a note is the text of an over-the-limit line."""
+    windows = []
+    notes = []
+    for line in text.splitlines():
+        m = POSE_GAP_RE.search(line)
+        if m:
+            def num(name):
+                v = m.group(name)
+                return float(v) if v is not None else None
+            windows.append({
+                "tid": int(m.group("tid")), "calls": int(m.group("calls")), "frm": m.group("frm"), "pred": float(m.group("pred")),
+                "gm": num("gm"), "gmin": num("gmin"), "gmax": num("gmax"), "am": num("am"), "amax": num("amax"), "head": num("head"),
+                "waits": int(m.group("waits")), "failed": int(m.group("failed")), "fb": int(m.group("fb") or 0)})
+            continue
+        if POSE_GAP_MORE_RE.search(line):
+            notes.append(line.split("pose gap:", 1)[1].strip())
+    return windows, notes
+
+
+def _pearson(pairs):
+    """Pearson's r over (x, y) pairs, None when there are fewer than three or either side does not vary."""
+    n = len(pairs)
+    if n < 3:
+        return None
+    mx = sum(p[0] for p in pairs) / float(n)
+    my = sum(p[1] for p in pairs) / float(n)
+    sxx = sum((p[0] - mx) ** 2 for p in pairs)
+    syy = sum((p[1] - my) ** 2 for p in pairs)
+    if sxx <= 1e-12 or syy <= 1e-12:
+        return None
+    return sum((p[0] - mx) * (p[1] - my) for p in pairs) / math.sqrt(sxx * syy)
+
+
+def tally_pose(windows):
+    """The --tally pose numbers: one row per (thread, return address), by thread, each over that caller's windows: n windows, calls, failed, fallbacks,
+    and (mean, sd) pairs of the windows' mean gap (ms), mean angle (deg) and head speed (deg/s), the range of the angle means, and r, the correlation
+    of a window's mean angle with its head speed (None when it cannot be told)."""
+    groups = {}
+    for w in windows:
+        groups.setdefault((w["tid"], w["frm"]), []).append(w)
+    rows = []
+    for key in sorted(groups):
+        ws = groups[key]
+        angles = [w["am"] for w in ws if w["am"] is not None]
+        rows.append({
+            "tid": key[0], "frm": key[1], "n": len(ws), "calls": sum(w["calls"] for w in ws),
+            "failed": sum(w["failed"] for w in ws), "fallbacks": sum(w["fb"] for w in ws),
+            "gap": _mean_sd([w["gm"] for w in ws if w["gm"] is not None]),
+            "angle": _mean_sd(angles), "angle_range": (min(angles), max(angles)) if angles else None,
+            "head": _mean_sd([w["head"] for w in ws if w["head"] is not None]),
+            "r": _pearson([(w["am"], w["head"]) for w in ws if w["am"] is not None and w["head"] is not None])})
+    return rows
+
+
+def print_pose_tally(text):
+    """The --tally pose report. Returns the process exit code."""
+    windows, notes = parse_pose_gap(text)
+    for note in notes:
+        print("[edvr] pose gap: %s" % note)
+    if not windows:
+        print("[edvr] no `pose gap:` lines in this log. The diagnostic is always on and writes one per caller every 60 s from the runtime's "
+              "WaitGetPoses; they are in the runtime log (--tag openxr), not the graphics log, and need a build with the pose-gap diagnostic.")
+        return 1
+    rows = tally_pose(windows)
+    print("[edvr] tally pose: %d window line(s) over %d caller row(s)" % (len(windows), len(rows)))
+    print("[edvr] per caller (thread, return address), mean +/- sd over that caller's windows of each window's mean:")
+    print("%7s %-14s %4s %7s %6s  %-20s %-22s %-11s %s"
+          % ("tid", "from", "n", "calls", "failed", "gap ms (target-disp)", "angle deg (to drawn)", "head deg/s", "r(angle,head)"))
+    for r in rows:
+        print("%7d %-14s %4d %7d %6d  %-20s %-22s %-11s %s"
+              % (r["tid"], r["frm"], r["n"], r["calls"], r["failed"], _mean_sd_cell(r["gap"], True, 2), _mean_sd_cell(r["angle"], False, 3),
+                 ("%.1f" % r["head"][0]) if r["head"][0] is not None else "n/a", ("%+.2f" % r["r"]) if r["r"] is not None else "n/a"))
+    for r in rows:
+        if r["fallbacks"]:
+            print("[edvr] tid %d: %d call(s) could not be given a target one display period after the display time (no frame yet, a stale frame, no "
+                  "period, or a reference-space change in between) and were located at now + prediction." % (r["tid"], r["fallbacks"]))
+    for r in rows:
+        if r["gap"][0] is None:
+            continue
+        spread = ""
+        if r["angle_range"] is not None:
+            spread = " (%.3f to %.3f across windows)" % r["angle_range"]
+        print("[edvr] %s, tid %d: its pose is located %+.2f ms from the drawn frame's display time, and is turned %s deg from the drawn pose%s; "
+              "angle against head speed r = %s over %d window(s)."
+              % (r["frm"], r["tid"], r["gap"][0], ("%.3f" % r["angle"][0]) if r["angle"][0] is not None else "n/a", spread,
+                 ("%+.2f" % r["r"]) if r["r"] is not None else "n/a", r["n"]))
+    print("[edvr] Elite's own \"now\" request should read a gap of about one display period (+11 ms at 90 Hz, +14 ms at 72 Hz) and an angle to the "
+          "drawn pose of about head speed times that period (r near +1: it is one period ahead by design). A gap near 0 means the answer is not "
+          "acting (or is the earlier display-time answer); +40 ms or more is the lag it replaced. A caller with a real prediction, or outside the "
+          "game's image, shows the true lag (before the fix Elite's was 41-44 ms and up to 4.1 degrees, r = +0.98).")
+    return 0
+
 # --camera-census: the VR camera census (advanced.vr_camera_census), one flight
 # in the VR profile with the key on. The question it answers (design doc section
 # 82): which signal tells an eye view's camera from the world's at the game's
@@ -976,8 +1115,10 @@ def print_vh_tally(text, frame):
 # the steady-detail key on, a third line follows the two (src/d3d11/vr_world_route_math.h vrWorldFormatRefusalWindow):
 #   vr world route refusal 5s: census=on|off every=N treated=N asked=N sampled=N read=N dropped=N size=WxH pixels=N refused=N
 #       refused-pct=X stale-refused=N masked=N corrupt=N sentinel=N unreprojectable=N camera=N range=N depth=N weapon=N other=N
-#       stale-kept=N depth-check=RAN/SKIPPED steady-detail=on|off view=on|off
-# (`pixels` is what the read-back samples examined, `refused` the pixels whose history the prep refused, by cause. The stale pixels are
+#       stale-kept=N depth-check=RAN/SKIPPED steady-detail=on|off view=on|off skinned-joined=N
+# (`skinned-joined` is F2 on foot, the only ACCEPTED class the census counts: the skinned pixels the prep took an exact motion for from the on-foot
+# source's target 7. It is not part of `refused`. 0 with a character in view means the route never read E; absent in a build before F2 on foot.
+# `pixels` is what the read-back samples examined, `refused` the pixels whose history the prep refused, by cause. The stale pixels are
 # two numbers: `stale-refused`, refused (with the steady-detail key off every stale pixel, with it on the ones last frame's depth did
 # not confirm), and `stale-kept`, not refused (the camera term, confirmed by last frame's depth). `depth-check` is the resolves with
 # the key on whose prep ran the depth check and those that could not (a reset frame is neither). The flight-3 build's `stale=` and
@@ -1610,6 +1751,7 @@ def parse_refusal_windows(text):
         for key in ("every", "treated", "asked", "sampled", "read", "dropped", "pixels", "refused"):
             w[key] = _cint(kv.get(key))
         w["kept"] = _cint(kv.get("stale-kept", kv.get("forgiven")))
+        w["skinned"] = _cint(kv.get("skinned-joined"))   # None in a build before F2 on foot
         check = re.match(r"^(\d+)/(\d+)$", kv.get("depth-check", ""))
         w["check_ran"], w["check_skipped"] = (int(check.group(1)), int(check.group(2))) if check else (None, None)
         w["causes"] = {name: _cint(kv.get(name)) for name, _ in REFUSAL_CAUSES}
@@ -1763,11 +1905,13 @@ def print_refusal_census(windows, events=None):
         if s == "measured":
             named = [(name, w["causes"][name]) for name, _ in REFUSAL_CAUSES if w["causes"][name]]
             mix = ", ".join("%s %s" % (name, _pct(n, w["pixels"])) for name, n in named) if named else "none refused"
+            # (printed only when a skinned pixel took its motion from target 7: a zero depends on whether a character was in view)
+            skinned = "" if not w.get("skinned") else "; skinned-joined %d (F2 on foot: pixels that took their exact motion from target 7)" % w["skinned"]
             print("%s: MEASURED %d sample(s) of %dx%d (%d asked, %d dispatched, %d dropped), treated %d; pixels %d; refused %s (%d): %s; "
-                  "stale-kept %s%s | %s"
+                  "stale-kept %s%s%s | %s"
                   % (head, w["read"], w["w"] or 0, w["h"] or 0, w["asked"], w["sampled"], w["dropped"] or 0, w["treated"], w["pixels"],
                      _pct(w["refused"], w["pixels"]), w["refused"], mix, _pct(w["kept"] or 0, w["pixels"]),
-                     _stale_tail(w["steady"], w["kept"], w["causes"]["stale-refused"], w["check_ran"], w["check_skipped"]), context))
+                     _stale_tail(w["steady"], w["kept"], w["causes"]["stale-refused"], w["check_ran"], w["check_skipped"]), skinned, context))
         else:
             reason = {
                 "idle": "the route treated no frame in this window (nothing was measured)",
@@ -3200,7 +3344,7 @@ def print_camera_census(text):
     return 0
 
 
-# --maps-sharp: the on-foot maps gate (experimental.on_foot_maps_sharp, docs/design-world-camera-motion-2026-09-30.md, Phase 1).
+# --maps-sharp: the on-foot maps gate (always on now; it was experimental.on_foot_maps_sharp, docs/design-world-camera-motion-2026-09-30.md, Phase 1).
 # The lines it reads are written by src/d3d11/ui_maps_math.h's formatters (their wording is the anchors below); the rig
 # tools/on_foot_maps_test compares tools/maps_sharp_fixture.log to those formatters byte for byte, and this reader's self-test
 # parses the same file, so a formatter that drifts fails in the build rather than in the ten minutes after a flight.
@@ -3222,7 +3366,7 @@ MAPS_BACK_RE = re.compile(r"^on foot maps sharp: the layer HANDS BACK the 2D scr
                           r"upscaler because the game drew something else into them\): (?P<why>.*)\.$")
 MAPS_NOTEMPTY_RE = re.compile(r"^on foot maps sharp: the layer took the 2D screen for eye (?P<eye>\d) \(sequence (?P<seq>\d+)\) but the "
                               r"game drew (?P<draws>\d+) draw\(s\) into eye-sized targets this frame and the layer took (?P<taken>\d+): ")
-MAPS_NOTLIVE_RE = re.compile(r"^on foot maps sharp: experimental\.on_foot_maps_sharp is on but .*: (?P<why>[^:]*)\.$")
+MAPS_NOTLIVE_RE = re.compile(r"^on foot maps sharp: the maps gate is on but .*: (?P<why>[^:]*)\.$")
 MAPS_WINDOW_RE = re.compile(r"^on foot maps sharp 5s: key=on (?P<secs>[0-9.]+) s mode=(?P<mode>\w+) gate=(?P<gate>world|panel) "
                             r"frames=(?P<frames>\d+) named=(?P<named>\d+) unnamed=(?P<unnamed>\d+) world-frames=(?P<world>\d+) "
                             r"panel-frames=(?P<panel>\d+) holds=(?P<holds>\d+) releases=(?P<releases>\d+) "
@@ -3466,8 +3610,9 @@ def print_maps_sharp(text):
     """--maps-sharp: the on-foot maps gate's flight in one report; exit 0 (PASS or WARN), 1 (STOP), 3 (no line of the feature in the log)."""
     p = parse_maps_sharp(text)
     if not p["events"] and not p["windows"]:
-        print("[edvr] maps-sharp: no 'on foot maps sharp' line in this log. The key experimental.on_foot_maps_sharp was off, the UI layer "
-              "was not live, or this build does not have the feature; with the key on and the layer live the feature prints an ON line and "
+        print("[edvr] maps-sharp: no 'on foot maps sharp' line in this log. The maps gate is always on in a current build (there is no setting "
+              "for it), so the UI layer was not live, this was not a VR flight, or the build is older than the feature or predates the gate "
+              "becoming unconditional (it was a switch in the ini then); with the layer live the feature prints an ON line and "
               "a 5 s line, zeros included.")
         return 3
     eps = maps_sharp_episodes(p)
@@ -4849,11 +4994,11 @@ def print_vscreen_fit(text):
 # formatters to tools\flat_upscale_fixture.log (a good flight and three episodes), the file this reader's self-test reads.
 # ---------------------------------------------------------------------------------------------------------------------------------------
 FLATU_TS = r"^(?:\[(?P<ts>[0-9:.]+)\] )?"
-FLATU_KEY_RE = re.compile(FLATU_TS + r"flat hdr route: experimental\.temporal_aa_before_post=(?P<key>\w+) \((?P<when>read at startup|changed)\) at frame=(?P<frame>\d+)")
+FLATU_KEY_RE = re.compile(FLATU_TS + r"flat hdr route: (?P<legacy>experimental\.temporal_aa_before_post=)?(?P<key>\w+) \((?P<when>read at startup|changed)\) at frame=(?P<frame>\d+)")
 FLATU_TRIGGER_RE = re.compile(FLATU_TS + r"flat hdr route: first trigger at frame=(?P<frame>\d+)")
 FLATU_WINDOW_RE = re.compile(FLATU_TS + r"flat copy structure 5s: (?P<rest>.*)$")
 FLATU_FIRST_RE = re.compile(
-    FLATU_TS + r"flat copy structure: first admission at frame=(?P<frame>\d+) \(experimental\.temporal_aa_before_post=auto\): the game's final copy reads a "
+    FLATU_TS + r"flat copy structure: first admission at frame=(?P<frame>\d+) \((?:experimental\.temporal_aa_before_post=auto|the HDR route is on)\): the game's final copy reads a "
     r"(?P<w>\d+)x(?P<h>\d+) R8G8B8A8 image written by one pass, VS=(?P<vs>[0-9A-F]+) PS=(?P<ps>[0-9A-F]+), after the scene HDR's first consumer "
     r"\(VS=(?P<tvs>[0-9A-F]+) PS=(?P<tps>[0-9A-F]+)\), .*?\(the whitelist said (?P<wl>[\w-]+)\); the scene is (?P<sw>\d+)x(?P<sh>\d+) on a "
     r"(?P<ow>\d+)x(?P<oh>\d+) output(?P<menu> \(the 3D menu\))?, route=(?P<route>[\w-]+);")
@@ -4886,7 +5031,7 @@ def parse_flat_upscale(text):
             m = FLATU_KEY_RE.match(raw)
             if m:
                 f["flat"] = True
-                f["keys"].append({"ts": m.group("ts") or "", "key": m.group("key"), "when": m.group("when")})
+                f["keys"].append({"ts": m.group("ts") or "", "key": m.group("key"), "when": m.group("when"), "legacy": bool(m.group("legacy"))})
                 continue
             m = FLATU_TRIGGER_RE.match(raw)
             if m:
@@ -4991,10 +5136,16 @@ def flat_upscale_verdict(f):
     # KEY
     if f["keys"]:
         last = f["keys"][-1]
-        if last["key"] == "auto":
-            add("KEY", "PASS", "experimental.temporal_aa_before_post=auto (%s): the game's final copy is admitted by structure where the HDR route does not serve the frame" % last["when"])
+        if last["legacy"]:
+            # A log from before the key was retired: its line names the setting that was read.
+            if last["key"] == "auto":
+                add("KEY", "PASS", "experimental.temporal_aa_before_post=auto (%s; a build that still read the key): the game's final copy is admitted by structure where the HDR route does not serve the frame" % last["when"])
+            else:
+                add("KEY", "WARN", "experimental.temporal_aa_before_post=%s (%s; a build that still read the key): the copy route is the whitelist alone; nothing is admitted by structure" % (last["key"], last["when"]))
+        elif last["key"] == "auto":
+            add("KEY", "PASS", "the flat HDR route is always on in this build, not a setting (%s): the game's final copy is admitted by structure where the route does not serve the frame" % last["when"])
         else:
-            add("KEY", "WARN", "experimental.temporal_aa_before_post=%s (%s): the copy route is the whitelist alone; nothing is admitted by structure" % (last["key"], last["when"]))
+            add("KEY", "WARN", "the route line reads %s (%s): a current build always logs auto, so this log is from before the route became unconditional (when it followed the retired key experimental.temporal_aa_before_post); the copy route was the whitelist alone and nothing was admitted by structure" % (last["key"], last["when"]))
     else:
         add("KEY", "n/a", "no `flat hdr route:` key line (a build that predates the route, or a session that never reached a Present)")
 
@@ -5120,7 +5271,7 @@ def print_flat_upscale(text):
     print("[edvr] flat upscale: %d key line(s), %d copy-structure window(s), %d route line(s), %d stand-down line(s), %d warning line(s), %d decline line(s)"
           % (len(f["keys"]), len(wins), len(f["routes"]), len(f["stand"]), len(f["warns"]), len(f["declines"])))
     for k in f["keys"]:
-        print("key %s: experimental.temporal_aa_before_post=%s (%s)" % (k["ts"] or "?", k["key"], k["when"]))
+        print("key %s: %s%s (%s)" % (k["ts"] or "?", "experimental.temporal_aa_before_post=" if k["legacy"] else "flat hdr route ", k["key"], k["when"]))
     for r in f["routes"]:
         print("route %s: %s R=%dx%d E=%dx%d D=%dx%d" % (r["ts"] or "?", r["name"], r["r"][0], r["r"][1], r["e"][0], r["e"][1], r["d"][0], r["d"][1]))
     if f["first"]:
@@ -6204,8 +6355,9 @@ def print_route_curve(text, path=None):
     p = parse_route_curve(text)
     ws = p["windows"]
     if not (ws or p["owns"] or p["layer"] or p["layer_unknown"]):
-        print("[edvr] route-curve: no `vr world route` line in this log. The key experimental.temporal_aa_on_foot_world was not auto, the UI layer was not "
-              "live (the route stays off then), or this is not a VR flight; with the key auto the route prints a 5 s line every window, zeros included.")
+        print("[edvr] route-curve: no `vr world route` line in this log. The route is always requested in a current build (there is no setting "
+              "for it), so the UI layer was not live (the route stays off then), this is not a VR flight, or the build predates the route "
+              "becoming unconditional (it followed an ini switch then); with the layer live the route prints a 5 s line every window, zeros included.")
         return 3
     ver = version_line(text)[1]
     print("[edvr] route-curve: %sbuild %s; %d route window(s), %d owned; %d OWNS line(s), %d `panel curvature:` note(s), %d layer refusal line(s)"
@@ -6504,6 +6656,11 @@ def self_test_route_curve():
         with contextlib.redirect_stdout(buf):
             rc = print_route_curve(text, path)
         return rc, buf.getvalue()
+
+    # A current-build log with no route line: the advice never recommends or blames a retired ini key (the route has no setting now).
+    rc0, out0 = run("[10:00:00.000] edvr 0.19.0 build deadbeef\n")
+    if rc0 != 3 or "experimental." in out0 or "temporal_aa_on_foot_world" in out0 or "key " in out0.lower():
+        fail("the no-line advice names a setting that no longer exists (rc=%d):\n%s" % (rc0, out0))
 
     def case(what, text, rc_want, verdict, *has, absent=()):
         rc, out = run(text)
@@ -9167,7 +9324,7 @@ def self_test_slow_regime():
                 % (seq, ms, period, ms - 5.0, ms - 5.1, ms - 5.1))
 
     def phases_line(window, first, last, end_p50, pacer_p50=0.0001, wait_p50=0.0, dispatch_p50=0.158):
-        return ("native_submit_phases,window=%d,first=%d,last=%d,output=2325x2392/2325x2392,treatments=6/6,feature_epoch=8,cull_stage=3,cull_factors=1.08488/1.00000,pacing=1,"
+        return ("native_submit_phases,window=%d,first=%d,last=%d,output=2325x2392/2325x2392,treatments=6/6,feature_epoch=8,trim_stage=3,trim_factors=0.90000/0.95000,pacing=1,"
                 "separate=1,producer_dispatch=%.4f/0.2701/0.3418/0.3961,producer_acquire=0.0765/0.1489/0.1674/0.1714,producer_flush=0.0330/0.1032/0.1267/0.1953,"
                 "consumer_acquire=0.0636/0.1304/0.1787/0.2020,consumer_flush=0.0281/0.0999/0.1065/0.1209,receive=0.1266/0.1833/0.2516/0.2953,xr_acquire=0.0014/0.0018/0.0021/0.0131,"
                 "xr_wait=0.0003/0.0004/0.0006/0.0006,xr_draw_submit=0.0794/0.1203/0.1579/0.1726,xr_release=0.0007/0.0010/0.0012/0.0014,"
@@ -9706,9 +9863,11 @@ def main(argv=None):
     ap.add_argument("--dir", default=None,
                     help="read this log directory directly, ignoring --target")
     ap.add_argument("--file", default=None, help="read exactly this log file")
-    ap.add_argument("--tag", default="gfx",
+    ap.add_argument("--tag", default=None,
                     help="gfx (d3d11), vr (legacy OpenVR proxy, retired 2026-09-16), "
-                         "openxr (native OpenXR), or all")
+                         "openxr (native OpenXR), or all. Omitted, it is gfx, except "
+                         "for --tally pose, whose lines are in the runtime log (openxr); "
+                         "a tag you name is always the one read")
     ap.add_argument("--nth", type=int, default=0,
                     help="0 is the newest log, 1 the one before it")
     ap.add_argument("--list", action="store_true",
@@ -9725,8 +9884,10 @@ def main(argv=None):
                     help="print only lines matching this regular expression")
     ap.add_argument("--tail", type=int, default=None,
                     help="print only the last N lines (after --grep)")
-    ap.add_argument("--tally", choices=["vh", "periodic"], default=None,
-                    help="aggregate instead of dumping: vh counts eye-texture "
+    ap.add_argument("--tally", choices=["vh", "periodic", "pose"], default=None,
+                    help="aggregate instead of dumping: pose tables the `pose gap:` "
+                         "lines of the runtime log by caller; "
+                         "vh counts eye-texture "
                          "DC lines per vh= hash, split by r= render-target "
                          "token, with the DC frame summaries as totals; "
                          "periodic lays the `periodic work:` timing against "
@@ -9750,8 +9911,7 @@ def main(argv=None):
                          "detour's CPU, and the stage 2 verdict (PASS / WARN / "
                          "STOP) on the world route's injected phase")
     ap.add_argument("--maps-sharp", action="store_true",
-                    help="report an on-foot maps gate flight (experimental.on_foot_maps_sharp "
-                         "= on): every map or menu the layer took and handed back "
+                    help="report an on-foot maps gate flight (the gate is always on): every map or menu the layer took and handed back "
                          "(when, how long, how many eyes skipped the upscaler), the 5 s "
                          "counters summed, whether the VR world route let go and "
                          "re-owned with the gate, and a PASS / WARN / STOP verdict")
@@ -9787,8 +9947,8 @@ def main(argv=None):
                          "CHANGES / LIMIT / HEADSET / FLAT lines. No line at all means the reader never started, which is not "
                          "\"read, off\"")
     ap.add_argument("--route-curve", action="store_true",
-                    help="report a curved VR world route flight (fix.panel_curvature above 0 "
-                         "with experimental.temporal_aa_on_foot_world = auto): the route's 5 s "
+                    help="report a curved VR world route flight (fix.panel_curvature above 0; "
+                         "the route is always on): the route's 5 s "
                          "lines by token (curve=, curve-reissues=), its OWNS lines, the `panel "
                          "curvature:` notes and the layer's refusals, and a PASS / WARN / STOP "
                          "verdict (strips drawn against eye takes, pending, stood-down, a stale "
@@ -9843,6 +10003,11 @@ def main(argv=None):
 
     if args.self_test:
         return self_test()
+
+    # The pose-gap lines are written by the runtime, not the graphics half: --tally pose reads its log when no tag was named. The default is
+    # None rather than "gfx" so that a tag named on the command line, gfx included, is never mistaken for the default and overridden.
+    if args.tag is None:
+        args.tag = "openxr" if args.tally == "pose" else "gfx"
 
     if args.tally == "periodic":
         if not args.file and args.tag.lower() != "gfx":
@@ -9967,6 +10132,8 @@ def main(argv=None):
         return print_freezes(path, text, ver, want, args, native_dirs)
     if args.tally == "periodic":
         return print_periodic_report(path, text, ver, want, args, native_dirs)
+    if args.tally == "pose":
+        return print_pose_tally(text)
     if args.tally:
         return print_vh_tally(text, args.frame)
 
@@ -10514,6 +10681,8 @@ def self_test():
         if 'original_read_trace' in locals():
             draw_ladder_replay.read_trace = original_read_trace
         shutil.rmtree(replay_dir, ignore_errors=True)
+    if not self_test_pose():
+        ok = False
 
     print("self-test: %s" % ("ok" if ok else "FAILED"))
     return 0 if ok else 1
@@ -10521,6 +10690,174 @@ def self_test():
 
 FLATU_FIXTURE = "flat_upscale_fixture.log"
 
+
+POSE_FIXTURE = "pose_gap_fixture.log"
+
+
+def self_test_pose():
+    """--tally pose on tools\\pose_gap_fixture.log (which tools\\openxr_pose_test holds to exactly what src/openxr/pose_gap.h writes for the scripted
+    flight: 24 lines -- twelve 60-second windows of Elite's own "now" request (thread 24212, answered one display period after the display time: gap
+    +11.11 ms, an angle of 0.0111 degrees per deg/s of head speed, one fallback call in window 2, three failed in window 5) and of another caller
+    (thread 7001, outside the image, a real prediction: gap 9.5 ms, an angle of 0.02 degrees per deg/s of head speed)), then on lines altered to
+    break each thing the report depends on. Returns ok."""
+    ok = True
+
+    def fail(message):
+        nonlocal ok
+        print("self_test_pose: %s" % message)
+        ok = False
+
+    import contextlib
+    import io
+    import shutil
+    fixture = os.path.join(os.path.dirname(os.path.abspath(__file__)), POSE_FIXTURE)
+    if not os.path.isfile(fixture):
+        fail("the fixture %s is missing beside this script" % POSE_FIXTURE)
+        return False
+    text = read_text(fixture)
+    windows, notes = parse_pose_gap(text)
+    if len(windows) != 24 or notes:
+        fail("the fixture parsed to %d windows and %d notes, want 24 and none" % (len(windows), len(notes)))
+        return False
+    w0, w1 = windows[0], windows[1]
+    if (w0["tid"], w0["calls"], w0["frm"], w0["waits"], w0["failed"], w0["fb"]) != (24212, 120, "exe+0x4E3881", 5400, 0, 0) \
+            or w0["pred"] != 0.0 or w0["gm"] != 11.11 or w0["gmin"] != 11.11 or w0["gmax"] != 11.11 or w0["am"] != 0.111 or w0["amax"] != 0.111 or w0["head"] != 10.0:
+        fail("window 1 parsed to %r" % (w0,))
+    if (w1["tid"], w1["calls"], w1["frm"]) != (7001, 60, "outside") or w1["pred"] != 11.0 or w1["gm"] != 9.5 or w1["gmin"] != 9.0 or w1["gmax"] != 10.0:
+        fail("window 2 (the other caller, outside the image, prediction 11 ms) parsed to %r" % (w1,))
+
+    def close(a, b, eps=0.005):
+        return a is not None and abs(a - b) <= eps
+
+    rows = {r["tid"]: r for r in tally_pose(windows)}
+    if sorted(rows) != [7001, 24212]:
+        fail("the rows -> %r" % (sorted(rows),))
+        return False
+    elite = rows[24212]
+    if elite["frm"] != "exe+0x4E3881" or elite["n"] != 12 or elite["calls"] != 1440 or elite["failed"] != 3 or elite["fallbacks"] != 1 \
+            or not close(elite["gap"][0], 11.11) or not close(elite["gap"][1], 0.0) or not close(elite["angle"][0], 0.7215) \
+            or not close(elite["head"][0], 65.0) or elite["angle_range"] != (0.111, 1.332) or elite["r"] is None or not close(elite["r"], 1.0, 1e-6):
+        fail("Elite's own request -> %r (a gap of one period and an angle of head speed times that period)" % (elite,))
+    other = rows[7001]
+    if other["frm"] != "outside" or other["n"] != 12 or other["calls"] != 720 or not close(other["gap"][0], 9.5) or not close(other["angle"][0], 1.3) \
+            or not close(other["angle"][1], 0.7, 0.05) or not close(other["head"][0], 65.0) or other["r"] is None or not close(other["r"], 1.0, 1e-9):
+        fail("the other caller -> %r (the true gap, an angle that follows head speed)" % (other,))
+    # The correlation needs three windows and a spread on both sides.
+    two = [w for w in windows if w["tid"] == 7001][:2]
+    if tally_pose(two)[0]["r"] is not None:
+        fail("two windows gave a correlation")
+    flat = [dict(w, am=0.05) for w in windows if w["tid"] == 7001]
+    if tally_pose(flat)[0]["r"] is not None:
+        fail("a flat angle gave a correlation")
+    if _pearson([(1.0, 1.0), (2.0, 4.0), (3.0, 9.0)]) is None or abs(_pearson([(1.0, 3.0), (2.0, 2.0), (3.0, 1.0)]) + 1.0) > 1e-9:
+        fail("_pearson of a rising and a falling line")
+    # A line altered: n/a figures parse as None and stay out of every mean.
+    altered = text.replace("target-minus-display mean 11.11 ms (min 11.11 max 11.11)", "target-minus-display n/a", 1)
+    aw, _ = parse_pose_gap(altered)
+    if aw[0]["gm"] is not None or aw[0]["gmin"] is not None or aw[0]["gmax"] is not None:
+        fail("an n/a gap parsed as a number: %r" % (aw[0],))
+    ar = {r["tid"]: r for r in tally_pose(aw)}[24212]
+    if ar["n"] != 12 or not close(ar["gap"][0], 11.11):
+        fail("an n/a window changed the gap mean -> %r" % (ar,))
+    # The over-the-limit line is a note, not a window.
+    more = text + "[00:00:00.000] pose gap: more than 16 callers in a window; 4 calls not counted\n"
+    mw, mn = parse_pose_gap(more)
+    if len(mw) != 24 or mn != ["more than 16 callers in a window; 4 calls not counted"]:
+        fail("the over-the-limit line -> %d windows, notes %r" % (len(mw), mn))
+    # Through main(), on a directory the tool discovers on its own: the runtime log is read by default.
+    tmp = tempfile.mkdtemp(prefix="edvr_pose_selftest_")
+    try:
+        logs = os.path.join(tmp, "edvr_logs")
+        os.makedirs(logs)
+        with open(os.path.join(logs, "edvr_openxr_20261009_120000_123_77.log"), "wb") as f:
+            f.write(("[00:00:00.001] version 0.18.3-1-gabcdef0 (build 68C0A1F2) -- this DLL was linked 2026-10-09 12:00:00 UTC\n" + text).encode("utf-8"))
+        with open(os.path.join(logs, "edvr_gfx_20261009_120001.log"), "wb") as f:
+            f.write(b"[00:00:00.001] version 0.18.3-1-gabcdef0 (build 68C0A1F2) -- x\n[00:00:01.000] nothing here\n")
+
+        def run(argv):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = main(argv)
+            return rc, buf.getvalue()
+
+        rc, out = run(["--dir", logs, "--tally", "pose"])
+        for want in ("tally pose: 24 window line(s) over 2 caller row(s)",
+                     "   7001 outside          12     720      0  +9.50 +/- 0.00",
+                     " 24212 exe+0x4E3881     12    1440      3  +11.11 +/- 0.00",
+                     "1.300 +/- 0.7", "+1.00",
+                     "exe+0x4E3881, tid 24212: its pose is located +11.11 ms from the drawn frame's display time, and is turned 0.722 deg from the drawn pose "
+                     "(0.111 to 1.332 across windows)",
+                     "outside, tid 7001: its pose is located +9.50 ms from the drawn frame's display time, and is turned 1.300 deg from the drawn pose "
+                     "(0.200 to 2.400 across windows); angle against head speed r = +1.00 over 12 window(s).",
+                     "tid 24212: 1 call(s) could not be given a target one display period after the display time",
+                     "a gap of about one display period (+11 ms at 90 Hz, +14 ms at 72 Hz) and an angle to the drawn pose of about head speed times that period",
+                     "before the fix Elite's was 41-44 ms"):
+            if want not in out:
+                fail("--tally pose output lacks %r:\n%s" % (want, out))
+        if rc != 0:
+            fail("--tally pose exited %d" % rc)
+        with open(os.path.join(logs, "edvr_openxr_20261009_130000_123_77.log"), "wb") as f:
+            f.write(b"[00:00:00.001] version 0.18.3-1-gabcdef0 (build 68C0A1F2) -- x\n[00:00:01.000] nothing here\n")
+        rc, out = run(["--dir", logs, "--tally", "pose", "--nth", "0"])
+        if rc != 1 or "no `pose gap:` lines" not in out:
+            fail("a log with no pose gap line -> rc %d:\n%s" % (rc, out))
+        rc, out = run(["--dir", logs, "--tally", "pose", "--tag", "gfx"])
+        if rc != 1 or "no `pose gap:` lines" not in out or "edvr_gfx_20261009_120001.log" not in out or "edvr_openxr_" in out:
+            fail("an explicit --tag gfx reads the graphics log, which has none -> rc %d:\n%s" % (rc, out))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    # Which log is read, from what each carries: an older runtime log and a NEWER graphics log, each with a pose row of its own (+0.00 ms and
+    # +123.00 ms), so the file that was read shows in the output twice over, by name and by content. The tag defaults to the runtime log for
+    # --tally pose only when it was omitted; a tag that was named, gfx included, is honoured; --file controls whatever the tag says.
+    tmp = tempfile.mkdtemp(prefix="edvr_pose_selftest_tag_")
+    try:
+        logs = os.path.join(tmp, "edvr_logs")
+        os.makedirs(logs)
+        head = "[00:00:00.001] version 0.18.3-1-gabcdef0 (build 68C0A1F2) -- this DLL was linked 2026-10-09 12:00:00 UTC\n"
+
+        def row(gap):
+            return ("[00:01:00.000] pose gap: tid 24212 calls 120 from exe+0x4E3881 prediction 0.0 ms target-minus-display mean %.2f ms "
+                    "(min %.2f max %.2f) angle-to-drawn mean 0.050 max 0.050 deg head 10.0 deg/s waitgetposes 5400 failed 0\n" % (gap, gap, gap))
+
+        runtime_name, gfx_name = "edvr_openxr_20261009_120000_123_77.log", "edvr_gfx_20261009_120001.log"
+        runtime_path, gfx_path = os.path.join(logs, runtime_name), os.path.join(logs, gfx_name)
+        with open(runtime_path, "wb") as f:
+            f.write((head + row(0.0)).encode("utf-8"))
+        with open(gfx_path, "wb") as f:
+            f.write((head + row(123.0)).encode("utf-8"))
+
+        def run_tag(argv):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = main(argv)
+            return rc, buf.getvalue()
+
+        def reads(label, argv, name, gap, other_name, other_gap):
+            rc, out = run_tag(argv)
+            read_line = [l for l in out.splitlines() if l.startswith("[edvr] ") and ".log" in l and "lines" in l]
+            if (rc != 0 or len(read_line) != 1 or name not in read_line[0] or other_name in out
+                    or ("is located %+.2f ms from the drawn frame's display time" % gap) not in out
+                    or ("is located %+.2f ms" % other_gap) in out):
+                fail("%s: expected %s at %+.2f ms, not %s at %+.2f ms -> rc %d:\n%s" % (label, name, gap, other_name, other_gap, rc, out))
+
+        reads("--tally pose with no tag reads the runtime log", ["--dir", logs, "--tally", "pose"], runtime_name, 0.0, gfx_name, 123.0)
+        reads("--tally pose --tag gfx reads the graphics log it was told to", ["--dir", logs, "--tally", "pose", "--tag", "gfx"], gfx_name, 123.0, runtime_name, 0.0)
+        reads("--tally pose --tag openxr reads the runtime log", ["--dir", logs, "--tally", "pose", "--tag", "openxr"], runtime_name, 0.0, gfx_name, 123.0)
+        reads("--tally pose --tag GFX is the same tag in any case", ["--dir", logs, "--tally", "pose", "--tag", "GFX"], gfx_name, 123.0, runtime_name, 0.0)
+        reads("--tally pose --tag all reads the newest log of any tag", ["--dir", logs, "--tally", "pose", "--tag", "all"], gfx_name, 123.0, runtime_name, 0.0)
+        reads("--tally pose --nth 0 with no tag still reads the runtime log", ["--dir", logs, "--tally", "pose", "--nth", "0"], runtime_name, 0.0, gfx_name, 123.0)
+        reads("--file controls with no tag", ["--file", gfx_path, "--tally", "pose"], gfx_name, 123.0, runtime_name, 0.0)
+        reads("--file controls over a tag that disagrees", ["--file", runtime_path, "--tally", "pose", "--tag", "gfx"], runtime_name, 0.0, gfx_name, 123.0)
+        # The other tallies keep their default: with no tag the graphics log is read (here, the tally finds nothing in it, which says which one it was).
+        rc, out = run_tag(["--dir", logs, "--tally", "vh"])
+        if gfx_name not in out or runtime_name in out:
+            fail("--tally vh with no tag no longer defaults to the graphics log -> rc %d:\n%s" % (rc, out))
+        rc, out = run_tag(["--dir", logs, "--list"])
+        if gfx_name not in out or runtime_name in out:
+            fail("--list with no tag no longer defaults to the graphics logs -> rc %d:\n%s" % (rc, out))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return ok
 
 def self_test_flat_upscale():
     """--flat-upscale on the checked-in synthetic flight (tools\\flat_upscale_fixture.log, which tools\\flat_temporal_test holds to exactly what the DLL's
@@ -10614,14 +10951,14 @@ def self_test_flat_upscale():
     flat = re.sub(r"[ ]+", " ", out)
     for want in (
             "[edvr] flat upscale: 1 key line(s), 5 copy-structure window(s), 1 route line(s), 2 stand-down line(s), 0 warning line(s), 0 decline line(s)",
-            "key 15:12:02.151: experimental.temporal_aa_before_post=auto (read at startup)",
+            "key 15:12:02.151: flat hdr route auto (read at startup)",
             "route 15:12:18.913: trained-upscale R=2880x1620 E=3840x2160 D=3840x2160",
             "first admission 15:12:18.914 at frame 1919: a 2880x1620 image, scene 2880x1620 on a 3840x2160 output, route trained-upscale; the whitelist said no-known-tone-pass",
             "window 15:12:21.149: key=auto copies 331 (whitelist 0, admitted 331, declined 0, selector-refused 0, no-3d-scene 0, render-size 0, route-serves 0, key-off 0); last admitted; "
             "scene 2880x1620 output 3840x2160 source 2880x1620; longest chain 0",
             "stand-down 15:12:08.368: entered for no-3d-scene",
             "stand-down 15:12:18.903: resumed",
-            "PASS (KEY) experimental.temporal_aa_before_post=auto (read at startup)",
+            "PASS (KEY) the flat HDR route is always on in this build, not a setting (read at startup)",
             "PASS (ADMISSION) 5 window(s): copies 1753, whitelist 0, admitted 1009, declined 0, selector-refused 0, no-3d-scene 744, render-size 0, route-serves 0, key-off 0; first admission at frame 1919",
             "PASS (TREATED) 1009 frame(s) treated over the log (the counter went 0 -> 1009)",
             "PASS (UPSCALE) below the output (trained-upscale R=2880x1620 D=3840x2160): 1009 frame(s) admitted by structure, treated",
@@ -10635,6 +10972,20 @@ def self_test_flat_upscale():
             fail("the good flight's report lacks %r:\n%s" % (want, out))
     if rc != 0:
         fail("the good flight reported exit %d" % rc)
+    # The current build's line (no key name on it) never recommends or reports the retired key as a setting; a log from before the
+    # retirement (its line names the key) is still read as that key's setting.
+    if "experimental.temporal_aa_before_post" in out:
+        fail("the current build's flat report names the retired key experimental.temporal_aa_before_post:\n%s" % out)
+    legacy_line = base.replace("flat hdr route: auto (", "flat hdr route: experimental.temporal_aa_before_post=auto (", 1)
+    if legacy_line == base:
+        fail("the fixture has no `flat hdr route: auto (` line to rewrite for the legacy check")
+    _, lout = report(legacy_line)
+    if "PASS (KEY) experimental.temporal_aa_before_post=auto (read at startup; a build that still read the key)" not in re.sub(r"[ ]+", " ", lout):
+        fail("a pre-retirement log's key line was not read as the key's setting:\n%s" % lout)
+    off_line = base.replace("flat hdr route: auto (", "flat hdr route: off (", 1)
+    _, oout = report(off_line)
+    if "WARN (KEY) the route line reads off" not in re.sub(r"[ ]+", " ", oout):
+        fail("a route line reading off was not flagged as a pre-unconditional log:\n%s" % oout)
 
     # ---- the episodes ----
     want_statuses(with_episode("render-size"), {"KEY": "PASS", "ADMISSION": "PASS", "TREATED": "PASS", "STAND-DOWN": "WARN", "F8 WARNING": "WARN", "CHAIN": "PASS", "ADVICE": "PASS"},
@@ -10667,7 +11018,7 @@ def self_test_flat_upscale():
     got, _ = statuses(no_windows)
     if got.get("ADMISSION") != "STOP" or rc != 0 or got.get("UPSCALE") != "STOP":
         fail("a flight with no admission window should say ADMISSION STOP and (nothing admitted below the output) UPSCALE STOP, exit 0: %r rc=%d" % (got, rc))
-    want_statuses(sub(base, "temporal_aa_before_post=auto (read at startup)", "temporal_aa_before_post=off (read at startup)"), {"KEY": "WARN"}, "the key off")
+    want_statuses(sub(base, "flat hdr route: auto (read at startup)", "flat hdr route: off (read at startup)"), {"KEY": "WARN"}, "the key off")
     no_key = "\n".join(l for l in base.splitlines() if "flat hdr route:" not in l) + "\n"
     want_statuses(no_key, {"KEY": "n/a", "ADMISSION": "PASS"}, "no key line")
     # Windows that never ruled on a final copy: the admission ran and had nothing to say, which is not a PASS.
@@ -10704,7 +11055,7 @@ def self_test_flat_upscale():
     runtime_cpp = os.path.join(os.path.dirname(here), "src", "d3d11", "flat_runtime.cpp")
     if os.path.isfile(runtime_cpp):
         r = read_text(runtime_cpp)
-        if "flat hdr route: experimental.temporal_aa_before_post=%s%s at frame=%llu: %s" not in r:
+        if "flat hdr route: %s (read at startup) at frame=%llu: %s" not in r:
             fail("src\\d3d11\\flat_runtime.cpp no longer writes the key line this reader parses")
     else:
         fail("src\\d3d11\\flat_runtime.cpp is not where the self-test looks for it (%s)" % runtime_cpp)
@@ -10979,6 +11330,11 @@ def self_test_maps_sharp():
             rc = print_maps_sharp(text)
         return rc, buf.getvalue()
 
+    # A current-build log with no feature line: the advice never recommends or blames a retired ini key (the gate has no setting now).
+    rc, out = run("[10:00:00.000] edvr 0.19.0 build deadbeef\n")
+    if rc != 3 or "experimental." in out or "on_foot_maps_sharp" in out or "key" in out.lower().replace("keys", ""):
+        fail("the no-line advice names a setting that no longer exists (rc=%d):\n%s" % (rc, out))
+
     # The fixture as it is: a 4-frame panel period is a flap (STOP), the not-empty eyes are a WARN, and the report says all of it.
     rc, out = run(base)
     if rc != 1 or "maps-sharp verdict: STOP" not in out or "a flap" not in out or "door-not-empty" not in out or "VR world route let go at" not in out:
@@ -11087,7 +11443,7 @@ def self_test_maps_sharp():
     # at the first ")": a real flight (edvr_gfx_20261001_085519.log, fix.temporal_aa off) lost its OFF line as "unknown". The list is held to the DLL's
     # sources, so a reason that is reworded fails here and not in the ten minutes after a flight.
     reasons = ["the key went off", "screen motion is not live", "fix.ui_quality is off", "no temporal mode is on (fix.temporal_aa is off)",
-               "the eye jitter is not as shipped (advanced.temporal_aa_jitter_sign or _lag is set)", "the layer stood down for the session",
+               "the eye jitter is not as shipped", "the layer stood down for the session",
                "screen motion is not live (fix.temporal_aa is off, or it stood down)", "the UI layer is not live"]
     reason_src = ""
     for rel in ("src/d3d11/ui_layer_math.h", "src/d3d11/ui_layer.cpp"):
@@ -11101,7 +11457,7 @@ def self_test_maps_sharp():
         pr = parse_maps_sharp(
             "[16:23:45.000] on foot maps sharp: OFF at frame=32500 (%s): the 2D screen is the world by the journal's reading or the screen's own "
             "depth again, as without the key.\n"
-            "[16:23:46.000] on foot maps sharp: experimental.on_foot_maps_sharp is on but the 2D screen's gate stays the journal's and the screen's "
+            "[16:23:46.000] on foot maps sharp: the maps gate is on but the 2D screen's gate stays the journal's and the screen's "
             "own depth, as without the key: %s.\n" % (why, why))
         got = [(e["kind"], e.get("why")) for e in pr["events"]]
         if got != [("off", why), ("notlive", why)] or pr["unparsed"]:
@@ -12198,15 +12554,29 @@ def self_test_camera_census():
         """One refusal line of the fixture's measured window, with some tokens changed."""
         v = dict(census="on", every=4, treated=450, asked=450, sampled=113, read=112, dropped=0, size="5040x2835", pixels=1600300800,
                  refused=58410978, pct="3.650", stale=40007520, masked=800150, corrupt=0, sentinel=16003008, unreprojectable=0, camera=0,
-                 range=1600300, depth=0, weapon=0, other=0, kept=0, ran=0, skipped=0, steady="off", view="off")
+                 range=1600300, depth=0, weapon=0, other=0, kept=0, ran=0, skipped=0, steady="off", view="off", skinned=None)
         v.update(kw)
-        return ("[12:00:09.000] vr world route refusal 5s: census=%(census)s every=%(every)d treated=%(treated)d asked=%(asked)d "
+        line = ("[12:00:09.000] vr world route refusal 5s: census=%(census)s every=%(every)d treated=%(treated)d asked=%(asked)d "
                 "sampled=%(sampled)d read=%(read)d dropped=%(dropped)d size=%(size)s pixels=%(pixels)d refused=%(refused)d "
                 "refused-pct=%(pct)s stale-refused=%(stale)d masked=%(masked)d corrupt=%(corrupt)d sentinel=%(sentinel)d "
                 "unreprojectable=%(unreprojectable)d camera=%(camera)d range=%(range)d depth=%(depth)d weapon=%(weapon)d other=%(other)d "
-                "stale-kept=%(kept)d depth-check=%(ran)d/%(skipped)d steady-detail=%(steady)s view=%(view)s\n") % v
+                "stale-kept=%(kept)d depth-check=%(ran)d/%(skipped)d steady-detail=%(steady)s view=%(view)s") % v
+        return line + ((" skinned-joined=%d" % v["skinned"]) if v["skinned"] is not None else "") + "\n"
 
     nothing = dict(refused=0, pct="0.000", stale=0, masked=0, sentinel=0, range=0)
+    # F2 on foot: `skinned-joined=N` ends the line of a build that has it. It parses (None for a build that predates it), it is printed in the MEASURED line and it is
+    # not part of the refused total (those pixels took their exact motion).
+    with_skin = text + refusal_line(skinned=19, **nothing)
+    wins = parse_refusal_windows(with_skin)
+    _, out = report(with_skin)
+    if wins[-1]["skinned"] != 19 or wins[0]["skinned"] != 0 or "skinned-joined 19 (F2 on foot" not in squash(out) or "!! " in out or \
+            "refused 1.825% (58410978)" not in squash(out):
+        fail("skinned-joined=N did not parse, print in the measured line, or stay out of the refused total:\n%s" % out)
+    # (the fixture's own lines are the formatter's: they end skinned-joined=0; a log from a build before F2 on foot has no token at all)
+    before_f2 = text.replace(" skinned-joined=0", "")
+    if any(w["skinned"] is not None for w in parse_refusal_windows(before_f2 + refusal_line(**nothing))) or \
+            "skinned-joined" in report(before_f2 + refusal_line(**nothing))[1]:
+        fail("a build without the token printed a skinned-joined count")
     # "Ran, 0 refused" (pixels > 0, refused=0) is never the same text as "never ran" (treated=0, asked=0, read=0).
     _, out = report(text + refusal_line(**nothing))
     if "refused 0.000% (0): none refused; stale-kept 0.000%" not in squash(out) or "!! " in out or \

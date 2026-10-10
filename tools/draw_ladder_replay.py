@@ -229,8 +229,6 @@ def _sunglare_wants(obj, prefix, label, should_evaluate):
             raise TraceError(label + " probe read lacks preceding damping stage")
         if damping[1] and damping[2] and probe[0]:
             raise TraceError(label + " true damping must short-circuit probe")
-        if damping[1] and not damping[2] and not probe[0]:
-            raise TraceError(label + " false damping lacks probe stage")
         return None, False, None
     if mode[2] != 0:
         if damping[0] or probe[0]:
@@ -246,11 +244,14 @@ def _sunglare_wants(obj, prefix, label, should_evaluate):
                 raise TraceError(label + " true damping must short-circuit probe")
             expected = True
         else:
-            if not probe[0]:
-                raise TraceError(label + " stock wants must read probe after damping is false")
-            if not probe[1]:
-                return 0, False, None
-            expected = probe[2]
+            # Current captures leave the retired probe field unread; older
+            # captures may still carry its observed value.
+            if probe[0]:
+                if not probe[1]:
+                    return 0, False, None
+                expected = probe[2]
+            else:
+                expected = False
     if result[1] and result[2] != expected:
         raise TraceError(label + "." + prefix + "Result disagrees with consumed inputs")
     return mode[2], result[1], expected
@@ -470,8 +471,9 @@ def _replay_sunglare_site(fact, site_id, draw, label, source_action,
                 expected_claim = True
             elif world[1] and world[2] == 0:
                 if not probe[0]:
-                    raise TraceError(label + " zero world value must read probe")
-                if probe[1]:
+                    predicate_known = True
+                    expected_claim = False
+                elif probe[1]:
                     predicate_known = True
                     expected_claim = probe[2]
                 else:
@@ -6788,7 +6790,7 @@ def self_test():
         if mode == 0:
             outer = {"outerWantsMode": sg_read(0),
                      "outerExposureDamping": sg_read(False),
-                     "outerProbe": sg_read(False),
+                     "outerProbe": sg_unread(),
                      "outerWantsResult": sg_read(False)}
             helper = {key: sg_unread() for key in (
                 "helperWantsMode", "helperExposureDamping", "helperProbe",
@@ -6851,7 +6853,7 @@ def self_test():
                "predicateFacts": [
                    sg_fact(61, 9, sg_site(before=0, after=0),
                            sg_selector()),
-                   sg_fact(62, 10, sg_site(source=True, world=0, probe=False)),
+                    sg_fact(62, 10, sg_site(source=True, world=0)),
                    sg_fact(63, 11, sg_site(source=True, before=0))]}
     try:
         sg_summary = _replay_predicate_facts(sg_draw, "fixture", 6)

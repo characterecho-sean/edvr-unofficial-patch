@@ -3,7 +3,7 @@
 ## Status
 
 *Restates the journal below; not new evidence -- update it whenever
-this doc changes. Last updated 2026-09-29 for flat sharpening.*
+this doc changes. Last updated 2026-10-09 for the DLSS ceiling.*
 
 - **State:** TAA/DLSS carries UI/smoke depth and station motion by
   default ("Current defaults", 2026-09-10). Feature A (the supersample
@@ -16,7 +16,9 @@ this doc changes. Last updated 2026-09-29 for flat sharpening.*
   09-03, retired 09-04. 2026-09-23: the DLSS ladder walk survives a
   failed query, and the door's output follows an input under a mode's
   floor (twice the input; the runtime upsamples the rest) -- BUILT, NOT
-  FLOWN ("The served floor", at the end).
+  FLOWN ("The served floor", at the end). 2026-10-09: NVIDIA's own side
+  limit (8192 per axis) cuts the output first -- BUILT, NOT FLOWN ("The
+  ceiling", at the end).
 - **Open:**
   - Flat sharpening (`fix.render_sharpness`, ahead of the game's output
     copy; the UI never is): BUILT 2026-09-29, NOT FLOWN. See its section.
@@ -2364,3 +2366,67 @@ devices in one process. What to look for in a log after one: `render sharpening:
 the D3D device changed (change 1)`, a second `precompiled compute shader
 render_sharpen_cs created`, and no `flat sharpen: a view over the sharpened ...
 could not be made`.
+
+## The ceiling: NVIDIA's own side limit (2026-10-09)
+
+**The flight.** Pimax 8KX, FOV Wide, HMD Quality 0.5, parallel projection
+on, EDVR v0.18.3-90-gbbca39a6. Per-eye output 8268x3948, Elite renders
+4134x1974. The graphics log:
+
+- `dlss: modes for 8268x3948: quality 0x0 (0x0..0x0), balanced 0x0 ...,
+  performance 0x0 ..., ultra performance 0x0`
+- `dlss floor: no output at or under 8268x3948 serves the game's 4134x1974
+  (NVIDIA's floor there is 0x0)`
+- `the DLAA feature would not be created at 8268x3948: an invalid parameter
+  (0xBAD00005)`, the warm-up's 1:1 create, which spent the one-shot note.
+
+The user saw the pass's own history at render size, stretched 2x by the
+submit blit. The same rig with parallel projection off (5016x3160) ran DLSS.
+
+**Cause.** NGX returns success with every size zero for an output past its
+ceiling. `ensureFeature` read that as an answer (the call succeeded), and
+the floor test reads only a mode with min < max, so the served floor had
+nothing to read and never cut. The floor cuts an output down to where the
+input reaches a mode's floor; nothing cut the output to where NVIDIA
+answers at all.
+
+**The probe (2026-10-09, RTX 5090, driver 617.42, a standalone program
+outside the repo).** NGX answers a usable ladder when max(width, height) <=
+8192. 8192x8192 (67.1 Mpx) answers; 8193 on either axis does not; 16384x1000
+does not; 8192x2000 does; 5424x5356 (DLAA's known size) does. The limit is
+per axis, not a pixel count: a pixel-count cap would have refused the
+square first. Every refusal is the same answer, success with zeros.
+
+**The rule** (`dlss_floor.h`, `native_temporal.cpp` floorOutput). NVIDIA's
+ceiling is found, not hard-coded. When the door's output has no usable
+ladder (`dlssRangesAnswered` false), `dlssCeilingOutput` bisects the width,
+aspect kept, both sides even, for the largest size NGX answers. The
+existing floor logic then reads the ladder at that cap. For the flight:
+the cap is 8192x3910 (3948 x 8192 / 8268, floored and made even), the
+quality mode's floor there is 4096x1955, and the 4134x1974 input clears it.
+The pass outputs 8192x3910 and the submit blit carries the last 0.9%.
+The search's own queries are quiet. The cap's ladder is logged as any
+output's is, and `dlss ceiling: NVIDIA answers no render range for a WxH
+output; the pass outputs W'xH' and the runtime upsamples the rest.` is
+logged once per door size.
+
+**The 1:1 frames.** `dlaaWarm` makes its 1:1 features only where the told
+size has a usable ladder; past the ceiling it stands aside, quietly. A
+1:1 frame whose create fails no longer spends `engineFailNoted` (temporal_pass.cpp,
+the treat's failure branch): that one-shot note belongs to an upscale the
+game asked for, and the flight's 1:1 create hid it.
+
+**Not done.** The flat route (`flat_runtime.cpp`, the `dlssModeRanges` at
+the flat plan, and `flat_dlss_negotiate.h`) has its own negotiation and no
+cap. If a flat output past 8192 shows the same zero ladder, the same cut
+applies there; that is a separate change.
+
+**Test.** `tools\dlaa_mode_test`: the flight's zero ladder; the ceiling
+search against the measured limit (8268x3948 -> 8192x3910, the tall and
+square shapes, odd sides, no answer, a non-monotone query, the query count);
+a pixel-count model that the rule must not match; and the mutants in
+`tools\dlaa_mode_test\mutants.py`.
+
+**State.** BUILT, NOT FLOWN. The next flight should show one `dlss ceiling:`
+line per output size, a `dlss modes` line for the cap, and the price line
+as DLSS rather than "own history".

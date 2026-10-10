@@ -8,7 +8,6 @@
 //
 // WHAT IS HERE, all pure (tools\vr_world_route_test drives every function, and the runtime calls the very same
 // code):
-//   - the key: experimental.temporal_aa_on_foot_world, auto (the default since 2026-10-01) or off;
 //   - the ownership machine: the route treats frames, is WARM after kVrWorldWarmFrames treated frames in a row,
 //     OWNS the world from then on, and is released by the gate, the layer, a scene reset, a run of frames it did not
 //     treat, or the late-write latch. Only an owned route moves the eye shift and the screen draws;
@@ -30,21 +29,9 @@
 
 namespace edvr {
 
-// ---- the key ---------------------------------------------------------------------------------------------
-// experimental.temporal_aa_on_foot_world: auto (the route where it applies) or off. Auto by default since 2026-10-01 (the
-// route has flown; off is kept for one release candidate as the way back). A key that is absent reads as the default; a
-// value that is present and is not "auto" reads as off, so a typo leaves on-foot VR exactly as it was before the route.
+// ---- the setting ----------------------------------------------------------------------------------------
+// The route is always on (since 2026-10-01). The enum names the two states the window line and the machine's inputs report.
 enum class VrWorldKey : uint8_t { Off, Auto };
-inline VrWorldKey vrWorldKeyFromText(const char* text) {
-    if (!text) return VrWorldKey::Off;
-    const char* a = "auto";
-    for (; *a; ++a, ++text) {
-        char c = *text;
-        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
-        if (c != *a) return VrWorldKey::Off;
-    }
-    return *text == 0 ? VrWorldKey::Auto : VrWorldKey::Off;
-}
 inline const char* vrWorldKeyName(VrWorldKey key) { return key == VrWorldKey::Auto ? "auto" : "off"; }
 
 // ---- the ownership machine --------------------------------------------------------------------------------
@@ -404,15 +391,13 @@ inline int vrWorldFormatFirstTrigger(char* out, size_t size, uint64_t frame, con
 }
 
 // ---- stage 2: the world jitter (design doc section 82, stage 2) ---------------------------------------------------------
-// The route has no jitter key of its own. While it owns the world (Warming or Owned) it puts the sub-pixel phase into the world's
+// While the route owns the world (Warming or Owned) it puts the sub-pixel phase into the world's
 // cameras through the camera injector (flat_camera_inject.h), and the resolver gets that phase for its jitter input and for the
-// rows. The one thing that stops it is the global jitter key: experimental.temporal_aa_jitter off keeps the route and zeroes the
-// phase, which is flight 1's unjittered world.
+// rows.
 
 // What the route decides about the world phase for the frame that starts. Only On asks the injector to write a camera.
 enum class VrWorldJitter : uint8_t {
     On,         // inject kind-3 screen-view calls before the trigger with this frame's phase
-    GlobalOff,  // experimental.temporal_aa_jitter is off: the route runs unjittered (nothing is installed for it)
     Idle,       // the route is not Warming or Owned (or its key is off): nothing to jitter
     Unnamed,    // the route is Warming or Owned but the last frame named no source for the screen (a map, a menu, a transition):
                 // the window stays shut, through the route's grace frames, until a frame names one again
@@ -424,21 +409,19 @@ enum class VrWorldJitter : uint8_t {
 // refreshed before the pass that draws with it), so the frame that starts cannot be asked;
 // a map frame refreshes about thirty kind-3 cameras and must never pick up the world's phase, so the window opens only after
 // a frame that named its source and stays shut after one that did not (design-world-camera-motion-2026-09-30.md section 5).
-inline VrWorldJitter vrWorldJitterDecide(bool routeKeyAuto, bool globalJitter,
+inline VrWorldJitter vrWorldJitterDecide(bool routeKeyAuto,
                                          bool routeWantsInjection, bool namedLast, bool hookLive, bool fault) {
     if (!routeKeyAuto) return VrWorldJitter::Idle;
     if (fault) return VrWorldJitter::Fault;
-    if (!globalJitter) return VrWorldJitter::GlobalOff;
     if (!routeWantsInjection) return VrWorldJitter::Idle;
     if (!namedLast) return VrWorldJitter::Unnamed;
     if (!hookLive) return VrWorldJitter::NoHook;
     return VrWorldJitter::On;
 }
-// The token of the 5 s line (jitter=): on, off (the global jitter key off), idle, unnamed, no-hook, fault.
+// The token of the 5 s line (jitter=): on, idle, unnamed, no-hook, fault.
 inline const char* vrWorldJitterName(VrWorldJitter j) {
     switch (j) {
         case VrWorldJitter::On: return "on";
-        case VrWorldJitter::GlobalOff: return "off";
         case VrWorldJitter::Idle: return "idle";
         case VrWorldJitter::Unnamed: return "unnamed";
         case VrWorldJitter::NoHook: return "no-hook";
@@ -558,8 +541,8 @@ inline int vrWorldFormatNoSceneInjection(char* out, size_t size, uint64_t frame,
 inline int vrWorldFormatStopWrongKind(char* out, size_t size, uint64_t frame, const VrWorldInjectFrame& f) {
     return std::snprintf(out, size,
         "vr world route: STOP at frame=%llu: camera calls of a kind other than 3 were INJECTED (kind 0: %u, 1: %u, 2: %u, 4: %u, "
-        "5: %u, other: %u, unreadable: %u): only kind 3 may be; the injector is switched off for this session (set "
-        "experimental.temporal_aa_on_foot_world off and auto again to clear it)",
+        "5: %u, other: %u, unreadable: %u): only kind 3 may be; the injector is switched off for this session (it stays off for "
+        "the rest of the session)",
         static_cast<unsigned long long>(frame), f.injectedKind[0], f.injectedKind[1], f.injectedKind[2], f.injectedKind[4],
         f.injectedKind[5], f.injectedKind[6], f.injectedKind[7]);
 }
@@ -579,8 +562,8 @@ inline int vrWorldFormatStopShut(char* out, size_t size, uint64_t frame, const c
     return std::snprintf(out, size,
         "vr world route: STOP at frame=%llu: %u scene and %u first-person camera call(s) were INJECTED on a frame whose window the "
         "route had shut (decision: %s); a shut window is never written through, and the map or menu would pick up the world's "
-        "phase; the injector is switched off for this session (set experimental.temporal_aa_on_foot_world off and auto again "
-        "to clear it)",
+        "phase; the injector is switched off for this session (it stays off for the rest of the "
+        "session)",
         static_cast<unsigned long long>(frame), f.sceneInjected, f.firstPersonInjected, decision ? decision : "?");
 }
 // The rows of two consecutive resolved frames did not differ by the phases they were claimed to carry (flat_camera_phase.h
@@ -604,16 +587,6 @@ inline int vrWorldFormatRowsMismatch(char* out, size_t size, uint64_t frame, flo
 // was flight 3's experiment); where it does not the pixel is refused as before. Only the stale-slot refusal is relaxed: a masked
 // record, a corrupt slot, the sky and the weapon's pixels stay refused. A lateral mover's interior can still pass the depth test and
 // ghost (flight 4: none seen).
-// The refusal view (advanced.temporal_aa_debug = motion_source while the route resolves): said when it comes on and when it goes off.
-inline int vrWorldFormatViewChanged(char* out, size_t size, uint64_t frame, bool on) {
-    if (on)
-        return std::snprintf(out, size,
-            "vr world route: the refusal view is ON from frame=%llu (advanced.temporal_aa_debug = motion_source): the world's picture is "
-            "painted by the prep's own classification before the game's tone pass (%s); the hue survives the tone pass, the absolute "
-            "colour does not",
-            static_cast<unsigned long long>(frame), flatMonoViewLegend());
-    return std::snprintf(out, size, "vr world route: the refusal view is OFF from frame=%llu", static_cast<unsigned long long>(frame));
-}
 // The third line of a 5 s window, printed while the refusal census is wanted (advanced.vr_camera_census on), while samples of a census
 // that has just gone off are still draining, and while the steady detail's depth check has frames to count (they are counted whatever
 // the census asks): an absent line is "the census was off and the resolver counted no frame", and a line with sampled=0 is "on, and no
@@ -633,6 +606,7 @@ struct VrWorldRefusalWindow {
     uint32_t width = 0, height = 0;       // the render size of the last sample read back
     uint64_t pixels = 0;                  // what the read-back samples examined
     uint64_t counts[kFlatMonoRefusalSlots] = {};
+    uint64_t skinned = 0;                 // ACCEPTED skinned pixels that took their exact motion from target 7 (F2 on foot): the proof the route read E
     uint64_t checked = 0, skipped = 0;    // the resolver's depth-check frames this window (FlatMonoRefusalCensus::checked, skipped)
     const char* steady = "on";            // always on in this build; only a rig that models an older log sets "off"
     const char* view = "off";             // "on" while the refusal view is painting
@@ -651,7 +625,7 @@ inline int vrWorldFormatRefusalWindow(char* out, size_t size, const VrWorldRefus
     return std::snprintf(out, size,
         "vr world route refusal 5s: census=%s every=%u treated=%llu asked=%llu sampled=%llu read=%llu dropped=%llu size=%ux%u "
         "pixels=%llu refused=%llu refused-pct=%.3f stale-refused=%llu masked=%llu corrupt=%llu sentinel=%llu unreprojectable=%llu camera=%llu "
-        "range=%llu depth=%llu weapon=%llu other=%llu stale-kept=%llu depth-check=%llu/%llu steady-detail=%s view=%s",
+        "range=%llu depth=%llu weapon=%llu other=%llu stale-kept=%llu depth-check=%llu/%llu steady-detail=%s view=%s skinned-joined=%llu",
         w.census ? "on" : "off", w.every, static_cast<unsigned long long>(w.treated), static_cast<unsigned long long>(w.asked),
         static_cast<unsigned long long>(w.sampled), static_cast<unsigned long long>(w.read), static_cast<unsigned long long>(w.dropped),
         w.width, w.height, static_cast<unsigned long long>(w.pixels), static_cast<unsigned long long>(refused), pct,
@@ -661,7 +635,7 @@ inline int vrWorldFormatRefusalWindow(char* out, size_t size, const VrWorldRefus
         static_cast<unsigned long long>(w.counts[kFlatMonoClassRange]), static_cast<unsigned long long>(w.counts[kFlatMonoClassDepth]),
         static_cast<unsigned long long>(w.counts[kFlatMonoClassWeaponRefused]), static_cast<unsigned long long>(refused - named),
         static_cast<unsigned long long>(w.counts[kFlatMonoRefusalStaleKept]), static_cast<unsigned long long>(w.checked),
-        static_cast<unsigned long long>(w.skipped), w.steady, w.view);
+        static_cast<unsigned long long>(w.skipped), w.steady, w.view, static_cast<unsigned long long>(w.skinned));
 }
 
 // The decline log. Flight 1 capped it per SESSION (twelve lines) and spent all twelve on the entry and the first seconds of one

@@ -34,7 +34,7 @@ import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_SRC = os.path.join(REPO, "src", "d3d11", "sunglare_vs.h")
-DEFAULT_DEFINES = ["NOGATE", "ALLWORLD", "ALLFLAT"]
+DEFAULT_DEFINES = []
 
 
 class Macro(ctypes.Structure):

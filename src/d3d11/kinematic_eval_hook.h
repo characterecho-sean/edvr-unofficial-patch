@@ -24,9 +24,10 @@ void detachKinematicEvalHooks(KinematicEvalProbe* probe) noexcept;
 
 // The relay gate is a cell of its own, open while ANY consumer wants
 // callbacks: the probe while attached (attach/detach above), the emit
-// (below), and the scheduler stack probe, the static prop gate and the cull
-// gate probe (further below). (The legacy kinematic tracker, once one of
-// them, retired 2026-09-23.)
+// (below), and the scheduler stack probe and the cull gate probe (further
+// below). (The legacy kinematic tracker, once one of them, retired
+// 2026-09-23; the static prop gate and the settlement LOD governor, two more,
+// were removed 2026-10-08.)
 
 // --- Engine-record velocity's emit feed (with fix.temporal_aa, phase 1) -----
 // FUN_144312E00 (direct producer 0) appends each kinematic rig record's
@@ -90,25 +91,6 @@ const char* kinematicEvalSchedulerAttach() noexcept;
 // consumer holds it.
 void kinematicEvalSchedulerDetach() noexcept;
 
-// --- The static prop gate's feed (fix.static_prop_updates) ------------------
-// Job 0's relay (FUN_144321940) is the gate's hook site -- CodeHook refuses
-// a second patch, and there is nothing to gain by double-hooking. The
-// bracket consults the registered observer BEFORE its timed region and, on
-// a skip verdict, forwards past the call entirely: skipped calls never
-// enter the timed bracket, so the gate's wall share reads off the jobs[0]
-// counter's drop against a no-gate baseline. The gate module (which owns
-// the cache) registers decide here, exactly the way the emit registers its
-// observer above; this file carries no link dependency on it.
-using StaticGateDecideFn = uint32_t (*)(uintptr_t job0Param) noexcept;
-void kinematicEvalSetStaticGateObserver(StaticGateDecideFn fn) noexcept;
-// Installs the shared kinematic hook set (validating the executable) and
-// holds the eval gate open for the static prop gate. Same return vocabulary
-// as attachKinematicEvalHooks; idempotent across re-arms.
-const char* kinematicEvalStaticGateAttach() noexcept;
-// Closes the static gate's want; the gate stays open while any other
-// consumer holds it.
-void kinematicEvalStaticGateDetach() noexcept;
-
 // --- The cull gate probe's feed (advanced.cull_gate_capture) ----------------
 // FUN_14430EFE0, this file's evaluator target, IS the traversal's per-(record,
 // view) gate, and FUN_1442B4420, the bucket bracket's target, is the
@@ -137,51 +119,12 @@ void kinematicEvalSetGateProbeObservers(GateProbeGateFn gate, GateProbeBuilderFn
 // Installs the shared kinematic hook set (validating the executable) and
 // holds the eval gate open for the probe's window. Same return vocabulary as
 // attachKinematicEvalHooks. It also installs, once, FUN_1442B3FC0's own patch
-// -- for this probe and the settlement LOD governor below, never for the
-// other consumers -- after a build-keyed signature (PE timestamp and size,
-// the prologue, the builder's frame and call site the observer reads); its
-// relay has a gate cell of its own, open only while the probe or the
-// governor is attached. A mismatch stands that hook down alone.
+// -- for this probe only, never for the other consumers -- after a build-keyed
+// signature (PE timestamp and size, the prologue, the builder's frame and call
+// site the observer reads); its relay has a gate cell of its own, open only
+// while the probe is attached. A mismatch stands that hook down alone.
 const char* kinematicEvalGateProbeAttach() noexcept;
 void kinematicEvalGateProbeDetach() noexcept;
-
-// --- The settlement LOD governor's feed (fix.settlement_detail) -------------
-// The builder observer runs BEFORE the draw-item builder's forward (pose, ctx,
-// mask, nibbles = rec+0x210, the same four the probe gets) and the part
-// observer AFTER each FUN_1442B3FC0 forward (items, out, view, fromBuilder);
-// both only read. The builder bracket's relay reads a cell of its own that is
-// the eval gate OR this governor's want, so the governor alone opens that one
-// relay and the part test's -- never the evaluator's, the job brackets' or
-// the direct producers' -- and the bracket's bucket census still runs only
-// while the eval gate is open. The setter observer runs AFTER the forward of
-// FUN_142819D90, the engine's per-frame rebuild of the render context, which
-// ends by storing the LOD scale at ctx+0x30 (decomp_2819D90.txt:108): the
-// governor's one write site (it scales that value by k while acting; the
-// bracket itself never writes). Raw callbacks, no link dependency; null means
-// off (one atomic load).
-using LodGovernorBuilderFn = void (*)(uintptr_t pose, uintptr_t ctx, uintptr_t mask, uintptr_t nibbles) noexcept;
-using LodGovernorPartFn = void (*)(uintptr_t items, uintptr_t out, uintptr_t view, bool fromBuilder) noexcept;
-using LodGovernorSetterFn = void (*)(uintptr_t ctx) noexcept;
-void kinematicEvalSetLodGovernorObservers(LodGovernorBuilderFn builder, LodGovernorPartFn part,
-                                          LodGovernorSetterFn setter) noexcept;
-// Installs the shared kinematic hook set, FUN_1442B3FC0's patch (the same
-// build-keyed install the probe uses) and FUN_142819D90's (build-keyed: PE
-// timestamp and size, its prologue, and every instruction the post-forward
-// read of ctx+0x30 rests on), each standing down alone, then opens the
-// builder bracket's, the part test's and the setter's relays for the
-// governor. Same return vocabulary as attachKinematicEvalHooks.
-const char* kinematicEvalLodGovernorAttach() noexcept;
-void kinematicEvalLodGovernorDetach() noexcept;
-// FUN_142819D90's hook: "hooked", or why it stood down ("not requested",
-// "not build 332841 (PE timestamp/size)", "prologue mismatch at RVA 0x2819D90",
-// "setter mismatch at RVA 0x... (...)", "CodeHook refused the patch", ...).
-const char* kinematicEvalLodSetterStatus() noexcept;
-// FUN_1404F4E10, the engine's plane test (view, float4 point, float4
-// interval) -> -1 outside a plane (as a 32-bit value), after the same
-// build-keyed check of its first sixteen bytes the cull gate probe makes; null
-// when the image does not match. Never patched: the governor only calls it.
-using LodGovernorFrustumFn = uint64_t (__fastcall*)(uintptr_t view, const float* point, const float* interval);
-LodGovernorFrustumFn kinematicEvalFrustumFn() noexcept;
 // True while the builder bracket (FUN_1442B4420) is installed: the probe's
 // builder verdicts depend on it separately from the evaluator.
 bool kinematicEvalBuilderHooked() noexcept;

@@ -44,7 +44,7 @@ UiDepthMode g_uiDepthMode = UiDepthMode::kNone;
 bool g_uiDepthOn = false;          // the key and the pass, both
 bool g_uiDepthStoodDown = false;
 bool g_uiDepthPlanetPending = false, g_uiDepthPlanetSolarPending = false;
-bool g_holoDepthOn = false;        // advanced.temporal_aa_hologram_depth
+bool g_holoDepthOn = false;        // the hologram depth pass (on whenever the temporal pass runs)
 bool g_uiDepthDrawComposite = false;  // the last eye draw sampled a learned interface surface (ui_depth.h)
 }  // namespace detail
 
@@ -104,7 +104,7 @@ constexpr uint64_t kPanelPsCheap  = 0xF2F872B191F656D5ull;
 // and the flight HUD use, so it belongs to the cockpit's UI pass and shares
 // the scene's projection where it binds the scene's pair -- hence it counts
 // as a scene family, like the holo panels, rather than through
-// advanced.ui_depth_families (which would also claim its draws that sample
+// the direct family list (which would also claim its draws that sample
 // no interface surface at all, and there are tens of thousands of those:
 // hud_sprite.h, removed 2026-09-29).
 //
@@ -165,11 +165,6 @@ bool     g_trained = false;    // ...and it is NVIDIA's history, which reads the
 
 bool     g_announced = false;
 bool     g_waitingNoted = false;
-bool     g_testAlways = false; // advanced.ui_depth_test = always
-bool     g_menus = true;       // advanced.ui_depth_menus: the interface-projection
-                               // composites get the alpha-aware depth pass
-bool     g_eyesSwapped = false; // advanced.ui_depth_eyes = swapped: the A/B for
-                                // the order rule that names the eye
 // THE ENCODING. The menu's and the loader's composites are drawn through
 // the interface projection -- near 0.1 m, far 1000 m on build 332841 (the
 // receiver logs every pair the game asks for) -- while the scene pair the
@@ -181,9 +176,8 @@ bool     g_eyesSwapped = false; // advanced.ui_depth_eyes = swapped: the A/B for
 // pass's VIEWPORT depth range carries the correction: MaxDepth =
 // sceneNear / uiNear scales what the rasteriser writes, no maths in the
 // shader.
-float    g_uiNear = 0.1f;       // advanced.ui_depth_planes
-float    g_uiFar = 1000.0f;
-float    g_alphaFloor = 0.5f;   // advanced.ui_depth_alpha: below it, no depth
+constexpr float kUiNear = 0.1f;        // the interface projection's near plane, metres (far is 1000)
+constexpr float kAlphaFloor = 0.5f;    // below this alpha, no depth
 float    g_cockpitMetres = kTemporalShipMetres; // same near-field domain as temporal AA
 HoloMotion g_holoMotion[2];
 PlanetCoverage g_planetCoverage;
@@ -212,9 +206,8 @@ ID3D11Resource* g_chromeHeld[2] = {};
 uint32_t g_chromeHeldCount = 0;
 Microsoft::WRL::ComPtr<ID3D11Texture2D> g_chromeDump[2];
 uint32_t g_chromeDumpCount = 0;
-float    g_reactive = 0.0f;     // advanced.ui_depth_reactive: the bias mask's value
-float    g_ghostTolerance = 12.0f; // advanced.ui_ghost_tolerance: the UI-resolve clamp's bound tolerance, 8-bit colour steps (0..64)
-float    g_coronaSmearLevel = 64.0f; // advanced.corona_smear_level: the corona-smear hold's brightness limit, 8-bit colour steps (0..255, 0 = off); always on under the temporal pass
+constexpr float kGhostTolerance = 12.0f; // the UI-resolve clamp's bound tolerance, 8-bit colour steps
+constexpr float kCoronaSmearLevel = 64.0f; // the corona-smear hold's brightness limit, 8-bit colour steps (0..255); always on under the temporal pass
 bool     g_scaleNoted = false;
 constexpr uint32_t kMaxViewports = 16;
 D3D11_VIEWPORT g_savedVps[kMaxViewports];
@@ -334,7 +327,6 @@ uint64_t    g_familyLoggedPs[kMaxFamilyLines];
 const char* g_familyLoggedHow[kMaxFamilyLines];
 uint32_t    g_familyLoggedCount = 0;
 // Pixel shaders adopted by another's transcription, named once each.
-bool     g_variants = true;    // advanced.ui_depth_variants
 uint64_t g_variantLogged[kMaxHashes];
 uint32_t g_variantLoggedCount = 0;
 
@@ -430,8 +422,7 @@ uint32_t g_variantLoggedCount = 0;
 // that could differ, and it is checked rather than assumed (the classifier
 // already knows which slot held the learned surface). What is left unchecked
 // is the TEXCOORD the variant samples at, which is why the fallback names
-// every shader it adopts in the log and advanced.ui_depth_variants turns it
-// off.
+// every shader it adopts in the log.
 constexpr uint32_t kMaxStandIns = 4;
 struct DepthShader {
     uint64_t            ps[kMaxStandIns];  // the game's pixel shaders it stands in for
@@ -474,21 +465,15 @@ struct FloorCb {
     float          cockpitMetres = -1.0f;
     ID3D11Buffer* cb = nullptr;
     float         floor = -1.0f;
-    float         strength = -1.0f;
     float         nearDepth = -1.0f;   // the depth value at one metre (temporalPassDepthAt), for a floating stroke's core
-    float         smokeFloor = -1.0f;  // slot 3, the smoke's: its opacity floor for the depth it writes (z)...
-    float         smokeMax = -1.0f;    // ...and the mask's strength at full opacity (w); advanced.temporal_aa_smoke_*
     float         depthAt2 = -1.0f;    // the depth value at two metres, with nearDepth the pass's projection pair (the second float4)
 };
-// THE SMOKE'S COVERAGE, tunable (the review of 2026-09-10): the trail's
+// THE SMOKE'S COVERAGE (the review of 2026-09-10): the trail's
 // rectangles trace its segments, each fading through the depth floor at
 // its own time -- a hard step between the smoke's depth and the sky's --
 // while its scrolling texture is accumulated under a one-quantum mark.
-// The floor is the smoke's own now (advanced.temporal_aa_smoke_floor,
-// 0.08 as before), and the mask can follow its opacity up to a strength
-// (advanced.temporal_aa_smoke_reactive; 0 keeps the one-quantum mark).
-float g_smokeFloor = 0.08f;
-float g_smokeReactive = 0.0f;
+// The floor is the smoke's own (0.08), and the mask keeps the one-quantum mark.
+constexpr float kSmokeFloor = 0.08f;
 // [4] the scanner's chrome: the interface proper at one alpha step. The
 // spectral graph and its labels are drawn DIM -- their strokes sit at alpha
 // 0.2-0.3 in the chrome (eye_194158_Chrome0: luma 20-40 at alpha 51-77 of
@@ -674,8 +659,7 @@ DepthShader*             g_reissueShader = nullptr;
 // pixels of halo fell to the camera's path and smeared -- the glow was
 // marked then; with the holo material alone brought across, no change --
 // the chevrons are the flight HUD's.
-float                    g_reissueMaskOffset = 0.0f;
-int                      g_reissueMaskSlot = 0;   // which cached constant buffer carries it (floorBuffer)
+int                    g_reissueMaskSlot = 0;   // which cached constant buffer carries it (floorBuffer)
 ID3D11PixelShader*       g_savedPs = nullptr;
 ID3D11ClassInstance* g_savedPsClasses[256]{};
 UINT g_savedPsClassCount=0;
@@ -699,7 +683,7 @@ ID3D11Texture2D*          g_reissueScene = nullptr;
 
 // Counters: this window, and the session.
 uint32_t g_wComposite = 0, g_wDirect = 0, g_wWrote = 0,
-         g_wNotScene = 0, g_wRebound = 0, g_wNoPair = 0, g_wReissued = 0,
+         g_wRebound = 0, g_wNoPair = 0, g_wReissued = 0,
          g_wNoShader = 0, g_wNoTwin = 0, g_wLearned = 0,
          g_wFrames = 0;
 uint64_t g_sessionWrote = 0;
@@ -710,7 +694,7 @@ int64_t g_stellarCpuStart=0;
 GpuIntervals<64> g_stellarGpu[2];
 
 void resetWindow() {
-    g_wComposite = g_wDirect = g_wWrote = g_wNotScene = 0;
+    g_wComposite = g_wDirect = g_wWrote = 0;
     g_wRebound = g_wNoPair = g_wReissued = g_wNoShader = 0;
     g_wNoTwin = g_wLearned = 0;
     g_wFrames = 0;
@@ -912,7 +896,7 @@ ID3D11DepthStencilState* reissueState(ID3D11DeviceContext* ctx, bool overlay = f
     D3D11_DEPTH_STENCIL_DESC d{};
     d.DepthEnable = TRUE;
     d.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
-    d.DepthFunc = (g_testAlways || overlay) ? D3D11_COMPARISON_ALWAYS : D3D11_COMPARISON_GREATER_EQUAL;
+    d.DepthFunc = overlay ? D3D11_COMPARISON_ALWAYS : D3D11_COMPARISON_GREATER_EQUAL;
     d.StencilEnable = FALSE;
     ID3D11Device* dev = nullptr;
     ctx->GetDevice(&dev);
@@ -949,7 +933,7 @@ DepthShader* depthShaderFor(ID3D11DeviceContext* ctx, uint64_t ps, uint64_t vs, 
             if (named && named == ps) return compiled(ctx, s);
         }
     }
-    if (!g_variants || !vs || slot < 0) return nullptr;
+    if (!vs || slot < 0) return nullptr;
     for (DepthShader& s : g_depthShaders) {
         if (s.slot != static_cast<uint32_t>(slot)) continue;
         bool family = false;
@@ -967,7 +951,7 @@ DepthShader* depthShaderFor(ID3D11DeviceContext* ctx, uint64_t ps, uint64_t vs, 
                             "takes the interface surface from the slot that family's "
                             "reads (%u), so that one stands in. If its interface "
                             "gains depth where nothing is drawn, this is the draw to "
-                            "suspect (advanced.ui_depth_variants = 0 declines it).",
+                            "suspect.",
                             static_cast<unsigned long long>(ps),
                             static_cast<unsigned long long>(vs), s.slot);
         }
@@ -1078,7 +1062,7 @@ SmokeDepth* smokeDepthFor(ID3D11DeviceContext* ctx, int eye, uint32_t w, uint32_
     return &s;
 }
 
-// GENERIC HOLOGRAM/ICON DEPTH COVERAGE (advanced.temporal_aa_hologram_depth).
+// GENERIC HOLOGRAM/ICON DEPTH COVERAGE.
 //
 // kHoloPanel's own coverage above (kHoloDepthHlsl) needs a per-family
 // shader that knows what alpha to clip at, and its glow rarely clears
@@ -1097,12 +1081,12 @@ SmokeDepth* smokeDepthFor(ID3D11DeviceContext* ctx, int eye, uint32_t w, uint32_
 // canopy the pass refuses are holo_families.h's -- the depth pass's eleven,
 // radius-clip and all. The crisp take's family rule reads the same header
 // but its own shorter list (kHoloFamiliesTake, eight); these eleven are
-// this pass's alone. The world-marker list stays fixed, never extended by
-// advanced.temporal_aa_hologram_families -- see holoWorldMarkerList below.
+// this pass's alone. The world-marker list stays fixed, never extended -- see
+// holoWorldMarkerList below.
 uint64_t g_holoFamilies[kMaxHashes];
 uint32_t g_holoFamilyCount = 0;
-float    g_holoFloor = 0.05f;    // advanced.temporal_aa_hologram_floor: display brightness, 0..1
-float    g_holoShare = 0.5f;     // advanced.temporal_aa_hologram_share
+float    g_holoFloor = 0.05f;    // display brightness floor, 0..1
+float    g_holoShare = 0.5f;     // the share of the display brightness the near-light test takes
 FaultBudget g_holoBudget("uiDepthHolo", 5);
 
 // This draw's classification, set by uiDepthHologramOnEyeDraw and read by
@@ -1127,7 +1111,7 @@ constexpr uint32_t kHoloQueryRing = 3;
 // A dark pixel the near-light test covers lands here, not at the
 // element's own depth: 1% inside the cockpit radius, still on the
 // temporal pass's HEAD path (temporal_pass.cpp splits head from world at
-// g_shipMetres, the same advanced.temporal_aa_ship_metres key and value
+// g_shipMetres, the same value
 // as g_cockpitMetres here), with rounding to spare.
 constexpr float kHoloFillerFraction = 0.99f;
 struct HoloScratch {
@@ -1334,7 +1318,7 @@ void holoDiagnosticsConfigure(bool on) {
     g_holoElementQuery = nullptr;
     g_holoPixelSampleCount = g_holoMarkerSampleCount = g_holoNearLightSampleCount = 0;
 }
-bool     g_holoScratchFailedNoted = false, g_holoFirstDrawNoted = false, g_holoCanopyRefusedNoted = false;
+bool     g_holoScratchFailedNoted = false, g_holoFirstDrawNoted = false;
 
 bool holoIsSrgbFormat(DXGI_FORMAT fmt) {
     switch (fmt) {
@@ -2006,7 +1990,7 @@ void holoDepthWindowTick(ID3D11DeviceContext* ctx) {
                     "eye-frames %u, share test skipped %u (no target view), floor on contribution %u "
                     "(no display view), declined %u (%u nothing listed, %u no private copy, %u no projection, "
                     "%u fault); world markers %.2f draws/frame; GPU pixel census off "
-                    "(advanced.temporal_aa_diagnostics = 0; pixel counts unavailable); %s.",
+                    "(pixel counts unavailable); %s.",
                     seconds, g_holoWindowFrames, static_cast<double>(g_holoWindowListed) / frames,
                     g_holoWindowResolved, g_holoWindowNoTarget, g_holoWindowFloorFallback, declined,
                     g_holoWindowDeclinedNotCleared, g_holoWindowDeclinedNoPrivate,
@@ -2113,14 +2097,11 @@ ID3D11DepthStencilState* maskDepthState(ID3D11DeviceContext* ctx) {
     return g_maskDss;
 }
 
-// The alpha floor and the reactive strength, in a constant buffer of
+// The alpha floor and the mask's value, in a constant buffer of
 // EDVR's at b13 (a slot the game's composites leave empty: their pixel
-// stages declare b2 alone).
-// ...one buffer per mask offset in use (g_reissueMaskOffset): the interface
-// proper at the strength, the families that ride a body's path under it.
-ID3D11Buffer* floorBuffer(ID3D11DeviceContext* ctx, int slotIndex, float maskOffset) {
-    const float strength = g_reactive > 0.0f ? (g_reactive + maskOffset > 0.0f ? g_reactive + maskOffset : 0.0f)
-                                             : 0.0f;
+// stages declare b2 alone). The fixed NVIDIA bias is zero, so the mask
+// carries only its low bits.
+ID3D11Buffer* floorBuffer(ID3D11DeviceContext* ctx, int slotIndex) {
     // Three families with different offsets draw in one frame; each keeps
     // its own buffer rather than trading one back and forth.
     slotIndex = slotIndex < 0 ? 0 : (slotIndex > kChromeFloorSlot ? kChromeFloorSlot : slotIndex);
@@ -2131,11 +2112,10 @@ ID3D11Buffer* floorBuffer(ID3D11DeviceContext* ctx, int slotIndex, float maskOff
     // The scanner's chrome writes down to one alpha step (g_floorCbs says
     // why); it is the interface proper otherwise, floating like slot 0.
     const bool chrome = slotIndex == kChromeFloorSlot;
-    const float alphaFloor = chrome ? (g_alphaFloor < 1.0f / 255.0f ? g_alphaFloor : 1.0f / 255.0f) : g_alphaFloor;
-    if (slot.cb && slot.floor == alphaFloor && slot.strength == strength && slot.nearDepth == nearDepth &&
+    const float alphaFloor = chrome ? (kAlphaFloor < 1.0f / 255.0f ? kAlphaFloor : 1.0f / 255.0f) : kAlphaFloor;
+    if (slot.cb && slot.floor == alphaFloor && slot.nearDepth == nearDepth &&
         slot.cockpitMetres == g_cockpitMetres &&
-        slot.depthAt2 == depthAt2 &&
-        (!smoke || (slot.smokeFloor == g_smokeFloor && slot.smokeMax == g_smokeReactive))) {
+        slot.depthAt2 == depthAt2) {
         return slot.cb;
     }
     if (slot.cb) {
@@ -2159,11 +2139,8 @@ ID3D11Buffer* floorBuffer(ID3D11DeviceContext* ctx, int slotIndex, float maskOff
     // over the sky beside it -- "shimmering on just one side".
     // Low two bits distinguish floating UI, attached UI and smoke. The
     // parity still selects motion; the upper six bits carry fixed bias.
-    const int q = static_cast<int>(strength * 63.0f + 0.5f);
-    const int qRide = 4*q+2;
-    const int qFloat = 4*q+1;
-    const float ride = static_cast<float>(qRide) / 255.0f;
-    const float flt = static_cast<float>(qFloat) / 255.0f;
+    const float ride = 2.0f / 255.0f;
+    const float flt = 1.0f / 255.0f;
     // The smoke's slot carries its own floor in z and the mask's strength at
     // full opacity in w (kSmokeDepthHlsl quantises); the others as before.
     // The second float4 is the pass's projection pair (depth = a + b / metres,
@@ -2172,8 +2149,8 @@ ID3D11Buffer* floorBuffer(ID3D11DeviceContext* ctx, int slotIndex, float maskOff
     // known, and the smoke's shader falls back to the raster's z.
     const float projB = 2.0f * (nearDepth - depthAt2);
     const float projA = nearDepth - projB;
-    const float data[8] = {alphaFloor, (slotIndex <= 0 || chrome) ? flt : ride, smoke ? g_smokeFloor : nearDepth,
-                           smoke ? g_smokeReactive : flt, projA, projB, g_cockpitMetres, 0.0f};
+    const float data[8] = {alphaFloor, (slotIndex <= 0 || chrome) ? flt : ride, smoke ? kSmokeFloor : nearDepth,
+                           smoke ? 0.0f : flt, projA, projB, g_cockpitMetres, 0.0f};
     D3D11_BUFFER_DESC bd{};
     bd.ByteWidth = sizeof(data);
     bd.Usage = D3D11_USAGE_IMMUTABLE;
@@ -2185,72 +2162,27 @@ ID3D11Buffer* floorBuffer(ID3D11DeviceContext* ctx, int slotIndex, float maskOff
     if (FAILED(hr)) slot.cb = nullptr;
     slot.floor = alphaFloor;
     slot.cockpitMetres = g_cockpitMetres;
-    slot.strength = strength;
     slot.nearDepth = nearDepth;
-    slot.smokeFloor = g_smokeFloor;
-    slot.smokeMax = g_smokeReactive;
     slot.depthAt2 = depthAt2;
     return slot.cb;
 }
 
-void parseHashes(const std::string& spec, uint64_t* out, uint32_t* count,
-                 uint32_t cap, const char* key) {
-    *count = 0;
-    const char* p = spec.c_str();
-    while (*p && *count < cap) {
-        while (*p == ' ' || *p == ',' || *p == '\t') ++p;
-        if (!*p) break;
-        char* end = nullptr;
-        const uint64_t h = _strtoui64(p, &end, 16);
-        if (end == p || h == 0) {
-            Log::get().note("ui depth: %s holds \"%s\", which is not a list of "
-                            "sixteen-hex-digit hashes; ignored from there on.",
-                            key, p);
-            break;
-        }
-        out[(*count)++] = h;
-        p = end;
-    }
-}
-
-// advanced.temporal_aa_hologram_depth/_families/_floor, read from
-// uiDepthConfigure (g_cockpitMetres is already current by the time it
-// calls this). advanced.ui_depth_exclude applies here too, through the
-// shared uiDepthIsExcluded the classifier below calls.
-// Pure past its string argument (no Config dependency), so the rig can
-// drive it directly: the built-in families plus spec's extras, minus the
-// canopy (kHoloCanopy, above -- refused and named once) and duplicates.
-uint32_t holoBuildFamilyList(const std::string& extraSpec, uint64_t* out, uint32_t cap) {
+// The hologram depth pass's built-in cockpit families (the canopy is not
+// one: it sits in front of the whole sky, and covering it would smear the
+// stars behind it). Pure, so the rig can drive it directly.
+uint32_t holoBuildFamilyList(uint64_t* out, uint32_t cap) {
     uint32_t count = 0;
     if (cap > 0) out[count++] = kHoloPanel;
     for (uint64_t built : kHoloFamiliesBuiltIn) {
         if (count < cap) out[count++] = built;
     }
-    uint64_t extra[kMaxHashes];
-    uint32_t extraCount = 0;
-    parseHashes(extraSpec, extra, &extraCount, kMaxHashes, "advanced.temporal_aa_hologram_families");
-    for (uint32_t i = 0; i < extraCount && count < cap; ++i) {
-        if (extra[i] == kHoloCanopy) {
-            if (!g_holoCanopyRefusedNoted) {
-                g_holoCanopyRefusedNoted = true;
-                Log::get().note("hologram depth: advanced.temporal_aa_hologram_families names the "
-                                "canopy (vs %016llX); refused -- it sits in front of the whole sky, "
-                                "and covering it would smear the stars behind it.",
-                                static_cast<unsigned long long>(kHoloCanopy));
-            }
-            continue;
-        }
-        if (!inList(out, count, extra[i])) out[count++] = extra[i];
-    }
     return count;
 }
 
-// The world-marker list (kHoloWorldMarkers, above): fixed, no Config, no
-// advanced.temporal_aa_hologram_families extras -- a world marker's whole
-// point is that it is not one of the (radius-clipped) cockpit families,
-// so folding user-added extras into it would let a mistaken hash skip the
-// radius test entirely. Pure, like holoBuildFamilyList, so the rig can
-// drive it directly.
+// The world-marker list (kHoloWorldMarkers, above): fixed and separate
+// from the cockpit families -- a world marker's whole point is that it is
+// not one of the (radius-clipped) cockpit families. Pure, like
+// holoBuildFamilyList, so the rig can drive it directly.
 uint32_t holoWorldMarkerList(uint64_t* out, uint32_t cap) {
     uint32_t count = 0;
     for (uint64_t marker : kHoloWorldMarkers) {
@@ -2259,34 +2191,24 @@ uint32_t holoWorldMarkerList(uint64_t* out, uint32_t cap) {
     return count;
 }
 
-void holoDepthConfigure(Config& cfg) {
-    holoDiagnosticsConfigure(cfg.getBool("advanced.temporal_aa_diagnostics", false));
-    const bool on = cfg.getBool("advanced.temporal_aa_hologram_depth", true);
+void holoDepthConfigure() {
+    holoDiagnosticsConfigure(false);   // the GPU pixel census is off in production
+    constexpr bool on = true;
     uint64_t fam[kMaxHashes];
-    const uint32_t famCount = holoBuildFamilyList(
-        cfg.getString("advanced.temporal_aa_hologram_families", ""), fam, kMaxHashes);
+    const uint32_t famCount = holoBuildFamilyList(fam, kMaxHashes);
     uint64_t world[kMaxHashes];
     const uint32_t worldCount = holoWorldMarkerList(world, kMaxHashes);
-    float floor = cfg.getFloat("advanced.temporal_aa_hologram_floor", 0.05f);
-    if (!std::isfinite(floor) || floor < 0.0f) floor = 0.0f;
-    if (floor > 1.0f) floor = 1.0f;
-    float share = cfg.getFloat("advanced.temporal_aa_hologram_share", 0.5f);
-    if (!std::isfinite(share) || share < 0.0f) share = 0.0f;
-    if (share > 1.0f) share = 1.0f;
     const bool changed = on != detail::g_holoDepthOn || famCount != g_holoFamilyCount ||
-                         floor != g_holoFloor || share != g_holoShare ||
                          memcmp(fam, g_holoFamilies, famCount * sizeof(uint64_t)) != 0;
     detail::g_holoDepthOn = on;
     g_holoFamilyCount = famCount;
     memcpy(g_holoFamilies, fam, famCount * sizeof(uint64_t));
-    g_holoFloor = floor;
-    g_holoShare = share;
     if (changed) {
-        Log::get().note("hologram depth: %s -- %u cockpit famil%s, %u world marker%s, "
+        Log::get().note("hologram depth: on -- %u cockpit famil%s, %u world marker%s, "
                         "floor %.3f (display brightness), share %.2f, cockpit radius %.0f m.",
-                        on ? "on" : "off", famCount, famCount == 1 ? "y" : "ies",
+                        famCount, famCount == 1 ? "y" : "ies",
                         worldCount, worldCount == 1 ? "" : "s",
-                        static_cast<double>(floor), static_cast<double>(share),
+                        static_cast<double>(g_holoFloor), static_cast<double>(g_holoShare),
                         static_cast<double>(g_cockpitMetres));
     }
 }
@@ -2332,8 +2254,8 @@ int eyeIndexFor(const void* rtvRes, uint32_t w, uint32_t h, uint32_t fmt) {
 // inflated FSS targets.
 void scaleViewportsForUi(ID3D11DeviceContext* ctx) {
     float sceneNear = 0.0f, sceneFar = 0.0f;
-    if (!temporalPassPlanes(&sceneNear, &sceneFar) || !(g_uiNear > 0.0f)) return;
-    float scale = sceneNear / g_uiNear;
+    if (!temporalPassPlanes(&sceneNear, &sceneFar)) return;
+    float scale = sceneNear / kUiNear;
     if (!(scale > 0.0f)) return;
     if (scale > 1.0f) scale = 1.0f;
     g_savedVpCount = kMaxViewports;
@@ -2355,8 +2277,8 @@ void scaleViewportsForUi(ID3D11DeviceContext* ctx) {
                         "through a viewport depth range of %.4f -- the interface "
                         "projection's near %g m against the scene's %g m -- so its "
                         "reversed-Z value decodes in the scene's encoding "
-                        "(advanced.ui_depth_planes).",
-                        static_cast<double>(scale), static_cast<double>(g_uiNear),
+                        "(the interface projection's planes).",
+                        static_cast<double>(scale), static_cast<double>(kUiNear),
                         static_cast<double>(sceneNear));
     }
 }
@@ -2450,9 +2372,7 @@ int uiDepthSampledSurfaceSlot() {
 
 int uiDepthEyeOfTarget(const void* res, uint32_t w, uint32_t h, uint32_t fmt) {
     if (!res) return -1;
-    int eye = eyeIndexFor(res, w, h, fmt);
-    if (eye >= 0 && g_eyesSwapped) eye = 1 - eye;
-    return eye;
+    return eyeIndexFor(res, w, h, fmt);
 }
 
 // The read-only form (ui_depth.h says who may call which): a known target's
@@ -2462,9 +2382,7 @@ int uiDepthEyeOfTargetReadOnly(const void* res) {
     for (uint32_t i = 0; i < g_frameTargetCount; ++i) {
         const FrameTarget& t = g_frameTargets[i];
         if (t.res == res) {
-            int eye = static_cast<int>(t.eye);
-            if (g_eyesSwapped) eye = 1 - eye;
-            return eye;
+            return static_cast<int>(t.eye);
         }
     }
     return -1;
@@ -2475,9 +2393,7 @@ bool uiDepthIsExcluded(uint64_t vsHash) {
 }
 
 void uiDepthConfigure(Config& cfg) {
-    float cockpit = cfg.getFloat("advanced.temporal_aa_ship_metres", kTemporalShipMetres);
-    if (!std::isfinite(cockpit) || cockpit < 0) cockpit = 0;
-    g_cockpitMetres = cockpit > 100000.0f ? 100000.0f : cockpit;
+    g_cockpitMetres = kTemporalShipMetres;
     // UI and smoke depth are required inputs of every temporal mode.
     const std::string aa = cfg.getString("fix.temporal_aa", "off");
     g_passOn = temporalModeEnabled(aa);
@@ -2485,142 +2401,15 @@ void uiDepthConfigure(Config& cfg) {
     // The legacy fixed bias is NVIDIA-only. Coverage and adaptive history
     // are used by every external, trained engine (NVIDIA's or AMD's).
     g_trained = temporalExternalEngine(aa);
-    // The direct list: the flight HUD built in, the ini's additions after.
+    // The direct list: the flight HUD, then the drives' smoke.
     g_familyCount = 0;
     g_families[g_familyCount++] = kFlightHud;
     g_smokeOn = g_passOn;
-    {
-        float f = cfg.getFloat("advanced.temporal_aa_smoke_floor", 0.08f);
-        if (f < 0.01f) f = 0.01f;
-        if (f > 0.9f) f = 0.9f;
-        float r = cfg.getFloat("advanced.temporal_aa_smoke_reactive", 0.0f);
-        if (r < 0.0f) r = 0.0f;
-        if (r > 1.0f) r = 1.0f;
-        if (f != g_smokeFloor || r != g_smokeReactive) {
-            Log::get().note("ui depth: the smoke's coverage writes depth above %.0f%% opacity and marks the mask %s "
-                            "(advanced.temporal_aa_smoke_floor, advanced.temporal_aa_smoke_reactive).",
-                            static_cast<double>(f) * 100.0,
-                            r > 0.0f ? "up to the strength with its opacity" : "at one quantum, as good as unmarked");
-        }
-        g_smokeFloor = f;
-        g_smokeReactive = r;
-    }
     if (g_smokeOn) g_families[g_familyCount++] = kSmokeVs;   // the drives' smoke, a direct family (kSmokeVs says)
-    uint64_t extra[kMaxHashes];
-    uint32_t extraCount = 0;
-    parseHashes(cfg.getString("advanced.ui_depth_families", ""), extra, &extraCount,
-                kMaxHashes, "advanced.ui_depth_families");
-    for (uint32_t i = 0; i < extraCount && g_familyCount < kMaxHashes; ++i) {
-        if (!inList(g_families, g_familyCount, extra[i])) g_families[g_familyCount++] = extra[i];
-    }
-    // The exclude list: the null-shader mesh built in, the ini's after.
+    // The exclude list: the null-shader mesh.
     g_excludeCount = 0;
     g_exclude[g_excludeCount++] = kNullPsMesh;
-    parseHashes(cfg.getString("advanced.ui_depth_exclude", ""), extra, &extraCount,
-                kMaxHashes, "advanced.ui_depth_exclude");
-    for (uint32_t i = 0; i < extraCount && g_excludeCount < kMaxHashes; ++i) {
-        if (!inList(g_exclude, g_excludeCount, extra[i])) g_exclude[g_excludeCount++] = extra[i];
-    }
-    {
-        // The interface projection's planes: "near, far" in metres.
-        const std::string planes = cfg.getString("advanced.ui_depth_planes", "0.1, 1000");
-        float n = 0.0f, f = 0.0f;
-        char* end = nullptr;
-        n = static_cast<float>(strtod(planes.c_str(), &end));
-        while (end && (*end == ' ' || *end == ',' || *end == '\t')) ++end;
-        if (end && *end) f = static_cast<float>(strtod(end, nullptr));
-        if (n > 0.0f && f > n) {
-            if (n != g_uiNear || f != g_uiFar) {
-                g_uiNear = n;
-                g_uiFar = f;
-                g_scaleNoted = false;
-            }
-        } else if (planes != "0.1, 1000") {
-            Log::get().note("ui depth: advanced.ui_depth_planes = \"%s\" is not "
-                            "\"near, far\" in metres with far beyond near; the "
-                            "interface projection is taken as 0.1..1000 m.",
-                            planes.c_str());
-            g_uiNear = 0.1f;
-            g_uiFar = 1000.0f;
-        }
-    }
-    {
-        float a = cfg.getFloat("advanced.ui_depth_alpha", 0.5f);
-        if (!(a >= 0.0f)) a = 0.0f;
-        if (a > 1.0f) a = 1.0f;
-        g_alphaFloor = a;
-    }
-    {
-        float r = cfg.getFloat("advanced.ui_depth_reactive", 0.0f);
-        if (!(r >= 0.0f)) r = 0.0f;
-        if (r > 1.0f) r = 1.0f;
-        if (r != g_reactive) {
-            const bool was = g_reactive > 0.0f;
-            g_reactive = r;
-            if (r > 0.0f) {
-                Log::get().note("ui depth: fixed NVIDIA UI bias %.2f; adaptive "
-                                "history additionally detects UI changes. At 1, "
-                                "fixed bias prevents stable UI accumulating.",
-                                static_cast<double>(r));
-            } else if (was) {
-                Log::get().note("ui depth: fixed NVIDIA UI bias is zero; motion "
-                                "classification and adaptive UI history remain active.");
-            }
-        }
-    }
-    {
-        float t = cfg.getFloat("advanced.ui_ghost_tolerance", 12.0f);
-        if (!std::isfinite(t)) t = 12.0f;
-        if (t < 0.0f) t = 0.0f;
-        if (t > 64.0f) t = 64.0f;
-        g_ghostTolerance = t;
-    }
-    {
-        float lvl = cfg.getFloat("advanced.corona_smear_level", 64.0f);
-        if (!std::isfinite(lvl)) lvl = 64.0f;
-        if (lvl < 0.0f) lvl = 0.0f;
-        if (lvl > 255.0f) lvl = 255.0f;
-        g_coronaSmearLevel = lvl;
-    }
-    const std::string eyes = cfg.getString("advanced.ui_depth_eyes", "as_is");
-    const bool swapped = eyes == "swapped";
-    if (swapped != g_eyesSwapped) {
-        g_eyesSwapped = swapped;
-        Log::get().note("ui depth: the eye a rebound composite belongs to is %s.",
-                        swapped ? "the REVERSE of its colour target's order in the "
-                                  "frame (advanced.ui_depth_eyes = swapped)"
-                                : "its colour target's order in the frame, first "
-                                  "= left");
-    }
-    const bool menus = cfg.getBool("advanced.ui_depth_menus", true);
-    if (menus != g_menus) {
-        g_menus = menus;
-        Log::get().note("ui depth: interface-projection composites (the menus, the "
-                        "loading screen, the modals) %s.",
-                        menus ? "get the alpha-aware depth pass"
-                              : "are left alone (advanced.ui_depth_menus = 0)");
-    }
-    const bool variants = cfg.getBool("advanced.ui_depth_variants", true);
-    if (variants != g_variants) {
-        g_variants = variants;
-        Log::get().note("ui depth: a pixel shader this build has no transcription "
-                        "for %s.",
-                        variants ? "is drawn by its vertex family's, when that one "
-                                   "reads the slot the surface is in"
-                                 : "is left alone (advanced.ui_depth_variants = 0)");
-    }
-    // Rebuild the private coverage depth state when its test changes.
-    const std::string test = cfg.getString("advanced.ui_depth_test", "as_is");
-    const bool always = test == "always";
-    if (always != g_testAlways) {
-        g_testAlways = always;
-        releaseStates();
-        Log::get().note("ui depth: the depth test at interface draws is %s.",
-                        always ? "ALWAYS (advanced.ui_depth_test = always: the "
-                                 "ordering A/B; the cockpit no longer occludes a panel)"
-                               : "the game's own");
-    }
-    holoDepthConfigure(cfg);
+    holoDepthConfigure();
 
     const bool was = detail::g_uiDepthOn;
     detail::g_uiDepthOn = g_keyOn && g_passOn;
@@ -2633,7 +2422,7 @@ void uiDepthConfigure(Config& cfg) {
                         "famil%s, %u excluded, alpha floor %.2f). It says so again "
                         "when the first frame writes.",
                         g_familyCount, g_familyCount == 1 ? "y" : "ies",
-                        g_excludeCount, static_cast<double>(g_alphaFloor));
+                        g_excludeCount, static_cast<double>(kAlphaFloor));
     } else if (!detail::g_uiDepthOn && was) {
         Log::get().note("ui depth: off%s. The interface draws as the game issues it.",
                         g_keyOn ? " while temporal_aa is off" : "");
@@ -2714,7 +2503,7 @@ bool uiDepthLearnScannerChrome(ID3D11DeviceContext*, uint64_t vs,
                             "while this surface is held its strokes write depth down to one alpha "
                             "step rather than the general floor (%.3f). Said once.",
                             info.a, info.b, info.fmt, g_surfaceCount,
-                            static_cast<unsigned long long>(vs), static_cast<double>(g_alphaFloor));
+                            static_cast<unsigned long long>(vs), static_cast<double>(kAlphaFloor));
         }
         return false;
     }
@@ -2752,11 +2541,9 @@ bool samplesScannerChrome(int surfaceSlot) {
     return false;
 }
 
-float uiDepthReactive() { return detail::g_uiDepthOn && !detail::g_uiDepthStoodDown ? g_reactive : 0.0f; }
+float uiDepthGhostTolerance() { return detail::g_uiDepthOn && !detail::g_uiDepthStoodDown ? kGhostTolerance : 0.0f; }
 
-float uiDepthGhostTolerance() { return detail::g_uiDepthOn && !detail::g_uiDepthStoodDown ? g_ghostTolerance : 0.0f; }
-
-float uiDepthCoronaHold() { return detail::g_uiDepthOn && !detail::g_uiDepthStoodDown ? g_coronaSmearLevel / 255.0f : 0.0f; }
+float uiDepthCoronaHold() { return detail::g_uiDepthOn && !detail::g_uiDepthStoodDown ? kCoronaSmearLevel / 255.0f : 0.0f; }
 
 void uiDepthNoteOffscreenDraw(ID3D11DeviceContext* ctx) {
     if (!detail::g_uiDepthOn || detail::g_uiDepthStoodDown) return;
@@ -2801,7 +2588,6 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx, const HoloDraw& draw) {
     g_rebindEye = -1;
     g_drawEye = -1;
     g_reissueShader = nullptr;
-    g_reissueMaskOffset = 0.0f;   // the interface proper unless the family below says otherwise
     g_reissueMaskSlot = 0;
     if (!detail::g_uiDepthOn || detail::g_uiDepthStoodDown) return false;
     // Cheapest first: no depth target, nothing to write (the post chain's
@@ -2854,7 +2640,7 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx, const HoloDraw& draw) {
         g_coronaPending=exactCorona;
         detail::g_uiDepthMode = Mode::kReissueScene;
         const bool wantLine = g_familyLoggedCount < kMaxFamilyLines;
-        const bool wantMask = true; // motion classification also needed at zero reactivity and with native TAA
+        const bool wantMask = true; // motion classification is needed regardless of any fixed bias
         // Every classified family needs a coverage shader. Unsupported
         // variants are declined, never treated by changing the original draw.
         // The holo material goes the same way since 2026-09-09: it draws
@@ -2894,9 +2680,6 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx, const HoloDraw& draw) {
         // its history is what smooths it.
         g_reissueMaskSlot = h == kFlightHud ? 2 : h == kSmokeVs ? 3 : hud ? 1
                           : samplesScannerChrome(surfaceSlot) ? kChromeFloorSlot : 0;
-        g_reissueMaskOffset = h == kFlightHud ? -0.5f * g_reactive
-                            : h == kSmokeVs ? (1.0f / 255.0f - g_reactive)
-                            : (hud ? -3.0f / 255.0f : 0.0f);
         const uint64_t ph = boundPsHash(ctx);
         DepthShader* shader = depthShaderFor(ctx, ph, h, surfaceSlot);
         // Unknown coverage must not fall back to changing the game's draw.
@@ -2912,8 +2695,7 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx, const HoloDraw& draw) {
         if (shader) {
             ResourceInfo rt;
             if (bindingResolve(bindingGet(BindSlot::Rtv0), &rt) && rt.isTexture2D) {
-                int eye = eyeIndexFor(rt.resource, rt.a, rt.b, rt.fmt);
-                if (eye >= 0 && g_eyesSwapped) eye = 1 - eye;
+                const int eye = eyeIndexFor(rt.resource, rt.a, rt.b, rt.fmt);
                 if (eye >= 0) {
                     g_wantMask = wantMask;
                     g_reissueShader = shader;
@@ -2938,10 +2720,6 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx, const HoloDraw& draw) {
         return true;
     }
     if (!composite) return false;   // a direct family off the scene pair: left alone
-    if (!g_menus) {
-        ++g_wNotScene;
-        return false;
-    }
     // The alpha-aware pass needs a shader for this family's pixel stage,
     // the scene's planes for the encoding, and the pass's depth for the
     // eye when the composite's own is not it.
@@ -2979,8 +2757,7 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx, const HoloDraw& draw) {
                               "something that is not a 2D colour target; left alone");
             return false;
         }
-        int eye = eyeIndexFor(rt.resource, rt.a, rt.b, rt.fmt);
-        if (eye >= 0 && g_eyesSwapped) eye = 1 - eye;
+        const int eye = eyeIndexFor(rt.resource, rt.a, rt.b, rt.fmt);
         ID3D11Texture2D* tex = nullptr;
         uint32_t fmt = 0;
         if (eye < 0 || !depthProbeSceneDepthFormat(rt.a, rt.b, eye, &tex, &fmt)) {
@@ -3001,9 +2778,7 @@ bool uiDepthOnEyeDraw(ID3D11DeviceContext* ctx, const HoloDraw& draw) {
     } else {
         ResourceInfo rt;
         if (bindingResolve(bindingGet(BindSlot::Rtv0), &rt) && rt.isTexture2D) {
-            int eye = eyeIndexFor(rt.resource, rt.a, rt.b, rt.fmt);
-            if (eye >= 0 && g_eyesSwapped) eye = 1 - eye;
-            g_drawEye = eye;
+            g_drawEye = eyeIndexFor(rt.resource, rt.a, rt.b, rt.fmt);
             g_rebindW = rt.a;
             g_rebindH = rt.b;
         }
@@ -3060,7 +2835,6 @@ bool uiDepthPlanetBegin(ID3D11DeviceContext* ctx) {
         if(depthProbeSceneDepthFormat(td.Width,td.Height,i,&candidate,&format) && candidate==scene.Get()){eye=i;break;}
     }
     if(eye<0)return false;
-    if(g_eyesSwapped)eye=1-eye;
     if(!g_planetCoverage.begin(ctx,scene.Get(),g_holoMotion[eye],g_holoDraw,solar))return false;
     if(solar) {
         if(!g_solarNoted) { g_solarNoted=true; Log::get().note("solar motion: exact surface coverage and affine approach motion active; stable art surface identity, original depth visibility, no UI marking or distance cutoff."); }
@@ -3116,7 +2890,7 @@ bool uiDepthReissueBegin(ID3D11DeviceContext* ctx) {
         // occluder: keep the seeded DSV's GEQUAL test, but never write it.
         const bool orbitalDepth = shader==&g_depthShaders[7];
         ID3D11DepthStencilState* dss = depthPass ? (orbitalDepth ? maskDepthState(ctx) : reissueState(ctx, overlay)) : maskDepthState(ctx);
-        ID3D11Buffer* cb = floorBuffer(ctx, g_reissueMaskSlot, g_reissueMaskOffset);
+        ID3D11Buffer* cb = floorBuffer(ctx, g_reissueMaskSlot);
         if (!dss || !cb) {
             ++g_wNoTwin;
             return;
@@ -3357,11 +3131,10 @@ bool uiDepthReissueBegin(ID3D11DeviceContext* ctx) {
             if (!g_maskNotedOnce) {
                 g_maskNotedOnce = true;
                 Log::get().note("ui depth: UI motion coverage is being marked at "
-                                "%ux%u for eye %d; fixed NVIDIA bias %.2f. "
-                                "Floating strokes keep the camera path even at zero "
-                                "fixed bias; the temporal pass detects UI changes separately.",
-                                g_rebindW, g_rebindH, g_drawEye,
-                                static_cast<double>(g_reactive));
+                                "%ux%u for eye %d; fixed NVIDIA bias is zero. "
+                                "Floating strokes keep the camera path; the temporal "
+                                "pass detects UI changes separately.",
+                                g_rebindW, g_rebindH, g_drawEye);
             }
         }
         ctx->OMSetDepthStencilState(dss, 0);
@@ -3468,7 +3241,7 @@ bool uiDepthHologramOnEyeDraw(ID3D11DeviceContext* ctx) {
     const uint64_t h = boundVsHash(ctx);
     if (!h || uiDepthIsExcluded(h)) return false;
     const bool worldMarker = inList(kHoloWorldMarkers, kHoloWorldMarkerCount, h);
-    if (!worldMarker && !inList(g_holoFamilies, g_holoFamilyCount, h)) return false;
+    if (!worldMarker && !inList(g_holoFamilies, g_holoFamilyCount, h)) return false;   // built-in families only
     // A bound depth-stencil must still be the scene's. None bound is
     // accepted: the icon core and the corona draw with depth off, and
     // neither pass below reads the game's depth.
@@ -3476,8 +3249,7 @@ bool uiDepthHologramOnEyeDraw(ID3D11DeviceContext* ctx) {
     if (dsv && !dsvIsSceneDepth(dsv)) return false;
     ResourceInfo rt;
     if (!bindingResolve(bindingGet(BindSlot::Rtv0), &rt) || !rt.isTexture2D) return false;
-    int eye = eyeIndexFor(rt.resource, rt.a, rt.b, rt.fmt);
-    if (eye >= 0 && g_eyesSwapped) eye = 1 - eye;
+    const int eye = eyeIndexFor(rt.resource, rt.a, rt.b, rt.fmt);
     if (eye < 0) return false;
     g_holoEye = eye;
     g_holoW = rt.a;
@@ -4081,7 +3853,7 @@ bool uiDepthCoverageMask(uint32_t w, uint32_t h, int eye, ID3D11Texture2D** tex)
             g_maskSizeNoted = true;
             Log::get().note("ui depth: the reactive mask is %ux%u but the pass treats "
                             "%ux%u, so it is not handed to NVIDIA. The interface's "
-                            "depth is unaffected; this is the cull guard's crop or a "
+                            "depth is unaffected; this is a "
                             "size change.",
                             m.w, m.h, w, h);
         }
@@ -4089,12 +3861,6 @@ bool uiDepthCoverageMask(uint32_t w, uint32_t h, int eye, ID3D11Texture2D** tex)
     }
     *tex = m.tex;
     return true;
-}
-
-bool uiDepthReactiveMask(uint32_t w, uint32_t h, int eye, ID3D11Texture2D** tex) {
-    if (!tex) return false;
-    *tex = nullptr;
-    return g_reactive > 0.0f && uiDepthCoverageMask(w, h, eye, tex);
 }
 
 bool uiDepthSmokeDepth(uint32_t w, uint32_t h, int eye, ID3D11ShaderResourceView** srv) {
@@ -4294,14 +4060,14 @@ void uiDepthFrameBoundary(ID3D11DeviceContext* ctx) {
                     gpu.samples?gpu.ms*1000.0/gpu.samples:0.0,
                     gpu.samples?gpu.ms/gpu.samples*double(s.calls)/g_wFrames:0.0,s.calls,g_wFrames);
         }
-        if (g_wWrote || g_wNotScene || g_wRebound || g_wNoPair || g_wNoShader ||
+        if (g_wWrote || g_wRebound || g_wNoPair || g_wNoShader ||
             g_wNoTwin || g_wLearned || g_evictions) {
             Log::get().note("ui depth totals: %.1f interface draws a frame wrote depth "
                             "(%.1f composites, %.1f direct; %.1f through the alpha-aware "
                             "pass, %.1f of those bound to the pass's depth); %u surfaces "
                             "known, %u learned this window, %u forgotten; left alone: "
                             "%.1f a frame with no depth shader for their family, %.1f "
-                            "with no pair or planes, %.1f by the menus switch, %u with no state; %llu written "
+                            "with no pair or planes, %u with no state; %llu written "
                             "this session.",
                             static_cast<double>(g_wWrote) / g_wFrames,
                             static_cast<double>(g_wComposite) / g_wFrames,
@@ -4311,7 +4077,6 @@ void uiDepthFrameBoundary(ID3D11DeviceContext* ctx) {
                             g_surfaceCount, g_wLearned, g_evictions,
                             static_cast<double>(g_wNoShader) / g_wFrames,
                             static_cast<double>(g_wNoPair) / g_wFrames,
-                            static_cast<double>(g_wNotScene) / g_wFrames,
                             g_wNoTwin,
                             static_cast<unsigned long long>(g_sessionWrote));
         }

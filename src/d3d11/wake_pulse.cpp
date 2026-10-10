@@ -322,33 +322,12 @@ void wakePulseConfigure(Config& cfg) {
         Log::get().note("wake_pulse \"%s\" is not stock or off; running "
                         "stock.", m.c_str());
     }
-    // Comma-separated, and empty means the measured set. A list because the
-    // count is tessellation and every panel size has its own.
-    const std::string spec = cfg.getString("advanced.wake_pulse_indices", "");
-    uint32_t parsed[kMaxIndices];
-    uint32_t n = 0;
-    bool ok = true;
-    for (const char* p = spec.c_str(); *p && ok;) {
-        while (*p == ' ' || *p == ',' || *p == '	') ++p;
-        if (!*p) break;
-        char* end = nullptr;
-        const unsigned long v = strtoul(p, &end, 10);
-        if (end == p || v == 0 || v > 1000000 || n == kMaxIndices) { ok = false; break; }
-        parsed[n++] = static_cast<uint32_t>(v);
-        p = end;
-    }
-    if (!spec.empty() && (!ok || n == 0)) {
-        Log::get().note("wake_pulse_indices \"%s\" is not up to %u whole "
-                        "numbers separated by commas; the measured set is "
-                        "used instead.", spec.c_str(), kMaxIndices);
-    } else if (n) {
-        for (uint32_t i = 0; i < n; ++i) g_indices[i] = parsed[i];
-        g_indexCount = n;
-    } else {
-        g_indices[0] = kIndices;
-        g_indices[1] = kIndicesAlt;
-        g_indexCount = 2;
-    }
+    // The measured set. The count is tessellation and every panel size has
+    // its own; the ring recogniser below adopts the right one for a panel
+    // this set does not cover.
+    g_indices[0] = kIndices;
+    g_indices[1] = kIndicesAlt;
+    g_indexCount = 2;
 
     if (was != detail::g_wakePulseOff) {
         Log::get().note(
@@ -360,8 +339,7 @@ void wakePulseConfigure(Config& cfg) {
             "on the frames the flash is on, and leaves the rest of the panel "
             "alone. That count is tessellation and depends on the panel's "
             "pixel size, so if the count below stays at zero this build "
-            "will name the candidates it saw and one of them wants "
-            "setting in advanced.wake_pulse_indices.",
+            "will name the candidates it saw.",
             detail::g_wakePulseOff ? "off" : "stock", g_indexCount);
     }
 }
@@ -527,9 +505,7 @@ void wakePulseReport() {
             "so nothing "
             "is being held off. The count is TESSELLATION -- the GUI "
             "subdivides its curves by pixel size, so a smaller panel needs "
-            "fewer -- and %u is right for a 2440x1996 panel. %s%s Set "
-            "advanced.wake_pulse_indices to the one that stops the flashing. "
-            "Said once.",
+            "fewer -- and %u is right for a 2440x1996 panel. %s%s Said once.",
             g_panelW, g_panelH, static_cast<unsigned long long>(g_surfaceSeen),
             kKind, kIndices,
             found ? "Drawn in only some frames here, so a pulse: " : "",

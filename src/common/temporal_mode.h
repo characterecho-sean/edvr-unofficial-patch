@@ -16,28 +16,28 @@ inline bool temporalModeEnabled(const std::string& mode) {
 }
 
 struct TemporalPresetSelection {
-    unsigned full = 11, fovea = 11;
+    unsigned full = 11;
     bool known = true;
 };
 // Shared model names; feature creation still applies the backend's DLAA guard.
 inline TemporalPresetSelection temporalPresetFor(const std::string& model) {
-    if (_stricmp(model.c_str(), "k") == 0 || _stricmp(model.c_str(), "quality") == 0)
-        return {11, 11, true};
-    if (_stricmp(model.c_str(), "steady") == 0) return {11, 12, true};
+    if (_stricmp(model.c_str(), "k") == 0 || _stricmp(model.c_str(), "quality") == 0 ||
+        _stricmp(model.c_str(), "steady") == 0)
+        return {11, true};
     if (_stricmp(model.c_str(), "auto") == 0 || _stricmp(model.c_str(), "default") == 0)
-        return {0, 0, true};
+        return {0, true};
     if (_stricmp(model.c_str(), "j") == 0 || _stricmp(model.c_str(), "responsive") == 0)
-        return {10, 10, true};
-    if (_stricmp(model.c_str(), "l") == 0) return {12, 12, true};
-    if (_stricmp(model.c_str(), "m") == 0) return {13, 13, true};
-    return {11, 11, model.empty()};
+        return {10, true};
+    if (_stricmp(model.c_str(), "l") == 0) return {12, true};
+    if (_stricmp(model.c_str(), "m") == 0) return {13, true};
+    return {11, model.empty()};
 }
 
 inline constexpr float kTemporalShipMetres = 10.0f;
 
 // ---- The ship split on foot ----------------------------------------------------------------------------------------------
 // The temporal pass tells what moves with the head from what moves with the camera by DISTANCE: a pixel nearer than the
-// split (advanced.temporal_aa_ship_metres, kTemporalShipMetres) is the ship's -- the cockpit, the hull -- and takes the
+// split (kTemporalShipMetres) is the ship's -- the cockpit, the hull -- and takes the
 // head's delta alone; every pixel farther, and the far plane, takes the camera's own (the head and the ship together, the
 // game's view rows). That is right in a cockpit, where the near things ride with the head. On foot there is no ship: in
 // Explorer Cam, the one on-foot mode Elite draws in stereo through the eye path, the camera walks with the commander and the
@@ -105,7 +105,7 @@ inline const char* temporalFootWhyName(TemporalFootWhy w) {
     return "?";
 }
 
-// The split the shader is given. A split of zero is the world path OFF (advanced.temporal_aa_ship_metres = 0), and on foot it
+// The split the shader is given. A split of zero is the world path OFF (a configured split of 0), and on foot it
 // stays off: the mode never turns on what the player turned off.
 inline float temporalShipSplitMetres(float configured, bool onFoot) {
     return onFoot && configured > 0.0f ? kTemporalOnFootSplitMetres : configured;

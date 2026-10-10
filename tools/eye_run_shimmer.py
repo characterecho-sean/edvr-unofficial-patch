@@ -2,7 +2,7 @@
 """How much a region of the TREATED picture changes from frame to frame -- the shimmer, and any flash:
 python eye_run_shimmer.py eye_HHMMSS_T00.bmp ... --centre X Y [--region NAME X0 Y0 X1 Y1 ...] [--annulus NAME R0 R1 ...]
 
-Reads the eye run's treated crops (advanced.eye_run_treated; the raw C00.. work the same way), removes
+Reads the eye run's treated crops (the T00.. files of hotkey.dump_eyes; the raw C00.. work the same way), removes
 the picture's own sub-pixel shift between consecutive frames (the head, by phase correlation on a window
 about the centre) and prints, per consecutive pair and per region: the mean absolute change of the
 pixels, as a fraction of the region's contrast (its standard deviation in the first frame). A steady

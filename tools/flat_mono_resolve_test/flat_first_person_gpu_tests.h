@@ -3,7 +3,12 @@
 // the render: xy previous minus current position in render pixels, z depth, w 1 valid / 2 new / 0 uncovered), and the game's depth
 // texture carries a first-person stencil bit (0x10). FlatMonoResolveFrame::firstPersonMotion and firstPersonStencil hand both to the
 // prep; where the bit is set the pixel takes the map's motion if the map is valid and REJECTS its history if not, and never takes the
-// engine or camera term; every other pixel is treated exactly as without the inputs.
+// engine or camera term; every other pixel is treated exactly as without the inputs. The bit is the game's characters' as well as the
+// weapon's (a walking NPC's silhouette and the commander's own body read 0x10 in the eye depth stencil, 2026-10-08), so a stencil pixel is
+// first-person only where the map covers it (w 1 or 2) or the surface is within first-person reach (raw depth >= kFirstPersonReachDepth,
+// .075); an uncovered stencil pixel beyond reach is a world character and is treated exactly as without the inputs (the engine record if
+// it is joined, else the camera term), which the World cells pin, and the near uncovered arm and the depth boundary (just below, at, just
+// above) pin the other side.
 //
 // What the scenario pins, on the shipped prep and then, as MUTATION CHECKS, on the prep with one rule flipped at a time (the
 // mutated source is compiled here, handed to the resolver through flatMonoResolveTestPrepBytecode, and the scenario must FAIL; a
@@ -60,7 +65,9 @@ struct Half4 { uint16_t x = 0, y = 0, z = 0, w = 0; };
 inline Half4 mapOf(float dx, float dy, float z, float w = 1.0f) { return Half4{toHalf(dx), toHalf(dy), toHalf(z), toHalf(w)}; }
 
 // What a fixture texel is, and so what the prep must make of it.
-enum class Cat : uint8_t { Plain, OtherBits, Valid, WrongW, Depth, Outside, NonFinite };
+// World: bit 0x10, the map uncovered (w 0), beyond first-person reach: a character, treated as without the inputs. NearUncovered: bit 0x10,
+// the map uncovered, within reach: a weapon or arm the matcher missed, rejected with no motion.
+enum class Cat : uint8_t { Plain, OtherBits, Valid, WrongW, Depth, Outside, NonFinite, World, NearUncovered };
 struct Spec {
     uint32_t stencil = 0x01;
     float depth = .01f;
@@ -70,6 +77,11 @@ struct Spec {
 };
 constexpr UINT W = 16, H = 16;
 constexpr float zOk = .01f;   // the fixture's ordinary depth
+// First-person reach (kFirstPersonReachDepth = .075): a weapon-like depth inside it (the measured weapon spans .1134 to .1948), and the
+// boundary's three sides. An uncovered stencil texel is world below .075 in depth and first-person at and above it.
+constexpr float zNear = .15f, zBelowReach = .0749f, zAtReach = .075f, zAboveReach = .0751f;
+// The cells the NPC checks read in the bare run: a plain world character and a joined one beside it (see judge).
+constexpr UINT kWorldPlainX = 3, kWorldJoinedX = 4, kWorldRowY = 12;
 
 inline std::vector<Spec> makeSpecs(std::vector<std::pair<UINT, UINT>>* joined) {
     std::vector<Spec> s(W * H);
@@ -86,6 +98,10 @@ inline std::vector<Spec> makeSpecs(std::vector<std::pair<UINT, UINT>>* joined) {
         Spec& t = at(x, y); t.stencil = 0x10; t.depth = depth; t.map = map; t.cat = cat;
     };
     auto other = [&](UINT x, UINT y, uint32_t stencil) { at(x, y).stencil = stencil; at(x, y).cat = Cat::OtherBits; };
+    // A stencil texel the map does not cover (w 0), with a map beneath that still looks valid and moves seven pixels, as every plain texel's does.
+    auto uncovered = [&](UINT x, UINT y, float depth, Cat cat) {
+        Spec& t = at(x, y); t.stencil = 0x10; t.depth = depth; t.map = mapOf(7, 7, depth, 0.0f); t.cat = cat;
+    };
     // The attached block: bit 0x10, a valid map of (0.5, 0.25).
     for (UINT y = 2; y <= 13; ++y)
         for (UINT x = 2; x <= 13; ++x) valid(x, y, .5f, .25f, 0x10);
@@ -95,7 +111,7 @@ inline std::vector<Spec> makeSpecs(std::vector<std::pair<UINT, UINT>>* joined) {
     valid(8, 5, 1.5f, -.75f, 0x10);         // and this one holds a joined rig record: its engine motion must not be used
     if (joined) joined->push_back({8, 5});
     rejected(5, 6, mapOf(2.5f, -1.25f, zOk, 2.0f), Cat::WrongW);                  // new
-    rejected(6, 6, mapOf(2.5f, -1.25f, zOk, 0.0f), Cat::WrongW);                  // uncovered
+    uncovered(6, 6, zOk, Cat::World);                                             // uncovered, beyond reach: a character, not a rejection
     rejected(7, 6, mapOf(.5f, .25f, zOk * 1.01f), Cat::Depth);                    // one percent too far
     rejected(8, 6, mapOf(.5f, .25f, .0099f), Cat::Depth);                         // and one percent too near
     rejected(5, 7, mapOf(-8, 0, zOk), Cat::Outside);                              // previous x = 5.5 - 8
@@ -117,6 +133,22 @@ inline std::vector<Spec> makeSpecs(std::vector<std::pair<UINT, UINT>>* joined) {
     rejected(6, 11, Half4{toHalf(.5f), toHalf(.25f), 0x211E, toHalf(1)}, Cat::Depth);
     // Stencil values around the bit that are not it: nothing attaches, whatever the map beneath says.
     other(9, 9, 0x0F); other(10, 9, 0x20); other(11, 9, 0x08); other(12, 9, 0xEF); other(9, 10, 0x40); other(10, 10, 0x80); other(11, 10, 0x00);
+    // Characters carry the bit too. A walking NPC: stencil 0x10, nothing in the weapon map (w 0, though the texel beneath holds a plausible
+    // motion), at the fixture's ordinary depth, which is far beyond first-person reach. It must be treated exactly as without the inputs: a
+    // plain one takes the camera term, one that holds a joined rig record takes the record's exact motion. Neither may be refused.
+    uncovered(kWorldPlainX, kWorldRowY, zOk, Cat::World);
+    uncovered(kWorldJoinedX, kWorldRowY, zOk, Cat::World);
+    if (joined) joined->push_back({kWorldJoinedX, kWorldRowY});
+    // An arm or weapon the matcher missed, inside the block of the real weapon: uncovered but within reach, so still first-person and
+    // rejected with no motion, never the camera term. Then the reach boundary, on its three sides: just below the bound is a character,
+    // at it and just above it first-person.
+    uncovered(5, kWorldRowY, zNear, Cat::NearUncovered);
+    uncovered(6, kWorldRowY, zBelowReach, Cat::World);
+    uncovered(7, kWorldRowY, zAtReach, Cat::NearUncovered);
+    uncovered(8, kWorldRowY, zAboveReach, Cat::NearUncovered);
+    // A silhouette of characters outside the weapon block, one of them joined.
+    for (UINT x = 1; x <= 6; ++x) uncovered(x, 14, zOk, Cat::World);
+    if (joined) joined->push_back({2, 14});
     return s;
 }
 
@@ -214,6 +246,7 @@ inline void judge(const std::vector<Spec>& specs, const Seen& got, const Seen* b
     check(sized, what);
     if (!sized) return;
     bool okReset = true, okValid = true, okWrongW = true, okDepth = true, okOutside = true, okNonFinite = true, okOther = true, okPlain = true;
+    bool okWorld = true, okWorldLive = true, okNear = true;
     for (size_t t = 0; t < specs.size(); ++t) {
         const Spec& s = specs[t];
         const float mx = got.motion[2 * t], my = got.motion[2 * t + 1];
@@ -230,7 +263,22 @@ inline void judge(const std::vector<Spec>& specs, const Seen& got, const Seen* b
                 if (!same) (s.cat == Cat::Plain ? okPlain : okOther) = false;
                 break;
             }
+            case Cat::World: {
+                // Exactly the bare run's pixel, and the bare run's pixel is live (not rejected), so equality is not two rejections.
+                const bool same = rej == (bare->mask[t] != 0) && mx == bare->motion[2 * t] && my == bare->motion[2 * t + 1];
+                if (!same) okWorld = false;
+                if (bare->mask[t] != 0) okWorldLive = false;
+                break;
+            }
+            case Cat::NearUncovered: if (!rejectedNoMotion) okNear = false; break;
         }
+    }
+    // The joined character must differ from the plain one in the bare run, or "the engine record if joined" is not what the equality tested:
+    // the record's exact motion is not the camera term.
+    bool joinedIsRecord = true;
+    if (!reset) {
+        const size_t plain = size_t(kWorldRowY) * W + kWorldPlainX, joinedCell = size_t(kWorldRowY) * W + kWorldJoinedX;
+        joinedIsRecord = bare->motion[2 * plain] != bare->motion[2 * joinedCell] || bare->motion[2 * plain + 1] != bare->motion[2 * joinedCell + 1];
     }
     auto report = [&](bool ok, const char* text) { std::snprintf(what, sizeof(what), "first person (%s): %s", tag, text); check(ok, what); };
     if (reset) {
@@ -238,7 +286,11 @@ inline void judge(const std::vector<Spec>& specs, const Seen& got, const Seen* b
         return;
     }
     report(okValid, "an attached pixel with a valid map takes the map's motion exactly and is not rejected (bits beside 0x10, the frame's edge, both depths, a joined engine record)");
-    report(okWrongW, "a map texel whose w is not 1 (new, uncovered) rejects the attached pixel, with no motion");
+    report(okWrongW, "a map texel whose w is new (2) rejects the attached pixel, with no motion, at any depth: the matcher saw a weapon mesh there");
+    report(okWorld, "a stencil-0x10 pixel the map does not cover (w 0) beyond first-person reach is a world character: it equals a run without the inputs exactly, the camera term, or a joined record's exact motion, although the map beneath it holds motion");
+    report(okWorldLive, "...and in that run it is not refused, so the equality is not two rejections");
+    report(joinedIsRecord, "...and the joined character's motion in that run is the record's, not the camera term");
+    report(okNear, "a stencil-0x10 pixel the map does not cover (w 0) within first-person reach (a weapon or arm the matcher missed), and at and just above the bound, is rejected with no motion, never the camera term");
     report(okDepth, "a map depth that disagrees beyond max(|depth| * 0.0005, 3e-8) rejects it, above and below, at two depths");
     report(okOutside, "a previous position outside [0, size] rejects it, on every side, a quarter pixel past the edge included");
     report(okNonFinite, "a non-finite map texel rejects it");
@@ -260,6 +312,11 @@ inline void taaScenario(Fixture& fx) {
     for (UINT y = 4; y <= 11; ++y)
         for (UINT x = 4; x <= 11; ++x) { Spec& t = specs[y * W + x]; t.stencil = 0x10; t.map = mapOf(0, 0, .01f); }
     specs[6 * W + 6].map = mapOf(0, 0, .01f, 2.0f);   // a new mesh: rejected
+    // A character the map does not cover (w 0), beyond first-person reach: the world path, so it reaches its history like any world pixel
+    // ((12,5) is odd parity, current 192; (12,6) even, current 64). An arm the map does not cover within reach (raw depth .15): no history,
+    // the current colour ((13,7) even, 64; (13,8) odd, 192).
+    for (UINT y : {5u, 6u}) { Spec& t = specs[y * W + 12]; t.stencil = 0x10; t.map = mapOf(0, 0, .01f, 0.0f); }
+    for (UINT y : {7u, 8u}) { Spec& t = specs[y * W + 13]; t.stencil = 0x10; t.depth = zNear; t.map = mapOf(0, 0, zNear, 0.0f); }
     fx.specs = specs; fx.upload();
     auto frame = fx.baseFrame(FlatMonoResolveMode::Taa);
     frame.firstPersonMotion = fx.mapView.Get(); frame.firstPersonStencil = fx.stencilView.Get();
@@ -275,9 +332,15 @@ inline void taaScenario(Fixture& fx) {
     ComPtr<ID3D11Texture2D> outTexture; if (resource) resource.As(&outTexture);
     auto red = [&](UINT x, UINT y) { uint32_t v = 0; if (!outTexture || !readPixel(fx.context, outTexture.Get(), &v, 4, x, y)) return -1; return int(v & 0xff); };
     const int valid64 = red(5, 5), valid192 = red(5, 6), rejected64 = red(6, 6), attachedEngine = red(8, 5), unattached = red(1, 1);
+    const int npc192 = red(12, 5), npc64 = red(12, 6), arm64 = red(13, 7), arm192 = red(13, 8);
     if (!mutationFailures)
         std::printf("flat mono resolve: first-person TAA: attached valid %d and %d (history weighted: ~122 and ~134; current: 64 and 192), attached joined %d, "
-                    "attached rejected %d (current: 64), unattached %d\n", valid64, valid192, attachedEngine, rejected64, unattached);
+                    "attached rejected %d (current: 64), unattached %d, uncovered beyond reach (character) %d and %d, uncovered within reach (arm) %d and %d\n",
+                    valid64, valid192, attachedEngine, rejected64, unattached, npc64, npc192, arm64, arm192);
+    check(npc64 >= 118 && npc64 <= 126 && npc192 >= 130 && npc192 <= 138,
+          "first person (TAA): a stencil pixel the map does not cover, beyond reach (a character), reaches its history through the camera term (122 and 134, not the current 64 and 192)");
+    check(arm64 >= 63 && arm64 <= 65 && arm192 >= 191 && arm192 <= 193,
+          "first person (TAA): a stencil pixel the map does not cover within reach (an arm) takes the current colour exactly, no history");
     // (8, 5) is the joined pixel and sits on an odd parity: its current colour is 192.
     check(valid64 >= 118 && valid64 <= 126 && valid192 >= 130 && valid192 <= 138 && attachedEngine >= 130 && attachedEngine <= 138,
           "first person (TAA): an attached pixel with a valid map reaches its history: expected depth is the pixel's own depth (122 and 134, not the current 64 and 192)");
@@ -372,6 +435,15 @@ inline void mutationChecks(Fixture& fx) {
          "bool attached=route.z!=0 && (FirstPersonStencil.Load(int3(q,0)).y&16)!=0;",
          "bool attached=route.z!=0 && (FirstPersonStencil.Load(int3(q,0)).y&16)!=0 && FirstPersonMotion.Load(int3(q,0)).w==1;", nullptr},
         {"the expected depth is not written for a first-person pixel", "expected=valid?depth:0;", "expected=0;", nullptr},
+        // The character rule (an uncovered stencil pixel beyond reach is a world pixel): every side of it flipped once.
+        {"every stencil-0x10 pixel is first-person again (the character rule removed)",
+         "if(attached && FirstPersonMotion.Load(int3(q,0)).w==0 && depth<kFirstPersonReachDepth)attached=false;", "", nullptr},
+        {"an uncovered stencil pixel is always a character (no reach)", " && depth<kFirstPersonReachDepth)attached=false;", ")attached=false;", nullptr},
+        {"an uncovered stencil pixel at the bound is a character (the test is inclusive)", "depth<kFirstPersonReachDepth", "depth<=kFirstPersonReachDepth", nullptr},
+        {"the reach bound is 1% nearer", "kFirstPersonReachDepth=.075;", "kFirstPersonReachDepth=.07425;", nullptr},
+        {"the reach bound is 1% farther", "kFirstPersonReachDepth=.075;", "kFirstPersonReachDepth=.07575;", nullptr},
+        {"a new (w 2) texel counts as uncovered", "FirstPersonMotion.Load(int3(q,0)).w==0", "FirstPersonMotion.Load(int3(q,0)).w!=1", nullptr},
+        {"every texel counts as uncovered (coverage ignored)", "FirstPersonMotion.Load(int3(q,0)).w==0", "true", nullptr},
         // Only a moving camera tells this one from the map alone: with a still camera the camera term it adds is zero.
         {"an attached pixel with a valid map adds the camera term to it", "motion=valid?m.xy:0; reject=valid?0:1;",
          "motion=valid?m.xy:0; { float4 cb; if(valid && cameraBefore(rawUv,depth,cb)) motion+=(cb.xy/cb.w*float2(.5,-.5)+.5-rawUv)*float2(size.xy); } reject=valid?0:1;", nullptr},

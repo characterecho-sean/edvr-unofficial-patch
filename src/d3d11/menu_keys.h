@@ -250,6 +250,15 @@ typedef int (*MenuMeasureFn)(const char* utf8, void* ctx);
 
 struct MenuFooterInput {
     bool        editing;
+    // A hotkey row is waiting for its input (hotkey_capture.h): the legend says
+    // what to press, what cancels and whether Delete may clear this one (not the
+    // menu key).
+    bool        capturing;
+    bool        canClear;
+    // What the Hotkeys page has to say about the row just edited or highlighted, a
+    // refusal, a warning or a lock; the second line of the footer, ahead of the
+    // pending-restart count and below the keys-shared fault. Cut with "..." to fit.
+    const char* note;
     bool        statusPage;
     const char* pageName;
     bool        privateWanted;   // menu.keyboard = private

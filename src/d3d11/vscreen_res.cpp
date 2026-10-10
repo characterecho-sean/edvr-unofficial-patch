@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <atomic>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -81,6 +82,8 @@ struct Site {
 Site g_sites[kMaxSites];
 size_t g_count = 0;
 bool g_applied = false;
+// The width written, for the panel patch's size budget (vscreenModeAppliedWidth): 0 while nothing is.
+std::atomic<uint32_t> g_appliedW{0};
 // What the game had before we touched it, so revert restores what was actually
 // there rather than a number this file assumed.
 uint32_t g_origW = 0, g_origH = 0;
@@ -297,6 +300,7 @@ bool applyVScreenModeResolution(uint32_t width, uint32_t height) {
     g_origW = srcW;
     g_origH = srcH;
     g_applied = true;
+    g_appliedW.store(width, std::memory_order_release);
     Log::get().note("vScreen resolution: %ux%u -> %ux%u at %zu site(s). This writes to game "
                     "CODE -- to %zu pairs of numbers and nothing else. It reverts when the "
                     "game closes.",
@@ -313,8 +317,11 @@ void revertVScreenModeResolution() {
     Log::get().note("vScreen resolution reverted to %ux%u at %zu site(s)",
                     g_origW, g_origH, g_count);
     g_applied = false;
+    g_appliedW.store(0, std::memory_order_release);
     g_count = 0;
 }
+
+uint32_t vscreenModeAppliedWidth() { return g_appliedW.load(std::memory_order_acquire); }
 
 // --- "auto": what each eye actually shows, from what the runtime rendered last time ---
 //
@@ -350,7 +357,7 @@ namespace {
 // The route's conditions as the configuration states them -- the same three the world
 // route needs at run time, read from the ini the way each owner reads it, because at
 // launch (and in the menu, for the next one) no owner has run yet:
-//   * experimental.temporal_aa_on_foot_world: vr_world_route.cpp's boundary, default auto
+//   * the on-foot world route: always on (vr_world_route.cpp's boundary)
 //   * (the curved screen is not a condition: the route re-issues a curved screen through
 //     the same strip the game's draw is substituted with, panel_curve.h panelCurveReissue)
 //   * the UI layer: ui_layer.cpp's uiLayerConfigure -- fix.ui_quality (default 100), a
@@ -367,16 +374,13 @@ namespace {
 vscreenfit::RouteFacts routeFactsFromConfig(Config& cfg) {
     vscreenfit::RouteFacts f;
     f.flatProfile = runtimeFlatProfile();
-    f.keyAuto = vscreenfit::keyTextIsAuto(
-        cfg.getString("experimental.temporal_aa_on_foot_world", "auto").c_str());
+    f.keyAuto = true;
 
     const std::string quality = cfg.getString("fix.ui_quality", "100");
     bool recognized = true;
     const float target = uiQualityParse(quality.c_str(), &recognized, nullptr);
     const bool temporal = temporalModeEnabled(cfg.getString("fix.temporal_aa", "off"));
-    const bool jitterAsShipped =
-        _stricmp(cfg.getString("advanced.temporal_aa_jitter_sign", "as_is").c_str(), "as_is") == 0 &&
-        !(cfg.getFloat("advanced.temporal_aa_jitter_lag", 0.0f) >= 0.5f);
+    const bool jitterAsShipped = true;
     f.layerWhy = uiLayerNotLiveReasonFor(target, temporal, jitterAsShipped, /*stoodDown=*/false);
 
     switch (vrRuntime()) {

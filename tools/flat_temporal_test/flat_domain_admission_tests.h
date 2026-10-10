@@ -681,14 +681,16 @@ inline int flatWeaponHistoryWiringTests() {
     const std::string build = slurp("build.bat");
     check(!runtime.empty() && !build.empty(), "the runtime source and build.bat are readable from the repo root");
 
-    // The SDK domain line: the seven counters in the order the format names them, each from the summed stats, and the sums add every field.
+    // The SDK domain line: the seven counters in the order the format names them, each from the summed stats, and the sums add every field. The line is
+    // three notes now (the logger cuts a line at about 1167 characters): the capture history counters end the first, the world markers open the second.
     const std::string report = compact(body(runtime, "static void reportForegroundDomain(State& s) {"));
     const auto reportValid = [&](const std::string& text) {
         return ordered(text, {"captures.add(candidate.motion.stats())",
                               "warmed-after-refusal=%llu no-candidate=%llu no-prior-pool=%llu no-prior-near=%llu no-prior-absent=%llu priors-one=%llu "
-                              "priors-several=%llu repeated-geometry=%llu world-markers=%llu",
+                              "priors-several=%llu repeated-geometry=%llu\"",
                               "captures.warmedAfterRefusal,", "captures.noCandidate,", "captures.noPriorPool,", "captures.noPriorNear,",
-                              "captures.noPriorAbsent,", "captures.priorsOne,", "captures.priorsSeveral,", "captures.repeated,", "n.worldMarkers,"});
+                              "captures.noPriorAbsent,", "captures.priorsOne,", "captures.priorsSeveral,", "captures.repeated);",
+                              "flat foreground SDK domain (2/3): world-markers=%llu", "n.worldMarkers,"});
     };
     check(reportValid(report), "the SDK domain line prints the capture history counters and sums every candidate's, live and retired");
     check(!reportValid(without(report, "captures.noPriorNear,")), "mutation control: a counter named in the format and missing from the arguments fails the wiring");

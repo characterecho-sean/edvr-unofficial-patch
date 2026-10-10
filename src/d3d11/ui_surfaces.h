@@ -70,8 +70,8 @@ void uiSurfacesLogAtlas();
 
 // Defined in native_temporal.cpp, lock-free: the size, max over eyes, the
 // runtime's beginFrame says the frame being drawn was rendered for
-// (fix.openxr_resolution, the FOV trim and the cull guard included) --
-// during a cull-guard or FOV-trim adoption the previous ask, one rebuild
+// (fix.openxr_resolution and the FOV trim included) --
+// during a FOV-trim adoption the previous ask, one rebuild
 // behind what the game is told (review P3-1). False before the first
 // beginFrame, after an invalidate, or with no native temporal channel.
 bool nativeTemporalRecommended(uint32_t* w, uint32_t* h);
@@ -84,12 +84,28 @@ bool nativeTemporalVerticalTangents(float* up, float* down);
 // 13:23 menu flight). False when the host does not say. Lock-free.
 bool nativeTemporalAsked(uint32_t* w, uint32_t* h);
 // ...and the TRUE display frustum's vertical tangents (eye 0, magnitudes):
-// the headset's own, before a cull guard or a trim -- the engine-side panel
+// the headset's own, before a trim -- the engine-side panel
 // sizing's untrimmed k (ui_panel_scale.h). Lock-free.
 bool nativeTemporalTrueVerticalTangents(float* up, float* down);
 
 // HMD Quality as last read (the newest .fxcfg's HMDRenderTargetMultiplier,
 // cached, never read on the frame path); 0 while unknown. Lock-free.
 float uiSurfacesHmdQuality();
+
+// Elite's Supersampling (the same .fxcfg's SSAAMultiplier) and the game window's
+// width (DisplaySettings.xml), read in the same pass and cached the same way; 0
+// while unknown. Lock-free. The panel factor carries the one, its size budget
+// both (ui_sizing_math.h).
+float uiSurfacesSupersampling();
+uint32_t uiSurfacesDisplayWidth();
+
+// The panel net (2026-10-08): a render or depth target the game asks for over D3D11's 16384 on either axis is
+// created shrunk to fit, aspect kept (ui_sizing_math.h's uiPanelNetShrink), because a refused create is fatal in
+// Elite. True when `out` was filled with the shrunk desc; false (and `out` untouched) for everything else: a request
+// at or under the limit, a texture that is no target, one with initial data. Counts every shrink and names each
+// distinct requested size once, with the factor and Supersampling at that moment. Called on the game's creating thread.
+bool uiSurfacesPanelNet(const D3D11_TEXTURE2D_DESC& in, bool initialData, D3D11_TEXTURE2D_DESC* out);
+// ...how many shrinks, of how many distinct requested sizes, so far. Lock-free; the 30 s panel line carries them.
+void uiSurfacesPanelNetCounts(uint32_t* fired, uint32_t* distinct);
 
 }  // namespace edvr

@@ -41,21 +41,64 @@ class HeadLocator {
     if(stage)*stage=HeadLocatorStage::None;
     if(!d.convert||!d.locate)return XR_ERROR_FUNCTION_UNSUPPORTED;
     if(!instance||!view||!origin)return XR_ERROR_HANDLE_INVALID;
-    if(!std::isfinite(prediction))return XR_ERROR_TIME_INVALID;
-    const double delta=std::round(double(prediction)*1e9),bound=std::ldexp(1.0,63);
-    if(delta>=bound||delta< -bound)return XR_ERROR_TIME_INVALID;
-    const XrTime offset=static_cast<XrTime>(delta);
-    LARGE_INTEGER counter{};
+    XrTime offset=0;
+    const XrResult predicted=predictionOffset(prediction,offset);
+    if(predicted!=XR_SUCCESS)return predicted;
     XrTime time=0;
-    const XrResult convertResult=(!now||!now(&counter))?XR_ERROR_RUNTIME_FAILURE:d.convert(instance,&counter,&time);
+    const XrResult timeResult=currentTime(d,instance,now,stage,fallbackNow,time);
+    if(timeResult!=XR_SUCCESS)return timeResult;
+    if((offset>0&&time>(std::numeric_limits<XrTime>::max)()-offset)||
+       (offset<0&&time<(std::numeric_limits<XrTime>::min)()-offset))return XR_ERROR_TIME_INVALID;
+    return finish(d,view,origin,time+offset,out,exact,stage);
+  }
+  // The current instant as the runtime's own clock reads it: the performance counter, converted. Only when the conversion itself fails, and
+  // fallbackNow is nonzero, is the caller's own estimate used instead (the stage then still says Convert, for the diagnostic).
+  XrResult currentTime(const LocatorDispatch& d,XrInstance instance,CounterNow now,HeadLocatorStage* stage,XrTime fallbackNow,XrTime& time) const {
+    if(!d.convert)return XR_ERROR_FUNCTION_UNSUPPORTED;
+    if(!instance)return XR_ERROR_HANDLE_INVALID;
+    LARGE_INTEGER counter{};
+    XrTime converted=0;
+    const XrResult convertResult=(!now||!now(&counter))?XR_ERROR_RUNTIME_FAILURE:d.convert(instance,&counter,&converted);
     if(convertResult!=XR_SUCCESS) {
       if(stage)*stage=HeadLocatorStage::Convert;
       if(!fallbackNow)return convertResult;
-      time=fallbackNow;
+      converted=fallbackNow;
     }
+    time=converted;
+    return XR_SUCCESS;
+  }
+  // locate() from an instant the caller already read (currentTime): the same prediction checks and the same locate, with no second clock read.
+  XrResult locateFrom(const LocatorDispatch& d,XrSpace view,XrSpace origin,XrTime time,float prediction,XrSpaceLocation& out,
+                      XrTime* exact=nullptr,HeadLocatorStage* stage=nullptr) const {
+    if(stage)*stage=HeadLocatorStage::None;
+    if(!d.locate)return XR_ERROR_FUNCTION_UNSUPPORTED;
+    if(!view||!origin)return XR_ERROR_HANDLE_INVALID;
+    XrTime offset=0;
+    const XrResult predicted=predictionOffset(prediction,offset);
+    if(predicted!=XR_SUCCESS)return predicted;
     if((offset>0&&time>(std::numeric_limits<XrTime>::max)()-offset)||
        (offset<0&&time<(std::numeric_limits<XrTime>::min)()-offset))return XR_ERROR_TIME_INVALID;
-    const XrTime target=time+offset;
+    return finish(d,view,origin,time+offset,out,exact,stage);
+  }
+  // The same locate at an instant the caller has already formed (the head-pose answer: the drawn frame's display time),
+  // with no clock read and no prediction. Everything the pose is checked for is what locate() checks.
+  XrResult locateAt(const LocatorDispatch& d,XrSpace view,XrSpace origin,XrTime target,XrSpaceLocation& out,
+                    XrTime* exact=nullptr,HeadLocatorStage* stage=nullptr) const {
+    if(stage)*stage=HeadLocatorStage::None;
+    if(!d.locate)return XR_ERROR_FUNCTION_UNSUPPORTED;
+    if(!view||!origin)return XR_ERROR_HANDLE_INVALID;
+    return finish(d,view,origin,target,out,exact,stage);
+  }
+ private:
+  static XrResult predictionOffset(float prediction,XrTime& offset) {
+    if(!std::isfinite(prediction))return XR_ERROR_TIME_INVALID;
+    const double delta=std::round(double(prediction)*1e9),bound=std::ldexp(1.0,63);
+    if(delta>=bound||delta< -bound)return XR_ERROR_TIME_INVALID;
+    offset=static_cast<XrTime>(delta);
+    return XR_SUCCESS;
+  }
+  static XrResult finish(const LocatorDispatch& d,XrSpace view,XrSpace origin,XrTime target,XrSpaceLocation& out,
+                         XrTime* exact,HeadLocatorStage* stage) {
     XrSpaceLocation location{XR_TYPE_SPACE_LOCATION};
     const XrResult r=d.locate(view,origin,target,&location);
     if(r!=XR_SUCCESS){if(stage)*stage=HeadLocatorStage::Locate;return r;}

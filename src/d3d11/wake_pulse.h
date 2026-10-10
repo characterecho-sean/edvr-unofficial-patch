@@ -62,8 +62,7 @@ namespace edvr {
 
 class Config;
 
-// Reads fix.wake_pulse (stock | off) and
-// advanced.wake_pulse_indices. Install and reload; live.
+// Reads fix.wake_pulse (stock | off). Install and reload; live.
 void wakePulseConfigure(Config& cfg);
 
 // False in stock mode, which keeps the offscreen draw path free.

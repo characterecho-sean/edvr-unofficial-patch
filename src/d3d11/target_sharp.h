@@ -55,8 +55,7 @@ namespace edvr {
 
 class Config;
 
-// Reads experimental.target_indicator (stock | sharp) and the shader pin
-// advanced.target_indicator_vs. Install and reload; live.
+// Reads experimental.target_indicator (stock | sharp). Install and reload; live.
 void targetSharpConfigure(Config& cfg);
 bool targetSharpDrawInterestConfigured() noexcept;
 std::size_t targetSharpDrawInterestFilters(draw_interest::ShaderFilter* out,
@@ -96,8 +95,7 @@ void targetSharpEnd(ID3D11DeviceContext* ctx);
 void targetSharpShutdown();
 
 #if defined(EDVR_VSCREEN_PREDICATE_TEST)
-void targetSharpPredicateTestSeed(bool sharp, bool failed,
-                                  std::uint64_t configuredHash) noexcept;
+void targetSharpPredicateTestSeed(bool sharp, bool failed) noexcept;
 std::uint64_t targetSharpPredicateTestConfiguredHash() noexcept;
 #endif
 

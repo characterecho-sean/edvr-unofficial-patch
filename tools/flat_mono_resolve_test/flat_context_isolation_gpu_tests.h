@@ -1,4 +1,4 @@
-// The resolver's context isolation on WARP (src\d3d11\flat_context_isolation.h, flat_context_state.h; docs\macos-dxmt-2026-09-30.md).
+// The resolver's context isolation on WARP (src\d3d11\flat_isolation_mode.h, flat_context_state.h; docs\macos-dxmt-2026-09-30.md).
 //
 // WHY. On DXMT (Elite under CrossOver on a Mac) ID3D11DeviceContext1::SwapDeviceContextState is UNIMPLEMENTED() and aborts the
 // process, so the resolver isolates the game's pipeline state there with an explicit capture: Get calls out, ClearState, Set calls
@@ -579,12 +579,6 @@ inline void decisionTests(ID3D11Device* device, ID3D11DeviceContext* context) {
     // The two IIDs, against DXMT's own text (src/d3d11/d3d11_interfaces.hpp: IMTLD3D11DeviceExt and IMTLD3D11ContextExt).
     check(guidText(kDxmtDeviceExtIid) == "efc77ae6-2179-4c0a-b844-7661ca0dcde7" && guidText(kDxmtContextExtIid) == "43ace3ce-1956-448b-a4eb-aee68bdeb283",
           "isolation: the two DXMT interface IDs are the ones DXMT's d3d11_interfaces.hpp defines");
-    // The key.
-    check(flatContextIsolationFromText("auto") == FlatContextIsolation::Auto && flatContextIsolationFromText("swap") == FlatContextIsolation::Swap &&
-              flatContextIsolationFromText("capture") == FlatContextIsolation::Capture && flatContextIsolationFromText("CAPTURE") == FlatContextIsolation::Capture &&
-              flatContextIsolationFromText("Swap") == FlatContextIsolation::Swap && flatContextIsolationFromText("") == FlatContextIsolation::Auto &&
-              flatContextIsolationFromText("explicit") == FlatContextIsolation::Auto && flatContextIsolationFromText(nullptr) == FlatContextIsolation::Auto,
-          "isolation: the key reads auto, swap and capture, in any case, and anything else (or nothing) as auto");
     // The markers, one at a time, on stand-in objects that answer the private interfaces as DXMT does.
     {
         Answerer none({}), onlyDevice({kDxmtDeviceExtIid}), onlyContext({kDxmtContextExtIid}), decoy({kDxmtContextExtIid});
@@ -699,10 +693,10 @@ inline void decisionTests(ID3D11Device* device, ID3D11DeviceContext* context) {
         check(!std::strcmp(line, "flat resolver: context isolation by explicit state capture (DXMT: adapter name \"Apple M4 Max\")"),
               "isolation: the log line when only the adapter name answered says so");
         flatFormatContextIsolationLine(c(FlatContextIsolation::Capture, none), none, line, sizeof(line));
-        check(!std::strcmp(line, "flat resolver: context isolation by explicit state capture (advanced.flat_context_isolation=capture; DXMT markers: none)"),
+        check(!std::strcmp(line, "flat resolver: context isolation by explicit state capture (forced capture; DXMT markers: none)"),
               "isolation: the log line for a forced capture");
         flatFormatContextIsolationLine(c(FlatContextIsolation::Swap, positive), positive, line, sizeof(line));
-        check(!std::strcmp(line, "flat resolver: context isolation by context state swap (advanced.flat_context_isolation=swap; DXMT markers: device interface "
+        check(!std::strcmp(line, "flat resolver: context isolation by context state swap (forced swap; DXMT markers: device interface "
                                  "IMTLD3D11DeviceExt; DXMT aborts in the swap)"),
               "isolation: the log line for a forced swap on a DXMT device says it aborts");
         // The ranges.
@@ -1038,8 +1032,8 @@ inline void resolverTests(ID3D11Device* device, ID3D11DeviceContext* context, Fi
             bool logged = isolationLines.size() == 1;
             if (logged) {
                 const std::string& line = isolationLines[0];
-                logged = expectCapture ? line == "flat resolver: context isolation by explicit state capture (advanced.flat_context_isolation=capture; DXMT markers: none)"
-                         : mode == edvr::FlatContextIsolation::Swap ? line == "flat resolver: context isolation by context state swap (advanced.flat_context_isolation=swap; DXMT markers: none)"
+                logged = expectCapture ? line == "flat resolver: context isolation by explicit state capture (forced capture; DXMT markers: none)"
+                         : mode == edvr::FlatContextIsolation::Swap ? line == "flat resolver: context isolation by context state swap (forced swap; DXMT markers: none)"
                                                                       : line == "flat resolver: context isolation by context state swap (no DXMT marker)";
             }
             if (!logged) for (const auto& l : isolationLines) std::printf("  (logged: %s)\n", l.c_str());

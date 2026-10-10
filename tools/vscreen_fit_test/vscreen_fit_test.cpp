@@ -23,7 +23,7 @@
 //   R9  the log's text: the `vScreen resolution:` line names the rule and why, the menu hint fits its buffer, the 30 s line's
 //       tokens (the reader, tools\edvr_log.py --vscreen-fit, parses exactly these), the save-failed token (only after a failed save)
 //       and the SAVE FAILED line
-//   R10 the route's key parse, pinned against the route's own (the resolver does not include the route's header chain)
+//   R10 the setting parse (keyTextIsAuto)
 //   R11 the state files on disk (vscreen_auto_state.cpp): the footprint's round trip beside the eye width's, in a temp directory,
 //       Sean's own older median file read as no record, and a save that cannot reach the file (held open with no sharing, held by a
 //       reader, the temp name or the destination taken by a directory, a record it refuses): false with the Win32 error, the file
@@ -215,7 +215,7 @@ void caseR2() {
     struct One { const char* label; void (*apply)(fit::RouteFacts&); const char* phrase; };
     const One singles[] = {
         {"R2b: the flat profile never fits", [](fit::RouteFacts& f) { f.flatProfile = true; }, "flat profile"},
-        {"R2b: the key not auto: no route", [](fit::RouteFacts& f) { f.keyAuto = false; }, "experimental.temporal_aa_on_foot_world is not auto"},
+        {"R2b: the key not auto: no route", [](fit::RouteFacts& f) { f.keyAuto = false; }, "the on-foot world route is off"},
         {"R2b: the UI layer not live: no route", [](fit::RouteFacts& f) { f.layerWhy = "fix.ui_quality is off"; }, "fix.ui_quality is off"},
         {"R2b: Elite's native Oculus back end: no route", [](fit::RouteFacts& f) { f.runtime = fit::RuntimeKind::OculusNative; }, "native Oculus"},
         {"R2b: a foreign openvr_api.dll: no route", [](fit::RouteFacts& f) { f.runtime = fit::RuntimeKind::ForeignOpenvr; }, "not EDVR's"},
@@ -238,7 +238,7 @@ void caseR2() {
         f.layerWhy = "fix.ui_quality is off";
         f.runtime = fit::RuntimeKind::OculusNative;
         const fit::RouteVerdict v = fit::routeVerdict(f);
-        check(!v.runs && has(v.why, "flat profile") && has(v.why, "not auto") && has(v.why, "ui_quality is off") && has(v.why, "native Oculus") &&
+        check(!v.runs && has(v.why, "flat profile") && has(v.why, "route is off") && has(v.why, "ui_quality is off") && has(v.why, "native Oculus") &&
                   count(v.why, "; ") == 3,
               "R2d: every failing condition is named, joined with \"; \"");
     }
@@ -788,7 +788,7 @@ void caseR9() {
         const auto t = tokensOf(s, "vScreen resolution: auto = 5040 wide: ");
         check(tok(t, "rule") == "legacy" && tok(t, "source") == "none" && tok(t, "route") == "no" && tok(t, "m") == "1.25" && tok(t, "legacy") == "5040",
               "R9d: rule=legacy source=none route=no m=1.25");
-        check(has(s, "LEGACY") && has(s, "experimental.temporal_aa_on_foot_world is not auto") && has(s, "fix.ui_quality is off") && !has(s, "panel_curvature"),
+        check(has(s, "LEGACY") && has(s, "the on-foot world route is off") && has(s, "fix.ui_quality is off") && !has(s, "panel_curvature"),
               "R9d: and the prose names EVERY route condition that failed (the curve is not one of them)");
     }
     {   // the hint
@@ -910,31 +910,12 @@ void caseR9() {
     }
 }
 
-// ---- R10: the route's key parse, pinned ----------------------------------------------------------------------------------
-// vr_world_route_math.h's vrWorldKeyFromText, verbatim (kept here so the rig needs none of the route's header chain).
-bool routeKeyOriginal(const char* text) {
-    if (!text) return false;
-    const char* a = "auto";
-    for (; *a; ++a, ++text) {
-        char c = *text;
-        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
-        if (c != *a) return false;
-    }
-    return *text == 0;
-}
+// ---- R10: the setting parse ----------------------------------------------------------------------------------------------
 void caseR10() {
-    const char* spellings[] = {"auto", "AUTO", "Auto", "aUtO", "off", "", "on", "autox", "aut", "auto ", " auto", "1", "true", "dlss", "automatic"};
-    bool same = true;
-    for (const char* s : spellings) same = same && fit::keyTextIsAuto(s) == routeKeyOriginal(s);
-    check(same && !fit::keyTextIsAuto(nullptr), "R10a: the resolver reads the route's key exactly as the route does, over a table of spellings");
-    check(fit::keyTextIsAuto("auto") && fit::keyTextIsAuto("AUTO") && !fit::keyTextIsAuto("autox") && !fit::keyTextIsAuto("off") && !fit::keyTextIsAuto(""),
+    check(!fit::keyTextIsAuto(nullptr), "R10a: no text is not auto");
+    check(fit::keyTextIsAuto("auto") && fit::keyTextIsAuto("AUTO") && fit::keyTextIsAuto("Auto") && !fit::keyTextIsAuto("autox") &&
+              !fit::keyTextIsAuto("aut") && !fit::keyTextIsAuto("off") && !fit::keyTextIsAuto("") && !fit::keyTextIsAuto(" auto"),
           "R10a: auto in any case and nothing else");
-    const std::string route = readFile("src\\d3d11\\vr_world_route_math.h");
-    if (route.empty()) { check(false, "R10b: vr_world_route_math.h is readable from the repo root"); return; }
-    const std::string body = functionBody(route, "inline VrWorldKey vrWorldKeyFromText(const char* text) {");
-    check(!body.empty() && has(body, "const char* a = \"auto\";") && has(body, "if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');") &&
-              has(body, "if (c != *a) return VrWorldKey::Off;") && has(body, "return *text == 0 ? VrWorldKey::Auto : VrWorldKey::Off;"),
-          "R10b: the route's own parse still has the body this rig copies (a change to it must change keyTextIsAuto too)");
 }
 
 // ---- R11: the state files on disk ----------------------------------------------------------------------------------------
@@ -1085,13 +1066,8 @@ void caseR12() {
     if (g_failure.size()) return;
 
     // The resolver reads each of the route's conditions the way its owner does.
-    // Auto since 2026-10-01: the route's default and the width's fitting rule flip together, in the same commit, or the width is fitted
-    // for a route that does not run (or the other way round); the shipped file says the same.
-    check(has(res, "getString(\"experimental.temporal_aa_on_foot_world\", \"auto\")") && has(route, "getString(\"experimental.temporal_aa_on_foot_world\", \"auto\")") &&
-              has(ini, "\ntemporal_aa_on_foot_world = auto"),
-          "R12b: the resolver and the route read experimental.temporal_aa_on_foot_world with the same default, auto, and the shipped edvr.ini ships it");
-    for (const char* read : {"getString(\"fix.ui_quality\", \"100\")", "getString(\"fix.temporal_aa\", \"off\")", "getString(\"advanced.temporal_aa_jitter_sign\", \"as_is\")",
-                             "getFloat(\"advanced.temporal_aa_jitter_lag\", 0.0f)"}) {
+    check(has(res, "f.keyAuto = true;"), "R12b: the resolver states the on-foot world route as on (it always is)");
+    for (const char* read : {"getString(\"fix.ui_quality\", \"100\")", "getString(\"fix.temporal_aa\", \"off\")"}) {
         checkf(has(res, read) && has(layer, read), "R12c: the resolver and uiLayerConfigure read the layer's key the same way: %s", read);
     }
     check(has(res, "temporalModeEnabled(") && has(layer, "temporalModeEnabled(") && has(res, "uiQualityParse(") && has(layer, "uiQualityParse(") &&

@@ -14,7 +14,7 @@ State, Open and Ruled-out bullets are verbatim in "Status detail".*
   - Native OpenXR builds its session once inside `VR_InitInternal`, so the
     removed `fix.vr_handover = early` has no analogue; the movie already
     plays on the splash's screen, world-locked (2026-09-15 18:30 flight).
-  - NGX warm-up (`advanced.temporal_aa_warm`, default on): BUILT
+  - NGX warm-up (always on since the 2026-10 cull): BUILT
     2026-09-15, NOT FLOWN. First Submit cost 857 ms; eye 0's create is
     <= 58 ms, the ~760 ms before it UNSPLIT (NGX init, five 16-MP history
     textures, UI-resolve compile); the per-stage ms lines split it.
@@ -40,11 +40,12 @@ State, Open and Ruled-out bullets are verbatim in "Status detail".*
   viewport counter-move, exe-imports-only skip, resample cache key, the
   "DRAWING anyway" line, early handover natively, Phase A = 6.4 s, on-foot
   panel as a vscreen regression), reasons in "Status detail".
-- **Next flight:** Steam, `fix.intro_video = screen`,
-  `advanced.intro_probe = 1`, reading `intro probe: watching the movie's
-  open`, `intro probe: the game opened <file> at +X.XXX s after the
-  device`, and `intro video lock: holding` against the device line --
-  plus section 9 (first 2026-09-15 entry) for the warm-up, the two
+- **Next flight:** Steam, `fix.intro_video = screen`, reading `intro video
+  lock: holding` and the surviving startup lines. The 2026-10 key cull
+  deleted `advanced.intro_probe` and its `intro probe:` lines, so the
+  ident-open -> first-composite latency cannot be measured again until a probe
+  is rebuilt (the 2026-09-15 numbers in "The startup, phase by phase" are the
+  surviving evidence) -- plus section 9 (first 2026-09-15 entry) for the warm-up, the two
   2026-09-17 entries' flight briefs and the 2026-10-01 curve leg.
 - **Environment:** The placement fix was measured on a Frontier
   install, game build 330683, Pimax via OpenComposite, eye 5424x5356;

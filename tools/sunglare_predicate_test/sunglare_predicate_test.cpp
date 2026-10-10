@@ -42,10 +42,11 @@ void equalObservation(const SunglareSelectorObservation& a, const SunglareSelect
 // output is an oracle input. Recording below only describes consumed reads.
 bool frozenWants(unsigned mode, bool probe, SunglareRead<SunglareTraceMode>& mr,
                  SunglareRead<bool>& dr, SunglareRead<bool>& pr, SunglareRead<bool>& rr) {
+    (void)probe;
+    (void)pr;  // the retired probe's trace field is present but unread
     record(mr, static_cast<SunglareTraceMode>(mode));
     bool result = mode != 0;
-    if (!result) { const bool d = damping(); record(dr,d); result = d;
-        if (!d) { record(pr,probe); result = probe; } }
+    if (!result) { const bool d = damping(); record(dr,d); result = d; }
     record(rr,result); return result;
 }
 bool frozenTexture(unsigned slot, SunglareTextureRead& r) {

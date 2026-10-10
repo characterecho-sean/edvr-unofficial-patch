@@ -180,9 +180,10 @@ inline void buildFrame(fpgpu::Fixture& fx, const Phase& ph, const std::vector<Po
         e.truth[0] = pt.prevX - pt.curX; e.truth[1] = pt.prevY - pt.curY;
     }
     // Texels an attached pixel must reject in every mode, whatever the phase.
-    struct Invalid { UINT x; fpgpu::Half4 map; };
+    struct Invalid { UINT x; fpgpu::Half4 map; float depth = zOk; };
     const Invalid invalids[] = {
-        {0, fpgpu::mapOf(1, 1, zOk, 0.0f)},                      // uncovered
+        // uncovered, within first-person reach: an uncovered stencil texel beyond reach is a world character and takes the world path
+        {0, fpgpu::mapOf(1, 1, fpgpu::zNear, 0.0f), fpgpu::zNear},
         {2, fpgpu::mapOf(1, 1, zOk, 2.0f)},                      // new
         {4, fpgpu::mapOf(1, 1, zOk * 1.01f)},                    // a depth that disagrees
         {6, fpgpu::mapOf(-10, 0, zOk)},                          // previous x far outside
@@ -190,7 +191,7 @@ inline void buildFrame(fpgpu::Fixture& fx, const Phase& ph, const std::vector<Po
         {10, fpgpu::mapOf(0, 12, zOk)},                          // previous y far outside
     };
     for (const Invalid& iv : invalids) {
-        fpgpu::Spec& t = s[14 * W + iv.x]; t.stencil = 0x10; t.depth = zOk; t.map = iv.map;
+        fpgpu::Spec& t = s[14 * W + iv.x]; t.stencil = 0x10; t.depth = iv.depth; t.map = iv.map;
         ex[14 * W + iv.x].kind = Kind::Rejected;
     }
     // A vector that is exactly negative zero: half 0x8000 on both axes.

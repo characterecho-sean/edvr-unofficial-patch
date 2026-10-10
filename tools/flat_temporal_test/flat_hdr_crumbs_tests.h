@@ -388,8 +388,8 @@ inline int flatHdrCrumbWiringTests() {
            "treatHdr admits once, declines through one place and reaches the resolver at its two calls, counting the frame once");
     // -- the route's key and its 5 s census --
     const std::string readKey = body(runtime, "static void hdrReadKey(State& s, uint64_t frame) {");
-    ordered(readKey, {"s.hdrKey = key; s.hdrKeyRead = true;", "if (key == FlatHdrKey::Auto && hdrCrumbArmed(flatHdrKeyName(key)))",
-                      "Log::get().note(\"flat hdr route: crash-safe trail on:", "Log::get().note(\"flat hdr route: experimental.temporal_aa_before_post="},
+    ordered(readKey, {"s.hdrKey = key; s.hdrKeyRead = true;", "if (hdrCrumbArmed(flatHdrKeyName(key)))",
+                      "Log::get().note(\"flat hdr route: crash-safe trail on:", "Log::get().note(\"flat hdr route: %s (read at startup)"},
             "the trail's armed line, and the log's line that says where to look, are written when the key is read as auto, at startup or after a change");
     ordered(body(runtime, "void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT flags) {"),
             {"const FlatMonoResolveStats rs = flatMonoResolveStats();", "gained.captured = rs.hdrCaptured - seen.captured;",
@@ -451,11 +451,6 @@ inline int flatHdrCrumbWiringTests() {
                    "Log::get().note(\"%s\",line);", "if(!g.capture && FAILED(device->QueryInterface(IID_PPV_ARGS(d1.GetAddressOf()))))", "if(g.capture) {",
                    "} else {", "\"create-context-state\"", "d1->CreateDeviceContextState(", "flat-resolve-context-state-create-failed"},
             "the renderer decides its isolation, says so in one log line, and makes the swap's state object only when it is the swap");
-    // The key is handed to the resolver once, before anything of the resolver's runs.
-    ordered(runtime, {"flatMonoResolveSetSpanHooks(&resolveSpanBegin, &resolveSpanEnd);", "if (!s.isolationRead) {",
-                      "flatMonoResolveSetIsolation(flatContextIsolationFromText(Config::get().getString(\"advanced.flat_context_isolation\", \"auto\").c_str()));",
-                      "flatMonoResolvePreflight(s.device.Get(),s.context.Get(),s.plannedResolve)"},
-            "advanced.flat_context_isolation is read once, at the first frame-end with a mode on, before the first preflight or resolve");
     // The explicit block: no swap in it, every stage's calls, in the order the groups are written.
     const std::string blockSrc = slurp("src/d3d11/flat_context_state.h");
     expect(!blockSrc.empty() && count(blockSrc, "->SwapDeviceContextState(") == 0 && count(blockSrc, "->CreateDeviceContextState(") == 0,
@@ -501,16 +496,21 @@ inline int flatHdrCrumbWiringTests() {
     ordered(solve, {"context->CopyResource(g.color.texture.Get(),overlay?cleanColor.Get():color.Get());",
                     "if(overlay) context->CopyResource(g.rawOverlay.texture.Get(),color.Get());",
                     "if(hdr)++stats.hdrCopied;", "copyStep.close();",
-                    "context->CSSetShaderResources(0,foreground?16:14,prepViews);",
+                    "const UINT prepViewCount=skin?18:(foreground?16:14);",
+                    "context->CSSetShaderResources(0,prepViewCount,prepViews);",
                     "context->Dispatch((f.renderWidth+7)/8,(f.renderHeight+7)/8,1);",
-                    "ID3D11UnorderedAccessView* nullUavs[6]={};ID3D11ShaderResourceView* nullViews[16]={};",
+                    "ID3D11UnorderedAccessView* nullUavs[6]={};ID3D11ShaderResourceView* nullViews[18]={};",
                     "context->CSSetUnorderedAccessViews(0,6,nullUavs,nullptr);",
-                    "context->CSSetShaderResources(0,foreground?16:14,nullViews);", "if(hdr)++stats.hdrPrepped;", "prepStep.close();",
+                    "context->CSSetShaderResources(0,prepViewCount,nullViews);", "if(hdr)++stats.hdrPrepped;", "prepStep.close();",
                     "backendStep.close();", "if(hdr && ok)++stats.hdrBackend;", "if(!ok) {"},
             "the resolve counts its copy, prep and backend for the 5 s line as each completes");
-    expect(count(solve,"context->CSSetShaderResources(0,foreground?16:14,prepViews);")==1 &&
-           count(solve,"context->CSSetShaderResources(0,foreground?16:14,nullViews);")==1,
-           "prep binds and clears exactly the same fourteen legacy or sixteen foreground SRV slots once");
+    // F2 on foot: the VR world route's target 7 rides at t17, so a frame that carries it binds and clears eighteen; every other frame (the flat profile's, whose
+    // engine views never carry one) is the fourteen or sixteen it always was.
+    expect(count(solve,"context->CSSetShaderResources(0,prepViewCount,prepViews);")==1 &&
+           count(solve,"context->CSSetShaderResources(0,prepViewCount,nullViews);")==1 &&
+           count(solve,"const UINT prepViewCount=skin?18:(foreground?16:14);")==1 &&
+           count(solve,"const bool skin=engine && f.engine.skin!=nullptr;")==1,
+           "prep binds and clears exactly the same fourteen legacy, sixteen foreground or eighteen skinned-source SRV slots once");
     ordered(spatial, {"context->CopyResource(g.color.texture.Get(),color.Get());", "if(hdr)++stats.hdrCopied;"},
             "the spatial recovery counts its copy too");
     ordered(resolve, {"\"create-context-state\"", "d1->CreateDeviceContextState(", "\"create-compute-shaders\"", "device->CreateComputeShader(kFlatMonoPrepBytecode",
@@ -543,7 +543,7 @@ inline int flatHdrCrumbWiringTests() {
 
     // -- THE DEVICE GATE (flat_hdr_crumbs.h): the crumbs are DXMT's alone --
     const std::string crumbs = slurp("src/d3d11/flat_hdr_crumbs.h");
-    const std::string isolation = slurp("src/d3d11/flat_context_isolation.h");
+    const std::string isolation = slurp("src/d3d11/flat_isolation_mode.h");
     expect(!crumbs.empty() && !isolation.empty(), "the crumbs and the isolation headers are readable from the repo root");
     // The one writer and the three entry points test the gate first, before any state moves; the gate is the first thing each does.
     ordered(body(crumbs, "inline void hdrCrumbEmit("), {"if (!hdrCrumbEnabled()) return;", "c.written.fetch_add("},
@@ -584,7 +584,7 @@ inline int flatHdrCrumbWiringTests() {
         const std::string gate = (g == std::string::npos || gEnd == std::string::npos) ? std::string() : runtime.substr(g, gEnd - g);
         expect(!gate.empty() && gate.find("isolation") == std::string::npos && gate.find("Isolation") == std::string::npos &&
                    gate.find("getString") == std::string::npos && gate.find("Config") == std::string::npos,
-               "the gate is the detection alone: forcing the capture on Windows (advanced.flat_context_isolation) cannot open it");
+               "the gate is the detection alone: forcing the capture on Windows cannot open it");
     }
     expect(count(runtime, "hdrCrumbEnable(") == 1 && count(slurp("src/d3d11/device_hook.cpp"), "hdrCrumbEnable(") == 0,
            "the runtime opens the gate in one place, and nothing else does");

@@ -2,7 +2,7 @@
 // agree on what a hologram is now give DIFFERENT answers, and both lists
 // live here:
 //   - ui_depth.cpp's generic hologram/icon depth pass
-//     (advanced.temporal_aa_hologram_depth -- the contribution and
+//     (the hologram depth pass -- the contribution and
 //     element-depth re-issues, whose family lists these seed) covers ALL
 //     ELEVEN: kHoloFamiliesBuiltIn's ten cockpit families plus
 //     kHoloWorldMarkers, radius-clipping the cockpit ones.
@@ -65,16 +65,14 @@ constexpr uint64_t kHoloFamiliesBuiltIn[10] = {kHoloIconCore, kHoloCoronaFamily,
 // WORLD MARKERS: a second, separate built-in list for draws that must be
 // covered wherever they are, not just inside the cockpit radius (the
 // families above are all short-range panel/icon geometry; a world marker
-// tracks something that can be kilometres out). Fixed, never extended by
-// advanced.temporal_aa_hologram_families -- see holoWorldMarkerList in
-// ui_depth.cpp.
+// tracks something that can be kilometres out). Fixed -- see
+// holoWorldMarkerList in ui_depth.cpp.
 constexpr uint64_t kHoloWorldMarkers[1] = {kHoloWorldMarkerReticle};
 constexpr uint32_t kHoloWorldMarkerCount = static_cast<uint32_t>(sizeof(kHoloWorldMarkers) / sizeof(kHoloWorldMarkers[0]));
 
 // The canopy sits in front of the whole sky; covering it would smear the
-// stars behind it. The depth pass refuses it even when named in
-// advanced.temporal_aa_hologram_families (holoBuildFamilyList in
-// ui_depth.cpp), and the crisp take refuses it the same way: it is not one
+// stars behind it. The depth pass leaves it out of its
+// list (holoBuildFamilyList in ui_depth.cpp), and the crisp take refuses it the same way: it is not one
 // of the take's eight uiHoloGenericHash matches, so a canopy draw names no
 // family and stays stock.
 constexpr uint64_t kHoloCanopy = 0x8C091FFD08644E02ull;

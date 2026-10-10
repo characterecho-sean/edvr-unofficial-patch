@@ -61,8 +61,8 @@ int guardFilter(unsigned long, const char*) { return EXCEPTION_EXECUTE_HANDLER; 
 void FaultBudget::charge() { --m_remaining; }
 // Configuration is outside these render-pass tests, exactly as in
 // tools\ui_depth_test: abort rather than silently supply fake state.
-// holoBuildFamilyList takes its spec as a plain string for exactly this
-// reason -- it is tested directly, below, with no Config in the loop.
+// holoBuildFamilyList is pure for exactly this reason -- it is tested
+// directly, below, with no Config in the loop.
 bool Config::getBool(const char*, bool) const { std::abort(); }
 float Config::getFloat(const char*, float) const { std::abort(); }
 std::string Config::getString(const char*, const char*) const { std::abort(); }
@@ -1244,19 +1244,16 @@ int main() {
 
     // The family builder covers the eleven built-ins (the holo panel, the
     // icon core, the corona, its two stalks, the target sphere and the
-    // five contact markers) and refuses the canopy, however it is named,
-    // and says so once. The world-marker list is separate, fixed, and
-    // reported by its own function -- holoWorldMarkerList takes no spec,
-    // so advanced.temporal_aa_hologram_families cannot add to it.
+    // five contact markers) and leaves the canopy out. The world-marker
+    // list is separate, fixed, and reported by its own function.
     {
         uint64_t fam[kMaxHashes];
-        const uint32_t famCount = holoBuildFamilyList("8C091FFD08644E02", fam, kMaxHashes);
+        const uint32_t famCount = holoBuildFamilyList(fam, kMaxHashes);
         check(famCount == 11, "family builder: eleven built-in families");
         check(inList(fam, famCount, kHoloTargetSphere), "family builder: the target sphere is built in");
         check(inList(fam, famCount, kHoloContactA) && inList(fam, famCount, kHoloContactE),
               "family builder: the contact markers are built in");
-        check(!inList(fam, famCount, kHoloCanopy), "family builder: the canopy is refused");
-        check(g_lastLog.find("canopy") != std::string::npos, "family builder: the refusal is logged");
+        check(!inList(fam, famCount, kHoloCanopy), "family builder: the canopy is left out");
 
         uint64_t world[kMaxHashes];
         const uint32_t worldCount = holoWorldMarkerList(world, kMaxHashes);

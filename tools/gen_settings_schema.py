@@ -59,6 +59,23 @@ number, and a getString read is read-only unless a `# dev: choices a, b, c`
 line above it names its values (the mirror of ui:, allowed only OUTSIDE
 [fix]). `# dev: hidden` keeps a key off the menu entirely.
 
+THE HOTKEYS PAGE (2026-10-08) takes its rows from [hotkey] by the same two
+annotations, the `hotkey` token marking a row whose value is a key, a pad button
+or a HOTAS button the menu CAPTURES (it is never typed). The annotation is the
+tier: `# ui: Menu key | hotkey | live` is a row for everyone, and
+`# dev: label Draw census key | hotkey` is a row only while menu.developer is on.
+The section names the page, so neither line does. See HOTKEY_SECTION.
+
+THE EXPLORER CAM PAGE (2026-10-08) is `menu explorer_cam`: the eye trims and the
+follow smoothing, for everyone. Four more tokens shape a NUMBER row there and
+nowhere else: `step 0.01` (the arrow keys' step, instead of the range's
+twentieth), `unit m` (the text after the number), `signed` (an explicit + on a
+positive one) and `zero exact` (the word in brackets after a zero, so `0 ms
+(exact)`). A step that is not a positive number, or any of the four on a
+row the code does not read as a number, fails the build. The older absolute
+fallback eye (`explorer_cam_eye_up/_forward/_right`) stays `ui: hidden`: neither
+schema gets a row for it.
+
 The menu's restart flagging is derived here too, from the same prose the
 window reads: a menu row on the Fixes or Performance page that does not say
 when it takes effect is a build error (as for the window); a developer-tier
@@ -121,18 +138,26 @@ import sys
 # the log names one when it wants you to change it, and that is the only way
 # anybody should arrive at them. Offering them in a list invites changing things
 # nobody asked you to change, and turns a support thread into a guessing game.
-# The remaining sections ([hotkey], [log], [openvr], [d3d11]) are plumbing named
+# The remaining sections ([hotkey], [log], [d3d11]) are plumbing named
 # after the halves of EDVR that read them, not fixes somebody came here to turn
 # on. Explorer Cam's own switches live in [fix] and are exposed; the metre
-# offsets it is tuned with are not, because tuning them means wearing the
-# headset and watching, which is what the ini's hot reload is for.
+# offsets it is tuned with (fix.explorer_cam_eye_*) are not, because tuning
+# them means wearing the headset and watching, which is what the ini's hot
+# reload is for.
 EXPOSED_SECTIONS = ('fix',)
 # The sections whose keys may carry a `ui:` line at all. The installer's
 # window still shows only EXPOSED_SECTIONS; what a ui: line buys a developer
 # key is its LABEL and its CHOICES in the in-headset menu, so that demoting a
 # setting from [fix] to [experimental] costs it its tier and its page but not
 # the words somebody already wrote for it.
-UI_SECTIONS = ('fix', 'advanced', 'experimental', 'menu')
+UI_SECTIONS = ('fix', 'advanced', 'experimental', 'menu', 'hotkey')
+# [hotkey] is the one section whose keys are rows by annotation alone, and whose
+# TIER is the annotation that carries the `hotkey` token (2026-10-08, the F8
+# menu's Hotkeys page): a `# ui:` line is a row everyone sees, a `# dev:` line is a
+# row only in developer mode. The section decides the page ("hotkeys"), so neither
+# line names one; the installer's window still shows [fix] and nothing else.
+HOTKEY_SECTION = 'hotkey'
+HOTKEY_PAGE = 'hotkeys'
 # The sections whose keys may be ordinary rows of the in-headset menu -- the
 # fixes, and the menu's own switches, which are the only [menu] keys anyone
 # would reach for while wearing the headset. Both are Fix tier: neither is a
@@ -159,7 +184,8 @@ UI_RE = re.compile(r'^ui\s*:\s*(.*)$', re.I)
 DEV_RE = re.compile(r'^dev\s*:\s*(.*)$', re.I)
 # The sections the menu's developer tier lists in full.
 DEV_SECTIONS = ('advanced', 'experimental')
-MENU_PAGES = ('fixes', 'performance')
+# Pages a `menu <page>` token can name. 'explorer_cam' is the Explorer Cam page (2026-10-08): the eye trims and the follow smoothing, for everyone.
+MENU_PAGES = ('fixes', 'performance', 'explorer_cam')
 # A heading in edvr.ini: a rule, the title, a rule. The heading a person
 # reads in the file is the heading the window shows, so there is no second
 # list of group names to keep in step with this one.
@@ -303,6 +329,18 @@ class Setting(object):
         self.devAnnotated = False
         self.devChoices = []
         self.devHidden = False
+        # `hotkey` on a ui: or dev: line: the value is a key, pad button or
+        # HOTAS button the menu captures (MenuKind::Hotkey). devLabel is the
+        # dev: line's `label <text>`, for a developer row with no ui: line.
+        self.hotkey = False
+        self.devLabel = ''
+        # How a menu NUMBER row is stepped and shown (2026-10-08, the Explorer Cam page): `step 0.01` is the arrow keys' step in place of the range's
+        # twentieth, `unit m` the text after the number, `signed` an explicit + on a positive one, `zero exact` the word that follows a
+        # zero in brackets (`0 ms (exact)`). The installer's window ignores all four.
+        self.step = ''
+        self.unit = ''
+        self.zero = ''
+        self.signed = False
         # Migration metadata from the annotation lines the installer's merge
         # reads (iniedit.cpp movedKeys / retiredDefaults): kept off the prose.
         self.movedFrom = []
@@ -440,6 +478,10 @@ def apply_dev_annotation(setting, text):
             setting.devChoices = [c.strip() for c in rest.split(',') if c.strip()]
         elif lower.startswith('range'):
             read_range(setting, part)
+        elif lower == 'hotkey':
+            setting.hotkey = True
+        elif lower.startswith('label '):
+            setting.devLabel = part.split(None, 1)[1].strip()
 
 
 def read_range(setting, part):
@@ -506,6 +548,18 @@ def apply_annotation(setting, text):
             setting.applies = 'restart'
         elif lower == 'live':
             setting.applies = 'live'
+        elif lower == 'hotkey':
+            # The value is a key, a pad button or a HOTAS button, captured by
+            # the menu's Hotkeys page rather than typed.
+            setting.hotkey = True
+        elif lower.startswith('step '):
+            setting.step = part.split(None, 1)[1].strip()
+        elif lower.startswith('unit '):
+            setting.unit = part.split(None, 1)[1].strip()
+        elif lower.startswith('zero '):
+            setting.zero = part.split(None, 1)[1].strip()
+        elif lower == 'signed':
+            setting.signed = True
         elif lower == 'menu' or lower.startswith('menu '):
             # The in-headset menu's page: bare `menu` is the Fixes page,
             # `menu performance` the Performance page.
@@ -687,8 +741,8 @@ def run(root, out, check):
     # ---- the ini's own shape ----------------------------------------------
     #
     # Two ways a line of edvr.ini becomes a row nobody wrote. A sentence that
-    # begins `word =` parses as a commented-out setting (edvr.ini spelled
-    # cull_guard_channel's explanation that way, and the menu grew a Text row
+    # begins `word =` parses as a commented-out setting (edvr.ini once spelled
+    # a developer key's explanation that way, and the menu grew a Text row
     # whose default was "raw means the culler's cache derives from the"); and a
     # key that is written twice is two rows, the reader taking whichever it
     # meets. Neither fails anywhere else. The first is checked first because it
@@ -788,6 +842,34 @@ def run(root, out, check):
               'page for. Pages: %s.' % ', '.join(MENU_PAGES))
         for s in badPage:
             print('  edvr.ini:%d  %s.%s  (menu %s)' % (s.line, s.section, s.key, s.menuPage))
+        return 1
+
+    # ---- how a number row is stepped and shown (step / unit / zero / signed) ----
+    #
+    # They shape a menu NUMBER row and nothing else: on a switch, a choice or a text row the
+    # words would be dropped without a sound, and a step that is not a positive plain number
+    # would be read by atof as 0 -- one press of Left or Right would then not move the row at all.
+    badShape = []
+    for s in settings:
+        if not (s.step or s.unit or s.zero or s.signed):
+            continue
+        dotted = '%s.%s' % (s.section, s.key)
+        if dotted not in code:
+            continue
+        faults = []
+        if code[dotted][0] != 'number':
+            faults.append('the code reads it as a %s, and these tokens shape a number row' % code[dotted][0])
+        if s.step:
+            plain = number_text(s.step)
+            if plain is None or float(plain) <= 0:
+                faults.append('`step %s` is not a positive number' % s.step)
+        if faults:
+            badShape.append((s, faults))
+    if badShape:
+        print('gen_settings_schema: ERROR: %d setting(s) carry a step, unit, zero or signed token the menu '
+              'cannot use.' % len(badShape))
+        for s, faults in badShape:
+            print('  edvr.ini:%d  %s.%s  %s' % (s.line, s.section, s.key, '; '.join(faults)))
         return 1
 
     missing = [s for s in settings
@@ -890,6 +972,58 @@ def run(root, out, check):
             devSilent.append(s)
         menuRows.append((s, s.section, 'Advanced' if s.section == 'advanced' else 'Experimental'))
 
+    # ---- the Hotkeys page (HOTKEY_SECTION) ----------------------------------
+    #
+    # The tier is the annotation that carries `hotkey`: `# ui:` is Fix (every
+    # player), `# dev:` is Advanced (developer mode only). The menu's Hotkeys page
+    # lists the first always and the second with menu.developer on. Four ways to get
+    # this wrong are build errors, each naming the key and the ini line, because the
+    # menu cannot repair any of them at run time: the token anywhere but [hotkey];
+    # an annotated [hotkey] key without it (a row that was meant and is silently
+    # absent); a key the code does not read as text (the capture writes a string);
+    # and a Fix-tier row that does not say when a change applies.
+    strayHotkey = [s for s in settings if s.hotkey and s.section != HOTKEY_SECTION]
+    if strayHotkey:
+        print('gen_settings_schema: ERROR: the `hotkey` token belongs to a [%s] setting.'
+              % HOTKEY_SECTION)
+        for s in strayHotkey:
+            print('  edvr.ini:%d  %s.%s' % (s.line, s.section, s.key))
+        return 1
+    unmarked = [s for s in settings if s.section == HOTKEY_SECTION and
+                ((s.annotated and not s.hidden) or (s.devAnnotated and not s.devHidden)) and not s.hotkey]
+    if unmarked:
+        print('gen_settings_schema: ERROR: an annotated [%s] setting needs the `hotkey` token '
+              '(its value is a key, a pad button or a HOTAS button the menu captures); '
+              '`dev: hidden` keeps a key off the menu.' % HOTKEY_SECTION)
+        for s in unmarked:
+            print('  edvr.ini:%d  %s.%s' % (s.line, s.section, s.key))
+        return 1
+    hotkeyRows = [s for s in settings if s.section == HOTKEY_SECTION and s.hotkey]
+    notText = [s for s in hotkeyRows
+               if '%s.%s' % (s.section, s.key) not in code
+               or code['%s.%s' % (s.section, s.key)][0] != 'text']
+    if notText:
+        print('gen_settings_schema: ERROR: a `hotkey` row is a string the code reads with '
+              'getString; nothing in src/ does for:')
+        for s in notText:
+            print('  edvr.ini:%d  %s.%s' % (s.line, s.section, s.key))
+        return 1
+    hotkeySilent = [s for s in hotkeyRows if s.annotated and when_it_applies(s) is None]
+    if hotkeySilent:
+        print('gen_settings_schema: ERROR: %d hotkey row(s) do not say when they take effect.'
+              % len(hotkeySilent))
+        print('End the comment block with "Live." or put `| live` on the ui: line.')
+        for s in hotkeySilent:
+            print('  edvr.ini:%d  %s.%s' % (s.line, s.section, s.key))
+        return 1
+    for s in hotkeyRows:
+        if s.annotated:
+            menuRows.append((s, HOTKEY_PAGE, 'Fix'))
+        else:
+            menuRows.append((s, HOTKEY_PAGE, 'Advanced'))
+            if when_it_applies(s) is None:
+                devSilent.append(s)
+
     # ---- what was taken off the menu stays off it (OFF_MENU) ---------------
     onMenu = []
     seenOff = set()
@@ -975,13 +1109,16 @@ def run(root, out, check):
 
     if check or not out:
         restarts = len([s for s in exposed if when_it_applies(s) == 'restart'])
+        hotkeyFix = len([r for r in menuRows if r[1] == HOTKEY_PAGE and r[2] == 'Fix'])
         print('gen_settings_schema: %d exposed, %d of them needing a game restart; '
-              '%d live in [%s]; menu: %d fix rows on %s, %d developer rows'
+              '%d live in [%s]; menu: %d fix rows on %s, %d hotkey rows (%d for everyone), '
+              '%d developer rows'
               % (len(exposed), restarts,
                  len([s for s in settings if s.live and s.section in EXPOSED_SECTIONS]),
                  ']/['.join(EXPOSED_SECTIONS), len(menuFix),
                  '/'.join(sorted(set(s.menuPage for s in menuFix))) or 'no page',
-                 len(menuRows) - len(menuFix)))
+                 len([r for r in menuRows if r[1] == HOTKEY_PAGE]), hotkeyFix,
+                 len(menuRows) - len(menuFix) - len([r for r in menuRows if r[1] == HOTKEY_PAGE])))
         return 0
 
     menuOut = []
@@ -994,22 +1131,27 @@ def run(root, out, check):
         choices = s.choices if s.choices else s.devChoices
         if choices:
             kind = 'choice'
+        if s.hotkey:
+            kind = 'hotkey'
         applies = when_it_applies(s)
+        label = s.label if s.annotated else (s.devLabel or s.key)
         menuOut.append(
             '    {%s, %s, %s, %s,\n     %s,\n     MenuKind::%s, %s, %s, %s, %d, %s, %s, %s, %d,\n'
-            '     MenuTier::%s, %s, %s},' % (
+            '     MenuTier::%s, %s, %s, %s, %s, %s, %s},' % (
                 c_string(s.section), c_string(s.key),
-                c_string(s.label if s.annotated else s.key),
+                c_string(label),
                 c_string(summarise(s.description)),
                 c_string(s.description),
                 {'toggle': 'Toggle', 'number': 'Number', 'text': 'Text',
-                 'choice': 'Choice'}[kind],
+                 'choice': 'Choice', 'hotkey': 'Hotkey'}[kind],
                 c_string(s.value), c_string(lo or ''), c_string(hi or ''), precision,
                 c_string('|'.join(choices)),
                 'true' if s.percent else 'false',
                 'true' if s.headset else 'false',
                 {None: 0, 'live': 1, 'restart': 2}[applies],
-                tier, c_string(page), c_string(s.group)))
+                tier, c_string(page), c_string(s.group),
+                c_string(number_text(s.step) or ''), c_string(s.unit), c_string(s.zero),
+                'true' if s.signed else 'false'))
     os.makedirs(out, exist_ok=True)
     menu_path = os.path.join(out, 'menu_schema.inc')
     with open(menu_path, 'w', encoding='utf-8', newline='\r\n') as f:
@@ -1471,7 +1613,7 @@ def self_test():
     expect_in(name, wrote, '{"advanced", "thing"')
     expect_in(name, wrote, '{"experimental", "thing"')
 
-    # A sentence that starts `word =`. cull_guard_channel's explanation did,
+    # A sentence that starts `word =`. A developer key's explanation once did,
     # and the menu grew a second Text row for the key whose default was the
     # sentence's next words, while the real row lost the paragraph above it.
     # The same words wrapped so no line starts with the key are the fix.
@@ -1482,7 +1624,7 @@ def self_test():
                        '#thing = both\n'), thing, 1)
     expect_in(name, said, 'start like a setting')
     expect_in(name, said, 'edvr.ini:3  advanced.thing')
-    # The shape settlement_detail's block had in [fix]: a dotted name, not a key
+    # The shape the retired settlement-detail block had in [fix]: a dotted name, not a key
     # the code reads, so no duplicate and no row -- but it cut the paragraph
     # above it off from the real key, whose hint became "changing anything."
     name = 'sentence-with-dotted-name'
@@ -1510,6 +1652,113 @@ def self_test():
     wrote = case(name, '[advanced]\n# A thing, and what it does. Live.\n#thing = 1\n', thing, 0)
     expect_in(name, wrote, '{"advanced", "thing", "thing", "A thing, and what it does."')
 
+    # The Hotkeys page (2026-10-08): in [hotkey] the annotation that carries
+    # `hotkey` IS the tier -- ui: a row for everyone (Fix), dev: a row only in
+    # developer mode (Advanced) -- and the section is the page. The fixture is the
+    # shape of the shipped block: two ui: keys, a dev: key with its own label, a
+    # plain key beside them (a row of nobody's), all read as text.
+    hotkey_ini = ('[hotkey]\n'
+                  '# Open the menu. Live.\n'
+                  '# ui: Menu key | hotkey | live\n'
+                  'menu = F8\n\n'
+                  '# Toggle it. Live.\n'
+                  '# ui: Toggle key | hotkey\n'
+                  'toggle = SCROLLLOCK\n\n'
+                  '# Log a census. Empty is off. Live.\n'
+                  '# dev: label Census key | hotkey\n'
+                  '#census =\n\n'
+                  '# Read the game\'s bindings. Live.\n'
+                  'read_game_bindings = 1\n')
+    hotkey_reads = {'a.cpp': ('auto m = cfg.getString("hotkey.menu", "F8");\n'
+                              'auto t = cfg.getString("hotkey.toggle", "SCROLLLOCK");\n'
+                              'auto c = cfg.getString("hotkey.census", "");\n'
+                              'bool r = cfg.getBool("hotkey.read_game_bindings", true);\n')}
+    name = 'hotkey-tiers'
+    wrote = case(name, hotkey_ini, hotkey_reads, 0)
+    expect_in(name, wrote, 'MenuKind::Hotkey, "F8", "", "", 2, "", false, false, 1,\n     MenuTier::Fix, "hotkeys", ""')
+    expect_in(name, wrote, 'MenuKind::Hotkey, "SCROLLLOCK"')
+    expect_in(name, wrote, '{"hotkey", "census", "Census key"')
+    expect_in(name, wrote, 'MenuKind::Hotkey, "", "", "", 2, "", false, false, 1,\n     MenuTier::Advanced, "hotkeys", ""')
+    expect_not_in(name, wrote, 'read_game_bindings')
+    expect_not_in(name, wrote, 'SettingKind::Hotkey')   # the installer's window shows [fix] only
+    if wrote.count('MenuTier::Advanced, "hotkeys"') != 1 or wrote.count('MenuTier::Fix, "hotkeys"') != 2:
+        failures.append('%s: expected two Fix-tier hotkey rows and one Advanced' % name)
+    # The token is the contract: an annotated [hotkey] key without it is a row
+    # that was meant and would be silently absent.
+    name = 'hotkey-token-missing'
+    said = case(name, hotkey_ini.replace('# ui: Menu key | hotkey | live', '# ui: Menu key | live'),
+                hotkey_reads, 1)
+    expect_in(name, said, 'needs the `hotkey` token')
+    expect_in(name, said, 'hotkey.menu')
+    # ...and it belongs to [hotkey] and nowhere else.
+    name = 'hotkey-token-elsewhere'
+    said = case(name, '[fix]\n# A key. Live.\n# ui: A key | hotkey\nkeyish = F9\n',
+                {'a.cpp': 'auto k = cfg.getString("fix.keyish", "");\n'}, 1)
+    expect_in(name, said, 'belongs to a [hotkey] setting')
+    # A hotkey row is a string the code reads with getString.
+    name = 'hotkey-not-a-string'
+    said = case(name, hotkey_ini, {'a.cpp': hotkey_reads['a.cpp'].replace(
+        'cfg.getString("hotkey.menu", "F8")', 'cfg.getInt("hotkey.menu", 0)')}, 1)
+    expect_in(name, said, 'hotkey.menu')
+    # A Fix-tier hotkey row has to say when a change applies, like every other.
+    name = 'hotkey-silent'
+    said = case(name, hotkey_ini.replace('# Open the menu. Live.', '# Open the menu.')
+                .replace('# ui: Menu key | hotkey | live', '# ui: Menu key | hotkey'), hotkey_reads, 1)
+    expect_in(name, said, 'do not say when they take effect')
+    expect_in(name, said, 'hotkey.menu')
+    # `dev: hidden` keeps a developer key off the page entirely.
+    name = 'hotkey-dev-hidden'
+    wrote = case(name, hotkey_ini.replace('# dev: label Census key | hotkey', '# dev: hidden'),
+                 hotkey_reads, 0)
+    expect_not_in(name, wrote, 'census')
+
+    # The Explorer Cam page (2026-10-08): `menu explorer_cam` puts a [fix] number row on its own page for everyone (Fix tier), and
+    # step / unit / zero / signed shape the row (0.01 m, "+0.15 m", "0 ms (exact)"). The two fallback keys the head joint replaced
+    # are `ui: hidden`: neither schema gets a row for them, however the neighbours are annotated.
+    explorer_ini = ('[fix]\n'
+                    '# Fallback eye height, used only when the head joint cannot be read. Live.\n'
+                    '# ui: hidden -- fallback only | range 0.5..2.5 | recommended 1.68\n'
+                    'eye_up = 1.68\n\n'
+                    '# Eye height: raises or lowers the view, in metres. Live.\n'
+                    '# ui: Eye height | range -0.5..0.5 | step 0.01 | unit m | signed | recommended 0.15 | live | menu explorer_cam\n'
+                    'trim_up = 0.15\n\n'
+                    '# Smoothing in milliseconds, 0 = exact. Live.\n'
+                    '# ui: Smoothing | range 0..200 | step 10 | unit ms | zero exact | recommended 0 | live | menu explorer_cam\n'
+                    'smooth = 0\n')
+    explorer_reads = {'a.cpp': ('float u = cfg.getFloat("fix.eye_up", 1.68f);\n'
+                                'float t = cfg.getFloat("fix.trim_up", 0.15f);\n'
+                                'int s = cfg.getInt("fix.smooth", 0);\n')}
+    name = 'explorer-page'
+    wrote = case(name, explorer_ini, explorer_reads, 0)
+    expect_in(name, wrote, 'MenuKind::Number, "0.15", "-0.5", "0.5", 2, "", false, false, 1,\n'
+                           '     MenuTier::Fix, "explorer_cam", "", "0.01", "m", "", true}')
+    expect_in(name, wrote, 'MenuKind::Number, "0", "0", "200", 0, "", false, false, 1,\n'
+                           '     MenuTier::Fix, "explorer_cam", "", "10", "ms", "exact", false}')
+    expect_not_in(name, wrote, 'eye_up')
+    if wrote.count('"explorer_cam"') != 2:
+        failures.append('%s: expected exactly two rows on the explorer_cam page, found %d'
+                        % (name, wrote.count('"explorer_cam"')))
+    # A row that does not use the tokens carries empty ones, so every other page is unchanged.
+    name = 'explorer-page-plain-rows'
+    wrote = case(name, '[fix]\n# A thing. Live.\n# ui: Thing | range 0..5 | menu fixes\nthing = 2\n',
+                 {'a.cpp': 'int t = cfg.getInt("fix.thing", 2);\n'}, 0)
+    expect_in(name, wrote, 'MenuTier::Fix, "fixes", "", "", "", "", false}')
+    # The tokens belong to number rows, and a step is a positive number.
+    name = 'explorer-step-on-a-switch'
+    said = case(name, '[fix]\n# A switch. Live.\n# ui: Switch | unit m | menu fixes\nswitch = 1\n',
+                {'a.cpp': 'bool b = cfg.getBool("fix.switch", true);\n'}, 1)
+    expect_in(name, said, 'fix.switch')
+    expect_in(name, said, 'shape a number row')
+    for bad in ('0', '-0.01', 'abc', '0.0'):
+        name = 'explorer-bad-step-' + bad
+        said = case(name, ('[fix]\n# A number. Live.\n# ui: Number | range 0..5 | step %s | menu fixes\nnumber = 2\n' % bad),
+                    {'a.cpp': 'int n = cfg.getInt("fix.number", 2);\n'}, 1)
+        expect_in(name, said, '`step %s` is not a positive number' % bad)
+    # A page nobody built is refused by name, as ever.
+    name = 'explorer-unknown-page'
+    said = case(name, '[fix]\n# A number. Live.\n# ui: Number | range 0..5 | menu explorer\nnumber = 2\n',
+                {'a.cpp': 'int n = cfg.getInt("fix.number", 2);\n'}, 1)
+    expect_in(name, said, 'explorer_cam')
     shutil.rmtree(base, ignore_errors=True)
     if failures:
         print('gen_settings_schema: self-test FAILED')

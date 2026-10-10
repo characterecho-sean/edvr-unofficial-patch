@@ -32,31 +32,13 @@
 #include "../../src/common/config.h"
 #include "../../src/common/frame_flag.h"
 #include "../../src/common/timing.h"
-#include "../../src/d3d11/eye_origin_trace.h"
 #include "../../src/d3d11/glitch_frame.h"
-#include "../../src/d3d11/pose_reader_watch.h"
-#include "../../src/d3d11/transition_flash_eye_base.h"
 
 namespace edvr {
-// Linker stubs: this rig drives glitch_frame.cpp alone, the way it always
-// has, without the modules it taps, which need CodeHook and the game.
-// First pose_reader_watch.cpp (also needing a hardware breakpoint):
-// advanced.eye_origin_readers reads as permanently off here, its dump
-// section and per-frame columns as empty.
-bool poseReaderWatchOn() { return false; }
-bool poseReaderTakeSwapTrigger(uint32_t*) { return false; }
-PoseReaderFrameSnapshot poseReaderWatchFrameSnapshot() { return PoseReaderFrameSnapshot{}; }
-uint32_t poseReaderWatchTableCount() { return 0; }
-PoseReaderTableEntry poseReaderWatchTableEntry(uint32_t) { return PoseReaderTableEntry{}; }
-// Same reason again, for transition_flash_eye_base.cpp (round 6's consumer
-// hook and writer watch, also needing CodeHook and the game): advanced.
-// transition_flash_eye_base reads as permanently off here, its per-frame
-// columns as empty/zero.
-void transitionFlashEyeBaseNoteDetectorVerdict(uint32_t, bool) {}
-void transitionFlashEyeBaseNoteSceneCamera(uint32_t, const float*, bool, const GlitchSceneGeometry&, bool,
-                                            GlitchSceneDecision) {}
-void transitionFlashEyeBaseNoteSceneCB(uint32_t, const void*, size_t, const GlitchSceneGeometry&, bool) {}
-EyeBaseFrameSnapshot transitionFlashEyeBaseFrameSnapshot() { return EyeBaseFrameSnapshot{}; }
+// Linker stub: this rig drives glitch_frame.cpp alone, without the engine
+// fix's module (transition_flash_eye_base.cpp, which needs CodeHook and the
+// game). The camera-CB tap it would run is a no-op here.
+void transitionFlashEyeBaseNoteSceneCB(uint32_t, const void*, size_t) {}
 }  // namespace edvr
 
 using namespace edvr;
@@ -64,6 +46,31 @@ using namespace edvr;
 namespace {
 
 int g_fails = 0;
+
+// The detector's tuning used to be twelve advanced.transition_flash_* keys read
+// at install; it is a constant struct now (glitch_frame.h) and this rig sets
+// its own through glitchFrameSetTuningForTest. tune() keeps the call sites
+// reading as they did: the key name without its prefix, the value as text.
+// The baseline is what the suite was written against: a separation memory
+// that ACTS and no burst governor (limit 30).
+GlitchTuning g_tune;
+void resetTuning() {
+    g_tune = GlitchTuning{};
+    g_tune.separationMode = 2;
+    g_tune.burstLimit = 30;
+    glitchFrameSetTuningForTest(g_tune);
+}
+void tune(const char* key, const char* value) {
+    const std::string k(key), v(value);
+    if (k == "repeat_percent") g_tune.repeatPercent = static_cast<float>(atof(value));
+    else if (k == "separation") g_tune.separationMode = v == "act" ? 2u : (v == "off" ? 0u : 1u);
+    else if (k == "burst_limit") g_tune.burstLimit = static_cast<uint32_t>(atoi(value));
+    else if (k == "burst_window") g_tune.burstWindow = static_cast<uint32_t>(atoi(value));
+    else if (k == "drift_pct") g_tune.driftPct = static_cast<float>(atof(value));
+    else if (k == "max_consecutive") g_tune.maxConsecutive = static_cast<uint32_t>(atoi(value));
+    else { printf("  FAIL  unknown tuning key %s\n", key); ++g_fails; }
+    glitchFrameSetTuningForTest(g_tune);
+}
 
 void ok(const char* what) { printf("  ok    %s\n", what); }
 
@@ -220,17 +227,6 @@ int main(int argc, char** argv) {
         "[fix]\r\n"
         "transition_flash = 1\r\n"
         "[advanced]\r\n"
-        "transition_flash_units = 2000\r\n"
-        "transition_flash_speed_factor = 8.0\r\n"
-        "transition_flash_max_consecutive = 2\r\n"
-        // The suite below was written against a separation memory that ACTS and
-        // against no burst governor, and it still tests those mechanisms -- so it
-        // states them rather than inheriting whatever the shipped default becomes.
-        // The default is log-only now (1e step 2); fixture L covers that, and the
-        // governor fixture covers the bound. Everything else here is asking "does
-        // the memory recognise this?", which needs it switched on.
-        "transition_flash_separation = act\r\n"
-        "transition_flash_burst_limit = 30\r\n"
         "camera_buffer_bytes = 5376\r\n"
         "camera_buffer_offset = 1100\r\n"
         "[log]\r\n"
@@ -240,6 +236,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     Config::get().init(scratch);
+    resetTuning();
     installGlitchFrameFix();
 
     check("the detector arms", glitchFrameNeedsEyeDraws(),
@@ -350,7 +347,7 @@ int main(int argc, char** argv) {
     // A harness that cannot produce the field failure proves nothing about a
     // change that makes it stop -- and this file's own history has an assertion
     // that passed against a detector that withheld nothing at all.
-    Config::get().set("advanced.transition_flash_repeat_percent", "0");
+    tune("repeat_percent", "0");
     installGlitchFrameFix();
     settle(b, x, 10);
     const uint32_t unsuppressed = cascadeFlips(b, x, 568000.0f, 30);
@@ -360,7 +357,7 @@ int main(int argc, char** argv) {
               " of 30 frames withheld; the field cadence is one in three, so a "
               "low number here means the fixture is not exercising the bug");
 
-    Config::get().set("advanced.transition_flash_repeat_percent", "2.0");
+    tune("repeat_percent", "2.0");
     installGlitchFrameFix();
     settle(b, x, 10);
 
@@ -725,7 +722,7 @@ int main(int argc, char** argv) {
         // The detector was right both times; the test was measuring the wrong
         // thing. Isolating the invariant under test is what makes a pass mean
         // what the name says.
-        Config::get().set("advanced.transition_flash_repeat_percent", "0");
+        tune("repeat_percent", "0");
         installGlitchFrameFix();
 
         // LONGER THAN THE REBASE COOLDOWN, which is 120 frames.
@@ -770,7 +767,7 @@ int main(int argc, char** argv) {
 
         // Back on, for the complementarity case below -- which is about the
         // separation memory doing the work the shell cannot.
-        Config::get().set("advanced.transition_flash_repeat_percent", "2.0");
+        tune("repeat_percent", "2.0");
         installGlitchFrameFix();
     }
 
@@ -796,7 +793,7 @@ int main(int argc, char** argv) {
         // rebasing and a 120-frame cooldown swallows the fixture, so it passed
         // with the park switched off, vacuously. Tuning a fixture until it fails
         // for the reason you wanted is not the same as testing the thing.
-        Config::get().set("advanced.transition_flash_repeat_percent", "0");
+        tune("repeat_percent", "0");
         installGlitchFrameFix();
 
         float nx = 1500.0f;
@@ -832,7 +829,7 @@ int main(int argc, char** argv) {
               caught, "the park's tolerance is swallowing frames well outside it");
         x += 30.0f;
         frame(b, x, 0.0f, 0.0f);
-        Config::get().set("advanced.transition_flash_repeat_percent", "2.0");
+        tune("repeat_percent", "2.0");
         installGlitchFrameFix();
     }
 
@@ -1026,7 +1023,7 @@ int main(int argc, char** argv) {
         // with the memory on, the probe is suppressed by a size the fixture
         // itself taught, and the shell rule under test is never reached. Same
         // collision fixtures F and H are set up around.
-        Config::get().set("advanced.transition_flash_repeat_percent", "0");
+        tune("repeat_percent", "0");
         installGlitchFrameFix();
 
         struct Rec { float x, y, z; uint32_t eye; };
@@ -1089,7 +1086,7 @@ int main(int argc, char** argv) {
               markedBad,
               "frame 11645, the recorded wrong viewpoint, is still being treated as "
               "an auxiliary pass");
-        Config::get().set("advanced.transition_flash_repeat_percent", "2.0");
+        tune("repeat_percent", "2.0");
         settle(b, x, 60);
     }
 
@@ -1146,8 +1143,8 @@ int main(int argc, char** argv) {
         // reported flashes through.
         //
         // Two writes per frame here, which is what the field frame carried.
-        Config::get().set("advanced.transition_flash_separation", "off");
-        Config::get().set("advanced.transition_flash_burst_limit", "3");
+        tune("separation", "off");
+        tune("burst_limit", "3");
         installGlitchFrameFix();
         settle(b, x, 200);
         uint32_t multi = 0;
@@ -1204,9 +1201,9 @@ int main(int argc, char** argv) {
     // models yet -- and the drift rule that will handle THIS storm properly is
     // not written.
     {
-        Config::get().set("advanced.transition_flash_separation", "off");
-        Config::get().set("advanced.transition_flash_burst_limit", "3");
-        Config::get().set("advanced.transition_flash_burst_window", "60");
+        tune("separation", "off");
+        tune("burst_limit", "3");
+        tune("burst_window", "60");
         installGlitchFrameFix();
         settle(b, x, 200);
 
@@ -1248,8 +1245,8 @@ int main(int argc, char** argv) {
     {
         const float kFirst = 17515.0f, kSecond = 17551.0f;   // 0.2% apart
 
-        Config::get().set("advanced.transition_flash_burst_limit", "30");
-        Config::get().set("advanced.transition_flash_separation", "act");
+        tune("burst_limit", "30");
+        tune("separation", "act");
         installGlitchFrameFix();
         settle(b, x, 200);
         oneFrameExcursion(b, x, kFirst);
@@ -1266,7 +1263,7 @@ int main(int argc, char** argv) {
               "the second wake is still being excused by the first with "
               "nothing about the change that stops it");
 
-        Config::get().set("advanced.transition_flash_separation", "log");
+        tune("separation", "log");
         installGlitchFrameFix();
         settle(b, x, 200);
         oneFrameExcursion(b, x, kFirst);
@@ -1290,8 +1287,8 @@ int main(int argc, char** argv) {
     //   L  two low wakes minutes apart, 17515 then 17551 units, where the first
     //      taught the memory to excuse the second.
     {
-        Config::get().set("advanced.transition_flash_separation", "act");
-        Config::get().set("advanced.transition_flash_burst_limit", "30");
+        tune("separation", "act");
+        tune("burst_limit", "30");
 
         // O -- must certify quickly and stop costing frames.
         installGlitchFrameFix();
@@ -1363,9 +1360,9 @@ int main(int argc, char** argv) {
                                         6225.0f, 6500.0f, 6803.0f, 8769.0f};
 
         // M, first direction: the rule off, the storm real.
-        Config::get().set("advanced.transition_flash_separation", "act");
-        Config::get().set("advanced.transition_flash_burst_limit", "30");
-        Config::get().set("advanced.transition_flash_drift_pct", "0");
+        tune("separation", "act");
+        tune("burst_limit", "30");
+        tune("drift_pct", "0");
         installGlitchFrameFix();
         settle(b, x, 200);
         uint32_t preWithheld = 0;
@@ -1393,7 +1390,7 @@ int main(int argc, char** argv) {
         // be handed to the separation path and withheld 8 of 8. The system's
         // own decay is the isolation: entries unseen for a runaway window no
         // longer match, which is also the semantics the field build runs on.
-        Config::get().set("advanced.transition_flash_drift_pct", "10");
+        tune("drift_pct", "10");
         installGlitchFrameFix();
         settle(b, x, 2100);
         uint32_t postWithheld = 0;
@@ -1513,8 +1510,8 @@ int main(int argc, char** argv) {
     // floor broke the detector". Fixtures here are not isolated; anything
     // asserting a jump IS caught has to say which rules it is asking about.
     auto wakeDrop = [&](float lx, float ly, float lz, const char* sep) {
-        Config::get().set("advanced.transition_flash_separation", sep);
-        Config::get().set("advanced.transition_flash_max_consecutive", "3");
+        tune("separation", sep);
+        tune("max_consecutive", "3");
         installGlitchFrameFix();
         Buffer r;
         float wx = 2000.0f, wy = 2200.0f, wz = 430.0f;
@@ -1541,67 +1538,26 @@ int main(int argc, char** argv) {
               "the floor is now high enough to switch the detector off, which "
               "buys silence rather than correctness");
 
-        Config::get().set("advanced.transition_flash_separation", "act");
-        Config::get().set("advanced.transition_flash_max_consecutive", "2");
+        tune("separation", "act");
+        tune("max_consecutive", "2");
         installGlitchFrameFix();
     }
 
     // --- 10. The churn instrument (spec §1g) --------------------------------
     //
-    // The cull guard's wider frustum admits more render passes and the
-    // recognition machinery churns with the margin -- 6bp measured 29
-    // recognitions at guard-off against 3,277 at half margin, 36 withheld.
-    // Whether that cost is this table THRASHING (H1) or genuine novelty (H2)
-    // decides between two different fixes, so the instrument ships first and
-    // the mechanism waits for a field session. These cells pin the
-    // instrument itself: the channel round-trips, the attribution splits
-    // move only while the lie is LIVE (stage 2, not stage 1), and the
-    // eviction and relearn counters count exactly the thing they claim.
-    // Nothing here asserts a decision change, because the instrument must
-    // not make one.
+    // The recognition machinery churned with the terrain guard's margin (the
+    // guard was removed 2026-10-09) -- 6bp measured 29 recognitions at guard-off
+    // against 3,277 at half margin, 36 withheld. Whether that cost is this table
+    // THRASHING (H1) or genuine novelty (H2) decides between two different
+    // fixes, so the instrument ships first and the mechanism waits for a field
+    // session. These cells pin the instrument itself: the eviction and relearn
+    // counters count exactly the thing they claim. Nothing here asserts a
+    // decision change, because the instrument must not make one.
     //
-    // The ring's per-frame guard stamp is read through the same guardPacked
-    // reading the splits are derived from, so the splits pin that path; the
-    // stamp's printf itself runs only in a dump, which logging-off tests do
-    // not exercise. The shell-side eviction counter mirrors the separation
-    // counter's tested shape; there is no measured 64-slot shell eviction to
-    // replay, and staging one synthetically would take thousands of frames
-    // to say nothing a code read does not -- stated here rather than tested
-    // silently.
-    {
-        // The channel: silence, both stages, the clamps, and off again.
-        check("cull channel: silence reads as guard-off",
-              cullGuardStatePacked() == 0,
-              "something published before the guard ever did");
-        announceCullGuardState(1, 1.0607f, 1.0f);
-        CullGuardState g = decodeCullGuardState(cullGuardStatePacked());
-        check("cull channel: stage 1 round-trips",
-              g.stage == 1 && g.hPerMille == 61 && g.vPerMille == 0,
-              "stage " + std::to_string(g.stage) + ", h " +
-                  std::to_string(g.hPerMille) + ", v " +
-                  std::to_string(g.vPerMille) + " -- expected 1/61/0");
-        announceCullGuardState(2, 1.25f, 1.10f);
-        g = decodeCullGuardState(cullGuardStatePacked());
-        check("cull channel: stage 2 round-trips",
-              g.stage == 2 && g.hPerMille == 250 && g.vPerMille == 100,
-              "stage " + std::to_string(g.stage) + ", h " +
-                  std::to_string(g.hPerMille) + ", v " +
-                  std::to_string(g.vPerMille) + " -- expected 2/250/100");
-        // Saturation clamps to the honest edge, never to zero: a margin too
-        // large to represent must still stamp as a live margin, and a factor
-        // below 1 (or NaN) as no widening.
-        announceCullGuardState(7, 200.0f, 0.5f);
-        g = decodeCullGuardState(cullGuardStatePacked());
-        check("cull channel: clamps saturate, not lie",
-              g.stage == 2 && g.hPerMille == 4095 && g.vPerMille == 0,
-              "stage " + std::to_string(g.stage) + ", h " +
-                  std::to_string(g.hPerMille) + ", v " +
-                  std::to_string(g.vPerMille) + " -- expected 2/4095/0");
-        announceCullGuardState(0, 1.0f, 1.0f);
-        check("cull channel: off clears to silence",
-              cullGuardStatePacked() == 0,
-              "stage 0 must be indistinguishable from nobody publishing");
-    }
+    // The shell-side eviction counter mirrors the separation counter's tested
+    // shape; there is no measured 64-slot shell eviction to replay, and staging
+    // one synthetically would take thousands of frames to say nothing a code
+    // read does not -- stated here rather than tested silently.
     // A FRESH BUFFER AND A FRESH, SMALL TRACK for the remaining cells, and
     // the reason is a trap the first draft of this section fell straight
     // into. The suite's main track sits near two million units by now, so
@@ -1631,52 +1587,7 @@ int main(int argc, char** argv) {
                   "after the buffer switch, so nothing below can be trusted");
     }
     {
-        // The attribution splits. Same detector, same shapes; the only thing
-        // varied is what the channel says, so any counter movement is the
-        // attribution and not the behaviour.
-        const GlitchFrameChurnStats s0 = glitchFrameChurnStats();
-        const bool offMarked = oneFrameExcursion(m, mx, 21000.0f);
-        const GlitchFrameChurnStats s1 = glitchFrameChurnStats();
-        check("splits: a guard-off withhold is not counted under the guard",
-              offMarked && s1.withheldGuardLive == s0.withheldGuardLive,
-              offMarked ? "withheldGuardLive moved with the guard off"
-                        : "the control excursion was not withheld at all, so "
-                          "the assertion is vacuous");
-
-        announceCullGuardState(2, 1.061f, 1.0f);
-        settle(m, mx, 200);
-        const bool liveMarked = oneFrameExcursion(m, mx, 26000.0f);
-        const GlitchFrameChurnStats s2 = glitchFrameChurnStats();
-        check("splits: a withhold under the live lie is counted",
-              liveMarked && s2.withheldGuardLive == s1.withheldGuardLive + 1,
-              liveMarked ? "withheldGuardLive did not move under stage 2"
-                         : "the guarded excursion was not withheld at all");
-
-        // Recognitions under the lie: the fixture-5 cascade shape, certified
-        // by its third mark, suppressing from the fourth flip on.
-        cascadeFlips(m, mx, 30000.0f, 40);
-        const GlitchFrameChurnStats s3 = glitchFrameChurnStats();
-        check("splits: recognitions under the live lie are counted",
-              s3.suppressedGuardLive >= s2.suppressedGuardLive + 8,
-              std::to_string(s3.suppressedGuardLive - s2.suppressedGuardLive) +
-                  " recognitions counted under the guard; the cascade should "
-                  "have supplied about ten");
-
-        // Stage 1 is supersampling only -- the frustum is still the truth,
-        // so nothing is tallied under the guard.
-        announceCullGuardState(1, 1.25f, 1.0f);
-        settle(m, mx, 200);
-        const bool stage1Marked = oneFrameExcursion(m, mx, 44000.0f);
-        const GlitchFrameChurnStats s4 = glitchFrameChurnStats();
-        check("splits: stage 1 does not count as the guard",
-              stage1Marked && s4.withheldGuardLive == s3.withheldGuardLive,
-              stage1Marked ? "a stage-1 withhold was tallied as guard-live"
-                           : "the stage-1 excursion was not withheld at all");
-        announceCullGuardState(0, 1.0f, 1.0f);
-    }
-    {
-        // The learning-cost counters, guard-off on purpose: the tax exists
-        // whatever the guard is doing -- the channel only attributes it.
+        // The learning-cost counters.
         //
         // Twenty distinct magnitudes, each 17% above the last -- outside the
         // 2% match window and the 10% drift band -- every one novel to the
@@ -1730,7 +1641,7 @@ int main(int argc, char** argv) {
     // next occurrence of ~6868 was being charged all three marks again.
     {
         shutdownGlitchFrameFix();
-        writeIni(scratch,kIni); Config::get().init(scratch); installGlitchFrameFix();
+        writeIni(scratch,kIni); Config::get().init(scratch); resetTuning(); installGlitchFrameFix();
         Buffer m; float mx=10000.f;
         settle(m,mx,2400); // expire the earlier fixtures' observation tables
         uint32_t training=0;
@@ -1852,7 +1763,7 @@ int main(int argc, char** argv) {
     for(unsigned disabled=0;disabled<2;++disabled){
         shutdownGlitchFrameFix();
         writeIni(scratch,disabled?"[fix]\ntransition_flash=0\n":kIni);
-        Config::get().init(scratch);installGlitchFrameFix();
+        Config::get().init(scratch);resetTuning();installGlitchFrameFix();
         Buffer scene,aux;aux.res=reinterpret_cast<const void*>(0x4545);
         constexpr unsigned count=128;uint32_t pool[count*84]{};
         const void* resource=reinterpret_cast<const void*>(0x9898);
@@ -1893,105 +1804,35 @@ int main(int argc, char** argv) {
         check("missing eye sample retains legacy behavior",glitchFrameMarked()==!disabled);end();
     }
 
-    // --- advanced.eye_origin_trace: pure logic (eye_origin_trace.h) -----
+    // --- the engine fix's tap availability (review of 33ffc76e, finding 1) -----
     //
-    // No detector state touched here -- the whole point of putting the
-    // dedupe table, the mask and the dump-window math in their own header
-    // was to be able to drive them without the game (and without even the
-    // rest of this file's Buffer/frame() fixture).
+    // "Armed" may only be reported when the camera-buffer tap can deliver a
+    // fill: the detector must be OBSERVING a 5376-byte buffer. Each of these
+    // writes its own ini and reinstalls.
     {
-        using namespace edvr::eot;
-
-        StackTable t;
-        const uint64_t hashA = 111, hashB = 222;
-        const uint8_t idA1 = t.intern("0x1000/0x2000", hashA);
-        const uint8_t idA2 = t.intern("0x1000/0x2000", hashA);
-        check("dedupe: the same chain+hash reuses one id", idA1 == idA2 && t.used() == 1);
-        check("dedupe: a repeated intern counts the write", t.entry(idA1).count == 2);
-        const uint8_t idB = t.intern("0x3000/0x4000", hashB);
-        check("dedupe: a different chain gets a different id", idB != idA1 && t.used() == 2);
-
-        // A real FNV-1a-64 collision (same hash, different text) must not
-        // merge two different stacks' evidence under one id.
-        const uint8_t idC1 = t.intern("stack-C", 999);
-        const uint8_t idC2 = t.intern("stack-D", 999);
-        check("dedupe: a hash collision opens a new entry rather than merging",
-              idC1 != idC2 && t.entry(idC1).count == 1 && t.entry(idC2).count == 1);
-
-        // Overflow: fill the table to its cap with distinct chains, then
-        // ask for one more.
-        StackTable full;
-        char chain[32];
-        uint32_t overflowsSeen = 0;
-        for (uint32_t i = 0; i < kMaxStacks; ++i) {
-            snprintf(chain, sizeof(chain), "0x%u", i);
-            if (full.intern(chain, 1000 + i) == kStackOverflowId) ++overflowsSeen;
+        struct Case { const char* name; const char* ini; bool tap; bool detector; };
+        const Case cases[] = {
+            {"defaults", "[fix]\ntransition_flash=1\n", true, true},
+            {"the explicit shipped geometry", "[fix]\ntransition_flash=1\n[advanced]\ncamera_buffer_bytes=5376\ncamera_buffer_offset=1100\n", true, true},
+            {"buffer size 0", "[fix]\ntransition_flash=1\n[advanced]\ncamera_buffer_bytes=0\n", false, false},
+            {"offset outside the buffer", "[fix]\ntransition_flash=1\n[advanced]\ncamera_buffer_offset=5000\n", false, false},
+            {"a buffer of another size", "[fix]\ntransition_flash=1\n[advanced]\ncamera_buffer_bytes=4096\ncamera_buffer_offset=100\n", false, true},
+            {"the fix switched off", "[fix]\ntransition_flash=0\n", true, false},
+        };
+        for (const Case& c : cases) {
+            shutdownGlitchFrameFix();
+            writeIni(scratch, c.ini);
+            Config::get().init(scratch);
+            resetTuning();
+            installGlitchFrameFix();
+            char why[256] = "";
+            const bool tap = glitchFrameEngineTapAvailable(why, sizeof(why));
+            check((std::string("tap availability: ") + c.name).c_str(), tap == c.tap,
+                  tap ? "the tap reported available" : why);
+            check((std::string("fallback detector runs: ") + c.name).c_str(), glitchFrameDetectorRuns() == c.detector,
+                  "the detector's willingness to watch differs");
+            if (!c.tap) check((std::string("a reason is given: ") + c.name).c_str(), why[0] != '\0', "no reason text");
         }
-        check("overflow: exactly kMaxStacks distinct chains all get real ids",
-              overflowsSeen == 0 && full.used() == kMaxStacks,
-              std::to_string(full.used()) + " used, " + std::to_string(overflowsSeen) + " overflowed early");
-        const uint8_t past = full.intern("one more, never seen before", 99999);
-        check("overflow: the (kMaxStacks+1)th distinct chain reports overflow",
-              past == kStackOverflowId && full.overflowed() == 1);
-        // A chain already in the table is still found after it is full --
-        // overflow means "cannot learn a NEW one", not "cannot look up".
-        const uint8_t again = full.intern("0x5", 1005);
-        check("overflow: a table at capacity still recognises a known chain",
-              again != kStackOverflowId && full.entry(again).count == 2);
-
-        // The eye-origin frame counter, separate from the write counter.
-        StackTable eyeT;
-        const uint8_t eid = eyeT.intern("eye-stack", 42);
-        eyeT.noteEyeOrigin(eid);
-        eyeT.noteEyeOrigin(eid);
-        check("eye-origin counter tracks matched-draw frames, not writes",
-              eyeT.entry(eid).count == 1 && eyeT.entry(eid).eyeFrames == 2);
-        eyeT.noteEyeOrigin(kStackNoneId);
-        eyeT.noteEyeOrigin(kStackOverflowId);
-        check("eye-origin counter ignores the none/overflow sentinels",
-              eyeT.entry(eid).eyeFrames == 2);
-
-        // The per-frame stack-id mask.
-        uint64_t mask = 0;
-        mask = addToMask(mask, 0);
-        mask = addToMask(mask, 63);
-        mask = addToMask(mask, 5);
-        check("mask: bits 0, 5 and 63 are set and nothing else",
-              mask == ((uint64_t(1) << 0) | (uint64_t(1) << 5) | (uint64_t(1) << 63)));
-        const uint64_t before = mask;
-        mask = addToMask(mask, 64);
-        mask = addToMask(mask, kStackNoneId);
-        mask = addToMask(mask, kStackOverflowId);
-        check("mask: an id past 63 (including the sentinels) cannot set a bit",
-              mask == before);
-
-        // Dump-window widening and selection.
-        PendingWindow w{};
-        check("window: inactive before any trigger", !w.active);
-        w = foldTrigger(w, 1000);
-        check("window: the first trigger opens [1000, 1060]",
-              w.active && w.lowFrame == 1000 && w.dueFrame == 1000 + kWindowFrames);
-        w = foldTrigger(w, 1010);
-        check("window: a later trigger inside the window widens dueFrame, not lowFrame",
-              w.lowFrame == 1000 && w.dueFrame == 1010 + kWindowFrames);
-        w = foldTrigger(w, 990);
-        check("window: an earlier trigger widens lowFrame",
-              w.lowFrame == 990 && w.dueFrame == 1010 + kWindowFrames);
-
-        check("selection: the frame just below the widened low edge is excluded",
-              !frameInWindow(990 - kWindowFrames - 1, w.lowFrame, w.dueFrame));
-        check("selection: the low edge itself is included",
-              frameInWindow(990 - kWindowFrames, w.lowFrame, w.dueFrame));
-        check("selection: dueFrame itself is included, one past it is not",
-              frameInWindow(w.dueFrame, w.lowFrame, w.dueFrame) &&
-              !frameInWindow(w.dueFrame + 1, w.lowFrame, w.dueFrame));
-
-        // Saturation: a trigger near frame 0 must not underflow the window
-        // test.
-        PendingWindow early = foldTrigger(PendingWindow{}, 10);
-        check("selection: a trigger near frame 0 saturates instead of underflowing",
-              frameInWindow(0, early.lowFrame, early.dueFrame) &&
-              !frameInWindow(0xFFFFFFFFu, early.lowFrame, early.dueFrame));
     }
 
     clearGlitchFrame();

@@ -208,23 +208,13 @@ namespace {
 // its CENTRE sits (outer-inner)/2 outward of straight ahead -- a centred
 // viewport scale scales about that point, not about the gaze. The formula
 // is validated by the field tuning it replaced: 0.70 on a Quest 3 and 0.60
-// on a Pimax both land within a degree of 46 through it. When the cull
-// guard's lie is live the game renders a nasal-widened span and the submit
-// crop keeps the true region, which moves the image centre; the guard's
-// published per-mille span ratio recomputes it.
+// on a Pimax both land within a degree of 46 through it.
 float effectiveScale() {
     float outer = 0.0f, inner = 0.0f;
     if (g_angleDeg <= 0.0f || !eyeTangents(&outer, &inner)) return g_scale;
 
-    float innerEff = inner;
-    const CullGuardState cg = decodeCullGuardState(cullGuardStatePacked());
-    if (cg.stage == 2) {
-        const float span = (outer + inner) * (1.0f + cg.hPerMille / 1000.0f);
-        innerEff = span - outer;
-        if (innerEff > outer) innerEff = outer;
-    }
-    const float halfSpan = (outer + innerEff) * 0.5f;
-    const float centerOut = (outer - innerEff) * 0.5f;
+    const float halfSpan = (outer + inner) * 0.5f;
+    const float centerOut = (outer - inner) * 0.5f;
     if (halfSpan < 1e-3f) return g_scale;
 
     const float target = tanf(g_angleDeg * 3.1415926535f / 180.0f);

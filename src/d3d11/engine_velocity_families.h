@@ -11,6 +11,10 @@ struct Family {
     uint64_t ps[5];
     bool flatOnly = false;
     uint64_t flatPs = 0;
+    bool vrOnly = false;   // keyed in the VR profiles alone (see the 2026-10-08 rows below)
+    // F2 (dxbc_skin_clone.h): the vertex shader has the game's skinning chain and takes the second skin in VR; the pairs that also
+    // export E to target 7 are kSkinPairs below. Never in the flat profile.
+    bool skinned = false;
 };
 constexpr Family kFamilies[] = {
     // 054658: both additional PSs draw certified moving station records;
@@ -36,14 +40,45 @@ constexpr Family kFamilies[] = {
     // AACFDCF2/CAD1F585 (EDHM-patched, reads t120) and BBE58E40/7311054A (an
     // SV_Position input); the flat census names them when they draw.
     {0x66DE2CADB1F4AE6Bull, "vs_66DE2CADB1F4AE6B", {0x864F1F949851B8DEull, 0xBBDE4E71FB78528Aull, 0, 0}, false, 0x235567BE2840B3EDull},
-    {0x61AE8EB05FDC18DDull, "vs_61AE8EB05FDC18DD", {0xFC43E42710010343ull, 0x451A82D4DD1BA254ull, 0x4504BC268E109C31ull, 0}},
+    {0x61AE8EB05FDC18DDull, "vs_61AE8EB05FDC18DD", {0xFC43E42710010343ull, 0x451A82D4DD1BA254ull, 0x4504BC268E109C31ull, 0}, false, 0, false, true},
     {0x436193B352A2897Eull, "vs_436193B352A2897E", {0x16940F576006BE65ull, 0x51EE1F922FD220B0ull, 0, 0}},
     {0x889A5279E68F0672ull, "vs_889A5279E68F0672", {0xB46E52A1E0B2F39Cull, 0xEBA95E15B0A66102ull, 0xD31DCAFA7C05CB47ull, 0}},
     // Epic flat cockpit shell: the real shader corpus proves the exported
     // t33 slot and byte-identical G-buffer/depth after the MRT6 patch.
     {0xBFE51414CC3024B4ull, "vs_BFE51414CC3024B4", {0xDB79AE788E049DFDull, 0, 0, 0}, true},
+    // 2026-10-08, F10 (6f47ea53, Explorer Cam, a walking settlement NPC; the F10 entries of
+    // docs/kinematic-motion-injection-2026-09-19.md). The NPC is a rigid body (17 base-0 records, read by 15 draws of
+    // 8B58 and 2 of 7B0D, certified joined, one rigid body to 0.2-0.8 mm) plus a skinned body (20 base != 0 records
+    // read by 7B0D, 114A and D99A draws, no previous pose by design). None of these pairs wrote MRT6, so 38.7% of the NPC's pixels
+    // (D3) kept a background slot under them (kind 4, stale, refused by the world route) and the rigid body had no
+    // motion. Keyed, the rigid records join (kind 1) and a skinned record lands in kind 3 (the camera term stands,
+    // no refusal): the emit leaves base != 0 records native, so they carry no marker. Each hash was recomputed
+    // (FNV-1a 64, log.cpp fnv1a64) from the dumped bytecode and each pair passed the corpus_identity harness on
+    // WARP: patched, created, reflected, o0..o3 and depth bit-identical, MRT6 = 2 slot + 1.
+    // VR only: these vertex shaders are also weapon_motion's first-person families (weapon_motion.cpp:92), and
+    // flat's foreground and source routing (flat_runtime.cpp, d.supported && weaponMotionFamilyVs) is qualified
+    // with them unkeyed. A flat key waits for a flat dump with an NPC.
+    {0x8B589D25B2A0ADDCull, "vs_8B589D25B2A0ADDC", {0x7268762D11A610F2ull, 0, 0, 0}, false, 0, true, true},
+    {0x7B0DC42D383F694Cull, "vs_7B0DC42D383F694C", {0x0DF03E64DF9DBEF1ull, 0, 0, 0}, false, 0, true, true},
+    {0x114AF608F86D9ED8ull, "vs_114AF608F86D9ED8", {0xA17504A2627767F2ull, 0, 0, 0}, false, 0, true, true},
+    {0xD99AFDC250D19A3Full, "vs_D99AFDC250D19A3F", {0xE86271E464CCDC1Dull, 0, 0, 0}, false, 0, true, true},
 };
 constexpr int kFamilyCount = static_cast<int>(sizeof(kFamilies) / sizeof(kFamilies[0]));
+// F2: the five measured skinned pairs (the NPC's shading pairs, 2026-10-08 F10/F11): the pixel shader exports the vertex shader's E to
+// target 7. A skinned family's other keyed pixel shaders (61AE with FC43 and 4504) keep their slot export and write nothing to target 7.
+struct SkinPair { uint64_t vs, ps; };
+constexpr SkinPair kSkinPairs[] = {
+    {0xD99AFDC250D19A3Full, 0xE86271E464CCDC1Dull},
+    {0x61AE8EB05FDC18DDull, 0x451A82D4DD1BA254ull},
+    {0x114AF608F86D9ED8ull, 0xA17504A2627767F2ull},
+    {0x7B0DC42D383F694Cull, 0x0DF03E64DF9DBEF1ull},
+    {0x8B589D25B2A0ADDCull, 0x7268762D11A610F2ull},
+};
+constexpr bool skinPair(uint64_t vs, uint64_t ps) noexcept {
+    for (const SkinPair& p : kSkinPairs)
+        if (p.vs == vs && p.ps == ps) return true;
+    return false;
+}
 // Historical marker-bearing pairs retained for compatibility. PROVENANCE
 // CORRECTION, 2026-09-28: every PS below is EDVR's generated substitution,
 // not a native game shader. Re-running engineVelocityPatchPs on the captured
@@ -97,10 +132,11 @@ inline int familyOfVs(uint64_t hash) noexcept {
 }
 inline int familyForProfile(uint64_t hash, bool flat) noexcept {
     const int family = familyOfVs(hash);
-    return family >= 0 && (!kFamilies[family].flatOnly || flat) ? family : -1;
+    return family >= 0 && (!kFamilies[family].flatOnly || flat) && (!kFamilies[family].vrOnly || !flat) ? family : -1;
 }
 inline bool keyedPs(int family, uint64_t hash, bool flat = false) noexcept {
     if (family < 0 || family >= kFamilyCount || !hash) return false;
+    if (flat && kFamilies[family].vrOnly) return false;
     for (uint64_t h : kFamilies[family].ps) if (h == hash) return true;
     return flat && kFamilies[family].flatPs == hash;
 }

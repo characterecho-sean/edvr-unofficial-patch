@@ -22,6 +22,8 @@ void flatCoveredDrawTests(ID3D11Device* dev,ID3D11DeviceContext* ctx,ID3D11Shade
                           unsigned width,unsigned height,edvr::FlatForegroundMotion::Inputs inputs,const float world[6][4],
                           ID3D11Buffer* sceneIb,Raster raster,ReadMap readMap) {
     using edvr::FlatForegroundMotion;
+    // The base map's contract: reasons 3, 5 and 6 for a draw with no history (the sibling pass, flat_foreground_sibling.h, replaces them).
+    FlatForegroundMotion::RigSiblingPass baseMap(false);
     inputs.gpuIdentity=true;inputs.identity={};inputs.certificate={};inputs.phaseX=inputs.phaseY=0;
     const auto place=[](float centre,float projection) {   // the quad's centre in NDC at w=1, and its half width .6 * projection
         Pose p{};p.projection=projection;p.mouse=centre/projection;return p;

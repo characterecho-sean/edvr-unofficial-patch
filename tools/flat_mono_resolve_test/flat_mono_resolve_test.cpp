@@ -6,7 +6,7 @@
 #include "../../src/d3d11/fsr3_engine.h"
 #include "../../src/d3d11/engine_velocity_emit.h"
 #include "../../src/d3d11/flat_hdr_crumbs.h"
-#include "../../src/d3d11/flat_context_isolation.h"
+#include "../../src/d3d11/flat_isolation_mode.h"
 #include "../../src/d3d11/flat_context_state.h"
 #include "../hdr_crumb_trail.h"
 #include <d3d11_1.h>
@@ -29,7 +29,7 @@ bool backendFail=false,backendReset=false,infiniteSeen=false;
 std::vector<std::string> resetEvents;
 // What the HDR route's breadcrumbs (flat_hdr_crumbs.h) were handed to breadcrumb(), in order: the lines edvr_breadcrumbs.txt would hold.
 std::vector<std::string> crumbLines;
-// The resolver's one log line per initialisation that says which isolation it chose (flat_context_isolation.h), in order.
+// The resolver's one log line per initialisation that says which isolation it chose (flat_isolation_mode.h), in order.
 std::vector<std::string> isolationLines;
 // Set by flat_context_isolation_gpu_tests.h: what the stub backend leaves bound, after its own ClearState. Null dirties nothing.
 void (*backendDirtyHook)(ID3D11DeviceContext*)=nullptr;
@@ -213,6 +213,7 @@ bool fsr3Evaluate(ID3D11DeviceContext* c,unsigned slot,ID3D11Texture2D* colour,I
 #include "flat_first_person_phase_gpu_tests.h"
 #include "flat_refusal_gpu_tests.h"
 #include "flat_steady_depth_gpu_tests.h"
+#include "flat_skin_gpu_tests.h"
 #include "flat_taa_history_depth_gpu_tests.h"
 #include "flat_context_isolation_gpu_tests.h"
 #include "flat_sdk_foreground_gpu_tests.h"
@@ -793,6 +794,27 @@ int main(int argc,char** argv) {
             std::printf("flat mono resolve: static scene: stale block %u/%u texels refused with the policy off, %u/%u with it on; "
                         "on vs no-slot texture difference %.5f px, block camera motion %.3f px\n",
                         rejectedOff,blockTexels,rejectedOn,blockTexels,maxDiff(on,bare),blockMotion);
+            // ---- Source-free views (design section 104, the pool-less view). ----
+            // A scene that drew no pool-family draw has its views made from nothing (engineVelocityPrepareSourceFree): the slot target holds
+            // the empty marker at every texel, the pool is one record nothing points into, and the scene constants are the selected camera's
+            // with this frame's stamp. No pixel names the record, so nothing in the pool may reach the output: a record of garbage gives the very
+            // texture a record of zeros gives, which is the camera term of this moved and turned camera (not zero), as any pixel with no slot takes.
+            {
+                noSlots();upload();
+                uint32_t keep[84];std::memcpy(keep,record,sizeof(keep));
+                std::memset(record,0,sizeof(record));context->UpdateSubresource(pool.Get(),0,nullptr,record,0,0);
+                const auto zeros=resolveWith(epicNow,epicPrev,sceneNowReal.Get(),scenePrevReal.Get(),0,0,0,0,"source-free: a one-record pool of zeros");
+                for(size_t i=0;i<84;++i)record[i]=(i&1)?0x7FC0DEADu:0x5F3759DFu;      // a NaN payload and a huge float, alternating
+                context->UpdateSubresource(pool.Get(),0,nullptr,record,0,0);
+                const auto garbage=resolveWith(epicNow,epicPrev,sceneNowReal.Get(),scenePrevReal.Get(),0,0,0,0,"source-free: a one-record pool of garbage");
+                std::memcpy(record,keep,sizeof(keep));context->UpdateSubresource(pool.Get(),0,nullptr,record,0,0);
+                float cameraMotion=0;for(float v:zeros.motion)cameraMotion=std::max(cameraMotion,std::abs(v));
+                check(cameraMotion>.05f,"source-free: the camera term of the moved and turned camera is not zero, so a refused pixel's zero cannot pass for it");
+                check(zeros.mask==garbage.mask && maxDiff(zeros,garbage)<=kSame,
+                      "source-free: a pool of garbage gives exactly the texture a pool of zeros gives: no pixel names the record");
+                std::printf("flat mono resolve: source-free views: zero vs garbage pool difference %.5f px, camera motion %.3f px\n",
+                            maxDiff(zeros,garbage),cameraMotion);
+            }
             // Leave the fixture as the pixel-capture tests below expect it.
             noSlots();upload();z[texel(12,12)]=.01f;context->UpdateSubresource(depth.Get(),0,nullptr,z.data(),w*4,0);
             g.staticScene=false;
@@ -820,6 +842,7 @@ int main(int argc,char** argv) {
     // The stage 2 experiment build's refusal census and view: the prep's class byte, the counting pass and its read-back, the steady-detail
     // rule's effect on the counts, and the HDR finish's paint.
     refusalGpuTests(device.Get(),context.Get());
+    skinGpuTests(device.Get(),context.Get());
     // The same view on the copy route (hdr off): the compute finish paints it for the SDK backends, EDVR's own TAA there asks for nothing.
     copyRefusalViewGpuTests(device.Get(),context.Get());
     // The first-person contract on the copy route (the weapon support below the output): a qualified map reaches the DLSS and FSR stubs, the

@@ -28,8 +28,7 @@ namespace edvr {
 
 class Config;
 
-// Reads fix.particle_billboard (stock | steady) and
-// advanced.particle_probe. Both live on save.
+// Reads fix.particle_billboard (stock | steady). Live on save.
 void particleConfigure(Config& cfg);
 bool particleSubstituteDrawInterestConfigured() noexcept;
 std::size_t particleSubstituteDrawInterestFilters(
@@ -46,12 +45,10 @@ std::size_t witchspaceStarsDrawInterestFilters(
 namespace detail {
 enum class ParticleMode { kStock, kSteady };
 extern ParticleMode g_particleMode;
-// The two flags below are particle_fix.cpp's g_hideWitchspaceStars and
-// g_probe, published so the draw path's per-draw calls can be skipped
-// inline when they would return at their first line (the .cpp binds its old
-// names to these, the depth probe's pattern, so its own code is unchanged).
+// The flag below is particle_fix.cpp's g_hideWitchspaceStars, published so
+// the draw path's per-draw calls can be skipped inline when they would
+// return at their first line (the .cpp binds its old name to this).
 extern bool g_particleHideStars;
-extern bool g_particleProbe;
 // The billboard transcriptions' vertex shader hashes, in kVariants order
 // (particle_fix.cpp static_asserts the two lists agree).
 inline constexpr uint64_t kParticleVariantVs[2] = {0xEB787F983BC1F5A3ull,
@@ -132,18 +129,7 @@ void particleCapture(const void* data, uint32_t bytes);
 // Whether anything here wants to see draws at all -- false is free.
 bool particleWantsDraws();
 
-// Called for every eye draw while the probe is armed. Recognises the
-// particle billboard shader by its content hash (the one key that cannot
-// collide with the terrain and prop pipelines it shares every size-level
-// signature with) and samples its constants at most once a second.
-// particleProbeOn() is its first test, inline: the draw path asks it before
-// the call, which with the probe off (its default) was a call per draw that
-// only returned.
-inline bool particleProbeOn() { return detail::g_particleProbe; }
-void particleOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
-                       uint32_t instances);
-
-// Drop the staging buffer. Safe to call twice.
+// Release what the substitute holds. Safe to call twice.
 void particleShutdown();
 
 }  // namespace edvr

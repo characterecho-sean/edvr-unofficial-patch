@@ -98,12 +98,6 @@ VSOut main(VSIn i) {
     // "keep the bar but lock it; only the lens flare moves."
     bool beamShaped = i.p1.x > 4.0 * i.p1.y || i.p1.y > 4.0 * i.p1.x;
     bool worldPath = (anchored && !slides) || axisLocked || beamShaped;
-#ifdef ALLWORLD
-    worldPath = true;
-#endif
-#ifdef ALLFLAT
-    worldPath = false;
-#endif
 
     // Element SELECTION by record, not by instance index. The game's
     // record list is dynamic: elements enter and REORDER with its
@@ -305,19 +299,14 @@ VSOut main(VSIn i) {
     float ecc2 = length(tapNdc);
     float edge = smoothstep(0.8, 1.2, ecc2);
     visFrac = lerp(visFrac, max(visFrac, 1.0), edge);
-#ifdef NOGATE
-    visFrac = 1.0;
-#endif
 
     // Gate, verbatim in spirit: collapse the quad only when the tested
     // visibility is nothing AND the edge blend is not holding it up.
-#ifndef NOGATE
     if (visFrac <= 0.01 || (worldPath ? tcw : cw) <= 0.0) {
         svpos = float4(0.0, 0.0, 0.0, 0.0);
     }
-#endif
     // Selection is not the occlusion gate: an unselected element stays
-    // collapsed even under NOGATE diagnostics.
+    // collapsed on its own.
     if (!selected) svpos = float4(0.0, 0.0, 0.0, 0.0);
     o.pos = svpos;
 

@@ -53,6 +53,7 @@
 #include "../../src/common/runtime_profile.h"
 #include "../../src/common/temporal_mode.h"
 #include "../../src/common/log.h"
+#include "../../src/d3d11/explorer_cam_follow_core.h"   // the Explorer Cam trims' and smoothing defaults: header-only, no link
 #include "config_contract_gen.h"   // build\gen: the tables the DLLs register, from the real edvr.ini
 
 using namespace edvr;
@@ -1051,19 +1052,105 @@ static void iniNameScan(const std::wstring& root) {
 // The three experimental keys retired on 2026-10-01 chose behaviour that is now permanent: the VR world route's jitter (always on
 // while the route owns the world; experimental.temporal_aa_jitter off still stops it), the depth-validated steady detail (always on,
 // in the VR world route and in the flat runtime) and the switch that made the jitter phases follow the upscale ratio (they always
-// do). Nothing may still spell their names. A reader left behind would let a user's old line act, a log message would send people
+// do). The fifteen keys of the old Explorer Cam route went on 2026-10-07 (docs/design-explorer-cam-free-camera-2026-10-07.md): the
+// press-counting gate, its camera-key adoption and the headset-pose offset, replaced by Explorer Cam's redesign. Nothing may still spell
+// their names. A reader left behind would let a user's old line act, a log message would send people
 // to a setting that does nothing, and the shipped file would document one. The installer carries an old line over under "this
 // version no longer uses it" (installer_test holds that), so only the two tests spell the names.
+//
+// The four keys of the settlement LOD governor and the static prop gate, removed 2026-10-08, are held out the same way, but for a
+// different reason: the behaviour is gone with them (the game's own detail and its own prop updates are what run), so there is
+// nothing to keep permanent. "settlement_detail" is also a prefix of the governor's two [advanced] keys, settlement_detail_max
+// and settlement_detail_observe, so the one name holds all three.
+//
+// advanced.explorer_cam_probe, the temporary log-only instruments of the Explorer Cam redesign (the free-camera observer, the camera census's
+// implicit tally, the scene-block fingerprint and the later controller, neck, fade and skeleton instruments behind the same key), was removed
+// 2026-10-09 when the arc's flights were done. No live key contains its name, so the bare name holds. An old line in a user's ini is carried over by
+// the installer under "no longer used by this version" and is never read by the DLL.
+//
+// The six keys of the terrain guard, removed 2026-10-09 (fix.cull_guard, its _percent, _fraction_h, _fraction_v and _headsets, and advanced.cull_guard_channel),
+// are held out the same way, the one bare name covering all six. The cause the guard worked around was found: Elite culled with a head pose 42 ms older than
+// the one it drew with, and EDVR now answers its "now" request one display period after the drawn frame's display time (docs/terrain-culling.md). Nothing is left to keep permanent.
+//
+// fix.scanner_body, removed 2026-10-09 with the lend it switched (resolve_bind_fix): the second eye's lighting draw ran with no vertex buffer because the game's own cache of
+// what it had bound went stale (docs/scanner-body.md). The repair at the game's input-assembler flush is behaviour, with no key. An old line in a user's ini is carried over by
+// the installer under "no longer used by this version" and is never read by the DLL.
 static const char* const kRetiredKeys[] = {
     "temporal_aa_on_foot_world_jitter",
     "temporal_aa_on_foot_world_steady_detail",
     "temporal_aa_jitter_follows_upscale",
+    "settlement_detail",
+    "static_prop_updates",
+    // The old Explorer Cam route, 2026-10-07. head_offset_view also covers head_offset_view_count.
+    "head_offset_gate",
+    "head_offset_view",
+    "head_offset_intent_grace_ms",
+    "head_offset_enter_window_ms",
+    "head_offset_right",
+    "head_offset_up",
+    "head_offset_forward",
+    "head_yaw_degrees",
+    "head_offset_external_only",
+    "head_offset_game_poses",
+    "head_offset_max_stale_frames",
+    "dump_camera_on_external_cam",
+    "keyless_camera",
+    "hold_frames_on_external_cam",
+    // The Explorer Cam redesign's temporary probe, 2026-10-09.
+    "explorer_cam_probe",
+    // The advanced and experimental key cull, 2026-10 (the installer carries an old line over; the DLL never reads it). The two names
+    // that begin a live key (temporal_aa_jitter_phases, the on-foot world route's retired siblings) are in kRetiredExactKeys.
+    "temporal_aa_motion", "temporal_aa_current", "temporal_aa_history_sharp", "temporal_aa_jitter_sign",
+    "temporal_aa_jitter_lag", "temporal_aa_ship_metres", "temporal_aa_debug", "temporal_aa_diagnostics",
+    "temporal_aa_fsr_reactive", "temporal_aa_fsr_debug", "temporal_aa_warm", "temporal_aa_smoke_floor",
+    "temporal_aa_smoke_reactive", "temporal_aa_menu_metres", "temporal_aa_movers_tolerance", "temporal_aa_movers_strength",
+    "temporal_aa_hologram_families", "temporal_aa_hologram_floor", "temporal_aa_hologram_share", "temporal_aa_hologram_depth",
+    "eye_run_paired", "eye_run_treated", "ui_depth_reactive", "ui_ghost_tolerance", "corona_smear_level", "temporal_aa_fovea",
+    "temporal_aa_periphery", "temporal_aa_partial", "temporal_aa_movers", "temporal_aa_blend", "temporal_aa_clamp",
+    "temporal_aa_before_post", "on_foot_maps_sharp", "sun_glare_variant", "sun_glare_probe",
+    "target_indicator_vs", "target_indicator_scale_probe", "wake_pulse_indices", "fss_eye_dump", "fss_eye_series",
+    "particle_probe", "intro_probe", "openvr_census", "ui_depth_eyes", "ui_depth_test", "dispatch_pair_sync",
+    "dispatch_cb1_lend", "dispatch_cb1_strip", "ui_depth_menus", "ui_depth_variants", "ui_depth_alpha", "ui_depth_planes",
+    "ui_depth_families", "ui_depth_exclude", "menu_backdrop_threshold", "menu_backdrop_dither", "intro_video_distance",
+    "intro_video_deband", "intro_video_dither", "intro_video_sharpen", "holo_pattern_level", "loading_dim_level",
+    "target_indicator_sharpen", "flat_cb_map_cache", "flat_context_isolation",
+    // The terrain guard, 2026-10-09: all six keys begin with this.
+    "cull_guard",
+    // The scanned-body lend, 2026-10-09: fix.scanner_body is gone with the lend. The cause is fixed at the game's own flush (vertex_resync_hook.cpp, which has no key).
+    "scanner_body",
 };
+static const int kRetiredKeyCount = int(sizeof(kRetiredKeys) / sizeof(kRetiredKeys[0]));
+
+// Retired by EXACT name, because the bare name is a substring of live keys. [fix] explorer_cam, the on/off switch of the redesigned Explorer Cam, was removed
+// 2026-10-08: Explorer Cam is armed exactly when hotkey.explorer_cam is set. Its qualified name "fix.explorer_cam" is also the beginning of every live
+// fix.explorer_cam_* key (_eye_up, _eye_trim_right, _follow_smoothing_ms ...), so a match counts only when the next character is not part of a name. A hotkey
+// line spells "hotkey.explorer_cam", which never contains "fix.". The shipped file's [fix] section is held out by the key lookup in main (expectStr, "<unset>"),
+// because there the key is the bare "explorer_cam", which sits in [hotkey] too.
+static const char* const kRetiredExactKeys[] = {
+    "fix.explorer_cam",
+    // The 2026-10 cull's two names that begin a live or already-retired key: the global jitter switch (temporal_aa_jitter_phases stays)
+    // and the world route's switch (its _jitter and _steady_detail siblings went on 2026-10-01).
+    "temporal_aa_jitter",
+    "temporal_aa_on_foot_world",
+};
+static const int kRetiredExactKeyCount = int(sizeof(kRetiredExactKeys) / sizeof(kRetiredExactKeys[0]));
+
+// True when `text` spells `name` followed by something that is not part of a key name.
+static bool spellsExactKey(const std::string& text, const char* name) {
+    const size_t n = std::strlen(name);
+    for (size_t at = text.find(name); at != std::string::npos; at = text.find(name, at + 1)) {
+        const char next = at + n < text.size() ? text[at + n] : '\0';
+        if (!(std::isalnum(static_cast<unsigned char>(next)) || next == '_')) return true;
+    }
+    return false;
+}
 
 // The first retired name `text` spells, or nullptr.
 static const char* spellsRetiredKey(const std::string& text) {
     for (const char* name : kRetiredKeys)
         if (text.find(name) != std::string::npos) return name;
+    for (const char* name : kRetiredExactKeys)
+        if (spellsExactKey(text, name)) return name;
     return nullptr;
 }
 
@@ -1080,21 +1167,53 @@ static void retiredKeyScan(const std::wstring& root) {
         if (a && b && c && std::strcmp(a, name) == 0 && std::strcmp(b, name) == 0 && std::strcmp(c, name) == 0) ++found;
     }
     const std::string live =
-        "experimental.temporal_aa_on_foot_world = auto\n"    // the live route key: the retired names start with it
-        "experimental.temporal_aa_jitter = on\n";             // the live global jitter key: one retired name starts with it
-    if (found == 3 && !spellsRetiredKey(live))
-        ok("the retired-key scan finds each of the three names in a read, a message and a comment, and passes the live keys beside them");
+        "advanced.temporal_aa_jitter_phases = 8\n"           // the live flat jitter cycle: a retired name starts it
+        "advanced.texture_lod_bias = 0\n"
+        "advanced.vr_camera_census = 0\n";   // (cull_guard_channel stood here while it was live; main retired it)
+    if (found == kRetiredKeyCount && !spellsRetiredKey(live))
+        ok(("the retired-key scan finds each of the " + std::to_string(kRetiredKeyCount) +
+            " names in a read, a message and a comment, and passes the live keys beside them").c_str());
     else
-        fail("the retired-key scan's own control", std::to_string(found) + " of 3 names found, or a live key was flagged");
+        fail("the retired-key scan's own control", std::to_string(found) + " of " + std::to_string(kRetiredKeyCount) +
+                                                       " names found, or a live key was flagged");
+
+    // The exact-name scan's own control: it finds the retired switch in a read, a message, a comment and at the end of a sentence or of the text, and passes
+    // every live key that begins with it or shares its tail (the hotkey, the eye keys, the trims, the smoothing).
+    {
+        const std::string retired[] = {
+            "Config::get().getBool(\"fix.explorer_cam\", true)",
+            "the log says set fix.explorer_cam to off",
+            "# fix.explorer_cam = on\n",
+            "turns it off (fix.explorer_cam).",
+            "fix.explorer_cam",
+        };
+        const std::string liveKeys[] = {
+            "Config::get().getString(\"hotkey.explorer_cam\", \"F5\")",
+            "[hotkey]\nexplorer_cam = F5\n",
+            "hotkey.explorer_cam)",
+            "cfg.getFloat(\"fix.explorer_cam_eye_up\", 1.68f)",
+            "fix.explorer_cam_eye_forward fix.explorer_cam_eye_right",
+            "fix.explorer_cam_eye_trim_right, _up, _forward",
+            "fix.explorer_cam_follow_smoothing_ms",
+        };
+        bool foundAll = true, passedAll = true;
+        for (const std::string& t : retired) foundAll = foundAll && spellsRetiredKey(t) != nullptr && std::strcmp(spellsRetiredKey(t), kRetiredExactKeys[0]) == 0;
+        for (const std::string& t : liveKeys) passedAll = passedAll && spellsRetiredKey(t) == nullptr;
+        if (foundAll && passedAll && kRetiredExactKeyCount == 3)
+            ok("the exact-name scan finds fix.explorer_cam in a read, a message, a comment and at the end of a sentence, and passes hotkey.explorer_cam, "
+               "fix.explorer_cam_eye_*, the trims and the smoothing beside it");
+        else
+            fail("the exact-name scan's own control", std::string(foundAll ? "" : "a retired spelling was missed; ") + (passedAll ? "" : "a live key was flagged"));
+    }
 
     // The shipped file: no template, no comment, no mention.
     const std::string ini = readRepoFile(root, L"edvr.ini");
     if (ini.empty()) {
         fail("edvr.ini is readable from the repo root (retired keys)", "could not read it");
     } else if (const char* name = spellsRetiredKey(ini)) {
-        fail("the shipped edvr.ini names none of the three retired keys", std::string("it spells ") + name);
+        fail("the shipped edvr.ini names none of the retired keys", std::string("it spells ") + name);
     } else {
-        ok("the shipped edvr.ini defines, documents and mentions none of the three retired keys");
+        ok("the shipped edvr.ini defines, documents and mentions none of the retired keys");
     }
 
     // Every production source, the installer's included: no reader, no allow-list entry, no log line.
@@ -1176,6 +1295,88 @@ int main(int argc, char** argv) {
     expectStr("experimental.temporal_aa_on_foot_world_jitter", "<unset>", "the retired world jitter key is absent");
     expectStr("experimental.temporal_aa_on_foot_world_steady_detail", "<unset>", "the retired steady-detail key is absent");
     expectStr("experimental.temporal_aa_jitter_follows_upscale", "<unset>", "the retired jitter-phase switch is absent");
+    // The 2026-10 cull: every removed advanced and experimental key reads as unset in the shipped file, under either section.
+    {
+        static const char* const culled[] = {
+            "temporal_aa_motion",
+            "temporal_aa_current",
+            "temporal_aa_history_sharp",
+            "temporal_aa_jitter_sign",
+            "temporal_aa_jitter_lag",
+            "temporal_aa_ship_metres",
+            "temporal_aa_debug",
+            "temporal_aa_diagnostics",
+            "temporal_aa_fsr_reactive",
+            "temporal_aa_fsr_debug",
+            "temporal_aa_warm",
+            "temporal_aa_smoke_floor",
+            "temporal_aa_smoke_reactive",
+            "temporal_aa_menu_metres",
+            "temporal_aa_movers_tolerance",
+            "temporal_aa_movers_strength",
+            "temporal_aa_hologram_families",
+            "temporal_aa_hologram_floor",
+            "temporal_aa_hologram_share",
+            "temporal_aa_hologram_depth",
+            "eye_run_paired",
+            "eye_run_treated",
+            "ui_depth_reactive",
+            "ui_ghost_tolerance",
+            "corona_smear_level",
+            "temporal_aa_fovea",
+            "temporal_aa_periphery",
+            "temporal_aa_jitter",
+            "temporal_aa_partial",
+            "temporal_aa_movers",
+            "temporal_aa_blend",
+            "temporal_aa_clamp",
+            "temporal_aa_on_foot_world",
+            "temporal_aa_before_post",
+            "on_foot_maps_sharp",
+            "sun_glare_variant",
+            "sun_glare_probe",
+            "target_indicator_vs",
+            "target_indicator_scale_probe",
+            "wake_pulse_indices",
+            "fss_eye_dump",
+            "fss_eye_series",
+            "particle_probe",
+            "intro_probe",
+            "openvr_census",
+            "ui_depth_eyes",
+            "ui_depth_test",
+            "dispatch_pair_sync",
+            "dispatch_cb1_lend",
+            "dispatch_cb1_strip",
+            "ui_depth_menus",
+            "ui_depth_variants",
+            "ui_depth_alpha",
+            "ui_depth_planes",
+            "ui_depth_families",
+            "ui_depth_exclude",
+            "menu_backdrop_threshold",
+            "menu_backdrop_dither",
+            "intro_video_distance",
+            "intro_video_deband",
+            "intro_video_dither",
+            "intro_video_sharpen",
+            "holo_pattern_level",
+            "loading_dim_level",
+            "target_indicator_sharpen",
+            "flat_cb_map_cache",
+            "flat_context_isolation",
+        };
+        int present = 0;
+        for (const char* name : culled) {
+            for (const char* section : {"advanced.", "experimental."}) {
+                if (Config::get().getString((std::string(section) + name).c_str(), "<unset>") != "<unset>") {
+                    ++present;
+                    fail("a removed key is absent from the shipped edvr.ini", (std::string(section) + name).c_str());
+                }
+            }
+        }
+        if (!present) ok("none of the 2026-10 cull's removed keys is defined in the shipped edvr.ini");
+    }
     // The particle facing measurement (dead since 2026-08-23) retired 2026-09-23.
     expectStr("advanced.particle_face_emitter", "<unset>", "the retired particle facing key is absent");
     // The foveation's eye-tracked centre went with its gaze source (2026-09-23)
@@ -1186,12 +1387,6 @@ int main(int argc, char** argv) {
     expectBool("fix.transition_flash", true, "...and another beside it");
     expectStr("hotkey.toggle_exposure", "SCROLLLOCK",
               "a key in the first [hotkey] reads");
-    // The sensitivity pair under [advanced]: users are directed to these by
-    // name in the log, so they stay ACTIVE rather than commented-out.
-    expectFloat("advanced.transition_flash_units", 2000.0f,
-                "the flash threshold reads from [advanced]");
-    expectFloat("advanced.transition_flash_speed_factor", 8.0f,
-                "...and its speed factor");
     // The eye-run depth instrument ships as a commented template like the
     // other developer instruments: the compiled default is what a user gets.
     if (Config::get().getBool("advanced.eye_depth_capture", false) == false &&
@@ -1200,17 +1395,19 @@ int main(int argc, char** argv) {
     else
         fail("eye depth capture is documented but not live under [advanced]",
              "the shipped file defines it live");
-    // The settlement LOD governor is a shipped fix: fix.settlement_detail is
-    // live under the first [fix] and reads game (off), the compiled default too.
-    // Its two [advanced] tuning keys ship as commented templates, so the
-    // compiled defaults -- a ceiling of 6.0 (held to 1..8) and observe 0 --
-    // are what every user runs until they choose otherwise.
-    expectStr("fix.settlement_detail", "game",
-              "settlement detail ships live in [fix] and reads game (off)");
-    expectStr("advanced.settlement_detail_max", "<unset>",
-              "...its ceiling ships commented out: the compiled 6.0 is in force");
-    expectStr("advanced.settlement_detail_observe", "<unset>",
-              "...and so does its observe-only switch");
+    // The settlement LOD governor and the static prop gate were removed 2026-10-08: their four keys are gone, not merely off. The
+    // file's text and every source are held clear of the names by retiredKeyScan, and these read the file as the parser sees it.
+    expectStr("fix.settlement_detail", "<unset>", "the removed settlement detail key is absent");
+    expectStr("advanced.settlement_detail_max", "<unset>", "...and so is its ceiling");
+    expectStr("advanced.settlement_detail_observe", "<unset>", "...and its observe-only switch");
+    expectStr("fix.static_prop_updates", "<unset>", "the removed static prop gate's key is absent");
+    // The terrain guard was removed 2026-10-09: its six keys are gone, not merely off.
+    expectStr("fix.cull_guard", "<unset>", "the removed terrain guard key is absent");
+    expectStr("fix.cull_guard_percent", "<unset>", "...and so is its percent margin");
+    expectStr("fix.cull_guard_fraction_h", "<unset>", "...its horizontal fraction");
+    expectStr("fix.cull_guard_fraction_v", "<unset>", "...its vertical fraction");
+    expectStr("fix.cull_guard_headsets", "<unset>", "...its headset list");
+    expectStr("advanced.cull_guard_channel", "<unset>", "...and its channel probe");
     // ui_quality (docs/ui-layer-2026-09-23.md) is one key for both halves:
     // the interface panels made at the target's size, and the game's
     // post-tonemap UI drawn into a per-eye layer after the upscale. Values
@@ -1255,146 +1452,9 @@ int main(int argc, char** argv) {
             }
         }
     }
-    // The HDR route (design doc section 81, experimental.temporal_aa_before_post) is ON by default since it flew
-    // (2026-09-30): the shipped file says auto, and so must the code's fallback for an ini with no such line -- every
-    // install whose edvr.ini predates the key. The same pair of checks as ui_quality's above, because nothing else
-    // holds the two to one answer (check_config_contract.py compares names, not values).
-    expectStr("experimental.temporal_aa_before_post", "auto", "the shipped edvr.ini ships the HDR route on (auto)");
-    {
-        const std::string shippedRoute = Config::get().getString("experimental.temporal_aa_before_post", "<unset>");
-        const std::string runtimeSource = readRepoFile(dir, L"src\\d3d11\\flat_runtime.cpp");
-        if (runtimeSource.empty()) {
-            fail("flat_runtime.cpp is readable from the repo root", "could not read it");
-        } else {
-            const std::string fallback = codeFallbackOf(runtimeSource, "experimental.temporal_aa_before_post");
-            if (fallback == shippedRoute) {
-                ok("the code's fallback for experimental.temporal_aa_before_post is the shipped default");
-            } else {
-                fail("the code's fallback for experimental.temporal_aa_before_post is the shipped default",
-                     "flat_runtime.cpp falls back to \"" + fallback + "\", the ini ships \"" + shippedRoute + "\"");
-            }
-            // CONTROL: the same source with the fallback put back to off (what it was until the route flew).
-            std::string reverted = runtimeSource;
-            const std::string from = "getString(\"experimental.temporal_aa_before_post\", \"" + fallback + "\")";
-            const size_t at = reverted.find(from);
-            if (at != std::string::npos)
-                reverted.replace(at, from.size(), "getString(\"experimental.temporal_aa_before_post\", \"off\")");
-            if (at != std::string::npos && codeFallbackOf(reverted, "experimental.temporal_aa_before_post") != shippedRoute) {
-                ok("control: the HDR route's fallback put back to off is caught");
-            } else {
-                fail("control: the HDR route's fallback put back to off is caught",
-                     at == std::string::npos ? "the call was not found to alter"
-                                             : "the reverted source still matched the ini");
-            }
-        }
-    }
-
-    // The VR on-foot world route (design doc section 82, experimental.temporal_aa_on_foot_world) is AUTO by default since
-    // 2026-10-01: it has flown, and Sean made it the default (the key stays for one release candidate as the way back). The shipped
-    // file says auto, and so must the code's fallback for an ini with no such line, which is every install that predates the
-    // key: the same pair of checks as above, because nothing else holds the two to one answer. The vscreen resolver's fallback
-    // (below) is held to the same answer in the same commit: a width fitted for a route that does not run would be wrong.
-    expectStr("experimental.temporal_aa_on_foot_world", "auto", "the shipped edvr.ini ships the VR world route auto");
-    {
-        const std::string shippedWorld = Config::get().getString("experimental.temporal_aa_on_foot_world", "<unset>");
-        const std::string worldSource = readRepoFile(dir, L"src\\d3d11\\vr_world_route.cpp");
-        if (worldSource.empty()) {
-            fail("vr_world_route.cpp is readable from the repo root", "could not read it");
-        } else {
-            const std::string fallback = codeFallbackOf(worldSource, "experimental.temporal_aa_on_foot_world");
-            if (fallback == shippedWorld) {
-                ok("the code's fallback for experimental.temporal_aa_on_foot_world is the shipped default");
-            } else {
-                fail("the code's fallback for experimental.temporal_aa_on_foot_world is the shipped default",
-                     "vr_world_route.cpp falls back to \"" + fallback + "\", the ini ships \"" + shippedWorld + "\"");
-            }
-            // CONTROL: the same source with the fallback turned the other way (a route that switched itself off for every install).
-            std::string flipped = worldSource;
-            const std::string from = "getString(\"experimental.temporal_aa_on_foot_world\", \"" + fallback + "\")";
-            const size_t at = flipped.find(from);
-            const char* other = shippedWorld == "auto" ? "off" : "auto";
-            if (at != std::string::npos)
-                flipped.replace(at, from.size(), std::string("getString(\"experimental.temporal_aa_on_foot_world\", \"") + other + "\")");
-            if (at != std::string::npos && codeFallbackOf(flipped, "experimental.temporal_aa_on_foot_world") != shippedWorld) {
-                ok("control: the VR world route's fallback turned the other way is caught");
-            } else {
-                fail("control: the VR world route's fallback turned the other way is caught",
-                     at == std::string::npos ? "the call was not found to alter"
-                                             : "the flipped source still matched the ini");
-            }
-        }
-    }
-
-    // fix.vscreen_res_width = auto reads the route's key too (src\d3d11\vscreen_res.cpp: the on-foot screen is fitted to the eye only
-    // when the route will run, vscreen_fit.h). Its fallback is a second reader of the same key, and it flipped to auto with the
-    // route's default in the same commit (2026-10-01), as it must every time: the same pair of checks, against the shipped file.
-    {
-        const std::string shippedWorld = Config::get().getString("experimental.temporal_aa_on_foot_world", "<unset>");
-        const std::string resSource = readRepoFile(dir, L"src\\d3d11\\vscreen_res.cpp");
-        if (resSource.empty()) {
-            fail("vscreen_res.cpp is readable from the repo root", "could not read it");
-        } else {
-            const std::string fallback = codeFallbackOf(resSource, "experimental.temporal_aa_on_foot_world");
-            if (fallback == shippedWorld) {
-                ok("the vscreen resolver's fallback for experimental.temporal_aa_on_foot_world is the shipped default");
-            } else {
-                fail("the vscreen resolver's fallback for experimental.temporal_aa_on_foot_world is the shipped default",
-                     "vscreen_res.cpp falls back to \"" + fallback + "\", the ini ships \"" + shippedWorld + "\"");
-            }
-            // CONTROL: the same source with the fallback turned the other way (a width fitted for a route that does not run, or the
-            // legacy width for a route that does).
-            std::string flipped = resSource;
-            const std::string from = "getString(\"experimental.temporal_aa_on_foot_world\", \"" + fallback + "\")";
-            const size_t at = flipped.find(from);
-            const char* other = shippedWorld == "auto" ? "off" : "auto";
-            if (at != std::string::npos)
-                flipped.replace(at, from.size(), std::string("getString(\"experimental.temporal_aa_on_foot_world\", \"") + other + "\")");
-            if (at != std::string::npos && codeFallbackOf(flipped, "experimental.temporal_aa_on_foot_world") != shippedWorld) {
-                ok("control: the vscreen resolver's fallback turned the other way is caught");
-            } else {
-                fail("control: the vscreen resolver's fallback turned the other way is caught",
-                     at == std::string::npos ? "the call was not found to alter" : "the flipped source still matched the ini");
-            }
-        }
-    }
-
-    // The world jitter has no key of its own any more (retired 2026-10-01; retiredKeyScan below holds every name out of the
-    // shipped file and the sources): while the route owns the world it always jitters, and the global jitter key off is
-    // the one thing that stops it (vr_world_route_test and vr_world_route_gpu_test pin both).
-
-    // The on-foot maps gate (design-world-camera-motion-2026-09-30.md, Phase 1: experimental.on_foot_maps_sharp) is ON by
-    // default since 2026-10-01 (the key stays for one release candidate as the way back): the layer takes a map's or a menu's 2D
-    // screen on foot. The shipped file and the code's fallback for an ini that predates the key must say the same thing; the
-    // control turns the fallback the other way (a gate that switched itself off for every install) and must be caught.
-    expectStr("experimental.on_foot_maps_sharp", "on", "the shipped edvr.ini ships the on-foot maps gate on");
-    {
-        const std::string shippedMaps = Config::get().getString("experimental.on_foot_maps_sharp", "<unset>");
-        const std::string layerSource = readRepoFile(dir, L"src\\d3d11\\ui_layer.cpp");
-        if (layerSource.empty()) {
-            fail("ui_layer.cpp is readable from the repo root (maps key)", "could not read it");
-        } else {
-            const std::string fallback = codeFallbackOf(layerSource, "experimental.on_foot_maps_sharp");
-            if (fallback == shippedMaps) {
-                ok("the code's fallback for experimental.on_foot_maps_sharp is the shipped default");
-            } else {
-                fail("the code's fallback for experimental.on_foot_maps_sharp is the shipped default",
-                     "ui_layer.cpp falls back to \"" + fallback + "\", the ini ships \"" + shippedMaps + "\"");
-            }
-            std::string flipped = layerSource;
-            const std::string from = "getString(\"experimental.on_foot_maps_sharp\", \"" + fallback + "\")";
-            const size_t at = flipped.find(from);
-            const char* other = shippedMaps == "on" ? "off" : "on";
-            if (at != std::string::npos)
-                flipped.replace(at, from.size(), std::string("getString(\"experimental.on_foot_maps_sharp\", \"") + other + "\")");
-            if (at != std::string::npos && codeFallbackOf(flipped, "experimental.on_foot_maps_sharp") != shippedMaps) {
-                ok("control: the on-foot maps gate's fallback turned the other way is caught");
-            } else {
-                fail("control: the on-foot maps gate's fallback turned the other way is caught",
-                     at == std::string::npos ? "the call was not found to alter"
-                                             : "the flipped source still matched the ini");
-            }
-        }
-    }
+    // The HDR route, the VR on-foot world route and the on-foot maps gate lost their keys in the 2026-10 cull: each ships as its
+    // former default (auto, auto, on) with no setting, so there is no fallback to hold to a shipped value. retiredKeyScan below holds
+    // the names out of the shipped file and the sources, and the absence checks above read the file as the parser sees it.
 
     // The depth-validated steady detail has no key any more either (retired 2026-10-01): both routes, the VR world route and the
     // flat runtime on foot, always ask the resolver for it (vr_world_route_test and flat_temporal_test pin both call sites), and
@@ -1433,15 +1493,66 @@ int main(int argc, char** argv) {
         }
     }
 
-    // The Explorer Cam block, under a SECOND [fix] and a second [hotkey].
-    // This is the claim that a repeated section header is not a parse error
-    // and does not silently discard everything after it.
-    expectBool("fix.head_offset_gate", true, "a key under a REPEATED [fix] reads");
-    // The preset it applies to moved to [advanced] and ships commented out,
-    // so the shipped file must NOT define it -- the compiled default is the
-    // one in force. -999999 is this file's "the key is not there" sentinel.
-    expectInt("advanced.head_offset_view", -999999,
-              "...and the preset it applies to is an expert setting now, not shipped live");
+    // The Explorer Cam switch reads from the shipped file, and the keys of the
+    // old route it replaced are not defined there (kRetiredKeys, above).
+    expectStr("fix.explorer_cam", "<unset>", "the retired [fix] explorer_cam switch is absent from the shipped file (Explorer Cam is armed by its hotkey alone)");
+    expectStr("hotkey.explorer_cam", "F5", "...and the hotkey that arms Explorer Cam ships as F5");
+    expectFloat("fix.explorer_cam_eye_up", 1.68f, "...the fallback eye keys ship at 1.68 up,");
+    expectFloat("fix.explorer_cam_eye_forward", 0.10f, "...0.10 forward,");
+    expectFloat("fix.explorer_cam_eye_right", 0.0f, "...and 0.0 right");
+    // The trims and the smoothing are PERMANENT user settings (Sean, 2026-10-08) and ship with his own tuning. Three places must say the same three numbers: the
+    // shipped file, the constants in explorer_cam_follow_core.h, and the code's fallback for an ini that lacks the keys (which must USE those constants).
+    expectFloat("fix.explorer_cam_eye_trim_up", 0.15f, "the Explorer Cam eye trims ship at Sean's tuning: up 0.15,");
+    expectFloat("fix.explorer_cam_eye_trim_forward", -0.08f, "...forward -0.08,");
+    expectFloat("fix.explorer_cam_eye_trim_right", 0.0f, "...right 0.0,");
+    expectFloat("fix.explorer_cam_follow_smoothing_ms", 0.0f, "...and the follow smoothing at 0 (exact follow)");
+    expectStr("advanced.explorer_cam_probe", "<unset>", "the retired Explorer Cam probe key is absent from the shipped file (removed 2026-10-09; kRetiredKeys holds its name out of every source)");
+    expectFloat("fix.explorer_cam_eye_trim_up", ecm::kTrimUpDefault, "the shipped up trim is the code constant ecm::kTrimUpDefault");
+    expectFloat("fix.explorer_cam_eye_trim_forward", ecm::kTrimForwardDefault, "...the shipped forward trim is ecm::kTrimForwardDefault");
+    expectFloat("fix.explorer_cam_eye_trim_right", ecm::kTrimRightDefault, "...the shipped right trim is ecm::kTrimRightDefault");
+    expectFloat("fix.explorer_cam_follow_smoothing_ms", static_cast<float>(ecm::kSmoothingMsDefault), "...the shipped smoothing is ecm::kSmoothingMsDefault");
+    {
+        const float trims[3] = {ecm::kTrimUpDefault, ecm::kTrimForwardDefault, ecm::kTrimRightDefault};
+        bool inside = true;
+        for (float v : trims) inside = inside && v >= -ecm::kTrimLimit && v <= ecm::kTrimLimit && ecm::clampTrim(v) == v;
+        if (inside && static_cast<float>(ecm::kSmoothingMsDefault) >= 0.0f && static_cast<float>(ecm::kSmoothingMsDefault) <= ecm::kSmoothingMsMax)
+            ok("every shipped Explorer Cam default is inside its clamp (+-0.5 m, 0..1000 ms)");
+        else
+            fail("every shipped Explorer Cam default is inside its clamp", "a default sits outside what the code would let through");
+    }
+    {
+        // The code's fallback must be the constant, not a number that happens to match today. The control rewrites each call to a literal that
+        // differs and must be caught. The reads are in the settings cache (explorer_cam_settings_core.h), which explorerCamFrameBoundary reads them through once per
+        // configuration change; explorer_cam_fade_test pins that the frame boundary reads none of these keys itself.
+        const std::string source = readRepoFile(dir, L"src\\d3d11\\explorer_cam_settings_core.h");
+        struct Read { const char* key; const char* call; const char* expr; };
+        const Read reads[] = {
+            {"fix.explorer_cam_eye_trim_up", "getFloat", "kTrimUpDefault"},
+            {"fix.explorer_cam_eye_trim_forward", "getFloat", "kTrimForwardDefault"},
+            {"fix.explorer_cam_eye_trim_right", "getFloat", "kTrimRightDefault"},
+            {"fix.explorer_cam_follow_smoothing_ms", "getInt", "kSmoothingMsDefault"},
+        };
+        auto usesConstant = [](const std::string& text, const Read& r) {
+            return text.find(std::string(r.call) + "(\"" + r.key + "\", " + r.expr + ")") != std::string::npos;
+        };
+        if (source.empty()) {
+            fail("explorer_cam_settings_core.h is readable from the repo root", "could not read it");
+        } else {
+            bool all = true, controlsCaught = true;
+            for (const Read& r : reads) {
+                all = all && usesConstant(source, r);
+                std::string flipped = source;
+                const std::string from = std::string(r.call) + "(\"" + r.key + "\", " + r.expr + ")";
+                const size_t at = flipped.find(from);
+                if (at != std::string::npos) flipped.replace(at, from.size(), std::string(r.call) + "(\"" + r.key + "\", 0.0f)");
+                controlsCaught = controlsCaught && at != std::string::npos && !usesConstant(flipped, r);
+            }
+            if (all) ok("explorer_cam_settings_core.h reads each trim and the smoothing with the code constant as its fallback (the shipped value, not a copy of it)");
+            else fail("explorer_cam_settings_core.h reads each trim and the smoothing with the code constant as its fallback", "a read uses another fallback");
+            if (controlsCaught) ok("control: a read rewritten to a literal fallback is caught");
+            else fail("control: a read rewritten to a literal fallback is caught", "the rewritten source still passed, or the call was not found");
+        }
+    }
     expectBool("hotkey.read_game_bindings", true,
                "a key under a repeated [hotkey] reads");
 
@@ -1469,7 +1580,7 @@ int main(int argc, char** argv) {
             "[d3d11]\r\n"
             "inventory = no\r\n"
             "[fix]\r\n"             // repeated, as the shipped file does it
-            "head_offset_view = 3\r\n"
+            "fixture_value = 3\r\n"
             // A STRAY KEYSTROKE, which strtol used to read as a deliberate
             // setting. Found in a player ini as
             // transition_flash_max_consecutive = 3w: it parsed to 3, which
@@ -1477,7 +1588,7 @@ int main(int argc, char** argv) {
             // whole budget and opened a two-second window in which nothing
             // could be withheld. The flash the fix exists to hide came back,
             // and the cause was one invisible character.
-            "head_offset_view_count = 4w\r\n"
+            "fixture_stray = 4w\r\n"
             "panel_distance_index = 12 or 13\r\n"
             "black_void = 0\r\n";   // duplicate: the later one must win
         if (!writeIni(scratch, kIni)) {
@@ -1487,9 +1598,9 @@ int main(int argc, char** argv) {
             expectBool("fix.share_exposure", true, "getBool accepts YES");
             expectBool("d3d11.inventory", false, "...and no");
             expectFloat("fix.panel_distance", 2.5f, "a ; comment is not part of the value");
-            expectInt("fix.head_offset_view", 3,
+            expectInt("fix.fixture_value", 3,
                       "a BOM does not swallow the first section");
-            expectInt("fix.head_offset_view_count", -999999,
+            expectInt("fix.fixture_stray", -999999,
                       "a trailing letter is refused, not silently truncated");
             expectInt("fix.panel_distance_index", -999999,
                       "...and so is a value with words after the number");
@@ -1990,43 +2101,30 @@ int main(int argc, char** argv) {
         else {
             Config::get().init(scratch);
             g_runtimeProfile = RuntimeProfile::Flat;
-            if (Config::get().getString("experimental.temporal_aa_jitter", "on") == "on")
-                ok("flat jitter uses on default when absent");
-            else fail("flat jitter default", "missing key was not on");
-            // The HDR route's key is read the same way with an auto default. A flat profile that did not permit it
-            // would turn that default into off, and an ini with no line (every install that predates the key) would
-            // run the copy route with nothing to say the route was never asked.
-            if (Config::get().getString("experimental.temporal_aa_before_post", "auto") == "auto")
-                ok("flat HDR route uses the auto default when the key is absent");
-            else fail("flat HDR route default", "missing key was not auto");
+            // The flat jitter cycle's key is read through getInt with an 8 default; a refused key would answer 0.
+            if (Config::get().getInt("advanced.temporal_aa_jitter_phases", 8) == 8)
+                ok("flat jitter cycle uses the 8 default when absent");
+            else fail("flat jitter cycle default", "missing key was refused");
             if (Config::get().getBool("advanced.input_gate", true))
                 ok("flat input_gate uses true default when absent");
             else fail("flat input_gate default", "missing key was not true");
+            // The interface quality (2026-10-09): a flat panel row, 100 by default. Refused, the default would read off and an
+            // edvr-flat.ini with no line (every one written before the row) would get today's interface with nothing said.
+            if (Config::get().getString("fix.ui_quality", "100") == "100")
+                ok("flat ui_quality uses the 100 default when absent");
+            else fail("flat ui_quality default", "missing key was not 100");
         }
     }
     Config::get().set("advanced.input_gate", "off");
     expectBool("advanced.input_gate", false, "flat scope reads input_gate override off");
     Config::get().set("advanced.input_gate", "on");
     expectBool("advanced.input_gate", true, "flat scope reads input_gate override on");
-    Config::get().set("experimental.temporal_aa_jitter", "on");
-    if (Config::get().getString("experimental.temporal_aa_jitter", "off") == "on")
-        ok("flat jitter reads explicit on");
-    else fail("flat jitter enabled", "explicit on was suppressed");
-    Config::get().set("experimental.temporal_aa_jitter", "off");
-    if (Config::get().getString("experimental.temporal_aa_jitter", "on") == "off")
-        ok("flat jitter preserves explicit off");
-    else fail("flat jitter override", "explicit off was not read");
-    // The HDR route's key (design doc section 81): the flat runtime reads it through getString with an "auto" default.
-    // Unlisted in runtimeProfileAllowsKey it would read off here whatever the file says -- a user who set auto, or
-    // left the default, would run the copy route with nothing in the log to say the key was refused.
-    Config::get().set("experimental.temporal_aa_before_post", "auto");
-    expectStr("experimental.temporal_aa_before_post", "auto", "flat scope permits the HDR route's key");
-    Config::get().set("experimental.temporal_aa_before_post", "off");
-    expectStr("experimental.temporal_aa_before_post", "off", "flat scope reads the HDR route's key off");
-    // The flat refusal view (design doc section 104). It flew unlisted once and read off whatever the file said.
-    Config::get().set("advanced.temporal_aa_debug", "motion_source");
-    expectStr("advanced.temporal_aa_debug", "motion_source", "flat scope permits the refusal view's key");
-    Config::get().set("advanced.temporal_aa_debug", "off");
+    // The flat panel's UI quality row reads fix.ui_quality through getString: it must pass the gate both ways.
+    Config::get().set("fix.ui_quality", "125");
+    expectStr("fix.ui_quality", "125", "flat scope permits the UI quality key");
+    Config::get().set("fix.ui_quality", "off");
+    expectStr("fix.ui_quality", "off", "flat scope reads the UI quality key off");
+    Config::get().set("fix.ui_quality", "100");
     // The flat jitter cycle's length (advanced.temporal_aa_jitter_phases): the flat runtime reads it through getInt with an 8 default.
     // Unlisted in runtimeProfileAllowsKey, a refused key answers 0 whatever the file says, which the reader takes for out of range and
     // reads as 8: a user who wrote 32 would fly 8, with a log line naming a value they never wrote.
@@ -2034,19 +2132,12 @@ int main(int argc, char** argv) {
     expectInt("advanced.temporal_aa_jitter_phases", 32, "flat scope permits the jitter cycle's key");
     Config::get().set("advanced.temporal_aa_jitter_phases", "8");
     expectInt("advanced.temporal_aa_jitter_phases", 8, "flat scope reads the jitter cycle's key at its default");
-    // The VR world route's key is a VR-profile key: unlisted in runtimeProfileAllowsKey, so a flat profile reads it off
-    // whatever the file says, and the flat runtime (which never asks) cannot be turned into it.
-    Config::get().set("experimental.temporal_aa_on_foot_world", "auto");
-    expectStr("experimental.temporal_aa_on_foot_world", "off", "flat scope refuses the VR world route's key");
-    // ... and the on-foot maps gate's: a VR-profile key, so a flat profile reads it off whatever the file says.
-    Config::get().set("experimental.on_foot_maps_sharp", "on");
-    expectStr("experimental.on_foot_maps_sharp", "off", "flat scope refuses the on-foot maps gate's key");
     // The VR camera census's key is a VR-profile key too: a flat profile must never install its hook.
     Config::get().set("advanced.vr_camera_census", "on");
     expectStr("advanced.vr_camera_census", "off", "flat scope refuses the VR camera census's key");
     Config::get().set("fix.temporal_aa", "dlss");
     Config::get().set("fix.black_void", "on");
-    Config::get().set("fix.head_offset_forward", "12");
+    Config::get().set("fix.explorer_cam_eye_forward", "12");
     Config::get().set("experimental.night_vision_realistic", "on");
     Config::get().set("advanced.real_dll", "d3d11_edhm.dll");
     expectStr("fix.temporal_aa", "off", "flat discovery cannot activate stereo temporal AA");
@@ -2070,9 +2161,9 @@ int main(int argc, char** argv) {
     Config::get().set("advanced.eye_depth_capture", "on");
     expectBool("advanced.eye_depth_capture", false,
                "flat profile: eye depth capture reads off, so it cannot arm the depth probe or hold the draw gate open");
-    expectInt("fix.head_offset_forward", 0, "flat profile suppresses numeric fix");
-    expectFloat("fix.head_offset_forward", 0.0f, "flat profile suppresses float fix");
-    if (Config::get().getIntInRange("fix.head_offset_forward", 12, 1, 100) != 0)
+    expectInt("fix.explorer_cam_eye_forward", 0, "flat profile suppresses numeric fix");
+    expectFloat("fix.explorer_cam_eye_forward", 0.0f, "flat profile suppresses float fix");
+    if (Config::get().getIntInRange("fix.explorer_cam_eye_forward", 12, 1, 100) != 0)
         fail("flat bounded getter", "minimum reactivated disabled feature");
     else ok("flat scope precedes bounded numeric defaults");
     expectStr("advanced.real_dll", "d3d11_edhm.dll", "flat scope preserves mod chaining");
@@ -2094,7 +2185,7 @@ int main(int argc, char** argv) {
     };
     for (const auto& p : presets) {
         const auto actual=temporalPresetFor(p.name);
-        if (actual.full!=p.full || actual.fovea!=p.fovea || actual.known!=p.known)
+        if (actual.full!=p.full || actual.known!=p.known)
             fail("shared temporal preset mapping",p.name);
     }
     Config::get().set("fix.black_void", "on");
@@ -2105,27 +2196,14 @@ int main(int argc, char** argv) {
     expectStr("fix.temporal_aa_model", "off", "invalid profile cannot select a DLSS model");
     expectFloat("fix.render_sharpness", 0.0f, "invalid profile cannot sharpen");
     expectStr("advanced.real_dll", "d3d11_edhm.dll", "bad descriptor preserves mod chaining");
-    if (Config::get().getString("experimental.temporal_aa_jitter", "on") == "off")
-        ok("invalid profile suppresses flat jitter");
-    else fail("invalid profile jitter", "flat key widened invalid scope");
-    Config::get().set("experimental.temporal_aa_before_post", "auto");
-    expectStr("experimental.temporal_aa_before_post", "off", "invalid profile cannot turn the HDR route on");
+    Config::get().set("advanced.temporal_aa_jitter_phases", "32");
+    expectInt("advanced.temporal_aa_jitter_phases", 0, "invalid profile refuses the flat jitter cycle's key");
     Config::get().set("advanced.vr_camera_census", "on");
     expectStr("advanced.vr_camera_census", "off", "invalid profile cannot turn the VR camera census on");
     g_runtimeProfile = RuntimeProfile::LegacyVr;
     expectBool("fix.black_void", true, "legacy profile retains original behavior");
-    if (Config::get().getString("experimental.temporal_aa_jitter", "on") == "off")
-        ok("legacy profile retains explicit jitter setting");
-    else fail("legacy profile jitter", "flat exception changed VR read");
+    expectInt("advanced.temporal_aa_jitter_phases", 32, "legacy profile reads the flat jitter cycle's key as written");
     g_runtimeProfile = RuntimeProfile::Vr;
-    Config::get().set("experimental.temporal_aa_jitter", "on");
-    if (Config::get().getString("experimental.temporal_aa_jitter", "off") == "on")
-        ok("VR profile reads explicit jitter setting");
-    else fail("VR profile jitter", "flat exception changed VR scope");
-    Config::get().set("experimental.temporal_aa_on_foot_world", "auto");
-    expectStr("experimental.temporal_aa_on_foot_world", "auto", "VR profile reads the VR world route's key");
-    Config::get().set("experimental.on_foot_maps_sharp", "on");
-    expectStr("experimental.on_foot_maps_sharp", "on", "VR profile reads the on-foot maps gate's explicit on");
     Config::get().set("advanced.vr_camera_census", "on");
     expectStr("advanced.vr_camera_census", "on", "VR profile reads the VR camera census's explicit on");
     g_runtimeProfile = RuntimeProfile::LegacyVr;

@@ -1,6 +1,11 @@
 #include "../../src/openxr/space_pose.h"
+#include "pose_gap_cases.h"
+#include "head_pose_time_cases.h"
 #include <cmath>
+#include <cstdio>
 #include <cstring>
+#include <fcntl.h>
+#include <io.h>
 #include <iostream>
 #include <limits>
 #include <string>
@@ -166,8 +171,16 @@ int main(int argc, char** argv) {
   if (argc == 2 && std::string(argv[1]) == "--dry-run") {
     std::cout << "openxr_pose_test: dry-run (no runtime or file writes)\n"; return 0;
   }
+  if (argc == 2 && std::string(argv[1]) == "--print-pose-fixture") {
+    const std::string text = pose_gap_cases::fixtureLog();
+    _setmode(_fileno(stdout), _O_BINARY);   // LF only: tools\pose_gap_fixture.log is this, byte for byte
+    std::fwrite(text.data(), 1, text.size(), stdout);
+    return 0;
+  }
   if (argc != 2 || std::string(argv[1]) != "--self-test") return 2;
   conversionTests(); locateTests(); timeTests();
+  pose_gap_cases::runPoseGapCases(check);
+  head_pose_time_cases::runHeadPoseTimeCases(check);
   std::cout << "openxr_pose_test: " << checks << " checks, " << failures << " failures\n";
   return failures ? 1 : 0;
 }

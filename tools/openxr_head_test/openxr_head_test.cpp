@@ -76,6 +76,75 @@ int selfTest(){
   check(out.locationFlags==0&&out.pose.orientation.w==1&&out.pose.position.x==0,"partial tracking initialized invalid");
   fake={};fake.time=(std::numeric_limits<XrTime>::max)()-500000000;check(attempt(api,instance,view,origin,.5f,now)==XR_SUCCESS&&time==(std::numeric_limits<XrTime>::max)(),"exact upper addition boundary");
   fake={};fake.time=(std::numeric_limits<XrTime>::min)()+500000000;check(attempt(api,instance,view,origin,-.5f,now)==XR_SUCCESS&&time==(std::numeric_limits<XrTime>::min)(),"exact lower addition boundary");
+  // ---- locateAt: the same locate at an instant the caller formed (the head-pose answer: the drawn frame's display time) ------------
+  {
+    XrSpaceLocation at{XR_TYPE_SPACE_LOCATION};XrTime exact=0;HeadLocatorStage stage=HeadLocatorStage::Convert;
+    fake={};
+    check(h.locateAt(api,view,origin,5000000000,at,&exact,&stage)==XR_SUCCESS&&fake.located==5000000000&&exact==5000000000&&stage==HeadLocatorStage::None&&at.pose.position.y==2,
+          "locateAt locates at exactly the instant given");
+    check(fake.trace==std::vector<unsigned>({3}),"...with no clock read and no conversion: the located instant is not now plus anything");
+    fake={};check(h.locateAt(api,view,origin,0,at,&exact,&stage)==XR_SUCCESS&&fake.located==0,"(an instant of 0 is passed through: the caller decides what is formed)");
+    const auto before=at;const XrTime exactBefore=exact;
+    for(unsigned test=0;test<4;++test){
+      fake={};XrResult r=XR_SUCCESS;
+      switch(test){
+        case 0:r=h.locateAt({convert,nullptr},view,origin,5,at,&exact,&stage);break;
+        case 1:r=h.locateAt(api,XR_NULL_HANDLE,origin,5,at,&exact,&stage);break;
+        case 2:r=h.locateAt(api,view,XR_NULL_HANDLE,5,at,&exact,&stage);break;
+        case 3:fake.locateResult=XR_ERROR_TIME_INVALID;r=h.locateAt(api,view,origin,5,at,&exact,&stage);break;
+      }
+      check(XR_FAILED(r)&&std::memcmp(&at,&before,sizeof(at))==0&&exact==exactBefore,"locateAt refuses a missing function or handle and keeps the runtime's failure; the output and the instant are left alone");
+      check(test!=3||(r==XR_ERROR_TIME_INVALID&&stage==HeadLocatorStage::Locate),"...a locate failure is reported as the locate stage");
+      check(test==3||fake.trace.empty(),"...and a refusal never reaches the runtime");
+    }
+    for(unsigned variant=2;variant<=5;++variant){
+      fake={};fake.variant=variant;XrTime kept=exactBefore;
+      check(XR_FAILED(h.locateAt(api,view,origin,7,at,&kept,&stage))&&kept==exactBefore&&std::memcmp(&at,&before,sizeof(at))==0,"locateAt rejects the same malformed poses and structs locate does");
+    }
+    fake={};fake.variant=1;
+    check(h.locateAt(api,view,origin,7,at,&exact,&stage)==XR_SUCCESS&&at.locationFlags==0&&at.pose.orientation.w==1&&at.pose.position.x==0&&exact==7,"...and reads partial tracking as invalid, not an error");
+    fake={};XrTime plain=0;
+    check(h.locate(api,instance,view,origin,0,at,&plain,now)==XR_SUCCESS&&plain==7000000000&&fake.trace==std::vector<unsigned>({1,2,3}),"(locate itself is unchanged: clock, conversion, locate, at now plus the prediction)");
+  }
+  // ---- currentTime and locateFrom: the clock read once, then the same locate from it (the head-pose answer reads "now" to judge a cached display time) ------
+  {
+    XrTime t=-1;HeadLocatorStage stage=HeadLocatorStage::None;
+    fake={};
+    check(h.currentTime(api,instance,now,&stage,0,t)==XR_SUCCESS&&t==7000000000&&stage==HeadLocatorStage::None&&fake.trace==std::vector<unsigned>({1,2}),
+          "currentTime reads the counter and converts it: the runtime's own clock, no locate");
+    fake={};fake.convertResult=XR_ERROR_RUNTIME_FAILURE;t=-1;
+    check(h.currentTime(api,instance,now,&stage,0,t)==XR_ERROR_RUNTIME_FAILURE&&t==-1&&stage==HeadLocatorStage::Convert,
+          "...a conversion that fails is reported with its stage and leaves the instant alone");
+    fake={};fake.convertResult=XR_ERROR_RUNTIME_FAILURE;t=-1;
+    check(h.currentTime(api,instance,now,&stage,4242,t)==XR_SUCCESS&&t==4242&&stage==HeadLocatorStage::Convert,
+          "...unless the caller has an estimate of its own, which is then the instant (the stage still says the conversion failed)");
+    fake={};fake.counter=false;t=-1;
+    check(h.currentTime(api,instance,now,&stage,0,t)==XR_ERROR_RUNTIME_FAILURE&&t==-1,"...and a counter that cannot be read fails the same way");
+    t=-1;check(h.currentTime({nullptr,locate},instance,now,&stage,0,t)==XR_ERROR_FUNCTION_UNSUPPORTED&&h.currentTime(api,XR_NULL_HANDLE,now,&stage,0,t)==XR_ERROR_HANDLE_INVALID&&t==-1,
+          "...as do a missing conversion and a missing instance");
+    XrSpaceLocation at{XR_TYPE_SPACE_LOCATION};XrTime exact=0;
+    fake={};
+    check(h.locateFrom(api,view,origin,5000000000,0.25f,at,&exact,&stage)==XR_SUCCESS&&fake.located==5250000000&&exact==5250000000&&fake.trace==std::vector<unsigned>({3}),
+          "locateFrom locates at the instant given plus the prediction, with no clock read");
+    fake={};
+    check(h.locateFrom(api,view,origin,5000000000,-0.004f,at,&exact,&stage)==XR_SUCCESS&&fake.located==4996000000,"...a negative prediction too");
+    const auto before=at;const XrTime exactBefore=exact;
+    for(unsigned test=0;test<7;++test){
+      fake={};XrResult r=XR_SUCCESS;
+      switch(test){
+        case 0:r=h.locateFrom({convert,nullptr},view,origin,5,0,at,&exact,&stage);break;
+        case 1:r=h.locateFrom(api,XR_NULL_HANDLE,origin,5,0,at,&exact,&stage);break;
+        case 2:r=h.locateFrom(api,view,XR_NULL_HANDLE,5,0,at,&exact,&stage);break;
+        case 3:r=h.locateFrom(api,view,origin,5,NAN,at,&exact,&stage);break;
+        case 4:r=h.locateFrom(api,view,origin,5,std::ldexp(1.f,34),at,&exact,&stage);break;
+        case 5:r=h.locateFrom(api,view,origin,(std::numeric_limits<XrTime>::max)(),.5f,at,&exact,&stage);break;
+        case 6:r=h.locateFrom(api,view,origin,(std::numeric_limits<XrTime>::min)(),-.5f,at,&exact,&stage);break;
+      }
+      check(XR_FAILED(r)&&std::memcmp(&at,&before,sizeof(at))==0&&exact==exactBefore&&fake.trace.empty(),"locateFrom refuses what locate refuses (a missing function or handle, a prediction that is not a number or overflows) and never reaches the runtime");
+    }
+    fake={};fake.locateResult=XR_ERROR_TIME_INVALID;
+    check(h.locateFrom(api,view,origin,5,0,at,&exact,&stage)==XR_ERROR_TIME_INVALID&&stage==HeadLocatorStage::Locate,"...and a runtime refusal is kept, with the locate stage");
+  }
   std::printf("openxr_head_test: %u checks, %u failures\n",checks,failures);return failures?1:0;
 }
 }

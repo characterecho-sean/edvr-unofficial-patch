@@ -2,63 +2,53 @@
 
 ## Status
 
-- **State (2026-10-07):** implementation in progress on
-  `codex/plugin-architecture`; do not merge to main until Sean is ready to
-  ship. Phase 1 of five is in progress; review and remaining gates: section 11.
-- **Goal (Sean):** every fix and performance item belongs to one plugin,
-  plugins group features logically, and the user picks which to install in the
-  installer. A plugin that is not installed costs nothing.
-- **Built on:** a read-only inventory of main `4296f142` (25 features, 225 ini
-  keys, 19 draw verdicts, the services they share; section 2), the flat CPU
-  census of 2026-09-30 (hook entry about 1.4 ms over 17,180 calls a frame on
-  foot; D3D call counts are what a wrapper such as ReShade multiplies), the
-  landing-pad regression of 2026-09-29 (a claim order nobody had written down)
-  and PR #46's diff.
-- **North star (Sean, 2026-09-30): performance.** The plugin layer never makes
-  EDVR slower, and its first phase makes it faster. Gates are relative: each
-  phase flies the same spots and must be no worse than the previous phase,
-  within noise (section 7).
-- **Decided, Q1 (Sean, 2026-09-30): monolithic.** First-party plugins are
-  modules inside the one DLL: each a static library behind the plugin
-  interface, a build gate against one plugin including another's internals, and
-  an unselected plugin never registers. The interface stays C-compatible so a
-  split into DLLs stays mechanical (section 10 has the reasons). PR #46's C ABI
-  stays the add-on tier, moved into the core so flat mode gets it too.
-- **Decided, Q2-Q6 (Sean, 2026-09-30):** the nine plugins of section 4
-  (regrouped: intro and on-foot-panel split out, UI quality inside
-  temporal-aa); defaults that reproduce today's shipped behaviour; the add-on
-  tier after Phase 1 (PR #46's OM-unbind fix lands on its own now); diagnostics
-  probes out of the default install, census kept in the core; today's keys and
-  sections kept, each owned by a plugin. Section 10.
-- **Decided, Q7 (Sean, 2026-09-30): graphics-only VR is its own phase, after
-  Phase 1.** When no selected plugin needs the OpenXR runtime (section 4.1),
-  the installer skips it and Elite stays on its stock VR path. Four changes
-  first (section 10); no F8, AA, flash fix or Explorer Cam without the runtime;
-  the first build needs a flight on a stock runtime.
-- **Next:** main integrates through `6b43ffc9` (code unchanged from
-  `0d4bc714`). The NV pilot's legacy replay, 32 composed children and pixel
-  coverage run. Whole-ladder actions precede broader migration. The refreshed
-  814 caller is diagnostic: its body gains 52 instruction bytes/14 records, raw
-  equality fails and timing remains unmeasured. New cold census
-  sample/calibration rows and the strict `edvr_log.py --plugin-cost` reader
-  pass the full 149-job build and installer checks, 344 focused census checks
-  and 17 fresh scoped gates. The complete main-based control `405b14cd` passes
-  129 jobs with identical census files. Frozen flights: `7bbe7d90`
-  control/`6c63f6aa` candidate, build/environment matched; no visual changes.
-  NV-on sampled hook time per timed draw is 15.0% lower; other CPU ranges
-  overlap. Carrier DLSS/NV-off EDVR GPU cost is 2.9% higher, its median above
-  the control range. Draw counts differ and the on-foot source has 4.175% more
-  pixels; normalization cannot establish GPU attribution/non-regression.
-  Domain/frame/lifecycle accounting, held-boundary frame cost and full coverage
-  remain open. Replay retains 482.4 MiB when enabled, none when off; NV blur
-  reproduces on `14a7ff70`. Temporary key: `advanced.draw_replay` (off);
-  removal requires Scope control. V2 preserves V1/CPU limits. No Phase 1
-  acceptance or shipping.
-- **Ruled out while designing:** loading every DLL found in a folder (DLL
-  planting; the installer's receipts already know what it installed), a stable
-  ABI for first-party plugins (they ship with the core; freezing their
-  interface buys nothing and costs every refactor), and a per-draw virtual call
-  into every plugin (section 7's measured costs forbid it).
+- **State (2026-10-09):** Phase 1 implementation continues on
+  `codex/plugin-architecture`; no merge to main until Sean is ready to ship.
+  Review and remaining gates: section 11.
+- **Goal (Sean):** every fix/performance item belongs to one plugin, grouped
+  logically and selectable in the installer. An uninstalled plugin costs
+  nothing. The layer must improve CPU cost and not regress GPU cost.
+- **Decided:** nine monolithic first-party modules inside the graphics DLL,
+  generated manifests/config ownership, subscription-driven dispatch and a
+  C-compatible interface. The add-on tier follows Phase 1. Graphics-only VR is
+  a separate phase; existing supported settings remain owned by one plugin.
+- **Current integration:** Sean requests latest main and conflict resolution.
+  Merge cut: `7960f016`, after `b321722f`. Main's key/feature retirements, skin
+  and vertex resync, head-pose timing, flat UI/device lifecycle, fixed
+  rendering behavior and test/build changes must survive together with the
+  plugin pilot, typed NoApi/API routes, ownership/cost reporting and
+  independent NV replay. Luna agents resolved draw/runtime, temporal/UI and
+  build/catalog/log seams; root reviewed and escalated repairs. Full validation
+  passes 155 jobs, the 125-key config contract, exports and installer checks.
+  New receipt `755886c9` verifies the resolved source. Git stays on the feature
+  branch.
+- **Historical gates:** the previous candidate passes 149 jobs and installer
+  checks, 344 focused census checks and 17 scoped assembly gates. Its
+  main-based control `405b14cd` passes 129 jobs. Those source/assembly receipts
+  and the 814 caller diagnostic are historical after this merge; none establish
+  new-tree correctness or performance. Steam holds control `405b14cd`; no new
+  install or flight is requested for this integration.
+- **Frozen flight evidence:** `7bbe7d90` control / `6c63f6aa` candidate,
+  matched Pimax OpenXR environment, no visual change. NV-on sampled hook time
+  per timed draw is 15.0% lower; other CPU ranges overlap. Carrier DLSS/NV-off
+  estimated EDVR GPU cost rises 2.9%, above the control range; workload varies
+  and on-foot source pixels rise 4.175%. Normalization cannot establish
+  causality or non-regression. The cold raw sample/calibration reader stays in
+  the branch; measured-helper estimates do not establish accepted-work latency.
+- **Open:** domain/frame/lifecycle accounting and held-boundary frame cost;
+  full-ladder/action replay before wider migration; matched runtime CPU/GPU
+  acceptance. No Phase 1 acceptance or shipping.
+- **Upstream retirements:** static props/settlement detail and terrain guard no
+  longer exist; the original design tables describe September 30, not the
+  current code. Other main-retired keys/features stay retired in this merge.
+  FOV trim retains its own engine. Temporary branch key: `advanced.draw_replay`
+  (off); replay holds 482.4 MiB when on, none when off. Any separate removal of
+  that branch key requires Scope control. NV blur reproduces on baseline
+  `14a7ff70`.
+- **Ruled out:** per-draw virtual dispatch into every plugin; folder-scanned
+  DLL loading; a frozen first-party ABI. The NV pilot already has independent
+  legacy replay, 32 composed child cases and pixel coverage; duplicate pilot
+  replay does not address the remaining gates.
 
 ## 1. Goals and non-goals
 
@@ -3353,3 +3343,76 @@ standing authorization; the production main cut and control stay identical to
 `0d4bc714`. A final candidate version promotion follows the documentation
 merge. Steam/settings stay unchanged at this point. GPU attribution and Phase 1
 acceptance remain open; broader migration and shipping stay held.
+
+### Latest main integration and conflict review, 2026-10-09
+
+Sean requests latest main and conflict resolution. The fixed merge cut is
+`7960f01682d552947a6203e2999352685cc3d304`, with feature parent
+`b321722ffb17f5b8c39b02abeca8075b4a0af27a`. The merge stays on
+`codex/plugin-architecture`; it does not merge the feature into main.
+
+Three Luna agents divide draw/runtime, temporal/UI, and build/catalog/log
+conflicts. Independent review escalates the draw and sunglare corrections to
+the next tier. Main's feature/key retirements, skin join and vertex resync,
+head-pose timing, Explorer Cam, flat UI/device lifecycle and blank-scene
+behavior survive alongside the plugin pilot and typed NoApi/sample routes. The
+catalog reconciles to nine plugins and 125 owned settings. FSS dump and
+resolve-bind implementations and their direct API fixtures stay deleted;
+historical replay schemas keep their reserved IDs. No retired setting is
+restored. Branch-only `advanced.draw_replay` remains separately controlled.
+
+Review finds the sampled EngineVelocity slow path still has the pre-main skin
+logic. It is brought into parity with the normal path, including shader
+exports, target 7, blend masks, prior-palette/join/pose views and
+instance-window bookkeeping. An actual WARP skinned-frame regression case
+exercises the sampled route and checks bindings and valid output. The skin rig
+links the plugin cost collector. Stale sunglare probe references are removed
+from observed predicates and fixtures, preserving main's stock/damping
+behavior. The scheduler probe is configured independently once at each VScreen
+startup/reload boundary.
+
+The five new second-skin GPU census sections are nested in
+`FrameEngineVelocity`, so their owner is temporal AA and attribution is nested
+breakdown. They are excluded from owner totals to avoid double counting. The
+ownership golden rows and both normal/sampled clear-site checks cover this
+mapping. Main's other census and plugin cost reporting remain intact.
+
+Compiler validation also exposes stale references to the retired FSS/resolve
+census rows, VR event census, sunglare draw-args probe and particle probe.
+Surviving census ordinals and exhaustive verdict switches are reconciled;
+reserved replay verdicts have no live fix. A systematic audit of main's removed
+header declarations finds no remaining production calls to those retired APIs.
+The separate live VR camera census and particle/witchspace behavior remain.
+
+The first rig run exposes two stale fixtures. Hook body extraction now accepts
+LF and CRLF with exact ordering/mutation controls retained; the working VScreen
+file also uses the index's LF form. The UI cost fixture uses its existing maps
+gate test hook instead of setting retired `experimental.on_foot_maps_sharp`.
+All four focused flat/UI/skin/census rigs pass, including 640 UI checks and 392
+census checks. The apparent screen-motion failures are seven deliberate shader
+mutants: the control and 56,647-check rig pass, so no shader change is made.
+
+The predicate fixture now respects TargetSharp's fixed production shader hash:
+it varies the queried shader registration for mismatch cases instead of
+assigning the immutable configured hash. Its exact cost oracle also counts RTV
+descriptor reads at Core sites 112/113/115 during sampled owner trace capture,
+including refusal cases; uncaptured and foreign-context paths retain their
+existing counts. No mask or owner assertions are relaxed. The focused predicate
+rig passes with production routing, composed UI pixels, callback arguments and
+restoration checks intact.
+
+The new UI device rig includes the existing world fixture and production UI
+implementation. Its build command now links the same real plugin cost and
+VTableHook implementations as the world rig; the focused device rig passes all
+34 checks. A Luna audit finds no analogous missing dependency in the other new
+C++ rigs.
+
+The absolute full build passes all 155 jobs (148 in the pool and seven
+isolated), the 125-key config contract, production export checks and installer
+resource validation. Log: `build/full-plugin-main-7960-20261009-r7.log`. The
+new full-pass receipt
+`755886c9716fef1b9ac71e9a450952609079b18186969bc8c2dbce8c3bf5411c` verifies the
+resolved source. Previous assembly/receipt and control/candidate performance
+results are historical for this new source tree. Steam remains on `405b14cd`;
+this integration requests no install or test flight. Phase 1 accounting and
+matched CPU/GPU acceptance remain open.

@@ -194,7 +194,7 @@ inline int flatNoCandidateTests() {
             nonEmpty = nonEmpty && name && name[0] && std::strcmp(name, "unknown") != 0;
             for (unsigned b = a + 1; b < kHistoryGapCount; ++b) unique = unique && std::strcmp(name, historyGapName(static_cast<HistoryGap>(b))) != 0;
         }
-        expect(unique && nonEmpty && kHistoryGapCount == 20, "the twenty patterns each carry one name");
+        expect(unique && nonEmpty && kHistoryGapCount == 22, "the twenty-two patterns each carry one name");
         expect(!std::strcmp(historyGapName(HistoryGap::OffsetShift), "offset-shift") && !std::strcmp(historyGapName(HistoryGap::NewKey), "new-key") &&
                !std::strcmp(historyGapName(HistoryGap::RefusedLastFrame), "refused-last-frame-cap"),
                "the names a log reader greps for are the ones the line prints");
@@ -206,9 +206,21 @@ inline int flatNoCandidateTests() {
         w.longestRun = 30; w.resetFrames = 2; w.nearChanges = 1;
         for (unsigned i = 0; i < kHistoryGapCount; ++i) w.missBy[i] = i == static_cast<unsigned>(HistoryGap::OffsetShift) ? 99 : i + 1;
         char line[4096];
-        const int n = flatNoCandidateLine(line, sizeof(line), w);
-        const std::string text(line);
-        expect(n > 0 && n < static_cast<int>(sizeof(line)) - 1, "the no-candidate line fits its buffer");
+        // The line is printed in kFlatNoCandidateLineParts parts (the logger cuts a line at about 1167 characters): the head, then the patterns. A field is
+        // asked of the parts together; flat_log_line_tests.h pins that each part is short and that each field is on exactly one.
+        const auto allParts = [&](const FlatNoCandidateWindow& window, bool& fits) {
+            std::string joined;
+            for (unsigned part = 0; part < kFlatNoCandidateLineParts; ++part) {
+                const int k = flatNoCandidateLine(line, sizeof(line), window, part);
+                fits = fits && k > 0 && k < static_cast<int>(sizeof(line)) - 1;
+                joined += line;
+                joined += '\n';
+            }
+            return joined;
+        };
+        bool partsFit = true;
+        const std::string text = allParts(w, partsFit);
+        expect(partsFit, "the no-candidate line fits its buffer");
         expect(text.rfind("flat foreground no-candidate 5s: ", 0) == 0, "the no-candidate line carries the key the log is read by");
         uint64_t sum = 0; bool all = true;
         for (unsigned i = 0; i < kHistoryGapCount; ++i) {
@@ -226,9 +238,8 @@ inline int flatNoCandidateTests() {
                text.find("reset-frames=2") != std::string::npos && text.find("near-changes=1") != std::string::npos,
                "the line carries the rescued count, what stayed without, the frame counters and the reset counters");
         FlatNoCandidateWindow zero;
-        flatNoCandidateLine(line, sizeof(line), zero);
-        const std::string zeros(line);
-        bool allZero = true;
+        const std::string zeros = allParts(zero, partsFit);
+        bool allZero = partsFit;
         for (unsigned i = 0; i < kHistoryGapCount; ++i) {
             char z[96];
             std::snprintf(z, sizeof(z), " %s=0", historyGapName(static_cast<HistoryGap>(i)));
@@ -570,13 +581,15 @@ inline int flatNoCandidateWiringTests() {
            "the capture is handed the draw's shader pair for the example lines");
     const std::string report = compact(body(runtimeSource, "static void reportForegroundNoCandidate("));
     const auto reportValid = [&](const std::string& text) {
-        return ordered(text, {"s.foregroundMissReported=captures;", "flatNoCandidateLine(line,sizeof(line),w);Log::get().note(\"%s\",line);",
+        return ordered(text, {"s.foregroundMissReported=captures;",
+                              "for(unsigned part=0;part<kFlatNoCandidateLineParts;++part){flatNoCandidateLine(line,sizeof(line),w,part);Log::get().note(\"%s\",line);}",
                               "flatIdentityLine(line,sizeof(line),w);Log::get().note(\"%s\",line);", "flatNoCandidateExampleLine(", "flatIdentityExampleLine("}) &&
             text.find(compact("w.longestRun=(std::max)(w.longestRun,motion.takeLongestMissRun());")) != std::string::npos &&
             text.find(compact("delta(captures.missBy[i],was.missBy[i])")) != std::string::npos;
     };
     expect(reportValid(report), "the window is the difference of the cumulative counters, printed as the two lines and the examples");
-    expect(!reportValid(without(report, "flatNoCandidateLine(line,sizeof(line),w);Log::get().note(\"%s\",line);")), "mutation control: a window that is never printed fails the wiring");
+    expect(!reportValid(without(report, "flatNoCandidateLine(line,sizeof(line),w,part);Log::get().note(\"%s\",line);")), "mutation control: a window that is never printed fails the wiring");
+    expect(!reportValid(replaced(report, "part<kFlatNoCandidateLineParts", "part<1")), "mutation control: a window printed as its head alone (the patterns never printed) fails the wiring");
     expect(compact(runtimeSource).find(compact("w.rescueCancelled=delta(captures.rescueCancelled,was.rescueCancelled);")) != std::string::npos,
            "the window carries the rescues withdrawn");
     const std::string domain = compact(body(runtimeSource, "static void reportForegroundDomain("));
@@ -587,9 +600,10 @@ inline int flatNoCandidateWiringTests() {
     const std::string selector = compact(body(selectorSource, "inline FlatMonoFrame flatSelectMonoFrame("));
     const auto selectorValid = [&](const std::string& text) {
         return ordered(text, {"if(!out.supportedDraws){", "summarizeSourceless(in,count,hdr->key.depth,*hdrCamera,out.sourceless);",
-                              "returnrefuse(FlatMonoReason::NoSupportedSource);", "}"});
+                              "if(in.unsupportedFamilyDraws||out.unsupportedDraws)returnrefuse(FlatMonoReason::NoSupportedSource);",
+                              "out.sourceFree=true;", "}"});
     };
-    expect(selectorValid(selector), "a scene with no supported source says what it held on the HDR's depth before it is refused");
+    expect(selectorValid(selector), "a scene with no supported source says what it held on the HDR's depth before it is refused, or taken source-free");
     expect(!selectorValid(without(selector, "summarizeSourceless(in,count,hdr->key.depth,*hdrCamera,out.sourceless);")), "mutation control: a refusal that names nothing fails the wiring");
     const std::string present = compact(runtimeSource);
     const auto spellValid = [&](const std::string& text) {

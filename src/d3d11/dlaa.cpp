@@ -14,6 +14,7 @@
 #include <dxgi.h>
 
 #include "../common/log.h"
+#include "../common/runtime_profile.h"  // the flat HDR route's fixed exposure (section 106)
 #include "flat_hdr_crumbs.h"   // the flat HDR route's crash-safe breadcrumbs around the feature's steps
 #include "perf_monitor.h"   // the feature's creation is an event with a duration
 #include "gpu_timing.h"
@@ -45,36 +46,25 @@ uint32_t g_timeCount = 0;
 double   g_timeSum = 0.0;
 double   g_timeMax = 0.0;
 
-// Per-role, per-eye price, alongside the pooled figures above (which stay
-// as they are for their existing callers): which of the three independent
-// NGX features -- the full frame, the fovea's centre crop, or the steady
-// periphery -- paid for a given evaluation, so the totals line can show a
-// real per-eye number instead of a pooled average mislabeled as one.
-// Declared unconditionally, like the pooled figures, so the accessors
-// below compile with no DLSS SDK in the build too (they just never see a
+// Per-eye price, alongside the pooled figures above (which stay as they are
+// for their existing callers), so the totals line can show a real per-eye
+// number instead of a pooled average mislabeled as one.
+// Declared unconditionally, like the pooled figures, so the accessor
+// below compiles with no DLSS SDK in the build too (it just never sees a
 // count).
-enum class DlaaRole { Full = 0, Centre = 1, Periphery = 2 };
-constexpr int kDlaaRoles = 3;
 struct DlaaRoleStats {
     uint32_t count = 0;
     double   sum = 0.0;
     double   maxMs = 0.0;
 };
-// Indexed by upscaler slot (dlaa.h, kUpscalerSlots): the eyes' two and the VR world route's third. Only the full-frame role
-// ever counts on the world's slot; the centre and periphery roles are the eyes' (dlaaEvaluateFovea, dlaaEvaluatePeriphery
-// refuse slot 2), so their third column stays empty.
-DlaaRoleStats g_roleStats[kDlaaRoles][kUpscalerSlots];
+// Indexed by upscaler slot (dlaa.h, kUpscalerSlots): the eyes' two and the VR world route's third.
+DlaaRoleStats g_fullStats[kUpscalerSlots];
 
-// Whether a role has this slot at all: the full frame on every slot, the other two on the eyes' only.
-bool roleHasSlot(DlaaRole role, int slot) {
-    return role == DlaaRole::Full ? upscalerSlotHasFullFrame(slot) : upscalerSlotHasFoveatedRoles(slot);
-}
-
-// The measured price for one role and eye, for the totals line. False when
-// that role/eye combination has not evaluated yet.
-bool roleTotals(DlaaRole role, int eye, uint32_t* evaluations, double* avgMs, double* maxMs) {
-    if (!roleHasSlot(role, eye)) return false;
-    const DlaaRoleStats& rs = g_roleStats[static_cast<int>(role)][eye];
+// The measured price for one eye, for the totals line. False when that eye
+// has not evaluated yet.
+bool fullTotals(int eye, uint32_t* evaluations, double* avgMs, double* maxMs) {
+    if (!upscalerSlotHasFullFrame(eye)) return false;
+    const DlaaRoleStats& rs = g_fullStats[eye];
     if (rs.count == 0) return false;
     if (evaluations) *evaluations = rs.count;
     if (avgMs) *avgMs = rs.sum / static_cast<double>(rs.count);
@@ -119,15 +109,14 @@ static_assert(kDlssFlagMvLowRes == static_cast<uint32_t>(NVSDK_NGX_DLSS_Feature_
 static_assert(kDlssFlagMvJittered == static_cast<uint32_t>(NVSDK_NGX_DLSS_Feature_Flags_MVJittered), "MVJittered bit");
 static_assert(kDlssFlagDepthInverted == static_cast<uint32_t>(NVSDK_NGX_DLSS_Feature_Flags_DepthInverted), "DepthInverted bit");
 static_assert(kDlssFlagAutoExposure == static_cast<uint32_t>(NVSDK_NGX_DLSS_Feature_Flags_AutoExposure), "AutoExposure bit");
-static_assert(flatDlssCreateFlags(false) == static_cast<uint32_t>(NVSDK_NGX_DLSS_Feature_Flags_MVLowRes |
+static_assert(flatDlssCreateFlags(false, true) == flatDlssCreateFlags(false, false), "the LDR set has no profile");
+static_assert(flatDlssCreateFlags(false, true) == static_cast<uint32_t>(NVSDK_NGX_DLSS_Feature_Flags_MVLowRes |
                                                                    NVSDK_NGX_DLSS_Feature_Flags_DepthInverted),
               "the LDR flag set is what it always was");
 
 // The render preset -- NVIDIA's model -- set by dlaaSetPreset from the
 // config and applied to the shared parameter block before each feature is
-// created, per ROLE: g_preset for the full frame and the periphery (every
-// mode), g_presetFovea for the fovea crop when it upscales (Balanced,
-// Performance, Ultra Performance). 0 = the driver's own choice per mode (K
+// created: g_preset, every mode. 0 = the driver's own choice per mode (K
 // for DLAA, Quality and Balanced, M for Performance, L for Ultra
 // Performance). A change bumps the generation, so live features are
 // recreated. The desk (2026-09-05): M is far behind K at rest on fine detail
@@ -135,13 +124,12 @@ static_assert(flatDlssCreateFlags(false) == static_cast<uint32_t>(NVSDK_NGX_DLSS
 // most at rest; and the cost probe priced the models at the Crystal Super's
 // sizes -- on the full frame K, L, M and J cost the same within 7% (the
 // price is the output's), under Performance L costs 1.8x K, and under DLAA L
-// costs FIVE times K. So: K everywhere but the fovea's upscaling crop, which
-// gets L (its faster convergence from fresh content is what a crop needs,
-// and a crop is small enough that L's price does not matter); never L or M
-// under DLAA.
-unsigned g_preset = 11;        // the full frame's and the periphery's, every mode
-unsigned g_presetFovea = 12;   // the fovea crop's, when it upscales
+// costs FIVE times K. So: K everywhere; never L or M under DLAA.
+unsigned g_preset = 11;        // the full frame's, every mode
 uint64_t g_presetGen = 1;
+// The flat HDR route's exposure input (section 106): NVIDIA's "1x1 texture containing the final exposure scale",
+// R32_FLOAT 1.0, made on the first such evaluation. H is pre-tonemap radiance the game's own tone pass exposes later.
+ID3D11Texture2D* g_exposureOne = nullptr;
 
 const char* presetName(unsigned p) {
     switch (p) {
@@ -159,26 +147,25 @@ const char* presetName(unsigned p) {
 // L and M are upscaling models: under DLAA L cost five times K on the desk.
 unsigned dlaaSafe(unsigned p) { return (p == 12 || p == 13) ? 11u : p; }
 
-// The hints for a feature about to be created: `upscaleP` for the upscaling
-// modes, g_preset for DLAA and the Quality modes.
-void applyPresetHints(unsigned upscaleP) {
+// The hints for a feature about to be created: g_preset for every mode
+// (never L or M under DLAA and the Quality modes).
+void applyPresetHints() {
     if (!g_params) return;
     g_params->Set(NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_DLAA, dlaaSafe(g_preset));
     g_params->Set(NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraQuality, dlaaSafe(g_preset));
     g_params->Set(NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Quality, dlaaSafe(g_preset));
-    g_params->Set(NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Balanced, upscaleP);
-    g_params->Set(NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Performance, upscaleP);
-    g_params->Set(NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraPerformance, upscaleP);
+    g_params->Set(NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Balanced, g_preset);
+    g_params->Set(NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Performance, g_preset);
+    g_params->Set(NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraPerformance, g_preset);
 }
-void applyPresetHints() { applyPresetHints(g_preset); }
 
-// The preset a feature of this quality and role runs under, for the log.
-unsigned presetFor(NVSDK_NGX_PerfQuality_Value q, bool fovea = false) {
+// The preset a feature of this quality runs under, for the log.
+unsigned presetFor(NVSDK_NGX_PerfQuality_Value q) {
     if (q == NVSDK_NGX_PerfQuality_Value_DLAA || q == NVSDK_NGX_PerfQuality_Value_MaxQuality ||
         q == NVSDK_NGX_PerfQuality_Value_UltraQuality) {
         return dlaaSafe(g_preset);
     }
-    return fovea ? g_presetFovea : g_preset;
+    return g_preset;
 }
 
 const char* qualityName(NVSDK_NGX_PerfQuality_Value q) {
@@ -195,22 +182,11 @@ const char* qualityName(NVSDK_NGX_PerfQuality_Value q) {
 // The full-frame features, one per upscaler slot (dlaa.h, kUpscalerSlots): the eyes' two, which dlaaWarm makes on the loading
 // screen, and the VR world route's third (slot 2), made lazily by the first evaluation on it and released with the others.
 EyeFeature g_feature[kUpscalerSlots];
-// The fovea features, kept apart from the full-frame ones: created with
-// output sub-rectangles enabled and their own history, so switching the
-// fovea on or off never disturbs the full-frame path's accumulation. The eyes'
-// only (kUpscalerEyeSlots): the VR world's slot has no fovea.
-EyeFeature g_fovea[kUpscalerEyeSlots];
-// The steady periphery's features (docs/performance.md feature 6): DLAA on
-// a reduced copy of the frame, a third slot with its own history, so the
-// fovea, the periphery and the full frame never share an accumulation. The
-// eyes' only, as the fovea's are.
-EyeFeature g_periph[kUpscalerEyeSlots];
 
 // The GPU-price ring, the resolve's discipline: never awaited.
 struct QuerySlot {
     GpuTimer     timer;
     bool         inUse = false;
-    DlaaRole     role = DlaaRole::Full;   // which feature this sample prices
     int          eye = 0;                 // the upscaler slot: 0 left, 1 right, 2 the VR world route's (full frame only)
 };
 constexpr int kQueryRing = 8;
@@ -233,8 +209,8 @@ void pollTimingRing(ID3D11DeviceContext* ctx) {
         ++g_timeCount;
         g_timeSum += ms;
         if (ms > g_timeMax) g_timeMax = ms;
-        if (roleHasSlot(q.role, q.eye)) {
-            DlaaRoleStats& rs = g_roleStats[static_cast<int>(q.role)][q.eye];
+        if (upscalerSlotHasFullFrame(q.eye)) {
+            DlaaRoleStats& rs = g_fullStats[q.eye];
             ++rs.count;
             rs.sum += ms;
             if (ms > rs.maxMs) rs.maxMs = ms;
@@ -282,20 +258,6 @@ char g_reasonBuf[256];
 
 void releaseFeatures() {
     for (EyeFeature& f : g_feature) {
-        if (f.handle) {
-            NVSDK_NGX_D3D11_ReleaseFeature(f.handle);
-            f.handle = nullptr;
-        }
-        f.w = f.h = 0;
-    }
-    for (EyeFeature& f : g_fovea) {
-        if (f.handle) {
-            NVSDK_NGX_D3D11_ReleaseFeature(f.handle);
-            f.handle = nullptr;
-        }
-        f.w = f.h = 0;
-    }
-    for (EyeFeature& f : g_periph) {
         if (f.handle) {
             NVSDK_NGX_D3D11_ReleaseFeature(f.handle);
             f.handle = nullptr;
@@ -462,10 +424,10 @@ bool ensureFeature(ID3D11DeviceContext* ctx, int eye, uint32_t w, uint32_t h,
         cp.Feature.InTargetWidth = outW;
         cp.Feature.InTargetHeight = outH;
         cp.Feature.InPerfQualityValue = quality;
-        // LDR colour (HDR with automatic exposure on the flat HDR route: hdr_backend_flags.h);
+        // LDR colour (HDR on the HDR route: fixed exposure in flat, automatic in the VR world route; hdr_backend_flags.h);
         // motion vectors at the render size, unjittered (the pass computes them on the unjittered
         // grid); reversed-Z depth.
-        cp.InFeatureCreateFlags = static_cast<int>(flatDlssCreateFlags(hdr));
+        cp.InFeatureCreateFlags = static_cast<int>(flatDlssCreateFlags(hdr, runtimeFlatProfile()));
         cp.InEnableOutputSubrects = false;
         applyPresetHints();
         // An event with a duration for the monitor's drop attribution: the
@@ -504,9 +466,11 @@ bool ensureFeature(ID3D11DeviceContext* ctx, int eye, uint32_t w, uint32_t h,
         f.presetGen = g_presetGen;
         f.hdr = hdr;
         if (hdr)
-            Log::get().note("dlss: the feature for %s was created for the flat HDR route: HDR input and "
-                            "automatic exposure (IsHDR | AutoExposure with MVLowRes | DepthInverted); the "
-                            "history starts here.", upscalerSlotLabel(eye));
+            Log::get().note("dlss: the feature for %s was created for the flat HDR route: HDR input, exposure %s; the "
+                            "history starts here.", upscalerSlotLabel(eye),
+                            flatDlssFixedExposure(hdr, runtimeFlatProfile())
+                                ? "fixed at 1.0 (IsHDR with MVLowRes | DepthInverted, no AutoExposure; a 1x1 exposure texture)"
+                                : "automatic (IsHDR | AutoExposure with MVLowRes | DepthInverted)");
         // Build point 5, 2026-09-23: a create success resets the shared
         // reason, so a caller that reads it later (dlaaAvailable's *reason,
         // which just echoes g_reason once NGX has initialised) is not shown
@@ -628,7 +592,7 @@ bool dlaaAvailable(ID3D11Device* dev, const char** reason) {
 // ensureFeature walks, answered and logged the same way; nothing is chosen
 // here, and ensureFeature's own walk and selection are untouched.
 bool dlssModeRanges(ID3D11Device* dev, uint32_t outW, uint32_t outH,
-                    DlssModeRange modes[kDlssModeCount]) {
+                    DlssModeRange modes[kDlssModeCount], bool quiet) {
     for (int k = 0; k < kDlssModeCount; ++k) modes[k] = DlssModeRange{};
 #ifndef EDVR_HAVE_NGX
     (void)dev;
@@ -653,15 +617,15 @@ bool dlssModeRanges(ID3D11Device* dev, uint32_t outW, uint32_t outH,
         modes[k].maxW = mxW; modes[k].maxH = mxH;
         modes[k].sharpness = sh;
     }
-    logDlssModesOnce(outW, outH, modes, errCodes);
+    if (!quiet) logDlssModesOnce(outW, outH, modes, errCodes);
     return any;
 #endif
 }
 
-bool dlaaWarm(ID3D11DeviceContext* ctx, uint32_t w, uint32_t h, bool features,
+bool dlaaWarm(ID3D11DeviceContext* ctx, uint32_t w, uint32_t h,
               double* initMs, double createMs[2], const char** reason) {
 #ifndef EDVR_HAVE_NGX
-    (void)ctx; (void)w; (void)h; (void)features;
+    (void)ctx; (void)w; (void)h;
     if (initMs) *initMs = 0.0;
     if (createMs) createMs[0] = createMs[1] = 0.0;
     if (reason) *reason = "this build has no DLSS SDK in it";
@@ -682,6 +646,14 @@ bool dlaaWarm(ID3D11DeviceContext* ctx, uint32_t w, uint32_t h, bool features,
                       ? static_cast<double>(qpcNow() - t0) * 1000.0 /
                             static_cast<double>(qpcFrequency())
                       : 0.0;
+    }
+    // NVIDIA's ceiling (dlss_floor.h): a size it names no usable range for has no 1:1 feature either -- the 2026-10-09 flight's
+    // 8268x3948 failed its create -- so the warm-up stands aside there, quietly. The first upscaled frame cuts its output to the
+    // ceiling and makes its own feature; the loading frames at this size stand aside too (temporal_pass.cpp).
+    bool features = true;   // the key cull dropped dlaaWarm's parameter of this name; main's ceiling check below still clears it
+    if (ok && features && dev) {
+        DlssModeRange modes[kDlssModeCount];
+        if (!dlssModeRanges(dev, w, h, modes) || !dlssRangesAnswered(modes)) features = false;
     }
     if (dev) dev->Release();
     if (!ok) return false;
@@ -751,6 +723,25 @@ bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
     ep.InMVScaleY = 1.0f;
     ep.InPreExposure = 1.0f;
     ep.InExposureScale = 1.0f;
+    if (flatDlssFixedExposure(hdr, runtimeFlatProfile())) {
+        if (!g_exposureOne) {
+            ID3D11Device* exposureDev = nullptr;
+            ctx->GetDevice(&exposureDev);
+            if (exposureDev) {
+                D3D11_TEXTURE2D_DESC td{};
+                td.Width = td.Height = 1; td.MipLevels = td.ArraySize = 1; td.Format = DXGI_FORMAT_R32_FLOAT;
+                td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_IMMUTABLE; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+                const float one = 1.0f;
+                D3D11_SUBRESOURCE_DATA init{&one, sizeof(one), 0};
+                const HRESULT hrExposure = exposureDev->CreateTexture2D(&td, &init, &g_exposureOne);
+                if (FAILED(hrExposure))
+                    Log::get().note("dlss: the fixed exposure texture (1x1 R32_FLOAT = 1.0) was refused (hr=0x%08X); "
+                                    "the evaluation runs without it", static_cast<unsigned>(hrExposure));
+                exposureDev->Release();
+            }
+        }
+        ep.pInExposureTexture = g_exposureOne;
+    }
     // The frame delta the SDK asks for ("helps in determining the amount
     // to denoise or anti-alias based on the speed of the object"); zero
     // when unknown, which the runtime treats as unstated.
@@ -759,7 +750,7 @@ bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
     ctx->GetDevice(&dev);
     const int qs = dev ? acquireQuerySlot(dev, ctx) : -1;
     if (dev) dev->Release();
-    if (qs >= 0) { g_qring[qs].role = DlaaRole::Full; g_qring[qs].eye = eye; }
+    if (qs >= 0) g_qring[qs].eye = eye;
     HdrCrumbSpan evaluate(hdr, "backend-evaluate", "ngx in=%ux%u out=%ux%u reset=%u", w, h, outW, outH, reset ? 1u : 0u);
     const NVSDK_NGX_Result er = NGX_D3D11_EVALUATE_DLSS_EXT(ctx, f.handle, g_params, &ep);
     evaluate.result("ngx=0x%08X", static_cast<unsigned>(er));
@@ -788,227 +779,14 @@ bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
 #endif
 }
 
+void dlaaSetPreset(unsigned preset) {
 #ifdef EDVR_HAVE_NGX
-namespace {
-// The general crop evaluation, which both the fovea and the steady periphery
-// are: NVIDIA runs on an INPUT crop (icx,icy,icw,ich) of the render-size
-// textures and writes an OUTPUT crop (ocx,ocy,ocw,och) of the native output,
-// through a feature `f` of its own (`what` names it in the log). The feature
-// is created at the input CROP size -> the output CROP size, not the full
-// frame -- the difference the crop probe (since removed) validated and the
-// production path first got wrong (0xBAD00005 in the field, 2026-09-05).
-// InRenderSubrectDimensions equals the created InWidth/InHeight; the input
-// sub-rect bases locate the crop in the full-frame render textures, and the
-// output base writes the (possibly upscaled) crop into the native output.
-// Equal crops are DLAA (1:1); a smaller input is DLSS upscaling just the
-// crop. Keyed on all four sizes, so a live width or render-size change
-// rebuilds and resets.
-bool evaluateCrop(EyeFeature& f, const char* what, int eye, ID3D11DeviceContext* ctx,
-                  ID3D11Texture2D* colour, ID3D11Texture2D* depth, ID3D11Texture2D* motion,
-                  ID3D11Texture2D* output, uint32_t inW, uint32_t inH, uint32_t outW,
-                  uint32_t outH, uint32_t icx, uint32_t icy, uint32_t icw, uint32_t ich,
-                  uint32_t ocx, uint32_t ocy, uint32_t ocw, uint32_t och, float jx, float jy,
-                  bool reset, float frameMs, const char** reason) {
-    if (!g_available || !g_params || !ctx || !colour || !depth || !motion || !output ||
-        !inW || !inH || !icw || !ich || !ocw || !och) {
-        if (reason) *reason = g_available ? "a missing input" : g_reason;
-        return false;
-    }
-    if (icx + icw > inW || icy + ich > inH || ocx + ocw > outW || ocy + och > outH) {
-        snprintf(g_reasonBuf, sizeof(g_reasonBuf), "the %s crop falls outside the frame", what);
-        g_reason = g_reasonBuf;
-        if (reason) *reason = g_reason;
-        return false;
-    }
-    // Hoisted out of the create-block below: needed again at the eval call
-    // site, well past where that block ends, to tag the timing sample.
-    const bool isFovea = what[0] == 'f';
-    pollTimingRing(ctx);
-    bool didCreate = false;
-    if (!f.handle || f.w != icw || f.h != ich || f.outW != ocw || f.outH != och ||
-        f.presetGen != g_presetGen) {
-        if (f.handle) {
-            NVSDK_NGX_D3D11_ReleaseFeature(f.handle);
-            f.handle = nullptr;
-        }
-        // Equal crops are DLAA. A smaller input picks the quality mode by the
-        // FRAME's upscale ratio, not the crop's -- the frame ratio is the same
-        // for both eyes and stable, so the eyes never land on different DLSS
-        // networks across a 0.5/0.58/0.667 threshold the way the per-eye crop
-        // ratio does when rounding straddles it (the review of 2026-09-05,
-        // F1). dlssModeByRatio (dlaa.h) is the one ratio rule in the file now
-        // (build point 4, 2026-09-23) -- ensureFeature's own range-unknown
-        // fallback calls the same helper, so a given ratio can no longer pick
-        // different modes depending which call site saw it.
-        NVSDK_NGX_PerfQuality_Value q = NVSDK_NGX_PerfQuality_Value_DLAA;
-        if (inW != outW || inH != outH) {
-            q = kNgxLadder[static_cast<int>(dlssModeByRatio(inW, outW))];
-        }
-        NVSDK_NGX_DLSS_Create_Params cp{};
-        cp.Feature.InWidth = icw;
-        cp.Feature.InHeight = ich;
-        cp.Feature.InTargetWidth = ocw;
-        cp.Feature.InTargetHeight = och;
-        cp.Feature.InPerfQualityValue = q;
-        cp.InFeatureCreateFlags = NVSDK_NGX_DLSS_Feature_Flags_MVLowRes |
-                                  NVSDK_NGX_DLSS_Feature_Flags_DepthInverted;
-        // NVIDIA writes at the output sub-rectangle's base rather than the origin.
-        cp.InEnableOutputSubrects = true;
-        applyPresetHints(isFovea ? g_presetFovea : g_preset);
-        const NVSDK_NGX_Result cr = NGX_D3D11_CREATE_DLSS_EXT(ctx, &f.handle, g_params, &cp);
-        if (NVSDK_NGX_FAILED(cr) || !f.handle) {
-            f.handle = nullptr;
-            snprintf(g_reasonBuf, sizeof(g_reasonBuf),
-                     "the %s feature would not be created at %ux%u->%ux%u: %s (0x%08X)", what,
-                     icw, ich, ocw, och, ngxResultName(cr), static_cast<unsigned>(cr));
-            g_reason = g_reasonBuf;
-            if (reason) *reason = g_reason;
-            return false;
-        }
-        f.w = icw;
-        f.h = ich;
-        f.outW = ocw;
-        f.outH = och;
-        f.presetGen = g_presetGen;
-        didCreate = true;
-        // Same reset as ensureFeature's (build point 5): this crop
-        // feature's own create succeeded, so the shared reason must not
-        // go on quoting an older refusal.
-        g_reason = "available";
-        Log::get().note(
-            "temporal aa %s: NVIDIA's feature is created for eye %d, crop %ux%u in -> "
-            "%ux%u out (%s, preset %s, output sub-rectangles; input based at %u,%u in the "
-            "%ux%u render, output at %u,%u in the %ux%u frame); its history starts here.",
-            what, eye, icw, ich, ocw, och, (icw == ocw && ich == och) ? "DLAA" : qualityName(q),
-            presetName(presetFor(q, isFovea)), icx, icy, inW, inH, ocx, ocy, outW, outH);
-    }
-
-    NVSDK_NGX_D3D11_DLSS_Eval_Params ep{};
-    ep.Feature.pInColor = colour;
-    ep.Feature.pInOutput = output;
-    ep.Feature.InSharpness = 0.0f;
-    ep.pInDepth = depth;
-    ep.pInMotionVectors = motion;
-    ep.InJitterOffsetX = jx;
-    ep.InJitterOffsetY = jy;
-    ep.InRenderSubrectDimensions.Width = icw;
-    ep.InRenderSubrectDimensions.Height = ich;
-    // A freshly created feature has no history, so it must reset whatever the
-    // caller thought -- a live fovea-width or render-size change recreates the
-    // feature without the caller's history flag knowing.
-    ep.InReset = (reset || didCreate) ? 1 : 0;
-    ep.InMVScaleX = 1.0f;
-    ep.InMVScaleY = 1.0f;
-    // The crop's top-left in each render-size input, and where the (possibly
-    // upscaled) crop lands in the native output.
-    ep.InColorSubrectBase.X = icx;
-    ep.InColorSubrectBase.Y = icy;
-    ep.InDepthSubrectBase.X = icx;
-    ep.InDepthSubrectBase.Y = icy;
-    ep.InMVSubrectBase.X = icx;
-    ep.InMVSubrectBase.Y = icy;
-    ep.InOutputSubrectBase.X = ocx;
-    ep.InOutputSubrectBase.Y = ocy;
-    ep.InPreExposure = 1.0f;
-    ep.InExposureScale = 1.0f;
-    ep.InFrameTimeDeltaInMsec = frameMs;
-
-    ID3D11Device* dev = nullptr;
-    ctx->GetDevice(&dev);
-    const int qs = dev ? acquireQuerySlot(dev, ctx) : -1;
-    if (dev) dev->Release();
-    if (qs >= 0) {
-        g_qring[qs].role = isFovea ? DlaaRole::Centre : DlaaRole::Periphery;
-        g_qring[qs].eye = eye;
-    }
-    const NVSDK_NGX_Result er = NGX_D3D11_EVALUATE_DLSS_EXT(ctx, f.handle, g_params, &ep);
-    if (qs >= 0) g_qring[qs].timer.end(ctx); // Poll consumes failed End samples too.
-    if (NVSDK_NGX_FAILED(er)) {
-        snprintf(g_reasonBuf, sizeof(g_reasonBuf), "the %s evaluation failed: %s (0x%08X)", what,
-                 ngxResultName(er), static_cast<unsigned>(er));
-        g_reason = g_reasonBuf;
-        if (reason) *reason = g_reason;
-        return false;
-    }
-    ++g_evaluations;
-    if (reset || didCreate) ++g_resets;   // a create forces a reset too (the review, F7)
-    return true;
-}
-}  // namespace
-#endif  // EDVR_HAVE_NGX
-
-bool dlssEvaluateFovea(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
-                       ID3D11Texture2D* depth, ID3D11Texture2D* motion,
-                       ID3D11Texture2D* output, uint32_t inW, uint32_t inH,
-                       uint32_t outW, uint32_t outH, uint32_t icx, uint32_t icy,
-                       uint32_t icw, uint32_t ich, uint32_t ocx, uint32_t ocy,
-                       uint32_t ocw, uint32_t och, float jx, float jy, bool reset,
-                       float frameMs, const char** reason) {
-#ifndef EDVR_HAVE_NGX
-    (void)ctx; (void)eye; (void)colour; (void)depth; (void)motion; (void)output;
-    (void)inW; (void)inH; (void)outW; (void)outH; (void)icx; (void)icy; (void)icw;
-    (void)ich; (void)ocx; (void)ocy; (void)ocw; (void)och;
-    (void)jx; (void)jy; (void)reset; (void)frameMs;
-    if (reason) *reason = "this build has no DLSS SDK in it";
-    return false;
-#else
-    if (!upscalerSlotHasFoveatedRoles(eye)) {
-        // The VR world's slot (2) is a real slot with no fovea; anything else is no slot at all.
-        if (reason) *reason = upscalerSlotHasFullFrame(eye) ? "this upscaler slot has no fovea" : "a missing input";
-        return false;
-    }
-    return evaluateCrop(g_fovea[eye], "fovea", eye, ctx, colour, depth, motion, output, inW, inH,
-                        outW, outH, icx, icy, icw, ich, ocx, ocy, ocw, och, jx, jy, reset, frameMs,
-                        reason);
-#endif
-}
-
-// The 1:1 crop (DLAA): the output crop equals the input crop, in the same
-// full-frame textures. A thin wrapper over the general path.
-bool dlaaEvaluateFovea(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
-                       ID3D11Texture2D* depth, ID3D11Texture2D* motion,
-                       ID3D11Texture2D* output, uint32_t w, uint32_t h,
-                       uint32_t cropX, uint32_t cropY, uint32_t cropW, uint32_t cropH,
-                       float jx, float jy, bool reset, float frameMs,
-                       const char** reason) {
-    return dlssEvaluateFovea(ctx, eye, colour, depth, motion, output, w, h, w, h, cropX, cropY,
-                             cropW, cropH, cropX, cropY, cropW, cropH, jx, jy, reset, frameMs,
-                             reason);
-}
-
-// The steady periphery (docs/performance.md feature 6): DLAA over the WHOLE of
-// a w x h frame -- a reduced copy of the render, or the render itself when the
-// game rendered small -- through the third feature slot, so its history is
-// its own. The composite upscales what comes back around the fovea.
-bool dlaaEvaluatePeriphery(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
-                           ID3D11Texture2D* depth, ID3D11Texture2D* motion,
-                           ID3D11Texture2D* output, uint32_t w, uint32_t h, float jx, float jy,
-                           bool reset, float frameMs, const char** reason) {
-#ifndef EDVR_HAVE_NGX
-    (void)ctx; (void)eye; (void)colour; (void)depth; (void)motion; (void)output;
-    (void)w; (void)h; (void)jx; (void)jy; (void)reset; (void)frameMs;
-    if (reason) *reason = "this build has no DLSS SDK in it";
-    return false;
-#else
-    if (!upscalerSlotHasFoveatedRoles(eye)) {
-        if (reason) *reason = upscalerSlotHasFullFrame(eye) ? "this upscaler slot has no periphery" : "a missing input";
-        return false;
-    }
-    return evaluateCrop(g_periph[eye], "periphery", eye, ctx, colour, depth, motion, output, w, h,
-                        w, h, 0, 0, w, h, 0, 0, w, h, jx, jy, reset, frameMs, reason);
-#endif
-}
-
-void dlaaSetPreset(unsigned preset, unsigned foveaPreset) {
-#ifdef EDVR_HAVE_NGX
-    if (preset != g_preset || foveaPreset != g_presetFovea) {
+    if (preset != g_preset) {
         g_preset = preset;
-        g_presetFovea = foveaPreset;
         ++g_presetGen;   // every live feature is recreated on its next evaluation
     }
 #else
     (void)preset;
-    (void)foveaPreset;
 #endif
 }
 
@@ -1022,25 +800,18 @@ bool dlaaTotals(uint32_t* evaluations, double* avgMs, double* maxMs,
     return true;
 }
 
-// The measured price for one role, both eyes visible to the caller by
-// asking twice: the full frame's own NGX feature (every mode), the fovea's
-// centre crop, and the steady periphery, each with its own history and so
-// its own price. False when that role/eye has not evaluated yet -- the
-// pooled dlaaTotals above stays as the fallback for callers that only want
-// one number.
+// The measured price for one eye, both eyes visible to the caller by asking
+// twice: the full frame's own NGX feature (every mode). False when that eye
+// has not evaluated yet -- the pooled dlaaTotals above stays as the fallback
+// for callers that only want one number.
 bool dlaaFullTotals(int eye, uint32_t* evaluations, double* avgMs, double* maxMs) {
-    return roleTotals(DlaaRole::Full, eye, evaluations, avgMs, maxMs);
-}
-bool dlaaCentreTotals(int eye, uint32_t* evaluations, double* avgMs, double* maxMs) {
-    return roleTotals(DlaaRole::Centre, eye, evaluations, avgMs, maxMs);
-}
-bool dlaaPeripheryTotals(int eye, uint32_t* evaluations, double* avgMs, double* maxMs) {
-    return roleTotals(DlaaRole::Periphery, eye, evaluations, avgMs, maxMs);
+    return fullTotals(eye, evaluations, avgMs, maxMs);
 }
 
 void dlaaShutdown() {
 #ifdef EDVR_HAVE_NGX
     releaseFeatures();
+    if (g_exposureOne) { g_exposureOne->Release(); g_exposureOne = nullptr; }
     for (QuerySlot& q : g_qring) releaseQuerySlot(q);
     if (g_params) {
         NVSDK_NGX_D3D11_DestroyParameters(g_params);

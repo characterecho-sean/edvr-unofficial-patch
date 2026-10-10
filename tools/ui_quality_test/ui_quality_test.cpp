@@ -72,13 +72,18 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <initializer_list>
 #include <iterator>
+#include <limits>
 #include <string>
 #include <vector>
 
 #include "../../src/common/system_d3d11.h"
 #include "../../src/common/temporal_math.h"
+#include "../../src/d3d11/flat_projection_math.h"  // flatProjectionJitter: the flat layer's jitter rule is its inverse
+#include "../../src/d3d11/flat_ui_layer_math.h"    // the flat layer's adapter rules
+#include "../../src/d3d11/orbital_width.h"  // the orbit lines' width decision, for the panel factor's Supersampling term
 #include "../../src/d3d11/ui_layer_seed.h"
 #include "../../src/d3d11/ui_layer_seed_census.h"
 #include "../../src/d3d11/ui_layer_math.h"
@@ -860,6 +865,7 @@ double panelFactor(uint32_t askW, float hmd, float up, float down, uint32_t outW
     in.outputW = outW;
     in.trueTangent = uiQualityFovTangent(trueUp, trueDown);
     in.target = target;
+    in.supersampling = 1.0f;  // these flights ran at Supersampling 1.0; panelbudget:: (ui_panel_budget_test.h) holds the rest
     double f = 0.0;
     return uiPanelFactor(in, &f, clamp) ? f : -1.0;
 }
@@ -955,7 +961,11 @@ void testPanelScale() {
           "Quest 3 trimmed 2/2/7: k from the narrower frustum it is told, k_out from the headset's");
     // The cap and the floor.
     f = panelFactor(3070, 0.2f, pimax, pimax, 3070, pimax, pimax, 1.25f, &clamp);
-    check(f == 0.25 && clamp == UiPanelClamp::kCap, "HMD Quality 0.2 -> 1.25 would be x6.25: capped at 4x");
+    check(std::fabs(f - kUiPanelObservedBase / kUiPanelBudget) < 1e-9 && clamp == UiPanelClamp::kBudget,
+          "HMD Quality 0.2 -> 1.25 would be x6.25: the 4x cap's 0.25 would ask for a 15360 px panel, over the size budget, so f is raised to x3.73");
+    f = panelFactor(3070, 0.2f, pimax, pimax, 3070, pimax, pimax, 1.0f, &clamp);
+    check(std::fabs(f - kUiPanelObservedBase / kUiPanelBudget) < 1e-9 && clamp == UiPanelClamp::kBudget,
+          "...and at 100: the budget's floor (x3.73) is above the 4x cap's, so it is the budget that holds, never the 4x cap alone");
     f = panelFactor(3070, 1.5f, pimax, pimax, 3070, pimax, pimax, 1.25f, &clamp);
     check(f == 1.0 && clamp == UiPanelClamp::kFloor, "HMD Quality 1.5 above 1.25: 1, never smaller than the game's");
     f = panelFactor(2458, 1.25f, trim, trim, 3070, pimax, pimax, 1.25f, &clamp);
@@ -1039,6 +1049,200 @@ void testPanelScale() {
     }
     check(count == 2 && at[0] == kUiPanelSiteRva[0] && at[1] == kUiPanelSiteRva[1],
           "...and the shape occurs exactly twice in .text, at the two sites");
+}
+
+// The flat profile's factor (ui_sizing_math.h's uiFlatPanelPlanFor, 2026-10-09): f = (R / D) / T on the axis the game
+// divides, the panels at D x T whatever the Supersampling. The 09:36 Epic flight's numbers: D 3840x2160, an rtt-init panel
+// 1920x960 at R 3840x2160 and 960x480 at R 1920x1080 -- the same 960x480 stage at s = R_h / 1080.
+void testFlatPanelScale() {
+    auto plan = [](uint32_t rw, uint32_t rh, uint32_t dw, uint32_t dh, float t, UiPanelPlan* p) {
+        UiFlatPanelInputs in;
+        in.renderW = rw;
+        in.renderH = rh;
+        in.outputW = dw;
+        in.outputH = dh;
+        in.target = t;
+        return uiFlatPanelPlanFor(in, p);
+    };
+    UiPanelPlan p;
+    // The flight's state: 0.5 Supersampling on a 4K screen.
+    check(plan(1920, 1080, 3840, 2160, 1.0f, &p) == UiFlatPanelRefuse::kNone && std::fabs(p.f - 0.5) < 1e-12 &&
+              p.clamp == UiPanelClamp::kNone && !p.budgetActs && p.ss == 1.0,
+          "flat R 1920x1080 on D 3840x2160 at 100: f = 0.5 (the panels x2), no Supersampling term, no clamp");
+    float d1080 = 0.0f, d1920 = 0.0f;
+    uiPanelDivisors(p.f, &d1080, &d1920);
+    check(d1080 == 540.0f && d1920 == 960.0f, "...the operands read 540 and 960");
+    check(uiFlatPanelSizeHeightAxis(960, 1080, 1080.0f) == 960 && uiFlatPanelSizeHeightAxis(480, 1080, 1080.0f) == 480,
+          "the flight's stage 960x480 at R 1920x1080 and the game's own divisor is the logged 960x480");
+    check(uiFlatPanelSizeHeightAxis(960, 2160, 1080.0f) == 1920 && uiFlatPanelSizeHeightAxis(480, 2160, 1080.0f) == 960,
+          "...and at R 3840x2160 the logged 1920x960: the panels follow R, which is what the factor divides out");
+    check(uiFlatPanelSizeHeightAxis(960, 1080, d1080) == 1920 && uiFlatPanelSizeHeightAxis(480, 1080, d1080) == 960,
+          "...so at R 1920x1080 with f 0.5 the panel is the display's 1920x960");
+    check(std::fabs(p.largest - 1920.0 / 0.5) < 1e-9, "the widest panel the formula can ask for is the 1920 stage at D: 3840 px");
+    check(plan(1920, 1080, 3840, 2160, 1.25f, &p) == UiFlatPanelRefuse::kNone && std::fabs(p.f - 0.4) < 1e-12 &&
+              p.clamp == UiPanelClamp::kNone && std::fabs(p.largest - 4800.0) < 1e-9,
+          "...at 125: f = 0.4 (x2.5), the widest 4800 px");
+    uiPanelDivisors(p.f, &d1080, &d1920);
+    check(uiFlatPanelSizeHeightAxis(960, 1080, d1080) == 2400 && uiFlatPanelSizeHeightAxis(480, 1080, d1080) == 1200,
+          "...the 960x480 stage comes out 2400x1200: the display's size x 1.25");
+    // Supersampling 1 and above: at or above D x T the game's own panels stand.
+    check(plan(3840, 2160, 3840, 2160, 1.0f, &p) == UiFlatPanelRefuse::kNone && p.f == 1.0,
+          "R = D at 100: f = 1, the game's own operands");
+    check(plan(3840, 2160, 3840, 2160, 1.25f, &p) == UiFlatPanelRefuse::kNone && std::fabs(p.f - 0.8) < 1e-12,
+          "R = D at 125: f = 0.8 (x1.25)");
+    check(plan(5760, 3240, 3840, 2160, 1.25f, &p) == UiFlatPanelRefuse::kNone && p.f == 1.0 && p.clamp == UiPanelClamp::kFloor,
+          "Supersampling 1.5 at 125: the game's panels are already 1.5x D, f = 1 (the floor): never smaller than the game makes them");
+    // Other shapes: the axis the game divides on.
+    check(uiFlatPanelHeightAxis(1920, 1080) && uiFlatPanelHeightAxis(3440, 1440) && !uiFlatPanelHeightAxis(2560, 1600),
+          "the height (1080) axis at 16:9 and wider, the width (1920) axis below 16:9");
+    check(plan(1280, 800, 2560, 1600, 1.0f, &p) == UiFlatPanelRefuse::kNone && std::fabs(p.f - 0.5) < 1e-12 &&
+              std::fabs(p.base - 1280.0) < 1e-9,
+          "16:10 at half: f 0.5 on the width axis, the base the render width");
+    check(plan(1720, 720, 3440, 1440, 1.0f, &p) == UiFlatPanelRefuse::kNone && std::fabs(p.f - 0.5) < 1e-12 &&
+              std::fabs(p.base - 1280.0) < 1e-9,
+          "21:9 at half: f 0.5 on the height axis, the base the 1920 stage at R's height (1280 px)");
+    check(plan(1919, 1080, 3840, 2160, 1.0f, &p) == UiFlatPanelRefuse::kNone,
+          "a pixel of rounding in R is the same shape");
+    // The cap and the budget: an 8K screen at a quarter render.
+    check(plan(1920, 1080, 7680, 4320, 1.25f, &p) == UiFlatPanelRefuse::kNone && p.f == 0.25 && p.clamp == UiPanelClamp::kCap &&
+              p.largest <= kUiPanelBudget,
+          "R a quarter of an 8K D at 125 would be x5: capped at x4, the widest 7680 px, inside the budget");
+    // Refusals: no factor, the floats hold.
+    check(plan(512, 512, 3840, 2160, 1.0f, &p) == UiFlatPanelRefuse::kAspect,
+          "the flight's 512x512 frames (a render unlike the screen's shape) make no factor");
+    check(plan(0, 0, 3840, 2160, 1.0f, &p) == UiFlatPanelRefuse::kUnknown &&
+              plan(1920, 1080, 0, 0, 1.0f, &p) == UiFlatPanelRefuse::kUnknown &&
+              plan(1920, 1080, 3840, 2160, 0.0f, &p) == UiFlatPanelRefuse::kUnknown,
+          "an unknown size or the key off: no factor");
+    // The setter thunk's move: R follows the Supersampling, so the plan scales with it.
+    UiPanelPlan base;
+    plan(1920, 1080, 3840, 2160, 1.0f, &base);
+    check(uiFlatPanelMove(base.formula, base.base, 0.5f, 1.0f, &p) && p.f == 1.0,
+          "the thunk: Supersampling 0.5 -> 1.0 moves f 0.5 -> 1 before R follows");
+    check(uiFlatPanelMove(base.formula, base.base, 0.5f, 0.75f, &p) && std::fabs(p.f - 0.75) < 1e-12,
+          "...0.5 -> 0.75: f 0.75, R's own 2880x1620 over D");
+    UiPanelPlan direct;
+    plan(2880, 1620, 3840, 2160, 1.0f, &direct);
+    check(std::fabs(direct.f - p.f) < 1e-12, "...the same f the frame boundary makes once R is 2880x1620 (so it writes nothing more)");
+    check(!uiFlatPanelMove(base.formula, base.base, 0.0f, 1.0f, &p), "...and no move without the value the plan was made at");
+}
+
+// The flat layer's adapter rules (flat_ui_layer_math.h, 2026-10-09): the families it asks for, the jitter a draw's camera
+// rows carry, the door.
+void testFlatLayerRules() {
+    check(flatUiLayerTakesFamily(UiLayerFamily::kHolo) && flatUiLayerTakesFamily(UiLayerFamily::kFlightHud) &&
+              flatUiLayerTakesFamily(UiLayerFamily::kSprite),
+          "flat layer: the holo panels, the flight HUD and the target sprite are asked for");
+    // The loading screen's ghost (2026-10-09 13:51): one of the hologram's seven pairs taken, six left (no camera rows) --
+    // a family is taken whole or not at all, so the holograms are not asked.
+    check(!flatUiLayerTakesFamily(UiLayerFamily::kHoloGeneric), "flat layer: the holograms family is not asked (taken whole or not at all)");
+    {
+        static const uint64_t kHoloVs[] = {0x94D5C556DFD6D705ull, 0xDF3503CD07F9B10Cull, 0x9B34C331902DC1EDull, 0x9611A454527F7FEBull};
+        static const uint64_t kHoloPs[] = {0x912477AEF6958379ull, 0x76BF170A625F18E3ull, 0x9FDA9FAB05B654BDull, 0x5270C41523EAF95Aull};
+        bool anyTaken = false;
+        for (int i = 0; i < 4; ++i) anyTaken = anyTaken || flatUiLayerTakesFamily(flatUiFamilyOf(kHoloVs[i], kHoloPs[i]));
+        check(!anyTaken, "flat layer: none of the census's hologram pairs (94D5 the one with camera rows among them) reaches the take");
+    }
+    check(!flatUiLayerTakesFamily(UiLayerFamily::kOrbitLines) && !flatUiLayerTakesFamily(UiLayerFamily::kSupercruiseBars) &&
+              !flatUiLayerTakesFamily(UiLayerFamily::kSpaceDust) && !flatUiLayerTakesFamily(UiLayerFamily::kScreen) &&
+              !flatUiLayerTakesFamily(UiLayerFamily::kPanel) && !flatUiLayerTakesFamily(UiLayerFamily::kGuiDirect) &&
+              !flatUiLayerTakesFamily(UiLayerFamily::kNone) && !flatUiLayerTakesFamily(UiLayerFamily::kAfterUi),
+          "flat layer: the scene lines, the 2D screen, the menus, the panels' rasterisation and the after-UI take are not");
+    for (UiLayerFamily f : {UiLayerFamily::kHolo, UiLayerFamily::kFlightHud, UiLayerFamily::kSprite})
+        check(uiLayerFamilyTakesHdr(f), "flat layer: every family it asks for is one the shared HDR take draws");
+    // The jitter: rows that carry the phase (0.25, -0.375) px at 1920x1080 measure ndc (2 x 0.25 / 1920, -2 x -0.375 / 1080).
+    const uint32_t w = 1920, h = 1080;
+    const float px = 0.25f, py = -0.375f;
+    FlatProjectionJitter pj{};
+    check(flatProjectionJitter(px, py, w, h, pj), "flat layer: the projection jitter of the phase");
+    FlatUiJitterRead r = flatUiLayerJitterOf(true, pj.ndcX, pj.ndcY, w, h, px, py);
+    check(r.kind == FlatUiJitter::kPhase && r.jx == px && r.jy == py && std::fabs(r.mx - px) < 1e-4 && std::fabs(r.my - py) < 1e-4,
+          "flat layer: rows that carry the frame's phase are cancelled by exactly that phase (right and down, render pixels)");
+    r = flatUiLayerJitterOf(true, 0.0, 0.0, w, h, px, py);
+    check(r.kind == FlatUiJitter::kZero && r.jx == 0.0f && r.jy == 0.0f, "flat layer: unjittered rows cancel nothing");
+    r = flatUiLayerJitterOf(true, -pj.ndcX, -pj.ndcY, w, h, px, py);
+    check(r.kind == FlatUiJitter::kOther, "flat layer: the phase with the wrong sign is neither, and is not guessed at");
+    r = flatUiLayerJitterOf(true, pj.ndcX + 2.0 * 0.5 / w, pj.ndcY, w, h, px, py);
+    check(r.kind == FlatUiJitter::kOther && std::fabs(r.mx - 0.75) < 1e-4, "flat layer: an off-centre camera half a pixel over is neither");
+    r = flatUiLayerJitterOf(true, pj.ndcX + 2.0 * 0.005 / w, pj.ndcY, w, h, px, py);
+    check(r.kind == FlatUiJitter::kPhase, "flat layer: a measurement within the 0.01 px tolerance is the phase");
+    check(flatUiLayerJitterOf(false, 0.0, 0.0, w, h, px, py).kind == FlatUiJitter::kNoRows &&
+              flatUiLayerJitterOf(true, 0.0, 0.0, 0, h, px, py).kind == FlatUiJitter::kNoRows,
+          "flat layer: no measurement (or no size) reads nothing");
+    r = flatUiLayerJitterOf(true, 0.0, 0.0, w, h, 0.0f, 0.0f);
+    check(r.kind == FlatUiJitter::kPhase && r.jx == 0.0f, "flat layer: a zero phase and zero rows are the phase, cancelling 0");
+    // The door.
+    check(flatUiLayerDoorArms(true, 3840, 2160, 3840, 2160), "flat layer: a resolved D-sized picture arms the next frame");
+    check(!flatUiLayerDoorArms(false, 3840, 2160, 3840, 2160), "flat layer: a refused frame arms nothing");
+    check(!flatUiLayerDoorArms(true, 1920, 1080, 3840, 2160), "flat layer: a picture at the render size (an E below D) arms nothing");
+    check(!flatUiLayerDoorArms(true, 0, 0, 0, 0), "flat layer: no display size arms nothing");
+    // The layer's size at the door, VR's own rule: D at 100, 1.25 D at 125.
+    const UiLayerSize s100 = uiLayerSize(3840, 2160, 1.0f), s125 = uiLayerSize(3840, 2160, 1.25f);
+    check(s100.w == 3840 && s100.h == 2160 && s125.w == 4800 && s125.h == 2700,
+          "flat layer: at a 3840x2160 door the layer is 3840x2160 at 100 and 4800x2700 at 125");
+    for (size_t i = 0; i < static_cast<size_t>(FlatUiRefuse::kCount); ++i)
+        check(std::strcmp(flatUiRefuseName(static_cast<FlatUiRefuse>(i)), "?") != 0, "flat layer: every refusal has a name");
+
+    // The tone proof, per target, on every route the flat runtime chooses (2026-10-09: 11:32 the HDR route's tone read
+    // a copy of H; 13:23 a hologram's own target stood for every HUD target, and draws were taken after the tone).
+    {
+        int h = 0, h2 = 0, copyOut = 0, holo = 0, other = 0, hNew = 0;
+        // copy route (trained-native at R = D, trained-upscale at R < D: the tone reads H itself)
+        FlatUiToneProof p;
+        check(!flatUiToneProven(p, 10, &h), "tone proof: nothing seen, nothing proven");
+        flatUiToneProofHud(p, 10, &h);
+        check(flatUiToneProofTone(p, 10, &h) == &h, "copy / trained-native / trained-upscale route: the tone reading H proves H");
+        flatUiToneProofHud(p, 11, &h);
+        check(flatUiToneProven(p, 11, &h) && !flatUiToneProven(p, 11, &other), "...for the next frame, and for H only");
+        check(!flatUiToneConsumed(p, 11, &h), "...and a draw into H before this frame's tone is not after-tone");
+        // HDR route: the trigger copies H to C and the tone reads C
+        flatUiToneProofCopy(p, 11, &h, &copyOut);
+        check(flatUiToneConsumed(p, 11, &h), "hdr route: once H is copied, a draw into H is after-tone (it would never be tonemapped)");
+        check(flatUiToneProofTone(p, 11, &copyOut) == &copyOut, "hdr route: the tone reading H's copy proves H");
+        flatUiToneProofHud(p, 12, &h);
+        check(flatUiToneProven(p, 12, &h), "...for the next frame");
+        // a hologram's own target asked first (13:23): it does not stand for H, nor H for it
+        flatUiToneProofHud(p, 12, &holo);
+        check(!flatUiToneProven(p, 12, &holo), "a target the last frame's tone never read is tone-unproven, whatever was asked first");
+        flatUiToneProofTone(p, 12, &h);
+        flatUiToneProofHud(p, 13, &holo);
+        flatUiToneProofHud(p, 13, &h);
+        check(flatUiToneProven(p, 13, &h) && !flatUiToneProven(p, 13, &holo),
+              "with a hologram target asked first, H is still proven and the hologram target still is not");
+        check(flatUiToneProofTone(p, 13, &h) && flatUiToneConsumed(p, 13, &h) && !flatUiToneConsumed(p, 13, &holo),
+              "after the tone read H, a draw into H is after-tone; one into an unread target is not");
+        // a render-size change: a new H is unproven for one frame, then proven
+        flatUiToneProofHud(p, 14, &hNew);
+        check(!flatUiToneProven(p, 14, &hNew), "render-size change: the new H is unproven on its first frame");
+        flatUiToneProofTone(p, 14, &hNew);
+        flatUiToneProofHud(p, 15, &hNew);
+        check(flatUiToneProven(p, 15, &hNew), "...and proven from the next");
+        // a copy of something else proves nothing; a frame with no tone proves nothing for the next
+        flatUiToneProofCopy(p, 15, &other, &copyOut);
+        check(flatUiToneProofTone(p, 15, &copyOut) == nullptr, "a copy of something else proves nothing");
+        flatUiToneProofHud(p, 17, &hNew);
+        check(!flatUiToneProven(p, 17, &hNew), "a frame without a proof (16 never seen) leaves the next unproven");
+        // targets alternating between frames (a ping-pong H): every frame unproven, counted, never taken
+        FlatUiToneProof q;
+        flatUiToneProofHud(q, 20, &h);
+        flatUiToneProofTone(q, 20, &h);
+        flatUiToneProofHud(q, 21, &h2);
+        check(!flatUiToneProven(q, 21, &h2), "an H alternating between frames is unproven (identity, not relation: safe, never swallowed)");
+    }
+    // Live with the default config (the 2026-10-09 11:08 flight: the flat layer was dead because a refused jitter
+    // key read as "not as shipped"; the jitter is now always as shipped).
+    check(uiLayerLiveFor(1.0f, true, true, false) && !uiLayerNotLiveReasonFor(1.0f, true, true, false),
+          "flat layer: ui_quality 100 + flat AA with the jitter as shipped -> live, no reason");
+    {
+        std::ifstream layerSrc("src/d3d11/ui_layer.cpp", std::ios::binary), adapterSrc("src/d3d11/flat_ui_layer.cpp", std::ios::binary);
+        const std::string layer((std::istreambuf_iterator<char>(layerSrc)), std::istreambuf_iterator<char>());
+        const std::string adapter((std::istreambuf_iterator<char>(adapterSrc)), std::istreambuf_iterator<char>());
+        check(!layer.empty() && layer.find("constexpr bool g_jitterAsShipped = true;") != std::string::npos,
+              "wiring: the layer's jitter is always as shipped");
+        check(!adapter.empty() && adapter.find("const char* why = uiLayerNotLiveReason();") != std::string::npos &&
+                  adapter.find("strstr") == std::string::npos,
+              "wiring: the flat layer's state names the shared not-live reason verbatim (no relabelling)");
+    }
 }
 
 // The family rule (ui_layer_math.h's uiLayerFamilyFor, which vscreen.cpp's
@@ -2779,6 +2983,8 @@ void testWriteBack(Gpu& g) {
 #include "ui_world_route_test.h"
 #include "ui_world_route_wiring_test.h"
 #include "ui_intro_curve_wiring_test.h"
+#include "ui_panel_budget_test.h"
+#include "ui_flat_panel_settle_test.h"
 
 }  // namespace
 
@@ -2828,6 +3034,11 @@ int main(int argc, char** argv) {
     testHudParity();
     testChains();
     testPanelScale();
+    testFlatPanelScale();
+    testFlatLayerRules();
+    panelbudget::testAll();
+    panelbudget::testWiring();
+    flatsettle::testAll();
     Gpu g;
     if (!setup(g, hardware)) {
         check(false, "a device and the production composite shader");

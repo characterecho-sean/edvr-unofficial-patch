@@ -16,6 +16,7 @@
 #include "../../src/d3d11/temporal_shader_source.h"
 #include "../../src/d3d11/flat_mono_shader_source.h"
 #include "../../src/d3d11/engine_velocity_primary_copy_shader.h"
+#include "../../src/d3d11/skin_join_shader.h"
 #include "../../src/d3d11/fixed_shader_source.h"
 #include "../../src/d3d11/flat_foreground_motion_shader.h"
 #include "../../src/d3d11/flat_domain_marker_shader.h"
@@ -305,6 +306,8 @@ static std::vector<Variant> fixedVariants(const std::string& core) {
     variants.insert(variants.end(), foreground.begin(), foreground.end());
     const auto supercruise = supercruiseVariants();
     variants.insert(variants.end(), supercruise.begin(), supercruise.end());
+    const auto sibling = siblingVariants();
+    variants.insert(variants.end(), sibling.begin(), sibling.end());
     return variants;
 }
 
@@ -369,6 +372,15 @@ static int generateTemporal(const Options& o) {
     static const D3D_SHADER_MACRO trace[] = {{"EDVR_TEMPORAL_DIAGNOSTICS", "1"}, {"EDVR_TEMPORAL_TRACE", "1"}, {nullptr, nullptr}};
     std::vector<Variant> variants = {
         {"kEnginePrimaryCopyScatterBytecode", "engine_primary_copy_scatter_cs", "main", nullptr, {}, false, edvr::kEnginePrimaryCopyScatterCsHlsl},
+        // F2 (skin_join_shader.h, docs/kinematic-motion-injection-2026-09-19.md "F2 built"): the identity join and the pose table passes, one HLSL text.
+        {"kSkinJoinBytecode", "skin_join_cs", "join", nullptr, {}, false, edvr::kSkinJoinCsHlsl},
+        {"kSkinJoinClearBytecode", "skin_join_clear_cs", "joinClear", nullptr, {}, false, edvr::kSkinJoinCsHlsl},
+        {"kSkinPoseClearBytecode", "skin_pose_clear_cs", "poseClear", nullptr, {}, false, edvr::kSkinJoinCsHlsl},
+        {"kSkinPoseRefMarkBytecode", "skin_pose_refmark_cs", "poseRefMark", nullptr, {}, false, edvr::kSkinJoinCsHlsl},
+        {"kSkinPoseScatterBytecode", "skin_pose_scatter_cs", "poseScatter", nullptr, {}, false, edvr::kSkinJoinCsHlsl},
+        {"kSkinPoseScatterRestBytecode", "skin_pose_scatter_rest_cs", "poseScatterRest", nullptr, {}, false, edvr::kSkinJoinCsHlsl},
+        {"kSkinPoseVerifyBytecode", "skin_pose_verify_cs", "poseVerify", nullptr, {}, false, edvr::kSkinJoinCsHlsl},
+        {"kSkinPoseFinishBytecode", "skin_pose_finish_cs", "poseFinish", nullptr, {}, false, edvr::kSkinJoinCsHlsl},
         {"kTemporalMvFastBytecode", "temporal_mv_fast_cs", "mv", fast, {}},
         {"kTemporalMvBytecode", "temporal_mv_cs", "mv", diagnostic, {}},
         {"kTemporalMvTraceBytecode", "temporal_mv_trace_cs", "mv", trace, {}},
@@ -391,7 +403,7 @@ static int generateTemporal(const Options& o) {
     const auto fixed = fixedVariants(core);
     variants.insert(variants.end(), fixed.begin(), fixed.end());
     const std::string flat = core + edvr::kFlatMonoShaderSource;
-    const std::string allSources = std::string(edvr::kTemporalCsHlsl) + flat + edvr::kEnginePrimaryCopyScatterCsHlsl;
+    const std::string allSources = std::string(edvr::kTemporalCsHlsl) + flat + edvr::kEnginePrimaryCopyScatterCsHlsl + edvr::kSkinJoinCsHlsl;
     const std::string key = sourceKey(allSources.c_str(), variants, compilerPath());
     if (outputCurrent(o.output, key)) {
         std::printf("temporal shaders: unchanged (key %s), reusing %ls\n", key.c_str(), o.output.c_str());
@@ -523,8 +535,8 @@ static void selfTest() {
     coreLegacy.insert(coreLegacy.end(), originalCore.begin(), originalCore.end());
     coreLegacy.insert(coreLegacy.end(), originalExtra.begin(), originalExtra.end());
     auto coreFixed = fixedVariants(extractCore(edvr::kTemporalCsHlsl));
-    check(originalCore.size() == 30 && originalExtra.size() == 18 && coreFixed.size() == 65 && coreLegacy.size() + 10 == coreFixed.size(),
-          "all original fixed shader contracts, three bounded diagnostics, six flat foreground shaders and the supercruise bars' geometry shader are registered");
+    check(originalCore.size() == 28 && originalExtra.size() == 14 && coreFixed.size() == 63 && coreLegacy.size() + 14 == coreFixed.size(),
+          "all original fixed shader contracts, three bounded diagnostics, six flat foreground shaders, the supercruise bars' geometry shader and the foreground map's four sibling-pass compute shaders (donor, fit and the shadow's two) are registered");
     for(size_t i=0;i<coreFixed.size();++i)for(size_t j=0;j<i;++j)
         check(std::strcmp(coreFixed[i].symbol,coreFixed[j].symbol)!=0,"generated shader symbols do not collide");
     using ReflectFn = HRESULT(WINAPI*)(LPCVOID, SIZE_T, REFIID, void**);
@@ -533,7 +545,13 @@ static void selfTest() {
     for (size_t i = 0; i < coreFixed.size() && i < coreLegacy.size(); ++i) {
         auto& shader = coreFixed[i]; const auto& legacy = coreLegacy[i];
         Fnv1a64 sourceFingerprint; sourceFingerprint.add(shader.alternate, std::strlen(shader.alternate));
-        check(legacy.sourceHash && sourceFingerprint.hash == legacy.sourceHash, "fixed HLSL remains exact to the original assembled source");
+        {
+            // A changed pinned shader names itself and its new hash, so a deliberate re-pin is one edit and an accidental one is seen.
+            static char pinned[256];
+            std::snprintf(pinned, sizeof(pinned), "fixed HLSL remains exact to the original assembled source (%s [%zu], %s: now 0x%016llX, pinned 0x%016llX)",
+                          legacy.sourceName, i, legacy.profile, static_cast<unsigned long long>(sourceFingerprint.hash), static_cast<unsigned long long>(legacy.sourceHash));
+            check(legacy.sourceHash && sourceFingerprint.hash == legacy.sourceHash, pinned);
+        }
         check(!std::strcmp(shader.sourceName, legacy.sourceName) && !std::strcmp(shader.entry, legacy.entry) &&
             !std::strcmp(shader.profile, legacy.profile) && sameMacros(shader.macros,legacy.macros) && shader.flags1 == 0 && shader.flags2 == 0,
             "fixed original source-name, entry, stage and flags are preserved");
@@ -656,6 +674,66 @@ static void selfTest() {
                   bind.BindPoint == 0 && bind.BindCount == 1 && cbuffer && SUCCEEDED(cbuffer->GetDesc(&bufferDesc)) && bufferDesc.Size == 16 &&
                   desc.ConstantBuffers == 1 && desc.BoundResources == 1,
                   "...reading one 16-byte constant buffer, Strip at b0, and nothing else");
+        }
+    }
+
+    // The flat foreground map's sibling pass (src/d3d11/flat_foreground_motion_shader.h, design doc section 104): two new compute shaders, held to
+    // their own contract -- the symbol, source name, entry, profile and flags, the text they compile (the donor pass is the map's own match text
+    // and a body), the thread groups the passes are dispatched with, and the bindings the runtime sets them at (flat_foreground_motion.h).
+    {
+        struct SiblingContract { const char* symbol; const char* name; const char* source; UINT x; };
+        const SiblingContract contracts[] = {
+            {"kFlatForegroundDonorBytecode", "flat foreground donor", edvr::kFlatForegroundDonorCs, 256},
+            {"kFlatForegroundFitBytecode", "flat foreground fit", edvr::kFlatForegroundFitCs, 64},
+            {"kFlatForegroundShadowMomentsBytecode", "flat foreground shadow moments", edvr::kFlatForegroundShadowMomentsCs, 256},
+            {"kFlatForegroundShadowEvalBytecode", "flat foreground shadow evaluation", edvr::kFlatForegroundShadowEvalCs, 256},
+        };
+        for (size_t i = 0; i < 4; ++i) {
+            auto& shader = coreFixed[coreLegacy.size() + 10 + i];
+            check(!std::strcmp(shader.symbol, contracts[i].symbol) && !std::strcmp(shader.sourceName, contracts[i].name) &&
+                  !std::strcmp(shader.entry, "main") && !std::strcmp(shader.profile, "cs_5_0") && shader.alternate == contracts[i].source &&
+                  shader.macros == nullptr && !shader.flags1 && !shader.flags2,
+                  "each sibling-pass shader has its distinct symbol and exact source/stage contract");
+            check(compile(compiler.fn, shader.alternate, shader, true) && shader.bytes.size() > 4 && !std::memcmp(shader.bytes.data(), "DXBC", 4),
+                  "each sibling-pass shader compiles to fixed DXBC");
+            if (reflect && !shader.bytes.empty()) {
+                ComPtr<ID3D11ShaderReflection> reflection;
+                D3D11_SHADER_DESC desc{};
+                const HRESULT hr = reflect(shader.bytes.data(), shader.bytes.size(), __uuidof(ID3D11ShaderReflection),
+                                           reinterpret_cast<void**>(reflection.GetAddressOf()));
+                UINT x = 0, y = 0, z = 0;
+                const UINT threads = reflection ? reflection->GetThreadGroupSize(&x, &y, &z) : 0;
+                check(SUCCEEDED(hr) && reflection && SUCCEEDED(reflection->GetDesc(&desc)) &&
+                      D3D11_SHVER_GET_TYPE(desc.Version) == D3D11_SHVER_COMPUTE_SHADER && D3D11_SHVER_GET_MAJOR(desc.Version) == 5 &&
+                      threads == contracts[i].x && x == contracts[i].x && y == 1 && z == 1,
+                      "each sibling-pass shader reflects as a Shader Model 5 compute shader with the group size it is dispatched with");
+                struct Binding { const char* name; D3D_SHADER_INPUT_TYPE type; UINT slot; };
+                const Binding donor[] = {{"Now", D3D_SIT_TEXTURE, 0}, {"Before0", D3D_SIT_TEXTURE, 1}, {"Before3", D3D_SIT_TEXTURE, 4},
+                                         {"Identity", D3D_SIT_STRUCTURED, 5}, {"PreviousIdentity0", D3D_SIT_STRUCTURED, 6},
+                                         {"PreviousIdentity3", D3D_SIT_STRUCTURED, 9}, {"InstanceIndex", D3D_SIT_TEXTURE, 10},
+                                         {"Settings", D3D_SIT_CBUFFER, 0}, {"Donors", D3D_SIT_UAV_RWSTRUCTURED, 0}};
+                const Binding fit[] = {{"Donors", D3D_SIT_STRUCTURED, 0}, {"Receivers", D3D_SIT_STRUCTURED, 1},
+                                       {"FitSettings", D3D_SIT_CBUFFER, 0}, {"Fit", D3D_SIT_UAV_RWSTRUCTURED, 0}};
+                const Binding moments[] = {{"Now", D3D_SIT_TEXTURE, 0}, {"Before0", D3D_SIT_TEXTURE, 1}, {"Before3", D3D_SIT_TEXTURE, 4},
+                                           {"Identity", D3D_SIT_STRUCTURED, 5}, {"PreviousIdentity0", D3D_SIT_STRUCTURED, 6},
+                                           {"PreviousIdentity3", D3D_SIT_STRUCTURED, 9}, {"InstanceIndex", D3D_SIT_TEXTURE, 10},
+                                           {"Settings", D3D_SIT_CBUFFER, 0}, {"Moments", D3D_SIT_UAV_RWSTRUCTURED, 0}};
+                const Binding evaluation[] = {{"Now", D3D_SIT_TEXTURE, 0}, {"Before0", D3D_SIT_TEXTURE, 1}, {"Before3", D3D_SIT_TEXTURE, 4},
+                                              {"Identity", D3D_SIT_STRUCTURED, 5}, {"PreviousIdentity0", D3D_SIT_STRUCTURED, 6},
+                                              {"PreviousIdentity3", D3D_SIT_STRUCTURED, 9}, {"InstanceIndex", D3D_SIT_TEXTURE, 10},
+                                              {"Moments", D3D_SIT_STRUCTURED, 11}, {"Settings", D3D_SIT_CBUFFER, 0},
+                                              {"Results", D3D_SIT_UAV_RWSTRUCTURED, 0}};
+                const Binding* bindings = i == 0 ? donor : i == 1 ? fit : i == 2 ? moments : evaluation;
+                const size_t bindingCount = i == 0 ? sizeof(donor) / sizeof(donor[0]) : i == 1 ? sizeof(fit) / sizeof(fit[0]) :
+                                            i == 2 ? sizeof(moments) / sizeof(moments[0]) : sizeof(evaluation) / sizeof(evaluation[0]);
+                bool bound = reflection != nullptr;
+                for (size_t j = 0; reflection && j < bindingCount; ++j) {
+                    D3D11_SHADER_INPUT_BIND_DESC bind{};
+                    bound = bound && SUCCEEDED(reflection->GetResourceBindingDescByName(bindings[j].name, &bind)) &&
+                            bind.Type == bindings[j].type && bind.BindPoint == bindings[j].slot && bind.BindCount == 1;
+                }
+                check(bound, "each sibling-pass shader keeps its inputs and outputs at the slots the runtime sets them at");
+            }
         }
     }
 
@@ -846,7 +924,7 @@ static void selfTest() {
         throw;
     }
     check(DeleteFileW(target.c_str()) && RemoveDirectoryW(parent.c_str()), "self-test cleanup");
-    std::puts("PASS: 58 fixed-shader original-source hashes, byte parity and SM5 reflection; 4 stereo shaders held to the runtime's former compile calls (text hash, parameters, bytes); "
+    std::puts("PASS: 56 fixed-shader original-source hashes, byte parity and SM5 reflection; 4 stereo shaders held to the runtime's former compile calls (text hash, parameters, bytes); "
               "temporal shader compiler, CLI, byte round-trip, engine-motion core text, atomic output, reuse key and dry-run invariants");
 }
 

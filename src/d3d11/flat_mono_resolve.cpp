@@ -9,7 +9,7 @@
 #include <limits>
 #include <vector>
 #include "../common/log.h"
-#include "flat_context_isolation.h"
+#include "flat_isolation_mode.h"
 #include "flat_context_state.h"
 #include "flat_cpu.h"
 #include "flat_hdr_crumbs.h"
@@ -57,7 +57,7 @@ struct Image {
 struct State {
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext1> context;
-    // The game's state is isolated one of two ways (flat_context_isolation.h), chosen at initialisation: by swapping in this fresh
+    // The game's state is isolated one of two ways (flat_isolation_mode.h), chosen at initialisation: by swapping in this fresh
     // state object (every device but DXMT's), or by the explicit capture (capture true, no state object made), whose slot ranges
     // are this device's.
     ComPtr<ID3DDeviceContextState> isolated;
@@ -118,7 +118,7 @@ bool firstPersonBoundLogged=false, firstPersonRefusedLogged=false;
 // loader lock.
 std::vector<unsigned char>& g_testPrepBytecode=*new std::vector<unsigned char>;
 std::vector<unsigned char>& g_testTaaBytecode=*new std::vector<unsigned char>;
-// advanced.flat_context_isolation (flatMonoResolveSetIsolation): what the next initialisation is asked for; and the renderer's
+// What the next initialisation is asked for (flatMonoResolveSetIsolation, test rigs only; Auto in production): what the next initialisation is asked for; and the renderer's
 // initialisations that said which isolation they chose, in the log, at most kIsolationLogCap a session.
 FlatContextIsolation g_isolationRequest=FlatContextIsolation::Auto;
 uint32_t isolationLogged=0;
@@ -145,7 +145,7 @@ bool g_steadyFailureLogged=false;
 struct Constants { float camera[6][4], previous[6][4]; uint32_t size[4], flags[4]; float jitter[4], rowsJitter[4]; uint32_t route[4], debug[4]; float foregroundDepth[4]; };
 static_assert(sizeof(Constants)==304, "HLSL cbuffer layout");
 // The game's pipeline state out of the way for the resolver's own work and its backends', and back on every exit. Two ways
-// (flat_context_isolation.h says which a device gets): the context state swap, which every device but DXMT's has always had and
+// (flat_isolation_mode.h says which a device gets): the context state swap, which every device but DXMT's has always had and
 // which is unchanged, or the explicit capture (flat_context_state.h) for DXMT, whose SwapDeviceContextState aborts the process.
 // Either way the context is ClearState()d after the game's state is out and before it goes back, so the work starts from the
 // defaults and leaves nothing bound for the game to inherit.
@@ -299,7 +299,7 @@ bool initialize(ID3D11Device* device,ID3D11DeviceContext* context,const char** r
     ComPtr<ID3D11Device1> d1;
     if(FAILED(context->QueryInterface(IID_PPV_ARGS(g.context.GetAddressOf()))))
         return fail(reason,"flat-resolve-requires-context-state-isolation");
-    // Which isolation this device gets, said once in the log with the reason (flat_context_isolation.h): the key's if it forces
+    // Which isolation this device gets, said once in the log with the reason (flat_isolation_mode.h): a test's if it forces
     // one, else the device's, and a device that calls itself DXMT gets the explicit capture, whose swap aborts the process.
     const FlatDxmtDetection dxmt=flatDetectDxmt(device,context);
     const FlatContextIsolationChoice choice=flatChooseContextIsolation(g_isolationRequest,dxmt);
@@ -508,6 +508,7 @@ void pollRefusalCensus(ID3D11DeviceContext* context) {
             const uint32_t* row=sums+stripe*kFlatMonoRefusalCounters;
             for(uint32_t slot=0;slot<kFlatMonoRefusalSlots;++slot)g_refusal.counts[slot]+=row[slot];
             for(uint32_t reason=0;reason<kFlatMonoWeaponReasons;++reason)g_refusal.weaponReasons[reason]+=row[kFlatMonoRefusalSlots+reason];
+            g_refusal.skinned+=row[kFlatMonoRefusalSkinned];
         }
         context->Unmap(g.refusalStaging[i].Get(),0);
         ++g_refusal.frames;
@@ -882,6 +883,8 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     stats.lastReset=reset;
     const bool engine=f.engine.slots && f.engine.pool && f.engine.sceneNow && f.engine.scenePrev;
     if(!reset && !engine)return fail(reason,"flat-resolve-engine-source-views-unavailable");
+    // F2 on foot: the source pass's target 7 (only the VR world route has one; the flat profile's views carry none), bound at t17 for the prep with the debug.w bit.
+    const bool skin=engine && f.engine.skin!=nullptr;
     // All external backend work is inside the same complete state isolation.
     Isolate isolated(g.context.Get(),g.isolated.Get(),g.capture);
     // DLAA and DLSS ask NGX, FSR asks AMD's port; EDVR's own TAA needs no SDK.
@@ -962,7 +965,7 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     constants.route[2]=firstPersonMap?1u:0u;constants.route[3]=firstPersonMap?f.firstPersonPhaseMode:0u;
     constants.debug[0]=sampleNow?1u:0u;constants.debug[1]=paintNow?1u:0u;
     constants.debug[2]=overlay?1u:0u;
-    constants.debug[3]=foreground?2u:(untrusted?1u:0u);
+    constants.debug[3]=(foreground?2u:(untrusted?1u:0u))|(skin?4u:0u);
     constants.foregroundDepth[0]=sdkDepthScale;
     constants.jitter[0]=f.jitterX;constants.jitter[1]=f.jitterY;
     constants.jitter[2]=f.previousJitterX;constants.jitter[3]=f.previousJitterY;
@@ -986,16 +989,17 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     // stencil, null unless the pair was accepted above.
     ID3D11ShaderResourceView* prepViews[]={g.color.srv.Get(),f.depth,f.engine.slots,f.engine.pool,
         nullptr,nullptr,nullptr,nullptr,depthCheck?g.depth[prevDepthIndex].srv.Get():nullptr,firstPersonMap,firstPersonStencil,
-        nullptr,nullptr,f.untrustedCameraCoverage,nullptr,foreground?f.foregroundMotion:nullptr};
-    context->CSSetShaderResources(0,foreground?16:14,prepViews);
+        nullptr,nullptr,f.untrustedCameraCoverage,nullptr,foreground?f.foregroundMotion:nullptr,nullptr,skin?f.engine.skin:nullptr};
+    const UINT prepViewCount=skin?18:(foreground?16:14);
+    context->CSSetShaderResources(0,prepViewCount,prepViews);
     // u5 is the refusal census's class texture, bound only on a frame that samples or paints (u4 is the later kernels' OutColor).
     ID3D11UnorderedAccessView* prepOutputs[]={g.depth[depthIndex].uav.Get(),g.motion.uav.Get(),g.rejection.uav.Get(),g.expected.uav.Get(),
         nullptr,needClass?g.klass.uav.Get():nullptr};
     context->CSSetUnorderedAccessViews(0,needClass?6:4,prepOutputs,nullptr);
     context->CSSetShader(g.prep.Get(),nullptr,0);
     context->Dispatch((f.renderWidth+7)/8,(f.renderHeight+7)/8,1);
-    ID3D11UnorderedAccessView* nullUavs[6]={};ID3D11ShaderResourceView* nullViews[16]={};
-    context->CSSetUnorderedAccessViews(0,6,nullUavs,nullptr);context->CSSetShaderResources(0,foreground?16:14,nullViews);
+    ID3D11UnorderedAccessView* nullUavs[6]={};ID3D11ShaderResourceView* nullViews[18]={};
+    context->CSSetUnorderedAccessViews(0,6,nullUavs,nullptr);context->CSSetShaderResources(0,prepViewCount,nullViews);
     if(hdr)++stats.hdrPrepped;
     prepStep.close();
     if(sampleNow) {

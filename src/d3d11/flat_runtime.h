@@ -7,6 +7,8 @@
 #include "flat_substitution.h"
 #include "flat_map_bounce.h"
 #include "flat_mutation_diagnostic.h"
+#include "animated_history_writes.h"
+#include "flat_ui_layer.h"   // fix.ui_quality's flat layer: the draw scope's second issues (uiReissue)
 #include <optional>
 namespace edvr {
 struct FlatMapBounceD3DDriver {
@@ -42,7 +44,7 @@ bool flatRuntimeNativeScale();
 // warning). Any thread; false with a treated, transiently refused or merely slow-to-start
 // session, and with the mode off. The caller checks that a temporal mode is selected.
 bool flatRuntimeStructuralRefusal(const char** reasonName, bool* standingDown);
-// Whether the route's key (experimental.temporal_aa_before_post) is auto, so the game's final copy is admitted by its
+// Whether the HDR route is on (it always is), so the game's final copy is admitted by its
 // structure and Bloom and Depth of field never cause a refusal (flat_copy_structure.h, design section 83): published with the
 // refusal state, so it is meaningful only while flatRuntimeStructuralRefusal is true. The F8 warning drops the Bloom and Depth
 // of field advice while it holds.
@@ -80,6 +82,10 @@ void flatRuntimeMap(ID3D11Resource*, D3D11_MAP, void*);
 void flatRuntimeUnmap(ID3D11Resource*);
 void flatRuntimeUpdate(ID3D11Resource*, const void*, const D3D11_BOX*);
 void flatRuntimeWritten(ID3D11Resource*, FlatOverlayMutationOp provenance=FlatOverlayMutationOp::Written);
+// A write whose bytes the hook knows (section 104, range-aware invalidation of the first-person history): the extents the hooks pass.
+void flatRuntimeWrittenExtent(ID3D11Resource*, const HistoryWriteExtent&);
+HistoryWriteExtent flatRuntimeCopyExtent(UINT dstSub, UINT dstX, const void* src, const D3D11_BOX* box);
+HistoryWriteExtent flatRuntimeUpdateExtent(UINT dstSub, const D3D11_BOX* box);
 enum class FlatOverlayMutationRole : unsigned char { Unrelated, Hdr, Depth, Unknown };
 inline FlatOverlayMutationRole flatRuntimeOverlayMutationRole(
     const void* resource, const void* hdr, const void* depth) {
@@ -129,6 +135,11 @@ struct FlatRuntimeDrawScope {
     bool overlayReplayPending = false;
     bool foregroundPlanned = false, foregroundStarted = false, foregroundEnded = false;
     bool untrustedPlanned = false, untrustedStarted = false, untrustedEnded = false;
+    // fix.ui_quality's flat layer (flat_ui_layer.h): a cockpit HUD draw the shared decision took (uiTake; uiTaken once
+    // Begin bound the layer), the game's tonemap admitted for its re-issue (uiTone), the output copy that composites
+    // (uiComposite).
+    bool uiTake=false,uiTaken=false,uiEnded=false,uiTone=false,uiComposite=false;
+    uint64_t uiVs=0,uiPs=0;
     bool domainPlanned=false,domainStarted=false,domainForeign=false,domainPool=false;
     bool domainProtectedOverlay=false;
     bool domainHdrWriter=false;
@@ -141,8 +152,17 @@ struct FlatRuntimeDrawScope {
     unsigned domainFormat=0;
     unsigned domainWidth=0,domainHeight=0;
     float domainCamera[6][4]{};
-    bool needsActualDraw() const { return drawPacket || domainPlanned || flatRuntimeNeedsActualDraw(weaponFootprintStarted, overlayPlanned,
+    bool needsActualDraw() const { return drawPacket || domainPlanned || uiTake || uiComposite ||
+                                          flatRuntimeNeedsActualDraw(weaponFootprintStarted, overlayPlanned,
                                                                      foregroundPlanned, untrustedPlanned); }
+    // After the game's own issue and endActualDraw: the second issues fix.ui_quality's flat layer asks for, each the game's
+    // draw again through `issue` (the hook's own real call, same arguments) -- a taken draw's colourless depth/stencil
+    // write-back into the game's buffer, and the admitted tonemap's re-issue over the HDR HUD layer. Nothing otherwise.
+    template <class Issue> void uiReissue(Issue issue) {
+        if (!ctx) return;
+        if (uiTaken && flatUiLayerWriteBackBegin(ctx)) { issue(); flatUiLayerWriteBackEnd(ctx); }
+        if (uiTone && flatUiLayerToneBegin(ctx)) { issue(); flatUiLayerToneEnd(ctx); }
+    }
     ID3D11Texture2D* overlayHdr = nullptr;
     ID3D11DepthStencilView* overlayDsv = nullptr;
     uint32_t weaponFootprintSeq = 0;

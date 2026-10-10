@@ -482,7 +482,7 @@ static void testShippedIni(const std::wstring& root) {
         "fov_trim_outer = oculus/meta-quest-3:7\r\n"
         "fov_trim_nasal =\r\n"
         "[advanced]\r\n"
-        "cull_guard_percent = 20.0\r\n";
+        "transition_flash_units = 1500\r\n";
     MergeReport moveRep;
     const std::string migrated = mergeIni(shipped, oldLayout, nullptr, {}, &moveRep);
     expectEq(iniValue(migrated, "experimental.fss_panel_distance"), "1.0",
@@ -493,7 +493,7 @@ static void testShippedIni(const std::wstring& root) {
              "nothing is left under the old name for the reader to shadow");
     expectEq(iniValue(migrated, "fix.fss_eye_sync"), "on",
              "the retired pair of keys lands merged on the one new key");
-    expectEq(iniValue(migrated, "advanced.cull_guard_percent"), "20.0",
+    expectEq(iniValue(migrated, "advanced.transition_flash_units"), "1500",
              "an unmoved tuned value still lands in its own section");
     check(iniValue(migrated, "fix.fss_eye_glue") == "stock",
           "a key this version never shipped is carried, with its note");
@@ -633,7 +633,7 @@ static void testShippedIni(const std::wstring& root) {
     check(shipped.find("terrain_motion") == std::string::npos,
           "the shipped ini no longer documents the terrain motion lever");
     {
-        const std::string terrainAnchor = "#temporal_aa_diagnostics = 0" + eol;
+        const std::string terrainAnchor = "#temporal_aa_jitter_phases = 8" + eol;
         const size_t terrainAt = shipped.find(terrainAnchor);
         check(terrainAt != std::string::npos, "the shipped ini still has the line the terrain-motion fixture anchors on");
         if (terrainAt != std::string::npos) {
@@ -649,12 +649,12 @@ static void testShippedIni(const std::wstring& root) {
                 shipped.substr(terrainAfter);
             std::string flown = previous;
             flown.replace(flown.find("#terrain_motion = on"), strlen("#terrain_motion = on"), "terrain_motion = off");
-            flown.replace(flown.find("#temporal_aa_diagnostics = 0"), strlen("#temporal_aa_diagnostics = 0"),
-                          "temporal_aa_diagnostics = 1");
+            flown.replace(flown.find("#temporal_aa_jitter_phases = 8"), strlen("#temporal_aa_jitter_phases = 8"),
+                          "temporal_aa_jitter_phases = 12");
 
             MergeReport terrainRep;
             const std::string terrainMerged = mergeIni(shipped, flown, &previous, {}, &terrainRep);
-            expectEq(iniValue(terrainMerged, "advanced.temporal_aa_diagnostics"), "1",
+            expectEq(iniValue(terrainMerged, "advanced.temporal_aa_jitter_phases"), "12",
                      "the setting next to the retired lever keeps its tuned value");
             expectEq(iniValue(terrainMerged, "advanced.terrain_motion"), "off",
                      "a retired terrain motion lever is carried with its value, not eaten");
@@ -706,9 +706,10 @@ static void testShippedIni(const std::wstring& root) {
           "the shipped ini documents none of the three retired experimental switches");
     {
         // The previous version's file: the shipped one with the three blocks put back where each sat, right after its neighbour.
-        const std::string afterJitter = "\ntemporal_aa_jitter = on" + eol;          // the jitter-phase switch followed it
-        const std::string afterRoute = "\ntemporal_aa_on_foot_world = auto" + eol;  // the world jitter followed the route's key
-        const std::string afterMaps = "\non_foot_maps_sharp = on" + eol;             // the steady detail followed the maps gate
+        // The three switches sat beside keys that were removed in the 2026-10 cull; the fixture now anchors on live neighbours.
+        const std::string afterJitter = "\nnight_vision_realistic = 0" + eol;      // the jitter-phase switch followed it
+        const std::string afterRoute = "\nnight_vision_brightness = 8.0" + eol;    // the world jitter followed the route's key
+        const std::string afterMaps = "\nfov_trim_nasal =" + eol;                  // the steady detail followed the maps gate
         const size_t atJitter = shipped.find(afterJitter);
         const size_t atRoute = shipped.find(afterRoute);
         const size_t atMaps = shipped.find(afterMaps);
@@ -742,10 +743,9 @@ static void testShippedIni(const std::wstring& root) {
                 return text;
             };
             const auto userFile = [&](const char* jitter, const char* steady, const char* follows) {
-                std::string text = setLine(previous, "temporal_aa_jitter = on", "temporal_aa_jitter = off");
-                // Both keys ship on now (2026-10-01): the user who opted out of the route and the maps gate has them off.
-                text = setLine(text, "temporal_aa_on_foot_world = auto", "temporal_aa_on_foot_world = off");
-                text = setLine(text, "on_foot_maps_sharp = on", "on_foot_maps_sharp = off");
+                std::string text = setLine(previous, "night_vision_realistic = 0", "night_vision_realistic = 1");
+                text = setLine(text, "night_vision_brightness = 8.0", "night_vision_brightness = 4.0");
+                text = setLine(text, "fov_trim_nasal =", "fov_trim_nasal = 5");
                 text = setLine(text, "temporal_aa_on_foot_world_jitter = on",
                                std::string("temporal_aa_on_foot_world_jitter = ") + jitter);
                 text = setLine(text, "temporal_aa_on_foot_world_steady_detail = on",
@@ -792,12 +792,12 @@ static void testShippedIni(const std::wstring& root) {
                       std::to_string(rep.retired.size()) + " retired, " + std::to_string(rep.carried.size()) + " carried");
                 check(carriedAs(switchMerged, jitterLine) && carriedAs(switchMerged, steadyLine) && carriedAs(switchMerged, followsLine),
                       (tag + "each carried line follows a note saying this version no longer uses it").c_str());
-                expectEq(iniValue(switchMerged, "experimental.temporal_aa_on_foot_world"), "off",
-                         (tag + "the route key beside the world jitter keeps its tuned value (off: opted out of the new default)").c_str());
-                expectEq(iniValue(switchMerged, "experimental.on_foot_maps_sharp"), "off",
-                         (tag + "the maps gate beside the steady detail keeps its tuned value (off: opted out of the new default)").c_str());
-                expectEq(iniValue(switchMerged, "experimental.temporal_aa_jitter"), "off",
-                         (tag + "the global jitter key beside the jitter-phase switch keeps its tuned value").c_str());
+                expectEq(iniValue(switchMerged, "experimental.night_vision_brightness"), "4.0",
+                         (tag + "the key beside the world jitter keeps its tuned value").c_str());
+                expectEq(iniValue(switchMerged, "experimental.fov_trim_nasal"), "5",
+                         (tag + "the key beside the steady detail keeps its tuned value").c_str());
+                expectEq(iniValue(switchMerged, "experimental.night_vision_realistic"), "1",
+                         (tag + "the key beside the jitter-phase switch keeps its tuned value").c_str());
                 check(switchMerged.find("steadier fine detail on objects") == std::string::npos &&
                           switchMerged.find("jitter the world's own cameras while the world route owns") == std::string::npos &&
                           switchMerged.find("TEMPORARY A/B SWITCH") == std::string::npos,
@@ -827,6 +827,279 @@ static void testShippedIni(const std::wstring& root) {
             const std::string fresh = mergeIni(shipped, shipped, &previous, {}, &freshRep);
             check(fresh == shipped && freshRep.retired.empty() && freshRep.carried.empty(),
                   "a file without the three lines carries nothing: the new file stands as shipped");
+        }
+    }
+
+    // 2026-10-08: the settlement LOD governor and the static prop gate removed, four keys: fix.settlement_detail (game | auto |
+    // reduced; shipped LIVE as `game` in [fix], so every install of the previous version has the line written out),
+    // advanced.settlement_detail_max and advanced.settlement_detail_observe (commented templates in [advanced]) and
+    // fix.static_prop_updates (a commented template in [fix]). The game's own detail and its own prop updates are what run now. A
+    // line somebody set is carried with its value, reported as retired and not as a key this version never shipped, and not
+    // adopted; the setting beside each keeps its tuned value; no documentation block is resurrected; a second merge adds no copy;
+    // a rig that left the templates commented carries only the live settlement_detail line. At run time the config audit names a
+    // carried line in the log (config.cpp: "name settings this build does not read ... a retired setting").
+    check(shipped.find("settlement_detail") == std::string::npos && shipped.find("static_prop_updates") == std::string::npos,
+          "the shipped ini documents none of the four removed settlement detail and static prop keys");
+    {
+        // The previous version's file: the shipped one with the two [fix] blocks put back after wake_pulse and the two [advanced]
+        // templates after the pixel probe, where each sat.
+        const std::string afterWake = "\nwake_pulse = off" + eol;
+        const std::string afterProbe = "\n#pixel_probe =" + eol;
+        const size_t atWake = shipped.find(afterWake);
+        const size_t atProbe = shipped.find(afterProbe);
+        const bool anchored = atWake != std::string::npos && atProbe != std::string::npos && atWake < atProbe;
+        check(anchored, "the shipped ini still has the two lines the removed-settlement-detail fixture anchors on, in this order");
+        if (anchored) {
+            std::string previous = shipped;
+            // Back to front, so the earlier offset stays valid.
+            previous.insert(atProbe + afterProbe.size(),
+                eol + "# How far fix.settlement_detail may move the game's level-of-detail" + eol +
+                "# distance, as a factor on the LOD scale the game holds: 1 changes nothing. Live." + eol +
+                "#settlement_detail_max = 6.0" + eol +
+                eol + "# Measurement mode for fix.settlement_detail (auto or reduced): 1 works out" + eol +
+                "# the factor and logs what it would drop. 0, the default, lets the setting act. Live." + eol +
+                "#settlement_detail_observe = 0" + eol);
+            previous.insert(atWake + afterWake.size(),
+                eol + "# Stop the engine re-composing settlement structures and props that have not" + eol +
+                "# changed. 1 on, 0 off (the shipped state). Live." + eol +
+                "#static_prop_updates = 0" + eol +
+                eol + "# Settlement detail: a higher frame rate at busy settlements." + eol +
+                "#   game    -- the default: the game's own detail, untouched." + eol +
+                "# ui: Settlement detail | choices game, auto=Auto, reduced | live | menu performance" + eol +
+                "settlement_detail = game" + eol);
+
+            const auto setLine = [&](std::string text, const std::string& oldLine, const std::string& newLine) {
+                const size_t p = text.find("\n" + oldLine + eol);
+                if (p != std::string::npos) text.replace(p + 1, oldLine.size(), newLine);
+                return text;
+            };
+            const auto copies = [](const std::string& text, const std::string& needle) {
+                size_t n = 0, from = 0;
+                while ((from = text.find(needle, from)) != std::string::npos) {
+                    ++n;
+                    from += 1;
+                }
+                return n;
+            };
+            const std::string carriedNote = "# carried over from your edvr.ini; this version no longer uses it";
+            const auto carriedAs = [&](const std::string& merged, const std::string& line) {
+                return merged.find(carriedNote + "\n" + line) != std::string::npos ||
+                       merged.find(carriedNote + "\r\n" + line) != std::string::npos;
+            };
+            // The settings beside the blocks, tuned, to show the merge leaves them alone.
+            const auto tuned = [&](std::string text) {
+                text = setLine(text, "wake_pulse = off", "wake_pulse = stock");
+                text = setLine(text, "#pixel_probe =", "pixel_probe = 0.5,0.5");
+                return text;
+            };
+
+            // 1. The previous version's own file: only the live settlement_detail line is there to carry.
+            {
+                MergeReport rep;
+                const std::string merged = mergeIni(shipped, tuned(previous), &previous, {}, &rep);
+                expectEq(iniValue(merged, "fix.settlement_detail"), "game",
+                         "the previous version's own settlement detail line is carried, not eaten");
+                check(rep.retired.size() == 1 && rep.carried.empty(),
+                      "...reported as a retired setting, not as a key this version never shipped",
+                      std::to_string(rep.retired.size()) + " retired, " + std::to_string(rep.carried.size()) + " carried");
+                check(carriedAs(merged, "settlement_detail = game"),
+                      "...after a note saying this version no longer uses it");
+                expectEq(iniValue(merged, "fix.wake_pulse"), "stock", "the setting before the removed blocks keeps its tuned value");
+                expectEq(iniValue(merged, "advanced.pixel_probe"), "0.5,0.5", "...and so does the one after them");
+                check(iniValue(merged, "advanced.settlement_detail_max", "<unset>") == "<unset>" &&
+                          iniValue(merged, "advanced.settlement_detail_observe", "<unset>") == "<unset>" &&
+                          iniValue(merged, "fix.static_prop_updates", "<unset>") == "<unset>",
+                      "the three commented templates carry nothing");
+            }
+
+            // 2. A rig that flew all four: every line is carried with its value.
+            {
+                std::string flown = tuned(previous);
+                flown = setLine(flown, "settlement_detail = game", "settlement_detail = auto");
+                flown = setLine(flown, "#static_prop_updates = 0", "static_prop_updates = 1");
+                flown = setLine(flown, "#settlement_detail_max = 6.0", "settlement_detail_max = 4.5");
+                flown = setLine(flown, "#settlement_detail_observe = 0", "settlement_detail_observe = 1");
+                MergeReport rep;
+                const std::string merged = mergeIni(shipped, flown, &previous, {}, &rep);
+                expectEq(iniValue(merged, "fix.settlement_detail"), "auto", "a flown settlement detail setting is carried with its value");
+                expectEq(iniValue(merged, "fix.static_prop_updates"), "1", "...and so is the static prop gate's");
+                expectEq(iniValue(merged, "advanced.settlement_detail_max"), "4.5", "...and the ceiling");
+                expectEq(iniValue(merged, "advanced.settlement_detail_observe"), "1", "...and the observe switch");
+                check(rep.retired.size() == 4 && rep.carried.empty(),
+                      "all four are reported as retired settings, none as a key this version never shipped",
+                      std::to_string(rep.retired.size()) + " retired, " + std::to_string(rep.carried.size()) + " carried");
+                check(carriedAs(merged, "settlement_detail = auto") && carriedAs(merged, "static_prop_updates = 1") &&
+                          carriedAs(merged, "settlement_detail_max = 4.5") && carriedAs(merged, "settlement_detail_observe = 1"),
+                      "each carried line follows a note saying this version no longer uses it");
+                expectEq(iniValue(merged, "fix.wake_pulse"), "stock", "the setting before the removed blocks keeps its tuned value");
+                expectEq(iniValue(merged, "advanced.pixel_probe"), "0.5,0.5", "...and so does the one after them");
+                check(merged.find("Stop the engine re-composing") == std::string::npos &&
+                          merged.find("a higher frame rate at busy settlements") == std::string::npos &&
+                          merged.find("# ui: Settlement detail") == std::string::npos &&
+                          merged.find("How far fix.settlement_detail may move") == std::string::npos &&
+                          merged.find("Measurement mode for fix.settlement_detail") == std::string::npos,
+                      "the removed settings' documentation blocks and menu row are not resurrected");
+
+                // The merge is idempotent on the carried lines.
+                MergeReport again;
+                const std::string twice = mergeIni(shipped, merged, &shipped, {}, &again);
+                check(copies(twice, "settlement_detail = auto") == 1 && copies(twice, "static_prop_updates = 1") == 1 &&
+                          copies(twice, "settlement_detail_max = 4.5") == 1 && copies(twice, "settlement_detail_observe = 1") == 1,
+                      "a second merge does not duplicate a carried line");
+
+                // Hand-installed, no base copy: the same four lines are still carried and still inert, only the note differs.
+                MergeReport bareRep;
+                const std::string bare = mergeIni(shipped, flown, nullptr, {}, &bareRep);
+                check(iniValue(bare, "fix.settlement_detail") == "auto" && iniValue(bare, "fix.static_prop_updates") == "1" &&
+                          iniValue(bare, "advanced.settlement_detail_max") == "4.5" &&
+                          iniValue(bare, "advanced.settlement_detail_observe") == "1",
+                      "with no base copy the four removed settings are still carried with their values");
+                check(bareRep.carried.size() == 4 && bareRep.retired.empty(),
+                      "and reported as keys this version never shipped (the merge cannot know they once did)");
+            }
+
+            // A file with none of the lines (installed from this version, or the lines deleted) carries nothing.
+            MergeReport freshRep;
+            const std::string fresh = mergeIni(shipped, shipped, &previous, {}, &freshRep);
+            check(fresh == shipped && freshRep.retired.empty() && freshRep.carried.empty(),
+                  "a file without the four lines carries nothing: the new file stands as shipped");
+        }
+    }
+
+    // 2026-10-09: the terrain guard removed, six keys: fix.cull_guard (off | symmetric | percent; shipped LIVE as `off` in [fix], so every
+    // install of the previous version has the line written out), fix.cull_guard_fraction_h, _fraction_v, _headsets and _percent (commented
+    // templates in [fix]) and advanced.cull_guard_channel (a commented template in [advanced]). The pose fix answers the cause, and Elite's
+    // own culling is what runs. A line somebody set is carried with its value, reported as retired and not as a key this version never
+    // shipped, and not adopted; the settings beside the blocks keep their tuned values; no documentation block is resurrected; a second
+    // merge adds no copy. At run time the config audit names a carried line in the log (config.cpp: "name settings this build does not
+    // read ... a retired setting").
+    check(shipped.find("cull_guard") == std::string::npos,
+          "the shipped ini documents none of the six removed terrain guard keys");
+    {
+        // The previous version's file: the shipped one with the [fix] block put back after the hologram setting and the [advanced]
+        // template after the pixel probe, where each sat.
+        const std::string afterHolo = "\nholo_pattern = steady" + eol;
+        const std::string afterProbe = "\n#pixel_probe =" + eol;
+        const size_t atHolo = shipped.find(afterHolo);
+        const size_t atProbe = shipped.find(afterProbe);
+        const bool anchored = atHolo != std::string::npos && atProbe != std::string::npos && atHolo < atProbe;
+        check(anchored, "the shipped ini still has the two lines the removed-terrain-guard fixture anchors on, in this order");
+        if (anchored) {
+            std::string previous = shipped;
+            // Back to front, so the earlier offset stays valid.
+            previous.insert(atProbe + afterProbe.size(),
+                eol + "# Developer instrument, and NOT a way to fly. Which of the game's two projection query channels the" + eol +
+                "# terrain guard's widened frustum is told through. Live." + eol +
+                "# dev: choices both, raw, matrix" + eol +
+                "#cull_guard_channel = both" + eol);
+            previous.insert(atHolo + afterHolo.size(),
+                eol + "# The terrain fix" + eol +
+                "# Fill in the black squares of missing planet terrain at the edges of view. Costs GPU time." + eol +
+                "# ui: Fill terrain gaps at view edges | choices off, symmetric | menu" + eol +
+                "cull_guard = off" + eol +
+                eol + "# How much of the shortfall to cover, 0..1 per axis." + eol +
+                "#cull_guard_fraction_h = 0.25" + eol +
+                "#cull_guard_fraction_v = 0" + eol +
+                eol + "# Run the guard only for these headsets: comma-separated FOV signatures." + eol +
+                "#cull_guard_headsets =" + eol +
+                eol + "# Percent mode's margin, in percent of every edge. Diagnostic." + eol +
+                "#cull_guard_percent = 8.0" + eol);
+
+            const auto setLine = [&](std::string text, const std::string& oldLine, const std::string& newLine) {
+                const size_t p = text.find("\n" + oldLine + eol);
+                if (p != std::string::npos) text.replace(p + 1, oldLine.size(), newLine);
+                return text;
+            };
+            const auto copies = [](const std::string& text, const std::string& needle) {
+                size_t n = 0, from = 0;
+                while ((from = text.find(needle, from)) != std::string::npos) {
+                    ++n;
+                    from += 1;
+                }
+                return n;
+            };
+            const std::string carriedNote = "# carried over from your edvr.ini; this version no longer uses it";
+            const auto carriedAs = [&](const std::string& merged, const std::string& line) {
+                return merged.find(carriedNote + "\n" + line) != std::string::npos ||
+                       merged.find(carriedNote + "\r\n" + line) != std::string::npos;
+            };
+            // The settings beside the blocks, tuned, to show the merge leaves them alone.
+            const auto tuned = [&](std::string text) {
+                text = setLine(text, "holo_pattern = steady", "holo_pattern = stock");
+                text = setLine(text, "#pixel_probe =", "pixel_probe = 0.5,0.5");
+                return text;
+            };
+
+            // 1. The previous version's own file: only the live cull_guard line is there to carry.
+            {
+                MergeReport rep;
+                const std::string merged = mergeIni(shipped, tuned(previous), &previous, {}, &rep);
+                expectEq(iniValue(merged, "fix.cull_guard"), "off", "the previous version's own terrain guard line is carried, not eaten");
+                check(rep.retired.size() == 1 && rep.carried.empty(),
+                      "...reported as a retired setting, not as a key this version never shipped",
+                      std::to_string(rep.retired.size()) + " retired, " + std::to_string(rep.carried.size()) + " carried");
+                check(carriedAs(merged, "cull_guard = off"), "...after a note saying this version no longer uses it");
+                expectEq(iniValue(merged, "fix.holo_pattern"), "stock", "the setting before the removed block keeps its tuned value");
+                expectEq(iniValue(merged, "advanced.pixel_probe"), "0.5,0.5", "...and so does the one after it");
+                check(iniValue(merged, "fix.cull_guard_fraction_h", "<unset>") == "<unset>" &&
+                          iniValue(merged, "fix.cull_guard_headsets", "<unset>") == "<unset>" &&
+                          iniValue(merged, "advanced.cull_guard_channel", "<unset>") == "<unset>",
+                      "the commented templates carry nothing");
+            }
+
+            // 2. A rig that flew all six: every line is carried with its value.
+            {
+                std::string flown = tuned(previous);
+                flown = setLine(flown, "cull_guard = off", "cull_guard = symmetric");
+                flown = setLine(flown, "#cull_guard_fraction_h = 0.25", "cull_guard_fraction_h = 0.5");
+                flown = setLine(flown, "#cull_guard_fraction_v = 0", "cull_guard_fraction_v = 0.25");
+                flown = setLine(flown, "#cull_guard_headsets =", "cull_guard_headsets = 94x99");
+                flown = setLine(flown, "#cull_guard_percent = 8.0", "cull_guard_percent = 12.0");
+                flown = setLine(flown, "#cull_guard_channel = both", "cull_guard_channel = raw");
+                MergeReport rep;
+                const std::string merged = mergeIni(shipped, flown, &previous, {}, &rep);
+                expectEq(iniValue(merged, "fix.cull_guard"), "symmetric", "a flown terrain guard mode is carried with its value");
+                expectEq(iniValue(merged, "fix.cull_guard_fraction_h"), "0.5", "...and so is each margin");
+                expectEq(iniValue(merged, "fix.cull_guard_fraction_v"), "0.25", "...both of them");
+                expectEq(iniValue(merged, "fix.cull_guard_headsets"), "94x99", "...the headset list");
+                expectEq(iniValue(merged, "fix.cull_guard_percent"), "12.0", "...the percent margin");
+                expectEq(iniValue(merged, "advanced.cull_guard_channel"), "raw", "...and the channel probe");
+                check(rep.retired.size() == 6 && rep.carried.empty(),
+                      "all six are reported as retired settings, none as a key this version never shipped",
+                      std::to_string(rep.retired.size()) + " retired, " + std::to_string(rep.carried.size()) + " carried");
+                check(carriedAs(merged, "cull_guard = symmetric") && carriedAs(merged, "cull_guard_fraction_h = 0.5") &&
+                          carriedAs(merged, "cull_guard_fraction_v = 0.25") && carriedAs(merged, "cull_guard_headsets = 94x99") &&
+                          carriedAs(merged, "cull_guard_percent = 12.0") && carriedAs(merged, "cull_guard_channel = raw"),
+                      "each carried line follows a note saying this version no longer uses it");
+                expectEq(iniValue(merged, "fix.holo_pattern"), "stock", "the setting before the removed block keeps its tuned value");
+                expectEq(iniValue(merged, "advanced.pixel_probe"), "0.5,0.5", "...and so does the one after it");
+                check(merged.find("Fill in the black squares") == std::string::npos &&
+                          merged.find("# ui: Fill terrain gaps") == std::string::npos &&
+                          merged.find("Which of the game's two projection query channels") == std::string::npos,
+                      "the removed settings' documentation blocks and menu row are not resurrected");
+
+                // The merge is idempotent on the carried lines.
+                MergeReport again;
+                const std::string twice = mergeIni(shipped, merged, &shipped, {}, &again);
+                check(copies(twice, "cull_guard = symmetric") == 1 && copies(twice, "cull_guard_fraction_h = 0.5") == 1 &&
+                          copies(twice, "cull_guard_channel = raw") == 1,
+                      "a second merge does not duplicate a carried line");
+
+                // Hand-installed, no base copy: the same six lines are still carried and still inert, only the note differs.
+                MergeReport bareRep;
+                const std::string bare = mergeIni(shipped, flown, nullptr, {}, &bareRep);
+                check(iniValue(bare, "fix.cull_guard") == "symmetric" && iniValue(bare, "fix.cull_guard_headsets") == "94x99" &&
+                          iniValue(bare, "advanced.cull_guard_channel") == "raw",
+                      "with no base copy the removed settings are still carried with their values");
+                check(bareRep.carried.size() == 6 && bareRep.retired.empty(),
+                      "and reported as keys this version never shipped (the merge cannot know they once did)");
+            }
+
+            // A file with none of the lines (installed from this version, or the lines deleted) carries nothing.
+            MergeReport freshRep;
+            const std::string fresh = mergeIni(shipped, shipped, &previous, {}, &freshRep);
+            check(fresh == shipped && freshRep.retired.empty() && freshRep.carried.empty(),
+                  "a file without the six lines carries nothing: the new file stands as shipped");
         }
     }
 }
@@ -886,74 +1159,164 @@ static void testChangedDefault(const std::wstring& root) {
              "<absent>", "a line they commented out stays commented out");
 }
 
-// 2026-10-01: two experimental defaults flipped on, the VR world route (experimental.temporal_aa_on_foot_world: off -> auto) and the
-// on-foot maps gate (experimental.on_foot_maps_sharp: off -> on), the keys kept for one release candidate as the way back. What an
-// existing install does with them is the merge's property, as for fix.ui_quality above, and it is pinned for both keys so that what an
-// upgrading user sees is on record: a line that still says what the previous version shipped (the installer's base copy kept) moves to
-// the new default and the report says so; a value somebody chose, a line they deleted and a hand-installed file with no base copy keep
-// what they have. The previous version's file is the shipped one with the two old defaults written back.
-static void testChangedDefaultsOn(const std::wstring& root) {
-    printf("\nshipped defaults that flipped on (the VR world route off -> auto, the on-foot maps gate off -> on), against the real edvr.ini\n");
+// 2026-10: the advanced and experimental key cull. About seventy keys went, each fixed at the behaviour it shipped: the temporal pass's
+// tuning and A/B switches, the foveated DLSS keys (a feature that shipped off), the closed-arc probes, the UI depth and intro/backdrop
+// tuning levels, the flat copy and isolation switches, and the experimental routes' on/off keys (temporal_aa_on_foot_world, on_foot_maps_sharp,
+// temporal_aa_before_post, temporal_aa_jitter, temporal_aa_partial, temporal_aa_movers, temporal_aa_blend, temporal_aa_clamp). A line somebody
+// set is carried with its value under "this version no longer uses it", reported as retired and not adopted, the setting beside it keeps its
+// tuned value, no documentation block is resurrected, and a second merge adds no copy. The shipped file defines none of them.
+static void testCullRetiredKeys(const std::wstring& root) {
+    printf("\nthe 2026-10 advanced and experimental key cull, against the real edvr.ini\n");
     const std::string shipped = readAll(joinPath(root, L"edvr.ini"));
     if (shipped.empty()) {
         fail("read the repository's edvr.ini", "not found next to the repo root");
         return;
     }
-    struct Flip {
-        const char* line;      // the key's line in the ini, as the previous version spelled its value
-        const char* dotted;    // the key as the merge names it
-        const char* newValue;  // what this version ships
+    const char* const removed[] = {
+        "temporal_aa_motion", "temporal_aa_current", "temporal_aa_history_sharp", "temporal_aa_jitter_sign", "temporal_aa_jitter_lag",
+        "temporal_aa_ship_metres", "temporal_aa_debug", "temporal_aa_diagnostics", "temporal_aa_fsr_reactive", "temporal_aa_fsr_debug",
+        "temporal_aa_warm", "temporal_aa_smoke_floor", "temporal_aa_smoke_reactive", "temporal_aa_menu_metres",
+        "temporal_aa_movers_tolerance", "temporal_aa_movers_strength", "temporal_aa_hologram_families", "temporal_aa_hologram_floor",
+        "temporal_aa_hologram_share", "temporal_aa_hologram_depth", "eye_run_paired", "eye_run_treated", "ui_depth_reactive",
+        "ui_ghost_tolerance", "corona_smear_level", "temporal_aa_fovea", "temporal_aa_fovea_shape", "temporal_aa_fovea_edge",
+        "temporal_aa_fovea_lead", "temporal_aa_fovea_distance", "temporal_aa_fovea_vertical", "temporal_aa_fovea_top",
+        "temporal_aa_fovea_bottom", "temporal_aa_fovea_outer", "temporal_aa_fovea_nasal", "temporal_aa_periphery",
+        "temporal_aa_periphery_scale", "temporal_aa_periphery_calm", "temporal_aa_jitter", "temporal_aa_partial", "temporal_aa_movers",
+        "temporal_aa_blend", "temporal_aa_clamp", "temporal_aa_on_foot_world", "temporal_aa_before_post", "on_foot_maps_sharp",
+        "sun_glare_variant", "sun_glare_probe", "target_indicator_vs", "target_indicator_scale_probe",
+        "wake_pulse_indices", "fss_eye_dump", "fss_eye_series", "particle_probe", "intro_probe", "openvr_census", "ui_depth_eyes",
+        "ui_depth_test", "dispatch_pair_sync", "dispatch_cb1_lend", "dispatch_cb1_strip", "ui_depth_menus", "ui_depth_variants",
+        "ui_depth_alpha", "ui_depth_planes", "ui_depth_families", "ui_depth_exclude", "menu_backdrop_threshold", "menu_backdrop_dither",
+        "intro_video_distance", "intro_video_deband", "intro_video_dither", "intro_video_sharpen", "holo_pattern_level",
+        "loading_dim_level", "target_indicator_sharpen", "flat_cb_map_cache", "flat_context_isolation",
     };
-    const Flip flips[] = {
-        {"temporal_aa_on_foot_world", "experimental.temporal_aa_on_foot_world", "auto"},
-        {"on_foot_maps_sharp", "experimental.on_foot_maps_sharp", "on"},
-    };
+    int stillDefined = 0;
+    for (const char* name : removed) {
+        const std::string live = std::string("\n") + name + " =";
+        const std::string commented = std::string("\n#") + name + " =";
+        if (shipped.find(live) != std::string::npos || shipped.find(commented) != std::string::npos) {
+            ++stillDefined;
+            fail("the shipped ini no longer defines a removed key", name);
+        }
+    }
+    if (!stillDefined) check(true, "the shipped ini defines none of the removed keys, live or as a template");
+    check(shipped.find("#temporal_aa_jitter_phases = 8") != std::string::npos, "the flat jitter cycle key, which stays, is still shipped");
+
+    // The previous version's file: the shipped one with three live experimental lines put back after night_vision_brightness and a
+    // commented advanced template after the jitter-phase key, each with a documentation line the new file must not resurrect.
+    const std::string eol = shipped.find("\r\n") != std::string::npos ? "\r\n" : "\n";
+    const std::string afterBrightness = "\nnight_vision_brightness = 8.0" + eol;
+    const std::string afterPhases = "#temporal_aa_jitter_phases = 8" + eol;
+    const size_t atBrightness = shipped.find(afterBrightness);
+    const size_t atPhases = shipped.find(afterPhases);
+    check(atBrightness != std::string::npos && atPhases != std::string::npos && atPhases < atBrightness,
+          "the shipped ini has the two lines the cull fixture anchors on, in this order");
+    if (atBrightness == std::string::npos || atPhases == std::string::npos || atPhases > atBrightness) return;
     std::string previous = shipped;
-    bool anchored = true;
-    for (const Flip& f : flips) {
-        expectEq(iniValue(shipped, f.dotted, "<absent>"), f.newValue,
-                 (std::string("the shipped default of ") + f.dotted + " is " + f.newValue).c_str());
-        const std::string now = std::string("\n") + f.line + " = " + f.newValue;
-        const size_t at = previous.find(now);
-        if (at == std::string::npos) { anchored = false; continue; }
-        previous.replace(at, now.size(), std::string("\n") + f.line + " = off");
+    previous.insert(atBrightness + afterBrightness.size(),
+        eol + "# CULLED-FIXTURE-DOC-A history weight for the temporal pass." + eol +
+        "temporal_aa_blend = 0.90" + eol +
+        eol + "# CULLED-FIXTURE-DOC-B the VR world route." + eol +
+        "on_foot_maps_sharp = on" + eol +
+        eol + "# CULLED-FIXTURE-DOC-C the mover mask." + eol +
+        "temporal_aa_movers = off" + eol);
+    previous.insert(atPhases + afterPhases.size(),
+        eol + "# CULLED-FIXTURE-DOC-D how many metres count as ship." + eol +
+        "#temporal_aa_ship_metres = 10" + eol);
+    std::string flown = previous;
+    const auto setLine = [&](const std::string& oldLine, const std::string& newLine) {
+        const size_t p = flown.find("\n" + oldLine + eol);
+        if (p != std::string::npos) flown.replace(p + 1, oldLine.size(), newLine);
+        else fail("the cull fixture's user file has the line it edits", oldLine.c_str());
+    };
+    setLine("temporal_aa_blend = 0.90", "temporal_aa_blend = 0.80");
+    setLine("temporal_aa_movers = off", "temporal_aa_movers = on");
+    setLine("night_vision_brightness = 8.0", "night_vision_brightness = 4.0");
+    {
+        const size_t p = flown.find("#temporal_aa_ship_metres = 10");
+        if (p != std::string::npos) flown.replace(p, strlen("#temporal_aa_ship_metres = 10"), "temporal_aa_ship_metres = 40");
     }
-    check(anchored, "the shipped ini has the two lines this case reverts");
-    if (!anchored) return;
 
-    // An install that never touched them, with the base copy the installer keeps: the new defaults are adopted, and the report
-    // says so. Somebody who typed `off` on purpose is the same bytes and gets the same answer: the merge cannot tell.
-    MergeReport untouched;
-    const std::string adopted = mergeIni(shipped, previous, &previous, {}, &untouched);
-    for (const Flip& f : flips) {
-        expectEq(iniValue(adopted, f.dotted, "<absent>"), f.newValue,
-                 (std::string("an install that never touched ") + f.dotted + " (base copy kept) is moved to the new default").c_str());
-        bool reported = false;
-        for (const std::string& line : untouched.adopted)
-            reported |= line.find(std::string(f.dotted) + " = " + f.newValue) == 0;
-        check(reported, (std::string("and the report says the default of ") + f.dotted + " moved").c_str());
+    MergeReport rep;
+    const std::string merged = mergeIni(shipped, flown, &previous, {}, &rep);
+    expectEq(iniValue(merged, "experimental.night_vision_brightness"), "4.0", "the setting beside the removed keys keeps its tuned value");
+    expectEq(iniValue(merged, "experimental.temporal_aa_blend"), "0.80", "a removed live setting is carried with its value, not eaten");
+    expectEq(iniValue(merged, "experimental.temporal_aa_movers"), "on", "...and so is a removed switch");
+    expectEq(iniValue(merged, "experimental.on_foot_maps_sharp"), "on", "...and a removed default-on key");
+    expectEq(iniValue(merged, "advanced.temporal_aa_ship_metres"), "40", "...and a removed advanced template somebody uncommented");
+    check(rep.retired.size() == 4 && rep.carried.empty(),
+          "all four are reported as retired settings, none as a key this version never shipped",
+          std::to_string(rep.retired.size()) + " retired, " + std::to_string(rep.carried.size()) + " carried");
+    check(merged.find("this version no longer uses it") != std::string::npos, "each carried line says this version no longer uses it");
+    check(merged.find("CULLED-FIXTURE-DOC") == std::string::npos, "the removed keys' documentation blocks are not resurrected");
+
+    // Hand-installed, no base copy: the lines are still carried and still inert; only the note differs.
+    MergeReport bareRep;
+    const std::string bare = mergeIni(shipped, flown, nullptr, {}, &bareRep);
+    expectEq(iniValue(bare, "experimental.temporal_aa_blend"), "0.80", "with no base copy a removed setting is still carried");
+    check(bareRep.carried.size() == 4, "and reported as keys this version never shipped");
+
+    // The merge is idempotent on the carried lines.
+    MergeReport again;
+    const std::string twice = mergeIni(shipped, merged, &shipped, {}, &again);
+    size_t copies = 0;
+    for (size_t from = 0; (from = twice.find("temporal_aa_blend = 0.80", from)) != std::string::npos; ++from) ++copies;
+    check(copies == 1, "a second merge does not duplicate a carried line", std::to_string(copies) + " copies");
+
+    // A file without the lines carries nothing: the new file stands.
+    MergeReport quiet;
+    const std::string quietMerged = mergeIni(shipped, shipped, &previous, {}, &quiet);
+    check(quietMerged == shipped && quiet.retired.empty() && quiet.carried.empty(),
+          "a file without the removed lines carries nothing: the new file stands as shipped");
+}
+
+// 2026-10-09: fix.scanner_body (the lend that gave the scanner's second-eye lighting draw the first eye's vertex buffer) went, replaced by the repair at the
+// game's own input-assembler flush (docs/scanner-body.md), which has no key. A line somebody set is carried with its value under "this version no longer uses
+// it", reported as retired and not adopted, its documentation block is not resurrected, and a second merge adds no copy. The shipped file defines none of it.
+static void testScannerBodyRetiredKey(const std::wstring& root) {
+    printf("\nthe retired scanned-body key, against the real edvr.ini\n");
+    const std::string shipped = readAll(joinPath(root, L"edvr.ini"));
+    if (shipped.empty()) {
+        fail("read the repository's edvr.ini", "not found next to the repo root");
+        return;
     }
+    check(shipped.find("\nscanner_body =") == std::string::npos && shipped.find("\n#scanner_body =") == std::string::npos,
+          "the shipped ini defines no scanner_body, live or as a template");
+    const std::string eol = shipped.find("\r\n") != std::string::npos ? "\r\n" : "\n";
+    const std::string anchor = "\nfss_eye_sync = on" + eol;
+    const size_t at = shipped.find(anchor);
+    check(at != std::string::npos, "the shipped ini has the line the scanned-body fixture anchors on");
+    if (at == std::string::npos) return;
+    std::string previous = shipped;
+    previous.insert(at + anchor.size(), eol + "# SCANNED-FIXTURE-DOC make the scanned body render in both eyes." + eol + "scanner_body = on" + eol);
+    std::string flown = previous;
+    const size_t line = flown.find("\nscanner_body = on" + eol);
+    check(line != std::string::npos, "the fixture's previous file has the line it edits");
+    if (line == std::string::npos) return;
+    flown.replace(line + 1, strlen("scanner_body = on"), "scanner_body = off");
 
-    // With no base copy (a hand-installed rig): compared against the NEW defaults, so the old default reads as a choice and is
-    // kept. The merge over-preserves; the key is the way back, and this is a rig that had written the old default out.
-    MergeReport handInstalled;
-    const std::string kept = mergeIni(shipped, previous, nullptr, {}, &handInstalled);
-    for (const Flip& f : flips)
-        expectEq(iniValue(kept, f.dotted, "<absent>"), "off",
-                 (std::string("with no base copy the same file keeps its off for ") + f.dotted).c_str());
-    check(handInstalled.twoWay, "and the report says it compared against the new defaults");
+    MergeReport rep;
+    const std::string merged = mergeIni(shipped, flown, &previous, {}, &rep);
+    expectEq(iniValue(merged, "fix.scanner_body"), "off", "the retired setting is carried with its value, not eaten");
+    check(rep.retired.size() == 1 && rep.carried.empty(), "and reported as a retired setting, not as a key this version never shipped",
+          std::to_string(rep.retired.size()) + " retired, " + std::to_string(rep.carried.size()) + " carried");
+    check(merged.find("this version no longer uses it") != std::string::npos, "the carried line says this version no longer uses it");
+    check(merged.find("SCANNED-FIXTURE-DOC") == std::string::npos, "its documentation block is not resurrected");
 
-    // A line they deleted stays deleted (commented out), and the runtime then uses the code's fallback, which is the shipped
-    // default (tools/config_test checks it); the other key, left alone, still moves.
-    std::string deletedRoute = previous;
-    deletedRoute.replace(deletedRoute.find("\ntemporal_aa_on_foot_world = off"), strlen("\ntemporal_aa_on_foot_world = off"),
-                         "\n#temporal_aa_on_foot_world = off");
-    MergeReport partial;
-    const std::string mixed = mergeIni(shipped, deletedRoute, &previous, {}, &partial);
-    expectEq(iniValue(mixed, "experimental.temporal_aa_on_foot_world", "<absent>"), "<absent>",
-             "a route line they commented out stays commented out (the runtime then uses the code's fallback, auto)");
-    expectEq(iniValue(mixed, "experimental.on_foot_maps_sharp", "<absent>"), "on",
-             "...and the maps gate they left alone still moves to the new default");
+    MergeReport bareRep;
+    const std::string bare = mergeIni(shipped, flown, nullptr, {}, &bareRep);
+    expectEq(iniValue(bare, "fix.scanner_body"), "off", "with no base copy the setting is still carried");
+    check(bareRep.carried.size() == 1, "and reported as a key this version never shipped");
+
+    MergeReport again;
+    const std::string twice = mergeIni(shipped, merged, &shipped, {}, &again);
+    size_t copies = 0;
+    for (size_t from = 0; (from = twice.find("scanner_body = off", from)) != std::string::npos; ++from) ++copies;
+    check(copies == 1, "a second merge does not duplicate the carried line", std::to_string(copies) + " copies");
+
+    MergeReport quiet;
+    check(mergeIni(shipped, shipped, &previous, {}, &quiet) == shipped && quiet.retired.empty() && quiet.carried.empty(),
+          "a file without the line carries nothing: the new file stands as shipped");
 }
 
 // ---------------------------------------------------------------------------
@@ -4628,7 +4991,8 @@ int wmain(int argc, wchar_t** argv) {
     testMerge();
     testShippedIni(root);
     testChangedDefault(root);
-    testChangedDefaultsOn(root);
+    testCullRetiredKeys(root);
+    testScannerBodyRetiredKey(root);
     testPlanner();
     testNativePlanner();
     testFlatPlanner();

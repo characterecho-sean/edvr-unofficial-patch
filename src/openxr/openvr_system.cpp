@@ -1,4 +1,5 @@
 #include "openvr_system.h"
+#include "canted_display.h"
 #include "native_cpu_trace.h"
 #include <algorithm>
 #include <cmath>
@@ -7,6 +8,20 @@
 #include <windows.h>
 
 namespace edvr::openxr {
+ExeModule readExeModule() noexcept {
+  ExeModule out{};
+  const auto base=reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+  if(!base)return out;
+  const auto* dos=reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+  if(dos->e_magic!=IMAGE_DOS_SIGNATURE)return out;
+  const auto* nt=reinterpret_cast<const IMAGE_NT_HEADERS*>(base+dos->e_lfanew);
+  if(nt->Signature!=IMAGE_NT_SIGNATURE)return out;
+  out.base=base;
+  out.size=nt->OptionalHeader.SizeOfImage;
+  out.stamp=nt->FileHeader.TimeDateStamp;
+  out.imageSize=nt->OptionalHeader.SizeOfImage;
+  return out;
+}
 namespace {
 HmdMatrix34_t identity() { HmdMatrix34_t m{}; m.m[0][0]=m.m[1][1]=m.m[2][2]=1; return m; }
 TrackedDevicePose_t invalidPose(bool connected=false) {
@@ -194,9 +209,7 @@ void OpenVRSystem::GetProjectionRaw(EVREye e,float* l,float* r,float* t,float* b
   const unsigned eye=unsigned(e);
   const bool liveGeometry=geometryValid(s);
   if(opticsAvailable(s)&&eyeValid(e)) {
-    // The cull guard's channel probe (advanced.cull_guard_channel) may hand
-    // this channel a different frustum from the one the game renders.
-    const RawFov base=liveGeometry?(s.geometry.queryRawValid?s.geometry.queryRaw[eye]:s.geometry.raw[eye]):s.optics.raw[eye];
+    const RawFov base=liveGeometry?s.geometry.raw[eye]:s.optics.raw[eye];
     if(liveGeometry) shiftedRawFov(base,s.tangentShift[eye][0],
                                    s.tangentShift[eye][1],out);
     else out=base;
@@ -207,7 +220,16 @@ DistortionCoordinates_t OpenVRSystem::ComputeDistortion(EVREye,float,float) { un
 HmdMatrix34_t OpenVRSystem::GetEyeToHeadTransform(EVREye e) {
   const auto s=source_.read();source_.noteGeometryQuery(4,s);
   const bool liveGeometry=geometryValid(s);
-  return opticsAvailable(s)&&eyeValid(e)?(liveGeometry?s.geometry.eyeToHead[unsigned(e)]:s.optics.eyeToHead[unsigned(e)]):HmdMatrix34_t{};
+  if(!opticsAvailable(s)||!eyeValid(e))return HmdMatrix34_t{};
+  // Elite composes this matrix with its head pose in a z-negated space but takes
+  // it raw, so a canted headset's per-eye yaw and pitch would arrive inverted:
+  // the game is given S*E*S, S = diag(1,1,-1), each eye's rotation in its own
+  // handedness (canted_display.h, docs/canted-projection.md). On parallel panels
+  // that is the located transform to the bit. The located transform itself stays
+  // what the snapshot holds: the native frame tables and the layer read it there.
+  // Only this answer to the game changes, and nothing reads it back.
+  const HmdMatrix34_t located=liveGeometry?s.geometry.eyeToHead[unsigned(e)]:s.optics.eyeToHead[unsigned(e)];
+  return gameHandedness(located);
 }
 bool OpenVRSystem::GetTimeSinceLastVsync(float* seconds,uint64_t* frame) {
   NativeCpuTraceSpan trace(EdvrCpuGetTimeSinceLastVsync);
@@ -218,13 +240,20 @@ void OpenVRSystem::GetDXGIOutputInfo(int32_t* index) {const auto s=source_.read(
 bool OpenVRSystem::IsDisplayOnDesktop() { return false; }
 bool OpenVRSystem::SetDisplayVisibility(bool) { unavailable(9);return false; }
 void OpenVRSystem::GetDeviceToAbsoluteTrackingPose(ETrackingUniverseOrigin origin,float prediction,TrackedDevicePose_t* poses,uint32_t count) {
+  // Who is asking, taken here on the caller's own thread: the owner thread the locate hops to cannot tell. Elite's own request for "now"
+  // (a return address inside the game's mapped image, a prediction under 5 ms either way) is located one display period past the latest
+  // frame's display time, the instant the NEXT frame is drawn at (head_pose_time.h); every other caller is located as it always was.
+  const auto caller=reinterpret_cast<uintptr_t>(_ReturnAddress());
   NativeCpuTraceSpan trace(EdvrCpuGetDeviceToAbsoluteTrackingPose);
   if(!poses||!count){trace.finishVoid(0);return;}
   const auto s=source_.read();for(uint32_t i=0;i<count;++i)poses[i]=invalidPose();
-  if(!live(s)){trace.finishVoid(0);return;}poses[0]=invalidPose(true);
-  if(!originValid(origin)||!std::isfinite(prediction)){trace.finishVoid(0);return;}
+  const ExeModule module=exe_;
+  HeadCall call;call.thread=GetCurrentThreadId();call.rva=frameRva(module,caller);
+  call.display=answeredAtDisplayTime(call.rva,prediction);
+  if(!live(s)){source_.noteHeadCallFailed(call,prediction);trace.finishVoid(0);return;}poses[0]=invalidPose(true);
+  if(!originValid(origin)||!std::isfinite(prediction)){source_.noteHeadCallFailed(call,prediction);trace.finishVoid(0);return;}
   TrackedDevicePose_t p=invalidPose(true);
-  const bool located=source_.locateHead(s.generation,origin,prediction,p);if(located)poses[0]=p;
+  const bool located=source_.locateHeadFor(s.generation,origin,prediction,call,p);if(located)poses[0]=p;
   trace.finishVoid(located?1:0);
 }
 void OpenVRSystem::ResetSeatedZeroPose() { const auto s=source_.read();if(!live(s)||!source_.resetSeated(s.generation))unavailable(11); }
@@ -318,33 +347,44 @@ bool OpenVRSystem::PollNextEventWithPose(ETrackingUniverseOrigin origin,VREvent_
   if(!source_.pollEvent(s.generation,origin,next,atEvent))return false;
   *event=next;if(pose)*pose=atEvent;return true;
 }
+const OpenVRSystem::MeshEntry* OpenVRSystem::eyeMesh(const SystemRead& s,unsigned e,const char*& failure) {
+  // Keep temporal jitter out of the retained mesh; its conservative inset
+  // leaves the unjittered visible region unmasked.
+  const RawFov fov=geometryValid(s)?s.geometry.raw[e]:s.optics.raw[e];
+  for(auto& entry:meshes_)if(entry->masks==s.hiddenMasks&&entry->eye==e&&
+      std::memcmp(&entry->fov,&fov,sizeof(fov))==0)return entry.get();
+  if(meshes_.size()>=64){failure="retention_limit";return nullptr;}
+  auto entry=std::make_unique<MeshEntry>();entry->masks=s.hiddenMasks;entry->eye=e;entry->fov=fov;
+  if(!projectHiddenMask(s.hiddenMasks->eyes[e],fov,s.hiddenMasks->guard[e][0],
+                        s.hiddenMasks->guard[e][1],entry->vertices,&entry->dropped)){
+    failure="invalid_mesh";return nullptr;
+  }
+  meshes_.push_back(std::move(entry));return meshes_.back().get();
+}
 HiddenAreaMesh_t OpenVRSystem::GetHiddenAreaMesh(EVREye eye) {
   if(!eyeValid(eye))return {};
   const auto s=source_.read();HiddenAreaMesh_t result{};const unsigned e=unsigned(eye);
-  const char* reason="unavailable";uint64_t revision=s.hiddenMasks?s.hiddenMasks->revision:0;
+  const char* reason="unavailable";uint64_t revision=s.hiddenMasks?s.hiddenMasks->revision:0;uint32_t dropped=0;
   try {
     if(opticsAvailable(s)&&s.hiddenMasksCompatible&&s.hiddenMasks&&s.hiddenMasks->generation==s.generation) {
-      // Keep temporal jitter out of the retained mesh; its conservative inset
-      // leaves the unjittered visible region unmasked.
-      const RawFov fov=geometryValid(s)?s.geometry.raw[e]:s.optics.raw[e];
-      std::lock_guard<std::mutex> lock(meshMutex_);MeshEntry* selected=nullptr;
-      for(auto& entry:meshes_)if(entry->masks==s.hiddenMasks&&entry->eye==e&&
-          std::memcmp(&entry->fov,&fov,sizeof(fov))==0){selected=entry.get();break;}
-      if(!selected&&meshes_.size()<64) {
-        auto entry=std::make_unique<MeshEntry>();entry->masks=s.hiddenMasks;entry->eye=e;entry->fov=fov;
-        if(projectHiddenMask(s.hiddenMasks->eyes[e],fov,s.hiddenMasks->guard[e][0],
-                             s.hiddenMasks->guard[e][1],entry->vertices)) {
-          selected=entry.get();meshes_.push_back(std::move(entry));
-        } else reason="invalid_mesh";
-      } else if(!selected)reason="retention_limit";
-      if(selected) {
-        result.unTriangleCount=uint32_t(selected->vertices.size()/3);
-        result.pVertexData=result.unTriangleCount?selected->vertices.data():nullptr;
-        reason=result.unTriangleCount?"runtime":"empty";
+      std::lock_guard<std::mutex> lock(meshMutex_);const char* otherFailure="";
+      const MeshEntry* mine=eyeMesh(s,e,reason);const MeshEntry* other=eyeMesh(s,1-e,otherFailure);
+      if(mine) {
+        dropped=mine->dropped;
+        // Elite makes one vertex buffer per eye from the counts it is given, and
+        // a zero-byte buffer is a CreateBuffer failure it treats as fatal. An
+        // eye is served a mesh only when the other eye is served one as well; a
+        // headset whose two eyes disagree gets neither, as one with no mask does.
+        if(mine->vertices.empty())reason="empty";
+        else if(!other||other->vertices.empty())reason="unpaired";
+        else {
+          result.unTriangleCount=uint32_t(mine->vertices.size()/3);
+          result.pVertexData=mine->vertices.data();reason="runtime";
+        }
       }
     } else if(!s.hiddenMasksCompatible)reason="modified_frustum";
   } catch(...) {reason="allocation_failure";result={};}
-  if(meshProbe_[e].take(GetTickCount64()))source_.noteHiddenMesh(e,revision,result.unTriangleCount,reason);
+  if(meshProbe_[e].take(GetTickCount64()))source_.noteHiddenMesh(e,revision,result.unTriangleCount,reason,dropped);
   return result;
 }
 bool OpenVRSystem::GetControllerState(TrackedDeviceIndex_t,VRControllerState_t* state) {if(state)*state={};return false;}

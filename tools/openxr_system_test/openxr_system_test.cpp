@@ -12,6 +12,9 @@
 #include <utility>
 #include <thread>
 extern "C" vr::IVRSystem* openxrAbiCaller(vr::IVRSystem*);
+// (windows.h stays out of this rig: its `near` macro breaks the headers the rig includes.)
+extern "C" __declspec(dllimport) unsigned long __stdcall GetCurrentThreadId(void);
+extern "C" int openxrAbiCallPose(vr::IVRSystem*, vr::ETrackingUniverseOrigin, float, vr::TrackedDevicePose_t*, uint32_t);
 
 
 namespace {
@@ -59,7 +62,10 @@ struct FakeSource final : SystemSource {
   void notePropertyQuery(unsigned,vr::TrackedDeviceIndex_t,vr::ETrackedDeviceProperty p,vr::ETrackedPropertyError e) noexcept override {
     std::lock_guard<std::mutex> lock(mutex);++propertyNotes;lastProperty=p;lastError=e;
   }
-  void noteHiddenMesh(unsigned,uint64_t,uint32_t,const char*) noexcept override {++meshNotes;}
+  const char* lastMeshReason="";uint32_t lastMeshTriangles=0,lastMeshDropped=0;
+  void noteHiddenMesh(unsigned,uint64_t,uint32_t triangles,const char* reason,uint32_t dropped) noexcept override {
+    ++meshNotes;lastMeshReason=reason;lastMeshTriangles=triangles;lastMeshDropped=dropped;
+  }
   void noteFrequencyQuery(const SystemRead&,vr::TrackedDeviceIndex_t,vr::ETrackedPropertyError error,
       float value,unsigned) noexcept override {
     std::lock_guard<std::mutex> lock(mutex);++frequencyNotes;frequencyError=error;frequencyValue=value;
@@ -98,6 +104,18 @@ struct FakeSource final : SystemSource {
     out.mDeviceToAbsoluteTracking.m[0][0] = float(generation);
     out.mDeviceToAbsoluteTracking.m[0][3] = prediction;
     return generation == state.generation && state.connected;
+  }
+  // The head-pose answer: the call the system made, as locateHeadFor was handed it, and the calls that never got there.
+  unsigned forCalls = 0, failedNotes = 0;
+  edvr::openxr::HeadCall lastCall{}, lastFailed{};
+  float lastFailedPrediction = 0;
+  bool locateHeadFor(uint64_t generation, vr::ETrackingUniverseOrigin origin, float prediction,
+                     const edvr::openxr::HeadCall& call, vr::TrackedDevicePose_t& out) override {
+    { std::lock_guard<std::mutex> lock(mutex); ++forCalls; lastCall = call; }
+    return locateHead(generation, origin, prediction, out);
+  }
+  void noteHeadCallFailed(const edvr::openxr::HeadCall& call, float prediction) noexcept override {
+    std::lock_guard<std::mutex> lock(mutex); ++failedNotes; lastFailed = call; lastFailedPrediction = prediction;
   }
   bool resetSeated(uint64_t generation) override {
     std::lock_guard<std::mutex> lock(mutex); ++resetCalls; return generation == state.generation;
@@ -222,6 +240,44 @@ void capabilityTests() {
     system.GetHiddenAreaMesh(vr::Eye_Left);
   }
   check(!system.GetHiddenAreaMesh(vr::Eye_Left).pVertexData&&left.pVertexData[1].v[1]==oldVertex.v[1],"mask retention limit refuses new data without dangling old pointers");
+  {
+    // Elite makes one vertex buffer per eye from the counts it is handed, and a
+    // zero-byte buffer fails CreateBuffer with E_INVALIDARG, which Elite treats
+    // as fatal (a Reverb G2 on SteamVR: left 29 triangles, right none, crash 4 s
+    // in). An eye is therefore served a mesh only when the other eye is too.
+    const NativeHiddenMask triangle=masks->eyes[0];
+    NativeHiddenMask none,broken=triangle,sliver=triangle;
+    broken.indices[0]=999;
+    // Three nearly collinear points: a nonzero area, but the inset corners land
+    // millions of units away. One such triangle used to discard the whole eye.
+    sliver.vertices.push_back({-2,-1});sliver.vertices.push_back({1,3});sliver.vertices.push_back({-.5f,1.0000001f});
+    sliver.indices.push_back(3);sliver.indices.push_back(4);sliver.indices.push_back(5);
+    struct Served{vr::HiddenAreaMesh_t eye[2];const char* reason;uint32_t dropped;};
+    const auto serve=[&](const NativeHiddenMask& l,const NativeHiddenMask& r)->Served {
+      FakeSource paired;OpenVRSystem pairedSystem(paired);paired.state=source.state;
+      auto both=std::make_shared<NativeHiddenMasks>(*masks);both->revision=1;both->eyes[0]=l;both->eyes[1]=r;
+      paired.state.hiddenMasks=both;
+      Served out{};out.eye[0]=pairedSystem.GetHiddenAreaMesh(vr::Eye_Left);
+      out.eye[1]=pairedSystem.GetHiddenAreaMesh(vr::Eye_Right);
+      out.reason=paired.lastMeshReason;out.dropped=paired.lastMeshDropped;return out;
+    };
+    auto served=serve(triangle,triangle);
+    check(served.eye[0].unTriangleCount==1&&served.eye[1].unTriangleCount==1&&!std::strcmp(served.reason,"runtime"),
+      "two populated eyes are both served");
+    served=serve(triangle,none);
+    check(!served.eye[0].pVertexData&&!served.eye[0].unTriangleCount&&!served.eye[1].pVertexData&&!served.eye[1].unTriangleCount,
+      "a populated left with an empty right serves neither eye (the zero-byte vertex buffer)");
+    check(!std::strcmp(served.reason,"empty"),"the empty eye says empty");
+    served=serve(none,triangle);
+    check(!served.eye[0].pVertexData&&!served.eye[1].pVertexData&&!std::strcmp(served.reason,"unpaired"),
+      "an empty left with a populated right serves neither eye, and the populated one says unpaired");
+    served=serve(triangle,broken);
+    check(!served.eye[0].pVertexData&&!served.eye[1].pVertexData&&!std::strcmp(served.reason,"invalid_mesh"),
+      "a malformed right eye takes the left eye's mesh with it");
+    served=serve(triangle,sliver);
+    check(served.eye[0].unTriangleCount==1&&served.eye[1].unTriangleCount==1&&served.dropped==1&&!std::strcmp(served.reason,"runtime"),
+      "a sliver triangle is dropped alone, the eye's other triangle and the other eye stay");
+  }
   source.state.connected=false;
   check(!system.GetHiddenAreaMesh(vr::Eye_Right).pVertexData&&
     system.GetFloatTrackedDeviceProperty(0,vr::Prop_UserIpdMeters_Float,&error)==0&&error==vr::TrackedProp_InvalidDevice,"retirement removes current IPD and mask availability");
@@ -284,8 +340,8 @@ void publicationTest() {
   system.GetProjectionRaw(vr::Eye_Left,&cachedLeft,&cachedRight,&cachedTop,&cachedBottom);
   check(near(cachedLeft,-.6841368f) && near(cachedRight,.8422884f) &&
         near(cachedTop,-.4227932f) && near(cachedBottom,.5463025f) &&
-        near(system.GetEyeToHeadTransform(vr::Eye_Left).m[2][3],-.06f),
-        "origin invalidation preserves cached raw FOV and eye placement");
+        near(system.GetEyeToHeadTransform(vr::Eye_Left).m[2][3],.06f),
+        "origin invalidation preserves cached raw FOV and eye placement (the eye's tz in Elite's handedness)");
   check(source.projectionNotes==projectionNotesBeforeFallback,
         "cached projection fallback does not advertise a stale temporal sequence");
   check(!publication.publish(geometry(generation, 3), true, true, badShifts), "publication rejects non-finite shifts");
@@ -394,6 +450,81 @@ void oddRecommendationTest() {
         !source.state.recommendedHeight[0], "retirement clears recommendations");
 }
 
+// Elite's "now" head pose, through the historical virtual ABI (docs/terrain-culling.md): which GetDeviceToAbsoluteTrackingPose calls are flagged for the drawn
+// frame's display time, judged by a return address inside the executable and a prediction under 5 ms either way, and what reaches the source.
+__declspec(noinline) void headPoseTests(vr::IVRSystem* system, FakeSource& source, edvr::openxr::OpenVRSystem& concrete) {
+  using edvr::openxr::ExeModule;
+  // ---- Elite's "now" head pose: which GetDeviceToAbsoluteTrackingPose calls are answered one display period after the drawn frame's display time ----
+  {
+    const ExeModule realExe = concrete.exeModule();
+    concrete.useExeModule(realExe);
+    vr::TrackedDevicePose_t poses[3]{};
+    const auto lastCall = [&] { std::lock_guard<std::mutex> lock(source.mutex); return source.lastCall; };
+    const unsigned callsBefore = [&] { std::lock_guard<std::mutex> lock(source.mutex); return source.forCalls; }();
+    openxrAbiCallPose(system, vr::TrackingUniverseSeated, 0.0f, poses, 3);
+    const edvr::openxr::HeadCall learned = lastCall();
+    unsigned callsAfter = 0;
+    { std::lock_guard<std::mutex> lock(source.mutex); callsAfter = source.forCalls; }
+    const uintptr_t poseCaller = reinterpret_cast<uintptr_t>(&openxrAbiCallPose);
+    check(callsAfter == callsBefore + 1 && learned.thread == GetCurrentThreadId() && learned.display && learned.rva < edvr::openxr::kFrameUnknown &&
+              realExe.base + learned.rva > poseCaller && realExe.base + learned.rva - poseCaller < 0x100,
+          "a pose call from inside the game's image (here this rig's own executable) with a prediction of 0 reaches the source with the CALLER's thread, its return address as an RVA, and the display flag set");
+    const uintptr_t poseSite = realExe.base + learned.rva;
+    const auto askAt = [&](float prediction) {
+      vr::TrackedDevicePose_t p[2]{};
+      openxrAbiCallPose(system, vr::TrackingUniverseSeated, prediction, p, 2);
+      return lastCall();
+    };
+    // The prediction filter, on both signs and at its boundary.
+    bool nowRequests = true, predictions = true;
+    for (float p : {0.0f, -0.0f, 0.001f, 0.0049f, 0.004999f, -0.001f, -0.0049f, -0.004999f}) nowRequests = nowRequests && askAt(p).display;
+    for (float p : {0.005f, -0.005f, 0.0051f, -0.0051f, 0.011f, -0.011f, 0.25f, -0.25f, 1.0f}) predictions = predictions && !askAt(p).display;
+    check(nowRequests, "a prediction under 5 ms either way (4.999 ms, -4.999 ms, 0) from inside the image is Elite's \"now\": flagged for the display time");
+    check(predictions, "...exactly 5 ms either way, a frame period (11 ms), a quarter second and a second are real predictions: not flagged");
+    // The image: the same call, with the executable mapped elsewhere.
+    concrete.useExeModule(ExeModule{poseSite + 0x1000, 0x40000000, 0, 0});
+    const auto below = askAt(0.0f);
+    concrete.useExeModule(ExeModule{poseSite - 0x10, 0x10, 0, 0});
+    const auto pastEnd = askAt(0.0f);
+    concrete.useExeModule(ExeModule{poseSite - 0x10, 0x11, 0, 0});
+    const auto lastByte = askAt(0.0f);
+    concrete.useExeModule(ExeModule{});
+    const auto unknown = askAt(0.0f);
+    check(!below.display && below.rva == edvr::openxr::kFrameOutside && !pastEnd.display && pastEnd.rva == edvr::openxr::kFrameOutside && lastByte.display && lastByte.rva == 0x10 &&
+              !unknown.display && unknown.rva == edvr::openxr::kFrameOutside,
+          "a return address before the image, one past its end, or any address when the image is unknown is outside it: not flagged, whatever the prediction; the image's last byte is inside");
+    // No build is asked for: the same call is flagged under another build's stamp.
+    concrete.useExeModule(ExeModule{poseSite - 0x4E3881, 0x40000000, 1788384821u, 104894465u});
+    const auto otherBuild = askAt(0.0f);
+    check(otherBuild.display && otherBuild.rva == 0x4E3881,
+          "no build is asked for: an executable of any stamp and size flags the same call, so the fix survives a game update");
+    concrete.useExeModule(realExe);
+    // The answer is the source's, untouched: the filter changes the instant, never the pose.
+    vr::TrackedDevicePose_t shifted[3]{};
+    openxrAbiCallPose(system, vr::TrackingUniverseSeated, 0.0f, shifted, 3);
+    check(shifted[0].bPoseIsValid && shifted[0].mDeviceToAbsoluteTracking.m[0][3] == 0.0f && !shifted[1].bPoseIsValid && !shifted[2].bPoseIsValid,
+          "the pose a flagged call is handed back is the source's, and the other poses stay invalid");
+    // Calls that never reach the source are counted, with who asked.
+    unsigned notesBefore = 0;
+    { std::lock_guard<std::mutex> lock(source.mutex); notesBefore = source.failedNotes; }
+    openxrAbiCallPose(system, static_cast<vr::ETrackingUniverseOrigin>(99), 0.0f, poses, 1);
+    openxrAbiCallPose(system, vr::TrackingUniverseSeated, NAN, poses, 1);
+    unsigned notes = 0;
+    edvr::openxr::HeadCall failed{};
+    float failedPrediction = 0;
+    { std::lock_guard<std::mutex> lock(source.mutex); notes = source.failedNotes; failed = source.lastFailed; failedPrediction = source.lastFailedPrediction; }
+    check(notes == notesBefore + 2 && failed.thread == GetCurrentThreadId() && failed.rva == learned.rva && std::isnan(failedPrediction),
+          "a bad origin and a prediction that is not a number are counted as failed pose calls, with the caller's thread and RVA");
+    const bool wasConnected = source.state.connected;
+    source.state.connected = false;
+    unsigned countedBefore = 0;
+    { std::lock_guard<std::mutex> lock(source.mutex); countedBefore = source.failedNotes; }
+    openxrAbiCallPose(system, vr::TrackingUniverseSeated, 0.0f, poses, 1);
+    { std::lock_guard<std::mutex> lock(source.mutex); check(source.failedNotes == countedBefore + 1, "...and so is a call with no live session"); }
+    source.state.connected = wasConnected;
+    concrete.useExeModule(realExe);
+  }
+}
 int selfTest() {
   publicationTest();
   oddRecommendationTest();
@@ -447,7 +578,50 @@ int selfTest() {
   const float rawAfter[4] = {l,r,t,b};
   check(allZero(rawAfter, sizeof(rawAfter)), "invalid raw eye zeros outputs");
   auto eye0 = system->GetEyeToHeadTransform(vr::Eye_Left); auto eye1 = system->GetEyeToHeadTransform(vr::Eye_Right);
-  check(near(eye0.m[2][3], -.06f) && near(eye1.m[2][3], .06f), "both eye transforms returned by value");
+  check(near(eye0.m[2][3], .06f) && near(eye1.m[2][3], -.06f), "both eye transforms returned by value, in Elite's handedness (this fixture's eyes sit at tz -0.06 and +0.06)");
+  {
+    // The answer to the game is S*E*S, S = diag(1,1,-1) (docs\canted-projection.md), and nothing else moves. The located transform the snapshot holds (the
+    // native frame tables and the layer read it there) is never touched, and the IPD property is made from the located one.
+    const GeometrySnapshot kept = source.state.geometry;
+    const SystemRead keptState = source.state;
+    vr::ETrackedPropertyError ipdError = vr::TrackedProp_Success;
+    const float ipd = system->GetFloatTrackedDeviceProperty(0, vr::Prop_UserIpdMeters_Float, &ipdError);
+    auto on0 = system->GetEyeToHeadTransform(vr::Eye_Left); auto on1 = system->GetEyeToHeadTransform(vr::Eye_Right);
+    check(near(on0.m[2][3], .06f) && near(on1.m[2][3], -.06f) && near(on0.m[0][3], kept.eyeToHead[0].m[0][3]) && near(on0.m[1][3], kept.eyeToHead[0].m[1][3]),
+          "only tz changes sign for a pure translation (x and y stay)");
+    check(std::memcmp(&source.state.geometry, &kept, sizeof(kept)) == 0 && std::memcmp(&source.state.optics, &keptState.optics, sizeof(keptState.optics)) == 0,
+          "...while the snapshot and the cached optics are bit-identical afterwards (nothing reads the game-facing answer back)");
+    check(std::fabs(system->GetFloatTrackedDeviceProperty(0, vr::Prop_UserIpdMeters_Float, &ipdError) - ipd) < 1e-7f && ipd > 0.1f,
+          "...and the IPD property is the same after the calls (made from the located transform)");
+    // A yawed, pitched eye shows the rotation entries: exactly R02, R12, R20, R21 and tz change sign.
+    vr::HmdMatrix34_t yawed{};
+    const double a = 10.0*3.14159265358979323846/180.0, p = 4.0*3.14159265358979323846/180.0;
+    const double ry[3][3] = {{std::cos(a),0,std::sin(a)},{0,1,0},{-std::sin(a),0,std::cos(a)}};
+    const double rx[3][3] = {{1,0,0},{0,std::cos(p),-std::sin(p)},{0,std::sin(p),std::cos(p)}};
+    for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j) { double v = 0; for (int k = 0; k < 3; ++k) v += ry[i][k]*rx[k][j]; yawed.m[i][j] = float(v); }
+    yawed.m[0][3] = -.032f; yawed.m[1][3] = .004f; yawed.m[2][3] = -.011f;
+    source.state.geometry.eyeToHead[0] = yawed;
+    auto given = system->GetEyeToHeadTransform(vr::Eye_Left);
+    bool flipped = true, kept2 = true;
+    for (int i = 0; i < 3; ++i) for (int j = 0; j < 4; ++j) {
+      const bool flips = (i == 2) != (j == 2);   // S*E*S: one index on the z row/column, not both (and the translation's z)
+      if (flips) flipped = flipped && given.m[i][j] == 0.0f - yawed.m[i][j];
+      else kept2 = kept2 && given.m[i][j] == yawed.m[i][j];
+    }
+    check(flipped && kept2 && yawed.m[0][2] != 0 && yawed.m[1][2] != 0 && yawed.m[2][0] != 0 && yawed.m[2][1] != 0,
+          "a yawed and pitched eye: R02, R12, R20, R21 and tz are negated, the other seven entries are not");
+    auto again = system->GetEyeToHeadTransform(vr::Eye_Left);
+    check(std::memcmp(&again, &given, sizeof(given)) == 0 && std::memcmp(&source.state.geometry.eyeToHead[0], &yawed, sizeof(yawed)) == 0,
+          "...asking again gives the same answer (the correction is not accumulated into the snapshot)");
+    // With the tracking sample gone the cached optics answer, and are corrected the same way.
+    source.state.geometry = kept; source.state.geometryValid = false;
+    source.state.optics.eyeToHead[1] = yawed;
+    auto cached = system->GetEyeToHeadTransform(vr::Eye_Right);
+    check(cached.m[0][2] == 0.0f - yawed.m[0][2] && cached.m[2][3] == 0.0f - yawed.m[2][3] && cached.m[0][0] == yawed.m[0][0] && cached.m[0][3] == yawed.m[0][3],
+          "no live geometry: the cached optics are corrected the same way");
+    source.state = keptState;
+  }
+  headPoseTests(system, source, concrete);
   for(const auto e:{vr::Eye_Left,vr::Eye_Right})for (const auto api : {vr::API_DirectX, vr::API_OpenGL}) for (const auto planes : {std::pair<float,float>{.025f,50000.f}, {.1f,1000.f}, {1.f,50000.f}}) {
     const auto m = system->GetProjectionMatrix(e, planes.first, planes.second, api);
     const float left=std::tan(-.6f), right=std::tan(.7f), top=std::tan(-.4f), bottom=std::tan(.5f);

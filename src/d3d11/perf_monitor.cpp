@@ -1,4 +1,5 @@
 #include "perf_monitor.h"
+#include "config_refresh_line.h"
 #include "engine_motion_cpu.h"
 #include "frame_ticks.h"
 #include "gpu_frame_timing.h"
@@ -194,6 +195,11 @@ struct State {
     float    drawWindowMaxMs = 0.0f;
     uint32_t drawWindowSamples = 0;
     draw_cpu::Window drawCpuWindow;
+    // The config refresh window (the line beside the draw hook's, every 1800 frames): what kEvReload (edvr.ini re-read and every module reconfigured, on the frame
+    // thread, its duration the whole of it) and kEvIniWrite (a menu edit queued for the file) were noted since the last line. A held numeric row in the F8 menu is
+    // one edit and, once the write lands, one refresh about every 83 ms; this prices it.
+    std::atomic<uint32_t> cfgReloads{0}, cfgEdits{0}, cfgReloadMaxUs{0};
+    std::atomic<uint64_t> cfgReloadUs{0};
 
     // The Present block noted by the swapchain hook, for the frame about
     // to be ringed.
@@ -1181,6 +1187,14 @@ void perfMonitorFrame(ID3D11Device* dev) {
         }
         s.drawWindowMs = 0.0; s.drawWindowMaxMs = 0.0f; s.drawWindowSamples = 0;
         s.drawCpuWindow.resetWindow();
+        // Written every window, quiet or not, so a window with no refresh in it (all zeros) can be told from a build that does not have this line.
+        const uint32_t reloads = s.cfgReloads.exchange(0, std::memory_order_relaxed);
+        const uint32_t edits = s.cfgEdits.exchange(0, std::memory_order_relaxed);
+        const double reloadMs = static_cast<double>(s.cfgReloadUs.exchange(0, std::memory_order_relaxed)) / 1000.0;
+        const double reloadMaxMs = static_cast<double>(s.cfgReloadMaxUs.exchange(0, std::memory_order_relaxed)) / 1000.0;
+        char refreshLine[320];
+        formatConfigRefreshWindow(refreshLine, sizeof(refreshLine), s.frameNo, reloads, reloadMs, reloadMaxMs, edits);
+        Log::get().note("%s", refreshLine);
     }
     if (pluginCostWindowReady) {
         const auto countMaskBits = [](uint64_t bits) {
@@ -1304,6 +1318,16 @@ void perfMonitorNoteEvent(uint32_t bits, double ms) {
         kEvBinds | kEvNgx | kEvFsr | kEvMenu | kEvCensus | kEvEyeDump;
     if (bits & kBenchmarkScopeEvents)
         s.nativeBenchmarkSettingsEpoch.fetch_add(1, std::memory_order_relaxed);
+    // The config refresh window's books (the line at the 1800-frame mark): every reload with its own duration, every queued menu edit.
+    if (bits & kEvReload) {
+        const uint32_t us = ms > 0.0 ? (ms < 60000.0 ? static_cast<uint32_t>(ms * 1000.0) : 60000000u) : 0u;
+        s.cfgReloads.fetch_add(1, std::memory_order_relaxed);
+        s.cfgReloadUs.fetch_add(us, std::memory_order_relaxed);
+        uint32_t cur = s.cfgReloadMaxUs.load(std::memory_order_relaxed);
+        while (us > cur && !s.cfgReloadMaxUs.compare_exchange_weak(cur, us, std::memory_order_relaxed)) {
+        }
+    }
+    if (bits & kEvIniWrite) s.cfgEdits.fetch_add(1, std::memory_order_relaxed);
     if (ms > 0.0) {
         const int32_t us = ms < 60000.0 ? static_cast<int32_t>(ms * 1000.0) : 60000000;
         // The longest event of the frame is the one worth naming.

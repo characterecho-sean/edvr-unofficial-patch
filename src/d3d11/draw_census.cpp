@@ -854,7 +854,7 @@ static void recordDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
     // dumped vertex shaders declare it at t33 with a 336-byte stride, and the
     // bone palette beside it at t38 (docs/shaders/fss-panel-vs.asm, and the
     // 2026-09-06 dump). If a future build moves them, this window is the
-    // thing to move, and a fresh glare_shader_dump is how you would learn it.
+    // thing to move, and a fresh shader dump is how you would learn it.
     //
     // One COM call on recorded draws only, the same bargain x= above makes.
     // The column is OMITTED when the whole window is empty, which is most

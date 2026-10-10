@@ -24,7 +24,7 @@ namespace edvr {
 //
 // Both DLLs compile frame_flag.cpp, and the shared block's layout changes
 // with it, so the block's name carries the version
-// (Local\edvr_glitch_frame_v36_<pid>): halves from different builds never
+// (Local\edvr_glitch_frame_v37_<pid>): halves from different builds never
 // share one. That kept a mismatched pair inert, but silently. Since v34
 // each half also signs a small version-independent roll-call with the
 // version it was built with, and looks for the last unsigned layout's
@@ -32,7 +32,7 @@ namespace edvr {
 // version REFUSES the channel -- from then on every call here reads as "no
 // answer" and writes nothing -- and frameFlagPeerMismatch() names the
 // partner's version so the caller's log can say both.
-constexpr uint32_t kFrameFlagVersion = 36;
+constexpr uint32_t kFrameFlagVersion = 37;
 
 // The partner half's layout version when it differs from kFrameFlagVersion,
 // else 0. Nonzero means the channel is refused. Each half asks on a cadence
@@ -83,8 +83,8 @@ void* submittedTexture(int eye);
 // it is published BEFORE the openvr half has been called at all. Measured on
 // the field rig, the device is created 1.20 s before openvr_api.dll is first
 // asked for an interface. It was published for the early VR handover
-// (removed 2026-09-13); what reads it now is the cull guard, as the test
-// for whether a d3d11 half is installed at all.
+// (removed 2026-09-13); what reads it now is the native frame provider and the
+// graphics bridge, as the test for whether a d3d11 half is installed at all.
 //
 // Null means no d3d11 half, or a device the proxy never saw. Every reader
 // must treat that as "stand down", not as a reason to wait.
@@ -95,11 +95,8 @@ void* submittedTexture(int eye);
 // any of those fixes are switched on, so this is a fact about the GAME and
 // not about EDVR's configuration.
 //
-// Read by the cull guard, which must not start lying about the frustum while
-// the movie and the menu are up: the intro panel is placed from the TRUE
-// tangents while the game would be rendering the widened ones, and the two
-// disagree by the whole margin. Terrain culling is a flight concern and has
-// nothing to do for a movie, so holding costs the guard nothing.
+// Read by the native frame provider, which hands it to the runtime as sceneReady
+// (the frame-cycle statistics count a frame's producer only once it is set).
 //
 // False also means "nobody has said yet". A reader must pair it with
 // gameDevice() to tell "the intro is still up" from "no d3d11 half is
@@ -162,61 +159,16 @@ bool glitchConsumerPresent();
 void noteJumpVerdict(uint32_t verdict);
 uint32_t jumpVerdictPacked();
 
-// The player is on foot in the external camera, having arrived there from the
-// flat panel -- the one state where moving the head pose is wanted.
-//
-// Set by d3d11.dll, which is the only half that can tell the modes apart: it
-// watches the panel composite, and the panel stopping while a full scene is
-// drawn into the eyes is what the transition looks like. Read by
-// openvr_api.dll, which is the only half that can act on it, because the head
-// pose passes through there. Neither can do the other's job, which is why this
-// is a channel rather than a local.
-//
-// UNLIKE the glitch flag, this one is a STATE and persists across frames. It is
-// not cleared at the frame boundary; it is cleared when the panel comes back.
-// Call this EVERY frame, with the current answer, not only when it changes. The
-// repetition is the point: it is also the heartbeat that externalCameraOnFootLive
-// reads, so "d3d11 says no" and "d3d11 has stopped saying anything" stay
-// distinguishable.
-void setExternalCameraOnFoot(bool on);
-
-// The last value written, whenever it was written.
-//
-// Prefer externalCameraOnFootLive for anything that MOVES THE PLAYER. This one
-// cannot tell a current "yes" from a "yes" left behind by a writer that has
-// since stopped, and the header used to say as much without doing anything
-// about it: "a wrong answer here does not expire on its own".
-bool externalCameraOnFoot();
-
-// True only if d3d11.dll says yes AND has said something within maxAgeFrames
-// calls of this function.
-//
-// WHY A HEARTBEAT. The writer runs inside a fault-budgeted SEH guard on the
-// Present path, and that guard stops running its body permanently after a few
-// faults. The gate would then freeze at whatever it last published. Frozen ON
-// means the head offset stays applied in every mode -- including the cockpit --
-// for the rest of the session, with both logs still saying it is gated, because
-// no line is printed for a decision that is never re-made. The same freeze
-// follows from the d3d11 hook being lost to a recreated device or swapchain.
-//
-// This is the argument the openvr half already makes for keeping the offset
-// itself outside its own budgeted guard: a fault budget is right for logging,
-// where losing a line costs nothing, and wrong for anything that changes what
-// the player sees. The writer here cannot move out of its guard -- it is
-// derived from the render state the guard exists to inspect -- so the reader
-// stops trusting it instead.
-//
-// Counted in READER frames rather than time. Both halves run once per rendered
-// frame, so the units match without a clock, and a stall that freezes both
-// halves together does not age the flag while nothing is being drawn anyway.
-bool externalCameraOnFootLive(uint32_t maxAgeFrames);
-
 // Ask the openvr half to decline the next `frames` frames.
 //
+// NO PRODUCTION CALLER since 2026-10-07: its only caller was the old Explorer
+// Cam's frame-hold setting, deleted with that route. The channel and its reader (takeSubmitHoldFrame, native_frame.cpp's
+// latchSubmit) are kept for now; native_frame_test still drives them.
+//
 // NOT A DETECTION, and that is the whole point of it. Everything else across
-// this channel is one half telling the other what it inferred; this is the
-// player saying so. They pressed the external-camera key, so a transition is
-// starting -- there is nothing to recognise and nothing to be wrong about.
+// this channel is one half telling the other what it inferred; this is a
+// request made on a known event, with nothing to recognise and nothing to be
+// wrong about.
 //
 // It exists because during that transition Elite draws several frames from
 // somewhere the player is not -- confirmed with fix.transition_flash = 0, so it
@@ -263,17 +215,6 @@ bool introRecentreRequested();
 // Clears the request. Called only once it has actually been acted on.
 void clearIntroRecentreRequest();
 
-// advanced.eye_origin_readers (docs/design-transition-flash-engine-fix-
-// 2026-09-23.md, part A1): d3d11.dll's pose_reader_watch asks the runtime
-// to start capturing its own call stack at WaitGetPoses/GetLastPoses --
-// who is calling INTO the OpenVR API -- and to keep publishing every
-// call's details below. Polled, not taken: several publishes can happen
-// while the request stays set. Cheap to check when off, which is the
-// common case (the whole point is to keep the per-call cost negligible
-// until somebody has actually turned the key on).
-void requestPoseReaderTrace(bool on);
-bool poseReaderTraceRequested();
-
 // advanced.slow_test_ms (docs/headset-lock-vdxr-2026-10-02.md, the test trigger of the end-frame episode and
 // slow-regime instruments): d3d11.dll asks the runtime to hold every xrEndFrame it makes for `ms` more
 // milliseconds, INSIDE the call's timed region, so the runtime's own xr_end_frame phase, its long-call episodes
@@ -284,37 +225,13 @@ bool poseReaderTraceRequested();
 void requestEndFrameHold(uint32_t ms);
 uint32_t endFrameHoldMs();
 
-// Published by openvr_api.dll at EVERY WaitGetPoses/GetLastPoses call: the
-// caller-supplied render/game array pointers and counts -- Elite's OWN
-// buffers, and so the exact memory pose_reader_watch's hardware breakpoint
-// eventually watches -- the calling thread id, a QueryPerformanceCounter
-// stamp, and whether each pointer lies inside the calling thread's own
-// stack (GetCurrentThreadStackLimits): a stack-resident buffer is gone the
-// moment the function that owns it returns, so it can never be watched
-// across frames. seq is the presence/change stamp, headPoseSeq's
-// discipline: 0 means nobody has published yet.
-struct PoseReaderCall {
-    uint64_t renderPtr = 0;
-    uint64_t gamePtr = 0;
-    uint64_t qpc = 0;
-    uint32_t renderCount = 0;
-    uint32_t gameCount = 0;
-    uint32_t threadId = 0;
-    uint32_t seq = 0;
-    bool     renderOnStack = false;
-    bool     gameOnStack = false;
-    bool     wasGetLastPoses = false;  // false: WaitGetPoses published this; true: GetLastPoses did
-};
-void publishPoseReaderCall(const PoseReaderCall& call);
-PoseReaderCall poseReaderCall();
-
 // The size of the texture the game hands the headset, as openvr_api.dll read it
 // off the Submit argument.
 //
 // WHY THIS IS A CHANNEL AND NOT A CONSTANT. The d3d11 half has to decide, per
 // render target, whether it is one of the eyes -- everything downstream of that
 // answer (the black void, the panel distance, the transition-flash detector's
-// "is a scene being drawn", and the head-offset gate) is fed by it. It cannot
+// "is a scene being drawn") is fed by it. It cannot
 // see a Submit, so it guessed by size: 2048x2048 or larger. A guess is what the
 // openvr half never has to make, because the texture is handed to it by name.
 //
@@ -427,9 +344,8 @@ void setMenuHeadLock(bool on, float yawDeg, float pitchDeg);
 bool menuHeadLock(float* yawDeg, float* pitchDeg);
 
 // VISIBLE: written by d3d11 EVERY FRAME while the menu machinery runs, with
-// the panel's fade alpha (0..1) -- and the stamp moves on every write, the
-// externalCam discipline, so "closed" and "d3d11 stopped saying" stay
-// distinguishable. The openvr half draws when alpha > 0 and the stamp moved
+// the panel's fade alpha (0..1) -- and the stamp moves on every write, so
+// "closed" and "d3d11 stopped saying" stay distinguishable. The openvr half draws when alpha > 0 and the stamp moved
 // within the last few frames.
 void setMenuVisible(float alpha);
 bool menuVisible(float* alpha, uint32_t* stamp);
@@ -452,54 +368,6 @@ uint32_t menuDrawnValue();
 // "40 up still puts it below my eye line" -- both predicted to the degree
 // by that arithmetic). A bias must fit in the field it is masked into.
 constexpr int32_t kHeadLockBias = 1800;
-
-// The cull guard's state, published by openvr_api.dll at its stage
-// transitions and read by d3d11.dll once per frame boundary.
-//
-// WHY THE DETECTOR NEEDS IT (SPEC-FLASH-FALSE-POSITIVES §1g, EVIDENCE 6bp):
-// the guard tells the game a wider frustum than the headset shows, the wider
-// frustum admits more near-surface render passes, and the transition-flash
-// detector's recognition machinery churns in proportion -- 29 recognitions at
-// guard-off against 3,277 at half margin, with the learning tax felt as
-// judder. Whether that churn is table thrash, genuine novelty, or an
-// identifiable camera population is exactly what nobody has measured, so this
-// channel carries ATTRIBUTION: the detector stamps its ring and splits its
-// counters by what the guard was doing, and changes no decision on it.
-//
-// The eyeSize disciplines apply unchanged. One packed value, so a reader
-// cannot catch half a pair. Zero means "no answer", and every reader must
-// treat it exactly like guard-off -- openvr_api.dll absent, its guard never
-// armed, or a mismatched build pair (the mapping version isolates those) all
-// look identical, and all of them are states in which no lie is being told.
-//
-// stage is 0 (off), 1 (the game is asked for BIGGER render targets but still
-// told true projections -- supersampling only), or 2 (the projection lie is
-// live). The factors are the per-axis span ratios lied/true, carried as
-// per-mille above 1.0 -- +6.1% renders as 61. Stage 1 is published
-// distinctly on purpose: it changes pixel count but not the reported
-// frustum, so detector churn moving at stage 1 alone would be a finding
-// about resolution-dependent pass composition, not noise.
-void announceCullGuardState(uint32_t stage, float factorH, float factorV);
-
-// The packed value as last published, or 0 for "no answer". Packing, also
-// relied on by decodeCullGuardState below: bits 25..24 stage, 23..12
-// horizontal per-mille, 11..0 vertical per-mille.
-uint32_t cullGuardStatePacked();
-
-// The unpacked reading. Header-only and pure, like SubmitPairLatch and for
-// the same reason: both halves and every test decode one way.
-struct CullGuardState {
-    uint32_t stage;      // 0 off, 1 size-only, 2 lie live
-    uint32_t hPerMille;  // (span ratio - 1) * 1000, horizontal
-    uint32_t vPerMille;
-};
-inline CullGuardState decodeCullGuardState(uint32_t packed) {
-    CullGuardState s;
-    s.stage = (packed >> 24) & 0x3u;
-    s.hPerMille = (packed >> 12) & 0xFFFu;
-    s.vPerMille = packed & 0xFFFu;
-    return s;
-}
 
 // ONE VERDICT PER FRAME, over a channel that carries no frame identity.
 //

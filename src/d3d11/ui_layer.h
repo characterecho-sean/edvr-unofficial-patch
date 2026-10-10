@@ -99,8 +99,7 @@ inline bool uiLayerLive() { return detail::g_uiLayerLive; }
 // session either way.
 inline bool uiLayerIssueBlocked() { return detail::g_uiLayerIssueBlocked; }
 
-// Reads fix.ui_quality, fix.temporal_aa and advanced.temporal_aa_debug
-// (value ui_layer). Live: an "off" composites the frame in flight and
+// Reads fix.ui_quality and fix.temporal_aa. Live: an "off" composites the frame in flight and
 // redirects nothing from the next draw.
 void uiLayerConfigure(Config& cfg);
 
@@ -217,7 +216,7 @@ void uiLayerCrispToneEnd(ID3D11DeviceContext* ctx);
 // With fix.panel_curvature above 0 the game's draw is the curve substitution's strip (panel_curve.h) and the second draw is that
 // strip too: vscreen.cpp issues panelCurveReissue between Begin and End, the same helper that bound the strip for the game's draw,
 // so the layer's bend and placement are the game's (the plan accepts a substituted draw as it does a flat one).
-// With experimental.temporal_aa_on_foot_world off none of this ever happens (the route never owns a frame): the
+// On a frame the route does not own none of this ever happens: the
 // decision, the draws, the jitter and the door are what they were.
 //
 // The on-foot world-screen gate the layer computes at its frame boundary (the journal's on-foot reading or the
@@ -268,7 +267,7 @@ struct UiLayerWorldStats {
 };
 UiLayerWorldStats uiLayerWorldStats();
 
-// ---- the on-foot maps gate (experimental.on_foot_maps_sharp; ui_maps_math.h; docs/design-world-camera-motion-2026-09-30.md) ----
+// ---- the on-foot maps gate (ui_maps_math.h; docs/design-world-camera-motion-2026-09-30.md) ----
 //
 // With the key on, the layer's world-screen gate is decided by the world camera alone: the 2D screen is the world only while
 // a draw that reads the world camera names its source (screen_motion.cpp), 2 frames in a row to hold, 3 to release. A map or a
@@ -278,6 +277,8 @@ UiLayerWorldStats uiLayerWorldStats();
 // The key is on, the layer and screen motion are live, so the naming decides the gate (latched at the frame boundary, so every
 // draw of a frame sees one answer). One load.
 inline bool uiLayerMapsOn() { return detail::g_uiLayerMapsOn; }
+// The rigs' switch for the gate (it is on in production, always): the gate-off path is driven with it.
+void uiLayerSetMapsGateForTest(bool on);
 // screen_motion.cpp, once, at the draw that names the screen's source for the frame in flight (the world camera's terrain or
 // scene draw, or the pool-family fallback): the gate judges the frame that ends at the next boundary by it. Attributed to the
 // layer's own frame count, so it is right whichever boundary runs first. Two loads and a store.
@@ -364,6 +365,36 @@ void uiLayerDoorSeen(uint64_t sequence, uint32_t eye, ID3D11Texture2D* source);
 // stands the layer down).
 ID3D11Texture2D* uiLayerComposite(uint64_t sequence, uint32_t eye, ID3D11Texture2D* frame,
                                   const uint32_t region[4], const float layerUv[4]);
+
+// ---- the flat profile's mono adapter (flat_ui_layer.h; docs/design-flat-ui-quality-2026-10-05.md) ----
+//
+// The flat profile drives the same take, tonemap re-issue, door and composite above for eye 0, from its own draw scope
+// (flat_runtime.cpp) through flat_ui_layer.cpp. It is live with fix.ui_quality on and the flat anti-aliasing on
+// (uiLayerConfigure reads the flat mode around the gate). What the VR profiles get from native_temporal (the frame's
+// sequence and the draw's jitter) and from vScreen (the eye's size) the adapter hands in here, before each decision and
+// each tonemap admission: the flat frame's number, the raster phase the draw's camera carries in render pixels (right and
+// down), and the scene's render size R. Read only in the flat profile; cleared at the frame boundary.
+void uiLayerFlatSetDraw(uint64_t frame, float jx, float jy, uint32_t renderW, uint32_t renderH);
+// The flat profile's tonemap admission (2026-10-09): the game's tone pass recognised by its known pair (flat_mono_frame.h
+// toneHdrSlot), whatever its vertex count, reading eye 0's HUD target -- or `alias`, a plain copy of it this frame (the
+// HDR route's post chain copies H before the tone) -- at `hdrSlot`. 1: armed, re-issue between uiLayerCrispToneBegin/End;
+// 0: not, `why` says which test refused. The ordering guards are VR's.
+int uiLayerCrispAdmitFlat(ID3D11DeviceContext* ctx, int hdrSlot, const void* alias, uint64_t vs, uint64_t ps, char* why,
+                          size_t whyN);
+// The UiLayerDecision (as an int) the last uiLayerDecide came to: the adapter names its refusals by it.
+int uiLayerLastDecision();
+// A game draw the layer did not take, while watching: a write of the depth-stencil buffer a seed copied makes the seed
+// stale (uiLayerNoteOther's first step, alone -- the flat profile has no after-the-UI take).
+void uiLayerNoteSceneDraw(ID3D11DeviceContext* ctx, uint32_t count, uint32_t instances, char drawKind);
+// The swap chain is resizing (or the device went): every layer, depth target, composite output and frame view released,
+// the door forgotten, so the next armed frame is a fresh door's. True when anything was held.
+bool uiLayerFlatRelease();
+// The D3D11 device itself changed (the flat profile's adoption of a new device; review 2026-10-09 P2): everything
+// uiLayerFlatRelease lets go of, and every device child the shared layer keeps across a same-device resize -- the blend
+// cache, the depth seeder and its deferred context, the coverage pass's shaders and deferred context, the composite
+// shader and its parameter buffer, the route's timers, the hologram remap's prepared shaders -- released, with their
+// creation-attempt and format-support flags reset, so the next use builds them on the new device. Never on a resize.
+void uiLayerDeviceReset();
 
 // Once per frame, from vScreenFrameBoundary: first, the settle of a fence a
 // failed hologram restore raised (uiLayerIssueBlocked above); then the

@@ -32,8 +32,6 @@ static std::vector<Variant> coreVariants(const std::string& core) {
         {"kWeaponMotionPsBytecode", "weapon motion", "main", nullptr, {}, false, edvr::kWeaponMotionPs, "ps_5_0"},
         {"kWeaponIdentityBytecode", "weapon identity", "main", nullptr, {}, false, edvr::kWeaponIdentityCs, "cs_5_0"},
         {"kPlanetCoverageBytecode", "planet coverage", "main", nullptr, {}, false, edvr::kPlanetCoverageHlsl, "ps_5_0"},
-        {"kTemporalFoveaBytecode", "temporal_fovea_cs", "fovea", nullptr, {}, false, edvr::kFoveaCsHlsl, "cs_5_0"},
-        {"kTemporalDownBytecode", "temporal_down_cs", "down", nullptr, {}, false, edvr::kDownCsHlsl, "cs_5_0"},
     };
 }
 
@@ -54,6 +52,18 @@ static std::vector<Variant> foregroundVariants() {
 static std::vector<Variant> supercruiseVariants() {
     return {
         {"kSupercruiseBarsGsBytecode", "supercruise bars strip", "main", nullptr, {}, false, edvr::kSupercruiseBarsGs, "gs_5_0"},
+    };
+}
+
+// The sibling pass of the flat foreground map (src/d3d11/flat_foreground_motion_shader.h, design doc section 104): four compute shaders, new, held to
+// their own contract (symbol, source name, entry, profile, the text they compile and the thread groups and bindings their DXBC reflects).
+static std::vector<Variant> siblingVariants() {
+    return {
+        {"kFlatForegroundDonorBytecode", "flat foreground donor", "main", nullptr, {}, false, edvr::kFlatForegroundDonorCs, "cs_5_0"},
+        {"kFlatForegroundFitBytecode", "flat foreground fit", "main", nullptr, {}, false, edvr::kFlatForegroundFitCs, "cs_5_0"},
+        // The sibling model's shadow (flat_foreground_shadow.h): the moments of each draw that matched, then each draw's leave-one-out measurement.
+        {"kFlatForegroundShadowMomentsBytecode", "flat foreground shadow moments", "main", nullptr, {}, false, edvr::kFlatForegroundShadowMomentsCs, "cs_5_0"},
+        {"kFlatForegroundShadowEvalBytecode", "flat foreground shadow evaluation", "main", nullptr, {}, false, edvr::kFlatForegroundShadowEvalCs, "cs_5_0"},
     };
 }
 
@@ -82,12 +92,17 @@ static std::vector<LegacyContract> coreLegacyContracts() {
         {"orbital coverage", "main", "vs_5_0", nullptr, 0xE791DFD3733D1EBAull},
         {"ui_depth_corona_ps", "main", "ps_5_0", nullptr, 0x0372DA1389F36CE0ull},
         {"night exterior", "main", "cs_5_0", nullptr, 0x28453D6A0BAB0138ull},
-        {"screen motion", "main", "ps_5_0", nullptr, 0x422615E32B4FE096ull},
+        // Re-pinned 2026-10-08 on purpose: the character rule (an uncovered stencil texel beyond kFirstPersonReachDepth is a world
+        // pixel), the same rule as the flat prep's. Was 0x422615E32B4FE096.
+        // Re-pinned again 2026-10-08 on purpose (F2): this pixel shader is the engine core text plus its own tail, and the core gained the
+        // second skin's reprojection (engineReprojectRowsE, the skinned branch of enginePixelZ, the gCount bins). Nothing in this shader
+        // calls them; the pin moves because the text it is assembled from did. Was 0x8C2F828BE3751ABB.
+        // Re-pinned 2026-10-09 on purpose (F2 on foot, F15): the on-foot eye-route fallback now takes a skinned character's exact motion from the source's
+        // target 7 (SourceSkin at t15, engine.w, kind 7 counted as joined and in its own slot, painted as joined). Was 0xAA505601226395B7.
+        {"screen motion", "main", "ps_5_0", nullptr, 0x47B44C452FE3B59Bull},
         {"weapon motion", "main", "vs_5_0", nullptr, 0x7232767DAC4ADBD4ull},
         {"weapon motion", "main", "ps_5_0", nullptr, 0xF948E51A2E036952ull},
         {"weapon identity", "main", "cs_5_0", nullptr, 0x10E05DE79500471Dull},
         {"planet coverage", "main", "ps_5_0", nullptr, 0xAC1BF855670403D4ull},
-        {"temporal_fovea_cs", "fovea", "cs_5_0", nullptr, 0xE05D6C08CF233167ull},
-        {"temporal_down_cs", "down", "cs_5_0", nullptr, 0x446A3A4BBB585FFAull},
     };
 }

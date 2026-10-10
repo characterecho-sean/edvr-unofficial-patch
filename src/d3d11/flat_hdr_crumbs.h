@@ -3,7 +3,7 @@
 //
 // WHY THIS EXISTS. Under CrossOver with DXMT (a D3D11-to-Metal layer, Apple M4 Max, flat profile) Elite exits cleanly
 // about 30 s into a session, at the first frame the HDR route would treat, with DLSS and with FSR alike and never with
-// experimental.temporal_aa_before_post off. There is no UNHANDLED line, only "gfx: process exit", and the gfx log does
+// the earlier-in-the-frame treatment point switched off. There is no UNHANDLED line, only "gfx: process exit", and the gfx log does
 // not flush its last lines on the way out: what it shows is the route's first selection, a decline
 // (engine-source-not-ready), engine motion's "substitution starts", and then nothing. Which step of the treatment
 // ends the process is therefore not in the log. It is in edvr_breadcrumbs.txt, if the steps write there.
@@ -15,10 +15,10 @@
 // nothing else:
 //
 // THE GATE. Nothing here writes unless the flat runtime has found the device to be DXMT's and said so with
-// hdrCrumbEnable(true). The finding is the markers' (flat_context_isolation.h: the device's or the context's private
+// hdrCrumbEnable(true). The finding is the markers' (flat_isolation_mode.h: the device's or the context's private
 // interface, the module's version resource, an adapter name that begins Apple), made once, at the first Present with a
 // temporal mode on, before the route's key is first read. The gate is that detection and nothing else:
-// advanced.flat_context_isolation=capture on a Windows device changes how the resolver isolates the game's state and
+// forcing the explicit capture on a Windows device (a test rig can) changes how the resolver isolates the game's state and
 // turns no crumb on. With the gate shut every writer below returns before it touches any state: the armed line,
 // admitted, reached and declined, every span (the resolver's, the backends', the explicit capture's eleven groups), the
 // frame end, and the Present hook's pair. edvr_breadcrumbs.txt on Windows holds none of them, and the budget is never
@@ -140,7 +140,7 @@ struct HdrCrumbState {
 inline HdrCrumbState g_hdrCrumbs;
 
 // THE GATE (the header's second paragraph): open only on a DXMT device. The flat runtime opens it once, from the markers
-// (flatCrumbsWantedFor, flat_context_isolation.h); a process nobody has told has it shut, which is every Windows process, and
+// (flatCrumbsWantedFor, flat_isolation_mode.h); a process nobody has told has it shut, which is every Windows process, and
 // every writer below tests it before it touches anything else. Shutting it ends a frame in progress.
 inline bool hdrCrumbEnabled() noexcept { return g_hdrCrumbs.enabled.load(std::memory_order_relaxed); }
 inline void hdrCrumbEnable(bool on) noexcept {

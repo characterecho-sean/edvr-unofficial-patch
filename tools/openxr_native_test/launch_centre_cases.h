@@ -17,6 +17,8 @@ struct Fake {
   // wait that actually admits pixels.
   bool shouldRender=false;
   XrTime sampleTime=0,verifyTime=0;
+  XrTime lastTime=0;   // the instant of the most recent locate, whichever space it was against (the pose-time cases)
+  XrTime rejectTime=-1;XrResult rejectResult=XR_ERROR_TIME_INVALID;   // a locate at exactly this instant answers rejectResult (the pose-time cases)
   XrSpace lastDestroyed=XR_NULL_HANDLE;
 };
 inline Fake* active=nullptr;
@@ -56,7 +58,8 @@ inline XrResult XRAPI_PTR destroy(XrSpace space) {
   ++active->destroys;active->lastDestroyed=space;return XR_SUCCESS;
 }
 inline XrResult XRAPI_PTR locate(XrSpace target,XrSpace base,XrTime time,XrSpaceLocation* out) {
-  ++active->locates;active->argumentsValid&=target==view()&&(base==local()||base==owned());
+  ++active->locates;active->lastTime=time;active->argumentsValid&=target==view()&&(base==local()||base==owned());
+  if(time==active->rejectTime)return active->rejectResult;
   if(active->locateResult!=XR_SUCCESS)return active->locateResult;
   out->locationFlags=active->flags;out->pose=active->head;
   if(base==local())active->sampleTime=time;
@@ -199,21 +202,14 @@ template<class Check> void runFeatureHostCases(Check check) {
   ++h.previousReference;check(!h.sceneLayerAvailable(),"old reference cannot replay after recenter");--h.previousReference;
   h.previousSpace=view();check(!h.sceneLayerAvailable(),"different space cannot replay");h.previousSpace=local();
   h.featureFrame.resubmitEnabled=0;check(!h.sceneLayerAvailable(),"resubmit disabled uses zero layers");h.featureFrame.resubmitEnabled=1;
+  // Explorer Cam's comfort fade is read from the provider's last answer, and only while a provider is here: with none acquired, whatever the kept answer holds
+  // (the d3d11 half unloaded in the middle of a fade) reads 0, never black.
+  h.featureFrameKnown=true;h.featureFrame.fadeAlpha=1.0f;
+  check(h.comfortFade()==0.0f,"no provider acquired: a fade level left in the kept frame reads 0 (an unloaded d3d11 half never leaves the user in black)");
+  h.featureFrameKnown=false;h.featureFrame.fadeAlpha=0.0f;
   h.sceneFinished(false,XR_SUCCESS);check(h.emptyWithholds==1&&h.previousPairValid,"zero-layer withhold retains prior good pair");
   h.sceneFinished(true,XR_SUCCESS);check(h.replayedPairs==1&&h.previousPairValid,"replay does not overwrite saved stereo pair");
   h.sceneFinished(true,XR_ERROR_RUNTIME_FAILURE);check(!h.previousPairValid,"failed endFrame cannot commit a replay pair");
   h.previousPairValid=true;h.invalidateOrigin("feature_fixture");check(!h.previousPairValid,"reference reset retires transition image");
-  vr::TrackedDevicePose_t pose=invalidHeadPose(true);pose.bPoseIsValid=true;
-  pose.mDeviceToAbsoluteTracking.m[0][3]=10;pose.mDeviceToAbsoluteTracking.m[1][3]=20;pose.mDeviceToAbsoluteTracking.m[2][3]=30;
-  const float offset[3]={-.25f,.25f,-1.25f};auto physical=pose;
-  applyNativeHeadOffset(pose,offset,1.57079632679f);
-  const auto& m=pose.mDeviceToAbsoluteTracking.m;
-  check(std::fabs(m[0][2]-1)<.0001f&&std::fabs(m[2][0]+1)<.0001f&&m[0][3]==9.75f&&m[1][3]==20.25f&&m[2][3]==28.75f,
-    "Explorer yaw rotates orientation but adds tracking-coordinate translation without rotating origin");
-  check(physical.mDeviceToAbsoluteTracking.m[2][3]==30&&physical.mDeviceToAbsoluteTracking.m[0][0]==1,"game offset leaves physical pose untouched");
-  const vr::VRTextureBounds_t reversed{.9f,.8f,.1f,.2f};
-  const auto crop=nativeCropBounds(&reversed,.25f,.1f,.75f,.9f);
-  check(std::fabs(crop.uMin-.7f)<.0001f&&std::fabs(crop.uMax-.3f)<.0001f&&std::fabs(crop.vMin-.74f)<.0001f&&std::fabs(crop.vMax-.26f)<.0001f,
-    "guard crop composes within original subrect and preserves both flips");
 }
 } // namespace edvr::openxr::test

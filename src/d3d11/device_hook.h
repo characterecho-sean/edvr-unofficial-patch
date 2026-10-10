@@ -112,6 +112,14 @@ bool deviceHookAutoBiasSource(float* multiplier, float* bias);
 // means unknown; callers should show a neutral DLSS/DLAA label.
 bool deviceHookHmdQuality(float* multiplier);
 
+// fix.ui_quality's panel factor reads three things from the game's own files in
+// one pass: HMD Quality and Supersampling (the newest .fxcfg's
+// HMDRenderTargetMultiplier and SSAAMultiplier) and the game window's size
+// (Options\Graphics\DisplaySettings.xml's ScreenWidth and ScreenHeight). A
+// folder scan and three small reads: never on the render thread. Each out is 0
+// while unknown; the return is true when HMD Quality was read.
+bool deviceHookPanelSettings(float* hmd, float* ssaa, uint32_t* displayW, uint32_t* displayH);
+
 // The FSS mode latch: true while the player is (believed to be) in the Full
 // System Scanner -- keyed by their own FSS bindings for frame-exact edges,
 // reconciled against the game's GuiFocus. Read by the panel rect's chrome

@@ -35,7 +35,7 @@ constexpr uint32_t kPatternFmt = 70;   // BC1-class, as the census resolves it
 static_assert(kKind == 'X' && kIndices == 6 && kInstances == 1,
               "holoPatternShape (holo_fix.h) must match the composite's measured shape");
 
-uint32_t g_level = 255;      // the uniform's channel value, live-tuned
+constexpr uint32_t g_level = 255;   // the uniform's channel value: white, so the shader's multiply is the identity
 
 // The substitute: a 1x1 immutable texture at g_level, rebuilt when the level
 // changes. One texture and one SRV for the session otherwise.
@@ -64,7 +64,7 @@ ID3D11ShaderResourceView* uniformSrv(ID3D11DeviceContext* ctx) {
     ctx->GetDevice(&dev);
     if (!dev) return nullptr;
 
-    const uint8_t v = static_cast<uint8_t>(g_level > 255 ? 255 : g_level);
+    const uint8_t v = static_cast<uint8_t>(g_level);
     const uint8_t pixel[4] = {v, v, v, 255};
     D3D11_TEXTURE2D_DESC td{};
     td.Width = 1;
@@ -119,8 +119,6 @@ void holoConfigure(Config& cfg) {
         Log::get().note("holo_pattern \"%s\" is not stock or steady; running "
                         "stock.", m.c_str());
     }
-    int level = cfg.getIntInRange("advanced.holo_pattern_level", 255, 0, 255);
-    g_level = static_cast<uint32_t>(level);
 
     if (was != detail::g_holoSteady) {
         Log::get().note("holo pattern: %s. The loading hologram's screen-space "

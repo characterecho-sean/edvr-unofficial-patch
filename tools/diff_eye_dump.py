@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare the fss_eye_dump captures: for each checkpoint, tile both eyes'
+"""Compare the eye-dump captures: for each checkpoint, tile both eyes'
 images 16x16 and report where they differ.
 
 Usage: python tools/diff_eye_dump.py <edvr_logs/dumps directory> [gfx log]

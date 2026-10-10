@@ -1,4 +1,4 @@
-// The on-foot maps gate's rig (experimental.on_foot_maps_sharp; docs/design-world-camera-motion-2026-09-30.md, Phase 1).
+// The on-foot maps gate's rig (docs/design-world-camera-motion-2026-09-30.md, Phase 1).
 //
 // Two halves, both with no D3D:
 //   R1..R9   the pure half, src\d3d11\ui_maps_math.h, run on its own: the key, the step (2 named frames hold the panel as the
@@ -205,7 +205,7 @@ void caseR7() {
 void caseR8() {
     char line[1400];
     int n = uiMapsFormatOn(line, sizeof(line), 4242, true, "on foot");
-    check(n > 0 && n < 900 && contains(line, "on foot maps sharp: ON at frame=4242 ") && contains(line, "experimental.on_foot_maps_sharp = on") &&
+    check(n > 0 && n < 900 && contains(line, "on foot maps sharp: ON at frame=4242 ") && contains(line, "(the maps gate is on)") &&
               contains(line, "2 frames in a row hold it, 3 release it") && contains(line, "the world (the journal: on foot)"),
           "R8a: the ON line says the frame, the key, the counts and the gate it starts as");
     n = uiMapsFormatOn(line, sizeof(line), 7, false, "aboard");
@@ -227,7 +227,7 @@ void caseR8() {
               contains(line, "3190 eyes through the layer-only door, 2 kept the upscaler") && contains(line, "a world camera named the screen's source for 2 frames in a row."),
           "R8g: the HANDS BACK line says the frame, the length of the panel period, what the door did and the reason");
     n = uiMapsFormatNotLive(line, sizeof(line), "fix.ui_quality is off");
-    check(n > 0 && contains(line, "on foot maps sharp: experimental.on_foot_maps_sharp is on but") && contains(line, "fix.ui_quality is off."),
+    check(n > 0 && contains(line, "on foot maps sharp: the maps gate is on but") && contains(line, "fix.ui_quality is off."),
           "R8h: the not-live line says the key is on and why nothing changes");
     n = uiMapsFormatNotEmpty(line, sizeof(line), 1, 8279, 5, 2);
     check(n > 0 && contains(line, "for eye 1 (sequence 8279)") && contains(line, "drew 5 draw(s) into eye-sized targets this frame and the layer took 2") &&
@@ -239,7 +239,7 @@ void caseR8() {
     const int b = uiMapsFormatOff(longest, sizeof(longest), ~0ull, "screen motion is not live (fix.temporal_aa is off, or it stood down)", true);
     const int c = uiMapsFormatTake(longest, sizeof(longest), ~0ull, 3, ~0ull, 99999999.9, "no Flags2 in Status.json (a menu, or no file yet)");
     const int d = uiMapsFormatHandBack(longest, sizeof(longest), ~0ull, ~0ull, 99999999.9, ~0ull, ~0ull, why);
-    const int e = uiMapsFormatNotLive(longest, sizeof(longest), "advanced.temporal_aa_jitter_sign or _lag is set (the eye jitter is not as shipped)");
+    const int e = uiMapsFormatNotLive(longest, sizeof(longest), "the eye jitter is not as shipped");
     check(a < 1100 && b < 1100 && c < 1100 && d < 1100 && e < 1100, "R8j: no line is longer than the log can carry");
 }
 
@@ -401,8 +401,6 @@ void pins() {
           "P1c: the gate's tick still steps the journal and the depth every frame, hands today's verdict to mapsGate and keeps its own flip lines for the frames mapsGate does not decide");
     check(has(tick, "const bool named = detail::g_uiLayerNamedAt == gateFrame;") || has(gate, "const bool named = detail::g_uiLayerNamedAt == gateFrame;"),
           "P1d: a frame is named when a draw attributed itself to the frame that is ending");
-    check(has(all, "g_maps.keyCfg = uiMapsKeyFromText(cfg.getString(\"experimental.on_foot_maps_sharp\", \"on\").c_str());"),
-          "P1e: the key is read in uiLayerConfigure with the default on (since 2026-10-01; tools\\config_test holds it to the shipped file)");
 
     // P2: the take. Only a TAKE of the 2D screen composite, not the route's re-issue, marks the eye, and only with the gate on.
     check(has(all, "if (g_draw.family == UiLayerFamily::kScreen && !g_draw.hdr && !g_draw.reissue && detail::g_uiLayerMapsOn) { e.screenTakenSeq = g_draw.seq;") &&

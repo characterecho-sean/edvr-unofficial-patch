@@ -55,6 +55,10 @@ struct FlatRuntimeDraw {
     //     pair does by its shader hashes.
     bool firstPersonCohort = false;
     bool alternateHdr = false;
+    // A pool family's vertex shader with a pixel shader the motion producer does not substitute, drawn into the scene's depth at the
+    // scene's extent (design section 104). Set only by the runtime (engineVelocityPoolFamilyVs, flatContractKind) and carried by the
+    // trace (kFlatTracePoolFamilyVs). It moves with no motion source tracking it, so the frame holding one is never source-free.
+    bool poolFamilyVs = false;
 };
 // Exact bytecode-qualified image filters, with a position/UV passthrough VS.
 // Live shader verification and resource/frame provenance remain mandatory.
@@ -140,6 +144,8 @@ struct FlatRuntimePrefix {
     // part of the contract hash; the copy branch reads it to call the selected frame mixed-camera.
     const void* firstPersonDepth = nullptr;
     uint32_t firstPersonDraws = 0;
+    // The draws of a pool family left stock (FlatRuntimeDraw::poolFamilyVs): the selector's FlatMonoFrameInput::unsupportedFamilyDraws.
+    uint32_t unsupportedFamilyDraws = 0;
 };
 // Whether the cohort drew into `depth`, the scene depth a selection names: the selected frame is then mixed-camera.
 inline bool flatRuntimeFirstPerson(const FlatRuntimePrefix& p, const void* depth) {
@@ -315,6 +321,7 @@ inline FlatMonoFrame flatRuntimeObserve(FlatRuntimePrefix& p, const FlatRuntimeD
         FlatMonoFrameInput in{}; in.world = records; in.worldCount = n;
         in.output = p.output; in.outputWidth = p.width; in.outputHeight = p.height; in.outputFormat = p.format;
         in.frame = in.epoch = p.frame; in.supportedPair = [](uint64_t, uint64_t) { return true; };
+        in.unsupportedFamilyDraws = p.unsupportedFamilyDraws;
         out = flatSelectMonoFrame(in);
         // The first-person cohort left out of the sources above makes the frame mixed-camera (the foreground contract's
         // trigger). Not part of the contract hash, and false for every frame whose draws carry no cohort flag.
@@ -347,6 +354,7 @@ inline FlatMonoFrame flatRuntimeObserve(FlatRuntimePrefix& p, const FlatRuntimeD
             (d.effectiveStencilWrite && !d.overlayProtected)) && k.depth == suffix.overlayDepth)
             bad(suffix, FlatRuntimeConflict::OverlaySuffix, suffix.tone);
     }
+    if (d.poolFamilyVs) ++p.unsupportedFamilyDraws;
     if (!k.color) return out;
     auto* t = flatRuntimeTarget(p, k.color); if (!t) return out;
     if (t->overlayOpen && !d.overlayProtected)

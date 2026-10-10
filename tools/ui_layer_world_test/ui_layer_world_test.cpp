@@ -27,7 +27,7 @@
 //      draw that did not happen (End told landed = false) closes the bracket without taking the eye, counted as a fault.
 //   5. THE HOOKS STEP ASIDE: every raw entry the re-issue calls runs with VrWorldInternalScope up, without an outer one.
 //   6. THE DOOR'S PREFLIGHT and the accessors, the lost-draw counter, the stats.
-//   7. THE ON-FOOT MAPS GATE (experimental.on_foot_maps_sharp, docs/design-world-camera-motion-2026-09-30.md, Phase 1), the layer's
+//   7. THE ON-FOOT MAPS GATE (docs/design-world-camera-motion-2026-09-30.md, Phase 1), the layer's
 //      half: the key off is today's gate frame by frame and logs nothing; the key on follows the naming (hold 2, release 3), a
 //      taken 2D screen marks the eye and the door's predicate answers for it while nothing else went into an eye-sized target, and
 //      every line is made in its order (testMapsGate below).
@@ -234,6 +234,7 @@ int uiDepthEyeOfTarget(const void* res, uint32_t, uint32_t, uint32_t) {
 }
 int uiDepthEyeOfTargetReadOnly(const void* res) { return uiDepthEyeOfTarget(res, 0, 0, 0); }
 void uiPanelScaleSetTarget(float) {}
+void uiPanelScaleSetFlatTemporal(bool) {}
 void uiPanelScaleFrameBoundary() {}
 void uiPanelScaleLog() {}
 void orbitalWidthLog(const char*) {}
@@ -763,7 +764,7 @@ constexpr uint64_t kThirdGetterMask1 = 0x00380000ull;   // sites 83-85 in mask w
 
 bool prepareVanillaTake(Rig& r) {
     auto& cfg = Config::get();
-    cfg.set("experimental.on_foot_maps_sharp", "on");
+    uiLayerSetMapsGateForTest(true);
     g_stubs.journalKnown = true;
     g_stubs.journalOnFoot = true;
     g_stubs.depthKnown = false;
@@ -1423,12 +1424,8 @@ void testAccessors(Rig& r) {
     uiLayerConfigure(cfg);
     check(!uiLayerLiveForWorldRoute() && uiLayerNotLiveReason() && std::strstr(uiLayerNotLiveReason(), "fix.temporal_aa"), "no temporal mode: not live, with its reason");
     cfg.set("fix.temporal_aa", "dlss");
-    cfg.set("advanced.temporal_aa_jitter_sign", "flip_x");
     uiLayerConfigure(cfg);
-    check(!uiLayerLiveForWorldRoute() && uiLayerNotLiveReason() && std::strstr(uiLayerNotLiveReason(), "jitter"), "jitter not as shipped: not live, with its reason");
-    cfg.set("advanced.temporal_aa_jitter_sign", "as_is");
-    uiLayerConfigure(cfg);
-    check(uiLayerLiveForWorldRoute() && uiLayerNotLiveReason() == nullptr && uiLayerLive(), "back as shipped: live again");
+    check(uiLayerLiveForWorldRoute() && uiLayerNotLiveReason() == nullptr && uiLayerLive(), "back with a temporal mode: live again");
     (void)r;
 }
 
@@ -1457,7 +1454,7 @@ void testDoorGaps(Rig& r) {
 }
 }  // namespace
 
-// ================================================================ the on-foot maps gate (experimental.on_foot_maps_sharp)
+// ================================================================ the on-foot maps gate
 // The layer's half, the real ui_layer.cpp (docs/design-world-camera-motion-2026-09-30.md, Phase 1; the pure half and the source pins
 // are tools\on_foot_maps_test). The boundary is driven the way vscreen.cpp drives it, once a frame, with the frame's naming told
 // first (uiLayerNoteScreenNamed: screen_motion.cpp's one call); the 2D screen composite is taken the way forwardWithVerdict takes it
@@ -1514,7 +1511,7 @@ void testMapsGate(Rig& r) {
     check(Log::get().open(dir, L"uilwmaps"), "maps: the rig's log opens in a temp directory (its lines are read back at the end)");
 
     // ---- 1. KEY OFF: today's gate, frame by frame, and nothing of the feature anywhere.
-    cfg.set("experimental.on_foot_maps_sharp", "off");
+    uiLayerSetMapsGateForTest(false);
     uiLayerConfigure(cfg);
     {
         UiOnFootGate refJournal;
@@ -1574,7 +1571,7 @@ void testMapsGate(Rig& r) {
     boundaryFrame(r, true);
     boundaryFrame(r, true);
     check(uiLayerWorldScreenHeld(), "maps: (setup) on foot, the journal holds the screen");
-    cfg.set("experimental.on_foot_maps_sharp", "on");
+    uiLayerSetMapsGateForTest(true);
     uiLayerConfigure(cfg);
     check(boundaryFrame(r, true) && uiLayerMapsOn(), "maps, key on: the first boundary switches the naming in, carrying the world today's gate held");
     check(boundaryFrame(r, true) && boundaryFrame(r, true) && uiLayerWorldScreenHeld(), "maps: named frames keep the world held");
@@ -1643,14 +1640,14 @@ void testMapsGate(Rig& r) {
         const uint64_t seq = nextArmed(r);
         g_stubs.eyeDraws = 1;
         check(takeScreen(r, 0) && uiLayerDoorLayerOnly(0, seq), "maps: (setup) a taken screen the door would run layer-only for");
-        cfg.set("experimental.on_foot_maps_sharp", "off");
+        uiLayerSetMapsGateForTest(false);
         uiLayerConfigure(cfg);
         check(boundaryFrame(r, false) && !uiLayerMapsOn(), "maps, key off live: the gate is the journal's again at once (on foot: held), the maps gate off");
         check(!uiLayerDoorLayerOnly(0, seq), "maps, key off live: ... and the door's predicate no longer answers for a mark made under the key");
     }
 
     // The key back on while a map is showing: carried from today's gate (held), released in the usual three.
-    cfg.set("experimental.on_foot_maps_sharp", "on");
+    uiLayerSetMapsGateForTest(true);
     uiLayerConfigure(cfg);
     check(boundaryFrame(r, false) && uiLayerMapsOn(), "maps, key on live: carried from today's gate: the world, though the screen names nothing");
     check(boundaryFrame(r, false) && !boundaryFrame(r, false), "maps: ... and released on the third unnamed frame after the switch");
@@ -1673,7 +1670,7 @@ void testMapsGate(Rig& r) {
     detail::g_screenMotionEnabled = true;
     check(boundaryFrame(r, false) && uiLayerMapsOn(), "maps: screen motion back: the naming decides again");
 
-    cfg.set("experimental.on_foot_maps_sharp", "off");
+    uiLayerSetMapsGateForTest(false);
     uiLayerConfigure(cfg);
     boundaryFrame(r, false);
     check(!uiLayerMapsOn(), "maps: (cleanup) key off");
@@ -1692,10 +1689,10 @@ void testMapsGate(Rig& r) {
         {"on foot maps sharp: ON at frame=", "the world (the journal: on foot)"},
         {"on foot maps sharp: the layer TAKES the 2D screen at frame=", "no world camera named its source for 3 frames in a row"},
         {"on foot maps sharp: OFF at frame=", "the layer held a panel at that moment"},
-        {"on foot maps sharp: experimental.on_foot_maps_sharp is on but", "fix.ui_quality is off"},
+        {"on foot maps sharp: the maps gate is on but", "fix.ui_quality is off"},
         {"on foot maps sharp: ON at frame=", "the world (the journal: on foot)"},
         {"on foot maps sharp: OFF at frame=", "(screen motion is not live)"},
-        {"on foot maps sharp: experimental.on_foot_maps_sharp is on but", "screen motion is not live"},
+        {"on foot maps sharp: the maps gate is on but", "screen motion is not live"},
         {"on foot maps sharp: ON at frame=", "the world (the journal: on foot)"},
         {"on foot maps sharp: OFF at frame=", "(the key went off)"},
     };
@@ -1759,7 +1756,7 @@ void testMapsTransitions(Rig& r) {
     g_stubs.depthDraws = 0;
     g_stubs.routeDoor = false;
     g_stubs.mayTake = false;
-    cfg.set("experimental.on_foot_maps_sharp", "on");
+    uiLayerSetMapsGateForTest(true);
     uiLayerConfigure(cfg);
     check(boundaryFrame(r, true) && uiLayerMapsOn(), "windows: (setup) the key on, on foot: the naming decides, carried from today's gate (the world)");
 
@@ -1833,7 +1830,7 @@ void testMapsTransitions(Rig& r) {
     cockpitFrame();                                  // the second window's line
     const unsigned w2Frames = worldFrames + panelFrames, w2World = worldFrames, w2Panel = panelFrames, w2Wrong = wrong, w2DoorWrong = doorWrong;
 
-    cfg.set("experimental.on_foot_maps_sharp", "off");
+    uiLayerSetMapsGateForTest(false);
     uiLayerConfigure(cfg);
     boundaryFrame(r, false);
     check(!uiLayerMapsOn(), "windows: (cleanup) key off");
@@ -1907,11 +1904,11 @@ void benchMaps(Rig& r) {
         return ns;
     };
     std::puts("ui_layer_world_test --bench: CPU of the on-foot maps gate, per call");
-    cfg.set("experimental.on_foot_maps_sharp", "off");
+    uiLayerSetMapsGateForTest(false);
     uiLayerConfigure(cfg);
     perCall("frame boundary, key off, first run (cold caches)", [&](uint32_t) { uiLayerFrameBoundary(r.ctx.Get()); });
     const double off = perCall("frame boundary, key off (the journal and depth gate as today)", [&](uint32_t) { uiLayerFrameBoundary(r.ctx.Get()); });
-    cfg.set("experimental.on_foot_maps_sharp", "on");
+    uiLayerSetMapsGateForTest(true);
     uiLayerConfigure(cfg);
     const double named = perCall("frame boundary, key on, a world camera named the source", [&](uint32_t) {
         uiLayerNoteScreenNamed();
@@ -1927,7 +1924,7 @@ void benchMaps(Rig& r) {
     volatile bool sink = false;
     const double doorOn = perCall("door predicate, key on, a take in this sequence", [&](uint32_t) { sink = sink | uiLayerDoorLayerOnly(0, seq); });
     const double doorMiss = perCall("door predicate, key on, no take for the eye", [&](uint32_t) { sink = sink | uiLayerDoorLayerOnly(1, seq); });
-    cfg.set("experimental.on_foot_maps_sharp", "off");
+    uiLayerSetMapsGateForTest(false);
     uiLayerConfigure(cfg);
     uiLayerFrameBoundary(r.ctx.Get());
     const double doorOff = perCall("door predicate, key off (the route's question and one load)", [&](uint32_t) { sink = sink | uiLayerDoorLayerOnly(0, seq); });
@@ -1951,8 +1948,6 @@ int main(int argc, char** argv) {
         auto& cfg = Config::get();
         cfg.set("fix.ui_quality", "100");
         cfg.set("fix.temporal_aa", "dlss");
-        cfg.set("advanced.temporal_aa_jitter_sign", "as_is");
-        cfg.set("advanced.temporal_aa_jitter_lag", "0");
         uiLayerConfigure(cfg);
         uiLayerFrameBoundary(r.ctx.Get());
         r.seq = 1;
@@ -1982,13 +1977,11 @@ int main(int argc, char** argv) {
     auto& cfg = Config::get();
     cfg.set("fix.ui_quality", "100");
     cfg.set("fix.temporal_aa", "dlss");
-    cfg.set("advanced.temporal_aa_jitter_sign", "as_is");
-    cfg.set("advanced.temporal_aa_jitter_lag", "0");
     // The on-foot maps gate ships ON since 2026-10-01 (an ini with no line reads on: tools\config_test and tools\on_foot_maps_test
     // hold the fallback). The cases before the maps section pin the world-screen gate as the journal and the screen's own depth
     // give it, which is the maps key off, and the maps section sets the key itself, so the rig starts with it off: the new default
     // must not leak in and make the first maps case start from a gate that is already on.
-    cfg.set("experimental.on_foot_maps_sharp", "off");
+    uiLayerSetMapsGateForTest(false);
     uiLayerConfigure(cfg);
     check(uiLayerLive(), "the layer is live for the rig (fix.ui_quality 100, dlss, jitter as shipped)");
     // The first boundary computes the world-screen gate (the journal: on foot) and warms the layer's shaders.

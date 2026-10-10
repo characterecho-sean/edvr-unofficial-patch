@@ -71,8 +71,8 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
   // source's size -- the same whether the frame is the source or the
   // sharpened copy of that region.
   float layerUv[4]; edvr::uiLayerUvFromRegion(region,desc.Width,desc.Height,layerUv);
-  // A layer-only eye (ui_layer.h uiLayerDoorLayerOnly: the VR world route's world, or a map's or a menu's 2D screen under
-  // experimental.on_foot_maps_sharp): the layer holds the WHOLE eye and the frame here is the black one the temporal door
+  // A layer-only eye (ui_layer.h uiLayerDoorLayerOnly: the VR world route's world, or a map's or a menu's 2D screen on foot):
+  // the layer holds the WHOLE eye and the frame here is the black one the temporal door
   // handed on. So the layer is composited FIRST and RCAS runs over the composited eye -- the order the ordinary path
   // reverses (RCAS on the frame, then the layer over it, so the sharpener never rings the text), which would sharpen a
   // black frame. The strength rules are the ordinary ones (fix.render_sharpness).

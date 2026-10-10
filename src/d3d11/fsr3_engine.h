@@ -45,8 +45,8 @@ bool fsr3Warm(ID3D11DeviceContext* ctx, uint32_t w, uint32_t h, uint32_t outW,
 // 1 the eyes', 2 the VR world route's, each with its own context and history;
 // fsr3Warm makes the eyes' two only, the world's is made lazily on its first
 // evaluation): colour, depth and motion vectors in the same formats
-// and sizes dlaaEvaluate takes (dlaa.h), a reactive mask (may be null: off
-// unless advanced.temporal_aa_fsr_reactive = on, design doc 3.1/3.3), into
+// and sizes dlaaEvaluate takes (dlaa.h), a reactive mask (may be null: unused
+// by default, design doc 3.1/3.3), into
 // output at outW x outH. reset breaks the history, exactly as dlaaEvaluate's
 // does. frameMs is the time since this eye's previous evaluation. nearZ/
 // farZ are the game's reversed-Z planes (temporal_pass.h's own nearZ/farZ,
@@ -114,13 +114,8 @@ const char* fsr3VersionLabel();
 // since fsr3Evaluate's stub never runs.
 bool fsr3Totals(uint32_t* evaluations, double* avgMs, double* maxMs, uint32_t* resets);
 
-// advanced.temporal_aa_fsr_reactive (off|on, default off) and
-// advanced.temporal_aa_fsr_debug (off|on, default off), both live: design
-// doc 3.1. Read fresh from Config each call, like the pass's own small
-// per-frame settings reads elsewhere in this codebase; called from the stub
-// too (fsr3Available's #else branch), so the config contract's static scan
-// of src\ sees both keys read regardless of which side of EDVR_HAVE_FSR3 a
-// build compiles.
+// The per-dispatch settings: both off (design doc 3.1). The struct stays so the
+// dispatch keeps one shape.
 struct Fsr3Settings {
     bool reactive = false;   // hand FSR the UI-and-movers mask as `reactive`
     bool debug = false;      // FSR's own DRAW_DEBUG_VIEW

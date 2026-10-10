@@ -53,8 +53,8 @@ namespace edvr {
 
 // "off" | "100" | "125" -> 0 (off) | 1.0 | 1.25: the target HMD Quality, as
 // a percentage of HMD Quality 1.0 in the file (a plain number, like every
-// numeric key) and "100%" / "125%" in the F8 menu. Exact text, the way
-// fix.settlement_detail reads its choices: "100.0" is not "100". The first
+// numeric key) and "100%" / "125%" in the F8 menu. Exact text, the way the
+// other choice keys read: "100.0" is not "100". The first
 // spellings -- "1.0", "1" and "1.25" -- are read for one release as 100 and
 // 125, with *alias set to the new spelling for the log's one-time note.
 // Anything else is off, and *recognized says so for the log. One reader for
@@ -928,8 +928,8 @@ inline UiLayerFamily uiLayerFamilyFor(const UiFamilyFacts& f, UiFamilyWhy* why =
 // everything else the layer takes, it still takes.
 //
 // The reading is the journal watcher's, of the game's Status.json (Flags2
-// bit 0: journalOnFootKnown && journalOnFoot, the LOD governor's and the
-// on-foot frame pacing's source). It LAGS: the game rewrites the file about
+// bit 0: journalOnFootKnown && journalOnFoot, the on-foot frame pacing's
+// source). It LAGS: the game rewrites the file about
 // once a second and the watcher reads it twice a second (the 09:38 flight:
 // the screen went on foot at 09:41:04.442, the journal said so at
 // 09:41:05.003) -- the transitions it lags are behind a loading screen.
@@ -1113,8 +1113,8 @@ struct UiLayerDrawFacts {
     // The VR world route owns the world for this frame (vr_world_route.h: it resolved the world
     // once and the eye shift is off), so the screen composite is the layer's to RE-ISSUE instead
     // of the temporal pass's to treat: the world-screen refusal does not apply, and every later
-    // test applies to the screen draw as to any opaque, no-depth eye draw. Always false with
-    // experimental.temporal_aa_on_foot_world off (design doc section 82; ui_layer.cpp sets it
+    // test applies to the screen draw as to any opaque, no-depth eye draw. Always false on a
+    // frame the route does not own (design doc section 82; ui_layer.cpp sets it
     // for the 2D screen family alone, from vrWorldRouteLayerMayTake()).
     bool worldRoute = false;
     bool eyeTarget = false;       // an eye-sized 2D colour target
@@ -1344,7 +1344,7 @@ inline bool uiLayerLiveFor(float target, bool temporal, bool jitterAsShipped, bo
 inline const char* uiLayerNotLiveReasonFor(float target, bool temporal, bool jitterAsShipped, bool stoodDown) {
     if (!(target > 0.0f)) return "fix.ui_quality is off";
     if (!temporal) return "no temporal mode is on (fix.temporal_aa is off)";
-    if (!jitterAsShipped) return "the eye jitter is not as shipped (advanced.temporal_aa_jitter_sign or _lag is set)";
+    if (!jitterAsShipped) return "the eye jitter is not as shipped";
     if (stoodDown) return "the layer stood down for the session";
     return nullptr;
 }
@@ -1416,7 +1416,7 @@ inline bool uiLayerLateFor(const UiLayerDoorState& d, uint64_t sequence) {
 // whole-pixel rectangle supersampleRegionFromBounds made of the Submit
 // bounds, already unflipped (the frame and the layer store the eye in the
 // same orientation) -- over its source's size. From the ROUNDED region and
-// not the raw bounds: a cull-guard crop is an arbitrary fraction, and the
+// not the raw bounds: submitted bounds can be an arbitrary fraction, and the
 // half-pixel between the two would shift the UI and straddle every texel.
 inline void uiLayerUvFromRegion(const uint32_t region[4], uint32_t sourceW, uint32_t sourceH,
                                 float uv[4]) {

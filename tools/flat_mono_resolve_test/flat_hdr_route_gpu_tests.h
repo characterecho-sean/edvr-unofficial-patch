@@ -983,7 +983,7 @@ inline void hdrRouteGpuTests(ID3D11Device* device, ID3D11DeviceContext* context)
         // (g) THE DEVICE GATE: the same route with the gate shut, as the runtime leaves it on every device the markers do not call DXMT.
         // A cold preflight, three frames that reach the resolver, a refused backend and a spatial recovery write not one crumb, the armed
         // line included, and the 5 s line's step counts count the frames all the same (they are plain counters, read into a log line).
-        // The same again with the explicit capture FORCED (advanced.flat_context_isolation=capture), which is what a tester on Windows
+        // The same again with the explicit capture FORCED (flatMonoResolveSetIsolation), which is what a tester on Windows
         // would do: the capture runs, and the gate, which is the detection's alone, stays shut.
         for (const bool forcedCapture : {false, true}) {
             restart();

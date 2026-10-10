@@ -1,7 +1,7 @@
 // on_foot_split_test: the ship split on foot (src/common/temporal_mode.h; docs/per-object-motion.md, 2026-10-07).
 //
 // The bug: in Explorer Cam the ground within ten metres of the commander smeared when he moved. The temporal pass sends a pixel
-// nearer than advanced.temporal_aa_ship_metres (10 m) down the HEAD path -- the head's own delta, right for a cockpit that rides with
+// nearer than the ship split (10 m) down the HEAD path -- the head's own delta, right for a cockpit that rides with
 // the head -- and farther ones down the WORLD path, the game's camera rows. On foot there is no ship, the ground at 1.5 to 10 m is the
 // world, and the head path missed the camera's whole walk (eye dump 090359: 24.9 px a frame at the median against 0.84 px for the
 // camera's own rows, by block matching the raw crops). The fix is one value: while Status.json says the commander is on foot and not
@@ -443,7 +443,7 @@ Pixel expectPixel(const Case& c, const FixRow& r, const std::vector<float>& dept
 // ---------------------------------------------------------------------------------------------------------------------------------
 // The production shader on WARP: the mv entry, the capture variant (EDVR_TEMPORAL_TRACE 1: DT at u7 is what the eye dump's D files are)
 // ---------------------------------------------------------------------------------------------------------------------------------
-struct Params {   // the cbuffer P, as temporal_pass.cpp's PassParams lays it out (528 bytes, 33 rows); checked against the compiled shader
+struct Params {   // the cbuffer P, as temporal_pass.cpp's PassParams lays it out (448 bytes, 28 rows); checked against the compiled shader
     int32_t region[4];
     int32_t size[2];
     int32_t texSize[2];
@@ -451,9 +451,9 @@ struct Params {   // the cbuffer P, as temporal_pass.cpp's PassParams lays it ou
     float cand[4][3][4];
     float blend, gamma;
     int32_t haveHistory, candMask;
-    float knobs[4], tvUsed[4], tvCand[4], tvCam[4], split[4], fovea0[4], fovea1[4], movers[4], probe[4], holoJitter[4], skip[4], lead[4];
+    float knobs[4], tvUsed[4], tvCand[4], tvCam[4], split[4], probe[4], holoJitter[4];
 };
-static_assert(sizeof(Params) == 528, "the cbuffer is 33 16-byte rows");
+static_assert(sizeof(Params) == 448, "the cbuffer is 28 16-byte rows");
 
 constexpr UINT kStatsN = 64;
 constexpr int kSlotStats = 2, kSlotMV = 3, kSlotDT = 7;
@@ -907,7 +907,7 @@ void testShader(const std::string& root) {
         hr(D3DReflect(v[0].code->GetBufferPointer(), v[0].code->GetBufferSize(), __uuidof(ID3D11ShaderReflection), reinterpret_cast<void**>(refl.GetAddressOf())), "D3DReflect");
         ID3D11ShaderReflectionConstantBuffer* cbr = refl->GetConstantBufferByName("P");
         D3D11_SHADER_BUFFER_DESC bd{};
-        check("R0", cbr && SUCCEEDED(cbr->GetDesc(&bd)) && bd.Size == sizeof(Params), "cbuffer P is 528 bytes, as PassParams");
+        check("R0", cbr && SUCCEEDED(cbr->GetDesc(&bd)) && bd.Size == sizeof(Params), "cbuffer P is 448 bytes, as PassParams");
         std::map<std::string, UINT> off;
         for (UINT i = 0; i < bd.Variables; ++i) {
             D3D11_SHADER_VARIABLE_DESC vd{};
@@ -977,8 +977,8 @@ void testPins(const std::string& root) {
     const std::string journal = slurp(root + "/src/d3d11/journal_watch.cpp");
     const std::string shader = slurp(root + "/src/d3d11/temporal_shader_source.h");
     const std::vector<Pin> pins = {
-        {&pass, "p.split[0] = temporalShipSplitMetres(g_shipMetres, footSplit);", 1, "R5a", "the shader's split is the pure function's, once"},
-        {&pass, "p.split[0] = g_shipMetres;", 0, "R5b", "nothing hands the shader the configured split raw"},
+        {&pass, "p.split[0] = temporalShipSplitMetres(kTemporalShipMetres, footSplit);", 1, "R5a", "the shader's split is the pure function's, once"},
+        {&pass, "p.split[0] = kTemporalShipMetres;", 0, "R5b", "nothing hands the shader the configured split raw"},
         {&pass, "const bool footSplit = footSplitNow();", 1, "R5c", "the mode is asked once, where the constants are built"},
         {&pass, "bool footSplitNow() {", 1, "R5d", "the mode has one definition"},
         {&pass, "f.watching = journalWatchActive();", 1, "R5e", "the verdict's input: the journal is read"},
@@ -994,7 +994,6 @@ void testPins(const std::string& root) {
         {&pass, "\"temporal aa: no longer on foot (%s) -- the ship split is back at %.0f m: pixels nearer take the head's \"", 1, "R5g", "the change back is told"},
         {&pass, "\"temporal aa on foot: the ship split was off for %u of %u eye-frames%s (the world path on for %u of them); the journal \"", 1, "R5h", "the interval's totals line, with its zeros"},
         {&vscreen, "temporalPassNoteFootTotals();", 1, "R5h", "the totals block prints the on-foot line beside the others"},
-        {&pass, "fprintf(f, \",shipSplit\");", 1, "R5i", "the eye dump's motion trace names the split the shader read"},
         {&journal, "s.pub.seated = sawFlags && journalSeatedFromFlags(flags, sawFlags2 ? flags2 : 0u);", 1, "R5j", "the seat is the pure function of the same read"},
         {&journal, "s.pub.seatedKnown = sawFlags;", 1, "R5j", "the seat is known whenever Flags is"},
         {&journal, "s.pub.seatedKnown = false;", 1, "R5j", "three missed reads drop the seat with the rest"},
@@ -1003,8 +1002,6 @@ void testPins(const std::string& root) {
         {&shader, "(far || z > split.x)", 2, "R5k", "the shader sends a pixel to the world path when it is far or farther than split.x"},
     };
     runPins(pins);
-    check("R5l", count(pass, "float    g_shipMetres = kTemporalShipMetres;") == 1 && count(pass, "g_shipMetres = ship;") == 1,
-          "the configured split is still read once from advanced.temporal_aa_ship_metres");
     std::printf("(R5) %zu source pins, each with its control (the line removed must fail it)\n", pins.size());
 }
 

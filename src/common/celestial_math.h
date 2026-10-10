@@ -39,7 +39,10 @@ namespace celestial {
 constexpr uint32_t kMaxPatches = 512;   // per eye per frame; the rest are counted and left to the camera term
 constexpr uint32_t kMaxBodies = 16;     // records per eye; nearest first
 constexpr uint32_t kMaxGroups = 64;     // bodies tracked while grouping, before the nearest kMaxBodies are kept
-constexpr uint32_t kRecordFloats = 20;  // five float4: m0 m1 m2 (rows of [R|t]), box (x0 y0 x1 y1 px), span (zmin zmax valid 0)
+// Six float4 a record (the shader's CelestialRecord, StructuredBuffer t15): m0 m1 m2 (rows of [R|t]), box (x0 y0 x1 y1 px),
+// span (zmin zmax valid rMax), ctr (the body's centre in the shader's view space, rMin). rMax > 0 turns the radial shell on: a
+// pixel's view-space point P must lie rMin <= |P - centre| <= rMax. 0 in span.w = no shell (the volume alone claims the pixel).
+constexpr uint32_t kRecordFloats = 24;
 
 // What one patch draw contributes. The first three rows of cb0 and the first 24 of cb2 are all a patch needs.
 struct Patch {
@@ -235,7 +238,13 @@ struct BodyResult {
     double M[9] = {}, tv[3] = {};         // the shader's view-space [R|t]
     double box[4] = {};                   // pixel rectangle x0 y0 x1 y1, margins in
     double zmin = 0.0, zmax = 0.0;        // view-depth interval, margins in
-    bool straddle = false;                // a patch box reaches the eye plane: the volume is the whole eye
+    bool straddle = false;                // a patch box reaches the eye plane: the volume is the whole eye, held to the shell below
+    // The radial shell of the body's own patches (2026-10-08): the centre in the shader's view space (-Z forward), and the
+    // distance from it that the patches' boxes occupy -- the nearest either box of any patch comes, the farthest any corner
+    // is -- with margins in. `shell` = straddle: a whole-eye volume claims a pixel only where its point lies in this shell.
+    double shellCentre[3] = {};
+    double rMin = 0.0, rMax = 0.0;
+    bool shell = false;
 };
 
 struct BuildResult {
@@ -380,9 +389,78 @@ inline void viewFrame(const float Ac[9], const float Ap[9], BodyResult& r) {
     std::memcpy(r.tv, tt, sizeof(r.tv));
 }
 
+// The nearest a point comes to a box [lo, hi], the point given in the box's own frame: clamp it into the box, measure the rest.
+// Exact for a box (the nearest point of one is the clamp). The nearest CORNER is not it: a flat box over a wide patch has its
+// corners beyond the sphere it holds (by about R (sec(half angle) - 1)), so a shell cut at the nearest corner could exclude
+// the very surface the box encloses.
+inline double distanceToBox(const double p[3], const float lo[3], const float hi[3]) {
+    double d2 = 0.0;
+    for (int i = 0; i < 3; ++i) {
+        const double c = std::min<double>(std::max<double>(p[i], lo[i]), hi[i]);
+        d2 += (p[i] - c) * (p[i] - c);
+    }
+    return std::sqrt(d2);
+}
+
+// The radial shell a body's patches occupy about its own centre, in head axes (+Z forward), margins in. The centre is cb2[12]
+// (world-aligned, camera-relative) carried back to head axes by A^T -- the same point the rig's sphere is built at -- and the
+// shell is read from the patches' own boxes, not from a terrain height: rMax the farthest any corner of either box of any
+// patch is from it, rMin the nearest either box of any patch comes. The surface of every patch lies inside its box, so every
+// surface point (and the terrain on it, to the extent of the boxes) has a distance from the centre inside [rMin, rMax].
+// MARGINS: a percent of each bound and four metres, plus six float32 ulp of the centre's distance -- the shader holds the
+// centre and the pixel's point in float32 and subtracts them, and at 1.7e7 m (a 4,478 km planet seen from 12,000 km) one ulp
+// is 1-2 m, so the rounding is metres, not kilometres; the term keeps a small body very far away from losing its own surface
+// to it (|centre| up to 8e8 m in the eye dump: 6 ulp is 570 m against a percent of a 680 km radius, 6.8 km).
+struct Shell {
+    double centre[3] = {};     // head axes
+    double rMin = 0.0, rMax = 0.0;
+    bool ok = false;
+};
+inline Shell bodyShell(const Patch* cur, uint32_t nCur, const uint32_t* groupOf, uint32_t body) {
+    Shell s;
+    const Patch* first = nullptr;
+    for (uint32_t i = 0; i < nCur && !first; ++i)
+        if (groupOf[i] == body) first = &cur[i];
+    if (!first) return s;
+    double A[9];
+    for (int i = 0; i < 9; ++i) A[i] = first->A[i];
+    const double B[3] = {first->body[0], first->body[1], first->body[2]};
+    mulTV(A, B, s.centre);   // head axes = A^T world-aligned (A is the camera's rotation)
+    double lo = 1e300, hi = 0.0;
+    for (uint32_t i = 0; i < nCur; ++i) {
+        if (groupOf[i] != body) continue;
+        const Patch& p = cur[i];
+        double pts[16][3];
+        patchCorners(p, pts);
+        for (int k = 0; k < 16; ++k) {
+            if (!std::isfinite(pts[k][0]) || !std::isfinite(pts[k][1]) || !std::isfinite(pts[k][2])) return s;
+            hi = std::max(hi, dist3(pts[k], s.centre));
+        }
+        // The centre in each box's own frame: box one is rotate(q, v) + c; box two is rotate(q, rotate(q2, v) + o) + c.
+        double Rq[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1}, R2[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+        quatToMat(p.q, Rq);
+        quatToMat(p.q2, R2);
+        const double d[3] = {s.centre[0] - p.c[0], s.centre[1] - p.c[1], s.centre[2] - p.c[2]};
+        double l1[3], l2[3], t[3];
+        mulTV(Rq, d, l1);
+        const double e[3] = {l1[0] - p.o[0], l1[1] - p.o[1], l1[2] - p.o[2]};
+        mulTV(R2, e, t);
+        l2[0] = t[0]; l2[1] = t[1]; l2[2] = t[2];
+        lo = std::min(lo, std::min(distanceToBox(l1, &p.rows[0], &p.rows[4]), distanceToBox(l2, &p.rows[8], &p.rows[12])));
+    }
+    if (!(hi > 0.0) || !std::isfinite(lo) || !std::isfinite(hi)) return s;
+    const double slack = 6.0 * ulp32(len3(s.centre));
+    s.rMin = std::max(0.0, lo * 0.99 - 4.0 - slack);
+    s.rMax = hi * 1.01 + 4.0 + slack;
+    s.ok = true;
+    return s;
+}
+
 // The coverage volume of a body: every corner of both boxes of every one of its patches, projected as the pass does.
-// A corner at or behind the eye plane makes the volume the whole eye from the plane out (a landed ship's patches
-// reach under it). 0 ok, 1 wholly behind the eye, 2 not finite.
+// A corner at or behind the eye plane makes the volume the whole eye from the plane out (a landed ship's patches reach under
+// it), and then the volume alone is no claim on a pixel: it holds every world pixel nearer than the far corners (a hangar's
+// wall as much as the planet), so the record also carries the body's radial shell and the shader takes only the pixels whose
+// point lies in it. 0 ok, 1 wholly behind the eye, 2 not finite.
 inline int volume(const Patch* cur, uint32_t nCur, const uint32_t* groupOf, uint32_t body, const EyeInput& eye, BodyResult& r) {
     double x0 = 1e300, y0 = 1e300, x1 = -1e300, y1 = -1e300, z0 = 1e300, z1 = -1e300;
     bool straddle = false, finite = true, any = false;
@@ -402,8 +480,17 @@ inline int volume(const Patch* cur, uint32_t nCur, const uint32_t* groupOf, uint
         }
     }
     if (!finite) return 2;
+    // The shell, for every body that has finite corners (a body behind the eye has one too: the rig reads it there).
+    const Shell sh = bodyShell(cur, nCur, groupOf, body);
+    if (sh.ok) {
+        r.shellCentre[0] = sh.centre[0]; r.shellCentre[1] = sh.centre[1]; r.shellCentre[2] = -sh.centre[2];   // the shader's view: -Z forward
+        r.rMin = sh.rMin;
+        r.rMax = sh.rMax;
+    }
     if (!any) return 1;   // no corner in front of the eye: the body is behind it
+    if (straddle && !sh.ok) return 2;   // a whole-eye volume with no shell to hold it would claim the room again: no record
     r.straddle = straddle;
+    r.shell = straddle;
     if (straddle) {
         r.box[0] = -4.0; r.box[1] = -4.0; r.box[2] = eye.w + 4.0; r.box[3] = eye.h + 4.0;
         r.zmin = 0.0;
@@ -536,20 +623,36 @@ inline void build(const Patch* cur, uint32_t nCur, const Patch* prev, uint32_t n
             g[row * 4 + 3] = float(r.tv[row]);
         }
         g[12] = float(r.box[0]); g[13] = float(r.box[1]); g[14] = float(r.box[2]); g[15] = float(r.box[3]);
-        g[16] = float(r.zmin);   g[17] = float(r.zmax);   g[18] = 1.0f;             g[19] = 0.0f;
+        g[16] = float(r.zmin);   g[17] = float(r.zmax);   g[18] = 1.0f;             g[19] = r.shell ? float(r.rMax) : 0.0f;
+        g[20] = r.shell ? float(r.shellCentre[0]) : 0.0f; g[21] = r.shell ? float(r.shellCentre[1]) : 0.0f;
+        g[22] = r.shell ? float(r.shellCentre[2]) : 0.0f; g[23] = r.shell ? float(r.rMin) : 0.0f;
         out.maxDisplacement = std::max(out.maxDisplacement, r.displacement);
     }
 }
 
+// The shell's widening at a pixel (the shader's `slack`): three pixels' footprint at the pixel's own depth, metres. A pixel beside
+// a silhouette carries the nearest depth of its 3x3, so its ray misses that depth's point by up to 1.4 pixels.
+inline double shellSlack(const float tanNow[4], int w, int h, double z) {
+    return 3.0 * z * std::max((double(tanNow[1]) - tanNow[0]) / w, (double(tanNow[3]) - tanNow[2]) / h);
+}
+
 // The shader's arithmetic on one pixel, for the rig and for reading a log against it: a pixel p at depth z (metres)
 // inside a record's volume moves to M (d z) + tv in last frame's view, projected by last frame's tangents. false
-// when the pixel is outside the volume. mx, my are previous minus current, render pixels, jitter excluded.
+// when the pixel is outside the volume -- or, for a record with a shell (rec[19] > 0), when its view-space point P is not
+// within [rMin, rMax] = [rec[23], rec[19]] of the body's centre rec[20..22], each bound widened by shellSlack. mx, my are
+// previous minus current, render pixels, jitter excluded.
 inline bool shaderMotion(const float rec[kRecordFloats], const float tanNow[4], const float tanPrev[4], int w, int h,
                          double px, double py, double z, double* mx, double* my) {
     if (!(px >= rec[12] && px <= rec[14] && py >= rec[13] && py <= rec[15] && z >= rec[16] && z <= rec[17])) return false;
     const double dx = tanNow[0] + (px + 0.5) / w * (double(tanNow[1]) - tanNow[0]);
     const double dy = tanNow[3] - (py + 0.5) / h * (double(tanNow[3]) - tanNow[2]);
     const double P[3] = {dx * z, dy * z, -z};
+    if (rec[19] > 0.0f) {
+        const double c[3] = {rec[20], rec[21], rec[22]};
+        const double radial = dist3(P, c);
+        const double slack = shellSlack(tanNow, w, h, z);
+        if (!(radial >= double(rec[23]) - slack && radial <= double(rec[19]) + slack)) return false;
+    }
     const double X = rec[0] * P[0] + rec[1] * P[1] + rec[2] * P[2] + rec[3];
     const double Y = rec[4] * P[0] + rec[5] * P[1] + rec[6] * P[2] + rec[7];
     const double Z = rec[8] * P[0] + rec[9] * P[1] + rec[10] * P[2] + rec[11];

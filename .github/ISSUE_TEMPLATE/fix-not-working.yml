@@ -18,13 +18,12 @@ body:
       label: Which fix
       description: The groups here are the ones in the installer's Settings tab and the in-headset menu's Fixes page, so pick whichever you were changing.
       options:
-        - When the eyes disagree (eye brightness, FSS scanner, scanned body)
+        - When the eyes disagree (eye brightness, FSS scanner)
         - Night vision (the pulse's distance; the experimental look and its brightness)
         - The on-foot screen (weapon stability, black surround, resolution, distance, curve)
         - The intro (movie on the screen or skipped, background picture, loading dimming, centring)
         - Jumps, stars and smoke (transition flash, sun glare, plumes, hyperspace starfield)
         - The helmet and the loading screen (RemLok lines, loading hologram)
-        - The terrain fix (gaps at the edges of view)
         - Explorer Cam (on-foot stereo depth, high-wake marker)
         - Anti-aliasing (temporal AA, DLAA/DLSS and its preset, sharpening)
         - The in-headset settings menu (F8, its keys, the Monitor and Status pages)

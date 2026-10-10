@@ -102,9 +102,9 @@ bool     g_on = false;
 bool     g_failed = false;
 bool     g_configured = false;
 uint32_t g_targetW = 0;
-float    g_deband = 0.0f;     // flatness threshold, 0..64 of 255; 0 = off
+float    g_deband = 8.0f;     // flatness threshold, 0..64 of 255; 0 = off
 float    g_dither = 1.0f;     // LSBs, on the last deband pass only
-float    g_sharpen = -1.0f;   // RCAS stops; negative = off
+float    g_sharpen = 0.25f;   // RCAS stops (AMD's unit: stops of sharpness reduction, 0 sharpest); negative = off
 
 ID3D11ComputeShader* g_csDeband = nullptr;
 ID3D11ComputeShader* g_csUp = nullptr;
@@ -555,8 +555,6 @@ void introUpscaleConfigure(Config& cfg) {
     const Mode want = ivm.upscale == 2
                           ? Mode::kFsr
                           : (ivm.upscale == 1 ? Mode::kSharp : Mode::kOff);
-    const float wasDeband = g_deband;
-    const float wasSharpen = g_sharpen;
     {
         // The same question the panel patch asks (vscreen_res.cpp), asked
         // once: "auto" now resolves through resolveVScreenTargetResolution
@@ -567,22 +565,9 @@ void introUpscaleConfigure(Config& cfg) {
         resolveVScreenTargetResolution(cfg, &vw, &vh, /*announce=*/false);
         g_targetW = vw;
     }
-    g_deband = static_cast<float>(
-        cfg.getIntInRange("advanced.intro_video_deband", 8, 0, 64));
-    g_dither = static_cast<float>(
-        cfg.getIntInRange("advanced.intro_video_dither", 1, 0, 8));
-    {
-        // AMD's own unit: STOPS of sharpness reduction, so 0 is the sharpest
-        // and 2 the mildest. "off" skips the pass and its memory entirely.
-        const std::string s =
-            cfg.getString("advanced.intro_video_sharpen", "0.25");
-        g_sharpen = (s == "off") ? -1.0f : static_cast<float>(atof(s.c_str()));
-        if (g_sharpen > 2.0f) g_sharpen = 2.0f;
-    }
     const bool first = !g_configured;
     g_configured = true;
-    if (want == g_mode && g_deband == wasDeband && g_sharpen == wasSharpen &&
-        !first) {
+    if (want == g_mode && !first) {
         return;
     }
     // Anything that changes which passes run changes what is allocated, so

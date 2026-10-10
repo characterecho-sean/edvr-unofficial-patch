@@ -32,8 +32,12 @@
 
 namespace edvr {
 
+// F2: target 7 (kSkinTarget) joins the slot target for the skinned characters' E: skinMode 0 leaves target 7 as the game's state has it
+// (flat, and any pass without the skin target), 1 turns target 7's writes off (a pixel shader that exports nothing there must not leave
+// undefined values in it), 2 writes all four channels unblended (the pixel shader exports E and its valid flag).
+//
 // The derived state's description.
-inline D3D11_BLEND_DESC engineVelocityDerivedBlend(const D3D11_BLEND_DESC& game) {
+inline D3D11_BLEND_DESC engineVelocityDerivedBlend(const D3D11_BLEND_DESC& game, int skinMode = 0) {
     D3D11_BLEND_DESC d = game;
     if (!game.IndependentBlendEnable)
         for (UINT i = 1; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; ++i) d.RenderTarget[i] = game.RenderTarget[0];
@@ -47,6 +51,17 @@ inline D3D11_BLEND_DESC engineVelocityDerivedBlend(const D3D11_BLEND_DESC& game)
     t.DestBlendAlpha = D3D11_BLEND_ZERO;
     t.BlendOpAlpha = D3D11_BLEND_OP_ADD;
     t.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_RED | D3D11_COLOR_WRITE_ENABLE_GREEN;
+    if (skinMode != 0) {
+        D3D11_RENDER_TARGET_BLEND_DESC& k = d.RenderTarget[kSkinTarget];
+        k.BlendEnable = FALSE;
+        k.SrcBlend = D3D11_BLEND_ONE;
+        k.DestBlend = D3D11_BLEND_ZERO;
+        k.BlendOp = D3D11_BLEND_OP_ADD;
+        k.SrcBlendAlpha = D3D11_BLEND_ONE;
+        k.DestBlendAlpha = D3D11_BLEND_ZERO;
+        k.BlendOpAlpha = D3D11_BLEND_OP_ADD;
+        k.RenderTargetWriteMask = skinMode == 2 ? D3D11_COLOR_WRITE_ENABLE_ALL : 0;
+    }
     return d;
 }
 
@@ -71,7 +86,7 @@ inline D3D11_BLEND_DESC engineVelocityDefaultBlend() {
 // logic op, which a D3D11_BLEND_DESC cannot carry.
 inline Microsoft::WRL::ComPtr<ID3D11BlendState> engineVelocityCreateDerivedBlend(ID3D11Device* device,
                                                                                ID3D11BlendState* game,
-                                                                               const char** refused) {
+                                                                               const char** refused, int skinMode = 0) {
     Microsoft::WRL::ComPtr<ID3D11BlendState> out;
     if (refused) *refused = nullptr;
     D3D11_BLEND_DESC desc = engineVelocityDefaultBlend();
@@ -85,7 +100,7 @@ inline Microsoft::WRL::ComPtr<ID3D11BlendState> engineVelocityCreateDerivedBlend
         }
         game->GetDesc(&desc);
     }
-    const D3D11_BLEND_DESC derived = engineVelocityDerivedBlend(desc);
+    const D3D11_BLEND_DESC derived = engineVelocityDerivedBlend(desc, skinMode);
     if (!device || FAILED(device->CreateBlendState(&derived, &out))) {
         out.Reset();
         if (refused) *refused = "CreateBlendState failed";

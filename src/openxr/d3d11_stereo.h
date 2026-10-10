@@ -25,7 +25,7 @@ namespace edvr::openxr {
 // projection hands over. A narrower one leaves the rest of the image black:
 // the layer still advertises the runtime's full field, because a runtime
 // that ignores a narrower layer FOV (the Oculus one does) would stretch a
-// trimmed image across the lens instead. Deliberately not the guard's own
+// trimmed image across the lens instead. Deliberately not the trim's own
 // bounds type -- this header stays free of the native feature headers.
 struct StereoPlacement { float left = 0, top = 0, right = 1, bottom = 1; };
 
@@ -67,12 +67,19 @@ class D3D11Stereo final {
   // XR calls and private deferred recording stay on the renderer owner.
   // placement, when given, points at one entry per eye. Absent, or the whole
   // image, is the path this renderer has always taken.
+  // fade, 0..1 (Explorer Cam's comfort fade, comfort_fade.h), blends black over
+  // each finished eye image by that much: out = in * (1 - fade). Exactly 0 (and
+  // anything that is not a number or is negative) runs no extra pass at all, so
+  // the image is the one this renderer has always drawn, bit for bit; 1 or more
+  // is plain black. The same level applies on a replayed pair, because it is an
+  // argument of each draw, not a property of the kept pixels.
   XrResult renderCaptured(const XrView (&)[2], XrSpace, const EyeCapture&,
                           XrCompositionLayerProjection&, GpuWorkObserver* observer = nullptr,
                           StereoWallTimes* times = nullptr,
-                          const StereoPlacement* placement = nullptr);
+                          const StereoPlacement* placement = nullptr,
+                          float fade = 0.0f);
   XrResult renderSkybox(const XrView (&)[2], XrSpace, const SkyboxCapture&,
-                        XrCompositionLayerProjection&);
+                        XrCompositionLayerProjection&, float fade = 0.0f);
   // Complete submitted GPU work before retiring the render caller. Uses its
   // immediate-context boundary, without changing pipeline state. Timeout or
   // unavailable admission leaves resources alive for an explicit retry.
@@ -117,6 +124,8 @@ class D3D11Stereo final {
   bool gpuPending_ = false;
   Microsoft::WRL::ComPtr<ID3D11RasterizerState> rasterizer_;
   Microsoft::WRL::ComPtr<ID3D11DepthStencilState> depth_;
+  // dest * (1 - blend factor) on red, green and blue; alpha untouched. The comfort fade's one pass.
+  Microsoft::WRL::ComPtr<ID3D11BlendState> fadeBlend_;
   Microsoft::WRL::ComPtr<ID3D11VertexShader> blitVertexShader_;
   Microsoft::WRL::ComPtr<ID3D11PixelShader> blitPixelShader_;
   Microsoft::WRL::ComPtr<ID3D11Buffer> blitConstants_;

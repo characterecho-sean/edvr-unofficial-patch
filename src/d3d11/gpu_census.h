@@ -26,7 +26,7 @@ namespace edvr {
 // subtracts that pair's own mean cost from the real one's, floored at zero.
 // How many fixes wrap Elite's draws and are named in the census (AlteredFix below: one for each
 // verdict that can reach the altered-draw site, and a last one for "unnamed").
-constexpr int kAlteredFixCount = 16;
+constexpr int kAlteredFixCount = 14;
 
 enum class GpuCensusSection : uint8_t {
     // Door: once or twice a frame, at Submit. K = 2 (both eyes) while active.
@@ -57,12 +57,21 @@ enum class GpuCensusSection : uint8_t {
                               // Seeder's passes into the layer's own target (ui_layer.cpp seedLayerDepth), counted
                               // once for each seed and only for that layer (GpuCensusSeedScope below)
     // The VR on-foot world route's own GPU work (vr_world_route.cpp, design doc section 82), EDVR's cost like the
-    // sections above. They run only while experimental.temporal_aa_on_foot_world is auto and the route works; the
+    // sections above. They run only while the on-foot world route works; the
     // rotation gives a turn to none of the three until one has been called (nextTurnOwner, gpu_census.cpp), so with
-    // the key off the census samples exactly as it did before they existed.
+    // the route idle the census samples exactly as it did before they existed.
     FrameWorldResolve,        // the route's resolve at the tone: the input copy, prep, upscaler and the finish into H
     FrameWorldMips,           // the screen texture's copy into the mipped texture and its GenerateMips
     FrameWorldLayer,          // the layer's re-issue of each eye's screen draw with the resolved, mipped screen
+    // The second skin's GPU work (F2: engine_velocity.cpp and skin_join_gpu.cpp), priced item by item (F16). Each is NESTED inside a FrameEngineVelocity span (the
+    // work was already in the engine velocity figure and still is), so they are timed on turns of their own, are NEVER added to a total, and are reported on a line
+    // of their own. Like the world route's they have no turn until called this window, so with no skinned character the census samples exactly as it did before.
+    // (A fifth item, a probe of the join's 3-table clear on scratch buffers, priced that clear at 0.015 ms in F16 and was removed: it ran every frame to measure.)
+    FrameSkinSourceClear,     // the on-foot source's target 7 clear, once at the frame's first skinned draw (68 MB at 3888x2187)
+    FrameSkinEyeClear,        // an eye's target 7 clear at the eye-frame's start (31 MB at 2016x1949)
+    FrameSkinJoinClear,       // the join's 3-table clear pass (F17: 64 groups of 256 threads over all 65,536 rows of the three tables), issued right before the join
+    FrameSkinJoin,            // the join dispatch (one 256-thread group; since F17 without the clear), the plan upload and the job-table copy
+    FrameSkinPose,            // the pose table build: instance copy, the six dispatches (clear, mark, scatter, scatter-rest, verify, finish)
     // Elite's OWN draws that EDVR alters (see AlteredDrawClass below): the game's
     // draw timed whole, so each figure holds the game's own work in it plus what
     // EDVR adds by binding its target or swapping its shader. NOT EDVR's cost,
@@ -220,8 +229,6 @@ enum class AlteredFix : uint8_t {
     Particle,      // the particle billboards (kParticle)
     FssPanel,      // the FSS panel composite (kFssPanel)
     FssReveal,     // the FSS body composite at one dissolve moment (kFssReveal)
-    FssDump,       // the FSS dump pass (kFssDump)
-    ResolveBind,   // the deferred lighting resolve with the scanner-body input lend (kResolveBind)
     Scrim,         // the loader dialog's dimming wash (kScrim)
     Backdrop,      // the menu backdrop blit (kBackdrop)
     Unnamed,       // a verdict nobody gave a name (none reaches the altered-draw site today): visible, never silent
@@ -238,11 +245,9 @@ static_assert(static_cast<uint8_t>(AlteredFix::Panel) == 0 &&
               static_cast<uint8_t>(AlteredFix::Particle) == 8 &&
               static_cast<uint8_t>(AlteredFix::FssPanel) == 9 &&
               static_cast<uint8_t>(AlteredFix::FssReveal) == 10 &&
-              static_cast<uint8_t>(AlteredFix::FssDump) == 11 &&
-              static_cast<uint8_t>(AlteredFix::ResolveBind) == 12 &&
-              static_cast<uint8_t>(AlteredFix::Scrim) == 13 &&
-              static_cast<uint8_t>(AlteredFix::Backdrop) == 14 &&
-              static_cast<uint8_t>(AlteredFix::Unnamed) == 15,
+              static_cast<uint8_t>(AlteredFix::Scrim) == 11 &&
+              static_cast<uint8_t>(AlteredFix::Backdrop) == 12 &&
+              static_cast<uint8_t>(AlteredFix::Unnamed) == 13,
               "gpuCensusOwnership's explicit wrapped-section ordinals must track AlteredFix");
 static_assert(static_cast<int>(AlteredFix::Count) == kAlteredFixCount, "one census section for each named fix");
 
@@ -267,8 +272,6 @@ constexpr GpuCensusOwnership gpuCensusOwnership(GpuCensusSection section) noexce
         case AlteredFix::Particle:    return {O::CockpitVisuals, A::WrappedGameDraw, legacy, ""};
         case AlteredFix::FssPanel:    return {O::Scanners, A::WrappedGameDraw, legacy, ""};
         case AlteredFix::FssReveal:   return {O::Scanners, A::WrappedGameDraw, legacy, ""};
-        case AlteredFix::FssDump:     return {O::Scanners, A::WrappedGameDraw, legacy, ""};
-        case AlteredFix::ResolveBind: return {O::Scanners, A::WrappedGameDraw, legacy, ""};
         case AlteredFix::Scrim:       return {O::Intro, A::WrappedGameDraw, legacy, ""};
         case AlteredFix::Backdrop:    return {O::Intro, A::WrappedGameDraw, legacy, ""};
         case AlteredFix::Unnamed:     return {O::Core, A::WrappedGameDraw, legacy, ""};
@@ -302,6 +305,12 @@ constexpr GpuCensusOwnership gpuCensusOwnership(GpuCensusSection section) noexce
     case GpuCensusSection::FrameWorldLayer:
         return {O::TemporalAa, A::Direct, legacy,
                 section == GpuCensusSection::FrameWeaponMotion ? "on-foot-panel" : ""};
+    case GpuCensusSection::FrameSkinSourceClear:
+    case GpuCensusSection::FrameSkinEyeClear:
+    case GpuCensusSection::FrameSkinJoinClear:
+    case GpuCensusSection::FrameSkinJoin:
+    case GpuCensusSection::FrameSkinPose:
+        return {O::TemporalAa, A::NestedBreakdown, legacy, ""};
     case GpuCensusSection::AlteredPoolFamily:
     case GpuCensusSection::AlteredUiLayer:
         return {O::TemporalAa, A::WrappedGameDraw, legacy, ""};
@@ -435,6 +444,10 @@ private:
 // and -- every 30 s of wall clock -- logs one summary line and resets the
 // window. No ini key: this is always on.
 void gpuCensusFrame(ID3D11DeviceContext* ctx) noexcept;
+
+// An eye run (the ledger, the draw census, the pool and palette copies) was armed: the window it falls in carries its extra GPU copies and its census, and
+// its summary lines say so, so a window without that sentence is the one to price a feature from (F13: both windows after the entry held a run).
+void gpuCensusNoteEyeRun() noexcept;
 
 // Quiescent cleanup, alongside the other feature modules' Shutdown().
 void gpuCensusShutdown() noexcept;

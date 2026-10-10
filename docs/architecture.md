@@ -57,10 +57,10 @@ owed; the one visible change is a log line.
     panel raster worker          std::thread, first submit    joined in menuPanelShutdown  CRT reference, pin
     journal worker               std::thread, first tick      stop flag, never joined  CRT reference, pin
     HMD Quality refresh          TrySubmitThreadpoolCallback  one-shot callback         pin only
-    debug-register helpers (3)   CreateThread, awaited 2 s    by itself                pin only
+    debug-register helper (1)    CreateThread, awaited 2 s    by itself                pin only
 
-The three helpers (`flat_camera_producer_probe.cpp`, `pose_reader_watch.cpp`,
-`transition_flash_eye_base.cpp`) serve default-off probes and are awaited by a
+The helper (`flat_camera_producer_probe.cpp`, a default-off probe; two more
+went with the pose-reader and eye-base instruments, 2026-10-09) is awaited by a
 thread already inside the DLL. The OpenXR runtime's threads (`frame_pacer.h`,
 `owner_service.h`) are in `openvr_api.dll`, which pins itself at configure and is
 not this DLL.

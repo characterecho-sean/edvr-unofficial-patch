@@ -2,23 +2,23 @@
 
 ## Status
 
-*Updated 2026-09-29 (previously 2026-09-15). Historical findings summarize
+*Updated 2026-10-08 (previously 2026-09-29). Historical findings summarize
 the journal below; the current timing and overlay qualification is linked separately. Dated notes
 and the ruled-out list: "Status detail", straight after this block.*
 
-- **Current code state (2026-09-29; dated notes in Status detail):**
-  - Retired 2026-09-29: the door GPU bracket (`edvrDoorGpuBegin`/`End`, the
-    per-eye query ring, the Monitor's "EDVR's GPU time at the door" tile;
-    e3109af4) and the `edvrMenuPanel` export with `edvrEyeCaptureArm` and
-    `edvrFssTheater` (6ecbd241). Their design text below is history.
+- **Current code state (2026-10-08; dated notes in Status detail):**
+  - Explorer Cam page (2026-10-08): Eye height / forward / sideways and
+    Head-follow smoothing, live, for everyone. BUILT, NOT FLOWN.
+  - Hotkeys page (2026-10-08): key, pad or HOTAS rebinding of the menu, Explorer
+    Cam, exposure and history keys. FLOWN OK ("worked great"). Sections
+    "Hotkeys page" and "Explorer Cam page" below.
   - Performance page: one `UI quality` row (`fix.ui_quality`, off / 100% /
     125%; default 100) drives the cockpit panels' size and the UI layer;
     BUILT, NOT FLOWN as of its 2026-09-23 entry. Gone: the `HUD quality` row,
     `advanced.ui_replay` (retired 48ad7689), the Foveation centre row
     (`experimental.foveation_centre`) and the three `Trim view` rows (ini-only
-    since 2026-09-29). `fix.settlement_detail` has a row (game, auto, reduced).
-  - Monitor page drops the rows the compositor's frame timing filled
-    instead of showing "--" (frame_flag v34).
+    since 2026-09-29). Its `Settlement detail` row: removed 2026-10-08 (claude/remove-settlement-detail).
+  - Monitor page: no rows the compositor's frame timing filled (frame_flag v34).
   - Single-line overlay: fits its text, keeps its font size across OpenXR
     resolutions, shows application GPU/CPU timings. Full desktop gates
     passed; headset checks: [combined test guide](native-render-benchmark-2026-09-15.md).
@@ -162,6 +162,49 @@ ruled-out list); the summary above points here.
   deferred UI replay it switched (retired the same day, 48ad7689): the
   developer tier no longer has the row, and the cockpit HUD stays in the
   picture the upscaler reconstructs.
+
+### Hotkeys page (2026-10-08)
+
+BUILT, NOT FLOWN. A page after Fixes: `hotkey.menu`, `.explorer_cam`,
+`.toggle_exposure`, `.dump_camera`, and with `menu.developer` also
+`.dump_draws`, `.dump_eyes` (`# ui: ... | hotkey | live` is a row for
+everyone, `# dev: label ... | hotkey` a developer-only one). Enter waits for
+the NEXT input: a key with Ctrl/Shift/Alt held, a pad button or trigger, or a
+HOTAS button or hat. Esc cancels; Delete or Backspace clears, except
+`hotkey.menu` (changed, never cleared). The menu's navigation does not run
+meanwhile. Arrows, Enter, Space, Tab, PageUp/Down, Home, End, R and Esc are
+refused WITH ANY MODIFIER, for every hotkey, the menu key too: the menu reads
+them raw, so CTRL+ENTER would also be its Enter and CTRL+ALT+ESCAPE would
+open the panel and close it in one tick. An exact copy of another hotkey is
+refused, naming it; a press Elite also binds WARNS ("also in Elite"): keys are
+watched, never captured. `hotkey.explorer_cam` is the Explorer Cam switch
+(empty = off), checked against on-foot bindings, locked while a session is on.
+
+Ending a capture PRIMES every live Hotkey (`hotkeysSuspend(false)`): each
+latch takes what is held, key, pad or HOTAS. The menu ticks before Explorer
+Cam's F5 is polled, so the press that ended a capture (a refused duplicate, an
+unchanged F5) was a fresh edge there. The rig runs the real `Hotkey` in that
+poll order for each outcome and each kind of Explorer key.
+
+Values: `F5`, `CTRL+SHIFT+F9`; `GamePad_Back`; `231D0200:Joy_12`,
+`231D0200:Joy_POV1Up` (vendor then product, as Elite's .binds write it). HOTAS
+is watched: input_gate copies buttons and hats out of the game's own
+GetDeviceState/GetDeviceData after they return (joy_watch.h), makes no device,
+and calls only GetCapabilities and GetDeviceInfo. The four diagnostic keys
+re-resolve live. A flight checks the `joystick watch:` log line, the Joy_N
+against the .binds, and no stall.
+### Explorer Cam page (2026-10-08)
+
+BUILT, NOT FLOWN. The `menu explorer_cam` rows of edvr.ini (generator page
+`explorer_cam`), for everyone: Eye height, Eye forward, Eye sideways
+(`fix.explorer_cam_eye_trim_up`, `_forward`, `_right`; -0.5..0.5 m, step 0.01,
+shown "+0.15 m") and Head-follow smoothing (`fix.explorer_cam_follow_smoothing_ms`;
+0..200 ms, step 10, "0 ms (exact)"). They are Sean's personal-preference
+settings, shipped at his tuning (0.15, -0.08, 0.0; 0), live, and they work
+while placed in Explorer Cam. R resets a row to the shipped value. The `ui:`
+line's `step`, `unit`, `signed` and `zero` tokens shape a number row; the
+absolute fallback eye keys stay `ui: hidden` (no row). The Explorer Cam KEY is
+on the Hotkeys page only.
 
 ## The ask
 
@@ -353,7 +396,9 @@ choice of key that causes it.
 
 - **The mouse.** Never touched; the menu has no pointer.
 - **DirectInput joysticks, throttles, pedals.** Never touched; the ship
-  flies.
+  flies. (Since 2026-10-08 their buttons and hats are WATCHED for the Hotkeys
+  page: the gate's wrappers copy what the game's own read returned, after it
+  returns -- see "Hotkeys page (2026-10-08)". The game's data is not altered.)
 - **XInput pads, in v1.** `XInputGetState` is imported and IAT-patchable
   the same way, and phase B masks the d-pad and face buttons while the menu
   is open and leaves sticks, triggers and bumpers to the game. In v1 pads are
@@ -765,7 +810,7 @@ they were there (flown 2026-09-07).
 1. **Performance.** The rows tagged `menu performance` in `edvr.ini`, in
    the ini's own order:
    `temporal_aa`, `temporal_aa_model` (labelled **DLSS preset**, default K),
-   `render_sharpness`, `foveation`, `settlement_detail`,
+   `render_sharpness`, `foveation`,
    `ui_quality` (labelled **UI quality**, off / 100% / 125%, default 100:
    the interface panels' size and the UI layer, one row), and `render_scale`
    when its branch lands. Costs where they are measured:
@@ -786,6 +831,17 @@ they were there (flown 2026-09-07).
 2. **Fixes.** Every other `[fix]` row tagged `menu`, under the ini's own
    headings ("When the eyes disagree", ...), scrolling. Restart rows are
    shown, badged, and editable: the badge is the point of showing them.
+   Pages in order: Performance, Fixes, Explorer Cam, Hotkeys, Monitor, Status
+   (and, in developer mode, Advanced, Experimental, Instruments). Two pages
+   were added on 2026-10-08, between Fixes and Monitor, without renumbering
+   this list:
+   - **Explorer Cam** (everyone): the rows tagged `menu explorer_cam` -- Eye
+     height, Eye forward, Eye sideways (`fix.explorer_cam_eye_trim_up`,
+     `_forward`, `_right`, metres, step 0.01, shown "+0.15 m") and Head-follow
+     smoothing (`fix.explorer_cam_follow_smoothing_ms`, 0..200 ms in steps of
+     10, "0 ms (exact)"). Live, also while placed in Explorer Cam. The key
+     stays on the Hotkeys page only.
+   - **Hotkeys**: the rows of "Hotkeys page (2026-10-08)" above.
 3. **Monitor.** fpsVR's readout, gathered as cheaply as it can be, and
    where each number comes from:
    - frame rate, frame time, the 1% low (the 99th-percentile frame time)
@@ -1046,10 +1102,10 @@ gains the "live" or "restart" word the generator derived.
    which is why the tier exists and is off by default.
 6. **Instruments.** Action rows for the things that today need a hotkey
    bound: dump the camera history (the `PAUSE` key's job), take a draw
-   census with the quad probe, reload `edvr.ini` now, write a marker line
-   to both logs, and reset Explorer Cam's counted view to zero (the planned
-   camera-index reset, which has needed a key of its own and gets a row
-   instead). Each fires the same function its hotkey fires.
+   census with the quad probe, reload `edvr.ini` now and write a marker line
+   to both logs. (A row that reset Explorer Cam's counted view to zero went
+   with the old Explorer Cam route on 2026-10-07.) Each fires the same
+   function its hotkey fires.
 
 **Toasts.** When a live setting changes -- from the menu, the installer's
 window, or a hand edit -- one line fades through the view for a couple of
@@ -1331,9 +1387,8 @@ real eye offset, calls the export, submits what came back. Publishes one
 new word: the runtime kind, for the Status page.
 
 **Channel** (`frame_flag.h`): `publishMenuAnchor(m12)` / `menuAnchor()`,
-`setMenuVisible(bool, alpha)` written every frame (a heartbeat, the
-`externalCameraOnFoot` discipline, so "closed" and "d3d11 stopped saying"
-stay distinguishable), `bumpMenuDrawn()` / `menuDrawnValue()` the other way,
+`setMenuVisible(bool, alpha)` written every frame (a heartbeat with a
+moving stamp, so "closed" and "d3d11 stopped saying" stay distinguishable), `bumpMenuDrawn()` / `menuDrawnValue()` the other way,
 and `announceRuntimeKind(k)`.
 
 **Common**: `iniedit` and `mirrorDirFor` move in; `iat_hook.h` is new.

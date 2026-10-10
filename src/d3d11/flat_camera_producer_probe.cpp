@@ -13,7 +13,7 @@
 #include "../common/module_name.h"
 #include "../common/runtime_profile.h"
 #include "../common/vtable_hook.h" // isExecutableAddress
-#include "pose_reader_watch_core.h"
+#include "debug_register_core.h"
 
 namespace edvr {
 namespace {
@@ -130,7 +130,7 @@ bool prepareRelay(void* trampoline, void*) noexcept {
 
 // DR0/Dr7 slot 0 on one thread, by handle, from OUTSIDE that thread:
 // Suspend/GetContext/SetContext/Resume, the supported mechanism
-// (pose_reader_watch.cpp's setThreadDr, with this probe's write-mode bits).
+// (the Dr7 slot-0 pattern (debug_register_core.h), with this probe's write-mode bits).
 bool setThreadDr(DWORD tid, uint64_t watchAddress, bool arm) noexcept {
     HANDLE h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_SET_CONTEXT, FALSE, tid);
     if (!h) return false;
@@ -142,7 +142,7 @@ bool setThreadDr(DWORD tid, uint64_t watchAddress, bool arm) noexcept {
             const uint32_t low = static_cast<uint32_t>(ctx.Dr7 & 0xFFFFFFFFull);
             const uint32_t high = static_cast<uint32_t>((ctx.Dr7 >> 32) & 0xFFFFFFFFull);
             ctx.Dr7 = (static_cast<DWORD64>(high) << 32) |
-                      (arm ? prw::armSlot0Dr7(low, prw::kDr7RwWrite) : prw::disarmSlot0Dr7(low));
+                      (arm ? dr7::armSlot0Dr7(low, dr7::kDr7RwWrite) : dr7::disarmSlot0Dr7(low));
             if (arm) ctx.Dr0 = static_cast<DWORD64>(watchAddress);
             ok = SetThreadContext(h, &ctx) != FALSE;
         }
@@ -264,7 +264,7 @@ LONG CALLBACK producerWatchVeh(EXCEPTION_POINTERS* ep) {
         // kernel restores on continue -- the one place that cannot be lost.
         const uint32_t low = static_cast<uint32_t>(ep->ContextRecord->Dr7 & 0xFFFFFFFFull);
         const uint32_t high = static_cast<uint32_t>((ep->ContextRecord->Dr7 >> 32) & 0xFFFFFFFFull);
-        ep->ContextRecord->Dr7 = (static_cast<DWORD64>(high) << 32) | prw::disarmSlot0Dr7(low);
+        ep->ContextRecord->Dr7 = (static_cast<DWORD64>(high) << 32) | dr7::disarmSlot0Dr7(low);
         ep->ContextRecord->Dr0 = 0;
         // Free the slot only if nobody re-claimed it under us; a re-claim
         // bumps the generation, and wiping a fresh watch's fields would

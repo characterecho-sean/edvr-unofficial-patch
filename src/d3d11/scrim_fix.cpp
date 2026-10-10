@@ -67,7 +67,7 @@ bool isBc1(uint32_t fmt) {
 // with the shader's own discard (all channels < 5/255) throwing the empty
 // area away. That is precisely what the no-wash variant 85565E9261812E2F
 // does with its own discard, reached by a different route.
-uint32_t g_level = 0;        // the uniform's channel value, live-tuned
+constexpr uint32_t g_level = 0;   // the uniform's channel value: black
 
 ID3D11Texture2D*          g_tex = nullptr;
 ID3D11ShaderResourceView* g_srv = nullptr;
@@ -227,7 +227,7 @@ ID3D11ShaderResourceView* uniformSrv(ID3D11DeviceContext* ctx) {
     ctx->GetDevice(&dev);
     if (!dev) return nullptr;
 
-    const uint8_t v = static_cast<uint8_t>(g_level > 255 ? 255 : g_level);
+    const uint8_t v = static_cast<uint8_t>(g_level);
     const uint8_t pixel[4] = {v, v, v, 255};
     D3D11_TEXTURE2D_DESC td{};
     td.Width = 1;
@@ -279,8 +279,6 @@ void scrimConfigure(Config& cfg) {
                         "the default, screen.", m.c_str());
     }
     detail::g_scrimOn = dm.washOff;
-    g_level = static_cast<uint32_t>(
-        cfg.getIntInRange("advanced.loading_dim_level", 0, 0, 255));
 
     if (was != detail::g_scrimOn) {
         resetMetadataCaches();
@@ -385,8 +383,7 @@ void scrimBegin(ID3D11DeviceContext* ctx) {
                         "level %u for exactly this draw, so the loader's "
                         "dialog sits on undimmed art. The game's texture is "
                         "restored after every draw. Level 0 collapses the "
-                        "blur layer the shader multiplies by it; raise it "
-                        "towards 255 to dim more, not less.", g_texLevel);
+                        "blur layer the shader multiplies by it.", g_texLevel);
     }
 }
 

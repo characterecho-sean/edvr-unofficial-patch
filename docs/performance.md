@@ -10,7 +10,8 @@ below and is not new evidence; update it whenever this doc changes.*
   184eee7f).** foveation.cpp, `experimental.foveation` and the seven
   `advanced.foveation_*` keys are gone. The Feature 2 and Feature 3 text below
   (rings, distance, passes, outer rate) is history. DLSS where you look
-  (Feature 6, `temporal_aa_fovea_*`) stays.
+  (Feature 6, `temporal_aa_fovea_*`) was removed in the 2026-10 key cull: the
+  feature shipped off, and its keys and code are gone.
 - **State: the desk probes retired 2026-09-29 (code removed, 72247cdf).**
   `dlaaMotionProbe`, `dlaaCropProbe` and `edvrDlaaCostProbe`, which the smoke
   harness ran and the Feature 6 entries below cite, are deleted with

@@ -17,36 +17,13 @@ namespace {
 struct Shared {
     volatile LONG flag;
     volatile LONG consumer;
-    // externalCam  the player is on foot in the external camera, having come
-    //              there from the flat panel
-    //
-    // Same shape of problem as `flag` and so the same channel: d3d11.dll is the
-    // only half that can tell the modes apart -- it watches the panel composite
-    // -- and openvr_api.dll is the only half that can act on the answer, because
-    // the head pose passes through it. Neither can do the other's job.
-    volatile LONG externalCam;
-    // externalCamStamp  bumped on every write of externalCam, including the
-    //                   writes that do not change it
-    //
-    // externalCam alone cannot distinguish "d3d11 says no" from "d3d11 has
-    // stopped saying anything", and the difference decides whether a player's
-    // viewpoint is still being moved in the cockpit. The writer sits inside a
-    // fault-budgeted guard that stops running permanently after a few faults,
-    // so "stopped saying anything" is a reachable state and not a theoretical
-    // one.
-    //
-    // A counter rather than a timestamp: no clock, no wraparound handling worth
-    // the name (2^32 frames is over a year at 90 Hz), and it compares with a
-    // plain !=.
-    volatile LONG externalCamStamp;
     // holdFrames  frames the openvr half should decline to submit, counting
-    //             down, set by d3d11 when the player presses a key that starts
-    //             a transition
+    //             down, set by d3d11 when a transition is known to be starting
     //
     // NOT a detection. Every other route in this file is one half telling the
-    // other what it INFERRED; this is the player telling us directly. They
-    // pressed the external-camera key, so a transition is starting -- there is
-    // nothing to detect and nothing to get wrong about which mode we are in.
+    // other what it INFERRED; this is a request made on a known event.
+    // (Its only caller was the old Explorer Cam's key press, deleted
+    // 2026-10-07; see requestSubmitHold in frame_flag.h.)
     //
     // It exists because during that transition Elite draws several frames from
     // somewhere the player is not, and no amount of detection helps: withholding
@@ -83,10 +60,9 @@ struct Shared {
     // Zero is "nobody has published", the eyeSize discipline.
     volatile LONG64 submitTex[2];
     // fssChromeStamp  bumped by d3d11 on every frame that draws the
-    //                 scanner's chrome -- externalCamStamp's discipline:
-    //                 a counter, compared with !=, staleness judged by
-    //                 the reader against its own frame count. The eye
-    //                 heal's gate.
+    //                 scanner's chrome: a counter, compared with !=,
+    //                 staleness judged by the reader against its own
+    //                 frame count. The eye heal's gate.
     volatile LONG fssChromeStamp;
     // The scanner screen's rectangle in the (left) eye, derived by d3d11
     // once per theater engage from the composite's own constants; the
@@ -109,18 +85,11 @@ struct Shared {
                                      // RIGHT eye's -- the renderer
                                      // stitches the two images, each
                                      // clean on its temporal side
-    // cullGuard  the cull guard's stage and margin, packed as
-    //            (stage << 24) | (hPerMille << 12) | vPerMille, written by
-    //            openvr_api.dll at its stage transitions
-    //
-    // The second openvr -> d3d11 field, and eyeSize's disciplines carry over
-    // whole: one packed word so no reader tears a pair, zero is "no answer"
-    // and must be read as guard-off, and a mismatched build pair is made
-    // inert by the mapping version rather than subtly wrong by the layout.
-    // What it exists for -- attribution of detector churn to the guard's
-    // margin, never a decision -- is documented at the header declaration
-    // and in SPEC-FLASH-FALSE-POSITIVES §1g.
-    volatile LONG cullGuard;
+    // RESERVED. It carried the terrain guard's stage and margin (openvr ->
+    // d3d11), for the transition-flash detector's attribution, until the guard
+    // was removed 2026-10-09. Nothing reads or writes it; the slot stays so the
+    // layout, and the mapping version that names it, do not change.
+    volatile LONG reservedGuardWord;
     // eyeTangents  the true horizontal frustum of one eye, packed as
     //              (outerMilli << 16) | innerMilli -- tangent magnitudes
     //              times 1000 -- written by openvr_api.dll as it observes
@@ -149,8 +118,8 @@ struct Shared {
     // the bias keep every published value nonzero.
     volatile LONG headForward;
     // gameDev  the game's own ID3D11Device, written by d3d11.dll at device
-    //          creation. Read by openvr_api.dll's cull guard as the test for
-    //          a d3d11 half being installed at all.
+    //          creation. Read as the test for a d3d11 half being installed
+    //          at all.
     //
     // The one field published before the openvr half has run at all. It
     // joined for the early VR handover (removed 2026-09-13), which needed a
@@ -162,8 +131,7 @@ struct Shared {
     // is the precedent.
     volatile LONG64 gameDev;
     // sceneArrived  latched by d3d11 at its scene boundary; read by the
-    //               cull guard so it does not lie about the frustum while
-    //               the intro is still on screen. See frame_flag.h.
+    //               native frame provider (sceneReady). See frame_flag.h.
     volatile LONG sceneArrived;
     // The settings menu (docs/settings-menu.md): the anchor pose the panel
     // was summoned at (d3d11 -> openvr, headPose's layout, seq as presence
@@ -194,26 +162,19 @@ struct Shared {
     //                current head pose", taken (cleared) by the vr half's
     //                own poll. See frame_flag.h.
     volatile LONG     introRecentre;
-    // advanced.eye_origin_readers (docs/design-transition-flash-engine-fix-
-    // 2026-09-23.md, part A1): d3d11 -> openvr, the request to start
-    // capturing the runtime's own WaitGetPoses/GetLastPoses call stack.
-    volatile LONG     poseReaderRequest;
-    // The rest of this family runs openvr -> d3d11, published at EVERY
-    // WaitGetPoses/GetLastPoses call: PoseReaderCall's fields (frame_flag.h)
-    // packed the same way submitTex/gameDev use LONG64 for a pointer. seq is
-    // bumped last, so a reader who samples it before and after a read can
-    // tell a torn snapshot from a fresh one (it never blocks on it -- this
-    // is a diagnostic, not a lock).
-    volatile LONG     poseReaderSeq;
-    volatile LONG64   poseReaderRenderPtr;
-    volatile LONG64   poseReaderGamePtr;
-    volatile LONG64   poseReaderQpc;
-    volatile LONG     poseReaderRenderCount;
-    volatile LONG     poseReaderGameCount;
-    volatile LONG     poseReaderThreadId;
-    // bit0 render ptr on the calling thread's stack, bit1 game ptr on it,
-    // bit2 this publish came from GetLastPoses rather than WaitGetPoses.
-    volatile LONG     poseReaderFlags;
+    // UNUSED since advanced.eye_origin_readers was removed (2026-10-09): the
+    // pose-reader hunt's request flag and per-call snapshot. Kept as padding
+    // so the layout -- and the mapping name the two halves agree on -- does
+    // not change; nothing reads or writes them.
+    volatile LONG     reservedPoseReader0;
+    volatile LONG     reservedPoseReader1;
+    volatile LONG64   reservedPoseReader2;
+    volatile LONG64   reservedPoseReader3;
+    volatile LONG64   reservedPoseReader4;
+    volatile LONG     reservedPoseReader5;
+    volatile LONG     reservedPoseReader6;
+    volatile LONG     reservedPoseReader7;
+    volatile LONG     reservedPoseReader8;
     // advanced.slow_test_ms: d3d11 -> openvr, the milliseconds the runtime
     // holds every xrEndFrame for, inside the call's timed region, while the
     // test is running; 0 is no hold (requestEndFrameHold, frame_flag.h).
@@ -234,6 +195,10 @@ struct Shared {
 // The name is built once, at first use. The two DLLs are in the same process,
 // so the channel between them is unaffected.
 //
+// _v37 because the external-camera pair left the layout (externalCam and
+// externalCamStamp) with the old Explorer Cam route, whose gate wrote them
+// and whose pose offset read them; Explorer Cam is now the free-camera
+// placement (explorer_cam.cpp), which uses no channel.
 // _v36 because the end-frame hold joined (endFrameHold), the test trigger of
 // the end-frame episode and slow-regime instruments (advanced.slow_test_ms,
 // docs/headset-lock-vdxr-2026-10-02.md).
@@ -298,7 +263,7 @@ struct Shared {
 // reverse pairing would have a new reader trusting a stamp nobody writes.
 // Separate mappings make both pairings inert instead of subtly wrong.
 //
-// eyeSize and cullGuard are built to survive that pairing on their own as
+// eyeSize is built to survive that pairing on its own as
 // well: an unmatched reader sees 0, which every caller is required to read as
 // "no answer" and fall back on. Mismatched halves therefore behave exactly
 // like a session with no openvr proxy installed, which is a supported
@@ -307,7 +272,7 @@ const wchar_t* mappingName() {
     static wchar_t name[64];
     static bool built = false;
     if (!built) {
-        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v36_%lu",
+        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v37_%lu",
                      GetCurrentProcessId());
         built = true;
     }
@@ -552,28 +517,6 @@ uint32_t jumpVerdictPacked() {
     return s ? static_cast<uint32_t>(InterlockedCompareExchange(&s->jumpVerdict, 0, 0)) : 0u;
 }
 
-void setExternalCameraOnFoot(bool on) {
-    Shared* s = map();
-    if (!s) return;
-    InterlockedExchange(&s->externalCam, on ? 1 : 0);
-    // The stamp moves on every call, not on every change. A gate that has
-    // settled on "no" is publishing just as actively as one that is toggling,
-    // and a reader that could not tell those apart would have to treat silence
-    // as consent.
-    InterlockedIncrement(&s->externalCamStamp);
-}
-
-bool externalCameraOnFoot() {
-    Shared* s = map();
-    // FALSE when the mapping could not be made, which is the safe direction: a
-    // head offset that fails to apply leaves the game exactly as it was, while
-    // one that fails to STOP applying moves the player's viewpoint in the
-    // cockpit. Unlike the glitch flag, this one persists across frames, so a
-    // wrong answer here does not expire on its own -- which is what
-    // externalCameraOnFootLive is for.
-    return s && InterlockedCompareExchange(&s->externalCam, 0, 0) != 0;
-}
-
 void requestSubmitHold(uint32_t frames) {
     Shared* s = map();
     if (!s) return;
@@ -605,38 +548,6 @@ bool eyeTextureSize(uint32_t* width, uint32_t* height) {
     if (width) *width = v >> 16;
     if (height) *height = v & 0xFFFFu;
     return true;
-}
-
-void announceCullGuardState(uint32_t stage, float factorH, float factorV) {
-    Shared* s = map();
-    if (!s) return;
-    // Stage 0 clears the whole word: "off" and "no answer" are deliberately
-    // the same value, because every reader must treat them identically.
-    if (stage == 0) {
-        InterlockedExchange(&s->cullGuard, 0);
-        return;
-    }
-    // Clamped rather than refused, unlike eyeSize's packing check, and the
-    // difference is what the field is FOR. A refused eye size would make an
-    // equality test miss real targets; this is attribution, where a margin
-    // saturated at +409.5% still names the right frames, while a refusal
-    // would stamp a live guard as "off" -- a lie in the data the channel
-    // exists to make honest.
-    auto perMille = [](float factor) -> uint32_t {
-        if (!(factor > 1.0f)) return 0;                    // NaN lands here too
-        const float pm = (factor - 1.0f) * 1000.0f + 0.5f;
-        if (pm >= 4095.0f) return 4095u;
-        return static_cast<uint32_t>(pm);
-    };
-    const uint32_t packed = ((stage > 2 ? 2u : stage) << 24) |
-                            (perMille(factorH) << 12) | perMille(factorV);
-    InterlockedExchange(&s->cullGuard, static_cast<LONG>(packed));
-}
-
-uint32_t cullGuardStatePacked() {
-    Shared* s = map();
-    if (!s) return 0;
-    return static_cast<uint32_t>(InterlockedCompareExchange(&s->cullGuard, 0, 0));
 }
 
 void announceEyeTangents(float outerMag, float innerMag) {
@@ -822,17 +733,6 @@ void clearIntroRecentreRequest() {
     if (s) InterlockedExchange(&s->introRecentre, 0);
 }
 
-void requestPoseReaderTrace(bool on) {
-    Shared* s = map();
-    if (!s) return;
-    InterlockedExchange(&s->poseReaderRequest, on ? 1 : 0);
-}
-
-bool poseReaderTraceRequested() {
-    Shared* s = map();
-    return s && InterlockedCompareExchange(&s->poseReaderRequest, 0, 0) != 0;
-}
-
 void requestEndFrameHold(uint32_t ms) {
     Shared* s = map();
     if (!s) return;
@@ -844,72 +744,6 @@ uint32_t endFrameHoldMs() {
     if (!s) return 0;
     const LONG v = InterlockedCompareExchange(&s->endFrameHold, 0, 0);
     return v > 0 ? static_cast<uint32_t>(v) : 0u;
-}
-
-void publishPoseReaderCall(const PoseReaderCall& call) {
-    Shared* s = map();
-    if (!s) return;
-    s->poseReaderRenderPtr = static_cast<LONG64>(call.renderPtr);
-    s->poseReaderGamePtr = static_cast<LONG64>(call.gamePtr);
-    s->poseReaderQpc = static_cast<LONG64>(call.qpc);
-    s->poseReaderRenderCount = static_cast<LONG>(call.renderCount);
-    s->poseReaderGameCount = static_cast<LONG>(call.gameCount);
-    s->poseReaderThreadId = static_cast<LONG>(call.threadId);
-    LONG flags = 0;
-    if (call.renderOnStack) flags |= 1;
-    if (call.gameOnStack) flags |= 2;
-    if (call.wasGetLastPoses) flags |= 4;
-    s->poseReaderFlags = flags;
-    // Last: a reader that samples seq before touching the rest of the
-    // fields and again after can tell a torn read from a fresh one.
-    InterlockedIncrement(&s->poseReaderSeq);
-}
-
-PoseReaderCall poseReaderCall() {
-    PoseReaderCall out{};
-    Shared* s = map();
-    if (!s) return out;
-    out.seq = static_cast<uint32_t>(s->poseReaderSeq);
-    out.renderPtr = static_cast<uint64_t>(s->poseReaderRenderPtr);
-    out.gamePtr = static_cast<uint64_t>(s->poseReaderGamePtr);
-    out.qpc = static_cast<uint64_t>(s->poseReaderQpc);
-    out.renderCount = static_cast<uint32_t>(s->poseReaderRenderCount);
-    out.gameCount = static_cast<uint32_t>(s->poseReaderGameCount);
-    out.threadId = static_cast<uint32_t>(s->poseReaderThreadId);
-    const LONG flags = s->poseReaderFlags;
-    out.renderOnStack = (flags & 1) != 0;
-    out.gameOnStack = (flags & 2) != 0;
-    out.wasGetLastPoses = (flags & 4) != 0;
-    return out;
-}
-
-bool externalCameraOnFootLive(uint32_t maxAgeFrames) {
-    Shared* s = map();
-    if (!s) return false;
-    const LONG stamp = InterlockedCompareExchange(&s->externalCamStamp, 0, 0);
-
-    // Reader-side state, so the writer needs no cooperation beyond bumping the
-    // stamp. Function-local statics: each DLL has its own copy, and only the
-    // openvr half calls this, once per frame from WaitGetPoses.
-    static LONG lastStamp = 0;
-    static uint32_t sinceMoved = 0;
-    static bool everMoved = false;
-
-    if (stamp != lastStamp) {
-        lastStamp = stamp;
-        sinceMoved = 0;
-        everMoved = true;
-    } else if (everMoved && sinceMoved < 0xFFFFFFFFu) {
-        ++sinceMoved;
-    }
-
-    // Never moved means d3d11.dll has not published once -- not installed, or
-    // its hooks never committed. That is not a "no" that has gone stale, it is
-    // an absence of anybody to ask, and guessing "yes" would apply the offset
-    // in every mode with no gate at all.
-    if (!everMoved) return false;
-    if (sinceMoved > maxAgeFrames) return false;
-    return InterlockedCompareExchange(&s->externalCam, 0, 0) != 0;
 }
 
 }  // namespace edvr

@@ -1,10 +1,8 @@
-#include "../common/vr_census.h"
 #include "vscreen.h"
 #include "gpu_timing.h"
 #include "gpu_frame_timing.h"
 #include "gpu_census.h"       // issue #38: the per-feature GPU cost census
 #include "../common/d3d11_gpu_command_slots.h"
-#include "head_offset_gate.h"
 #include "vr_runtime.h"
 
 #include <windows.h>
@@ -50,12 +48,9 @@
 #include "draw_gate.h"    // the sampled subscriber gate the draw path reads
 #include "object_probe.h"     // tier 2 stage 1: the instanced-mesh pool, read on two frames
 #include "pixel_probe.h"      // advanced.pixel_probe: who drew this pixel, during an eye dump
-#include "lod_governor.h"     // fix.settlement_detail: the settlement LOD governor
 #include "fss_panel.h"
 #include "fss_panel_rect.h"
 #include "fss_reveal.h"
-#include "fss_dump.h"
-#include "resolve_bind_fix.h"
 #include "fss_res.h"
 #include "depth_probe.h"      // Phase 0 item 3: which depth target the eye draws use, and how it reads
 #include "sharpen_pass.h"      // likewise: warm-up and totals; the sharpening runs at submit
@@ -65,13 +60,12 @@
 #include "boundary_tick.h"     // one fault budget per boundary tick
 #include "temporal_pass.h"     // and the temporal pass: warm-up, the camera capture, totals
 #include "glitch_frame.h"
-#include "pose_reader_watch.h"
+#include "explorer_cam.h"        // Explorer Cam (hotkey.explorer_cam): the free camera placed at the commander's head and locked (the Explorer Cam redesign)
 #include "transition_flash_eye_base.h"
 #include "holo_fix.h"
 #include "target_sharp.h"
 #include "wake_pulse.h"
 #include "scheduler_stack_probe.h"  // schedulerStackProbeShutdown
-#include "static_prop_gate.h"
 #include "ui_depth.h"
 #include "ui_layer.h"
 #include "ui_layer_math.h"
@@ -92,7 +86,6 @@
 #include "intro_curve.h"     // the splash's recogniser: which composite draws are the game's own world-space panel
 #include "intro_skip.h"
 #include "intro_upscale.h"
-#include "intro_probe.h"
 #include "journal_watch.h"  // gameplay started, for the low-peak notice
 #include "loader_panel.h"
 #include "splash_dim.h"
@@ -706,15 +699,6 @@ struct State {
     // Which scene candidate the bound target is, resolved with rtv0Eye and
     // valid for the same binding generation. -1 for none.
     int      rtv0Cand = -1;
-    // The bound target's SIZE, derived on the same generation, for the intro
-    // probe (intro_probe.h). Its whole question is which target the frame's
-    // draws land in, so it is the one subscriber that needs the size of every
-    // target and not just of the eye-shaped ones. Cached rather than resolved
-    // per draw, the rtv0Eye pattern above, and never derived while the probe
-    // is off.
-    uint32_t rtv0W = 0;
-    uint32_t rtv0H = 0;
-    uint32_t rtv0SizeGen = 0;
     bool     psSrv0Panel = false;
     uint32_t psSrv0PanelGen = 0;
     // The bound target's whole resolve, the rtv0Eye pattern once more, for
@@ -782,13 +766,8 @@ struct State {
 
     uint32_t eyeDrawsThisFrame = 0;
     uint32_t eyeDrawsLastFrame = 0;
-    // Draws that sampled the flat on-foot panel this frame. The head-offset
-    // gate's other input: the panel being composited is direct evidence of
-    // on-foot first person, which is what tells it from the external camera
-    // that mode turns into.
-    uint32_t panelCompositeDraws = 0;
-    // Frames since the hooks were installed. Only the gate's log lines use it,
-    // to say when the panel was first counted.
+    // Frames since the hooks were installed. The per-frame instruments' log
+    // lines use it to say which frame they mean.
     uint32_t frameNo = 0;
     // Keep counting eye draws even when the panel distance fix is off, because
     // the transition-flash detector cannot act without the count.
@@ -1030,7 +1009,6 @@ FaultBudget g_panelCbBudget("vScreen.panelBuffer", 5);  // reading the panel's t
 // is the CONSUMER: sunglareSceneRows reads two buffers and has one budget.
 FaultBudget g_glitchCameraBudget("vScreen.glitchCamera", 5);          // the flash detector's camera history
 FaultBudget g_glitchPoolBudget("vScreen.glitchPool", 5);              // ...and its scene instance pool
-FaultBudget g_sunglareDumpBudget("vScreen.sunglareDump", 5);          // the world shader's desk-side buffer dump
 FaultBudget g_sunglareRowsBudget("vScreen.sunglareRows", 5);          // ...and its live true-camera feed
 FaultBudget g_temporalCameraBudget("vScreen.temporalCamera", 5);      // the temporal pass's camera rows
 FaultBudget g_particleCaptureBudget("vScreen.particleCapture", 5);    // the particle billboards' constants
@@ -1566,11 +1544,10 @@ enum class DrawVerdict {
     // (fss_reveal.h): eye B drawn with eye A's scene constants, wrapped
     // in fssRevealBegin/End.
     kFssReveal,
-    kFssDump,
-    // The deferred lighting resolve drawn with the scanner-body fix's
-    // input lend (fix.scanner_body, resolve_bind_fix.h), wrapped in
-    // resolveBindBegin/End.
-    kResolveBind,
+    // Reserved wire ordinals for retired FSS dump and resolve-bind claims.
+    // Replay site IDs remain stable, but neither claim has a live subscriber.
+    kRetiredFssDump,
+    kRetiredResolveBind,
     // A batched draw re-issued without some of its quads (advanced.
     // census_skip_quad). Swallows the game's draw and makes up to two of its
     // own, so it must not be combined with anything that also draws.
@@ -1601,8 +1578,8 @@ static_assert(static_cast<int>(DrawVerdict::kGlareSteady) == static_cast<int>(dr
 static_assert(static_cast<int>(DrawVerdict::kParticle) == static_cast<int>(draw_ladder::VerdictOrdinal::kParticle));
 static_assert(static_cast<int>(DrawVerdict::kFssPanel) == static_cast<int>(draw_ladder::VerdictOrdinal::kFssPanel));
 static_assert(static_cast<int>(DrawVerdict::kFssReveal) == static_cast<int>(draw_ladder::VerdictOrdinal::kReveal));
-static_assert(static_cast<int>(DrawVerdict::kFssDump) == static_cast<int>(draw_ladder::VerdictOrdinal::kDump));
-static_assert(static_cast<int>(DrawVerdict::kResolveBind) == static_cast<int>(draw_ladder::VerdictOrdinal::kResolve));
+static_assert(static_cast<int>(DrawVerdict::kRetiredFssDump) == static_cast<int>(draw_ladder::VerdictOrdinal::kDump));
+static_assert(static_cast<int>(DrawVerdict::kRetiredResolveBind) == static_cast<int>(draw_ladder::VerdictOrdinal::kResolve));
 static_assert(static_cast<int>(DrawVerdict::kQuadSkip) == static_cast<int>(draw_ladder::VerdictOrdinal::kQuadSkip));
 static_assert(static_cast<int>(DrawVerdict::kLoaderPanel) == static_cast<int>(draw_ladder::VerdictOrdinal::kLoader));
 static_assert(static_cast<int>(DrawVerdict::kScrim) == static_cast<int>(draw_ladder::VerdictOrdinal::kScrim));
@@ -1728,7 +1705,6 @@ __declspec(noinline) bool ensureOurCompositeCb(ID3D11DeviceContext* self, State*
 
 EDVR_GATE_STATE(panel_distance, s->distanceEnabled)
 EDVR_GATE_STATE(transition_flash_eye_count, s->countForFlashFix)
-EDVR_GATE_GLOBAL(head_offset, headOffsetGateWantsPanel())
 EDVR_GATE_STATE(census_skip_count, s->censusSkipCount != 0)
 EDVR_GATE_STATE(census_skip_ranges, s->censusSkipRangeCount != 0)
 EDVR_GATE_STATE(census_skip_off, s->censusSkipOffCount != 0)
@@ -1737,8 +1713,6 @@ EDVR_GATE_STATE(census_auto, s->censusAutoW != 0)
 EDVR_GATE_GLOBAL(fss_resolution, fssResActive())
 EDVR_GATE_GLOBAL(fss_panel, fssPanelWantsDraws())
 EDVR_GATE_GLOBAL(fss_reveal, fssRevealWantsDraws())
-EDVR_GATE_GLOBAL(fss_dump, fssDumpWantsDraws())
-EDVR_GATE_GLOBAL(resolve_bind, resolveBindWants())
 EDVR_GATE_GLOBAL(remlok, remlokWantsDraws())
 EDVR_GATE_GLOBAL(hologram_depth, holoWantsDraws())
 EDVR_GATE_GLOBAL(target_indicator, targetSharpWantsDraws())
@@ -1752,7 +1726,6 @@ EDVR_GATE_GLOBAL(backdrop, backdropWantsDraws())
 EDVR_GATE_GLOBAL(scrim, scrimWantsDraws())
 EDVR_GATE_GLOBAL(quad_probe, quadProbeWants())
 EDVR_GATE_GLOBAL(loader_panel, loaderPanelWants())
-EDVR_GATE_GLOBAL(intro_probe, introProbeWants())
 EDVR_GATE_GLOBAL(intro_panel, introPanelWants())
 EDVR_GATE_GLOBAL(wake_pulse, wakePulseWantsDraws())
 EDVR_GATE_GLOBAL(witchspace_stars, witchspaceStarsHidden())
@@ -1771,7 +1744,6 @@ struct LegacyDrawGateRegistration {
 constexpr LegacyDrawGateRegistration kLegacyDrawGateRegistrations[] = {
     {"legacy.panel-distance", &drawGate_panel_distance, true},
     {"legacy.transition-flash-eye-count", &drawGate_transition_flash_eye_count, true},
-    {"legacy.head-offset", &drawGate_head_offset, false},
     {"legacy.census-skip-count", &drawGate_census_skip_count, true},
     {"legacy.census-skip-ranges", &drawGate_census_skip_ranges, true},
     {"legacy.census-skip-off", &drawGate_census_skip_off, true},
@@ -1780,8 +1752,6 @@ constexpr LegacyDrawGateRegistration kLegacyDrawGateRegistrations[] = {
     {"legacy.fss-resolution", &drawGate_fss_resolution, false},
     {"legacy.fss-panel", &drawGate_fss_panel, false},
     {"legacy.fss-reveal", &drawGate_fss_reveal, false},
-    {"legacy.fss-dump", &drawGate_fss_dump, false},
-    {"legacy.resolve-bind", &drawGate_resolve_bind, false},
     {"legacy.remlok", &drawGate_remlok, false},
     {"legacy.hologram-depth", &drawGate_hologram_depth, false},
     {"legacy.target-indicator", &drawGate_target_indicator, false},
@@ -1795,7 +1765,6 @@ constexpr LegacyDrawGateRegistration kLegacyDrawGateRegistrations[] = {
     {"legacy.scrim", &drawGate_scrim, false},
     {"legacy.quad-probe", &drawGate_quad_probe, false},
     {"legacy.loader-panel", &drawGate_loader_panel, false},
-    {"legacy.intro-probe", &drawGate_intro_probe, false},
     {"legacy.intro-panel", &drawGate_intro_panel, false},
     {"legacy.wake-pulse", &drawGate_wake_pulse, false},
     {"legacy.witchspace-stars", &drawGate_witchspace_stars, false},
@@ -2094,34 +2063,28 @@ struct VScreenDrawLadderVisitor {
             }
             if constexpr (TracePolicy::enabled &&
                           (SiteType::id == draw_ladder::SiteId::kFssPanelClaim ||
-                           SiteType::id == draw_ladder::SiteId::kFssRevealClaim ||
-                           SiteType::id == draw_ladder::SiteId::kFssDumpClaim)) {
+                           SiteType::id == draw_ladder::SiteId::kFssRevealClaim)) {
                 if (!interested) {
-                    if constexpr (SiteType::id == draw_ladder::SiteId::kFssDumpClaim) {
-                        FssDumpObservation fact{};
-                        trace.fssDumpFact(fact);
+                    FssObservation fact{};
+                    fact.kind = SiteType::id == draw_ladder::SiteId::kFssPanelClaim
+                        ? FssTraceFactKind::kPanel : FssTraceFactKind::kReveal;
+                    fact.rawProbeReached = true;
+                    if constexpr (SiteType::id == draw_ladder::SiteId::kFssPanelClaim) {
+                        fssOuterProbePanel(fact.panel,
+                            [] { return detail::g_fssPanelEnabled; },
+                            [&] { return s->fssBodyFrame; },
+                            [&] { return s->frameNo; });
                     } else {
-                        FssObservation fact{};
-                        fact.kind = SiteType::id == draw_ladder::SiteId::kFssPanelClaim
-                            ? FssTraceFactKind::kPanel : FssTraceFactKind::kReveal;
-                        fact.rawProbeReached = true;
-                        if constexpr (SiteType::id == draw_ladder::SiteId::kFssPanelClaim) {
-                            fssOuterProbePanel(fact.panel,
-                                [] { return detail::g_fssPanelEnabled; },
-                                [&] { return s->fssBodyFrame; },
-                                [&] { return s->frameNo; });
-                        } else {
-                            fssOuterProbeReveal(fact.reveal,
-                                [] { return detail::g_fssRevealSteady; },
-                                [] { return detail::g_fssRevealLockstep; },
-                                [&] { return s->fssBodyFrame; },
-                                [&] { return s->frameNo; },
-                                [&] { return s->fssJumpFrame; },
-                                [&] { return s->frameNo; },
-                                [] { return deviceHookFssModeLatch(); });
-                        }
-                        trace.fssFact(fact);
+                        fssOuterProbeReveal(fact.reveal,
+                            [] { return detail::g_fssRevealSteady; },
+                            [] { return detail::g_fssRevealLockstep; },
+                            [&] { return s->fssBodyFrame; },
+                            [&] { return s->frameNo; },
+                            [&] { return s->fssJumpFrame; },
+                            [&] { return s->frameNo; },
+                            [] { return deviceHookFssModeLatch(); });
                     }
+                    trace.fssFact(fact);
                 }
             }
             return interested;
@@ -2238,7 +2201,6 @@ struct VScreenDrawLadderVisitor {
             return SiteResult::observed();
         } else if constexpr (id == SiteId::kParticleProbe) {
             if ((++s->bindAuditSeq & 1023u) == 0) bindingAudit(s, self);
-            if (particleProbeOn()) particleOnEyeDraw(self, kind, count, instances);
             return SiteResult::observed();
         } else if constexpr (id == SiteId::kParticleSubstitute) {
             if (particleSteady() &&
@@ -2312,16 +2274,6 @@ struct VScreenDrawLadderVisitor {
                 s->rtv0Eye = targetIsEyeSized(bindingGet(BindSlot::Rtv0), &s->rtv0Cand);
                 s->rtv0EyeGen = rtvGen;
             }
-            if (introProbeWants()) {
-                if (s->rtv0SizeGen != rtvGen) {
-                    s->rtv0SizeGen = rtvGen;
-                    ResourceInfo info;
-                    if (bindingResolveProbe(bindingGet(BindSlot::Rtv0), &info) && info.isTexture2D) {
-                        s->rtv0W = info.a; s->rtv0H = info.b;
-                    } else { s->rtv0W = 0; s->rtv0H = 0; }
-                }
-                introProbeOnDraw(s->rtv0W, s->rtv0H, s->rtv0Eye);
-            }
             if (quadProbeWants()) {
                 ResourceInfo info;
                 if (bindingResolveProbe(bindingGet(BindSlot::Rtv0), &info) && info.isTexture2D)
@@ -2362,13 +2314,12 @@ struct VScreenDrawLadderVisitor {
             if (drawCensusWantsOffscreen() && drawCensusArmed())
                 drawCensusOffDraw(self, kind, count, instances, args);
             if (uiDepthWantsDraws()) uiDepthNoteOffscreenDraw(self);
-            if (kind == 'N' && count == 4 && (introPanelWants() || introProbeWants()) &&
+            if (kind == 'N' && count == 4 && introPanelWants() &&
                 bindingGet(BindSlot::PsSrv1) && bindingGet(BindSlot::PsSrv2)) {
                 ResourceInfo info;
                 if (bindingResolve(bindingGet(BindSlot::Rtv0), &info) && info.isTexture2D) {
                     introPanelNoteFill(info.a, info.b);
                     introSkipNoteMovieDrew();
-                    introProbeNoteMovieFill();
                 }
             }
             return SiteResult::observed();
@@ -2583,7 +2534,7 @@ struct VScreenDrawLadderVisitor {
                 return SiteResult::declined();
             }
         } else if constexpr (id == SiteId::kOffscreenBodyLayerUpdate) {
-            if (fssPanelWantsDraws() || fssRevealWantsDraws() || fssDumpWantsDraws()) {
+            if (fssPanelWantsDraws() || fssRevealWantsDraws()) {
                 if (s->fssBodyLayerGen != rtvGen) {
                     s->fssBodyLayerGen = rtvGen;
                     s->fssBodyLayerBound = false;
@@ -3131,60 +3082,6 @@ struct VScreenDrawLadderVisitor {
                 }
             }
             return SiteResult::declined();
-        } else if constexpr (id == SiteId::kFssDumpClaim) {
-            if constexpr (TracePolicy::enabled) {
-                FssDumpObservation fact{};
-                fact.handlerInvoked = true;
-                bool matches = false;
-                if (fssDumpWantsDrawsObserved(fact.outer.wants)) {
-                    const std::uint32_t bodyFrame = s->fssBodyFrame;
-                    fact.outer.bodyFrame = {true, true, bodyFrame};
-                    if (bodyFrame != 0) {
-                        const std::uint32_t frameNo = s->frameNo;
-                        fact.outer.frameNo = {true, true, frameNo};
-                        if (frameNo - bodyFrame <= 2)
-                            matches = fssDumpOnEyeDrawObserved(
-                                self, kind, count, instances, fact.helper);
-                    }
-                }
-                trace.fssDumpFact(fact);
-                if (matches) return claimed(id, DrawVerdict::kFssDump);
-            } else {
-                if (fssDumpWantsDraws() && s->fssBodyFrame != 0 &&
-                    s->frameNo - s->fssBodyFrame <= 2 &&
-                    fssDumpOnEyeDraw(self, kind, count, instances))
-                    return claimed(id, DrawVerdict::kFssDump);
-            }
-            return SiteResult::declined();
-        } else if constexpr (id == SiteId::kResolveBindClaim) {
-            if constexpr (!TracePolicy::enabled) {
-                if (resolveBindWants() &&
-                    !resolveBindShadowSaysNo(bindingGet(BindSlot::Ps) != nullptr,
-                                             bindingShaderHash(BindSlot::Ps)) &&
-                    resolveBindOnEyeDraw(self))
-                    return claimed(id, DrawVerdict::kResolveBind);
-                return SiteResult::declined();
-            } else {
-                ResolveBindObservation fact{};
-                const bool wants = resolveBindWants();
-                fact.outer.wants = {true, true, wants};
-                if (!wants) {
-                    trace.resolveBindFact(fact);
-                    return SiteResult::declined();
-                }
-                const bool psPresent = bindingGet(BindSlot::Ps) != nullptr;
-                const uint64_t psHash = bindingShaderHash(BindSlot::Ps);
-                fact.outer.psPresent = {true, true, psPresent};
-                fact.outer.psHash = {true, true, psHash};
-                if (resolveBindShadowSaysNo(psPresent, psHash)) {
-                    trace.resolveBindFact(fact);
-                    return SiteResult::declined();
-                }
-                const bool matched = resolveBindOnEyeDrawObserved(self, fact.helper);
-                trace.resolveBindFact(fact);
-                if (matched) return claimed(id, DrawVerdict::kResolveBind);
-                return SiteResult::declined();
-            }
         } else if constexpr (id == SiteId::kSunglareSkip) {
             if constexpr (TracePolicy::enabled) {
                 SunglareObservation fact{};
@@ -3231,11 +3128,6 @@ struct VScreenDrawLadderVisitor {
                     observeSunglareRead(fact.site.worldValue,
                                         static_cast<int32_t>(world));
                     gate = world != 0;
-                    if (!gate) {
-                        const bool probe = sunglareProbeActive();
-                        observeSunglareRead(fact.site.probeValue, probe);
-                        gate = probe;
-                    }
                 }
                 if (gate) {
                     const uint32_t clampBefore = s->glareClamp;
@@ -3250,8 +3142,7 @@ struct VScreenDrawLadderVisitor {
                 }
                 trace.sunglareFact(fact);
             } else {
-                if (glareAction != SunglareAction::kStock &&
-                    (sunglareWorldActive() || sunglareProbeActive())) {
+                if (glareAction != SunglareAction::kStock && sunglareWorldActive()) {
                     s->glareClamp = 0;
                     billboardOnGlareDraw(count, instances);
                     return claimed(id, DrawVerdict::kGlareSteady);
@@ -3280,8 +3171,8 @@ struct VScreenDrawLadderVisitor {
             }
             return SiteResult::declined();
         } else if constexpr (id == SiteId::kHeadOffsetObserve) {
-            if (headOffsetGateWantsPanel() && srv0IsPanelSized(s, kind, count))
-                ++s->panelCompositeDraws;
+            // The old head-offset gate was retired with its Explorer Cam route.
+            // Keep the replay site's outcome stable without counting or acting.
             return SiteResult::observed();
         } else if constexpr (id == SiteId::kPanelCurveObserve) {
             if (panelCurveWants() && srv0IsPanelSized(s, kind, count) &&
@@ -3479,9 +3370,11 @@ LadderDecision withDrawLadderTraceSelectedApi(
         facts.dsv0Identity = reinterpret_cast<uintptr_t>(bindingGet(BindSlot::Dsv0));
         facts.rtv0Generation = bindingGeneration(BindSlot::Rtv0);
         facts.dsv0Generation = bindingGeneration(BindSlot::Dsv0);
-        if (g_state->rtv0SizeGen == facts.rtv0Generation) {
-            facts.rtv0Width = g_state->rtv0W;
-            facts.rtv0Height = g_state->rtv0H;
+        ResourceInfo rtv0Info;
+        if (bindingResolveProbe(bindingGet(BindSlot::Rtv0), &rtv0Info) &&
+            rtv0Info.isTexture2D) {
+            facts.rtv0Width = rtv0Info.a;
+            facts.rtv0Height = rtv0Info.b;
         }
         facts.flags = (g_state->pluginDispatchEnabled ? 1u : 0u) |
                       (g_state->distanceEnabled ? 2u : 0u) |
@@ -3793,7 +3686,6 @@ void STDMETHODCALLTYPE hookedClearRtv(ID3D11DeviceContext* self,
                                       ID3D11RenderTargetView* rtv, const FLOAT c[4]) {
     if (g_flatComputeInternal) { g_state->realClearRtv(self, rtv, c); return; }
     gpuFrameCommand(self);
-    if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::ClearRtv, self, static_cast<int>(self->GetType()));
     noteStaleForward(kSlotClearRenderTargetView, reinterpret_cast<const void*>(g_state->realClearRtv),
                      "ClearRenderTargetView");
     State* s = g_state;
@@ -3828,16 +3720,6 @@ void STDMETHODCALLTYPE hookedClearRtv(ID3D11DeviceContext* self,
                             "b=%.4f a=%.4f (%u of 8)",
                             info.a, info.b, c[0], c[1], c[2], c[3],
                             s->clearProbeSeen);
-        }
-    }
-    // The intro probe, also before the void fix and for the same reason: the
-    // question it is asked is whether the startup's void is already
-    // grey-to-black material, and a colour read after the substitution would
-    // answer it with EDVR's own answer.
-    if (introProbeWants() && rtv && c) {
-        ResourceInfo info{};
-        if (bindingResolveProbe(rtv, &info) && info.isTexture2D) {
-            introProbeOnClear(info.a, info.b, c);
         }
     }
     // Cheap test first: four float compares, and only a match pays to resolve
@@ -4137,7 +4019,6 @@ void STDMETHODCALLTYPE hookedExecuteCommandList(ID3D11DeviceContext* self,
                                                 ID3D11CommandList* list,
                                                 BOOL restoreContextState) {
     gpuFrameCommand(self);
-    if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::ExecuteList, self, static_cast<int>(self->GetType()));
     State* s = g_state;
     if (foreignContext(self)) {
         if (flatRuntimeActive()) flatRuntimeOverlayForeignMutation();
@@ -4449,11 +4330,6 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
         guardedBudget(g_glitchCameraBudget, [&] {
             glitchFrameObserve(s->camData, s->camBytes, s->camResource);
         });
-        guardedBudget(g_sunglareDumpBudget, [&] {
-            // The world shader's desk-side offset hunt: one whole-buffer
-            // dump of the big scene block per session.
-            sunglareSceneDump(s->camData, s->camBytes);
-        });
         guardedBudget(g_sunglareRowsBudget, [&] {
             // And the live feed: the true view matrix at offset 932 of
             // the same block, named by the two-shot dump.
@@ -4630,8 +4506,6 @@ __declspec(noinline) void forwardVerdictBegin(ID3D11DeviceContext* self, DrawVer
     case DrawVerdict::kRemlok:       remlokScissorBegin(self); break;
     case DrawVerdict::kFssPanel:     fssPanelBegin(self); break;
     case DrawVerdict::kFssReveal:    fssRevealBegin(self); break;
-    case DrawVerdict::kFssDump:      fssDumpBegin(self); break;
-    case DrawVerdict::kResolveBind:  resolveBindBegin(self); break;
     case DrawVerdict::kHolo:         holoBegin(self); break;
     case DrawVerdict::kTargetSharp:  targetSharpBegin(self); break;
     case DrawVerdict::kNightVision:  pluginRegistryBegin(kPluginClaimNightVision,self); break;
@@ -4652,8 +4526,6 @@ __declspec(noinline) void forwardVerdictEnd(ID3D11DeviceContext* self, DrawVerdi
     case DrawVerdict::kNightVision:  pluginRegistryEnd(kPluginClaimNightVision,self); break;
     case DrawVerdict::kHolo:         holoEnd(self); break;
     case DrawVerdict::kFssReveal:    fssRevealEnd(self); break;
-    case DrawVerdict::kResolveBind:  resolveBindEnd(self); break;
-    case DrawVerdict::kFssDump:      fssDumpEnd(self); break;
     case DrawVerdict::kFssPanel:     fssPanelEnd(self); break;
     case DrawVerdict::kRemlok:       remlokScissorEnd(self); break;
     default: break;   // kBackdrop: issued inline, before the splash re-issue
@@ -4681,10 +4553,11 @@ constexpr AlteredFix alteredFixOf(DrawVerdict v) noexcept {
     case DrawVerdict::kParticle:     return AlteredFix::Particle;
     case DrawVerdict::kFssPanel:     return AlteredFix::FssPanel;
     case DrawVerdict::kFssReveal:    return AlteredFix::FssReveal;
-    case DrawVerdict::kFssDump:      return AlteredFix::FssDump;
-    case DrawVerdict::kResolveBind:  return AlteredFix::ResolveBind;
     case DrawVerdict::kScrim:        return AlteredFix::Scrim;
     case DrawVerdict::kBackdrop:     return AlteredFix::Backdrop;
+    // Reserved trace IDs have no live fix or census row.
+    case DrawVerdict::kRetiredFssDump:
+    case DrawVerdict::kRetiredResolveBind:
     case DrawVerdict::kNone:
     case DrawVerdict::kSkip:
     case DrawVerdict::kQuadSkip:
@@ -4699,8 +4572,9 @@ static_assert(alteredFixOf(DrawVerdict::kPanel) == AlteredFix::Panel && alteredF
                   alteredFixOf(DrawVerdict::kIntroPanel) == AlteredFix::IntroPanel && alteredFixOf(DrawVerdict::kGlareClamp) == AlteredFix::GlareClamp &&
                   alteredFixOf(DrawVerdict::kGlareSteady) == AlteredFix::GlareSteady && alteredFixOf(DrawVerdict::kParticle) == AlteredFix::Particle &&
                   alteredFixOf(DrawVerdict::kFssPanel) == AlteredFix::FssPanel && alteredFixOf(DrawVerdict::kFssReveal) == AlteredFix::FssReveal &&
-                  alteredFixOf(DrawVerdict::kFssDump) == AlteredFix::FssDump && alteredFixOf(DrawVerdict::kResolveBind) == AlteredFix::ResolveBind &&
-                  alteredFixOf(DrawVerdict::kScrim) == AlteredFix::Scrim && alteredFixOf(DrawVerdict::kBackdrop) == AlteredFix::Backdrop,
+                  alteredFixOf(DrawVerdict::kScrim) == AlteredFix::Scrim && alteredFixOf(DrawVerdict::kBackdrop) == AlteredFix::Backdrop &&
+                  alteredFixOf(DrawVerdict::kRetiredFssDump) == AlteredFix::Unnamed &&
+                  alteredFixOf(DrawVerdict::kRetiredResolveBind) == AlteredFix::Unnamed,
               "each verdict that can reach the altered-draw site names its own census row");
 
 // forwardWithVerdict's re-issue of the game's own draw, straight to the
@@ -5204,7 +5078,7 @@ void forwardWithVerdict(TracePolicy& trace, ID3D11DeviceContext* self, DrawVerdi
             // was and re-issued into the layer right after it (worldScreenReissue below).
             worldReissueEvaluated = true;
             worldReissue.on = uiLayerWorldReissuePending();
-            // The on-foot maps gate (ui_layer.h; experimental.on_foot_maps_sharp). While the layer TAKES the 2D screen's composite
+            // The on-foot maps gate (ui_layer.h). While the layer TAKES the 2D screen's composite
             // the per-eye screen-motion calls at the tail of the game's draw stand aside (uiLayerRedirecting), and with them the
             // recognition that keeps naming the world's source: naming stops two frames after the last recognised composite, and
             // the panel would never come back to the eye route. It is made here instead, before the draw's own issue, so the
@@ -5710,7 +5584,6 @@ void STDMETHODCALLTYPE hookedCopyResource(ID3D11DeviceContext* self,
     if (g_flatComputeInternal) { g_state->realCopyResource(self, dst, src); return; }
     gpuFrameCommand(self);
     if (foreignContext(self) && flatRuntimeActive()) flatRuntimeOverlayForeignMutation();
-    if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::Copy, self, static_cast<int>(self->GetType()));
     noteStaleForward(kSlotCopyResource, reinterpret_cast<const void*>(g_state->realCopyResource),
                      "CopyResource");
     uiAtlasNoteWrite(dst, 2);
@@ -5721,7 +5594,7 @@ void STDMETHODCALLTYPE hookedCopyResource(ID3D11DeviceContext* self,
         flatRuntimeSubstitution(self, FlatSubstEvent::kCopy);
         flatRuntimeOverlayResourceMutation(dst, FlatOverlayMutationOp::CopyResource,
             FlatMutationDetails::transfer(FlatOverlayMutationOp::CopyResource,"CopyResource",src));
-        flatRuntimeWritten(dst);
+        flatRuntimeWrittenExtent(dst,historyWholeWrite(HistoryWriteEntry::CopyResource));
     }
     if (!foreignContext(self) && flatTemporalCapturing()) flatTemporalTransfer(dst, src, 'R');
     if (drawCensusArmed()) {
@@ -5740,7 +5613,6 @@ void STDMETHODCALLTYPE hookedClearDsv(ID3D11DeviceContext* self,
     if (g_flatComputeInternal) { g_state->realClearDsv(self, dsv, flags, depth, stencil); return; }
     gpuFrameCommand(self);
     if (foreignContext(self) && flatRuntimeActive()) flatRuntimeOverlayForeignMutation();
-    if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::ClearDsv, self, static_cast<int>(self->GetType()));
     noteStaleForward(kSlotClearDepthStencilView, reinterpret_cast<const void*>(g_state->realClearDsv),
                      "ClearDepthStencilView");
     if (drawCensusArmed()) {
@@ -5825,7 +5697,6 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstancedIndirect(
         self, 'Z', 0, 0, DrawArgs{}, args, off, true, false,
         draw_ladder::kActionGpuDrawArgsUnavailable, blocked, [&](auto& trace) {
             gpuFrameCommand(self);
-            if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::DrawIndexedIndirect, self, static_cast<int>(self->GetType()));
             noteStaleForward(kSlotDrawIndexedInstancedIndirect, reinterpret_cast<const void*>(g_state->realDrawIndexedInstancedIndirect),
                              "DrawIndexedInstancedIndirect");
             if (drawCensusArmed()) drawCensusDrawDirect(self, 'Z', 0, 0, foreignContext(self), args, off);
@@ -5875,7 +5746,6 @@ void STDMETHODCALLTYPE hookedDrawInstancedIndirect(ID3D11DeviceContext* self,
         self, 'Y', 0, 0, DrawArgs{}, args, off, true, false,
         draw_ladder::kActionGpuDrawArgsUnavailable, blocked, [&](auto& trace) {
             gpuFrameCommand(self);
-            if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::DrawIndirect, self, static_cast<int>(self->GetType()));
             noteStaleForward(kSlotDrawInstancedIndirect, reinterpret_cast<const void*>(g_state->realDrawInstancedIndirect),
                              "DrawInstancedIndirect");
             if (drawCensusArmed()) drawCensusDrawDirect(self, 'Y', 0, 0, foreignContext(self), args, off);
@@ -5920,7 +5790,6 @@ void STDMETHODCALLTYPE hookedCopySubresourceRegion(
     if (g_flatComputeInternal) { g_state->realCopySubresourceRegion(self,dst,dstSub,dstX,dstY,dstZ,src,srcSub,box); return; }
     gpuFrameCommand(self);
     if (foreignContext(self) && flatRuntimeActive()) flatRuntimeOverlayForeignMutation();
-    if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::CopyRegion, self, static_cast<int>(self->GetType()));
     noteStaleForward(kSlotCopySubresourceRegion, reinterpret_cast<const void*>(g_state->realCopySubresourceRegion),
                      "CopySubresourceRegion");
     uiAtlasNoteWrite(dst, 2);
@@ -5942,7 +5811,7 @@ void STDMETHODCALLTYPE hookedCopySubresourceRegion(
         flatRuntimeOverlayResourceMutation(dst, FlatOverlayMutationOp::CopyRegion,
             FlatMutationDetails::transfer(FlatOverlayMutationOp::CopyRegion,"CopySubresourceRegion",
                 src,srcSub,dstSub,box,dstX,dstY,dstZ));
-        flatRuntimeWritten(dst);
+        flatRuntimeWrittenExtent(dst,flatRuntimeCopyExtent(dstSub,dstX,src,box));
     }
     if (!foreignContext(self) && flatTemporalCapturing()) flatTemporalTransfer(dst, src, 'C');
     if (drawCensusArmed()) {
@@ -5966,7 +5835,6 @@ void STDMETHODCALLTYPE hookedUpdateSubresource(ID3D11DeviceContext* self,
     if (g_flatComputeInternal) { g_state->realUpdateSubresource(self, dst, dstSub, box, data, rowPitch, depthPitch); return; }
     gpuFrameCommand(self);
     if (foreignContext(self) && flatRuntimeActive()) flatRuntimeOverlayForeignMutation();
-    if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::Update, self, static_cast<int>(self->GetType()));
     noteStaleForward(kSlotUpdateSubresource, reinterpret_cast<const void*>(g_state->realUpdateSubresource),
                      "UpdateSubresource");
     uiAtlasNoteWrite(dst, 0);
@@ -6020,7 +5888,6 @@ void STDMETHODCALLTYPE hookedResolveSubresource(ID3D11DeviceContext* self,
     if (g_flatComputeInternal) { g_state->realResolveSubresource(self, dst, dstSub, src, srcSub, fmt); return; }
     gpuFrameCommand(self);
     if (foreignContext(self) && flatRuntimeActive()) flatRuntimeOverlayForeignMutation();
-    if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::Resolve, self, static_cast<int>(self->GetType()));
     noteStaleForward(kSlotResolveSubresource, reinterpret_cast<const void*>(g_state->realResolveSubresource),
                      "ResolveSubresource");
     if(!foreignContext(self)){if(fssResActive())fssResNoteCopyMaybeMismatched(dst,src);}
@@ -6197,7 +6064,6 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
         return;
     }   // the world route's own draw (vr_world_route.h)
     gpuFrameCommand(self);
-    if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::Draw, self, static_cast<int>(self->GetType()));
     DrawClock clock;
     ++g_state->thunkHits[kHitDraw];
     noteStaleForward(kSlotDraw, reinterpret_cast<const void*>(g_state->realDraw),
@@ -6300,7 +6166,6 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
         return;
     }
     gpuFrameCommand(self);
-    if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::DrawIndexed, self, static_cast<int>(self->GetType()));
     DrawClock clock;
     ++g_state->thunkHits[kHitDrawIndexed];
     noteStaleForward(kSlotDrawIndexed,
@@ -6368,7 +6233,6 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
         return;
     }
     gpuFrameCommand(self);
-    if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::DrawInstanced, self, static_cast<int>(self->GetType()));
     noteStaleForward(kSlotDrawInstanced, reinterpret_cast<const void*>(g_state->realDrawInstanced),
                      "DrawInstanced");
     DrawClock clock;
@@ -6386,11 +6250,12 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
             std::remove_reference_t<decltype(cpu)>,
             Api>(trace, self, 'N', perInstance, instances, args);
         const DrawVerdict v = decision.verdict;
-        if (v == DrawVerdict::kNone && self == g_state->ownerCtx)
+        if (v == DrawVerdict::kNone && self == g_state->ownerCtx) {
             engineVelocityBeforeDrawWithApi<Api>(self, g_state->rtv0Eye);
+            engineVelocityNoteSkinDraw(self, startInstance, instances);
+        }
         if (self == g_state->ownerCtx) pixelProbeBefore(g_state, self);
         if (g_vrWorldWants && self == g_state->ownerCtx) vrWorldRouteDraw(self);
-        if (v == DrawVerdict::kGlareSteady) sunglareDrawArgs(instances, startInstance);
         const UINT drawn = g_state->glareClamp && g_state->glareClamp < instances
                                ? g_state->glareClamp : instances;
         if (drawn != instances)
@@ -6446,7 +6311,6 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
         return;
     }
     gpuFrameCommand(self);
-    if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::DrawIndexedInstanced, self, static_cast<int>(self->GetType()));
     noteStaleForward(kSlotDrawIndexedInstanced, reinterpret_cast<const void*>(g_state->realDrawIndexedInstanced),
                      "DrawIndexedInstanced");
     DrawClock clock;
@@ -6482,8 +6346,10 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
       // compares; the pool families' substituted shaders and MRT6 are bound
       // only when the game has rebound something since the last look. After the
       // verdict, which refreshes rtv0Eye; a draw a verdict claims is left alone.
-        if (v == DrawVerdict::kNone && self == g_state->ownerCtx)
+        if (v == DrawVerdict::kNone && self == g_state->ownerCtx) {
             engineVelocityBeforeDrawWithApi<Api>(self, g_state->rtv0Eye);
+            engineVelocityNoteSkinDraw(self, startInstance, instances);
+        }
       if (self == g_state->ownerCtx) pixelProbeBefore(g_state, self);
       if (g_vrWorldWants && self == g_state->ownerCtx) vrWorldRouteDraw(self);
       forwardWithVerdict(trace, self, v, 'X', perInstance, instances, args, [&](AlteredDraw altered) {
@@ -6624,13 +6490,8 @@ using VScreenDistanceTestSite = draw_ladder::Site<
     draw_ladder::SiteId::kEyeNoDistanceNone, draw_ladder::SiteKind::Exit>;
 using VScreenEyeCensusTestSite = draw_ladder::Site<
     draw_ladder::SiteId::kEyeCensusSkip, draw_ladder::SiteKind::Claim>;
-using VScreenResolveBindTestSite = draw_ladder::Site<
-    draw_ladder::SiteId::kResolveBindClaim, draw_ladder::SiteKind::Claim>;
 using VScreenLoaderPanelTestSite = draw_ladder::Site<
     draw_ladder::SiteId::kOffscreenLoaderPanel, draw_ladder::SiteKind::Claim>;
-using VScreenFssDumpTestSite = draw_ladder::InterestGated<
-    draw_ladder::SiteId::kFssDumpClaim, draw_ladder::SiteKind::Claim,
-    draw_interest::InterestId::FssDump>;
 using VScreenTargetSharpTestSite = draw_ladder::InterestGated<
     draw_ladder::SiteId::kTargetSharpClaim, draw_ladder::SiteKind::Claim,
     draw_interest::InterestId::TargetSharp>;
@@ -7004,16 +6865,8 @@ struct VScreenTestTraceCapture final {
         policy.eyeCensusFact(fact);
     }
 
-    void resolveBindFact(const ResolveBindObservation& fact) noexcept {
-        policy.resolveBindFact(fact);
-    }
-
     void loaderPanelFact(const LoaderPanelObservation& fact) noexcept {
         policy.loaderPanelFact(fact);
-    }
-
-    void fssDumpFact(const FssDumpObservation& fact) noexcept {
-        policy.fssDumpFact(fact);
     }
 
     void targetSharpFact(const TargetSharpObservation& fact) noexcept {
@@ -7064,33 +6917,9 @@ draw_ladder::SiteResult vScreenEyeCensusPredicateTestInvoke(
 }
 
 template <class TracePolicy>
-draw_ladder::SiteResult vScreenResolveBindPredicateTestInvoke(
-    VScreenDrawLadderVisitor<TracePolicy>& visitor, TracePolicy& trace) noexcept {
-    return vScreenPredicateTestInvokeSite<VScreenResolveBindTestSite>(visitor, trace);
-}
-
-template <class TracePolicy>
 draw_ladder::SiteResult vScreenLoaderPanelPredicateTestInvoke(
     VScreenDrawLadderVisitor<TracePolicy>& visitor, TracePolicy& trace) noexcept {
     return vScreenPredicateTestInvokeSite<VScreenLoaderPanelTestSite>(visitor, trace);
-}
-
-template <class TracePolicy>
-draw_ladder::SiteResult vScreenFssDumpPredicateTestInvoke(
-    VScreenDrawLadderVisitor<TracePolicy>& visitor, TracePolicy& trace) noexcept {
-    if constexpr (TracePolicy::enabled) {
-        draw_ladder::SiteResult result{};
-        VScreenTestTraceCapture<TracePolicy> capture{trace, result};
-        plugin_cost::NoCpu cpu;
-        draw_ladder::Flow flow = draw_ladder::Flow::Continue;
-        draw_ladder::visitOne<decltype(visitor), VScreenFssDumpTestSite>(
-            flow, visitor, visitor, capture, cpu);
-        return result;
-    } else {
-        if (!visitor.template eligible<VScreenFssDumpTestSite>())
-            return draw_ladder::SiteResult::notEligible();
-        return visitor.template visit<VScreenFssDumpTestSite>();
-    }
 }
 
 } // namespace
@@ -7138,52 +6967,6 @@ bool vScreenPredicateTestVisit(
         result->siteResult = vScreenPredicateTestInvoke(visitor, siteId, trace);
     }
     result->glareClampAfter = fixture.glareClamp;
-    t_uiDepthThisDraw = priorUiDepth;
-    t_compositeThisDraw = priorComposite;
-    g_state = priorState;
-    return true;
-}
-
-bool vScreenFssDumpPredicateTestVisit(
-    ID3D11DeviceContext* context, char kind, std::uint32_t count,
-    std::uint32_t instances, std::uint32_t frameNo,
-    std::uint32_t fssBodyFrame, bool traceEnabled,
-    VScreenPredicateTestResult* result) noexcept {
-    if (!result) return false;
-    static State fixture{};
-    fixture.ownerCtx = context;
-    fixture.frameNo = frameNo;
-    fixture.fssBodyFrame = fssBodyFrame;
-    State* const priorState = g_state;
-    const bool priorUiDepth = t_uiDepthThisDraw;
-    const bool priorComposite = t_compositeThisDraw;
-    g_state = &fixture;
-
-    draw_ladder_trace::DrawFacts facts{};
-    facts.kind = kind;
-    facts.count = count;
-    facts.instances = instances;
-    result->token = draw_ladder_trace::beginDraw(facts);
-    if (!result->token.valid()) {
-        t_uiDepthThisDraw = priorUiDepth;
-        t_compositeThisDraw = priorComposite;
-        g_state = priorState;
-        return false;
-    }
-    const DrawArgs args{};
-    if (traceEnabled) {
-        auto trace = draw_ladder_trace::makePolicy(result->token);
-        VScreenDrawLadderVisitor<draw_ladder_trace::TracePolicy> visitor{
-            &fixture, context, kind, count, instances, args, trace};
-        visitor.legacyInterestMask = pluginRegistryDrawInterestMask();
-        result->siteResult = vScreenFssDumpPredicateTestInvoke(visitor, trace);
-    } else {
-        draw_ladder::NoTrace trace;
-        VScreenDrawLadderVisitor<draw_ladder::NoTrace> visitor{
-            &fixture, context, kind, count, instances, args, trace};
-        visitor.legacyInterestMask = pluginRegistryDrawInterestMask();
-        result->siteResult = vScreenFssDumpPredicateTestInvoke(visitor, trace);
-    }
     t_uiDepthThisDraw = priorUiDepth;
     t_compositeThisDraw = priorComposite;
     g_state = priorState;
@@ -7419,49 +7202,6 @@ bool vScreenEyeCensusPredicateTestVisit(
     result->censusSkippedAfter = fixture.censusSkipped;
     g_eyeCensusTestState = priorActive;
     restoreBindings();
-    t_uiDepthThisDraw = priorUiDepth;
-    t_compositeThisDraw = priorComposite;
-    g_state = priorState;
-    return true;
-}
-
-bool vScreenResolveBindPredicateTestVisit(
-    ID3D11DeviceContext* context, bool traceEnabled,
-    VScreenPredicateTestResult* result) noexcept {
-    if (!result || !context) return false;
-
-    static State fixture{};
-    fixture.ownerCtx = context;
-    State* const priorState = g_state;
-    const bool priorUiDepth = t_uiDepthThisDraw;
-    const bool priorComposite = t_compositeThisDraw;
-    g_state = &fixture;
-
-    draw_ladder_trace::DrawFacts facts{};
-    facts.kind = 'N';
-    facts.count = 3;
-    facts.instances = 1;
-    result->token = draw_ladder_trace::beginDraw(facts);
-    if (!result->token.valid()) {
-        g_state = priorState;
-        t_uiDepthThisDraw = priorUiDepth;
-        t_compositeThisDraw = priorComposite;
-        return false;
-    }
-
-    const DrawArgs args{};
-    if (traceEnabled) {
-        auto trace = draw_ladder_trace::makePolicy(result->token);
-        VScreenDrawLadderVisitor<draw_ladder_trace::TracePolicy> visitor{
-            &fixture, context, 'N', 3, 1, args, trace};
-        result->siteResult = vScreenResolveBindPredicateTestInvoke(visitor, trace);
-    } else {
-        draw_ladder::NoTrace trace;
-        VScreenDrawLadderVisitor<draw_ladder::NoTrace> visitor{
-            &fixture, context, 'N', 3, 1, args, trace};
-        result->siteResult = vScreenResolveBindPredicateTestInvoke(visitor, trace);
-    }
-
     t_uiDepthThisDraw = priorUiDepth;
     t_compositeThisDraw = priorComposite;
     g_state = priorState;
@@ -8508,7 +8248,6 @@ static bool configureLegacyDrawInterests() {
     enable(InterestId::WitchspaceStars, witchspaceStarsDrawInterestConfigured());
     enable(InterestId::FssPanel, fssPanelDrawInterestConfigured());
     enable(InterestId::FssReveal, fssRevealDrawInterestConfigured());
-    enable(InterestId::FssDump, fssDumpDrawInterestConfigured());
     enable(InterestId::ParticleSubstitute, particleSubstituteDrawInterestConfigured());
     enable(InterestId::IntroCurveObserve, introCurveDrawInterestConfigured());
     enable(InterestId::PanelCurveObserve, panelCurveDrawInterestConfigured());
@@ -8518,7 +8257,6 @@ static bool configureLegacyDrawInterests() {
         append(witchspaceStarsDrawInterestFilters) &&
         append(fssPanelDrawInterestFilters) &&
         append(fssRevealDrawInterestFilters) &&
-        append(fssDumpDrawInterestFilters) &&
         append(particleSubstituteDrawInterestFilters);
     const bool accepted = pluginRegistryConfigureDrawInterests(
         configured, filtersFit ? filters : nullptr,
@@ -8537,11 +8275,14 @@ uint32_t vScreenEyeDrawsThisFrame() {
 
 void vScreenRefreshConfig() {
     State* s = g_state;
-    if (!s) return;
     Config& cfg = Config::get();
     // Cheap: one GetFileAttributesEx, and only when the write time moved.
     const int64_t reloadT0 = qpcNow();
+    // THE RELOAD COMES BEFORE THE STATE CHECK. This is the only place the ini is re-read, and its readers outside vScreen (hotkey.explorer_cam, the diagnostic keys,
+    // each read live from Config) need no vScreen State: with vScreen installed transport-only (no State) a reload that waited for one never happened, and a key
+    // bound or cleared while the game runs never applied (review 2026-10-08, finding 3; tools\gate_test pins the order, the transport fixture binds a key live).
     if (!cfg.reloadIfChanged()) return;
+    if (!s) return;   // the reload above also serves global readers without vScreen State
     ++s->classifierConfigEpoch;
     s->replayTraceEnabled = cfg.getBool("advanced.draw_replay", false);
     s->replayTraceConfigPending = true;
@@ -8586,36 +8327,21 @@ void vScreenRefreshConfig() {
     quadProbeConfigure(cfg);
     loaderPanelConfigure(cfg);
     splashDimConfigure(cfg);
-    introProbeConfigure(cfg);
     introPanelConfigure(cfg);
     introSkipConfigure(cfg);
     introUpscaleConfigure(cfg);
     sharpenPassConfigure(cfg);
     temporalPassConfigure(cfg);
     schedulerStackProbeConfigure(cfg.getBool("advanced.scheduler_probe", false));
-    staticPropGateConfigure(cfg.getBool("fix.static_prop_updates", false));
     screenMotionConfigure(cfg);
     pluginRegistryConfigure(&cfg);
     depthProbeConfigure(cfg);
     backdropConfigure(cfg);
     fssPanelConfigure(cfg);
     fssRevealConfigure(cfg);
-    fssDumpConfigure(cfg);
-    resolveBindConfigure(cfg);
-    // advanced.eye_origin_readers: the engine-side fix design doc's
-    // (docs/design-transition-flash-engine-fix-2026-09-23.md) parts A2/B (who
-    // reads the pose, and the positioner swap). Off leaves this line as
-    // the only thing it does; a non-off value installs its two CodeHooks
-    // the first time this is reached, then only moves the live on/off bit
-    // -- the hardware breakpoint itself arms and disarms on its own
-    // schedule from poseReaderWatchFrameBoundary, not from here.
-    poseReaderWatchConfigure(cfg);
-    // advanced.transition_flash_eye_base: the same design doc's "Static
-    // round 6" (the mailbox consumer, and its own writer watch). Off leaves
-    // this line as the only thing it does; a non-off value installs the
-    // consumer hook the first time this is reached, then only moves the
-    // live mode -- the writer watch arms/re-arms/disarms on its own
-    // schedule from transitionFlashEyeBaseFrameBoundary, not from here.
+    // fix.transition_flash: the engine fix (transition_flash_eye_base.cpp). The
+    // first call installs its consumer hook when the key is on and reports
+    // Armed or Lost to the detector; later calls do nothing.
     transitionFlashEyeBaseConfigure(cfg);
     // The settings menu: its own keys, then the reload's diff -- every row's
     // value, the restart snapshot, and a toast for what changed from outside.
@@ -8645,13 +8371,6 @@ void vScreenRefreshConfig() {
     configureLegacyDrawInterests();
     objectProbeConfigure(cfg);
     pixelProbeConfigure(cfg);
-    lodGovernorConfigure(cfg);
-    // Every fix.head_offset_* key, on the reload path as well as the startup
-    // one. A config reader on only one of the two is a specific repeatable bug
-    // -- reload-only means the value stays its C++ initialiser for the whole
-    // session -- and it cost a flight when fix.head_offset_gate did exactly
-    // that.
-    headOffsetGateConfigure();
     perfMonitorPluginCostConfigure(static_cast<uint8_t>(runtimeVrProfile()
         ? plugins::kProfileVr : plugins::kProfileFlat));
 
@@ -8803,13 +8522,12 @@ EDVR_BOUNDARY_TICK(tkIntroPanel, "intro_panel");
 EDVR_BOUNDARY_TICK(tkIntroCurve, "intro_curve");
 EDVR_BOUNDARY_TICK(tkIntroSkip, "intro_skip");
 EDVR_BOUNDARY_TICK(tkLoaderPanel, "loader_panel");
-EDVR_BOUNDARY_TICK(tkIntroProbe, "intro_probe");
-EDVR_BOUNDARY_TICK(tkLodGovernor, "lod_governor");
 EDVR_BOUNDARY_TICK(tkDrawCensusBoundary, "draw_census_boundary");
 EDVR_BOUNDARY_TICK(tkFssReveal, "fss_reveal");
-EDVR_BOUNDARY_TICK(tkFssDump, "fss_dump");
 EDVR_BOUNDARY_TICK(tkFssPacing, "fss_pacing");
 EDVR_BOUNDARY_TICK(tkRemlok, "remlok");
+// (Explorer Cam's frame tick and its probe's are device_hook.cpp's: they must run whatever this file's options say, and when vScreen installs transport-only
+// there is no State here and no vScreenFrameBoundary to carry them. tools\gate_test pins that.)
 
 // The one line the surface strip adds when the intro ends, said once, at the first rendered scene: how many strip draws the intro had in all
 // (panel_curve.h counts every one it drew: the movie's, the splash's, and the splash dim's re-issues of either) and how many composite draws the
@@ -8855,7 +8573,7 @@ void vScreenFrameBoundary() {
         tkSupercruiseBars.run([&] { supercruiseBarsFrameBoundary(g_state->ownerCtx); });
         // The VR world route (docs section 82) reads the world-screen gate the layer's boundary just computed, accounts the
         // frame that ended, steps its ownership machine and arms its detector; the camera census runs after it. With
-        // experimental.temporal_aa_on_foot_world off and the census off each returns at its first test.
+        // the census off each returns at its first test when the route has nothing to do.
         tkVrWorldRoute.run([&] { vrWorldRouteFrameBoundary(); });
         tkVrCameraCensus.run([&] { vrCameraCensusFrameBoundary(); });
         // fix.vscreen_res_width = auto's footprint instrument (vscreen_footprint.h): maps a sample whose copy has had time to
@@ -8884,10 +8602,9 @@ void vScreenFrameBoundary() {
         // section's timer, rotates which one is actively timed next frame,
         // and every 30 s logs one summary line. Always on, no ini key.
         tkGpuCensus.run([&] { gpuCensusFrame(g_state->ownerCtx); });
-        // Told to the openvr half whether or not any intro fix is on: the
-        // cull guard holds its lie until a scene exists, and that must
-        // depend on the GAME reaching one, not on EDVR being configured
-        // to do anything about the intro.
+        // Told to the openvr half whether or not any intro fix is on: it
+        // must depend on the GAME reaching a scene, not on EDVR being
+        // configured to do anything about the intro.
         tkSceneArrived.run([&] {
             if (g_state->eyeDrawsLastFrame >= kSceneEyeDraws) announceSceneArrived();
         });
@@ -8940,19 +8657,6 @@ void vScreenFrameBoundary() {
                         s->classifierConfigEpoch,
                         draw_ladder_trace::statusName(draw_ladder_trace::status()));
     }
-
-    // The intro probe's frame edge, first: it closes the frame's composition
-    // and its timing, and both are about the frame that has just ENDED rather
-    // than about anything decided below. The scene flag is the one the intro
-    // fixes above retire on, so the probe's movie account closes with them.
-    tkIntroProbe.run([&] {
-        introProbeFrameBoundary(s->frameNo, s->eyeDrawsLastFrame >= kSceneEyeDraws);
-    });
-
-    // The settlement LOD governor (fix.settlement_detail, shadow only): the
-    // frame's draw-builder and part-test counts, the producer's frame work,
-    // one policy step, its log lines. One atomic load while it is off.
-    tkLodGovernor.run([&] { lodGovernorFrameBoundary(); });
 
     // The ARRIVAL census (advanced.census_fss_jump): a world-camera jump
     // while the scanner's chrome is up is a zoom's first frame, and the
@@ -9014,7 +8718,6 @@ void vScreenFrameBoundary() {
     // here, a running one advances, a spent one writes its tables.
     tkDrawCensusBoundary.run([&] { drawCensusFrameBoundary(s->frameNo); });
     tkFssReveal.run([&] { fssRevealFrameBoundary(); });
-    tkFssDump.run([&] { fssDumpFrameBoundary(s->ownerCtx); });
 
     // FSS frame pacing (round 31): the left-only squares are now measured
     // to be runtime-side (both submitted images carry the flicker equally),
@@ -9201,8 +8904,7 @@ void vScreenFrameBoundary() {
         // with them OFF is the settings -- and accusing a healthy
         // exposure-only install of being hooked over, with a solicited bug
         // report, is exactly the kind of lie this notice exists to end.
-        const bool perDrawAskers = s->distanceEnabled || s->countForFlashFix ||
-                                   headOffsetGateWantsPanel();
+        const bool perDrawAskers = s->distanceEnabled || s->countForFlashFix;
         char adviceBuf[1100];
         const char* advice;
         // The runtime paragraph goes on its own line AFTER the notice, not
@@ -9217,10 +8919,9 @@ void vScreenFrameBoundary() {
             // whether the clearing worked.
             advice =
                 "Eye draws are only counted when a fix that needs them per "
-                "draw is on, and none is: the panel distance is at 1.0, the "
-                "flash detector is not counting, and the head-offset gate is "
-                "idle. The black void fix does not count draws -- the totals "
-                "lines say whether it is clearing. This zero is those "
+                "draw is on, and none is: the panel distance is at 1.0 and the "
+                "flash detector is not counting. The black void fix does not "
+                "count draws -- the totals lines say whether it is clearing. This zero is those "
                 "settings, not a fault.";
         } else if (s->recogniserAsks == 0) {
             advice =
@@ -9784,26 +9485,12 @@ void vScreenFrameBoundary() {
     // The flash detector needs the count for the frame that just ended, to tell
     // a rendered scene from a menu. It has to be told before the counter resets.
     glitchFrameBoundary(sceneDraws);
-    // Publishes the frame number the consumer hook reads (also, possibly, a
-    // scheduler job thread), runs the writer watch's own ship-pointer
-    // stability gate / arms, re-arms or sweeps it, and services one
-    // deferred dump. Deliberately AFTER glitchFrameBoundary, same reason as
-    // poseReaderWatchFrameBoundary below: that call already read this
-    // frame's eye-base snapshot (read-and-reset, transitionFlashEyeBase
-    // FrameSnapshot's own comment) for its own ring entry.
+    // The engine fix's per-frame service: publishes the frame number its
+    // consumer hook reads (that hook can run on a scheduler job thread), logs
+    // a held frame, closes its event window, and owes the temporal pass its
+    // verdict once a held frame's eyes have been handed over. After
+    // glitchFrameBoundary, which closes the same frame.
     transitionFlashEyeBaseFrameBoundary(s->frameNo);
-    // Publishes the frame number the positioner hooks read (also, possibly,
-    // a scheduler job thread) and runs the 60-frame stability gate / arms
-    // or sweeps the hardware breakpoint. Deliberately AFTER glitchFrameBoundary:
-    // that call already read this frame's pose-reader snapshot (read-and-
-    // reset, poseReaderWatchFrameSnapshot's own comment) for its own ring
-    // entry, so the accumulators this call would otherwise finalise are
-    // already clear.
-    poseReaderWatchFrameBoundary(s->frameNo);
-    // The gate decides on the counts for the frame that just ended, so it is
-    // told before they reset -- same rule as the flash detector above.
-    headOffsetGateFrame(s->frameNo, s->panelCompositeDraws, sceneDraws);
-    s->panelCompositeDraws = 0;
     s->eyeDrawsThisFrame = 0;
     s->sceneDrawsThisFrame = 0;
     ++s->frameNo;
@@ -9826,7 +9513,7 @@ void vScreenFrameBoundary() {
                              (drawGateWanted() ? 4u : 0u);
     replayFacts.sceneCounters[0] = s->eyeDrawsLastFrame;
     replayFacts.sceneCounters[1] = s->sceneDrawsThisFrame;
-    replayFacts.sceneCounters[2] = s->panelCompositeDraws;
+    replayFacts.sceneCounters[2] = 0;  // retired head-offset counter; keep the replay field reserved
     const auto replayStatusBeforeBegin = draw_ladder_trace::status();
     draw_ladder_trace::frameBegin(replayFacts);
     const auto replayStatusAfterBegin = draw_ladder_trace::status();
@@ -9847,7 +9534,6 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     if (!device || g_state || g_transportSelected) return;
 
     Config& cfg = Config::get();
-    headOffsetGateConfigure();
     const bool wantVoid = cfg.getBool("fix.black_void", true);
     const float scale = cfg.getFloat("fix.panel_distance", 1.0f);
     // Register profile-supported modules before the dormant-hook check so
@@ -9878,7 +9564,6 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     // them: armed in the log, then nothing, and not even the give-up notice,
     // because the frame counter it waits on also lives in here.
     if (!wantVoid && scale == 1.0f && !glitchFrameNeedsEyeDraws() &&
-        !headOffsetGateWantsPanel() &&
         !pluginRegistryWantsStartupHooks(&cfg) &&
         !cfg.getBool("advanced.app_gpu_timing", true) &&
         !cfg.getBool("advanced.panel_hooks_always", true)) {
@@ -9929,27 +9614,19 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     quadProbeConfigure(cfg);
     loaderPanelConfigure(cfg);
     splashDimConfigure(cfg);
-    introProbeConfigure(cfg);
     introPanelConfigure(cfg);
     introSkipConfigure(cfg);
     introUpscaleConfigure(cfg);
     sharpenPassConfigure(cfg);
     temporalPassConfigure(cfg);
     schedulerStackProbeConfigure(cfg.getBool("advanced.scheduler_probe", false));
-    staticPropGateConfigure(cfg.getBool("fix.static_prop_updates", false));
     screenMotionConfigure(cfg);
     pluginRegistryConfigure(&cfg);
     depthProbeConfigure(cfg);
     backdropConfigure(cfg);
     fssPanelConfigure(cfg);
     fssRevealConfigure(cfg);
-    fssDumpConfigure(cfg);
-    resolveBindConfigure(cfg);
-    // advanced.eye_origin_readers: the same design doc's parts A2/B. See
-    // the other call site's comment above.
-    poseReaderWatchConfigure(cfg);
-    // advanced.transition_flash_eye_base: the same design doc's "Static
-    // round 6". See the other call site's comment above.
+    // The engine fix. See the other call site's comment above.
     transitionFlashEyeBaseConfigure(cfg);
     {
         g_state->censusFssJump =
@@ -9972,7 +9649,6 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     configureLegacyDrawInterests();
     objectProbeConfigure(cfg);
     pixelProbeConfigure(cfg);
-    lodGovernorConfigure(cfg);
     // installGlitchFrameFix is called before this, deliberately, so this is its
     // settled answer rather than a guess about config it has not read yet.
     g_state->countForFlashFix = glitchFrameNeedsEyeDraws();
@@ -10297,9 +9973,6 @@ void shutdownVScreenFixes() {
     particleShutdown();
     objectProbeShutdown();
     pixelProbeShutdown();
-    // The settlement LOD governor: stop acting and write the game's LOD scale
-    // back to any render context still holding EDVR's.
-    lodGovernorShutdown();
     if (g_state->ourCb) {
         g_state->ourCb->Release();
         g_state->ourCb = nullptr;
@@ -10322,9 +9995,7 @@ void shutdownVScreenFixes() {
     fssPanelShutdown();
     fssPanelRectShutdown();
     fssRevealShutdown();
-    fssDumpShutdown();
     gpuCensusShutdown();
-    resolveBindShutdown();
     billboardShutdown();
     // Both halves of the intro. Neither was on this roll-call, so a session
     // that ended without a rendered scene ever arriving -- quitting from the
@@ -10334,8 +10005,8 @@ void shutdownVScreenFixes() {
     introUpscaleShutdown();
     introSkipShutdown();
     temporalPassShutdown();
-    // The scheduler stack probe (advanced.scheduler_probe) is configured only
-    // from temporalPassConfigure, so it stands down after the temporal pass.
+    // The scheduler stack probe (advanced.scheduler_probe) is configured by
+    // vScreen startup and reload, independently of the temporal pass.
     // reset() clears active_ -- the Present and job-entry feeds check it --
     // and detaches its scheduler-hook observer. A second call finds it
     // inactive and detached and does nothing.

@@ -8,7 +8,7 @@
 #include "flat_foreground_ownership.h"
 #include "flat_camera_phase.h"
 #include "flat_context_state.h"
-#include "flat_context_isolation.h"
+#include "flat_isolation_mode.h"
 #include "temporal_shader_bytecode.h"
 #include "../common/log.h"
 #include <wrl/client.h>

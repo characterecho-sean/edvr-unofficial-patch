@@ -29,7 +29,8 @@
 // binding (pin_tests.h), and the pool copier's observer running on job threads
 // without the engine mutex (copier_tests.h). build.bat links
 // src\d3d11\engine_velocity.cpp with EDVR_ENGINE_VELOCITY_RIG and the binding
-// shadow external; lifecycle_tests.h supplies the stubs.
+// shadow external; lifecycle_tests.h supplies the stubs. remember_cap_tests.h runs last: the remember
+// tables' cap, and the one line a full table writes per kind.
 #include <windows.h>
 #include <d3d11.h>
 #include <d3dcompiler.h>
@@ -55,9 +56,11 @@
 #include "lifecycle_tests.h"
 #include "flat_lazy_tests.h"
 #include "flat_domain_tests.h"
+#include "source_free_tests.h"
 #include "pin_tests.h"
 #include "copier_tests.h"
 #include "unkeyed_tests.h"
+#include "remember_cap_tests.h"
 #include "../../src/common/runtime_profile.h"
 #include "../../src/d3d11/engine_velocity_families.h"   // kSelfMarking
 #include "../../third_party/dxbc_hash/DxilHash.cpp"
@@ -258,7 +261,7 @@ void corpus(ID3D11Device* device, ID3D11DeviceContext* context, const std::wstri
         // Eye run 055427 (2026-09-26, parked close to a coriolis port): the
         // station's close-range stock pixel shaders -- the hull's pixel path
         // while the keyed pairs of the same families draw nothing. Dumped by
-        // the 2026-09-27 glare_shader_dump flight, harnessed, keyed.
+        // the 2026-09-27 shader-dump flight, harnessed, keyed.
         {L"vs_436193B352A2897E", L"ps_51EE1F922FD220B0", false},
         {L"vs_889A5279E68F0672", L"ps_D31DCAFA7C05CB47", false},
         // Epic 20260929, the Krait's main-menu F10 capture: the hull plating's stock
@@ -266,6 +269,10 @@ void corpus(ID3D11Device* device, ID3D11DeviceContext* context, const std::wstri
         // 5 draws left 22.5% of the frame's slots stale. Passes whole on WARP: patched,
         // reflected, created, o0..o3 and depth bit-identical to the stock pair.
         {L"vs_66DE2CADB1F4AE6B", L"ps_235567BE2840B3ED", false},
+        // F10, 2026-10-08 (Frontier 13:39, a walking settlement NPC): its rigid and skinned shading pairs, keyed for VR.
+        // Each passes whole: patched, reflected, created, o0..o3 and depth bit-identical, MRT6 = 2 slot + 1.
+        {L"vs_8B589D25B2A0ADDC", L"ps_7268762D11A610F2", false}, {L"vs_7B0DC42D383F694C", L"ps_0DF03E64DF9DBEF1", false},
+        {L"vs_114AF608F86D9ED8", L"ps_A17504A2627767F2", false}, {L"vs_D99AFDC250D19A3F", L"ps_E86271E464CCDC1D", false},
     };
     for (const auto& p : pairs) onePair(device, context, root, p, &check);
     // Candidates: pairs seen drawing stock that are not keyed. Each is tried
@@ -416,6 +423,35 @@ int wmain(int argc, wchar_t** argv) {
     check(edvr::engineVelocityPoolFamilyPair(hullVs, hullPs) &&
           edvr::engineVelocityPoolFamilyPair(hullVs, hullSiblingPs),
           "flat keys the hull pair beside its sibling");
+    // The F10 NPC pairs (2026-10-08, docs/kinematic-motion-injection-2026-09-19.md): the walking NPC's rigid body
+    // (8B58, and 7B0D's two base-0 draws) and skinned body (7B0D, 114A, D99A). Keyed for VR alone, because these
+    // vertex shaders are weapon_motion's first-person families and flat's foreground and source routing is qualified
+    // with them unkeyed; each pixel shader belongs to its own vertex shader only. The hashes are the ones
+    // recomputed from the dumped bytecode (FNV-1a 64), not retyped from a name.
+    struct NpcPair { uint64_t vs, ps; };
+    constexpr NpcPair npcPairs[] = {
+        {0x8B589D25B2A0ADDCull, 0x7268762D11A610F2ull}, {0x7B0DC42D383F694Cull, 0x0DF03E64DF9DBEF1ull},
+        {0x114AF608F86D9ED8ull, 0xA17504A2627767F2ull}, {0xD99AFDC250D19A3Full, 0xE86271E464CCDC1Dull},
+    };
+    static_assert(edvr::engine_velocity_family::kFamilyCount <= edvr::engine_velocity_detail::kMaxFamilies,
+                  "every keyed family has its own substituted-draw counter");
+    for (const auto profile : {edvr::RuntimeProfile::Vr, edvr::RuntimeProfile::LegacyVr}) {
+        edvr::g_runtimeProfile = profile;
+        for (const auto& a : npcPairs) {
+            check(edvr::engineVelocityPoolFamilyVs(a.vs) && edvr::engineVelocityPoolFamilyPair(a.vs, a.ps),
+                  "F10: each NPC pair is keyed in VR");
+            for (const auto& b : npcPairs)
+                if (&a != &b) check(!edvr::engineVelocityPoolFamilyPair(a.vs, b.ps),
+                                    "F10: an NPC pixel shader stays keyed to its own vertex shader only");
+            check(!edvr::engineVelocityPoolFamilyPair(a.vs, 0x123456789abcdef0ull), "F10: an unknown pixel shader stays unkeyed");
+        }
+    }
+    edvr::g_runtimeProfile = edvr::RuntimeProfile::Flat;
+    for (const auto& a : npcPairs) {
+        check(!edvr::engineVelocityPoolFamilyVs(a.vs) && !edvr::engineVelocityPoolFamilyPair(a.vs, a.ps) &&
+              !edvr::engine_velocity_family::supportedPair(a.vs, a.ps),
+              "F10: the NPC pairs stay unkeyed in flat (the weapon families' foreground and source routing)");
+    }
     edvr::g_runtimeProfile = edvr::RuntimeProfile::LegacyVr;
     shader_tests::run({device.Get(), context.Get(), &check});
     overlay_depth_gpu_tests::run(device.Get(), context.Get(), &check);
@@ -435,6 +471,7 @@ int wmain(int argc, wchar_t** argv) {
         std::string(engineVelocitySource.begin(), engineVelocitySource.end()));
     flat_lazy_tests::run({device.Get(), context.Get(), &check});
     flat_domain_tests::run({device.Get(), context.Get(), &check});
+    source_free_tests::run({device.Get(), context.Get(), &check});
     pin_tests::run({device.Get(), context.Get(), &check});
     copier_tests::run({device.Get(), context.Get(), &check});
     unkeyed_tests::run({&check});
@@ -444,6 +481,8 @@ int wmain(int argc, wchar_t** argv) {
               "captured DE54/PS91 real VS link and G-buffer equivalence");
     }
     if (!corpusRoot.empty()) corpus(device.Get(), context.Get(), corpusRoot);
+    // Last: it fills both remember tables to their cap for the rest of the process.
+    remember_cap_tests::run({device.Get(), context.Get(), &check});
     std::printf("engine_velocity_test: %u checks passed%s%s%s.\n", g_checks,
                 corpusRoot.empty() ? "" : (g_absent ? " including the real shader corpus (PARTIAL: some pairs absent from the dump)"
                                                     : " including the real shader corpus"),

@@ -1,6 +1,6 @@
 // The refusal view on the COPY route (FlatMonoResolveFrame::hdr = false) on WARP.
 //
-// The view (advanced.temporal_aa_debug = motion_source) paints the prep's per-pixel class over what the finish shows. It began as the HDR route's
+// The refusal view paints the prep's per-pixel class over what the finish shows. It began as the HDR route's
 // (the finish draw into H); the copy route's compute finish paints it now too, for the SDK backends (DLAA, DLSS, FSR) whatever the render and the
 // output sizes: the resolver asks the prep for the class texture (paintView is true for hdr or any mode but EDVR's own TAA), binds it at t11 for
 // the finish, and the finish paints refusalPaint(c, refusalClassAt(rasterUv)) over its colour c when debug.y says so. EDVR's own TAA writes its output

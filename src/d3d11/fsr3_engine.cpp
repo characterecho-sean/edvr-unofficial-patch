@@ -163,11 +163,8 @@ struct EyeCtx {
     ID3D11Texture2D* dilatedDepth = nullptr;
     ID3D11Texture2D* dilatedMv = nullptr;
     ID3D11Texture2D* prevNearestDepth = nullptr;
-    // AMD's own debug checking, read from advanced.temporal_aa_diagnostics at
-    // creation and part of the key below, so flipping that setting live
-    // remakes the context instead of doing nothing until a size moves (the
-    // review of 2026-09-16, F8). Sean's documented A/B habit for the temporal
-    // work is to flip exactly this key mid-session.
+    // AMD's own debug checking, baked in at creation (always off now) and
+    // part of the key below.
     bool diagnostics = false;
     bool infiniteDepth = false;
     // The flat HDR route's input is HDR with automatic exposure (section 81, hdr_backend_flags.h). The flags are
@@ -181,8 +178,8 @@ struct EyeCtx {
     // for, while the seam's once-per-session refusal line said nothing more.
     // Latched per KEY, not per session: the key that failed is refused with
     // its stored reason and no retry, and a different size (or an explicit
-    // fsr3ReleaseFeatures) re-arms it, mirroring temporal_pass.cpp's own
-    // g_foveaFailed.
+    // fsr3ReleaseFeatures) re-arms it, mirroring the
+    // other engine's own failure latch.
     bool     failed = false;
     uint32_t failW = 0, failH = 0, failOutW = 0, failOutH = 0;
     bool     failDiagnostics = false;
@@ -199,6 +196,9 @@ EyeCtx g_ctx[kUpscalerSlots];
 // Test-only bookkeeping (fsr3TestContextCreations): how many contexts each slot has had made, so a rig can prove that
 // making or remaking one slot's context touches no other's. Counts successful creates only; never read by the engine.
 uint32_t g_testCreations[kUpscalerSlots] = {};
+// Test-only (fsr3TestRequestDebugChecking): asks ensureContext for AMD's FFX_FSR3UPSCALER_ENABLE_DEBUG_CHECKING. False unless a rig
+// sets it; there is no user setting for it.
+bool g_testDebugChecking = false;
 
 // The GPU-price ring, dlaa.cpp's own discipline (QuerySlot/pollTimingRing/
 // acquireQuerySlot there): never awaited. FSR has one role (unlike DLAA's
@@ -457,16 +457,9 @@ bool ensureContext(unsigned eye, uint32_t w, uint32_t h, uint32_t outW, uint32_t
         if (why) *why = "an upscaler slot out of range";
         return false;
     }
-    // advanced.temporal_aa_diagnostics is a context-creation-time flag (the
-    // debug checks it enables run only inside ContextDispatch, but the flag
-    // itself is baked in at create), so it is read here rather than through
-    // Fsr3Settings/fsr3ReadConfig, which cover the two live per-DISPATCH
-    // keys (advanced.temporal_aa_fsr_reactive, advanced.temporal_aa_fsr_debug).
-    // It IS part of the key below (the review of 2026-09-16, F8): flipping it
-    // live is Sean's documented A/B for this pass, and keying on it is what
-    // makes that flip reach AMD's context instead of waiting for a size to
-    // move -- the same scope dlaa.cpp's own preset generation bump gets.
-    const bool diagnostics = Config::get().getBool("advanced.temporal_aa_diagnostics", false);
+    // AMD's debug checking is a context-creation-time flag and stays off in production; only a rig's fsr3TestRequestDebugChecking
+    // turns it on (read here, at context creation, never per frame). It remains part of the key below.
+    const bool diagnostics = g_testDebugChecking;
 
     EyeCtx& e = g_ctx[eye];
     if (e.valid && e.w == w && e.h == h && e.outW == outW && e.outH == outH &&
@@ -495,7 +488,7 @@ bool ensureContext(unsigned eye, uint32_t w, uint32_t h, uint32_t outW, uint32_t
                 ? "the sizes moved"
                 : e.infiniteDepth != infiniteDepth ? "the depth projection changed"
                 : e.hdr != hdr ? "the flat HDR route flipped (its input is HDR with automatic exposure)"
-                : "advanced.temporal_aa_diagnostics was flipped",
+                : "the context key changed",
             e.w, e.h, e.outW, e.outH, e.diagnostics ? "on" : "off", w, h, outW, outH,
             diagnostics ? "on" : "off");
         ffxFsr3UpscalerContextDestroy(&e.ctx);
@@ -1057,9 +1050,6 @@ bool fsr3Totals(uint32_t* evaluations, double* avgMs, double* maxMs, uint32_t* r
 
 Fsr3Settings fsr3ReadConfig() {
     Fsr3Settings s;
-    auto& cfg = Config::get();
-    s.reactive = cfg.getBool("advanced.temporal_aa_fsr_reactive", false);
-    s.debug = cfg.getBool("advanced.temporal_aa_fsr_debug", false);
     return s;
 }
 
@@ -1091,6 +1081,11 @@ uint32_t fsr3TestContextFlags(unsigned eye) { return eye < kUpscalerSlots && g_c
 // again), 0 for a slot out of range. tools\fsr3_engine_test reads it to prove each slot's context is its own: making or
 // remaking the VR world's (slot 2) moves no eye's count, and an eye's rekey moves none of the others.
 uint32_t fsr3TestContextCreations(unsigned slot) { return slot < kUpscalerSlots ? g_testCreations[slot] : 0u; }
+
+// Test-only, NOT part of fsr3_engine.h's contract: makes every context created from now on carry AMD's debug checking, so
+// tools\fsr3_engine_test can assert that well-formed input stays silent AND that malformed input is reported. Call it before the
+// first evaluation (the flag is part of the context key, so a later flip remakes the context). Never called outside that rig.
+void fsr3TestRequestDebugChecking(bool on) { g_testDebugChecking = on; }
 #endif
 
 }  // namespace edvr

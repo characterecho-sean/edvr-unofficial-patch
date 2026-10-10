@@ -35,6 +35,16 @@ unsigned checks = 0, failures = 0;
             std::printf("FAIL: line %d: %s\n", __LINE__, #value); \
         } \
     } while (false)
+// A check with a label, for the cases tools\dlaa_mode_test\mutants.py names: "C<n>.<case>.<what>". The mutation proof requires a mutant to fail a
+// check of the case it belongs to (a FAIL label starting "C<n>."), so every check of the ceiling section carries one.
+#define CASE(id, value) \
+    do { \
+        ++checks; \
+        if (!(value)) { \
+            ++failures; \
+            std::printf("FAIL: %s: %s\n", id, #value); \
+        } \
+    } while (false)
 
 namespace {
 
@@ -280,23 +290,21 @@ int main(int argc, char** argv) {
     CHECK(!rule(pimax, 0, 4076, 1833, 1834) && !rule(pimax, 4074, 4076, 0, 1834));
 
     // --- The upscaler slots (dlaa.h, kUpscalerSlots; docs/design-flat-temporal-aa-2026-09-23.md section 82). The eyes own slots 0 and 1,
-    // the VR world route owns slot 2; the eyes have every role, the world the full frame only. ---
+    // the VR world route owns slot 2; every slot has the full frame. ---
     static_assert(kUpscalerSlots == 3 && kUpscalerEyeSlots == 2 && kUpscalerEyeSlots < kUpscalerSlots,
                   "two eyes' slots and the VR world route's third");
     for (int slot = -3; slot < 7; ++slot) {
         const bool eye = slot == 0 || slot == 1, world = slot == 2;
         CHECK(upscalerSlotHasFullFrame(slot) == (eye || world));
-        CHECK(upscalerSlotHasFoveatedRoles(slot) == eye);
     }
-    CHECK(!upscalerSlotHasFullFrame(3) && !upscalerSlotHasFullFrame(-1) && upscalerSlotHasFullFrame(2) &&
-          !upscalerSlotHasFoveatedRoles(2));
+    CHECK(!upscalerSlotHasFullFrame(3) && !upscalerSlotHasFullFrame(-1) && upscalerSlotHasFullFrame(2));
     // The eyes' log lines are the lines they always were ("for eye 0"); the world's names its slot.
     CHECK(!std::strcmp(upscalerSlotLabel(0), "eye 0") && !std::strcmp(upscalerSlotLabel(1), "eye 1"));
     CHECK(std::strstr(upscalerSlotLabel(2), "slot 2") != nullptr && std::strstr(upscalerSlotLabel(2), "world") != nullptr);
     CHECK(std::strstr(upscalerSlotLabel(3), "unknown") != nullptr && std::strstr(upscalerSlotLabel(-1), "unknown") != nullptr);
 
     // --- dlaa.cpp's slot wiring, read as source: NGX needs an NVIDIA GPU, so no rig can run it (tools\fsr3_engine_test runs the FSR
-    // half for real). The full-frame features are one per slot and the foveated ones the eyes' only; every entry gate takes the rules
+    // half for real). The full-frame features are one per slot; every entry gate takes the rules
     // above; the loading-screen warm-up makes the eyes' two and not the world's (its feature is made lazily, on its first evaluation);
     // and the creation lines name the slot through upscalerSlotLabel, which keeps the eyes' words. The rig runs from the repo root. ---
     {
@@ -309,15 +317,231 @@ int main(int argc, char** argv) {
         };
         CHECK(!src.empty());
         CHECK(count("EyeFeature g_feature[kUpscalerSlots];") == 1);
-        CHECK(count("EyeFeature g_fovea[kUpscalerEyeSlots];") == 1 && count("EyeFeature g_periph[kUpscalerEyeSlots];") == 1);
-        CHECK(count("DlaaRoleStats g_roleStats[kDlaaRoles][kUpscalerSlots];") == 1);
+        CHECK(count("DlaaRoleStats g_fullStats[kUpscalerSlots];") == 1);
         CHECK(count("if (!upscalerSlotHasFullFrame(eye)) {") == 2);        // ensureFeature, the one place that indexes g_feature, and dlaaEvaluate
-        CHECK(count("if (!upscalerSlotHasFoveatedRoles(eye)) {") == 2);    // the fovea and the periphery refuse the world's slot
         CHECK(count("for (int eye = 0; eye < 2; ++eye) {") == 1);          // dlaaWarm: the eyes' two only
         CHECK(count("eye > 1") == 0 && count("eye == 1") == 0);             // no hard-coded two-eye bound left
         CHECK(count("the feature is created for %s at") == 1 && count("the feature is created for %s, %ux%u in") == 1 &&
               count("the feature for %s was created for the flat HDR route") == 1 && count("upscalerSlotLabel(eye)") == 3);
-        CHECK(count("static_cast<int>(q.role)][q.eye]") == 1 && count("roleHasSlot(q.role, q.eye)") == 1);
+        CHECK(count("g_fullStats[q.eye]") == 1 && count("upscalerSlotHasFullFrame(q.eye)") == 1);
+    }
+
+    // --- The ceiling (dlss_floor.h, 2026-10-09). NGX answers a usable ladder for any output with max(width, height) <= 8192 and, past that, ok = true
+    // with every size ZERO for all four modes (the Pimax flight at 8268x3948 printed "quality 0x0 (0x0..0x0)" four times; an NGX probe on an RTX 5090,
+    // driver 617.42, measured 8192x8192 usable, 8193 on either axis and 16384x1000 not -- an axis limit, not a pixel count). So `ok` proves nothing; a mode is
+    // ANSWERED only when its sizes are there, and an output with no answered mode is cut to the largest one that has one: 8268x3948 -> 8192x3910. Every check
+    // carries a label "C<n>.<case>.<what>" (the cases: C1 zero_ladder, C2 answered_ladder, C3 single_point, C4 partial, C5 ceiling_8268, C6 ceiling_tall,
+    // C7 ceiling_square, C8 ceiling_odd, C9 ceiling_none, C10 ceiling_verified, C11 ceiling_calls, C12 ceiling_pixel_model, C13 window_mode); the numbers are
+    // there because tools\rig_mutants_lib.py reads a case id as a prefix plus digits. ---
+    {
+        // The answer past the limit: ok, every size zero, on all four modes.
+        const auto zeroLadder = [](DlssModeRange ms[kDlssModeCount]) {
+            for (int k = 0; k < kDlssModeCount; ++k) {
+                ms[k] = DlssModeRange{};
+                ms[k].ok = true;
+            }
+        };
+        // NGX as measured: a usable ladder when both axes are within 8192, the zero ladder otherwise.
+        const auto perAxis = [&](unsigned qw, unsigned qh, DlssModeRange* ms) {
+            if (qw <= 8192 && qh <= 8192) buildLadder(qw, qh, ms); else zeroLadder(ms);
+        };
+        // NOT NGX: a pixel-count limit, to prove the per-axis model above is what the search followed.
+        const auto perPixel = [&](unsigned qw, unsigned qh, DlssModeRange* ms) {
+            if (uint64_t(qw) * qh <= 32000000ull) buildLadder(qw, qh, ms); else zeroLadder(ms);
+        };
+        const auto answeredBy = [](const auto& q, unsigned qw, unsigned qh) {
+            DlssModeRange ms[kDlssModeCount];
+            q(qw, qh, ms);
+            return dlssRangesAnswered(ms);
+        };
+        // The oracle: the largest even width at or under the door's whose size the model answers, every width tried, no bisection; the height is the
+        // door's aspect, rounded down and made even, as the search sizes it.
+        const auto bruteCeiling = [](unsigned dw, unsigned dh, const auto& q, unsigned* bw, unsigned* bh) {
+            *bw = *bh = 0;
+            for (unsigned half = 1; half <= dw / 2; ++half) {
+                const unsigned qw = 2 * half;
+                const unsigned qh = static_cast<unsigned>((uint64_t(dh) * qw / dw) & ~uint64_t(1));
+                if (qh < 2) continue;
+                DlssModeRange ms[kDlssModeCount];
+                q(qw, qh, ms);
+                if (dlssRangesAnswered(ms)) { *bw = qw; *bh = qh; }
+            }
+            return *bw != 0;
+        };
+
+        // C1: the flight's zero ladder is no answer and no floor, and serves nothing.
+        DlssModeRange zl[kDlssModeCount];
+        zeroLadder(zl);
+        uint32_t zfw = 0, zfh = 0, zow = 0, zoh = 0;
+        CASE("C1.zero_ladder.not_answered", !dlssRangesAnswered(zl));
+        CASE("C1.zero_ladder.no_mode_answered", !dlssModeAnswered(zl[0]) && !dlssModeAnswered(zl[1]) && !dlssModeAnswered(zl[2]) && !dlssModeAnswered(zl[3]));
+        CASE("C1.zero_ladder.no_floor", !dlssRangeFloor(zl, &zfw, &zfh) && zfw == 0 && zfh == 0);
+        CASE("C1.zero_ladder.no_floor_output", !dlssFloorOutput(zl, 8268, 3948, 4134, 1974, &zow, &zoh));
+        CASE("C1.zero_ladder.door_kept", zow == 8268 && zoh == 3948);
+        CASE("C1.zero_ladder.serves_nothing", !dlssRangesServe(zl, 4134, 1974) && !dlssRangesServe(zl, 1, 1));
+
+        // C2: a complete ladder is answered, on every mode and as a whole.
+        DlssModeRange al[kDlssModeCount];
+        buildLadder(4134, 1974, al);
+        CASE("C2.answered_ladder.mode_0", dlssModeAnswered(al[0]));
+        CASE("C2.answered_ladder.mode_1", dlssModeAnswered(al[1]));
+        CASE("C2.answered_ladder.mode_2", dlssModeAnswered(al[2]));
+        CASE("C2.answered_ladder.mode_3", dlssModeAnswered(al[3]));
+        CASE("C2.answered_ladder.ranges_answered", dlssRangesAnswered(al));
+
+        // C3: one mode answered as a point (ultra performance on the flights) is an answer, and is no floor.
+        DlssModeRange sp[kDlssModeCount] = {};
+        sp[3].ok = true;
+        sp[3].optW = sp[3].minW = sp[3].maxW = 1378;
+        sp[3].optH = sp[3].minH = sp[3].maxH = 658;
+        uint32_t spw = 0, sph = 0;
+        CASE("C3.single_point.mode_answered", dlssModeAnswered(sp[3]));
+        CASE("C3.single_point.ranges_answered", dlssRangesAnswered(sp));
+        CASE("C3.single_point.is_no_range", !dlssRangeIsRange(sp[3]));
+        CASE("C3.single_point.no_floor", !dlssRangeFloor(sp, &spw, &sph));
+        CASE("C3.single_point.serves_itself", dlssRangesServe(sp, 1378, 658) && !dlssRangesServe(sp, 1379, 658));
+
+        // C4: a mode that is missing a part of its answer is not answered -- the three shapes the spec names, then each field of a complete mode on its own.
+        DlssModeRange pt[kDlssModeCount] = {};
+        pt[0].ok = true;  // optimal set, minimum zero
+        pt[0].optW = 2756; pt[0].optH = 1316;
+        pt[0].maxW = 4134; pt[0].maxH = 1974;
+        pt[1].ok = true;  // minimum above maximum
+        pt[1].optW = 2067; pt[1].optH = 987;
+        pt[1].minW = 4134; pt[1].minH = 1974;
+        pt[1].maxW = 2067; pt[1].maxH = 987;
+        pt[2] = al[2];    // every size there, the call failed
+        pt[2].ok = false;
+        pt[3].ok = true;  // optimal zero, minimum and maximum set
+        pt[3].minW = 1378; pt[3].minH = 658;
+        pt[3].maxW = 4134; pt[3].maxH = 1974;
+        CASE("C4.partial.min_zero", !dlssModeAnswered(pt[0]));
+        CASE("C4.partial.min_above_max", !dlssModeAnswered(pt[1]));
+        CASE("C4.partial.not_ok", !dlssModeAnswered(pt[2]));
+        CASE("C4.partial.opt_zero", !dlssModeAnswered(pt[3]));
+        CASE("C4.partial.none_answered", !dlssRangesAnswered(pt));
+        const DlssModeRange full = al[2];
+        DlssModeRange one;
+        CASE("C4.partial.control", dlssModeAnswered(full));
+        one = full; one.optW = 0;  CASE("C4.partial.opt_w_zero", !dlssModeAnswered(one));
+        one = full; one.optH = 0;  CASE("C4.partial.opt_h_zero", !dlssModeAnswered(one));
+        one = full; one.minW = 0;  CASE("C4.partial.min_w_zero", !dlssModeAnswered(one));
+        one = full; one.minH = 0;  CASE("C4.partial.min_h_zero", !dlssModeAnswered(one));
+        one = full; one.maxW = 0;  CASE("C4.partial.max_w_zero", !dlssModeAnswered(one));
+        one = full; one.maxH = 0;  CASE("C4.partial.max_h_zero", !dlssModeAnswered(one));
+        one = full; one.minW = full.maxW + 1;  CASE("C4.partial.min_w_above_max", !dlssModeAnswered(one));
+        one = full; one.minH = full.maxH + 1;  CASE("C4.partial.min_h_above_max", !dlssModeAnswered(one));
+        one = full; one.minW = full.maxW;      CASE("C4.partial.min_w_equals_max", dlssModeAnswered(one));
+
+        // C5: the flight. 8268x3948 has the zero ladder; the ceiling is 8192 wide, and 3948 * 8192 / 8268 = 3911.7 floors to 3911 and is made even.
+        uint32_t cow = 77, coh = 77;
+        CASE("C5.ceiling_8268.model_door_zero", !answeredBy(perAxis, 8268, 3948));
+        CASE("C5.ceiling_8268.model_cut_answered", answeredBy(perAxis, 8192, 3910));
+        CASE("C5.ceiling_8268.model_next_pair_zero", !answeredBy(perAxis, 8194, 3912));  // the model itself: one pair of pixels past the limit
+        CASE("C5.ceiling_8268.returns", dlssCeilingOutput(8268, 3948, perAxis, &cow, &coh));
+        CASE("C5.ceiling_8268.width", cow == 8192);
+        CASE("C5.ceiling_8268.height", coh == 3910);
+        unsigned bw = 0, bh = 0;
+        CASE("C5.ceiling_8268.oracle", bruteCeiling(8268, 3948, perAxis, &bw, &bh) && bw == cow && bh == coh);
+
+        // C6: a portrait door, the limit on the height: 4134x8268 -> 4096x8192.
+        cow = coh = 77;
+        CASE("C6.ceiling_tall.returns", dlssCeilingOutput(4134, 8268, perAxis, &cow, &coh));
+        CASE("C6.ceiling_tall.size", cow == 4096 && coh == 8192);
+        CASE("C6.ceiling_tall.next_pair_zero", !answeredBy(perAxis, 4098, 8196));
+
+        // C7: a door at the limit is answered as it stands; a door under it is cut only to even.
+        cow = coh = 77;
+        CASE("C7.ceiling_square.returns", dlssCeilingOutput(8192, 8192, perAxis, &cow, &coh));
+        CASE("C7.ceiling_square.size", cow == 8192 && coh == 8192);
+        cow = coh = 77;
+        CASE("C7.ceiling_square.under_limit_returns", dlssCeilingOutput(3071, 3033, perAxis, &cow, &coh));
+        CASE("C7.ceiling_square.under_limit_size", cow == 3070 && coh == 3032);
+        cow = coh = 77;
+        CASE("C7.ceiling_square.exact_door_returns", dlssCeilingOutput(3070, 3032, perAxis, &cow, &coh));
+        CASE("C7.ceiling_square.exact_door_size", cow == 3070 && coh == 3032);
+
+        // C8: an odd door. 3949 * 8192 / 8269 = 3912.2 -> 3912; 3950 * 8192 / 8269 = 3913.2 -> 3913 -> made even, 3912.
+        cow = coh = 77;
+        CASE("C8.ceiling_odd.returns", dlssCeilingOutput(8269, 3949, perAxis, &cow, &coh));
+        CASE("C8.ceiling_odd.even", (cow & 1u) == 0 && (coh & 1u) == 0);
+        CASE("C8.ceiling_odd.size", cow == 8192 && coh == 3912);
+        cow = coh = 77;
+        CASE("C8.ceiling_odd.odd_height_returns", dlssCeilingOutput(8269, 3950, perAxis, &cow, &coh));
+        CASE("C8.ceiling_odd.odd_height_even", (cow & 1u) == 0 && (coh & 1u) == 0);
+        CASE("C8.ceiling_odd.odd_height_size", cow == 8192 && coh == 3912);
+
+        // C9: nothing at or under the door answers -> false, and the outputs say 0, not what they held.
+        const auto zeroAlways = [&](unsigned, unsigned, DlssModeRange* ms) { zeroLadder(ms); };
+        const auto notOk = [](unsigned, unsigned, DlssModeRange* ms) {
+            for (int k = 0; k < kDlssModeCount; ++k) ms[k] = DlssModeRange{};  // ok false: NGX unavailable
+        };
+        cow = coh = 77;
+        CASE("C9.ceiling_none.zero_ladder_false", !dlssCeilingOutput(8268, 3948, zeroAlways, &cow, &coh));
+        CASE("C9.ceiling_none.zero_ladder_outputs_zero", cow == 0 && coh == 0);
+        cow = coh = 77;
+        CASE("C9.ceiling_none.not_ok_false", !dlssCeilingOutput(8268, 3948, notOk, &cow, &coh));
+        CASE("C9.ceiling_none.not_ok_outputs_zero", cow == 0 && coh == 0);
+        cow = coh = 77;
+        CASE("C9.ceiling_none.no_door_false", !dlssCeilingOutput(0, 3948, perAxis, &cow, &coh) && cow == 0 && coh == 0);
+        cow = coh = 77;
+        CASE("C9.ceiling_none.no_door_height_false", !dlssCeilingOutput(8268, 0, perAxis, &cow, &coh) && cow == 0 && coh == 0);
+
+        // C10: only a size seen answered is returned, however the answers fall. A hole at the natural ceiling, at 6000, an island, a hole at the search's
+        // second probe: the size returned answers when it is asked again.
+        const auto holes = [&](unsigned qw, unsigned qh, DlssModeRange* ms) {
+            if (qw == 6000 || qw == 8192) zeroLadder(ms); else perAxis(qw, qh, ms);
+        };
+        cow = coh = 77;
+        CASE("C10.ceiling_verified.holes_returns", dlssCeilingOutput(8268, 3948, holes, &cow, &coh));
+        CASE("C10.ceiling_verified.holes_answered", answeredBy(holes, cow, coh));
+        CASE("C10.ceiling_verified.holes_not_the_holes", cow < 8192 && cow != 6000 && coh <= 3910);
+        const auto island = [&](unsigned qw, unsigned qh, DlssModeRange* ms) {
+            if (qw >= 4000 && qw <= 4200) perAxis(qw, qh, ms); else zeroLadder(ms);
+        };
+        cow = coh = 77;
+        CASE("C10.ceiling_verified.island_returns", dlssCeilingOutput(8268, 3948, island, &cow, &coh));
+        CASE("C10.ceiling_verified.island_answered", answeredBy(island, cow, coh) && cow >= 4000 && cow <= 4200);
+        const auto probeHole = [&](unsigned qw, unsigned qh, DlssModeRange* ms) {
+            if (qw == 6202) zeroLadder(ms); else perAxis(qw, qh, ms);
+        };
+        cow = coh = 77;
+        CASE("C10.ceiling_verified.probe_hole_returns", dlssCeilingOutput(8268, 3948, probeHole, &cow, &coh));
+        CASE("C10.ceiling_verified.probe_hole_answered", answeredBy(probeHole, cow, coh) && cow <= 8192);
+
+        // C11: a bisection -- a dozen queries for 8268x3948 (4134 widths), never a scan.
+        unsigned calls = 0;
+        const auto counting = [&](unsigned qw, unsigned qh, DlssModeRange* ms) { ++calls; perAxis(qw, qh, ms); };
+        cow = coh = 77;
+        CASE("C11.ceiling_calls.returns", dlssCeilingOutput(8268, 3948, counting, &cow, &coh) && cow == 8192 && coh == 3910);
+        CASE("C11.ceiling_calls.at_most_16", calls >= 1 && calls <= 16);
+
+        // C12: the search follows the query. Under a pixel-count limit (32 Mpx; not NGX's) the ceiling of the same door is not 8192x3910 -- it is what the
+        // oracle finds under that limit -- so a search that hard-codes NGX's 8192 cannot pass both models.
+        cow = coh = 77;
+        CASE("C12.ceiling_pixel_model.returns", dlssCeilingOutput(8268, 3948, perPixel, &cow, &coh));
+        CASE("C12.ceiling_pixel_model.differs", !(cow == 8192 && coh == 3910));
+        CASE("C12.ceiling_pixel_model.under_limit", uint64_t(cow) * coh <= 32000000ull && answeredBy(perPixel, cow, coh));
+        CASE("C12.ceiling_pixel_model.oracle", bruteCeiling(8268, 3948, perPixel, &bw, &bh) && bw == cow && bh == coh);
+        CASE("C12.ceiling_pixel_model.models_differ", !answeredBy(perPixel, 8192, 3910) && answeredBy(perAxis, 8192, 3910));
+
+        // C13: the cut output serves a 2x input. At 8192x3910 the three upper modes' floor is half the output, 4096x1955 (buildLadder stacks its modes,
+        // so a floor on the flights' own shape is checked as well), and the flight's 4134x1974 input stands on it with the door unchanged.
+        DlssModeRange cut[kDlssModeCount];
+        buildLadder(8192, 3910, cut);
+        CASE("C13.window_mode.stacked_serves_half", dlssRangesServe(cut, 4096, 1955));
+        DlssModeRange fcut[kDlssModeCount];
+        flightLadder(8192, 3910, fcut);
+        CASE("C13.window_mode.answered", dlssRangesAnswered(fcut));
+        CASE("C13.window_mode.floor_served", dlssRangesServe(fcut, 4096, 1955));
+        CASE("C13.window_mode.under_floor_w_refused", !dlssRangesServe(fcut, 4095, 1955));
+        CASE("C13.window_mode.under_floor_h_refused", !dlssRangesServe(fcut, 4096, 1954));
+        CASE("C13.window_mode.max_served", dlssRangesServe(fcut, 8192, 3910));
+        CASE("C13.window_mode.over_max_w_refused", !dlssRangesServe(fcut, 8194, 3910));
+        CASE("C13.window_mode.over_max_h_refused", !dlssRangesServe(fcut, 8192, 3912));
+        uint32_t wow = 0, woh = 0;
+        int wmode = -2;
+        CASE("C13.window_mode.flight_input_stands", dlssFloorOutput(fcut, 8192, 3910, 4134, 1974, &wow, &woh, &wmode) && wow == 8192 && woh == 3910 && wmode == -1);
     }
 
     std::printf("dlaa_mode_test: %u checks, %u failures\n", checks, failures);

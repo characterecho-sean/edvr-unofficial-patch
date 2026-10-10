@@ -520,7 +520,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\common\hotkey.cpp" "src\common\proxy.cpp" ^
     "src\common\frame_flag.cpp" ^
     "src\common\iat_hook.cpp" "src\common\iniedit.cpp" ^
-    "src\d3d11\input_gate.cpp" "src\d3d11\menu.cpp" ^
+    "src\d3d11\input_gate.cpp" "src\d3d11\joy_watch.cpp" "src\d3d11\hotkey_capture.cpp" "src\d3d11\menu.cpp" ^
     "src\d3d11\oculus_route.cpp" ^
     "src\d3d11\menu_keys.cpp" ^
     "src\d3d11\menu_panel.cpp" "src\d3d11\perf_monitor.cpp" "src\d3d11\native_perf_history.cpp" "src\d3d11\native_benchmark_collector.cpp" ^
@@ -544,9 +544,10 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\render_boundary.cpp" ^
     "src\d3d11\exposure_fix.cpp" "src\d3d11\vscreen.cpp" "src\d3d11\plugin_registry.cpp" "src\d3d11\plugin_cost.cpp" ^
     "src\d3d11\glitch_frame.cpp" ^
-    "src\d3d11\pose_reader_watch.cpp" "src\d3d11\transition_flash_eye_base.cpp" ^
+    "src\d3d11\transition_flash_eye_base.cpp" ^
+    "src\d3d11\explorer_cam.cpp" ^
     "src\d3d11\vscreen_res.cpp" "src\common\vscreen_auto_state.cpp" "src\d3d11\vscreen_footprint.cpp" ^
-    "src\d3d11\binding_shadow.cpp" "src\d3d11\head_offset_gate.cpp" ^
+    "src\d3d11\binding_shadow.cpp" ^
     "src\d3d11\vr_runtime.cpp" ^
     "src\d3d11\journal_watch.cpp" "src\d3d11\terrain_checkerboard.cpp" ^
     "src\d3d11\elite_binds.cpp" "src\d3d11\draw_census.cpp" "src\d3d11\draw_ladder_trace.cpp" ^
@@ -555,15 +556,14 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\object_record_writer_probe.cpp" "src\d3d11\object_record_writer_hook.cpp" ^
     "src\d3d11\kinematic_eval_probe.cpp" "src\d3d11\kinematic_eval_hook.cpp" ^
     "src\d3d11\scheduler_stack_probe.cpp" "src\d3d11\scheduler_stack_hook.cpp" ^
-    "src\d3d11\static_prop_gate.cpp" "src\d3d11\cull_gate_probe.cpp" ^
-    "src\d3d11\lod_governor.cpp" ^
-    "src\d3d11\engine_velocity.cpp" ^
+    "src\d3d11\cull_gate_probe.cpp" ^
+    "src\d3d11\engine_velocity.cpp" "src\d3d11\skin_join_gpu.cpp" "src\d3d11\skin_entity_hook.cpp" ^
     "src\d3d11\celestial_motion.cpp" ^
     "src\d3d11\fss_res.cpp" ^
     "src\d3d11\fss_panel.cpp" ^
     "src\d3d11\fss_reveal.cpp" ^
-    "src\d3d11\fss_dump.cpp" "src\d3d11\fss_heal.cpp" ^
-    "src\d3d11\resolve_bind_fix.cpp" ^
+    "src\d3d11\fss_heal.cpp" ^
+    "src\d3d11\vertex_resync_hook.cpp" ^
     "src\d3d11\xinput_watch.cpp" ^
     "src\d3d11\fss_panel_rect.cpp" ^
     "src\d3d11\panel_curve.cpp" "src\d3d11\screen_motion.cpp" "src\d3d11\weapon_motion.cpp" ^
@@ -576,7 +576,6 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\backdrop_fix.cpp" ^
     "src\d3d11\scrim_fix.cpp" ^
     "src\d3d11\quad_probe.cpp" ^
-    "src\d3d11\intro_probe.cpp" ^
     "src\d3d11\intro_panel.cpp" ^
     "src\d3d11\intro_curve.cpp" ^
     "src\d3d11\intro_skip.cpp" ^
@@ -588,7 +587,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\dlss_runtime_info.cpp" ^
     "src\d3d11\fsr3_engine.cpp" ^
     "src\d3d11\sharpen_pass.cpp" ^
-    "src\d3d11\flat_sharpen.cpp" ^
+    "src\d3d11\flat_sharpen.cpp" "src\d3d11\flat_ui_layer.cpp" ^
     "src\d3d11\loader_panel.cpp" ^
     "src\d3d11\splash_dim.cpp" ^
     "src\d3d11\billboard_fix.cpp" ^
@@ -889,7 +888,7 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /Fo"%OBJ%\native_menu\\" /Fe"%BUILD%\native_menu_test.exe" ^
     "tools\native_menu_test\native_menu_test.cpp" "src\d3d11\native_menu.cpp" ^
     "src\openxr\eye_capture.cpp" "src\openxr\shared_texture_transfer.cpp" "src\openxr\producer_gpu_timing.cpp" ^
-    "src\d3d11\input_gate.cpp" "src\d3d11\menu_panel.cpp" ^
+    "src\d3d11\input_gate.cpp" "src\d3d11\joy_watch.cpp" "src\d3d11\menu_panel.cpp" ^
     "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
     "src\d3d11\menu_keys.cpp" "src\d3d11\shader_swap.cpp" "src\d3d11\plugin_cost.cpp" ^
     "src\common\iat_hook.cpp" "src\common\iniedit.cpp" ^
@@ -943,15 +942,15 @@ if errorlevel 1 ( echo [edvr] ERROR: native FSS shader test build failed & exit 
 "%BUILD%\native_fss_gpu_test.exe" --self-test || exit /b 1
 exit /b 0
 
-:rig_native_cull_test
-echo [edvr] === native_cull_test.exe ===
-if not exist "%OBJ%\native_cull" mkdir "%OBJ%\native_cull"
+:rig_native_trim_test
+echo [edvr] === native_trim_test.exe ===
+if not exist "%OBJ%\native_trim" mkdir "%OBJ%\native_trim"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
-    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\native_cull\\" /Fe"%BUILD%\native_cull_test.exe" ^
-    "tools\native_cull_test\native_cull_test.cpp" /link /INCREMENTAL:NO
-if errorlevel 1 ( echo [edvr] ERROR: native cull policy test build failed & exit /b 1 )
-"%BUILD%\native_cull_test.exe" --dry-run || exit /b 1
-"%BUILD%\native_cull_test.exe" --self-test || exit /b 1
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\native_trim\\" /Fe"%BUILD%\native_trim_test.exe" ^
+    "tools\native_trim_test\native_trim_test.cpp" /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: native FOV trim policy test build failed & exit /b 1 )
+"%BUILD%\native_trim_test.exe" --dry-run || exit /b 1
+"%BUILD%\native_trim_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_dlaa_mode_test
@@ -963,6 +962,8 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
 if errorlevel 1 ( echo [edvr] ERROR: dlaa_mode_test build failed & exit /b 1 )
 "%BUILD%\dlaa_mode_test.exe" --dry-run || exit /b 1
 "%BUILD%\dlaa_mode_test.exe" --self-test || exit /b 1
+REM tools\dlaa_mode_test\mutants.py --self-test holds the mutation list to the sources as they are; --run builds the rig against each edit.
+python "tools\dlaa_mode_test\mutants.py" --self-test || exit /b 1
 exit /b 0
 
 :rig_format_support_test
@@ -992,6 +993,8 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /I"third_party\openxr\include" ^
     /Fo"%OBJ%\native_temporal\\" /Fe"%BUILD%\native_temporal_test.exe" ^
     "tools\native_temporal_test\native_temporal_test.cpp" "src\d3d11\native_temporal.cpp" ^
+    "src\d3d11\glitch_frame.cpp" "src\d3d11\vr_runtime.cpp" "src\d3d11\transition_flash_eye_base.cpp" ^
+    "src\common\code_hook.cpp" "src\common\guard.cpp" ^
     "src\common\config.cpp" "src\common\frame_flag.cpp" "src\common\log.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib dxgi.lib
 if errorlevel 1 ( echo [edvr] ERROR: native temporal test build failed & exit /b 1 )
@@ -1243,6 +1246,137 @@ if errorlevel 1 ( echo [edvr] ERROR: vram_watch_test build failed & exit /b 1 )
 python "tools\vram_watch_test\mutants.py" --self-test || exit /b 1
 exit /b 0
 
+:rig_skin_ledger_test
+echo [edvr] === skin_ledger_test.exe ===
+REM Build gate for the skin ledger (src\d3d11\skin_ledger.h, the F2 settling instrument that rides an armed eye run;
+REM docs\kinematic-motion-injection-2026-09-19.md, "F2 study"): the rules (unarmed is silent and stateless, the 20-frame window and its
+REM edges, the copy plan, the numbers, a whole run, a run of fewer frames than the window, never-ran told from broken, a run the process
+REM ended, finished only after the report), the file layout written by the production serialiser, and by source text the glue that
+REM reads the context (the dispatch hook asks before it acts, one arm, the report before the pool copies are let go, whole palette
+REM copies). The rig writes a fixture run; tools\skin_palette_check.py (the offline checker) reads it with its own reader and
+REM requires its verdicts, and --self-test builds synthetic runs with injected faults. It links nothing of the DLLs and needs no device.
+REM tools\skin_ledger_test\mutants.py --self-test holds the mutation list to the sources as they are; --run builds the rig
+REM against each edit and needs the MSVC toolchain.
+if not exist "%OBJ%\skinledger" mkdir "%OBJ%\skinledger"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /I"src\d3d11" ^
+    /Fo"%OBJ%\skinledger"\ /Fe"%OBJ%\skinledger\skin_ledger_test.exe" ^
+    "tools\skin_ledger_test\skin_ledger_test.cpp" ^
+    /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: skin_ledger_test build failed & exit /b 1 )
+"%OBJ%\skinledger\skin_ledger_test.exe" --dry-run || exit /b 1
+"%OBJ%\skinledger\skin_ledger_test.exe" --self-test "%ROOT%" || exit /b 1
+if not exist "%OBJ%\skinledger\fixture" mkdir "%OBJ%\skinledger\fixture"
+"%OBJ%\skinledger\skin_ledger_test.exe" --fixture "%OBJ%\skinledger\fixture" || exit /b 1
+python "tools\skin_palette_check.py" --self-test || exit /b 1
+python "tools\skin_palette_check.py" --verify-fixture "%OBJ%\skinledger\fixture" || exit /b 1
+python "tools\skin_ledger_test\mutants.py" --self-test || exit /b 1
+exit /b 0
+
+:rig_skin_join_test
+echo [edvr] === skin_join_test.exe ===
+REM Build gate for the second skin's join (src\d3d11\skin_join.h, skin_entity_walk.h; docs\kinematic-motion-injection-2026-09-19.md, "F2 built"): the
+REM CPU half of the identity of a skinned character from one frame to the next. The hook's reading of the game's entry list over a fake heap with
+REM faults in it (J11), the job table's prefix join and the hook's entity join against a scripted world (spawn, despawn, reorder, a character that
+REM changes its bone count, a swap, the hook disagreeing with the table, a gap in the frames, no history), the palette history's certificates, the
+REM plan the GPU is handed, and the periodic line. A failed join is no history, never a guess: the cases pin it. No device needed.
+REM tools\skin_join_test\mutants.py --self-test holds the mutation list to the sources as they are; --run builds the rig against each edit.
+if not exist "%OBJ%\skinjoin" mkdir "%OBJ%\skinjoin"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /I"src\d3d11" ^
+    /Fo"%OBJ%\skinjoin"\ /Fe"%OBJ%\skinjoin\skin_join_test.exe" ^
+    "tools\skin_join_test\skin_join_test.cpp" ^
+    /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: skin_join_test build failed & exit /b 1 )
+"%OBJ%\skinjoin\skin_join_test.exe" --dry-run || exit /b 1
+"%OBJ%\skinjoin\skin_join_test.exe" --self-test "%ROOT%" || exit /b 1
+python "tools\skin_join_test\mutants.py" --self-test || exit /b 1
+exit /b 0
+
+:rig_skin_join_gpu_test
+echo [edvr] === skin_join_gpu_test.exe ===
+REM Build gate for the second skin's GPU join (src\d3d11\skin_join_shader.h: JoinCS and the pose table's clear, scatter and verify passes) on WARP.
+REM The shipped HLSL is compiled and run beside the CPU model (skin_join.h) on scripted and random worlds and must agree with it word for word:
+REM the join and info tables, the pose table, the hook cross-check bits, the statistics. The fxc trap that cost a build once is pinned (atomics
+REM counted after the loops, not inside branches that `continue`). Needs no real GPU.
+if not exist "%OBJ%\skinjoingpu" mkdir "%OBJ%\skinjoingpu"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /I"src\d3d11" ^
+    /Fo"%OBJ%\skinjoingpu"\ /Fe"%OBJ%\skinjoingpu\skin_join_gpu_test.exe" ^
+    "tools\skin_join_gpu_test\skin_join_gpu_test.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib dxguid.lib
+if errorlevel 1 ( echo [edvr] ERROR: skin_join_gpu_test build failed & exit /b 1 )
+"%OBJ%\skinjoingpu\skin_join_gpu_test.exe" --dry-run || exit /b 1
+"%OBJ%\skinjoingpu\skin_join_gpu_test.exe" --self-test "%ROOT%" || exit /b 1
+python "tools\skin_join_gpu_test\mutants.py" --self-test || exit /b 1
+exit /b 0
+
+:rig_skin_clone_test
+echo [edvr] === skin_clone_test.exe ===
+REM Build gate for the second skin's vertex shader patch (src\d3d11\dxbc_skin_clone.h, through dxbc_engine_velocity.h; docs\kinematic-motion-injection-
+REM 2026-09-19.md, "F2 built"): the token-level clone that computes last frame's position from last frame's palette and pose. Tokens and structure
+REM (the new resources, the temp renaming, the single export), every refusal (displacement before the anchor, no pose, a square root in the chain,
+REM relative cb addressing, occupied slots), and on WARP the properties that make E exact: E is exactly zero when the previous state equals the
+REM current, equals the CPU reference within 1e-6 when it does not, is zero and invalid without a join, and is the same for a swapped palette
+REM buffer pair. --corpus DIR adds the game's own five skinned shaders from a log dump (local only, not run here).
+if not exist "%OBJ%\skinclone" mkdir "%OBJ%\skinclone"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /utf-8 ^
+    /Fo"%OBJ%\skinclone"\ /Fe"%OBJ%\skinclone\skin_clone_test.exe" ^
+    "tools\skin_clone_test\skin_clone_test.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib dxguid.lib
+if errorlevel 1 ( echo [edvr] ERROR: skin_clone_test build failed & exit /b 1 )
+"%OBJ%\skinclone\skin_clone_test.exe" --dry-run || exit /b 1
+"%OBJ%\skinclone\skin_clone_test.exe" --self-test "%ROOT%" || exit /b 1
+python "tools\skin_clone_test\mutants.py" --self-test || exit /b 1
+exit /b 0
+
+:rig_skin_engine_test
+echo [edvr] === skin_engine_test.exe ===
+REM Build gate for the second skin's engine side (docs\kinematic-motion-injection-2026-09-19.md, "F2 built"), on WARP. The compose: the shipped HLSL's
+REM skinned reprojection against a double reference (previous position = world + camera term + E), the production mv pass on real ES/EP/scene-depth/target-7
+REM resources (a valid E takes its exact motion, E = 0 is the camera term, no valid E keeps no history, rigid records never read target 7, the counters and
+REM the |E| bins), and the derived blend state's target-7 modes. The engine: the linked engine_velocity.cpp and skin_join_gpu.cpp draw a skinned character
+REM in both eyes through the real path (the palette chain's dispatch told to the join, the pool torn the way the game's tees report it, the patched pair
+REM made and bound, target 7 created, cleared and read back through the view the compose gets): the first frame has honest no-history, a steady character
+REM has E exactly zero in both eyes, a moving one has 100 x (previous - current), a changed job table has none for a frame, the three views and target 7
+REM are bound for the draw and let go at the boundary, the hook's list and the prefix both identify the character, the periodic lines carry the GPU's
+REM counters, a previous palette buffer too small for a job's previous rows gives no history. tools\skin_engine_test\mutants.py --self-test holds the
+REM mutation list to the sources as they are; --run (needs this build's generated shader header) rebuilds the rig against each edit.
+if not exist "%OBJ%\skinengine" mkdir "%OBJ%\skinengine"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /utf-8 ^
+    /DEDVR_ENGINE_VELOCITY_RIG /DEDVR_BINDING_SHADOW_EXTERNAL /I"%GEN%" /I"src\d3d11" ^
+    /Fo"%OBJ%\skinengine"\ /Fe"%OBJ%\skinengine\skin_engine_test.exe" ^
+    "tools\skin_engine_test\skin_engine_test.cpp" "src\d3d11\engine_velocity.cpp" "src\d3d11\skin_join_gpu.cpp" "src\d3d11\plugin_cost.cpp" ^
+    "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib dxguid.lib
+if errorlevel 1 ( echo [edvr] ERROR: skin_engine_test build failed & exit /b 1 )
+"%OBJ%\skinengine\skin_engine_test.exe" --dry-run || exit /b 1
+"%OBJ%\skinengine\skin_engine_test.exe" --self-test "%ROOT%" || exit /b 1
+python "tools\skin_engine_test\mutants.py" --self-test || exit /b 1
+exit /b 0
+
+:rig_skin_entity_hook_test
+echo [edvr] === skin_entity_hook_test.exe ===
+REM Build gate for the read-only hook on the game's skinning-job assembly (src\d3d11\skin_entity_hook.cpp, EDVR_SKIN_HOOK_TEST; docs\kinematic-motion-
+REM injection-2026-09-19.md, "F2 built"). The production source carries its own test: the real CodeHook patches a synthetic function that begins with the
+REM real 28-byte prologue, the real relay runs, the real guarded reads walk a heap laid out as the decompile says the list is. The original runs first,
+REM the list is read whole, a wrong prologue stands the hook down with no patch, a fault or a wild pointer is counted and the game is unharmed, a second
+REM node stands it down, a gate shut observes nothing, and a reader against the game's thread never gets a torn copy.
+if not exist "%OBJ%\skinentityhook" mkdir "%OBJ%\skinentityhook"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /DEDVR_SKIN_HOOK_TEST /I"src\d3d11" ^
+    /Fo"%OBJ%\skinentityhook"\ /Fe"%OBJ%\skinentityhook\skin_entity_hook_test.exe" ^
+    "tools\skin_entity_hook_test\skin_entity_hook_test.cpp" "src\d3d11\skin_entity_hook.cpp" ^
+    "src\common\code_hook.cpp" "src\common\guard.cpp" "src\common\log.cpp" "src\common\config.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib
+if errorlevel 1 ( echo [edvr] ERROR: skin_entity_hook_test build failed & exit /b 1 )
+"%OBJ%\skinentityhook\skin_entity_hook_test.exe" --dry-run || exit /b 1
+"%OBJ%\skinentityhook\skin_entity_hook_test.exe" --self-test "%ROOT%" || exit /b 1
+python "tools\skin_entity_hook_test\mutants.py" --self-test || exit /b 1
+exit /b 0
+
 :rig_slow_regime_test
 echo [edvr] === slow_regime_test.exe ===
 REM Build gate for the runtime's vendor instruments (src\openxr\vendor_events.h, end_frame_episodes.h, slow_regime.h,
@@ -1487,7 +1621,7 @@ if not exist "%OBJ%\inputgatetest" mkdir "%OBJ%\inputgatetest"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\inputgatetest"\ ^
     /Fe"%BUILD%\input_gate_test.exe" "tools\input_gate_test\input_gate_test.cpp" ^
-    "src\common\iat_hook.cpp" "src\common\vtable_hook.cpp" ^
+    "src\d3d11\joy_watch.cpp" "src\common\iat_hook.cpp" "src\common\vtable_hook.cpp" ^
     "src\common\hotkey.cpp" "src\common\config.cpp" "src\common\log.cpp" ^
     "src\common\guard.cpp" "src\common\frame_flag.cpp" "src\common\proxy.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib version.lib dinput8.lib
@@ -1498,13 +1632,34 @@ if errorlevel 1 ( echo [edvr] ERROR: input_gate_test build failed & exit /b 1 )
 )
 exit /b 0
 
+:rig_hotkey_capture_test
+echo [edvr] === hotkey_capture_test.exe ===
+REM The F8 menu's Hotkeys page below the menu: the three hotkey value formats and their round trip
+REM through edvr.ini, the pad and joystick edge, the joystick table against synthetic DIJOYSTATE2
+REM buffers on a read-only page, the capture state machine, the checks on a captured binding
+REM (duplicate, reserved, Elite clash, the Explorer Cam lock), Elite's bindings read for keyboard,
+REM pad and joystick, and which generated rows are on the page in which tier. Nothing is opened:
+REM no device, no window, no game.
+if not exist "%OBJ%\hotkeycapturetest" mkdir "%OBJ%\hotkeycapturetest"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /I"%GEN%" /Fo"%OBJ%\hotkeycapturetest"\ ^
+    /Fe"%BUILD%\hotkey_capture_test.exe" "tools\hotkey_capture_test\hotkey_capture_test.cpp" ^
+    "src\common\hotkey.cpp" "src\d3d11\joy_watch.cpp" "src\d3d11\hotkey_capture.cpp" ^
+    "src\d3d11\elite_binds.cpp" "src\common\iniedit.cpp" "src\common\config.cpp" "src\common\log.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib version.lib
+if errorlevel 1 ( echo [edvr] ERROR: hotkey_capture_test build failed & exit /b 1 )
+"%BUILD%\hotkey_capture_test.exe" "%ROOT%" || (
+    echo [edvr] ERROR: the Hotkeys page failed its format, capture, joystick or row checks
+    exit /b 1
+)
+exit /b 0
+
 :rig_gate_test
 echo [edvr] === gate_test.exe ===
 if not exist "%OBJ%\gatetest" mkdir "%OBJ%\gatetest"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\gatetest"\ /Fe"%BUILD%\gate_test.exe" ^
     "tools\gate_test\gate_test.cpp" ^
-    "src\d3d11\head_offset_gate.cpp" "src\d3d11\vr_runtime.cpp" ^
     "src\common\config.cpp" ^
     "src\common\log.cpp" "src\common\frame_flag.cpp" ^
     "src\common\guard.cpp" ^
@@ -1512,7 +1667,7 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib version.lib
 if errorlevel 1 ( echo [edvr] ERROR: gate_test build failed & exit /b 1 )
 "%BUILD%\gate_test.exe" "%ROOT%" || (
-    echo [edvr] ERROR: the head-offset gate arms where it should not
+    echo [edvr] ERROR: gate_test failed: the journal watcher, timing, periodic work or logged-note checks
     exit /b 1
 )
 exit /b 0
@@ -2650,18 +2805,18 @@ cl.exe /I"%GEN%" /nologo /c /O2 /Gy /Gw /MT /std:c++17 /EHsc /W4 /GR- ^
     /DEDVR_VSCREEN_PREDICATE_TEST /DEDVR_VERSION_STRING=\"%EDVR_VER%\" %NGXFLAGS% %FSRFLAGS% ^
     /Fo"%OBJ%\vscreenpredicate\\" ^
     "tools\vscreen_predicate_test\vscreen_predicate_test.cpp" ^
-    "src\d3d11\vscreen.cpp" "src\d3d11\ui_layer.cpp" "src\d3d11\draw_ladder_trace.cpp" "src\d3d11\loader_panel.cpp" "src\d3d11\fss_dump.cpp" "src\d3d11\target_sharp.cpp" "src\d3d11\sunglare_fix.cpp"
+    "src\d3d11\vscreen.cpp" "src\d3d11\ui_layer.cpp" "src\d3d11\draw_ladder_trace.cpp" "src\d3d11\loader_panel.cpp" "src\d3d11\target_sharp.cpp" "src\d3d11\sunglare_fix.cpp"
 if errorlevel 1 ( echo [edvr] ERROR: VScreen predicate test compile failed & exit /b 1 )
 > "%OBJ%\vscreenpredicate\production_objects.rsp" (
     for %%F in ("%OBJ%\d3d11\*.obj") do (
-        if /I not "%%~nxF"=="vscreen.obj" if /I not "%%~nxF"=="ui_layer.obj" if /I not "%%~nxF"=="draw_ladder_trace.obj" if /I not "%%~nxF"=="loader_panel.obj" if /I not "%%~nxF"=="fss_dump.obj" if /I not "%%~nxF"=="target_sharp.obj" if /I not "%%~nxF"=="sunglare_fix.obj" echo "%%~fF"
+        if /I not "%%~nxF"=="vscreen.obj" if /I not "%%~nxF"=="ui_layer.obj" if /I not "%%~nxF"=="draw_ladder_trace.obj" if /I not "%%~nxF"=="loader_panel.obj" if /I not "%%~nxF"=="target_sharp.obj" if /I not "%%~nxF"=="sunglare_fix.obj" echo "%%~fF"
     )
 )
 link.exe /nologo /MACHINE:X64 /INCREMENTAL:NO /OPT:REF ^
     /OUT:"%BUILD%\vscreen_predicate_test.exe" ^
     "%OBJ%\vscreenpredicate\vscreen_predicate_test.obj" ^
     "%OBJ%\vscreenpredicate\vscreen.obj" "%OBJ%\vscreenpredicate\ui_layer.obj" "%OBJ%\vscreenpredicate\draw_ladder_trace.obj" ^
-    "%OBJ%\vscreenpredicate\loader_panel.obj" "%OBJ%\vscreenpredicate\fss_dump.obj" "%OBJ%\vscreenpredicate\target_sharp.obj" "%OBJ%\vscreenpredicate\sunglare_fix.obj" ^
+    "%OBJ%\vscreenpredicate\loader_panel.obj" "%OBJ%\vscreenpredicate\target_sharp.obj" "%OBJ%\vscreenpredicate\sunglare_fix.obj" ^
     @"%OBJ%\vscreenpredicate\production_objects.rsp" ^
     "%OBJ%\plugins\cockpit_visuals\plugin_cockpit_visuals.lib" ^
     kernel32.lib user32.lib gdi32.lib version.lib d3dcompiler.lib %NGXLIB% %FSRLIB%
@@ -2732,22 +2887,6 @@ cl.exe /I"%GEN%" /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
 if errorlevel 1 ( echo [edvr] ERROR: remlok predicate test build failed & exit /b 1 )
 "%BUILD%\remlok_predicate_test.exe" --dry-run || exit /b 1
 "%BUILD%\remlok_predicate_test.exe" --self-test || exit /b 1
-exit /b 0
-
-:rig_resolve_bind_test
-echo [edvr] === resolve bind shadow regression ===
-if not exist "%OBJ%\resolvebind" mkdir "%OBJ%\resolvebind"
-cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
-    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
-    /Fo"%OBJ%\resolvebind\\" /Fe"%OBJ%\resolvebind\resolve_bind_test.exe" ^
-    "tools\resolve_bind_test\resolve_bind_test.cpp" ^
-    "src\d3d11\resolve_bind_fix.cpp" "src\d3d11\binding_shadow.cpp" "src\d3d11\plugin_cost.cpp" ^
-    "src\common\vtable_hook.cpp" "src\common\code_hook.cpp" ^
-    "src\common\log.cpp" "src\common\config.cpp" "src\common\proxy.cpp" ^
-    "src\common\guard.cpp" ^
-    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib user32.lib version.lib
-if errorlevel 1 ( echo [edvr] ERROR: resolve bind test build failed & exit /b 1 )
-"%OBJ%\resolvebind\resolve_bind_test.exe" || exit /b 1
 exit /b 0
 
 :rig_object_classification
@@ -2822,15 +2961,6 @@ python "tools\eye_panel_snapshot.py" "%OBJ%\panelsnapshot\fixture.bin" --verify-
 REM The crisp-HUD parity gate (G-F) reads both snapshot formats; gate its
 REM self-test here, after both parents' fixtures ran.
 python "tools\hud_parity.py" --self-test || exit /b 1
-exit /b 0
-
-:rig_vr_census_test
-if not exist "%OBJ%\vrcensus" mkdir "%OBJ%\vrcensus"
-cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT ^
-    /Fo"%OBJ%\vrcensus\\" /Fe"%BUILD%\vr_census_test.exe" ^
-    "tools\vr_census_test\vr_census_test.cpp" /link /INCREMENTAL:NO
-if errorlevel 1 ( echo [edvr] ERROR: VR census budget test build failed & exit /b 1 )
-"%BUILD%\vr_census_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_gpu_span_state_test
@@ -3070,6 +3200,9 @@ for %%T in (native stereo) do (
     "%BUILD%\openxr_%%T_test.exe" --dry-run || exit /b 1
     "%BUILD%\openxr_%%T_test.exe" --self-test || exit /b 1
 )
+REM tools\openxr_stereo_test\mutants.py --self-test holds the mutation list to d3d11_stereo.cpp as it is (a fully black frame draws nothing: case B1); --run builds the
+REM rig against each edit.
+python "tools\openxr_stereo_test\mutants.py" --self-test || exit /b 1
 exit /b 0
 
 :rig_openxr_capture_test
@@ -3660,18 +3793,21 @@ REM (EDVR_ENGINE_VELOCITY_RIG: no engine image to verify; the binding shadow
 REM external) and drives its draw half through the flight's and the review's
 REM cases -- cb1 re-maps, interleaved eyes, source swaps, pool writes, blend
 REM states, depth formats, the stand-down -- plus the temporal pass's
-REM compute-state save, sentinel by sentinel.
+REM compute-state save, sentinel by sentinel. It ends with the remember cap (remember_cap_tests.h: a full
+REM table of keyed shader objects writes one line per kind on the first drop, never below the cap);
+REM tools\engine_velocity_test\mutants.py --self-test holds that line's mutation list to the source as it is.
 if not exist "%OBJ%\enginevelocity" mkdir "%OBJ%\enginevelocity"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /utf-8 ^
     /DEDVR_ENGINE_VELOCITY_RIG /DEDVR_BINDING_SHADOW_EXTERNAL /I"%GEN%" ^
     /Fo"%OBJ%\enginevelocity\\" /Fe"%OBJ%\enginevelocity\engine_velocity_test.exe" ^
-    "tools\engine_velocity_test\engine_velocity_test.cpp" "src\d3d11\engine_velocity.cpp" ^
+    "tools\engine_velocity_test\engine_velocity_test.cpp" "src\d3d11\engine_velocity.cpp" "src\d3d11\skin_join_gpu.cpp" ^
     "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
     /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib dxguid.lib
 if errorlevel 1 ( echo [edvr] ERROR: engine velocity test build failed & exit /b 1 )
 "%OBJ%\enginevelocity\engine_velocity_test.exe" --dry-run || exit /b 1
 "%OBJ%\enginevelocity\engine_velocity_test.exe" --self-test || exit /b 1
+python "tools\engine_velocity_test\mutants.py" --self-test || exit /b 1
 exit /b 0
 
 :rig_engine_motion_cpu_test
@@ -3737,6 +3873,96 @@ if errorlevel 1 ( echo [edvr] ERROR: transition flash prevent test build failed 
 "%BUILD%\transition_flash_prevent_test.exe" --self-test || exit /b 1
 exit /b 0
 
+:rig_explorer_cam_test
+echo [edvr] === explorer_cam_test.exe ===
+REM Build gate for Explorer Cam (hotkey.explorer_cam; docs\design-explorer-cam-free-camera-2026-10-07.md, "Phase 1a", "Phase 1c").
+REM Part A drives src\d3d11\explorer_cam_core.h, the pure half the DLL compiles: the build-332841 identity and CodeHook's reading of all five
+REM prologues, the eye keys' clamp, the exact 16 floats written into the free camera's commander-local pose, the placement machine on
+REM scripted state sequences, the F5 sequencer on scripted mode sequences (enter from every mode, timeouts, the player's own TAB engaging
+REM nothing, detach and re-attach, exit), F5's decision table, the camera-UI hider, the watches, the event ring, every log line's text and
+REM the relays' machine code. Part B compiles the REAL glue (explorer_cam.cpp, EDVR_EXPLORER_CAM_TEST) with the real CodeHook and installs all
+REM five hooks on synthetic functions that begin with the real prologues: the pose is written before the original, every pressed int is 1
+REM for exactly one call and restored after it, both bypass relays answer 0 without running the function for the placed activity only and
+REM hand every other call, with its arguments (the sweep's fifth on the stack), to the original, each wrong prologue stands down with one
+REM line and no patch, F5 opens the camera, switches to the free camera, places, locks and hides the UI and F5 again gives the UI back and
+REM closes the camera, the hotkey is checked against a fixture of the player's Elite bindings at launch and on a rebind, faults are counted
+REM and the eighth ends the feature, and the keys are read from the config under their real names.
+if not exist "%OBJ%\explorercam" mkdir "%OBJ%\explorercam"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /DEDVR_EXPLORER_CAM_TEST /I"%GEN%" ^
+    /Fo"%OBJ%\explorercam"\ /Fe"%BUILD%\explorer_cam_test.exe" ^
+    "tools\explorer_cam_test\explorer_cam_test.cpp" "src\d3d11\explorer_cam.cpp" "src\d3d11\elite_binds.cpp" ^
+    "src\common\hotkey.cpp" "src\common\code_hook.cpp" "src\common\guard.cpp" "src\common\log.cpp" "src\common\config.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib
+if errorlevel 1 ( echo [edvr] ERROR: explorer cam test build failed & exit /b 1 )
+"%BUILD%\explorer_cam_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_explorer_cam_fade_test
+echo [edvr] === explorer_cam_fade_test.exe ===
+REM Build gate for the entry fade's wait for the engine's motion (src\d3d11\explorer_cam_fade_core.h, "MOTION"; docs\kinematic-motion-injection-2026-09-19.md,
+REM "F12 fixes built"): the pure comfort timeline driven with the facts the glue feeds it from the engine (engine_motion_ready.h). An entry that is otherwise
+REM ready fades in at once when the engine's motion is live (the eye path's views for three frames in a row, and the second skin's join when the frame has
+REM skinned jobs), holds black until it is, gives up one second after it was otherwise ready and says which condition was missing, does not wait for a join
+REM in a scene with no characters, waits for nothing when the engine's motion is not armed, never delays an exit, waits on a re-attach like an entry, starts
+REM the hold over when the entry stops being ready, and leaves the 3 s cap from the press as it was. The lines. No device needed.
+REM tools\explorer_cam_fade_test\mutants.py --self-test holds the mutation list to the sources as they are; --run builds the rig against each edit.
+if not exist "%OBJ%\explorercamfade" mkdir "%OBJ%\explorercamfade"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /I"src\d3d11" ^
+    /Fo"%OBJ%\explorercamfade"\ /Fe"%OBJ%\explorercamfade\explorer_cam_fade_test.exe" ^
+    "tools\explorer_cam_fade_test\explorer_cam_fade_test.cpp" ^
+    /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: explorer_cam_fade_test build failed & exit /b 1 )
+"%OBJ%\explorercamfade\explorer_cam_fade_test.exe" --dry-run || exit /b 1
+"%OBJ%\explorercamfade\explorer_cam_fade_test.exe" --self-test "%ROOT%" || exit /b 1
+python "tools\explorer_cam_fade_test\mutants.py" --self-test || exit /b 1
+exit /b 0
+
+:rig_menu_edit_hold_test
+echo [edvr] === menu_edit_hold_test.exe ===
+REM Build gate for the F8 menu's held numeric edits (src\d3d11\menu_edit_hold.h) and the config refresh window line (config_refresh_line.h). Holding a Number row steps
+REM it every 83 ms; each step is shown at once, and a burst of steps is one write and so one config refresh on the frame thread (F16 priced the hold at 100 refreshes in
+REM five seconds). The rig drives the coalescer with a frame clock and the tracker's repeat: a tap writes once on release, a long hold a bounded few, a row or page
+REM switch, a close, a shutdown and any other change write what is held, nothing is written twice, a failed write puts the row back; menu.cpp's wiring and the monitor's
+REM use of the formatter are read as text. No device needed.
+REM tools\menu_edit_hold_test\mutants.py --self-test holds the mutation list to the sources as they are; --run builds the rig against each edit.
+if not exist "%OBJ%\menueditHold" mkdir "%OBJ%\menueditHold"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /I"src\d3d11" ^
+    /Fo"%OBJ%\menueditHold"\ /Fe"%OBJ%\menueditHold\menu_edit_hold_test.exe" ^
+    "tools\menu_edit_hold_test\menu_edit_hold_test.cpp" ^
+    /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: menu_edit_hold_test build failed & exit /b 1 )
+"%OBJ%\menueditHold\menu_edit_hold_test.exe" --dry-run || exit /b 1
+"%OBJ%\menueditHold\menu_edit_hold_test.exe" --self-test "%ROOT%" || exit /b 1
+python "tools\menu_edit_hold_test\mutants.py" --self-test || exit /b 1
+exit /b 0
+
+:rig_vertex_resync_test
+echo [edvr] === vertex_resync_test.exe ===
+REM Build gate for the vertex-buffer resync (src\d3d11\vertex_resync_core.h and vertex_resync_hook.cpp, EDVR_VERTEX_RESYNC_TEST; docs\scanner-body.md, "The root cause:
+REM Frontier's f3d state cache"): the game's applied vertex-buffer cache goes stale when a buffer it binds again equals its DESIRED state (SetVertexBuffer compares only that)
+REM after zero-slot draws zeroed the applied copy, and the second eye's lighting resolve runs with slot 0 empty. The pure repair runs on a fake command list laid out at the real
+REM offsets and replays the failing sequence (stock binds NULL; repaired binds the buffer and its offset; off counts and writes nothing; slots past the layout's count, a null
+REM desired slot, more than 16 slots and null pointers are left alone). The production hook is compiled in with the real CodeHook and patches a synthetic function that begins with
+REM the real 16-byte prologue of FlushIA: a wrong prologue is refused with one line and nothing patched, the right one arms, the original sees the repaired cache, the live key,
+REM the eight first-sighting lines, the 60 s count, the ten-minute heartbeat (zero counts included) and the session line are what the log says, a fault is absorbed and eight
+REM stand it down. device_hook.cpp's wiring and the exit line's registration with the log are
+REM read as text. tools\vertex_resync_test\mutants.py --self-test holds the mutation list to the sources as they are; --run builds the rig against each edit.
+if not exist "%OBJ%\vertexresync" mkdir "%OBJ%\vertexresync"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /DEDVR_VERTEX_RESYNC_TEST /I"src\d3d11" /I"src\common" ^
+    /Fo"%OBJ%\vertexresync"\ /Fe"%OBJ%\vertexresync\vertex_resync_test.exe" ^
+    "tools\vertex_resync_test\vertex_resync_test.cpp" "src\d3d11\vertex_resync_hook.cpp" ^
+    "src\common\code_hook.cpp" "src\common\guard.cpp" "src\common\log.cpp" "src\common\config.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib
+if errorlevel 1 ( echo [edvr] ERROR: vertex_resync_test build failed & exit /b 1 )
+"%OBJ%\vertexresync\vertex_resync_test.exe" --dry-run || exit /b 1
+"%OBJ%\vertexresync\vertex_resync_test.exe" --self-test "%ROOT%" || exit /b 1
+python "tools\vertex_resync_test\mutants.py" --self-test || exit /b 1
+exit /b 0
+
 :rig_scheduler_stack_json_test
 echo [edvr] === scheduler_stack_json_test.exe ===
 REM Build gate for the production SchedulerStackProbe JSON writer: the
@@ -3777,46 +4003,6 @@ if errorlevel 1 ( echo [edvr] ERROR: scheduler stack probe test build failed & e
 "%BUILD%\scheduler_stack_probe_test.exe" --self-test || exit /b 1
 exit /b 0
 
-:rig_static_prop_gate_test
-echo [edvr] === static_prop_gate_test.exe ===
-REM Build gate for the StaticPropGate's cache logic: the change test
-REM (hit/miss/first-sight), the forced-refresh failsafe, invalidation
-REM epochs, oldest-evict at capacity and the SEH fault tolerance. These run
-REM at ~432 calls/frame in flight; a cache defect costs a test flight AND
-REM can read as invisible success (a wrong skip just costs CPU), so the rig
-REM drives the production decide() on synthetic record arrays, including a
-REM VirtualProtect guard-page fixture.
-if not exist "%OBJ%\staticgate" mkdir "%OBJ%\staticgate"
-cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
-    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /utf-8 ^
-    /Fo"%OBJ%\staticgate\\" /Fe"%BUILD%\static_prop_gate_test.exe" ^
-    "tools\static_prop_gate_test\static_prop_gate_test.cpp" ^
-    /link /INCREMENTAL:NO kernel32.lib user32.lib
-if errorlevel 1 ( echo [edvr] ERROR: static prop gate test build failed & exit /b 1 )
-"%BUILD%\static_prop_gate_test.exe" --dry-run || exit /b 1
-"%BUILD%\static_prop_gate_test.exe" --self-test || exit /b 1
-exit /b 0
-
-:rig_static_prop_gate_json_test
-echo [edvr] === static_prop_gate_json_test.exe ===
-REM Build gate for the production StaticPropGate JSON writer: the kinematic
-REM writer shipped three serialization failures before its gate existed,
-REM and compilation cannot catch a dropped quote. The exe serializes a
-REM deterministic fixture through the real writeJson; the python gate
-REM strict-parses it and asserts every value round-trips.
-if not exist "%OBJ%\staticgatejson" mkdir "%OBJ%\staticgatejson"
-cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
-    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /utf-8 ^
-    /Fo"%OBJ%\staticgatejson\\" /Fe"%BUILD%\static_prop_gate_json_test.exe" ^
-    "tools\static_prop_gate_json_test\static_prop_gate_json_test.cpp" ^
-    "src\d3d11\static_prop_gate.cpp" ^
-    /link /INCREMENTAL:NO kernel32.lib user32.lib
-if errorlevel 1 ( echo [edvr] ERROR: static prop gate JSON writer test build failed & exit /b 1 )
-"%BUILD%\static_prop_gate_json_test.exe" --dry-run || exit /b 1
-"%BUILD%\static_prop_gate_json_test.exe" --self-test || exit /b 1
-python "tools\static_prop_gate_json_selftest.py" --self-test || exit /b 1
-exit /b 0
-
 :rig_cull_gate_probe_test
 echo [edvr] === cull_gate_probe_test.exe ===
 REM Build gate for the cull gate probe (advanced.cull_gate_capture): the
@@ -3842,36 +4028,6 @@ if errorlevel 1 ( echo [edvr] ERROR: cull gate probe test build failed & exit /b
 python "tools\cull_gate_probe.py" --self-test || exit /b 1
 python "tools\cull_gate_probe.py" --verify-fixture "%OBJ%\cullgate\gate_fixture.bin" || exit /b 1
 python "tools\cull_gate_probe.py" --tables-only "%OBJ%\cullgate\gate_fixture.bin" || exit /b 1
-exit /b 0
-
-:rig_lod_governor_test
-echo [edvr] === lod_governor_test.exe ===
-REM Build gate for the settlement LOD governor (fix.settlement_detail: auto and
-REM reduced scale the game's LOD scale right after FUN_142819D90 stores it;
-REM advanced.settlement_detail_observe = 1 never writes): the policy's steps
-REM and hysteresis, reduced's k_max at once; the engine arithmetic the shadow
-REM repeats (FUN_1442B3FC0 / FUN_144308B30's rsqrt(rcp) distance, LOD
-REM distance, LOD pick, the screen-size term); the observers on synthetic
-REM engine memory laid out as the decompiles read it; the setter's bracket
-REM against a fake context and a fake setter (only the builder's context is
-REM written, k = 1 and observe leave the game's value, the table's limit and
-REM an unwritable page stand acting down, off writes the game's value back);
-REM the acting counts; the per-thread counters under four threads; and the
-REM frame boundary end to end against a stub native timing feed, a fake
-REM engine and a captured log -- the configure line naming the mechanism,
-REM the first write, step lines, 30-second summaries, NOT ACTING, "k stayed
-REM 1", and silence while off. It prints the observers' cost per call. A
-REM governor that writes when it should not, or never counts, fails here,
-REM not in the flight that was meant to price it.
-if not exist "%OBJ%\lodgov" mkdir "%OBJ%\lodgov"
-cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
-    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /utf-8 ^
-    /Fo"%OBJ%\lodgov\\" /Fe"%BUILD%\lod_governor_test.exe" ^
-    "tools\lod_governor_test\lod_governor_test.cpp" ^
-    /link /INCREMENTAL:NO kernel32.lib user32.lib
-if errorlevel 1 ( echo [edvr] ERROR: LOD governor test build failed & exit /b 1 )
-"%BUILD%\lod_governor_test.exe" --dry-run || exit /b 1
-"%BUILD%\lod_governor_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_ui_layer_coverage_test
@@ -3967,6 +4123,30 @@ cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
 if errorlevel 1 ( echo [edvr] ERROR: ui layer world test build failed & exit /b 1 )
 "%OBJ%\uilayerworld\ui_layer_world_test.exe" --dry-run || exit /b 1
 "%OBJ%\uilayerworld\ui_layer_world_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_ui_layer_device_test
+echo [edvr] === ui_layer_device_test.exe ===
+REM The shared UI layer across a D3D11 device change (review 2026-10-09, P2): src\d3d11\ui_layer.cpp compiled WHOLE (through
+REM tools\ui_layer_device_test\ui_layer_device_bridge.cpp, which only exposes which device each retained cache belongs to) with the
+REM world rig's neighbour stubs, on two WARP devices. A frame on device A (door, the crisp take's dependencies, a HUD frame through
+REM the production coverage pass, the production composite, read back), the production device-change reset (uiLayerDeviceReset),
+REM the same frame on device B: every retained child -- blend cache, coverage shaders and deferred context, seeder context,
+REM composite shader and parameter buffer, both layers, the composite output -- is B's, the pixels are the HUD over the frame,
+REM the caller's bindings come back. Then a same-device resize (uiLayerFlatRelease) at another size: the pixel again, nothing
+REM device-bound rebuilt. Built outside build\ like the world rig.
+if not exist "%OBJ%\uilayerdevice" mkdir "%OBJ%\uilayerdevice"
+cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE ^
+    /Fo"%OBJ%\uilayerdevice\\" /Fe"%OBJ%\uilayerdevice\ui_layer_device_test.exe" ^
+    "tools\ui_layer_device_test\ui_layer_device_test.cpp" "tools\ui_layer_device_test\ui_layer_device_bridge.cpp" ^
+    "src\d3d11\plugin_cost.cpp" "src\common\vtable_hook.cpp" ^
+    "src\common\config.cpp" "src\common\log.cpp" "src\common\guard.cpp" ^
+    "third_party\dxbc_hash\DxilHash.cpp" ^
+    /link /INCREMENTAL:NO d3dcompiler.lib user32.lib
+if errorlevel 1 ( echo [edvr] ERROR: ui layer device test build failed & exit /b 1 )
+"%OBJ%\uilayerdevice\ui_layer_device_test.exe" --dry-run || exit /b 1
+"%OBJ%\uilayerdevice\ui_layer_device_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_on_foot_maps_test
@@ -4178,23 +4358,6 @@ if errorlevel 1 ( echo [edvr] ERROR: UI hologram test build failed & exit /b 1 )
 "%OBJ%\uiholo\ui_holo_test.exe" --self-test || exit /b 1
 exit /b 0
 
-
-:rig_fss_dump_api_test
-echo [edvr] === FSS dump capture/readback API owner regression ===
-if not exist "%OBJ%\fssdumpapi" mkdir "%OBJ%\fssdumpapi"
-cl.exe /I"%GEN%" /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
-    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
-    /DEDVR_FSS_DUMP_API_TEST /DEDVR_VERSION_STRING=\"%EDVR_VER%\" ^
-    /Fo"%OBJ%\fssdumpapi\\" /Fe"%BUILD%\fss_dump_api_test.exe" ^
-    "tools\fss_dump_api_test\fss_dump_api_test.cpp" ^
-    "src\d3d11\fss_dump.cpp" "src\d3d11\plugin_cost.cpp" ^
-    "src\common\guard.cpp" ^
-    "src\common\vtable_hook.cpp" "src\common\code_hook.cpp" ^
-    /link /INCREMENTAL:NO /OPT:REF kernel32.lib user32.lib version.lib
-if errorlevel 1 ( echo [edvr] ERROR: FSS dump API test build failed & exit /b 1 )
-"%BUILD%\fss_dump_api_test.exe" --dry-run || exit /b 1
-"%BUILD%\fss_dump_api_test.exe" --self-test || exit /b 1
-exit /b 0
 
 :rig_fss_reveal_api_test
 echo [edvr] === FSS Reveal Begin/End API owner regression ===

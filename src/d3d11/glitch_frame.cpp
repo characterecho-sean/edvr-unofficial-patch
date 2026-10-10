@@ -5,6 +5,7 @@
 
 #include <windows.h>
 
+#include <atomic>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
@@ -15,8 +16,6 @@
 #include "../common/frame_flag.h"
 #include "../common/game_call_probe.h"
 #include "../common/log.h"
-#include "eye_origin_trace.h"
-#include "pose_reader_watch.h"
 #include "transition_flash_eye_base.h"
 
 namespace edvr {
@@ -41,8 +40,7 @@ namespace {
 // supported rate instead, so ten seconds is the FLOOR at every rate rather
 // than the value at one of them. Nothing is written to disk unless the dump
 // key is pressed, so the only cost is kRingFrames copies of RingEntry below
-// (a few dozen bytes each; advanced.eye_origin_trace, off by default, adds
-// a handful more when it is on).
+// (a few dozen bytes each).
 constexpr uint32_t kRingFrames = 1200;   // 10 s at 120Hz, 16.7 s at 72Hz
 
 // How long to stand down for after deciding a jump was a change of reference
@@ -85,10 +83,10 @@ constexpr uint32_t kSeparations = 16;
 // Evicted separation magnitudes remembered, so an insertion can be recognised
 // as a RELEARN -- the table paying a withheld frame twice for one lesson.
 //
-// THE CHURN INSTRUMENT (spec §1g, EVIDENCE 6bp). The cull guard's wider
-// frustum admits more near-surface passes and the recognition machinery
-// churns with the margin: 29 recognitions at guard-off against 3,277 at half
-// margin, 36 withheld. Whether that cost is this table THRASHING (more live
+// THE CHURN INSTRUMENT (spec §1g, EVIDENCE 6bp). The terrain guard's wider
+// frustum (removed 2026-10-09) admitted more near-surface passes and the
+// recognition machinery churned with the margin: 29 recognitions at guard-off
+// against 3,277 at half margin, 36 withheld. Whether that cost is this table THRASHING (more live
 // pairs than sixteen slots, the failure the shell table had at eight) or
 // genuine novelty (cascade geometry re-fitting continuously) decides between
 // two completely different fixes -- capacity against a new invariant -- so
@@ -263,8 +261,8 @@ constexpr uint32_t kShellCertifyDirs = 3;
 // cos 15 degrees: how far the camera must swing to count as a new direction.
 constexpr float kShellDirCos = 0.966f;
 
-// A FRACTION, not a percentage -- unlike transition_flash_repeat_percent beside
-// it, which is one. The two are documented together in the ini for that reason.
+// A FRACTION, not a percentage -- unlike the repeat percentage beside it
+// (GlitchTuning), which is one.
 //
 // Tight, and it has to be: the measured spread is 0.3% at 7.6k and 6v held to
 // about 0.005% at 136k, while the genuine-flash band (9,900 to 24,000 off path)
@@ -318,11 +316,9 @@ constexpr uint32_t kDefaultDwellFrames = 20;
 // above what any single transition has ever cost (one or two) and far below the
 // eight-in-fifteen storm that prompted this. The cooldown is long enough to sit
 // out a storm and short enough that the next genuine event is still covered.
-// The window stays in FRAMES because it is a user-facing ini value
-// (advanced.transition_flash_burst_window, documented in frames with a
-// 10-600 range); reinterpreting it as milliseconds would silently change
-// every existing config. It is also the denominator of a rate, where the
-// frame is a defensible unit. The COOLDOWN is internal and is a duration --
+// The window stays in FRAMES (it was a user-facing ini value in frames until
+// Build 2d); it is the denominator of a rate, where the frame is a
+// defensible unit. The COOLDOWN is internal and is a duration --
 // "stand down for two seconds" -- so it becomes one.
 constexpr uint32_t kDefaultBurstLimit = 3;
 constexpr uint32_t kDefaultBurstWindow = 60;
@@ -404,16 +400,6 @@ struct RingEntry {
     bool     sceneValid;
     GlitchSceneGeometry geometry;
 
-    // THE CULL GUARD'S STATE while this frame was drawn, packed as the
-    // channel carries it (frame_flag.h), zero when the guard was off.
-    //
-    // Stamped so a staircase flight's dumps are self-describing: the margin
-    // is live-tunable, so one capture can span guard-off and two margins, and
-    // without the stamp nothing in the dump says which frames were which --
-    // the exact attribution the 6bp churn measurement had to reconstruct
-    // from log timestamps.
-    uint32_t guard;
-
     // WHAT THE DETECTOR DECIDED ABOUT THIS FRAME, carried on the frame itself.
     //
     // The reason a jump was let through used to be reported only as a sampled
@@ -429,37 +415,6 @@ struct RingEntry {
     // the answer is then guaranteed to be there for the frame they care about.
     uint8_t  verdict;
 
-    // advanced.eye_origin_trace (off by default; see eye_origin_trace.h).
-    // Deliberately independent of sceneValid/scenePos above, which serve the
-    // H3 cross-check and read fine with this whole instrument off: a reader
-    // following just these four fields needs nothing else in the struct.
-    uint8_t  eyeOriginStackId;  // eot::kStackNoneId when eyeBufferWritten is false
-    bool     eyeBufferWritten;  // same test as sceneValid
-    uint32_t eyeTraceWrites;    // 5376-byte writes observed this frame
-    uint64_t eyeTraceMask;      // bit N set: stack id N wrote it this frame
-
-    // advanced.eye_origin_readers (docs/design-transition-flash-engine-
-    // fix-2026-09-23.md, parts A2/B). Zero/false for every frame while the
-    // key is off, or before the hardware breakpoint has armed --
-    // pose_reader_watch.h's PoseReaderFrameSnapshot, read once here the
-    // way guard is read from cullGuardStatePacked() just above.
-    uint32_t poseReaderMask;         // bit N: unique-reader table id N fired this frame
-    uint16_t positionerTickCalls;
-    uint16_t positionerSwapSyncCalls;
-    bool     positionerSwapDetected;
-
-    // advanced.transition_flash_eye_base (docs/design-transition-flash-
-    // engine-fix-2026-09-23.md, "Static round 6"). Zero/false for every
-    // frame while the key is off -- transition_flash_eye_base.h's
-    // EyeBaseFrameSnapshot, read once here the way poseReaderMask is above.
-    uint16_t eyeBaseCalls;            // consumer hook calls this frame
-    uint16_t eyeBaseUnrefilledCalls;  // of those, how many read the mailbox as the reset value
-    uint8_t  eyeBaseTreatment;        // this frame's last unrefilled call: 0 none, 1 watched, 2 acted
-    uint32_t eyeBaseWriterMask;       // bit N: writer-table id N hit this frame
-    bool     eyeBaseWriterSinceLastConsume;  // any writer hit since the previous consumer call
-    bool     eyeBaseShipChanged;      // the ship pointer differed from the previous consumer call's
-    float    eyeBaseM[3];             // last call this frame: the mailbox's translation
-    float    eyeBaseF[3];             // last call this frame: the stand-in's translation
 };
 
 // What ended up in RingEntry::verdict. Order is the order the detector tests
@@ -495,13 +450,6 @@ const char* ringVerdictName(uint8_t v) {
         case kVerdictSceneReset:  return "WITHHELD -- eye camera reset without matching object rebase";
         default:                  return "";
     }
-}
-
-// RingEntry::eyeBaseTreatment's three values (transition_flash_eye_base.h's
-// own 0/1/2 convention, kept as a raw byte there for the same reason verdict
-// is one here: private to that file's event logic).
-const char* eyeBaseTreatmentName(uint8_t t) {
-    return t == 2 ? "acted" : t == 1 ? "watched" : "none";
 }
 
 struct State {
@@ -696,12 +644,6 @@ struct State {
     uint32_t   lastLetThroughFrame = 0;
 
     // --- the churn instrument (spec §1g): attribution, never decision ---
-    // The channel reading for the frame being closed, taken once at the
-    // boundary; everything below keys on it or feeds the ring dump.
-    uint32_t   guardPacked = 0;
-    bool       guardLiveNoted = false;
-    uint32_t   withheldGuardLive = 0;
-    uint32_t   suppressedGuardLive = 0;
     // The learning-cost counters: insertions are the tax being paid (each
     // novel magnitude's first mark was a withheld frame), live evictions are
     // knowledge lost while still current, relearns are the H1 number -- a
@@ -780,34 +722,11 @@ struct State {
     uint32_t validateMoved = 0;
     uint32_t revalidations = 0;
 
-    struct SceneWrite { const void* resource=nullptr; float pos[3]{}; uint32_t frame=0; bool valid=false;
-        uint8_t stackId=eot::kStackNoneId; };
+    struct SceneWrite { const void* resource=nullptr; float pos[3]{}; uint32_t frame=0; bool valid=false; };
     SceneWrite sceneWrites[16];
     uint32_t sceneDrawFrame=~0u;
     float sceneDrawPos[3]{};
     bool sceneDrawNoted=false;
-    uint8_t sceneDrawStackId=eot::kStackNoneId;  // the matched write's stack id (eye_origin_trace)
-
-    // advanced.eye_origin_trace (off by default). Off: none of this is
-    // touched anywhere in this file -- not the unwind, not the hash, not the
-    // per-frame counters, not the dump scheduling. See eye_origin_trace.h.
-    bool eyeOriginTraceOn=false;
-    eot::StackTable eyeOriginStacks;
-    uint32_t eyeTraceFrame=~0u;              // which frame the two counters below describe
-    uint32_t eyeTraceWritesThisFrame=0;
-    uint64_t eyeTraceMaskThisFrame=0;
-    uint32_t eyeTraceFramesTotal=0;          // session-cumulative: frames with >=1 write
-    uint32_t eyeTraceWritesTotal=0;          // session-cumulative: writes observed
-    uint64_t eyeTraceCaptureUs=0;            // session-cumulative: time spent in captureGameCallStack()
-    eot::PendingWindow eyeTraceDump;
-    uint32_t eyeTraceDumpsThisSession=0;
-    // The ~20s summary line (kTotalsEveryMs), printed only when a counter
-    // below has moved since the last one -- see eyeOriginTraceReport().
-    uint64_t eyeTraceReportAtMs=0;
-    uint32_t eyeTraceReportWrites=0;
-    uint32_t eyeTraceReportFrames=0;
-    uint32_t eyeTraceReportStacks=0;
-    uint32_t eyeTraceReportDumps=0;
     struct ScenePool {
         const void* resource=nullptr;
         uint32_t bytes=0,lastBound=0;
@@ -1157,8 +1076,7 @@ void observeShell(const float* pos, float radius) {
         // The churn instrument: a CERTIFIED entry evicted while still in the
         // window is the "learned and lost and learned again" failure this
         // table's own 8-to-64 history records, and whether 64 still thrashes
-        // at large cull-guard margins is one of the questions the counter
-        // answers. Uncertified evictions are the table working as intended.
+        // is one of the questions the counter answers. Uncertified evictions are the table working as intended.
         if (s->shells[victim].framesSeen > 0 &&
             s->frameNo - s->shells[victim].lastSeen <= kRunawayWindow &&
             (s->shells[victim].certified || s->shells[victim].parked)) {
@@ -1447,6 +1365,91 @@ void validate() {
 
 }  // namespace
 
+// The engine fix's handshake (glitchFrameNoteEngineFix, glitch_frame.h). While
+// the engine fix is ARMED the detector below is DORMANT: it records and
+// observes exactly as it does with the fix switched off, and judges, marks and
+// un-marks nothing -- an un-mark would cancel the engine fix's own withhold.
+// Starts false, i.e. the detector runs, and stays so unless the eye-base
+// module reports Armed: a module that never reports (fix off, identity or a
+// hook failing) leaves the detector in charge, which is the safe side.
+static std::atomic<bool> g_engineFixArmed{false};
+static inline bool engineFixDormant() {
+    return g_engineFixArmed.load(std::memory_order_relaxed);
+}
+// The engine fix's event window is open (armed event .. its two bad renders):
+// the camera CB's Unmap tap is the one place the fix looks at a frame. Outside
+// it, with the detector dormant, glitchFrameObserve returns on its first line.
+static std::atomic<bool> g_engineWindowOpen{false};
+static inline bool engineObserveIdle() {
+    return engineFixDormant() && !g_engineWindowOpen.load(std::memory_order_relaxed);
+}
+void glitchFrameEngineWindow(bool open) {
+    g_engineWindowOpen.store(open, std::memory_order_relaxed);
+}
+// The pool and scene-draw recording exists to feed the detector's scene
+// verdict; dormant, nothing reads it, so the per-draw and per-Map reads are
+// skipped.
+static inline bool poolRecordingWanted() {
+    return !engineFixDormant();
+}
+
+void glitchFrameNoteEngineFix(bool armed) {
+    const bool was = g_engineFixArmed.exchange(armed, std::memory_order_relaxed);
+    if (was != armed) {
+        Log::get().note(
+            armed ? "transition flash: the engine fix is armed, so the detector is dormant "
+                    "(it judges, withholds and records nothing; the camera-history key reports that)."
+                  : "transition flash: the engine fix is not armed, so the detector is in charge.");
+    }
+}
+
+// The engine fix marks frames from the camera-buffer tap inside
+// glitchFrameObserve, so "armed" means the tap can deliver. It reaches the
+// engine module only when the detector is observing (buffer size nonzero and
+// the position offset inside it -- install above), Map nominates that buffer
+// by size (bufferBytes == the engine's 5376-byte scene CB), and the position
+// passes the finite check per fill. This answers the static part.
+bool glitchFrameEngineTapAvailable(char* why, size_t whySize) {
+    State* s = g_state;
+    if (!s) { snprintf(why, whySize, "the detector is not installed"); return false; }
+    if (!s->observing) {
+        snprintf(why, whySize, "the camera buffer is not observed -- camera_buffer_bytes = %u and "
+                 "camera_buffer_offset = %u do not describe a buffer holding three floats (see the "
+                 "line above)", s->bufferBytes, s->posOffset);
+        return false;
+    }
+    if (s->bufferBytes != 5376) {
+        snprintf(why, whySize, "camera_buffer_bytes = %u, but the engine fix reads the game's 5376-byte "
+                 "scene buffer", s->bufferBytes);
+        return false;
+    }
+    return true;
+}
+
+// Whether the old detector will watch anything: observing, and not switched off.
+bool glitchFrameDetectorRuns() {
+    State* s = g_state;
+    return s && s->observing && s->enabled && !s->disabledForSession;
+}
+
+bool glitchFrameEngineFixEvent(bool withhold) {
+    State* s = g_state;
+    // A camera jump either way: the FSS arrival trigger and the openvr half
+    // key on it exactly as they do on a detector mark.
+    noteWorldJump();
+    if (!withhold) return true;
+    if (s) s->verdictThisFrame = kVerdictSceneReset;
+    markGlitchFrame();
+    // The jump verdict is NOT published here: see glitchFrameEngineFixVerdict.
+    return glitchConsumerPresent();
+}
+
+void glitchFrameEngineFixVerdict() {
+    // "Stayed": a change of reference frame, the next frame is coherent, so
+    // the temporal pass keeps its history.
+    noteJumpVerdict(2);
+}
+
 // glitchFrameInstalled()/glitchFrameObserving()'s refresh (glitch_frame.h):
 // re-derived from g_state/State::observing rather than toggled by hand, so a
 // re-install that finds State::observing already true from a previous
@@ -1457,9 +1460,26 @@ static void syncGlitchFrameDetail() {
     detail::g_glitchFrameObserving = g_state && g_state->observing;
 }
 
+// The fallback detector's tuning: GlitchTuning's defaults are the values the
+// old advanced.transition_flash_* keys defaulted to.
+static GlitchTuning g_tuning;
+static_assert(GlitchTuning{}.repeatPercent == kDefaultRepeatPercent, "tuning defaults track the detector's constants");
+static_assert(GlitchTuning{}.radiusTolerance == kDefaultRadiusTolerance, "tuning defaults track the detector's constants");
+static_assert(GlitchTuning{}.parkUnits == kDefaultParkUnits, "tuning defaults track the detector's constants");
+static_assert(GlitchTuning{}.dwellFrames == kDefaultDwellFrames, "tuning defaults track the detector's constants");
+static_assert(GlitchTuning{}.burstLimit == kDefaultBurstLimit, "tuning defaults track the detector's constants");
+static_assert(GlitchTuning{}.burstWindow == kDefaultBurstWindow, "tuning defaults track the detector's constants");
+static_assert(GlitchTuning{}.driftPct == kDefaultDriftPct, "tuning defaults track the detector's constants");
+
+void glitchFrameSetTuningForTest(const GlitchTuning& tuning) { g_tuning = tuning; }
+
 void installGlitchFrameFix() {
     static State s;
     g_state = &s;
+    // Observation is decided afresh by every install below: a re-install on the
+    // same static State (the test rigs, a hot reload) must not inherit a stale
+    // "observing" from a geometry that has since been refused.
+    s.observing = false;
     syncGlitchFrameDetail();
 
     Config& cfg = Config::get();
@@ -1472,187 +1492,26 @@ void installGlitchFrameFix() {
     // invisible unless somebody actually changed a value -- at which point the
     // sensitivity they were tuning silently did not move.
     s.enabled = cfg.getBool("fix.transition_flash", true);
-    s.jumpMin = cfg.getFloat("advanced.transition_flash_units", 2000.0f);
-    s.jumpFactor = cfg.getFloat("advanced.transition_flash_speed_factor", 8.0f);
-    // 0 would mean "never withhold anything" -- `consecutive < 0` is never true
-    // -- while the log went on saying the fix was armed and then ACTIVE. That is
-    // a switch disguised as a limit, and an accidental one: the value is
-    // documented as a cap on a run, so 0 reads as "no runs allowed", not as
-    // "disable the feature". Anyone who wants it off has fix.transition_flash.
-    //
-    // The cap is also unreachable above 1 in practice: a marked frame resets the
-    // camera history, so the next frame cannot be evaluated and a run of two
-    // never forms. The knob is kept because it bounds a future detector that
-    // could produce runs, and because removing a documented setting is worse
-    // than one that is quietly generous.
-    const int maxConsec = cfg.getInt("advanced.transition_flash_max_consecutive", 2);
-    if (maxConsec < 1) {
-        s.maxConsecutive = 1;
-        Log::get().note(
-            "transition_flash_max_consecutive = %d would stop every frame from being "
-            "withheld while the fix still reported itself active, so 1 is being used. "
-            "To turn the fix off, set transition_flash = 0 under [fix].",
-            maxConsec);
-    } else {
-        s.maxConsecutive = static_cast<uint32_t>(maxConsec);
-    }
-    // Clamped rather than trusted, and 0 is a real setting rather than an error:
-    // it turns the suppression off, which is the escape hatch if a build ever
-    // produces genuine flashes that coincidentally repeat. A negative or absurd
-    // value is a typo, and the direction of the mistake matters -- too large a
-    // tolerance suppresses real flashes, which is silent.
-    const float repeat = cfg.getFloat("advanced.transition_flash_repeat_percent",
-                                      kDefaultRepeatPercent);
-    if (!std::isfinite(repeat) || repeat < 0.0f || repeat > 50.0f) {
-        Log::get().note(
-            "transition_flash_repeat_percent = %.2f is outside 0 to 50, so %.1f is "
-            "being used. This is how close two jump magnitudes have to be for the "
-            "second to be treated as the same fixed separation; too large and real "
-            "flashes get suppressed, which nothing would tell you.",
-            static_cast<double>(repeat), static_cast<double>(kDefaultRepeatPercent));
-        s.repeatPercent = kDefaultRepeatPercent;
-    } else {
-        s.repeatPercent = repeat;
-    }
-    // A FRACTION here, where the setting above it is a percentage. That is not
-    // an oversight but it IS a trap, so the ini says so beside both of them.
-    const float radiusTol = cfg.getFloat("advanced.transition_flash_radius_tolerance",
-                                         kDefaultRadiusTolerance);
-    if (!std::isfinite(radiusTol) || radiusTol < 0.0f || radiusTol > 0.05f) {
-        Log::get().note(
-            "transition_flash_radius_tolerance = %.4f is outside 0 to 0.05, so %.4f "
-            "is being used. It is a FRACTION -- 0.005 is half a percent -- and it is "
-            "how close two camera distances have to be to count as the same orbit. "
-            "Too wide and a genuine bad frame that happens to land near one gets "
-            "treated as the pass and shown.",
-            static_cast<double>(radiusTol),
-            static_cast<double>(kDefaultRadiusTolerance));
-        s.radiusTolerance = kDefaultRadiusTolerance;
-    } else {
-        s.radiusTolerance = radiusTol;
-    }
-    // ABSOLUTE units, where the two settings above it are proportional. The ini
-    // says so beside all three; a park is a fixed point and a percentage of a
-    // 69,000-unit radius would be hundreds of units of slack on a camera that
-    // was measured holding still to four.
-    const float parkUnits = cfg.getFloat("advanced.transition_flash_park_units",
-                                         kDefaultParkUnits);
-    if (!std::isfinite(parkUnits) || parkUnits < 0.0f || parkUnits > 1000.0f) {
-        Log::get().note(
-            "transition_flash_park_units = %.1f is outside 0 to 1000, so %.0f is "
-            "being used. It is how still a camera has to hold, in world units, to "
-            "count as parked.",
-            static_cast<double>(parkUnits), static_cast<double>(kDefaultParkUnits));
-        s.parkUnits = kDefaultParkUnits;
-    } else {
-        s.parkUnits = parkUnits;
-    }
-    // How long a camera has to sit on a radius before that radius is the view's.
-    //
-    // Twenty frames, about a fifth of a second, and it is bracketed by
-    // measurement rather than chosen between guesses: 6v's cascade blocks rest
-    // four to six frames, and the view rests a hundred or more (6ah). Anything
-    // in the wide gap between separates them. The floor of 8 keeps it clear of
-    // the cascades; the ceiling of 120 keeps it under what the view does, since
-    // a value above that would never fire and would silently restore the bug.
-    {
-        const std::string mode =
-            cfg.getString("advanced.transition_flash_separation", "act");
-        s.separationMode = mode == "act" ? 2u : (mode == "off" ? 0u : 1u);
-        if (mode != "act" && mode != "log" && mode != "off") {
-            Log::get().note(
-                "transition_flash_separation = '%s' is not act, log or off, so log "
-                "is being used -- the repeating-jump-size rule reports what it "
-                "would have excused without excusing it.",
-                mode.c_str());
-        }
-    }
-    s.burstLimit = static_cast<uint32_t>(cfg.getIntInRange(
-        "advanced.transition_flash_burst_limit", kDefaultBurstLimit, 1, 30));
-    s.burstWindow = static_cast<uint32_t>(cfg.getIntInRange(
-        "advanced.transition_flash_burst_window", kDefaultBurstWindow, 10, 600));
-
-    // THESE TWO ARE COUPLED, and nothing said so until it cost a flight.
-    //
-    // max_consecutive caps how long ONE run of withholds can be. burst_limit
-    // is how many withholds inside burst_window spend the whole budget. If
-    // the cap is not SMALLER than the budget, a single capped run spends it
-    // by definition -- so every genuine transition, the thing the fix exists
-    // for, is immediately followed by a stand-down in which nothing can be
-    // withheld, and the rest of that same transition goes straight through.
-    //
-    // Measured 2026-08-17 on a Pimax at 72Hz, with max_consecutive at 3 and
-    // the budget at 3: three excursions in one session, each exactly 3 frames
-    // withheld, each followed by "the whole budget ... Standing down for 2000
-    // ms". The third stand-down began 1.84 s before the player pressed the
-    // history key, and a jump was let through 0.93 s before the press --
-    // inside the blind window, and inside reaction time. The shipped default
-    // of 2 against a budget of 3 does not do this; the player had the value
-    // uncommented, and a stray keystroke ("3w", which strtol read as 3) is
-    // what put it there.
-    //
-    // Said, not overridden. Both are deliberate escape hatches and a player
-    // who wants this shape may have it -- but they should be told what it
-    // costs rather than discovering it as a flash the fix was meant to hide.
-    if (s.maxConsecutive >= s.burstLimit) {
-        Log::get().note(
-            "transition_flash_max_consecutive = %u is not below "
-            "transition_flash_burst_limit = %u, so ONE run of withholds spends "
-            "the whole burst budget and every transition is followed by a "
-            "stand-down of %u ms in which nothing can be withheld -- including "
-            "the rest of that transition. If you are seeing a flash on a wake "
-            "drop or a landing, this is the first thing to change: leave "
-            "max_consecutive at its default of 2, or raise burst_limit above "
-            "it.",
-            s.maxConsecutive, s.burstLimit, (unsigned)kBurstCooldownMs);
-    }
-    // A PERCENTAGE, like repeat_percent above and unlike the radius tolerance;
-    // the ini says so beside it. 0 turns Rule B off -- the escape hatch if a
-    // build ever produces genuine flashes that drift in lockstep with their
-    // own landings, which nothing measured suggests but nothing rules out.
-    const float driftPct = cfg.getFloat("advanced.transition_flash_drift_pct",
-                                        kDefaultDriftPct);
-    if (!std::isfinite(driftPct) || driftPct < 0.0f || driftPct > 50.0f) {
-        Log::get().note(
-            "transition_flash_drift_pct = %.1f is outside 0 to 50, so %.0f is "
-            "being used. It is how far above the last withheld jump, in per cent, "
-            "a new jump may sit -- landing nearby -- and still be the same camera "
-            "drifting away rather than a fresh event. Too large and a real flash "
-            "near a drift gets suppressed, which nothing would tell you.",
-            static_cast<double>(driftPct), static_cast<double>(kDefaultDriftPct));
-        s.driftPct = kDefaultDriftPct;
-    } else {
-        s.driftPct = driftPct;
-    }
-    s.dwellFrames = static_cast<uint32_t>(cfg.getIntInRange(
-        "advanced.transition_flash_dwell_frames", kDefaultDwellFrames, 8, 120));
+    // BUILD 2d: the twelve advanced.transition_flash_* tuning keys are gone.
+    // The detector is only the fallback for when the engine fix is not armed
+    // (identity or a hook failed), and it runs on the values every release has
+    // shipped (GlitchTuning, glitch_frame.h). Tests set their own through
+    // glitchFrameSetTuningForTest. The camera buffer's size and offset below
+    // are build facts, not tuning, and stay keys.
+    const GlitchTuning& tune = g_tuning;
+    s.jumpMin = tune.units;
+    s.jumpFactor = tune.speedFactor;
+    s.maxConsecutive = tune.maxConsecutive < 1 ? 1u : tune.maxConsecutive;
+    s.repeatPercent = tune.repeatPercent;
+    s.radiusTolerance = tune.radiusTolerance;
+    s.parkUnits = tune.parkUnits;
+    s.separationMode = tune.separationMode;
+    s.burstLimit = tune.burstLimit;
+    s.burstWindow = tune.burstWindow;
+    s.driftPct = tune.driftPct;
+    s.dwellFrames = tune.dwellFrames;
     s.bufferBytes = static_cast<uint32_t>(cfg.getInt("advanced.camera_buffer_bytes", 5376));
     s.posOffset = static_cast<uint32_t>(cfg.getInt("advanced.camera_buffer_offset", 1100));
-
-    // advanced.eye_origin_trace: read once, here, like camera_buffer_bytes/
-    // offset just above -- this file is only ever installed once (device_
-    // hook.cpp), so there is no later config poll to hot-reload it from.
-    // Off (the default): nothing below this read ever touches
-    // eyeOriginStacks, captureGameCallStack(), or a file, in any of
-    // glitchFrameObserve, glitchFrameNoteSceneDraw, glitchFrameBoundary or
-    // dumpCameraRing.
-    s.eyeOriginTraceOn = cfg.getBool("advanced.eye_origin_trace", false);
-    // advanced.eye_origin_readers (docs/design-transition-flash-engine-fix-
-    // 2026-09-23.md) needs this instrument's stack capture running too, so
-    // the two share one dump timeline -- read once, here, the same rule as
-    // eye_origin_trace just above. pose_reader_watch.cpp reads the key
-    // itself for its own (hot-reloadable) purposes; this is only about
-    // whether ITS dump machinery is live.
-    if (cfg.getBool("advanced.eye_origin_readers", false)) s.eyeOriginTraceOn = true;
-    if (s.eyeOriginTraceOn) {
-        Log::get().note(
-            "eye-origin trace armed (advanced.eye_origin_trace=on): capturing the "
-            "game's own call stack at every write to the camera buffer, deduped "
-            "into a %u-entry table (a %uth distinct stack reports as overflow). "
-            "Automatic dumps go to edvr_logs\\flash\\eyetrace_HHMMSS_fN.txt, at "
-            "most %u a session.",
-            eot::kMaxStacks, eot::kMaxStacks + 1, eot::kMaxAutoDumps);
-    }
 
     if (!s.enabled) {
         // Off, but still watching. See State::observing.
@@ -1671,9 +1530,9 @@ void installGlitchFrameFix() {
         }
         return;
     }
-    if (s.jumpMin <= 0.0f || s.bufferBytes == 0) {
+    if (s.bufferBytes == 0) {
         s.enabled = false;
-        Log::get().note("transition flash fix off: threshold or buffer size is zero.");
+        Log::get().note("transition flash fix off: the camera buffer size is zero.");
         return;
     }
     // Three floats have to fit at that offset, inside that buffer.
@@ -1722,7 +1581,9 @@ bool glitchFrameNeedsEyeDraws() {
     // detector has given up -- no buffer, validation failed, runaway guard --
     // vScreen would go on resolving a view per render-target rebind, every
     // frame, for a consumer that will never look at the count again.
-    return s && s->observing && !s->disabledForSession;
+    // Dormant, the detector judges nothing and counts nothing: the draw gate
+    // need not carry it (vscreen re-asks this every frame).
+    return s && s->observing && !s->disabledForSession && !engineFixDormant();
 }
 
 bool glitchFrameWantsBuffer(uint32_t bytes) {
@@ -1740,6 +1601,7 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
     // rather than the moment the fix gave up. The gate that matters -- never
     // acting -- is below, after the tracking.
     if (!s || !s->observing) return;
+    if (engineObserveIdle()) return;   // armed and idle: three relaxed flag tests, no recording
     if (bytes != s->bufferBytes) return;
     // Widened deliberately. posOffset comes from the ini through getInt and is
     // stored unsigned, so a negative or very large value becomes something near
@@ -1761,31 +1623,6 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
         }
         auto& w=s->sceneWrites[at];w.resource=resource;w.frame=s->frameNo;w.valid=finite3(pos);
         for(unsigned a=0;a<3;++a)w.pos[a]=pos[a];
-        // advanced.eye_origin_trace: the robust anchor for WHICH game code
-        // writes the eye origin is the game's own call stack at the moment
-        // of this write, not a guessed address -- a guessed address was
-        // already flown and refuted. Reset first so a slot recycled from an
-        // earlier resource (the LRU eviction above) never carries a stale
-        // id forward; off, it stays this way -- not even the unwind runs.
-        w.stackId=eot::kStackNoneId;
-        if(s->eyeOriginTraceOn){
-            const int64_t t0=qpcNow();
-            const GameCallStack stack=captureGameCallStack();
-            const int64_t t1=qpcNow();
-            const int64_t freq=qpcFrequency();
-            if(freq>0)s->eyeTraceCaptureUs+=static_cast<uint64_t>((t1-t0)*1000000/freq);
-            const size_t len=std::strlen(stack.rvas);
-            w.stackId=s->eyeOriginStacks.intern(stack.rvas,fnv1a64(stack.rvas,len));
-            if(s->eyeTraceFrame!=s->frameNo){
-                s->eyeTraceFrame=s->frameNo;
-                s->eyeTraceWritesThisFrame=0;
-                s->eyeTraceMaskThisFrame=0;
-                ++s->eyeTraceFramesTotal;
-            }
-            ++s->eyeTraceWritesThisFrame;
-            ++s->eyeTraceWritesTotal;
-            s->eyeTraceMaskThisFrame=eot::addToMask(s->eyeTraceMaskThisFrame,w.stackId);
-        }
     }
     if (!finite3(pos)) return;
 
@@ -1798,23 +1635,14 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
     // scene-judged one when the trap is on).
     const float posOrig[3] = {pos[0], pos[1], pos[2]};
 
-    // advanced.transition_flash_eye_base (CHANGE 14/15): the patch sim --
-    // and, on a patched event's act frame, the render patch itself -- sees
-    // this same pre-Unmap fill. ORDER MATTERS, twice over. The tap runs
-    // AFTER the sceneWrites update above, so the detector's per-fill record
-    // of row 275 (w.pos, which its scene verdict reads back through
-    // s->sceneDrawPos) always holds the ORIGINAL bad values even when the
-    // patch rewrites the buffer here. And posOrig was just snapshotted, so
-    // nothing below reads back the correction. The frame is s->frameNo --
-    // the PRE-advance counter (the boundary that closes this frame records
-    // it one higher); the module compensates. The geometry argument is now
-    // superseded by the latch's own per-fill evidence query
-    // (glitchFrameScenePoolEvidence); the sim's boundary-time read of it
-    // stays for the referee comparison.
-    const bool sceneGeomFresh = s->scenePoolFrame == s->frameNo;
-    transitionFlashEyeBaseNoteSceneCB(s->frameNo, data, bytes,
-                                      sceneGeomFresh ? s->sceneGeometry : GlitchSceneGeometry{},
-                                      sceneGeomFresh);
+    // The engine fix's render tap (transition_flash_eye_base.cpp): it sees this
+    // pre-Unmap fill while an event's window is open and holds the frame at
+    // the first head-only one. The frame is s->frameNo -- the PRE-advance
+    // counter (the boundary that closes this frame records it one higher); the
+    // module compensates. It runs AFTER the sceneWrites update above, so this
+    // file's own record of row 275 is unaffected, and posOrig was snapshotted
+    // before it.
+    transitionFlashEyeBaseNoteSceneCB(s->frameNo, data, bytes);
 
     s->sawBuffer = true;
 
@@ -1869,7 +1697,7 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
 
     // Everything above is observation. Everything below can withhold a frame,
     // so a fix that has stood down -- or was never switched on -- stops here.
-    if (!s->enabled || s->disabledForSession) return;
+    if (!s->enabled || s->disabledForSession || engineFixDormant()) return;
 
     // The first recognised eye draw has stronger evidence than an auxiliary
     // pass. Later writes must not reverse its verdict before either Submit.
@@ -2133,30 +1961,15 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
 // glitchFrameIsSceneDraw: inline in glitch_frame.h (the same five hashes).
 bool glitchFrameWantsSceneDraw(uint64_t hash) {
     State* s=g_state;
-    if(!s || !s->observing || s->sceneDrawFrame==s->frameNo)return false;
+    if(!s || !s->observing || s->sceneDrawFrame==s->frameNo || !poolRecordingWanted())return false;
     return glitchFrameIsSceneDraw(hash);
-}
-// True once the camera validation behind "transition flash fix ACTIVE" has
-// passed -- the scene camera moved through its first rendered frames, which
-// is flight, not the menu or the loader. advanced.eye_origin_readers waits for
-// it before arming its time-bounded watch, so the watch is spent in flight.
-bool glitchFrameCameraValidated() {
-    State* s=g_state;
-    return s && s->validated;
 }
 bool glitchFrameNoteSceneDraw(const void* resource,float* sampledPosition) {
     State* s=g_state;
-    if(!s || !s->observing || !resource || s->sceneDrawFrame==s->frameNo)return false;
+    if(!s || !s->observing || !resource || s->sceneDrawFrame==s->frameNo || !poolRecordingWanted())return false;
     for(const auto& w:s->sceneWrites)if(w.resource==resource && w.frame==s->frameNo && w.valid){
         s->sceneDrawFrame=s->frameNo;
         for(unsigned a=0;a<3;++a){s->sceneDrawPos[a]=w.pos[a];if(sampledPosition)sampledPosition[a]=w.pos[a];}
-        // advanced.eye_origin_trace: this write's stack id IS the eye
-        // origin's stack for the frame -- w.stackId is eot::kStackNoneId
-        // whenever tracing is off, so noteEyeOrigin's bound check (id<used_,
-        // and used_ is 0 when nothing has ever been interned) already
-        // no-ops in that case without a separate gate.
-        s->sceneDrawStackId=w.stackId;
-        if(s->eyeOriginTraceOn)s->eyeOriginStacks.noteEyeOrigin(w.stackId);
         if(!s->sceneDrawNoted){s->sceneDrawNoted=true;Log::get().note(
             "transition flash: bound eye-draw camera cross-check is recording "
             "VS b1's current write, independently of AA; Pause history includes "
@@ -2166,10 +1979,8 @@ bool glitchFrameNoteSceneDraw(const void* resource,float* sampledPosition) {
     return false;
 }
 namespace {
-// CHANGE 9 (2026-09-24, task "the object side and the camera side of each
-// frame on one line"): recordScenePosition's own fold, handed back so the
-// three call sites can pass it straight to transitionFlashEyeBaseNoteScene-
-// Camera without recomputing the same frame-arithmetic gates a second time.
+// recordScenePosition's own fold of the pool geometry's freshness and the
+// scene decision for the frame just completed (no caller reads it any more).
 struct SceneGeometryTap {
     bool fresh;
     GlitchSceneDecision decision;
@@ -2181,13 +1992,6 @@ SceneGeometryTap recordScenePosition(RingEntry& e,const State* s){
     for(unsigned a=0;a<3;++a)e.scenePos[a]=s->sceneDrawPos[a];
     const bool geometryFresh=s->scenePoolFrame+1==s->frameNo;
     e.geometry=geometryFresh?s->sceneGeometry:GlitchSceneGeometry{};
-    // advanced.eye_origin_trace: eyeBufferWritten uses the SAME test as
-    // sceneValid above, on purpose (see the field comment on RingEntry).
-    e.eyeBufferWritten=s->sceneDrawFrame+1==s->frameNo;
-    e.eyeOriginStackId=e.eyeBufferWritten?s->sceneDrawStackId:eot::kStackNoneId;
-    const bool freshTrace=s->eyeTraceFrame+1==s->frameNo;
-    e.eyeTraceWrites=freshTrace?s->eyeTraceWritesThisFrame:0;
-    e.eyeTraceMask=freshTrace?s->eyeTraceMaskThisFrame:0;
     // CHANGE 9: the detector's decision for the SAME just-completed frame --
     // sceneDecisionFrame only advances when glitchSceneDecision returned
     // non-Unknown (the compare-and-decide site below), so a frame whose pool
@@ -2198,203 +2002,9 @@ SceneGeometryTap recordScenePosition(RingEntry& e,const State* s){
     return {geometryFresh, decision};
 }
 
-// appendLine's own copy for this instrument (transition_flash_eye_base.cpp
-// has one too, for its own dump; see AGENTS.md on copy-culture). Appends
-// one printf-style line plus \r\n to a std::string dump buffer.
-void eyeOriginTraceAppend(std::string& out,const char* fmt,...){
-    char buf[640];
-    va_list ap;
-    va_start(ap,fmt);
-    const int n=std::vsnprintf(buf,sizeof(buf),fmt,ap);
-    va_end(ap);
-    if(n>0)out.append(buf,static_cast<size_t>(n)<sizeof(buf)?static_cast<size_t>(n):sizeof(buf)-1);
-    out+="\r\n";
-}
-
-// One automatic dump file: edvr_logs\flash\eyetrace_HHMMSS_fN.txt, the
-// unique-stack table first (point 4 of the design: this file is read
-// stack-first), then every ring frame inside the folded trigger window.
-// Mirrors transition_flash_eye_base.cpp's performDump in shape (same log
-// directory accessor, same CreateDirectoryW/CreateFileW pattern) but is
-// this file's own function: that module stays untouched.
-void eyeOriginTracePerformDump(State* s,const eot::PendingWindow& window){
-    const uint32_t dumpIndex=++s->eyeTraceDumpsThisSession;
-
-    std::string text;
-    eyeOriginTraceAppend(text,
-        "eye-origin trace: dump %u/%u, window frames %u..%u",
-        dumpIndex,eot::kMaxAutoDumps,window.lowFrame,window.dueFrame);
-    eyeOriginTraceAppend(text,
-        "eye-origin call-stack table: %u of %u slot(s) used, %u write(s) overflowed it",
-        s->eyeOriginStacks.used(),eot::kMaxStacks,s->eyeOriginStacks.overflowed());
-    for(uint32_t i=0;i<s->eyeOriginStacks.used();++i){
-        const auto& se=s->eyeOriginStacks.entry(i);
-        eyeOriginTraceAppend(text,"  #%u count=%u eyeFrames=%u %s",i,se.count,se.eyeFrames,se.chain);
-    }
-
-    // advanced.eye_origin_readers (design doc part C): the unique-reader
-    // table, dump time only -- id is the row number, pose_reader_watch.h's
-    // own convention, eot::StackTable's above. Omitted when the instrument
-    // is off: nothing populated it, and an empty "0 of 32" section would
-    // only be noise on eye_origin_trace's own flights.
-    if(poseReaderWatchOn()){
-        const uint32_t readerCount=poseReaderWatchTableCount();
-        eyeOriginTraceAppend(text,
-            "pose-reader table: %u of %u unique reader(s)",
-            readerCount,prw::kMaxReaders);
-        for(uint32_t i=0;i<readerCount;++i){
-            const PoseReaderTableEntry re=poseReaderWatchTableEntry(i);
-            std::string callers;
-            for(uint32_t u=0;u<re.unwindCount;++u){
-                char piece[16];
-                std::snprintf(piece,sizeof(piece),"%s0x%X",callers.empty()?"":"/",re.unwindRvas[u]);
-                callers+=piece;
-            }
-            if(callers.empty())callers="(none)";
-            eyeOriginTraceAppend(text,
-                "  #%u rip=0x%llX count=%u firstFrame=%u lastFrame=%u callers=%s",
-                i,(unsigned long long)re.rip,re.count,re.firstFrame,re.lastFrame,callers.c_str());
-        }
-    }
-
-    const uint64_t have=s->ringHead<kRingFrames?s->ringHead:kRingFrames;
-    const uint64_t first=s->ringHead-have;
-    uint32_t printed=0;
-    for(uint64_t i=first;i<s->ringHead;++i){
-        const RingEntry& e=s->ring[i%kRingFrames];
-        if(!eot::frameInWindow(e.frame,window.lowFrame,window.dueFrame))continue;
-        ++printed;
-        char stackText[16];
-        if(!e.eyeBufferWritten)std::snprintf(stackText,sizeof(stackText),"none");
-        else if(e.eyeOriginStackId==eot::kStackOverflowId)std::snprintf(stackText,sizeof(stackText),"overflow");
-        else std::snprintf(stackText,sizeof(stackText),"#%u",e.eyeOriginStackId);
-        eyeOriginTraceAppend(text,
-            "f%-7u eye=%-3u verdict=%-40s pos=(%+.2f %+.2f %+.2f) scene=(%+.2f %+.2f %+.2f) "
-            "stack=%-8s buf=%-7s writes=%u mask=0x%016llX reader=0x%08X tick=%u swapsync=%u swap=%s "
-            "eyebase calls=%u unref=%u treat=%-7s wmask=0x%08X wsince=%s shipchg=%s "
-            "M=(%+.2f %+.2f %+.2f) F=(%+.2f %+.2f %+.2f)",
-            e.frame,e.eyeDraws,ringVerdictName(e.verdict),
-            e.pos[0],e.pos[1],e.pos[2],e.scenePos[0],e.scenePos[1],e.scenePos[2],
-            stackText,e.eyeBufferWritten?"written":"no",
-            e.eyeTraceWrites,(unsigned long long)e.eyeTraceMask,
-            e.poseReaderMask,unsigned(e.positionerTickCalls),unsigned(e.positionerSwapSyncCalls),
-            e.positionerSwapDetected?"yes":"no",
-            unsigned(e.eyeBaseCalls),unsigned(e.eyeBaseUnrefilledCalls),eyeBaseTreatmentName(e.eyeBaseTreatment),
-            e.eyeBaseWriterMask,e.eyeBaseWriterSinceLastConsume?"yes":"no",e.eyeBaseShipChanged?"yes":"no",
-            e.eyeBaseM[0],e.eyeBaseM[1],e.eyeBaseM[2],e.eyeBaseF[0],e.eyeBaseF[1],e.eyeBaseF[2]);
-    }
-    eyeOriginTraceAppend(text,"eye-origin trace dump done, %u entries",printed);
-
-    const std::wstring logDir=Log::get().dir();
-    std::wstring path;
-    bool wrote=false;
-    if(!logDir.empty()){
-        const std::wstring dir=logDir+L"\\flash";
-        CreateDirectoryW(dir.c_str(),nullptr);
-        SYSTEMTIME stm{};
-        GetLocalTime(&stm);
-        wchar_t filename[64];
-        _snwprintf_s(filename,_TRUNCATE,L"eyetrace_%02u%02u%02u_f%u.txt",
-                     static_cast<unsigned>(stm.wHour),static_cast<unsigned>(stm.wMinute),
-                     static_cast<unsigned>(stm.wSecond),window.lowFrame);
-        path=dir+L"\\"+filename;
-        HANDLE f=CreateFileW(path.c_str(),GENERIC_WRITE,0,nullptr,CREATE_ALWAYS,
-                             FILE_ATTRIBUTE_NORMAL,nullptr);
-        if(f!=INVALID_HANDLE_VALUE){
-            DWORD written=0;
-            wrote=WriteFile(f,text.data(),static_cast<DWORD>(text.size()),&written,nullptr)!=0;
-            CloseHandle(f);
-        }
-    }
-    Log::get().note(
-        "eye-origin trace: dump %u/%u, frames %u..%u, %u entries -> %ls",
-        dumpIndex,eot::kMaxAutoDumps,window.lowFrame,window.dueFrame,printed,
-        wrote?path.c_str():L"(could not write the file; see the log directory)");
-}
-
-// The ~20s summary (kTotalsEveryMs), printed only when a counter has moved
-// -- see the totals block in glitchFrameBoundary for the same discipline.
-void eyeOriginTraceReport(State* s){
-    const uint32_t stacks=s->eyeOriginStacks.used();
-    if(s->eyeTraceWritesTotal==s->eyeTraceReportWrites &&
-       s->eyeTraceFramesTotal==s->eyeTraceReportFrames &&
-       stacks==s->eyeTraceReportStacks &&
-       s->eyeTraceDumpsThisSession==s->eyeTraceReportDumps)return;
-    s->eyeTraceReportWrites=s->eyeTraceWritesTotal;
-    s->eyeTraceReportFrames=s->eyeTraceFramesTotal;
-    s->eyeTraceReportStacks=stacks;
-    s->eyeTraceReportDumps=s->eyeTraceDumpsThisSession;
-
-    // Top 8 stack ids by eye-origin frame count -- the same top-N selection
-    // scheduler_stack_probe.cpp uses for its own per-target report, kept as
-    // its own copy here (different table, different field to rank by).
-    uint32_t top[8];
-    for(uint32_t i=0;i<8;++i)top[i]=0xFFFFFFFFu;
-    for(uint32_t rank=0;rank<8 && rank<stacks;++rank){
-        uint32_t best=0xFFFFFFFFu;
-        for(uint32_t k=0;k<stacks;++k){
-            bool used=false;for(uint32_t r=0;r<rank;++r)if(top[r]==k)used=true;
-            if(used || s->eyeOriginStacks.entry(k).eyeFrames==0)continue;
-            if(best==0xFFFFFFFFu || s->eyeOriginStacks.entry(k).eyeFrames>s->eyeOriginStacks.entry(best).eyeFrames)best=k;
-        }
-        if(best!=0xFFFFFFFFu)top[rank]=best;
-    }
-    std::string topText;
-    for(uint32_t rank=0;rank<8;++rank){
-        if(top[rank]==0xFFFFFFFFu)break;
-        char piece[32];
-        std::snprintf(piece,sizeof(piece),"%s#%u:%u",topText.empty()?"":" ",
-                     top[rank],s->eyeOriginStacks.entry(top[rank]).eyeFrames);
-        topText+=piece;
-    }
-    if(topText.empty())topText="(none)";
-
-    Log::get().note(
-        "eye-origin trace: %u frame(s) traced, %u write(s), %u unique stack(s), top: %s, "
-        "%u automatic dump(s), %llu us spent capturing stacks so far.",
-        s->eyeTraceFramesTotal,s->eyeTraceWritesTotal,stacks,topText.c_str(),
-        s->eyeTraceDumpsThisSession,(unsigned long long)s->eyeTraceCaptureUs);
-}
-
-// Called from all three of glitchFrameBoundary's verdict sites (the
-// fix-off path, the disabled-for-session path, and the normal path) with
-// the same withheldClass test at each -- so one flight needs no key presses
-// -- plus sceneResetVerdict, the narrower test advanced.eye_origin_readers
-// wants (pose_reader_watch_core.h's dumpVerdictTrigger; see the design
-// doc's part C). Off is the only real gate; once on, this runs every
-// boundary call so a pending dump becomes due even on a frame with no new
-// trigger.
-void eyeOriginTraceBoundary(State* s,uint32_t frame,bool withheldClass,bool sceneResetVerdict){
-    if(!s->eyeOriginTraceOn)return;
-    const bool readersOn=poseReaderWatchOn();
-    if(prw::dumpVerdictTrigger(readersOn,withheldClass,sceneResetVerdict)){
-        const bool creatingNew=!s->eyeTraceDump.active;
-        if(!creatingNew || s->eyeTraceDumpsThisSession<eot::kMaxAutoDumps){
-            s->eyeTraceDump=eot::foldTrigger(s->eyeTraceDump,frame);
-        }
-    }
-    // The design doc's part C, trigger 2: a positioner swap. Only a
-    // possibility once advanced.eye_origin_readers is on -- pose_reader_
-    // watch.cpp never raises this trigger otherwise.
-    uint32_t swapFrame=0;
-    if(readersOn && poseReaderTakeSwapTrigger(&swapFrame)){
-        const bool creatingNew=!s->eyeTraceDump.active;
-        if(!creatingNew || s->eyeTraceDumpsThisSession<eot::kMaxAutoDumps){
-            s->eyeTraceDump=eot::foldTrigger(s->eyeTraceDump,swapFrame);
-        }
-    }
-    if(s->eyeTraceDump.active && frame>=s->eyeTraceDump.dueFrame){
-        eyeOriginTracePerformDump(s,s->eyeTraceDump);
-        s->eyeTraceDump=eot::PendingWindow{};
-    }
-    if(dueMs(s->eyeTraceReportAtMs,kTotalsEveryMs)){
-        s->eyeTraceReportAtMs=stampMs();
-        eyeOriginTraceReport(s);
-    }
-}
 }
 uint32_t glitchFrameWantsPool(const void* resource){
-    State* s=g_state;if(!s || !s->observing || !resource || s->scenePoolFrame==s->frameNo)return 0;
+    State* s=g_state;if(!s || !s->observing || !resource || s->scenePoolFrame==s->frameNo || !poolRecordingWanted())return 0;
     for(const auto& p:s->scenePools)if(p.resource==resource && s->frameNo-p.lastBound<=2)return p.bytes;
     return 0;
 }
@@ -2416,34 +2026,10 @@ void glitchFrameInvalidatePool(const void* resource){
     State* s=g_state;if(!s)return;
     for(auto& p:s->scenePools)if(!resource || p.resource==resource)p.write.valid=false;
 }
-// advanced.transition_flash_eye_base's per-bad-frame latch query -- see the
-// header's own comment for the contract. A copy of the frame's pool upload
-// goes into compare with the fill's row 275 as the camera; the store itself
-// (p.write/p.prev/p.older) is never advanced or mutated here.
-bool glitchFrameScenePoolEvidence(uint32_t frame, const float camera[3], GlitchSceneGeometry* out,
-                                  glitch_scene_detail::Sample snapshot[3]) {
-    State* s = g_state;
-    if (!s || !s->observing || !camera || !out) return false;
-    for (const auto& p : s->scenePools) {
-        if (!p.write.valid || p.write.frame != frame) continue;
-        glitch_scene_detail::Sample copy = p.write;
-        copy.camera[0] = camera[0];
-        copy.camera[1] = camera[1];
-        copy.camera[2] = camera[2];
-        *out = glitch_scene_detail::compare(copy, p.prev, p.older);
-        if (snapshot) {
-            snapshot[0] = copy;
-            snapshot[1] = p.prev;
-            snapshot[2] = p.older;
-        }
-        return true;
-    }
-    return false;
-}
 void glitchFrameNoteScenePool(const void* resource,uint32_t bytes){
     State* s=g_state;
     if(!s || !s->observing || !resource || !bytes || bytes%glitch_scene_detail::kPoolStride ||
-       s->sceneDrawFrame!=s->frameNo || s->scenePoolFrame==s->frameNo)return;
+       s->sceneDrawFrame!=s->frameNo || s->scenePoolFrame==s->frameNo || !poolRecordingWanted())return;
     uint32_t at=0;
     for(uint32_t i=0;i<4;++i){
         if(s->scenePools[i].resource==resource){at=i;break;}
@@ -2466,7 +2052,7 @@ void glitchFrameNoteScenePool(const void* resource,uint32_t bytes){
             "jump; an unmatched reset into head space can mark before Submit. "
             "Missing pairs report matched=0 and retain the legacy decision.");}
     }
-    if(!s->enabled || s->disabledForSession || !s->validated || s->lastEyeDraws<s->minEyeDraws)return;
+    if(!s->enabled || s->disabledForSession || engineFixDormant() || !s->validated || s->lastEyeDraws<s->minEyeDraws)return;
     const auto decision=glitchSceneDecision(s->sceneGeometry,s->sceneDrawPos);
     if(decision==GlitchSceneDecision::Unknown)return;
     s->sceneDecision=decision;s->sceneDecisionFrame=s->frameNo;
@@ -2498,84 +2084,23 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
     const bool sceneReset=s->sceneDecisionFrame==s->frameNo && s->sceneDecision==GlitchSceneDecision::CameraReset;
     ++s->frameNo;
 
-    // The cull guard's state for the frame being closed, read once so the
-    // stamp, the split counters and the log all describe the same reading.
-    // The guard's stage transitions happen only at WaitGetPoses, before the
-    // game queries its projections -- so the value standing at Present is the
-    // value that governed everything this frame was drawn under. Zero is
-    // "off" and also "nobody publishing", identical on purpose (frame_flag.h).
-    s->guardPacked = cullGuardStatePacked();
-    if (!s->guardLiveNoted && decodeCullGuardState(s->guardPacked).stage == 2) {
-        s->guardLiveNoted = true;
-        const CullGuardState g = decodeCullGuardState(s->guardPacked);
-        Log::get().note(
-            "transition flash: the cull guard's wider frustum is live "
-            "(+%u.%u%% horizontal, +%u.%u%% vertical). A wider frustum admits "
-            "more render passes, so recognition churn may climb here; "
-            "camera-history lines now carry a cull= column and the running "
-            "totals attribute their counts to the guard, so that churn is "
-            "readable per margin. Bookkeeping only; no decision changes on "
-            "it.",
-            g.hPerMille / 10, g.hPerMille % 10, g.vPerMille / 10,
-            g.vPerMille % 10);
-    }
-
     // OBSERVING BUT NOT ACTING. Record the frame and stop.
     //
     // Everything past here validates, decides and withholds, and none of it has
     // any business running for a fix the player has switched off. The ring does,
     // because a history is the whole reason to run with it off: nothing withheld
     // means anything seen was somebody else's.
-    if (!s->enabled) {
+    if (!s->enabled || engineFixDormant()) {
         if (s->frameFarMag2 >= 0.0f || s->sceneDrawFrame+1==s->frameNo) {
             RingEntry& e = s->ring[s->ringHead % kRingFrames];
             e.qpc = static_cast<uint64_t>(qpcNow());
             e.frame = s->frameNo;
             e.eyeDraws = eyeDraws;
-            e.guard = s->guardPacked;
             e.verdict = s->verdictThisFrame;
-            transitionFlashEyeBaseNoteDetectorVerdict(e.frame, e.verdict==kVerdictSceneReset);
             for (uint32_t a = 0; a < 3; ++a) e.pos[a] = s->frameFarMag2>=0?s->frameFarPos[a]:NAN;
-            const SceneGeometryTap sceneGeometryTap = recordScenePosition(e,s);
-            // advanced.transition_flash_eye_base: CHANGE 3/4's own per-frame
-            // tap, independent of advanced.eye_origin_trace -- the value
-            // recordScenePosition just folded into e.scenePos/e.sceneValid/
-            // e.geometry, plus this frame's own geometry freshness and
-            // detector decision (CHANGE 9).
-            transitionFlashEyeBaseNoteSceneCamera(e.frame, e.scenePos, e.sceneValid,
-                e.geometry, sceneGeometryTap.fresh, sceneGeometryTap.decision);
-            // advanced.eye_origin_readers: read-and-reset (see the
-            // function's own comment), so this must run exactly once per
-            // real frame -- true here, since this block and its siblings
-            // at glitchFrameBoundary's other two verdict sites are
-            // mutually exclusive.
-            {
-                const PoseReaderFrameSnapshot pr = poseReaderWatchFrameSnapshot();
-                e.poseReaderMask = pr.readerMask;
-                e.positionerTickCalls = pr.tickCalls;
-                e.positionerSwapSyncCalls = pr.swapSyncCalls;
-                e.positionerSwapDetected = pr.swapDetected;
-            }
-            // advanced.transition_flash_eye_base: read-and-reset, the same
-            // convention and the same "exactly once per real frame" note as
-            // the pose-reader tap just above.
-            {
-                const EyeBaseFrameSnapshot eb = transitionFlashEyeBaseFrameSnapshot();
-                e.eyeBaseCalls = eb.calls;
-                e.eyeBaseUnrefilledCalls = eb.unrefilledCalls;
-                e.eyeBaseTreatment = eb.treatment;
-                e.eyeBaseWriterMask = eb.writerMask;
-                e.eyeBaseWriterSinceLastConsume = eb.writerSinceLastConsume;
-                e.eyeBaseShipChanged = eb.shipChanged;
-                e.eyeBaseM[0] = eb.mTranslation[0]; e.eyeBaseM[1] = eb.mTranslation[1]; e.eyeBaseM[2] = eb.mTranslation[2];
-                e.eyeBaseF[0] = eb.fTranslation[0]; e.eyeBaseF[1] = eb.fTranslation[1]; e.eyeBaseF[2] = eb.fTranslation[2];
-            }
+            recordScenePosition(e,s);
             ++s->ringHead;
         }
-        eyeOriginTraceBoundary(s, s->frameNo,
-            s->verdictThisFrame==kVerdictWithheld || s->verdictThisFrame==kVerdictWithheldSepWould ||
-            s->verdictThisFrame==kVerdictSceneReset,
-            s->verdictThisFrame==kVerdictSceneReset);
         s->frameFarMag2 = -1.0f;
         s->verdictThisFrame = kVerdictQuiet;
         s->jumpedThisFrame = false;
@@ -2660,49 +2185,11 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
             e.qpc = static_cast<uint64_t>(qpcNow());
             e.frame = s->frameNo;
             e.eyeDraws = eyeDraws;
-            e.guard = s->guardPacked;
             e.verdict = s->verdictThisFrame;
-            transitionFlashEyeBaseNoteDetectorVerdict(e.frame, e.verdict==kVerdictSceneReset);
             for (uint32_t a = 0; a < 3; ++a) e.pos[a] = s->frameFarMag2>=0?s->frameFarPos[a]:NAN;
-            const SceneGeometryTap sceneGeometryTap = recordScenePosition(e,s);
-            // advanced.transition_flash_eye_base: CHANGE 3/4's own per-frame
-            // tap, independent of advanced.eye_origin_trace -- the value
-            // recordScenePosition just folded into e.scenePos/e.sceneValid/
-            // e.geometry, plus this frame's own geometry freshness and
-            // detector decision (CHANGE 9).
-            transitionFlashEyeBaseNoteSceneCamera(e.frame, e.scenePos, e.sceneValid,
-                e.geometry, sceneGeometryTap.fresh, sceneGeometryTap.decision);
-            // advanced.eye_origin_readers: read-and-reset (see the
-            // function's own comment), so this must run exactly once per
-            // real frame -- true here, since this block and its siblings
-            // at glitchFrameBoundary's other two verdict sites are
-            // mutually exclusive.
-            {
-                const PoseReaderFrameSnapshot pr = poseReaderWatchFrameSnapshot();
-                e.poseReaderMask = pr.readerMask;
-                e.positionerTickCalls = pr.tickCalls;
-                e.positionerSwapSyncCalls = pr.swapSyncCalls;
-                e.positionerSwapDetected = pr.swapDetected;
-            }
-            // advanced.transition_flash_eye_base: read-and-reset, the same
-            // convention as the pose-reader tap just above.
-            {
-                const EyeBaseFrameSnapshot eb = transitionFlashEyeBaseFrameSnapshot();
-                e.eyeBaseCalls = eb.calls;
-                e.eyeBaseUnrefilledCalls = eb.unrefilledCalls;
-                e.eyeBaseTreatment = eb.treatment;
-                e.eyeBaseWriterMask = eb.writerMask;
-                e.eyeBaseWriterSinceLastConsume = eb.writerSinceLastConsume;
-                e.eyeBaseShipChanged = eb.shipChanged;
-                e.eyeBaseM[0] = eb.mTranslation[0]; e.eyeBaseM[1] = eb.mTranslation[1]; e.eyeBaseM[2] = eb.mTranslation[2];
-                e.eyeBaseF[0] = eb.fTranslation[0]; e.eyeBaseF[1] = eb.fTranslation[1]; e.eyeBaseF[2] = eb.fTranslation[2];
-            }
+            recordScenePosition(e,s);
             ++s->ringHead;
         }
-        eyeOriginTraceBoundary(s, s->frameNo,
-            s->verdictThisFrame==kVerdictWithheld || s->verdictThisFrame==kVerdictWithheldSepWould ||
-            s->verdictThisFrame==kVerdictSceneReset,
-            s->verdictThisFrame==kVerdictSceneReset);
         s->frameFarMag2 = -1.0f;
         s->verdictThisFrame = kVerdictQuiet;
         s->jumpedThisFrame = false;
@@ -2748,11 +2235,6 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
         // a separation that is suppressing correctly from ageing out of the
         // memory and firing all over again.
         ++s->suppressed;
-        // Attribution, not decision: how much of the recognition traffic
-        // arrives under the cull guard's wider frustum (spec §1g).
-        if (decodeCullGuardState(s->guardPacked).stage == 2) {
-            ++s->suppressedGuardLive;
-        }
         if (s->parkSuppressedThisFrame) {
             ++s->suppressedByPark;
             // Not recorded as a separation, for the same reason a radius
@@ -2808,9 +2290,6 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
         ++s->framesWithheld;
         ++s->windowWithheld;
         s->lastWithheldFrame = s->frameNo;
-        if (decodeCullGuardState(s->guardPacked).stage == 2) {
-            ++s->withheldGuardLive;
-        }
         // The first of a kind is always withheld -- it cannot be known to repeat
         // until it has. That is the cost of this approach and it is one frame per
         // novel magnitude, against one frame every three that it replaces.
@@ -3020,42 +2499,9 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
         e.qpc = static_cast<uint64_t>(qpcNow());
         e.frame = s->frameNo;
         e.eyeDraws = eyeDraws;
-        e.guard = s->guardPacked;
         e.verdict = s->verdictThisFrame;
-        transitionFlashEyeBaseNoteDetectorVerdict(e.frame, e.verdict==kVerdictSceneReset);
         for (uint32_t a = 0; a < 3; ++a) e.pos[a] = s->frameFarMag2>=0?s->frameFarPos[a]:NAN;
-        const SceneGeometryTap sceneGeometryTap = recordScenePosition(e,s);
-        // advanced.transition_flash_eye_base: CHANGE 3/4's own per-frame tap,
-        // independent of advanced.eye_origin_trace -- the value
-        // recordScenePosition just folded into e.scenePos/e.sceneValid/
-        // e.geometry, plus this frame's own geometry freshness and detector
-        // decision (CHANGE 9).
-        transitionFlashEyeBaseNoteSceneCamera(e.frame, e.scenePos, e.sceneValid,
-            e.geometry, sceneGeometryTap.fresh, sceneGeometryTap.decision);
-        // advanced.eye_origin_readers: read-and-reset: see
-        // poseReaderWatchFrameSnapshot's own comment, and the identical
-        // tap at glitchFrameBoundary's other two (mutually exclusive)
-        // verdict sites.
-        {
-            const PoseReaderFrameSnapshot pr = poseReaderWatchFrameSnapshot();
-            e.poseReaderMask = pr.readerMask;
-            e.positionerTickCalls = pr.tickCalls;
-            e.positionerSwapSyncCalls = pr.swapSyncCalls;
-            e.positionerSwapDetected = pr.swapDetected;
-        }
-        // advanced.transition_flash_eye_base: read-and-reset, the same
-        // convention as the pose-reader tap just above.
-        {
-            const EyeBaseFrameSnapshot eb = transitionFlashEyeBaseFrameSnapshot();
-            e.eyeBaseCalls = eb.calls;
-            e.eyeBaseUnrefilledCalls = eb.unrefilledCalls;
-            e.eyeBaseTreatment = eb.treatment;
-            e.eyeBaseWriterMask = eb.writerMask;
-            e.eyeBaseWriterSinceLastConsume = eb.writerSinceLastConsume;
-            e.eyeBaseShipChanged = eb.shipChanged;
-            e.eyeBaseM[0] = eb.mTranslation[0]; e.eyeBaseM[1] = eb.mTranslation[1]; e.eyeBaseM[2] = eb.mTranslation[2];
-            e.eyeBaseF[0] = eb.fTranslation[0]; e.eyeBaseF[1] = eb.fTranslation[1]; e.eyeBaseF[2] = eb.fTranslation[2];
-        }
+        recordScenePosition(e,s);
         ++s->ringHead;
     }
 
@@ -3125,19 +2571,6 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
                 s->suppressedByPark, s->suppressedByDrift,
                 s->framesWithheld - s->totalsWithheld,
                 s->suppressed - s->totalsSuppressed, s->withheldNotRendering);
-            // ITS OWN LINE, not a suffix of the paragraph above: appended
-            // there it pushed the note past the log's line buffer and every
-            // field log carried it truncated mid-word, which is worse than
-            // absent -- a sentence that ends in "(do" reads as a crash.
-            // Present only in sessions the guard has been live in, so every
-            // other rig's totals read exactly as they always have.
-            if (s->withheldGuardLive || s->suppressedGuardLive) {
-                Log::get().note(
-                    "transition flash, guard attribution: %u withheld / %u "
-                    "recognised under the cull guard's wider frustum "
-                    "(docs/terrain-culling.md).",
-                    s->withheldGuardLive, s->suppressedGuardLive);
-            }
             s->totalsWithheld = s->framesWithheld;
             s->totalsSuppressed = s->suppressed;
         }
@@ -3150,10 +2583,6 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
     s->radiusSuppressedThisFrame = false;
     s->parkSuppressedThisFrame = false;
     s->driftSuppressedThisFrame = false;
-    eyeOriginTraceBoundary(s, s->frameNo,
-        s->verdictThisFrame==kVerdictWithheld || s->verdictThisFrame==kVerdictWithheldSepWould ||
-        s->verdictThisFrame==kVerdictSceneReset,
-        s->verdictThisFrame==kVerdictSceneReset);
     s->frameFarMag2 = -1.0f;
     s->verdictThisFrame = kVerdictQuiet;
 }
@@ -3161,6 +2590,19 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
 void dumpCameraRing(const char* trigger, uint32_t msAfterPress) {
     State* s = g_state;
     if (!s) return;
+    if (engineFixDormant()) {
+        // Armed and idle, glitchFrameObserve returns before recording: the ring
+        // would hold old event frames or none, and presenting it as the moment
+        // somebody pressed a key about would mislead.
+        Log::get().note("camera history dump requested, but the engine fix is armed "
+                        "(fix.transition_flash), and while it is the old detector's camera "
+                        "history is not recorded. Every frame the fix holds is logged as "
+                        "'transition flash: frame N held'; no such line near the moment you "
+                        "reacted to means it did not hold one. To record the history instead, "
+                        "set fix.transition_flash = 0 and restart -- the clean control for a "
+                        "flash report.");
+        return;
+    }
     if (!s->observing) {
         Log::get().note("camera history dump requested, but nothing is being recorded: "
                         "the viewpoint offset and buffer size in [advanced] do not "
@@ -3219,45 +2661,15 @@ void dumpCameraRing(const char* trigger, uint32_t msAfterPress) {
             freq ? static_cast<double>(static_cast<int64_t>(newest - e.qpc)) * 1000.0 /
                        static_cast<double>(freq)
                  : 0.0;
-        // The cull guard's margin, only on frames it was doing something --
-        // a guard-off session's dump is byte-identical to what it always
-        // was, and a staircase flight's dump names the margin per frame,
-        // across live changes, which is the attribution 6bp had to
-        // reconstruct from log timestamps.
-        char cull[28] = "";
-        if (e.guard) {
-            const CullGuardState g = decodeCullGuardState(e.guard);
-            if (g.stage == 1) {
-                snprintf(cull, sizeof(cull), " cull=stage1");
-            } else {
-                snprintf(cull, sizeof(cull), " cull=+%u.%u%%/+%u.%u%%",
-                         g.hPerMille / 10, g.hPerMille % 10, g.vPerMille / 10,
-                         g.vPerMille % 10);
-            }
-        }
-        Log::get().note("CAM %8.1fms f%-7u eye=%-5u pos=(%+.2f %+.2f %+.2f)%s %s",
+        Log::get().note("CAM %8.1fms f%-7u eye=%-5u pos=(%+.2f %+.2f %+.2f) %s",
                         -msAgo, e.frame, e.eyeDraws, e.pos[0], e.pos[1], e.pos[2],
-                        cull, ringVerdictName(e.verdict));
+                        ringVerdictName(e.verdict));
         if(e.sceneValid)Log::get().note("    f%u scene=(%+.2f %+.2f %+.2f) [bound VS b1]",
             e.frame,e.scenePos[0],e.scenePos[1],e.scenePos[2]);
         else Log::get().note("    f%u scene=unavailable [no fresh recognised eye draw]",e.frame);
         const auto& g=e.geometry;
         Log::get().note("    f%u geometry matched=%u predicted=%u cameraStep=%.3f poolStep=%.3f relativeMedian=%.3f relativeP90=%.3f predictionP90=%.3f",
             e.frame,g.matched,g.predicted,g.cameraStep,g.poolStep,g.relativeMedian,g.relativeP90,g.predictionP90);
-        // advanced.eye_origin_trace: printed only when the session actually
-        // ran it -- off, every one of these fields is a meaningless zero,
-        // and printing them on every ring line of every Pause dump ever
-        // taken would be exactly the per-frame log noise AGENTS.md's
-        // logging-bounded rule exists to prevent.
-        if(s->eyeOriginTraceOn){
-            char stackText[16];
-            if(!e.eyeBufferWritten)std::snprintf(stackText,sizeof(stackText),"none");
-            else if(e.eyeOriginStackId==eot::kStackOverflowId)std::snprintf(stackText,sizeof(stackText),"overflow");
-            else std::snprintf(stackText,sizeof(stackText),"#%u",e.eyeOriginStackId);
-            Log::get().note("    f%u eyetrace stack=%s buf=%s writes=%u mask=0x%016llX",
-                e.frame,stackText,e.eyeBufferWritten?"written":"no",
-                e.eyeTraceWrites,(unsigned long long)e.eyeTraceMask);
-        }
     }
     // WAS ANY OF THIS OURS? The question every one of these dumps has been
     // opened to answer, worked out by hand every time.
@@ -3291,10 +2703,7 @@ void dumpCameraRing(const char* trigger, uint32_t msAfterPress) {
     // WHAT THE DETECTOR HAS LEARNED, printed beside the history it learned it
     // from (spec §1g). The note lines are a sample and the totals are counts;
     // this is the CONTENTS -- which magnitudes and which landing geometry are
-    // doing the suppressing, and what the learning has cost. On a cull-guard
-    // staircase flight this is the per-step readout: dump at each margin and
-    // the tables name what that margin taught, which is the data the
-    // margin-aware-detector decision waits on.
+    // doing the suppressing, and what the learning has cost.
     {
         uint32_t sepsInUse = 0;
         for (uint32_t i = 0; i < kSeparations; ++i) {
@@ -3370,17 +2779,6 @@ void dumpCameraRing(const char* trigger, uint32_t msAfterPress) {
         }
     }
     Log::get().note("--- bound-pool coherence: %u auxiliary jumps excused, %u eye-reset frames marked; %u frame(s) exceeded the four-write sampling cap. Unavailable pairs stay matched=0 and retain the legacy decision. ---",s->sceneExcused,s->sceneResets,s->scenePoolCapped);
-    // advanced.eye_origin_trace: the unique-stack table, once, at the end of
-    // the dump -- the per-frame eyetrace lines above name a stack by id;
-    // this is where that id's RVA chain actually lives.
-    if(s->eyeOriginTraceOn){
-        Log::get().note("--- eye-origin call-stack table: %u of %u slot(s) used, %u write(s) overflowed it ---",
-            s->eyeOriginStacks.used(),eot::kMaxStacks,s->eyeOriginStacks.overflowed());
-        for(uint32_t i=0;i<s->eyeOriginStacks.used();++i){
-            const auto& se=s->eyeOriginStacks.entry(i);
-            Log::get().note("  #%u count=%u eyeFrames=%u %s",i,se.count,se.eyeFrames,se.chain);
-        }
-    }
     Log::get().note("--- end camera history ---");
 }
 
@@ -3409,8 +2807,6 @@ GlitchFrameChurnStats glitchFrameChurnStats() {
     GlitchFrameChurnStats out = {};
     State* s = g_state;
     if (!s) return out;
-    out.withheldGuardLive = s->withheldGuardLive;
-    out.suppressedGuardLive = s->suppressedGuardLive;
     out.sepInsertions = s->sepInsertions;
     out.sepEvictedLive = s->sepEvictedLive;
     out.sepRelearned = s->sepRelearned;

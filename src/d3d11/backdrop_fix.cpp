@@ -99,8 +99,10 @@ FaultBudget g_budget("backdrop", 8);
 // Nothing is shipped or redistributed to do this: it is the game's own asset,
 // used a few seconds longer than the game intended.
 bool g_splash = false;
-float g_threshold = 6.0f / 255.0f;
-float g_dither = 1.0f / 255.0f;
+// Flatness threshold, 0..64 of 255. Above about 24 this stops being a
+// deband and starts being a blur that eats stars.
+constexpr float g_threshold = 6.0f / 255.0f;
+constexpr float g_dither = 1.0f / 255.0f;
 
 // One baked still. `srcRes` is the source resource as an IDENTITY only --
 // never dereferenced, only compared, the same bargain binding_shadow states
@@ -137,7 +139,6 @@ ID3D11UnorderedAccessView* g_tmpUav = nullptr;
 ID3D11Buffer*              g_cb = nullptr;
 ID3D11ComputeShader*       g_cs = nullptr;
 
-bool g_rebuild = false;
 bool g_notedFull = false;
 bool g_notedComposite = false;
 bool g_failed = false;
@@ -446,30 +447,6 @@ void backdropConfigure(Config& cfg) {
     const bool splash = bm.splash;
     const bool on = bm.on;
 
-    // 0..64 of 255. Above about 24 this stops being a deband and starts
-    // being a blur that eats stars, which is a thing to be able to SEE
-    // rather than a thing to be protected from.
-    const float t =
-        static_cast<float>(cfg.getIntInRange("advanced.menu_backdrop_threshold",
-                                             6, 0, 64)) /
-        255.0f;
-    const float d =
-        static_cast<float>(cfg.getIntInRange("advanced.menu_backdrop_dither",
-                                             1, 0, 8)) /
-        255.0f;
-
-    // A tunable that changed has to reach the image, and the image is baked.
-    // But nothing here frees a D3D object: this runs on the config reload
-    // path, and the textures are read by Begin/End on the render thread.
-    // Requesting a rebuild lets the draw path do the freeing, where it is the
-    // only thread that can be looking.
-    if (g_slotsUsed > 0 && (t != g_threshold || d != g_dither)) {
-        g_rebuild = true;
-        g_failed = false;
-        g_notedBuilt = false;
-    }
-    g_threshold = t;
-    g_dither = d;
     detail::g_backdropOn = on;
     if (g_splash != splash) g_notedSplash = false;
     g_splash = splash;
@@ -499,14 +476,6 @@ bool backdropOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
     if (info.a < kMinWidth || info.b < kMinHeight) return false;
     const float aspect = static_cast<float>(info.a) / static_cast<float>(info.b);
     if (aspect < kMinAspect || aspect > kMaxAspect) return false;
-
-    // A tunable moved under us. The freeing happens HERE, on the render
-    // thread, and not in Configure -- Begin/End read these textures and
-    // Configure runs on the reload path.
-    if (g_rebuild) {
-        g_rebuild = false;
-        releaseAll();
-    }
 
     // Already baked? Serve THIS draw's own bake. This is the whole point of
     // the cache: the menu's two stills each keep their own, so neither

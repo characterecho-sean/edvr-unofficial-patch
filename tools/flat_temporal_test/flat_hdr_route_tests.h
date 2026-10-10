@@ -310,6 +310,13 @@ struct Stream {
     void dispatch(const void* uav) {
         edvr::flatRuntimeDispatchObserveWritten(*prefix, uav); edvr::flatHdrObserveDispatchWrite(hdr, uav);
     }
+    // A draw of a pool family's vertex shader with a pixel shader the motion producer does not substitute, into the scene's depth: the
+    // runtime flags it (FlatRuntimeDraw::poolFamilyVs), and a scene holding one is never source-free.
+    void stockFamilyDraw() {
+        edvr::FlatRuntimeDraw d = make(sc.h, sc.hDepth, sc.hW, sc.hH, 26, 0xA1, 0xB9, true, false);
+        d.poolFamilyVs = true;
+        draw(d);
+    }
     // The scene's draws into H: the first few are pool-family draws (the motion source), the rest lighting and glass.
     void sceneDraws(uint32_t pool, uint32_t other) {
         for (uint32_t i = 0; i < pool; ++i)
@@ -352,11 +359,15 @@ inline int flatHdrRouteTests() {
     // ---- the backend flags, as pure functions ---------------------------------------------------------
     // The values are the SDKs' own (dlaa.cpp and fsr3_engine.cpp static_assert them against the headers); what is pinned
     // here is which bits each route sets, and that the LDR sets are what they always were.
-    expect(flatDlssCreateFlags(false) == (1u << 1 | 1u << 3) && flatDlssCreateFlags(false) == 0x0Au,
+    expect(flatDlssCreateFlags(false, true) == (1u << 1 | 1u << 3) && flatDlssCreateFlags(false, true) == 0x0Au &&
+           flatDlssCreateFlags(false, false) == 0x0Au,
            "DLSS LDR flags stay MVLowRes | DepthInverted, bit for bit");
-    expect(flatDlssCreateFlags(true) == (1u << 0 | 1u << 1 | 1u << 3 | 1u << 6) && flatDlssCreateFlags(true) == 0x4Bu &&
-           (flatDlssCreateFlags(true) & kDlssFlagMvJittered) == 0,
-           "DLSS HDR adds IsHDR and AutoExposure, keeps MVLowRes and DepthInverted, and never sets MVJittered");
+    expect(flatDlssCreateFlags(true, true) == (1u << 0 | 1u << 1 | 1u << 3) && flatDlssCreateFlags(true, true) == 0x0Bu &&
+           (flatDlssCreateFlags(true, true) & (kDlssFlagMvJittered | kDlssFlagAutoExposure)) == 0,
+           "DLSS on the flat HDR route adds IsHDR only (fixed exposure, section 106), keeps MVLowRes and DepthInverted, never MVJittered");
+    expect(flatDlssCreateFlags(true, false) == 0x4Bu && flatDlssFixedExposure(true, true) &&
+           !flatDlssFixedExposure(true, false) && !flatDlssFixedExposure(false, true),
+           "the VR world route keeps IsHDR | AutoExposure, and only the flat HDR route evaluates with the fixed exposure texture");
     expect(flatFsrCreateFlags(false, false, false) == (1u << 3) &&
            flatFsrCreateFlags(true, false, false) == (1u << 3 | 1u << 4) &&
            flatFsrCreateFlags(true, true, false) == (1u << 3 | 1u << 4 | 1u << 8) &&
@@ -632,8 +643,16 @@ inline int flatHdrRouteTests() {
         expect(!wild.select().selected(), "a target off the output's aspect is refused");
 
         Stream noPool; noPool.sceneDraws(0, 4); noPool.toneTrigger();   // H without a pool-family source
-        expect(noPool.select().reason == FlatMonoReason::NoSupportedSource,
-               "no supported source: no-supported-motion-source-pair");
+        const FlatMonoFrame noPoolFrame = noPool.select();
+        expect(noPoolFrame.selected() && noPoolFrame.sourceFree && noPoolFrame.supportedDraws == 0 && noPoolFrame.hdr == noPool.sc.h &&
+                   noPoolFrame.depth == noPool.sc.hDepth && noPoolFrame.sceneConstants == noPool.sc.b1 && noPoolFrame.sourceFirst == 0,
+               "no pool-family draw in the scene: selected with no motion source, naming H's depth, constants and camera (the pool-less view)");
+        Stream stockOnly; stockOnly.sceneDraws(0, 4); stockOnly.stockFamilyDraw(); stockOnly.toneTrigger();
+        expect(stockOnly.select().reason == FlatMonoReason::NoSupportedSource && !stockOnly.select().sourceFree,
+               "no supported source and a pool-family draw left stock: no-supported-motion-source-pair");
+        Stream sourced; sourced.sceneDraws(2, 2); sourced.toneTrigger();
+        expect(sourced.select().selected() && !sourced.select().sourceFree,
+               "a scene with a supported source is selected as before and is not source-free");
         Stream noCam;
         for (int i = 0; i < 2; ++i) noCam.draw(noCam.make(noCam.sc.h, noCam.sc.hDepth, 3840, 2160, 26, 0xA1, 0xB1, false, true));
         noCam.toneTrigger();
@@ -1174,7 +1193,7 @@ inline int flatHdrRouteTests() {
         expect(taaAbove.machine.entries == 1 && dlssAbove.machine.entries == 0,
                "EDVR's TAA above D: a refused chain stands down as before; DLSS above D: the route treats it, nothing stands down");
         // A refusal for any other reason adds nothing either (the copy stage decides).
-        Stream noPool; noPool.sceneDraws(0, 4); noPool.toneTrigger();
+        Stream noPool; noPool.sceneDraws(0, 4); noPool.stockFamilyDraw(); noPool.toneTrigger();
         const FlatMonoFrame refused = noPool.select();
         Sim refusedSim;
         runs(refused, FlatMonoResolveMode::Dlss, true, &refusedSim);
@@ -1540,8 +1559,10 @@ inline int flatHdrRouteTests() {
             return n;
         };
         const std::string dlaa = slurpSource("src/d3d11/dlaa.cpp");
-        expect(!dlaa.empty() && count(dlaa, "cp.InFeatureCreateFlags = static_cast<int>(flatDlssCreateFlags(hdr));") == 1 &&
-                   count(dlaa, "flatDlssCreateFlags(hdr)") == 1,
+        expect(!dlaa.empty() && count(dlaa, "cp.InFeatureCreateFlags = static_cast<int>(flatDlssCreateFlags(hdr, runtimeFlatProfile()));") == 1 &&
+                   count(dlaa, "flatDlssCreateFlags(hdr") == 1 &&
+                   count(dlaa, "if (flatDlssFixedExposure(hdr, runtimeFlatProfile())) {") == 1 &&
+                   count(dlaa, "ep.pInExposureTexture = g_exposureOne;") == 1,
                "dlaa.cpp creates the DLSS feature with exactly the flags hdr_backend_flags.h names for the route, in one place");
         expect(count(dlaa, "f.presetGen != g_presetGen || f.hdr != hdr") == 1 && count(dlaa, "f.hdr = hdr;") == 1,
                "dlaa.cpp keys the feature on the route's bit and stores it when the feature is made, so a flip remakes it");
@@ -1575,8 +1596,6 @@ inline int flatHdrRouteTests() {
         const std::string runtime = slurpSource("src/d3d11/flat_runtime.cpp");
         const std::string menu = slurpSource("src/d3d11/menu.cpp");
         expect(!runtime.empty() && !menu.empty(), "the runtime and menu sources are readable from the repo root");
-        expect(count(runtime, "Config::get().getString(\"experimental.temporal_aa_before_post\", \"auto\")") == 1,
-               "the route's key falls back to auto when the file has no line");
         expect(count(runtime, "flatHdrTriggerSeen(sel,") == 1 &&
                    count(runtime, "sel.mixedCamera?FlatMonoResolveMode::Taa:s.engine);") == 0 &&
                    count(runtime, "flatFrameSeenFor(") == 1 &&

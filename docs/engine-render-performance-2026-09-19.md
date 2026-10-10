@@ -2,6 +2,11 @@
 
 ## Status
 
+* **Removed 2026-10-08 (branch claude/remove-settlement-detail):** the
+  LOD governor (`fix.settlement_detail`, `advanced.settlement_detail_max`
+  and `_observe`) and the static prop gate (`fix.static_prop_updates`),
+  with code and rigs. The entries below are their history.
+
 * **State, 2026-09-23 (scope: cockpit, stereo only).** The settlement
   CPU wall is the caller thread's own draw submission, not the job
   pipeline: the pipeline's critical-path share is 0.78-0.81 ms against
@@ -14,18 +19,13 @@
   B' on evidence — the hiding surface is 89.6% open panels, qualified
   solid occluders remove zero draws — and no cull code was built
   ("Gate probe flown", "Probe v2 flown"). The settlement LOD governor
-  has flown eight times (2 shadow, 6 acting): sustained 90 Hz for
-  90 s before the k_max 4 cap (fixed via k_max 6); a reduced-by-
-  accident flight saturated at k 6; a close-range flight found the
-  lever INERT there; 4b flown at the pad -- every rule fired, but at
-  the ceiling (half the k=1 parts passed) 25-34% of cycles still
-  take two slots at 10.1-10.7 ms MEAN: the wall is now the frame's
-  TAIL, not its mean, past the kick's reach ("Refinement 3 flight",
-  "The LOD lever is INERT at close range", "Refinement 4b flown at
-  the pad").
+  flew eight times (2 shadow, 6 acting; "Shadow flight 1" to
+  "Refinement 4b flown at the pad": at the ceiling 25-34% of cycles
+  still took two slots, the wall being the frame's TAIL) and was then
+  removed (the bullet above).
 
-* **Levers still open:** the draw count, now via the LOD governor's
-  acting mode (flown once, in refinement); the last ~0.4-0.6 ms of EDVR's own per-draw
+* **Levers still open:** the draw count (its governor lever is gone);
+  the last ~0.4-0.6 ms of EDVR's own per-draw
   path — the always-on instruments armed-only, plus a fourth round on
   the resource hooks ("Leg C").
 

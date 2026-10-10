@@ -48,7 +48,7 @@ constexpr size_t kFrameSections = sizeof(kFrameBreakdownNames) / sizeof(kFrameBr
 // Elite's own draws that EDVR alters (gpu_census.h): the game's draws timed whole, so they are
 // reported on their own lines and never summed into EDVR's total. AlteredPoolFamily and
 // AlteredUiLayer are one class each (indices 20..21); the draws another fix wraps are one
-// section per fix from AlteredFixFirst on (indices 22..37), reported as one item on the
+// section per fix from AlteredFixFirst on (the last kAlteredFixCount sections), reported as one item on the
 // classes' line (their sum) and one by one on the line after it.
 constexpr size_t kAlteredFirst = static_cast<size_t>(GpuCensusSection::AlteredPoolFamily);
 constexpr size_t kSeedSection = static_cast<size_t>(GpuCensusSection::FrameUiLayerHdrSeed);
@@ -61,8 +61,8 @@ constexpr const char* kAlteredFixSumName = "other fix-wrapped draws";
 // The fix names, in AlteredFix's order: fixed strings, never built from a draw.
 constexpr const char* kAlteredFixNames[kAlteredFixCount] = {
     "panel distance", "RemLok overlay", "loading hologram", "target indicator", "night vision", "intro panel",
-    "sun glare clamp", "sun glare steady", "particles", "FSS panel", "FSS reveal", "FSS dump",
-    "scanner-body resolve", "loading scrim", "menu backdrop", "unnamed fix"
+    "sun glare clamp", "sun glare steady", "particles", "FSS panel", "FSS reveal",
+    "loading scrim", "menu backdrop", "unnamed fix"
 };
 static_assert(kAlteredClassSections == 2, "one name for each altered-draw class");
 // The VR world route's three sections (gpu_census.h) come right after the seed and are the last in-frame ones. The
@@ -70,9 +70,18 @@ static_assert(kAlteredClassSections == 2, "one name for each altered-draw class"
 // before they existed.
 constexpr size_t kWorldFirst = static_cast<size_t>(GpuCensusSection::FrameWorldResolve);
 constexpr size_t kWorldSections = static_cast<size_t>(GpuCensusSection::FrameWorldLayer) - kWorldFirst + 1;
-static_assert(kAlteredFirst == kDoorSections + kFrameSections, "one name for each in-frame section, and the altered sections follow them");
-static_assert(kSeedSection + 1 == kWorldFirst && kWorldFirst + kWorldSections == kAlteredFirst && kWorldSections == 3,
-              "the seed is followed by the three world-route sections, which are the last in-frame ones");
+// The second skin's five items (gpu_census.h) come right after the world route's and are the last in-frame sections. Each is nested inside an engine velocity
+// span, so none is in kFrameBreakdownNames or in any total: they are priced on a line of their own (logAndResetWindow), and, like the world route's, have no turn
+// in the rotation until called this window.
+constexpr size_t kSkinFirst = static_cast<size_t>(GpuCensusSection::FrameSkinSourceClear);
+constexpr size_t kSkinSections = static_cast<size_t>(GpuCensusSection::FrameSkinPose) - kSkinFirst + 1;
+constexpr const char* kSkinNames[] = {
+    "source target 7 clear", "eye target 7 clear", "join 3-table clear pass", "join dispatch (clear pass not included)", "pose table"
+};
+static_assert(kAlteredFirst == kDoorSections + kFrameSections + kSkinSections, "one name for each in-frame section, and the altered sections follow them");
+static_assert(kSeedSection + 1 == kWorldFirst && kWorldFirst + kWorldSections == kSkinFirst && kSkinFirst + kSkinSections == kAlteredFirst && kWorldSections == 3 &&
+                  kSkinSections == 5 && sizeof(kSkinNames) / sizeof(kSkinNames[0]) == kSkinSections,
+              "the seed is followed by the three world-route sections and the second skin's five, which are the last in-frame ones");
 static_assert(kAlteredFixFirst + kAlteredFixCount == kSections, "the fix sections are the last ones");
 
 struct SectionState {
@@ -116,6 +125,7 @@ bool g_activeNullDone = false;
 
 uint64_t g_windowStartMs = 0;
 uint64_t g_windowFrames = 0;
+unsigned g_windowEyeRuns = 0;   // eye runs armed in this window (gpuCensusNoteEyeRun)
 
 // R (design item 3): our own cursor into gpu_frame_timing's completion
 // ring, and this window's Application-render outerMs samples. Read via
@@ -293,15 +303,17 @@ uint64_t turnOccurrences(GpuCensusSection owner) noexcept {
     for (size_t i = 0; i < static_cast<size_t>(kAlteredFixCount); ++i) total += g_section[kAlteredFixFirst + i].occurrences;
     return total;
 }
-// The next section to hold a turn: the fix sections after the first are not turns of their own, and a world-route
-// section has none until it has been called this window (its first call counts whether or not it is on turn).
+// A world-route or second-skin section has no turn until it has been called this window (its first call counts whether or not it is on turn).
+bool hasNoTurnYet(size_t i) noexcept {
+    return ((i >= kWorldFirst && i < kWorldFirst + kWorldSections) || (i >= kSkinFirst && i < kSkinFirst + kSkinSections)) && g_section[i].occurrences == 0;
+}
+// The next section to hold a turn: the fix sections after the first are not turns of their own, and a world-route or second-skin
+// section has none until it has been called this window.
 int nextTurnOwner(int current) noexcept {
     int next = current;
     do {
         next = (next + 1) % static_cast<int>(kSections);
-    } while (turnOwnerOf(static_cast<GpuCensusSection>(next)) != static_cast<GpuCensusSection>(next) ||
-             (static_cast<size_t>(next) >= kWorldFirst && static_cast<size_t>(next) < kWorldFirst + kWorldSections &&
-              g_section[static_cast<size_t>(next)].occurrences == 0));
+    } while (turnOwnerOf(static_cast<GpuCensusSection>(next)) != static_cast<GpuCensusSection>(next) || hasNoTurnYet(static_cast<size_t>(next)));
     return next;
 }
 
@@ -373,8 +385,24 @@ void formatSeedDetail(char* out, size_t n, const Snapshot& s, uint64_t notes, bo
                   s.perFrame, cost, target);
 }
 
+// The second skin's line (gpu_census.h, FrameSkinSourceClear..FrameSkinPose): "-" for an item that did not run this window. Each item is also inside the engine velocity
+// figure on the main line, so it is a breakdown of that figure and never an addition to a total.
+void formatSkinDetail(char* out, size_t n, const Snapshot (&items)[kSkinSections], double edvrTotal) {
+    std::string list;
+    for (size_t i = 0; i < kSkinSections; ++i) appendItem(list, kSkinNames[i], items[i]);
+    std::snprintf(out, n,
+                  "EDVR GPU census, the second skin's GPU work (F2); each item is already inside the engine velocity figure above, so none of it is added to EDVR ~%.3f: "
+                  "%s; the clear pass is issued right before the join dispatch and is not part of it (before F17 the join's first phase was the clear: 0.015 of its 0.030 ms); "
+                  "\"-\" means that work did not run this window.",
+                  edvrTotal, list.c_str());
+}
+
 void logAndResetWindow(uint64_t now) {
     const uint64_t frames = g_windowFrames;
+    // A window an eye run fell in prices the run along with the features: its copies and its draw census are in the figures.
+    const char* eyeNote = g_windowEyeRuns
+        ? " An eye run was armed in this window: its ledger, draw census and copies are in these figures; price a feature from a window without this sentence."
+        : "";
     const double seconds = static_cast<double>(now - g_windowStartMs) / 1000.0;
 
     // "door D" is the wrapped whole temporalInner (both eyes) plus the
@@ -491,10 +519,10 @@ void logAndResetWindow(uint64_t now) {
     Log::get().note(
         "EDVR GPU census: %.0f s, %llu frames; EDVR ~%.3f ms/frame = door %.3f "
         "(%s) + in-frame %.3f (%s); application render p50 %s; %s; "
-        "timer floor %s; spans timed %llu, failed %llu.",
+        "timer floor %s; spans timed %llu, failed %llu.%s",
         seconds, static_cast<unsigned long long>(frames), doorTotal + frameTotal, doorTotal,
         doorItems.c_str(), frameTotal, frameItems.c_str(), rBuf, gapBrief, floorBuf,
-        static_cast<unsigned long long>(spansTimed), static_cast<unsigned long long>(spansSkipped));
+        static_cast<unsigned long long>(spansTimed), static_cast<unsigned long long>(spansSkipped), eyeNote);
     // The HDR HUD seed's own line, only when a seed ran: "-" on the main line alone means none did (the layer is
     // off, or it drew no HUD that tests the game's depth or stencil); a line here means the item above is a
     // measurement, and says which target it was taken on.
@@ -503,14 +531,28 @@ void logAndResetWindow(uint64_t now) {
         formatSeedDetail(seedDetail, sizeof(seedDetail), seedSnap, g_seedNotes, g_seedMixed, g_seedFirst, g_seedOther);
         Log::get().note("%s", seedDetail);
     }
+    // The second skin's own line, only when some of that work ran this window (a window with no skinned character prints nothing of it, as before F16).
+    {
+        Snapshot skin[kSkinSections];
+        bool any = false;
+        for (size_t i = 0; i < kSkinSections; ++i) {
+            skin[i] = snapshotOf(g_section[kSkinFirst + i], frames);
+            any = any || skin[i].occurred;
+        }
+        if (any) {
+            char skinDetail[1024];
+            formatSkinDetail(skinDetail, sizeof(skinDetail), skin, doorTotal + frameTotal);
+            Log::get().note("%s", skinDetail);
+        }
+    }
     // Elite's own draws that EDVR alters: what the AA path's GPU cost looks like from
     // outside, inside draws the census would otherwise count as the game's. Each is the
     // game's draw timed whole, so the figures INCLUDE the game's own work in those draws.
     Log::get().note(
         "EDVR GPU census, Elite's own draws that EDVR alters (each is the game's draw timed whole, so a figure "
         "includes the game's own work in it, not only what EDVR adds, and none of it is in EDVR ~%.3f above): "
-        "%s; together %.3f ms/frame; \"-\" means no such draw ran this window.",
-        doorTotal + frameTotal, alteredItems.c_str(), alteredTotal);
+        "%s; together %.3f ms/frame; \"-\" means no such draw ran this window.%s",
+        doorTotal + frameTotal, alteredItems.c_str(), alteredTotal, eyeNote);
     // The "other fix-wrapped draws" above, one fix at a time: which code wraps the draws that cost.
     Log::get().note(
         "EDVR GPU census, the other fix-wrapped draws above by the fix that wraps each (the same draws, the game's own "
@@ -533,6 +575,7 @@ void logAndResetWindow(uint64_t now) {
     }
     resetSeedNotes();
     g_windowFrames = 0;
+    g_windowEyeRuns = 0;
     g_windowStartMs = now;
     g_p50Count = 0;
 }
@@ -624,6 +667,8 @@ void gpuCensusFrame(ID3D11DeviceContext* ctx) noexcept {
     if (now - g_windowStartMs < 30000) return;
     logAndResetWindow(now);
 }
+
+void gpuCensusNoteEyeRun() noexcept { ++g_windowEyeRuns; }
 
 void gpuCensusShutdown() noexcept {
     for (auto& st : g_section) { st.sampler.reset(); st.nullSampler.reset(); }

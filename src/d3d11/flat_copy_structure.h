@@ -122,7 +122,7 @@ inline FlatWeaponRoute flatWeaponRoute(bool keyAuto, bool routeLatched, FlatMono
 
 // ---- the admission --------------------------------------------------------------------------------------------
 struct FlatCopyPolicy {
-    bool structure = false;              // admit by structure (experimental.temporal_aa_before_post = auto)
+    bool structure = false;              // admit by structure (the HDR route is on)
     FlatMonoResolveMode mode = FlatMonoResolveMode::Taa;
     bool routeLatched = false;           // the HDR route turned itself off this session (flat_hdr_route.h's latch)
 };
@@ -381,7 +381,7 @@ inline int flatCopyFormatWindow(char* out, size_t size, bool structureOn, const 
 // The first admission of a session, once. `routeName` is flatResolveRoute's name for the mode at this size.
 inline int flatCopyFormatFirstAdmission(char* out, size_t size, uint64_t frame, const FlatCopyDiag& g, const char* routeName) {
     return std::snprintf(out, size,
-        "flat copy structure: first admission at frame=%llu (experimental.temporal_aa_before_post=auto): the game's final "
+        "flat copy structure: first admission at frame=%llu (the HDR route is on): the game's final "
         "copy reads a %ux%u R8G8B8A8 image written by one pass, VS=%016llX PS=%016llX, after the scene HDR's first consumer "
         "(VS=%016llX PS=%016llX), with no other R-sized image pass in between; no whitelisted tone pass wrote it (the "
         "whitelist said %s); the scene is %ux%u on a %ux%u output%s, route=%s; admitted by structure, so bloom, depth of "

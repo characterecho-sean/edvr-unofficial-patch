@@ -30,30 +30,35 @@
   entries describe coverage repairs. The 09-28 bytecode proof supersedes their
   native-marker/bypass interpretation: all five alleged native pairs and BA58
   were EDVR-generated.
-- **Other open work:** phase 2 rigid builder/per-part history and bones for
-  walkers/articulated parts; ships, evaluated-but-undrawn movers, flat-source
-  aliasing; stale cockpit (low priority); ps_91F8/ps_A607 owner/coverage.
+- **Other open work:** walkers (F10, F1, F2 entries at the end); ships,
+  evaluated-but-undrawn movers, flat-source aliasing; stale cockpit (low
+  priority); ps_91F8/ps_A607 owner/coverage.
   Flight 5/6 and 162703 cover the fixed on-foot/hangar paths. Boarding flicker:
-  LOD governor. Pending checks: diagnostics 1 vs 0, walker near drone with
-  motion_source.
+  LOD governor (removed 2026-10-08, branch claude/remove-settlement-detail,
+  with `fix.settlement_detail`). Pending checks: diagnostics 1 vs 0, walker
+  near drone with motion_source.
 - **Ruled-out pointer:** dated entries close estimation/shape/slot identity,
   four flag routes, velocity buffers, record+0x1C0 previous poses,
   content-pairing A, fix-round five hypotheses, on-foot camera/packing
   assumptions, fetch cost, cockpit depth pre-pass/bias, motion-cost
   interpretations, wrong joined station motion, close-range
-  reconstruction-floor-only diagnosis.
-- **Validation / delivery:** absolute build.bat --jobs 4 passed all gates:
-  production DLLs, 82 pooled jobs + 4 quiet, 262-key contract and installer
-  resources. Focused/full-build engine rig: 1686 checks; prior real corpus:
-  2398. Source fix 4118ae84 is committed, merged and pushed; remote main was
-  verified. The repair entry records the full source commit and receipt.
+  reconstruction-floor-only diagnosis; F10: DE54 as the NPC's, the pixel probe
+  naming it, per-part rotation, rigid-only keying under 1 px, own body gain.
+- **Validation / delivery:** build.bat --jobs 4 passed all gates (82 pooled jobs
+  + 4 quiet, 262-key contract, installer); engine rig 1686 checks, real corpus
+  2398. Fix 4118ae84 merged, pushed, remote main verified.
+- **0.19.0 review (10-09):** chain verdict vs shader registry, and history out of
+  a mixed-palette frame, FIXED (two end entries, NOT FLOWN).
 - **Next:** rotating-station capture on the installed repair, after clean
   promotion/deployment is verified by the installer and delivery report.
   Require hooked primary/copier/merge/clear statuses, nonzero joined private
   rows/scatter, actual EP/EN ownership exports and correct brace
   motion/coverage; inspect remaining WORLD and building pixels separately.
   Visual verification is open. Native primary records stay unchanged; no bones,
-  estimation, generic pool matching or new shader admission.
+  estimation or generic pool matching. NPC (Explorer Cam, VR): F1, F2 and the
+  one-join-per-frame fix are FLOWN OK (F14, 7d0e052e; Sean: "NPCs looked
+  good"; cost +0.1-0.2 ms a frame). F15 (E on the first-person panel) is FLOWN
+  OK (050026, no leak). F16 priced it: clears 0.003-0.005, join 0.03, pose 0.03-0.09 ms.
 
 ## Premise
 
@@ -3683,3 +3688,753 @@ exports actual consumed EP ownership and EN private-pool bytes on its first
 frame; it must show these named rigid braces gaining accurate engine motion.
 Top-building attribution, incomplete captured geometry/material visibility and
 any remaining reconstruction softness remain explicit limits.
+
+## 2026-10-08 NPCs blur in Explorer Cam, pixelate on the flat screen: walkers get camera-only motion
+
+Sean, on the Explorer Cam branch (build 9dab1fdc, log
+`edvr_gfx_20261008_111125.log`, eye dump `eye_111351_FinalCrisp`, settlement
+NPC standing and gesturing): the NPC blurs in Explorer Cam (stereo eyes,
+DLSS Performance) and looks pixelated on the flat first-person screen.
+Diagnosis by a read-only pass over the dump and log (notes and scripts in the
+worktree's `analysis\npc_blur\`):
+
+- **Eyes, MEASURED.** Of the NPC's 13,945 pixels (stencil 0x10), 13,943 take
+  path 2 (camera through depth) and 2 take engine records. 83% are unmarked,
+  14% stale and 2.6% pool-not-rig. Hidden and masked are 0, so history is
+  never refused. The DLSS input MV on the NPC is a median of 0.834 px, the
+  same as the static floor. Bias (reactive) is zero everywhere. The camera
+  path is healthy (rowsOk 16/16). The error sits on the moving limbs: the
+  head and arm's low-pass |T-C| is 2-3x the static baseline, while the
+  standing torso and legs sit at baseline. A WALKING NPC would be worse.
+- **Flat first person, INFERRED.** The VR world route runs flat DLAA. Stale
+  engine slots are REFUSED there (raw jittered pixels) unless steady detail
+  forgives them. Unslotted pixels take the camera term. That predicts blur
+  inside the NPC and raw pixels at its silhouette. There is no NPC-specific
+  pixel evidence yet.
+- **ruled out:** the avatar dither fade (EDVR's global write), because F's
+  heartbeat reads enabled_calls=0 in every window from 11:12 to 11:14:26,
+  with the global at -1 and at 0.
+- **Predates the Explorer Cam branch.** The branch changes no temporal,
+  engine-velocity, flat, weapon, screen-motion or world-route source (git
+  diff e1e8f82c..9dab1fdc).
+- **Plan (Sean, 2026-10-08): data first, then F1.** The next combined flight
+  takes two eye dumps with a WALKING NPC, one in Explorer Cam and one in plain
+  first person. F1 admits the NPC's skinned shading families to the
+  engine-record path, so the rig record's root pose pair gives root motion.
+  Admission is approved for those families only, if the dumps show the limb
+  residual after root motion is about 1 px or less. F2, per-vertex skinned
+  motion generalised from weapon motion, follows only if the limbs need it.
+
+### 2026-10-08 follow-up: the walking NPC passes F1's rule; the flat screen refuses 0x10
+
+Build v0.18.3-50-g8f2946f7, log `edvr_gfx_20261008_120441.log`, dumps
+120917 (walking NPC, Explorer Cam), 120929 (own body, looking down), 121052
+(flat screen at a route release); 120851 captured the F5 entry instead (the
+fade's black frame, then the photo preset). Scripts in the worktree's
+`analysis\npc_blur\` (b5.py estimator).
+
+- **Walking NPC, MEASURED.** All 8,359 px take path 2 with 0 joined. The MV
+  is the camera field (spread 0.017 px). Root motion is 1.53 px/frame
+  (1.25 m/s at 8.6 m). The limb residual after the root is a median of
+  0.71 px/frame (p90 1.5; legs 1.15; static noise floor 0.26). By Sean's rule
+  (about 1 px or less) F1 suffices. It cuts the error by about 60%; the leg
+  swing stays above 1 px.
+- **NPC shading draws, INFERRED.** The main-eye draws carrying stencil 0x10
+  are vs DE545DC8EE4FBB87 with ps 3AF0C44DA1B245D9 (x16), 91F8937EDA723663
+  (x13) and 03B17F89B31C4788 (x3). Only E46E/03B1 are patched; 91F8 was
+  refused by the patcher ("position input register holds another
+  semantic"). Decider: advanced.pixel_probe on NPC pixels.
+- **Flat screen, INFERRED (strong).** flat_mono_shader_source.h:187 treats
+  every stencil-0x10 pixel as first-person attached (the weapon map's motion
+  or refused). Characters carry 0x10 and are not in the weapon map, so NPC
+  pixels are refused and show raw jittered input. That is the pixelation.
+- **ruled out:** "Sean's own body rides the near-field head path". Its
+  268,856 px take path 2, mis-registered by a median of 2.08 px/frame
+  against the ground's 0.28. It only looks clean (dark, smooth, near).
+- **Weapon refusals in the VR route** (41k-189k px per sampled frame)
+  predate the Explorer Cam branch (pre-branch b4d9d6ab shows up to 148,675).
+  The cause is open. Three world-route releases ("engine-views-unavailable")
+  this flight against 0-1 before: test with advanced.explorer_cam_probe off,
+  which also switches the camera census off.
+
+### 2026-10-08 step A built: a stencil-0x10 pixel is first-person only where the weapon map covers it or within reach
+
+Branch claude/explorer-cam-npc-motion, full build.bat green, not flown, not
+installed. The flat prep (flat_mono_shader_source.h, "attached" in prep) and
+the eye route's screen shader (fixed_shader_source.h, kScreenMotionPs) shared
+one rule: stencil bit 0x10 means the weapon, so the weapon map's motion or no
+history. Characters carry the bit too (the walking NPC 8,359 px, the commander's
+body 785,022 px), and the map never covers them. Now a 0x10 texel is
+first-person only if the map covers it (w 1 or 2) or its raw depth is at least
+kFirstPersonReachDepth = .075; any other 0x10 texel takes the world path (the
+engine record if joined, else the camera term). The first-person camera's near
+plane is 0.0675 m and the world's 0.025 m, so .075 is 0.9 m for a first-person
+draw and 0.33 m for the world camera. The weapon map measured on 2026-10-08
+(eye_121052_WeaponMotion.bin, 245,865 texels) spans raw depth .1134-.1948, i.e.
+0.35-0.60 m. The bound protects a weapon or arm the matcher missed on a frame
+it declined (more than four mesh occurrences, an arena write): it stays
+first-person and keeps no history instead of taking a camera term that would
+ghost it. No first-person arm depth has been measured; the bound rests on the
+weapon's. The two shaders carry the same literal; the screen shader's
+source-hash pin (fixed_core_shader_variants.h) was re-pinned on purpose.
+Rigs: the flat first-person scenario gained World, joined-World and
+near-uncovered cells, the reach boundary on three sides, and TAA cells (28 of
+28 mutants caught); the screen-motion rig gained the same cells and a mutation
+harness of its own (7 mutants and a control, each caught).
+
+Correction to the entry above: the DE54 draws with stencil ref bit 0x10 (ps
+3AF0, 91F8, 03B1: 16, 13 and 3 a frame) are NOT shown to be the NPC's. They are
+small instanced meshes (startInstance 14.9k-22.3k, past the 13,312-record
+pool), the counts are the same in both NPC dumps, and the census listed only
+3,288 of about 12.5k main-eye draws (truncated=29,051), so the NPC's colour
+draws are not in this log. What the pool does show (eye_120917_EnginePool.bin
+and EngineNow.bin, MEASURED): 82 moving rig records, all certified-joined at
+the frame token; 43 within 6-12 m of the camera in an NPC-sized volume
+(0.72 x 0.86 x 0.33 m) at 8.5-8.9 m, 25 distinct poses, 5.5-8.2 mm of
+translation and up to 12.2 degrees of rotation per record. INFERRED: those are
+the NPC's per-part records (the projection onto the image was not verified).
+If so, F1 is per-part rigid motion, not root-only, and its limb residual should
+sit below the 0.71 px a root-only model leaves.
+
+### 2026-10-08 F10 (6f47ea53): the NPC is one rigid body plus a skinned body, and its pairs are unkeyed
+
+Log edvr_gfx_20261008_133931.log (v0.18.3-54-g6f47ea53, build matched),
+Frontier, Explorer Cam. Dumps 134235 (NPC walking at 10.9 m, not the planned
+6 m: raw depth .0023, 4,394 px of stencil 0x10), 134247 (head turned: no NPC
+pixel; 418,854 px of 0x10 are the commander's own gear), 134323 (NPC walking
+away at 5.1 m, 21,724 px). Scripts f1-f35.py, f10lib.py, ev_candidates.cpp (the
+patcher and WARP identity harness) are in analysis\npc_blur; no DLL was built.
+
+**Which draws (Q1).**
+- Pixel probe, MEASURED: it cannot name them. Its atlas takes the first
+  target's format (the HDR colour, rt 890/1259/775) and declines every draw
+  into another target. The ledger's colour pass runs in rt 124/500 (D3: 9,434
+  rows) against 176 rows in rt 890, and the probe copied 174 draws. Its 5/3/5
+  "changed" draws are blend and post draws (vs 7E38A6AA, 963B52C7, 24DE25E4,
+  0357BBB2 particles, F8FA801F quad; in D3 also 7F9B650E, a pool record 0.4 m
+  behind the camera). None is the NPC's.
+- Record route, MEASURED: the moving, certified-joined records that project
+  onto the NPC (Q3) are read through the instance stream (inst_<stamp>_<frame>
+  .bin: 8 bytes an instance, the record index first; StartInstanceLocation picks
+  the entry; one instance a draw). D3 eye A colour pass (census frame 0 =
+  ledger frame 11711; its listing reaches #4282 of 9,990, so eye B and all of
+  D1's colour pass lie past the truncation): vs 8B589D25B2A0ADDC + ps
+  7268762D11A610F2, 15 draws (index counts 411, 5928, 4662, 2115, 1032, 168,
+  5967, 1344, 1344, 192, 159, 426, 579, 426, 579), stencil ref 121 = 0x79, the
+  0x10 bit; vs 7B0DC42D383F694C + ps 0DF03E64DF9DBEF1, 2 draws (10842, 60),
+  ref 0x79; vs 114AF608F86D9ED8 + ps A17504A2627767F2, 2 draws (78, 78), ref
+  0x4E7 (no 0x10). Each part also draws depth-only (vs F516BF02... + ps
+  B40B0462..., no colour output). Eye B repeats in rt 500; D1 in rt 231/769.
+- Diff, MEASURED: all 12 distinct index counts of the 15 8B58 draws are absent
+  from D2 (its other D3-only keys: 123, 180, 267, 57729). The diff alone cannot
+  split NPC from props (the pairs draw 68/34/45 a frame in D1/D2/D3 and the
+  commander's gear: 18 7B0D and 4 8B58 draws in D2 use records within 2.5 m of
+  the camera); the record link does.
+- Skinned half, MEASURED: 20 more records (base word != 0, palette bases
+  7656-10383, the same list in D1, D3 and every ledger frame) sit at the NPC's
+  feet, 1.1 m under the rigid parts, and move with it (11.4 mm in step one).
+  They are read by 17 draws of 7B0D/0DF03E64 (index sum 141,936, max 22,344), 3
+  of 114A/A175 (8136, 9222, 426), 1 of vs D99AFDC250D19A3F + ps
+  E86271E464CCDC1D (10,932) and 1 of vs 61AE8EB0 + ps 451A82D4 (510, the one
+  pair already keyed). Colour-pass index count, rigid : skinned = 36,390 :
+  171,162. INFERRED as the pixel share (17 : 83): the eyemesh vertex capture was
+  declined (0 bytes) and no tool rasterises a draw.
+- ruled out: the DE54 draws (ps 3AF0, 91F8, 03B1) are the NPC's, because their
+  records sit 24 m to 10 km from the camera (medians 65-200 m), none of the
+  14/17 NPC records is read by any of their 107/169 draws, and the pair draws
+  with the NPC out of view (D2: 74 draws, 3 with the 0x10 bit).
+- ruled out: the pixel probe names the opaque NPC draws, because it declined
+  the whole G-buffer pass (rt 124/500) on its format rule.
+
+**The shaders (Q2).** MEASURED from the dumped bytecode (the shaders folder
+holds 1,199 files written on nine dates since 9/6; this run wrote 16, and every
+pair below was in it by hash).
+- vs 8B58, 7B0D, 114A (and F516) declare t33 (336 B) and t38 (48 B) and index
+  t33 with INSTANCEANDMODELDATAINDEX.x (v0.x, the stream's first word): pose at
+  +16, quaternion at +8, palette path only when record word 0 (the base) is not
+  0. They export FACEINVARIANT.x = bfi(31,0,v0.x,flag) at register 0 and
+  SV_POSITION at register 4; the pixel shaders take v0.xy, write SV_Target0-3
+  and discard.
+- Patcher, MEASURED (ev_candidates.cpp, the corpus_identity harness over this
+  dump on WARP, under the build lock): derive, patch, create, reflect, o0..o3 +
+  depth bit-identical and MRT6 = 2 slot + 1 with the fragment's depth, all PASS
+  for 8B58/7268762D, 7B0D/0DF03E64, 114A/A175 and D99A/E86271E4 (controls 61AE/
+  451A, DE54/E46E, 03B1, 91F8 pass as before). Refused: DE54/3AF0 ("output
+  target 6 or above occupied": it already writes target 6), F516/B40B ("no
+  colour output"), D8FC/E875 ("no INSTANCEANDMODELDATAINDEX.x at v0").
+  The patcher is not what leaves the NPC alone: none of its pairs is in
+  kFamilies (ten vertex shaders; kMaxFamilies is 10). The old "position input
+  register holds another semantic" was DE54/91F8, which the harness patches.
+
+**Do the records land on the NPC, and what is left (Q3).**
+- Projection, MEASURED (d7.py read the VP rows as tangents; the form that
+  works is clip = (p - EN[275]) . rows 270..273, NDC onto the 2016 x 1949 eye):
+  D1 14 of 14 moving records land at x 1206-1238, y 960-1010, depth 10.9-11.4
+  m, inside the mask box (x 1178-1243, y 944-1100). D3 17 of 17 at x 1176-1252,
+  y 644-760, depth 5.0-5.6 m, inside x 1155-1282, y 608-952 (raw depth says
+  5.1 m). They cover head, torso and arms; none sits on the legs.
+- One body, MEASURED: a Kabsch fit of all moving NPC records, previous pose to
+  current, leaves a median 0.2-0.8 mm (max 0.8-3.5) at ordinary steps (D3 11711,
+  11712, 11715-11722; D1 8970, 8971, 8975); 3.7-5.7 mm only on the 97-134 mm
+  hitch frames. At 11712, 15 of 17 records share one 0.93 degree yaw step
+  (the other two 0.0 and 0.12). The rigid parts do not articulate; the walking
+  is in the skinned half. All NPC rigid
+  records are certified joined at the frame token (14/14, 17/17), as is every
+  moving record in the pool (29/29, 30/30); all 154/120 skinned records in the
+  pool carry no marker and previous = now.
+- The crops are not live steps, MEASURED: the NPC records advance 8.9, 10.7 mm,
+  then 119, 44, 30-41 mm per ledger frame (D3) and 9.8, 12.9, 134, 97, 40-50 mm
+  (D1); the log has a 196.9 ms frame at the arming and 34 head updates a second
+  through the window. Only pair k=1 is a live-sized step. Pairs k>=2 are 3-12 x
+  as far, which inflates every px/frame figure from a crop run (b5.py, 120917:
+  its 0.71 px/frame is INFERRED inflated by k>=2 hitch pairs; never checked
+  against record steps).
+- Residual at the live-sized pair, median over only the blocks that have a
+  nearest rigid record (D3 336 of 379 blocks, 5.1 m; D1 42 of 74, 10.9 m), px/
+  frame, against the motion measured beyond the camera term. NOT a whole-mask
+  number: every such block is moved by its nearest rigid record, as if the
+  whole NPC were rigid:
+  camera only (today) 1.40 / 0.93; one root translation (median record) 0.77 /
+  0.48; each pixel moved by its own record's pose pair 0.61 / 0.49; by its own
+  record's translation only 0.59 / 0.49; oracle uniform shift 0.58 / 0.42;
+  static-background floor 0.2-0.3. By band in D3 (camera only -> own record's
+  pose): torso 1.65 -> 0.54, pelvis 1.41 -> 0.52, head and shoulders 0.90 ->
+  0.93 (skinned neck and arms: no gain). Pairs k=4-9 agree (own record 0.59-0.89,
+  one root 0.51-0.80).
+- Whole-mask medians under F1 (f36.py, k=1; rigid pixels take their record's
+  pose pair, skinned pixels keep the camera term; today D3 1.36, D1 0.98). The
+  rigid pixel share is INFERRED: no dump attributes a pixel to a draw (vertex
+  capture declined), so 17% (colour-pass index count), 50%, and the best case
+  (everything above the pelvis rigid, 66% of the D3 mask, 52% of D1's). D3:
+  1.26 / 1.02 / 0.93; D1: 0.90 / 0.75 / 0.80. F1 gains 7-32%, not 56%, and does
+  not reach ~1 px at close range unless the share is high. A slot per draw is
+  per-part already: each pixel is reprojected with its own record's pose pair.
+- The stale-class change does not depend on the share, MEASURED: 38.7% (D3) /
+  37.5% (D1) of the mask leave engineKind 4 whichever pair draws them.
+- ruled out: keying the NPC's rigid families alone brings it under ~1 px at
+  close range, because skinned meshes (limbs, head, body) have no previous pose
+  and hold 34-83% of the mask; D3 whole-mask 1.0-1.26 px after.
+- ruled out: the commander's own body improves under F1, because it is skinned
+  (kind 3, camera term): within 2.5 m of the camera, 46 rigid certified records
+  (props; the big 8B58 draws there look like the tent, INFERRED), all still,
+  and 8-14 skinned unmarked ones, all still, in every dump.
+- ruled out: a separate per-part rotation model on the rigid parts, because
+  they fit one rigid body to 0.2-0.8 mm and rotation scored 0.61 against 0.59
+  for each record's translation alone.
+- not supported: a root translation for the skinned parts. The oracle shift
+  made the D3 shin and foot band worse (0.93 -> 1.23, n=29), the D1 band better
+  (1.66 -> 1.07, n=32) and left the head band alone.
+
+**What is wrong besides motion, MEASURED.** On the D00 flags of the NPC mask,
+D3: 12,587 px unmarked (58.0%), 8,415 stale (38.7%, engineKind 4: a background
+slot under the NPC's pixel, because its draws never write MRT6), 722
+pool-not-rig (3.3%, the keyed 61AE piece); D1: 2,588 / 1,646 (37.5%) / 160. The
+VR world route and the flat route refuse a stale slot unless the steady-detail
+rule keeps it. Keying the NPC's pairs gives those pixels their own slot and
+depth.
+
+**Fix A check (Q4), MEASURED.** vr world route refusal 5s, 19 treated windows
+13:44:03-13:45:33 (1,871 sampled frames): weapon = 0 in every one, against
+6,750 / 10,084 / 7,987 / 6,786 / 10,481 / 10,562 / 8,280 px per sampled frame
+at 12:08:27-12:08:57 in the pre-fix flight 120441 (NPC in view). The log has
+no in-view marker, but stale-refused per sampled frame follows the NPC: 7,568,
+3,591, 5,433 at 13:44:08-:18 and 7,102 at 13:45:33, against 0.6-1.4k at
+13:44:23-:53 (ground) and 0-134 at 13:44:58-13:45:28 (sky); pre-fix the same
+class read 5,616 / 7,006 / 3,809 at 12:08:32-:42. INFERRED: those are the NPC
+windows. The first-person refusal is gone; the stale class (+3-7k px a frame)
+remains, and it is what F1 removes.
+
+**F1, revised by the data (plan only; no key, no build).** Key the NPC's pool
+pairs. Admission is not "skinned families": the rigid body's pair 8B58/7268762D
+is the one that gains motion; the skinned pairs gain a slot write (stale to
+pool-not-rig, camera term, no refusal) and nothing else, because skinned
+records get no previous pose by design (engine_velocity_emit.h taints header
+word != 0).
+1. engine_velocity_families.h: four rows, 8B58/7268762D, 7B0D/0DF03E64,
+   114A/A175, D99A/E86271E4 (A4A19FAF/BE3EA29C also passes, needs the VS patch;
+   leave it out: 4 small draws near the camera).
+2. engine_velocity.h:112 kMaxFamilies 10 -> 16 (the static_assert at
+   engine_velocity.cpp:114 fails the build otherwise).
+3. Rig: the four pairs join the corpus list in engine_velocity_test.cpp (they
+   pass whole as of this entry); a consumer case that a base != 0 record under a
+   keyed pair lands in kind 3 (camera term, not 2/4/6) and a certified moving
+   base 0 record in kind 1. Mutants: kMaxFamilies left at 10 (build fails); a
+   row dropped (supportedPair assertion); the base != 0 record taken as joined
+   (the new case fails). No new config key.
+4. Flight on Frontier: the same three dumps plus a plain first-person pass.
+   Expected: NPC engineKind 4 -> 0, kind 1 on the rigid share, kind 3 on the
+   skinned share; stale-refused with the NPC in view back to <= 1.4k px a
+   frame. Watch the commander's own gear (D2's 418,854 px) and props, which
+   share these pairs: standing still they keep the camera term (joined-still or
+   kind 3), so INFERRED no change except no stale refusal. Worse than today
+   only where a record is masked (kind 2: no history; none of the 167 near
+   records was) or an unkeyed draw (A4A19FAF/BE3EA29C, blends) overdraws a
+   keyed one and leaves a new stale slot. The 0x10 first-person rule
+   (flat_mono_shader_source.h:203, fixed_shader_source.h:692) runs first, so
+   gear in the weapon map or within reach is unchanged.
+   Cost, INFERRED: about 200 more substituted draws a frame (196/142/109 in
+   D1/D2/D3) on about 3.3k keyed today: at most 0.05-0.08 ms render thread
+   (F10 log, `engine motion CPU, render thread`, 13:45:02-13:46:32: draw side
+   p50 0.02-0.06 ms over 47-259 calls, 0.2-0.4 us a slow-half visit; the inline
+   half is unclocked, openxr-performance-review-2026-09-14.md:1174-1175) against
+   about 0.65 ms for all engine motion. GPU cost of the extra MRT6 export is
+   not measured.
+5. Not in F1: the skinned limbs, head and body (0.9 px a frame by band). F2
+   facts: keying D99A only turns its stale refusal into kind 3; F1 is a
+   prerequisite for any F2, since a skinned draw must be keyed to carry its
+   record at all; F2 needs a previous bone palette, unproven because the
+   bones0/1 copies of this flight read all zeros (the base list is stable).
+
+### 2026-10-08 F1 built: the NPC's four pool pairs keyed, VR only
+
+Branch claude/explorer-cam-npc-motion on the Explorer Cam branch a6dc34a9 (merge
+7774f09b, no conflict). Full build.bat green with its receipt;
+engine_velocity_test 15,399 checks. Not flown, not installed, no config key.
+- engine_velocity_families.h: rows 8B589D25B2A0ADDC/7268762D11A610F2,
+  7B0DC42D383F694C/0DF03E64DF9DBEF1, 114AF608F86D9ED8/A17504A2627767F2,
+  D99AFDC250D19A3F/E86271E464CCDC1D, each hash recomputed (FNV-1a 64) from the
+  dumped bytecode (analysis\npc_blur\f38_hashes.py), and a new Family::vrOnly
+  that familyForProfile and keyedPs honour; engine_velocity.h kMaxFamilies 10 ->
+  16. The family index is a plain int everywhere (engine_velocity.h:110,
+  engine_velocity.cpp:125,178); 14 families fit every array.
+- Flat decision, VR only: 7B0D, 8B58 and 114A are weapon_motion's first-person
+  families (weapon_motion.cpp:92), and flat routes a supported pair of one into
+  its foreground and source shapes (flat_runtime.cpp:4756, 4986, 5102;
+  supportedPair also feeds flat_hdr_route.h:231). Keying them in flat changes
+  the weapon path that was FLOWN OK with them unkeyed, and no flat dump holds
+  the pairs. In VR a weapon draw under its own camera is declined by
+  sourceCameraHolds (engine_velocity.cpp:1554), screen_motion.cpp:270 skips
+  weapon families, and the world route tests attached and foreground before
+  engineBefore (flat_mono_shader_source.h:195-247): INFERRED, unflown.
+- Rig (engine_velocity_test): the VR/flat table checks for the four pairs and
+  their cross-pairings, a skinned record (word 0 != 0, no marker, hostile
+  previous block) in the consumer case at pxSkin (kind 3, baseline, flags,
+  Stats[52] = 2), an emit check that a base != 0 record is never emitted (the old
+  line only compared the native copy, which a primary sink never writes), and
+  the four pairs in the --corpus list. Mutants, each built and run in a mirror
+  (analysis\npc_blur\f1_mutants.py), control 15,399 checks passed: kMaxFamilies
+  left at 10 -- compile error (static_assert); a row dropped (8B58, D99A) --
+  "each NPC pair is keyed in VR"; base != 0 taken as rigid in the emit -- the
+  new emit check (the old rig did NOT catch it); base != 0 taken as joined in
+  the consumer HLSL -- the capture-flag and Stats checks; vrOnly dropped from a
+  row, or ignored by familyForProfile -- "stay unkeyed in flat".
+- Log signatures on a Frontier flight. Success: `engine motion: family vs_8B58...:
+  live; substituted N binds, M draws; patched [ps_7268762D11A610F2]` and the
+  same for 7B0D, 114A, D99A (M > 0 even without an NPC: props use them, D2 had
+  142 draws a frame); `pixels per eye-frame on the trained path` stale slot
+  down by about the NPC's stale pixels (D3 8,415 per eye-frame), pool surface
+  not a rig record and engine-joined up; world route stale-refused per sampled
+  frame in NPC windows <= 1.4k (was 3.6-7.6k). Never ran: the four lines read
+  "not created by the game this session ... 0 binds, 0 draws; patched []" (a
+  hash that matches nothing: the game does create these shaders) or "unkeyed
+  pixel shader ps_X left stock" (a PS variant not keyed); stale numbers stay.
+  Regression: "STOOD DOWN" on a new family; `masked` or `stale stamp` above 0
+  on the trained-path line (both 0 in F10); stale-refused above 1.4k in a
+  window with no NPC; `weapon=` above 0 with the weapon holstered.
+- Price lines that exist: CPU `engine motion CPU, render thread` draw side p50
+  0.02-0.06 ms (F10); GPU `EDVR GPU census, Elite's own draws that EDVR alters`
+  pool-family draws 0.167 ms at 7824.10 a frame and `engine velocity` 0.197 ms
+  in the in-frame list. That GPU figure times each game draw whole, so the
+  change is a same-scene delta, and there is no line for EDVR's share alone.
+  Correction to the plan: 7,824 substituted draws a frame today, not 3.3k, so
+  +200 is +2.6%.
+- Doubts: kRememberCap (engine_velocity.cpp:137) keeps 512 shader objects and
+  drops the rest silently; the pairs are keyed for VR only, so the flat screen
+  keeps its stale NPC refusal until a flat dump says otherwise.
+### 2026-10-08 F2 study: the previous bone palette is the game's other buffer, and the instrument that settles it
+
+Study notes and scripts: analysis\npc_blur\f2 (f2_feasibility.md, g1-g12). Verdict
+UNKNOWN, leaning FEASIBLE. Branch claude/explorer-cam-npc-motion, instrument BUILT,
+not flown, no config key.
+- t38 (MEASURED, D99AFDC2 and 61AE8EB0 bytecode): row = t33 word 0 + the vertex's
+  8-bit bone index, up to 4 influences, three float4 loads a row (3x4 row-major,
+  translation in .w, 48 B), applied before the record's quaternion (words 2-3) and
+  position (+16). At the NPC's 2,944 rows 100% are rotations. t33 holds no bone
+  count (an index is 8 bits: at most 256 rows a record).
+- The palette is written on the GPU (MEASURED, bytecode + census DCX #13):
+  cs_6FE04AF836BB1DBA, APPLY_BIND_POSE_TRANSFORMS_CS, one group a job:
+  `palette[dst+i] = joint[src+i] o invBind[bind+3i]` from a job table t0 (16 B:
+  src, dst, bind, count), CPU-written joints t2 (48 B) and bind poses t1; cs_7B2A
+  is CLEAR_TRANSFORM_DATA_CS (identity fill). The dst base is the running sum of
+  bone counts in the node's list order, restarted every frame (FUN_144C540E0).
+- The game keeps last frame's palette (code MEASURED, behaviour INFERRED):
+  fRenderSkinningProcessorNode::PrevGpuTransformData. FUN_144C54A20 (RVA
+  0x4C54A20, from the per-frame FUN_144C52CE0) swaps GpuTransformData and
+  PrevGpuTransformData and their views on every call; two persistent 8,388,624 B
+  buffers, not renamed. The ledger saw exactly one palette a frame, alternating.
+- Identity is the open half (MEASURED): the base is not an exact key. D3 frames
+  11718/11719: 107 bases new, 30 gone, 2 of 90 persisted bases jump 200.6 m (a base
+  reused by another character). Skinned records never reach the FUN_144312E00 emit
+  hook (log `tainted 0`), so the rigid path's certified joins cannot carry them; a
+  key needs the job list (entry pointer -> dst base), a hook at FUN_144C540E0.
+- The bones files read all zeros because of the COPY, not the buffer (MEASURED on
+  this GPU and WARP, analysis\npc_blur\f2\boxcopy.cpp): CopySubresourceRegion of a
+  box out of a stride-48 structured buffer returns nothing when the box is not a
+  multiple of 48, and 1,048,576 is not. A box of 1,048,560 reads the rows, so does
+  a whole CopyResource (the eyemesh dump's, which held real rows all along).
+  ruled out: the palette copies read zeros because the game discarded the buffers
+  before the boundary (per-object-motion.md, 09-10), because the draw-time copy
+  read zeros too and the box is the cause.
+- The instrument (skin_ledger.h, glue in object_probe.cpp and the dispatch hook in
+  exposure_fix.cpp): rides the eye-dump key, nothing unarmed (one bool load in the
+  dispatch hook). For the run's 20 frames: every learned palette copied WHOLE at
+  the frame's first pool draw (the first 3 MiB kept, bones<p>_<stamp>_<frame>.bin,
+  now both buffers every frame), and at each cs_6FE0 dispatch its t0 and t2 whole
+  (t1 once per buffer) plus the four views, into skin_<stamp>.bin. Per press about
+  150 MiB more (about 120 MiB of bones files, about 35 MiB in the skin file).
+  tools\skin_palette_check.py reads it: Prev (other buffer in frame n == the buffer
+  bound in n-1, bit for bit, on the rows n-1's jobs wrote), the recompute of every
+  row from t0/t1/t2, the running sum, t33 bases against job dst values, list
+  changes against identity swaps, the views. Rig skin_ledger_test (S1-S12, 36
+  mutants all caught) and the checker's own self-test with injected faults.
+- Flight: Frontier, any scene with skinned characters (the commander's own body
+  runs the chain, so an NPC is not required; a walking one makes the identity half
+  worth reading), the eye-dump key as for F10, then
+  `python analysis\npc_blur\f2\f2_check.py`. No holding still: the window is 20
+  frames. Log: `skin ledger: armed with eye run` at the press, then 20 `skin ledger
+  frame N:` lines and `skin ledger RESULT RAN|PARTIAL|NEVER RAN|BROKEN` at the
+  ledger write. No RESULT at all: the window never closed (the ledger write line is
+  missing too). NEVER RAN names why (no dispatch reached the hook, or none was the
+  chain); BROKEN counts lost, declined, skipped copies and groups with no job table.
+- Not in this build: the job-list hook, any use of the previous palette, any
+  change on screen.
+
+### 2026-10-08 F11 (93d388c1): F1 flown -- the stale class is gone, the NPC body is not fixed
+
+Log edvr_gfx_20261008_154553.log (v0.18.3-64-g93d388c1, build matched), Frontier.
+Plain first person from 15:47:37, F5 in at 15:48:06, eye run 154827 at 15:48:27 (a
+walking NPC at 10.4 m carrying a rifle, 5,883 px of stencil 0x10), weapon drawn and
+holstered in Explorer Cam, F5 out at 15:49:35, then plain first person. Sean: "weapons
+look good, definitely need F2, the blur on the npc body is distracting." Scripts
+f41-f44 in analysis\npc_blur.
+- Ran, MEASURED: the four family lines read `live` from 15:47:54, patched [the four
+  pixel shaders], 30 s windows of 8B58 115-160k, 7B0D 120-170k, 114A 23-33k, D99A
+  6-12k draws (about 180 a frame, as priced); no family STOOD DOWN (the 12 matches
+  are `stood down 0` counters). In the three windows before the scene loaded (to
+  15:47:24) 8B58 and 7B0D read "not created by the game this session", as expected.
+- The NPC, eye run 154827, MEASURED. By kind (D00 flags): 85.3% kind 3, 13.9% kind 1,
+  0.8% stale (48 px), 0% unmarked; F10 D3 was 58.0% unmarked, 38.7% stale. All 5,017
+  px whose slot names a base != 0 record are kind 3 (the camera term stands, no
+  refusal); D99A reads such a record, so its pixels are kind 3 (INFERRED for D99A
+  itself: no pixel->draw attribution). The 48 stale px are base-0 (rows 990-1001), a
+  later draw over a keyed one. Rigid parts: 34 moving records, 34 certified joined;
+  the 818 joined px took an engine MV that differs from the camera term by a median
+  0.18-0.23 px/frame at the live-sized steps (records 6.7 and 8.2 mm) and 0.7-4.8 px at
+  the hitch crops (steps 41-123 mm), so the certified motion is right and small.
+- Whole-mask error, f42.py (the MV the pass used against the camera-only MV): k=1 0.56
+  -> 0.56 px (the background's block-match floor is 0.53); k=5-9 (steps 40-52 mm)
+  1.00, 1.63, 1.05, 1.09, 1.04 -> 0.99, 1.61, 1.04, 1.09, 1.04. The rigid-dominated
+  blocks (3-10 a pair) improved in three pairs (0.80 -> 0.43, 0.75 -> 0.29, 1.20 ->
+  0.32), worsened in two (0.30 -> 0.62, 0.36 -> 0.85) and tied in five. The rigid share
+  is 13.9%, under the 17% the index count gave and far under the 50-66% best case.
+- ruled out: F1 as the fix for the NPC body blur, because 85.3% of the mask is skinned
+  and keeps the camera term, the 13.9% that took engine motion moved 0.2 px a frame,
+  and the whole-mask median did not move (0.56 -> 0.56 at the live step); Sean's
+  verdict agrees.
+- ruled out: F1 raised the history-gap bursts, because the `history gaps` lines peak
+  where F10's did (F11 28,287 gaps in 288 burst frames at 15:47:54, 73,891 in 636 at
+  15:48:24; F10 58,222 in 542 at 13:42:31, 60,652 in 488 at 13:43:01), each window
+  holding an F5 entry or an eye run, and the later windows fall to 4-33k with 11-195
+  bursts; F1 changes no emit file, and these counters sit on the job threads. The
+  peak is 22% over F10's, one window each, not a trend.
+- ruled out: a weapon regression, because `weapon=` is 0 in all 17 world-route windows
+  and the on-foot camera rule declined 1,493 of 1,493 source frames as another camera
+  (rows 270..273 changed), by family vs_7B0DC42D 1,493: exactly one 7B0D draw a frame,
+  the weapon, left unsubstituted (15:49:54). Trained-path line 15:48:54: masked 0,
+  corrupt 0, stale stamp 0.
+- World route, plain first person after F5 out, stale-refused per sampled frame, MEASURED:
+  10,182 (partial window, 65 frames), 1,980, 114, 96, then 0 in the sky windows
+  (15:50:00-15:50:20; sentinel 0). F10's NPC windows read 7,568, 3,591, 5,433 and
+  7,102. The log has no in-view marker: I read 114 and 96 as the NPC windows (INFERRED;
+  the eye run's 0.8% on an NPC of 8,000 px predicts about 70), and the first two as
+  the re-own after F5 (F10's first window read 1,338 of 35 frames). So not uniformly
+  at or under 1.4k; the class result above is the firm one.
+- Cost, F11 against F10 in matched Explorer Cam windows, MEASURED: render-thread draw
+  side p50 0.07 / p95 0.10 ms at 268-277 calls a frame (F10 0.07 / 0.10 at 263-265);
+  plain first person 0.05 / 0.10 at 230 calls (F10 0.02-0.06 / 0.04-0.10). GPU
+  `Elite's own draws that EDVR alters`, pool-family draws 0.175 ms at 7,889 a frame
+  (F10 0.146 at 7,348); outliers of 0.905 (F11) and 1.096 and 5.320 (F10) are the
+  timer's noise. `engine velocity` 0.209-0.244 ms (F10 0.181-0.191), application
+  render p50 12.1-12.8 ms (F10 12.6-13.4). Nothing measurable beyond the +180 draws.
+- F2: the skin ledger also ran in this window (`RESULT RAN`, chain, pool draw and
+  palettes 19/20); its reading belongs to the F2 study. F1 stays the prerequisite.
+
+### 2026-10-08 F2 built: the second skin -- an exact previous position for skinned characters, VR only
+
+Branch claude/explorer-cam-npc-motion, full build.bat green, NOT flown, no config key (a fix that always helps gets no toggle; flat is untouched).
+Sean approved the plan (analysis\npc_blur\f2\f2_build_plan.md, 2.1-2.7): one flight with everything on, no oracle flight.
+- What it does. The five NPC skinned vertex shaders (D99A, 61AE, 114A, 7B0D, 8B58) get a CLONE of their own skinning chain (dxbc_skin_clone.h):
+  the game's instructions up to the position anchor, token for token, temporaries renamed, t38 -> t108 (last frame's palette), the two t33 pose
+  loads -> t110 (last frame's pose table, indexed by the joined previous base). E = (clone - original) x 100 cm and a valid flag go to an extra
+  output, and the five keyed pixel shaders export it to target 7 (RT7, R16G16B16A16_FLOAT, one per VR eye, cleared each eye-frame, +62 MB at
+  full size). The compose (temporal_shader_source.h) takes, for a pixel a skinned record owns, previous position = world + (nCam - bCam) + E
+  (kind 1); a pixel with no valid E keeps NO history (kind 2: MV the sentinel, MK 1), never a guess. Rigid records never read target 7.
+- Identity (which previous base is whose). The hook (below) gives the game's entry list; JoinCS (skin_join_shader.h) checks it against the chain
+  dispatch's own job table every frame (heads, tiling, sums; a disagreement uses the prefix and is counted) and joins each job through its
+  entity, its offset inside the entity, its (bind, count), and a pose record at the previous base. The fallback is the job table's prefix (jobs
+  0..k-1 are last frame's while their (bind, count) tuples are equal). A previous palette buffer too small for a job's previous rows is a failed
+  join per job (the plan's word 7).
+- THE HOOK (skin_entity_hook.cpp): FUN_144C540E0, EliteDangerous64.exe+0x4C540E0, the skinning job assembly (single caller FUN_144c52ce0). READ
+  ONLY: CodeHook steals the first 5 bytes (`mov rax,rsp; push rbp; push rbx`), the original runs first, then the list is read under SEH
+  (node +0xA8 first entry, +0xC4 the end row; entry +0x08 next, +0x38 mesh data whose first ushort is the bone count, +0xA8 the assigned base),
+  nothing is written in game memory. Armed only if the PE timestamp/size are build 332841's AND the 28 prologue bytes match; any other build,
+  a relay that cannot be placed within 2 GB, a CodeHook refusal, a second processor node, or 120 lists with none usable stands it down (logged
+  once; the prefix join takes over). Entity key = the entry's address, checked against vtable, mesh data and bone count; a key listed twice
+  joins neither entry. The thread that calls it is not known statically: the hook records it and the join counts same/other thread. The
+  offsets are the decompile's, EVIDENCE not assumption: every snapshot is checked (increasing bases tiling to the end row), and on the GPU every
+  frame the list's (dst, count) sequence must equal the t0 job table's, or that frame uses the prefix join.
+- Rigs, each with mutants (all caught): skin_join_test (114 checks, 55 mutations: the list walk over a fake heap with faults, continuity,
+  certificates, the CPU twin of JoinCS, the line), skin_join_gpu_test (28 checks on WARP, 33: JoinCS and the pose passes word for word against
+  the twin, random worlds), skin_clone_test (178, 25: tokens, structure, declines, and the properties that make E exact -- identity gives exactly
+  zero, a moved pose or palette 100 x the move, a swap negates, no join is zero and invalid, a 1e6 m jump is invalid -- with and without the
+  game's displacement block; `--corpus` runs the game's own five shader pairs from a dump), skin_entity_hook_test (13 cases, 16: the real
+  CodeHook on a synthetic function with the real prologue, original first, faults, a lapped reader), skin_engine_test (1060 checks, 34: the
+  compose arithmetic and the production mv pass on real resources; the linked engine_velocity.cpp drawing a skinned character in both eyes
+  through the real path -- first frame no history, steady E exactly 0 in both eyes, a moving one 100 x the move, a changed job table, the
+  hook's list, the periodic lines, a small previous buffer). tools\rig_mutants_lib.py is the shared machinery.
+- Found by the end-to-end rig (fixed): without a usable hook list the whole-frame "shrunk" certificate compared the previous palette buffer with
+  all 65,536 rows, so the prefix fallback would have joined NOTHING in the field. The certificate now applies only when the list names the rows
+  in use; the per-job guard (plan word 7, `prev-rows` in the line) does the work otherwise. Also: every substituted draw that does not export E
+  now masks target 7's writes off (a rigid family's draw wrote undefined values into it before).
+- ruled out: the checker's 154827 verdict (FAILED bases, list_identity), because both were false positives: `bases` counted a frame with no job
+  table as all bases "not a job dst" (now skipped and said so), `list_identity` took two characters stepping 0.34-0.56 m together for 31
+  identity swaps (now judged by coherence: records of one character share a previous position, and a group that moves differently from itself is
+  a swap, one that moves together is a pacing hitch). Re-run on 154827: every hard check passes, 0 incoherent groups, 31 bases in hitches.
+  `analyse()` in skin_ledger.h makes the same skip. Rig cases and mutants for both.
+- Flight (one, everything on): install on Frontier (`python tools\install_edvr.py --target frontier`), VR, F10's scene (a walking NPC within
+  about 10 m), Explorer Cam in, the eye-dump key once, then `python tools\edvr_log.py --target frontier --expect-build HEAD` and
+  `python analysis\npc_blur\f2\h1_skin_e.py <the capture directory>`.
+- Log signatures. WORKING: at start `skin join: hook armed: EliteDangerous64.exe+0x4C540E0 ... READ ONLY`, `skin join: the second skin is live
+  (VR)`, one `skin join: eye N target 7 created ...` an eye; every 30 s `skin join: source=hook|hook+prefix hook=armed frames=N ... joined=J
+  (J close to jobs for a steady scene) failed: new-entity .. range .. layout .. prefix .. pose .. cap .. dup-base .. prev-rows ..`, history
+  [... shrunk 0 ... no pose 0 ...], `hook/t0 disagreements 0`; `skin join: second skin this window: binds writing E N>0 ... compose: skinned
+  pixels on the trained path (joined N>0, masked small), |E| ... median >= x cm, p99 >= y cm` (a walker: 1-14 cm); `skin join: hook window: armed,
+  calls N, lists usable N`. NEVER RAN: no `the second skin is live` line (flat build, the emit stood down), or `no counters read back ... chain
+  dispatches seen 0`, or `binds writing E 0`. HOOK STOOD DOWN: `skin join: the hook stood down: <reason>` once, `hook=stood down`,
+  source=prefix, and the join still works. BROKEN: `vertex patches refused N` or a `takes no second skin: <reason>` line (that family keeps
+  the old answer), `target 7 could not be created`, `history [shrunk ..]` or `[no pose ..]` large, many `hook/t0 disagreements` (the offsets
+  do not describe this build's list), `joined` far under `jobs` with the `failed:` causes saying why, compose `masked` far over `joined`.
+- Cost to read: the census section `engine velocity` (JoinCS, the pose passes, the RT7 clear) and `Elite's own draws that EDVR alters` (the cloned
+  vertex shaders: about 400k extra vertex invocations an eye by the plan's count). Priced, not measured.
+- Residuals and what is NOT done. (1) The on-foot source pass (plain first person) and the world route do not consume E: a skinned record there
+  keeps its answer (the camera term; it stays "owned"). (2) Hook source: an entry destroyed and one created at the same address with the same
+  vtable, mesh data and bone count between two consecutive snapshots is taken for the same entity; prefix source: an entity removed and one with
+  the same (bind, count) inserted at the same position in one frame. Neither was seen in the logs. (3) The thread of the hook is unknown until
+  the flight (the join line's `threads same N other N` and the hook's first-call line say). (4) The clone declines any shader whose chain has an
+  opcode outside the 28 the five measured shaders use; then that family goes on as before and the log says so. (5) E is exact for the vertex
+  position; the game's cosmetic displacement block after the anchor is deliberately not part of it.
+
+### 2026-10-08 F12: F2 flown (log 190316, Frontier, 2c51b26b, eye run 190534 in Explorer Cam) -- it works where it runs; what is left
+
+Sean: "much better", some shimmer and occasional flicker of the entire scene at first, and the NPC's backpack in the eye dump aliased, then resolved. Diagnosis only, no code changed. MEASURED = a log line, a dump number or file:line; INFERRED = said so. The scripts (h1..h8 in analysis\npc_blur\f2) are local, gitignored.
+- Verdict, MEASURED on 190534 (scene frames 10505-10524; the NPC stood still, |E| median 0.03 cm, so a WALKER IS NOT YET TESTED). NPC mask 12,213 px at frame 10505: the 17 skinned records (10,437 px, the backpack among them) 100% kind 1 with a valid E, the rigid base-0 records (rifle, 1,771 px) 100% kind 1 through the marker, 5 px no record (camera). Masked 0 in all 16 frames and the joined count of the NPC box is constant (12,195-12,361 a frame); the frame-0 mask loses joined pixels to camera/stale kinds linearly with the frame number (9% at frame 1, 20% at 15), which is the silhouette drifting under a fixed mask (INFERRED), not a record dropping out. SkinE: 10,499 valid px in the eye, |E| p50 0.032 / p90 0.147 / p99 0.739 / max 1.818 cm, every value finite, E exactly 0 wherever w is 0 (0 of 3,929,184 break it). Block-matched residual beyond the used MV (f15.py): limb median 0.15 px (range 0.07-0.27, p90 0.38), F11's 154827 was 0.60 px (0.15-1.90, p90 1.31). F2 delivers its promise on a standing NPC.
+- h1_skin_e.py printed two FAILs ("valid flag neither 0 nor 1", "invalid pixels carry E"): the same 5,473 px, every one w = 0.9995117 (the half below 1.0), none above 1, same records and stencil as the w = 1 pixels. That is the interpolation of the constant 1 across a triangle (the PS passes the interpolated attribute through, dxbc_engine_velocity.h:288-291); the compose tests `sk.w > 0.5` (temporal_shader_source.h:642). The checker is too strict (INFERRED cause, MEASURED values); no pixel is wrong.
+1. Hook stand-down. MEASURED: `19:03:47.215 hook window: stood down, calls 120, lists usable 0 ... last list 0 entries to row 1`, same window `chain dispatches seen 0`, eye targets first created 19:03:53, `frame gap p50 72.5 ms` in the census: a menu/loading screen, genuinely no characters. skin_join.h:81 fails any list with n == 0 as "entry count" and skin_entity_hook.cpp:170 stands down at 120 lists with none usable, so the hook died on the main menu and never saw one non-empty list (`hook=stood down` in every later window; the 120 calls repeat in each summary because it never recovers). Yes, the criterion is wrong: judge only lists made while the job table has jobs. Nothing in this flight tells whether +0x20/+0xA8/+0x38 are right: it never read a character's list. The join ran on the prefix source throughout (source=prefix), which is why it worked.
+2. Pose conflicts. MEASURED in the pool copies of 190534: 0 conflicts in 20 frames (records of one base are byte-identical; the NPC stood still). MEASURED in F11's 154827 copies (a walker): frames 14166 and 14176 (2 of 20) hold 312 skinned records for 152 bases, 148 bases twice, the second copy 2,924 / 2,927 slots later in the pool; those copies are byte-identical, slot for slot, to the records of frames 14164 / 14174, and are base 0 in 14165; poses differ by 0.1-0.2 m (words 2-6, scale never). So a conflict is a stale second set of records left in the pool's other half from two frames earlier, which equals the live set only when the character is still (pose words 4-6 are world positions, identical across every base of a character). The backpack is not special: all of a walker's bases are doubled on such a frame. They are not attachments and not a second draw; nothing draws them (INFERRED: the eye pass's slot codes under the NPC sit in the low half). In the F12 flight the same shows as 4,951-59,077 conflicts and `failed: pose` 33.8-66.7k a window against a baseline of 17 jobs a frame (36.6k at 19:08:17 with 0 conflicts): the 19:07:47 line has 59,077 conflicts and about 26k excess failed jobs, 7-16% of its 2,400 frames at about 150 bases a frame, the 1-in-10 order of 2 of 20 (INFERRED). Effect (INFERRED from poseVerify killing the base): on each such frame the table for the next frame loses every base of every moving character, so the NPC has no E for one frame in about ten, DLSS rejects its history there, and it pulses between resolved and aliased at about 7 Hz. Keying the pose per record would not help (INFERRED: the stale records are never drawn); the live record is the one the join must keep.
+3. Frames without history. MEASURED: the CPU half of the join line, against the route timeline. `no pose` 1,321 (19:05:17) / 512 (19:05:47) / 1,588 (19:07:17) frames match the world route `owned` time before each F5 (owned 19:04:57-19:05:23, 19:06:49-19:07:07 at about 88 frames a second) and `declined no history` equals no pose + gap exactly (656 = 512 + 144; 1,588 = 1,588 + 0). In plain first person no eye-pass skinned draw runs, so no pose table is built: nothing is wrong, F2 is simply inert there (the F2-built residual 1). `gap` is the F5 transition: 144 frames at the first entry (19:05:23, black until 19:05:24.47, so about 0.7 s of NPC visible without E: views given 2,531, live 2,315, 216 = 8.5% not live), 0 at the second (19:07:07; views 1,676 of 1,676 live); why the first gap was 144 is not known. `declined no snapshot` 1,271-2,162 a window (851 where 1,588 declined as no history instead) is about one per chain frame: with the hook stood down every offer is declined and the prefix join takes the frame, by design; the counter name misleads. In 190534 each of 16 frames was live.
+4. Consistency. The join line's two halves are different windows. MEASURED in code: the GPU half (source=, frames=, jobs, joined, failed, pose records and conflicts) is staged: a copy is queued only when chainFrames_ % 120 == 0 (skin_join_gpu.cpp:271) into a three-slot ring that only takeWindow frees, at the 30 s summary, with DO_NOT_WAIT (:326-334), so it can describe a window up to 30 s older than the CPU half (declines, history verdicts, views, binds, compose). INFERRED from that and the contradiction: at 19:05:47 the GPU half reads `no history 1320 of 1320, joined 0` while the CPU half reads views 2,531 (2,315 live), compose `joined 336556, masked 0`, `binds writing E 45279`, and the eye run inside that window (19:05:34) shows E valid on 100% of the NPC. The GPU half there is the spawn and first-person stretch before it. A stale table cannot write a valid E: the second-skin VS gets the real join only when `live = joinPresent == present && joinHistory && prevPalette` (skin_join_gpu.cpp:315), else nullJoinSrv (:322: valid 0); RT7 is cleared to zero at every eye-frame (engine_velocity.cpp:1733-1739; the counter is `eye-frames with target 7`), so it is not "never cleared", and a pixel cannot hold an E from an earlier frame. One latent hole, INFERRED, not seen: a pixel owned (RT6) by a skinned draw that exports no E (skinMode 1 masks its RT7 write, :1807) keeps an E an earlier exporting draw wrote at that pixel in the same eye-frame (same character, close pose, one frame).
+5. Target 7 re-created. MEASURED: every `target 7 created` line sits at the same present frame as an `engine motion: eye N slot target (re-)created` line, because ensureSlots (engine_velocity.cpp:1136-1164) rebuilds both whenever the eye's depth texture POINTER changes (the game hands the eye pass new depth textures), whatever the size. 19:03:53 first world entry, 19:03:58 the game re-made its depth pair, 19:04:56 the spawn on foot (world route `owned` from 19:04:57), 19:05:23 and 19:07:07 the two F5 entries (the free camera has its own depth textures; at 19:07:07 the game gave eye 1 eye 0's texture at frame 17112 and its own at 17113, hence eye 1 twice). F11 did the same at the same transitions (15:46:18, 15:46:20, 15:47:37, 15:48:06). A re-creation resets no history: RT7 is rebuilt per eye-frame anyway, the join history lives in JoinCS's buffers keyed to the chain, and no `dlss: feature is created` line appears at 19:05:23 or 19:07:07 (nor in F11); NVIDIA resets 10 eye-frames (F11 12), `native temporal resets` 22 against 18. The cost is one allocation of 31.4 MB an eye at each pointer change (about 63 ms apart at F5, two frames).
+6. Whole-scene flicker. NOT diagnosable from this log, and it carries no F2 fingerprint. MEASURED: the background patch of the 16 dumped frames has luminance std 0.14 (raw) / 0.08 (output) of 255, no global flicker eleven seconds after the F5; the transitions and the black fade are the same as F11's (1.31 s against 1.09 s); Explorer Cam's application render p50 is 11.8-12.9 ms in F12 and 12.1-12.8 in F11, both over the 11.1 ms period (`producer 13.48 ms vs predicted period 11.111` at 19:05:24), so late frames reprojected, the known pre-existing cause (INFERRED), plus the F5 transition itself. F2 writes target 7 for skinned pixels only and cannot touch the rest of the scene.
+7. Cost, MEASURED, F12 against F11 in the pure Explorer Cam census windows (F11 15:48:54 and 15:49:24; F12 19:06:17, 19:06:47, 19:07:47, 19:08:17; the windows with an F5 in them left out): `engine velocity` 0.270-0.296 ms (F11 0.209-0.244), +0.05-0.08 ms a frame; whole `EDVR ~` 4.7-5.3 ms (F11 4.9-5.5); application render p50 11.8-12.9 ms (F11 12.1-12.8); frame gap p95 5.7-7.6 (F11 4.8-5.9). Nothing else moved.
+- Backpack, MEASURED on 190534: slot 2842, base 5827, 392 px (eye x 1140..1173, y 960..1011), the ribbed object behind the left shoulder, one of 17 skinned records. E valid on 392 of 392 (|E| median 0.032, max 0.075 cm), kind 1 in every one of 16 frames (364-376 of 392; the rest are mask-edge pixels as the NPC drifts). Motion beyond the used MV: every record shows the same +-0.5 px alternation (the jitter) and the backpack sits within 0.3 px of its neighbours each pair; block residual median 0.17 px (p90 0.85) against 0.12 (0.37) elsewhere on the NPC. DLSS output blockiness (within-2x2-block gradient over across-block gradient) 0.79-1.13 in all 16 frames, 1.0 being smooth: the output never replicates the raw pixels, from frame 0. The raw input is stair-stepped on the ribbing, as every 1x jittered input is. So the dump holds no aliased backpack; what Sean saw is the F5 window (item 3: about 0.7 s of NPC with no E after the fade, then history rebuilding, INFERRED) or the conflict pulse of item 2 on a moving NPC.
+- Proposed fixes, not made, each tied to its evidence. (a) Hook: do not count a list with n == 0 (end row 1) toward the stand-down; judge only lists made while the job table has jobs (item 1; the next flight then tests the offsets). (b) Pose: build the table from the live record, not any record of the base. The two sets differ by slot half and by age; candidates are keeping both and letting the VS take the one nearer its own record's current pose, or admitting only records the frame's draws used. Add a conflict witness line first (slots a, b, the 2,000-slot gap, equal-to-two-frames-ago) so the flight proves it (item 2). (c) Stage the GPU stats every chain frame so the join line's halves describe one window (item 4). (d) Hold the F5 comfort fade's black until the second skin's views are live, 3 s at most (item 3); needs Sean's yes. (e) h1_skin_e.py: valid = w > 0.5, E zero where w is 0 (items above). (f) Close the latent RT7 hole only if a flight ever shows it.
+- Next flight (F13) must show: an eye run with a WALKING NPC (|E| median several cm; the standing one proves nothing about motion), Explorer Cam in; the new `pose` conflicts 0 on the NPC's bases or only witness lines with the stale signature; `failed: pose` at the 17 a frame baseline; kind 2 on the NPC mask in none of D00..D15; residual at or under 0.3 px; `hook window: ... lists usable` above 0 (or a stand-down naming a non-empty reason); the join line's halves agreeing; views live right after the F5.
+- ruled out: records sharing a base are byte-identical in flight, because 154827's copies have 274 doubled bases with poses 0.1-0.2 m apart on 2 of 20 frames (190534's were identical only because the NPC stood still).
+- ruled out: a stale join or pose table writing a valid E, because the VS gets the null join unless this present's join is live (skin_join_gpu.cpp:315-322) and RT7 is cleared every eye-frame (engine_velocity.cpp:1733-1739); the "no history yet joined 336,556" line is two windows, not one.
+- ruled out: an invalid or wrong E on the backpack in 190534, because 392 of 392 px are valid and joined in 16 of 16 frames, residual 0.17 px, output smooth.
+- ruled out: SkinE contamination, because w = 0 carries E exactly 0 on all 3,929,184 px and everything is finite; the checker's two FAILs are the interpolated flag 0.9995117.
+- ruled out: target 7's re-creation resetting any F2 or DLSS history, because it follows the game's depth-pointer change, F11 re-created its slot targets at the same four moments, and no DLSS feature was re-created.
+- ruled out: F2's cost as a cause of the flicker, +0.05-0.08 ms a frame against Explorer Cam frames already over the 11.1 ms period in F11.
+- ruled out: the `declined no snapshot` and `no history` counts as faults, because they are one per chain frame with the hook stood down and the owned first-person seconds, respectively.
+- not tested: the hook's offsets (never read a list); the walking NPC through F2 (190534 stood still).
+
+### 2026-10-08 F12 fixes built (branch claude/explorer-cam-npc-motion, on d32ecbec) -- hook, the live pool record, staged stats, the hole, the entry fade hold; VR, built, NOT FLOWN
+
+Five fixes approved after the F12 diagnosis above. MEASURED = a rig result or a dump number; INFERRED = said so. Nothing was flown: every claim about the game below is from the 154827 dump or the rigs. Rigs and mutation lists (each mutant must fail a check of its own case): hook 17 cases, 23 mutants (7 new); join J12, 14 new mutants; GPU join 48 checks, 25 mutants; clone 184 checks, 6 new; engine 1169 checks, 48 mutants (18 new or reworked); fade hold (new rig, tools\explorer_cam_fade_test) 38 checks, 23 mutants. Full build.bat (absolute path) GREEN, exit 0, every gate and the receipt, on the tree that is committed (the first run failed the log-line gate on a std::string pass-through of the pose witness line; it now goes through a fixed 1100-byte buffer like the join line).
+
+1. Hook. skin_entity_hook.cpp: a list of no entries (n 0, flags 0, end row <= 1: a menu, a loading screen) is counted in `emptyLists` and judges nothing. The 120-list stand-down is kept for lists with something to read (`judged >= 120, usable 0`). The job table's side is the new `skinEntityHookNoteChain(jobs)` from the chain dispatch: a dispatch whose table has jobs and whose latest list is a clean empty one counts in `emptyWithJobs`; 120 of those with `usable 0` stand the hook down, naming it (the offsets are wrong). A dispatch with no jobs never judges. Exact because both bounds count what the hook read at the same call, not time. Rig H14-H17: 200 empty lists leave it armed; the bound for non-empty lists; empty lists with jobs; a usable list ends the empty-with-jobs judging.
+
+2. Pose conflicts. EVIDENCE (analysis\npc_blur\f2\h9_refs.py, local, run 154827, frames 14166 and 14176 carry the doubled set): 266 bases with two disagreeing records; the HIGHER-slot record (the stale N-2 set, 2,924-2,927 slots later) is read by a skinned draw in 0 of them and by a draw of ANY shader in 0; the lower-slot record is read by a skinned draw in 92 and by any draw in 106. Per disagreeing base: exactly one record referenced 92 (always the lower), none 182 (the character was not drawn in the eye pass that frame), both 0. A draw reads instance-stream entries [StartInstanceLocation, +InstanceCount), entry word 0 = pool record index (g17_inst.py joined this in 154827).
+ Mechanism. Every substituted skinned draw (not the source eye) reports its (start, count) window at the draw (engineVelocityNoteSkinDraw -> noteSkinDrawSlow, from vscreen.cpp). The collector accepts the frame's list as COMPLETE only if exactly one vertex buffer of stride 8 is bound, the same stream and offset for every draw, and the caps hold (16384 ranges, 1024 instances a draw, stream span <= 4 MB, 65536 records). The pose table is built at the frame boundary (skinBuildPoseLocked), not in the draw: copy the stream span, then poseClear, poseRefMark (ranges -> a bit per record), poseScatter (referenced records of a base, LIVE), poseScatterRest (records of bases no draw read), poseVerify, poseFinish. Rule per base whose records disagree (words 0..6): exactly one referenced -> keep it (resolved); neither or both -> the whole entry zeroed (dropped: no history); records that agree need no reference. An incomplete or unreadable list is never approximated: every record decides, any disagreement kills the base (the pre-F12 rule). Completeness is a CPU fact, so the GPU decides nothing the CPU did not make exact. `skin join: pose witness:` counts tables built, conflicts resolved / unresolved, bases dropped, lists exact / unreadable / not complete, and names why the last list was not exact. Rigs: J12 a-r (CPU twin), G6 a-p and G7 (150 random pools, GPU against the twin word for word), L10 a-h (the N-2 duplicate above and below the live slot, both referenced, none referenced, a second stream, the IA offset, recovery, the witness). Mutants: first writer, last writer, reference test ignored, draws never noted, ambiguous stream trusted, stream offset dropped, incomplete list called complete.
+
+3. The "latent same-frame hole" was real, not latent: a skinned draw whose pixel shader exports no E had its RT7 write masked off, so its pixels kept an earlier exporting draw's E in the same eye-frame (a wrong E, not only a missing one). Closed: such a pixel shader gets a variant that writes (0,0,0,0) to target 7 (valid 0 = no history; dxbc_engine_velocity.h skinZero), so an overdrawn pixel carries "no history", never another draw's answer. Rigs K2.q1-q6 (the token form), L6.e and L11 (overdraw: valid 0, then whole again), 6 zero-* mutants and no-history-write-masked. A draw whose pixel shader can take neither variant is not substituted (counter `not substituted`, expected 0; the path is defensive and cannot be reached with the game's shaders, since both variants need the same free target).
+
+4. Diagnostics. The GPU counters are copied to a ring of 4 staging slots at EVERY chain frame with the chain frame number and the CPU's counters (feeder, history, pose) as they stood; a window is the span between two finished read-backs, so the join line's halves are the same frames (`frames=` equals offered + declined; L8.h, with a mutant for halves taken at the summary and one for CPU counters not snapshotted). The first L8.h passed for any CPU half that counted nothing (a window with no frames in it): the mutant cpu-counters-not-snapshotted survived; the rig now closes a window of several frames and requires frames >= 3. The SkinE checker (analysis\npc_blur\f2\h1_skin_e.py, gitignored so not in the commit) now tests w > 0.5 and accepts the interpolated 0.9995117.
+
+5. Entry fade hold (Sean approved). explorer_cam_fade_core.h: an entry or a re-attach that is otherwise ready (placed, locked, steady, UI settled) stays black until the engine's motion is live for the eye path, at most kFadeMotionHoldMs = 1000 ms from the moment it was otherwise ready (not from the press: it can end up to 1 s past the 3 s cap); then it fades in and logs which condition was missing. Exits unchanged. Signal (engineMotionReady, engine_motion_ready.h), kept at each frame boundary under the engine mutex: armed = the emit hook is up AND the temporal pass asked engineVelocityViews within the last 30 frames (a pass that never asks could never satisfy it: the hold would cost a second at every entry with TAA off); viewsRun = consecutive boundaries at which BOTH eyes were given the views, needing 3; skinJobs = the palette chain ran with jobs since the last boundary; skinLive = the join was live for it (the VS gets the real join and a previous palette, SkinJoinGpu::views(present).live), required only when skinJobs. A scene with no characters waits for the views alone; unarmed waits for nothing. Lines: the FadeIn line always ends in `[engine motion: ...]` (views live for N frames, skinned jobs with the join live / no skinned jobs, or "not running, so nothing was waited for"), plus `(held N ms of that for the engine's motion ...)` after a hold; the cap fires as `MotionTimedOut` naming the unmet conditions. Rigs: M1-M10 pure (ready early, ready late and the three-frame run, never ready so the cap fires at 1000 ms, no skinned jobs, unarmed, exits, re-attach, the hold starting over, the 3 s cap unchanged, the lines); engine side L2.e, L3.d, L8.i-k (armed only with a consumer, a run needs both eyes, the join not live on the first frame); mutants for each.
+
+F13 SUCCESS signatures (flight, VR, Explorer Cam in, a WALKING NPC):
+- `skin join: hook window:` shows `lists of no entries N` and no stand-down on the menu; once a character exists `lists usable` > 0 (this also tests the offsets +0x20/+0xA8/+0x38 for the first time); `source=hook`.
+- the join line: `frames=` equals `offered + declined [..]`; `no history` follows the first-person stretches (no eye-pass skinned draw), not the whole window.
+- `skin join: pose witness:` on a walker: `conflicts resolved` > 0 (the stale set overruled), `unresolved 0`, `bases dropped` near 0, `reference lists exact` about equal to `tables built`, `unreadable 0`, `not complete 0`. On the 154827 shape expect about one resolved conflict per live base on the doubled frames (49 and 43 there).
+- `second skin this window: binds writing E X, writing no history Y ... not substituted 0`.
+- `explorer cam: comfort fade: entering: ... fading in over 300 ms ... [engine motion: views live for 3+ frames in a row, skinned jobs, the second skin's join live]`, with `(held N ms ...)` when the views were late.
+- an eye run: h1_skin_e.py PASS, the walker's |E| median several cm, kind 2 on the NPC mask in none of the frames, residual at or under 0.3 px, no pulse at about 7 Hz.
+F13 FAILURE signatures and what each means:
+- `reference lists ... unreadable N` or `not complete N` with `last list not exact: <why>`: the draw-list assumption broke (a second stride-8 buffer, per-draw stream offsets, a window over 1024 instances); the table falls back to the old kill rule, so the pulse returns.
+- `conflicts unresolved` or `bases dropped` above 0 on the walker's bases: neither or both records were referenced; a draw that reads the live record did not pass through the noted draw calls (indirect or deferred), or the stream entry is not the record index.
+- `hook window: stood down` naming "the job table had jobs on 120 dispatches and the hook's list had no entries each time": the hook's offsets are wrong; "none of the first 120 lists with something to read was usable": its lists are unusable.
+- `MotionTimedOut ... Unmet: the engine's motion views were live for N of 3 frames`: the views never came (read the engine-motion refusal counters); `... the second skin's join is not live`: no history after the entry.
+- a FadeIn ending `[engine motion: not running, so nothing was waited for]` while the engine path is live: the consumer test (the temporal pass asking in the last 30 frames) failed; the fix is inert.
+- `frames=` and `offered + declined` still disagreeing by more than a chain frame or two: the staging did not align.
+
+ruled out: a stale second set of pool records being read by any draw in 154827, because 0 of 266 two-record disagreeing bases have their higher-slot record read by a draw of any shader (92 lower-slot records are read by a skinned draw, 106 by any draw).
+ruled out: judging the hook on lists with no entries, because 120 of them on a main menu stood it down before a character existed (F12 item 1), and the rig keeps it armed through 200.
+ruled out: leaving the same-frame RT7 hole for a flight to find, because the rig draws it (an exporting draw's E under a non-exporting draw's pixels) and without the zero variant the pixel keeps the wrong E.
+Doubts. (a) The non-exporting skinned pixel-shader pairs (61AE with FC43/4504) were 40-68% of the skinned binds in the later F12 windows; their pixels now say "no history" instead of carrying another draw's E, but they have no E: keying them to export is the remaining coverage gap and not in this build. (b) A skinned draw that bypasses the two draw hooks (indirect, a command list) is not in the reference list; its record then looks unreferenced and the base is dropped, never guessed (INFERRED not to occur; the witness would show it). (c) 182 of 274 disagreeing bases in 154827 were not drawn by any skinned draw that frame; they get no history, correct for a base nobody drew but one frame of no E if that character appears next frame. (d) "Both referenced" never occurred in 154827 (0 of 274); the rule drops it. (e) The fade hold costs up to 1.0 s extra black per entry if the views never go live (MotionTimedOut says so); with TAA off the signal is unarmed and it costs nothing. (f) The pose table is now built at the boundary, one stage later than before: its order against the next frame's first draw is covered by the present-frame rig (L3, L4) but only a flight shows it on the real pool.
+
+### 2026-10-08 F13 (0975c0a4, log edvr_gfx_20261008_212129, eye runs 212348 and 212416): F2 is exact when the join is live; a second chain dispatch in a frame switches it off for four frames of seven
+
+Diagnosis only, no code changed. MEASURED = a log line, a dump number or file:line; INFERRED = said so. Build matched (`v0.18.3-72-g0975c0a4`, edvr_log.py --expect-build HEAD). Sean: the first dump (212348, 21:23:48) NPC walking, the second (212416, 21:24:16) "the whole scene having a history reset". F5 entry 21:23:41.8. The scripts (h9_refs.py, h10_pairs.py, h11_attrib.py, f15.py on m16_212348/212416) are local and gitignored. The summary lines are per 30 s window, not cumulative.
+
+1. The walking NPC (212348, scene frame 13649, NPC 17.2 m away, 1,812 px). Crop 0, MEASURED: engine kind 1 (joined) on 1,812 of 1,812 px; SkinE valid on 1,573 (86.8%), which is every skinned pixel (the other 239 px are five rigid base-0 marker records, no E needed); |E| p50 0.84 / p90 1.93 / p99 3.25 / max 3.42 cm; h1_skin_e.py with w > 0.5 PASS. Residual beyond the used MV (f15.py, 12 pairs): limb median-of-blocks mean 0.30 px (range 0.07-0.94, p90 mean 1.34), against F11's walker 0.60 and F12's standing NPC 0.15. 212416 (NPC 12.8 m, 3,742 px, SkinE valid 3,203, |E| p50 1.14 cm): kind 1 on 100%, kind 2 in none of the 16 crops, residual 0.19 mean (0.10-0.36, p90 0.60, 15 pairs): the floor the doc asked for.
+ The 0.94 in 212348 is not noise. D00 engine kinds in a 40 px ring round the tracked mask, per crop: crops 0-4 and 9-11 kind 1 about 2.3-2.5k px, kind 2 none; crops 5-8 and 12-15 kind 1 about 0.5k (the rigid marker records), kind 2 about 1.6-1.8k: the WHOLE skinned body is masked (valid 0, camera term only) in 8 of the 16 frames. The pairs with a masked NPC and a walking root (k = 5, 6) show root residual 1.11 / 1.34 px and limb 0.94 / 0.81; the joined pairs k = 9-11 give 0.26 / 0.24 / 0.23. In k = 12-15 the NPC was nearly still (root <= 0.10), so the masking cost little.
+ Cause, MEASURED in the skin ledger (skin_212348.bin): the palette chain was dispatched TWICE in frames 13655-13657 and 13662-13664 (6 of 19 frames; sequence 1111122211112221111). Dispatch 1 holds 4-6 new jobs of 147-155 bones and dispatch 0 gains 3 (149 jobs become 156 / 158); the NPC's 15 jobs stay at positions 60-78 with the same bases. Taking crop k as frame 13650 + k (INFERRED alignment; it is the one that makes the pattern fit), the masked crops 5-8 and 12-15 are the double frames plus the frame after each. 190534, 154827 and 212416 are 19 of 19 single dispatches.
+ The log fits it to the unit (window 21:24:30): `frames=1856` chain calls over 1,769 present frames = 87 extra; `history gap 87` = `hook/t0 disagreements 87` = `no history 87` = `declined no history 87`; `views given 3538 (live 3364)`: 174 not live = 2 x 87 eye-frames; prefix source 116 = 87 + `unverified-previous` 29; `failed: prefix` 15,468 / 116 = 133 jobs per prefix frame. Window 21:24:00 the same: 2,020 chain calls over 1,889 frames, gap 129, prefix 97 = 72 + 25, no history 1,095 = gap 129 + no pose 966 (the first-person stretch).
+ Mechanism, INFERRED from the code, and every count above agrees with it: SkinJoinGpu::onChain runs once per DISPATCH. Each call sets `joinHistory = false` (skin_join_gpu.cpp:238), counts a chain frame (:282), notes the palette history with the same present (:294; skin_join.h:272 `frame != lastFrame_ + 1` is "gap" for a second call in one frame), flips the table parity (:298), overwrites prevJobs with its own table (:324) and sets joinPresent / joinHistory (:326). So on a double frame the first dispatch is offered a hook list for the whole frame, whose rows its half table cannot tile (bits 0x08 + 0x10, below) and falls to the prefix source; the second has no history, so `live` is false and EVERY skinned bind of the frame gets the null join (valid 0); and the next frame compares its 149 jobs with the second dispatch's 4-job table: prefix limit 0, every job fails (`failed: prefix`), which is the fourth masked frame.
+
+2. The whole-scene reset (212416). Nothing of EDVR's reset. MEASURED: `dlaa totals ... 14 of them started NVIDIA's history afresh` at 21:23:52, 21:24:12 and 21:24:32: no reset between; `vr world route 5s` state=observing, scene-resets 0, enters 0, every window; no `target 7 created` / slot-target line after 21:23:42; no Explorer Cam event (heartbeats only). What did happen is the eye run: `skin ledger: armed with eye run 212416` at 21:24:16.226 with a draw census (DC begin census=2), then render-thread stalls of 154 ms (16.382), 155 (17.244), 500 (17.590), 1004 (18.094), a 1985.4 ms FREEZE ending 19.075 (frame 15170) and a 794.5 ms FREEZE ending 20.649 (755 ms of it in EDVR's Present hook, writing the dump); frames 15153 to 15207 in 4.4 s. The first run has the same shape (154, 154, 500, 1004 ms at 49.150-50.995; 743.8 ms freeze, 708 ms in the Present hook, ending 53.567): the eye run costs 3-5 s of stalls every time. The 16 treated frames have no global history drop: Laplacian energy of the output 0.0110-0.0123 (212348: 0.0156 flat), one 6% dip at crop 1 where the raw input jumps twice as far as usual (|C - Cprev| 0.031 against 0.010-0.017; the 163.5 ms long frame at 16.390), recovering over 14 crops; the output is not the upscaled raw input (|T - NN2x(C)| 0.007-0.013 in both runs). F2 is not the cause: kind 2 in 0 of 16 crops (whole eye and near characters), kind 1 about 4.5-5.0k px within 60 px of the characters and a constant 10.5k elsewhere (rigid marker records, the same count in every crop), no E outside the characters (SkinE valid 3,203 px, all on the NPC). INFERRED: Sean saw the scene lurch and then re-accumulate after frames 100-1000 ms apart (DLSS saw a camera delta of that size, not a reset); a flight without the census and the ledger would show whether anything is left.
+
+3. Unresolved conflicts (h9_refs.py, three dumps). Both-referenced is 0 everywhere: 212416 202 disagreeing bases = 54 exactly one record referenced (always the lower slot, gap 2,649) + 148 none + 0 both; 212348 21 = 0 + 21 + 0; 154827 274 = 92 + 182 + 0. The stale higher-slot record is read by a skinned draw in 0 of 200 two-record bases of 212416 and by a draw of ANY shader in 0 (the lower-slot record: 54 / 62). The N-2 inference holds. The log's ratio is the same: resolved 3,086 : unresolved 7,978 = 1 : 2.6, the dump's 54 : 148 = 1 : 2.7. So `unresolved` is the "none referenced" class: bases of characters no skinned draw read this frame (212416: 228 skinned draws read 101 records of 137 doubled bases; 75 of the 102 disagreeing bases on a doubled frame are undrawn). They are dropped (no history for a base nobody drew), which is correct, and costs the join their `failed: pose` jobs: the join runs for every job the game skins, drawn or not. 212348's three disagreeing bases a frame are also all unreferenced and none is the NPC's (its 15 bases have one record each). The exact rule needs no change; its counter does: it calls an idle base "unresolved". Nothing needs counting of "eye colour-pass references only": the reference test already counts only the substituted skinned eye-pass draws.
+
+4. Hook/t0 disagreements. MEASURED: causes 0x18 on all of them (72 of 72, 87 of 87) and never 0x01, 0x02 or 0x04. skin_join.h:326-331: 0x01 a job outside every entity's range, 0x02 a head job whose count differs, 0x04 the number of entity heads differs, 0x08 the jobs' counts do not add up to the hook's end row, 0x10 an entity's jobs do not tile its range. Heads and counts match, only the totals do not: the offsets are right (lists usable 2,821 then 4,590, faulted / overflowed / implausible 0, `last list 8 entries to row 20385` is exactly the dump's single-dispatch row total 20,384 + 1) and the table is partial: on a double frame the dump's frame total is 21,333 rows (+1 = the list's end, INFERRED) while dispatch 0's jobs sum to 20,745. A timing mismatch in the sense that the list is one per frame and the tables are two per frame. `unverified-previous` (25, 29) is the frame after a disagreement: hookOk but not prevHookOk (skin_join.h:405), so it joins by prefix. `failed: prefix` stays at 11-15k with the hook as source because it is counted only in the prefix frames (97 and 116) and almost all jobs fail in them: 119 and 133 a frame. `failed: new-entity` 100 / 144 are the dispatch-1 characters appearing every seven frames; `failed: pose` 17.6k / 38.9k is, INFERRED, the idle-base drops (item 3) plus the aftermath of the double frames; not separately measured.
+
+5. The fade hold. MEASURED, 21:23:43.126: `entering: placed, locked, the camera UI hidden and the eye steady for 10 updates; black lasted 1.30 s; fading in over 300 ms [engine motion: views live for 22 frames in a row, skinned jobs, the second skin's join live]`, no `held N ms`: the signals were already live when the entry was otherwise ready (0 ms of hold; F12's black was 1.31 s the same way), `clear again` at 43.426 (1.60 s dark in all). No MotionTimedOut. The hold did what it was for; it cannot cover the double frames after it.
+
+6. Cost. `EDVR GPU census` windows, engine velocity per frame: 0.259 ms at 21:24:00 (F5 entry in it, 12 s of it first person at 0.045: about 0.40 ms over the Explorer Cam part), 0.394 ms at 21:24:30 (the whole window Explorer Cam); F12 0.270-0.296, F11 0.209-0.244. Whole EDVR 3.63 and 5.52 ms (F12 4.7-5.3); application render p50 11.04 and 12.98 ms (F12 11.8-12.9); frame gap p95 10.32 and 5.82 ms (F12 5.7-7.6). Both windows contain an eye run, so the numbers carry the capture's copies: the +0.10 ms over F12 is an upper bound and INFERRED to be mostly the boundary pose build (three clears of 65,536-entry tables, the instance-stream span copy and six dispatches a frame); no clean window exists. Draw side `~0.081 ms/frame on the caller thread`.
+
+Proposed fixes, each tied to the evidence above (none made):
+(a) Join the frame's chain dispatches as ONE logical frame (the NPC pulse, item 1; also the 0x18 disagreements, the gap, the failed-prefix aftermath and the 87-per-window not-live eye-frames). The exact form: copy each dispatch's job table into one per-present concatenation as it arrives (a boxed copy of at most jobs x 16 bytes), note the palette history once per present, run JoinCS once at the first skinned draw of the frame (the F2 preparation point, where every dispatch of the frame is in) over the concatenation, and let the hook's one list be judged against the union. A smaller step that is not exact: make a second call in the same present additive (no history note, no parity flip, no prevJobs overwrite, no `joinHistory = false`) so the frame stays live for dispatch 0's jobs and the next frame keeps their history; dispatch 1's jobs would have none. Rig: a second skin_lifecycle case with two dispatches in one present: E exact in the NPC's pixels on the double frame and the frame after, `frames=` equals present frames, no gap, no disagreement; mutants for the note, the flip and the overwrite.
+(b) Split the witness counter: `idle` = a disagreeing base no draw read; `unresolved` stays for both-referenced (0 in every dump), so the F14 log can be read at a glance. No change to the rule.
+(c) Nothing for the reset in EDVR. For the next flight, judge the scene without an eye run in the window, or run it with the draw census and the ledger palettes off.
+(d) Re-measure the cost after (a) in a window with no eye run.
+
+ruled out: a DLSS or TAA history reset, a route switch or a re-created target at 21:24:16, because `afresh` stays 14 across 21:23:52-21:24:32, the world route never leaves `observing` with 0 enters and 0 scene resets, and no target 7 / slot target line follows 21:23:42.
+ruled out: F2 as the source of the whole-scene reset, because kind 2 is 0 of 16 crops of 212416, no SkinE-valid pixel lies off the NPC, and the output sharpness has no step (0.0110-0.0123 over 16 crops).
+ruled out: wrong hook offsets as the cause of the 0x18 disagreements, because heads, counts and ranges (0x01, 0x02, 0x04) never mismatch and the list's end row equals the single-dispatch row total; the two failing bits are totals, and a double frame's table is half of the list.
+ruled out: a stale second pool set being read by any draw, a third time: 0 of 200 two-record disagreeing bases of 212416 have the higher-slot record read by a draw of any shader, and both-referenced is 0 in 154827, 212348 and 212416 (so no colour-pass-only reference rule is needed).
+ruled out: `unresolved` conflicts as damage to drawn characters, because they are the bases no skinned draw read (148 of 202 in 212416), and the NPC's own bases have one record each.
+ruled out: the fade hold as the cause of the masked frames, because it fired for 0 ms and the masked runs come 5 s later with the chain dispatched twice.
+Does F2 meet Sean's bar on a walking NPC? Not yet. Where its join is live the NPC is exact (every skinned pixel valid, residual 0.19-0.26 px, F11 0.60), but in 212348 it is live in 8 of 16 frames, and the masked frames carry the walking root with no motion (0.8-0.9 px residual).
+
+### 2026-10-08 F13 fixes built (branch claude/explorer-cam-npc-motion, on 90988886): one join per present frame over the chain's one or two dispatches, the idle / unresolved pose witness, the census windows (VR, built, NOT FLOWN)
+
+Two fixes approved after the F13 diagnosis above, and the cost-line ask. MEASURED = a ledger, a dump or a log number; INFERRED = said so. Nothing was flown. Rigs and mutation lists (each mutant must fail a check of its own case): join J1-J13, 136 checks, 74 mutants (5 new); GPU join 50 checks, 54 mutants (3 new); engine 1589 checks, 60 mutants, case L12 new (12 new mutants, 3 re-anchored). Full build.bat (absolute path) GREEN, exit 0, every gate and the receipt, on the tree that is committed.
+
+PRECONDITION, measured before any code (skin_212348.bin, bones0 / bones1 dumps, the F13 log). The plan was to concatenate the frame's dispatches into one table; each answer could have stopped it, none did.
+- Same u0? Yes. Both dispatches of all 6 double frames (13655-57, 13662-64) write the same palette buffer (one address); t0 and t1 differ (a second job table and a second joint matrix buffer, bind 1 against bind 0), t2 is shared.
+- dst ranges? Disjoint and continuous with each other, one running sum across both, NOT in row order: the union of both dispatches' [dst, dst + count) tiles [1, 21334) (13655-57) and [1, 21675) (13662-64) with 0 gaps and 0 overlaps in every one of the 18 frames; dispatch 1 fills the gaps between dispatch 0's last jobs (d0 ends 20384+185, 20716+2, 21012+174; d1 holds 20570.., 20719.., 20866.., 21187..). The second dispatch does not restart at 0. So the union in dispatch order is not row-ordered: the join is by dst (JoinCS section A and the hook cross-check sum and tile by row, not by position), only the prefix source reads positions, and there the first 149 jobs keep their old positions.
+- One swap a frame? Yes. u0 alternates buffer 1, 0, 1, 0 across singles and doubles alike (13655 b1, 13656 b0, 13657 b1, 13658 b0 ...). The written buffer's bytes at the frame's first pool draw equal the same buffer's bytes a frame later in every row (0 rows changed in all 18 frames, the 6 double frames included): both dispatches are complete before the first pool draw, and nothing writes the other buffer.
+- The hook? ONE call and one list per present frame, one node, whatever the dispatch count. MEASURED, window 21:24:00-21:24:30: `calls` 11,073 -> 12,842 (+1,769), `lists usable` 2,821 -> 4,590 (+1,769), the engine's frame count 1,769, while `frames=` (chain dispatches) was 1,856; `node changes 0`, `threads 1`. Nothing to concatenate: the one list is judged against the union (its sums and tilings are order independent). INFERRED that it covers both dispatches' rows: the causes were 0x08 + 0x10 only (a half table against the frame's list), never 0x01, 0x02 or 0x04.
+- Late? A second dispatch after the first skinned draw has needed the join: not in the dumps (the palette is final at the first pool draw in 6 of 6; the chain is op #2 of the census frames, before about 9,000 draws). It cannot be ruled out from the game's design, so the code counts it (`late`) and does not join it; the rig draws it.
+
+(a) One join per present frame. SkinJoinGpu::noteChain (was onChain) takes each dispatch: the same bindings test as before (t0 a 16-byte structured table of at least `groups` rows, u0 a 48-byte structured palette), then copies the dispatch's job table, as a boxed GPU copy at the dispatch, behind the earlier ones into the frame's table `frameJobs` (so one buffer rewritten between the dispatches is still taken at each dispatch), and notes the palette buffer: a later dispatch on another u0 marks the frame MIXED. A dispatch of a present whose join has already run is LATE (counted, not joined, no second join). runJoin then runs once: the hook's one list and `skinEntityHookNoteChain(total groups)`, `PaletteHistory::note` once for the present with the first dispatch's palette (so no `gap` for a second dispatch), the parity flip once, JoinCS over the union (`prevJobs` := the union for the next frame's prefix compare), and the staged GPU counters with the CPU's (now with chain dispatches / frames with two or more / late / mixed). History is false for a MIXED frame (nothing measured says which buffer is last frame's for which job); every other frame's history is the verdict it would have been. Where it runs: at the first skinned draw that binds the join's views (engine_velocity.cpp slowPath: `g_skin.flush(ctx, frame)` before `views(frame)`), else at the frame boundary (`flushPending`), so a frame whose character is out of view still joins and the history chain does not skip it. The entry fade's `skinLive` is read at the boundary after that run (`lastJoinLive()`), so it describes THIS frame (the old `chainLive` was the last dispatch's, which on a double frame was the history-less one).
+ Exact because: the union's rows are disjoint (measured), the join is by row, the hook's one list is judged against the whole frame's table, history is noted once per present, and each table is copied when its dispatch comes. What a double frame does to the old numbers: `gap`, `hook/t0 disagreements`, `no history` and `declined no history` stop counting the second dispatch (87 each in the 21:24:30 window), `failed: prefix` stops counting the frame after it, and the NPC's 8 masked frames of 16.
+ Rig L12 (a-o, the fixture dispatches the chain in two parts, into one buffer or two job tables, with the character in either part): a double frame has history, valid 1 and E exactly zero (a); the frame after it (b); a one-two-one sequence of 12 frames, whole in every one (c); the drawn character in the second dispatch, the extra one first, rows not in order (d); one job table buffer rewritten between the dispatches (e); a late second dispatch (f, g, counted in n); a second dispatch on the other palette buffer: no history that frame, history the next (h, i); the fade's signal after single and double frames (j, k); the counters in a window of nothing else: dispatches = 2 x frames, two or more in every frame, none late, the hook's list judged against the union with no disagreement, no gap, no frame without history (l, m); every second dispatch late (n); a chain-only frame joined at the boundary, the signal saying its join has no history (o). Mutants (12 new): join at each dispatch (the old behaviour), each table copied to the start of the frame's, rows not accumulated, a late dispatch re-joined, late and two-or-more uncounted, a mixed frame joined, no boundary join, no join at the draw, `lastJoinLive` always true, the chain line's and the pose line's columns swapped.
+
+(b) The pose witness splits the dropped bases. Stat words 26 (`idle`) and 27 (`unresolved`), counted in poseFinish only when the draw list was exact: a dropped base with a live (read) record is `unresolved` (two or more read records disagree: 0 in every dump of three flights), one without is `idle` (no draw read the base: a character out of view, every record decided and they disagreed); the rest of `bases dropped` is `no exact list`. The line: `skin join: pose witness: tables built T, records R | conflicts resolved C | bases dropped D: idle I (no draw read the base), unresolved U (two or more read records disagree), no exact list N | reference lists exact ..., unreadable ..., not complete ...`. Rule unchanged. A new line after the join line: `skin join: chain dispatches D over F frames (two or more in K, late L, on another palette buffer M)`. Rigs: J12.s/t/q/r, J13, G6.q/r, L10.h/i (the draws read an empty slot: idle 2 or more, unresolved 0). 
+
+The cost line. `EDVR GPU census` and its `alters` line gain, when an eye run was armed in the window, the sentence `An eye run was armed in this window: its ledger, draw census and copies are in these figures; price a feature from a window without this sentence.` (gpuCensusNoteEyeRun, called where the ledger arms). Both F13 windows after the entry carried one, so no clean window existed; the next flight needs one 30 s window of Explorer Cam with the NPC in view and no dump, and the line will say whether it is clean.
+
+F14 SUCCESS signatures (flight in the settlement, a walking NPC, Explorer Cam in, no eye run in the pricing window; then one eye run):
+- `skin join: chain dispatches D over F frames (two or more in K, late 0, on another palette buffer 0)`: D = F + K, K > 0 whenever the game dispatches twice, late 0, mixed 0, and F equal to the window's present frames (`engine motion: ... over 30 s, N frames`).
+- the join line: `history [first 0, gap 0, ...]` outside the F5 transition, `hook/t0 disagreements 0`, `unverified-previous 0`, `no history` and `declined [no history ..]` only the first-person stretch (no pose), `failed: prefix` near 0 with source=hook, `views given N (live N)`.
+- `pose witness`: `idle` the culled characters, `unresolved 0`, `no exact list 0`.
+- an eye run on the walker: kind 2 on the NPC mask in 0 of 16 crops (8 of 16 in 212348), residual at or under 0.3 px on every pair.
+- `EDVR GPU census` lines without the eye-run sentence: `engine velocity` and the `alters` pool-family figure to compare with F12 (0.270-0.296 ms) and F11.
+F14 FAILURE signatures:
+- `late` above 0: a chain dispatch after a skinned draw, the ledger's premise broken; that dispatch's jobs have no join. `on another palette buffer` above 0: two buffers in one frame, same.
+- `gap` or `hook/t0 disagreements` above 0 with K > 0: the one list does not cover the union; read `causes`.
+- D = F with K = 0 while the NPC still pulses: the pulse was not the second dispatch after all.
+- F below the window's present frames: frames that never joined.
+
+ruled out: a second swap of the palette buffers inside a frame, because u0 alternates once per frame across singles and doubles, and no row of the written buffer changes after the first pool draw in 18 of 18 frames.
+ruled out: overlapping or restarted dst ranges for the two dispatches, because the union tiles [1, 21334) and [1, 21675) with 0 gaps and 0 overlaps.
+ruled out: the hook seeing two calls on a double frame, because its calls equal the present frames (+1,769 against 1,856 chain dispatches).
+ruled out: a dispatch after the first pool draw in 212348, because the written buffer is already final there in all 6 double frames.
+Doubts. (a) The premise is one dump (6 double frames in 19) and one log; a third dispatch is handled by the same accumulation (the table holds 8,192 rows) but has never been seen. (b) The join now runs inside the first skinned draw's setup on the render thread, not at the chain dispatch: the same GPU work in another place; whether its cost moved is for the clean window. (c) `lastJoinLive` is the last join that ran, so a frame with jobs and no join at all (a refused dispatch) reads the frame before's; `chainRefused` says it. (d) A chain-only frame builds no pose table (no draw, no pool snapshot), so the next frame has `no pose` and no history, as in first person; the boundary join only keeps the tables and the counters in step. (e) `idle` bases are still failed jobs in `failed: pose`; the number is the culled characters', not damage.
+
+### 2026-10-09 F14 (7d0e052e, log edvr_gfx_20261009_011420, Frontier, Explorer Cam, no eye run): F2 is verified on a walking NPC; the one-join-per-frame fix holds
+
+Sean: "NPCs looked good, didn't see any reset." Build matched (`v0.18.3-75-g7d0e052e`). F5 entry 01:17:42.8. No eye run in the flight, so every census window is clean (none carries the eye-run sentence). MEASURED = a log line read for this entry; the window figures of the join, the pose witness and the GPU census are as read from the log by the coordinator.
+- The double dispatch is joined as one frame. `skin join: chain dispatches D over F frames` has D = F + K in every window: 1,147 / 1,111 (K 36) at 01:17:21, 1,933 / 1,807 (K 126) at 01:17:51, 2,058 / 1,989 (K 69) at 01:18:21, then K 0 from 01:18:51 on (2,055, 1,791, 1,941, 2,180); late 0 and on another palette buffer 0 in all of them, so the premise (both dispatches before the first skinned draw, one palette buffer) held in the field. In the windows 01:18:21-01:20:21: source=hook in every frame (1,791-2,180 frames a window), no history 0, history gap 0, hook/t0 disagreements 0, unverified-previous 0 (F13: 87 of each in a window). Joined about 87% of the jobs; `failed: pose` 34-49k a window (17-22 a frame: the jobs of characters no draw reads); new-entity 157-3,075. Pose witness: unresolved 0, drops idle only.
+- The fade hold did nothing, as in F13: `entering: ... black lasted 1.15 s; fading in over 300 ms [engine motion: views live for 22 frames in a row, skinned jobs, the second skin's join live]` at 01:17:43.965, no `held` suffix, no MotionTimedOut. The 1 s cap has not been exercised in a flight.
+- Cost, clean: `engine velocity` in-frame 0.27-0.42 ms a frame in Explorer Cam against F11's 0.21-0.24 (before F2) and F12's 0.27-0.30: F2 costs about +0.1-0.2 ms a frame. The pool-family `alters` figure, 0.18-1.05 ms, holds the game's own work in those draws and is not EDVR's cost.
+- Verdict: F2 meets Sean's bar on a walking NPC in Explorer Cam: exact motion for skinned characters (F13 measured 0.19-0.26 px on joined pairs against F11's 0.60) now with no frame without history in any window (F13: masked in 8 of 16 dump frames); no eye run was taken, so the per-frame residual is not re-measured. The F13 arc (second skin, hook, pose by draw reference, one join a frame) is closed.
+- Open: (1) the first-person panel (the world route) does not consume target 7, so a skinned character seen through it keeps the camera term; a follow-up only if Sean asks. (2) The fade hold's 1 s cap is unexercised (it needs an entry whose views never go live). (3) The non-exporting rigid FC43 draws need no E (h10, F13-era: base-0 records, not characters).
+
+ruled out: the double dispatch as a remaining cause of masked frames, because K frames with two dispatches ran (36, 126, 69 in three windows) with no history 0, gap 0 and disagreements 0 beside them.
+ruled out: the idle bases as damage, because `unresolved` is 0 and Sean saw no pulse; they are the characters no draw reads.
+
+### 2026-10-09 F15 built (branch claude/explorer-cam-npc-motion, on 7cee4ced): F2 on foot -- the first-person panel and the screen motion map take a skinned character's exact motion from the source's own target 7 (VR, built, NOT FLOWN)
+
+F14's open (1): a skinned character seen through the first-person panel (the VR world route, the resolver's prep) kept the camera term, because target 7 existed for the two eyes only and the on-foot source pass, where the panel's scene is drawn, had none. Sean chose to extend F2 to it before merging to main. The size came in under the estimate; no second resource path and no new camera plumbing were needed (the world route's camera term already came from the source Eye's own scene snapshots EN/EB, rows 270..275, which the joined-record branch has always used).
+
+What changed (every item is VR; the flat profile's views, bindings and shader path are the old ones):
+- engine_velocity.cpp: the source Eye gets its own target 7, R16G16B16A16F at the source depth's size (3808x2142 in the F14 flight, 65.3 MB), beside its slot target; a source draw of the exporting pair writes it; it is cleared at the frame's FIRST skinned draw, not at the frame's start (most frames on foot draw no character); the pose table and the pool scatter run for the source's pool snapshot as for an eye's (`g_skinPoseEye <= kEngineVelocitySourceEye`). `EngineVelocityViews::skin` (new, AddRef'd, released at every call site) is set by `engineVelocitySourceViews` only while a skinned draw wrote it this frame, never by `engineVelocityViews` (the eyes' own view is the compose's `engineVelocitySkinView`), and never in the flat profile.
+- flat_mono_shader_source.h / flat_mono_resolve.cpp: the prep binds the view at t17 and sets bit 2 (value 4) of `debug.w` only when the frame carries one. A record with a palette base (`data[0].x != 0`) then takes `prev = world + (EN[275] - EB[275]) + E/100` through the shared `engineReprojectRowsE` (skinned) with the SOURCE pass's rows, class 15 `skinned` (accepted, so it gets its own census slot 24, the stripe is 25 counters); a texel with no valid flag or a non-finite E is class `masked` (kind 2: no history, as Explorer Cam). The TAA kernel's three `debug.w != 0` tests are now `(debug.w & 3) != 0`: the first draft shared the constants and would have read bit 2 as "alternate-camera coverage present" and shown every pixel's current colour (the TAA case F of flat_skin_gpu_tests.h failed on it before the fix, and fails again with the fix reverted).
+- fixed_shader_source.h (`kScreenMotionPs`) / screen_motion.cpp: the same branch as the eye-route fallback (t15, `engine.w`), kind 7 counted as joined and in its own slot, painted as joined (17).
+- Logs: `vr world route refusal 5s:` ends `skinned-joined=N`; `skin join: on-foot source target 7 created WxH ...`; the second-skin line ends `on-foot source ... handed ... N times (live M), cleared K times`; the on-foot pixels line says how many joined pixels were a skinned character's. tools\edvr_log.py parses and prints `skinned-joined`.
+
+Flat-profile proof: the flat resolver's engine views carry no `skin` (a flat source has no target 7), so bit 2 is never set, the prep binds the fourteen or sixteen slots it always did, and the skinned branch is not taken. Held by: flat_mono_resolve_test (a record with a base and a joined marker, no view: the whole output bit for bit the base-0 record's; a base with no marker, no view: bit for bit a not-rig surface; a rigid record with the view bound: unchanged; EDVR's TAA with the view bound blends as without it; 14 prep mutants, each caught, including the view bit ignored and a rigid record taking the branch); skin_engine_test L13.j-l (skinned shaders in the flat profile make no target 7, bind none, patch no vertex shader) and the mutant that removes ALL the flat layers (the vrOnly families, the skinDraw guard, the flat source's early return, the wantSkin guard; any one alone is equivalent by design) is caught. The prep's binding pins in flat_temporal_test were re-pinned on purpose (18 slots when skinned).
+
+Not live: a source frame whose job table changed shape has valid 0 and E 0 at every drawn pixel (L13.g), which the prep reads as masked (no history), exactly as Explorer Cam; a frame whose skinned draws wrote nothing hands out no view, so the bit is clear and the record is a not-rig surface (the camera term), as before F15.
+
+Rigs: skin_engine_test 1647 checks (L13 new, 9 new engine mutants, 69 in all), engine_velocity_test 15462 (panel K/L/R/P cases, 11 screen-shader mutants), flat_mono_resolve_test (skin scenario), vr_world_route_test (token, class 15, a mutant), flat_temporal_test (log gate: 0 failures), edvr_log --self-test.
+
+What to look for in the F15 flight (VR, a skinned NPC in view on foot in the first-person panel, then Explorer Cam):
+- First person: `skin join: on-foot source target 7 created ...` once; `vr world route refusal 5s: ... skinned-joined=N` with N > 0 while the character is in view (N = 0 with the character in view means the route did not read E; the line before it, the second-skin line, shows whether target 7 was handed out); `masked` in the same line is the skinned pixels with no valid texel. Cost: the second-skin line's `cleared` count and `engine velocity` in-frame ms.
+- Explorer Cam: the F14 lines unchanged (the eyes' views carry no `skin`; `eye-frames with target 7`, `views given`).
+
+Doubts: (1) a non-exporting skinned family's pixel (the FC43 draws) now has valid 0 under the bit, so it is refused where before F15 it took the camera term (Explorer Cam made the same call in L11); (2) the target is allocated whenever the second skin is armed, not only when a character appears (+65 MB on the F14 rig); (3) the 65 MB clear is 3808x2142x8 bytes written on every frame with a skinned draw, not measured; (4) not flown.
+
+ruled out: sharing `debug.w`'s bit pattern with the TAA kernel's tests, because the TAA kernel read any nonzero `debug.w` as alternate-camera coverage and the TAA case F of flat_skin_gpu_tests.h (a hot pixel blended near 111) failed with it.
+
+### 2026-10-09 F15 flown (log edvr_gfx_20261009_050026, Frontier, bd003185 installed, no eye run): the first-person panel reads E; target 7 does not leak; the cost is the clear
+
+Build `v0.18.3-79-gbd003185`. MEASURED = a number or line read from this log; INFERRED = reasoned from it.
+- The panel works (MEASURED). `vr world route refusal 5s: ... skinned-joined=` was 0 until 05:02:27, then 187, 2,113, 1,121, 10,508, 168,638, 555,865, 1,325,160, 978,871, 1,175,295, 1,340,442 and 1,165,313 per 5 s in first person; `masked` was 2,958 and 1,970 in the first two windows with a character in view and 0 after. The window with the route released for Explorer Cam (05:03:27) reads 0; after the exit 2,638,871, 11,563,990 and 15,297,874. The join was `source=hook` (2,161 of 2,161 frames in the 05:02:57 window), hook/t0 disagreements 0, every declined class 0. Source views handed out 2,161 (live 2,161) in that window; Explorer Cam's eye views 939 (live 939).
+- Release (MEASURED lifecycle, code answer): not a leak. Created 05:02:20.377 (3888x2187, 68.0 MB, present frame 12286); `on-foot source slot target released ... no on-foot source for 120 frames` at 05:03:22.304 (frame 16716), which runs `source = Eye{}` (engine_velocity.cpp:3130, idle ceiling kSourceIdleFrames = 120, engine_velocity.h:390) and drops the slot target, target 7 and both views with the Eye; created again 05:03:30.097 (frame 17266) for a NEW source depth (00000224D10BF620 against 00000224A4B30B20: the game re-made it on the F5 exit); released again 05:03:44.854. Every create has a release. The AddRef'd views are dropped inside the frame by their consumers (vr_world_route.cpp:296 RAII, screen_motion.cpp:503), and a rebuild on a new depth resets the old target first (engine_velocity.cpp:1186, :1133). The vram lines (local_used 14,435 then 13,350 MB across the release) are the whole game, so they do not isolate 68 MB.
+- Re-creating on a return is right: in Explorer Cam the scene is drawn in the eyes, so the source is idle and a persistent 68 MB target would sit unused for the session; and the depth it matched is re-made on exit, so it would be rebuilt anyway. Nothing changed in code.
+- Cost. World resolve (MEASURED): 1.103 ms a frame at 1.00 resolves a frame and 0.877 at 0.78, against F14's 0.669 at 0.60, which is 1.103, 1.124 and 1.115 ms PER RESOLVE: unchanged, so the t17 read costs nothing measurable and the rise is the route resolving more frames (INFERRED: F14's window held more non-panel frames). Engine velocity (MEASURED): 0.170 and 0.194 ms a frame (5.00 and 5.21 spans) against F14's 0.077 (1.79). The target is cleared once a frame (2,161 clears in 2,162 frames), inside that section; 68 MB is about 0.04-0.07 ms at 1-1.8 TB/s (INFERRED), so the clear is most of the +0.09-0.12 and the rest is the scene (spans a frame 5.0 against 1.8). The two are not separable in this log.
+- Doubt (1) of the F15 entry: skinned binds that write no history were 22, 0 and 8,499 in the three windows (the last is Explorer Cam's eyes), so the first-person panel did not meet the non-exporting family in this flight.
+- Open: nothing new for F15; the 1 s fade-hold cap is still unexercised.
+
+### 2026-10-09 F16 instruments built (branch claude/explorer-cam-npc-motion, on e4ec4d8e): the census prices F2's big clears, the join and the pose table item by item (VR, built, NOT FLOWN; no behaviour change)
+
+Final review item 4 (reviews\explorer-cam-hotkeys-final-2026-10-09.md): Sean chose to time the broad clears before changing them. F15's flight (050026) priced engine velocity at 0.170 / 0.194 ms a frame against F14's 0.077 and could not say how much of that was the 68 MB clear; this build splits it. Instrument only: nothing the draws, the join or the consumers read changed.
+- Five new census sections (gpu_census.h, after the world route's), each NESTED inside an existing engine-velocity span, so the engine velocity figure still holds all of it and none of the five is added to any total: `FrameSkinSourceClear` (the on-foot source's target 7 clear, engine_velocity.cpp), `FrameSkinEyeClear` (an eye's target 7 clear at the eye-frame start), `FrameSkinJoin` (the join dispatch, its plan upload and job-table copy; skin_join_gpu.cpp), `FrameSkinPose` (the pose table build: instance copy and six dispatches), and `FrameSkinJoinClearProbe`.
+- The join's 3-table clear is phase 0 of ONE kernel (skin_join_shader.h:116), so it cannot be timed from inside. The probe is a new entry point, `joinClearProbe` (the same loop over the same 65,536 rows, one 256-thread group), dispatched on scratch tables of the join's sizes on the probe section's turn only; it writes nothing the join reads. The rest of the join is the join figure minus the probe figure.
+- Where to read it: a line of its own after the main `EDVR GPU census:` line (the main line, its fields and its format are unchanged), prefix `EDVR GPU census, the second skin's GPU work (F2); each item is already inside the engine velocity figure above`, one `name ms (count/frame)` per item: `source target 7 clear`, `eye target 7 clear`, `join dispatch (3-table clear included)`, `join 3-table clear alone (probe on scratch buffers)`, `pose table`. An item that did not run is `-`; the line is absent in a window where none ran. Like the world route's, the five have no turn in the rotation until called in the window, so a window with no skinned character samples exactly as before. The main line's `spans timed` now counts their spans too.
+- Rigs: gpu_census_test 218 checks (the table, the line's format and `-`, absence, no total moved, the turns: none until called then 25 in a cycle, line length, and a scan of the five call sites with 6 mutants); skin_engine_test L14 (the stub counts Begins per section: the eye frame begins each eye's clear, the join, the probe's slot and the pose table once; two source frames begin the source's clear once each; a rigid-only source frame and a frame with no pool draw begin none; with the census timing the probe the join's result is unchanged), 7 new mutants including the probe writing the real join table; skin_join_gpu_test G8 (the probe leaves the three scratch tables in the join's cleared state and touches nothing else), 2 mutants; the two join-clear mutants re-anchored because the probe repeats the loop.
+- What to read in F16: the new line over a first-person window with a character in view (the source clear is 1 a frame there) and an Explorer Cam window (two eye clears a frame). Expect small numbers: a micro-benchmark on this PC's RTX 5090 (idle GPU, flush and wait around each call) measured ClearRenderTargetView on a 3888x2187 RGBA16F target at 0.010-0.035 ms (a fast clear of compression metadata, not 68 MB of writes), CreateTexture2D plus both views at 0.007-0.03 ms (the runtime defers the real allocation), and a first clear of fresh memory 0.03-0.3 ms; the 8 and 15 ms of the very first trial look like the GPU waking (INFERRED). So the engine velocity rise in F15 is probably mostly not the clear (INFERRED); the line will say.
+- Lazy allocation of the source's target 7 (at the first skinned draw instead of when armed), for Sean's decision after F16: it saves 68 MB (0.5% of the 13.6-14.4 GB the game held on foot in 050026, 31.4 GB budget; about 0.6-0.9% of a 12 or 8 GB card) in on-foot time with no skinned draw (in 050026 the first skinned draws came within one or two 5 s windows of the source's creation, so little there; more in an empty corridor). It costs a hitch at first sight of a character: best case 0.03-0.3 ms (MEASURED, idle GPU, free VRAM), under memory pressure unmeasured. Today the allocation lands inside the on-foot scene load (050026: a 85.4 ms long frame and a 155 ms render-thread stall in d3d11.dll at 05:02:20, where the game created 534 MB; our two 68 MB targets are made in that frame), which hides it; lazily it would land alone 5-10 s later in the middle of a frame under the engine mutex. A possible middle, not built: allocate when the chain dispatch first lists jobs (before the first skinned draw), which keeps the saving for character-free time and moves the hitch off the draw path. Not changed.
+
+### 2026-10-09 F16 flown (log edvr_gfx_20261009_092635, Frontier, 8c48a820 installed): F2's clears are nearly free, the join is 0.03 ms, the pose table 0.03-0.09 ms; the join-clear probe is removed
+
+MEASURED = read from the log's `EDVR GPU census, the second skin's GPU work` lines (ms a frame, 30 s windows).
+- Eye target 7 clear 0.002-0.005 at 1.5-2.0 a frame; source target 7 clear 0.003-0.004 at 1.00 a frame (the 68 MB clear costs 0.003-0.004 ms: a fast clear of compression metadata, as the micro-benchmark in the F16 entry above predicted). Join dispatch 0.030-0.037 at 1.00. The join's 3-table clear alone, by the probe, 0.015-0.017 at 1.00, so the clear is about 45% of the join dispatch. Pose table 0.031-0.092 at 1.00. Engine velocity as a whole 0.18-0.34, so these four items are about 0.07-0.14 of it (a third to a half); the rest is the slot-target clears, the pool and scene snapshot copies and the other engine work.
+- The pose table's variation is by frame kind, not by size (MEASURED): 0.031 and 0.032 in the two on-foot windows (source frames only, no eye frame), 0.039-0.092 in the Explorer Cam windows with eye frames; the pool held 6,144 to 19,456 records (19,456 in both a 0.092 and a 0.032 window) and 57-277 skinned records a table, with no ordering between those and the cost. The join and the probe did not move (0.030-0.037, 0.015) across the same windows. INFERRED: the pose table is the last EDVR compute at the frame boundary, after the eye passes, and its span starts when the GPU reaches it, so it holds the wait for the game's still-running graphics work to drain before compute may start; that wait is longer after two eye passes than after the source pass. A discriminating instrument for later: time one trivial dependent compute dispatch just before the pose build; if it reads 0.02-0.06 ms in eye windows the pose cost is the drain, not the kernels.
+- The probe (`joinClearProbe`, its dispatch, census item, rig cases and mutants) is REMOVED: it ran every join to measure what is now known. The other four timers stay (cheap queries). The census line now has four items and reads the same otherwise.
+
+Investigation, nothing changed (a micro-benchmark of lone dispatches on this driver could not be trusted: GPU timestamp pairs around one read zero and dispatches in a row overlap, so these are estimates from the shaders and the figures above):
+- Pose table: six dependent dispatches, each needing the whole previous phase (scatter, scatter-rest and verify are one thread per pool record, 99% of which read 32 bytes and exit), so they cannot be fused without turning 19,456 records into a serial loop. Only the mark loop (one thread per listed draw, serial over its instances, up to 1,024) scales, and only for draws of hundreds of instances: a few microseconds at best. The excess over the dispatch floor is not kernel work (INFERRED); removing it means building the table beside the join, which needs the previous frame's pool snapshot kept (a second 6.5 MB buffer and copy) and costs about what it saves. Not recommended.
+- 3-table clear (1 MiB, one 256-thread group, 256 dependent iterations a thread, latency-bound): a separate 64-group clear dispatch is about 4-5 us against 15, a saving near 0.010 ms, no change to the rows cleared. Clearing only the previous frame's rows saves at most 43% (the hook's list reached rows 17,027-28,166 of 65,536) and is the risky one: Info is double-buffered (its stale rows are two frames old), JoinOut and Owner are single buffers, writes are bounded by the 65,536-row cap and not by the CPU's end-row estimate, and after the entity or job count shrinks the stale rows are the ones above the new end, where a limited clear leaves old join, by-base and owner entries (a recycled base would read stale history; a stale small owner would take a new job's base). It needs a GPU-side high-water mark per buffer and parity and a shrink-case mutant for each table.
+
+### 2026-10-09 F17 built (on 2f918ca0): the join's 3-table clear is its own 64-group pass (VR, built, NOT FLOWN)
+
+The join's phase 0 moved out of the one-group kernel into `joinClear` (64 groups of 256 threads, all 65,536 rows of all three tables every frame, dispatched on the same context and views right before the join); the second-skin census line gains the item `join 3-table clear pass`, and `join dispatch (clear pass not included)` should drop from about 0.030 ms by about the 0.015 the clear took there (expected clear pass: a few microseconds); rigs: skin_join_gpu_test G8 (sixty entities to rows near 60,000, shrinking to two: every stale row read as cleared, plus 5 mutants and a text pin that the join kernel has no clear loop), skin_engine_test L14/L3/L5 mutants for the pass.
+
+### 2026-10-09 0.19.0 review, finding 1: the skin-chain verdict follows the shader registry (VR, built, NOT FLOWN)
+
+The release review (reviewed main 824972e8; still present on b259e6bf) found `skinChainBound` (exposure_fix.cpp) keeping a Boolean per compute-shader address and never asking the registry again, while `registerShaderHash` replaces a hash and advances `g_shaderRegistryGen` when a released shader's address is reused. A non-chain address reused for the palette chain stayed false (no join or history that frame: the NPC motion lost); the reverse stayed true (a non-chain dispatch fed to the chain reader).
+- Fix: `skinjoin::ChainVerdicts` (skin_join.h) keeps each verdict WITH the registry generation it was asked at (read before the lookup, `shaderRegistryGeneration()`, an inline atomic load) and asks the registry again when the generation has moved. A steady dispatch is a map hit and the load, never the registry's lock; an unrelated registration costs each dispatched address one lookup.
+- Tests: skin_join_test J14 (false to true, true to false, hash 0 registered later, a replaced device, a shader destroyed and re-created on the same device, an unrelated registration, a registration landing between the generation read and the lookup, the 1,024-address cap, and source pins that skinChainBound passes the generation and the hook is gated by it); seven mutants in tools\skin_join_test\mutants.py, each caught by J14.
+- Observable only when an address is reused; nothing to fly for it alone.
+
+### 2026-10-09 0.19.0 review, finding 2: the frame after a mixed-palette frame has no history (VR, built, NOT FLOWN)
+
+The release review found (still present on b259e6bf) that after a frame whose chain dispatches wrote two palette buffers (`noteChain`'s `pendingMixed`), `runJoin` refused history for that frame but still recorded the first buffer as `curPalette`, advanced `PaletteHistory` and stored the union job table as the next frame's jobs. The next single-palette frame passed every certificate with the first buffer as its previous palette, so a job the mixed frame wrote only into the SECOND buffer was joined against rows that buffer never held (the review's helper: row 20, history 0 then 1, join[20] = 20). L12.h/i missed it: its drawn character was in the first dispatch's buffer.
+- Fix (the review's conservative option), skin_join_gpu.cpp: `prevMixed`. `runJoin` refuses history while the previous join's frame was mixed and sets the flag from its own frame, so a complete single-palette frame is the recovery: the frame after a mixed one has no history, the one after that has it. A character that was in the first dispatch's buffer also loses that one frame (L12.i now says so; L12.i2 is the recovery).
+- Tests: skin_engine_test L15 (the review's case: a character written only to the second buffer, retained in the next frame, none there and history on the frame after; two mixed frames in a row; reordered dispatches; overlapping rows; unequal palette sizes in both orders) and L12.i/i2. Mutants frame-after-mixed-joined, mixed-flag-not-kept and mixed-flag-never-cleared are each caught by L15; mixed-palette-joined is re-anchored.
+- Cost: one frame without NPC motion after a mixed frame. The cited flights used one palette buffer for all dispatches, so the trigger has not been seen in play. Nothing counts the refused frame separately: it shows as a `no history` frame in the join line beside `on another palette buffer` in the chain line.

@@ -622,6 +622,7 @@ Texture2D<uint2> SourceStencil:register(t11);
 Texture2D<float4> WeaponMotion:register(t12);
 Texture2D<float2> SourceSlots:register(t13);
 StructuredBuffer<EnginePoolRecord> SourcePool:register(t14);
+Texture2D<float4> SourceSkin:register(t15);   // bound when engine.w != 0: the VR on-foot source's target 7 (F2): xyz a skinned character's previous - current position in cm, w 1 valid / 0 none
 cbuffer SourceNow:register(b2){float4 src[276];}
 cbuffer SourceBefore:register(b3){float4 old[276];}
 cbuffer ScreenBefore:register(b4){float4 model[12];}
@@ -630,10 +631,16 @@ cbuffer Settings:register(b6){float4 shape;float4 extent;float4 engine;}
 cbuffer EngineSourceNow:register(b7){float4 SEN[277];}   // SEN[276].x: the frame stamp, as EN's
 cbuffer EngineSourceBefore:register(b8){float4 SEB[276];}
 RWStructuredBuffer<uint> PanelCounts:register(u1);
+// First-person reach as a raw source depth (reversed-Z, d = near / z): the same .075 as the flat prep's kFirstPersonReachDepth
+// (flat_mono_shader_source.h carries the measurement). The first-person camera's near plane is 0.0675 m, the world's 0.025 m.
+static const float kFirstPersonReachDepth=.075;
 // enginePixel's kinds for the source texel q: 0 no engine data, 1 joined
 // (prev = the surface's previous source UV), 2 masked, 3 not a rig record,
 // 4 stale slot, 5 corrupt slot code, 6 stale stamp (a joined marker from an
-// older frame: the camera term) -- the same tests in the same order.
+// older frame: the camera term) -- the same tests in the same order. 7 (F2 on
+// foot, engine.w != 0 with a nonzero palette base): a skinned character whose
+// target-7 texel is valid, joined by that texel (the counts add it to joined and
+// to their own slot, the view paints it as joined); the texel invalid: masked.
 uint sourceEngine(int2 q,float2 uv,float z,out float2 prev) {
     prev=uv;
     if(engine.x==0)return 0u;
@@ -649,6 +656,19 @@ uint sourceEngine(int2 q,float2 uv,float z,out float2 prev) {
     if(slot>=count)return 0u;
     const EnginePoolRecord r=SourcePool[slot];
     const uint token=asuint(SEN[276].x);
+    if(engine.w!=0 && r.data[0].x!=0u) {
+        // A skinned record has no pose blocks and no marker: the surface's exact previous position is in target 7, previous - current in centimetres,
+        // relative to this frame's camera origin. The point under the pixel goes back to world + the source camera term + that motion.
+        const float4 sk=SourceSkin.Load(int3(q,0));
+        if(!(sk.w>0.5) || !all(isfinite(sk.xyz)))return 2u;
+        float4 before;
+        if(!engineReprojectRowsE(r,true,sk.xyz*0.01,uv*float2(2,-2)+float2(-1,1),z,SEN[270],SEN[271],SEN[272],SEN[273],SEN[275].xyz,
+                                 SEB[270],SEB[271],SEB[272],SEB[273],SEB[275].xyz,before))return 2u;
+        prev=before.xy/before.w*float2(.5,-.5)+.5;
+        if(all(isfinite(prev)))return 7u;
+        prev=uv;
+        return 2u;
+    }
     uint kind=engineRecordKind(r,token);
     if(kind==3u)kind=engineStaleStampKind(r,token);   // 6 stale stamp, 2 an older masked marker, 3 neither
     if(kind!=1u)return kind;
@@ -666,7 +686,7 @@ uint sourceEngine(int2 q,float2 uv,float z,out float2 prev) {
     return engineRecordMoved(r)?2u:0u;
 }
 // Under the motion_source view the validity carries the source kind.
-float4 tagged(float4 v,uint kind){return engine.y!=0 && kind!=0u?float4(v.xyz,16.0+kind):v;}
+float4 tagged(float4 v,uint kind){return engine.y!=0 && kind!=0u?float4(v.xyz,16.0+(kind==7u?1u:kind)):v;}
 float4 main(float2 uv:__USER_VERTEX_M_TEXCOORD0,float4 pos:SV_Position):SV_Target {
     uint w,h;Depth.GetDimensions(w,h);
     const int2 texel=clamp(int2(uv*float2(w,h)),0,int2(w,h)-1);
@@ -683,6 +703,10 @@ float4 main(float2 uv:__USER_VERTEX_M_TEXCOORD0,float4 pos:SV_Position):SV_Targe
     // that mesh animated. Use its actual post-VS movement, including aiming.
     bool attached=false;
     if(extent.w>0)attached=(SourceStencil.Load(int3(clamp(int2(uv*float2(w,h)),0,int2(w,h)-1),0)).y&16)!=0;
+    // The bit is the game's characters' as well as the weapon's (flat_mono_shader_source.h, "attached" in prep: the same rule, the same
+    // bound). A character is a world surface the weapon map never covers (w 0), so it takes the world path below; only a texel the map
+    // covers, or one within first-person reach, is first-person.
+    if(attached && WeaponMotion.Load(int3(texel,0)).w==0 && z<kFirstPersonReachDepth)attached=false;
     if(!ui && attached) {
         float4 motion=WeaponMotion.Load(int3(clamp(int2(uv*float2(w,h)),0,int2(w,h)-1),0));
         // R16 depth has at most half a ULP of rounding. Missing, occluded,
@@ -695,10 +719,13 @@ float4 main(float2 uv:__USER_VERTEX_M_TEXCOORD0,float4 pos:SV_Position):SV_Targe
     if(!ui && !attached) {
     float2 carried;
     sk=sourceEngine(texel,uv,z,carried);
-    if(engine.z!=0 && sk!=0u && all(uint2(pos.xy)%uint(engine.z)==0u))InterlockedAdd(PanelCounts[sk-1u],1u);
+    if(engine.z!=0 && sk!=0u && all(uint2(pos.xy)%uint(engine.z)==0u)) {
+        InterlockedAdd(PanelCounts[sk==7u?0u:sk-1u],1u);   // a skinned character's exact motion is counted as joined, and in its own slot
+        if(sk==7u)InterlockedAdd(PanelCounts[6],1u);
+    }
     // A rig record EDVR cannot follow keeps no history, as in the eye.
     if(sk==2u)return tagged(float4(0,0,z,2),sk);
-    if(sk==1u) {
+    if(sk==1u || sk==7u) {
         prev=carried;
         if(any(prev<0) || any(prev>1))return tagged(float4(0,0,z,2),sk);
     } else {
@@ -800,129 +827,6 @@ float4 main(float4 pos:SV_Position,float4 old:TEXCOORD0,nointerpolation uint val
 constexpr char kPlanetCoverageHlsl[]=R"HLSL(
 cbuffer Motion:register(b12){uint4 info;}
 float2 main(float4 p:SV_Position):SV_Target{return float2(info.x+1,p.z);}
-)HLSL";
-
-constexpr char kFoveaCsHlsl[] = R"HLSL(
-Texture2D<float4> PERIPH : register(t0);   // the periphery: NVIDIA's reduced DLAA or the own history, any size
-Texture2D<float4> FOVEA  : register(t1);   // NVIDIA's output, native size, valid in the crop
-RWTexture2D<float4> FO   : register(u0);   // the composited native frame, game format
-RWTexture2D<float4> HIST : register(u1);   // the own history being written this frame (mode.y)
-SamplerState SMP : register(s0);           // bilinear clamp, for the periphery upscale
-cbuffer FC : register(b0) {
-    float4 crop;   // output crop x0 y0 x1 y1 in native pixels, x1/y1 exclusive
-    float4 band;   // x the blend band in pixels; y the output width, z the output height; w the periphery's width
-    float4 disc;   // xy the fovea's centre in native pixels, zw its half-extents (the ellipse's semi-axes)
-    float4 mode;   // x 1 = round fovea (else the rectangle); y 1 = write the history too; z 1 = the periphery is smaller than the output (bicubic); w the periphery's height
-};
-// Catmull-Rom through nine bilinear fetches (the pass's own kernel, C = 0.5),
-// for a periphery smaller than the output: sharper than the bilinear
-// upscale, mild ringing, the standard upscaling kernel.
-float4 periphCubic(float2 uv, float2 tsize) {
-    const float C = 0.5;
-    float2 sp = uv * tsize;
-    float2 t1 = floor(sp - 0.5) + 0.5;
-    float2 f = sp - t1;
-    float2 g0 = 1.0 + f;
-    float2 g3 = 2.0 - f;
-    float2 w0 = C * (-g0 * g0 * g0 + 5.0 * g0 * g0 - 8.0 * g0 + 4.0);
-    float2 w1 = (2.0 - C) * f * f * f + (C - 3.0) * f * f + 1.0;
-    float2 h = 1.0 - f;
-    float2 w2 = (2.0 - C) * h * h * h + (C - 3.0) * h * h + 1.0;
-    float2 w3 = C * (-g3 * g3 * g3 + 5.0 * g3 * g3 - 8.0 * g3 + 4.0);
-    float2 w12 = w1 + w2;
-    float2 o12 = w2 / w12;
-    float2 t0 = (t1 - 1.0) / tsize;
-    float2 t3 = (t1 + 2.0) / tsize;
-    float2 t12 = (t1 + o12) / tsize;
-    float4 r = 0.0;
-    r += PERIPH.SampleLevel(SMP, float2(t0.x, t0.y), 0) * w0.x * w0.y;
-    r += PERIPH.SampleLevel(SMP, float2(t12.x, t0.y), 0) * w12.x * w0.y;
-    r += PERIPH.SampleLevel(SMP, float2(t3.x, t0.y), 0) * w3.x * w0.y;
-    r += PERIPH.SampleLevel(SMP, float2(t0.x, t12.y), 0) * w0.x * w12.y;
-    r += PERIPH.SampleLevel(SMP, float2(t12.x, t12.y), 0) * w12.x * w12.y;
-    r += PERIPH.SampleLevel(SMP, float2(t3.x, t12.y), 0) * w3.x * w12.y;
-    r += PERIPH.SampleLevel(SMP, float2(t0.x, t3.y), 0) * w0.x * w3.y;
-    r += PERIPH.SampleLevel(SMP, float2(t12.x, t3.y), 0) * w12.x * w3.y;
-    r += PERIPH.SampleLevel(SMP, float2(t3.x, t3.y), 0) * w3.x * w3.y;
-    return r;
-}
-[numthreads(8, 8, 1)]
-void fovea(uint3 id : SV_DispatchThreadID) {
-    if (id.x >= (uint)band.y || id.y >= (uint)band.z) return;
-    int2 p = int2(id.xy);
-    float b = max(band.x, 1.0);
-    float w;
-    if (mode.x != 0.0) {
-        // The disc: the normalised radius in the ellipse inscribed in the
-        // crop, turned back into pixels inside its edge along the minor axis.
-        float2 n = (float2(p) + 0.5 - disc.xy) / max(disc.zw, 1.0);
-        float d = (1.0 - length(n)) * min(disc.z, disc.w);
-        w = saturate(d / b);
-    } else {
-        float dx = min((float)p.x - crop.x, crop.z - 1.0 - (float)p.x);
-        float dy = min((float)p.y - crop.y, crop.w - 1.0 - (float)p.y);
-        w = saturate(min(dx, dy) / b);     // pixels inside the crop's nearest edge
-    }
-    w = w * w * (3.0 - 2.0 * w);           // smoothstep across the band
-    // The periphery is sampled by normalised uv, so any size lands on the
-    // native output: bicubic when it is smaller, an exact fetch at 1:1 (the
-    // uv lands on texel centres). The fovea is native, read where it is
-    // valid (strictly inside the fovea, where w > 0).
-    float2 uv = (float2(p) + 0.5) / float2(band.y, band.z);
-    float4 per = mode.z != 0.0 ? periphCubic(uv, float2(band.w, mode.w))
-                               : PERIPH.SampleLevel(SMP, uv, 0);
-    float4 fov = w > 0.0 ? FOVEA.Load(int3(p, 0)) : per;
-    float4 o = lerp(per, fov, w);
-    FO[p] = o;
-    // The hand-off into the own history (mode.y, the sharp periphery at 1:1):
-    // inside the fovea and its band the history takes the blended result.
-    if (mode.y != 0.0 && w > 0.0) HIST[p] = float4(o.rgb, 1.0);
-}
-)HLSL";
-
-constexpr char kDownCsHlsl[] = R"HLSL(
-Texture2D<float4> DC : register(t0);    // the colour, render size
-Texture2D<float>  DZ : register(t1);    // the depth copy, render size
-Texture2D<float2> DM : register(t2);    // the motion vectors, render pixels
-RWTexture2D<float4> PC : register(u0);  // the reduced colour
-RWTexture2D<float>  PZ : register(u1);  // the reduced depth
-RWTexture2D<float2> PM : register(u2);  // the reduced motion, reduced pixels
-cbuffer DS : register(b0) {
-    float4 dims;   // x reduced width, y reduced height, z render width, w render height
-    float4 par;    // x unused (was the block side), y the scale (reduced / render), zw unused
-};
-[numthreads(8, 8, 1)]
-void down(uint3 id : SV_DispatchThreadID) {
-    if (id.x >= (uint)dims.x || id.y >= (uint)dims.y) return;
-    float2 q = dims.zw / dims.xy;                    // render pixels per reduced pixel, > 1
-    float2 x0 = float2(id.xy) * q;                   // the footprint [x0, x1) in render pixels
-    float2 x1 = x0 + q;
-    int2 k0 = int2(floor(x0));
-    int2 k1 = min(int2(ceil(x1)), int2(dims.zw));    // exclusive
-    float4 c = 0.0;
-    float wsum = 0.0;
-    float zmax = -1.0;
-    float2 mv = 0.0;
-    [loop] for (int y = k0.y; y < k1.y; ++y) {
-        float wy = min((float)y + 1.0, x1.y) - max((float)y, x0.y);
-        [loop] for (int x = k0.x; x < k1.x; ++x) {
-            float wx = min((float)x + 1.0, x1.x) - max((float)x, x0.x);
-            float w = wx * wy;
-            if (w <= 0.0) continue;
-            int2 s = int2(x, y);
-            c += DC.Load(int3(s, 0)) * w;
-            wsum += w;
-            float z = DZ.Load(int3(s, 0));
-            if (z > zmax) {
-                zmax = z;
-                mv = DM.Load(int3(s, 0));
-            }
-        }
-    }
-    PC[id.xy] = c / max(wsum, 1e-6);
-    PZ[id.xy] = max(zmax, 0.0);
-    PM[id.xy] = mv * par.y;
-}
 )HLSL";
 
 } // namespace edvr

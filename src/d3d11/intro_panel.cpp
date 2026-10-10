@@ -116,8 +116,6 @@ bool  g_anchored = false;   // the "holding" line has been said
 bool  g_lockRefusedNoted = false;
 bool  g_recentreRequested = false;   // requestIntroRecentre has been asked
 
-float g_screenDist = kScreenDistDefault;
-
 // Set when fix.intro_video plays the movie on the splash's screen.
 bool  g_matchSplash = false;
 float g_engagedScale = 1.0f;
@@ -413,10 +411,6 @@ void introPanelConfigure(Config& cfg) {
     g_size = mode.screen ? 0.0f : 1.0f;   // derived at readback when on
     const bool wasLock = g_worldLock;
     g_worldLock = mode.worldLock;
-    g_screenDist = cfg.getFloat("advanced.intro_video_distance",
-                                kScreenDistDefault);
-    if (g_screenDist < 1.0f) g_screenDist = 1.0f;
-    if (g_screenDist > 20.0f) g_screenDist = 20.0f;
     if (g_worldLock != wasLock) {
         Log::get().note(
             g_worldLock
@@ -604,7 +598,7 @@ bool introPanelOnComposite(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                 const bool curved = panelCurveSurfaceWanted();
                 const char* why = "the viewport is degenerate";
                 if (nvp == 0 || vp.Width <= 0.0f || vp.Height <= 0.0f ||
-                    !buildWorldCb(s->leftEye, g_screenDist, world, &why,
+                    !buildWorldCb(s->leftEye, kScreenDistDefault, world, &why,
                                   g_anchored ? nullptr : &yawDeg, curved)) {
                     // No pose, no tangents, no viewport: stock rather than a
                     // panel placed on guesses.
