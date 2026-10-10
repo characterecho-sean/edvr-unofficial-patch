@@ -6,11 +6,20 @@ issue (26 and 28 September). Read the Status block first.
 
 ## Status
 
-- **State (2026-10-02):** Root cause isolated and fix implemented.
-  `factoryCreateDevice` queried `GetCapabilities` on every DirectInput device,
-  crashing unconfigured third-party force-feedback drivers (G29 / jerry_forcefeedback_x64).
-  Fixed by filtering on system keyboard GUIDs before capture and adding
-  `advanced.input_gate` toggle.
+- **State (2026-10-10):** The v0.19.0 regression is fixed on branch
+  `claude/issue-45-g29-0190`: not merged, not flown. Cause: 9b2f23ef (the Hotkeys
+  page, first in v0.19.0) put driver calls back on controllers. The joystick watch
+  patched DINPUT8's shared joystick table in place, and read every controller with
+  `GetCapabilities` (at CreateDevice and on every read) and `GetDeviceInfo` (once a
+  second). The v0.19.0 logs show the "captured a game controller at CreateDevice"
+  line, then a silent death; plugging the wheel in mid-session also kills it.
+  Fix: EDVR calls nothing on a non-keyboard device beyond holding a reference. A
+  controller's type and name come from the game's own `IDirectInput8::EnumDevices`,
+  recorded by the factory door.
+- **Earlier (2026-10-02, v0.18.1, 15a50741):** `factoryCreateDevice` queried
+  `GetCapabilities` on every DirectInput device, crashing unconfigured third-party
+  force-feedback drivers (G29 / jerry_forcefeedback_x64). Fixed by filtering on system
+  keyboard GUIDs and adding the `advanced.input_gate` toggle.
 - **Launch type A, armed (the "crash"):** EDVR arms the d3d11 hooks and the
   game ends within 30 s. 14 of 14 armed launches in the reporter's breadcrumb
   file (rc.2, rc.3, v0.18.0 and one earlier build) have no `gfx: process exit`,
@@ -33,9 +42,6 @@ issue (26 and 28 September). Read the Status block first.
 - **The alternation is the sentinel.** A trip clears itself, so the launch
   after a tripped one arms again and dies again: strict A, T, A, T over 27
   logged launches.
-- **Fix:** `isKeyboardGuid(guid)` check added to `factoryCreateDevice` so
-  non-keyboard devices (force-feedback wheels, pedals, joysticks) are never
-  probed for capabilities. `advanced.input_gate` override added.
 - **Ruled out** (reasons in the evidence sections):
   - The sentinel as the cause of the deaths: it only reports them.
   - SteamVR cold start as the cause of the A deaths: no A launch reached the
@@ -47,7 +53,8 @@ issue (26 and 28 September). Read the Status block first.
     343 clean exits in 351 armed launches.
   - A missing or wrong OpenXR install: the runtime, loader and config all
     checked out in the logs ("Install check").
-- **Next:** User test flight with the fix build.
+- **Next:** Reporter flight on the fix build. Workaround meanwhile: `input_gate = 0`
+  under `[advanced]` in `edvr.ini` (turns off the keyboard gate and the joystick watch).
 
 
 ## 2026-09-30: evidence
@@ -348,3 +355,69 @@ With the reporter's answers this names the cause without a further build.
 3. Extended `tools/input_gate_test/input_gate_test.cpp` with a fresh unhooked device table
    asserting that `GetCapabilities` is never invoked for non-keyboard GUIDs, and verified flat
    profile default gating. Added flat profile scope assertions in `tools/config_test/config_test.cpp`.
+
+## 2026-10-10: the v0.19.0 regression
+
+Branch `claude/issue-45-g29-0190`, cut from v0.19.0 (7960f016). Full `build.bat`
+green (receipt written). Not merged, not flown.
+
+1. **What broke.** 9b2f23ef (Hotkeys page, first in v0.19.0) added the joystick
+   watch. Three of its paths put calls on a wheel that the 2026-10-02 fix had
+   removed:
+   - `captureController` ran on every non-keyboard, non-mouse device at CreateDevice.
+     It called `GetCapabilities` (slot 3) for the type, then patched the device's
+     class vtable in place (GetDeviceState slot 9, GetDeviceData slot 10). That table
+     is DINPUT8.dll's shared joystick table, so every joystick, the wheel included,
+     was hooked.
+   - `joyDeviceState` and `joyDeviceData` called `GetCapabilities` on every read.
+   - The observers called `GetDeviceInfo` (slot 15) once a second per device, for
+     the product id.
+2. **Why it dies silently.** Those calls run inside the game's own DirectInput read
+   on the render thread, against the force-feedback driver. The v0.19.0 log shows
+   the capture line and then nothing. Plugging the wheel in mid-session reaches the
+   same code through the factory, so it dies the same way.
+3. **The fix.** EDVR calls nothing on a non-keyboard device beyond holding a reference.
+   - The factory door hooks slot 4 (EnumDevices) next to slot 3, for A and W. The
+     thunk copies each record the game is handed (instance GUID, dwDevType, product
+     id, UTF-8 name) into a 32-entry table, under a lock that is never held across
+     the game's callback. It then returns the game's callback's answer unchanged.
+   - `factoryCreateDevice` drops any old registry entry at the new object's address
+     first. For a controller the game enumerated, it registers the device (type, id
+     and name from that record), then captures the table. A controller the game never
+     enumerated is not registered, not captured and not called.
+   - The keyboard door's per-read type check answers from the registry, so an
+     enumerated controller never gets `GetCapabilities`. The joystick doors and the
+     observers read the registry. `queryJoyIdentity`, `joyIdentify` and the identity
+     cache are gone.
+4. **Calls that remain on a non-keyboard device.**
+   - The `AddRef` at capture and the `Release`s at shutdown. Reclaim reads the
+     patched table every second, and an overlay's private table can be freed with
+     its device, so the reference stays.
+   - One `GetCapabilities` per read on an un-enumerated device that shares the
+     keyboard's table. That predates the regression (the keyboard door's type probe
+     has always asked it). Not changed here.
+5. **Rig.** `tools\input_gate_test` covers: a fake factory answering EnumDevices in
+   A or W; a controller with zero `GetCapabilities` and zero `GetDeviceInfo` calls
+   across creation and reads; a reused address taking the new record's identity
+   with no call; a never-enumerated GUID with no registration, capture or call; the
+   game's callback receiving its own pvRef with DIENUM_STOP passed through; and a
+   fault where the buffer's page becomes unreadable after the game's own write, so
+   the watch's copy faults inside its budget. The real DirectInput EnumDevices also
+   hands the game's pvRef through the thunk. In the same run, the real EnumDevices
+   made DirectInput call CreateDevice(SysKeyboard) through the hooked table, so a
+   door was already on that table before the test's own keyboard. The test's
+   captured-keyboard check now runs before the real enumeration; the origin inside
+   DirectInput of that internal CreateDevice is not traced.
+6. **Log lines a flight shows.**
+   - A controller the game enumerated: `joystick watch: the game enumerated <id>
+     "<name>" as a game controller; its reads are copied after the game's own calls.`
+     Then `captured a game controller at CreateDevice` if its table was not already
+     covered, then the `read by the game with GetDeviceState` or `GetDeviceData` line.
+   - A controller the game never enumerated: `joystick watch: the game created a
+     device it never enumerated; it is not watched.` Once per session, with no
+     `captured` line for that device.
+7. **Not done.** No flight, no hardware (no wheel here). The mid-session plug-in path
+   takes the same code as startup, but that is not separately tested. Nothing yet
+   shows the fix ends the death; that needs the reporter's flight.
+8. **Next:** reporter flight on the fix build. Until then, `input_gate = 0` under
+   `[advanced]` in `edvr.ini` turns off the keyboard gate and the joystick watch.

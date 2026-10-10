@@ -55,9 +55,10 @@
 // own, COPY the buttons and hats out of what the game's own GetDeviceState or
 // GetDeviceData just returned, after the call, into a table the Hotkeys page's
 // pad/HOTAS hotkeys read. Never the game's buffer (read-only), never a device of
-// EDVR's own, never a call on the device beyond GetCapabilities and, once a second,
-// GetDeviceInfo (issue 45: a wheel's force-feedback driver stalled the render
-// thread inside DirectInput; no new traffic there). Its fault budget is its own.
+// EDVR's own. EDVR calls nothing on a controller beyond holding a reference: a
+// controller's type and name come from the game's own IDirectInput8::EnumDevices,
+// recorded by the factory door (issue 45: a wheel's force-feedback driver stalled
+// the render thread inside DirectInput; no new traffic there). Its fault budget is its own.
 #pragma once
 
 #include <cstdint>

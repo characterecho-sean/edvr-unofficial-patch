@@ -67,6 +67,15 @@ struct Factory {
     Device* next;
     HRESULT result = DI_OK;
     unsigned calls = 0;
+    // The game's enumeration, as the fake factory answers EnumDevices: one device, the
+    // record it is handed (A or W by `wide`), and what the game's callback answered.
+    bool     wide = false;
+    GUID     enumGuid{};
+    DWORD    enumType = DI8DEVTYPE_JOYSTICK;
+    DWORD    enumProduct = 0x0200231D;
+    unsigned enumCalls = 0;
+    HRESULT  enumResult = DI_OK;
+    BOOL     callbackResult = DIENUM_CONTINUE;
 };
 ULONG STDMETHODCALLTYPE retainFactory(Factory* f) { return ++f->refs; }
 ULONG STDMETHODCALLTYPE releaseFactory(Factory* f) { return --f->refs; }
@@ -76,13 +85,72 @@ HRESULT STDMETHODCALLTYPE createDevice(Factory* f, REFGUID, void** out, LPUNKNOW
     *out = f->next;
     return f->result;
 }
+HRESULT STDMETHODCALLTYPE enumDevices(Factory* f, DWORD, LPVOID callback, LPVOID pvRef, DWORD) {
+    ++f->enumCalls;
+    if (FAILED(f->enumResult)) return f->enumResult;
+    if (!callback) return DIERR_INVALIDPARAM;
+    if (f->wide) {
+        DIDEVICEINSTANCEW inst{};
+        inst.dwSize = sizeof(inst);
+        inst.guidInstance = f->enumGuid;
+        inst.guidProduct = GUID{f->enumProduct, 0, 0, {0, 0, 'P', 'I', 'D', 'V', 'I', 'D'}};
+        inst.dwDevType = f->enumType;
+        wcscpy_s(inst.tszProductName, L"Test Stick");
+        f->callbackResult = reinterpret_cast<LPDIENUMDEVICESCALLBACKW>(callback)(&inst, pvRef);
+    } else {
+        DIDEVICEINSTANCEA inst{};
+        inst.dwSize = sizeof(inst);
+        inst.guidInstance = f->enumGuid;
+        inst.guidProduct = GUID{f->enumProduct, 0, 0, {0, 0, 'P', 'I', 'D', 'V', 'I', 'D'}};
+        inst.dwDevType = f->enumType;
+        strcpy_s(inst.tszProductName, "Test Stick");
+        f->callbackResult = reinterpret_cast<LPDIENUMDEVICESCALLBACKA>(callback)(&inst, pvRef);
+    }
+    return DI_OK;
+}
 std::array<void*, 11> factoryTable() {
     std::array<void*, 11> t;
     t.fill(reinterpret_cast<void*>(&unused));
     t[1] = reinterpret_cast<void*>(&retainFactory);
     t[2] = reinterpret_cast<void*>(&releaseFactory);
     t[3] = reinterpret_cast<void*>(&createDevice);
+    t[kSlotEnumDevices] = reinterpret_cast<void*>(&enumDevices);
     return t;
+}
+// The game's own callback, A or W: it records its pvRef and the record it was handed, and
+// answers `answer` (DIENUM_STOP passes through the thunks unchanged).
+struct GameEnum {
+    unsigned calls = 0;
+    void*    seenRef = nullptr;
+    DWORD    seenType = 0;
+    BOOL     answer = DIENUM_CONTINUE;
+};
+BOOL CALLBACK gameEnumW(LPCDIDEVICEINSTANCEW inst, LPVOID ref) {
+    auto* g = static_cast<GameEnum*>(ref);
+    ++g->calls;
+    g->seenRef = ref;
+    g->seenType = inst->dwDevType;
+    return g->answer;
+}
+BOOL CALLBACK gameEnumA(LPCDIDEVICEINSTANCEA inst, LPVOID ref) {
+    auto* g = static_cast<GameEnum*>(ref);
+    ++g->calls;
+    g->seenRef = ref;
+    g->seenType = inst->dwDevType;
+    return g->answer;
+}
+// The game enumerates through the factory's own slot 4 with its own callback and pvRef.
+HRESULT enumerateThrough(Factory& f, GameEnum& g) {
+    const LPVOID callback = f.wide ? reinterpret_cast<LPVOID>(&gameEnumW) : reinterpret_cast<LPVOID>(&gameEnumA);
+    return reinterpret_cast<PFN_EnumDevices>(f.table[kSlotEnumDevices])(&f, DI8DEVCLASS_ALL, callback, &g, 0);
+}
+// Enumerate `guid` as `type` with product `product`, the record the game would hand out.
+void enumerate(Factory& f, const GUID& guid, DWORD type, DWORD product) {
+    f.enumGuid = guid;
+    f.enumType = type;
+    f.enumProduct = product;
+    GameEnum g;
+    enumerateThrough(f, g);
 }
 HRESULT createThrough(Factory& f, void** out) {
     return reinterpret_cast<PFN_CreateDevice>(f.table[3])(&f, kGuidSysKeyboard, out, nullptr);
@@ -125,9 +193,9 @@ struct Stick {
     DIDEVICEOBJECTDATA rows[6]{};           // what the game's buffered read returns
     DWORD    rowCount = 0;
     HRESULT  result = DI_OK;
-    DWORD    infoSize = sizeof(DIDEVICEINSTANCEW);   // the interface this object is (W, or A)
-    DWORD    product = 0x0200231D;          // Data1 of the product GUID: 231D0200
-    bool     infoFaults = false;
+    // A read whose out page the fake makes unreadable after its own write: the watch's
+    // copy of the game's buffer then faults inside its own guard (the game's call returns).
+    bool     faultRead = false;
     DWORD    nButtons = 32, nAxes = 6, nPovs = 1;   // the shape GetCapabilities reports
     unsigned stateCalls = 0, dataCalls = 0, capsCalls = 0, infoCalls = 0;
     void button(int n, bool down) { state[kJoyOfsButtons + n] = down ? 0x80 : 0; }
@@ -148,7 +216,10 @@ HRESULT STDMETHODCALLTYPE stickState(Stick* s, DWORD bytes, void* out) {
     ++s->stateCalls;
     if (FAILED(s->result)) return s->result;
     if (!out) return DIERR_INVALIDPARAM;
+    DWORD old = 0;
+    if (s->faultRead) VirtualProtect(out, bytes, PAGE_READWRITE, &old);   // a page a previous read left unreadable
     memcpy(out, s->state, bytes < sizeof(s->state) ? bytes : sizeof(s->state));
+    if (s->faultRead) VirtualProtect(out, bytes, PAGE_NOACCESS, &old);
     return s->result;
 }
 HRESULT STDMETHODCALLTYPE stickData(Stick* s, DWORD bytes, DIDEVICEOBJECTDATA* out, DWORD* count, DWORD flags) {
@@ -161,22 +232,11 @@ HRESULT STDMETHODCALLTYPE stickData(Stick* s, DWORD bytes, DIDEVICEOBJECTDATA* o
     if (!(flags & DIGDD_PEEK) && out) s->rowCount = 0;
     return s->result;
 }
-// GetDeviceInfo, A or W by the size it is handed: the field the watch reads is at the
-// same offset in both (dwSize, guidInstance, guidProduct).
-HRESULT STDMETHODCALLTYPE stickInfo(Stick* s, void* info) {
+// GetDeviceInfo: nothing may call it on a controller any more. It is counted, and it
+// answers as a device that will not say.
+HRESULT STDMETHODCALLTYPE stickInfo(Stick* s, void*) {
     ++s->infoCalls;
-    if (s->infoFaults) RaiseException(EXCEPTION_ACCESS_VIOLATION, 0, 0, nullptr);
-    DWORD size = 0;
-    memcpy(&size, info, sizeof(size));
-    if (size != s->infoSize) return DIERR_INVALIDPARAM;
-    GUID product = {s->product, 0, 0, {0, 0, 'P', 'I', 'D', 'V', 'I', 'D'}};
-    memcpy(static_cast<uint8_t*>(info) + 4 + sizeof(GUID), &product, sizeof(GUID));
-    if (size == sizeof(DIDEVICEINSTANCEW)) {
-        wcscpy_s(static_cast<DIDEVICEINSTANCEW*>(info)->tszProductName, L"Test Stick");
-    } else {
-        strcpy_s(static_cast<DIDEVICEINSTANCEA*>(info)->tszProductName, "Test Stick");
-    }
-    return DI_OK;
+    return E_NOTIMPL;
 }
 std::array<void*, 32> stickTable() {
     std::array<void*, 32> t;
@@ -191,9 +251,11 @@ std::array<void*, 32> stickTable() {
     return t;
 }
 const GUID kGuidSomeStick = {0xAAAA0001, 0x1111, 0x2222, {1, 2, 3, 4, 5, 6, 7, 8}};
-HRESULT createStick(Factory& f, void** out) {
-    return reinterpret_cast<PFN_CreateDevice>(f.table[3])(&f, kGuidSomeStick, out, nullptr);
+const GUID kGuidGhost = {0xAAAA0002, 0x1111, 0x2222, {1, 2, 3, 4, 5, 6, 7, 8}};   // never enumerated
+HRESULT createAs(Factory& f, const GUID& guid, void** out) {
+    return reinterpret_cast<PFN_CreateDevice>(f.table[3])(&f, guid, out, nullptr);
 }
+HRESULT createStick(Factory& f, void** out) { return createAs(f, kGuidSomeStick, out); }
 HRESULT readStick(Stick& s, DWORD bytes, uint8_t* out) {
     return reinterpret_cast<PFN_GetDeviceState>(s.table[9])(&s, bytes, out);
 }
@@ -217,16 +279,16 @@ int main() {
 
     // The old dummy's table is deliberately different from BOTH returned
     // keyboards, exactly the case that bypassed the gate under Steam overlay.
-    captureFactory(&factory, std::make_index_sequence<kFactoryDoors>{});
+    captureFactory(&factory, true, std::make_index_sequence<kFactoryDoors>{});
     check(createThrough(factory, &returned) == DI_OK && returned == &keyboard,
           "the original factory runs and returns the same object identity");
     check(keyboard.table == table1.data() && keyboard.refs == 2 && factory.refs == 2,
           "the overlay's vptr stays intact and restore targets are retained");
-    captureFactory(&otherFactory, std::make_index_sequence<kFactoryDoors>{});
+    captureFactory(&otherFactory, false, std::make_index_sequence<kFactoryDoors>{});
     check(createThrough(otherFactory, &returned) == DI_OK && returned == &second,
           "a second private factory and keyboard table are captured");
     const auto hooked = keyboard.table[9];
-    captureFactory(&factory, std::make_index_sequence<kFactoryDoors>{});
+    captureFactory(&factory, true, std::make_index_sequence<kFactoryDoors>{});
     createThrough(factory, &returned);
     check(keyboard.table[9] == hooked && keyboard.refs == 2 && factory.refs == 2,
           "observing the same tables twice neither chains to itself nor leaks references");
@@ -350,13 +412,28 @@ int main() {
     Stick kb3{sharedTable.data()};
     Stick js3{sharedTable.data()};
     Stick js4{sharedTable.data()};
+    // The factories live at main's scope too: their doors are undone at shutdown, which writes
+    // to their tables.
+    auto stickFactoryTable = factoryTable();
+    Factory stickFactory{stickFactoryTable.data(), 1, nullptr};
+    auto ansiFactoryTable = factoryTable();
+    Factory ansiFactory{ansiFactoryTable.data(), 1, nullptr};
     {
         joyWatchReset();
         g_trapCalls = 0;
-        auto stickFactoryTable = factoryTable();
-        Factory stickFactory{stickFactoryTable.data(), 1, nullptr};
+        stickFactory.wide = true;
         stickFactory.next = reinterpret_cast<Device*>(&stick);
-        captureFactory(&stickFactory, std::make_index_sequence<kFactoryDoors>{});
+        captureFactory(&stickFactory, true, std::make_index_sequence<kFactoryDoors>{});
+        // The game enumerates the stick through the factory's own slot 4, with its own callback,
+        // pvRef and answer, and then creates it. The record is the game's own; EDVR asks the stick
+        // nothing.
+        GameEnum seen;
+        seen.answer = DIENUM_STOP;
+        enumerate(stickFactory, kGuidSomeStick, DI8DEVTYPE_JOYSTICK, 0x0200231D);
+        check(enumerateThrough(stickFactory, seen) == DI_OK && seen.calls == 1 && seen.seenRef == &seen,
+              "the game's EnumDevices reaches its own callback, with its own pvRef");
+        check(stickFactory.callbackResult == DIENUM_STOP,
+              "...and the callback's DIENUM_STOP comes back to the game unchanged");
         void* made = nullptr;
         check(createStick(stickFactory, &made) == DI_OK && made == &stick, "a joystick is created through the factory unchanged");
         check(stick.table == stickTable1.data() && stick.refs == 2,
@@ -382,24 +459,26 @@ int main() {
         check(joyWatchHeld(0x231D0200, 11, now), "Joy_12 of 231D0200 is watched");
         check(joyWatchHeld(0x231D0200, kJoyPovBase + 1, now), "...and the hat pointing right");
         check(!joyWatchHeld(0x231D0200, 12, now), "...and not its neighbour");
-        check(stick.infoCalls <= 2 && stick.capsCalls >= 2,
-              "the device was asked who it is (once, W then A at worst) and what type it is");
-        const unsigned infoBefore = stick.infoCalls;
+        check(stick.infoCalls == 0 && stick.capsCalls == 0,
+              "the device is never asked who it is or what type it is: the game's enumeration said so");
         for (int i = 0; i < 50; ++i) readStick(stick, kJoyState2Size, buf);
-        check(stick.infoCalls == infoBefore, "...and not again on each read");
+        check(stick.infoCalls == 0 && stick.capsCalls == 0, "...and not on each read either");
         // The same address holding another device (a released stick whose address a new one reused):
-        // it reports another shape, so it is asked who it is again.
-        stick.nButtons = 24;
-        stick.product = 0x012D231D;
+        // the game enumerates the new object and creates it at that address. The registry takes the
+        // new record over, and still nothing is called on the object.
+        enumerate(stickFactory, kGuidSomeStick, DI8DEVTYPE_JOYSTICK, 0x012D231D);
+        void* again = nullptr;
+        check(createStick(stickFactory, &again) == DI_OK && again == &stick,
+              "the same address is created again: the new record replaces the old identity");
         readStick(stick, kJoyState2Size, buf);
-        check(stick.infoCalls == infoBefore + 1, "an address that now reports another shape is identified again");
+        check(stick.infoCalls == 0 && stick.capsCalls == 0, "...and the new object is not asked either");
         stick.button(20, true);
         readStick(stick, kJoyState2Size, buf);
         check(joyWatchHeld(0x231D012D, 20, stampMs()) && !joyWatchHeld(0x231D0200, 20, stampMs()),
               "...and its buttons are the new device's");
         stick.button(20, false);
-        stick.nButtons = 32;
-        stick.product = 0x0200231D;
+        enumerate(stickFactory, kGuidSomeStick, DI8DEVTYPE_JOYSTICK, 0x0200231D);
+        createStick(stickFactory, &again);
         readStick(stick, kJoyState2Size, buf);
         readStick(stick, kJoyState2Size, buf);
         check(g_trapCalls == 0, "nothing else on the device was called (no Acquire, no Poll, no force feedback)");
@@ -464,13 +543,14 @@ int main() {
               "with the keyboard private the stick's state is untouched and still watched");
         inputGateSetPrivate(false);
 
-        // The interface encoding: an object that answers only the ANSI size.
+        // The interface encoding: an A factory, so the game's enumeration is the ANSI record and
+        // the A thunk is the one that records it.
         {
-            ansi.infoSize = sizeof(DIDEVICEINSTANCEA);
-            ansi.product = 0x012D231D;   // 231D012D, the other of Sean's two
-            stickFactory.next = reinterpret_cast<Device*>(&ansi);
+            captureFactory(&ansiFactory, false, std::make_index_sequence<kFactoryDoors>{});
+            enumerate(ansiFactory, kGuidSomeStick, DI8DEVTYPE_JOYSTICK, 0x012D231D);   // 231D012D, the other of Sean's two
+            ansiFactory.next = reinterpret_cast<Device*>(&ansi);
             void* m2 = nullptr;
-            createStick(stickFactory, &m2);
+            createAs(ansiFactory, kGuidSomeStick, &m2);
             ansi.button(41, true);
             readStick(ansi, kJoyState2Size, buf);
             ansi.button(0, true);
@@ -486,6 +566,7 @@ int main() {
             Stick odd{t3.data()};
             odd.type = DI8DEVTYPE_MOUSE;
             odd.button(9, true);
+            enumerate(stickFactory, kGuidSomeStick, DI8DEVTYPE_MOUSE, 0x0200231D);   // the game's record says mouse
             stickFactory.next = reinterpret_cast<Device*>(&odd);
             void* m3 = nullptr;
             createStick(stickFactory, &m3);
@@ -495,16 +576,36 @@ int main() {
             check(!joyWatchHeld(0x231D0200, 9, stampMs()), "...and its bytes never reach the table");
         }
 
+        // A device the game never enumerated: not registered, not captured, and nothing is called
+        // on it, whatever it does. The game's own reads still reach its table untouched.
+        {
+            auto ghostTable1 = stickTable();
+            Stick ghost{ghostTable1.data()};
+            stickFactory.next = reinterpret_cast<Device*>(&ghost);
+            void* m7 = nullptr;
+            check(createAs(stickFactory, kGuidGhost, &m7) == DI_OK && m7 == &ghost,
+                  "a device the game never enumerated is created through the factory");
+            check(ghost.table == ghostTable1.data() && ghostTable1[9] == reinterpret_cast<void*>(&stickState) &&
+                      ghost.refs == 1,
+                  "...its table is left alone: no capture, no reference kept");
+            ghost.button(3, true);
+            readStick(ghost, kJoyState2Size, buf);
+            readStick(ghost, kJoyState2Size, buf);
+            check(ghost.capsCalls == 0 && ghost.infoCalls == 0 && g_trapCalls == 0,
+                  "...and nothing is called on it");
+            check(!joyWatchHeld(0x231D0200, 3, stampMs()), "...and its buttons are not watched");
+        }
+
         // The shared-table case: a stick on a table a keyboard door holds is watched by that
         // door's wrapper, and no second door is made for it.
         {
             kb3.type = DI8DEVTYPE_KEYBOARD;
-            js3.product = 0x0200231D;
             stickFactory.next = reinterpret_cast<Device*>(&kb3);
             void* m4 = nullptr;
             createThrough(stickFactory, &m4);   // the keyboard first: the door goes on the shared table
             size_t joyDoorsBefore = 0;
             for (const auto& j : g_joyDoors) joyDoorsBefore += j.installed;
+            enumerate(stickFactory, kGuidSomeStick, DI8DEVTYPE_JOYSTICK, 0x0200231D);
             stickFactory.next = reinterpret_cast<Device*>(&js3);
             createStick(stickFactory, &m4);
             size_t joyDoorsAfter = 0;
@@ -525,32 +626,39 @@ int main() {
             check(g_trapCalls == 0, "still no call on any device beyond caps and info");
         }
 
-        // Faults: a GetDeviceInfo that crashes is contained on BOTH paths a stick can be read by --
-        // the wrapper of a keyboard door on a shared table (js4) and the observer-only door on a
-        // table of its own (bad) -- and each is charged to the joystick watch's own budget. Two
-        // faults on each path spend it (four), which only happens if both paths charge it and
-        // neither charges the keyboard door's. The game's reads go on throughout.
+        // Faults: the watch's copy of the game's buffer faults when the buffer's page cannot be read
+        // (the fake makes it unreadable after the game's own write). That is contained on BOTH paths
+        // a stick can be read by -- the wrapper of a keyboard door on a shared table (js4) and the
+        // observer-only door on a table of its own (bad) -- and each is charged to the joystick
+        // watch's own budget. Two faults on each path spend it (four), which only happens if both
+        // paths charge it and neither charges the keyboard door's. The game's reads go on throughout.
         {
-            js4.infoFaults = true;
-            js4.product = 0x0200231D;
-            bad.infoFaults = true;
-            bad.product = 0x0200231D;
+            uint8_t* faultPage = static_cast<uint8_t*>(VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+            js4.faultRead = true;
+            bad.faultRead = true;
+            // Both registered through the factory, as the game creates them: js4 on the shared table
+            // (no second capture there, but it is still registered), bad on its own.
+            enumerate(stickFactory, kGuidSomeStick, DI8DEVTYPE_JOYSTICK, 0x0200231D);
+            stickFactory.next = reinterpret_cast<Device*>(&js4);
+            void* m6 = nullptr;
+            createStick(stickFactory, &m6);
             stickFactory.next = reinterpret_cast<Device*>(&bad);
             void* m5 = nullptr;
             createStick(stickFactory, &m5);
             joyWatchReset();
             check(g_budgetJoy.shouldRun(), "(the joystick watch's budget is whole before the faults)");
             for (int i = 0; i < 2; ++i) {
-                check(readStick(js4, kJoyState2Size, buf) == DI_OK, "a faulting identity query on the shared path never breaks the game's read");
+                check(readStick(js4, kJoyState2Size, faultPage) == DI_OK, "a faulting copy on the shared path never breaks the game's read");
             }
             check(g_budgetJoy.shouldRun(), "...two faults leave the budget standing");
             for (int i = 0; i < 2; ++i) {
-                check(readStick(bad, kJoyState2Size, buf) == DI_OK, "...nor on the private path");
+                check(readStick(bad, kJoyState2Size, faultPage) == DI_OK, "...nor on the private path");
             }
             check(!g_budgetJoy.shouldRun(), "...four, split across both paths, spend the joystick watch's budget");
             check(g_budgetDi.shouldRun(), "...and the keyboard door's is untouched");
-            js4.infoFaults = false;
-            bad.infoFaults = false;
+            js4.faultRead = false;
+            bad.faultRead = false;
+            VirtualFree(faultPage, 0, MEM_RELEASE);
             bad.button(8, true);
             readStick(bad, kJoyState2Size, buf);
             check(!joyWatchHeld(0x231D0200, 8, stampMs()), "a retired watch observes nothing more");
@@ -575,6 +683,12 @@ int main() {
         bool found = false;
         for (const auto& d : g_gameDi) found |= d.installed && d.dummy == realKeyboard;
         check(found, "the returned runtime keyboard is captured before reaching the caller");
+        // The real EnumDevices: the game's own pvRef and callback answer come back through the thunk.
+        GameEnum real;
+        hr = realW->EnumDevices(DI8DEVCLASS_ALL, reinterpret_cast<LPDIENUMDEVICESCALLBACKW>(&gameEnumW), &real,
+                                DIEDFL_ALLDEVICES);
+        check(SUCCEEDED(hr) && (real.calls == 0 || real.seenRef == &real),
+              "the real Unicode EnumDevices hands the game's own pvRef through the thunk");
         if (realKeyboard) realKeyboard->Release();
         realW->Release();
     }
@@ -592,7 +706,8 @@ int main() {
     inputGateShutdown();
     check(table1[9] == reinterpret_cast<void*>(&state) && table2[10] == reinterpret_cast<void*>(&data),
           "shutdown restores all device tables");
-    check(ftable1[3] == reinterpret_cast<void*>(&createDevice) && factory.refs == 1 &&
+    check(ftable1[3] == reinterpret_cast<void*>(&createDevice) && ftable1[kSlotEnumDevices] == reinterpret_cast<void*>(&enumDevices) &&
+          factory.refs == 1 &&
           keyboard.refs == 1 && second.refs == 1, "shutdown restores factories and balances retained references");
     check(!g_createImport.applied, "shutdown restores the executable import");
     {

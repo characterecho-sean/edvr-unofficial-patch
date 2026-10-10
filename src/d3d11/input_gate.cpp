@@ -74,15 +74,18 @@ static_assert(DIJOFS_POV(0) == kJoyOfsPov && DIJOFS_BUTTON(0) == kJoyOfsButtons,
 // GetObjectInfo 14, GetDeviceInfo 15.
 constexpr size_t kSlotGetDeviceState = 9;
 constexpr size_t kSlotGetDeviceData = 10;
-constexpr size_t kSlotGetDeviceInfo = 15;
+constexpr size_t kSlotGetDeviceInfo = 15;   // checked for plausibility only; nothing calls it
+
+// IDirectInput8's vtable: IUnknown 0-2, CreateDevice 3, EnumDevices 4 (A and W alike,
+// the callback type aside).
+constexpr size_t kSlotEnumDevices = 4;
 
 typedef HRESULT(WINAPI* PFN_DirectInput8Create)(HINSTANCE, DWORD, REFIID, LPVOID*, LPUNKNOWN);
 typedef HRESULT(STDMETHODCALLTYPE* PFN_CreateDevice)(void*, REFGUID, void**, LPUNKNOWN);
+typedef HRESULT(STDMETHODCALLTYPE* PFN_EnumDevices)(void*, DWORD, LPVOID, LPVOID, DWORD);
 typedef HRESULT(STDMETHODCALLTYPE* PFN_GetDeviceState)(void*, DWORD, LPVOID);
 typedef HRESULT(STDMETHODCALLTYPE* PFN_GetDeviceData)(void*, DWORD, LPDIDEVICEOBJECTDATA,
                                                       LPDWORD, DWORD);
-typedef HRESULT(STDMETHODCALLTYPE* PFN_GetDeviceInfoW)(void*, LPDIDEVICEINSTANCEW);
-typedef HRESULT(STDMETHODCALLTYPE* PFN_GetDeviceInfoA)(void*, LPDIDEVICEINSTANCEA);
 
 typedef SHORT(WINAPI* PFN_GetAsyncKeyState)(int);
 typedef SHORT(WINAPI* PFN_GetKeyState)(int);
@@ -145,6 +148,8 @@ struct FactoryDoor {
     void* owner = nullptr;
     VTableHook hook;
     PFN_CreateDevice original = nullptr;
+    PFN_EnumDevices enumOriginal = nullptr;   // the game's EnumDevices, the same slot in the A and W tables
+    bool wide = false;                        // IDirectInput8W: the enumeration callback is the W kind
 };
 FactoryDoor g_factories[kFactoryDoors];
 SRWLOCK g_captureLock = SRWLOCK_INIT;
@@ -248,40 +253,68 @@ FaultBudget g_budgetJoy("inputGate.joystick", 4);
 // ---------------------------------------------------------------------------
 // The joystick watch's side of the gate (docs/settings-menu.md, "Hotkeys page").
 //
-// READ-ONLY, in three promises the rig pins with a fake device whose every
-// other method counts its calls:
-//   * after the game's own GetDeviceState / GetDeviceData returns, the wrapper
-//     COPIES what the game just got into joy_watch's table; the game's buffer is
-//     never written;
-//   * the only methods of the game's device it ever calls are GetCapabilities
-//     (slot 3, as the keyboard check already did) and, once a second per device,
-//     GetDeviceInfo (slot 15) to learn the product id -- no Acquire, no Poll, no
-//     force-feedback call, no device of EDVR's own (issue 45: a wheel's FFB
-//     driver stalled the render thread inside DirectInput, and new traffic there
-//     is the risk);
-//   * anything it does not recognise -- a device that is not a game controller,
-//     a buffer of another size, a row at an offset that is not a button -- is
-//     ignored and counted, and the call goes on untouched.
+// READ-ONLY, and it calls nothing on a controller. The invariant, stated once:
+// EDVR calls nothing on a non-keyboard device beyond holding a reference (the AddRef
+// at capture, released at shutdown). A controller's type and name come from the
+// game's OWN IDirectInput8::EnumDevices, recorded by the factory door as the game
+// receives each record. Its reads are copies taken AFTER the game's own GetDeviceState
+// or GetDeviceData returns, into joy_watch's table. The rig pins this with a fake device
+// whose every method counts its calls. Issue 45: a wheel's force-feedback driver stalled
+// the render thread inside DirectInput, and new traffic there is the risk.
+//   * the game's buffer is never written;
+//   * a device the game never enumerated is not registered, not captured and not called;
+//   * anything it does not recognise -- a device that is not a game controller, a buffer
+//     of another size, a row at an offset that is not a button -- is ignored and counted,
+//     and the call goes on untouched.
 
-// What a device is, learned ONCE: the id Elite writes in its bindings, and the
-// product name for the log. It is asked again only if the object at that address
-// now reports a different shape (buttons, axes, hats: a released device whose
-// address another reused), or, for a device that would not say, after a second.
-struct JoyIdentity {
+// The game's own enumeration is the only source of a controller's type and identity.
+// The factory door records every device record the game receives from EnumDevices
+// (below); a device the game then creates is looked up by its instance GUID.
+struct EnumRecord {
+    bool     used = false;
+    GUID     instance{};
+    uint32_t devType = 0;      // dwDevType, as the game was handed it
+    uint32_t id = 0;           // the id Elite writes: vendor << 16 | product
+    char     name[48] = "";    // the product name, UTF-8, for the log
+};
+constexpr size_t kEnumRecords = 32;
+EnumRecord g_enumRecords[kEnumRecords];
+size_t     g_enumNext = 0;     // the slot a new record takes when it is not already here
+SRWLOCK    g_enumLock = SRWLOCK_INIT;
+
+// A game controller the game enumerated and then created. The flags say which read
+// paths have been named in the log, once per device.
+struct DeviceEntry {
     void*    device = nullptr;
-    uint32_t shape = 0;
+    uint32_t type = 0;         // GET_DIDEVICE_TYPE(dwDevType)
     uint32_t id = 0;
-    uint64_t checkedMs = 0;
-    bool     ok = false;
+    char     name[48] = "";
+    uint64_t seq = 0;          // registration order: the oldest is the one evicted
     bool     notedState = false;
     bool     notedData = false;
     bool     notedSize = false;
-    char     name[48] = "";
 };
-constexpr size_t kJoyIdentities = 16;
-constexpr uint64_t kJoyIdentityMs = 1000;
-JoyIdentity g_joyId[kJoyIdentities];
-SRWLOCK     g_joyIdLock = SRWLOCK_INIT;
+constexpr size_t kWatchedDevices = 16;
+DeviceEntry g_devices[kWatchedDevices];
+uint64_t    g_devSeq = 0;
+SRWLOCK     g_devicesLock = SRWLOCK_INIT;
+std::atomic<bool> g_neverEnumeratedNoted{false};
+
+// The registry entry for `self`, copied out under the lock. False for a device the
+// watch does not know: it is then ignored, and nothing is called on it.
+bool watchedEntry(const void* self, DeviceEntry* out) {
+    AcquireSRWLockShared(&g_devicesLock);
+    bool found = false;
+    for (const DeviceEntry& e : g_devices) {
+        if (e.device == self) {
+            *out = e;
+            found = true;
+            break;
+        }
+    }
+    ReleaseSRWLockShared(&g_devicesLock);
+    return found;
+}
 
 // An observer-only door on a joystick's own table: the private-table case, where
 // the overlay hands each device a table of its own and the keyboard's door never
@@ -317,16 +350,10 @@ uint32_t modsNow() {
 
 bool summonModsHeldNow(uint32_t mods) { return (mods & ~modsNow()) == 0; }
 
-// GetCapabilities has the same layout on A and W. The retained keyboard
-// is known; other devices sharing its table are checked without caching a
-// raw pointer that a released device could reuse for a joystick later.
-// The answer is PACKED: GET_DIDEVICE_TYPE of dwDevType in the low byte (0 when the
-// device would not say), and the device's shape -- buttons, axes and hats, a byte
-// each -- above it, which costs nothing (it is the same call) and lets the joystick
-// watch tell that an address now holds another device. devType() and devShape()
-// take it apart.
-constexpr uint32_t devType(uint32_t packed) { return packed & 0xFFu; }
-constexpr uint32_t devShape(uint32_t packed) { return packed >> 8; }
+// GET_DIDEVICE_TYPE of what GetCapabilities says, 0 when the device would not say.
+// Only the keyboard door asks, and only for a device that is neither its dummy nor a
+// controller the game enumerated (see deviceTypeOf): the one call EDVR still makes on
+// a non-keyboard device, and it predates the joystick watch.
 uint32_t capsTypeOf(void* self) {
     void** vt = *reinterpret_cast<void***>(self);
     if (!vt || !vt[3]) return 0;
@@ -334,156 +361,185 @@ uint32_t capsTypeOf(void* self) {
     caps.dwSize = sizeof(caps);
     typedef HRESULT(STDMETHODCALLTYPE* GetCaps)(void*, LPDIDEVCAPS);
     if (FAILED(reinterpret_cast<GetCaps>(vt[3])(self, &caps))) return 0;
-    return GET_DIDEVICE_TYPE(caps.dwDevType) | ((caps.dwButtons & 0xFFu) << 8) | ((caps.dwAxes & 0xFFu) << 16) |
-           ((caps.dwPOVs & 0xFFu) << 24);
+    return GET_DIDEVICE_TYPE(caps.dwDevType);
 }
 
+// The type the keyboard door reads a device as. Its dummy is the keyboard; a controller
+// the game enumerated is answered from the registry, with no call on it.
 template <bool Wide>
 uint32_t deviceTypeOf(DiDoor& d, void* self) {
     if (self == d.dummy) return DI8DEVTYPE_KEYBOARD;
+    DeviceEntry e;
+    if (watchedEntry(self, &e)) return e.type;
     return capsTypeOf(self);
 }
 
 template <bool Wide>
 bool isKeyboard(DiDoor& d, void* self) {
-    return devType(deviceTypeOf<Wide>(d, self)) == DI8DEVTYPE_KEYBOARD;
+    return deviceTypeOf<Wide>(d, self) == DI8DEVTYPE_KEYBOARD;
 }
 
 // ---- the joystick watch ---------------------------------------------------
 
-// The id Elite writes for this device ("231D0200" is 0x231D0200), and its name.
-// DirectInput checks dwSize against the interface it implements, and the
-// interface this object is -- A or W -- is not known here, so both are tried.
-bool queryJoyIdentity(void* self, uint32_t* id, char* name, size_t nameLen) {
-    void** vt = *reinterpret_cast<void***>(self);
-    if (!vt || !vt[kSlotGetDeviceInfo]) return false;
-    {
-        DIDEVICEINSTANCEW info{};
-        info.dwSize = sizeof(info);
-        if (SUCCEEDED(reinterpret_cast<PFN_GetDeviceInfoW>(vt[kSlotGetDeviceInfo])(self, &info))) {
-            *id = joyDeviceIdFromProduct(info.guidProduct.Data1);
-            WideCharToMultiByte(CP_UTF8, 0, info.tszProductName, -1, name, static_cast<int>(nameLen),
-                                nullptr, nullptr);
-            name[nameLen - 1] = 0;
-            return true;
+// One record the game was handed by EnumDevices. A record for an instance already
+// here overwrites its own entry; a new one takes the next slot, the oldest.
+void recordEnumerated(REFGUID instance, DWORD devType, REFGUID product, const char* name) {
+    EnumRecord r;
+    r.used = true;
+    r.instance = instance;
+    r.devType = devType;
+    r.id = joyDeviceIdFromProduct(product.Data1);
+    snprintf(r.name, sizeof(r.name), "%s", name);
+    AcquireSRWLockExclusive(&g_enumLock);
+    EnumRecord* slot = nullptr;
+    for (EnumRecord& e : g_enumRecords) {
+        if (e.used && IsEqualGUID(e.instance, instance)) {
+            slot = &e;
+            break;
         }
     }
-    {
-        DIDEVICEINSTANCEA info{};
-        info.dwSize = sizeof(info);
-        if (SUCCEEDED(reinterpret_cast<PFN_GetDeviceInfoA>(vt[kSlotGetDeviceInfo])(self, &info))) {
-            *id = joyDeviceIdFromProduct(info.guidProduct.Data1);
-            snprintf(name, nameLen, "%s", info.tszProductName);
-            return true;
-        }
+    if (!slot) {
+        slot = &g_enumRecords[g_enumNext];
+        g_enumNext = (g_enumNext + 1) % kEnumRecords;
     }
-    return false;
+    *slot = r;
+    ReleaseSRWLockExclusive(&g_enumLock);
 }
 
-// The identity of `self`, from the cache or freshly asked. False for a device
-// that will not say what it is (it is then ignored).
-bool joyIdentify(void* self, uint32_t shape, uint32_t* id, char* name, size_t nameLen) {
-    const uint64_t now = stampMs();
-    AcquireSRWLockExclusive(&g_joyIdLock);
-    for (JoyIdentity& e : g_joyId) {
-        // Known and the same shape: that is the answer, for good. A device that would
-        // not say what it is stays "ignored" for the same second.
-        if (e.device == self && e.shape == shape && (e.ok || now - e.checkedMs < kJoyIdentityMs)) {
-            const bool ok = e.ok;
-            if (ok) {
-                *id = e.id;
-                snprintf(name, nameLen, "%s", e.name);
+// The game's own record for an instance GUID, if it enumerated one.
+bool enumeratedRecord(REFGUID instance, EnumRecord* out) {
+    AcquireSRWLockShared(&g_enumLock);
+    bool found = false;
+    for (const EnumRecord& e : g_enumRecords) {
+        if (e.used && IsEqualGUID(e.instance, instance)) {
+            *out = e;
+            found = true;
+            break;
+        }
+    }
+    ReleaseSRWLockShared(&g_enumLock);
+    return found;
+}
+
+// A device the game has just created. If the game enumerated its instance as a game
+// controller, the device is registered with the type and name from that record, and
+// true comes back: the caller may then capture its table. A device the game never
+// enumerated is neither registered nor watched, and nothing is called on it.
+bool registerCreated(void* device, REFGUID guid) {
+    EnumRecord rec;
+    if (!enumeratedRecord(guid, &rec)) {
+        if (!g_neverEnumeratedNoted.exchange(true)) {
+            Log::get().note("joystick watch: the game created a device it never enumerated; it is not watched.");
+        }
+        return false;
+    }
+    const uint32_t type = GET_DIDEVICE_TYPE(rec.devType);
+    if (!joyDeviceTypeIsController(type)) return false;
+    DeviceEntry e;
+    e.device = device;
+    e.type = type;
+    e.id = rec.id;
+    snprintf(e.name, sizeof(e.name), "%s", rec.name);
+    AcquireSRWLockExclusive(&g_devicesLock);
+    // The same address again (a new object where an old one was) takes the entry
+    // over; otherwise the first free slot, else the one registered longest ago.
+    DeviceEntry* slot = nullptr;
+    for (DeviceEntry& d : g_devices) {
+        if (d.device == device) {
+            slot = &d;
+            break;
+        }
+    }
+    if (!slot) {
+        for (DeviceEntry& d : g_devices) {
+            if (!d.device) {
+                slot = &d;
+                break;
             }
-            ReleaseSRWLockExclusive(&g_joyIdLock);
-            return ok;
         }
     }
-    ReleaseSRWLockExclusive(&g_joyIdLock);
-
-    uint32_t found = 0;
-    char product[48] = "";
-    const bool ok = queryJoyIdentity(self, &found, product, sizeof(product));
-
-    AcquireSRWLockExclusive(&g_joyIdLock);
-    JoyIdentity* e = nullptr;
-    JoyIdentity* spare = nullptr;
-    for (JoyIdentity& c : g_joyId) {
-        if (c.device == self) e = &c;
-        else if (!c.device && !spare) spare = &c;
-    }
-    if (!e) e = spare;
-    if (!e) {
-        // Full: recycle the entry checked longest ago.
-        for (JoyIdentity& c : g_joyId) {
-            if (!e || c.checkedMs < e->checkedMs) e = &c;
+    if (!slot) {
+        slot = &g_devices[0];
+        for (DeviceEntry& d : g_devices) {
+            if (d.seq < slot->seq) slot = &d;
         }
-        *e = JoyIdentity();
     }
-    if (e->device == self && e->shape != shape) *e = JoyIdentity();   // another device at this address
-    e->device = self;
-    e->shape = shape;
-    e->ok = ok;
-    e->checkedMs = now;
-    if (ok) {
-        e->id = found;
-        snprintf(e->name, sizeof(e->name), "%s", product);
-        *id = found;
-        snprintf(name, nameLen, "%s", e->name);
+    e.seq = ++g_devSeq;
+    *slot = e;
+    ReleaseSRWLockExclusive(&g_devicesLock);
+    char dev[9];
+    hotkeyJoyDeviceText(rec.id, dev);
+    Log::get().note("joystick watch: the game enumerated %s \"%s\" as a game controller; its reads are copied "
+                    "after the game's own calls.", dev, e.name);
+    return true;
+}
+
+// The game created a device at an address that may have held a controller before. The
+// old identity is not the new object's, so it is dropped (before the new one is classified).
+void watchForget(void* device) {
+    AcquireSRWLockExclusive(&g_devicesLock);
+    for (DeviceEntry& d : g_devices) {
+        if (d.device == device) d = DeviceEntry();
     }
-    ReleaseSRWLockExclusive(&g_joyIdLock);
-    return ok;
+    ReleaseSRWLockExclusive(&g_devicesLock);
 }
 
 // Said once per device and per path: how the game reads its joystick. This is
 // the line a flight reads to learn whether Elite uses GetDeviceState,
-// GetDeviceData or both, and with which buffer.
+// GetDeviceData or both, and with which buffer. The flags live in the registry
+// entry; the text is built outside the lock.
 void joyNote(void* self, int what, uint32_t detail) {
-    char text[260] = "";
-    AcquireSRWLockExclusive(&g_joyIdLock);
-    for (JoyIdentity& e : g_joyId) {
+    uint32_t id = 0;
+    char name[48] = "";
+    bool first = false;
+    AcquireSRWLockExclusive(&g_devicesLock);
+    for (DeviceEntry& e : g_devices) {
         if (e.device != self) continue;
         bool* flag = what == 0 ? &e.notedState : what == 1 ? &e.notedData : &e.notedSize;
-        if (*flag) break;
-        *flag = true;
-        char dev[9];
-        hotkeyJoyDeviceText(e.id, dev);
-        if (what == 0)
-            snprintf(text, sizeof(text),
-                     "joystick watch: %s \"%s\" is read by the game with GetDeviceState (%u bytes); its buttons are "
-                     "watched.", dev, e.name, detail);
-        else if (what == 1)
-            snprintf(text, sizeof(text),
-                     "joystick watch: %s \"%s\" is read by the game with GetDeviceData; its buttons are watched.", dev,
-                     e.name);
-        else
-            snprintf(text, sizeof(text),
-                     "joystick watch: %s \"%s\" is read with a %u-byte data format this build does not read (it "
-                     "understands DIJOYSTATE, 80, and DIJOYSTATE2, 272), so its buttons cannot be watched. Please "
-                     "report this line.", dev, e.name, detail);
+        if (!*flag) {
+            *flag = true;
+            first = true;
+            id = e.id;
+            snprintf(name, sizeof(name), "%s", e.name);
+        }
         break;
     }
-    ReleaseSRWLockExclusive(&g_joyIdLock);
-    if (text[0]) Log::get().note("%s", text);
+    ReleaseSRWLockExclusive(&g_devicesLock);
+    if (!first) return;
+    char dev[9];
+    hotkeyJoyDeviceText(id, dev);
+    char text[260] = "";
+    if (what == 0)
+        snprintf(text, sizeof(text),
+                 "joystick watch: %s \"%s\" is read by the game with GetDeviceState (%u bytes); its buttons are "
+                 "watched.", dev, name, detail);
+    else if (what == 1)
+        snprintf(text, sizeof(text),
+                 "joystick watch: %s \"%s\" is read by the game with GetDeviceData; its buttons are watched.", dev,
+                 name);
+    else
+        snprintf(text, sizeof(text),
+                 "joystick watch: %s \"%s\" is read with a %u-byte data format this build does not read (it "
+                 "understands DIJOYSTATE, 80, and DIJOYSTATE2, 272), so its buttons cannot be watched. Please "
+                 "report this line.", dev, name, detail);
+    Log::get().note("%s", text);
 }
 
-// The game's GetDeviceState just returned `data` (cb bytes) for `self`, which
-// deviceTypeOf said is of `type`. A copy, nothing more.
-void observeControllerState(void* self, uint32_t packed, DWORD cb, const void* data) {
-    if (!joyDeviceTypeIsController(devType(packed))) return;
-    uint32_t id = 0;
-    char name[48];
-    if (!joyIdentify(self, devShape(packed), &id, name, sizeof(name))) return;
+// The game's GetDeviceState just returned `data` (cb bytes) for `self`. A copy, nothing
+// more, and only for a device the registry holds.
+void observeControllerState(void* self, DWORD cb, const void* data) {
+    DeviceEntry e;
+    if (!watchedEntry(self, &e)) return;
     const bool sized = cb == kJoyStateSize || cb == kJoyState2Size;
-    if (joyWatchObserveState(self, id, data, cb, stampMs())) joyNote(self, 0, cb);
+    if (joyWatchObserveState(self, e.id, data, cb, stampMs())) joyNote(self, 0, cb);
     else if (!sized) joyNote(self, 2, cb);
 }
 
-void observeControllerData(void* self, uint32_t packed, const DIDEVICEOBJECTDATA* rows, DWORD count) {
-    if (!joyDeviceTypeIsController(devType(packed))) return;
-    uint32_t id = 0;
-    char name[48];
-    if (!joyIdentify(self, devShape(packed), &id, name, sizeof(name))) return;
-    if (joyWatchObserveData(self, id, rows, count, sizeof(DIDEVICEOBJECTDATA), stampMs())) joyNote(self, 1, 0);
+// The game's GetDeviceData just returned `count` rows for `self`. Also a copy.
+void observeControllerData(void* self, const DIDEVICEOBJECTDATA* rows, DWORD count) {
+    DeviceEntry e;
+    if (!watchedEntry(self, &e)) return;
+    if (joyWatchObserveData(self, e.id, rows, count, sizeof(DIDEVICEOBJECTDATA), stampMs())) joyNote(self, 1, 0);
 }
 
 template <bool Wide>
@@ -492,11 +548,10 @@ HRESULT filterDeviceState(DiDoor& d, void* self, DWORD cb, LPVOID data) {
     d.stateCalls.fetch_add(1, std::memory_order_relaxed);
     if (self != d.dummy) d.stateForeign.fetch_add(1, std::memory_order_relaxed);
     if (d.retired || FAILED(hr) || !data) return hr;
-    uint32_t otherType = 0;   // the packed type and shape of a device that is not the keyboard
+    bool other = false;   // a device that is not the keyboard
     guardedBudget(g_budgetDi, [&] {
-        const uint32_t type = deviceTypeOf<Wide>(d, self);
-        if (devType(type) != DI8DEVTYPE_KEYBOARD) {
-            otherType = type;
+        if (deviceTypeOf<Wide>(d, self) != DI8DEVTYPE_KEYBOARD) {
+            other = true;
             return;
         }
         d.stateKeyboard.fetch_add(1, std::memory_order_relaxed);
@@ -528,8 +583,8 @@ HRESULT filterDeviceState(DiDoor& d, void* self, DWORD cb, LPVOID data) {
     });
     // A joystick or HOTAS: copy what the game just read, after its call, into
     // the watch. Not the keyboard's business and not its budget's.
-    if (otherType) {
-        guardedBudget(g_budgetJoy, [&] { observeControllerState(self, otherType, cb, data); });
+    if (other) {
+        guardedBudget(g_budgetJoy, [&] { observeControllerState(self, cb, data); });
     }
     if (!g_budgetDi.shouldRun() && !d.retired) {
         d.retired = true;
@@ -548,12 +603,11 @@ HRESULT filterDeviceData(DiDoor& d, void* self, DWORD cbObj, LPDIDEVICEOBJECTDAT
     d.dataCalls.fetch_add(1, std::memory_order_relaxed);
     if (d.retired || FAILED(hr) || !rgdod || !inOut) return hr;
     if (cbObj != sizeof(DIDEVICEOBJECTDATA)) return hr;   // a layout this was not written for
-    uint32_t otherType = 0;   // the device's type when it is not the keyboard
+    bool other = false;   // a device that is not the keyboard
     const DWORD returned = *inOut;
     guardedBudget(g_budgetDi, [&] {
-        const uint32_t type = deviceTypeOf<Wide>(d, self);
-        if (devType(type) != DI8DEVTYPE_KEYBOARD) {
-            otherType = type;
+        if (deviceTypeOf<Wide>(d, self) != DI8DEVTYPE_KEYBOARD) {
+            other = true;
             return;
         }
         // An empty read is nothing to filter (the check that used to sit above
@@ -592,8 +646,8 @@ HRESULT filterDeviceData(DiDoor& d, void* self, DWORD cbObj, LPDIDEVICEOBJECTDAT
     });
     // A joystick or HOTAS: the rows the game's read just returned, copied and
     // untouched (an empty read too: it shows the game is polling the device).
-    if (otherType) {
-        guardedBudget(g_budgetJoy, [&] { observeControllerData(self, otherType, rgdod, returned); });
+    if (other) {
+        guardedBudget(g_budgetJoy, [&] { observeControllerData(self, rgdod, returned); });
     }
     return hr;
 }
@@ -825,7 +879,7 @@ HRESULT STDMETHODCALLTYPE joyDeviceState(void* self, DWORD cb, LPVOID data) {
     JoyDoor& j = g_joyDoors[Index];
     const HRESULT hr = j.origState(self, cb, data);
     if (SUCCEEDED(hr) && data) {
-        guardedBudget(g_budgetJoy, [&] { observeControllerState(self, capsTypeOf(self), cb, data); });
+        guardedBudget(g_budgetJoy, [&] { observeControllerState(self, cb, data); });
     }
     return hr;
 }
@@ -837,19 +891,52 @@ HRESULT STDMETHODCALLTYPE joyDeviceData(void* self, DWORD cb, LPDIDEVICEOBJECTDA
     const HRESULT hr = j.origData(self, cb, data, count, flags);
     if (SUCCEEDED(hr) && data && count && cb == sizeof(DIDEVICEOBJECTDATA)) {
         const DWORD returned = *count;
-        guardedBudget(g_budgetJoy, [&] { observeControllerData(self, capsTypeOf(self), data, returned); });
+        guardedBudget(g_budgetJoy, [&] { observeControllerData(self, data, returned); });
     }
     return hr;
 }
 
-// The game created a device that is not a keyboard or a mouse: if it is a game
-// controller, watch its reads. A table a keyboard door already holds is watched
-// by that door's wrapper (it sees every device on the table), so only a table of
-// its own gets a door here -- the private overlay table. Nothing is called on the
-// device beyond GetCapabilities, and the hooks added only copy.
+// What the factory door hands the game's own EnumDevices callback in place of the
+// callback: the game's callback and its pvRef, carried for this one call on the stack.
+struct EnumCall {
+    void* callback;   // the game's LPDIENUMDEVICESCALLBACKA, or W for the W interface
+    void* pvRef;      // the game's pvRef
+};
+
+// The thunks copy the record the game is being handed, then pass the SAME record on
+// to the game's callback with the game's own pvRef, and return that callback's answer
+// unchanged (DIENUM_STOP included). The lock is never held across the game's callback.
+BOOL CALLBACK enumThunkA(LPCDIDEVICEINSTANCEA inst, LPVOID ref) {
+    const EnumCall* call = static_cast<const EnumCall*>(ref);
+    if (inst) {
+        guardedBudget(g_budgetJoy, [&] {
+            recordEnumerated(inst->guidInstance, inst->dwDevType, inst->guidProduct, inst->tszProductName);
+        });
+    }
+    return reinterpret_cast<LPDIENUMDEVICESCALLBACKA>(call->callback)(inst, call->pvRef);
+}
+
+BOOL CALLBACK enumThunkW(LPCDIDEVICEINSTANCEW inst, LPVOID ref) {
+    const EnumCall* call = static_cast<const EnumCall*>(ref);
+    if (inst) {
+        guardedBudget(g_budgetJoy, [&] {
+            char name[260] = "";
+            WideCharToMultiByte(CP_UTF8, 0, inst->tszProductName, -1, name, static_cast<int>(sizeof(name)),
+                                nullptr, nullptr);
+            name[sizeof(name) - 1] = 0;
+            recordEnumerated(inst->guidInstance, inst->dwDevType, inst->guidProduct, name);
+        });
+    }
+    return reinterpret_cast<LPDIENUMDEVICESCALLBACKW>(call->callback)(inst, call->pvRef);
+}
+
+// A registered controller (registerCreated said so) gets its table captured for the
+// observers. A table a keyboard door already holds is watched by that door's wrapper
+// (it sees every device on the table), so only a table of its own gets a door here --
+// the private overlay table. Nothing is called on the device: the hooks only copy, and
+// the AddRef below is the one reference, which keeps the table alive for the reclaim.
 template <size_t... I>
 void captureController(void* device, std::index_sequence<I...>) {
-    if (!joyDeviceTypeIsController(devType(capsTypeOf(device)))) return;
     static const PFN_GetDeviceState stateHooks[] = {&joyDeviceState<I>...};
     static const PFN_GetDeviceData dataHooks[] = {&joyDeviceData<I>...};
     CaptureLock lock;
@@ -896,18 +983,37 @@ void captureController(void* device, std::index_sequence<I...>) {
                     kJoyDoors);
 }
 
+// The game's IDirectInput8::EnumDevices, wrapped. The game's callback is replaced by the
+// thunk for the interface this factory belongs to (A or W), with the game's callback and
+// pvRef carried on the stack for this one call.
+template <size_t Index>
+HRESULT STDMETHODCALLTYPE factoryEnumDevices(void* self, DWORD devType, LPVOID callback, LPVOID pvRef,
+                                             DWORD flags) {
+    const FactoryDoor& f = g_factories[Index];
+    if (!callback) return f.enumOriginal(self, devType, callback, pvRef, flags);
+    EnumCall call{callback, pvRef};
+    const LPVOID thunk = f.wide ? reinterpret_cast<LPVOID>(&enumThunkW) : reinterpret_cast<LPVOID>(&enumThunkA);
+    return f.enumOriginal(self, devType, thunk, &call, flags);
+}
+
 template <size_t Index>
 HRESULT STDMETHODCALLTYPE factoryCreateDevice(void* self, REFGUID guid, void** device,
                                                LPUNKNOWN outer) {
     const HRESULT hr = g_factories[Index].original(self, guid, device, outer);
     if (SUCCEEDED(hr) && device && *device && !outer) {
+        watchForget(*device);   // whatever this object is, an old controller at its address is not its identity
         if (isKeyboardGuid(guid)) {
             guardedBudget(g_budgetDi, [&] {
                 captureKeyboard(*device, std::make_index_sequence<kGameDeviceDoors>{});
             });
         } else if (!isMouseGuid(guid)) {
+            // A controller the game enumerated is registered BEFORE the table is looked at:
+            // a shared table that is already patched returns early in captureController,
+            // and the device must be registered either way.
             guardedBudget(g_budgetJoy, [&] {
-                captureController(*device, std::make_index_sequence<kJoyDoors>{});
+                if (registerCreated(*device, guid)) {
+                    captureController(*device, std::make_index_sequence<kJoyDoors>{});
+                }
             });
         }
     }
@@ -915,8 +1021,9 @@ HRESULT STDMETHODCALLTYPE factoryCreateDevice(void* self, REFGUID guid, void** d
 }
 
 template <size_t... I>
-void captureFactory(void* factory, std::index_sequence<I...>) {
+void captureFactory(void* factory, bool wide, std::index_sequence<I...>) {
     static const PFN_CreateDevice hooks[] = {&factoryCreateDevice<I>...};
+    static const PFN_EnumDevices enums[] = {&factoryEnumDevices<I>...};
     CaptureLock lock;
     void** table = *reinterpret_cast<void***>(factory);
     for (const auto& f : g_factories) {
@@ -925,15 +1032,18 @@ void captureFactory(void* factory, std::index_sequence<I...>) {
     for (size_t i = 0; i < kFactoryDoors; ++i) {
         auto& f = g_factories[i];
         if (f.owner) continue;
-        if (!f.hook.attach(factory, 11) || f.hook.executablePrefix() <= 3) {
+        if (!f.hook.attach(factory, 11) || f.hook.executablePrefix() <= kSlotEnumDevices) {
             f.hook.uninstall();
             return;
         }
         f.owner = factory;
+        f.wide = wide;
         reinterpret_cast<IUnknown*>(factory)->AddRef();
         f.hook.setMode(HookMode::InPlace);
-        if (!f.hook.replace(3, reinterpret_cast<void*>(hooks[i]),
-                            reinterpret_cast<void**>(&f.original)) || !f.hook.commit()) {
+        if (!f.hook.replace(3, reinterpret_cast<void*>(hooks[i]), reinterpret_cast<void**>(&f.original)) ||
+            !f.hook.replace(kSlotEnumDevices, reinterpret_cast<void*>(enums[i]),
+                            reinterpret_cast<void**>(&f.enumOriginal)) ||
+            !f.hook.commit()) {
             f.hook.uninstall();
             f.owner = nullptr;
             reinterpret_cast<IUnknown*>(factory)->Release();
@@ -951,10 +1061,10 @@ HRESULT WINAPI hookDirectInput8Create(HINSTANCE instance, DWORD version, REFIID 
     if (!Config::get().getBool("advanced.input_gate", true)) {
         return hr;
     }
-    if (SUCCEEDED(hr) && out && *out && !outer &&
-        (IsEqualGUID(iid, kIidDirectInput8A) || IsEqualGUID(iid, kIidDirectInput8W))) {
+    const bool wide = IsEqualGUID(iid, kIidDirectInput8W);
+    if (SUCCEEDED(hr) && out && *out && !outer && (wide || IsEqualGUID(iid, kIidDirectInput8A))) {
         guardedBudget(g_budgetDi, [&] {
-            captureFactory(*out, std::make_index_sequence<kFactoryDoors>{});
+            captureFactory(*out, wide, std::make_index_sequence<kFactoryDoors>{});
         });
     }
     return hr;

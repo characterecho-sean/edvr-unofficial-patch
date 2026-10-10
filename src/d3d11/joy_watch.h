@@ -43,10 +43,10 @@ constexpr int      kJoyWatchSlots = 8;
 // which hotkey.h keeps as vendor << 16 | product.
 uint32_t joyDeviceIdFromProduct(uint32_t productData1);
 
-// A device whose DIDEVCAPS type we read as a game controller (the types a
-// joystick, gamepad, wheel, flight stick, first-person controller, a generic
-// device or a supplemental device -- pedals, a throttle -- reports; a mouse
-// and a keyboard never). `type` is GET_DIDEVICE_TYPE(dwDevType).
+// A device type the game enumerated as a game controller (the types a joystick,
+// gamepad, wheel, flight stick, first-person controller, a generic device or a
+// supplemental device -- pedals, a throttle -- reports; a mouse and a keyboard
+// never). `type` is GET_DIDEVICE_TYPE(dwDevType) from the game's own EnumDevices record.
 bool joyDeviceTypeIsController(uint32_t type);
 
 // ---- the writer: the game's thread, from input_gate's wrappers ----------------
