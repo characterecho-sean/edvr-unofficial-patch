@@ -58,6 +58,11 @@
 
 namespace edvr {
 
+// The Supersampling setter and getter hooks, installed at DLL load by vr_ssaa_hold.cpp (the Supersampling hold does not wait for
+// the key). Pure memory: the build is checked, the functions' bytes and the slots are checked, nothing is logged. True when the
+// hooks are in; otherwise why is written. apply() later sees them in and does not install them again.
+bool uiPanelScaleEarlyHooks(char* why, size_t whyLen);
+
 // From uiLayerConfigure: the key's target (0 off, 1.0, 1.25). The first time
 // it is on, the sites are checked and the operands swapped (the floats at
 // the game's own values until the factor's inputs are known).

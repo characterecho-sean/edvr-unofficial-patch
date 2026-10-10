@@ -11,6 +11,8 @@
 // so once, and every other entry point here returns at once.
 #pragma once
 
+#include <cstdint>
+
 namespace edvr {
 
 // Once per process, from hookDevice: the build gate, then one line with the startup Settings.xml's StereoscopicMode and
@@ -26,7 +28,7 @@ void vrSsaaGateNoteSetterBefore(float before);
 // ui_panel_scale.cpp's setter thunk: after the game's setter ran, with the value passed, ctx+0x3564 and the game's range
 // as read after it (NaN for the value if it could not be read). Writes at most one line: the first 64 calls each, then
 // a call only when the passed, before or after value differs from the last one logged, up to a hard cap.
-void vrSsaaGateNoteSetterAfter(float passed, float after, float lo, float hi);
+void vrSsaaGateNoteSetterAfter(uintptr_t ctx, float passed, float after, float lo, float hi);
 
 // ui_panel_scale.cpp's getter thunk: true until the first getter read is logged, so the caller reads the value only then.
 bool vrSsaaGateGetterPending();

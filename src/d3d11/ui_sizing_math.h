@@ -655,11 +655,11 @@ constexpr uint8_t kUiSsGetterBytes[13] = {0x48, 0x8B, 0x41, 0x18, 0xF3, 0x0F, 0x
 constexpr float kUiSsCeiling = 8.0f;  // the .fxcfg reader's own ceiling (device_hook.cpp eliteHmdMultiplier)
 
 enum class UiSsRead : uint8_t { kNone = 0, kFault, kOk };  // no render context known yet / a read faulted / read
-enum class UiSsSource : uint8_t { kNone = 0, kLive, kFxcfg };
+enum class UiSsSource : uint8_t { kNone = 0, kLive, kFxcfg, kHeld };  // kHeld: the VR Supersampling hold (vr_ssaa_hold.h), 1.0
 enum class UiSsWhy : uint8_t { kNone = 0, kNotCaptured, kUnreadable, kNotFinite, kOutOfRange };
 
 inline const char* uiSsSourceName(UiSsSource s) {
-    return s == UiSsSource::kLive ? "live" : s == UiSsSource::kFxcfg ? ".fxcfg" : "none";
+    return s == UiSsSource::kLive ? "live" : s == UiSsSource::kFxcfg ? ".fxcfg" : s == UiSsSource::kHeld ? "held at 1.0" : "none";
 }
 inline const char* uiSsWhyName(UiSsWhy w) {
     return w == UiSsWhy::kNotCaptured   ? "the game has not called its Supersampling setter or getter yet, so its render context is not known"

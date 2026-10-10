@@ -30,6 +30,7 @@
 #include "flat_wrapper_note.h"
 #include "format_support_log.h"
 #include "input_gate.h"
+#include "vr_ssaa_hold.h"  // vrSsaaHoldEarlyInstall: the Supersampling hold's hooks at DLL load
 #include "oculus_route.h"
 
 extern "C" const EdvrNativeStartupRouting edvrNativeStartupRouting = {
@@ -399,6 +400,10 @@ void reportLoopOnce() {
 
 }  // namespace
 
+// The graphics DLL's one-time setup (config, log, module pin) for vr_ssaa_hold.cpp's loader thunk: the game can run its settings
+// loader before the first device creation, which is the other way in. The same work, once.
+void edvrGraphicsEnsureInitialised() { ensureInitialised(); }
+
 namespace edvr {
 
 // The mechanism decision, made from the fact that actually settles safety:
@@ -651,6 +656,9 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
                 return FALSE;
             loaderPhase();
             edvr::inputGateInstallEarly();
+            // The VR Supersampling hold's hooks (vr_ssaa_hold.h): pure memory reads and writes, the build gate first, so a
+            // stranger's process (the installer) refuses them silently. No config, file or log here.
+            edvr::vrSsaaHoldEarlyInstall();
             break;
 
         case DLL_PROCESS_DETACH:

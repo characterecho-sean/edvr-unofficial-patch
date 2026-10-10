@@ -5,6 +5,7 @@
 #include "ui_panel_scale.h"  // uiPanelScaleFactor, uiPanelScaleChosenSupersampling: lock-free
 #include "ui_sizing_math.h"  // kUiPanelStamp, kUiPanelImageSize: build 332841
 #include "ui_surfaces.h"     // uiSurfacesHmdQuality: lock-free
+#include "vr_ssaa_hold.h"    // the hold's report, mode re-read and loader object (the hold changes values; this file only logs)
 
 #include "../common/elite_graphics_folder.h"  // the Options\Graphics folder under %LOCALAPPDATA%
 #include "../common/log.h"
@@ -121,8 +122,10 @@ void vrSsaaGateStartup() {
     if (!g_started.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) return;
     if (!gameBuildChecked()) {
         Log::get().note("vr ssaa gate: game build not checked; instruments off");
+        vrSsaaHoldReport();
         return;
     }
+    vrSsaaHoldReport();
     g_on.store(true, std::memory_order_release);
 
     // Settings.xml names the 3D mode (the live value is not located in this step; see the line below).
@@ -152,6 +155,7 @@ void vrSsaaGateStartup() {
 }
 
 void vrSsaaGateNotePresent() {
+    vrSsaaHoldFrameBoundary();  // the Supersampling hold's mode re-read (a small read, only when a setter call asked for one)
     if (!g_on.load(std::memory_order_acquire)) return;
     const uint32_t frame = g_presents.fetch_add(1, std::memory_order_relaxed) + 1;
     bool expected = false;
@@ -166,7 +170,7 @@ void vrSsaaGateNoteSetterBefore(float before) {
     g_beforeBits.store(bitsOf(before), std::memory_order_relaxed);
 }
 
-void vrSsaaGateNoteSetterAfter(float passed, float after, float lo, float hi) {
+void vrSsaaGateNoteSetterAfter(uintptr_t ctx, float passed, float after, float lo, float hi) {
     if (!g_on.load(std::memory_order_acquire)) return;
     const uint32_t seq = g_setterCalls.fetch_add(1, std::memory_order_relaxed) + 1;
     const uint32_t kPassed = bitsOf(passed), kBefore = g_beforeBits.load(std::memory_order_relaxed), kAfter = bitsOf(after);
@@ -181,10 +185,11 @@ void vrSsaaGateNoteSetterAfter(float passed, float after, float lo, float hi) {
     g_lastAfter.store(kAfter, std::memory_order_relaxed);
     const char* source = "none";
     const double chosen = uiPanelScaleChosenSupersampling(&source);
-    Log::get().note("vr ssaa gate: SS setter call %u%s: passed %.4f; ctx+0x3564 before %.4f after %.4f (range %.2f to "
-                    "%.2f); HMD Quality %.3f; panel factor %.4f; chosen Supersampling %.4f from %s; frame %u; "
-                    "qpc=%.3f s; sizing record not read by EDVR",
+    Log::get().note("vr ssaa gate: SS setter call %u%s: passed %.4f; ctx 0x%llX (loader object 0x%llX) ctx+0x3564 before "
+                    "%.4f after %.4f (range %.2f to %.2f); HMD Quality %.3f; panel factor %.4f; chosen Supersampling %.4f "
+                    "from %s; frame %u; qpc=%.3f s; sizing record not read by EDVR",
                     seq, seq == 1 ? " (first)" : "", static_cast<double>(passed),
+                    static_cast<unsigned long long>(ctx), vrSsaaHoldLoaderObject(),
                     static_cast<double>(floatOf(kBefore)), static_cast<double>(after), static_cast<double>(lo),
                     static_cast<double>(hi), static_cast<double>(uiSurfacesHmdQuality()),
                     uiPanelScaleFactor(), chosen, source, g_presents.load(std::memory_order_relaxed),

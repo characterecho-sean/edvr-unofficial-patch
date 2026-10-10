@@ -551,7 +551,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\panel_curve.cpp" "src\d3d11\screen_motion.cpp" "src\d3d11\weapon_motion.cpp" ^
     "src\d3d11\remlok_fix.cpp" "src\d3d11\holo_fix.cpp" ^
     "src\d3d11\target_sharp.cpp" "src\d3d11\night_vision.cpp" ^
-    "src\d3d11\wake_pulse.cpp" "src\d3d11\vr_ssaa_gate.cpp" ^
+    "src\d3d11\wake_pulse.cpp" "src\d3d11\vr_ssaa_gate.cpp" "src\d3d11\vr_ssaa_hold.cpp" ^
     "src\d3d11\ui_depth.cpp" ^
     "src\d3d11\ui_layer.cpp" "src\d3d11\ui_surfaces.cpp" "src\d3d11\ui_panel_scale.cpp" "src\d3d11\orbital_width.cpp" "src\d3d11\supercruise_bars.cpp" ^
     "third_party\dxbc_hash\DxilHash.cpp" ^
@@ -3441,6 +3441,20 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
 if errorlevel 1 ( echo [edvr] ERROR: UI hologram test build failed & exit /b 1 )
 "%OBJ%\uiholo\ui_holo_test.exe" --dry-run || exit /b 1
 "%OBJ%\uiholo\ui_holo_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_vr_ssaa_hold_test
+echo [edvr] === vr_ssaa_hold_test.exe ===
+REM The VR Supersampling hold's pure decision (src\d3d11\vr_ssaa_hold_math.h, docs\vr-supersampling-gate-2026-10-10.md): the Settings.xml
+REM mode parse, the held value by profile and mode, the toast. The DLL calls the same functions; the hooks are not in this rig.
+if not exist "%OBJ%\vrssaahold" mkdir "%OBJ%\vrssaahold"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /utf-8 ^
+    /Fo"%OBJ%\vrssaahold\\" /Fe"%OBJ%\vrssaahold\vr_ssaa_hold_test.exe" ^
+    "tools\vr_ssaa_hold_test\vr_ssaa_hold_test.cpp" ^
+    /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: vr_ssaa_hold_test build failed & exit /b 1 )
+"%OBJ%\vrssaahold\vr_ssaa_hold_test.exe" --dry-run || exit /b 1
+"%OBJ%\vrssaahold\vr_ssaa_hold_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_orbital_width_test
