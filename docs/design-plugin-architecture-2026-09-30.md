@@ -20,16 +20,19 @@
   separate WARP variant links the real collector and verifies physical restore
   calls in the sampled 1800-frame window. Runtime caller routing remains
   source-pinned; this does not establish full-frame held-event cost. Normal
-  WARP, collector, strict boundary and real-backend gates pass. Full validation
-  passes 156 jobs, config/export/installer gates and receipt `44fba17c`.
+  WARP, collector, strict boundary and real-backend gates pass. Candidate
+  `6ab758d2` passes 156 jobs, config/export/installer gates and receipt
+  `44fba17c`. A reader-only exponent repair passes the tool self-tests;
+  refreshing the full source receipt waits until matched flights finish.
   Git stays on `codex/plugin-architecture`.
 - **Historical gates:** the previous candidate passes 149 jobs and installer
   checks, 344 focused census checks and 17 scoped assembly gates. Its
   main-based control `405b14cd` passes 129 jobs. Those source/assembly receipts
   and the 814 caller diagnostic are historical after this merge; none establish
-  new-tree correctness or performance. Steam now holds verified control
-  `e16dbb54` over main `7960f016`; the live INI is preserved and replay is off.
-  Next flight: matched control after candidate promotion, then candidate.
+  new-tree correctness or performance. Control `e16dbb54` has completed all
+  five states, on foot first. Steam holds verified candidate `6ab758d2`; the
+  live graphics INI and DLSS file hashes are unchanged and replay is off. Next
+  flight: the same five holds, on foot first, on the candidate.
 - **Frozen flight evidence:** `7bbe7d90` control / `6c63f6aa` candidate,
   matched Pimax OpenXR environment, no visual change. NV-on sampled hook time
   per timed draw is 15.0% lower; other CPU ranges overlap. Carrier DLSS/NV-off
@@ -3600,3 +3603,74 @@ capture, add bounded facts from existing selector reads, a frozen legacy
 oracle, terminal swallow-action expectations, capacity/mutation checks and an
 unarmed path gate. Carrier/hangar captures cannot establish this FSS-specific
 selector.
+
+### 2026-10-10 — matched control measured, candidate installed
+
+Sean reports the same stationary two-minute holds, with on-foot hangar first
+(AA off, then DLSS), followed by carrier AA off, carrier DLSS/NV off and
+carrier DLSS/NV on. Both module identities match `e16dbb54`:
+`edvr_gfx_20261010_055217.log` and `edvr_openxr_20261010_055219_060_31212.log`.
+The runtime confirms Pimax OpenXR, 4032x3898 per eye, separate graphics
+ownership and clean shutdown. The installed DLSS file reports version
+310.9.1.0; the control log does not record the loaded DLSS runtime version, so
+the file observation is not a runtime observation.
+
+Independent source and log review selects completed native benchmark windows
+W9-10 for on-foot AA off, W12-15 for on-foot DLSS, W16-19 for carrier AA off,
+W21-23 for carrier DLSS/NV off and W25-26 for carrier DLSS/NV on. These are
+separate 30-second CPU/GPU windows. W12-15 lie within the observed on-foot
+world route ownership at 05:57:22.618-05:59:40.666. The configured AA field and
+actual world-route observations agree. W8 begins before the first explicit
+on-foot status after an earlier aboard status; W11/W20 change scope; W24
+crosses NV engagement at 06:04:41.522; W27 has a late sample-count/frame-rate
+drop. Those windows are excluded from the strict comparison. W2-3 precede
+gameplay.
+
+Ruled out: a missing on-foot DLSS hold, because the complete native records
+contain completed DLSS W12-15 and independent world-route ownership. The first
+Luna conclusion came from truncated console output; compact complete parsing
+and a second source/log review corrected it. No runtime metadata defect is
+established by that mistaken reading.
+
+Baseline native timing medians below are medians of independent per-window p50
+values, rounded to two decimals, not pooled percentiles. The hook CPU column is
+the sampled-frame mean weighted by sampled frames. There is no per-timed-draw
+CPU denominator in this control build. Helper figures sum null-corrected cold
+scope estimates per reporting window, then take the median; their phase windows
+differ from the native samples. They do not measure total EDVR GPU latency or
+accepted-work latency and do not establish non-regression.
+
+| State | Native CPU p50 median, ms | Native GPU p50 median, ms | Hook CPU mean, ms/sampled frame | Corrected helper estimate median, ms/frame |
+|---|---:|---:|---:|---:|
+| On foot, AA off | 2.17 | 3.89 | 0.299 | 0.0131 |
+| On foot, DLSS | 2.57 | 5.99 | 0.611 | 2.1630 |
+| Carrier, AA off | 3.35 | 5.31 | 0.341 | 0.8779 |
+| Carrier, DLSS, NV off by reported sequence | 4.99 | 10.78 | 1.065 | 11.1070 |
+| Carrier, DLSS, NV on | 5.03 | 10.74 | 1.092 | 11.0791 |
+
+The log reader initially omitted 14 valid scope rows because the existing
+`%.17g` emitter writes zero-padded exponents such as `e-05`, while the reader
+required an exponent without leading zeros. The narrowly scoped reader repair
+changes only exponent digits; mantissa, integer, finite-number, schema and
+calibration validation remain strict. Tests cover emitted formats and malformed
+numeric fields; the full reader self-test passes. The saved control now parses
+with zero errors: 29 completion windows and 298 scope rows, comprising 292
+measured, 5 null-floor, 1 unmeasured and no uncalibrated rows. Corrected
+selected phase helper estimates match the preliminary numbers because the
+recovered rows are outside those fully contained phase windows. Complete
+reports are kept under `build/control_e16_measure_20261010.{json,md}`; the
+journal preserves the selected windows and baseline values. No additional
+flight is needed for this reader correction. Refreshing the full source receipt
+is held until the matched flights finish; no C++ or installed DLL changes
+accompany this repair.
+
+The prepared clean-version candidate `6ab758d2` was installed and verified with
+`tools/install_edvr.py` while Elite was closed. Graphics INI SHA256
+`B5E4FD8C862258197235E20DD10D9931170EF0EE6AA1EB7D78967016D7BBBF1A` and DLSS
+file SHA256 `3975567B8943C53ACCE397F2B72380092F84F162D00B0D2C7D08A1025C563983`
+remained unchanged through the switch; `advanced.draw_replay` remains off. The
+requested candidate run repeats the same five states in Sean's actual
+on-foot-first order. Its flight identity must be checked against `6ab758d2`,
+even if a later reader/documentation commit moves branch HEAD. Main `7960f016`
+remains included; no feature-to-main merge occurred. Matched performance
+acceptance remains open.

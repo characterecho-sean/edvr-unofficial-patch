@@ -321,7 +321,7 @@ PLUGIN_COST_INVALID_RE = re.compile(
     r"^(?:\[[\d:.]+\]\s*)?EDVR plugin cost invalid v(?P<version>\d+):\s*(?P<data>.*?)\s*$")
 PLUGIN_COST_UINT_RE = re.compile(r"^(?:0|[1-9]\d*)$")
 PLUGIN_COST_DECIMAL_RE = re.compile(
-    r"^(?:0|[1-9]\d*)(?:\.\d*)?(?:[eE][+-]?(?:0|[1-9]\d*))?$")
+    r"^(?:0|[1-9]\d*)(?:\.\d*)?(?:[eE][+-]?\d+)?$")
 PLUGIN_COST_FIELDS = frozenset((
     "window_start_ms", "window_end_ms", "scope", "owner", "attribution",
     "frames", "occurrences", "completed_samples", "raw_sample_ms",
@@ -13679,6 +13679,23 @@ def self_test_plugin_cost():
                    status="measured")
     check(not parse_plugin_cost(exponent)["errors"],
           "accepts finite scientific-notation decimals from round-trip serialization")
+    emitted_exponent = row(scope=13, frames=1, occurrences=1, samples=1,
+                           raw="1E+05", null_samples=1,
+                           null_ms="9.6000000000000002E-05", status="measured")
+    check(not parse_plugin_cost(emitted_exponent)["errors"],
+          "accepts printf zero-padded exponents and uppercase scientific notation")
+    for value, label in (("1e", "empty exponent"), ("1e+", "empty signed exponent"),
+                         ("1e+-5", "malformed exponent sign"),
+                         ("1e999", "nonfinite exponent overflow"),
+                         ("+1", "signed mantissa"), (".1", "missing integer mantissa"),
+                         ("01", "leading-zero mantissa")):
+        malformed_decimal = measured.replace("raw_sample_ms=0.008",
+                                             "raw_sample_ms=" + value)
+        check(bool(parse_plugin_cost(malformed_decimal)["errors"]),
+              "rejects %s" % label)
+    leading_zero_uint = measured.replace("occurrences=5", "occurrences=05")
+    check(bool(parse_plugin_cost(leading_zero_uint)["errors"]),
+          "still rejects leading-zero unsigned integer fields")
     no_data = parse_plugin_cost("ordinary flight log line\n")
     with contextlib.redirect_stdout(io.StringIO()):
         no_data_rc = print_plugin_cost("ordinary flight log line\n")
