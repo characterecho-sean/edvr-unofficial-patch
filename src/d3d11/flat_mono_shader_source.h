@@ -18,8 +18,7 @@ cbuffer Mono : register(b0) {
     uint4 debug; // x/y: refusal census/view, z: late overlay. w: flat HDR TAA has a conservative alternate-camera
                  // fragment union at t13 and output-domain history at t14/u7 (bit 0).
                  // Bit 1: qualified flat SDK foreground map at t15. Bit 2 (value 4): the VR on-foot source's target 7 is bound at t17 (F2; only
-                 // the VR world route sets it, never the flat profile). Bit 3 (value 8): the System Map is open and the plane range is bound at
-                 // t18 (prep: a depth-0 pixel's camera term takes the range's midpoint; FlatMonoResolveFrame::mapPlane). Zero leaves the old path unchanged.
+                 // the VR world route sets it, never the flat profile). Zero leaves the old shader path unchanged.
     float4 foregroundDepth; // SDK common-near/world-near scale, only read with debug.w bit 1
 };
 cbuffer EngineNow : register(b1) { float4 EN[277]; };   // EN[276].x: the frame stamp
@@ -45,11 +44,6 @@ Texture2D<float4> SkinE : register(t17);                // prep only, bound when
                                                          // position in centimetres, w 1 valid / 0 none, at the slot target's size; read at the pixel's own texel
 Texture2D<float4> OverlayColor : register(t16);         // HDR finish only, bound in overlay frames: the raw H with the protected late overlays
                                                          // drawn (t0 is then the CLEAN H, the image the backend was handed)
-ByteAddressBuffer MapPlaneRange : register(t18);         // prep only, bound when debug.w bit 3: the frame's nearest and farthest non-zero depth
-                                                         // as two uint words (asuint), from mapPlaneDepth; read only on that bit
-// The previous map frame's input colour (2026-10-10, the stars' choice: starChoice in prep). An EDVR-owned copy made after the prep
-// on each map-plane frame, bound at t19 only on a frame whose debug.w bit 4 says it holds the last frame's input.
-Texture2D<float4> PrevColor : register(t19);
 SamplerState LinearClamp : register(s0);
 RWTexture2D<float> OutDepth : register(u0);
 RWTexture2D<float2> OutMotion : register(u1);
@@ -57,8 +51,7 @@ RWTexture2D<float> OutRejection : register(u2);
 RWTexture2D<float> OutExpected : register(u3);
 RWTexture2D<float4> OutColor : register(u4);
 RWTexture2D<uint> OutClass : register(u5);            // prep only, bound when debug.x or debug.y: what the pixel is and whether its history was refused
-RWByteAddressBuffer RefusalCounts : register(u6);     // the census kernel's: 16 stripes of 25 counters, 16 by class, 8 by weapon-refused reason and the accepted skinned pixels (flat_mono_refusal.h).
-                                                       // The same slot is the map plane's range in mapPlaneDepth's own dispatch (two words): one entry per dispatch, each binds its own buffer.
+RWByteAddressBuffer RefusalCounts : register(u6);     // the census kernel's: 16 stripes of 25 counters, 16 by class, 8 by weapon-refused reason and the accepted skinned pixels (flat_mono_refusal.h)
 RWTexture2D<float> OutOutputDomain : register(u7);    // TAA only: 1 when all current colour taps are trusted world
 
 // The pixel classes (flat_mono_refusal.h kFlatMonoClass*, which tools\flat_mono_resolve_test holds these to). The byte the prep writes is the
@@ -192,41 +185,9 @@ uint engineBefore(int2 q,float2 uv,float depth,out float4 before,out uint cls) {
 }
 )HLSL"
 R"HLSL(
-// THE STARS' CHOICE (2026-10-10). On the System Map a depth-0 pixel with a valid plane motion (candidate A, the map plane's camera term)
-// may be a still background (the stars move <= 1.6 px a frame) or a moving line (the grid pans with the plane). Candidate B is the
-// rotation-only term the pixel had before the plane (the pre-fix motion). Each candidate says where the surface was a frame ago; the
-// previous frame's input colour is sampled there (bilinear, the same 3x3 neighbourhood as now), and the lower sum of absolute
-// differences of log luminance wins. Both under kStarTieEpsilon (flat black sky, a tie) keeps A, as the bulk did before. CPU mirror:
-// flat_map_star_choice.h (the same constant and rule).
-static const float kStarTieEpsilon=0.05;
-float starLog(float3 c){return log(max(dot(c,float3(0.2126,0.7152,0.0722)),0.0)+1e-4);}
-// 0: candidate A (plane), 1: candidate B (still), 2: a tie (A).
-uint starChoice(int2 q,float4 planeMotion,float4 stillMotion){
-    const float2 pa=planeMotion.xy/planeMotion.w*float2(.5,-.5)+.5;   // the surface's previous UV under A
-    const float2 pb=stillMotion.xy/stillMotion.w*float2(.5,-.5)+.5;   // ...under B
-    if(!all(isfinite(pa))||!all(isfinite(pb))||any(pb<0)||any(pb>1))return 0;
-    float sa=0,sb=0;
-    for(int j=-1;j<=1;++j)for(int i=-1;i<=1;++i){
-        const int2 o=int2(i,j);
-        const float cur=starLog(Color.Load(int3(clamp(q+o,int2(0,0),int2(size.xy)-1),0)).rgb);
-        const float2 d=float2(o)/float2(size.xy);
-        sa+=abs(cur-starLog(PrevColor.SampleLevel(LinearClamp,pa+d,0).rgb));
-        sb+=abs(cur-starLog(PrevColor.SampleLevel(LinearClamp,pb+d,0).rgb));
-    }
-    if(!isfinite(sa)||!isfinite(sb))return 0;
-    if(sa<kStarTieEpsilon&&sb<kStarTieEpsilon)return 2;
-    return sb<sa?1:0;
-}
-// The choice counts of one group (0 plane, 1 still, 2 tie, 3 not chosen: no previous colour or no still term), added to the
-// four words of u6 once per group on a choice frame (debug.w bit 4).
-groupshared uint gChoice[4];
 [numthreads(8,8,1)]
-void prep(uint3 id:SV_DispatchThreadID,uint gi:SV_GroupIndex) {
-    // No early return: every thread reaches the group barrier. An out-of-range thread's writes are discarded by the UAVs, its loads
-    // read zero, and it counts nothing (inside is false).
-    const bool inside=all(id.xy<uint2(size.xy));
-    if(gi==0){for(uint k=0;k<4;++k)gChoice[k]=0;}
-    GroupMemoryBarrierWithGroupSync();
+void prep(uint3 id:SV_DispatchThreadID) {
+    if(any(id.xy>=size.xy))return;
     int2 q=int2(id.xy); float2 uv=(float2(q)+.5)/float2(size.xy);
     // The depth belongs to the raster pixel q. Both raw camera and engine
     // rows describe the same surface at its unjittered screen coordinate.
@@ -310,35 +271,8 @@ void prep(uint3 id:SV_DispatchThreadID,uint gi:SV_GroupIndex) {
         // out parameter in || would overwrite the exact engine result.
         bool valid=kind==1;
         if(kind==0||kind==3)valid=cameraBefore(rawUv,depth,before);
-        // THE SYSTEM MAP'S PLANE (FlatMonoResolveFrame::mapPlane). A pixel nothing drew (depth 0, kind 0: its slot is unwritten) has a rotation-only
-        // camera term at infinity, which the map's translation does not move. While the map is open it takes the camera term at the midpoint of
-        // the frame's non-zero depth range instead, the map plane's own depth. Only the MOTION comes from that call: `before`, and with it expected
-        // depth, is the call above, so every history depth test and output is what it was. Without the bit the range is not bound and not read.
-        float4 motionBefore=before;
-        const bool beforeValid=valid;   // candidate B: the rotation-only term above (the pre-fix motion)
-        bool planeApplied=false;
-        if(kind==0 && depth==0 && (debug.w&8)!=0) {
-            // The range as mapPlaneDecode (flat_map_plane_range.h) reads it: word 0 the nearest depth, word 1 the inverted farthest. An empty
-            // or bad range (a NaN, an inverted pair, a depth outside (0, 1]) takes today's call.
-            const uint2 span=MapPlaneRange.Load2(0);
-            const float lo=asfloat(span.x), hi=asfloat(~span.y);
-            if(isfinite(lo) && isfinite(hi) && lo>0 && lo<=hi && hi<=1) {
-                const float mid=0.5*(lo+hi);
-                float4 plane;
-                if(isfinite(mid) && cameraBefore(rawUv,mid,plane)) {motionBefore=plane;valid=true;planeApplied=true;}
-            }
-        }
-        // THE STARS' CHOICE (debug.w bit 4, with the plane). A choice of B takes the rotation-only term as the motion; the history
-        // checks below read the chosen term exactly as they read A, and `before` (so expected depth) is unchanged.
-        if(planeApplied && inside) {
-            if((debug.w&16)!=0 && beforeValid) {
-                const uint pick=starChoice(q,motionBefore,before);
-                InterlockedAdd(gChoice[pick],1);
-                if(pick==1)motionBefore=before;
-            } else InterlockedAdd(gChoice[3],1);
-        }
         if(valid) {
-            float2 prev=motionBefore.xy/motionBefore.w*float2(.5,-.5)+.5;
+            float2 prev=before.xy/before.w*float2(.5,-.5)+.5;
             // SDK vectors exclude both raster phases; the backend receives
             // the actual current phase separately and tracks its own history.
             motion=(prev-rawUv)*float2(size.xy);
@@ -360,11 +294,6 @@ void prep(uint3 id:SV_DispatchThreadID,uint gi:SV_GroupIndex) {
     if(flags.z!=0)OutExpected[q]=expected;
     // The refusal census and view: one byte, the class and (bit 7) whether this pixel's history was refused.
     if(debug.x!=0 || debug.y!=0)OutClass[q]=cls|(reject!=0?0x80u:0u);
-    // The choice counts: one add per group and counter, on a choice frame only (the census's pattern: no per-pixel atomics).
-    GroupMemoryBarrierWithGroupSync();
-    if(gi==0 && (debug.w&16)!=0) {
-        for(uint k=0;k<4;++k)if(gChoice[k]!=0)RefusalCounts.InterlockedAdd(4*k,gChoice[k]);
-    }
 }
 )HLSL"
 R"HLSL(
@@ -394,25 +323,6 @@ void census(uint3 id:SV_DispatchThreadID,uint3 gid:SV_GroupID,uint gi:SV_GroupIn
     }
     GroupMemoryBarrierWithGroupSync();
     if(gi<25 && gRefusal[gi]!=0)RefusalCounts.InterlockedAdd(((gid.x&15u)*25u+gi)*4u,gRefusal[gi]);
-}
-
-// THE SYSTEM MAP'S PLANE RANGE (FlatMonoResolveFrame::mapPlane), one dispatch over the frame's depth on a frame whose map is open, before the
-// prep. Each group keeps the smallest asuint of the non-zero depths in (0, 1] and the smallest ~asuint, in shared memory, and makes ONE
-// InterlockedMin into each of the two words of its buffer (u6, RefusalCounts' slot). Word 0 is then the nearest depth; word 1 the inverted
-// farthest (flat_map_plane_range.h has the encoding). Both words are cleared to 0xFFFFFFFF before the dispatch, which is the empty state for
-// both. Both reduce by InterlockedMin, so the clear value is the identity whatever the driver does with it. No early return: every thread
-// reaches both barriers.
-groupshared uint gPlaneNear, gPlaneFarInv;
-[numthreads(8,8,1)]
-void mapPlaneDepth(uint3 id:SV_DispatchThreadID,uint gi:SV_GroupIndex) {
-    if(gi==0){gPlaneNear=0xFFFFFFFFu;gPlaneFarInv=0xFFFFFFFFu;}
-    GroupMemoryBarrierWithGroupSync();
-    if(all(id.xy<size.xy)) {
-        const float d=SceneDepth.Load(int3(id.xy,0));
-        if(d>0 && d<=1){const uint b=asuint(d);InterlockedMin(gPlaneNear,b);InterlockedMin(gPlaneFarInv,~b);}
-    }
-    GroupMemoryBarrierWithGroupSync();
-    if(gi==0){RefusalCounts.InterlockedMin(0,gPlaneNear);RefusalCounts.InterlockedMin(4,gPlaneFarInv);}
 }
 
 // The HDR route accumulates in a bounded space, c / (1 + max3(c)), and inverts it on output: a sun disc or a hot

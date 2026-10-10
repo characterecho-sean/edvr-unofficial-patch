@@ -87,7 +87,7 @@ bool journalFssFocus();
 bool journalGuiFocus(uint32_t* focus);
 
 // THE FLAT PROFILE'S ONE READER. The watcher runs in flat (d3d11.journal_watch
-// is on there) for the System Map: flat_runtime's map-plane motion asks this,
+// is on there) for the maps: flat_runtime's map focus asks this,
 // and only this, for GuiFocus. Same answer as journalGuiFocus, but it answers
 // only in flat. Every accessor above answers in flat with the value a stopped
 // watcher gives, so the flat consumers written against "no journal" do not see

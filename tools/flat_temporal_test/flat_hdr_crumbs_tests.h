@@ -499,8 +499,8 @@ inline int flatHdrCrumbWiringTests() {
                     "const UINT prepViewCount=skin?18:(foreground?16:14);",
                     "context->CSSetShaderResources(0,prepViewCount,prepViews);",
                     "context->Dispatch((f.renderWidth+7)/8,(f.renderHeight+7)/8,1);",
-                    "ID3D11UnorderedAccessView* nullUavs[7]={};ID3D11ShaderResourceView* nullViews[18]={};",
-                    "context->CSSetUnorderedAccessViews(0,7,nullUavs,nullptr);",
+                    "ID3D11UnorderedAccessView* nullUavs[6]={};ID3D11ShaderResourceView* nullViews[18]={};",
+                    "context->CSSetUnorderedAccessViews(0,6,nullUavs,nullptr);",
                     "context->CSSetShaderResources(0,prepViewCount,nullViews);", "if(hdr)++stats.hdrPrepped;", "prepStep.close();",
                     "backendStep.close();", "if(hdr && ok)++stats.hdrBackend;", "if(!ok) {"},
             "the resolve counts its copy, prep and backend for the 5 s line as each completes");

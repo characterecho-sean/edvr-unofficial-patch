@@ -76,13 +76,16 @@ inline uint32_t flatUiMapToneSlotOf(uint64_t vs, uint64_t ps) {
     return vs == kFlatUiMapToneVs && ps == kFlatUiMapTonePs ? 0u : ~0u;  // the scene is SRV slot 0
 }
 
-// TEMPORAL AA OFF ON THE GALAXY MAP AND THE ORRERY (maintainer's decision, 2026-10-10). Their scenes have no non-zero depth, so
-// no motion exists for the temporal history, and the grid and line draws (census: depth off, additive or multiply, drawn
-// before the map composites) smear through accumulation. While GuiFocus is 6 or 8 the frame runs no temporal resolve and no
-// jitter (the copy route's spatial recovery stands in, flat_runtime.cpp); the UI layer keeps the map's text and markers. The
-// System Map (7) is not in it. GuiFocus unknown is not in it either.
-inline bool flatUiMapTemporalOff(bool known, uint32_t focus) { return known && (focus == 6 || focus == 8); }
-inline const char* flatUiMapTemporalName(uint32_t focus) { return focus == 8 ? "the Orrery" : "the Galaxy Map"; }
+// TEMPORAL AA OFF WHILE A MAP IS OPEN (maintainer's decisions, 2026-10-10: the Galaxy Map and the Orrery first, then the System
+// Map). The map scenes' grid, line and star draws are not taken by the UI layer, and their temporal history smears (the
+// System Map's stars pan with the plane in one capture and sit near still in another, so no motion rule fits both: the
+// plane-motion and star-choice work is removed). While GuiFocus is 6, 7 or 8 the frame runs no temporal resolve and no jitter
+// (the copy route's spatial recovery stands in, flat_runtime.cpp); the UI layer keeps the map's text and markers. GuiFocus
+// unknown, and every other screen, keep temporal AA as before.
+inline bool flatUiMapTemporalOff(bool known, uint32_t focus) { return known && (focus == 6 || focus == 7 || focus == 8); }
+inline const char* flatUiMapTemporalName(uint32_t focus) {
+    return focus == 8 ? "the Orrery" : focus == 7 ? "the System Map" : "the Galaxy Map";
+}
 
 // The map line's temporal-AA counts (2026-10-10), as pure state so the rig pins them. A frame is `temporalOff` when the
 // mechanism is armed at the frame boundary; `jitterZeroed` when that frame would otherwise have jittered. A frame whose copy

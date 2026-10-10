@@ -2106,7 +2106,7 @@ State& ensureState() {
         journalWatchConfigure();
         g_state->fssModeLatchWanted =
             eyeSyncFromConfig(Config::get()).any();
-        // Flat reads the System Map's GuiFocus from Status.json for the map-plane motion, at the same 100 ms the FSS latch wants.
+        // Flat reads the GuiFocus of the open map (temporal AA off on the Galaxy Map, the System Map and the Orrery) from Status.json, at the same 100 ms the FSS latch wants.
         journalWatchSetEagerStatus(g_state->fssModeLatchWanted || runtimeFlatProfile());
     }
     return *g_state;

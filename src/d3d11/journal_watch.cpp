@@ -899,7 +899,7 @@ void journalWatchConfigure() {
     if (runtimeFlatProfile()) {
         // The flat profile's one reader is the System Map's GuiFocus (journalFlatGuiFocus). The accessors above answer flat with
         // the no-journal values, so this line is the only place the watcher says it runs there.
-        Log::get().note("journal: flat profile -- Status.json is read for the System Map's GuiFocus (flat map motion). The journal's "
+        Log::get().note("journal: flat profile -- Status.json is read for the map's GuiFocus (temporal AA off on the maps). The journal's "
                         "events are tailed but not used in flat.");
         return;
     }

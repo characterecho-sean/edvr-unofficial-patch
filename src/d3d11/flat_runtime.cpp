@@ -49,7 +49,7 @@
 #include "binding_shadow.h"
 #include "exposure_fix.h"
 #include "device_hook.h"
-#include "journal_watch.h"   // the System Map's GuiFocus for the map-plane motion (flatRuntimeMapPlaneFrame)
+#include "journal_watch.h"   // the map's GuiFocus (flatRuntimeMapFocusFrame): temporal AA off on the maps, and the map families' gate
 #include "dlaa.h"
 #include "flat_sharpen.h"
 #include "flat_ui_layer_math.h"   // fix.ui_quality's flat layer: the target class and family rule its decision asks
@@ -600,49 +600,31 @@ struct State {
 };
 // Driver objects retire on the owner Present; never release under loader lock.
 State& state() { static State* p = new State; return *p; }
-// THE SYSTEM MAP'S PLANE (FlatMonoResolveFrame::mapPlane) AND THE MAP FAMILIES (flat_ui_layer_math.h flatUiMapFamilyOf).
-// Status.json's GuiFocus 7 is the System Map, 6 the Galaxy Map, 8 the Orrery. The flat runtime reads the journal watcher's
-// flat reader (journalFlatGuiFocus) ONCE per frame, at the frame boundary (flatRuntimeMapFocusFrame), and every answer the
-// frame gives comes from that read: the map plane's flag (what the resolver's map-plane reduction and the prep's midpoint
-// motion wait on; nothing else reads it) and the map families' gate (flatRuntimeMapOpenFrame). A frame's answer does not
-// change mid-frame. Each change of the map plane's answer is logged once.
-struct MapPlaneWatch {
-    bool open = false;          // the System Map open, this frame's answer (GuiFocus 7)
+// THE MAP FOCUS (2026-10-10). Status.json's GuiFocus 6 is the Galaxy Map, 7 the System Map, 8 the Orrery. The flat runtime reads the
+// journal watcher's flat reader (journalFlatGuiFocus) ONCE per frame, at the frame boundary (flatRuntimeMapFocusFrame), and every answer
+// the frame gives comes from that read: temporal AA off while a map is open (flatUiMapTemporalOff) and the map families' gate
+// (flatRuntimeMapOpenFrame). A frame's answer does not change mid-frame. Each change of the temporal AA answer is logged once.
+struct MapFocusWatch {
     bool focusKnown = false;    // the watcher has reported GuiFocus at least once this session
     uint32_t focus = 0;         // the last GuiFocus it reported, while known
     bool frameKnown = false;    // this frame's read: the watcher reported a GuiFocus
     uint32_t frameFocus = 0;    // ...and its value, while known
-    uint32_t noted = 0;         // transition lines written
-    bool temporalOff = false;   // temporal AA is off this frame (GuiFocus 6 or 8: flat_ui_layer_math.h flatUiMapTemporalOff)
+    bool temporalOff = false;   // temporal AA is off this frame (GuiFocus 6, 7 or 8: flat_ui_layer_math.h flatUiMapTemporalOff)
     uint32_t aaNoted = 0;       // the temporal AA transition lines written
 };
-MapPlaneWatch& mapPlaneWatch() { static MapPlaneWatch* p = new MapPlaneWatch; return *p; }
-constexpr uint32_t kMapPlaneNoteCap = 64;
+MapFocusWatch& mapFocusWatch() { static MapFocusWatch* p = new MapFocusWatch; return *p; }
+constexpr uint32_t kMapFocusNoteCap = 64;
 void flatRuntimeMapFocusFrame() {
-    MapPlaneWatch& w = mapPlaneWatch();
+    MapFocusWatch& w = mapFocusWatch();
     uint32_t focus = 0;
     const bool known = journalFlatGuiFocus(&focus);
     if (known) { w.focusKnown = true; w.focus = focus; }
     w.frameKnown = known;
     w.frameFocus = known ? focus : 0;
-    const bool open = known && focus == 7;
-    if (open != w.open) {
-        w.open = open;
-        if (w.noted < kMapPlaneNoteCap) {
-            ++w.noted;
-            if (open)
-                Log::get().note("flat map motion: the System Map is open (Status.json GuiFocus 7); pixels with no depth take the map plane's motion");
-            else if (known)
-                Log::get().note("flat map motion: the System Map is closed (GuiFocus %u); pixels with no depth are at infinity again", focus);
-            else
-                Log::get().note("flat map motion: the System Map is closed (GuiFocus unknown); pixels with no depth are at infinity again");
-        }
-    }
-    // Temporal AA off on the Galaxy Map and the Orrery (flat_ui_layer_math.h): its own transition lines, once each, capped.
     const bool off = flatUiMapTemporalOff(known, focus);
     if (off != w.temporalOff) {
         w.temporalOff = off;
-        if (w.aaNoted < kMapPlaneNoteCap) {
+        if (w.aaNoted < kMapFocusNoteCap) {
             ++w.aaNoted;
             if (off)
                 Log::get().note("flat map aa: temporal AA off on %s (GuiFocus %u): no accumulation, no jitter; the UI layer keeps the map's "
@@ -654,13 +636,11 @@ void flatRuntimeMapFocusFrame() {
         }
     }
 }
-// The System Map's plane, this frame (the frame's read).
-bool flatRuntimeMapPlaneFrame() { return mapPlaneWatch().open; }
-// Temporal AA is off this frame: the Galaxy Map or the Orrery is open (the frame's read).
-bool flatRuntimeMapTemporalOff() { return mapPlaneWatch().temporalOff; }
+// Temporal AA is off this frame: a map is open (the frame's read).
+bool flatRuntimeMapTemporalOff() { return mapFocusWatch().temporalOff; }
 // The Galaxy Map (6), the System Map (7) or the Orrery (8) is open, this frame (the frame's read): the map families' gate.
 bool flatRuntimeMapOpenFrame() {
-    const MapPlaneWatch& w = mapPlaneWatch();
+    const MapFocusWatch& w = mapFocusWatch();
     return w.frameKnown && (w.frameFocus == 6 || w.frameFocus == 7 || w.frameFocus == 8);
 }
 // Row 275's size and its frame-to-frame step (design doc section 104). The float32 spacing at that size is the finest step the camera
@@ -3797,33 +3777,16 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
                     o.maxStep,o.minStep);
             }
             s.origin={};
-            // The System Map's plane (FlatMonoResolveFrame::mapPlane), every window, zeros included: map-frames the reduction ran for, its
-            // dispatches, the last range read back and how many read-backs had no non-zero depth. "map-frames=0" with the map open is the
-            // flag never reaching the resolver; "reductions" above map-frames is a reduction that never ran; a range with a midpoint near
-            // 0.0011-0.0012 is the map plane (the body depths are 0.00113-0.00119).
+            // The map focus, every window, zeros included: the GuiFocus the watcher last reported, whether temporal AA is off on a map this
+            // frame, and the watcher's own state (ungated by profile, journalRawStatus). statusSamples=0 with watcher=active is the file never
+            // being read; gui-known=0 is the field absent.
             {
-                const FlatMonoMapPlane plane=flatMonoResolveTakeMapPlane();
-                const MapPlaneWatch& w=mapPlaneWatch();
+                const MapFocusWatch& w=mapFocusWatch();
                 char focus[16]="unknown";
                 if(w.focusKnown)std::snprintf(focus,sizeof(focus),"%u",w.focus);
-                // The decoded range is printed only when it is valid (never NaN); the raw words always, so a bad clear or a bad read is visible as
-                // words=FFFFFFFF/FFFFFFFF or an empty plane=none beside them. Word 1 is the inverted far depth (flat_map_plane_range.h).
-                char range[96]="none";
-                if(plane.haveRange)std::snprintf(range,sizeof(range),"%.6f..%.6f (midpoint %.6f)",plane.minDepth,plane.maxDepth,plane.midpoint());
-                char words[24]="none";
-                if(plane.haveWords)std::snprintf(words,sizeof(words),"%08X/%08X",plane.nearWord,plane.farWord);
-                // The watcher's own state, ungated by profile (journalRawStatus): whether it runs, how many Status.json reads parsed, and the last
-                // sample's GuiFocus. statusSamples=0 with watcher=active is the file never being read; gui-known=0 is the field absent.
                 const JournalRawStatus raw=journalRawStatus();
-                // The stars' choice (2026-10-10): the depth-0 pixels of the choice frames by what they chose (plane, still, tie kept at the
-                // plane, and not chosen), and the map frames that had no previous colour to choose with (no-previous frames).
-                Log::get().note("flat map motion 5s: focus=%s map-frames=%llu reductions=%llu plane=%s words=%s empty=%llu watcher=%s status-samples=%u "
-                                "gui-known=%d gui=%u; the System Map's pixels with no depth take the plane's motion while it is open; "
-                                "chose-plane=%llu chose-still=%llu ties=%llu not-chosen=%llu no-previous=%llu",
-                    focus,(unsigned long long)plane.frames,(unsigned long long)plane.reductions,range,words,(unsigned long long)plane.empty,
-                    raw.active?"active":"inactive",raw.statusSamples,raw.guiKnown?1:0,raw.gui,
-                    (unsigned long long)plane.chosePlane,(unsigned long long)plane.choseStill,(unsigned long long)plane.ties,
-                    (unsigned long long)plane.unchosen,(unsigned long long)plane.noPrevious);
+                Log::get().note("flat map focus 5s: focus=%s temporal-aa-off=%u watcher=%s status-samples=%u gui-known=%d gui=%u",
+                    focus,w.temporalOff?1u:0u,raw.active?"active":"inactive",raw.statusSamples,raw.guiKnown?1:0,raw.gui);
             }
         }
         // The census of unkeyed pairs, every window while a temporal mode runs (empty
@@ -5597,7 +5560,6 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     f.staticScene=flatFrameThroughMenuCopy(s.prefix,selected.hdr);
     if(f.staticScene)++s.staticSceneFrames;
     f.steadyDetail=true;   // the depth-validated steady detail: always on, no key (the 3D menu's blanket rule above is separate and wins where it applies)
-    f.mapPlane=flatRuntimeMapPlaneFrame();   // the System Map open: depth-0 pixels take the map plane's motion (flat_mono_resolve.h)
     // Metadata is frozen from the qualified handoff for a future frame's
     // preflight. It cannot authorize jitter in this already rendered frame.
     Ptr<ID3D11Texture2D> colorTexture;
@@ -5973,7 +5935,6 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
     f.staticScene = flatFrameThroughMenuCopy(s.prefix, selected.hdr);
     if (f.staticScene) ++s.staticSceneFrames;
     f.steadyDetail = true;   // the depth-validated steady detail: always on, no key (the 3D menu's blanket rule above is separate and wins where it applies)
-    f.mapPlane = flatRuntimeMapPlaneFrame();   // the System Map open: depth-0 pixels take the map plane's motion (flat_mono_resolve.h)
     // The plan, frozen from the qualified trigger for the next frame's preflight, as the copy route freezes its own.
     Ptr<ID3D11Texture2D> colorTexture;
     if (s.projection && SUCCEEDED(hdrResource.As(&colorTexture))) {

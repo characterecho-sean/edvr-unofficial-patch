@@ -22,7 +22,8 @@
   cheap; separate scheduling/capture when it saves copies/sync/per-draw work.
   Defer broad core extraction until flat capture establishes the boundary.
 - **Recommendation:** two installers, one graphics implementation, one temporal pipeline, separate VR/mono adapters; flat enables only temporal AA + support.
-- **10-10 map arcs (section below):** System Map (7): depth-0 pixels take the plane's motion, the stars choose per pixel (built, not flown), and the cursor takes no cancel (built, not flown). Galaxy Map (6) and Orrery (8): temporal AA OFF, no jitter (built, not flown).
+- **10-10 map arcs (section below):** temporal AA OFF, no jitter, while any map is open (GuiFocus 6, 7, 8; built, not flown). The
+  plane-motion and per-pixel star-choice work is REMOVED (the stars' parallax, section below). Kept: the map UI families and their zero cancel.
 - **106 (10-09):** fixed exposure 1.0 SHIPS on the flat HDR route (flown by eye:
   brighter, stars back); temporary key and luma probe REMOVED. VR keeps auto.
 - **Open:** station/on-foot projection coverage and mixed-camera HDR ownership,
@@ -14712,3 +14713,41 @@ group reduction) and the copy/bind/readback in flat_mono_resolve.cpp. Those need
 
 Flight checks: the stars hold still on the System Map (the ghosting gone); the lines still pan; the cursor does not pulse under TAA or DLAA; the
 5s line's chose-still share is high where the sky is and low on the lines; no-previous is one per map start and per reset.
+
+### 2026-10-10: the stars' parallax; temporal AA off on all three maps; the plane and star-choice work removed (built, not flown)
+
+The star evidence disagrees between captures. In the capture of 33034 to 33035 (plane motion 10.2 px, a uniform pan), every luminance
+band of the depth-0 content, the stars included, matches best at the plane motion: the input and the resolved output both pan with it.
+In the earlier capture the stars were near still (about 2% of the plane pan). The stars sit on a parallax layer whose rate varies, so
+no single rule that picks between the plane motion and the rotation-only motion is right for both. Offline, the best rule for one
+capture sent 15% of the stars to still in the other, where they pan. The plane-motion path (FIX 2 of 60735460 and the map-plane
+reduction before it) is dropped for that reason.
+
+Decision (maintainer, 2026-10-10): temporal AA is off while any map is open: the Galaxy Map (GuiFocus 6), the System Map (7) and
+the Orrery (8). The frame runs no temporal resolve and no jitter; the copy route's spatial recovery stands in (327f62dd); the
+UI layer keeps the map's text, markers and cursor. The System Map loses DLAA on the planets too, as the maintainer accepted.
+Flight: all three maps at native (DLAA), expecting the game's own image with no ghosting; then one session with an upscaling
+mode below native (DLSS Quality or game SS below 1) to check the maps are not black or blank and the text is intact.
+
+Removed (the code that only served the System Map's motion and the star choice):
+- Shader (flat_mono_shader_source.h, reverted to 322271d9^): the mapPlaneDepth entry, the t18 map range, the debug.w bit 8 path in the
+  prep, the star choice (starLog, starChoice, the t19 previous colour, gChoice, the group reduction) and debug.w bit 16. The prep is back to
+  its early return and its single parameter.
+- Resolver (flat_mono_resolve.cpp/.h, reverted to 322271d9^): FlatMonoResolveFrame::mapPlane, the plane reduction and its readback ring,
+  the previous-colour copy, the choice binds and counts, FlatMonoMapPlane, flatMonoResolveTakeMapPlane.
+- Headers and rig: flat_map_plane_range.h, flat_map_star_choice.h, gate_test section 9 (the plane's range words), the ui_quality_test
+  star pins; the shader build's mapPlaneDepth entry and self-test name; the hdr crumb pin's post-dispatch unbind is back to six UAVs.
+- Runtime (flat_runtime.cpp): the plane flag on both resolve sites, the "flat map motion" transition lines, and the 5 s plane line.
+
+Kept:
+- The flat Status.json reader and GuiFocus plumbing (journalFlatGuiFocus, the allow-list keys, eager polling in device_hook.cpp,
+  flatRuntimeMapFocusFrame, the one per-frame read at the boundary), and the journal's flat log text (now "for the map's GuiFocus").
+- The map UI families (kMapCanvas, kMapSprite), the C89DD4 tone candidate and its SRV capture, the map families' zero cancel
+  (flatUiLayerCancelOf), and the map line's counts. They serve frames that are treated (below native, the copy route's recovery).
+- The temporal-off counters (temporal-off, jitter-zeroed, spatial, spatial-refused, no-copy, resets) and the logs "flat map aa: temporal
+  AA off on the Galaxy Map | the System Map | the Orrery" and "temporal AA on again".
+- A new 5 s line: "flat map focus 5s: focus=N temporal-aa-off=0|1 watcher=... status-samples=N gui-known=0|1 gui=N" (every window, zeros included).
+- The draw census (d7df341c's DCO recording and 375e6ba3's NumLock census) and the journal diagnostics (455854ff's gate_test section 8).
+
+Rig: ui_quality_test pins flatUiMapTemporalOff for 6, 7 and 8 (on), another screen and an unknown GuiFocus (off), and the three names.
+gate_test section 8 still runs the GuiFocus rig case. Not covered: the spatial recovery's image on a map, and the flight.

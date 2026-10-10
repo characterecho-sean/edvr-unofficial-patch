@@ -1,5 +1,4 @@
 #include "flat_mono_resolve.h"
-#include "flat_map_plane_range.h"   // the System Map plane's range encoding (the reduction's words and their decode)
 #include "dlaa.h"
 #include "fsr3_engine.h"
 #include "temporal_shader_bytecode.h"
@@ -88,28 +87,6 @@ struct State {
     bool refusalPending[4]={false,false,false,false};
     uint32_t refusalWidth[4]={0,0,0,0}, refusalHeight[4]={0,0,0,0};
     uint32_t refusalWrite=0;
-    // The System Map's plane range (FlatMonoResolveFrame::mapPlane): the reduction's two words (u6 in its own dispatch, bound at t18 to the prep
-    // as a raw view), the compute shader, and a four-slot staging ring read back without waiting, the refusal census's pattern.
-    ComPtr<ID3D11ComputeShader> planeScan;
-    ComPtr<ID3D11Buffer> planeRange;
-    ComPtr<ID3D11UnorderedAccessView> planeRangeUav;
-    ComPtr<ID3D11ShaderResourceView> planeRangeSrv;
-    ComPtr<ID3D11Buffer> planeStaging[4];
-    bool planePending[4]={false,false,false,false};
-    uint32_t planeWrite=0;
-    // The stars' choice (2026-10-10, flat_mono_shader_source.h starChoice): the previous map frame's input colour (an EDVR-owned copy of
-    // g.color, made after the prep on each map frame, its shader view at t19), whether the previous resolve call made that copy, and the
-    // choice counts (four words at u6 in the prep, read back through a four-slot ring like the map range).
-    ComPtr<ID3D11Texture2D> prevColor;
-    ComPtr<ID3D11ShaderResourceView> prevColorSrv;
-    uint32_t prevColorW=0, prevColorH=0;
-    DXGI_FORMAT prevColorFmt=DXGI_FORMAT_UNKNOWN;
-    bool lastCallCopied=false;
-    ComPtr<ID3D11Buffer> choiceCounts;
-    ComPtr<ID3D11UnorderedAccessView> choiceUav;
-    ComPtr<ID3D11Buffer> choiceStaging[4];
-    bool choicePending[4]={false,false,false,false};
-    uint32_t choiceWrite=0;
     Image color, rawOverlay, depth[2], motion, rejection, expected, output[2], outputDomain[2];
     uint32_t width=0, height=0, outWidth=0, outHeight=0, evalWidth=0, evalHeight=0, current=0;
     // The steady-detail depth check's previous depth (FlatMonoResolveFrame::steadyDetail). TAA keeps last frame's depth in depth[current^1]
@@ -155,9 +132,6 @@ FlatContextState& g_contextBlock=*new FlatContextState;
 FlatMonoRefusalCensus& g_refusal=*new FlatMonoRefusalCensus;
 uint64_t g_refusalCadence=0;
 bool g_refusalFailureLogged=false;
-// The System Map plane's counts since the last take, and its last range read back (a take clears the counts, not the range). Leaked on purpose.
-FlatMonoMapPlane& g_mapPlane=*new FlatMonoMapPlane;
-bool g_planeFailureLogged=false;
 // The steady-detail rule's second depth image could not be made: said once, and the frames that ask run as if they had not (refused as before).
 bool g_steadyFailureLogged=false;
 // rowsJitter: the NDC shift the camera rows themselves carry (current xy, previous zw), the shader removes it; all zero
@@ -545,112 +519,6 @@ void pollRefusalCensus(ID3D11DeviceContext* context) {
 }
 // The ring is consumed in order, so the next sample may be taken only if the slot it would write is not still waiting to be read.
 bool refusalSlotFree() { return !g.refusalPending[g.refusalWrite]; }
-// The System Map's plane range (FlatMonoResolveFrame::mapPlane): the reduction, its two-word raw buffer with a raw UAV (the dispatch) and a raw SRV
-// (the prep, t18), and the staging ring its result is read back from. Made on the first map frame that is not a reset; nothing else makes it.
-bool ensureMapPlaneRange() {
-    if(g.planeScan && g.planeRange && g.planeRangeUav && g.planeRangeSrv && g.planeStaging[0] && g.planeStaging[1] && g.planeStaging[2] && g.planeStaging[3] &&
-       g.choiceCounts && g.choiceUav && g.choiceStaging[0] && g.choiceStaging[1] && g.choiceStaging[2] && g.choiceStaging[3])
-        return true;
-    // The stars' choice counts (2026-10-10): four raw words at u6 in the prep (flat_mono_shader_source.h), and their staging ring.
-    ID3D11Device* const choiceDevice=g.device.Get();
-    if(!choiceDevice)return false;
-    if(!g.choiceCounts) {
-        D3D11_BUFFER_DESC cd{};cd.ByteWidth=16;cd.Usage=D3D11_USAGE_DEFAULT;cd.BindFlags=D3D11_BIND_UNORDERED_ACCESS;
-        cd.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
-        if(FAILED(choiceDevice->CreateBuffer(&cd,nullptr,g.choiceCounts.GetAddressOf())))return false;
-    }
-    if(!g.choiceUav) {
-        D3D11_UNORDERED_ACCESS_VIEW_DESC ud{};ud.Format=DXGI_FORMAT_R32_TYPELESS;ud.ViewDimension=D3D11_UAV_DIMENSION_BUFFER;
-        ud.Buffer.NumElements=4;ud.Buffer.Flags=D3D11_BUFFER_UAV_FLAG_RAW;
-        if(FAILED(choiceDevice->CreateUnorderedAccessView(g.choiceCounts.Get(),&ud,g.choiceUav.GetAddressOf())))return false;
-    }
-    for(auto& staging:g.choiceStaging) {
-        if(staging)continue;
-        D3D11_BUFFER_DESC sd{};sd.ByteWidth=16;sd.Usage=D3D11_USAGE_STAGING;sd.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
-        if(FAILED(choiceDevice->CreateBuffer(&sd,nullptr,staging.GetAddressOf())))return false;
-    }
-    ID3D11Device* device=g.device.Get();
-    if(!device)return false;
-    if(!g.planeScan && FAILED(device->CreateComputeShader(kFlatMonoMapPlaneBytecode,sizeof(kFlatMonoMapPlaneBytecode),nullptr,g.planeScan.GetAddressOf())))
-        return false;
-    if(!g.planeRange) {
-        D3D11_BUFFER_DESC bd{};bd.ByteWidth=8;bd.Usage=D3D11_USAGE_DEFAULT;bd.BindFlags=D3D11_BIND_UNORDERED_ACCESS|D3D11_BIND_SHADER_RESOURCE;
-        bd.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
-        if(FAILED(device->CreateBuffer(&bd,nullptr,g.planeRange.GetAddressOf())))return false;
-    }
-    if(!g.planeRangeUav) {
-        D3D11_UNORDERED_ACCESS_VIEW_DESC ud{};ud.Format=DXGI_FORMAT_R32_TYPELESS;ud.ViewDimension=D3D11_UAV_DIMENSION_BUFFER;
-        ud.Buffer.NumElements=2;ud.Buffer.Flags=D3D11_BUFFER_UAV_FLAG_RAW;
-        if(FAILED(device->CreateUnorderedAccessView(g.planeRange.Get(),&ud,g.planeRangeUav.GetAddressOf())))return false;
-    }
-    if(!g.planeRangeSrv) {
-        D3D11_SHADER_RESOURCE_VIEW_DESC sd{};sd.Format=DXGI_FORMAT_R32_TYPELESS;sd.ViewDimension=D3D11_SRV_DIMENSION_BUFFEREX;
-        sd.BufferEx.NumElements=2;sd.BufferEx.Flags=D3D11_BUFFEREX_SRV_FLAG_RAW;
-        if(FAILED(device->CreateShaderResourceView(g.planeRange.Get(),&sd,g.planeRangeSrv.GetAddressOf())))return false;
-    }
-    for(auto& staging:g.planeStaging) {
-        if(staging)continue;
-        D3D11_BUFFER_DESC bd{};bd.ByteWidth=8;bd.Usage=D3D11_USAGE_STAGING;bd.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
-        if(FAILED(device->CreateBuffer(&bd,nullptr,staging.GetAddressOf())))return false;
-    }
-    return true;
-}
-// The previous map frame's input colour (the stars' choice): a texture shaped like the input copy (g.color), with its default shader view
-// (t19). Made on the first map frame and again when the input's size or format changes (the old copy is then no previous frame).
-bool ensurePrevColor(ID3D11Device* device,const D3D11_TEXTURE2D_DESC& like) {
-    if(g.prevColor && g.prevColorSrv && g.prevColorW==like.Width && g.prevColorH==like.Height && g.prevColorFmt==like.Format)return true;
-    g.prevColor.Reset();g.prevColorSrv.Reset();g.lastCallCopied=false;
-    if(!device)return false;
-    D3D11_TEXTURE2D_DESC td=like;
-    td.Usage=D3D11_USAGE_DEFAULT;td.BindFlags=D3D11_BIND_SHADER_RESOURCE;td.CPUAccessFlags=0;td.MiscFlags=0;
-    td.MipLevels=1;td.ArraySize=1;td.SampleDesc.Count=1;td.SampleDesc.Quality=0;
-    if(FAILED(device->CreateTexture2D(&td,nullptr,g.prevColor.GetAddressOf()))) {g.prevColor.Reset();return false;}
-    if(FAILED(device->CreateShaderResourceView(g.prevColor.Get(),nullptr,g.prevColorSrv.GetAddressOf()))) {
-        g.prevColor.Reset();g.prevColorSrv.Reset();return false;
-    }
-    g.prevColorW=like.Width;g.prevColorH=like.Height;g.prevColorFmt=like.Format;
-    return true;
-}
-// Reads back the ranges the GPU has finished, oldest first, without waiting (the refusal census's ring, the same order rule).
-void pollMapPlane(ID3D11DeviceContext* context) {
-    if(!context)return;
-    // The stars' choice counts of the choice frames the GPU has finished (the same ring order).
-    for(uint32_t k=0;k<4;++k) {
-        const uint32_t i=(g.choiceWrite+k)%4;
-        if(!g.choicePending[i])continue;
-        D3D11_MAPPED_SUBRESOURCE mapped{};
-        if(context->Map(g.choiceStaging[i].Get(),0,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&mapped)!=S_OK)break;
-        const uint32_t* words=static_cast<const uint32_t*>(mapped.pData);
-        g_mapPlane.chosePlane+=words[0];g_mapPlane.choseStill+=words[1];g_mapPlane.ties+=words[2];g_mapPlane.unchosen+=words[3];
-        context->Unmap(g.choiceStaging[i].Get(),0);
-        g.choicePending[i]=false;
-    }
-    for(uint32_t k=0;k<4;++k) {
-        const uint32_t i=(g.planeWrite+k)%4;
-        if(!g.planePending[i])continue;
-        D3D11_MAPPED_SUBRESOURCE mapped{};
-        if(context->Map(g.planeStaging[i].Get(),0,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&mapped)!=S_OK)break;
-        const uint32_t* words=static_cast<const uint32_t*>(mapped.pData);
-        const uint32_t nearWord=words[0],farWord=words[1];
-        context->Unmap(g.planeStaging[i].Get(),0);
-        g.planePending[i]=false;
-        ++g_mapPlane.readbacks;
-        g_mapPlane.nearWord=nearWord;
-        g_mapPlane.farWord=farWord;
-        g_mapPlane.haveWords=true;
-        // The decode refuses an empty frame, a NaN, an inverted pair and a depth outside (0, 1]: such a read-back is an empty one, and the
-        // range printed is the last valid one, never a NaN.
-        const MapPlaneRange range=mapPlaneDecode(nearWord,farWord);
-        if(!range.valid) {
-            ++g_mapPlane.empty;
-            g_mapPlane.haveRange=false;
-        } else {
-            g_mapPlane.minDepth=range.lo;
-            g_mapPlane.maxDepth=range.hi;
-            g_mapPlane.haveRange=true;
-        }
-    }
-}
 // The first-person inputs (FlatMonoResolveFrame::firstPersonMotion and firstPersonStencil, section 82), checked the way
 // inputTexture checks the colour and depth views, and answered by name: null when the view is fit to bind, else a static
 // reason. The reason goes to stats.firstPersonRefusal and the log; a refusal never refuses the frame, it only drops the pair.
@@ -763,13 +631,6 @@ FlatMonoRefusalCensus flatMonoResolveTakeRefusalCensus() {
     g_refusal=FlatMonoRefusalCensus{};
     return out;
 }
-FlatMonoMapPlane flatMonoResolveTakeMapPlane() {
-    if(g.context)pollMapPlane(g.context.Get());
-    FlatMonoMapPlane out=g_mapPlane;
-    g_mapPlane.frames=g_mapPlane.reductions=g_mapPlane.readbacks=g_mapPlane.empty=0;   // the range stays: it is the last one read back
-    g_mapPlane.chosePlane=g_mapPlane.choseStill=g_mapPlane.ties=g_mapPlane.unchosen=g_mapPlane.noPrevious=0;   // the stars' choice counts
-    return out;
-}
 // The preflight proper; the public entry below puts the route's crumbs around it.
 static FlatMonoResolvePreflightResult preflightBody(ID3D11Device* device,
     ID3D11DeviceContext* context,const FlatMonoResolvePreflight& planned) {
@@ -879,9 +740,6 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
                      ID3D11ShaderResourceView** output,const char** reason) {
     CrumbScope crumbs(f.hdr);   // the HDR route's breadcrumbs (flat_hdr_crumbs.h) for every step below
     ++stats.calls;
-    // The stars' choice's previous frame: only a call that made the previous input copy (the call before was a map frame) can use it.
-    const bool prevUsable=g.lastCallCopied;
-    g.lastCallCopied=false;
     if(output)*output=nullptr;
     if(reason)*reason=nullptr;
     if(!output || !device || !context || !f.renderWidth || !f.renderHeight || !f.outputWidth || !f.outputHeight ||
@@ -945,7 +803,6 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     if(!initialize(device,context,reason))return false;
     if(hdr && !initializeHdr(device,reason))return false;
     pollRefusalCensus(context);   // the samples the GPU finished since the last call (nothing pending: one flag test per slot)
-    pollMapPlane(context);        // the same for the System Map plane's ranges
     ComPtr<ID3D11Texture2D> color,depth,cleanColor,overlayMask,untrustedMask;
     const bool overlay=f.cleanColor || f.overlayCoverage;
     if(overlay && (!hdr || !f.cleanColor || !f.overlayCoverage))
@@ -1100,30 +957,6 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     }
     const bool depthCheck=steadyAvailable && !reset;
     if(steady && !reset) {if(depthCheck)++g_refusal.checked;else ++g_refusal.skipped;}
-    // The System Map's plane (FlatMonoResolveFrame::mapPlane): a map frame that is not a reset reduces the frame's depth to its range before the
-    // prep, which then reads it at t18 (debug.w bit 3). A reset frame refuses every pixel anyway, so it runs nothing. If the resources cannot be
-    // made the frame runs as if the map were closed, and says so once.
-    bool planeOn=f.mapPlane && !reset;
-    if(planeOn && !ensureMapPlaneRange()) {
-        planeOn=false;
-        if(!g_planeFailureLogged) {
-            g_planeFailureLogged=true;
-            Log::get().note("flat resolve: the System Map plane's resources could not be made (reduction, range buffer or readback ring); the map "
-                            "frames run as if the map were closed");
-        }
-    }
-    if(planeOn)++g_mapPlane.frames;
-    // The stars' choice (2026-10-10): a map frame whose previous call copied its input chooses per pixel against that copy. This
-    // frame's copy (made after the prep) is the next frame's. The copy follows the input's size and format; a frame without a usable
-    // previous copy runs the plane as before and is counted as no-previous.
-    bool choiceOn=false;
-    if(planeOn && g.color.texture) {
-        D3D11_TEXTURE2D_DESC inputDesc{};g.color.texture->GetDesc(&inputDesc);
-        const bool same=prevUsable && g.prevColor && g.prevColorW==inputDesc.Width && g.prevColorH==inputDesc.Height && g.prevColorFmt==inputDesc.Format;
-        const bool ensured=ensurePrevColor(device,inputDesc);
-        choiceOn=same && ensured;
-    }
-    if(planeOn && !choiceOn)++g_mapPlane.noPrevious;
     Constants constants{};std::memcpy(constants.camera,f.camera,sizeof(f.camera));
     std::memcpy(constants.previous,reset?f.camera:f.previousCamera,sizeof(f.previousCamera));
     constants.size[0]=f.renderWidth;constants.size[1]=f.renderHeight;constants.size[2]=evalW;constants.size[3]=evalH;
@@ -1132,7 +965,7 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     constants.route[2]=firstPersonMap?1u:0u;constants.route[3]=firstPersonMap?f.firstPersonPhaseMode:0u;
     constants.debug[0]=sampleNow?1u:0u;constants.debug[1]=paintNow?1u:0u;
     constants.debug[2]=overlay?1u:0u;
-    constants.debug[3]=(foreground?2u:(untrusted?1u:0u))|(skin?4u:0u)|(planeOn?8u:0u)|(choiceOn?16u:0u);
+    constants.debug[3]=(foreground?2u:(untrusted?1u:0u))|(skin?4u:0u);
     constants.foregroundDepth[0]=sdkDepthScale;
     constants.jitter[0]=f.jitterX;constants.jitter[1]=f.jitterY;
     constants.jitter[2]=f.previousJitterX;constants.jitter[3]=f.previousJitterY;
@@ -1151,28 +984,6 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     HdrCrumbSpan prepStep(g_crumbOn,"prep","groups=%ux%u",(f.renderWidth+7)/8,(f.renderHeight+7)/8);
     ID3D11Buffer* cb[]={g.constants.Get(),f.engine.sceneNow,f.engine.scenePrev};
     context->CSSetConstantBuffers(0,3,cb);
-    // The System Map's plane reduction (planeOn): the range cleared to empty, the frame's depth read (t1, as the prep reads it, b0 bound
-    // above for the size), one dispatch, and the result copied to the next free staging slot. A slot still waiting to be read is skipped
-    // for this frame's copy, not for the dispatch: the prep needs this frame's range whatever the readback does.
-    if(planeOn) {
-        // Both words to the empty state, every element: a clear that replicates its first value, or one that leaves the second word alone,
-        // must read back the same (flat_map_plane_range.h).
-        const UINT emptyRange[4]={kMapPlaneEmpty,kMapPlaneEmpty,kMapPlaneEmpty,kMapPlaneEmpty};
-        context->ClearUnorderedAccessViewUint(g.planeRangeUav.Get(),emptyRange);
-        ID3D11ShaderResourceView* depthView=f.depth;context->CSSetShaderResources(1,1,&depthView);
-        ID3D11UnorderedAccessView* range=g.planeRangeUav.Get();context->CSSetUnorderedAccessViews(6,1,&range,nullptr);
-        context->CSSetShader(g.planeScan.Get(),nullptr,0);
-        context->Dispatch((f.renderWidth+7)/8,(f.renderHeight+7)/8,1);
-        ID3D11UnorderedAccessView* noRange=nullptr;context->CSSetUnorderedAccessViews(6,1,&noRange,nullptr);
-        ID3D11ShaderResourceView* noDepth=nullptr;context->CSSetShaderResources(1,1,&noDepth);
-        const uint32_t slot=g.planeWrite;
-        if(!g.planePending[slot]) {
-            context->CopyResource(g.planeStaging[slot].Get(),g.planeRange.Get());
-            g.planePending[slot]=true;
-            g.planeWrite=(slot+1)%4;
-        }
-        ++g_mapPlane.reductions;
-    }
     // t4..t7 are the later kernels' (motion, rejection, expected depth, history): null for prep. t8 is the later kernels' history depth
     // and the prep's too, but only on a frame whose steady-detail check runs (last frame's depth). t9 and t10 are the first-person map and
     // stencil, null unless the pair was accepted above.
@@ -1181,38 +992,14 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
         nullptr,nullptr,f.untrustedCameraCoverage,nullptr,foreground?f.foregroundMotion:nullptr,nullptr,skin?f.engine.skin:nullptr};
     const UINT prepViewCount=skin?18:(foreground?16:14);
     context->CSSetShaderResources(0,prepViewCount,prepViews);
-    // t18 is the System Map's plane range, bound (and cleared again) only on a frame that reduced it; the prep never reads it otherwise.
-    ID3D11ShaderResourceView* planeView=g.planeRangeSrv.Get();
-    if(planeOn)context->CSSetShaderResources(18,1,&planeView);
-    // t19 is the previous map frame's input colour, bound only on a choice frame (flat_mono_shader_source.h starChoice).
-    ID3D11ShaderResourceView* prevView=g.prevColorSrv.Get();
-    if(choiceOn)context->CSSetShaderResources(19,1,&prevView);
-    // u5 is the refusal census's class texture, bound only on a frame that samples or paints (u4 is the later kernels' OutColor). u6 is the
-    // choice counts on a choice frame (the prep's four words; the census and the map-range reduction bind their own u6 elsewhere).
+    // u5 is the refusal census's class texture, bound only on a frame that samples or paints (u4 is the later kernels' OutColor).
     ID3D11UnorderedAccessView* prepOutputs[]={g.depth[depthIndex].uav.Get(),g.motion.uav.Get(),g.rejection.uav.Get(),g.expected.uav.Get(),
-        nullptr,needClass?g.klass.uav.Get():nullptr,choiceOn?g.choiceUav.Get():nullptr};
-    context->CSSetUnorderedAccessViews(0,choiceOn?7:(needClass?6:4),prepOutputs,nullptr);
-    if(choiceOn) {const UINT zeroCounts[4]={0,0,0,0};context->ClearUnorderedAccessViewUint(g.choiceUav.Get(),zeroCounts);}
+        nullptr,needClass?g.klass.uav.Get():nullptr};
+    context->CSSetUnorderedAccessViews(0,needClass?6:4,prepOutputs,nullptr);
     context->CSSetShader(g.prep.Get(),nullptr,0);
     context->Dispatch((f.renderWidth+7)/8,(f.renderHeight+7)/8,1);
-    ID3D11UnorderedAccessView* nullUavs[7]={};ID3D11ShaderResourceView* nullViews[18]={};
-    context->CSSetUnorderedAccessViews(0,7,nullUavs,nullptr);context->CSSetShaderResources(0,prepViewCount,nullViews);
-    if(planeOn) {ID3D11ShaderResourceView* noPlane=nullptr;context->CSSetShaderResources(18,1,&noPlane);}
-    if(choiceOn) {ID3D11ShaderResourceView* noPrev=nullptr;context->CSSetShaderResources(19,1,&noPrev);}
-    // The choice counts of this frame to the next staging slot (read back by pollMapPlane), and this frame's input copy for the next map
-    // frame (after the prep, which read g.color).
-    if(choiceOn) {
-        const uint32_t slot=g.choiceWrite;
-        if(!g.choicePending[slot]) {
-            context->CopyResource(g.choiceStaging[slot].Get(),g.choiceCounts.Get());
-            g.choicePending[slot]=true;
-            g.choiceWrite=(slot+1)%4;
-        }
-    }
-    if(planeOn && g.prevColor && g.color.texture) {
-        context->CopyResource(g.prevColor.Get(),g.color.texture.Get());
-        g.lastCallCopied=true;
-    }
+    ID3D11UnorderedAccessView* nullUavs[6]={};ID3D11ShaderResourceView* nullViews[18]={};
+    context->CSSetUnorderedAccessViews(0,6,nullUavs,nullptr);context->CSSetShaderResources(0,prepViewCount,nullViews);
     if(hdr)++stats.hdrPrepped;
     prepStep.close();
     if(sampleNow) {
