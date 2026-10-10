@@ -12,6 +12,7 @@
 #include "../common/log.h"
 #include "binding_shadow.h"
 #include "exposure_fix.h"   // lookupShaderHash: the shared shader registry
+#include "vertex_resync_core.h"   // the running-count window and its line (shared with the vertex resync)
 
 namespace edvr {
 
@@ -47,6 +48,7 @@ UINT g_offset = 0;
 bool g_lent = false;
 
 uint32_t g_healed = 0;        // lends this session
+vresync::WindowCount g_lentWindow;   // lends in the running 60 s window (resolveBindTick says it while non-zero)
 uint32_t g_seenEmpty = 0;     // empty sightings, healed or not
 bool g_healNoted = false;
 bool g_dryNoted = false;
@@ -160,6 +162,7 @@ void resolveBindBegin(ID3D11DeviceContext* ctx) {
         ctx->IASetVertexBuffers(0, 1, &g_vb, &g_stride, &g_offset);
         g_lent = true;
         ++g_healed;
+        g_lentWindow.add();
         if (!g_healNoted) {
             g_healNoted = true;
             Log::get().note(
@@ -184,6 +187,16 @@ void resolveBindEnd(ID3D11DeviceContext* ctx) {
         UINT zero = 0;
         ctx->IASetVertexBuffers(0, 1, &none, &zero, &zero);
     });
+}
+
+uint32_t resolveBindTick(uint64_t nowMs) {
+    const uint32_t n = g_lentWindow.take(nowMs);
+    if (n) {
+        char line[160];
+        vresync::formatLentLine(line, sizeof(line), n);
+        Log::get().note("%s", line);
+    }
+    return n;
 }
 
 void resolveBindShutdown() {

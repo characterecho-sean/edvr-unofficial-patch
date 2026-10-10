@@ -203,6 +203,16 @@ int main() {
         context->IAGetVertexBuffers(0, 1, &lent, &lentStride, &lentOffset);
         check(!lent, "repair restores empty vertex binding");
 
+        // The running lend count (the 2026-10-09 scanner-body instrument): the one lend above counts in the 60 s window the first tick starts; it is said once, 60 s on,
+        // as "scanner body fix: lent the other eye's buffer N times in the last 60 s" (the line's text is vertex_resync_test's V4); a window with no lend says nothing.
+        check(edvr::resolveBindTick(1000) == 0, "the first tick starts the lend window and says nothing");
+        check(edvr::resolveBindTick(60999) == 0, "a tick inside the 60 s says nothing");
+        check(edvr::resolveBindTick(61000) == 1, "the tick 60 s after the first says the one lend");
+        check(edvr::resolveBindTick(121000) == 0, "the next window, with no lend in it, says nothing");
+        edvr::resolveBindBegin(context.Get());   // the slot is empty again: one more lend, then restore
+        edvr::resolveBindEnd(context.Get());
+        check(edvr::resolveBindTick(181000) == 1, "a later window with a lend in it says it");
+
         // THE BINDING SHADOW'S RESOLVERS ARE ON FOUR BUDGETS (binding_shadow.h): the
         // fixes' pair and the instruments' pair. A stale pointer faults inside a
         // resolver, the fault is absorbed and charged to that resolver's budget of

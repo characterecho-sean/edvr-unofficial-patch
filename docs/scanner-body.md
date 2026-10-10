@@ -2,37 +2,59 @@
 
 ## Status
 
-- **State: solved, and its instruments retired 2026-09-29 (code removed,
-  d38272de).** `advanced.eye_split`, `advanced.resolve_probe`,
-  `advanced.stencil_probe` and `tools/diff_eye_split.py`, all described below,
-  are deleted. `fix.scanner_body` stays.
+- **State: REOPENED 2026-10-09. The root cause is in Frontier's f3d state
+  cache; a game-side fix is built and NOT FLOWN.** `fix.scanner_body`'s lend
+  (field-verified 2026-09-01, sections below) heals the same symptom one level
+  up and stays until the flight. After a successful flight the key and the
+  lend are to be retired (Sean pre-approved); that is NOT in the commit that
+  added the fix.
+- **Root cause** (READ = an instruction of build 332841, disassembled in
+  `analysis\decomp\scanner_vb_*`; INFERRED = the sequence they imply; the
+  dated entry at the end has the addresses):
+  - READ: SetVertexBuffer 0x1404E9D70 compares only the DESIRED state and
+    skips when it is equal; on a change it writes desired and the APPLIED cache
+    together. FlushIA 0x140522A50 zeroes applied slots when the draw's layout
+    has fewer slots than the last draw's, never touches desired, and binds from
+    applied.
+  - INFERRED: resolve 1 binds Q; two zero-slot full-screen draws zero
+    applied[0]; the second eye's SetVertexBuffer(Q) equals desired and is
+    skipped; FlushIA binds applied[0] = NULL with stride 20 from desired. That
+    is the resolve with slot 0 empty. The task counted 38 of 38 field frames
+    consistent with it; no flight has yet shown the cache stale.
+- **The fix under test:** a CodeHook at FlushIA's entry
+  (`vertex_resync_hook.cpp`, pure logic in `vertex_resync_core.h`) makes
+  applied agree with desired for the slots the layout uses (buffer and
+  offset), before the original runs. Installed once at startup in the VR and
+  the flat profile, gated on the PE pair (stamp 1788384820, image 104894464)
+  and FlushIA's first 16 bytes; a mismatch is one log line and never retried.
+- **Temporary key:** `advanced.vertex_resync = on | off`, default on, live,
+  allow-listed for flat. Off counts and writes nothing. Remove it when the arc
+  closes. `fix.scanner_body` is the other key this arc retires.
+- **Flight protocol (Sean's rig, DSS scans, live):** key on, scan; key off,
+  scan. Read the log with `edvr_log.py`: `vertex resync: hook armed`, the
+  first-sighting lines (at most 8), `vertex resync: N stale vertex-buffer
+  bindings in the last 60 s (repaired|left as the game had them)`, and
+  `scanner body fix: lent the other eye's buffer N times in the last 60 s`.
+  With the key on and the fix working, N stays 0 on the lend line and the body
+  is lit in both eyes. With it off the counts show whether the cache went stale
+  (the mechanism) and the body goes black as before. Neither line ever
+  appearing means the failure is elsewhere.
+- **Open:** whether FlushIA's early return (no dirty bit) can hide a stale
+  slot the repair would not bind; whether deferred command lists see it; the
+  first flight. Ruled out: nothing new.
 
-*Frontier issue [78021](https://issues.frontierstore.net/issue-detail/78021) —
+*Frontier issue [78021](https://issues.frontierstore.net/issue-detail/78021),
 "Detailed surface scanner eye mismatch in VR", filed 2025-08-22 against
-4.2.0.1 and marked Confirmed. The reporter describes the planet's surface
-as dark in one eye and light in the other after a scan, with the blue
-bio/geo areas fine — the symptom this document traces to its mechanism.*
+4.2.0.1, Confirmed.* Investigated 2026-08-30 to 2026-09-01 by remote worksheet
+with one volunteer (Quest 3, Virtual Desktop): scanning a planet, the body is a
+**featureless black disc in the right eye** with its exact silhouette; markers
+and UI are fine; only the DSS and FSS. A stock bug, absent on both dev rigs.
 
-Investigated 2026-08-30 to 2026-09-01, from field reports: when scanning a
-planet, the body renders as a **featureless black disc in the right eye**
-and correctly in the left. The disc keeps the body's exact silhouette. Blue
-bio/geo markers and the scanner UI render correctly in both eyes. Normal
-space and supercruise are fine; only the DSS and FSS views are affected. A
-stock game bug that predates EDVR, present on some machines and absent on
-others — it never reproduced on either dev rig, and the entire
-investigation ran by remote worksheet with one volunteer (Quest 3, Virtual
-Desktop, stand-alone launcher).
-
-> **STATUS: SOLVED, field-verified 2026-09-01.** The frame's second eye's
-> deferred lighting resolve is issued by the game with **no vertex buffer
-> bound at IA slot 0**. Its vertex shader reads real vertex attributes, so
-> the draw rasterises nothing: the eye's lit image never receives its
-> lighting, and the body's disc — the one region later layers are
-> depth-excluded from — stays black with a perfect silhouette. Healed by
-> the shipping key `fix.scanner_body = on` (default), which lends the draw
-> the buffer the other eye's resolve just used. Verified in the field the
-> same day: the fix's ENGAGED line reports stride 20, offset 0 — exactly
-> the disassembly's declared inputs — and the body renders in both eyes.
+> **2026-09-01, solved at the symptom, field-verified:** the second eye's
+> deferred lighting resolve is issued with **no vertex buffer at IA slot 0**, so
+> nothing rasterises. `fix.scanner_body = on` lends it the other eye's buffer;
+> the ENGAGED line reported stride 20, offset 0. That hunt's instruments were
+> retired 2026-09-29 (d38272de).
 
 ## The mechanism
 
@@ -178,3 +200,50 @@ for it.
 The lesson that outlives the hunt: register the two eyes before comparing
 pixels, the miss that produced the 7% figure above. `tools/diff_eye_split.py`
 now does that itself before tiling (commit 8676060).
+
+
+## 2026-10-09: the root cause is Frontier's f3d state cache; the repair at FlushIA's entry (built, NOT FLOWN)
+
+The lend heals what the draw is given. This finds why the draw was given nothing. All of Elite's D3D11 goes through Frontier's "f3d" layer
+(`f3dPipelineState_DX11.cpp`). A command list holds two copies of the vertex-buffer state, at fixed offsets from the list. READ below means an instruction of build 332841
+(`analysis\decomp\scanner_vb_dump_*.txt`, `scanner_vb_dump_setvb_1404e9d70.txt`, `scanner_vb_dump_flush_ia_140522a50.txt`; the Epic exe and the analysis copy give the same
+bytes, SHA-256 e6be8bbe...4e988). INFERRED means what those instructions imply together.
+
+- **DESIRED** (READ): wrapper `[list+8*slot+0x60]`, offset `[list+4*slot+0xE0]`, stride override `[list+4*slot+0x120]`; the dirty word is `[list+0x1E8]`.
+- **APPLIED**, the cache of what was last bound (READ): native `ID3D11Buffer*` `[list+8*slot+0x408]`, stride `[list+4*slot+0x488]`, offset `[list+4*slot+0x4C8]`.
+- **SetVertexBuffer 0x1404E9D70** (READ): loads the desired wrapper, offset and override, compares them with its arguments and returns at 0x1404E9DAF when all three are equal.
+  Only when they differ does it write desired, set dirty bit 0x20 and write applied: `[list+8*slot+0x408] = [wrapper+0x140]`, `[list+4*slot+0x4C8] = offset`,
+  `[list+4*slot+0x488] = 0`. The applied copy is never consulted.
+- **FlushIA 0x140522A50** (READ; called from 0x140510404 with rcx = the pipeline state, r8 = list+0x60 desired, r9 = list+0x2A0, so r9+0x168 = applied buffers, +0x228 =
+  offsets, +0x1E8 = strides; the call site is 0x140510BE9 in the setters dump, `lea r9,[rbx+0x2a0]` / `lea r8,[rbx+0x60]`): returns early when the dirty word has none of
+  0xFBFE20; reads the layout object `[pso+0x188]` and its slot count `[[pso+0x188]+0x60]`; computes each slot's stride from desired (only for a slot with a desired wrapper);
+  for slots from the new count up to the old count `[r9+0x118]` writes zero to applied buffer, offset and stride (0x140522B7C..0x140522BA0), never touching desired; binds from
+  the applied arrays (the call through `[r10+0x90]` at 0x140522BF5, IASetVertexBuffers).
+- **The sequence** (INFERRED): the first eye's resolve binds Q (desired = applied = Q). Two zero-slot full-screen draws follow; their FlushIA zeroes applied[0] and binds
+  (NULL, 0, 0), and desired[0] stays Q. The second eye's resolve calls SetVertexBuffer(Q): equal to desired, SKIPPED, applied[0] not rewritten. FlushIA computes stride 20 from
+  desired and binds applied[0] = NULL: (NULL, 20, 0). That is the draw with slot 0 empty, stride 20, offset 0 the lend's ENGAGED line named on 2026-09-01.
+- **Why only some rigs and modes** (INFERRED): it needs the zero-slot draws between the two resolves and a skipped SetVertexBuffer, which is timing and what the mode inserts
+  between the eyes; the same as the "state-cache desync" this document had already guessed at, now located.
+
+**The repair.** A CodeHook at FlushIA's entry (EliteDangerous64.exe+0x522A50; first 16 bytes read from the exe: `48 89 5C 24 18 56 57 41 56 48 83 EC 30 49 8B F8`, CodeHook
+steals the first instruction, 5 bytes, no relative operand). For each slot below min(layout count, 16): if desired holds a wrapper, native = `[wrapper+0x140]`; if applied's
+buffer is not native it is a desync, counted, and with the key on applied buffer = native and applied offset = the desired offset. Slots at or above the count, empty desired
+slots and every stride are left as the game has them, so stock behaviour is otherwise identical. The original runs next through the relay. The reads are SEH-guarded (eight
+faults stand it down); a build or prologue mismatch, a CodeHook refusal or no relay memory is one log line, the hook stays out, and it is never retried. Installed once at
+startup by device_hook.cpp in the VR and the flat profile alike.
+
+**Instruments.** `vertex resync: hook armed ...` (or `NOT installed -- why`); up to 8 `vertex resync: stale binding N of 8: slot, list, desired wrapper, native buffer, applied
+buffer, layout slots, thread, repaired|left as the game had it; game stack (RVAs)` lines; `vertex resync: N stale vertex-buffer bindings in the last 60 s (repaired|left as the
+game had them)` per 60 s while non-zero. And `scanner body fix: lent the other eye's buffer N times in the last 60 s` per 60 s while non-zero (the ENGAGED line stays). With the
+repair working the lend count stays 0.
+
+**Temporary key:** `advanced.vertex_resync = on | off` (default on, live; off counts and writes nothing). Retire it, `fix.scanner_body` and the lend after the flight.
+
+**Tests.** `tools\vertex_resync_test` (44 mutants): the failing sequence replayed on a fake list at the real offsets (stock binds NULL, repaired binds Q with its offset, off writes
+nothing, slots past the count, a null desired slot, a count above 16 and null pointers untouched); the gate and every one of the 16 bytes; the key spellings and the flat
+allow-list; the exact lines and windows; the production hook on a synthetic function with the real prologue, through the real CodeHook; the glue read as text.
+`resolve_bind_test` holds the lend window.
+
+**Not known.** FlushIA returns before binding when the dirty word has no relevant bit; a stale slot there would be repaired in the cache but not bound by that call (the
+failing sequence changes the layout, so its flush proceeds). Whether deferred command lists see the same thing, and whether the count is ever non-zero on a rig that never
+showed the black body, are what the flight and the counts answer.

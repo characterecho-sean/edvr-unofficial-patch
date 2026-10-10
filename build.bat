@@ -545,7 +545,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\fss_panel.cpp" ^
     "src\d3d11\fss_reveal.cpp" ^
     "src\d3d11\fss_heal.cpp" ^
-    "src\d3d11\resolve_bind_fix.cpp" ^
+    "src\d3d11\resolve_bind_fix.cpp" "src\d3d11\vertex_resync_hook.cpp" ^
     "src\d3d11\xinput_watch.cpp" ^
     "src\d3d11\fss_panel_rect.cpp" ^
     "src\d3d11\panel_curve.cpp" "src\d3d11\screen_motion.cpp" "src\d3d11\weapon_motion.cpp" ^
@@ -3040,6 +3040,29 @@ if errorlevel 1 ( echo [edvr] ERROR: menu_edit_hold_test build failed & exit /b 
 "%OBJ%\menueditHold\menu_edit_hold_test.exe" --dry-run || exit /b 1
 "%OBJ%\menueditHold\menu_edit_hold_test.exe" --self-test "%ROOT%" || exit /b 1
 python "tools\menu_edit_hold_test\mutants.py" --self-test || exit /b 1
+exit /b 0
+
+:rig_vertex_resync_test
+echo [edvr] === vertex_resync_test.exe ===
+REM Build gate for the vertex-buffer resync (src\d3d11\vertex_resync_core.h and vertex_resync_hook.cpp, EDVR_VERTEX_RESYNC_TEST; docs\scanner-body.md, "The root cause:
+REM Frontier's f3d state cache"): the game's applied vertex-buffer cache goes stale when a buffer it binds again equals its DESIRED state (SetVertexBuffer compares only that)
+REM after zero-slot draws zeroed the applied copy, and the second eye's lighting resolve runs with slot 0 empty. The pure repair runs on a fake command list laid out at the real
+REM offsets and replays the failing sequence (stock binds NULL; repaired binds the buffer and its offset; off counts and writes nothing; slots past the layout's count, a null
+REM desired slot, more than 16 slots and null pointers are left alone). The production hook is compiled in with the real CodeHook and patches a synthetic function that begins with
+REM the real 16-byte prologue of FlushIA: a wrong prologue is refused with one line and nothing patched, the right one arms, the original sees the repaired cache, the live key,
+REM the eight first-sighting lines and the 60 s count are what the log says, a fault is absorbed and eight stand it down. device_hook.cpp's and resolve_bind_fix.cpp's wiring is
+REM read as text. tools\vertex_resync_test\mutants.py --self-test holds the mutation list to the sources as they are; --run builds the rig against each edit.
+if not exist "%OBJ%\vertexresync" mkdir "%OBJ%\vertexresync"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /DEDVR_VERTEX_RESYNC_TEST /I"src\d3d11" /I"src\common" ^
+    /Fo"%OBJ%\vertexresync"\ /Fe"%OBJ%\vertexresync\vertex_resync_test.exe" ^
+    "tools\vertex_resync_test\vertex_resync_test.cpp" "src\d3d11\vertex_resync_hook.cpp" ^
+    "src\common\code_hook.cpp" "src\common\guard.cpp" "src\common\log.cpp" "src\common\config.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib
+if errorlevel 1 ( echo [edvr] ERROR: vertex_resync_test build failed & exit /b 1 )
+"%OBJ%\vertexresync\vertex_resync_test.exe" --dry-run || exit /b 1
+"%OBJ%\vertexresync\vertex_resync_test.exe" --self-test "%ROOT%" || exit /b 1
+python "tools\vertex_resync_test\mutants.py" --self-test || exit /b 1
 exit /b 0
 
 :rig_scheduler_stack_json_test

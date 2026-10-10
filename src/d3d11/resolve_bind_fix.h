@@ -97,6 +97,11 @@ bool resolveBindOnEyeDraw(ID3D11DeviceContext* ctx);
 void resolveBindBegin(ID3D11DeviceContext* ctx);
 void resolveBindEnd(ID3D11DeviceContext* ctx);
 
+// Once a second from device_hook's config tick: said once per 60 s while the lend count is non-zero ("scanner body fix: lent the other eye's buffer N times in the
+// last 60 s"), after the one-shot ENGAGED line, which stays. With advanced.vertex_resync on the count should stay 0 (the cache is repaired before the draw). Returns the
+// count it said (0: nothing said), for the rig.
+uint32_t resolveBindTick(uint64_t nowMs);
+
 void resolveBindShutdown();
 
 }  // namespace edvr
