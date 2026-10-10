@@ -192,6 +192,12 @@ bool mfxAvailable(ID3D11DeviceContext* ctx, const char** why);
 // MFX-specific one. autoExposure is the HDR route's flag. False on any
 // refusal, with why.
 //
+// TemporalUpscale returns void: a dispatched call proves EDVR asked, not that
+// DXMT created the scaler or that the GPU ran it (its implementation returns
+// silently on bad inputs). The backend refuses everything it can see -- null
+// resources, zero extents, missing interface, refused feature -- but absence
+// of failure is not success; the flight judges the picture.
+//
 // THE JITTER SIGN, ANSWERED BY FLIGHT. EDVR's phase is positive right/down in
 // [-0.5, 0.5) (src/common/temporal_math.h:90); MetalFX's jitterOffset is
 // documented only as "the pixel offset this scaler samples to return to the

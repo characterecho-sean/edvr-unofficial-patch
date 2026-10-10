@@ -407,8 +407,8 @@ bool resources(const FlatMonoResolveFrame& f,const char** reason) {
     // rather than by anything about Elite:
     //
     //   colour. R11G11B10_FLOAT and R8G8B8A8_UNORM are both formats MetalFX will not take as a colour: DXMT hands
-    //   the texture's own pixel format straight to MTLFXTemporalScalerDescriptor.colorTextureFormat
-    //   (dxmt/src/d3d11/d3d11_context_impl.cpp:5259). So MFX gets a second image, fp16 RGBA at the render size,
+    //   the texture's own pixel format straight into the scaler setup (it records scaler_entry.color_pixel_format
+    //   as WMTFXTemporalScalerInfo::color_format in d3d11_context_impl.cpp). So MFX gets a second image, fp16 RGBA at the render size,
     //   which the prep writes from the copy it already reads at t0 (backend.x) -- a format expansion inside a pass
     //   that already runs, not a copy and not a blit. g.color itself is left exactly as the route made it, because
     //   the finish kernel and the HDR finish both still sample the ORIGINAL render-resolution colour at t0 for the

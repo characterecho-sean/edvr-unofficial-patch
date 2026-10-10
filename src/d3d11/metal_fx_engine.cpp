@@ -27,11 +27,13 @@ struct Cached {
     const char *reason = "";
 };
 
-// Renderer state: one per owner thread, released by flatMonoResolveReset or at
-// the end of a session from the owner thread. Never a static destructor --
-// releasing a COM reference under the DLL loader lock is how this file's kind
+// Renderer state: deliberately leaked, one per owner thread, never released.
+// Releasing a COM reference under the DLL loader lock is how this file's kind
 // of code crashes a process that is already on its way out (the same rule the
-// resolver's own State, flat_mono_resolve.cpp:100, states).
+// resolver's own State, flat_mono_resolve.cpp:100, states) -- and the cached
+// answer is a property of the driver, valid until the process ends, so there
+// is nothing to reclaim. A different context drops its own reference from the
+// owner thread when it re-queries.
 Cached &cached() { return *new Cached; }
 
 // Said once a session, so a refusal is visible without a flight's log being a
@@ -212,10 +214,17 @@ bool mfxEvaluate(ID3D11DeviceContext *ctx, ID3D11Texture2D *colour, ID3D11Textur
     // DXMT closes the current pass, records the call in this chunk's encoder
     // list between EDVR's prep dispatch and its finish dispatch, and encodes
     // MetalFX into the same MTLCommandBuffer with its own hazard and
-    // residency tracking (its TemporalUpscale, dxmt_context.cpp:5302 and
-    // :590). Ordering is its job; EDVR has nothing to do but be in order
+    // residency tracking (its TemporalUpscale, d3d11_context_impl.cpp:5214).
+    // Ordering is its job; EDVR has nothing to do but be in order
     // itself, which it is. No command buffer, no commit, no wait, no fence,
     // no copy: nothing below the call touches the device.
+    //
+    // The call returns void, and DXMT's implementation fails silently: a null
+    // resource is a bare return, an invalid motion-vector format an ERR log
+    // and a return (d3d11_context_impl.cpp:5214). EDVR refuses every malformed
+    // frame before the interface is asked, but a scaler that fails to create
+    // inside DXMT is invisible from here. Dispatch proves the ask went out
+    // (the MFX line below), not that the scaler ran; the flight judges that.
     //
     // Said once a session, next to the dispatch and not at initialisation,
     // so it proves a scaler call actually went out this run rather than
