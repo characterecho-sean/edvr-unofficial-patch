@@ -1,5 +1,5 @@
 #include "temporal_shader_bytecode.h"
-#include "intro_upscale.h"
+#include "../../d3d11/intro_upscale.h"
 
 #include <windows.h>
 
@@ -9,12 +9,12 @@
 #include <cstring>
 #include <string>
 
-#include "../common/config.h"
-#include "../common/intro_mode.h"
-#include "../common/guard.h"
-#include "../common/log.h"
-#include "shader_swap.h"
-#include "vscreen_res.h"
+#include "../../common/config.h"
+#include "../../common/intro_mode.h"
+#include "../../common/guard.h"
+#include "../../common/log.h"
+#include "../../d3d11/shader_swap.h"
+#include "../../d3d11/vscreen_res.h"
 
 // AMD's own FSR, CPU side: A_CPU gives FsrEasuCon and FsrRcasCon, which
 // compute the constants each pass needs. Transcribing that arithmetic by hand
@@ -26,8 +26,8 @@
 // real warning from our own code cannot end up buried in theirs.
 #pragma warning(push)
 #pragma warning(disable : 4505)
-#include "fsr/ffx_a.h"
-#include "fsr/ffx_fsr1.h"
+#include "../../d3d11/fsr/ffx_a.h"
+#include "../../d3d11/fsr/ffx_fsr1.h"
 #pragma warning(pop)
 
 // The same two files as GPU text, generated at build time.

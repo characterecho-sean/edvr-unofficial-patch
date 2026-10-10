@@ -256,6 +256,7 @@ python "tools\check_config_contract.py" --self-test || exit /b 1
 python "tools\check_config_contract.py" --quiet --emit "%GEN%\config_contract_gen.h"
 if errorlevel 1 ( echo [edvr] ERROR: contract header generation failed & exit /b 1 )
 python "tools\plugin_catalog.py" --self-test || exit /b 1
+python "tools\plugin_selection.py" --self-test || exit /b 1
 python "tools\draw_ladder_replay.py" --self-test || exit /b 1
 python "tools\plugin_catalog.py" --emit-cpp "%GEN%\plugin_manifest.inc" --dry-run || exit /b 1
 python "tools\plugin_catalog.py" --emit-cpp "%GEN%\plugin_manifest.inc"
@@ -291,7 +292,11 @@ REM build if either DLL imports the compiler again.
 
 python "tools\check_plugin_boundaries.py" --self-test || exit /b 1
 python "tools\check_plugin_boundaries.py" --quiet --require-plugin cockpit_visuals ^
-    --require-source src\plugins\cockpit_visuals\night_vision.cpp --include-dir "%GEN%" || exit /b 1
+    --require-source src\plugins\cockpit_visuals\night_vision.cpp ^
+    --require-plugin intro --require-source src\plugins\intro\intro_skip.cpp ^
+    --require-source src\plugins\intro\intro_upscale.cpp ^
+    --require-plugin exposure --require-source src\plugins\exposure\exposure_shape.cpp ^
+    --include-dir "%GEN%" || exit /b 1
 
 if not exist "%OBJ%\plugins\cockpit_visuals" mkdir "%OBJ%\plugins\cockpit_visuals"
 del /q "%OBJ%\plugins\cockpit_visuals\*.obj" 2>nul
@@ -301,6 +306,22 @@ if errorlevel 1 ( echo [edvr] ERROR: cockpit visuals plugin compile failed & exi
 lib.exe /nologo /OUT:"%OBJ%\plugins\cockpit_visuals\plugin_cockpit_visuals.lib" ^
     "%OBJ%\plugins\cockpit_visuals\night_vision.obj"
 if errorlevel 1 ( echo [edvr] ERROR: cockpit visuals plugin library failed & exit /b 1 )
+
+if not exist "%OBJ%\plugins\intro" mkdir "%OBJ%\plugins\intro"
+del /q "%OBJ%\plugins\intro\*.obj" 2>nul
+cl.exe %CFLAGS% /Fo"%OBJ%\plugins\intro\\" ^
+    "src\plugins\intro\intro_skip.cpp" "src\plugins\intro\intro_upscale.cpp"
+if errorlevel 1 ( echo [edvr] ERROR: intro plugin compile failed & exit /b 1 )
+lib.exe /nologo /OUT:"%OBJ%\plugins\intro\plugin_intro.lib" ^
+    "%OBJ%\plugins\intro\intro_skip.obj" "%OBJ%\plugins\intro\intro_upscale.obj"
+if errorlevel 1 ( echo [edvr] ERROR: intro plugin library failed & exit /b 1 )
+
+if not exist "%OBJ%\plugins\exposure" mkdir "%OBJ%\plugins\exposure"
+del /q "%OBJ%\plugins\exposure\*.obj" 2>nul
+cl.exe %CFLAGS% /Fo"%OBJ%\plugins\exposure\\" "src\plugins\exposure\exposure_shape.cpp"
+if errorlevel 1 ( echo [edvr] ERROR: exposure plugin compile failed & exit /b 1 )
+lib.exe /nologo /OUT:"%OBJ%\plugins\exposure\plugin_exposure.lib" "%OBJ%\plugins\exposure\exposure_shape.obj"
+if errorlevel 1 ( echo [edvr] ERROR: exposure plugin library failed & exit /b 1 )
 
 echo [edvr] === d3d11.dll ===
 REM The settings schema -- the installer's window AND the in-headset menu's
@@ -542,7 +563,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\format_support_log.cpp" ^
     "src\d3d11\graphics_bridge.cpp" ^
     "src\d3d11\render_boundary.cpp" ^
-    "src\d3d11\exposure_fix.cpp" "src\d3d11\vscreen.cpp" "src\d3d11\plugin_registry.cpp" "src\d3d11\plugin_cost.cpp" ^
+    "src\d3d11\exposure_fix.cpp" "src\d3d11\shader_registry.cpp" "src\d3d11\vscreen.cpp" "src\d3d11\plugin_registry.cpp" "src\d3d11\plugin_cost.cpp" ^
     "src\d3d11\glitch_frame.cpp" ^
     "src\d3d11\transition_flash_eye_base.cpp" ^
     "src\d3d11\explorer_cam.cpp" ^
@@ -578,8 +599,6 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\quad_probe.cpp" ^
     "src\d3d11\intro_panel.cpp" ^
     "src\d3d11\intro_curve.cpp" ^
-    "src\d3d11\intro_skip.cpp" ^
-    "src\d3d11\intro_upscale.cpp" ^
     "src\d3d11\temporal_pass.cpp" ^
     "src\d3d11\depth_probe.cpp" ^
     "src\d3d11\luma_probe.cpp" ^
@@ -619,6 +638,7 @@ if errorlevel 1 ( echo [edvr] ERROR: rc.exe failed on the runtime version resour
 link.exe /nologo /DLL /MACHINE:X64 /INCREMENTAL:NO %EDVR_CPU_LINK% /PDB:"%BUILD%\d3d11.pdb" ^
     /DEF:"%GEN%\edvr_d3d11.def" /OUT:"%BUILD%\d3d11.dll" ^
     "%OBJ%\d3d11\*.obj" "%OBJ%\plugins\cockpit_visuals\plugin_cockpit_visuals.lib" ^
+    "%OBJ%\plugins\intro\plugin_intro.lib" "%OBJ%\plugins\exposure\plugin_exposure.lib" ^
     "%OBJ%\d3d11\dxbc_notice.res" "%OBJ%\d3d11\version.res" kernel32.lib user32.lib gdi32.lib version.lib d3dcompiler.lib %NGXLIB% %FSRLIB%
 if errorlevel 1 ( echo [edvr] ERROR: link failed & exit /b 1 )
 
@@ -2819,6 +2839,7 @@ link.exe /nologo /MACHINE:X64 /INCREMENTAL:NO /OPT:REF ^
     "%OBJ%\vscreenpredicate\loader_panel.obj" "%OBJ%\vscreenpredicate\target_sharp.obj" "%OBJ%\vscreenpredicate\sunglare_fix.obj" ^
     @"%OBJ%\vscreenpredicate\production_objects.rsp" ^
     "%OBJ%\plugins\cockpit_visuals\plugin_cockpit_visuals.lib" ^
+    "%OBJ%\plugins\intro\plugin_intro.lib" "%OBJ%\plugins\exposure\plugin_exposure.lib" ^
     kernel32.lib user32.lib gdi32.lib version.lib d3dcompiler.lib %NGXLIB% %FSRLIB%
 if errorlevel 1 ( echo [edvr] ERROR: VScreen predicate test build failed & exit /b 1 )
 "%BUILD%\vscreen_predicate_test.exe" --dry-run || exit /b 1

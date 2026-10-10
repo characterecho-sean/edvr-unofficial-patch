@@ -1,6 +1,6 @@
 // Exercise the production hooks through Windows' actual DirectShow file
 // source, not only by calling the refusal wrapper with a synthetic path.
-#include "../../src/d3d11/intro_skip.cpp"
+#include "../../src/plugins/intro/intro_skip.cpp"
 #include <dshow.h>
 #include <wrl/client.h>
 #include <cstdio>

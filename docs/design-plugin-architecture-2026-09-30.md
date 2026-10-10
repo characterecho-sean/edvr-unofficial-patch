@@ -12,10 +12,17 @@
   generated manifests/config ownership, subscription-driven dispatch and a
   C-compatible interface. The add-on tier follows Phase 1. Graphics-only VR is
   a separate phase; supported settings remain owned by one plugin.
-- **Current integration:** main `a1609f2b` is merged; its latest changes are
-  installer-only. The combined FSS replay and flat cleanup checkpoint passes
-  156 full-build jobs plus config, export and installer gates; receipt
-  `79d77eef` matches the source. Steam retains measured `6ab758d2`.
+- **Current integration:** main `a1609f2b` is merged. The intro/exposure
+  ownership checkpoint passes 156 full-build jobs plus config, export
+  and installer gates; receipt `66e0d9da` matches the source. Steam
+  retains measured `6ab758d2`.
+- **Module progress:** intro skip/upscale and the exposure shape
+  classifier build in first-party libraries; the shader registry is
+  core-owned with its original availability and generation semantics.
+  The offline selection model resolves dependencies and rejects
+  unavailable plugins. Registry integration, remaining group ownership
+  and installer selection are still open; availability is unchanged.
+
 - **Offline evidence:** FSS site 1 has a frozen legacy selector oracle,
   version-16 facts, seven-base-fact capacity and terminal X/6 action fixtures.
   Capture uses consumed values; unarmed paths construct no predicate payload.
@@ -3841,3 +3848,55 @@ during the holds. After syncing main, retest only paths its changes affect. The
 mixed `e16dbb54`/`6ab758d2` measurements and latest unanswered visual follow-up
 are retained as evidence; they do not establish CPU improvement or GPU
 non-regression. No additional flight is requested now.
+
+### 2026-10-10 — intro/exposure ownership and selection model
+
+Luna 6 implemented three independent slices: intro skip/upscale source
+ownership, exposure classifier/core shader-registry separation, and a
+pure installer selection model. The two intro bodies are identical to
+`7e8a8bfe` after normalizing include directives; their public headers
+are unchanged. They now compile into `plugin_intro.lib`. Exposure's
+existing guarded dispatch path calls the same UAV classifier through
+`plugin_exposure.lib`; the hook/census/temporal glue stays in core. The
+build enforces required source/include boundaries and links the new
+archives into the production DLL, actual VScreen predicate rig and
+offline flat benchmark proxy. Main-only benchmark object sets continue
+without those archives.
+
+Ruled out: an independently active shader registry as a
+behavior-preserving extraction, because the frozen implementation
+required exposure `g_state` and `lockReady` and returned no hashes
+before installation, after failures or after shutdown. The core service
+now begins and ends at those same lifecycle points. Only accepted shader
+registrations advance its never-reset generation; lifecycle memo
+invalidation was left outside this move. Production registry tests cover
+dormant calls, pointer replacement, concurrent registration/lookup,
+teardown and retry. Existing WARP exposure, intro and source-pinned
+dispatch rigs remain in the full gate.
+
+`tools/plugin_selection.py` models explicit VR/flat requests, stable
+manifest order, hard dependency closure, soft notices, conflicts and
+profile/availability validation. It keeps target defaults separate from
+current availability and requires a future explicit selection-ready
+state. Review corrected soft notices to use the final hard closure,
+rejects malformed metadata, supports an explicit empty selection, and
+rejects the self-test/dry-run combination before fixture writes. Its CLI
+dry-run has a filesystem snapshot assertion. It is not wired to
+installer UI or receipts: no plugin has become selectable and existing
+settings/install defaults are unchanged.
+
+The full absolute build passed all 156 jobs, the 125-key config
+contract, exports and the self-contained installer. Receipt:
+`66e0d9da5fad3c7d742a7faf584a62eb475b49486323cdadc9125ae9261bc325`.
+Initial integration failures were confined to Windows compiler path
+escaping and the benchmark proxy's library inputs; both were corrected
+before this validated tree. No Steam install or test flight occurred.
+
+This is a development checkpoint, not completion of Phase 1 or either
+group. Remaining exposure share/damping migration needs a core
+dispatch-observer boundary preserving census/probes, flat forwarding and
+temporal-AA skin observation; intro panel/backdrop/loading paths still
+await their ownership moves. Existing replay and CPU/GPU shipping gates
+stay open. Feature work remains free to branch from the validated
+architecture branch; the next matched performance pair is at rendering
+freeze.

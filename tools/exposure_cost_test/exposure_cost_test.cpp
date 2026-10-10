@@ -4,6 +4,7 @@
 #define EDVR_BINDING_SHADOW_EXTERNAL 1
 #define EDVR_EXPOSURE_DAMP_TEST 1
 #include "../../src/d3d11/exposure_fix.cpp"
+#include "../../src/d3d11/shader_registry.cpp"
 #include "../../src/common/system_d3d11.h"
 
 #include <d3d11.h>
@@ -127,6 +128,79 @@ bool verifyWindow(const EdvrPluginCostWindowV1& window, unsigned reads,
         owner.apiObserved == (reads + transfers != 0);
     return check(okay, label);
 }
+
+void verifyShaderRegistry() {
+    int shader = 0;
+    const auto gen0 = edvr::shaderRegistryGeneration();
+    edvr::registerShaderHash(&shader, 11);
+    check(edvr::lookupShaderHash(&shader) == 0 &&
+          edvr::shaderRegistryGeneration() == gen0,
+          "registry ignores creation before the exposure lifetime");
+
+    edvr::shaderRegistryBegin();
+    check(edvr::shaderRegistryGeneration() == gen0,
+          "empty begin leaves the registration generation unchanged");
+    edvr::registerShaderHash(&shader, 11);
+    const auto gen1 = edvr::shaderRegistryGeneration();
+    check(edvr::lookupShaderHash(&shader) == 11 && gen1 == gen0 + 1,
+          "live registration publishes the shader hash and generation");
+    edvr::registerShaderHash(&shader, 22);
+    check(edvr::lookupShaderHash(&shader) == 22 &&
+          edvr::shaderRegistryGeneration() == gen1 + 1,
+          "replacement at a reused pointer invalidates cached hashes");
+
+    constexpr size_t kThreads = 4;
+    constexpr size_t kSlots = 64;
+    std::array<int, kThreads * kSlots> shaders{};
+    std::array<bool, kThreads> threadOkay{};
+    std::array<std::thread, kThreads> workers;
+    const auto concurrentStart = edvr::shaderRegistryGeneration();
+    for (size_t t = 0; t < kThreads; ++t) {
+        workers[t] = std::thread([&, t] {
+            bool okay = true;
+            for (size_t i = 0; i < kSlots; ++i) {
+                const auto hash = static_cast<uint64_t>(1000 + t * kSlots + i);
+                void* key = &shaders[t * kSlots + i];
+                edvr::registerShaderHash(key, hash);
+                okay &= edvr::lookupShaderHash(key) == hash;
+            }
+            threadOkay[t] = okay;
+        });
+    }
+    for (auto& worker : workers) worker.join();
+    bool allFound = true;
+    for (size_t t = 0; t < kThreads; ++t) {
+        allFound &= threadOkay[t];
+        for (size_t i = 0; i < kSlots; ++i) {
+            allFound &= edvr::lookupShaderHash(&shaders[t * kSlots + i]) ==
+                static_cast<uint64_t>(1000 + t * kSlots + i);
+        }
+    }
+    check(allFound && edvr::shaderRegistryGeneration() ==
+          concurrentStart + kThreads * kSlots,
+          "concurrent register/lookup retains every hash and publication");
+
+    const auto beforeEnd = edvr::shaderRegistryGeneration();
+    edvr::shaderRegistryEnd();
+    check(edvr::lookupShaderHash(&shader) == 0 &&
+          edvr::lookupShaderHash(&shaders[0]) == 0 &&
+          edvr::shaderRegistryGeneration() == beforeEnd,
+          "end hides old hashes without publishing a registration");
+    const auto dormantGen = edvr::shaderRegistryGeneration();
+    edvr::registerShaderHash(&shader, 33);
+    check(edvr::lookupShaderHash(&shader) == 0 &&
+          edvr::shaderRegistryGeneration() == dormantGen,
+          "registry ignores creation after shutdown");
+    edvr::shaderRegistryBegin();
+    check(edvr::lookupShaderHash(&shader) == 0 &&
+          edvr::shaderRegistryGeneration() == dormantGen,
+          "new lifetime cannot see a prior pointer assignment");
+    edvr::registerShaderHash(&shader, 44);
+    check(edvr::lookupShaderHash(&shader) == 44 &&
+          edvr::shaderRegistryGeneration() == dormantGen + 1,
+          "registration after retry publishes the new pointer assignment");
+    edvr::shaderRegistryEnd();
+}
 } // namespace
 
 namespace edvr {
@@ -151,6 +225,7 @@ int main(int argc, char** argv) {
         std::puts("Usage: exposure_cost_test [--dry-run|--self-test]");
         return 2;
     }
+    verifyShaderRegistry();
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> real;
     D3D_FEATURE_LEVEL level{};

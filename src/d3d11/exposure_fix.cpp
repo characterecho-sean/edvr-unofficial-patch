@@ -2,7 +2,6 @@
 
 #include <windows.h>
 
-#include <atomic>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -31,6 +30,7 @@
                           // because slot 41 is already ours and a second
                           // patch on it would be a second thing to reclaim
 #include "sunglare_fix.h"  // sunglareLastSeenMs, the damper's sun scope
+#include "../plugins/exposure/exposure_shape.h"
 
 namespace edvr {
 namespace {
@@ -239,10 +239,6 @@ struct State {
     uint64_t       dampWrites = 0;
     uint64_t       dampWritesAtNote = 0;
     uint64_t       dampLastNoteMs = 0;
-
-    std::unordered_map<void*, uint64_t> shaderHashes;
-    CRITICAL_SECTION lock{};
-    bool lockReady = false;
 };
 
 // Consecutive frames a detected candidate must run exactly twice before the
@@ -315,13 +311,7 @@ BindSlot uavSlot(uint32_t i) {
 
 #if !defined(EDVR_EXPOSURE_DAMP_TEST)
 uint64_t hashOf(void* shader) {
-    if (!shader || !g_state || !g_state->lockReady) return 0;
-    uint64_t out = 0;
-    EnterCriticalSection(&g_state->lock);
-    auto it = g_state->shaderHashes.find(shader);
-    if (it != g_state->shaderHashes.end()) out = it->second;
-    LeaveCriticalSection(&g_state->lock);
-    return out;
+    return lookupShaderHash(shader);
 }
 
 // Two resources may only be copied if they are the same kind and size. The two
@@ -626,33 +616,6 @@ void exposureDamp(ID3D11DeviceContext* ctx,
 }
 
 #if !defined(EDVR_EXPOSURE_DAMP_TEST)
-// Does the bound UAV set look like per-eye exposure state?
-//
-// Slot 0 is a small structured buffer holding the luminance range; slot 1 is a
-// tiny texture holding the tonemap parameters the rest of the frame reads. Both
-// are unusual enough that nothing else in the frame matches, and neither depends
-// on the shader's bytecode, so this survives the game being rebuilt.
-bool shapeLooksLikeExposure() {
-    // Slot 0 is a small structured buffer holding the luminance range; slot 1 is
-    // a tiny texture holding the tonemap parameters the rest of the frame reads.
-    // Both are unusual enough that nothing else in the frame matches, and
-    // neither depends on the shader's bytecode, so this survives a rebuild.
-    //
-    // Resolved through binding_shadow, which owns the guard, the budget and the
-    // GetType-first rule. A view that cannot be resolved -- because it is no
-    // longer live -- reads as "not the exposure pass", which is the safe answer.
-    ResourceInfo buf;
-    if (!bindingResolve(bindingGet(uavSlot(0)), &buf) || !buf.isBuffer) return false;
-    if (buf.a == 0 || buf.a > 256) return false;
-
-    ResourceInfo strip;
-    if (!bindingResolve(bindingGet(uavSlot(1)), &strip) || !strip.isTexture2D) return false;
-    // A parameter strip: a few texels, one row.
-    if (strip.b != 1 || strip.a == 0 || strip.a > 64) return false;
-
-    return true;
-}
-
 // Is this call for the context we installed on? In-place vtable patching
 // hooks every object of the class, so a deferred context or a wrapper mod's
 // internal one lands here too and must leave untouched.
@@ -726,7 +689,7 @@ bool isExposureDispatch() {
     auto it = s->shapeVerdict.find(h);
     if (it != s->shapeVerdict.end()) return it->second;
 
-    const bool match = shapeLooksLikeExposure();
+    const bool match = plugins::exposure::shapeLooksLikeExposure();
     s->everExamined.insert(h);
     s->shapeVerdict[h] = match;
     if (match) {
@@ -842,7 +805,8 @@ void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y,
     // Classification runs INSIDE the guard.
     //
     // It was called here, bare, one line above the guarded region it feeds.
-    // isExposureDispatch reaches shapeLooksLikeExposure, which makes COM calls
+    // isExposureDispatch reaches the exposure plugin's shape classifier, which
+    // makes COM calls
     // through the curUav shadow -- and that shadow is only as fresh as the last
     // CSSetUnorderedAccessViews we saw. After a ClearState (now hooked below,
     // but a command list can still do it) those pointers can name released
@@ -898,8 +862,6 @@ void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y,
 }
 
 }  // namespace
-
-uint64_t lookupShaderHash(void* shader) { return hashOf(shader); }
 
 void exposureConfigure(Config& cfg) {
     State* s = g_state;
@@ -999,24 +961,6 @@ void exposureConfigure(Config& cfg) {
     }
 }
 
-// Bumped after every registration, read by the memos before their lookup:
-// a memo that read the old count and then missed the map holds a zero,
-// which it asks again; one that read it and hit holds the answer the
-// registry had, and the next set sees the count move and asks again.
-// Published (exposure_fix.h) so shaderRegistryGeneration() is an inline
-// load; this file remains its only writer.
-namespace detail {
-std::atomic<uint32_t> g_shaderRegistryGen{0};
-}  // namespace detail
-
-void registerShaderHash(void* shader, uint64_t hash) {
-    if (!g_state || !shader || !g_state->lockReady) return;
-    EnterCriticalSection(&g_state->lock);
-    g_state->shaderHashes[shader] = hash;
-    LeaveCriticalSection(&g_state->lock);
-    detail::g_shaderRegistryGen.fetch_add(1, std::memory_order_release);
-}
-
 void exposureFixFrameBoundary() {
     State* s = g_state;
     if (!s) return;
@@ -1112,8 +1056,7 @@ void installExposureFix(ID3D11Device* device, HookMode mode) {
     if (!ctx) return;
 
     g_state = new State();
-    InitializeCriticalSection(&g_state->lock);
-    g_state->lockReady = true;
+    shaderRegistryBegin();
     // An empty hash means "find it yourself", which is the default and the
     // reason this survives a game update.
     const std::string hashText = cfg.getString("advanced.exposure_shader", "");
@@ -1140,12 +1083,7 @@ void installExposureFix(ID3D11Device* device, HookMode mode) {
         // never installed, and at 5000 frames announced "NOT ENGAGED ... the
         // game is stock" -- a report about a fix that had never been there.
         //
-        // The critical section is initialised above this point, so it has to go
-        // back before the object does.
-        if (g_state->lockReady) {
-            DeleteCriticalSection(&g_state->lock);
-            g_state->lockReady = false;
-        }
+        shaderRegistryEnd();
         delete g_state;
         g_state = nullptr;
         return;
@@ -1193,12 +1131,7 @@ void installExposureFix(ID3D11Device* device, HookMode mode) {
         // never installed, and at 5000 frames announced "NOT ENGAGED ... the
         // game is stock" -- a report about a fix that had never been there.
         //
-        // The critical section is initialised above this point, so it has to go
-        // back before the object does.
-        if (g_state->lockReady) {
-            DeleteCriticalSection(&g_state->lock);
-            g_state->lockReady = false;
-        }
+        shaderRegistryEnd();
         delete g_state;
         g_state = nullptr;
         return;
@@ -1286,10 +1219,7 @@ void shutdownExposureFix() {
         }
     }
     g_state->hook.uninstall();
-    if (g_state->lockReady) {
-        DeleteCriticalSection(&g_state->lock);
-        g_state->lockReady = false;
-    }
+    shaderRegistryEnd();
 }
 
 #else

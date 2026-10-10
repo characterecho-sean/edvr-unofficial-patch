@@ -1,4 +1,4 @@
-#include "intro_skip.h"
+#include "../../d3d11/intro_skip.h"
 
 #include <atomic>
 #include <cstdint>
@@ -6,11 +6,11 @@
 
 #include <windows.h>
 
-#include "../common/config.h"
-#include "../common/iat_hook.h"
-#include "../common/intro_mode.h"
-#include "../common/log.h"
-#include "../common/timing.h"
+#include "../../common/config.h"
+#include "../../common/iat_hook.h"
+#include "../../common/intro_mode.h"
+#include "../../common/log.h"
+#include "../../common/timing.h"
 
 namespace edvr {
 namespace {
