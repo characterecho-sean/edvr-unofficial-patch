@@ -253,6 +253,12 @@ echo.
 REM The runtime config audit data: known keys + the moved-from map,
 REM generated from the same sources the late contract check verifies.
 python "tools\check_config_contract.py" --self-test || exit /b 1
+REM The MetalFX backend's DXMT Ext/Ext1 ABI and its invariants: the descriptor's
+REM layout and the two IIDs against DXMT's own header when a DXMT checkout is
+REM beside the tree, and the rules that backend must not break -- no vendor
+REM extension, no MetalFX 4 path, and no added context-state calls (the
+REM swap abort()s on DXMT). See the tool's own docstring.
+python "tools\check_metal_fx_backend.py" --self-test || exit /b 1
 python "tools\check_config_contract.py" --quiet --emit "%GEN%\config_contract_gen.h"
 if errorlevel 1 ( echo [edvr] ERROR: contract header generation failed & exit /b 1 )
 
@@ -567,6 +573,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\luma_probe.cpp" ^
     "src\d3d11\dlaa.cpp" ^
     "src\d3d11\fsr3_engine.cpp" ^
+    "src\d3d11\metal_fx_engine.cpp" ^
     "src\d3d11\sharpen_pass.cpp" ^
     "src\d3d11\flat_sharpen.cpp" "src\d3d11\flat_ui_layer.cpp" ^
     "src\d3d11\loader_panel.cpp" ^
@@ -1458,6 +1465,10 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /Fe"%BUILD%\flat_mono_resolve_test.exe" "tools\flat_mono_resolve_test\flat_mono_resolve_test.cpp" ^
     "src\d3d11\flat_mono_resolve.cpp" "src\d3d11\flat_projection_scope.cpp" "src\d3d11\flat_projection_runtime.cpp" ^
     "third_party\dxbc_hash\DxilHash.cpp" /link /INCREMENTAL:NO dxgi.lib d3dcompiler.lib
+REM src\d3d11\metal_fx_engine.cpp is deliberately NOT here: like dlaa.cpp and
+REM fsr3_engine.cpp, the rig stubs its entry points (mfxAvailable,
+REM mfxEvaluate) so it can see what the resolver hands the backend. Linking the
+REM real one as well would be a duplicate symbol.
 if errorlevel 1 ( echo [edvr] ERROR: flat mono resolve test build failed & exit /b 1 )
 "%BUILD%\flat_mono_resolve_test.exe" --dry-run || exit /b 1
 "%BUILD%\flat_mono_resolve_test.exe" --self-test || exit /b 1

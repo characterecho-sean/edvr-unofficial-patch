@@ -213,6 +213,18 @@ inline int flatCopyWeaponTests() {
             }
         }
         expect(all, "flatWeaponRoute: the HDR route's frames stay its own, the upscalers get the copy route where it will not treat them, TAA and DLAA keep what they had");
+        // MetalFX keeps the established trained-upscaler policy in the new weapon path.
+        // The domain witness must request foreground ownership only where the copy route judges the frame.
+        for (const auto mode : {M::Mfx})
+            for (const bool autoKey : {false, true})
+                for (const bool latched : {false, true})
+                    for (const Size* size : {&below, &at, &above}) {
+                        const R want = autoKey && !latched && size != &below ? R::Hdr : R::Copy;
+                        const R got = flatWeaponRoute(autoKey, latched, mode, size->w, size->h, dW, dH);
+                        expect(got == want, "MetalFX weapon ownership follows the existing HDR/copy policy at each size");
+                        expect(flatCopyMixedCamera(false, got, 1) == (want == R::Copy),
+                               "MetalFX copy weapon domain witness requests the upstream foreground contract");
+                    }
         expect(std::strcmp(flatWeaponRouteName(R::Hdr), "hdr") == 0 && std::strcmp(flatWeaponRouteName(R::Copy), "copy") == 0 &&
                    std::strcmp(flatWeaponRouteName(R::Unchanged), "unchanged") == 0,
                "the routes have their words");

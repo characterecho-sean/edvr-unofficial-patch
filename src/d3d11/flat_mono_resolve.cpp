@@ -1,6 +1,7 @@
 #include "flat_mono_resolve.h"
 #include "dlaa.h"
 #include "fsr3_engine.h"
+#include "metal_fx_engine.h"
 #include "temporal_shader_bytecode.h"
 #include <d3d11_1.h>
 #include <wrl/client.h>
@@ -88,6 +89,11 @@ struct State {
     uint32_t refusalWidth[4]={0,0,0,0}, refusalHeight[4]={0,0,0,0};
     uint32_t refusalWrite=0;
     Image color, rawOverlay, depth[2], motion, rejection, expected, output[2], outputDomain[2];
+    // MetalFX's colour: fp16 RGBA at the render size, written by the prep from the
+    // copy at t0 when backend.x is set, and the texture handed to DXMT as MTL_TEMPORAL_UPSCALE_D3D11_DESC::Color. Empty
+    // on every other backend, and not part of any other mode's identity. `color` above is NOT replaced by it: the
+    // finish kernels still sample the original format for rejected pixels.
+    Image mfxColor;
     uint32_t width=0, height=0, outWidth=0, outHeight=0, evalWidth=0, evalHeight=0, current=0;
     // The steady-detail depth check's previous depth (FlatMonoResolveFrame::steadyDetail). TAA keeps last frame's depth in depth[current^1]
     // already; the other backends keep none, so depth[1] is made on the first frame that asks, and while frames ask, the depth the
@@ -142,8 +148,8 @@ bool g_steadyFailureLogged=false;
 // unchanged.
 // debug: x = this frame samples the refusal census, y = this frame paints the refusal view (FlatMonoResolveFrame::refusalCensus and
 // refusalView; the prep writes its class texture for either). Zero for every frame that asks for neither.
-struct Constants { float camera[6][4], previous[6][4]; uint32_t size[4], flags[4]; float jitter[4], rowsJitter[4]; uint32_t route[4], debug[4]; float foregroundDepth[4]; };
-static_assert(sizeof(Constants)==304, "HLSL cbuffer layout");
+struct Constants { float camera[6][4], previous[6][4]; uint32_t size[4], flags[4]; float jitter[4], rowsJitter[4]; uint32_t route[4], debug[4]; float foregroundDepth[4]; uint32_t backend[4]; };
+static_assert(sizeof(Constants)==320, "HLSL cbuffer layout");
 // The game's pipeline state out of the way for the resolver's own work and its backends', and back on every exit. Two ways
 // (flat_isolation_mode.h says which a device gets): the context state swap, which every device but DXMT's has always had and
 // which is unchanged, or the explicit capture (flat_context_state.h) for DXMT, whose SwapDeviceContextState aborts the process.
@@ -205,7 +211,8 @@ bool rowsJitterValid(const FlatMonoResolveFrame& f) {
 }
 bool resolveModeValid(FlatMonoResolveMode mode) {
     return mode==FlatMonoResolveMode::Taa || mode==FlatMonoResolveMode::Dlaa ||
-        mode==FlatMonoResolveMode::Dlss || mode==FlatMonoResolveMode::Fsr;
+        mode==FlatMonoResolveMode::Dlss || mode==FlatMonoResolveMode::Fsr ||
+        mode==FlatMonoResolveMode::Mfx;
 }
 bool preflightMetadataValid(const FlatMonoResolvePreflight& f,const char** reason) {
     if(!f.renderWidth || !f.renderHeight || !f.outputWidth || !f.outputHeight ||
@@ -383,18 +390,41 @@ bool resources(const FlatMonoResolveFrame& f,const char** reason) {
     ++stats.allocations;
     g.color={};g.rawOverlay={};g.depth[0]={};g.depth[1]={};g.motion={};g.rejection={};g.expected={};g.output[0]={};g.output[1]={};
     g.outputDomain[0]={};g.outputDomain[1]={};g.untrustedCoverageLast=false;
+    g.mfxColor={};
     g.klass={};g.classWidth=g.classHeight=0;   // the refusal census's class texture is the render size: made again by a frame that asks
     g.width=g.height=g.outWidth=g.outHeight=0;g.evalWidth=g.evalHeight=0;g.current=0;g.depthLast=0;g.history=false;g.hdr=false;
     const bool taa=f.mode==FlatMonoResolveMode::Taa;
     // The images' names for the HDR route's crumbs: which of the private textures each creation is.
     const auto role=[&](const Image& i)->const char* {
         return &i==&g.color?"color":&i==&g.rawOverlay?"overlay-raw":&i==&g.depth[0]?"depth0":&i==&g.depth[1]?"depth1":&i==&g.motion?"motion":
-               &i==&g.rejection?"rejection":&i==&g.expected?"expected":&i==&g.output[0]?"output0":"output1";
+               &i==&g.rejection?"rejection":&i==&g.expected?"expected":&i==&g.mfxColor?"mfx-color":&i==&g.output[0]?"output0":"output1";
     };
     auto make=[&](Image& out,DXGI_FORMAT format,bool output=false,bool writable=true) {
         return image(g.device.Get(),output?evalW:f.renderWidth,output?evalH:f.renderHeight,format,out,writable,role(out));
     };
     bool made;
+    // MetalFX, and only MetalFX, changes two of the formats here, and both are forced by what MetalFX accepts
+    // rather than by anything about Elite:
+    //
+    //   colour. R11G11B10_FLOAT and R8G8B8A8_UNORM are both formats MetalFX will not take as a colour: DXMT hands
+    //   the texture's own pixel format straight into the scaler setup (it records scaler_entry.color_pixel_format
+    //   as WMTFXTemporalScalerInfo::color_format in d3d11_context_impl.cpp). So MFX gets a second image, fp16 RGBA at the render size,
+    //   which the prep writes from the copy it already reads at t0 (backend.x) -- a format expansion inside a pass
+    //   that already runs, not a copy and not a blit. g.color itself is left exactly as the route made it, because
+    //   the finish kernel and the HDR finish both still sample the ORIGINAL render-resolution colour at t0 for the
+    //   pixels the rejection mask refused, and neither of those is MetalFX's to change.
+    //
+    //   output. MetalFX writes fp16 RGBA, so both output images are fp16 for it, on the copy route as much as the
+    //   HDR one. On the copy route output[1] stays R8G8B8A8_TYPELESS for everyone else, because being TYPELESS is
+    //   what gives the srgb view at the end of flatMonoResolveResolve; mfx takes the plain fp16 format and the
+    //   ordinary view.
+    //
+    // That is the whole of MFX's resource difference. Every other line below is exactly what it was, because a
+    // shared change to the three backends that already work is the kind of edit that costs a flight to notice.
+    const bool mfx = f.mode==FlatMonoResolveMode::Mfx;
+    const DXGI_FORMAT out0Fmt = mfx ? DXGI_FORMAT_R16G16B16A16_FLOAT
+                                    : (taa ? DXGI_FORMAT_R8G8B8A8_TYPELESS : DXGI_FORMAT_R8G8B8A8_UNORM);
+    const DXGI_FORMAT out1Fmt = mfx ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R8G8B8A8_TYPELESS;
     if(f.hdr) {
         // The HDR route (section 81): the input copy is H's own format, the backend's output and TAA's ping-pong
         // history are fp16 (R11G11B10F holds no more than the game's own tone pass would see, and the history must
@@ -408,10 +438,13 @@ bool resources(const FlatMonoResolveFrame& f,const char** reason) {
     } else {
         made=make(g.color,DXGI_FORMAT_R8G8B8A8_UNORM,false,false) && make(g.depth[0],DXGI_FORMAT_R32_FLOAT) &&
             make(g.motion,DXGI_FORMAT_R16G16_FLOAT) && make(g.rejection,DXGI_FORMAT_R8_UNORM) &&
-            make(g.output[0],taa?DXGI_FORMAT_R8G8B8A8_TYPELESS:DXGI_FORMAT_R8G8B8A8_UNORM,true) &&
-            make(g.output[1],DXGI_FORMAT_R8G8B8A8_TYPELESS,true) &&
+            make(g.output[0],out0Fmt,true) &&
+            make(g.output[1],out1Fmt,true) &&
             (!taa || (make(g.depth[1],DXGI_FORMAT_R32_FLOAT) && make(g.expected,DXGI_FORMAT_R32_FLOAT)));
     }
+    // MetalFX's colour, and only MetalFX's. Made after the branch above because it is the one image that is
+    // neither the route's colour nor an output, and because making it here keeps the two branches untouched.
+    if(mfx) made=made && make(g.mfxColor,DXGI_FORMAT_R16G16B16A16_FLOAT);
     if(!made)return fail(reason,"flat-resolve-texture-create-failed");
     g.width=f.renderWidth;g.height=f.renderHeight;g.outWidth=f.outputWidth;g.outHeight=f.outputHeight;g.mode=f.mode;
     g.evalWidth=evalW;g.evalHeight=evalH;g.hdr=f.hdr;
@@ -611,13 +644,19 @@ void drawHdrTarget(ID3D11DeviceContext* context,ID3D11PixelShader* ps,uint32_t w
 // The backend's availability ask, where the asker is the HDR route: the first such ask of a session is the SDK's own
 // initialisation (NGX's, or AMD's), the first call into code that has never run on a DXMT device, so the crumbs bracket it.
 // Later asks are a flag test and are not written. DLAA and DLSS share NGX.
-bool backendAvailable(FlatMonoResolveMode mode,ID3D11Device* device,const char** reason) {
-    static bool crumbed[2]={false,false};
-    const unsigned which=mode==FlatMonoResolveMode::Fsr?1u:0u;
+bool backendAvailable(FlatMonoResolveMode mode,ID3D11Device* device,ID3D11DeviceContext* context,const char** reason) {
+    static bool crumbed[3]={false,false,false};
+    // Three trained backends, three answers. MFX asks DXMT's own extension
+    // interface and the Metal device behind it, which is a different question
+    // from AMD's or NVIDIA's and gets its own crumb slot so the HDR route's
+    // breadcrumbs say which SDK was asked.
+    const unsigned which=mode==FlatMonoResolveMode::Fsr?1u:mode==FlatMonoResolveMode::Mfx?2u:0u;
     const bool first=g_crumbOn && !crumbed[which];
     if(first)crumbed[which]=true;
-    HdrCrumbSpan span(first,"backend-available","backend=%s",which?"fsr":"ngx");
-    const bool ok=which?fsr3Available(device,reason):dlaaAvailable(device,reason);
+    HdrCrumbSpan span(first,"backend-available","backend=%s",
+                      which==2u?"mfx":which?"fsr":"ngx");
+    const bool ok=which==2u ? mfxAvailable(context,reason)
+                            : (which ? fsr3Available(device,reason) : dlaaAvailable(device,reason));
     span.result("ok=%u reason=%s",ok?1u:0u,(reason && *reason)?*reason:"none");
     return ok;
 }
@@ -690,9 +729,10 @@ static FlatMonoResolvePreflightResult preflightBody(ID3D11Device* device,
         return result;
     }
     result.backendFeatureCreationDeferred=planned.mode!=FlatMonoResolveMode::Taa;
-    // DLAA and DLSS ask NGX, FSR asks AMD's port, EDVR's own TAA needs no SDK.
+    // DLAA and DLSS ask NGX, FSR asks AMD's port, MFX asks DXMT's own MetalFX
+    // interface (metal_fx_engine.h), and EDVR's TAA needs no SDK.
     if(planned.mode!=FlatMonoResolveMode::Taa)
-        result.backendAvailable=backendAvailable(planned.mode,device,&why);
+        result.backendAvailable=backendAvailable(planned.mode,device,context,&why);
     else result.backendAvailable=true;
     if(!result.backendAvailable) {
         result.status=FlatMonoResolvePreflightStatus::BackendUnavailable;
@@ -754,8 +794,12 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
        !flatProjectionJitter(f.rowsJitterX,f.rowsJitterY,f.renderWidth,f.renderHeight,rowsNow) ||
        !flatProjectionJitter(f.previousRowsJitterX,f.previousRowsJitterY,f.renderWidth,f.renderHeight,rowsBefore))
         return fail(reason,"flat-resolve-invalid-rows-jitter");
-    if(f.mode!=FlatMonoResolveMode::Taa && f.mode!=FlatMonoResolveMode::Dlaa && f.mode!=FlatMonoResolveMode::Dlss &&
-       f.mode!=FlatMonoResolveMode::Fsr)return fail(reason,"flat-resolve-invalid-mode");
+    // The shared predicate, not a second hand-written list. This used to spell the four modes out again and was
+    // missed when Mfx was added to resolveModeValid above, so every mfx frame refused HERE, at the resolve entry
+    // point, with flat-resolve-invalid-mode -- before the backend, before the route, before anything the preflight
+    // had already accepted. Adding the enumerator to this copy would have fixed the flight and left the trap for
+    // the next backend; the resolver is the one place the list may live.
+    if(!resolveModeValid(f.mode))return fail(reason,"flat-resolve-invalid-mode");
     // The upscaler slot (FlatMonoResolveFrame::slot): a slot no engine has refuses the frame here, before anything is made or written.
     if(f.slot>=kUpscalerSlots)return fail(reason,"flat-resolve-invalid-slot");
     // Gate 2 step 2 (design doc section 72): the route table owns the size
@@ -869,6 +913,11 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     // refuses the frame while H is still the game's own.
     if(hdr && !hdrTargetView(color.Get(),reason))return false;
     const bool taa=f.mode==FlatMonoResolveMode::Taa;
+    // MetalFX, and only MetalFX: its colour is the fp16 image the prep wrote, not the copy, and it is called
+    // through DXMT's own interface rather than through an SDK (metal_fx_engine.h). Everything else about this
+    // frame -- depth, motion, rejection, jitter, reset, the route, the finish and the substitution -- runs the same
+    // code it already ran for the other backends.
+    const bool mfx=f.mode==FlatMonoResolveMode::Mfx;
     D3D11_SHADER_RESOURCE_VIEW_DESC colorDesc{};f.color->GetDesc(&colorDesc);
     const float sdkDepthScale=foreground?sdkNear/f.camera[3][2]:1.f;
     const bool depthConventionTransition=g.history && sdkDepthScale!=g.sdkDepthScaleLast;
@@ -888,7 +937,7 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     // All external backend work is inside the same complete state isolation.
     Isolate isolated(g.context.Get(),g.isolated.Get(),g.capture);
     // DLAA and DLSS ask NGX, FSR asks AMD's port; EDVR's own TAA needs no SDK.
-    if(f.mode!=FlatMonoResolveMode::Taa && !backendAvailable(f.mode,device,reason)) {++stats.backendFailures;g.history=false;stats.currentContinueRun=0;return false;}
+    if(f.mode!=FlatMonoResolveMode::Taa && !backendAvailable(f.mode,device,context,reason)) {++stats.backendFailures;g.history=false;stats.currentContinueRun=0;return false;}
     // The first-person inputs (section 82): validated here, beside the colour and depth views, and bound for the prep kernel
     // only when the pair is whole and fit. A missing half is an absent pair; an unfit one is named, counted and dropped.
     ID3D11ShaderResourceView* firstPersonMap=nullptr,* firstPersonStencil=nullptr;
@@ -967,6 +1016,8 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     constants.debug[2]=overlay?1u:0u;
     constants.debug[3]=(foreground?2u:(untrusted?1u:0u))|(skin?4u:0u);
     constants.foregroundDepth[0]=sdkDepthScale;
+    // MetalFX colour expansion has its own lane after upstream foreground depth.
+    constants.backend[0]=mfx?1u:0u;
     constants.jitter[0]=f.jitterX;constants.jitter[1]=f.jitterY;
     constants.jitter[2]=f.previousJitterX;constants.jitter[3]=f.previousJitterY;
     // On a reset the previous rows ARE the current rows (above), so they carry the current phase.
@@ -992,10 +1043,10 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
         nullptr,nullptr,f.untrustedCameraCoverage,nullptr,foreground?f.foregroundMotion:nullptr,nullptr,skin?f.engine.skin:nullptr};
     const UINT prepViewCount=skin?18:(foreground?16:14);
     context->CSSetShaderResources(0,prepViewCount,prepViews);
-    // u5 is the refusal census's class texture, bound only on a frame that samples or paints (u4 is the later kernels' OutColor).
+    // u4 receives the MetalFX colour expansion in prep (backend.x); u5 is the refusal census's class texture.
     ID3D11UnorderedAccessView* prepOutputs[]={g.depth[depthIndex].uav.Get(),g.motion.uav.Get(),g.rejection.uav.Get(),g.expected.uav.Get(),
-        nullptr,needClass?g.klass.uav.Get():nullptr};
-    context->CSSetUnorderedAccessViews(0,needClass?6:4,prepOutputs,nullptr);
+        mfx?g.mfxColor.uav.Get():nullptr,needClass?g.klass.uav.Get():nullptr};
+    context->CSSetUnorderedAccessViews(0,(needClass||mfx)?6:4,prepOutputs,nullptr);
     context->CSSetShader(g.prep.Get(),nullptr,0);
     context->Dispatch((f.renderWidth+7)/8,(f.renderHeight+7)/8,1);
     ID3D11UnorderedAccessView* nullUavs[6]={};ID3D11ShaderResourceView* nullViews[18]={};
@@ -1024,7 +1075,7 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
         f.renderWidth,f.renderHeight,evalW,evalH,reset?1u:0u);
     bool ok=true;
     {
-        flatcpu::Scope backendScope(flatcpu::kBackend);   // the backend evaluation: NGX, FSR3, or the TAA dispatch
+        flatcpu::Scope backendScope(flatcpu::kBackend);   // the backend evaluation: NGX, FSR3, MetalFX, or the TAA dispatch
     if(taa) {
         ID3D11ShaderResourceView* views[]={g.color.srv.Get(),nullptr,nullptr,nullptr,g.motion.srv.Get(),
             g.rejection.srv.Get(),g.expected.srv.Get(),g.output[index^1].srv.Get(),g.depth[index^1].srv.Get(),
@@ -1043,6 +1094,16 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
         ok=fsr3Evaluate(context,f.slot,g.color.texture.Get(),g.depth[depthIndex].texture.Get(),g.motion.texture.Get(),g.rejection.texture.Get(),
             g.output[0].texture.Get(),f.renderWidth,f.renderHeight,evalW,evalH,f.jitterX,f.jitterY,reset,f.deltaMs,
             sdkNear,(std::numeric_limits<float>::max)(),2*std::atan(1/sy),reason,true,hdr);
+    } else if(mfx) {
+        // MetalFX. The colour is g.mfxColor (fp16 RGBA at R, written by the prep above), NOT g.color: DXMT passes a
+        // texture's own pixel format to the scaler, and neither R11G11B10_FLOAT nor R8G8B8A8_UNORM is one MetalFX
+        // accepts. Depth, motion, jitter and reset are the same values the two SDK backends are handed from this
+        // same frame, and the output is the same g.output[0] the finish kernel below reads either way.
+        // No reactive mask: DXMT's descriptor has no field for one and DXMT is read-only here, and the finish
+        // kernel already applies the rejection mask itself. No history resource: MetalFX owns it inside the scaler
+        // DXMT caches, so `reset` is the only history control that crosses.
+        ok=mfxEvaluate(context,g.mfxColor.texture.Get(),g.depth[depthIndex].texture.Get(),g.motion.texture.Get(),
+            g.output[0].texture.Get(),f.renderWidth,f.renderHeight,evalW,evalH,f.jitterX,f.jitterY,reset,reason,hdr);
     } else {
         ok=dlaaEvaluate(context,static_cast<int>(f.slot),g.color.texture.Get(),g.depth[depthIndex].texture.Get(),g.motion.texture.Get(),g.output[0].texture.Get(),
             g.rejection.texture.Get(),f.renderWidth,f.renderHeight,evalW,evalH,f.jitterX,f.jitterY,reset,f.deltaMs,reason,hdr);
@@ -1113,8 +1174,7 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
                 const float delta=std::abs(f.camera[row][col]-f.previousCamera[row][col]);
                 if(delta>maxMatrixDelta)maxMatrixDelta=delta;
             }
-            const char* modeName=f.mode==FlatMonoResolveMode::Taa?"taa":
-                f.mode==FlatMonoResolveMode::Dlaa?"dlaa":f.mode==FlatMonoResolveMode::Dlss?"dlss":"fsr";
+            const char* modeName=flatMonoResolveModeName(f.mode);   // mfx included; the chain here had no name for it
             Log::get().note("flat resolve reset event: frame=%llu mode=%s render=%ux%u output=%ux%u "
                 "requested=%u lost=%u gap=%u invalid-prev-camera=%u format=%u camera-cut=%u "
                 "delta-ms=%.9g now=(%.9g,%.9g,%.9g) previous=(%.9g,%.9g,%.9g) "
@@ -1136,7 +1196,12 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     }
     // The HDR route's result is already in H: nothing for the caller to bind, *output stays null.
     if(hdr) {++stats.hdrResolves;return true;}
-    *output=(colorDesc.Format==DXGI_FORMAT_R8G8B8A8_UNORM_SRGB?g.output[taa?index:1].srgb:g.output[taa?index:1].srv).Get();
+    // The srgb view exists only on the copy route's TYPELESS second image (image() makes it, and only for that
+    // format). mfx's second image is plain fp16 and has no srgb view, so the ask is keyed on the image actually
+    // there rather than on the source colour's format -- otherwise a game presenting an _SRGB swap chain would
+    // hand the game's copy a null view for a backend that never had one.
+    Image& second=g.output[taa?index:1];
+    *output=(second.srgb && colorDesc.Format==DXGI_FORMAT_R8G8B8A8_UNORM_SRGB?second.srgb:second.srv).Get();
     (*output)->AddRef();
     return true;
 }
@@ -1153,7 +1218,7 @@ bool flatMonoResolveSpatialFallback(ID3D11Device* device,ID3D11DeviceContext* co
        f.renderWidth>D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION || f.renderHeight>D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
        f.outputWidth>D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION || f.outputHeight>D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
        !jitterValid(f) || (f.mode!=FlatMonoResolveMode::Taa && f.mode!=FlatMonoResolveMode::Dlaa &&
-       f.mode!=FlatMonoResolveMode::Dlss && f.mode!=FlatMonoResolveMode::Fsr))
+       f.mode!=FlatMonoResolveMode::Dlss && f.mode!=FlatMonoResolveMode::Fsr && f.mode!=FlatMonoResolveMode::Mfx))
         return fail(reason,"flat-spatial-invalid-frame");
     const bool hdr=f.hdr;
     if(hdr && (f.renderWidth<f.outputWidth || f.renderHeight<f.outputHeight))return fail(reason,"flat-spatial-hdr-requires-render-at-least-output");
@@ -1201,7 +1266,12 @@ bool flatMonoResolveSpatialFallback(ID3D11Device* device,ID3D11DeviceContext* co
     ID3D11UnorderedAccessView* target=g.output[1].uav.Get();context->CSSetUnorderedAccessViews(4,1,&target,nullptr);
     context->CSSetShader(g.spatial.Get(),nullptr,0);
     context->Dispatch((evalW+7)/8,(evalH+7)/8,1);
-    *output=(colorDesc.Format==DXGI_FORMAT_R8G8B8A8_UNORM_SRGB?g.output[1].srgb:g.output[1].srv).Get();
+    // As in the primary resolve above: the srgb view exists only on a TYPELESS
+    // image. mfx's output[1] is plain fp16 and has no srgb view, so the ask is
+    // keyed on the image actually there -- otherwise an _SRGB game colour with
+    // an mfx fallback hands back a null view and the AddRef below faults.
+    Image& fallback=g.output[1];
+    *output=(fallback.srgb && colorDesc.Format==DXGI_FORMAT_R8G8B8A8_UNORM_SRGB?fallback.srgb:fallback.srv).Get();
     (*output)->AddRef();
     return true;
 }

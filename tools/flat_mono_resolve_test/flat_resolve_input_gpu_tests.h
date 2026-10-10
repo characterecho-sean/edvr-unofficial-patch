@@ -115,7 +115,8 @@ inline int flatResolveInputGpuTests(ID3D11Device* device,ID3D11DeviceContext* co
 
     // Exercise the actual resolver arm/capture/refusal/poll path for every SDK.
     const fs::path root=fs::path(edvr::Config::get().logDir())/"flat_pixels";
-    for(const auto mode:{FlatMonoResolveMode::Dlaa,FlatMonoResolveMode::Dlss,FlatMonoResolveMode::Fsr}) {
+    for(const auto mode:{FlatMonoResolveMode::Dlaa,FlatMonoResolveMode::Dlss,FlatMonoResolveMode::Fsr,
+                         FlatMonoResolveMode::Mfx}) {
         edvr::flatMonoResolveReset();std::vector<fs::path> before;
         for(const auto& entry:fs::directory_iterator(root))before.push_back(entry.path());
         f.mode=mode;f.frame+=200;edvr::flatMonoResolveArmPixels(f.frame-1);
@@ -128,7 +129,8 @@ inline int flatResolveInputGpuTests(ID3D11Device* device,ID3D11DeviceContext* co
         for(unsigned n=0;n<200;++n) {edvr::flatMonoResolvePollPixels(context,f.frame+1);Sleep(1);}
         const auto manifestPath=actualFolder/("inputs_frame_"+std::to_string(f.frame)+"_1.json");
         const auto resultText=text(manifestPath);
-        const char* name=mode==FlatMonoResolveMode::Dlaa?"dlaa":mode==FlatMonoResolveMode::Dlss?"dlss":"fsr";
+        const char* name=mode==FlatMonoResolveMode::Dlaa?"dlaa":mode==FlatMonoResolveMode::Dlss?"dlss":
+                         mode==FlatMonoResolveMode::Mfx?"mfx":"fsr";
         expect(!actualFolder.empty() && resultText.find("\"complete\":true")!=std::string::npos && resultText.find(std::string("\"mode\":\"")+name+"\"")!=std::string::npos,"production preguard capture survives SDK refusal and Present poll with configured mode");
         edvr::flatMonoResolveReset();
     }

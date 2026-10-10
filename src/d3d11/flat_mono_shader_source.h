@@ -2,6 +2,11 @@
 namespace edvr {
 // Prepend the generated kEngineMotionCoreHlsl: rigid-record arithmetic is shared
 // verbatim with VR. This source has no eye, headset or panel globals.
+//
+// Keep adjacent raw string literals split at top-level boundaries.
+// MSVC caps each literal at 16382 characters (C2026); the MetalFX colour
+// expansion below crossed that limit, and the upstream shader code has its own
+// seam. Concatenation preserves the HLSL bytes at each seam.
 inline constexpr char kFlatMonoShaderSource[] = R"HLSL(
 cbuffer Mono : register(b0) {
     float4 now[6]; float4 old[6];
@@ -20,6 +25,7 @@ cbuffer Mono : register(b0) {
                  // Bit 1: qualified flat SDK foreground map at t15. Bit 2 (value 4): the VR on-foot source's target 7 is bound at t17 (F2; only
                  // the VR world route sets it, never the flat profile). Zero leaves the old shader path unchanged.
     float4 foregroundDepth; // SDK common-near/world-near scale, only read with debug.w bit 1
+    uint4 backend; // x: expand Color into fp16 RGBA at u4 for MetalFX; independent of upstream flags/depth.
 };
 cbuffer EngineNow : register(b1) { float4 EN[277]; };   // EN[276].x: the frame stamp
 cbuffer EngineBefore : register(b2) { float4 EB[276]; };
@@ -292,6 +298,17 @@ void prep(uint3 id:SV_DispatchThreadID) {
     OutDepth[q]=isfinite(depth)?saturate(depth):0;
     OutMotion[q]=motion; OutRejection[q]=reject;
     if(flags.z!=0)OutExpected[q]=expected;
+    // The MetalFX colour (backend.x): the same texel this pass already read for nothing else, widened into the fp16
+    // RGBA the scaler takes. Alpha 1 -- neither source carries one (R11G11B10F has no alpha; R8G8B8A8_UNORM's is
+    // whatever the game wrote and MetalFX does not read it), and 1 is the value every other path's implicit alpha
+    // is anyway. Clamped to fp16's finite range because the destination is fp16, at the same 65504 ceiling
+    // hdrExpand uses: the HDR route's own output has always been clamped there, so this is not a new limit,
+    // only the same one applied a pass earlier. The lower bound cannot bind -- R11G11B10F and R8G8B8A8_UNORM are
+    // both unsigned -- and is here so a future signed source cannot reach the scaler with an infinity.
+    if(backend.x!=0) {
+        float3 c=Color.Load(int3(q,0)).rgb;
+        OutColor[q]=float4(clamp(c,0.0,65504.0),1.0);
+    }
     // The refusal census and view: one byte, the class and (bit 7) whether this pixel's history was refused.
     if(debug.x!=0 || debug.y!=0)OutClass[q]=cls|(reject!=0?0x80u:0u);
 }

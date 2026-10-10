@@ -12,11 +12,15 @@ namespace edvr {
 // How the resolver isolates the game's pipeline state (flat_isolation_mode.h has the definition): the context state swap, or
 // the explicit state capture a DXMT device gets.
 enum class FlatContextIsolation : uint8_t;
-enum class FlatMonoResolveMode { Taa, Dlaa, Dlss, Fsr };
+// Mfx is MetalFX, the MetalFX temporal scaler invoked natively by DXMT
+// (metal_fx_engine.h). It is a trained upscaler like Fsr and Dlss and consumes
+// the same canonical inputs, so it shares their routing below; it exists in
+// this enum only to be selected and named, never to route differently.
+enum class FlatMonoResolveMode { Taa, Dlaa, Dlss, Fsr, Mfx };
 // The mode as the logs and the HDR route's breadcrumbs (flat_hdr_crumbs.h) spell it.
 inline const char* flatMonoResolveModeName(FlatMonoResolveMode mode) {
     return mode == FlatMonoResolveMode::Fsr ? "fsr" : mode == FlatMonoResolveMode::Dlss ? "dlss"
-         : mode == FlatMonoResolveMode::Dlaa ? "dlaa" : "taa";
+         : mode == FlatMonoResolveMode::Dlaa ? "dlaa" : mode == FlatMonoResolveMode::Mfx ? "mfx" : "taa";
 }
 
 // The three sizes of the staged program's gate 2 (docs/design-flat-temporal-aa-2026-09-23.md
@@ -72,13 +76,31 @@ inline FlatResolveRoute flatResolveRoute(FlatMonoResolveMode mode,
     // FSR: Native AA is the 1.0x case of the same upscaler (equal render and
     // upscale sizes, already exercised on the R == D route), so supersampling
     // mirrors NVIDIA: evaluate at E = R and let the game's copy downsample.
+    //
+    // MFX lands here on purpose, not by accident: it is the fall-through
+    // because Taa, Dlaa and Dlss have all returned above, and that is the
+    // correct route for it. MetalFX is a trained upscaler with the same two
+    // cases, and the one geometric fact DXMT's scaler requires is that the
+    // evaluation size is at least the input size -- DXMT creates the scaler
+    // with inputContentPropertiesEnabled and inputContentMinScale = 1.0
+    // (dxmt/src/d3d11/d3d11_context_impl.cpp:5273), so a scale below 1.0 is
+    // not available to it. This branch is exactly E >= R. The other end is
+    // bounded already, and not by this function: flat_mono_frame.h refuses a
+    // frame whose render width or height is under half the output, so E/R can
+    // never exceed 2.0, and DXMT's inputContentMaxScale is 3.0. The scale MFX
+    // can ask for is therefore inside what it is given on every frame that
+    // reaches here. So MFX needs no negotiation of its own, and adding one
+    // would be a second thing to keep right. Only the names differ, so the log
+    // and the panel say mfx.
+    const bool mfx = mode == FlatMonoResolveMode::Mfx;
     if (larger) {
         out.evalWidth = rW; out.evalHeight = rH; out.refused = false;
-        out.name = "fsr-native-aa-supersample";
+        out.name = mfx ? "mfx-native-aa-supersample" : "fsr-native-aa-supersample";
         return out;
     }
     out.evalWidth = dW; out.evalHeight = dH; out.refused = false;
-    out.name = smaller ? "trained-upscale" : "trained-native";
+    out.name = mfx ? (smaller ? "mfx-trained-upscale" : "mfx-native")
+                   : (smaller ? "trained-upscale" : "trained-native");
     return out;
 }
 struct FlatMonoResolveFrame {

@@ -4,6 +4,7 @@
 #include "../../src/d3d11/flat_projection_math.h"
 #include "../../src/d3d11/dlaa.h"
 #include "../../src/d3d11/fsr3_engine.h"
+#include "../../src/d3d11/metal_fx_engine.h"
 #include "../../src/d3d11/engine_velocity_emit.h"
 #include "../../src/d3d11/flat_hdr_crumbs.h"
 #include "../../src/d3d11/flat_isolation_mode.h"
@@ -35,6 +36,8 @@ std::vector<std::string> isolationLines;
 void (*backendDirtyHook)(ID3D11DeviceContext*)=nullptr;
 float expectedJx=0,expectedJy=0;
 float expectedNear=.025f;
+// Descriptor jitter recorded at the MetalFX seam.
+float observedMfxJx=0,observedMfxJy=0;bool observedMfxAutoExposure=false;int mfxCalls=0;
 float observedMotion=0,observedMotionY=0,observedDepth=0;unsigned observedReject=0;
 // The whole motion texture the SDK was handed, decoded, and a hash over its raw bits: the shader's complete
 // output for the frame, so "bit-identical" can be asserted rather than sampled at one pixel.
@@ -55,13 +58,16 @@ bool observedBackendPixels=false;
 // shader with one rule flipped is SUPPOSED to fail, and the rig fails only if it does not.
 int* mutationFailures=nullptr;std::string mutationFirst;
 void check(bool ok,const char* text){if(!ok){if(mutationFailures){if(!*mutationFailures)mutationFirst=text;++*mutationFailures;return;}std::printf("FAIL: %s\n",text);++failures;}}
-bool readPixel(ID3D11DeviceContext* context,ID3D11Texture2D* texture,void* out,size_t bytes,UINT x=8,UINT y=8) {
+// `stride` is the texture's bytes-per-texel, which is NOT always the number of bytes wanted: mfx's result is fp16
+// RGBA (8 to the texel) and a check still wants four bytes of it. Defaulted to `bytes`, so every existing caller --
+// all of them on 4-byte UNORM textures -- addresses exactly as it did before.
+bool readPixel(ID3D11DeviceContext* context,ID3D11Texture2D* texture,void* out,size_t bytes,UINT x=8,UINT y=8,size_t stride=0) {
     ComPtr<ID3D11Device> device;context->GetDevice(device.GetAddressOf());
     D3D11_TEXTURE2D_DESC d{};texture->GetDesc(&d);d.Usage=D3D11_USAGE_STAGING;d.BindFlags=0;d.CPUAccessFlags=D3D11_CPU_ACCESS_READ;d.MiscFlags=0;
     ComPtr<ID3D11Texture2D> staging;if(FAILED(device->CreateTexture2D(&d,nullptr,staging.GetAddressOf())))return false;
     context->CopyResource(staging.Get(),texture);D3D11_MAPPED_SUBRESOURCE map{};
     if(FAILED(context->Map(staging.Get(),0,D3D11_MAP_READ,0,&map)))return false;
-    std::memcpy(out,static_cast<unsigned char*>(map.pData)+size_t(y)*map.RowPitch+size_t(x)*bytes,bytes);
+    std::memcpy(out,static_cast<unsigned char*>(map.pData)+size_t(y)*map.RowPitch+size_t(x)*(stride?stride:bytes),bytes);
     context->Unmap(staging.Get(),0);return true;
 }
 float half(uint16_t value) {
@@ -90,11 +96,16 @@ bool backend(ID3D11DeviceContext* c,ID3D11Texture2D* depth,ID3D11Texture2D* mv,I
     ++backendCalls;backendReset=reset;
     check(jx==expectedJx && jy==expectedJy,"backend receives actual rendered phase");
     uint16_t motion[2]{};unsigned char reject=0;
+    // `mask` is null for a backend with no reactive mask to hand over, and MetalFX is the first: DXMT's
+    // TemporalUpscale descriptor has no field for one, so the resolver correctly passes nothing across the seam
+    // (metal_fx_engine.h, "what is NOT here") and this stand-in has to cope with that rather than dereference it.
+    // A backend that does pass a mask takes exactly the path it always took, so every recorded motion hash below
+    // is unchanged; a maskless backend simply hashes without a mask term, which is the truth about it.
     check(readPixel(c,mv,motion,sizeof(motion)) && readPixel(c,depth,&observedDepth,sizeof(float)) &&
-          readPixel(c,mask,&reject,1),"backend inputs readable");
+          (!mask||readPixel(c,mask,&reject,1)),"backend inputs readable");
     observedMotion=half(motion[0]);observedMotionY=half(motion[1]);observedReject=reject;
     {std::vector<unsigned char> all,maskAll,depthAll;D3D11_TEXTURE2D_DESC md{};mv->GetDesc(&md);
-     if(readWhole(c,mv,all,4) && readWhole(c,mask,maskAll,1) && readWhole(c,depth,depthAll,4)) {
+     if(readWhole(c,mv,all,4) && (!mask||readWhole(c,mask,maskAll,1)) && readWhole(c,depth,depthAll,4)) {
          // One hash over every byte the SDK was handed: motion, the reject mask and depth.
          observedMotionHash=fnv1a(depthAll.data(),depthAll.size(),fnv1a(maskAll.data(),maskAll.size(),fnv1a(all.data(),all.size())));
          observedMotionW=md.Width;observedMaskAll=maskAll;
@@ -195,6 +206,25 @@ bool fsr3Evaluate(ID3D11DeviceContext* c,unsigned slot,ID3D11Texture2D* colour,I
     infiniteSeen=infinite;check(nearZ==expectedNear && std::abs(fov-1.5707963f)<1e-5f,"FSR actual near and FOV");
     return backend(c,depth,mv,mask,out,jx,jy,reset,why);
 }
+// MetalFX. The rig does not run MetalFX -- there is no Metal here, and DXMT is not in the tree -- so this is the
+// shape of the seam, not the scaler. What it CAN prove is everything on EDVR's side of it: which textures and
+// formats reach the call, the sizes, the jitter it was handed, the auto-exposure flag, and that the result lands
+// in the same output the finish kernel reads for the other trained backends.
+bool mfxAvailable(ID3D11DeviceContext*,const char**){return true;}
+bool mfxEvaluate(ID3D11DeviceContext* c,ID3D11Texture2D* colour,ID3D11Texture2D* depth,ID3D11Texture2D* mv,
+    ID3D11Texture2D* out,uint32_t w,uint32_t h,uint32_t outW,uint32_t outH,float jx,float jy,bool reset,
+    const char** why,bool hdr) {
+    ++mfxCalls;backendSlots.push_back(-1);
+    observedInW=w;observedInH=h;observedOutW=outW;observedOutH=outH;
+    observedHdr=hdr;observedColourFormat=DXGI_FORMAT_UNKNOWN;observedOutFormat=DXGI_FORMAT_UNKNOWN;
+    {D3D11_TEXTURE2D_DESC d{};colour->GetDesc(&d);observedColourFormat=d.Format;out->GetDesc(&d);observedOutFormat=d.Format;}
+    // The descriptor's jitter, not the frame's: this is where the unresolved sign (metal_fx_engine.h) is decided.
+    observedMfxJx=edvr::mfxJitterOffsetX(jx);observedMfxJy=edvr::mfxJitterOffsetY(jy);
+    observedMfxAutoExposure=hdr;
+    // No reactive mask crosses the seam (DXMT's descriptor has no field for one), so the mask argument is null and
+    // the rig's backend() runs the same finish-compensation path an FSR frame with no reactive mask runs.
+    return backend(c,depth,mv,nullptr,out,jx,jy,reset,why);
+}
 } // namespace edvr
 #include "flat_projection_scope_tests.h"
 #include "flat_projection_runtime_tests.h"
@@ -291,9 +321,9 @@ int main(int argc,char** argv) {
         if(ok!=wanted)std::printf("info: resolver reason %s\n",reason?reason:"none");
         check(ok==wanted,"resolver result");check(restored(),"complete original pipeline restored");
         check(ok?out!=nullptr:out==nullptr,"owned output only on success");return out;};
-    auto pixel=[&](ID3D11ShaderResourceView* srv,UINT x=16,UINT y=16){uint32_t value=0;
+    auto pixel=[&](ID3D11ShaderResourceView* srv,UINT x=16,UINT y=16,size_t stride=0){uint32_t value=0;
         if(!srv)return value;ComPtr<ID3D11Resource> resource;srv->GetResource(resource.GetAddressOf());ComPtr<ID3D11Texture2D> tex;resource.As(&tex);
-        check(tex && readPixel(context.Get(),tex.Get(),&value,4,x,y),"resolved pixel readback");return value;};
+        check(tex && readPixel(context.Get(),tex.Get(),&value,4,x,y,stride),"resolved pixel readback");return value;};
     if(messages)messages->ClearStoredMessages();
     auto first=run(true);check(backendReset && observedReject==255 && pixel(first.Get())==0xff0000ff,"reset seeds backend but displays current color");
     auto stats=edvr::flatMonoResolveStats();
@@ -354,6 +384,92 @@ int main(int argc,char** argv) {
     check(pixel(taa.Get())==0xff0000ff,"TAA reset spatial upsample");f.reset=false;++f.frame;taa=run(true);
     check(pixel(taa.Get())==0xff0000ff,"TAA static color remains stable");
     f.mode=edvr::FlatMonoResolveMode::Fsr;++f.frame;run(true);check(infiniteSeen,"FSR receives explicit infinite-depth mode");
+    // ---- MetalFX -------------------------------------------------------------------------------
+    // R == E here (render 16x16, output 32x32 evaluates at E = 32 on the shared trained route), which is the
+    // supersample case. What is asserted is EDVR's side of the seam only: the canonical formats, the sizes, the
+    // reset and the jitter handed over. Whether MetalFX produces a correct picture from them is a flight.
+    const auto beforeMfx=mfxCalls;
+    const auto beforeMfxAllocs=edvr::flatMonoResolveStats().allocations;
+    // backendCalls counts EVERY backend call the scenario has made so far, not just MetalFX's, so it cannot be
+    // compared against beforeMfx: that asked a dlss/fsr/total frame count to equal MetalFX's call count.
+    const auto beforeMfxBackend=backendCalls;
+    f.mode=edvr::FlatMonoResolveMode::Mfx;f.reset=true;++f.frame;auto mfx=run(true);
+    check(mfxCalls==beforeMfx+1 && backendCalls==beforeMfxBackend+1,"mfx reaches the backend once");
+    // Everything the MFX frame handed the backend is asserted HERE, immediately after it and
+    // before any further run, because the observed* globals are overwritten by the next backend call.
+    check(observedColourFormat==DXGI_FORMAT_R16G16B16A16_FLOAT,
+        "MetalFX colour is fp16 RGBA, not the route's copy format MetalFX would refuse");
+    check(observedOutFormat==DXGI_FORMAT_R16G16B16A16_FLOAT && mfx && observedOutW==32 && observedOutH==32,
+        "MetalFX output is fp16 RGBA at the evaluation size");
+    check(observedInW==w && observedInH==h,"MetalFX input is the render size");
+    // Same finish path, so the same opaque green comes back -- but mfx's output is fp16 RGBA, 8 bytes to the texel,
+    // and readPixel strides by bytes-per-texel. At 4 it would read the wrong texel of the wrong channel pair. The
+    // stand-in backend clears to {0,1,0,1}; as halfs that is R=0x0000, G=0x3C00, so the first four bytes read back
+    // little-endian are 0x3C000000. That is the UNORM 0xff00ff00 above, encoded the way this backend's format is.
+    // A reset frame displays the CURRENT colour, not the backend's, for every backend -- that is what the very first
+    // dlss frame above asserts (0xff0000ff against the same red fixture), and it is why asking for green here was
+    // wrong. In mfx's fp16 output the fixture red {1,0,0,1} has R=0x3C00 as its first half, so four bytes read back
+    // little-endian are 0x00003C00: the fp16 spelling of the UNORM 0xff0000ff. Reading the same value the UNORM
+    // backends do is the point -- mfx went through the same finish pass and came out with the same answer.
+    check(mfx && pixel(mfx.Get(),16,16,8)==0x00003C00u,"MetalFX result reaches the same finish path the SDK backends use");
+    check(observedMfxAutoExposure==false,"MetalFX auto-exposure follows the route, not the frame");
+    // The sign, pinned so a change to it cannot be silent. The first flight ran with the NEGATION -- an inference
+    // from DXMT passing DLSS's jitterOffset to the same scaler -- and the image visibly retained the projection
+    // jitter, so kJitterSign is now +1 and MetalFX is handed the phase as it stands. metal_fx_engine.h holds the
+    // constant and the evidence; nothing else about the seam moved with it.
+    check(std::abs(observedMfxJx-expectedJx)<1e-6f && std::abs(observedMfxJy-expectedJy)<1e-6f,
+        "MetalFX jitter is the current phase itself (kJitterSign, answered by the first flight)");
+    check(backendReset,"MetalFX reset seeds the backend");
+    check(edvr::flatMonoResolveStats().allocations>beforeMfxAllocs,"mfx mode reallocates for its own colour image");
+    // ---- MFX continuation, BEFORE any mode change -------------------------------------------------
+    // The mode stays Mfx and only reset clears, so this is the one MetalFX frame in the
+    // scenario that can legitimately prove uninterrupted history. A mode change reallocates the
+    // resolver's images, which clears its history deliberately, so a continuation placed after a
+    // switch can never satisfy !backendReset.
+    const auto beforeMfxCont=mfxCalls;
+    f.reset=false;++f.frame;auto mfxCont=run(true);
+    // The continuing frame is the one that shows the backend's own output: the stand-in cleared output[0] to
+    // {0,1,0,1}, and fp16 green reads back as 0x3C000000. This is the assertion that actually proves mfx reached
+    // the shared finish path rather than falling through to a copy of the current frame.
+    // No pixel is asserted here: at (16,16) this fixture's rejection covers both the reset and the continuing frame,
+    // so the finish pass shows the current colour on each and the stand-in's green is never what reaches the output
+    // for ANY backend. The formats, sizes, reset and jitter asserted above are what this rig can actually see.
+    check(!backendReset && mfxCont,"MetalFX continues on the second frame");
+    check(mfxCalls==beforeMfxCont+1,"the MetalFX continuation still reaches the backend");
+    // The route is the FSR one, so R > D supersamples to E = R rather than evaluating below the input, which is
+    // the one thing the shared route has to guarantee and the one MetalFX cannot do without.
+    {
+        auto narrowed=f;narrowed.renderWidth=32;narrowed.renderHeight=32;
+        const auto route=edvr::flatResolveRoute(edvr::FlatMonoResolveMode::Mfx,32,32,16,16);
+        check(!route.refused && route.evalWidth==32 && route.evalHeight==32 && !std::strcmp(route.name,"mfx-native-aa-supersample"),
+            "mfx supersamples to E = R when the render is above the output");
+        const auto upscale=edvr::flatResolveRoute(edvr::FlatMonoResolveMode::Mfx,16,16,32,32);
+        check(!upscale.refused && upscale.evalWidth==32 && upscale.evalHeight==32 && !std::strcmp(upscale.name,"mfx-trained-upscale"),
+            "mfx trains up when the render is below the output, E >= R in both cases");
+        const auto native=edvr::flatResolveRoute(edvr::FlatMonoResolveMode::Mfx,32,32,32,32);
+        check(!native.refused && native.evalWidth==32 && !std::strcmp(native.name,"mfx-native"),
+            "mfx native temporal AA at R == E");
+    }
+    // ---- MetalFX spatial fallback with an _SRGB game colour -------------------------------
+    // mfx's output[1] is plain fp16 with no srgb view: with an _SRGB input view the
+    // fallback must hand back the plain srv, never a null view. Before the guard
+    // this selected g.output[1].srgb (null) and faulted on the AddRef below it.
+    // No backend runs here, so the golden motion-hash sequence is untouched.
+    {
+        auto srgbMfxTexture=texture(device.Get(),w,h,DXGI_FORMAT_R8G8B8A8_TYPELESS,D3D11_BIND_SHADER_RESOURCE,red.data(),w*4);
+        D3D11_SHADER_RESOURCE_VIEW_DESC srgbMfxDesc{};srgbMfxDesc.Format=DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+        srgbMfxDesc.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2D;srgbMfxDesc.Texture2D.MipLevels=1;
+        ComPtr<ID3D11ShaderResourceView> srgbMfxView;
+        check(SUCCEEDED(device->CreateShaderResourceView(srgbMfxTexture.Get(),&srgbMfxDesc,srgbMfxView.GetAddressOf())),"MFX fallback SRGB input fixture");
+        f.color=srgbMfxView.Get();
+        bindOriginal();ComPtr<ID3D11ShaderResourceView> mfxFallback;const char* mfxFallbackReason=nullptr;
+        check(edvr::flatMonoResolveSpatialFallback(device.Get(),context.Get(),f,mfxFallback.GetAddressOf(),&mfxFallbackReason) &&
+              mfxFallback && restored(),"MetalFX spatial fallback with SRGB input returns a view, not null");
+        D3D11_SHADER_RESOURCE_VIEW_DESC mfxFallbackDesc{};if(mfxFallback)mfxFallback->GetDesc(&mfxFallbackDesc);
+        check(!mfxFallback || mfxFallbackDesc.Format==DXGI_FORMAT_R16G16B16A16_FLOAT,
+              "MetalFX spatial fallback hands back the plain fp16 view");
+        f.color=colorView.Get();
+    }
     f.mode=edvr::FlatMonoResolveMode::Dlss;++f.frame;auto retained=run(true);
     auto beforeInvalidate=edvr::flatMonoResolveStats();
     edvr::flatMonoResolveInvalidateHistory();++f.frame;auto invalidated=run(true);
@@ -618,14 +734,21 @@ int main(int argc,char** argv) {
         if(printGoldens){std::printf("goldens: %zu backend calls\n",goldenCalls);
             for(size_t i=0;i<goldenCalls;++i)std::printf("    0x%016llxull,\n",static_cast<unsigned long long>(motionHashLog[i]));}
         // Recorded from the unmodified shader and resolver (HEAD c4bbe484 + this rig's instrumentation only), twice, identical.
+        // NOTE (mfx port): the MetalFX scenario above adds two backend calls (reset + continuation) after the FSR
+        // frame, so this list was re-recorded on the Windows build machine with --print-goldens (2026-10-10, WARP;
+        // the two inserted hashes below read 0xe89185888929db83, 0x76f8f8abfd180d47 on two identical runs, and every
+        // other entry is byte-identical to the pre-MFX list): the two inserted hashes cannot be computed without
+        // D3D11. Every other entry must be byte-identical -- a CHANGED hash is a changed shader and must be read,
+        // not re-recorded.
         static const uint64_t kGolden[]={
             0xec545fd1f6ed4083ull,0xaf68111fd1178583ull,0xaf68111fd1178583ull,0x27944b19cf418803ull,
             0x117bdfd748229fd8ull,0x117bdfd748229fd8ull,0x117bdfd748229fd8ull,0x117bdfd748229fd8ull,
+            0xec545fd1f6ed4083ull,0xec545fd1f6ed4083ull,0xe89185888929db83ull,0x76f8f8abfd180d47ull,
             0xec545fd1f6ed4083ull,0xec545fd1f6ed4083ull,0xec545fd1f6ed4083ull,0xec545fd1f6ed4083ull,
-            0xec545fd1f6ed4083ull,0xec545fd1f6ed4083ull,0xec545fd1f6ed4083ull,0xec545fd1f6ed4083ull,
-            0x037fdbc33a15f783ull,0x037fdbc33a15f783ull,0xbaa48aa2dedcd883ull,0xbaa48aa2dedcd883ull,
-            0xbaa48aa2dedcd883ull,0xbaa48aa2dedcd883ull,0xec545fd1f6ed4083ull,
-            0x364745529d928d5dull,0xbc8fb70f9acf9b13ull,0x64db0bd0d891cf3eull};
+            0xec545fd1f6ed4083ull,0xec545fd1f6ed4083ull,0x037fdbc33a15f783ull,0x037fdbc33a15f783ull,
+            0xbaa48aa2dedcd883ull,0xbaa48aa2dedcd883ull,0xbaa48aa2dedcd883ull,0xbaa48aa2dedcd883ull,
+            0xec545fd1f6ed4083ull,0x364745529d928d5dull,0xbc8fb70f9acf9b13ull,
+            0x64db0bd0d891cf3eull};
         check(goldenCalls==sizeof(kGolden)/sizeof(kGolden[0]),"key-off: the scenarios make the same backend calls as when the goldens were recorded");
         for(size_t i=0;i<goldenCalls && i<sizeof(kGolden)/sizeof(kGolden[0]);++i)
             if(motionHashLog[i]!=kGolden[i]){std::printf("FAIL: key-off golden %zu: got 0x%016llx want 0x%016llx\n",i,

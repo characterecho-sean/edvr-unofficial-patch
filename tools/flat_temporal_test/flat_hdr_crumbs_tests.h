@@ -422,7 +422,7 @@ inline int flatHdrCrumbWiringTests() {
            "the resolver's three entry points (resolve, spatial recovery, preflight) each open the route's scope from their own hdr bit");
     const std::string solve = body(resolve, "bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const FlatMonoResolveFrame& f,");
     ordered(solve, {"CrumbScope crumbs(f.hdr);", "initialize(device,context,reason)", "initializeHdr(device,reason)", "resources(f,reason)",
-                    "hdrTargetView(color.Get(),reason)", "Isolate isolated(", "backendAvailable(f.mode,device,reason)", "HdrCrumbSpan copyStep(",
+                    "hdrTargetView(color.Get(),reason)", "Isolate isolated(", "backendAvailable(f.mode,device,context,reason)", "HdrCrumbSpan copyStep(",
                     "SpanGuard span(context);", "context->CopyResource(g.color.texture.Get(),overlay?cleanColor.Get():color.Get());",
                     "if(overlay) context->CopyResource(g.rawOverlay.texture.Get(),color.Get());", "copyStep.close();",
                     "HdrCrumbSpan prepStep(", "context->Dispatch((f.renderWidth+7)/8,(f.renderHeight+7)/8,1);", "prepStep.close();",

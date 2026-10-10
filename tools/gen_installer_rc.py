@@ -333,8 +333,9 @@ def main(argv=None):
     if args.profile == 'flat' and not args.ini:
         with open(ini, 'wb') as f:
             f.write(b'# Experimental flat temporal profile: visual qualification in progress.\r\n'
-                    b'# F8 opens the AA menu: Off / TAA / DLSS / FSR3 and DLSS model presets.\r\n'
-                    b'# temporal_aa: off, on (TAA), dlaa (native SS), dlss, fsr. Game SS controls render scale.\r\n'
+                    b'# F8 opens the AA menu: Off / TAA / DLSS / FSR3 / MetalFX and DLSS model presets.\r\n'
+                    b'# temporal_aa: off, on (TAA), dlaa (native SS), dlss, fsr, mfx (MetalFX, Apple silicon via DXMT).\r\n'
+                    b'# Game SS controls render scale.\r\n'
                     b'# Press NumLock while the issue is visible to collect a diagnostic capture.\r\n'
                     b'[fix]\r\ntemporal_aa = off\r\ntemporal_aa_model = k\r\nui_quality = 100\r\n\r\n'
                     b'[hotkey]\r\nmenu = F8\r\ndump_draws = NUMLOCK\r\n\r\n'
@@ -348,9 +349,10 @@ def main(argv=None):
                     b'Its settings live in edvr-flat.ini, never in the VR profile\'s edvr.ini.\r\n'
                     b'Experimental temporal AA; visual quality is not yet qualified.\r\n'
                     b'Press F8 for the AA menu. Up/Down selects a row; Left/Right changes it.\r\n'
-                    b'Choose Off, TAA, DLSS or FSR3 and the DLSS model preset; settings save live.\r\n'
+                    b'Choose Off, TAA, DLSS, FSR3 or MetalFX and the DLSS model preset; settings save live.\r\n'
                     b'Press F8 or Escape to close. Game keys are private while the menu is drawn.\r\n'
-                    b'[fix] temporal_aa also accepts off, on (TAA), dlaa, dlss or fsr (default off).\r\n'
+                    b'[fix] temporal_aa also accepts off, on (TAA), dlaa, dlss, fsr or mfx (default off).\r\n'
+                    b'MetalFX needs Apple silicon through DXMT; without it the mode refuses and says so in the log.\r\n'
                     b'Game supersampling controls render scale; DLAA requires native SS.\r\n'
                     b'Press NumLock while the issue is visible to collect a diagnostic capture.\r\n'
                     b'Use --convert-profile for an explicit VR/flat edition switch.\r\n')
