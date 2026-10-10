@@ -196,6 +196,9 @@ EyeCtx g_ctx[kUpscalerSlots];
 // Test-only bookkeeping (fsr3TestContextCreations): how many contexts each slot has had made, so a rig can prove that
 // making or remaking one slot's context touches no other's. Counts successful creates only; never read by the engine.
 uint32_t g_testCreations[kUpscalerSlots] = {};
+// Test-only (fsr3TestRequestDebugChecking): asks ensureContext for AMD's FFX_FSR3UPSCALER_ENABLE_DEBUG_CHECKING. False unless a rig
+// sets it; there is no user setting for it.
+bool g_testDebugChecking = false;
 
 // The GPU-price ring, dlaa.cpp's own discipline (QuerySlot/pollTimingRing/
 // acquireQuerySlot there): never awaited. FSR has one role (unlike DLAA's
@@ -454,9 +457,9 @@ bool ensureContext(unsigned eye, uint32_t w, uint32_t h, uint32_t outW, uint32_t
         if (why) *why = "an upscaler slot out of range";
         return false;
     }
-    // AMD's debug checking is a context-creation-time flag and stays off; it
-    // remains part of the key below.
-    const bool diagnostics = false;
+    // AMD's debug checking is a context-creation-time flag and stays off in production; only a rig's fsr3TestRequestDebugChecking
+    // turns it on (read here, at context creation, never per frame). It remains part of the key below.
+    const bool diagnostics = g_testDebugChecking;
 
     EyeCtx& e = g_ctx[eye];
     if (e.valid && e.w == w && e.h == h && e.outW == outW && e.outH == outH &&
@@ -1078,6 +1081,11 @@ uint32_t fsr3TestContextFlags(unsigned eye) { return eye < kUpscalerSlots && g_c
 // again), 0 for a slot out of range. tools\fsr3_engine_test reads it to prove each slot's context is its own: making or
 // remaking the VR world's (slot 2) moves no eye's count, and an eye's rekey moves none of the others.
 uint32_t fsr3TestContextCreations(unsigned slot) { return slot < kUpscalerSlots ? g_testCreations[slot] : 0u; }
+
+// Test-only, NOT part of fsr3_engine.h's contract: makes every context created from now on carry AMD's debug checking, so
+// tools\fsr3_engine_test can assert that well-formed input stays silent AND that malformed input is reported. Call it before the
+// first evaluation (the flag is part of the context key, so a later flip remakes the context). Never called outside that rig.
+void fsr3TestRequestDebugChecking(bool on) { g_testDebugChecking = on; }
 #endif
 
 }  // namespace edvr

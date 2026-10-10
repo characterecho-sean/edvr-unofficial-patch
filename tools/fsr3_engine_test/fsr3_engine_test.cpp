@@ -100,6 +100,7 @@ using Microsoft::WRL::ComPtr;
 namespace edvr {
 uint32_t fsr3TestMessageCount();
 void fsr3TestSkipBindCheck(bool on);
+void fsr3TestRequestDebugChecking(bool on);   // contexts made from now on carry AMD's ENABLE_DEBUG_CHECKING (production: never)
 uint32_t fsr3TestContextFlags(unsigned eye);   // the flags an eye's context was created with (hdr_backend_flags.h)
 uint32_t fsr3TestContextCreations(unsigned slot);   // how many contexts an upscaler slot has had made (a rekey counts again)
 }
@@ -450,13 +451,32 @@ void testContextCreateAndSilence(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     }
     check(ok0, "(b) eye 0 dispatched FFX_OK at 2064x2208");
     check(ok1, "(b) eye 1 dispatched FFX_OK at 2064x2208");
-    std::printf("info: (b) fpMessage count before=%u after=%u (debug checking is off)\n",
+    std::printf("info: (b) fpMessage count before=%u after=%u (debug checking is on: this rig requests it)\n",
                 before, after);
+    // The checker really is on: both eyes' contexts were created with AMD's bit. Without it, silence below proves nothing
+    // (the 2026-10 key cull dropped the request and these asserts kept passing, review 2026-10-09 finding 1).
+    check(made && ok0 && ok1 && (edvr::fsr3TestContextFlags(0) & edvr::kFsrFlagDebugChecking) != 0 &&
+              (edvr::fsr3TestContextFlags(1) & edvr::kFsrFlagDebugChecking) != 0,
+          "(b) both eyes' contexts were created with FFX_FSR3UPSCALER_ENABLE_DEBUG_CHECKING");
     // `made` is in the test on purpose: with no textures, nothing dispatches,
     // before and after are both 0, and this printed as a clean pass while
     // measuring nothing at all (the delegated rig review, 2026-09-16).
     check(made && ok0 && ok1 && after == before,
           "(b) DEBUG_CHECKING stayed silent on two well-formed dispatches");
+    // Negative control: a jitter offset of 2.0 is outside the range AMD's checker accepts (a fraction of a pixel, |x| <= 1),
+    // so the same context, same textures, one malformed dispatch MUST be reported. Silence above then means the checker ran
+    // and found nothing, not that it never ran.
+    if (made && ok0) {
+        const uint32_t beforeBad = edvr::fsr3TestMessageCount();
+        const char* whyBad = nullptr;
+        const bool okBad = edvr::fsr3Evaluate(ctx, 0, colour, depth, mv, nullptr, out0, w, h, w, h, 2.0f, 0.0f, false,
+                                              11.1f, 0.1f, 10000.0f, kFovY, &whyBad);
+        const uint32_t afterBad = edvr::fsr3TestMessageCount();
+        std::printf("info: (b) negative control (jitter X 2.0): dispatch %s, fpMessage count %u -> %u\n",
+                    okBad ? "ok" : (whyBad ? whyBad : "refused"), beforeBad, afterBad);
+        check(afterBad > beforeBad,
+              "(b) DEBUG_CHECKING reports a malformed dispatch (jitter X 2.0): the checker is live, so the silence above is evidence");
+    }
     if (colour) colour->Release();
     if (depth) depth->Release();
     if (mv) mv->Release();
@@ -1147,7 +1167,7 @@ void testHdrRoute(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
         // always made with, or that set plus the two HDR bits (this rig runs with AMD's debug checking on, which is
         // the same bit in both). Read from the engine's own record of desc.flags, so a flag that never reached the
         // port, or a flip that did not remake the context, shows here and nowhere a constant field could.
-        const bool diagnostics = false;
+        const bool diagnostics = true;
         const uint32_t ldrFlags = edvr::flatFsrCreateFlags(false, diagnostics, false);
         const uint32_t hdrFlags = edvr::flatFsrCreateFlags(false, diagnostics, true);
         const uint32_t messagesBefore = edvr::fsr3TestMessageCount();
@@ -1299,7 +1319,7 @@ void testUpscalerSlots(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
             ctx->UpdateSubresource(hc, 0, nullptr, field.data(), hw * 4, 0);
             SlotRig hdrRig = eyeRig;
             hdrRig.colour = hc; hdrRig.out = ho;
-            const bool diagnostics = false;
+            const bool diagnostics = true;
             const uint32_t ldrFlags = edvr::flatFsrCreateFlags(false, diagnostics, false);
             const uint32_t hdrFlags = edvr::flatFsrCreateFlags(false, diagnostics, true);
             const uint32_t before0 = created(0), before1 = created(1), before2 = created(world);
@@ -1863,6 +1883,8 @@ int run() {
     check(avail, "(a) fsr3Available on WARP");
     std::printf("info: (a) fsr3Available = %s (%s)\n", avail ? "true" : "false", why ? why : "?");
     if (avail) {
+        // Production never asks for AMD's debug checking; this rig does, before the first context exists.
+        edvr::fsr3TestRequestDebugChecking(true);
         testContextCreateAndSilence(device.Get(), context.Get());
         dumpDebugMessages(device.Get(), "after (b)");
         testAtRest(device.Get(), context.Get());
