@@ -1062,6 +1062,10 @@ static void iniNameScan(const std::wstring& root) {
 // The six keys of the terrain guard, removed 2026-10-09 (fix.cull_guard, its _percent, _fraction_h, _fraction_v and _headsets, and advanced.cull_guard_channel),
 // are held out the same way, the one bare name covering all six. The cause the guard worked around was found: Elite culled with a head pose 42 ms older than
 // the one it drew with, and EDVR now answers its "now" request at the drawn frame's display time (docs/terrain-culling.md). Nothing is left to keep permanent.
+//
+// fix.scanner_body, removed 2026-10-09 with the lend it switched (resolve_bind_fix): the second eye's lighting draw ran with no vertex buffer because the game's own cache of
+// what it had bound went stale (docs/scanner-body.md). The repair at the game's input-assembler flush is behaviour, with no key. An old line in a user's ini is carried over by
+// the installer under "no longer used by this version" and is never read by the DLL.
 static const char* const kRetiredKeys[] = {
     "temporal_aa_on_foot_world_jitter",
     "temporal_aa_on_foot_world_steady_detail",
@@ -1103,6 +1107,8 @@ static const char* const kRetiredKeys[] = {
     "target_indicator_sharpen", "flat_cb_map_cache", "flat_context_isolation",
     // The terrain guard, 2026-10-09: all six keys begin with this.
     "cull_guard",
+    // The scanned-body lend, 2026-10-09: fix.scanner_body is gone with the lend. The cause is fixed at the game's own flush (vertex_resync_hook.cpp, which has no key).
+    "scanner_body",
 };
 static const int kRetiredKeyCount = int(sizeof(kRetiredKeys) / sizeof(kRetiredKeys[0]));
 

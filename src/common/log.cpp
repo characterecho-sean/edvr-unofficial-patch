@@ -460,6 +460,23 @@ void Log::detachDuringProcessExit() {
                 WriteFile(m_impl->file, msg, static_cast<DWORD>(n), &w, nullptr);
             }
         }
+        // The one line a module asked to have said at the end (setExitLine), stamped like note()'s: stack buffer, direct WriteFile, nothing that locks or allocates.
+        if (const ExitLineFn exitLine = m_exitLine.load(std::memory_order_acquire)) {
+            SYSTEMTIME st;
+            GetLocalTime(&st);
+            char msg[400];
+            int n = _snprintf_s(msg, sizeof(msg), _TRUNCATE, "[%02u:%02u:%02u.%03u] ", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+            if (n > 0) {
+                const int m = exitLine(msg + n, sizeof(msg) - static_cast<size_t>(n) - 3);
+                if (m > 0 && n + m + 2 <= static_cast<int>(sizeof(msg))) {
+                    n += m;
+                    msg[n++] = '\r';
+                    msg[n++] = '\n';
+                    DWORD w = 0;
+                    WriteFile(m_impl->file, msg, static_cast<DWORD>(n), &w, nullptr);
+                }
+            }
+        }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         // Buffers were mid-update when their writer was killed. Nothing to
         // recover; everything flushed before this is already on disk.

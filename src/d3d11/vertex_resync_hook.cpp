@@ -1,7 +1,6 @@
 #include "vertex_resync_hook.h"
 #include "vertex_resync_core.h"
 #include "../common/code_hook.h"
-#include "../common/config.h"
 #include "../common/game_call_probe.h"
 #include "../common/log.h"
 
@@ -86,9 +85,12 @@ bool prepareRelay(void* trampoline, void*) noexcept {
 // --- State and instruments -------------------------------------------------------------------------------------------------------------------------------------
 std::atomic<bool> g_attempted{false};          // install has been tried (once, ever)
 std::atomic<bool> g_installed{false};
-std::atomic<bool> g_repair{true};              // advanced.vertex_resync
-std::atomic<uint64_t> g_calls{0}, g_desynced{0}, g_repaired{0}, g_faults{0};
-vresync::WindowCount g_window;
+std::atomic<uint64_t> g_repairedTotal{0}, g_faults{0};   // rare events: a locked add is fine
+// The count of flushes seen: bumped on every flush with a relaxed load and a relaxed store, no lock prefix, on its own cache line (vertex_resync_core.h says why).
+vresync::FlushCount g_flushes;
+vresync::WindowCount g_window(vresync::kWindowMs);        // repairs in the running 60 s (said while non-zero)
+vresync::WindowCount g_beat(vresync::kHeartbeatMs);       // repairs in the running 10 min (said always, zero included)
+uint64_t g_flushesAtLastBeat = 0;                         // the poll thread's own
 vresync::SightingGate g_sightings;
 
 #ifdef EDVR_VERTEX_RESYNC_TEST
@@ -135,9 +137,9 @@ __declspec(noinline) bool checkIdentity(uintptr_t base, const char** why) noexce
     }
 }
 // The repair itself, under SEH: the pointers it follows (the layout object, the wrapper) are the game's.
-__declspec(noinline) bool guardedResync(uintptr_t pso, uintptr_t desired, uintptr_t applied, bool repair, vresync::Report* out) noexcept {
+__declspec(noinline) bool guardedResync(uintptr_t pso, uintptr_t desired, uintptr_t applied, vresync::Report* out) noexcept {
     __try {
-        *out = vresync::resync(reinterpret_cast<const uint8_t*>(pso), reinterpret_cast<const uint8_t*>(desired), reinterpret_cast<uint8_t*>(applied), repair);
+        *out = vresync::resync(reinterpret_cast<const uint8_t*>(pso), reinterpret_cast<const uint8_t*>(desired), reinterpret_cast<uint8_t*>(applied));
         return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
@@ -154,13 +156,20 @@ void noteFault() noexcept {
     }
 }
 
-void noteSighting(const vresync::Report& r, uintptr_t desired, bool repair) noexcept {
+void noteSighting(const vresync::Report& r, uintptr_t desired) noexcept {
     if (!r.hasFirst || !g_sightings.take()) return;
     const GameCallStack stack = captureGameCallStack();
     char line[900];
     vresync::formatSightingLine(line, sizeof(line), g_sightings.taken(), r.first, desired >= vresync::kListDesired ? desired - vresync::kListDesired : 0, r.layoutCount,
-                                GetCurrentThreadId(), repair, stack.gameFrames, stack.rvas);
+                                GetCurrentThreadId(), stack.gameFrames, stack.rvas);
     say(line);
+}
+
+// The process-exit line (Log::setExitLine): the session totals, from atomics, into the caller's stack buffer. Nothing is armed, nothing is said.
+int exitLine(char* out, size_t cap) {
+    if (!g_installed.load(std::memory_order_acquire) || g_relayGate.load(std::memory_order_acquire) == 0) return 0;
+    vresync::formatSessionLine(out, cap, g_repairedTotal.load(std::memory_order_relaxed), g_flushes.read());
+    return static_cast<int>(std::strlen(out));
 }
 
 using FlushFn = uintptr_t (__fastcall*)(uintptr_t, uintptr_t, uintptr_t, uintptr_t);
@@ -168,17 +177,16 @@ using FlushFn = uintptr_t (__fastcall*)(uintptr_t, uintptr_t, uintptr_t, uintptr
 __declspec(noinline) uintptr_t __fastcall flushIaObserved(uintptr_t pso, uintptr_t context, uintptr_t desired, uintptr_t applied) noexcept {
     const auto forward = reinterpret_cast<FlushFn>(g_forward.load(std::memory_order_acquire));
     if (!forward) return 0;   // stood down at install; the relay is unreachable then
+    g_flushes.bump();
     if (pso && desired && applied) {
-        g_calls.fetch_add(1, std::memory_order_relaxed);
-        const bool repair = g_repair.load(std::memory_order_relaxed);
         vresync::Report r;
-        if (!guardedResync(pso, desired, applied, repair, &r)) {
+        if (!guardedResync(pso, desired, applied, &r)) {
             noteFault();
-        } else if (r.desynced) {
-            g_desynced.fetch_add(r.desynced, std::memory_order_relaxed);
-            g_repaired.fetch_add(r.repaired, std::memory_order_relaxed);
-            g_window.add(r.desynced);
-            noteSighting(r, desired, repair);
+        } else if (r.repaired) {
+            g_repairedTotal.fetch_add(r.repaired, std::memory_order_relaxed);
+            g_window.add(r.repaired);
+            g_beat.add(r.repaired);
+            noteSighting(r, desired);
         }
     }
     return forward(pso, context, desired, applied);
@@ -226,47 +234,57 @@ void vertexResyncInstall() {
     }
     g_relayGate.store(1, std::memory_order_release);
     g_installed.store(true, std::memory_order_release);
+    Log::get().setExitLine(&exitLine);   // the game never unloads this DLL: its process exit says the session line
     sayf("vertex resync: hook armed at EliteDangerous64.exe+0x%llX (Frontier's input-assembler flush, build 332841), stolen=%zu bytes, prologue %zu/%zu bytes verified. Before each "
-         "flush the applied vertex-buffer cache is checked against the desired state (advanced.vertex_resync, TEMPORARY, default on); first sightings are logged "
-         "(at most %u), then a count every 60 s while it is non-zero.",
+         "flush the applied vertex-buffer cache is made to agree with the desired state for the slots the draw's layout uses; the first %u sightings are logged, then a count every "
+         "60 s while it is non-zero, a heartbeat every 10 min (zero counts included) and a line when the session ends.",
          static_cast<unsigned long long>(vresync::kFlushIaRva), g_hook.stolenBytes(), vresync::kPrologueBytes, vresync::kPrologueBytes, vresync::kMaxSightings);
 }
 
-void vertexResyncPoll(Config& cfg, uint64_t nowMs) {
-    static std::atomic<bool> announced{false};
-    const std::string value = cfg.getString("advanced.vertex_resync", "on");
-    const bool want = vresync::wantsRepair(value.c_str());
-    const bool changed = g_repair.exchange(want, std::memory_order_relaxed) != want;
-    if (!announced.exchange(true) || changed) {
-        say(want ? "vertex resync: advanced.vertex_resync = on -- a stale vertex-buffer binding is repaired before the flush binds it (TEMPORARY key, for the scanner-body A/B flight)."
-                 : "vertex resync: advanced.vertex_resync = off -- stale vertex-buffer bindings are counted and left as the game has them (TEMPORARY key, for the scanner-body A/B flight).");
-    }
-    if (const uint32_t n = g_window.take(nowMs)) {
+void vertexResyncPoll(uint64_t nowMs) {
+    uint32_t n = 0;
+    if (g_window.tick(nowMs, &n) && n) {
         char line[200];
-        vresync::formatResyncLine(line, sizeof(line), n, want);
+        vresync::formatResyncLine(line, sizeof(line), n);
         say(line);
     }
+    uint32_t repairedInBeat = 0;
+    if (g_beat.tick(nowMs, &repairedInBeat)) {
+        const uint64_t flushes = g_flushes.read();
+        const uint64_t seen = flushes - g_flushesAtLastBeat;
+        g_flushesAtLastBeat = flushes;
+        // Said while the hook is armed and not stood down (a stand-down has its own line): the zero-count line is what tells quiet from absent.
+        if (g_installed.load(std::memory_order_acquire) && g_relayGate.load(std::memory_order_acquire) != 0) {
+            char line[200];
+            vresync::formatHeartbeatLine(line, sizeof(line), repairedInBeat, seen);
+            say(line);
+        }
+    }
+}
+
+void vertexResyncShutdown() {
+    char line[200];
+    if (exitLine(line, sizeof(line)) > 0) say(line);
 }
 
 #ifdef EDVR_VERTEX_RESYNC_TEST
 void vertexResyncTestSetTarget(uintptr_t target) { g_testTarget = target; }
 void vertexResyncTestReset() {
     g_attempted.store(false);
-    g_repair.store(true);
-    g_calls = g_desynced = g_repaired = g_faults = 0;
+    g_repairedTotal = g_faults = 0;
+    g_flushes.reset();
+    g_flushesAtLastBeat = 0;
     g_window.reset();
+    g_beat.reset();
     g_sightings.reset();
     std::lock_guard<std::mutex> lock(g_testMutex);
     g_testLines.clear();
 }
-void vertexResyncTestSetRepair(bool on) { g_repair.store(on); }
 VertexResyncTestState vertexResyncTestState() {
     VertexResyncTestState s;
     s.installed = g_installed.load();
-    s.repair = g_repair.load();
-    s.calls = g_calls.load();
-    s.desynced = g_desynced.load();
-    s.repaired = g_repaired.load();
+    s.flushes = g_flushes.read();
+    s.repaired = g_repairedTotal.load();
     s.faults = g_faults.load();
     s.sightings = g_sightings.taken();
     s.attempted = g_attempted.load();
@@ -280,6 +298,7 @@ const char* vertexResyncTestLine(size_t i) {
     std::lock_guard<std::mutex> lock(g_testMutex);
     return i < g_testLines.size() ? g_testLines[i].c_str() : "";
 }
+int vertexResyncTestExitLine(char* out, size_t cap) { return exitLine(out, cap); }
 #endif
 
 }  // namespace edvr

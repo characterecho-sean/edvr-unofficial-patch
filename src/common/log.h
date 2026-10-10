@@ -38,6 +38,12 @@ public:
     // can and leaves the rest for the OS to reclaim.
     void detachDuringProcessExit();
 
+    // One line the log writes as the process ends, after everything buffered (detachDuringProcessExit; a FreeLibrary teardown says its own). The game never unloads this
+    // DLL, so a summary that is only said at a teardown is never said: this is the way to have one. `fn` runs where nothing may be relied on -- no lock, no heap, no note() --
+    // and formats from atomics into `out`, returning the length (0: nothing to say). One slot; the last setter wins.
+    using ExitLineFn = int (*)(char* out, size_t cap);
+    void setExitLine(ExitLineFn fn) { m_exitLine.store(fn, std::memory_order_release); }
+
     void note(const char* fmt, ...);
 
     bool isOpen() const { return m_open; }
@@ -70,6 +76,7 @@ private:
     // counts -- and the flusher reads it from a third. This is the same
     // read-modify-write FaultBudget's comment in guard.h already names.
     std::atomic<uint64_t> m_dropped{0};
+    std::atomic<ExitLineFn> m_exitLine{nullptr};
     // Written by whichever thread is inside writeBuffer, which is the flusher
     // OR the one calling close() -- never both, because close() joins the
     // flusher first and the join is the happens-before edge. "One writer at a

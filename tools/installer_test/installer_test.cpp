@@ -1270,6 +1270,55 @@ static void testCullRetiredKeys(const std::wstring& root) {
           "a file without the removed lines carries nothing: the new file stands as shipped");
 }
 
+// 2026-10-09: fix.scanner_body (the lend that gave the scanner's second-eye lighting draw the first eye's vertex buffer) went, replaced by the repair at the
+// game's own input-assembler flush (docs/scanner-body.md), which has no key. A line somebody set is carried with its value under "this version no longer uses
+// it", reported as retired and not adopted, its documentation block is not resurrected, and a second merge adds no copy. The shipped file defines none of it.
+static void testScannerBodyRetiredKey(const std::wstring& root) {
+    printf("\nthe retired scanned-body key, against the real edvr.ini\n");
+    const std::string shipped = readAll(joinPath(root, L"edvr.ini"));
+    if (shipped.empty()) {
+        fail("read the repository's edvr.ini", "not found next to the repo root");
+        return;
+    }
+    check(shipped.find("\nscanner_body =") == std::string::npos && shipped.find("\n#scanner_body =") == std::string::npos,
+          "the shipped ini defines no scanner_body, live or as a template");
+    const std::string eol = shipped.find("\r\n") != std::string::npos ? "\r\n" : "\n";
+    const std::string anchor = "\nfss_eye_sync = on" + eol;
+    const size_t at = shipped.find(anchor);
+    check(at != std::string::npos, "the shipped ini has the line the scanned-body fixture anchors on");
+    if (at == std::string::npos) return;
+    std::string previous = shipped;
+    previous.insert(at + anchor.size(), eol + "# SCANNED-FIXTURE-DOC make the scanned body render in both eyes." + eol + "scanner_body = on" + eol);
+    std::string flown = previous;
+    const size_t line = flown.find("\nscanner_body = on" + eol);
+    check(line != std::string::npos, "the fixture's previous file has the line it edits");
+    if (line == std::string::npos) return;
+    flown.replace(line + 1, strlen("scanner_body = on"), "scanner_body = off");
+
+    MergeReport rep;
+    const std::string merged = mergeIni(shipped, flown, &previous, {}, &rep);
+    expectEq(iniValue(merged, "fix.scanner_body"), "off", "the retired setting is carried with its value, not eaten");
+    check(rep.retired.size() == 1 && rep.carried.empty(), "and reported as a retired setting, not as a key this version never shipped",
+          std::to_string(rep.retired.size()) + " retired, " + std::to_string(rep.carried.size()) + " carried");
+    check(merged.find("this version no longer uses it") != std::string::npos, "the carried line says this version no longer uses it");
+    check(merged.find("SCANNED-FIXTURE-DOC") == std::string::npos, "its documentation block is not resurrected");
+
+    MergeReport bareRep;
+    const std::string bare = mergeIni(shipped, flown, nullptr, {}, &bareRep);
+    expectEq(iniValue(bare, "fix.scanner_body"), "off", "with no base copy the setting is still carried");
+    check(bareRep.carried.size() == 1, "and reported as a key this version never shipped");
+
+    MergeReport again;
+    const std::string twice = mergeIni(shipped, merged, &shipped, {}, &again);
+    size_t copies = 0;
+    for (size_t from = 0; (from = twice.find("scanner_body = off", from)) != std::string::npos; ++from) ++copies;
+    check(copies == 1, "a second merge does not duplicate the carried line", std::to_string(copies) + " copies");
+
+    MergeReport quiet;
+    check(mergeIni(shipped, shipped, &previous, {}, &quiet) == shipped && quiet.retired.empty() && quiet.carried.empty(),
+          "a file without the line carries nothing: the new file stands as shipped");
+}
+
 // ---------------------------------------------------------------------------
 // the planner
 // ---------------------------------------------------------------------------
@@ -4943,6 +4992,7 @@ int wmain(int argc, wchar_t** argv) {
     testShippedIni(root);
     testChangedDefault(root);
     testCullRetiredKeys(root);
+    testScannerBodyRetiredKey(root);
     testPlanner();
     testNativePlanner();
     testFlatPlanner();

@@ -26,8 +26,8 @@
 //
 //   The repair: at FlushIA's entry, for every slot the draw's layout uses (count = [[pso+0x188]+0x60], at most 16), where DESIRED holds a wrapper, make APPLIED agree
 //   with it -- applied buffer = [wrapper+0x140], applied offset = the desired offset. Slots at or above the count, empty desired slots and every stride are left as the
-//   game has them, so stock behaviour is otherwise identical. fix.scanner_body (resolve_bind_fix.cpp) healed the same symptom one level up, by lending a buffer to the
-//   resolve draw; that is retired after this has flown.
+//   game has them, so stock behaviour is otherwise identical. The repair is always on: a build or prologue mismatch is the only way it stays out. It replaced the older
+//   workaround one level up (lending a buffer to the resolve draw), which is gone; docs/scanner-body.md has the flight that settled it.
 
 #include <atomic>
 #include <cstddef>
@@ -74,15 +74,15 @@ struct Sighting {
 struct Report {
     uint32_t layoutCount = 0;   // the slots the draw's layout declares (as read; the loop is bounded by kMaxSlots)
     uint32_t checked = 0;       // slots with a desired wrapper
-    uint32_t desynced = 0;      // ...whose applied buffer is not that wrapper's native buffer
-    uint32_t repaired = 0;      // ...and which were rewritten (repair on)
+    uint32_t repaired = 0;      // ...whose applied buffer was not that wrapper's native buffer, and were rewritten
     bool hasFirst = false;
-    Sighting first;             // the first desynced slot
+    Sighting first;             // the first repaired slot
 };
 
 // FlushIA's entry. `pso` is rcx, `desired` r8, `applied` r9. Every pointer read is guarded against null: a null pso, desired or applied, a null layout object and a null wrapper
-// read nothing further. The caller (the hook) runs this under SEH, because the pointers it follows are the game's. With `repair` false nothing is written (count only).
-inline Report resync(const uint8_t* pso, const uint8_t* desired, uint8_t* applied, bool repair) {
+// read nothing further. The caller (the hook) runs this under SEH, because the pointers it follows are the game's. Where DESIRED holds a wrapper and APPLIED's buffer is not
+// that wrapper's native buffer, APPLIED's buffer and offset are made to agree with DESIRED.
+inline Report resync(const uint8_t* pso, const uint8_t* desired, uint8_t* applied) {
     Report r;
     if (!pso || !desired || !applied) return r;
     const uint64_t layoutAddress = load64(pso + kPsoLayout);
@@ -97,7 +97,6 @@ inline Report resync(const uint8_t* pso, const uint8_t* desired, uint8_t* applie
         const uint64_t was = load64(appliedBuffer);
         ++r.checked;
         if (was == native) continue;
-        ++r.desynced;
         if (!r.hasFirst) {
             r.hasFirst = true;
             r.first.slot = i;
@@ -105,53 +104,67 @@ inline Report resync(const uint8_t* pso, const uint8_t* desired, uint8_t* applie
             r.first.native = native;
             r.first.applied = was;
         }
-        if (repair) {
-            store64(appliedBuffer, native);
-            store32(applied + kAppliedOffsets + 4u * i, load32(desired + kDesiredOffsets + 4u * i));
-            ++r.repaired;
-        }
+        store64(appliedBuffer, native);
+        store32(applied + kAppliedOffsets + 4u * i, load32(desired + kDesiredOffsets + 4u * i));
+        ++r.repaired;
     }
     return r;
 }
 
-// ---- the key ---------------------------------------------------------------------------------------------------------------------------------------------------
-// advanced.vertex_resync = on | off (default on, live). Off counts and writes nothing. TEMPORARY: it exists for the scanner-body A/B flight (docs/scanner-body.md), and goes
-// when the arc closes.
-inline bool wantsRepair(const char* text) {
-    if (!text) return true;
-    char lower[16] = {};
-    size_t n = 0;
-    for (; text[n] && n < sizeof(lower) - 1; ++n) lower[n] = static_cast<char>(text[n] >= 'A' && text[n] <= 'Z' ? text[n] + 32 : text[n]);
-    return !(std::strcmp(lower, "off") == 0 || std::strcmp(lower, "0") == 0 || std::strcmp(lower, "false") == 0 || std::strcmp(lower, "no") == 0);
-}
-
 // ---- the instruments -------------------------------------------------------------------------------------------------------------------------------------------
 constexpr uint32_t kMaxSightings = 8;          // first-sighting lines, ever
-constexpr uint64_t kWindowMs = 60000;          // the running counts are said once per this, while non-zero
+constexpr uint64_t kWindowMs = 60000;          // the repair count is said once per this, while it is non-zero
+constexpr uint64_t kHeartbeatMs = 600000;      // the heartbeat is said once per this, zero counts included
 
-// A count said once per window while it is non-zero (the lend count, the resync count). Many threads add; the tick takes. The first tick starts the window.
+// A count over a window. Many threads add; the poll ticks. The first tick starts the window.
 class WindowCount {
 public:
+    explicit WindowCount(uint64_t windowMs = kWindowMs) : windowMs_(windowMs) {}
     void add(uint32_t n = 1) { count_.fetch_add(n, std::memory_order_relaxed); }
-    // The count of the window that ended, or 0 when the window is still running or nothing happened in it. A window that ends restarts, empty or not.
-    uint32_t take(uint64_t nowMs) {
+    // True when a window has just ended (never on the tick that starts the first one); *count receives its count, which may be 0. A window that ends restarts, empty or not.
+    bool tick(uint64_t nowMs, uint32_t* count) {
         if (!started_) {
             started_ = true;
             startMs_ = nowMs;
-            return 0;
+            return false;
         }
-        if (nowMs - startMs_ < kWindowMs) return 0;
+        if (nowMs - startMs_ < windowMs_) return false;
         startMs_ = nowMs;
-        return count_.exchange(0, std::memory_order_relaxed);
+        *count = count_.exchange(0, std::memory_order_relaxed);
+        return true;
+    }
+    // The count of the window that ended, or 0 when the window is still running or nothing happened in it (the non-zero line's way to ask).
+    uint32_t take(uint64_t nowMs) {
+        uint32_t n = 0;
+        return tick(nowMs, &n) ? n : 0;
     }
     uint32_t pending() const { return count_.load(std::memory_order_relaxed); }
     void reset() { count_.store(0, std::memory_order_relaxed); started_ = false; startMs_ = 0; }
 
 private:
+    uint64_t windowMs_;
     std::atomic<uint32_t> count_{0};
     bool started_ = false;   // the tick's own (one thread)
     uint64_t startMs_ = 0;
 };
+
+// The flush count behind the heartbeat. It is bumped on EVERY flush, by whichever thread flushes -- the render thread in practice -- so it costs nothing measurable: a relaxed
+// load and a relaxed store (two plain moves, no lock prefix, no shared read-modify-write), on a cache line of its own so no other global shares the line the render thread
+// writes. Written by more than one thread (a deferred context's) it can lose a count; the heartbeat says "flushes seen" and means activity, not an exact tally.
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable : 4324)   // C4324: padded to the cache line, which is the point
+#endif
+struct alignas(64) FlushCount {
+    std::atomic<uint64_t> n{0};
+    void bump() { n.store(n.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed); }
+    uint64_t read() const { return n.load(std::memory_order_relaxed); }
+    void reset() { n.store(0, std::memory_order_relaxed); }
+};
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
+static_assert(sizeof(FlushCount) == 64, "the flush counter owns its cache line");
 
 // At most kMaxSightings first-sighting lines: true for the first eight askers.
 class SightingGate {
@@ -164,19 +177,26 @@ private:
     std::atomic<uint32_t> taken_{0};
 };
 
-inline void formatResyncLine(char* out, size_t cap, uint32_t n, bool repaired) {
-    std::snprintf(out, cap, "vertex resync: %u stale vertex-buffer bindings in the last 60 s (%s)", n, repaired ? "repaired" : "left as the game had them");
+inline void formatResyncLine(char* out, size_t cap, uint32_t n) {
+    std::snprintf(out, cap, "vertex resync: %u stale vertex-buffer bindings in the last 60 s (repaired)", n);
 }
-inline void formatLentLine(char* out, size_t cap, uint32_t n) {
-    std::snprintf(out, cap, "scanner body fix: lent the other eye's buffer %u times in the last 60 s", n);
+// Every ten minutes while the hook is armed, zero counts included: the line that tells a hook that saw nothing stale from one that was never reached.
+inline void formatHeartbeatLine(char* out, size_t cap, uint64_t repaired, uint64_t flushes) {
+    std::snprintf(out, cap, "vertex resync: armed; %llu stale vertex-buffer bindings repaired in the last 10 min (%llu flushes seen)", static_cast<unsigned long long>(repaired),
+                  static_cast<unsigned long long>(flushes));
 }
-inline void formatSightingLine(char* out, size_t cap, uint32_t number, const Sighting& s, uint64_t list, uint32_t layoutCount, uint32_t threadId, bool repaired,
-                               unsigned gameFrames, const char* stack) {
+// Once when the session ends, the totals since the hook armed.
+inline void formatSessionLine(char* out, size_t cap, uint64_t repaired, uint64_t flushes) {
+    std::snprintf(out, cap, "vertex resync: armed; %llu stale vertex-buffer bindings repaired this session (%llu flushes seen)", static_cast<unsigned long long>(repaired),
+                  static_cast<unsigned long long>(flushes));
+}
+inline void formatSightingLine(char* out, size_t cap, uint32_t number, const Sighting& s, uint64_t list, uint32_t layoutCount, uint32_t threadId, unsigned gameFrames,
+                               const char* stack) {
     std::snprintf(out, cap,
-                  "vertex resync: stale binding %u of %u: slot %u, list 0x%llX, desired wrapper 0x%llX, native buffer 0x%llX, applied buffer 0x%llX, layout slots %u, thread %u, %s; "
-                  "game stack (%u frames) %s",
+                  "vertex resync: stale binding %u of %u: slot %u, list 0x%llX, desired wrapper 0x%llX, native buffer 0x%llX, applied buffer 0x%llX, layout slots %u, thread %u, "
+                  "repaired; game stack (%u frames) %s",
                   number, kMaxSightings, s.slot, static_cast<unsigned long long>(list), static_cast<unsigned long long>(s.wrapper), static_cast<unsigned long long>(s.native),
-                  static_cast<unsigned long long>(s.applied), layoutCount, threadId, repaired ? "repaired" : "left as the game had it", gameFrames, stack && *stack ? stack : "(none in the game's image)");
+                  static_cast<unsigned long long>(s.applied), layoutCount, threadId, gameFrames, stack && *stack ? stack : "(none in the game's image)");
 }
 
 }  // namespace vresync

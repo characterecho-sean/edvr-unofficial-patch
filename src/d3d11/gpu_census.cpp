@@ -47,7 +47,7 @@ constexpr size_t kFrameSections = sizeof(kFrameBreakdownNames) / sizeof(kFrameBr
 // Elite's own draws that EDVR alters (gpu_census.h): the game's draws timed whole, so they are
 // reported on their own lines and never summed into EDVR's total. AlteredPoolFamily and
 // AlteredUiLayer are one class each (indices 20..21); the draws another fix wraps are one
-// section per fix from AlteredFixFirst on (indices 22..37), reported as one item on the
+// section per fix from AlteredFixFirst on (the last kAlteredFixCount sections), reported as one item on the
 // classes' line (their sum) and one by one on the line after it.
 constexpr size_t kAlteredFirst = static_cast<size_t>(GpuCensusSection::AlteredPoolFamily);
 constexpr size_t kSeedSection = static_cast<size_t>(GpuCensusSection::FrameUiLayerHdrSeed);
@@ -61,7 +61,7 @@ constexpr const char* kAlteredFixSumName = "other fix-wrapped draws";
 constexpr const char* kAlteredFixNames[kAlteredFixCount] = {
     "panel distance", "RemLok overlay", "loading hologram", "target indicator", "night vision", "intro panel",
     "sun glare clamp", "sun glare steady", "particles", "FSS panel", "FSS reveal",
-    "scanner-body resolve", "loading scrim", "menu backdrop", "unnamed fix"
+    "loading scrim", "menu backdrop", "unnamed fix"
 };
 static_assert(kAlteredClassSections == 2, "one name for each altered-draw class");
 // The VR world route's three sections (gpu_census.h) come right after the seed and are the last in-frame ones. The
