@@ -295,6 +295,7 @@ python "tools\check_plugin_boundaries.py" --quiet --require-plugin cockpit_visua
     --require-source src\plugins\cockpit_visuals\night_vision.cpp ^
     --require-plugin intro --require-source src\plugins\intro\intro_skip.cpp ^
     --require-source src\plugins\intro\intro_upscale.cpp ^
+    --require-source src\plugins\intro\intro_lifecycle.cpp ^
     --require-plugin exposure --require-source src\plugins\exposure\exposure_shape.cpp ^
     --include-dir "%GEN%" || exit /b 1
 
@@ -310,10 +311,12 @@ if errorlevel 1 ( echo [edvr] ERROR: cockpit visuals plugin library failed & exi
 if not exist "%OBJ%\plugins\intro" mkdir "%OBJ%\plugins\intro"
 del /q "%OBJ%\plugins\intro\*.obj" 2>nul
 cl.exe %CFLAGS% /Fo"%OBJ%\plugins\intro\\" ^
-    "src\plugins\intro\intro_skip.cpp" "src\plugins\intro\intro_upscale.cpp"
+    "src\plugins\intro\intro_skip.cpp" "src\plugins\intro\intro_upscale.cpp" ^
+    "src\plugins\intro\intro_lifecycle.cpp"
 if errorlevel 1 ( echo [edvr] ERROR: intro plugin compile failed & exit /b 1 )
 lib.exe /nologo /OUT:"%OBJ%\plugins\intro\plugin_intro.lib" ^
-    "%OBJ%\plugins\intro\intro_skip.obj" "%OBJ%\plugins\intro\intro_upscale.obj"
+    "%OBJ%\plugins\intro\intro_skip.obj" "%OBJ%\plugins\intro\intro_upscale.obj" ^
+    "%OBJ%\plugins\intro\intro_lifecycle.obj"
 if errorlevel 1 ( echo [edvr] ERROR: intro plugin library failed & exit /b 1 )
 
 if not exist "%OBJ%\plugins\exposure" mkdir "%OBJ%\plugins\exposure"
@@ -1705,6 +1708,20 @@ if errorlevel 1 ( echo [edvr] ERROR: plugin dispatch rig build failed & exit /b 
     echo [edvr] ERROR: plugin dispatch verdict replay failed
     exit /b 1
 )
+exit /b 0
+
+:rig_intro_lifecycle_test
+echo [edvr] === intro_lifecycle_test.exe ===
+python "tools\intro_lifecycle_test\source_order_test.py" --dry-run || exit /b 1
+python "tools\intro_lifecycle_test\source_order_test.py" --self-test || exit /b 1
+if not exist "%OBJ%\introlifecycle" mkdir "%OBJ%\introlifecycle"
+cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\introlifecycle\\" ^
+    /Fe"%BUILD%\intro_lifecycle_test.exe" "tools\intro_lifecycle_test\intro_lifecycle_test.cpp" ^
+    "src\plugins\intro\intro_lifecycle.cpp" /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: intro lifecycle rig build failed & exit /b 1 )
+"%BUILD%\intro_lifecycle_test.exe" --dry-run || exit /b 1
+"%BUILD%\intro_lifecycle_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_draw_selector_cost_test

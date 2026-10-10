@@ -12,16 +12,16 @@
   generated manifests/config ownership, subscription-driven dispatch and a
   C-compatible interface. The add-on tier follows Phase 1. Graphics-only VR is
   a separate phase; supported settings remain owned by one plugin.
-- **Current integration:** main `a1609f2b` is merged. The intro/exposure
-  ownership checkpoint passes 156 full-build jobs plus config, export
-  and installer gates; receipt `66e0d9da` matches the source. Steam
+- **Current integration:** main `a1609f2b` is merged. The intro
+  lifecycle checkpoint passes 157 full-build jobs plus config, export
+  and installer gates; receipt `d689c2a8` matches the source. Steam
   retains measured `6ab758d2`.
-- **Module progress:** intro skip/upscale and the exposure shape
-  classifier build in first-party libraries; the shader registry is
-  core-owned with its original availability and generation semantics.
-  The offline selection model resolves dependencies and rejects
-  unavailable plugins. Registry integration, remaining group ownership
-  and installer selection are still open; availability is unchanged.
+- **Module progress:** intro skip/upscale configure, frame and teardown
+  now use direct registry slots at their original core callsites.
+  Intro/exposure libraries and the core shader registry are validated;
+  the offline selection model rejects unavailable plugins. Remaining
+  group ownership and installer selection are open; availability is
+  unchanged.
 
 - **Offline evidence:** FSS site 1 has a frozen legacy selector oracle,
   version-16 facts, seven-base-fact capacity and terminal X/6 action fixtures.
@@ -3900,3 +3900,51 @@ await their ownership moves. Existing replay and CPU/GPU shipping gates
 stay open. Feature work remains free to branch from the validated
 architecture branch; the next matched performance pair is at rendering
 freeze.
+
+### 2026-10-10 — intro video lifecycle registry
+
+Luna 6 implemented the fixed-slot lifecycle registry, intro callback
+module and catalog contract in parallel. The root reviewed integration
+and a separate Luna review checked lifetime/order against `c0083534`.
+Intro skip/upscale configure and teardown, plus skip's scene-frame
+callback, now dispatch through a separate C-compatible record in
+`plugin_intro.lib`. The callbacks preserve skip then upscale configure,
+upscale then skip teardown and the original nonzero scene-frame
+semantics. VScreen retains the install/reload positions, `tkIntroSkip`
+fault budget and final teardown position. Registration happens only at
+configure; frame dispatch uses a fixed index without draw subscriptions
+or a plugin loop.
+
+The existing draw registry has a partial host lifetime: its historical
+NV shutdown and failed-install paths leave lifecycle slots alone.
+Intro's explicit final shutdown detaches its slot before calling the
+module, so repeated or reentrant registry shutdown is harmless. Failed
+VScreen installation retains the same intro globals as the previous
+code; retry accepts only the same immutable ops record. An occupied
+different record or unsupported profile uses the original direct
+fallback. Review corrected the host's initial occupancy-only shortcut:
+an occupied slot alone does not establish record ownership. The
+configure result is frozen for frame and teardown; neither path
+registers or validates metadata.
+
+The registry fixture covers malformed records, stable ID/profile/status
+rejection, occupied-slot conflicts, retry, callback delivery, absent
+slots, reentry and independence from draw masks/interests. The new
+native `intro_lifecycle_test` links the real callback module with stub
+feature entrypoints to check record identity, null config, scene flags
+and callback order. Its source fixture pins the actual core order and
+guarded frame callsite, and verifies in-memory mutations are rejected.
+These source checks do not execute VScreen installation in a headset.
+Both rigs are required by Intro's manifest. Intro is marked
+`phase1-lifecycle`, with no draw claims, selection availability or
+measured cost claim.
+
+The full absolute build passed all 157 jobs, the 125-key config
+contract, exports and the self-contained installer. Receipt:
+`d689c2a8f2486495f0040b0988f7637713cc9b9af0e942f8b28d011b32464e3c`. No
+Steam install, live settings edit or flight occurred. This completes the
+intro video lifecycle slice only. Intro panel/backdrop/loading
+ownership, remaining groups, installer selection, whole-ladder replay
+and runtime CPU/GPU shipping acceptance remain open. Feature development
+can use the branch; the final matched performance pair remains scheduled
+for rendering-code freeze.

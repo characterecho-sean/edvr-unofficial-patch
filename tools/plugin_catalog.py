@@ -65,11 +65,14 @@ EXPECTED_IMPLEMENTATION = {
     'cockpit-visuals': 'phase1-pilot',
     'exposure': 'catalog-only',
     'scanners': 'catalog-only',
-    'intro': 'catalog-only',
+    'intro': 'phase1-lifecycle',
     'on-foot-panel': 'catalog-only',
     'comfort': 'catalog-only',
     'performance': 'catalog-only',
     'diagnostics': 'catalog-only',
+}
+EXPECTED_HOOK_POINTS = {
+    'intro': ('lifecycle.configure', 'lifecycle.frame', 'lifecycle.shutdown'),
 }
 DEFAULT_INSTALL = {
     'vr': frozenset(EXPECTED_IDS[:-1]),
@@ -356,12 +359,19 @@ def validate_manifest(data, documented_keys=None):
         owned = _string_list(plugin.get('ownedConfigKeys'), pid + '.ownedConfigKeys', problems)
         for key in owned:
             ownership.setdefault(key, []).append(pid)
-        for field in ('hookPoints', 'rigs'):
-            _string_list(plugin.get(field), pid + '.' + field, problems)
+        hook_points = _string_list(plugin.get('hookPoints'), pid + '.hookPoints', problems)
+        if pid in EXPECTED_HOOK_POINTS and tuple(hook_points) != EXPECTED_HOOK_POINTS[pid]:
+            problems.append('%s.hookPoints must be %s' %
+                            (pid, ', '.join(EXPECTED_HOOK_POINTS[pid])))
+        rigs = _string_list(plugin.get('rigs'), pid + '.rigs', problems)
+        if pid == 'intro' and tuple(rigs) != ('plugin_dispatch_test', 'intro_lifecycle_test'):
+            problems.append('intro rigs must name plugin_dispatch_test and intro_lifecycle_test')
         claims = plugin.get('claims')
         if not isinstance(claims, list):
             problems.append(pid + '.claims must be an array')
             claims = []
+        if pid == 'intro' and claims:
+            problems.append('intro phase1-lifecycle implementation cannot declare draw claims')
         claim_ids = set()
         for ci, claim in enumerate(claims):
             clabel = '%s.claims[%d]' % (pid, ci)
@@ -766,6 +776,46 @@ def self_test():
         original = load_json()
         documented = ini_documented_keys()
         check('canonical manifest validates', not validate_manifest(original, documented))
+        intro_index = EXPECTED_IDS.index('intro')
+        intro = original['plugins'][intro_index]
+        check('intro is explicitly lifecycle-only and stays non-selectable',
+              intro['implementationStatus'] == 'phase1-lifecycle' and
+              intro['selectionAvailableProfiles'] == [] and
+              tuple(intro['hookPoints']) == EXPECTED_HOOK_POINTS['intro'] and
+              intro['claims'] == [] and
+              all(rig in intro['rigs'] for rig in
+                  ('plugin_dispatch_test', 'intro_lifecycle_test')))
+        for missing_rig in ('plugin_dispatch_test', 'intro_lifecycle_test'):
+            bad = copy.deepcopy(original)
+            bad['plugins'][intro_index]['rigs'].remove(missing_rig)
+            check('intro requires %s' % missing_rig,
+                  any('intro rigs must name plugin_dispatch_test and intro_lifecycle_test' in p
+                      for p in validate_manifest(bad, documented)))
+        bad = copy.deepcopy(original)
+        bad['plugins'][intro_index]['implementationStatus'] = 'complete'
+        check('lifecycle module cannot claim pilot or completed implementation status',
+              any('intro.implementationStatus must be phase1-lifecycle' in p
+                  for p in validate_manifest(bad, documented)))
+        bad = copy.deepcopy(original)
+        bad['plugins'][intro_index]['selectionAvailableProfiles'] = ['vr']
+        check('lifecycle module remains unavailable for selection',
+              any('intro selection is not available during Phase 1' in p
+                  for p in validate_manifest(bad, documented)))
+        bad = copy.deepcopy(original)
+        bad['plugins'][intro_index]['hookPoints'] = ['draw.classify']
+        check('lifecycle module rejects unexpected hook metadata',
+              any('intro.hookPoints must be lifecycle.configure, lifecycle.frame, lifecycle.shutdown' in p
+                  for p in validate_manifest(bad, documented)))
+        bad = copy.deepcopy(original)
+        bad['plugins'][intro_index]['claims'] = [{}]
+        check('lifecycle module rejects misrepresented draw claims',
+              any('intro phase1-lifecycle implementation cannot declare draw claims' in p
+                  for p in validate_manifest(bad, documented)))
+        bad = copy.deepcopy(original)
+        bad['plugins'][intro_index]['selectionAvailableProfiles'] = ['flat']
+        check('lifecycle module rejects availability on an unsupported profile',
+              any('intro.selectionAvailableProfiles references unsupported profile flat' in p
+                  for p in validate_manifest(bad, documented)))
         check('all nine plugin cost budgets are explicitly unmeasured',
               len(original['plugins']) == 9 and all(
                   plugin['costBudget']['state'] == 'unmeasured' and
@@ -774,6 +824,8 @@ def self_test():
                       set(metric) == {'state', 'unit', 'coverage'}
                       for metric in plugin['costBudget']['metrics'].values())
                   for plugin in original['plugins']))
+        check('manifest still covers all 125 documented configuration keys',
+              len(documented) == 125)
 
         bad = copy.deepcopy(original)
         bad['plugins'][0]['costBudget']['metrics']['cpu']['referenceValue'] = 0
@@ -935,6 +987,13 @@ def self_test():
                   'k_temporal_aa_cost_budget = {kCostBudgetUnmeasured, nullptr' in content and
                   '"directGpu", kCostMetricUnmeasured' in content and
                   'kCostMetricUnmeasured' in content)
+        intro_record = next((line for line in content.splitlines()
+                             if '"phase1-lifecycle"' in line), '')
+        check('generated intro metadata stays lifecycle-only and non-selectable',
+              '"phase1-lifecycle"' in intro_record and '0x0u' in intro_record and
+              'k_intro_hook_points[] = {\n    "lifecycle.configure",\n    "lifecycle.frame",\n    "lifecycle.shutdown",' in content and
+              'k_intro_claims, 0' in content and 'k_intro_rigs, 2' in content and
+              'k_intro_rigs[] = {\n    "plugin_dispatch_test",\n    "intro_lifecycle_test",' in content)
     except Exception as exc:
         failures.append('unexpected exception: %s' % exc)
 

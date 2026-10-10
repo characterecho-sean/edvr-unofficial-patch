@@ -55,6 +55,8 @@ static_assert(sizeof(LegacyEdvrPluginOpsPrefix) ==
 static_assert(offsetof(EdvrPluginOps, shutdown) ==
                   offsetof(LegacyEdvrPluginOpsPrefix, shutdown),
               "legacy shutdown callback offset must remain stable");
+static_assert(std::is_standard_layout<EdvrPluginLifecycleOps>::value,
+              "lifecycle ops ABI must remain standard-layout");
 
 struct RegistryState {
     bool wants = false;
@@ -69,6 +71,17 @@ struct RegistryState {
     bool traceModeAvailable = true;
     bool failed = false;
 };
+
+struct LifecycleState {
+    uint32_t configureCalls = 0;
+    uint32_t frameCalls = 0;
+    uint32_t shutdownCalls = 0;
+    uint32_t lastFrame = 0;
+    bool configured = false;
+    bool reenterShutdown = false;
+    uint32_t manifestIndex = 0;
+};
+LifecycleState lifecycleState;
 RegistryState registryState;
 const char* const kRegistryClaimIds[] = {"night-vision"};
 const char* const kNullRegistryClaimIds[] = {nullptr};
@@ -141,6 +154,27 @@ EdvrPluginOps registryOps() {
             &registryStartupHooksWanted, &registryClaim,
             &registryBegin, &registryEnd, &registryShutdown,
             &registryClaimObserved, &registryTraceMode};
+}
+
+void lifecycleConfigure(void* config) {
+    ++lifecycleState.configureCalls;
+    lifecycleState.configured = config && *static_cast<const bool*>(config);
+}
+void lifecycleFrame(void* state, uint32_t sceneFrame) {
+    auto* s = static_cast<LifecycleState*>(state);
+    ++s->frameCalls;
+    s->lastFrame = sceneFrame;
+}
+void lifecycleShutdown(void* state) {
+    auto* s = static_cast<LifecycleState*>(state);
+    ++s->shutdownCalls;
+    if (s->reenterShutdown)
+        edvr::pluginRegistryShutdownLifecycle(s->manifestIndex);
+}
+EdvrPluginLifecycleOps introLifecycleOps() {
+    return {sizeof(EdvrPluginLifecycleOps), edvr::plugins::kPluginIntro,
+            "intro", &lifecycleState, &lifecycleConfigure, &lifecycleFrame,
+            &lifecycleShutdown};
 }
 
 bool oldShape(char kind, uint32_t count, uint32_t instances) {
@@ -539,6 +573,93 @@ void registryLifecycle() {
           "ordinary fallback leaves trace-only observation explicitly unknown");
     edvr::pluginRegistryShutdown();
 }
+
+void lifecycleRegistryDispatch() {
+    constexpr uint32_t kIntro = edvr::plugins::kPluginIntro;
+    constexpr uint32_t kExposure = edvr::plugins::kPluginExposure;
+    edvr::pluginRegistryShutdownLifecycle(kIntro);
+    lifecycleState = {};
+    lifecycleState.manifestIndex = kIntro;
+    registryState.legacyWants = false;
+    check(edvr::pluginRegistryRegisterLegacyDrawGate(
+              "lifecycle.test", &legacyGate, &registryState),
+          "draw subscription fixture is registered before lifecycle dispatch");
+    const bool drawSubscriptionBefore = edvr::pluginRegistryWantsDraws(&registryState);
+    const uint64_t candidatesBefore = edvr::pluginRegistryShaderCandidates();
+    const auto interestsBefore = edvr::pluginRegistryDrawInterestMask();
+    EdvrPluginLifecycleOps ops = introLifecycleOps();
+
+    EdvrPluginLifecycleOps invalid = ops;
+    invalid.structSize = 0;
+    check(!edvr::pluginRegistryRegisterLifecycle(&invalid),
+          "lifecycle registry rejects a malformed callback record");
+    invalid = ops;
+    invalid.manifestId = "exposure";
+    check(!edvr::pluginRegistryRegisterLifecycle(&invalid),
+          "lifecycle registry rejects a mismatched stable manifest ID");
+    invalid = ops;
+    invalid.frame = nullptr;
+    check(!edvr::pluginRegistryRegisterLifecycle(&invalid),
+          "lifecycle registry requires configure, frame, and shutdown callbacks");
+    EdvrPluginLifecycleOps catalogOnly = {
+        sizeof(EdvrPluginLifecycleOps), kExposure, "exposure", &lifecycleState,
+        &lifecycleConfigure, &lifecycleFrame, &lifecycleShutdown};
+    check(!edvr::pluginRegistryRegisterLifecycle(&catalogOnly),
+          "lifecycle registry rejects catalog-only implementations");
+
+    const auto savedProfile = edvr::g_runtimeProfile;
+    edvr::g_runtimeProfile = edvr::RuntimeProfile::Flat;
+    check(!edvr::pluginRegistryRegisterLifecycle(&ops),
+          "VR-only lifecycle module is rejected under the flat profile");
+    edvr::g_runtimeProfile = savedProfile;
+
+    check(edvr::pluginRegistryRegisterLifecycle(&ops),
+          "lifecycle registry accepts the manifest lifecycle implementation");
+    check(edvr::pluginRegistryRegisterLifecycle(&ops),
+          "same lifecycle ops pointer is idempotent for install retry");
+    EdvrPluginLifecycleOps conflict = ops;
+    check(!edvr::pluginRegistryRegisterLifecycle(&conflict),
+          "lifecycle registry rejects a different record for an occupied index");
+    check(edvr::pluginRegistryHasLifecycle(kIntro),
+          "registered lifecycle slot is visible by direct manifest index");
+
+    bool enabled = true;
+    edvr::pluginRegistryConfigureLifecycle(kIntro, &enabled);
+    edvr::pluginRegistryFrameLifecycle(kIntro, 0x1234u);
+    check(lifecycleState.configureCalls == 1 && lifecycleState.configured &&
+              lifecycleState.frameCalls == 1 && lifecycleState.lastFrame == 0x1234u,
+          "lifecycle dispatch delivers config and scene-frame value with module state");
+    check(edvr::pluginRegistryShaderCandidates() == candidatesBefore &&
+              edvr::pluginRegistryDrawInterestMask() == interestsBefore &&
+              edvr::pluginRegistryWantsDraws(&registryState) == drawSubscriptionBefore,
+          "lifecycle registration and dispatch do not change draw masks or subscriptions");
+
+    edvr::pluginRegistryShutdown();
+    check(edvr::pluginRegistryHasLifecycle(kIntro) &&
+              lifecycleState.shutdownCalls == 0,
+          "legacy draw shutdown leaves lifecycle slots and their lifetime alone");
+    lifecycleState.reenterShutdown = true;
+    edvr::pluginRegistryShutdownLifecycle(kIntro);
+    edvr::pluginRegistryShutdownLifecycle(kIntro);
+    check(!edvr::pluginRegistryHasLifecycle(kIntro) &&
+              lifecycleState.shutdownCalls == 1,
+          "lifecycle shutdown detaches before callback and is reentrant/idempotent");
+
+    const uint32_t configureBeforeAbsent = lifecycleState.configureCalls;
+    const uint32_t frameBeforeAbsent = lifecycleState.frameCalls;
+    edvr::pluginRegistryConfigureLifecycle(kIntro, nullptr);
+    edvr::pluginRegistryFrameLifecycle(kIntro, 44);
+    edvr::pluginRegistryShutdownLifecycle(kIntro);
+    check(lifecycleState.configureCalls == configureBeforeAbsent &&
+              lifecycleState.frameCalls == frameBeforeAbsent &&
+              lifecycleState.shutdownCalls == 1,
+          "absent lifecycle entries receive no callbacks");
+
+    edvr::g_runtimeProfile = edvr::RuntimeProfile::Invalid;
+    check(!edvr::pluginRegistryRegisterLifecycle(&ops),
+          "invalid runtime profile rejects lifecycle registration");
+    edvr::g_runtimeProfile = savedProfile;
+}
 }
 
 namespace edvr {
@@ -557,6 +678,7 @@ int main(int argc, char** argv) {
     costBudgetMetadata();
     disabledAndCacheCases();
     registryLifecycle();
+    lifecycleRegistryDispatch();
     std::printf("PASS: plugin dispatch (%u checks)\n", checks);
     return 0;
 }

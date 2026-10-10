@@ -27,6 +27,7 @@ struct LegacySubscriber {
 
 const EdvrPluginOps* g_plugins[kMaxPlugins]{};
 const EdvrPluginOps* g_registeredPlugins[kMaxPlugins]{};
+const EdvrPluginLifecycleOps* g_lifecyclePlugins[kMaxPlugins]{};
 uint32_t g_registeredPluginCount = 0;
 LegacySubscriber g_legacy[kMaxLegacySubscribers]{};
 uint32_t g_legacyCount = 0;
@@ -186,6 +187,56 @@ bool pluginRegistryRegister(const EdvrPluginOps* ops) {
     Log::get().note("plugin registry: %s registered; %u declared claim(s), draw gate '%s'",
                     record.id, ops->claimCount, ops->drawGateName);
     return true;
+}
+
+bool pluginRegistryRegisterLifecycle(const EdvrPluginLifecycleOps* ops) {
+    if (!ops || ops->structSize < sizeof(EdvrPluginLifecycleOps) ||
+        !ops->manifestId || !*ops->manifestId || !ops->configure ||
+        !ops->frame || !ops->shutdown || ops->manifestIndex >= kMaxPlugins)
+        return false;
+
+    // Registration can be retried when a later install step fails. Preserve
+    // the already-published slot only for the exact same immutable record.
+    const EdvrPluginLifecycleOps* const existing =
+        g_lifecyclePlugins[ops->manifestIndex];
+    if (existing) return existing == ops;
+
+    if (!pluginRegistryProfileSupports(ops->manifestIndex)) return false;
+    const plugins::PluginRecord& record = plugins::kManifest[ops->manifestIndex];
+    if (!record.id || !record.implementationStatus ||
+        record.index != ops->manifestIndex ||
+        std::strcmp(record.id, ops->manifestId) != 0 ||
+        std::strcmp(record.implementationStatus, "phase1-lifecycle") != 0)
+        return false;
+
+    g_lifecyclePlugins[ops->manifestIndex] = ops;
+    return true;
+}
+
+bool pluginRegistryHasLifecycle(uint32_t manifestIndex) {
+    return manifestIndex < kMaxPlugins &&
+        g_lifecyclePlugins[manifestIndex] != nullptr;
+}
+
+void pluginRegistryConfigureLifecycle(uint32_t manifestIndex, void* config) {
+    if (manifestIndex >= kMaxPlugins) return;
+    const EdvrPluginLifecycleOps* const ops = g_lifecyclePlugins[manifestIndex];
+    if (ops) ops->configure(config);
+}
+
+void pluginRegistryFrameLifecycle(uint32_t manifestIndex, uint32_t sceneFrame) {
+    if (manifestIndex >= kMaxPlugins) return;
+    const EdvrPluginLifecycleOps* const ops = g_lifecyclePlugins[manifestIndex];
+    if (ops) ops->frame(ops->state, sceneFrame);
+}
+
+void pluginRegistryShutdownLifecycle(uint32_t manifestIndex) {
+    if (manifestIndex >= kMaxPlugins) return;
+    const EdvrPluginLifecycleOps* const ops = g_lifecyclePlugins[manifestIndex];
+    if (!ops) return;
+    // Detach first so a callback that re-enters shutdown is harmless.
+    g_lifecyclePlugins[manifestIndex] = nullptr;
+    ops->shutdown(ops->state);
 }
 
 bool pluginRegistryProfileSupports(uint32_t manifestIndex) {

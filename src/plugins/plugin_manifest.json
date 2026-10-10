@@ -318,11 +318,18 @@
         "fix.intro_video",
         "fix.loading_dim"
       ],
-      "hookPoints": [],
+      "hookPoints": [
+        "lifecycle.configure",
+        "lifecycle.frame",
+        "lifecycle.shutdown"
+      ],
       "claims": [],
       "costNote": "Per-plugin cost not measured; see the design document census baseline.",
-      "rigs": [],
-      "implementationStatus": "catalog-only",
+      "rigs": [
+        "plugin_dispatch_test",
+        "intro_lifecycle_test"
+      ],
+      "implementationStatus": "phase1-lifecycle",
       "selectionAvailableProfiles": [],
       "costBudget": {
         "state": "unmeasured",

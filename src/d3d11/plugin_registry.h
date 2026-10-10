@@ -30,9 +30,26 @@ typedef uint32_t (*EdvrPluginClaimDrawObservedFn)(
     uint32_t instances, EdvrPluginClaimObservation* observation);
 typedef uint32_t (*EdvrPluginTraceModeFn)(void* state, uint8_t* mode);
 typedef void (*EdvrPluginConfigureFn)(void* config);
+typedef void (*EdvrPluginFrameFn)(void* state, uint32_t sceneFrame);
 typedef void (*EdvrPluginDrawFn)(void* state, const char* claimId,
                                  ID3D11DeviceContext* context);
 typedef void (*EdvrPluginShutdownFn)(void* state);
+
+// Separate lifecycle registration for modules whose lifetime is owned by a
+// specific core callsite. The legacy draw registry has a partial-host lifetime:
+// pluginRegistryShutdown() runs at its historical NV/failed-vScreen positions
+// and deliberately leaves these slots alone. A lifecycle module is retired
+// only by pluginRegistryShutdownLifecycle() at that module's original core
+// shutdown callsite.
+struct EdvrPluginLifecycleOps {
+    uint32_t structSize;
+    uint32_t manifestIndex;
+    const char* manifestId;
+    void* state;
+    EdvrPluginConfigureFn configure;
+    EdvrPluginFrameFn frame;
+    EdvrPluginShutdownFn shutdown;
+};
 
 struct EdvrPluginOps {
     uint32_t structSize;
@@ -93,6 +110,11 @@ enum : uint32_t {
 // at configure/frame boundaries or shader binds. The draw path only reads the
 // cached candidate mask and visits claims named by that mask.
 bool pluginRegistryRegister(const EdvrPluginOps* ops);
+bool pluginRegistryRegisterLifecycle(const EdvrPluginLifecycleOps* ops);
+bool pluginRegistryHasLifecycle(uint32_t manifestIndex);
+void pluginRegistryConfigureLifecycle(uint32_t manifestIndex, void* config);
+void pluginRegistryFrameLifecycle(uint32_t manifestIndex, uint32_t sceneFrame);
+void pluginRegistryShutdownLifecycle(uint32_t manifestIndex);
 bool pluginRegistryProfileSupports(uint32_t manifestIndex);
 bool pluginRegistryWantsStartupHooks(void* config);
 bool pluginRegistryRegisterLegacyDrawGate(const char* stableName,

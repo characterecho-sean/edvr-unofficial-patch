@@ -36,6 +36,7 @@
 #include "screen_motion.h"
 #include "weapon_motion.h"
 #include "plugin_registry.h"
+#include "intro_lifecycle.h"
 #include "plugin_dispatch.h"
 #include "device_hook.h"  // contextHookModeFor
 #include "draw_census.h"
@@ -983,6 +984,43 @@ struct State {
 State* g_state = nullptr;
 bool g_vScreenInstallAttempted = false;
 bool g_transportSelected = false;
+bool g_introLifecycleRegistered = false;
+
+constexpr uint32_t kIntroPluginIndex = plugins::kPluginIntro;
+
+bool ensureIntroVideoLifecycle() {
+    if (!g_state) return false;
+    return pluginRegistryRegisterLifecycle(introVideoLifecycleOps());
+}
+
+void configureIntroVideoLifecycle(Config& cfg) {
+    g_introLifecycleRegistered = ensureIntroVideoLifecycle();
+    if (g_introLifecycleRegistered) {
+        pluginRegistryConfigureLifecycle(kIntroPluginIndex, &cfg);
+        return;
+    }
+    introSkipConfigure(cfg);
+    introUpscaleConfigure(cfg);
+}
+
+void frameIntroVideoLifecycle(uint32_t sceneFrame) {
+    if (g_introLifecycleRegistered) {
+        pluginRegistryFrameLifecycle(kIntroPluginIndex, sceneFrame);
+        return;
+    }
+    introSkipTick(sceneFrame != 0);
+}
+
+void shutdownIntroVideoLifecycle() {
+    const bool registered = g_introLifecycleRegistered;
+    g_introLifecycleRegistered = false;
+    if (registered) {
+        pluginRegistryShutdownLifecycle(kIntroPluginIndex);
+        return;
+    }
+    introUpscaleShutdown();
+    introSkipShutdown();
+}
 
 // One budget per thing that can fail, not one for the file.
 //
@@ -8517,8 +8555,7 @@ void vScreenRefreshConfig() {
     loaderPanelConfigure(cfg);
     splashDimConfigure(cfg);
     introPanelConfigure(cfg);
-    introSkipConfigure(cfg);
-    introUpscaleConfigure(cfg);
+    configureIntroVideoLifecycle(cfg);
     sharpenPassConfigure(cfg);
     temporalPassConfigure(cfg);
     schedulerStackProbeConfigure(cfg.getBool("advanced.scheduler_probe", false));
@@ -8812,7 +8849,8 @@ void vScreenFrameBoundary() {
         // The same boundary closes the skip's verdict: refused, drawn, or
         // neither, said once when the scene arrives.
         tkIntroSkip.run([&] {
-            introSkipTick(g_state->eyeDrawsLastFrame >= kSceneEyeDraws);
+            frameIntroVideoLifecycle(
+                g_state->eyeDrawsLastFrame >= kSceneEyeDraws ? 1u : 0u);
         });
         // The scene flag retires the loader fix when the intro ends: the
         // same boundary the draw hook gates on, read at the frame edge.
@@ -9804,8 +9842,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     loaderPanelConfigure(cfg);
     splashDimConfigure(cfg);
     introPanelConfigure(cfg);
-    introSkipConfigure(cfg);
-    introUpscaleConfigure(cfg);
+    configureIntroVideoLifecycle(cfg);
     sharpenPassConfigure(cfg);
     temporalPassConfigure(cfg);
     schedulerStackProbeConfigure(cfg.getBool("advanced.scheduler_probe", false));
@@ -10191,8 +10228,7 @@ void shutdownVScreenFixes() {
     // menu -- freed nothing at all.
     introPanelShutdown();
     introCurveShutdown();
-    introUpscaleShutdown();
-    introSkipShutdown();
+    shutdownIntroVideoLifecycle();
     temporalPassShutdown();
     // The scheduler stack probe (advanced.scheduler_probe) is configured by
     // vScreen startup and reload, independently of the temporal pass.
