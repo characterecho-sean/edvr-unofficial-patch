@@ -1,4 +1,4 @@
-#include "pixel_probe.h"
+#include "../../d3d11/pixel_probe.h"
 
 #include <cmath>
 #include <cstdio>
@@ -8,8 +8,8 @@
 
 #include <d3d11.h>
 
-#include "../common/config.h"
-#include "../common/log.h"
+#include "../../common/config.h"
+#include "../../common/log.h"
 
 namespace edvr {
 

@@ -12,17 +12,15 @@
   generated manifests/config ownership, subscription-driven dispatch and a
   C-compatible interface. The add-on tier follows Phase 1. Graphics-only VR is
   a separate phase; supported settings remain owned by one plugin.
-- **Current integration:** main `a1609f2b` is merged. Exposure lifecycle
-  and three group ownership moves pass 158 full-build jobs plus config,
-  export and installer gates; receipt `66c97d72` matches the source.
-  Last measured Steam build: `6ab758d2`; Sean must approve any install
-  (2026-10-10).
-- **Module progress:** Intro and Exposure have archive/lifecycle
-  ownership. Weapon motion, FSS eye heal and transition-flash eye base
-  build in their on-foot, scanner and comfort archives through existing
-  core APIs. Installer records preserve versioned selections. Remaining
-  group/draw-claim migration, selection UI/runtime gating remain open;
-  availability is unchanged.
+- **Current integration:** main `a1609f2b` is merged. The latest
+  ownership batch passes 158 full-build jobs plus config, exports and
+  installer gates; receipt `784229db` matches. Last measured Steam
+  build: `6ab758d2`. Sean must approve any install.
+- **Module progress:** Intro and Exposure own lifecycle work. Scanner,
+  comfort, temporal-AA, on-foot and diagnostic implementations now build
+  in their archives. Selection records are versioned; remaining
+  group/draw-claim migration and selection UI/runtime gating stay open.
+  Availability is unchanged.
 
 - **Offline evidence:** FSS site 1 has a frozen legacy selector oracle,
   version-16 facts, seven-base-fact capacity and terminal X/6 action fixtures.
@@ -4281,3 +4279,47 @@ installation while he tests other work. The branch remains isolated from
 main; final matched performance comparison stays at rendering-code
 freeze. Remaining group/draw-claim migrations, selection UI/runtime
 gating and whole-ladder replay remain required.
+
+### 2026-10-10 — scanner, sharpening, probe and Explorer ownership
+
+After validated checkpoint `8a4a4bcb`, Luna 6 agents moved five
+production implementations in parallel. Scanners now compiles FSS panel
+and reveal beside its eye-heal implementation. Temporal-AA gains the
+production sharpening pass, diagnostics gains pixel probes, and comfort
+gains Explorer Cam beside transition-flash eye-base work. Every moved
+body compares byte-for-byte with `8a4a4bcb` after reversing only
+required relative include changes. Public core headers, shared
+draw/lifecycle callsites, state, defaults, logs, cost IDs, shader code
+and hook order remain unchanged. Scanner resolution and shared draw
+classification remain core work; these moves do not complete full group
+ownership or uninstalled-zero-work selection.
+
+Shared integration removes the five bodies from core compilation,
+extends scanner/comfort archives, and adds temporal-AA and diagnostic
+archives. Production graphics, VScreen predicate and flat benchmark
+consumers link each archive once. Boundary checks require the new source
+roots and resolve generated includes through `build/gen`. The
+direct-source FSS predicate/reveal, sharpening, pixel-probe and Explorer
+rigs compile the relocated actual implementations. Explorer's fade
+source reads and mutation fixture follow the relocated source while
+keeping the original assertions. Manifest rig coverage records these
+existing fixtures; statuses remain catalog-only and available profile
+lists stay empty. No new config key or user-visible selection behavior
+was added.
+
+Review corrected duplicate archive wiring and required sharpening
+include paths before the native build. Source comparisons,
+boundary/catalog/selection/proxy checks and the Explorer mutation
+self-test passed. The full absolute validation build then passed all 158
+jobs, configuration, export and self-contained installer gates. Receipt:
+`784229db205818c7ce9a8f02dbc47a3cb436ecbdd7c9f90f422a2478f7c7f4f2`.
+Source relocation and offline WARP/hook fixtures preserve this
+development checkpoint; they do not establish live runtime CPU/GPU
+acceptance or whole-ladder replay.
+
+Steam installation remains held for Sean's explicit approval while he
+tests other work. No Steam install, live config edit or flight occurred.
+The feature branch remains isolated from main. Remaining work includes
+shared group boundaries, lifecycle/draw-claim migration, selection
+UI/runtime consumption and whole-ladder replay; take the final matched
+performance comparison at rendering-code freeze.

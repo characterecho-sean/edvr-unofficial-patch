@@ -21,12 +21,12 @@
 // and clears the published state (g_placedActivity,
 // g_phase, g_sessionActive) itself whenever placement is not active, every frame, so an end never depends on a hook being called
 // again.
-#include "explorer_cam.h"
-#include "engine_motion_ready.h"
-#include "explorer_cam_core.h"
-#include "explorer_cam_fade_core.h"
-#include "explorer_cam_follow_core.h"
-#include "explorer_cam_settings_core.h"
+#include "../../d3d11/explorer_cam.h"
+#include "../../d3d11/engine_motion_ready.h"
+#include "../../d3d11/explorer_cam_core.h"
+#include "../../d3d11/explorer_cam_fade_core.h"
+#include "../../d3d11/explorer_cam_follow_core.h"
+#include "../../d3d11/explorer_cam_settings_core.h"
 
 #include <windows.h>
 #include <intrin.h>
@@ -38,13 +38,13 @@
 #include <cstring>
 #include <string>
 
-#include "../common/code_hook.h"
-#include "../common/comfort_fade.h"
-#include "../common/config.h"
-#include "../common/hotkey.h"
-#include "../common/log.h"
-#include "elite_binds.h"
-#include "journal_watch.h"
+#include "../../common/code_hook.h"
+#include "../../common/comfort_fade.h"
+#include "../../common/config.h"
+#include "../../common/hotkey.h"
+#include "../../common/log.h"
+#include "../../d3d11/elite_binds.h"
+#include "../../d3d11/journal_watch.h"
 
 namespace edvr {
 namespace {

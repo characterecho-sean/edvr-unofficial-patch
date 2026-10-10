@@ -1,4 +1,4 @@
-#include "fss_panel.h"
+#include "../../d3d11/fss_panel.h"
 
 #include <cstdio>    // _snprintf_s: the macro value for the compile
 
@@ -9,12 +9,12 @@
 #include <string>
 #include <new>
 
-#include "../common/config.h"
-#include "../common/guard.h"
-#include "../common/log.h"
-#include "exposure_fix.h"   // lookupShaderHash
-#include "fss_panel_vs.h"
-#include "shader_swap.h"
+#include "../../common/config.h"
+#include "../../common/guard.h"
+#include "../../common/log.h"
+#include "../../d3d11/exposure_fix.h"   // lookupShaderHash
+#include "../../d3d11/fss_panel_vs.h"
+#include "../../d3d11/shader_swap.h"
 
 namespace edvr {
 

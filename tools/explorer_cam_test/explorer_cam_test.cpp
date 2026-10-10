@@ -1,4 +1,4 @@
-// Explorer Cam's rig (src/d3d11/explorer_cam_core.h, explorer_cam.cpp, elite_binds.cpp; hotkey.explorer_cam).
+// Explorer Cam's rig (src/d3d11/explorer_cam_core.h, src/plugins/comfort/explorer_cam.cpp, elite_binds.cpp; hotkey.explorer_cam).
 //
 // Part A drives the pure half the DLL compiles: the build-332841 identity and CodeHook's reading of all five prologues, the eye
 // keys' clamp, the sixteen floats written into the free camera's commander-local pose, the placement machine on scripted state

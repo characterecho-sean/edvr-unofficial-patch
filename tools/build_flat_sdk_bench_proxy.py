@@ -38,6 +38,8 @@ def plan(root: Path, env: dict[str, str]) -> tuple[list[str], Path]:
         ("on-foot-panel", objdir / "plugins" / "on_foot_panel" / "plugin_on_foot_panel.lib"),
         ("scanners", objdir / "plugins" / "scanners" / "plugin_scanners.lib"),
         ("comfort", objdir / "plugins" / "comfort" / "plugin_comfort.lib"),
+        ("temporal-aa", objdir / "plugins" / "temporal_aa" / "plugin_temporal_aa.lib"),
+        ("diagnostics", objdir / "plugins" / "diagnostics" / "plugin_diagnostics.lib"),
     )
     bench = objdir / "flat_sdk_bench_proxy"
     output = build / "flat_sdk_bench_proxy.dll"
@@ -115,6 +117,8 @@ def self_test() -> None:
             "on-foot-panel": root / "build" / "obj" / "plugins" / "on_foot_panel" / "plugin_on_foot_panel.lib",
             "scanners": root / "build" / "obj" / "plugins" / "scanners" / "plugin_scanners.lib",
             "comfort": root / "build" / "obj" / "plugins" / "comfort" / "plugin_comfort.lib",
+            "temporal-aa": root / "build" / "obj" / "plugins" / "temporal_aa" / "plugin_temporal_aa.lib",
+            "diagnostics": root / "build" / "obj" / "plugins" / "diagnostics" / "plugin_diagnostics.lib",
         }
         for library in plugin_libs.values():
             library.parent.mkdir(parents=True)

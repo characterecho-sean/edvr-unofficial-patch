@@ -1,4 +1,4 @@
-#include "fss_reveal.h"
+#include "../../d3d11/fss_reveal.h"
 
 #include <cstring>
 
@@ -9,12 +9,12 @@
 #include <string>
 #include <new>
 
-#include "../common/config.h"
-#include "../common/eye_sync.h"
-#include "../common/guard.h"
-#include "../common/log.h"
-#include "exposure_fix.h"   // lookupShaderHash
-#include "fss_reveal_cost_sites.h"
+#include "../../common/config.h"
+#include "../../common/eye_sync.h"
+#include "../../common/guard.h"
+#include "../../common/log.h"
+#include "../../d3d11/exposure_fix.h"   // lookupShaderHash
+#include "../../d3d11/fss_reveal_cost_sites.h"
 
 namespace edvr {
 

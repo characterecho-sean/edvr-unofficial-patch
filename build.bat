@@ -303,7 +303,12 @@ python "tools\check_plugin_boundaries.py" --quiet --require-plugin cockpit_visua
     --require-source src\plugins\intro\splash_dim.cpp ^
     --require-plugin on_foot_panel --require-source src\plugins\on_foot_panel\weapon_motion.cpp ^
     --require-plugin scanners --require-source src\plugins\scanners\fss_heal.cpp ^
+    --require-source src\plugins\scanners\fss_panel.cpp ^
+    --require-source src\plugins\scanners\fss_reveal.cpp ^
     --require-plugin comfort --require-source src\plugins\comfort\transition_flash_eye_base.cpp ^
+    --require-source src\plugins\comfort\explorer_cam.cpp ^
+    --require-plugin temporal_aa --require-source src\plugins\temporal_aa\sharpen_pass.cpp ^
+    --require-plugin diagnostics --require-source src\plugins\diagnostics\pixel_probe.cpp ^
     --require-plugin exposure --require-source src\plugins\exposure\exposure_shape.cpp ^
     --require-source src\plugins\exposure\exposure_dispatch.cpp ^
     --require-source src\plugins\exposure\exposure_actions.cpp ^
@@ -331,20 +336,42 @@ if errorlevel 1 ( echo [edvr] ERROR: on-foot-panel plugin library failed & exit 
 if not exist "%OBJ%\plugins\scanners" mkdir "%OBJ%\plugins\scanners"
 del /q "%OBJ%\plugins\scanners\*.obj" 2>nul
 cl.exe %CFLAGS% /Fo"%OBJ%\plugins\scanners\\" ^
-    "src\plugins\scanners\fss_heal.cpp"
+    "src\plugins\scanners\fss_heal.cpp" ^
+    "src\plugins\scanners\fss_panel.cpp" "src\plugins\scanners\fss_reveal.cpp"
 if errorlevel 1 ( echo [edvr] ERROR: scanners plugin compile failed & exit /b 1 )
 lib.exe /nologo /OUT:"%OBJ%\plugins\scanners\plugin_scanners.lib" ^
-    "%OBJ%\plugins\scanners\fss_heal.obj"
+    "%OBJ%\plugins\scanners\fss_heal.obj" ^
+    "%OBJ%\plugins\scanners\fss_panel.obj" "%OBJ%\plugins\scanners\fss_reveal.obj"
 if errorlevel 1 ( echo [edvr] ERROR: scanners plugin library failed & exit /b 1 )
 
 if not exist "%OBJ%\plugins\comfort" mkdir "%OBJ%\plugins\comfort"
 del /q "%OBJ%\plugins\comfort\*.obj" 2>nul
 cl.exe %CFLAGS% /Fo"%OBJ%\plugins\comfort\\" ^
-    "src\plugins\comfort\transition_flash_eye_base.cpp"
+    "src\plugins\comfort\transition_flash_eye_base.cpp" ^
+    "src\plugins\comfort\explorer_cam.cpp"
 if errorlevel 1 ( echo [edvr] ERROR: comfort plugin compile failed & exit /b 1 )
 lib.exe /nologo /OUT:"%OBJ%\plugins\comfort\plugin_comfort.lib" ^
-    "%OBJ%\plugins\comfort\transition_flash_eye_base.obj"
+    "%OBJ%\plugins\comfort\transition_flash_eye_base.obj" ^
+    "%OBJ%\plugins\comfort\explorer_cam.obj"
 if errorlevel 1 ( echo [edvr] ERROR: comfort plugin library failed & exit /b 1 )
+
+if not exist "%OBJ%\plugins\temporal_aa" mkdir "%OBJ%\plugins\temporal_aa"
+del /q "%OBJ%\plugins\temporal_aa\*.obj" 2>nul
+cl.exe %CFLAGS% /Fo"%OBJ%\plugins\temporal_aa\\" ^
+    "src\plugins\temporal_aa\sharpen_pass.cpp"
+if errorlevel 1 ( echo [edvr] ERROR: temporal-aa plugin compile failed & exit /b 1 )
+lib.exe /nologo /OUT:"%OBJ%\plugins\temporal_aa\plugin_temporal_aa.lib" ^
+    "%OBJ%\plugins\temporal_aa\sharpen_pass.obj"
+if errorlevel 1 ( echo [edvr] ERROR: temporal-aa plugin library failed & exit /b 1 )
+
+if not exist "%OBJ%\plugins\diagnostics" mkdir "%OBJ%\plugins\diagnostics"
+del /q "%OBJ%\plugins\diagnostics\*.obj" 2>nul
+cl.exe %CFLAGS% /Fo"%OBJ%\plugins\diagnostics\\" ^
+    "src\plugins\diagnostics\pixel_probe.cpp"
+if errorlevel 1 ( echo [edvr] ERROR: diagnostics plugin compile failed & exit /b 1 )
+lib.exe /nologo /OUT:"%OBJ%\plugins\diagnostics\plugin_diagnostics.lib" ^
+    "%OBJ%\plugins\diagnostics\pixel_probe.obj"
+if errorlevel 1 ( echo [edvr] ERROR: diagnostics plugin library failed & exit /b 1 )
 
 if not exist "%OBJ%\plugins\intro" mkdir "%OBJ%\plugins\intro"
 del /q "%OBJ%\plugins\intro\*.obj" 2>nul
@@ -620,14 +647,12 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\render_boundary.cpp" ^
     "src\d3d11\exposure_fix.cpp" "src\d3d11\shader_registry.cpp" "src\d3d11\vscreen.cpp" "src\d3d11\plugin_registry.cpp" "src\d3d11\plugin_cost.cpp" ^
     "src\d3d11\glitch_frame.cpp" ^
-    "src\d3d11\explorer_cam.cpp" ^
     "src\d3d11\vscreen_res.cpp" "src\common\vscreen_auto_state.cpp" "src\d3d11\vscreen_footprint.cpp" ^
     "src\d3d11\binding_shadow.cpp" ^
     "src\d3d11\vr_runtime.cpp" ^
     "src\d3d11\journal_watch.cpp" "src\d3d11\terrain_checkerboard.cpp" ^
     "src\d3d11\elite_binds.cpp" "src\d3d11\draw_census.cpp" "src\d3d11\draw_ladder_trace.cpp" ^
     "src\d3d11\object_probe.cpp" ^
-    "src\d3d11\pixel_probe.cpp" ^
     "src\d3d11\object_record_writer_probe.cpp" "src\d3d11\object_record_writer_hook.cpp" ^
     "src\d3d11\kinematic_eval_probe.cpp" "src\d3d11\kinematic_eval_hook.cpp" ^
     "src\d3d11\scheduler_stack_probe.cpp" "src\d3d11\scheduler_stack_hook.cpp" ^
@@ -635,8 +660,6 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\engine_velocity.cpp" "src\d3d11\skin_join_gpu.cpp" "src\d3d11\skin_entity_hook.cpp" ^
     "src\d3d11\celestial_motion.cpp" ^
     "src\d3d11\fss_res.cpp" ^
-    "src\d3d11\fss_panel.cpp" ^
-    "src\d3d11\fss_reveal.cpp" ^
     "src\d3d11\vertex_resync_hook.cpp" ^
     "src\d3d11\xinput_watch.cpp" ^
     "src\d3d11\fss_panel_rect.cpp" ^
@@ -655,7 +678,6 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\dlaa.cpp" ^
     "src\d3d11\dlss_runtime_info.cpp" ^
     "src\d3d11\fsr3_engine.cpp" ^
-    "src\d3d11\sharpen_pass.cpp" ^
     "src\d3d11\flat_sharpen.cpp" "src\d3d11\flat_ui_layer.cpp" ^
     "src\d3d11\billboard_fix.cpp" ^
     "src\d3d11\particle_fix.cpp" "src\d3d11\shader_swap.cpp" "src\d3d11\sunglare_fix.cpp"
@@ -689,6 +711,7 @@ link.exe /nologo /DLL /MACHINE:X64 /INCREMENTAL:NO %EDVR_CPU_LINK% /PDB:"%BUILD%
     "%OBJ%\plugins\intro\plugin_intro.lib" "%OBJ%\plugins\exposure\plugin_exposure.lib" ^
     "%OBJ%\plugins\on_foot_panel\plugin_on_foot_panel.lib" ^
     "%OBJ%\plugins\scanners\plugin_scanners.lib" "%OBJ%\plugins\comfort\plugin_comfort.lib" ^
+    "%OBJ%\plugins\temporal_aa\plugin_temporal_aa.lib" "%OBJ%\plugins\diagnostics\plugin_diagnostics.lib" ^
     "%OBJ%\d3d11\dxbc_notice.res" "%OBJ%\d3d11\version.res" kernel32.lib user32.lib gdi32.lib version.lib d3dcompiler.lib %NGXLIB% %FSRLIB%
 if errorlevel 1 ( echo [edvr] ERROR: link failed & exit /b 1 )
 
@@ -1127,7 +1150,7 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /I"%GEN%" ^
     /Fo"%OBJ%\flat_sharpen_pass_test\\" /Fe"%BUILD%\flat_sharpen_pass_test.exe" ^
     "tools\flat_sharpen_test\flat_sharpen_pass_test.cpp" "src\d3d11\flat_sharpen.cpp" ^
-    "src\d3d11\sharpen_pass.cpp" "src\d3d11\shader_swap.cpp" "src\d3d11\plugin_cost.cpp" ^
+    "src\plugins\temporal_aa\sharpen_pass.cpp" "src\d3d11\shader_swap.cpp" "src\d3d11\plugin_cost.cpp" ^
     "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
     "src\common\config.cpp" "src\common\log.cpp" "src\common\guard.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib dxgi.lib
@@ -1871,7 +1894,7 @@ cl.exe /I"%GEN%" /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
     /DEDVR_BINDING_SHADOW_EXTERNAL /DEDVR_FSS_PREDICATE_TEST ^
     /Fo"%OBJ%\fsspredicate\\" /Fe"%BUILD%\fss_predicate_test.exe" ^
     "tools\fss_predicate_test\fss_predicate_test.cpp" ^
-    "src\d3d11\fss_panel.cpp" "src\d3d11\fss_reveal.cpp" "src\d3d11\plugin_cost.cpp" ^
+    "src\plugins\scanners\fss_panel.cpp" "src\plugins\scanners\fss_reveal.cpp" "src\d3d11\plugin_cost.cpp" ^
     "src\common\config.cpp" "src\common\log.cpp" "src\common\proxy.cpp" ^
     "src\common\guard.cpp" ^
     /link /INCREMENTAL:NO /OPT:REF user32.lib version.lib
@@ -2923,6 +2946,7 @@ link.exe /nologo /MACHINE:X64 /INCREMENTAL:NO /OPT:REF ^
     "%OBJ%\plugins\intro\plugin_intro.lib" "%OBJ%\plugins\exposure\plugin_exposure.lib" ^
     "%OBJ%\plugins\on_foot_panel\plugin_on_foot_panel.lib" ^
     "%OBJ%\plugins\scanners\plugin_scanners.lib" "%OBJ%\plugins\comfort\plugin_comfort.lib" ^
+    "%OBJ%\plugins\temporal_aa\plugin_temporal_aa.lib" "%OBJ%\plugins\diagnostics\plugin_diagnostics.lib" ^
     kernel32.lib user32.lib gdi32.lib version.lib d3dcompiler.lib %NGXLIB% %FSRLIB%
 if errorlevel 1 ( echo [edvr] ERROR: VScreen predicate test build failed & exit /b 1 )
 "%BUILD%\vscreen_predicate_test.exe" --dry-run || exit /b 1
@@ -4013,7 +4037,7 @@ if not exist "%OBJ%\explorercam" mkdir "%OBJ%\explorercam"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /DEDVR_EXPLORER_CAM_TEST /I"%GEN%" ^
     /Fo"%OBJ%\explorercam"\ /Fe"%BUILD%\explorer_cam_test.exe" ^
-    "tools\explorer_cam_test\explorer_cam_test.cpp" "src\d3d11\explorer_cam.cpp" "src\d3d11\elite_binds.cpp" ^
+    "tools\explorer_cam_test\explorer_cam_test.cpp" "src\plugins\comfort\explorer_cam.cpp" "src\d3d11\elite_binds.cpp" ^
     "src\common\hotkey.cpp" "src\common\code_hook.cpp" "src\common\guard.cpp" "src\common\log.cpp" "src\common\config.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib
 if errorlevel 1 ( echo [edvr] ERROR: explorer cam test build failed & exit /b 1 )
@@ -4458,7 +4482,7 @@ if not exist "%OBJ%\pixelprobe" mkdir "%OBJ%\pixelprobe"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
     /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
     /Fo"%OBJ%\pixelprobe\\" /Fe"%OBJ%\pixelprobe\pixel_probe_test.exe" ^
-    "tools\pixel_probe_test\pixel_probe_test.cpp" "src\d3d11\pixel_probe.cpp" ^
+    "tools\pixel_probe_test\pixel_probe_test.cpp" "src\plugins\diagnostics\pixel_probe.cpp" ^
     /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib
 if errorlevel 1 ( echo [edvr] ERROR: pixel probe test build failed & exit /b 1 )
 "%OBJ%\pixelprobe\pixel_probe_test.exe" --dry-run || exit /b 1
@@ -4489,7 +4513,7 @@ cl.exe /I"%GEN%" /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
     /DEDVR_VERSION_STRING=\"%EDVR_VER%\" ^
     /Fo"%OBJ%\fssrevealapi\\" /Fe"%BUILD%\fss_reveal_api_test.exe" ^
     "tools\fss_reveal_api_test\fss_reveal_api_test.cpp" ^
-    "src\d3d11\fss_reveal.cpp" "src\d3d11\plugin_cost.cpp" ^
+    "src\plugins\scanners\fss_reveal.cpp" "src\d3d11\plugin_cost.cpp" ^
     "src\common\guard.cpp" "src\common\vtable_hook.cpp" "src\common\code_hook.cpp" ^
     /link /INCREMENTAL:NO /OPT:REF kernel32.lib user32.lib version.lib
 if errorlevel 1 ( echo [edvr] ERROR: FSS Reveal API test build failed & exit /b 1 )

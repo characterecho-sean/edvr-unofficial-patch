@@ -1,4 +1,4 @@
-// Test rig for the pixel probe (src/d3d11/pixel_probe.*): a WARP device, a
+// Test rig for the pixel probe (src/plugins/diagnostics/pixel_probe.cpp (src/d3d11/pixel_probe.h)): a WARP device, a
 // 256x256 eye-sized render target and a trivial VS/PS that fills a
 // scissor-clipped region with a constant-buffer colour, so a "draw" can be
 // placed precisely on or off a probe window. Config and Log are narrow,

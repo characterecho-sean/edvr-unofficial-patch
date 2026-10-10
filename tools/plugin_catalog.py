@@ -76,6 +76,11 @@ EXPECTED_HOOK_POINTS = {
     'intro': ('lifecycle.configure', 'lifecycle.frame', 'lifecycle.shutdown'),
 }
 EXPECTED_RIGS = {
+    'temporal-aa': ('flat_sharpen_pass_test',),
+    'scanners': ('native_fss_gpu_test', 'fss_predicate_test', 'fss_reveal_api_test'),
+    'comfort': ('native_temporal_test', 'transition_flash_prevent_test',
+                'explorer_cam_test', 'explorer_cam_fade_test'),
+    'diagnostics': ('pixel_probe_test',),
     'exposure': ('exposure_dispatch_test', 'exposure_cost_test', 'plugin_dispatch_test'),
     'intro': ('plugin_dispatch_test', 'intro_lifecycle_test'),
 }

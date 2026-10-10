@@ -1,7 +1,7 @@
 #include "temporal_shader_bytecode.h"
-#include "sharpen_pass.h"
-#include "../common/native_sharpen.h"
-#include "graphics_runtime.h"
+#include "../../d3d11/sharpen_pass.h"
+#include "../../common/native_sharpen.h"
+#include "../../d3d11/graphics_runtime.h"
 
 #include <cmath>
 #include <cstdio>
@@ -12,17 +12,17 @@
 
 #include <d3d11.h>
 
-#include "../common/config.h"
-#include "../common/frame_flag.h"   // glitchConsumerPresent: is a compositor hook alive
-#include "../common/guard.h"
-#include "../common/log.h"
-#include "../common/runtime_profile.h"   // runtimeFlatProfile: what a "pass" is counted in
-#include "../common/supersample_math.h"   // supersampleRegionFromBounds: the eye's pixels
-#include "../common/temporal_mode.h"      // temporalModeEnabled: why the flat pass may never run
-#include "../common/timing.h"
-#include "shader_swap.h"
-#include "gpu_timing.h"
-#include "gpu_census.h"   // issue #38: the per-feature GPU cost census
+#include "../../common/config.h"
+#include "../../common/frame_flag.h"   // glitchConsumerPresent: is a compositor hook alive
+#include "../../common/guard.h"
+#include "../../common/log.h"
+#include "../../common/runtime_profile.h"   // runtimeFlatProfile: what a "pass" is counted in
+#include "../../common/supersample_math.h"   // supersampleRegionFromBounds: the eye's pixels
+#include "../../common/temporal_mode.h"      // temporalModeEnabled: why the flat pass may never run
+#include "../../common/timing.h"
+#include "../../d3d11/shader_swap.h"
+#include "../../d3d11/gpu_timing.h"
+#include "../../d3d11/gpu_census.h"   // issue #38: the per-feature GPU cost census
 
 // AMD's own FSR, CPU side: FsrRcasCon packs the strength into the constants
 // the shader reads. intro_upscale.cpp's arrangement, warnings and all --
@@ -31,8 +31,8 @@
 #define A_CPU 1
 #pragma warning(push)
 #pragma warning(disable : 4505)
-#include "fsr/ffx_a.h"
-#include "fsr/ffx_fsr1.h"
+#include "../../d3d11/fsr/ffx_a.h"
+#include "../../d3d11/fsr/ffx_fsr1.h"
 #pragma warning(pop)
 
 // The same two files as GPU text, generated at build time.

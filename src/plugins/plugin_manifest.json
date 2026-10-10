@@ -71,7 +71,9 @@
       "hookPoints": [],
       "claims": [],
       "costNote": "Per-plugin cost not measured; see the design document census baseline.",
-      "rigs": [],
+      "rigs": [
+        "flat_sharpen_pass_test"
+      ],
       "implementationStatus": "catalog-only",
       "selectionAvailableProfiles": [],
       "costBudget": {
@@ -276,7 +278,9 @@
       "claims": [],
       "costNote": "Per-plugin cost not measured; see the design document census baseline.",
       "rigs": [
-        "native_fss_gpu_test"
+        "native_fss_gpu_test",
+        "fss_predicate_test",
+        "fss_reveal_api_test"
       ],
       "implementationStatus": "catalog-only",
       "selectionAvailableProfiles": [],
@@ -469,7 +473,9 @@
       "costNote": "Per-plugin cost not measured; see the design document census baseline.",
       "rigs": [
         "native_temporal_test",
-        "transition_flash_prevent_test"
+        "transition_flash_prevent_test",
+        "explorer_cam_test",
+        "explorer_cam_fade_test"
       ],
       "implementationStatus": "catalog-only",
       "selectionAvailableProfiles": [],
@@ -611,7 +617,9 @@
       "hookPoints": [],
       "claims": [],
       "costNote": "Per-plugin cost not measured; see the design document census baseline.",
-      "rigs": [],
+      "rigs": [
+        "pixel_probe_test"
+      ],
       "implementationStatus": "catalog-only",
       "selectionAvailableProfiles": [],
       "costBudget": {
