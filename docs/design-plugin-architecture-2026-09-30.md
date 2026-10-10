@@ -22,17 +22,20 @@
   source-pinned; this does not establish full-frame held-event cost. Normal
   WARP, collector, strict boundary and real-backend gates pass. Candidate
   `6ab758d2` passes 156 jobs, config/export/installer gates and receipt
-  `44fba17c`. A reader-only exponent repair passes the tool self-tests;
-  refreshing the full source receipt waits until matched flights finish.
+  `44fba17c`. The reader-only exponent repair also passes full validation;
+  refreshed source receipt `eea6ad9a` is verified.
   Git stays on `codex/plugin-architecture`.
-- **Historical gates:** the previous candidate passes 149 jobs and installer
-  checks, 344 focused census checks and 17 scoped assembly gates. Its
-  main-based control `405b14cd` passes 129 jobs. Those source/assembly receipts
-  and the 814 caller diagnostic are historical after this merge; none establish
-  new-tree correctness or performance. Control `e16dbb54` has completed all
-  five states, on foot first. Steam holds verified candidate `6ab758d2`; the
-  live graphics INI and DLSS file hashes are unchanged and replay is off. Next
-  flight: the same five holds, on foot first, on the candidate.
+- **Matched flights:** control `e16dbb54` and candidate `6ab758d2` match Pimax
+  OpenXR, 4032x3898 per eye, 90 Hz and graphics ownership. Control was on foot
+  first; candidate was carrier first. Candidate on-foot AA off overlaps another
+  build; its late windows remain conditional without a verified stop time.
+  Reported hook CPU varies by state. Direct-only GPU estimates rise 5.0% and
+  11.3% in carrier DLSS with NV off/on; on-foot DLSS falls 3.7% while source
+  pixels rise 2.559%. Nested and wrapped-game scopes are excluded from totals.
+  Workload and runtime acceptance remain open; no CPU benefit or GPU
+  non-regression is accepted. Steam retains verified `6ab758d2`, with graphics
+  INI and DLSS hashes unchanged. Next flight: none requested until the offline
+  audit establishes what further evidence is needed.
 - **Frozen flight evidence:** `7bbe7d90` control / `6c63f6aa` candidate,
   matched Pimax OpenXR environment, no visual change. NV-on sampled hook time
   per timed draw is 15.0% lower; other CPU ranges overlap. Carrier DLSS/NV-off
@@ -3674,3 +3677,105 @@ on-foot-first order. Its flight identity must be checked against `6ab758d2`,
 even if a later reader/documentation commit moves branch HEAD. Main `7960f016`
 remains included; no feature-to-main merge occurred. Matched performance
 acceptance remains open.
+
+### 2026-10-10 — paired flights, external build overlap and unresolved cost
+
+The candidate graphics log `edvr_gfx_20261010_062435.log` and runtime log
+`edvr_openxr_20261010_062436_256_28036.log` both match `6ab758d2`, rather than
+the later reader/documentation commit `cbaa4d8a`. Loaded DLSS reports
+310.9.1.0. The runtime matches the control's Pimax OpenXR / Crystal Super, 90
+Hz, 4032x3898 output per eye, 2016x1949 submitted input and separate graphics
+ownership. Shutdown completes with `exception=0`. The sanctioned installer
+verifies the candidate payload in its original installation context; graphics
+INI and DLSS SHA256 remain unchanged. No rebuild or reinstall of the measured
+candidate is performed for this comparison.
+
+Sean reports carrier first (AA off, DLSS/NV off, DLSS/NV on), then on-foot
+hangar AA off and DLSS, with the same nominal two-minute stationary holds.
+Strict candidate native windows are W5-8, W10-12, W14-16 and W25-27
+respectively for carrier AA off, carrier DLSS/NV off, carrier DLSS/NV on and
+on-foot DLSS. W4 starts before the first explicit aboard status; W13 crosses NV
+engagement at 06:31:03.065; W17 has a reduced sample count near the carrier
+exit. Those are excluded from the primary comparison. The on-foot world route
+owns from 06:36:19.935. Full compact parsing and independent source/log review
+establish these boundaries; the reader accepts all 316 scope rows across 27
+helper completion windows without errors.
+
+Sean stopped a separate agent's build after it began towards the beginning of
+on-foot AA off, and reports the remaining minute should be clear. Its build
+worktree `system-map-dlaa-smear-9595a7` contains writes to `d3d11.lib` at
+06:34:45.618 and `flat_sdk_bench_proxy.lib` at 06:34:50.895. These establish
+overlap, not its exact start or stop. Candidate W20 is disturbed; W21 may
+overlap. W22 samples 06:35:11.014-06:35:41.014 and W23 samples
+06:35:45.014-06:36:15.014. The last entirely AA-off hook window spans roughly
+06:35:44.736-06:36:04.735. Their ordinary counts and percentiles cannot prove
+that the build had stopped. AA-off CPU and GPU are excluded from the primary
+comparison; W23 CPU p50 1.727 ms, GPU p50 3.378 ms and hook mean 0.252 ms/frame
+are retained as an operator-supported conditional tail. No clean-state delta is
+claimed. A new build lock began at 06:44:28, after the flight exited, and does
+not establish when the earlier build stopped.
+
+The primary reported observations below are candidate versus control. Native
+percentiles remain independent per-window statistics; hook means are weighted
+by sampled frames. Cold helper totals are estimates from separate reporting
+windows, with null calibration subtracted, and are not accepted-work latency.
+The GPU helper column includes only Direct attribution (0). NestedBreakdown (1)
+is already included in parent work, and WrappedGameDraw (2) includes Elite's
+own GPU work; neither is added to EDVR cost totals.
+
+| State | Reported hook CPU mean change | Native GPU p50 median change | Corrected Direct GPU estimate change |
+|---|---:|---:|---:|
+| Carrier, AA off | +20.7% | +9.6% | -1.1% |
+| Carrier, DLSS, NV off | +5.1% | +0.4% | +5.0% |
+| Carrier, DLSS, NV on | -7.4% | +0.4% | +11.3% |
+| On foot, DLSS | -21.2% | -11.1% | -3.7% |
+
+Independent source audit establishes that the hook CPU counter has the same
+definition in both builds: one sampled frame in 16, one timed draw in 64, the
+first original forwarding interval subtracted, remaining ticks clamped and
+scaled, and sampled frames averaged over 1800 frames. Indexed-instanced weapon
+motion reissues have the same first-forward subtraction. The new per-timed-draw
+accumulator and disjoint offset-32 CPU probe do not feed this numerator or
+shift its frame boundary. Candidate trace/API work may run inside the measured
+hook; the deltas are same-counter observations, not isolated pluginization
+overhead, pure classifier cost or total EDVR CPU.
+
+Ruled out: an all-scope sum as EDVR GPU cost, because nested attribution
+duplicates its parent and wrapped-game attribution includes Elite's work. The
+earlier synthetic carrier-AA-off +38.2% and on-foot-DLSS +9.6% increases
+therefore do not establish EDVR GPU regressions. Carrier AA-off's dominant
+scope 34 is the wrapped glare-steady game draw; scope 25 is the wrapped pool
+draw. The observed Direct-only corrected medians, candidate/control in ms per
+frame, are 0.011907/0.012045, 5.86556/5.58662, 6.01565/5.40420 and
+1.73370/1.80046 in the table's order. These are medians of per-window totals,
+not sums of row medians. Carrier DLSS has nine observed Direct rows per
+candidate window versus eight in the control; completeness of observed rows
+does not establish total EDVR scope coverage. Independent sanctioned-log
+reparsing reproduces every selected window's raw/corrected Direct sum and the
+reported medians, with matching owner/attribution for shared IDs. Candidate
+carrier DLSS alone observes FrameUiDepthCoverage (scope 11), contributing
+0.014964 ms/frame with NV off and 0.016802 with NV on; removing that scope as a
+sensitivity still leaves its observed totals above control. Its absence in the
+control remains unknown, not zero cost. On-foot DLSS has a null-floor Direct
+row in one of two candidate and two of three control helper windows; a
+corrected zero does not establish zero GPU work.
+
+On foot, the candidate's initial world-route source is 3824x2151 versus
+3776x2124 in the control (+2.559% pixels). The initial route trigger reports
+111 scene draws versus 203; that is a single trigger, not whole-hold workload
+normalization. Source/workload differences, opposite flight order and different
+completion-window counts prevent causal attribution or GPU non-regression
+acceptance. The candidate's dominant observed Direct on-foot scopes are world
+resolve, UI layer composite and engine velocity. Native frame GPU percentiles
+remain distinct from cold sampled-helper estimates.
+
+The initial validation attempt was held by the global build lock before any
+compiler launched. After the competing build finished, the guarded absolute
+full build refreshed the reader-only source validation:
+`build/full-plugin-reader-cbaa4d8a-20261010.log`: 149 pooled and 7 quiet jobs,
+125-key config contract, exports and installer all pass. Full-pass receipt
+`eea6ad9afdf8675ebdf4629dbb6078815af120e166c3a82add77ae8f91d7460d` is verified for that source. Steam remains the measured `6ab758d2`;
+the receipt refresh does not change its payload. Remaining held-frame/lifecycle
+accounting, whole-ladder replay and matched performance acceptance remain open.
+The offline audit must identify a discriminating next measurement before
+requesting another flight. No feature-to-main merge or shipping acceptance.
