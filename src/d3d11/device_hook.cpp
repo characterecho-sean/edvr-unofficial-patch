@@ -847,6 +847,9 @@ HRESULT STDMETHODCALLTYPE hookedCreateTexture2D(ID3D11Device* self,
                                                 const D3D11_SUBRESOURCE_DATA* init,
                                                 ID3D11Texture2D** out) {
     const bool fromEdvr = addressInEdvr(_ReturnAddress());
+    // The sizing watch (H7, vr_ssaa_hold.cpp): the game's own render and depth targets created within seconds of a Supersampling
+    // setter call or a 3D mode change, with the caller chain. Log only; one flag test when nothing is armed.
+    if (!fromEdvr && desc) vrSizingWatchTexture(desc->Width, desc->Height, desc->Format, desc->BindFlags);
     // THE PANEL NET (2026-10-08, ui_sizing_math.h uiPanelNetShrink): a game create of a render or depth target over
     // D3D11's 16384 on either axis -- which would be refused, and a refused create is fatal in Elite -- is created
     // shrunk to fit with its aspect kept, and says so (ui_surfaces.cpp). Everything at or under the limit is
@@ -3008,6 +3011,7 @@ void hookSwapChain(IDXGISwapChain* swapChain) {
     s.swapChain = swapChain;
     Log::get().note("Present hook installed");
     vrDisplayObserveInstalled(observeFullscreen, observeTarget, "the vtable hook refused slot 10 or 14");
+    vrDisplayObserveWindowCallsInstall();  // H6: the game's user32 window imports, observe only (once per process)
     {
         DXGI_SWAP_CHAIN_DESC windowDesc{};
         if (SUCCEEDED(swapChain->GetDesc(&windowDesc))) vrDisplayObserveWindow(windowDesc.OutputWindow);

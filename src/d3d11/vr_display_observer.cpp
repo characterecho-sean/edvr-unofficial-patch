@@ -4,6 +4,7 @@
 #include "vr_ssaa_gate.h"  // vrSsaaGateFrame: the frame number the lines carry
 #include "vr_ssaa_hold.h"  // vrSsaaHoldLastMode: the Settings.xml mode as the hold last knew it
 
+#include "../common/iat_hook.h"  // the game's own user32 imports, observed (vrDisplayObserveWindowCallsInstall)
 #include "../common/log.h"
 
 #include <windows.h>
@@ -56,6 +57,22 @@ void callerText(void* ret, char* out, size_t n) {
     std::snprintf(out, n, "%ls+0x%llX", leaf ? leaf + 1 : path, static_cast<unsigned long long>(off));
 }
 
+// The user32 window calls: a chain of up to four return addresses, the first being the game's caller of the hook (skip 2: this
+// function and the hook).
+void chainText(char* out, size_t n) {
+    void* frames[4] = {};
+    const USHORT got = CaptureStackBackTrace(2, 4, frames, nullptr);
+    out[0] = '\0';
+    size_t used = 0;
+    for (USHORT i = 0; i < got && used + 2 < n; ++i) {
+        char one[80];
+        callerText(frames[i], one, sizeof(one));
+        const int m = std::snprintf(out + used, n - used, "%s%s", used ? " <- " : "", one);
+        if (m < 0) break;
+        used += static_cast<size_t>(m);
+    }
+}
+
 void modeText(char* out, size_t n) {
     bool known = false;
     const int mode = vrSsaaHoldLastMode(&known);
@@ -70,6 +87,8 @@ LONG_PTR g_style = 0;
 LONG g_cw = 0, g_ch = 0;
 
 }  // namespace
+
+void vrDisplayCallerText(void* addr, char* out, size_t n) { callerText(addr, out, n); }
 
 void vrDisplayObserveInstalled(bool setFullscreenState, bool resizeTarget, const char* why) {
     if (setFullscreenState && resizeTarget) {
@@ -147,6 +166,104 @@ void vrDisplayNoteResizeBuffers(const char* api, uint32_t width, uint32_t height
     Log::get().note("vr display: %s %ux%u format %u flags 0x%X from %s -> hr 0x%08lX; %s swap chain; frame %u",
                     api ? api : "ResizeBuffers", width, height, format, flags, where, static_cast<unsigned long>(hr),
                     ours ? "the game's" : "another", vrSsaaGateFrame());
+}
+
+// ---- the user32 window calls (H6): import-table observers ----------------------------------------------------------------------------
+namespace {
+
+IatPatch g_pSetWindowPos, g_pSetWindowLongPtrW, g_pShowWindow, g_pMoveWindow, g_pAdjustWindowRect, g_pAdjustWindowRectEx;
+Cap g_cSetWindowPos, g_cSetWindowLongPtrW, g_cShowWindow, g_cMoveWindow, g_cAdjustWindowRect, g_cAdjustWindowRectEx;
+
+BOOL WINAPI observeSetWindowPos(HWND h, HWND after, int x, int y, int cx, int cy, UINT flags) {
+    const BOOL r = reinterpret_cast<BOOL(WINAPI*)(HWND, HWND, int, int, int, int, UINT)>(g_pSetWindowPos.original)(h, after, x, y, cx, cy, flags);
+    if (capAllow(g_cSetWindowPos, 0)) {
+        char chain[240];
+        chainText(chain, sizeof(chain));
+        Log::get().note("vr window: SetWindowPos(hwnd %p, after %p, at %d,%d size %dx%d, flags 0x%X) -> %d; from %s; frame %u",
+                        static_cast<void*>(h), static_cast<void*>(after), x, y, cx, cy, flags, static_cast<int>(r), chain,
+                        vrSsaaGateFrame());
+    }
+    return r;
+}
+
+LONG_PTR WINAPI observeSetWindowLongPtrW(HWND h, int index, LONG_PTR value) {
+    const LONG_PTR r = reinterpret_cast<LONG_PTR(WINAPI*)(HWND, int, LONG_PTR)>(g_pSetWindowLongPtrW.original)(h, index, value);
+    if (capAllow(g_cSetWindowLongPtrW, 0)) {
+        char chain[240];
+        chainText(chain, sizeof(chain));
+        Log::get().note("vr window: SetWindowLongPtrW(hwnd %p, index %d, value 0x%llX) -> previous 0x%llX; from %s; frame %u",
+                        static_cast<void*>(h), index, static_cast<unsigned long long>(value), static_cast<unsigned long long>(r),
+                        chain, vrSsaaGateFrame());
+    }
+    return r;
+}
+
+BOOL WINAPI observeShowWindow(HWND h, int cmd) {
+    const BOOL r = reinterpret_cast<BOOL(WINAPI*)(HWND, int)>(g_pShowWindow.original)(h, cmd);
+    if (capAllow(g_cShowWindow, 0)) {
+        char chain[240];
+        chainText(chain, sizeof(chain));
+        Log::get().note("vr window: ShowWindow(hwnd %p, cmd %d) -> %d; from %s; frame %u", static_cast<void*>(h), cmd,
+                        static_cast<int>(r), chain, vrSsaaGateFrame());
+    }
+    return r;
+}
+
+BOOL WINAPI observeMoveWindow(HWND h, int x, int y, int w, int hgt, BOOL repaint) {
+    const BOOL r = reinterpret_cast<BOOL(WINAPI*)(HWND, int, int, int, int, BOOL)>(g_pMoveWindow.original)(h, x, y, w, hgt, repaint);
+    if (capAllow(g_cMoveWindow, 0)) {
+        char chain[240];
+        chainText(chain, sizeof(chain));
+        Log::get().note("vr window: MoveWindow(hwnd %p, at %d,%d size %dx%d, repaint %d) -> %d; from %s; frame %u",
+                        static_cast<void*>(h), x, y, w, hgt, static_cast<int>(repaint), static_cast<int>(r), chain,
+                        vrSsaaGateFrame());
+    }
+    return r;
+}
+
+BOOL WINAPI observeAdjustWindowRect(LPRECT rc, DWORD style, BOOL menu) {
+    const BOOL r = reinterpret_cast<BOOL(WINAPI*)(LPRECT, DWORD, BOOL)>(g_pAdjustWindowRect.original)(rc, style, menu);
+    if (capAllow(g_cAdjustWindowRect, 0)) {
+        char chain[240];
+        chainText(chain, sizeof(chain));
+        Log::get().note("vr window: AdjustWindowRect(style 0x%lX, menu %d) -> %d, rect %ld,%ld %ldx%ld; from %s; frame %u",
+                        static_cast<unsigned long>(style), static_cast<int>(menu), static_cast<int>(r), rc ? rc->left : 0,
+                        rc ? rc->top : 0, rc ? rc->right - rc->left : 0, rc ? rc->bottom - rc->top : 0, chain, vrSsaaGateFrame());
+    }
+    return r;
+}
+
+BOOL WINAPI observeAdjustWindowRectEx(LPRECT rc, DWORD style, BOOL menu, DWORD exStyle) {
+    const BOOL r = reinterpret_cast<BOOL(WINAPI*)(LPRECT, DWORD, BOOL, DWORD)>(g_pAdjustWindowRectEx.original)(rc, style, menu, exStyle);
+    if (capAllow(g_cAdjustWindowRectEx, 0)) {
+        char chain[240];
+        chainText(chain, sizeof(chain));
+        Log::get().note("vr window: AdjustWindowRectEx(style 0x%lX, ex 0x%lX, menu %d) -> %d, rect %ld,%ld %ldx%ld; from %s; frame %u",
+                        static_cast<unsigned long>(style), static_cast<unsigned long>(exStyle), static_cast<int>(menu),
+                        static_cast<int>(r), rc ? rc->left : 0, rc ? rc->top : 0, rc ? rc->right - rc->left : 0,
+                        rc ? rc->bottom - rc->top : 0, chain, vrSsaaGateFrame());
+    }
+    return r;
+}
+
+void installWindowObserver(const char* fn, void* replacement, IatPatch* patch) {
+    const bool ok = iatHookInstall("user32.dll", fn, replacement, patch);
+    Log::get().note("vr window: IAT observer on user32 %s: %s", fn,
+                    ok ? "patched (observe only)" : "not imported by the game, or the slot is not ours to take");
+}
+
+}  // namespace
+
+void vrDisplayObserveWindowCallsInstall() {
+    static bool done = false;
+    if (done) return;
+    done = true;
+    installWindowObserver("SetWindowPos", reinterpret_cast<void*>(&observeSetWindowPos), &g_pSetWindowPos);
+    installWindowObserver("SetWindowLongPtrW", reinterpret_cast<void*>(&observeSetWindowLongPtrW), &g_pSetWindowLongPtrW);
+    installWindowObserver("ShowWindow", reinterpret_cast<void*>(&observeShowWindow), &g_pShowWindow);
+    installWindowObserver("MoveWindow", reinterpret_cast<void*>(&observeMoveWindow), &g_pMoveWindow);
+    installWindowObserver("AdjustWindowRect", reinterpret_cast<void*>(&observeAdjustWindowRect), &g_pAdjustWindowRect);
+    installWindowObserver("AdjustWindowRectEx", reinterpret_cast<void*>(&observeAdjustWindowRectEx), &g_pAdjustWindowRectEx);
 }
 
 }  // namespace edvr

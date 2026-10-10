@@ -384,6 +384,7 @@ void setterBeforeImpl(void* self, float x) {
     uintptr_t ctx = 0;
     if (!readGame(reinterpret_cast<const uint8_t*>(self) + kUiSsCtxFromThis, &ctx, sizeof(ctx)) || !ctx) return;
     noteCtx(ctx);
+    vrSsaaHoldNoteContext(ctx);  // the render context the hold re-applies to (H7 / GAP 2)
     g_setterCalls.fetch_add(1, std::memory_order_relaxed);
     float beforeCur = 0.0f;
     vrSsaaGateNoteSetterBefore(readFloatAt(ctx + kUiSsOffCur, &beforeCur) ? beforeCur : NAN);  // log only
@@ -414,7 +415,10 @@ void setterAfterImpl(void* self, float passed) {
 
 void getterNoteImpl(void* self) {
     uintptr_t ctx = 0;
-    if (readGame(reinterpret_cast<const uint8_t*>(self) + kUiSsCtxFromThis, &ctx, sizeof(ctx))) noteCtx(ctx);
+    if (readGame(reinterpret_cast<const uint8_t*>(self) + kUiSsCtxFromThis, &ctx, sizeof(ctx))) {
+        noteCtx(ctx);
+        vrSsaaHoldNoteContext(ctx);
+    }
     g_getterSeen.store(true, std::memory_order_relaxed);
     float cur = 0.0f;  // log only: the first getter read's value (the getter returns ctx+0x3564)
     if (ctx && vrSsaaGateGetterPending() && readFloatAt(ctx + kUiSsOffCur, &cur)) vrSsaaGateNoteGetter(cur);

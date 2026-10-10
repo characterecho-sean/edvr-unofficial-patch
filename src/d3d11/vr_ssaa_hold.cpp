@@ -2,6 +2,7 @@
 #include "vr_ssaa_hold.h"
 
 #include "vr_ssaa_hold_math.h"
+#include "vr_display_observer.h"  // vrDisplayCallerText: the sizing watch's callers
 #include "ui_panel_scale.h"  // uiPanelScaleEarlyHooks: the setter and getter hooks, installed at DLL load
 #include "ui_sizing_math.h"  // kUiPanelStamp, kUiPanelImageSize: build 332841
 
@@ -54,6 +55,20 @@ std::atomic<bool> g_noticedAny{false};
 std::atomic<uint64_t> g_rereadAt{0};       // QPC ticks; 0 when no re-read is pending
 std::atomic<uintptr_t> g_loaderObj{0};
 std::atomic<bool> g_startupSaid{false};
+// The render context the setter was last called on (vrSsaaHoldNoteContext): the field the hold re-applies to on a 0 -> on change.
+std::atomic<uintptr_t> g_ctx{0};
+constexpr uintptr_t kCtxSsOff = 0x3564;  // render context +0x3564: the Supersampling field every sizing consumer reads
+// The sizing watch (H7): for 3 s after a setter call or a mode change, the game's render and depth targets are logged with their callers.
+std::atomic<uint64_t> g_watchUntil{0};   // QPC ticks; 0 when not armed
+std::atomic<int64_t> g_watchArmed{0};    // QPC ticks at arming
+std::atomic<uint8_t> g_watchWhy{0};      // 1 a setter call, 2 a mode change
+std::atomic<uint32_t> g_watchLines{0};
+constexpr uint32_t kWatchLines = 96;
+constexpr double kWatchSeconds = 3.0;
+// The loader's repeated runs (the presets, then Custom): a run logs only when its request or mode changes, and counts the rest.
+std::atomic<uint32_t> g_loaderRuns{0};
+std::atomic<uint32_t> g_loaderLastReq{0};
+std::atomic<int> g_loaderLastMode{-2};
 
 uint32_t bitsOf(float v) {
     uint32_t b = 0;
@@ -77,6 +92,15 @@ int64_t holdTicksPerSecond() {
     LARGE_INTEGER f{};
     QueryPerformanceFrequency(&f);
     return f.QuadPart;
+}
+
+// Arms the sizing watch for kWatchSeconds from now: why is 1 (a setter call) or 2 (a mode change).
+void armWatch(uint8_t why) {
+    const int64_t now = holdTicksNow();
+    g_watchArmed.store(now, std::memory_order_relaxed);
+    g_watchWhy.store(why, std::memory_order_relaxed);
+    g_watchUntil.store(static_cast<uint64_t>(now + static_cast<int64_t>(kWatchSeconds * static_cast<double>(holdTicksPerSecond()))),
+                       std::memory_order_release);
 }
 
 // No destructors in the guarded readers: __try is illegal where unwinding is needed.
@@ -223,10 +247,18 @@ void afterLoader(uintptr_t obj) {
         g_requestedBits.store(bitsOf(requested), std::memory_order_release);
         g_loggedBits.store(bitsOf(requested), std::memory_order_release);
         g_loggedAny.store(true, std::memory_order_release);
-        Log::get().note("vr ssaa gate: holding Supersampling at 1.0 (requested %.4f, 3D mode %d, at startup); loader object "
-                        "0x%llX, field 0x%llX",
-                        static_cast<double>(requested), mode, static_cast<unsigned long long>(obj),
-                        static_cast<unsigned long long>(obj + kSsFieldOff));
+        // The loader runs once per preset and once for Custom: a run logs only when its request or the mode changes, and carries
+        // the run number, so the count of the rest is in the line that follows them.
+        const uint32_t run = g_loaderRuns.fetch_add(1, std::memory_order_relaxed) + 1;
+        const uint32_t bits = bitsOf(requested);
+        if (run == 1 || bits != g_loaderLastReq.load(std::memory_order_relaxed) || mode != g_loaderLastMode.load(std::memory_order_relaxed)) {
+            g_loaderLastReq.store(bits, std::memory_order_relaxed);
+            g_loaderLastMode.store(mode, std::memory_order_relaxed);
+            Log::get().note("vr ssaa gate: holding Supersampling at 1.0 (requested %.4f, 3D mode %d, at startup); loader object "
+                            "0x%llX, field 0x%llX; loader run %u",
+                            static_cast<double>(requested), mode, static_cast<unsigned long long>(obj),
+                            static_cast<unsigned long long>(obj + kSsFieldOff), run);
+        }
     } else {
         g_held.store(false, std::memory_order_release);
         if (!g_startupSaid.exchange(true))
@@ -321,6 +353,7 @@ float vrSsaaHoldSetterValue(float requested) {
     // A setter call asks for a mode re-read: the game rewrites Settings.xml on apply, just after this.
     g_rereadAt.store(static_cast<uint64_t>(holdTicksNow() + static_cast<int64_t>(kRereadSeconds * static_cast<double>(holdTicksPerSecond()))),
                      std::memory_order_release);
+    armWatch(1);  // the sizing watch (H7): the targets created in the next seconds, with their callers
     const bool wasHeld = g_held.exchange(d.hold, std::memory_order_acq_rel);
     const uint32_t bits = bitsOf(requested);
     if (d.hold) {
@@ -357,6 +390,57 @@ void vrSsaaHoldFrameBoundary() {
     if (oldKnown && old != 0 && known && mode == 0 && g_held.load(std::memory_order_acquire))
         Log::get().note("vr ssaa gate: 3D mode is now 0; the held Supersampling stays at 1.0 until the next apply or restart "
                         "(not chased)");
+    armWatch(2);  // the sizing watch (H7): the targets the game makes after a mode change, with their callers
+    // GAP 2: 0 (or unknown) -> on re-holds at once, on the render context the setter last named. The game's apply after the switch
+    // has already passed the setter, so waiting for the next apply would leave the field at the game's value until then.
+    const bool turnedOn = known && mode != 0 && (!oldKnown || old == 0);
+    if (turnedOn && g_holdAllowed.load(std::memory_order_acquire) && !g_held.load(std::memory_order_acquire)) {
+        const uintptr_t ctx = g_ctx.load(std::memory_order_acquire);
+        float cur = 0.0f;
+        if (ctx && readFloatGuarded(ctx + kCtxSsOff, &cur) && writeFloatGuarded(ctx + kCtxSsOff, ssaahold::kHeldValue)) {
+            g_held.store(true, std::memory_order_release);
+            g_requestedBits.store(bitsOf(cur), std::memory_order_release);
+            g_loggedBits.store(bitsOf(cur), std::memory_order_release);
+            g_loggedAny.store(true, std::memory_order_release);
+            Log::get().note("vr ssaa gate: holding Supersampling at 1.0 (requested %.4f, 3D mode %d, at mode change); context "
+                            "0x%llX",
+                            static_cast<double>(cur), mode, static_cast<unsigned long long>(ctx));
+        }
+    }
+}
+
+void vrSsaaHoldNoteContext(uintptr_t ctx) {
+    if (ctx) g_ctx.store(ctx, std::memory_order_release);
+}
+
+void vrSizingWatchTexture(uint32_t w, uint32_t h, uint32_t format, uint32_t bind) {
+    const uint64_t until = g_watchUntil.load(std::memory_order_acquire);
+    if (!until) return;
+    const int64_t now = holdTicksNow();
+    if (static_cast<uint64_t>(now) >= until) {
+        g_watchUntil.store(0, std::memory_order_release);
+        return;
+    }
+    constexpr uint32_t kRenderTarget = 0x20u, kDepthStencil = 0x40u;  // D3D11_BIND_RENDER_TARGET, D3D11_BIND_DEPTH_STENCIL
+    if (!(bind & (kRenderTarget | kDepthStencil))) return;
+    if (g_watchLines.fetch_add(1, std::memory_order_relaxed) >= kWatchLines) return;
+    void* frames[6] = {};
+    const USHORT got = CaptureStackBackTrace(1, 6, frames, nullptr);  // frame 0: the create hook; then the game's callers
+    char chain[400];
+    chain[0] = '\0';
+    size_t used = 0;
+    for (USHORT i = 0; i < got && used + 2 < sizeof(chain); ++i) {
+        char one[96];
+        vrDisplayCallerText(frames[i], one, sizeof(one));
+        const int m = std::snprintf(chain + used, sizeof(chain) - used, "%s%s", used ? " <- " : "", one);
+        if (m < 0) break;
+        used += static_cast<size_t>(m);
+    }
+    const double secs = static_cast<double>(now - g_watchArmed.load(std::memory_order_relaxed)) /
+                        static_cast<double>(holdTicksPerSecond());
+    const char* kind = (bind & kRenderTarget) && (bind & kDepthStencil) ? "render and depth-stencil" : (bind & kRenderTarget) ? "render target" : "depth-stencil";
+    Log::get().note("vr sizing: %s %ux%u format %u bind 0x%X created %.2f s after a %s; callers %s", kind, w, h, format, bind, secs,
+                    g_watchWhy.load(std::memory_order_relaxed) == 1 ? "Supersampling setter call" : "3D mode change", chain);
 }
 
 bool vrSsaaHoldNoticeDue(float* requested) {

@@ -27,4 +27,12 @@ void vrDisplayNoteResizeTarget(uint32_t width, uint32_t height, uint32_t refresh
 void vrDisplayNoteResizeBuffers(const char* api, uint32_t width, uint32_t height, uint32_t format, uint32_t flags, void* ret,
                                 long hr, bool ours);
 
+// An address as text: "game RVA 0x..." inside the game's image, else "<module>+0x...". Shared with the sizing watch.
+void vrDisplayCallerText(void* addr, char* out, size_t n);
+
+// The user32 window calls the game makes (H6, the windowed switch): import-table patches on the game's own imports of SetWindowPos,
+// SetWindowLongPtrW, ShowWindow, MoveWindow, AdjustWindowRect and AdjustWindowRectEx. Observe only: each call goes to the original
+// and returns its result. One line per function says patched or not imported. Called once, from hookSwapChain.
+void vrDisplayObserveWindowCallsInstall();
+
 }  // namespace edvr

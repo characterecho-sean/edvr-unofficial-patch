@@ -5068,7 +5068,7 @@ def vr_supersampling_verdict(f):
 # --vr-supersampling's hold lines: the VR Supersampling hold (src/d3d11/vr_ssaa_hold.cpp; docs/vr-supersampling-gate-2026-10-10.md). The
 # hold keeps the game's Supersampling at 1.0 in VR while the 3D mode is on, so these lines say what was held, when, and whether the
 # menu's notice followed a requested value other than 1.0.
-SSAA_HOLD_RE = re.compile(FLATU_TS + r"vr ssaa gate: holding Supersampling at 1\.0 \(requested (?P<req>-?[0-9.]+), 3D mode (?P<mode>-?\d+), at (?P<at>startup|menu)\)")
+SSAA_HOLD_RE = re.compile(FLATU_TS + r"vr ssaa gate: holding Supersampling at 1\.0 \(requested (?P<req>-?[0-9.]+), 3D mode (?P<mode>-?\d+), at (?P<at>startup|menu|mode change)\)")
 SSAA_MODE_RE = re.compile(FLATU_TS + r"vr ssaa gate: 3D mode (?P<old>\S+) -> (?P<new>\S+) \(Settings\.xml")
 SSAA_NOT_CHASED_RE = re.compile(FLATU_TS + r"vr ssaa gate: 3D mode is now 0; the held Supersampling stays at 1\.0")
 SSAA_NOTICE_RE = re.compile(FLATU_TS + r"vr ssaa gate: notice queued as a toast \(\"Supersampling (?P<x>[0-9.]+) is held at 1\.0 in VR")

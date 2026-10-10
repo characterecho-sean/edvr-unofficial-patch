@@ -2,81 +2,63 @@
 
 ## Status
 
-- **State:** step 2 (the hold) on branch `claude/vr-ssaa-gate`, on top of step 1 (28edab7b). Built, not merged to main. Step 1's flight is in; step 2 has not flown.
-- **Decided goal (maintainer):** while Elite's 3D mode is not 0, the game's Supersampling field (render context +0x3564, read by every sizing and shader consumer) is held at 1.0, so HMD Image Quality is the only render control in VR. Flat (the flat profile) and 3D mode 0 are untouched. No new config key. Never write the user's settings files.
-- **Startup mechanism (chosen):** an .rdata slot swap at DLL attach. Slot RVA 0x52E8368 holds the wrapper RVA 0x2862780, which calls the fxcfg loader RVA 0x2855A50 with the loader object in r8. The thunk calls the original, then writes 1.0 to the object's SS field (+0x13C) when the decision says held. Evidence in the investigation section below.
-- **Menu:** the setter thunk (ui_panel_scale.cpp hookedSetter) passes 1.0 when held and remembers the requested value. The setter hook is installed at DLL attach too, so the hold does not wait for `fix.ui_quality`.
-- **Mode tracking:** Settings.xml at the loader; re-read 1.5 s after each setter call, on the render thread at a frame boundary (one small read). A 3 -> 0 change is logged and not chased: the field stays at 1.0 until the next apply or restart. 0 -> on is held at the next apply.
-- **Panel sizing:** chooseSupersampling takes 1.0 (source `held`) while held, so the factor and the size budget match the field.
-- **Notice:** a toast "Supersampling <x> is held at 1.0 in VR: use HMD Image Quality to set resolution", once per change of a requested value other than 1.0, while held. The measured render-below-eye notice is kept for the cases the hold does not cover (3D mode 0, flat); it cannot fire under the hold.
-- **Finding, not changed:** the flight's setter range is 0 to FLT_MAX, which is the game's own range. The read is right. EDVR's live check (ui_sizing_math.h uiLiveSupersamplingValid) rejects a maximum above 8.0, so the live value has never been believable and the panel factor has always used the .fxcfg value. The hold bypasses that check while held. Fixing the ceiling changes VR panel sizing with 3D off, so it is a separate decision.
+- **State:** steps 1-3 committed on `claude/vr-ssaa-gate` (28edab7b, c5491ab3, cf11d33c), flown in two Frontier sessions on cf11d33c (logs `edvr_gfx_20261010_102911.log`, `..._103029.log`). Step 4 (this commit): the sizing watch (H7), the window IAT observers (H6), GAP 2 fix, startup-line change-only. Not merged.
+- **Goal (decided):** while the 3D mode is not 0, hold the game's Supersampling field at 1.0 so HMD Image Quality is the only VR render control. Flat and 3D mode 0 untouched. No config key. Never write the user's settings files.
+- **Works (flights):** hold installed at DLL load; startup loader hold line (session 2 at 0.85, requested 0.85); menu hold at 0.85 with the toast; re-read saw 3 -> 0 and 0 -> 4; the game saves the menu value to the .fxcfg (0.85), not the held field (H5 answered).
+- **Gap 1, FALSIFIED: "one field covers every consumer".** Session 1, after `holding ... at menu` (10:29:52.278), new depth targets 2227x2153 appeared at 10:29:53.379 (278 and 308 draws). 2227 = trunc(2620 x 0.85). The eye-sized targets stayed 2620x2533 (HMD Quality 0.65 x 4032). The field stayed 1.0, so some consumer sizes from the requested value by another path. H7 names it.
+- **Gap 2, FIXED here:** on a 0 -> on mode change the hold re-applies at once, to the render context the setter last named (`at mode change` line).
+- **Startup loader, UNPROVEN:** session 2's loader ran about 4.4 s after the first Present, and about 12 times (presets, then Custom). So the startup write is not before the first sizing. See H8.
 - **Open hypotheses:**
-  - H1 mode values: 3 = VR (confirmed at startup in the flight). 0 = off is inferred from the menu's 3D off and on passing through the setter; the mode read at that time is not yet in a log.
-  - H2 order: the loader runs before the first Present (the hold log line should precede it; unverified). The first setter call in the flight was frame 6110, when the menu changed.
-  - H3 live 3D mode: still not located (step 1). The hold uses the Settings.xml mode.
-  - H4 object relation: render context = loader object + 0x3428 (so the SS field is ctx+0x3564). Each setter line prints ctx and the loader object; check ctx - object = 0x3428.
-  - H5 file contents: the game may write its own SS value to the .fxcfg from the field. If so, a held session would save 1.0 over the user's value. Check SSAAMultiplier in the .fxcfg after a held apply.
-  - H6 windowed switch (related report: 3D mode Off to HMD drops the monitor window to WINDOWED at 1280x768). Read-only findings: the 1280x768 is a code constant. Game fn RVA 0x8D33F0 asks for the display mode nearest 1280x768 (`mov r9d,0x300` at 0x8D3786, `mov r8d,0x500` at 0x8D378F, call 0x7EE240). Its trigger is unlocated. Whether the game then calls IDXGISwapChain::SetFullscreenState(FALSE) or ResizeTarget is unproven. DisplaySettings.xml holds FullScreen (0 windowed, 1 full, 2 borderless: inferred), ScreenWidth, ScreenHeight. Test: the display observer (below). A SetFullscreenState(FALSE) or ResizeTarget(1280x768) line at the switch, from the game's RVA, confirms the game makes the change; none means the change is made elsewhere (for example at the window).
-- **Ruled out:** a static-address read of the 3D mode (step 1: the gate reads it through virtual calls on heap objects).
-- **Next:** one VR flight on Frontier (the step-2 commit, named in the DLL's FileVersion): (a) start with 3D on and the .fxcfg at Supersampling 0.85: expect `holding ... at startup` before `first Present`; (b) change Supersampling in the menu: expect `holding ... at menu` and the toast; (c) switch 3D off: expect the mode re-read line; (d) read the .fxcfg after the apply (H5). Then `python tools\edvr_log.py --target frontier --expect-build HEAD --vr-supersampling`.
+  - H1 modes: 3 = VR (startup, both sessions). 0 and 4 seen in re-reads. 4 is not identified; the 0 -> 4 switch is the windowed switch in H6. 5 (HMD Cinema) not seen.
+  - H4 REFUTED: render context and loader object are different allocations. Session 1: ctx 0x1728C199820, loader 0x1C110FF1D0. Session 2: ctx 0x...EC860, loader 0x...F610 (the coordinator's abbreviated values). Neither difference is 0x3428. So the loader write does not touch the field the setter reads.
+  - H5 ANSWERED: the game writes the menu's value to the .fxcfg. The held field is not saved.
+  - H6 PARTIAL: at the 0 -> 4 switch (session 1 and 2), window style 0x94020000 at 3840x2160 became 0x14C80000 at 1280x768 (frame 4572), then ResizeBuffers 1280x768 format 28 flags 0x2 from game RVA 0x521CE5. No ResizeTarget. SetFullscreenState(FALSE, null target) from game RVA 0x50B30B about 10-20 s later in both sessions (likely at quit). So the switch is a window restyle plus a buffer resize, not a DXGI fullscreen change. Who restyles is open: the IAT observers (below) test it.
+  - H7 OPEN: which game code sized the 2227 targets. Test: the sizing watch's `vr sizing:` lines (callers as game RVAs) after a menu change.
+  - H8 OPEN: does the startup hold reach ctx+0x3564? Test: the first setter call's `before` value in a flight that changes nothing in the menu before it. 0.85 means no; 1.0 means yes. The copy from loader table to render context is not located.
+  - H9 mode 4: what it is (the menu's 3D mode name for it).
+- **Ruled out:** a static-address read of the 3D mode (step 1: virtual calls on heap objects). H4 (same-object relation), above.
+- **Next flight (VR, Frontier, the step-4 commit):** (a) menu Supersampling change: read `vr sizing:` lines and their callers (H7). (b) 3D Off to HMD: read `vr window:` lines (who restyles, H6) and `vr sizing:` lines. (c) start with the .fxcfg at 0.85, then the first setter call's `before` (H8). Then `python tools\edvr_log.py --target frontier --expect-build HEAD --vr-supersampling`.
 - **Doc rule:** dated entries below; keep this block current.
 
-## 2026-10-10 step-1 flight (edvr_gfx_20261010_092344.log, build 28edab7b)
+## Investigation: the startup mechanism (2026-10-10, read-only)
 
-- Startup at 09:23:44.988: StereoscopicMode=3, file SSAAMultiplier 1.0000, HMDRenderTargetMultiplier 0.5000. First Present 09:23:45.081 (frame 1). Setter calls 0, getter not yet read.
-- The first getter read and the first setter call both came at frame 6110 (09:24:30), when the menu changed Supersampling. So at startup the game sizes from the loader's stored value without calling either hooked function.
-- Setter calls 1 to 4 passed 0.5, 0.85, 1.25, 1.0, with ctx+0x3564 following. Calls 5 to 7 passed 1.0 (HMD Quality 0.65, then 3D off and on). A 12.4 s runtime stall at 09:25:55; the OpenXR session survived.
-- EDVR's "chosen from .fxcfg" lags one change: the game writes the .fxcfg after the setter.
+Frontier exe, build 332841 (PE stamp 1788384820, image 104894464). Byte scans and capstone; no game memory touched.
 
-## The startup mechanism: investigation (read-only, 2026-10-10)
+- The fxcfg loader is RVA 0x2855A50. Its only direct caller is the wrapper RVA 0x2862780 (`sub rsp,28; mov rcx,r8; call loader; mov al,1; add rsp,28; ret`). The wrapper's address is in one place: .rdata slot RVA 0x52E8368. So it is a virtual call.
+- The loader writes a table in its object: SS entry at object+0x13C, min +0x140, max +0x144 (the flight's range 0 to FLT_MAX is the real max).
+- The hold writes the loader object's SS field at DLL-load-time swap (vr_ssaa_hold.cpp). H4 refutes that this object is the render context. So the startup write may not reach the sizing. H8 tests it.
+- Rejected: hooking at device creation (the loader can run after it, as session 2 shows). Patching a sizing instruction mid-function: no safe point identified.
 
-Method: `python -I` over the Frontier exe's bytes (build 332841: PE stamp 1788384820, image 104894464 bytes, both installs); no game memory read or written.
+## Flight evidence (step 1 and step 2)
 
-- The fxcfg loader is RVA 0x2855A50. Its only direct caller is the wrapper RVA 0x2862780: `sub rsp,0x28; mov rcx,r8; call 0x2855A50; mov al,1; add rsp,0x28; ret`.
-- The wrapper's address appears in exactly one place in the image: the .rdata slot at RVA 0x52E8368. So the wrapper is a virtual call, and its caller is some object's method. That caller is not identified in this step.
-- The loader writes a table in its object: 5 entries of 12 bytes from +0x124 (entry 2, the SS entry, at +0x13C). Each entry has a min at +0x140 and a max at +0x144 for the SS entry. The clamp takes min(max, v) with floor min. The flight's range of 0 to FLT_MAX shows max is FLT_MAX by default.
-- The setter's context: ctx = [self+0x18], SS at ctx+0x3564 = ctx+0x3568 min, +0x356C max. The loader's SS field +0x13C is ctx+0x3564 when the object is ctx-0x3428. That relation is the one H4 checks.
-- Timing: DllMain runs before the game's entry point, so an install there precedes every game call. EDVR's graphics init (config, log, module pin) runs at the first device creation export (d3d11_proxy.cpp initOnceCallback). The loader's position relative to that export is not established, so the loader thunk asks for the init itself (edvrGraphicsEnsureInitialised) before it reads the profile.
-- Install gate: the PE stamp and image size, the wrapper's 19 bytes, its call landing on the loader, and the slot holding the wrapper. Any mismatch writes nothing and the device-creation line says why.
-- Not chosen: installing at device creation (hookDevice). The loader may already have run by then, so that hook would be too late. Not relied on.
-- Not chosen: patching a mid-function instruction of the sizing (FUN_14288E3A0 / FUN_14284CB70). No safe point identified; the field is held at its one writer instead, which covers every consumer.
+- Step 1 flight (build 28edab7b, edvr_gfx_20261010_092344.log): startup StereoscopicMode=3, file SSAAMultiplier 1.0, HMDRenderTargetMultiplier 0.5, first Present 09:23:45.081 (frame 1). First getter and setter at frame 6110 (09:24:30), the menu change. Setter calls 1-4 passed 0.5, 0.85, 1.25, 1.0, with ctx+0x3564 following. Calls 5-7 passed 1.0 (3D off and on). A 12.4 s stall at 09:25:55; the OpenXR session survived. EDVR's "chosen from .fxcfg" lagged one change (the game writes the .fxcfg after the setter).
+- Range: the setter's range prints 0 to FLT_MAX, the game's own range. EDVR's live check (ui_sizing_math.h uiLiveSupersamplingValid, hi <= 8) rejects it, so the live value was never believable and the panel factor used the .fxcfg value. Pre-existing, not changed; the hold bypasses it while held.
+- Step 2 flight, session 1 (cf11d33c, 10:29:11): startup hold lines at 10:29:18 (file 1.0, requested 1.0, loader object 0x1C110FF1D0, field 0x1C110FF30C). Menu hold at 10:29:52.278 (requested 0.85), setter call 1 at frame 4426: passed 1.0; ctx 0x1728C199820; before 1.0; after 1.0; range 0 to FLT_MAX; HMD Quality 0.650; panel factor 0.5198; chosen Supersampling 1.0 from held.
+- Step 2 flight, session 2 (10:30:29): first Present 10:30:29.439. Loader hold lines from 10:30:33.818 (file 0.85; requested values 0.67, 0.77, 1.25, 1.0 across presets), loader object 0xED6E2FF610. The loader ran about 4.4 s after the first Present.
 
-## The hold, as built (step 2)
+## The hold, as built
 
-- `src\d3d11\vr_ssaa_hold_math.h` (pure): `parseStereoscopicMode` (0..6, whitespace allowed, else refused), `decide(holdAllowed, modeKnown, mode, requested)` (held only for a VR profile, a known mode and mode != 0), and the toast formatter.
-- `src\d3d11\vr_ssaa_hold.cpp/.h`: DllMain's `vrSsaaHoldEarlyInstall` (pure memory), the loader thunk, `vrSsaaHoldSetterValue`, `vrSsaaHoldFrameBoundary` (the re-read), `vrSsaaHoldNoticeDue`, `vrSsaaHoldReadSettings`, and the shutdown that puts the slot back.
-- `src\d3d11\ui_panel_scale.cpp`: `uiPanelScaleEarlyHooks` (the setter and getter hooks at DLL attach, once), `hookedSetter` passes the hold's value first, `chooseSupersampling` takes kHeld while held.
-- `src\d3d11\d3d11_proxy.cpp`: DllMain's attach calls the early install; `edvrGraphicsEnsureInitialised` wraps the once-only init for the loader thunk.
-- `src\d3d11\menu.cpp`: the held toast.
-- `tools\edvr_log.py --vr-supersampling`: the hold lines (holds, modes, notices, refusals, installed) with their own verdicts; the measured-notice reader is unchanged.
-- `tools\vr_ssaa_hold_test`: the pure decision, the parse, the toast, run by build.bat.
+- `vr_ssaa_hold_math.h` (pure): `parseStereoscopicMode` (0..6), `decide` (held only for a VR profile, a known mode and mode != 0), the toast formatter.
+- `vr_ssaa_hold.cpp/.h`: DllMain install (pure memory; a refused VirtualProtect is recorded and nothing is written); the loader thunk (change-only logging with the run number); `vrSsaaHoldSetterValue` (1.0 while held, arms the re-read and the sizing watch); `vrSsaaHoldFrameBoundary` (the re-read, the mode-change line, the watch, GAP 2's re-hold on the setter's context); the notice gate; `vrSizingWatchTexture` (H7); shutdown restores the slot only when the write lands.
+- `ui_panel_scale.cpp`: the setter and getter hooks at DLL load; the setter's value first; the panel factor takes 1.0 while held; the setter and getter note the render context.
+- `device_hook.cpp`: pass-through hooks on SetFullscreenState (slot 10), ResizeTarget (slot 14), ResizeBuffers (VR, slot 13); the window observers (H6); the texture create notes the sizing watch.
+- `vr_display_observer.cpp/.h`: the notes, caps, caller labels, and the user32 IAT observers.
 
-## Log lines (step 2)
+## Log lines
 
-- `vr ssaa gate: hold installed at DLL load: loader wrapper 0x2862780 (slot 0x52E8368) ...` (at device creation), or `hold refused, nothing written: <why>`.
-- `vr ssaa gate: holding Supersampling at 1.0 (requested <x>, 3D mode <m>, at startup); loader object 0x..., field 0x...`
-- `vr ssaa gate: holding Supersampling at 1.0 (requested <x>, 3D mode <m>, at menu)` (once per change of the requested value).
-- `vr ssaa gate: released: the game's Supersampling <x> passes again (3D mode <m>)`.
-- `vr ssaa gate: 3D mode <a> -> <b> (Settings.xml, re-read 1.5 s after a Supersampling call)`.
-- `vr ssaa gate: 3D mode is now 0; the held Supersampling stays at 1.0 until the next apply or restart (not chased)`.
-- `vr ssaa gate: startup not held (<flat profile|3D mode unknown|3D mode 0>)`.
-- Step 1's lines remain; the setter line now also prints the render context and the loader object.
-
-## Display observer (step 3, H6): log only
-
-- Pass-through vtable hooks (device_hook.cpp, both profiles): IDXGISwapChain::SetFullscreenState (slot 10) and ResizeTarget (slot 14), and ResizeBuffers (slot 13) in the VR profile. Each calls the original first and returns its HRESULT. The flat profile's own ResizeBuffers hook gains one log call and is otherwise unchanged.
-- Lines (vr_display_observer.cpp): the first 64 calls of each, then only a call whose arguments differ from the last logged one, up to 512.
-  - `vr display: SetFullscreenState(<TRUE|FALSE>, target <given|null>) from <game RVA 0x... | module+0x...> -> hr 0x...; <the game's|another> swap chain; frame N; StereoscopicMode <m|unknown>`
-  - `vr display: ResizeTarget <w>x<h> refresh n/d format f scaling s from ... -> hr ...; ...; frame N; StereoscopicMode ...`
-  - `vr display: ResizeBuffers <w>x<h> format f flags 0x... from ... -> hr ...; ...` (also `ResizeBuffers (flat)` in the flat profile)
-  - `vr display: game window at the first frame: style 0x... client WxH, frame N`, then `vr display: game window style 0x... client WxH (was 0x... WxH), frame N` on each change (once per frame boundary, read-only).
-  - Startup, once per swap chain: `vr ssaa gate: display observer installed (SetFullscreenState, ResizeTarget)`, or `vr ssaa gate: display observer not installed: SetFullscreenState <ok|no>, ResizeTarget <ok|no>; <why>`. No such line means the swap-chain hook never ran; the line with no `vr display:` lines means it ran and the game made no such call.
-- Test for H6: the flight with 3D Off to HMD. Expect a `SetFullscreenState(FALSE` or `ResizeTarget 1280x768` line from a game RVA at the switch, and a window style change line. If the window changes with no such line, the change is made outside these calls.
-
-## Hold hardening (step 3)
-
-- writeSlot now returns false when VirtualProtect fails. The loader slot's install then records `hold refused, nothing written: VirtualProtect failed (<GetLastError>)` and leaves the hold off. Shutdown clears its flag only when the restore lands.
+- `vr ssaa gate: hold installed at DLL load: loader wrapper 0x2862780 (slot 0x52E8368) and the Supersampling setter, build 332841 checked`
+- `vr ssaa gate: hold refused, nothing written: VirtualProtect failed (<n>); the game's Supersampling is not held`
+- `vr ssaa gate: holding Supersampling at 1.0 (requested <x>, 3D mode <m>, at startup); loader object 0x..., field 0x...; loader run <n>` (change-only)
+- `vr ssaa gate: holding Supersampling at 1.0 (requested <x>, 3D mode <m>, at menu)`
+- `vr ssaa gate: holding Supersampling at 1.0 (requested <x>, 3D mode <m>, at mode change); context 0x...` (GAP 2)
+- `vr ssaa gate: 3D mode <a> -> <b> (Settings.xml, re-read 1.5 s after a Supersampling call)`
+- `vr ssaa gate: 3D mode is now 0; ...` and `vr ssaa gate: released: ...`
+- `vr sizing: <render target | depth-stencil | render and depth-stencil> <w>x<h> format <f> bind 0x<b> created <s> s after a <Supersampling setter call | 3D mode change>; callers <up to 6 frames: game RVA 0x... or module+0x...>` (cap 96)
+- `vr window: IAT observer on user32 <fn>: patched (observe only) | not imported by the game, or the slot is not ours to take`
+- `vr window: SetWindowPos(...)`, `SetWindowLongPtrW(...)`, `ShowWindow(...)`, `MoveWindow(...)`, `AdjustWindowRect(Ex)(...)`, each with arguments, result, a chain of up to 4 callers, the frame (cap 64 each)
+- `vr display: SetFullscreenState(...)`, `ResizeTarget ...`, `ResizeBuffers ...` (VR and flat), `game window ...` (step 3; unchanged)
+- `vr ssaa gate: display observer installed (SetFullscreenState, ResizeTarget)`
 
 ## Verified in the build
 
-(filled in after the build and the flight; see the commit message)
+(filled in from the build and install output of this commit)

@@ -22,6 +22,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 
 namespace edvr {
 
@@ -56,5 +57,12 @@ unsigned long long vrSsaaHoldLoaderObject();
 
 // The Settings.xml mode as the hold last read it (*known false when unread or unparsed); the display observer's lines carry it.
 int vrSsaaHoldLastMode(bool* known);
+
+// ui_panel_scale.cpp's setter thunks: the render context the setter was called on. The hold re-applies to it on a 0 -> on change.
+void vrSsaaHoldNoteContext(uintptr_t ctx);
+
+// The sizing watch (H7): called from the game's texture creates (device_hook.cpp). For 3 s after a setter call or a mode change, a
+// game render or depth-stencil target is logged with its size, format, bind flags and the callers. One flag test when not armed.
+void vrSizingWatchTexture(uint32_t w, uint32_t h, uint32_t format, uint32_t bind);
 
 }  // namespace edvr
