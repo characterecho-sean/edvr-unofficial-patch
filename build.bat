@@ -255,6 +255,12 @@ REM generated from the same sources the late contract check verifies.
 python "tools\check_config_contract.py" --self-test || exit /b 1
 python "tools\check_config_contract.py" --quiet --emit "%GEN%\config_contract_gen.h"
 if errorlevel 1 ( echo [edvr] ERROR: contract header generation failed & exit /b 1 )
+python "tools\plugin_catalog.py" --self-test || exit /b 1
+python "tools\plugin_selection.py" --self-test || exit /b 1
+python "tools\draw_ladder_replay.py" --self-test || exit /b 1
+python "tools\plugin_catalog.py" --emit-cpp "%GEN%\plugin_manifest.inc" --dry-run || exit /b 1
+python "tools\plugin_catalog.py" --emit-cpp "%GEN%\plugin_manifest.inc"
+if errorlevel 1 ( echo [edvr] ERROR: plugin catalog validation or generation failed & exit /b 1 )
 
 echo [edvr] === precompiled temporal shaders ===
 REM Fixed HLSL belongs in the build: compiling it in the first Present delayed
@@ -283,6 +289,121 @@ REM build if either DLL imports the compiler again.
 "%OBJ%\temporalshader\temporal_shader_build.exe" --self-test || exit /b 1
 "%OBJ%\temporalshader\temporal_shader_build.exe" --output "%GEN%\temporal_shader_bytecode.h" --stereo-output "%GEN%\openxr_stereo_shader_bytecode.h" --dry-run || exit /b 1
 "%OBJ%\temporalshader\temporal_shader_build.exe" --output "%GEN%\temporal_shader_bytecode.h" --stereo-output "%GEN%\openxr_stereo_shader_bytecode.h" || exit /b 1
+
+python "tools\check_plugin_boundaries.py" --self-test || exit /b 1
+python "tools\check_plugin_boundaries.py" --quiet --require-plugin cockpit_visuals ^
+    --require-source src\plugins\cockpit_visuals\night_vision.cpp ^
+    --require-plugin intro --require-source src\plugins\intro\intro_skip.cpp ^
+    --require-source src\plugins\intro\intro_upscale.cpp ^
+    --require-source src\plugins\intro\intro_lifecycle.cpp ^
+    --require-source src\plugins\intro\intro_panel.cpp ^
+    --require-source src\plugins\intro\intro_curve.cpp ^
+    --require-source src\plugins\intro\backdrop_fix.cpp ^
+    --require-source src\plugins\intro\loader_panel.cpp ^
+    --require-source src\plugins\intro\splash_dim.cpp ^
+    --require-plugin on_foot_panel --require-source src\plugins\on_foot_panel\weapon_motion.cpp ^
+    --require-plugin scanners --require-source src\plugins\scanners\fss_heal.cpp ^
+    --require-source src\plugins\scanners\fss_panel.cpp ^
+    --require-source src\plugins\scanners\fss_reveal.cpp ^
+    --require-plugin comfort --require-source src\plugins\comfort\transition_flash_eye_base.cpp ^
+    --require-source src\plugins\comfort\explorer_cam.cpp ^
+    --require-plugin temporal_aa --require-source src\plugins\temporal_aa\sharpen_pass.cpp ^
+    --require-plugin diagnostics --require-source src\plugins\diagnostics\pixel_probe.cpp ^
+    --require-plugin exposure --require-source src\plugins\exposure\exposure_shape.cpp ^
+    --require-source src\plugins\exposure\exposure_dispatch.cpp ^
+    --require-source src\plugins\exposure\exposure_actions.cpp ^
+    --require-source src\plugins\exposure\exposure_lifecycle.cpp ^
+    --include-dir "%GEN%" || exit /b 1
+
+if not exist "%OBJ%\plugins\cockpit_visuals" mkdir "%OBJ%\plugins\cockpit_visuals"
+del /q "%OBJ%\plugins\cockpit_visuals\*.obj" 2>nul
+cl.exe %CFLAGS% /Fo"%OBJ%\plugins\cockpit_visuals\\" ^
+    "src\plugins\cockpit_visuals\night_vision.cpp"
+if errorlevel 1 ( echo [edvr] ERROR: cockpit visuals plugin compile failed & exit /b 1 )
+lib.exe /nologo /OUT:"%OBJ%\plugins\cockpit_visuals\plugin_cockpit_visuals.lib" ^
+    "%OBJ%\plugins\cockpit_visuals\night_vision.obj"
+if errorlevel 1 ( echo [edvr] ERROR: cockpit visuals plugin library failed & exit /b 1 )
+
+if not exist "%OBJ%\plugins\on_foot_panel" mkdir "%OBJ%\plugins\on_foot_panel"
+del /q "%OBJ%\plugins\on_foot_panel\*.obj" 2>nul
+cl.exe %CFLAGS% /Fo"%OBJ%\plugins\on_foot_panel\\" ^
+    "src\plugins\on_foot_panel\weapon_motion.cpp"
+if errorlevel 1 ( echo [edvr] ERROR: on-foot-panel plugin compile failed & exit /b 1 )
+lib.exe /nologo /OUT:"%OBJ%\plugins\on_foot_panel\plugin_on_foot_panel.lib" ^
+    "%OBJ%\plugins\on_foot_panel\weapon_motion.obj"
+if errorlevel 1 ( echo [edvr] ERROR: on-foot-panel plugin library failed & exit /b 1 )
+
+if not exist "%OBJ%\plugins\scanners" mkdir "%OBJ%\plugins\scanners"
+del /q "%OBJ%\plugins\scanners\*.obj" 2>nul
+cl.exe %CFLAGS% /Fo"%OBJ%\plugins\scanners\\" ^
+    "src\plugins\scanners\fss_heal.cpp" ^
+    "src\plugins\scanners\fss_panel.cpp" "src\plugins\scanners\fss_reveal.cpp"
+if errorlevel 1 ( echo [edvr] ERROR: scanners plugin compile failed & exit /b 1 )
+lib.exe /nologo /OUT:"%OBJ%\plugins\scanners\plugin_scanners.lib" ^
+    "%OBJ%\plugins\scanners\fss_heal.obj" ^
+    "%OBJ%\plugins\scanners\fss_panel.obj" "%OBJ%\plugins\scanners\fss_reveal.obj"
+if errorlevel 1 ( echo [edvr] ERROR: scanners plugin library failed & exit /b 1 )
+
+if not exist "%OBJ%\plugins\comfort" mkdir "%OBJ%\plugins\comfort"
+del /q "%OBJ%\plugins\comfort\*.obj" 2>nul
+cl.exe %CFLAGS% /Fo"%OBJ%\plugins\comfort\\" ^
+    "src\plugins\comfort\transition_flash_eye_base.cpp" ^
+    "src\plugins\comfort\explorer_cam.cpp"
+if errorlevel 1 ( echo [edvr] ERROR: comfort plugin compile failed & exit /b 1 )
+lib.exe /nologo /OUT:"%OBJ%\plugins\comfort\plugin_comfort.lib" ^
+    "%OBJ%\plugins\comfort\transition_flash_eye_base.obj" ^
+    "%OBJ%\plugins\comfort\explorer_cam.obj"
+if errorlevel 1 ( echo [edvr] ERROR: comfort plugin library failed & exit /b 1 )
+
+if not exist "%OBJ%\plugins\temporal_aa" mkdir "%OBJ%\plugins\temporal_aa"
+del /q "%OBJ%\plugins\temporal_aa\*.obj" 2>nul
+cl.exe %CFLAGS% /Fo"%OBJ%\plugins\temporal_aa\\" ^
+    "src\plugins\temporal_aa\sharpen_pass.cpp"
+if errorlevel 1 ( echo [edvr] ERROR: temporal-aa plugin compile failed & exit /b 1 )
+lib.exe /nologo /OUT:"%OBJ%\plugins\temporal_aa\plugin_temporal_aa.lib" ^
+    "%OBJ%\plugins\temporal_aa\sharpen_pass.obj"
+if errorlevel 1 ( echo [edvr] ERROR: temporal-aa plugin library failed & exit /b 1 )
+
+if not exist "%OBJ%\plugins\diagnostics" mkdir "%OBJ%\plugins\diagnostics"
+del /q "%OBJ%\plugins\diagnostics\*.obj" 2>nul
+cl.exe %CFLAGS% /Fo"%OBJ%\plugins\diagnostics\\" ^
+    "src\plugins\diagnostics\pixel_probe.cpp"
+if errorlevel 1 ( echo [edvr] ERROR: diagnostics plugin compile failed & exit /b 1 )
+lib.exe /nologo /OUT:"%OBJ%\plugins\diagnostics\plugin_diagnostics.lib" ^
+    "%OBJ%\plugins\diagnostics\pixel_probe.obj"
+if errorlevel 1 ( echo [edvr] ERROR: diagnostics plugin library failed & exit /b 1 )
+
+if not exist "%OBJ%\plugins\intro" mkdir "%OBJ%\plugins\intro"
+del /q "%OBJ%\plugins\intro\*.obj" 2>nul
+cl.exe %CFLAGS% /Fo"%OBJ%\plugins\intro\\" ^
+    "src\plugins\intro\intro_skip.cpp" "src\plugins\intro\intro_upscale.cpp" ^
+    "src\plugins\intro\intro_lifecycle.cpp" ^
+    "src\plugins\intro\intro_panel.cpp" ^
+    "src\plugins\intro\intro_curve.cpp" ^
+    "src\plugins\intro\backdrop_fix.cpp" ^
+    "src\plugins\intro\loader_panel.cpp" ^
+    "src\plugins\intro\splash_dim.cpp"
+if errorlevel 1 ( echo [edvr] ERROR: intro plugin compile failed & exit /b 1 )
+lib.exe /nologo /OUT:"%OBJ%\plugins\intro\plugin_intro.lib" ^
+    "%OBJ%\plugins\intro\intro_skip.obj" "%OBJ%\plugins\intro\intro_upscale.obj" ^
+    "%OBJ%\plugins\intro\intro_lifecycle.obj" ^
+    "%OBJ%\plugins\intro\intro_panel.obj" ^
+    "%OBJ%\plugins\intro\intro_curve.obj" ^
+    "%OBJ%\plugins\intro\backdrop_fix.obj" ^
+    "%OBJ%\plugins\intro\loader_panel.obj" ^
+    "%OBJ%\plugins\intro\splash_dim.obj"
+if errorlevel 1 ( echo [edvr] ERROR: intro plugin library failed & exit /b 1 )
+
+if not exist "%OBJ%\plugins\exposure" mkdir "%OBJ%\plugins\exposure"
+del /q "%OBJ%\plugins\exposure\*.obj" 2>nul
+cl.exe %CFLAGS% /Fo"%OBJ%\plugins\exposure\\" ^
+    "src\plugins\exposure\exposure_shape.cpp" "src\plugins\exposure\exposure_dispatch.cpp" ^
+    "src\plugins\exposure\exposure_actions.cpp" "src\plugins\exposure\exposure_lifecycle.cpp"
+if errorlevel 1 ( echo [edvr] ERROR: exposure plugin compile failed & exit /b 1 )
+lib.exe /nologo /OUT:"%OBJ%\plugins\exposure\plugin_exposure.lib" ^
+    "%OBJ%\plugins\exposure\exposure_shape.obj" "%OBJ%\plugins\exposure\exposure_dispatch.obj" ^
+    "%OBJ%\plugins\exposure\exposure_actions.obj" "%OBJ%\plugins\exposure\exposure_lifecycle.obj"
+if errorlevel 1 ( echo [edvr] ERROR: exposure plugin library failed & exit /b 1 )
 
 echo [edvr] === d3d11.dll ===
 REM The settings schema -- the installer's window AND the in-headset menu's
@@ -524,17 +645,14 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\format_support_log.cpp" ^
     "src\d3d11\graphics_bridge.cpp" ^
     "src\d3d11\render_boundary.cpp" ^
-    "src\d3d11\exposure_fix.cpp" "src\d3d11\vscreen.cpp" ^
+    "src\d3d11\exposure_fix.cpp" "src\d3d11\shader_registry.cpp" "src\d3d11\vscreen.cpp" "src\d3d11\plugin_registry.cpp" "src\d3d11\plugin_cost.cpp" ^
     "src\d3d11\glitch_frame.cpp" ^
-    "src\d3d11\transition_flash_eye_base.cpp" ^
-    "src\d3d11\explorer_cam.cpp" ^
     "src\d3d11\vscreen_res.cpp" "src\common\vscreen_auto_state.cpp" "src\d3d11\vscreen_footprint.cpp" ^
     "src\d3d11\binding_shadow.cpp" ^
     "src\d3d11\vr_runtime.cpp" ^
     "src\d3d11\journal_watch.cpp" "src\d3d11\terrain_checkerboard.cpp" ^
-    "src\d3d11\elite_binds.cpp" "src\d3d11\draw_census.cpp" ^
+    "src\d3d11\elite_binds.cpp" "src\d3d11\draw_census.cpp" "src\d3d11\draw_ladder_trace.cpp" ^
     "src\d3d11\object_probe.cpp" ^
-    "src\d3d11\pixel_probe.cpp" ^
     "src\d3d11\object_record_writer_probe.cpp" "src\d3d11\object_record_writer_hook.cpp" ^
     "src\d3d11\kinematic_eval_probe.cpp" "src\d3d11\kinematic_eval_hook.cpp" ^
     "src\d3d11\scheduler_stack_probe.cpp" "src\d3d11\scheduler_stack_hook.cpp" ^
@@ -542,35 +660,25 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\engine_velocity.cpp" "src\d3d11\skin_join_gpu.cpp" "src\d3d11\skin_entity_hook.cpp" ^
     "src\d3d11\celestial_motion.cpp" ^
     "src\d3d11\fss_res.cpp" ^
-    "src\d3d11\fss_panel.cpp" ^
-    "src\d3d11\fss_reveal.cpp" ^
-    "src\d3d11\fss_heal.cpp" ^
     "src\d3d11\vertex_resync_hook.cpp" ^
     "src\d3d11\xinput_watch.cpp" ^
     "src\d3d11\fss_panel_rect.cpp" ^
-    "src\d3d11\panel_curve.cpp" "src\d3d11\screen_motion.cpp" "src\d3d11\weapon_motion.cpp" ^
+    "src\d3d11\panel_curve.cpp" "src\d3d11\screen_motion.cpp" ^
     "src\d3d11\remlok_fix.cpp" "src\d3d11\holo_fix.cpp" ^
-    "src\d3d11\target_sharp.cpp" "src\d3d11\night_vision.cpp" ^
+    "src\d3d11\target_sharp.cpp" ^
     "src\d3d11\wake_pulse.cpp" ^
     "src\d3d11\ui_depth.cpp" ^
     "src\d3d11\ui_layer.cpp" "src\d3d11\ui_surfaces.cpp" "src\d3d11\ui_panel_scale.cpp" "src\d3d11\orbital_width.cpp" "src\d3d11\supercruise_bars.cpp" ^
     "third_party\dxbc_hash\DxilHash.cpp" ^
-    "src\d3d11\backdrop_fix.cpp" ^
     "src\d3d11\scrim_fix.cpp" ^
     "src\d3d11\quad_probe.cpp" ^
-    "src\d3d11\intro_panel.cpp" ^
-    "src\d3d11\intro_curve.cpp" ^
-    "src\d3d11\intro_skip.cpp" ^
-    "src\d3d11\intro_upscale.cpp" ^
     "src\d3d11\temporal_pass.cpp" ^
     "src\d3d11\depth_probe.cpp" ^
     "src\d3d11\luma_probe.cpp" ^
     "src\d3d11\dlaa.cpp" ^
+    "src\d3d11\dlss_runtime_info.cpp" ^
     "src\d3d11\fsr3_engine.cpp" ^
-    "src\d3d11\sharpen_pass.cpp" ^
     "src\d3d11\flat_sharpen.cpp" "src\d3d11\flat_ui_layer.cpp" ^
-    "src\d3d11\loader_panel.cpp" ^
-    "src\d3d11\splash_dim.cpp" ^
     "src\d3d11\billboard_fix.cpp" ^
     "src\d3d11\particle_fix.cpp" "src\d3d11\shader_swap.cpp" "src\d3d11\sunglare_fix.cpp"
 if errorlevel 1 ( echo [edvr] ERROR: compile failed & exit /b 1 )
@@ -599,7 +707,12 @@ if errorlevel 1 ( echo [edvr] ERROR: rc.exe failed on the runtime version resour
 
 link.exe /nologo /DLL /MACHINE:X64 /INCREMENTAL:NO %EDVR_CPU_LINK% /PDB:"%BUILD%\d3d11.pdb" ^
     /DEF:"%GEN%\edvr_d3d11.def" /OUT:"%BUILD%\d3d11.dll" ^
-    "%OBJ%\d3d11\*.obj" "%OBJ%\d3d11\dxbc_notice.res" "%OBJ%\d3d11\version.res" kernel32.lib user32.lib gdi32.lib version.lib d3dcompiler.lib %NGXLIB% %FSRLIB%
+    "%OBJ%\d3d11\*.obj" "%OBJ%\plugins\cockpit_visuals\plugin_cockpit_visuals.lib" ^
+    "%OBJ%\plugins\intro\plugin_intro.lib" "%OBJ%\plugins\exposure\plugin_exposure.lib" ^
+    "%OBJ%\plugins\on_foot_panel\plugin_on_foot_panel.lib" ^
+    "%OBJ%\plugins\scanners\plugin_scanners.lib" "%OBJ%\plugins\comfort\plugin_comfort.lib" ^
+    "%OBJ%\plugins\temporal_aa\plugin_temporal_aa.lib" "%OBJ%\plugins\diagnostics\plugin_diagnostics.lib" ^
+    "%OBJ%\d3d11\dxbc_notice.res" "%OBJ%\d3d11\version.res" kernel32.lib user32.lib gdi32.lib version.lib d3dcompiler.lib %NGXLIB% %FSRLIB%
 if errorlevel 1 ( echo [edvr] ERROR: link failed & exit /b 1 )
 
 echo [edvr] built %BUILD%\d3d11.dll
@@ -701,7 +814,7 @@ set "RUN_JOBS_ARGS="
 if defined EDVR_JOBS set "RUN_JOBS_ARGS=--jobs %EDVR_JOBS%"
 python tools\run_jobs.py --self-test || exit /b 1
 python tools\run_jobs.py --script "%ROOT%\build.bat" --times "%BUILD%\rig_times.json" ^
-    --exe-dir "%BUILD%" --quiet native_timing_test,gpu_timing_test,gpu_census_test,vtable_test,stall_sampler_test ^
+    --exe-dir "%BUILD%" --quiet native_timing_test,gpu_timing_test,gpu_census_test,vtable_test,stall_sampler_test,draw_ladder_test,draw_selector_cost_test ^
     --after openxr_module_test=openxr_exports_test ^
     %RUN_JOBS_ARGS% || exit /b 1
 
@@ -843,10 +956,11 @@ REM The object-wrapping collision (issue #6), without needing ReShade. These
 REM cells were written against the copy-and-swap-vptr mechanism and FAILED on
 REM it, which is the only reason to believe them now.
 if not exist "%OBJ%\vtabletest" mkdir "%OBJ%\vtabletest"
-cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\vtabletest"\ ^
     /DEDVR_VTABLE_TEST /Fe"%BUILD%\vtable_test.exe" "tools\vtable_test\vtable_test.cpp" ^
-    "src\d3d11\shader_swap.cpp" "src\common\vtable_hook.cpp" "src\common\code_hook.cpp" "src\common\guard.cpp" ^
+    "src\d3d11\shader_swap.cpp" "src\d3d11\plugin_cost.cpp" ^
+    "src\common\vtable_hook.cpp" "src\common\code_hook.cpp" "src\common\guard.cpp" ^
     "src\common\log.cpp" "src\common\config.cpp" ^
     "src\common\proxy.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib version.lib
@@ -869,7 +983,7 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     "src\openxr\eye_capture.cpp" "src\openxr\shared_texture_transfer.cpp" "src\openxr\producer_gpu_timing.cpp" ^
     "src\d3d11\input_gate.cpp" "src\d3d11\joy_watch.cpp" "src\d3d11\menu_panel.cpp" ^
     "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
-    "src\d3d11\menu_keys.cpp" "src\d3d11\shader_swap.cpp" ^
+    "src\d3d11\menu_keys.cpp" "src\d3d11\shader_swap.cpp" "src\d3d11\plugin_cost.cpp" ^
     "src\common\iat_hook.cpp" "src\common\iniedit.cpp" ^
     "src\common\vtable_hook.cpp" "src\common\code_hook.cpp" "src\common\hotkey.cpp" ^
     "src\common\config.cpp" "src\common\log.cpp" ^
@@ -913,7 +1027,7 @@ echo [edvr] === native_fss_gpu_test.exe ===
 if not exist "%OBJ%\native_fss_gpu" mkdir "%OBJ%\native_fss_gpu"
 cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\native_fss_gpu\\" /Fe"%BUILD%\native_fss_gpu_test.exe" ^
-    "tools\native_fss_test\native_fss_gpu_test.cpp" "src\d3d11\native_fss.cpp" "src\d3d11\fss_heal.cpp" ^
+    "tools\native_fss_test\native_fss_gpu_test.cpp" "src\d3d11\native_fss.cpp" "src\plugins\scanners\fss_heal.cpp" ^
     "src\common\config.cpp" "src\common\frame_flag.cpp" "src\common\log.cpp" "src\common\guard.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib dxgi.lib d3dcompiler.lib
 if errorlevel 1 ( echo [edvr] ERROR: native FSS shader test build failed & exit /b 1 )
@@ -972,7 +1086,7 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /I"third_party\openxr\include" ^
     /Fo"%OBJ%\native_temporal\\" /Fe"%BUILD%\native_temporal_test.exe" ^
     "tools\native_temporal_test\native_temporal_test.cpp" "src\d3d11\native_temporal.cpp" ^
-    "src\d3d11\glitch_frame.cpp" "src\d3d11\vr_runtime.cpp" "src\d3d11\transition_flash_eye_base.cpp" ^
+    "src\d3d11\glitch_frame.cpp" "src\d3d11\vr_runtime.cpp" "src\plugins\comfort\transition_flash_eye_base.cpp" ^
     "src\common\code_hook.cpp" "src\common\guard.cpp" ^
     "src\common\config.cpp" "src\common\frame_flag.cpp" "src\common\log.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib dxgi.lib
@@ -1036,7 +1150,7 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /I"%GEN%" ^
     /Fo"%OBJ%\flat_sharpen_pass_test\\" /Fe"%BUILD%\flat_sharpen_pass_test.exe" ^
     "tools\flat_sharpen_test\flat_sharpen_pass_test.cpp" "src\d3d11\flat_sharpen.cpp" ^
-    "src\d3d11\sharpen_pass.cpp" "src\d3d11\shader_swap.cpp" ^
+    "src\plugins\temporal_aa\sharpen_pass.cpp" "src\d3d11\shader_swap.cpp" "src\d3d11\plugin_cost.cpp" ^
     "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
     "src\common\config.cpp" "src\common\log.cpp" "src\common\guard.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib dxgi.lib
@@ -1327,7 +1441,7 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /utf-8 ^
     /DEDVR_ENGINE_VELOCITY_RIG /DEDVR_BINDING_SHADOW_EXTERNAL /I"%GEN%" /I"src\d3d11" ^
     /Fo"%OBJ%\skinengine"\ /Fe"%OBJ%\skinengine\skin_engine_test.exe" ^
-    "tools\skin_engine_test\skin_engine_test.cpp" "src\d3d11\engine_velocity.cpp" "src\d3d11\skin_join_gpu.cpp" ^
+    "tools\skin_engine_test\skin_engine_test.cpp" "src\d3d11\engine_velocity.cpp" "src\d3d11\skin_join_gpu.cpp" "src\d3d11\plugin_cost.cpp" ^
     "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
     /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib dxguid.lib
 if errorlevel 1 ( echo [edvr] ERROR: skin_engine_test build failed & exit /b 1 )
@@ -1385,7 +1499,7 @@ exit /b 0
 :rig_flat_temporal_test
 echo [edvr] === flat_temporal_test.exe ===
 if not exist "%OBJ%\flattemporaltest" mkdir "%OBJ%\flattemporaltest"
-cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\flattemporaltest"\ ^
     /Fe"%BUILD%\flat_temporal_test.exe" "tools\flat_temporal_test\flat_temporal_test.cpp" ^
     "third_party\dxbc_hash\DxilHash.cpp" ^
@@ -1408,7 +1522,7 @@ REM holds the mutation list of this rig, of vr_world_route_gpu_test and of ui_la
 REM --run (on demand) builds each rig against one edited production file and requires a check that names the edit to fail. Its wiring rig
 REM (--run --rig wiring) proves the surface strip's wiring pins (:rig_ui_quality_test, --wiring) on edited copies of vscreen.cpp, in seconds.
 if not exist "%OBJ%\vrworldroutetest" mkdir "%OBJ%\vrworldroutetest"
-cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\vrworldroutetest"\ ^
     /Fe"%BUILD%\vr_world_route_test.exe" "tools\vr_world_route_test\vr_world_route_test.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib
@@ -1428,7 +1542,7 @@ if not exist "%OBJ%\vrworldroutegpu" mkdir "%OBJ%\vrworldroutegpu"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /I"%GEN%" /Fo"%OBJ%\vrworldroutegpu\\" ^
     /Fe"%BUILD%\vr_world_route_gpu_test.exe" "tools\vr_world_route_gpu_test\vr_world_route_gpu_test.cpp" ^
-    "src\d3d11\vr_world_route.cpp" "src\d3d11\binding_shadow.cpp" "src\d3d11\flat_mono_resolve.cpp" ^
+    "src\d3d11\vr_world_route.cpp" "src\d3d11\binding_shadow.cpp" "src\d3d11\plugin_cost.cpp" "src\d3d11\flat_mono_resolve.cpp" ^
     "src\d3d11\flat_projection_scope.cpp" "src\d3d11\flat_projection_runtime.cpp" ^
     "src\common\config.cpp" "src\common\proxy.cpp" "src\common\guard.cpp" ^
     /link /INCREMENTAL:NO dxgi.lib d3dcompiler.lib user32.lib version.lib
@@ -1525,7 +1639,7 @@ REM source scans that hold "key off = nothing" and "the detour never writes a ca
 REM root), plus tools\camera_census_fixture.log held to exactly what the formatters write -- the file that
 REM edvr_log.py --camera-census's own self-test reads.
 if not exist "%OBJ%\vrcamcensus" mkdir "%OBJ%\vrcamcensus"
-cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\vrcamcensus\\" ^
     /Fe"%BUILD%\vr_camera_census_test.exe" "tools\vr_camera_census_test\vr_camera_census_test.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib
@@ -1649,6 +1763,832 @@ if errorlevel 1 ( echo [edvr] ERROR: gate_test build failed & exit /b 1 )
     echo [edvr] ERROR: gate_test failed: the journal watcher, timing, periodic work or logged-note checks
     exit /b 1
 )
+exit /b 0
+
+:rig_plugin_dispatch_test
+echo [edvr] === plugin_dispatch_test.exe ===
+if not exist "%OBJ%\plugindispatch" mkdir "%OBJ%\plugindispatch"
+cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\plugindispatch\\" ^
+    /Fe"%BUILD%\plugin_dispatch_test.exe" "tools\plugin_dispatch_test\plugin_dispatch_test.cpp" ^
+    "src\d3d11\plugin_registry.cpp" "src\d3d11\binding_shadow.cpp" "src\d3d11\plugin_cost.cpp" "src\common\guard.cpp" ^
+    "src\plugins\exposure\exposure_actions.cpp" "src\plugins\exposure\exposure_dispatch.cpp" ^
+    "src\plugins\exposure\exposure_lifecycle.cpp" ^
+    /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: plugin dispatch rig build failed & exit /b 1 )
+"%BUILD%\plugin_dispatch_test.exe" --self-test || (
+    echo [edvr] ERROR: plugin dispatch verdict replay failed
+    exit /b 1
+)
+exit /b 0
+
+:rig_intro_lifecycle_test
+echo [edvr] === intro_lifecycle_test.exe ===
+python "tools\intro_lifecycle_test\source_order_test.py" --dry-run || exit /b 1
+python "tools\intro_lifecycle_test\source_order_test.py" --self-test || exit /b 1
+if not exist "%OBJ%\introlifecycle" mkdir "%OBJ%\introlifecycle"
+cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\introlifecycle\\" ^
+    /Fe"%BUILD%\intro_lifecycle_test.exe" "tools\intro_lifecycle_test\intro_lifecycle_test.cpp" ^
+    "src\plugins\intro\intro_lifecycle.cpp" /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: intro lifecycle rig build failed & exit /b 1 )
+"%BUILD%\intro_lifecycle_test.exe" --dry-run || exit /b 1
+"%BUILD%\intro_lifecycle_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_draw_selector_cost_test
+if "%EDVR_RIG_STEP%"=="run" goto draw_selector_cost_test_run
+echo [edvr] === draw_selector_cost_test.exe ===
+if not exist "%OBJ%\drawselectorcost" mkdir "%OBJ%\drawselectorcost"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /I"%GEN%" /Fo"%OBJ%\drawselectorcost"\ /Fe"%BUILD%\draw_selector_cost_test.exe" ^
+    "tools\draw_selector_cost_test\draw_selector_cost_test.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: draw_selector_cost_test build failed & exit /b 1 )
+if "%EDVR_RIG_STEP%"=="build" exit /b 0
+:draw_selector_cost_test_run
+"%BUILD%\draw_selector_cost_test.exe" --dry-run || exit /b 1
+"%BUILD%\draw_selector_cost_test.exe" --self-test || exit /b 1
+"%BUILD%\draw_selector_cost_test.exe" || exit /b 1
+exit /b 0
+
+:rig_plugin_cost_test
+echo [edvr] === plugin_cost_test.exe ===
+if not exist "%OBJ%\plugincost" mkdir "%OBJ%\plugincost"
+cl.exe /nologo /TC /std:c11 /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /c ^
+    "tools\plugin_cost_test\plugin_cost_header_c_smoke.c" ^
+    /Fo"%OBJ%\plugincost\plugin_cost_header_c_smoke.obj"
+if errorlevel 1 ( echo [edvr] ERROR: plugin cost C header smoke failed & exit /b 1 )
+cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\plugincost\\" ^
+    /Fe"%BUILD%\plugin_cost_test.exe" "tools\plugin_cost_test\plugin_cost_test.cpp" ^
+    "src\d3d11\plugin_cost.cpp" /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: plugin cost test build failed & exit /b 1 )
+"%BUILD%\plugin_cost_test.exe" --dry-run || exit /b 1
+"%BUILD%\plugin_cost_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_exposure_cost_test
+echo [edvr] === exposure_cost_test.exe ===
+if not exist "%OBJ%\exposurecost" mkdir "%OBJ%\exposurecost"
+cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 /Gy ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\exposurecost\\" /Fe"%BUILD%\exposure_cost_test.exe" ^
+    "tools\exposure_cost_test\exposure_cost_test.cpp" "src\d3d11\plugin_cost.cpp" ^
+    /link /INCREMENTAL:NO /OPT:REF
+if errorlevel 1 ( echo [edvr] ERROR: exposure cost test build failed & exit /b 1 )
+"%BUILD%\exposure_cost_test.exe" --dry-run || exit /b 1
+"%BUILD%\exposure_cost_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_exposure_dispatch_test
+echo [edvr] === exposure_dispatch_test.exe ===
+python "tools\exposure_dispatch_test\source_order_test.py" --dry-run || exit /b 1
+python "tools\exposure_dispatch_test\source_order_test.py" --self-test || exit /b 1
+if not exist "%OBJ%\exposuredispatch" mkdir "%OBJ%\exposuredispatch"
+cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\exposuredispatch\\" /Fe"%BUILD%\exposure_dispatch_test.exe" ^
+    "tools\exposure_dispatch_test\exposure_dispatch_test.cpp" ^
+    "src\plugins\exposure\exposure_dispatch.cpp" /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: exposure dispatch test build failed & exit /b 1 )
+"%BUILD%\exposure_dispatch_test.exe" --dry-run || exit /b 1
+"%BUILD%\exposure_dispatch_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_witchspace_stars_test
+echo [edvr] === witchspace_stars_test.exe ===
+if not exist "%OBJ%\witchspacestars" mkdir "%OBJ%\witchspacestars"
+cl.exe /I"%GEN%" /I"%ROOT%\src\d3d11" /I"%ROOT%\src\common" ^
+    /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\witchspacestars\\" /Fe"%BUILD%\witchspace_stars_test.exe" ^
+    "tools\witchspace_stars_test\witchspace_stars_test.cpp" "src\d3d11\particle_fix.cpp" ^
+    /link /INCREMENTAL:NO /OPT:REF
+if errorlevel 1 ( echo [edvr] ERROR: witchspace stars test build failed & exit /b 1 )
+"%BUILD%\witchspace_stars_test.exe" --dry-run || exit /b 1
+"%BUILD%\witchspace_stars_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_holo_predicate_test
+echo [edvr] === holo_predicate_test.exe ===
+if not exist "%OBJ%\holopredicate" mkdir "%OBJ%\holopredicate"
+cl.exe /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /DEDVR_BINDING_SHADOW_EXTERNAL /DEDVR_HOLO_PREDICATE_TEST ^
+    /Fo"%OBJ%\holopredicate\\" /Fe"%BUILD%\holo_predicate_test.exe" ^
+    "tools\holo_predicate_test\holo_predicate_test.cpp" "src\d3d11\holo_fix.cpp" ^
+    "src\common\config.cpp" "src\common\log.cpp" "src\common\proxy.cpp" ^
+    "src\common\guard.cpp" ^
+    /link /INCREMENTAL:NO /OPT:REF user32.lib version.lib
+if errorlevel 1 ( echo [edvr] ERROR: holo predicate test build failed & exit /b 1 )
+"%BUILD%\holo_predicate_test.exe" --dry-run || exit /b 1
+"%BUILD%\holo_predicate_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_fss_predicate_test
+echo [edvr] === fss_predicate_test.exe ===
+if not exist "%OBJ%\fsspredicate" mkdir "%OBJ%\fsspredicate"
+cl.exe /I"%GEN%" /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /DEDVR_BINDING_SHADOW_EXTERNAL /DEDVR_FSS_PREDICATE_TEST ^
+    /Fo"%OBJ%\fsspredicate\\" /Fe"%BUILD%\fss_predicate_test.exe" ^
+    "tools\fss_predicate_test\fss_predicate_test.cpp" ^
+    "src\plugins\scanners\fss_panel.cpp" "src\plugins\scanners\fss_reveal.cpp" "src\d3d11\plugin_cost.cpp" ^
+    "src\common\config.cpp" "src\common\log.cpp" "src\common\proxy.cpp" ^
+    "src\common\guard.cpp" ^
+    /link /INCREMENTAL:NO /OPT:REF user32.lib version.lib
+if errorlevel 1 ( echo [edvr] ERROR: FSS predicate test build failed & exit /b 1 )
+"%BUILD%\fss_predicate_test.exe" --dry-run || exit /b 1
+"%BUILD%\fss_predicate_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_sunglare_predicate_test
+echo [edvr] === sunglare_predicate_test.exe ===
+if not exist "%OBJ%\sunglarepredicate" mkdir "%OBJ%\sunglarepredicate"
+cl.exe /I"%GEN%" /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /DEDVR_BINDING_SHADOW_EXTERNAL /DEDVR_SUNGLARE_PREDICATE_TEST ^
+    /Fo"%OBJ%\sunglarepredicate\\" /Fe"%BUILD%\sunglare_predicate_test.exe" ^
+    "tools\sunglare_predicate_test\sunglare_predicate_test.cpp" "src\d3d11\sunglare_fix.cpp" ^
+    "src\common\config.cpp" "src\common\log.cpp" "src\common\proxy.cpp" ^
+    "src\common\guard.cpp" ^
+    /link /INCREMENTAL:NO /OPT:REF user32.lib version.lib
+if errorlevel 1 ( echo [edvr] ERROR: sunglare predicate test build failed & exit /b 1 )
+"%BUILD%\sunglare_predicate_test.exe" --dry-run || exit /b 1
+"%BUILD%\sunglare_predicate_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_offscreen_skip_test
+echo [edvr] === offscreen_skip_test.exe ===
+if not exist "%OBJ%\offscreenskip" mkdir "%OBJ%\offscreenskip"
+cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\offscreenskip\\" /Fe"%BUILD%\offscreen_skip_test.exe" ^
+    "tools\offscreen_skip_test\offscreen_skip_test.cpp" ^
+    /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: offscreen skip test build failed & exit /b 1 )
+"%BUILD%\offscreen_skip_test.exe" --dry-run || exit /b 1
+"%BUILD%\offscreen_skip_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_cockpit_api_test
+echo [edvr] === cockpit_api_test.exe ===
+if not exist "%OBJ%\cockpitapi" mkdir "%OBJ%\cockpitapi"
+cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DEDVR_BINDING_SHADOW_EXTERNAL /Fo"%OBJ%\cockpitapi\\" ^
+    /Fe"%OBJ%\cockpitapi\cockpit_api_test.exe" "tools\cockpit_api_test\cockpit_api_test.cpp" ^
+    "src\d3d11\target_sharp.cpp" "src\d3d11\remlok_fix.cpp" "src\d3d11\plugin_cost.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib
+if errorlevel 1 ( echo [edvr] ERROR: cockpit API WARP rig build failed & exit /b 1 )
+"%OBJ%\cockpitapi\cockpit_api_test.exe" --self-test || (
+    echo [edvr] ERROR: concurrent TargetSharp/RemLok API annotations drifted from real helper calls
+    exit /b 1
+)
+exit /b 0
+
+:rig_draw_ladder_test
+echo [edvr] === draw_ladder_test.exe ===
+if exist "%BUILD%\draw_ladder_test-trace" (
+    echo [edvr] ERROR: stale draw ladder trace fixture directory; inspect and remove it before rerunning
+    exit /b 1
+)
+if not exist "%OBJ%\drawladder" mkdir "%OBJ%\drawladder"
+cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DEDVR_VERSION_STRING=\"%EDVR_VER%\" ^
+    /Fo"%OBJ%\drawladder\\" ^
+    /Fe"%BUILD%\draw_ladder_test.exe" "tools\draw_ladder_test\draw_ladder_test.cpp" ^
+    "src\d3d11\draw_ladder_trace.cpp" /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: draw ladder rig build failed & exit /b 1 )
+"%BUILD%\draw_ladder_test.exe" --self-test "%BUILD%\draw_ladder_test-trace" || (
+    echo [edvr] ERROR: ordered draw ladder replay failed
+    exit /b 1
+)
+dir /s /b "%BUILD%\draw_ladder_test-trace" > "%BUILD%\draw_ladder_trace_files_before.txt"
+python "%ROOT%\tools\draw_ladder_replay.py" --file ^
+    "%BUILD%\draw_ladder_test-trace\valid\edvr_gfx_trace_fixture.draw-ladder-12.json" ^
+    --expected-log edvr_gfx_trace_fixture.log --dry-run || exit /b 1
+python "%ROOT%\tools\draw_ladder_replay.py" --file ^
+    "%BUILD%\draw_ladder_test-trace\valid\edvr_gfx_trace_fixture.draw-ladder-14.json" ^
+    --expected-log edvr_gfx_trace_fixture.log --dry-run || exit /b 1
+python "%ROOT%\tools\draw_ladder_replay.py" --file ^
+    "%BUILD%\draw_ladder_test-trace\terminalmatrix\edvr_gfx_terminal_matrix.draw-ladder-15.json" ^
+    --expected-log edvr_gfx_terminal_matrix.log --dry-run || exit /b 1
+python "%ROOT%\tools\draw_ladder_replay.py" --file ^
+    "%BUILD%\draw_ladder_test-trace\sunglarefacts\edvr_gfx_sunglare.draw-ladder-31.json" ^
+    --expected-log edvr_gfx_sunglare.log --dry-run || exit /b 1
+python "%ROOT%\tools\draw_ladder_replay.py" --file ^
+    "%BUILD%\draw_ladder_test-trace\generatedinvalid\edvr_gfx_generated_invalid.draw-ladder-16.json" ^
+    --expected-log edvr_gfx_generated_invalid.log --dry-run --expect-invalid || exit /b 1
+python "%ROOT%\tools\draw_ladder_replay.py" --file ^
+    "%BUILD%\draw_ladder_test-trace\invalidtoken\edvr_gfx_invalid_token.draw-ladder-24.json" ^
+    --expected-log edvr_gfx_invalid_token.log --dry-run --expect-invalid || exit /b 1
+python "%ROOT%\tools\draw_ladder_replay.py" --file ^
+    "%BUILD%\draw_ladder_test-trace\postfinalized\edvr_gfx_postfinalized.draw-ladder-25.json" ^
+    --expected-log edvr_gfx_postfinalized.log --dry-run --expect-invalid || exit /b 1
+python "%ROOT%\tools\draw_ladder_replay.py" --file ^
+    "%BUILD%\draw_ladder_test-trace\duplicatefacts\edvr_gfx_duplicate_facts.draw-ladder-26.json" ^
+    --expected-log edvr_gfx_duplicate_facts.log --dry-run --expect-invalid || exit /b 1
+python "%ROOT%\tools\draw_ladder_replay.py" --file ^
+    "%BUILD%\draw_ladder_test-trace\reloadinvalid\edvr_gfx_reload_invalid.draw-ladder-27.json" ^
+    --expected-log edvr_gfx_reload_invalid.log --dry-run --expect-invalid || exit /b 1
+python "%ROOT%\tools\draw_ladder_replay.py" --file ^
+    "%BUILD%\draw_ladder_test-trace\siteoverflow\edvr_gfx_site.draw-ladder-20.json" ^
+    --expected-log edvr_gfx_site.log --dry-run --expect-invalid || exit /b 1
+python "%ROOT%\tools\draw_ladder_replay.py" --file ^
+    "%BUILD%\draw_ladder_test-trace\actionoverflow\edvr_gfx_action.draw-ladder-21.json" ^
+    --expected-log edvr_gfx_action.log --dry-run --expect-invalid || exit /b 1
+python "%ROOT%\tools\draw_ladder_replay.py" --file ^
+    "%BUILD%\draw_ladder_test-trace\unfinished\edvr_gfx_unfinished.draw-ladder-22.json" ^
+    --expected-log edvr_gfx_unfinished.log --dry-run --expect-invalid || exit /b 1
+python "%ROOT%\tools\draw_ladder_replay.py" --file ^
+    "%BUILD%\draw_ladder_test-trace\missingnightvisionfact\edvr_gfx_missing_night_vision_fact.draw-ladder-31.json" ^
+    --expected-log edvr_gfx_missing_night_vision_fact.log --dry-run --expect-invalid || exit /b 1
+python "%ROOT%\tools\draw_ladder_replay.py" --file ^
+    "%BUILD%\draw_ladder_test-trace\unfinishedwitchspacestars\edvr_gfx_unfinished_witchspace_stars.draw-ladder-32.json" ^
+    --expected-log edvr_gfx_unfinished_witchspace_stars.log --dry-run --expect-invalid || exit /b 1
+python "%ROOT%\tools\draw_ladder_replay.py" --file ^
+    "%BUILD%\draw_ladder_test-trace\missingoffscreenfacts\edvr_gfx_missing_offscreen_facts.draw-ladder-34.json" ^
+    --expected-log edvr_gfx_missing_offscreen_facts.log --dry-run --expect-invalid || exit /b 1
+python "%ROOT%\tools\draw_ladder_replay.py" --file ^
+    "%BUILD%\draw_ladder_test-trace\unfinishedoffscreenfact\edvr_gfx_unfinished_offscreen_fact.draw-ladder-35.json" ^
+    --expected-log edvr_gfx_unfinished_offscreen_fact.log --dry-run --expect-invalid || exit /b 1
+python "%ROOT%\tools\draw_ladder_replay.py" --file ^
+    "%BUILD%\draw_ladder_test-trace\missingholo53fact\edvr_gfx_missing_holo53_fact.draw-ladder-41.json" ^
+    --expected-log edvr_gfx_missing_holo53_fact.log --dry-run --expect-invalid || exit /b 1
+python "%ROOT%\tools\draw_ladder_replay.py" --file ^
+    "%BUILD%\draw_ladder_test-trace\missingscrim55fact\edvr_gfx_missing_scrim55_fact.draw-ladder-42.json" ^
+    --expected-log edvr_gfx_missing_scrim55_fact.log --dry-run --expect-invalid || exit /b 1
+python "%ROOT%\tools\draw_ladder_replay.py" --file ^
+    "%BUILD%\draw_ladder_test-trace\unfinishedholo53fact\edvr_gfx_unfinished_holo53_fact.draw-ladder-43.json" ^
+    --expected-log edvr_gfx_unfinished_holo53_fact.log --dry-run --expect-invalid || exit /b 1
+python "%ROOT%\tools\draw_ladder_replay.py" --file ^
+    "%BUILD%\draw_ladder_test-trace\unfinishedscrim55fact\edvr_gfx_unfinished_scrim55_fact.draw-ladder-44.json" ^
+    --expected-log edvr_gfx_unfinished_scrim55_fact.log --dry-run --expect-invalid || exit /b 1
+python "%ROOT%\tools\draw_ladder_replay.py" --file ^
+    "%BUILD%\draw_ladder_test-trace\wrongholo53kind\edvr_gfx_wrong_holo53_kind.draw-ladder-45.json" ^
+    --expected-log edvr_gfx_wrong_holo53_kind.log --dry-run --expect-invalid || exit /b 1
+python "%ROOT%\tools\draw_ladder_replay.py" --file ^
+    "%BUILD%\draw_ladder_test-trace\duplicateholo53fact\edvr_gfx_duplicate_holo53_fact.draw-ladder-46.json" ^
+    --expected-log edvr_gfx_duplicate_holo53_fact.log --dry-run --expect-invalid || exit /b 1
+python "%ROOT%\tools\draw_ladder_replay.py" --file ^
+    "%BUILD%\draw_ladder_test-trace\factcapoverflow\edvr_gfx_fact_cap_overflow.draw-ladder-47.json" ^
+    --expected-log edvr_gfx_fact_cap_overflow.log --dry-run --expect-invalid || exit /b 1
+python "%ROOT%\tools\draw_ladder_replay.py" --file ^
+    "%BUILD%\draw_ladder_test-trace\sunglare_missing_fact\edvr_gfx_sunglare_missing.draw-ladder-32.json" ^
+    --expected-log edvr_gfx_sunglare_missing.log --dry-run --expect-invalid || exit /b 1
+python "%ROOT%\tools\draw_ladder_replay.py" --file ^
+    "%BUILD%\draw_ladder_test-trace\sunglare_wrong_kind\edvr_gfx_sunglare_wrong_kind.draw-ladder-33.json" ^
+    --expected-log edvr_gfx_sunglare_wrong_kind.log --dry-run --expect-invalid || exit /b 1
+python "%ROOT%\tools\draw_ladder_replay.py" --file ^
+    "%BUILD%\draw_ladder_test-trace\sunglare_duplicate_fact\edvr_gfx_sunglare_duplicate.draw-ladder-34.json" ^
+    --expected-log edvr_gfx_sunglare_duplicate.log --dry-run --expect-invalid || exit /b 1
+python "%ROOT%\tools\draw_ladder_replay.py" --file ^
+    "%BUILD%\draw_ladder_test-trace\sunglare_unfinished_kind9\edvr_gfx_sunglare_unfinished.draw-ladder-35.json" ^
+    --expected-log edvr_gfx_sunglare_unfinished.log --dry-run --expect-invalid || exit /b 1
+python "%ROOT%\tools\draw_ladder_replay.py" --file ^
+    "%BUILD%\draw_ladder_test-trace\sunglare_per_draw_cap\edvr_gfx_sunglare_per_draw.draw-ladder-37.json" ^
+    --expected-log edvr_gfx_sunglare_per_draw.log --dry-run --expect-invalid || exit /b 1
+python "%ROOT%\tools\draw_ladder_replay.py" --file ^
+    "%BUILD%\draw_ladder_test-trace\fss_missing_fact\edvr_gfx_fss_missing.draw-ladder-40.json" ^
+    --expected-log edvr_gfx_fss_missing.log --dry-run --expect-invalid || exit /b 1
+python "%ROOT%\tools\draw_ladder_replay.py" --file ^
+    "%BUILD%\draw_ladder_test-trace\fss_wrong_kind\edvr_gfx_fss_wrong_kind.draw-ladder-41.json" ^
+    --expected-log edvr_gfx_fss_wrong_kind.log --dry-run --expect-invalid || exit /b 1
+python "%ROOT%\tools\draw_ladder_replay.py" --file ^
+    "%BUILD%\draw_ladder_test-trace\fss_duplicate_fact\edvr_gfx_fss_duplicate.draw-ladder-42.json" ^
+    --expected-log edvr_gfx_fss_duplicate.log --dry-run --expect-invalid || exit /b 1
+python "%ROOT%\tools\draw_ladder_replay.py" --file ^
+    "%BUILD%\draw_ladder_test-trace\fss_unfinished_fact\edvr_gfx_fss_unfinished.draw-ladder-43.json" ^
+    --expected-log edvr_gfx_fss_unfinished.log --dry-run --expect-invalid || exit /b 1
+python "%ROOT%\tools\draw_ladder_replay.py" --file ^
+    "%BUILD%\draw_ladder_test-trace\fss_per_draw_cap\edvr_gfx_fss_per_draw.draw-ladder-44.json" ^
+    --expected-log edvr_gfx_fss_per_draw.log --dry-run --expect-invalid || exit /b 1
+python "%ROOT%\tools\draw_ladder_replay.py" --file ^
+    "%BUILD%\draw_ladder_test-trace\remlok_missing_fact\edvr_gfx_remlok_missing.draw-ladder-46.json" ^
+    --expected-log edvr_gfx_remlok_missing.log --dry-run --expect-invalid || exit /b 1
+python "%ROOT%\tools\draw_ladder_replay.py" --file ^
+    "%BUILD%\draw_ladder_test-trace\remlok_duplicate_fact\edvr_gfx_remlok_duplicate.draw-ladder-47.json" ^
+    --expected-log edvr_gfx_remlok_duplicate.log --dry-run --expect-invalid || exit /b 1
+python "%ROOT%\tools\draw_ladder_replay.py" --file ^
+    "%BUILD%\draw_ladder_test-trace\remlok_bad_read\edvr_gfx_remlok_bad_read.draw-ladder-48.json" ^
+    --expected-log edvr_gfx_remlok_bad_read.log --dry-run --expect-invalid || exit /b 1
+python "%ROOT%\tools\draw_ladder_replay.py" --file ^
+    "%BUILD%\draw_ladder_test-trace\remlok_unvisited\edvr_gfx_remlok_unvisited.draw-ladder-49.json" ^
+    --expected-log edvr_gfx_remlok_unvisited.log --dry-run --expect-invalid || exit /b 1
+python "%ROOT%\tools\draw_ladder_replay.py" --file ^
+    "%BUILD%\draw_ladder_test-trace\fss_probe_unknown\edvr_gfx_fss_probe_unknown.draw-ladder-51.json" ^
+    --expected-log edvr_gfx_fss_probe_unknown.log --dry-run --expect-unreplayable 1 || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\basic_missing_fact\edvr_gfx_basic_missing.draw-ladder-52.json" ^
+    --expected-log edvr_gfx_basic_missing.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\basic_duplicate_fact\edvr_gfx_basic_duplicate.draw-ladder-53.json" ^
+    --expected-log edvr_gfx_basic_duplicate.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\basic_wrong_kind\edvr_gfx_basic_wrong_kind.draw-ladder-54.json" ^
+    --expected-log edvr_gfx_basic_wrong_kind.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\basic_bad_read\edvr_gfx_basic_bad_read.draw-ladder-55.json" ^
+    --expected-log edvr_gfx_basic_bad_read.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\basic_unvisited\edvr_gfx_basic_unvisited.draw-ladder-56.json" ^
+    --expected-log edvr_gfx_basic_unvisited.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\basic_unknown\edvr_gfx_basic_unknown.draw-ladder-57.json" ^
+    --expected-log edvr_gfx_basic_unknown.log --dry-run --expect-unreplayable 1 || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\eye_census_missing\edvr_gfx_eye_missing.draw-ladder-59.json" ^
+    --expected-log edvr_gfx_eye_missing.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\eye_census_duplicate\edvr_gfx_eye_duplicate.draw-ladder-60.json" ^
+    --expected-log edvr_gfx_eye_duplicate.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\eye_census_wrong_kind\edvr_gfx_eye_wrong_kind.draw-ladder-61.json" ^
+    --expected-log edvr_gfx_eye_wrong_kind.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\eye_census_bad_read\edvr_gfx_eye_bad_read.draw-ladder-62.json" ^
+    --expected-log edvr_gfx_eye_bad_read.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\eye_census_over_capacity\edvr_gfx_eye_over_capacity.draw-ladder-63.json" ^
+    --expected-log edvr_gfx_eye_over_capacity.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\eye_census_unvisited\edvr_gfx_eye_unvisited.draw-ladder-64.json" ^
+    --expected-log edvr_gfx_eye_unvisited.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\eye_census_unknown\edvr_gfx_eye_unknown.draw-ladder-65.json" ^
+    --expected-log edvr_gfx_eye_unknown.log --dry-run --expect-unreplayable 1 || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\eye_census_positive\edvr_gfx_eye_positive.draw-ladder-67.json" ^
+    --expected-log edvr_gfx_eye_positive.log --dry-run || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\resolve_bind_missing\edvr_gfx_resolve_missing.draw-ladder-68.json" ^
+    --expected-log edvr_gfx_resolve_missing.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\resolve_bind_duplicate\edvr_gfx_resolve_duplicate.draw-ladder-69.json" ^
+    --expected-log edvr_gfx_resolve_duplicate.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\resolve_bind_wrong_kind\edvr_gfx_resolve_wrong_kind.draw-ladder-70.json" ^
+    --expected-log edvr_gfx_resolve_wrong_kind.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\resolve_bind_bad_read\edvr_gfx_resolve_bad_read.draw-ladder-71.json" ^
+    --expected-log edvr_gfx_resolve_bad_read.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\resolve_bind_unvisited\edvr_gfx_resolve_unvisited.draw-ladder-72.json" ^
+    --expected-log edvr_gfx_resolve_unvisited.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\resolve_bind_unknown\edvr_gfx_resolve_unknown.draw-ladder-73.json" ^
+    --expected-log edvr_gfx_resolve_unknown.log --dry-run --expect-unreplayable 1 || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\resolve_bind_positive\edvr_gfx_resolve_positive.draw-ladder-75.json" ^
+    --expected-log edvr_gfx_resolve_positive.log --dry-run || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\resolve_bind_negative\edvr_gfx_resolve_negative.draw-ladder-76.json" ^
+    --expected-log edvr_gfx_resolve_negative.log --dry-run || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\loader_panel_missing\edvr_gfx_loader_panel_missing.draw-ladder-77.json" ^
+    --expected-log edvr_gfx_loader_panel_missing.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\loader_panel_duplicate\edvr_gfx_loader_panel_duplicate.draw-ladder-78.json" ^
+    --expected-log edvr_gfx_loader_panel_duplicate.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\loader_panel_wrong_kind\edvr_gfx_loader_panel_wrong_kind.draw-ladder-79.json" ^
+    --expected-log edvr_gfx_loader_panel_wrong_kind.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\loader_panel_bad_read\edvr_gfx_loader_panel_bad_read.draw-ladder-80.json" ^
+    --expected-log edvr_gfx_loader_panel_bad_read.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\loader_panel_unvisited\edvr_gfx_loader_panel_unvisited.draw-ladder-81.json" ^
+    --expected-log edvr_gfx_loader_panel_unvisited.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\loader_panel_unknown\edvr_gfx_loader_panel_unknown.draw-ladder-82.json" ^
+    --expected-log edvr_gfx_loader_panel_unknown.log --dry-run --expect-unreplayable 1 || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\loader_panel_chain_over_capacity\edvr_gfx_loader_panel_chain_over_capacity.draw-ladder-83.json" ^
+    --expected-log edvr_gfx_loader_panel_chain_over_capacity.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\loader_panel_positive_negative\edvr_gfx_loader_panel_paths.draw-ladder-85.json" ^
+    --expected-log edvr_gfx_loader_panel_paths.log --dry-run || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\loader_panel_mutation_warning\edvr_gfx_loader_panel_mutation_warning.draw-ladder-86.json" ^
+    --expected-log edvr_gfx_loader_panel_mutation_warning.log --dry-run --expect-mutation-unobserved 1 || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\fss_dump_missing\edvr_gfx_fss_dump_missing.draw-ladder-87.json" ^
+    --expected-log edvr_gfx_fss_dump_missing.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\fss_dump_duplicate\edvr_gfx_fss_dump_duplicate.draw-ladder-88.json" ^
+    --expected-log edvr_gfx_fss_dump_duplicate.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\fss_dump_wrong_kind\edvr_gfx_fss_dump_wrong_kind.draw-ladder-89.json" ^
+    --expected-log edvr_gfx_fss_dump_wrong_kind.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\fss_dump_bad_read\edvr_gfx_fss_dump_bad_read.draw-ladder-90.json" ^
+    --expected-log edvr_gfx_fss_dump_bad_read.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\fss_dump_unvisited\edvr_gfx_fss_dump_unvisited.draw-ladder-91.json" ^
+    --expected-log edvr_gfx_fss_dump_unvisited.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\fss_dump_unknown\edvr_gfx_fss_dump_unknown.draw-ladder-92.json" ^
+    --expected-log edvr_gfx_fss_dump_unknown.log --dry-run --expect-unreplayable 1 || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\fss_dump_positive_negative\edvr_gfx_fss_dump_paths.draw-ladder-94.json" ^
+    --expected-log edvr_gfx_fss_dump_paths.log --dry-run || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\fss_dump_counter_wrap\edvr_gfx_fss_dump_wrap.draw-ladder-95.json" ^
+    --expected-log edvr_gfx_fss_dump_wrap.log --dry-run || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\forward_none_applied\edvr_gfx_forward_none_applied.draw-ladder-96.json" ^
+    --expected-log edvr_gfx_forward_none_applied.log --dry-run --expect-forward-replayed 1 || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\forward_none_declined\edvr_gfx_forward_none_declined.draw-ladder-97.json" ^
+    --expected-log edvr_gfx_forward_none_declined.log --dry-run --expect-forward-replayed 1 || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\forward_skip\edvr_gfx_forward_skip.draw-ladder-98.json" ^
+    --expected-log edvr_gfx_forward_skip.log --dry-run --expect-forward-replayed 1 || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\forward_unavailable\edvr_gfx_forward_unavailable.draw-ladder-99.json" ^
+    --expected-log edvr_gfx_forward_unavailable.log --dry-run --expect-forward-unavailable 1 || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\forward_unknown\edvr_gfx_forward_unknown.draw-ladder-100.json" ^
+    --expected-log edvr_gfx_forward_unknown.log --dry-run --expect-forward-unavailable 1 || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\targetsharp_positive\edvr_gfx_targetsharp_positive.draw-ladder-101.json" ^
+    --expected-log edvr_gfx_targetsharp_positive.log --dry-run || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\targetsharp_lazydecline\edvr_gfx_targetsharp_lazydecline.draw-ladder-102.json" ^
+    --expected-log edvr_gfx_targetsharp_lazydecline.log --dry-run || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\targetsharp_noteligible\edvr_gfx_targetsharp_noteligible.draw-ladder-103.json" ^
+    --expected-log edvr_gfx_targetsharp_noteligible.log --dry-run || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\targetsharp_unknown\edvr_gfx_targetsharp_unknown.draw-ladder-104.json" ^
+    --expected-log edvr_gfx_targetsharp_unknown.log --dry-run --expect-unreplayable 1 || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\targetsharp_missing\edvr_gfx_targetsharp_missing.draw-ladder-105.json" ^
+    --expected-log edvr_gfx_targetsharp_missing.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\targetsharp_duplicate\edvr_gfx_targetsharp_duplicate.draw-ladder-106.json" ^
+    --expected-log edvr_gfx_targetsharp_duplicate.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\targetsharp_malformed\edvr_gfx_targetsharp_malformed.draw-ladder-107.json" ^
+    --expected-log edvr_gfx_targetsharp_malformed.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\targetsharp_unvisited\edvr_gfx_targetsharp_unvisited.draw-ladder-108.json" ^
+    --expected-log edvr_gfx_targetsharp_unvisited.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\targetsharp_perdrawcap\edvr_gfx_targetsharp_perdrawcap.draw-ladder-109.json" ^
+    --expected-log edvr_gfx_targetsharp_perdrawcap.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\targetsharp_globaloverflow\edvr_gfx_targetsharp_globaloverflow.draw-ladder-110.json" ^
+    --expected-log edvr_gfx_targetsharp_globaloverflow.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\sunglare_nomination_positive\edvr_gfx_sungnom_positive.draw-ladder-111.json" ^
+    --expected-log edvr_gfx_sungnom_positive.log --dry-run || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\sunglare_nomination_lazydecline\edvr_gfx_sungnom_lazydecline.draw-ladder-112.json" ^
+    --expected-log edvr_gfx_sungnom_lazydecline.log --dry-run || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\sunglare_nomination_cutoff\edvr_gfx_sungnom_cutoff.draw-ladder-113.json" ^
+    --expected-log edvr_gfx_sungnom_cutoff.log --dry-run || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\sunglare_nomination_unknown\edvr_gfx_sungnom_unknown.draw-ladder-114.json" ^
+    --expected-log edvr_gfx_sungnom_unknown.log --dry-run --expect-unreplayable 1 || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\sunglare_nomination_missing\edvr_gfx_sungnom_missing.draw-ladder-115.json" ^
+    --expected-log edvr_gfx_sungnom_missing.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\sunglare_nomination_duplicate\edvr_gfx_sungnom_duplicate.draw-ladder-116.json" ^
+    --expected-log edvr_gfx_sungnom_duplicate.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\sunglare_nomination_malformed\edvr_gfx_sungnom_malformed.draw-ladder-117.json" ^
+    --expected-log edvr_gfx_sungnom_malformed.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\sunglare_nomination_unvisited\edvr_gfx_sungnom_unvisited.draw-ladder-118.json" ^
+    --expected-log edvr_gfx_sungnom_unvisited.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\sunglare_nomination_perdrawcap\edvr_gfx_sungnom_perdrawcap.draw-ladder-119.json" ^
+    --expected-log edvr_gfx_sungnom_perdrawcap.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\sunglare_nomination_globaloverflow\edvr_gfx_sungnom_globaloverflow.draw-ladder-120.json" ^
+    --expected-log edvr_gfx_sungnom_globaloverflow.log --dry-run --expect-invalid || exit /b 1
+dir /s /b "%BUILD%\draw_ladder_test-trace" > "%BUILD%\draw_ladder_trace_files_after.txt"
+fc /b "%BUILD%\draw_ladder_trace_files_before.txt" ^
+    "%BUILD%\draw_ladder_trace_files_after.txt" >nul || (
+    echo [edvr] ERROR: draw ladder reader dry-run changed scratch directory entries
+    exit /b 1
+)
+del /q "%BUILD%\draw_ladder_trace_files_before.txt" "%BUILD%\draw_ladder_trace_files_after.txt"
+del /q "%BUILD%\draw_ladder_test-trace\sunglare_nomination_positive\edvr_gfx_sungnom_positive.log" "%BUILD%\draw_ladder_test-trace\sunglare_nomination_positive\edvr_gfx_sungnom_positive.draw-ladder-111.json"
+if exist "%BUILD%\draw_ladder_test-trace\sunglare_nomination_positive" rmdir "%BUILD%\draw_ladder_test-trace\sunglare_nomination_positive"
+del /q "%BUILD%\draw_ladder_test-trace\sunglare_nomination_lazydecline\edvr_gfx_sungnom_lazydecline.log" "%BUILD%\draw_ladder_test-trace\sunglare_nomination_lazydecline\edvr_gfx_sungnom_lazydecline.draw-ladder-112.json"
+if exist "%BUILD%\draw_ladder_test-trace\sunglare_nomination_lazydecline" rmdir "%BUILD%\draw_ladder_test-trace\sunglare_nomination_lazydecline"
+del /q "%BUILD%\draw_ladder_test-trace\sunglare_nomination_cutoff\edvr_gfx_sungnom_cutoff.log" "%BUILD%\draw_ladder_test-trace\sunglare_nomination_cutoff\edvr_gfx_sungnom_cutoff.draw-ladder-113.json"
+if exist "%BUILD%\draw_ladder_test-trace\sunglare_nomination_cutoff" rmdir "%BUILD%\draw_ladder_test-trace\sunglare_nomination_cutoff"
+del /q "%BUILD%\draw_ladder_test-trace\sunglare_nomination_unknown\edvr_gfx_sungnom_unknown.log" "%BUILD%\draw_ladder_test-trace\sunglare_nomination_unknown\edvr_gfx_sungnom_unknown.draw-ladder-114.json"
+if exist "%BUILD%\draw_ladder_test-trace\sunglare_nomination_unknown" rmdir "%BUILD%\draw_ladder_test-trace\sunglare_nomination_unknown"
+del /q "%BUILD%\draw_ladder_test-trace\sunglare_nomination_missing\edvr_gfx_sungnom_missing.log" "%BUILD%\draw_ladder_test-trace\sunglare_nomination_missing\edvr_gfx_sungnom_missing.draw-ladder-115.json"
+if exist "%BUILD%\draw_ladder_test-trace\sunglare_nomination_missing" rmdir "%BUILD%\draw_ladder_test-trace\sunglare_nomination_missing"
+del /q "%BUILD%\draw_ladder_test-trace\sunglare_nomination_duplicate\edvr_gfx_sungnom_duplicate.log" "%BUILD%\draw_ladder_test-trace\sunglare_nomination_duplicate\edvr_gfx_sungnom_duplicate.draw-ladder-116.json"
+if exist "%BUILD%\draw_ladder_test-trace\sunglare_nomination_duplicate" rmdir "%BUILD%\draw_ladder_test-trace\sunglare_nomination_duplicate"
+del /q "%BUILD%\draw_ladder_test-trace\sunglare_nomination_malformed\edvr_gfx_sungnom_malformed.log" "%BUILD%\draw_ladder_test-trace\sunglare_nomination_malformed\edvr_gfx_sungnom_malformed.draw-ladder-117.json"
+if exist "%BUILD%\draw_ladder_test-trace\sunglare_nomination_malformed" rmdir "%BUILD%\draw_ladder_test-trace\sunglare_nomination_malformed"
+del /q "%BUILD%\draw_ladder_test-trace\sunglare_nomination_unvisited\edvr_gfx_sungnom_unvisited.log" "%BUILD%\draw_ladder_test-trace\sunglare_nomination_unvisited\edvr_gfx_sungnom_unvisited.draw-ladder-118.json"
+if exist "%BUILD%\draw_ladder_test-trace\sunglare_nomination_unvisited" rmdir "%BUILD%\draw_ladder_test-trace\sunglare_nomination_unvisited"
+del /q "%BUILD%\draw_ladder_test-trace\sunglare_nomination_perdrawcap\edvr_gfx_sungnom_perdrawcap.log" "%BUILD%\draw_ladder_test-trace\sunglare_nomination_perdrawcap\edvr_gfx_sungnom_perdrawcap.draw-ladder-119.json"
+if exist "%BUILD%\draw_ladder_test-trace\sunglare_nomination_perdrawcap" rmdir "%BUILD%\draw_ladder_test-trace\sunglare_nomination_perdrawcap"
+del /q "%BUILD%\draw_ladder_test-trace\sunglare_nomination_globaloverflow\edvr_gfx_sungnom_globaloverflow.log" "%BUILD%\draw_ladder_test-trace\sunglare_nomination_globaloverflow\edvr_gfx_sungnom_globaloverflow.draw-ladder-120.json"
+if exist "%BUILD%\draw_ladder_test-trace\sunglare_nomination_globaloverflow" rmdir "%BUILD%\draw_ladder_test-trace\sunglare_nomination_globaloverflow"
+del /q "%BUILD%\draw_ladder_test-trace\targetsharp_positive\edvr_gfx_targetsharp_positive.log" "%BUILD%\draw_ladder_test-trace\targetsharp_positive\edvr_gfx_targetsharp_positive.draw-ladder-101.json"
+if exist "%BUILD%\draw_ladder_test-trace\targetsharp_positive" rmdir "%BUILD%\draw_ladder_test-trace\targetsharp_positive"
+del /q "%BUILD%\draw_ladder_test-trace\targetsharp_lazydecline\edvr_gfx_targetsharp_lazydecline.log" "%BUILD%\draw_ladder_test-trace\targetsharp_lazydecline\edvr_gfx_targetsharp_lazydecline.draw-ladder-102.json"
+if exist "%BUILD%\draw_ladder_test-trace\targetsharp_lazydecline" rmdir "%BUILD%\draw_ladder_test-trace\targetsharp_lazydecline"
+del /q "%BUILD%\draw_ladder_test-trace\targetsharp_noteligible\edvr_gfx_targetsharp_noteligible.log" "%BUILD%\draw_ladder_test-trace\targetsharp_noteligible\edvr_gfx_targetsharp_noteligible.draw-ladder-103.json"
+if exist "%BUILD%\draw_ladder_test-trace\targetsharp_noteligible" rmdir "%BUILD%\draw_ladder_test-trace\targetsharp_noteligible"
+del /q "%BUILD%\draw_ladder_test-trace\targetsharp_unknown\edvr_gfx_targetsharp_unknown.log" "%BUILD%\draw_ladder_test-trace\targetsharp_unknown\edvr_gfx_targetsharp_unknown.draw-ladder-104.json"
+if exist "%BUILD%\draw_ladder_test-trace\targetsharp_unknown" rmdir "%BUILD%\draw_ladder_test-trace\targetsharp_unknown"
+del /q "%BUILD%\draw_ladder_test-trace\targetsharp_missing\edvr_gfx_targetsharp_missing.log" "%BUILD%\draw_ladder_test-trace\targetsharp_missing\edvr_gfx_targetsharp_missing.draw-ladder-105.json"
+if exist "%BUILD%\draw_ladder_test-trace\targetsharp_missing" rmdir "%BUILD%\draw_ladder_test-trace\targetsharp_missing"
+del /q "%BUILD%\draw_ladder_test-trace\targetsharp_duplicate\edvr_gfx_targetsharp_duplicate.log" "%BUILD%\draw_ladder_test-trace\targetsharp_duplicate\edvr_gfx_targetsharp_duplicate.draw-ladder-106.json"
+if exist "%BUILD%\draw_ladder_test-trace\targetsharp_duplicate" rmdir "%BUILD%\draw_ladder_test-trace\targetsharp_duplicate"
+del /q "%BUILD%\draw_ladder_test-trace\targetsharp_malformed\edvr_gfx_targetsharp_malformed.log" "%BUILD%\draw_ladder_test-trace\targetsharp_malformed\edvr_gfx_targetsharp_malformed.draw-ladder-107.json"
+if exist "%BUILD%\draw_ladder_test-trace\targetsharp_malformed" rmdir "%BUILD%\draw_ladder_test-trace\targetsharp_malformed"
+del /q "%BUILD%\draw_ladder_test-trace\targetsharp_unvisited\edvr_gfx_targetsharp_unvisited.log" "%BUILD%\draw_ladder_test-trace\targetsharp_unvisited\edvr_gfx_targetsharp_unvisited.draw-ladder-108.json"
+if exist "%BUILD%\draw_ladder_test-trace\targetsharp_unvisited" rmdir "%BUILD%\draw_ladder_test-trace\targetsharp_unvisited"
+del /q "%BUILD%\draw_ladder_test-trace\targetsharp_perdrawcap\edvr_gfx_targetsharp_perdrawcap.log" "%BUILD%\draw_ladder_test-trace\targetsharp_perdrawcap\edvr_gfx_targetsharp_perdrawcap.draw-ladder-109.json"
+if exist "%BUILD%\draw_ladder_test-trace\targetsharp_perdrawcap" rmdir "%BUILD%\draw_ladder_test-trace\targetsharp_perdrawcap"
+del /q "%BUILD%\draw_ladder_test-trace\targetsharp_globaloverflow\edvr_gfx_targetsharp_globaloverflow.log" "%BUILD%\draw_ladder_test-trace\targetsharp_globaloverflow\edvr_gfx_targetsharp_globaloverflow.draw-ladder-110.json"
+if exist "%BUILD%\draw_ladder_test-trace\targetsharp_globaloverflow" rmdir "%BUILD%\draw_ladder_test-trace\targetsharp_globaloverflow"
+del /q "%BUILD%\draw_ladder_test-trace\valid\edvr_gfx_trace_fixture.log" ^
+    "%BUILD%\draw_ladder_test-trace\valid\edvr_gfx_newer_decoy.log" ^
+    "%BUILD%\draw_ladder_test-trace\valid\edvr_gfx_trace_fixture.draw-ladder-12.json" ^
+    "%BUILD%\draw_ladder_test-trace\valid\edvr_gfx_trace_fixture.draw-ladder-14.json" ^
+    "%BUILD%\draw_ladder_test-trace\terminalmatrix\edvr_gfx_terminal_matrix.log" ^
+    "%BUILD%\draw_ladder_test-trace\terminalmatrix\edvr_gfx_terminal_matrix.draw-ladder-15.json" ^
+    "%BUILD%\draw_ladder_test-trace\generatedinvalid\edvr_gfx_generated_invalid.log" ^
+    "%BUILD%\draw_ladder_test-trace\generatedinvalid\edvr_gfx_generated_invalid.draw-ladder-16.json" ^
+    "%BUILD%\draw_ladder_test-trace\invalidtoken\edvr_gfx_invalid_token.log" ^
+    "%BUILD%\draw_ladder_test-trace\invalidtoken\edvr_gfx_invalid_token.draw-ladder-24.json" ^
+    "%BUILD%\draw_ladder_test-trace\postfinalized\edvr_gfx_postfinalized.log" ^
+    "%BUILD%\draw_ladder_test-trace\postfinalized\edvr_gfx_postfinalized.draw-ladder-25.json" ^
+    "%BUILD%\draw_ladder_test-trace\duplicatefacts\edvr_gfx_duplicate_facts.log" ^
+    "%BUILD%\draw_ladder_test-trace\duplicatefacts\edvr_gfx_duplicate_facts.draw-ladder-26.json" ^
+    "%BUILD%\draw_ladder_test-trace\reloadinvalid\edvr_gfx_reload_invalid.log" ^
+    "%BUILD%\draw_ladder_test-trace\reloadinvalid\edvr_gfx_reload_invalid.draw-ladder-27.json" ^
+    "%BUILD%\draw_ladder_test-trace\duplicatepredicatefacts\edvr_gfx_duplicate_predicate.log" ^
+    "%BUILD%\draw_ladder_test-trace\duplicatepredicatefacts\edvr_gfx_duplicate_predicate.draw-ladder-28.json" ^
+    "%BUILD%\draw_ladder_test-trace\missingpredicatefacts\edvr_gfx_missing_predicate.log" ^
+    "%BUILD%\draw_ladder_test-trace\missingpredicatefacts\edvr_gfx_missing_predicate.draw-ladder-29.json" ^
+    "%BUILD%\draw_ladder_test-trace\invalidcounterdelta\edvr_gfx_invalid_counter_delta.log" ^
+    "%BUILD%\draw_ladder_test-trace\invalidcounterdelta\edvr_gfx_invalid_counter_delta.draw-ladder-30.json" ^
+    "%BUILD%\draw_ladder_test-trace\missingnightvisionfact\edvr_gfx_missing_night_vision_fact.log" ^
+    "%BUILD%\draw_ladder_test-trace\missingnightvisionfact\edvr_gfx_missing_night_vision_fact.draw-ladder-31.json" ^
+    "%BUILD%\draw_ladder_test-trace\unfinishedwitchspacestars\edvr_gfx_unfinished_witchspace_stars.log" ^
+    "%BUILD%\draw_ladder_test-trace\unfinishedwitchspacestars\edvr_gfx_unfinished_witchspace_stars.draw-ladder-32.json" ^
+    "%BUILD%\draw_ladder_test-trace\missingoffscreenfacts\edvr_gfx_missing_offscreen_facts.log" ^
+    "%BUILD%\draw_ladder_test-trace\missingoffscreenfacts\edvr_gfx_missing_offscreen_facts.draw-ladder-34.json" ^
+    "%BUILD%\draw_ladder_test-trace\unfinishedoffscreenfact\edvr_gfx_unfinished_offscreen_fact.log" ^
+    "%BUILD%\draw_ladder_test-trace\unfinishedoffscreenfact\edvr_gfx_unfinished_offscreen_fact.draw-ladder-35.json" ^
+    "%BUILD%\draw_ladder_test-trace\missingholo53fact\edvr_gfx_missing_holo53_fact.log" ^
+    "%BUILD%\draw_ladder_test-trace\missingholo53fact\edvr_gfx_missing_holo53_fact.draw-ladder-41.json" ^
+    "%BUILD%\draw_ladder_test-trace\missingscrim55fact\edvr_gfx_missing_scrim55_fact.log" ^
+    "%BUILD%\draw_ladder_test-trace\missingscrim55fact\edvr_gfx_missing_scrim55_fact.draw-ladder-42.json" ^
+    "%BUILD%\draw_ladder_test-trace\unfinishedholo53fact\edvr_gfx_unfinished_holo53_fact.log" ^
+    "%BUILD%\draw_ladder_test-trace\unfinishedholo53fact\edvr_gfx_unfinished_holo53_fact.draw-ladder-43.json" ^
+    "%BUILD%\draw_ladder_test-trace\unfinishedscrim55fact\edvr_gfx_unfinished_scrim55_fact.log" ^
+    "%BUILD%\draw_ladder_test-trace\unfinishedscrim55fact\edvr_gfx_unfinished_scrim55_fact.draw-ladder-44.json" ^
+    "%BUILD%\draw_ladder_test-trace\wrongholo53kind\edvr_gfx_wrong_holo53_kind.log" ^
+    "%BUILD%\draw_ladder_test-trace\wrongholo53kind\edvr_gfx_wrong_holo53_kind.draw-ladder-45.json" ^
+    "%BUILD%\draw_ladder_test-trace\duplicateholo53fact\edvr_gfx_duplicate_holo53_fact.log" ^
+    "%BUILD%\draw_ladder_test-trace\duplicateholo53fact\edvr_gfx_duplicate_holo53_fact.draw-ladder-46.json" ^
+    "%BUILD%\draw_ladder_test-trace\factcapoverflow\edvr_gfx_fact_cap_overflow.log" ^
+    "%BUILD%\draw_ladder_test-trace\factcapoverflow\edvr_gfx_fact_cap_overflow.draw-ladder-47.json" ^
+    "%BUILD%\draw_ladder_test-trace\siteoverflow\edvr_gfx_site.log" ^
+    "%BUILD%\draw_ladder_test-trace\siteoverflow\edvr_gfx_site.draw-ladder-20.json" ^
+    "%BUILD%\draw_ladder_test-trace\actionoverflow\edvr_gfx_action.log" ^
+    "%BUILD%\draw_ladder_test-trace\actionoverflow\edvr_gfx_action.draw-ladder-21.json" ^
+    "%BUILD%\draw_ladder_test-trace\unfinished\edvr_gfx_unfinished.log" ^
+    "%BUILD%\draw_ladder_test-trace\unfinished\edvr_gfx_unfinished.draw-ladder-22.json" ^
+    "%BUILD%\draw_ladder_test-trace\drawoverflow\edvr_gfx_draws.log" ^
+    "%BUILD%\draw_ladder_test-trace\shutdown\edvr_gfx_shutdown.log" ^
+    "%BUILD%\draw_ladder_test-trace\armedshutdown\edvr_gfx_armed_shutdown.log"
+del /q "%BUILD%\draw_ladder_test-trace\sunglarefacts\edvr_gfx_sunglare.log" ^
+    "%BUILD%\draw_ladder_test-trace\sunglarefacts\edvr_gfx_sunglare.draw-ladder-31.json" ^
+    "%BUILD%\draw_ladder_test-trace\sunglare_missing_fact\edvr_gfx_sunglare_missing.log" ^
+    "%BUILD%\draw_ladder_test-trace\sunglare_missing_fact\edvr_gfx_sunglare_missing.draw-ladder-32.json" ^
+    "%BUILD%\draw_ladder_test-trace\sunglare_wrong_kind\edvr_gfx_sunglare_wrong_kind.log" ^
+    "%BUILD%\draw_ladder_test-trace\sunglare_wrong_kind\edvr_gfx_sunglare_wrong_kind.draw-ladder-33.json" ^
+    "%BUILD%\draw_ladder_test-trace\sunglare_duplicate_fact\edvr_gfx_sunglare_duplicate.log" ^
+    "%BUILD%\draw_ladder_test-trace\sunglare_duplicate_fact\edvr_gfx_sunglare_duplicate.draw-ladder-34.json" ^
+    "%BUILD%\draw_ladder_test-trace\sunglare_unfinished_kind9\edvr_gfx_sunglare_unfinished.log" ^
+    "%BUILD%\draw_ladder_test-trace\sunglare_unfinished_kind9\edvr_gfx_sunglare_unfinished.draw-ladder-35.json" ^
+    "%BUILD%\draw_ladder_test-trace\sunglare_per_draw_cap\edvr_gfx_sunglare_per_draw.log" ^
+    "%BUILD%\draw_ladder_test-trace\sunglare_per_draw_cap\edvr_gfx_sunglare_per_draw.draw-ladder-37.json" ^
+    "%BUILD%\draw_ladder_test-trace\sunglare_pool_cap\edvr_gfx_sunglare_pool.log"
+if exist "%BUILD%\draw_ladder_test-trace\sunglarefacts" rmdir "%BUILD%\draw_ladder_test-trace\sunglarefacts"
+if exist "%BUILD%\draw_ladder_test-trace\sunglare_missing_fact" rmdir "%BUILD%\draw_ladder_test-trace\sunglare_missing_fact"
+if exist "%BUILD%\draw_ladder_test-trace\sunglare_wrong_kind" rmdir "%BUILD%\draw_ladder_test-trace\sunglare_wrong_kind"
+if exist "%BUILD%\draw_ladder_test-trace\sunglare_duplicate_fact" rmdir "%BUILD%\draw_ladder_test-trace\sunglare_duplicate_fact"
+if exist "%BUILD%\draw_ladder_test-trace\sunglare_unfinished_kind9" rmdir "%BUILD%\draw_ladder_test-trace\sunglare_unfinished_kind9"
+if exist "%BUILD%\draw_ladder_test-trace\sunglare_per_draw_cap" rmdir "%BUILD%\draw_ladder_test-trace\sunglare_per_draw_cap"
+if exist "%BUILD%\draw_ladder_test-trace\sunglare_pool_cap" rmdir "%BUILD%\draw_ladder_test-trace\sunglare_pool_cap"
+del /q "%BUILD%\draw_ladder_test-trace\fss_missing_fact\edvr_gfx_fss_missing.log" ^
+    "%BUILD%\draw_ladder_test-trace\fss_missing_fact\edvr_gfx_fss_missing.draw-ladder-40.json" ^
+    "%BUILD%\draw_ladder_test-trace\fss_wrong_kind\edvr_gfx_fss_wrong_kind.log" ^
+    "%BUILD%\draw_ladder_test-trace\fss_wrong_kind\edvr_gfx_fss_wrong_kind.draw-ladder-41.json" ^
+    "%BUILD%\draw_ladder_test-trace\fss_duplicate_fact\edvr_gfx_fss_duplicate.log" ^
+    "%BUILD%\draw_ladder_test-trace\fss_duplicate_fact\edvr_gfx_fss_duplicate.draw-ladder-42.json" ^
+    "%BUILD%\draw_ladder_test-trace\fss_unfinished_fact\edvr_gfx_fss_unfinished.log" ^
+    "%BUILD%\draw_ladder_test-trace\fss_unfinished_fact\edvr_gfx_fss_unfinished.draw-ladder-43.json" ^
+    "%BUILD%\draw_ladder_test-trace\fss_per_draw_cap\edvr_gfx_fss_per_draw.log" ^
+    "%BUILD%\draw_ladder_test-trace\fss_per_draw_cap\edvr_gfx_fss_per_draw.draw-ladder-44.json" ^
+    "%BUILD%\draw_ladder_test-trace\fss_pool_cap\edvr_gfx_fss_pool.log" ^
+    "%BUILD%\draw_ladder_test-trace\remlok_missing_fact\edvr_gfx_remlok_missing.log" ^
+    "%BUILD%\draw_ladder_test-trace\remlok_missing_fact\edvr_gfx_remlok_missing.draw-ladder-46.json" ^
+    "%BUILD%\draw_ladder_test-trace\remlok_duplicate_fact\edvr_gfx_remlok_duplicate.log" ^
+    "%BUILD%\draw_ladder_test-trace\remlok_duplicate_fact\edvr_gfx_remlok_duplicate.draw-ladder-47.json" ^
+    "%BUILD%\draw_ladder_test-trace\remlok_bad_read\edvr_gfx_remlok_bad_read.log" ^
+    "%BUILD%\draw_ladder_test-trace\remlok_bad_read\edvr_gfx_remlok_bad_read.draw-ladder-48.json" ^
+    "%BUILD%\draw_ladder_test-trace\remlok_unvisited\edvr_gfx_remlok_unvisited.log" ^
+    "%BUILD%\draw_ladder_test-trace\remlok_unvisited\edvr_gfx_remlok_unvisited.draw-ladder-49.json" ^
+    "%BUILD%\draw_ladder_test-trace\remlok_pool_cap\edvr_gfx_remlok_pool.log" ^
+    "%BUILD%\draw_ladder_test-trace\fss_probe_unknown\edvr_gfx_fss_probe_unknown.log" ^
+    "%BUILD%\draw_ladder_test-trace\fss_probe_unknown\edvr_gfx_fss_probe_unknown.draw-ladder-51.json" ^
+    "%BUILD%\draw_ladder_test-trace\basic_missing_fact\edvr_gfx_basic_missing.log" ^
+    "%BUILD%\draw_ladder_test-trace\basic_missing_fact\edvr_gfx_basic_missing.draw-ladder-52.json" ^
+    "%BUILD%\draw_ladder_test-trace\basic_duplicate_fact\edvr_gfx_basic_duplicate.log" ^
+    "%BUILD%\draw_ladder_test-trace\basic_duplicate_fact\edvr_gfx_basic_duplicate.draw-ladder-53.json" ^
+    "%BUILD%\draw_ladder_test-trace\basic_wrong_kind\edvr_gfx_basic_wrong_kind.log" ^
+    "%BUILD%\draw_ladder_test-trace\basic_wrong_kind\edvr_gfx_basic_wrong_kind.draw-ladder-54.json" ^
+    "%BUILD%\draw_ladder_test-trace\basic_bad_read\edvr_gfx_basic_bad_read.log" ^
+    "%BUILD%\draw_ladder_test-trace\basic_bad_read\edvr_gfx_basic_bad_read.draw-ladder-55.json" ^
+    "%BUILD%\draw_ladder_test-trace\basic_unvisited\edvr_gfx_basic_unvisited.log" ^
+    "%BUILD%\draw_ladder_test-trace\basic_unvisited\edvr_gfx_basic_unvisited.draw-ladder-56.json" ^
+    "%BUILD%\draw_ladder_test-trace\basic_unknown\edvr_gfx_basic_unknown.log" ^
+    "%BUILD%\draw_ladder_test-trace\basic_unknown\edvr_gfx_basic_unknown.draw-ladder-57.json" ^
+    "%BUILD%\draw_ladder_test-trace\basic_pool_cap\edvr_gfx_basic_pool.log"
+if exist "%BUILD%\draw_ladder_test-trace\fss_missing_fact" rmdir "%BUILD%\draw_ladder_test-trace\fss_missing_fact"
+if exist "%BUILD%\draw_ladder_test-trace\fss_wrong_kind" rmdir "%BUILD%\draw_ladder_test-trace\fss_wrong_kind"
+if exist "%BUILD%\draw_ladder_test-trace\fss_duplicate_fact" rmdir "%BUILD%\draw_ladder_test-trace\fss_duplicate_fact"
+if exist "%BUILD%\draw_ladder_test-trace\fss_unfinished_fact" rmdir "%BUILD%\draw_ladder_test-trace\fss_unfinished_fact"
+if exist "%BUILD%\draw_ladder_test-trace\fss_per_draw_cap" rmdir "%BUILD%\draw_ladder_test-trace\fss_per_draw_cap"
+if exist "%BUILD%\draw_ladder_test-trace\fss_pool_cap" rmdir "%BUILD%\draw_ladder_test-trace\fss_pool_cap"
+if exist "%BUILD%\draw_ladder_test-trace\remlok_missing_fact" rmdir "%BUILD%\draw_ladder_test-trace\remlok_missing_fact"
+if exist "%BUILD%\draw_ladder_test-trace\remlok_duplicate_fact" rmdir "%BUILD%\draw_ladder_test-trace\remlok_duplicate_fact"
+if exist "%BUILD%\draw_ladder_test-trace\remlok_bad_read" rmdir "%BUILD%\draw_ladder_test-trace\remlok_bad_read"
+if exist "%BUILD%\draw_ladder_test-trace\remlok_unvisited" rmdir "%BUILD%\draw_ladder_test-trace\remlok_unvisited"
+if exist "%BUILD%\draw_ladder_test-trace\remlok_pool_cap" rmdir "%BUILD%\draw_ladder_test-trace\remlok_pool_cap"
+if exist "%BUILD%\draw_ladder_test-trace\fss_probe_unknown" rmdir "%BUILD%\draw_ladder_test-trace\fss_probe_unknown"
+if exist "%BUILD%\draw_ladder_test-trace\basic_missing_fact" rmdir "%BUILD%\draw_ladder_test-trace\basic_missing_fact"
+if exist "%BUILD%\draw_ladder_test-trace\basic_duplicate_fact" rmdir "%BUILD%\draw_ladder_test-trace\basic_duplicate_fact"
+if exist "%BUILD%\draw_ladder_test-trace\basic_wrong_kind" rmdir "%BUILD%\draw_ladder_test-trace\basic_wrong_kind"
+if exist "%BUILD%\draw_ladder_test-trace\basic_bad_read" rmdir "%BUILD%\draw_ladder_test-trace\basic_bad_read"
+if exist "%BUILD%\draw_ladder_test-trace\basic_unvisited" rmdir "%BUILD%\draw_ladder_test-trace\basic_unvisited"
+if exist "%BUILD%\draw_ladder_test-trace\basic_unknown" rmdir "%BUILD%\draw_ladder_test-trace\basic_unknown"
+if exist "%BUILD%\draw_ladder_test-trace\basic_pool_cap" rmdir "%BUILD%\draw_ladder_test-trace\basic_pool_cap"
+del /q "%BUILD%\draw_ladder_test-trace\eye_census_missing\edvr_gfx_eye_missing.log"
+del /q "%BUILD%\draw_ladder_test-trace\eye_census_missing\edvr_gfx_eye_missing.draw-ladder-59.json"
+if exist "%BUILD%\draw_ladder_test-trace\eye_census_missing" rmdir "%BUILD%\draw_ladder_test-trace\eye_census_missing"
+del /q "%BUILD%\draw_ladder_test-trace\eye_census_duplicate\edvr_gfx_eye_duplicate.log"
+del /q "%BUILD%\draw_ladder_test-trace\eye_census_duplicate\edvr_gfx_eye_duplicate.draw-ladder-60.json"
+if exist "%BUILD%\draw_ladder_test-trace\eye_census_duplicate" rmdir "%BUILD%\draw_ladder_test-trace\eye_census_duplicate"
+del /q "%BUILD%\draw_ladder_test-trace\eye_census_wrong_kind\edvr_gfx_eye_wrong_kind.log"
+del /q "%BUILD%\draw_ladder_test-trace\eye_census_wrong_kind\edvr_gfx_eye_wrong_kind.draw-ladder-61.json"
+if exist "%BUILD%\draw_ladder_test-trace\eye_census_wrong_kind" rmdir "%BUILD%\draw_ladder_test-trace\eye_census_wrong_kind"
+del /q "%BUILD%\draw_ladder_test-trace\eye_census_bad_read\edvr_gfx_eye_bad_read.log"
+del /q "%BUILD%\draw_ladder_test-trace\eye_census_bad_read\edvr_gfx_eye_bad_read.draw-ladder-62.json"
+if exist "%BUILD%\draw_ladder_test-trace\eye_census_bad_read" rmdir "%BUILD%\draw_ladder_test-trace\eye_census_bad_read"
+del /q "%BUILD%\draw_ladder_test-trace\eye_census_over_capacity\edvr_gfx_eye_over_capacity.log"
+del /q "%BUILD%\draw_ladder_test-trace\eye_census_over_capacity\edvr_gfx_eye_over_capacity.draw-ladder-63.json"
+if exist "%BUILD%\draw_ladder_test-trace\eye_census_over_capacity" rmdir "%BUILD%\draw_ladder_test-trace\eye_census_over_capacity"
+del /q "%BUILD%\draw_ladder_test-trace\eye_census_unvisited\edvr_gfx_eye_unvisited.log"
+del /q "%BUILD%\draw_ladder_test-trace\eye_census_unvisited\edvr_gfx_eye_unvisited.draw-ladder-64.json"
+if exist "%BUILD%\draw_ladder_test-trace\eye_census_unvisited" rmdir "%BUILD%\draw_ladder_test-trace\eye_census_unvisited"
+del /q "%BUILD%\draw_ladder_test-trace\eye_census_unknown\edvr_gfx_eye_unknown.log"
+del /q "%BUILD%\draw_ladder_test-trace\eye_census_unknown\edvr_gfx_eye_unknown.draw-ladder-65.json"
+if exist "%BUILD%\draw_ladder_test-trace\eye_census_unknown" rmdir "%BUILD%\draw_ladder_test-trace\eye_census_unknown"
+del /q "%BUILD%\draw_ladder_test-trace\eye_census_pool\edvr_gfx_eye_pool.log"
+if exist "%BUILD%\draw_ladder_test-trace\eye_census_pool" rmdir "%BUILD%\draw_ladder_test-trace\eye_census_pool"
+del /q "%BUILD%\draw_ladder_test-trace\eye_census_positive\edvr_gfx_eye_positive.log"
+del /q "%BUILD%\draw_ladder_test-trace\eye_census_positive\edvr_gfx_eye_positive.draw-ladder-67.json"
+if exist "%BUILD%\draw_ladder_test-trace\eye_census_positive" rmdir "%BUILD%\draw_ladder_test-trace\eye_census_positive"
+del /q "%BUILD%\draw_ladder_test-trace\resolve_bind_missing\edvr_gfx_resolve_missing.log"
+del /q "%BUILD%\draw_ladder_test-trace\resolve_bind_missing\edvr_gfx_resolve_missing.draw-ladder-68.json"
+if exist "%BUILD%\draw_ladder_test-trace\resolve_bind_missing" rmdir "%BUILD%\draw_ladder_test-trace\resolve_bind_missing"
+del /q "%BUILD%\draw_ladder_test-trace\resolve_bind_duplicate\edvr_gfx_resolve_duplicate.log"
+del /q "%BUILD%\draw_ladder_test-trace\resolve_bind_duplicate\edvr_gfx_resolve_duplicate.draw-ladder-69.json"
+if exist "%BUILD%\draw_ladder_test-trace\resolve_bind_duplicate" rmdir "%BUILD%\draw_ladder_test-trace\resolve_bind_duplicate"
+del /q "%BUILD%\draw_ladder_test-trace\resolve_bind_wrong_kind\edvr_gfx_resolve_wrong_kind.log"
+del /q "%BUILD%\draw_ladder_test-trace\resolve_bind_wrong_kind\edvr_gfx_resolve_wrong_kind.draw-ladder-70.json"
+if exist "%BUILD%\draw_ladder_test-trace\resolve_bind_wrong_kind" rmdir "%BUILD%\draw_ladder_test-trace\resolve_bind_wrong_kind"
+del /q "%BUILD%\draw_ladder_test-trace\resolve_bind_bad_read\edvr_gfx_resolve_bad_read.log"
+del /q "%BUILD%\draw_ladder_test-trace\resolve_bind_bad_read\edvr_gfx_resolve_bad_read.draw-ladder-71.json"
+if exist "%BUILD%\draw_ladder_test-trace\resolve_bind_bad_read" rmdir "%BUILD%\draw_ladder_test-trace\resolve_bind_bad_read"
+del /q "%BUILD%\draw_ladder_test-trace\resolve_bind_unvisited\edvr_gfx_resolve_unvisited.log"
+del /q "%BUILD%\draw_ladder_test-trace\resolve_bind_unvisited\edvr_gfx_resolve_unvisited.draw-ladder-72.json"
+if exist "%BUILD%\draw_ladder_test-trace\resolve_bind_unvisited" rmdir "%BUILD%\draw_ladder_test-trace\resolve_bind_unvisited"
+del /q "%BUILD%\draw_ladder_test-trace\resolve_bind_unknown\edvr_gfx_resolve_unknown.log"
+del /q "%BUILD%\draw_ladder_test-trace\resolve_bind_unknown\edvr_gfx_resolve_unknown.draw-ladder-73.json"
+if exist "%BUILD%\draw_ladder_test-trace\resolve_bind_unknown" rmdir "%BUILD%\draw_ladder_test-trace\resolve_bind_unknown"
+del /q "%BUILD%\draw_ladder_test-trace\resolve_bind_pool\edvr_gfx_resolve_pool.log"
+if exist "%BUILD%\draw_ladder_test-trace\resolve_bind_pool" rmdir "%BUILD%\draw_ladder_test-trace\resolve_bind_pool"
+del /q "%BUILD%\draw_ladder_test-trace\resolve_bind_positive\edvr_gfx_resolve_positive.log"
+del /q "%BUILD%\draw_ladder_test-trace\resolve_bind_positive\edvr_gfx_resolve_positive.draw-ladder-75.json"
+if exist "%BUILD%\draw_ladder_test-trace\resolve_bind_positive" rmdir "%BUILD%\draw_ladder_test-trace\resolve_bind_positive"
+del /q "%BUILD%\draw_ladder_test-trace\resolve_bind_negative\edvr_gfx_resolve_negative.log"
+del /q "%BUILD%\draw_ladder_test-trace\resolve_bind_negative\edvr_gfx_resolve_negative.draw-ladder-76.json"
+if exist "%BUILD%\draw_ladder_test-trace\resolve_bind_negative" rmdir "%BUILD%\draw_ladder_test-trace\resolve_bind_negative"
+del /q "%BUILD%\draw_ladder_test-trace\loader_panel_missing\edvr_gfx_loader_panel_missing.draw-ladder-77.json"
+del /q "%BUILD%\draw_ladder_test-trace\loader_panel_missing\edvr_gfx_loader_panel_missing.log"
+if exist "%BUILD%\draw_ladder_test-trace\loader_panel_missing" rmdir "%BUILD%\draw_ladder_test-trace\loader_panel_missing"
+del /q "%BUILD%\draw_ladder_test-trace\loader_panel_duplicate\edvr_gfx_loader_panel_duplicate.draw-ladder-78.json"
+del /q "%BUILD%\draw_ladder_test-trace\loader_panel_duplicate\edvr_gfx_loader_panel_duplicate.log"
+if exist "%BUILD%\draw_ladder_test-trace\loader_panel_duplicate" rmdir "%BUILD%\draw_ladder_test-trace\loader_panel_duplicate"
+del /q "%BUILD%\draw_ladder_test-trace\loader_panel_wrong_kind\edvr_gfx_loader_panel_wrong_kind.draw-ladder-79.json"
+del /q "%BUILD%\draw_ladder_test-trace\loader_panel_wrong_kind\edvr_gfx_loader_panel_wrong_kind.log"
+if exist "%BUILD%\draw_ladder_test-trace\loader_panel_wrong_kind" rmdir "%BUILD%\draw_ladder_test-trace\loader_panel_wrong_kind"
+del /q "%BUILD%\draw_ladder_test-trace\loader_panel_bad_read\edvr_gfx_loader_panel_bad_read.draw-ladder-80.json"
+del /q "%BUILD%\draw_ladder_test-trace\loader_panel_bad_read\edvr_gfx_loader_panel_bad_read.log"
+if exist "%BUILD%\draw_ladder_test-trace\loader_panel_bad_read" rmdir "%BUILD%\draw_ladder_test-trace\loader_panel_bad_read"
+del /q "%BUILD%\draw_ladder_test-trace\loader_panel_unvisited\edvr_gfx_loader_panel_unvisited.draw-ladder-81.json"
+del /q "%BUILD%\draw_ladder_test-trace\loader_panel_unvisited\edvr_gfx_loader_panel_unvisited.log"
+if exist "%BUILD%\draw_ladder_test-trace\loader_panel_unvisited" rmdir "%BUILD%\draw_ladder_test-trace\loader_panel_unvisited"
+del /q "%BUILD%\draw_ladder_test-trace\loader_panel_unknown\edvr_gfx_loader_panel_unknown.draw-ladder-82.json"
+del /q "%BUILD%\draw_ladder_test-trace\loader_panel_unknown\edvr_gfx_loader_panel_unknown.log"
+if exist "%BUILD%\draw_ladder_test-trace\loader_panel_unknown" rmdir "%BUILD%\draw_ladder_test-trace\loader_panel_unknown"
+del /q "%BUILD%\draw_ladder_test-trace\loader_panel_chain_over_capacity\edvr_gfx_loader_panel_chain_over_capacity.draw-ladder-83.json"
+del /q "%BUILD%\draw_ladder_test-trace\loader_panel_chain_over_capacity\edvr_gfx_loader_panel_chain_over_capacity.log"
+if exist "%BUILD%\draw_ladder_test-trace\loader_panel_chain_over_capacity" rmdir "%BUILD%\draw_ladder_test-trace\loader_panel_chain_over_capacity"
+del /q "%BUILD%\draw_ladder_test-trace\loader_panel_pool_cap\edvr_gfx_loader_panel_pool_cap.log"
+if exist "%BUILD%\draw_ladder_test-trace\loader_panel_pool_cap" rmdir "%BUILD%\draw_ladder_test-trace\loader_panel_pool_cap"
+del /q "%BUILD%\draw_ladder_test-trace\loader_panel_positive_negative\edvr_gfx_loader_panel_paths.draw-ladder-85.json"
+del /q "%BUILD%\draw_ladder_test-trace\loader_panel_positive_negative\edvr_gfx_loader_panel_paths.log"
+if exist "%BUILD%\draw_ladder_test-trace\loader_panel_positive_negative" rmdir "%BUILD%\draw_ladder_test-trace\loader_panel_positive_negative"
+del /q "%BUILD%\draw_ladder_test-trace\loader_panel_mutation_warning\edvr_gfx_loader_panel_mutation_warning.draw-ladder-86.json"
+del /q "%BUILD%\draw_ladder_test-trace\loader_panel_mutation_warning\edvr_gfx_loader_panel_mutation_warning.log"
+if exist "%BUILD%\draw_ladder_test-trace\loader_panel_mutation_warning" rmdir "%BUILD%\draw_ladder_test-trace\loader_panel_mutation_warning"
+del /q "%BUILD%\draw_ladder_test-trace\fss_dump_missing\edvr_gfx_fss_dump_missing.log" "%BUILD%\draw_ladder_test-trace\fss_dump_missing\edvr_gfx_fss_dump_missing.draw-ladder-87.json"
+if exist "%BUILD%\draw_ladder_test-trace\fss_dump_missing" rmdir "%BUILD%\draw_ladder_test-trace\fss_dump_missing"
+del /q "%BUILD%\draw_ladder_test-trace\fss_dump_duplicate\edvr_gfx_fss_dump_duplicate.log" "%BUILD%\draw_ladder_test-trace\fss_dump_duplicate\edvr_gfx_fss_dump_duplicate.draw-ladder-88.json"
+if exist "%BUILD%\draw_ladder_test-trace\fss_dump_duplicate" rmdir "%BUILD%\draw_ladder_test-trace\fss_dump_duplicate"
+del /q "%BUILD%\draw_ladder_test-trace\fss_dump_wrong_kind\edvr_gfx_fss_dump_wrong_kind.log" "%BUILD%\draw_ladder_test-trace\fss_dump_wrong_kind\edvr_gfx_fss_dump_wrong_kind.draw-ladder-89.json"
+if exist "%BUILD%\draw_ladder_test-trace\fss_dump_wrong_kind" rmdir "%BUILD%\draw_ladder_test-trace\fss_dump_wrong_kind"
+del /q "%BUILD%\draw_ladder_test-trace\fss_dump_bad_read\edvr_gfx_fss_dump_bad_read.log" "%BUILD%\draw_ladder_test-trace\fss_dump_bad_read\edvr_gfx_fss_dump_bad_read.draw-ladder-90.json"
+if exist "%BUILD%\draw_ladder_test-trace\fss_dump_bad_read" rmdir "%BUILD%\draw_ladder_test-trace\fss_dump_bad_read"
+del /q "%BUILD%\draw_ladder_test-trace\fss_dump_unvisited\edvr_gfx_fss_dump_unvisited.log" "%BUILD%\draw_ladder_test-trace\fss_dump_unvisited\edvr_gfx_fss_dump_unvisited.draw-ladder-91.json"
+if exist "%BUILD%\draw_ladder_test-trace\fss_dump_unvisited" rmdir "%BUILD%\draw_ladder_test-trace\fss_dump_unvisited"
+del /q "%BUILD%\draw_ladder_test-trace\fss_dump_unknown\edvr_gfx_fss_dump_unknown.log" "%BUILD%\draw_ladder_test-trace\fss_dump_unknown\edvr_gfx_fss_dump_unknown.draw-ladder-92.json"
+if exist "%BUILD%\draw_ladder_test-trace\fss_dump_unknown" rmdir "%BUILD%\draw_ladder_test-trace\fss_dump_unknown"
+del /q "%BUILD%\draw_ladder_test-trace\fss_dump_pool_cap\edvr_gfx_fss_dump_pool.log"
+if exist "%BUILD%\draw_ladder_test-trace\fss_dump_pool_cap" rmdir "%BUILD%\draw_ladder_test-trace\fss_dump_pool_cap"
+del /q "%BUILD%\draw_ladder_test-trace\fss_dump_positive_negative\edvr_gfx_fss_dump_paths.log" "%BUILD%\draw_ladder_test-trace\fss_dump_positive_negative\edvr_gfx_fss_dump_paths.draw-ladder-94.json"
+if exist "%BUILD%\draw_ladder_test-trace\fss_dump_positive_negative" rmdir "%BUILD%\draw_ladder_test-trace\fss_dump_positive_negative"
+del /q "%BUILD%\draw_ladder_test-trace\fss_dump_counter_wrap\edvr_gfx_fss_dump_wrap.log" "%BUILD%\draw_ladder_test-trace\fss_dump_counter_wrap\edvr_gfx_fss_dump_wrap.draw-ladder-95.json"
+if exist "%BUILD%\draw_ladder_test-trace\fss_dump_counter_wrap" rmdir "%BUILD%\draw_ladder_test-trace\fss_dump_counter_wrap"
+del /q "%BUILD%\draw_ladder_test-trace\forward_none_applied\edvr_gfx_forward_none_applied.log" "%BUILD%\draw_ladder_test-trace\forward_none_applied\edvr_gfx_forward_none_applied.draw-ladder-96.json"
+if exist "%BUILD%\draw_ladder_test-trace\forward_none_applied" rmdir "%BUILD%\draw_ladder_test-trace\forward_none_applied"
+del /q "%BUILD%\draw_ladder_test-trace\forward_none_declined\edvr_gfx_forward_none_declined.log" "%BUILD%\draw_ladder_test-trace\forward_none_declined\edvr_gfx_forward_none_declined.draw-ladder-97.json"
+if exist "%BUILD%\draw_ladder_test-trace\forward_none_declined" rmdir "%BUILD%\draw_ladder_test-trace\forward_none_declined"
+del /q "%BUILD%\draw_ladder_test-trace\forward_skip\edvr_gfx_forward_skip.log" "%BUILD%\draw_ladder_test-trace\forward_skip\edvr_gfx_forward_skip.draw-ladder-98.json"
+if exist "%BUILD%\draw_ladder_test-trace\forward_skip" rmdir "%BUILD%\draw_ladder_test-trace\forward_skip"
+del /q "%BUILD%\draw_ladder_test-trace\forward_unavailable\edvr_gfx_forward_unavailable.log" "%BUILD%\draw_ladder_test-trace\forward_unavailable\edvr_gfx_forward_unavailable.draw-ladder-99.json"
+if exist "%BUILD%\draw_ladder_test-trace\forward_unavailable" rmdir "%BUILD%\draw_ladder_test-trace\forward_unavailable"
+del /q "%BUILD%\draw_ladder_test-trace\forward_unknown\edvr_gfx_forward_unknown.log" "%BUILD%\draw_ladder_test-trace\forward_unknown\edvr_gfx_forward_unknown.draw-ladder-100.json"
+if exist "%BUILD%\draw_ladder_test-trace\forward_unknown" rmdir "%BUILD%\draw_ladder_test-trace\forward_unknown"
+del /q "%BUILD%\draw_ladder_test-trace\forward_duplicate\edvr_gfx_forward_duplicate.log"
+if exist "%BUILD%\draw_ladder_test-trace\forward_duplicate" rmdir "%BUILD%\draw_ladder_test-trace\forward_duplicate"
+del /q "%BUILD%\draw_ladder_test-trace\forward_malformed\edvr_gfx_forward_malformed.log"
+if exist "%BUILD%\draw_ladder_test-trace\forward_malformed" rmdir "%BUILD%\draw_ladder_test-trace\forward_malformed"
+del /q "%BUILD%\draw_ladder_test-trace\forward_pool_overflow\edvr_gfx_forward_pool_overflow.log"
+if exist "%BUILD%\draw_ladder_test-trace\forward_pool_overflow" rmdir "%BUILD%\draw_ladder_test-trace\forward_pool_overflow"
+if exist "%BUILD%\draw_ladder_test-trace\disabled" rmdir "%BUILD%\draw_ladder_test-trace\disabled"
+if exist "%BUILD%\draw_ladder_test-trace\valid" rmdir "%BUILD%\draw_ladder_test-trace\valid"
+if exist "%BUILD%\draw_ladder_test-trace\terminalmatrix" rmdir "%BUILD%\draw_ladder_test-trace\terminalmatrix"
+if exist "%BUILD%\draw_ladder_test-trace\generatedinvalid" rmdir "%BUILD%\draw_ladder_test-trace\generatedinvalid"
+if exist "%BUILD%\draw_ladder_test-trace\invalidtoken" rmdir "%BUILD%\draw_ladder_test-trace\invalidtoken"
+if exist "%BUILD%\draw_ladder_test-trace\postfinalized" rmdir "%BUILD%\draw_ladder_test-trace\postfinalized"
+if exist "%BUILD%\draw_ladder_test-trace\duplicatefacts" rmdir "%BUILD%\draw_ladder_test-trace\duplicatefacts"
+if exist "%BUILD%\draw_ladder_test-trace\reloadinvalid" rmdir "%BUILD%\draw_ladder_test-trace\reloadinvalid"
+if exist "%BUILD%\draw_ladder_test-trace\duplicatepredicatefacts" rmdir "%BUILD%\draw_ladder_test-trace\duplicatepredicatefacts"
+if exist "%BUILD%\draw_ladder_test-trace\missingpredicatefacts" rmdir "%BUILD%\draw_ladder_test-trace\missingpredicatefacts"
+if exist "%BUILD%\draw_ladder_test-trace\invalidcounterdelta" rmdir "%BUILD%\draw_ladder_test-trace\invalidcounterdelta"
+if exist "%BUILD%\draw_ladder_test-trace\missingnightvisionfact" rmdir "%BUILD%\draw_ladder_test-trace\missingnightvisionfact"
+if exist "%BUILD%\draw_ladder_test-trace\unfinishedwitchspacestars" rmdir "%BUILD%\draw_ladder_test-trace\unfinishedwitchspacestars"
+if exist "%BUILD%\draw_ladder_test-trace\missingoffscreenfacts" rmdir "%BUILD%\draw_ladder_test-trace\missingoffscreenfacts"
+if exist "%BUILD%\draw_ladder_test-trace\unfinishedoffscreenfact" rmdir "%BUILD%\draw_ladder_test-trace\unfinishedoffscreenfact"
+if exist "%BUILD%\draw_ladder_test-trace\missingholo53fact" rmdir "%BUILD%\draw_ladder_test-trace\missingholo53fact"
+if exist "%BUILD%\draw_ladder_test-trace\missingscrim55fact" rmdir "%BUILD%\draw_ladder_test-trace\missingscrim55fact"
+if exist "%BUILD%\draw_ladder_test-trace\unfinishedholo53fact" rmdir "%BUILD%\draw_ladder_test-trace\unfinishedholo53fact"
+if exist "%BUILD%\draw_ladder_test-trace\unfinishedscrim55fact" rmdir "%BUILD%\draw_ladder_test-trace\unfinishedscrim55fact"
+if exist "%BUILD%\draw_ladder_test-trace\wrongholo53kind" rmdir "%BUILD%\draw_ladder_test-trace\wrongholo53kind"
+if exist "%BUILD%\draw_ladder_test-trace\duplicateholo53fact" rmdir "%BUILD%\draw_ladder_test-trace\duplicateholo53fact"
+if exist "%BUILD%\draw_ladder_test-trace\factcapoverflow" rmdir "%BUILD%\draw_ladder_test-trace\factcapoverflow"
+if exist "%BUILD%\draw_ladder_test-trace\siteoverflow" rmdir "%BUILD%\draw_ladder_test-trace\siteoverflow"
+if exist "%BUILD%\draw_ladder_test-trace\actionoverflow" rmdir "%BUILD%\draw_ladder_test-trace\actionoverflow"
+if exist "%BUILD%\draw_ladder_test-trace\unfinished" rmdir "%BUILD%\draw_ladder_test-trace\unfinished"
+if exist "%BUILD%\draw_ladder_test-trace\drawoverflow" rmdir "%BUILD%\draw_ladder_test-trace\drawoverflow"
+if exist "%BUILD%\draw_ladder_test-trace\shutdown" rmdir "%BUILD%\draw_ladder_test-trace\shutdown"
+if exist "%BUILD%\draw_ladder_test-trace\armedshutdown" rmdir "%BUILD%\draw_ladder_test-trace\armedshutdown"
+if exist "%BUILD%\draw_ladder_test-trace" rmdir "%BUILD%\draw_ladder_test-trace"
 exit /b 0
 
 :rig_journal_unload_test
@@ -1963,17 +2903,118 @@ exit /b 0
 :rig_scrim_metadata_test
 echo [edvr] === scrim metadata cache regression ===
 if not exist "%OBJ%\scrimmetadata" mkdir "%OBJ%\scrimmetadata"
-cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
     /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /DEDVR_SCRIM_METADATA_TEST ^
     /Fo"%OBJ%\scrimmetadata\\" /Fe"%OBJ%\scrimmetadata\scrim_metadata_test.exe" ^
     "tools\scrim_metadata_test\scrim_metadata_test.cpp" ^
-    "src\d3d11\scrim_fix.cpp" "src\d3d11\binding_shadow.cpp" ^
+    "src\d3d11\scrim_fix.cpp" "src\d3d11\binding_shadow.cpp" "src\d3d11\plugin_cost.cpp" ^
     "src\common\vtable_hook.cpp" "src\common\code_hook.cpp" ^
     "src\common\log.cpp" "src\common\config.cpp" "src\common\proxy.cpp" ^
     "src\common\guard.cpp" ^
     /link /INCREMENTAL:NO user32.lib version.lib
 if errorlevel 1 ( echo [edvr] ERROR: scrim metadata test build failed & exit /b 1 )
 "%OBJ%\scrimmetadata\scrim_metadata_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_vscreen_predicate_test
+echo [edvr] === actual VScreen predicate producer regression ===
+if not exist "%OBJ%\vscreenpredicate" mkdir "%OBJ%\vscreenpredicate"
+REM The actual visitor lives in the graphics module. Link this isolated EXE
+REM against the completed production object set, replacing the
+REM macro-test translation units. These inputs are built before the rig pool.
+if not exist "%OBJ%\d3d11\vscreen.obj" exit /b 1
+if not exist "%OBJ%\d3d11\draw_ladder_trace.obj" exit /b 1
+cl.exe /I"%GEN%" /nologo /c /O2 /Gy /Gw /MT /std:c++17 /EHsc /W4 /GR- ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE ^
+    /DEDVR_VSCREEN_PREDICATE_TEST /DEDVR_VERSION_STRING=\"%EDVR_VER%\" %NGXFLAGS% %FSRFLAGS% ^
+    /Fo"%OBJ%\vscreenpredicate\\" ^
+    "tools\vscreen_predicate_test\vscreen_predicate_test.cpp" ^
+    "src\d3d11\vscreen.cpp" "src\d3d11\ui_layer.cpp" "src\d3d11\draw_ladder_trace.cpp" "src\plugins\intro\loader_panel.cpp" "src\d3d11\target_sharp.cpp" "src\d3d11\sunglare_fix.cpp"
+if errorlevel 1 ( echo [edvr] ERROR: VScreen predicate test compile failed & exit /b 1 )
+> "%OBJ%\vscreenpredicate\production_objects.rsp" (
+    for %%F in ("%OBJ%\d3d11\*.obj") do (
+        if /I not "%%~nxF"=="vscreen.obj" if /I not "%%~nxF"=="ui_layer.obj" if /I not "%%~nxF"=="draw_ladder_trace.obj" if /I not "%%~nxF"=="loader_panel.obj" if /I not "%%~nxF"=="target_sharp.obj" if /I not "%%~nxF"=="sunglare_fix.obj" echo "%%~fF"
+    )
+)
+link.exe /nologo /MACHINE:X64 /INCREMENTAL:NO /OPT:REF ^
+    /OUT:"%BUILD%\vscreen_predicate_test.exe" ^
+    "%OBJ%\vscreenpredicate\vscreen_predicate_test.obj" ^
+    "%OBJ%\vscreenpredicate\vscreen.obj" "%OBJ%\vscreenpredicate\ui_layer.obj" "%OBJ%\vscreenpredicate\draw_ladder_trace.obj" ^
+    "%OBJ%\vscreenpredicate\loader_panel.obj" "%OBJ%\vscreenpredicate\target_sharp.obj" "%OBJ%\vscreenpredicate\sunglare_fix.obj" ^
+    @"%OBJ%\vscreenpredicate\production_objects.rsp" ^
+    "%OBJ%\plugins\cockpit_visuals\plugin_cockpit_visuals.lib" ^
+    "%OBJ%\plugins\intro\plugin_intro.lib" "%OBJ%\plugins\exposure\plugin_exposure.lib" ^
+    "%OBJ%\plugins\on_foot_panel\plugin_on_foot_panel.lib" ^
+    "%OBJ%\plugins\scanners\plugin_scanners.lib" "%OBJ%\plugins\comfort\plugin_comfort.lib" ^
+    "%OBJ%\plugins\temporal_aa\plugin_temporal_aa.lib" "%OBJ%\plugins\diagnostics\plugin_diagnostics.lib" ^
+    kernel32.lib user32.lib gdi32.lib version.lib d3dcompiler.lib %NGXLIB% %FSRLIB%
+if errorlevel 1 ( echo [edvr] ERROR: VScreen predicate test build failed & exit /b 1 )
+"%BUILD%\vscreen_predicate_test.exe" --dry-run || exit /b 1
+"%BUILD%\vscreen_predicate_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_loader_panel_api_test
+echo [edvr] === loader-panel staging API owner regression ===
+if not exist "%OBJ%\loaderpanelapi" mkdir "%OBJ%\loaderpanelapi"
+cl.exe /I"%GEN%" /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /DEDVR_VERSION_STRING=\"%EDVR_VER%\" ^
+    /Fo"%OBJ%\loaderpanelapi\\" /Fe"%BUILD%\loader_panel_api_test.exe" ^
+    "tools\loader_panel_api_test\loader_panel_api_test.cpp" ^
+    "src\plugins\intro\loader_panel.cpp" "src\d3d11\plugin_cost.cpp" ^
+    "src\common\guard.cpp" ^
+    "src\common\vtable_hook.cpp" "src\common\code_hook.cpp" ^
+    /link /INCREMENTAL:NO /OPT:REF kernel32.lib user32.lib version.lib
+if errorlevel 1 ( echo [edvr] ERROR: loader-panel API test build failed & exit /b 1 )
+"%BUILD%\loader_panel_api_test.exe" --dry-run || exit /b 1
+"%BUILD%\loader_panel_api_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_shader_swap_api_test
+echo [edvr] === shared shader creation API attempts ===
+if not exist "%OBJ%\shaderswapapi" mkdir "%OBJ%\shaderswapapi"
+cl.exe /I"%GEN%" /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\shaderswapapi\\" /Fe"%BUILD%\shader_swap_api_test.exe" ^
+    "tools\shader_swap_api_test\shader_swap_api_test.cpp" ^
+    "src\d3d11\shader_swap.cpp" "src\d3d11\plugin_cost.cpp" ^
+    "src\common\guard.cpp" "src\common\vtable_hook.cpp" "src\common\code_hook.cpp" ^
+    /link /INCREMENTAL:NO /OPT:REF kernel32.lib user32.lib d3dcompiler.lib
+if errorlevel 1 ( echo [edvr] ERROR: shader creation API test build failed & exit /b 1 )
+"%BUILD%\shader_swap_api_test.exe" --dry-run || exit /b 1
+"%BUILD%\shader_swap_api_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_splash_dim_api_test
+echo [edvr] === splash dim API owner and state regression ===
+if not exist "%OBJ%\splashdimapi" mkdir "%OBJ%\splashdimapi"
+cl.exe /I"%GEN%" /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\splashdimapi\\" /Fe"%BUILD%\splash_dim_api_test.exe" ^
+    "tools\splash_dim_api_test\splash_dim_api_test.cpp" ^
+    "src\plugins\intro\splash_dim.cpp" "src\d3d11\binding_shadow.cpp" ^
+    "src\d3d11\shader_swap.cpp" "src\d3d11\plugin_cost.cpp" ^
+    "src\common\guard.cpp" "src\common\vtable_hook.cpp" "src\common\code_hook.cpp" ^
+    /link /INCREMENTAL:NO /OPT:REF d3dcompiler.lib
+if errorlevel 1 ( echo [edvr] ERROR: splash dim API test build failed & exit /b 1 )
+"%BUILD%\splash_dim_api_test.exe" --dry-run || exit /b 1
+"%BUILD%\splash_dim_api_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_remlok_predicate_test
+echo [edvr] === remlok predicate and mutation regression ===
+if not exist "%OBJ%\remlokpredicate" mkdir "%OBJ%\remlokpredicate"
+cl.exe /I"%GEN%" /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /DEDVR_REMLOK_PREDICATE_TEST ^
+    /Fo"%OBJ%\remlokpredicate\\" /Fe"%BUILD%\remlok_predicate_test.exe" ^
+    "tools\remlok_predicate_test\remlok_predicate_test.cpp" ^
+    "src\d3d11\remlok_fix.cpp" "src\d3d11\binding_shadow.cpp" "src\d3d11\plugin_cost.cpp" ^
+    "src\common\vtable_hook.cpp" "src\common\code_hook.cpp" ^
+    "src\common\config.cpp" "src\common\log.cpp" "src\common\proxy.cpp" "src\common\guard.cpp" ^
+    /link /INCREMENTAL:NO /OPT:REF user32.lib version.lib
+if errorlevel 1 ( echo [edvr] ERROR: remlok predicate test build failed & exit /b 1 )
+"%BUILD%\remlok_predicate_test.exe" --dry-run || exit /b 1
+"%BUILD%\remlok_predicate_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_object_classification
@@ -2897,6 +3938,24 @@ if errorlevel 1 ( echo [edvr] ERROR: engine velocity test build failed & exit /b
 python "tools\engine_velocity_test\mutants.py" --self-test || exit /b 1
 exit /b 0
 
+:rig_engine_velocity_cost_test
+echo [edvr] === engine_velocity_cost_test.exe ===
+REM Separate real plugin-cost backend link: production cause-aware flat restore
+REM on WARP, then the production 1800-frame V2 Present window. The ordinary
+REM engine_velocity_test keeps its isolated fake API probe and remains unchanged.
+if not exist "%OBJ%\enginevelocitycost" mkdir "%OBJ%\enginevelocitycost"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /utf-8 ^
+    /DEDVR_ENGINE_VELOCITY_RIG /DEDVR_ENGINE_VELOCITY_REAL_COST_RIG /DEDVR_BINDING_SHADOW_EXTERNAL /I"%GEN%" ^
+    /Fo"%OBJ%\enginevelocitycost\\" /Fe"%OBJ%\enginevelocitycost\engine_velocity_cost_test.exe" ^
+    "tools\engine_velocity_test\engine_velocity_test.cpp" "src\d3d11\engine_velocity.cpp" "src\d3d11\skin_join_gpu.cpp" ^
+    "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" "src\d3d11\plugin_cost.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib dxguid.lib
+if errorlevel 1 ( echo [edvr] ERROR: engine velocity real cost test build failed & exit /b 1 )
+"%OBJ%\enginevelocitycost\engine_velocity_cost_test.exe" --dry-run || exit /b 1
+"%OBJ%\enginevelocitycost\engine_velocity_cost_test.exe" --self-test || exit /b 1
+exit /b 0
+
 :rig_engine_motion_cpu_test
 echo [edvr] === engine_motion_cpu_test.exe ===
 REM Build gate for engine motion's CPU instrument (src\d3d11\engine_motion_cpu.h,
@@ -2978,7 +4037,7 @@ if not exist "%OBJ%\explorercam" mkdir "%OBJ%\explorercam"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /DEDVR_EXPLORER_CAM_TEST /I"%GEN%" ^
     /Fo"%OBJ%\explorercam"\ /Fe"%BUILD%\explorer_cam_test.exe" ^
-    "tools\explorer_cam_test\explorer_cam_test.cpp" "src\d3d11\explorer_cam.cpp" "src\d3d11\elite_binds.cpp" ^
+    "tools\explorer_cam_test\explorer_cam_test.cpp" "src\plugins\comfort\explorer_cam.cpp" "src\d3d11\elite_binds.cpp" ^
     "src\common\hotkey.cpp" "src\common\code_hook.cpp" "src\common\guard.cpp" "src\common\log.cpp" "src\common\config.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib
 if errorlevel 1 ( echo [edvr] ERROR: explorer cam test build failed & exit /b 1 )
@@ -3203,6 +4262,7 @@ cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
     /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE ^
     /Fo"%OBJ%\uilayerworld\\" /Fe"%OBJ%\uilayerworld\ui_layer_world_test.exe" ^
     "tools\ui_layer_world_test\ui_layer_world_test.cpp" "src\d3d11\ui_layer.cpp" ^
+    "src\d3d11\plugin_cost.cpp" "src\common\vtable_hook.cpp" ^
     "src\common\config.cpp" "src\common\log.cpp" "src\common\guard.cpp" ^
     "third_party\dxbc_hash\DxilHash.cpp" ^
     /link /INCREMENTAL:NO d3dcompiler.lib user32.lib
@@ -3226,6 +4286,7 @@ cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
     /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE ^
     /Fo"%OBJ%\uilayerdevice\\" /Fe"%OBJ%\uilayerdevice\ui_layer_device_test.exe" ^
     "tools\ui_layer_device_test\ui_layer_device_test.cpp" "tools\ui_layer_device_test\ui_layer_device_bridge.cpp" ^
+    "src\d3d11\plugin_cost.cpp" "src\common\vtable_hook.cpp" ^
     "src\common\config.cpp" "src\common\log.cpp" "src\common\guard.cpp" ^
     "third_party\dxbc_hash\DxilHash.cpp" ^
     /link /INCREMENTAL:NO d3dcompiler.lib user32.lib
@@ -3316,12 +4377,12 @@ exit /b 0
 
 :rig_intro_curve_test
 echo [edvr] === intro_curve_test.exe ===
-REM src\d3d11\intro_panel.cpp for real (movie world lock, splash refusal, screen-space test, config, retirement) on WARP, goldens bit for bit;
+REM src\plugins\intro\intro_panel.cpp for real (movie world lock, splash refusal, screen-space test, config, retirement) on WARP, goldens bit for bit;
 REM one process per scenario because the module's latches cannot be reset. tools\intro_curve_test\mutants.py --self-test holds the mutation list to the module.
 if not exist "%OBJ%\introcurve" mkdir "%OBJ%\introcurve"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /I"%GEN%" /I"src\d3d11" ^
     /Fo"%OBJ%\introcurve\\" /Fe"%OBJ%\introcurve\intro_curve_test.exe" ^
-    "tools\intro_curve_test\intro_curve_test.cpp" "src\d3d11\intro_panel.cpp" "src\d3d11\panel_curve.cpp" ^
+    "tools\intro_curve_test\intro_curve_test.cpp" "src\plugins\intro\intro_panel.cpp" "src\d3d11\panel_curve.cpp" ^
     "src\common\config.cpp" "src\common\log.cpp" "src\common\guard.cpp" "src\common\proxy.cpp" ^
     /link /INCREMENTAL:NO user32.lib version.lib
 if errorlevel 1 ( echo [edvr] ERROR: intro_curve_test build failed & exit /b 1 )
@@ -3354,7 +4415,7 @@ exit /b 0
 
 :rig_intro_curve_module_test
 echo [edvr] === intro_curve_module_test.exe ===
-REM The splash's recogniser (src\d3d11\intro_curve.cpp; fix.panel_curvature, the game-placed composite the movie's vertex shader draws)
+REM The splash's recogniser (src\plugins\intro\intro_curve.cpp; fix.panel_curvature, the game-placed composite the movie's vertex shader draws)
 REM compiled for real with the real Config, Log, fault guard and the real strip (panel_curve.cpp's surface API, drawing through a
 REM recording draw function), on a WARP device with the game's state bound: 80-byte constant buffers at VS slot 2 holding the game's
 REM two real splash captures and the movie's stock constants, decoys in the slots round them, the sampled surface in the binding
@@ -3372,7 +4433,7 @@ if not exist "%OBJ%\introcurvemodule" mkdir "%OBJ%\introcurvemodule"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /DEDVR_INTRO_CURVE_RIG ^
     /DINTRO_CURVE_RIG_REAL_STRIP /I"%GEN%" /I"src\d3d11" ^
     /Fo"%OBJ%\introcurvemodule\\" /Fe"%OBJ%\introcurvemodule\intro_curve_module_test.exe" ^
-    "tools\intro_curve_module_test\intro_curve_module_test.cpp" "src\d3d11\intro_curve.cpp" "src\d3d11\panel_curve.cpp" ^
+    "tools\intro_curve_module_test\intro_curve_module_test.cpp" "src\plugins\intro\intro_curve.cpp" "src\d3d11\panel_curve.cpp" ^
     "src\common\config.cpp" "src\common\log.cpp" "src\common\guard.cpp" "src\common\proxy.cpp" ^
     /link /INCREMENTAL:NO user32.lib version.lib
 if errorlevel 1 ( echo [edvr] ERROR: intro_curve_module_test build failed & exit /b 1 )
@@ -3396,7 +4457,7 @@ REM Built under obj\ and taking System32's device through src\common\system_d3d1
 if not exist "%OBJ%\surfacestrip" mkdir "%OBJ%\surfacestrip"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /I"%GEN%" /I"src\d3d11" ^
     /Fo"%OBJ%\surfacestrip\\" /Fe"%OBJ%\surfacestrip\surface_strip_render_test.exe" ^
-    "tools\surface_strip_render_test\surface_strip_render_test.cpp" "src\d3d11\intro_panel.cpp" "src\d3d11\intro_curve.cpp" "src\d3d11\panel_curve.cpp" ^
+    "tools\surface_strip_render_test\surface_strip_render_test.cpp" "src\plugins\intro\intro_panel.cpp" "src\plugins\intro\intro_curve.cpp" "src\d3d11\panel_curve.cpp" ^
     "src\common\config.cpp" "src\common\log.cpp" "src\common\guard.cpp" "src\common\proxy.cpp" ^
     /link /INCREMENTAL:NO user32.lib version.lib d3dcompiler.lib
 if errorlevel 1 ( echo [edvr] ERROR: surface_strip_render_test build failed & exit /b 1 )
@@ -3421,7 +4482,7 @@ if not exist "%OBJ%\pixelprobe" mkdir "%OBJ%\pixelprobe"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
     /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
     /Fo"%OBJ%\pixelprobe\\" /Fe"%OBJ%\pixelprobe\pixel_probe_test.exe" ^
-    "tools\pixel_probe_test\pixel_probe_test.cpp" "src\d3d11\pixel_probe.cpp" ^
+    "tools\pixel_probe_test\pixel_probe_test.cpp" "src\plugins\diagnostics\pixel_probe.cpp" ^
     /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib
 if errorlevel 1 ( echo [edvr] ERROR: pixel probe test build failed & exit /b 1 )
 "%OBJ%\pixelprobe\pixel_probe_test.exe" --dry-run || exit /b 1
@@ -3441,6 +4502,43 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
 if errorlevel 1 ( echo [edvr] ERROR: UI hologram test build failed & exit /b 1 )
 "%OBJ%\uiholo\ui_holo_test.exe" --dry-run || exit /b 1
 "%OBJ%\uiholo\ui_holo_test.exe" --self-test || exit /b 1
+exit /b 0
+
+
+:rig_fss_reveal_api_test
+echo [edvr] === FSS Reveal Begin/End API owner regression ===
+if not exist "%OBJ%\fssrevealapi" mkdir "%OBJ%\fssrevealapi"
+cl.exe /I"%GEN%" /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /DEDVR_VERSION_STRING=\"%EDVR_VER%\" ^
+    /Fo"%OBJ%\fssrevealapi\\" /Fe"%BUILD%\fss_reveal_api_test.exe" ^
+    "tools\fss_reveal_api_test\fss_reveal_api_test.cpp" ^
+    "src\plugins\scanners\fss_reveal.cpp" "src\d3d11\plugin_cost.cpp" ^
+    "src\common\guard.cpp" "src\common\vtable_hook.cpp" "src\common\code_hook.cpp" ^
+    /link /INCREMENTAL:NO /OPT:REF kernel32.lib user32.lib version.lib
+if errorlevel 1 ( echo [edvr] ERROR: FSS Reveal API test build failed & exit /b 1 )
+"%BUILD%\fss_reveal_api_test.exe" --dry-run || exit /b 1
+"%BUILD%\fss_reveal_api_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_dlss_runtime_info_test
+echo [edvr] === mapped DLSS runtime metadata regression ===
+if not exist "%OBJ%\dlssruntimeinfo" mkdir "%OBJ%\dlssruntimeinfo"
+cl.exe /nologo /LD /O2 /MT /std:c++17 /EHsc /W4 ^
+    /Fo"%OBJ%\dlssruntimeinfo\\" ^
+    "tools\dlss_runtime_info_test\no_version_module.cpp" ^
+    /link /INCREMENTAL:NO /OUT:"%BUILD%\dlss_no_version_fixture.dll" /IMPLIB:"%OBJ%\dlssruntimeinfo\no_version_module.lib"
+if errorlevel 1 ( echo [edvr] ERROR: DLSS no-version fixture build failed & exit /b 1 )
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /DEDVR_DLSS_RUNTIME_INFO_TEST ^
+    /Fo"%OBJ%\dlssruntimeinfo\\" /Fe"%BUILD%\dlss_runtime_info_test.exe" ^
+    "tools\dlss_runtime_info_test\dlss_runtime_info_test.cpp" ^
+    "src\d3d11\dlss_runtime_info.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib version.lib
+if errorlevel 1 ( echo [edvr] ERROR: DLSS runtime info test build failed & exit /b 1 )
+"%BUILD%\dlss_runtime_info_test.exe" --dry-run || exit /b 1
+"%BUILD%\dlss_runtime_info_test.exe" --self-test "%BUILD%\dlss_no_version_fixture.dll" || exit /b 1
 exit /b 0
 
 :rig_orbital_width_test

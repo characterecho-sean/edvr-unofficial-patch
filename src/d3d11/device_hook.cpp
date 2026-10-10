@@ -294,6 +294,11 @@ struct State {
     // frame the game is drawing before it has presented anything. It advances
     // at the top of the post-Present block; see hookedPresent.
     uint64_t frameCounter = 1;
+    // The capture tick commits its Present stamp last. A fault or stand-down
+    // leaves an older stamp, which the separate close tick cannot observe.
+    uint64_t pluginCostCapturedPresent = 0;
+    bool pluginCostClosedCpuSampleFrame = false;
+    uint32_t pluginCostMenuFrameBefore = 0;
     uint64_t configPollMs = 0;
     // For the crash sentinel's confirm window: the previous Present, and the
     // frame time credited so far. See kSentinelConfirmMs.
@@ -1205,10 +1210,12 @@ EDVR_BOUNDARY_TICK(tkCelestialStatus, "celestial_status");
 // advanced.app_gpu_timing off and advanced.panel_hooks_always off it installs transport-only and F5 did nothing. Here it runs every owned Present.
 EDVR_BOUNDARY_TICK(tkExplorerCam, "explorer_cam");
 EDVR_BOUNDARY_TICK(tkFssModeLatch, "fss_mode_latch");
+EDVR_BOUNDARY_TICK(tkPluginCostCapture, "plugin_cost_capture");
 EDVR_BOUNDARY_TICK(tkMenu, "menu");
 EDVR_BOUNDARY_TICK(tkBindingBoundary, "binding_boundary");
 EDVR_BOUNDARY_TICK(tkExposureBoundary, "exposure_boundary");
 EDVR_BOUNDARY_TICK(tkVscreenRest, "vscreen_rest");
+EDVR_BOUNDARY_TICK(tkPluginCostClose, "plugin_cost_close");
 EDVR_BOUNDARY_TICK(tkVscreenReclaimTick, "vscreen_reclaim_tick");
 EDVR_BOUNDARY_TICK(tkExposureReclaimTick, "exposure_reclaim_tick");
 EDVR_BOUNDARY_TICK(tkMtSample, "mt_sample");
@@ -1553,6 +1560,16 @@ void presentFrameBoundary() {
     // follows its draw, and the upload of a fresh raster. One key poll
     // when closed.
     //
+    // Capture the just-ended draw-clock flag before the VR menu tick rotates
+    // it for the next frame. Flat has no VR whole-draw timing observation.
+    tkPluginCostCapture.run([] {
+        const bool pluginCostClosedCpuSampleFrame =
+            !runtimeFlatProfile() && perfMonitorSampleDraws();
+        const uint32_t pluginCostMenuFrameBefore = perfMonitorFrameSerial();
+        g_state->pluginCostClosedCpuSampleFrame = pluginCostClosedCpuSampleFrame;
+        g_state->pluginCostMenuFrameBefore = pluginCostMenuFrameBefore;
+        g_state->pluginCostCapturedPresent = g_state->frameCounter;
+    });
     // This call holds the monitor's frame clock (perfMonitorFrame), which is
     // where the frame-tick chain is cut: the tick named "menu_tick" ends there,
     // "perf_monitor" is the rest of that function, and "menu" is what is left.
@@ -1568,6 +1585,18 @@ void presentFrameBoundary() {
     tkExposureBoundary.run([] { exposureFixFrameBoundary(); });
     // vScreenFrameBoundary marks its own ticks; this is what is left of it.
     tkVscreenRest.run([] { vScreenFrameBoundary(); });
+    // Close after menu, binding, exposure and vScreen have attributed their
+    // work to this interval. This shared Present path also runs in flat.
+    // A skipped or faulted capture cannot reuse an older frame's CPU flag.
+    // Its fault budget is independent of both the menu and the collector close.
+    tkPluginCostClose.run([] {
+        const bool pluginCostCpuObserved =
+            g_state->pluginCostCapturedPresent == g_state->frameCounter &&
+            g_state->pluginCostClosedCpuSampleFrame &&
+            perfMonitorFrameSerial() != g_state->pluginCostMenuFrameBefore;
+        perfMonitorPluginCostFrameBoundary(
+            static_cast<uint32_t>(g_state->frameCounter), pluginCostCpuObserved);
+    });
 
     // THE FAST PATROL on the two context hooks, every frame.
     //

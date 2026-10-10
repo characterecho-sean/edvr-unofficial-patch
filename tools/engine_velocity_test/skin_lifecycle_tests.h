@@ -108,6 +108,7 @@ struct Fixture {
     bool readStale = false;              // a second draw per eye reads the stale record (both records are read)
     bool secondStream = false;           // a second vertex buffer of stride 8 is bound: the draws' stream is ambiguous
     bool overdrawPlain = false;          // after each eye's pair draw, a skinned family's pixel shader that exports no E draws over the same pixels (L11)
+    bool sampleApi = false;              // route a real skinned draw through the sampled EngineVelocity slow path
     UINT drawEntry = 0;                  // the stream entry the draws read (3 names slot 3, a record no base owns: nothing of the character is read)
     // The palette chain in two dispatches (L12): the jobs of built.jobs listed in `secondDispatch` go in the frame's second dispatch, the rest in the first.
     std::vector<size_t> secondDispatch;
@@ -319,7 +320,10 @@ struct Fixture {
         ctx->VSSetShaderResources(38, 1, &t38);
         if (pair) { g.setVs(vsPair.Get(), kPairVs); g.setPs(psPair.Get(), kPairPs); }
         else { g.setVs(vsPlain.Get(), kPlainVs); g.setPs(psPlain.Get(), kPlainPs); }
-        edvr::engineVelocityBeforeDraw(ctx, eye != kSource);
+        if (sampleApi)
+            edvr::engineVelocityBeforeDrawWithApi<edvr::plugin_cost::SampledApi<>>(ctx, eye != kSource);
+        else
+            edvr::engineVelocityBeforeDraw(ctx, eye != kSource);
         edvr::engineVelocityNoteSkinDraw(ctx, start, 1);
         if (observe) look();
         ctx->DrawInstanced(3, 1, 0, start);
@@ -632,6 +636,16 @@ inline void run(const lt::Harness& h) {
         h.check(pair.rt7 && pair.vsPatched && pair.srv[0] && pair.srv[1] && pair.srv[2], "L6.c the E-exporting pair draws with target 7 bound, the patched vertex shader, and the previous palette, join and pose views");
         h.check(pair.derived && pair.blend7 == D3D11_COLOR_WRITE_ENABLE_ALL && pair.blend6 == (D3D11_COLOR_WRITE_ENABLE_RED | D3D11_COLOR_WRITE_ENABLE_GREEN),
                 "L6.d its derived blend state writes target 7's four channels and target 6's R and G");
+        f.sampleApi = true;
+        Fixture::Eye sampled0;
+        f.frame(true, [&] { sampled0 = f.read(0); }, false, true);
+        const Seen sampled = f.seen;
+        const Judged sampledPixels = judge(sampled0, zero);
+        h.check(sampled.rt7 && sampled.vsPatched && sampled.srv[0] && sampled.srv[1] && sampled.srv[2] &&
+                    sampled.derived && sampled.blend7 == D3D11_COLOR_WRITE_ENABLE_ALL &&
+                    sampledPixels.drawn > 20 && sampledPixels.valid == sampledPixels.drawn && sampledPixels.worst == 0.0,
+                "L6.i the sampled API slow path binds and draws the same valid second skin as the normal path");
+        f.sampleApi = false;
         f.frame(false, [&] {}, false, true);
         const Seen plain = f.seen;
         h.check(plain.rt7 && plain.vsPatched && plain.derived && plain.blend7 == D3D11_COLOR_WRITE_ENABLE_ALL,

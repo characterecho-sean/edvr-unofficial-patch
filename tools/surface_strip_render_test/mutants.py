@@ -34,9 +34,11 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 SRC = ROOT / "src" / "d3d11"
+INTRO = ROOT / "src" / "plugins" / "intro"
+COMMON_HEADERS = ROOT / "src" / "common"
 # The production sources a rule can live in: "panel" the strip, "movie" intro_panel.cpp, "splash" intro_curve.cpp, "math" the pure header both read
 # the placement's direction with (it is included by the two modules and by the rig, so a mutated copy rebuilds all three).
-FILES = {"panel": SRC / "panel_curve.cpp", "movie": SRC / "intro_panel.cpp", "splash": SRC / "intro_curve.cpp", "math": SRC / "intro_curve_math.h"}
+FILES = {"panel": SRC / "panel_curve.cpp", "movie": INTRO / "intro_panel.cpp", "splash": INTRO / "intro_curve.cpp", "math": SRC / "intro_curve_math.h"}
 CPP_KEYS = ("panel", "movie", "splash")
 RIG = HERE / "surface_strip_render_test.cpp"
 BUILD_BAT = ROOT / "build.bat"
@@ -135,6 +137,12 @@ def apply_edits(text, edits, name="?"):
 
 def read_source(path):
     return path.read_bytes().decode("utf-8").replace("\r\n", "\n")
+
+
+def fixture_source(text):
+    # Temp module copies cannot use paths relative to src/plugins/intro.
+    # Resolve core headers through include dirs and keep mutated siblings first.
+    return text.replace('../../d3d11/', '').replace('../../common/', '')
 
 
 def fail_labels(output):
@@ -270,7 +278,7 @@ def run_all(only=None, jobs=None, keep=False, dry_run=False, verbose=False, out=
     work = Path(tempfile.mkdtemp(prefix="ssm_"))
     workers = jobs or min(4, os.cpu_count() or 2)
     try:
-        base_inc = ([gen] if gen else []) + [SRC]
+        base_inc = ([gen] if gen else []) + [SRC, COMMON_HEADERS]
         # The control: every source as it is, built the way every mutation is; the control's objects are what a mutation links its unmutated rest from.
         control = work / "k"
         control.mkdir()
@@ -310,7 +318,7 @@ def run_all(only=None, jobs=None, keep=False, dry_run=False, verbose=False, out=
                 # modules' own copies (a quoted include finds it first) and first on the rig's include path
                 (d / FILES["math"].name).write_text(mutated, encoding="utf-8", newline="\n")
                 for key in ("movie", "splash"):
-                    (d / FILES[key].name).write_text(sources[key], encoding="utf-8", newline="\n")
+                    (d / FILES[key].name).write_text(fixture_source(sources[key]), encoding="utf-8", newline="\n")
                     code, text, objs[key] = compile_obj(tc, d / FILES[key].name, d, inc, key)
                     if code != 0:
                         return m, "nocompile", (text.strip().splitlines() or [""])[-1]
@@ -318,7 +326,8 @@ def run_all(only=None, jobs=None, keep=False, dry_run=False, verbose=False, out=
                 if code != 0:
                     return m, "nocompile", (text.strip().splitlines() or [""])[-1]
             else:
-                (d / FILES[m.file].name).write_text(mutated, encoding="utf-8", newline="\n")
+                text = fixture_source(mutated) if m.file in ("movie", "splash") else mutated
+                (d / FILES[m.file].name).write_text(text, encoding="utf-8", newline="\n")
                 code, text, objs[m.file] = compile_obj(tc, d / FILES[m.file].name, d, inc, m.file)
                 if code != 0:
                     return m, "nocompile", (text.strip().splitlines() or [""])[-1]
@@ -398,8 +407,9 @@ def self_test(build_bat=BUILD_BAT):
     # the sources the rig links all exist where this tool reads them
     for k, p in FILES.items():
         check(p.is_file(), "%s (%s) exists" % (k, p))
-    check('#include "intro_curve_math.h"' in sources["movie"] and '#include "intro_curve_math.h"' in sources["splash"],
-          "both modules include intro_curve_math.h (a mutated copy of the header is written beside each)")
+    check('#include "../../d3d11/intro_curve_math.h"' in sources["movie"] and '#include "../../d3d11/intro_curve_math.h"' in sources["splash"] and
+          '#include "intro_curve_math.h"' in fixture_source(sources["movie"]) and '#include "intro_curve_math.h"' in fixture_source(sources["splash"]),
+          "moved modules resolve the production math header and fixture copies still prefer the mutated sibling header")
 
     # build.bat compiles the rig the way this tool does, and runs this tool's self-test
     bat = Path(build_bat).read_bytes().decode("utf-8", errors="replace")
@@ -410,8 +420,8 @@ def self_test(build_bat=BUILD_BAT):
         cl = next((l for l in block if l.strip().lower().startswith("cl.exe")), "")
         for flag in CL_FLAGS:
             check(flag in cl, "build.bat's rig compile has %s" % flag)
-        for src in ("tools\\surface_strip_render_test\\surface_strip_render_test.cpp", "src\\d3d11\\panel_curve.cpp", "src\\d3d11\\intro_panel.cpp",
-                    "src\\d3d11\\intro_curve.cpp", "src\\common\\config.cpp", "src\\common\\log.cpp", "src\\common\\guard.cpp", "src\\common\\proxy.cpp"):
+        for src in ("tools\\surface_strip_render_test\\surface_strip_render_test.cpp", "src\\d3d11\\panel_curve.cpp", "src\\plugins\\intro\\intro_panel.cpp",
+                    "src\\plugins\\intro\\intro_curve.cpp", "src\\common\\config.cpp", "src\\common\\log.cpp", "src\\common\\guard.cpp", "src\\common\\proxy.cpp"):
             check(src in cl, "build.bat's rig compile has %s (the sources this tool links)" % src)
         check('/I"src\\d3d11"' in cl, "build.bat's rig compile finds the headers through /I src\\d3d11")
         for lib in LIBS:

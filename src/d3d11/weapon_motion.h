@@ -16,6 +16,11 @@ void weaponMotionSource(ID3D11Texture2D*);
 // Call after the original opaque draw, with the pool it read still bound at VS SRV 33.
 void weaponMotionDraw(ID3D11DeviceContext*,PanelCurveDrawFn,unsigned count,unsigned instances,
                        unsigned start,int base,unsigned startInstance);
+// Called only from the draw ladder after it has selected the sampled API
+// policy for the owner context. The original weaponMotionDraw entry remains
+// the NoApi path.
+void weaponMotionDrawSampledApi(ID3D11DeviceContext*,PanelCurveDrawFn,unsigned count,unsigned instances,
+                               unsigned start,int base,unsigned startInstance);
 // The host's per-draw gate, cheap enough for every DrawIndexedInstanced:
 // on, the on-foot source depth seen this frame, and a weapon family VS.
 bool weaponMotionWants(uint64_t vsHash);

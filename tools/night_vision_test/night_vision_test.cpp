@@ -3,7 +3,7 @@
 // This rig supplies its own binding shadow readers (below), so it asks the
 // header for declarations rather than the inline production ones.
 #define EDVR_BINDING_SHADOW_EXTERNAL 1
-#include "../../src/d3d11/night_vision.cpp"
+#include "../../src/plugins/cockpit_visuals/night_vision.cpp"
 #include <d3dcompiler.h>
 #include <d3d11sdklayers.h>
 #include <cstdio>
@@ -13,9 +13,32 @@
 #include <vector>
 #include <string>
 #include <limits>
+#include <thread>
 using Microsoft::WRL::ComPtr;
 unsigned checks=0;
 D3D_DRIVER_TYPE testDriver=D3D_DRIVER_TYPE_WARP;
+uint8_t nvApiSampleFlag=0;
+unsigned nvApiSampleReads=0;
+uint64_t nvApiCalls[10][39][5]{};
+ID3D11DeviceContext* nvApiOwnerContext=nullptr;
+std::thread::id nvApiOwnerThread;
+extern "C" uint8_t edvrPluginCostApiSampleContext(const void* context) noexcept {
+    ++nvApiSampleReads;
+    return context==nvApiOwnerContext && std::this_thread::get_id()==nvApiOwnerThread
+        ? nvApiSampleFlag : 0;
+}
+extern "C" void edvrPluginCostNoteD3dCall(uint8_t owner,uint16_t siteId,uint8_t apiClass) noexcept {
+    if(owner<10 && siteId<39 && apiClass<5) ++nvApiCalls[owner][siteId][apiClass];
+}
+void resetNvApiNotes(uint8_t sample){
+    nvApiSampleFlag=sample;nvApiSampleReads=0;std::memset(nvApiCalls,0,sizeof(nvApiCalls));
+}
+void registerNvApiOwner(ID3D11DeviceContext* context){
+    nvApiOwnerContext=context;nvApiOwnerThread=std::this_thread::get_id();
+}
+uint64_t nvApiSiteTotal(unsigned site){uint64_t n=0;for(unsigned c=0;c<5;++c)n+=nvApiCalls[1][site][c];return n;}
+uint64_t nvApiClassTotal(unsigned apiClass){uint64_t n=0;for(unsigned s=0;s<39;++s)n+=nvApiCalls[1][s][apiClass];return n;}
+uint64_t nvApiTotal(){uint64_t n=0;for(unsigned s=0;s<39;++s)n+=nvApiSiteTotal(s);return n;}
 void check(bool b,const char* why){++checks;if(!b){std::printf("FAIL: %s\n",why);std::exit(1);}}
 void hr(HRESULT h){check(SUCCEEDED(h),"D3D operation");}
 ComPtr<ID3DBlob> compile(const char* s,const char* entry,const char* profile,const D3D_SHADER_MACRO* macros=nullptr){
@@ -68,7 +91,7 @@ struct Rig {
     ComPtr<ID3D11PixelShader> stock;float c[333][4]{},n[12][4]{};
     Rig(){
         D3D_FEATURE_LEVEL fl;HRESULT h=D3D11CreateDevice(nullptr,testDriver,nullptr,D3D11_CREATE_DEVICE_DEBUG,nullptr,0,D3D11_SDK_VERSION,&dev,&fl,&ctx);
-        if(h==DXGI_ERROR_SDK_COMPONENT_MISSING)h=D3D11CreateDevice(nullptr,testDriver,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&dev,&fl,&ctx);hr(h);dev.As(&queue);
+        if(h==DXGI_ERROR_SDK_COMPONENT_MISSING)h=D3D11CreateDevice(nullptr,testDriver,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&dev,&fl,&ctx);hr(h);dev.As(&queue);registerNvApiOwner(ctx.Get());
         // The grid is disabled in these fixtures, so the unused TEXCOORD
         // can come from the same position without changing the reference.
         auto vsCode=compile("struct O{float2 t:TEXCOORD4;float4 p:SV_Position;};O main(uint id:SV_VertexID){O o;o.p=float4(id==2?3:-1,id==1?3:-1,0,1);o.t=o.p.xy;return o;}","main","vs_5_0");
@@ -124,6 +147,38 @@ struct Rig {
 void test(bool realistic){
     testOn=realistic;testPulse=true;
     Rig r;check(nightVisionMatches('X',240,1),"exact night pair accepted");check(!nightVisionMatches('D',240,1)&&!nightVisionMatches('X',6,1)&&!nightVisionMatches('X',240,2),"unrelated draw shapes rejected");
+    // The owner-context sample gate is read once only after GetType accepts
+    // the immediate context. Unsampled begin/end preserves the call path without collector
+    // writes; sampled notes count each actual call, including both SRV slots.
+    nightVisionShutdown();testOn=false;testPulse=true;nightVisionConfigure(Config::get());
+    resetNvApiNotes(0);nightVisionBegin(r.ctx.Get());nightVisionEnd(r.ctx.Get());
+    check(nvApiSampleReads==1&&nvApiTotal()==0,"unsampled immediate begin/end emits no API collector notes");
+    resetNvApiNotes(1);nightVisionBegin(r.ctx.Get());nightVisionEnd(r.ctx.Get());
+    check(nvApiSampleReads==1,"sampled immediate begin reads API sampling flag once");
+    check(nvApiSiteTotal(18)==1&&nvApiSiteTotal(19)==1&&nvApiSiteTotal(20)==1&&
+          nvApiSiteTotal(21)==2&&nvApiSiteTotal(22)==1&&nvApiSiteTotal(23)==1&&
+          nvApiSiteTotal(24)==1&&nvApiSiteTotal(33)==1&&nvApiSiteTotal(34)==1&&
+          nvApiSiteTotal(38)==1&&nvApiTotal()==11,"sampled pulse begin/end notes exact direct calls and two SRV iterations");
+    check(nvApiClassTotal(3)==9&&nvApiClassTotal(2)==2&&nvApiClassTotal(0)==0&&
+          nvApiClassTotal(1)==0&&nvApiClassTotal(4)==0,"sampled pulse API categories reflect read queries and state calls only");
+    ComPtr<ID3D11PixelShader> beforeForeign;r.ctx->PSGetShader(&beforeForeign,nullptr,nullptr);
+    resetNvApiNotes(1);
+    std::thread foreignSameContext([&]{nightVisionBegin(r.ctx.Get());nightVisionEnd(r.ctx.Get());});
+    foreignSameContext.join();
+    ComPtr<ID3D11PixelShader> afterForeign;r.ctx->PSGetShader(&afterForeign,nullptr,nullptr);
+    check(nvApiSampleReads==1&&nvApiTotal()==0,
+          "same immediate-context pointer on a foreign thread is rejected by the owner sample gate");
+    check(afterForeign==beforeForeign,
+          "foreign-thread Night Vision begin/end still restores the existing pixel shader");
+    // A bad settings buffer returns immediately after the three reached
+    // context queries; no later resource, shader, or restoration site exists.
+    r.ctx->PSSetConstantBuffers(2,1,r.camera.GetAddressOf());resetNvApiNotes(1);
+    nightVisionBegin(r.ctx.Get());
+    check(nvApiSampleReads==1&&nvApiTotal()==3&&nvApiSiteTotal(18)==1&&
+          nvApiSiteTotal(19)==1&&nvApiSiteTotal(20)==1&&nvApiSiteTotal(21)==0,
+          "malformed settings resource records only API calls reached before early return");
+    r.ctx->PSSetConstantBuffers(2,1,r.settings.GetAddressOf());
+    testOn=realistic;testPulse=true;nightVisionConfigure(Config::get());
     // The draw path asks nightVisionShape inline before the call: it must
     // accept the matched shape and nothing the match itself rejects on shape.
     check(nightVisionShape('X',240,1)&&!nightVisionShape('D',240,1)&&!nightVisionShape('X',6,1)&&!nightVisionShape('X',240,2),"inline shape pre-check agrees with the match");
@@ -158,8 +213,9 @@ void test(bool realistic){
     fixed=r.draw(true);stock=r.draw(false);
     for(size_t i=0;i<fixed.size();++i)check(std::isfinite(fixed[i])&&fabsf(fixed[i]-stock[i])<1e-5f,"singular camera retains original pulse");
     // A matched hash is insufficient when a future build changes resources.
-    r.ctx->PSSetConstantBuffers(2,1,r.camera.GetAddressOf());nightVisionBegin(r.ctx.Get());
+    r.ctx->PSSetConstantBuffers(2,1,r.camera.GetAddressOf());resetNvApiNotes(1);nightVisionBegin(r.ctx.Get());
     ComPtr<ID3D11PixelShader> ps;r.ctx->PSGetShader(&ps,nullptr,nullptr);check(ps.Get()==r.stock.Get(),"wrong settings size rejected");nightVisionEnd(r.ctx.Get());r.ctx->PSSetConstantBuffers(2,1,r.settings.GetAddressOf());
+    check(nvApiSampleReads==1&&nvApiTotal()==3,"malformed settings early return notes only its reached context calls");
     r.bind(2,r.depth);fixed=r.draw(true);stock=r.draw(false);check(fixed==stock,"wrong normal format draws stock");r.bind(2,r.normals);stock=r.draw(false);
     // The second shader output is a blend factor, not another render
     // target. A changed MRT/blend contract must retain the original draw.
@@ -170,14 +226,36 @@ void test(bool realistic){
     r.ctx->OMSetRenderTargets(2,mrt,nullptr);nightVisionBegin(r.ctx.Get());ps.Reset();r.ctx->PSGetShader(&ps,nullptr,nullptr);
     check(ps==r.stock,"MRT pass keeps original shader");nightVisionEnd(r.ctx.Get());r.ctx->OMSetRenderTargets(1,r.rt.GetAddressOf(),r.dsv.Get());
     // Nested Begin is harmless, including live disabling before End.
-    nightVisionBegin(r.ctx.Get());ps.Reset();r.ctx->PSGetShader(&ps,nullptr,nullptr);check(ps!=r.stock,"known single target engages");
+    nightVisionShutdown();testOn=realistic;testPulse=true;nightVisionConfigure(Config::get());
+    resetNvApiNotes(1);nightVisionBegin(r.ctx.Get());ps.Reset();r.ctx->PSGetShader(&ps,nullptr,nullptr);check(ps!=r.stock,"known single target engages");
     nightVisionBegin(r.ctx.Get());testOn=false;testPulse=false;nightVisionConfigure(Config::get());nightVisionEnd(r.ctx.Get());
+    check(nvApiSampleReads==1&&nvApiTotal()==(realistic?40u:11u)&&nvApiSiteTotal(38)==1&&
+          (!realistic || (nvApiSiteTotal(35)==1&&nvApiSiteTotal(36)==1&&nvApiSiteTotal(37)==1)),
+          "sampled end records each state restoration call used by its mode");
+    if(realistic){
+        bool exact=nvApiTotal()==40;
+        for(unsigned site=0;site<39;++site)
+            exact=exact&&nvApiSiteTotal(site)==(site==21?2u:1u);
+        check(exact,"first sampled realistic begin/end records all 39 direct sites and both SRV iterations exactly");
+    }
     ps.Reset();r.ctx->PSGetShader(&ps,nullptr,nullptr);check(ps==r.stock,"live disabling restores an engaged draw");testOn=realistic;testPulse=true;nightVisionConfigure(Config::get());
-    ComPtr<ID3D11DeviceContext> deferred;hr(r.dev->CreateDeferredContext(0,&deferred));nightVisionBegin(deferred.Get());ps.Reset();deferred->PSGetShader(&ps,nullptr,nullptr);check(!ps,"deferred context rejected");
+    ComPtr<ID3D11DeviceContext> deferred;hr(r.dev->CreateDeferredContext(0,&deferred));resetNvApiNotes(1);nightVisionBegin(deferred.Get());ps.Reset();deferred->PSGetShader(&ps,nullptr,nullptr);check(!ps,"deferred context rejected");
+    check(nvApiSampleReads==0&&nvApiTotal()==0,"deferred context rejects before collector accessor or owner API notes");
     testOn=false;testPulse=false;nightVisionConfigure(Config::get());check(!nightVisionMatches('X',240,1),"both live settings Off bypass replacement");fixed=r.draw(true);
     check(fixed==stock,"live Off draws original pixels");
     testOn=realistic;testPulse=true;nightVisionConfigure(Config::get());check(nightVisionMatches('X',240,1),"live On reengages");
-    nightVisionShutdown();testFail=true;fixed=r.draw(true);check(fixed==stock&&!nightVisionMatches('X',240,1),"precompiled shader creation failure draws stock and stands down");testFail=false;
+    nightVisionShutdown();testFail=true;fixed=r.draw(true);check(fixed==stock&&!nightVisionMatches('X',240,1),"precompiled shader creation failure draws stock and stands down");
+    if(realistic){
+        const EdvrPluginOps* ops=cockpitVisualsPluginOps();
+        EdvrPluginClaimObservation observation{};
+        const uint32_t plain=ops->claimDraw(ops->state,"night-vision",'X',240,1);
+        const uint32_t observed=ops->claimDrawObserved(
+            ops->state,"night-vision",'X',240,1,&observation);
+        check(observed==plain&&observed==kPluginClaimNone&&
+                  observation.mode==3&&observation.failedKnown==1&&observation.failed==1,
+              "failed applicable realistic+pulse variant is observed without changing ordinary decline");
+    }
+    testFail=false;
     r.clean();
 }
 void geometryTest(){
@@ -321,6 +399,33 @@ void gateTest(){
         const bool acts=testOn||testPulse;
         check(nightVisionWantsDraws()==acts,"draw gate: night vision wants draws exactly when realistic or pulse stability is on");
         check(nightVisionMatches('X',240,1)==acts,"draw gate: a fix that can match a draw is one that wanted draws");
+        const EdvrPluginOps* ops=cockpitVisualsPluginOps();
+        check(ops&&ops->claimDraw&&ops->claimDrawObserved&&ops->traceMode,
+              "registered Night Vision ops expose ordinary claim and optional observation callbacks");
+        uint8_t observedMode=0xff;
+        check(ops->traceMode(ops->state,&observedMode)!=0&&observedMode==i,
+              "trace mode reports each configured raw switch combination");
+        EdvrPluginClaimObservation observation{};
+        const uint32_t plain=ops->claimDraw(ops->state,"night-vision",'X',240,1);
+        const uint32_t observed=ops->claimDrawObserved(
+            ops->state,"night-vision",'X',240,1,&observation);
+        check(observed==plain&&observed==(acts?kPluginClaimNightVision:kPluginClaimNone),
+              "observed claim returns the same decision as the ordinary production callback");
+        check(observation.mode==i&&observation.failedKnown==(i?1u:0u)&&
+                  observation.failed==0,
+              "observation distinguishes mode zero from known-clear applicable failure state");
+        state.failed[i]=true;
+        EdvrPluginClaimObservation failedObservation{};
+        const uint32_t failedPlain=ops->claimDraw(ops->state,"night-vision",'X',240,1);
+        const uint32_t failedObserved=ops->claimDrawObserved(
+            ops->state,"night-vision",'X',240,1,&failedObservation);
+        check(failedPlain==kPluginClaimNone&&failedObserved==failedPlain&&
+                  failedObservation.mode==i&&failedObservation.failedKnown==(i?1u:0u)&&
+                  failedObservation.failed==(i?1u:0u),
+              "each failed mode declines identically; mode zero does not consume its failure slot");
+        state.failed[i]=false;
+        check(ops->claimDrawObserved(ops->state,"night-vision",'X',240,1,nullptr)==plain,
+              "null observation preserves the ordinary production claim");
     }
     testOn=true;testPulse=true;nightVisionConfigure(Config::get());
 }

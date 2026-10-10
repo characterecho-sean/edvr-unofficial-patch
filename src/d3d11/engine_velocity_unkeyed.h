@@ -32,6 +32,15 @@ public:
         if (used_ < kCapacity) { e_[used_].vs = vs; e_[used_].ps = ps; e_[used_].binds = 1; ++used_; return; }
         ++overflow_;
     }
+    // Keep only the legacy NoApi slow-path's original inline packaging.
+    // The shared/sampled note method above retains its existing behavior.
+    __forceinline void noteNoApiInline(uint64_t vs, uint64_t ps) {
+        ++total_;
+        for (size_t i = 0; i < used_; ++i)
+            if (e_[i].vs == vs && e_[i].ps == ps) { ++e_[i].binds; return; }
+        if (used_ < kCapacity) { e_[used_].vs = vs; e_[used_].ps = ps; e_[used_].binds = 1; ++used_; return; }
+        ++overflow_;
+    }
     void reset() { *this = Table{}; }
     size_t used() const { return used_; }
     uint64_t total() const { return total_; }

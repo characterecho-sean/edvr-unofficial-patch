@@ -2,18 +2,13 @@
 
 #include <windows.h>
 
-#include <atomic>
 #include <cstdlib>
 #include <cstring>
 #include <string>
-#include <iterator>
-#include <unordered_map>
-#include <unordered_set>
 
 #include "../common/config.h"
 #include "../common/guard.h"
 #include "../common/log.h"
-#include "../common/timing.h"
 #include "../common/vtable_hook.h"
 #include "binding_shadow.h"
 #include "device_hook.h"  // contextHookModeFor
@@ -29,7 +24,8 @@
                           // writers through THIS module's Dispatch hook,
                           // because slot 41 is already ours and a second
                           // patch on it would be a second thing to reclaim
-#include "sunglare_fix.h"  // sunglareLastSeenMs, the damper's sun scope
+#include "../plugins/exposure/exposure_actions.h"
+#include "../plugins/exposure/exposure_lifecycle.h"
 
 namespace edvr {
 namespace {
@@ -88,7 +84,9 @@ typedef void(STDMETHODCALLTYPE* PFN_CSSetUAVs)(ID3D11DeviceContext*, UINT, UINT,
                                                const UINT*);
 typedef void(STDMETHODCALLTYPE* PFN_ClearState)(ID3D11DeviceContext*);
 
-struct State {
+struct State : plugins::exposure::ExposureActionState {
+    EdvrPluginLifecycleOps lifecycleOps{};
+    bool lifecycleRegistered = false;
     VTableHook    hook;
     // The context these hooks were installed for. Identity only -- compared,
     // never dereferenced. In-place vtable patching hooks the class, so
@@ -119,12 +117,6 @@ struct State {
     uint32_t thunkHits[kHitCount] = {};
     uint8_t  quietPasses[kHitCount] = {};
 
-    bool     enabled = false;
-    uint64_t targetHash = 0;      // pinned by config, or learned by detection
-    bool     pinned = false;      // true if the hash came from config
-    uint32_t copyMask = 0xF;
-    bool     copyBtoA = false;
-
     // The dispatch-skip probe (advanced.census_skip_dispatch): compute
     // shaders named by content hash are NOT forwarded while the spec is set.
     // The census_skip idea completed -- draws could be probed by hash since
@@ -143,133 +135,12 @@ struct State {
     bool     dispatchSkipNoted = false;
     char     dispatchSkipSpec[96] = {};   // raw spec, to log only on change
 
-    // Shape detection.
-    //
-    // A bytecode hash identifies one compiled shader and changes whenever the
-    // game's shaders are rebuilt, so pinning one means the fix breaks on every
-    // update until somebody re-derives it. The pass's SHAPE is far more stable:
-    // it writes a small structured buffer of exposure state and a tiny
-    // parameter texture, and it runs once per eye. Detecting that costs one
-    // evaluation per distinct compute shader and then nothing.
-    std::unordered_map<uint64_t, bool> shapeVerdict;
-    // Hashes the shape test has ever run on. A counter cannot do this job: the
-    // prune below removes negatives every frame, so the map "forgets" a shader
-    // and the next frame's probe counts it again -- the give-up notice, which
-    // calls itself the thing to report, would print tens of thousands where it
-    // means a handful. This set is never pruned; it holds one 64-bit hash per
-    // distinct compute shader the game creates.
-    std::unordered_set<uint64_t> everExamined;
-    uint32_t detectStreak = 0;    // consecutive frames the candidate ran twice
-    bool     announced = false;
     uint64_t frames = 0;
-    bool     gaveUpNotice = false;
 
-    uint32_t seenThisFrame = 0;
     // Whether the game did ANY compute work this frame. The give-up notice
     // counts these frames rather than all frames -- see exposureFixFrameBoundary.
     bool     computeThisFrame = false;
-    ID3D11UnorderedAccessView* firstEye[4] = {nullptr, nullptr, nullptr, nullptr};
-    uint64_t applied = 0;
-    bool     rejected = false;
-
-    // The damper. The exposure peek's sweep (the retired measurement
-    // instrument, removed 2026-09-23) decoded the 8-byte state buffer: float
-    // [0] a constant luminance floor (-9.9658 in every sample), float [1]
-    // the adaptation value in log2 stops -- and a four-stop swing under
-    // an ordinary head pitch at a star, because the metering runs on the
-    // head-tracked view and the simulated pupils land on top of the real
-    // ones. Each frame the freshly computed value is read back (an 8-byte
-    // ping-pong copy, one frame of lag a slow signal never notices), a
-    // slow mean tracks where it lives, and mean + (1-k)(v - mean) is
-    // written over the game's state for both eyes. The game's own
-    // adaptation loop then runs FROM the damped value -- swing compressed
-    // by k, genuine scene changes still drifting the mean over seconds.
-    float          dampK = 0;             // experimental.exposure_damping, 0..1
-    float          dampTau = 45.0f;       // experimental.exposure_damping_tau, secs
-    ID3D11Texture2D* dampStaging[2] = {}; // owned; strip ping-pong pair
-    int            dampCur = 0;
-    bool           dampPrevValid = false;
-    bool           dampHaveMean = false;
-    float          dampMean[6] = {};      // per-texel slow means
-    uint64_t       dampSeedMs = 0;        // when the means were (re)seeded
-    uint64_t       dampDevSinceMs = 0;    // 0 = gain currently inside band
-    uint64_t       dampSnaps = 0;
-    void*          dampLastStrip = nullptr;  // identity only, never
-                                             // dereferenced: the strip
-                                             // must be the SAME texture
-                                             // object, settled for
-                                             // kDampSettleMs, before the
-                                             // damper acts
-    uint64_t       dampStableSinceMs = 0;
-    uint64_t       dampStepMs = 0;        // wall clock of the last step --
-                                          // the blend is dt/tau, so the
-                                          // mean's speed survives
-                                          // reprojection halving the rate
-    uint64_t       dampWrites = 0;
-    uint64_t       dampWritesAtNote = 0;
-    uint64_t       dampLastNoteMs = 0;
-
-    std::unordered_map<void*, uint64_t> shaderHashes;
-    CRITICAL_SECTION lock{};
-    bool lockReady = false;
 };
-
-// Consecutive frames a detected candidate must run exactly twice before the
-// fix acts on it.
-constexpr uint32_t kConfirmFrames = 5;
-
-// The damper's constants. The strip as measured 2026-08-21: 6x1, R32
-// float, texels [raw luminance, smoothed luminance, gain, gain again,
-// curve, direct-sun term]. Texels 0-4 are damped; texel 5 passes raw --
-// it is the sun-occlusion intensity the glare cards read, and holding it
-// would leave glare shining through cockpit struts. The state-buffer
-// damper this replaces measured beta of ~1: the game re-derives its
-// state within a frame, so only the strip -- pure output, read by the
-// tonemaps at frame end -- can hold the image.
-constexpr uint32_t kStripW = 6;
-constexpr uint32_t kStripFmtA = 39;  // R32_TYPELESS
-constexpr uint32_t kStripFmtB = 41;  // R32_FLOAT
-constexpr uint32_t kDampRawTexel = 5;
-constexpr uint32_t kDampGainTexel = 2;
-
-// The transient-versus-sustained discriminator. A head pose swings the
-// gain briefly and returns; a real scene change -- the menu hangar on
-// launch, a station slot, a jump -- moves it far and KEEPS it there. A
-// gain more than a quarter away from the mean continuously for a second
-// and a half snaps the means to reality; the launch that taught this
-// held the hangar blown out for most of a minute, because the mean had
-// seeded from the game's arbitrary pre-adapted first frame and tau is
-// deliberately glacial. A fast-blend window right after seeding covers
-// the same first seconds.
-constexpr float    kSnapDeviation = 0.25f;
-constexpr uint64_t kSnapAfterMs = 1500;
-constexpr uint64_t kFastSeedMs = 3000;
-constexpr float    kFastSeedBoost = 10.0f;
-
-// The menu lesson (Q3 launch, 2026-08-21): menus run MULTIPLE passes of
-// the exposure shape, so "the second dispatch's strip" is not reliably
-// an eye there -- the damper read a zero-gain UI strip and faithfully
-// wrote zero gain over the real eyes, which IS the blowout it was
-// blamed for. Every measured eye gain sits far above this floor; a
-// reading at or below it is some other instance, and the damper stands
-// aside rather than propagate it.
-constexpr float    kDampGainFloor = 0.5f;
-
-// How long the strip's identity must hold before the damper's FIRST
-// write. Two frames was not enough: the Q3 menu's pass sequence is
-// QUASI-stable -- the same strip for a handful of frames, then a
-// shuffle -- so intermittent writes slipped through as a left-eye
-// flicker. Gameplay holds one identity for hours; a menu shuffle never
-// survives two seconds.
-constexpr uint64_t kDampSettleMs = 2000;
-
-// The sun scope: the damper acts only while the glare train has drawn
-// within this window. The breathing it exists for happens AT a star;
-// with no sun around, stock adaptation is the correct behaviour, and
-// menus never see the damper at all -- which retires the whole family
-// of pass-instance ambiguities the menu kept teaching, one flicker at
-// a time.
-constexpr uint64_t kDampSunWindowMs = 5000;
 
 // Frames to wait before reporting that detection found nothing. Long enough to
 // cover menus and loading, where the pass legitimately does not run.
@@ -278,306 +149,14 @@ constexpr uint64_t kGiveUpFrames = 5000;
 State* g_state = nullptr;
 FaultBudget g_budget("exposureFix", 5);
 
-BindSlot uavSlot(uint32_t i) {
-    return static_cast<BindSlot>(static_cast<uint32_t>(BindSlot::CsUav0) + i);
-}
-
+#if !defined(EDVR_EXPOSURE_DAMP_TEST)
 uint64_t hashOf(void* shader) {
-    if (!shader || !g_state || !g_state->lockReady) return 0;
-    uint64_t out = 0;
-    EnterCriticalSection(&g_state->lock);
-    auto it = g_state->shaderHashes.find(shader);
-    if (it != g_state->shaderHashes.end()) out = it->second;
-    LeaveCriticalSection(&g_state->lock);
-    return out;
+    return lookupShaderHash(shader);
 }
+#endif  // !EDVR_EXPOSURE_DAMP_TEST
 
-// Two resources may only be copied if they are the same kind and size. The two
-// eyes' equivalents always are; anything else means the configured shader hash
-// no longer identifies what it did when it was verified, and the copy is
-// skipped rather than applied to an unrelated resource.
-bool copyCompatible(ID3D11Resource* a, ID3D11Resource* b) {
-    if (!a || !b || a == b) return false;
-    D3D11_RESOURCE_DIMENSION da = D3D11_RESOURCE_DIMENSION_UNKNOWN;
-    D3D11_RESOURCE_DIMENSION db = D3D11_RESOURCE_DIMENSION_UNKNOWN;
-    a->GetType(&da);
-    b->GetType(&db);
-    if (da != db) return false;
 
-    if (da == D3D11_RESOURCE_DIMENSION_BUFFER) {
-        D3D11_BUFFER_DESC x{}, y{};
-        static_cast<ID3D11Buffer*>(a)->GetDesc(&x);
-        static_cast<ID3D11Buffer*>(b)->GetDesc(&y);
-        return x.ByteWidth == y.ByteWidth && x.StructureByteStride == y.StructureByteStride;
-    }
-    if (da == D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
-        D3D11_TEXTURE2D_DESC x{}, y{};
-        static_cast<ID3D11Texture2D*>(a)->GetDesc(&x);
-        static_cast<ID3D11Texture2D*>(b)->GetDesc(&y);
-        return x.Width == y.Width && x.Height == y.Height && x.Format == y.Format &&
-               x.MipLevels == y.MipLevels && x.ArraySize == y.ArraySize;
-    }
-    return false;
-}
-
-void shareExposure(ID3D11DeviceContext* ctx, ID3D11UnorderedAccessView* const* first,
-                   ID3D11UnorderedAccessView* const* second) {
-    State* s = g_state;
-    uint32_t copied = 0, skipped = 0;
-
-    for (uint32_t slot = 0; slot < 4; ++slot) {
-        if ((s->copyMask & (1u << slot)) == 0) continue;
-        if (!first[slot] || !second[slot]) continue;
-
-        ID3D11Resource* a = nullptr;
-        ID3D11Resource* b = nullptr;
-        first[slot]->GetResource(&a);
-        second[slot]->GetResource(&b);
-
-        if (copyCompatible(a, b)) {
-            if (s->copyBtoA) ctx->CopyResource(a, b);
-            else             ctx->CopyResource(b, a);
-            ++copied;
-        } else {
-            ++skipped;
-        }
-        if (a) a->Release();
-        if (b) b->Release();
-    }
-
-    if (++s->applied == 1) {
-        if (copied == 0) {
-            s->rejected = true;
-            Log::get().note("exposure fix DISABLED: no compatible resource pairs "
-                            "(mask 0x%X, %u skipped). The configured shader is not the "
-                            "exposure pass on this game build.", s->copyMask, skipped);
-        } else {
-            Log::get().note("exposure fix ACTIVE: sharing %u slot(s) %s each frame",
-                            copied,
-                            s->copyBtoA ? "second eye -> first" : "first eye -> second");
-        }
-    }
-}
-
-// One damping step, run right after the second eye's dispatch with the
-// pass's UAVs still bound and share_exposure's copy already landed:
-// queue this frame's strip readback, consume last frame's, filter, and
-// write the damped strip over both eyes' copies -- after the passes,
-// before the tonemaps at frame end that read it.
-void exposureDamp(ID3D11DeviceContext* ctx,
-                  ID3D11UnorderedAccessView* firstEyeStrip) {
-    State* s = g_state;
-
-    // The sun scope, checked first: no glare train in the last few
-    // seconds means no sun worth holding for, and the damper does not
-    // touch anything. The pending readback is dropped rather than kept
-    // -- resuming later re-settles from scratch.
-    const uint64_t seen = sunglareLastSeenMs();
-    if (seen == 0 || nowMs() - seen > kDampSunWindowMs) {
-        s->dampPrevValid = false;
-        s->dampLastStrip = nullptr;
-        return;
-    }
-
-    ID3D11UnorderedAccessView* view =
-        static_cast<ID3D11UnorderedAccessView*>(bindingGet(uavSlot(1)));
-    if (!view || !firstEyeStrip) return;
-    ID3D11Resource* resB = nullptr;
-    view->GetResource(&resB);
-    if (!resB) return;
-    D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN;
-    resB->GetType(&dim);
-    if (dim != D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
-        resB->Release();
-        return;
-    }
-    D3D11_TEXTURE2D_DESC td{};
-    static_cast<ID3D11Texture2D*>(resB)->GetDesc(&td);
-    const uint32_t fmt = static_cast<uint32_t>(td.Format);
-    if (td.Width != kStripW || td.Height != 1 ||
-        (fmt != kStripFmtA && fmt != kStripFmtB)) {
-        resB->Release();
-        return;   // not the measured strip; stand aside entirely
-    }
-
-    // Identity gate: act only when this frame's strip is the SAME texture
-    // object it has been for kDampSettleMs. Gameplay holds one identity
-    // for hours and settles once; a menu shuffling several same-shaped
-    // instances -- even quasi-stably, which is what got past the
-    // two-frame version of this gate as a left-eye flicker -- never
-    // survives the settle. The pending readback dies with any change; it
-    // was copied from whatever the previous instance was.
-    const uint64_t nowGate = nowMs();
-    if (resB != s->dampLastStrip) {
-        s->dampLastStrip = resB;
-        s->dampStableSinceMs = nowGate;
-        s->dampPrevValid = false;
-        resB->Release();
-        return;
-    }
-    if (nowGate - s->dampStableSinceMs < kDampSettleMs) {
-        s->dampPrevValid = false;
-        resB->Release();
-        return;
-    }
-
-    if (!s->dampStaging[0]) {
-        ID3D11Device* dev = nullptr;
-        ctx->GetDevice(&dev);
-        if (!dev) {
-            resB->Release();
-            return;
-        }
-        D3D11_TEXTURE2D_DESC sd = td;
-        sd.Usage = D3D11_USAGE_STAGING;
-        sd.BindFlags = 0;
-        sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-        sd.MiscFlags = 0;
-        dev->CreateTexture2D(&sd, nullptr, &s->dampStaging[0]);
-        dev->CreateTexture2D(&sd, nullptr, &s->dampStaging[1]);
-        dev->Release();
-        if (!s->dampStaging[0] || !s->dampStaging[1]) {
-            resB->Release();
-            return;
-        }
-    }
-
-    ID3D11Resource* resA = nullptr;
-    firstEyeStrip->GetResource(&resA);
-
-    // Queue this frame's readback FIRST, before the damped write below
-    // lands on the same texture -- the staging captures the game's own
-    // freshly derived parameters, so the filter runs on the measurement
-    // and never chews its own output.
-    const int prev = s->dampCur ^ 1;
-    ctx->CopyResource(s->dampStaging[s->dampCur], resB);
-    s->dampCur ^= 1;
-
-    if (s->dampPrevValid) {
-        D3D11_MAPPED_SUBRESOURCE m{};
-        if (SUCCEEDED(ctx->Map(s->dampStaging[prev], 0, D3D11_MAP_READ, 0,
-                               &m)) &&
-            m.pData) {
-            float raw[kStripW];
-            memcpy(raw, m.pData, sizeof(raw));
-            ctx->Unmap(s->dampStaging[prev], 0);
-
-            bool sane = raw[kDampGainTexel] > kDampGainFloor;
-            for (uint32_t i = 0; i < kStripW; ++i) {
-                if (!(raw[i] >= -1e6f && raw[i] <= 1e6f)) sane = false;
-            }
-            if (sane) {
-                const uint64_t now = nowMs();
-                if (!s->dampHaveMean) {
-                    memcpy(s->dampMean, raw, sizeof(raw));
-                    s->dampHaveMean = true;
-                    s->dampStepMs = now;
-                    s->dampSeedMs = now;
-                    s->dampDevSinceMs = 0;
-                }
-                // The scene-change snap: gain far from the mean and
-                // STAYING far means the scene itself moved, and holding
-                // the old mean would hold the wrong brightness -- the
-                // launch hangar stayed blown out until this existed.
-                const float dev =
-                    fabsf(raw[kDampGainTexel] - s->dampMean[kDampGainTexel]);
-                const float ref = fabsf(s->dampMean[kDampGainTexel]);
-                if (dev > kSnapDeviation * (ref > 1.0f ? ref : 1.0f)) {
-                    if (s->dampDevSinceMs == 0) s->dampDevSinceMs = now;
-                    if (now - s->dampDevSinceMs >= kSnapAfterMs) {
-                        memcpy(s->dampMean, raw, sizeof(raw));
-                        s->dampSeedMs = now;
-                        s->dampDevSinceMs = 0;
-                        ++s->dampSnaps;
-                        Log::get().note("exposure damping: scene change -- "
-                                        "means snapped to the new scene "
-                                        "(gain %.1f, snap %llu).",
-                                        raw[kDampGainTexel],
-                                        static_cast<unsigned long long>(
-                                            s->dampSnaps));
-                    }
-                } else {
-                    s->dampDevSinceMs = 0;
-                }
-                // The mean's blend is wall-clock over tau -- a
-                // few-second constant matched a held head pose and the
-                // mean chased every pitch, which was the first field
-                // trial's leak. Right after a seed or a snap the blend
-                // runs boosted, so the first seconds of a new scene
-                // settle at stock-like speed.
-                float alpha =
-                    static_cast<float>(now - s->dampStepMs) / 1000.0f /
-                    s->dampTau;
-                if (now - s->dampSeedMs < kFastSeedMs) {
-                    alpha *= kFastSeedBoost;
-                }
-                if (alpha > 0.2f) alpha = 0.2f;
-                s->dampStepMs = now;
-
-                float out[kStripW];
-                for (uint32_t i = 0; i < kStripW; ++i) {
-                    s->dampMean[i] += alpha * (raw[i] - s->dampMean[i]);
-                    out[i] = i == kDampRawTexel
-                                 ? raw[i]
-                                 : s->dampMean[i] +
-                                       (1.0f - s->dampK) *
-                                           (raw[i] - s->dampMean[i]);
-                }
-                const UINT pitch = kStripW * 4;
-                if (resA) {
-                    ctx->UpdateSubresource(resA, 0, nullptr, out, pitch, 0);
-                }
-                if (resB != resA) {
-                    ctx->UpdateSubresource(resB, 0, nullptr, out, pitch, 0);
-                }
-                ++s->dampWrites;
-                if (s->dampWrites == 1 ||
-                    now - s->dampLastNoteMs >= 5000) {
-                    Log::get().note(
-                        "exposure damping: %llu write(s) since last note, "
-                        "k=%.2f, gain %.1f, gain mean %.1f.",
-                        static_cast<unsigned long long>(
-                            s->dampWrites - s->dampWritesAtNote),
-                        s->dampK, raw[2], s->dampMean[2]);
-                    s->dampLastNoteMs = now;
-                    s->dampWritesAtNote = s->dampWrites;
-                }
-            }
-        }
-    }
-
-    s->dampPrevValid = true;
-    if (resA) resA->Release();
-    resB->Release();
-}
-
-// Does the bound UAV set look like per-eye exposure state?
-//
-// Slot 0 is a small structured buffer holding the luminance range; slot 1 is a
-// tiny texture holding the tonemap parameters the rest of the frame reads. Both
-// are unusual enough that nothing else in the frame matches, and neither depends
-// on the shader's bytecode, so this survives the game being rebuilt.
-bool shapeLooksLikeExposure() {
-    // Slot 0 is a small structured buffer holding the luminance range; slot 1 is
-    // a tiny texture holding the tonemap parameters the rest of the frame reads.
-    // Both are unusual enough that nothing else in the frame matches, and
-    // neither depends on the shader's bytecode, so this survives a rebuild.
-    //
-    // Resolved through binding_shadow, which owns the guard, the budget and the
-    // GetType-first rule. A view that cannot be resolved -- because it is no
-    // longer live -- reads as "not the exposure pass", which is the safe answer.
-    ResourceInfo buf;
-    if (!bindingResolve(bindingGet(uavSlot(0)), &buf) || !buf.isBuffer) return false;
-    if (buf.a == 0 || buf.a > 256) return false;
-
-    ResourceInfo strip;
-    if (!bindingResolve(bindingGet(uavSlot(1)), &strip) || !strip.isTexture2D) return false;
-    // A parameter strip: a few texels, one row.
-    if (strip.b != 1 || strip.a == 0 || strip.a > 64) return false;
-
-    return true;
-}
-
+#if !defined(EDVR_EXPOSURE_DAMP_TEST)
 // Is this call for the context we installed on? In-place vtable patching
 // hooks every object of the class, so a deferred context or a wrapper mod's
 // internal one lands here too and must leave untouched.
@@ -637,30 +216,7 @@ void STDMETHODCALLTYPE hookedClearState(ID3D11DeviceContext* self) {
     g_state->realClearState(self);
 }
 
-// Is this dispatch the exposure pass? Pinned hash if configured, otherwise
-// shape detection, cached per shader so the cost is one evaluation each.
-bool isExposureDispatch() {
-    State* s = g_state;
-    if (!s->enabled || s->rejected) return false;
-
-    const uint64_t h = hashOf(bindingGet(BindSlot::Cs));
-    if (h == 0) return false;
-    if (s->targetHash != 0) return h == s->targetHash;
-    if (s->pinned) return false;   // pinned but not matching: do nothing
-
-    auto it = s->shapeVerdict.find(h);
-    if (it != s->shapeVerdict.end()) return it->second;
-
-    const bool match = shapeLooksLikeExposure();
-    s->everExamined.insert(h);
-    s->shapeVerdict[h] = match;
-    if (match) {
-        Log::get().note("exposure fix: candidate compute shader %016llX matches the "
-                        "exposure-state shape; confirming across frames",
-                        static_cast<unsigned long long>(h));
-    }
-    return match;
-}
+// Exposure target classification lives in the strongly linked plugin observer.
 
 // Record-only: the census names GPU-driven compute (group counts live in
 // the argument buffer, so n= cannot be known CPU-side), and everything else
@@ -767,15 +323,19 @@ void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y,
     // Classification runs INSIDE the guard.
     //
     // It was called here, bare, one line above the guarded region it feeds.
-    // isExposureDispatch reaches shapeLooksLikeExposure, which makes COM calls
+    // isExposureDispatch reaches the exposure plugin's shape classifier, which
+    // makes COM calls
     // through the curUav shadow -- and that shadow is only as fresh as the last
     // CSSetUnorderedAccessViews we saw. After a ClearState (now hooked below,
     // but a command list can still do it) those pointers can name released
     // views, and the probe would run on them with no SEH at all. The budget is
     // the same one the copy uses: if we cannot classify, we cannot act, so
     // there is nothing to keep alive separately.
-    bool isTarget = false;
-    guardedBudget(g_budget, [&] { isTarget = isExposureDispatch(); });
+    ExposureDispatchTicket ticket{};
+    guardedBudget(g_budget, [&] {
+        ticket = exposurePluginBeginDispatch(
+            static_cast<plugins::exposure::ExposureDispatchObserverState*>(s));
+    });
 
     // Any compute work at all means the game is rendering a scene, which is the
     // only condition under which the exposure pass could appear. Menus and
@@ -783,48 +343,33 @@ void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y,
     s->computeThisFrame = true;
 
     s->realDispatch(self, x, y, z);
-    if (!isTarget) return;
+    if (!ticket.target) return;
 
     guardedBudget(g_budget, [&] {
-        ++s->seenThisFrame;
-        if (s->seenThisFrame == 1) {
-            for (uint32_t i = 0; i < 4; ++i) {
-                s->firstEye[i] = static_cast<ID3D11UnorderedAccessView*>(
-                    bindingGet(uavSlot(i)));
-            }
-        } else if (s->seenThisFrame == 2) {
-            // Running exactly twice a frame is the other half of the signature:
-            // once per eye. A shader that merely has the right resource shape
-            // but runs once, or five times, is something else. Detection waits
-            // for a few consecutive frames of that before touching anything;
-            // a pinned hash is trusted immediately.
-            if (!s->pinned && s->detectStreak < kConfirmFrames) return;
-
-            ID3D11UnorderedAccessView* second[4];
-            for (uint32_t i = 0; i < 4; ++i) {
-                second[i] = static_cast<ID3D11UnorderedAccessView*>(bindingGet(uavSlot(i)));
-            }
-            if (!s->announced) {
-                s->announced = true;
-                // The key is advanced.exposure_shader. It said fix.b1_exposure_cs,
-                // which is this repo's predecessor's name for it and is read by
-                // nothing here -- so anyone following the instruction was
-                // silently ignored, on the support path where it matters most.
-                Log::get().note("exposure fix: confirmed compute shader %016llX runs "
-                                "once per eye. Pin it with exposure_shader under "
-                                "[advanced] in %s if you want to skip detection.",
-                                static_cast<unsigned long long>(hashOf(bindingGet(BindSlot::Cs))),
-                                Config::get().iniName());
-            }
-            shareExposure(self, s->firstEye, second);
-            if (s->dampK > 0.0f) exposureDamp(self, s->firstEye[1]);
-        }
+        exposurePluginCompleteDispatch(
+            static_cast<plugins::exposure::ExposureDispatchObserverState*>(s),
+            ticket, self);
     });
 }
 
 }  // namespace
 
-uint64_t lookupShaderHash(void* shader) { return hashOf(shader); }
+void exposureDispatchApplyPair(void* observerState,
+                               ID3D11DeviceContext* context,
+                               ID3D11UnorderedAccessView** first,
+                               ID3D11UnorderedAccessView** second) {
+    auto* observer = static_cast<plugins::exposure::ExposureDispatchObserverState*>(
+        observerState);
+    State* s = static_cast<State*>(observer);
+    plugins::exposure::exposurePluginShareExposure(
+        static_cast<plugins::exposure::ExposureActionState*>(g_state), context,
+        first, second);
+    if (s->dampK > 0.0f) {
+        plugins::exposure::exposurePluginDamp(
+            static_cast<plugins::exposure::ExposureActionState*>(g_state),
+            context, first[1]);
+    }
+}
 
 void exposureConfigure(Config& cfg) {
     State* s = g_state;
@@ -899,61 +444,25 @@ void exposureConfigure(Config& cfg) {
         }
     }
 
-    const float wasK = s->dampK;
-    float k = cfg.getFloat("experimental.exposure_damping", 0.0f);
-    if (k < 0.0f) k = 0.0f;
-    if (k > 1.0f) k = 1.0f;
-    s->dampK = k;
-    float tau = cfg.getFloat("experimental.exposure_damping_tau", 45.0f);
-    if (tau < 1.0f) tau = 1.0f;
-    if (tau > 600.0f) tau = 600.0f;
-    s->dampTau = tau;
-    if (s->dampK != wasK) {
-        if (s->dampK > 0.0f) {
-            Log::get().note("exposure damping: ON, k=%.2f -- the adaptation "
-                            "swing is compressed to %.0f%% about a slow "
-                            "running mean. 0 restores stock; 1 holds the "
-                            "mean outright.",
-                            s->dampK, (1.0f - s->dampK) * 100.0f);
-        } else {
-            Log::get().note("exposure damping: off; the game's adaptation "
-                            "is stock from the next frame.");
-            s->dampPrevValid = false;
-            s->dampHaveMean = false;
-        }
+    auto* state = static_cast<plugins::exposure::ExposureActionState*>(s);
+    if (s->lifecycleRegistered) {
+        pluginRegistryConfigureLifecycle(plugins::kPluginExposure, &cfg);
+    } else {
+        plugins::exposure::exposurePluginConfigure(state, cfg);
     }
-}
-
-// Bumped after every registration, read by the memos before their lookup:
-// a memo that read the old count and then missed the map holds a zero,
-// which it asks again; one that read it and hit holds the answer the
-// registry had, and the next set sees the count move and asks again.
-// Published (exposure_fix.h) so shaderRegistryGeneration() is an inline
-// load; this file remains its only writer.
-namespace detail {
-std::atomic<uint32_t> g_shaderRegistryGen{0};
-}  // namespace detail
-
-void registerShaderHash(void* shader, uint64_t hash) {
-    if (!g_state || !shader || !g_state->lockReady) return;
-    EnterCriticalSection(&g_state->lock);
-    g_state->shaderHashes[shader] = hash;
-    LeaveCriticalSection(&g_state->lock);
-    detail::g_shaderRegistryGen.fetch_add(1, std::memory_order_release);
 }
 
 void exposureFixFrameBoundary() {
     State* s = g_state;
     if (!s) return;
-    // Exactly two dispatches means one per eye. Anything else breaks the streak,
-    // so a shader that only sometimes runs twice never gets promoted.
-    if (s->seenThisFrame == 2) {
-        if (s->detectStreak < kConfirmFrames) ++s->detectStreak;
-    } else if (s->seenThisFrame != 0) {
-        s->detectStreak = 0;
+    auto* observer =
+        static_cast<plugins::exposure::ExposureDispatchObserverState*>(s);
+    if (!s->lifecycleRegistered ||
+        !pluginRegistryFrameLifecycleStage(
+            plugins::kPluginExposure,
+            plugins::exposure::kExposureLifecycleResetPairing, nullptr, 0)) {
+        exposurePluginResetDispatchFrame(observer);
     }
-    s->seenThisFrame = 0;
-    for (uint32_t i = 0; i < 4; ++i) s->firstEye[i] = nullptr;
     // The skip probe counts occurrences per frame.
     for (uint32_t i = 0; i < 4; ++i) s->dispatchOccSeen[i] = 0;
 
@@ -976,10 +485,11 @@ void exposureFixFrameBoundary() {
     //
     // Yes answers are kept: those are confirmed across frames anyway, and a
     // shader that matched the shape once does not stop having matched it.
-    if (!s->announced && !s->gaveUpNotice && s->targetHash == 0) {
-        for (auto it = s->shapeVerdict.begin(); it != s->shapeVerdict.end();) {
-            it = it->second ? std::next(it) : s->shapeVerdict.erase(it);
-        }
+    if (!s->lifecycleRegistered ||
+        !pluginRegistryFrameLifecycleStage(
+            plugins::kPluginExposure,
+            plugins::exposure::kExposureLifecycleExpireVerdicts, nullptr, 0)) {
+        exposurePluginExpireDispatchVerdicts(observer);
     }
 
     // Say so when detection comes up empty. Otherwise a build where the shape
@@ -1037,8 +547,10 @@ void installExposureFix(ID3D11Device* device, HookMode mode) {
     if (!ctx) return;
 
     g_state = new State();
-    InitializeCriticalSection(&g_state->lock);
-    g_state->lockReady = true;
+    plugins::exposure::initializeExposureLifecycleOps(
+        &g_state->lifecycleOps,
+        static_cast<plugins::exposure::ExposureActionState*>(g_state));
+    shaderRegistryBegin();
     // An empty hash means "find it yourself", which is the default and the
     // reason this survives a game update.
     const std::string hashText = cfg.getString("advanced.exposure_shader", "");
@@ -1065,12 +577,7 @@ void installExposureFix(ID3D11Device* device, HookMode mode) {
         // never installed, and at 5000 frames announced "NOT ENGAGED ... the
         // game is stock" -- a report about a fix that had never been there.
         //
-        // The critical section is initialised above this point, so it has to go
-        // back before the object does.
-        if (g_state->lockReady) {
-            DeleteCriticalSection(&g_state->lock);
-            g_state->lockReady = false;
-        }
+        shaderRegistryEnd();
         delete g_state;
         g_state = nullptr;
         return;
@@ -1118,12 +625,7 @@ void installExposureFix(ID3D11Device* device, HookMode mode) {
         // never installed, and at 5000 frames announced "NOT ENGAGED ... the
         // game is stock" -- a report about a fix that had never been there.
         //
-        // The critical section is initialised above this point, so it has to go
-        // back before the object does.
-        if (g_state->lockReady) {
-            DeleteCriticalSection(&g_state->lock);
-            g_state->lockReady = false;
-        }
+        shaderRegistryEnd();
         delete g_state;
         g_state = nullptr;
         return;
@@ -1151,6 +653,8 @@ void installExposureFix(ID3D11Device* device, HookMode mode) {
     // need it too and never ran this function; see logContextTableVariants.
     logContextTableVariants(s.hook.originalVTable(), s.hook.executablePrefix(),
                             "exposure context");
+    s.lifecycleRegistered =
+        pluginRegistryRegisterLifecycle(&s.lifecycleOps);
     exposureConfigure(cfg);
     ctx->Release();
 }
@@ -1204,17 +708,19 @@ void exposureFixReclaimTick() {
 void shutdownExposureFix() {
     if (!g_state) return;
     g_state->enabled = false;
-    for (int i = 0; i < 2; ++i) {
-        if (g_state->dampStaging[i]) {
-            g_state->dampStaging[i]->Release();
-            g_state->dampStaging[i] = nullptr;
-        }
+    if (g_state->lifecycleRegistered) {
+        pluginRegistryShutdownLifecycle(plugins::kPluginExposure);
+        g_state->lifecycleRegistered = false;
+    } else {
+        // Profile rejection retains the old direct module shutdown path.
+        plugins::exposure::exposurePluginShutdownResources(
+            static_cast<plugins::exposure::ExposureActionState*>(g_state));
     }
     g_state->hook.uninstall();
-    if (g_state->lockReady) {
-        DeleteCriticalSection(&g_state->lock);
-        g_state->lockReady = false;
-    }
+    shaderRegistryEnd();
 }
 
+#else
+}  // namespace
+#endif  // !EDVR_EXPOSURE_DAMP_TEST
 }  // namespace edvr

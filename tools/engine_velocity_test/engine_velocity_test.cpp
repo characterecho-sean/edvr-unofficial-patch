@@ -55,6 +55,9 @@
 #include "actual_vs_link_test.h"
 #include "lifecycle_tests.h"
 #include "flat_lazy_tests.h"
+#ifdef EDVR_ENGINE_VELOCITY_REAL_COST_RIG
+#include "flat_real_cost_tests.h"
+#endif
 #include "flat_domain_tests.h"
 #include "source_free_tests.h"
 #include "pin_tests.h"
@@ -66,6 +69,60 @@
 #include "../../third_party/dxbc_hash/DxilHash.cpp"
 
 using Microsoft::WRL::ComPtr;
+
+#ifndef EDVR_ENGINE_VELOCITY_REAL_COST_RIG
+namespace edvr::plugin_cost::detail { thread_local bool g_apiSampleHint = false; }
+#endif
+
+namespace flat_lazy_tests {
+ApiProbe g_apiProbe;
+}
+
+#ifndef EDVR_ENGINE_VELOCITY_REAL_COST_RIG
+extern "C" uint8_t edvrPluginCostApiSampleContext(const void* context) noexcept {
+    auto& probe = flat_lazy_tests::g_apiProbe;
+    ++probe.verifierCalls;
+    return static_cast<uint8_t>(edvr::plugin_cost::apiSampleHint() && probe.enabled &&
+                                context == probe.ownerContext &&
+                                std::this_thread::get_id() == probe.ownerThread);
+}
+
+extern "C" uint8_t edvrPluginCostApiSampleOwnerThread(void) noexcept {
+    const auto& probe = flat_lazy_tests::g_apiProbe;
+    return static_cast<uint8_t>(edvr::plugin_cost::apiSampleHint() && probe.enabled &&
+                                std::this_thread::get_id() == probe.ownerThread);
+}
+
+extern "C" void edvrPluginCostNoteD3dCall(uint8_t owner, uint16_t siteId, uint8_t apiClass) noexcept {
+    auto& probe = flat_lazy_tests::g_apiProbe;
+    if (owner != static_cast<uint8_t>(edvr::plugin_cost::Owner::TemporalAa) ||
+        siteId >= probe.sites.size() || apiClass >= probe.classes.size() ||
+        !probe.enabled || std::this_thread::get_id() != probe.ownerThread) {
+        ++probe.badNotes;
+        return;
+    }
+    ++probe.sites[siteId];
+    ++probe.classes[apiClass];
+    if (probe.noteCount < probe.noteOrder.size())
+        probe.noteOrder[probe.noteCount++] = siteId;
+}
+#endif
+
+namespace flat_lazy_tests {
+void apiProbeThreadRejection(const lifecycle_tests::Harness& h) {
+    g_apiProbe.reset(h.context, true);
+    uint8_t accepted = 1;
+    std::thread worker([&] {
+        edvr::plugin_cost::detail::g_apiSampleHint = true;
+        accepted = edvrPluginCostApiSampleContext(h.context);
+        edvr::plugin_cost::detail::g_apiSampleHint = false;
+    });
+    worker.join();
+    h.check(accepted == 0 && g_apiProbe.verifierCalls == 1,
+            "engine velocity API sampling: matching context and enabled hint still reject a foreign thread");
+    g_apiProbe.enabled = false;
+}
+}
 
 // The linked draw half uses the same internal binding guard as production;
 // the rig does not link the flat readback module that normally defines it.
@@ -310,6 +367,11 @@ int wmain(int argc, wchar_t** argv) {
     check(SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &device,
                                       &level, &context)), "D3D11CreateDevice WARP");
     check(level >= D3D_FEATURE_LEVEL_11_0, "feature level 11");
+#ifdef EDVR_ENGINE_VELOCITY_REAL_COST_RIG
+    flat_real_cost_tests::run({device.Get(), context.Get(), &check});
+    std::printf("engine_velocity_cost_test: %u checks passed.\n", g_checks);
+    return 0;
+#endif
     constexpr uint64_t shellVs = 0xBFE51414CC3024B4ull;
     constexpr uint64_t shellPs = 0xDB79AE788E049DFDull;
     constexpr uint64_t edgeVs = 0xDE545DC8EE4FBB87ull;
@@ -414,6 +476,13 @@ int wmain(int argc, wchar_t** argv) {
     primary_copy_tests::run(device.Get(),context.Get(),&check);
     panel_tests::run({device.Get(), context.Get(), &check});
     lifecycle_tests::run({device.Get(), context.Get(), &check});
+    const auto flatRuntimeSource = readFile(L"src/d3d11/flat_runtime.cpp");
+    const auto engineVelocitySource = readFile(L"src/d3d11/engine_velocity.cpp");
+    const auto flatPolicySource = readFile(L"src/d3d11/flat_substitution.h");
+    flat_lazy_tests::otherDrawWiringTests({device.Get(), context.Get(), &check},
+        std::string(flatRuntimeSource.begin(), flatRuntimeSource.end()),
+        std::string(engineVelocitySource.begin(), engineVelocitySource.end()),
+        std::string(flatPolicySource.begin(), flatPolicySource.end()));
     flat_lazy_tests::run({device.Get(), context.Get(), &check});
     flat_domain_tests::run({device.Get(), context.Get(), &check});
     source_free_tests::run({device.Get(), context.Get(), &check});

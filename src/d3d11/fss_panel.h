@@ -33,6 +33,9 @@
 // that window.
 #pragma once
 
+#include "draw_interest.h"
+#include "fss_observation.h"
+
 #include <cstdint>
 
 struct ID3D11DeviceContext;
@@ -44,6 +47,9 @@ class Config;
 // fix.fss_panel_distance, resolved against fix.panel_distance. Install and
 // reload paths; live.
 void fssPanelConfigure(Config& cfg);
+bool fssPanelDrawInterestConfigured() noexcept;
+std::size_t fssPanelDrawInterestFilters(draw_interest::ShaderFilter* out,
+                                       std::size_t capacity) noexcept;
 
 // One bool for the draw path's early-out set.
 //
@@ -59,6 +65,19 @@ inline bool fssPanelWantsDraws() { return detail::g_fssPanelEnabled; }
 // begin; true means wrap the draw in fssPanelBegin/End.
 bool fssPanelOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                        uint32_t instances);
+// TracePolicy twin. The ordinary entry point above remains the production
+// NoTrace path; this records only values consumed by the same selector.
+bool fssPanelOnEyeDrawObserved(ID3D11DeviceContext* ctx, char kind,
+                               uint32_t count, uint32_t instances,
+                               FssPanelObservation& observed);
+
+#if defined(EDVR_FSS_PREDICATE_TEST)
+namespace fss_predicate_test {
+void setPanelEnabled(bool enabled) noexcept;
+void setPanelMatchedHash(uint64_t hash) noexcept;
+void resetPanelBudget(int remaining = 8) noexcept;
+}
+#endif
 
 // Swap in the replacement for the matched shader / restore the game's.
 void fssPanelBegin(ID3D11DeviceContext* ctx);

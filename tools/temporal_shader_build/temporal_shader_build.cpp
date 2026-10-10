@@ -21,7 +21,7 @@
 #include "../../src/d3d11/flat_foreground_motion_shader.h"
 #include "../../src/d3d11/flat_domain_marker_shader.h"
 #include "../../src/d3d11/ui_resolve.h"
-#include "../../src/d3d11/night_vision_shader.h"
+#include "../../src/plugins/cockpit_visuals/night_vision_shader.h"
 #include "../../src/d3d11/stellar_coverage.h"
 #include "../../src/d3d11/supercruise_bars_shader.h"
 #include "../../src/openxr/stereo_shader_source.h"

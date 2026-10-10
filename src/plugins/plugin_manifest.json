@@ -1,0 +1,649 @@
+{
+  "schemaVersion": 2,
+  "description": "Canonical first-party plugin catalog for EDVR. Array order and index define stable plugin mask bits.",
+  "profiles": [
+    "vr",
+    "flat"
+  ],
+  "coreOwnedConfigKeys": [
+    "advanced.app_gpu_timing",
+    "advanced.d3d11_fixes",
+    "advanced.draw_replay",
+    "advanced.eye_render_size",
+    "advanced.input_gate",
+    "advanced.real_dll",
+    "d3d11.focus_on_launch",
+    "d3d11.journal_dir",
+    "d3d11.journal_watch",
+    "hotkey.menu",
+    "hotkey.read_game_bindings",
+    "hotkey.toggle_exposure",
+    "log.breadcrumb_heartbeat_seconds",
+    "log.buffer_mb",
+    "log.dir",
+    "log.enabled",
+    "log.max_mb",
+    "menu.aim",
+    "menu.curve",
+    "menu.developer",
+    "menu.distance",
+    "menu.fps_overlay",
+    "menu.fps_overlay_lock",
+    "menu.fps_overlay_pitch",
+    "menu.fps_overlay_yaw",
+    "menu.idle_dismiss",
+    "menu.keyboard",
+    "menu.text_degrees",
+    "menu.toasts",
+    "menu.tooltip_delay",
+    "menu.width_degrees"
+  ],
+  "plugins": [
+    {
+      "index": 0,
+      "id": "temporal-aa",
+      "name": "Temporal anti-aliasing",
+      "description": "Temporal AA backends, motion, depth, UI quality, sharpening, and the flat adapter.",
+      "profiles": [
+        "vr",
+        "flat"
+      ],
+      "recommendedProfiles": [
+        "vr"
+      ],
+      "defaultInstallProfiles": [
+        "vr",
+        "flat"
+      ],
+      "runtimeRequirement": {
+        "vr": "partial",
+        "flat": "none"
+      },
+      "dependencies": [],
+      "conflicts": [],
+      "ownedConfigKeys": [
+        "advanced.temporal_aa_jitter_phases",
+        "fix.render_sharpness",
+        "fix.temporal_aa",
+        "fix.temporal_aa_model",
+        "fix.ui_quality"
+      ],
+      "hookPoints": [],
+      "claims": [],
+      "costNote": "Per-plugin cost not measured; see the design document census baseline.",
+      "rigs": [
+        "flat_sharpen_pass_test"
+      ],
+      "implementationStatus": "catalog-only",
+      "selectionAvailableProfiles": [],
+      "costBudget": {
+        "state": "unmeasured",
+        "reference": null,
+        "metrics": {
+          "cpu": {
+            "state": "unmeasured",
+            "unit": "milliseconds per frame",
+            "coverage": "EDVR-owned CPU work attributable to this plugin. The existing draw-hook CPU census is aggregate and does not split module cost."
+          },
+          "issuedGpuWork": {
+            "state": "unmeasured",
+            "unit": "EDVR-issued D3D11 calls per frame",
+            "coverage": "Calls issued by this plugin only; forwarded game calls and shared/core work are excluded unless explicitly attributed."
+          },
+          "directGpu": {
+            "state": "unmeasured",
+            "unit": "GPU milliseconds per frame",
+            "coverage": "Direct GPU work attributable to this plugin. Whole-frame GPU samples are not plugin-level attribution."
+          }
+        }
+      }
+    },
+    {
+      "index": 1,
+      "id": "cockpit-visuals",
+      "name": "Cockpit visuals",
+      "description": "Sun glare, particle billboards, witchspace stars, RemLok lines, wake pulse, target indicator, and night vision.",
+      "profiles": [
+        "vr"
+      ],
+      "recommendedProfiles": [
+        "vr"
+      ],
+      "defaultInstallProfiles": [
+        "vr"
+      ],
+      "runtimeRequirement": {
+        "vr": "partial",
+        "flat": "none"
+      },
+      "dependencies": [],
+      "conflicts": [],
+      "ownedConfigKeys": [
+        "advanced.remlok_keep_fraction",
+        "advanced.remlok_scale",
+        "advanced.remlok_swap_eyes",
+        "experimental.night_vision_brightness",
+        "experimental.night_vision_realistic",
+        "experimental.target_indicator",
+        "fix.night_vision_stability",
+        "fix.particle_billboard",
+        "fix.remlok_line_angle",
+        "fix.remlok_lines",
+        "fix.sun_glare",
+        "fix.wake_pulse",
+        "fix.witchspace_stars"
+      ],
+      "hookPoints": [
+        "draw.classify"
+      ],
+      "claims": [
+        {
+          "id": "night-vision",
+          "hook": "draw.classify",
+          "precedence": 100,
+          "rig": "night_vision_test",
+          "shaderPairs": [
+            {
+              "vs": "FCF7BD2896751D96",
+              "ps": "F786D34B5E118D5E"
+            }
+          ],
+          "shape": "legacy rung after census skip ranges and before remlok",
+          "precedenceAfter": "census.skip-ranges",
+          "precedenceBefore": "legacy.remlok",
+          "drawShape": {
+            "kind": "X",
+            "count": 240,
+            "instances": 1
+          }
+        }
+      ],
+      "costNote": "Per-plugin cost not measured; see the design document census baseline.",
+      "rigs": [
+        "night_vision_test",
+        "plugin_dispatch_test"
+      ],
+      "implementationStatus": "phase1-pilot",
+      "selectionAvailableProfiles": [],
+      "costBudget": {
+        "state": "unmeasured",
+        "reference": null,
+        "metrics": {
+          "cpu": {
+            "state": "unmeasured",
+            "unit": "milliseconds per frame",
+            "coverage": "EDVR-owned CPU work attributable to this plugin. The existing draw-hook CPU census is aggregate and does not split module cost."
+          },
+          "issuedGpuWork": {
+            "state": "unmeasured",
+            "unit": "EDVR-issued D3D11 calls per frame",
+            "coverage": "Calls issued by this plugin only; forwarded game calls and shared/core work are excluded unless explicitly attributed."
+          },
+          "directGpu": {
+            "state": "unmeasured",
+            "unit": "GPU milliseconds per frame",
+            "coverage": "Direct GPU work attributable to this plugin. Whole-frame GPU samples are not plugin-level attribution."
+          }
+        }
+      }
+    },
+    {
+      "index": 2,
+      "id": "exposure",
+      "name": "Exposure",
+      "description": "Exposure sharing and damping.",
+      "profiles": [
+        "vr"
+      ],
+      "recommendedProfiles": [
+        "vr"
+      ],
+      "defaultInstallProfiles": [
+        "vr"
+      ],
+      "runtimeRequirement": {
+        "vr": "none",
+        "flat": "none"
+      },
+      "dependencies": [],
+      "conflicts": [],
+      "ownedConfigKeys": [
+        "advanced.exposure_shader",
+        "experimental.exposure_damping",
+        "experimental.exposure_damping_tau",
+        "fix.share_exposure"
+      ],
+      "hookPoints": [
+        "lifecycle.configure",
+        "lifecycle.frame",
+        "lifecycle.shutdown"
+      ],
+      "claims": [],
+      "costNote": "Per-plugin cost not measured; see the design document census baseline.",
+      "rigs": [
+        "exposure_dispatch_test",
+        "exposure_cost_test",
+        "plugin_dispatch_test"
+      ],
+      "implementationStatus": "phase1-lifecycle",
+      "selectionAvailableProfiles": [],
+      "costBudget": {
+        "state": "unmeasured",
+        "reference": null,
+        "metrics": {
+          "cpu": {
+            "state": "unmeasured",
+            "unit": "milliseconds per frame",
+            "coverage": "EDVR-owned CPU work attributable to this plugin. The existing draw-hook CPU census is aggregate and does not split module cost."
+          },
+          "issuedGpuWork": {
+            "state": "unmeasured",
+            "unit": "EDVR-issued D3D11 calls per frame",
+            "coverage": "Calls issued by this plugin only; forwarded game calls and shared/core work are excluded unless explicitly attributed."
+          },
+          "directGpu": {
+            "state": "unmeasured",
+            "unit": "GPU milliseconds per frame",
+            "coverage": "Direct GPU work attributable to this plugin. Whole-frame GPU samples are not plugin-level attribution."
+          }
+        }
+      }
+    },
+    {
+      "index": 3,
+      "id": "scanners",
+      "name": "Scanners",
+      "description": "FSS eye synchronization and scanner body.",
+      "profiles": [
+        "vr"
+      ],
+      "recommendedProfiles": [
+        "vr"
+      ],
+      "defaultInstallProfiles": [
+        "vr"
+      ],
+      "runtimeRequirement": {
+        "vr": "partial",
+        "flat": "none"
+      },
+      "dependencies": [],
+      "conflicts": [],
+      "ownedConfigKeys": [
+        "experimental.fss_panel_distance",
+        "experimental.fss_res",
+        "fix.fss_eye_sync"
+      ],
+      "hookPoints": [],
+      "claims": [],
+      "costNote": "Per-plugin cost not measured; see the design document census baseline.",
+      "rigs": [
+        "native_fss_gpu_test",
+        "fss_predicate_test",
+        "fss_reveal_api_test"
+      ],
+      "implementationStatus": "catalog-only",
+      "selectionAvailableProfiles": [],
+      "costBudget": {
+        "state": "unmeasured",
+        "reference": null,
+        "metrics": {
+          "cpu": {
+            "state": "unmeasured",
+            "unit": "milliseconds per frame",
+            "coverage": "EDVR-owned CPU work attributable to this plugin. The existing draw-hook CPU census is aggregate and does not split module cost."
+          },
+          "issuedGpuWork": {
+            "state": "unmeasured",
+            "unit": "EDVR-issued D3D11 calls per frame",
+            "coverage": "Calls issued by this plugin only; forwarded game calls and shared/core work are excluded unless explicitly attributed."
+          },
+          "directGpu": {
+            "state": "unmeasured",
+            "unit": "GPU milliseconds per frame",
+            "coverage": "Direct GPU work attributable to this plugin. Whole-frame GPU samples are not plugin-level attribution."
+          }
+        }
+      }
+    },
+    {
+      "index": 4,
+      "id": "intro",
+      "name": "Intro and loading",
+      "description": "Intro video, splash backdrop, loading dim, and loading hologram.",
+      "profiles": [
+        "vr"
+      ],
+      "recommendedProfiles": [
+        "vr"
+      ],
+      "defaultInstallProfiles": [
+        "vr"
+      ],
+      "runtimeRequirement": {
+        "vr": "partial",
+        "flat": "none"
+      },
+      "dependencies": [],
+      "conflicts": [],
+      "ownedConfigKeys": [
+        "fix.holo_pattern",
+        "fix.intro_backdrop",
+        "fix.intro_video",
+        "fix.loading_dim"
+      ],
+      "hookPoints": [
+        "lifecycle.configure",
+        "lifecycle.frame",
+        "lifecycle.shutdown"
+      ],
+      "claims": [],
+      "costNote": "Per-plugin cost not measured; see the design document census baseline.",
+      "rigs": [
+        "plugin_dispatch_test",
+        "intro_lifecycle_test"
+      ],
+      "implementationStatus": "phase1-lifecycle",
+      "selectionAvailableProfiles": [],
+      "costBudget": {
+        "state": "unmeasured",
+        "reference": null,
+        "metrics": {
+          "cpu": {
+            "state": "unmeasured",
+            "unit": "milliseconds per frame",
+            "coverage": "EDVR-owned CPU work attributable to this plugin. The existing draw-hook CPU census is aggregate and does not split module cost."
+          },
+          "issuedGpuWork": {
+            "state": "unmeasured",
+            "unit": "EDVR-issued D3D11 calls per frame",
+            "coverage": "Calls issued by this plugin only; forwarded game calls and shared/core work are excluded unless explicitly attributed."
+          },
+          "directGpu": {
+            "state": "unmeasured",
+            "unit": "GPU milliseconds per frame",
+            "coverage": "Direct GPU work attributable to this plugin. Whole-frame GPU samples are not plugin-level attribution."
+          }
+        }
+      }
+    },
+    {
+      "index": 5,
+      "id": "on-foot-panel",
+      "name": "On-foot panel",
+      "description": "Black void, screen resolution, panel distance, curvature, and weapon stability.",
+      "profiles": [
+        "vr"
+      ],
+      "recommendedProfiles": [
+        "vr"
+      ],
+      "defaultInstallProfiles": [
+        "vr"
+      ],
+      "runtimeRequirement": {
+        "vr": "partial",
+        "flat": "none"
+      },
+      "dependencies": [
+        {
+          "id": "temporal-aa",
+          "kind": "soft",
+          "reason": "weapon stability's motion half"
+        }
+      ],
+      "conflicts": [],
+      "ownedConfigKeys": [
+        "advanced.panel_curvature_segments",
+        "advanced.panel_curvature_sign",
+        "advanced.panel_curvature_z_gain",
+        "advanced.panel_distance_index",
+        "advanced.panel_hooks_always",
+        "fix.black_void",
+        "fix.panel_curvature",
+        "fix.panel_distance",
+        "fix.vscreen_res_width",
+        "fix.weapon_stability"
+      ],
+      "hookPoints": [],
+      "claims": [],
+      "costNote": "Per-plugin cost not measured; see the design document census baseline.",
+      "rigs": [
+        "weapon_motion_test"
+      ],
+      "implementationStatus": "catalog-only",
+      "selectionAvailableProfiles": [],
+      "costBudget": {
+        "state": "unmeasured",
+        "reference": null,
+        "metrics": {
+          "cpu": {
+            "state": "unmeasured",
+            "unit": "milliseconds per frame",
+            "coverage": "EDVR-owned CPU work attributable to this plugin. The existing draw-hook CPU census is aggregate and does not split module cost."
+          },
+          "issuedGpuWork": {
+            "state": "unmeasured",
+            "unit": "EDVR-issued D3D11 calls per frame",
+            "coverage": "Calls issued by this plugin only; forwarded game calls and shared/core work are excluded unless explicitly attributed."
+          },
+          "directGpu": {
+            "state": "unmeasured",
+            "unit": "GPU milliseconds per frame",
+            "coverage": "Direct GPU work attributable to this plugin. Whole-frame GPU samples are not plugin-level attribution."
+          }
+        }
+      }
+    },
+    {
+      "index": 6,
+      "id": "comfort",
+      "name": "Comfort",
+      "description": "Transition flash and Explorer Cam.",
+      "profiles": [
+        "vr"
+      ],
+      "recommendedProfiles": [
+        "vr"
+      ],
+      "defaultInstallProfiles": [
+        "vr"
+      ],
+      "runtimeRequirement": {
+        "vr": "required",
+        "flat": "none"
+      },
+      "dependencies": [],
+      "conflicts": [],
+      "ownedConfigKeys": [
+        "advanced.camera_buffer_bytes",
+        "advanced.camera_buffer_offset",
+        "fix.explorer_cam_eye_forward",
+        "fix.explorer_cam_eye_right",
+        "fix.explorer_cam_eye_trim_forward",
+        "fix.explorer_cam_eye_trim_right",
+        "fix.explorer_cam_eye_trim_up",
+        "fix.explorer_cam_eye_up",
+        "fix.explorer_cam_follow_smoothing_ms",
+        "fix.transition_flash",
+        "hotkey.explorer_cam"
+      ],
+      "hookPoints": [],
+      "claims": [],
+      "costNote": "Per-plugin cost not measured; see the design document census baseline.",
+      "rigs": [
+        "native_temporal_test",
+        "transition_flash_prevent_test",
+        "explorer_cam_test",
+        "explorer_cam_fade_test"
+      ],
+      "implementationStatus": "catalog-only",
+      "selectionAvailableProfiles": [],
+      "costBudget": {
+        "state": "unmeasured",
+        "reference": null,
+        "metrics": {
+          "cpu": {
+            "state": "unmeasured",
+            "unit": "milliseconds per frame",
+            "coverage": "EDVR-owned CPU work attributable to this plugin. The existing draw-hook CPU census is aggregate and does not split module cost."
+          },
+          "issuedGpuWork": {
+            "state": "unmeasured",
+            "unit": "EDVR-issued D3D11 calls per frame",
+            "coverage": "Calls issued by this plugin only; forwarded game calls and shared/core work are excluded unless explicitly attributed."
+          },
+          "directGpu": {
+            "state": "unmeasured",
+            "unit": "GPU milliseconds per frame",
+            "coverage": "Direct GPU work attributable to this plugin. Whole-frame GPU samples are not plugin-level attribution."
+          }
+        }
+      }
+    },
+    {
+      "index": 7,
+      "id": "performance",
+      "name": "Performance",
+      "description": "Cull guard, FOV trim, OpenXR resolution, settlement detail, and static props.",
+      "profiles": [
+        "vr"
+      ],
+      "recommendedProfiles": [
+        "vr"
+      ],
+      "defaultInstallProfiles": [
+        "vr"
+      ],
+      "runtimeRequirement": {
+        "vr": "partial",
+        "flat": "none"
+      },
+      "dependencies": [],
+      "conflicts": [],
+      "ownedConfigKeys": [
+        "advanced.texture_anisotropy",
+        "advanced.texture_lod_bias",
+        "experimental.fov_trim_nasal",
+        "experimental.fov_trim_outer",
+        "experimental.fov_trim_vertical",
+        "fix.openxr_resolution"
+      ],
+      "hookPoints": [],
+      "claims": [],
+      "costNote": "Per-plugin cost not measured; see the design document census baseline.",
+      "rigs": [],
+      "implementationStatus": "catalog-only",
+      "selectionAvailableProfiles": [],
+      "costBudget": {
+        "state": "unmeasured",
+        "reference": null,
+        "metrics": {
+          "cpu": {
+            "state": "unmeasured",
+            "unit": "milliseconds per frame",
+            "coverage": "EDVR-owned CPU work attributable to this plugin. The existing draw-hook CPU census is aggregate and does not split module cost."
+          },
+          "issuedGpuWork": {
+            "state": "unmeasured",
+            "unit": "EDVR-issued D3D11 calls per frame",
+            "coverage": "Calls issued by this plugin only; forwarded game calls and shared/core work are excluded unless explicitly attributed."
+          },
+          "directGpu": {
+            "state": "unmeasured",
+            "unit": "GPU milliseconds per frame",
+            "coverage": "Direct GPU work attributable to this plugin. Whole-frame GPU samples are not plugin-level attribution."
+          }
+        }
+      }
+    },
+    {
+      "index": 8,
+      "id": "diagnostics",
+      "name": "Diagnostics",
+      "description": "Developer probes, eye dumps, and diagnostic instruments.",
+      "profiles": [
+        "vr",
+        "flat"
+      ],
+      "recommendedProfiles": [],
+      "defaultInstallProfiles": [],
+      "runtimeRequirement": {
+        "vr": "partial",
+        "flat": "none"
+      },
+      "dependencies": [],
+      "conflicts": [],
+      "ownedConfigKeys": [
+        "advanced.census_at_ms",
+        "advanced.census_auto",
+        "advanced.census_cb_slot",
+        "advanced.census_cb_watch",
+        "advanced.census_clip_height",
+        "advanced.census_clip_width",
+        "advanced.census_frames",
+        "advanced.census_fss_jump",
+        "advanced.census_lines",
+        "advanced.census_offscreen",
+        "advanced.census_skip",
+        "advanced.census_skip_dispatch",
+        "advanced.census_skip_offscreen",
+        "advanced.census_skip_quad",
+        "advanced.census_skip_range",
+        "advanced.clear_probe",
+        "advanced.context_hook_mode",
+        "advanced.context_hook_probe",
+        "advanced.cull_gate_capture",
+        "advanced.eye_depth_capture",
+        "advanced.flat_camera_producer_probe",
+        "advanced.freeze_location",
+        "advanced.freeze_test_ms",
+        "advanced.glare_shader_dump",
+        "advanced.ignore_sentinel",
+        "advanced.input_probe",
+        "advanced.object_probe",
+        "advanced.pixel_probe",
+        "advanced.quad_probe",
+        "advanced.quad_probe_at_ms",
+        "advanced.scheduler_probe",
+        "advanced.slow_test_ms",
+        "advanced.vr_camera_census",
+        "advanced.vtable_flip_timeline",
+        "advanced.vtable_writer_probe",
+        "hotkey.dump_camera",
+        "hotkey.dump_draws",
+        "hotkey.dump_eyes"
+      ],
+      "hookPoints": [],
+      "claims": [],
+      "costNote": "Per-plugin cost not measured; see the design document census baseline.",
+      "rigs": [
+        "pixel_probe_test"
+      ],
+      "implementationStatus": "catalog-only",
+      "selectionAvailableProfiles": [],
+      "costBudget": {
+        "state": "unmeasured",
+        "reference": null,
+        "metrics": {
+          "cpu": {
+            "state": "unmeasured",
+            "unit": "milliseconds per frame",
+            "coverage": "EDVR-owned CPU work attributable to this plugin. The existing draw-hook CPU census is aggregate and does not split module cost."
+          },
+          "issuedGpuWork": {
+            "state": "unmeasured",
+            "unit": "EDVR-issued D3D11 calls per frame",
+            "coverage": "Calls issued by this plugin only; forwarded game calls and shared/core work are excluded unless explicitly attributed."
+          },
+          "directGpu": {
+            "state": "unmeasured",
+            "unit": "GPU milliseconds per frame",
+            "coverage": "Direct GPU work attributable to this plugin. Whole-frame GPU samples are not plugin-level attribution."
+          }
+        }
+      }
+    }
+  ],
+  "selectionSemantics": "defaultInstallProfiles records the design target defaults from the architecture decision. Phase 1 does not expose plugin selection; implementationStatus records what the registry currently implements."
+}

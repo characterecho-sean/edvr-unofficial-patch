@@ -3,12 +3,170 @@
 #include <windows.h>
 
 #include <cstdio>
+#include <stdexcept>
 #include <vector>
 
 #include "detect.h"
 #include "../common/iniedit.h"
 
 namespace edvr::installer {
+namespace {
+
+std::string trimStateToken(const std::string& value) {
+    const size_t first = value.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) return std::string();
+    const size_t last = value.find_last_not_of(" \t\r\n");
+    return value.substr(first, last - first + 1);
+}
+
+std::string lowerStateToken(std::string value) {
+    for (char& c : value) {
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    }
+    return value;
+}
+
+bool isPluginSectionName(const std::string& section) {
+    return lowerStateToken(section) == "plugins";
+}
+
+// Also recognize a broken [plugins header so it is retained as opaque data
+// rather than disappearing as an ordinary comment during a state rewrite.
+bool isPluginSectionCandidate(const IniLine& line) {
+    const std::string body = trimStateToken(line.text);
+    if (body.empty() || body[0] != '[') return false;
+    const std::string inside = trimStateToken(body.substr(1));
+    if (inside.size() < 7 || lowerStateToken(inside.substr(0, 7)) != "plugins") return false;
+    return inside.size() == 7 || inside[7] == ']' || inside[7] == ' ' || inside[7] == '\t';
+}
+
+bool validPluginId(const std::string& id) {
+    if (id.empty() || id.front() == '-' || id.back() == '-') return false;
+    bool previousDash = false;
+    for (char c : id) {
+        const bool dash = c == '-';
+        const bool alphanumeric = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9');
+        if (!dash && !alphanumeric) return false;
+        if (dash && previousDash) return false;
+        previousDash = dash;
+    }
+    return true;
+}
+
+bool parseSelectedPluginIds(const std::string& value, std::vector<std::string>* ids) {
+    ids->clear();
+    if (value.empty()) return true;
+    size_t begin = 0;
+    while (begin <= value.size()) {
+        const size_t comma = value.find(',', begin);
+        const size_t end = comma == std::string::npos ? value.size() : comma;
+        const std::string id = value.substr(begin, end - begin);
+        if (!validPluginId(id)) return false;
+        for (const std::string& prior : *ids) {
+            if (prior == id) return false;
+        }
+        ids->push_back(id);
+        if (comma == std::string::npos) break;
+        begin = comma + 1;
+    }
+    return true;
+}
+
+PluginSelectionRecord parsePluginSelection(const IniDoc& doc) {
+    PluginSelectionRecord record;
+    std::vector<const IniLine*> pluginLines;
+    size_t sectionCount = 0;
+    bool inPluginSection = false;
+    for (const IniLine& line : doc.lines) {
+        const bool candidate = isPluginSectionCandidate(line);
+        if (candidate) {
+            ++sectionCount;
+            inPluginSection = true;
+        } else if (line.kind == LineKind::Section) {
+            inPluginSection = false;
+        }
+        if (inPluginSection) {
+            record.opaqueText += line.text;
+            record.opaqueText += line.eol;
+            pluginLines.push_back(&line);
+        }
+    }
+    if (sectionCount == 0) {
+        record.opaqueText.clear();
+        return record;
+    }
+
+    auto opaque = [&]() {
+        record.state = PluginSelectionRecordState::Opaque;
+        record.selectedIds.clear();
+        return record;
+    };
+    if (sectionCount != 1 || pluginLines.empty() ||
+        pluginLines.front()->kind != LineKind::Section ||
+        lowerStateToken(trimStateToken(pluginLines.front()->text)) != "[plugins]") {
+        return opaque();
+    }
+
+    bool haveSelectionSchema = false;
+    bool haveCatalogSchema = false;
+    bool haveProfile = false;
+    bool haveSelectedIds = false;
+    std::string selectedValue;
+    for (size_t i = 1; i < pluginLines.size(); ++i) {
+        const IniLine& line = *pluginLines[i];
+        if (line.kind != LineKind::Key || !isPluginSectionName(line.section)) return opaque();
+        // Refuse comments, inline comments and noncanonical spacing only when
+        // they change the value seen by the INI parser; otherwise known keys
+        // can be safely normalized by the serializer.
+        const size_t eq = line.text.find('=');
+        if (eq == std::string::npos || trimStateToken(line.text.substr(eq + 1)) != line.value)
+            return opaque();
+        if (line.key == "selection_schema_version") {
+            if (haveSelectionSchema || line.value != "1") return opaque();
+            haveSelectionSchema = true;
+        } else if (line.key == "catalog_schema_version") {
+            if (haveCatalogSchema || line.value != "2") return opaque();
+            haveCatalogSchema = true;
+        } else if (line.key == "profile") {
+            if (haveProfile || (line.value != "vr" && line.value != "flat")) return opaque();
+            record.profile = line.value;
+            haveProfile = true;
+        } else if (line.key == "selected_ids") {
+            if (haveSelectedIds) return opaque();
+            selectedValue = line.value;
+            haveSelectedIds = true;
+        } else {
+            return opaque();
+        }
+    }
+    if (!haveSelectionSchema || !haveCatalogSchema || !haveProfile || !haveSelectedIds ||
+        !parseSelectedPluginIds(selectedValue, &record.selectedIds)) {
+        return opaque();
+    }
+
+    record.state = PluginSelectionRecordState::Supported;
+    record.schemaVersion = 1;
+    record.catalogSchemaVersion = 2;
+    record.opaqueText.clear();
+    return record;
+}
+
+bool supportedPluginSelection(const PluginSelectionRecord& record) {
+    if (record.state != PluginSelectionRecordState::Supported ||
+        record.schemaVersion != 1 || record.catalogSchemaVersion != 2 ||
+        (record.profile != "vr" && record.profile != "flat")) return false;
+    std::vector<std::string> checked;
+    for (const std::string& id : record.selectedIds) {
+        if (!validPluginId(id)) return false;
+        for (const std::string& prior : checked) {
+            if (prior == id) return false;
+        }
+        checked.push_back(id);
+    }
+    return true;
+}
+
+}  // namespace
 
 std::wstring stateDirPath(const std::wstring& gameDir) {
     return joinPath(gameDir, L"edvr_install");
@@ -65,6 +223,7 @@ InstallState parseState(const std::string& text) {
     s.descriptorSha = get("edvr", "descriptor_sha256");
     s.components = get("edvr", "components");
     s.openvrDir = fromUtf8(get("edvr", "openvr_dir"));
+    s.pluginSelection = parsePluginSelection(doc);
 
     s.d3d11Sha = get("d3d11", "sha256");
     s.d3d11Installed = !s.d3d11Sha.empty();
@@ -138,6 +297,33 @@ std::string serializeState(const InstallState& state) {
     out += "config_sha256 = " + state.nativeConfigSha + "\r\n";
     out += "original_name = " + toUtf8(state.nativeOriginalName) + "\r\n";
     out += "original_sha256 = " + state.nativeOriginalSha + "\r\n";
+    if (supportedPluginSelection(state.pluginSelection)) {
+        out += "\r\n[plugins]\r\n";
+        out += "selection_schema_version = 1\r\n";
+        out += "catalog_schema_version = 2\r\n";
+        out += "profile = " + state.pluginSelection.profile + "\r\n";
+        out += "selected_ids = ";
+        for (size_t i = 0; i < state.pluginSelection.selectedIds.size(); ++i) {
+            if (i) out += ',';
+            out += state.pluginSelection.selectedIds[i];
+        }
+        out += "\r\n";
+    } else if (state.pluginSelection.state == PluginSelectionRecordState::Opaque) {
+        if (state.pluginSelection.opaqueText.empty())
+            throw std::invalid_argument("cannot serialize an empty opaque plugin selection record");
+        // A broken [plugins header is a comment to IniDoc, so its following
+        // keys would otherwise inherit [native] from the generated record.
+        // The valid header becomes part of opaqueText on the next parse, which
+        // makes subsequent rewrites byte-stable without adding more guards.
+        const IniDoc opaqueDoc = iniParse(state.pluginSelection.opaqueText);
+        if (opaqueDoc.lines.empty() || opaqueDoc.lines.front().kind != LineKind::Section ||
+            !isPluginSectionName(opaqueDoc.lines.front().section)) {
+            out += "[plugins]\r\n";
+        }
+        out += state.pluginSelection.opaqueText;
+    } else if (state.pluginSelection.state == PluginSelectionRecordState::Supported) {
+        throw std::invalid_argument("cannot serialize an invalid supported plugin selection record");
+    }
     return out;
 }
 

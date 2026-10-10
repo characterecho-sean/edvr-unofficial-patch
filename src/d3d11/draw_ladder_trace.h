@@ -1,0 +1,520 @@
+#pragma once
+
+#include "draw_census.h"
+#include "draw_ladder.h"
+#include "basic_draw_observation.h"
+#include "eye_census_observation.h"
+#include "resolve_bind_observation.h"
+#include "loader_panel_observation.h"
+#include "fss_dump_observation.h"
+#include "forwarding_observation.h"
+#include "holo_scrim_observation.h"
+#include "fss_observation.h"
+#include "remlok_observation.h"
+#include "sunglare_observation.h"
+#include "target_sharp_observation.h"
+#include "sunglare_nomination_observation.h"
+
+#include <atomic>
+#include <cstdint>
+
+namespace edvr::draw_ladder_trace {
+
+// One complete owner-context frame is retained. These caps are part of the
+// trace format contract: exceeding any cap invalidates the whole capture and
+// the reader refuses it rather than silently replaying a prefix.
+// A documented on-foot frame can contain 17,180 draw-hook calls. Leave room
+// for busy frames without making the opt-in capture fail at that known case.
+constexpr std::uint32_t kMaxDraws = 65536;
+constexpr std::uint16_t kMaxSiteEventsPerDraw = 48;
+constexpr std::uint16_t kMaxActionEventsPerDraw = 32;
+constexpr std::uint8_t kMaxPredicateFactsPerDraw = 7;
+constexpr std::uint8_t kMaxSunglareFactsPerDraw = 3;
+constexpr std::uint32_t kMaxSunglareFacts = kMaxDraws * kMaxSunglareFactsPerDraw;
+constexpr std::uint8_t kMaxFssFactsPerDraw = 2;
+constexpr std::uint32_t kMaxFssFacts = kMaxDraws * kMaxFssFactsPerDraw;
+constexpr std::uint8_t kMaxRemlokFactsPerDraw = 1;
+constexpr std::uint32_t kMaxRemlokFacts = kMaxDraws * kMaxRemlokFactsPerDraw;
+constexpr std::uint8_t kMaxBasicFactsPerDraw = 2;
+constexpr std::uint32_t kMaxBasicFacts = kMaxDraws * kMaxBasicFactsPerDraw;
+constexpr std::uint8_t kMaxEyeCensusFactsPerDraw = 1;
+// The larger, opt-in census grammar pool has its own explicit capture cap.
+constexpr std::uint32_t kMaxEyeCensusFacts = 32768;
+constexpr std::uint8_t kMaxResolveBindFactsPerDraw = 1;
+constexpr std::uint32_t kMaxResolveBindFacts = 32768;
+constexpr std::uint8_t kMaxLoaderPanelFactsPerDraw = 1;
+constexpr std::uint32_t kMaxLoaderPanelFacts = 32768;
+constexpr std::uint8_t kMaxFssDumpFactsPerDraw = 1;
+constexpr std::uint32_t kMaxFssDumpFacts = 32768;
+constexpr std::uint8_t kMaxTargetSharpFactsPerDraw = 1;
+constexpr std::uint32_t kMaxTargetSharpFacts = 32768;
+constexpr std::uint8_t kMaxSunglareNominationFactsPerDraw = 1;
+constexpr std::uint32_t kMaxSunglareNominationFacts = 32768;
+constexpr std::uint8_t kMaxForwardingFactsPerDraw = 1;
+constexpr std::uint32_t kMaxForwardingFacts = kMaxDraws;
+constexpr std::uint8_t kMaxTotalPredicateFactsPerDraw =
+    kMaxPredicateFactsPerDraw + kMaxSunglareFactsPerDraw +
+    kMaxFssFactsPerDraw + kMaxRemlokFactsPerDraw + kMaxBasicFactsPerDraw +
+    kMaxEyeCensusFactsPerDraw + kMaxResolveBindFactsPerDraw + kMaxLoaderPanelFactsPerDraw +
+    kMaxFssDumpFactsPerDraw + kMaxTargetSharpFactsPerDraw +
+    kMaxSunglareNominationFactsPerDraw;
+static_assert(kMaxDraws >= 17180, "replay capacity must cover the documented on-foot frame");
+
+enum class Status : std::uint8_t {
+    Disabled = 0,
+    PathInvalid = 1,
+    AllocationFailed = 2,
+    Ready = 3,
+    Armed = 4,
+    Capturing = 5,
+    CompleteWritten = 6,
+    InvalidCapture = 7,
+    WriteFailed = 8,
+};
+
+enum class CaptureInvalidation : std::uint8_t {
+    None = 0,
+    Other = 1,
+    SunglareIndexOverflow = 2,
+    SunglarePoolMissing = 3,
+    FssIndexOverflow = 4,
+    FssPoolMissing = 5,
+    RemlokIndexOverflow = 6,
+    RemlokPoolMissing = 7,
+    BasicIndexOverflow = 8,
+    BasicPoolMissing = 9,
+    EyeCensusIndexOverflow = 10,
+    EyeCensusPoolMissing = 11,
+    ResolveBindIndexOverflow = 12,
+    ResolveBindPoolMissing = 13,
+    LoaderPanelIndexOverflow = 14,
+    LoaderPanelPoolMissing = 15,
+    FssDumpIndexOverflow = 16,
+    FssDumpPoolMissing = 17,
+    ForwardingIndexOverflow = 18,
+    ForwardingPoolMissing = 19,
+    TargetSharpIndexOverflow = 20,
+    TargetSharpPoolMissing = 21,
+    SunglareNominationIndexOverflow = 22,
+    SunglareNominationPoolMissing = 23,
+};
+
+// Returned by shutdown() so production can report whether an armed or partial
+// capture was intentionally discarded during cold teardown.
+struct ShutdownResult final {
+    Status previousStatus = Status::Disabled;
+    bool discardedPendingArm = false;
+    bool discardedCapture = false;
+};
+
+struct Token final {
+    std::uint32_t drawIndex = UINT32_MAX;
+    std::uint32_t generation = 0;
+    constexpr bool valid() const noexcept { return drawIndex != UINT32_MAX; }
+};
+
+struct FrameFacts final {
+    std::uint32_t frameNo = 0;
+    std::uint32_t configEpoch = 0;
+    std::uint32_t eyeDrawsThisFrame = 0;
+    std::uint32_t eyeDrawsLastFrame = 0;
+    std::uint32_t sceneDrawsThisFrame = 0;
+    std::uint32_t stateFlags = 0;
+    std::uint32_t sceneCounters[4]{};
+};
+
+struct DrawFacts final {
+    std::uint32_t eyeDrawIndex = 0;
+    std::uint8_t kind = 0;  // D/I/N/X direct, A Auto, Z/Y indirect.
+    draw_ladder::RouteId route = draw_ladder::RouteId::kCommon;
+    draw_ladder::SequenceId sequence = draw_ladder::SequenceId::kCommon;
+    std::uint32_t count = 0;
+    std::uint32_t instances = 1;
+    DrawArgs args{};
+    std::uint64_t vsHash = 0;
+    std::uint64_t psHash = 0;
+    std::uintptr_t vsIdentity = 0;
+    std::uintptr_t psIdentity = 0;
+    std::uintptr_t rtv0Identity = 0;
+    std::uintptr_t dsv0Identity = 0;
+    std::uint32_t rtv0Generation = 0;
+    std::uint32_t dsv0Generation = 0;
+    std::uint32_t rtv0Width = 0;
+    std::uint32_t rtv0Height = 0;
+    std::uintptr_t argumentBufferIdentity = 0;
+    std::uint32_t argumentByteOffset = 0;
+    std::uint64_t candidateMask = 0;
+    std::uint32_t flags = 0;
+    bool argumentBufferKnown = false;
+    bool drawParametersKnown = true;
+};
+
+enum class TriState : std::uint8_t {
+    Unknown = 0,
+    No = 1,
+    Yes = 2,
+};
+
+// Inputs for the small, independently re-evaluable predicate slice. These
+// facts are recorded only by TracePolicy at already-reached sites; expected
+// SiteEvents remain outputs and are never used as selector inputs.
+enum class PredicateFactKind : std::uint8_t {
+    DrawGateWanted = 1,
+    EyeRangeSkip = 2,
+    NightVisionClaim = 3,
+    WitchspaceStarsSkip = 4,
+    OffscreenCensusSkip = 5,
+    OffscreenQuadSkip = 6,
+    Holo53 = 7,
+    Scrim55 = 8,
+    FssChromeSkip = 23,
+};
+
+struct FssChromeSkipObservation final {
+    TriState outerHeal = TriState::Unknown;
+    TriState outerCensus = TriState::Unknown;
+    TriState outerTemporal = TriState::Unknown;
+    TriState kindReached = TriState::Unknown;
+    std::uint8_t drawKind = 0;
+    TriState kindMatched = TriState::Unknown;
+    TriState countReached = TriState::Unknown;
+    std::uint32_t drawCount = 0;
+    TriState countMatched = TriState::Unknown;
+    TriState budgetEntered = TriState::Unknown;
+    TriState budgetResult = TriState::Unknown;
+    TriState hashReached = TriState::Unknown;
+    std::uint64_t vsHash = 0;
+    TriState hashMatched = TriState::Unknown;
+    TriState srvReached = TriState::Unknown;
+    TriState srvNonNull = TriState::Unknown;
+    TriState resourceReached = TriState::Unknown;
+    TriState resourceNonNull = TriState::Unknown;
+    TriState queryReached = TriState::Unknown;
+    TriState texture2D = TriState::Unknown;
+    TriState dimensionsReached = TriState::Unknown;
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    TriState chromeMatched = TriState::Unknown;
+    TriState healForSkip = TriState::Unknown;
+    TriState latchReached = TriState::Unknown;
+    TriState latchOn = TriState::Unknown;
+    TriState frameReached = TriState::Unknown;
+    std::uint32_t frameNo = 0;
+    std::uint32_t priorFrameNo = 0;
+    std::uint32_t ordinalCountBefore = 0;
+    TriState frameChanged = TriState::Unknown;
+    std::uint32_t ordinal = 0;
+    std::uint32_t ordinalCountAfter = 0;
+    TriState helperReached = TriState::Unknown;
+    std::uint32_t startInstance = 0;
+    std::int32_t baseVertex = 0;
+    TriState maskReached = TriState::Unknown;
+    std::uint32_t skipMask = 0;
+    TriState ordinalInRange = TriState::Unknown;
+    TriState maskBit = TriState::Unknown;
+    TriState terminalSkip = TriState::Unknown;
+};
+
+struct PredicateRange final {
+    std::uint32_t lo = 0;
+    std::uint32_t hi = 0;
+};
+
+struct PredicateOffscreenRule final {
+    std::uint8_t kind = 0;
+    std::uint32_t count = 0;
+    std::uint32_t w = 0;
+    std::uint32_t h = 0;
+};
+
+struct PredicateFact final {
+    std::uint16_t siteId = 0;
+    PredicateFactKind kind = PredicateFactKind::DrawGateWanted;
+    TriState known = TriState::Unknown;
+    TriState gateWanted = TriState::Unknown;
+    std::uint8_t rangeCount = 0;
+    std::uint32_t eyeDrawIndex = 0;
+    PredicateRange ranges[4]{};
+    // EyeRangeSkip's observed post-increment counter delta. False means the
+    // input fact is valid but the mutation observation is unavailable.
+    bool censusSkippedDeltaKnown = false;
+    std::uint32_t censusSkippedDelta = 0;
+    // NightVisionClaim source inputs. Availability is explicit because the
+    // legacy ladder short-circuits before later stages on dispatch/candidate
+    // misses. The callback observation is sampled during its single call.
+    TriState dispatchEnabled = TriState::Unknown;
+    TriState activeMaskKnown = TriState::Unknown;
+    std::uint64_t activePluginMask = 0;
+    TriState candidateKnown = TriState::Unknown;
+    TriState candidatePresent = TriState::Unknown;
+    TriState modeKnown = TriState::Unknown;
+    std::uint8_t mode = 0;
+    TriState shapeReached = TriState::Unknown;
+    TriState shapeMatched = TriState::Unknown;
+    TriState callbackReached = TriState::Unknown;
+    TriState callbackModeKnown = TriState::Unknown;
+    std::uint8_t callbackMode = 0;
+    TriState failedKnown = TriState::Unknown;
+    TriState failed = TriState::Unknown;
+    // WitchspaceStarsSkip source inputs and the observed single-call hash.
+    // The cached interest mask validates whether the ladder staged the site;
+    // it is not used as the frozen helper's selector oracle.
+    TriState interestMaskKnown = TriState::Unknown;
+    std::uint64_t legacyInterestMask = 0;
+    TriState starsHelperReached = TriState::Unknown;
+    TriState hiddenKnown = TriState::Unknown;
+    TriState hidden = TriState::Unknown;
+    TriState contextKnown = TriState::Unknown;
+    TriState contextValid = TriState::Unknown;
+    TriState starsShapeReached = TriState::Unknown;
+    TriState starsShapeMatched = TriState::Unknown;
+    TriState starsHashKnown = TriState::Unknown;
+    std::uint8_t starsHashSource = 0;
+    std::uint64_t starsVsHash = 0;
+    bool starsSkippedDeltaKnown = false;
+    std::uint32_t starsSkippedDelta = 0;
+    // Offscreen skip selectors. Site 24 snapshots its ordered configured
+    // census rules; site 26 snapshots one configured quad target/rule.
+    std::uint8_t offscreenRuleCount = 0;
+    PredicateOffscreenRule offscreenRules[4]{};
+    TriState quadArmed = TriState::Unknown;
+    std::uint32_t offscreenEyeDrawsLastFrame = 0;
+    TriState offscreenProbeReached = TriState::Unknown;
+    TriState offscreenProbeResolved = TriState::Unknown;
+    TriState offscreenProbeTexture2D = TriState::Unknown;
+    std::uint32_t offscreenTargetW = 0;
+    std::uint32_t offscreenTargetH = 0;
+    holo_scrim_observation::HoloObservation holo{};
+    holo_scrim_observation::ScrimObservation scrim{};
+    FssChromeSkipObservation fssChrome{};
+    bool detailsFinalized = false;  // internal capture validity; not serialized
+};
+
+// The census counter is uint64_t. Keep only the supported single-step delta
+// in the trace's uint32_t field; sentinel 2 intentionally trips its validator
+// for any other observed jump. Unsigned subtraction preserves a real wrap.
+constexpr std::uint32_t boundedCensusSkippedDelta(std::uint64_t before,
+                                                  std::uint64_t after) noexcept {
+    const std::uint64_t delta = after - before;
+    return delta <= 1 ? static_cast<std::uint32_t>(delta) : 2u;
+}
+
+// Each bit marks a decision field actually supplied by the caller. A clear
+// bit/Unknown value means the decision was not reached or was unavailable.
+enum ForwardFact : std::uint32_t {
+    kForwardOwner = 1u << 0,
+    kForwardVerdict = 1u << 1,
+    kForwardVerdictForwards = 1u << 2,
+    kForwardFamily = 1u << 3,
+    kForwardInitialUiTake = 1u << 4,
+    kForwardAfterUiTake = 1u << 5,
+    kForwardWorldReissue = 1u << 6,
+    kForwardCurveThisDraw = 1u << 7,
+    kForwardIntroCurveThisDraw = 1u << 8,
+    kForwardUiDepth = 1u << 9,
+    kForwardHoloDepth = 1u << 10,
+    kForwardComposite = 1u << 11,
+    kForwardCrispPending = 1u << 12,
+    kForwardIssueBlocked = 1u << 13,
+};
+
+struct ForwardFacts final {
+    std::uint32_t presentMask = 0;
+    std::int16_t verdictOrdinal = -1;
+    std::uint16_t family = 0;
+    TriState owner = TriState::Unknown;
+    TriState verdictForwards = TriState::Unknown;
+    TriState familyAvailable = TriState::Unknown;
+    TriState initialUiTake = TriState::Unknown;
+    TriState afterUiTake = TriState::Unknown;
+    TriState worldReissue = TriState::Unknown;
+    TriState curveThisDraw = TriState::Unknown;
+    TriState introCurveThisDraw = TriState::Unknown;
+    TriState uiDepth = TriState::Unknown;
+    TriState holoDepth = TriState::Unknown;
+    TriState composite = TriState::Unknown;
+    TriState crispPending = TriState::Unknown;
+    TriState issueBlocked = TriState::Unknown;
+};
+
+// Call after Config and Log initialization. The user switch is read by the
+// caller; when disabled this allocates no storage and performs no file work.
+// Pass the exact path selected by Log::open; this avoids associating a sidecar
+// with another concurrent or flat-profile session.
+void configure(bool enabled, const wchar_t* logFilePath) noexcept;
+// Call only after draw hooks are uninstalled and no trace callback can run.
+// This cold path discards partial data, frees opt-in storage, and never writes
+// a sidecar. The returned prior state distinguishes discard from success.
+ShutdownResult shutdown() noexcept;
+void armManual() noexcept;
+
+// Called only at owner-frame boundaries. frameBegin starts a capture only if
+// the manual request was pending at that boundary. frameEnd writes only after
+// the entire captured frame has completed.
+void frameBegin(const FrameFacts& facts) noexcept;
+void frameEnd(std::uint32_t completedFrameNo) noexcept;
+void invalidateActiveCapture() noexcept;
+
+// Called only from the trace-enabled draw specialization. No resource query,
+// allocation, lock, or log call occurs in these append functions.
+Token beginDraw(const DrawFacts& facts) noexcept;
+void appendSite(Token token, std::uint16_t id, std::uint8_t kind,
+                std::uint8_t outcome, std::uint8_t flow,
+                std::uint16_t subsite, std::int16_t siteVerdict) noexcept;
+void appendAction(Token token, std::uint16_t id,
+                  const draw_ladder::ActionRecord& action) noexcept;
+void recordForwardFacts(Token token, const ForwardFacts& facts) noexcept;
+void appendPredicateFact(Token token, const PredicateFact& fact) noexcept;
+void appendSunglareFact(Token token, const SunglareObservation& fact) noexcept;
+void appendFssFact(Token token, const FssObservation& fact) noexcept;
+void appendRemlokFact(Token token, const remlok_observation::Observation& fact) noexcept;
+void appendBasicFact(Token token, const BasicDrawObservation& fact) noexcept;
+void appendEyeCensusFact(Token token, const EyeCensusObservation& fact) noexcept;
+void appendResolveBindFact(Token token, const ResolveBindObservation& fact) noexcept;
+void appendLoaderPanelFact(Token token, const LoaderPanelObservation& fact) noexcept;
+void appendFssDumpFact(Token token, const FssDumpObservation& fact) noexcept;
+void appendForwardingFact(Token token, const ForwardingObservation& fact) noexcept;
+void appendTargetSharpFact(Token token, const TargetSharpObservation& fact) noexcept;
+void appendSunglareNominationFact(Token token,
+                                 const SunglareNominationObservation& fact) noexcept;
+bool readSunglareNominationFactForTest(
+    Token token, std::uint8_t ordinal,
+    SunglareNominationObservation* out) noexcept;
+std::uint8_t sunglareNominationFactCountForTest(Token token) noexcept;
+#if defined(EDVR_VSCREEN_PREDICATE_TEST)
+bool readEyeCensusFactForTest(Token token, std::uint8_t ordinal, EyeCensusObservation* out) noexcept;
+std::uint8_t eyeCensusFactCountForTest(Token token) noexcept;
+bool readResolveBindFactForTest(Token token, std::uint8_t ordinal, ResolveBindObservation* out) noexcept;
+std::uint8_t resolveBindFactCountForTest(Token token) noexcept;
+bool readLoaderPanelFactForTest(Token token, std::uint8_t ordinal, LoaderPanelObservation* out) noexcept;
+std::uint8_t loaderPanelFactCountForTest(Token token) noexcept;
+bool readBasicFactForTest(Token token, std::uint8_t ordinal, BasicDrawObservation* out) noexcept;
+std::uint8_t basicFactCountForTest(Token token) noexcept;
+bool readFssDumpFactForTest(Token token, std::uint8_t ordinal, FssDumpObservation* out) noexcept;
+std::uint8_t fssDumpFactCountForTest(Token token) noexcept;
+bool readForwardingFactForTest(Token token, std::uint8_t ordinal, ForwardingObservation* out) noexcept;
+std::uint8_t forwardingFactCountForTest(Token token) noexcept;
+bool readTargetSharpFactForTest(Token token, std::uint8_t ordinal, TargetSharpObservation* out) noexcept;
+std::uint8_t targetSharpFactCountForTest(Token token) noexcept;
+std::uint16_t actionCountForTest(Token token) noexcept;
+bool readActionForTest(Token token, std::uint16_t ordinal, std::uint16_t* actionId,
+                       draw_ladder::ActionRecord* out) noexcept;
+#endif
+void completeNightVisionFact(Token token, const PredicateFact& fact) noexcept;
+void completeWitchspaceStarsFact(Token token, const PredicateFact& fact) noexcept;
+void updateCandidates(Token token, std::uint64_t mask) noexcept;
+void updateRoute(Token token, draw_ladder::RouteId route,
+                 draw_ladder::SequenceId sequence) noexcept;
+void finishDraw(Token token, std::int16_t winnerSiteId,
+                std::int16_t verdictOrdinal) noexcept;
+
+bool configured() noexcept;
+bool capturing() noexcept;
+bool overflowed() noexcept;
+CaptureInvalidation invalidationReason() noexcept;
+Status status() noexcept;
+const char* statusName(Status value) noexcept;
+
+namespace detail {
+extern std::atomic<bool> g_captureActive;
+}
+
+// Exactly one draw-level branch chooses TracePolicy or draw_ladder::NoTrace.
+// The disabled specialization has no per-site calls or payload construction.
+inline bool drawLadderTraceCaptureActive() noexcept {
+    return detail::g_captureActive.load(std::memory_order_relaxed);
+}
+
+struct TracePolicy final {
+    static constexpr bool enabled = true;
+    Token token{};
+    // Per-draw snapshots exist only on the enabled trace policy, so the
+    // ordinary visitor retains its original layout and initialization.
+    std::uint32_t sunglareClampResetBefore = 0;
+    std::uint32_t sunglareClampResetAfter = 0;
+    bool sunglareClampResetSeen = false;
+
+    template <draw_ladder::SiteId Id, draw_ladder::SiteKind Kind,
+              class Payload>
+    inline void site(const Payload& payload) noexcept {
+        appendSite(token, static_cast<std::uint16_t>(Id),
+                   static_cast<std::uint8_t>(Kind),
+                   static_cast<std::uint8_t>(payload.outcome),
+                   static_cast<std::uint8_t>(payload.flow), payload.subsite,
+                   payload.verdict);
+    }
+
+    template <draw_ladder::ActionId Id>
+    inline void action(const draw_ladder::ActionRecord& payload) noexcept {
+        appendAction(token, static_cast<std::uint16_t>(Id), payload);
+    }
+
+    inline void candidates(std::uint64_t mask) noexcept {
+        updateCandidates(token, mask);
+    }
+
+    inline void route(draw_ladder::RouteId routeId,
+                      draw_ladder::SequenceId sequenceId) noexcept {
+        updateRoute(token, routeId, sequenceId);
+    }
+
+    inline void forward(const ForwardFacts& facts) noexcept {
+        recordForwardFacts(token, facts);
+    }
+
+    inline void predicateFact(const PredicateFact& fact) noexcept {
+        appendPredicateFact(token, fact);
+    }
+
+    inline void completePredicateFact(const PredicateFact& fact) noexcept {
+        completeNightVisionFact(token, fact);
+    }
+
+    inline void completeWitchspaceStarsPredicateFact(const PredicateFact& fact) noexcept {
+        completeWitchspaceStarsFact(token, fact);
+    }
+
+    inline void sunglareFact(const SunglareObservation& fact) noexcept {
+        appendSunglareFact(token, fact);
+    }
+
+    inline void fssFact(const FssObservation& fact) noexcept {
+        appendFssFact(token, fact);
+    }
+    inline void remlokFact(const remlok_observation::Observation& fact) noexcept {
+        appendRemlokFact(token, fact);
+    }
+    inline void basicFact(const BasicDrawObservation& fact) noexcept {
+        appendBasicFact(token, fact);
+    }
+    inline void eyeCensusFact(const EyeCensusObservation& fact) noexcept {
+        appendEyeCensusFact(token, fact);
+    }
+    inline void resolveBindFact(const ResolveBindObservation& fact) noexcept {
+        appendResolveBindFact(token, fact);
+    }
+    inline void loaderPanelFact(const LoaderPanelObservation& fact) noexcept {
+        appendLoaderPanelFact(token, fact);
+    }
+    inline void fssDumpFact(const FssDumpObservation& fact) noexcept {
+        appendFssDumpFact(token, fact);
+    }
+    inline void forwardInputs(const ForwardingObservation& fact) noexcept {
+        appendForwardingFact(token, fact);
+    }
+    inline void targetSharpFact(const TargetSharpObservation& fact) noexcept {
+        appendTargetSharpFact(token, fact);
+    }
+    inline void sunglareNominationFact(
+        const SunglareNominationObservation& fact) noexcept {
+        appendSunglareNominationFact(token, fact);
+    }
+};
+
+inline TracePolicy makePolicy(Token token) noexcept {
+    TracePolicy policy{};
+    policy.token = token;
+    return policy;
+}
+
+}  // namespace edvr::draw_ladder_trace

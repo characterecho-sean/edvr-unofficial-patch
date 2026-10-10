@@ -135,15 +135,25 @@ static bool wiredLayerTakeVscreen(const std::string& t) {
     const size_t layerBegin = found(begin) ? t.find("const bool layered = uiLayer && uiLayerBegin(self);", begin) : std::string::npos;
     const size_t issue = t.find("const bool originalIssued=observedDraw(", fn);
     const size_t end = t.find("if (orbitScaled) orbitalWidthEnd(self);", fn);
-    const size_t layerEnd = t.find("        uiLayerEnd(self);\n        if (originalIssued) uiLayerSecondIssues(", fn);
+    // Trace actions can sit between the restore and second issues. Pin the
+    // actual calls and their order, rather than requiring textual adjacency.
+    const size_t layerEnd = found(layerBegin) ? t.find("        uiLayerEnd(self);\n", layerBegin) : std::string::npos;
+    const size_t secondIssues = found(layerEnd) ? t.find("if (originalIssued) uiLayerSecondIssues(", layerEnd) : std::string::npos;
     const size_t twin = t.find("if (!layered && uiDepthScope.on && uiDepthWantsReissue()) {", fn);
     const size_t twinBegin = t.find("uiDepthReissueBegin(self)", fn);
-    if (!found(gate) || !found(begin) || !found(layerBegin) || !found(issue) || !found(end) || !found(layerEnd) || !found(twin) || !found(twinBegin)) return false;
+    if (!found(gate) || !found(begin) || !found(layerBegin) || !found(issue) || !found(end) || !found(layerEnd) || !found(secondIssues) || !found(twin) || !found(twinBegin)) return false;
+    // Both production forms are supported: the trace policy is a compile-time
+    // argument in the feature forwarder and absent in the main-only forwarder.
+    const bool tracedSecondIssues = t.compare(secondIssues, std::strlen("if (originalIssued) uiLayerSecondIssues(trace, self, kind, count, instances, args);"),
+        "if (originalIssued) uiLayerSecondIssues(trace, self, kind, count, instances, args);") == 0;
+    const bool plainSecondIssues = t.compare(secondIssues, std::strlen("if (originalIssued) uiLayerSecondIssues(self, kind, count, instances, args);"),
+        "if (originalIssued) uiLayerSecondIssues(self, kind, count, instances, args);") == 0;
+    if (!tracedSecondIssues && !plainSecondIssues) return false;
     // the same factor in the layer: the gate never asks whether the layer takes the draw
     const std::string condition = t.substr(gate, begin - gate);
     if (found(condition.find("uiLayer")) || found(condition.find("layered")) || found(condition.find("barsDecided"))) return false;
     // the patch is bound before the layer's bracket and put back after the issue and before the layer's own restore
-    if (!(begin < layerBegin && layerBegin < issue && issue < end && end < layerEnd)) return false;
+    if (!(begin < layerBegin && layerBegin < issue && issue < end && end < layerEnd && layerEnd < secondIssues && secondIssues < twin)) return false;
     // the twin: only for a draw the layer did not take, and after the patch is put back
     return end < twin && twin < twinBegin;
 }
@@ -236,10 +246,14 @@ static void wiringCases() {
           "control: ...whatever name the layer's decision goes by");
     check(!wiredLayerTakeVscreen(replaced(vscreen, "if (!layered && uiDepthScope.on && uiDepthWantsReissue()) {", "if (uiDepthScope.on && uiDepthWantsReissue()) {")),
           "control: a coverage twin that also runs for a draw the layer took (a second, phantom line in the scene's account) trips the pin");
-    check(!wiredLayerTakeVscreen(replaced(without(vscreen, "    if (orbitScaled) orbitalWidthEnd(self);   // the game's vertex shader and its slot 13 back, before anything else looks\n"),
-                                          "if (originalIssued) uiLayerSecondIssues(self, kind, count, instances, args);\n    }\n",
-                                          "if (originalIssued) uiLayerSecondIssues(self, kind, count, instances, args);\n    }\n    if (orbitScaled) orbitalWidthEnd(self);\n")),
+    check(!wiredLayerTakeVscreen(replacedAfter(without(vscreen, "    if (orbitScaled) orbitalWidthEnd(self);   // the game's vertex shader and its slot 13 back, before anything else looks\n"),
+                                          "const bool orbitScaled = ", "        uiLayerEnd(self);\n",
+                                          "        uiLayerEnd(self);\n    if (orbitScaled) orbitalWidthEnd(self);\n")),
           "control: the patch put back after the layer's own restore trips the pin");
+    check(!wiredLayerTakeVscreen(without(without(vscreen,
+          "        if (originalIssued) uiLayerSecondIssues(trace, self, kind, count, instances, args);\n"),
+          "        if (originalIssued) uiLayerSecondIssues(self, kind, count, instances, args);\n")),
+          "control: missing second issues after the layer restore trips the pin");
 
     check(wiredLayerTakeLayer(layer),
           "ui_layer.cpp: the orbit lines and the bars are HDR families by the one list; the density fact is asked of them alone, from the layer's own size against the render's, "

@@ -429,26 +429,29 @@ void pins() {
         return countOf(squeezed, "screenMotionRecognize()") == 3 &&
                has(squeezed, "if(uiLayer&&uiFamily==UiLayerFamily::kScreen&&uiLayerMapsOn()&&screenMotionLive()&&screenMotionRecognize())uiLayerMapsNoteRecognised();") &&
                has(squeezed, "if(screenMotionLive()&&uiLayerWorldReissuePending())screenMotionRecognize();") &&
-               has(squeezed, "if(!routeOwns)return;if(screenMotionLive())screenMotionRecognize();worldScreenReissueCurved(self);");
+               has(squeezed, "if(!routeOwns)return;if(screenMotionLive())screenMotionRecognize();worldScreenReissueCurved(trace,self,'X',count,instances,args);");
     };
     check(recognitionPlaces(squeeze(vs)),
           "P4a: the recognition is called in exactly three places in vscreen.cpp: the route's (unchanged), a taken 2D screen's behind uiLayerMapsOn(), and the curved screen's after the substitution (behind routeOwns)");
     {   // controls: the same predicate over copies with one edit each must fail, so P4a can fail
         const std::string sq = squeeze(vs);
-        const std::string third = "if(!routeOwns)return;if(screenMotionLive())screenMotionRecognize();worldScreenReissueCurved(self);";
+        const std::string third = "if(!routeOwns)return;if(screenMotionLive())screenMotionRecognize();worldScreenReissueCurved(trace,self,'X',count,instances,args);";
         const size_t at = sq.find(third);
         std::string without = sq, extra = sq, ungated = sq;
         if (at != std::string::npos) {
-            without.replace(at, third.size(), "if(!routeOwns)return;worldScreenReissueCurved(self);");
+            without.replace(at, third.size(), "if(!routeOwns)return;worldScreenReissueCurved(trace,self,'X',count,instances,args);");
             extra.replace(at, third.size(), third + "screenMotionRecognize();");
-            ungated.replace(at, third.size(), "if(screenMotionLive())screenMotionRecognize();worldScreenReissueCurved(self);");
+            ungated.replace(at, third.size(), "if(screenMotionLive())screenMotionRecognize();worldScreenReissueCurved(trace,self,'X',count,instances,args);");
         }
         check(at != std::string::npos && !recognitionPlaces(without) && !recognitionPlaces(extra) && !recognitionPlaces(ungated),
               "P4a control: without the curved screen's recognition, with a fourth, or with the curved screen's ungated by routeOwns, the pin fails");
     }
-    const std::string fwd = functionBody(vs, "void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,");
+    const std::string fwd = functionBody(vs, "void forwardWithVerdict(TracePolicy& trace, ID3D11DeviceContext* self, DrawVerdict v,");
     check(inOrder(fwd, {"uiLayer = uiLayerDecide(self, static_cast<int>(uiFamily)", "worldReissue.on = uiLayerWorldReissuePending();",
-                        "screenMotionRecognize()", "uiLayer = uiLayerNoteOther(", "if (g_state->curveThisDraw) {", "const bool layered = uiLayer && uiLayerBegin(self);"}),
+                        "screenMotionRecognize()", "uiLayer = uiLayerNoteOther(",
+                        "if (forwardInputs.read(forwardInputs.fact.curveThisDrawCurveGate,"
+                        "[&] { return g_state->curveThisDraw; }, [&] { return g_state->curveThisDraw; })) {",
+                        "const bool layered = uiLayer && uiLayerBegin(self);"}),
           "P4b: the recognition sits right after the decision and before the curved screen's substitution and the draw's own issue, so the curved screen is covered");
 
     // P5: the naming. Told once, at the one place screen motion names the source.

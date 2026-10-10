@@ -154,6 +154,11 @@ void bindingSet(BindSlot slot, void* ptr);
 // hash is 0 for a slot never set; a caller that finds the pointer null falls
 // back to the Get, since the shadow follows the owner context only.
 void bindingSetShader(BindSlot slot, void* ptr, uint64_t hash);
+// Optional owner-thread observer for the canonical shader pair. Installed only
+// while an active dispatch claim needs cached candidates; ordinary shadow
+// writes stay independent of plugin registration.
+using BindingShaderObserverFn = void (*)();
+void bindingShadowSetShaderObserver(BindingShaderObserverFn observer);
 #ifndef EDVR_BINDING_SHADOW_EXTERNAL
 inline uint64_t bindingShaderHash(BindSlot slot) {
     return detail::g_bindingSlots[static_cast<size_t>(slot)].hash;

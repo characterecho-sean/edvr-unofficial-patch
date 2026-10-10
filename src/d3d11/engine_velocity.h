@@ -44,9 +44,11 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <type_traits>
 
 #include "binding_shadow.h"
 #include "engine_velocity_families.h"
+#include "../common/plugin_cost.h"
 
 struct ID3D11Buffer;
 struct ID3D11DeviceContext;
@@ -122,6 +124,7 @@ extern uint64_t g_stateCalls;                  // owner thread only: the draw wr
 constexpr unsigned kWatchSlots = 6;
 extern std::atomic<const ID3D11Resource*> watch[kWatchSlots];
 void beforeDrawSlow(ID3D11DeviceContext*, bool rtv0Eye);
+void beforeDrawSlowSampledApi(ID3D11DeviceContext*, bool rtv0Eye);
 void noteSkinDrawSlow(ID3D11DeviceContext*, uint32_t startInstance, uint32_t instances);
 extern uint32_t g_psShadowProbeN;   // owner thread; the header's sampling counter
 // Sampled backstop for a genuinely unobserved game bind. The seam arc's
@@ -131,6 +134,23 @@ extern uint32_t g_psShadowProbeN;   // owner thread; the header's sampling count
 // shader absent from the shadow; otherwise it adopts our substitution as
 // game state and destroys restoration ownership.
 void psShadowProbe(ID3D11DeviceContext*);
+void psShadowProbeSampledApi(ID3D11DeviceContext*);
+// NoApi's original probe gate keeps these tiny pure lookups at the callsite.
+// The sampled/shared family lookups retain their existing implementation.
+__forceinline int familyOfVsNoApiInline(uint64_t hash) noexcept {
+    using namespace engine_velocity_family;
+    for (int i = 0; i < kFamilyCount; ++i) if (kFamilies[i].vs == hash) return i;
+    return -1;
+}
+__forceinline bool anyFamilyPsNoApiInline(uint64_t ps) noexcept {
+    using namespace engine_velocity_family;
+    for (const Family& f : kFamilies)
+        for (uint64_t h : f.ps)
+            if (h == ps) return true;
+    for (const SelfMarking& p : kSelfMarking)
+        if (p.ps == ps) return true;
+    return false;
+}
 void noteResourceMapped(const ID3D11Resource*, void* data, int mapType) noexcept;
 void noteResourceWrite(const ID3D11Resource*) noexcept;
 constexpr unsigned kPrimaryPoolResources=16;
@@ -160,8 +180,8 @@ inline void engineVelocityBeforeDraw(ID3D11DeviceContext* ctx, bool rtv0Eye) {
         cache.scene != bindingGet(BindSlot::VsCb1) || cache.eye != rtv0Eye) {
         beforeDrawSlow(ctx, rtv0Eye);
     } else if (((++g_psShadowProbeN) & 63u) == 0u &&
-               (engine_velocity_family::familyOfVs(bindingShaderHash(BindSlot::Vs)) >= 0 ||
-                engine_velocity_family::anyFamilyPs(bindingShaderHash(BindSlot::Ps)))) {
+               (familyOfVsNoApiInline(bindingShaderHash(BindSlot::Vs)) >= 0 ||
+                anyFamilyPsNoApiInline(bindingShaderHash(BindSlot::Ps)))) {
         // One pool-context draw in 64 checks for an unobserved game bind.
         // A live shader different from the shadow is normally our installed
         // substitution, so the probe first excludes its owned identity. The
@@ -169,6 +189,63 @@ inline void engineVelocityBeforeDraw(ID3D11DeviceContext* ctx, bool rtv0Eye) {
         // hashes; they are not evidence of a real hook bypass. A different
         // registered game shader heals the shadow and takes the slow half.
         psShadowProbe(ctx);
+    }
+    if (cache.family >= 0) ++familyDraws[cache.family];
+}
+
+template <class ApiPolicy>
+inline void engineVelocityBeforeDrawWithApi(ID3D11DeviceContext* ctx, bool rtv0Eye) {
+    using namespace engine_velocity_detail;
+    if (!live.load(std::memory_order_relaxed)) return;
+    if (cache.vs != bindingGeneration(BindSlot::Vs) || cache.ps != bindingGeneration(BindSlot::Ps) ||
+        cache.rtv != bindingGeneration(BindSlot::Rtv0) || cache.dsv != bindingGeneration(BindSlot::Dsv0) ||
+        cache.blend != bindingGeneration(BindSlot::Blend) || cache.pool != bindingGet(BindSlot::VsSrv33) ||
+        cache.scene != bindingGet(BindSlot::VsCb1) || cache.eye != rtv0Eye) {
+        beforeDrawSlowSampledApi(ctx, rtv0Eye);
+    } else if (((++g_psShadowProbeN) & 63u) == 0u &&
+               (engine_velocity_family::familyOfVs(bindingShaderHash(BindSlot::Vs)) >= 0 ||
+                engine_velocity_family::anyFamilyPs(bindingShaderHash(BindSlot::Ps)))) {
+        psShadowProbeSampledApi(ctx);
+    }
+    if (cache.family >= 0) ++familyDraws[cache.family];
+}
+
+// Preserve the original unsampled gate and call target. Only this tiny
+// compile-time adapter is forced inline; the sampled gate remains separate.
+template <>
+__forceinline void engineVelocityBeforeDrawWithApi<plugin_cost::NoApi>(
+    ID3D11DeviceContext* ctx, bool rtv0Eye) {
+    engineVelocityBeforeDraw(ctx, rtv0Eye);
+}
+
+// Auto and indirect hooks do not enter the common draw chooser. Their API
+// policy is selected only after the same cheap live/cache/probe gates show
+// that EngineVelocity will query or change target/blend state.
+inline void engineVelocityBeforeDrawSampledBoundary(ID3D11DeviceContext* ctx,
+                                                     bool rtv0Eye) {
+    using namespace engine_velocity_detail;
+    if (!live.load(std::memory_order_relaxed)) return;
+    const bool stale = cache.vs != bindingGeneration(BindSlot::Vs) ||
+        cache.ps != bindingGeneration(BindSlot::Ps) ||
+        cache.rtv != bindingGeneration(BindSlot::Rtv0) ||
+        cache.dsv != bindingGeneration(BindSlot::Dsv0) ||
+        cache.blend != bindingGeneration(BindSlot::Blend) ||
+        cache.pool != bindingGet(BindSlot::VsSrv33) ||
+        cache.scene != bindingGet(BindSlot::VsCb1) || cache.eye != rtv0Eye;
+    if (stale) {
+        if (plugin_cost::apiSampleHint() &&
+            edvrPluginCostApiSampleContext(ctx) != 0)
+            beforeDrawSlowSampledApi(ctx, rtv0Eye);
+        else
+            beforeDrawSlow(ctx, rtv0Eye);
+    } else if (((++g_psShadowProbeN) & 63u) == 0u &&
+               (engine_velocity_family::familyOfVs(bindingShaderHash(BindSlot::Vs)) >= 0 ||
+                engine_velocity_family::anyFamilyPs(bindingShaderHash(BindSlot::Ps)))) {
+        if (plugin_cost::apiSampleHint() &&
+            edvrPluginCostApiSampleContext(ctx) != 0)
+            psShadowProbeSampledApi(ctx);
+        else
+            psShadowProbe(ctx);
     }
     if (cache.family >= 0) ++familyDraws[cache.family];
 }
@@ -290,6 +367,17 @@ bool engineVelocityFlatDomainSlots(ID3D11Texture2D* depth, ID3D11ShaderResourceV
 bool engineVelocityFlatBeginDraw(ID3D11DeviceContext* ctx, bool* gameHadTarget6);
 void engineVelocityFlatEndDraw(ID3D11DeviceContext* ctx);
 void engineVelocityFlatFlush(ID3D11DeviceContext* ctx, EngineVelocityFlushCause cause);
+// The flat runtime calls this only for a pending kOtherDraw restore after its
+// owner-thread and exact owner-context gates. OtherDraw keeps its own bounded
+// source route.
+void engineVelocityFlatFlushOtherDrawSampledBoundary(ID3D11DeviceContext* ctx);
+// Other runtime restore causes use this after the same owner/context gates.
+// Keep the public engineVelocityFlatFlush entry as the direct NoApi route.
+void engineVelocityFlatFlushSampledBoundary(ID3D11DeviceContext* ctx, EngineVelocityFlushCause cause);
+// The explicit-domain marker path has its own validated kOtherDraw boundary.
+// Keep its original direct flush available for callers that do not qualify
+// for API sampling.
+void engineVelocityFlatDomainEntrySampledBoundary(ID3D11DeviceContext* ctx);
 void engineVelocityFlatAbandon() noexcept;
 // The frame ends, after the Present's flush: what the bracket kept for it (the game's render-target set, its blend state, the
 // accepted binding; flat_query_cut.h) is released. A no-op while EDVR's state is still bound: the flush is owed first.

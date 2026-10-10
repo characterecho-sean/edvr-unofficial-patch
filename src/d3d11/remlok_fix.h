@@ -36,6 +36,8 @@
 
 #include <cstdint>
 
+#include "remlok_observation.h"
+
 struct ID3D11DeviceContext;
 
 namespace edvr {
@@ -82,6 +84,9 @@ inline bool remlokOverlayShape(char kind, uint32_t count, uint32_t instances) {
     return kind == 'N' && count == 3 && instances == 1;
 }
 RemlokAction remlokOnEyeDraw(char kind, uint32_t count, uint32_t instances);
+RemlokAction remlokOnEyeDrawObserved(
+    char kind, uint32_t count, uint32_t instances,
+    remlok_observation::Observation& observation);
 
 // Around the real draw, for kScissor: set a scissor-enabled rasterizer
 // state (cloned once from the game's own) and the per-eye rectangle; put
@@ -95,5 +100,12 @@ void remlokScissorEnd(ID3D11DeviceContext* ctx);
 void remlokFrameBoundary();
 
 void remlokShutdown();
+
+#if defined(EDVR_REMLOK_PREDICATE_TEST)
+void remlokPredicateTestSetMode(uint32_t mode);
+void remlokPredicateTestSeed(uint32_t mode, bool swap, uint32_t matches,
+                             uint64_t hidden, bool pendingRight);
+remlok_observation::MutationObservation remlokPredicateTestSnapshot();
+#endif
 
 }  // namespace edvr

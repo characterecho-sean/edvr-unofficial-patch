@@ -3040,8 +3040,24 @@ void testFlatSubstitutionWiring() {
         std::ifstream in(path, std::ios::binary);
         return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     };
+    auto normalizeNewlines = [](std::string text) {
+        std::string normalized;
+        normalized.reserve(text.size());
+        for (size_t i = 0; i < text.size(); ++i) {
+            if (text[i] == '\r' && i + 1 < text.size() && text[i + 1] == '\n') continue;
+            normalized.push_back(text[i]);
+        }
+        return normalized;
+    };
     const std::string runtimeCpp = slurp("src/d3d11/flat_runtime.cpp");
-    const std::string vscreenCpp = slurp("src/d3d11/vscreen.cpp");
+    const std::string vscreenCpp = normalizeNewlines(slurp("src/d3d11/vscreen.cpp"));
+    const std::string normalizedRuntimeCpp = normalizeNewlines(runtimeCpp);
+    const char* const causeRoute =
+        "const EngineVelocityFlushCause cause = flushCauseOf(event);\n"
+        "            if (cause == EngineVelocityFlushCause::kOtherDraw)\n"
+        "                engineVelocityFlatFlushOtherDrawSampledBoundary(ctx);\n"
+        "            else\n"
+        "                engineVelocityFlatFlushSampledBoundary(ctx, cause);";
     const std::string exposureCpp = slurp("src/d3d11/exposure_fix.cpp");
     const std::string deviceCpp = slurp("src/d3d11/device_hook.cpp");
     const std::string policyH = slurp("src/d3d11/flat_substitution.h");
@@ -3052,6 +3068,23 @@ void testFlatSubstitutionWiring() {
         for (size_t at = text.find(needle); at != std::string::npos; at = text.find(needle, at + 1)) ++n;
         return n;
     };
+    const std::string mixedLineEndings =
+        "void STDMETHODCALLTYPE firstHook() {\r\n"
+        "    flatRuntimeSubstitution(self, FlatSubstEvent::kClear);\r\n"
+        "}\r\n"
+        "void STDMETHODCALLTYPE nextHook() {\r\n"
+        "    flatRuntimeSubstitution(self, FlatSubstEvent::kClear);\n"
+        "    flatRuntimeSubstitution(self, FlatSubstEvent::kCopy);\r\n"
+        "}\n";
+    const std::string normalizedMixed = normalizeNewlines(mixedLineEndings);
+    const size_t firstStart = normalizedMixed.find("void STDMETHODCALLTYPE firstHook(");
+    const size_t firstEnd = normalizedMixed.find("\n}\n", firstStart);
+    const std::string firstBody = firstStart == std::string::npos || firstEnd == std::string::npos
+        ? std::string() : normalizedMixed.substr(firstStart, firstEnd - firstStart);
+    check(count(firstBody, "flatRuntimeSubstitution(self, FlatSubstEvent::kClear);") == 1,
+          "mixed CRLF/LF hook extraction stays scoped to the first hook");
+    check(count(firstBody, "flatRuntimeSubstitution(self, FlatSubstEvent::kCopy);") == 0,
+          "mixed-line-ending extraction does not inherit the next hook's event");
     struct Pin { const std::string* text; const char* needle; unsigned times; const char* what; };
     const Pin pins[] = {
         // The runtime's own sites: what each says to the policy.
@@ -3067,7 +3100,7 @@ void testFlatSubstitutionWiring() {
         {&runtimeCpp, "flatRuntimeSubstitution(nullptr, FlatSubstEvent::kClearState);", 1, "ClearState forgets it, touching no context"},
         {&runtimeCpp, "if (!engineVelocityFlatPending()) return;", 1, "with nothing of engine motion's bound the policy costs one load"},
         {&runtimeCpp, "switch (flatSubstAction(event)) {", 1, "the runtime asks the policy what to do"},
-        {&runtimeCpp, "engineVelocityFlatFlush(ctx, flushCauseOf(event));", 1, "a flush names its cause"},
+        {&normalizedRuntimeCpp, causeRoute, 1, "a qualified flush preserves its mapped cause: OtherDraw uses its dedicated boundary; every other cause uses the cause-aware sampled boundary"},
         {&runtimeCpp, "engineVelocityFlatAbandon();", 1, "an abandon"},
         {&runtimeCpp, "producer = engineVelocityFlatBeginDraw(ctx, &gameHadTarget6);", 1, "the producer branch opens the lazy bracket"},
         {&runtimeCpp, "engineVelocityFlatEndDraw(ctx);", 1, "and closes it"},
@@ -3090,6 +3123,29 @@ void testFlatSubstitutionWiring() {
             without.erase(at, std::strlen(pin.needle));
         check(count(without, pin.needle) == 0, "substitution wiring control: a source with the line removed no longer contains it");
     }
+    const auto causeRouteMutation = [&](const char* from, const char* to, const char* what) {
+        std::string changed = normalizedRuntimeCpp;
+        const size_t at = changed.find(from);
+        check(count(changed, from) == 1, "cause-route mutant has exactly one production anchor");
+        if (at != std::string::npos) changed.replace(at, std::strlen(from), to);
+        check(count(changed, causeRoute) == 0, what);
+    };
+    causeRouteMutation("const EngineVelocityFlushCause cause = flushCauseOf(event);",
+        "const EngineVelocityFlushCause cause = EngineVelocityFlushCause::kPresent;",
+        "cause-route control: replacing the mapped cause with Present fails");
+    causeRouteMutation("if (cause == EngineVelocityFlushCause::kOtherDraw)",
+        "if (cause == EngineVelocityFlushCause::kOtherDraw || cause == EngineVelocityFlushCause::kPresent)",
+        "cause-route control: routing Present through the dedicated OtherDraw boundary fails");
+    causeRouteMutation("engineVelocityFlatFlushOtherDrawSampledBoundary(ctx);", "",
+        "cause-route control: dropping the selected OtherDraw restore fails");
+    causeRouteMutation("engineVelocityFlatFlushSampledBoundary(ctx, cause);",
+        "engineVelocityFlatFlushSampledBoundary(ctx, EngineVelocityFlushCause::kOtherDraw);",
+        "cause-route control: replacing every non-OtherDraw cause with OtherDraw fails");
+    causeRouteMutation("engineVelocityFlatFlushSampledBoundary(ctx, cause);",
+        "engineVelocityFlatFlush(ctx, cause);",
+        "cause-route control: bypassing qualified cause-aware sampling with a direct NoApi flush fails");
+    causeRouteMutation("engineVelocityFlatFlushSampledBoundary(ctx, cause);", "",
+        "cause-route control: dropping the qualified non-OtherDraw restore fails");
     // The hooks: one event each, ahead of the real call the hook forwards to (the last one in its body: the early returns
     // for an internal or foreign call forward untouched, and the void fix in ClearRenderTargetView is another way out).
     struct Hook { const char* name; const char* event; const char* real; };
@@ -3281,10 +3337,17 @@ void testFlatOverlayMutationWiring() {
     };
     auto bodyOf=[](const std::string& code,const std::string& signature) {
         const size_t first=code.find(signature);
-        const size_t last=first==std::string::npos?std::string::npos:code.find("\n}\n",first);
-        return first==std::string::npos||last==std::string::npos?
-            std::string():code.substr(first,last-first);
+        if(first==std::string::npos)return std::string();
+        const size_t lf=code.find("\n}\n",first),crlf=code.find("\n}\r\n",first);
+        const size_t last=(std::min)(lf,crlf);
+        return last==std::string::npos?std::string():code.substr(first,last-first);
     };
+    check(compact(bodyOf("void hook(){\nnotify();\n}\nvoid later(){\nother();\n}\n","void hook("))==
+              "voidhook(){notify();" &&
+          compact(bodyOf("void hook(){\r\nnotify();\r\n}\r\nvoid later(){\r\nother();\r\n}\r\n","void hook("))==
+              "voidhook(){notify();" &&
+          bodyOf("void hook(){\nnotify();\n","void hook(").empty(),
+          "overlay hook extraction accepts LF and CRLF and stops at its own closing line");
     struct Hook {const char* name;const char* dest;const char* type;const char* op;const char* real;};
     const Hook hooks[]={
         {"hookedClearRtv","rtv","View","ClearRtv","realClearRtv("},
@@ -3758,7 +3821,8 @@ void testFlatQueryCutWiring() {
     const std::string runtimeCpp = slurp("src/d3d11/flat_runtime.cpp");
     const std::string engineCpp = slurp("src/d3d11/engine_velocity.cpp");
     const std::string readsH = slurp("src/d3d11/flat_query_reads.h");
-    check(!runtimeCpp.empty() && !engineCpp.empty() && !readsH.empty(), "the runtime, engine motion and query sources are readable from the repo root");
+    const std::string frameEndCostH = slurp("src/d3d11/engine_velocity_frame_end_cost.h");
+    check(!runtimeCpp.empty() && !engineCpp.empty() && !readsH.empty() && !frameEndCostH.empty(), "the runtime, engine motion, query and frame-end cost sources are readable from the repo root");
     auto count = [](const std::string& text, const std::string& needle) {
         unsigned n = 0;
         for (size_t at = text.find(needle); at != std::string::npos; at = text.find(needle, at + 1)) ++n;
@@ -3774,12 +3838,15 @@ void testFlatQueryCutWiring() {
         {&runtimeCpp, "flatQueryCut().beginFrame(frame);", 1, "the Present tells the policy which frame starts (one in 64 checks)"},
         {&runtimeCpp, "(s.projectionFrames != 0 || !flatCameraInjectUpstreamOwns());", 1,
          "the coverage reads that still ask the context (an F10 audit, the legacy route) put the game's state back first, and nothing else does"},
-        {&runtimeCpp, "if (owner()) engineVelocityFlatFrameEnd();", 1, "the frame's end lets go of what the bracket kept"},
+        {&runtimeCpp, "if (owner()) engineVelocityFlatFrameEndWithCost();", 1, "the owner routes frame-end release through the existing sampled CPU family"},
+        {&frameEndCostH, "flatcpu::Scope cleanup(flatcpu::kEngineDraw);", 1, "the shared frame-end wrapper uses the existing engine-draw family"},
+        {&frameEndCostH, "release();", 1, "the shared timing wrapper encloses its release callback"},
+        {&frameEndCostH, "engineVelocityFlatFrameEnd();", 1, "the no-argument production wrapper calls the real cleanup"},
         // Engine motion's wrapper.
         {&engineCpp, "flatQueryCut().plan(FlatQuery::GameTargets)", 1, "the game's render-target set is kept through the policy"},
-        {&engineCpp, "flatQueryCut().plan(FlatQuery::GameBlend)", 1, "and its blend state"},
+        {&engineCpp, "flatQueryCut().plan(FlatQuery::GameBlend)", 2, "and its blend state in each mutually exclusive API policy body"},
         {&engineCpp, "flatQueryCut().plan(FlatQuery::TargetsKept)", 1, "and the runtime's acceptance of MRT6"},
-        {&engineCpp, "flatQueryCut().compared(", 3, "each is compared with the context on a check"},
+        {&engineCpp, "flatQueryCut().compared(", 4, "each is compared with the context on a check, including both API policy bodies"},
         {&engineCpp, "void engineVelocityFlatFrameEnd() noexcept {", 1, "the bracket lets go of what it kept at the frame's end"},
         // The shared reads.
         {&readsH, "cut.plan(FlatQuery::CoverageDepth)", 1, "the depth question asks the policy"},
@@ -3792,6 +3859,50 @@ void testFlatQueryCutWiring() {
         for (size_t at = without.find(pin.needle); at != std::string::npos; at = without.find(pin.needle))
             without.erase(at, std::strlen(pin.needle));
         check(count(without, pin.needle) == 0, "query cut wiring control: a source with the line removed no longer contains it");
+    }
+    // The legacy and sampled slow paths are mutually exclusive. Each keeps
+    // the same blend shortcut and its check; a file-wide count cannot prove
+    // both bodies retain them. Delimit the function with balanced braces,
+    // ignoring quoted text and comments so they cannot move its boundary.
+    auto functionBody = [](const std::string& code, const char* signature) {
+        const size_t first = code.find(signature);
+        if (first == std::string::npos || code.find(signature, first + 1) != std::string::npos) return std::string();
+        const size_t open = code.find('{', first);
+        if (open == std::string::npos) return std::string();
+        unsigned depth = 0;
+        char quote = 0;
+        bool lineComment = false, blockComment = false;
+        for (size_t at = open; at < code.size(); ++at) {
+            const char c = code[at], next = at + 1 < code.size() ? code[at + 1] : '\0';
+            if (lineComment) { if (c == '\n') lineComment = false; continue; }
+            if (blockComment) { if (c == '*' && next == '/') { blockComment = false; ++at; } continue; }
+            if (quote) { if (c == '\\') ++at; else if (c == quote) quote = 0; continue; }
+            if (c == '/' && next == '/') { lineComment = true; ++at; continue; }
+            if (c == '/' && next == '*') { blockComment = true; ++at; continue; }
+            if (c == '"' || c == '\'') { quote = c; continue; }
+            if (c == '{') ++depth;
+            if (c == '}' && --depth == 0) return code.substr(open, at - open + 1);
+        }
+        return std::string();
+    };
+    const char* const slowPaths[] = {
+        "void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye)",
+        "void slowPathSampledApi(ID3D11DeviceContext* ctx, bool rtv0Eye)",
+    };
+    const char* const blendPins[] = {
+        "flatQueryCut().plan(FlatQuery::GameBlend)",
+        "flatQueryCut().compared(FlatQuery::GameBlend, agree)",
+    };
+    for (const char* signature : slowPaths) {
+        const std::string body = functionBody(engineCpp, signature);
+        check(!body.empty(), "query cut: each API policy slow-path body is uniquely delimited");
+        for (const char* needle : blendPins) {
+            check(count(body, needle) == 1, "query cut: each API policy body plans and compares its blend state exactly once");
+            std::string without = body;
+            const size_t at = without.find(needle);
+            if (at != std::string::npos) without.erase(at, std::strlen(needle));
+            check(count(without, needle) == 0, "query cut control: removing either policy's blend plan or comparison fails its pin");
+        }
     }
     // The coverage classification no longer reads the context for what the shadow knows.
     const size_t coverageFrom = runtimeCpp.find("flatcpu::Scope coverage(flatcpu::kCoverage);");
@@ -3808,9 +3919,32 @@ void testFlatQueryCutWiring() {
     // The frame's end comes after the Present's flush, inside the same function.
     const size_t before = runtimeCpp.find("void flatRuntimeBeforePresent() {");
     const size_t flush = runtimeCpp.find("flatRuntimeSubstitution(state().context.Get(), FlatSubstEvent::kPresent);", before);
-    const size_t end = runtimeCpp.find("if (owner()) engineVelocityFlatFrameEnd();", before);
-    check(before != std::string::npos && flush != std::string::npos && end != std::string::npos && flush < end && end - flush < 400,
-          "the frame's end follows the Present's flush");
+    const size_t end = runtimeCpp.find("if (owner()) engineVelocityFlatFrameEndWithCost();", before);
+    const size_t gpuClose = runtimeCpp.find("if (owner()) gpuFrameClose(state());", end);
+    check(before != std::string::npos && flush != std::string::npos && end != std::string::npos &&
+              gpuClose != std::string::npos && flush < end && end < gpuClose && gpuClose - flush < 500,
+          "owner-only frame-end cleanup is timed after the Present flush and before GPU span close");
+    const std::string presentBody = functionBody(runtimeCpp, "void flatRuntimePresent(");
+    const char* const testPresentGuardText =
+        "if (!runtimeFlatProfile() || !swap || (flags & DXGI_PRESENT_TEST)) return;";
+    const size_t presentOpen = presentBody.find('{');
+    const size_t firstPresentStatement = presentOpen == std::string::npos
+        ? std::string::npos : presentBody.find_first_not_of(" \t\r\n", presentOpen + 1);
+    const size_t testPresentGuard = presentBody.find(testPresentGuardText);
+    const size_t censusCut = presentBody.find("s.census.onFrame(censusNow, censusFreq, endedPaused);");
+    const auto guardRejectsMutation = [&](const char* from, const char* to) {
+        std::string mutated = presentBody;
+        const size_t at = mutated.find(from);
+        if (at == std::string::npos) return false;
+        mutated.replace(at, std::strlen(from), to);
+        return mutated.find(testPresentGuardText) == std::string::npos;
+    };
+    check(!presentBody.empty() && firstPresentStatement == testPresentGuard &&
+              censusCut != std::string::npos && testPresentGuard < censusCut,
+          "profile, swap, and TEST Present guard returns as the first statement before the census cut");
+    check(guardRejectsMutation("!runtimeFlatProfile()", "") && guardRejectsMutation("!swap", "") &&
+              guardRejectsMutation("(flags & DXGI_PRESENT_TEST)", "") && guardRejectsMutation(" return;", ";"),
+          "TEST Present guard source pin rejects removal of each condition or its early return");
 }
 
 int main(int argc, char** argv) {

@@ -49,7 +49,7 @@ def tree_files():
     return out
 
 
-UNITS = [("src/d3d11/engine_velocity.cpp", "engine"), ("src/d3d11/skin_join_gpu.cpp", "gpu"), ("src/d3d11/gpu_timing.cpp", None), ("src/d3d11/gpu_span_d3d11.cpp", None)]
+UNITS = [("src/d3d11/engine_velocity.cpp", "engine"), ("src/d3d11/skin_join_gpu.cpp", "gpu"), ("src/d3d11/plugin_cost.cpp", None), ("src/d3d11/gpu_timing.cpp", None), ("src/d3d11/gpu_span_d3d11.cpp", None)]
 CL_FLAGS = lib.DEFAULT_CL_FLAGS + ["/DUNICODE", "/D_UNICODE", "/utf-8", "/DEDVR_ENGINE_VELOCITY_RIG", "/DEDVR_BINDING_SHADOW_EXTERNAL"]
 CONFIG = lib.Config(
     here=__file__, files=FILES, header_keys=HEADER_KEYS, pin_keys=PIN_KEYS, rig=HERE / "skin_engine_test.cpp",
@@ -91,29 +91,29 @@ MUTANTS = [
     M("mode-0-touches-target-7", "C3", "state", [("    if (skinMode != 0) {\n        D3D11_RENDER_TARGET_BLEND_DESC& k", "    if (true) {\n        D3D11_RENDER_TARGET_BLEND_DESC& k")],
       "the derived state overrides target 7 where the pass has no second skin"),
     # ---- L: the engine ----
-    M("rigid-draws-leave-target-7-open", "L6", "engine", [("const int skinMode = e.skinBound ? ((exportsE || zeroes) ? 2 : 1) : 0;", "const int skinMode = e.skinBound && skinDraw ? ((exportsE || zeroes) ? 2 : 1) : 0;")],
+    M("rigid-draws-leave-target-7-open", "L6", "engine", [("const int skinMode = e.skinBound ? ((exportsE || zeroes) ? 2 : 1) : 0;", "const int skinMode = e.skinBound && skinDraw ? ((exportsE || zeroes) ? 2 : 1) : 0;", 2)],
       "a rigid family's draw writes undefined values into target 7"),
-    M("rigid-draws-write-target-7", "L6", "engine", [("const int skinMode = e.skinBound ? ((exportsE || zeroes) ? 2 : 1) : 0;", "const int skinMode = e.skinBound ? 2 : 0;")],
+    M("rigid-draws-write-target-7", "L6", "engine", [("const int skinMode = e.skinBound ? ((exportsE || zeroes) ? 2 : 1) : 0;", "const int skinMode = e.skinBound ? 2 : 0;", 2)],
       "a rigid family's draw writes target 7 through the derived blend state (the pixel shader has no output there)"),
-    M("no-history-write-masked", ("L6", "L11"), "engine", [("const int skinMode = e.skinBound ? ((exportsE || zeroes) ? 2 : 1) : 0;", "const int skinMode = e.skinBound ? (exportsE ? 2 : 1) : 0;")],
+    M("no-history-write-masked", ("L6", "L11"), "engine", [("const int skinMode = e.skinBound ? ((exportsE || zeroes) ? 2 : 1) : 0;", "const int skinMode = e.skinBound ? (exportsE ? 2 : 1) : 0;", 2)],
       "a skinned family's pixel shader that exports no E is write-masked off target 7: its pixels keep the E an earlier draw wrote there"),
     M("no-history-variant-never-made", "L6", "engine", [("for (int mode = wantsExport ? 0 : skinFamily ? 1 : 2; mode <= 2 && !patched; ++mode) {", "for (int mode = wantsExport ? 0 : 2; mode <= 2 && !patched; ++mode) {")],
       "a skinned family's pixel shader that exports no E is made without the no-history write: its draws are not substituted"),
     M("skin-views-not-bound", ("L2", "L3", "L6"), "engine", [("        ctx->VSSetShaderResources(kSkinPrevPaletteSlot, 3, skinViews);\n        engineVelocityNoteStateCalls(1);\n        g_bound.skinSrvs = true;",
-                                                               "        g_bound.skinSrvs = true;")],
+                                                               "        g_bound.skinSrvs = true;", 2)],
       "the cloned vertex shader reads unbound views"),
     M("skin-views-kept-at-the-boundary", "L6", "engine", [("    if (ctx && g_bound.skinSrvs) {\n        ID3D11ShaderResourceView* none[3] = {};", "    if (false && ctx && g_bound.skinSrvs) {\n        ID3D11ShaderResourceView* none[3] = {};")],
       "the three skin views stay bound across the frame"),
     M("target-7-not-cleared", "L3", "engine", [("ctx->ClearRenderTargetView(e.skinRtv.Get(), zero);\n                }\n                engineVelocityNoteStateCalls(1);\n                ++g_skinStats.eyeFrames;",
                                                 "(void)zero;\n                }\n                engineVelocityNoteStateCalls(1);\n                ++g_skinStats.eyeFrames;")],
       "target 7 keeps last frame's answers where nothing is drawn"),
-    M("view-not-offered", "L2", "engine", [("if (exportsE) { e.skinWrittenFrame = frame; ++g_skinStats.draws; }", "if (exportsE) { ++g_skinStats.draws; }")],
+    M("view-not-offered", "L2", "engine", [("if (exportsE) { e.skinWrittenFrame = frame; ++g_skinStats.draws; }", "if (exportsE) { ++g_skinStats.draws; }", 2)],
       "the compose is never given target 7"),
     M("pose-table-not-built", ("L2", "L3"), "engine", [("            g_skin.buildPose(ctx, e.poolSrv.Get(), e.poolBytes / emit::kItemBytes, ended, refs);", "            (void)refs;")],
       "the previous pose table is never made: no character has history"),
     M("draws-not-listed", "L10", "engine", [("    c.ranges.push_back(startInstance);\n    c.ranges.push_back(instances);", "    (void)startInstance;")],
       "a skinned draw's instance window is never listed: no record is live and the stale second record kills its base"),
-    M("skin-draws-never-noted", "L10", "engine", [("    cache.skin = skinDraw && e.skinBound;", "    cache.skin = false;")],
+    M("skin-draws-never-noted", "L10", "engine", [("    cache.skin = skinDraw && e.skinBound;", "    cache.skin = false;", 2)],
       "the draw hook's second call never reaches the list"),
     M("ambiguous-stream-trusted", "L10", "engine", [("    bool ok = eights == 1;", "    bool ok = eights >= 1;")],
       "a draw that binds two vertex buffers of stride 8 is listed against the first: the list is called complete"),
@@ -189,14 +189,14 @@ MUTANTS = [
     # path and in the slow one), the draw's skinDraw guard, the flat source's early return in ensureSlots and the guard on wantSkin. Any ONE removed is an equivalent
     # mutant by design, so this removes every one the draw path reads: the flat profile's skinned draws are then patched and get a target 7, and L13.j-l must see it.
     M("flat-profile-layers-all-removed", "L13", "engine",
-      [("        familyForProfile(bindingShaderHash(BindSlot::Vs), runtimeFlatProfile()) < 0) {\n", "        engine_velocity_family::familyOfVs(bindingShaderHash(BindSlot::Vs)) < 0) {\n"),
-       ("    const int f = familyForProfile(vsHash, runtimeFlatProfile());\n", "    const int f = engine_velocity_family::familyOfVs(vsHash);\n"),
-       ("    if (!keyedPs(f, psHash, runtimeFlatProfile())) {\n", "    if (!keyedPs(f, psHash, false)) {\n"),
-       ("    bool skinDraw = fam.skin && !runtimeFlatProfile();", "    bool skinDraw = fam.skin;"),
+      [("        familyForProfile(bindingShaderHash(BindSlot::Vs), runtimeFlatProfile()) < 0) {\n", "        engine_velocity_family::familyOfVs(bindingShaderHash(BindSlot::Vs)) < 0) {\n", 2),
+       ("    const int f = familyForProfile(vsHash, runtimeFlatProfile());\n", "    const int f = engine_velocity_family::familyOfVs(vsHash);\n", 2),
+       ("    if (!keyedPs(f, psHash, runtimeFlatProfile())) {\n", "    if (!keyedPs(f, psHash, false)) {\n", 2),
+       ("    bool skinDraw = fam.skin && !runtimeFlatProfile();", "    bool skinDraw = fam.skin;", 2),
        ("const bool wantSkin = !runtimeFlatProfile() && g_skinWanted.load(std::memory_order_acquire);", "const bool wantSkin = g_skinWanted.load(std::memory_order_acquire);"),
        ("    if(runtimeFlatProfile() && eye==kEngineVelocitySourceEye) {\n        FlatMarkerPlane* plane", "    if(false) {\n        FlatMarkerPlane* plane")],
       "the flat profile treats a skinned family's draw as the second skin's: a patched vertex shader and a target 7 in a profile with no consumer for either"),
-    M("source-target-7-never-cleared", "L13", "engine", [("if (eye == kEngineVelocitySourceEye && e.skinClearedFrame != frame && e.skinRtv) {", "if (false) {")],
+    M("source-target-7-never-cleared", "L13", "engine", [("if (eye == kEngineVelocitySourceEye && e.skinClearedFrame != frame && e.skinRtv) {", "if (false) {", 2)],
       "the source's target 7 is never cleared: the pixels a character left a frame ago still say valid 1 and last frame's E"),
     M("eyes-views-carry-target-7", "L13", "engine", [("g_draw.refusedUnwritten, g_draw.refusedPrevious}, false);", "g_draw.refusedUnwritten, g_draw.refusedPrevious}, true);")],
       "the eyes' EngineVelocityViews carry a target 7 too: the compose has its own view of it, and a second consumer would read one the first releases"),
@@ -212,11 +212,11 @@ MUTANTS = [
     M("source-target-7-creation-unsaid", "L13", "engine", [("    if (eye == kEngineVelocitySourceEye)\n        Log::get().note(\"skin join: on-foot source target 7 created", "    if (false)\n        Log::get().note(\"skin join: on-foot source target 7 created")],
       "the log does not say the source's target 7 was made, so a flight cannot tell the first-person route read E from the route that never had it"),
     # ---- L14: the GPU census slots of the second skin (F16) ----
-    M("source-clear-uncensused", "L14", "engine", [("                GpuCensusScope clearCensus(ctx, GpuCensusSection::FrameSkinSourceClear);\n", "")],
+    M("source-clear-uncensused", "L14", "engine", [("                GpuCensusScope clearCensus(ctx, GpuCensusSection::FrameSkinSourceClear);\n", "", 2)],
       "the on-foot source's target 7 clear is not begun in the census: F16 could not price the 68 MB clear apart from the rest of engine velocity"),
     M("eye-clear-uncensused", "L14", "engine", [("                    GpuCensusScope clearCensus(ctx, GpuCensusSection::FrameSkinEyeClear);\n", "")],
       "an eye's target 7 clear is not begun in the census"),
-    M("eye-clear-in-the-sources-slot", "L14", "engine", [("GpuCensusScope clearCensus(ctx, GpuCensusSection::FrameSkinEyeClear);", "GpuCensusScope clearCensus(ctx, GpuCensusSection::FrameSkinSourceClear);")],
+    M("eye-clear-in-the-sources-slot", "L14", "engine", [("GpuCensusScope clearCensus(ctx, GpuCensusSection::FrameSkinEyeClear);", "GpuCensusScope clearCensus(ctx, GpuCensusSection::FrameSkinSourceClear);", 2)],
       "the eyes' clears are priced as the source's: the two figures would be one number"),
     M("join-uncensused", "L14", "gpu", [("        GpuCensusScope joinCensus(ctx, GpuCensusSection::FrameSkinJoin);   // (F16: nested in the engine velocity span; priced on the second skin's line)\n", "")],
       "the join dispatch is not begun in the census"),

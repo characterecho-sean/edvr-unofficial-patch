@@ -38,6 +38,7 @@ def configuration(mode: str, probe: str, directory: Path, *, log: bool = False, 
 black_void = 0
 panel_distance = 1
 transition_flash = 0
+night_vision_stability = 0
 temporal_aa = off
 share_exposure = 0
 [advanced]
@@ -47,6 +48,8 @@ camera_buffer_bytes = 0
 context_hook_mode = {mode}
 context_hook_probe = {probe}
 texture_lod_bias = 0
+[experimental]
+night_vision_realistic = 0
 [log]
 dir = {directory / 'logs'}
 enabled = {1 if log else 0}
@@ -158,6 +161,11 @@ def run_matrix(executable: Path, proxy: Path, *, dry_run: bool = False) -> int:
 
 def self_test() -> int:
     class Contracts(unittest.TestCase):
+        def test_fixture_disables_pilot_owned_startup_hooks(self):
+            text = configuration("shared", "off", Path("C:/transport-fixture"))
+            self.assertIn("night_vision_stability = 0", text)
+            self.assertIn("[experimental]\nnight_vision_realistic = 0", text)
+
         def test_dry_run_has_no_side_effects(self):
             with tempfile.TemporaryDirectory() as temporary:
                 directory = Path(temporary).resolve()

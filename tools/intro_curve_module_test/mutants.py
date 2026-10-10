@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The mutation proof for tools\\intro_curve_module_test: the rig fails when a rule of the splash's recogniser is flipped.
 
-The rig (intro_curve_module_test.cpp) runs the REAL src\\d3d11\\intro_curve.cpp on a WARP device, in seventeen cases C1..C17 (its header says
+The rig (intro_curve_module_test.cpp) runs the REAL src\\plugins\\intro\\intro_curve.cpp on a WARP device, in seventeen cases C1..C17 (its header says
 which); every check it makes carries a label "C<case>.<what>". A rig that passes proves little until it is seen to FAIL on a module that
 breaks the rule it pins. This tool does that: for each mutation below it copies intro_curve.cpp (and intro_curve.h where the rule lives
 there, and intro_curve_math.h for a mutation of the pure reading the module is built on) into a temp directory OUTSIDE the repo, applies one
@@ -42,7 +42,9 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 SRC = ROOT / "src" / "d3d11"
-FILES = {"cpp": SRC / "intro_curve.cpp", "h": SRC / "intro_curve.h", "math": SRC / "intro_curve_math.h"}
+INTRO = ROOT / "src" / "plugins" / "intro"
+COMMON_HEADERS = ROOT / "src" / "common"
+FILES = {"cpp": INTRO / "intro_curve.cpp", "h": SRC / "intro_curve.h", "math": SRC / "intro_curve_math.h"}
 RIG = HERE / "intro_curve_module_test.cpp"
 BUILD_BAT = ROOT / "build.bat"
 RIG_LABEL = ":rig_intro_curve_module_test"
@@ -498,6 +500,13 @@ def read_source(path):
     return path.read_bytes().decode("utf-8").replace("\r\n", "\n")
 
 
+def fixture_source(text):
+    # Temp copies cannot use paths relative to src/plugins/intro. Resolve core
+    # headers through include directories and leave the mutated sibling headers
+    # first in the include search order.
+    return text.replace('../../d3d11/', '').replace('../../common/', '')
+
+
 def fail_labels(output):
     """The labels of every check the rig reported ('C7.the-least-recent...'), in order, and not its closing summary."""
     return [m.group(1) for m in re.finditer(r"^FAIL: (C\d+\.[\w-]+)", output, re.MULTILINE)]
@@ -629,13 +638,14 @@ def run_all(only=None, jobs=None, keep=False, dry_run=False, verbose=False, out=
     workers = jobs or min(8, os.cpu_count() or 2)
     try:
         # The control: the unmutated module and the rig, built the way every mutation is, and every common source compiled once.
-        base_inc = ([gen] if gen else []) + [SRC]
+        base_inc = ([gen] if gen else []) + [SRC, COMMON_HEADERS]
         common_dir = work / "c"
         common_dir.mkdir()
         control_dir = work / "k"
         control_dir.mkdir()
         for k in FILES:
-            (control_dir / FILES[k].name).write_text(sources[k], encoding="utf-8", newline="\n")
+            text = fixture_source(sources[k]) if k == "cpp" else sources[k]
+            (control_dir / FILES[k].name).write_text(text, encoding="utf-8", newline="\n")
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
             futures = [pool.submit(compile_obj, tc, c, common_dir, base_inc) for c in COMMON]
             futures.append(pool.submit(compile_obj, tc, control_dir / "intro_curve.cpp", control_dir, [control_dir] + base_inc))
@@ -666,7 +676,10 @@ def run_all(only=None, jobs=None, keep=False, dry_run=False, verbose=False, out=
             d = work / ("m%03d" % index)
             d.mkdir()
             for k in FILES:
-                (d / FILES[k].name).write_text(mutated if k == m.file else sources[k], encoding="utf-8", newline="\n")
+                text = mutated if k == m.file else sources[k]
+                if k == "cpp":
+                    text = fixture_source(text)
+                (d / FILES[k].name).write_text(text, encoding="utf-8", newline="\n")
             inc = [d] + base_inc
             code, text, mobj = compile_obj(tc, d / "intro_curve.cpp", d, inc)
             if code != 0:
@@ -756,6 +769,7 @@ def self_test(build_bat=BUILD_BAT):
 
     # the module still has what the rig stubs and the tool copies
     check(find_gen() is None or find_gen().is_dir(), "the generated-headers directory, when there is one, is a directory")
+    check('#include "../../d3d11/intro_curve.h"' in sources["cpp"] and '#include "intro_curve.h"' in fixture_source(sources["cpp"]), "the moved module resolves its public header and fixture copies still prefer the mutated sibling header")
 
     # build.bat compiles the rig the way this tool does, and runs this tool's self-test
     bat = Path(build_bat).read_bytes().decode("utf-8", errors="replace")
@@ -766,7 +780,7 @@ def self_test(build_bat=BUILD_BAT):
         cl = next((l for l in block if l.strip().lower().startswith("cl.exe")), "")
         for flag in CL_FLAGS:
             check(flag in cl, "build.bat's rig compile has %s" % flag)
-        for src in ("tools\\intro_curve_module_test\\intro_curve_module_test.cpp", "src\\d3d11\\intro_curve.cpp", "src\\common\\config.cpp", "src\\common\\log.cpp",
+        for src in ("tools\\intro_curve_module_test\\intro_curve_module_test.cpp", "src\\plugins\\intro\\intro_curve.cpp", "src\\common\\config.cpp", "src\\common\\log.cpp",
                     "src\\common\\guard.cpp", "src\\common\\proxy.cpp"):
             check(src in cl, "build.bat's rig compile has %s (the sources this tool links)" % src)
         check(("src\\d3d11\\panel_curve.cpp" in cl) == REAL_STRIP, "build.bat's rig links the real panel_curve.cpp if and only if this tool's REAL_STRIP is on (%s)" % REAL_STRIP)

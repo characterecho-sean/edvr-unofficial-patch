@@ -39,6 +39,8 @@
 // built, nothing is bound and the composite path does not call in.
 #pragma once
 
+#include "draw_interest.h"
+
 #include <cstdint>
 
 struct ID3D11DeviceContext;
@@ -66,6 +68,8 @@ typedef void(__stdcall* PanelCurveDrawFn)(ID3D11DeviceContext*, unsigned int,
 // live -- the whole staged proof above depends on being able to walk the
 // three cases without restarting the game.
 void panelCurveConfigure(Config& cfg);
+bool introCurveDrawInterestConfigured() noexcept;
+bool panelCurveDrawInterestConfigured() noexcept;
 
 // Is a substitution wanted at all? False when curvature is 0 and the segment
 // count is the default, and false for the rest of the session once the fault

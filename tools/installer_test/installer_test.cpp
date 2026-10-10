@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cwctype>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -1847,6 +1848,11 @@ static void testFlatPlanner() {
 
     s = baseSurvey(dir);
     s.state.present = true; s.state.profile = "vr";
+    s.state.pluginSelection.state = PluginSelectionRecordState::Supported;
+    s.state.pluginSelection.schemaVersion = 1;
+    s.state.pluginSelection.catalogSchemaVersion = 2;
+    s.state.pluginSelection.profile = "vr";
+    s.state.pluginSelection.selectedIds = {"temporal-aa"};
     s.state.openvrInstalled = true; s.state.openvrSha = "installed-vr";
     s.state.openvrOrigSha = "game-vr";
     s.openvrCurrent = fakeDll(DllKind::Edvr, joinPath(s.game.openvrDir, L"openvr_api.dll"), "installed-vr");
@@ -1855,6 +1861,43 @@ static void testFlatPlanner() {
     o.convertProfile = true;
     Plan conversion = planInstall(s, o, flat);
     check(!conversion.blocked, "owned VR to flat conversion plans");
+    check(conversion.nextState.profile == "flat" &&
+              conversion.nextState.pluginSelection.profile == "vr" &&
+              conversion.nextState.pluginSelection.selectedIds == std::vector<std::string>{"temporal-aa"},
+          "VR to flat conversion preserves selection metadata bound to VR");
+    const std::string futurePluginText = "[plugins]\r\nselection_schema_version = 1\r\ncatalog_schema_version = 2\r\nprofile = vr\r\nselected_ids = temporal-aa\r\nfuture_field = keep-me\r\n";
+    s.state.pluginSelection = parseState("[edvr]\r\nversion = v0.10.1\r\n" + futurePluginText).pluginSelection;
+    Plan opaqueConversion = planInstall(s, o, flat);
+    check(!opaqueConversion.blocked &&
+              opaqueConversion.nextState.pluginSelection.state == PluginSelectionRecordState::Opaque &&
+              opaqueConversion.nextState.pluginSelection.opaqueText == futurePluginText,
+          "a profile conversion carries unsupported plugin metadata without rebinding or dropping it");
+    bool opaqueStateTextPreserved = false;
+    for (const Step& step : opaqueConversion.steps) {
+        if (step.action == Action::WriteText && step.to == statePath(s.game.dir))
+            opaqueStateTextPreserved = step.text.find(futurePluginText) != std::string::npos;
+    }
+    check(opaqueStateTextPreserved,
+          "the planned install-record write retains opaque plugin metadata");
+    const std::string malformedPluginText =
+        "[plugins\r\nprofile = vr\r\nruntime_sha256 = foreign-value\r\n";
+    s.state.pluginSelection = parseState(
+        "[edvr]\r\nversion = v0.10.1\r\n" + malformedPluginText).pluginSelection;
+    Plan malformedConversion = planInstall(s, o, flat);
+    check(!malformedConversion.blocked && malformedConversion.nextState.profile == "flat" &&
+              malformedConversion.nextState.pluginSelection.state == PluginSelectionRecordState::Opaque &&
+              malformedConversion.nextState.pluginSelection.opaqueText == malformedPluginText,
+          "edition conversion preserves malformed opaque plugin bytes");
+    bool malformedPlannedStateSafe = false;
+    for (const Step& step : malformedConversion.steps) {
+        if (step.action != Action::WriteText || step.to != statePath(s.game.dir)) continue;
+        const InstallState written = parseState(step.text);
+        malformedPlannedStateSafe = written.profile == "flat" && !written.nativeInstalled &&
+            written.nativeRuntimeSha.empty() &&
+            step.text.find("[plugins]\r\n" + malformedPluginText) != std::string::npos;
+    }
+    check(malformedPlannedStateSafe,
+          "a planned edition rewrite guards malformed plugin keys from native scope");
     check(hasStep(conversion, Action::Rename, L"openvr_api_orig.dll", L"openvr_api.dll"),
           "conversion restores the game's original runtime");
     s.openvrOrig = fakeDll(DllKind::Absent, joinPath(s.game.openvrDir, L"openvr_api_orig.dll"), "");
@@ -4964,16 +5007,168 @@ static void testState() {
     state.openvrOrigName = L"openvr_api_orig.dll";
     state.openvrOrigSha = "9abc";
     state.iniSha = "def0";
+    state.components = "graphics,profile,ini,openvr,openxr-loader";
 
-    const InstallState back = parseState(serializeState(state));
+    const std::string legacyText = serializeState(state);
+    const InstallState back = parseState(legacyText);
     check(back.present, "a written record reads back as present");
     expectEq(back.edvrVersion, state.edvrVersion, "the version survives");
     expectEq(toUtf8(back.chainTarget), "d3d11_edhm.dll", "the chain target survives");
     expectEq(toUtf8(back.openvrDir), "Openvr\\win64", "the openvr folder survives");
     expectEq(back.openvrOrigSha, "9abc", "the original runtime's hash survives");
+    expectEq(back.components, state.components, "the existing component inventory survives unchanged");
+    check(back.pluginSelection.state == PluginSelectionRecordState::Absent &&
+              legacyText.find("[plugins]") == std::string::npos,
+          "a legacy record stays absent and serializes without a plugin section");
+
+    InstallState explicitlyEmpty = state;
+    explicitlyEmpty.pluginSelection.state = PluginSelectionRecordState::Supported;
+    explicitlyEmpty.pluginSelection.schemaVersion = 1;
+    explicitlyEmpty.pluginSelection.catalogSchemaVersion = 2;
+    explicitlyEmpty.pluginSelection.profile = "vr";
+    const InstallState emptyBack = parseState(serializeState(explicitlyEmpty));
+    check(emptyBack.pluginSelection.state == PluginSelectionRecordState::Supported &&
+              emptyBack.pluginSelection.selectedIds.empty(),
+          "a complete v1 record distinguishes an explicit empty selection from absence");
+    expectEq(emptyBack.pluginSelection.profile, "vr", "the empty selection keeps its profile");
+
+    InstallState selected = explicitlyEmpty;
+    selected.pluginSelection.selectedIds = {"temporal-aa", "on-foot-panel"};
+    const InstallState selectedBack = parseState(serializeState(selected));
+    check(selectedBack.pluginSelection.state == PluginSelectionRecordState::Supported &&
+              selectedBack.pluginSelection.selectedIds == selected.pluginSelection.selectedIds,
+          "a nonempty resolved selection preserves its supplied order");
+    expectEq(selectedBack.components, state.components,
+             "plugin metadata does not repurpose the existing component inventory");
+
+    struct OpaqueFixture {
+        std::string inputSectionText;
+        std::string expectedSectionText;
+        bool needsSectionGuard = false;
+    };
+    const std::string repeatedFirst =
+        "[plugins]\r\nselection_schema_version = 1\r\ncatalog_schema_version = 2\r\nprofile = vr\r\nselected_ids = temporal-aa\r\n";
+    const std::string repeatedSecond =
+        "[plugins]\nselection_schema_version = 1\ncatalog_schema_version = 2\nprofile = vr\nselected_ids = on-foot-panel\nfuture = exact";
+    const std::string mixedEolAndComments =
+        "[plugins]\r\nselection_schema_version = 1\ncatalog_schema_version = 2\r\n# retained comment\r\n\nprofile = vr\nselected_ids = temporal-aa\r\nfuture_field = keep-me";
+    const std::vector<OpaqueFixture> opaqueRecords = {
+        {"[plugins]\r\nselection_schema_version = 1\r\n",
+         "[plugins]\r\nselection_schema_version = 1\r\n"},
+        {"[plugins]\r\nselection_schema_version = 3\r\ncatalog_schema_version = 2\r\nprofile = vr\r\nselected_ids = temporal-aa\r\n",
+         "[plugins]\r\nselection_schema_version = 3\r\ncatalog_schema_version = 2\r\nprofile = vr\r\nselected_ids = temporal-aa\r\n"},
+        {"[plugins]\r\nselection_schema_version = 1\r\ncatalog_schema_version = 3\r\nprofile = vr\r\nselected_ids = temporal-aa\r\n",
+         "[plugins]\r\nselection_schema_version = 1\r\ncatalog_schema_version = 3\r\nprofile = vr\r\nselected_ids = temporal-aa\r\n"},
+        {"[plugins]\r\nselection_schema_version = 1\r\ncatalog_schema_version = 2\r\nprofile = vr\r\nselected_ids = temporal-aa\r\nselection_schema_version = 1\r\n",
+         "[plugins]\r\nselection_schema_version = 1\r\ncatalog_schema_version = 2\r\nprofile = vr\r\nselected_ids = temporal-aa\r\nselection_schema_version = 1\r\n"},
+        {"[plugins]\r\nselection_schema_version = 1\r\ncatalog_schema_version = 2\r\nprofile = vr\r\nselected_ids = temporal-aa\r\nfuture_field = keep-me",
+         "[plugins]\r\nselection_schema_version = 1\r\ncatalog_schema_version = 2\r\nprofile = vr\r\nselected_ids = temporal-aa\r\nfuture_field = keep-me"},
+        {"[plugins]\r\nselection_schema_version = 1\r\ncatalog_schema_version = 2\r\nprofile = vr\r\nselected_ids = temporal-aa\r\n\r\n[plugins]\r\nselection_schema_version = 1\r\ncatalog_schema_version = 2\r\nprofile = vr\r\nselected_ids = on-foot-panel\r\n",
+         "[plugins]\r\nselection_schema_version = 1\r\ncatalog_schema_version = 2\r\nprofile = vr\r\nselected_ids = temporal-aa\r\n\r\n[plugins]\r\nselection_schema_version = 1\r\ncatalog_schema_version = 2\r\nprofile = vr\r\nselected_ids = on-foot-panel\r\n"},
+        {"[plugins]\r\nselection_schema_version = 1\r\ncatalog_schema_version = 2\r\nprofile = vr\r\nselected_ids = temporal-aa,temporal-aa\r\n",
+         "[plugins]\r\nselection_schema_version = 1\r\ncatalog_schema_version = 2\r\nprofile = vr\r\nselected_ids = temporal-aa,temporal-aa\r\n"},
+        {"[plugins]\r\nselection_schema_version = 1\r\ncatalog_schema_version = 2\r\nprofile = vr\r\nselected_ids = temporal-aa,bad/id\r\n",
+         "[plugins]\r\nselection_schema_version = 1\r\ncatalog_schema_version = 2\r\nprofile = vr\r\nselected_ids = temporal-aa,bad/id\r\n"},
+        {"[plugins\r\nselection_schema_version = 1\r\n", "[plugins\r\nselection_schema_version = 1\r\n", true},
+        {"[plugins]\nselection_schema_version = 1\ncatalog_schema_version = 2\nprofile = vr\nselected_ids = temporal-aa\nfuture_field = keep-me",
+         "[plugins]\nselection_schema_version = 1\ncatalog_schema_version = 2\nprofile = vr\nselected_ids = temporal-aa\nfuture_field = keep-me"},
+        {mixedEolAndComments, mixedEolAndComments},
+        {repeatedFirst + "[future]\r\nkeep = outside-plugin-section\r\n" + repeatedSecond,
+         repeatedFirst + repeatedSecond},
+    };
+    for (size_t i = 0; i < opaqueRecords.size(); ++i) {
+        const std::string input = "[edvr]\r\nversion = v0.10.1\r\ncomponents = preserved\r\n" + opaqueRecords[i].inputSectionText;
+        const InstallState opaque = parseState(input);
+        check(opaque.pluginSelection.state == PluginSelectionRecordState::Opaque,
+              "partial, unsupported, ambiguous and malformed plugin metadata stays opaque");
+        expectEq(opaque.pluginSelection.opaqueText, opaqueRecords[i].expectedSectionText,
+                 "opaque parser retains the exact plugin-section bytes");
+        const std::string rewritten = serializeState(opaque);
+        const std::string expectedSuffix =
+            (opaqueRecords[i].needsSectionGuard ? "[plugins]\r\n" : "") +
+            opaqueRecords[i].expectedSectionText;
+        const size_t rawAt = rewritten.find(expectedSuffix);
+        check(rawAt != std::string::npos,
+              "opaque plugin-section bytes survive state serialization");
+        if (rawAt != std::string::npos) {
+            expectEq(rewritten.substr(rawAt), expectedSuffix,
+                     "the serialized suffix retains the original plugin-section bytes and any guard");
+        }
+        const InstallState opaqueAgain = parseState(rewritten);
+        check(opaqueAgain.pluginSelection.state == PluginSelectionRecordState::Opaque &&
+                   opaqueAgain.pluginSelection.opaqueText == expectedSuffix,
+              "opaque plugin sections stay opaque across repeated round trips");
+        expectEq(serializeState(opaqueAgain), rewritten,
+                 "an opaque rewrite is byte-stable after adding any needed section guard");
+        expectEq(opaqueAgain.components, "preserved", "opaque metadata does not disturb components");
+    }
+
+    const std::string brokenUnderEdvr =
+        "[edvr]\r\nversion = v0.10.1\r\nprofile = flat\r\n"
+        "[plugins\r\nruntime_sha256 = foreign-value\r\nprofile = flat\r\n";
+    InstallState malformedEdvr = parseState(brokenUnderEdvr);
+    check(malformedEdvr.pluginSelection.state == PluginSelectionRecordState::Opaque &&
+              !malformedEdvr.nativeInstalled && malformedEdvr.nativeRuntimeSha.empty() &&
+              malformedEdvr.profile == "flat",
+          "a malformed plugin header under edvr does not initially claim a native runtime");
+    malformedEdvr.profile = "vr";  // a requested edition conversion must win
+    const std::string rewrittenEdvr = serializeState(malformedEdvr);
+    const InstallState roundEdvr = parseState(rewrittenEdvr);
+    check(roundEdvr.profile == "vr" && !roundEdvr.nativeInstalled &&
+              roundEdvr.nativeRuntimeSha.empty(),
+          "opaque keys under a broken edvr header cannot change the rewritten edition or native state");
+    check(rewrittenEdvr.find("[plugins]\r\n" + malformedEdvr.pluginSelection.opaqueText) != std::string::npos,
+          "the edvr case keeps the exact malformed bytes behind a valid section guard");
+    expectEq(serializeState(roundEdvr), rewrittenEdvr,
+             "the guarded edvr case stays byte-stable on another rewrite");
+
+    const std::string brokenUnderNative =
+        "[edvr]\r\nversion = v0.10.1\r\nprofile = vr\r\n"
+        "[native]\r\nruntime_sha256 = prior-runtime\r\n"
+        "[plugins\r\nruntime_sha256 = stale-runtime\r\n";
+    InstallState malformedNative = parseState(brokenUnderNative);
+    check(malformedNative.nativeRuntimeSha == "stale-runtime" && malformedNative.nativeInstalled,
+          "a malformed plugin header under native initially leaves native keys in scope");
+    malformedNative.nativeRuntimeSha.clear();
+    malformedNative.nativeInstalled = false;
+    const std::string rewrittenNative = serializeState(malformedNative);
+    const InstallState roundNative = parseState(rewrittenNative);
+    check(roundNative.nativeRuntimeSha.empty() && !roundNative.nativeInstalled,
+          "opaque keys under a broken native header cannot restore a removed runtime");
+    check(rewrittenNative.find("[plugins]\r\n" + malformedNative.pluginSelection.opaqueText) != std::string::npos,
+          "the native case retains its malformed bytes behind a valid section guard");
+    expectEq(serializeState(roundNative), rewrittenNative,
+             "the guarded native case stays byte-stable on another rewrite");
+
+    auto rejectsInvalidSupported = [](const InstallState& invalid) {
+        try {
+            (void)serializeState(invalid);
+        } catch (const std::invalid_argument&) {
+            return true;
+        }
+        return false;
+    };
+    InstallState invalidSupported = selected;
+    invalidSupported.pluginSelection.schemaVersion = 2;
+    check(rejectsInvalidSupported(invalidSupported),
+          "serialization rejects a programmatically unsupported selection schema");
+    invalidSupported = selected;
+    invalidSupported.pluginSelection.selectedIds = {"bad/id"};
+    check(rejectsInvalidSupported(invalidSupported),
+          "serialization rejects programmatic IDs that could inject INI syntax");
+
+    InstallState switchedProfile = selected;
+    switchedProfile.profile = "flat";
+    const InstallState switchedBack = parseState(serializeState(switchedProfile));
+    expectEq(switchedBack.profile, "flat", "the installer profile can change independently");
+    expectEq(switchedBack.pluginSelection.profile, "vr",
+             "a profile switch does not silently rebind preserved selection metadata");
+
     check(!parseState("").present, "an empty record is not a record");
     check(!parseState("[edvr]\r\nsomething = else\r\n").present,
           "a file that merely parses is not a record either");
+    check(!parseState("[plugins]\r\nselection_schema_version = 1\r\ncatalog_schema_version = 2\r\nprofile = vr\r\nselected_ids =\r\n").present,
+          "plugin metadata alone does not change legacy install-record presence detection");
 }
 
 int wmain(int argc, wchar_t** argv) {

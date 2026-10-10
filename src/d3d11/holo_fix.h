@@ -27,6 +27,8 @@
 
 #include <cstdint>
 
+#include "holo_scrim_observation.h"
+
 struct ID3D11DeviceContext;
 
 namespace edvr {
@@ -60,6 +62,11 @@ inline bool holoPatternShape(char kind, uint32_t count, uint32_t instances) {
 }
 bool holoOnEyeDraw(char kind, uint32_t count, uint32_t instances);
 
+// Trace-only parity path. The NoTrace caller continues to use the function
+// above so its helper body and call target remain unchanged.
+bool holoOnEyeDrawObserved(char kind, uint32_t count, uint32_t instances,
+                           holo_scrim_observation::HoloObservation* observation);
+
 // Around the real draw: bind the uniform texture into PS slot 1, restore
 // the game's binding after. begin failing to build the substitute degrades
 // to the draw running untouched.
@@ -67,5 +74,10 @@ void holoBegin(ID3D11DeviceContext* ctx);
 void holoEnd(ID3D11DeviceContext* ctx);
 
 void holoShutdown();
+
+#ifdef EDVR_HOLO_PREDICATE_TEST
+// Narrow state setup for the standalone production-helper rig only.
+void holoPredicateSetCountersForTest(std::uint64_t missed, bool noted);
+#endif
 
 }  // namespace edvr

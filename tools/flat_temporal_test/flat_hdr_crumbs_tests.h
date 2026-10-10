@@ -404,7 +404,7 @@ inline int flatHdrCrumbWiringTests() {
             "flatRuntimePresent's frame end is open before anything it does, the preflight included");
     const std::string before = body(runtime, "void flatRuntimeBeforePresent() {");
     ordered(before, {"HdrCrumbSpan routeBeforePresent(hdrCrumbPresentSide(), \"before-present\");",
-                     "flatRuntimeSubstitution(state().context.Get(), FlatSubstEvent::kPresent);", "engineVelocityFlatFrameEnd();",
+                      "flatRuntimeSubstitution(state().context.Get(), FlatSubstEvent::kPresent);", "engineVelocityFlatFrameEndWithCost();",
                      "gpuFrameClose(state());"},
             "the pre-Present span opens before engine motion's state goes back and the census span closes");
     const std::string depth = body(runtime, "bool depthView(ID3D11Texture2D* depth) {");

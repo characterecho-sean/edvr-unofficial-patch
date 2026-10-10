@@ -52,6 +52,9 @@ public:
     // by tools\config_test, and the cap's behaviour at a small explicit value with it.
     uint64_t maxBytes() const { return m_maxBytes; }
     const std::wstring& dir() const { return m_dir; }
+    // Exact collision-safe path selected by open(); empty unless the log is
+    // open. Consumers that create adjacent artifacts must not guess by time.
+    const std::wstring& path() const { return m_path; }
 
 private:
     Log() = default;
@@ -70,6 +73,7 @@ private:
     Impl* m_impl = nullptr;
 
     std::wstring m_dir;
+    std::wstring m_path;
 
     // Atomic, not volatile (2026-09-07). The increment used to happen AFTER
     // append() released the spinlock, so two threads dropping at once lost

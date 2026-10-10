@@ -166,6 +166,36 @@ uint64_t boundVsHashFast(ID3D11DeviceContext* ctx) {
     return h;
 }
 
+// Armed-trace counterpart. It follows the exact consumed-input path above
+// and reports whether the hash came from the binding shadow or the existing
+// VSGetShader fallback; callers must not issue a second query for tracing.
+uint64_t boundVsHashFastObserved(ID3D11DeviceContext* ctx,
+                                WitchspaceStarsObservation& observation) {
+    if (bindingGet(BindSlot::Vs)) {
+        const uint64_t held = bindingShaderHash(BindSlot::Vs);
+        if (held) {
+            observation.hashKnown = true;
+            observation.hashSource = WitchspaceStarsHashSource::kBindingShadow;
+            observation.vsHash = held;
+            return held;
+        }
+    }
+    ID3D11VertexShader* vs = nullptr;
+    ctx->VSGetShader(&vs, nullptr, nullptr);
+    if (!vs) {
+        observation.hashKnown = true;
+        observation.hashSource = WitchspaceStarsHashSource::kFallbackNoShader;
+        observation.vsHash = 0;
+        return 0;
+    }
+    const uint64_t h = lookupShaderHash(vs);
+    vs->Release();
+    observation.hashKnown = true;
+    observation.hashSource = WitchspaceStarsHashSource::kFallbackShaderLookup;
+    observation.vsHash = h;
+    return h;
+}
+
 int billboardVariantFor(ID3D11DeviceContext* ctx) {
     const uint64_t h = boundVsHashFast(ctx);
     if (!h) return -1;
@@ -321,6 +351,58 @@ bool witchspaceStarsSkip(ID3D11DeviceContext* ctx, char kind, uint32_t count,
             static_cast<unsigned long long>(g_starsSkipped),
             static_cast<unsigned long long>(kWitchspaceStarsVs));
     }
+    return true;
+}
+
+bool witchspaceStarsSkipTraced(ID3D11DeviceContext* ctx, char kind,
+                               uint32_t count, uint32_t instances,
+                               WitchspaceStarsObservation* output) {
+    WitchspaceStarsObservation local{};
+    WitchspaceStarsObservation& observation = output ? *output : local;
+    observation = {};
+    observation.hidden = g_hideWitchspaceStars;
+    const uint64_t skippedBefore = g_starsSkipped;
+    if (!observation.hidden) {
+        observation.skippedDeltaKnown = true;
+        observation.skippedDelta = 0;
+        return false;
+    }
+    observation.contextKnown = true;
+    observation.contextValid = ctx != nullptr;
+    if (!ctx) {
+        observation.skippedDeltaKnown = true;
+        observation.skippedDelta = 0;
+        return false;
+    }
+    observation.shapeReached = true;
+    observation.shapeMatched = (kind == 'X' || kind == 'N') &&
+                               instances != 0 && count >= 6;
+    if (!observation.shapeMatched) {
+        observation.skippedDeltaKnown = true;
+        observation.skippedDelta = 0;
+        return false;
+    }
+    const uint64_t h = boundVsHashFastObserved(ctx, observation);
+    if (h != kWitchspaceStarsVs) {
+        observation.skippedDeltaKnown = true;
+        const uint64_t delta = g_starsSkipped - skippedBefore;
+        observation.skippedDelta = delta <= 1 ? static_cast<uint32_t>(delta) : 2u;
+        return false;
+    }
+    ++g_starsSkipped;
+    const uint64_t now = nowMs();
+    if (now - g_starsNoteMs >= 30000) {
+        g_starsNoteMs = now;
+        Log::get().note(
+            "witchspace stars: OFF -- %llu draw(s) of vs %016llX withheld so "
+            "far. The tunnel is empty by choice; set witchspace_stars = on "
+            "to have them back.",
+            static_cast<unsigned long long>(g_starsSkipped),
+            static_cast<unsigned long long>(kWitchspaceStarsVs));
+    }
+    observation.skippedDeltaKnown = true;
+    const uint64_t delta = g_starsSkipped - skippedBefore;
+    observation.skippedDelta = delta <= 1 ? static_cast<uint32_t>(delta) : 2u;
     return true;
 }
 
@@ -534,6 +616,36 @@ void particleConfigure(Config& cfg) {
             Log::get().note("particle billboard: stock.");
         }
     }
+}
+
+bool particleSubstituteDrawInterestConfigured() noexcept {
+    return detail::g_particleMode == Mode::kSteady;
+}
+
+std::size_t particleSubstituteDrawInterestFilters(
+    draw_interest::ShaderFilter* out, std::size_t capacity) noexcept {
+    if (!particleSubstituteDrawInterestConfigured()) return 0;
+    constexpr uint64_t hashes[] = {detail::kParticleVariantVs[0],
+                                   detail::kParticleVariantVs[1]};
+    for (std::size_t i = 0; out && i < 2 && i < capacity; ++i) {
+        out[i] = {draw_interest::InterestId::ParticleSubstitute,
+                  draw_interest::HashFilter::Vertex, hashes[i], 0};
+    }
+    return 2;
+}
+
+bool witchspaceStarsDrawInterestConfigured() noexcept {
+    return g_hideWitchspaceStars;
+}
+
+std::size_t witchspaceStarsDrawInterestFilters(
+    draw_interest::ShaderFilter* out, std::size_t capacity) noexcept {
+    if (!g_hideWitchspaceStars) return 0;
+    if (out && capacity) {
+        out[0] = {draw_interest::InterestId::WitchspaceStars,
+                  draw_interest::HashFilter::Vertex, kWitchspaceStarsVs, 0};
+    }
+    return 1;
 }
 
 bool particleWantsDraws() {

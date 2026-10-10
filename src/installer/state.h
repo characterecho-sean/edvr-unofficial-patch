@@ -14,9 +14,28 @@
 // to open it.
 #pragma once
 
+#include <cstdint>
 #include <string>
+#include <vector>
 
 namespace edvr::installer {
+
+enum class PluginSelectionRecordState {
+    Absent,
+    Supported,
+    Opaque,
+};
+
+struct PluginSelectionRecord {
+    PluginSelectionRecordState state = PluginSelectionRecordState::Absent;
+    std::uint32_t schemaVersion = 1;
+    std::uint32_t catalogSchemaVersion = 2;
+    std::string profile;  // profile the selection belongs to, independent of current install profile
+    std::vector<std::string> selectedIds;
+    // Opaque plugin-section bytes; a protective [plugins] header may precede
+    // them after rewriting a malformed section candidate.
+    std::string opaqueText;
+};
 
 struct InstallState {
     bool present = false;  // a record was found and parsed
@@ -26,6 +45,7 @@ struct InstallState {
     std::string  profile = "vr"; // absent in legacy records means VR
     std::string  descriptorSha;
     std::string  components; // installed component inventory, comma separated
+    PluginSelectionRecord pluginSelection;
 
     // Which Openvr folder was used, RELATIVE to the game folder (Openvr\win64
     // or Openvr). Relative because the reader trims a value at whitespace

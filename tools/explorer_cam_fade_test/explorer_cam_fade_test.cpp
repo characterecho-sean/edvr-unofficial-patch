@@ -1,7 +1,7 @@
 // explorer_cam_fade_test: the entry fade's wait for the engine's motion (src/d3d11/explorer_cam_fade_core.h, "MOTION"), pure.
 //
 //   --dry-run    the same run (the rig never writes a file), for the gate's --dry-run convention; with no repository root, M11.p (which reads a source) is skipped
-//   --self-test  every check; the optional argument is the repository root, where M11.p reads src/d3d11/explorer_cam.cpp (the mutation tool hands it a temp root
+//   --self-test  every check; the optional argument is the repository root, where M11.p reads src/plugins/comfort/explorer_cam.cpp (the mutation tool hands it a temp root
 //                holding an edited copy)
 //
 // The comfort fade's own timeline (enter, exit, re-attach, the 3 s cap, the aborts) is held by tools\explorer_cam_test; this rig holds what the F12 flight's
@@ -481,12 +481,12 @@ void caseWrapTimeline() {
     check(s.stepped, "M11.h the multiply-first conversion does step the clock back in this scenario (the rig crosses the wrap point)");
 }
 
-// The glue (src/d3d11/explorer_cam.cpp) is read as text: both of its conversions of QueryPerformanceCounter go through ecm::qpcTicksToUs.
+// The glue (src/plugins/comfort/explorer_cam.cpp) is read as text: both of its conversions of QueryPerformanceCounter go through ecm::qpcTicksToUs.
 void caseGlue(const std::string& root) {
     if (root.empty()) return;   // --dry-run has no repository root: the --self-test run reads the file
     std::string text;
-    const bool read = readText(root + "/src/d3d11/explorer_cam.cpp", &text);
-    check(read, "M11.p0 src/d3d11/explorer_cam.cpp can be read under the repository root");
+    const bool read = readText(root + "/src/plugins/comfort/explorer_cam.cpp", &text);
+    check(read, "M11.p0 src/plugins/comfort/explorer_cam.cpp can be read under the repository root");
     if (!read) return;
     check(occurrences(text, "return ecm::qpcTicksToUs(qpcNow(), freq);") == 1, "M11.p1 realNowUs converts the counter through ecm::qpcTicksToUs");
     check(occurrences(text, "in.nowUs = ecm::qpcTicksToUs(static_cast<uint64_t>(t.QuadPart), freq);") == 1,
@@ -640,7 +640,7 @@ void caseSettings(const std::string& root) {
     }
     if (root.empty()) return;   // --dry-run has no repository root
     std::string text;
-    if (!readText(root + "/src/d3d11/explorer_cam.cpp", &text)) return;   // M11.p0 has said so
+    if (!readText(root + "/src/plugins/comfort/explorer_cam.cpp", &text)) return;   // M11.p0 has said so
     check(occurrences(text, "g_settings.get(cfg.generation(), ConfigSource(cfg))") == 1, "M13.p1 explorerCamFrameBoundary takes its settings from the cache, under Config::generation()");
     check(!has(text, "cfg.getFloat(\"fix.explorer_cam_") && !has(text, "cfg.getInt(\"fix.explorer_cam_") && !has(text, "cfg.getString(\"hotkey.explorer_cam\"") &&
               !has(text, "cfg.getBool(\"hotkey.read_game_bindings\""),
@@ -755,7 +755,7 @@ void caseMotionGate(const std::string& root) {
     }
     if (root.empty()) return;
     std::string text;
-    if (!readText(root + "/src/d3d11/explorer_cam.cpp", &text)) return;
+    if (!readText(root + "/src/plugins/comfort/explorer_cam.cpp", &text)) return;
     check(occurrences(text, "in.motion = g_frame.fade.wantsMotion() ? engineMotionReady() : EngineMotionReady{};") == 1,
           "M14.p1 explorerCamFrameBoundary asks the engine for its motion only when the timeline wants it");
 }

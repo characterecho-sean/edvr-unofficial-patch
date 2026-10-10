@@ -35,6 +35,8 @@
 #include <windows.h>
 
 #include <d3d11.h>
+#include <d3d11_1.h>
+#include <d3d11_4.h> // ID3D11Multithread for the real worker/context fixture
 #include <d3dcompiler.h>
 #include <dxgi.h>
 #include <wrl/client.h>
@@ -46,12 +48,15 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "../../src/common/config.h"
 #include "../../src/common/guard.h"
 #include "../../src/common/log.h"
 #include "../../src/common/system_d3d11.h"
+#include "../../src/common/plugin_cost.h"
+#include "../../src/common/vtable_hook.h"
 #include "../../src/d3d11/binding_shadow.h"
 #include "../../src/d3d11/depth_probe.h"
 #include "../../src/d3d11/device_hook.h"
@@ -305,6 +310,8 @@ constexpr uint32_t kBlack = 0xFF000000u, kGrey = 0xFF808080u, kVoid = 0xFF282828
 struct Rig {
     ComPtr<ID3D11Device> dev;
     ComPtr<ID3D11DeviceContext> ctx;
+    ComPtr<ID3D11DeviceContext> deferred;
+    ComPtr<ID3D11Multithread> multithread;
     Tex eye[2], screen, frame[2], tiny;
     ComPtr<ID3D11Texture2D> mipsTex;
     ComPtr<ID3D11ShaderResourceView> mipsSrv, otherSrv;
@@ -445,6 +452,9 @@ bool setup(Rig& r, bool hardware) {
     D3D_FEATURE_LEVEL fl{};
     const auto create = edvr::systemD3D11CreateDevice();
     if (!create || FAILED(create(nullptr, hardware ? D3D_DRIVER_TYPE_HARDWARE : D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &r.dev, &fl, &r.ctx))) return false;
+    if (FAILED(r.dev->CreateDeferredContext(0, &r.deferred)) ||
+        FAILED(r.ctx.As(&r.multithread))) return false;
+    r.multithread->SetMultithreadProtected(TRUE);
     check(edvr::reportSystemD3D11Only("ui_layer_world_test"), "the rig runs on System32's d3d11.dll and on no other d3d11.dll");
     for (int e = 0; e < 2; ++e) {
         r.eye[e] = makeTex(r, kEyeW, kEyeH, DXGI_FORMAT_R8G8B8A8_TYPELESS, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE,
@@ -554,6 +564,19 @@ void bindGame(Rig& r, int eye, ID3D11BlendState* blend = nullptr, ID3D11DepthSte
     ++slot.gen;
 }
 
+void bindVanillaCostState(Rig& r, ID3D11DeviceContext* ctx, int eye) {
+    ID3D11RenderTargetView* rtv = r.eye[eye].rtv.Get();
+    ctx->OMSetRenderTargets(1, &rtv, nullptr);
+    const D3D11_VIEWPORT vp{0, 0, static_cast<float>(kEyeW), static_cast<float>(kEyeH), 0, 1};
+    ctx->RSSetViewports(1, &vp);
+    ctx->RSSetState(r.raster.Get());
+    const D3D11_RECT sc{2, 2, 60, 44};
+    ctx->RSSetScissorRects(1, &sc);
+    const float bf[4] = {0.1f, 0.2f, 0.3f, 0.4f};
+    ctx->OMSetBlendState(r.blend.Get(), bf, 0xFFFFFFFDu);
+    ctx->OMSetDepthStencilState(r.dsOff.Get(), 7);
+}
+
 // Everything the re-issue could have changed, as raw pointers and values: equal before and after means restored.
 struct Snap {
     ID3D11RenderTargetView* rtv[8] = {};
@@ -655,7 +678,265 @@ uint64_t nextArmed(Rig& r) {
     return r.seq;
 }
 
+using GetBlendStateFn = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11BlendState**,
+                                                  FLOAT[4], UINT*);
+GetBlendStateFn g_realGetBlendState = nullptr;
+uint32_t g_getBlendStateHits = 0;
+void STDMETHODCALLTYPE observeGetBlendState(ID3D11DeviceContext* ctx, ID3D11BlendState** state,
+                                             FLOAT factor[4], UINT* mask) {
+    ++g_getBlendStateHits;
+    g_realGetBlendState(ctx, state, factor, mask);
+}
+
+uint32_t g_faultViewportsHits = 0;
+void STDMETHODCALLTYPE faultGetViewports(ID3D11DeviceContext*, UINT*, D3D11_VIEWPORT*) {
+    ++g_faultViewportsHits;
+    RaiseException(0xE042ED94u, EXCEPTION_NONCONTINUABLE, 0, nullptr);
+}
+
+bool costCheck(bool ok, const char* what) {
+    check(ok, what);
+    return ok;
+}
+
+bool startCostWindow(ID3D11DeviceContext* ownerContext, bool sample) {
+    edvrPluginCostShutdown();
+    LARGE_INTEGER frequency{};
+    if (!QueryPerformanceFrequency(&frequency) || frequency.QuadPart <= 0) return false;
+    edvrPluginCostConfigure(0x1u, static_cast<uint64_t>(frequency.QuadPart));
+    edvrPluginCostSetOwnerContext(ownerContext);
+    EdvrPluginCostWindowV1 discarded{};
+    edvrPluginCostFrameBoundary(0, 0, 0, sample ? 1 : 0, 0, &discarded);
+    return edvrPluginCostApiSampleContext(ownerContext) == (sample ? 1 : 0);
+}
+
+EdvrPluginCostWindowV1 finishCostWindow(bool sample) {
+    EdvrPluginCostWindowV1 report{};
+    bool completed = false;
+    for (uint32_t frame = 1; frame <= 1800; ++frame) {
+        const uint8_t closeApi = sample ? 1 : 0;
+        completed = edvrPluginCostFrameBoundary(frame, 0, closeApi,
+                                                  sample ? 1 : 0, 0, &report) != 0;
+    }
+    check(completed, "API cost collector closes the full 1800-frame window");
+    return report;
+}
+
+bool costWindowHeader(const EdvrPluginCostWindowV1& report, bool sample) {
+    return costCheck(report.version == 1 && report.profileBit == 0x1u &&
+                         report.windowFrames == 1800 && report.firstFrame == 1 &&
+                         report.lastFrame == 1800 &&
+                         report.completedCpuSampleFrames == 0 &&
+                         report.completedApiSampleFrames == (sample ? 1800u : 0u),
+                     "API cost report has the exact 1800-frame header and denominator");
+}
+
+bool exactCoreApi(const EdvrPluginCostWindowV1& report, uint64_t readQuery,
+                  uint64_t state, uint64_t mask0, uint64_t mask1,
+                  const char* label) {
+    const auto& core = report.owners[static_cast<uint8_t>(plugin_cost::Owner::Core)];
+    bool ok = true;
+    ok &= costCheck(core.owner == static_cast<uint8_t>(plugin_cost::Owner::Core) &&
+                        core.apiObserved == ((readQuery + state) != 0),
+                    label);
+    ok &= costCheck(core.apiCalls[static_cast<uint8_t>(plugin_cost::ApiClass::ReadQuery)] == readQuery,
+                    label);
+    ok &= costCheck(core.apiCalls[static_cast<uint8_t>(plugin_cost::ApiClass::State)] == state,
+                    label);
+    for (uint8_t cls = 0; cls < EDVR_PLUGIN_COST_API_CLASS_COUNT; ++cls) {
+        if (cls == static_cast<uint8_t>(plugin_cost::ApiClass::ReadQuery) ||
+            cls == static_cast<uint8_t>(plugin_cost::ApiClass::State)) continue;
+        ok &= costCheck(core.apiCalls[cls] == 0, label);
+    }
+    ok &= costCheck(core.apiSiteMask[0] == mask0 && core.apiSiteMask[1] == mask1, label);
+    for (uint8_t owner = 0; owner < EDVR_PLUGIN_COST_OWNER_COUNT; ++owner) {
+        if (owner == static_cast<uint8_t>(plugin_cost::Owner::Core)) continue;
+        const auto& other = report.owners[owner];
+        for (uint8_t cls = 0; cls < EDVR_PLUGIN_COST_API_CLASS_COUNT; ++cls)
+            ok &= costCheck(other.apiCalls[cls] == 0, label);
+        ok &= costCheck(other.apiSiteMask[0] == 0 && other.apiSiteMask[1] == 0, label);
+    }
+    return ok;
+}
+
+constexpr uint64_t kVanillaStateMask1 = 0x1FFF80000ull; // sites 83-96 in mask word 1
+constexpr uint64_t kThirdGetterMask1 = 0x00380000ull;   // sites 83-85 in mask word 1
+
+bool prepareVanillaTake(Rig& r) {
+    auto& cfg = Config::get();
+    uiLayerSetMapsGateForTest(true);
+    g_stubs.journalKnown = true;
+    g_stubs.journalOnFoot = true;
+    g_stubs.depthKnown = false;
+    g_stubs.depthDraws = 0;
+    g_stubs.mayTake = false;
+    g_stubs.eyeDraws = 1;
+    uiLayerConfigure(cfg);
+    uiLayerFrameBoundary(r.ctx.Get());
+    uiLayerFrameBoundary(r.ctx.Get());
+    uiLayerFrameBoundary(r.ctx.Get()); // three unnamed frames release the carried on-foot world gate
+    nextArmed(r);
+    bindGame(r, 0);
+    const bool decided = uiLayerDecide(r.ctx.Get(), static_cast<int>(UiLayerFamily::kScreen), true, false);
+    bindVanillaCostState(r, r.ctx.Get(), 0); // real scissor-enabled state and null DSV for Begin/End
+    return decided;
+}
+
+bool runVanillaBeginEnd(Rig& r, ID3D11DeviceContext* ctx) {
+    const bool began = uiLayerBegin(ctx);
+    if (began) {
+        ctx->Draw(4, 0);
+        uiLayerEnd(ctx);
+    }
+    return began;
+}
+
 UiLayerWorldStats statsNow() { return uiLayerWorldStats(); }
+
+bool attachGetBlendObserver(edvr::VTableHook& hook, ID3D11DeviceContext* ctx) {
+    g_realGetBlendState = nullptr;
+    g_getBlendStateHits = 0;
+    return hook.attach(ctx, 128) && hook.setMode(edvr::HookMode::CopyVptr) &&
+           // Windows Kits 10.0.26100.0 d3d11.h: OMGetBlendState is context
+           // zero-based method index 84 plus seven inherited slots = slot 91.
+           hook.replace(91, reinterpret_cast<void*>(&observeGetBlendState),
+                        reinterpret_cast<void**>(&g_realGetBlendState)) && hook.commit();
+}
+
+bool testUiLayerApiCost(Rig& r) {
+    bool ok = true;
+    check(prepareVanillaTake(r), "cost rig admits a plain screen draw with null DSV");
+    // Warm the real target and blend caches before the sampled transaction.
+    check(runVanillaBeginEnd(r, r.ctx.Get()), "cost rig warms the production Begin/End caches");
+
+    check(prepareVanillaTake(r), "cost rig re-admits the plain screen draw after warmup");
+    const Snap before = take(r.ctx.Get());
+    check(startCostWindow(r.ctx.Get(), true), "owner context opens an enabled API sample window");
+    const bool began = uiLayerBegin(r.ctx.Get());
+    check(began, "sampled production Begin binds the real WARP layer");
+    const Snap during = take(r.ctx.Get());
+    check(!same(before, during), "Begin changes the active render-target/state transaction");
+    if (began) {
+        r.ctx->Draw(4, 0);
+        uiLayerEnd(r.ctx.Get());
+    }
+    const Snap after = take(r.ctx.Get());
+    check(same(before, after), "sampled Begin/End restores targets, viewport, scissor, rasterizer and blend state");
+    const auto baseline = finishCostWindow(true);
+    ok &= costWindowHeader(baseline, true);
+    ok &= exactCoreApi(baseline, 6, 8, 0, kVanillaStateMask1,
+                       "plain Begin/End records six state reads and eight state writes on exactly sites 83-96");
+    edvrPluginCostShutdown();
+
+    check(prepareVanillaTake(r), "decline case starts from a valid production setup");
+    check(!uiLayerDecide(r.ctx.Get(), static_cast<int>(UiLayerFamily::kScreen), false, false),
+          "a non-forwarded screen decision refuses the Begin admission");
+    check(startCostWindow(r.ctx.Get(), true), "decline window samples the registered context");
+    check(!uiLayerBegin(r.ctx.Get()), "Begin without an admitted draw declines");
+    const auto declined = finishCostWindow(true);
+    ok &= costWindowHeader(declined, true);
+    ok &= exactCoreApi(declined, 0, 0, 0, 0,
+                       "declined Begin produces no state API attempt or site bit");
+    edvrPluginCostShutdown();
+
+    check(prepareVanillaTake(r), "unsampled case prepares an accepted draw");
+    {
+        edvr::VTableHook observer;
+        check(attachGetBlendObserver(observer, r.ctx.Get()), "observe actual WARP blend getter in unsampled case");
+        check(startCostWindow(r.ctx.Get(), false), "unsampled API window keeps API sampling disabled");
+        check(runVanillaBeginEnd(r, r.ctx.Get()), "unsampled production Begin/End still performs the draw");
+        observer.uninstall();
+        check(g_getBlendStateHits == 1, "unsampled path reaches one real OMGetBlendState call");
+    }
+    const auto unsampled = finishCostWindow(false);
+    ok &= costWindowHeader(unsampled, false);
+    ok &= exactCoreApi(unsampled, 0, 0, 0, 0,
+                       "unsampled real Begin/End produces no Core API cost notes");
+    edvrPluginCostShutdown();
+
+    check(prepareVanillaTake(r), "worker case prepares an accepted draw on the owner thread");
+    {
+        edvr::VTableHook observer;
+        check(attachGetBlendObserver(observer, r.ctx.Get()), "observe actual WARP blend getter for worker call");
+        check(startCostWindow(r.ctx.Get(), true), "worker case samples only the registered owner context/thread");
+        bool workerSample = true, workerBegan = false;
+        std::thread worker([&] {
+            workerSample = edvrPluginCostApiSampleContext(r.ctx.Get()) != 0;
+            workerBegan = runVanillaBeginEnd(r, r.ctx.Get());
+        });
+        worker.join();
+        observer.uninstall();
+        check(!workerSample && workerBegan && g_getBlendStateHits == 1,
+              "foreign worker performs a real Begin/End query prefix but fails owner-thread sampling");
+    }
+    const auto worker = finishCostWindow(true);
+    ok &= costWindowHeader(worker, true);
+    ok &= exactCoreApi(worker, 0, 0, 0, 0,
+                       "foreign worker Begin/End is excluded from Core owner-thread API cost");
+    edvrPluginCostShutdown();
+
+    check(prepareVanillaTake(r), "deferred case prepares a decision on the registered immediate context");
+    bindVanillaCostState(r, r.deferred.Get(), 0);
+    {
+        edvr::VTableHook observer;
+        check(attachGetBlendObserver(observer, r.deferred.Get()), "observe actual deferred-context blend getter");
+        check(startCostWindow(r.ctx.Get(), true), "deferred case has an active immediate-owner sample frame");
+        check(edvrPluginCostApiSampleContext(r.deferred.Get()) == 0,
+              "deferred context is outside the registered immediate-context gate");
+        const bool deferredBegan = runVanillaBeginEnd(r, r.deferred.Get());
+        ComPtr<ID3D11CommandList> commands;
+        const HRESULT finishHr = r.deferred->FinishCommandList(FALSE, &commands);
+        observer.uninstall();
+        check(g_getBlendStateHits == 1, "deferred path reaches an actual WARP OMGetBlendState attempt");
+        check(SUCCEEDED(finishHr) && commands.Get() != nullptr,
+              deferredBegan ? "deferred Begin/End state changes form a real command list"
+                    : "deferred declined Begin still finishes its real admitted query prefix");
+    }
+    const auto deferred = finishCostWindow(true);
+    ok &= costWindowHeader(deferred, true);
+    ok &= exactCoreApi(deferred, 0, 0, 0, 0,
+                       "deferred-context Begin/End is excluded from immediate-owner API cost");
+    edvrPluginCostShutdown();
+
+    check(prepareVanillaTake(r), "fault case prepares an accepted draw");
+    {
+        edvr::VTableHook fault;
+        // SDK method order: RSGetViewports is context method index 88 plus the
+        // seven inherited IUnknown/ID3D11DeviceChild slots = vtable slot 95.
+        check(fault.attach(r.ctx.Get(), 128) && fault.setMode(edvr::HookMode::CopyVptr) &&
+                  fault.replace(95, reinterpret_cast<void*>(&faultGetViewports), nullptr) && fault.commit(),
+              "install typed WARP RSGetViewports slot-95 fault hook from the SDK vtable order");
+        g_faultViewportsHits = 0;
+        check(startCostWindow(r.ctx.Get(), true), "fault window samples the registered immediate context");
+        const bool faultBegan = uiLayerBegin(r.ctx.Get());
+        fault.uninstall();
+        if (faultBegan) uiLayerEnd(r.ctx.Get()); // keep later scenarios usable if the hook failed to inject
+        check(!faultBegan && g_faultViewportsHits == 1,
+              "guarded third getter fault is observed exactly once and declines Begin");
+    }
+    const auto faulted = finishCostWindow(true);
+    ok &= costWindowHeader(faulted, true);
+    ok &= exactCoreApi(faulted, 3, 0, 0, kThirdGetterMask1,
+                       "third-getter fault records only the three real ReadQuery attempts");
+    edvrPluginCostShutdown();
+
+    // The production fault policy stands the feature down after this fault;
+    // changing the configured target is its normal explicit re-arm path.
+    auto& cfg = Config::get();
+    cfg.set("fix.ui_quality", "125");
+    uiLayerConfigure(cfg);
+    cfg.set("fix.ui_quality", "100");
+    uiLayerConfigure(cfg);
+    check(prepareVanillaTake(r), "post-fault case prepares the recovery draw");
+    check(startCostWindow(r.ctx.Get(), true), "post-fault recovery window samples the owner");
+    check(runVanillaBeginEnd(r, r.ctx.Get()), "production Begin/End succeeds after the guarded getter fault");
+    const auto recovered = finishCostWindow(true);
+    ok &= costWindowHeader(recovered, true);
+    ok &= exactCoreApi(recovered, 6, 8, 0, kVanillaStateMask1,
+                       "post-fault recovery returns to the complete vanilla state transaction");
+    edvrPluginCostShutdown();
+    return ok;
+}
 
 // ======================================================================================== the scenarios
 void testKeyOff(Rig& r) {
@@ -1720,6 +2001,8 @@ int main(int argc, char** argv) {
     testAccessors(r);
     testMapsGate(r);
     testMapsTransitions(r);
+    check(testUiLayerApiCost(r), "UI-layer state API cost cohort passes its complete WARP report matrix");
+    edvrPluginCostShutdown();
     uiLayerShutdown();
     std::printf("ui_layer_world_test: %u checks, %u failures\n", g_checks, g_fails);
     return g_fails ? 1 : 0;

@@ -43,7 +43,6 @@
 #include "cs_stage_save.h"
 #include "engine_velocity.h"
 #include "celestial_motion.h"   // planet patch motion: each body's own rigid motion on its pixels (decision path 12)
-#include "scheduler_stack_probe.h"
 #include "journal_watch.h"   // the ship split on foot: Status.json's word on whether the commander is on foot (temporal_mode.h)
 #include "perf_monitor.h"
 #include "shader_swap.h"
@@ -4538,12 +4537,6 @@ void temporalPassConfigure(Config& cfg) {
     // Planet patch motion (celestial_motion.h) is part of fix.temporal_aa in the VR build, with no key of its own (a fix that always helps
     // gets no toggle): its capture and its records run exactly while the pass does. The flat profile has its own planet, its own pass.
     celestialMotionConfigure(detail::g_temporalPassWantedFssChrome && !runtimeFlatProfile());
-    // The scheduler stack-capture probe (docs/engine-render-pipeline.md
-    // stage 0): read-only return-address signatures at the four
-    // scheduler-fed worker entries, naming the frame scheduler the vtable
-    // tables hide from static RE. Independent of the temporal pass fixes:
-    // it observes the engine, not the renderer, so it arms on its own key.
-    schedulerStackProbeConfigure(cfg.getBool("advanced.scheduler_probe", false));
     applyEngineMotionDiagnostics();
     // K is the default in every mode. The legacy "steady" alias uses K for the
     // full frame in every mode; quality = K everywhere; responsive = J everywhere (NVIDIA: slightly less

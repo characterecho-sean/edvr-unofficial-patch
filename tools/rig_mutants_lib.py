@@ -76,11 +76,13 @@ class Config:
 
 # ---- text helpers --------------------------------------------------------------------------------------------------------
 def apply_edits(text, edits, name="?"):
-    """The text with each (old, new) applied in order; each `old` must occur exactly once in the text as it stands then."""
-    for old, new in edits:
+    """Apply (old, new) edits; an optional third value pins identical copies in parallel production paths."""
+    for edit in edits:
+        old, new = edit[:2]
+        expected = edit[2] if len(edit) == 3 else 1
         count = text.count(old)
-        if count != 1:
-            raise ValueError("mutation %s: an anchor occurs %d times (want 1): %r" % (name, count, old[:90]))
+        if count != expected:
+            raise ValueError("mutation %s: an anchor occurs %d times (want %d): %r" % (name, count, expected, old[:90]))
         if old == new:
             raise ValueError("mutation %s: an edit changes nothing: %r" % (name, old[:90]))
         text = text.replace(old, new)

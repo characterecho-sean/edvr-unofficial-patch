@@ -11,7 +11,9 @@
 
 #include "../common/config.h"
 #include "../common/log.h"
+#include "../common/plugin_cost.h"
 #include "binding_shadow.h"
+#include "cockpit_cost_sites.h"
 #include "exposure_fix.h"   // lookupShaderHash
 #include "fsr_hlsl_gen.h"   // AMD's ffx_a.h and ffx_fsr1.h, as string chunks
 #include "shader_swap.h"
@@ -217,6 +219,7 @@ float              g_psSharpen = 0.0f;
 bool               g_psHadRcas = false;
 
 bool               g_engaged = false;
+bool               g_costSample = false;
 ID3D11PixelShader* g_displaced = nullptr;
 uint64_t           g_applied = 0;
 
@@ -312,9 +315,41 @@ void targetSharpConfigure(Config& cfg) {
     }
 }
 
-bool targetSharpOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
-                          uint32_t instances) {
-    if (!targetSharpWantsDraws()) return false;
+bool targetSharpDrawInterestConfigured() noexcept {
+    return detail::g_targetSharpSharp;
+}
+
+std::size_t targetSharpDrawInterestFilters(draw_interest::ShaderFilter* out,
+                                           std::size_t capacity) noexcept {
+    if (!detail::g_targetSharpSharp) return 0;
+    if (out && capacity) {
+        out[0] = {draw_interest::InterestId::TargetSharp,
+                  draw_interest::HashFilter::Vertex, g_vsHash, 0};
+    }
+    return 1;
+}
+
+template <bool Observe>
+bool targetSharpWantsDrawsImpl(TargetSharpObservation* observation, bool helper) noexcept {
+    const bool sharp = detail::g_targetSharpSharp;
+    if constexpr (Observe) {
+        auto& read = helper ? observation->helperSharp : observation->outerSharp;
+        read = {true, true, sharp};
+    }
+    if (!sharp) return false;
+    const bool failed = detail::g_targetSharpFailed;
+    if constexpr (Observe) {
+        auto& read = helper ? observation->helperFailed : observation->outerFailed;
+        read = {true, true, failed};
+    }
+    return !failed;
+}
+
+template <bool Observe>
+bool targetSharpOnEyeDrawImpl(ID3D11DeviceContext* ctx, char kind,
+                              uint32_t count, uint32_t instances,
+                              TargetSharpObservation* observation) {
+    if (!targetSharpWantsDrawsImpl<Observe>(observation, true)) return false;
     if (kind != kKind || count != kIndices || instances != kInstances) {
         return false;
     }
@@ -322,35 +357,117 @@ bool targetSharpOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
     // Eye-sized by vScreen's answer rather than an equality, the lesson
     // holo_fix paid for on a rig with a render scale.
     ResourceInfo surf;
-    if (!bindingResolve(bindingGet(BindSlot::PsSrv0), &surf) ||
-        !surf.isTexture2D || vScreenIsEyeSized(surf.a, surf.b)) {
+    void* const srv0 = bindingGet(BindSlot::PsSrv0);
+    if constexpr (Observe)
+        observation->srv0Present = {true, true, srv0 != nullptr};
+    const bool resolved = bindingResolve(srv0, &surf);
+    if constexpr (Observe)
+        observation->srv0Resolved = {true, true, resolved};
+    if (!resolved) return false;
+    if constexpr (Observe)
+        observation->srv0Texture2D = {true, true, surf.isTexture2D};
+    if (!surf.isTexture2D) return false;
+    if constexpr (Observe) {
+        observation->srv0Width = {true, true, surf.a};
+        observation->srv0Height = {true, true, surf.b};
+    }
+    bool eyeSized = false;
+    if constexpr (Observe) {
+        eyeSized = vScreenIsEyeSizedObserved(surf.a, surf.b,
+                                             &observation->eyeSize);
+    } else {
+        eyeSized = vScreenIsEyeSized(surf.a, surf.b);
+    }
+    if (eyeSized) {
         return false;
     }
     // Slots 1-3 unbound. The composite reads one texture and nothing else,
     // which is most of what separates it from every other textured quad.
-    if (bindingGet(BindSlot::PsSrv1) || bindingGet(BindSlot::PsSrv2) ||
-        bindingGet(BindSlot::PsSrv3)) {
+    void* const srv1 = bindingGet(BindSlot::PsSrv1);
+    if constexpr (Observe)
+        observation->aux1Present = {true, true, srv1 != nullptr};
+    if (srv1) return false;
+    void* const srv2 = bindingGet(BindSlot::PsSrv2);
+    if constexpr (Observe)
+        observation->aux2Present = {true, true, srv2 != nullptr};
+    if (srv2) return false;
+    void* const srv3 = bindingGet(BindSlot::PsSrv3);
+    if constexpr (Observe)
+        observation->aux3Present = {true, true, srv3 != nullptr};
+    if (srv3) {
         return false;
     }
     // The clincher, and last because it costs a call: nothing hooks
     // VSSetShader, so the shader is read off the context the way the census
     // reads it.
     ID3D11VertexShader* vs = nullptr;
+    if (edvrPluginCostApiSampleContext(ctx)) {
+        edvrPluginCostNoteD3dCall(static_cast<uint8_t>(plugin_cost::Owner::CockpitVisuals),
+                                  cockpit_cost::id(cockpit_cost::Site::TargetVsGetShader),
+                                  static_cast<uint8_t>(plugin_cost::ApiClass::ReadQuery));
+    }
     ctx->VSGetShader(&vs, nullptr, nullptr);
+    if constexpr (Observe)
+        observation->vsPresent = {true, true, vs != nullptr};
     if (!vs) return false;
     const uint64_t h = lookupShaderHash(vs);
     vs->Release();
-    return h == g_vsHash;
+    const uint64_t configuredHash = g_vsHash;
+    if constexpr (Observe) {
+        observation->queriedShaderHash = {true, true, h};
+        observation->configuredShaderHash = {true, true, configuredHash};
+    }
+    return h == configuredHash;
 }
 
+bool targetSharpWantsDrawsObserved(TargetSharpObservation& observation,
+                                   bool helper) noexcept {
+    return targetSharpWantsDrawsImpl<true>(&observation, helper);
+}
+
+bool targetSharpOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
+                          uint32_t instances) {
+    return targetSharpOnEyeDrawImpl<false>(ctx, kind, count, instances, nullptr);
+}
+
+bool targetSharpOnEyeDrawObserved(ID3D11DeviceContext* ctx, char kind,
+                                  uint32_t count, uint32_t instances,
+                                  TargetSharpObservation& observation) {
+    return targetSharpOnEyeDrawImpl<true>(ctx, kind, count, instances,
+                                          &observation);
+}
+
+#if defined(EDVR_VSCREEN_PREDICATE_TEST)
+void targetSharpPredicateTestSeed(bool sharp, bool failed) noexcept {
+    detail::g_targetSharpSharp = sharp;
+    detail::g_targetSharpFailed = failed;
+}
+
+std::uint64_t targetSharpPredicateTestConfiguredHash() noexcept {
+    return g_vsHash;
+}
+#endif
+
 void targetSharpBegin(ID3D11DeviceContext* ctx) {
+    g_costSample = false;
     g_engaged = false;
     ID3D11PixelShader* ps = replacement(ctx);
     if (!ps) return;   // stock behaviour, which the log explained once
+    g_costSample = edvrPluginCostApiSampleContext(ctx) != 0;
 
     // The game's own pixel shader, off the context: binding_shadow does not
     // carry shaders, and PSSetShader is not hooked.
+    if (g_costSample) {
+        edvrPluginCostNoteD3dCall(static_cast<uint8_t>(plugin_cost::Owner::CockpitVisuals),
+                                  cockpit_cost::id(cockpit_cost::Site::TargetPsGetShader),
+                                  static_cast<uint8_t>(plugin_cost::ApiClass::ReadQuery));
+    }
     ctx->PSGetShader(&g_displaced, nullptr, nullptr);
+    if (g_costSample) {
+        edvrPluginCostNoteD3dCall(static_cast<uint8_t>(plugin_cost::Owner::CockpitVisuals),
+                                  cockpit_cost::id(cockpit_cost::Site::TargetPsSetShaderApply),
+                                  static_cast<uint8_t>(plugin_cost::ApiClass::State));
+    }
     ctx->PSSetShader(ps, nullptr, 0);
     g_engaged = true;
 
@@ -362,16 +479,24 @@ void targetSharpBegin(ID3D11DeviceContext* ctx) {
 }
 
 void targetSharpEnd(ID3D11DeviceContext* ctx) {
-    if (!g_engaged) return;
+    if (!g_engaged) { g_costSample = false; return; }
     g_engaged = false;
+    const bool costSample = g_costSample;
+    g_costSample = false;
     ID3D11PixelShader* orig = g_displaced;
     g_displaced = nullptr;
     // Null restores an unbind, which is also the truth.
+    if (costSample) {
+        edvrPluginCostNoteD3dCall(static_cast<uint8_t>(plugin_cost::Owner::CockpitVisuals),
+                                  cockpit_cost::id(cockpit_cost::Site::TargetPsSetShaderRestore),
+                                  static_cast<uint8_t>(plugin_cost::ApiClass::State));
+    }
     ctx->PSSetShader(orig, nullptr, 0);
     if (orig) orig->Release();
 }
 
 void targetSharpShutdown() {
+    g_costSample = false;
     if (g_ps) {
         g_ps->Release();
         g_ps = nullptr;

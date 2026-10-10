@@ -29,6 +29,13 @@ static std::string replaced(std::string t, const std::string& from, const std::s
     if (p != std::string::npos) t.replace(p, from.size(), to);
     return t;
 }
+static std::string replacedAfter(std::string t, const std::string& anchor, const std::string& from, const std::string& to) {
+    const size_t a = t.find(anchor);
+    if (a == std::string::npos) return t;
+    const size_t p = t.find(from, a);
+    if (p != std::string::npos) t.replace(p, from.size(), to);
+    return t;
+}
 
 // vscreen.cpp, forwardWithVerdict.
 static bool wiredVscreenBars(const std::string& t) {
@@ -41,10 +48,18 @@ static bool wiredVscreenBars(const std::string& t) {
     const size_t begin = t.find("const bool barsBound = layered && barsDecided && supercruiseBarsBegin(self, count);", fn);
     const size_t issue = t.find("const bool originalIssued=observedDraw(", fn);
     const size_t end = t.find("if (barsBound) supercruiseBarsEnd(self);", fn);
-    const size_t layerEnd = t.find("        uiLayerEnd(self);\n        if (originalIssued) uiLayerSecondIssues(", fn);
-    if (!found(flag) || !found(decided) || !found(prepare) || !found(layerBegin) || !found(begin) || !found(issue) || !found(end) || !found(layerEnd)) return false;
+    // The feature forwarder records a trace action between restore and second
+    // issues. Check the real statements independently without losing ordering.
+    const size_t layerEnd = found(layerBegin) ? t.find("        uiLayerEnd(self);\n", layerBegin) : std::string::npos;
+    const size_t secondIssues = found(layerEnd) ? t.find("if (originalIssued) uiLayerSecondIssues(", layerEnd) : std::string::npos;
+    if (!found(flag) || !found(decided) || !found(prepare) || !found(layerBegin) || !found(begin) || !found(issue) || !found(end) || !found(layerEnd) || !found(secondIssues)) return false;
+    const bool tracedSecondIssues = t.compare(secondIssues, std::strlen("if (originalIssued) uiLayerSecondIssues(trace, self, kind, count, instances, args);"),
+        "if (originalIssued) uiLayerSecondIssues(trace, self, kind, count, instances, args);") == 0;
+    const bool plainSecondIssues = t.compare(secondIssues, std::strlen("if (originalIssued) uiLayerSecondIssues(self, kind, count, instances, args);"),
+        "if (originalIssued) uiLayerSecondIssues(self, kind, count, instances, args);") == 0;
+    if (!tracedSecondIssues && !plainSecondIssues) return false;
     // the flag is made from the family rule; Prepare (the game's viewport) is before the layer's bracket; Begin (the layer's) is after it and before the game's issue; End is after the issue and before the layer's restore
-    if (!(flag < decided && decided < prepare && prepare < layerBegin && layerBegin < begin && begin < issue && issue < end && end < layerEnd)) return false;
+    if (!(flag < decided && decided < prepare && prepare < layerBegin && layerBegin < begin && begin < issue && issue < end && end < layerEnd && layerEnd < secondIssues)) return false;
     // Begin only for a draw the layer bracketed AND decided to take as the bars
     return found(t.substr(begin, 120).find("layered && barsDecided"));
 }
@@ -128,9 +143,14 @@ static void wiringCases() {
           "control: a Begin that does not ask whether the layer bracketed the draw trips the pin");
     check(!wiredVscreenBars(replaced(vscreen, "const bool barsBound = layered && barsDecided && supercruiseBarsBegin(self, count);", "const bool barsBound = layered && barsFamily && supercruiseBarsBegin(self, count);")),
           "control: a Begin for every bars draw, taken or not, trips the pin");
-    check(!wiredVscreenBars(replaced(replaced(vscreen, "    if (barsBound) supercruiseBarsEnd(self);", ""), "        if (originalIssued) uiLayerSecondIssues(self, kind, count, instances, args);\n    }\n",
-                                     "        if (originalIssued) uiLayerSecondIssues(self, kind, count, instances, args);\n    }\n    if (barsBound) supercruiseBarsEnd(self);\n")),
+    check(!wiredVscreenBars(replacedAfter(without(vscreen, "    if (barsBound) supercruiseBarsEnd(self);"),
+                                     "const bool barsDecided = ", "        uiLayerEnd(self);\n",
+                                     "        uiLayerEnd(self);\n    if (barsBound) supercruiseBarsEnd(self);\n")),
           "control: End after the layer's own restore trips the pin");
+    check(!wiredVscreenBars(without(without(vscreen,
+          "        if (originalIssued) uiLayerSecondIssues(trace, self, kind, count, instances, args);\n"),
+          "        if (originalIssued) uiLayerSecondIssues(self, kind, count, instances, args);\n")),
+          "control: missing second issues after the layer restore trips the pin");
     check(!wiredVscreenBars(replaced(vscreen, "barsFamily = uiFamily == UiLayerFamily::kSupercruiseBars;", "barsFamily = uiFamily == UiLayerFamily::kOrbitLines;")),
           "control: a flag made from the wrong family trips the pin");
 

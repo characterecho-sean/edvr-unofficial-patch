@@ -43,6 +43,7 @@ tool with the real tree.
 import os
 import re
 import sys
+import json
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC = os.path.join(ROOT, 'src')
@@ -204,6 +205,50 @@ def keys_moved():
     return out
 
 
+def config_ownership_problems(keys, manifest_path=None):
+    """Require one explicit manifest owner for every documented setting."""
+    path = manifest_path or os.path.join(ROOT, 'src', 'plugins', 'plugin_manifest.json')
+    try:
+        with open(path, encoding='utf-8') as f:
+            manifest = json.load(f)
+    except (OSError, ValueError) as exc:
+        return ['PLUGIN MANIFEST UNAVAILABLE: %s (%s)' % (path, exc)]
+    if not isinstance(manifest, dict):
+        return ['PLUGIN MANIFEST INVALID: expected a JSON object']
+
+    groups = [('core', manifest.get('coreOwnedConfigKeys'))]
+    plugins = manifest.get('plugins')
+    if not isinstance(plugins, list):
+        return ['PLUGIN MANIFEST INVALID: plugins must be an array']
+    for plugin in plugins:
+        if not isinstance(plugin, dict) or not isinstance(plugin.get('id'), str):
+            return ['PLUGIN MANIFEST INVALID: every plugin must have a string id']
+        groups.append((plugin['id'], plugin.get('ownedConfigKeys')))
+    owners = {}
+    problems = []
+    for owner, owned in groups:
+        if not isinstance(owned, list) or any(not isinstance(key, str) or not key for key in owned):
+            problems.append('PLUGIN CONFIG OWNERSHIP INVALID: %s must list ownedConfigKeys' % owner)
+            continue
+        for key in owned:
+            owners.setdefault(key.lower(), []).append((owner, key))
+    canonical_keys = {key.lower(): key for key in keys}
+    for folded, entries in sorted(owners.items()):
+        if len(entries) > 1:
+            problems.append('DUPLICATE CONFIG OWNER: %s (%s)' %
+                            (entries[0][1], ', '.join(owner for owner, _key in entries)))
+        if folded not in canonical_keys:
+            problems.append('UNKNOWN CONFIG OWNER KEY: %s (owned by %s)' %
+                            (entries[0][1], ', '.join(owner for owner, _key in entries)))
+        elif any(key != canonical_keys[folded] for _owner, key in entries):
+            problems.append('CONFIG OWNER KEY SPELLING DOES NOT MATCH: %s (expected %s)' %
+                            (entries[0][1], canonical_keys[folded]))
+    for key in sorted(keys):
+        if key.lower() not in owners:
+            problems.append('CONFIG KEY HAS NO OWNER: %s' % key)
+    return problems
+
+
 def emit_header(path, read, doc, moved):
     known = sorted(set(k.lower() for k in read) | set(k.lower() for k in doc))
     lines = [
@@ -313,6 +358,8 @@ def main(argv=None):
                 '    A user following that instruction is silently ignored.'
                 % (key, ', '.join(mentioned[key][:3])))
 
+    problems.extend(config_ownership_problems(set(doc) | set(read)))
+
     if problems:
         print('[edvr] config contract FAILED\n')
         for p in problems:
@@ -346,9 +393,23 @@ def self_test():
 
     def lay(name, ini, sources):
         root = os.path.join(base, name)
-        os.makedirs(os.path.join(root, 'src'))
+        os.makedirs(os.path.join(root, 'src', 'plugins'))
         with open(os.path.join(root, 'edvr.ini'), 'w', encoding='utf-8') as f:
             f.write(ini)
+        section = ''
+        fixture_keys = []
+        for raw in ini.splitlines():
+            line = raw.strip().lstrip('\ufeff')
+            m = re.match(r'^\[([^\]]+)\]', line)
+            if m:
+                section = m.group(1).strip()
+                continue
+            body = line[1:].strip() if line[:1] in ('#', ';') else line
+            m = re.match(r'^([A-Za-z0-9_]+)\s*=', body)
+            if m and not (line[:1] in ('#', ';') and ' ' in body.split('=')[0].strip()):
+                fixture_keys.append('%s.%s' % (section, m.group(1)) if section else m.group(1))
+        with open(os.path.join(root, 'src', 'plugins', 'plugin_manifest.json'), 'w', encoding='utf-8') as f:
+            json.dump({'coreOwnedConfigKeys': fixture_keys, 'plugins': []}, f)
         for leaf, text in sources.items():
             with open(os.path.join(root, 'src', leaf), 'w', encoding='utf-8') as f:
                 f.write(text)
@@ -404,6 +465,47 @@ def self_test():
         code, said = run(root, '--quiet')
         expect(name, code == 0 and said == '', '--quiet said %r' % said)
 
+        name = 'plugin-owner-missing'
+        own = lay(name, '[fix]\nblack_void = 1\n',
+                  {'a.cpp': 'cfg.getBool("fix.black_void", true);\n'})
+        owner_path = os.path.join(own, 'src', 'plugins', 'plugin_manifest.json')
+        with open(owner_path, encoding='utf-8') as f:
+            owner_manifest = json.load(f)
+        owner_manifest['coreOwnedConfigKeys'] = []
+        with open(owner_path, 'w', encoding='utf-8') as f:
+            json.dump(owner_manifest, f)
+        code, said = run(own)
+        expect(name, code == 1, 'exit %d' % code)
+        expect_in(name, said, 'CONFIG KEY HAS NO OWNER: fix.black_void')
+
+        name = 'plugin-owner-duplicate-and-unknown'
+        own = lay(name, '[fix]\nblack_void = 1\n',
+                  {'a.cpp': 'cfg.getBool("fix.black_void", true);\n'})
+        owner_path = os.path.join(own, 'src', 'plugins', 'plugin_manifest.json')
+        with open(owner_path, encoding='utf-8') as f:
+            owner_manifest = json.load(f)
+        owner_manifest['plugins'] = [{'id': 'fixture', 'ownedConfigKeys':
+                                      ['fix.black_void', 'fix.unknown']}]
+        with open(owner_path, 'w', encoding='utf-8') as f:
+            json.dump(owner_manifest, f)
+        code, said = run(own)
+        expect(name, code == 1, 'exit %d' % code)
+        expect_in(name, said, 'DUPLICATE CONFIG OWNER: fix.black_void')
+        expect_in(name, said, 'UNKNOWN CONFIG OWNER KEY: fix.unknown')
+
+        name = 'plugin-owner-case-mismatch'
+        own = lay(name, '[fix]\nblack_void = 1\n',
+                  {'a.cpp': 'cfg.getBool("fix.black_void", true);\n'})
+        owner_path = os.path.join(own, 'src', 'plugins', 'plugin_manifest.json')
+        with open(owner_path, encoding='utf-8') as f:
+            owner_manifest = json.load(f)
+        owner_manifest['coreOwnedConfigKeys'] = ['FIX.black_void']
+        with open(owner_path, 'w', encoding='utf-8') as f:
+            json.dump(owner_manifest, f)
+        code, said = run(own)
+        expect(name, code == 1, 'exit %d' % code)
+        expect_in(name, said, 'CONFIG OWNER KEY SPELLING DOES NOT MATCH: FIX.black_void (expected fix.black_void)')
+
         # A byte-order mark on the ini's first line is not part of its header, for the
         # documented keys and for the moved-from map alike.
         name = 'bom'
@@ -422,7 +524,7 @@ def self_test():
         expect(name, code == 1, 'exit %d' % code)
         expect_in(name, said, 'READ BUT NOT IN edvr.ini: fix.extra')
         expect_in(name, said, 'src/a.cpp:2')
-        expect_in(name, said, '1 problem(s)')
+        expect_in(name, said, '2 problem(s)')
 
         # The 0.5.x shape: documented under [fix], read from [advanced]. Both
         # halves are reported, and the second says where the code looks.

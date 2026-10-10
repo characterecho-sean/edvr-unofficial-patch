@@ -264,9 +264,17 @@ inline int flatRangeInvalidateWiringTests() {
     const auto body = [](const std::string& text, const char* signature) {
         const size_t at = text.find(signature);
         if (at == std::string::npos) return std::string();
-        const size_t end = text.find("\n}\n", at);
-        return text.substr(at, end == std::string::npos ? std::string::npos : end + 3 - at);
+        const size_t lf = text.find("\n}\n", at), crlf = text.find("\n}\r\n", at);
+        const size_t end = (std::min)(lf, crlf);
+        return end == std::string::npos ? std::string() :
+            text.substr(at, end + (end == crlf ? 4 : 3) - at);
     };
+    expect(compact(body("void hook(){\nnotify();\n}\nvoid later(){\nother();\n}\n", "void hook(")) ==
+               "voidhook(){notify();}" &&
+           compact(body("void hook(){\r\nnotify();\r\n}\r\nvoid later(){\r\nother();\r\n}\r\n", "void hook(")) ==
+               "voidhook(){notify();}" &&
+           body("void hook(){\nnotify();\n", "void hook(").empty(),
+           "hook extraction accepts LF and CRLF and refuses an unterminated body");
     // A member function of a class whose members are indented four spaces ends at the first line that is four spaces and a brace.
     const auto member = [](const std::string& text, const char* signature) {
         const size_t at = text.find(signature);

@@ -1,6 +1,6 @@
 // Production post-VS history, animated perspective projection and state
 // restoration. No game assets or CPU readback exists in the production path.
-#include "../../src/d3d11/weapon_motion.cpp"
+#include "../../src/plugins/on_foot_panel/weapon_motion.cpp"
 #include "../../src/d3d11/flat_animated_identity_ledger.h"
 #include "../../src/d3d11/flat_foreground_motion.h"
 #include "../../src/d3d11/flat_foreground_phase.h"
@@ -12,6 +12,9 @@
 #include <cmath>
 #include <cstring>
 #include <string>
+#include <array>
+#include <iterator>
+#include <utility>
 using Microsoft::WRL::ComPtr;
 unsigned checks=0;
 // The compute shaders the flat foreground shadow asked the device for (its roles all begin "flat foreground shadow"): a shadow that never ran asks for none.
@@ -43,7 +46,138 @@ ID3D11ComputeShader* shaderSwapCompileCs(ID3D11DeviceContext* c,const char* s,si
 }
 using namespace edvr;
 unsigned issuedDraws=0;
-void __stdcall issue(ID3D11DeviceContext* c,unsigned n,unsigned instances,unsigned start,int base,unsigned si){++issuedDraws;c->DrawIndexedInstanced(n,instances,start,base,si);}
+struct DrawTuple { unsigned count,instances,start; int base; unsigned startInstance; };
+std::vector<DrawTuple> issuedTuples;
+struct WeaponApiNote { uint8_t owner; uint16_t site; uint8_t apiClass; };
+std::vector<WeaponApiNote> weaponApiNotes;
+extern "C" void edvrPluginCostNoteD3dCall(uint8_t owner,uint16_t site,uint8_t apiClass) noexcept {
+ weaponApiNotes.push_back({owner,site,apiClass});
+}
+void __stdcall issue(ID3D11DeviceContext* c,unsigned n,unsigned instances,unsigned start,int base,unsigned si){
+ ++issuedDraws;issuedTuples.push_back({n,instances,start,base,si});c->DrawIndexedInstanced(n,instances,start,base,si);
+}
+bool weaponApiNotesAre(bool sampled) {
+ using edvr::plugin_cost::ApiClass;
+ struct ExpectedNote { uint16_t first; ApiClass second; };
+ constexpr ExpectedNote expected[] = {
+  {136,ApiClass::ReadQuery},{137,ApiClass::ReadQuery},{138,ApiClass::ReadQuery},
+  {139,ApiClass::ReadQuery},{140,ApiClass::ReadQuery},{141,ApiClass::ReadQuery},
+  {142,ApiClass::ReadQuery},{143,ApiClass::Transfer},{144,ApiClass::State},
+  {145,ApiClass::State},{146,ApiClass::State},{147,ApiClass::State},
+  {148,ApiClass::State},{149,ApiClass::State},{150,ApiClass::State},
+  {151,ApiClass::State},{152,ApiClass::State},{153,ApiClass::State},
+  {154,ApiClass::Work},{155,ApiClass::State},{156,ApiClass::State},
+  {157,ApiClass::State},{158,ApiClass::State},{159,ApiClass::State},
+  {160,ApiClass::State},{161,ApiClass::State},{162,ApiClass::State},
+  {163,ApiClass::State},{164,ApiClass::State},{165,ApiClass::State},
+ };
+ if(!sampled)return weaponApiNotes.empty();
+ if(weaponApiNotes.size()!=std::size(expected))return false;
+ for(size_t i=0;i<std::size(expected);++i)
+  if(weaponApiNotes[i].owner!=static_cast<uint8_t>(edvr::plugin_cost::Owner::OnFootPanel) ||
+     weaponApiNotes[i].site!=expected[i].first ||
+     weaponApiNotes[i].apiClass!=static_cast<uint8_t>(expected[i].second))return false;
+ return true;
+}
+bool drawTupleIs(const DrawTuple& got,unsigned n,unsigned instances,unsigned start,
+                 int base,unsigned startInstance) {
+ return got.count==n&&got.instances==instances&&got.start==start&&got.base==base&&
+        got.startInstance==startInstance;
+}
+struct WeaponHostState {
+ std::array<ComPtr<ID3D11RenderTargetView>,8> rtvs;
+ ComPtr<ID3D11DepthStencilView> dsv;
+ ComPtr<ID3D11BlendState> blend;
+ FLOAT blendFactors[4]{};UINT sampleMask=0;
+ ComPtr<ID3D11DepthStencilState> depth;UINT stencilRef=0;
+ ComPtr<ID3D11VertexShader> vs;ComPtr<ID3D11PixelShader> ps;
+ UINT vsClassCount=0,psClassCount=0;
+ ComPtr<ID3D11Buffer> vsCb0,psCb0;
+ std::array<ComPtr<ID3D11ShaderResourceView>,10> vsSrvs;
+ ComPtr<ID3D11InputLayout> layout;ComPtr<ID3D11Buffer> indexBuffer;
+ DXGI_FORMAT indexFormat=DXGI_FORMAT_UNKNOWN;UINT indexOffset=0;
+ std::array<ComPtr<ID3D11Buffer>,2> vertexBuffers;
+ UINT strides[2]{},offsets[2]{};
+ D3D11_PRIMITIVE_TOPOLOGY topology=D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
+ std::array<ComPtr<ID3D11Buffer>,4> soTargets;
+ ComPtr<ID3D11GeometryShader> gs;ComPtr<ID3D11HullShader> hs;ComPtr<ID3D11DomainShader> ds;
+ UINT gsClassCount=0,hsClassCount=0,dsClassCount=0;
+};
+WeaponHostState weaponHostState(ID3D11DeviceContext* ctx) {
+ WeaponHostState state;
+ ID3D11RenderTargetView* rtvs[8]{};ctx->OMGetRenderTargets(8,rtvs,&state.dsv);
+ for(size_t i=0;i<8;++i)state.rtvs[i].Attach(rtvs[i]);
+ ctx->OMGetBlendState(&state.blend,state.blendFactors,&state.sampleMask);
+ ctx->OMGetDepthStencilState(&state.depth,&state.stencilRef);
+ ctx->VSGetShader(&state.vs,nullptr,&state.vsClassCount);
+ ctx->PSGetShader(&state.ps,nullptr,&state.psClassCount);
+ ctx->VSGetConstantBuffers(0,1,&state.vsCb0);ctx->PSGetConstantBuffers(0,1,&state.psCb0);
+ ID3D11ShaderResourceView* srvs[10]{};ctx->VSGetShaderResources(0,10,srvs);
+ for(size_t i=0;i<10;++i)state.vsSrvs[i].Attach(srvs[i]);
+ ctx->IAGetInputLayout(&state.layout);
+ ctx->IAGetIndexBuffer(&state.indexBuffer,&state.indexFormat,&state.indexOffset);
+ ID3D11Buffer* vertex[2]{};ctx->IAGetVertexBuffers(0,2,vertex,state.strides,state.offsets);
+ for(size_t i=0;i<2;++i)state.vertexBuffers[i].Attach(vertex[i]);
+ ctx->IAGetPrimitiveTopology(&state.topology);
+ ID3D11Buffer* so[4]{};ctx->SOGetTargets(4,so);
+ for(size_t i=0;i<4;++i)state.soTargets[i].Attach(so[i]);
+ ctx->GSGetShader(&state.gs,nullptr,&state.gsClassCount);
+ ctx->HSGetShader(&state.hs,nullptr,&state.hsClassCount);
+ ctx->DSGetShader(&state.ds,nullptr,&state.dsClassCount);
+ return state;
+}
+bool sameWeaponHostState(const WeaponHostState& a,const WeaponHostState& b) {
+ if(a.dsv!=b.dsv||a.blend!=b.blend||a.sampleMask!=b.sampleMask||a.depth!=b.depth||
+    a.stencilRef!=b.stencilRef||a.vs!=b.vs||a.ps!=b.ps||
+    a.vsClassCount!=b.vsClassCount||a.psClassCount!=b.psClassCount||
+    a.vsCb0!=b.vsCb0||a.psCb0!=b.psCb0||a.layout!=b.layout||
+    a.indexBuffer!=b.indexBuffer||a.indexFormat!=b.indexFormat||a.indexOffset!=b.indexOffset||
+    a.topology!=b.topology||a.gs!=b.gs||a.hs!=b.hs||a.ds!=b.ds||
+    a.gsClassCount!=b.gsClassCount||a.hsClassCount!=b.hsClassCount||a.dsClassCount!=b.dsClassCount)
+  return false;
+ for(size_t i=0;i<4;++i)if(a.blendFactors[i]!=b.blendFactors[i]||a.soTargets[i]!=b.soTargets[i])return false;
+ for(size_t i=0;i<8;++i)if(a.rtvs[i]!=b.rtvs[i])return false;
+ for(size_t i=0;i<10;++i)if(a.vsSrvs[i]!=b.vsSrvs[i])return false;
+ for(size_t i=0;i<2;++i)if(a.vertexBuffers[i]!=b.vertexBuffers[i]||
+     a.strides[i]!=b.strides[i]||a.offsets[i]!=b.offsets[i])return false;
+ return true;
+}
+std::vector<WeaponHostState> weaponIssueStates;
+bool weaponCaptureStateIs(const WeaponHostState& capture,const WeaponHostState& host,
+                          const WeaponHostState& raster,unsigned count) {
+ // SO capture intentionally changes only topology, GS and SO targets. Its
+ // output must be the exact position buffer consumed by the subsequent raster.
+ if(capture.topology!=D3D11_PRIMITIVE_TOPOLOGY_POINTLIST||!capture.gs||
+    capture.gsClassCount!=0||!capture.soTargets[0]||!raster.vsSrvs[0])return false;
+ for(size_t i=1;i<4;++i)if(capture.soTargets[i])return false;
+ D3D11_BUFFER_DESC captureDesc{};capture.soTargets[0]->GetDesc(&captureDesc);
+ if(captureDesc.ByteWidth!=count*16||
+    captureDesc.BindFlags!=(D3D11_BIND_STREAM_OUTPUT|D3D11_BIND_SHADER_RESOURCE))return false;
+ ComPtr<ID3D11Resource> rasterPositions;raster.vsSrvs[0]->GetResource(&rasterPositions);
+ if(rasterPositions.Get()!=capture.soTargets[0].Get())return false;
+ auto unchanged=capture;
+ unchanged.topology=host.topology;unchanged.gs=host.gs;unchanged.gsClassCount=host.gsClassCount;
+ unchanged.soTargets=host.soTargets;
+ return sameWeaponHostState(unchanged,host);
+}
+void __stdcall recordingIssue(ID3D11DeviceContext* ctx,unsigned n,unsigned instances,
+                             unsigned start,int base,unsigned startInstance) {
+ weaponIssueStates.push_back(weaponHostState(ctx));
+ issue(ctx,n,instances,start,base,startInstance);
+}
+bool weaponRasterStateIs(const WeaponHostState& state,ID3D11DepthStencilView* hostDepth) {
+ using namespace edvr::weapon_motion_detail;
+ if(state.rtvs[0].Get()!=g.rtv.Get()||state.dsv.Get()!=hostDepth||
+    state.blend.Get()!=g.blend.Get()||state.depth.Get()!=g.depth.Get()||state.stencilRef!=16||
+    state.vs.Get()!=g.vs.Get()||state.ps.Get()!=g.ps.Get()||
+    state.vsCb0.Get()!=g.settings.Get()||state.psCb0.Get()!=g.settings.Get()||
+    state.layout||state.indexBuffer.Get()!=g.sequential.Get()||
+    state.indexFormat!=DXGI_FORMAT_R32_UINT||state.indexOffset!=0||
+    state.topology!=D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST||
+    !state.vsSrvs[0]||!state.vsSrvs[5])return false;
+ for(size_t i=1;i<8;++i)if(state.rtvs[i])return false;
+ return true;
+}
 struct F4 {double x,y,z,w;};
 struct Pose {float mouse=0,projection=1,nearBone=0,farBone=0,clip=.025f,skeleton=92,pad[2]{};};
 F4 vertex(int i,Pose p){const double x=i==0||i==3?-.6:.6,y=i<2?-.6:.6,t=i<2?0:1;double z=1+t*.25;return {(x+p.mouse+p.nearBone*(1-t)+p.farBone*t)*p.projection,y,p.clip,z};}
@@ -138,7 +272,93 @@ int main(int argc,char** argv){
  }
  auto motion=[&](){weaponMotionDraw(ctx.Get(),issue,9,1,0,0,0);};
  auto read=[&](){auto& g=weapon_motion_detail::g;D3D11_TEXTURE2D_DESC d{};g.map->GetDesc(&d);d.Usage=D3D11_USAGE_STAGING;d.BindFlags=0;d.CPUAccessFlags=D3D11_CPU_ACCESS_READ;ComPtr<ID3D11Texture2D> s;hr(dev->CreateTexture2D(&d,nullptr,&s));ctx->CopyResource(s.Get(),g.map.Get());D3D11_MAPPED_SUBRESOURCE m{};hr(ctx->Map(s.Get(),0,D3D11_MAP_READ,0,&m));std::vector<float> out(W*H*4);for(UINT y=0;y<H;++y)for(UINT x=0;x<W*4;++x)out[y*W*4+x]=DirectX::PackedVector::XMConvertHalfToFloat(reinterpret_cast<const uint16_t*>(static_cast<const unsigned char*>(m.pData)+y*m.RowPitch)[x]);ctx->Unmap(s.Get(),0);return out;};
- weaponMotionConfigure(true);Pose old{};bind(old);motion();check(weaponMotionView()!=nullptr,"first mesh writes rejection coverage");auto first=read();unsigned covered=0;for(UINT i=0;i<W*H;++i)if(first[i*4+3]){++covered;check(first[i*4+3]==2,"new mesh has no fabricated history");}check(covered>2000,"rasterized weapon coverage present");
+ weaponMotionConfigure(true);
+ // Exercise the complete sampled 30-call weapon raster bracket on a real WARP
+ // draw with non-default host state. The shifted vertex/index fixture makes
+ // the capture tuple non-zero without changing the original pixel-oracle test.
+ Pose old{};bind(old);
+ float offsetVertices[]={0,0,1,0, -.6f,-.6f,1,0, .6f,-.6f,1,0,
+                         .6f,.6f,1.25f,1, -.6f,.6f,1.25f,1};
+ UINT offsetIndices[]={0,1,2,0,2,3,0,0,0};
+ auto offsetVb=buffer(offsetVertices,sizeof(offsetVertices),D3D11_BIND_VERTEX_BUFFER);
+ auto offsetIb=buffer(offsetIndices,sizeof(offsetIndices),D3D11_BIND_INDEX_BUFFER);
+ D3D11_BUFFER_DESC hostCbDesc{};hostCbDesc.ByteWidth=16;hostCbDesc.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
+ ComPtr<ID3D11Buffer> hostVsCb,hostPsCb;hr(dev->CreateBuffer(&hostCbDesc,nullptr,&hostVsCb));hr(dev->CreateBuffer(&hostCbDesc,nullptr,&hostPsCb));
+ D3D11_BLEND_DESC hostBlendDesc{};hostBlendDesc.AlphaToCoverageEnable=TRUE;
+ hostBlendDesc.RenderTarget[0].BlendEnable=TRUE;
+ hostBlendDesc.RenderTarget[0].SrcBlend=D3D11_BLEND_SRC_ALPHA;
+ hostBlendDesc.RenderTarget[0].DestBlend=D3D11_BLEND_INV_SRC_ALPHA;
+ hostBlendDesc.RenderTarget[0].BlendOp=D3D11_BLEND_OP_ADD;
+ hostBlendDesc.RenderTarget[0].SrcBlendAlpha=D3D11_BLEND_ONE;
+ hostBlendDesc.RenderTarget[0].DestBlendAlpha=D3D11_BLEND_ZERO;
+ hostBlendDesc.RenderTarget[0].BlendOpAlpha=D3D11_BLEND_OP_ADD;
+ hostBlendDesc.RenderTarget[0].RenderTargetWriteMask=D3D11_COLOR_WRITE_ENABLE_ALL;
+ ComPtr<ID3D11BlendState> hostBlend;hr(dev->CreateBlendState(&hostBlendDesc,&hostBlend));
+ std::array<ComPtr<ID3D11Texture2D>,8> hostTargetTextures;
+ std::array<ComPtr<ID3D11RenderTargetView>,8> hostTargetViews;
+ D3D11_TEXTURE2D_DESC hostTargetDesc{};hostTargetDesc.Width=W;hostTargetDesc.Height=H;
+ hostTargetDesc.MipLevels=hostTargetDesc.ArraySize=hostTargetDesc.SampleDesc.Count=1;
+ hostTargetDesc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;hostTargetDesc.BindFlags=D3D11_BIND_RENDER_TARGET;
+ for(unsigned i=0;i<8;++i){hr(dev->CreateTexture2D(&hostTargetDesc,nullptr,&hostTargetTextures[i]));hr(dev->CreateRenderTargetView(hostTargetTextures[i].Get(),nullptr,&hostTargetViews[i]));}
+ ID3D11RenderTargetView* hostRtvs[8]={hostTargetViews[0].Get(),nullptr,
+  hostTargetViews[2].Get(),nullptr,nullptr,nullptr,nullptr,hostTargetViews[7].Get()};
+ ID3D11ShaderResourceView* hostSrvs[10]={poolView.Get(),nullptr,boneView.Get(),nullptr,
+  poolView.Get(),nullptr,boneView.Get(),nullptr,poolView.Get(),nullptr};
+ UINT hostStride=16,hostOffset=0;
+ ctx->IASetVertexBuffers(1,1,offsetVb.GetAddressOf(),&hostStride,&hostOffset);
+ ctx->IASetIndexBuffer(offsetIb.Get(),DXGI_FORMAT_R32_UINT,0);
+ ctx->IASetInputLayout(layout.Get());ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+ ctx->VSSetShader(vs.Get(),nullptr,0);ctx->PSSetShader(ps.Get(),nullptr,0);
+ ctx->VSSetConstantBuffers(0,1,hostVsCb.GetAddressOf());ctx->PSSetConstantBuffers(0,1,hostPsCb.GetAddressOf());
+ ctx->VSSetShaderResources(0,10,hostSrvs);
+ ctx->OMSetRenderTargets(8,hostRtvs,dsv.Get());ctx->OMSetDepthStencilState(state.Get(),21);
+ const FLOAT hostFactors[4]={.25f,.5f,.75f,1.f};ctx->OMSetBlendState(hostBlend.Get(),hostFactors,0x13579BDFu);
+ // Original host invocation and the two saved-callback invocations have
+ // deliberately distinct tuples: capture uses (6,1,3,1,1), raster uses
+ // (6,1,0,0,0). A +1 base lands on valid shifted quad vertices.
+ issuedTuples.clear();issue(ctx.Get(),6,1,3,1,1);
+ check(issuedTuples.size()==1&&drawTupleIs(issuedTuples[0],6,1,3,1,1),
+       "WARP host fixture issues the valid non-zero indexed-instanced tuple");
+ issuedTuples.clear();weaponApiNotes.clear();weaponIssueStates.clear();
+ const auto sampledBefore=weaponHostState(ctx.Get());
+ weaponMotionDrawSampledApi(ctx.Get(),recordingIssue,6,1,3,1,1);
+ const auto sampledAfter=weaponHostState(ctx.Get());
+ check(weaponMotionView()!=nullptr,"sampled weapon transaction accepts a zero-history-candidate first capture");
+ check(weaponApiNotesAre(true),"sampled weapon transaction records the literal 30-site owner/class sequence");
+ check(issuedTuples.size()==2&&drawTupleIs(issuedTuples[0],6,1,3,1,1)&&
+       drawTupleIs(issuedTuples[1],6,1,0,0,0),
+       "sampled transaction forwards the saved capture tuple and distinct sequential raster tuple");
+ check(weaponIssueStates.size()==2&&weaponCaptureStateIs(weaponIssueStates[0],sampledBefore,weaponIssueStates[1],6)&&
+        weaponRasterStateIs(weaponIssueStates[1],dsv.Get()),
+        "capture callback sees the exact SO pipeline and raster consumes its captured positions");
+ check(sameWeaponHostState(sampledBefore,sampledAfter),
+       "sampled transaction restores all seeded host outputs, shaders, constants, SRVs and IA state");
+ check(sampledAfter.rtvs[0]&&sampledAfter.rtvs[2]&&sampledAfter.rtvs[7]&&
+       !sampledAfter.rtvs[1]&&!sampledAfter.rtvs[3]&&!sampledAfter.rtvs[4]&&
+       !sampledAfter.rtvs[5]&&!sampledAfter.rtvs[6]&&
+       sampledAfter.vsSrvs[0]&&!sampledAfter.vsSrvs[1]&&sampledAfter.vsSrvs[2]&&
+       !sampledAfter.vsSrvs[3]&&!sampledAfter.soTargets[0]&&!sampledAfter.soTargets[1]&&
+       !sampledAfter.soTargets[2]&&!sampledAfter.soTargets[3]&&
+       sampledAfter.vsClassCount==0&&sampledAfter.psClassCount==0,
+       "WARP state witness preserves populated and null slots; linked class instances are absent in this fixture");
+ const auto sampledPixels=read();
+ issuedTuples.clear();weaponApiNotes.clear();weaponIssueStates.clear();
+ const auto noApiBefore=weaponHostState(ctx.Get());
+ weaponMotionDraw(ctx.Get(),recordingIssue,6,1,3,1,1);
+ const auto noApiAfter=weaponHostState(ctx.Get());
+ const auto noApiPixels=read();
+ check(weaponApiNotesAre(false),"original NoApi weapon entry records zero sampled bracket sites");
+ check(issuedTuples.size()==2&&drawTupleIs(issuedTuples[0],6,1,3,1,1)&&
+       drawTupleIs(issuedTuples[1],6,1,0,0,0),
+       "NoApi control preserves both production callback tuples");
+ check(weaponIssueStates.size()==2&&weaponCaptureStateIs(weaponIssueStates[0],noApiBefore,weaponIssueStates[1],6)&&
+        weaponRasterStateIs(weaponIssueStates[1],dsv.Get()),
+        "NoApi control has the same exact SO capture and temporary raster-time state");
+ check(sameWeaponHostState(noApiBefore,noApiAfter)&&sameWeaponHostState(sampledBefore,noApiBefore)&&
+       sampledPixels==noApiPixels,
+       "NoApi and sampled successful transactions preserve identical host state and WARP output");
+
+ bind(old);motion();check(weaponMotionView()!=nullptr,"first mesh writes rejection coverage");auto first=read();unsigned covered=0;for(UINT i=0;i<W*H;++i)if(first[i*4+3]){++covered;check(first[i*4+3]==2,"new mesh has no fabricated history");}check(covered>2000,"rasterized weapon coverage present");
  for(Pose now: {Pose{},Pose{.08f,1,0,0},Pose{-.06f,1.15f,.01f,-.025f},Pose{.03f,.9f,-.02f,.04f}}){
   bind(now);motion();check(weaponMotionView()!=nullptr,"animated mesh has valid motion");auto a=read();covered=0;
   for(UINT y=0;y<H;++y)for(UINT x=0;x<W;++x){UINT at=(y*W+x)*4;if(a[at+3]!=1)continue;++covered;bool matched=false;
@@ -188,7 +408,25 @@ int main(int argc,char** argv){
  weaponMotionConfigure(false);check(weaponMotionGpuDiagnostics().draining,"weapon GPU diagnostics close immediately on config change");check(!weaponMotionView()&&!weapon_motion_detail::g.map,"off frees temporal weapon resources");bind(old);motion();check(!weaponMotionView(),"live off stays inactive");
  weaponMotionConfigure(true);bind(old);motion();check(weaponMotionView()!=nullptr,"live on resumes with fresh coverage");
  // Bound GPU resource growth; these states must decline before a draw.
- unsigned allocated=weapon_motion_detail::g.history.bytes();weaponMotionDraw(ctx.Get(),issue,131073,1,0,0,0);weaponMotionDraw(ctx.Get(),issue,9,2,0,0,0);check(weapon_motion_detail::g.history.bytes()==allocated,"oversized and instanced meshes allocate nothing");
+ unsigned allocated=weapon_motion_detail::g.history.bytes();
+ issuedTuples.clear();weaponApiNotes.clear();
+ weaponMotionDrawSampledApi(ctx.Get(),issue,131073,1,0,0,0);
+ check(issuedTuples.empty()&&weaponApiNotesAre(false)&&weapon_motion_detail::g.history.bytes()==allocated,
+       "immediate oversized sampled-path rejection emits no saved callbacks or bracket sites");
+ const auto savedTopologyState=weaponHostState(ctx.Get());
+ ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_LINELIST);
+ const auto refusedTopologyState=weaponHostState(ctx.Get());
+ issuedTuples.clear();weaponApiNotes.clear();
+ weaponMotionDrawSampledApi(ctx.Get(),issue,9,1,0,0,0);
+ const auto afterTopologyRefusal=weaponHostState(ctx.Get());
+ check(issuedTuples.empty()&&weaponApiNotesAre(false)&&
+       sameWeaponHostState(refusedTopologyState,afterTopologyRefusal)&&
+       weapon_motion_detail::g.history.bytes()==allocated,
+       "later topology refusal emits no saved callbacks or bracket sites and leaves bindings intact");
+ ctx->IASetPrimitiveTopology(savedTopologyState.topology);
+ weaponMotionDraw(ctx.Get(),issue,9,2,0,0,0);
+ check(weapon_motion_detail::g.history.bytes()==allocated,
+       "instanced NoApi rejection still allocates no history");
  weaponMotionResourceWritten(bones.Get());check(weaponMotionView()!=nullptr,"animation updates preserve vertex correspondence");
  weaponMotionResourceWritten(ib.Get());check(!weaponMotionView(),"rewritten mesh indices invalidate motion");bind(old);motion();first=read();for(UINT i=0;i<W*H;++i)check(first[i*4+3]!=1,"rewritten mesh cannot reuse old correspondence");
  // Deterministic source-boundary, drain-cutoff and same-frame budget checks.

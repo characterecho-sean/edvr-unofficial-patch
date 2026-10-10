@@ -39,6 +39,7 @@
 #include "flat_standdown.h"
 #include "flat_witness_bound.h"
 #include "flat_cpu.h"
+#include "engine_velocity_frame_end_cost.h"
 #include "flat_camera_table.h"
 #include "flat_query_cut.h"
 #include "flat_query_reads.h"
@@ -2581,7 +2582,7 @@ void flatRuntimeBeforePresent() {
     // and every EDVR pass that follows it (the lazy form, engine_velocity.h).
     if (owner()) flatRuntimeSubstitution(state().context.Get(), FlatSubstEvent::kPresent);
     // And what engine motion's bracket kept for the frame goes with it.
-    if (owner()) engineVelocityFlatFrameEnd();
+    if (owner()) engineVelocityFlatFrameEndWithCost();
     // The census's whole-frame GPU span ends here, just before the real Present.
     if (owner()) gpuFrameClose(state());
 }
@@ -3951,7 +3952,11 @@ void flatRuntimeSubstitution(ID3D11DeviceContext* ctx, FlatSubstEvent event) {
         // engine motion's draw wrapper's, and the census counts it there, not in whatever hook it came from.
         if (ctx && ctx == state().context.Get()) {
             flatcpu::Scope engine(flatcpu::kEngineDraw);
-            engineVelocityFlatFlush(ctx, flushCauseOf(event));
+            const EngineVelocityFlushCause cause = flushCauseOf(event);
+            if (cause == EngineVelocityFlushCause::kOtherDraw)
+                engineVelocityFlatFlushOtherDrawSampledBoundary(ctx);
+            else
+                engineVelocityFlatFlushSampledBoundary(ctx, cause);
         }
         return;
     case FlatSubstAction::kAbandon:

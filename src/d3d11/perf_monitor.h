@@ -36,6 +36,9 @@ namespace edvr {
 
 // Every frame, from the frame boundary: the interval ring.
 void perfMonitorFrame(ID3D11Device* dev);
+// Lets the shared Present close tell whether menuTick actually advanced the
+// VR draw clock. A skipped/unconfigured menu supplies no CPU observation.
+uint32_t perfMonitorFrameSerial();
 
 // The page is showing (or not): starts and stops the once-a-second samplers.
 void perfMonitorSetActive(bool active);
@@ -158,6 +161,16 @@ inline bool perfMonitorSampleDraws() { return detail::g_perfMonitorSampleDraws; 
 // nothing in a frame's draw order is known to.
 constexpr uint32_t kPerfMonitorDrawTimeStride = 64;
 void perfMonitorDrawTicks(int64_t wholeTicks, int64_t realTicks);
+
+// Fixed-memory plugin-cost collector lifecycle. Configure/reset it after the
+// vScreen hooks are successfully installed (and after config reload), then
+// shut it down only after those hooks are removed.
+void perfMonitorPluginCostConfigure(uint8_t profileBit);
+void perfMonitorPluginCostShutdown();
+// Close the collector once per owned Present, after the vScreen boundary.
+// closedCpuSampleFrame is captured before menuTick rotates the draw clock
+// and accepted only when that clock advanced; flat Present passes false.
+void perfMonitorPluginCostFrameBoundary(uint32_t frameNo, bool closedCpuSampleFrame);
 
 // The runtime closed its timing context, so the session is over: the long-frame counts and the worst few
 // are written (docs/freeze-diagnostics-2026-10-01.md). Called from native_timing.cpp's close through

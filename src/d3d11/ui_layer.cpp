@@ -26,6 +26,7 @@
 #include "ui_layer_seed_timing.h"
 #include "draw_state_describe.h"  // viewName, describeBlend/describeDs, shapeOf, dsStateOf
 #include "tonemap_admit.h"  // the tonemap draw's structural admission, shared with the census
+#include "ui_layer_cost_sites.h"
 
 #include "binding_shadow.h"
 #include "depth_probe.h"   // depthProbeDrawsAtSize: the world-screen gate's own count
@@ -66,6 +67,10 @@
 #include <string>
 
 namespace edvr {
+
+#if defined(EDVR_VSCREEN_PREDICATE_TEST)
+thread_local UiLayerPredicateTestTemporalInput g_uiLayerPredicateTestTemporalInput{};
+#endif
 
 namespace detail {
 bool g_uiLayerLive = false;
@@ -356,6 +361,7 @@ TargetCache g_tc;
 // issue with Begin/End, on the render thread, before the next draw arrives.
 struct Draw {
     bool decided = false, active = false;
+    bool apiCostSample = false; // latched for the admitted Begin/End state transaction
     bool saved = false;    // the game's state is held below: restore it on any exit
     bool counted = false;  // this decision's draw is counted (a fallback re-issue is not)
     bool hdr = false;      // the crisp-HUD half of fix.ui_quality: the draw goes to the HDR HUD layer, not the 8-bit one
@@ -1351,9 +1357,19 @@ void restore(ID3D11DeviceContext* ctx) {
     if (holoRestore.retried)
         standDown(holoRestore.restored ? "a hologram shader/b13 restoration fault recovered on the bounded retry"
                                      : "hologram shader/b13 restoration failed; original state untrusted, owner draw issues suppressed until the frame boundary puts it back");
+    ui_layer_cost::note(g_draw.apiCostSample, ui_layer_cost::Site::RestoreRenderTargets,
+                        plugin_cost::ApiClass::State);
     vScreenSetRenderTargetsRaw(ctx, boundCount(g_draw.rtv), g_draw.rtv, g_draw.dsv);
+    ui_layer_cost::note(g_draw.apiCostSample, ui_layer_cost::Site::RestoreViewports,
+                        plugin_cost::ApiClass::State);
     vScreenRSSetViewportsRaw(ctx, g_draw.vpCount, g_draw.vp);
-    if (g_draw.scissorSet) ctx->RSSetScissorRects(g_draw.scCount, g_draw.sc);
+    if (g_draw.scissorSet) {
+        ui_layer_cost::note(g_draw.apiCostSample, ui_layer_cost::Site::RestoreScissorRects,
+                            plugin_cost::ApiClass::State);
+        ctx->RSSetScissorRects(g_draw.scCount, g_draw.sc);
+    }
+    ui_layer_cost::note(g_draw.apiCostSample, ui_layer_cost::Site::RestoreBlendState,
+                        plugin_cost::ApiClass::State);
     ctx->OMSetBlendState(g_draw.blend, g_draw.factor, g_draw.sampleMask);
 }
 
@@ -1527,6 +1543,8 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
     ID3D11BlendState* bs = nullptr;
     FLOAT factor[4] = {};
     UINT sampleMask = 0xFFFFFFFFu;
+    ui_layer_cost::note(g_draw.apiCostSample, ui_layer_cost::Site::GetBlendState,
+                        plugin_cost::ApiClass::ReadQuery);
     ctx->OMGetBlendState(&bs, factor, &sampleMask);
     UiBlendRt game, conv;
     ID3D11BlendState* layerBlend = nullptr;
@@ -1595,18 +1613,30 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
     g_draw.blend = bs;
     std::memcpy(g_draw.factor, factor, sizeof(factor));
     g_draw.sampleMask = sampleMask;
+    ui_layer_cost::note(g_draw.apiCostSample, ui_layer_cost::Site::GetRenderTargets,
+                        plugin_cost::ApiClass::ReadQuery);
     ctx->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, g_draw.rtv, &g_draw.dsv);
     g_draw.vpCount = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+    ui_layer_cost::note(g_draw.apiCostSample, ui_layer_cost::Site::GetViewports,
+                        plugin_cost::ApiClass::ReadQuery);
     ctx->RSGetViewports(&g_draw.vpCount, g_draw.vp);
     g_draw.scissorSet = false;
     g_draw.scCount = 0;
     {
         Ptr<ID3D11RasterizerState> rs;
+        ui_layer_cost::note(g_draw.apiCostSample, ui_layer_cost::Site::GetRasterizerState,
+                            plugin_cost::ApiClass::ReadQuery);
         ctx->RSGetState(&rs);
         D3D11_RASTERIZER_DESC rd{};
-        if (rs) rs->GetDesc(&rd);
+        if (rs) {
+            ui_layer_cost::note(g_draw.apiCostSample, ui_layer_cost::Site::RasterizerGetDesc,
+                                plugin_cost::ApiClass::ReadQuery);
+            rs->GetDesc(&rd);
+        }
         if (rs && rd.ScissorEnable) {
             g_draw.scCount = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+            ui_layer_cost::note(g_draw.apiCostSample, ui_layer_cost::Site::GetScissorRects,
+                                plugin_cost::ApiClass::ReadQuery);
             ctx->RSGetScissorRects(&g_draw.scCount, g_draw.sc);
             g_draw.scissorSet = g_draw.scCount > 0;
         }
@@ -1717,6 +1747,8 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
         const UiViewport o = uiLayerMapViewport(m, v, cx, cy);
         vp[i] = {o.x, o.y, o.w, o.h, o.minZ, o.maxZ};
     }
+    ui_layer_cost::note(g_draw.apiCostSample, ui_layer_cost::Site::ApplyViewports,
+                        plugin_cost::ApiClass::State);
     vScreenRSSetViewportsRaw(ctx, g_draw.vpCount, vp);
     if (g_draw.scissorSet) {
         D3D11_RECT sc[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE];
@@ -1729,9 +1761,15 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
             const UiRect o = uiLayerMapScissor(m, r, cx, cy, layerW, layerH);
             sc[i] = {o.l, o.t, o.r, o.b};
         }
+        ui_layer_cost::note(g_draw.apiCostSample, ui_layer_cost::Site::ApplyScissorRects,
+                            plugin_cost::ApiClass::State);
         ctx->RSSetScissorRects(g_draw.scCount, sc);
     }
+    ui_layer_cost::note(g_draw.apiCostSample, ui_layer_cost::Site::ApplyBlendState,
+                        plugin_cost::ApiClass::State);
     ctx->OMSetBlendState(layerBlend, factor, sampleMask);
+    ui_layer_cost::note(g_draw.apiCostSample, ui_layer_cost::Site::ApplyRenderTargets,
+                        plugin_cost::ApiClass::State);
     vScreenSetRenderTargetsRaw(ctx, 1, &target, layerDsv);
     // An original read-only view can mask its effect, while this private view
     // is writable. Preserve the raw state's potential without another query.
@@ -1838,6 +1876,7 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
 
 bool beginGuarded(ID3D11DeviceContext* ctx, int which) {
     if (!g_draw.decided || g_draw.active || !ctx) return false;
+    g_draw.apiCostSample = edvrPluginCostApiSampleContext(ctx) != 0;
     bool ok = false;
     const bool ran = guardedBudget(g_drawBudget, [&] { ok = beginInner(ctx, which); });
     if (!ran || !ok) {
@@ -1868,9 +1907,11 @@ bool beginGuarded(ID3D11DeviceContext* ctx, int which) {
         releaseSaved();
         g_draw.active = false;
         detail::g_uiLayerRedirecting = false;
+        g_draw.apiCostSample = false;
         standDown("a fault while binding the layer for a draw");
         return false;
     }
+    if (!ok) g_draw.apiCostSample = false;
     detail::g_uiLayerRedirecting = ok;
     return ok;
 }
@@ -3154,8 +3195,26 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
         // this resource was taken from.
         f.eye = knownEye >= 0 ? knownEye
                               : uiDepthEyeOfTarget(g_tc.info.resource, g_tc.info.a, g_tc.info.b, g_tc.info.fmt);
+#if defined(EDVR_VSCREEN_PREDICATE_TEST)
+        bool haveDrawTemporal = false;
+        const auto& testTemporal = g_uiLayerPredicateTestTemporalInput;
+        if (f.eye >= 0 && testTemporal.active &&
+            f.eye == static_cast<int>(testTemporal.eye)) {
+            seq = testTemporal.sequence;
+            jx = testTemporal.jx;
+            jy = testTemporal.jy;
+            sw = testTemporal.width;
+            sh = testTemporal.height;
+            haveDrawTemporal = true;
+        } else if (f.eye >= 0) {
+            haveDrawTemporal = layerDrawJitter(static_cast<uint32_t>(f.eye),
+                                               &seq, &jx, &jy, &sw, &sh);
+        }
+        if (f.eye >= 0 && haveDrawTemporal) {
+#else
         if (f.eye >= 0 &&
             layerDrawJitter(static_cast<uint32_t>(f.eye), &seq, &jx, &jy, &sw, &sh)) {
+#endif
             // The map sends the whole target onto the layer: only right when
             // the target IS the region the game submits for that eye.
             f.targetMatchesEye = !sw || !sh || (sw == g_tc.info.a && sh == g_tc.info.b);
@@ -3376,6 +3435,7 @@ void uiLayerEnd(ID3D11DeviceContext* ctx) {
     }
     releaseSaved();
     g_draw.active = false;
+    g_draw.apiCostSample = false;
     detail::g_uiLayerRedirecting = false;
 }
 
@@ -4859,5 +4919,16 @@ void uiLayerShutdown() {
                         static_cast<unsigned long long>(g_sessionRedirected));
     }
 }
+
+#if defined(EDVR_VSCREEN_PREDICATE_TEST)
+void uiLayerPredicateTestSetTemporalInput(
+    const UiLayerPredicateTestTemporalInput& input) noexcept {
+    g_uiLayerPredicateTestTemporalInput = input;
+}
+
+UiLayerPredicateTestTemporalInput uiLayerPredicateTestGetTemporalInput() noexcept {
+    return g_uiLayerPredicateTestTemporalInput;
+}
+#endif
 
 }  // namespace edvr

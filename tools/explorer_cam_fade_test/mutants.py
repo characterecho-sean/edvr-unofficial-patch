@@ -28,7 +28,7 @@ ROOT = HERE.parents[1]
 FILES = {
     "fade": ROOT / "src" / "d3d11" / "explorer_cam_fade_core.h",
     "settings": ROOT / "src" / "d3d11" / "explorer_cam_settings_core.h",
-    "glue": ROOT / "src" / "d3d11" / "explorer_cam.cpp",   # read by the rig as text (M11.p, M13.p, M14.p): the conversion of the counter, the settings cache, the motion gate
+    "glue": ROOT / "src" / "plugins" / "comfort" / "explorer_cam.cpp",   # read by the rig as text (M11.p, M13.p, M14.p): the conversion of the counter, the settings cache, the motion gate
 }
 TREE_EXTRA = [("src/d3d11/explorer_cam_core.h", ROOT / "src" / "d3d11" / "explorer_cam_core.h"),
               ("src/d3d11/explorer_cam_follow_core.h", ROOT / "src" / "d3d11" / "explorer_cam_follow_core.h")]

@@ -7,6 +7,7 @@
 #include "../common/guard.h"
 #include "../common/log.h"
 #include "perf_monitor.h"   // the compile is an event with a duration
+#include "shader_cost_sites.h"
 
 namespace edvr {
 namespace {
@@ -151,9 +152,16 @@ ID3D11VertexShader* shaderSwapCreateVs(ID3D11DeviceContext* ctx,
     // Keep published COM pointers outside SEH: a driver can fault after
     // writing an output, and /EHsc does not unwind its interrupted lambda.
     ID3D11Device* dev = nullptr;
+    const bool costSample = edvrPluginCostApiSampleContext(ctx) != 0;
     bool ran = guardedBudget(g_createBudget, [&] {
+        if (costSample) shader_cost::note(shader_cost::Site::CreateVsGetDevice,
+                                          plugin_cost::ApiClass::ReadQuery);
         ctx->GetDevice(&dev);
-        if (dev) hr = dev->CreateVertexShader(bytecode, bytecodeLen, nullptr, &out);
+        if (dev) {
+            if (costSample) shader_cost::note(shader_cost::Site::CreateVsShader,
+                                              plugin_cost::ApiClass::Work);
+            hr = dev->CreateVertexShader(bytecode, bytecodeLen, nullptr, &out);
+        }
     });
     if (dev) {
         ID3D11Device* release = dev;
@@ -187,9 +195,16 @@ ID3D11ComputeShader* shaderSwapCreateCs(ID3D11DeviceContext* ctx,
     // Keep published COM pointers outside SEH: a driver can fault after
     // writing an output, and /EHsc does not unwind its interrupted lambda.
     ID3D11Device* dev = nullptr;
+    const bool costSample = edvrPluginCostApiSampleContext(ctx) != 0;
     bool ran = guardedBudget(g_createBudget, [&] {
+        if (costSample) shader_cost::note(shader_cost::Site::CreateCsGetDevice,
+                                          plugin_cost::ApiClass::ReadQuery);
         ctx->GetDevice(&dev);
-        if (dev) hr = dev->CreateComputeShader(bytecode, bytecodeLen, nullptr, &out);
+        if (dev) {
+            if (costSample) shader_cost::note(shader_cost::Site::CreateCsShader,
+                                              plugin_cost::ApiClass::Work);
+            hr = dev->CreateComputeShader(bytecode, bytecodeLen, nullptr, &out);
+        }
     });
     if (dev) {
         ID3D11Device* release = dev;
@@ -223,9 +238,16 @@ ID3D11PixelShader* shaderSwapCreatePs(ID3D11DeviceContext* ctx,
     // Keep published COM pointers outside SEH: a driver can fault after
     // writing an output, and /EHsc does not unwind its interrupted lambda.
     ID3D11Device* dev = nullptr;
+    const bool costSample = edvrPluginCostApiSampleContext(ctx) != 0;
     bool ran = guardedBudget(g_createBudget, [&] {
+        if (costSample) shader_cost::note(shader_cost::Site::CreatePsGetDevice,
+                                          plugin_cost::ApiClass::ReadQuery);
         ctx->GetDevice(&dev);
-        if (dev) hr = dev->CreatePixelShader(bytecode, bytecodeLen, nullptr, &out);
+        if (dev) {
+            if (costSample) shader_cost::note(shader_cost::Site::CreatePsShader,
+                                              plugin_cost::ApiClass::Work);
+            hr = dev->CreatePixelShader(bytecode, bytecodeLen, nullptr, &out);
+        }
     });
     if (dev) {
         ID3D11Device* release = dev;

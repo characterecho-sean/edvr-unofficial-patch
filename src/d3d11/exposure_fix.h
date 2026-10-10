@@ -18,9 +18,9 @@
 
 #include <d3d11.h>
 
-#include <atomic>
 #include <cstdint>
 
+#include "shader_registry.h"  // compatibility: legacy exposure_fix.h users get registry APIs
 #include "../common/vtable_hook.h"  // HookMode
 
 namespace edvr {
@@ -48,30 +48,6 @@ void** exposureFixContextTable(size_t* spanOut);
 // experiments and the damper. Called on the install path (by
 // installExposureFix itself) and the reload path.
 void exposureConfigure(Config& cfg);
-
-// Records shader pointer -> bytecode hash, so a bound shader can be identified
-// when it is dispatched.
-void registerShaderHash(void* shader, uint64_t hash);
-
-// The reverse lookup, for any module that holds a shader object and wants
-// its bytecode hash -- the shader-swap arc identifies the glare train's
-// vertex and pixel shaders this way. 0 if never registered.
-uint64_t lookupShaderHash(void* shader);
-
-// How many registrations there have been: a memo of pointer -> hash asks
-// again when this moves, because a destroyed shader's address comes back as
-// another shader's (vscreen's shaderHashMemo, 2026-09-09).
-//
-// Inline over the counter itself (bumped only in exposure_fix.cpp's
-// registerShaderHash): the memo asks it on every VS and PS set, and as a
-// cross-TU call (/O2, no /GL) that was a call per set for one load. Same
-// load, same acquire ordering.
-namespace detail {
-extern std::atomic<uint32_t> g_shaderRegistryGen;
-}  // namespace detail
-inline uint32_t shaderRegistryGeneration() {
-    return detail::g_shaderRegistryGen.load(std::memory_order_acquire);
-}
 
 // Called once per frame from Present. The pairing of first and second eye is
 // only meaningful within a frame.

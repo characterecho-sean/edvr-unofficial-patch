@@ -21,6 +21,7 @@
     python tools/edvr_log.py --target frontier --route-curve --expect-build HEAD
     python tools/edvr_log.py --target steam --map-bounce --expect-build HEAD
     python tools/edvr_log.py --target steam --freezes --expect-build HEAD
+    python tools/edvr_log.py --target steam --draw-replay --expect-build HEAD
     python tools/edvr_log.py --list
 
 This is the sanctioned replacement for `Get-Content <some path> -Tail 200 |
@@ -311,6 +312,21 @@ CENSUS_END_RE = re.compile(r"^(?:\[[\d:.]+\]\s*)?DC end\b")
 CENSUS_LINES_RE = re.compile(r"\blines=(\d+)")
 CENSUS_TRUNC_RE = re.compile(r"\btruncated=(\d+)")
 
+# Cold, per-scope sampling evidence. This is an additive report row; it does
+# not replace the rounded 30 s EDVR GPU census line. IDs remain integers here
+# so this reader does not infer ownership or meaning from a moving catalog.
+PLUGIN_COST_LINE_RE = re.compile(
+    r"^(?:\[[\d:.]+\]\s*)?EDVR plugin cost v(?P<version>\d+):\s*(?P<data>.*?)\s*$")
+PLUGIN_COST_INVALID_RE = re.compile(
+    r"^(?:\[[\d:.]+\]\s*)?EDVR plugin cost invalid v(?P<version>\d+):\s*(?P<data>.*?)\s*$")
+PLUGIN_COST_UINT_RE = re.compile(r"^(?:0|[1-9]\d*)$")
+PLUGIN_COST_DECIMAL_RE = re.compile(
+    r"^(?:0|[1-9]\d*)(?:\.\d*)?(?:[eE][+-]?\d+)?$")
+PLUGIN_COST_FIELDS = frozenset((
+    "window_start_ms", "window_end_ms", "scope", "owner", "attribution",
+    "frames", "occurrences", "completed_samples", "raw_sample_ms",
+    "null_samples", "null_ms", "status"))
+
 
 def repo_root():
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -413,6 +429,85 @@ def version_line(text):
         if m:
             return line.strip(), m.group("ver"), None
     return None, None, None
+
+
+DLSS_RUNTIME_RE = re.compile(
+    r"^(?:\[[\d:.]+\]\s*)?(?P<line>dlss: runtime module\b.*)$")
+DLSS_RUNTIME_COMPLETE_RE = re.compile(
+    r"^dlss: runtime module loaded: path=.+ fileVersion="
+    r"\d+\.\d+\.\d+\.\d+$")
+
+
+def dlss_runtime_observation(text):
+    """Return the latest DLSS module observation and whether it is complete.
+
+    Older graphics logs have no such record; callers keep that distinct from
+    a current log that explicitly reports an unavailable module/version.
+    """
+    found = None
+    for raw_line in text.splitlines():
+        match = DLSS_RUNTIME_RE.match(raw_line)
+        if match:
+            found = match.group("line")
+    if found is None:
+        return None, None
+    return found, bool(DLSS_RUNTIME_COMPLETE_RE.match(found))
+
+
+def print_dlss_runtime_observation(text):
+    line, complete = dlss_runtime_observation(text)
+    if line is None:
+        print("[edvr] DLSS runtime: unavailable (record not present in this historical log)")
+    else:
+        detail = line[len("dlss: "):]
+        if complete:
+            print("[edvr] DLSS runtime: %s" % detail)
+        else:
+            # Preserve explicit unavailable details. A present but malformed
+            # or newer record is unavailable, never inferred.
+            print("[edvr] DLSS runtime: unavailable; %s" % detail)
+
+
+def print_draw_ladder_report(log_path, version, stamp):
+    """Read only sidecars whose basename is derived from this graphics log."""
+    import draw_ladder_replay
+
+    match = LOG_RE.match(os.path.basename(log_path))
+    if not match or match.group("tag").lower() != "gfx":
+        print("[edvr] --draw-replay requires a named edvr_gfx_*.log file.")
+        return 1
+
+    sidecars = draw_ladder_replay.discover_sidecars(log_path)
+    if not sidecars:
+        print("[edvr] no draw-ladder sidecar beside %s" % os.path.basename(log_path))
+        return 3
+    ok = True
+    # Bound output on sessions with many manual captures; filenames are still
+    # derived from the already-selected graphics log, never from JSON data.
+    for sidecar in sidecars[:16]:
+        try:
+            _, summary = draw_ladder_replay.read_trace(
+                sidecar, os.path.basename(log_path), stamp)
+            if version and summary["buildVersion"] != version:
+                raise draw_ladder_replay.TraceError(
+                    "sidecar version does not match the graphics log")
+            print(draw_ladder_replay.format_summary(summary, sidecar))
+            gate_failure = draw_ladder_replay.predicate_replay_gate_failure(summary)
+            if gate_failure:
+                print("[edvr] predicate replay gate failed: %s" % gate_failure)
+                ok = False
+        except draw_ladder_replay.TraceError as exc:
+            print("[edvr] BUILD MISMATCH or invalid draw-ladder sidecar: %s" % exc)
+            if "build stamp" in str(exc) or "version does not match" in str(exc):
+                return 2
+            ok = False
+        except (OSError, ValueError) as exc:
+            print("[edvr] draw-ladder sidecar rejected: %s" % exc)
+            ok = False
+    if len(sidecars) > 16:
+        print("[edvr] %d additional capture(s) omitted from this bounded report" %
+              (len(sidecars) - 16))
+    return 0 if ok else 1
 
 
 def describe_cmd(ref, root):
@@ -537,6 +632,233 @@ def tally_vh(draws, frame=None):
         })
     rows.sort(key=lambda r: (-r["count"], r["vh"] or ""))
     return rows, len(eye), off_total
+
+
+def _plugin_cost_tokens(data, line_no, errors, expected=PLUGIN_COST_FIELDS):
+    """Parse strict key=value tokens; rows are versioned and closed-schema."""
+    fields = {}
+    for token in data.split():
+        if "=" not in token:
+            errors.append("line %d: malformed plugin-cost token %r" % (line_no, token))
+            continue
+        key, value = token.split("=", 1)
+        if not key or not value:
+            errors.append("line %d: empty plugin-cost key/value in %r" % (line_no, token))
+        elif key in fields:
+            errors.append("line %d: duplicate plugin-cost field %s" % (line_no, key))
+        else:
+            fields[key] = value
+    missing = expected - set(fields)
+    extra = set(fields) - expected
+    if missing:
+        errors.append("line %d: plugin-cost row missing fields %s" %
+                      (line_no, ",".join(sorted(missing))))
+    if extra:
+        errors.append("line %d: plugin-cost row has unknown fields %s" %
+                      (line_no, ",".join(sorted(extra))))
+    return fields
+
+
+def _plugin_cost_uint(fields, key, line_no, errors):
+    value = fields.get(key)
+    if value is None or not PLUGIN_COST_UINT_RE.match(value):
+        errors.append("line %d: plugin-cost %s is not an unsigned integer" %
+                      (line_no, key))
+        return None
+    number = int(value)
+    if number > 0xFFFFFFFFFFFFFFFF:
+        errors.append("line %d: plugin-cost %s exceeds uint64" % (line_no, key))
+        return None
+    return number
+
+
+def _plugin_cost_decimal(fields, key, line_no, errors):
+    value = fields.get(key)
+    if value is None or not PLUGIN_COST_DECIMAL_RE.match(value):
+        errors.append("line %d: plugin-cost %s is not a nonnegative decimal" %
+                      (line_no, key))
+        return None
+    number = float(value)
+    if not math.isfinite(number):
+        errors.append("line %d: plugin-cost %s is nonfinite" % (line_no, key))
+        return None
+    return number
+
+
+def _plugin_cost_invalid_row(data, line_no, errors):
+    required = {"window_start_ms", "window_end_ms", "scope", "owner",
+                "attribution", "reason"}
+    fields = _plugin_cost_tokens(data, line_no, errors, required)
+    if set(fields) != required:
+        errors.append("line %d: invalid diagnostic fields do not match v1" % line_no)
+        return None
+    row = {key: _plugin_cost_uint(fields, key, line_no, errors)
+           for key in ("window_start_ms", "window_end_ms", "scope", "owner", "attribution")}
+    row["reason"] = fields.get("reason")
+    if row["reason"] not in ("sample-counter-regressed", "sample-ms-regressed",
+                              "sample-ms-nonfinite", "sample-ms-without-samples",
+                              "null-counter-regressed", "null-ms-regressed",
+                              "null-ms-nonfinite", "null-ms-without-samples"):
+        errors.append("line %d: unknown plugin-cost invalid reason" % line_no)
+    if row["window_start_ms"] is not None and row["window_end_ms"] is not None and \
+            row["window_end_ms"] < row["window_start_ms"]:
+        errors.append("line %d: plugin-cost invalid window ends before it starts" % line_no)
+    return row
+
+
+def parse_plugin_cost(text):
+    """Parse cold plugin-cost v1 rows grouped by completion window.
+
+    The counters describe occurrences and completed sample totals attributed to
+    a report window. They do not join a sample to a particular occurrence.
+    Unknown schema versions and invalid-diagnostic rows are fail-closed.
+    """
+    groups = {}
+    errors = []
+    invalid = []
+    recognized = 0
+    for line_no, raw in enumerate(text.splitlines(), 1):
+        body = re.sub(r"^\[[\d:.]+\]\s*", "", raw)
+        if body.startswith("EDVR plugin cost invalid v"):
+            recognized += 1
+            m = PLUGIN_COST_INVALID_RE.match(raw)
+            if not m:
+                errors.append("line %d: malformed plugin-cost invalid diagnostic" % line_no)
+                continue
+            if m.group("version") != "1":
+                errors.append("line %d: unsupported plugin-cost invalid schema v%s" %
+                              (line_no, m.group("version")))
+                continue
+            row = _plugin_cost_invalid_row(m.group("data"), line_no, errors)
+            if row is not None:
+                row["line"] = line_no
+                row["raw"] = raw
+                invalid.append(row)
+            continue
+        if body.startswith("EDVR plugin cost v"):
+            recognized += 1
+            m = PLUGIN_COST_LINE_RE.match(raw)
+            if not m:
+                errors.append("line %d: malformed plugin-cost row" % line_no)
+                continue
+            if m.group("version") != "1":
+                errors.append("line %d: unsupported plugin-cost schema v%s" %
+                              (line_no, m.group("version")))
+                continue
+            fields = _plugin_cost_tokens(m.group("data"), line_no, errors)
+            row = {}
+            for key in ("window_start_ms", "window_end_ms", "scope", "owner",
+                        "attribution", "frames", "occurrences", "completed_samples",
+                        "null_samples"):
+                row[key] = _plugin_cost_uint(fields, key, line_no, errors)
+            row["raw_sample_ms"] = _plugin_cost_decimal(fields, "raw_sample_ms", line_no, errors)
+            row["null_ms"] = _plugin_cost_decimal(fields, "null_ms", line_no, errors)
+            row["status"] = fields.get("status")
+            if row["status"] not in ("measured", "unmeasured", "uncalibrated", "null-floor"):
+                errors.append("line %d: unknown plugin-cost status" % line_no)
+            if None in (row["window_start_ms"], row["window_end_ms"],
+                        row["completed_samples"], row["null_samples"],
+                        row["raw_sample_ms"], row["null_ms"]):
+                continue
+            if row["window_end_ms"] < row["window_start_ms"]:
+                errors.append("line %d: plugin-cost window ends before it starts" % line_no)
+                continue
+            if (row["completed_samples"] == 0 and row["raw_sample_ms"] != 0.0) or \
+                    (row["null_samples"] == 0 and row["null_ms"] != 0.0):
+                errors.append("line %d: plugin-cost sample sum is nonzero with zero samples" % line_no)
+                continue
+            samples, null_samples = row["completed_samples"], row["null_samples"]
+            if samples == 0:
+                expected_status = "unmeasured"
+            elif null_samples == 0:
+                expected_status = "uncalibrated"
+            elif row["raw_sample_ms"] / samples <= row["null_ms"] / null_samples:
+                expected_status = "null-floor"
+            else:
+                expected_status = "measured"
+            if row["status"] != expected_status:
+                errors.append("line %d: plugin-cost status %s disagrees with sample calibration (%s)" %
+                              (line_no, row["status"], expected_status))
+                continue
+            if None in (row["scope"], row["owner"], row["attribution"],
+                        row["frames"], row["occurrences"]):
+                continue
+            key = (row["window_start_ms"], row["window_end_ms"])
+            group = groups.setdefault(key, {"frames": row["frames"], "rows": []})
+            if group["frames"] != row["frames"]:
+                errors.append("line %d: plugin-cost rows disagree on frames for window %s" %
+                              (line_no, key))
+                continue
+            if any(existing["scope"] == row["scope"] for existing in group["rows"]):
+                errors.append("line %d: duplicate plugin-cost scope %d in window %s" %
+                              (line_no, row["scope"], key))
+                continue
+            row["line"] = line_no
+            group["rows"].append(row)
+    windows = []
+    for (start, end), group in sorted(groups.items()):
+        windows.append({"window_start_ms": start, "window_end_ms": end,
+                        "frames": group["frames"],
+                        "rows": sorted(group["rows"], key=lambda r: (r["owner"], r["scope"]))})
+    return {"recognized_lines": recognized, "windows": windows,
+            "invalid": invalid, "errors": errors}
+
+
+def print_plugin_cost(text):
+    """Read cold per-scope raw sample evidence without making a latency claim."""
+    parsed = parse_plugin_cost(text)
+    print("\n== plugin cost (cold per-scope sample totals; completion window, not invocation cohort) ==")
+    print("occurrences are helper attempts; scope/owner/attribution IDs stay raw and are not merged")
+    if not parsed["recognized_lines"]:
+        print("no plugin-cost v1 rows (no instrument evidence; absent scopes are not zero)")
+        return 3
+    if parsed["errors"]:
+        for error in parsed["errors"]:
+            print("ERROR: %s" % error)
+    for bad in parsed["invalid"]:
+        print("ERROR: line %d: writer rejected scope %d (owner %d, attribution %d): %s" %
+              (bad["line"], bad["scope"], bad["owner"], bad["attribution"], bad["reason"]))
+    for window in parsed["windows"]:
+        print("WINDOW %d..%d ms frames=%d scopes=%d; counts/samples belong to this completion window" %
+              (window["window_start_ms"], window["window_end_ms"], window["frames"], len(window["rows"])))
+        for row in window["rows"]:
+            samples, null_samples = row["completed_samples"], row["null_samples"]
+            raw_mean = row["raw_sample_ms"] / samples if samples else None
+            null_mean = row["null_ms"] / null_samples if null_samples else None
+            corrected = max(0.0, raw_mean - null_mean) if raw_mean is not None and null_mean is not None else None
+            per_frame = (corrected * row["occurrences"] / row["frames"]
+                         if corrected is not None and row["frames"] > 0 and row["occurrences"] > 0 else None)
+            occ_rate = (row["occurrences"] / float(row["frames"])
+                        if row["frames"] > 0 else None)
+            raw_text = "n/a" if raw_mean is None else "%.17g" % (raw_mean * 1000.0)
+            null_text = "n/a" if null_mean is None else "%.17g" % (null_mean * 1000.0)
+            corrected_text = "n/a" if corrected is None else "%.17g" % (corrected * 1000.0)
+            rate_text = "n/a" if occ_rate is None else "%.17g" % occ_rate
+            if row["frames"] == 0:
+                estimate_note = "per-frame unavailable (zero frames)"
+            elif row["occurrences"] == 0:
+                estimate_note = "per-frame unavailable (zero completion-window occurrences; samples may be late completions)"
+            elif corrected is None:
+                estimate_note = "per-frame unavailable (no corrected sampled-helper mean)"
+            else:
+                estimate_note = "sampled-helper estimate %.17g ms/frame; not accepted-work latency" % per_frame
+            if row["status"] == "null-floor":
+                estimate_note += "; null-floor does not mean zero GPU work"
+            print("  scope=%d owner=%d attribution=%d frames=%d occurrences=%d occ/frame=%s "
+                  "completed_samples=%d raw_sample_ms=%.17g raw_mean_us/sample=%s "
+                  "null_samples=%d null_ms=%.17g null_mean_us/sample=%s "
+                  "corrected_sampled_helper_mean_us=%s status=%s; %s" %
+                  (row["scope"], row["owner"], row["attribution"], row["frames"],
+                   row["occurrences"], rate_text, samples, row["raw_sample_ms"], raw_text,
+                   null_samples, row["null_ms"], null_text, corrected_text,
+                   row["status"], estimate_note))
+    if parsed["invalid"]:
+        print("partial scope totals rejected by writer diagnostics; no missing scope is inferred to be zero")
+    elif not parsed["windows"]:
+        print("no valid plugin-cost rows")
+    else:
+        print("rows are sample evidence only; scopes with no row are absent, not measured zero")
+    return 1 if parsed["errors"] or parsed["invalid"] or not parsed["windows"] else 0
 
 
 def print_vh_tally(text, frame):
@@ -9551,7 +9873,10 @@ def main(argv=None):
     ap.add_argument("--list", action="store_true",
                     help="list the logs found and stop")
     ap.add_argument("--version", action="store_true",
-                    help="print the log's version line and stop")
+                    help="print the log's build identity and graphics-log DLSS runtime observation, then stop")
+    ap.add_argument("--draw-replay", action="store_true",
+                    help="read the selected graphics log's derived draw-ladder sidecars; "
+                         "validates observed selector/action order, not hidden predicate parity")
     ap.add_argument("--expect-build", default=None,
                     help="a git ref (HEAD) or literal version; exit 2 if the "
                          "log was not written by that build")
@@ -9631,6 +9956,8 @@ def main(argv=None):
                          "STOP, 3 when the log has no route line")
     ap.add_argument("--map-bounce", action="store_true",
                     help="report issue 65's flat constant-buffer Map bounce: 5 s summaries, adaptive decision, verification and fail-safe trips; PASS / WARN / STOP, exit 3 when the instrument never ran")
+    ap.add_argument("--plugin-cost", action="store_true",
+                    help="report cold per-scope plugin-cost v1 samples (completion-window totals, not matched invocation latency); exit 3 when no rows are present")
     ap.add_argument("--freezes", action="store_true",
                     help="report a flight's freeze diagnostics (issue 63): the graphics log's "
                          "FREEZE lines (a frame of 250 ms or more, never rate limited) joined "
@@ -9698,6 +10025,15 @@ def main(argv=None):
               "its runtime log itself; drop --tag %s." % args.tag)
         return 1
 
+    if args.plugin_cost and not args.file and args.tag.lower() != "gfx":
+        print("[edvr] --plugin-cost reads a graphics log (--tag gfx); drop "
+              "--tag %s." % args.tag)
+        return 1
+
+    if args.draw_replay and args.tag.lower() != "gfx":
+        print("[edvr] --draw-replay reads sidecars associated with a graphics log; use --tag gfx.")
+        return 1
+
     native_dirs = None
     if args.file:
         path = os.path.abspath(args.file)
@@ -9763,7 +10099,16 @@ def main(argv=None):
             return 2
 
     if args.version:
+        selected = LOG_RE.match(os.path.basename(path))
+        if selected and selected.group("tag").lower() == "gfx":
+            print_dlss_runtime_observation(text)
         return 0
+
+    if args.draw_replay:
+        return print_draw_ladder_report(path, ver, stamp)
+
+    if args.plugin_cost:
+        return print_plugin_cost(text)
 
     if args.vscreen_fit:
         return print_vscreen_fit(text)
@@ -9931,6 +10276,23 @@ def self_test():
         print("version_line matched prose: %r" % ver3)
         ok = False
 
+    dlss_complete = ("[00:00:01.000] dlss: runtime module loaded: "
+                     "path=C:\\NVIDIA\\nvngx_dlss.dll fileVersion=3.7.0.12\n")
+    line, complete = dlss_runtime_observation(dlss_complete)
+    if not line or not complete or "fileVersion=3.7.0.12" not in line:
+        print("DLSS complete observation -> %r %r" % (line, complete))
+        ok = False
+    dlss_unavailable = ("[00:00:02.000] dlss: runtime module unavailable "
+                        "(nvngx_dlss.dll is not already loaded); actual file version unavailable\n")
+    line, complete = dlss_runtime_observation(dlss_unavailable)
+    if not line or complete:
+        print("DLSS explicit unavailable observation -> %r %r" % (line, complete))
+        ok = False
+    line, complete = dlss_runtime_observation("historical graphics log\n")
+    if line is not None or complete is not None:
+        print("DLSS absent historical observation -> %r %r" % (line, complete))
+        ok = False
+
     native = ("2026-09-13 14:01:42.659 UTC pid=1234 tid=5678 "
               "module_init,version=v0.16.2-77-gab80a6c-dirty,durable_log=1")
     native2 = native.replace("14:01:42.659", "14:01:43.001")
@@ -9980,9 +10342,13 @@ def self_test():
                 # With the timestamp prefix Log::note() really writes: a
                 # fixture without it is what hid a regex that matched
                 # nothing in the field.
+                observation = ("[00:00:01.000] dlss: runtime module loaded: "
+                               "path=C:\\NVIDIA\\nvngx_dlss.dll fileVersion=3.7.0.12\n"
+                               if stamp_s == "20260910_050000" else "")
                 f.write(("[00:00:00.001] version 0.14.1-93-gf78eba4 "
                          "(build 68C0A1F2) -- this DLL was linked "
                          "2026-09-09 20:34:39 UTC\n"
+                         + observation +
                          "[00:00:12.400] Stats[40] ships 3\n"
                          "[00:00:12.400] Stats[41] ships 0\n"
                          "[00:00:12.401] something else\n").encode("utf-8"))
@@ -10064,8 +10430,35 @@ def self_test():
         os.remove(newer_native)
 
         newest = os.path.join(logs, "edvr_gfx_20260910_050000.log")
-        if main(["--file", newest, "--version"]) != 0:
-            print("--version on a good log did not exit 0")
+        import contextlib
+        import io
+
+        def version_report(path):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code = main(["--file", path, "--version"])
+            return code, output.getvalue()
+
+        rc, output = version_report(newest)
+        if rc != 0 or "DLSS runtime: runtime module loaded:" not in output \
+                or "fileVersion=3.7.0.12" not in output:
+            print("--version did not report a complete DLSS observation (rc=%d):\n%s"
+                  % (rc, output))
+            ok = False
+        historical = os.path.join(logs, "edvr_gfx_20260910_040000.log")
+        rc, output = version_report(historical)
+        if rc != 0 or "unavailable (record not present in this historical log)" not in output:
+            print("--version did not label the absent historical observation (rc=%d):\n%s"
+                  % (rc, output))
+            ok = False
+        unavailable_path = os.path.join(tmp, "edvr_gfx_20260910_055900.log")
+        with open(unavailable_path, "wb") as f:
+            f.write(("[00:00:00.001] version 0.14.1-93-gf78eba4 (build 68C0A1F2)\n" +
+                     dlss_unavailable).encode("utf-8"))
+        rc, output = version_report(unavailable_path)
+        if rc != 0 or "DLSS runtime: unavailable; runtime module unavailable" not in output:
+            print("--version did not report explicit DLSS unavailability (rc=%d):\n%s"
+                  % (rc, output))
             ok = False
         # The exit code a caller keys off: 2, distinct from 1.
         rc = main(["--file", newest, "--expect-build",
@@ -10217,6 +10610,8 @@ def self_test():
 
     if not self_test_periodic():
         ok = False
+    if not self_test_plugin_cost():
+        ok = False
     if not self_test_camera_census():
         ok = False
     if not self_test_maps_sharp():
@@ -10237,6 +10632,55 @@ def self_test():
         ok = False
     if not self_test_terrain_checkerboard():
         ok = False
+    import draw_ladder_replay
+    if draw_ladder_replay.self_test() != 0:
+        ok = False
+    # Exercise the actual --draw-replay report return code: old schema remains
+    # readable, while unknown facts and supported mismatches fail closed.
+    import contextlib
+    import io
+    import shutil
+    replay_dir = tempfile.mkdtemp(prefix="edvr_draw_replay_gate_")
+    try:
+        log_path = os.path.join(replay_dir, "edvr_gfx_20261001_010203.log")
+        sidecar_path = os.path.join(
+            replay_dir, "edvr_gfx_20261001_010203.draw-ladder-12.json")
+        scenarios = []
+        legacy = draw_ladder_replay._fixture()
+        legacy["schemaVersion"] = 1
+        legacy.pop("predicateFactVersion")
+        for draw in legacy["draws"]:
+            draw.pop("predicateFacts")
+        legacy_summary = draw_ladder_replay.validate_trace(legacy)
+        scenarios.append(("legacy v1", legacy_summary, 0, "unavailable"))
+        for status in ("unreplayable", "mismatch", "mutation-unobserved"):
+            failed_summary = dict(legacy_summary)
+            failed_summary["predicateReplay"] = {
+                "status": status, "factCount": 1, "replayed": 0,
+                "unreplayable": int(status == "unreplayable"),
+                "mismatches": int(status == "mismatch"),
+                "mutationUnobserved": int(status == "mutation-unobserved"),
+                "predicateFactVersion": 0, "nightVisionStatus": "unavailable-v1",
+                "nightVisionFacts": 0, "nightVisionReplayed": 0,
+                "nightVisionUnreplayable": 0, "nightVisionMismatches": 0}
+            scenarios.append((status, failed_summary, 1, "gate failed"))
+        original_read_trace = draw_ladder_replay.read_trace
+        for label, summary, want, output_token in scenarios:
+            with open(sidecar_path, "w", encoding="utf-8") as stream:
+                stream.write("{}")
+            draw_ladder_replay.read_trace = lambda *args, _summary=summary, **kwargs: ({}, _summary)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                got = print_draw_ladder_report(log_path, "fixture", "1234ABCD")
+            if got != want or output_token not in output.getvalue():
+                print("--draw-replay %s -> %r, output %r" %
+                      (label, got, output.getvalue()))
+                ok = False
+        draw_ladder_replay.read_trace = original_read_trace
+    finally:
+        if 'original_read_trace' in locals():
+            draw_ladder_replay.read_trace = original_read_trace
+        shutil.rmtree(replay_dir, ignore_errors=True)
     if not self_test_pose():
         ok = False
 
@@ -10632,7 +11076,8 @@ def self_test_flat_upscale():
     else:
         fail("src\\common\\vr_supersample_notice.h is not where the self-test looks for it (%s)" % header)
     if os.path.isfile(vscreen):
-        if adopt_prefix.replace("%ux%u", "%ux%u") not in read_text(vscreen).replace("\"\n                \"", ""):
+        adoption_source = re.sub(r'"\r?\n[ \t]*"', "", read_text(vscreen))
+        if adopt_prefix not in adoption_source:
             fail("src\\d3d11\\vscreen.cpp's adoption line is not the text this reader parses")
     notice = ("[09:30:12.100] " + (notice_prefix % (2112, 2304, 75, 2816, 3072)) + "Elite's Supersampling is below 1 (an upscaler in the chain reads the same). EDVR's DLSS then upscales an "
               "image that is already upscaled, which softens the world and the holograms. Set Elite's Supersampling to 1 and raise HMD Image Quality instead: EDVR's DLSS upscales from that. "
@@ -13108,6 +13553,169 @@ def self_test_periodic():
         ok = False
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+    return ok
+
+
+def self_test_plugin_cost():
+    """Pin the cold v1 rows, calibration states, fail-closed parser and CLI."""
+    import contextlib
+    import io
+    import shutil
+    ok = True
+
+    def check(condition, label):
+        nonlocal ok
+        if not condition:
+            print("plugin-cost: FAIL: %s" % label)
+            ok = False
+
+    def row(start=100, end=200, scope=7, owner=2, attribution=2,
+            frames=10, occurrences=5, samples=2, raw="0.008",
+            null_samples=2, null_ms="0.002", status="measured"):
+        return ("EDVR plugin cost v1: window_start_ms=%s window_end_ms=%s "
+                "scope=%s owner=%s attribution=%s frames=%s occurrences=%s "
+                "completed_samples=%s raw_sample_ms=%s null_samples=%s "
+                "null_ms=%s status=%s" %
+                (start, end, scope, owner, attribution, frames, occurrences,
+                 samples, raw, null_samples, null_ms, status))
+
+    measured = row(scope=4000000000, owner=3000000000, attribution=77)
+    late_floor = row(scope=8, occurrences=0, samples=1, raw="0.001",
+                     null_samples=1, null_ms="0.002", status="null-floor")
+    zero_frames = row(start=200, end=300, scope=9, frames=0, occurrences=4,
+                      samples=1, raw="0.003", null_samples=0, null_ms="0",
+                      status="uncalibrated")
+    unmeasured = row(start=300, end=400, scope=10, frames=7, occurrences=1,
+                     samples=0, raw="0", null_samples=0, null_ms="0",
+                     status="unmeasured")
+    fixture = "\n".join(("[00:00:01.000] " + measured,
+                         "[00:00:01.000] " + late_floor,
+                         "[00:00:02.000] " + zero_frames,
+                         "[00:00:03.000] " + unmeasured))
+    parsed = parse_plugin_cost(fixture)
+    check(not parsed["errors"] and len(parsed["windows"]) == 3,
+          "three complete windows parse without errors")
+    if len(parsed["windows"]) == 3:
+        first = parsed["windows"][0]
+        rows = {r["scope"]: r for r in first["rows"]}
+        check(first["frames"] == 10 and set(rows) == {8, 4000000000},
+              "window groups by start/end, checks shared frames and retains future raw IDs")
+        check(rows[4000000000]["owner"] == 3000000000 and
+              rows[4000000000]["attribution"] == 77 and
+              rows[8]["occurrences"] == 0 and rows[8]["completed_samples"] == 1,
+              "IDs remain uninterpreted and late sample completion preserves zero occurrences")
+        check(rows[8]["status"] == "null-floor" and
+              parsed["windows"][1]["frames"] == 0 and
+              parsed["windows"][2]["rows"][0]["status"] == "unmeasured",
+              "null-floor, zero-frame and unmeasured states are distinct")
+    capture = io.StringIO()
+    with contextlib.redirect_stdout(capture):
+        rc = print_plugin_cost(fixture)
+    output = capture.getvalue()
+    check(rc == 0 and "corrected_sampled_helper_mean_us=3 status=measured" in output and
+          "not accepted-work latency" in output and
+          "does not mean zero GPU work" in output and
+          "samples may be late completions" in output and
+          "per-frame unavailable (zero frames)" in output,
+          "report labels sampled helper mean and unavailable frame estimates")
+
+    bad_prefix = ("EDVR plugin cost invalid v1: window_start_ms=100 "
+                  "window_end_ms=200 scope=11 owner=3 attribution=0 "
+                  "reason=sample-counter-regressed")
+    parsed_bad = parse_plugin_cost(measured + "\n" + bad_prefix)
+    with contextlib.redirect_stdout(io.StringIO()):
+        bad_rc = print_plugin_cost(measured + "\n" + bad_prefix)
+    check(bad_rc == 1 and len(parsed_bad["invalid"]) == 1 and
+          len(parsed_bad["windows"]) == 1,
+          "writer invalid diagnostic fails closed even beside valid rows")
+    for reason in ("sample-counter-regressed", "sample-ms-regressed",
+                   "sample-ms-nonfinite", "sample-ms-without-samples",
+                   "null-counter-regressed", "null-ms-regressed",
+                   "null-ms-nonfinite", "null-ms-without-samples"):
+        diagnostic = bad_prefix.replace("sample-counter-regressed", reason)
+        parsed_diagnostic = parse_plugin_cost(diagnostic)
+        check(not parsed_diagnostic["errors"] and len(parsed_diagnostic["invalid"]) == 1,
+              "accepts writer coherence diagnostic %s" % reason)
+
+    mutations = [
+        (measured.replace(" status=measured", ""), "missing field"),
+        (measured.replace("raw_sample_ms=0.008", "raw_sample_ms=nan"), "nonfinite decimal"),
+        (measured.replace("occurrences=5", "occurrences=-1"), "negative counter"),
+        (measured.replace("null_samples=2", "null_samples=0"), "status calibration mismatch"),
+        (measured.replace("frames=10", "frames=10 scope=12"), "malformed token"),
+        (measured.replace("window_end_ms=200", "window_end_ms=99"), "reversed window"),
+        (measured.replace("window_end_ms=200", "window_end_ms=200 completed_samples=2"), "duplicate field"),
+        (measured.replace("status=measured", "status=estimated"), "unknown status"),
+    ]
+    for mutated, label in mutations:
+        check(bool(parse_plugin_cost(mutated)["errors"]), "rejects %s" % label)
+
+    duplicate = parse_plugin_cost(measured + "\n" + measured)
+    check(any("duplicate plugin-cost scope" in e for e in duplicate["errors"]),
+          "rejects duplicate scope in a completion window")
+    mismatch = row(scope=8, frames=11, occurrences=1)
+    parsed_mismatch = parse_plugin_cost(measured + "\n" + mismatch)
+    check(any("disagree on frames" in e for e in parsed_mismatch["errors"]),
+          "rejects incoherent frames within one window")
+    parsed_future = parse_plugin_cost(measured.replace("v1:", "v2:"))
+    check(any("unsupported plugin-cost schema v2" in e for e in parsed_future["errors"]),
+          "rejects unknown schema version")
+    near_floor = row(scope=11, frames=1, occurrences=1, samples=1,
+                     raw="1.0000000000001", null_samples=1, null_ms="1",
+                     status="measured")
+    parsed_near_floor = parse_plugin_cost(near_floor)
+    check(not parsed_near_floor["errors"] and
+          parsed_near_floor["windows"][0]["rows"][0]["status"] == "measured",
+          "round-trip decimal precision preserves a measured value just above null floor")
+    capture = io.StringIO()
+    with contextlib.redirect_stdout(capture):
+        near_rc = print_plugin_cost(near_floor)
+    check(near_rc == 0 and "raw_sample_ms=1.0000000000000999" in capture.getvalue() and
+          "corrected_sampled_helper_mean_us=" in capture.getvalue() and
+          "status=measured" in capture.getvalue(),
+          "report preserves round-trip sample precision at the null-floor boundary")
+    exponent = row(scope=12, frames=1, occurrences=1, samples=1,
+                   raw="1.0000000000001e+0", null_samples=1, null_ms="1e0",
+                   status="measured")
+    check(not parse_plugin_cost(exponent)["errors"],
+          "accepts finite scientific-notation decimals from round-trip serialization")
+    emitted_exponent = row(scope=13, frames=1, occurrences=1, samples=1,
+                           raw="1E+05", null_samples=1,
+                           null_ms="9.6000000000000002E-05", status="measured")
+    check(not parse_plugin_cost(emitted_exponent)["errors"],
+          "accepts printf zero-padded exponents and uppercase scientific notation")
+    for value, label in (("1e", "empty exponent"), ("1e+", "empty signed exponent"),
+                         ("1e+-5", "malformed exponent sign"),
+                         ("1e999", "nonfinite exponent overflow"),
+                         ("+1", "signed mantissa"), (".1", "missing integer mantissa"),
+                         ("01", "leading-zero mantissa")):
+        malformed_decimal = measured.replace("raw_sample_ms=0.008",
+                                             "raw_sample_ms=" + value)
+        check(bool(parse_plugin_cost(malformed_decimal)["errors"]),
+              "rejects %s" % label)
+    leading_zero_uint = measured.replace("occurrences=5", "occurrences=05")
+    check(bool(parse_plugin_cost(leading_zero_uint)["errors"]),
+          "still rejects leading-zero unsigned integer fields")
+    no_data = parse_plugin_cost("ordinary flight log line\n")
+    with contextlib.redirect_stdout(io.StringIO()):
+        no_data_rc = print_plugin_cost("ordinary flight log line\n")
+    check(no_data_rc == 3 and not no_data["windows"],
+          "returns unavailable when the log has no plugin-cost evidence")
+
+    tmp = tempfile.mkdtemp(prefix="edvr_plugin_cost_test_")
+    try:
+        path = os.path.join(tmp, "edvr_gfx_20261007_010203.log")
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write("[00:00:00.001] version test-build (build 1234ABCD)\n")
+            f.write("[00:00:01.000] " + measured + "\n")
+        capture = io.StringIO()
+        with contextlib.redirect_stdout(capture):
+            cli_rc = main(["--file", path, "--plugin-cost"])
+        check(cli_rc == 0 and "== plugin cost" in capture.getvalue(),
+              "--plugin-cost dispatches through the exact-file CLI")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("plugin-cost: %s" % ("PASS" if ok else "FAILED"))
     return ok
 
 

@@ -1,4 +1,4 @@
-// The splash's recogniser, run for real (src/d3d11/intro_curve.cpp; src/d3d11/intro_curve_math.h; docs/intro-video.md, job 3).
+// The splash's recogniser, run for real (src/plugins/intro/intro_curve.cpp; src/d3d11/intro_curve_math.h; docs/intro-video.md, job 3).
 //
 // With fix.panel_curvature above 0 the splash is drawn as a bent strip in place of the game's flat quad. The splash is the SAME composite as the
 // intro movie (VS EF103A7CB4A8369A, six indices) with the game's own world-space placement in VS b2, so the module has to tell, from the shape of a
