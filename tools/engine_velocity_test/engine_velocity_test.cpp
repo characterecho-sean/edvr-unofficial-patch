@@ -55,6 +55,9 @@
 #include "actual_vs_link_test.h"
 #include "lifecycle_tests.h"
 #include "flat_lazy_tests.h"
+#ifdef EDVR_ENGINE_VELOCITY_REAL_COST_RIG
+#include "flat_real_cost_tests.h"
+#endif
 #include "flat_domain_tests.h"
 #include "source_free_tests.h"
 #include "pin_tests.h"
@@ -67,12 +70,15 @@
 
 using Microsoft::WRL::ComPtr;
 
+#ifndef EDVR_ENGINE_VELOCITY_REAL_COST_RIG
 namespace edvr::plugin_cost::detail { thread_local bool g_apiSampleHint = false; }
+#endif
 
 namespace flat_lazy_tests {
 ApiProbe g_apiProbe;
 }
 
+#ifndef EDVR_ENGINE_VELOCITY_REAL_COST_RIG
 extern "C" uint8_t edvrPluginCostApiSampleContext(const void* context) noexcept {
     auto& probe = flat_lazy_tests::g_apiProbe;
     ++probe.verifierCalls;
@@ -100,6 +106,7 @@ extern "C" void edvrPluginCostNoteD3dCall(uint8_t owner, uint16_t siteId, uint8_
     if (probe.noteCount < probe.noteOrder.size())
         probe.noteOrder[probe.noteCount++] = siteId;
 }
+#endif
 
 namespace flat_lazy_tests {
 void apiProbeThreadRejection(const lifecycle_tests::Harness& h) {
@@ -360,6 +367,11 @@ int wmain(int argc, wchar_t** argv) {
     check(SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &device,
                                       &level, &context)), "D3D11CreateDevice WARP");
     check(level >= D3D_FEATURE_LEVEL_11_0, "feature level 11");
+#ifdef EDVR_ENGINE_VELOCITY_REAL_COST_RIG
+    flat_real_cost_tests::run({device.Get(), context.Get(), &check});
+    std::printf("engine_velocity_cost_test: %u checks passed.\n", g_checks);
+    return 0;
+#endif
     constexpr uint64_t shellVs = 0xBFE51414CC3024B4ull;
     constexpr uint64_t shellPs = 0xDB79AE788E049DFDull;
     constexpr uint64_t edgeVs = 0xDE545DC8EE4FBB87ull;
@@ -466,9 +478,11 @@ int wmain(int argc, wchar_t** argv) {
     lifecycle_tests::run({device.Get(), context.Get(), &check});
     const auto flatRuntimeSource = readFile(L"src/d3d11/flat_runtime.cpp");
     const auto engineVelocitySource = readFile(L"src/d3d11/engine_velocity.cpp");
+    const auto flatPolicySource = readFile(L"src/d3d11/flat_substitution.h");
     flat_lazy_tests::otherDrawWiringTests({device.Get(), context.Get(), &check},
         std::string(flatRuntimeSource.begin(), flatRuntimeSource.end()),
-        std::string(engineVelocitySource.begin(), engineVelocitySource.end()));
+        std::string(engineVelocitySource.begin(), engineVelocitySource.end()),
+        std::string(flatPolicySource.begin(), flatPolicySource.end()));
     flat_lazy_tests::run({device.Get(), context.Get(), &check});
     flat_domain_tests::run({device.Get(), context.Get(), &check});
     source_free_tests::run({device.Get(), context.Get(), &check});

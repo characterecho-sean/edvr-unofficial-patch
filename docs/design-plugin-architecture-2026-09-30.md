@@ -12,22 +12,24 @@
   generated manifests/config ownership, subscription-driven dispatch and a
   C-compatible interface. The add-on tier follows Phase 1. Graphics-only VR is
   a separate phase; existing supported settings remain owned by one plugin.
-- **Current integration:** main `7960f016` is merged at feature commit
-  `9c5d3a4a`; upstream fixes and retirements remain in place. The next offline
-  slice closes plugin-cost windows after menu, binding, exposure and vScreen
-  work in the shared owned-Present path, including flat and unavailable-menu
-  cases. API cadence follows Presents; VR CPU observations require the menu
-  clock to advance. Validated flat domain entry now accounts for sampled held
-  restores. Independent flat-bypass replay checks literal call arguments.
-  Focused collector and EngineVelocity WARP gates pass. Full validation passes
-  155 jobs, config/export/installer gates and receipt `1a4198c5`. Git
-  stays on `codex/plugin-architecture`.
+- **Current integration:** main `7960f016` is merged at `9c5d3a4a`; the guarded
+  Present collector/domain/replay checkpoint is pushed at `55bd3ae8`. Runtime
+  flat restore causes now select sampled accounting after the existing owner
+  and exact-context gates; actual owed restores remain attributable after
+  engine stand-down. Direct NoApi and abandon behavior remain intact. A
+  separate WARP variant links the real collector and verifies physical restore
+  calls in the sampled 1800-frame window. Runtime caller routing remains
+  source-pinned; this does not establish full-frame held-event cost. Normal
+  WARP, collector, strict boundary and real-backend gates pass. Full validation
+  passes 156 jobs, config/export/installer gates and receipt `44fba17c`.
+  Git stays on `codex/plugin-architecture`.
 - **Historical gates:** the previous candidate passes 149 jobs and installer
   checks, 344 focused census checks and 17 scoped assembly gates. Its
   main-based control `405b14cd` passes 129 jobs. Those source/assembly receipts
   and the 814 caller diagnostic are historical after this merge; none establish
-  new-tree correctness or performance. Steam holds control `405b14cd`; no new
-  install or flight is requested for this integration.
+  new-tree correctness or performance. Steam now holds verified control
+  `e16dbb54` over main `7960f016`; the live INI is preserved and replay is off.
+  Next flight: matched control after candidate promotion, then candidate.
 - **Frozen flight evidence:** `7bbe7d90` control / `6c63f6aa` candidate,
   matched Pimax OpenXR environment, no visual change. NV-on sampled hook time
   per timed draw is 15.0% lower; other CPU ranges overlap. Carrier DLSS/NV-off
@@ -3519,3 +3521,82 @@ checks, with receipt
 is pushed and its clean-version DLL promotion passes. Use the feature reader
 for raw V1 rows; main's reader does not parse that schema. Steam has not
 changed in this offline slice.
+
+### 2026-10-10 — physical flat restore calls reach the real collector window
+
+The guarded owned-Present/domain/replay checkpoint is validated and pushed as
+`55bd3ae8296fc3b63de1a65389a8622276917a7c`. A fresh fetch confirms main remains
+at `7960f016`, already included in the feature branch. No feature-to-main merge
+occurred.
+
+After Elite exited, the clean matched control `e16dbb54` was installed in Steam
+and verified with the sanctioned installer. Its runtime version is
+`v0.19.0-1-ge16dbb54`; the live graphics INI SHA256 remained unchanged and
+`advanced.draw_replay` is off. The control contains only the raw GPU telemetry
+backport over main `7960f016`. No flight has yet measured this installed
+control. The candidate will be promoted from the same validated source before
+the control flight so subsequent switching does not require a native build.
+
+The source trace showed that `flatRuntimeBeforePresent` restores held state
+before the real Present, while the shared plugin collector closes later after
+menu, binding, exposure and vScreen boundary work. Present and six other
+non-OtherDraw runtime flush causes still used the public NoApi route. The new
+cause-aware sampled boundary checks pending state first, then the collector
+hint and exact owner context, and selects one restore policy before locking.
+The actual runtime caller retains its existing pending, owner-thread and exact
+context guards. A restore still owed after the engine is disabled is physical
+TemporalAa work, so this helper does not require the engine's live flag. Public
+direct NoApi, ordinary OtherDraw and validated domain-entry routes remain
+separately bounded. ClearState and normal Resize abandon state without issuing
+restore setters; frame-end reference release is not fabricated as API work. No
+rendering operation, setting or public ABI changed.
+
+The normal WARP rig verifies actual setters and their annotation order, State
+sites 135 (blend) then 132 (render targets), independent generation refusal,
+unsampled/context-refused fallbacks and an owed restore after engine
+stand-down. Source mutations pin all seven named cause mappings, OtherDraw
+fallback, ClearState/Resize abandon and the real caller's owner/context gates.
+
+A new `engine_velocity_cost_test` build variant links the actual engine helper
+and actual plugin-cost backend. The ordinary rig retains its test probe. The
+new WARP fixture creates held producer state while sampling is off, before
+close 16 publishes sampled frame 17. The production helper then physically
+restores blend and targets in frame 17; close 17 consumes those annotations.
+Frame 18 performs an otherwise identical physical restore while unsampled. The
+completed V2 window is exactly frames 2..1801, 1800 frames, 112 API-sampled
+frames, zero CPU observations, and exactly two TemporalAa State calls with only
+site bits 132 and 135. A separate reset window tests a sampled owed restore
+after engine stand-down. Wrong-thread/context tests call only the real sampler
+getter; no foreign-thread D3D operation is issued. No manual API note supplies
+the expected result.
+
+The initial focused build passed 18980 normal checks and the mutation gate,
+then the new variant failed before compilation: its single trailing backslash
+in quoted `/Fo` escaped the closing quote and swallowed the source arguments.
+An escalated review corrected the new label to match the existing doubled
+backslash convention. Focused rerun:
+`build/focused-flat-cost-backend-20261010-r3.log`, normal WARP 18980 checks,
+real-backend WARP 3806 checks, collector, strict boundary and flat-temporal
+source/mutation gates PASS. Full build:
+`build/full-flat-cost-backend-20261010-r2.log`, all 156 jobs plus config,
+exports and self-contained installer/resource gates. Full-pass receipt
+`44fba17c8b2c8b510d61ff48ec59b6297accdd8feda39ef0d17e6c1523d116e5` verifies this source.
+
+The first full run stopped at the flat-temporal source oracle, whose expected
+route and mutation anchor still named the old public NoApi call. The updated
+oracle pins qualified cause-aware sampling and the unchanged cause argument;
+negative controls reject the old direct route and forced OtherDraw cause.
+Owner/context gates and ClearState/Resize abandon assertions remain strict.
+
+The real-backend rig executes the production helper, actual WARP setters and
+collector close together; it does not execute `flatRuntimeSubstitution` itself.
+Caller routing/order is pinned by source oracles. Partial annotation coverage,
+remaining direct/lifecycle routes, held-event full-frame cost and runtime
+CPU/GPU acceptance remain open. No whole-ladder equivalence is claimed.
+
+The next independent selector family identified offline is common site 1, FSS
+Chrome Skip. Existing sidecars lack its raw predicate facts. Before a new
+capture, add bounded facts from existing selector reads, a frozen legacy
+oracle, terminal swallow-action expectations, capacity/mutation checks and an
+unarmed path gate. Carrier/hangar captures cannot establish this FSS-specific
+selector.

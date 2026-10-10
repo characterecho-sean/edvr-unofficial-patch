@@ -3269,9 +3269,9 @@ void engineVelocityFlatFlush(ID3D11DeviceContext* ctx, EngineVelocityFlushCause 
 }
 
 // Only the flat runtime's owner-context ordinary kOtherDraw boundary calls
-// this. The explicit-domain path has its own validated boundary below; frame,
-// shutdown and every other cause still use the public NoApi flush. The pending
-// recheck avoids asking the plugin sampler after a prior flush consumed state.
+// this. The explicit-domain path has its own validated boundary below. Other
+// runtime causes use the cause-aware sampled boundary; direct callers retain
+// the public NoApi flush. The pending recheck avoids sampling after consumption.
 void engineVelocityFlatFlushOtherDrawSampledBoundary(ID3D11DeviceContext* ctx) {
     if (!g_flatPending.load(std::memory_order_acquire)) return;
     if (live.load(std::memory_order_acquire) && plugin_cost::apiSampleHint() &&
@@ -3280,6 +3280,20 @@ void engineVelocityFlatFlushOtherDrawSampledBoundary(ID3D11DeviceContext* ctx) {
         flatFlushLocked<plugin_cost::SampledApi<>>(ctx, EngineVelocityFlushCause::kOtherDraw);
     } else {
         engineVelocityFlatFlush(ctx, EngineVelocityFlushCause::kOtherDraw);
+    }
+}
+
+// The flat runtime calls this for a real pending restore after its owner-thread
+// and exact owner-context gates. A pending restore remains TemporalAa work after
+// the feature is stood down, so collector eligibility does not depend on live.
+// Select once before locking; the public entry remains the NoApi fallback.
+void engineVelocityFlatFlushSampledBoundary(ID3D11DeviceContext* ctx, EngineVelocityFlushCause cause) {
+    if (!g_flatPending.load(std::memory_order_acquire)) return;
+    if (plugin_cost::apiSampleHint() && edvrPluginCostApiSampleContext(ctx) != 0) {
+        std::lock_guard<std::recursive_mutex> lock(g_mutex);
+        flatFlushLocked<plugin_cost::SampledApi<>>(ctx, cause);
+    } else {
+        engineVelocityFlatFlush(ctx, cause);
     }
 }
 

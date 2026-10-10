@@ -3057,7 +3057,7 @@ void testFlatSubstitutionWiring() {
         "            if (cause == EngineVelocityFlushCause::kOtherDraw)\n"
         "                engineVelocityFlatFlushOtherDrawSampledBoundary(ctx);\n"
         "            else\n"
-        "                engineVelocityFlatFlush(ctx, cause);";
+        "                engineVelocityFlatFlushSampledBoundary(ctx, cause);";
     const std::string exposureCpp = slurp("src/d3d11/exposure_fix.cpp");
     const std::string deviceCpp = slurp("src/d3d11/device_hook.cpp");
     const std::string policyH = slurp("src/d3d11/flat_substitution.h");
@@ -3100,7 +3100,7 @@ void testFlatSubstitutionWiring() {
         {&runtimeCpp, "flatRuntimeSubstitution(nullptr, FlatSubstEvent::kClearState);", 1, "ClearState forgets it, touching no context"},
         {&runtimeCpp, "if (!engineVelocityFlatPending()) return;", 1, "with nothing of engine motion's bound the policy costs one load"},
         {&runtimeCpp, "switch (flatSubstAction(event)) {", 1, "the runtime asks the policy what to do"},
-        {&normalizedRuntimeCpp, causeRoute, 1, "a flush names its mapped cause: only OtherDraw selects the sampled boundary, every other cause reaches the original flush unchanged"},
+        {&normalizedRuntimeCpp, causeRoute, 1, "a qualified flush preserves its mapped cause: OtherDraw uses its dedicated boundary; every other cause uses the cause-aware sampled boundary"},
         {&runtimeCpp, "engineVelocityFlatAbandon();", 1, "an abandon"},
         {&runtimeCpp, "producer = engineVelocityFlatBeginDraw(ctx, &gameHadTarget6);", 1, "the producer branch opens the lazy bracket"},
         {&runtimeCpp, "engineVelocityFlatEndDraw(ctx);", 1, "and closes it"},
@@ -3135,12 +3135,17 @@ void testFlatSubstitutionWiring() {
         "cause-route control: replacing the mapped cause with Present fails");
     causeRouteMutation("if (cause == EngineVelocityFlushCause::kOtherDraw)",
         "if (cause == EngineVelocityFlushCause::kOtherDraw || cause == EngineVelocityFlushCause::kPresent)",
-        "cause-route control: broadening the sampled boundary to Present fails");
+        "cause-route control: routing Present through the dedicated OtherDraw boundary fails");
     causeRouteMutation("engineVelocityFlatFlushOtherDrawSampledBoundary(ctx);", "",
         "cause-route control: dropping the selected OtherDraw restore fails");
-    causeRouteMutation("engineVelocityFlatFlush(ctx, cause);",
-        "engineVelocityFlatFlush(ctx, EngineVelocityFlushCause::kOtherDraw);",
+    causeRouteMutation("engineVelocityFlatFlushSampledBoundary(ctx, cause);",
+        "engineVelocityFlatFlushSampledBoundary(ctx, EngineVelocityFlushCause::kOtherDraw);",
         "cause-route control: replacing every non-OtherDraw cause with OtherDraw fails");
+    causeRouteMutation("engineVelocityFlatFlushSampledBoundary(ctx, cause);",
+        "engineVelocityFlatFlush(ctx, cause);",
+        "cause-route control: bypassing qualified cause-aware sampling with a direct NoApi flush fails");
+    causeRouteMutation("engineVelocityFlatFlushSampledBoundary(ctx, cause);", "",
+        "cause-route control: dropping the qualified non-OtherDraw restore fails");
     // The hooks: one event each, ahead of the real call the hook forwards to (the last one in its body: the early returns
     // for an internal or foreign call forward untouched, and the void fix in ClearRenderTargetView is another way out).
     struct Hook { const char* name; const char* event; const char* real; };

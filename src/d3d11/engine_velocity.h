@@ -368,9 +368,12 @@ bool engineVelocityFlatBeginDraw(ID3D11DeviceContext* ctx, bool* gameHadTarget6)
 void engineVelocityFlatEndDraw(ID3D11DeviceContext* ctx);
 void engineVelocityFlatFlush(ID3D11DeviceContext* ctx, EngineVelocityFlushCause cause);
 // The flat runtime calls this only for a pending kOtherDraw restore after its
-// owner-thread and exact owner-context gates. Other flush causes keep the
-// original NoApi entry above.
+// owner-thread and exact owner-context gates. OtherDraw keeps its own bounded
+// source route.
 void engineVelocityFlatFlushOtherDrawSampledBoundary(ID3D11DeviceContext* ctx);
+// Other runtime restore causes use this after the same owner/context gates.
+// Keep the public engineVelocityFlatFlush entry as the direct NoApi route.
+void engineVelocityFlatFlushSampledBoundary(ID3D11DeviceContext* ctx, EngineVelocityFlushCause cause);
 // The explicit-domain marker path has its own validated kOtherDraw boundary.
 // Keep its original direct flush available for callers that do not qualify
 // for API sampling.

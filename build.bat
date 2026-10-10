@@ -3810,6 +3810,24 @@ if errorlevel 1 ( echo [edvr] ERROR: engine velocity test build failed & exit /b
 python "tools\engine_velocity_test\mutants.py" --self-test || exit /b 1
 exit /b 0
 
+:rig_engine_velocity_cost_test
+echo [edvr] === engine_velocity_cost_test.exe ===
+REM Separate real plugin-cost backend link: production cause-aware flat restore
+REM on WARP, then the production 1800-frame V2 Present window. The ordinary
+REM engine_velocity_test keeps its isolated fake API probe and remains unchanged.
+if not exist "%OBJ%\enginevelocitycost" mkdir "%OBJ%\enginevelocitycost"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /utf-8 ^
+    /DEDVR_ENGINE_VELOCITY_RIG /DEDVR_ENGINE_VELOCITY_REAL_COST_RIG /DEDVR_BINDING_SHADOW_EXTERNAL /I"%GEN%" ^
+    /Fo"%OBJ%\enginevelocitycost\\" /Fe"%OBJ%\enginevelocitycost\engine_velocity_cost_test.exe" ^
+    "tools\engine_velocity_test\engine_velocity_test.cpp" "src\d3d11\engine_velocity.cpp" "src\d3d11\skin_join_gpu.cpp" ^
+    "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" "src\d3d11\plugin_cost.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib dxguid.lib
+if errorlevel 1 ( echo [edvr] ERROR: engine velocity real cost test build failed & exit /b 1 )
+"%OBJ%\enginevelocitycost\engine_velocity_cost_test.exe" --dry-run || exit /b 1
+"%OBJ%\enginevelocitycost\engine_velocity_cost_test.exe" --self-test || exit /b 1
+exit /b 0
+
 :rig_engine_motion_cpu_test
 echo [edvr] === engine_motion_cpu_test.exe ===
 REM Build gate for engine motion's CPU instrument (src\d3d11\engine_motion_cpu.h,

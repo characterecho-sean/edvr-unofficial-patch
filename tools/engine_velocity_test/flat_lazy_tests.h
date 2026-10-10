@@ -1213,13 +1213,22 @@ inline std::string otherDrawSourceBody(const std::string& tokens, const char* si
 }
 
 inline void otherDrawWiringTests(const Harness& h, const std::string& runtimeSource,
-                                const std::string& engineSource) {
+                                 const std::string& engineSource,
+                                 const std::string& policySource) {
     const std::string runtime = otherDrawSourceTokens(runtimeSource);
     const std::string engine = otherDrawSourceTokens(engineSource);
+    const std::string policy = otherDrawSourceTokens(policySource);
     const auto count = [](const std::string& text, const char* needle) {
         unsigned n = 0;
         for (size_t p = text.find(needle); p != std::string::npos; p = text.find(needle, p + 1)) ++n;
         return n;
+    };
+    const char* policySignature =
+        "constexprFlatSubstActionflatSubstAction(FlatSubstEvente)noexcept";
+    const auto policyValid = [&](const std::string& source) {
+        const std::string body = otherDrawSourceBody(source, policySignature);
+        return body.find("caseFlatSubstEvent::kClearState:returnFlatSubstAction::kAbandon;") != std::string::npos &&
+            body.find("caseFlatSubstEvent::kResize:returnFaults::flushOnResize?FlatSubstAction::kFlush:FlatSubstAction::kAbandon;") != std::string::npos;
     };
     const auto valid = [&](const std::string& rt, const std::string& ev) {
         const std::string caller = otherDrawSourceBody(rt,
@@ -1227,17 +1236,29 @@ inline void otherDrawWiringTests(const Harness& h, const std::string& runtimeSou
         const char* route = "if(ctx&&ctx==state().context.Get()){flatcpu::Scopeengine(flatcpu::kEngineDraw);"
             "constEngineVelocityFlushCausecause=flushCauseOf(event);"
             "if(cause==EngineVelocityFlushCause::kOtherDraw)engineVelocityFlatFlushOtherDrawSampledBoundary(ctx);"
-            "elseengineVelocityFlatFlush(ctx,cause);}";
+            "elseengineVelocityFlatFlushSampledBoundary(ctx,cause);}";
         const size_t pending = caller.find("if(!engineVelocityFlatPending())return;");
         const size_t owner = caller.find("if(!owner())return;");
-        const size_t policy = caller.find("switch(flatSubstAction(event))");
+        const size_t policyIndex = caller.find("switch(flatSubstAction(event))");
         const size_t flush = caller.find("caseFlatSubstAction::kFlush:");
         const size_t selected = caller.find(route);
         const size_t abandon = caller.find("caseFlatSubstAction::kAbandon:");
         const std::string causes = otherDrawSourceBody(rt, "staticEngineVelocityFlushCauseflushCauseOf(");
+        const char* exactCauses =
+            "switch(event){"
+            "caseFlatSubstEvent::kDispatch:returnEngineVelocityFlushCause::kDispatch;"
+            "caseFlatSubstEvent::kClear:returnEngineVelocityFlushCause::kClear;"
+            "caseFlatSubstEvent::kCopy:returnEngineVelocityFlushCause::kCopy;"
+            "caseFlatSubstEvent::kResolve:returnEngineVelocityFlushCause::kResolve;"
+            "caseFlatSubstEvent::kKeepTargets:returnEngineVelocityFlushCause::kKeepTargets;"
+            "caseFlatSubstEvent::kExecuteCommandList:returnEngineVelocityFlushCause::kCommandList;"
+            "caseFlatSubstEvent::kPresent:returnEngineVelocityFlushCause::kPresent;"
+            "default:returnEngineVelocityFlushCause::kOtherDraw;}";
         const std::string domain = otherDrawSourceBody(ev, "boolengineVelocityFlatDomainBeginDraw(");
         const std::string domainBoundary = otherDrawSourceBody(ev,
             "voidengineVelocityFlatDomainEntrySampledBoundary(ID3D11DeviceContext*ctx)");
+        const std::string sampledBoundary = otherDrawSourceBody(ev,
+            "voidengineVelocityFlatFlushSampledBoundary(ID3D11DeviceContext*ctx,EngineVelocityFlushCausecause)");
         const std::string original = otherDrawSourceBody(ev, "voidengineVelocityFlatFlush(");
         const size_t domainInput = domain.find("if(!runtimeFlatProfile()||!ctx||!depth||ctx->GetType()!=D3D11_DEVICE_CONTEXT_IMMEDIATE)returnfail(\"\");");
         const size_t domainFlush = domain.find("engineVelocityFlatDomainEntrySampledBoundary(ctx);");
@@ -1253,12 +1274,20 @@ inline void otherDrawWiringTests(const Harness& h, const std::string& runtimeSou
             "flatFlushLocked<plugin_cost::SampledApi<>>(ctx,EngineVelocityFlushCause::kOtherDraw);");
         const size_t boundaryFallback = domainBoundary.find(
             "}else{engineVelocityFlatFlush(ctx,EngineVelocityFlushCause::kOtherDraw);}");
+        const size_t sampledPending = sampledBoundary.find("if(!g_flatPending.load(std::memory_order_acquire))return;");
+        const size_t sampledHint = sampledBoundary.find("plugin_cost::apiSampleHint()");
+        const size_t sampledVerifier = sampledBoundary.find("edvrPluginCostApiSampleContext(ctx)!=0");
+        const size_t sampledLock = sampledBoundary.find("std::lock_guard<std::recursive_mutex>lock(g_mutex);");
+        const size_t sampledRestore = sampledBoundary.find(
+            "flatFlushLocked<plugin_cost::SampledApi<>>(ctx,cause);");
+        const size_t sampledFallback = sampledBoundary.find("engineVelocityFlatFlush(ctx,cause);");
         return pending != std::string::npos && abandon != std::string::npos &&
-            pending < owner && owner < policy && policy < flush && flush < selected && selected < abandon &&
+            pending < owner && owner < policyIndex && policyIndex < flush && flush < selected && selected < abandon &&
             count(caller, "engineVelocityFlatFlushOtherDrawSampledBoundary(ctx);") == 1 &&
-            count(caller, "engineVelocityFlatFlush(ctx,cause);") == 1 &&
-            causes.find("caseFlatSubstEvent::kPresent:returnEngineVelocityFlushCause::kPresent;") != std::string::npos &&
-            causes.find("default:returnEngineVelocityFlushCause::kOtherDraw;") != std::string::npos &&
+            count(caller, "engineVelocityFlatFlushSampledBoundary(ctx,cause);") == 1 &&
+            count(caller, "engineVelocityFlatFlush(ctx,cause);") == 0 &&
+            causes == exactCauses && policyValid(policy) &&
+            caller.find("caseFlatSubstAction::kAbandon:engineVelocityFlatAbandon();return;") != std::string::npos &&
             domainInput != std::string::npos && writerToken != std::string::npos &&
             primitiveCount != std::string::npos && domainFlush != std::string::npos &&
             domainLock != std::string::npos &&
@@ -1270,6 +1299,12 @@ inline void otherDrawWiringTests(const Harness& h, const std::string& runtimeSou
             boundaryLive < boundaryHint && boundaryHint < boundaryVerifier &&
             boundaryVerifier < boundaryLock && boundaryLock < boundarySampled &&
             boundarySampled < boundaryFallback &&
+            sampledPending == 0 && sampledPending < sampledHint && sampledHint < sampledVerifier &&
+            sampledVerifier < sampledLock && sampledLock < sampledRestore && sampledRestore < sampledFallback &&
+            sampledBoundary.find("live.load(") == std::string::npos &&
+            count(sampledBoundary, "edvrPluginCostApiSampleContext(ctx)") == 1 &&
+            count(sampledBoundary, "flatFlushLocked<plugin_cost::SampledApi<>>") == 1 &&
+            count(sampledBoundary, "engineVelocityFlatFlush(ctx,cause);") == 1 &&
             count(domainBoundary, "edvrPluginCostApiSampleContext(ctx)") == 1 &&
             count(domainBoundary, "flatFlushLocked<plugin_cost::SampledApi<>>") == 1 &&
             count(domainBoundary, "engineVelocityFlatFlush(ctx,EngineVelocityFlushCause::kOtherDraw);") == 1 &&
@@ -1311,10 +1346,38 @@ inline void otherDrawWiringTests(const Harness& h, const std::string& runtimeSou
     h.check(mutateBody(ambiguousNeedle, targetSignature, "sample();", "changed();") == ambiguousNeedle,
         "held OtherDraw source mutation control: ambiguous strings inside the selected body refuse mutation");
     const char* callerSignature = "voidflatRuntimeSubstitution(ID3D11DeviceContext*ctx,FlatSubstEventevent)";
-    h.check(valid(runtime, engine), "held OtherDraw source pins: ordinary caller keeps pending/owner/exact-context gates; domain entry uses its validated sampled boundary and other causes stay NoApi");
+    h.check(valid(runtime, engine), "flat lifecycle source pins: owner caller retains pending/exact-context gates, every cause maps correctly, and direct flush remains NoApi");
+    const char* causeSignature = "staticEngineVelocityFlushCauseflushCauseOf(";
+    const char* causeMappings[] = {
+        "caseFlatSubstEvent::kDispatch:returnEngineVelocityFlushCause::kDispatch;",
+        "caseFlatSubstEvent::kClear:returnEngineVelocityFlushCause::kClear;",
+        "caseFlatSubstEvent::kCopy:returnEngineVelocityFlushCause::kCopy;",
+        "caseFlatSubstEvent::kResolve:returnEngineVelocityFlushCause::kResolve;",
+        "caseFlatSubstEvent::kKeepTargets:returnEngineVelocityFlushCause::kKeepTargets;",
+        "caseFlatSubstEvent::kExecuteCommandList:returnEngineVelocityFlushCause::kCommandList;",
+        "caseFlatSubstEvent::kPresent:returnEngineVelocityFlushCause::kPresent;",
+        "default:returnEngineVelocityFlushCause::kOtherDraw;",
+    };
+    for (const char* mapping : causeMappings)
+        h.check(!valid(mutateBody(runtime, causeSignature, mapping, ""), engine),
+                "flat lifecycle source mutant: each cause mapping and OtherDraw fallback is required");
+    h.check(!policyValid(mutateBody(policy, policySignature,
+        "caseFlatSubstEvent::kClearState:returnFlatSubstAction::kAbandon;", "")) &&
+        !policyValid(mutateBody(policy, policySignature,
+        "caseFlatSubstEvent::kResize:returnFaults::flushOnResize?FlatSubstAction::kFlush:FlatSubstAction::kAbandon;", "")) &&
+        !valid(mutateBody(runtime, callerSignature,
+        "engineVelocityFlatAbandon();", ""), engine),
+        "flat lifecycle source mutants: ClearState and resize abandon policy and caller stay wired");
     const char* call = "engineVelocityFlatFlushOtherDrawSampledBoundary(ctx);";
     h.check(!valid(mutateBody(runtime, callerSignature, call, ""), engine),
             "held OtherDraw source mutant: deleting the real selected call fails");
+    h.check(!valid(mutateBody(runtime, callerSignature,
+        "engineVelocityFlatFlushSampledBoundary(ctx,cause);", ""), engine),
+            "flat lifecycle source mutant: deleting the cause-aware sampled restore fails");
+    h.check(!valid(mutateBody(runtime, callerSignature,
+        "elseengineVelocityFlatFlushSampledBoundary(ctx,cause);",
+        "elseengineVelocityFlatFlush(ctx,cause);"), engine),
+            "flat lifecycle source mutant: routing Present and other causes through public NoApi fails");
     h.check(!valid(mutateBody(runtime, callerSignature, "if(cause==EngineVelocityFlushCause::kOtherDraw)",
         "if(cause==EngineVelocityFlushCause::kOtherDraw||cause==EngineVelocityFlushCause::kPresent)"), engine),
             "held OtherDraw source mutant: broadening selection to Present fails");
@@ -1347,11 +1410,18 @@ inline void otherDrawWiringTests(const Harness& h, const std::string& runtimeSou
     h.check(!valid(runtime, mutateBody(engine, "voidengineVelocityFlatDomainEntrySampledBoundary(ID3D11DeviceContext*ctx)",
         "}else{engineVelocityFlatFlush(ctx,EngineVelocityFlushCause::kOtherDraw);}", "}else{}")),
         "held OtherDraw source mutant: domain boundary must retain the direct NoApi fallback");
+    h.check(!valid(runtime, mutateBody(engine,
+        "voidengineVelocityFlatFlushSampledBoundary(ID3D11DeviceContext*ctx,EngineVelocityFlushCausecause)",
+        "if(!g_flatPending.load(std::memory_order_acquire))return;", "")) &&
+        !valid(runtime, mutateBody(engine,
+        "voidengineVelocityFlatFlushSampledBoundary(ID3D11DeviceContext*ctx,EngineVelocityFlushCausecause)",
+        "edvrPluginCostApiSampleContext(ctx)!=0", "true")),
+        "flat lifecycle source mutants: pending-first and exact owner-context sampler checks remain required");
 }
 
 inline ApiRunResult runOtherDrawApiBoundary(const Harness& h, bool sampling, bool matchingOwner,
     OtherDrawMutation mutation = OtherDrawMutation::None, bool directEntry = false,
-    bool domainEntry = false) {
+    bool domainEntry = false, bool sampledCause = false) {
     edvr::g_runtimeProfile = edvr::RuntimeProfile::Flat;
     edvr::flatQueryCut().reset();
     Game g(h);
@@ -1449,10 +1519,14 @@ inline ApiRunResult runOtherDrawApiBoundary(const Harness& h, bool sampling, boo
             mutation != OtherDrawMutation::Shutdown)
             h.check(began, reason ? reason : "engine velocity API sampling: valid WARP domain entry begins");
         e.expectGame("sampled domain-entry flush and marker bracket");
+    } else if (sampledCause) {
+        RecOn on;
+        edvr::engineVelocityFlatFlushSampledBoundary(g.ctx, edvr::EngineVelocityFlushCause::kPresent);
+        e.expectGame("sampled Present held restore");
     } else {
         e.otherDraw("sampled ordinary other-draw flush");
     }
-    h.check(e.ok, "engine velocity API sampling: other-draw flush leaves the actual game state bound");
+    h.check(e.ok, "engine velocity API sampling: held restore leaves the actual game state bound");
 
     ApiRunResult out{domainEntry ? domainRestoreRecorder : g_rec, g_apiProbe};
     out.markerRecorder = domainMarkerRecorder;
@@ -1466,6 +1540,9 @@ inline ApiRunResult runOtherDrawApiBoundary(const Harness& h, bool sampling, boo
         // directly probe the new boundary's pending-first recheck here.
         RecOn on;
         edvr::engineVelocityFlatDomainEntrySampledBoundary(g.ctx);
+    } else if (sampledCause) {
+        RecOn on;
+        edvr::engineVelocityFlatFlushSampledBoundary(g.ctx, edvr::EngineVelocityFlushCause::kPresent);
     } else {
         e.otherDraw("repeated other-draw with no pending restore");
     }
@@ -1680,6 +1757,18 @@ inline void apiTransactionTests(const Harness& h) {
         OtherDrawMutation::Shutdown, false, true);
     const ApiRunResult domainRefused = runOtherDrawApiBoundary(h, true, true,
         OtherDrawMutation::InvalidDomain, false, true);
+    const ApiRunResult presentFlush = runOtherDrawApiBoundary(h, true, true,
+        OtherDrawMutation::None, false, false, true);
+    const ApiRunResult presentBlendGeneration = runOtherDrawApiBoundary(h, true, true,
+        OtherDrawMutation::Blend, false, false, true);
+    const ApiRunResult presentTargetGeneration = runOtherDrawApiBoundary(h, true, true,
+        OtherDrawMutation::Targets, false, false, true);
+    const ApiRunResult presentOff = runOtherDrawApiBoundary(h, false, true,
+        OtherDrawMutation::None, false, false, true);
+    const ApiRunResult presentForeignContext = runOtherDrawApiBoundary(h, true, false,
+        OtherDrawMutation::None, false, false, true);
+    const ApiRunResult presentAfterShutdown = runOtherDrawApiBoundary(h, true, true,
+        OtherDrawMutation::Shutdown, false, false, true);
     auto sameOtherDrawCalls = [&](const ApiRunResult& candidate) {
         for (unsigned i = 0; i < kRecCount; ++i)
             if (candidate.recorder.calls[i] != otherDraw.recorder.calls[i]) return false;
@@ -1721,6 +1810,28 @@ inline void apiTransactionTests(const Harness& h) {
                 restoreSettersAre(domainRefused.recorder, 1, 1) &&
                 domainRefused.markerRecorder.total() == 0,
             "engine velocity API sampling: refused domain input bypasses sampling, then explicit direct NoApi cleanup restores the held state");
+    h.check(presentFlush.probe.verifierCalls == 1 && otherDrawNotesAre(presentFlush.probe, 1, 1) &&
+                restoreSettersAre(presentFlush.recorder, 1, 1),
+            "flat lifecycle API sampling: Present restore records State sites 135 then 132 at the actual setters");
+    h.check(presentBlendGeneration.probe.verifierCalls == 1 &&
+                otherDrawNotesAre(presentBlendGeneration.probe, 0, 1) &&
+                restoreSettersAre(presentBlendGeneration.recorder, 0, 1),
+            "flat lifecycle API sampling: changed blend generation suppresses only site 135");
+    h.check(presentTargetGeneration.probe.verifierCalls == 1 &&
+                otherDrawNotesAre(presentTargetGeneration.probe, 1, 0) &&
+                restoreSettersAre(presentTargetGeneration.recorder, 1, 0),
+            "flat lifecycle API sampling: changed target generation suppresses only site 132");
+    h.check(presentOff.probe.verifierCalls == 0 && otherDrawNotesAre(presentOff.probe, 0, 0) &&
+                restoreSettersAre(presentOff.recorder, 1, 1),
+            "flat lifecycle API sampling: unsampled Present still restores through NoApi");
+    h.check(presentForeignContext.probe.verifierCalls == 1 &&
+                otherDrawNotesAre(presentForeignContext.probe, 0, 0) &&
+                restoreSettersAre(presentForeignContext.recorder, 1, 1),
+            "flat lifecycle API sampling: wrong collector context emits no notes and retains the restore");
+    h.check(presentAfterShutdown.probe.verifierCalls == 1 &&
+                otherDrawNotesAre(presentAfterShutdown.probe, 1, 1) &&
+                restoreSettersAre(presentAfterShutdown.recorder, 1, 1),
+            "flat lifecycle API sampling: an owed Present restore remains counted after engine velocity stands down");
 
     const ApiRunResult sampled = runApiTransaction(h, true, true);
     const ApiRunResult disabled = runApiTransaction(h, false, true);

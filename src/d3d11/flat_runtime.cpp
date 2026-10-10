@@ -3955,7 +3955,7 @@ void flatRuntimeSubstitution(ID3D11DeviceContext* ctx, FlatSubstEvent event) {
             if (cause == EngineVelocityFlushCause::kOtherDraw)
                 engineVelocityFlatFlushOtherDrawSampledBoundary(ctx);
             else
-                engineVelocityFlatFlush(ctx, cause);
+                engineVelocityFlatFlushSampledBoundary(ctx, cause);
         }
         return;
     case FlatSubstAction::kAbandon:
