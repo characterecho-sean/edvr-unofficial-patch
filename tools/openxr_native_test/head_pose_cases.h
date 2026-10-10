@@ -2,6 +2,9 @@
 // Elite's "now" head pose, answered at the drawn frame's display time (src/openxr/head_pose_time.h, native_runtime_host.h locateHeadFor,
 // src/openxr/pose_gap.h; docs\terrain-culling.md): through the real hop to the owner thread, from a foreign thread, the instant a call is
 // located at, the figures the diagnostic takes from each locate, what the WaitGetPoses publish point keeps, and who is said to be answered.
+// Then advanced.cull_pose (src/common/cull_pose.h, TEMPORARY), read from the kept frame answer: the instant under each mode (now, display, next),
+// the next mode's fallbacks (a stale frame, a reference change between, a refused target), the window a change of mode closes, and the angle from
+// what the game thread was handed in one frame to the next frame's drawn pose.
 // Then the cache's lifetime: it is dropped wherever the origin, the session or the geometry publication is invalidated (a seated reset, a
 // session stop and restart, a failed reset, a fatal failure), it is not used once it has fallen more than one display period behind now, and a
 // display-time locate the runtime refuses with XR_ERROR_TIME_INVALID is retried once at now + prediction. Every cell reads the instant the fake
@@ -36,12 +39,13 @@ template<class Check> void runHeadPoseCases(Check&& check) {
   if (!f.initialized) return;
   auto& h = *f.hostPtr;
   h.headClock = readClock;
+  uint64_t seq = 100;   // the frame sequence each publish carries
   const DWORD me = GetCurrentThreadId();
   const XrTime display = 5000000000, period = 11111111;
   const XrTime lead = 42000000;   // flight 3: the game thread's "now" was about 42 ms before the drawn frame's display time
   const XrTime now = display - lead;
   setNow(now);
-  char lines[8][352]{};
+  char lines[8][400]{};
   unsigned lineCount = 0;
   const auto collect = [&](const char* line) { if (lineCount < 8) std::snprintf(lines[lineCount++], sizeof(lines[0]), "%s", line); };
   const double half = 3.14159265358979323846 / 180.0 * 0.5;
@@ -50,7 +54,7 @@ template<class Check> void runHeadPoseCases(Check&& check) {
   XrVector3f turn{0.0f, 0.5235988f, 0.0f};   // 30 degrees a second about y
   bool published = false;
   check(f.owner.invoke([&] {
-    h.publishPoseGap(display, period, XrPosef{{0, 0, 0, 1}, {0, 0, 0}}, true, XR_SPACE_VELOCITY_ANGULAR_VALID_BIT, turn, 1000, collect);
+    h.publishPoseGap(++seq, display, period, XrPosef{{0, 0, 0, 1}, {0, 0, 0}}, true, XR_SPACE_VELOCITY_ANGULAR_VALID_BIT, turn, 1000, collect);
     published = h.latestPoseFrame.valid;
   }) && published, "(a frame is published to the host)");
   bool kept = false;
@@ -62,7 +66,7 @@ template<class Check> void runHeadPoseCases(Check&& check) {
   check(kept, "the publish point keeps the frame's display time and period, its orientation, the head speed in degrees a second, and counts the wait");
   // What the WaitGetPoses publish point does, for a cell that needs another frame.
   const auto publish = [&](XrTime displayTime, XrDuration framePeriod, uint64_t atMs) {
-    f.owner.invoke([&] { h.publishPoseGap(displayTime, framePeriod, XrPosef{{0, 0, 0, 1}, {0, 0, 0}}, true, 0, XrVector3f{0, 0, 0}, atMs, collect); });
+    f.owner.invoke([&] { h.publishPoseGap(++seq, displayTime, framePeriod, XrPosef{{0, 0, 0, 1}, {0, 0, 0}}, true, 0, XrVector3f{0, 0, 0}, atMs, collect); });
   };
   vr::TrackedDevicePose_t pose{};
   const auto locateAs = [&](bool atDisplay, float prediction, uint32_t rva = 0x4E3881) {
@@ -72,7 +76,7 @@ template<class Check> void runHeadPoseCases(Check&& check) {
   };
   const auto flushLine = [&](std::string& out) {
     lineCount = 0;
-    f.owner.invoke([&] { h.poseGap.flushNow(0, collect); });
+    f.owner.invoke([&] { h.poseGap.flushNow(0, uint32_t(h.cullPoseMode()), collect); });
     out = lineCount ? lines[lineCount - 1] : "";
     return lineCount;
   };
@@ -85,7 +89,7 @@ template<class Check> void runHeadPoseCases(Check&& check) {
   std::string line;
   flushLine(line);
   char want[512];
-  std::snprintf(want, sizeof(want), "pose gap: tid %lu calls 3 from exe+0x4E3881 prediction -0.3 ms target-minus-display mean 0.00 ms (min 0.00 max 0.00) angle-to-drawn mean 0.000 max 0.000 deg head 30.0 deg/s waitgetposes 1 failed 0", (unsigned long)me);
+  std::snprintf(want, sizeof(want), "pose gap: mode display tid %lu calls 3 from exe+0x4E3881 prediction -0.3 ms target-minus-display mean 0.00 ms (min 0.00 max 0.00) angle-to-drawn mean 0.000 max 0.000 deg angle-to-next-drawn n/a head 30.0 deg/s waitgetposes 1 failed 0", (unsigned long)me);
   check(line == want, "the diagnostic records the CALLER's thread (the hop to the owner does not lose it), the return RVA, the mean prediction, a gap of 0, an angle of 0 and the wait the publish point counted (the exact line)");
   // ---- everything else: today's answer ------------------------------------------------------------------------------------------------
   check(locateAs(false, 0.0f) && f.fake.lastTime == now && f.fake.lastTime != display, "a call that is not flagged (outside the image, or with a real prediction) is located on the wall clock as always, not at the display time");
@@ -109,7 +113,7 @@ template<class Check> void runHeadPoseCases(Check&& check) {
   f.owner.invoke([&] { h.latestPoseFrame.valid = false; });
   check(locateAs(true, 0.0f, 0x777777) && f.fake.lastTime == now, "with no frame yet an Elite \"now\" call is located at now + prediction, as before");
   flushLine(line);
-  check(line.find("target-minus-display n/a angle-to-drawn n/a head n/a") != std::string::npos && line.find(" fallback 1") != std::string::npos,
+  check(line.find("target-minus-display n/a angle-to-drawn n/a angle-to-next-drawn n/a head n/a") != std::string::npos && line.find(" fallback 1") != std::string::npos,
         "...and the line says there was nothing to measure against, and one fallback");
   f.owner.invoke([&] { h.latestPoseFrame.valid = true;h.latestPoseFrame.displayTime = 0; });
   check(locateAs(true, 0.0f, 0x777777) && f.fake.lastTime == now, "a display time that is not positive falls back too");
@@ -148,16 +152,183 @@ template<class Check> void runHeadPoseCases(Check&& check) {
   flushLine(line);
   check(line.find(" tid 0 calls 1 from exe+0x0 ") != std::string::npos, "...and is recorded under thread 0, RVA 0");
   // The publish point writes the window when it is 60 s old, and only then.
-  f.owner.invoke([&] { h.poseGap.flushNow(0, collect); });
+  f.owner.invoke([&] { h.poseGap.flushNow(0, uint32_t(h.cullPoseMode()), collect); });
   lineCount = 0;
   f.owner.invoke([&] {
     PoseGapStats::Sample s{};s.thread = 5;s.rva = 0x4E3881;s.located = true;
     h.poseGap.note(s);
-    h.publishPoseGap(display, period, XrPosef{{0, 0, 0, 1}, {0, 0, 0}}, true, 0, XrVector3f{0, 0, 0}, 59999, collect);
+    h.publishPoseGap(++seq, display, period, XrPosef{{0, 0, 0, 1}, {0, 0, 0}}, true, 0, XrVector3f{0, 0, 0}, 59999, collect);
   });
   check(lineCount == 0, "the publish point writes nothing for a window under 60 s old");
   publish(display, period, 60000 + 1);
-  check(lineCount == 1 && std::string(lines[0]).rfind("pose gap: tid 5 calls 1 ", 0) == 0, "...and the window's line once it is 60 s old");
+  check(lineCount == 1 && std::string(lines[0]).rfind("pose gap: mode display tid 5 calls 1 ", 0) == 0, "...and the window's line once it is 60 s old");
+
+  // ====================================================================================================================================
+  // advanced.cull_pose (src/common/cull_pose.h, TEMPORARY): the mode is the last frame answer's cullPose (the d3d11 half reads the key and writes
+  // it into the answer every frame). Each cell sets that field the way the answer would carry it. now is the behaviour before the fix, display
+  // the shipped default, next one period after the display time (what the game-pose array of WaitGetPoses already uses).
+  // ====================================================================================================================================
+  {
+    const XrTime base = 13000000000LL;
+    const auto setMode = [&](uint32_t code) { h.featureFrameKnown = true; h.featureFrame.cullPose = code; };
+    // A frame with its own sequence and orientation (yaw about y, degrees), as WaitGetPoses publishes it.
+    const auto publishFrame = [&](uint64_t sequence, XrTime displayTime, double yawDegrees, uint64_t atMs) {
+      f.owner.invoke([&] {
+        const XrPosef p{{0.0f, float(std::sin(yawDegrees * half)), 0.0f, float(std::cos(yawDegrees * half))}, {0, 0, 0}};
+        h.publishPoseGap(sequence, displayTime, period, p, true, 0, XrVector3f{0, 0, 0}, atMs, collect);
+      });
+      seq = sequence;
+    };
+    flushLine(line);
+    setNow(base - lead);
+    publishFrame(500, base, 0.0, 1000);
+    h.featureFrameKnown = false;h.featureFrame.cullPose = 0;
+    check(h.cullPoseMode() == cullpose::Mode::Display && locateAs(true, 0.0f, 0x6000001) && f.fake.lastTime == base,
+          "with no frame answer yet the mode is display, the shipped behaviour: located at the display time");
+    h.featureFrameKnown = true;
+    check(h.cullPoseMode() == cullpose::Mode::Display && locateAs(true, 0.0f, 0x6000001) && f.fake.lastTime == base,
+          "...a frame answer that carries 0 (an unset key, or a provider too old to carry the field) is display too");
+    h.featureFrame.cullPose = 99;
+    check(h.cullPoseMode() == cullpose::Mode::Display && locateAs(true, 0.0f, 0x6000001) && f.fake.lastTime == base,
+          "...and a code past the last reads display (a runtime and a provider that disagree)");
+    flushLine(line);
+    // ---- now: the behaviour before the fix, kept as a control ------------------------------------------------------------------------------
+    const unsigned sightingsBefore = h.poseSightings.distinct();
+    setMode(1);
+    check(locateAs(true, 0.0f, 0x6000001) && f.fake.lastTime == base - lead && h.lastHeadTime == base - lead && pose.bPoseIsValid,
+          "cull_pose now: a call the filter flags is located at now + prediction (the behaviour before the fix), not at the display time");
+    check(locateAs(true, 0.003f, 0x6000001) && f.fake.lastTime == base - lead + 3000000, "...with the prediction the caller passed");
+    check(locateAs(true, 0.0f, 0x6000006) && h.poseSightings.distinct() == sightingsBefore, "...and a caller is not said to be answered at any display time");
+    flushLine(line);
+    const std::string nowLine = lineCount >= 2 ? lines[0] : "";   // (the first caller's line; the last is the other address)
+    check(lineCount == 2 && nowLine.rfind("pose gap: mode now tid ", 0) == 0 && nowLine.find("target-minus-display mean -40.50 ms (min -42.00 max -39.00)") != std::string::npos &&
+              nowLine.find(" calls 2 ") != std::string::npos && nowLine.find("fallback") == std::string::npos && line.find("fallback") == std::string::npos,
+          "...the line says mode now, the true lag, and NO fallback (it was never asked for an explicit instant)");
+    // ---- next: one period after the display time -----------------------------------------------------------------------------------------------
+    setMode(2);
+    check(h.cullPoseMode() == cullpose::Mode::Next && locateAs(true, 0.0f, 0x6000001) && f.fake.lastTime == base + period && h.lastHeadTime == base + period && pose.bPoseIsValid,
+          "cull_pose next: a flagged call is located at the latest frame's display time plus that frame's period");
+    check(locateAs(true, 0.003f, 0x6000001) && f.fake.lastTime == base + period && locateAs(true, -0.004f, 0x6000001) && f.fake.lastTime == base + period,
+          "...whatever small prediction Elite passed");
+    flushLine(line);
+    check(line.rfind("pose gap: mode next tid ", 0) == 0 && line.find("target-minus-display mean 11.11 ms (min 11.11 max 11.11)") != std::string::npos &&
+              line.find("fallback") == std::string::npos,
+          "...the line says mode next and a gap of one period (+11.11 ms), no fallback");
+    check(locateAs(true, 0.0f, 0x6000005) && h.poseSightings.distinct() == sightingsBefore + 1, "a flagged caller not seen before is said to be answered (under now none was)");
+    flushLine(line);
+    check(locateAs(false, 0.0f, 0x6000002) && f.fake.lastTime == base - lead, "a call the filter did not flag is still located on the wall clock, whatever the mode");
+    flushLine(line);
+    // The freshness test is on the cached frame (not on the target one period ahead of it).
+    setNow(base + period);
+    check(locateAs(true, 0.0f, 0x6000001) && f.fake.lastTime == base + period, "next: a frame exactly one period behind now still answers");
+    setNow(base + period + 1);
+    check(locateAs(true, 0.0f, 0x6000001) && f.fake.lastTime == base + period + 1, "...one nanosecond more and it does not: the call is located at now + prediction");
+    flushLine(line);
+    check(line.find(" fallback 1") != std::string::npos, "...counted as a fallback");
+    setNow(base - lead);
+    // A frame that reports no period has no next target.
+    publishFrame(501, base, 0.0, 1000);
+    f.owner.invoke([&] { h.latestPoseFrame.period = 0; });
+    check(locateAs(true, 0.0f, 0x6000001) && f.fake.lastTime == base - lead, "next with a frame that reports no period: no target, located at now + prediction");
+    flushLine(line);
+    check(line.find(" fallback 1") != std::string::npos, "...counted as a fallback");
+    setMode(0);
+    check(locateAs(true, 0.0f, 0x6000001) && f.fake.lastTime == base, "...display, which adds nothing, is unaffected by it");
+    flushLine(line);
+    publishFrame(502, base, 0.0, 1000);
+    setMode(2);
+    // A reference-space change between the display time and the target: the pose there would be in another origin.
+    {
+      XrEventDataReferenceSpaceChangePending event{XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING};
+      event.session = session();event.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_LOCAL;event.changeTime = base + period / 2;event.poseValid = XR_FALSE;
+      bool noted = false;
+      f.owner.invoke([&] { noted = h.changes.note(event); });
+      check(noted && locateAs(true, 0.0f, 0x6000001) && f.fake.lastTime == base - lead,
+            "next with a reference-space change pending between the display time and the target: located at now + prediction, not across the change");
+      flushLine(line);
+      check(line.find(" fallback 1") != std::string::npos, "...counted as a fallback");
+      setMode(0);
+      check(locateAs(true, 0.0f, 0x6000001) && f.fake.lastTime == base, "...display never reaches across it, so the same change does not move the shipped answer");
+      flushLine(line);
+      f.owner.invoke([&] { h.changes.clear();noted = h.changes.begin(session()); });
+      check(noted, "(the fixture's reference changes are active again)");
+      setMode(2);
+    }
+    // The runtime refuses the target.
+    {
+      const uint64_t refusalsBefore = h.displayTimeRefusals;
+      const unsigned locatesBefore = f.fake.locates;
+      f.fake.rejectTime = base + period;
+      const bool answered = locateAs(true, 0.0f, 0x6000001);
+      f.fake.rejectTime = -1;
+      check(answered && pose.bPoseIsValid && f.fake.lastTime == base - lead && f.fake.locates == locatesBefore + 2 && h.displayTimeRefusals == refusalsBefore + 1,
+            "next: XR_ERROR_TIME_INVALID on the target is retried once at now + prediction, a valid pose, as in display");
+      flushLine(line);
+      check(line.find(" fallback 1") != std::string::npos && line.find(" failed 0") != std::string::npos, "...counted as a fallback, not a failure");
+    }
+    // ---- a change of mode closes the pose-gap window ----------------------------------------------------------------------------------------------
+    setMode(0);
+    flushLine(line);
+    check(locateAs(true, 0.0f, 0x6000001), "(a call located under display)");
+    setMode(2);
+    lineCount = 0;
+    publishFrame(503, base, 0.0, 1000);
+    check(lineCount == 1 && std::string(lines[0]).rfind("pose gap: mode display tid ", 0) == 0 && std::string(lines[0]).find(" calls 1 ") != std::string::npos,
+          "a change of mode closes the window at the next publish and writes it under the mode its calls were located under (display), not the new one");
+    check(locateAs(true, 0.0f, 0x6000001), "(a call located under next)");
+    flushLine(line);
+    check(line.rfind("pose gap: mode next tid ", 0) == 0 && line.find(" calls 1 ") != std::string::npos, "...and the new window holds only its own calls, under next");
+    // ---- the angle from what the game thread was handed in one frame to the next frame's drawn pose ------------------------------------------
+    // H-onef: the game thread prepares frame N+1 while N is drawn, so the pose it is handed during N is drawn one frame later. Under display that is
+    // located at N's display time and is one period old (head speed times 11 ms: 2.8 degrees at 250 deg/s); under next it is N+1's display time.
+    setMode(0);
+    publishFrame(1000, base, 0.0, 1000);
+    flushLine(line);
+    yawed(10.0);
+    check(locateAs(true, 0.0f, 0x6000003) && pose.bPoseIsValid, "(display: the game thread is handed a pose turned 10 degrees during frame 1000)");
+    publishFrame(1001, base + period, 12.8, 1000);
+    flushLine(line);
+    check(line.rfind("pose gap: mode display tid ", 0) == 0 && line.find("angle-to-next-drawn mean 2.800 max 2.800 deg") != std::string::npos,
+          "...and frame 1001 is drawn 2.8 degrees on: angle-to-next-drawn reads 2.800 (the lag of a pose located at the display time)");
+    check(line.find("angle-to-drawn mean 10.000 max 10.000 deg") != std::string::npos,
+          "...beside its angle to the frame it was handed in, 10.000 (the first angle is unchanged)");
+    yawed(10.0);
+    check(locateAs(false, 0.0f, 0x6000007), "(a pose at 10 degrees against frame 1001, which was drawn at 12.8)");
+    flushLine(line);
+    check(line.find("angle-to-drawn mean 2.800 max 2.800 deg") != std::string::npos,
+          "the angle to the drawn pose is against the LATEST frame's orientation as published (2.800), not against the one before");
+    f.owner.invoke([&] { PoseGapStats::Sample key{};key.thread = me;key.rva = 0x6000003;key.located = true;h.poseGap.note(key); });
+    publishFrame(1002, base + 2 * period, 12.8, 1000);
+    flushLine(line);
+    check(line.find(" calls 1 ") != std::string::npos && line.find("angle-to-next-drawn n/a") != std::string::npos, "a hand-out is measured once: the next publish measures nothing");
+    setMode(2);
+    publishFrame(1003, base + 3 * period, 12.8, 1000);   // (the mode change closes the old window here)
+    flushLine(line);
+    yawed(12.8);   // what the runtime locates at the next frame's display time
+    check(locateAs(true, 0.0f, 0x6000003), "(next: the game thread is handed the pose of the frame after, located one period ahead)");
+    publishFrame(1004, base + 4 * period, 12.8, 1000);
+    flushLine(line);
+    check(line.rfind("pose gap: mode next tid ", 0) == 0 && line.find("angle-to-next-drawn mean 0.000 max 0.000 deg") != std::string::npos,
+          "...and the next frame is drawn at that pose: angle-to-next-drawn reads 0.000");
+    // What is not measured.
+    yawed(10.0);
+    check(locateAs(false, 0.25f, 0x6000004), "(a call the filter did not flag, during frame 1004)");
+    publishFrame(1005, base + 5 * period, 12.8, 1000);
+    flushLine(line);
+    check(line.rfind("pose gap: mode next tid ", 0) == 0 && line.find("angle-to-next-drawn n/a") != std::string::npos, "an unflagged caller is not tracked: n/a");
+    check(locateAs(true, 0.0f, 0x6000003), "(a flagged call during frame 1005)");
+    publishFrame(1007, base + 7 * period, 12.8, 1000);   // frame 1006 was never published
+    flushLine(line);
+    check(line.find("angle-to-next-drawn n/a") != std::string::npos, "a pose handed out two frames ago (a frame was never published in between) is not measured against the wrong one");
+    check(locateAs(true, 0.0f, 0x6000003), "(a flagged call during frame 1007)");
+    f.owner.invoke([&] { h.dropPoseFrame(); });
+    publishFrame(1008, base + 8 * period, 12.8, 1000);
+    flushLine(line);
+    check(line.find("angle-to-next-drawn n/a") != std::string::npos, "dropping the cached frame (a reset, a session restart, a failed wait) forgets what was handed out");
+    h.featureFrameKnown = false;h.featureFrame.cullPose = 0;
+    yawed(0.0);
+    flushLine(line);
+  }
 
   // ====================================================================================================================================
   // The cache's lifetime. Each cell first proves the cache is live (a qualifying call is located at the display time), so that what follows is
@@ -200,7 +371,7 @@ template<class Check> void runHeadPoseCases(Check&& check) {
       queued = XR_SESSION_STATE_READY;
       running = h.state.reset(dispatch, instance(), session(), XR_ENVIRONMENT_BLEND_MODE_OPAQUE) == XR_SUCCESS &&
                 h.state.pollEvents() == XR_SUCCESS && h.state.startIfReady() == XR_SUCCESS;
-      h.publishPoseGap(restartDisplay, period, XrPosef{{0, 0, 0, 1}, {0, 0, 0}}, true, 0, XrVector3f{0, 0, 0}, 200000, collect);
+      h.publishPoseGap(++seq, restartDisplay, period, XrPosef{{0, 0, 0, 1}, {0, 0, 0}}, true, 0, XrVector3f{0, 0, 0}, 200000, collect);
     });
     check(running && answeredAt(restartDisplay), "(a started session, with a frame cached)");
     f.owner.invoke([&] {
@@ -230,7 +401,7 @@ template<class Check> void runHeadPoseCases(Check&& check) {
     f.owner.invoke([&] {
       queued = XR_SESSION_STATE_STOPPING;
       h.pumpEvents();
-      h.publishPoseGap(afterRestart, period, XrPosef{{0, 0, 0, 1}, {0, 0, 0}}, true, 0, XrVector3f{0, 0, 0}, 200002, collect);   // a stale publish into the stopped session
+      h.publishPoseGap(++seq, afterRestart, period, XrPosef{{0, 0, 0, 1}, {0, 0, 0}}, true, 0, XrVector3f{0, 0, 0}, 200002, collect);   // a stale publish into the stopped session
       prepared = !h.state.running() && h.prepareSessionRestart();
       dropped = !h.latestPoseFrame.valid;
       queued = XR_SESSION_STATE_READY;

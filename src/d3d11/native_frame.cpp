@@ -7,6 +7,7 @@
 #include "../common/openxr_resolution_entries.h"
 #include "journal_watch.h"
 #include "native_render_labels.h"
+#include "pose_latch_patch.h"
 
 #include <algorithm>
 #include <cmath>
@@ -237,39 +238,45 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
                           EdvrNativeFrameOutput* output) {
     std::lock_guard<std::mutex> lock(g_mutex);
     State* state = identify(context);
-    // A version 1, 2, 3 or 4 caller is an openvr_api.dll from before the
-    // comfort fade (or, earlier, the channel probe, turbo pacing or the
-    // field-of-view trim) existed. Each gets exactly the fields it knows
-    // about, and whatever it cannot carry stays out of its struct entirely.
-    const bool wantsFade = output &&
-        output->version == EDVR_NATIVE_FRAME_VERSION_5 &&
+    // A version 1, 2, 3, 4 or 5 caller is an openvr_api.dll from before the
+    // pose-time switch (or, earlier, the comfort fade, the channel probe,
+    // turbo pacing or the field-of-view trim) existed. Each gets exactly the
+    // fields it knows about, and whatever it cannot carry stays out of its
+    // struct entirely.
+    const bool wantsPose = output &&
+        output->version == EDVR_NATIVE_FRAME_VERSION_6 &&
         output->size == sizeof(*output);
-    const bool wantsChannel = output && !wantsFade &&
+    const bool wantsFade = output && !wantsPose &&
+        output->version == EDVR_NATIVE_FRAME_VERSION_5 &&
+        output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_5;
+    const bool wantsChannel = output && !wantsPose && !wantsFade &&
         output->version == EDVR_NATIVE_FRAME_VERSION_4 &&
         output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_4;
-    const bool wantsPacing = output && !wantsFade && !wantsChannel &&
+    const bool wantsPacing = output && !wantsPose && !wantsFade && !wantsChannel &&
         output->version == EDVR_NATIVE_FRAME_VERSION_3 &&
         output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_3;
-    const bool wantsTrim = output && !wantsFade && !wantsChannel && !wantsPacing &&
+    const bool wantsTrim = output && !wantsPose && !wantsFade && !wantsChannel && !wantsPacing &&
         output->version == EDVR_NATIVE_FRAME_VERSION_2 &&
         output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_2;
-    const bool legacy = output && !wantsFade && !wantsChannel && !wantsPacing && !wantsTrim &&
+    const bool legacy = output && !wantsPose && !wantsFade && !wantsChannel && !wantsPacing && !wantsTrim &&
         output->version == EDVR_NATIVE_FRAME_VERSION_1 &&
         output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_1;
     if (!state || state != g_current || !state->active || !input || !output ||
         input->size != sizeof(*input) || input->version != EDVR_NATIVE_FRAME_VERSION_1 ||
-        (!wantsFade && !wantsChannel && !wantsPacing && !wantsTrim && !legacy) ||
+        (!wantsPose && !wantsFade && !wantsChannel && !wantsPacing && !wantsTrim && !legacy) ||
         input->generation != state->generation || input->referenceGeneration == 0 ||
         input->sequence == 0 || input->sequence <= state->sequenceFloor ||
         input->valid > 1 || (input->valid && !rigidPose(input->physicalHead))) return E_INVALIDARG;
 
     EdvrNativeFrameOutput result{};
-    result.size = wantsFade ? sizeof(result)
+    result.size = wantsPose ? sizeof(result)
+                 : wantsFade ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_5
                  : wantsChannel ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_4
                  : wantsPacing ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_3
                  : wantsTrim  ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_2
                               : EDVR_NATIVE_FRAME_OUTPUT_SIZE_1;
-    result.version = wantsFade ? EDVR_NATIVE_FRAME_VERSION_5
+    result.version = wantsPose ? EDVR_NATIVE_FRAME_VERSION_6
+                    : wantsFade ? EDVR_NATIVE_FRAME_VERSION_5
                     : wantsChannel ? EDVR_NATIVE_FRAME_VERSION_4
                     : wantsPacing ? EDVR_NATIVE_FRAME_VERSION_3
                     : wantsTrim  ? EDVR_NATIVE_FRAME_VERSION_2
@@ -282,6 +289,17 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
     // offsetEnabled, offsetGamePoses) is retired: those slots stay zero, so a
     // runtime built before 2026-10-07 reads "no offset" and applies none.
     const bool physicalValid = input->valid != 0;
+
+    // advanced.cull_pose (src\common\cull_pose.h, docs\terrain-culling.md; TEMPORARY): the instant the runtime locates Elite's game-thread
+    // head pose at, and for the _direct modes the 2-byte engine patch (pose_latch_patch.h). Only a version 6 caller has the slot: an older
+    // runtime is told nothing (it reads the default, display, the shipped behaviour), never has the patch applied, and has one that was
+    // applied put back. The patch is written here, at the frame boundary the owner thread reaches inside WaitGetPoses, and never from
+    // inside a pose call.
+    const auto poseLogLine = [](const char* line) { edvr::Log::get().note("%s", line); };
+    const edvr::cullpose::Mode poseRequested = wantsPose
+        ? edvr::cullpose::parseMode(edvr::Config::get().getString("advanced.cull_pose", "display").c_str())
+        : edvr::cullpose::Mode::Display;
+    result.cullPose = edvr::cullpose::frame(poseRequested, poseLogLine);
 
     // The worn headset's entry in each of the three lists, resolved from the
     // last render-settings query's labels and cached between changes.

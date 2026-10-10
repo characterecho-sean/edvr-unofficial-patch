@@ -2,55 +2,62 @@
 
 ## Status
 
-- **State (2026-10-09): CLOSED. The head-pose fix ships as behaviour, with no
-  key.** Elite's game thread asks the runtime for the head pose "now"
+- **State (2026-10-09, evening): REOPENED -- a residual on RAPID head turns is
+  under investigation.** The head-pose fix ships as behaviour, with no key.
+  Elite's game thread asks the runtime for the head pose "now"
   (GetDeviceToAbsoluteTrackingPose, return RVA 0x4E3881, prediction about 0 s)
   and culls planet terrain with it, while the frame is drawn with the pose at
-  its display time. Flight 3 (Crystal Super, Pimax OpenXR, build e256e9bb,
-  `edvr_log.py --tally pose`): the "now" pose was **41 to 44 ms** older than
-  the drawn frame's display time and turned 0.9 deg on average, **up to 4.1
-  deg**, from the drawn pose, r = **+0.98** against head speed. A head turn's
-  leading edge was missing: the black squares. Answering that call at the
-  drawn frame's display time (`display`) stopped the squares on gaze switches,
-  with no engine patch, no extra pixels and no tuning. See "What EDVR does now".
+  its display time. Flight 3 (Crystal Super, Pimax OpenXR): that pose was
+  **41 to 44 ms** older than the drawn one and up to **4.1 deg** from it, r =
+  **+0.98** against head speed. Answering it at the drawn frame's display time
+  (`display`) stopped the squares on gaze switches. See "What EDVR does now".
+- **Residual (rc flight, v0.18.3-164-gf9597bd3, Crystal Super, Pimax OpenXR).**
+  Gaze switches are clean, but black terrain squares still show at the OUTER
+  edges on RAPID head turns on approach to a planet. The runtime log says
+  `display` acts fully there (gap 0 ms, mean angle to the latest frame's render
+  pose 0.003-0.029 deg, fallbacks only while loading), yet one window reads a
+  max of 2.8 deg. **H-onef (untested):** the game thread prepares frame N+1
+  while the render thread draws N; during N's render the latch is set, so it
+  reuses the pose cached for N and its cull camera is drawn one frame later.
+  `display` then leaves one period (~11 ms; 2.8 deg at 250 deg/s).
+- **Test build (NOT FLOWN, TEMPORARY).** `advanced.cull_pose` = `display`
+  (default, = what ships) | `now` | `next` | `display_direct` | `next_direct`,
+  live; the `_direct` modes hot-patch the latch branch (build 332841 only). The
+  `pose gap:` line gains `mode` and `angle-to-next-drawn` (the pose each
+  game-thread caller was handed in frame N against the render pose of N+1):
+  about 0 under `next`, head speed x one period under `display`. Frame ABI:
+  `EdvrNativeFrameOutput` version 6 adds one `cullPose` word after the fade
+  level (an older half, or a code past 4, reads display); versions 7 and 8 of
+  earlier test builds stay deleted. Protocol and verdict rule: "2026-10-09, rc
+  flight" at the end.
 - **What ships.** A call to GetDeviceToAbsoluteTrackingPose is answered at the
   latest frame's predictedDisplayTime when its return address is inside the
-  game's own image and its prediction is under 5 ms either way (a real
-  prediction, or any other caller, is located as it always was). No build gate:
-  it holds across a game update. The first such call logs once, `head pose:
-  Elite's "now" requests are answered at the drawn frame's display time (first
-  from exe+0x...)`, and up to 8 further callers are named the same way. The
-  `pose gap:` line, once per caller per 60 s in the runtime log, stays as a
-  diagnostic (`python tools\edvr_log.py --tally pose`): for Elite's "now" caller
-  it now reads a gap of 0.00 ms and an angle of 0.000 deg; a caller outside the
-  image, or with a real prediction, shows the true lag.
-- **Removed (2026-10-09, five commits):** the terrain guard, with all six keys
+  game's own image and its prediction is under 5 ms either way; any other
+  caller is located as it always was. No build gate. The first such call logs
+  `head pose: Elite's "now" requests are answered at the drawn frame's display
+  time (first from exe+0x...)`, up to 8 further callers likewise. The cached
+  display time is dropped wherever the origin, session or geometry publication
+  is invalidated, is not used once more than one period (at most 50 ms) behind
+  now, and a TIME_INVALID is retried once at now + prediction.
+- **Removed (2026-10-09, five commits):** the terrain guard with all six keys
   (`fix.cull_guard`, `_percent`, `_fraction_h`, `_fraction_v`, `_headsets`,
-  `advanced.cull_guard_channel`; an old line is carried by the installer as
-  "no longer used"); the temporary instruments `advanced.cull_probe` (caller
-  census, selective lies, cycle and measure, terrain-draw counter, mono camera
-  hooks, `--tally cull`) and `advanced.cull_pose` (and its latch-bypass patch,
-  which was never needed). The FOV trim that shared the guard's stage machine is
-  untouched; its engine is now `native_fov_trim.h`.
-- **2026-10-09, release review finding 1:** the cached display time is dropped wherever the origin, the session or the geometry
-  publication is invalidated (recenter, session stop and restart, a failed wait or reset, a fatal failure), is not used once it is more
-  than one display period (at most 50 ms) behind now, and a display-time locate the runtime refuses (TIME_INVALID) is retried once at
-  now + prediction. Until the next wait publishes a frame, a qualifying call is located at now + prediction.
-- **Frame ABI.** `EdvrNativeFrameOutput` keeps every shape's size and layout:
-  the guard's slots in versions 1 and 4 stay as zeroed reserved words (an older
-  runtime reads a guard that is off); versions 6, 7 and 8 existed only on this
-  branch and are deleted, so the struct is main's version 5 again and the ladder
-  steps a half built from a test build down to it.
+  `advanced.cull_guard_channel`; the installer carries an old line as "no
+  longer used") and the instrument `advanced.cull_probe` (caller census,
+  selective lies, mono camera hooks, `--tally cull`). `advanced.cull_pose` went
+  with them and is back, in a new form, as the test key above. The FOV trim
+  that shared the guard's stage machine is untouched (`native_fov_trim.h`).
 - **Ruled out** (evidence under "Status detail"): a static frustum deficit (a
   steady head shows no squares), the fov getter as the culler's input, the
   09-23 "same +19.4% ask" premise, H3, the union model, H2, FUN_13ACC40 as the
   consumer. **UNRELIABLE:** the 09-23 verdict "the culler follows
   `GetProjectionRaw`, not the matrix" (a pilot's judgement under periphery
   flicker, a 10-degree trim and a 1.6% difference).
-- **Next (nothing is blocked):** one more flight on the cleaned build, ideally on
-  the Quest 3 too, to confirm the squares stay gone with no key set. The
-  pilot's one unreproduced sighting (under `next_direct`, one frame of
-  over-lead) is moot: `next` is not a shipped mode.
+- **Next:** one flight of the test build, same approach and the same rapid
+  turns, three runs: `display` (control), `next`, `next_direct`. Read
+  `python tools\edvr_log.py --tally pose` for the angle-to-next-drawn of
+  Elite's caller (exe+0x4E3881) per mode, and the squares by eye. The pilot's
+  one earlier sighting under `next_direct` (one frame of over-lead) is a reason
+  to read `next` before `next_direct`.
 
 ## The bug in short
 
@@ -897,3 +904,40 @@ the instructions say; **INFERRED** is what follows from them.
 **Reading it.** Under `off` the game thread's gap should be near the time since the last frame began (several ms) and its angle should grow with
 head speed (r near +1 in `--tally pose`); display should read 0 ms and next one period. If squares go with a smaller angle, the culler is on that
 pose; if the squares do not change under any mode, it is not (and the instrument has still said how stale the pose was).
+
+## 2026-10-09, rc flight — residual squares on rapid turns (H-onef), and the second test build
+
+**Flight.** Main at v0.18.3-164-gf9597bd3 (the head-pose fix shipped as behaviour), Crystal Super on Pimax OpenXR, the Frontier copy. Gaze switches no
+longer show squares. On approach to a planet, a RAPID head turn still shows black terrain squares at the OUTER edges. The runtime log's `pose gap:` lines
+for Elite's caller (tid 24212, exe+0x4E3881) say the shipped `display` is working: gap 0.00 ms, mean angle to the latest frame's render pose 0.003 to
+0.029 deg, fallbacks only while loading. One window has a max angle-to-drawn of 2.8 deg. That figure is against the latest frame's render pose, so it is
+not the lag between what the game thread is handed and what is drawn when it is used.
+
+**H-onef (untested).** The game thread prepares frame N+1 while the render thread draws N. While N renders the latch at [W+0x111] is set, so the game
+thread's call does not reach 0x4E384F and Elite reuses the pose cached for N (round 6). That pose is drawn one frame later, as N+1's cull camera. Located
+at D_N (display time), it is one display period behind D_N+1: about 11 ms, which is 2.8 deg at 250 deg/s and nothing at a gaze switch. The squares then
+sit on the leading outer edge of a fast turn. Two candidate fixes, both in the test build: answer at D_N + one period (`next`), and keep the game thread
+off the latched pose so the call is always answered fresh (`display_direct`, `next_direct`).
+
+**The test build** (not flown; TEMPORARY, to be removed or shipped as behaviour when the arc closes).
+
+- `advanced.cull_pose` = `display` (the default, exactly what ships; an unset key changes nothing) | `now` (the pre-fix answer, a control) | `next` |
+  `display_direct` | `next_direct`. Only Elite's own "now" calls move (return address in the game's image, prediction under 5 ms either way); the
+  freshness guard (one period, at most 50 ms) and the TIME_INVALID retry stay, and `next` also falls back to now + prediction when the period cannot
+  be added or a reference-space change falls between the display time and the target. `next` reuses `nextPredictionTime`, the arithmetic the game-pose
+  array uses. The mode travels in `EdvrNativeFrameOutput` version 6 (`cullPose`); no build gate for the time modes.
+- The `_direct` modes restore the round-6 patch: `0F 84` to `90 E9` at RVA 0x4E36EE, one atomic aligned eight-byte store over 0x4E36E8..0x4E36EF at the
+  frame boundary, gated on the PE stamp (1788384820), the image size and the six bytes, restored on leaving a `_direct` mode; refused elsewhere.
+- Graphics log, on a change: `cull pose: <mode> -- Elite's game-thread head pose is located at <now+prediction | the frame's display time | display
+  time + one period>; latched-pose bypass <on|off|refused: why>`. A key left unset writes nothing.
+- Runtime log, `pose gap:` (every 60 s; a mode change closes the window): `pose gap: mode <m> tid T calls n from exe+0x… prediction p ms
+  target-minus-display mean a ms (min b max c) angle-to-drawn mean d max e deg angle-to-next-drawn mean g max h deg head f deg/s waitgetposes w failed k`.
+  **angle-to-next-drawn** is new: the angle between the orientation each game-thread caller (thread, return RVA) was last handed during frame N and the
+  render orientation published for N+1, measured at the N+1 publish; one orientation per caller, no allocation. `--tally pose` tables it per mode and
+  caller, with the largest window.
+
+**Verdict rule.** Same approach and turns, one run each of `display`, `next`, `next_direct`. If H-onef holds, `display` reads angle-to-next-drawn near
+head speed x one period (mean tens of hundredths of a degree and a max of a few degrees on a fast turn), `next` reads near 0, and the squares go or
+shrink under `next`. If angle-to-next-drawn is near 0 under `next` and the squares remain, H-onef is wrong (record `ruled out: H-onef, because ...`)
+and the culler is not working from this pose at that instant. If it does not fall under `next`, the cached pose is still reaching Elite: read
+`next_direct`, which closes it. Nothing is ruled out yet.

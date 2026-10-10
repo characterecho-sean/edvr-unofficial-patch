@@ -26,6 +26,12 @@
 // d3d11.dll that refuses the shape steps down and reads "no fade" (0), never
 // black.
 #define EDVR_NATIVE_FRAME_VERSION_5 5u
+// Version 6 adds cullPose to the END and nothing else (the terrain-culling arc's pose-time switch, advanced.cull_pose,
+// src\common\cull_pose.h; TEMPORARY), under the same hand-copied-DLLs rule: a version 1 to 5 caller never learns of it, and a runtime
+// that asks version 6 of a d3d11.dll that refuses the shape steps down and reads the switch as 0, which is the default, `display`: the
+// shipped behaviour. A test build that never reached main once used version 6 for other fields (the canted-display keys); the sizes differ,
+// and a provider refuses a size that does not match the version it names, so a half from that build steps down to 5.
+#define EDVR_NATIVE_FRAME_VERSION_6 6u
 
 // The game producer owns the device and generation passed at acquire. The
 // methods in the table are CPU-only and are called by the XR owner after the
@@ -83,6 +89,12 @@ struct EdvrNativeFrameOutput {
     // freshness-checked by the provider (comfort_fade.h): a signal that went
     // stale reads 0.
     float fadeAlpha;
+    // Version 6 and later (TEMPORARY, the terrain-culling arc). The instant the runtime locates Elite's game-thread head pose at, and
+    // whether the latched-pose branch is bypassed (advanced.cull_pose): 0 display (the latest frame's display time: the shipped behaviour
+    // and the default), 1 now (before the fix: now + the prediction Elite passes), 2 next (display time + one period), 3 display_direct,
+    // 4 next_direct. The graphics half applies the engine patch the _direct modes name itself; the runtime reads 3 and 4 as 0 and 2.
+    // Anything else reads as 0.
+    uint32_t cullPose;
 };
 
 // The size the fields through resubmitEnabled occupy, which is what a
@@ -104,6 +116,10 @@ struct EdvrNativeFrameOutput {
 // caller's struct is, with no tail padding before fadeAlpha.
 #define EDVR_NATIVE_FRAME_OUTPUT_SIZE_4 \
     ((uint32_t)offsetof(EdvrNativeFrameOutput, fadeAlpha))
+// The size the fields through fadeAlpha occupy, which is what a version 5
+// caller's struct is, with no tail padding before cullPose.
+#define EDVR_NATIVE_FRAME_OUTPUT_SIZE_5 \
+    ((uint32_t)offsetof(EdvrNativeFrameOutput, cullPose))
 
 struct EdvrNativeFrameDecision {
     uint32_t size, version;

@@ -12,6 +12,7 @@
 // whose return address lies inside the game executable's mapped image and whose prediction is under 5 ms either way. A real prediction (a
 // caller that wants the future), a caller outside the image (an overlay, a tool) and a call before any frame has been waited are answered
 // as they always were, at the wall clock plus the prediction.
+#include "../common/cull_pose.h"
 #include "exe_module.h"
 
 #include <cmath>
@@ -62,23 +63,52 @@ inline bool displayTimeFresh(int64_t displayTime, int64_t periodNs, int64_t now)
   return now - displayTime <= poseFrameTolerance(periodNs);          // both positive, so the difference cannot overflow
 }
 
+// WHICH INSTANT. advanced.cull_pose (common/cull_pose.h, TEMPORARY) chooses the instant an Elite "now" call is located at: Now is the
+// behaviour before the fix, Display (the default, and exactly the shipped behaviour) is the latest frame's display time, and Next is one
+// display period after it (what the game-pose array of WaitGetPoses already uses for the gameplay prediction). The test: Elite's game
+// thread prepares frame N+1 while the render thread draws N, so a cull camera located at N's display time is one period older than the
+// frame it is drawn in. Returns false (the call is located at now + prediction, counted as a fallback) when `time` is Now, when there is no
+// usable display time, when the cached frame is no longer fresh (displayTimeFresh, on the CACHED frame, whatever the mode), or, for Next,
+// when the period cannot be added (`addPeriod(display, period, out)`, space_pose.h nextPredictionTime) or a reference-space change falls
+// between the display time and the target (`crosses(from, to)`, reference_changes.h): a pose there would be in another origin.
+template <class AddPeriod, class Crosses>
+inline bool poseTargetTime(cullpose::Time time, int64_t latestDisplayTime, int64_t periodNs, int64_t now, AddPeriod&& addPeriod, Crosses&& crosses, int64_t* out) {
+  if (time == cullpose::Time::Now) return false;
+  int64_t at = 0;
+  if (!displayTimeTarget(latestDisplayTime, &at)) return false;
+  if (!displayTimeFresh(at, periodNs, now)) return false;
+  if (time == cullpose::Time::Next) {
+    int64_t next = 0;
+    if (!addPeriod(at, periodNs, next)) return false;
+    if (crosses(at, next)) return false;
+    at = next;
+  }
+  *out = at;
+  return true;
+}
+
 // The log lines that say the fix is acting, and for whom. The first caller to qualify writes one line; each further DISTINCT return RVA that
 // qualifies writes one more, up to kFurtherCap, so a caller that turns up after a game update is named. One more line says the cap was reached.
 //   head pose: Elite's "now" requests are answered at the drawn frame's display time (first from exe+0x...)
 //   head pose: another Elite caller of "now" is answered at the drawn frame's display time (exe+0x...)
 //   head pose: more than 8 further callers of "now"; the rest are not logged
+// Under advanced.cull_pose = next the phrase is "one display period after the drawn frame's display time" instead (the mode in force when
+// the caller is first seen; the cull pose line the graphics half writes names every change).
 class HeadPoseSightings {
  public:
   static constexpr unsigned kFurtherCap = 8;
   template <class Sink>
-  void note(uint32_t returnRva, Sink&& sink) {
+  void note(uint32_t returnRva, Sink&& sink) { note(returnRva, cullpose::Time::Display, sink); }
+  template <class Sink>
+  void note(uint32_t returnRva, cullpose::Time time, Sink&& sink) {
     for (unsigned i = 0; i < count_; ++i)
       if (seen_[i] == returnRva) return;
-    char line[160];
+    const char* at = time == cullpose::Time::Next ? "one display period after the drawn frame's display time" : "at the drawn frame's display time";
+    char line[192];
     if (count_ == 0) {
-      std::snprintf(line, sizeof(line), "head pose: Elite's \"now\" requests are answered at the drawn frame's display time (first from exe+0x%X)", returnRva);
+      std::snprintf(line, sizeof(line), "head pose: Elite's \"now\" requests are answered %s (first from exe+0x%X)", at, returnRva);
     } else if (count_ <= kFurtherCap) {
-      std::snprintf(line, sizeof(line), "head pose: another Elite caller of \"now\" is answered at the drawn frame's display time (exe+0x%X)", returnRva);
+      std::snprintf(line, sizeof(line), "head pose: another Elite caller of \"now\" is answered %s (exe+0x%X)", at, returnRva);
     } else {
       if (!capSaid_) {
         capSaid_ = true;

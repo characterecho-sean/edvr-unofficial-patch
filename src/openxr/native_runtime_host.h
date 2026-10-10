@@ -207,7 +207,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   NativeFrameClient features;
   NativeFssClient fss;
   NativeFovTrim fovTrim;
-  EdvrNativeFrameOutput featureFrame{sizeof(featureFrame),EDVR_NATIVE_FRAME_VERSION_5};
+  EdvrNativeFrameOutput featureFrame{sizeof(featureFrame),EDVR_NATIVE_FRAME_VERSION_6};
   EdvrNativeFrameDecision featureDecision{sizeof(featureDecision),EDVR_NATIVE_FRAME_VERSION_1};
   bool featureFrameKnown=false;
   uint64_t fssHealedEyes[2]{},featureChanges=0;
@@ -389,11 +389,14 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   // used (displayTimeFresh), so nothing the game was told earlier outlives the state it was told in.
   struct PoseFrame {
     bool valid=false,orientationKnown=false,speedKnown=false;
+    uint64_t sequence=0;
     XrTime displayTime=0;XrDuration period=0;
     float orientation[4]{0,0,0,1};
     double speedDegPerSec=0;
   } latestPoseFrame;
-  void dropPoseFrame() {latestPoseFrame=PoseFrame{};}
+  // What each "now" caller was last handed and during which frame (pose_gap.h): measured against the next frame's render pose.
+  HandedOutPoses handedOut;
+  void dropPoseFrame() {latestPoseFrame=PoseFrame{};handedOut.clear();}
   // The clock Elite's "now" pose calls read (a rig substitutes its own so "now" is a number it chooses), and the display-time locates the runtime
   // refused with XR_ERROR_TIME_INVALID and that were located at now + prediction instead.
   CounterNow headClock=counterNow;
@@ -863,16 +866,25 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   // The frame the game now holds, for Elite's "now" pose calls to be located at and measured against, and the pose-gap instrument's
   // window: counted here, written here, so the lines come from the one thread that already logs per frame.
   template<class Sink>
-  void publishPoseGap(XrTime displayTime,XrDuration period,const XrPosef& headPose,bool poseValid,XrSpaceVelocityFlags velocityFlags,
+  void publishPoseGap(uint64_t sequence,XrTime displayTime,XrDuration period,const XrPosef& headPose,bool poseValid,XrSpaceVelocityFlags velocityFlags,
                       const XrVector3f& angularVelocity,uint64_t nowMs,Sink&& sink) {
-    latestPoseFrame.valid=true;latestPoseFrame.displayTime=displayTime;latestPoseFrame.period=period;
+    const float renderOrientation[4]={headPose.orientation.x,headPose.orientation.y,headPose.orientation.z,headPose.orientation.w};
+    // The poses the game thread was handed during the frame before this one are drawn now: measure them against this render pose (before the
+    // window can close, so the angle lands in the window whose calls were handed the poses).
+    handedOut.resolve(sequence,poseValid,renderOrientation,[&](uint32_t thread,uint32_t rva,double angleDeg){poseGap.noteNext(thread,rva,angleDeg);});
+    latestPoseFrame.valid=true;latestPoseFrame.sequence=sequence;latestPoseFrame.displayTime=displayTime;latestPoseFrame.period=period;
     latestPoseFrame.orientationKnown=poseValid;
-    latestPoseFrame.orientation[0]=headPose.orientation.x;latestPoseFrame.orientation[1]=headPose.orientation.y;
-    latestPoseFrame.orientation[2]=headPose.orientation.z;latestPoseFrame.orientation[3]=headPose.orientation.w;
+    for(unsigned k=0;k<4;++k)latestPoseFrame.orientation[k]=renderOrientation[k];
     latestPoseFrame.speedKnown=(velocityFlags&XR_SPACE_VELOCITY_ANGULAR_VALID_BIT)!=0;
     latestPoseFrame.speedDegPerSec=latestPoseFrame.speedKnown?angularSpeedDegrees(angularVelocity.x,angularVelocity.y,angularVelocity.z):0.0;
     poseGap.noteWait();
-    poseGap.flushIfDue(nowMs,sink);
+    poseGap.flushIfDue(nowMs,static_cast<uint32_t>(cullPoseMode()),sink);
+  }
+  // advanced.cull_pose as the last frame answer carried it (common/cull_pose.h, TEMPORARY): which instant Elite's "now" calls are located at.
+  // The default, display, is what is shipped, and it is what a run with no answer yet, an older provider or an unset key reads. (The provider
+  // is only closed at shutdown, so a kept answer is never one from a provider that has gone.)
+  cullpose::Mode cullPoseMode() const {
+    return featureFrameKnown?cullpose::modeFromCode(featureFrame.cullPose):cullpose::Mode::Display;
   }
   // Whether the runtime's hidden-area mesh may be handed to the game this frame.
   // It is cut for the runtime's own frustum and Elite reads it once, so a trim,
@@ -1134,7 +1146,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       gameGeometry.width[eye]=dims.width;gameGeometry.height[eye]=dims.height;
     }
     if(features.acquired()) {
-      EdvrNativeFrameOutput next{sizeof(next),EDVR_NATIVE_FRAME_VERSION_5};
+      EdvrNativeFrameOutput next{sizeof(next),EDVR_NATIVE_FRAME_VERSION_6};
       if(features.begin(located,poses.read().originGeneration,next)!=S_OK) {
         boundary.clear();return fail(XR_ERROR_VALIDATION_FAILURE);
       }
@@ -1248,7 +1260,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     snapshot.renderPose=render.pose;snapshot.gamePose=game.pose;snapshot.posesAvailable=true;
     if(!poses.publish(snapshot)){boundary.clear();return fail(XR_ERROR_VALIDATION_FAILURE);}
     out=snapshot;lastCompositorResult=XR_SUCCESS;
-    publishPoseGap(frame.predictedDisplayTime,frame.predictedDisplayPeriod,located.headPose,render.pose.bPoseIsValid,
+    publishPoseGap(frame.sequence,frame.predictedDisplayTime,frame.predictedDisplayPeriod,located.headPose,render.pose.bPoseIsValid,
       velocity.velocityFlags,velocity.angularVelocity,GetTickCount64(),[](const char* gapLine){nativeTracePuts(gapLine);});
     if(timingFrameActive && FAILED(timing.waitEnd(timingSequence,true,static_cast<int64_t>(frame.predictedDisplayPeriod))))
       timingInvalidate();
@@ -2249,15 +2261,16 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     poseGap.note(sample);
     return located;
   }
-  // The instant an Elite "now" call is located at: the latest frame's display time; false when there is none (no frame waited since the origin,
-  // session or geometry was last invalidated, a display time that is not positive) or when it has fallen more than one display period behind
-  // `now` (displayTimeFresh), and the call is located at now + prediction as it always was.
-  bool poseTargetFor(bool display,XrTime now,XrTime& target) {
-    if(!display||!latestPoseFrame.valid)return false;
-    int64_t at=0;
-    if(!displayTimeTarget(latestPoseFrame.displayTime,&at))return false;
-    if(!displayTimeFresh(at,latestPoseFrame.period,now))return false;
-    target=at;return true;
+  // The instant an Elite "now" call is located at under `time` (advanced.cull_pose; head_pose_time.h poseTargetTime): the latest frame's
+  // display time, or one period after it; false when there is none (the time is Now, no frame waited since the origin, session or geometry
+  // was last invalidated, a display time that is not positive), when the cached frame has fallen more than one display period behind `now`
+  // (displayTimeFresh), or when the period cannot be added or a reference change falls between, and the call is located at now + prediction
+  // as it always was.
+  bool poseTargetFor(cullpose::Time time,XrTime now,XrTime& target) {
+    if(time==cullpose::Time::Now||!latestPoseFrame.valid)return false;
+    return poseTargetTime(time,latestPoseFrame.displayTime,latestPoseFrame.period,now,
+      [](int64_t display,int64_t period,int64_t& out){return nextPredictionTime(display,period,out);},
+      [&](int64_t from,int64_t to){return changes.crosses(from,to);},&target);
   }
   bool locateHeadOwned(uint64_t generation,vr::ETrackingUniverseOrigin origin,float prediction,const HeadCall& call,vr::TrackedDevicePose_t& out,
                        PoseGapStats::Sample& sample) {
@@ -2271,13 +2284,16 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     HeadLocatorStage headLocateStage=HeadLocatorStage::None;
     XrTime explicitTarget=0;
     const LocatorDispatch dispatch{api.convertTime,api.locateSpace};
-    // "Now" is read once, and only for a call the display time could answer: it decides whether the cached display time is still good, and if
-    // it is not (or the runtime refuses it) it is the instant the call falls back to. A clock that cannot be read leaves the plain path, which
-    // reads it again and fails the way it always did.
+    // Which instant this call is located at: only a call the filter answers (Elite's own "now") is moved off the wall clock, and advanced.cull_pose
+    // says where to (display time by default; now+prediction is the behaviour before the fix, kept as a control).
+    const cullpose::Time poseTime=call.display?cullpose::timeOf(cullPoseMode()):cullpose::Time::Now;
+    // "Now" is read once, and only for a call an explicit instant could answer: it decides whether the cached display time is still good, and
+    // if it is not (or the runtime refuses it) it is the instant the call falls back to. A clock that cannot be read leaves the plain path,
+    // which reads it again and fails the way it always did.
     XrTime now=0;
-    const bool nowKnown=call.display&&latestPoseFrame.valid&&
+    const bool nowKnown=poseTime!=cullpose::Time::Now&&latestPoseFrame.valid&&
       HeadLocator{}.currentTime(dispatch,instance,headClock,&headLocateStage,boundary.estimateNow(),now)==XR_SUCCESS;
-    bool explicitTime=nowKnown&&poseTargetFor(call.display,now,explicitTarget);
+    bool explicitTime=nowKnown&&poseTargetFor(poseTime,now,explicitTarget);
     const auto locatePlain=[&]{
       return nowKnown
         ?HeadLocator{}.locateFrom(dispatch,view,seated.space(),now,prediction,head,&lastHeadTime,&headLocateStage)
@@ -2295,7 +2311,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         lastHeadResult=locatePlain();
       }
     } else lastHeadResult=locatePlain();
-    sample.fallback=call.display&&!explicitTime;
+    sample.fallback=poseTime!=cullpose::Time::Now&&!explicitTime;
     if(lastHeadResult!=XR_SUCCESS) {
       // Diagnostic only (docs/linux-native-openxr-launch-centre-2026-09-22.md):
       // this per-frame path was silent before this build. Rate-limited so a
@@ -2313,7 +2329,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       headLocateConsecutiveFailures=0;
     }
     // Said when the fix acts, and for each further distinct Elite caller (a new one after a game update shows up here).
-    if(explicitTime)poseSightings.note(call.rva,[](const char* sighting){nativeTracePuts(sighting);});
+    if(explicitTime)poseSightings.note(call.rva,poseTime,[](const char* sighting){nativeTracePuts(sighting);});
     vr::TrackedDevicePose_t pose{};pose.bDeviceIsConnected=true;
     pose.mDeviceToAbsoluteTracking.m[0][0]=pose.mDeviceToAbsoluteTracking.m[1][1]=pose.mDeviceToAbsoluteTracking.m[2][2]=1;
     constexpr auto valid=XR_SPACE_LOCATION_POSITION_VALID_BIT|XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
@@ -2327,6 +2343,12 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         sample.angleKnown=true;sample.angleDeg=quaternionAngleDegrees(latestPoseFrame.orientation,returned);
       }
       if(latestPoseFrame.speedKnown){sample.speedKnown=true;sample.speedDegPerSec=latestPoseFrame.speedDegPerSec;}
+      // What the game thread was just handed, tagged with the frame it was handed during: measured against the NEXT frame's render pose at the
+      // next WaitGetPoses publish (angle-to-next-drawn).
+      if(call.display&&pose.bPoseIsValid) {
+        const float handed[4]={head.pose.orientation.x,head.pose.orientation.y,head.pose.orientation.z,head.pose.orientation.w};
+        handedOut.note(call.thread,call.rva,latestPoseFrame.sequence,handed);
+      }
     }
     pose.eTrackingResult=pose.bPoseIsValid?vr::TrackingResult_Running_OK:vr::TrackingResult_Running_OutOfRange;
     if(pose.bPoseIsValid){double matrix[4][4];detail::rigid(head.pose,matrix);if(!detail::narrow(matrix,pose.mDeviceToAbsoluteTracking))return false;}

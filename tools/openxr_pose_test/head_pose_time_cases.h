@@ -1,8 +1,10 @@
 #pragma once
 // Elite's "now" head pose, answered at the drawn frame's display time (src/openxr/head_pose_time.h; docs\terrain-culling.md): which calls it
 // answers (a return address inside the game's image and a prediction under 5 ms either way, at its boundary and on both signs), which it
-// leaves alone, the instant it forms, and the log lines that say whom it is answering, and when the cap is hit.
+// leaves alone, the instant it forms under each advanced.cull_pose time (now, display, next), and the log lines that say whom it is answering,
+// and when the cap is hit.
 #include "../../src/openxr/head_pose_time.h"
+#include "../../src/openxr/space_pose.h"
 
 #include <cmath>
 #include <limits>
@@ -11,6 +13,7 @@
 
 namespace head_pose_time_cases {
 using namespace edvr::openxr;
+namespace cullpose = ::edvr::cullpose;
 
 template<class Check>
 void runHeadPoseTimeCases(Check&& check) {
@@ -75,6 +78,53 @@ void runHeadPoseTimeCases(Check&& check) {
     check(displayTimeFresh(INT64_MAX, period, INT64_MAX) && displayTimeFresh(INT64_MAX, period, INT64_MAX - 1) && !displayTimeFresh(INT64_MAX - 3 * period, period, INT64_MAX),
           "the comparison does not overflow at the ends of the range");
   }
+  // ---- the instant, per advanced.cull_pose time -----------------------------------------------------------------------------------------------
+  {
+    using cullpose::Time;
+    constexpr int64_t period = 11111111, display = 5000000000, lead = 42000000;
+    const auto add = [](int64_t d, int64_t p, int64_t& out) { return nextPredictionTime(d, p, out); };
+    const auto never = [](int64_t, int64_t) { return false; };
+    int64_t at = -7;
+    check(poseTargetTime(Time::Display, display, period, display - lead, add, never, &at) && at == display,
+          "cull_pose display: the instant is the latest frame's display time (the shipped behaviour)");
+    at = -7;
+    check(poseTargetTime(Time::Next, display, period, display - lead, add, never, &at) && at == display + period,
+          "cull_pose next: the instant is the display time plus one period of that frame");
+    at = -7;
+    check(!poseTargetTime(Time::Now, display, period, display - lead, add, never, &at) && at == -7,
+          "cull_pose now: no explicit instant (the call is located at now + prediction, the behaviour before the fix) and the output is left alone");
+    // The freshness test applies to the CACHED frame, in every mode: one period behind now is still good, a nanosecond more is not.
+    at = -7;
+    check(poseTargetTime(Time::Display, display, period, display + period, add, never, &at) && at == display &&
+              poseTargetTime(Time::Next, display, period, display + period, add, never, &at) && at == display + period,
+          "a cached frame exactly one period behind now still answers, in both modes");
+    at = -7;
+    check(!poseTargetTime(Time::Display, display, period, display + period + 1, add, never, &at) && !poseTargetTime(Time::Next, display, period, display + period + 1, add, never, &at) && at == -7,
+          "...and one nanosecond more, neither does: the freshness test is on the cached frame, not on the target one period ahead of it");
+    check(poseTargetTime(Time::Next, display, period, display + period - 1000000, add, never, &at) && at == display + period &&
+              !poseTargetTime(Time::Next, display, period, display + 2 * period, add, never, &at),
+          "...a stale frame falls back in next as it does in display, whatever the target would have been");
+    // No frame / no period / overflow.
+    check(!poseTargetTime(Time::Display, 0, period, 1, add, never, &at) && !poseTargetTime(Time::Next, -5, period, 1, add, never, &at),
+          "no display time (not positive) is no instant, in both modes");
+    at = -7;
+    check(!poseTargetTime(Time::Next, display, 0, display, add, never, &at) && !poseTargetTime(Time::Next, display, -1, display, add, never, &at) && at == -7 &&
+              poseTargetTime(Time::Display, display, 0, display, add, never, &at) && at == display,
+          "cull_pose next with a frame that reports no period has no target (display, which never adds one, still answers)");
+    check(!poseTargetTime(Time::Next, INT64_MAX - 5, period, INT64_MAX - 5, add, never, &at) && poseTargetTime(Time::Display, INT64_MAX - 5, period, INT64_MAX - 5, add, never, &at) && at == INT64_MAX - 5,
+          "a display time so late that one more period overflows has no next target and does not wrap");
+    // A reference-space change between the display time and the target: a pose there is in another origin.
+    const auto crossing = [&](int64_t from, int64_t to) { return from < display + 5000000 && display + 5000000 <= to; };
+    at = -7;
+    check(!poseTargetTime(Time::Next, display, period, display - lead, add, crossing, &at) && at == -7 && poseTargetTime(Time::Display, display, period, display - lead, add, crossing, &at) && at == display,
+          "a reference change between the display time and the target: next has no instant (display never crosses it)");
+    int64_t seenFrom = 0, seenTo = 0;
+    poseTargetTime(Time::Next, display, period, display - lead, add, [&](int64_t f, int64_t t) { seenFrom = f; seenTo = t; return false; }, &at);
+    check(seenFrom == display && seenTo == display + period, "...asked about exactly the span from the display time to the target");
+    int64_t addOrCrossCalls = 0;
+    poseTargetTime(Time::Display, display, period, display - lead, [&](int64_t, int64_t, int64_t&) { ++addOrCrossCalls; return true; }, [&](int64_t, int64_t) { ++addOrCrossCalls; return false; }, &at);
+    check(addOrCrossCalls == 0, "(display neither adds a period nor asks about a reference change)");
+  }
   // ---- the lines -----------------------------------------------------------------------------------------------------------------------------
   {
     HeadPoseSightings s;
@@ -98,6 +148,22 @@ void runHeadPoseTimeCases(Check&& check) {
           "the next distinct caller finds the cap: one line says the rest are not logged, and it is not remembered");
     s.note(0x301,sink);s.note(0x300,sink);s.note(0x4E3881,sink);s.note(0x200,sink);
     check(lines.size()==10,"...which is said once; later callers, new or old, write nothing");
+  }
+  {
+    // Under cull_pose next the phrase says so: the one-period lead is the thing under test.
+    HeadPoseSightings s;
+    std::vector<std::string> lines;
+    const auto sink=[&](const char* l){lines.emplace_back(l);};
+    s.note(0x4E3881,cullpose::Time::Next,sink);
+    s.note(0x2A03F51,cullpose::Time::Next,sink);
+    check(lines.size()==2&&lines[0]=="head pose: Elite's \"now\" requests are answered one display period after the drawn frame's display time (first from exe+0x4E3881)"&&
+              lines[1]=="head pose: another Elite caller of \"now\" is answered one display period after the drawn frame's display time (exe+0x2A03F51)",
+          "under cull_pose next the lines say one display period after the drawn frame's display time (the exact text)");
+    HeadPoseSightings d;
+    std::vector<std::string> displayLines;
+    d.note(0x4E3881,cullpose::Time::Display,[&](const char* l){displayLines.emplace_back(l);});
+    check(displayLines.size()==1&&displayLines[0]=="head pose: Elite's \"now\" requests are answered at the drawn frame's display time (first from exe+0x4E3881)",
+          "...and under display they are the shipped text");
   }
 }
 }  // namespace head_pose_time_cases
