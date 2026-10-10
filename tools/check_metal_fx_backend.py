@@ -302,17 +302,26 @@ def checks(root):
     check(host_constants is not None and shader_constants is not None,
           "host and shader declare the shared mono constants")
     if host_constants and shader_constants:
-        check(re.search(r"uint32_t route\[4\], debug\[4\];\s*float foregroundDepth\[4\];\s*uint32_t backend\[4\];", host_constants[1]) is not None
-              and re.search(r"uint4 route\s*;\s*uint4 debug\s*;\s*float4 foregroundDepth\s*;\s*uint4 backend\s*;", shader_constants[1]) is not None
+        # Normalized to single spaces: the invariant is the lane sequence, not
+        # the file's indentation or line-wrapping (which upstream already
+        # reflowed once, breaking an exact-literal form of this check).
+        host_flat = " ".join(host_constants[1].split())
+        shader_flat = " ".join(shader_constants[1].split())
+        check("uint32_t route[4], debug[4]; float foregroundDepth[4]; uint32_t backend[4];" in host_flat
+              and "uint4 route; uint4 debug; float4 foregroundDepth; uint4 backend;" in shader_flat
               and "sizeof(Constants)==320" in route_cpp,
               "MetalFX appends one matching cbuffer lane after upstream route/debug/foregroundDepth (320 bytes)")
-    check("constants.debug[2]=overlay?1u:0u;" in route_cpp
+    check("constants.debug[2]=overlay?1u:0u" in route_cpp
           and "foreground?2u:(untrusted?1u:0u)" in route_cpp
-          and "constants.foregroundDepth[0]=sdkDepthScale;" in route_cpp
-          and "constants.backend[0]=mfx?1u:0u;" in route_cpp,
+          and "constants.foregroundDepth[0]=sdkDepthScale" in route_cpp
+          and "constants.backend[0]=mfx?1u:0u" in route_cpp,
           "late-overlay/foreground/alternate-camera flags remain independent of MetalFX colour expansion")
-    check(re.search(r"if\(backend.x!=0\)\s*\{\s*float3 c=Color.Load\(int3\(q,0\)\).rgb;\s*"
-                    r"OutColor\[q\]=float4\(clamp\(c,0.0,65504.0\),1.0\);", shader) is not None,
+    # Block scope, not statement text: the invariant is that MetalFX's own flag
+    # guards a block reading Color and writing OutColor with the fp16 ceiling,
+    # not the variable names or line breaks inside it.
+    prep_block = re.search(r"if\s*\(backend\.x\s*!=\s*0\)\s*\{(.*?)\n\}", shader, re.S)
+    check(prep_block is not None and "Color.Load" in prep_block.group(1) and "OutColor[q]" in prep_block.group(1)
+          and "65504" in prep_block.group(1),
           "only MetalFX's own flag writes the prep colour UAV with the established fp16 expansion")
     check(re.search(r"if\(debug.z!=0\)\s*\{[^}]*OverlayCoverage.Load", shader, re.S) is not None,
           "upstream debug.z still gates the late-overlay HDR finish")
@@ -398,7 +407,13 @@ def checks(root):
     for needle, why in BANNED_IN_BACKEND:
         check(needle not in code_only,
               "the MetalFX backend's code does not name %s (%s)" % (needle, why))
-    check("TemporalUpscale" in backend, "the MetalFX backend calls TemporalUpscale")
+    # The declaration the call needs: TemporalUpscale on the descriptor. This is
+    # the interface half of the call-shape check below (which pins the call
+    # site); pinning the declaration too keeps a renamed or retyped virtual
+    # from passing green while the vtable slot it needs is gone.
+    check(re.search(r"TemporalUpscale\s*\(\s*const\s+TemporalUpscaleDesc\s*\*\s*pDesc\s*\)\s*=\s*0",
+                    header_code) is not None,
+          "the header declares TemporalUpscale on the DXMT descriptor (the vtable slot the call needs)")
     check("CheckFeatureSupport" in backend, "the MetalFX backend asks CheckFeatureSupport")
 
     # 6b. THE METAL 3 CALL SHAPE. mfxEvaluate asks the Ext1 capability gate,
@@ -549,7 +564,9 @@ struct TemporalUpscaleDesc {
 };
 static_assert(sizeof(TemporalUpscaleDesc) == %d, "");
 %s
-struct ContextExt : public IUnknown {};
+struct ContextExt : public IUnknown {
+    virtual void STDMETHODCALLTYPE TemporalUpscale(const TemporalUpscaleDesc *pDesc) = 0;
+};
 struct ContextExt1 : public ContextExt {};
 bool mfxAvailable(ID3D11DeviceContext* ctx, const char** why);
 bool mfxEvaluate(ID3D11DeviceContext* ctx, ID3D11Texture2D* colour, ID3D11Texture2D* depth,
