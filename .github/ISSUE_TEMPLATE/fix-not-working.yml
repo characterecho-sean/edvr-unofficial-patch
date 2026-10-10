@@ -24,7 +24,6 @@ body:
         - The intro (movie on the screen or skipped, background picture, loading dimming, centring)
         - Jumps, stars and smoke (transition flash, sun glare, plumes, hyperspace starfield)
         - The helmet and the loading screen (RemLok lines, loading hologram)
-        - The terrain fix (gaps at the edges of view)
         - Explorer Cam (on-foot stereo depth, high-wake marker)
         - Anti-aliasing (temporal AA, DLAA/DLSS and its preset, sharpening)
         - The in-headset settings menu (F8, its keys, the Monitor and Status pages)

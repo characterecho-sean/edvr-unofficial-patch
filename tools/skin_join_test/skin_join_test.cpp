@@ -17,6 +17,9 @@
 //   J11 the hook's reading of the game's list (skin_entity_walk.h) over a fake heap with faults in it
 //   J12 which record of a base is the live one: the records the frame's skinned draws read decide (a stale second set before and after the live
 //       record, both read, none read, an incomplete list, unreadable entries), and the pose witness line
+//   J13 the chain line
+//   J14 the chain verdict the dispatch hook keeps per shader address (ChainVerdicts): kept with the shader registry's generation, so a re-used
+//       address is asked again (false->true, true->false, not yet registered, a replaced device, a re-created shader, the cap), and the glue's pins
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -829,6 +832,153 @@ void caseChainLine() {
     bigCpu.chainDispatches = bigCpu.chainMulti = bigCpu.chainLate = bigCpu.chainMixed = ~0ull;
     check(chainLine(big, bigCpu).size() < 300, "J13.b the chain line fits its buffer at the largest numbers");
 }
+
+// ---- J14 -----------------------------------------------------------------------------------------------------------------
+// The chain verdict the dispatch hook keeps per shader address (ChainVerdicts, skin_join.h; exposure_fix.cpp's skinChainBound): kept with the shader
+// registry's generation, so an address a registration has since re-used is asked again (the 0.19.0 review, finding 1).
+struct FakeRegistry {                       // the shader registry's stand-in: address -> hash, a generation that moves at every registration
+    std::unordered_map<const void*, uint64_t> hash;
+    uint32_t generation = 1;
+    unsigned reads = 0;
+    void registerShader(const void* shader, uint64_t h) { hash[shader] = h; ++generation; }   // registerShaderHash: replace, then advance
+    uint64_t lookup(const void* shader) { ++reads; const auto it = hash.find(shader); return it == hash.end() ? 0 : it->second; }
+    bool ask(ChainVerdicts& v, const void* shader) {   // the hook's call: the generation first, then the registry through the lambda
+        return v.bound(shader, generation, [this](const void* s) { return lookup(s); });
+    }
+};
+
+std::string g_root;                          // the repository root when the rig is given one (the source pins)
+std::string slurpSource(const char* relative) {
+    if (g_root.empty()) return "";
+    std::FILE* f = std::fopen((g_root + "/" + relative).c_str(), "rb");
+    if (!f) return "";
+    std::string text;
+    char buf[4096];
+    size_t n;
+    while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0) text.append(buf, n);
+    std::fclose(f);
+    text.erase(std::remove(text.begin(), text.end(), '\r'), text.end());
+    return text;
+}
+// the text of the function whose definition line starts with `head`, up to the next column-0 `}`
+std::string functionBody(const std::string& text, const char* head) {
+    const size_t s = text.find(head);
+    if (s == std::string::npos) return "";
+    const size_t e = text.find("\n}\n", s);
+    return e == std::string::npos ? text.substr(s) : text.substr(s, e - s);
+}
+
+void caseChainVerdicts() {
+    int a = 0, b = 0, c = 0;                 // three distinct shader addresses
+    {
+        FakeRegistry r;
+        ChainVerdicts v;
+        r.registerShader(&a, 17);
+        r.registerShader(&b, kChainHash);
+        check(!r.ask(v, &a) && r.ask(v, &b) && r.reads == 2, "J14.a a non-chain shader and the chain are told apart, one registry read each");
+        check(!r.ask(v, &a) && r.ask(v, &b) && !r.ask(v, &a) && r.ask(v, &b) && r.reads == 2,
+              "J14.b a steady dispatch (the generation has not moved) never reaches the registry again");
+        check(!v.bound(nullptr, r.generation, [&](const void* s) { return r.lookup(s); }) && r.reads == 2, "J14.c no shader bound: false, and the registry is not asked");
+    }
+    {
+        FakeRegistry r;                      // false -> true at one address: a non-chain shader's address is re-used for the chain
+        ChainVerdicts v;
+        r.registerShader(&a, 17);
+        const bool before = r.ask(v, &a);
+        r.registerShader(&a, kChainHash);
+        const bool after = r.ask(v, &a);
+        check(!before && after && r.reads == 2, "J14.d an address re-registered as the chain is the chain from the next dispatch (false -> true), the registry asked again");
+    }
+    {
+        FakeRegistry r;                      // true -> false: the chain's address is re-used for another shader
+        ChainVerdicts v;
+        r.registerShader(&a, kChainHash);
+        const bool before = r.ask(v, &a);
+        r.registerShader(&a, 17);
+        const bool after = r.ask(v, &a);
+        check(before && !after && r.reads == 2, "J14.e an address re-registered as another shader stops being the chain (true -> false), so the chain reader is not fed its bindings");
+    }
+    {
+        FakeRegistry r;                      // a dispatch that beats its shader's registration: "not registered" is not a permanent answer
+        ChainVerdicts v;
+        const bool unknown = r.ask(v, &a);
+        r.registerShader(&a, kChainHash);
+        const bool known = r.ask(v, &a);
+        check(!unknown && known, "J14.f an address the registry had not met (hash 0) is the chain once it is registered");
+        FakeRegistry q;
+        ChainVerdicts w;
+        const bool u2 = q.ask(w, &b);
+        q.registerShader(&b, 17);
+        check(!u2 && !q.ask(w, &b) && q.reads == 2, "J14.f2 ...and a non-chain shader registered later is asked once more, and stays false");
+    }
+    {
+        FakeRegistry r;                      // device recreation: the new device's shaders land at the old device's addresses, in the other order
+        ChainVerdicts v;
+        r.registerShader(&a, kChainHash);
+        r.registerShader(&b, 17);
+        r.registerShader(&c, 23);
+        const bool oldA = r.ask(v, &a), oldB = r.ask(v, &b), oldC = r.ask(v, &c);
+        r.registerShader(&a, 17);            // the replacement device creates its shaders anew, the chain now at b
+        r.registerShader(&b, kChainHash);
+        r.registerShader(&c, 23);
+        const bool newA = r.ask(v, &a), newB = r.ask(v, &b), newC = r.ask(v, &c);
+        check(oldA && !oldB && !oldC && !newA && newB && !newC, "J14.g after a device is replaced every address answers for the shader it now holds");
+    }
+    {
+        FakeRegistry r;                      // the same device: the chain destroyed and another shader created at its address, then the chain again
+        ChainVerdicts v;
+        r.registerShader(&a, kChainHash);
+        const bool chain1 = r.ask(v, &a);
+        r.registerShader(&a, 99);
+        const bool other = r.ask(v, &a);
+        r.registerShader(&a, kChainHash);
+        const bool chain2 = r.ask(v, &a);
+        check(chain1 && !other && chain2, "J14.h a shader destroyed and re-created at its address on the same device: each re-creation is told as what it is");
+    }
+    {
+        FakeRegistry r;                      // an unrelated registration moves the generation: one more read per address, the same answers
+        ChainVerdicts v;
+        r.registerShader(&a, kChainHash);
+        r.registerShader(&b, 17);
+        r.ask(v, &a); r.ask(v, &b);
+        const unsigned before = r.reads;
+        r.registerShader(&c, 5);
+        check(r.ask(v, &a) && !r.ask(v, &b) && r.reads == before + 2, "J14.i a registration elsewhere costs each address one read, with the same answers");
+        check(r.ask(v, &a) && !r.ask(v, &b) && r.reads == before + 2, "J14.i2 ...and then it is steady again");
+    }
+    {
+        FakeRegistry r;                      // the registration that lands while the registry is being asked: the generation was read first, so it is seen as a move
+        ChainVerdicts v;
+        r.registerShader(&a, 17);
+        const uint32_t gen = r.generation;
+        const bool during = v.bound(&a, gen, [&](const void* s) { const uint64_t old = r.lookup(s); r.registerShader(&a, kChainHash); return old; });
+        const bool next = r.ask(v, &a);
+        check(!during && next, "J14.j a registration that lands between the generation read and the lookup is not lost: the next dispatch asks again");
+    }
+    {
+        FakeRegistry r;                      // the table is bounded: past the cap it clears, and every answer is still right
+        ChainVerdicts v;
+        std::vector<int> shaders(ChainVerdicts::kCap + 40);
+        for (size_t i = 0; i < shaders.size(); ++i) r.registerShader(&shaders[i], i == 7 ? kChainHash : 1000 + i);
+        bool right = true;
+        for (size_t i = 0; i < shaders.size(); ++i) right = right && (r.ask(v, &shaders[i]) == (i == 7));
+        right = right && r.ask(v, &shaders[7]);
+        check(right && v.size() <= ChainVerdicts::kCap + 1, "J14.k more addresses than the table keeps: it clears and the verdicts stay right");
+    }
+    // The glue is the hook's: exposure_fix.cpp's skinChainBound keeps its verdicts here and hands them the registry's generation. Source pins, when the
+    // rig is given the repository root.
+    if (!g_root.empty()) {
+        const std::string ex = slurpSource("src/d3d11/exposure_fix.cpp");
+        const std::string fn = functionBody(ex, "bool skinChainBound() {");
+        check(!fn.empty(), "J14.l exposure_fix.cpp defines skinChainBound");
+        const size_t gen = fn.find("shaderRegistryGeneration()");
+        check(fn.find("static skinjoin::ChainVerdicts verdicts;") != std::string::npos && fn.find("verdicts.bound(cs, shaderRegistryGeneration(),") != std::string::npos &&
+                  gen != std::string::npos && fn.find("unordered_map") == std::string::npos && fn.find("EnterCriticalSection") == std::string::npos,
+              "J14.l skinChainBound keeps its verdicts in skinjoin::ChainVerdicts and passes the registry's generation (an inline load), not the lock");
+        check(ex.find("if (engineVelocitySkinWanted() && skinChainBound()) engineVelocityNoteChainDispatch(self, x);") != std::string::npos,
+              "J14.m the dispatch hook feeds the chain's dispatches to the join only when skinChainBound() says so");
+    }
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -836,7 +986,7 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--self-test" || a == "--dry-run") selfTest = true;
-        else if (i == 2 && argv[1] == std::string("--self-test")) continue;
+        else if (i == 2 && argv[1] == std::string("--self-test")) { g_root = a; continue; }
         else {
             std::fprintf(stderr, "usage: skin_join_test --self-test [repository root] | --dry-run\n");
             return 2;
@@ -854,6 +1004,7 @@ int main(int argc, char** argv) {
     caseChildren();
     caseDisagree();
     caseChainLine();
+    caseChainVerdicts();
     caseLimits();
     caseResiduals();
     caseLine();

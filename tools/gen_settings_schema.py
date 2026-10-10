@@ -741,8 +741,8 @@ def run(root, out, check):
     # ---- the ini's own shape ----------------------------------------------
     #
     # Two ways a line of edvr.ini becomes a row nobody wrote. A sentence that
-    # begins `word =` parses as a commented-out setting (edvr.ini spelled
-    # cull_guard_channel's explanation that way, and the menu grew a Text row
+    # begins `word =` parses as a commented-out setting (edvr.ini once spelled
+    # a developer key's explanation that way, and the menu grew a Text row
     # whose default was "raw means the culler's cache derives from the"); and a
     # key that is written twice is two rows, the reader taking whichever it
     # meets. Neither fails anywhere else. The first is checked first because it
@@ -1613,7 +1613,7 @@ def self_test():
     expect_in(name, wrote, '{"advanced", "thing"')
     expect_in(name, wrote, '{"experimental", "thing"')
 
-    # A sentence that starts `word =`. cull_guard_channel's explanation did,
+    # A sentence that starts `word =`. A developer key's explanation once did,
     # and the menu grew a second Text row for the key whose default was the
     # sentence's next words, while the real row lost the paragraph above it.
     # The same words wrapped so no line starts with the key are the fix.

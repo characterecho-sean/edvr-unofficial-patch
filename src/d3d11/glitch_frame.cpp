@@ -83,10 +83,10 @@ constexpr uint32_t kSeparations = 16;
 // Evicted separation magnitudes remembered, so an insertion can be recognised
 // as a RELEARN -- the table paying a withheld frame twice for one lesson.
 //
-// THE CHURN INSTRUMENT (spec §1g, EVIDENCE 6bp). The cull guard's wider
-// frustum admits more near-surface passes and the recognition machinery
-// churns with the margin: 29 recognitions at guard-off against 3,277 at half
-// margin, 36 withheld. Whether that cost is this table THRASHING (more live
+// THE CHURN INSTRUMENT (spec §1g, EVIDENCE 6bp). The terrain guard's wider
+// frustum (removed 2026-10-09) admitted more near-surface passes and the
+// recognition machinery churned with the margin: 29 recognitions at guard-off
+// against 3,277 at half margin, 36 withheld. Whether that cost is this table THRASHING (more live
 // pairs than sixteen slots, the failure the shell table had at eight) or
 // genuine novelty (cascade geometry re-fitting continuously) decides between
 // two completely different fixes -- capacity against a new invariant -- so
@@ -400,16 +400,6 @@ struct RingEntry {
     bool     sceneValid;
     GlitchSceneGeometry geometry;
 
-    // THE CULL GUARD'S STATE while this frame was drawn, packed as the
-    // channel carries it (frame_flag.h), zero when the guard was off.
-    //
-    // Stamped so a staircase flight's dumps are self-describing: the margin
-    // is live-tunable, so one capture can span guard-off and two margins, and
-    // without the stamp nothing in the dump says which frames were which --
-    // the exact attribution the 6bp churn measurement had to reconstruct
-    // from log timestamps.
-    uint32_t guard;
-
     // WHAT THE DETECTOR DECIDED ABOUT THIS FRAME, carried on the frame itself.
     //
     // The reason a jump was let through used to be reported only as a sampled
@@ -654,12 +644,6 @@ struct State {
     uint32_t   lastLetThroughFrame = 0;
 
     // --- the churn instrument (spec §1g): attribution, never decision ---
-    // The channel reading for the frame being closed, taken once at the
-    // boundary; everything below keys on it or feeds the ring dump.
-    uint32_t   guardPacked = 0;
-    bool       guardLiveNoted = false;
-    uint32_t   withheldGuardLive = 0;
-    uint32_t   suppressedGuardLive = 0;
     // The learning-cost counters: insertions are the tax being paid (each
     // novel magnitude's first mark was a withheld frame), live evictions are
     // knowledge lost while still current, relearns are the H1 number -- a
@@ -1092,8 +1076,7 @@ void observeShell(const float* pos, float radius) {
         // The churn instrument: a CERTIFIED entry evicted while still in the
         // window is the "learned and lost and learned again" failure this
         // table's own 8-to-64 history records, and whether 64 still thrashes
-        // at large cull-guard margins is one of the questions the counter
-        // answers. Uncertified evictions are the table working as intended.
+        // is one of the questions the counter answers. Uncertified evictions are the table working as intended.
         if (s->shells[victim].framesSeen > 0 &&
             s->frameNo - s->shells[victim].lastSeen <= kRunawayWindow &&
             (s->shells[victim].certified || s->shells[victim].parked)) {
@@ -2101,28 +2084,6 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
     const bool sceneReset=s->sceneDecisionFrame==s->frameNo && s->sceneDecision==GlitchSceneDecision::CameraReset;
     ++s->frameNo;
 
-    // The cull guard's state for the frame being closed, read once so the
-    // stamp, the split counters and the log all describe the same reading.
-    // The guard's stage transitions happen only at WaitGetPoses, before the
-    // game queries its projections -- so the value standing at Present is the
-    // value that governed everything this frame was drawn under. Zero is
-    // "off" and also "nobody publishing", identical on purpose (frame_flag.h).
-    s->guardPacked = cullGuardStatePacked();
-    if (!s->guardLiveNoted && decodeCullGuardState(s->guardPacked).stage == 2) {
-        s->guardLiveNoted = true;
-        const CullGuardState g = decodeCullGuardState(s->guardPacked);
-        Log::get().note(
-            "transition flash: the cull guard's wider frustum is live "
-            "(+%u.%u%% horizontal, +%u.%u%% vertical). A wider frustum admits "
-            "more render passes, so recognition churn may climb here; "
-            "camera-history lines now carry a cull= column and the running "
-            "totals attribute their counts to the guard, so that churn is "
-            "readable per margin. Bookkeeping only; no decision changes on "
-            "it.",
-            g.hPerMille / 10, g.hPerMille % 10, g.vPerMille / 10,
-            g.vPerMille % 10);
-    }
-
     // OBSERVING BUT NOT ACTING. Record the frame and stop.
     //
     // Everything past here validates, decides and withholds, and none of it has
@@ -2135,7 +2096,6 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
             e.qpc = static_cast<uint64_t>(qpcNow());
             e.frame = s->frameNo;
             e.eyeDraws = eyeDraws;
-            e.guard = s->guardPacked;
             e.verdict = s->verdictThisFrame;
             for (uint32_t a = 0; a < 3; ++a) e.pos[a] = s->frameFarMag2>=0?s->frameFarPos[a]:NAN;
             recordScenePosition(e,s);
@@ -2225,7 +2185,6 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
             e.qpc = static_cast<uint64_t>(qpcNow());
             e.frame = s->frameNo;
             e.eyeDraws = eyeDraws;
-            e.guard = s->guardPacked;
             e.verdict = s->verdictThisFrame;
             for (uint32_t a = 0; a < 3; ++a) e.pos[a] = s->frameFarMag2>=0?s->frameFarPos[a]:NAN;
             recordScenePosition(e,s);
@@ -2276,11 +2235,6 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
         // a separation that is suppressing correctly from ageing out of the
         // memory and firing all over again.
         ++s->suppressed;
-        // Attribution, not decision: how much of the recognition traffic
-        // arrives under the cull guard's wider frustum (spec §1g).
-        if (decodeCullGuardState(s->guardPacked).stage == 2) {
-            ++s->suppressedGuardLive;
-        }
         if (s->parkSuppressedThisFrame) {
             ++s->suppressedByPark;
             // Not recorded as a separation, for the same reason a radius
@@ -2336,9 +2290,6 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
         ++s->framesWithheld;
         ++s->windowWithheld;
         s->lastWithheldFrame = s->frameNo;
-        if (decodeCullGuardState(s->guardPacked).stage == 2) {
-            ++s->withheldGuardLive;
-        }
         // The first of a kind is always withheld -- it cannot be known to repeat
         // until it has. That is the cost of this approach and it is one frame per
         // novel magnitude, against one frame every three that it replaces.
@@ -2548,7 +2499,6 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
         e.qpc = static_cast<uint64_t>(qpcNow());
         e.frame = s->frameNo;
         e.eyeDraws = eyeDraws;
-        e.guard = s->guardPacked;
         e.verdict = s->verdictThisFrame;
         for (uint32_t a = 0; a < 3; ++a) e.pos[a] = s->frameFarMag2>=0?s->frameFarPos[a]:NAN;
         recordScenePosition(e,s);
@@ -2621,19 +2571,6 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
                 s->suppressedByPark, s->suppressedByDrift,
                 s->framesWithheld - s->totalsWithheld,
                 s->suppressed - s->totalsSuppressed, s->withheldNotRendering);
-            // ITS OWN LINE, not a suffix of the paragraph above: appended
-            // there it pushed the note past the log's line buffer and every
-            // field log carried it truncated mid-word, which is worse than
-            // absent -- a sentence that ends in "(do" reads as a crash.
-            // Present only in sessions the guard has been live in, so every
-            // other rig's totals read exactly as they always have.
-            if (s->withheldGuardLive || s->suppressedGuardLive) {
-                Log::get().note(
-                    "transition flash, guard attribution: %u withheld / %u "
-                    "recognised under the cull guard's wider frustum "
-                    "(docs/terrain-culling.md).",
-                    s->withheldGuardLive, s->suppressedGuardLive);
-            }
             s->totalsWithheld = s->framesWithheld;
             s->totalsSuppressed = s->suppressed;
         }
@@ -2724,25 +2661,9 @@ void dumpCameraRing(const char* trigger, uint32_t msAfterPress) {
             freq ? static_cast<double>(static_cast<int64_t>(newest - e.qpc)) * 1000.0 /
                        static_cast<double>(freq)
                  : 0.0;
-        // The cull guard's margin, only on frames it was doing something --
-        // a guard-off session's dump is byte-identical to what it always
-        // was, and a staircase flight's dump names the margin per frame,
-        // across live changes, which is the attribution 6bp had to
-        // reconstruct from log timestamps.
-        char cull[28] = "";
-        if (e.guard) {
-            const CullGuardState g = decodeCullGuardState(e.guard);
-            if (g.stage == 1) {
-                snprintf(cull, sizeof(cull), " cull=stage1");
-            } else {
-                snprintf(cull, sizeof(cull), " cull=+%u.%u%%/+%u.%u%%",
-                         g.hPerMille / 10, g.hPerMille % 10, g.vPerMille / 10,
-                         g.vPerMille % 10);
-            }
-        }
-        Log::get().note("CAM %8.1fms f%-7u eye=%-5u pos=(%+.2f %+.2f %+.2f)%s %s",
+        Log::get().note("CAM %8.1fms f%-7u eye=%-5u pos=(%+.2f %+.2f %+.2f) %s",
                         -msAgo, e.frame, e.eyeDraws, e.pos[0], e.pos[1], e.pos[2],
-                        cull, ringVerdictName(e.verdict));
+                        ringVerdictName(e.verdict));
         if(e.sceneValid)Log::get().note("    f%u scene=(%+.2f %+.2f %+.2f) [bound VS b1]",
             e.frame,e.scenePos[0],e.scenePos[1],e.scenePos[2]);
         else Log::get().note("    f%u scene=unavailable [no fresh recognised eye draw]",e.frame);
@@ -2782,10 +2703,7 @@ void dumpCameraRing(const char* trigger, uint32_t msAfterPress) {
     // WHAT THE DETECTOR HAS LEARNED, printed beside the history it learned it
     // from (spec §1g). The note lines are a sample and the totals are counts;
     // this is the CONTENTS -- which magnitudes and which landing geometry are
-    // doing the suppressing, and what the learning has cost. On a cull-guard
-    // staircase flight this is the per-step readout: dump at each margin and
-    // the tables name what that margin taught, which is the data the
-    // margin-aware-detector decision waits on.
+    // doing the suppressing, and what the learning has cost.
     {
         uint32_t sepsInUse = 0;
         for (uint32_t i = 0; i < kSeparations; ++i) {
@@ -2889,8 +2807,6 @@ GlitchFrameChurnStats glitchFrameChurnStats() {
     GlitchFrameChurnStats out = {};
     State* s = g_state;
     if (!s) return out;
-    out.withheldGuardLive = s->withheldGuardLive;
-    out.suppressedGuardLive = s->suppressedGuardLive;
     out.sepInsertions = s->sepInsertions;
     out.sepEvictedLive = s->sepEvictedLive;
     out.sepRelearned = s->sepRelearned;

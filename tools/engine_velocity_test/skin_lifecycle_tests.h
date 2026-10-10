@@ -31,6 +31,9 @@
 //       as valid 0 and E 0, never in the eyes' views, and never in the flat profile (no target 7 is created there)
 //   L14 the GPU census slots the second skin fills (F16, F17): the source's and the eyes' target 7 clears, the join's clear pass, the join and the pose table are each begun
 //       by the work they price and by nothing else
+//   L15 the frame after a mixed-palette frame (the 0.19.0 release review, finding 2): a character written only to the SECOND buffer of a frame whose dispatches wrote
+//       two, retained in the next frame, has no history there and has it again in the frame after that; two mixed frames in a row, reordered dispatches, rows that
+//       overlap, palette buffers of unequal sizes
 
 #include <algorithm>
 #include <cmath>
@@ -111,6 +114,8 @@ struct Fixture {
     bool sameJobsBuffer = false;         // the second dispatch rewrites the first's job table buffer (the join must take each table at its dispatch)
     bool lateSecond = false;             // the second dispatch comes after the frame's first pass: a skinned draw has already needed the join
     bool secondOnOtherPalette = false;   // the second dispatch writes the other palette buffer
+    bool rowsInSecondBuffer = false;     // L15: the drawn character's palette rows are written into the OTHER buffer (the second dispatch's) and the first buffer holds none
+    uint32_t paletteRowsB = 0;           // L15: rows of the second palette buffer when it is not the first's size (0: the same)
     unsigned chainK = 0;                 // the palette buffer of the frame's chain
     std::vector<sjw::JobRow> pendingSecond;
     ComPtr<ID3D11DepthStencilState> alwaysDepth;
@@ -170,7 +175,7 @@ struct Fixture {
         jobs2 = structured(nullptr, 16, 8, D3D11_BIND_SHADER_RESOURCE);
         h.check(SUCCEEDED(dev->CreateShaderResourceView(jobs2.Get(), nullptr, &jobs2Srv)), "L: the second job table's view");
         for (int i = 0; i < 2; ++i) {
-            palette[i] = structured(nullptr, 48, paletteRows, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS);
+            palette[i] = structured(nullptr, 48, rowsOf(unsigned(i)), D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS);
             h.check(SUCCEEDED(dev->CreateShaderResourceView(palette[i].Get(), nullptr, &paletteSrv[i])) &&
                     SUCCEEDED(dev->CreateUnorderedAccessView(palette[i].Get(), nullptr, &paletteUav[i])), "L: a palette buffer's views");
         }
@@ -211,12 +216,19 @@ struct Fixture {
         }
     }
 
+    // The rows of palette buffer i (the second one's size may differ: L15).
+    uint32_t rowsOf(unsigned i) const { return (i == 1 && paletteRowsB) ? paletteRowsB : paletteRows; }
     // The game's palette chain for this frame: the palette written into one of its two buffers, the job table at t0, the chain's dispatch.
     void chain(unsigned frameIndex) {
         const unsigned k = frameIndex & 1u;
-        std::vector<float> cur(size_t(paletteRows) * 12, 0.0f);
+        const unsigned rowsK = rowsInSecondBuffer ? (k ^ 1u) : k;   // L15: the character's rows are in the other buffer than the frame's first dispatch wrote
+        std::vector<float> cur(size_t(rowsOf(rowsK)) * 12, 0.0f);
         for (size_t i = 0; i < state.rows.size() && size_t(base) * 12 + i < cur.size(); ++i) cur[size_t(base) * 12 + i] = state.rows[i];   // (rows past the buffer are the game's to lose)
-        ctx->UpdateSubresource(palette[k].Get(), 0, nullptr, cur.data(), 0, 0);
+        ctx->UpdateSubresource(palette[rowsK].Get(), 0, nullptr, cur.data(), 0, 0);
+        if (rowsInSecondBuffer) {   // ...and the first buffer holds none of them
+            const std::vector<float> none(size_t(rowsOf(k)) * 12, 0.0f);
+            ctx->UpdateSubresource(palette[k].Get(), 0, nullptr, none.data(), 0, 0);
+        }
         chainK = k;
         std::vector<sjw::JobRow> first, second;
         for (size_t i = 0; i < built.jobs.size(); ++i) {
@@ -303,7 +315,7 @@ struct Fixture {
         ID3D11Buffer* vbs[3] = {verts.Get(), instances.Get(), secondStream ? instances.Get() : nullptr};
         UINT strides[3] = {sizeof(sct::Vertex), 8, secondStream ? 8u : 0u}, offsets[3] = {0, 8, 0};
         ctx->IASetVertexBuffers(0, 3, vbs, strides, offsets);
-        ID3D11ShaderResourceView* t38 = paletteSrv[count & 1u].Get();
+        ID3D11ShaderResourceView* t38 = paletteSrv[(count & 1u) ^ (rowsInSecondBuffer ? 1u : 0u)].Get();
         ctx->VSSetShaderResources(38, 1, &t38);
         if (pair) { g.setVs(vsPair.Get(), kPairVs); g.setPs(psPair.Get(), kPairPs); }
         else { g.setVs(vsPlain.Get(), kPlainVs); g.setPs(psPlain.Get(), kPlainPs); }
@@ -971,8 +983,14 @@ inline void run(const lt::Harness& h) {
     f.secondOnOtherPalette = false;
     single();
     {
+        // (this character was in the FIRST dispatch's buffer, so its rows were last frame's palette: the frame after a mixed one is refused all the same, because the join
+        // cannot tell that from a character written only to the second buffer. L15 holds that case.)
         const Judged a = judged();
-        h.check(whole(a), "L12.i ...and the next frame has it again");
+        h.check(a.drawn > 20 && a.valid == 0 && a.worst == 0.0, "L12.i ...and the next frame has none either (valid 0, E 0): its previous tables are the union of two buffers' jobs (L15)");
+    }
+    {
+        const Judged a = judged();
+        h.check(whole(a), "L12.i2 ...and the frame after that, which follows a complete single-palette frame, has it again");
     }
     single();
     for (int i = 0; i < 4; ++i) f.frame(true, [&] { f.g.views(0); f.g.views(1); }, false, false);
@@ -1035,6 +1053,104 @@ inline void run(const lt::Harness& h) {
     }
     single();
     f.frame([&] {});
+
+    // L15: the frame AFTER a mixed one (the 0.19.0 release review, finding 2). A frame whose two dispatches wrote two palette buffers has no history (L12.h), but what the join
+    // keeps of it for the next frame -- the first dispatch's buffer as "last frame's palette", the union of both job tables as last frame's jobs, their by-base layout, the pose
+    // table -- describes ONE buffer's rows for the jobs of BOTH. A character the mixed frame wrote only into its SECOND buffer, listed in the same place by the next frame (one
+    // buffer again), passed every certificate and was joined against rows the first buffer never held: a valid-1 pixel with a false E. The frame after a mixed one has no history,
+    // and the one after THAT one, which follows a complete single-palette frame, has it again. The world: the other character (20 bones, rows 1..20) and the drawn one (3 bones,
+    // rows 21..23); the mixed frame sends the other's job in the first dispatch and the drawn one's alone in the second, on the other buffer, its rows there and none in the
+    // first buffer. The steady frames send the same two jobs in the same order, on one buffer.
+    lifecycle_fake::g_hookSnap = nullptr;
+    f.useHookList = false;
+    lifecycle_fake::g_hookArmed = false;
+    f.staleSlot = -1; f.drawEntry = 0; f.readStale = false; f.secondStream = false; f.overdrawPlain = false;
+    size_t cIdx15 = 1;   // the drawn character's job in the world's table
+    const auto world15 = [&](bool cFirst /* its rows come before the other's */, uint32_t cBase /* 0: the builder's own base */) {
+        sjw::World w;
+        const sjw::Ent other{901, 0xA11CE, 0, {{78, 20}}}, drawn{902, 0xA11CE, 0, {{79, 3}}};
+        if (cFirst) { w.push_back(drawn); w.push_back(other); } else { w.push_back(other); w.push_back(drawn); }
+        f.built = sjw::build(w, 1);
+        cIdx15 = cFirst ? 0 : 1;
+        f.bones = 3;
+        if (cBase) f.built.jobs[cIdx15].dst = cBase;
+        f.base = f.built.jobs[cIdx15].dst;
+        sct::Rng rng(31);
+        sct::Vertex scratch[3];
+        sct::makeVertices(rng, 3, scratch);
+        f.state = sct::makeState(rng, 3, f.base);
+        f.secondDispatch.clear(); f.sameJobsBuffer = false; f.lateSecond = false; f.secondOnOtherPalette = false; f.rowsInSecondBuffer = false;
+    };
+    // One frame of it. `mixed`: the drawn job alone in the second dispatch, on the OTHER palette buffer, its rows only there. Otherwise the same two dispatches on ONE buffer when
+    // `split`, or the whole table in one dispatch.
+    const auto frame15 = [&](bool mixed, bool split) {
+        f.secondDispatch.clear();
+        if (mixed || split) f.secondDispatch.push_back(cIdx15);
+        f.secondOnOtherPalette = mixed;
+        f.rowsInSecondBuffer = mixed;
+        Fixture::Eye e0;
+        f.frame([&] { e0 = f.read(0); });
+        f.secondDispatch.clear(); f.secondOnOtherPalette = false; f.rowsInSecondBuffer = false;
+        return judge(e0, zero);
+    };
+    const auto noHistory15 = [&](const Judged& a) { return a.drawn > 20 && a.valid == 0 && a.worst == 0.0; };
+    struct Seq15 { Judged before, mixed, next, after; };
+    // History established, then the mixed frame (its first dispatch writes palette buffer `firstK` when that is 0 or 1), the frame after it, the frame after that.
+    const auto sequence15 = [&](bool split, int firstK) {
+        Seq15 q;
+        for (int i = 0; i < 4; ++i) frame15(false, split);
+        q.before = frame15(false, split);
+        while (firstK >= 0 && int(f.count & 1u) != firstK) frame15(false, split);
+        q.mixed = frame15(true, split);
+        q.next = frame15(false, split);
+        q.after = frame15(false, split);
+        return q;
+    };
+    const auto check15 = [&](const char* id, const char* what, bool ok) {
+        char msg[400];
+        std::snprintf(msg, sizeof(msg), "L15.%s %s", id, what);
+        h.check(ok, msg);
+    };
+    const auto report15 = [&](const char* id, const char* world, const Seq15& q, bool controls) {
+        if (controls) {
+            check15(id, (std::string("(control) ") + world + ": the steady frame before the mixed one has history").c_str(), whole(q.before));
+            check15(id, (std::string("(control) ") + world + ": the mixed frame has none (valid 0, E 0)").c_str(), noHistory15(q.mixed));
+        }
+        check15(id, (std::string(world) + ": the frame after the mixed one has no history (valid 0, E 0), not rows from a buffer that never held them").c_str(), noHistory15(q.next));
+        check15(id, (std::string(world) + ": the frame after that, which follows a complete single-palette frame, has history again (valid 1, E exactly zero)").c_str(), whole(q.after));
+        if (!(noHistory15(q.next) && whole(q.after)))
+            std::fprintf(stderr, "  L15.%s next: drawn %u valid %u worst %.4f; after: drawn %u valid %u worst %.4f\n", id, q.next.drawn, q.next.valid, q.next.worst, q.after.drawn, q.after.valid, q.after.worst);
+    };
+    world15(false, 0);
+    report15("a", "the review's case (the drawn character written only to the second buffer, retained in the next frame in one dispatch)", sequence15(false, -1), true);
+    {
+        // two mixed frames in a row: neither has history, nor has the frame after the second; the recovery waits for a complete single-palette frame
+        frame15(false, false);
+        frame15(true, false);
+        const Judged again = frame15(true, false);
+        const Judged next = frame15(false, false);
+        const Judged after = frame15(false, false);
+        check15("b", "two mixed frames in a row: none in the second, none in the frame after them, history in the one after that", noHistory15(again) && noHistory15(next) && whole(after));
+    }
+    world15(true, 0);
+    report15("c", "reordered dispatches (the drawn rows come first, its job is in the second dispatch, the union is not in row order)", sequence15(true, -1), false);
+    world15(false, 10);
+    report15("d", "overlapping rows (the drawn character's rows 10..12 lie inside the other's 1..20, in the other buffer)", sequence15(false, -1), false);
+    world15(false, 0);
+    // The second palette buffer remade with `rows` rows (0: the first's size), the way L9 remakes both.
+    const auto remakeSecond15 = [&](uint32_t rows) {
+        f.paletteRowsB = rows;
+        f.palette[1] = f.structured(nullptr, 48, f.rowsOf(1), D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS);
+        f.paletteSrv[1].Reset(); f.paletteUav[1].Reset();
+        h.device->CreateShaderResourceView(f.palette[1].Get(), nullptr, &f.paletteSrv[1]);
+        h.device->CreateUnorderedAccessView(f.palette[1].Get(), nullptr, &f.paletteUav[1]);
+    };
+    // The first buffer 64 rows and the second 24 (the drawn rows 21..23 just fit), the mixed frame's first dispatch writing the larger one; then the smaller one.
+    remakeSecond15(24);
+    report15("e", "unequal palette buffers, the mixed frame's first dispatch on the larger (64 rows), the drawn character on the smaller (24)", sequence15(false, 0), false);
+    report15("f", "unequal palette buffers, the mixed frame's first dispatch on the smaller (24 rows), the drawn character on the larger (64)", sequence15(false, 1), false);
+    remakeSecond15(0);
+    std::printf("  skin lifecycle: the frame after a mixed-palette frame has no history, the one after it has (the review's case, two in a row, reordered, overlapping, unequal buffers)\n");
 
     // L13: the on-foot source (F2 on foot, the VR first-person panel). The source pass draws the same skinned pair into the source's own targets (a depth the
     // screen shader names, no eye RTV). The engine makes the source's own target 7 beside its slot target, clears it at the frame's first skinned draw, runs the

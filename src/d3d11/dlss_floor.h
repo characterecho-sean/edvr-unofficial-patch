@@ -43,9 +43,10 @@ namespace edvr {
 // available; every entry is then left !ok. Render thread only, like the
 // rest of dlaa.cpp. Logs the "dlss: modes for WxH" line once per output
 // size, as ensureFeature does, so the floor a decision stood on is in the
-// log beside it.
+// log beside it; `quiet` skips that line (the ceiling search asks a dozen
+// sizes and logs only the one it keeps).
 bool dlssModeRanges(ID3D11Device* dev, uint32_t outW, uint32_t outH,
-                    DlssModeRange modes[kDlssModeCount]);
+                    DlssModeRange modes[kDlssModeCount], bool quiet = false);
 
 // Does some answered mode's range hold w x h (inclusive at both ends)? The
 // same test dlssChooseMode's first rule makes; true means the selection
@@ -64,6 +65,26 @@ inline bool dlssRangesServe(const DlssModeRange modes[kDlssModeCount], uint32_t 
 // stand on it, so it is no floor.
 inline bool dlssRangeIsRange(const DlssModeRange& m) {
     return m.ok && m.minW && m.minH && m.minW < m.maxW && m.minH < m.maxH;
+}
+
+// A mode NGX actually answered with a usable range: the call succeeded AND
+// its optimal size, its minimum and its maximum are all nonzero, and the
+// range is not inverted. NGX returns success with every size zero for an
+// output past its ceiling -- the 2026-10-09 Pimax flight printed "quality
+// 0x0 (0x0..0x0)" for all four modes at 8268x3948 -- so `ok` alone proves
+// nothing about the output.
+inline bool dlssModeAnswered(const DlssModeRange& m) {
+    return m.ok && m.optW && m.optH && m.minW && m.minH && m.maxW && m.maxH &&
+           m.minW <= m.maxW && m.minH <= m.maxH;
+}
+
+// Does any mode answer with a usable range for this output? False is the
+// output's ceiling (or NGX said nothing about it at all).
+inline bool dlssRangesAnswered(const DlssModeRange modes[kDlssModeCount]) {
+    for (int k = 0; k < kDlssModeCount; ++k) {
+        if (dlssModeAnswered(modes[k])) return true;
+    }
+    return false;
 }
 
 // The lowest floor among the modes with a range, per axis, for the log; false
@@ -127,6 +148,47 @@ inline bool dlssFloorOutput(const DlssModeRange modes[kDlssModeCount], uint32_t 
     if (outW) *outW = bestW;
     if (outH) *outH = bestH;
     if (mode) *mode = best;
+    return true;
+}
+
+// NVIDIA's ceiling, found by search. When an output has no usable range
+// (dlssRangesAnswered false) the output is cut to the largest one that does:
+// the largest at or under doorW x doorH, aspect kept, both sides even, that
+// query answers. query(w, h, modes) fills the four ranges for w x h -- the
+// NGX call in dlaa.cpp, or a table in a rig. Bisects on the width in pairs of
+// pixels: NVIDIA's refusal is a size limit, so the answer is monotone in
+// practice. The search returns only a size it has seen answered, so a query
+// that is not monotone costs precision, never truth. False when no size at or
+// under the door is answered.
+template <typename Query>
+inline bool dlssCeilingOutput(uint32_t doorW, uint32_t doorH, Query&& query, uint32_t* outW,
+                              uint32_t* outH) {
+    if (outW) *outW = 0;
+    if (outH) *outH = 0;
+    if (!doorW || !doorH) return false;
+    // k answers the width 2k: lo is the largest k verified answered (0: none
+    // yet), hi the largest k that could still be the answer.
+    uint32_t lo = 0, hi = doorW / 2, loH = 0;
+    while (lo < hi) {
+        const uint32_t mid = lo + (hi - lo + 1) / 2;
+        const uint32_t w = 2 * mid;
+        const uint64_t hh = (uint64_t(doorH) * w / doorW) & ~uint64_t(1);
+        bool answered = false;
+        if (hh >= 2) {
+            DlssModeRange modes[kDlssModeCount];
+            query(w, static_cast<uint32_t>(hh), modes);
+            answered = dlssRangesAnswered(modes);
+        }
+        if (answered) {
+            lo = mid;
+            loH = static_cast<uint32_t>(hh);
+        } else {
+            hi = mid - 1;
+        }
+    }
+    if (!lo) return false;
+    if (outW) *outW = 2 * lo;
+    if (outH) *outH = loH;
     return true;
 }
 

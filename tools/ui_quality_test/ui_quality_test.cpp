@@ -72,6 +72,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <initializer_list>
 #include <iterator>
 #include <limits>
@@ -2983,6 +2984,7 @@ void testWriteBack(Gpu& g) {
 #include "ui_world_route_wiring_test.h"
 #include "ui_intro_curve_wiring_test.h"
 #include "ui_panel_budget_test.h"
+#include "ui_flat_panel_settle_test.h"
 
 }  // namespace
 
@@ -3036,6 +3038,7 @@ int main(int argc, char** argv) {
     testFlatLayerRules();
     panelbudget::testAll();
     panelbudget::testWiring();
+    flatsettle::testAll();
     Gpu g;
     if (!setup(g, hardware)) {
         check(false, "a device and the production composite shader");

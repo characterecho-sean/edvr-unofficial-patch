@@ -5819,10 +5819,9 @@ void vScreenFrameBoundary() {
         // section's timer, rotates which one is actively timed next frame,
         // and every 30 s logs one summary line. Always on, no ini key.
         tkGpuCensus.run([&] { gpuCensusFrame(g_state->ownerCtx); });
-        // Told to the openvr half whether or not any intro fix is on: the
-        // cull guard holds its lie until a scene exists, and that must
-        // depend on the GAME reaching one, not on EDVR being configured
-        // to do anything about the intro.
+        // Told to the openvr half whether or not any intro fix is on: it
+        // must depend on the GAME reaching a scene, not on EDVR being
+        // configured to do anything about the intro.
         tkSceneArrived.run([&] {
             if (g_state->eyeDrawsLastFrame >= kSceneEyeDraws) announceSceneArrived();
         });

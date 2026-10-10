@@ -167,7 +167,7 @@ MUTANTS = [
       "a late dispatch is not said"),
     M("multi-dispatch-frame-uncounted", "L12", "gpu", [("    if (dispatches > 1) ++s.chainMulti;\n", "")],
       "a frame with two dispatches is not said"),
-    M("mixed-palette-joined", "L12", "gpu", [("verdict == kHistoryOk && groups <= kMaxJobs && !s.pendingMixed;", "verdict == kHistoryOk && groups <= kMaxJobs;")],
+    M("mixed-palette-joined", "L12", "gpu", [("verdict == kHistoryOk && groups <= kMaxJobs && !s.pendingMixed && !s.prevMixed;", "verdict == kHistoryOk && groups <= kMaxJobs;")],
       "a frame whose dispatches wrote two palette buffers is joined as if one buffer were last frame's"),
     M("boundary-does-not-join", "L12", "engine", [("    if (ctx) g_skin.flushPending(ctx);\n", "")],
       "a frame whose chain no skinned draw needed is not joined at the boundary: the entry fade reads the frame before's join as this frame's"),
@@ -233,6 +233,13 @@ MUTANTS = [
       [("            ctx->CSSetShader(s.joinClear.Get(), nullptr, 0);\n            ctx->CSSetUnorderedAccessViews(0, 4, uavs, nullptr);\n            ctx->Dispatch(kClearGroups, 1, 1);\n", ""),
        ("        ctx->Dispatch(1, 1, 1);\n        ID3D11UnorderedAccessView* none[4] = {};", "        ctx->Dispatch(1, 1, 1);\n        ctx->CSSetShader(s.joinClear.Get(), nullptr, 0);\n        ctx->Dispatch(kClearGroups, 1, 1);\n        ID3D11UnorderedAccessView* none[4] = {};")],
       "the join reads the tables before the clear pass clears them, and the clear then wipes what the join wrote: every character seen has no history"),
+    # ---- L15: the frame after a mixed-palette frame has no history (the 0.19.0 release review, finding 2) ----
+    M("frame-after-mixed-joined", "L15", "gpu", [("verdict == kHistoryOk && groups <= kMaxJobs && !s.pendingMixed && !s.prevMixed;", "verdict == kHistoryOk && groups <= kMaxJobs && !s.pendingMixed;")],
+      "the frame after one whose dispatches wrote two palette buffers is joined against the first dispatch's buffer and the union of both job tables"),
+    M("mixed-flag-not-kept", "L15", "gpu", [("s.prevMixed = s.pendingMixed;", "s.prevMixed = false;")],
+      "a mixed frame is not remembered: the frame after it has history"),
+    M("mixed-flag-never-cleared", "L15", "gpu", [("s.prevMixed = s.pendingMixed;", "s.prevMixed = s.prevMixed || s.pendingMixed;")],
+      "after a mixed frame no frame ever has history again: the recovery after a complete single-palette frame is lost"),
 ]
 
 if __name__ == "__main__":

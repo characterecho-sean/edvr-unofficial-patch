@@ -44,11 +44,11 @@
   interpretations, wrong joined station motion, close-range
   reconstruction-floor-only diagnosis; F10: DE54 as the NPC's, the pixel probe
   naming it, per-part rotation, rigid-only keying under 1 px, own body gain.
-- **Validation / delivery:** absolute build.bat --jobs 4 passed all gates:
-  production DLLs, 82 pooled jobs + 4 quiet, 262-key contract and installer
-  resources. Focused/full-build engine rig: 1686 checks; prior real corpus:
-  2398. Source fix 4118ae84 is committed, merged and pushed; remote main was
-  verified. The repair entry records the full source commit and receipt.
+- **Validation / delivery:** build.bat --jobs 4 passed all gates (82 pooled jobs
+  + 4 quiet, 262-key contract, installer); engine rig 1686 checks, real corpus
+  2398. Fix 4118ae84 merged, pushed, remote main verified.
+- **0.19.0 review (10-09):** chain verdict vs shader registry, and history out of
+  a mixed-palette frame, FIXED (two end entries, NOT FLOWN).
 - **Next:** rotating-station capture on the installed repair, after clean
   promotion/deployment is verified by the installer and delivery report.
   Require hooked primary/copier/merge/clear statuses, nonzero joined private
@@ -4424,3 +4424,17 @@ Investigation, nothing changed (a micro-benchmark of lone dispatches on this dri
 ### 2026-10-09 F17 built (on 2f918ca0): the join's 3-table clear is its own 64-group pass (VR, built, NOT FLOWN)
 
 The join's phase 0 moved out of the one-group kernel into `joinClear` (64 groups of 256 threads, all 65,536 rows of all three tables every frame, dispatched on the same context and views right before the join); the second-skin census line gains the item `join 3-table clear pass`, and `join dispatch (clear pass not included)` should drop from about 0.030 ms by about the 0.015 the clear took there (expected clear pass: a few microseconds); rigs: skin_join_gpu_test G8 (sixty entities to rows near 60,000, shrinking to two: every stale row read as cleared, plus 5 mutants and a text pin that the join kernel has no clear loop), skin_engine_test L14/L3/L5 mutants for the pass.
+
+### 2026-10-09 0.19.0 review, finding 1: the skin-chain verdict follows the shader registry (VR, built, NOT FLOWN)
+
+The release review (reviewed main 824972e8; still present on b259e6bf) found `skinChainBound` (exposure_fix.cpp) keeping a Boolean per compute-shader address and never asking the registry again, while `registerShaderHash` replaces a hash and advances `g_shaderRegistryGen` when a released shader's address is reused. A non-chain address reused for the palette chain stayed false (no join or history that frame: the NPC motion lost); the reverse stayed true (a non-chain dispatch fed to the chain reader).
+- Fix: `skinjoin::ChainVerdicts` (skin_join.h) keeps each verdict WITH the registry generation it was asked at (read before the lookup, `shaderRegistryGeneration()`, an inline atomic load) and asks the registry again when the generation has moved. A steady dispatch is a map hit and the load, never the registry's lock; an unrelated registration costs each dispatched address one lookup.
+- Tests: skin_join_test J14 (false to true, true to false, hash 0 registered later, a replaced device, a shader destroyed and re-created on the same device, an unrelated registration, a registration landing between the generation read and the lookup, the 1,024-address cap, and source pins that skinChainBound passes the generation and the hook is gated by it); seven mutants in tools\skin_join_test\mutants.py, each caught by J14.
+- Observable only when an address is reused; nothing to fly for it alone.
+
+### 2026-10-09 0.19.0 review, finding 2: the frame after a mixed-palette frame has no history (VR, built, NOT FLOWN)
+
+The release review found (still present on b259e6bf) that after a frame whose chain dispatches wrote two palette buffers (`noteChain`'s `pendingMixed`), `runJoin` refused history for that frame but still recorded the first buffer as `curPalette`, advanced `PaletteHistory` and stored the union job table as the next frame's jobs. The next single-palette frame passed every certificate with the first buffer as its previous palette, so a job the mixed frame wrote only into the SECOND buffer was joined against rows that buffer never held (the review's helper: row 20, history 0 then 1, join[20] = 20). L12.h/i missed it: its drawn character was in the first dispatch's buffer.
+- Fix (the review's conservative option), skin_join_gpu.cpp: `prevMixed`. `runJoin` refuses history while the previous join's frame was mixed and sets the flag from its own frame, so a complete single-palette frame is the recovery: the frame after a mixed one has no history, the one after that has it. A character that was in the first dispatch's buffer also loses that one frame (L12.i now says so; L12.i2 is the recovery).
+- Tests: skin_engine_test L15 (the review's case: a character written only to the second buffer, retained in the next frame, none there and history on the frame after; two mixed frames in a row; reordered dispatches; overlapping rows; unequal palette sizes in both orders) and L12.i/i2. Mutants frame-after-mixed-joined, mixed-flag-not-kept and mixed-flag-never-cleared are each caught by L15; mixed-palette-joined is re-anchored.
+- Cost: one frame without NPC motion after a mixed frame. The cited flights used one palette buffer for all dispatches, so the trigger has not been seen in play. Nothing counts the refused frame separately: it shows as a `no history` frame in the join line beside `on another palette buffer` in the chain line.

@@ -48,11 +48,13 @@ struct Settings {
 };
 // The served floor's decision for one eye (floorOutput below), keyed by the
 // output the door would hand and the input: out is what the pass is asked
-// for, the door's own unless the input is under NVIDIA's floor there.
-// floorW x floorH is that floor as NGX names it (0 when it would not say);
-// failed means no output at or under the door's served the input.
+// for, the door's own unless NVIDIA's ceiling cut it (cap: the largest output
+// NVIDIA answers at or under the door, the door's own when it answers there)
+// or the input is under the floor at the cap. floorW x floorH is that floor as
+// NGX names it (0 when it would not say); failed means no output at or under
+// the cap served the input.
 struct FloorDecision {
-  uint32_t doorW=0,doorH=0,w=0,h=0,outW=0,outH=0,floorW=0,floorH=0;
+  uint32_t doorW=0,doorH=0,w=0,h=0,outW=0,outH=0,floorW=0,floorH=0,capW=0,capH=0;
   bool known=false,failed=false;
 };
 
@@ -111,7 +113,7 @@ std::atomic<uint64_t> g_recommended{0};
 // (ui_quality_math.h's rule). 0 at the same times as g_recommended.
 std::atomic<uint64_t> g_vertical{0};
 // ...and what the game is told now (the host's ask), which leads the
-// recommendation above through a cull-guard or FOV-trim adoption: the game
+// recommendation above through a FOV-trim adoption: the game
 // re-creates its surfaces for it before a frame of it arrives (review P3-1,
 // flight 2026-09-23 13:23). 0 when the host does not say.
 std::atomic<uint64_t> g_asked{0};
@@ -187,7 +189,21 @@ const char* mode(const Settings& s) {
 }
 
 bool sameFloor(const FloorDecision& a,const FloorDecision& b) {
-  return a.doorW==b.doorW&&a.doorH==b.doorH&&a.w==b.w&&a.h==b.h&&a.outW==b.outW&&a.outH==b.outH&&a.failed==b.failed;
+  return a.doorW==b.doorW&&a.doorH==b.doorH&&a.w==b.w&&a.h==b.h&&a.outW==b.outW&&a.outH==b.outH&&a.failed==b.failed&&
+         a.capW==b.capW&&a.capH==b.capH;
+}
+// One line per door size for NVIDIA's ceiling (floorOutput): the cut, or that
+// NVIDIA answers nothing at or under the door. Render thread only.
+uint32_t g_ceilNotedW=0,g_ceilNotedH=0;
+void noteCeiling(uint32_t doorW,uint32_t doorH,uint32_t capW,uint32_t capH) {
+  if(doorW==g_ceilNotedW&&doorH==g_ceilNotedH)return;
+  g_ceilNotedW=doorW;g_ceilNotedH=doorH;
+  if(capW)
+    edvr::Log::get().note("dlss ceiling: NVIDIA answers no render range for a %ux%u output; the pass outputs %ux%u "
+        "and the runtime upsamples the rest.",doorW,doorH,capW,capH);
+  else
+    edvr::Log::get().note("dlss ceiling: NVIDIA answers no render range at or under %ux%u; the door's own output "
+        "stands.",doorW,doorH);
 }
 // fix.temporal_aa = dlss's served floor (dlss_floor.h). NVIDIA serves an
 // input only inside some mode's range for the output it is asked for, and
@@ -204,17 +220,36 @@ bool sameFloor(const FloorDecision& a,const FloorDecision& b) {
 // or nothing serves, the door's output stands and the pass decides, as
 // before this existed. Logged once per change of the decision (one line
 // for the pair while the eyes agree): the cut, a cut's end, a failure.
+// First comes NVIDIA's ceiling (dlss_floor.h, dlssCeilingOutput): an output
+// it names no usable range for is cut to the largest it does answer, and the
+// floor is read there -- the 2026-10-09 Pimax flight's 8268x3948 answered
+// zeros for every mode, so the floor was never reached.
 void floorOutput(State& s,unsigned eye,uint32_t w,uint32_t h,unsigned& outW,unsigned& outH) {
   FloorDecision& f=s.floor[eye];
   if(f.doorW==outW&&f.doorH==outH&&f.w==w&&f.h==h){outW=f.outW;outH=f.outH;return;}
   f={};f.doorW=outW;f.doorH=outH;f.w=w;f.h=h;f.outW=outW;f.outH=outH;
   edvr::DlssModeRange modes[edvr::kDlssModeCount];
   if(edvr::dlssModeRanges(s.device,outW,outH,modes)) {
-    f.known=true;edvr::dlssRangeFloor(modes,&f.floorW,&f.floorH);
-    uint32_t cw=outW,ch=outH;
+    f.known=true;
+    // NVIDIA's ceiling first (dlss_floor.h): an output with no usable range is cut to the largest one that has one, and the floor is
+    // read there. The search's own queries are quiet; the cap's ladder is logged as any output's is.
+    f.capW=outW;f.capH=outH;
+    if(!edvr::dlssRangesAnswered(modes)) {
+      uint32_t kw=0,kh=0;
+      edvr::dlssCeilingOutput(outW,outH,[&](uint32_t qw,uint32_t qh,edvr::DlssModeRange* at){
+        edvr::dlssModeRanges(s.device,qw,qh,at,true);},&kw,&kh);
+      if(kw) {
+        f.capW=kw;f.capH=kh;
+        edvr::dlssModeRanges(s.device,kw,kh,modes);
+      }
+      noteCeiling(outW,outH,kw,kh);
+    }
+    f.outW=f.capW;f.outH=f.capH;
+    edvr::dlssRangeFloor(modes,&f.floorW,&f.floorH);
+    uint32_t cw=f.capW,ch=f.capH;
     if(!edvr::dlssRangesServe(modes,w,h)) {
       f.failed=true;
-      if(edvr::dlssFloorOutput(modes,outW,outH,w,h,&cw,&ch)) {
+      if(edvr::dlssFloorOutput(modes,f.capW,f.capH,w,h,&cw,&ch)) {
         for(unsigned step=0;step<8&&cw>=2&&ch>=2;++step) {
           edvr::DlssModeRange at[edvr::kDlssModeCount];
           if(!edvr::dlssModeRanges(s.device,cw,ch,at))break;
@@ -230,23 +265,23 @@ void floorOutput(State& s,unsigned eye,uint32_t w,uint32_t h,unsigned& outW,unsi
   }
   outW=f.outW;outH=f.outH;
   if(!f.known)return;  // NGX said nothing: nothing decided, nothing to say (the pass says why)
-  const bool cut=f.outW!=f.doorW||f.outH!=f.doorH;
+  const bool cut=f.outW!=f.capW||f.outH!=f.capH;
   if(cut)++s.floorCuts;
   const FloorDecision& n=s.floorNoted;
-  const bool notedCut=n.outW&&(n.outW!=n.doorW||n.outH!=n.doorH);
+  const bool notedCut=n.outW&&(n.outW!=n.capW||n.outH!=n.capH);
   if(sameFloor(f,n)||!(cut||f.failed||notedCut))return;
   if(cut)
     edvr::Log::get().note("dlss floor: the game's %ux%u is under the %ux%u floor NVIDIA names for a %ux%u "
         "output, where no mode serves it; the pass outputs %ux%u (%.2fx the input, the largest output that "
         "floor reaches) and the runtime's submit upsamples the rest to the headset.",
-        w,h,f.floorW,f.floorH,f.doorW,f.doorH,f.outW,f.outH,double(f.outW)/double(w));
+        w,h,f.floorW,f.floorH,f.capW,f.capH,f.outW,f.outH,double(f.outW)/double(w));
   else if(f.failed)
     edvr::Log::get().note("dlss floor: no output at or under %ux%u serves the game's %ux%u (NVIDIA's floor "
-        "there is %ux%u); the door's own output stands, and the pass decides as before.",
-        f.doorW,f.doorH,w,h,f.floorW,f.floorH);
+        "there is %ux%u); that output stands, and the pass decides as before.",
+        f.capW,f.capH,w,h,f.floorW,f.floorH);
   else
     edvr::Log::get().note("dlss floor: the game's %ux%u reaches the floor of the %ux%u output again (%ux%u); "
-        "the pass outputs %ux%u.",w,h,f.doorW,f.doorH,f.floorW,f.floorH,f.doorW,f.doorH);
+        "the pass outputs %ux%u.",w,h,f.capW,f.capH,f.floorW,f.floorH,f.capW,f.capH);
   s.floorNoted=f;
 }
 
@@ -565,9 +600,9 @@ bool nativeTemporalOmissionCounters(uint64_t* skipped, uint64_t* historyKept, ui
 }
 // fix.ui_quality's panels and instruments (ui_surfaces.h): the size, max over eyes, the
 // runtime's beginFrame says the frame being drawn was rendered for (the
-// host's treatedGeometry: the FOV trim and the cull guard included). Outside
+// host's treatedGeometry: the FOV trim included). Outside
 // an adoption that is what GetRecommendedRenderTargetSize answers; DURING a
-// cull-guard or FOV-trim adoption it is the previous ask, one rebuild behind
+// FOV-trim adoption it is the previous ask, one rebuild behind
 // the game (review P3-1, open). Read from inside CreateTexture2D -- EDVR's
 // own creates in treat() included -- so from g_recommended, never the lock.
 bool nativeTemporalRecommended(uint32_t* w, uint32_t* h) {

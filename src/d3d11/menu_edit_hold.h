@@ -18,7 +18,8 @@
 //       Other       any other change is about to be queued (it goes behind the held one, the order the player made them in),
 //       Close       the menu closes (Escape, the summon key, focus lost, the tracking origin changed),
 //       Shutdown    the DLL is shutting down.
-//   - the sink is the writer thread's queue, so a failed write is rolled back exactly as it was: the row is put back to what the file holds.
+//   - the sink is the writer thread's queue, so a failed write is rolled back exactly as it was: the row is put back to what the file holds -- unless the row has been
+//     edited since (EditGeneration below): the newer edit is already shown, and it is held or queued or written, so its own result decides what the row shows.
 //
 // Pure: the job is whatever the caller writes (menu.cpp's WriteJob; the rig's own), and the clock and the key state are arguments.
 #pragma once
@@ -29,6 +30,17 @@ namespace edvr {
 constexpr uint64_t kEditMaxWaitMs = 250;   // the longest a held edit waits for its write: a hold writes about every 250 ms, and once more on release
 
 enum class EditFlush : uint8_t { None = 0, Release, MaxWait, RowSwitch, PageSwitch, Other, Close, Shutdown };
+
+// The edit counter of one row (the 0.19.0 release review, "existing limitation"). Every edit of the row takes the next number and its job carries it. A write that fails
+// puts the row back to what the file holds only when its job was the row's LATEST edit: with a newer edit held in the coalescer or queued behind it, the row already shows
+// the newer value, and putting it back to the file's would drop the steps that were made since -- the next repeat of a held key would step from the file's value, not
+// from the one on the screen (a hold of 1, 2, 3, 4 written, 5 held, the write of 4 failing: the row went to 0 and the next step to 1, not 6). The newer edit's own result
+// then decides: written, the file and the row agree; failed, it is the latest and rolls the row back itself.
+struct EditGeneration {
+    uint32_t latest = 0;
+    uint32_t next() { return ++latest; }                                              // a new edit of the row: the number its job carries
+    bool rollbackDue(uint32_t jobGeneration) const { return jobGeneration == latest; }   // a failed write rolls the row back only if no newer edit was made
+};
 
 template <class Job>
 class EditCoalescer {

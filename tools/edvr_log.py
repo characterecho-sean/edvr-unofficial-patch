@@ -7,6 +7,7 @@
     python tools/edvr_log.py --target steam --tail 80
     python tools/edvr_log.py --target frontier --tally vh
     python tools/edvr_log.py --target frontier --tally vh --frame 1
+    python tools/edvr_log.py --target steam --tally pose
     python tools/edvr_log.py --target frontier --tally periodic --expect-build HEAD
     python tools/edvr_log.py --target frontier --tally periodic --window-ms 250
     python tools/edvr_log.py --target frontier --tally periodic --infer-runs
@@ -58,6 +59,10 @@ the totals row. The census caps its log output at 16384 lines
 (draw_census.cpp), so a long census keeps per-draw detail only for the
 first frames; --tally says which frames survive only as summaries
 rather than printing an empty table.
+
+--tally pose tables the pose-gap diagnostic: every `pose gap:` line in the RUNTIME log (it reads --tag openxr unless you name a tag or a file) by
+caller (thread, return address): how far a head pose is located from the drawn frame's display time, how far it is turned from the drawn pose, and the
+correlation of that angle with head speed across the windows (docs\terrain-culling.md). Exit 1 when the log has no such line.
 
 --tally periodic answers one question about one flight: which periodic work
 coincides with long frames. It reads the graphics log and the runtime log
@@ -602,6 +607,137 @@ def print_vh_tally(text, frame):
                  s["clears"], s["unseen"]))
     return 0
 
+
+def _mean_sd(values):
+    n = len(values)
+    if not n:
+        return None, None
+    mean = sum(values) / float(n)
+    sd = statistics.stdev(values) if n > 1 else None
+    return mean, sd
+
+
+def _mean_sd_cell(ms, signed, digits):
+    mean, sd = ms
+    if mean is None:
+        return "-"
+    fmt = "%%%s.%df" % ("+" if signed else "", digits)
+    return (fmt % mean) + (" +/- " + ("%.*f" % (digits, sd)) if sd is not None else "")
+
+
+# --tally pose: the pose-gap diagnostic (src/openxr/pose_gap.h writes every line, and tools\openxr_pose_test holds tools\pose_gap_fixture.log, which this
+# script's --self-test reads, to exactly what it writes). The lines are in the RUNTIME log, one per caller every 60 s:
+#
+#   pose gap: tid T calls n from exe+0xRVA prediction p ms target-minus-display mean a ms (min b max c) angle-to-drawn mean d max e deg
+#       head f deg/s waitgetposes w failed k[ fallback f]
+#   pose gap: more than 16 callers in a window; N calls not counted
+#
+# One line is one caller (thread, return RVA) over a window of WaitGetPoses; "target-minus-display" is the instant its pose was located at less the
+# latest frame's predictedDisplayTime, "angle-to-drawn" the angle between the pose it got and the pose that frame was drawn with, "head" the render
+# pose's angular speed. Any of the three reads n/a when none of the window's calls had it. Elite's own request for "now" is answered at the display
+# time since the head-pose fix (docs\terrain-culling.md), so for it the gap reads 0; a caller that passes a real prediction, or is not in the game's
+# image, is located at the wall clock and shows the true lag.
+
+POSE_GAP_RE = re.compile(
+    r"pose gap: tid (?P<tid>\d+) calls (?P<calls>\d+) from (?P<frm>exe\+0x[0-9A-Fa-f]+|outside|\?) "
+    r"prediction (?P<pred>[-+0-9.]+) ms target-minus-display "
+    r"(?:mean (?P<gm>[-+0-9.]+) ms \(min (?P<gmin>[-+0-9.]+) max (?P<gmax>[-+0-9.]+)\)|n/a) "
+    r"angle-to-drawn (?:mean (?P<am>[-+0-9.]+) max (?P<amax>[-+0-9.]+) deg|n/a) "
+    r"head (?:(?P<head>[-+0-9.]+) deg/s|n/a) waitgetposes (?P<waits>\d+) failed (?P<failed>\d+)(?: fallback (?P<fb>\d+))?")
+POSE_GAP_MORE_RE = re.compile(r"pose gap: more than (?P<limit>\d+) callers in a window; (?P<dropped>\d+) calls not counted")
+
+
+def parse_pose_gap(text):
+    """Every `pose gap:` line, in order. Returns (windows, notes): a window is a dict of tid, calls, frm, pred (ms), gm/gmin/gmax (ms) and am/amax
+    (deg) and head (deg/s) each None when the line said n/a, waits, failed, fb; a note is the text of an over-the-limit line."""
+    windows = []
+    notes = []
+    for line in text.splitlines():
+        m = POSE_GAP_RE.search(line)
+        if m:
+            def num(name):
+                v = m.group(name)
+                return float(v) if v is not None else None
+            windows.append({
+                "tid": int(m.group("tid")), "calls": int(m.group("calls")), "frm": m.group("frm"), "pred": float(m.group("pred")),
+                "gm": num("gm"), "gmin": num("gmin"), "gmax": num("gmax"), "am": num("am"), "amax": num("amax"), "head": num("head"),
+                "waits": int(m.group("waits")), "failed": int(m.group("failed")), "fb": int(m.group("fb") or 0)})
+            continue
+        if POSE_GAP_MORE_RE.search(line):
+            notes.append(line.split("pose gap:", 1)[1].strip())
+    return windows, notes
+
+
+def _pearson(pairs):
+    """Pearson's r over (x, y) pairs, None when there are fewer than three or either side does not vary."""
+    n = len(pairs)
+    if n < 3:
+        return None
+    mx = sum(p[0] for p in pairs) / float(n)
+    my = sum(p[1] for p in pairs) / float(n)
+    sxx = sum((p[0] - mx) ** 2 for p in pairs)
+    syy = sum((p[1] - my) ** 2 for p in pairs)
+    if sxx <= 1e-12 or syy <= 1e-12:
+        return None
+    return sum((p[0] - mx) * (p[1] - my) for p in pairs) / math.sqrt(sxx * syy)
+
+
+def tally_pose(windows):
+    """The --tally pose numbers: one row per (thread, return address), by thread, each over that caller's windows: n windows, calls, failed, fallbacks,
+    and (mean, sd) pairs of the windows' mean gap (ms), mean angle (deg) and head speed (deg/s), the range of the angle means, and r, the correlation
+    of a window's mean angle with its head speed (None when it cannot be told)."""
+    groups = {}
+    for w in windows:
+        groups.setdefault((w["tid"], w["frm"]), []).append(w)
+    rows = []
+    for key in sorted(groups):
+        ws = groups[key]
+        angles = [w["am"] for w in ws if w["am"] is not None]
+        rows.append({
+            "tid": key[0], "frm": key[1], "n": len(ws), "calls": sum(w["calls"] for w in ws),
+            "failed": sum(w["failed"] for w in ws), "fallbacks": sum(w["fb"] for w in ws),
+            "gap": _mean_sd([w["gm"] for w in ws if w["gm"] is not None]),
+            "angle": _mean_sd(angles), "angle_range": (min(angles), max(angles)) if angles else None,
+            "head": _mean_sd([w["head"] for w in ws if w["head"] is not None]),
+            "r": _pearson([(w["am"], w["head"]) for w in ws if w["am"] is not None and w["head"] is not None])})
+    return rows
+
+
+def print_pose_tally(text):
+    """The --tally pose report. Returns the process exit code."""
+    windows, notes = parse_pose_gap(text)
+    for note in notes:
+        print("[edvr] pose gap: %s" % note)
+    if not windows:
+        print("[edvr] no `pose gap:` lines in this log. The diagnostic is always on and writes one per caller every 60 s from the runtime's "
+              "WaitGetPoses; they are in the runtime log (--tag openxr), not the graphics log, and need a build with the pose-gap diagnostic.")
+        return 1
+    rows = tally_pose(windows)
+    print("[edvr] tally pose: %d window line(s) over %d caller row(s)" % (len(windows), len(rows)))
+    print("[edvr] per caller (thread, return address), mean +/- sd over that caller's windows of each window's mean:")
+    print("%7s %-14s %4s %7s %6s  %-20s %-22s %-11s %s"
+          % ("tid", "from", "n", "calls", "failed", "gap ms (target-disp)", "angle deg (to drawn)", "head deg/s", "r(angle,head)"))
+    for r in rows:
+        print("%7d %-14s %4d %7d %6d  %-20s %-22s %-11s %s"
+              % (r["tid"], r["frm"], r["n"], r["calls"], r["failed"], _mean_sd_cell(r["gap"], True, 2), _mean_sd_cell(r["angle"], False, 3),
+                 ("%.1f" % r["head"][0]) if r["head"][0] is not None else "n/a", ("%+.2f" % r["r"]) if r["r"] is not None else "n/a"))
+    for r in rows:
+        if r["fallbacks"]:
+            print("[edvr] tid %d: %d call(s) could not be located at the display time (no frame yet, or no positive display time) and were located at "
+                  "now + prediction." % (r["tid"], r["fallbacks"]))
+    for r in rows:
+        if r["gap"][0] is None:
+            continue
+        spread = ""
+        if r["angle_range"] is not None:
+            spread = " (%.3f to %.3f across windows)" % r["angle_range"]
+        print("[edvr] %s, tid %d: its pose is located %+.2f ms from the drawn frame's display time, and is turned %s deg from the drawn pose%s; "
+              "angle against head speed r = %s over %d window(s)."
+              % (r["frm"], r["tid"], r["gap"][0], ("%.3f" % r["angle"][0]) if r["angle"][0] is not None else "n/a", spread,
+                 ("%+.2f" % r["r"]) if r["r"] is not None else "n/a", r["n"]))
+    print("[edvr] Elite's own \"now\" request should read a gap of 0 ms and a small angle that does not grow with head speed; a caller with a real "
+          "prediction, or outside the game's image, shows the true lag (before the fix Elite's was 41-44 ms and up to 4.1 degrees, r = +0.98).")
+    return 0
 
 # --camera-census: the VR camera census (advanced.vr_camera_census), one flight
 # in the VR profile with the key on. The question it answers (design doc section
@@ -8850,7 +8986,7 @@ def self_test_slow_regime():
                 % (seq, ms, period, ms - 5.0, ms - 5.1, ms - 5.1))
 
     def phases_line(window, first, last, end_p50, pacer_p50=0.0001, wait_p50=0.0, dispatch_p50=0.158):
-        return ("native_submit_phases,window=%d,first=%d,last=%d,output=2325x2392/2325x2392,treatments=6/6,feature_epoch=8,cull_stage=3,cull_factors=1.08488/1.00000,pacing=1,"
+        return ("native_submit_phases,window=%d,first=%d,last=%d,output=2325x2392/2325x2392,treatments=6/6,feature_epoch=8,trim_stage=3,trim_factors=0.90000/0.95000,pacing=1,"
                 "separate=1,producer_dispatch=%.4f/0.2701/0.3418/0.3961,producer_acquire=0.0765/0.1489/0.1674/0.1714,producer_flush=0.0330/0.1032/0.1267/0.1953,"
                 "consumer_acquire=0.0636/0.1304/0.1787/0.2020,consumer_flush=0.0281/0.0999/0.1065/0.1209,receive=0.1266/0.1833/0.2516/0.2953,xr_acquire=0.0014/0.0018/0.0021/0.0131,"
                 "xr_wait=0.0003/0.0004/0.0006/0.0006,xr_draw_submit=0.0794/0.1203/0.1579/0.1726,xr_release=0.0007/0.0010/0.0012/0.0014,"
@@ -9389,9 +9525,11 @@ def main(argv=None):
     ap.add_argument("--dir", default=None,
                     help="read this log directory directly, ignoring --target")
     ap.add_argument("--file", default=None, help="read exactly this log file")
-    ap.add_argument("--tag", default="gfx",
+    ap.add_argument("--tag", default=None,
                     help="gfx (d3d11), vr (legacy OpenVR proxy, retired 2026-09-16), "
-                         "openxr (native OpenXR), or all")
+                         "openxr (native OpenXR), or all. Omitted, it is gfx, except "
+                         "for --tally pose, whose lines are in the runtime log (openxr); "
+                         "a tag you name is always the one read")
     ap.add_argument("--nth", type=int, default=0,
                     help="0 is the newest log, 1 the one before it")
     ap.add_argument("--list", action="store_true",
@@ -9405,8 +9543,10 @@ def main(argv=None):
                     help="print only lines matching this regular expression")
     ap.add_argument("--tail", type=int, default=None,
                     help="print only the last N lines (after --grep)")
-    ap.add_argument("--tally", choices=["vh", "periodic"], default=None,
-                    help="aggregate instead of dumping: vh counts eye-texture "
+    ap.add_argument("--tally", choices=["vh", "periodic", "pose"], default=None,
+                    help="aggregate instead of dumping: pose tables the `pose gap:` "
+                         "lines of the runtime log by caller; "
+                         "vh counts eye-texture "
                          "DC lines per vh= hash, split by r= render-target "
                          "token, with the DC frame summaries as totals; "
                          "periodic lays the `periodic work:` timing against "
@@ -9522,6 +9662,11 @@ def main(argv=None):
     if args.self_test:
         return self_test()
 
+    # The pose-gap lines are written by the runtime, not the graphics half: --tally pose reads its log when no tag was named. The default is
+    # None rather than "gfx" so that a tag named on the command line, gfx included, is never mistaken for the default and overridden.
+    if args.tag is None:
+        args.tag = "openxr" if args.tally == "pose" else "gfx"
+
     if args.tally == "periodic":
         if not args.file and args.tag.lower() != "gfx":
             print("[edvr] --tally periodic reads the graphics log (--tag gfx) "
@@ -9627,6 +9772,8 @@ def main(argv=None):
         return print_freezes(path, text, ver, want, args, native_dirs)
     if args.tally == "periodic":
         return print_periodic_report(path, text, ver, want, args, native_dirs)
+    if args.tally == "pose":
+        return print_pose_tally(text)
     if args.tally:
         return print_vh_tally(text, args.frame)
 
@@ -10075,6 +10222,8 @@ def self_test():
         ok = False
     if not self_test_terrain_checkerboard():
         ok = False
+    if not self_test_pose():
+        ok = False
 
     print("self-test: %s" % ("ok" if ok else "FAILED"))
     return 0 if ok else 1
@@ -10082,6 +10231,171 @@ def self_test():
 
 FLATU_FIXTURE = "flat_upscale_fixture.log"
 
+
+POSE_FIXTURE = "pose_gap_fixture.log"
+
+
+def self_test_pose():
+    """--tally pose on tools\\pose_gap_fixture.log (which tools\\openxr_pose_test holds to exactly what src/openxr/pose_gap.h writes for the scripted
+    flight: 24 lines -- twelve 60-second windows of Elite's own "now" request (thread 24212, answered at the display time: gap 0, a small flat
+    angle, one fallback call in window 2, three failed in window 5) and of another caller (thread 7001, outside the image, a real prediction: gap 9.5
+    ms, an angle of 0.02 degrees per deg/s of head speed)), then on lines altered to break each thing the report depends on. Returns ok."""
+    ok = True
+
+    def fail(message):
+        nonlocal ok
+        print("self_test_pose: %s" % message)
+        ok = False
+
+    import contextlib
+    import io
+    import shutil
+    fixture = os.path.join(os.path.dirname(os.path.abspath(__file__)), POSE_FIXTURE)
+    if not os.path.isfile(fixture):
+        fail("the fixture %s is missing beside this script" % POSE_FIXTURE)
+        return False
+    text = read_text(fixture)
+    windows, notes = parse_pose_gap(text)
+    if len(windows) != 24 or notes:
+        fail("the fixture parsed to %d windows and %d notes, want 24 and none" % (len(windows), len(notes)))
+        return False
+    w0, w1 = windows[0], windows[1]
+    if (w0["tid"], w0["calls"], w0["frm"], w0["waits"], w0["failed"], w0["fb"]) != (24212, 120, "exe+0x4E3881", 5400, 0, 0) \
+            or w0["pred"] != 0.0 or w0["gm"] != 0.0 or w0["gmin"] != 0.0 or w0["gmax"] != 0.0 or w0["am"] != 0.05 or w0["amax"] != 0.05 or w0["head"] != 10.0:
+        fail("window 1 parsed to %r" % (w0,))
+    if (w1["tid"], w1["calls"], w1["frm"]) != (7001, 60, "outside") or w1["pred"] != 11.0 or w1["gm"] != 9.5 or w1["gmin"] != 9.0 or w1["gmax"] != 10.0:
+        fail("window 2 (the other caller, outside the image, prediction 11 ms) parsed to %r" % (w1,))
+
+    def close(a, b, eps=0.005):
+        return a is not None and abs(a - b) <= eps
+
+    rows = {r["tid"]: r for r in tally_pose(windows)}
+    if sorted(rows) != [7001, 24212]:
+        fail("the rows -> %r" % (sorted(rows),))
+        return False
+    elite = rows[24212]
+    if elite["frm"] != "exe+0x4E3881" or elite["n"] != 12 or elite["calls"] != 1440 or elite["failed"] != 3 or elite["fallbacks"] != 1 \
+            or not close(elite["gap"][0], 0.0) or not close(elite["gap"][1], 0.0) or not close(elite["angle"][0], 0.055) \
+            or not close(elite["head"][0], 65.0) or elite["angle_range"] != (0.05, 0.06) or elite["r"] is None or abs(elite["r"]) > 0.4:
+        fail("Elite's own request -> %r (a gap of 0 and an angle that does not follow head speed)" % (elite,))
+    other = rows[7001]
+    if other["frm"] != "outside" or other["n"] != 12 or other["calls"] != 720 or not close(other["gap"][0], 9.5) or not close(other["angle"][0], 1.3) \
+            or not close(other["angle"][1], 0.7, 0.05) or not close(other["head"][0], 65.0) or other["r"] is None or not close(other["r"], 1.0, 1e-9):
+        fail("the other caller -> %r (the true gap, an angle that follows head speed)" % (other,))
+    # The correlation needs three windows and a spread on both sides.
+    two = [w for w in windows if w["tid"] == 7001][:2]
+    if tally_pose(two)[0]["r"] is not None:
+        fail("two windows gave a correlation")
+    flat = [dict(w, am=0.05) for w in windows if w["tid"] == 7001]
+    if tally_pose(flat)[0]["r"] is not None:
+        fail("a flat angle gave a correlation")
+    if _pearson([(1.0, 1.0), (2.0, 4.0), (3.0, 9.0)]) is None or abs(_pearson([(1.0, 3.0), (2.0, 2.0), (3.0, 1.0)]) + 1.0) > 1e-9:
+        fail("_pearson of a rising and a falling line")
+    # A line altered: n/a figures parse as None and stay out of every mean.
+    altered = text.replace("target-minus-display mean 0.00 ms (min 0.00 max 0.00)", "target-minus-display n/a", 1)
+    aw, _ = parse_pose_gap(altered)
+    if aw[0]["gm"] is not None or aw[0]["gmin"] is not None or aw[0]["gmax"] is not None:
+        fail("an n/a gap parsed as a number: %r" % (aw[0],))
+    ar = {r["tid"]: r for r in tally_pose(aw)}[24212]
+    if ar["n"] != 12 or not close(ar["gap"][0], 0.0):
+        fail("an n/a window changed the gap mean -> %r" % (ar,))
+    # The over-the-limit line is a note, not a window.
+    more = text + "[00:00:00.000] pose gap: more than 16 callers in a window; 4 calls not counted\n"
+    mw, mn = parse_pose_gap(more)
+    if len(mw) != 24 or mn != ["more than 16 callers in a window; 4 calls not counted"]:
+        fail("the over-the-limit line -> %d windows, notes %r" % (len(mw), mn))
+    # Through main(), on a directory the tool discovers on its own: the runtime log is read by default.
+    tmp = tempfile.mkdtemp(prefix="edvr_pose_selftest_")
+    try:
+        logs = os.path.join(tmp, "edvr_logs")
+        os.makedirs(logs)
+        with open(os.path.join(logs, "edvr_openxr_20261009_120000_123_77.log"), "wb") as f:
+            f.write(("[00:00:00.001] version 0.18.3-1-gabcdef0 (build 68C0A1F2) -- this DLL was linked 2026-10-09 12:00:00 UTC\n" + text).encode("utf-8"))
+        with open(os.path.join(logs, "edvr_gfx_20261009_120001.log"), "wb") as f:
+            f.write(b"[00:00:00.001] version 0.18.3-1-gabcdef0 (build 68C0A1F2) -- x\n[00:00:01.000] nothing here\n")
+
+        def run(argv):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = main(argv)
+            return rc, buf.getvalue()
+
+        rc, out = run(["--dir", logs, "--tally", "pose"])
+        for want in ("tally pose: 24 window line(s) over 2 caller row(s)",
+                     "   7001 outside          12     720      0  +9.50 +/- 0.00",
+                     " 24212 exe+0x4E3881     12    1440      3  +0.00 +/- 0.00",
+                     "1.300 +/- 0.7", "+1.00",
+                     "exe+0x4E3881, tid 24212: its pose is located +0.00 ms from the drawn frame's display time, and is turned 0.055 deg from the drawn pose "
+                     "(0.050 to 0.060 across windows)",
+                     "outside, tid 7001: its pose is located +9.50 ms from the drawn frame's display time, and is turned 1.300 deg from the drawn pose "
+                     "(0.200 to 2.400 across windows); angle against head speed r = +1.00 over 12 window(s).",
+                     "tid 24212: 1 call(s) could not be located at the display time", "before the fix Elite's was 41-44 ms"):
+            if want not in out:
+                fail("--tally pose output lacks %r:\n%s" % (want, out))
+        if rc != 0:
+            fail("--tally pose exited %d" % rc)
+        with open(os.path.join(logs, "edvr_openxr_20261009_130000_123_77.log"), "wb") as f:
+            f.write(b"[00:00:00.001] version 0.18.3-1-gabcdef0 (build 68C0A1F2) -- x\n[00:00:01.000] nothing here\n")
+        rc, out = run(["--dir", logs, "--tally", "pose", "--nth", "0"])
+        if rc != 1 or "no `pose gap:` lines" not in out:
+            fail("a log with no pose gap line -> rc %d:\n%s" % (rc, out))
+        rc, out = run(["--dir", logs, "--tally", "pose", "--tag", "gfx"])
+        if rc != 1 or "no `pose gap:` lines" not in out or "edvr_gfx_20261009_120001.log" not in out or "edvr_openxr_" in out:
+            fail("an explicit --tag gfx reads the graphics log, which has none -> rc %d:\n%s" % (rc, out))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    # Which log is read, from what each carries: an older runtime log and a NEWER graphics log, each with a pose row of its own (+0.00 ms and
+    # +123.00 ms), so the file that was read shows in the output twice over, by name and by content. The tag defaults to the runtime log for
+    # --tally pose only when it was omitted; a tag that was named, gfx included, is honoured; --file controls whatever the tag says.
+    tmp = tempfile.mkdtemp(prefix="edvr_pose_selftest_tag_")
+    try:
+        logs = os.path.join(tmp, "edvr_logs")
+        os.makedirs(logs)
+        head = "[00:00:00.001] version 0.18.3-1-gabcdef0 (build 68C0A1F2) -- this DLL was linked 2026-10-09 12:00:00 UTC\n"
+
+        def row(gap):
+            return ("[00:01:00.000] pose gap: tid 24212 calls 120 from exe+0x4E3881 prediction 0.0 ms target-minus-display mean %.2f ms "
+                    "(min %.2f max %.2f) angle-to-drawn mean 0.050 max 0.050 deg head 10.0 deg/s waitgetposes 5400 failed 0\n" % (gap, gap, gap))
+
+        runtime_name, gfx_name = "edvr_openxr_20261009_120000_123_77.log", "edvr_gfx_20261009_120001.log"
+        runtime_path, gfx_path = os.path.join(logs, runtime_name), os.path.join(logs, gfx_name)
+        with open(runtime_path, "wb") as f:
+            f.write((head + row(0.0)).encode("utf-8"))
+        with open(gfx_path, "wb") as f:
+            f.write((head + row(123.0)).encode("utf-8"))
+
+        def run_tag(argv):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = main(argv)
+            return rc, buf.getvalue()
+
+        def reads(label, argv, name, gap, other_name, other_gap):
+            rc, out = run_tag(argv)
+            read_line = [l for l in out.splitlines() if l.startswith("[edvr] ") and ".log" in l and "lines" in l]
+            if (rc != 0 or len(read_line) != 1 or name not in read_line[0] or other_name in out
+                    or ("is located %+.2f ms from the drawn frame's display time" % gap) not in out
+                    or ("is located %+.2f ms" % other_gap) in out):
+                fail("%s: expected %s at %+.2f ms, not %s at %+.2f ms -> rc %d:\n%s" % (label, name, gap, other_name, other_gap, rc, out))
+
+        reads("--tally pose with no tag reads the runtime log", ["--dir", logs, "--tally", "pose"], runtime_name, 0.0, gfx_name, 123.0)
+        reads("--tally pose --tag gfx reads the graphics log it was told to", ["--dir", logs, "--tally", "pose", "--tag", "gfx"], gfx_name, 123.0, runtime_name, 0.0)
+        reads("--tally pose --tag openxr reads the runtime log", ["--dir", logs, "--tally", "pose", "--tag", "openxr"], runtime_name, 0.0, gfx_name, 123.0)
+        reads("--tally pose --tag GFX is the same tag in any case", ["--dir", logs, "--tally", "pose", "--tag", "GFX"], gfx_name, 123.0, runtime_name, 0.0)
+        reads("--tally pose --tag all reads the newest log of any tag", ["--dir", logs, "--tally", "pose", "--tag", "all"], gfx_name, 123.0, runtime_name, 0.0)
+        reads("--tally pose --nth 0 with no tag still reads the runtime log", ["--dir", logs, "--tally", "pose", "--nth", "0"], runtime_name, 0.0, gfx_name, 123.0)
+        reads("--file controls with no tag", ["--file", gfx_path, "--tally", "pose"], gfx_name, 123.0, runtime_name, 0.0)
+        reads("--file controls over a tag that disagrees", ["--file", runtime_path, "--tally", "pose", "--tag", "gfx"], runtime_name, 0.0, gfx_name, 123.0)
+        # The other tallies keep their default: with no tag the graphics log is read (here, the tally finds nothing in it, which says which one it was).
+        rc, out = run_tag(["--dir", logs, "--tally", "vh"])
+        if gfx_name not in out or runtime_name in out:
+            fail("--tally vh with no tag no longer defaults to the graphics log -> rc %d:\n%s" % (rc, out))
+        rc, out = run_tag(["--dir", logs, "--list"])
+        if gfx_name not in out or runtime_name in out:
+            fail("--list with no tag no longer defaults to the graphics logs -> rc %d:\n%s" % (rc, out))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return ok
 
 def self_test_flat_upscale():
     """--flat-upscale on the checked-in synthetic flight (tools\\flat_upscale_fixture.log, which tools\\flat_temporal_test holds to exactly what the DLL's

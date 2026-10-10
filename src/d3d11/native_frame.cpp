@@ -10,7 +10,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cctype>
 #include <cstdint>
 #include <cstring>
 #include <mutex>
@@ -37,8 +36,6 @@ struct State {
     uint32_t invalidationCount = 0;
     uint32_t lastTransitionEnabled = 0;
     uint32_t lastResubmitEnabled = 0;
-    uint32_t lastCullMode = 0;
-    uint32_t lastCullChannel = 0;
     uint32_t lastDeferredPacing = 0;
     bool pacingNoted = false;
     bool weaponStabilityNoted = false;
@@ -100,74 +97,6 @@ bool rigidPose(const float* m) {
         m[1] * (m[4] * m[10] - m[6] * m[8]) +
         m[2] * (m[4] * m[9] - m[5] * m[8]);
     return std::fabs(determinant - 1.0f) <= 0.004f;
-}
-
-uint32_t cullMode(const std::string& value) {
-    if (_stricmp(value.c_str(), "symmetric") == 0) return 1;
-    if (_stricmp(value.c_str(), "percent") == 0) return 2;
-    return 0;
-}
-
-uint32_t cullChannel(const std::string& value) {
-    if (_stricmp(value.c_str(), "raw") == 0) return 1;
-    if (_stricmp(value.c_str(), "matrix") == 0) return 2;
-    return 0;
-}
-
-bool parseSignature(const std::string& token, uint32_t* width,
-                    uint32_t* height) {
-    if (!width || !height) return false;
-    size_t p = 0;
-    while (p < token.size() && std::isspace(static_cast<unsigned char>(token[p]))) ++p;
-    const size_t widthStart = p;
-    uint64_t w = 0;
-    while (p < token.size() && token[p] >= '0' && token[p] <= '9') {
-        w = w * 10 + static_cast<unsigned>(token[p] - '0');
-        if (w > 0xffffffffu) return false;
-        ++p;
-    }
-    if (p == widthStart || p >= token.size() || token[p] != 'x') return false;
-    ++p;
-    const size_t heightStart = p;
-    uint64_t h = 0;
-    while (p < token.size() && token[p] >= '0' && token[p] <= '9') {
-        h = h * 10 + static_cast<unsigned>(token[p] - '0');
-        if (h > 0xffffffffu) return false;
-        ++p;
-    }
-    if (p == heightStart) return false;
-    while (p < token.size() && std::isspace(static_cast<unsigned char>(token[p]))) ++p;
-    if (p != token.size() || w <= 10 || w >= 360 || h <= 10 || h >= 360) return false;
-    *width = static_cast<uint32_t>(w);
-    *height = static_cast<uint32_t>(h);
-    return true;
-}
-
-void readSignatures(const std::string& raw, EdvrNativeFrameOutput* output) {
-    size_t begin = 0;
-    while (begin <= raw.size() && output->cullSignatureCount < 8) {
-        size_t end = raw.find(',', begin);
-        if (end == std::string::npos) end = raw.size();
-        uint32_t width = 0, height = 0;
-        if (parseSignature(raw.substr(begin, end - begin), &width, &height)) {
-            const uint32_t index = output->cullSignatureCount++;
-            output->cullSignatures[index][0] = width;
-            output->cullSignatures[index][1] = height;
-        }
-        if (end == raw.size()) break;
-        begin = end + 1;
-    }
-}
-
-float clampPercent(float value) {
-    if (!std::isfinite(value) || value < 0.0f) return 0.0f;
-    return value > 50.0f ? 50.0f : value;
-}
-
-float clampFraction(float value) {
-    if (!std::isfinite(value)) return 1.0f;
-    if (value < 0.0f) return 0.0f;
-    return value > 1.0f ? 1.0f : value;
 }
 
 // ---------------------------------------------------------------------------
@@ -354,17 +283,6 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
     // runtime built before 2026-10-07 reads "no offset" and applies none.
     const bool physicalValid = input->valid != 0;
 
-    result.cullMode = cullMode(edvr::Config::get().getString(
-        "fix.cull_guard", "off"));
-    result.cullPercent = clampPercent(edvr::Config::get().getFloat(
-        "fix.cull_guard_percent", 8.0f));
-    result.cullHorizontalFraction = clampFraction(edvr::Config::get().getFloat(
-        "fix.cull_guard_fraction_h", 1.0f));
-    result.cullVerticalFraction = clampFraction(edvr::Config::get().getFloat(
-        "fix.cull_guard_fraction_v", 1.0f));
-    readSignatures(edvr::Config::get().getString("fix.cull_guard_headsets", ""), &result);
-    result.cullChannel = cullChannel(edvr::Config::get().getString(
-        "advanced.cull_guard_channel", "both"));
     // The worn headset's entry in each of the three lists, resolved from the
     // last render-settings query's labels and cached between changes.
     uint32_t trim[kTrimCount] = {0, 0, 0};
@@ -428,22 +346,17 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
     if (!state->configNoted ||
         state->lastTransitionEnabled != result.transitionEnabled ||
         state->lastResubmitEnabled != result.resubmitEnabled ||
-        state->lastCullMode != result.cullMode ||
-        state->lastCullChannel != result.cullChannel ||
         state->lastDeferredPacing != result.deferredPacing) {
         edvr::Log::get().note(
-            "native frame: begin #%u seq=%llu cull=%u, channel=%u, transition=%s, "
+            "native frame: begin #%u seq=%llu transition=%s, "
             "resubmit=%s, pacing=%s.", state->beginCount,
-            static_cast<unsigned long long>(input->sequence), result.cullMode,
-            result.cullChannel,
+            static_cast<unsigned long long>(input->sequence),
             result.transitionEnabled ? "on" : "off",
             result.resubmitEnabled ? "on" : "off",
             result.deferredPacing ? "turbo" : "runtime");
         state->configNoted = true;
         state->lastTransitionEnabled = result.transitionEnabled;
         state->lastResubmitEnabled = result.resubmitEnabled;
-        state->lastCullMode = result.cullMode;
-        state->lastCullChannel = result.cullChannel;
         state->lastDeferredPacing = result.deferredPacing;
     }
     // Only as many bytes as the caller's own struct holds.
@@ -451,14 +364,10 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
     return S_OK;
 }
 
-HRESULT WINAPI setCullState(void* context, uint32_t stage, float factorH,
-                            float factorV) {
-    std::lock_guard<std::mutex> lock(g_mutex);
-    State* state = identify(context);
-    if (!state || state != g_current || !state->active || stage > 2 ||
-        !std::isfinite(factorH) || !std::isfinite(factorV) ||
-        (stage != 0 && (factorH < 1.0f || factorV < 1.0f))) return E_INVALIDARG;
-    edvr::announceCullGuardState(stage, factorH, factorV);
+// RETIRED with the terrain guard (native_frame.h, EdvrNativeFrameRetiredCall): the slot stays in the
+// table, so a runtime built before the removal still finds the provider's own entry there, and the
+// entry does nothing.
+HRESULT WINAPI retiredCall(void*, uint32_t, float, float) {
     return S_OK;
 }
 
@@ -502,7 +411,6 @@ HRESULT WINAPI invalidate(void* context) {
     state->held = false;
     ++state->invalidationCount;
     edvr::clearGlitchFrame();
-    edvr::announceCullGuardState(0, 1.0f, 1.0f);
     return S_OK;
 }
 
@@ -512,7 +420,6 @@ HRESULT WINAPI close(void* context) {
     if (!state) return E_INVALIDARG;
     if (!state->active) return S_FALSE;
     edvr::clearGlitchFrame();
-    edvr::announceCullGuardState(0, 1.0f, 1.0f);
     if (state->consumerAnnounced) {
         edvr::retireGlitchConsumer();
         state->consumerAnnounced = false;
@@ -574,7 +481,7 @@ extern "C" HRESULT WINAPI edvrAcquireNativeFrame(
     g_current = &state;
     table->context = &state;
     table->beginFrame = beginFrame;
-    table->setCullState = setCullState;
+    table->reservedCall = retiredCall;
     table->latchSubmit = latchSubmit;
     table->invalidate = invalidate;
     table->close = close;

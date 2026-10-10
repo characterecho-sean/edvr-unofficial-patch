@@ -11,7 +11,7 @@
 //
 //   * the JITTER: which sub-pixel offset frame n renders through, and how
 //     that offset is told to the game as a shift of its projection's
-//     tangents (the cull guard's own edit, with a different number);
+//     tangents;
 //   * the MAPPING between a pixel and the view-space direction it looks
 //     along, through the frustum the game rendered with;
 //   * the ROTATION DELTA between two frames' cameras, from the runtime's
@@ -22,8 +22,8 @@
 // Conventions, stated once: view space is OpenVR's -- +X right, +Y up, -Z
 // forward -- and the projection is the runtime's raw tangents l, r, t, b,
 // where texture row 0 looks along the b tangent and the last row along t
-// (the guard's cropFractions derived this from the matrix formula and the
-// field confirmed it, 2026-08-18). A jitter of (jx, jy) pixels means the
+// (derived from the matrix formula and confirmed in the field,
+// 2026-08-18). A jitter of (jx, jy) pixels means the
 // rendered content sits jx pixels to the right and jy pixels down from
 // where the unjittered projection would put it.
 #pragma once

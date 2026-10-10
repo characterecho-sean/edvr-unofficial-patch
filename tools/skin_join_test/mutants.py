@@ -25,9 +25,10 @@ ROOT = HERE.parents[1]
 FILES = {
     "join": ROOT / "src" / "d3d11" / "skin_join.h",
     "walk": ROOT / "src" / "d3d11" / "skin_entity_walk.h",
+    "exposure": ROOT / "src" / "d3d11" / "exposure_fix.cpp",   # the dispatch hook's glue, read by the rig as text (J14's pins)
 }
 CONFIG = lib.Config(
-    here=__file__, files=FILES, header_keys=("join", "walk"), pin_keys=(), rig=HERE / "skin_join_test.cpp",
+    here=__file__, files=FILES, header_keys=("join", "walk"), pin_keys=("exposure",), rig=HERE / "skin_join_test.cpp",
     rig_label=":rig_skin_join_test", rig_source_in_bat="tools\\skin_join_test\\skin_join_test.cpp", rig_exe_in_bat="skin_join_test.exe",
     case_prefix="J", include_dirs=("src/d3d11",), min_mutants=40, run_timeout=120.0)
 
@@ -186,6 +187,20 @@ MUTANTS = [
       "a fault reading the bone count is not reported"),
     M("walk-node-unchecked", "J11", "walk", [("if (!userPointer(node) || !read(node + kOffNodeList, &entry, 8)) {", "if (!read(node + kOffNodeList, &entry, 8)) {")],
       "a node address that cannot be a user object is read"),
+    # ---- J14: the chain verdict kept per shader address and registry generation ----
+    M("verdict-ignores-generation", "J14", "join", [("if (found != verdicts_.end() && found->second.generation == generation) return found->second.chain;", "if (found != verdicts_.end()) return found->second.chain;")],
+      "the verdict is kept by the raw shader address again: a re-registered address keeps the old shader's answer (the 0.19.0 review's finding 1)"),
+    M("verdict-generation-not-kept", "J14", "join", [("verdicts_[cs] = Verdict{generation, chain};", "verdicts_[cs] = Verdict{0, chain};")],
+      "the generation a verdict was asked at is lost, so every dispatch asks the registry (its lock) again"),
+    M("verdict-null-shader-asked", "J14", "join", [("        if (!cs) return false;\n        const auto found = verdicts_.find(cs);", "        const auto found = verdicts_.find(cs);")],
+      "a dispatch with no compute shader bound is looked up in the registry"),
+    M("verdict-table-unbounded", "J14", "join", [("if (verdicts_.size() > kCap) verdicts_.clear();", ";")], "the verdict table grows without a bound"),
+    M("verdict-glue-drops-generation", "J14", "exposure", [("verdicts.bound(cs, shaderRegistryGeneration(),", "verdicts.bound(cs, 0,")],
+      "skinChainBound hands the cache no generation: it keeps one verdict per address for good"),
+    M("verdict-glue-own-map", "J14", "exposure", [("static skinjoin::ChainVerdicts verdicts;", "static std::unordered_map<void*, bool> verdicts;")],
+      "skinChainBound keeps its own address-keyed map again"),
+    M("verdict-hook-ungated", "J14", "exposure", [("if (engineVelocitySkinWanted() && skinChainBound()) engineVelocityNoteChainDispatch(self, x);", "if (engineVelocitySkinWanted()) engineVelocityNoteChainDispatch(self, x);")],
+      "every owner dispatch is fed to the join, whatever shader it runs"),
 ]
 
 if __name__ == "__main__":

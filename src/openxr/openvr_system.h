@@ -1,5 +1,7 @@
 #pragma once
 #include "system_source.h"
+#include "exe_module.h"
+#include "head_pose_time.h"
 #include <atomic>
 #include <mutex>
 #include "../common/call_probe_budget.h"
@@ -57,10 +59,14 @@ class OpenVRSystem final : public vr::IVRSystem {
   vr::EVRFirmwareError PerformFirmwareUpdate( vr::TrackedDeviceIndex_t unDeviceIndex ) override;
   void AcknowledgeQuit_Exiting() override;
   void AcknowledgeQuit_UserPrompt() override;
+  // The executable a pose call's return address is judged against (a rig maps a synthetic image over it).
+  void useExeModule(const ExeModule& module) { exe_ = module; }
+  const ExeModule& exeModule() const { return exe_; }
  private:
   void unavailable(unsigned slot) noexcept;
   void noteProperty(unsigned,TrackedDeviceIndex_t,ETrackedDeviceProperty,ETrackedPropertyError) noexcept;
   SystemSource& source_;
+  ExeModule exe_ = readExeModule();
   std::atomic<uint64_t> unavailable_{0};
   struct ProjectionKey { uint64_t clip=0; unsigned eye=0,api=0; bool live=false; };
   ProjectionKey projectionKeys_[2][32]{};

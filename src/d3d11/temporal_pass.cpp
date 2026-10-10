@@ -4071,7 +4071,13 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         endRegion(qs, Region::Full, ctx);
                         gpuCensusEnd(ctx, GpuCensusSection::DoorUpscaler);
                         e.dlHaveHistory = false;
-                        if (!engineFailNoted) {
+                        // A 1:1 frame (no upscale: the loading screen's, or a
+                        // full-size output NVIDIA cannot make) stands aside
+                        // quietly and does not spend the one-shot note: that
+                        // note belongs to an upscale the game asked for, and
+                        // the 2026-10-09 flight's 1:1 create used to hide it.
+                        const bool unityFrame = oW == w && oH == h;
+                        if (!unityFrame && !engineFailNoted) {
                             engineFailNoted = true;
                             if (amdEngine) {
                                 Log::get().note(

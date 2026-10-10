@@ -97,7 +97,7 @@ void attachToDevice(ID3D11Device* device, IDXGISwapChain* swapChain,
         edvr::formatSupportLogDevice(device);
         // Published before anything is hooked, and deliberately before the
         // config is consulted: the openvr half reads this as its test for a
-        // d3d11 half being present (the cull guard), and it cannot ask for
+        // d3d11 half being present, and it cannot ask for
         // it later -- by the time the game requests an interface the moment
         // has passed. Publishing an unwanted pointer costs one store into a
         // mapping we already own. It was first published for the early VR

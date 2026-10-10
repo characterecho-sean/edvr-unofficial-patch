@@ -44,7 +44,7 @@ char g_why[240] = "";
 double g_written = 1.0;
 double g_pending = -1.0;
 uint32_t g_settle = 0;
-constexpr uint32_t kSettleFrames = 10;  // the inputs steady this long before a write
+constexpr uint32_t kSettleFrames = kUiPanelSettleFrames;  // the inputs steady this long before a write
 uint32_t g_frame = 0, g_liveSince = 0, g_writes = 0;
 UiPanelInputs g_lastInputs;
 UiPanelPlan g_lastPlan;
@@ -80,7 +80,14 @@ float g_liveCur = 0.0f, g_liveLo = 0.0f, g_liveHi = 0.0f, g_fxcfgSs = 0.0f;
 std::atomic<bool> g_flatTemporal{false};      // the flat profile's anti-aliasing is on (uiPanelScaleSetFlatTemporal)
 std::atomic<bool> g_pubFlat{false};           // the published plan is the flat one: the setter thunk scales it by the move
 std::atomic<uint32_t> g_pubFlatSsBits{0};     // ...from the live Supersampling it was made beside
+std::atomic<uint64_t> g_pubFlatDims{0};       // ...and the scene size it was made beside (render W << 32 | H)
+// A move of the factor the setter thunk made while the plan is flat: the number of them, and the scene's size when the last one ran. The boundary holds the thunk's factor
+// until the scene's size differs from it (UiFlatPanelSettle). Written by the thunk, read by the render thread.
+std::atomic<uint32_t> g_flatSetterEpoch{0};
+std::atomic<uint64_t> g_flatSetterAt{0};
 // The render thread's own.
+UiFlatPanelSettle g_flatSettle;               // the plan's settle and the setter's held factor (ui_sizing_math.h)
+uint64_t g_flatHeldFrames = 0, g_flatArrivals = 0, g_flatTimeouts = 0;   // boundaries a setter's factor was held / sizes that followed / waits that gave up (all time)
 UiFlatPanelInputs g_flatLastIn;               // the inputs of the last write
 UiFlatPanelRefuse g_flatRefuse = UiFlatPanelRefuse::kUnknown;  // this frame's refusal (kNone: the inputs make a plan)
 uint64_t g_flatRefusedFrames = 0;             // frames the inputs were refused, this 30 s window
@@ -257,12 +264,11 @@ double doubleFromBitsOrOne(uint64_t bits) {
 
 // The two floats: data stores, aligned, each one atomic for the game's reads. `lineF` is the factor without the
 // budget and `ss` the Supersampling in it, for the readers beside the panels (the orbit lines, the chain line).
-bool writeFloats(double f, double lineF = 1.0, double ss = 1.0) {
+// The render thread and the setter thunk both write: one at a time, or one's READONLY lands under the other's store. The caller holds g_floatLock.
+bool writeFloatsUnlocked(double f, double lineF, double ss) {
     if (!g_floats) return false;
     float d1080 = 1080.0f, d1920 = 1920.0f;
     uiPanelDivisors(f, &d1080, &d1920);
-    // The render thread and the setter thunk both write: one at a time, or one's READONLY lands under the other's store.
-    AcquireSRWLockExclusive(&g_floatLock);
     DWORD prot = 0;
     const bool ok = VirtualProtect(const_cast<float*>(g_floats), 8, PAGE_READWRITE, &prot) != 0;
     if (ok) {
@@ -274,9 +280,77 @@ bool writeFloats(double f, double lineF = 1.0, double ss = 1.0) {
         g_ssBits.store(doubleBitsOrZero(ss), std::memory_order_release);
         g_factorBits.store(doubleBitsOrZero(f), std::memory_order_release);
     }
+    return ok;
+}
+
+bool writeFloats(double f, double lineF = 1.0, double ss = 1.0) {
+    AcquireSRWLockExclusive(&g_floatLock);
+    const bool ok = writeFloatsUnlocked(f, lineF, ss);
     ReleaseSRWLockExclusive(&g_floatLock);
     return ok;
 }
+
+// The environment of the two critical sections (ui_sizing_math.h: uiFlatPanelBoundarySection, uiPanelSetterSection), over this file's state. Under g_floatLock it does atomic
+// loads and stores, the floats' write and one load of the scene's size, and nothing else: no log, no wait, no call into the game's code. `liveSs`/`liveOk` are the game's
+// live Supersampling, read by the boundary BEFORE it takes the lock.
+struct PanelEnv {
+    float liveSs = 0.0f;
+    bool liveOk = false;
+    void lock() { AcquireSRWLockExclusive(&g_floatLock); }
+    void unlock() { ReleaseSRWLockExclusive(&g_floatLock); }
+    void seam(UiFlatSeam) {}
+    // the boundary's reads
+    uint32_t setterEpoch() const { return g_flatSetterEpoch.load(std::memory_order_acquire); }
+    uint64_t setterAt() const { return g_flatSetterAt.load(std::memory_order_acquire); }
+    bool isLive() const { return g_live.load(std::memory_order_acquire); }
+    double factorNow() const { return uiPanelScaleFactor(); }
+    double lineFactorNow() const { return uiPanelScaleLineFactor(); }
+    // what the setter thunk scales when the game's menu moves the Supersampling before R follows; published only beside a believable live value
+    void publish(const UiPanelPlan& plan, uint32_t renderW, uint32_t renderH) {
+        if (!liveOk) {
+            g_pubReady.store(false, std::memory_order_release);
+            return;
+        }
+        uint64_t fb = 0, bb = 0;
+        uint32_t sb = 0;
+        std::memcpy(&fb, &plan.formula, sizeof(fb));
+        std::memcpy(&bb, &plan.base, sizeof(bb));
+        std::memcpy(&sb, &liveSs, sizeof(sb));
+        g_pubReady.store(false, std::memory_order_release);
+        g_pubFormulaBits.store(fb, std::memory_order_release);
+        g_pubBaseBits.store(bb, std::memory_order_release);
+        g_pubFlatSsBits.store(sb, std::memory_order_release);
+        g_pubFlatDims.store((static_cast<uint64_t>(renderW) << 32) | renderH, std::memory_order_release);
+        g_pubFlat.store(true, std::memory_order_release);
+        g_pubReady.store(true, std::memory_order_release);
+    }
+    bool writeFactors(double f, double lineF, double ss) { return writeFloatsUnlocked(f, lineF, ss); }
+    // the setter's reads
+    UiPublishedPlan published() const {
+        UiPublishedPlan r;
+        r.ready = g_pubReady.load(std::memory_order_acquire);
+        if (!r.ready) return r;
+        const uint64_t fb = g_pubFormulaBits.load(std::memory_order_acquire), bb = g_pubBaseBits.load(std::memory_order_acquire);
+        std::memcpy(&r.formula, &fb, sizeof(r.formula));
+        std::memcpy(&r.base, &bb, sizeof(r.base));
+        r.flat = g_pubFlat.load(std::memory_order_acquire);
+        const uint32_t sb = g_pubFlatSsBits.load(std::memory_order_acquire);
+        std::memcpy(&r.ss, &sb, sizeof(r.ss));
+        r.dims = g_pubFlatDims.load(std::memory_order_acquire);
+        return r;
+    }
+    void noteMove(bool flat, uint64_t publishedDims) {
+        g_preWrites.fetch_add(1, std::memory_order_relaxed);
+        if (!flat) return;
+        // Flat: the factor the thunk wrote is for the size the game is about to reconfigure to. The boundary holds it until the scene's size has followed, so the size it has
+        // now is recorded (the plan's own when the runtime cannot say), then the count that tells the boundary there is something to hold.
+        uint32_t w = 0, h = 0, ow = 0, oh = 0;
+        uint64_t at = publishedDims;
+        if (flatRuntimeSceneSizes(&w, &h, &ow, &oh) && w && h) at = (static_cast<uint64_t>(w) << 32) | h;
+        g_flatSetterAt.store(at, std::memory_order_release);
+        g_flatSetterEpoch.fetch_add(1, std::memory_order_acq_rel);
+    }
+};
 
 // ---------------------------------------------------- the live Supersampling: the thunks
 
@@ -296,26 +370,10 @@ void noteCtx(uintptr_t ctx) {
 bool readFloatAt(uintptr_t at, float* out) { return readGame(reinterpret_cast<const uint8_t*>(at), out, sizeof(float)); }
 
 // The factor for Supersampling `ss` from what the render thread last published, written when it is not the one the
-// floats hold. No log here (a game thread): the frame boundary says what it sees.
+// floats hold; one operation with the boundary's epoch check and write (uiPanelSetterSection). No log here (a game thread): the frame boundary says what it sees.
 void moveFactorTo(float ss) {
-    if (!g_pubReady.load(std::memory_order_acquire)) return;
-    const uint64_t fb = g_pubFormulaBits.load(std::memory_order_acquire), bb = g_pubBaseBits.load(std::memory_order_acquire);
-    double formula = 0.0, base = 0.0;
-    std::memcpy(&formula, &fb, sizeof(formula));
-    std::memcpy(&base, &bb, sizeof(base));
-    if (!(formula > 0.0) || !(base > 0.0)) return;
-    UiPanelPlan p;
-    if (g_pubFlat.load(std::memory_order_acquire)) {
-        // Flat: R carries the Supersampling, so the plan scales by its move (ui_sizing_math.h's uiFlatPanelMove).
-        const uint32_t sb = g_pubFlatSsBits.load(std::memory_order_acquire);
-        float from = 0.0f;
-        std::memcpy(&from, &sb, sizeof(from));
-        if (!uiFlatPanelMove(formula, base, from, ss, &p)) return;
-    } else {
-        uiPanelSolve(formula, base, UiPanelBase::kObserved, ss, &p);
-    }
-    if (std::fabs(p.f - uiPanelScaleFactor()) <= 1e-9 && std::fabs(p.lineF - uiPanelScaleLineFactor()) <= 1e-9) return;
-    if (writeFloats(p.f, p.lineF, p.ss)) g_preWrites.fetch_add(1, std::memory_order_relaxed);
+    PanelEnv env;
+    uiPanelSetterSection(env, ss);
 }
 
 // Before the game's own setter runs: the context, and the factor for the value it is about to store.
@@ -669,6 +727,7 @@ void uiPanelScaleFrameBoundary() {
         }
         g_pending = -1.0;
         g_settle = 0;
+        g_flatSettle.forget();
         return;
     }
     // The flat profile has its own inputs (the render and display sizes; no HMD, frustum or .fxcfg).
@@ -801,6 +860,7 @@ void flatFrameBoundary(float target) {
         }
         g_pending = -1.0;
         g_settle = 0;
+        g_flatSettle.forget();
         return;
     }
     g_flatAaOff = false;
@@ -812,38 +872,39 @@ void flatFrameBoundary(float target) {
     if (g_flatRefuse != UiFlatPanelRefuse::kNone) {
         // A frame with no scene (a loading screen) or one unlike the screen (a 512x512 preview): the floats hold.
         ++g_flatRefusedFrames;
-        g_settle = 0;
+        g_flatSettle.unsettle();
         return;
     }
-    // Only a value the inputs have held for kSettleFrames is written (the two runs of one view change read one factor).
-    if (std::fabs(plan.f - g_pending) > 1e-6) {
-        g_pending = plan.f;
-        g_settle = 0;
-        return;
-    }
-    if (++g_settle < kSettleFrames) return;
-    // Settled: what the setter thunk scales when the game's menu moves the Supersampling before R follows. Published only
-    // beside a believable live value (the scale needs the value the plan was made at); without one the thunk does nothing.
+    // Only a value the inputs have held for kSettleFrames is written (the two runs of one view change read one factor) -- and a factor the game's Supersampling setter wrote
+    // is held, not written over by the old size's plan, until the scene's size has followed it; the new size's plan is then accepted at once (ui_sizing_math.h's UiFlatPanelSettle).
+    // The setter's epoch, the decision, the publish and the write are ONE operation under the floats' lock (uiFlatPanelBoundarySection): a setter that lands in between waits
+    // for it, and one that landed before it is seen. The game's live Supersampling is read before the lock; the log is written after it.
+    PanelEnv env;
     {
         float cur = 0.0f, lo = 0.0f, hi = 0.0f;
-        if (readLiveSupersampling(&cur, &lo, &hi) == UiSsRead::kOk && uiLiveSupersamplingValid(cur, lo, hi, nullptr)) {
-            uint64_t fb = 0, bb = 0;
-            uint32_t sb = 0;
-            std::memcpy(&fb, &plan.formula, sizeof(fb));
-            std::memcpy(&bb, &plan.base, sizeof(bb));
-            std::memcpy(&sb, &cur, sizeof(sb));
-            g_pubReady.store(false, std::memory_order_release);
-            g_pubFormulaBits.store(fb, std::memory_order_release);
-            g_pubBaseBits.store(bb, std::memory_order_release);
-            g_pubFlatSsBits.store(sb, std::memory_order_release);
-            g_pubFlat.store(true, std::memory_order_release);
-            g_pubReady.store(true, std::memory_order_release);
-        } else {
-            g_pubReady.store(false, std::memory_order_release);
-        }
+        env.liveOk = readLiveSupersampling(&cur, &lo, &hi) == UiSsRead::kOk && uiLiveSupersamplingValid(cur, lo, hi, nullptr);
+        env.liveSs = cur;
     }
-    if (g_live.load(std::memory_order_acquire) && std::fabs(plan.f / uiPanelScaleFactor() - 1.0) <= 0.001) return;
-    if (!writeFloats(plan.f, plan.lineF, 1.0)) return;
+    bool wrote = false;
+    const UiFlatPanelSettle::Step step = uiFlatPanelBoundarySection(g_flatSettle, env, plan, in.renderW, in.renderH, &wrote);
+    if (step.arrived) {
+        ++g_flatArrivals;
+        Log::get().note("ui quality: panels (flat): the scene is now %ux%u, %u boundary(ies) after the game's Supersampling setter moved the factor to x%.4f; "
+                        "the plan for it is f %.4f, accepted without settling.",
+                        in.renderW, in.renderH, step.waited, 1.0 / uiPanelScaleFactor(), plan.f);
+    }
+    if (step.timedOut) {
+        ++g_flatTimeouts;
+        Log::get().note("ui quality: panels (flat): the scene stayed %ux%u for %u boundaries after the game's Supersampling setter moved the factor to x%.4f; "
+                        "the plan for that size (f %.4f) stands.",
+                        in.renderW, in.renderH, step.waited, 1.0 / uiPanelScaleFactor(), plan.f);
+    }
+    if (step.act == UiFlatPanelSettle::Act::kHold) {
+        ++g_flatHeldFrames;
+        return;
+    }
+    if (step.act == UiFlatPanelSettle::Act::kWait || step.act == UiFlatPanelSettle::Act::kKeep) return;
+    if (!wrote) return;
     g_written = plan.f;
     g_lastSsEff = 1.0;
     g_flatLastIn = in;
@@ -871,14 +932,18 @@ void flatLog(const char* net) {
     const uint64_t refused = g_flatRefusedFrames;
     g_flatRefusedFrames = 0;
     // The game's Supersampling setter, through which a menu change moves the factor before R follows.
-    char live[200];
+    char live[360];
     if (g_hookState != kHookInstalled)
         std::snprintf(live, sizeof(live), "not hooked (%s): a change follows R once it holds",
                       g_hookState == kHookRefused ? g_hookWhy : "not installed");
     else
-        std::snprintf(live, sizeof(live), "hooked, called %u time(s), %u factor move(s) made in it, the plan %s published to it",
+        std::snprintf(live, sizeof(live),
+                      "hooked, called %u time(s), %u factor move(s) made in it, the plan %s published to it; a moved factor held for %llu boundary(ies) "
+                      "until the scene's size followed (%llu time(s)) or gave up waiting (%llu time(s))",
                       g_setterCalls.load(std::memory_order_relaxed), g_preWrites.load(std::memory_order_relaxed),
-                      g_pubReady.load(std::memory_order_acquire) && g_pubFlat.load(std::memory_order_acquire) ? "is" : "is not");
+                      g_pubReady.load(std::memory_order_acquire) && g_pubFlat.load(std::memory_order_acquire) ? "is" : "is not",
+                      static_cast<unsigned long long>(g_flatHeldFrames), static_cast<unsigned long long>(g_flatArrivals),
+                      static_cast<unsigned long long>(g_flatTimeouts));
     if (!g_live.load(std::memory_order_acquire)) {
         const char* why = g_target.load(std::memory_order_acquire) <= 0.0f ? "the key is off: the game's own sizes"
                           : g_flatAaOff ? "anti-aliasing is off: the game's own sizes until it is on"

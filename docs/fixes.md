@@ -147,59 +147,20 @@ door; 0.3 to 0.5 is where to start. `fix.render_sharpness = 0.0` (off).
 
 ## Over a planet
 
-**Terrain missing at the edges of view.** *Off by default.* Over planets Elite
-culls terrain against a narrower frustum than it renders, so squares of ground
-at the edges of your view are simply not drawn — black tiles popping in and out
-as you look around (Frontier issue
-[72609](https://issues.frontierstore.net/issue-detail/72609)). EDVR tells the
-game your headset shows a little more than it does and hands the runtime only
-the part you really see, so those tiles get drawn. It costs GPU time — about 6%
-at the values tested on a Quest 3, more if you leave the margin at full — which
-is why it is off. `fix.cull_guard = off`.
+**Terrain missing at the edges of view.** *Fixed; there is no setting.* Over
+planets Elite culled terrain with a head pose 41 to 44 ms older than the
+display time of the frame it drew, so squares of ground at the edges of your
+view were not drawn while you moved your head — black tiles popping in and out
+as you looked around (Frontier issue
+[72609](https://issues.frontierstore.net/issue-detail/72609)). EDVR now answers
+the game's own request for the head pose "now" at the display time of the frame
+being drawn, which stopped the squares in the flight that tested it. An
+earlier build tried to cover them instead, with a setting that told the game
+your headset shows more than it does (about 6% GPU at the values tested on a
+Quest 3); that setting and its five siblings are gone, and a line for one in an
+old `edvr.ini` is carried over by the installer under "no longer used by this
+version" and does nothing.
 *[terrain-culling.md](terrain-culling.md).*
-
-Turning it on takes three settings in `edvr.ini`, and it wants to be gated to
-your headset:
-
-1. Turn it on. Like every other cull-guard setting, this one is live:
-
-   ```
-   [fix]
-   cull_guard = symmetric
-   ```
-
-2. Limit it to your headset (recommended). The `vr` log prints your headset's
-   signature (`cull guard: this headset's signature is 94x99`); copy that value
-   in:
-
-   ```
-   cull_guard_headsets = 94x99
-   ```
-
-   The guard then runs only on that headset, so on a rig that swaps headsets
-   the other one pays nothing and you edit nothing when you swap.
-
-3. Pick the margin. Left alone, the guard covers the full shortfall, which is
-   guaranteed wherever the fix works at all and is the most expensive choice
-   (~48% more rendered pixels on a Quest 3). The values tested on a Quest 3
-   keep the edges clean at about 6%:
-
-   ```
-   cull_guard_fraction_h = 0.25
-   cull_guard_fraction_v = 0
-   ```
-
-   Both are live, so save the file mid-flight and the guard picks them up. If
-   black squares persist on your headset, raise `_h` in steps; the log's `cull
-   guard margins` line names what each step leaves uncovered.
-
-When the guard is working, the `vr` log says `cull guard stage 1`, then two
-`cull guard LIVE` lines. `cull guard INERT` means the runtime shapes its
-projections in a way the guard refuses to edit; the game runs normally, and
-that log is worth attaching to an issue. The guard has been checked in the
-field on Quest 3 via Virtual Desktop, where the missing tiles reproduced and
-are now gone, and on Pimax via PiOpenXR. Real SteamVR is unmeasured so far, so
-a log from there is a useful report whether the guard works or not.
 
 ---
 
@@ -362,7 +323,7 @@ off by default) each run one GPU pass over the game's finished frame into a
 texture EDVR owns, and the runtime receives that copy. The game's texture is
 read and never written, and no answer the game asks for changes. The temporal
 pass also shifts the projection the game is told by a fraction of a pixel each
-frame, the way the terrain fix shifts it by a margin.
+frame.
 
 For moving objects the temporal pass goes further, and only while `temporal_aa`
 is on. It hooks Elite's own functions that update and pack moving ships,
@@ -385,15 +346,13 @@ default, `screen`, does not. Some advanced settings, all off by default, hook
 the game for diagnosis or experiments, and `edvr.ini` describes each. Explorer
 Cam ([explorer-cam.md](explorer-cam.md)) changes the headset position the game
 is told about, and it reads nothing from the game's memory: it counts your
-camera-key presses. The cull guard
-([above](#over-a-planet)) changes the field of view the game is told the
-headset shows; the game then draws the wider view itself, and EDVR submits only
-the true region, copied from the game's own frame. The cull guard edits
-answers, never memory, so the runtime and anything else that asks always
-receive the truth, and before changing anything it validates the runtime's
-projection against the shape it expects, standing down loudly on a mismatch.
-The cull guard does nothing until you configure it. Explorer Cam works when you
-open the on-foot camera and press TAB.
+camera-key presses. The field-of-view trim
+(`experimental.fov_trim_*`) changes the field of view the game is told the
+headset shows; the game then draws the narrower view itself, and EDVR places it
+back inside the eye's full field, copied from the game's own frame. The trim
+edits answers, never memory, so the runtime and anything else that asks always
+receive the truth. It does nothing until you configure it. Explorer Cam works
+when you open the on-foot camera and press TAB.
 
 Two changes are always made, and no setting turns them off. At load EDVR
 redirects two of the game's imports in memory: `LoadLibraryW`, so that Elite's

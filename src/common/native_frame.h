@@ -16,9 +16,9 @@
 // versions a caller's struct shape asks for, and a version 1 or 2 caller
 // simply never turbo-paces, exactly as it never got a trim before version 2.
 #define EDVR_NATIVE_FRAME_VERSION_3 3u
-// Version 4 adds cullChannel to the END and nothing else, under the same
-// hand-copied-DLLs rule: a version 1, 2 or 3 caller simply gets the guard's
-// lie on both projection channels, exactly as before the key existed.
+// Version 4 added one word to the END and nothing else, under the same
+// hand-copied-DLLs rule (the projection channel of the terrain guard, retired
+// 2026-10-09: the slot stays, see reservedProjectionChannel below).
 #define EDVR_NATIVE_FRAME_VERSION_4 4u
 // Version 5 adds fadeAlpha to the END and nothing else (Explorer Cam's comfort
 // fade, comfort_fade.h), under the same hand-copied-DLLs rule: a version 1 to
@@ -55,10 +55,13 @@ struct EdvrNativeFrameOutput {
     float reservedOffset[3];
     float reservedYaw;
     uint32_t reservedOffsetEnabled, reservedOffsetGamePoses;
-    uint32_t cullMode; // 0 off, 1 symmetric, 2 percent
-    float cullPercent, cullHorizontalFraction, cullVerticalFraction;
-    uint32_t cullSignatureCount;
-    uint32_t cullSignatures[8][2];
+    // RETIRED 2026-10-09 with the terrain guard (a mode, three margins, a count
+    // and up to eight headset signatures: 21 words). Always zero now: the provider
+    // writes nothing here and the runtime reads nothing. The slots stay so the
+    // struct, and the versions that name its prefixes, keep their layout --
+    // the two DLLs are copied apart by hand, and a runtime from before the
+    // removal then reads a guard that is off.
+    uint32_t reservedTerrainGuard[21];
     uint32_t sceneReady;
     uint32_t transitionEnabled;
     uint32_t resubmitEnabled;
@@ -70,10 +73,10 @@ struct EdvrNativeFrameOutput {
     // (fix.weapon_stability while on foot); 0: the wait stays in
     // WaitGetPoses.
     uint32_t deferredPacing;
-    // Version 4 and later. Which projection query channel the cull guard's
-    // widened frustum is told through (advanced.cull_guard_channel):
-    // 0 both, 1 GetProjectionRaw only, 2 GetProjectionMatrix only.
-    uint32_t cullChannel;
+    // RETIRED 2026-10-09 (version 4's one word: which projection query channel
+    // the terrain guard's widened frustum was told through). Always zero, never
+    // read; the slot stays for the same reason as the 21 above.
+    uint32_t reservedProjectionChannel;
     // Version 5 and later. How black the projection layer is, 0 (clear, the
     // default and the only value an older provider can mean) to 1: the runtime
     // blends black over each eye image by this much when it composes. Already
@@ -93,10 +96,11 @@ struct EdvrNativeFrameOutput {
 #define EDVR_NATIVE_FRAME_OUTPUT_SIZE_2 \
     ((uint32_t)offsetof(EdvrNativeFrameOutput, deferredPacing))
 // The size the fields through deferredPacing occupy, which is what a
-// version 3 caller's struct is, with no tail padding before cullChannel.
+// version 3 caller's struct is, with no tail padding before
+// reservedProjectionChannel.
 #define EDVR_NATIVE_FRAME_OUTPUT_SIZE_3 \
-    ((uint32_t)offsetof(EdvrNativeFrameOutput, cullChannel))
-// The size the fields through cullChannel occupy, which is what a version 4
+    ((uint32_t)offsetof(EdvrNativeFrameOutput, reservedProjectionChannel))
+// The size the fields through reservedProjectionChannel occupy, which is what a version 4
 // caller's struct is, with no tail padding before fadeAlpha.
 #define EDVR_NATIVE_FRAME_OUTPUT_SIZE_4 \
     ((uint32_t)offsetof(EdvrNativeFrameOutput, fadeAlpha))
@@ -110,8 +114,12 @@ struct EdvrNativeFrameDecision {
 
 typedef HRESULT(WINAPI *EdvrNativeFrameBegin)(
     void*, const EdvrNativeFrameInput*, EdvrNativeFrameOutput*);
-typedef HRESULT(WINAPI *EdvrNativeFrameSetCullState)(
-    void*, uint32_t stage, float factorH, float factorV);
+// RETIRED 2026-10-09 with the terrain guard: this slot carried the guard's stage
+// to the d3d11 half. Nothing calls it any more, and the provider's entry does
+// nothing and returns S_OK, so a runtime built before the removal, which still
+// checks that the slot is the provider's own, acquires as it always did.
+typedef HRESULT(WINAPI *EdvrNativeFrameRetiredCall)(
+    void*, uint32_t, float, float);
 typedef HRESULT(WINAPI *EdvrNativeFrameLatchSubmit)(
     void*, uint64_t sequence, EdvrNativeFrameDecision*);
 typedef HRESULT(WINAPI *EdvrNativeFrameInvalidate)(void*);
@@ -121,7 +129,7 @@ struct EdvrNativeFrameTable {
     uint32_t size, version;
     void* context;
     EdvrNativeFrameBegin beginFrame;
-    EdvrNativeFrameSetCullState setCullState;
+    EdvrNativeFrameRetiredCall reservedCall;
     EdvrNativeFrameLatchSubmit latchSubmit;
     EdvrNativeFrameInvalidate invalidate;
     EdvrNativeFrameClose close;
