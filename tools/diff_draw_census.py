@@ -28,6 +28,14 @@ gaining instances shows up there, not nowhere. Two eye textures share a size
 and format, so a per-eye overlay shows up as one signature with two draws per
 frame -- which is exactly the shape worth reporting.
 
+The census tags a draw DC when it is an eye-texture draw and DCO when it is an
+offscreen draw (the flat profile's frame is offscreen, so every draw there is
+DCO). Both parse into the same tuples; the tag is the last field, kept out of
+the signature, and printed so a reader can see which kind a draw was. A census
+is refused, with exit 1, when its own end line counts draws of a kind and none
+of that kind parsed, or when it parsed no draws at all: an unparsed census
+diffs as "nothing added", which reads as a clean result.
+
 Usage:
   python tools/diff_draw_census.py <gfx-log> [<gfx-log2>] [--a N --b N]
   python tools/diff_draw_census.py --self-test
@@ -42,7 +50,10 @@ import argparse
 import re
 import sys
 
-LINE_RE = re.compile(r'^\[\d{2}:\d{2}:\d{2}\.\d{3}\] (DC .*)$')
+LINE_RE = re.compile(r'^\[\d{2}:\d{2}:\d{2}\.\d{3}\] (DCO? .*)$')
+# Display names for the two draw tags. DC is the eye-texture draw, DCO the
+# offscreen draw; recordDraw() writes both with the same field layout.
+KIND_LABEL = {'DC': 'DC eye', 'DCO': 'DCO offscreen'}
 # Every census regex tolerates ADDITIVE trailing fields, and that is a scar,
 # not generosity: the DLL grew off=/copies= on its frame and end lines and
 # offscreen= on its begin line (2026-08-24, the FSS hunt) while these
@@ -59,7 +70,7 @@ BEGIN_RE = re.compile(r'^DC begin census=(\d+) frames=(\d+) frame=(\d+)'
 # the sessions already paid for. q= is the shared event ordinal (draws,
 # copies, dispatches, one counter); positional, per-capture, and so no part
 # of a signature.
-DRAW_RE = re.compile(r'^DC (\d+) #(\d+) ([A-Z]) n=(\d+) i=(\d+) '
+DRAW_RE = re.compile(r'^DCO? (\d+) #(\d+) ([A-Z]) n=(\d+) i=(\d+) '
                      r'r=(\S+) d=(\S+) c=(\S+) s=(\S+),(\S+),(\S+),(\S+)'
                      r'(?: vs=(\S+)(?: vh=([0-9A-Fa-f]+))? vb=(\S+) '
                      r'sd=(\d+) of=(\d+) tp=(\d+)'
@@ -138,7 +149,11 @@ ID_TEX_RE = re.compile(r'^DC id @(\d+) tex (\d+)x(\d+) fmt=(\d+)'
 # signature.
 ID_BUF_RE = re.compile(r'^DC id @(\d+) buf (\d+)(?: res=\S+)?(?: stride=\d+)?$')
 ID_UNK_RE = re.compile(r'^DC id @(\d+) \?$')
-END_RE = re.compile(r'^DC end census=(\d+) draws=(\d+)(?: \S+=\d+)*? '
+# off= (the offscreen draw count) is absent from logs before the DCO tag, and
+# is optional for that reason; None there means "not counted", which the
+# refusal below must not read as zero.
+END_RE = re.compile(r'^DC end census=(\d+) draws=(\d+)(?: off=(\d+))?'
+                    r'(?: \S+=\d+)*? '
                     r'lines=(\d+) interned=(\d+) overflow=(\d+) '
                     r'truncated=(\d+)$')
 
@@ -149,9 +164,11 @@ class Census(object):
         self.frames = frames          # frames the capture was asked for
         self.at_frame = at_frame      # vscreen frame number at begin
         self.source = source          # file name, for the report
-        self.draws = []               # (frame, idx, kind, n, i, r, d, c, slots)
+        self.draws = []               # (frame, idx, kind, n, i, r, d, c, slots, ia, tag)
         self.ids = {}                 # intern ordinal -> resolved string
         self.frame_draws = {}         # frame ordinal -> draws the DLL counted
+        self.declared_draws = None    # end line's draws= (DC eye draws counted)
+        self.declared_off = None      # end line's off= (DCO draws counted), or None
         self.truncated = 0
         self.overflow = 0
         self.complete = False
@@ -199,11 +216,14 @@ def parse_dc_lines(lines, source):
                 ia = (m.group(13), m.group(15), int(m.group(16)),
                       int(m.group(17)), int(m.group(18)), vh,
                       m.group(19), m.group(20))
+            # The tag is the line's first word: DCO for an offscreen draw,
+            # DC for an eye draw. Last in the tuple, so no index above moves.
+            tag = 'DCO' if line.startswith('DCO ') else 'DC'
             cur.draws.append((int(m.group(1)), int(m.group(2)), m.group(3),
                               int(m.group(4)), int(m.group(5)), m.group(6),
                               m.group(7), m.group(8),
                               (m.group(9), m.group(10), m.group(11),
-                               m.group(12)), ia))
+                               m.group(12)), ia, tag))
             continue
         m = FRAME_RE.match(line)
         if m:
@@ -227,8 +247,10 @@ def parse_dc_lines(lines, source):
             continue
         m = END_RE.match(line)
         if m:
-            cur.overflow = int(m.group(5))
-            cur.truncated = int(m.group(6))
+            cur.declared_draws = int(m.group(2))
+            cur.declared_off = int(m.group(3)) if m.group(3) is not None else None
+            cur.overflow = int(m.group(6))
+            cur.truncated = int(m.group(7))
             cur.complete = True
             censuses.append(cur)
             cur = None
@@ -247,7 +269,7 @@ def resolve(census, token):
 
 
 def signature(census, draw):
-    _frame, _idx, kind, n, _i, r, d, _c, slots, ia = draw
+    _frame, _idx, kind, n, _i, r, d, _c, slots, ia = draw[:10]
     # The constant buffer is left out because a pointer ordinal means nothing
     # across two censuses -- the same buffer interns as @2 in one and @9 in the
     # other, and a signature built on that never matches. The IA tail splits on
@@ -317,6 +339,42 @@ def instance_totals(per, census):
             for f in sorted(frames_seen(census))]
 
 
+def tag_counts(draws):
+    """'DC eye x3, DCO offscreen x2' -- which tag each draw came from."""
+    counts = dict((t, 0) for t in KIND_LABEL)
+    for d in draws:
+        counts[d[10]] += 1
+    return ', '.join('%s x%d' % (KIND_LABEL[t], counts[t])
+                     for t in KIND_LABEL if counts[t]) or 'none'
+
+
+def census_problems(c):
+    """Why census c cannot be diffed, as messages; empty when it can.
+
+    A census whose draw lines did not parse diffs as "nothing added", which is
+    how the flat profile's DCO draws read as ADDED (none) with no error. So a
+    census is refused when it parsed no draws at all, and when its own end
+    line counts draws of a kind that none of which parsed. The end line's
+    count is the DLL's own; lines lost to the line cap are in truncated=, and
+    a kind the cap ate entirely is refused too, with the cap named.
+    """
+    problems = []
+    where = 'census %d (%s)' % (c.number, c.source)
+    if not c.draws:
+        problems.append('%s parsed 0 draws (DC or DCO): its draw lines do not '
+                        'match DRAW_RE in tools/diff_draw_census.py. Refusing '
+                        'to diff it.' % where)
+    for tag, declared in (('DC', c.declared_draws), ('DCO', c.declared_off)):
+        parsed = sum(1 for d in c.draws if d[10] == tag)
+        if declared and not parsed:
+            problems.append('%s: its end line counts %d %s draws but none '
+                            'parsed (truncated=%d). The %s lines do not match '
+                            'DRAW_RE in tools/diff_draw_census.py. Refusing to '
+                            'diff it.' % (where, declared, KIND_LABEL[tag],
+                                          c.truncated, tag))
+    return problems
+
+
 def report_side(title, sigs_map, census, chosen):
     print()
     print(title)
@@ -335,9 +393,11 @@ def report_side(title, sigs_map, census, chosen):
                 rtvs[d[5]] = rtvs.get(d[5], 0) + 1
         print('  %s' % describe(sig))
         print('    draws per frame: %s   instances per frame: %s   '
-              'eye-draw index range: %d-%d' % (
+              'index range: %d-%d' % (
                   ','.join(map(str, counts)), ','.join(map(str, totals)),
                   min(idxs), max(idxs)))
+        print('    draw tag: %s' % tag_counts(
+            d for v in per.values() for d in v))
         print('    render targets hit: %s   census_skip spec: %s' % (
             ', '.join('%s x%d' % (k, v) for k, v in sorted(rtvs.items())),
             skip_spec(sig)))
@@ -362,6 +422,8 @@ def report_changed(a_sigs, b_sigs, a, b):
         print('  %s' % describe(sig))
         print('    instances per frame: %s -> %s (spec %s)' % (
             ','.join(map(str, at)), ','.join(map(str, bt)), skip_spec(sig)))
+        print('    draw tag in effect: %s' % tag_counts(
+            d for v in b_sigs[sig].values() for d in v))
     if len(changed) > 20:
         print('  (%d more not shown)' % (len(changed) - 20))
     return {c[1] for c in changed}
@@ -379,8 +441,9 @@ def diff(a, b):
         if c.overflow:
             note.append('%d bindings resolved inline past the intern table'
                         % c.overflow)
-        print('census %d (%s, %s): %d frames, %d draws recorded%s' % (
+        print('census %d (%s, %s): %d frames, %d draws recorded (%s)%s' % (
             c.number, label, c.source, len(frames_seen(c)), len(c.draws),
+            tag_counts(c.draws),
             ' -- NOTE: ' + ', '.join(note) if note else ''))
 
     report_side('ADDED -- in every frame with the effect, never without it:',
@@ -395,6 +458,17 @@ def diff(a, b):
               'cannot see (a deferred context, or a target that is not an eye '
               'texture).')
     return added, removed, changed
+
+
+def compare(a, b):
+    """diff(), refused with exit 1 when either census cannot be diffed."""
+    problems = census_problems(a) + census_problems(b)
+    if problems:
+        for p in problems:
+            print(p, file=sys.stderr)
+        return 1
+    diff(a, b)
+    return 0
 
 
 def self_test():
@@ -547,6 +621,106 @@ def self_test():
     if scene_b[6:] != ('1536,-12,0', '@13+64') or scene_a[6:] != (None, None):
         print('self-test: ia=/ib= parsed wrong: %r / %r' % (scene_b[6:], scene_a[6:]))
         return 1
+    # The eye fixtures are all DC; no draw may pick up the offscreen tag.
+    if any(d[10] != 'DC' for c in censuses for d in c.draws):
+        print('self-test: eye census drew a non-DC tag')
+        return 1
+
+    # A DCO-only pair: the flat profile's shape, every draw on the offscreen
+    # tag. The same draw shapes as the eye pair, so the same three verdicts must
+    # come out of it, and the overlay's interned and inline spellings must still
+    # merge. Its own pair, so a DCO-only parse is proven on its own rather than
+    # riding along with the DC fixture.
+    oa = ['DC begin census=3 frames=2 frame=3000 offscreen=yes']
+    for f in range(2):
+        oa += ['DCO %d #%d I n=5000 i=5 r=@0 d=- c=@2 s=@3,-,-,- '
+               'vs=@7 vb=@8 sd=32 of=0 tp=4' % (f, 1),
+               'DCO %d #%d D n=3 i=1 r=@0 d=- c=@2 s=-,-,-,-' % (f, 2),
+               'DC frame %d draws=0 off=2 copies=0 disp=0 clears=0 unseen=0' % f]
+    oa += ['DC id @0 tex 1832x1920 fmt=87', 'DC id @2 buf 96',
+           'DC id @3 buf 256', 'DC id @7 ?', 'DC id @8 buf 96',
+           'DC end census=3 draws=0 off=4 copies=0 disp=0 unseen=0 lines=4 '
+           'interned=5 overflow=0 truncated=0']
+
+    ob = ['DC begin census=4 frames=2 frame=4000 offscreen=yes']
+    for f in range(2):
+        ob += ['DCO %d #%d I n=5000 i=24 r=@0 d=- c=@9 s=@3,-,-,- '
+               'vs=@7 vb=@8 sd=32 of=0 tp=4 q=0' % (f, 1),
+               # The overlay, drawn twice a frame on the offscreen tag: one
+               # slot through the intern table, one inline; two different
+               # vertex shader pointers, which must not split the pair.
+               'DCO %d #%d D n=4 i=1 r=@0 d=- c=@9 s=@5,-,-,- '
+               'vs=@10 vb=- sd=0 of=0 tp=5 q=1' % (f, 610),
+               'DCO %d #%d D n=4 i=1 r=@0 d=- c=@9 s=tex512x64f28,-,-,- '
+               'vs=@11 vb=- sd=0 of=0 tp=5 q=2' % (f, 611),
+               'DC frame %d draws=0 off=3 copies=0 disp=0 clears=0 unseen=0' % f]
+    ob += ['DC id @0 tex 1832x1920 fmt=87 res=000001B2C3D40000',
+           'DC id @3 buf 256', 'DC id @5 tex 512x64 fmt=28',
+           'DC id @7 ?', 'DC id @8 buf 96', 'DC id @9 buf 96',
+           'DC id @10 ?', 'DC id @11 ?',
+           'DC end census=4 draws=0 off=6 copies=0 disp=0 unseen=0 lines=6 '
+           'interned=6 overflow=0 truncated=0']
+
+    dco = parse_dc_lines([m.group(1) for m in map(LINE_RE.match, dc(oa + ob))
+                          if m], 'self-test-dco')
+    if len(dco) != 2:
+        print('self-test: DCO pair expected 2 censuses, parsed %d' % len(dco))
+        return 1
+    if any(d[10] != 'DCO' for d in dco[0].draws + dco[1].draws):
+        print('self-test: DCO census drew a non-DCO tag')
+        return 1
+    if census_problems(dco[0]) or census_problems(dco[1]):
+        print('self-test: a parsed DCO census was refused: %r' %
+              (census_problems(dco[0]) + census_problems(dco[1])))
+        return 1
+    added, removed, changed = diff(dco[0], dco[1])
+    want_added = {('D', 4, 'tex1832x1920f87', '-',
+                   ('tex512x64f28', '-', '-', '-'), 0, 5, None)}
+    want_removed = {('D', 3, 'tex1832x1920f87', '-',
+                     ('-', '-', '-', '-'), None, None, None)}
+    want_changed = {('I', 5000, 'tex1832x1920f87', '-',
+                     ('buf256', '-', '-', '-'), 32, 4, None)}
+    if added != want_added:
+        print('self-test: DCO ADDED mismatch: %r' % added)
+        return 1
+    if removed != want_removed:
+        print('self-test: DCO REMOVED mismatch: %r' % removed)
+        return 1
+    if changed != want_changed:
+        print('self-test: DCO CHANGED mismatch: %r' % changed)
+        return 1
+    per = by_signature(dco[1])[next(iter(want_added))]
+    if sorted(len(v) for v in per.values()) != [2, 2]:
+        print('self-test: DCO overlay did not merge: %r' %
+              {f: len(v) for f, v in per.items()})
+        return 1
+
+    # Refusals. Both censuses here are real emitter shapes that the parser
+    # misses: a DCO line whose field is malformed (its end line still counts
+    # it), and a census with no draw lines at all. Each must fail loudly
+    # through compare(), with exit 1 and no diff printed, never "ADDED (none)".
+    bad = parse_dc_lines([m.group(1) for m in map(LINE_RE.match, dc([
+        'DC begin census=5 frames=1 frame=5000 offscreen=yes',
+        'DCO 0 #1 I n=oops i=1 r=@0 d=- c=@2 s=-,-,-,-',
+        'DC frame 0 draws=0 off=1 copies=0 disp=0 clears=0 unseen=0',
+        'DC end census=5 draws=0 off=1 copies=0 disp=0 unseen=0 lines=1 '
+        'interned=0 overflow=0 truncated=0'])) if m], 'self-test-bad')
+    empty = parse_dc_lines([m.group(1) for m in map(LINE_RE.match, dc([
+        'DC begin census=6 frames=1 frame=6000 offscreen=yes',
+        'DC end census=6 draws=0 off=0 copies=0 disp=0 unseen=0 lines=0 '
+        'interned=0 overflow=0 truncated=0'])) if m], 'self-test-empty')
+    if len(bad) != 1 or len(empty) != 1:
+        print('self-test: refusal fixtures did not parse as censuses')
+        return 1
+    if not census_problems(bad[0]) or not census_problems(empty[0]):
+        print('self-test: an unparsed census was not refused')
+        return 1
+    if compare(bad[0], dco[1]) != 1 or compare(dco[0], empty[0]) != 1:
+        print('self-test: compare() did not exit 1 on an unparsed census')
+        return 1
+    if compare(dco[0], dco[1]) != 0:
+        print('self-test: compare() refused a parsed pair')
+        return 1
     print()
     print('self-test: ok')
     return 0
@@ -576,8 +750,8 @@ def main():
 
     print('censuses found:')
     for i, c in enumerate(censuses, 1):
-        print('  %d: census=%d at frame %d, %d draws (%s)' % (
-            i, c.number, c.at_frame, len(c.draws), c.source))
+        print('  %d: census=%d at frame %d, %d draws (%s) [%s]' % (
+            i, c.number, c.at_frame, len(c.draws), c.source, tag_counts(c.draws)))
     print()
 
     if len(args.logs) == 2 and args.a is None and args.b is None:
@@ -593,8 +767,7 @@ def main():
             ia, ib, len(censuses)))
         return 1
 
-    diff(censuses[ia - 1], censuses[ib - 1])
-    return 0
+    return compare(censuses[ia - 1], censuses[ib - 1])
 
 
 if __name__ == '__main__':
