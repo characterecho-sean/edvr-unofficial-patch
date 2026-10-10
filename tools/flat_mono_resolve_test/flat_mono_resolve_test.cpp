@@ -450,6 +450,26 @@ int main(int argc,char** argv) {
         check(!native.refused && native.evalWidth==32 && !std::strcmp(native.name,"mfx-native"),
             "mfx native temporal AA at R == E");
     }
+    // ---- MetalFX spatial fallback with an _SRGB game colour -------------------------------
+    // mfx's output[1] is plain fp16 with no srgb view: with an _SRGB input view the
+    // fallback must hand back the plain srv, never a null view. Before the guard
+    // this selected g.output[1].srgb (null) and faulted on the AddRef below it.
+    // No backend runs here, so the golden motion-hash sequence is untouched.
+    {
+        auto srgbMfxTexture=texture(device.Get(),w,h,DXGI_FORMAT_R8G8B8A8_TYPELESS,D3D11_BIND_SHADER_RESOURCE,red.data(),w*4);
+        D3D11_SHADER_RESOURCE_VIEW_DESC srgbMfxDesc{};srgbMfxDesc.Format=DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+        srgbMfxDesc.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2D;srgbMfxDesc.Texture2D.MipLevels=1;
+        ComPtr<ID3D11ShaderResourceView> srgbMfxView;
+        check(SUCCEEDED(device->CreateShaderResourceView(srgbMfxTexture.Get(),&srgbMfxDesc,srgbMfxView.GetAddressOf())),"MFX fallback SRGB input fixture");
+        f.color=srgbMfxView.Get();
+        bindOriginal();ComPtr<ID3D11ShaderResourceView> mfxFallback;const char* mfxFallbackReason=nullptr;
+        check(edvr::flatMonoResolveSpatialFallback(device.Get(),context.Get(),f,mfxFallback.GetAddressOf(),&mfxFallbackReason) &&
+              mfxFallback && restored(),"MetalFX spatial fallback with SRGB input returns a view, not null");
+        D3D11_SHADER_RESOURCE_VIEW_DESC mfxFallbackDesc{};if(mfxFallback)mfxFallback->GetDesc(&mfxFallbackDesc);
+        check(!mfxFallback || mfxFallbackDesc.Format==DXGI_FORMAT_R16G16B16A16_FLOAT,
+              "MetalFX spatial fallback hands back the plain fp16 view");
+        f.color=colorView.Get();
+    }
     f.mode=edvr::FlatMonoResolveMode::Dlss;++f.frame;auto retained=run(true);
     auto beforeInvalidate=edvr::flatMonoResolveStats();
     edvr::flatMonoResolveInvalidateHistory();++f.frame;auto invalidated=run(true);

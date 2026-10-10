@@ -1266,7 +1266,12 @@ bool flatMonoResolveSpatialFallback(ID3D11Device* device,ID3D11DeviceContext* co
     ID3D11UnorderedAccessView* target=g.output[1].uav.Get();context->CSSetUnorderedAccessViews(4,1,&target,nullptr);
     context->CSSetShader(g.spatial.Get(),nullptr,0);
     context->Dispatch((evalW+7)/8,(evalH+7)/8,1);
-    *output=(colorDesc.Format==DXGI_FORMAT_R8G8B8A8_UNORM_SRGB?g.output[1].srgb:g.output[1].srv).Get();
+    // As in the primary resolve above: the srgb view exists only on a TYPELESS
+    // image. mfx's output[1] is plain fp16 and has no srgb view, so the ask is
+    // keyed on the image actually there -- otherwise an _SRGB game colour with
+    // an mfx fallback hands back a null view and the AddRef below faults.
+    Image& fallback=g.output[1];
+    *output=(fallback.srgb && colorDesc.Format==DXGI_FORMAT_R8G8B8A8_UNORM_SRGB?fallback.srgb:fallback.srv).Get();
     (*output)->AddRef();
     return true;
 }
