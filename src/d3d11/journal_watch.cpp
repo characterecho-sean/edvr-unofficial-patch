@@ -224,6 +224,11 @@ struct Session {
     // the player teleporting off their feet, so `known` only drops after a
     // few misses in a row.
     uint32_t     statusMisses = 0;
+    // The flat profile's GuiFocus note (pollStatus): the last value noted, and how many notes were written (capped).
+    bool         guiNoted = false;
+    bool         guiNotedPresent = false;
+    uint32_t     guiNotedValue = 0;
+    uint32_t     guiNotes = 0;
     // Phase-0 timing for the three things this module does with files
     // (src/common/periodic_work.h says what is written and why). Each is timed
     // separately because they run on different clocks and cost different
@@ -373,6 +378,9 @@ void scanRange(Session& s, const char* p, uint32_t n) {
 // Flags bits 24-26, Flags2 bits 1-2). A file without the field -- the menu,
 // shutdown -- answers "not known", and callers fall back to keys and delays
 // respectively.
+// The flat profile's GuiFocus notes, at most this many a session (pollStatus).
+constexpr uint32_t kGuiNoteCap = 64;
+
 void pollStatus(Session& s) {
     ioSite("status");
     const std::wstring path = s.dir + L"\\Status.json";
@@ -388,11 +396,13 @@ void pollStatus(Session& s) {
     uint32_t flags2 = 0;
     uint32_t flags = 0;
     uint32_t gui = 0;
+    DWORD bytesRead = 0;
     if (f != INVALID_HANDLE_VALUE) {
         char buf[2048];
         DWORD got = 0;
         if (ReadFile(f, buf, sizeof(buf) - 1, &got, nullptr) && got > 0) {
             buf[got] = '\0';
+            bytesRead = got;
             parsed = true;
             const char* p = strstr(buf, "\"Flags2\":");
             if (p) {
@@ -440,6 +450,19 @@ void pollStatus(Session& s) {
         s.pub.fssFocusKnown = sawGui;
         s.pub.fssFocus = fss;
         s.pub.guiFocus = sawGui ? gui : 0;
+        // The flat profile's answer to "is GuiFocus in the file": one note per change of presence or value, so a flight shows what the
+        // game wrote while the System Map was open, and whether the field was there at all.
+        if (runtimeFlatProfile()) {
+            const uint32_t value = sawGui ? gui : 0;
+            if (s.guiNotes < kGuiNoteCap && (!s.guiNoted || s.guiNotedPresent != sawGui || s.guiNotedValue != value)) {
+                s.guiNoted = true;
+                s.guiNotedPresent = sawGui;
+                s.guiNotedValue = value;
+                ++s.guiNotes;
+                Log::get().note("journal: Status.json GuiFocus present=%d value=%u (bytes=%lu)", sawGui ? 1 : 0, value,
+                                static_cast<unsigned long>(bytesRead));
+            }
+        }
     } else if (++s.statusMisses >= 3) {
         s.pub.onFootKnown = false;
         s.pub.seatedKnown = false;
@@ -979,6 +1002,15 @@ bool journalOnFoot() { return !runtimeFlatProfile() && peek(g_v.onFoot); }
 bool journalSeatedKnown() { return journalWatchActive() && peek(g_v.seatedKnown); }
 bool journalSeated() { return !runtimeFlatProfile() && peek(g_v.seated); }
 uint32_t journalStatusSamples() { return runtimeFlatProfile() ? 0u : peek(g_v.statusSamples); }
+
+JournalRawStatus journalRawStatus() {
+    JournalRawStatus r;
+    r.active = g_v.active.load(std::memory_order_acquire);
+    r.statusSamples = peek(g_v.statusSamples);
+    r.guiKnown = peek(g_v.fssFocusKnown);
+    r.gui = peek(g_v.guiFocus);
+    return r;
+}
 
 void journalWatchShutdown() {
     g_stopped.store(true);

@@ -1,4 +1,4 @@
-﻿// gate_test -- the rig for the pure decisions and file work that sit under the
+// gate_test -- the rig for the pure decisions and file work that sit under the
 // per-frame machinery: the clock helpers (src/common/timing.h), the journal
 // watcher and its worker thread, which journal is ours, periodic-work timing,
 // the notes as they reach a real log, the frame-boundary ticks' structure, and
@@ -1065,6 +1065,17 @@ std::string statusText(uint32_t flags, int flags2, int gui) {
     return s + " }\n";
 }
 
+// A Status.json as Elite writes it in play: the field order and value shapes of the game's file, with GuiFocus
+// (gui 0 and up) where the game puts it, and left out for gui below zero.
+std::string playStatus(int gui) {
+    std::string s = "{ \"timestamp\":\"2026-10-10T07:00:00Z\", \"event\":\"Status\", \"Flags\":16777232, \"Flags2\":0, "
+                    "\"Pips\":[4,4,4], \"FireGroup\":0";
+    if (gui >= 0) s += ", \"GuiFocus\":" + std::to_string(gui);
+    s += ", \"Fuel\":{ \"FuelMain\":32.000000, \"FuelReservoir\":0.550000 }, \"Cargo\":0, \"LegalState\":\"Clean\", "
+         "\"Balance\":1000000, \"Destination\":{ \"System\":0, \"Body\":0, \"Name\":\"\" } }\n";
+    return s;
+}
+
 // The test thread is the Present thread: it makes the same call, at about the
 // same rate, until the condition holds.
 template <class Cond>
@@ -1514,6 +1525,37 @@ int journalWorkerChecks() {
         verify(g_w.calls.load() >= 3, "the slow file calls were made");
         // The ticking thread here is this one, and it made none of them.
         verify(g_w.onPresenter.load() == 0, "and none of them on the thread that ticks");
+    }
+
+    // ------------------------------------------- 8. the flat profile reads GuiFocus (System Map plane)
+    // The flat profile runs the same worker, and its one reader is journalFlatGuiFocus: a play-time Status.json with GuiFocus,
+    // through configure and the tick, must reach it, change with the file, and answer not-known without the field.
+    {
+        const RuntimeProfile savedProfile = g_runtimeProfile;
+        g_runtimeProfile = RuntimeProfile::Flat;
+        const std::wstring d = makeDir(L"flatmap");
+        journalWatchTestSetCadencePercent(5);
+        const std::wstring statusFile = d + L"\\Status.json";
+        writeWhole(statusFile, playStatus(7));
+        journalWatchConfigure();
+        uint32_t focus0 = 99;
+        verify(!journalWatchActive() && !journalFlatGuiFocus(&focus0),
+               "flat: nothing is answered before the worker has read anything");
+        verify(tickUntil([] { uint32_t f = 0; return journalFlatGuiFocus(&f) && f == 7; }, 10000),
+               "flat: a play-time Status.json with GuiFocus 7 reaches journalFlatGuiFocus through the worker");
+        const JournalRawStatus raw = journalRawStatus();
+        verify(raw.active && raw.statusSamples >= 1 && raw.guiKnown && raw.gui == 7,
+               "flat: the ungated raw status says the watcher is active, has parsed a sample and holds GuiFocus 7");
+        writeWhole(statusFile, playStatus(8));
+        verify(tickUntil([] { uint32_t f = 0; return journalFlatGuiFocus(&f) && f == 8; }, 10000),
+               "flat: the same reader follows a change to GuiFocus 8");
+        writeWhole(statusFile, playStatus(-1));
+        verify(tickUntil([] { uint32_t f = 0; return !journalFlatGuiFocus(&f); }, 10000),
+               "flat: a Status.json without GuiFocus answers not-known");
+        verify(!journalWatchActive() && !journalGameplay(),
+               "flat: the VR accessors still answer the no-journal values");
+        g_runtimeProfile = savedProfile;
+        stopWorker();
     }
 
     // ------------------------------------------------------------------- done

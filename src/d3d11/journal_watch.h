@@ -94,6 +94,17 @@ bool journalGuiFocus(uint32_t* focus);
 // a change. Known is false when the watcher is off or the field is absent.
 bool journalFlatGuiFocus(uint32_t* focus);
 
+// DIAGNOSTIC, ungated by profile: what the watcher holds right now, for the flat map line's 5 s report (flat_runtime.cpp). Not a consumer's
+// answer: the accessors above are the answers. active is the watcher's own state; statusSamples counts Status.json reads that parsed;
+// guiKnown and gui are the last parsed sample's GuiFocus field.
+struct JournalRawStatus {
+    bool active = false;
+    uint32_t statusSamples = 0;
+    bool guiKnown = false;
+    uint32_t gui = 0;
+};
+JournalRawStatus journalRawStatus();
+
 // Flags bit 4: supercruise, where the FSS keys actually do something.
 bool journalSupercruiseKnown();
 bool journalSupercruise();
