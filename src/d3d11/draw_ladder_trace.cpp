@@ -613,6 +613,65 @@ bool validHoloScrimFact(const PredicateFact& fact) noexcept {
     return false;
 }
 
+bool validFssChromeFact(const PredicateFact& fact) noexcept {
+    const FssChromeSkipObservation& f = fact.fssChrome;
+    const auto validTri = [](TriState value) noexcept {
+        return static_cast<std::uint8_t>(value) <=
+               static_cast<std::uint8_t>(TriState::Yes);
+    };
+    const TriState states[] = {
+        f.outerHeal, f.outerCensus, f.outerTemporal, f.kindReached,
+        f.kindMatched, f.countReached, f.countMatched, f.budgetEntered,
+        f.budgetResult, f.hashReached, f.hashMatched, f.srvReached,
+        f.srvNonNull, f.resourceReached, f.resourceNonNull, f.queryReached,
+        f.texture2D, f.dimensionsReached, f.chromeMatched, f.healForSkip,
+        f.latchReached, f.latchOn, f.frameReached, f.frameChanged,
+        f.helperReached, f.maskReached, f.ordinalInRange, f.maskBit,
+        f.terminalSkip,
+    };
+    for (TriState value : states) if (!validTri(value)) return false;
+    if (fact.siteId != 1 || fact.known != TriState::Yes ||
+        f.outerHeal == TriState::Unknown ||
+        (f.outerHeal == TriState::Yes &&
+         (f.outerCensus != TriState::Unknown ||
+          f.outerTemporal != TriState::Unknown)) ||
+        (f.outerHeal == TriState::No && f.outerCensus == TriState::Unknown) ||
+        (f.outerHeal == TriState::No && f.outerCensus == TriState::Yes &&
+         f.outerTemporal != TriState::Unknown) ||
+        (f.outerHeal == TriState::No && f.outerCensus == TriState::No &&
+         f.outerTemporal == TriState::Unknown) ||
+        (f.kindReached == TriState::Unknown &&
+         (f.drawKind != 0 || f.kindMatched != TriState::Unknown)) ||
+        (f.kindReached != TriState::Yes && f.kindMatched != TriState::Unknown) ||
+        (f.countReached == TriState::Unknown &&
+         (f.drawCount != 0 || f.countMatched != TriState::Unknown)) ||
+        (f.countReached != TriState::Yes && f.countMatched != TriState::Unknown) ||
+        (f.hashReached != TriState::Yes &&
+         (f.vsHash != 0 || f.hashMatched != TriState::Unknown)) ||
+        (f.dimensionsReached != TriState::Yes && (f.width || f.height)) ||
+        (f.frameReached != TriState::Yes &&
+         (f.frameNo || f.priorFrameNo || f.ordinalCountBefore ||
+          f.frameChanged != TriState::Unknown || f.ordinal ||
+          f.ordinalCountAfter)) ||
+        (f.helperReached != TriState::Yes &&
+         (f.startInstance || f.baseVertex || f.maskReached != TriState::No ||
+          f.skipMask || f.ordinalInRange != TriState::Unknown ||
+          f.maskBit != TriState::Unknown || f.terminalSkip != TriState::No)) ||
+        (f.helperReached == TriState::Yes &&
+         (f.maskReached != TriState::Yes ||
+          f.ordinalInRange == TriState::Unknown ||
+          f.terminalSkip == TriState::Unknown)) ||
+        (f.maskReached != TriState::Yes &&
+         (f.skipMask || f.ordinalInRange != TriState::Unknown ||
+          f.maskBit != TriState::Unknown)) ||
+        (f.ordinalInRange != TriState::Yes && f.maskBit != TriState::Unknown) ||
+        (f.ordinalInRange == TriState::Yes && f.maskBit == TriState::Unknown) ||
+        (f.ordinalInRange == TriState::No && f.terminalSkip != TriState::No) ||
+        (f.ordinalInRange == TriState::Yes && f.terminalSkip != f.maskBit))
+        return false;
+    return true;
+}
+
 const char* commandName(std::uint8_t kind) noexcept {
     switch (kind) {
     case 'D': return "draw";
@@ -1209,7 +1268,7 @@ bool writeTrace(Writer& writer, std::uint32_t completedFrameNo) noexcept {
     const std::uint32_t stamp = moduleBuildStamp();
     bool ok = writeText(writer,
         "{\"format\":\"edvr.draw-ladder-trace\",\"schemaVersion\":2,"
-        "\"predicateFactVersion\":15,"
+        "\"predicateFactVersion\":16,"
         "\"forwardInputVersion\":1,"
         "\"buildVersion\":\"");
     ok = ok && writeText(writer, EDVR_VERSION_STRING);
@@ -1406,6 +1465,45 @@ bool writeTrace(Writer& writer, std::uint32_t completedFrameNo) noexcept {
                     !writeResourceObservation(writer, observed.ui) ||
                     !writeFmt(writer, ",\"predicateResult\":\"%s\"}",
                         observationTriName(observed.predicateResult))) return false;
+            } else if (fact.kind == PredicateFactKind::FssChromeSkip) {
+                const FssChromeSkipObservation& chrome = fact.fssChrome;
+                if (!writeFmt(writer,
+                    "{\"siteId\":1,\"kind\":23,\"known\":\"%s\","
+                    "\"outerHeal\":\"%s\",\"outerCensus\":\"%s\",\"outerTemporal\":\"%s\","
+                    "\"kindReached\":\"%s\",\"drawKind\":%u,\"kindMatched\":\"%s\","
+                    "\"countReached\":\"%s\",\"drawCount\":%u,\"countMatched\":\"%s\","
+                    "\"budgetEntered\":\"%s\",\"budgetResult\":\"%s\","
+                    "\"hashReached\":\"%s\",\"vsHash\":\"%016llX\",\"hashMatched\":\"%s\","
+                    "\"srvReached\":\"%s\",\"srvNonNull\":\"%s\","
+                    "\"resourceReached\":\"%s\",\"resourceNonNull\":\"%s\","
+                    "\"queryReached\":\"%s\",\"texture2D\":\"%s\","
+                    "\"dimensionsReached\":\"%s\",\"width\":%u,\"height\":%u,"
+                    "\"chromeMatched\":\"%s\",\"healForSkip\":\"%s\","
+                    "\"latchReached\":\"%s\",\"latchOn\":\"%s\","
+                    "\"frameReached\":\"%s\",\"frameNo\":%u,\"priorFrameNo\":%u,"
+                    "\"ordinalCountBefore\":%u,\"frameChanged\":\"%s\","
+                    "\"ordinal\":%u,\"ordinalCountAfter\":%u,\"helperReached\":\"%s\","
+                    "\"startInstance\":%u,\"baseVertex\":%d,\"maskReached\":\"%s\","
+                    "\"skipMask\":%u,\"ordinalInRange\":\"%s\","
+                    "\"maskBit\":\"%s\",\"terminalSkip\":\"%s\"}",
+                    triName(fact.known), triName(chrome.outerHeal), triName(chrome.outerCensus),
+                    triName(chrome.outerTemporal), triName(chrome.kindReached), chrome.drawKind,
+                    triName(chrome.kindMatched), triName(chrome.countReached), chrome.drawCount,
+                    triName(chrome.countMatched), triName(chrome.budgetEntered),
+                    triName(chrome.budgetResult), triName(chrome.hashReached),
+                    static_cast<unsigned long long>(chrome.vsHash), triName(chrome.hashMatched),
+                    triName(chrome.srvReached), triName(chrome.srvNonNull),
+                    triName(chrome.resourceReached), triName(chrome.resourceNonNull),
+                    triName(chrome.queryReached), triName(chrome.texture2D),
+                    triName(chrome.dimensionsReached), chrome.width, chrome.height,
+                    triName(chrome.chromeMatched), triName(chrome.healForSkip),
+                    triName(chrome.latchReached), triName(chrome.latchOn),
+                    triName(chrome.frameReached), chrome.frameNo, chrome.priorFrameNo,
+                    chrome.ordinalCountBefore, triName(chrome.frameChanged), chrome.ordinal,
+                    chrome.ordinalCountAfter, triName(chrome.helperReached), chrome.startInstance,
+                    chrome.baseVertex, triName(chrome.maskReached), chrome.skipMask,
+                    triName(chrome.ordinalInRange), triName(chrome.maskBit),
+                    triName(chrome.terminalSkip))) return false;
             } else {
                 return false;
             }
@@ -2147,6 +2245,8 @@ void appendPredicateFact(Token token, const PredicateFact& fact) noexcept {
         ((fact.kind == PredicateFactKind::Holo53 ||
           fact.kind == PredicateFactKind::Scrim55) &&
          !validHoloScrimFact(fact)) ||
+        (fact.kind == PredicateFactKind::FssChromeSkip &&
+         !validFssChromeFact(fact)) ||
         (fact.kind == PredicateFactKind::DrawGateWanted &&
          ((fact.known == TriState::Yes && fact.gateWanted == TriState::Unknown) ||
           (fact.known == TriState::Unknown && fact.gateWanted != TriState::Unknown))) ||
@@ -2204,7 +2304,8 @@ void appendPredicateFact(Token token, const PredicateFact& fact) noexcept {
          fact.kind != PredicateFactKind::OffscreenCensusSkip &&
          fact.kind != PredicateFactKind::OffscreenQuadSkip &&
          fact.kind != PredicateFactKind::Holo53 &&
-         fact.kind != PredicateFactKind::Scrim55)) {
+         fact.kind != PredicateFactKind::Scrim55 &&
+         fact.kind != PredicateFactKind::FssChromeSkip)) {
         g_wasOverflowed = true;
         return;
     }
@@ -3128,7 +3229,7 @@ void finishDraw(Token token, std::int16_t winnerSiteId,
             }
             if (!found) g_wasOverflowed = true;
         }
-        if (siteId != 3 && siteId != 6 && siteId != 24 && siteId != 26 &&
+        if (siteId != 1 && siteId != 3 && siteId != 6 && siteId != 24 && siteId != 26 &&
             siteId != 49 && siteId != 50 && siteId != 53 && siteId != 55) continue;
         bool found = false;
         for (std::uint8_t j = 0; j < record.predicateFactCount; ++j) {
@@ -3138,6 +3239,25 @@ void finishDraw(Token token, std::int16_t winnerSiteId,
                      siteId == 53 || siteId == 55) &&
                     !record.predicateFacts[j].detailsFinalized)
                     g_wasOverflowed = true;
+                if (siteId == 1) {
+                    const SiteEvent& event = record.sites[i];
+                    const PredicateFact& fact = record.predicateFacts[j];
+                    const bool skipped = fact.fssChrome.terminalSkip == TriState::Yes;
+                    const std::int16_t expectedVerdict =
+                        static_cast<std::int16_t>(draw_ladder::VerdictOrdinal::kSkip);
+                    if (event.kind != static_cast<std::uint8_t>(draw_ladder::SiteKind::Claim) ||
+                        event.subsite != 0 ||
+                        event.outcome != static_cast<std::uint8_t>(skipped
+                            ? draw_ladder::SiteOutcome::Exited
+                            : draw_ladder::SiteOutcome::Declined) ||
+                        event.flow != static_cast<std::uint8_t>(skipped
+                            ? draw_ladder::Flow::Stop
+                            : draw_ladder::Flow::Continue) ||
+                        event.verdict != (skipped ? expectedVerdict : -1) ||
+                        (skipped && (winnerSiteId != static_cast<std::int16_t>(siteId) ||
+                                     verdictOrdinal != expectedVerdict)))
+                        g_wasOverflowed = true;
+                }
                 if (siteId == 53 || siteId == 55) {
                     const SiteEvent& event = record.sites[i];
                     const PredicateFact& fact = record.predicateFacts[j];

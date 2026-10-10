@@ -12,6 +12,7 @@
 #include <atomic>   // g_renderBelowEye
 #include <cctype>   // toupper, in the census-skip spec parser
 #include <cmath>
+#include <optional>
 #include <cstdio>   // _snprintf_s, for the sizes list in the starvation line
 #include <cstdlib>  // strtoul, same parser
 #include <cstring>
@@ -2102,26 +2103,138 @@ struct VScreenDrawLadderVisitor {
         if constexpr (id == SiteId::kFssChromeSkip) {
             // Kept before the foreign-context exit: the scanner chrome tracker
             // has always observed the draw at this exact rung.
-            if ((s->fssHealOn || s->censusFssJump || temporalPassWantsFssChrome()) &&
-                kind == 'X' && count == 6) {
-                guardedBudget(g_panelCbBudget, [&] {
+            using draw_ladder_trace::PredicateFact;
+            using draw_ladder_trace::PredicateFactKind;
+            using draw_ladder_trace::TriState;
+            struct EmptyFssChromePayload final {};
+            using FssChromePayload = std::conditional_t<TracePolicy::enabled,
+                std::optional<PredicateFact>, EmptyFssChromePayload>;
+            FssChromePayload payload{};
+            PredicateFact* fact = nullptr;
+            if constexpr (TracePolicy::enabled) {
+                if (trace.token.valid()) {
+                    fact = &payload.emplace();
+                    fact->siteId = static_cast<std::uint16_t>(id);
+                    fact->kind = PredicateFactKind::FssChromeSkip;
+                    fact->known = TriState::Yes;
+                }
+            }
+            const bool captureFact = fact != nullptr;
+            const auto tri = [](bool value) noexcept {
+                return value ? TriState::Yes : TriState::No;
+            };
+            const auto finishFact = [&](TriState skipped) noexcept {
+                if constexpr (TracePolicy::enabled) {
+                    if (captureFact) {
+                        fact->fssChrome.terminalSkip = skipped;
+                        trace.predicateFact(*fact);
+                    }
+                }
+            };
+
+            const bool healGate = s->fssHealOn != 0;
+            bool outerGate = healGate;
+            if (captureFact) fact->fssChrome.outerHeal = tri(healGate);
+            if (!outerGate) {
+                const bool censusGate = s->censusFssJump != 0;
+                if (captureFact) fact->fssChrome.outerCensus = tri(censusGate);
+                outerGate = censusGate;
+                if (!outerGate) {
+                    const bool temporalGate = temporalPassWantsFssChrome();
+                    if (captureFact) fact->fssChrome.outerTemporal = tri(temporalGate);
+                    outerGate = temporalGate;
+                }
+            }
+
+            bool shapeMatched = false;
+            if (outerGate) {
+                if (captureFact) {
+                    fact->fssChrome.kindReached = TriState::Yes;
+                    fact->fssChrome.drawKind = static_cast<std::uint8_t>(kind);
+                }
+                const bool kindMatched = kind == 'X';
+                if (captureFact) fact->fssChrome.kindMatched = tri(kindMatched);
+                if (kindMatched) {
+                    if (captureFact) {
+                        fact->fssChrome.countReached = TriState::Yes;
+                        fact->fssChrome.drawCount = count;
+                    }
+                    shapeMatched = count == 6;
+                    if (captureFact) fact->fssChrome.countMatched = tri(shapeMatched);
+                }
+            }
+            if (captureFact && !outerGate) fact->fssChrome.kindReached = TriState::No;
+            if (captureFact && outerGate && fact->fssChrome.kindMatched == TriState::No)
+                fact->fssChrome.countReached = TriState::No;
+
+            if (shapeMatched) {
+                bool lambdaEntered = false;
+                const bool budgetResult = guardedBudget(g_panelCbBudget, [&] {
+                    lambdaEntered = true;
+                    if (captureFact) {
+                        fact->fssChrome.budgetEntered = TriState::Yes;
+                        fact->fssChrome.hashReached = TriState::Yes;
+                    }
                     const uint64_t h = bindingShaderHash(BindSlot::Vs);
-                    if (h != 0xA888D51024D9798Eull && h != 0xB018D143700AB803ull) return;
+                    if (captureFact) fact->fssChrome.vsHash = h;
+                    const bool hashMatched = h == 0xA888D51024D9798Eull ||
+                                             h == 0xB018D143700AB803ull;
+                    if (captureFact) fact->fssChrome.hashMatched = tri(hashMatched);
+                    if (!hashMatched) {
+                        if (captureFact) {
+                            fact->fssChrome.srvReached = TriState::No;
+                            fact->fssChrome.resourceReached = TriState::No;
+                            fact->fssChrome.queryReached = TriState::No;
+                            fact->fssChrome.dimensionsReached = TriState::No;
+                        }
+                        return;
+                    }
+                    if (captureFact) fact->fssChrome.srvReached = TriState::Yes;
                     ID3D11ShaderResourceView* srv = nullptr;
                     self->PSGetShaderResources(1, 1, &srv);
-                    if (!srv) return;
+                    if (captureFact) fact->fssChrome.srvNonNull = tri(srv != nullptr);
+                    if (!srv) {
+                        if (captureFact) {
+                            fact->fssChrome.resourceReached = TriState::No;
+                            fact->fssChrome.queryReached = TriState::No;
+                            fact->fssChrome.dimensionsReached = TriState::No;
+                        }
+                        return;
+                    }
+                    if (captureFact) fact->fssChrome.resourceReached = TriState::Yes;
                     ID3D11Resource* res = nullptr;
                     srv->GetResource(&res);
-                    if (!res) { srv->Release(); return; }
+                    if (captureFact) fact->fssChrome.resourceNonNull = tri(res != nullptr);
+                    if (!res) {
+                        if (captureFact) fact->fssChrome.queryReached = TriState::No;
+                        if (captureFact) fact->fssChrome.dimensionsReached = TriState::No;
+                        srv->Release();
+                        return;
+                    }
+                    if (captureFact) fact->fssChrome.queryReached = TriState::Yes;
                     ID3D11Texture2D* tex = nullptr;
                     res->QueryInterface(__uuidof(ID3D11Texture2D),
                                         reinterpret_cast<void**>(&tex));
+                    if (captureFact) fact->fssChrome.texture2D = tri(tex != nullptr);
                     D3D11_TEXTURE2D_DESC td{};
-                    if (tex) { tex->GetDesc(&td); tex->Release(); }
-                    if (tex && td.Width >= 2000 && td.Height >= 1000 && td.Height < td.Width) {
+                    if (tex) {
+                        if (captureFact) fact->fssChrome.dimensionsReached = TriState::Yes;
+                        tex->GetDesc(&td);
+                        if (captureFact) {
+                            fact->fssChrome.width = td.Width;
+                            fact->fssChrome.height = td.Height;
+                        }
+                        tex->Release();
+                    } else if (captureFact) {
+                        fact->fssChrome.dimensionsReached = TriState::No;
+                    }
+                    const bool textureMatched = tex && td.Width >= 2000 &&
+                        td.Height >= 1000 && td.Height < td.Width;
+                    if (textureMatched) {
                         chromeMatched = true;
-                        if (s->fssChromeFrame != s->frameNo) {
-                            s->fssChromeFrame = s->frameNo;
+                        const uint32_t chromeFrameNo = s->frameNo;
+                        if (s->fssChromeFrame != chromeFrameNo) {
+                            s->fssChromeFrame = chromeFrameNo;
                             bumpFssChromeStamp();
                         }
                         if (uiDepthWantsDraws()) uiDepthLearnScannerChrome(self, h, srv, res);
@@ -2129,25 +2242,99 @@ struct VScreenDrawLadderVisitor {
                     res->Release();
                     srv->Release();
                 });
-                if (chromeMatched && s->fssHealOn && deviceHookFssModeLatch()) {
-                    if (s->fssChromeSkipFrame != s->frameNo) {
-                        s->fssChromeSkipFrame = s->frameNo;
-                        s->fssChromeSkipCount = 0;
-                    }
-                    const uint32_t ord = s->fssChromeSkipCount++;
-                    fssPanelRectOnComposite(self, ord, fssPanelRectStartInstance(),
-                                            fssPanelRectBaseVertex());
-                    const uint32_t mask = fssPanelRectSkipMask();
-                    if (ord < 32 && ((mask >> ord) & 1u)) {
-                        if (!s->fssChromeSkipNoted) {
-                            s->fssChromeSkipNoted = true;
-                            Log::get().note("fss panel rect: the derivation classified the scanner's scenery quads (mask 0x%X) and they are skipped while the screen is up. Said once.", mask);
-                        }
-                        if (drawCensusArmed()) drawCensusNoteUnseen('f');
-                        return exited(id, DrawVerdict::kSkip);
+                if (captureFact) {
+                    fact->fssChrome.budgetEntered = tri(lambdaEntered);
+                    fact->fssChrome.budgetResult = tri(budgetResult);
+                    fact->fssChrome.chromeMatched = tri(chromeMatched);
+                    if (!lambdaEntered) {
+                        fact->fssChrome.hashReached = TriState::No;
+                        fact->fssChrome.srvReached = TriState::No;
+                        fact->fssChrome.resourceReached = TriState::No;
+                        fact->fssChrome.queryReached = TriState::No;
+                        fact->fssChrome.dimensionsReached = TriState::No;
                     }
                 }
+                if (chromeMatched) {
+                    const bool healForSkip = s->fssHealOn != 0;
+                    if (captureFact) fact->fssChrome.healForSkip = tri(healForSkip);
+                    if (healForSkip && deviceHookFssModeLatch()) {
+                        if (captureFact) {
+                            fact->fssChrome.latchReached = TriState::Yes;
+                            fact->fssChrome.latchOn = TriState::Yes;
+                            fact->fssChrome.frameReached = TriState::Yes;
+                        }
+                        const uint32_t frameNo = s->frameNo;
+                        const uint32_t priorFrameNo = s->fssChromeSkipFrame;
+                        const bool frameChanged = priorFrameNo != frameNo;
+                        if (captureFact) fact->fssChrome.frameChanged = tri(frameChanged);
+                        if (frameChanged) {
+                            s->fssChromeSkipFrame = frameNo;
+                            s->fssChromeSkipCount = 0;
+                        }
+                        const uint32_t ord = s->fssChromeSkipCount++;
+                        const uint32_t countAfter = s->fssChromeSkipCount;
+                        const uint32_t startInstance = fssPanelRectStartInstance();
+                        const int32_t baseVertex = fssPanelRectBaseVertex();
+                        fssPanelRectOnComposite(self, ord, startInstance, baseVertex);
+                        const uint32_t mask = fssPanelRectSkipMask();
+                        const bool inRange = ord < 32;
+                        const bool maskBit = inRange && ((mask >> ord) & 1u);
+                        if (captureFact) {
+                            fact->fssChrome.frameNo = frameNo;
+                            fact->fssChrome.priorFrameNo = priorFrameNo;
+                            fact->fssChrome.ordinalCountBefore = ord;
+                            fact->fssChrome.ordinal = ord;
+                            fact->fssChrome.ordinalCountAfter = countAfter;
+                            fact->fssChrome.helperReached = TriState::Yes;
+                            fact->fssChrome.startInstance = startInstance;
+                            fact->fssChrome.baseVertex = baseVertex;
+                            fact->fssChrome.maskReached = TriState::Yes;
+                            fact->fssChrome.skipMask = mask;
+                            fact->fssChrome.ordinalInRange = tri(inRange);
+                            if (inRange) fact->fssChrome.maskBit = tri(maskBit);
+                        }
+                        if (maskBit) {
+                            if (!s->fssChromeSkipNoted) {
+                                s->fssChromeSkipNoted = true;
+                                Log::get().note("fss panel rect: the derivation classified the scanner's scenery quads (mask 0x%X) and they are skipped while the screen is up. Said once.", mask);
+                            }
+                            if (drawCensusArmed()) drawCensusNoteUnseen('f');
+                            finishFact(TriState::Yes);
+                            return exited(id, DrawVerdict::kSkip);
+                        }
+                    } else if (captureFact && healForSkip) {
+                        fact->fssChrome.latchReached = TriState::Yes;
+                        fact->fssChrome.latchOn = TriState::No;
+                        fact->fssChrome.frameReached = TriState::No;
+                        fact->fssChrome.helperReached = TriState::No;
+                        fact->fssChrome.maskReached = TriState::No;
+                    } else if (captureFact) {
+                        fact->fssChrome.latchReached = TriState::No;
+                        fact->fssChrome.frameReached = TriState::No;
+                        fact->fssChrome.helperReached = TriState::No;
+                        fact->fssChrome.maskReached = TriState::No;
+                    }
+                } else if (captureFact) {
+                    fact->fssChrome.latchReached = TriState::No;
+                    fact->fssChrome.frameReached = TriState::No;
+                    fact->fssChrome.helperReached = TriState::No;
+                    fact->fssChrome.maskReached = TriState::No;
+                }
+            } else if (captureFact) {
+                fact->fssChrome.budgetEntered = TriState::No;
+                fact->fssChrome.budgetResult = TriState::Unknown;
+                fact->fssChrome.hashReached = TriState::No;
+                fact->fssChrome.srvReached = TriState::No;
+                fact->fssChrome.resourceReached = TriState::No;
+                fact->fssChrome.queryReached = TriState::No;
+                fact->fssChrome.dimensionsReached = TriState::No;
+                fact->fssChrome.chromeMatched = TriState::No;
+                fact->fssChrome.latchReached = TriState::No;
+                fact->fssChrome.frameReached = TriState::No;
+                fact->fssChrome.helperReached = TriState::No;
+                fact->fssChrome.maskReached = TriState::No;
             }
+            finishFact(TriState::No);
             return SiteResult::declined();
         } else if constexpr (id == SiteId::kForeignContextNone) {
             if constexpr (TracePolicy::enabled) {
@@ -6788,6 +6975,7 @@ template <class Policy>
 struct VScreenTestTraceCapture final {
     static constexpr bool enabled = Policy::enabled;
     Policy& policy;
+    const draw_ladder_trace::Token& token;
     draw_ladder::SiteResult& result;
     VScreenClassifierSiteEvent* orderedSites = nullptr;
     std::uint8_t* orderedSiteCount = nullptr;
@@ -6800,7 +6988,8 @@ struct VScreenTestTraceCapture final {
         Policy& borrowedPolicy, draw_ladder::SiteResult& capturedResult,
         VScreenClassifierSiteEvent* sites = nullptr,
         std::uint8_t* siteCount = nullptr, bool* siteOverflow = nullptr) noexcept
-        : policy(borrowedPolicy), result(capturedResult), orderedSites(sites),
+        : policy(borrowedPolicy), token(borrowedPolicy.token),
+          result(capturedResult), orderedSites(sites),
           orderedSiteCount(siteCount), orderedSiteOverflow(siteOverflow),
           sunglareClampResetBefore(borrowedPolicy.sunglareClampResetBefore),
           sunglareClampResetAfter(borrowedPolicy.sunglareClampResetAfter),

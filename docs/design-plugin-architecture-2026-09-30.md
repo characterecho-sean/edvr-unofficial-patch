@@ -2,57 +2,55 @@
 
 ## Status
 
-- **State (2026-10-10):** Phase 1 implementation continues on
-  `codex/plugin-architecture`; no merge to main until Sean is ready to ship.
-  Review and remaining gates: section 11.
-- **Goal (Sean):** every fix/performance item belongs to one plugin, grouped
-  logically and selectable in the installer. An uninstalled plugin costs
-  nothing. The layer must improve CPU cost and not regress GPU cost.
+- **State (2026-10-10):** the architecture has a validated development base on
+  `codex/plugin-architecture`. New feature work may branch from it; no
+  feature-to-main merge until Sean is ready to ship. Review: section 11.
+- **Goal (Sean):** every fix/performance item belongs to one selectable plugin.
+  An uninstalled plugin costs nothing. The layer must improve CPU cost and not
+  regress GPU cost before shipping.
 - **Decided:** nine monolithic first-party modules inside the graphics DLL,
   generated manifests/config ownership, subscription-driven dispatch and a
   C-compatible interface. The add-on tier follows Phase 1. Graphics-only VR is
-  a separate phase; existing supported settings remain owned by one plugin.
-- **Current integration:** main `a1609f2b` is merged; its latest changes update
-  installer dry-run pruning. The guarded collector/domain/replay checkpoint
-  remains `55bd3ae8`. Runtime flat restores select sampled accounting after
-  owner and exact-context gates; owed work stays attributable after engine
-  stand-down. Direct NoApi and abandon behavior remain intact. Real-backend
-  WARP verifies physical restores and collector rows; runtime callers stay
-  source-pinned and full held-frame cost remains open. The main merge passes
-  156 jobs, config, export and installer gates; source receipt `453e2f92` is
-  verified. Steam retains measured candidate `6ab758d2`. Git stays on
-  `codex/plugin-architecture`.
+  a separate phase; supported settings remain owned by one plugin.
+- **Current integration:** main `a1609f2b` is merged; its latest changes are
+  installer-only. The combined FSS replay and flat cleanup checkpoint passes
+  156 full-build jobs plus config, export and installer gates; receipt
+  `79d77eef` matches the source. Steam retains measured `6ab758d2`.
+- **Offline evidence:** FSS site 1 has a frozen legacy selector oracle,
+  version-16 facts, seven-base-fact capacity and terminal X/6 action fixtures.
+  Capture uses consumed values; unarmed paths construct no predicate payload.
+  The fault fixture covers a caught fault after matching reads; earlier faults
+  with unavailable reads are conservatively rejected. The oracle consumes the
+  post-helper mask, not rectangle derivation or learning effects.
+- **Held cleanup:** frame-end release now uses the existing sampled
+  `kEngineDraw` clock/family. Fake-clock and real WARP/refcount checks cover
+  cleanup after restore and stand-down. Owner/flush/cleanup/GPU-close ordering
+  and the TEST Present return are source-pinned; WARP does not execute the
+  runtime caller. TEST work may roll into the next eligible census cut. Full
+  held-frame runtime cost remains open.
 - **Matched flights:** control `e16dbb54` and candidate `6ab758d2` match Pimax
-  OpenXR, 4032x3898 per eye, 90 Hz and graphics ownership. Control was on foot
-  first; candidate was carrier first. Candidate on-foot AA off overlaps another
-  build; its late windows remain conditional without a verified stop time.
-  Reported hook CPU varies by state. Direct-only GPU estimates rise 5.0% and
-  11.3% in carrier DLSS with NV off/on; on-foot DLSS falls 3.7% while source
-  pixels rise 2.559%. Nested and wrapped-game scopes are excluded from totals.
-  Workload and runtime acceptance remain open; no CPU benefit or GPU
-  non-regression is accepted. Steam retains verified `6ab758d2`, with graphics
-  INI and DLSS hashes unchanged. Next flight: none requested until the offline
-  audit establishes what further evidence is needed.
-- **Frozen flight evidence:** `7bbe7d90` control / `6c63f6aa` candidate,
-  matched Pimax OpenXR environment, no visual change. NV-on sampled hook time
-  per timed draw is 15.0% lower; other CPU ranges overlap. Historical helper
-  estimates and differing workloads remain in the journal. The current
-  attribution-aware pair governs cost review; no causal benefit or GPU
-  non-regression is accepted from these historical runs.
-- **Open:** remaining frame/lifecycle accounting and held-boundary frame cost;
-  full-ladder/action replay before wider migration; matched runtime CPU/GPU
-  acceptance. No Phase 1 acceptance or shipping.
-- **Upstream retirements:** static props/settlement detail and terrain guard no
-  longer exist; the original design tables describe September 30, not the
-  current code. Other main-retired keys/features stay retired in this merge.
-  FOV trim retains its own engine. Temporary branch key: `advanced.draw_replay`
-  (off); replay holds 482.4 MiB when on, none when off. Any separate removal of
-  that branch key requires Scope control. NV blur reproduces on baseline
-  `14a7ff70`.
+  OpenXR, 4032x3898 per eye, 90 Hz and graphics ownership. Candidate on-foot AA
+  off overlaps another build; late windows remain conditional without a
+  verified stop time. Hook CPU varies by state. Direct-only GPU estimates rise
+  5.0% and 11.3% in carrier DLSS with NV off/on; on-foot DLSS falls 3.7% while
+  source pixels rise 2.559%. Nested/wrapped-game scopes are excluded. Workload
+  differences prevent accepting CPU benefit or GPU non-regression. Historical
+  pair evidence stays in the journal; NV blur is pre-existing.
+- **Development and shipping:** broader legacy migration and performance
+  investigation no longer block feature development. Take the final matched
+  performance comparison at rendering-code freeze; main sync triggers tests for
+  affected paths. No install or flight is requested now. Whole-ladder replay,
+  remaining lifecycle cost and runtime CPU/GPU acceptance stay open; this
+  checkpoint does not claim Phase 1 completion or shipping acceptance.
+- **Upstream retirements:** main-retired features/keys stay retired; the
+  original design tables describe September 30. FOV trim keeps its own engine.
+  Temporary branch key `advanced.draw_replay` stays off. Its diagnostic pools
+  allocate only when enabled, with none allocated when off. Removing this key
+  requires Scope control.
 - **Ruled out:** per-draw virtual dispatch into every plugin; folder-scanned
   DLL loading; a frozen first-party ABI. The NV pilot already has independent
-  legacy replay, 32 composed child cases and pixel coverage; duplicate pilot
-  replay does not address the remaining gates.
+  legacy replay, 32 composed child cases and pixel coverage; duplicating that
+  pilot does not close the remaining gates.
 
 ## 1. Goals and non-goals
 
@@ -3794,3 +3792,52 @@ promotion, install or settings edit is performed. Next offline slices are
 schema-16 FSS chrome-skip replay and the existing sampled CPU scope around
 frame-end retained-reference cleanup. Performance acceptance, complete
 held-frame accounting and whole-ladder replay remain open; no merge to main.
+
+### 2026-10-10 — development checkpoint and fewer flight gates
+
+Sean asked to accelerate the work because repeated control/candidate flights
+were blocking feature development. The coordinator made validated `89b896ea`
+available as the development base and closed the two pending offline slices
+into this checkpoint. Broader legacy migration and performance investigation
+can continue alongside feature work. Keep the architecture on
+`codex/plugin-architecture`; no feature-to-main merge before shipping approval.
+
+The combined full build passes 156 jobs plus config ownership, production
+exports and installer gates. Source receipt `79d77eef` is verified against the
+committed inputs. No Steam installation or flight accompanies this checkpoint;
+measured candidate `6ab758d2` remains installed.
+
+FSS site-1 replay now records only consumed inputs, including short-circuit
+reachability, the budget's entry/result distinction, resource facts, ordinal
+and post-helper mask. The independent oracle is pinned to legacy `14a7ff70` and
+fact version 16 preserves older reader versions. The writer fixtures cover
+seven base facts plus a separate site-2 pool, eighth-fact invalidation, missing
+site-1 fact invalidation, real decline shapes and the terminal X/6 applied
+swallow envelope. Review repaired decline validation, stale capacity/version
+assertions and an unarmed payload constructor before the build. This proves the
+bounded selector/action slice, not whole-ladder replay or the rectangle
+derivation/learning helpers. The caught-fault fixture is after the matching
+reads; earlier faults with unavailable data are rejected conservatively.
+
+The held cleanup change times retained-reference release in the existing
+sampled `kEngineDraw` family after the Present restore and before GPU span
+close. It uses the existing clock and adds no logger, schema or export.
+Fake-clock ticks/calls and real WARP/refcount checks cover normal cleanup, owed
+cleanup after stand-down, and immediate ClearState abandonment. WARP executes
+the shared cleanup helper; runtime caller execution remains source-pinned only.
+The TEST Present pin includes the actual early return and mutation controls.
+Its skipped census cut can still roll prior work into the next eligible cut. No
+full held-frame runtime-cost claim follows.
+
+Native checks also verify the corrected fixture setup: engine stand-down clears
+the source watch and derived-blend cache, so reactivation is warmed before
+producing again and reference counts use a disabled-session baseline. The FSS
+terminal fixture satisfies both the frozen traversal oracle and the production
+exit event. Existing source pins follow the shared cleanup helper.
+
+Performance acceptance remains a shipping gate. Use one final matched pair at
+rendering-code freeze, preserving the same settings and keeping builds idle
+during the holds. After syncing main, retest only paths its changes affect. The
+mixed `e16dbb54`/`6ab758d2` measurements and latest unanswered visual follow-up
+are retained as evidence; they do not establish CPU improvement or GPU
+non-regression. No additional flight is requested now.

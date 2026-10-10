@@ -8,8 +8,10 @@
 #include <thread>
 
 #include "../../src/d3d11/plugin_cost_boundary.h"
+#include "../../src/d3d11/engine_velocity_frame_end_cost.h"
 
 namespace flat_real_cost_tests {
+namespace flatcpu = edvr::flatcpu;
 using flat_lazy_tests::Emu;
 using flat_lazy_tests::Game;
 using flat_lazy_tests::Harness;
@@ -94,7 +96,24 @@ inline void runWindow(const Harness& h, bool shutdownWhileHeld) {
             "real cost: sampled Present physically restores blend then targets exactly once");
     e.expectGame("real cost sampled Present restore");
     h.check(e.ok, "real cost: sampled restore returns the actual WARP game state");
-    if (!shutdownWhileHeld) e.present();
+    flatcpu::resetForTest();
+    flatcpu::g_gate.store(flatcpu::makeGate(true, flatcpu::currentThreadId()),
+                          std::memory_order_relaxed);
+    g_rec.reset();
+    {
+        RecOn on;
+        if (!shutdownWhileHeld) e.present();
+        else edvr::engineVelocityFlatFrameEndWithCost();
+    }
+    const flatcpu::Slot* frameEndSlot = flatcpu::t_ctx.slot;
+    h.check(frameEndSlot &&
+                frameEndSlot->cell[flatcpu::kEngineDraw].calls.load(std::memory_order_relaxed) == 1,
+            "real cost: actual frame-end helper records one sampled cleanup scope after restore");
+    h.check(!edvr::engineVelocityFlatPending() && g_rec.calls[kOMSetBlend] == 0 &&
+                g_rec.calls[kOMSetRT] == 0 && e.ok,
+            shutdownWhileHeld
+                ? "real cost: frame-end cleanup after stand-down releases the owed state without context setters"
+                : "real cost: frame-end cleanup after Present is a no-setter no-op after restore");
     h.check(!boundary.close(17, false, &report) && !boundary.apiSampleFrame &&
                 !cost::apiSampleHint() && edvrPluginCostApiSampleContext(g.ctx) == 0,
             "real cost: sampled frame 17 closes before unsampled frame 18");
@@ -161,5 +180,10 @@ inline void runWindow(const Harness& h, bool shutdownWhileHeld) {
 inline void run(const Harness& h) {
     runWindow(h, false);
     runWindow(h, true);
+    std::string releaseWhy;
+    const bool released = flat_lazy_tests::releaseScene(h, &releaseWhy);
+    if (!released) std::printf("  real cost: reference envelope failed at: %s\n", releaseWhy.c_str());
+    h.check(released,
+            "real cost: WARP frame-end releases retained view/blend references; ClearState abandons them immediately");
 }
 } // namespace flat_real_cost_tests

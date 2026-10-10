@@ -55,6 +55,7 @@
 #include <vector>
 
 #include "../../src/d3d11/engine_velocity.h"
+#include "../../src/d3d11/engine_velocity_frame_end_cost.h"
 #include "../../src/d3d11/flat_query_cut.h"
 #include "../../src/d3d11/flat_query_reads.h"
 #include "../../src/d3d11/flat_substitution.h"
@@ -482,7 +483,7 @@ public:
     void commandList() { action(FlatSubstEvent::kExecuteCommandList, "a command list"); }
     void present() {
         action(FlatSubstEvent::kPresent, "the present");
-        edvr::engineVelocityFlatFrameEnd();   // the runtime's BeforePresent: the flush, then what the frame kept goes
+        edvr::engineVelocityFlatFrameEndWithCost();   // the runtime's BeforePresent: the flush, then what the frame kept goes
         if (ok) g_.endFrame();
     }
     // The game's Get of state EDVR's substitution still holds: not a hooked call, so it reads what is bound.
@@ -943,6 +944,27 @@ inline bool releaseScene(const Harness& h, std::string* why) {
     const ULONG after = refs(), blendAfter = blendRefs();
     e.startFrame();
     e.gameSetBlend(blend);
+    e.producer("a run held across stand-down");
+    const ULONG beforeStanddown = refs(), blendBeforeStanddown = blendRefs();
+    edvr::engineVelocityConfigure(false);
+    const bool pendingAtStanddown = edvr::engineVelocityFlatPending();
+    e.present();
+    const ULONG afterStanddown = refs(), blendAfterStanddown = blendRefs();
+    const bool pendingAfterStanddown = edvr::engineVelocityFlatPending();
+    if (!e.ok) { *why = e.why; return false; }
+    // Shutdown discarded the derived-blend cache, so the pre-shutdown quiet
+    // count is not a valid blend baseline. Rebind the same game state after
+    // ClearState, with no pending bracket, and compare within this session.
+    e.clearState();
+    e.restartPass();
+    e.gameSetBlend(blend);
+    const ULONG standdownQuiet = refs(), blendStanddownQuiet = blendRefs();
+    edvr::engineVelocityConfigure(true);
+    // Configure clears the source-camera watch. Its first naming cannot see
+    // rows written before that watch was assigned, so prime a frame again.
+    e.warmUp();
+    e.startFrame();
+    e.gameSetBlend(blend);
     e.producer("a run before ClearState");
     const ULONG held = refs(), blendHeld = blendRefs();
     e.clearState();
@@ -950,6 +972,13 @@ inline bool releaseScene(const Harness& h, std::string* why) {
     if (during <= quiet || blendDuring <= blendQuiet) { *why = "the bracket held no reference to the game's view or blend state mid-frame (the scene proves nothing)"; return false; }
     if (after != quiet) { *why = "the Present left the game's render-target view held"; return false; }
     if (blendAfter != blendQuiet) { *why = "the Present left the game's blend state held"; return false; }
+    if (!pendingAtStanddown || beforeStanddown <= quiet || blendBeforeStanddown <= blendQuiet) {
+        *why = "stand-down did not retain the pending game's view and blend references"; return false;
+    }
+    if (afterStanddown != standdownQuiet || blendAfterStanddown != blendStanddownQuiet ||
+        pendingAfterStanddown) {
+        *why = "the frame end after stand-down left the game's view, blend state, or pending restore held"; return false;
+    }
     if (held <= unbound || cleared != unbound) { *why = "ClearState left the game's render-target view held"; return false; }
     if (blendHeld <= blendUnbound || blendCleared != blendUnbound) { *why = "ClearState left the game's blend state held"; return false; }
     return true;

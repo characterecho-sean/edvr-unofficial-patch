@@ -61,6 +61,7 @@ inline int64_t now() {
 #define EDVR_FLATCPU_NOW() (::flat_cpu_rig::now())
 #define EDVR_EMCPU_NOW() (::flat_cpu_rig::now())
 #include "../../src/d3d11/flat_cpu.h"
+#include "../../src/d3d11/engine_velocity_frame_end_cost.h"
 
 namespace flat_cpu_rig {
 
@@ -156,6 +157,18 @@ inline int flatCpuTests() {
         if (!ok) { std::printf("FAIL: census %s\n", name); ++failures; }
     };
     auto nearly = [](double a, double b, double eps = 1e-6) { return std::fabs(a - b) <= eps; };
+
+    // The same non-exported wrapper used around production frame-end cleanup:
+    // the family receives only the callback's own ticks, exactly once.
+    {
+        flatcpu::resetForTest();
+        fake(400);
+        engineVelocityFlatFrameEndWithCost([] { t_now += 29; });
+        const flatcpu::Slot* s = flatcpu::t_ctx.slot;
+        expect(s && s->cell[flatcpu::kEngineDraw].ticks.load() == 29 &&
+                   s->cell[flatcpu::kEngineDraw].calls.load() == 1 && t_reads == 2,
+               "the shared frame-end wrapper records the exact fake-clock kEngineDraw interval and one call");
+    }
 
     // ---- 1: exclusive nesting, in the scope itself -------------------------------------------
     {

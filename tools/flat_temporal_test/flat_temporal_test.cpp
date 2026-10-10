@@ -3821,7 +3821,8 @@ void testFlatQueryCutWiring() {
     const std::string runtimeCpp = slurp("src/d3d11/flat_runtime.cpp");
     const std::string engineCpp = slurp("src/d3d11/engine_velocity.cpp");
     const std::string readsH = slurp("src/d3d11/flat_query_reads.h");
-    check(!runtimeCpp.empty() && !engineCpp.empty() && !readsH.empty(), "the runtime, engine motion and query sources are readable from the repo root");
+    const std::string frameEndCostH = slurp("src/d3d11/engine_velocity_frame_end_cost.h");
+    check(!runtimeCpp.empty() && !engineCpp.empty() && !readsH.empty() && !frameEndCostH.empty(), "the runtime, engine motion, query and frame-end cost sources are readable from the repo root");
     auto count = [](const std::string& text, const std::string& needle) {
         unsigned n = 0;
         for (size_t at = text.find(needle); at != std::string::npos; at = text.find(needle, at + 1)) ++n;
@@ -3837,7 +3838,10 @@ void testFlatQueryCutWiring() {
         {&runtimeCpp, "flatQueryCut().beginFrame(frame);", 1, "the Present tells the policy which frame starts (one in 64 checks)"},
         {&runtimeCpp, "(s.projectionFrames != 0 || !flatCameraInjectUpstreamOwns());", 1,
          "the coverage reads that still ask the context (an F10 audit, the legacy route) put the game's state back first, and nothing else does"},
-        {&runtimeCpp, "if (owner()) engineVelocityFlatFrameEnd();", 1, "the frame's end lets go of what the bracket kept"},
+        {&runtimeCpp, "if (owner()) engineVelocityFlatFrameEndWithCost();", 1, "the owner routes frame-end release through the existing sampled CPU family"},
+        {&frameEndCostH, "flatcpu::Scope cleanup(flatcpu::kEngineDraw);", 1, "the shared frame-end wrapper uses the existing engine-draw family"},
+        {&frameEndCostH, "release();", 1, "the shared timing wrapper encloses its release callback"},
+        {&frameEndCostH, "engineVelocityFlatFrameEnd();", 1, "the no-argument production wrapper calls the real cleanup"},
         // Engine motion's wrapper.
         {&engineCpp, "flatQueryCut().plan(FlatQuery::GameTargets)", 1, "the game's render-target set is kept through the policy"},
         {&engineCpp, "flatQueryCut().plan(FlatQuery::GameBlend)", 2, "and its blend state in each mutually exclusive API policy body"},
@@ -3915,9 +3919,32 @@ void testFlatQueryCutWiring() {
     // The frame's end comes after the Present's flush, inside the same function.
     const size_t before = runtimeCpp.find("void flatRuntimeBeforePresent() {");
     const size_t flush = runtimeCpp.find("flatRuntimeSubstitution(state().context.Get(), FlatSubstEvent::kPresent);", before);
-    const size_t end = runtimeCpp.find("if (owner()) engineVelocityFlatFrameEnd();", before);
-    check(before != std::string::npos && flush != std::string::npos && end != std::string::npos && flush < end && end - flush < 400,
-          "the frame's end follows the Present's flush");
+    const size_t end = runtimeCpp.find("if (owner()) engineVelocityFlatFrameEndWithCost();", before);
+    const size_t gpuClose = runtimeCpp.find("if (owner()) gpuFrameClose(state());", end);
+    check(before != std::string::npos && flush != std::string::npos && end != std::string::npos &&
+              gpuClose != std::string::npos && flush < end && end < gpuClose && gpuClose - flush < 500,
+          "owner-only frame-end cleanup is timed after the Present flush and before GPU span close");
+    const std::string presentBody = functionBody(runtimeCpp, "void flatRuntimePresent(");
+    const char* const testPresentGuardText =
+        "if (!runtimeFlatProfile() || !swap || (flags & DXGI_PRESENT_TEST)) return;";
+    const size_t presentOpen = presentBody.find('{');
+    const size_t firstPresentStatement = presentOpen == std::string::npos
+        ? std::string::npos : presentBody.find_first_not_of(" \t\r\n", presentOpen + 1);
+    const size_t testPresentGuard = presentBody.find(testPresentGuardText);
+    const size_t censusCut = presentBody.find("s.census.onFrame(censusNow, censusFreq, endedPaused);");
+    const auto guardRejectsMutation = [&](const char* from, const char* to) {
+        std::string mutated = presentBody;
+        const size_t at = mutated.find(from);
+        if (at == std::string::npos) return false;
+        mutated.replace(at, std::strlen(from), to);
+        return mutated.find(testPresentGuardText) == std::string::npos;
+    };
+    check(!presentBody.empty() && firstPresentStatement == testPresentGuard &&
+              censusCut != std::string::npos && testPresentGuard < censusCut,
+          "profile, swap, and TEST Present guard returns as the first statement before the census cut");
+    check(guardRejectsMutation("!runtimeFlatProfile()", "") && guardRejectsMutation("!swap", "") &&
+              guardRejectsMutation("(flags & DXGI_PRESENT_TEST)", "") && guardRejectsMutation(" return;", ";"),
+          "TEST Present guard source pin rejects removal of each condition or its early return");
 }
 
 int main(int argc, char** argv) {

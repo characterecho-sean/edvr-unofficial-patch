@@ -14,7 +14,7 @@ import tempfile
 
 FORMAT = "edvr.draw-ladder-trace"
 SCHEMA_VERSION = 2
-PREDICATE_FACT_VERSION = 15
+PREDICATE_FACT_VERSION = 16
 RESOLVE_BIND_PS_HASH = 0x7CECABDE34FFBE9E
 MAX_TRACE_BYTES = 256 * 1024 * 1024
 MAX_DRAWS = 65536
@@ -3339,13 +3339,346 @@ def _sunglare_nomination_fact(fact, draw, label):
     return expected_event, mismatches, unavailable
 
 
+_FSS_CHROME_FIELDS = {
+        "siteId", "kind", "known", "outerHeal", "outerCensus", "outerTemporal",
+    "kindReached", "drawKind", "kindMatched", "countReached", "drawCount",
+    "countMatched", "budgetEntered", "budgetResult", "hashReached", "vsHash",
+    "hashMatched", "srvReached", "srvNonNull", "resourceReached",
+    "resourceNonNull", "queryReached", "texture2D", "dimensionsReached",
+    "width", "height", "chromeMatched", "healForSkip", "latchReached",
+    "latchOn", "frameReached", "frameNo", "priorFrameNo", "ordinalCountBefore",
+    "frameChanged", "ordinal", "ordinalCountAfter", "helperReached",
+    "startInstance", "baseVertex", "maskReached", "skipMask", "ordinalInRange",
+    "maskBit", "terminalSkip",
+}
+_FSS_CHROME_TRI_FIELDS = _FSS_CHROME_FIELDS - {
+    "siteId", "kind", "known", "drawKind", "drawCount", "vsHash", "width",
+    "height", "frameNo", "priorFrameNo", "ordinalCountBefore", "ordinal",
+    "ordinalCountAfter", "startInstance", "baseVertex", "skipMask",
+}
+
+
+def _legacy14a_fss_chrome_skip(fact, draw, label):
+    """Frozen site-1 selector; it consumes only the serialized site-1 inputs."""
+    if set(fact) != _FSS_CHROME_FIELDS:
+        raise TraceError(label + " has missing or unexpected FSS chrome fields")
+    if fact["known"] != "yes" or any(fact.get(key) not in TRI_STATES
+                                      for key in _FSS_CHROME_TRI_FIELDS):
+        raise TraceError(label + " has invalid FSS chrome availability")
+    integer_ranges = {
+        "siteId": (1, 1), "kind": (23, 23), "drawKind": (0, 255),
+        "drawCount": (0, 0xffffffff), "width": (0, 0xffffffff),
+        "height": (0, 0xffffffff), "frameNo": (0, 0xffffffff),
+        "priorFrameNo": (0, 0xffffffff), "ordinalCountBefore": (0, 0xffffffff),
+        "ordinal": (0, 0xffffffff), "ordinalCountAfter": (0, 0xffffffff),
+        "startInstance": (0, 0xffffffff), "baseVertex": (-0x80000000, 0x7fffffff),
+        "skipMask": (0, 0xffffffff),
+    }
+    for key, bounds in integer_ranges.items():
+        _integer(fact.get(key), label + "." + key, *bounds)
+    if not isinstance(fact.get("vsHash"), str) or not re.match(
+            r"^[0-9A-Fa-f]{16}$", fact["vsHash"]):
+        raise TraceError(label + ".vsHash must be sixteen hexadecimal digits")
+
+    def require(condition, message):
+        if not condition:
+            raise TraceError(label + " " + message)
+
+    def unknown(*keys):
+        for key in keys:
+            require(fact[key] == "unknown", key + " must be unknown before its branch")
+
+    def zero(*keys):
+        for key in keys:
+            expected = "0000000000000000" if key == "vsHash" else 0
+            require(fact[key] == expected, key + " must be zero when unavailable")
+
+    # Preserve the source's short-circuit order: heal, census, temporal.
+    require(fact["outerHeal"] != "unknown", "lacks the first outer gate")
+    if fact["outerHeal"] == "yes":
+        unknown("outerCensus", "outerTemporal")
+        outer = True
+    else:
+        require(fact["outerCensus"] != "unknown", "lacks the reached census gate")
+        if fact["outerCensus"] == "yes":
+            unknown("outerTemporal")
+            outer = True
+        else:
+            require(fact["outerTemporal"] != "unknown", "lacks the reached temporal gate")
+            outer = fact["outerTemporal"] == "yes"
+    require(fact["kindReached"] == ("yes" if outer else "no"),
+            "has inconsistent kind-gate reachability")
+    shape = False
+    if outer:
+        require(fact["drawKind"] == draw["kind"], "kind input differs from draw facts")
+        kind_match = fact["drawKind"] == ord("X")
+        require(fact["kindMatched"] == ("yes" if kind_match else "no"),
+                "kind comparison differs from frozen X gate")
+        if kind_match:
+            require(fact["countReached"] == "yes", "lacks reached count gate")
+            require(fact["drawCount"] == draw["count"], "count input differs from draw facts")
+            shape = fact["drawCount"] == 6
+            require(fact["countMatched"] == ("yes" if shape else "no"),
+                    "count comparison differs from frozen six-count gate")
+        else:
+            require(fact["countReached"] == "no", "count gate must be unreached after kind miss")
+            unknown("countMatched")
+            zero("drawCount")
+    else:
+        unknown("kindMatched", "countReached", "countMatched")
+        zero("drawKind", "drawCount")
+    if not shape:
+        require(fact["budgetEntered"] == "no" and fact["budgetResult"] == "unknown",
+                "budget must not run after an outer-shape miss")
+        unknown("hashMatched")
+        zero("vsHash")
+        require(fact["hashReached"] == "no", "hash must be unreached after shape miss")
+        require(fact["srvReached"] == fact["resourceReached"] ==
+                fact["queryReached"] == fact["dimensionsReached"] == "no",
+                "D3D stages must be unreached after shape miss")
+        unknown("srvNonNull", "resourceNonNull", "texture2D")
+        require(fact["chromeMatched"] == "no", "shape miss cannot match chrome")
+    else:
+        require(fact["budgetEntered"] in ("yes", "no"), "budget entry result is unavailable")
+        require(fact["budgetResult"] in ("yes", "no"), "budget result is unavailable")
+        if fact["budgetEntered"] == "no":
+            require(fact["budgetResult"] == "no" and fact["hashReached"] == "no",
+                    "declined budget must not reach the hash read")
+            unknown("hashMatched")
+            zero("vsHash")
+            require(fact["srvReached"] == fact["resourceReached"] ==
+                    fact["queryReached"] == fact["dimensionsReached"] == "no",
+                    "D3D stages must be unreached when budget declines")
+            unknown("srvNonNull", "resourceNonNull", "texture2D")
+            require(fact["chromeMatched"] == "no", "unentered probe must not match chrome")
+        else:
+            require(fact["hashReached"] == "yes", "entered budget lacks hash read")
+            hash_value = int(fact["vsHash"], 16)
+            hash_match = hash_value in (0xA888D51024D9798E, 0xB018D143700AB803)
+            require(fact["hashMatched"] == ("yes" if hash_match else "no"),
+                    "VS hash comparison differs from frozen hashes")
+            if not hash_match:
+                require(fact["srvReached"] == fact["resourceReached"] ==
+                        fact["queryReached"] == fact["dimensionsReached"] == "no",
+                        "hash miss must short-circuit all D3D reads")
+                unknown("srvNonNull", "resourceNonNull", "texture2D")
+                require(fact["chromeMatched"] == "no", "hash miss cannot match chrome")
+            else:
+                require(fact["srvReached"] == "yes", "hash hit lacks SRV read")
+                if fact["srvNonNull"] == "no":
+                    require(fact["resourceReached"] == fact["queryReached"] ==
+                            fact["dimensionsReached"] == "no", "null SRV must short-circuit")
+                    unknown("resourceNonNull", "texture2D")
+                    require(fact["chromeMatched"] == "no", "null SRV cannot match chrome")
+                else:
+                    require(fact["srvNonNull"] == "yes" and fact["resourceReached"] == "yes",
+                            "SRV result lacks resource stage")
+                    if fact["resourceNonNull"] == "no":
+                        require(fact["queryReached"] == fact["dimensionsReached"] == "no",
+                                "missing resource must short-circuit query")
+                        unknown("texture2D")
+                        require(fact["chromeMatched"] == "no", "missing resource cannot match chrome")
+                    else:
+                        require(fact["resourceNonNull"] == "yes" and
+                                fact["queryReached"] == "yes", "resource result lacks QI stage")
+                        if fact["texture2D"] == "no":
+                            require(fact["dimensionsReached"] == "no" and
+                                    fact["chromeMatched"] == "no", "non-2D resource must short-circuit desc")
+                            zero("width", "height")
+                        else:
+                            require(fact["texture2D"] == "yes" and
+                                    fact["dimensionsReached"] == "yes", "2D query lacks GetDesc")
+                            texture_match = (fact["width"] >= 2000 and
+                                             fact["height"] >= 1000 and
+                                             fact["height"] < fact["width"])
+                            require(fact["chromeMatched"] == ("yes" if texture_match else "no"),
+                                    "texture dimensions differ from frozen thresholds")
+
+    chrome = fact["chromeMatched"] == "yes"
+    if not chrome:
+        unknown("healForSkip", "latchOn", "frameChanged", "maskBit")
+        require(fact["latchReached"] == fact["frameReached"] ==
+                fact["helperReached"] == fact["maskReached"] == "no" and
+                fact["terminalSkip"] == "no", "chrome miss must not reach skip stages")
+        zero("frameNo", "priorFrameNo", "ordinalCountBefore", "ordinal",
+             "ordinalCountAfter", "startInstance", "baseVertex", "skipMask")
+    else:
+        require(fact["healForSkip"] in ("yes", "no"), "chrome match lacks heal state")
+        if fact["healForSkip"] == "no":
+            require(fact["latchReached"] == fact["frameReached"] ==
+                    fact["helperReached"] == fact["maskReached"] == "no" and
+                    fact["terminalSkip"] == "no", "heal-off must short-circuit skip stages")
+            unknown("latchOn", "frameChanged", "maskBit")
+            zero("frameNo", "priorFrameNo", "ordinalCountBefore", "ordinal",
+                 "ordinalCountAfter", "startInstance", "baseVertex", "skipMask")
+        else:
+            require(fact["latchReached"] == "yes" and fact["latchOn"] in ("yes", "no"),
+                    "heal-on chrome match lacks mode latch result")
+            if fact["latchOn"] == "no":
+                require(fact["frameReached"] == fact["helperReached"] ==
+                        fact["maskReached"] == "no" and fact["terminalSkip"] == "no",
+                        "latch-off must short-circuit frame/helper stages")
+                unknown("frameChanged", "maskBit")
+                zero("frameNo", "priorFrameNo", "ordinalCountBefore", "ordinal",
+                     "ordinalCountAfter", "startInstance", "baseVertex", "skipMask")
+            else:
+                require(fact["frameReached"] == fact["helperReached"] ==
+                        fact["maskReached"] == "yes", "mode latch hit lacks helper and mask")
+                changed = fact["priorFrameNo"] != fact["frameNo"]
+                require(fact["frameChanged"] == ("yes" if changed else "no"),
+                        "frame transition differs from captured frame values")
+                ordinal = 0 if changed else fact["ordinalCountBefore"]
+                after = (ordinal + 1) & 0xffffffff
+                require(fact["ordinal"] == ordinal and fact["ordinalCountAfter"] == after,
+                        "ordinal transition differs from post-increment counter")
+                in_range = ordinal < 32
+                require(fact["ordinalInRange"] == ("yes" if in_range else "no"),
+                        "ordinal range differs from frozen bound")
+                if in_range:
+                    bit = bool((fact["skipMask"] >> ordinal) & 1)
+                    require(fact["maskBit"] == ("yes" if bit else "no"),
+                            "mask-bit result differs from frozen bit test")
+                else:
+                    bit = False
+                    unknown("maskBit")
+                require(fact["terminalSkip"] == ("yes" if bit else "no"),
+                        "terminal result differs from frozen selector")
+    terminal = fact["terminalSkip"] == "yes"
+    event = {"id": 1, "kind": 2, "outcome": 4 if terminal else 2,
+             "flow": 1 if terminal else 0, "subsite": 0,
+             "verdict": 2 if terminal else -1}
+    return event, 0
+
+
+def _fss_chrome_skip_fact_fixture(draw, **inputs):
+    """Build explicit consumed site-1 facts for offline oracle fixtures."""
+    values = {
+        "outerHeal": True, "outerCensus": False, "outerTemporal": False,
+        "budgetEntered": True, "budgetResult": True,
+        "vsHash": 0xA888D51024D9798E, "srvNonNull": True,
+        "resourceNonNull": True, "texture2D": True, "width": 2000,
+        "height": 1000, "healForSkip": True, "latchOn": True,
+        "frameNo": 12, "priorFrameNo": 11, "ordinal": 0, "mask": 1,
+        "startInstance": 4, "baseVertex": -3,
+        "drawKind": draw["kind"], "drawCount": draw["count"],
+    }
+    values.update(inputs)
+    f = {key: "unknown" for key in _FSS_CHROME_TRI_FIELDS}
+    f.update({"siteId": 1, "kind": 23, "known": "yes", "drawKind": 0,
+              "drawCount": 0, "vsHash": "%016X" % 0, "width": 0, "height": 0,
+              "frameNo": 0, "priorFrameNo": 0, "ordinalCountBefore": 0,
+              "ordinal": 0, "ordinalCountAfter": 0, "startInstance": 0,
+              "baseVertex": 0, "skipMask": 0})
+    outer = bool(values["outerHeal"] or values["outerCensus"] or values["outerTemporal"])
+    f["outerHeal"] = "yes" if values["outerHeal"] else "no"
+    if not values["outerHeal"]:
+        f["outerCensus"] = "yes" if values["outerCensus"] else "no"
+        if not values["outerCensus"]:
+            f["outerTemporal"] = "yes" if values["outerTemporal"] else "no"
+    f["kindReached"] = "yes" if outer else "no"
+    shape = False
+    if outer:
+        f["drawKind"] = values["drawKind"]
+        kind_match = values["drawKind"] == ord("X")
+        f["kindMatched"] = "yes" if kind_match else "no"
+        if kind_match:
+            f["countReached"] = "yes"
+            f["drawCount"] = values["drawCount"]
+            shape = values["drawCount"] == 6
+            f["countMatched"] = "yes" if shape else "no"
+        else:
+            f["countReached"] = "no"
+    if not shape:
+        f.update(budgetEntered="no", budgetResult="unknown", hashReached="no",
+                 srvReached="no", resourceReached="no", queryReached="no",
+                 dimensionsReached="no", chromeMatched="no", latchReached="no",
+                 frameReached="no", helperReached="no", maskReached="no",
+                 terminalSkip="no")
+        return f
+    entered = bool(values["budgetEntered"])
+    f["budgetEntered"] = "yes" if entered else "no"
+    f["budgetResult"] = "yes" if values["budgetResult"] else "no"
+    if not entered:
+        f.update(hashReached="no", srvReached="no", resourceReached="no",
+                 queryReached="no", dimensionsReached="no", chromeMatched="no",
+                 latchReached="no", frameReached="no", helperReached="no",
+                 maskReached="no", terminalSkip="no")
+        return f
+    f["hashReached"] = "yes"
+    hash_value = values["vsHash"]
+    f["vsHash"] = "%016X" % hash_value
+    hash_match = hash_value in (0xA888D51024D9798E, 0xB018D143700AB803)
+    f["hashMatched"] = "yes" if hash_match else "no"
+    if not hash_match:
+        f.update(srvReached="no", resourceReached="no", queryReached="no",
+                 dimensionsReached="no", chromeMatched="no", latchReached="no",
+                 frameReached="no", helperReached="no", maskReached="no",
+                 terminalSkip="no")
+        return f
+    f["srvReached"] = "yes"
+    f["srvNonNull"] = "yes" if values["srvNonNull"] else "no"
+    if not values["srvNonNull"]:
+        f.update(resourceReached="no", queryReached="no", dimensionsReached="no",
+                 chromeMatched="no", latchReached="no", frameReached="no",
+                 helperReached="no", maskReached="no", terminalSkip="no")
+        return f
+    f["resourceReached"] = "yes"
+    f["resourceNonNull"] = "yes" if values["resourceNonNull"] else "no"
+    if not values["resourceNonNull"]:
+        f.update(queryReached="no", dimensionsReached="no", chromeMatched="no",
+                 latchReached="no", frameReached="no", helperReached="no",
+                 maskReached="no", terminalSkip="no")
+        return f
+    f["queryReached"] = "yes"
+    f["texture2D"] = "yes" if values["texture2D"] else "no"
+    if not values["texture2D"]:
+        f.update(dimensionsReached="no", chromeMatched="no", latchReached="no",
+                 frameReached="no", helperReached="no", maskReached="no",
+                 terminalSkip="no")
+        return f
+    f["dimensionsReached"] = "yes"
+    f["width"], f["height"] = values["width"], values["height"]
+    chrome = values["width"] >= 2000 and values["height"] >= 1000 and values["height"] < values["width"]
+    f["chromeMatched"] = "yes" if chrome else "no"
+    if not chrome:
+        f.update(latchReached="no", frameReached="no", helperReached="no",
+                 maskReached="no", terminalSkip="no")
+        return f
+    f["healForSkip"] = "yes" if values["healForSkip"] else "no"
+    if not values["healForSkip"]:
+        f.update(latchReached="no", frameReached="no", helperReached="no",
+                 maskReached="no", terminalSkip="no")
+        return f
+    f["latchReached"] = "yes"
+    f["latchOn"] = "yes" if values["latchOn"] else "no"
+    if not values["latchOn"]:
+        f.update(frameReached="no", helperReached="no", maskReached="no",
+                 terminalSkip="no")
+        return f
+    f.update(frameReached="yes", helperReached="yes", maskReached="yes",
+             frameNo=values["frameNo"], priorFrameNo=values["priorFrameNo"],
+             startInstance=values["startInstance"], baseVertex=values["baseVertex"],
+             frameChanged="yes" if values["frameNo"] != values["priorFrameNo"] else "no",
+             ordinal=values["ordinal"], ordinalCountBefore=values["ordinal"],
+             ordinalCountAfter=(values["ordinal"] + 1) & 0xffffffff,
+             skipMask=values["mask"], ordinalInRange="yes" if values["ordinal"] < 32 else "no")
+    if values["ordinal"] < 32:
+        bit = bool((values["mask"] >> values["ordinal"]) & 1)
+        f["maskBit"] = "yes" if bit else "no"
+    else:
+        bit = False
+    f["terminalSkip"] = "yes" if bit else "no"
+    return f
+
+
 def _replay_predicate_facts(draw, label, predicate_fact_version=1):
     facts = draw.get("predicateFacts")
-    maximum = 20 if predicate_fact_version >= 15 else 19 if predicate_fact_version >= 14 else 18 if predicate_fact_version >= 13 else 17 if predicate_fact_version >= 12 else 16 if predicate_fact_version >= 11 else 15 if predicate_fact_version >= 10 else 14 if predicate_fact_version >= 9 else 12 if predicate_fact_version >= 8 else 11 if predicate_fact_version >= 7 else 9 if predicate_fact_version >= 6 else 6 if predicate_fact_version >= 5 else 4 if predicate_fact_version >= 3 else 3 if predicate_fact_version >= 2 else 2
+    maximum = 21 if predicate_fact_version >= 16 else 20 if predicate_fact_version >= 15 else 19 if predicate_fact_version >= 14 else 18 if predicate_fact_version >= 13 else 17 if predicate_fact_version >= 12 else 16 if predicate_fact_version >= 11 else 15 if predicate_fact_version >= 10 else 14 if predicate_fact_version >= 9 else 12 if predicate_fact_version >= 8 else 11 if predicate_fact_version >= 7 else 9 if predicate_fact_version >= 6 else 6 if predicate_fact_version >= 5 else 4 if predicate_fact_version >= 3 else 3 if predicate_fact_version >= 2 else 2
     if not isinstance(facts, list) or len(facts) > maximum:
         raise TraceError(label + ".predicateFacts must be a bounded array (type %s, count %s)" %
                          (type(facts).__name__, len(facts) if isinstance(facts, list) else "n/a"))
-    supported_ids = ((2, 3, 6, 24, 25, 26, 45, 48, 49, 50, 51, 52, 53, 54, 55, 57, 58, 59, 60, 61, 62, 63, 67) if predicate_fact_version >= 15 else
+    supported_ids = ((1, 2, 3, 6, 24, 25, 26, 45, 48, 49, 50, 51, 52, 53, 54, 55, 57, 58, 59, 60, 61, 62, 63, 67) if predicate_fact_version >= 16 else
+                     (2, 3, 6, 24, 25, 26, 45, 48, 49, 50, 51, 52, 53, 54, 55, 57, 58, 59, 60, 61, 62, 63, 67) if predicate_fact_version >= 15 else
                      (2, 3, 6, 24, 25, 26, 48, 49, 50, 51, 52, 53, 54, 55, 57, 58, 59, 60, 61, 62, 63, 67) if predicate_fact_version >= 14 else
                      (2, 3, 6, 24, 25, 26, 48, 49, 50, 51, 52, 53, 55, 57, 58, 59, 60, 61, 62, 63, 67) if predicate_fact_version >= 13 else
                      (2, 3, 6, 24, 25, 26, 48, 49, 50, 51, 52, 53, 55, 57, 58, 60, 61, 62, 63, 67) if predicate_fact_version >= 12 else
@@ -3368,12 +3701,15 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
     target_sharp_interested = None
     target_sharp_facts = 0
     sunglare_nomination_facts = 0
+    fss_chrome_skip_mismatches = 0
+    fss_chrome_skip_terminal = 0
     for index, fact in enumerate(facts):
         fact_label = "%s.predicateFacts[%d]" % (label, index)
         if not isinstance(fact, dict):
             raise TraceError(fact_label + " must be an object")
         site_id = _integer(fact.get("siteId"), fact_label + ".siteId", 1, 76)
         kind = _integer(fact.get("kind"), fact_label + ".kind", 1,
+                        23 if predicate_fact_version >= 16 else
                         22 if predicate_fact_version >= 15 else
                         21 if predicate_fact_version >= 14 else
                         20 if predicate_fact_version >= 13 else
@@ -3390,7 +3726,9 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
                         3 if predicate_fact_version >= 2 else 2)
         if site_id in by_site:
             raise TraceError(fact_label + " duplicates a supported site fact")
-        supported_pairs = ((2, 15), (3, 1), (6, 4), (24, 5), (25, 19), (26, 6), (45, 22), (48, 17), (49, 2), (50, 3), (51, 14), (53, 7), (54, 21), (55, 8),
+        supported_pairs = ((1, 23), (2, 15), (3, 1), (6, 4), (24, 5), (25, 19), (26, 6), (45, 22), (48, 17), (49, 2), (50, 3), (51, 14), (53, 7), (54, 21), (55, 8),
+                           (57, 12), (58, 13), (59, 20), (60, 18), (61, 9), (62, 10), (63, 11), (67, 16)) if predicate_fact_version >= 16 else (
+            (2, 15), (3, 1), (6, 4), (24, 5), (25, 19), (26, 6), (45, 22), (48, 17), (49, 2), (50, 3), (51, 14), (53, 7), (54, 21), (55, 8),
                            (57, 12), (58, 13), (59, 20), (60, 18), (61, 9), (62, 10), (63, 11), (67, 16)) if predicate_fact_version >= 15 else (
             (2, 15), (3, 1), (6, 4), (24, 5), (25, 19), (26, 6), (48, 17), (49, 2), (50, 3), (51, 14), (53, 7), (54, 21), (55, 8),
                            (57, 12), (58, 13), (59, 20), (60, 18), (61, 9), (62, 10), (63, 11), (67, 16)) if predicate_fact_version >= 14 else (
@@ -3424,7 +3762,16 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
             raise TraceError(fact_label + ".known is invalid")
         if known == "no":
             raise TraceError(fact_label + ".known must be yes or unknown")
-        if kind in (9, 10, 11):
+        if kind == 23:
+            if predicate_fact_version < 16:
+                raise TraceError(fact_label + " has unsupported FSS chrome fact")
+            expected_event, fact_mismatches = _legacy14a_fss_chrome_skip(
+                fact, draw, fact_label)
+            fss_chrome_skip_mismatches += fact_mismatches
+            fss_chrome_skip_terminal += int(expected_event["verdict"] == 2)
+            by_site[site_id] = (expected_event, None, True, 0,
+                                fact_mismatches, None)
+        elif kind in (9, 10, 11):
             required = {"siteId", "kind", "known", "site"}
             if kind == 9:
                 required |= {"selector", "common2ClampBefore", "common2ClampAfter"}
@@ -3784,7 +4131,7 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
                 # observation is unavailable; report that separately below.
                 pass
             expected_event = candidate[0] if candidate is not None else None
-        if kind not in (3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22):
+        if kind not in (3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23):
             by_site[site_id] = (expected_event, expected_delta,
                                 fact.get("censusSkippedDeltaKnown", True),
                                 fact.get("censusSkippedDelta", 0), 0, None)
@@ -4146,7 +4493,11 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
             "sunglareNominationFacts": sunglare_nomination_facts,
             "sunglareNominationReplayed": sunglare_nomination_replayed,
             "sunglareNominationUnreplayable": sunglare_nomination_unreplayable,
-            "sunglareNominationMismatches": sunglare_nomination_mismatches}
+            "sunglareNominationMismatches": sunglare_nomination_mismatches,
+            "fssChromeSkipFacts": int(1 in by_site),
+            "fssChromeSkipReplayed": int(1 in by_site and not fss_chrome_skip_mismatches),
+            "fssChromeSkipMismatches": fss_chrome_skip_mismatches,
+            "fssChromeSkipTerminal": fss_chrome_skip_terminal}
 
 
 def _integer(value, label, low=0, high=0xffffffff):
@@ -4403,6 +4754,14 @@ def _forward_draw_end(draw):
     return [_forward_action(17, 3, 2, draw, 0)]
 
 
+def _fss_chrome_skip_action_plan(draw, issue_blocked_entry=False):
+    """Exact swallowed-original plan when the independently replayed site 1 skips."""
+    if issue_blocked_entry is not False:
+        raise TraceError("site-1 terminal fixture must have issueBlockedEntry false")
+    return (_forward_draw_envelope(draw) +
+            [_forward_action(3, 2, 2, draw, 0)] + _forward_draw_end(draw))
+
+
 def _flat_bypass_action_plan(draw):
     """Replay the flat profile's direct original call from recorded draw facts."""
     kind = draw["kind"]
@@ -4444,7 +4803,7 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
         raise TraceError("unsupported schemaVersion")
     schema_version = data["schemaVersion"]
     if schema_version == SCHEMA_VERSION:
-        if type(data.get("predicateFactVersion")) is not int or data["predicateFactVersion"] not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, PREDICATE_FACT_VERSION):
+        if type(data.get("predicateFactVersion")) is not int or data["predicateFactVersion"] not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, PREDICATE_FACT_VERSION):
             raise TraceError("unsupported predicateFactVersion")
         predicate_fact_version = data["predicateFactVersion"]
         forward_input_version = data.get("forwardInputVersion", 0)
@@ -4556,7 +4915,11 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
                         "sunglareNominationFacts": 0,
                         "sunglareNominationReplayed": 0,
                         "sunglareNominationUnreplayable": 0,
-                        "sunglareNominationMismatches": 0}
+                        "sunglareNominationMismatches": 0,
+                        "fssChromeSkipFacts": 0,
+                        "fssChromeSkipReplayed": 0,
+                        "fssChromeSkipMismatches": 0,
+                        "fssChromeSkipTerminal": 0}
     forward_replay = {"factCount": 0, "replayed": 0, "unavailable": 0,
                       "mismatches": 0, "eligible": 0, "expectedActions": 0,
                       "observedActionMismatches": 0, "forwardFactsMismatches": 0,
@@ -4743,6 +5106,8 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
         actions = draw.get("actions")
         if not isinstance(actions, list) or len(actions) > MAX_ACTION_EVENTS:
             raise TraceError(label + ".actions exceeds the fixed event capacity")
+        if schema_version == SCHEMA_VERSION and replay["fssChromeSkipTerminal"] and actions != _fss_chrome_skip_action_plan(draw):
+            raise TraceError(label + " site-1 Skip action plan differs from swallowed original")
         total_actions += len(actions)
         for action_index, action in enumerate(actions):
             action_label = "%s.actions[%d]" % (label, action_index)
@@ -5008,6 +5373,10 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
                                        "mismatch" if predicate_replay["sunglareNominationMismatches"] else
                                        "unreplayable" if predicate_replay["sunglareNominationUnreplayable"] else
                                        "replayed"),
+             fssChromeSkipStatus=("unavailable-before-v16" if predicate_fact_version < 16 else
+                                  "not-visited" if not predicate_replay["fssChromeSkipFacts"] else
+                                  "mismatch" if predicate_replay["fssChromeSkipMismatches"] else
+                                  "replayed"),
              **predicate_replay)
             if schema_version == SCHEMA_VERSION else
             {"status": "unavailable", "factCount": 0, "replayed": 0,
@@ -5242,6 +5611,15 @@ def format_summary(summary, sidecar_path=None):
                       replay.get("sunglareNominationReplayed", 0),
                       replay.get("sunglareNominationUnreplayable", 0),
                       replay.get("sunglareNominationMismatches", 0)))
+    if replay.get("predicateFactVersion", 0) < 16:
+        lines.append("  FssChromeSkip site 1: unavailable before predicate fact version 16")
+    else:
+        lines.append("  FssChromeSkip site 1: %s (%d fact(s), %d replayed, %d mismatch, %d terminal Skip)" %
+                     (replay.get("fssChromeSkipStatus", "not-visited"),
+                      replay.get("fssChromeSkipFacts", 0),
+                      replay.get("fssChromeSkipReplayed", 0),
+                      replay.get("fssChromeSkipMismatches", 0),
+                      replay.get("fssChromeSkipTerminal", 0)))
     if sidecar_path:
         lines.insert(0, "[edvr] draw-ladder sidecar: %s" % sidecar_path)
     return "\n".join(lines)
@@ -5543,7 +5921,7 @@ def self_test():
                 "rawAvailable": "yes", "texture2D": texture,
                 "a": a, "b": b, "fmt": fmt}
 
-    def eye_fact(depth_w, depth_h, mode="match"):
+    def holo_eye_fact(depth_w, depth_h, mode="match"):
         if mode == "state-absent":
             return {"reached": "yes", "statePresent": "no", "result": "no",
                     "readMask": 0, "depthW": 0, "depthH": 0,
@@ -5586,7 +5964,7 @@ def self_test():
         depth = resource_fact(depth_source, "yes", 2000, 2000, 28) if depth_reached and depth_source == 1 else (
             resource_fact(2) if depth_reached else resource_fact())
         depth_match = depth_reached and depth_source == 1
-        eye = eye_fact(2000, 2000, eye_mode) if depth_match else eye_fact(0, 0, "skip")
+        eye = holo_eye_fact(2000, 2000, eye_mode) if depth_match else holo_eye_fact(0, 0, "skip")
         eye_yes = eye_mode in ("match", "plus-two", "minus-two")
         predicate = bool(depth_match and eye_yes)
         noted_before = "yes" if noted else "no"
@@ -9780,6 +10158,173 @@ def self_test():
     if (unknown_summary["sunglareNominationUnreplayable"] != 1 or
             unknown_summary["sunglareNominationReplayed"]):
         print("Sunglare nomination reached-unknown mode was not reported unavailable")
+        return 1
+
+    chrome_draw_input = {"kind": ord("X"), "count": 6}
+    chrome_positive = _fss_chrome_skip_fact_fixture(chrome_draw_input)
+    chrome_event, chrome_mismatches = _legacy14a_fss_chrome_skip(
+        chrome_positive, chrome_draw_input, "fss-chrome-positive")
+    if chrome_event["verdict"] != 2 or chrome_mismatches:
+        print("FSS chrome positive did not replay the terminal Skip")
+        return 1
+    second_hash_fact = _fss_chrome_skip_fact_fixture(
+        chrome_draw_input, vsHash=0xB018D143700AB803)
+    second_hash_event, _ = _legacy14a_fss_chrome_skip(
+        second_hash_fact, chrome_draw_input, "fss-chrome-second-hash")
+    if second_hash_event["verdict"] != 2:
+        print("FSS chrome second frozen hash was not accepted")
+        return 1
+    for gate_case, changes in (
+            ("census", {"outerHeal": False, "outerCensus": True}),
+            ("temporal", {"outerHeal": False, "outerCensus": False,
+                          "outerTemporal": True})):
+        fact = _fss_chrome_skip_fact_fixture(chrome_draw_input, **changes)
+        event, _ = _legacy14a_fss_chrome_skip(
+            fact, chrome_draw_input, "fss-chrome-outer-" + gate_case)
+        if event["verdict"] != 2:
+            print("FSS chrome outer %s gate did not admit the selector" % gate_case)
+            return 1
+    entered_fault_fact = _fss_chrome_skip_fact_fixture(
+        chrome_draw_input, budgetResult=False)
+    entered_fault_event, _ = _legacy14a_fss_chrome_skip(
+        entered_fault_fact, chrome_draw_input, "fss-chrome-caught-fault-after-match")
+    if (entered_fault_fact["budgetEntered"] != "yes" or
+            entered_fault_fact["budgetResult"] != "no" or
+            entered_fault_event["verdict"] != 2):
+        print("FSS chrome guarded-budget entry was conflated with its caught-fault result")
+        return 1
+    for ordinal in range(32):
+        fact = _fss_chrome_skip_fact_fixture(
+            chrome_draw_input, frameNo=12, priorFrameNo=12,
+            ordinal=ordinal, mask=1 << ordinal)
+        event, _ = _legacy14a_fss_chrome_skip(
+            fact, chrome_draw_input, "fss-chrome-ordinal-%d" % ordinal)
+        if event["verdict"] != 2:
+            print("FSS chrome ordinal %d did not select the corresponding mask bit" % ordinal)
+            return 1
+    chrome_negative_inputs = [
+        ("outer gate", {"outerHeal": False, "outerCensus": False, "outerTemporal": False}, chrome_draw_input),
+        ("kind", {"drawKind": ord("N")}, dict(chrome_draw_input, kind=ord("N"))),
+        ("count", {"drawCount": 5}, dict(chrome_draw_input, count=5)),
+        ("hash A miss", {"vsHash": 0}, chrome_draw_input),
+        ("hash B miss", {"vsHash": 0x1111111111111111}, chrome_draw_input),
+        ("budget declined before lambda", {"budgetEntered": False,
+                                             "budgetResult": False}, chrome_draw_input),
+        ("null SRV", {"srvNonNull": False}, chrome_draw_input),
+        ("missing resource", {"resourceNonNull": False}, chrome_draw_input),
+        ("failed QI", {"texture2D": False}, chrome_draw_input),
+        ("width 1999", {"width": 1999}, chrome_draw_input),
+        ("height 999", {"height": 999}, chrome_draw_input),
+        ("equal dimensions", {"width": 2000, "height": 2000}, chrome_draw_input),
+        ("heal off", {"healForSkip": False}, chrome_draw_input),
+        ("latch off", {"latchOn": False}, chrome_draw_input),
+        ("ordinal 32", {"frameNo": 12, "priorFrameNo": 12,
+                         "ordinal": 32, "mask": 0xffffffff}, chrome_draw_input),
+        ("mask clear", {"mask": 0}, chrome_draw_input),
+    ]
+    for case_name, changes, case_draw in chrome_negative_inputs:
+        fact = _fss_chrome_skip_fact_fixture(case_draw, **changes)
+        event, _ = _legacy14a_fss_chrome_skip(
+            fact, case_draw, "fss-chrome-" + case_name)
+        if event["verdict"] != -1:
+            print("FSS chrome negative control matched unexpectedly: %s" % case_name)
+            return 1
+    for width, height, expected in ((2000, 1000, 2), (1999, 1000, -1),
+                                    (2000, 999, -1), (2000, 2000, -1)):
+        fact = _fss_chrome_skip_fact_fixture(
+            chrome_draw_input, width=width, height=height)
+        event, _ = _legacy14a_fss_chrome_skip(
+            fact, chrome_draw_input, "fss-chrome-size-%dx%d" % (width, height))
+        if event["verdict"] != expected:
+            print("FSS chrome dimension boundary failed: %dx%d" % (width, height))
+            return 1
+
+    chrome_terminal_trace = _fixture()
+    chrome_terminal_trace["predicateFactVersion"] = 16
+    chrome_terminal_draw = chrome_terminal_trace["draws"][0]
+    chrome_terminal_draw.update(route=6, sequence=4, count=6, instances=1,
+                                winnerSiteId=1, verdict=2,
+                                sites=[chrome_event], predicateFacts=[chrome_positive])
+    chrome_terminal_draw["args"] = {"start": 19, "base": -7, "startInstance": 3}
+    issue_blocked_entry = False
+    chrome_terminal_draw["actions"] = _fss_chrome_skip_action_plan(
+        chrome_terminal_draw, issue_blocked_entry)
+    try:
+        _fss_chrome_skip_action_plan(chrome_terminal_draw, True)
+    except TraceError:
+        pass
+    else:
+        print("FSS chrome terminal action plan accepted issueBlockedEntry true")
+        return 1
+    try:
+        chrome_terminal_summary = validate_trace(chrome_terminal_trace)
+    except TraceError as exc:
+        print("FSS chrome terminal/action roundtrip failed: %s" % exc)
+        return 1
+    chrome_replay_summary = chrome_terminal_summary["predicateReplay"]
+    if (chrome_replay_summary["fssChromeSkipStatus"] != "replayed" or
+            chrome_replay_summary["fssChromeSkipTerminal"] != 1 or
+            chrome_terminal_draw["actions"][1]["id"] != 3 or
+            chrome_terminal_draw["actions"][1]["phase"] != 2 or
+            chrome_terminal_draw["actions"][1]["outcome"] != 2 or
+            chrome_terminal_draw["actions"][1]["issueCount"] != 0 or
+            chrome_terminal_draw["actions"][1]["call"] != 4 or
+            chrome_terminal_draw["actions"][1]["count"] != 6 or
+            chrome_terminal_draw["actions"][1]["instances"] != 1 or
+            chrome_terminal_draw["actions"][1]["start"] != 19 or
+            chrome_terminal_draw["actions"][1]["baseVertex"] != -7 or
+            chrome_terminal_draw["actions"][1]["startInstance"] != 3):
+        print("FSS chrome terminal/action plan did not match applied swallowed original")
+        return 1
+
+    base_capacity_ids = (1, 3, 6, 49, 50, 53, 55)
+    if len(set(base_capacity_ids)) != 7 or PREDICATE_FACT_VERSION != 16:
+        print("FSS chrome owner-context decline does not pin the reviewed seven-fact base set")
+        return 1
+
+    for field, changes in (
+            ("hash", {"vsHash": 0x1111111111111111}),
+            ("threshold", {"width": 1999}),
+            ("ordinal", {"frameNo": 12, "priorFrameNo": 12,
+                         "ordinal": 1, "mask": 1}),
+            ("mask", {"mask": 0})):
+        mutant = _fss_chrome_skip_fact_fixture(chrome_draw_input, **changes)
+        mutant_trace = json.loads(json.dumps(chrome_terminal_trace))
+        mutant_trace["draws"][0]["predicateFacts"][0] = mutant
+        mutant_summary = validate_trace(mutant_trace)["predicateReplay"]
+        if not mutant_summary["mismatches"]:
+            print("FSS chrome %s mutation did not mismatch the captured terminal result" % field)
+            return 1
+    gate_order = json.loads(json.dumps(chrome_positive))
+    gate_order["outerCensus"] = "yes"
+    try:
+        _legacy14a_fss_chrome_skip(gate_order, chrome_draw_input,
+                                   "fss-chrome-gate-order")
+    except TraceError:
+        pass
+    else:
+        print("FSS chrome gate-order mutation did not fail reachability validation")
+        return 1
+    terminal_mutation = json.loads(json.dumps(chrome_terminal_trace))
+    terminal_mutation["draws"][0]["actions"][1]["id"] = 2
+    try:
+        validate_trace(terminal_mutation)
+    except TraceError:
+        pass
+    else:
+        print("FSS chrome swallowed-action mutation was not detected")
+        return 1
+
+    old_v15_site1 = json.loads(json.dumps(chrome_positive))
+    try:
+        _replay_predicate_facts(dict(chrome_draw_input,
+                                     sites=[chrome_event],
+                                     predicateFacts=[old_v15_site1]),
+                                "fss-chrome-old-v15", 15)
+    except TraceError:
+        pass
+    else:
+        print("predicate-fact version 15 accepted the new site-1 pair")
         return 1
     print("draw-ladder-replay self-test: ok")
     return 0

@@ -81,6 +81,10 @@ struct ModelVisitor final {
     }
 
     ladder::SiteResult handle(ladder::SiteId id, ladder::SiteKind kind) {
+        if (id == ladder::SiteId::kFssChromeSkip && id == scenario.exitAt) {
+            return ladder::SiteResult::exited(
+                static_cast<std::int16_t>(ladder::VerdictOrdinal::kSkip));
+        }
         if (id == ladder::SiteId::kRouteSelected) {
             return ladder::SiteResult::observed(static_cast<std::uint16_t>(scenario.route));
         }
@@ -1350,7 +1354,8 @@ template <ladder::ActionId Id, class TracePolicy>
 void appendTestIssue(TracePolicy& policy, ladder::DrawCallKind call,
                      std::uint16_t flags = 0, std::uint32_t instances = 1,
                      ladder::ActionOutcome outcome = ladder::ActionOutcome::Applied,
-                     std::uint16_t issueCount = 1) {
+                     std::uint16_t issueCount = 1,
+                     std::uint32_t drawCount = 240) {
     ladder::recordAction<TracePolicy, Id>(policy, [=] {
         ladder::ActionRecord action;
         action.phase = ladder::ActionPhase::Issue;
@@ -1360,7 +1365,7 @@ void appendTestIssue(TracePolicy& policy, ladder::DrawCallKind call,
         action.issueCount = issueCount;
         const bool generatedArgsUnknown =
             (flags & ladder::kActionGeneratedDrawArgsUnavailable) != 0;
-        action.count = outcome == ladder::ActionOutcome::Applied && !generatedArgsUnknown ? 240 : 0;
+        action.count = outcome == ladder::ActionOutcome::Applied && !generatedArgsUnknown ? drawCount : 0;
         action.instances = outcome == ladder::ActionOutcome::Applied && !generatedArgsUnknown ? instances : 0;
         if (!generatedArgsUnknown) switch (call) {
         case ladder::DrawCallKind::Draw:
@@ -1572,7 +1577,10 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
     const auto terminalKind = frozenKind(terminal);
     if (terminal == ladder::SiteId::kForeignContextNone) scenario.foreignOwner = true;
     else if (terminal == ladder::SiteId::kDrawGateDisabledNone) scenario.drawGateOff = true;
-    else if (terminal == ladder::SiteId::kEyeRangeSkip ||
+    else if (terminal == ladder::SiteId::kFssChromeSkip) {
+        scenario.claimAt = terminal;  // Frozen Claim-site traversal stops here.
+        scenario.exitAt = terminal;   // The FSS handler returns Exited/Skip.
+    } else if (terminal == ladder::SiteId::kEyeRangeSkip ||
              terminal == ladder::SiteId::kWitchspaceStarsSkip ||
              terminal == ladder::SiteId::kOffscreenCensusSkip ||
              terminal == ladder::SiteId::kEyeCensusSkip) scenario.exitAt = terminal;
@@ -1604,6 +1612,10 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
         facts.instances = (std::max)(instances, 2u);
     }
     if (terminal == ladder::SiteId::kFssPanelClaim) {
+        facts.kind = static_cast<std::uint8_t>('X');
+        facts.count = 6;
+        facts.instances = 1;
+    } else if (terminal == ladder::SiteId::kFssChromeSkip) {
         facts.kind = static_cast<std::uint8_t>('X');
         facts.count = 6;
         facts.instances = 1;
@@ -1731,7 +1743,75 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
             }
             policy.sunglareNominationFact(observed);
         }
-        if (visited == ladder::SiteId::kDrawGateDisabledNone) {
+        if (visited == ladder::SiteId::kFssChromeSkip) {
+            trace::PredicateFact fact{};
+            fact.siteId = static_cast<std::uint16_t>(visited);
+            fact.kind = trace::PredicateFactKind::FssChromeSkip;
+            fact.known = trace::TriState::Yes;
+            auto& f = fact.fssChrome;
+            if (terminal != ladder::SiteId::kFssChromeSkip) {
+                f.outerHeal = trace::TriState::No;
+                f.outerCensus = trace::TriState::No;
+                f.outerTemporal = trace::TriState::No;
+                f.kindReached = trace::TriState::No;
+                f.budgetEntered = trace::TriState::No;
+                f.budgetResult = trace::TriState::Unknown;
+                f.hashReached = trace::TriState::No;
+                f.srvReached = trace::TriState::No;
+                f.resourceReached = trace::TriState::No;
+                f.queryReached = trace::TriState::No;
+                f.dimensionsReached = trace::TriState::No;
+                f.chromeMatched = trace::TriState::No;
+                f.latchReached = trace::TriState::No;
+                f.frameReached = trace::TriState::No;
+                f.helperReached = trace::TriState::No;
+                f.maskReached = trace::TriState::No;
+                f.terminalSkip = trace::TriState::No;
+                policy.predicateFact(fact);
+            } else {
+                f.outerHeal = trace::TriState::Yes;
+                f.kindReached = trace::TriState::Yes;
+                f.drawKind = facts.kind;
+                f.kindMatched = trace::TriState::Yes;
+                f.countReached = trace::TriState::Yes;
+                f.drawCount = facts.count;
+                f.countMatched = trace::TriState::Yes;
+                f.budgetEntered = trace::TriState::Yes;
+                f.budgetResult = trace::TriState::Yes;
+                f.hashReached = trace::TriState::Yes;
+                f.vsHash = 0xA888D51024D9798Eull;
+                f.hashMatched = trace::TriState::Yes;
+                f.srvReached = trace::TriState::Yes;
+                f.srvNonNull = trace::TriState::Yes;
+                f.resourceReached = trace::TriState::Yes;
+                f.resourceNonNull = trace::TriState::Yes;
+                f.queryReached = trace::TriState::Yes;
+                f.texture2D = trace::TriState::Yes;
+                f.dimensionsReached = trace::TriState::Yes;
+                f.width = 2000;
+                f.height = 1000;
+                f.chromeMatched = trace::TriState::Yes;
+                f.healForSkip = trace::TriState::Yes;
+                f.latchReached = trace::TriState::Yes;
+                f.latchOn = trace::TriState::Yes;
+                f.frameReached = trace::TriState::Yes;
+                f.frameNo = frameNo;
+                f.priorFrameNo = frameNo - 1;
+                f.ordinalCountBefore = 0;
+                f.frameChanged = trace::TriState::Yes;
+                f.ordinal = 0;
+                f.ordinalCountAfter = 1;
+                f.helperReached = trace::TriState::Yes;
+                f.startInstance = facts.args.startInstance;
+                f.baseVertex = facts.args.base;
+                f.maskReached = trace::TriState::Yes;
+                f.skipMask = 1;
+                f.ordinalInRange = trace::TriState::Yes;
+                f.maskBit = trace::TriState::Yes;
+                f.terminalSkip = trace::TriState::Yes;
+                policy.predicateFact(fact);
+            }
+        } else if (visited == ladder::SiteId::kDrawGateDisabledNone) {
             trace::PredicateFact fact{};
             fact.siteId = static_cast<std::uint16_t>(visited);
             fact.kind = trace::PredicateFactKind::DrawGateWanted;
@@ -2057,8 +2137,14 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
         }
         policy.forwardInputs(fact);
         if (skip) {
-            appendTestIssue<ladder::ActionId::kSwallowOriginal>(policy,
-                directCallKind(kind), 0, instances, ladder::ActionOutcome::Applied, 0);
+            if (terminal == ladder::SiteId::kFssChromeSkip) {
+                appendTestIssue<ladder::ActionId::kSwallowOriginal>(policy,
+                    directCallKind(kind), 0, instances, ladder::ActionOutcome::Applied,
+                    0, facts.count);
+            } else {
+                appendTestIssue<ladder::ActionId::kSwallowOriginal>(policy,
+                    directCallKind(kind), 0, instances, ladder::ActionOutcome::Applied, 0);
+            }
         } else {
             ladder::recordAction<trace::TracePolicy, ladder::ActionId::kOriginalDraw>(policy, [&] {
                 ladder::ActionRecord action;
@@ -2236,7 +2322,35 @@ bool traceWriterChecks(const char* rootArg) {
             nomination.callbackInvoked = {true, true, false};
             vrPolicy.sunglareNominationFact(nomination);
         }
-        if (visited == ladder::SiteId::kDrawGateDisabledNone) {
+        if (visited == ladder::SiteId::kFssChromeSkip) {
+            // Heal admits this X draw, but its 239 indices miss the six-index
+            // chrome shape. No budget, D3D lookup, or skip helper is reached.
+            trace::PredicateFact fact{};
+            fact.siteId = static_cast<std::uint16_t>(visited);
+            fact.kind = trace::PredicateFactKind::FssChromeSkip;
+            fact.known = trace::TriState::Yes;
+            auto& chrome = fact.fssChrome;
+            chrome.outerHeal = trace::TriState::Yes;
+            chrome.kindReached = trace::TriState::Yes;
+            chrome.drawKind = vrDraw.kind;
+            chrome.kindMatched = trace::TriState::Yes;
+            chrome.countReached = trace::TriState::Yes;
+            chrome.drawCount = vrDraw.count;
+            chrome.countMatched = trace::TriState::No;
+            chrome.budgetEntered = trace::TriState::No;
+            chrome.hashReached = trace::TriState::No;
+            chrome.srvReached = trace::TriState::No;
+            chrome.resourceReached = trace::TriState::No;
+            chrome.queryReached = trace::TriState::No;
+            chrome.dimensionsReached = trace::TriState::No;
+            chrome.chromeMatched = trace::TriState::No;
+            chrome.latchReached = trace::TriState::No;
+            chrome.frameReached = trace::TriState::No;
+            chrome.helperReached = trace::TriState::No;
+            chrome.maskReached = trace::TriState::No;
+            chrome.terminalSkip = trace::TriState::No;
+            vrPolicy.predicateFact(fact);
+        } else if (visited == ladder::SiteId::kDrawGateDisabledNone) {
             trace::PredicateFact fact{};
             fact.siteId = static_cast<std::uint16_t>(visited);
             fact.kind = trace::PredicateFactKind::DrawGateWanted;
@@ -2338,6 +2452,8 @@ bool traceWriterChecks(const char* rootArg) {
     trace::finishDraw(vrToken,
         static_cast<std::int16_t>(ladder::SiteId::kEyeNoDistanceNone),
         static_cast<std::int16_t>(ladder::VerdictOrdinal::kNone));
+    ok &= check(!trace::overflowed(),
+                "complete VR None frame satisfies writer fact requirements");
     trace::frameEnd(14);
     ok &= check(fileExists(validDir +
                 "\\edvr_gfx_trace_fixture.draw-ladder-14.json"),
@@ -2356,11 +2472,16 @@ bool traceWriterChecks(const char* rootArg) {
     const auto addCommon = [&](ladder::SiteId terminal, bool foreign, bool gate) {
         const auto route = foreign ? ladder::RouteId::kForeignOwner
             : gate ? ladder::RouteId::kDrawGateOff : ladder::RouteId::kCommon;
+        const bool fssChromeTerminal = terminal == ladder::SiteId::kFssChromeSkip;
         matrixOk &= writeTerminalCase(route,
             ladder::SequenceId::kCommon,
-            terminal == ladder::SiteId::kWitchspaceStarsSkip ? 'X' : 'D',
+            (terminal == ladder::SiteId::kWitchspaceStarsSkip || fssChromeTerminal) ? 'X' : 'D',
             terminal, false,
-            kFrozenCommon, 8, ladder::CommonSequence{});
+            kFrozenCommon, 8, ladder::CommonSequence{}, 1, false, false,
+            edvr::SunglareTraceMode::kStock, false, false, 0, 15,
+            false, false, 0, 0, 0, 0, 0, fssChromeTerminal ? 3u : 0u,
+            false, 0, 0,
+            fssChromeTerminal ? 6u : 0u);
     };
     addCommon(ladder::SiteId::kForeignContextNone, true, false);
     addCommon(ladder::SiteId::kDrawGateDisabledNone, false, true);
@@ -2486,7 +2607,10 @@ bool traceWriterChecks(const char* rootArg) {
     ok &= check(matrixOk && trace::status() == trace::Status::CompleteWritten &&
                 fileExists(matrixDir +
                     "\\edvr_gfx_terminal_matrix.draw-ladder-15.json") &&
-                matrixJson.find("\"predicateFactVersion\":15") != std::string::npos &&
+                matrixJson.find("\"predicateFactVersion\":16") != std::string::npos &&
+                matrixJson.find("\"siteId\":1,\"kind\":23,\"known\":\"yes\"") != std::string::npos &&
+                matrixJson.find("\"issueBlockedEntry\":{\"reached\":true,\"known\":true,\"value\":false}") != std::string::npos &&
+                matrixJson.find("\"id\":3,\"phase\":2,\"outcome\":2,\"call\":4") != std::string::npos &&
                 matrixJson.find("\"siteId\":45,\"kind\":22,\"known\":\"yes\",\"inputs\":") != std::string::npos &&
                 matrixJson.find("\"forwardInputVersion\":1") != std::string::npos &&
                 matrixJson.find("\"siteId\":54,\"kind\":21,\"known\":\"yes\",\"handlerInvoked\":true") != std::string::npos &&
@@ -2496,7 +2620,7 @@ bool traceWriterChecks(const char* rootArg) {
                 matrixJson.find("\"siteId\":58,\"kind\":13") != std::string::npos &&
                 matrixJson.find("\"assignedHash\":{\"reached\":true,\"known\":true,\"value\":12144190660518967694}") != std::string::npos &&
                 matrixJson.find("\"assignedHash\":{\"reached\":true,\"known\":true,\"value\":10753612000489488699}") != std::string::npos,
-                "real writer records positive FSS panel and reveal source facts in canonical v10 predicateFacts");
+                "writer records FSS chrome terminal actions and FSS facts in canonical v16 predicateFacts");
 
     const auto writeTargetSharpFixture = [&](const char* leaf, std::uint32_t frameNo,
         ladder::SiteId terminal, unsigned observationCase) {
@@ -2811,6 +2935,211 @@ bool traceWriterChecks(const char* rootArg) {
                 trace::overflowed() && trace::status() == trace::Status::InvalidCapture,
                 "duplicate predicate fact invalidates the capture");
 
+    const std::string predicateCapacityDir = root + "\\predicatecapacity";
+    const bool predicateCapacityStarted = beginCapture(predicateCapacityDir,
+        "edvr_gfx_predicate_capacity.log", 31);
+    trace::DrawFacts predicateCapacityDraw = draw;
+    predicateCapacityDraw.route = ladder::RouteId::kCommon;
+    predicateCapacityDraw.sequence = ladder::SequenceId::kCommon;
+    predicateCapacityDraw.count = 6;
+    const trace::Token predicateCapacityToken = trace::beginDraw(predicateCapacityDraw);
+    const auto appendCapacityFact = [&](trace::PredicateFact fact) {
+        trace::appendPredicateFact(predicateCapacityToken, fact);
+    };
+    trace::PredicateFact fssChromeCapacity{};
+    fssChromeCapacity.siteId = static_cast<std::uint16_t>(ladder::SiteId::kFssChromeSkip);
+    fssChromeCapacity.kind = trace::PredicateFactKind::FssChromeSkip;
+    fssChromeCapacity.known = trace::TriState::Yes;
+    fssChromeCapacity.fssChrome.outerHeal = trace::TriState::No;
+    fssChromeCapacity.fssChrome.outerCensus = trace::TriState::No;
+    fssChromeCapacity.fssChrome.outerTemporal = trace::TriState::No;
+    fssChromeCapacity.fssChrome.kindReached = trace::TriState::No;
+    fssChromeCapacity.fssChrome.budgetEntered = trace::TriState::No;
+    fssChromeCapacity.fssChrome.budgetResult = trace::TriState::Unknown;
+    fssChromeCapacity.fssChrome.hashReached = trace::TriState::No;
+    fssChromeCapacity.fssChrome.srvReached = trace::TriState::No;
+    fssChromeCapacity.fssChrome.resourceReached = trace::TriState::No;
+    fssChromeCapacity.fssChrome.queryReached = trace::TriState::No;
+    fssChromeCapacity.fssChrome.dimensionsReached = trace::TriState::No;
+    fssChromeCapacity.fssChrome.chromeMatched = trace::TriState::No;
+    fssChromeCapacity.fssChrome.latchReached = trace::TriState::No;
+    fssChromeCapacity.fssChrome.frameReached = trace::TriState::No;
+    fssChromeCapacity.fssChrome.helperReached = trace::TriState::No;
+    fssChromeCapacity.fssChrome.maskReached = trace::TriState::No;
+    fssChromeCapacity.fssChrome.terminalSkip = trace::TriState::No;
+    appendCapacityFact(fssChromeCapacity);
+
+    trace::PredicateFact drawGateCapacity{};
+    drawGateCapacity.siteId = static_cast<std::uint16_t>(ladder::SiteId::kDrawGateDisabledNone);
+    drawGateCapacity.kind = trace::PredicateFactKind::DrawGateWanted;
+    drawGateCapacity.known = trace::TriState::Yes;
+    drawGateCapacity.gateWanted = trace::TriState::Yes;
+    appendCapacityFact(drawGateCapacity);
+
+    trace::PredicateFact starsCapacity{};
+    starsCapacity.siteId = static_cast<std::uint16_t>(ladder::SiteId::kWitchspaceStarsSkip);
+    starsCapacity.kind = trace::PredicateFactKind::WitchspaceStarsSkip;
+    starsCapacity.known = trace::TriState::Yes;
+    starsCapacity.interestMaskKnown = trace::TriState::Yes;
+    starsCapacity.legacyInterestMask = 1ull << 1;
+    starsCapacity.starsHelperReached = trace::TriState::Yes;
+    starsCapacity.hiddenKnown = trace::TriState::Yes;
+    starsCapacity.hidden = trace::TriState::No;
+    starsCapacity.starsSkippedDeltaKnown = true;
+    starsCapacity.detailsFinalized = true;
+    appendCapacityFact(starsCapacity);
+
+    trace::PredicateFact eyeCapacity{};
+    eyeCapacity.siteId = static_cast<std::uint16_t>(ladder::SiteId::kEyeRangeSkip);
+    eyeCapacity.kind = trace::PredicateFactKind::EyeRangeSkip;
+    eyeCapacity.known = trace::TriState::Yes;
+    eyeCapacity.censusSkippedDeltaKnown = true;
+    appendCapacityFact(eyeCapacity);
+
+    trace::PredicateFact nightVisionCapacity{};
+    nightVisionCapacity.siteId = static_cast<std::uint16_t>(ladder::SiteId::kNightVisionClaim);
+    nightVisionCapacity.kind = trace::PredicateFactKind::NightVisionClaim;
+    nightVisionCapacity.known = trace::TriState::Yes;
+    nightVisionCapacity.dispatchEnabled = trace::TriState::No;
+    nightVisionCapacity.shapeReached = trace::TriState::No;
+    nightVisionCapacity.callbackReached = trace::TriState::No;
+    appendCapacityFact(nightVisionCapacity);
+
+    appendCapacityFact(makeHoloPredicateFact(ladder::SiteId::kHoloClaim,
+                                              predicateCapacityDraw, true));
+    appendCapacityFact(makeScrimPredicateFact(ladder::SiteId::kScrimClaim,
+                                               predicateCapacityDraw));
+    const bool sevenBaseFactsFit = !trace::overflowed();
+    trace::appendBasicFact(predicateCapacityToken, contextFact());
+    const bool separateBasicPoolFits = !trace::overflowed();
+    trace::PredicateFact eighthCapacityFact{};
+    eighthCapacityFact.siteId = static_cast<std::uint16_t>(ladder::SiteId::kOffscreenCensusSkip);
+    eighthCapacityFact.kind = trace::PredicateFactKind::OffscreenCensusSkip;
+    eighthCapacityFact.known = trace::TriState::Yes;
+    eighthCapacityFact.detailsFinalized = true;
+    eighthCapacityFact.censusSkippedDeltaKnown = true;
+    eighthCapacityFact.offscreenProbeReached = trace::TriState::No;
+    appendCapacityFact(eighthCapacityFact);
+    const bool eighthBaseFactRejected = trace::overflowed();
+    trace::frameEnd(31);
+    ok &= check(predicateCapacityStarted && predicateCapacityToken.valid() &&
+                sevenBaseFactsFit && separateBasicPoolFits && eighthBaseFactRejected &&
+                trace::status() == trace::Status::InvalidCapture,
+                "seven base facts plus separate site-2 fact fit; eighth base append invalidates capture");
+
+    const auto makeFssDeclineFact = [] {
+        trace::PredicateFact fact{};
+        fact.siteId = static_cast<std::uint16_t>(ladder::SiteId::kFssChromeSkip);
+        fact.kind = trace::PredicateFactKind::FssChromeSkip;
+        fact.known = trace::TriState::Yes;
+        auto& f = fact.fssChrome;
+        f.outerHeal = trace::TriState::No;
+        f.outerCensus = trace::TriState::No;
+        f.outerTemporal = trace::TriState::No;
+        f.kindReached = trace::TriState::No;
+        f.budgetEntered = trace::TriState::No;
+        f.budgetResult = trace::TriState::Unknown;
+        f.hashReached = trace::TriState::No;
+        f.srvReached = trace::TriState::No;
+        f.resourceReached = trace::TriState::No;
+        f.queryReached = trace::TriState::No;
+        f.dimensionsReached = trace::TriState::No;
+        f.chromeMatched = trace::TriState::No;
+        f.latchReached = trace::TriState::No;
+        f.frameReached = trace::TriState::No;
+        f.helperReached = trace::TriState::No;
+        f.maskReached = trace::TriState::No;
+        f.terminalSkip = trace::TriState::No;
+        return fact;
+    };
+    const auto setFssShapeAndBudget = [](trace::PredicateFact& fact,
+                                          trace::TriState budgetEntered,
+                                          trace::TriState budgetResult) {
+        auto& f = fact.fssChrome;
+        f.outerHeal = trace::TriState::Yes;
+        f.outerCensus = trace::TriState::Unknown;
+        f.outerTemporal = trace::TriState::Unknown;
+        f.kindReached = trace::TriState::Yes;
+        f.drawKind = 'X';
+        f.kindMatched = trace::TriState::Yes;
+        f.countReached = trace::TriState::Yes;
+        f.drawCount = 6;
+        f.countMatched = trace::TriState::Yes;
+        f.budgetEntered = budgetEntered;
+        f.budgetResult = budgetResult;
+    };
+    const auto setFssChromeMatched = [&](trace::PredicateFact& fact) {
+        auto& f = fact.fssChrome;
+        setFssShapeAndBudget(fact, trace::TriState::Yes, trace::TriState::Yes);
+        f.hashReached = trace::TriState::Yes;
+        f.vsHash = 0xA888D51024D9798Eull;
+        f.hashMatched = trace::TriState::Yes;
+        f.srvReached = trace::TriState::Yes;
+        f.srvNonNull = trace::TriState::Yes;
+        f.resourceReached = trace::TriState::Yes;
+        f.resourceNonNull = trace::TriState::Yes;
+        f.queryReached = trace::TriState::Yes;
+        f.texture2D = trace::TriState::Yes;
+        f.dimensionsReached = trace::TriState::Yes;
+        f.width = 2000;
+        f.height = 1000;
+        f.chromeMatched = trace::TriState::Yes;
+    };
+    const auto writeFssDeclineCase = [&](const char* name, std::uint32_t frameNo,
+                                          trace::PredicateFact fact, bool expectValid) {
+        const std::string directory = root + "\\fss_writer_" + name;
+        const std::string logLeaf = std::string("edvr_gfx_fss_") + name + ".log";
+        const bool started = beginCapture(directory, logLeaf.c_str(), frameNo);
+        trace::DrawFacts facts = draw;
+        facts.route = ladder::RouteId::kCommon;
+        facts.sequence = ladder::SequenceId::kCommon;
+        facts.kind = 'X';
+        facts.count = 6;
+        const trace::Token token = trace::beginDraw(facts);
+        trace::appendPredicateFact(token, fact);
+        const bool rejected = trace::overflowed();
+        trace::appendSite(token,
+            static_cast<std::uint16_t>(ladder::SiteId::kFssChromeSkip),
+            static_cast<std::uint8_t>(ladder::SiteKind::Claim),
+            static_cast<std::uint8_t>(ladder::SiteOutcome::Declined),
+            static_cast<std::uint8_t>(ladder::Flow::Continue), 0, -1);
+        trace::finishDraw(token, -1,
+            static_cast<std::int16_t>(ladder::VerdictOrdinal::kNone));
+        trace::frameEnd(frameNo);
+        const bool validWritten = started && token.valid() && !rejected &&
+            trace::status() == trace::Status::CompleteWritten;
+        const bool invalidRejected = started && token.valid() && rejected &&
+            trace::status() == trace::Status::InvalidCapture;
+        return expectValid ? validWritten : invalidRejected;
+    };
+
+    trace::PredicateFact outerGateDecline = makeFssDeclineFact();
+    trace::PredicateFact budgetDecline = makeFssDeclineFact();
+    setFssShapeAndBudget(budgetDecline, trace::TriState::No, trace::TriState::No);
+    budgetDecline.fssChrome.hashReached = trace::TriState::No;
+    trace::PredicateFact hashDecline = makeFssDeclineFact();
+    setFssShapeAndBudget(hashDecline, trace::TriState::Yes, trace::TriState::Yes);
+    hashDecline.fssChrome.hashReached = trace::TriState::Yes;
+    hashDecline.fssChrome.vsHash = 0;
+    hashDecline.fssChrome.hashMatched = trace::TriState::No;
+    trace::PredicateFact healDecline = makeFssDeclineFact();
+    setFssChromeMatched(healDecline);
+    healDecline.fssChrome.healForSkip = trace::TriState::No;
+    trace::PredicateFact latchDecline = makeFssDeclineFact();
+    setFssChromeMatched(latchDecline);
+    latchDecline.fssChrome.healForSkip = trace::TriState::Yes;
+    latchDecline.fssChrome.latchReached = trace::TriState::Yes;
+    latchDecline.fssChrome.latchOn = trace::TriState::No;
+    trace::PredicateFact malformedDecline = outerGateDecline;
+    malformedDecline.fssChrome.skipMask = 1;
+    ok &= check(writeFssDeclineCase("outer_gate", 32, outerGateDecline, true) &&
+                writeFssDeclineCase("budget", 33, budgetDecline, true) &&
+                writeFssDeclineCase("hash", 34, hashDecline, true) &&
+                writeFssDeclineCase("heal", 35, healDecline, true) &&
+                writeFssDeclineCase("latch", 36, latchDecline, true) &&
+                writeFssDeclineCase("malformed", 37, malformedDecline, false),
+                "writer accepts observed FSS declines and rejects unused helper payload");
+
     const std::string invalidDeltaDir = root + "\\invalidcounterdelta";
     const bool invalidDeltaStarted = beginCapture(invalidDeltaDir,
         "edvr_gfx_invalid_counter_delta.log", 30);
@@ -2851,6 +3180,24 @@ bool traceWriterChecks(const char* rootArg) {
     ok &= check(missingPredicateStarted && missingPredicateToken.valid() &&
                 trace::overflowed() && trace::status() == trace::Status::InvalidCapture,
                 "missing visited predicate fact invalidates the capture");
+
+    const std::string missingFssChromeDir = root + "\\missingfsschromefact";
+    const bool missingFssChromeStarted = beginCapture(missingFssChromeDir,
+        "edvr_gfx_missing_fss_chrome_fact.log", 38);
+    trace::DrawFacts missingFssChromeDraw = draw;
+    missingFssChromeDraw.route = ladder::RouteId::kCommon;
+    missingFssChromeDraw.sequence = ladder::SequenceId::kCommon;
+    const trace::Token missingFssChromeToken = trace::beginDraw(missingFssChromeDraw);
+    trace::appendSite(missingFssChromeToken,
+        static_cast<std::uint16_t>(ladder::SiteId::kFssChromeSkip),
+        static_cast<std::uint8_t>(ladder::SiteKind::Claim),
+        static_cast<std::uint8_t>(ladder::SiteOutcome::Declined),
+        static_cast<std::uint8_t>(ladder::Flow::Continue), 0, -1);
+    trace::finishDraw(missingFssChromeToken, -1, -1);
+    trace::frameEnd(38);
+    ok &= check(missingFssChromeStarted && missingFssChromeToken.valid() &&
+                trace::overflowed() && trace::status() == trace::Status::InvalidCapture,
+                "visited site-1 event without FSS chrome fact invalidates the capture");
 
     const std::string missingNightVisionDir = root + "\\missingnightvisionfact";
     const bool missingNightVisionStarted = beginCapture(missingNightVisionDir,
@@ -3052,7 +3399,7 @@ bool traceWriterChecks(const char* rootArg) {
     trace::appendPredicateFact(factCapToken,
         makeScrimPredicateFact(ladder::SiteId::kScrimClaim, factCapDraw));
     appendCapSite(static_cast<std::uint16_t>(ladder::SiteId::kScrimClaim));
-    const bool sixFactsFit = !trace::overflowed();
+    const bool firstSixFactsFit = !trace::overflowed();
 
     trace::PredicateFact capSeventh{};
     capSeventh.siteId = static_cast<std::uint16_t>(ladder::SiteId::kOffscreenQuadSkip);
@@ -3064,12 +3411,15 @@ bool traceWriterChecks(const char* rootArg) {
     capSeventh.detailsFinalized = true;
     trace::appendPredicateFact(factCapToken, capSeventh);
     appendCapSite(capSeventh.siteId);
+    const bool sevenFactsFit = !trace::overflowed();
+    trace::appendPredicateFact(factCapToken, capSeventh);
     trace::finishDraw(factCapToken,
         static_cast<std::int16_t>(ladder::SiteId::kOffscreenQuadSkip), -1);
     trace::frameEnd(47);
-    ok &= check(factCapStarted && factCapToken.valid() && sixFactsFit &&
+    ok &= check(factCapStarted && factCapToken.valid() && firstSixFactsFit &&
+                sevenFactsFit &&
                 trace::overflowed() && trace::status() == trace::Status::InvalidCapture,
-                "six predicate facts fit and the seventh invalidates capture");
+                "seven predicate facts fit and the eighth invalidates capture");
 
     const std::string unfinishedOffscreenDir = root + "\\unfinishedoffscreenfact";
     const bool unfinishedOffscreenStarted = beginCapture(unfinishedOffscreenDir,
@@ -3236,7 +3586,7 @@ bool traceWriterChecks(const char* rootArg) {
     ok &= check(sunglareStarted && sunglareSequenceWritten &&
                 trace::invalidationReason() == trace::CaptureInvalidation::None &&
                 fileExists(sunglarePath) &&
-                sunglareJson.find("\"predicateFactVersion\":15") != std::string::npos &&
+                sunglareJson.find("\"predicateFactVersion\":16") != std::string::npos &&
                 sunglareJson.find("\"kind\":9") != std::string::npos &&
                 sunglareJson.find("\"kind\":10") != std::string::npos &&
                 sunglareJson.find("\"kind\":11") != std::string::npos &&
@@ -4070,7 +4420,7 @@ static_assert(static_cast<std::int16_t>(ladder::VerdictOrdinal::kPanel) == 1);
 static_assert(static_cast<std::int16_t>(ladder::VerdictOrdinal::kSkip) == 2);
 static_assert(static_cast<std::int16_t>(ladder::VerdictOrdinal::kRemlok) == 3);
 static_assert(static_cast<std::int16_t>(ladder::VerdictOrdinal::kHolo) == 4);
-static_assert(trace::kMaxPredicateFactsPerDraw == 6);
+static_assert(trace::kMaxPredicateFactsPerDraw == 7);
 static_assert(static_cast<std::int16_t>(ladder::VerdictOrdinal::kTarget) == 5);
 static_assert(static_cast<std::int16_t>(ladder::VerdictOrdinal::kNightVision) == 6);
 static_assert(static_cast<std::int16_t>(ladder::VerdictOrdinal::kIntro) == 7);

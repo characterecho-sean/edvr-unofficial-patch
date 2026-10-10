@@ -28,7 +28,7 @@ namespace edvr::draw_ladder_trace {
 constexpr std::uint32_t kMaxDraws = 65536;
 constexpr std::uint16_t kMaxSiteEventsPerDraw = 48;
 constexpr std::uint16_t kMaxActionEventsPerDraw = 32;
-constexpr std::uint8_t kMaxPredicateFactsPerDraw = 6;
+constexpr std::uint8_t kMaxPredicateFactsPerDraw = 7;
 constexpr std::uint8_t kMaxSunglareFactsPerDraw = 3;
 constexpr std::uint32_t kMaxSunglareFacts = kMaxDraws * kMaxSunglareFactsPerDraw;
 constexpr std::uint8_t kMaxFssFactsPerDraw = 2;
@@ -167,6 +167,52 @@ enum class PredicateFactKind : std::uint8_t {
     OffscreenQuadSkip = 6,
     Holo53 = 7,
     Scrim55 = 8,
+    FssChromeSkip = 23,
+};
+
+struct FssChromeSkipObservation final {
+    TriState outerHeal = TriState::Unknown;
+    TriState outerCensus = TriState::Unknown;
+    TriState outerTemporal = TriState::Unknown;
+    TriState kindReached = TriState::Unknown;
+    std::uint8_t drawKind = 0;
+    TriState kindMatched = TriState::Unknown;
+    TriState countReached = TriState::Unknown;
+    std::uint32_t drawCount = 0;
+    TriState countMatched = TriState::Unknown;
+    TriState budgetEntered = TriState::Unknown;
+    TriState budgetResult = TriState::Unknown;
+    TriState hashReached = TriState::Unknown;
+    std::uint64_t vsHash = 0;
+    TriState hashMatched = TriState::Unknown;
+    TriState srvReached = TriState::Unknown;
+    TriState srvNonNull = TriState::Unknown;
+    TriState resourceReached = TriState::Unknown;
+    TriState resourceNonNull = TriState::Unknown;
+    TriState queryReached = TriState::Unknown;
+    TriState texture2D = TriState::Unknown;
+    TriState dimensionsReached = TriState::Unknown;
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    TriState chromeMatched = TriState::Unknown;
+    TriState healForSkip = TriState::Unknown;
+    TriState latchReached = TriState::Unknown;
+    TriState latchOn = TriState::Unknown;
+    TriState frameReached = TriState::Unknown;
+    std::uint32_t frameNo = 0;
+    std::uint32_t priorFrameNo = 0;
+    std::uint32_t ordinalCountBefore = 0;
+    TriState frameChanged = TriState::Unknown;
+    std::uint32_t ordinal = 0;
+    std::uint32_t ordinalCountAfter = 0;
+    TriState helperReached = TriState::Unknown;
+    std::uint32_t startInstance = 0;
+    std::int32_t baseVertex = 0;
+    TriState maskReached = TriState::Unknown;
+    std::uint32_t skipMask = 0;
+    TriState ordinalInRange = TriState::Unknown;
+    TriState maskBit = TriState::Unknown;
+    TriState terminalSkip = TriState::Unknown;
 };
 
 struct PredicateRange final {
@@ -240,6 +286,7 @@ struct PredicateFact final {
     std::uint32_t offscreenTargetH = 0;
     holo_scrim_observation::HoloObservation holo{};
     holo_scrim_observation::ScrimObservation scrim{};
+    FssChromeSkipObservation fssChrome{};
     bool detailsFinalized = false;  // internal capture validity; not serialized
 };
 
