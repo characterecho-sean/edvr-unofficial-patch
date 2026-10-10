@@ -197,8 +197,8 @@ memory: read [What the fixes touch](#what-the-fixes-touch) first.
 `fix.vscreen_res_width = auto` (default); `1920` turns it off, same as stock.
 
 **On foot not being in 3D — Explorer Cam.** First person on foot is a flat image
-shown to both eyes; the free camera renders real stereo. Open the camera on foot
-and press TAB, and Explorer Cam puts your viewpoint at your commander's head and
+shown to both eyes; the free camera renders real stereo. Press F5 on foot, and
+Explorer Cam puts your viewpoint at your commander's head and
 locks it to them, so the surface, your ship and the room have depth. It cannot
 make first person 3D and does not try, and it gives you no capability you do not
 already have. On by default in VR; the commander's head is still visible from
@@ -355,7 +355,7 @@ headset shows; the game then draws the narrower view itself, and EDVR places it
 back inside the eye's full field, copied from the game's own frame. The trim
 edits answers, never memory, so the runtime and anything else that asks always
 receive the truth. It does nothing until you configure it. Explorer Cam works
-when you open the on-foot camera and press TAB.
+when you press F5 on foot.
 
 Two changes are always made, and no setting turns them off. At load EDVR
 redirects two of the game's imports in memory: `LoadLibraryW`, so that Elite's
