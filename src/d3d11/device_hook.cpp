@@ -47,6 +47,9 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "ui_sizing_math.h" // uiDisplaySizeFromXml: DisplaySettings.xml, for the panel budget
 #include "vr_ssaa_gate.h"   // the step-1 Supersampling gate instruments (log only)
 #include "vr_ssaa_hold.h"   // the Supersampling hold's shutdown (the loader slot goes back)
+#include "vr_display_observer.h"  // the display observer's notes (H6): SetFullscreenState, ResizeTarget, ResizeBuffers, the window
+
+#include <intrin.h>         // _ReturnAddress: the caller of each observed call
 #include "orbital_width.h" // orbitalWidthRememberVs: the orbit lines' shader, captured at its creation
 #include "xinput_watch.h"
 #include "joy_watch.h"
@@ -133,6 +136,7 @@ constexpr size_t kDevCreateSlots         = 11;
 
 constexpr size_t kSwapPresent            = 8;
 constexpr size_t kSwapResizeBuffers = 13, kSwapResizeBuffers1 = 39;
+constexpr size_t kSwapSetFullscreenState = 10, kSwapResizeTarget = 14;  // the display observer (vr_display_observer.h, H6)
 constexpr size_t kFactoryCreateSwapChain = 10;
 constexpr size_t kFactory2CreateSwapChainForHwnd = 15;
 
@@ -158,6 +162,8 @@ typedef HRESULT(STDMETHODCALLTYPE* PFN_DevCreate)(ID3D11Device*, const void*,
 typedef HRESULT(STDMETHODCALLTYPE* PFN_Present)(IDXGISwapChain*, UINT, UINT);
 typedef HRESULT(STDMETHODCALLTYPE* PFN_ResizeBuffers)(IDXGISwapChain*, UINT, UINT, UINT, DXGI_FORMAT, UINT);
 typedef HRESULT(STDMETHODCALLTYPE* PFN_ResizeBuffers1)(IDXGISwapChain3*, UINT, UINT, UINT, DXGI_FORMAT, UINT, const UINT*, IUnknown* const*);
+typedef HRESULT(STDMETHODCALLTYPE* PFN_SetFullscreenState)(IDXGISwapChain*, BOOL, IDXGIOutput*);
+typedef HRESULT(STDMETHODCALLTYPE* PFN_ResizeTarget)(IDXGISwapChain*, const DXGI_MODE_DESC*);
 typedef HRESULT(STDMETHODCALLTYPE* PFN_CreateSwapChain)(IDXGIFactory*, IUnknown*,
                                                         DXGI_SWAP_CHAIN_DESC*,
                                                         IDXGISwapChain**);
@@ -248,6 +254,8 @@ struct State {
     PFN_Present      realPresent = nullptr;
     PFN_ResizeBuffers realResizeBuffers = nullptr;
     PFN_ResizeBuffers1 realResizeBuffers1 = nullptr;
+    PFN_SetFullscreenState realSetFullscreenState = nullptr;  // the display observer's pass-through forwards
+    PFN_ResizeTarget realResizeTarget = nullptr;
     PFN_CreateSwapChain        realCreateSwapChain = nullptr;
     PFN_CreateSwapChainForHwnd realCreateSwapChainForHwnd = nullptr;
 
@@ -1148,11 +1156,39 @@ void flatResizeNote(const char* api, UINT count, UINT width, UINT height, DXGI_F
 }
 
 HRESULT STDMETHODCALLTYPE hookedFlatResizeBuffers(IDXGISwapChain* self, UINT count, UINT width, UINT height, DXGI_FORMAT format, UINT flags) {
+    void* ret = _ReturnAddress();
     const bool ours = self == g_state->swapChain;
     long refs = -1;
     if (ours) { menuFlatResize(); flatRuntimeResize(); refs = flatResizeBackBufferRefs(self); }
     const HRESULT hr = g_state->realResizeBuffers(self, count, width, height, format, flags);
     if (ours) flatResizeNote("ResizeBuffers", count, width, height, format, flags, hr, refs);
+    vrDisplayNoteResizeBuffers("ResizeBuffers (flat)", width, height, format, flags, ret, hr, ours);  // log only
+    return hr;
+}
+
+// The display observer (vr_display_observer.h, H6): pass-through hooks. The original is called first and its result returned; the
+// notes are read-only. The VR profile's ResizeBuffers observer is the same shape without the flat profile's resize bookkeeping.
+HRESULT STDMETHODCALLTYPE hookedObserveResizeBuffers(IDXGISwapChain* self, UINT count, UINT width, UINT height, DXGI_FORMAT format, UINT flags) {
+    void* ret = _ReturnAddress();
+    const HRESULT hr = g_state->realResizeBuffers(self, count, width, height, format, flags);
+    vrDisplayNoteResizeBuffers("ResizeBuffers", width, height, format, flags, ret, hr, self == g_state->swapChain);
+    return hr;
+}
+HRESULT STDMETHODCALLTYPE hookedSetFullscreenState(IDXGISwapChain* self, BOOL fullscreen, IDXGIOutput* target) {
+    void* ret = _ReturnAddress();
+    const HRESULT hr = g_state->realSetFullscreenState(self, fullscreen, target);
+    vrDisplayNoteFullscreen(fullscreen ? 1 : 0, target != nullptr, ret, hr, self == g_state->swapChain);
+    return hr;
+}
+HRESULT STDMETHODCALLTYPE hookedResizeTarget(IDXGISwapChain* self, const DXGI_MODE_DESC* desc) {
+    void* ret = _ReturnAddress();
+    const HRESULT hr = g_state->realResizeTarget(self, desc);
+    const bool ours = self == g_state->swapChain;
+    if (desc)
+        vrDisplayNoteResizeTarget(desc->Width, desc->Height, desc->RefreshRate.Numerator, desc->RefreshRate.Denominator,
+                                  desc->Format, desc->Scaling, ret, hr, ours);
+    else
+        vrDisplayNoteResizeTarget(0, 0, 0, 0, 0, 0, ret, hr, ours);
     return hr;
 }
 HRESULT STDMETHODCALLTYPE hookedFlatResizeBuffers1(IDXGISwapChain3* self, UINT count, UINT width, UINT height, DXGI_FORMAT format, UINT flags, const UINT* masks, IUnknown* const* queues) {
@@ -2933,10 +2969,20 @@ void hookSwapChain(IDXGISwapChain* swapChain) {
     if (!s.swapChainHook.attach(swapChain) ||
         s.swapChainHook.executablePrefix() <= kSwapPresent) {
         s.swapChainHook.uninstall();
+        vrDisplayObserveInstalled(false, false, "the swap chain's vtable could not be attached");
         return;
     }
     s.swapChainHook.replace(kSwapPresent, &hookedPresent,
                             reinterpret_cast<void**>(&s.realPresent));
+    // The display observer (vr_display_observer.h, H6): pass-through hooks on SetFullscreenState and ResizeTarget in both profiles,
+    // and on ResizeBuffers in the VR profile (the flat profile's own ResizeBuffers hook below carries its log).
+    const bool observeFullscreen = s.swapChainHook.replace(kSwapSetFullscreenState, &hookedSetFullscreenState,
+                                                           reinterpret_cast<void**>(&s.realSetFullscreenState));
+    const bool observeTarget = s.swapChainHook.replace(kSwapResizeTarget, &hookedResizeTarget,
+                                                       reinterpret_cast<void**>(&s.realResizeTarget));
+    if (!runtimeFlatProfile())
+        s.swapChainHook.replace(kSwapResizeBuffers, &hookedObserveResizeBuffers,
+                                reinterpret_cast<void**>(&s.realResizeBuffers));
     if (runtimeFlatProfile()) {
         const bool resize = s.swapChainHook.replace(kSwapResizeBuffers, &hookedFlatResizeBuffers,
             reinterpret_cast<void**>(&s.realResizeBuffers));
@@ -2948,14 +2994,24 @@ void hookSwapChain(IDXGISwapChain* swapChain) {
             third->Release();
         }
         Log::get().note("flat runtime resize hooks: ResizeBuffers=%u ResizeBuffers1=%u; release owned backbuffer references before forwarding", resize?1u:0u, resize1?1u:0u);
-        if (!resize) { s.swapChainHook.uninstall(); return; }
+        if (!resize) {
+            s.swapChainHook.uninstall();
+            vrDisplayObserveInstalled(false, false, "the flat ResizeBuffers hook was refused, so the swap chain is not hooked");
+            return;
+        }
     }
     if (!s.swapChainHook.commit()) {
         s.swapChainHook.uninstall();
+        vrDisplayObserveInstalled(false, false, "the vtable hook did not commit");
         return;
     }
     s.swapChain = swapChain;
     Log::get().note("Present hook installed");
+    vrDisplayObserveInstalled(observeFullscreen, observeTarget, "the vtable hook refused slot 10 or 14");
+    {
+        DXGI_SWAP_CHAIN_DESC windowDesc{};
+        if (SUCCEEDED(swapChain->GetDesc(&windowDesc))) vrDisplayObserveWindow(windowDesc.OutputWindow);
+    }
 
     if (Config::get().getBool("d3d11.focus_on_launch", true)) {
         DXGI_SWAP_CHAIN_DESC desc{};

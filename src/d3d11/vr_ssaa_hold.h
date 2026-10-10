@@ -54,4 +54,7 @@ bool vrSsaaHoldReadSettings(int* mode, char* raw, size_t rawLen);
 // the render context beside it, so a flight can check context = object + 0x3428.
 unsigned long long vrSsaaHoldLoaderObject();
 
+// The Settings.xml mode as the hold last read it (*known false when unread or unparsed); the display observer's lines carry it.
+int vrSsaaHoldLastMode(bool* known);
+
 }  // namespace edvr

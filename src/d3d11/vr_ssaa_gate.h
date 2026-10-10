@@ -19,8 +19,12 @@ namespace edvr {
 // the newest .fxcfg's SSAAMultiplier and HMDRenderTargetMultiplier, and the timestamp of the read.
 void vrSsaaGateStartup();
 
-// hookedPresent, for the game's own swap chain: every call counts a frame; the first logs the order line.
+// hookedPresent, for the game's own swap chain: every call counts a frame; the first logs the order line. Also the hold's mode
+// re-read and the display observer's window check, both on this boundary.
 void vrSsaaGateNotePresent();
+
+// The frame number the game's Presents have reached (the count the other lines carry). Lock-free.
+uint32_t vrSsaaGateFrame();
 
 // ui_panel_scale.cpp's setter thunk: before the game's setter runs, with the value ctx+0x3564 holds then (NaN if unread).
 void vrSsaaGateNoteSetterBefore(float before);

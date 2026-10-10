@@ -128,13 +128,19 @@ bool buildChecked(const uint8_t* base, char* why, size_t whyLen) {
     return true;
 }
 
-// Writes one 8-byte slot in the game's .rdata (ui_panel_scale.cpp's writeSlot).
-void writeSlot(uint8_t* slot, uint64_t value) {
+// Writes one 8-byte slot in the game's .rdata (ui_panel_scale.cpp's writeSlot). False, with GetLastError in g_slotErr, when the page
+// cannot be made writable: nothing was written then, and the caller keeps its state as it was.
+DWORD g_slotErr = 0;
+bool writeSlot(uint8_t* slot, uint64_t value) {
     DWORD prot = 0;
-    if (!VirtualProtect(slot, 8, PAGE_READWRITE, &prot)) return;
+    if (!VirtualProtect(slot, 8, PAGE_READWRITE, &prot)) {
+        g_slotErr = GetLastError();
+        return false;
+    }
     InterlockedExchange64(reinterpret_cast<volatile LONG64*>(slot), static_cast<LONG64>(value));
     DWORD ignored = 0;
     VirtualProtect(slot, 8, prot, &ignored);
+    return true;
 }
 
 // Settings.xml's text, read whole (small; a size over 1 MB is refused).
@@ -265,8 +271,13 @@ void vrSsaaHoldEarlyInstall() {
         g_slotState.store(2, std::memory_order_release);
         return;
     }
+    if (!writeSlot(const_cast<uint8_t*>(base) + kLoaderSlotRva, reinterpret_cast<uint64_t>(&loaderHoldThunk))) {
+        // Nothing was written: the slot still holds the wrapper, so the hold stays off and the state says so.
+        std::snprintf(g_slotWhy, sizeof(g_slotWhy), "VirtualProtect failed (%lu)", static_cast<unsigned long>(g_slotErr));
+        g_slotState.store(2, std::memory_order_release);
+        return;
+    }
     g_wrapperOrig.store(reinterpret_cast<WrapperFn>(const_cast<uint8_t*>(base + kWrapperRva)), std::memory_order_release);
-    writeSlot(const_cast<uint8_t*>(base) + kLoaderSlotRva, reinterpret_cast<uint64_t>(&loaderHoldThunk));
     g_slotWritten = true;
     g_slotState.store(1, std::memory_order_release);
     // The setter and getter hooks: the same build gate and the same slots ui_panel_scale.cpp uses, once and for all.
@@ -292,9 +303,15 @@ void vrSsaaHoldReport() {
 
 void vrSsaaHoldShutdown() {
     if (!g_slotWritten) return;
-    g_slotWritten = false;
     const uint8_t* base = reinterpret_cast<const uint8_t*>(GetModuleHandleW(nullptr));
-    if (base) writeSlot(const_cast<uint8_t*>(base) + kLoaderSlotRva, reinterpret_cast<uint64_t>(base + kWrapperRva));
+    // The slot goes back only if the write lands; if it does not, the flag stays set (the game's own slot is still ours).
+    if (base && writeSlot(const_cast<uint8_t*>(base) + kLoaderSlotRva, reinterpret_cast<uint64_t>(base + kWrapperRva)))
+        g_slotWritten = false;
+}
+
+int vrSsaaHoldLastMode(bool* known) {
+    if (known) *known = g_modeKnown.load(std::memory_order_acquire);
+    return g_mode.load(std::memory_order_acquire);
 }
 
 float vrSsaaHoldSetterValue(float requested) {

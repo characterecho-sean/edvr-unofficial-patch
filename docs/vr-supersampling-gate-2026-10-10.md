@@ -16,6 +16,7 @@
   - H3 live 3D mode: still not located (step 1). The hold uses the Settings.xml mode.
   - H4 object relation: render context = loader object + 0x3428 (so the SS field is ctx+0x3564). Each setter line prints ctx and the loader object; check ctx - object = 0x3428.
   - H5 file contents: the game may write its own SS value to the .fxcfg from the field. If so, a held session would save 1.0 over the user's value. Check SSAAMultiplier in the .fxcfg after a held apply.
+  - H6 windowed switch (related report: 3D mode Off to HMD drops the monitor window to WINDOWED at 1280x768). Read-only findings: the 1280x768 is a code constant. Game fn RVA 0x8D33F0 asks for the display mode nearest 1280x768 (`mov r9d,0x300` at 0x8D3786, `mov r8d,0x500` at 0x8D378F, call 0x7EE240). Its trigger is unlocated. Whether the game then calls IDXGISwapChain::SetFullscreenState(FALSE) or ResizeTarget is unproven. DisplaySettings.xml holds FullScreen (0 windowed, 1 full, 2 borderless: inferred), ScreenWidth, ScreenHeight. Test: the display observer (below). A SetFullscreenState(FALSE) or ResizeTarget(1280x768) line at the switch, from the game's RVA, confirms the game makes the change; none means the change is made elsewhere (for example at the window).
 - **Ruled out:** a static-address read of the 3D mode (step 1: the gate reads it through virtual calls on heap objects).
 - **Next:** one VR flight on Frontier (the step-2 commit, named in the DLL's FileVersion): (a) start with 3D on and the .fxcfg at Supersampling 0.85: expect `holding ... at startup` before `first Present`; (b) change Supersampling in the menu: expect `holding ... at menu` and the toast; (c) switch 3D off: expect the mode re-read line; (d) read the .fxcfg after the apply (H5). Then `python tools\edvr_log.py --target frontier --expect-build HEAD --vr-supersampling`.
 - **Doc rule:** dated entries below; keep this block current.
@@ -60,6 +61,21 @@ Method: `python -I` over the Frontier exe's bytes (build 332841: PE stamp 178838
 - `vr ssaa gate: 3D mode is now 0; the held Supersampling stays at 1.0 until the next apply or restart (not chased)`.
 - `vr ssaa gate: startup not held (<flat profile|3D mode unknown|3D mode 0>)`.
 - Step 1's lines remain; the setter line now also prints the render context and the loader object.
+
+## Display observer (step 3, H6): log only
+
+- Pass-through vtable hooks (device_hook.cpp, both profiles): IDXGISwapChain::SetFullscreenState (slot 10) and ResizeTarget (slot 14), and ResizeBuffers (slot 13) in the VR profile. Each calls the original first and returns its HRESULT. The flat profile's own ResizeBuffers hook gains one log call and is otherwise unchanged.
+- Lines (vr_display_observer.cpp): the first 64 calls of each, then only a call whose arguments differ from the last logged one, up to 512.
+  - `vr display: SetFullscreenState(<TRUE|FALSE>, target <given|null>) from <game RVA 0x... | module+0x...> -> hr 0x...; <the game's|another> swap chain; frame N; StereoscopicMode <m|unknown>`
+  - `vr display: ResizeTarget <w>x<h> refresh n/d format f scaling s from ... -> hr ...; ...; frame N; StereoscopicMode ...`
+  - `vr display: ResizeBuffers <w>x<h> format f flags 0x... from ... -> hr ...; ...` (also `ResizeBuffers (flat)` in the flat profile)
+  - `vr display: game window at the first frame: style 0x... client WxH, frame N`, then `vr display: game window style 0x... client WxH (was 0x... WxH), frame N` on each change (once per frame boundary, read-only).
+  - Startup, once per swap chain: `vr ssaa gate: display observer installed (SetFullscreenState, ResizeTarget)`, or `vr ssaa gate: display observer not installed: SetFullscreenState <ok|no>, ResizeTarget <ok|no>; <why>`. No such line means the swap-chain hook never ran; the line with no `vr display:` lines means it ran and the game made no such call.
+- Test for H6: the flight with 3D Off to HMD. Expect a `SetFullscreenState(FALSE` or `ResizeTarget 1280x768` line from a game RVA at the switch, and a window style change line. If the window changes with no such line, the change is made outside these calls.
+
+## Hold hardening (step 3)
+
+- writeSlot now returns false when VirtualProtect fails. The loader slot's install then records `hold refused, nothing written: VirtualProtect failed (<GetLastError>)` and leaves the hold off. Shutdown clears its flag only when the restore lands.
 
 ## Verified in the build
 

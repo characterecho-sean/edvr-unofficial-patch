@@ -6,6 +6,7 @@
 #include "ui_sizing_math.h"  // kUiPanelStamp, kUiPanelImageSize: build 332841
 #include "ui_surfaces.h"     // uiSurfacesHmdQuality: lock-free
 #include "vr_ssaa_hold.h"    // the hold's report, mode re-read and loader object (the hold changes values; this file only logs)
+#include "vr_display_observer.h"  // the game window's frame check (read-only)
 
 #include "../common/elite_graphics_folder.h"  // the Options\Graphics folder under %LOCALAPPDATA%
 #include "../common/log.h"
@@ -154,10 +155,13 @@ void vrSsaaGateStartup() {
     Log::get().note("vr ssaa gate: live 3D mode not located; using the startup file value");
 }
 
+uint32_t vrSsaaGateFrame() { return g_presents.load(std::memory_order_relaxed); }
+
 void vrSsaaGateNotePresent() {
     vrSsaaHoldFrameBoundary();  // the Supersampling hold's mode re-read (a small read, only when a setter call asked for one)
-    if (!g_on.load(std::memory_order_acquire)) return;
+    vrDisplayObserveFrame();    // the game window's style and client size, one line when they change (read-only)
     const uint32_t frame = g_presents.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (!g_on.load(std::memory_order_acquire)) return;
     bool expected = false;
     if (!g_presentLogged.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) return;
     Log::get().note("vr ssaa gate: first Present at qpc=%.3f s (frame %u); setter calls so far %u, getter read %s",
