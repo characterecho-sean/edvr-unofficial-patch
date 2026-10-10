@@ -24,6 +24,7 @@
 - **Recommendation:** two installers, one graphics implementation, one temporal pipeline, separate VR/mono adapters; flat enables only temporal AA + support.
 - **10-10 map arcs (section below):** temporal AA OFF, no jitter, while any map is open (GuiFocus 6, 7, 8; built, not flown). The
   plane-motion and per-pixel star-choice work is REMOVED (the stars' parallax, section below). Kept: the map UI families and their zero cancel.
+  Map frames run AMD's FSR1 EASU in place of the bilinear tap (built, not flown; section below).
 - **106 (10-09):** fixed exposure 1.0 SHIPS on the flat HDR route (flown by eye:
   brighter, stars back); temporary key and luma probe REMOVED. VR keeps auto.
 - **Open:** station/on-foot projection coverage and mixed-camera HDR ownership,
@@ -14751,3 +14752,41 @@ Kept:
 
 Rig: ui_quality_test pins flatUiMapTemporalOff for 6, 7 and 8 (on), another screen and an unknown GuiFocus (off), and the three names.
 gate_test section 8 still runs the GuiFocus rig case. Not covered: the spatial recovery's image on a map, and the flight.
+
+### 2026-10-10: the map frames below native: AMD's FSR1 EASU instead of the bilinear tap (built, not flown)
+
+Flight on 849ed10d at game SS 0.5 (R 1920x1080, D 3840x2160, DLSS): the map path ran as designed (temporal-off 2699, jitter-zeroed 2699,
+spatial 2699, spatial-refused 0, no-copy 0; canvas 26956 of 26956 taken, sprites 13757 of 13757). The Galaxy Map looked good; the System Map
+was soft, planets and stars especially. The cause is the spatial recovery's filter, one bilinear LinearClamp tap per output pixel.
+
+Decision (maintainer, 2026-10-10): on the map temporal-off frames only, upscale with AMD's FidelityFX FSR1 EASU (edge-adaptive), with no
+RCAS or other sharpening pass. Every other spatial recovery (a frame the temporal resolve refuses) stays bilinear, byte for byte.
+
+Source and licence. Nothing new is brought in. src\d3d11\fsr\ffx_a.h and ffx_fsr1.h are AMD's own FSR 1.0 sources (v1.20210629),
+unmodified, MIT licensed, Copyright (c) 2021 Advanced Micro Devices, Inc., with the notice in each file and in src\d3d11\fsr\README.md. They
+were already vendored and already used by the intro movie's resampler (intro_upscale.cpp), the flat sharpen (sharpen_pass.cpp) and the
+target indicator (target_sharp.cpp). The notice stays with the files; nothing in them is edited.
+
+How it is built:
+- Shader (src\d3d11\map_easu_shader.h): two compute entries over the vendored FSR text, which tools\temporal_shader_build prepends at build
+  time (the runtime carries no HLSL compiler, shader_swap.h). mapCompress bounds the copy route's colour at render size, c / (1 + max c)
+  (hdrCompress's form), so EASU's edge test sees a bounded signal and not HDR radiance. mapEasu runs FsrEasuF at the evaluation size on that
+  texture, then inverts the compression (hdrExpand's form), clamped to [0, 0.9999] before the expand so ringing stays finite and inside the
+  half-float range, and a non-finite value falls to zero.
+- Constants (src\d3d11\map_easu.cpp): FsrEasuCon, the same AMD call intro_upscale.cpp makes, with the render size as the input and the
+  evaluation size as the output (mapEasuConstants).
+- Wiring: flat_mono_resolve.cpp's spatial recovery takes the EASU path only when FlatMonoResolveFrame::easu is set and the frame is not HDR.
+  flat_runtime.cpp's map temporal-off branch sets it. The HDR route does not reach this path on map frames: treatHdr is skipped there
+  (327f62dd), so the HDR pixel variant is not used for maps. The EASU output is the frame's output: the RCAS pass (flatSharpenView) is not
+  applied to it.
+- The output is the same surface the bilinear path writes (g.output[1]), at the same size (the evaluation grid: the display size for
+  DLSS and FSR below native), so the UI layer's door arms as before.
+- Counters: the map line gains spatial-easu=N, the copies that ran EASU (spatial counts all spatial copies, EASU or bilinear). A frame
+  that armed the mechanism but fell back to bilinear shows as spatial without spatial-easu.
+
+Rig: ui_quality_test pins the counter rule (an EASU copy counts in spatial and spatial-easu; bilinear in spatial only; refused in
+spatial-refused). Not covered: the FsrEasuCon constants themselves (the CPU call is AMD's, and a rig would have to load the FSR headers
+into the test); the shader's output (the flight); the spatial recovery's image on the three maps; the EASU result against the bilinear one.
+
+Flight: the SS 0.5 DLSS session again, the System Map and the Galaxy Map: spatial-easu equal to spatial on every window; the planets and
+stars sharper than the bilinear flight; no blank or black map frames.

@@ -479,7 +479,7 @@ void flatUiLayerMapAaFrame(bool engaged, bool jitterWanted) {
     if (!runtimeFlatProfile()) return;
     g_mapAa.frame(engaged, jitterWanted);
 }
-void flatUiLayerMapAaCopy(bool ok) { g_mapAa.copy(ok); }
+void flatUiLayerMapAaCopy(bool ok, bool easu) { g_mapAa.copy(ok, easu); }
 
 void flatUiLayerFrame(bool mapOpen) {
     if (!runtimeFlatProfile()) return;
@@ -537,7 +537,7 @@ void flatUiLayerReport(uint64_t windowSeconds) {
     Log::get().note(
         "flat ui layer map: open-frames=%llu; canvas asked=%llu taken=%llu refused=%llu (%s); sprite asked=%llu taken=%llu "
         "refused=%llu (%s); tone-candidates-map=%llu tone-matched-map=%llu; temporal-off=%llu jitter-zeroed=%llu spatial=%llu "
-        "spatial-refused=%llu no-copy=%llu resets=%llu; canvas rows phase=%llu zero=%llu other=%llu no-rows=%llu; sprite rows "
+        "spatial-refused=%llu no-copy=%llu resets=%llu spatial-easu=%llu; canvas rows phase=%llu zero=%llu other=%llu no-rows=%llu; sprite rows "
         "phase=%llu zero=%llu other=%llu no-rows=%llu",
         static_cast<unsigned long long>(w.mapOpenFrames), static_cast<unsigned long long>(w.asked[fc]),
         static_cast<unsigned long long>(w.taken[fc]), static_cast<unsigned long long>(mapRefusedTotal(w, 0, w.atIssue[fc])),
@@ -547,7 +547,7 @@ void flatUiLayerReport(uint64_t windowSeconds) {
         static_cast<unsigned long long>(w.mapToneMatched), static_cast<unsigned long long>(g_mapAa.temporalOff),
         static_cast<unsigned long long>(g_mapAa.jitterZeroed), static_cast<unsigned long long>(g_mapAa.spatial),
         static_cast<unsigned long long>(g_mapAa.spatialRefused), static_cast<unsigned long long>(g_mapAa.noCopy),
-        static_cast<unsigned long long>(g_mapAa.resets),
+        static_cast<unsigned long long>(g_mapAa.resets), static_cast<unsigned long long>(g_mapAa.spatialEasu),
         static_cast<unsigned long long>(w.mapJitter[0][0]), static_cast<unsigned long long>(w.mapJitter[0][1]),
         static_cast<unsigned long long>(w.mapJitter[0][2]), static_cast<unsigned long long>(w.mapJitter[0][3]),
         static_cast<unsigned long long>(w.mapJitter[1][0]), static_cast<unsigned long long>(w.mapJitter[1][1]),

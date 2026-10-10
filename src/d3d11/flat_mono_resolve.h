@@ -136,6 +136,9 @@ struct FlatMonoResolveFrame {
     uint64_t frame = 0;
     float deltaMs = 0;
     bool reset = true;
+    // The map temporal-off frames (2026-10-10): the spatial recovery runs AMD's EASU (map_easu_shader.h) instead of the bilinear tap. A copy-route
+    // frame only; the bilinear path is unchanged for every other caller.
+    bool easu = false;
     FlatMonoResolveMode mode = FlatMonoResolveMode::Taa;
     uint32_t configuredDlssPreset = 0; // diagnostic attribution only
     // The HDR route (docs/design-flat-temporal-aa-2026-09-23.md section 81; flat_hdr_route.h). `color` is then the
@@ -329,6 +332,8 @@ void flatMonoResolveSetSpanHooks(FlatMonoResolveSpanFn begin, FlatMonoResolveSpa
 // device or allocation failure by itself.
 bool flatMonoResolveSpatialFallback(ID3D11Device*, ID3D11DeviceContext*, const FlatMonoResolveFrame&,
                                     ID3D11ShaderResourceView** output, const char** reason);
+// Whether the last spatial recovery ran AMD's EASU (the frame's easu flag) and not the bilinear tap. Read after the call.
+bool flatMonoResolveLastSpatialWasEasu();
 // What the renderer's next initialisation is asked for (auto, swap or capture); test rigs only, production never calls it. Auto,
 // the default, takes the swap everywhere but on a device that calls itself DXMT, where SwapDeviceContextState aborts the process
 // and the explicit capture runs instead. flatMonoResolveReset() makes the next call initialise again, which a rig uses to change it.

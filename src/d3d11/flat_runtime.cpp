@@ -5722,12 +5722,17 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     // door arms from it as from a treated frame), with no history and the zero phase the boundary gave it. Treated, so the
     // door arms; the history is not kept, so the first frame after the map restarts it (one reset, the resolver's own).
     if (flatRuntimeMapTemporalOff()) {
+        // The map frames' upscale is AMD's EASU (2026-10-10, the maintainer's decision): the frame asks for it, and an EASU frame takes no
+        // RCAS or other sharpening pass, so its output is the EASU output itself. A frame that falls back to the bilinear tap is unchanged.
+        FlatMonoResolveFrame mapFrame=f;
+        mapFrame.easu=true;
         const char* spatialReason=nullptr;
-        if (flatMonoResolveSpatialFallback(s.device.Get(),ctx,f,&outputView,&spatialReason)) {
-            ID3D11ShaderResourceView* spatial=flatSharpenView(ctx,outputView.Get());
+        if (flatMonoResolveSpatialFallback(s.device.Get(),ctx,mapFrame,&outputView,&spatialReason)) {
+            const bool easu=flatMonoResolveLastSpatialWasEasu();
+            ID3D11ShaderResourceView* spatial=easu?outputView.Get():flatSharpenView(ctx,outputView.Get());
             ctx->PSSetShaderResources(0,1,&spatial);replaced=true;
             s.treated=true;s.temporalAccepted=false;s.havePrevious=false;s.reason="map-temporal-off";
-            flatUiLayerMapAaCopy(true);
+            flatUiLayerMapAaCopy(true,easu);
         } else {
             s.reason=spatialReason?spatialReason:"map-temporal-off-refused";
             refuse(s);

@@ -1269,6 +1269,18 @@ void testFlatLayerRules() {
         t.copy(true);          // no frame pending: nothing counted
         check(t.spatial == 1 && t.spatialRefused == 1, "temporal AA tally: a copy with no armed frame counts nothing");
     }
+    // The map temporal-off frames' spatial recovery (2026-10-10): an EASU copy counts in spatial and spatial-easu, a bilinear one in spatial only.
+    {
+        FlatUiMapAaTally e;
+        e.frame(true, true);
+        e.copy(true, true);
+        e.frame(true, true);
+        e.copy(true, false);
+        e.frame(true, true);
+        e.copy(false, true);
+        check(e.spatial == 2 && e.spatialEasu == 1 && e.spatialRefused == 1,
+              "map spatial: an EASU copy counts in spatial and spatial-easu; a bilinear one in spatial only; a refused one in spatial-refused");
+    }
     // The map families take no cancel (2026-10-10, the cursor's pulse): whatever their rows measured, zero; the HUD families keep it.
     {
         const FlatUiJitterRead phaseRead = flatUiLayerJitterOf(true, 2.0 * 0.25 / 1920.0, -2.0 * -0.375 / 1080.0, 1920, 1080, 0.25f, -0.375f);

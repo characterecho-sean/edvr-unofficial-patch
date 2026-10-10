@@ -1,6 +1,7 @@
 #include "flat_mono_resolve.h"
 #include "dlaa.h"
 #include "fsr3_engine.h"
+#include "map_easu.h"
 #include "temporal_shader_bytecode.h"
 #include <d3d11_1.h>
 #include <wrl/client.h>
@@ -66,6 +67,15 @@ struct State {
     ComPtr<ID3D11ComputeShader> prep, taa, finish, spatial;
     ComPtr<ID3D11Buffer> constants;
     ComPtr<ID3D11SamplerState> sampler;
+    // The map temporal-off frames' EASU (2026-10-10, map_easu_shader.h): two precompiled compute passes, their constants, and the bounded colour
+    // texture at the render size. lastSpatialEasu says whether the last spatial recovery ran it.
+    ComPtr<ID3D11ComputeShader> easuCompress, easuResolve;
+    ComPtr<ID3D11Buffer> easuCon;
+    ComPtr<ID3D11Texture2D> easuTmp;
+    ComPtr<ID3D11UnorderedAccessView> easuTmpUav;
+    ComPtr<ID3D11ShaderResourceView> easuTmpSrv;
+    uint32_t easuTmpW=0, easuTmpH=0;
+    bool lastSpatialEasu=false;
     // The HDR route's pixel-shader half (section 81), made on first use (initializeHdr): one triangle vertex shader,
     // the finish and the spatial recovery as pixel shaders, and a rasterizer state that culls nothing. The render-target
     // view over the game's H is cached by the texture it was made for and holds a reference to it, so the address
@@ -1141,6 +1151,28 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     return true;
 }
 
+// The map temporal-off frames' EASU objects (2026-10-10): the two precompiled passes (the runtime has no HLSL compiler), the constants buffer,
+// and the bounded colour texture at the render size. Made on first use; a failure returns false and the caller takes the bilinear path.
+static bool ensureEasu(ID3D11Device* device,uint32_t renderW,uint32_t renderH) {
+    if(!device)return false;
+    if(!g.easuCompress && FAILED(device->CreateComputeShader(kFlatMapEasuCompressBytecode,sizeof(kFlatMapEasuCompressBytecode),nullptr,g.easuCompress.GetAddressOf())))return false;
+    if(!g.easuResolve && FAILED(device->CreateComputeShader(kFlatMapEasuBytecode,sizeof(kFlatMapEasuBytecode),nullptr,g.easuResolve.GetAddressOf())))return false;
+    if(!g.easuCon) {
+        D3D11_BUFFER_DESC bd{};bd.ByteWidth=5*16;bd.Usage=D3D11_USAGE_DEFAULT;bd.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
+        if(FAILED(device->CreateBuffer(&bd,nullptr,g.easuCon.GetAddressOf())))return false;
+    }
+    if(!g.easuTmp || !g.easuTmpUav || !g.easuTmpSrv || g.easuTmpW!=renderW || g.easuTmpH!=renderH) {
+        g.easuTmpUav.Reset();g.easuTmpSrv.Reset();g.easuTmp.Reset();
+        D3D11_TEXTURE2D_DESC td{};td.Width=renderW;td.Height=renderH;td.MipLevels=1;td.ArraySize=1;td.Format=DXGI_FORMAT_R16G16B16A16_FLOAT;
+        td.SampleDesc.Count=1;td.Usage=D3D11_USAGE_DEFAULT;td.BindFlags=D3D11_BIND_UNORDERED_ACCESS|D3D11_BIND_SHADER_RESOURCE;
+        if(FAILED(device->CreateTexture2D(&td,nullptr,g.easuTmp.GetAddressOf())))return false;
+        if(FAILED(device->CreateUnorderedAccessView(g.easuTmp.Get(),nullptr,g.easuTmpUav.GetAddressOf())))return false;
+        if(FAILED(device->CreateShaderResourceView(g.easuTmp.Get(),nullptr,g.easuTmpSrv.GetAddressOf())))return false;
+        g.easuTmpW=renderW;g.easuTmpH=renderH;
+    }
+    return true;
+}
+
 bool flatMonoResolveSpatialFallback(ID3D11Device* device,ID3D11DeviceContext* context,const FlatMonoResolveFrame& f,
                                     ID3D11ShaderResourceView** output,const char** reason) {
     // The HDR route's spatial recovery writes the same crumbs as its resolve (flat_hdr_crumbs.h): capture-state, copy-h,
@@ -1190,6 +1222,46 @@ bool flatMonoResolveSpatialFallback(ID3D11Device* device,ID3D11DeviceContext* co
         (f.evalWidth && f.evalHeight) ? f.evalWidth : route.evalWidth;
     const uint32_t evalH = route.refused ? f.outputHeight :
         (f.evalWidth && f.evalHeight) ? f.evalHeight : route.evalHeight;
+    // THE MAP TEMPORAL-OFF FRAMES (2026-10-10, f.easu): AMD's EASU over the bounded colour, in place of the bilinear tap below. Only a
+    // copy-route frame asks (flat_runtime.cpp); an HDR frame and every other caller take the bilinear path, unchanged.
+    g.lastSpatialEasu=false;
+    if(f.easu && !hdr && ensureEasu(device,f.renderWidth,f.renderHeight)) {
+        uint32_t con[20]={};
+        mapEasuConstants(f.renderWidth,f.renderHeight,evalW,evalH,con);
+        context->UpdateSubresource(g.easuCon.Get(),0,nullptr,con,0,0);
+        ID3D11Buffer* easuCb=g.easuCon.Get();
+        ID3D11SamplerState* easuSampler=g.sampler.Get();
+        ID3D11ShaderResourceView* nullSrv=nullptr;
+        ID3D11UnorderedAccessView* nullUav=nullptr;
+        {
+            // Pass 1: the colour, bounded (c / (1 + max c)), at the render size.
+            ID3D11ShaderResourceView* raw=g.color.srv.Get();
+            ID3D11UnorderedAccessView* bounded=g.easuTmpUav.Get();
+            context->CSSetShaderResources(1,1,&raw);
+            context->CSSetUnorderedAccessViews(0,1,&bounded,nullptr);
+            context->CSSetShader(g.easuCompress.Get(),nullptr,0);
+            context->Dispatch((f.renderWidth+7)/8,(f.renderHeight+7)/8,1);
+            context->CSSetShaderResources(1,1,&nullSrv);
+            context->CSSetUnorderedAccessViews(0,1,&nullUav,nullptr);
+        }
+        {
+            // Pass 2: EASU at the evaluation size, expanded back, into the output the bilinear path would have written.
+            ID3D11ShaderResourceView* bounded=g.easuTmpSrv.Get();
+            ID3D11UnorderedAccessView* target=g.output[1].uav.Get();
+            context->CSSetShaderResources(0,1,&bounded);
+            context->CSSetSamplers(0,1,&easuSampler);
+            context->CSSetConstantBuffers(0,1,&easuCb);
+            context->CSSetUnorderedAccessViews(0,1,&target,nullptr);
+            context->CSSetShader(g.easuResolve.Get(),nullptr,0);
+            context->Dispatch((evalW+7)/8,(evalH+7)/8,1);
+            context->CSSetShaderResources(0,1,&nullSrv);
+            context->CSSetUnorderedAccessViews(0,1,&nullUav,nullptr);
+        }
+        g.lastSpatialEasu=true;
+        *output=(colorDesc.Format==DXGI_FORMAT_R8G8B8A8_UNORM_SRGB?g.output[1].srgb:g.output[1].srv).Get();
+        (*output)->AddRef();
+        return true;
+    }
     Constants constants{};
     constants.size[0]=f.renderWidth;constants.size[1]=f.renderHeight;
     constants.size[2]=evalW;constants.size[3]=evalH;
@@ -1205,6 +1277,8 @@ bool flatMonoResolveSpatialFallback(ID3D11Device* device,ID3D11DeviceContext* co
     (*output)->AddRef();
     return true;
 }
+
+bool flatMonoResolveLastSpatialWasEasu() { return g.lastSpatialEasu; }
 
 // Test-only, NOT part of flat_mono_resolve.h's contract (the rig forward-declares it, as tools\fsr3_engine_test does for
 // fsr3_engine.cpp's own hooks): the prep kernel the NEXT initialisation makes is this bytecode instead of the shipped one, so
