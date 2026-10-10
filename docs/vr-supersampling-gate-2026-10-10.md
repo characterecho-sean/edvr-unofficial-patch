@@ -108,6 +108,16 @@ Lines:
 - `vr ssaa gate: write watch disarmed (16 writes logged, the cap | shutdown): <n> write(s) seen; <k> thread(s) cleared, <f> could not be`
 - `vr ssaa gate: watch: ctx+0x3564 <first read | old> -> <new>, frame <N>, <ms | no setter call yet> after the last setter call` (change only, cap 128)
 
+## The menu-apply writer (read-only disassembly after flight b677656c; PROVEN unless marked)
+
+- Flight: the write watch's one hit, value 0.8500 at RIP 0x281C391 on thread 17964, which is the render thread (the log's "Present is running on thread 17964"). The size chain made the 1713x1656 set 2 ms later.
+- W = 0x281C0D0..0x281C3EB is a block copy. It takes S = [arg+0x1180] (0x281C0F8) and copies 0x80-byte chunks from S into the render context's block at r8+0x3428 (r8 = [rbp+0x1180] = ctx). The store at 0x281C38D (movups [rax+0x30]) lands on ctx+0x3564; its load is movups from [rcx+0x30] at 0x281C381. The source offset 0x13C is INFERRED from the identity of the strides, not verified by the loop count.
+- C2 = 0x284CB70 is the size-record writer (the FUN_14284CB70 of the notes). It calls W at 0x284D0E2, then reads ctx+0x3564 at 0x284CC67 (movss xmm0, [[arg+0x1180]+0x3564]) and computes trunc(size x scale) into its record (0x284CCC9..0x284CCE7). So the copy and the sizing run in sequence in C2.
+- C2 is called through a vtable slot (.rdata 0x52E94E8). C1 = 0x2815710 calls W directly at 0x2815722 and is called directly from 0x284E931 (inside 0x284E218) and 0x288727D.
+- W does not write the size record O+0x158..0x164 itself; C2 does not write O either (its stores are to its own record at rcx+0x20.., r8+0x30..0x58).
+- Hold options. A: pre-write S+0x13C = 1.0 at W's entry while held. Risk: S may be the object the fxcfg save and the menu read, which would save 1.0 (not verified; the save path is not located). B (recommended): a relay on W's entry that calls the original and then writes ctx+0x3564 = 1.0 while held. C2 reads the field after W returns, so the sizes use 1.0; S is untouched, so the menu and the fxcfg are unchanged. Risks: other readers of S or of ctx's shader globals (gSSAAMultiplier) are not covered; the write is on the render thread, after the copy and before C2's read; all three callers pass through the one relay.
+- Next instrument: the watch's hit after B would be labelled EDVR; the size lines should show 2620 x 1.0 after the apply. Before choosing B over A, locate the fxcfg writer and check whether it reads S+0x13C.
+
 ## Verified in the build
 
 (filled in from the build and install output of this commit)
