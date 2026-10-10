@@ -505,3 +505,23 @@ Ruled out: none (new arc).
 
 Next: an Epic flat flight with all three maps opened (Galaxy, System, Orrery), at SS 1.0 and UI 125. Read the "flat ui layer map:" line in each window: the
 canvas and sprite asked counts show the gate; the reasons show what refused. Then look at a star field crossing a map.
+
+### Follow-up: the map frames' tonemap (9cc6b8ba flight, log 091943)
+
+The flight refuted the first reading. Every map ask was refused "tone-unproven" before the shared decision (flat_ui_layer.cpp: recorded at the proof
+hud step, refused at the proven check), because no proof was ever recorded for a map frame. The census (every map census: Galaxy twice, System,
+Orrery) shows the cause: the map draws write the scene, and VS CFA91824129ECBBC with PS C89DD4ED362D743F reads that scene in slot 0 and writes a
+3840x2160 RGBA8 target, 3-5 draws after the last map draw. That PS is in no tone list (flat_mono_frame.h tonePsHdrSlot), so flatUiLayerToneCandidate never
+saw it, and no proof was recorded.
+- Caller audit before the change. `toneHdrSlot` and `tonePsHdrSlot` have these callers: the resolve's tone selection (flat_mono_frame.h ~310-318,
+  NoTonePass / AmbiguousTonePass), the target's tone record (flat_runtime_model.h ~533, which the resolve model reads), the HDR route's input
+  (flat_runtime_model.h ~247, ~300), the draw scope's tone flag (flat_runtime.cpp ~4738, ~4760), the packet capture's representative (~4591), two
+  diagnostic logs (~1636, ~5500), the UI layer's candidate branch (~5437), and tests. Registering the pair in the registry would change the resolve and
+  the target record on map frames, so it is NOT registered there.
+- What was built: `kFlatUiMapToneVs` / `kFlatUiMapTonePs` and `flatUiMapToneSlotOf` (flat_ui_layer_math.h, with the census comment). The flat
+  runtime's candidate branch (flat_runtime.cpp, the `else if (tone || ...)` near the UI layer decision) accepts the pair for the UI layer alone, with slot 0.
+  The first proof from a map frame is said once: "flat ui layer: map-frame tone proven by VS ... PS ... reading slot 0, frame N (the proof holds for frame N+1);
+  said once."
+- Not covered: the bloom composite CFA918 / FA01CD writes the scene and stays out. Its full hash is not in the repo, so the rig pins a neighbouring PS on the
+  same VS instead.
+- Next: the Epic flat flight with the three maps open, reading that line and the map line's tone-unproven count.

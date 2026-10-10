@@ -1213,6 +1213,16 @@ void testFlatLayerRules() {
                             : "map families, VR: uiLayerFamilyFor names neither pair on the post-tonemap target");
         }
     }
+    // The map frames' tonemap (census 2026-10-10): the UI layer's own table names the exact pair, reading the scene in slot 0.
+    // Registered for the UI layer only (flat_ui_layer_math.h); the registry's tonePsHdrSlot is not changed, so the resolve's
+    // tone selection and the target's tone record see no new pass.
+    check(flatUiMapToneSlotOf(0xCFA91824129ECBBCull, 0xC89DD4ED362D743Full) == 0u,
+          "map tone: VS CFA918 with PS C89DD4 is the map frames' tonemap, reading the scene in slot 0");
+    check(flatUiMapToneSlotOf(0xCFA91824129ECBBCull, 0xC89DD4ED362D743Eull) == ~0u &&
+              flatUiMapToneSlotOf(0x43CA9F1C0AD2ACFEull, 0xC89DD4ED362D743Full) == ~0u &&
+              flatUiMapToneSlotOf(0xF9CFC798F21E9AEAull, 0xFEE777E92850B390ull) == ~0u,
+          "map tone: a neighbouring PS on CFA918, the same PS on another VS, and the registry's own pair are not this table's "
+          "(the bloom composite FA01CD writes the scene and is named by neither: its exact hash is not in the repo)");
     // The jitter: rows that carry the phase (0.25, -0.375) px at 1920x1080 measure ndc (2 x 0.25 / 1920, -2 x -0.375 / 1080).
     const uint32_t w = 1920, h = 1080;
     const float px = 0.25f, py = -0.375f;

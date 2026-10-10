@@ -53,6 +53,7 @@ Window g_w;
 FlatUiLayerAsk g_lastAsk = FlatUiLayerAsk::kNotAsked;
 UiLayerFamily g_decidedFamily = UiLayerFamily::kNone;  // the family of the last kDecided draw (flatUiLayerNoteIssue's)
 bool g_mapCanvasNoted = false, g_mapSpriteNoted = false;  // the once-only first take of each map family
+bool g_mapToneNoted = false;                              // the once-only first proof from a map frame's tonemap
 FlatUiToneProof g_proof;
 uint32_t g_candidateLines = 0;  // eight tone candidates logged, re-armed after a route, render-size or swap-chain change
 char g_candidateRoute[48] = "";
@@ -280,6 +281,14 @@ bool flatUiLayerToneCandidate(ID3D11DeviceContext* ctx, uint64_t frame, uint32_t
         if (g_takenFrame == frame && g_proof.hud[i] == g_takenTarget) takenAlias = g_proof.alias[i];
     const bool proven = flatUiToneProofTone(g_proof, frame, input) != nullptr;
     if (proven) ++g_w.toneProven;
+    // The first proof a map frame's tonemap records (flatUiMapToneSlotOf: the UI layer's own table): said once, with its frame.
+    if (proven && !g_mapToneNoted && flatUiMapToneSlotOf(vs, ps) == static_cast<uint32_t>(hdrSlot)) {
+        g_mapToneNoted = true;
+        Log::get().note("flat ui layer: map-frame tone proven by VS %016llX PS %016llX reading slot %d, frame %llu (the proof "
+                        "holds for frame %llu); said once.",
+                        static_cast<unsigned long long>(vs), static_cast<unsigned long long>(ps), hdrSlot,
+                        static_cast<unsigned long long>(frame), static_cast<unsigned long long>(frame + 1));
+    }
     bool admitted = false;
     char why[96] = "not asked: no HUD was taken this frame";
     {

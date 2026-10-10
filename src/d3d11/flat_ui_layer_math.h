@@ -61,6 +61,21 @@ inline UiLayerFamily flatUiFamilyFor(uint64_t vs, uint64_t ps, bool mapOpen, boo
     return map != UiLayerFamily::kNone ? map : flatUiFamilyOf(vs, ps);
 }
 
+// THE MAP FRAMES' TONEMAP, FOR THE UI LAYER ONLY (census, 2026-10-10, every map census of log 091943's build 9cc6b8ba): VS
+// CFA91824129ECBBC with PS C89DD4ED362D743F reads the scene in SRV slot 0 and writes a 3840x2160 RGBA8 target, issued 3-5
+// draws after the last map draw. The map draws write the same scene (R11G11B10F 3840x2160). None of the registry's tone PS
+// (flat_mono_frame.h tonePsHdrSlot: FEE777, EAA5F1, DE65BF, 9270C3) appear in a map census, so flatUiLayerToneCandidate never
+// ran on a map frame and no target was ever proven there (tone-unproven on every map and HUD ask).
+// NOT in the registry. The registry also drives the resolve's tone selection (flat_mono_frame.h ~310-318), the target's tone
+// record (flat_runtime_model.h ~533) and the HDR route's trigger, and a map frame's pass must not change those. The UI layer
+// alone asks this table (flat_runtime.cpp's tone candidate branch). CFA918 with PS FA01CD writes the scene (the bloom
+// composite) and stays out: only the exact pair is named.
+constexpr uint64_t kFlatUiMapToneVs = 0xCFA91824129ECBBCull;
+constexpr uint64_t kFlatUiMapTonePs = 0xC89DD4ED362D743Full;
+inline uint32_t flatUiMapToneSlotOf(uint64_t vs, uint64_t ps) {
+    return vs == kFlatUiMapToneVs && ps == kFlatUiMapTonePs ? 0u : ~0u;  // the scene is SRV slot 0
+}
+
 // The families the flat layer asks the shared decision for: the cockpit HUD families the 2026-10-09 09:36 census found
 // drawn into the scene's HDR target before the resolve, jittered (the holo panels, the flight HUD, the target sprite),
 // and since 2026-10-10 the System Map's two (the map canvas and the map sprites, flatUiMapFamilyOf: asked only while a map

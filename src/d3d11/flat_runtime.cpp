@@ -5433,8 +5433,9 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
             else if (ask == FlatUiLayerAsk::kRefused) {}   // a HUD draw left in H: never also a tone candidate
             // The game's tone pass by its known pair, whatever its vertex count (the 11:32 flight's HDR route read a copy of
             // H, which the structural rule below never matched): the next frame's proof, and this frame's admission.
-            else if (tone) {
-                const uint32_t slot = flat_mono_detail::toneHdrSlot(k.vs, k.ps);
+            // The registry's tone pass, or the map frames' tonemap (flatUiMapToneSlotOf: the UI layer's own table, not the registry).
+            else if (tone || flatUiMapToneSlotOf(k.vs, k.ps) != ~0u) {
+                const uint32_t slot = tone ? flat_mono_detail::toneHdrSlot(k.vs, k.ps) : flatUiMapToneSlotOf(k.vs, k.ps);
                 // The route so far: the HDR route once it treated this frame, else the resolve plan's (trained-native,
                 // trained-upscale, ...), or none yet.
                 const char* route = s.hdrTreated ? "hdr"
