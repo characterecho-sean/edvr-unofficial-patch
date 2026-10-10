@@ -6,8 +6,9 @@ issue (26 and 28 September). Read the Status block first.
 
 ## Status
 
-- **State (2026-10-10):** The v0.19.0 regression is fixed on branch
-  `claude/issue-45-g29-0190`: not merged, not flown. Cause: 9b2f23ef (the Hotkeys
+- **State (2026-10-10):** The v0.19.0 regression fix is CONFIRMED by the reporter on
+  the test DLL v0.19.0-1-g421ba98f (2026-10-10). Branch `claude/issue-45-g29-0190`
+  is held unmerged. Cause: 9b2f23ef (the Hotkeys
   page, first in v0.19.0) put driver calls back on controllers. The joystick watch
   patched DINPUT8's shared joystick table in place, and read every controller with
   `GetCapabilities` (at CreateDevice and on every read) and `GetDeviceInfo` (once a
@@ -53,8 +54,9 @@ issue (26 and 28 September). Read the Status block first.
     343 clean exits in 351 armed launches.
   - A missing or wrong OpenXR install: the runtime, loader and config all
     checked out in the logs ("Install check").
-- **Next:** Reporter flight on the fix build. Workaround meanwhile: `input_gate = 0`
-  under `[advanced]` in `edvr.ini` (turns off the keyboard gate and the joystick watch).
+- **Next:** ships with the next release; the branch stays unmerged until then.
+  The `input_gate = 0` workaround under `[advanced]` in `edvr.ini` (turns off the
+  keyboard gate and the joystick watch) is no longer needed for this fix.
 
 
 ## 2026-09-30: evidence
@@ -421,3 +423,4 @@ green (receipt written). Not merged, not flown.
    shows the fix ends the death; that needs the reporter's flight.
 8. **Next:** reporter flight on the fix build. Until then, `input_gate = 0` under
    `[advanced]` in `edvr.ini` turns off the keyboard gate and the joystick watch.
+9. Confirmed: the reporter's crash is gone on the test DLL v0.19.0-1-g421ba98f (relayed by the maintainer, 2026-10-10).
