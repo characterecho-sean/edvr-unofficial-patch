@@ -72,6 +72,9 @@ uint32_t g_watchFieldBits = 0;
 bool g_watchSeen = false;
 std::atomic<uint32_t> g_watchWatchLines{0};
 constexpr uint32_t kWatchWatchCap = 128;
+// Option B (vrSsaaHoldAfterCopy): whether the copy's hold is on, and the copied value it last logged (float bits).
+std::atomic<bool> g_copyHeld{false};
+std::atomic<uint32_t> g_copyBits{0xFFFFFFFEu};
 // The loader's repeated runs (the presets, then Custom): a run logs only when its request or mode changes, and counts the rest.
 std::atomic<uint32_t> g_loaderRuns{0};
 std::atomic<uint32_t> g_loaderLastReq{0};
@@ -415,6 +418,37 @@ void vrSsaaHoldFrameBoundary() {
                             "0x%llX",
                             static_cast<double>(cur), mode, static_cast<unsigned long long>(ctx));
         }
+    }
+}
+
+// Option B (the settings copy's trampoline, vr_window_trampolines.cpp): after the copy, while the hold is on, the field the size writer
+// reads next is set to 1.0. The decision is the setter's: the VR profile, a known mode, and mode != 0. Not held: nothing is written.
+void vrSsaaHoldAfterCopy(uintptr_t ctx) {
+    if (!ctx || g_slotState.load(std::memory_order_acquire) != 1 || !g_holdAllowed.load(std::memory_order_acquire)) return;
+    const ssaahold::Decision d = ssaahold::decide(true, g_modeKnown.load(std::memory_order_acquire), g_mode.load(std::memory_order_acquire), 0.0f);
+    if (!d.hold) {
+        g_copyHeld.store(false, std::memory_order_release);
+        return;
+    }
+    float copied = 0.0f;
+    const bool haveCopied = readFloatGuarded(ctx + kCtxSsOff, &copied);
+    if (!writeFloatGuarded(ctx + kCtxSsOff, ssaahold::kHeldValue)) {
+        Log::get().note("vr ssaa gate: holding Supersampling at 1.0 after the settings copy failed: the field at 0x%llX could not be "
+                        "written",
+                        static_cast<unsigned long long>(ctx + kCtxSsOff));
+        return;
+    }
+    g_held.store(true, std::memory_order_release);
+    const uint32_t bits = haveCopied ? bitsOf(copied) : 0xFFFFFFFFu;
+    g_requestedBits.store(bits, std::memory_order_release);
+    if (!g_copyHeld.load(std::memory_order_acquire) || bits != g_copyBits.load(std::memory_order_acquire)) {
+        g_copyHeld.store(true, std::memory_order_release);
+        g_copyBits.store(bits, std::memory_order_release);
+        char copiedText[24] = "unknown";
+        if (haveCopied) std::snprintf(copiedText, sizeof(copiedText), "%.4f", static_cast<double>(copied));
+        Log::get().note("vr ssaa gate: holding Supersampling at 1.0 after the settings copy (W 0x281C0D0): copied %s, held 1.0, "
+                        "3D mode %d",
+                        copiedText, g_mode.load(std::memory_order_acquire));
     }
 }
 

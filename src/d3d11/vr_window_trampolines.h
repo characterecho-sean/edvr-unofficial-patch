@@ -1,6 +1,7 @@
-// The window-mode trampolines (H6, docs/vr-supersampling-gate-2026-10-10.md): OBSERVE ONLY. Two entries in the game's code, installed
-// with EDVR's CodeHook (src/common/code_hook.h), log the game's mode request and its window apply, and forward every call to the
-// original with all its arguments. Nothing is changed.
+// The window-mode trampolines (H6, docs/vr-supersampling-gate-2026-10-10.md): the two window entries are OBSERVE ONLY. Installed with
+// EDVR's CodeHook (src/common/code_hook.h) through a near relay, they log the game's mode request and window apply and forward every
+// call with all its arguments. A third entry, the settings copy at 0x281C0D0 (option B), forwards the same way and, while the 3D mode is
+// on, sets the copied Supersampling field to 1.0 after the copy (vrSsaaHoldAfterCopy). It is the only entry that changes a value.
 //
 //   0x7E9D50  the mode request: rcx = the window object, rdx = the request (mode index [rdx], kind [rdx+0x20]).
 //   0x5589B0  the window apply: rcx = the window object, rdx = the state (kind [state+0x20], client w/h [state+0x18]/[+0x1C],

@@ -58,6 +58,11 @@ unsigned long long vrSsaaHoldLoaderObject();
 // The Settings.xml mode as the hold last read it (*known false when unread or unparsed); the display observer's lines carry it.
 int vrSsaaHoldLastMode(bool* known);
 
+// The settings copy's trampoline (option B, vr_window_trampolines.cpp): after the game copies its settings into the render context
+// (ctx given), the Supersampling field is held at 1.0 while the 3D mode is on. The source block is not written. Writes nothing when
+// not held.
+void vrSsaaHoldAfterCopy(uintptr_t ctx);
+
 // ui_panel_scale.cpp's setter thunks: the render context the setter was called on. The hold re-applies to it on a 0 -> on change.
 void vrSsaaHoldNoteContext(uintptr_t ctx);
 

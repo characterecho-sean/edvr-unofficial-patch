@@ -24,13 +24,19 @@ constexpr uint32_t kApplyRva = 0x5589B0;    // the window apply
 // The first eleven bytes of each, read from build 332841 (the build gate is the PE stamp; these pin the function itself).
 constexpr uint8_t kRequestBytes[11] = {0x48, 0x8B, 0xC4, 0x48, 0x89, 0x58, 0x10, 0x48, 0x89, 0x70, 0x18};
 constexpr uint8_t kApplyBytes[11] = {0x40, 0x53, 0x55, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x57};
+// The settings copy W (H7/H8, docs/vr-supersampling-gate-2026-10-10.md): the block copy into the render context at ctx+0x3428 (ctx = the
+// first argument's +0x1180). The first eleven bytes: mov r11,rsp; push rbx; sub rsp,0x4D0.
+constexpr uint32_t kCopyRva = 0x281C0D0;
+constexpr uint8_t kCopyBytes[11] = {0x4C, 0x8B, 0xDC, 0x53, 0x48, 0x81, 0xEC, 0xD0, 0x04, 0x00, 0x00};
 constexpr uint32_t kCap = 64;
 
 using Fn8 = uint64_t (*)(void*, void*, void*, void*, void*, void*, void*, void*);
 Fn8 g_requestOrig = nullptr;
 Fn8 g_applyOrig = nullptr;
+Fn8 g_copyOrig = nullptr;
 CodeHook g_requestHook;
 CodeHook g_applyHook;
+CodeHook g_copyHook;
 std::atomic<uint32_t> g_requestLines{0};
 std::atomic<uint32_t> g_applyLines{0};
 
@@ -115,6 +121,17 @@ uint64_t requestReplacement(void* a, void* b, void* c, void* d, void* e, void* f
 uint64_t applyReplacement(void* a, void* b, void* c, void* d, void* e, void* f, void* g, void* h) {
     observeApply(a, b);
     return g_applyOrig(a, b, c, d, e, f, g, h);
+}
+
+// The settings copy (option B): the original copies the settings block into the render context; while held (3D mode on), the
+// copied Supersampling field at ctx+0x3564 is then set to 1.0, so the size writer that reads it right after the copy sizes at 1.0. The
+// source block is not written. ctx is the first argument's +0x1180, read before the copy (the destination is that same pointer).
+uint64_t copyReplacement(void* a, void* b, void* c, void* d, void* e, void* f, void* g, void* h) {
+    uint64_t ctx = 0;
+    readU64(reinterpret_cast<uintptr_t>(a) + 0x1180, &ctx);
+    const uint64_t r = g_copyOrig(a, b, c, d, e, f, g, h);
+    if (ctx) vrSsaaHoldAfterCopy(static_cast<uintptr_t>(ctx));
+    return r;
 }
 
 // A relay within +/-2 GB of the target: the five-byte jump CodeHook writes can reach it, and the relay jumps to the replacement, which
@@ -206,8 +223,11 @@ void vrWindowTrampolinesInstall() {
                                 reinterpret_cast<void**>(&g_requestOrig), &g_requestHook, "0x7E9D50 (mode request)");
     const bool app = installOne(base, kApplyRva, kApplyBytes, sizeof(kApplyBytes), reinterpret_cast<void*>(&applyReplacement),
                                 reinterpret_cast<void**>(&g_applyOrig), &g_applyHook, "0x5589B0 (window apply)");
-    Log::get().note("vr window: trampolines: 0x7E9D50 (mode request) %s; 0x5589B0 (window apply) %s; observe only",
-                    req ? "installed" : "not installed", app ? "installed" : "not installed");
+    const bool copy = installOne(base, kCopyRva, kCopyBytes, sizeof(kCopyBytes), reinterpret_cast<void*>(&copyReplacement),
+                                 reinterpret_cast<void**>(&g_copyOrig), &g_copyHook, "0x281C0D0 (settings copy)");
+    Log::get().note("vr window: trampolines: 0x7E9D50 (mode request) %s; 0x5589B0 (window apply) %s; 0x281C0D0 (settings copy) %s; "
+                    "the window two observe only; the copy holds the field while the 3D mode is on",
+                    req ? "installed" : "not installed", app ? "installed" : "not installed", copy ? "installed" : "not installed");
 }
 
 }  // namespace edvr

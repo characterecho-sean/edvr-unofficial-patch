@@ -118,6 +118,17 @@ Lines:
 - Hold options. A: pre-write S+0x13C = 1.0 at W's entry while held. Risk: S may be the object the fxcfg save and the menu read, which would save 1.0 (not verified; the save path is not located). B (recommended): a relay on W's entry that calls the original and then writes ctx+0x3564 = 1.0 while held. C2 reads the field after W returns, so the sizes use 1.0; S is untouched, so the menu and the fxcfg are unchanged. Risks: other readers of S or of ctx's shader globals (gSSAAMultiplier) are not covered; the write is on the render thread, after the copy and before C2's read; all three callers pass through the one relay.
 - Next instrument: the watch's hit after B would be labelled EDVR; the size lines should show 2620 x 1.0 after the apply. Before choosing B over A, locate the fxcfg writer and check whether it reads S+0x13C.
 
+## Option B (implemented): hold after the settings copy
+
+- Correction to the findings above: W's DESTINATION is ctx = [arg+0x1180] (mov rbp,rcx at 0x281C0F1; mov r8,[rbp+0x1180] at 0x281C247; the copy lands at r8+0x3428). The SOURCE block is not resolved; it is not ctx, because the field holds 1.0 before the copy.
+- W = 0x281C0D0 copies in 0x80-byte chunks to ctx+0x3428. C2 = 0x284CB70 (called through the vtable slot 0x52E94E8) calls W at 0x284D0E2, then reads ctx+0x3564 and writes trunc(size x scale). C1 = 0x2815710 calls W at 0x2815722. The apply runs on the render thread (thread 17964).
+- Option B: a near-relay CodeHook on W's entry (prologue pinned: 4C 8B DC 53 48 81 EC D0 04 00 00). It forwards all eight argument slots, reads ctx = [arg+0x1180] before the call, calls the original, then, while held (VR profile, known mode, mode != 0), writes 1.0 to ctx+0x3564. C2 reads that field after W returns, so the sizes use 1.0. When not held, nothing is written beyond the original.
+- Why the source stays untouched: the menu display and the .fxcfg save keep the user's value. Option B changes only the render context's copy. CAVEAT: this is an assumption until the source and the save path are located; the flight checks the .fxcfg after a held apply.
+- Log, once per change of the copied value while held: `vr ssaa gate: holding Supersampling at 1.0 after the settings copy (W 0x281C0D0): copied <x>, held 1.0, 3D mode <m>`. A failed write says `... after the settings copy failed: the field at 0x... could not be written`.
+- The write watch stays armed for this flight: expect the game's copy hit (RIP 0x281C391, label game code) followed by EDVR's restore hit (label EDVR or another module).
+- Window trampolines stay observe only.
+- Flight: VR, 3D on; Supersampling 0.85, apply. The resolution must not drop: the size lines should show the full eye size. Then 3D off and back on to HMD (the window data and the mode re-hold).
+
 ## Verified in the build
 
 (filled in from the build and install output of this commit)
