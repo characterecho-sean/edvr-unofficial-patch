@@ -12,16 +12,16 @@
   generated manifests/config ownership, subscription-driven dispatch and a
   C-compatible interface. The add-on tier follows Phase 1. Graphics-only VR is
   a separate phase; supported settings remain owned by one plugin.
-- **Current integration:** main `a1609f2b` is merged. The intro
-  ownership checkpoint passes 157 full-build jobs plus config, export
-  and installer gates; receipt `bb56131d` matches the source. Steam
+- **Current integration:** main `a1609f2b` is merged. The staged intro
+  lifecycle checkpoint passes 157 full-build jobs plus config, export
+  and installer gates; receipt `96e5cf03` matches the source. Steam
   retains measured `6ab758d2`.
-- **Module progress:** intro video, panel, curve, backdrop, loading
-  hologram and splash dim implementations build in `plugin_intro.lib`.
-  Video lifecycle uses direct registry slots; other callsites keep their
-  original order. Remaining registry/group migration, the exposure
-  dispatch observer and installer selection are open; availability is
-  unchanged.
+- **Module progress:** all intro implementations build in
+  `plugin_intro.lib`. Configure, frame and shutdown dispatch now use
+  direct registry slots at their original callsites and fault budgets;
+  draw actions remain in the legacy ladder. Remaining registry/group
+  migration, the exposure dispatch observer and installer selection are
+  open; availability is unchanged.
 
 - **Offline evidence:** FSS site 1 has a frozen legacy selector oracle,
   version-16 facts, seven-base-fact capacity and terminal X/6 action fixtures.
@@ -4001,3 +4001,57 @@ registry/group migrations, installer selection, whole-ladder replay and
 runtime CPU/GPU shipping acceptance stay open. Feature work can continue
 on this branch; the final matched performance pair remains at
 rendering-code freeze.
+
+### 2026-10-10 — staged intro lifecycle ownership
+
+Luna 6 agents implemented and cross-reviewed the remaining Intro
+lifecycle dispatch. The private callback record appends optional
+configure/frame/shutdown stage fields after its original prefix.
+Registration accepts that original prefix, and each staged lookup checks
+the declared size through its own field before reading the pointer.
+Dispatch uses the manifest index directly and returns whether a callback
+ran; an absent staged callback retains the original direct-call
+fallback. Stage shutdown leaves the lifecycle slot attached, while the
+final video shutdown detaches before calling the module. No draw masks
+or subscriptions changed.
+
+The actual Intro record routes loader, splash dim, panel and backdrop
+configure calls, panel/curve/loader frame calls and all five staged
+shutdowns. Video callbacks retain their original skip/upscale order.
+VScreen selects the immutable record immediately before the original
+loader configure position at install and refresh. Backdrop stays after
+depth configuration. Panel, curve, skip and loader retain four
+independent BoundaryTick budgets and the same scene signal. Curve
+retirement reporting remains after its tick in the same lambda.
+Separated shutdown positions and final hook teardown order stay intact.
+Feature implementation bodies and per-draw paths are unchanged; no
+settings or new instrumentation were added.
+
+The real registry fixture exercises legacy and partial record extents
+immediately before a PAGE_NOACCESS page, so reading a later callback
+would fault. It also checks exact argument forwarding, null/absent
+callbacks, profile rejection, retained staged shutdown slots, final
+shutdown reentry and unchanged draw subscriptions. The real Intro record
+fixture covers metadata, config/context forwarding, nonzero scene
+mapping, unsupported stages and interleaved lifecycle order. Source pins
+and in-memory mutations cover host ordering, successful dispatch
+returning before fallback and absence of staged lookups in draw
+handlers; they do not execute the runtime host. The first full gate
+stopped at stale direct-call pins in the UI quality rig. A mid-tier
+repair updated those pins and VR route mutation anchors, retaining the
+original ordering, scene signal and exactly-once intent. The tools scan
+found no other stale lifecycle wiring pins. Independent source review
+confirms the inherited failed-install behavior: draw-registry shutdown
+and g_state deletion leave the lifecycle slot attached for retry, as at
+`c7f2187f`. The immutable record and original module-global lifetimes
+are preserved.
+
+The full absolute build passed all 157 jobs, the 125-key config
+contract, exports and self-contained installer gates. Receipt:
+`96e5cf03067ff0bd9d3f94c80564446c29eed495c6c57d43adb27b3115985b0e`. No
+Steam install, live settings edit or flight occurred. Intro lifecycle
+ownership is complete for these existing calls, but its draw claims and
+selection availability remain open. Remaining group migrations,
+installer selection, whole-ladder replay and runtime CPU/GPU shipping
+acceptance are still required. Feature work may continue on the branch;
+the final matched performance pair remains at rendering-code freeze.

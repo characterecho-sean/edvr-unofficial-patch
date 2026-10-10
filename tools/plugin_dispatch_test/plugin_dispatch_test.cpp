@@ -9,7 +9,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <initializer_list>
+#include <new>
 #include <type_traits>
+#include <windows.h>
 
 namespace edvr { uint32_t loggerNoteCalls = 0; }
 
@@ -57,6 +59,40 @@ static_assert(offsetof(EdvrPluginOps, shutdown) ==
               "legacy shutdown callback offset must remain stable");
 static_assert(std::is_standard_layout<EdvrPluginLifecycleOps>::value,
               "lifecycle ops ABI must remain standard-layout");
+struct LegacyEdvrPluginLifecycleOpsPrefix final {
+    uint32_t structSize;
+    uint32_t manifestIndex;
+    const char* manifestId;
+    void* state;
+    EdvrPluginConfigureFn configure;
+    EdvrPluginFrameFn frame;
+    EdvrPluginShutdownFn shutdown;
+};
+struct ConfigureStageLifecycleOpsPrefix final {
+    LegacyEdvrPluginLifecycleOpsPrefix legacy;
+    EdvrPluginConfigureStageFn configureStage;
+};
+struct FrameStageLifecycleOpsPrefix final {
+    LegacyEdvrPluginLifecycleOpsPrefix legacy;
+    EdvrPluginConfigureStageFn configureStage;
+    EdvrPluginFrameStageFn frameStage;
+};
+static_assert(sizeof(LegacyEdvrPluginLifecycleOpsPrefix) ==
+                  offsetof(EdvrPluginLifecycleOps, configureStage),
+              "staged lifecycle fields must append after the exact legacy prefix");
+static_assert(sizeof(ConfigureStageLifecycleOpsPrefix) ==
+                  offsetof(EdvrPluginLifecycleOps, frameStage),
+              "configure-only fixture must end at the frameStage boundary");
+static_assert(sizeof(FrameStageLifecycleOpsPrefix) ==
+                  offsetof(EdvrPluginLifecycleOps, shutdownStage),
+              "frame-stage fixture must end at the shutdownStage boundary");
+static_assert(offsetof(EdvrPluginLifecycleOps, configure) ==
+                  offsetof(LegacyEdvrPluginLifecycleOpsPrefix, configure) &&
+              offsetof(EdvrPluginLifecycleOps, frame) ==
+                  offsetof(LegacyEdvrPluginLifecycleOpsPrefix, frame) &&
+              offsetof(EdvrPluginLifecycleOps, shutdown) ==
+                  offsetof(LegacyEdvrPluginLifecycleOpsPrefix, shutdown),
+              "legacy lifecycle callback offsets must remain stable");
 
 struct RegistryState {
     bool wants = false;
@@ -80,6 +116,14 @@ struct LifecycleState {
     bool configured = false;
     bool reenterShutdown = false;
     uint32_t manifestIndex = 0;
+    uint32_t configureStageCalls = 0;
+    uint32_t frameStageCalls = 0;
+    uint32_t shutdownStageCalls = 0;
+    uint32_t lastStage = 0;
+    void* lastState = nullptr;
+    void* lastConfig = nullptr;
+    ID3D11DeviceContext* lastContext = nullptr;
+    uint32_t lastStageSceneFrame = 0;
 };
 LifecycleState lifecycleState;
 RegistryState registryState;
@@ -171,10 +215,33 @@ void lifecycleShutdown(void* state) {
     if (s->reenterShutdown)
         edvr::pluginRegistryShutdownLifecycle(s->manifestIndex);
 }
+void lifecycleConfigureStage(void* state, uint32_t stage, void* config) {
+    auto* s = static_cast<LifecycleState*>(state);
+    ++s->configureStageCalls;
+    s->lastState = state;
+    s->lastStage = stage;
+    s->lastConfig = config;
+}
+void lifecycleFrameStage(void* state, uint32_t stage,
+                         ID3D11DeviceContext* context, uint32_t sceneFrame) {
+    auto* s = static_cast<LifecycleState*>(state);
+    ++s->frameStageCalls;
+    s->lastState = state;
+    s->lastStage = stage;
+    s->lastContext = context;
+    s->lastStageSceneFrame = sceneFrame;
+}
+void lifecycleShutdownStage(void* state, uint32_t stage) {
+    auto* s = static_cast<LifecycleState*>(state);
+    ++s->shutdownStageCalls;
+    s->lastState = state;
+    s->lastStage = stage;
+}
 EdvrPluginLifecycleOps introLifecycleOps() {
     return {sizeof(EdvrPluginLifecycleOps), edvr::plugins::kPluginIntro,
             "intro", &lifecycleState, &lifecycleConfigure, &lifecycleFrame,
-            &lifecycleShutdown};
+            &lifecycleShutdown, &lifecycleConfigureStage,
+            &lifecycleFrameStage, &lifecycleShutdownStage};
 }
 
 bool oldShape(char kind, uint32_t count, uint32_t instances) {
@@ -589,6 +656,86 @@ void lifecycleRegistryDispatch() {
     const auto interestsBefore = edvr::pluginRegistryDrawInterestMask();
     EdvrPluginLifecycleOps ops = introLifecycleOps();
 
+    // Place each declared ABI prefix immediately before PAGE_NOACCESS. A read
+    // of any callback beyond structSize then faults instead of finding stack
+    // padding that happens to be readable.
+    lifecycleState = {};
+    lifecycleState.manifestIndex = kIntro;
+    SYSTEM_INFO pageInfo{};
+    GetSystemInfo(&pageInfo);
+    auto* guardPages = static_cast<uint8_t*>(VirtualAlloc(
+        nullptr, static_cast<SIZE_T>(pageInfo.dwPageSize) * 2,
+        MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+    check(guardPages != nullptr, "guard-page lifecycle fixture allocates storage");
+    DWORD previousProtect = 0;
+    check(VirtualProtect(guardPages + pageInfo.dwPageSize, pageInfo.dwPageSize,
+                         PAGE_NOACCESS, &previousProtect) != 0,
+          "guard-page lifecycle fixture protects the following page");
+    void* const pageEnd = guardPages + pageInfo.dwPageSize;
+    auto* const oldPrefix = new (static_cast<uint8_t*>(pageEnd) -
+                                 sizeof(LegacyEdvrPluginLifecycleOpsPrefix))
+        LegacyEdvrPluginLifecycleOpsPrefix{
+            sizeof(LegacyEdvrPluginLifecycleOpsPrefix), kIntro, "intro",
+            &lifecycleState, &lifecycleConfigure, &lifecycleFrame,
+            &lifecycleShutdown};
+    const auto* oldOps = reinterpret_cast<const EdvrPluginLifecycleOps*>(oldPrefix);
+    check(edvr::pluginRegistryRegisterLifecycle(oldOps),
+          "lifecycle registry accepts the original callback-prefix size");
+    check(!edvr::pluginRegistryConfigureLifecycleStage(kIntro, 91, nullptr) &&
+              !edvr::pluginRegistryFrameLifecycleStage(kIntro, 92, nullptr, 1) &&
+              !edvr::pluginRegistryShutdownLifecycleStage(kIntro, 93) &&
+              lifecycleState.configureStageCalls == 0 &&
+              lifecycleState.frameStageCalls == 0 &&
+              lifecycleState.shutdownStageCalls == 0,
+          "old prefix record reports absent staged callbacks without reading appended storage");
+    edvr::pluginRegistryShutdownLifecycle(kIntro);
+    check(!edvr::pluginRegistryHasLifecycle(kIntro),
+          "old prefix lifecycle record can be detached normally");
+
+    auto* const configurePrefix = new (static_cast<uint8_t*>(pageEnd) -
+                                       sizeof(ConfigureStageLifecycleOpsPrefix))
+        ConfigureStageLifecycleOpsPrefix{
+            {offsetof(EdvrPluginLifecycleOps, frameStage), kIntro, "intro",
+             &lifecycleState, &lifecycleConfigure, &lifecycleFrame,
+             &lifecycleShutdown},
+            &lifecycleConfigureStage};
+    const auto* configureOnlyOps = reinterpret_cast<
+        const EdvrPluginLifecycleOps*>(configurePrefix);
+    check(edvr::pluginRegistryRegisterLifecycle(configureOnlyOps),
+          "configureStage-only boundary record registers at its declared size");
+    check(edvr::pluginRegistryConfigureLifecycleStage(kIntro, 94, nullptr) &&
+              !edvr::pluginRegistryFrameLifecycleStage(kIntro, 95, nullptr, 0) &&
+              !edvr::pluginRegistryShutdownLifecycleStage(kIntro, 96) &&
+              lifecycleState.configureStageCalls == 1 &&
+              lifecycleState.frameStageCalls == 0 &&
+              lifecycleState.shutdownStageCalls == 0,
+          "configureStage-only page-boundary record never reads later callbacks");
+    edvr::pluginRegistryShutdownLifecycle(kIntro);
+
+    auto* const framePrefix = new (static_cast<uint8_t*>(pageEnd) -
+                                   sizeof(FrameStageLifecycleOpsPrefix))
+        FrameStageLifecycleOpsPrefix{
+            {offsetof(EdvrPluginLifecycleOps, shutdownStage), kIntro, "intro",
+             &lifecycleState, &lifecycleConfigure, &lifecycleFrame,
+             &lifecycleShutdown},
+            nullptr, &lifecycleFrameStage};
+    const auto* frameOnlyOps = reinterpret_cast<const EdvrPluginLifecycleOps*>(
+        framePrefix);
+    check(edvr::pluginRegistryRegisterLifecycle(frameOnlyOps),
+          "frameStage boundary record registers at its declared size");
+    check(!edvr::pluginRegistryConfigureLifecycleStage(kIntro, 97, nullptr) &&
+              edvr::pluginRegistryFrameLifecycleStage(kIntro, 98, nullptr, 99) &&
+              !edvr::pluginRegistryShutdownLifecycleStage(kIntro, 100) &&
+              lifecycleState.frameStageCalls == 1 &&
+              lifecycleState.shutdownStageCalls == 0,
+          "frameStage-only page-boundary record does not read shutdownStage");
+    edvr::pluginRegistryShutdownLifecycle(kIntro);
+    check(VirtualFree(guardPages, 0, MEM_RELEASE) != 0,
+          "guard-page lifecycle fixture releases its storage");
+
+    lifecycleState = {};
+    lifecycleState.manifestIndex = kIntro;
+
     EdvrPluginLifecycleOps invalid = ops;
     invalid.structSize = 0;
     check(!edvr::pluginRegistryRegisterLifecycle(&invalid),
@@ -622,6 +769,69 @@ void lifecycleRegistryDispatch() {
           "lifecycle registry rejects a different record for an occupied index");
     check(edvr::pluginRegistryHasLifecycle(kIntro),
           "registered lifecycle slot is visible by direct manifest index");
+
+    check(!edvr::pluginRegistryConfigureLifecycleStage(kExposure, 1, nullptr) &&
+              !edvr::pluginRegistryFrameLifecycleStage(kExposure, 1, nullptr, 0) &&
+              !edvr::pluginRegistryShutdownLifecycleStage(kExposure, 1) &&
+              !edvr::pluginRegistryConfigureLifecycleStage(UINT32_MAX, 1, nullptr) &&
+              !edvr::pluginRegistryFrameLifecycleStage(UINT32_MAX, 1, nullptr, 0) &&
+              !edvr::pluginRegistryShutdownLifecycleStage(UINT32_MAX, 1),
+          "staged lifecycle dispatch returns false for absent and out-of-range indices");
+
+    EdvrPluginLifecycleOps noStageCallbacks = ops;
+    noStageCallbacks.configureStage = nullptr;
+    noStageCallbacks.frameStage = nullptr;
+    noStageCallbacks.shutdownStage = nullptr;
+    edvr::pluginRegistryShutdownLifecycle(kIntro);
+    check(edvr::pluginRegistryRegisterLifecycle(&noStageCallbacks),
+          "lifecycle registry permits absent optional staged callbacks");
+    check(!edvr::pluginRegistryConfigureLifecycleStage(kIntro, 3, nullptr) &&
+              !edvr::pluginRegistryFrameLifecycleStage(kIntro, 3, nullptr, 0) &&
+              !edvr::pluginRegistryShutdownLifecycleStage(kIntro, 3),
+          "null optional staged callbacks report false");
+    edvr::pluginRegistryShutdownLifecycle(kIntro);
+
+    EdvrPluginLifecycleOps partialStageOps = ops;
+    partialStageOps.structSize = offsetof(EdvrPluginLifecycleOps, frameStage);
+    check(edvr::pluginRegistryRegisterLifecycle(&partialStageOps),
+          "lifecycle registry accepts a record ending after configureStage");
+    check(edvr::pluginRegistryConfigureLifecycleStage(kIntro, 4, nullptr) &&
+              !edvr::pluginRegistryFrameLifecycleStage(kIntro, 5, nullptr, 0) &&
+              !edvr::pluginRegistryShutdownLifecycleStage(kIntro, 6) &&
+              lifecycleState.configureStageCalls == 1 &&
+              lifecycleState.frameStageCalls == 0 &&
+              lifecycleState.shutdownStageCalls == 0,
+          "each staged callback is gated by its own structSize extent");
+    edvr::pluginRegistryShutdownLifecycle(kIntro);
+    lifecycleState = {};
+    lifecycleState.manifestIndex = kIntro;
+    check(edvr::pluginRegistryRegisterLifecycle(&ops),
+          "staged lifecycle record can be registered after optional-field fixture");
+
+    bool stageConfig = true;
+    auto* const expectedContext = reinterpret_cast<ID3D11DeviceContext*>(
+        static_cast<uintptr_t>(0x12340));
+    check(edvr::pluginRegistryConfigureLifecycleStage(kIntro, 0x10001u,
+                                                       &stageConfig) &&
+              lifecycleState.configureStageCalls == 1 &&
+              lifecycleState.lastState == &lifecycleState &&
+              lifecycleState.lastStage == 0x10001u &&
+              lifecycleState.lastConfig == &stageConfig,
+          "staged configure forwards opaque stage, state, and config exactly");
+    check(edvr::pluginRegistryFrameLifecycleStage(kIntro, 0x20002u,
+                                                   expectedContext, 0x30003u) &&
+              lifecycleState.frameStageCalls == 1 &&
+              lifecycleState.lastState == &lifecycleState &&
+              lifecycleState.lastStage == 0x20002u &&
+              lifecycleState.lastContext == expectedContext &&
+              lifecycleState.lastStageSceneFrame == 0x30003u,
+          "staged frame forwards stage, context, and scene frame exactly");
+    check(edvr::pluginRegistryShutdownLifecycleStage(kIntro, 0x40004u) &&
+              lifecycleState.shutdownStageCalls == 1 &&
+              lifecycleState.lastState == &lifecycleState &&
+              lifecycleState.lastStage == 0x40004u &&
+              edvr::pluginRegistryHasLifecycle(kIntro),
+          "staged shutdown forwards stage and keeps the lifecycle slot registered");
 
     bool enabled = true;
     edvr::pluginRegistryConfigureLifecycle(kIntro, &enabled);

@@ -145,7 +145,9 @@ W_INTRO_GATE = ("forwardInputs.read(\n"
 W_CANDIDATE = "if ((v == DrawVerdict::kIntroPanel || " + W_INTRO_GATE + ") && owner && panelCurveSurfaceWanted()) {"
 W_STRIP_CALL = "stripIssued = panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, g_state->realDrawIndexedInstanced);"
 W_TICK = ("        tkIntroCurve.run([&] {\n            const bool sceneFrame = g_state->eyeDrawsLastFrame >= kSceneEyeDraws;\n"
-          "            introCurveTick(g_state->ownerCtx, sceneFrame);\n            if (sceneFrame) introCurveNoteRetired();\n        });\n")
+          "            frameIntroLifecycleStage(kIntroLifecycleCurve, g_state->ownerCtx,\n"
+          "                                     sceneFrame ? 1u : 0u, introCurveTick);\n"
+          "            if (sceneFrame) introCurveNoteRetired();\n        });\n")
 W_RETIRE_TEXT = "in all (the movie's, the splash's and the splash dim's re-issues of either)"
 LADDER_INTRO_RUNG = ("InterestGated<SiteId::kIntroCurveObserve, SiteKind::Observe,\n"
                      "                  draw_interest::InterestId::IntroCurveObserve>")
@@ -426,11 +428,11 @@ MUTANTS = [
                                             "return g_state->introCurveThisDraw || g_state->curveThisDraw;"))],
            "the strip's site also reads the on-foot flag"),
     wiring("iw-tick-missing", "tick", [(W_TICK, "")], "the recogniser is never ticked: it never retires"),
-    wiring("iw-tick-no-scene", "tick", [("introCurveTick(g_state->ownerCtx, sceneFrame);", "introCurveTick(g_state->ownerCtx, false);")], "the tick is told no scene"),
+    wiring("iw-tick-no-scene", "tick", [("sceneFrame ? 1u : 0u, introCurveTick);", "0u, introCurveTick);")], "the tick is told no scene"),
     wiring("iw-tick-before-the-movie", "tick", [(W_TICK, ""), ("        tkIntroPanel.run([&] {\n", W_TICK + "        tkIntroPanel.run([&] {\n")],
            "the tick runs before the movie's"),
     wiring("iw-tick-line-every-frame", "tick", [("if (sceneFrame) introCurveNoteRetired();", "introCurveNoteRetired();")], "the retirement line is called every frame"),
-    wiring("iw-shutdown-missing", "shutdown", [("    introPanelShutdown();\n    introCurveShutdown();\n", "    introPanelShutdown();\n")],
+    wiring("iw-shutdown-missing", "shutdown", [("    shutdownIntroLifecycleStage(kIntroLifecycleCurve, introCurveShutdown);\n", "")],
            "the shutdown never releases the recogniser's staging buffers"),
     wiring("iw-retire-reworded", "retire-line", [(W_RETIRE_TEXT, "in all (the movie's and the splash's together)")],
            "the retirement line is reworded: it no longer says the dim's re-issues are counted"),

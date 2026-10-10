@@ -52,7 +52,8 @@ const char* const kDim =
     "constboolstripDim=stripIssued&&panelCurveSurfaceDraw(self,stripGain,stripToward,stripReverseU,g_state->realDrawIndexedInstanced);"
     "booldimIssued=stripDim;if(!stripDim){draw(AlteredDrawClass::None);dimIssued=true;}splashDimEnd(self);";
 const char* const kTick =
-    "tkIntroCurve.run([&]{constboolsceneFrame=g_state->eyeDrawsLastFrame>=kSceneEyeDraws;introCurveTick(g_state->ownerCtx,sceneFrame);"
+    "tkIntroCurve.run([&]{constboolsceneFrame=g_state->eyeDrawsLastFrame>=kSceneEyeDraws;"
+    "frameIntroLifecycleStage(kIntroLifecycleCurve,g_state->ownerCtx,sceneFrame?1u:0u,introCurveTick);"
     "if(sceneFrame)introCurveNoteRetired();});";
 const char* const kRetire =
     "staticboolsaid=false;if(said)return;said=true;constuint64_tdrawn=panelCurveSurfaceInfo().drawn;if(drawn==0&&!panelCurveSurfaceWanted())return;"
@@ -176,12 +177,21 @@ std::vector<WirePin> wiringPins(const std::string& text, const std::string& ladd
                     "the verdict's Begin and the dim)"});
     // The boundary tick: declared, run once beside the movie's with the same scene signal, its one line only at the scene.
     pins.push_back({"tick",
-                    has(all, "EDVR_BOUNDARY_TICK(tkIntroCurve,\"intro_curve\");") && countOf(all, "tkIntroCurve.run(") == 1 && countOf(all, "introCurveTick(") == 1 &&
-                        inOrder(frame, {"tkIntroPanel.run([&]{introPanelTick(g_state->ownerCtx,g_state->eyeDrawsLastFrame>=kSceneEyeDraws);});", kTick, "tkIntroSkip.run("}),
-                    "intro curve wiring [tick]: tkIntroCurve is declared and run once, right after the movie's tick and before the skip's, with the same scene signal "
-                    "(eyeDrawsLastFrame >= kSceneEyeDraws), and its retirement line is called only on a scene frame"});
-    pins.push_back({"shutdown", has(shut, "introPanelShutdown();introCurveShutdown();") && countOf(shut, "introCurveShutdown()") == 1,
-                    "intro curve wiring [shutdown]: introCurveShutdown() runs beside introPanelShutdown(), once"});
+                    has(all, "EDVR_BOUNDARY_TICK(tkIntroCurve,\"intro_curve\");") && countOf(all, "tkIntroCurve.run(") == 1 &&
+                        countOf(all, "introCurveTick") == 1 &&
+                        countOf(frame, "frameIntroLifecycleStage(kIntroLifecycleCurve,") == 1 &&
+                        inOrder(frame, {"tkIntroPanel.run([&]{frameIntroLifecycleStage(kIntroLifecyclePanel,g_state->ownerCtx,"
+                                        "g_state->eyeDrawsLastFrame>=kSceneEyeDraws?1u:0u,introPanelTick);});",
+                                        kTick, "tkIntroSkip.run("}),
+                    "intro curve wiring [tick]: tkIntroCurve runs once after the movie's staged tick and before the skip's, forwards the same scene signal "
+                    "(eyeDrawsLastFrame >= kSceneEyeDraws) with introCurveTick as its sole call site, and calls its retirement line only on a scene frame"});
+    pins.push_back({"shutdown",
+                    inOrder(shut, {"shutdownIntroLifecycleStage(kIntroLifecyclePanel,introPanelShutdown);",
+                                   "shutdownIntroLifecycleStage(kIntroLifecycleCurve,introCurveShutdown);",
+                                   "shutdownIntroVideoLifecycle();"}) &&
+                        countOf(shut, "shutdownIntroLifecycleStage(kIntroLifecycleCurve,introCurveShutdown);") == 1 &&
+                        countOf(all, "introCurveShutdown") == 1,
+                    "intro curve wiring [shutdown]: the curve stage is shut down once beside the panel stage, with introCurveShutdown as its sole call site, before final video detach"});
     // The one line: said once, at the first scene frame, nothing at curvature 0 unless something was drawn, both counters.
     pins.push_back({"retire-line", note == std::string("voidintroCurveNoteRetired(){") + kRetire,
                     "intro curve wiring [retire-line]: introCurveNoteRetired says `intro curve: %llu strip draw(s) in all (the movie's, the splash's and the splash dim's re-issues of "
@@ -222,7 +232,8 @@ const char* const kRawDim = R"x(            const bool stripDim = stripIssued &&
 )x";
 const char* const kRawTick = R"x(        tkIntroCurve.run([&] {
             const bool sceneFrame = g_state->eyeDrawsLastFrame >= kSceneEyeDraws;
-            introCurveTick(g_state->ownerCtx, sceneFrame);
+            frameIntroLifecycleStage(kIntroLifecycleCurve, g_state->ownerCtx,
+                                     sceneFrame ? 1u : 0u, introCurveTick);
             if (sceneFrame) introCurveNoteRetired();
         });
 )x";
@@ -271,7 +282,10 @@ void testIntroCurveControls(const std::string& text, const std::string& ladderTe
         {"the failed strip still swallows the game's draw", {{"stripIssued = panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, g_state->realDrawIndexedInstanced);", "panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, g_state->realDrawIndexedInstanced);\n            stripIssued = true;"}}, "fallback"},
         {"the splash uses the on-foot flag", {{"s->introCurveThisDraw = introCurveOnComposite(self, kind, count, instances);", "s->introCurveThisDraw = introCurveOnComposite(self, kind, count, instances);\n                s->curveThisDraw = s->introCurveThisDraw;"}}, "not-on-foot-flag"},
         {"the tick retires without a scene", {{"if (sceneFrame) introCurveNoteRetired();", "introCurveNoteRetired();"}}, "tick"},
-        {"shutdown leaves the recogniser live", {{"introCurveShutdown();", ""}}, "shutdown"},
+        {"the tick loses the scene signal", {{"sceneFrame ? 1u : 0u, introCurveTick);", "0u, introCurveTick);"}}, "tick"},
+        {"the tick also calls the recogniser directly", {{"        tkIntroSkip.run([&] {\n", "        introCurveTick(g_state->ownerCtx, false);\n        tkIntroSkip.run([&] {\n"}}, "tick"},
+        {"shutdown leaves the recogniser live", {{"    shutdownIntroLifecycleStage(kIntroLifecycleCurve, introCurveShutdown);\n", ""}}, "shutdown"},
+        {"shutdown also calls the recogniser directly", {{"    shutdownIntroLifecycleStage(kIntroLifecycleCurve, introCurveShutdown);\n", "    shutdownIntroLifecycleStage(kIntroLifecycleCurve, introCurveShutdown);\n    introCurveShutdown();\n"}}, "shutdown"},
         {"the retirement message repeats", {{"if (said) return;", ""}}, "retire-line"},
     };
     for (const Flip& f : flips) {

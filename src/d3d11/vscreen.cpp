@@ -993,8 +993,19 @@ bool ensureIntroVideoLifecycle() {
     return pluginRegistryRegisterLifecycle(introVideoLifecycleOps());
 }
 
-void configureIntroVideoLifecycle(Config& cfg) {
+void selectIntroVideoLifecycle() {
     g_introLifecycleRegistered = ensureIntroVideoLifecycle();
+}
+
+void configureIntroLifecycleStage(uint32_t stage, Config& cfg,
+                                  void (*fallback)(Config&)) {
+    if (g_introLifecycleRegistered &&
+        pluginRegistryConfigureLifecycleStage(kIntroPluginIndex, stage, &cfg))
+        return;
+    fallback(cfg);
+}
+
+void configureIntroVideoLifecycle(Config& cfg) {
     if (g_introLifecycleRegistered) {
         pluginRegistryConfigureLifecycle(kIntroPluginIndex, &cfg);
         return;
@@ -1003,12 +1014,29 @@ void configureIntroVideoLifecycle(Config& cfg) {
     introUpscaleConfigure(cfg);
 }
 
+void frameIntroLifecycleStage(
+    uint32_t stage, ID3D11DeviceContext* context, uint32_t sceneFrame,
+    void (*fallback)(ID3D11DeviceContext*, bool)) {
+    if (g_introLifecycleRegistered &&
+        pluginRegistryFrameLifecycleStage(kIntroPluginIndex, stage, context,
+                                          sceneFrame))
+        return;
+    fallback(context, sceneFrame != 0);
+}
+
 void frameIntroVideoLifecycle(uint32_t sceneFrame) {
     if (g_introLifecycleRegistered) {
         pluginRegistryFrameLifecycle(kIntroPluginIndex, sceneFrame);
         return;
     }
     introSkipTick(sceneFrame != 0);
+}
+
+void shutdownIntroLifecycleStage(uint32_t stage, void (*fallback)()) {
+    if (g_introLifecycleRegistered &&
+        pluginRegistryShutdownLifecycleStage(kIntroPluginIndex, stage))
+        return;
+    fallback();
 }
 
 void shutdownIntroVideoLifecycle() {
@@ -8552,9 +8580,13 @@ void vScreenRefreshConfig() {
     uiLayerConfigure(cfg);
     scrimConfigure(cfg);
     quadProbeConfigure(cfg);
-    loaderPanelConfigure(cfg);
-    splashDimConfigure(cfg);
-    introPanelConfigure(cfg);
+    selectIntroVideoLifecycle();
+    configureIntroLifecycleStage(kIntroLifecycleLoader, cfg,
+                                 loaderPanelConfigure);
+    configureIntroLifecycleStage(kIntroLifecycleSplashDim, cfg,
+                                 splashDimConfigure);
+    configureIntroLifecycleStage(kIntroLifecyclePanel, cfg,
+                                 introPanelConfigure);
     configureIntroVideoLifecycle(cfg);
     sharpenPassConfigure(cfg);
     temporalPassConfigure(cfg);
@@ -8562,7 +8594,8 @@ void vScreenRefreshConfig() {
     screenMotionConfigure(cfg);
     pluginRegistryConfigure(&cfg);
     depthProbeConfigure(cfg);
-    backdropConfigure(cfg);
+    configureIntroLifecycleStage(kIntroLifecycleBackdrop, cfg,
+                                 backdropConfigure);
     fssPanelConfigure(cfg);
     fssRevealConfigure(cfg);
     // fix.transition_flash: the engine fix (transition_flash_eye_base.cpp). The
@@ -8835,15 +8868,18 @@ void vScreenFrameBoundary() {
             if (g_state->eyeDrawsLastFrame >= kSceneEyeDraws) announceSceneArrived();
         });
         tkIntroPanel.run([&] {
-            introPanelTick(g_state->ownerCtx,
-                           g_state->eyeDrawsLastFrame >= kSceneEyeDraws);
+            frameIntroLifecycleStage(
+                kIntroLifecyclePanel, g_state->ownerCtx,
+                g_state->eyeDrawsLastFrame >= kSceneEyeDraws ? 1u : 0u,
+                introPanelTick);
         });
         // The splash's recogniser (intro_curve.h), on the same boundary and the same scene signal as the movie's: it counts the frame, reads the
         // copies that have settled and retires itself at the first rendered scene. At curvature 0 that is a frame counter and one load. Its one
         // line, what the strip drew over the intro, is said from here once.
         tkIntroCurve.run([&] {
             const bool sceneFrame = g_state->eyeDrawsLastFrame >= kSceneEyeDraws;
-            introCurveTick(g_state->ownerCtx, sceneFrame);
+            frameIntroLifecycleStage(kIntroLifecycleCurve, g_state->ownerCtx,
+                                     sceneFrame ? 1u : 0u, introCurveTick);
             if (sceneFrame) introCurveNoteRetired();
         });
         // The same boundary closes the skip's verdict: refused, drawn, or
@@ -8855,8 +8891,10 @@ void vScreenFrameBoundary() {
         // The scene flag retires the loader fix when the intro ends: the
         // same boundary the draw hook gates on, read at the frame edge.
         tkLoaderPanel.run([&] {
-            loaderPanelTick(g_state->ownerCtx,
-                            g_state->eyeDrawsLastFrame >= kSceneEyeDraws);
+            frameIntroLifecycleStage(
+                kIntroLifecycleLoader, g_state->ownerCtx,
+                g_state->eyeDrawsLastFrame >= kSceneEyeDraws ? 1u : 0u,
+                loaderPanelTick);
         });
     }
     State* s = g_state;
@@ -9839,9 +9877,13 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     uiLayerConfigure(cfg);
     scrimConfigure(cfg);
     quadProbeConfigure(cfg);
-    loaderPanelConfigure(cfg);
-    splashDimConfigure(cfg);
-    introPanelConfigure(cfg);
+    selectIntroVideoLifecycle();
+    configureIntroLifecycleStage(kIntroLifecycleLoader, cfg,
+                                 loaderPanelConfigure);
+    configureIntroLifecycleStage(kIntroLifecycleSplashDim, cfg,
+                                 splashDimConfigure);
+    configureIntroLifecycleStage(kIntroLifecyclePanel, cfg,
+                                 introPanelConfigure);
     configureIntroVideoLifecycle(cfg);
     sharpenPassConfigure(cfg);
     temporalPassConfigure(cfg);
@@ -9849,7 +9891,8 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     screenMotionConfigure(cfg);
     pluginRegistryConfigure(&cfg);
     depthProbeConfigure(cfg);
-    backdropConfigure(cfg);
+    configureIntroLifecycleStage(kIntroLifecycleBackdrop, cfg,
+                                 backdropConfigure);
     fssPanelConfigure(cfg);
     fssRevealConfigure(cfg);
     // The engine fix. See the other call site's comment above.
@@ -10215,9 +10258,9 @@ void shutdownVScreenFixes() {
     scrimShutdown();
     quadProbeShutdown();
     wakePulseShutdown();
-    loaderPanelShutdown();
-    splashDimShutdown();
-    backdropShutdown();
+    shutdownIntroLifecycleStage(kIntroLifecycleLoader, loaderPanelShutdown);
+    shutdownIntroLifecycleStage(kIntroLifecycleSplashDim, splashDimShutdown);
+    shutdownIntroLifecycleStage(kIntroLifecycleBackdrop, backdropShutdown);
     fssPanelShutdown();
     fssPanelRectShutdown();
     fssRevealShutdown();
@@ -10226,8 +10269,8 @@ void shutdownVScreenFixes() {
     // Both halves of the intro. Neither was on this roll-call, so a session
     // that ended without a rendered scene ever arriving -- quitting from the
     // menu -- freed nothing at all.
-    introPanelShutdown();
-    introCurveShutdown();
+    shutdownIntroLifecycleStage(kIntroLifecyclePanel, introPanelShutdown);
+    shutdownIntroLifecycleStage(kIntroLifecycleCurve, introCurveShutdown);
     shutdownIntroVideoLifecycle();
     temporalPassShutdown();
     // The scheduler stack probe (advanced.scheduler_probe) is configured by

@@ -34,6 +34,12 @@ typedef void (*EdvrPluginFrameFn)(void* state, uint32_t sceneFrame);
 typedef void (*EdvrPluginDrawFn)(void* state, const char* claimId,
                                  ID3D11DeviceContext* context);
 typedef void (*EdvrPluginShutdownFn)(void* state);
+typedef void (*EdvrPluginConfigureStageFn)(void* state, uint32_t stage,
+                                           void* config);
+typedef void (*EdvrPluginFrameStageFn)(void* state, uint32_t stage,
+                                       ID3D11DeviceContext* context,
+                                       uint32_t sceneFrame);
+typedef void (*EdvrPluginShutdownStageFn)(void* state, uint32_t stage);
 
 // Separate lifecycle registration for modules whose lifetime is owned by a
 // specific core callsite. The legacy draw registry has a partial-host lifetime:
@@ -49,7 +55,16 @@ struct EdvrPluginLifecycleOps {
     EdvrPluginConfigureFn configure;
     EdvrPluginFrameFn frame;
     EdvrPluginShutdownFn shutdown;
+    // Optional staged callbacks append after the original lifecycle prefix.
+    // Consumers must check structSize through each field before reading it.
+    EdvrPluginConfigureStageFn configureStage;
+    EdvrPluginFrameStageFn frameStage;
+    EdvrPluginShutdownStageFn shutdownStage;
 };
+static_assert(offsetof(EdvrPluginLifecycleOps, configureStage) ==
+                  offsetof(EdvrPluginLifecycleOps, shutdown) +
+                      sizeof(EdvrPluginShutdownFn),
+              "staged callbacks must remain after the legacy lifecycle prefix");
 
 struct EdvrPluginOps {
     uint32_t structSize;
@@ -115,6 +130,13 @@ bool pluginRegistryHasLifecycle(uint32_t manifestIndex);
 void pluginRegistryConfigureLifecycle(uint32_t manifestIndex, void* config);
 void pluginRegistryFrameLifecycle(uint32_t manifestIndex, uint32_t sceneFrame);
 void pluginRegistryShutdownLifecycle(uint32_t manifestIndex);
+bool pluginRegistryConfigureLifecycleStage(uint32_t manifestIndex,
+                                           uint32_t stage, void* config);
+bool pluginRegistryFrameLifecycleStage(uint32_t manifestIndex, uint32_t stage,
+                                       ID3D11DeviceContext* context,
+                                       uint32_t sceneFrame);
+bool pluginRegistryShutdownLifecycleStage(uint32_t manifestIndex,
+                                          uint32_t stage);
 bool pluginRegistryProfileSupports(uint32_t manifestIndex);
 bool pluginRegistryWantsStartupHooks(void* config);
 bool pluginRegistryRegisterLegacyDrawGate(const char* stableName,

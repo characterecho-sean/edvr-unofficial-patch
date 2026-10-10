@@ -58,6 +58,11 @@ bool legacyInterestNeedsShaderObserver() {
     return false;
 }
 
+template <typename T>
+bool lifecycleFieldPresent(const EdvrPluginLifecycleOps* ops, size_t offset) {
+    return ops && ops->structSize >= offset + sizeof(T);
+}
+
 void observeCanonicalShaderPair() {
     pluginRegistryOnShaderBind(bindingShaderHash(BindSlot::Vs),
                                bindingShaderHash(BindSlot::Ps));
@@ -190,7 +195,9 @@ bool pluginRegistryRegister(const EdvrPluginOps* ops) {
 }
 
 bool pluginRegistryRegisterLifecycle(const EdvrPluginLifecycleOps* ops) {
-    if (!ops || ops->structSize < sizeof(EdvrPluginLifecycleOps) ||
+    constexpr size_t kLegacyLifecycleSize =
+        offsetof(EdvrPluginLifecycleOps, configureStage);
+    if (!ops || ops->structSize < kLegacyLifecycleSize ||
         !ops->manifestId || !*ops->manifestId || !ops->configure ||
         !ops->frame || !ops->shutdown || ops->manifestIndex >= kMaxPlugins)
         return false;
@@ -237,6 +244,43 @@ void pluginRegistryShutdownLifecycle(uint32_t manifestIndex) {
     // Detach first so a callback that re-enters shutdown is harmless.
     g_lifecyclePlugins[manifestIndex] = nullptr;
     ops->shutdown(ops->state);
+}
+
+bool pluginRegistryConfigureLifecycleStage(uint32_t manifestIndex,
+                                           uint32_t stage, void* config) {
+    if (manifestIndex >= kMaxPlugins) return false;
+    const EdvrPluginLifecycleOps* const ops = g_lifecyclePlugins[manifestIndex];
+    if (!lifecycleFieldPresent<EdvrPluginConfigureStageFn>(
+            ops, offsetof(EdvrPluginLifecycleOps, configureStage)) ||
+        !ops->configureStage)
+        return false;
+    ops->configureStage(ops->state, stage, config);
+    return true;
+}
+
+bool pluginRegistryFrameLifecycleStage(uint32_t manifestIndex, uint32_t stage,
+                                       ID3D11DeviceContext* context,
+                                       uint32_t sceneFrame) {
+    if (manifestIndex >= kMaxPlugins) return false;
+    const EdvrPluginLifecycleOps* const ops = g_lifecyclePlugins[manifestIndex];
+    if (!lifecycleFieldPresent<EdvrPluginFrameStageFn>(
+            ops, offsetof(EdvrPluginLifecycleOps, frameStage)) ||
+        !ops->frameStage)
+        return false;
+    ops->frameStage(ops->state, stage, context, sceneFrame);
+    return true;
+}
+
+bool pluginRegistryShutdownLifecycleStage(uint32_t manifestIndex,
+                                          uint32_t stage) {
+    if (manifestIndex >= kMaxPlugins) return false;
+    const EdvrPluginLifecycleOps* const ops = g_lifecyclePlugins[manifestIndex];
+    if (!lifecycleFieldPresent<EdvrPluginShutdownStageFn>(
+            ops, offsetof(EdvrPluginLifecycleOps, shutdownStage)) ||
+        !ops->shutdownStage)
+        return false;
+    ops->shutdownStage(ops->state, stage);
+    return true;
 }
 
 bool pluginRegistryProfileSupports(uint32_t manifestIndex) {
