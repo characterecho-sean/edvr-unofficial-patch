@@ -16,11 +16,9 @@
   section 82; `edvr_gfx_20260930_161545.log`, v0.18.0-rc.4-104-gbde47f81).
   Sean's direction: every view's temporal-AA motion comes from the game camera
   that renders it, not head heuristics.
-- **Keys:** none. `experimental.on_foot_maps_sharp` (default ON since
-  2026-10-01; it covered menus too) and `experimental.temporal_aa_on_foot_world`
-  were removed in the 2026-10 key cull: the gate and the VR world route are
-  always on, so there is no "off" leg to compare against. `advanced.vr_camera_census`
-  (episodes, naming runs and the detour's CPU ride it) is the one key left here.
+- **Keys:** the maps gate and the world route lost their switches in the
+  2026-10 cull (always on; no "off" leg). `advanced.vr_camera_census`
+  (episodes, naming runs, the detour's CPU) is the one key left.
 - **Trigger (Sean's correction):** the maps smear when dragged ON FOOT,
   where the game draws them into the 2D panel. The gate keeps the panel in
   the eye route (the journal says on foot), nothing names its camera, and

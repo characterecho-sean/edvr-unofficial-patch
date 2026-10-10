@@ -14,8 +14,7 @@ State, Open and Ruled-out bullets are verbatim in "Status detail".*
   - Native OpenXR builds its session once inside `VR_InitInternal`, so the
     removed `fix.vr_handover = early` has no analogue; the movie already
     plays on the splash's screen, world-locked (2026-09-15 18:30 flight).
-  - NGX warm-up (always on since the 2026-10 key cull; it was
-    `advanced.temporal_aa_warm`, default on): BUILT
+  - NGX warm-up (always on since the 2026-10 cull): BUILT
     2026-09-15, NOT FLOWN. First Submit cost 857 ms; eye 0's create is
     <= 58 ms, the ~760 ms before it UNSPLIT (NGX init, five 16-MP history
     textures, UI-resolve compile); the per-stage ms lines split it.
