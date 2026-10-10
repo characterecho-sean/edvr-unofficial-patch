@@ -475,6 +475,12 @@ void testGate() {
     check(hdrWith(UiLayerFamily::kHolo, [](UiLayerDrawFacts& g) { g.blend = UiBlendShape::kPremulOver; }) ==
               UiLayerDecision::kRedirect,
           "the holo panels' premultiplied-over is taken into the HDR layer");
+    // The map families draw SRC_ALPHA over (flight 081437): the shared HDR take accepts it as the HUD's over, not refused.
+    check(hdrWith(UiLayerFamily::kMapCanvas, [](UiLayerDrawFacts& g) { g.blend = UiBlendShape::kOver; }) ==
+                  UiLayerDecision::kRedirect &&
+              hdrWith(UiLayerFamily::kMapSprite, [](UiLayerDrawFacts& g) { g.blend = UiBlendShape::kOver; }) ==
+                  UiLayerDecision::kRedirect,
+          "the map canvas and the map sprites (SRC_ALPHA over) are taken into the HDR layer");
     check(hdrWith(UiLayerFamily::kHolo, [](UiLayerDrawFacts& g) { g.blend = UiBlendShape::kOpaque; }) ==
               UiLayerDecision::kRedirect,
           "an opaque holo draw is taken into the HDR layer");
@@ -1148,8 +1154,65 @@ void testFlatLayerRules() {
               !flatUiLayerTakesFamily(UiLayerFamily::kPanel) && !flatUiLayerTakesFamily(UiLayerFamily::kGuiDirect) &&
               !flatUiLayerTakesFamily(UiLayerFamily::kNone) && !flatUiLayerTakesFamily(UiLayerFamily::kAfterUi),
           "flat layer: the scene lines, the 2D screen, the menus, the panels' rasterisation and the after-UI take are not");
-    for (UiLayerFamily f : {UiLayerFamily::kHolo, UiLayerFamily::kFlightHud, UiLayerFamily::kSprite})
+    for (UiLayerFamily f : {UiLayerFamily::kHolo, UiLayerFamily::kFlightHud, UiLayerFamily::kSprite, UiLayerFamily::kMapCanvas,
+                            UiLayerFamily::kMapSprite})
         check(uiLayerFamilyTakesHdr(f), "flat layer: every family it asks for is one the shared HDR take draws");
+    // The System Map's two families (2026-10-10, flat draw census flight 081437): asked only while a map is open (GuiFocus 6,
+    // 7 or 8) and only on the HDR target (flatUiMapFamilyOf); no VR classifier names them.
+    check(flatUiLayerTakesFamily(UiLayerFamily::kMapCanvas) && flatUiLayerTakesFamily(UiLayerFamily::kMapSprite),
+          "map families: the canvas and the sprites are asked for");
+    check(std::strcmp(uiLayerFamilyName(UiLayerFamily::kMapCanvas), "map canvas") == 0 &&
+              std::strcmp(uiLayerFamilyName(UiLayerFamily::kMapSprite), "map sprite") == 0,
+          "map families: named \"map canvas\" and \"map sprite\" in the 30 s line");
+    {
+        static const uint64_t kCanvasVs = 0x12382D2EA45E9632ull, kCanvasPs = 0x855C469156AB997Full;
+        static const uint64_t kSpriteVs = 0xC31238331D8AC3D4ull, kSpritePsA = 0xBD0FEB3276C8B2D7ull,
+                              kSpritePsB = 0x539A4858CE3A3477ull;
+        static const uint64_t kUnrelatedVs = 0x1111222233334444ull, kUnrelatedPs = 0x5555666677778888ull;
+        // With a map open on the HDR target, the canvas pair is the canvas and both sprite pairs are sprites.
+        check(flatUiMapFamilyOf(kCanvasVs, kCanvasPs, true, true) == UiLayerFamily::kMapCanvas,
+              "map families: the canvas pair, with a map open on the HDR target, is the canvas");
+        check(flatUiMapFamilyOf(kSpriteVs, kSpritePsA, true, true) == UiLayerFamily::kMapSprite &&
+                  flatUiMapFamilyOf(kSpriteVs, kSpritePsB, true, true) == UiLayerFamily::kMapSprite,
+              "map families: both sprite pairs (BD0F on the Galaxy and the Orrery, 539A on the System Map) are sprites");
+        // The gate: with no map open, or on any target that is not the HDR class, neither family is named.
+        check(flatUiMapFamilyOf(kCanvasVs, kCanvasPs, false, true) == UiLayerFamily::kNone &&
+                  flatUiMapFamilyOf(kSpriteVs, kSpritePsB, false, true) == UiLayerFamily::kNone,
+              "map families: with no map open (GuiFocus not 6, 7 or 8) neither is named");
+        check(flatUiMapFamilyOf(kCanvasVs, kCanvasPs, true, false) == UiLayerFamily::kNone &&
+                  flatUiMapFamilyOf(kSpriteVs, kSpritePsA, true, false) == UiLayerFamily::kNone,
+              "map families: and neither on a target that is not the HDR class");
+        // Only the pairs: a shader mixed across the two families, or an unrelated pair, stays kNone.
+        check(flatUiMapFamilyOf(kCanvasVs, kSpritePsA, true, true) == UiLayerFamily::kNone &&
+                  flatUiMapFamilyOf(kSpriteVs, kCanvasPs, true, true) == UiLayerFamily::kNone &&
+                  flatUiMapFamilyOf(kUnrelatedVs, kUnrelatedPs, true, true) == UiLayerFamily::kNone,
+              "map families: a canvas or sprite vertex shader with another pixel shader, and an unrelated pair, stay kNone");
+        // The flat draw's family: the map families first, the shared rule otherwise (which names none of these pairs).
+        check(flatUiFamilyFor(kCanvasVs, kCanvasPs, true, true) == UiLayerFamily::kMapCanvas &&
+                  flatUiFamilyFor(kSpriteVs, kSpritePsB, true, true) == UiLayerFamily::kMapSprite,
+              "flatUiFamilyFor: the map families with a map open on the HDR target");
+        check(flatUiFamilyOf(kCanvasVs, kCanvasPs) == UiLayerFamily::kNone &&
+                  flatUiFamilyFor(kCanvasVs, kCanvasPs, false, true) == UiLayerFamily::kNone &&
+                  flatUiFamilyFor(kSpriteVs, kSpritePsA, false, true) == UiLayerFamily::kNone &&
+                  flatUiFamilyFor(kUnrelatedVs, kUnrelatedPs, true, true) == UiLayerFamily::kNone,
+              "flatUiFamilyFor: with no map open the pairs are kNone, as the shared rule has them");
+        // VR: the classifier names neither pair, on the HDR target (kind 1) or the post-tonemap one (kind 2).
+        for (int kind = 1; kind <= 2; ++kind) {
+            UiFamilyFacts vf;
+            vf.targetKind = kind;
+            vf.vs = kCanvasVs;
+            vf.ps = kCanvasPs;
+            UiFamilyFacts sf = vf;
+            sf.vs = kSpriteVs;
+            sf.ps = kSpritePsA;
+            UiFamilyFacts sf2 = sf;
+            sf2.ps = kSpritePsB;
+            check(uiLayerFamilyFor(vf) == UiLayerFamily::kNone && uiLayerFamilyFor(sf) == UiLayerFamily::kNone &&
+                      uiLayerFamilyFor(sf2) == UiLayerFamily::kNone,
+                  kind == 1 ? "map families, VR: uiLayerFamilyFor names neither pair on the HDR target"
+                            : "map families, VR: uiLayerFamilyFor names neither pair on the post-tonemap target");
+        }
+    }
     // The jitter: rows that carry the phase (0.25, -0.375) px at 1920x1080 measure ndc (2 x 0.25 / 1920, -2 x -0.375 / 1080).
     const uint32_t w = 1920, h = 1080;
     const float px = 0.25f, py = -0.375f;
@@ -1463,11 +1526,12 @@ void testSupercruiseLines() {
         const UiLayerFamily fam = static_cast<UiLayerFamily>(i);
         const bool expectHdr = fam == UiLayerFamily::kHolo || fam == UiLayerFamily::kFlightHud || fam == UiLayerFamily::kSprite ||
                                fam == UiLayerFamily::kHoloGeneric || fam == UiLayerFamily::kOrbitLines ||
-                               fam == UiLayerFamily::kSupercruiseBars || fam == UiLayerFamily::kSpaceDust;
+                               fam == UiLayerFamily::kSupercruiseBars || fam == UiLayerFamily::kSpaceDust ||
+                               fam == UiLayerFamily::kMapCanvas || fam == UiLayerFamily::kMapSprite;
         takesHdr = takesHdr && uiLayerFamilyTakesHdr(fam) == expectHdr;
         sceneLines = sceneLines && uiLayerFamilyIsSceneLines(fam) == (fam == UiLayerFamily::kOrbitLines || fam == UiLayerFamily::kSupercruiseBars);
     }
-    check(takesHdr, "SC3a: uiLayerFamilyTakesHdr is exactly the holo panels, flight HUD, sprite, holograms, orbit lines, bars and space dust");
+    check(takesHdr, "SC3a: uiLayerFamilyTakesHdr is exactly the holo panels, flight HUD, sprite, holograms, orbit lines, bars, space dust and the two map families");
     check(sceneLines, "SC3b: uiLayerFamilyIsSceneLines is exactly the orbit lines and the bars (the space dust has no width to give: it is exempt from the density rule)");
     check(uiLayerWiderThanRender(5040, 4873, 2016, 1949) && uiLayerWiderThanRender(4032, 3898, 2016, 1949) &&
               !uiLayerWiderThanRender(2016, 1949, 2016, 1949) && !uiLayerWiderThanRender(4032, 1949, 4032, 1949) &&

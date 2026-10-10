@@ -39,9 +39,13 @@
 - **0.19.0 review (10-09), finding 3:** the Supersampling setter's panel factor is
   held until the scene's size follows it, its epoch check and write one operation
   under the floats' lock (last entry; built, not flown).
+- **System Map families (10-10, built, not flown):** `kMapCanvas` and `kMapSprite`
+  (flat only; asked while GuiFocus 6, 7 or 8 is open, on the HDR target) go into the
+  flat UI layer like the HUD families, so they are drawn at D x T after the upscale.
+  The "flat ui layer map:" 30 s line counts them and names each refusal. Entry at the end.
 - **Temporary config keys:** none.
 - **Next:** fly SS 0.5 on the shipped build (the copy route under eced5813's
-  admission change) and 100% at SS 1.0.
+  admission change) and 100% at SS 1.0; then an Epic flight opening all three maps.
 
 Bring VR's source-panel quality and separate UI composition to flat Elite:
 retain fine text below display-resolution world rendering; avoid UI history
@@ -455,3 +459,49 @@ for the right factor. The review's scratch check shows the reversed factor; it d
   arrival unsettled, no timeout, timeout off by one, no restart, hold publishes, forget keeps the hold, keep tolerance zero, refused frame does not unsettle, arrival
   ignores the size, and three glue edits).
 - 2026-10-09, follow-up review of dbbbcf03, finding 2 (built, not flown): a setter that landed between the boundary's epoch read and its write was overwritten (epoch 0 read, setter 0.400 and epoch 1, 0.800 written back, then a hold on it). The boundary's epoch read, decision, publish and write (`uiFlatPanelBoundarySection`) and the setter's published-plan read, factor write and epoch (`uiPanelSetterSection`) are now each ONE operation under `g_floatLock`, the floats' lock; under it only atomics, `UiFlatPanelSettle::step`, the move arithmetic, the floats' write (`writeFloatsUnlocked`) and one load of the scene's size; the live Supersampling is read before it and the log written after. Tests: `testRace` injects a setter at each point of the boundary's section (including a boundary that writes 0.533), before its lock, and a boundary into the setter's; mutants that drop either lock, read the epoch outside it, or lock only the write fail them.
+
+## 2026-10-10: the System Map's draws into the flat UI layer (built, not flown)
+
+Census (flat draw census, flight 081437): every draw is a TRISTRIP quad into the HDR scene (R11G11B10F, 3840x2160), depth off, alpha over (SRC_ALPHA, INV_SRC_ALPHA),
+VS SRVs t1/t6 from the instanced pool, CB c=@46.
+- `kMapCanvas`: VS 12382D2EA45E9632, PS 855C469156AB997F, n=6. PS slot 0 is a GUI canvas (RGBA8), or on the System Map a 1024x1024 BC3. 45 a frame on the
+  Galaxy Map, 10 on the System Map, 8 on the Orrery; absent in the cockpit.
+- `kMapSprite`: VS C31238331D8AC3D4 with PS BD0FEB3276C8B2D7 (n=6, a 64x64 or 128x128 BC3/BC7 icon) and with PS 539A4858CE3A3477 (n=12, System Map). 172 a frame
+  on the Galaxy Map, 14 on the Orrery, 5 on the System Map.
+- Stays in the scene: the additive star and dust fields (41C518.., 7D26BC.., 39D858..).
+
+The canvas VS was seen before. The 2026-09-23 VR session logged it as an always-on composite the ui depth rule left alone, as "samples a learned surface"
+(docs\ui-layer-2026-09-23.md, around line 1055). The VR classifier does not name it on the HDR target (uiLayerFamilyFor's HDR branch names only the pairs it
+named before), so the new families are flat-only by construction and also gated on the map being open.
+
+What was built:
+- Families: `kMapCanvas` and `kMapSprite`, appended before `kCount` (ui_layer_math.h), named "map canvas" and "map sprite", in `uiLayerFamilyTakesHdr`.
+  No VR classifier returns them; the two enum loops that walk `1..kCount` print only engaged or decided families, and the arrays sized `kCount` grow with them.
+- Classification: `flatUiMapFamilyOf(vs, ps, mapOpen, hdrTarget)` (flat_ui_layer_math.h) names the pairs only when a map is open and the target is the HDR class
+  (flatUiTargetClass). `flatUiFamilyFor` asks it first and falls back to `flatUiFamilyOf`. `flatUiLayerTakesFamily` lists both families.
+- Gate: GuiFocus is read ONCE per frame, at the frame boundary (`flatRuntimeMapFocusFrame`, flat_runtime.cpp). The map plane (focus 7) and the map families (6, 7, 8,
+  `flatRuntimeMapOpenFrame`) answer from that read, so a frame's answer does not change mid-frame. The map plane's behaviour is as before; it now reads at the frame
+  boundary rather than at the resolve, within the same frame.
+- Draws: `FlatUiLayerDraw.mapOpen` is filled where the draw is classified. A taken draw goes through the existing begin, issue, tone re-issue and composite path,
+  as the HUD families do. The issue count reads the family the decision stored, not a second classification.
+- Logs: the 30 s "flat ui layer families" line gains map-canvas and map-sprite. A new 30 s line, "flat ui layer map: open-frames=N; canvas asked=A taken=T refused=R
+  (reasons); sprite asked=... (reasons)", prints zeros too. The first take of each family is said once: "flat ui layer: the first map canvas taken -- frame N, vs ...".
+- Tests: ui_quality_test `testFlatLayerRules` (the takes list, the names, the gate on mapOpen and on the HDR class, the mixed and unrelated pairs, `flatUiFamilyFor`,
+  the VR classifier on both target kinds), the `SC3a` takes-HDR set, and the HDR decision for each family (kOver redirects).
+
+Mechanism, not yet shown in a flight:
+- Raster size. A taken draw rasterises into the layer at D x T, as the HUD families do. The canvas is a 4800x2700 texture at ui_quality 125, which is 3840x2160 x 1.25.
+  So the game may already draw the canvas at the panel factor, and the layer would then resample it rather than enlarge it. Unproven: a texel check needs a flight.
+- Sprites are fixed-size atlases (64 or 128 px). At 125 the layer magnifies them, where the game drew them at a fixed size. Unproven: what they look like at D x T.
+
+Risks, in order of how likely they are to make the take a no-op:
+1. The map draws may carry no camera rows, or no upstream camera owner. Then every draw refuses ("no-camera-rows" or "not-upstream") and nothing is taken. The map line
+   says which refusal it was.
+2. The map draws are straight-alpha over. The HUD families were measured premultiplied-over; the HDR take's straight over has not been flown.
+3. Draw order. The star and dust fields stay in the scene. If the game draws stars after a canvas, they now sit under the map's canvas (the layer composites last).
+   Not checked.
+
+Ruled out: none (new arc).
+
+Next: an Epic flat flight with all three maps opened (Galaxy, System, Orrery), at SS 1.0 and UI 125. Read the "flat ui layer map:" line in each window: the
+canvas and sprite asked counts show the gate; the reasons show what refused. Then look at a star field crossing a map.

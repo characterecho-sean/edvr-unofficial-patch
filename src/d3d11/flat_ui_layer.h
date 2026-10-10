@@ -46,6 +46,8 @@ struct FlatUiLayerDraw {
     uint32_t width = 0, height = 0;    // its colour target
     uint32_t format = 0;
     bool hdrTarget = false;            // that target is the scene's HDR target (flat_ui_layer_math.h FlatUiTarget::kHdr)
+    bool mapOpen = false;              // the Galaxy Map, the System Map or the Orrery is open this frame (GuiFocus 6, 7, 8: the
+                                       // frame's one read, flatRuntimeMapOpenFrame); gates the map families only
     bool otherWork = false;            // the scope does something else with the draw (a capture, an overlay, a substitution)
     bool upstream = false;             // the camera injector owns the jitter
     bool haveRows = false;             // `rows` are the draw's camera rows
@@ -58,7 +60,8 @@ enum class FlatUiLayerAsk : uint8_t { kNotAsked = 0, kDecided, kRefused };
 FlatUiLayerAsk flatUiLayerDecide(ID3D11DeviceContext* ctx, const FlatUiLayerDraw& draw);
 bool flatUiLayerBegin(ID3D11DeviceContext* ctx);   // false: the draw goes to the game's frame as always
 void flatUiLayerEnd(ID3D11DeviceContext* ctx);
-// Begin's answer for a decided draw, into the window's per-family counts (taken, or refused at issue).
+// Begin's answer for the decided draw (the last kDecided from flatUiLayerDecide, whose family it is), into the window's
+// per-family counts (taken, or refused at issue). Called only for a decided draw.
 void flatUiLayerNoteIssue(uint64_t vs, uint64_t ps, bool taken);
 // A decided draw that writes depth or stencil: its colourless re-issue into the game's buffer (uiLayerWriteBackBegin/End).
 bool flatUiLayerWriteBackBegin(ID3D11DeviceContext* ctx);
@@ -98,9 +101,10 @@ void flatUiLayerRelease();
 // layer's device children are all released first (uiLayerDeviceReset). The device is held for identity until then.
 void flatUiLayerNoteDevice(ID3D11Device* device);
 
-// Once a frame from the flat runtime's frame boundary: every 30 s the "flat ui layer" lines (flatUiLayerReport), zeros
-// included, every window of the flat profile -- a log without them is a build that never ran the adapter.
-void flatUiLayerFrame();
+// Once a frame from the flat runtime's frame boundary (mapOpen: this frame's map answer, counted as an open-map frame):
+// every 30 s the "flat ui layer" lines (flatUiLayerReport), zeros included, every window of the flat profile -- a log
+// without them is a build that never ran the adapter.
+void flatUiLayerFrame(bool mapOpen);
 void flatUiLayerReport(uint64_t windowSeconds);
 // The layer's state for the 30 s line: "live", or the shared not-live reason verbatim.
 const char* flatUiLayerState();

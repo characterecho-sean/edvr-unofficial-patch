@@ -600,22 +600,29 @@ struct State {
 };
 // Driver objects retire on the owner Present; never release under loader lock.
 State& state() { static State* p = new State; return *p; }
-// THE SYSTEM MAP'S PLANE (FlatMonoResolveFrame::mapPlane). Status.json's GuiFocus 7 is the System Map. The flat runtime asks the journal watcher's
-// flat reader (journalFlatGuiFocus) once per resolve, which is once per frame that reaches the resolver, and logs each change of answer once.
-// The flag is what the resolver's map-plane reduction and the prep's midpoint motion wait on; nothing else reads it.
+// THE SYSTEM MAP'S PLANE (FlatMonoResolveFrame::mapPlane) AND THE MAP FAMILIES (flat_ui_layer_math.h flatUiMapFamilyOf).
+// Status.json's GuiFocus 7 is the System Map, 6 the Galaxy Map, 8 the Orrery. The flat runtime reads the journal watcher's
+// flat reader (journalFlatGuiFocus) ONCE per frame, at the frame boundary (flatRuntimeMapFocusFrame), and every answer the
+// frame gives comes from that read: the map plane's flag (what the resolver's map-plane reduction and the prep's midpoint
+// motion wait on; nothing else reads it) and the map families' gate (flatRuntimeMapOpenFrame). A frame's answer does not
+// change mid-frame. Each change of the map plane's answer is logged once.
 struct MapPlaneWatch {
-    bool open = false;          // the last answer
+    bool open = false;          // the System Map open, this frame's answer (GuiFocus 7)
     bool focusKnown = false;    // the watcher has reported GuiFocus at least once this session
     uint32_t focus = 0;         // the last GuiFocus it reported, while known
+    bool frameKnown = false;    // this frame's read: the watcher reported a GuiFocus
+    uint32_t frameFocus = 0;    // ...and its value, while known
     uint32_t noted = 0;         // transition lines written
 };
 MapPlaneWatch& mapPlaneWatch() { static MapPlaneWatch* p = new MapPlaneWatch; return *p; }
 constexpr uint32_t kMapPlaneNoteCap = 64;
-bool flatRuntimeMapPlaneFrame() {
+void flatRuntimeMapFocusFrame() {
     MapPlaneWatch& w = mapPlaneWatch();
     uint32_t focus = 0;
     const bool known = journalFlatGuiFocus(&focus);
     if (known) { w.focusKnown = true; w.focus = focus; }
+    w.frameKnown = known;
+    w.frameFocus = known ? focus : 0;
     const bool open = known && focus == 7;
     if (open != w.open) {
         w.open = open;
@@ -629,7 +636,13 @@ bool flatRuntimeMapPlaneFrame() {
                 Log::get().note("flat map motion: the System Map is closed (GuiFocus unknown); pixels with no depth are at infinity again");
         }
     }
-    return open;
+}
+// The System Map's plane, this frame (the frame's read).
+bool flatRuntimeMapPlaneFrame() { return mapPlaneWatch().open; }
+// The Galaxy Map (6), the System Map (7) or the Orrery (8) is open, this frame (the frame's read): the map families' gate.
+bool flatRuntimeMapOpenFrame() {
+    const MapPlaneWatch& w = mapPlaneWatch();
+    return w.frameKnown && (w.frameFocus == 6 || w.frameFocus == 7 || w.frameFocus == 8);
 }
 // Row 275's size and its frame-to-frame step (design doc section 104). The float32 spacing at that size is the finest step the camera
 // term can see: a walking step near it reaches the upscaler quantised.
@@ -3679,7 +3692,8 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     s.phaseCensusPending=s.work != FlatWork::Paused;
     s.phaseCensusFailed=false;
     s.prefix.output = output.Get(); s.prefix.width = d.Width; s.prefix.height = d.Height; s.prefix.format = d.Format;
-    flatUiLayerFrame();   // fix.ui_quality's flat layer: its 30 s lines (flat_ui_layer.h)
+    flatRuntimeMapFocusFrame();                   // the frame's one GuiFocus read: the map plane and the map families answer from it
+    flatUiLayerFrame(flatRuntimeMapOpenFrame());  // fix.ui_quality's flat layer: its 30 s lines (flat_ui_layer.h)
     if(s.namingVetoedThisFrame) {
         // A frame that vetoed a draw: if the world was named anyway the veto did its work; if nothing named it, the reference may be the
         // one that is wrong, and the third such frame in a row gives it up (the next naming and the next H select a new one).
@@ -5406,6 +5420,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
             ui.format = k.format;
             ui.hdrTarget = flatUiTargetClass(k.color && k.color == s.prefix.output, k.width, k.height, k.format,
                                              s.prefix.width, s.prefix.height, sceneRw, sceneRh) == FlatUiTarget::kHdr;
+            ui.mapOpen = flatRuntimeMapOpenFrame();   // this frame's map answer (the frame's one read): gates the map families only
             ui.otherWork = producer || (projection && projection->active()) || drawCaptureStarted || drawPacket ||
                            overlayPlanned || foregroundPlanned || untrustedPlanned || domainPlanned ||
                            weaponFootprintStarted || d.overlayProtected || d.alternateHdr;

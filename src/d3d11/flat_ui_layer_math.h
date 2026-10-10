@@ -38,10 +38,34 @@ inline UiLayerFamily flatUiFamilyOf(uint64_t vs, uint64_t ps) {
     return uiLayerFamilyFor(f);
 }
 
+// THE SYSTEM MAP'S DRAWS (flat draw census, flight 081437, 2026-10-10): the GUI canvas composite and the icon sprites the
+// Galaxy Map (GuiFocus 6), the System Map (7) and the Orrery (8) draw into the scene's HDR target. Named only while one of
+// those maps is open AND the target is the HDR class: the same pairs with no map open, or on another target, are not the
+// family. The canvas is the always-on composite the 2026-09-23 VR session also saw (docs\ui-layer-2026-09-23.md), which is
+// why no VR classifier names it: this rule is flat's, and GuiFocus-gated.
+constexpr uint64_t kFlatUiMapCanvasVs = 0x12382D2EA45E9632ull;
+constexpr uint64_t kFlatUiMapCanvasPs = 0x855C469156AB997Full;
+constexpr uint64_t kFlatUiMapSpriteVs = 0xC31238331D8AC3D4ull;
+constexpr uint64_t kFlatUiMapSpritePsA = 0xBD0FEB3276C8B2D7ull;  // the 64x64 / 128x128 BC3 / BC7 icons (Galaxy, Orrery)
+constexpr uint64_t kFlatUiMapSpritePsB = 0x539A4858CE3A3477ull;  // the System Map's sprites (n=12)
+inline UiLayerFamily flatUiMapFamilyOf(uint64_t vs, uint64_t ps, bool mapOpen, bool hdrTarget) {
+    if (!mapOpen || !hdrTarget) return UiLayerFamily::kNone;
+    if (vs == kFlatUiMapCanvasVs && ps == kFlatUiMapCanvasPs) return UiLayerFamily::kMapCanvas;
+    if (vs == kFlatUiMapSpriteVs && (ps == kFlatUiMapSpritePsA || ps == kFlatUiMapSpritePsB)) return UiLayerFamily::kMapSprite;
+    return UiLayerFamily::kNone;
+}
+
+// A draw's family in the flat layer: the map families first (only with a map open, on the HDR target), then the shared rule.
+inline UiLayerFamily flatUiFamilyFor(uint64_t vs, uint64_t ps, bool mapOpen, bool hdrTarget) {
+    const UiLayerFamily map = flatUiMapFamilyOf(vs, ps, mapOpen, hdrTarget);
+    return map != UiLayerFamily::kNone ? map : flatUiFamilyOf(vs, ps);
+}
+
 // The families the flat layer asks the shared decision for: the cockpit HUD families the 2026-10-09 09:36 census found
-// drawn into the scene's HDR target before the resolve, jittered (the holo panels, the flight HUD, the target sprite).
-// The scene lines the VR layer also takes for density (the orbit lines, the supercruise bars, the space dust) are not
-// asked: they are scene geometry, upscaled with the world in flat as they always were.
+// drawn into the scene's HDR target before the resolve, jittered (the holo panels, the flight HUD, the target sprite),
+// and since 2026-10-10 the System Map's two (the map canvas and the map sprites, flatUiMapFamilyOf: asked only while a map
+// is open). The scene lines the VR layer also takes for density (the orbit lines, the supercruise bars, the space dust)
+// are not asked: they are scene geometry, upscaled with the world in flat as they always were.
 //
 // NOR THE HOLOGRAMS (2026-10-09 13:51 flight, the loading screen's ghost). A hologram is several pairs drawn together;
 // in flat only one of them (94D5C556DFD6D705 / 912477AEF6958379) carries camera rows the jitter can be read from, the
@@ -49,7 +73,8 @@ inline UiLayerFamily flatUiFamilyOf(uint64_t vs, uint64_t ps) {
 // upscale, the rest jittered through it, and the taken part flipping in and out of the layer as the route treated or
 // refused each frame. A family is taken whole or not at all, so the holograms stay in the game's frame, as before the port.
 inline bool flatUiLayerTakesFamily(UiLayerFamily f) {
-    return f == UiLayerFamily::kHolo || f == UiLayerFamily::kFlightHud || f == UiLayerFamily::kSprite;
+    return f == UiLayerFamily::kHolo || f == UiLayerFamily::kFlightHud || f == UiLayerFamily::kSprite ||
+           f == UiLayerFamily::kMapCanvas || f == UiLayerFamily::kMapSprite;
 }
 
 // The adapter's own refusals, before the shared decision is asked. Each leaves the draw in the game's frame as stock.

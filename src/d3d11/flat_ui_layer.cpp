@@ -17,6 +17,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <string>
 
 namespace edvr {
 
@@ -41,9 +42,17 @@ struct Window {
     uint64_t composites = 0, compositeNone = 0, bindFailed = 0;
     uint32_t inW = 0, inH = 0, outW = 0, outH = 0;  // the last copy's picture and the display
     double otherX = 0.0, otherY = 0.0;              // the last other-shift draw's measured shift, render pixels
+    // The System Map's two families (2026-10-10): the frames a map was open in, and per family (0 canvas, 1 sprite) the
+    // adapter's refusals and the shared decision's declines, by reason. Their asked/decided/taken/refused-at-issue are the
+    // family arrays above.
+    uint64_t mapOpenFrames = 0;
+    uint64_t mapRefused[2][kRefusals] = {};
+    uint64_t mapDeclined[2][kDecisions] = {};
 };
 Window g_w;
 FlatUiLayerAsk g_lastAsk = FlatUiLayerAsk::kNotAsked;
+UiLayerFamily g_decidedFamily = UiLayerFamily::kNone;  // the family of the last kDecided draw (flatUiLayerNoteIssue's)
+bool g_mapCanvasNoted = false, g_mapSpriteNoted = false;  // the once-only first take of each map family
 FlatUiToneProof g_proof;
 uint32_t g_candidateLines = 0;  // eight tone candidates logged, re-armed after a route, render-size or swap-chain change
 char g_candidateRoute[48] = "";
@@ -75,6 +84,37 @@ const char* decisionShort(size_t d) {
     }
 }
 
+// The map families' window slot (Window::mapRefused / mapDeclined), or -1 for every other family.
+int mapSlot(UiLayerFamily f) {
+    if (f == UiLayerFamily::kMapCanvas) return 0;
+    if (f == UiLayerFamily::kMapSprite) return 1;
+    return -1;
+}
+
+// One map family's refusals this window, by reason: the adapter's, the shared decision's, and the refusals at the game's
+// issue ("at-issue"). "other-work=2 late=1 at-issue=3", or "none".
+std::string mapReasons(const Window& w, int slot, uint64_t atIssue) {
+    std::string out;
+    const auto add = [&out](const char* name, uint64_t n) {
+        if (!n) return;
+        char buf[64];
+        std::snprintf(buf, sizeof(buf), "%s%s=%llu", out.empty() ? "" : " ", name, static_cast<unsigned long long>(n));
+        out += buf;
+    };
+    for (size_t r = 0; r < kRefusals; ++r) add(flatUiRefuseName(static_cast<FlatUiRefuse>(r)), w.mapRefused[slot][r]);
+    for (size_t d = 0; d < kDecisions; ++d) add(decisionShort(d), w.mapDeclined[slot][d]);
+    add("at-issue", atIssue);
+    return out.empty() ? "none" : out;
+}
+
+// The same refusals as one number (mapReasons' list, summed).
+uint64_t mapRefusedTotal(const Window& w, int slot, uint64_t atIssue) {
+    uint64_t n = atIssue;
+    for (size_t r = 0; r < kRefusals; ++r) n += w.mapRefused[slot][r];
+    for (size_t d = 0; d < kDecisions; ++d) n += w.mapDeclined[slot][d];
+    return n;
+}
+
 }  // namespace
 
 bool flatUiLayerOn() { return runtimeFlatProfile() && uiLayerCrispOn(); }
@@ -92,13 +132,16 @@ const char* flatUiLayerState() {
 FlatUiLayerAsk flatUiLayerDecide(ID3D11DeviceContext* ctx, const FlatUiLayerDraw& d) {
     g_lastAsk = FlatUiLayerAsk::kNotAsked;
     if (!ctx || !flatUiLayerOn()) return g_lastAsk;
-    const UiLayerFamily family = flatUiFamilyOf(d.vs, d.ps);
+    // The map families first (only with a map open, on the HDR target); otherwise the shared family rule, as it always was.
+    const UiLayerFamily family = flatUiFamilyFor(d.vs, d.ps, d.mapOpen, d.hdrTarget);
     if (!flatUiLayerTakesFamily(family)) return g_lastAsk;
     const size_t fi = static_cast<size_t>(family);
+    const int ms = mapSlot(family);
     ++g_w.asked[fi];
     g_lastAsk = FlatUiLayerAsk::kRefused;
     const auto refuse = [&](FlatUiRefuse r) {
         ++g_w.refused[static_cast<size_t>(r)];
+        if (ms >= 0) ++g_w.mapRefused[ms][static_cast<size_t>(r)];
         return g_lastAsk;
     };
     if (d.otherWork) return refuse(FlatUiRefuse::kOtherWork);
@@ -133,10 +176,14 @@ FlatUiLayerAsk flatUiLayerDecide(ID3D11DeviceContext* ctx, const FlatUiLayerDraw
     uiLayerFlatSetDraw(d.frame, j.jx, j.jy, d.width, d.height);
     if (!uiLayerDecide(ctx, static_cast<int>(family), true, false, 0)) {
         const int decision = uiLayerLastDecision();
-        if (decision >= 0 && static_cast<size_t>(decision) < kDecisions) ++g_w.declined[static_cast<size_t>(decision)];
+        if (decision >= 0 && static_cast<size_t>(decision) < kDecisions) {
+            ++g_w.declined[static_cast<size_t>(decision)];
+            if (ms >= 0) ++g_w.mapDeclined[ms][static_cast<size_t>(decision)];
+        }
         return g_lastAsk;
     }
     ++g_w.decided[fi];
+    g_decidedFamily = family;  // flatUiLayerNoteIssue counts this draw under it
     if (g_takenFrame != d.frame) {
         g_takenFrame = d.frame;
         g_takenTarget = d.color;
@@ -169,10 +216,24 @@ void flatUiLayerWriteBackEnd(ID3D11DeviceContext* ctx) {
 
 // The take's outcome, for the window: Begin's answer per family.
 void flatUiLayerNoteIssue(uint64_t vs, uint64_t ps, bool taken) {
-    const size_t fi = static_cast<size_t>(flatUiFamilyOf(vs, ps));
+    const size_t fi = static_cast<size_t>(g_decidedFamily);
     if (fi >= kFamilies) return;
-    if (taken) ++g_w.taken[fi];
-    else ++g_w.atIssue[fi];
+    if (!taken) {
+        ++g_w.atIssue[fi];
+        return;
+    }
+    ++g_w.taken[fi];
+    // The first take of each map family is said once, with its frame and pair (the first composite's note, for the maps).
+    const int ms = mapSlot(g_decidedFamily);
+    if (ms < 0) return;
+    bool& noted = ms == 0 ? g_mapCanvasNoted : g_mapSpriteNoted;
+    if (!noted) {
+        noted = true;
+        Log::get().note("flat ui layer: the first %s taken -- frame %llu, vs %016llX ps %016llX, into the flat HDR layer "
+                        "while a map is open (GuiFocus 6, 7 or 8); said once.",
+                        uiLayerFamilyName(g_decidedFamily), static_cast<unsigned long long>(g_takenFrame),
+                        static_cast<unsigned long long>(vs), static_cast<unsigned long long>(ps));
+    }
 }
 
 bool flatUiLayerToneAdmit(ID3D11DeviceContext* ctx, uint64_t frame, uint32_t renderW, uint32_t renderH, char kind,
@@ -369,8 +430,9 @@ void flatUiLayerRelease() {
                         "released; the next frame EDVR resolves arms a fresh door.");
 }
 
-void flatUiLayerFrame() {
+void flatUiLayerFrame(bool mapOpen) {
     if (!runtimeFlatProfile()) return;
+    if (mapOpen) ++g_w.mapOpenFrames;
     static uint64_t windowStartMs = 0;
     const uint64_t now = GetTickCount64();
     if (!windowStartMs) windowStartMs = now;
@@ -400,10 +462,13 @@ void flatUiLayerReport(uint64_t windowSeconds) {
                                        UiLayerFamily::kHoloGeneric};
     const size_t f0 = static_cast<size_t>(families[0]), f1 = static_cast<size_t>(families[1]),
                  f2 = static_cast<size_t>(families[2]), f3 = static_cast<size_t>(families[3]);
+    const size_t fc = static_cast<size_t>(UiLayerFamily::kMapCanvas), fs = static_cast<size_t>(UiLayerFamily::kMapSprite);
     Log::get().note(
         "flat ui layer families: holo-panels asked=%llu decided=%llu taken=%llu refused-at-issue=%llu; flight-hud "
         "asked=%llu decided=%llu taken=%llu refused-at-issue=%llu; target-sprite asked=%llu decided=%llu taken=%llu "
-        "refused-at-issue=%llu; holograms asked=%llu decided=%llu taken=%llu refused-at-issue=%llu",
+        "refused-at-issue=%llu; holograms asked=%llu decided=%llu taken=%llu refused-at-issue=%llu; map-canvas "
+        "asked=%llu decided=%llu taken=%llu refused-at-issue=%llu; map-sprite asked=%llu decided=%llu taken=%llu "
+        "refused-at-issue=%llu",
         static_cast<unsigned long long>(w.asked[f0]), static_cast<unsigned long long>(w.decided[f0]),
         static_cast<unsigned long long>(w.taken[f0]), static_cast<unsigned long long>(w.atIssue[f0]),
         static_cast<unsigned long long>(w.asked[f1]), static_cast<unsigned long long>(w.decided[f1]),
@@ -411,7 +476,21 @@ void flatUiLayerReport(uint64_t windowSeconds) {
         static_cast<unsigned long long>(w.asked[f2]), static_cast<unsigned long long>(w.decided[f2]),
         static_cast<unsigned long long>(w.taken[f2]), static_cast<unsigned long long>(w.atIssue[f2]),
         static_cast<unsigned long long>(w.asked[f3]), static_cast<unsigned long long>(w.decided[f3]),
-        static_cast<unsigned long long>(w.taken[f3]), static_cast<unsigned long long>(w.atIssue[f3]));
+        static_cast<unsigned long long>(w.taken[f3]), static_cast<unsigned long long>(w.atIssue[f3]),
+        static_cast<unsigned long long>(w.asked[fc]), static_cast<unsigned long long>(w.decided[fc]),
+        static_cast<unsigned long long>(w.taken[fc]), static_cast<unsigned long long>(w.atIssue[fc]),
+        static_cast<unsigned long long>(w.asked[fs]), static_cast<unsigned long long>(w.decided[fs]),
+        static_cast<unsigned long long>(w.taken[fs]), static_cast<unsigned long long>(w.atIssue[fs]));
+    // The System Map's line (2026-10-10): the frames a map was open in, and each map family's asked/taken/refused, with the
+    // refusals by reason (the adapter's and the shared decision's; "at-issue" is a refusal at the game's issue). Zeros print.
+    Log::get().note(
+        "flat ui layer map: open-frames=%llu; canvas asked=%llu taken=%llu refused=%llu (%s); sprite asked=%llu taken=%llu "
+        "refused=%llu (%s)",
+        static_cast<unsigned long long>(w.mapOpenFrames), static_cast<unsigned long long>(w.asked[fc]),
+        static_cast<unsigned long long>(w.taken[fc]), static_cast<unsigned long long>(mapRefusedTotal(w, 0, w.atIssue[fc])),
+        mapReasons(w, 0, w.atIssue[fc]).c_str(), static_cast<unsigned long long>(w.asked[fs]),
+        static_cast<unsigned long long>(w.taken[fs]), static_cast<unsigned long long>(mapRefusedTotal(w, 1, w.atIssue[fs])),
+        mapReasons(w, 1, w.atIssue[fs]).c_str());
     char declined[400] = "";
     size_t used = 0;
     for (size_t d = 0; d < kDecisions && used < sizeof(declined); ++d) {

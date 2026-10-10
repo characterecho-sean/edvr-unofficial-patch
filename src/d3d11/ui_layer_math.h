@@ -625,6 +625,12 @@ enum class UiLayerFamily : uint8_t {
                  // uiLayerFamilyOf/uiLayerFamilyFor -- uiLayerNoteOther
                  // assigns it, with the eye already known from the taken
                  // target, not derived by family.
+    kMapCanvas,  // flat only (flat_ui_layer_math.h flatUiMapFamilyOf, while GuiFocus 6, 7 or 8 -- the Galaxy Map,
+                 // the System Map, the Orrery -- is open): the map's GUI canvas composite (vs 12382D2EA45E9632 with
+                 // ps 855C469156AB997F), drawn into the HDR scene and taken into the flat UI layer. No VR classifier
+                 // names it: uiLayerFamilyFor's HDR branch never returns it.
+    kMapSprite,  // flat only, the same gate: a map's icon sprite (vs C31238331D8AC3D4 with ps BD0FEB3276C8B2D7, or
+                 // with ps 539A4858CE3A3477 on the System Map)
     kCount
 };
 
@@ -643,6 +649,8 @@ inline const char* uiLayerFamilyName(UiLayerFamily f) {
         case UiLayerFamily::kSupercruiseBars: return "supercruise bars";
         case UiLayerFamily::kSpaceDust: return "space dust";
         case UiLayerFamily::kAfterUi: return "after the UI";
+        case UiLayerFamily::kMapCanvas: return "map canvas";
+        case UiLayerFamily::kMapSprite: return "map sprite";
         default: return "none";
     }
 }
@@ -650,10 +658,13 @@ inline const char* uiLayerFamilyName(UiLayerFamily f) {
 // The families the crisp take draws into the eye's HDR layer when they are drawn into the lit HDR scene target (the
 // cockpit's holo panels, the flight HUD, the target sprite, the eight holograms, and the three supercruise draws: the
 // orbit lines, the bars and the space dust). The ONE list: ui_layer.cpp's decision and the rigs' routing model both ask it.
+// The two map families (kMapCanvas, kMapSprite) are in it too: the flat layer asks for them only while a map is open
+// (flat_ui_layer_math.h), and no VR family rule names them, so the VR take never reaches them.
 inline bool uiLayerFamilyTakesHdr(UiLayerFamily f) {
     return f == UiLayerFamily::kHolo || f == UiLayerFamily::kFlightHud || f == UiLayerFamily::kSprite ||
            f == UiLayerFamily::kHoloGeneric || f == UiLayerFamily::kOrbitLines ||
-           f == UiLayerFamily::kSupercruiseBars || f == UiLayerFamily::kSpaceDust;
+           f == UiLayerFamily::kSupercruiseBars || f == UiLayerFamily::kSpaceDust ||
+           f == UiLayerFamily::kMapCanvas || f == UiLayerFamily::kMapSprite;
 }
 
 // The two families that are scene geometry rather than interface: the layer takes them for DENSITY alone (their lines
