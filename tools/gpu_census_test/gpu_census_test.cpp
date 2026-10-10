@@ -868,7 +868,7 @@ void alteredFixCases() {
         check(byFix->find("\"-\" means no draw of that fix ran this window") != std::string::npos,
               "fix line: it says what '-' means");
         check(byFix->find("sun glare clamp") != std::string::npos && byFix->find("FSS reveal") != std::string::npos &&
-                  byFix->find("scanner-body resolve") != std::string::npos && byFix->find("menu backdrop") != std::string::npos,
+                  byFix->find("loading scrim") != std::string::npos && byFix->find("menu backdrop") != std::string::npos,
               "fix line: every named fix has its place on the line, ran or not");
     }
     check(g_lastLog.find("timer floor 100.0 us/pair") != std::string::npos && g_lastLog.find("spans timed 5,") != std::string::npos,

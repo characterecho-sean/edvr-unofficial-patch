@@ -144,7 +144,7 @@ tree, and they are laid out in that order below: cheapest fix first.
 | | Mechanism | Signature in the capture | Fix shape | Precedent |
 |---|---|---|---|---|
 | A | the kernel's rotation seed steps per pass, not per frame | eye A's and eye B's constant dumps differ in one stepping field | substitute eye A's constants into eye B's pass | `billboard_fix.h`, the panel-distance discipline; `dispatch_cb1_lend` |
-| B | the pass runs for one eye per frame, alternating | the pass's lines appear once a frame, eyes alternating | re-issue the pass for the missing eye with its own inputs | `scanner_body`, the lend, reversed |
+| B | the pass runs for one eye per frame, alternating | the pass's lines appear once a frame, eyes alternating | re-issue the pass for the missing eye with its own inputs | `scanner_body`, the lend, reversed (retired 2026-10-09, [scanner-body.md](scanner-body.md)) |
 | C | the noise is anchored to the pixel grid (and the buffer may be half size) | constants identical, both eyes every frame, the occlusion target differs by an uncorrelated grain | a transcribed replacement shader whose noise is hashed from world position | `shader_swap.h`; the sun-glare and particle transcriptions |
 
 And a fourth to rule out before any of them: EDVR itself, meaning the
@@ -197,7 +197,7 @@ Measured, with the source:
   that needs to know where the eye is has somewhere to get it.
 - **Every fix shape below has shipped once already.** Copying a per-eye
   resource from the first eye to the second (`exposure_fix.h`); lending
-  one draw a binding the other eye used (`scanner_body`,
+  one draw a binding the other eye used (`scanner_body`, since retired,
   [scanner-body.md](scanner-body.md)); substituting a copy of a draw's
   constants around that one draw and restoring the game's buffer after
   (`billboard_fix.h`, the panel-distance discipline); substituting a

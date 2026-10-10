@@ -74,6 +74,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "perf_monitor.h"
 #include "stall_watch.h"     // stallWatchBeat: the stall sampler's heartbeat, once per owned Present
 #include "vram_tick.h"       // vramWatchTick: the graphics memory watch, once per owned Present
+#include "vertex_resync_hook.h"   // vertexResyncInstall at startup, vertexResyncPoll once a second: the f3d vertex-buffer cache repair (both profiles)
 #include "frame_ticks.h"     // g_frameTicks: what the Present hook's own work cost, by name
 #include "boundary_tick.h"   // one fault budget per frame-boundary tick
 #include "vscreen.h"
@@ -1608,6 +1609,8 @@ void presentFrameBoundary() {
         // stood down there is nothing new to derive from.
         tkConfigRefresh.run([] {
             vScreenRefreshConfig();
+            // The vertex-buffer resync's 60 s count and its ten-minute heartbeat: it needs no vScreen State, so it is asked here, after the reload, in both profiles.
+            vertexResyncPoll(stampMs());
             // The four diagnostic keys follow the file too (the menu's Hotkeys page).
             configureDiagnosticHotkeys();
             g_state->fssModeLatchWanted =
@@ -2822,6 +2825,9 @@ void hookDevice(ID3D11Device* device) {
             installGlitchFrameFix();
             installVScreenFixes(device, ctxMode);
             flatTemporalStart(device);
+            // The game's own vertex-buffer cache repair (vertex_resync_hook.cpp): a CodeHook on Frontier's input-assembler flush, once, in BOTH profiles -- the stale
+            // cache is the game's, not VR's. A build that is not 332841 is one log line and nothing patched.
+            vertexResyncInstall();
 
             // AFTER BOTH INSTALLERS, and the order is the whole point. EDVR's
             // own commit writes two dozen entries of this table in the shared
@@ -3136,6 +3142,7 @@ void shutdownDeviceHooks() {
     // exposure fix's, so it comes off first.
     revertVScreenModeResolution();
     uiPanelScaleShutdown();  // fix.ui_quality's four operands, back to the game's
+    vertexResyncShutdown();  // the vertex-buffer resync's session line (the hook itself stays; the game's process exit says the line through Log::setExitLine)
     shutdownGlitchFrameFix();
     transitionFlashEyeBaseShutdown();
     shutdownVScreenFixes();

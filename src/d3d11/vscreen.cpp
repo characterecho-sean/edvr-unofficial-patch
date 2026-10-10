@@ -40,7 +40,6 @@
 #include "fss_panel.h"
 #include "fss_panel_rect.h"
 #include "fss_reveal.h"
-#include "resolve_bind_fix.h"
 #include "fss_res.h"
 #include "depth_probe.h"      // Phase 0 item 3: which depth target the eye draws use, and how it reads
 #include "sharpen_pass.h"      // likewise: warm-up and totals; the sharpening runs at submit
@@ -1516,10 +1515,6 @@ enum class DrawVerdict {
     // (fss_reveal.h): eye B drawn with eye A's scene constants, wrapped
     // in fssRevealBegin/End.
     kFssReveal,
-    // The deferred lighting resolve drawn with the scanner-body fix's
-    // input lend (fix.scanner_body, resolve_bind_fix.h), wrapped in
-    // resolveBindBegin/End.
-    kResolveBind,
     // A batched draw re-issued without some of its quads (advanced.
     // census_skip_quad). Swallows the game's draw and makes up to two of its
     // own, so it must not be combined with anything that also draws.
@@ -1677,7 +1672,6 @@ bool drawGateSubscribed(State* s) {
         s->quadSkipArmed ||
         s->censusAutoW != 0 || fssResActive() ||
         fssPanelWantsDraws() || fssRevealWantsDraws() ||
-        resolveBindWants() ||
         remlokWantsDraws() || holoWantsDraws() || targetSharpWantsDraws() ||
         uiDepthWantsDraws() ||
         sunglareWantsDraws() ||
@@ -2528,19 +2522,6 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         fssRevealOnEyeDraw(self, kind, count, instances)) {
         if (s->fssArrivalOpen) ++s->fssArrivalRecogs;
         return DrawVerdict::kFssReveal;
-    }
-
-    // The scanner-body fix's resolve (the black planet, 2026-08-30):
-    // recognised by its PIXEL shader hash, so it is asked LAST -- every fix
-    // above it that swaps a shader has already had its say.
-    // resolveBindShadowSaysNo (resolve_bind_fix.h) is the fix's own first
-    // answer from the shadow, inline: a held shader whose hash is not the
-    // resolve's is a false the call gives without touching anything.
-    if (resolveBindWants() &&
-        !resolveBindShadowSaysNo(bindingGet(BindSlot::Ps) != nullptr,
-                                 bindingShaderHash(BindSlot::Ps)) &&
-        resolveBindOnEyeDraw(self)) {
-        return DrawVerdict::kResolveBind;
     }
 
     // The sun-glare element train: off skips it, first:K clamps it, and the
@@ -3583,7 +3564,6 @@ __declspec(noinline) void forwardVerdictBegin(ID3D11DeviceContext* self, DrawVer
     case DrawVerdict::kRemlok:       remlokScissorBegin(self); break;
     case DrawVerdict::kFssPanel:     fssPanelBegin(self); break;
     case DrawVerdict::kFssReveal:    fssRevealBegin(self); break;
-    case DrawVerdict::kResolveBind:  resolveBindBegin(self); break;
     case DrawVerdict::kHolo:         holoBegin(self); break;
     case DrawVerdict::kTargetSharp:  targetSharpBegin(self); break;
     case DrawVerdict::kNightVision:  nightVisionBegin(self); break;
@@ -3604,7 +3584,6 @@ __declspec(noinline) void forwardVerdictEnd(ID3D11DeviceContext* self, DrawVerdi
     case DrawVerdict::kNightVision:  nightVisionEnd(self); break;
     case DrawVerdict::kHolo:         holoEnd(self); break;
     case DrawVerdict::kFssReveal:    fssRevealEnd(self); break;
-    case DrawVerdict::kResolveBind:  resolveBindEnd(self); break;
     case DrawVerdict::kFssPanel:     fssPanelEnd(self); break;
     case DrawVerdict::kRemlok:       remlokScissorEnd(self); break;
     default: break;   // kBackdrop: issued inline, before the splash re-issue
@@ -3632,7 +3611,6 @@ constexpr AlteredFix alteredFixOf(DrawVerdict v) noexcept {
     case DrawVerdict::kParticle:     return AlteredFix::Particle;
     case DrawVerdict::kFssPanel:     return AlteredFix::FssPanel;
     case DrawVerdict::kFssReveal:    return AlteredFix::FssReveal;
-    case DrawVerdict::kResolveBind:  return AlteredFix::ResolveBind;
     case DrawVerdict::kScrim:        return AlteredFix::Scrim;
     case DrawVerdict::kBackdrop:     return AlteredFix::Backdrop;
     case DrawVerdict::kNone:
@@ -3649,7 +3627,6 @@ static_assert(alteredFixOf(DrawVerdict::kPanel) == AlteredFix::Panel && alteredF
                   alteredFixOf(DrawVerdict::kIntroPanel) == AlteredFix::IntroPanel && alteredFixOf(DrawVerdict::kGlareClamp) == AlteredFix::GlareClamp &&
                   alteredFixOf(DrawVerdict::kGlareSteady) == AlteredFix::GlareSteady && alteredFixOf(DrawVerdict::kParticle) == AlteredFix::Particle &&
                   alteredFixOf(DrawVerdict::kFssPanel) == AlteredFix::FssPanel && alteredFixOf(DrawVerdict::kFssReveal) == AlteredFix::FssReveal &&
-                  alteredFixOf(DrawVerdict::kResolveBind) == AlteredFix::ResolveBind &&
                   alteredFixOf(DrawVerdict::kScrim) == AlteredFix::Scrim && alteredFixOf(DrawVerdict::kBackdrop) == AlteredFix::Backdrop,
               "each verdict that can reach the altered-draw site names its own census row");
 
@@ -5561,7 +5538,6 @@ void vScreenRefreshConfig() {
     backdropConfigure(cfg);
     fssPanelConfigure(cfg);
     fssRevealConfigure(cfg);
-    resolveBindConfigure(cfg);
     // fix.transition_flash: the engine fix (transition_flash_eye_base.cpp). The
     // first call installs its consumer hook when the key is on and reports
     // Armed or Lost to the detector; later calls do nothing.
@@ -6779,7 +6755,6 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     backdropConfigure(cfg);
     fssPanelConfigure(cfg);
     fssRevealConfigure(cfg);
-    resolveBindConfigure(cfg);
     // The engine fix. See the other call site's comment above.
     transitionFlashEyeBaseConfigure(cfg);
     {
@@ -7126,7 +7101,6 @@ void shutdownVScreenFixes() {
     fssPanelRectShutdown();
     fssRevealShutdown();
     gpuCensusShutdown();
-    resolveBindShutdown();
     billboardShutdown();
     // Both halves of the intro. Neither was on this roll-call, so a session
     // that ended without a rendered scene ever arriving -- quitting from the

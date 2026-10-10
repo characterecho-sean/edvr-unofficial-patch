@@ -545,7 +545,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\fss_panel.cpp" ^
     "src\d3d11\fss_reveal.cpp" ^
     "src\d3d11\fss_heal.cpp" ^
-    "src\d3d11\resolve_bind_fix.cpp" ^
+    "src\d3d11\vertex_resync_hook.cpp" ^
     "src\d3d11\xinput_watch.cpp" ^
     "src\d3d11\fss_panel_rect.cpp" ^
     "src\d3d11\panel_curve.cpp" "src\d3d11\screen_motion.cpp" "src\d3d11\weapon_motion.cpp" ^
@@ -1976,22 +1976,6 @@ if errorlevel 1 ( echo [edvr] ERROR: scrim metadata test build failed & exit /b 
 "%OBJ%\scrimmetadata\scrim_metadata_test.exe" --self-test || exit /b 1
 exit /b 0
 
-:rig_resolve_bind_test
-echo [edvr] === resolve bind shadow regression ===
-if not exist "%OBJ%\resolvebind" mkdir "%OBJ%\resolvebind"
-cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
-    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
-    /Fo"%OBJ%\resolvebind\\" /Fe"%OBJ%\resolvebind\resolve_bind_test.exe" ^
-    "tools\resolve_bind_test\resolve_bind_test.cpp" ^
-    "src\d3d11\resolve_bind_fix.cpp" "src\d3d11\binding_shadow.cpp" ^
-    "src\common\vtable_hook.cpp" "src\common\code_hook.cpp" ^
-    "src\common\log.cpp" "src\common\config.cpp" "src\common\proxy.cpp" ^
-    "src\common\guard.cpp" ^
-    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib user32.lib version.lib
-if errorlevel 1 ( echo [edvr] ERROR: resolve bind test build failed & exit /b 1 )
-"%OBJ%\resolvebind\resolve_bind_test.exe" || exit /b 1
-exit /b 0
-
 :rig_object_classification
 echo [edvr] === object classification provenance regression ===
 if not exist "%OBJ%\classification" mkdir "%OBJ%\classification"
@@ -3040,6 +3024,30 @@ if errorlevel 1 ( echo [edvr] ERROR: menu_edit_hold_test build failed & exit /b 
 "%OBJ%\menueditHold\menu_edit_hold_test.exe" --dry-run || exit /b 1
 "%OBJ%\menueditHold\menu_edit_hold_test.exe" --self-test "%ROOT%" || exit /b 1
 python "tools\menu_edit_hold_test\mutants.py" --self-test || exit /b 1
+exit /b 0
+
+:rig_vertex_resync_test
+echo [edvr] === vertex_resync_test.exe ===
+REM Build gate for the vertex-buffer resync (src\d3d11\vertex_resync_core.h and vertex_resync_hook.cpp, EDVR_VERTEX_RESYNC_TEST; docs\scanner-body.md, "The root cause:
+REM Frontier's f3d state cache"): the game's applied vertex-buffer cache goes stale when a buffer it binds again equals its DESIRED state (SetVertexBuffer compares only that)
+REM after zero-slot draws zeroed the applied copy, and the second eye's lighting resolve runs with slot 0 empty. The pure repair runs on a fake command list laid out at the real
+REM offsets and replays the failing sequence (stock binds NULL; repaired binds the buffer and its offset; off counts and writes nothing; slots past the layout's count, a null
+REM desired slot, more than 16 slots and null pointers are left alone). The production hook is compiled in with the real CodeHook and patches a synthetic function that begins with
+REM the real 16-byte prologue of FlushIA: a wrong prologue is refused with one line and nothing patched, the right one arms, the original sees the repaired cache, the live key,
+REM the eight first-sighting lines, the 60 s count, the ten-minute heartbeat (zero counts included) and the session line are what the log says, a fault is absorbed and eight
+REM stand it down. device_hook.cpp's wiring and the exit line's registration with the log are
+REM read as text. tools\vertex_resync_test\mutants.py --self-test holds the mutation list to the sources as they are; --run builds the rig against each edit.
+if not exist "%OBJ%\vertexresync" mkdir "%OBJ%\vertexresync"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /DEDVR_VERTEX_RESYNC_TEST /I"src\d3d11" /I"src\common" ^
+    /Fo"%OBJ%\vertexresync"\ /Fe"%OBJ%\vertexresync\vertex_resync_test.exe" ^
+    "tools\vertex_resync_test\vertex_resync_test.cpp" "src\d3d11\vertex_resync_hook.cpp" ^
+    "src\common\code_hook.cpp" "src\common\guard.cpp" "src\common\log.cpp" "src\common\config.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib
+if errorlevel 1 ( echo [edvr] ERROR: vertex_resync_test build failed & exit /b 1 )
+"%OBJ%\vertexresync\vertex_resync_test.exe" --dry-run || exit /b 1
+"%OBJ%\vertexresync\vertex_resync_test.exe" --self-test "%ROOT%" || exit /b 1
+python "tools\vertex_resync_test\mutants.py" --self-test || exit /b 1
 exit /b 0
 
 :rig_scheduler_stack_json_test

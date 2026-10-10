@@ -25,7 +25,7 @@ namespace edvr {
 // subtracts that pair's own mean cost from the real one's, floored at zero.
 // How many fixes wrap Elite's draws and are named in the census (AlteredFix below: one for each
 // verdict that can reach the altered-draw site, and a last one for "unnamed").
-constexpr int kAlteredFixCount = 15;
+constexpr int kAlteredFixCount = 14;
 
 enum class GpuCensusSection : uint8_t {
     // Door: once or twice a frame, at Submit. K = 2 (both eyes) while active.
@@ -120,7 +120,6 @@ enum class AlteredFix : uint8_t {
     Particle,      // the particle billboards (kParticle)
     FssPanel,      // the FSS panel composite (kFssPanel)
     FssReveal,     // the FSS body composite at one dissolve moment (kFssReveal)
-    ResolveBind,   // the deferred lighting resolve with the scanner-body input lend (kResolveBind)
     Scrim,         // the loader dialog's dimming wash (kScrim)
     Backdrop,      // the menu backdrop blit (kBackdrop)
     Unnamed,       // a verdict nobody gave a name (none reaches the altered-draw site today): visible, never silent

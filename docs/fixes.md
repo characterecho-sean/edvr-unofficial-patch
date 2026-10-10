@@ -38,11 +38,14 @@ system scanners the body renders as a featureless black disc in the right eye
 and correctly in the left — silhouette intact, markers and scanner UI fine in
 both (Frontier issue
 [78021](https://issues.frontierstore.net/issue-detail/78021)). The game issues
-the second eye's lighting draw with one of its inputs missing. EDVR lends that
-draw the input the first eye just used, for that one draw, put back exactly as
-found. Present on some machines and absent on others; on a machine without the
-bug it never engages. `fix.scanner_body = on`.
-*[scanner-body.md](scanner-body.md).*
+the second eye's lighting draw with its vertex buffer missing, because the
+game's own cache of what it last bound goes stale after two draws that use no
+vertex buffer. EDVR makes that cache agree with what the game asked for, at the
+entry of the game's own input-assembler flush, before the flush binds it. Always
+on, no setting; present on some machines and absent on others, and on a machine
+without the bug it finds nothing to repair. The log says `vertex resync: ...`
+(first sightings, a count every minute while it is not zero, and a line every
+ten minutes saying it is armed). *[scanner-body.md](scanner-body.md).*
 
 **The FSS showing each eye a different scan.** In the Full System Scanner the
 zoomed body's not-yet-resolved tiles can be hard black in one eye and already
