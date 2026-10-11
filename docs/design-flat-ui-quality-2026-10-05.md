@@ -2,7 +2,11 @@
 
 ## Status
 
-- **State: SHIPPED (2026-10-09).** Flown OK on Epic flat. Branch
+- **State: SHIPPED (2026-10-09); cockpit proof gap open on B390 (10-11).**
+  Local Steam flat XeSS at SS 0.5/UI 125 applies panel sizing but cannot separate
+  the cockpit HUD. The October 11 entry records the confirmed counters and the
+  bounded binding probe needed before admitting another tonemap variant.
+  Flown OK on Epic flat. Branch
   `claude/flat-display-crash-ui-smearing-f1d96a`; the census was removed in the
   commit that follows the flown build.
   - SS 1.0 at 125%, HDR route: build `eced5813`, Sean: "Looks great!". In the
@@ -12,6 +16,9 @@
     every counter, Sean: "works great"). Copy route last flown on 75cd495c;
     eced5813's flat admission change not yet flown there.
   - Not flown: 100% at SS 1.0.
+- **Local probe gate:** production DLLs compile; 91 CPU checks pass. The UI
+  rig's 206 Wine failures exactly match the clean baseline. Full build stops
+  at baseline run_jobs failures; Windows validation and the local capture remain.
 - **The key:** `fix.ui_quality = off | 100 | 125`, default 100 in flat (the
   code's fallback and the flat ini template), the fourth flat F8 row. 100: the
   panels at display size and the cockpit HUD out of temporal history, whatever
@@ -44,8 +51,13 @@
   flat UI layer like the HUD families, so they are drawn at D x T after the upscale.
   The "flat ui layer map:" 30 s line counts them and names each refusal. Entry at the end.
 - **Temporary config keys:** none.
-- **Next:** fly SS 0.5 on the shipped build (the copy route under eced5813's
+- **Next locally:** capture physical cockpit F9CFC798/E8948389 inputs with the
+  diagnostic-only observer; confirm HDR target identity and pass shape before
+  changing admission. No rendering fix is justified by the source writer alone.
+- **Next on Epic:** fly SS 0.5 on the shipped build (the copy route under eced5813's
   admission change) and 100% at SS 1.0; then an Epic flight opening all three maps.
+
+## Purpose
 
 Bring VR's source-panel quality and separate UI composition to flat Elite:
 retain fine text below display-resolution world rendering; avoid UI history
@@ -537,3 +549,68 @@ every draw). The frame-contract hash (flat_frame_contract.h) mixes the slots int
   <list or none>, match yes|no (reason), map asks this frame n; said once." The reason is flatUiToneMatchWhy (flat_ui_layer_math.h, rig-pinned).
 - The map line gains tone-candidates-map and tone-matched-map (zeros print).
 - No rig drives the runtime's candidate branch (it needs the D3D draw scope); the pure reason function is pinned instead.
+
+## October 11: B390 cockpit HUD remains in temporal history
+
+User reports HUD and menu motion smear with the latest XeSS flat branch.
+Environment: Steam Odyssey flat, ONEXPLAYER 3 Intel Arc B390, Proton
+Experimental, DXVK, private Mesa 26.3-devel 37bf953a58; no VR runtime or eye
+size applies. Correct installed code is 0f700706, build 6ACBB8D6, linked
+16:27:02 UTC. The flight is edvr_gfx_20261011_105659.log. Live flat settings
+are temporal_aa=xess and ui_quality=125. Render is 960x600, output 1920x1200,
+UI layer 2400x1500. SDK SR runtime is 2.0.2.0 from package v3.0.2.
+
+At 11:01:29.328, after leaving the map, the 30-second cockpit window records
+1785 copies and 1785 door-armed, zero tone candidates/proven/admitted/reissued,
+zero composites, and 1785 composite-none. Holo asks 21420, flight HUD asks
+30230 and target sprite asks 1719 all have zero taken. tone-unproven is 53369;
+other-work, not-HDR, not-upstream, no-camera, other-shift and after-tone are
+zero. XeSS evaluations return rc=0. The panel scaler separately reports target
+125%, x2.5 and a widest panel of 2400 pixels.
+
+The preceding map window has 611 proven/admitted/reissued tone candidates and
+611 composites. At 11:00:44.892, structural HUD reissue identifies
+43CA9F1C0AD2ACFE/E8948389387DA083 reading the taken HDR HUD at PS t1. The
+steady cockpit's LDR source writer is F9CFC798F21E9AEA/E8948389387DA083. Both
+VS hashes are already named tone variants, but E894 is absent from the tone
+slot registry. The structural fallback needs a HUD take, while HUD take needs
+previous-frame tone proof, so it cannot bootstrap this gap.
+
+Ruled out: disabled UI quality or failed XeSS execution, because the live
+INI/panel scaler select 125 and the backend repeatedly executes rc=0. Ruled
+out: copy admission or camera/jitter refusal as the cockpit UI gate, because
+every copy arms and the refusal counters isolate tone-unproven. Ruled out:
+historical FTR5 proving F9's HDR slot, because all three F9/E894 draws have the
+HDR-SRV-known flag clear; null slots mean unavailable data.
+
+Hypotheses for one capture:
+
+- Missing cockpit tone recognition: actual F9/E894 t1 equals a current HUD
+  target or its recorded alias, with full LDR output and valid tone shape.
+- A downstream pass shares that pair: all physical inputs miss HUD targets, or
+  the RTV/viewport/depth and read-only tone shape reject it.
+- Binding drift or an alias differs from the cached draw key: physical shader
+  identities and t0..t3 typed resources disagree with the recorded identities
+  or match only a copy alias. Record both without changing proof state.
+
+The existing F10 draw-packet capture records physical bindings, but its
+one-per-category selection would consume the category before this late unknown
+tone; it cannot reliably target the required pair. A bounded diagnostic-only
+observer instead samples these two exact VS/PS pairs only after current-frame
+HUD asks. Each pair has two physical snapshots per geometry, at least 90 frames
+apart, and explicit progress/never-observed counts. Physical HDR RTV
+observations at HUD asks also check the cached target identity. It does not
+change tone proof, candidate admission, rendering or the global tone registry.
+No diagnostic config key is added. Next: build, install on the branch, and
+capture one steady cockpit with UI 125 and XeSS selected.
+
+Validation before the diagnostic flight: both changed production units compile
+with MSVC and the normal absolute build.bat compiles and links the production
+DLLs. The 91 flat UI CPU checks pass. The targeted UI rig reports 3794 checks
+and 206 failures; every FAIL line matches a clean isolated 0f700706 run (3782
+checks, 206 failures) under the same Wine prefix. The normal full build stops
+at the previously reproduced run_jobs process, focus and inherited error-mode
+failures. It writes no full-build receipt. Keep the diagnostic on
+codex/xess-flat pending the physical binding capture and native Windows
+validation. Detailed log:
+/tmp/edvr-msvc-bootstrap-20261011/full_ui_tone_probe_20261011.log.

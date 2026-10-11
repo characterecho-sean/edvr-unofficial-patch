@@ -76,6 +76,39 @@ inline uint32_t flatUiMapToneSlotOf(uint64_t vs, uint64_t ps) {
     return vs == kFlatUiMapToneVs && ps == kFlatUiMapTonePs ? 0u : ~0u;  // the scene is SRV slot 0
 }
 
+// Observation only: the 2026-10-11 XeSS cockpit used E894 to write the final LDR source, while its HUD layer had no
+// tone proof. Neither pair is admitted as a tone by this predicate; it only bounds physical-binding diagnostics.
+inline int flatUiToneProbeSlot(uint64_t vs, uint64_t ps) {
+    if (ps != 0xE8948389387DA083ull) return -1;
+    if (vs == 0xF9CFC798F21E9AEAull) return 0;  // steady LDR-source writer in the FTR5 capture
+    if (vs == 0x43CA9F1C0AD2ACFEull) return 1;  // physically admitted at t1 in the map-transition flight
+    return -1;
+}
+inline bool flatUiToneProbePair(uint64_t vs, uint64_t ps) { return flatUiToneProbeSlot(vs, ps) >= 0; }
+struct FlatUiToneProbeBudget {
+    uint32_t renderW = 0, renderH = 0, outputW = 0, outputH = 0;
+    uint64_t firstSampleFrame = 0, lastSampleFrame = 0, candidates = 0, withHud = 0;
+    uint32_t samples = 0;
+    bool geometryKnown = false;
+    // A geometry change is a fresh discovery. Reset is explicit at swap-chain/device release too.
+    bool geometry(uint32_t rw, uint32_t rh, uint32_t ow, uint32_t oh) {
+        if (geometryKnown && renderW == rw && renderH == rh && outputW == ow && outputH == oh) return false;
+        *this = FlatUiToneProbeBudget{};
+        renderW = rw; renderH = rh; outputW = ow; outputH = oh; geometryKnown = true;
+        return true;
+    }
+    bool consider(uint64_t frame, bool currentHudAsk) {
+        ++candidates;
+        if (!currentHudAsk) return false;
+        ++withHud;
+        if (samples >= 2 || (lastSampleFrame && frame < lastSampleFrame + 90)) return false;
+        if (!samples) firstSampleFrame = frame;
+        lastSampleFrame = frame;
+        ++samples;
+        return true;
+    }
+};
+
 // TEMPORAL AA OFF WHILE A MAP IS OPEN (maintainer's decisions, 2026-10-10: the Galaxy Map and the Orrery first, then the System
 // Map). The map scenes' grid, line and star draws are not taken by the UI layer, and their temporal history smears (the
 // System Map's stars pan with the plane in one capture and sit near still in another, so no motion rule fits both: the

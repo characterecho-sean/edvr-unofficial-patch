@@ -34,15 +34,16 @@
 - Local install: clean source commit 0f700706, version v0.19.1-13-g0f700706.
   Sanctioned installer dry-run, install and verify-only passed, including the
   XeSS DLL/notices; the live flat INI is unchanged. Main remains at 99476a02.
-- Current flight: correct 0f700706, edvr_gfx_20261011_103114.log. Native HDR AA
-  executes at 1920x1200; gameplay HDR windows complete every step. At 0.75,
-  1440x900 is upscaled to 1920x1200 on the LDR copy route, with 15 jitter
-  phases instead of native's eight. Logged XeSS init/evaluations return rc=0.
+- Gameplay flight: correct 0f700706, 103114.log. Native HDR AA at 1920x1200
+  completes every step. SS 0.75 upscales 1440x900 to 1920x1200 on the LDR copy
+  route with 15 jitter phases; XeSS init/evaluations return rc=0.
 - User: mostly stable. Station surface below the hangar's Welcome to sign
   flickers at native and stops below 1; sizes imply 0.75. This changes resolve
   route and jitter as well as resolution, so it does not isolate the cause.
-- Open: native surface flicker needs draw-level evidence before a rendering
-  fix; below-native gameplay is locally confirmed. FSR3 SDK is absent here.
+- Open: cockpit HUD/menu motion smear at UI 125 on correct 0f700706;
+  105659.log shows no cockpit tone proof/composites despite an open UI door.
+  Diagnosis and next binding probe are in design-flat-ui-quality-2026-10-05.md.
+  Native surface flicker still needs evidence; FSR3 SDK is absent here.
 - Capture: correct build 644fe39b, edvr_gfx_20261011_100319.log and
   flat_trace_14850.bin; three complete frames, zero overflow. Stored/replayed
   contracts match exactly. All reject image-copy-source: 29/31 guards pass;

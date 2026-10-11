@@ -3716,7 +3716,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     s.phaseCensusPending=s.work != FlatWork::Paused;
     s.phaseCensusFailed=false;
     s.prefix.output = output.Get(); s.prefix.width = d.Width; s.prefix.height = d.Height; s.prefix.format = d.Format;
-    flatUiLayerFrame(flatRuntimeMapOpenFrame());  // fix.ui_quality's flat layer: its 30 s lines (flat_ui_layer.h)
+    flatUiLayerFrame(flatRuntimeMapOpenFrame(), s.prefix.frame);  // fix.ui_quality's flat layer: its 30 s lines
     if(s.namingVetoedThisFrame) {
         // A frame that vetoed a draw: if the world was named anyway the veto did its work; if nothing named it, the reference may be the
         // one that is wrong, and the third such frame in a row gives it up (the next naming and the next H select a new one).
@@ -5433,7 +5433,8 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
             uint32_t sceneRw = 0, sceneRh = 0, sceneOw = 0, sceneOh = 0;
             flatRuntimeSceneSizes(&sceneRw, &sceneRh, &sceneOw, &sceneOh);
             FlatUiLayerDraw ui;
-            ui.frame = s.prefix.frame; ui.vs = k.vs; ui.ps = k.ps; ui.color = k.color; ui.width = k.width; ui.height = k.height;
+            ui.frame = s.prefix.frame; ui.sequence = s.prefix.sequence + 1;
+            ui.vs = k.vs; ui.ps = k.ps; ui.color = k.color; ui.width = k.width; ui.height = k.height;
             ui.format = k.format;
             ui.hdrTarget = flatUiTargetClass(k.color && k.color == s.prefix.output, k.width, k.height, k.format,
                                              s.prefix.width, s.prefix.height, sceneRw, sceneRh) == FlatUiTarget::kHdr;
@@ -5446,6 +5447,12 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
             if (k.camera) { ui.haveRows = true; std::memcpy(ui.rows, d.camera, sizeof(ui.rows)); }
             ui.phaseX = s.phase.currentX; ui.phaseY = s.phase.currentY;
             ask = flatUiLayerDecide(ctx, ui);   // a cockpit HUD family's draw, or kNotAsked
+            // Diagnostic only: physically inspect the unknown E894 LDR-source writer after HUD asks. This does not
+            // feed the tone proof or change which draw the UI layer takes/reissues.
+            if (flatUiToneProbePair(k.vs, k.ps))
+                flatUiLayerProbeTone(ctx, s.prefix.frame, s.prefix.sequence + 1, k.vs, k.ps,
+                                     sceneRw, sceneRh, s.prefix.width, s.prefix.height,
+                                     kind, count, instances, startInstance);
             if (ask == FlatUiLayerAsk::kDecided) { uiTake = true; uiVs = k.vs; uiPs = k.ps; }
             else if (ask == FlatUiLayerAsk::kRefused) {}   // a HUD draw left in H: never also a tone candidate
             // The game's tone pass by its known pair, whatever its vertex count (the 11:32 flight's HDR route read a copy of
@@ -5471,7 +5478,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
                 ctx->PSGetShaderResources(0, 1, &copySrv);
                 Ptr<ID3D11Resource> copySource;
                 if (copySrv) copySrv->GetResource(&copySource);
-                flatUiLayerNoteCopy(s.prefix.frame, copySource.Get(), k.color);
+                flatUiLayerNoteCopy(ctx, s.prefix.frame, s.prefix.sequence + 1, copySource.Get(), k.color);
             }
             // Any other full-screen triangle may be the game's tonemap under a pair the flat list does not know: VR's
             // structural admission, by the HUD source it reads.

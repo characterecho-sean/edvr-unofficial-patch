@@ -6,6 +6,8 @@
 #include "flat_camera_phase.h"     // flatCameraMeasureRowShift: the jitter a draw's camera rows carry
 #include "flat_compute_readback.h" // FlatComputeInternalScope
 #include "flat_ui_layer_math.h"
+#include "exposure_fix.h"         // lookupShaderHash: compare the physical shaders with the draw's cached pair
+#include "tonemap_admit.h"        // read-only structural description of the actual game's tone-shaped draw
 #include "ui_layer.h"
 
 #include "../common/log.h"
@@ -63,6 +65,67 @@ bool g_mapFirstToneNoted = false;                         // the once-only first
 FlatUiMapAaTally g_mapAa;                                 // temporal AA off on the Galaxy Map and the Orrery: the map line's counts
 uint64_t g_mapAskFrame = 0, g_mapAsksFrame = 0;           // the frame of the last map ask, and how many map asks it has had
 FlatUiToneProof g_proof;
+FlatUiToneProbeBudget g_toneProbe[2];  // F9C/E894 and 43CA/E894 cannot consume each other's two samples
+bool g_toneProbeArmed = false;
+// First physical RTV seen for each distinct, HDR-qualified HUD target in the current frame. The references live only
+// until the next frame, device change, or resize; they never feed the UI decision or tone proof.
+struct HudPhysical {
+    const void* shadow = nullptr;
+    Ptr<ID3D11Resource> actual;
+    uint32_t sequence = 0;
+    uint32_t width = 0, height = 0;
+    DXGI_FORMAT viewFormat = DXGI_FORMAT_UNKNOWN, resourceFormat = DXGI_FORMAT_UNKNOWN;
+    bool unavailable = false;
+};
+HudPhysical g_hudPhysical[4];
+struct HudPhysicalAlias {
+    const void* shadow = nullptr;
+    const void* source = nullptr;
+    Ptr<ID3D11Resource> actual;
+    uint32_t sequence = 0;
+    bool unobservedLatest = false;
+};
+HudPhysicalAlias g_hudAlias[4];
+uint64_t g_hudPhysicalFrame = 0;
+unsigned g_hudPhysicalCount = 0;
+unsigned g_hudCopyReads = 0;
+uint64_t g_hudPhysicalMismatch = 0, g_hudPhysicalUnavailable = 0;
+uint64_t g_hudCopyOutputMismatch = 0, g_hudCopyOutputUnavailable = 0;
+uint64_t g_hudCopyBudgetExhausted = 0;
+bool g_hudCopyExhaustionNoted = false;
+void clearHudPhysical(uint64_t frame) {
+    for (auto& h : g_hudPhysical) h = HudPhysical{};
+    for (auto& a : g_hudAlias) a = HudPhysicalAlias{};
+    g_hudPhysicalFrame = frame;
+    g_hudPhysicalCount = 0;
+    g_hudCopyReads = 0;
+}
+void observeHudPhysical(ID3D11DeviceContext* ctx, const FlatUiLayerDraw& d) {
+    if (g_hudPhysicalFrame != d.frame) clearHudPhysical(d.frame);
+    for (unsigned i = 0; i < g_hudPhysicalCount; ++i)
+        if (g_hudPhysical[i].shadow == d.color) return;
+    if (g_hudPhysicalCount == 4) return;
+    HudPhysical& h = g_hudPhysical[g_hudPhysicalCount++];
+    h.shadow = d.color;
+    h.sequence = d.sequence;
+    FlatComputeInternalScope internal;
+    ID3D11RenderTargetView* rawRtv = nullptr;
+    ctx->OMGetRenderTargets(1, &rawRtv, nullptr);
+    Ptr<ID3D11RenderTargetView> rtv; rtv.Attach(rawRtv);
+    if (rtv) {
+        D3D11_RENDER_TARGET_VIEW_DESC view{}; rtv->GetDesc(&view);
+        h.viewFormat = view.Format;
+        rtv->GetResource(&h.actual);
+        Ptr<ID3D11Texture2D> texture;
+        if (h.actual && SUCCEEDED(h.actual.As(&texture))) {
+            D3D11_TEXTURE2D_DESC desc{}; texture->GetDesc(&desc);
+            h.width = desc.Width; h.height = desc.Height; h.resourceFormat = desc.Format;
+        }
+    }
+    h.unavailable = !h.actual;
+    if (h.unavailable) ++g_hudPhysicalUnavailable;
+    else if (h.actual.Get() != d.color) ++g_hudPhysicalMismatch;
+}
 uint32_t g_candidateLines = 0;  // eight tone candidates logged, re-armed after a route, render-size or swap-chain change
 char g_candidateRoute[48] = "";
 uint32_t g_candidateW = 0, g_candidateH = 0;
@@ -161,6 +224,7 @@ FlatUiLayerAsk flatUiLayerDecide(ID3D11DeviceContext* ctx, const FlatUiLayerDraw
     if (!d.hdrTarget || !d.width || !d.height) return refuse(FlatUiRefuse::kNotHdrTarget);
     // The proof's subject: the target this frame's HUD families draw into, from the first ask, taken or not.
     flatUiToneProofHud(g_proof, d.frame, d.color);
+    observeHudPhysical(ctx, d);  // read-only OM binding before any UI take or target substitution
     if (flatUiToneConsumed(g_proof, d.frame, d.color)) return refuse(FlatUiRefuse::kAfterTone);
     if (!flatUiToneProven(g_proof, d.frame, d.color)) return refuse(FlatUiRefuse::kToneUnproven);
     if (!d.upstream) return refuse(FlatUiRefuse::kNotUpstream);
@@ -212,6 +276,152 @@ FlatUiLayerAsk flatUiLayerDecide(ID3D11DeviceContext* ctx, const FlatUiLayerDraw
     }
     g_lastAsk = FlatUiLayerAsk::kDecided;
     return g_lastAsk;
+}
+
+void flatUiLayerProbeTone(ID3D11DeviceContext* ctx, uint64_t frame, uint32_t sequence, uint64_t vs, uint64_t ps,
+                          uint32_t renderW, uint32_t renderH, uint32_t outputW, uint32_t outputH,
+                          char kind, uint32_t count, uint32_t instances, uint32_t startInstance) {
+    const int pairSlot = flatUiToneProbeSlot(vs, ps);
+    if (!ctx || !flatUiLayerOn() || pairSlot < 0) return;
+    FlatUiToneProbeBudget& budget = g_toneProbe[pairSlot];
+    if (budget.geometry(renderW, renderH, outputW, outputH))
+        Log::get().note("flat ui tone probe: armed pair=%s geometry R=%ux%u D=%ux%u, two physical samples at least 90 frames apart; "
+                        "observation only, tone proof and admission unchanged",
+                        pairSlot == 0 ? "F9C/E894" : "43CA/E894", renderW, renderH, outputW, outputH);
+    g_toneProbeArmed = true;
+    const bool asked = g_proof.frame == frame && g_proof.count != 0;
+    if (!budget.consider(frame, asked)) return;
+    FlatComputeInternalScope internal;  // the getters below must not re-enter the flat draw observer
+    Ptr<ID3D11VertexShader> actualVs;
+    Ptr<ID3D11PixelShader> actualPs;
+    ctx->VSGetShader(&actualVs, nullptr, nullptr);
+    ctx->PSGetShader(&actualPs, nullptr, nullptr);
+    const uint64_t actualVh = lookupShaderHash(actualVs.Get()), actualPh = lookupShaderHash(actualPs.Get());
+    ID3D11RenderTargetView* rawRtv = nullptr;
+    ID3D11DepthStencilView* rawDsv = nullptr;
+    ctx->OMGetRenderTargets(1, &rawRtv, &rawDsv);
+    Ptr<ID3D11RenderTargetView> rtv; rtv.Attach(rawRtv);
+    Ptr<ID3D11DepthStencilView> dsv; dsv.Attach(rawDsv);
+    Ptr<ID3D11Resource> output;
+    D3D11_RENDER_TARGET_VIEW_DESC rv{};
+    D3D11_TEXTURE2D_DESC td{};
+    if (rtv) {
+        rtv->GetDesc(&rv);
+        rtv->GetResource(&output);
+        Ptr<ID3D11Texture2D> texture;
+        if (output && SUCCEEDED(output.As(&texture))) texture->GetDesc(&td);
+    }
+    D3D11_VIEWPORT viewport[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE]{};
+    UINT viewportCount = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+    ctx->RSGetViewports(&viewportCount, viewport);
+    const bool fullViewport = viewportCount == 1 && td.Width && td.Height &&
+        viewport[0].TopLeftX == 0.0f && viewport[0].TopLeftY == 0.0f &&
+        viewport[0].Width == static_cast<float>(td.Width) && viewport[0].Height == static_cast<float>(td.Height);
+    ToneAdmit shape{};
+    const bool shaped = tonemapAdmitStructure(ctx, actualPh, shape);  // getters only; no crispArm or proof mutation
+    Log::get().note("flat ui tone probe: sample=%u/2 frame=%llu q=%u draw=%c/%u/%u/start%u cached=%016llX/%016llX "
+                    "actual=%016llX/%016llX shader-match=%u HUD-targets=%u physical-HUD-targets=%u "
+                    "output=%p RTV=%p viewFmt=%u viewDim=%u resourceFmt=%u %ux%u DSV=%p viewport-count=%u "
+                    "viewport=(%.0f,%.0f,%.0f,%.0f,%.2f,%.2f) full=%u shape=%u full-shape=%u; observation only",
+                    budget.samples, static_cast<unsigned long long>(frame), sequence, kind, count, instances, startInstance,
+                    static_cast<unsigned long long>(vs), static_cast<unsigned long long>(ps),
+                    static_cast<unsigned long long>(actualVh), static_cast<unsigned long long>(actualPh),
+                    actualVh == vs && actualPh == ps, g_proof.count, g_hudPhysicalFrame == frame ? g_hudPhysicalCount : 0,
+                    output.Get(), rtv.Get(), static_cast<unsigned>(rv.Format), static_cast<unsigned>(rv.ViewDimension),
+                    static_cast<unsigned>(td.Format), td.Width, td.Height, dsv.Get(), viewportCount,
+                    viewportCount ? viewport[0].TopLeftX : 0.0f, viewportCount ? viewport[0].TopLeftY : 0.0f,
+                    viewportCount ? viewport[0].Width : 0.0f, viewportCount ? viewport[0].Height : 0.0f,
+                    viewportCount ? viewport[0].MinDepth : 0.0f, viewportCount ? viewport[0].MaxDepth : 0.0f,
+                    fullViewport, shaped, shape.full);
+    if (g_hudPhysicalFrame == frame) for (unsigned i = 0; i < g_hudPhysicalCount; ++i) {
+        const HudPhysical& h = g_hudPhysical[i];
+        const HudPhysicalAlias& a = g_hudAlias[i];
+        const void* cachedAlias = nullptr;
+        for (uint32_t n = 0; n < g_proof.count; ++n)
+            if (g_proof.hud[n] == h.shadow) { cachedAlias = g_proof.alias[n]; break; }
+        Log::get().note("flat ui tone probe: sample=%u/2 frame=%llu HUD[%u] q=%u shadow=%p physical=%p "
+                        "viewFmt=%u resourceFmt=%u %ux%u shadow-physical-match=%u unavailable=%u "
+                        "cached-alias=%p copy-q=%u copy-source=%p copy-shadow=%p copy-physical=%p "
+                        "copy-shadow-physical-match=%u copy-unobserved-latest=%u copy-reads=%u/4; "
+                        "cumulative HUD mismatch/unavailable=%llu/%llu copy mismatch/unavailable/exhausted=%llu/%llu/%llu; "
+                        "observation only",
+                        budget.samples, static_cast<unsigned long long>(frame), i, h.sequence, h.shadow, h.actual.Get(),
+                        static_cast<unsigned>(h.viewFormat), static_cast<unsigned>(h.resourceFormat), h.width, h.height,
+                        h.actual && h.actual.Get() == h.shadow, h.unavailable,
+                        cachedAlias, a.sequence, a.source, a.shadow, a.actual.Get(),
+                        a.actual && a.actual.Get() == a.shadow, a.unobservedLatest, g_hudCopyReads,
+                        static_cast<unsigned long long>(g_hudPhysicalMismatch),
+                        static_cast<unsigned long long>(g_hudPhysicalUnavailable),
+                        static_cast<unsigned long long>(g_hudCopyOutputMismatch),
+                        static_cast<unsigned long long>(g_hudCopyOutputUnavailable),
+                        static_cast<unsigned long long>(g_hudCopyBudgetExhausted));
+    }
+    Log::get().note("flat ui tone probe: sample=%u/2 frame=%llu q=%u shape RTV=%p fmt=%u %ux%u PS-b2=%u "
+                    "VS-exposure-t0=%p PS-LUT-t0=%p LUT-3D=%u HDR-named-slot=%d HDR-read-slot=%d "
+                    "HDR=%p fmt=%u %ux%u view-2D=%u; observation only",
+                    budget.samples, static_cast<unsigned long long>(frame), sequence, shape.rtvRes,
+                    static_cast<unsigned>(shape.rtvFmt), shape.rtvW, shape.rtvH, shape.b2,
+                    shape.vsT0Res, shape.psT0Res, shape.psT0Is3D, shape.hdrSlot, shape.hdrSlotRead,
+                    shape.hdrRes, static_cast<unsigned>(shape.hdrFmt), shape.hdrW, shape.hdrH, shape.hdr2D);
+    ID3D11ShaderResourceView* rawSrv[4]{};
+    ctx->PSGetShaderResources(0, 4, rawSrv);
+    for (unsigned slot = 0; slot < 4; ++slot) {
+        Ptr<ID3D11ShaderResourceView> srv; srv.Attach(rawSrv[slot]);
+        Ptr<ID3D11Resource> resource;
+        D3D11_SHADER_RESOURCE_VIEW_DESC view{};
+        D3D11_RESOURCE_DIMENSION dimension = D3D11_RESOURCE_DIMENSION_UNKNOWN;
+        uint32_t width = 0, height = 0, depth = 0, format = 0;
+        if (srv) {
+            srv->GetDesc(&view);
+            srv->GetResource(&resource);
+            if (resource) {
+                resource->GetType(&dimension);
+                Ptr<ID3D11Texture2D> two;
+                Ptr<ID3D11Texture3D> three;
+                if (SUCCEEDED(resource.As(&two))) {
+                    D3D11_TEXTURE2D_DESC desc{}; two->GetDesc(&desc);
+                    width = desc.Width; height = desc.Height; depth = desc.ArraySize; format = static_cast<uint32_t>(desc.Format);
+                } else if (SUCCEEDED(resource.As(&three))) {
+                    D3D11_TEXTURE3D_DESC desc{}; three->GetDesc(&desc);
+                    width = desc.Width; height = desc.Height; depth = desc.Depth; format = static_cast<uint32_t>(desc.Format);
+                }
+            }
+        }
+        Log::get().note("flat ui tone probe: sample=%u/2 frame=%llu q=%u PS-t%u view=%p viewFmt=%u viewDim=%u "
+                        "resource=%p resourceDim=%u resourceFmt=%u %ux%ux%u cached-HUD-match=%s physical-HUD-match=%d "
+                        "physical-HUD-q=%u physical-copy-match=%d physical-copy-q=%u; observation only",
+                        budget.samples, static_cast<unsigned long long>(frame), sequence, slot, srv.Get(),
+                        static_cast<unsigned>(view.Format), static_cast<unsigned>(view.ViewDimension), resource.Get(),
+                        static_cast<unsigned>(dimension), format, width, height, depth,
+                        flatUiToneMatchWhy(g_proof, frame, resource.Get()),
+                        [&]() { if (g_hudPhysicalFrame != frame) return -1;
+                                 for (unsigned i = 0; i < g_hudPhysicalCount; ++i)
+                                     if (g_hudPhysical[i].actual && g_hudPhysical[i].actual.Get() == resource.Get())
+                                         return static_cast<int>(i);
+                                 return -1; }(),
+                        [&]() { if (g_hudPhysicalFrame != frame) return 0u;
+                                 for (unsigned i = 0; i < g_hudPhysicalCount; ++i)
+                                     if (g_hudPhysical[i].actual && g_hudPhysical[i].actual.Get() == resource.Get())
+                                         return g_hudPhysical[i].sequence;
+                                 return 0u; }(),
+                        [&]() { if (g_hudPhysicalFrame != frame) return -1;
+                                 for (unsigned i = 0; i < g_hudPhysicalCount; ++i)
+                                     if (g_hudAlias[i].actual && g_hudAlias[i].actual.Get() == resource.Get())
+                                         return static_cast<int>(i);
+                                 return -1; }(),
+                        [&]() { if (g_hudPhysicalFrame != frame) return 0u;
+                                 for (unsigned i = 0; i < g_hudPhysicalCount; ++i)
+                                     if (g_hudAlias[i].actual && g_hudAlias[i].actual.Get() == resource.Get())
+                                         return g_hudAlias[i].sequence;
+                                 return 0u; }());
+    }
+    if (budget.samples == 2)
+        Log::get().note("flat ui tone probe: complete pair=%s R=%ux%u D=%ux%u samples=2, frame-spacing=%llu, candidates=%llu "
+                        "with-HUD=%llu; observation only",
+                        pairSlot == 0 ? "F9C/E894" : "43CA/E894", renderW, renderH, outputW, outputH,
+                        static_cast<unsigned long long>(budget.lastSampleFrame - budget.firstSampleFrame),
+                        static_cast<unsigned long long>(budget.candidates),
+                        static_cast<unsigned long long>(budget.withHud));
 }
 
 bool flatUiLayerBegin(ID3D11DeviceContext* ctx) {
@@ -269,8 +479,42 @@ bool flatUiLayerToneAdmit(ID3D11DeviceContext* ctx, uint64_t frame, uint32_t ren
     return admitted;
 }
 
-void flatUiLayerNoteCopy(uint64_t frame, const void* source, const void* output) {
+void flatUiLayerNoteCopy(ID3D11DeviceContext* ctx, uint64_t frame, uint32_t sequence,
+                         const void* source, const void* output) {
     if (!flatUiLayerOn()) return;
+    // The caller got source from physical PS t0. Only inspect the OM output when it reads a physically observed HUD
+    // target or one of its verified copies. Follow later direct HUD copies because the existing proof replaces its
+    // cached alias with the latest. Exhaustion invalidates the earlier physical alias so it cannot masquerade as proof.
+    if (ctx && source && g_hudPhysicalFrame == frame) for (unsigned i = 0; i < g_hudPhysicalCount; ++i) {
+        const bool hudSource = g_hudPhysical[i].actual && source == g_hudPhysical[i].actual.Get();
+        const bool aliasSource = g_hudAlias[i].actual && source == g_hudAlias[i].actual.Get();
+        if (!hudSource && !aliasSource) continue;
+        HudPhysicalAlias& alias = g_hudAlias[i];
+        if (g_hudCopyReads == 4) {
+            alias.shadow = output; alias.source = source; alias.sequence = sequence;
+            alias.actual.Reset(); alias.unobservedLatest = true;
+            ++g_hudCopyBudgetExhausted;
+            if (!g_hudCopyExhaustionNoted) {
+                g_hudCopyExhaustionNoted = true;
+                Log::get().note("flat ui tone probe: physical-copy budget exhausted frame=%llu q=%u HUD[%u] "
+                                "latest-copy-shadow=%p physical-latest=unobserved; four OM copy reads this frame; "
+                                "observation only",
+                                static_cast<unsigned long long>(frame), sequence, i, output);
+            }
+            break;
+        }
+        ++g_hudCopyReads;
+        FlatComputeInternalScope internal;
+        ID3D11RenderTargetView* rawRtv = nullptr;
+        ctx->OMGetRenderTargets(1, &rawRtv, nullptr);
+        Ptr<ID3D11RenderTargetView> rtv; rtv.Attach(rawRtv);
+        alias.shadow = output; alias.source = source; alias.sequence = sequence;
+        alias.actual.Reset(); alias.unobservedLatest = false;
+        if (rtv) rtv->GetResource(&alias.actual);
+        if (!alias.actual) ++g_hudCopyOutputUnavailable;
+        else if (alias.actual.Get() != output) ++g_hudCopyOutputMismatch;
+        break;
+    }
     flatUiToneProofCopy(g_proof, frame, source, output);
 }
 
@@ -447,6 +691,13 @@ void flatUiLayerNoteDevice(ID3D11Device* device) {
     if (!device || device == g_device.Get()) return;
     if (g_device) {
         g_proof = FlatUiToneProof{};
+        clearHudPhysical(0);
+        g_hudPhysicalMismatch = g_hudPhysicalUnavailable = 0;
+        g_hudCopyOutputMismatch = g_hudCopyOutputUnavailable = 0;
+        g_hudCopyBudgetExhausted = 0;
+        g_hudCopyExhaustionNoted = false;
+        for (auto& budget : g_toneProbe) budget = FlatUiToneProbeBudget{};
+        g_toneProbeArmed = false;
         g_view.Reset();
         g_viewTex = nullptr;
         g_viewFmt = DXGI_FORMAT_UNKNOWN;
@@ -463,6 +714,13 @@ void flatUiLayerNoteDevice(ID3D11Device* device) {
 
 void flatUiLayerRelease() {
     g_proof = FlatUiToneProof{};  // a fresh chain proves itself again
+    clearHudPhysical(0);
+    g_hudPhysicalMismatch = g_hudPhysicalUnavailable = 0;
+    g_hudCopyOutputMismatch = g_hudCopyOutputUnavailable = 0;
+    g_hudCopyBudgetExhausted = 0;
+    g_hudCopyExhaustionNoted = false;
+    for (auto& budget : g_toneProbe) budget = FlatUiToneProbeBudget{};
+    g_toneProbeArmed = false;
     g_candidateLines = 0;         // and its first tone candidates are logged
     g_takenFrame = 0;
     g_takenTarget = nullptr;
@@ -481,8 +739,14 @@ void flatUiLayerMapAaFrame(bool engaged, bool jitterWanted) {
 }
 void flatUiLayerMapAaCopy(bool ok, bool easu, bool smaa) { g_mapAa.copy(ok, easu, smaa); }
 
-void flatUiLayerFrame(bool mapOpen) {
+void flatUiLayerFrame(bool mapOpen, uint64_t nextFrame) {
     if (!runtimeFlatProfile()) return;
+    clearHudPhysical(nextFrame);  // release the previous frame's physical RTV resources at Present
+    if (flatUiLayerOn() && !g_toneProbeArmed) {
+        g_toneProbeArmed = true;
+        Log::get().note("flat ui tone probe: armed; F9C/E894 and 43CA/E894 physical bindings only after a HUD ask, "
+                        "two samples at least 90 frames apart per geometry; tone proof and admission unchanged");
+    }
     if (mapOpen) ++g_w.mapOpenFrames;
     static uint64_t windowStartMs = 0;
     const uint64_t now = GetTickCount64();
@@ -494,6 +758,23 @@ void flatUiLayerFrame(bool mapOpen) {
 
 void flatUiLayerReport(uint64_t windowSeconds) {
     Window& w = g_w;
+    const uint64_t hudAsks = w.asked[static_cast<size_t>(UiLayerFamily::kHolo)] +
+        w.asked[static_cast<size_t>(UiLayerFamily::kFlightHud)] +
+        w.asked[static_cast<size_t>(UiLayerFamily::kSprite)];
+    for (unsigned pair = 0; pair < 2; ++pair) {
+        const auto& budget = g_toneProbe[pair];
+        const char* progress = !flatUiLayerOn() ? "inactive" : budget.samples == 2 ? "complete"
+            : !budget.candidates ? "never-observed" : !budget.withHud ? "observed-without-current-HUD" : "armed";
+        Log::get().note("flat ui tone probe: progress pair=%s window=%llus state=%s geometry=%ux%u->%ux%u "
+                        "HUD-asks-this-window=%llu pair-candidates=%llu pair-candidates-with-current-HUD=%llu "
+                        "pair-samples=%u/2 last-frame=%llu; window HUD asks are context, not same-frame matches; observation only",
+                        pair == 0 ? "F9C/E894" : "43CA/E894", static_cast<unsigned long long>(windowSeconds), progress,
+                        budget.renderW, budget.renderH, budget.outputW, budget.outputH,
+                        static_cast<unsigned long long>(hudAsks),
+                        static_cast<unsigned long long>(budget.candidates),
+                        static_cast<unsigned long long>(budget.withHud), budget.samples,
+                        static_cast<unsigned long long>(budget.lastSampleFrame));
+    }
     Log::get().note(
         "flat ui layer: window=%llus state=%s copies=%llu door-armed=%llu door-refused-untreated=%llu "
         "door-refused-size=%llu (last copy read %ux%u, display %ux%u) tone-candidates=%llu tone-proven=%llu "
