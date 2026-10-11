@@ -46,9 +46,11 @@
 // flag is set by the menu, which sets it only while the panel is actually
 // being drawn (frame_flag.h's menuDrawn), never on its own belief.
 //
-// WHAT IS NOT CAPTURED: the mouse, DirectInput joysticks, XInput pads (a
-// phase-B door of the same shape). Nothing here reads a key EDVR does not
-// already read through hotkey.cpp; nothing here injects anything.
+// The mouse and DirectInput joysticks are not captured. The flat panel alone
+// can own one proven XInput slot's DPad/A/B/LB/RB through the EXE's GetState
+// import; sticks, triggers and other controls pass through. Ownership follows
+// visible/focused frame heartbeats and closing buttons wait for release.
+// VR menus never request controller ownership. Nothing here injects input.
 //
 // JOYSTICKS ARE WATCHED, since 2026-10-08 (joy_watch.h): the wrappers below, and
 // an observer-only door made at CreateDevice for a controller on a table of its
@@ -86,6 +88,14 @@ void inputGateInstall();
 // which is why the menu also clears it on every path that closes.
 void inputGateSetPrivate(bool priv);
 bool inputGatePrivate();
+
+// Flat-panel controller ownership, independent of the keyboard door proof.
+// Requests expire without the visible/focused panel's per-frame heartbeat.
+// A slot becomes usable only after the EXE's actual GetState call is observed
+// applying that request. Other slots and all non-navigation controls pass.
+void inputGateSetPadPrivate(bool priv, int index);
+bool inputGatePadSeen(int index);
+bool inputGatePadPrivate(int index);
 
 // The stricter question the menu's adopted Elite keys ask (menu_keys.h):
 // is the flag set AND a DirectInput door installed and not retired AND the

@@ -99,11 +99,36 @@ struct KeyRepeat {
 // state change never fires when the state later allows it -- neither the
 // edge nor the repeat train. With act=true this is exactly the old
 // pollKey for a key that was not held across a swallowed state.
-int keyRepeatStep(KeyRepeat& k, bool down, uint64_t now, bool act);
+inline int keyRepeatStep(KeyRepeat& k, bool down, uint64_t now, bool act) {
+    if (!down) {
+        k.down = false;
+        k.nextMs = 0;
+        return 0;
+    }
+    if (!act) {
+        k.down = true;
+        k.nextMs = kKeyRepeatParked;
+        return 0;
+    }
+    if (!k.down) {
+        k.down = true;
+        k.nextMs = now + kKeyRepeatFirstMs;
+        return 1;
+    }
+    if (k.nextMs == kKeyRepeatParked) return 0;
+    if (now >= k.nextMs) {
+        k.nextMs = now + kKeyRepeatMs;
+        return 1;
+    }
+    return 0;
+}
 
 // Seed a tracker from the raw key: a key that is down now is parked until
 // released; a key that is up is fresh.
-void keyRepeatPrime(KeyRepeat& k, bool down);
+inline void keyRepeatPrime(KeyRepeat& k, bool down) {
+    k.down = down;
+    k.nextMs = down ? kKeyRepeatParked : 0;
+}
 
 // The ten elements, in the order that is also the priority for duplicates
 // (R7): Up, Down, Left, Right, Select, Back, PageNext, PagePrev, ReadOn,

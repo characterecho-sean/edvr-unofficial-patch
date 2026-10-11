@@ -5,14 +5,14 @@
 - State: local XeSS native AA/upscaling and FSR3 0.65 upscaling confirmed. User
   reports stable scene/HUD/menu motion; native hangar flicker was absent at
   XeSS 0.75. Keep this branch for Windows testing; no main merge.
-- Environment: ONEXPLAYER 3, Intel Arc B390 PTL 8086:b080, CachyOS xe, Proton
-  Experimental experimental-11.0-20261001-x86_64, DXVK
-  v3.1.1-47-g685301564ea3486, private Mesa 26.3.0-devel git-37bf953a58. Normal
-  Elite startup now reaches the menu without EDVR or a debugger; see
-  planetary-startup-intel-b390-2026-10-11.md.
+- Environment: ONEXPLAYER 3, Intel Arc B390 PTL 8086:b080; CachyOS xe; Proton
+  Experimental experimental-11.0-20261001-x86_64; DXVK
+  v3.1.1-47-g685301564ea3486; private Mesa 26.3.0-devel git-37bf953a58. Elite
+  reaches the menu; see planetary-startup-intel-b390-2026-10-11.md.
 - Branch adds fix.temporal_aa=xess for flat only, a pinned SDK fetcher, a
   D3D11/D3D12 shared-texture/fence backend and installer payloads. Existing
-  modes and defaults stay unchanged. Live flat config selects fsr after testing.
+  modes and defaults stay unchanged. Live flat config selects fsr after
+  testing.
 - SDK v3.0.2, commit 8fe81bdbbaf00b3c1b733fd0d830c333dc84e6f0; XeSS-SR runtime
   2.0.2. Package and component versions differ.
 - Windows SDK handoff: `python tools/fetch_xess.py --dest third_party/xess` and
@@ -27,13 +27,12 @@
 - XeSS jitter minimum follows ceil(8 * max(E/R)^2), including 72 phases at 3x.
   Legacy/Off camera routes stay at eight and explicitly refuse XeSS upscaling
   when insufficient; native AA can use eight.
-- Build gate: portable Microsoft MSVC/SDK compiles production DLLs and both
-  installers. Full build is not green: unchanged run_jobs process/error-mode
-  tests and installer sharing tests fail under Wine. Windows validation is
-  still required. The user authorized branch-only work pending that check.
-- Local install: clean source 75848439, v0.19.1-22-g75848439; pinned FSR3 3.1.2
-  enabled. Sanctioned dry-run/install/verify passed; settings unchanged.
-  Hardware rig 97/97; production DLLs and separate flat installer checks pass.
+- Build: portable MSVC/SDK compiles production DLLs and installers. Full build
+  fails unchanged run_jobs and installer sharing tests under Wine; Windows
+  validation is required. User authorized branch-only work pending that check.
+- Earlier local FSR install: clean source 75848439, v0.19.1-22-g75848439; FSR3
+  3.1.2 enabled. Install/verify passed; hardware rig 97/97 and installer checks
+  passed. See the navigation journal for the current installed build.
 - Gameplay flight: correct 0f700706, 103114.log. Native HDR AA at 1920x1200
   completes every step. SS 0.75 upscales 1440x900 to 1920x1200 on the LDR copy
   route with 15 jitter phases; XeSS init/evaluations return rc=0.
@@ -45,10 +44,10 @@
   exact-pair guard evidence are in design-flat-ui-quality-2026-10-05.md. Native
   surface flicker still needs evidence. FSR3 flight 125209.log treats 463
   frames without SDK fallback; sampled FSR HUD counters remain unmeasured.
-- Capture: correct build 644fe39b, edvr_gfx_20261011_100319.log and
-  flat_trace_14850.bin; three complete frames, zero overflow. Stored/replayed
-  contracts match exactly. All reject image-copy-source: 29/31 guards pass;
-  destination hdrCamera and current tone camera are missing.
+- Capture: build 644fe39b, edvr_gfx_20261011_100319.log and
+  flat_trace_14850.bin; three frames, zero overflow, matching contracts. All
+  reject image-copy-source: 29/31 guards pass; destination hdrCamera and
+  current tone camera are missing.
 - Confirmed: H has camera-less writes then a laser-pair draw excluded from
   setting tone. Its camera matches 266 prior supported pool draws on the same
   scene depth, including exact camera bytes and current write provenance.
@@ -57,9 +56,9 @@
 - Implemented: actual H laser draw qualified by scene camera and verified image
   continuation. MSVC rig passes; 17 historical traces retain all 46 hashes;
   current capture selects all three HDR frames. Fix flown.
-- Local settings: temporal_aa=fsr, UI 125, menu=F8; rear-right unresolved. No new
-  diagnostic keys. M2 vendor identity verified; bridge/window checks pass.
-  Next: install read access and test menu. Private Mesa launch options verified.
+- Local: temporal_aa=xess, UI 125, sharpness 0.75, menu F8; M2 and desktop
+  work. Human flight confirms pad and normal Elite controls after close.
+  Full-build and native-rig caveats remain (journal below).
 
 ## October 11: D3D11 capability probe
 
@@ -591,5 +590,91 @@ matches the XWayland window's _NET_WM_PID; its class is steam_app_359320.
 Dry-run identifies Elite foreground and leaves gamepad0 unchanged, with no
 device open, target creation, key sends or file writes. Live DBus creation,
 SendKey signature introspection and removal of an unattached keyboard0 target
-also passed without sending keys or altering the main target. Menu forwarding
-is still untested; initial permission setup and user confirmation remain.
+also passed without sending keys or altering the main target. Subsequent local
+installation and user-authorized testing confirmed menu forwarding; details
+follow.
+
+The user explicitly approved a read-only udev rule and the per-install bridge.
+`pkexec /usr/bin/python3 -I -B /tmp/edvr_install_rear_read_access.py --install`
+succeeded. The installed `/etc/udev/rules.d/70-edvr-onex-rear-button.rules`
+matches hidraw only by USB bus, VID 1a86, PID fe00 and interface 02, assigning
+group deck and mode 0640. The rule changed access only for hidraw2: owner root,
+group ID 1000, mode 0640; deck UID 1000 can open it read-only and cannot write.
+hidraw1 and hidraw6 remain root:root 0600 and unreadable to deck. The original
+permissions snapshot is
+`/etc/udev/rules.d/.70-edvr-onex-rear-button.state.json`; rollback is available
+through `/home/deck/.local/share/elite-mesa-37bf953a58/rear_menu_access.py
+--rollback` with local root authorization.
+
+The bridge is installed at
+`/home/deck/.local/share/elite-mesa-37bf953a58/rear_menu.py` (SHA256
+bea553d04f0e88436bead487237186892b025db2971295bab046383de61762db). Its launcher
+is `launch.py` (SHA256
+0438254d21a8e6fce4228ef5ba4993505032d33b23b5bf1e8c4966b9621ad4f7), with the
+original saved as `launch.py.before-rear-menu` (SHA256
+781f898a252b7a5350313407bdae90b8933f5b884a1e51f9dcc94c4ca5b86c4e). The current
+Steam launch options are unchanged; original Mesa setup and `execvpe` behavior
+are preserved. Each launch creates its own keyboard target and forwards only M2
+to F8 while the exact Elite PID and cwd are foreground; it closes on exit. The
+test log records two F8 down/up pairs and `CLOSED main_targets_unchanged=True`.
+User confirmed rear-right opens and closes the EDVR menu and desktop clicks
+work.
+
+At this earlier checkpoint controller navigation was still open. Source
+inspection showed `menu.cpp` keyboard-only at lines 2763 and 3450; flat
+navigation at line 4140 used `handleKeys`, XInput served hotkey capture at line
+3311, and `input_gate.h` excluded pads at line 49. No existing INI key enabled
+pad navigation. The implementation and validation status below supersedes that
+checkpoint. Preserve the XeSS/FSR3 Windows build-gate caveats above.
+
+## October 11: native flat controller navigation
+
+The flat menu adopts focused gamepad navigation alongside keyboard input. The
+EXE's XINPUT9_1_0 XInputGetState gate forwards original state and records one
+proven slot; only a focused, drawn flat menu consumes it. D-pad moves rows and
+changes values, A selects or commits, B cancels an edit or closes, and LB/RB
+use the existing page dispatcher. Other controls and VR paths are unchanged,
+and no INI key was added; controller privacy is independent of menu.keyboard.
+Closing while A/B is held sends a release tail. Final review also covered the
+controller footer on actual readiness, reconnect/reselect and priming, and
+physical Shift refresh.
+
+The pure `menu_pad.h` model covers mask 0x330F, per-slot isolation, changing
+and stable packets, release-tail handling, 100 ms ownership expiry, held-open
+reacquisition seeding, repeat, and action edges. Its native-host rig passes all
+45 checks. `input_gate_test` passes; `menu_edit_hold` passes 95 checks and 38
+mutation anchors; `hotkey_capture` passes 627 checks. Their logs are under
+`/tmp/edvr-msvc-bootstrap-20261011/rig_<label>_20261011.log`. The native menu
+rig reports 125 checks and five shared-resource capture/read/pixel failures in
+this environment; no baseline comparison establishes them as pre-existing.
+
+The final full absolute build log is
+`/tmp/edvr-msvc-bootstrap-20261011/full_menu_pad_shift_final_20261011.log`. It
+compiled and linked production `d3d11.dll` and `edvr_openxr_graphics.dll`, then
+failed unchanged Wine `run_jobs` process/focus self-tests involving Job
+Objects, inherited error mode and window attribution, before pool, packaging
+and receipt gates. The complete build is not green.
+
+Reviewed dirty build v0.19.1-26-g85e79e18-dirty was installed through the
+sanctioned helper; dry-run, install and verify each exited 0. Source
+`d3d11.dll` and `edvr_openxr_graphics.dll` have SHA256
+6d297b9a18447263e9953451261ecb80e74d25321720f011e06fb66f46656c89 (18,563,072
+bytes); installed `d3d11.dll` matches. The flat INI and LocalAppData mirror
+remain at original SHA256
+c2ecc7487c6633000b93600a97fbbbffd4928c6b76be61ad9e6c5c2fe3d1c6e5; installation
+used no `--ini`.
+
+The human controller flight is recorded in `edvr_gfx_20261011_144257.log` (912
+lines, 231.3 KB). The sanctioned `edvr_log.py --expect-build HEAD` matched it:
+version v0.19.1-26-g85e79e18-dirty, build 6ACBF433 linked at 20:40:19 UTC. At
+14:43:05.686 the EXE XINPUT9_1_0 gate was installed; at .735 Elite slot 0 was
+observed and private; at .736 flat pad navigation became active on proven
+private slot 0. The log records settings edits during the flight, ending with
+temporal_aa=xess, UI 125, sharpness 0.75 and menu F8. It records menu close via
+UI_Back at 14:43:17.837. The user confirmed all tested D-pad, value, A/B and
+LB/RB controls worked, then confirmed normal Elite controls worked after close.
+Controller navigation is human-tested and confirmed. The bridge's
+`rear_menu.log` did not yet contain a `CLOSED` line when last read; cleanup at
+process exit is not claimed for this run. The full-build gate and five
+native-menu shared-resource failures above remain unresolved; no baseline
+establishes those failures as pre-existing.

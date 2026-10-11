@@ -49,4 +49,7 @@ bool xinputHeld(const XinputBinding& b);
 // 0 left, bit 1 right), as of the last tick: the settings menu's capture.
 void xinputSnapshot(uint16_t* buttons, uint8_t* triggers);
 
+// The flat menu owns one proven game input slot, never the OR of several pads.
+bool xinputSlotSnapshot(unsigned index, uint16_t* buttons);
+
 }  // namespace edvr

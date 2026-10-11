@@ -132,37 +132,8 @@ void groupName(const MenuAliasTable& t, const Group& g, char* out, size_t n) {
 // ---------------------------------------------------------------------------
 // The tracker
 
-int keyRepeatStep(KeyRepeat& k, bool down, uint64_t now, bool act) {
-    if (!down) {
-        k.down = false;
-        k.nextMs = 0;
-        return 0;
-    }
-    if (!act) {
-        // Tracked and swallowed: parked until the key is released. A press
-        // made while the menu could not take it is not a press the menu
-        // will take later.
-        k.down = true;
-        k.nextMs = kKeyRepeatParked;
-        return 0;
-    }
-    if (!k.down) {
-        k.down = true;
-        k.nextMs = now + kKeyRepeatFirstMs;
-        return 1;
-    }
-    if (k.nextMs == kKeyRepeatParked) return 0;   // held since a swallowed state: wait for release
-    if (now >= k.nextMs) {
-        k.nextMs = now + kKeyRepeatMs;
-        return 1;
-    }
-    return 0;
-}
-
-void keyRepeatPrime(KeyRepeat& k, bool down) {
-    k.down = down;
-    k.nextMs = down ? kKeyRepeatParked : 0;
-}
+// Pure tracker definitions live beside KeyRepeat in menu_keys.h, so both
+// the menu and controller regression rig compile the same implementation.
 
 // ---------------------------------------------------------------------------
 // The rules

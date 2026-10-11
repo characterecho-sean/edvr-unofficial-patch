@@ -3621,3 +3621,14 @@ if errorlevel 1 ( echo [edvr] ERROR: supercruise census test build failed & exit
 "%OBJ%\supercruisecensus\supercruise_census_test.exe" --dry-run || exit /b 1
 "%OBJ%\supercruisecensus\supercruise_census_test.exe" --self-test || exit /b 1
 exit /b 0
+
+:rig_menu_pad_test
+echo [edvr] === menu_pad_test.exe ===
+if not exist "%OBJ%\menupad" mkdir "%OBJ%\menupad"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+/Fo"%OBJ%\menupad"\ /Fe"%BUILD%\menu_pad_test.exe" ^
+"tools\menu_pad_test\menu_pad_test.cpp" /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: menu_pad_test build failed & exit /b 1 )
+"%BUILD%\menu_pad_test.exe" --dry-run || exit /b 1
+"%BUILD%\menu_pad_test.exe" --self-test || exit /b 1
+exit /b 0

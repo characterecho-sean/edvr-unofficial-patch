@@ -176,6 +176,13 @@ void xinputWatchTick() {
     if (probedSlots != 0) g_workProbe.recordDuration(probeTicks, probedSlots);
 }
 
+bool xinputSlotSnapshot(unsigned index, uint16_t* buttons) {
+    if (buttons) *buttons = 0;
+    if (index >= 4 || !g_slot[index].connected) return false;
+    if (buttons) *buttons = g_slot[index].cur.Gamepad.wButtons;
+    return true;
+}
+
 bool xinputPressed(const XinputBinding& b) {
     if (!b.valid || !g_getState) return false;
     for (const Slot& s : g_slot) {

@@ -10,15 +10,18 @@
 
 #define DIRECTINPUT_VERSION 0x0800
 #include <dinput.h>
+#include <Xinput.h>
 
 #include "../common/config.h"
 #include "../common/guard.h"
 #include "../common/hotkey.h"
 #include "../common/iat_hook.h"
 #include "../common/log.h"
+#include "../common/runtime_profile.h"
 #include "../common/timing.h"
 #include "../common/vtable_hook.h"
 #include "joy_watch.h"
+#include "menu_pad.h"
 
 namespace edvr {
 namespace {
@@ -234,6 +237,84 @@ struct UserDoor {
     std::atomic<uint32_t> swallowed{0};
 };
 UserDoor g_user;
+
+// Door 4 is only requested by the flat panel. The EXE's import is patched,
+// never the export that xinput_watch uses to read the real pad.
+typedef DWORD(WINAPI* PFN_PadGetState)(DWORD, XINPUT_STATE*);
+IatPatch g_padImport;
+std::atomic<bool> g_padInstalled{false};
+std::atomic<bool> g_padRetired{false};
+SRWLOCK g_padLock = SRWLOCK_INIT;
+struct PadDoorSlot {
+    MenuPadGate gate;
+    uint64_t seenMs = 0;
+    bool privateNoted = false;
+};
+PadDoorSlot g_padSlot[4];
+int g_padRequested = -1;
+uint64_t g_padRequestMs = 0;
+
+DWORD WINAPI hookPadGetState(DWORD index, XINPUT_STATE* state) {
+    DWORD result = ERROR_DEVICE_NOT_CONNECTED;
+    // iatHookInstall publishes patch.original BEFORE exchanging the slot.
+    // A separate pointer assigned after Install would race the first call.
+    const auto original = reinterpret_cast<PFN_PadGetState>(g_padImport.original);
+    if (!original) return result;
+    if (!guarded("inputGate/padOriginal", [&] { result = original(index, state); })) {
+        g_padRetired.store(true);
+        return result;
+    }
+    if (index >= 4 || g_padRetired.load()) return result;
+    if (result != ERROR_SUCCESS || !state) {
+        AcquireSRWLockExclusive(&g_padLock);
+        g_padSlot[index].gate.disconnect();
+        g_padSlot[index].seenMs = 0;
+        ReleaseSRWLockExclusive(&g_padLock);
+        return result;
+    }
+    // Access the caller's buffer outside the lock; a bad pointer cannot strand
+    // it. The locked region only touches our own plain state.
+    XINPUT_STATE value{};
+    if (!guarded("inputGate/padRead", [&] { value = *state; })) {
+        g_padRetired.store(true);
+        return result;
+    }
+    MenuPadSample raw;
+    raw.packet = value.dwPacketNumber;
+    raw.buttons = value.Gamepad.wButtons;
+    raw.leftTrigger = value.Gamepad.bLeftTrigger;
+    raw.rightTrigger = value.Gamepad.bRightTrigger;
+    raw.leftX = value.Gamepad.sThumbLX; raw.leftY = value.Gamepad.sThumbLY;
+    raw.rightX = value.Gamepad.sThumbRX; raw.rightY = value.Gamepad.sThumbRY;
+    const uint64_t now = stampMs();
+    AcquireSRWLockExclusive(&g_padLock);
+    PadDoorSlot& slot = g_padSlot[index];
+    slot.seenMs = now;
+    const bool own = menuPadMayOwn(static_cast<int>(index), g_padRequested, g_padRequestMs, now,
+                                  g_padInstalled.load(), g_padRetired.load());
+    const MenuPadSample visible = slot.gate.filter(raw, own);
+    const bool note = own && !slot.privateNoted;
+    if (note) slot.privateNoted = true;
+    ReleaseSRWLockExclusive(&g_padLock);
+    value.dwPacketNumber = visible.packet;
+    value.Gamepad.wButtons = visible.buttons;
+    const bool written = guarded("inputGate/padWrite", [&] { *state = value; });
+    if (!written) g_padRetired.store(true);
+    if (note && written)
+        Log::get().note("controller gate: Elite's XInputGetState slot %lu is observed and private; "
+                        "DPad/A/B/LB/RB belong to the drawn flat panel, other controls pass through.",
+                        static_cast<unsigned long>(index));
+    return result;
+}
+
+void installPadDoor() {
+    const bool installed = iatHookInstall("xinput9_1_0.dll", "XInputGetState",
+        reinterpret_cast<void*>(&hookPadGetState), &g_padImport);
+    g_padInstalled.store(installed);
+    Log::get().note("controller gate: executable XINPUT9_1_0 XInputGetState door %s; "
+                    "flat navigation waits for an observed private controller slot.",
+                    installed ? "installed" : "unavailable");
+}
 
 bool g_installTried = false;
 bool g_probe = false;
@@ -1437,6 +1518,7 @@ void inputGateInstall() {
                                          &shared);
         }
         installUserDoors();
+        if (runtimeFlatProfile()) installPadDoor();
     });
 }
 
@@ -1459,6 +1541,37 @@ void inputGateSetPrivate(bool priv) {
 }
 
 bool inputGatePrivate() { return g_private.load() != 0; }
+
+void inputGateSetPadPrivate(bool priv, int index) {
+    AcquireSRWLockExclusive(&g_padLock);
+    g_padRequested = priv && index >= 0 && index < 4 &&
+                     g_padInstalled.load() && !g_padRetired.load() ? index : -1;
+    g_padRequestMs = stampMs();
+    ReleaseSRWLockExclusive(&g_padLock);
+}
+
+bool inputGatePadSeen(int index) {
+    if (index < 0 || index >= 4 || !g_padInstalled.load() || g_padRetired.load()) return false;
+    const uint64_t now = stampMs();
+    AcquireSRWLockShared(&g_padLock);
+    const bool seen = g_padSlot[index].seenMs != 0 && now >= g_padSlot[index].seenMs &&
+                      now - g_padSlot[index].seenMs <= kMenuPadDoorFreshMs;
+    ReleaseSRWLockShared(&g_padLock);
+    return seen;
+}
+
+bool inputGatePadPrivate(int index) {
+    if (index < 0 || index >= 4 || !g_padInstalled.load() || g_padRetired.load()) return false;
+    const uint64_t now = stampMs();
+    AcquireSRWLockShared(&g_padLock);
+    const bool own = menuPadMayOwn(index, g_padRequested, g_padRequestMs, now,
+                                  g_padInstalled.load(), g_padRetired.load()) &&
+                     g_padSlot[index].gate.owned && g_padSlot[index].seenMs != 0 &&
+                     now >= g_padSlot[index].seenMs &&
+                     now - g_padSlot[index].seenMs <= kMenuPadDoorFreshMs;
+    ReleaseSRWLockShared(&g_padLock);
+    return own;
+}
 
 bool inputGateHoldsGameKeyboard() {
     if (g_private.load() == 0) return false;
@@ -1561,6 +1674,9 @@ void inputGateStatusLine(char* buf, size_t bufLen) {
 }
 
 void inputGateShutdown() {
+    inputGateSetPadPrivate(false, -1);
+    g_padInstalled.store(false);
+    iatHookUninstall(&g_padImport);
     g_private.store(0);
     g_summon.store(0);
     g_releaseTail.store(false);
