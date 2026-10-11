@@ -42,6 +42,12 @@
   changes. Steam Launch Options uses the verified persistent wrapper below;
   clear it to revert.
 - Evidence directory: /home/deck/.cache/elite-startup-diagnostics/2026-10-11.
+- Launcher follow-up: user reports the EDLaunch window stays open after closing.
+  The Mesa wrapper uses execvpe and retains no Python parent. No live hung
+  launcher was captured; driver involvement in its shutdown is not ruled out.
+- Alternative: verified native MinEdLauncher v0.13.0 installed outside the game.
+  Steam launch options verified; user confirms the game launches and its
+  terminal closes on game exit. Command and rollback are recorded below.
 
 ## October 11 evidence
 
@@ -267,3 +273,53 @@ compiler/exit causes remain unresolved. No EDVR changes were needed.
 - [Fossilize capture
   source](https://github.com/ValveSoftware/Fossilize/blob/master/layer/dispatch.cpp#L893)
   records ordinary compute pipelines after successful driver compilation.
+
+### Launcher shutdown follow-up and MinEdLauncher installation
+
+The user reports that the visible EDLaunch window stays open after closing and
+has to be killed. Read-only inspection of the persistent Mesa wrapper shows it
+sets VK_DRIVER_FILES/VK_ICD_FILENAMES and calls os.execvpe: it leaves no Python
+waiting parent, spawns no background process and has no wait loop. This rules
+out wrapper-parent retention, not a Mesa/Proton shutdown problem inside the
+launcher. Inspection after the user closed the session found no EDLaunch, game,
+Proton or wineserver process; Steam recorded removal of app 359320 from its
+running list at 12:21:03. No live shutdown hang was captured and no causal
+launcher fix is claimed.
+
+At the user's request, installed the official [MinEdLauncher v0.13.0 Linux
+release](https://github.com/rfvgyhn/min-ed-launcher/releases/tag/v0.13.0) in
+`/home/deck/.local/share/min-ed-launcher-v0.13.0`, outside the game. Its
+archive SHA-256
+c50a2c8bd3ffad8876e30f05c9e80c1ee55c43c79455e7521ef2cdd2f88367a8 matches the
+release shasum and GitHub asset digest; GitHub attestation verification exits
+0. Dry-run creates nothing, installation verifies all five copied release files
+and preserves executable mode. This is a self-contained Linux application; no
+system .NET installation is needed. Native startup displays v0.13.0+6e50d0e0
+and correctly rejects missing game-location arguments in a sandbox smoke test.
+The initial smoke test needed a temporary DOTNET_BUNDLE_EXTRACT_BASE_DIR
+because the sandbox cannot write the normal home cache. No such override is
+installed for Steam.
+
+The [exact-release
+README](https://github.com/rfvgyhn/min-ed-launcher/tree/v0.13.0) documents the
+alacritty Steam command, /edo, /novr and /autoquit waitForExit. The
+exact-release Settings.fs discovers Elite from EDLaunch.exe in %command% and
+preserves the preceding Steam/Proton command, allowing the standalone
+installation. Activated Steam command preserves the Mesa wrapper and Proton
+Experimental:
+
+```text
+/usr/bin/python3 /home/deck/.local/share/elite-mesa-37bf953a58/launch.py /usr/bin/alacritty -e /home/deck/.local/share/min-ed-launcher-v0.13.0/MinEdLauncher %command% /autorun /autoquit waitForExit /edo /novr
+```
+
+Steam's saved Elite launch options match this command. The user confirms the
+game launches and the terminal closes after quitting Elite. No live Steam VDF
+was edited by the agent. Previous launch option, also the rollback command:
+
+```text
+/usr/bin/python3 /home/deck/.local/share/elite-mesa-37bf953a58/launch.py %command%
+```
+
+The installed Mesa driver, wrapper and flown 4b7bfec4 EDVR files/settings
+remain unchanged. Main stays 99476a02; XeSS/UI diagnostic cleanup 02f50bd7 is
+pushed on codex/xess-flat with native Windows full validation pending.

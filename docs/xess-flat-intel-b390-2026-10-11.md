@@ -41,7 +41,7 @@
   flickers at native and stops below 1; sizes imply 0.75. This changes resolve
   route and jitter as well as resolution, so it does not isolate the cause.
 - Confirmed: correct 4b7bfec4, 120427.log; E894 UI proof bootstraps and every
-  steady frame composites HUD/menus. User reports stable. Probe cleanup and
+  steady frame composites HUD/menus. User reports stable. Cleanup 02f50bd7 and
   exact-pair guard evidence are in design-flat-ui-quality-2026-10-05.md.
   Native surface flicker still needs evidence; FSR3 SDK is absent here.
 - Capture: correct build 644fe39b, edvr_gfx_20261011_100319.log and

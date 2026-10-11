@@ -53,7 +53,7 @@
   The "flat ui layer map:" 30 s line counts them and names each refusal. Entry at the end.
 - **Temporary config keys:** none.
 - **Next locally:** no repeat flight needed for capture cleanup. The installed
-  4b7bfec4 rendering path is verified; cleanup compiled both production DLLs.
+  4b7bfec4 rendering path is verified; cleanup 02f50bd7 is pushed and compiled.
   Keep codex/xess-flat separate pending the user's Windows full build/testing.
 - **Next on Epic:** fly SS 0.5 on the shipped build (the copy route under eced5813's
   admission change) and 100% at SS 1.0; then an Epic flight opening all three maps.
