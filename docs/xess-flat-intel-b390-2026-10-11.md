@@ -15,9 +15,9 @@
   modes and defaults stay unchanged. Initial live flat config selects xess.
 - SDK v3.0.2, commit 8fe81bdbbaf00b3c1b733fd0d830c333dc84e6f0; XeSS-SR runtime
   2.0.2. Package and component versions differ.
-- Windows SDK handoff: run `python tools/fetch_xess.py --dest third_party/xess`
-  before the full build; the fetcher pins and verifies the SDK and the build
-  stages `libxess.dll` with Intel's license notices for the flat installer.
+- Windows SDK handoff: `python tools/fetch_xess.py --dest third_party/xess`
+  and `python tools/fetch_ffx_dx11.py --dest third_party/ffx-dx11` before full
+  build. Fetchers pin/verify dependencies; installers carry required notices.
 - Ruled-out pointer: capability entries below record D3D11 unsupported-driver
   refusal and the missing enabled Vulkan extension on DXVK's device. Separate
   Vulkan execution passed; the confirmed D3D12 bridge is the branch backend.
@@ -43,7 +43,7 @@
 - Confirmed: correct 4b7bfec4, 120427.log; E894 UI proof bootstraps and every
   steady frame composites HUD/menus. User reports stable. Cleanup 02f50bd7 and
   exact-pair guard evidence are in design-flat-ui-quality-2026-10-05.md.
-  Native surface flicker still needs evidence; FSR3 SDK is absent here.
+  Native surface flicker still needs evidence; enabling the missing FSR3 SDK.
 - Capture: correct build 644fe39b, edvr_gfx_20261011_100319.log and
   flat_trace_14850.bin; three complete frames, zero overflow. Stored/replayed
   contracts match exactly. All reject image-copy-source: 29/31 guards pass;
@@ -378,3 +378,32 @@ rendering change. No source or live config changed for this read.
   (dx11_with_dx12.cpp)](https://github.com/OptiScaler/OptiScaler/blob/master/OptiScaler/with_dx12/dx11_with_dx12.cpp)
   and [XeSS D3D11-on-12 path
   (XeSSFeature_Dx11on12.cpp)](https://github.com/OptiScaler/OptiScaler/blob/master/OptiScaler/upscalers/xess/XeSSFeature_Dx11on12.cpp).
+
+### FSR3 local enablement: current refusal is a missing dependency
+
+The user reports FSR3 still does not work after the verified MinEdLauncher
+launch/exit test. Sanctioned reader confirms correct installed source 4b7bfec4
+in edvr_gfx_20261011_123101.log. At 12:32:05.684 the F8 mode changes xess ->
+fsr; at 12:32:05.717 the fallback says "this build was made without AMD's
+upscaler (EDVR_HAVE_FSR3)". The refusal counter reaches 29 at 12:32:06.183. No
+FSR3 GPU feature checks or execution are reached. Ruled out: the current logged
+refusal demonstrates an unsupported Intel device, because it is the build-time
+SDK-absence stub. Actual hardware compatibility remains to be checked after
+enabling the engine.
+
+The existing fetch_ffx_dx11.py pins the OptiScaler FidelityFX DX11 port at
+9b04fa49abae5aa341c0007af13c8ba1b4ad9913 (FSR 3.1.2), with AMD's MIT notice.
+Its offline self-test passes 25 checks. Pinned source is staged at
+/tmp/edvr-fsr3-pinned-source and the shader compiler matches the fetcher's
+SHA-256 30f9df1412742b7dcd5a8655c309ebfdb2210b070f9e6c1b09290a127c7d6dd7. The
+existing fetcher assumes a Windows VS2022 CMake generator; portable MSVC build
+adaptation is in progress. No production C++ fix is proposed for this refusal:
+verified libraries in third_party/ffx-dx11 enable the existing engine.
+
+Before another flight, a temporary hardware adaptation of the existing FSR3
+engine rig will check FL11_1, Options2 typed-UAV additional formats and
+individual required format support, then exercise the production engine's
+LDR/HDR evaluations and resets in the real DXVK/private-Mesa environment. The
+repository rig remains WARP by default for native Windows validation; there is
+no Intel vendor exclusion in the production engine. Both the dependency build
+and actual GPU results are pending.
