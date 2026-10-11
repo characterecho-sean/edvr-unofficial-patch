@@ -12,7 +12,7 @@
   planetary-startup-intel-b390-2026-10-11.md.
 - Branch adds fix.temporal_aa=xess for flat only, a pinned SDK fetcher, a
   D3D11/D3D12 shared-texture/fence backend and installer payloads. Existing
-  modes and defaults stay unchanged. Initial live flat config selects xess.
+  modes and defaults stay unchanged. Live flat config selects fsr after testing.
 - SDK v3.0.2, commit 8fe81bdbbaf00b3c1b733fd0d830c333dc84e6f0; XeSS-SR runtime
   2.0.2. Package and component versions differ.
 - Windows SDK handoff: `python tools/fetch_xess.py --dest third_party/xess` and
@@ -57,8 +57,8 @@
 - Implemented: actual H laser draw qualified by scene camera and verified image
   continuation. MSVC rig passes; 17 historical traces retain all 46 hashes;
   current capture selects all three HDR frames. Fix flown.
-- Temporary settings: initial flat profile fix.temporal_aa=xess; no new
-  diagnostic config keys. Existing private Mesa launch options verified.
+- Local settings: temporal_aa=fsr, UI 125, menu=F16 (rear-right M2). No new
+  diagnostic keys. Existing private Mesa launch options verified.
 
 ## October 11: D3D11 capability probe
 
@@ -449,3 +449,35 @@ Ruled out: the previously observed FSR3 refusal was caused by Intel hardware
 incompatibility, because enabling the missing dependency passes the hardware
 rig and produces successful FSR gameplay evaluations. This confirms the tested
 flat Proton/DXVK environment, not native Windows or an untested VR runtime.
+
+## October 11: local rear-right menu binding
+
+The user requested the menu on the ONEXPLAYER rear-right button for this
+install. The local hid-oxp driver identifies M1 as report 0x22 and M2 as 0x23;
+the ONEXPLAYER 3 setup project's measured left paddle is 0x22, so rear-right is
+M2. Live sysfs button_m2 is KEY_F16. EDVR's existing hotkey parser supports
+F16; no C++ change or repository default change is needed.
+
+The initial focused keyboard test received no rear-button event. InputPlumber
+owned the physical keyboard, but its active output was only deck-uhid, with no
+keyboard target, no keyboard output capabilities and no F16 translation in the
+current Default profile. Ruled out: changing the INI alone could deliver
+rear-right in that state, because the input manager discarded keyboard output
+before desktop/Proton delivery. KDE has no F15/F16 shortcut.
+
+The existing device YAML already requests deck-uhid, keyboard and mouse. The
+current outputs were set to deck-uhid plus keyboard, preserving the controller
+and restoring only the keyboard route needed here; no system file was edited.
+The Default profile has no target override. The earlier remover is unknown, and
+persistence across reboot has not been verified. Do not add a launch wrapper
+for an unobserved future reset.
+
+The live edvr-flat.ini and its existing LocalAppData mirror now have
+hotkey.menu=F16. They match exactly, SHA256
+614057eddf2587a8869e56b02b5d09bfe8077045feb601420212334734969058. The reviewed
+byte diff changes only menu=F8 to menu=F16 and its comment; CRLF,
+temporal_aa=fsr, UI 125, sharpness 0.75 and all other settings remain. The
+original is staged at /tmp/edvr-rear-right-original.ini, SHA256
+c2ecc7487c6633000b93600a97fbbbffd4928c6b76be61ad9e6c5c2fe3d1c6e5. User
+confirmation of in-game rear-right open/close is pending. The latest 125209.log
+predates this configuration change and still reports F8.
