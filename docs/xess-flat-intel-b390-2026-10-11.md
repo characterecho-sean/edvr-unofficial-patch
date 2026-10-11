@@ -57,8 +57,9 @@
 - Implemented: actual H laser draw qualified by scene camera and verified image
   continuation. MSVC rig passes; 17 historical traces retain all 46 hashes;
   current capture selects all three HDR frames. Fix flown.
-- Local settings: temporal_aa=fsr, UI 125, menu=F8 (rear-right unresolved). No new
-  diagnostic keys. Existing private Mesa launch options verified.
+- Local settings: temporal_aa=fsr, UI 125, menu=F8; rear-right unresolved. No new
+  diagnostic keys. M2 vendor identity verified; bridge/window checks pass.
+  Next: install read access and test menu. Private Mesa launch options verified.
 
 ## October 11: D3D11 capability probe
 
@@ -540,3 +541,55 @@ c2ecc7487c6633000b93600a97fbbbffd4928c6b76be61ad9e6c5c2fe3d1c6e5. FSR3, UI 125
 and sharpness 0.75 remain. User confirms only desktop clicks recovered, not the
 EDVR menu. The rear-right request remains open; no new binding is justified
 yet.
+
+The authenticated physical observer opened event18 (keyboard) and event6
+(consumer/mouse), both identified by the exact 1a86:fe00 USB ancestor. After
+READY the user pressed and released rear-right; no function-key or actual BTN_*
+identity was reported, while heartbeats continued. It made no grabs, input
+injections, mappings or configuration changes. Event18 is grabbed by
+InputPlumber and the filter excludes other keyboard codes, so this does not
+prove the hardware emits no report. Ruled out: rear-right emits an observed
+function-key or mouse/controller-button event on the ungrabbed event6 path in
+this test. The next test needs HID reports and aggregate event counts to
+distinguish another keyboard code, a grabbed interface and firmware-side
+silence.
+
+The combined authenticated capture opened event18, event6 and hidraw1/2/6 with
+zero report/event baselines. The user pressed front Console then rear-right.
+hidraw6 first recorded six boot-keyboard reports, then hidraw2 recorded two
+vendor reports; all evdev counters and hidraw1 stayed zero. No function-key or
+mouse-button identity appeared. This confirms that the raw reader bypasses the
+grabbed keyboard and can see hardware reports. Ruled out: event18's grab
+explains an unseen F16 keyboard emission during this test, because hidraw6 was
+observed directly and reported no F16. The rear sequence is associated with
+vendor-channel activity, but the counts-only observer discarded its payload;
+decode the exact vendor fields before claiming a button identity or changing
+firmware mappings.
+
+The vendor-only decoder confirmed the actual rear-right packet: CID 0xB2,
+matching 0x3f markers/footer, byte6=0x23 (M2/RightPaddle1), byte12=1 on press
+and 2 on release, packet type 0x01, flag 0x80, function 0x02. The source's
+`pressed = report.press_state == 1` agrees; its function byte is opaque and
+only logged. The first decoder assumed release=0, so it correctly preserved the
+actual state2 as rejected protocol metadata rather than falsely labeling it.
+Forwarding must use the observed 1/2 pair. No more identity test is needed.
+
+InputPlumber v0.81's existing OXP HID driver recognizes this B2 format, but the
+current composite has only evdev18 and evdev16 sources. Kernel hid-oxp
+raw_event handles B8 RGB replies and does not convert B2 buttons into keyboard
+events. Ruled out: choosing another INI key alone fixes the current vendor
+route, because the actual M2 packet never reaches a keyboard target. A narrow
+per-install bridge can read only the vendor interface and send F8 through a
+standalone InputPlumber keyboard target while Elite has focus, then
+release/stop that target on exit. This avoids changing the main controller's
+target list or global controller mappings. Implementation and local menu
+testing are still pending.
+
+The staged bridge passes measured M2 1/2 protocol and focus/debounce/release
+tests. Live host PID 244679 is deck-owned, has the exact Odyssey game cwd and
+matches the XWayland window's _NET_WM_PID; its class is steam_app_359320.
+Dry-run identifies Elite foreground and leaves gamepad0 unchanged, with no
+device open, target creation, key sends or file writes. Live DBus creation,
+SendKey signature introspection and removal of an unattached keyboard0 target
+also passed without sending keys or altering the main target. Menu forwarding
+is still untested; initial permission setup and user confirmation remain.
