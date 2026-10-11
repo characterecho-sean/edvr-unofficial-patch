@@ -182,6 +182,51 @@ inline bool flatRuntimeCameraCurrent(const FlatRuntimeDraw& d, uint32_t q, uint6
     return q && k.b1 && k.camera && k.writeEpoch == frame && k.writeSeq && k.writeSeq <= q &&
         (d.cameraHashTrusted || k.cameraHash == flatCameraHash(d.camera));
 }
+// A laser-family H draw is normally an alternate-camera weapon draw. It may
+// establish the scene camera only when the already-qualified pool source on
+// this exact depth proves that its current b1 rows are the scene's own camera
+// from before H's first write, and the pending camera-independent image source
+// names the same scene depth. The image copy's bound b1 is never evidence.
+inline bool flatRuntimeQualifiedLaserSceneCamera(const FlatRuntimePrefix& p,
+                                                 const FlatRuntimeTarget& t,
+                                                 const FlatRuntimeDraw& d, uint32_t q) {
+    using namespace flat_mono_detail;
+    const auto& k = d.key;
+    if (p.uncertain || t.hdrBad || t.hdrLayoutChanged || !t.writes.draws ||
+        t.writes.key.format != 26 || t.writes.key.width != k.width ||
+        t.writes.key.height != k.height || t.writes.key.depth != k.depth ||
+        t.writes.key.dsv != k.dsv || t.writes.key.depthFormat != k.depthFormat ||
+        !flatRuntimeCameraCurrent(d, q, p.frame)) return false;
+    uint32_t sameDepthSources = 0;
+    for (uint32_t i = 0; i < p.sourcesUsed; ++i) {
+        const auto& source = p.sources[i];
+        if (source.key.depth != k.depth) continue;
+        ++sameDepthSources;
+        if (source.key.kind != kFlatContractPool || !source.key.color || !source.key.rtv ||
+            source.key.color == k.color || source.key.dsv != k.dsv ||
+            source.key.depthFormat != k.depthFormat || source.key.width != k.width ||
+            source.key.height != k.height || source.key.depthWidth != k.width ||
+            source.key.depthHeight != k.height || !fullViewport(source.key, k.width, k.height) ||
+            !cameraCurrent(source, p.frame) || !flatRuntimeSameCamera(source, d) ||
+            source.last >= t.writes.first) return false;
+    }
+    if (sameDepthSources != 1) return false;
+    uint32_t imageSources = 0;
+    for (uint32_t i = 0; i < p.targetsUsed; ++i) {
+        const auto& image = p.targets[i];
+        const auto& r = image.writes;
+        if (!r.draws || r.key.format != 9 || r.key.depth != k.depth) continue;
+        ++imageSources;
+        if (image.hdrBad || image.imageSourceBad || image.imageHasCamera || r.key.camera ||
+            !flatRuntimeCameraIndependentImageSourcePair(r.key.vs, r.key.ps) ||
+            !r.key.rtv || r.key.dsv != k.dsv || r.key.depthFormat != k.depthFormat ||
+            r.key.width != k.width || r.key.height != k.height ||
+            r.key.depthWidth != k.width || r.key.depthHeight != k.height ||
+            !fullViewport(r.key, k.width, k.height) ||
+            r.first <= t.writes.first || r.last >= q) return false;
+    }
+    return imageSources == 1;
+}
 inline FlatRuntimeTarget* flatRuntimeTarget(FlatRuntimePrefix& p, const void* resource) {
     for (uint32_t i = 0; i < p.targetsUsed; ++i) if (p.targets[i].resource == resource) return &p.targets[i];
     if (!resource || p.targetsUsed == 128) { p.uncertain = true; return nullptr; }
@@ -467,9 +512,11 @@ inline FlatMonoFrame flatRuntimeObserve(FlatRuntimePrefix& p, const FlatRuntimeD
             // family) draws into the scene HDR/depth with its own qualified
             // second projection -- same position and orientation, narrower
             // FOV, near 0.0675 versus 0.025; its b0[4..7] transposes its own
-            // b1[270..273]. It neither sets nor vetoes the scene camera; its
-            // pixels fail strict depth ownership at resolve and fall back to
-            // current colour.
+            // b1[270..273]. A differing weapon projection neither sets nor
+            // vetoes the scene camera; its pixels fail strict depth ownership
+            // at resolve and fall back to current colour. This exact pair may
+            // set H's scene camera only when an earlier supported pool source
+            // on the same depth proves identical current camera bytes.
             const bool laserPair =
                 k.vs == 0x88DCF1164C640EC3ull && k.ps == 0x494506A63091DF8Cull;
             const bool otherCamera = t->hdrCamera && !flatRuntimeSameCamera(t->tone, d);
@@ -480,6 +527,8 @@ inline FlatMonoFrame flatRuntimeObserve(FlatRuntimePrefix& p, const FlatRuntimeD
             // bad stays bad with its first witness, and a draw planned as a protected overlay is the overlay's own case just below.
             const bool alternate = d.alternateHdr && otherCamera && !d.effectiveDepthWrite;
             const bool secondCamera = laserPair || alternate;
+            const bool sceneLaserCamera = laserPair && !t->hdrCamera &&
+                flatRuntimeQualifiedLaserSceneCamera(p, *t, d, q);
             const bool overlay = d.overlayProtected && otherCamera && !t->hdrBad &&
                 t->writes.draws && t->writes.key.format == 26 &&
                 k.depth == t->writes.key.depth && k.dsv == t->writes.key.dsv;
@@ -491,7 +540,7 @@ inline FlatMonoFrame flatRuntimeObserve(FlatRuntimePrefix& p, const FlatRuntimeD
                 bad(*t, FlatRuntimeConflict::CameraProvenance, t->tone);
             // Keep the first known camera draw separate from earlier HDR writes
             // without b1. Assigning its later write to those draws invents provenance.
-            if (!t->hdrCamera && !secondCamera) { t->tone = current(); t->hdrCamera = true; }
+            if (!t->hdrCamera && (!secondCamera || sceneLaserCamera)) { t->tone = current(); t->hdrCamera = true; }
             if (overlay) { t->overlayOpen = true; t->overlayDepth = k.depth; }
         }
     }

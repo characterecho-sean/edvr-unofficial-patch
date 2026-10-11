@@ -2,9 +2,9 @@
 
 ## Status
 
-- State: first local flight confirms menu XeSS, but gameplay route refuses. The
-  user wants to test locally on this device first, then test on Windows. Keep
-  the work on this branch; do not merge to main.
+- State: menu XeSS works; captured gameplay fails destination camera admission.
+  The user wants to test locally on this device first, then test on Windows.
+  Keep the work on this branch; do not merge to main.
 - Environment: ONEXPLAYER 3, Intel Arc B390 PTL 8086:b080, CachyOS xe, Proton
   Experimental experimental-11.0-20261001-x86_64, DXVK
   v3.1.1-47-g685301564ea3486, private Mesa 26.3.0-devel git-37bf953a58. Normal
@@ -44,17 +44,19 @@
 - Ruled out: XeSS runtime/bridge execution failure as the reason gameplay is
   untreated, because menu evaluations succeed and gameplay backend=0 before any
   SDK call. Actual gameplay temporal quality remains untested.
-- Open: first detailed conflict is image-copy-source at frame 6642, q14/q16:
-  source VS CFA91824129ECBBC / PS FCFAD73924BF45B9, format 9 with depth but no
-  captured camera; copy PS DFCBA0EC70B03C9B writes format 26 without depth. The
-  aggregate HDR conflict does not yet prove a mixed-camera error. Prior flat-AA
-  section 105 records the same guard; do not repeat its ruled-out
-  shader/binding hypotheses without this flight's trace evidence.
-- Next capture: user requested Shift+NumLock in the affected scene, then hold
-  view 20 seconds. Full capture arms the replay trace and copy provenance;
-  ordinary NumLock only requests General and will not save the full trace.
-  Replay all preceding H writes and discriminate copy proof, source layout,
-  source camera provenance and destination depth/camera agreement together.
+- Capture: correct build 644fe39b, edvr_gfx_20261011_100319.log and
+  flat_trace_14850.bin; three complete frames, zero overflow. Stored/replayed
+  contracts match exactly. All reject image-copy-source: 29/31 guards pass;
+  destination hdrCamera and current tone camera are missing.
+- Confirmed: H has camera-less writes then a laser-pair draw excluded from
+  setting tone. Its camera matches 266 prior supported pool draws on the same
+  scene depth, including exact camera bytes and current write provenance.
+- Ruled out: defective copy bindings/source layout and capture-induced healing;
+  all three frames retain the same refusal, with no gameplay backend calls.
+- Implemented: actual H laser draw qualified by scene camera and verified image
+  continuation. MSVC rig passes; 17 historical traces retain all 46 hashes;
+  current capture selects all three HDR frames. Production DLLs compile; full
+  build stops at baseline Wine run_jobs failures. New local flight pending.
 - Temporary settings: initial flat profile fix.temporal_aa=xess; no new
   diagnostic config keys. Existing private Mesa launch options verified.
 
@@ -228,6 +230,90 @@ self-test. The disposable runner is
 /tmp/edvr-msvc-bootstrap-20261011/run_trace_replay.py; it runs trace-check,
 trace-chain and trace-structure without using the live prefix. A separate
 read-only guard diagnostic is being prepared under /tmp; it is not shipped.
+
+## October 11: gameplay trace isolates the admission gap
+
+The user identified the cockpit/station scene and completed Shift+NumLock.
+Correct installed source build 644fe39b (HEAD 4d8e8ab8 changes only this doc)
+wrote edvr_gfx_20261011_100319.log and flat_trace_14850.bin. The trace has
+three complete frames, 9963 events, 5021512 bytes and zero overflow slots.
+Native guard analysis and the existing Windows flat_temporal_test replay agree:
+frames 14847-14849 reproduce their stored contract hashes exactly.
+
+Every frame rejects the HDR image copy. At frame 14847 q2261, 29 of 31 guard
+predicates pass. Only destination hdrCamera and cameraCurrent(t->tone, frame)
+fail. Source format 9 has verified camera-independent image proof, valid
+layout/depth/order and no bad state. H has 13 prior draws: 12 camera-less and
+one current-camera laser-pair draw. The unconditional laser exemption prevents
+that draw from establishing H's scene tone. No earlier bad witness exists; the
+failed copy sets firstBad=image-copy-source. The later known HDR consumer then
+refuses H, and the final output reports no-known-tone-pass.
+
+The existing prefix already holds one supported pool record on that same scene
+depth with 266 draws and current camera provenance. Its b1, hash and exact 96
+camera bytes match the laser and image copy in every captured frame. Two
+unsupported format-60 draws have a different camera and are not evidence for
+scene ownership. A shared depth alone therefore cannot qualify a donor.
+
+Ruled out: broken actual copy binding or image-source layout/proof, because
+their guards pass in all three exact replays. Ruled out: full capture heals the
+route, because accepted copies remain zero, gameplay backend calls remain zero
+and the runtime stands down again. The camera-independent source recipe is
+already correct; adding another shader exception would not fix this gap.
+
+Open hypothesis: the unconditional weapon-shader exclusion also suppresses a
+verified scene camera when Elite reuses that pair with scene constants. Judge a
+narrow qualification against the existing mixed-camera safeguards before
+editing production code. A matching supported source must be current and agree
+in exact camera bytes and scene depth/layout; a copy's b1 alone is not scene
+proof. No production code changed for the initial analysis.
+
+The narrow model change now establishes tone from the actual H laser draw only
+when a unique supported pool source precedes H's first write and matches its
+current camera binding/hash/96 bytes, depth/DSV/format, dimensions and full
+viewport. Existing differing-camera laser handling remains unchanged. The image
+copy's constants are not used to invent a camera. Thirteen CPU scenarios cover
+the captured ordering and absent, cohort, stale, mismatched, ambiguous, mutated
+or late source evidence; the qualifying draw's own sequence and write
+provenance are asserted. Native g++ compilation and these fixtures pass.
+
+Replay using the changed production headers now selects the HDR route in all
+three captured frames: q2438/2359/2289, scene 1920x1200, first consumer
+960x600, 266 supported source draws and the captured scene depth/camera. Each
+image copy is accepted once, refused zero times. The final mono-copy contract
+hashes still match: its no-known-tone-pass result is unchanged because this
+frame is served by the preceding HDR route. This proves the admission change on
+the captured draws, not XeSS execution or image quality in a new game flight.
+
+The first MSVC rig compiled and the new fixture passed, but historical
+Krait/corpus/detector hash checks failed. Old/new replay found the Krait frames
+have no HDR image continuation. Their final copy remained selected, but
+unconditional same-scene laser promotion changed an unrelated copy contract.
+Ruled out: camera match alone as the complete qualification, because it changes
+those three unrelated recorded contracts. No golden was relaxed.
+
+Qualification now also requires one clean, verified camera-independent format-9
+source on the same depth/DSV/layout, ordered after H's first write and before
+the laser draw. This is the captured image-continuation sequence. All 17
+committed traces (46 frames) now reproduce their hashes exactly, while the new
+cockpit/station capture still selects the HDR route in all three frames.
+Fourteen fixture scenarios pass, including a new absent-image-source refusal.
+Targeted MSVC flat_temporal_test now passes, including all historical corpus
+and existing second-camera weapon checks. Windows replay independently confirms
+image accepted=1/refused=0 and HDR selected=1 in all three current frames, with
+no selected conflict and matching stored mono-copy hashes.
+
+The full build.bat ran by absolute path and compiled both production graphics
+DLLs, then exited 1 at the previously demonstrated Wine run_jobs process/focus
+and inherited-error-mode self-tests. Its tail was read. No full-build receipt
+exists and no full green build is claimed. Logs are
+/tmp/edvr-msvc-bootstrap-20261011/laser-flat-temporal-rig-final.log and
+/tmp/edvr-msvc-bootstrap-20261011/full_xess_laser_scene_20261011.log. The user
+authorized branch-only work pending native Windows validation. Commit this
+validated source, rebuild for a clean version stamp, install with the
+sanctioned tool preserving the live flat INI, then test this device's same
+cockpit/station scene. Gameplay XeSS execution and picture quality remain
+unverified until that new flight.
 
 ## Sources
 
