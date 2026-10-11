@@ -2,17 +2,17 @@
 
 ## Status
 
-- State: local XeSS native AA/upscaling and FSR3 0.65 upscaling confirmed. User
-  reports stable scene/HUD/menu motion; native hangar flicker was absent at
-  XeSS 0.75. Keep this branch for Windows testing; no main merge.
+- State: local XeSS/FSR3 results below remain confirmed. The Type 11 failed
+  view remains unresolved; a fresh trace admits its copy contract, but prior
+  HDR-writer camera provenance is unproven. Await clarification; recapture only
+  if the refusal persists.
 - Environment: ONEXPLAYER 3, Intel Arc B390 PTL 8086:b080; CachyOS xe; Proton
   Experimental experimental-11.0-20261001-x86_64; DXVK
   v3.1.1-47-g685301564ea3486; private Mesa 26.3.0-devel git-37bf953a58. Elite
   reaches the menu; see planetary-startup-intel-b390-2026-10-11.md.
 - Branch adds fix.temporal_aa=xess for flat only, a pinned SDK fetcher, a
   D3D11/D3D12 shared-texture/fence backend and installer payloads. Existing
-  modes and defaults stay unchanged. Live flat config selects fsr after
-  testing.
+  modes and defaults stay unchanged. The latest Type 11 capture logs XeSS.
 - SDK v3.0.2, commit 8fe81bdbbaf00b3c1b733fd0d830c333dc84e6f0; XeSS-SR runtime
   2.0.2. Package and component versions differ.
 - Windows SDK handoff: `python tools/fetch_xess.py --dest third_party/xess` and
@@ -44,18 +44,12 @@
   exact-pair guard evidence are in design-flat-ui-quality-2026-10-05.md. Native
   surface flicker still needs evidence. FSR3 flight 125209.log treats 463
   frames without SDK fallback; sampled FSR HUD counters remain unmeasured.
-- Capture: build 644fe39b, edvr_gfx_20261011_100319.log and
-  flat_trace_14850.bin; three frames, zero overflow, matching contracts. All
-  reject image-copy-source: 29/31 guards pass; destination hdrCamera and
-  current tone camera are missing.
-- Confirmed: H has camera-less writes then a laser-pair draw excluded from
-  setting tone. Its camera matches 266 prior supported pool draws on the same
-  scene depth, including exact camera bytes and current write provenance.
-- Ruled out: defective copy bindings/source layout and capture-induced healing;
-  all three frames retain the same refusal, with no gameplay backend calls.
-- Implemented: actual H laser draw qualified by scene camera and verified image
-  continuation. MSVC rig passes; 17 historical traces retain all 46 hashes;
-  current capture selects all three HDR frames. Fix flown.
+- Historical HDR capture/repair: build 644fe39b, three-frame trace and 29/31
+  guards; qualified H laser draw selects all three HDR frames. MSVC rig and
+  17-trace/46-hash history pass. Current Type 11 AA failure is separate.
+- Type 11 AA: fresh replay accepts the image contract (93/93); the failed view
+  remains unresolved and capture did not prove recovery. Await AA state/mode/
+  restart clarification; capture again only if refusal persists.
 - Local: temporal_aa=xess, UI 125, sharpness 0.75, menu F8; M2 and desktop
   work. Human flight confirms pad and normal Elite controls after close.
   Full-build and native-rig caveats remain (journal below).
@@ -678,3 +672,59 @@ Controller navigation is human-tested and confirmed. The bridge's
 process exit is not claimed for this run. The full-build gate and five
 native-menu shared-resource failures above remain unresolved; no baseline
 establishes those failures as pre-existing.
+
+## October 11: Type 11 AA admission capture
+
+The correct installed source `91576e7e` log, `edvr_gfx_20261011_162505.log`,
+was verified at HEAD. The docked Type 11 was at the same station; the flight
+tried XeSS, TAA and FSR, all reported failed. At NumLock 16:37:40, frames
+21036–21039 used XeSS 1248x780→1920x1200 (0.65), UI 125. The capture treated
+12,412 frames and refused admission for conflicting HDR target/camera,
+subreason `image-copy-source`; every SDK step remained zero.
+
+The four-frame signature was VS `CFA91824129ECBBC`, PS `FCFAD73924BF45B3`,
+source `966F0C70`, format 9, depth `7AB55040`; the copy used PS
+`DFCBA0EC70B03C9B` to HDR `7AB56300`, format 26, no depth. Later tone VS
+`F9CFC798F21E9AEA` / PS `FEE777E92850B390` sampled that same HDR at `@690`.
+There were exactly 11 HDR-prefix writes and none was a previously qualified
+laser pair. Their scene-camera provenance is unproven: the general census `c=`
+field describes VS `CB0`, not VS `b1` or its matrices; a missing `c=` does not
+prove the camera is missing.
+
+Ruled out for this refusal: SDK/vendor backend execution, since admission
+stopped with every SDK step at zero; map focus, since `focus=0` and
+`temporal-aa-off=0`; and history/UI reset after admission, since the SDK was
+never reached. Passive discovery truncation belongs to the separate observer,
+not the runtime refusal. The unchanged strict guard stays in place until the
+required scene-camera field is proven. The requested Shift+NumLock detailed
+capture followed on the unchanged scene with existing instrumentation; no new
+build or code change.
+
+The follow-up `edvr_gfx_20261011_164313.log` uses verified installed source
+`91576e7e`. Replay frames 7793–7795 exactly match stored contract hashes. All
+31 image-copy guards pass on each frame (93 pass, zero fail); each accepts the
+copy and produces a contract. Runtime had already treated 1,010 frames at
+16:45:28; the opening capture line at 16:45:31.482 reports
+`last=treated-jittered` and `accepted=1097`. The capture therefore does not
+show that it caused recovery.
+
+The accepted destination HDR has current camera and tone. Before the copy, the
+camera witness is fixed laser VS `88DCF1164C640EC3` / PS `494506A63091DF8C`;
+296 supported pool draws share depth `7AD76140` and those camera bytes. Copy
+source `7DB8A0F0` targets HDR `7AD77400`. The first-writer camera-zero
+diagnostic is not the final camera. Ruled out: static inability to admit this
+image-copy signature, because the fresh trace accepts it. The earlier failed
+view remains unresolved; this does not establish that all Type 11 scenes work.
+
+Both complete failed census frames contain zero laser-pair draws, across all
+targets; the treated trace contains one per frame in scene HDR/depth. This
+supports a view/material-dependent camera-admission gap, without proving
+occlusion. The per-frame prefix is replaced with `FlatRuntimePrefix{}` at
+`flat_runtime.cpp:3683` for watched frames, so its hdrCamera/imageSourceBad
+fields do not retain an earlier frame's values. A failed detailed trace must
+distinguish missing current HDR camera, rejected scene-camera proof and
+within-frame contamination; no classifier or reset change is yet justified.
+
+Next: await the user's clarification of current AA state, restart, view and
+mode. Capture detailed evidence while the actual refusal persists; do not
+recapture if the failure is no longer present.

@@ -2,8 +2,8 @@
 
 ## Status
 
-- State: desktop startup workaround verified; Game Mode presentation follow-up
-  active. Compiler and earlier exit causes remain unresolved.
+- State: desktop startup and Game Mode workarounds verified; remediation
+  closed. Compiler and earlier exit causes remain unresolved.
 - Device: ONEXPLAYER 3, Intel Arc B390 PTL 8086:b080, xe driver, CachyOS,
   kernel 7.2.9-1-cachyos-deckify, Mesa 26.2.4-arch3.1.
 - Game: Steam 359320, installed build 25433925, Proton Experimental
@@ -56,8 +56,8 @@
 - Matched headless XCB tests: stock Mesa + Gamescope WSI passes 60 frames;
   private Mesa + WSI crashes; private Mesa + WSI disabled passes 60 frames.
 - Corrected build: same commit with X11 and Wayland installed; host/runtime
-  loading and 60-frame WSI presentation pass. Next: one Game Mode check of both
-  games with existing launch options. No global driver changes.
+  loading and 60-frame WSI presentation pass. User confirms both Elite and BG3
+  work in Game Mode with existing launch options. No global driver changes.
 
 ## October 11 evidence
 
@@ -377,8 +377,8 @@ enabled, exit 0; WSI disabled also exits 0. This confirms that adding the
 missing platform corrects the reproduced presentation failure, without
 disabling the layer. Logs are
 `/tmp/edvr_mesa_wayland_{host,runtime4}_summary.log` and
-`/tmp/edvr_gamescope_headless_wayland_xcb_status_{enabled,disabled}.log`.
-Actual Game Mode presentation is not yet verified.
+`/tmp/edvr_gamescope_headless_wayland_xcb_status_{enabled,disabled}.log`. The
+user subsequently confirmed that both Elite and BG3 work in Game Mode.
 
 Guarded installation replaced only the private library and its version.json
 library hash, retaining the old files as rollback backups. Independent SHA
@@ -386,8 +386,10 @@ checks confirm both wrappers, rear-button helpers, ICD, system Mesa and both
 live/mirrored flat INIs unchanged. The existing generic wrapper then loads the
 installed driver inside Steam Runtime4, reports the correct B390/Mesa revision
 and Wayland extension, exit 0. Evidence:
-`/tmp/edvr_mesa_wayland_installed_runtime4_summary.log`. User Game Mode check
-of Elite and BG3 is pending; keep both existing Steam launch options.
+`/tmp/edvr_mesa_wayland_installed_runtime4_summary.log`. The user confirms that
+both Elite and BG3 work in Game Mode with their existing Steam launch options.
+This closes the presentation follow-up. The new cockpit/scene AA disengagement
+reported during that flight belongs to the XeSS/flat arc.
 
 Retained backups beside the original files:
 `lib/libvulkan_intel.so.edvr-rollback` and `version.json.edvr-rollback`. The
