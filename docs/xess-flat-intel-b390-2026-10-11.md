@@ -32,9 +32,9 @@
   installers. Full build is not green: unchanged run_jobs process/error-mode
   tests and installer sharing tests fail under Wine. Windows validation is
   still required. The user authorized branch-only work pending that check.
-- Local install: clean source commit 644fe39b, version v0.19.1-11-g644fe39b.
+- Local install: clean source commit 0f700706, version v0.19.1-13-g0f700706.
   Sanctioned installer dry-run, install and verify-only passed, including the
-  XeSS DLL/notices and reviewed flat INI. Main remains at 99476a02.
+  XeSS DLL/notices; the live flat INI is unchanged. Main remains at 99476a02.
 - First flight: correct build 644fe39b, edvr_gfx_20261011_093635.log. Native
   HDR R=E=D=1920x1200; XeSS init/execute rc=0, 3115 evaluations. Gameplay
   admission fails with conflicting-hdr-target-or-camera then
@@ -55,8 +55,8 @@
   all three frames retain the same refusal, with no gameplay backend calls.
 - Implemented: actual H laser draw qualified by scene camera and verified image
   continuation. MSVC rig passes; 17 historical traces retain all 46 hashes;
-  current capture selects all three HDR frames. Production DLLs compile; full
-  build stops at baseline Wine run_jobs failures. New local flight pending.
+  current capture selects all three HDR frames. Production DLLs/flat installer
+  compile; full build stops at baseline Wine run_jobs failures. Flight pending.
 - Temporary settings: initial flat profile fix.temporal_aa=xess; no new
   diagnostic config keys. Existing private Mesa launch options verified.
 
@@ -314,6 +314,17 @@ validated source, rebuild for a clean version stamp, install with the
 sanctioned tool preserving the live flat INI, then test this device's same
 cockpit/station scene. Gameplay XeSS execution and picture quality remain
 unverified until that new flight.
+
+Clean source 0f700706 is pushed to codex/xess-flat; main remains 99476a02. The
+normal absolute full rebuild stamped v0.19.1-13-g0f700706 and reproduced the
+baseline Wine gate failure. The flat installer separately rebuilt and passed
+its payload check. Installed graphics SHA256 is
+55e0f1fcef4ad708b857e41c0ca46ebe9e98da322d69c13392401c990d19af92. Sanctioned
+dry-run, install and verify-only passed after the user closed Elite and its
+launcher. The live flat INI was preserved byte-for-byte (SHA256
+007d94135805fcb0d01766fe728c00e64ac2aae5ae74df15f9a9becb6d07ea5a), still
+selecting xess. The same cockpit/station scene for one minute is requested;
+read that new flight with --expect-build 0f700706, even after doc-only commits.
 
 ## Sources
 
