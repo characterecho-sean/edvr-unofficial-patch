@@ -16,7 +16,8 @@
     every counter, Sean: "works great"). Copy route last flown on 75cd495c;
     eced5813's flat admission change not yet flown there.
   - Not flown: 100% at SS 1.0.
-- **Local probe gate:** production DLLs compile; 91 CPU checks pass. The UI
+- **Local probe:** clean 8dad2398 installed and verified; capture pending.
+  Production DLLs compile; 91 CPU checks pass. The UI
   rig's 206 Wine failures exactly match the clean baseline. Full build stops
   at baseline run_jobs failures; Windows validation and the local capture remain.
 - **The key:** `fix.ui_quality = off | 100 | 125`, default 100 in flat (the
@@ -614,3 +615,11 @@ failures. It writes no full-build receipt. Keep the diagnostic on
 codex/xess-flat pending the physical binding capture and native Windows
 validation. Detailed log:
 /tmp/edvr-msvc-bootstrap-20261011/full_ui_tone_probe_20261011.log.
+
+Clean diagnostic 8dad2398 (v0.19.1-16-g8dad2398) is installed locally. The
+normal clean rebuild again stops only at the known Wine run_jobs gate; the
+fresh flat installer payload check passes. Sanctioned install dry-run, install
+and verify-only pass. The live flat INI SHA256 stays
+85aa64ab9f41dcdee88e8bf0e4b7ff2abece9016fe549c30e604cbaffd7bff02 (618 bytes).
+The physical cockpit/menu capture is pending. Expect source 8dad2398 in its
+flight log; any following docs-only commit changes no DLL input.

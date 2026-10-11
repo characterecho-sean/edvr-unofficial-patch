@@ -31,9 +31,9 @@
   installers. Full build is not green: unchanged run_jobs process/error-mode
   tests and installer sharing tests fail under Wine. Windows validation is
   still required. The user authorized branch-only work pending that check.
-- Local install: clean source commit 0f700706, version v0.19.1-13-g0f700706.
+- Local install: clean source commit 8dad2398, version v0.19.1-16-g8dad2398.
   Sanctioned installer dry-run, install and verify-only passed, including the
-  XeSS DLL/notices; the live flat INI is unchanged. Main remains at 99476a02.
+  XeSS DLL/notices; live settings unchanged. UI binding probe pending; main 99476a02.
 - Gameplay flight: correct 0f700706, 103114.log. Native HDR AA at 1920x1200
   completes every step. SS 0.75 upscales 1440x900 to 1920x1200 on the LDR copy
   route with 15 jitter phases; XeSS init/evaluations return rc=0.
