@@ -41,7 +41,6 @@ bool flatUiLayerOn();
 // One draw the flat scope watched, as the adapter needs it.
 struct FlatUiLayerDraw {
     uint64_t frame = 0;                // the flat frame being drawn (the layer's sequence)
-    uint32_t sequence = 0;              // the physical HUD binding's draw order within that frame
     uint64_t vs = 0, ps = 0;
     const void* color = nullptr;       // its colour target (identity only)
     uint32_t width = 0, height = 0;    // its colour target
@@ -59,11 +58,6 @@ enum class FlatUiLayerAsk : uint8_t { kNotAsked = 0, kDecided, kRefused };
 // The draw's family is a cockpit HUD family: ask the shared decision (eye 0) with this draw's jitter. kDecided: bracket
 // the game's issue with flatUiLayerBegin / flatUiLayerEnd, then call flatUiLayerReissue's write-back half.
 FlatUiLayerAsk flatUiLayerDecide(ID3D11DeviceContext* ctx, const FlatUiLayerDraw& draw);
-// Read-only, bounded physical-binding observation of the E894 LDR-source writer. It never updates tone proof or
-// admission, and samples only after this frame has asked for a HUD target.
-void flatUiLayerProbeTone(ID3D11DeviceContext* ctx, uint64_t frame, uint32_t sequence, uint64_t vs, uint64_t ps,
-                          uint32_t renderW, uint32_t renderH, uint32_t outputW, uint32_t outputH,
-                          char kind, uint32_t count, uint32_t instances, uint32_t startInstance);
 bool flatUiLayerBegin(ID3D11DeviceContext* ctx);   // false: the draw goes to the game's frame as always
 void flatUiLayerEnd(ID3D11DeviceContext* ctx);
 // Begin's answer for the decided draw (the last kDecided from flatUiLayerDecide, whose family it is), into the window's
@@ -87,8 +81,7 @@ bool flatUiLayerSourceToneCandidate(ID3D11DeviceContext* ctx, uint64_t frame, ui
                                     uint32_t outW, uint32_t outH, const char* route);
 // A plain copy (the game's copy pixel shader) from `source` into `output` this frame: when the source is the HUD's HDR
 // target, the output is the copy the tone may read instead (the HDR route's post chain does).
-void flatUiLayerNoteCopy(ID3D11DeviceContext* ctx, uint64_t frame, uint32_t sequence,
-                         const void* physicalSource, const void* shadowOutput);
+void flatUiLayerNoteCopy(uint64_t frame, const void* source, const void* output);
 
 // A full-screen triangle (3 vertices, 1 instance) that is no known tone pair: the game's tonemap, admitted for the re-issue when this frame's HUD
 // is in the HDR layer (uiLayerCrispNoteEyeDraw). True: after the game's own issue, re-issue it between

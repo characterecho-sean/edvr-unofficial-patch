@@ -3,8 +3,8 @@
 ## Status
 
 - State: local flat XeSS gameplay confirmed at native AA and 0.75 upscaling.
-  User reports mostly stable, with one native hangar-surface flicker absent at
-  0.75. Keep this branch for later Windows testing; do not merge to main.
+  HUD/menu motion now stable at UI 125, SS 0.5 and about 0.65. Native hangar
+  flicker was absent at 0.75. Keep this branch for Windows testing; no main merge.
 - Environment: ONEXPLAYER 3, Intel Arc B390 PTL 8086:b080, CachyOS xe, Proton
   Experimental experimental-11.0-20261001-x86_64, DXVK
   v3.1.1-47-g685301564ea3486, private Mesa 26.3.0-devel git-37bf953a58. Normal
@@ -33,16 +33,16 @@
   still required. The user authorized branch-only work pending that check.
 - Local install: clean source commit 4b7bfec4, version v0.19.1-18-g4b7bfec4.
   Sanctioned installer dry-run, install and verify-only passed, including the
-  XeSS DLL/notices; settings unchanged. UI fix flight pending; main 99476a02.
+  XeSS DLL/notices; settings unchanged. HUD/menu fix verified; main 99476a02.
 - Gameplay flight: correct 0f700706, 103114.log. Native HDR AA at 1920x1200
   completes every step. SS 0.75 upscales 1440x900 to 1920x1200 on the LDR copy
   route with 15 jitter phases; XeSS init/evaluations return rc=0.
 - User: mostly stable. Station surface below the hangar's Welcome to sign
   flickers at native and stops below 1; sizes imply 0.75. This changes resolve
   route and jitter as well as resolution, so it does not isolate the cause.
-- Open: cockpit HUD/menu motion smear at UI 125. Correct 8dad2398 114059.log
-  confirms both unrecognised E894 variants physically read the HDR HUD at t1.
-  Exact-pair UI fix and flight are in design-flat-ui-quality-2026-10-05.md.
+- Confirmed: correct 4b7bfec4, 120427.log; E894 UI proof bootstraps and every
+  steady frame composites HUD/menus. User reports stable. Probe cleanup and
+  exact-pair guard evidence are in design-flat-ui-quality-2026-10-05.md.
   Native surface flicker still needs evidence; FSR3 SDK is absent here.
 - Capture: correct build 644fe39b, edvr_gfx_20261011_100319.log and
   flat_trace_14850.bin; three complete frames, zero overflow. Stored/replayed

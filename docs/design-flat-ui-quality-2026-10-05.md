@@ -2,10 +2,10 @@
 
 ## Status
 
-- **State: SHIPPED (2026-10-09); cockpit proof gap open on B390 (10-11).**
-  Local Steam flat XeSS at SS 0.5/UI 125 applies panel sizing but cannot separate
-  the cockpit HUD. The October 11 physical capture confirms both E894 tone
-  variants read the actual HDR HUD at t1. The scoped UI candidate fix needs flight.
+- **State: SHIPPED (2026-10-09); B390 cockpit proof gap fixed locally (10-11).**
+  Steam flat XeSS/UI 125: user reports HUD and menus stable. Correct 4b7bfec4
+  proves both E894 variants and composites every steady frame. The October 11
+  entry records physical input proof, the fix flight and temporary-probe cleanup.
   Flown OK on Epic flat. Branch
   `claude/flat-display-crash-ui-smearing-f1d96a`; the census was removed in the
   commit that follows the flown build.
@@ -16,10 +16,10 @@
     every counter, Sean: "works great"). Copy route last flown on 75cd495c;
     eced5813's flat admission change not yet flown there.
   - Not flown: 100% at SS 1.0.
-- **Local probe:** correct 8dad2398, 114059.log, R1720x720/D3440x1440.
-  Fix 4b7bfec4 is installed; 97 CPU checks pass. The UI
+- **Local flight:** correct 4b7bfec4, 120427.log, SS 0.5 then about 0.65/UI 125.
+  Cleanup keeps the flown guards; 88 CPU checks pass. The UI
   rig's 206 Wine failures exactly match the clean baseline. Full build stops
-  at baseline run_jobs failures; Windows validation and the fix flight remain.
+  at baseline run_jobs failures; native Windows validation remains.
 - **The key:** `fix.ui_quality = off | 100 | 125`, default 100 in flat (the
   code's fallback and the flat ini template), the fourth flat F8 row. 100: the
   panels at display size and the cockpit HUD out of temporal history, whatever
@@ -52,9 +52,9 @@
   flat UI layer like the HUD families, so they are drawn at D x T after the upscale.
   The "flat ui layer map:" 30 s line counts them and names each refusal. Entry at the end.
 - **Temporary config keys:** none.
-- **Next locally:** build the exact-pair UI-only t1 candidate, then fly the
-  same cockpit/menu. Require tone proof, take, reissue and composites in the
-  log, plus the user's HUD/menu stability check. Keep the probe through that flight.
+- **Next locally:** no repeat flight needed for capture cleanup. The installed
+  4b7bfec4 rendering path is verified; cleanup compiled both production DLLs.
+  Keep codex/xess-flat separate pending the user's Windows full build/testing.
 - **Next on Epic:** fly SS 0.5 on the shipped build (the copy route under eced5813's
   admission change) and 100% at SS 1.0; then an Epic flight opening all three maps.
 
@@ -685,3 +685,57 @@ dry-run, install and verify-only pass, and the live INI remains
 remains separate from main. User HUD/menu motion check is pending; expect
 source 4b7bfec4 in that flight, with any subsequent documentation commit
 changing no production input.
+
+### Fix verified locally: 4b7bfec4, flight 120427
+
+The user reports "HUD and menus look stable." Sanctioned reader verifies
+v0.19.1-18-g4b7bfec4, build 6ACBCE36, linked 17:58:14 UTC. XeSS remains active
+and executes rc=0. Render begins 1720x720, then becomes 2236x935; output stays
+3440x1440, UI 125. These imply SS 0.5 then about 0.65. The UI HDR/8-bit layers
+are 4300x1800. Environment remains B390, Proton Experimental, private Mesa,
+flat only; no VR runtime/eye size applies.
+
+At 12:07:07.027, 43CA/E894 first qualifies from physical HUD t1 at frame 9167,
+establishing proof for 9168. That next frame is admitted and reissued. At
+12:07:07.848, F9/E894 also engages. Thus the newly recognised pair ran before
+the stable result, rather than relying on a later registry variant. At
+12:07:57.979, copies = door = tone candidates = proven = admitted = reissued =
+composites = 1083. Declines, composite-none, binding failures and all refusal
+categories are zero. Holo panels take 13018/13018, flight HUD 12525/12525,
+target sprites 2/2. Later steady windows similarly complete every frame. A
+transition at 12:09:28 contains two missing composites, 22 not-HDR and 22
+unproven asks; the following windows return to complete coverage. The user
+reports no visible issue during cockpit/menu movement.
+
+The same run later uses F9/FEE, an existing registry variant, after render size
+changes. This confirms that the renderer can select different colour passes
+within one device/run. It does not by itself isolate the setting or capability
+selecting E894. Any setup selecting the previously unrecognised variant could
+hit the original proof gap.
+
+Ruled out: a later hidden camera-row/jitter refusal causing the reported menu
+smear, because steady HUD and panel takes have zero no-camera/other-shift
+refusals and the user confirms stability. Existing hologram limitations in
+other scenes remain outside this tested coverage.
+
+Removed the temporary detailed tone probe, its pair budgets/progress and
+physical-copy alias diagnostics. Preserved the physical HUD snapshot used by the
+permanent guard, the exact-pair shader/shape/direct-input checks, normal UI
+counters and the bounded first-qualified line. Independent review confirms the
+flown guard and proof/reissue path are unchanged; snapshots still hold up to
+four actual resources only for the current frame, with Present/device/ resize
+cleanup. Both changed units compile; cleanup CPU checks pass 88/88, UI rig 3791
+checks has the same 206 FAIL lines as the clean Wine baseline. No config key or
+user feature is removed. Native Windows full validation is pending before any
+main merge. The installed 4b7bfec4 remains the tested path.
+
+Cleanup validation: the normal full absolute `build.bat` compiled and linked
+both production DLLs from the frozen cleanup tree
+(`v0.19.1-19-g724503cd-dirty`). It stopped at the established Wine `run_jobs.py
+--self-test` failures: focus attribution to the main flow, inherited error mode
+0x0 and Job Object process-tree cleanup. There is no full-build receipt and the
+full build is not green. Log:
+`/tmp/edvr-msvc-bootstrap-20261011/full_ui_tone_cleanup_20261011.log`. Native
+Windows validation remains the branch handoff gate. The installed and flown
+4b7bfec4 DLL is left in place; the cleanup removes capture overhead while
+retaining the reviewed rendering checks.

@@ -1223,13 +1223,6 @@ void testFlatLayerRules() {
               flatUiMapToneSlotOf(0xF9CFC798F21E9AEAull, 0xFEE777E92850B390ull) == ~0u,
           "map tone: a neighbouring PS on CFA918, the same PS on another VS, and the registry's own pair are not this table's "
           "(the bloom composite FA01CD writes the scene and is named by neither: its exact hash is not in the repo)");
-    // The XeSS flight's E894 observer is diagnostic only. It is bounded by the exact seen pairs and cannot change
-    // the map-tone or global tone tables; a missing HUD ask never consumes one of its two physical samples.
-    check(flatUiToneProbeSlot(0xF9CFC798F21E9AEAull, 0xE8948389387DA083ull) == 0 &&
-              flatUiToneProbeSlot(0x43CA9F1C0AD2ACFEull, 0xE8948389387DA083ull) == 1 &&
-              flatUiToneProbeSlot(0xCFA91824129ECBBCull, 0xE8948389387DA083ull) == -1 &&
-              flatUiToneProbeSlot(0xF9CFC798F21E9AEAull, 0x9270C355389DA302ull) == -1,
-          "E894 probe: the steady writer and transition variant have independent diagnostic slots, no tone admission");
     check(flatUiSourceTonePair(0xF9CFC798F21E9AEAull, 0xE8948389387DA083ull) &&
               flatUiSourceTonePair(0x43CA9F1C0AD2ACFEull, 0xE8948389387DA083ull) &&
               !flatUiSourceTonePair(0xF9CFC798F21E9AEAull, 0xE8948389387DA082ull) &&
@@ -1249,34 +1242,6 @@ void testFlatLayerRules() {
               !flatUiSourceToneDirectHud(&kE894Hud, &kE894Hud, &kE894Other) &&
               !flatUiSourceToneDirectHud(nullptr, nullptr, nullptr),
           "E894 UI source tone: proof bootstraps only from the direct, physically verified HUD target");
-    {
-        FlatUiToneProbeBudget b;
-        check(b.geometry(960, 600, 1920, 1200) && !b.geometry(960, 600, 1920, 1200),
-              "E894 probe: the first geometry arms once without gratuitous resets");
-        check(!b.consider(10, false) && b.samples == 0 && b.candidates == 1 && b.withHud == 0,
-              "E894 probe: a candidate before HUD asks does not spend the sample budget");
-        check(b.consider(11, true) && !b.consider(12, true) && !b.consider(100, true) &&
-              b.consider(101, true) && !b.consider(191, true) && b.samples == 2 &&
-              b.firstSampleFrame == 11 && b.lastSampleFrame == 101,
-              "E894 probe: at most two samples, separated by 90 frames, even with repeated candidates");
-        check(b.geometry(1440, 900, 1920, 1200) && b.samples == 0 && b.candidates == 0 &&
-              b.consider(102, true) && b.firstSampleFrame == 102,
-              "E894 probe: a render-size change starts a fresh bounded discovery");
-        FlatUiToneProbeBudget pair[2];
-        pair[1].geometry(960, 600, 1920, 1200);
-        check(pair[1].consider(200, true) && pair[1].consider(290, true) && pair[1].samples == 2,
-              "E894 probe: the 43CA map-transition variant can spend its own two samples");
-        pair[0].geometry(960, 600, 1920, 1200);
-        check(pair[0].consider(291, true) && !pair[0].consider(292, true) && pair[0].consider(381, true) &&
-              pair[0].samples == 2 && pair[1].samples == 2,
-              "E894 probe: a later F9C cockpit still gets two independent samples after the map transition");
-        pair[0] = pair[1] = FlatUiToneProbeBudget{};
-        check(!pair[0].geometryKnown && !pair[1].geometryKnown,
-              "E894 probe: device and swap-chain reset clears both pair budgets");
-        b = FlatUiToneProbeBudget{};
-        check(!b.geometryKnown && b.samples == 0 && b.candidates == 0,
-              "E894 probe: resize/device release clears the discovery state");
-    }
     // The first map-tone candidate's log reason (flatUiToneMatchWhy): what a tone read proves, and the three ways it does not.
     {
         static int kTargetA = 0, kTargetB = 0;
@@ -1473,28 +1438,16 @@ void testFlatLayerRules() {
         check(!adapter.empty() && adapter.find("const char* why = uiLayerNotLiveReason();") != std::string::npos &&
                   adapter.find("strstr") == std::string::npos,
               "wiring: the flat layer's state names the shared not-live reason verbatim (no relabelling)");
-        const size_t probe = adapter.find("void flatUiLayerProbeTone(");
-        const size_t afterProbe = adapter.find("bool flatUiLayerBegin(", probe);
-        check(probe != std::string::npos && afterProbe != std::string::npos &&
-                  adapter.substr(probe, afterProbe - probe).find("flatUiToneProofTone(") == std::string::npos &&
-                  adapter.substr(probe, afterProbe - probe).find("uiLayerCrispAdmitFlat(") == std::string::npos &&
-                  adapter.substr(probe, afterProbe - probe).find("PSSetShaderResources(") == std::string::npos &&
-                  runtime.find("flatUiLayerProbeTone(ctx, s.prefix.frame, s.prefix.sequence + 1") != std::string::npos,
-              "wiring: the physical E894 probe is called from the flat draw scope without proof, admission or binding writes");
         const size_t hudProof = adapter.find("flatUiToneProofHud(g_proof, d.frame, d.color);");
         const size_t hudDecision = adapter.find("flatUiToneConsumed(g_proof, d.frame, d.color)", hudProof);
         check(hudProof != std::string::npos && hudDecision != std::string::npos &&
                   adapter.substr(hudProof, hudDecision - hudProof).find("observeHudPhysical(ctx, d)") != std::string::npos &&
                   runtime.find("flatUiLayerFrame(flatRuntimeMapOpenFrame(), s.prefix.frame)") != std::string::npos,
               "wiring: the HUD physical RTV is read after its qualified ask and released at the next Present");
-        const size_t copy = adapter.find("void flatUiLayerNoteCopy(");
-        const size_t afterCopy = adapter.find("bool flatUiLayerToneCandidate(", copy);
-        check(copy != std::string::npos && afterCopy != std::string::npos &&
-                  adapter.substr(copy, afterCopy - copy).find("source == g_hudPhysical[i].actual.Get()") != std::string::npos &&
-                  adapter.substr(copy, afterCopy - copy).find("g_hudCopyReads == 4") != std::string::npos &&
-                  adapter.substr(copy, afterCopy - copy).find("flatUiToneProofCopy(g_proof, frame, source, output)") != std::string::npos &&
-                  runtime.find("flatUiLayerNoteCopy(ctx, s.prefix.frame, s.prefix.sequence + 1, copySource.Get(), k.color)") != std::string::npos,
-              "wiring: physical copy observation is source-qualified and bounded while the existing proof path remains");
+        check(adapter.find("void flatUiLayerNoteCopy(uint64_t frame, const void* source, const void* output)") != std::string::npos &&
+                  adapter.find("flatUiToneProofCopy(g_proof, frame, source, output)") != std::string::npos &&
+                  runtime.find("flatUiLayerNoteCopy(s.prefix.frame, copySource.Get(), k.color)") != std::string::npos,
+              "wiring: the original plain-copy tone proof remains after diagnostic cleanup");
         const size_t sourceTone = adapter.find("bool flatUiLayerSourceToneCandidate(");
         const size_t afterSourceTone = adapter.find("bool flatUiLayerToneCandidate(", sourceTone);
         check(sourceTone != std::string::npos && afterSourceTone != std::string::npos &&
@@ -1503,6 +1456,10 @@ void testFlatLayerRules() {
                   adapter.substr(sourceTone, afterSourceTone - sourceTone).find("return flatUiLayerToneCandidate(") != std::string::npos &&
                   runtime.find("flatUiLayerSourceToneCandidate(ctx, s.prefix.frame") != std::string::npos,
               "wiring: physical E894 shape and direct-HUD identity qualify before the ordinary flat UI tone proof");
+        check(adapter.find("flat ui tone probe") == std::string::npos &&
+                  runtime.find("flatUiLayerProbeTone(") == std::string::npos &&
+                  adapter.find("FlatUiToneProbeBudget") == std::string::npos,
+              "wiring: temporary E894 sampling is gone while the physical HUD admission guard remains");
         check(!mono.empty() && !sharedTone.empty() && mono.find("E8948389387DA083") == std::string::npos &&
                   sharedTone.find("E8948389387DA083") == std::string::npos,
               "wiring: E894 remains absent from the mono HDR selector and shared tonemap registry");

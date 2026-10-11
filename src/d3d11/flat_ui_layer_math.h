@@ -84,14 +84,6 @@ constexpr uint64_t kFlatUiSourceTonePs = 0xE8948389387DA083ull;
 inline bool flatUiSourceTonePair(uint64_t vs, uint64_t ps) {
     return ps == kFlatUiSourceTonePs && (vs == kFlatUiSourceToneVsSteady || vs == kFlatUiSourceToneVsTransition);
 }
-// Observation only: each exact pair has an independent bounded physical-binding diagnostic budget.
-inline int flatUiToneProbeSlot(uint64_t vs, uint64_t ps) {
-    if (ps != kFlatUiSourceTonePs) return -1;
-    if (vs == kFlatUiSourceToneVsSteady) return 0;
-    if (vs == kFlatUiSourceToneVsTransition) return 1;
-    return -1;
-}
-inline bool flatUiToneProbePair(uint64_t vs, uint64_t ps) { return flatUiToneProbeSlot(vs, ps) >= 0; }
 inline bool flatUiSourceToneShape(uint32_t renderW, uint32_t renderH, uint32_t cachedOutW, uint32_t cachedOutH,
                                   uint32_t physicalOutW, uint32_t physicalOutH, uint32_t physicalOutViewFmt,
                                   uint32_t hdrW, uint32_t hdrH, uint32_t hdrViewFmt,
@@ -103,29 +95,6 @@ inline bool flatUiSourceToneShape(uint32_t renderW, uint32_t renderH, uint32_t c
 inline bool flatUiSourceToneDirectHud(const void* cachedHud, const void* physicalHud, const void* physicalInput) {
     return cachedHud && cachedHud == physicalHud && physicalHud == physicalInput;
 }
-struct FlatUiToneProbeBudget {
-    uint32_t renderW = 0, renderH = 0, outputW = 0, outputH = 0;
-    uint64_t firstSampleFrame = 0, lastSampleFrame = 0, candidates = 0, withHud = 0;
-    uint32_t samples = 0;
-    bool geometryKnown = false;
-    // A geometry change is a fresh discovery. Reset is explicit at swap-chain/device release too.
-    bool geometry(uint32_t rw, uint32_t rh, uint32_t ow, uint32_t oh) {
-        if (geometryKnown && renderW == rw && renderH == rh && outputW == ow && outputH == oh) return false;
-        *this = FlatUiToneProbeBudget{};
-        renderW = rw; renderH = rh; outputW = ow; outputH = oh; geometryKnown = true;
-        return true;
-    }
-    bool consider(uint64_t frame, bool currentHudAsk) {
-        ++candidates;
-        if (!currentHudAsk) return false;
-        ++withHud;
-        if (samples >= 2 || (lastSampleFrame && frame < lastSampleFrame + 90)) return false;
-        if (!samples) firstSampleFrame = frame;
-        lastSampleFrame = frame;
-        ++samples;
-        return true;
-    }
-};
 
 // TEMPORAL AA OFF WHILE A MAP IS OPEN (maintainer's decisions, 2026-10-10: the Galaxy Map and the Orrery first, then the System
 // Map). The map scenes' grid, line and star draws are not taken by the UI layer, and their temporal history smears (the
