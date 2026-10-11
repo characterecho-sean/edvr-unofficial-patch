@@ -226,6 +226,12 @@ bool gpuCensusBegin(ID3D11DeviceContext*, GpuCensusSection) noexcept { return fa
 void gpuCensusEnd(ID3D11DeviceContext*, GpuCensusSection) noexcept {}
 bool dlaaAvailable(ID3D11Device*, const char**) { return true; }
 bool fsr3Available(ID3D11Device*, const char**) { return true; }
+bool xessAvailable(ID3D11Device*, const char**) { return false; }
+void xessReleaseFeatures() {}
+void xessShutdown() {}
+bool xessBuiltIn() { return false; }
+bool xessEvaluate(ID3D11DeviceContext*,unsigned,ID3D11Texture2D*,ID3D11Texture2D*,ID3D11Texture2D*,
+                  ID3D11Texture2D*,uint32_t,uint32_t,uint32_t,uint32_t,float,float,bool,bool,const char**) { return false; }
 bool dlaaEvaluate(ID3D11DeviceContext* c, int slot, ID3D11Texture2D* colour, ID3D11Texture2D*, ID3D11Texture2D*, ID3D11Texture2D* out,
                   ID3D11Texture2D*, uint32_t w, uint32_t h, uint32_t outW, uint32_t outH, float jx, float jy, bool reset, float,
                   const char**, bool hdr) {

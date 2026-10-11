@@ -78,6 +78,9 @@ InstallState parseState(const std::string& text) {
 
     s.ngxSha = get("ngx", "sha256");
     s.ngxInstalled = !s.ngxSha.empty();
+    s.xessSha = get("xess", "sha256");
+    s.xessLicenseSha = get("xess", "license_sha256");
+    s.xessThirdPartySha = get("xess", "third_party_sha256");
 
     s.iniSha = get("ini", "sha256");
     s.nativeGraphicsSha = get("native", "graphics_sha256");
@@ -127,6 +130,10 @@ std::string serializeState(const InstallState& state) {
 
     out += "\r\n[ngx]\r\n";
     out += "sha256 = " + (state.ngxInstalled ? state.ngxSha : std::string()) + "\r\n";
+    out += "\r\n[xess]\r\n";
+    out += "sha256 = " + state.xessSha + "\r\n";
+    out += "license_sha256 = " + state.xessLicenseSha + "\r\n";
+    out += "third_party_sha256 = " + state.xessThirdPartySha + "\r\n";
 
     out += "\r\n[ini]\r\n";
     out += "sha256 = " + state.iniSha + "\r\n";

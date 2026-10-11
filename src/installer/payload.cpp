@@ -31,6 +31,9 @@ int idFor(const std::string& item) {
     if (item == "native_runtime") return IDR_EDVR_OPENVR;
     if (item == "ini") return IDR_EDVR_INI;
     if (item == "ngx") return IDR_EDVR_NGX;
+    if (item == "xess") return IDR_EDVR_XESS;
+    if (item == "xess_license") return IDR_EDVR_XESS_LICENSE;
+    if (item == "xess_third_party") return IDR_EDVR_XESS_THIRD_PARTY;
     if (item == "openxr_loader") return IDR_EDVR_OPENXR_LOADER;
     if (item == "openxr_license") return IDR_EDVR_OPENXR_LICENSE;
     if (item == "profile") return IDR_EDVR_PROFILE;
@@ -67,6 +70,12 @@ const PayloadInfo& payloadInfo() {
             p.haveNgx = true;
             p.ngxSha = sha256Bytes(data, size);
         }
+        if (payloadItem("xess", &data, &size)) {
+            p.haveXess = true;
+            p.xessSha = sha256Bytes(data, size);
+        }
+        if (payloadItem("xess_license", &data, &size)) p.xessLicenseSha = sha256Bytes(data, size);
+        if (payloadItem("xess_third_party", &data, &size)) p.xessThirdPartySha = sha256Bytes(data, size);
         const bool graphicsPresent = payloadItem("native_graphics", &data, &size);
         const bool graphics = graphicsPresent && validateNativePayloadBytes(data, size, NativeImageKind::Graphics);
         p.nativeGraphicsValid = graphics;

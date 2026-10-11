@@ -148,7 +148,7 @@ DepthViews g_depthViews;
 
 FlatMonoResolveMode resolveModeFromConfig(bool* known) {
     const std::string m = Config::get().getString("fix.temporal_aa", "off");
-    if (known) *known = temporalModeEnabled(m);
+    if (known) *known = temporalModeEnabled(m) && _stricmp(m.c_str(), "xess") != 0;
     if (_stricmp(m.c_str(), "fsr") == 0) return FlatMonoResolveMode::Fsr;
     if (_stricmp(m.c_str(), "dlss") == 0) return FlatMonoResolveMode::Dlss;
     if (_stricmp(m.c_str(), "dlaa") == 0) return FlatMonoResolveMode::Dlaa;

@@ -71,6 +71,10 @@ def _files(root, no_dlss, profile="vr"):
     if not no_dlss or (build / "nvngx_dlss.dll").is_file():
         result.append((build / "nvngx_dlss.dll", "nvngx_dlss.dll"))
         result.append((build / "NVIDIA-DLSS-LICENSE.txt", "NVIDIA-DLSS-LICENSE.txt"))
+    if profile == "flat" and (build / "libxess.dll").is_file():
+        result.extend(((build / "libxess.dll", "libxess.dll"),
+                       (build / "INTEL-XESS-LICENSE.txt", "INTEL-XESS-LICENSE.txt"),
+                       (build / "INTEL-XESS-THIRD-PARTY.txt", "INTEL-XESS-THIRD-PARTY.txt")))
     # The flat edition keeps its settings in a file of its own (config.cpp reads
     # edvr-flat.ini first), so its archive carries that name: a flat archive that
     # shipped an "edvr.ini" told somebody unpacking it by hand to put the flat
@@ -247,6 +251,14 @@ def _validate_installer_resources(executable, files, profile="vr"):
             raise ValueError("the embedded DLSS runtime requires its NVIDIA license notice")
     elif embedded_dlss is not None:
         raise ValueError("installer embeds DLSS but its matching DLL and notice are missing from the package")
+    xess_names = {108: "libxess.dll", 109: "INTEL-XESS-LICENSE.txt", 110: "INTEL-XESS-THIRD-PARTY.txt"}
+    for resource_id, name in xess_names.items():
+        embedded = _embedded_resource(executable, resource_id, required=False)
+        if name in by_name:
+            if embedded != by_name[name].read_bytes():
+                raise ValueError("installer resource %d differs from %s" % (resource_id, name))
+        elif embedded is not None:
+            raise ValueError("installer embeds XeSS without matching runtime and notices")
 
 
 def package(root, version, no_dlss=False, dry_run=False, profile="vr"):
@@ -549,6 +561,23 @@ def self_test():
             except ValueError as error:
                 assert "edvr-flat-installer.exe is stamped v3.0.1-dirty" in str(error), str(error)
             assert not (root / "dist" / "edvr-flat-3.0.2.zip").exists()
+            stamps["override"] = {}
+            xess_files = {108: "libxess.dll", 109: "INTEL-XESS-LICENSE.txt",
+                          110: "INTEL-XESS-THIRD-PARTY.txt"}
+            for resource_id, name in xess_files.items():
+                contents = ("XeSS fixture " + name).encode("ascii")
+                (root / "build" / name).write_bytes(contents)
+                resources[resource_id] = contents
+            assert package(root, "3.0.3", no_dlss=True, profile="flat") == 0
+            with zipfile.ZipFile(root / "dist" / "edvr-flat-3.0.3.zip") as archive:
+                for name in xess_files.values():
+                    assert archive.read(name) == (root / "build" / name).read_bytes()
+            resources[108] = b"wrong XeSS"
+            try:
+                package(root, "3.0.4", no_dlss=True, profile="flat")
+                raise AssertionError("flat installer with mismatched XeSS runtime accepted")
+            except ValueError:
+                pass
         finally:
             openxr_pe.native_exports, openxr_pe.native_graphics_exports = old_native, old_graphics
             fetch_openxr_loader.verify = old_verify

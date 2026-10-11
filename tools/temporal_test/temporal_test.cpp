@@ -91,7 +91,7 @@ int main() {
     for (float scale : {0.0f, -1.0f, NAN, INFINITY}) {
         if (strcmp(edvr::temporalNvidiaLabel(scale), "DLSS / DLAA")) { ++g_fails; puts("FAIL: unknown scale label"); }
     }
-    for (const char* mode : {"on", "ON", "dlaa", "DLAA", "dlss", "DLSS"}) {
+    for (const char* mode : {"on", "ON", "dlaa", "DLAA", "dlss", "DLSS", "fsr", "xess", "XeSS"}) {
         if (!edvr::temporalModeEnabled(mode)) { ++g_fails; printf("FAIL: bundled temporal mode %s\n", mode); }
     }
     for (const char* mode : {"off", "OFF", "", "bogus"}) {
@@ -243,6 +243,28 @@ int main() {
         check(flagged && edvr::temporalJitterPhases(100) == 8u, "jitter phases: the caller is told a value was not usable, and the pointer is optional");
         check(edvr::kTemporalJitterPhasesMin == 8u && edvr::kTemporalJitterPhasesMax == 64u && edvr::kTemporalJitterCount == 8u,
               "jitter phases: the range is 8 to 64 and the default is the fixed eight");
+    }
+    {
+        using edvr::temporalXessJitterPhases;
+        check(temporalXessJitterPhases(8, 1920, 1080, 1920, 1080) == 8 &&
+              temporalXessJitterPhases(24, 1920, 1080, 1920, 1080) == 24,
+              "XeSS jitter: native resolution keeps the configured cycle");
+        check(temporalXessJitterPhases(8, 960, 540, 1920, 1080) == 32 &&
+              temporalXessJitterPhases(48, 960, 540, 1920, 1080) == 48,
+              "XeSS jitter: 2x needs 32, and a higher configured count wins");
+        check(temporalXessJitterPhases(8, 640, 360, 1920, 1080) == 72,
+              "XeSS jitter: 3x needs 72, above the configurable 64 ceiling");
+        float lastX, lastY, repeatedX, repeatedY;
+        edvr::temporalJitter(71, &lastX, &lastY, 72);
+        edvr::temporalJitter(143, &repeatedX, &repeatedY, 72);
+        check(lastX == repeatedX && lastY == repeatedY,
+              "XeSS jitter: the 72-phase Halton cycle repeats without a fixed 64-entry table");
+        check(temporalXessJitterPhases(8, 1024, 720, 1920, 1080) == 29 &&
+              temporalXessJitterPhases(8, 960, 720, 1920, 1080) == 32,
+              "XeSS jitter: anisotropic scale uses the larger axis and rounds the minimum up");
+        check(temporalXessJitterPhases(17, 0, 540, 1920, 1080) == 17 &&
+              temporalXessJitterPhases(17, 960, 540, 0, 1080) == 17,
+              "XeSS jitter: invalid dimensions retain the configured count");
     }
 
     // ---- The jitter as a tangent shift: the sign, pinned. -----------------

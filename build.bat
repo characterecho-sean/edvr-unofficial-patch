@@ -156,6 +156,7 @@ python tools\fetch_openxr_loader.py --verify || exit /b 1
 copy /y "%ROOT%\third_party\openxr\loader\openxr_loader.dll" "%BUILD%\openxr_loader.dll" >nul || exit /b 1
 copy /y "%ROOT%\third_party\openxr\loader\OPENXR-LOADER-LICENSE.txt" "%BUILD%\OPENXR-LOADER-LICENSE.txt" >nul || exit /b 1
 python tools\fetch_openxr_loader.py --self-test || exit /b 1
+python tools\fetch_xess.py --self-test || exit /b 1
 python tools\gen_installer_rc.py --self-test || exit /b 1
 python tools\package_native.py --self-test || exit /b 1
 python tools\build_diff.py --self-test || exit /b 1
@@ -414,6 +415,30 @@ if defined NGX (
     if exist "%BUILD%\NVIDIA-DLSS-LICENSE.txt" del /q "%BUILD%\NVIDIA-DLSS-LICENSE.txt"
 )
 
+REM Intel XeSS-SR SDK for the flat profile. The D3D11 proxy bridges to D3D12
+REM at runtime; it imports no XeSS library. A missing SDK builds a refusal stub.
+set XESS=
+if defined EDVR_XESS_SDK set XESS=%EDVR_XESS_SDK%
+if not defined XESS if exist "%ROOT%\third_party\xess\include\xess\xess.h" set XESS=%ROOT%\third_party\xess
+if not defined XESS if exist "%LOCALAPPDATA%\EDVR\xess-sdk\include\xess\xess.h" set XESS=%LOCALAPPDATA%\EDVR\xess-sdk
+set XESSFLAGS=/DEDVR_HAVE_XESS=0
+if defined XESS (
+    python "tools\fetch_xess.py" --verify "%XESS%" || (
+        echo [edvr] ERROR: the XeSS SDK at %XESS% is not the pinned one. tools\fetch_xess.py
+        exit /b 1
+    )
+    set XESSFLAGS=/DEDVR_HAVE_XESS=1 /I"%XESS%\include"
+    copy /Y "%XESS%\bin\libxess.dll" "%BUILD%\libxess.dll" >nul || exit /b 1
+    copy /Y "%XESS%\LICENSE.txt" "%BUILD%\INTEL-XESS-LICENSE.txt" >nul || exit /b 1
+    copy /Y "%XESS%\third-party-programs.txt" "%BUILD%\INTEL-XESS-THIRD-PARTY.txt" >nul || exit /b 1
+    echo [edvr] XeSS-SR SDK: %XESS%
+) else (
+    if exist "%BUILD%\libxess.dll" del /q "%BUILD%\libxess.dll"
+    if exist "%BUILD%\INTEL-XESS-LICENSE.txt" del /q "%BUILD%\INTEL-XESS-LICENSE.txt"
+    if exist "%BUILD%\INTEL-XESS-THIRD-PARTY.txt" del /q "%BUILD%\INTEL-XESS-THIRD-PARTY.txt"
+    echo [edvr] NO XeSS SDK. Flat XeSS-SR will refuse at runtime. Fetch with tools\fetch_xess.py.
+)
+
 REM AMD's FSR 3.1 upscaler, the community Direct3D 11 port (the optiscaler
 REM FidelityFX-SDK-DX11 fork; tools\fetch_ffx_dx11.py; design doc section
 REM 3.2). EDVR_FFX_DX11 names a copy explicitly, or forces the no-SDK path
@@ -485,6 +510,8 @@ if defined EDVR_DLL_ONLY (
         --context "cpu_link=%EDVR_CPU_LINK%" ^
         --context "ngx_request=%EDVR_NGX_SDK%" ^
         --context "ngx=%NGX%" ^
+        --context "xess_request=%EDVR_XESS_SDK%" ^
+        --context "xess=%XESS%" ^
         --context "ffx_request=%EDVR_FFX_DX11%" ^
         --context "ffx=%FFX%" ^
         --context "fsr_none=%FSR_NONE%" || (
@@ -499,7 +526,7 @@ del /q "%OBJ%\d3d11\*.obj" 2>nul
 ml64.exe /nologo /c /Fo"%OBJ%\d3d11\thunks.obj" "%GEN%\edvr_thunks_d3d11.asm" >nul
 if errorlevel 1 ( echo [edvr] ERROR: ml64 failed & exit /b 1 )
 
-cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
+cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% %XESSFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\common\log.cpp" "src\common\config.cpp" ^
     "src\common\config_audit.cpp" ^
     "src\common\guard.cpp" "src\common\vtable_hook.cpp" "src\common\code_hook.cpp" ^
@@ -513,7 +540,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\stall_watch.cpp" "src\d3d11\vram_tick.cpp" ^
     "src\d3d11\native_menu.cpp" ^
     "src\d3d11\native_temporal.cpp" "src\d3d11\flat_temporal.cpp" "src\d3d11\flat_compute_capture.cpp" "src\d3d11\flat_compute_readback.cpp" ^
-    "src\d3d11\flat_runtime.cpp" "src\d3d11\flat_mono_resolve.cpp" "src\d3d11\map_easu.cpp" "src\d3d11\map_smaa.cpp" "src\d3d11\flat_projection_scope.cpp" "src\d3d11\flat_projection_runtime.cpp" ^
+    "src\d3d11\flat_runtime.cpp" "src\d3d11\flat_mono_resolve.cpp" "src\d3d11\xess_engine.cpp" "src\d3d11\map_easu.cpp" "src\d3d11\map_smaa.cpp" "src\d3d11\flat_projection_scope.cpp" "src\d3d11\flat_projection_runtime.cpp" ^
     "src\d3d11\flat_camera_producer_probe.cpp" "src\d3d11\flat_camera_inject.cpp" ^
     "src\d3d11\vr_world_route.cpp" "src\d3d11\vr_world_mips.cpp" "src\d3d11\vr_camera_census.cpp" ^
     "src\d3d11\native_sharpen.cpp" ^
@@ -748,6 +775,8 @@ python tools\build_receipt.py --write "%BUILD%\full_build_receipt.json" ^
     --context "cpu_link=%EDVR_CPU_LINK%" ^
     --context "ngx_request=%EDVR_NGX_SDK%" ^
     --context "ngx=%NGX%" ^
+    --context "xess_request=%EDVR_XESS_SDK%" ^
+    --context "xess=%XESS%" ^
     --context "ffx_request=%EDVR_FFX_DX11%" ^
     --context "ffx=%FFX%" ^
     --context "fsr_none=%FSR_NONE%" || exit /b 1
@@ -2453,6 +2482,26 @@ cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT ^
 if errorlevel 1 ( echo [edvr] ERROR: OpenXR shared texture test build failed & exit /b 1 )
 "%BUILD%\openxr_shared_texture_test.exe" --dry-run || exit /b 1
 "%BUILD%\openxr_shared_texture_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_xess_engine_test
+REM XeSS bridge's CPU contract. Hardware execution is an explicit disposable
+REM Proton test, never part of the routine build or the game's live prefix.
+if not defined XESS (
+    echo [edvr] xess_engine_test: no XeSS SDK in this build -- skipping.
+    exit /b 0
+)
+if not exist "%OBJ%\xess_engine_test" mkdir "%OBJ%\xess_engine_test"
+REM This exe lives below obj: an import of d3d11.lib from an exe directly in
+REM build would accidentally load EDVR's proxy instead of the system DLL.
+cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /D_CRT_SECURE_NO_WARNINGS ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX %XESSFLAGS% /I"%GEN%" ^
+    /Fo"%OBJ%\xess_engine_test\\" /Fe"%OBJ%\xess_engine_test\xess_engine_test.exe" ^
+    "tools\xess_engine_test\xess_engine_test.cpp" "src\d3d11\xess_engine.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib dxgi.lib
+if errorlevel 1 ( echo [edvr] ERROR: XeSS engine test build failed & exit /b 1 )
+"%OBJ%\xess_engine_test\xess_engine_test.exe" --dry-run || exit /b 1
+"%OBJ%\xess_engine_test\xess_engine_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_fsr3_engine_test

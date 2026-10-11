@@ -937,6 +937,9 @@ std::vector<ChoiceItem> choicesOf(const MenuRowDef& d) {
         }
         pos = bar + 1;
     }
+    // The shipped row is shared with VR; XeSS is a flat-only choice.
+    if (runtimeFlatProfile() && strcmp(d.section, "fix") == 0 && strcmp(d.key, "temporal_aa") == 0)
+        out.push_back({"xess", "XeSS-SR"});
     return out;
 }
 

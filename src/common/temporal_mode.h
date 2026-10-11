@@ -12,7 +12,8 @@ inline bool temporalModeEnabled(const std::string& mode) {
     return _stricmp(mode.c_str(), "on") == 0 ||
            _stricmp(mode.c_str(), "dlaa") == 0 ||
            _stricmp(mode.c_str(), "dlss") == 0 ||
-           _stricmp(mode.c_str(), "fsr") == 0;
+           _stricmp(mode.c_str(), "fsr") == 0 ||
+           _stricmp(mode.c_str(), "xess") == 0;
 }
 
 struct TemporalPresetSelection {

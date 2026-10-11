@@ -39,6 +39,8 @@ struct PayloadInfo {
     std::string openvrSha;
     bool        haveNgx = false;   // NVIDIA's DLSS runtime, nvngx_dlss.dll
     std::string ngxSha;
+    bool        haveXess = false;
+    std::string xessSha, xessLicenseSha, xessThirdPartySha;
     bool        nativePairValid = false;
     bool        haveOpenxrLoader = false;
     std::string openxrLoaderSha;
@@ -90,6 +92,7 @@ struct Survey {
     // AMD integrated GPU beside an RTX card counts, and the rig this was
     // built on is one.
     DllInfo      ngx;            // <game>\nvngx_dlss.dll
+    DllInfo      xess, xessLicense, xessThirdParty;
     bool         nvidiaAdapter = false;
     std::wstring nvidiaAdapterName;
 

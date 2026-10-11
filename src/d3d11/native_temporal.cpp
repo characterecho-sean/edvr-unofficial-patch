@@ -161,7 +161,9 @@ bool sameDevice(ID3D11Device* expected, ID3D11Texture2D* source) {
 }
 Settings readConfig() {
   Settings s; auto& c=edvr::Config::get(); const auto mode=c.getString("fix.temporal_aa","off");
-  s.on=edvr::temporalModeEnabled(mode);
+  // XeSS is offered only by the flat runtime. A copied flat setting cannot
+  // silently start the VR eye path with EDVR's own TAA under a XeSS label.
+  s.on=edvr::temporalModeEnabled(mode) && _stricmp(mode.c_str(),"xess")!=0;
   s.engine=edvr::temporalEngineFor(mode);
   s.dlaa=edvr::temporalExternalEngine(mode);
   // fsr takes the same sizes dlss does (design doc 3.1): 1:1 at the

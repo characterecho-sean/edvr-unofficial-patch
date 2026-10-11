@@ -31,6 +31,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 
 namespace edvr {
 
@@ -94,6 +95,24 @@ inline uint32_t temporalJitterPhases(long configured, bool* usable = nullptr) {
                     configured <= static_cast<long>(kTemporalJitterPhasesMax);
     if (usable) *usable = ok;
     return ok ? static_cast<uint32_t>(configured) : kTemporalJitterCount;
+}
+
+// Intel XeSS-SR's minimum jitter sequence is ceil(8 * scale^2). Use the
+// larger axis for an anisotropic input, so neither axis gets fewer samples
+// than its own upscale factor requires. The UI key keeps its existing 8..64
+// range; this automatic XeSS minimum may exceed 64. Zero dimensions decline
+// to the configured/default cycle until a valid route has been planned.
+inline uint32_t temporalXessJitterPhases(uint32_t configured, uint32_t renderW,
+                                         uint32_t renderH, uint32_t evalW, uint32_t evalH) {
+    if (!renderW || !renderH || !evalW || !evalH) return configured;
+    const double x = static_cast<double>(evalW) / renderW;
+    const double y = static_cast<double>(evalH) / renderH;
+    const double scale = x > y ? x : y;
+    if (scale <= 1.0) return configured;
+    const double required = std::ceil(8.0 * scale * scale);
+    const uint32_t minimum = required >= static_cast<double>((std::numeric_limits<uint32_t>::max)())
+        ? (std::numeric_limits<uint32_t>::max)() : static_cast<uint32_t>(required);
+    return configured > minimum ? configured : minimum;
 }
 
 // The radical inverse of i (i >= 1) in `base`: the Halton sequence's

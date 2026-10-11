@@ -4491,7 +4491,8 @@ void temporalPassConfigure(Config& cfg) {
     ++g_configGeneration;
     const std::string mode = cfg.getString("fix.temporal_aa", "off");
     const bool wasWanted = detail::g_temporalPassWantedFssChrome;
-    detail::g_temporalPassWantedFssChrome = temporalModeEnabled(mode);
+    detail::g_temporalPassWantedFssChrome = temporalModeEnabled(mode) &&
+        (runtimeFlatProfile() || _stricmp(mode.c_str(), "xess") != 0);
     if (detail::g_temporalPassWantedFssChrome != wasWanted) {
         memset(g_rowsObserved, 0, sizeof(g_rowsObserved));
         g_rowsObservedWrites = 0;

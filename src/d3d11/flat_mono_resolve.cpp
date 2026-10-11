@@ -1,6 +1,7 @@
 #include "flat_mono_resolve.h"
 #include "dlaa.h"
 #include "fsr3_engine.h"
+#include "xess_engine.h"
 #include "map_easu.h"
 #include "map_smaa.h"
 #include "temporal_shader_bytecode.h"
@@ -11,6 +12,7 @@
 #include <limits>
 #include <vector>
 #include "../common/log.h"
+#include "../common/temporal_math.h"
 #include "flat_isolation_mode.h"
 #include "flat_context_state.h"
 #include "flat_cpu.h"
@@ -226,7 +228,7 @@ bool rowsJitterValid(const FlatMonoResolveFrame& f) {
 }
 bool resolveModeValid(FlatMonoResolveMode mode) {
     return mode==FlatMonoResolveMode::Taa || mode==FlatMonoResolveMode::Dlaa ||
-        mode==FlatMonoResolveMode::Dlss || mode==FlatMonoResolveMode::Fsr;
+        mode==FlatMonoResolveMode::Dlss || mode==FlatMonoResolveMode::Fsr || mode==FlatMonoResolveMode::Xess;
 }
 bool preflightMetadataValid(const FlatMonoResolvePreflight& f,const char** reason) {
     if(!f.renderWidth || !f.renderHeight || !f.outputWidth || !f.outputHeight ||
@@ -633,12 +635,12 @@ void drawHdrTarget(ID3D11DeviceContext* context,ID3D11PixelShader* ps,uint32_t w
 // initialisation (NGX's, or AMD's), the first call into code that has never run on a DXMT device, so the crumbs bracket it.
 // Later asks are a flag test and are not written. DLAA and DLSS share NGX.
 bool backendAvailable(FlatMonoResolveMode mode,ID3D11Device* device,const char** reason) {
-    static bool crumbed[2]={false,false};
-    const unsigned which=mode==FlatMonoResolveMode::Fsr?1u:0u;
+    static bool crumbed[3]={false,false,false};
+    const unsigned which=mode==FlatMonoResolveMode::Xess?2u:mode==FlatMonoResolveMode::Fsr?1u:0u;
     const bool first=g_crumbOn && !crumbed[which];
     if(first)crumbed[which]=true;
-    HdrCrumbSpan span(first,"backend-available","backend=%s",which?"fsr":"ngx");
-    const bool ok=which?fsr3Available(device,reason):dlaaAvailable(device,reason);
+    HdrCrumbSpan span(first,"backend-available","backend=%s",which==2?"xess":which?"fsr":"ngx");
+    const bool ok=which==2?xessAvailable(device,reason):which?fsr3Available(device,reason):dlaaAvailable(device,reason);
     span.result("ok=%u reason=%s",ok?1u:0u,(reason && *reason)?*reason:"none");
     return ok;
 }
@@ -737,7 +739,7 @@ FlatMonoResolvePreflightResult flatMonoResolvePreflight(ID3D11Device* device,
         result.reason?result.reason:"none");
     return result;
 }
-void flatMonoResolveReset() { pixels.cancel();resolveInputs.cancel();++stats.fullResets;stats.currentContinueRun=0;g=State{}; }
+void flatMonoResolveReset() { pixels.cancel();resolveInputs.cancel();xessReleaseFeatures();++stats.fullResets;stats.currentContinueRun=0;g=State{}; }
 void flatMonoResolveSetIsolation(FlatContextIsolation request) { g_isolationRequest=request; }
 void flatMonoResolveArmPixels(uint64_t frame) {
     try { pixels.arm(frame); } catch(...) { pixels.cancel(); }
@@ -776,9 +778,10 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
        !flatProjectionJitter(f.previousRowsJitterX,f.previousRowsJitterY,f.renderWidth,f.renderHeight,rowsBefore))
         return fail(reason,"flat-resolve-invalid-rows-jitter");
     if(f.mode!=FlatMonoResolveMode::Taa && f.mode!=FlatMonoResolveMode::Dlaa && f.mode!=FlatMonoResolveMode::Dlss &&
-       f.mode!=FlatMonoResolveMode::Fsr)return fail(reason,"flat-resolve-invalid-mode");
+       f.mode!=FlatMonoResolveMode::Fsr && f.mode!=FlatMonoResolveMode::Xess)return fail(reason,"flat-resolve-invalid-mode");
     // The upscaler slot (FlatMonoResolveFrame::slot): a slot no engine has refuses the frame here, before anything is made or written.
     if(f.slot>=kUpscalerSlots)return fail(reason,"flat-resolve-invalid-slot");
+    if(f.mode==FlatMonoResolveMode::Xess && f.slot!=0)return fail(reason,"flat-xess-slot-zero-only");
     // Gate 2 step 2 (design doc section 72): the route table owns the size
     // refusals. NVIDIA supersampling (R > D) evaluates DLAA at R and lets the
     // game's own copy downsample E = R to D; FSR refuses R > D until the
@@ -790,6 +793,9 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     // drives allocation, dispatch and telemetry (gate-2 review G2-2).
     const uint32_t evalW = (!route.refused && f.evalWidth && f.evalHeight) ? f.evalWidth : route.evalWidth;
     const uint32_t evalH = (!route.refused && f.evalWidth && f.evalHeight) ? f.evalHeight : route.evalHeight;
+    if(f.mode==FlatMonoResolveMode::Xess &&
+       f.jitterCycle<temporalXessJitterPhases(kTemporalJitterCount,f.renderWidth,f.renderHeight,evalW,evalH))
+        return fail(reason,"flat-xess-jitter-cycle-too-short");
     // The HDR route resolves at E = R into H itself (section 81): a render below the output, or a mode that evaluates
     // on another grid, is the copy route's.
     const bool hdr=f.hdr;
@@ -1059,6 +1065,10 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
         }
         ID3D11SamplerState* sampler=g.sampler.Get();context->CSSetSamplers(0,1,&sampler);
         context->CSSetShader(g.taa.Get(),nullptr,0);context->Dispatch((f.outputWidth+7)/8,(f.outputHeight+7)/8,1);
+    } else if(f.mode==FlatMonoResolveMode::Xess) {
+        ok=xessEvaluate(context,f.slot,g.color.texture.Get(),g.depth[depthIndex].texture.Get(),
+            g.motion.texture.Get(),g.output[0].texture.Get(),f.renderWidth,f.renderHeight,
+            evalW,evalH,f.jitterX,f.jitterY,reset,hdr,reason);
     } else if(f.mode==FlatMonoResolveMode::Fsr) {
         const float sy=std::sqrt(f.camera[0][1]*f.camera[0][1]+f.camera[1][1]*f.camera[1][1]+f.camera[2][1]*f.camera[2][1]);
         ok=fsr3Evaluate(context,f.slot,g.color.texture.Get(),g.depth[depthIndex].texture.Get(),g.motion.texture.Get(),g.rejection.texture.Get(),
@@ -1134,8 +1144,7 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
                 const float delta=std::abs(f.camera[row][col]-f.previousCamera[row][col]);
                 if(delta>maxMatrixDelta)maxMatrixDelta=delta;
             }
-            const char* modeName=f.mode==FlatMonoResolveMode::Taa?"taa":
-                f.mode==FlatMonoResolveMode::Dlaa?"dlaa":f.mode==FlatMonoResolveMode::Dlss?"dlss":"fsr";
+            const char* modeName=flatMonoResolveModeName(f.mode);
             Log::get().note("flat resolve reset event: frame=%llu mode=%s render=%ux%u output=%ux%u "
                 "requested=%u lost=%u gap=%u invalid-prev-camera=%u format=%u camera-cut=%u "
                 "delta-ms=%.9g now=(%.9g,%.9g,%.9g) previous=(%.9g,%.9g,%.9g) "
@@ -1268,7 +1277,8 @@ bool flatMonoResolveSpatialFallback(ID3D11Device* device,ID3D11DeviceContext* co
        f.renderWidth>D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION || f.renderHeight>D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
        f.outputWidth>D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION || f.outputHeight>D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
        !jitterValid(f) || (f.mode!=FlatMonoResolveMode::Taa && f.mode!=FlatMonoResolveMode::Dlaa &&
-       f.mode!=FlatMonoResolveMode::Dlss && f.mode!=FlatMonoResolveMode::Fsr))
+       f.mode!=FlatMonoResolveMode::Dlss && f.mode!=FlatMonoResolveMode::Fsr &&
+       f.mode!=FlatMonoResolveMode::Xess))
         return fail(reason,"flat-spatial-invalid-frame");
     const bool hdr=f.hdr;
     if(hdr && (f.renderWidth<f.outputWidth || f.renderHeight<f.outputHeight))return fail(reason,"flat-spatial-hdr-requires-render-at-least-output");

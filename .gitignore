@@ -24,6 +24,10 @@ third_party/ngx/
 # licensed, but built, not authored here -- same reasoning as third_party/ngx.
 third_party/ffx-dx11/
 
+# Intel XeSS SDK fetched by tools/fetch_xess.py; pinned runtime and headers
+# are verified at build time and packaged with their notices.
+third_party/xess/
+
 # Pinned Khronos loader binary, fetched by tools/fetch_openxr_loader.py.
 third_party/openxr/loader/
 

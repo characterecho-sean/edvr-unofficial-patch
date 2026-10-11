@@ -16,6 +16,7 @@
 #include "../../src/d3d11/temporal_shader_source.h"
 #include "../../src/d3d11/flat_mono_shader_source.h"
 #include "../../src/d3d11/engine_velocity_primary_copy_shader.h"
+#include "../../src/d3d11/xess_copy_shader.h"
 #include "../../src/d3d11/skin_join_shader.h"
 #include "../../src/d3d11/fixed_shader_source.h"
 #include "../../src/d3d11/flat_foreground_motion_shader.h"
@@ -401,6 +402,7 @@ static int generateTemporal(const Options& o) {
     const std::string mapSmaaBlend = mapSmaaSource(edvr::kMapSmaaBlendHlsl);
     std::vector<Variant> variants = {
         {"kEnginePrimaryCopyScatterBytecode", "engine_primary_copy_scatter_cs", "main", nullptr, {}, false, edvr::kEnginePrimaryCopyScatterCsHlsl},
+        {"kXessR11ToFp16Bytecode", "xess_r11_to_fp16_cs", "main", nullptr, {}, false, edvr::kXessR11ToFp16Cs},
         // F2 (skin_join_shader.h, docs/kinematic-motion-injection-2026-09-19.md "F2 built"): the identity join and the pose table passes, one HLSL text.
         {"kSkinJoinBytecode", "skin_join_cs", "join", nullptr, {}, false, edvr::kSkinJoinCsHlsl},
         {"kSkinJoinClearBytecode", "skin_join_clear_cs", "joinClear", nullptr, {}, false, edvr::kSkinJoinCsHlsl},

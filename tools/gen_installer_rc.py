@@ -36,6 +36,9 @@ IDR_NGX = 104   # NVIDIA's DLSS runtime, when the build had the SDK
 IDR_LOADER = 105
 IDR_LOADER_NOTICE = 106
 IDR_PROFILE = 107
+IDR_XESS = 108
+IDR_XESS_LICENSE = 109
+IDR_XESS_THIRD_PARTY = 110
 RT_MANIFEST = 24
 
 
@@ -288,6 +291,9 @@ def main(argv=None):
     ini = args.ini or (os.path.join(args.build, 'edvr-flat.ini') if args.profile == 'flat'
                        else os.path.join(args.root, 'edvr.ini'))
     ngx = os.path.join(args.build, 'nvngx_dlss.dll')
+    xess = os.path.join(args.build, 'libxess.dll')
+    xess_license = os.path.join(args.build, 'INTEL-XESS-LICENSE.txt')
+    xess_third_party = os.path.join(args.build, 'INTEL-XESS-THIRD-PARTY.txt')
     manifest = os.path.join(args.root, 'src', 'installer', 'installer.manifest')
 
     required = [("native graphics", d3d11)]
@@ -326,6 +332,11 @@ def main(argv=None):
         print('  A manifest Windows cannot parse is an installer that cannot start.')
         return 1
 
+    if args.profile == 'flat' and os.path.exists(xess) and (
+            not os.path.isfile(xess_license) or not os.path.isfile(xess_third_party)):
+        print('gen_installer_rc: ERROR: XeSS runtime lacks license notices')
+        return 1
+
     if args.dry_run:
         print('gen_installer_rc: dry run; validated %s resources and wrote nothing' % args.profile)
         return 0
@@ -333,8 +344,9 @@ def main(argv=None):
     if args.profile == 'flat' and not args.ini:
         with open(ini, 'wb') as f:
             f.write(b'# Experimental flat temporal profile: visual qualification in progress.\r\n'
-                    b'# F8 opens the AA menu: Off / TAA / DLSS / FSR3 and DLSS model presets.\r\n'
-                    b'# temporal_aa: off, on (TAA), dlaa (native SS), dlss, fsr. Game SS controls render scale.\r\n'
+                    b'# F8 opens the AA menu: Off / TAA / DLSS / FSR3 / XeSS-SR and DLSS model presets.\r\n'
+                    b'# temporal_aa: off, on (TAA), dlaa (native SS), dlss, fsr, xess. Game SS controls render scale.\r\n'
+                    b'# XeSS-SR needs libxess.dll beside the game; the flat installer includes it when built with the SDK.\r\n'
                     b'# Press NumLock while the issue is visible to collect a diagnostic capture.\r\n'
                     b'[fix]\r\ntemporal_aa = off\r\ntemporal_aa_model = k\r\nui_quality = 100\r\n\r\n'
                     b'[hotkey]\r\nmenu = F8\r\ndump_draws = NUMLOCK\r\n\r\n'
@@ -348,9 +360,10 @@ def main(argv=None):
                     b'Its settings live in edvr-flat.ini, never in the VR profile\'s edvr.ini.\r\n'
                     b'Experimental temporal AA; visual quality is not yet qualified.\r\n'
                     b'Press F8 for the AA menu. Up/Down selects a row; Left/Right changes it.\r\n'
-                    b'Choose Off, TAA, DLSS or FSR3 and the DLSS model preset; settings save live.\r\n'
+                    b'Choose Off, TAA, DLSS, FSR3 or XeSS-SR and the DLSS model preset; settings save live.\r\n'
                     b'Press F8 or Escape to close. Game keys are private while the menu is drawn.\r\n'
-                    b'[fix] temporal_aa also accepts off, on (TAA), dlaa, dlss or fsr (default off).\r\n'
+                    b'[fix] temporal_aa also accepts off, on (TAA), dlaa, dlss, fsr or xess (default off).\r\n'
+                    b'XeSS-SR needs libxess.dll beside the game; the SDK-enabled flat installer includes it.\r\n'
                     b'Game supersampling controls render scale; DLAA requires native SS.\r\n'
                     b'Press NumLock while the issue is visible to collect a diagnostic capture.\r\n'
                     b'Use --convert-profile for an explicit VR/flat edition switch.\r\n')
@@ -386,6 +399,11 @@ def main(argv=None):
     else:
         lines.append('// no nvngx_dlss.dll in the build (no DLSS SDK): this installer ships without')
         lines.append("// NVIDIA's optional anti-aliasing runtime.")
+    if args.profile == 'flat' and os.path.exists(xess):
+        lines += ['%d RCDATA "%s"' % (IDR_XESS, rc_path(xess)),
+                  '%d RCDATA "%s"' % (IDR_XESS_LICENSE, rc_path(xess_license)),
+                  '%d RCDATA "%s"' % (IDR_XESS_THIRD_PARTY, rc_path(xess_third_party))]
+        carried += ', Intel XeSS-SR runtime and notices'
 
     version = args.version
     lines += [''] + versioninfo_lines(
@@ -446,9 +464,20 @@ def self_test():
             assert '%d RCDATA ' % IDR_LOADER not in rc_text
             assert '%d RCDATA ' % IDR_LOADER_NOTICE not in rc_text
             assert '%d RCDATA ' % IDR_PROFILE in rc_text
+            for name in ('libxess.dll', 'INTEL-XESS-LICENSE.txt', 'INTEL-XESS-THIRD-PARTY.txt'):
+                with open(os.path.join(build, name), 'wb') as stream: stream.write(name.encode('ascii'))
+            assert main(['--root', root, '--build', build, '--out', out,
+                         '--version', '1.2.3', '--profile', 'flat']) == 0
+            with open(os.path.join(out, 'payload.rc'), encoding='utf-8') as stream:
+                rc_text = stream.read()
+            assert all('%d RCDATA ' % resource_id in rc_text for resource_id in
+                       (IDR_XESS, IDR_XESS_LICENSE, IDR_XESS_THIRD_PARTY))
             with open(os.path.join(build, 'edvr-flat.ini'), 'rb') as stream:
                 flat_ini = stream.read()
                 assert b'temporal_aa = off' in flat_ini
+                assert b'fsr, xess. Game SS controls render scale.' in flat_ini
+                assert b'FSR3 / XeSS-SR' in flat_ini
+                assert b'XeSS-SR needs libxess.dll' in flat_ini
                 assert b'temporal_aa_model = k' in flat_ini and b'menu = F8' in flat_ini
                 assert b'dump_draws = NUMLOCK' in flat_ini and b'dump_draws = F10' not in flat_ini
             with open(os.path.join(build, 'edvr_profile_flat.ini'), 'rb') as stream:
@@ -459,6 +488,8 @@ def self_test():
                 readme = stream.read()
             assert b'installs d3d11.dll, edvr-flat.ini,' in readme, readme
             assert b'installs d3d11.dll, edvr.ini' not in readme
+            assert b'FSR3 or XeSS-SR' in readme
+            assert b'XeSS-SR needs libxess.dll' in readme
             with open(os.path.join(out, 'payload.rc'), encoding='utf-8') as stream:
                 assert 'graphics, edvr-flat.ini and flat profile descriptor' in stream.read()
         finally:

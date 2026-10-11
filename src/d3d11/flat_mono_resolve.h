@@ -12,10 +12,10 @@ namespace edvr {
 // How the resolver isolates the game's pipeline state (flat_isolation_mode.h has the definition): the context state swap, or
 // the explicit state capture a DXMT device gets.
 enum class FlatContextIsolation : uint8_t;
-enum class FlatMonoResolveMode { Taa, Dlaa, Dlss, Fsr };
+enum class FlatMonoResolveMode { Taa, Dlaa, Dlss, Fsr, Xess };
 // The mode as the logs and the HDR route's breadcrumbs (flat_hdr_crumbs.h) spell it.
 inline const char* flatMonoResolveModeName(FlatMonoResolveMode mode) {
-    return mode == FlatMonoResolveMode::Fsr ? "fsr" : mode == FlatMonoResolveMode::Dlss ? "dlss"
+    return mode == FlatMonoResolveMode::Xess ? "xess" : mode == FlatMonoResolveMode::Fsr ? "fsr" : mode == FlatMonoResolveMode::Dlss ? "dlss"
          : mode == FlatMonoResolveMode::Dlaa ? "dlaa" : "taa";
 }
 
@@ -67,6 +67,14 @@ inline FlatResolveRoute flatResolveRoute(FlatMonoResolveMode mode,
         }
         out.evalWidth = dW; out.evalHeight = dH; out.refused = false;
         out.name = smaller ? "trained-upscale" : "trained-native";
+        return out;
+    }
+    // XeSS-SR also serves native AA and upscaling; above native, evaluate
+    // at the render grid and let the game's final copy downsample once.
+    if (mode == FlatMonoResolveMode::Xess) {
+        out.evalWidth = larger ? rW : dW; out.evalHeight = larger ? rH : dH;
+        out.refused = false;
+        out.name = larger ? "xess-native-aa-supersample" : smaller ? "xess-upscale" : "xess-native-aa";
         return out;
     }
     // FSR: Native AA is the 1.0x case of the same upscaler (equal render and
@@ -191,6 +199,9 @@ struct FlatMonoResolveFrame {
     // a time, which the flat and VR profiles already are. A slot outside 0..kUpscalerSlots-1 refuses the frame
     // ("flat-resolve-invalid-slot") before anything is written.
     uint32_t slot = 0;
+    // The actual camera phase cycle on this frame. Legacy projection is
+    // limited to eight even when XeSS requests a longer upscale cycle.
+    uint32_t jitterCycle = 8;
     // The first-person ("weapon") fold-in of the VR world route (docs/design-flat-temporal-aa-2026-09-23.md section 82).
     // The VR weapon-motion module rebuilds motion for first-person draws from their own animated vertices; the game's depth
     // texture carries a first-person stencil bit. Both come in as inputs of the prep kernel, both borrowed, BOTH OR NEITHER

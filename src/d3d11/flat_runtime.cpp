@@ -3333,7 +3333,8 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
         endStandDown(s, frame, "the anti-aliasing mode changed");
         engineVelocityConfigure(enabled);
         s.phase.resetHistory();
-        s.engine = _stricmp(mode.c_str(), "fsr") == 0 ? FlatMonoResolveMode::Fsr :
+        s.engine = _stricmp(mode.c_str(), "xess") == 0 ? FlatMonoResolveMode::Xess :
+            _stricmp(mode.c_str(), "fsr") == 0 ? FlatMonoResolveMode::Fsr :
             _stricmp(mode.c_str(), "dlss") == 0 ? FlatMonoResolveMode::Dlss :
             _stricmp(mode.c_str(), "dlaa") == 0 ? FlatMonoResolveMode::Dlaa : FlatMonoResolveMode::Taa;
         if(s.engine==FlatMonoResolveMode::Taa) {
@@ -3469,7 +3470,22 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     {
         const int asked=Config::get().getInt("advanced.temporal_aa_jitter_phases",8);
         bool usable=false;
-        const uint32_t phases=temporalJitterPhases(asked,&usable);
+        const uint32_t configured=temporalJitterPhases(asked,&usable);
+        uint32_t phases=configured;
+        uint32_t xessMinimum=kTemporalJitterCount;
+        if(s.engine==FlatMonoResolveMode::Xess && s.haveResolvePlan) {
+            const auto& plan=s.plannedResolve;
+            const auto route=flatResolveRoute(plan.mode,plan.renderWidth,plan.renderHeight,
+                                              plan.outputWidth,plan.outputHeight);
+            if(!route.refused) {
+                const uint32_t evalW=plan.evalWidth&&plan.evalHeight?plan.evalWidth:route.evalWidth;
+                const uint32_t evalH=plan.evalWidth&&plan.evalHeight?plan.evalHeight:route.evalHeight;
+                xessMinimum=temporalXessJitterPhases(kTemporalJitterCount,
+                    plan.renderWidth,plan.renderHeight,evalW,evalH);
+                phases=temporalXessJitterPhases(configured,
+                    plan.renderWidth,plan.renderHeight,evalW,evalH);
+            }
+        }
         if(!usable) {
             if(!s.jitterPhasesBadSaid || s.jitterPhasesBad!=asked) {
                 s.jitterPhasesBadSaid=true;s.jitterPhasesBad=asked;
@@ -3482,6 +3498,9 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
             Log::get().note("flat jitter: the cycle is %u phases (advanced.temporal_aa_jitter_phases, was %u); the %s camera route runs %u; "
                             "the phase and the resolver's history restart",
                 phases,s.jitterPhases,flatCameraRouteName(route),flatCameraPhaseCount(route,phases));
+            if(s.engine==FlatMonoResolveMode::Xess)
+                Log::get().note("flat jitter: XeSS-SR minimum=%u configured=%u effective=%u camera=%s actual=%u",
+                    xessMinimum,configured,phases,flatCameraRouteName(route),flatCameraPhaseCount(route,phases));
             s.phase.resetHistory();reset();
             s.jitterPhases=phases;
         }
@@ -5546,6 +5565,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     }
     FlatMonoResolveFrame f{}; f.color = original; f.depth = s.depthView.Get(); f.renderWidth = selected.renderWidth; f.renderHeight = selected.renderHeight;
     f.outputWidth = selected.outputWidth; f.outputHeight = selected.outputHeight; f.frame = s.prefix.frame; f.mode = s.engine;
+    f.jitterCycle=s.phase.phaseCount;
     // The refusal census on the copy route too (render below the output: DLSS or FSR upscaling), as on the HDR route.
     f.refusalView = 0u;
     f.refusalCensus = s.refusalCensusFrames > 0;
@@ -5936,6 +5956,7 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
     f.renderWidth = selected.renderWidth; f.renderHeight = selected.renderHeight;
     f.outputWidth = selected.outputWidth; f.outputHeight = selected.outputHeight;
     f.frame = s.prefix.frame; f.mode = effectiveMode;
+    f.jitterCycle=s.phase.phaseCount;
     nativeScale.store(true, std::memory_order_release);   // the route's gate is R >= D
     f.configuredDlssPreset = s.preset;
     f.staticScene = flatFrameThroughMenuCopy(s.prefix, selected.hdr);

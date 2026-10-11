@@ -22,6 +22,9 @@ namespace edvr::installer {
 #define IDR_EDVR_OPENXR_LOADER 105
 #define IDR_EDVR_OPENXR_LICENSE 106
 #define IDR_EDVR_PROFILE 107
+#define IDR_EDVR_XESS 108
+#define IDR_EDVR_XESS_LICENSE 109
+#define IDR_EDVR_XESS_THIRD_PARTY 110
 
 // Native names: native_graphics, native_runtime and openxr_loader.
 bool payloadItem(const std::string& item, const void** data, size_t* size);

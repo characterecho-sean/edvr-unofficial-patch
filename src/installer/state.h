@@ -45,6 +45,7 @@ struct InstallState {
 
     bool         ngxInstalled = false;  // NVIDIA's DLSS runtime, the copy we placed
     std::string  ngxSha;
+    std::string  xessSha, xessLicenseSha, xessThirdPartySha;
 
     std::string iniSha;       // the edvr.ini we wrote; a differing file is user edits
     bool        hasBaseIni = false;

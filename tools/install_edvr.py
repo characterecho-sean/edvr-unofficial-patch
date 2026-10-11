@@ -719,13 +719,19 @@ def _validate_v2_receipt(r):
             ini_target = legacy
     targets.update(profile=os.path.join(target, PROFILE_FILE),
                    ini=ini_target,
-                   dlss=os.path.join(target, "nvngx_dlss.dll"))
+                   dlss=os.path.join(target, "nvngx_dlss.dll"),
+                   xess=os.path.join(target, "libxess.dll"),
+                   xess_license=os.path.join(target, "INTEL-XESS-LICENSE.txt"),
+                   xess_third_party=os.path.join(target, "INTEL-XESS-THIRD-PARTY.txt"))
     keys = [e["key"] for e in files]
     if len(keys) != len(set(keys)) or not required.issubset(keys) or set(keys) - targets.keys():
         raise ValueError("incomplete or duplicate EDVR v2 components")
     if r["kind"] == FLAT_KIND:
         sources = {"graphics": paths["graphics"],
                    "dlss": os.path.join(root, "build", "nvngx_dlss.dll"),
+                   "xess": os.path.join(root, "build", "libxess.dll"),
+                   "xess_license": os.path.join(root, "build", "INTEL-XESS-LICENSE.txt"),
+                   "xess_third_party": os.path.join(root, "build", "INTEL-XESS-THIRD-PARTY.txt"),
                    "ini": _ini_source(root, "flat"), "profile": "generated"}
         for e in files:
             expected = sources[e["key"]]
@@ -1218,6 +1224,13 @@ def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
               if not os.path.isfile(p[k])]
     if include_dlss and not os.path.isfile(os.path.join(root, "build", "nvngx_dlss.dll")):
         errors.append("missing optional DLSS source %s" % os.path.join(root, "build", "nvngx_dlss.dll"))
+    xess_names = (("xess", "libxess.dll"), ("xess_license", "INTEL-XESS-LICENSE.txt"),
+                  ("xess_third_party", "INTEL-XESS-THIRD-PARTY.txt"))
+    include_xess = not native and os.path.isfile(os.path.join(root, "build", "libxess.dll"))
+    if include_xess:
+        for key, name in xess_names:
+            if not os.path.isfile(os.path.join(root, "build", name)):
+                errors.append("missing XeSS source %s" % os.path.join(root, "build", name))
     ini_source = _ini_source(root, profile)
     if include_ini and not os.path.isfile(ini_source):
         errors.append("missing %s INI source %s" % (profile, ini_source))
@@ -1275,6 +1288,11 @@ def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
             dst = os.path.join(target, "nvngx_dlss.dll")
             if not os.path.isfile(dst) or sha256(dst) != sha256(dlss):
                 print("[edvr] %s verify mismatch: %s" % (profile, dst)); ok = False
+        if include_xess:
+            for key, name in xess_names:
+                src = os.path.join(root, "build", name); dst = os.path.join(target, name)
+                if not os.path.isfile(dst) or sha256(dst) != sha256(src):
+                    print("[edvr] %s verify mismatch: %s" % (profile, dst)); ok = False
         if include_ini:
             ini_target = _ini_target(target, profile)
             if (not os.path.isfile(ini_target) or not os.path.isfile(ini_source) or
@@ -1310,6 +1328,13 @@ def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
                         "backup": _native_backup_name(dst, tag, stamp) if os.path.isfile(dst) else None,
                         "before_sha256": sha256(dst) if os.path.isfile(dst) else None,
                         "installed_sha256": sha256(src)})
+    if include_xess:
+        for key, name in xess_names:
+            src = os.path.join(root, "build", name); dst = os.path.join(target, name)
+            entries.append({"key": key, "source": os.path.abspath(src), "target": os.path.abspath(dst),
+                            "backup": _native_backup_name(dst, tag, stamp) if os.path.isfile(dst) else None,
+                            "before_sha256": sha256(dst) if os.path.isfile(dst) else None,
+                            "installed_sha256": sha256(src)})
     if include_ini:
         src = ini_source; dst = _ini_target(target, profile)
         entries.append({"key": "ini", "source": os.path.abspath(src), "target": os.path.abspath(dst),
@@ -2122,6 +2147,9 @@ def self_test():
         os.makedirs(fxr)
         Path(froot, "build", "d3d11.dll").write_bytes(b"FLAT-GRAPHICS")
         Path(froot, "build", "nvngx_dlss.dll").write_bytes(b"FLAT-DLSS")
+        Path(froot, "build", "libxess.dll").write_bytes(b"FLAT-XESS")
+        Path(froot, "build", "INTEL-XESS-LICENSE.txt").write_bytes(b"INTEL-LICENSE")
+        Path(froot, "build", "INTEL-XESS-THIRD-PARTY.txt").write_bytes(b"INTEL-THIRD-PARTY")
         Path(froot, "edvr.ini").write_bytes(b"[fix]\ntemporal_aa=dlss\n")
         Path(fgame, GAME_EXE).write_bytes(b"GAME")
         Path(fgame, "edvr.ini").write_bytes(b"[user]\nkeep=1\n")
@@ -2144,6 +2172,9 @@ def self_test():
             assert xr_snapshot() == before_xr, "flat install changed Openvr"
             assert Path(fgame, "d3d11.dll").read_bytes() == b"FLAT-GRAPHICS"
             assert Path(fgame, "nvngx_dlss.dll").read_bytes() == b"FLAT-DLSS"
+            assert Path(fgame, "libxess.dll").read_bytes() == b"FLAT-XESS"
+            assert Path(fgame, "INTEL-XESS-LICENSE.txt").read_bytes() == b"INTEL-LICENSE"
+            assert Path(fgame, "INTEL-XESS-THIRD-PARTY.txt").read_bytes() == b"INTEL-THIRD-PARTY"
             assert Path(fgame, "edvr.ini").read_bytes() == b"[user]\nkeep=1\n"
             # First flat install with no edvr-flat.ini yet seeds it from the
             # existing edvr.ini; after that the two profiles' settings part.
@@ -2170,6 +2201,7 @@ def self_test():
             assert restore_native(str(receipt_path)) == 0
             assert xr_snapshot() == before_xr, "flat restore changed Openvr"
             assert not Path(fgame, "d3d11.dll").exists()
+            assert not Path(fgame, "libxess.dll").exists()
             assert not descriptor_path.exists()
             # --ini must require the generated flat template, never copy the
             # full VR INI in the repository root, and restore the user's INI.
