@@ -2,9 +2,9 @@
 
 ## Status
 
-- State: menu XeSS works; captured gameplay fails destination camera admission.
-  The user wants to test locally on this device first, then test on Windows.
-  Keep the work on this branch; do not merge to main.
+- State: local flat XeSS gameplay confirmed at native AA and 0.75 upscaling.
+  User reports mostly stable, with one native hangar-surface flicker absent at
+  0.75. Keep this branch for later Windows testing; do not merge to main.
 - Environment: ONEXPLAYER 3, Intel Arc B390 PTL 8086:b080, CachyOS xe, Proton
   Experimental experimental-11.0-20261001-x86_64, DXVK
   v3.1.1-47-g685301564ea3486, private Mesa 26.3.0-devel git-37bf953a58. Normal
@@ -21,10 +21,9 @@
 - Ruled-out pointer: capability entries below record D3D11 unsupported-driver
   refusal and the missing enabled Vulkan extension on DXVK's device. Separate
   Vulkan execution passed; the confirmed D3D12 bridge is the branch backend.
-- Confirmed: D3D11/D3D12 bridge and production backend execute on the B390. GPU
-  rig passed 20 evaluations across native LDR, 2x LDR, 2x HDR and HDR
-  recreation, with four resets and zero failures. XeFX version is 0.0.0.0; this
-  establishes XeSS execution, not XMX acceleration or image quality.
+- Confirmed: B390 bridge GPU rig passed 20 evaluations across native LDR, 2x
+  LDR/HDR and HDR recreation, four resets and zero failures. XeFX version is
+  0.0.0.0; XMX acceleration remains unverified. Local gameplay now executes.
 - XeSS jitter minimum follows ceil(8 * max(E/R)^2), including 72 phases at 3x.
   Legacy/Off camera routes stay at eight and explicitly refuse XeSS upscaling
   when insufficient; native AA can use eight.
@@ -35,15 +34,15 @@
 - Local install: clean source commit 0f700706, version v0.19.1-13-g0f700706.
   Sanctioned installer dry-run, install and verify-only passed, including the
   XeSS DLL/notices; the live flat INI is unchanged. Main remains at 99476a02.
-- First flight: correct build 644fe39b, edvr_gfx_20261011_093635.log. Native
-  HDR R=E=D=1920x1200; XeSS init/execute rc=0, 3115 evaluations. Gameplay
-  admission fails with conflicting-hdr-target-or-camera then
-  no-known-tone-pass; treated freezes at 3186 and the runtime stands down. User
-  reports a great menu and mostly untreated gameplay elements. FSR3 dependency
-  is absent in this build.
-- Ruled out: XeSS runtime/bridge execution failure as the reason gameplay is
-  untreated, because menu evaluations succeed and gameplay backend=0 before any
-  SDK call. Actual gameplay temporal quality remains untested.
+- Current flight: correct 0f700706, edvr_gfx_20261011_103114.log. Native HDR AA
+  executes at 1920x1200; gameplay HDR windows complete every step. At 0.75,
+  1440x900 is upscaled to 1920x1200 on the LDR copy route, with 15 jitter
+  phases instead of native's eight. Logged XeSS init/evaluations return rc=0.
+- User: mostly stable. Station surface below the hangar's Welcome to sign
+  flickers at native and stops below 1; sizes imply 0.75. This changes resolve
+  route and jitter as well as resolution, so it does not isolate the cause.
+- Open: native surface flicker needs draw-level evidence before a rendering
+  fix; below-native gameplay is locally confirmed. FSR3 SDK is absent here.
 - Capture: correct build 644fe39b, edvr_gfx_20261011_100319.log and
   flat_trace_14850.bin; three complete frames, zero overflow. Stored/replayed
   contracts match exactly. All reject image-copy-source: 29/31 guards pass;
@@ -56,7 +55,7 @@
 - Implemented: actual H laser draw qualified by scene camera and verified image
   continuation. MSVC rig passes; 17 historical traces retain all 46 hashes;
   current capture selects all three HDR frames. Production DLLs/flat installer
-  compile; full build stops at baseline Wine run_jobs failures. Flight pending.
+  compile; full build stops at baseline Wine run_jobs failures. Fix flown.
 - Temporary settings: initial flat profile fix.temporal_aa=xess; no new
   diagnostic config keys. Existing private Mesa launch options verified.
 
@@ -325,6 +324,43 @@ launcher. The live flat INI was preserved byte-for-byte (SHA256
 007d94135805fcb0d01766fe728c00e64ac2aae5ae74df15f9a9becb6d07ea5a), still
 selecting xess. The same cockpit/station scene for one minute is requested;
 read that new flight with --expect-build 0f700706, even after doc-only commits.
+
+## October 11: local gameplay execution confirmed
+
+Correct installed source 0f700706 wrote edvr_gfx_20261011_103114.log, version
+v0.19.1-13-g0f700706, build 6ACBB8D6, linked 2026-10-11 16:27:02 UTC. The user
+reports mostly stable gameplay: one station surface below the hangar's Welcome
+to sign flickers at native and stops after lowering supersampling. The log's
+1440x900 render and 1920x1200 output imply 0.75. No visual cause is established
+by that observation.
+
+At 10:34:10 the native HDR route has 191 frames, selected/admitted/reached/
+captured/copied/prepped/backend/finished/restored all 191, no late H writes,
+and a 979-frame treated streak. The previously refusing gameplay consumer
+DFED8E1C9E191BEC/14C60393D1FC9766 is now selected. XeSS execute #1500-#2400
+logs rc=0, 1920x1200 to 1920x1200, HDR, R11-to-FP16 copy and reset=0. History
+is live with eight jitter phases. Image-copy refusals stop growing while
+accepted continuations increase.
+
+At 10:34:15 the renderer changes to 1440x900. The HDR route deliberately yields
+to the structural LDR copy route; XeSS opens a 1440x900 to 1920x1200 Ultra
+Quality context. At 10:34:50 all 284 copy frames are admitted/treated with
+valid history, 15 jitter phases and no reset that window. Later XeSS executes
+through #6600 with rc=0, RGBA8 copy and monotonic fence values. The renderer
+reaches a 3487-frame history continuation run. Backend-failure totals grow
+during FSR mode comparisons and stay fixed throughout this last XeSS run; do
+not mislabel those aggregate totals as XeSS SDK errors.
+
+Ruled out: XeSS remaining inactive after the camera admission fix, because this
+correct-build flight executes native HDR and below-native LDR with successful
+SDK evaluations and accumulating treated frames. Local scope is confirmed:
+flat, this Intel device and private Mesa/Proton environment. Native surface
+flicker, XMX acceleration, other gameplay scenes, VR and the native Windows
+full build remain unqualified. Reducing supersampling changes both the resolve
+position (HDR before tone versus later LDR) and jitter sequence; it is a stable
+user setting, not a proven correction of the native artifact. Identify the
+surface's draw/placement relative to resolve before another production
+rendering change. No source or live config changed for this read.
 
 ## Sources
 
