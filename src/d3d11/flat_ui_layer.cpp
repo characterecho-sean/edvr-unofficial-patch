@@ -67,6 +67,7 @@ uint64_t g_mapAskFrame = 0, g_mapAsksFrame = 0;           // the frame of the la
 FlatUiToneProof g_proof;
 FlatUiToneProbeBudget g_toneProbe[2];  // F9C/E894 and 43CA/E894 cannot consume each other's two samples
 bool g_toneProbeArmed = false;
+bool g_sourceToneFirstNoted = false;
 // First physical RTV seen for each distinct, HDR-qualified HUD target in the current frame. The references live only
 // until the next frame, device change, or resize; they never feed the UI decision or tone proof.
 struct HudPhysical {
@@ -518,6 +519,46 @@ void flatUiLayerNoteCopy(ID3D11DeviceContext* ctx, uint64_t frame, uint32_t sequ
     flatUiToneProofCopy(g_proof, frame, source, output);
 }
 
+bool flatUiLayerSourceToneCandidate(ID3D11DeviceContext* ctx, uint64_t frame, uint32_t renderW, uint32_t renderH,
+                                    uint64_t vs, uint64_t ps, const void* cachedOutput,
+                                    uint32_t outW, uint32_t outH, const char* route) {
+    if (!ctx || !flatUiLayerOn() || !flatUiSourceTonePair(vs, ps) || g_hudPhysicalFrame != frame) return false;
+    FlatComputeInternalScope internal;
+    Ptr<ID3D11VertexShader> actualVs;
+    Ptr<ID3D11PixelShader> actualPs;
+    ctx->VSGetShader(&actualVs, nullptr, nullptr);
+    ctx->PSGetShader(&actualPs, nullptr, nullptr);
+    if (lookupShaderHash(actualVs.Get()) != vs || lookupShaderHash(actualPs.Get()) != ps) return false;
+    ToneAdmit shape{};
+    if (!tonemapAdmitStructure(ctx, ps, shape) || shape.hdrSlotRead != 1 || shape.rtvRes != cachedOutput) return false;
+    D3D11_VIEWPORT viewport[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE]{};
+    UINT viewportCount = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+    ctx->RSGetViewports(&viewportCount, viewport);
+    const bool fullViewport = viewportCount == 1 && viewport[0].TopLeftX == 0.0f && viewport[0].TopLeftY == 0.0f &&
+        viewport[0].Width == static_cast<float>(renderW) && viewport[0].Height == static_cast<float>(renderH) &&
+        viewport[0].MinDepth == 0.0f && viewport[0].MaxDepth == 1.0f;
+    if (!flatUiSourceToneShape(renderW, renderH, outW, outH, shape.rtvW, shape.rtvH,
+                               static_cast<uint32_t>(shape.rtvFmt), shape.hdrW, shape.hdrH,
+                               static_cast<uint32_t>(shape.hdrFmt), shape.psT0Is3D && shape.psT0Res != nullptr,
+                               shape.hdr2D, fullViewport))
+        return false;
+    bool directHud = false;
+    for (unsigned i = 0; i < g_hudPhysicalCount; ++i)
+        if (flatUiSourceToneDirectHud(g_hudPhysical[i].shadow, g_hudPhysical[i].actual.Get(), shape.hdrRes)) {
+            directHud = true;
+            break;
+        }
+    if (!directHud) return false;  // no proof from a cached shadow or an unverified alias
+    if (!g_sourceToneFirstNoted) {
+        g_sourceToneFirstNoted = true;
+        Log::get().note("flat ui layer: first E894 source tone qualified -- frame %llu VS %016llX PS %016llX, "
+                        "physical HUD t1=%p, LDR RTV=%p R=%ux%u, full viewport; flat UI proof only.",
+                        static_cast<unsigned long long>(frame), static_cast<unsigned long long>(vs),
+                        static_cast<unsigned long long>(ps), shape.hdrRes, shape.rtvRes, renderW, renderH);
+    }
+    return flatUiLayerToneCandidate(ctx, frame, renderW, renderH, 1, vs, ps, shape.hdrRes, outW, outH, route);
+}
+
 bool flatUiLayerToneCandidate(ID3D11DeviceContext* ctx, uint64_t frame, uint32_t renderW, uint32_t renderH, int hdrSlot,
                               uint64_t vs, uint64_t ps, const void* input, uint32_t outW, uint32_t outH, const char* route) {
     if (!ctx || !flatUiLayerOn()) return false;
@@ -698,6 +739,7 @@ void flatUiLayerNoteDevice(ID3D11Device* device) {
         g_hudCopyExhaustionNoted = false;
         for (auto& budget : g_toneProbe) budget = FlatUiToneProbeBudget{};
         g_toneProbeArmed = false;
+        g_sourceToneFirstNoted = false;
         g_view.Reset();
         g_viewTex = nullptr;
         g_viewFmt = DXGI_FORMAT_UNKNOWN;
@@ -721,6 +763,7 @@ void flatUiLayerRelease() {
     g_hudCopyExhaustionNoted = false;
     for (auto& budget : g_toneProbe) budget = FlatUiToneProbeBudget{};
     g_toneProbeArmed = false;
+    g_sourceToneFirstNoted = false;
     g_candidateLines = 0;         // and its first tone candidates are logged
     g_takenFrame = 0;
     g_takenTarget = nullptr;

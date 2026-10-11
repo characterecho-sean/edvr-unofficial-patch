@@ -1230,6 +1230,25 @@ void testFlatLayerRules() {
               flatUiToneProbeSlot(0xCFA91824129ECBBCull, 0xE8948389387DA083ull) == -1 &&
               flatUiToneProbeSlot(0xF9CFC798F21E9AEAull, 0x9270C355389DA302ull) == -1,
           "E894 probe: the steady writer and transition variant have independent diagnostic slots, no tone admission");
+    check(flatUiSourceTonePair(0xF9CFC798F21E9AEAull, 0xE8948389387DA083ull) &&
+              flatUiSourceTonePair(0x43CA9F1C0AD2ACFEull, 0xE8948389387DA083ull) &&
+              !flatUiSourceTonePair(0xF9CFC798F21E9AEAull, 0xE8948389387DA082ull) &&
+              !flatUiSourceTonePair(0xCFA91824129ECBBCull, 0xE8948389387DA083ull),
+          "E894 UI source tone: both observed exact pairs qualify, neighbouring PS and unrelated VS do not");
+    check(flatUiMapToneSlotOf(0xF9CFC798F21E9AEAull, 0xE8948389387DA083ull) == ~0u,
+          "E894 UI source tone: the map table remains unchanged");
+    check(flatUiSourceToneShape(1720, 720, 1720, 720, 1720, 720, 28, 1720, 720, 26, true, true, true) &&
+              !flatUiSourceToneShape(1720, 720, 3440, 1440, 1720, 720, 28, 1720, 720, 26, true, true, true) &&
+              !flatUiSourceToneShape(1720, 720, 1720, 720, 1720, 720, 28, 1720, 720, 26, true, true, false) &&
+              !flatUiSourceToneShape(1720, 720, 1720, 720, 1720, 720, 27, 1720, 720, 26, true, true, true) &&
+              !flatUiSourceToneShape(1720, 720, 1720, 720, 1720, 720, 28, 1720, 720, 26, false, true, true),
+          "E894 UI source tone: full-size LDR RTV, R11 HUD source, LUT and viewport are required");
+    static int kE894Hud = 0, kE894Other = 0;
+    check(flatUiSourceToneDirectHud(&kE894Hud, &kE894Hud, &kE894Hud) &&
+              !flatUiSourceToneDirectHud(&kE894Hud, &kE894Other, &kE894Hud) &&
+              !flatUiSourceToneDirectHud(&kE894Hud, &kE894Hud, &kE894Other) &&
+              !flatUiSourceToneDirectHud(nullptr, nullptr, nullptr),
+          "E894 UI source tone: proof bootstraps only from the direct, physically verified HUD target");
     {
         FlatUiToneProbeBudget b;
         check(b.geometry(960, 600, 1920, 1200) && !b.geometry(960, 600, 1920, 1200),
@@ -1445,6 +1464,10 @@ void testFlatLayerRules() {
         const std::string layer((std::istreambuf_iterator<char>(layerSrc)), std::istreambuf_iterator<char>());
         const std::string adapter((std::istreambuf_iterator<char>(adapterSrc)), std::istreambuf_iterator<char>());
         const std::string runtime((std::istreambuf_iterator<char>(runtimeSrc)), std::istreambuf_iterator<char>());
+        std::ifstream monoSrc("src/d3d11/flat_mono_frame.h", std::ios::binary),
+            sharedToneSrc("src/d3d11/tonemap_admit.h", std::ios::binary);
+        const std::string mono((std::istreambuf_iterator<char>(monoSrc)), std::istreambuf_iterator<char>());
+        const std::string sharedTone((std::istreambuf_iterator<char>(sharedToneSrc)), std::istreambuf_iterator<char>());
         check(!layer.empty() && layer.find("constexpr bool g_jitterAsShipped = true;") != std::string::npos,
               "wiring: the layer's jitter is always as shipped");
         check(!adapter.empty() && adapter.find("const char* why = uiLayerNotLiveReason();") != std::string::npos &&
@@ -1472,6 +1495,17 @@ void testFlatLayerRules() {
                   adapter.substr(copy, afterCopy - copy).find("flatUiToneProofCopy(g_proof, frame, source, output)") != std::string::npos &&
                   runtime.find("flatUiLayerNoteCopy(ctx, s.prefix.frame, s.prefix.sequence + 1, copySource.Get(), k.color)") != std::string::npos,
               "wiring: physical copy observation is source-qualified and bounded while the existing proof path remains");
+        const size_t sourceTone = adapter.find("bool flatUiLayerSourceToneCandidate(");
+        const size_t afterSourceTone = adapter.find("bool flatUiLayerToneCandidate(", sourceTone);
+        check(sourceTone != std::string::npos && afterSourceTone != std::string::npos &&
+                  adapter.substr(sourceTone, afterSourceTone - sourceTone).find("tonemapAdmitStructure(ctx, ps, shape)") != std::string::npos &&
+                  adapter.substr(sourceTone, afterSourceTone - sourceTone).find("flatUiSourceToneDirectHud(") != std::string::npos &&
+                  adapter.substr(sourceTone, afterSourceTone - sourceTone).find("return flatUiLayerToneCandidate(") != std::string::npos &&
+                  runtime.find("flatUiLayerSourceToneCandidate(ctx, s.prefix.frame") != std::string::npos,
+              "wiring: physical E894 shape and direct-HUD identity qualify before the ordinary flat UI tone proof");
+        check(!mono.empty() && !sharedTone.empty() && mono.find("E8948389387DA083") == std::string::npos &&
+                  sharedTone.find("E8948389387DA083") == std::string::npos,
+              "wiring: E894 remains absent from the mono HDR selector and shared tonemap registry");
     }
 }
 

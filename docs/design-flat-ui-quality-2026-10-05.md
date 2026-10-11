@@ -4,8 +4,8 @@
 
 - **State: SHIPPED (2026-10-09); cockpit proof gap open on B390 (10-11).**
   Local Steam flat XeSS at SS 0.5/UI 125 applies panel sizing but cannot separate
-  the cockpit HUD. The October 11 entry records the confirmed counters and the
-  bounded binding probe needed before admitting another tonemap variant.
+  the cockpit HUD. The October 11 physical capture confirms both E894 tone
+  variants read the actual HDR HUD at t1. The scoped UI candidate fix needs flight.
   Flown OK on Epic flat. Branch
   `claude/flat-display-crash-ui-smearing-f1d96a`; the census was removed in the
   commit that follows the flown build.
@@ -16,10 +16,10 @@
     every counter, Sean: "works great"). Copy route last flown on 75cd495c;
     eced5813's flat admission change not yet flown there.
   - Not flown: 100% at SS 1.0.
-- **Local probe:** clean 8dad2398 installed and verified; capture pending.
-  Production DLLs compile; 91 CPU checks pass. The UI
+- **Local probe:** correct 8dad2398, 114059.log, R1720x720/D3440x1440.
+  The candidate fix compiles; 97 CPU checks pass. The UI
   rig's 206 Wine failures exactly match the clean baseline. Full build stops
-  at baseline run_jobs failures; Windows validation and the local capture remain.
+  at baseline run_jobs failures; Windows validation and the fix flight remain.
 - **The key:** `fix.ui_quality = off | 100 | 125`, default 100 in flat (the
   code's fallback and the flat ini template), the fourth flat F8 row. 100: the
   panels at display size and the cockpit HUD out of temporal history, whatever
@@ -52,9 +52,9 @@
   flat UI layer like the HUD families, so they are drawn at D x T after the upscale.
   The "flat ui layer map:" 30 s line counts them and names each refusal. Entry at the end.
 - **Temporary config keys:** none.
-- **Next locally:** capture physical cockpit F9CFC798/E8948389 inputs with the
-  diagnostic-only observer; confirm HDR target identity and pass shape before
-  changing admission. No rendering fix is justified by the source writer alone.
+- **Next locally:** build the exact-pair UI-only t1 candidate, then fly the
+  same cockpit/menu. Require tone proof, take, reissue and composites in the
+  log, plus the user's HUD/menu stability check. Keep the probe through that flight.
 - **Next on Epic:** fly SS 0.5 on the shipped build (the copy route under eced5813's
   admission change) and 100% at SS 1.0; then an Epic flight opening all three maps.
 
@@ -623,3 +623,56 @@ and verify-only pass. The live flat INI SHA256 stays
 85aa64ab9f41dcdee88e8bf0e4b7ff2abece9016fe549c30e604cbaffd7bff02 (618 bytes).
 The physical cockpit/menu capture is pending. Expect source 8dad2398 in its
 flight log; any following docs-only commit changes no DLL input.
+
+### Physical capture result: 8dad2398, flight 114059
+
+The user completed the cockpit/menu test. Sanctioned reader confirms
+v0.19.1-16-g8dad2398, build 6ACBC80B, linked 17:31:55 UTC. Render is now
+1720x720, display 3440x1440, SS 0.5/UI 125. This remains the flat B390, Proton
+Experimental, private Mesa setup; no VR runtime or per-eye size applies. The
+panel factor is x2.5. At 11:44:29.875, 1372 copies all arm the UI door, but
+tone candidates/proven/admitted/reissued and composites remain zero.
+
+F9CFC798F21E9AEA/E8948389387DA083 has physical snapshots at frames 6625 and
+6715, 90 frames apart. Cached and actual shaders agree. Actual PS t1 is
+resource 0x7E11A240, R11G11B10_FLOAT view/resource (26), 1720x720. The
+same-frame HUD's physical RTV is that exact resource, matching its cached
+target. HUD precedes tone: q1977 before q2042, then q2081 before q2145. The
+output is resource 0x7E11E980, RGBA8 view (28), typeless RGBA8 resource (27),
+1720x720. One full viewport has depth 0..1 and no DSV. Read-only tone shape is
+true, full shape true, PS b2 272 bytes, exposure present, PS t0 a 16-cubed 3D
+LUT. t2 is quarter-sized bloom; t3 is null.
+
+43CA9F1C0AD2ACFE/E8948389387DA083 at frame 6603 has the same physical HUD t1
+and LDR output, HUD q2038 before tone q2116. Structural shape is true; full
+shape is false solely because VS exposure t0 is absent. The existing structural
+rule permits missing exposure. This pair appears briefly at scene transition;
+sustained cockpit uses F9. No recorded alias is involved; all HUD and copy
+mismatch/unavailable/exhaustion counters are zero.
+
+Ruled out: F9/E894 being an unrelated downstream pass in this cockpit, because
+its actual t1 equals the actual HUD target and the output has the measured tone
+shape. Ruled out: binding-cache drift or an unseen copy alias explaining the
+missing proof, because both physical HUD and shader identities agree and the
+input directly reads H. The missing UI tone recognition is confirmed.
+
+Implement only these two observed UI candidate pairs with slot 1, keeping map
+pairs, the global tone/HDR registry and the XeSS backend unchanged. Before
+initial proof, require physical shader identities, tone structure, LDR
+output/full viewport at R and direct current physical HDR HUD identity. Permit
+the observed 43CA missing exposure. The new candidate reads t1 physically
+through the structural observer before establishing proof, so it does not need
+or widen the runtime's cached SRV capture gate. Restrict its caller to one
+three-vertex fullscreen draw. Keep the diagnostic observer through the fix
+flight; no new config key. Native Windows full validation remains pending.
+
+Candidate validation: production DLLs compile and link in the normal absolute
+build.bat. All 97 flat UI CPU checks pass, including pair/shape/direct-H
+identity and next-frame proof bootstrap. The UI rig has 3800 checks and the
+same 206 FAIL lines, in the same order, as the clean Wine baseline. The full
+build still stops at unchanged run_jobs focus/process/error-mode failures, with
+no receipt. Root added the captured three-vertex/one-instance/start-zero
+prefilter before this final build. Next flight must show tone proof, HUD takes,
+reissue and composites, and inspect both HUD and menus; a newly exposed later
+refusal must be diagnosed from those counters rather than hidden by a threshold
+change.

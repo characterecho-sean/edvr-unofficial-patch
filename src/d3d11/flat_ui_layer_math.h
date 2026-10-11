@@ -76,15 +76,33 @@ inline uint32_t flatUiMapToneSlotOf(uint64_t vs, uint64_t ps) {
     return vs == kFlatUiMapToneVs && ps == kFlatUiMapTonePs ? 0u : ~0u;  // the scene is SRV slot 0
 }
 
-// Observation only: the 2026-10-11 XeSS cockpit used E894 to write the final LDR source, while its HUD layer had no
-// tone proof. Neither pair is admitted as a tone by this predicate; it only bounds physical-binding diagnostics.
+// The 11:40 XeSS cockpit capture physically verified both exact E894 variants reading the HDR HUD at PS t1 and writing
+// a full-size LDR target. This flat UI-only table stays separate from the mono HDR selector and shared/VR tone registry.
+constexpr uint64_t kFlatUiSourceToneVsSteady = 0xF9CFC798F21E9AEAull;
+constexpr uint64_t kFlatUiSourceToneVsTransition = 0x43CA9F1C0AD2ACFEull;
+constexpr uint64_t kFlatUiSourceTonePs = 0xE8948389387DA083ull;
+inline bool flatUiSourceTonePair(uint64_t vs, uint64_t ps) {
+    return ps == kFlatUiSourceTonePs && (vs == kFlatUiSourceToneVsSteady || vs == kFlatUiSourceToneVsTransition);
+}
+// Observation only: each exact pair has an independent bounded physical-binding diagnostic budget.
 inline int flatUiToneProbeSlot(uint64_t vs, uint64_t ps) {
-    if (ps != 0xE8948389387DA083ull) return -1;
-    if (vs == 0xF9CFC798F21E9AEAull) return 0;  // steady LDR-source writer in the FTR5 capture
-    if (vs == 0x43CA9F1C0AD2ACFEull) return 1;  // physically admitted at t1 in the map-transition flight
+    if (ps != kFlatUiSourceTonePs) return -1;
+    if (vs == kFlatUiSourceToneVsSteady) return 0;
+    if (vs == kFlatUiSourceToneVsTransition) return 1;
     return -1;
 }
 inline bool flatUiToneProbePair(uint64_t vs, uint64_t ps) { return flatUiToneProbeSlot(vs, ps) >= 0; }
+inline bool flatUiSourceToneShape(uint32_t renderW, uint32_t renderH, uint32_t cachedOutW, uint32_t cachedOutH,
+                                  uint32_t physicalOutW, uint32_t physicalOutH, uint32_t physicalOutViewFmt,
+                                  uint32_t hdrW, uint32_t hdrH, uint32_t hdrViewFmt,
+                                  bool lut3D, bool hdr2D, bool fullViewport) {
+    return renderW && renderH && cachedOutW == renderW && cachedOutH == renderH &&
+           physicalOutW == renderW && physicalOutH == renderH && physicalOutViewFmt == 28 &&
+           hdrW == renderW && hdrH == renderH && hdrViewFmt == 26 && lut3D && hdr2D && fullViewport;
+}
+inline bool flatUiSourceToneDirectHud(const void* cachedHud, const void* physicalHud, const void* physicalInput) {
+    return cachedHud && cachedHud == physicalHud && physicalHud == physicalInput;
+}
 struct FlatUiToneProbeBudget {
     uint32_t renderW = 0, renderH = 0, outputW = 0, outputH = 0;
     uint64_t firstSampleFrame = 0, lastSampleFrame = 0, candidates = 0, withHud = 0;

@@ -80,6 +80,11 @@ void flatUiLayerWriteBackEnd(ID3D11DeviceContext* ctx);
 // `route` names the frame's route so far ("hdr" once the HDR route treated, else the resolve plan's route name).
 bool flatUiLayerToneCandidate(ID3D11DeviceContext* ctx, uint64_t frame, uint32_t renderW, uint32_t renderH, int hdrSlot,
                               uint64_t vs, uint64_t ps, const void* input, uint32_t outW, uint32_t outH, const char* route);
+// The two flight-verified E894 source writers: physically qualify their full-size LDR draw and direct HUD read at t1
+// before using the usual flat-only tone candidate/proof path. Unknown pairs do not bootstrap proof.
+bool flatUiLayerSourceToneCandidate(ID3D11DeviceContext* ctx, uint64_t frame, uint32_t renderW, uint32_t renderH,
+                                    uint64_t vs, uint64_t ps, const void* cachedOutput,
+                                    uint32_t outW, uint32_t outH, const char* route);
 // A plain copy (the game's copy pixel shader) from `source` into `output` this frame: when the source is the HUD's HDR
 // target, the output is the copy the tone may read instead (the HDR route's post chain does).
 void flatUiLayerNoteCopy(ID3D11DeviceContext* ctx, uint64_t frame, uint32_t sequence,

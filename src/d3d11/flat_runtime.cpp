@@ -5457,17 +5457,25 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
             else if (ask == FlatUiLayerAsk::kRefused) {}   // a HUD draw left in H: never also a tone candidate
             // The game's tone pass by its known pair, whatever its vertex count (the 11:32 flight's HDR route read a copy of
             // H, which the structural rule below never matched): the next frame's proof, and this frame's admission.
-            // The registry's tone pass, or the map frames' tonemap (flatUiMapToneSlotOf: the UI layer's own table, not the registry).
-            else if (tone || flatUiMapToneSlotOf(k.vs, k.ps) != ~0u) {
-                const uint32_t slot = tone ? flat_mono_detail::toneHdrSlot(k.vs, k.ps) : flatUiMapToneSlotOf(k.vs, k.ps);
+            // The registry's tone pass, map tonemap, or the two physically verified E894 LDR-source writers.
+            // The E894 pair remains UI-only: it does not enter the global tone registry or mono HDR selector.
+            else if (tone || flatUiMapToneSlotOf(k.vs, k.ps) != ~0u || flatUiSourceTonePair(k.vs, k.ps)) {
                 // The route so far: the HDR route once it treated this frame, else the resolve plan's (trained-native,
                 // trained-upscale, ...), or none yet.
                 const char* route = s.hdrTreated ? "hdr"
                     : s.haveResolvePlan ? flatResolveRoute(s.plannedResolve.mode, s.plannedResolve.renderWidth, s.plannedResolve.renderHeight,
                                                            s.plannedResolve.outputWidth, s.plannedResolve.outputHeight).name
                                         : "no-plan";
-                uiTone = flatUiLayerToneCandidate(ctx, s.prefix.frame, sceneRw, sceneRh, static_cast<int>(slot), k.vs, k.ps,
-                                                  slot < 2 ? k.srvResource[slot] : nullptr, k.width, k.height, route);
+                if (flatUiSourceTonePair(k.vs, k.ps)) {
+                    // Both physical captures issued one fullscreen triangle. Keep a partial draw from bootstrapping proof.
+                    if ((kind == 'D' || kind == 'N') && count == 3 && instances == 1 && startInstance == 0)
+                        uiTone = flatUiLayerSourceToneCandidate(ctx, s.prefix.frame, sceneRw, sceneRh, k.vs, k.ps,
+                                                                k.color, k.width, k.height, route);
+                } else {
+                    const uint32_t slot = tone ? flat_mono_detail::toneHdrSlot(k.vs, k.ps) : flatUiMapToneSlotOf(k.vs, k.ps);
+                    uiTone = flatUiLayerToneCandidate(ctx, s.prefix.frame, sceneRw, sceneRh, static_cast<int>(slot), k.vs, k.ps,
+                                                      slot < 2 ? k.srvResource[slot] : nullptr, k.width, k.height, route);
+                }
             }
             // A plain copy reading the HUD's target names the copy the tone may read (the HDR route's post chain).
             // Its source is read from the context, not the binding shadow: when this copy is the HDR route's trigger, the
