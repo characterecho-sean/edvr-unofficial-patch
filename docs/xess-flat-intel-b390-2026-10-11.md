@@ -2,9 +2,9 @@
 
 ## Status
 
-- State: local flat XeSS gameplay confirmed at native AA and 0.75 upscaling.
-  HUD/menu motion now stable at UI 125, SS 0.5 and about 0.65. Native hangar
-  flicker was absent at 0.75. Keep this branch for Windows testing; no main merge.
+- State: local XeSS native AA/upscaling and FSR3 0.65 upscaling confirmed. User
+  reports stable scene/HUD/menu motion; native hangar flicker was absent at
+  XeSS 0.75. Keep this branch for Windows testing; no main merge.
 - Environment: ONEXPLAYER 3, Intel Arc B390 PTL 8086:b080, CachyOS xe, Proton
   Experimental experimental-11.0-20261001-x86_64, DXVK
   v3.1.1-47-g685301564ea3486, private Mesa 26.3.0-devel git-37bf953a58. Normal
@@ -15,8 +15,8 @@
   modes and defaults stay unchanged. Initial live flat config selects xess.
 - SDK v3.0.2, commit 8fe81bdbbaf00b3c1b733fd0d830c333dc84e6f0; XeSS-SR runtime
   2.0.2. Package and component versions differ.
-- Windows SDK handoff: `python tools/fetch_xess.py --dest third_party/xess`
-  and `python tools/fetch_ffx_dx11.py --dest third_party/ffx-dx11` before full
+- Windows SDK handoff: `python tools/fetch_xess.py --dest third_party/xess` and
+  `python tools/fetch_ffx_dx11.py --dest third_party/ffx-dx11` before full
   build. Fetchers pin/verify dependencies; installers carry required notices.
 - Ruled-out pointer: capability entries below record D3D11 unsupported-driver
   refusal and the missing enabled Vulkan extension on DXVK's device. Separate
@@ -31,9 +31,9 @@
   installers. Full build is not green: unchanged run_jobs process/error-mode
   tests and installer sharing tests fail under Wine. Windows validation is
   still required. The user authorized branch-only work pending that check.
-- Local install: clean source commit 4b7bfec4, version v0.19.1-18-g4b7bfec4.
-  Sanctioned installer dry-run, install and verify-only passed, including the
-  XeSS DLL/notices; settings unchanged. HUD/menu fix verified; main 99476a02.
+- Local install: clean source 75848439, v0.19.1-22-g75848439; pinned FSR3 3.1.2
+  enabled. Sanctioned dry-run/install/verify passed; settings unchanged.
+  Hardware rig 97/97; production DLLs and separate flat installer checks pass.
 - Gameplay flight: correct 0f700706, 103114.log. Native HDR AA at 1920x1200
   completes every step. SS 0.75 upscales 1440x900 to 1920x1200 on the LDR copy
   route with 15 jitter phases; XeSS init/evaluations return rc=0.
@@ -42,8 +42,9 @@
   route and jitter as well as resolution, so it does not isolate the cause.
 - Confirmed: correct 4b7bfec4, 120427.log; E894 UI proof bootstraps and every
   steady frame composites HUD/menus. User reports stable. Cleanup 02f50bd7 and
-  exact-pair guard evidence are in design-flat-ui-quality-2026-10-05.md.
-  Native surface flicker still needs evidence; enabling the missing FSR3 SDK.
+  exact-pair guard evidence are in design-flat-ui-quality-2026-10-05.md. Native
+  surface flicker still needs evidence. FSR3 flight 125209.log treats 463
+  frames without SDK fallback; sampled FSR HUD counters remain unmeasured.
 - Capture: correct build 644fe39b, edvr_gfx_20261011_100319.log and
   flat_trace_14850.bin; three complete frames, zero overflow. Stored/replayed
   contracts match exactly. All reject image-copy-source: 29/31 guards pass;
@@ -55,8 +56,7 @@
   all three frames retain the same refusal, with no gameplay backend calls.
 - Implemented: actual H laser draw qualified by scene camera and verified image
   continuation. MSVC rig passes; 17 historical traces retain all 46 hashes;
-  current capture selects all three HDR frames. Production DLLs/flat installer
-  compile; full build stops at baseline Wine run_jobs failures. Fix flown.
+  current capture selects all three HDR frames. Fix flown.
 - Temporary settings: initial flat profile fix.temporal_aa=xess; no new
   diagnostic config keys. Existing private Mesa launch options verified.
 
@@ -407,3 +407,45 @@ LDR/HDR evaluations and resets in the real DXVK/private-Mesa environment. The
 repository rig remains WARP by default for native Windows validation; there is
 no Intel vendor exclusion in the production engine. Both the dependency build
 and actual GPU results are pending.
+
+## October 11: FSR3 dependency enabled and gameplay confirmed
+
+Installed clean source 75848439, v0.19.1-22-g75848439, includes the pinned
+OptiScaler FSR3 3.1.2 libraries. The existing fetcher verifies the staged
+dependency, static LIBCMT CRT, imports, pin and shader compiler provenance.
+VERSION.txt records CMake 3.31.3, MSVC 14.44.35207 and Ninja, plus a temporary
+CMake shader-output-list dereference correction in the dependency build. This
+is a build-generation correction, not an EDVR C++ change; the pinned shader
+compiler hash remains unchanged. The AMD MIT notice is carried with the build.
+
+The temporary hardware adaptation of the existing FSR3 engine rig passes all 97
+checks on Intel Arc B390 through the actual game-profile DXVK/private-Mesa
+environment, including production-engine LDR/HDR evaluation and resets. The
+repository rig remains WARP by default for Windows validation. The full build
+was launched by absolute path and compiled both production DLLs, but unchanged
+Wine run_jobs failures still prevent a full-build receipt. A separate flat
+installer build and check passed. Sanctioned install dry-run, install and
+verify-only passed; the settings hash stayed unchanged. Native Windows full
+validation and the user's branch-only/no-main-merge requirement still apply.
+
+The sanctioned reader verifies edvr_gfx_20261011_125209.log against 75848439.
+At 12:52:44.611 FSR3 first asks for the Intel Arc B390 and initialises its DX11
+backend in 1 ms. At 12:52:44.618 it creates the context for 1248x780 ->
+1920x1200, matching game SS 0.65. At 12:52:49.644 the runtime reports
+treated-jittered: 281 successful FSR frames since the switch, with one reset
+and 280 history continuations. By 12:52:54.649 it has treated 182 more, giving
+463 successful FSR frames across the sampled ten seconds and a longest
+FSR-treated streak of 463. Tone processing reports trained-upscale, confirming
+the output route as well as context creation. No new SDK fallback appears.
+
+The two engine-source-not-ready refusals preceded FSR selection. The later 111
+no-3d-scene refusals identify an absent 3D scene, not an SDK failure; the log
+alone does not identify which menu or scene transition caused them. The user
+confirms FSR3 engagement and stable scene, HUD and menu motion. That is human
+visual evidence: HUD counters were not independently measured during the
+sampled FSR window, whose initial tone samples had no HUD requests.
+
+Ruled out: the previously observed FSR3 refusal was caused by Intel hardware
+incompatibility, because enabling the missing dependency passes the hardware
+rig and produces successful FSR gameplay evaluations. This confirms the tested
+flat Proton/DXVK environment, not native Windows or an untested VR runtime.
