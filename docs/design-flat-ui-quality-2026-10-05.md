@@ -17,7 +17,7 @@
     eced5813's flat admission change not yet flown there.
   - Not flown: 100% at SS 1.0.
 - **Local probe:** correct 8dad2398, 114059.log, R1720x720/D3440x1440.
-  The candidate fix compiles; 97 CPU checks pass. The UI
+  Fix 4b7bfec4 is installed; 97 CPU checks pass. The UI
   rig's 206 Wine failures exactly match the clean baseline. Full build stops
   at baseline run_jobs failures; Windows validation and the fix flight remain.
 - **The key:** `fix.ui_quality = off | 100 | 125`, default 100 in flat (the
@@ -676,3 +676,12 @@ prefilter before this final build. Next flight must show tone proof, HUD takes,
 reissue and composites, and inspect both HUD and menus; a newly exposed later
 refusal must be diagnosed from those counters rather than hidden by a threshold
 change.
+
+Clean candidate install: source 4b7bfec4, version v0.19.1-18-g4b7bfec4.
+Production DLLs compiled and linked; the full build again stops at the baseline
+Wine run_jobs gate. Fresh flat installer payload validation passes. Sanctioned
+dry-run, install and verify-only pass, and the live INI remains
+85aa64ab9f41dcdee88e8bf0e4b7ff2abece9016fe549c30e604cbaffd7bff02. This branch
+remains separate from main. User HUD/menu motion check is pending; expect
+source 4b7bfec4 in that flight, with any subsequent documentation commit
+changing no production input.
