@@ -2,9 +2,9 @@
 
 ## Status
 
-- State: implemented on codex/xess-flat; first actual Elite flat test pending.
-  The user wants to test locally on this device first, then test on Windows.
-  Keep the work on this branch; do not merge to main.
+- State: first local flight confirms menu XeSS, but gameplay route refuses. The
+  user wants to test locally on this device first, then test on Windows. Keep
+  the work on this branch; do not merge to main.
 - Environment: ONEXPLAYER 3, Intel Arc B390 PTL 8086:b080, CachyOS xe, Proton
   Experimental experimental-11.0-20261001-x86_64, DXVK
   v3.1.1-47-g685301564ea3486, private Mesa 26.3.0-devel git-37bf953a58. Normal
@@ -12,28 +12,15 @@
   planetary-startup-intel-b390-2026-10-11.md.
 - Branch adds fix.temporal_aa=xess for flat only, a pinned SDK fetcher, a
   D3D11/D3D12 shared-texture/fence backend and installer payloads. Existing
-  modes and defaults stay unchanged. No live EDVR config exists yet.
-- Latest official package: Intel XeSS SDK v3.0.2, peeled commit
-  8fe81bdbbaf00b3c1b733fd0d830c333dc84e6f0. Its D3D11 DLL reports XeSS-SR
-  runtime 2.0.2; package and component versions differ.
+  modes and defaults stay unchanged. Initial live flat config selects xess.
+- SDK v3.0.2, commit 8fe81bdbbaf00b3c1b733fd0d830c333dc84e6f0; XeSS-SR runtime
+  2.0.2. Package and component versions differ.
 - Windows SDK handoff: run `python tools/fetch_xess.py --dest third_party/xess`
   before the full build; the fetcher pins and verifies the SDK and the build
   stages `libxess.dll` with Intel's license notices for the flat installer.
-- Ruled out: a straightforward native D3D11 XeSS integration on this
-  Proton/Mesa stack. D3D11CreateDevice succeeds, the SDK loads, but
-  xessD3D11CreateContext returns -2, XESS_RESULT_ERROR_UNSUPPORTED_DRIVER, and
-  a null context. Init/Execute were correctly not called.
-- Evidence: disposable-prefix probe and DXVK logs under
-  /tmp/edvr-xess-probe-20261011. DXVK identifies B390 and driver 26.2.99, the
-  private development build; system Mesa reports 26.2.4.
-- Ruled out: immediate XeSS Vulkan use of DXVK's existing device. SDK required
-  queries succeed and require Vulkan 1.3.0, VK_EXT_mutable_descriptor_type, and
-  mutableDescriptorType=true; DXVK interop returns matching handles, but DXVK
-  did not enable the required extension. XeSS Vulkan context creation was not
-  called with these missing prerequisites.
-- Confirmed: standalone Wine Vulkan XeSS context creation, init, execute, queue
-  submit/wait and RGBA16F readback all succeed on private Mesa B390. This is
-  basic execution only; it does not prove temporal quality or DXVK interop.
+- Ruled-out pointer: capability entries below record D3D11 unsupported-driver
+  refusal and the missing enabled Vulkan extension on DXVK's device. Separate
+  Vulkan execution passed; the confirmed D3D12 bridge is the branch backend.
 - Confirmed: D3D11/D3D12 bridge and production backend execute on the B390. GPU
   rig passed 20 evaluations across native LDR, 2x LDR, 2x HDR and HDR
   recreation, with four resets and zero failures. XeFX version is 0.0.0.0; this
@@ -45,11 +32,31 @@
   installers. Full build is not green: unchanged run_jobs process/error-mode
   tests and installer sharing tests fail under Wine. Windows validation is
   still required. The user authorized branch-only work pending that check.
-- Next flight: compile final phase changes, install/verify the flat branch with
-  XeSS enabled, launch using the existing private Mesa wrapper and read the
-  correct-build EDVR log for positive xess execute evidence.
-- Temporary settings: planned initial flat profile fix.temporal_aa=xess; no new
-  diagnostic config keys. No EDVR build has been installed yet.
+- Local install: clean source commit 644fe39b, version v0.19.1-11-g644fe39b.
+  Sanctioned installer dry-run, install and verify-only passed, including the
+  XeSS DLL/notices and reviewed flat INI. Main remains at 99476a02.
+- First flight: correct build 644fe39b, edvr_gfx_20261011_093635.log. Native
+  HDR R=E=D=1920x1200; XeSS init/execute rc=0, 3115 evaluations. Gameplay
+  admission fails with conflicting-hdr-target-or-camera then
+  no-known-tone-pass; treated freezes at 3186 and the runtime stands down. User
+  reports a great menu and mostly untreated gameplay elements. FSR3 dependency
+  is absent in this build.
+- Ruled out: XeSS runtime/bridge execution failure as the reason gameplay is
+  untreated, because menu evaluations succeed and gameplay backend=0 before any
+  SDK call. Actual gameplay temporal quality remains untested.
+- Open: first detailed conflict is image-copy-source at frame 6642, q14/q16:
+  source VS CFA91824129ECBBC / PS FCFAD73924BF45B9, format 9 with depth but no
+  captured camera; copy PS DFCBA0EC70B03C9B writes format 26 without depth. The
+  aggregate HDR conflict does not yet prove a mixed-camera error. Prior flat-AA
+  section 105 records the same guard; do not repeat its ruled-out
+  shader/binding hypotheses without this flight's trace evidence.
+- Next capture: user requested Shift+NumLock in the affected scene, then hold
+  view 20 seconds. Full capture arms the replay trace and copy provenance;
+  ordinary NumLock only requests General and will not save the full trace.
+  Replay all preceding H writes and discriminate copy proof, source layout,
+  source camera provenance and destination depth/camera agreement together.
+- Temporary settings: initial flat profile fix.temporal_aa=xess; no new
+  diagnostic config keys. Existing private Mesa launch options verified.
 
 ## October 11: D3D11 capability probe
 
@@ -172,6 +179,55 @@ failure strings, including identical key-off golden hashes. Evidence:
 flat_mono_resolve_test-final.log. The real game's current graphics files say
 1920x1200, supersampling 1.0 and AAMode 0; the flight log must establish its
 actual R/E/D grids.
+
+## October 11: first Elite flat flight
+
+The sanctioned log reader verifies source commit 644fe39b in
+edvr_gfx_20261011_093635.log. The user reports that the menu looks great, but
+XeSS appears absent on most gameplay elements. The menu uses the native HDR
+route at R=E=D=1920x1200 with SDK AA quality, eight jitter phases and
+successful D3D12 initialization. XeSS executes through 3115 evaluations with no
+SDK/fence refusal. Repeated menu windows treat every HDR trigger frame.
+
+Around 09:38:30, loading changes the observed scene. Treatment stops at 3186
+frames. The detailed conflict at frame 6642, q14/q16 is image-copy-source:
+source VS CFA91824129ECBBC / PS FCFAD73924BF45B9 writes format 9 with depth but
+no captured camera; the PS DFCBA0EC70B03C9B copy writes format 26 without
+depth. The later half-size HDR consumer is VS DFED8E1C9E191BEC / PS
+14C60393D1FC9766. HDR admission refuses before the backend; the copy route has
+no known tone pass and the runtime eventually stands down.
+
+Ruled out: XeSS runtime/bridge failure as the cause of these untreated gameplay
+frames, because menu initialization/execution succeed while the gameplay
+backend counter remains zero. This flight does not test gameplay temporal
+quality or any R<D XeSS upscaling. FSR3 separately refuses because the local
+build lacks EDVR_HAVE_FSR3; its fallback is not a XeSS error.
+
+The current image-copy guard in flat_runtime_model.h checks verified actual
+bindings, source format/layout/depth/order and source camera when present, then
+the destination HDR's existing writes/current camera and matching depth. The
+source PS already has a camera-independent recipe; a missing source camera
+alone is expected and is not a fix hypothesis. Prior flat-AA section 105
+records the same copy guard on another device, with binding checks that passed
+but incomplete preceding-H writer evidence. Do not repeat those exceptions or
+infer a camera mismatch from the aggregate reason.
+
+This flight saved seven unknown scene-projection pairs (14 DXBC stages), but
+neither the new HDR consumer stages nor a replay trace. The existing source
+witness is gated on marked overlay ambiguity and recorded zero candidates.
+Shift+NumLock full capture in the affected scene is requested. It resumes
+stand-down work, samples exact copy provenance and records individual draws and
+resource-write markers in FTR5. Accept three complete frames with nonzero
+events, no overflow and no short write. Ordinary NumLock is General only and
+does not arm the full trace. The offline replay must distinguish copy proof,
+source invalidation, source camera provenance, destination initialization and
+depth/camera agreement before any production code changes.
+
+The existing flat_temporal_test replay rig rebuilt and passed its CPU
+self-test. The disposable runner is
+/tmp/edvr-msvc-bootstrap-20261011/run_trace_replay.py; it runs trace-check,
+trace-chain and trace-structure without using the live prefix. A separate
+read-only guard diagnostic is being prepared under /tmp; it is not shipped.
 
 ## Sources
 
