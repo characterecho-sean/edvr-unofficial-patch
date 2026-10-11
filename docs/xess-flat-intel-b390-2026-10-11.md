@@ -57,7 +57,7 @@
 - Implemented: actual H laser draw qualified by scene camera and verified image
   continuation. MSVC rig passes; 17 historical traces retain all 46 hashes;
   current capture selects all three HDR frames. Fix flown.
-- Local settings: temporal_aa=fsr, UI 125, menu=F16 (rear-right M2). No new
+- Local settings: temporal_aa=fsr, UI 125, menu=F8 (rear-right unresolved). No new
   diagnostic keys. Existing private Mesa launch options verified.
 
 ## October 11: D3D11 capability probe
@@ -479,5 +479,64 @@ byte diff changes only menu=F8 to menu=F16 and its comment; CRLF,
 temporal_aa=fsr, UI 125, sharpness 0.75 and all other settings remain. The
 original is staged at /tmp/edvr-rear-right-original.ini, SHA256
 c2ecc7487c6633000b93600a97fbbbffd4928c6b76be61ad9e6c5c2fe3d1c6e5. User
-confirmation of in-game rear-right open/close is pending. The latest 125209.log
-predates this configuration change and still reports F8.
+confirmation initially failed. Correct-build 131338.log loads the F16 hotkey
+but records no menu opening; the user reports rear-right does not work.
+InputPlumber's keyboard target remains active after that launch.
+
+Ruled out: a stale F8 config or removal of the restored keyboard target caused
+this failure, because 131338.log announces F16 and active targets still include
+keyboard. Forwarding the declared M2 key is insufficient; capture the actual
+press before choosing another binding or changing device mappings.
+
+The keyboard target alone did not make the button work. The user also reported
+desktop clicks stopped registering after using the focused tester. All test
+processes were already closed. Restoring the on-disk target list
+deck-uhid/keyboard/mouse did not recover clicks; reverting to the exact
+original active target list, deck-uhid only, also did not immediately recover
+them. No system files or mappings were edited for these target changes.
+
+Read-only XWayland checks reported core button1 down and no held Ctrl/Alt/Meta
+modifiers. XInput2 reported no buttons held on individual pointer devices and
+identified touch as the last core-pointer source. One conditioned XTest
+button-release event, with no motion or press, left the core mask unchanged at
+0x110. Ruled out: that release cleared the reported core state, because the
+before/after masks were identical. The user then recovered physical
+mouse/trackpad clicks by pressing the right controller's back button. The core
+mask still read 0x110 after practical recovery, so it is not a reliable measure
+of this user's physical click problem. The cause remains unknown; do not
+disable the touchscreen or restart the compositor on that stale reading.
+
+Input experiments are back to the original controller-only active output. The
+next button diagnosis must measure the actual normalized source event, with a
+known controller button as a positive capture check, and must retain the
+existing controller instance. No more focused-window tests are needed.
+
+The headless debug capture at 13:28:41 retained the exact gamepad0 instance,
+advertised F16 and standard controller button capabilities, and confirmed
+DPadUp down/up at 13:29:55. The user then pressed rear-right, but reports
+remained at two with no additional event. Ruled out: the declared sysfs
+M2=KEY_F16 is confirmed input on the current composite path, because the
+positive control arrived and the rear press did not. Inspect the separate input
+nodes/firmware route before choosing a new binding.
+
+The follow-up driver-source read corrects the initial M2 assumption:
+map_button_show reads the cached mapping index; gamepad_mode_show reads the
+cached mode. Probe seeds F15/F16 and XInput before delayed MCU setup attempts
+the actual firmware writes. Failed transport leaves those sysfs defaults
+visible. Ruled out: the displayed F16 alone proves what the button emits,
+because it is not firmware readback. No kernel-journal mapping error was found,
+which does not prove the write succeeded.
+
+Every physical ONEX input and HIDraw channel is root-only. Event6 is the
+separate consumer/mouse node outside the current composite's event18/event16
+sources. Only Steam's virtual controller is readable as deck; another virtual
+capture cannot establish the missing physical route. The next discriminating
+test needs a read-only, no-grab administrator observer on the ONEX physical
+nodes, filtering function-key and mouse/controller button identities only.
+
+F8 and its original comment were restored in both live and mirrored flat INIs
+while Elite was closed. Both match the original byte-for-byte, SHA256
+c2ecc7487c6633000b93600a97fbbbffd4928c6b76be61ad9e6c5c2fe3d1c6e5. FSR3, UI 125
+and sharpness 0.75 remain. User confirms only desktop clicks recovered, not the
+EDVR menu. The rear-right request remains open; no new binding is justified
+yet.
