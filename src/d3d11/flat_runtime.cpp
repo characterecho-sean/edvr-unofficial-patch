@@ -40,6 +40,8 @@
 #include "flat_witness_bound.h"
 #include "flat_cpu.h"
 #include "flat_camera_table.h"
+#include "flat_hdr_projection_capture.h"
+#include "flat_deferred_camera.h"
 #include "flat_query_cut.h"
 #include "flat_query_reads.h"
 #include "gpu_timing.h"
@@ -439,6 +441,15 @@ struct State {
         uint32_t attempts = 0, complete = 0;
     };
     LocalProjectionSample localSamples[2]{};
+    FlatHdrProjectionCapture hdrProjectionCapture{};
+    struct HdrCaptureWrite { const void* resource = nullptr; uint64_t frame = 0; uint32_t sequence = 0; };
+    HdrCaptureWrite hdrCaptureWrites[256]{};
+    uint32_t hdrCaptureWriteNext = 0;
+    uint32_t hdrCaptureWriteEvictions = 0;
+    uint64_t deferredCameraChecks = 0, deferredCameraAccepted = 0, deferredCameraRefused = 0;
+    uint64_t deferredCameraLastLog = 0, deferredInverseLastLog = 0, deferredInverseExecutions = 0;
+    bool deferredInverseLastBound = false;
+    bool deferredCameraLastAccepted = false, deferredCameraNonzeroLogged = false;
     FlatCameraProbe cameraProbe{};
     struct CopyProvenanceSample {
         uint64_t firstFrame = 0, frames[2]{};
@@ -529,6 +540,9 @@ struct State {
     // made MSVC expand all 262,144 events as an aggregate initializer, so
     // this file's compile took ~74 GB of commit and 3.5 min (2026-10-06).
     FlatTraceRing traceRing;
+    FlatTraceFailureCapture deferredFailureCapture;
+    uint64_t deferredFailureCalls=0,deferredFailureLastLog=0;
+    bool deferredFailureArmReported=false;
     uint64_t traceDumpFrame = 0;   // an F10 dump waits for full-window frames
     FlatFrameContract traceContract{};
 
@@ -1241,6 +1255,10 @@ void reportProjectionFailure(const State& s, const FlatProjectionRecipes& recipe
     }
 }
 void failPhase(State& s,const char* reason) {
+    // Compute qualification reaches this directly; the draw path's refusal
+    // bypass alone cannot keep an audit of unused private rows observational.
+    // Diagnostics are recorded by the qualifier before this phase decision.
+    if(flatCameraInjectBypassRefusal(reason)) return;
     s.frameCoverage=false;
     s.phase.fail();s.jitterReason=reason;++s.jitterRefusals;
     if(s.phaseCensusPending) {
@@ -1369,7 +1387,9 @@ void reportUnknownProjection(State& s,const char* event) {
         (unsigned long long)s.unknownProjectionCaptureOverflow,s.unknownProjectionBytesSaved,
         s.unknownProjectionBytesFailed,s.unknownProjectionStagesAbsent);
 }
+void reportHdrProjectionCapture(State& s, const char* event);
 void reportProjection(State& s, const char* event) {
+    reportHdrProjectionCapture(s,event);
     if (!s.projection) return;
     const auto status=s.projection->status();
     Log::get().note("flat projection readiness: event=%s draws=%llu dispatches=%llu candidates=%llu prepared=%llu refused=%llu depth-unassociated=%llu unknown-scene-draws=%llu full-writes=%llu initial-writes=%llu invalidations=%llu frames-left=%u raster-phase=(%.5g,%.5g) raster-bindings=%u resolve-ready=%u fallback-ready=%u backend-available=%u backend-feature-deferred=%u preflight=%s spatial-fallbacks=%llu spatial-fallback-failures=%llu",
@@ -1728,6 +1748,332 @@ uint32_t captureCameraConflict(State& s, const FlatRuntimeDraw& draw) {
     s.cameraProbe.finish(attempt,complete,actualMatches);
     return attempt;
 }
+void recordDeferredFailure(State& s,const FlatContractObservation& k,const char* reason,
+        bool actual,bool input,const FlatContractRecord* donor,bool firstWitness) {
+    ++s.deferredFailureCalls;
+    const uint64_t now=GetTickCount64();
+    if(s.deferredFailureCalls==1 || now-s.deferredFailureLastLog>=5000) {
+        Ptr<ID3D11Buffer> buffer;UINT first=0,count=0;
+        FlatComputeInternalScope internal;
+        if(s.projectionContext)s.projectionContext->VSGetConstantBuffers1(2,1,&buffer,&first,&count);
+        const auto m=s.projection?s.projection->constantsMetadata(buffer.Get()):FlatProjectionShadowMetadata{};
+        Log::get().note("flat deferred failure ownership: reason=%s frame=%llu q=%u H=%p depth=%p dsv=%p size=%ux%u depth-size=%ux%u phase-H=%p phase-depth=%p phase-size=%ux%u named-depth=%p source=%p actual=%u input=%u range=%u original=%u current=%u CB2=%p first=%u count=%u write-frame=%llu write-q=%u donor=%p donor-b1=%p donor-role=%s donor-camera=%016llX first-witness=%u phase=(%.9g,%.9g) calls=%llu; observational ownership, no admission change",
+            reason,(unsigned long long)s.prefix.frame,s.prefix.sequence+1,k.color,k.depth,k.dsv,k.width,k.height,k.depthWidth,k.depthHeight,
+            s.phaseHdr.Get(),s.phaseDepth.Get(),s.phaseWidth,s.phaseHeight,s.namedDepth,k.srvResource[0],actual?1u:0u,input?1u:0u,
+            buffer && flatHdrCaptureRange(first,count,10,7) && m.width>=(uint64_t(first)+17)*16?1u:0u,
+            m.tracked && m.shadowPresent && !m.mapped?1u:0u,
+            m.writeFrame==s.prefix.frame && m.writeSequence && m.writeSequence<=s.prefix.sequence+1?1u:0u,
+            buffer.Get(),first,count,(unsigned long long)m.writeFrame,m.writeSequence,
+            donor?donor->key.color:nullptr,donor?donor->key.b1:nullptr,donor?"qualified-pool":"unavailable",
+            (unsigned long long)(donor?donor->key.cameraHash:0),firstWitness?1u:0u,s.phase.currentX,s.phase.currentY,
+            (unsigned long long)s.deferredFailureCalls);
+        s.deferredFailureLastLog=now;
+    }
+    if(s.deferredFailureCapture.request(s.prefix.frame)) {
+        const auto& h=s.traceRing.headers[s.traceRing.slot];
+        Log::get().note("flat deferred failure snapshot: event=requested failure-frame=%llu q=%u ring-frame=%llu prior-events=%u prior-overflow=%u attempt=%u max-attempts=2; max-one emitted per process/manual arm, completion waits for seal",
+            (unsigned long long)s.prefix.frame,s.prefix.sequence+1,(unsigned long long)h.frame,h.eventCount,h.truncated,s.deferredFailureCapture.attempts);
+        s.traceRing.eventLimit=kFlatTraceEventsPerFrame;
+    }
+}
+void expireDeferredFailure(State& s,const char* event) {
+    if(s.deferredFailureArmReported && s.deferredFailureCapture.reportNeverRan())
+        Log::get().note("flat deferred failure snapshot: event=%s result=never-ran; no propagation failure requested a snapshot",event);
+    if(s.deferredFailureCapture.pendingFrame || (s.deferredFailureCapture.available && s.deferredFailureCapture.attempts)) {
+        Log::get().note("flat deferred failure snapshot: event=%s failure-frame=%llu result=expired-before-completion",
+            event,(unsigned long long)s.deferredFailureCapture.pendingFrame);
+        s.deferredFailureCapture.cancel();
+    }
+}
+const FlatProjectionBindingPlan* verifyDeferredHdrCamera(State& s, FlatRuntimeDraw& draw) {
+    auto& k=draw.key;
+    if(k.format!=26 || k.vs!=0x7E38A6AA1269C901ull || k.ps!=0x7CECABDE34FFBE9Eull || k.camera)return nullptr;
+    const bool nonzero=s.phase.currentX!=0 || s.phase.currentY!=0;
+    if(s.work==FlatWork::Probe && nonzero)return nullptr;
+    const auto phaseDomain=flatDeferredPhaseDomain(k.color,k.depth,k.width,k.height,
+        s.phaseHdr.Get(),s.phaseDepth.Get(),s.namedDepth,s.phaseWidth,s.phaseHeight);
+    // Exact shader identity is not scene ownership: offscreen domains may use
+    // the same deferred shader with their own camera. Do not mutate their CBs
+    // or invalidate scene history. Selected-H identity remains protected even
+    // when its current depth, extent or donor proof is damaged.
+    if(flatCameraInjectUpstreamOwns() && !flatDeferredVerifyInPhase(nonzero,phaseDomain))return nullptr;
+    bool firstWitness=true;
+    for(uint32_t i=0;i<s.prefix.targetsUsed;++i)
+        if(s.prefix.targets[i].resource==k.color && s.prefix.targets[i].writes.draws)firstWitness=false;
+    ++s.deferredCameraChecks;
+    FlatComputeInternalScope internal;
+    Ptr<ID3D11VertexShader> vs;Ptr<ID3D11PixelShader> ps;
+    s.context->VSGetShader(&vs,nullptr,nullptr);s.context->PSGetShader(&ps,nullptr,nullptr);
+    Ptr<ID3D11RenderTargetView> rtv;Ptr<ID3D11DepthStencilView> dsv;
+    Ptr<ID3D11Resource> color,depth;s.context->OMGetRenderTargets(1,&rtv,&dsv);
+    if(rtv)rtv->GetResource(&color);if(dsv)dsv->GetResource(&depth);
+    Ptr<ID3D11Texture2D> colorTexture,depthTexture;
+    if(color)color.As(&colorTexture);if(depth)depth.As(&depthTexture);
+    D3D11_TEXTURE2D_DESC colorDesc{},depthDesc{};
+    if(colorTexture)colorTexture->GetDesc(&colorDesc);if(depthTexture)depthTexture->GetDesc(&depthDesc);
+    UINT viewportCount=D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+    D3D11_VIEWPORT viewports[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE]{};
+    s.context->RSGetViewports(&viewportCount,viewports);
+    const float actualViewport[]={viewports[0].TopLeftX,viewports[0].TopLeftY,viewports[0].Width,
+        viewports[0].Height,viewports[0].MinDepth,viewports[0].MaxDepth};
+    Ptr<ID3D11ShaderResourceView> srv;Ptr<ID3D11Resource> source;Ptr<ID3D11Texture2D> sourceTexture;
+    s.context->PSGetShaderResources(0,1,&srv);if(srv)srv->GetResource(&source);
+    if(source)source.As(&sourceTexture);
+    D3D11_SHADER_RESOURCE_VIEW_DESC view{};if(srv)srv->GetDesc(&view);
+    D3D11_TEXTURE2D_DESC desc{};if(sourceTexture)sourceTexture->GetDesc(&desc);
+    k.srvView[0]=srv.Get();k.srvResource[0]=source.Get();
+    const auto* donor=flatRuntimeDeferredDonor(s.prefix,k,s.prefix.sequence+1);
+    Ptr<ID3D11Buffer> buffer;UINT first=0,count=0;
+    if(s.projectionContext)s.projectionContext->VSGetConstantBuffers1(2,1,&buffer,&first,&count);
+    const auto metadata=s.projection?s.projection->constantsMetadata(buffer.Get()):FlatProjectionShadowMetadata{};
+    const bool range=buffer && flatHdrCaptureRange(first,count,10,7) && metadata.width>=(first+17u)*16u;
+    const bool original=metadata.tracked && metadata.shadowPresent && !metadata.mapped;
+    const bool current=metadata.writeFrame==s.prefix.frame && metadata.writeSequence && metadata.writeSequence<=s.prefix.sequence+1;
+    unsigned char raw[112]{};
+    const bool copied=range && original && current && s.projection->copyConstants(buffer.Get(),(first+10u)*16u,sizeof(raw),raw);
+    const bool actual=lookupShaderHash(vs.Get())==k.vs && lookupShaderHash(ps.Get())==k.ps &&
+        color.Get()==k.color && depth.Get()==k.depth && rtv.Get()==k.rtv && dsv.Get()==k.dsv &&
+        viewportCount==k.viewportCount && std::memcmp(actualViewport,k.viewport,sizeof(actualViewport))==0 &&
+        flat_mono_detail::fullViewport(viewportCount,actualViewport,k.width,k.height) &&
+        colorTexture && depthTexture && colorDesc.Width==k.width && colorDesc.Height==k.height &&
+        colorDesc.Format==DXGI_FORMAT_R11G11B10_FLOAT && colorDesc.SampleDesc.Count==1 && colorDesc.ArraySize==1 &&
+        depthDesc.Width==k.width && depthDesc.Height==k.height && depthDesc.Format==k.depthFormat &&
+        depthDesc.SampleDesc.Count==1 && depthDesc.ArraySize==1;
+    const bool input=sourceTexture && view.ViewDimension==D3D11_SRV_DIMENSION_TEXTURE2D &&
+        view.Format==DXGI_FORMAT_R10G10B10A2_UNORM &&
+        view.Texture2D.MostDetailedMip==0 && view.Texture2D.MipLevels==1 &&
+        desc.Width==k.width && desc.Height==k.height && desc.Format==DXGI_FORMAT_R10G10B10A2_TYPELESS &&
+        desc.ArraySize==1 && desc.SampleDesc.Count==1;
+    const auto match=donor && copied?flatMatchDeferredCamera(donor->camera,raw):FlatDeferredCameraMatch::Unavailable;
+    const bool qualified=actual && input && donor && copied && !foreignWork.load(std::memory_order_acquire);
+    FlatProjectionJitter jitter{};unsigned char certified[112]{};
+    const bool missingPhase=qualified && flatCameraInjectUpstreamOwns() && nonzero &&
+        flatProjectionJitter(s.phase.currentX,s.phase.currentY,k.width,k.height,jitter) &&
+        flatRepairDeferredMissingPhase(donor->camera,raw,jitter,certified);
+    const FlatProjectionBindingPlan* deferredPlan=nullptr;
+    bool prepared=false,warmed=false;
+    // Warm only a fully qualified coherent original. The upstream camera already
+    // owns forward projection; this plan patches exactly the omitted inverse rays.
+    if(s.work==FlatWork::Full && qualified && flatCameraInjectUpstreamOwns() &&
+       ((!nonzero && match==FlatDeferredCameraMatch::Match) || missingPhase)) {
+        Ptr<ID3D11Buffer> ordinary;s.context->VSGetConstantBuffers(2,1,&ordinary);
+        const bool whole=ordinary.Get()==buffer.Get() && first==0 && metadata.width &&
+            metadata.width%16==0 && count==metadata.width/16;
+        FlatProjectionRuntimeRequest request{};request.stage=FlatProjectionStage::Vertex;request.slot=2;
+        request.original=buffer.Get();request.firstConstant=first;request.constantCount=count;
+        request.wholeBuffer=whole;request.patchCount=1;
+        request.patches[0]={FlatProjectionPatchLayout::InverseUvRay,14*16,{}};
+        if(!nonzero)flatProjectionJitter(0,0,k.width,k.height,jitter);
+        const bool ranged=first==0 && count && count<=4096 && count%16==0;
+        warmed=(whole || ranged) && s.projection->preflight(&request,1,jitter,s.phase.phaseSequence,!nonzero);
+        if(warmed && missingPhase) {
+            deferredPlan=s.projection->prepare(&request,1,jitter,s.phase.phaseSequence);
+            unsigned char uploaded[112]{};
+            prepared=deferredPlan && deferredPlan->copyUploadedConstants(FlatProjectionStage::Vertex,2,10*16,112,uploaded) &&
+                std::memcmp(uploaded,certified,sizeof(uploaded))==0 &&
+                flatMatchDeferredCamera(donor->camera,uploaded)==FlatDeferredCameraMatch::Match;
+            if(!prepared)deferredPlan=nullptr;
+        }
+        if(missingPhase && !prepared) {
+            recordDeferredFailure(s,k,"deferred-inverse-preparation-failed",actual,input,donor,firstWitness);
+            failPhase(s,"deferred-inverse-preparation-failed");
+            s.prefix.uncertain=true;flatTraceMark(s.traceRing,kFlatTraceEventMarkUncertain,nullptr);
+        }
+    }
+    const bool executionCoherent=flatDeferredExecutionCoherent(qualified,match,prepared);
+    // Later exact consumers cannot hide a changed/unavailable inverse behind
+    // the first H witness. This consumer's execution must remain coherent too.
+    if(flatCameraInjectUpstreamOwns() && nonzero && !executionCoherent && !missingPhase) {
+        recordDeferredFailure(s,k,"deferred-inverse-unproven",actual,input,donor,firstWitness);
+        failPhase(s,"deferred-inverse-unproven");
+        s.prefix.uncertain=true;flatTraceMark(s.traceRing,kFlatTraceEventMarkUncertain,nullptr);
+    }
+    draw.deferredHdrVerified=firstWitness && executionCoherent;
+    if(draw.deferredHdrVerified) {
+        auto& projection=k.projection[1];projection.resource=buffer.Get();projection.width=metadata.width;
+        projection.copied=sizeof(raw);projection.writeEpoch=metadata.writeFrame;projection.writeSeq=metadata.writeSequence;
+        projection.status=FlatProjectionStatus::Available;
+        uint32_t hash=2166136261u;for(unsigned char byte:raw){hash^=byte;hash*=16777619u;}projection.hash=hash;
+        std::memcpy(draw.camera,donor->camera,kFlatCameraBytes);k.cameraHash=donor->key.cameraHash;
+        ++s.deferredCameraAccepted;
+    } else ++s.deferredCameraRefused;
+    const uint64_t now=GetTickCount64();
+    if(s.deferredCameraChecks<=8 || s.deferredCameraLastAccepted!=draw.deferredHdrVerified ||
+       (nonzero && !s.deferredCameraNonzeroLogged) || now-s.deferredCameraLastLog>=5000) {
+        Log::get().note("flat deferred HDR camera: frame=%llu q=%u H=%p actual-b1=%p CB2=%p first=%u count=%u original=%u current=%u write-frame=%llu write-q=%u donor-b1=%p donor-last=%u source=%p actual=%u input=%u relation=%s accepted=%u missing-phase=%u prepared=%u warmed=%u phase=(%.9g,%.9g) checks=%llu accepted-total=%llu refused-total=%llu work=%s; actual H CB2 witness, donor identity separate; prepared admission awaits verified binding",
+            (unsigned long long)s.prefix.frame,s.prefix.sequence+1,k.color,k.b1,buffer.Get(),first,count,original?1u:0u,current?1u:0u,
+            (unsigned long long)metadata.writeFrame,metadata.writeSequence,donor?donor->key.b1:nullptr,donor?donor->last:0,source.Get(),
+            actual?1u:0u,input?1u:0u,flatDeferredCameraMatchName(match),draw.deferredHdrVerified?1u:0u,missingPhase?1u:0u,prepared?1u:0u,warmed?1u:0u,s.phase.currentX,s.phase.currentY,
+            (unsigned long long)s.deferredCameraChecks,(unsigned long long)s.deferredCameraAccepted,(unsigned long long)s.deferredCameraRefused,flatWorkName(s.work));
+        s.deferredCameraLastLog=now;if(nonzero)s.deferredCameraNonzeroLogged=true;
+    }
+    s.deferredCameraLastAccepted=draw.deferredHdrVerified;
+    return deferredPlan;
+}
+void reportHdrProjectionCapture(State& s, const char* event) {
+    const auto& c=s.hdrProjectionCapture;
+    if(!c.armed)return;
+    Log::get().note("flat HDR projection payload: event=%s frame=%llu H=%p depth=%p attempts-finished=%u complete-frames=%u writers=%u payloads=%u unknown-recipes=%u donors=%u closed=%u prior-uncaptured=%u overflow=%u mutation=%u uncertain=%u result=%s; observational forward capture, not camera admission or the prior FTR dump",
+        event,(unsigned long long)c.frame,c.target,c.depth,c.frames,c.completeFrames,c.writers,c.payloads,c.unknown,c.donors,
+        c.closed?1u:0u,c.partial?1u:0u,c.overflow?1u:0u,c.mutation?1u:0u,c.uncertain?1u:0u,
+        !c.target?(c.frames?"captured-frames":"never-ran"):c.complete()?"complete-payload":"incomplete-payload");
+    Log::get().note("flat HDR projection ledger: event=%s write-identity-evictions=%u incomplete-finished-frames=%u; missing ledger identity means unavailable freshness, payload completeness is not camera proof",
+        event,s.hdrCaptureWriteEvictions,c.frames-c.completeFrames);
+}
+void captureHdrProjectionRows(State& s, uint32_t writer, FlatProjectionStage stage,
+                             UINT slot, uint32_t row, uint32_t rows, bool& complete) {
+    Ptr<ID3D11Buffer> buffer;UINT first=0,count=0;
+    if(s.projectionContext) {
+        if(stage==FlatProjectionStage::Vertex)s.projectionContext->VSGetConstantBuffers1(slot,1,&buffer,&first,&count);
+        else if(stage==FlatProjectionStage::Pixel)s.projectionContext->PSGetConstantBuffers1(slot,1,&buffer,&first,&count);
+        else s.projectionContext->CSGetConstantBuffers1(slot,1,&buffer,&first,&count);
+    }
+    const auto metadata=s.projection?s.projection->constantsMetadata(buffer.Get()):FlatProjectionShadowMetadata{};
+    const bool inRange=buffer && rows<=8 && flatHdrCaptureRange(first,count,row,rows);
+    // copyConstants can fall back to a private replacement. Require a tracked,
+    // unmapped original shadow before asking it for bytes, never label fallback as original.
+    const bool original=metadata.tracked && metadata.shadowPresent && !metadata.mapped;
+    unsigned char raw[8*16]{};char hex[8*4*9+1]{};
+    const bool copied=inRange && original && s.projection->copyConstants(buffer.Get(),(first+row)*16u,rows*16u,raw);
+    if(copied)hexWords(raw,rows*4,hex,sizeof(hex));else complete=false;
+    const State::HdrCaptureWrite* write=nullptr;
+    for(const auto& w:s.hdrCaptureWrites)if(w.resource==buffer.Get() && w.resource){write=&w;break;}
+    const char* freshness=!write?"unobserved-write":write->frame!=s.prefix.frame?"older-frame":
+        write->sequence>s.prefix.sequence?"later-write":"current-frame";
+    Log::get().note("flat HDR projection rows: frame=%llu writer=%u stage=%u slot=%u row=%u rows=%u buffer=%p first=%u bound-count=%u byte-offset=%u tracked=%u width=%u generation=%llu mutation=%llu mapped=%u pending=%u shadow=%u shadow-write=%llu bank-epoch=%llu write-frame=%llu write-q=%u freshness=%s result=%s words=%s",
+        (unsigned long long)s.prefix.frame,writer,static_cast<unsigned>(stage),slot,row,rows,buffer.Get(),first,count,
+        inRange?(first+row)*16u:0u,metadata.tracked?1u:0u,metadata.width,(unsigned long long)metadata.generation,
+        (unsigned long long)metadata.mutationSerial,metadata.mapped?1u:0u,metadata.pending?1u:0u,metadata.shadowPresent?1u:0u,
+        (unsigned long long)metadata.writeGeneration,(unsigned long long)metadata.bankEpoch,
+        (unsigned long long)(write?write->frame:0),write?write->sequence:0,freshness,
+        !buffer?"unbound":!inRange?"range-invalid":!original?"no-original-shadow":copied?"original-full-shadow":"copy-unavailable",copied?hex:"unavailable");
+}
+void captureHdrProjectionSrv(State& s, uint32_t writer, const char* stage, UINT slot,
+                             ID3D11ShaderResourceView* srv, bool& complete) {
+    Ptr<ID3D11Resource> resource;srv->GetResource(&resource);
+    D3D11_SHADER_RESOURCE_VIEW_DESC desc{};srv->GetDesc(&desc);
+    Ptr<ID3D11Texture2D> texture;resource.As(&texture);D3D11_TEXTURE2D_DESC td{};if(texture)texture->GetDesc(&td);
+    UINT mip=0,mips=1,slice=0,slices=1;bool known=true;
+    switch(desc.ViewDimension) {
+    case D3D11_SRV_DIMENSION_TEXTURE2D: mip=desc.Texture2D.MostDetailedMip;mips=desc.Texture2D.MipLevels;break;
+    case D3D11_SRV_DIMENSION_TEXTURE2DARRAY: mip=desc.Texture2DArray.MostDetailedMip;mips=desc.Texture2DArray.MipLevels;
+        slice=desc.Texture2DArray.FirstArraySlice;slices=desc.Texture2DArray.ArraySize;break;
+    case D3D11_SRV_DIMENSION_TEXTURE2DMS: break;
+    case D3D11_SRV_DIMENSION_TEXTURE2DMSARRAY: slice=desc.Texture2DMSArray.FirstArraySlice;slices=desc.Texture2DMSArray.ArraySize;break;
+    case D3D11_SRV_DIMENSION_TEXTURECUBE: mip=desc.TextureCube.MostDetailedMip;mips=desc.TextureCube.MipLevels;slices=6;break;
+    case D3D11_SRV_DIMENSION_TEXTURECUBEARRAY: mip=desc.TextureCubeArray.MostDetailedMip;mips=desc.TextureCubeArray.MipLevels;
+        slice=desc.TextureCubeArray.First2DArrayFace;slices=desc.TextureCubeArray.NumCubes*6u;break;
+    default:known=false;complete=false;break;
+    }
+    Log::get().note("flat HDR projection SRV: frame=%llu writer=%u stage=%s slot=%u view=%p resource=%p format=%u dimension=%u subresources=%s most-detailed-mip=%u mip-levels=%u first-slice=%u slices=%u tex=%ux%u tex-format=%u samples=%u is-anchor-depth=%u",
+        (unsigned long long)s.prefix.frame,writer,stage,slot,srv,resource.Get(),static_cast<unsigned>(desc.Format),static_cast<unsigned>(desc.ViewDimension),known?"known":"unsupported-view",
+        mip,mips,slice,slices,td.Width,td.Height,static_cast<unsigned>(td.Format),td.SampleDesc.Count,resource.Get()==s.hdrProjectionCapture.depth?1u:0u);
+}
+void captureHdrProjectionDraw(State& s, const FlatRuntimeDraw& draw) {
+    auto& c=s.hdrProjectionCapture;const auto& k=draw.key;
+    if(!s.projectionFrames || !c.armed || c.exhausted())return;
+    if(c.target && k.color==c.target && k.vs==kHdrCopyVs && k.ps==kHdrCopyPs) {
+        c.closed=true;c.uncertain|=s.prefix.uncertain || foreignWork.load(std::memory_order_acquire);
+        Ptr<ID3D11ShaderResourceView> srv;Ptr<ID3D11Resource> resource;Ptr<ID3D11Texture2D> texture;
+        FlatComputeInternalScope internal;s.context->PSGetShaderResources(0,1,&srv);
+        if(srv)srv->GetResource(&resource);if(resource)resource.As(&texture);
+        D3D11_TEXTURE2D_DESC source{};if(texture)texture->GetDesc(&source);
+        Log::get().note("flat HDR projection handoff: frame=%llu q=%u H=%p H-size=%ux%u H-fmt=%u source=%p actual-source=%p source-size=%ux%u source-fmt=%u output=%p output-size=%ux%u output-fmt=%u exact-copy=%u; closes diagnostic even when camera admission refuses",
+            (unsigned long long)s.prefix.frame,s.prefix.sequence+1,k.color,k.width,k.height,k.format,k.srvResource[0],resource.Get(),
+            source.Width,source.Height,static_cast<unsigned>(source.Format),s.prefix.output,s.prefix.width,s.prefix.height,s.prefix.format,draw.hdrCopyVerified?1u:0u);
+        reportHdrProjectionCapture(s,"handoff");return;
+    }
+    if(!c.target && k.format==26 && k.vs==0x7E38A6AA1269C901ull && k.ps==0x7CECABDE34FFBE9Eull) {
+        uint32_t prior=0;for(uint32_t i=0;i<s.prefix.targetsUsed;++i)
+            if(s.prefix.targets[i].resource==k.color)prior=s.prefix.targets[i].writes.draws;
+        if(!c.begin(s.prefix.frame,k.color,k.depth,prior))return;
+        for(uint32_t i=0;i<s.prefix.sourcesUsed;++i) {
+            const auto& r=s.prefix.sources[i];if(r.key.depth!=k.depth)continue;++c.donors;
+            const bool current=flat_mono_detail::cameraCurrent(r,s.prefix.frame);
+            char camera[24*9+1]{};if(r.key.camera)hexWords(r.camera,24,camera,sizeof(camera));
+            Log::get().note("flat HDR projection donor: frame=%llu anchor-q=%u candidate=%u color=%p rtv=%p kind=%u first=%u last=%u depth=%p dsv=%p fmt=%u size=%ux%u depth-fmt=%u depth-size=%ux%u b1=%p write-frame=%llu write-q=%u current=%u camera=%s; frozen donor, never substituted for H provenance",
+                (unsigned long long)s.prefix.frame,s.prefix.sequence+1,c.donors,r.key.color,r.key.rtv,r.key.kind,r.first,r.last,
+                r.key.depth,r.key.dsv,r.key.format,r.key.width,r.key.height,r.key.depthFormat,r.key.depthWidth,r.key.depthHeight,
+                r.key.b1,(unsigned long long)r.key.writeEpoch,r.key.writeSeq,current?1u:0u,r.key.camera?camera:"unavailable");
+            if(!current || r.key.kind!=kFlatContractPool || r.key.dsv!=k.dsv || r.last>=s.prefix.sequence+1)c.partial=true;
+        }
+        reportHdrProjectionCapture(s,"anchor");
+    }
+    if(!c.writer(s.prefix.frame,k.color))return;
+    c.uncertain|=s.prefix.uncertain || foreignWork.load(std::memory_order_acquire);
+    FlatComputeInternalScope internal;
+    Ptr<ID3D11VertexShader> vs;Ptr<ID3D11PixelShader> ps;
+    s.context->VSGetShader(&vs,nullptr,nullptr);s.context->PSGetShader(&ps,nullptr,nullptr);
+    const auto actualVs=lookupShaderHash(vs.Get()),actualPs=lookupShaderHash(ps.Get());
+    const auto recipes=flatProjectionDrawRecipes(k.vs,k.ps);
+    const bool unchanged=flatProjectionDrawUnchanged(k.vs,k.ps);
+    if(!recipes.count && !unchanged)++c.unknown;
+    bool complete=actualVs==k.vs && actualPs==k.ps && s.projection && s.projectionContext;
+    Log::get().note("flat HDR projection writer: frame=%llu writer=%u q=%u H=%p rtv=%p depth=%p dsv=%p size=%ux%u fmt=%u expected-VS=%016llX expected-PS=%016llX actual-VS=%016llX actual-PS=%016llX recipes=%u classification=%s actual-match=%u upstream=%u phase=(%.9g,%.9g) vp-count=%u vp=(%.9g,%.9g,%.9g,%.9g,%.9g,%.9g)",
+        (unsigned long long)s.prefix.frame,c.writers,s.prefix.sequence+1,k.color,k.rtv,k.depth,k.dsv,k.width,k.height,k.format,
+        (unsigned long long)k.vs,(unsigned long long)k.ps,(unsigned long long)actualVs,(unsigned long long)actualPs,recipes.count,
+        recipes.count?"registered-recipe":unchanged?"explicit-unchanged":"unknown",complete?1u:0u,flatCameraInjectUpstreamOwns()?1u:0u,
+        s.phase.currentX,s.phase.currentY,k.viewportCount,k.viewport[0],k.viewport[1],k.viewport[2],k.viewport[3],k.viewport[4],k.viewport[5]);
+    captureHdrProjectionRows(s,c.writers,FlatProjectionStage::Vertex,2,10,7,complete);
+    for(uint32_t i=0;i<recipes.count;++i)for(uint32_t p=0;p<recipes.requests[i].patchCount;++p) {
+        const auto& r=recipes.requests[i];const auto& patch=r.patches[p];
+        const uint32_t rows=patch.layout==FlatProjectionPatchLayout::InverseUvRay || patch.layout==FlatProjectionPatchLayout::LightingUvRay?3:4;
+        Log::get().note("flat HDR projection recipe: frame=%llu writer=%u stage=%u slot=%u layout=%u row=%u rows=%u",
+            (unsigned long long)s.prefix.frame,c.writers,static_cast<unsigned>(r.stage),r.slot,static_cast<unsigned>(patch.layout),patch.byteOffset/16u,rows);
+        captureHdrProjectionRows(s,c.writers,r.stage,r.slot,patch.byteOffset/16u,rows,complete);
+    }
+    uint32_t boundViews=0;
+    for(uint32_t stage=0;stage<2;++stage) {
+      ID3D11ShaderResourceView* views[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT]{};
+      if(stage==0)s.context->VSGetShaderResources(0,D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT,views);
+      else s.context->PSGetShaderResources(0,D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT,views);
+      for(UINT slot=0;slot<D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT;++slot) {
+        Ptr<ID3D11ShaderResourceView> srv;srv.Attach(views[slot]);
+        if(!srv)continue;
+        if(++boundViews>16){complete=false;continue;}
+        captureHdrProjectionSrv(s,c.writers,stage==0?"VS":"PS",slot,srv.Get(),complete);
+      }
+    }
+    if(boundViews>16)Log::get().note("flat HDR projection SRV overflow: frame=%llu writer=%u bound-views=%u limit=16 result=incomplete-payload",
+        (unsigned long long)s.prefix.frame,c.writers,boundViews);
+    if(complete)++c.payloads;
+}
+void captureHdrProjectionDispatch(State& s) {
+    auto& c=s.hdrProjectionCapture;
+    if(!s.projectionFrames || !c.armed || !c.target || c.closed || c.exhausted())return;
+    bool writes=false;for(const auto& u:s.uavs)if(u.Get()==c.target)writes=true;
+    if(!writes || !c.writer(s.prefix.frame,c.target))return;
+    FlatComputeInternalScope internal;Ptr<ID3D11ComputeShader> shader;
+    s.context->CSGetShader(&shader,nullptr,nullptr);
+    const auto actual=lookupShaderHash(shader.Get()),expected=lookupShaderHash(bindingGet(BindSlot::Cs));
+    uint32_t width=0,height=0;for(uint32_t i=0;i<s.prefix.targetsUsed;++i)
+        if(s.prefix.targets[i].resource==c.target){width=s.prefix.targets[i].writes.key.width;height=s.prefix.targets[i].writes.key.height;}
+    const auto recipes=flatProjectionDispatchRecipes(actual,width,height);
+    bool complete=actual==expected && recipes.count && s.projection && s.projectionContext;
+    if(!recipes.count)++c.unknown;
+    c.uncertain|=s.prefix.uncertain || foreignWork.load(std::memory_order_acquire);
+    Log::get().note("flat HDR projection dispatch: frame=%llu writer=%u after-q=%u H=%p expected-CS=%016llX actual-CS=%016llX recipes=%u actual-match=%u upstream=%u",
+        (unsigned long long)s.prefix.frame,c.writers,s.prefix.sequence,c.target,(unsigned long long)expected,(unsigned long long)actual,
+        recipes.count,actual==expected?1u:0u,flatCameraInjectUpstreamOwns()?1u:0u);
+    for(uint32_t i=0;i<recipes.count;++i)for(uint32_t p=0;p<recipes.requests[i].patchCount;++p) {
+        const auto& r=recipes.requests[i];const auto& patch=r.patches[p];
+        const uint32_t rows=patch.layout==FlatProjectionPatchLayout::InverseUvRay || patch.layout==FlatProjectionPatchLayout::LightingUvRay?3:4;
+        Log::get().note("flat HDR projection recipe: frame=%llu writer=%u stage=%u slot=%u layout=%u row=%u rows=%u",
+            (unsigned long long)s.prefix.frame,c.writers,static_cast<unsigned>(r.stage),r.slot,static_cast<unsigned>(patch.layout),patch.byteOffset/16u,rows);
+        captureHdrProjectionRows(s,c.writers,r.stage,r.slot,patch.byteOffset/16u,rows,complete);
+    }
+    uint32_t boundViews=0;ID3D11ShaderResourceView* views[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT]{};
+    s.context->CSGetShaderResources(0,D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT,views);
+    for(UINT slot=0;slot<D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT;++slot) {
+        Ptr<ID3D11ShaderResourceView> srv;srv.Attach(views[slot]);
+        if(!srv)continue;
+        if(++boundViews>16){complete=false;continue;}
+        captureHdrProjectionSrv(s,c.writers,"CS",slot,srv.Get(),complete);
+    }
+    if(boundViews>16)Log::get().note("flat HDR projection SRV overflow: frame=%llu writer=%u bound-views=%u limit=16 result=incomplete-payload",
+        (unsigned long long)s.prefix.frame,c.writers,boundViews);
+    if(complete)++c.payloads;
+}
 void captureLocalProjection(State& s, uint64_t vs, uint64_t ps) {
     const uint32_t pair=vs==0x4D516EF05C68FFA5ull && ps==0x147E748F4CD3AE9Aull ? 0u :
         vs==0x5E417E9DF2E7F9E6ull && ps==0xBD801F2FB02522EBull ? 1u : 2u;
@@ -2006,7 +2352,7 @@ void refuseDraw(State& s, const char* reason) {
 
 const FlatProjectionBindingPlan* qualifyProjection(State& s, FlatProjectionRecipes recipes, uint32_t width, uint32_t height,
                        uint64_t vs, uint64_t ps, uint64_t cs, bool owned, bool sceneHdr = false) {
-    if (!s.projection || !recipes.count) return nullptr;
+    if (s.work != FlatWork::Full || !s.projection || !recipes.count) return nullptr;
     flatcpu::Scope timed(flatcpu::kProjection);   // projection readiness: the checks, preflight and prepare
     const bool audit=s.projectionFrames!=0;
     if(audit) { ++s.projectionCandidates;if(!owned)++s.projectionUnowned; }
@@ -2433,12 +2779,12 @@ void publishRefusal(const State& s, bool warn) {
 // --- Stand-down: what each mode does (flat_standdown.h) --------------------------
 // The one place the pieces are paused and resumed, called at every Present with the
 // mode of the frame that starts now (idempotent). Full is the runtime as it was
-// before the stand-down existed. Probe and Paused pull back everything named in
+// before the stand-down existed. Paused pulls back everything named in
 // kFlatStandDownPausedWork; the gate of each piece, for the rig's source scan:
 //   coverage classification, legacy projection readiness, jitter preparation and
-//     constant-buffer shadow tracking: s.projection is released here and none of
-//     them runs without it (the draw scope, the Map/Unmap/Update tees, the dispatch
-//     scope and qualifyProjection all test it); the Present creates it in Full only
+//     constant-buffer shadow tracking: each work-tier change releases s.projection.
+//     Full recreates execution readiness; Probe creates CPU shadows/Context1 only
+//     for strict original deferred-camera certification, with no GPU preparation
 //   the per-draw scope, and the Map/Unmap/Update/Written/Uavs/Dispatch tees: s.work
 //   the camera-write witness: s.work == FlatWork::Full at its call sites
 //   engine motion (hooks, tees, substitution): s.enginePaused, which the Present
@@ -2455,18 +2801,16 @@ void applyWork(State& s, FlatWork next) {
         // state ExecuteCommandList leaves it in, so a stale binding never reads as live.
         for (auto& u : s.uavs) u.Reset();
     }
-    if (was == FlatWork::Full && next != FlatWork::Full) {
-        // Legacy projection readiness stops tracking constant-buffer writes and
-        // drops every shadow; it is rebuilt from nothing on resume, as after a resize.
+    if (was != next && was != FlatWork::Paused) {
+        // Probe evidence must not survive Paused or become Full preparation
+        // readiness. Every departing watched tier drops shadows and plans.
         if (s.projection) s.projection.reset();
         s.projectionContext.Reset();
         s.projectionFrames = 0;
         // Local refusal's observation ends with the contract, as in a resize.
         s.observing = false; s.covFrameLocallyRefused = false;
-        s.enginePaused = true;
-    } else if (was != FlatWork::Full && next == FlatWork::Full) {
-        s.enginePaused = false;
     }
+    s.enginePaused = next != FlatWork::Full;
 }
 
 // The stand-down ends because something outside the frame changed (the AA mode, a
@@ -2542,6 +2886,7 @@ bool flatRuntimeSceneSizes(uint32_t* renderWidth, uint32_t* renderHeight, uint32
 }
 
 void flatRuntimeResize() {
+    expireDeferredFailure(state(),"resize");
     // The game retries a refused ResizeBuffers every frame: thousands of calls in seconds with no Present between
     // them (2026-10-09 Epic logs). The reports below say it once per 5 s with the count of the calls they skipped.
     static ULONGLONG lastResizeReportMs = 0;
@@ -2650,23 +2995,23 @@ void flatRuntimeCreateBuffer(ID3D11Buffer* buffer, const void* initialData) {
 // The trace window for the frame that starts now: full while a capture reads
 // the ring (draw packets, a pending F10 dump), the narrow idle window otherwise.
 void traceWindow(State& s) {
-    s.traceRing.eventLimit=s.traceDumpFrame || s.drawPackets.active()?
+    s.traceRing.eventLimit=s.traceDumpFrame || s.deferredFailureCapture.fullWindow(s.prefix.frame) || s.drawPackets.active()?
         kFlatTraceEventsPerFrame:kFlatTraceIdleEventsPerFrame;
 }
 // Gate 1 trace dump: write the ring's complete frames to logDir\traces on the
 // F10 audit arm. CREATE_ALWAYS: each arm is a new capture of the newest slots.
-void flatTraceDumpToLogDir(State& s, uint64_t frame) {
+bool flatTraceDumpToLogDir(State& s, uint64_t frame,bool includeCompletedCurrent=false) {
     const auto root = Config::get().logDir() + L"\\traces";
     if (!CreateDirectoryW(root.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS) {
         Log::get().note("flat trace dump: cannot create %ls (error %lu)", root.c_str(), GetLastError());
-        return;
+        return false;
     }
     wchar_t path[MAX_PATH];
     swprintf_s(path, L"%ls\\flat_trace_%llu.bin", root.c_str(), (unsigned long long)frame);
     HANDLE f = CreateFileW(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (f == INVALID_HANDLE_VALUE) {
         Log::get().note("flat trace dump: cannot write %ls (error %lu)", path, GetLastError());
-        return;
+        return false;
     }
     // Emitted versus withheld counts are reported separately: the serializer
     // skips the in-flight, empty and truncated slots, and a busy frame that
@@ -2674,28 +3019,28 @@ void flatTraceDumpToLogDir(State& s, uint64_t frame) {
     uint32_t emittedFrames = 0, emittedEvents = 0, skipped = 0,inFlight=0,empty=0;
     for (uint32_t i = 0; i < kFlatTraceFrames; ++i) {
         if (!s.traceRing.slotUsed[i]) continue;
-        if(i==s.traceRing.slot)++inFlight;
+        if(i==s.traceRing.slot && !s.traceRing.slotSealed[i])++inFlight;
         if(!s.traceRing.headers[i].eventCount)++empty;
-        if (i == s.traceRing.slot || s.traceRing.headers[i].truncated || !s.traceRing.headers[i].eventCount)
+        if (!flatTraceEmittable(s.traceRing,i,includeCompletedCurrent))
             ++skipped;
         else { ++emittedFrames; emittedEvents += s.traceRing.headers[i].eventCount; }
     }
     uint32_t expected = sizeof(FlatTraceHeader);
     for (uint32_t i = 0; i < kFlatTraceFrames; ++i)
-        if (s.traceRing.slotUsed[i] && i != s.traceRing.slot && !s.traceRing.headers[i].truncated &&
-            s.traceRing.headers[i].eventCount)
+        if (flatTraceEmittable(s.traceRing,i,includeCompletedCurrent))
             expected += sizeof(FlatTraceFrameHeader) + s.traceRing.headers[i].eventCount * sizeof(FlatTraceEvent);
     bool shortWrite = false;
     const uint32_t bytes = flatTraceDump(s.traceRing, [&](const void* data, uint32_t bytes) {
         DWORD wrote = 0; WriteFile(f, data, bytes, &wrote, nullptr);
         if (wrote != bytes) shortWrite = true;
         return wrote;
-    });
+    },includeCompletedCurrent);
     CloseHandle(f);
     const auto stats=flatTraceStats(s.traceRing);
     Log::get().note("flat trace dump: %ls frames=%u events=%u bytes=%u skipped-slots=%u capacity=%u peak-attempted=%u overflow-slots=%u in-flight-slots=%u empty-slots=%u%s",
         path, emittedFrames, emittedEvents, bytes, skipped,stats.capacity,stats.peakAttempted,stats.overflowSlots,inFlight,empty,
         shortWrite || bytes != expected ? " SHORT WRITE -- capture unusable" : "");
+    return !shortWrite && bytes==expected;
 }
 // --- The HDR route's runtime half (flat_hdr_route.h holds the pure logic and the log lines) -----------------
 // The route is always on (design section 81), set at the first Present. It is also the final copy's admission by
@@ -2807,7 +3152,7 @@ static void hdrAmbiguousSourceReport(const FlatMonoFrameInput& in, const void* h
         (unsigned long long)hdr->key.writeEpoch,hdr->key.writeSeq,
         hdr->first,hdrLast,hdrCamera->first,hdrCamera->last,
         s.namedDepth,s.namedConstants,(unsigned long long)flatCameraHash(s.namedCamera),
-        s.namedDepth==hdr->key.depth && s.namedConstants==hdrCamera->key.b1 &&
+        s.namedDepth==hdr->key.depth && s.namedConstants==flat_mono_detail::cameraIdentity(*hdrCamera) &&
             std::memcmp(s.namedCamera,hdrCamera->camera,sizeof(s.namedCamera))==0?1u:0u,worldRows);
     for(uint32_t i=0;i<count;++i) {
         const auto f=flatHdrSourceFacts(in,i,*hdr,*hdrCamera,hdr->key.width,hdr->key.height,consumerSeq,hdrLast);
@@ -3382,7 +3727,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     Ptr<ID3D11Device> actualDevice; swap->GetDevice(IID_PPV_ARGS(&actualDevice));
     if (s.device && actualDevice.Get() != s.device.Get()) { flatRuntimeResize(); s.thread = GetCurrentThreadId(); }
     if (!s.device) { swap->GetDevice(IID_PPV_ARGS(&s.device)); if (s.device) s.device->GetImmediateContext(&s.context); }
-    if (!s.device || !s.context) return;
+    if (!s.device || !s.context) {expireDeferredFailure(s,"device-unavailable");return;}
     // fix.ui_quality's flat layer: a device the layer has not seen (the actual-device-change branch above, or a device
     // adopted after a resize cleared the old one) releases every device child the shared layer keeps; same device, nothing.
     flatUiLayerNoteDevice(s.device.Get());
@@ -3515,13 +3860,13 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
         Log::get().note("flat coverage: contract requalified at frame=%llu; warm-up resumes",
             (unsigned long long)frame);
     }
-    // Legacy projection readiness exists in Full frames only: a stand-down releases it and
-    // a resume creates it fresh here, as after a resize.
-    if(!s.projection && s.work == FlatWork::Full) {
+    // Full creates execution readiness; a Probe creates only CPU shadow banks
+    // and Context1, before the frame's original writes. Paused retains neither.
+    if(!s.projection && s.work != FlatWork::Paused) {
         s.projection.reset(new(std::nothrow) FlatProjectionRuntime);
-        if (s.projection) s.projection->setBounceSampleHooks(
+        if (s.projection && s.work==FlatWork::Full) s.projection->setBounceSampleHooks(
             &flatRuntimeMapBounceSamplePending,&flatRuntimeMapBounceObserveCopy);
-        if (s.projection) s.projection->setBounceTelemetryHooks(
+        if (s.projection && s.work==FlatWork::Full) s.projection->setBounceTelemetryHooks(
             &flatRuntimeMapBounceTrackedMap,&flatRuntimeMapBounceBankWrite,
             &flatRuntimeMapBounceRegistered);
         s.context.As(&s.projectionContext);
@@ -3529,7 +3874,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
             s.projection.reset();s.projectionContext.Reset();
         }
     }
-    if(s.projection)s.projection->pollColdReadbacks();
+    if(s.projection && s.work==FlatWork::Full)s.projection->pollColdReadbacks();
     if(s.traceDumpFrame && frame>=s.traceDumpFrame) {
         flatTraceDumpToLogDir(s, frame);
         s.traceDumpFrame=0;
@@ -3537,8 +3882,15 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     if(s.projectionFrames && --s.projectionFrames==0) {
         reportProjection(s,"complete");
     }
+    if(!s.deferredFailureArmReported) {
+        Log::get().note("flat deferred failure snapshot: event=armed scope=process max-snapshots=1 max-attempts=2 retry-window=900; dormant until a real propagation failure");
+        s.deferredFailureArmReported=true;
+    }
     const auto captureRequest=projectionAuditRequested.take();
     if(captureRequest!=FlatCaptureTier::None) {
+        s.deferredFailureCapture.arm();
+        Log::get().note("flat deferred failure snapshot: event=armed scope=manual pending-frame=%llu max-snapshots=1; a pending failure is retained",
+            (unsigned long long)s.deferredFailureCapture.pendingFrame);
         Log::get().note("flat capture general: configured=%s last=%s accepted=%llu refused=%llu tier=%s; backend/refusal and environment counters follow normal census",mode.c_str(),s.reason,(unsigned long long)s.accepted,(unsigned long long)s.refused,flatCaptureBulk(captureRequest)?"full":"general");
         reportForegroundDomain(s);
         s.refusalCensusFrames=600;   // about five seconds of resolves; one in kFlatMonoRefusalEvery is sampled
@@ -3578,6 +3930,11 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
             s.projectionDetailsUsed=0;
             s.projectionOutcomesUsed=0;s.projectionOutcomeOverflow=0;
             s.localSamples[0]={};s.localSamples[1]={};
+            s.hdrProjectionCapture.arm();
+            for(auto& write:s.hdrCaptureWrites)write={};s.hdrCaptureWriteNext=s.hdrCaptureWriteEvictions=0;
+            Log::get().note("flat HDR projection payload: event=armed current-frame=%llu max-attempts=4 max-complete-frames=2 min-frame-spacing=%llu max-writers-per-frame=64 max-bound-SRVs-per-writer=16 anchor=7E38A6AA1269C901/7CECABDE34FFBE9E; forward frames only, prior FTR dump has no CB2 bytes",
+                (unsigned long long)s.prefix.frame,
+                (unsigned long long)FlatHdrProjectionCapture::kMinimumFrameSpacing);
             s.cameraProbe={};
             s.copyProvenance={};s.copyProvenance.rearmedBeforeComplete=interrupted;
             s.unknownProjectionPairsUsed=0;s.unknownProjectionCaptureOverflow=0;
@@ -3617,10 +3974,11 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
                 0xC49F999F7D3C801Dull,0x6EAA86EFE135B2D4ull};
             for(uint32_t i=0;i<10;++i){captureFlatProbeShader('v',unknownVs[i]);captureFlatProbeShader('p',unknownPs[i]);}
         } else {s.projection.reset();s.projectionContext.Reset();s.projectionFrames=0;
+            Log::get().note("flat HDR projection payload: event=unavailable result=arm-refused; allocation/context1/runtime unavailable, no forward payload captured");
             Log::get().note("flat projection: arm refused (allocation/context1/runtime unavailable), raster-phase=0");}
     }
     const uint64_t preflightNow=GetTickCount64();
-    if(s.projection && s.haveResolvePlan && !s.resolvePreflight.readyForRasterJitter() &&
+    if(s.work==FlatWork::Full && s.projection && s.haveResolvePlan && !s.resolvePreflight.readyForRasterJitter() &&
        (!s.resolvePreflightRetryMs || preflightNow-s.resolvePreflightRetryMs>=1000)) {
         s.resolvePreflight=flatMonoResolvePreflight(s.device.Get(),s.context.Get(),s.plannedResolve);
         s.resolvePreflightRetryMs=preflightNow;
@@ -3641,7 +3999,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     }
     if (s.frameSourceFree) s.sourceSpell.sourceFreeFrame(s.treated && SUCCEEDED(hr));
     if (!s.treated || FAILED(hr)) reset();
-    Ptr<ID3D11Texture2D> output; if (FAILED(swap->GetBuffer(0, IID_PPV_ARGS(&output)))) return;
+    Ptr<ID3D11Texture2D> output; if (FAILED(swap->GetBuffer(0, IID_PPV_ARGS(&output)))) {expireDeferredFailure(s,"output-unavailable");return;}
     // Swapchain image rotation does not change render scale. Resize/device
     // teardown clears the published extent; each qualified handoff updates it.
     if (s.output.Get() != output.Get()) reset(); s.output = output;
@@ -3666,7 +4024,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     // The frame's one GuiFocus read (flatRuntimeMapFocusFrame) comes first: on the Galaxy Map and the Orrery temporal AA is off, and
     // this frame's phase is zero (no jitter, the history restarts). A frame that would have jittered is counted jitter-zeroed.
     flatRuntimeMapFocusFrame();
-    const bool phaseWanted = flatCameraPhaseEnabled(phaseRoute,true,s.observing,s.projection!=nullptr);
+    const bool phaseWanted = s.work==FlatWork::Full && flatCameraPhaseEnabled(phaseRoute,true,s.observing,s.projection!=nullptr);
     const bool temporalOff = flatRuntimeMapTemporalOff();
     flatUiLayerMapAaFrame(temporalOff, phaseWanted);
     s.phase.beginFrame(phaseWanted && !temporalOff,
@@ -3675,11 +4033,16 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     flatCameraInjectArm(); // the phase is chosen: the injector's frame window opens
     s.frameCoverage=true;s.temporalAccepted=false;
     s.jitterReason=nonzeroPhase(s)?"live":"warming";
-    if(s.projection)s.projection->enableColdReadback(!nonzeroPhase(s));
+    if(s.projection)s.projection->enableColdReadback(s.work==FlatWork::Full && !nonzeroPhase(s));
     for (auto& r : s.colors) r.Reset(); for (auto& r : s.depths) r.Reset();
     // A Paused frame (stand-down) is not watched: no prefix to clear -- the frame's one
     // large reset -- and no trace slot to rotate, so the ring keeps the last watched
     // frames for an F10 dump instead of filling with empty ones.
+    if(s.hdrProjectionCapture.target) {
+        s.hdrProjectionCapture.uncertain|=s.prefix.uncertain || foreignWork.load(std::memory_order_acquire);
+        reportHdrProjectionCapture(s,"frame-end");s.hdrProjectionCapture.finishFrame();
+        if(s.hdrProjectionCapture.exhausted())reportHdrProjectionCapture(s,"budget-complete");
+    }
     if (s.work != FlatWork::Paused) s.prefix = FlatRuntimePrefix{};
     s.prefix.frame = frame + 1;
     if(s.engine!=FlatMonoResolveMode::Taa && s.work==FlatWork::Full) {
@@ -3706,6 +4069,21 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
                   !s.drawPacketOnlyObserved&&s.traceContract.produced ? flatFrameContractHash(s.traceContract) : 0);
     s.drawPackets.trace(s.traceRing.headers[s.traceRing.slot].frame,s.traceRing,true);
     s.drawPacketOnlyObserved=false;
+    if(s.deferredFailureCapture.expired(s.traceRing.headers[s.traceRing.slot].frame)) {
+        Log::get().note("flat deferred failure snapshot: event=retry-expired attempts=%u result=no-complete-failure-within-900-frames",
+            s.deferredFailureCapture.attempts);s.deferredFailureCapture.cancel();
+    }
+    if(s.deferredFailureCapture.ready(s.traceRing.headers[s.traceRing.slot].frame)) {
+        const uint64_t failed=s.deferredFailureCapture.pendingFrame;
+        const FlatTraceFrameHeader* captured=nullptr;
+        for(uint32_t i=0;i<kFlatTraceFrames;++i)
+            if(s.traceRing.headers[i].frame==failed && flatTraceEmittable(s.traceRing,i,true))captured=&s.traceRing.headers[i];
+        const bool written=captured && flatTraceDumpToLogDir(s,failed,true);
+        Log::get().note("flat deferred failure snapshot: event=completed failure-frame=%llu sealed-frame=%llu captured-events=%u failure-frame-present=%u attempt=%u result=%s; no prior overflow can be repaired",
+            (unsigned long long)failed,(unsigned long long)s.traceRing.headers[s.traceRing.slot].frame,captured?captured->eventCount:0,
+            captured?1u:0u,s.deferredFailureCapture.attempts,!captured?"unavailable-truncated-empty-or-missing":written?"emitted":"write-failed");
+        s.deferredFailureCapture.finish(written);
+    }
     traceWindow(s);
     if (s.work != FlatWork::Paused || s.drawPackets.armed()) {
         s.traceContract = FlatFrameContract{};
@@ -4126,8 +4504,9 @@ FlatRuntimeDispatchScope::FlatRuntimeDispatchScope(ID3D11DeviceContext* ctx) {
     // A dispatch is not a substituted producer draw: it sees the game's state (engine_velocity.h, the lazy form).
     flatRuntimeSubstitution(ctx, FlatSubstEvent::kDispatch);
     if (s.work == FlatWork::Paused) return;
+    captureHdrProjectionDispatch(s);
     flatcpu::Scope shell(flatcpu::kOther);   // the dispatch scope's own time
-    if(s.projection) {
+    if(s.work==FlatWork::Full && s.projection) {
         if(s.projectionFrames)++s.projectionDispatches;
         // CSSetShader records only the pointer via bindingSet, unlike the
         // VS/PS hash-caching setters. Resolve its registered hash here, only
@@ -4156,6 +4535,8 @@ FlatRuntimeDispatchScope::FlatRuntimeDispatchScope(ID3D11DeviceContext* ctx) {
         }
     }
     for (const auto& u : s.uavs) if (u) {
+        if(s.hdrProjectionCapture.target && u.Get()==s.hdrProjectionCapture.depth)
+            s.hdrProjectionCapture.written(u.Get());
         if(s.engine!=FlatMonoResolveMode::Taa) {
             domainResourceWritten(s,u.Get(),"foreground-dispatch-depth-write",historyWholeWrite(HistoryWriteEntry::Dispatch));
         }
@@ -4179,6 +4560,16 @@ FlatRuntimeDispatchScope::FlatRuntimeDispatchScope(ID3D11DeviceContext* ctx) {
 static void resourceWritten(State& s, ID3D11Resource* res,const char* entry,
                             FlatOverlayMutationOp provenance=FlatOverlayMutationOp::Written,
                             const HistoryWriteExtent& extent=HistoryWriteExtent{}) {
+    if(s.projectionFrames && s.hdrProjectionCapture.armed && !s.hdrProjectionCapture.exhausted()) {
+        s.hdrProjectionCapture.written(res);
+        State::HdrCaptureWrite* write=nullptr;
+        for(auto& w:s.hdrCaptureWrites)if(w.resource==res){write=&w;break;}
+        if(!write) {
+            write=&s.hdrCaptureWrites[s.hdrCaptureWriteNext++%256];
+            if(write->resource)++s.hdrCaptureWriteEvictions;
+        }
+        *write={res,s.prefix.frame,s.prefix.sequence};
+    }
     // The mutation report (flatRuntimeOverlayResourceMutation) counts the same API call for the history; this notification only invalidates.
     if(s.engine!=FlatMonoResolveMode::Taa)
         domainResourceWritten(s,res,"foreground-depth-or-unknown-mutation",extent,false);
@@ -4413,7 +4804,8 @@ void flatRuntimeMap(ID3D11Resource* res, D3D11_MAP type, void* bytes) {
 void flatRuntimeUnmap(ID3D11Resource* res) {
     if (!owner() || state().work == FlatWork::Paused) return;
     flatcpu::Scope lookup(flatcpu::kResource);
-    if (state().projection) { flatcpu::Scope shadows(flatcpu::kShadows); state().projection->observeUnmap(res); }
+    if (state().projection) { flatcpu::Scope shadows(flatcpu::kShadows);
+        state().projection->observeUnmap(res,state().prefix.frame,state().prefix.sequence); }
     if (auto* c = camera(res, false)) {
         if (c->mapped) { capture(*c, c->mapped); if (state().work == FlatWork::Full) cameraWitness(res); }
         state().cameras.setMapped(*c, nullptr);
@@ -4426,7 +4818,8 @@ void flatRuntimeUpdate(ID3D11Resource* res, const void* bytes, const D3D11_BOX* 
     if (auto* c = camera(res, false)) {
         if (!box || (box->left == 0 && box->right == c->width)) { capture(*c, bytes); if (state().work == FlatWork::Full) cameraWitness(res); }
     }
-    if (state().projection) { flatcpu::Scope shadows(flatcpu::kShadows); state().projection->observeUpdate(res,bytes,box); }
+    if (state().projection) { flatcpu::Scope shadows(flatcpu::kShadows);
+        state().projection->observeUpdate(res,bytes,box,state().prefix.frame,state().prefix.sequence); }
 }
 
 // The coverage classification's two questions to the context, asked of the binding shadow and of the context only on the
@@ -4675,6 +5068,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         if (diagnostics) flatRuntimeSubstitution(context, FlatSubstEvent::kOtherDraw);
     }
     const FlatProjectionBindingPlan* projectionPlan=nullptr;
+    const FlatProjectionBindingPlan* deferredPlan=nullptr;
     const auto rt = view(BindSlot::Rtv0, 0), ds = view(BindSlot::Dsv0, 1);
     k.color = rt.resource; k.rtv = bindingGet(BindSlot::Rtv0); k.width = rt.a; k.height = rt.b; k.format = rt.fmt;
     k.depth = ds.resource; k.dsv = bindingGet(BindSlot::Dsv0); k.depthWidth = ds.a; k.depthHeight = ds.b; k.depthFormat = ds.fmt;
@@ -4800,7 +5194,9 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         d.hdrCopyVerified=verifyHdrCopy(ctx,d);
         d.menuHdrCopyVerified=verifyMenuHdrCopy(ctx,d);
         d.imageSourceCameraIndependentVerified=verifyCameraIndependentImageSource(ctx,d);
+        deferredPlan=verifyDeferredHdrCamera(s,d);
         captureCopyProvenance(s,ctx,d);
+        captureHdrProjectionDraw(s,d);
     }
     const auto oldTargets = s.prefix.targetsUsed;
     const uint32_t oldImageAccepted=s.prefix.imageCopiesAccepted,oldImageRefused=s.prefix.imageCopiesRefused;
@@ -4944,6 +5340,30 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     // Gate 1 consolidation: the copy draw's selection is produced as the
     // frame contract (identical decision), and every draw is recorded into
     // the trace ring for the reducer replay.
+    // All original-state captures, including the camera conflict probe above,
+    // precede this binding. Retain its separate scope through the actual issue;
+    // admission records original CB2 provenance plus explicit executed attestation.
+    if(deferredPlan) {
+        deferredProjection.emplace(*deferredPlan);
+        if(deferredProjection->active())d.deferredInverseRepaired=d.deferredHdrVerified;
+        ++s.deferredInverseExecutions;
+        const uint64_t executionNow=GetTickCount64();
+        if(s.deferredInverseExecutions<=8 || s.deferredInverseLastBound!=deferredProjection->active() ||
+           executionNow-s.deferredInverseLastLog>=5000) {
+            Log::get().note("flat deferred inverse execution: frame=%llu q=%u H=%p original-CB2=%p original-hash=%08X bound=%u typed-first=%u executions=%llu phase=(%.9g,%.9g); uploaded inverse-only clone strict-certified, original provenance retained",
+            (unsigned long long)s.prefix.frame,s.prefix.sequence+1,k.color,k.projection[1].resource,k.projection[1].hash,
+            deferredProjection->active()?1u:0u,d.deferredHdrVerified?1u:0u,(unsigned long long)s.deferredInverseExecutions,s.phase.currentX,s.phase.currentY);
+            s.deferredInverseLastLog=executionNow;
+        }
+        s.deferredInverseLastBound=deferredProjection->active();
+        if(!deferredProjection->active()) {
+            recordDeferredFailure(s,k,"deferred-inverse-binding-failed",true,true,flatRuntimeDeferredDonor(s.prefix,k,s.prefix.sequence+1),d.deferredHdrVerified);
+            d.deferredHdrVerified=false;d.deferredInverseRepaired=false;
+            failPhase(s,"deferred-inverse-binding-failed");
+            s.prefix.uncertain=true;
+            flatTraceMark(s.traceRing,kFlatTraceEventMarkUncertain,nullptr);
+        }
+    }
     FlatMonoFrame selected = [&]() -> FlatMonoFrame {
         flatcpu::Scope reduce(flatcpu::kReduce);   // the reducer: the online prefix model and the selector
         return copy
@@ -5330,7 +5750,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
             // recipe branch this candidate draw took. Orthogonal to whether
             // qualifyProjection then accepted or locally/globally refused it.
             ++s.covSceneDraws;
-            if(s.projectionFrames)captureLocalProjection(s,k.vs,k.ps);
+            if(s.projectionFrames && !deferredProjection)captureLocalProjection(s,k.vs,k.ps);
             const auto recipes=flatProjectionDrawRecipes(k.vs,k.ps);
             if(recipes.count) {
                 ++s.covExact;
@@ -5341,7 +5761,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
                 if(!owned && k.color==s.phaseHdr.Get())failPhase(s,"scene-projection-depth-unassociated");
                 if(nonzeroPhase(s) && owned && s.phaseDepth && depthResource!=s.phaseDepth.Get())failPhase(s,"scene-depth-changed");
                 const bool sceneHdr=flatRuntimeProjectionHdr(k,s.prefix.output,owned?depthResource:nullptr);
-                projectionPlan=qualifyProjection(s,recipes,k.width,k.height,k.vs,k.ps,0,owned,sceneHdr);
+                if(!deferredProjection)projectionPlan=qualifyProjection(s,recipes,k.width,k.height,k.vs,k.ps,0,owned,sceneHdr);
             }
             else if(flatProjectionDrawUnchanged(k.vs,k.ps)) {
                 ++s.covUnchanged;
@@ -6480,6 +6900,7 @@ FlatRuntimeDrawScope::~FlatRuntimeDrawScope() {
     {
         flatcpu::Scope jitter(flatcpu::kProjection);   // the binding scope's restore
         projection.reset();
+        deferredProjection.reset();
     }
     if (producer) {
         // Engine motion's draw wrapper, the other half. Lazy: nothing goes back here; the game's shader, blend state and

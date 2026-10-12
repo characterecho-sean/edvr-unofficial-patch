@@ -17,7 +17,7 @@ bool same(const FlatProjectionPatchRequest& a, const FlatProjectionPatchRequest&
 bool same(const FlatProjectionRuntimeRequest& a, const FlatProjectionRuntimeRequest& b) {
     if (a.stage != b.stage || a.slot != b.slot || a.original != b.original ||
         a.firstConstant != b.firstConstant || a.constantCount != b.constantCount ||
-        a.patchCount != b.patchCount) return false;
+        a.patchCount != b.patchCount || a.wholeBuffer != b.wholeBuffer) return false;
     for (uint32_t i = 0; i < a.patchCount; ++i) if (!same(a.patches[i], b.patches[i])) return false;
     return true;
 }
@@ -31,7 +31,7 @@ bool sameStructure(const FlatProjectionPatchRequest& a, const FlatProjectionPatc
 bool sameStructure(const FlatProjectionRuntimeRequest& a, const FlatProjectionRuntimeRequest& b) {
     if (a.stage != b.stage || a.slot != b.slot || a.original != b.original ||
         a.firstConstant != b.firstConstant || a.constantCount != b.constantCount ||
-        a.patchCount != b.patchCount) return false;
+        a.patchCount != b.patchCount || a.wholeBuffer != b.wholeBuffer) return false;
     for (uint32_t i = 0; i < a.patchCount; ++i)
         if (!sameStructure(a.patches[i], b.patches[i])) return false;
     return true;
@@ -174,6 +174,7 @@ void FlatProjectionRuntime::enableColdReadback(bool enabled) {
     // until their event completes or the bounded poll timeout expires.
 }
 void FlatProjectionRuntime::mutate(Tracked& entry) {
+    entry.writeFrame = 0; entry.writeSequence = 0;
     if (entry.mutationSerial == UINT64_MAX) entry.mutationOverflow = true;
     else ++entry.mutationSerial;
 }
@@ -353,7 +354,7 @@ FlatProjectionBounceSource FlatProjectionRuntime::bounceSource(ID3D11Resource* r
     if (result.seedValid) result.seed = view.bytes;
     return result;
 }
-void FlatProjectionRuntime::observeUnmap(ID3D11Resource* resource) {
+void FlatProjectionRuntime::observeUnmap(ID3D11Resource* resource, uint64_t frame, uint32_t sequence) {
     if (!owner()) return;
     Tracked* entry = find(resource);
     if (!entry || !entry->mapped) return;
@@ -369,13 +370,14 @@ void FlatProjectionRuntime::observeUnmap(ID3D11Resource* resource) {
     }
     entry->mapped = false; entry->mapBytes = nullptr;
     if (complete) {
+        entry->writeFrame=frame;entry->writeSequence=sequence;
         ++status_.fullWrites;
         if (bounceFullWrite_) bounceFullWrite_(entry->width);
     }
     else { ++status_.invalidations; refuse(FlatProjectionRuntimeRefusal::MissingFullWrite); }
 }
 void FlatProjectionRuntime::observeUpdate(ID3D11Resource* resource, const void* bytes,
-                                          const D3D11_BOX* box) {
+                                          const D3D11_BOX* box, uint64_t frame, uint32_t sequence) {
     if (!owner()) return;
     Tracked* entry = track(resource);
     if (!entry) return;
@@ -387,8 +389,9 @@ void FlatProjectionRuntime::observeUpdate(ID3D11Resource* resource, const void* 
         ++status_.invalidations;
         return;
     }
-    if (shadows_.captureFullWrite(entry->buffer.Get(), entry->generation, bytes, entry->width))
-        ++status_.fullWrites;
+    if (shadows_.captureFullWrite(entry->buffer.Get(), entry->generation, bytes, entry->width)) {
+        ++status_.fullWrites;entry->writeFrame=frame;entry->writeSequence=sequence;
+    }
     else refuse(FlatProjectionRuntimeRefusal::MissingFullWrite);
 }
 void FlatProjectionRuntime::invalidate(ID3D11Resource* resource) {
@@ -435,6 +438,7 @@ FlatProjectionShadowMetadata FlatProjectionRuntime::constantsMetadata(ID3D11Buff
     result.tracked = true; result.mapped = entry->mapped; result.pending = entry->pending;
     result.width = entry->width; result.generation = entry->generation;
     result.mutationSerial = entry->mutationSerial;
+    result.writeFrame = entry->writeFrame; result.writeSequence = entry->writeSequence;
     FlatProjectionShadowView view{};
     result.shadowPresent = shadows_.lookup(buffer, entry->generation, view);
     if (result.shadowPresent) {
@@ -515,7 +519,18 @@ FlatProjectionRuntime::CachedPlan* FlatProjectionRuntime::retirePlan() {
 void FlatProjectionRuntime::invalidatePreparedPlans() {
     // A plan pointer may outlive the request that produced it. Refusing a draw
     // revokes every handed-out token until its exact recipe is prepared again.
+    // Invalidation changes readiness only: an active scope's uploaded GPU bytes
+    // and resource lifetime remain intact until it restores the original.
     for (auto& entry : tracked_) if (entry.privateReady) entry.privateBuffer.invalidate();
+}
+bool FlatProjectionRuntime::privateBufferActive(ID3D11Buffer* original) const {
+    const auto active=[&](const CachedPlan& plan) {
+        if(!plan.used || plan.plan.idle())return false;
+        for(uint32_t i=0;i<plan.count;++i)if(plan.requests[i].original==original)return true;
+        return false;
+    };
+    for(const auto& plan:plans_)if(active(plan))return true;
+    return active(livePlan_);
 }
 bool FlatProjectionRuntime::actualBindings(const FlatProjectionRuntimeRequest* requests,
                                             uint32_t count) {
@@ -527,12 +542,22 @@ bool FlatProjectionRuntime::actualBindings(const FlatProjectionRuntimeRequest* r
         get(context_.Get(), r.stage, r.slot, &actual, &first, &constants);
         const bool match = actual == r.original && first == r.firstConstant &&
                             constants == r.constantCount;
-        if (!match) {
+        bool ordinaryMatch=true;
+        if(r.wholeBuffer) {
+            Microsoft::WRL::ComPtr<ID3D11Buffer> ordinary;
+            switch(r.stage) {
+            case FlatProjectionStage::Vertex:context_->VSGetConstantBuffers(r.slot,1,ordinary.GetAddressOf());break;
+            case FlatProjectionStage::Pixel:context_->PSGetConstantBuffers(r.slot,1,ordinary.GetAddressOf());break;
+            case FlatProjectionStage::Compute:context_->CSGetConstantBuffers(r.slot,1,ordinary.GetAddressOf());break;
+            }
+            ordinaryMatch=ordinary.Get()==r.original;
+        }
+        if (!match || !ordinaryMatch) {
             attempt_.actualBuffer = actual;
             attempt_.actualFirst = first; attempt_.actualCount = constants;
         }
         if (actual) actual->Release();
-        if (!match) return refuseAt(first != 0 ? FlatProjectionRuntimeRefusal::UnsupportedRange :
+        if (!match || !ordinaryMatch) return refuseAt(first != 0 ? FlatProjectionRuntimeRefusal::UnsupportedRange :
                                                 FlatProjectionRuntimeRefusal::BindingMismatch,
                                     "binding-mismatch", i);
     }
@@ -544,6 +569,8 @@ bool FlatProjectionRuntime::preflight(const FlatProjectionRuntimeRequest* reques
     if (!owner()) return refuseAt(FlatProjectionRuntimeRefusal::WrongThread, "preflight-owner");
     if (!requests || !count || count > FlatProjectionBindingPlan::kCapacity ||
         !flat_projection_detail::finite(jitter)) return refuseAt(FlatProjectionRuntimeRefusal::InvalidRecipe, "preflight-shape");
+    for(uint32_t i=0;i<count;++i)if(privateBufferActive(requests[i].original))
+        return refuseAt(FlatProjectionRuntimeRefusal::PlanFailure,"preflight-private-buffer-active",i);
     CachedPlan* cached = findPlan(requests, count, jitter, phase);
     attempt_.exactPlan = cached != nullptr;
     if (!cached) cached = findTopology(requests, count);
@@ -571,7 +598,7 @@ bool FlatProjectionRuntime::preflight(const FlatProjectionRuntimeRequest* reques
         const auto& r = requests[i];
         if (!r.original || r.slot >= D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT ||
             r.firstConstant != 0 || !r.constantCount || r.constantCount > 4096 ||
-            r.constantCount % 16 || !r.patchCount || r.patchCount > 8 ||
+            (!r.wholeBuffer && r.constantCount % 16) || !r.patchCount || r.patchCount > 8 ||
             (r.stage != FlatProjectionStage::Vertex && r.stage != FlatProjectionStage::Pixel &&
              r.stage != FlatProjectionStage::Compute))
             return refuseAt(r.firstConstant ? FlatProjectionRuntimeRefusal::UnsupportedRange :
@@ -598,6 +625,8 @@ bool FlatProjectionRuntime::preflight(const FlatProjectionRuntimeRequest* reques
             if (!entry && failure_.valid) return false;
         }
         if (!entry) return refuseAt(FlatProjectionRuntimeRefusal::UnknownBuffer, "untracked-live-buffer", i);
+        if(r.wholeBuffer && (entry->width%16 || r.constantCount!=entry->width/16))
+            return refuseAt(FlatProjectionRuntimeRefusal::UnsupportedRange,"whole-buffer-size",i);
         FlatProjectionShadowView view{};
         if (!shadows_.lookup(r.original, entry->generation, view)) {
             if (allowAllocation) queueCold(*entry);
@@ -614,6 +643,7 @@ bool FlatProjectionRuntime::preflight(const FlatProjectionRuntimeRequest* reques
         if (!entry->privateBuffer.prepare(shadows_, r.patches, r.patchCount, jitter, phase))
             return refuseAt(FlatProjectionRuntimeRefusal::InvalidRecipe, "private-patch-preparation", i);
         bindings[i] = entry->privateBuffer.binding(r.stage, r.slot, r.firstConstant, r.constantCount);
+        bindings[i].wholeBuffer=r.wholeBuffer;
     }
     if (liveRetarget) {
         // Transactional retarget (gate-2 review G2-1): the replaced plan's
@@ -655,6 +685,9 @@ const FlatProjectionBindingPlan* FlatProjectionRuntime::prepare(
     if (!requests || !count || count > FlatProjectionBindingPlan::kCapacity) {
         invalidatePreparedPlans();
         refuseAt(FlatProjectionRuntimeRefusal::InvalidRecipe, "prepare-shape"); return nullptr;
+    }
+    for(uint32_t i=0;i<count;++i)if(privateBufferActive(requests[i].original)) {
+        refuseAt(FlatProjectionRuntimeRefusal::PlanFailure,"prepare-private-buffer-active",i);return nullptr;
     }
     CachedPlan* cached = findPlan(requests, count, jitter, phase);
     attempt_.exactPlan = cached != nullptr;

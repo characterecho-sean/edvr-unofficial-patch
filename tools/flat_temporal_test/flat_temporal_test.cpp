@@ -24,6 +24,7 @@
 #include "flat_live_phase_tests.h"
 #include "flat_pixel_capture_tests.h"
 #include "flat_local_reject_tests.h"
+#include "flat_hdr_projection_capture_tests.h"
 #include "flat_negotiated_eval_tests.h"
 #include "flat_standdown_tests.h"
 #include "flat_elite_settings_tests.h"
@@ -34,6 +35,8 @@
 #include "flat_wrapper_note_tests.h"
 #include "flat_hdr_route_tests.h"
 #include "flat_laser_scene_tone_tests.h"
+#include "flat_deferred_camera_tests.h"
+#include "flat_deferred_failure_capture_tests.h"
 #include "flat_copy_structure_tests.h"
 #include "flat_copy_weapon_tests.h"
 #include "flat_covered_draw_wiring_tests.h"
@@ -2563,10 +2566,24 @@ void testStandDownWiring() {
          "Unmap's camera witness is Full-only"},
         {&runtimeCpp, "capture(*c, bytes); if (state().work == FlatWork::Full) cameraWitness(res);", 1,
          "Update's camera witness is Full-only"},
-        // Legacy projection readiness, coverage, jitter preparation: released, and created in Full only.
+        // Cold CPU tracking exists in Probe; legacy execution stays Full-only.
         {&runtimeCpp, "if (s.projection) s.projection.reset();", 1, "the stand-down releases legacy projection readiness"},
-        {&runtimeCpp, "if(!s.projection && s.work == FlatWork::Full) {", 1,
-         "the Present creates legacy projection readiness in Full frames only"},
+        {&runtimeCpp, "if(!s.projection && s.work != FlatWork::Paused) {", 1,
+         "the Present creates Full readiness or bounded Probe cold tracking"},
+        {&runtimeCpp, "if (s.work != FlatWork::Full || !s.projection || !recipes.count) return nullptr;", 1,
+         "cold Probe cannot prepare legacy projection bindings"},
+        {&runtimeCpp, "if(s.projection && s.work==FlatWork::Full)s.projection->pollColdReadbacks();", 1,
+         "Probe observes original writes without cold GPU readback"},
+        {&runtimeCpp, "if (was != next && was != FlatWork::Paused) {", 1,
+         "departing Probe releases shadows before Paused or fresh Full"},
+        {&runtimeCpp, "if(s.work==FlatWork::Full && qualified && flatCameraInjectUpstreamOwns() &&", 1,
+         "Probe strict certificate never warms or prepares a private clone"},
+        {&runtimeCpp, "const bool phaseWanted = s.work==FlatWork::Full && flatCameraPhaseEnabled", 1,
+         "Probe cold tracking never authorizes raster jitter"},
+        {&runtimeCpp, "if(s.work==FlatWork::Full && s.projection && s.haveResolvePlan", 1,
+         "Probe never performs resolver backend preflight"},
+        {&runtimeCpp, "if(s.work==FlatWork::Full && s.projection) {", 1,
+         "Probe dispatch cannot prepare compute projection bindings"},
         // Engine motion, the camera hook, the discovery observers.
         {&runtimeCpp, "engineVelocityConfigure(enabled && !enginePausedThen);", 1, "the Present hands the pause to engine motion"},
         {&runtimeCpp, "engineVelocityConfigure(enabled && !s.enginePaused);", 1, "and again when the stand-down changed it"},
@@ -2592,6 +2609,20 @@ void testStandDownWiring() {
             without.erase(at, std::strlen(pin.needle));
         check(count(without, pin.needle) == 0, "stand-down wiring control: a source with the line removed no longer contains it");
     }
+    const size_t coldInit = runtimeCpp.find("if(!s.projection && s.work != FlatWork::Paused) {");
+    const size_t phaseBegin = runtimeCpp.find("s.phase.beginFrame(", coldInit);
+    check(coldInit != std::string::npos && phaseBegin != std::string::npos && coldInit < phaseBegin,
+          "Probe CPU tracking is initialized before the frame and its original writes begin");
+    const size_t workStart = runtimeCpp.find("void applyWork(State& s, FlatWork next) {");
+    const size_t workEnd = runtimeCpp.find("void endStandDown(", workStart);
+    if(workStart != std::string::npos && workEnd != std::string::npos) {
+        const auto body=runtimeCpp.substr(workStart,workEnd-workStart);
+        const auto transition=body.find("if (was != next && was != FlatWork::Paused) {");
+        const auto shadows=body.find("if (s.projection) s.projection.reset();",transition);
+        const auto context=body.find("s.projectionContext.Reset();",shadows);
+        check(transition!=std::string::npos && shadows!=std::string::npos && context!=std::string::npos && transition<shadows && shadows<context,
+              "departing Probe drops CPU shadows and Context1 before Paused or fresh Full");
+    } else check(false,"cold Probe tracking lifecycle can be delimited");
     // The old eight-way reason list is gone from the discovery dump: one definition of "structural".
     check(count(temporalCpp, "mono.reason == FlatMonoReason::NoTonePass") == 0,
           "the chain dump no longer carries its own copy of the structural reasons");
@@ -2853,10 +2884,39 @@ void testFlatCpuWiring() {
     check(standDown != std::string::npos && tick != std::string::npos && capture != std::string::npos &&
           standDown < tick && tick < capture,
           "the census tick follows the stand-down's frame boundary and precedes the draw capture");
-    const size_t flatReturn = at(menuCpp, "if (!g_budget.shouldRun()) inputGateSetPrivate(false);");
-    const size_t perf = at(menuCpp, "perfMonitorFrame(dev);");
-    check(flatReturn != std::string::npos && perf != std::string::npos && flatReturn < perf,
+    auto flatReturnsBeforeMonitor = [](const std::string& text) {
+        const size_t menuTick = text.find("void menuTick(ID3D11Device* dev)");
+        if (menuTick == std::string::npos) return false;
+        const size_t flat = text.find("if (runtimeFlatProfile()) {", menuTick);
+        if (flat == std::string::npos) return false;
+        // The next outer guardedBudget is the native branch. Inspect the end
+        // of the flat branch itself, independent of its controller cleanup.
+        const size_t native = text.find("\n    guardedBudget(g_budget, [&] {", flat);
+        const size_t perf = text.find("perfMonitorFrame(dev);", menuTick);
+        if (native == std::string::npos || perf == std::string::npos || native >= perf)
+            return false;
+        std::string branch = text.substr(flat, native - flat);
+        if (branch.find("perfMonitorFrame(dev);") != std::string::npos) return false;
+        branch.erase(std::remove_if(branch.begin(), branch.end(), [](char c) {
+            return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+        }), branch.end());
+        const std::string end = "return;}";
+        return branch.size() >= end.size() &&
+               branch.compare(branch.size() - end.size(), end.size(), end) == 0;
+    };
+    check(flatReturnsBeforeMonitor(menuCpp),
           "the flat branch of the menu tick ends before perfMonitorFrame: the census is the flat profile's only driver of engine motion's clock");
+    std::string missingFlatReturn = menuCpp;
+    const size_t nativeBudget = missingFlatReturn.find("\n    guardedBudget(g_budget, [&] {",
+        missingFlatReturn.find("void menuTick(ID3D11Device* dev)"));
+    const size_t flatReturn = missingFlatReturn.rfind("return;", nativeBudget);
+    if (flatReturn != std::string::npos) missingFlatReturn.erase(flatReturn, 7);
+    check(!flatReturnsBeforeMonitor(missingFlatReturn),
+          "menu clock control: deleting the flat return fails the ordering invariant");
+    std::string earlyMonitor = menuCpp;
+    if (flatReturn != std::string::npos) earlyMonitor.insert(flatReturn, "perfMonitorFrame(dev);\n");
+    check(!flatReturnsBeforeMonitor(earlyMonitor),
+          "menu clock control: a monitor call inside the flat branch fails the invariant");
     // INSTRUMENT ONLY. The stand-down functions never read the census, and no decision in the
     // runtime reads a figure it produced.
     const size_t first = at(runtimeCpp, "void applyWork(State& s, FlatWork next) {");
@@ -3885,9 +3945,12 @@ int main(int argc, char** argv) {
     failures += flatLightingTests();
     failures += flatLivePhaseTests();
     failures += flatLocalRejectTests();
+    failures += flatHdrProjectionCaptureTests();
     failures += flatNegotiatedEvalTests();
     flatRuntimePrefixTests();
     flatRuntimeImageCopyTests();
+    check(deferred_camera_test::run() == 0, "actual deferred HDR camera proof");
+    check(flatDeferredFailureCaptureTests() == 0, "completed failure-frame diagnostic snapshot");
     check(laser_scene_tone_test::run() == 0, "qualified laser scene tone preserves guarded HDR lineage");
     flatRuntimeMenuCopyTests();
     testFrameContractTrace();

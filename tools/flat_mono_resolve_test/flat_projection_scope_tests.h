@@ -55,6 +55,13 @@ void projectionScopeTests(ID3D11Device* device, ID3D11DeviceContext* base) {
         privateBuffer.binding(FlatProjectionStage::Compute,0,first,count)};
     FlatProjectionBindingPlan plan;
     check(plan.initialize(ctx.Get(),bindings,3),"projection binding preflight");
+    float uploaded=0;
+    check(plan.copyUploadedConstants(FlatProjectionStage::Vertex,1,256,4,&uploaded) && uploaded==2.625f,
+        "plan certificate copies the uploaded private revision");
+    uploaded=713;
+    check(!plan.copyUploadedConstants(FlatProjectionStage::Vertex,3,256,4,&uploaded) && uploaded==713 &&
+        !plan.copyUploadedConstants(FlatProjectionStage::Vertex,1,sizeof(raw)-1,4,&uploaded),
+        "plan certificate rejects absent stage-slot and out-of-bounds slice");
     auto checkBindings=[&](ID3D11Buffer* expected) {
         for (unsigned stage=0;stage<3;++stage) {
             ComPtr<ID3D11Buffer> observed;UINT offset=0,length=0;
@@ -116,11 +123,13 @@ void projectionScopeTests(ID3D11Device* device, ID3D11DeviceContext* base) {
     check(shadows.invalidate(original.Get(),1) && !privateBuffer.prepare(shadows,&patch,1,jitter,2),"failed prepare invalidates existing plan token");
     certificate[0]=713;
     check(!privateBuffer.copyUploadedConstants(replacement,0,4,certificate) && certificate[0]==713,"invalidated private upload cannot certify stale bytes");
+    check(!plan.copyUploadedConstants(FlatProjectionStage::Vertex,1,0,4,certificate),"plan certificate rejects invalidated upload");
     {FlatProjectionBindingScope refused(plan);check(!refused.active(),"old plan cannot bind after failed prepare");}
     check(!plan.refreshPrepared(),"invalid token cannot refresh plan");checkBindings(original.Get());
     check(shadows.captureFullWrite(original.Get(),1,raw,sizeof(raw)) &&
         privateBuffer.prepare(shadows,&patch,1,jitter,2),"recover source and private upload");
     {FlatProjectionBindingScope refused(plan);check(!refused.active(),"new upload requires explicit plan token refresh");}
+    check(!plan.copyUploadedConstants(FlatProjectionStage::Vertex,1,0,4,certificate),"plan certificate rejects unrefreshed revision");
     check(plan.refreshPrepared(),"refresh tokens without repeated resource preflight");
     {FlatProjectionBindingScope refreshed(plan);check(refreshed.active(),"refreshed plan uses current preparation");}
     checkBindings(original.Get());
@@ -139,5 +148,51 @@ void projectionScopeTests(ID3D11Device* device, ID3D11DeviceContext* base) {
     check(bool(deferred),"deferred projection test fixture");
     check(!plan.initialize(deferred.Get(),bindings,1),"deferred context refuses projection plan");
     {FlatProjectionBindingScope refused(plan);check(!refused.active(),"deferred context refuses projection scope");}
+    {
+        UINT f=0,n=sizeof(raw)/16;auto* source=original.Get();ctx->VSSetConstantBuffers1(1,1,&source,&f,&n);
+        auto full=privateBuffer.binding(FlatProjectionStage::Vertex,1,f,n);full.wholeBuffer=true;
+        FlatProjectionBindingPlan fullPlan;check(fullPlan.initialize(ctx.Get(),&full,1),"full-size ranged-origin whole-mode fixture");
+        {FlatProjectionBindingScope scope(fullPlan);}
+        ComPtr<ID3D11Buffer> restored;UINT rf=0,rn=0;ctx->VSGetConstantBuffers1(1,1,restored.GetAddressOf(),&rf,&rn);
+        check(restored.Get()==original.Get() && rf==f && rn==n,"whole install failure or success restores exact full-size ranged origin");
+    }
+    {
+        float wholeRaw[196]{};wholeRaw[56]=2;wholeRaw[59]=3;
+        D3D11_BUFFER_DESC bd{};bd.ByteWidth=sizeof(wholeRaw);bd.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
+        D3D11_SUBRESOURCE_DATA data{};data.pSysMem=wholeRaw;ComPtr<ID3D11Buffer> whole;
+        check(SUCCEEDED(device->CreateBuffer(&bd,&data,whole.GetAddressOf())),"49-constant whole buffer fixture");
+        FlatProjectionShadowBank<1,1024> bank;FlatProjectionPrivateBuffer clone;
+        FlatProjectionPatchRequest inverse{FlatProjectionPatchLayout::InverseUvRay,14*16,{}};
+        check(bank.registerBuffer(whole.Get(),1,sizeof(wholeRaw)) && bank.captureFullWrite(whole.Get(),1,wholeRaw,sizeof(wholeRaw)) &&
+            clone.initialize(ctx.Get(),whole.Get(),1) && clone.prepare(bank,&inverse,1,jitter,1),"whole buffer inverse-only upload");
+        auto binding=clone.binding(FlatProjectionStage::Vertex,2,0,49);FlatProjectionBindingPlan wholePlan;
+        check(!wholePlan.initialize(ctx.Get(),&binding,1),"49 constants remain invalid in ranged mode");
+        binding.wholeBuffer=true;
+        check(wholePlan.initialize(ctx.Get(),&binding,1),"explicit whole mode admits exact natural count");
+        float changed=0;check(wholePlan.copyUploadedConstants(FlatProjectionStage::Vertex,2,14*16+12,4,&changed) && changed==2.875f,
+            "whole inverse certificate contains uploaded correction only");
+        auto invalid=binding;invalid.constantCount=48;FlatProjectionBindingPlan invalidPlan;
+        check(!invalidPlan.initialize(ctx.Get(),&invalid,1),"whole mode rejects nonnatural count");
+        invalid=binding;invalid.firstConstant=16;
+        check(!invalidPlan.initialize(ctx.Get(),&invalid,1),"whole mode rejects nonzero offset");
+        auto* originalWhole=whole.Get();ctx->VSSetConstantBuffers(2,1,&originalWhole);
+        ComPtr<ID3D11Buffer> observed;UINT naturalFirst=0,naturalCount=0;
+        ctx->VSGetConstantBuffers1(2,1,observed.GetAddressOf(),&naturalFirst,&naturalCount);
+        const bool natural=observed.Get()==whole.Get() && naturalFirst==0 && naturalCount==49;
+        bool bound=false;
+        {FlatProjectionBindingScope scope(wholePlan);check(scope.active()==natural,"whole scope requires actual natural GetCB1 range");
+            bound=scope.active();
+            if(scope.active()) {ComPtr<ID3D11Buffer> ordinary,ranged;UINT f=0,n=0;
+                ctx->VSGetConstantBuffers(2,1,ordinary.GetAddressOf());ctx->VSGetConstantBuffers1(2,1,ranged.GetAddressOf(),&f,&n);
+                check(ordinary.Get()==binding.replacement && ranged.Get()==binding.replacement && f==0 && n==49,
+                    "whole install attests ordinary and Context1 private binding");}}
+        std::printf("projection scope natural49: first=%u count=%u qualified=%u bound=%u\n",naturalFirst,naturalCount,natural?1u:0u,bound?1u:0u);
+        observed.Reset();UINT restoredFirst=0,restoredCount=0;
+        ctx->VSGetConstantBuffers1(2,1,observed.GetAddressOf(),&restoredFirst,&restoredCount);
+        check(observed.Get()==whole.Get() && restoredFirst==naturalFirst && restoredCount==naturalCount,
+            "whole scope restores original natural binding or refuses without mutation");
+        ID3D11Buffer* absent=nullptr;ctx->VSSetConstantBuffers(2,1,&absent);
+        {FlatProjectionBindingScope scope(wholePlan);check(!scope.active(),"whole scope rejects changed actual buffer");}
+    }
     ctx->ClearState();
 }

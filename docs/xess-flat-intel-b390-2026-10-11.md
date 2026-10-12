@@ -2,10 +2,20 @@
 
 ## Status
 
-- State: local XeSS/FSR3 results below remain confirmed. The Type 11 failed
-  view remains unresolved; a fresh trace admits its copy contract, but prior
-  HDR-writer camera provenance is unproven. Await clarification; recapture only
-  if the refusal persists.
+- State: generalized camera repair and automatic recovery verified locally for
+  T9 <-> Lynx. Correct 6ACD6A82/174055.log has no AA mode cycle: current
+  original CB2 certifies in Probe without preparation; selected handoff wakes
+  Full, then strict inverse-only repair runs. Later 4,812-frame treated streak,
+  12,198 treated, zero backend failures; user reports stable scene/HUD/menus.
+  Brief ship-switch delay fits existing 1.5s probes; logs cannot time
+  readiness. Type 11 shares the original issue but was not retested in this
+  final flight. Root evidence: 070705 proves omitted H inverse phase (CS/sky
+  already phased); 162004/trace6060 proves unrelated 256x256 veto; 165802
+  proves missing paused shadow/context. All are corrected without ship/size
+  rules. Native/MSVC/B390 binding tests and all 46 replay hashes pass. Final
+  full Wine gate was stopped after a stall; no receipt. `codex/xess-flat` is
+  ready for user Windows validation. Windows main works on another Nvidia PC;
+  hardware/OS comparison remains open.
 - Environment: ONEXPLAYER 3, Intel Arc B390 PTL 8086:b080; CachyOS xe; Proton
   Experimental experimental-11.0-20261001-x86_64; DXVK
   v3.1.1-47-g685301564ea3486; private Mesa 26.3.0-devel git-37bf953a58. Elite
@@ -30,9 +40,6 @@
 - Build: portable MSVC/SDK compiles production DLLs and installers. Full build
   fails unchanged run_jobs and installer sharing tests under Wine; Windows
   validation is required. User authorized branch-only work pending that check.
-- Earlier local FSR install: clean source 75848439, v0.19.1-22-g75848439; FSR3
-  3.1.2 enabled. Install/verify passed; hardware rig 97/97 and installer checks
-  passed. See the navigation journal for the current installed build.
 - Gameplay flight: correct 0f700706, 103114.log. Native HDR AA at 1920x1200
   completes every step. SS 0.75 upscales 1440x900 to 1920x1200 on the LDR copy
   route with 15 jitter phases; XeSS init/evaluations return rc=0.
@@ -44,15 +51,12 @@
   exact-pair guard evidence are in design-flat-ui-quality-2026-10-05.md. Native
   surface flicker still needs evidence. FSR3 flight 125209.log treats 463
   frames without SDK fallback; sampled FSR HUD counters remain unmeasured.
-- Historical HDR capture/repair: build 644fe39b, three-frame trace and 29/31
-  guards; qualified H laser draw selects all three HDR frames. MSVC rig and
-  17-trace/46-hash history pass. Current Type 11 AA failure is separate.
-- Type 11 AA: fresh replay accepts the image contract (93/93); the failed view
-  remains unresolved and capture did not prove recovery. Await AA state/mode/
-  restart clarification; capture again only if refusal persists.
+- Type 11 AA: October 12 flight 050205.log is correct dirty build 6ACC18CC; AA
+  worked until switching cockpit. Trace flat_trace_9189.bin now records the
+  original conflict. The earlier 93/93 passing capture did not prove recovery;
+  see the journal for both distinct failures.
 - Local: temporal_aa=xess, UI 125, sharpness 0.75, menu F8; M2 and desktop
   work. Human flight confirms pad and normal Elite controls after close.
-  Full-build and native-rig caveats remain (journal below).
 
 ## October 11: D3D11 capability probe
 
@@ -723,8 +727,728 @@ occlusion. The per-frame prefix is replaced with `FlatRuntimePrefix{}` at
 `flat_runtime.cpp:3683` for watched frames, so its hdrCamera/imageSourceBad
 fields do not retain an earlier frame's values. A failed detailed trace must
 distinguish missing current HDR camera, rejected scene-camera proof and
-within-frame contamination; no classifier or reset change is yet justified.
+within-frame contamination; no HDR classifier or prefix-reset change is yet
+justified.
 
-Next: await the user's clarification of current AA state, restart, view and
-mode. Capture detailed evidence while the actual refusal persists; do not
-recapture if the failure is no longer present.
+The user clarified that the detailed capture still looked unfiltered: Elite was
+started fresh, AA looked fine in the menu, then failed visually when the Type
+11 cockpit loaded. Contract acceptance never established visible AA.
+
+Two separate failures are now distinguished. The original image-copy refusal
+still requires failed camera/provenance fields. The detailed audit has an
+independent, confirmed failure: under Upstream projection ownership, normal
+rendering skips unused legacy preparation, but full audit runs it. Compute
+shaders `5998146D464F5C0E` and `EB0245DE0BB23BB6` fail that private preparation
+once per frame. Unlike draw refusal, the compute branch calls failPhase
+directly. At 16:45:39, all 215 treated frames reset history; history
+continuations are zero. XeSS execution 1200 returns 0 with zero jitter and
+reset=1. Reset reaches shader flags.x, leaves rejection=1 for every pixel and
+the SDK finish selects raw bilinear Color instead of SDK History. This explains
+why successful admission and SDK execution still yield an unfiltered capture.
+
+The audit-only failure begins at frame 7793, so it does not explain the earlier
+pre-capture report or the original image-copy refusal. Initial private
+preparation code 10 is `topology-first-seen-live-no-capability`, later code 8
+is InvalidRecipe. The tracked scene CB has 336 constants/5376 bytes and no
+private-plan capability. Source anchors: flat_runtime.cpp qualification and
+compute failPhase path; flat_mono_resolve.cpp reset propagation; SDK finish in
+flat_mono_shader_source.h. The final-copy replay consumes the expected
+LDR/output resources, but records no private SDK pixels or substituted SRVs.
+
+The source fix routes the central phase decision through the existing three
+Upstream legacy-refusal classes, so compute receives the same protection as
+draws. Diagnostics still report unused private preparation; genuine shader,
+viewport, extent, depth and foreign-work violations still invalidate history.
+Private replacements remain gated off under Upstream ownership. Native phase
+tests pass; removing the preparation bypass fails the history-preservation
+assertion. Both changed production translation units compile with MSVC, and the
+fresh temporal rig preserves all 46 historical contract hashes. Its single menu
+source-anchor failure also occurred in the baseline executable: the controller
+cleanup added braces but retained the flat branch's return before the native
+monitor. The test now checks that invariant directly; removing the return or
+adding the monitor inside the flat branch fails its controls. The fresh full
+temporal rig passes. The required absolute-path full build compiled production
+DLLs, then exited 1 on the same five run_jobs Wine process-control assertions
+(focus, inherited error mode, child creation/liveness and heartbeat ownership).
+No full-build receipt or green Windows validation is claimed. Build log:
+`/tmp/edvr-msvc-bootstrap-20261011/full_type11_audit_20261011.log`.
+
+Sanctioned installer dry-run wrote nothing, then install and verify-only passed
+with Elite closed. No INI replacement was requested; the flat INI retains SHA
+`85aa64ab9f41dcdee88e8bf0e4b7ff2abece9016fe549c30e604cbaffd7bff02`. Installed
+local test version is `v0.19.1-29-gdac1916e-dirty`; graphics DLL SHA
+`aefb593e4a41cb1230519939d0cdb0f96dda8446681ce968133035972418a1cc` matches the
+compiled artifact. Source remains on codex/xess-flat, unmerged; the original
+Type 11 admission fix has not been guessed or declared complete.
+
+Next: collect failed scene-admission evidence without audit altering rendering.
+Verify the new dirty version before reading that flight; the old captures were
+91576e7e. The original Type 11 cockpit failure remains unresolved until its own
+guards or pixels explain it.
+
+## October 12: original Type 11 refusal reproduced
+
+Human report: AA was active until switching to this particular cockpit. Fresh
+`edvr_gfx_20261012_050205.log` verifies `v0.19.1-29-gdac1916e-dirty`, build
+6ACC18CC linked 2026-10-11 23:16:28 UTC. Before the switch, 2498 frames were
+treated, with nine accepted resets and 2489 history continuations. Afterwards
+the treated and backend-call counters stay frozen; this is admission failure,
+not an SDK evaluation or UI-composite failure.
+
+First conflict at 05:04:30.955, frame 8083: image-copy-source at q244 after the
+source writer q240. Writer VS CFA91824129ECBBC / PS FCFAD73924BF45B9; copy PS
+DFCBA0EC70B03C9B. Source format 9, destination HDR format 26; 1248x780 to
+1920x1200, configured XeSS. HDR resource 7AAE39E0 and source depth 7AAE2720.
+The summary's first-writer b1=0/camera=0 does not establish the later pool
+camera; exact trace guards must decide that.
+
+Shift+NumLock at 05:04:49.899 produced `flat_trace_9189.bin`: three frames,
+8042 events, 4053328 bytes, no overflow. The same image-copy-source refusal
+persists across capture and afterwards. At 05:04:51 treated remains 2498,
+renderer calls 2500, accepted-continue 2489; no SDK output exists for these
+rejected frames. Next: replay exact guards and source/HDR camera provenance,
+compare passing traces, and change only the field or policy proved wrong.
+
+Exact replay frames 9186–9188 matches stored contract hashes
+`9955d597864425cc`, `4432b1c748ae3414`, `a14b51add16d9dbc`. Each frame passes
+29/31 image-copy guards; only destination hdrCamera and its current tone camera
+fail. H resource 7AAE39E0 has 11 prior camera-less draws, no bad or
+layout-change flag. The copied source 96785490, format 9, passes its
+camera-independent source proof. A unique qualified pool camera on depth
+7AAE2720/DSV 7A7FB0B0 has 284 draws, q728–1126 before H first q1341 in frame
+9186; b1 7AAF5710, camera hash C4BDFB00E579BF8D. No known laser witness
+appears. H draws have known CB2 InverseClip/ForwardDp4 recipes, so their
+projection provenance must be established before granting inheritance.
+
+Ruled out: an SDK backend or late UI failure for this captured view, because
+scene admission refuses before backend work and every SDK call counter freezes.
+Ruled out: the audit-only reset as the cause of this original refusal, because
+the same image-copy-source conflict starts before audit and persists after it.
+No generic same-depth camera inheritance or shader whitelist expansion is
+justified solely by these passing source guards.
+
+Evidence boundary: FTR5 nulls all projection byte pointers and stores only
+canonical VS b1 camera bytes. Failed frames contain 255/242/238 format-26 draws
+with zero populated projection metadata slots or payloads; the earlier accepted
+7793–7795 frames likewise have none. Existing local-capture pair 0/1 attempts
+and completed captures are zero; those pairs target other shaders. Neither
+trace proves CB2 matrix bytes, write freshness, bound subrange or its relation
+to upstream jitter. A rendering admission change is not justified yet.
+
+Next flight: extend the existing manual audit/capture to record the actual
+scene-H writer's current projection bytes/epochs/ranges, verified shader
+recipe, donor camera and resource/depth lineage together. Capture every
+relevant writer in bounded frames, with explicit not-run, missing/stale,
+ambiguous and complete outcomes. Keep admission/rendering behavior unchanged
+and add no config key.
+
+Instrument plan: two bounded forward frames, anchored at the actual H first
+deferred inverse-ray writer, all subsequent H writes through copy handoff.
+Record original tracked CPU-shadow projection bytes and binding subranges,
+shader recipe/actual-stage identities, write generation/epoch/mutation, donor
+camera provenance separately, and SRV resource/subresource lineage. Private or
+untracked copyConstants fallback data must not be labeled game projection.
+Earlier uncaptured writes, writer overflow or missing payload prevent complete
+proof; unknown recipes remain explicit. Forward frame/q must be reported,
+because the existing FTR dump contains frames preceding the hotkey.
+
+Implementation is observational: no admission, camera, phase or binding
+decisions. Sampling permits at most four attempts, at least 90 frames apart,
+and stops after two complete payload frames. Original CPU-shadow filtering,
+dispatch/depth-write mutation records, expiry/reset reports and immediate final
+counts passed independent flow review. "Complete payload" is not camera proof.
+The final production translation unit compiled with MSVC; the fresh full
+temporal rig passes and all 17 corpus files/46 frames retain their hashes.
+Native focused tests pass with warnings as errors. Root launched the required
+absolute-path full build; it compiled production DLLs and exited 1 on the same
+five run_jobs Wine process-control assertions. Full log:
+`/tmp/edvr-msvc-bootstrap-20261011/full_type11_payload_20261012.log`.
+
+Sanctioned dry-run wrote nothing; install and verify-only passed with Elite
+closed. Flat settings retain SHA
+`85aa64ab9f41dcdee88e8bf0e4b7ff2abece9016fe549c30e604cbaffd7bff02`. Installed
+DLL SHA `22060934135177246d775ef8200b8c04bae513684d5ab440aba90aad59a1c5b3`
+matches the build artifact. Version is still `v0.19.1-29-gdac1916e-dirty`, but
+new PE build ID is **6ACCC3B6**, linked **2026-10-12 11:25:42 UTC**. Verify
+that ID/time as well as the version before reading the next flight; the prior
+dirty version is the same string but has ID 6ACC18CC. No rendering admission
+repair is installed or claimed yet; this build collects the missing evidence.
+
+### Captured payload evidence
+
+User completed the capture. `edvr_gfx_20261012_053211.log` verifies dirty
+version plus build **6ACCC3B6**, linked 2026-10-12 11:25:42 UTC. Four forward
+attempts end at frame 9201; each observes 13 writers, six payloads labeled
+complete, no unknown recipes, one donor and no prior-write, overflow, mutation
+or uncertainty flag. AA treats 2407 frames before cockpit refusal, then backend
+counters freeze again.
+
+All 100 constant-buffer row captures are original-full-shadow/current-frame;
+there is no missing projection, range, shadow or SRV-budget failure. The seven
+incomplete writers are 2, 3, 4, 5, 8, 11 and 12: the texture-only SRV helper
+cannot describe BUFFER/BUFFEREX views. Their element ranges/flags are absent,
+but captured projection bytes remain usable. The 256-entry global write ledger
+evicts 104145 identities; every captured CB still retained its current write.
+This does not prove a freshness loss. No extra flight is justified merely to
+make the payload-completeness counter green.
+
+Frame 9201: H 7AF1E410, donor color 7AF1D8D0/depth 7AF1D150, donor b1 7AF35010.
+Writers 1–10 VS b2[10..13] match donor spatial/depth coefficients exactly, near
+term .025. Translation residuals are -3.38e-7, -2.73e-7, +8.69e-7. Their
+inverse-ray rows satisfy A×rayUV near diag(2,-2,1) with UV-origin offsets
+(-1,1,0), maximum residual 1.96e-7. First H PS t0 directly reads donor color;
+lighting CS t4 reads donor depth and t9 reads donor color. The lighting CS
+inverse UV projection also matches the donor reciprocal FOV within float32
+roundoff. Sky orientation differs and its transform semantics remain unproven.
+That is adjacent: the existing reducer already accepts one verified actual H
+draw as the camera witness while retaining its later-writer conflict checks.
+The repair therefore adds an equivalent first-deferred-H witness without
+changing sky rules or classifying camera-less writers by FOV.
+
+Next: implement the exact-pair witness with original current CB2 bytes, direct
+PS t0 donor input, a unique earlier qualified donor and separate donor/H-write
+provenance. Use float32 algebra/error bounds, not a tuned flight threshold.
+Runtime freshness must come from tracked CB metadata, not the diagnostic
+ledger. Nonzero-jitter disagreement must fail closed and log the current phase;
+the next flight must show continuing history after AA starts.
+
+Implementation review: ruled out roundoff agreement alone as an invertibility
+certificate. A singular donor with huge cancelling inverse-ray values returned
+`match` in the independent `/tmp/edvr-degenerate-review.cpp` control because
+its error bound exceeded the identity entries. The new helper must reject
+singular/ill-conditioned evidence with a numerical certificate before build.
+
+That blocker is repaired: the normalized inverse residual and its roundoff
+uncertainty certify `||(AB-T)T^-1||∞ < 1`. Exact/near-singular cancellation
+controls now reject. Independent nonzero-jitter controls match only when both
+forward and inverse projections agree; donor-only jitter and a stale inverse
+reject with distinct reasons. Captured frame 9201, typed trace/provenance
+negatives and later actual camera-conflict tests pass natively. Independent
+source review is clear; MSVC production compilation and full temporal replay
+validation are next, followed by the absolute full build and local flight.
+
+### Deferred camera witness test build
+
+The narrow repair verifies the exact first deferred-H shader pair, actual CB2
+range/current original full-write bytes, direct PS t0 donor-color lineage and a
+unique earlier qualified scene donor. Typed records keep donor b1 identity
+separate from the actual H draw and CB2 write. Later real camera, layout, depth
+and foreign-work vetoes remain. Sky rules are unchanged. FTR5 retains its
+layout; a new verified-witness flag carries the validated slice digest and
+write provenance without falsely setting HasCamera or inventing an H b1.
+
+Both changed production TUs compiled with MSVC. The fresh full temporal rig
+passes; the old corpus remains 17 files / 46 of 46 frames replay-identical.
+Native focused tests and independent review pass. The absolute full build
+(`full_type11_deferred_20261012.log`) compiles production DLLs, then exits 1 at
+the same five Wine run_jobs process-control tests. No green full-build receipt
+exists; Windows validation remains pending.
+
+User closed Elite/MinEdLauncher. Sanctioned dry-run, install and verify pass
+without `--ini`; live/mirrored flat INI SHA256 remains `85aa64ab...7bff02`.
+Installed DLL SHA256 `3ab3b6c2...681fabed`, build **6ACCCDCC**, linked
+2026-10-12 12:08:44 UTC. The dirty version string is reused, so the next log
+must match this ID/time. Next flight is unarmed normal gameplay: AA and clear
+UI after loading/switching into Type 11, continuing backend/history counters,
+and a matched witness with nonzero phase.
+
+### Nonzero-phase failure after the witness repair
+
+Correct `edvr_gfx_20261012_061500.log` verifies build **6ACCCDCC** and link
+time 12:08:44 UTC. User reports the whole exterior shimmers with AA On and
+stabilizes Off; clarification: shimmer starts after cycling Off -> XeSS, not
+immediately on cockpit load. Main H 7A7BA770 has actual shader/input/viewport
+and current original CB2 writes throughout. Forward/translation agree; only the
+inverse relation fails when phase is nonzero. No nonzero match appears. At one
+snapshot, 2563 logged zero-phase matches and 2214 nonzero inverse mismatches
+were observed.
+
+Before first Off (06:17:17.613), acceptance stops at four (frame 6442), then
+refusals reach 1040; stand-down follows. After cycling, treatment restarts with
+zero-phase matches and nonzero inverse failures. Steady windows show about 100
+failing frames per 300, equal repeated history resets and only two-frame
+treated streaks. Backend failures remain zero. Ruled out: the narrow camera
+witness alone completes the repair, because its live nonzero inverse proof
+fails. Ruled out: the initially stable view proves active accumulation, because
+admission was almost continuously refused before the toggle.
+
+Open hypotheses and discriminators: unchanged/unjittered inverse rays would
+leave the nonzero `A*B` residual proportional to the injected phase while
+neighboring zero-phase rows match; another camera/epoch would give a different
+row relation; a legitimate phase-dependent UV convention requires actual
+shader/input evidence of that correction. The exact saved VS forwards fixed
+input UVs and computes rays solely from b2[14..16].xyw dotted with (u,v,1),
+without phase correction. The injector leaves view-side ray snapshots
+unchanged, but this does not yet prove the H CB2 composer uses them. Do not
+relax the inverse veto or compensate from the counters alone.
+
+Producer boundary: the certified injector changes bounds +0x28C/+0x290 and
+marks projection/VP bits 4|8. The observed FUN_1405964c0 ray CB composer uses
+view/origin snapshots +0x870/+0x8B0 from FUN_1406be790; those are view-only and
+must remain unchanged for pure projection jitter. Separate heap frustum blocks
+behind +0x90/+0x98 use bit1 finalizer FUN_1404f3770, but no H CB2 lineage is
+established. Existing C2/W2 tests prove projection algebra and view anchoring,
+not this H producer. A bit1 repair is unproved. First classify the actual
+nonzero rows, then identify their exact composer/cache before an upstream
+dirty-flag edit.
+
+This flight has no manual raw-row capture. Requested one while XeSS shimmers.
+Existing four-attempt spacing is 90 frames and can alias the three-frame reset
+cycle; check the actual captured phase before treating those rows as evidence.
+
+### Type 9 capture and generalized scope
+
+User confirms Type 9, Type 11 and Lynx Highliner have the same issue, and the
+latest capture was in Type 9. The repair must target shared camera/projection
+production and propagation across cockpits. T9/T11 have log evidence; Lynx
+currently has the user's matching symptom report.
+
+Correct `edvr_gfx_20261012_062410.log` has the same 6ACCCDCC build/time. Type 9
+uses the exact deferred shader pair with current original CB2, same R1248x780
+and one earlier scene donor. Frames 27601, 27691, 27781 and 27871 all captured
+phase (0,0), and their donor/CB2 bytes are bit-identical. Forward/near terms
+match exactly; maximum inverse residual is 6.8924e-8 and the normalized
+nonsingularity certificate is 4.36e-6 < 1. Neighboring nonzero frames fail the
+inverse check but have no captured payload. No nonzero match is established.
+
+Ruled out: 90-frame sample spacing can measure this repeating failure, because
+all four attempts sampled the same zero phase of its three-frame reset cycle.
+Nonzero propagation remains unmeasured, so these rows cannot prove stale rays
+or justify a rendering change. Diagnostic-only spacing will become 91, with
+boundary/cycle coverage tests and unchanged four-attempt budget, so one capture
+can cover the repeating phases. Rendering checks and sky policy stay unchanged.
+
+### October 12: sampling build and producer boundary
+
+Diagnostic build 6ACCD50D, linked 2026-10-12 12:39:41 UTC, changes payload
+spacing from 90 to 91 frames. Full MSVC temporal tests pass, including cadence
+boundaries and reset-cycle coverage; the existing 17 traces retain all 46
+replay hashes. Production DLLs compile. The full build still fails the five
+existing Wine process-control checks; Windows validation remains pending.
+Sanctioned dry-run, install and verify pass. DLL SHA256 is
+`1811e22d107a6886abb0488929144ee60c19441b8d1fb34ec487cc8cc5218c6d`; live and
+mirrored flat settings retain SHA256
+`85aa64ab9f41dcdee88e8bf0e4b7ff2abece9016fe549c30e604cbaffd7bff02`. The
+requested next flight is T9, Off -> XeSS, then Shift+NumLock while shimmering.
+
+Static current-engine evidence identifies a separate projection-dependent
+cache: FUN_1404F3770 rebuilds from camera+0x1D0, calls inverse helper 5E9ED0,
+writes heap frustum data referenced by camera+0x90/+0x98, and clears flag bit
+1. Its connection to actual H CB2 rows 14..16 is not proved. Canonical angular
+setters for camera+0x280 use mask 0xD at RVAs 58F374, 58F3B0, 592154 and
+5921BA; compound-near camera+0x25C setters use 0xC. The invalidation contract
+is field-dependent. No canonical setter for jittered bounds +0x28C/+0x290 has
+been verified, so these findings do not yet justify adding bit 1 to injection.
+The observed FUN_1405964C0 staging transform is view/origin-relative and is not
+the H UV inverse projection. Next evidence must distinguish these producers.
+
+Static lineage stops at the generic pool uploader 501A4A: descriptor WORD
+[r14+2] selects pool/offset, [r14+4] supplies byte width, and staging is
+[r10+8]+offset. No actual H descriptor or pool instance is joined. Frustum
+consumer 5A8B70 copies camera heap arrays +0x90/+0x98 and camera state but has
+no direct H upload or CB2 ray assembly. Ruled out: those callsites alone
+establish the bit-1 cache as H's inverse producer, because no connected staging
+writer has been found. Preserve the strict inverse veto.
+
+### October 12: capture hotkey did not register
+
+User reported the requested T9 capture complete. Sanctioned log inspection
+verifies `edvr_gfx_20261012_065912.log` uses 6ACCD50D with the expected link
+time, but finds no full-audit arm or HDR projection payload lines. NUMLOCK is
+bound at startup; no unfocused-key warning appears. Rejection counters still
+show current original CB2 and nonzero inverse mismatches, but do not establish
+the numerical cause. Requested another press with Elite focused, left Shift
+held first, NumLock held about one second, then an unchanged 20-second view. No
+rebuild or rendering change is justified by this missing payload.
+
+### October 12: nonzero T9 inverse propagation established
+
+Focused retry registers in correct `edvr_gfx_20261012_070705.log`, build
+6ACCD50D with the expected link time. Frame 9678 captures phase (-0.46875,
+0.092592597) at R1248x780. Predicted NDC phase is (-0.000751201923,
+-0.000237416915). Measured AB-T constant column is (-0.000751320997,
+-0.000237305569, 5.64e-8), differing from prediction by 1.19e-7 and 1.11e-7,
+below gamma(12) bounds 1.43e-6 and 2.06e-6. All slope entries pass. Zero frames
+9587, 9769 and 9860 have maximum residual 2.06e-7; all four inverse rows 14..16
+are bit-identical. Forward coefficients exactly match each same-frame qualified
+donor; translation residual is <=5.42e-7.
+
+Main H/donor share the actual depth/DSV and full viewport. Original unmapped VS
+b2 is 9150C5E0, first 0, count 49, width 784; complete same-frame write
+immediately precedes each H draw. Actual shaders and direct PS t0 donor input
+match. This establishes missing current inverse phase, not a stale cache or its
+engine producer. The diagnostic's overall incomplete label is the known
+BUFFER-view limitation; these 112 projection bytes are present and qualified.
+
+Separate CS 5998/EB02 b0 inverse rays already include phase; blanket patching
+would double jitter them. Next repair design is a mathematically certified
+shared projection propagation path for the missing inverse, preserving strict
+AB=T on corrected constants and refusing every other relation. The observed
+missing-phase dataflow is enough to design this consumer correction; it does
+not authorize speculative camera-cache invalidation. No ship whitelist,
+threshold adjustment or new config key is needed.
+
+Cross-consumer capture check: writers 2..10 reuse the same current VS b2
+projection but registered recipes consume forward rows 10..13, already phased.
+Only writer 1 proves the inverse omission. CS 5998/EB02 use separate b0
+7B48CC60; observed constant changes agree with inverse phase to 2.54e-8. Sky
+F8FA uses separate b2 917D5F70 and a rotating basis. Dephasing its center
+restores orthogonality within 3.64e-8, below gamma(12) uncertainty; it already
+contains phase too. Available bytecode fixtures confirm the known layouts; not
+every later H fixture is present, so do not claim exhaustive shader proof.
+
+Repair implementation plan: preserve original current-write/shader/donor/input
+guards; certify only coherent or precisely missing-phase inverse relations.
+Warm a private inverse-only plan at zero phase, strictly verify uploaded clone
+rows against the current donor, bind before admission, retain through the real
+draw and restore the exact original binding. Natural whole-buffer binding is
+explicitly separate from ranged mode and requires ordinary/Context1 identity
+agreement, first 0 and count equal to ByteWidth/16. Preserve original CB2
+provenance/hash and use a distinct executed-repair attestation. FTR5 has
+neither projection bytes nor phase, so this is a live numerical attestation,
+not an independently replayed matrix proof. Legacy audit preparation for the
+same private buffer must not run while the certified deferred scope is bound.
+
+### October 12: selective repair implementation and validation
+
+The implementation prepares only the certified omitted VS b2 inverse rows.
+Strictly coherent originals stay untouched. Original captures precede binding;
+the installed clone is verified before model admission, survives the real draw,
+then restores the original. Bit 15 records executed repaired admission while
+original CB2 metadata/hash remains original. Later exact consumers whose
+inverse becomes unproved invalidate the frame; new propagation failures are
+outside the three legacy-audit bypass reasons. Active-buffer preparation guards
+prevent a second upload while bound; invalidation revokes future tokens without
+changing executing GPU bytes. Ranged alignment rules remain intact.
+
+Native inverse/provenance/refusal tests pass; fresh MSVC temporal tests pass
+with the existing 17 traces and all 46 hashes unchanged. First full MSVC build
+compiles fresh production DLLs but hits the five existing Wine process-control
+failures. The installer resource error appears in an expected negative tool
+self-test, not a new build failure. No full-build receipt is produced.
+
+Actual B390/DXVK/private Mesa projection scope tests have no failures. Runtime
+tests exposed two fixture assumptions: ordinary GetCB1 returns count 320 for
+the 5120-byte foreground fixture here, rather than assumed 4096; the new active
+buffer guard refuses before the old topology branch. Test-only corrections
+query/validate actual ranges and require the precise new refusal. Natural
+49-constant tests now print qualified/prepared/bound and execute installation
+and restoration, so the hardware run cannot silently pass by skipping that
+path. The repeated full build compiles fresh production DLLs with no C++ errors
+and stops at the same five run_jobs Wine failures. The repeated B390 hardware
+rig passes scope/runtime tests with zero failures. Both natural-49 paths report
+first=0/count=49/qualified=1/bound=1; runtime reports prepared=1.
+
+Final local install: sanctioned flat dry run, install and verify pass for build
+6ACCE2F3, linked 2026-10-12 13:38:59 UTC. DLL is 18,597,376 bytes, SHA-256
+`8ff4a79c6e6b9313f5187b9a1e7a6e21034ea77dfea7153ded523a36be9c0310`. Live and
+mirrored flat INIs retain their pre-install SHA-256
+`85aa64ab9f41dcdee88e8bf0e4b7ff2abece9016fe549c30e604cbaffd7bff02`. No
+full-build receipt or clean-commit promotion is claimed. Next flight: same Type
+9, Off -> XeSS, view motion for about a minute; if convenient switch to Type
+11/Lynx in the same session. Verify actual repaired binding and continued
+temporal accumulation from this PE build, then compare the human image report.
+Windows full validation remains required before main integration.
+
+### October 12: selective repair local regression
+
+Human reports a previously working cockpit now cycles clear -> shimmer with
+frequent history resets. Correct `edvr_gfx_20261012_075614.log` is build
+6ACCE2F3 with the expected link time. The first H 7AE771A0/source 7AE76660
+certifies and binds the inverse-only clone (bound=1, typed-first=1). A second H
+90EBAF80/source 90EBA440 uses the same CB2 7DF53700 but frequently has no
+qualified donor or inverse-mismatch without certified missing phase. The new
+global failure path fires deferred-inverse-unproven about 29-36 frames per 5 s;
+compute source invalidation and relevant-observations-truncated follow,
+rejecting those frames. Renderer backend-failure/camera-cut/frame-gap stay zero
+and accepted resets track these rejections. Next evidence: identify this second
+H's depth, extent and consumer lineage before changing the correction/admission
+scope.
+
+Ruled out: successful clone binding and CPU/GPU rig passes establish a complete
+visual fix, because the verified local flight regresses another cockpit. Ruled
+out: SDK execution failure explains these cycles, because the current backend
+failure count is zero and global phase rejection matches the resets.
+
+Capture registered at 08:02:54.798, full audit and forward payload arm, then
+`flat_trace_23409.bin`: three frames, 7,278 events, 3,668,272 bytes, no
+overflow. First forward payload anchors primary H 7AE771A0/depth 7AE75EE0 at
+R1248x780. The second target's resource/depth/consumer lineage is being checked
+in the trace; no production change is justified merely by its secondary
+appearance.
+
+Exact replay: frames 23406-23408 contain only primary H, one candidate and no
+ambiguity or uncertainty mark. Its first writer is typed verified/repaired; the
+final F9CF/FEE tone reads it at PS1. No secondary H/source appears. This proves
+the good interval's primary lineage, not ownership of the failing pass. Ruled
+out: this random three-frame capture classifies the intermittent secondary
+target, because the target is absent from every captured frame.
+
+Discriminating next evidence, instrumented together: compare the rejected
+target/depth/extent with retained phase HDR/depth/extent and named depth;
+retain the actual failed frame through final consumer. Different domain plus
+absent main-output lineage supports a local refusal. Main identity despite
+missing donor requires retaining global protection. A secondary input feeding
+the main output needs its own verified projection/domain relation, not an
+exemption. The diagnostic will record ownership at the refusal and request one
+bounded completed-frame trace there, so the next flight does not depend on
+pressing a key during the brief reset. Rendering/admission stays unchanged for
+this probe.
+
+Diagnostic implementation: ownership fields log at the propagation refusal.
+Snapshot completion follows seal and precedes BeginFrame. The serializer's
+explicit opt-in accepts only sealed, non-overflowed frames, and any append
+revokes a seal. Success requires the requested failure frame in the emitted
+file. At most two actual-failure attempts and one emitted snapshot occur per
+process/manual arm, with a 900-frame retry window when the first frame was
+already truncated. AA-off, reset, resize or device/output loss report
+expiration; never-ran and file-write failure are distinct. No good following
+frame can stand in for the failed one. Fresh native policy/serializer/order
+tests pass. Independent review and fresh MSVC temporal tests pass, including
+the registered snapshot tests and all 17 traces/46 hashes. The final full build
+compiles production DLLs without MSVC errors, then fails the same five Wine
+run_jobs tests. First attempt was stopped before compilation by this doc's
+61-line Status block; it was shortened and the final build passed that gate.
+
+Diagnostic local install: sanctioned dry run, install and verify pass for
+6ACCECDD, linked 2026-10-12 14:21:17 UTC, 18,603,520 bytes, SHA-256
+`2b772ed83f644ff0127b1665625a60cbc3d82d3ca3d10ebc78c07acfb837f429`. Both flat
+INIs retain the previous SHA-256 85aa64ab...ff02. Source remains on
+codex/xess-flat; no full-build receipt or main integration is claimed. Next
+flight: the regressed cockpit, XeSS selected, view visible about one minute, no
+hotkey; confirm PE identity, rejection ownership and automatic snapshot's
+actual failure-frame inclusion before proposing a scope fix.
+
+### October 12: Windows main counterexample clarified
+
+User corrects the preceding statement: Windows main does engage AA normally in
+these cockpits. TAA, FSR and DLSS work at supersampling 1.0 and 0.5. No Windows
+log/build identity has been inspected. This is a functional main test, not
+validation of the current branch build. The original device-side admission
+failure remains proved by its captures; its cross-platform cause is unresolved.
+Branch, GPU, platform and graphics settings are not a controlled comparison.
+
+Ruled out: ship identity alone implies main cannot recognize these cockpits,
+because the user reports successful AA on Windows main. Do not infer Mesa or
+Proton caused it solely from this comparison. The new branch-wide failure scope
+still directly explains the current reset cycle; the automatic ownership and
+failure-frame probe remains the next local test. The Windows result spans both
+native and reduced rendering, so a single SS route or one AA backend does not
+explain its success. Branch versus main provenance/ownership changes are being
+audited alongside platform/GPU rendering-path differences. A main flat build on
+this device or this branch on Windows would separate those axes; neither is yet
+an executed controlled comparison.
+
+Read-only audit main 99476a -> committed branch dac1916e: camera discovery,
+injector/table, projection recipes/runtime/scope, HDR selector and final-copy
+selector are unchanged. The laser witness addition broadens qualified admission
+and removes no existing path. XeSS phase-count changes are gated to XeSS;
+TAA/FSR retain the earlier cycle. Thus the original camera-less H draw inputs
+would fail the same main guards. Later dirty DeferredB2 acceptance/repair is a
+separate stage, and its secondary-H global veto is the confirmed new
+regression.
+
+Discriminators: compare actual native/DXVK H and camera-bearing witness draws,
+VS b1 rows/write stamps, depth/DSV and final-copy lineage. Separately compare
+nonzero same-frame donor/CB2 inverse relation and actual history continuation.
+Post-admission UI/backend differences cannot explain the captured earlier
+pre-backend admission refusal. Strongest baseline is verified main flat on this
+same device/cockpit/settings with TAA/FSR, holding platform fixed; a verified
+pre-dirty branch capture on Windows is complementary. No baseline build or
+install has been made yet; the installed diagnostic remains the next local
+flight.
+
+### October 12: exact secondary-domain failure captured
+
+User says the installed diagnostic ran about a minute. Correct
+`edvr_gfx_20261012_162004.log` verifies 6ACCECDD/link 14:21:17 UTC. Ownership
+record at frame6060/q1230: H A1E842E0, depth6F6D8780, DSV7DFECCD0, 256x256;
+phase H6F988DD0, depth6F987B10, named depth6F987B10, R1248x780. Actual
+bindings, input, range, original shadow and current write all pass; donor is
+unavailable. Original CB2 9E379710 is first0/count49 with current write q1229.
+Automatic snapshot completes after seal: failure frame present, 4 frames/8,503
+events, no overflow, emitted `flat_trace_6060.bin`. This is the requested
+failed frame, not a random good interval.
+
+Replay frame6060: primary H q1218 is typed/repaired (C000), 1248x780, depth
+6F987B10/DSV6F7445F0, direct pool6F988290/current camera. Global uncertainty is
+marked just before the secondary H q1230. Secondary has its own 256x256 source
+A1E837A0, draws on its distinct depth and later sky draw q1469; no qualified
+pool is registered there. Final tone q1474 reads primary H at PS1; final copy
+q1476 reads primary LDR6F986FD0. HDR replay has one candidate; frame6057-6059
+ordinary HdrExtent(22) becomes PrefixUncertain(3) in6060 after the marker. No
+recorded PS0/1 or sampled tone t0..3 reads secondary H; higher unsampled SRV
+slots are not proved. Separate depth/extent establishes it is outside the owned
+scene phase regardless of its exact visual purpose.
+
+Ruled out: primary H inverse/binding refusal triggered failure6060, because its
+first writer carries verified executed-repair attestation and the uncertainty
+marker occurs only at the separate-domain writer q1230.
+
+Correction authorized: separate phase ownership from matrix qualification.
+Known phaseHdr identity stays protected even with missing/ambiguous donor or
+corrupt depth/extent. With HDR-null ownership, scene depth plus phase extent
+defines a candidate. A current typed witness may retain protection only when
+anchored to that phase domain; generic DeferredHdrVerified cannot promote an
+unrelated coherent secondary target. Outside scope, nonzero verification must
+neither prepare/bind an inverse clone nor fail phase/mark prefix uncertain.
+Zero-phase bootstrap retains strict original matrix/donor proof so scene/size
+changes can discover a new main target. No ship or 256x256 whitelist.
+Independent review is clear. Tests pin missing/stale donor, corrupt selected
+depth/extent, later owned mismatch and coherent-secondary -> unproved-secondary
+sequences. The early outside-domain gate is Upstream-only; Legacy behavior is
+preserved. A bounded source-order assertion pins it before verifier work,
+preflight/repair, global failure and admission. Native tests pass with zero
+failures and all 46 hashes across 17 historical traces remain unchanged. Source
+is frozen for the final full build and fresh MSVC temporal checks.
+
+Windows comparison clarification: successful main test was another PC with an
+Nvidia GPU. TAA/FSR/DLSS at SS1.0/0.5 work there, but this does not isolate
+Intel versus Nvidia, native versus DXVK, or branch versus main. User can exit
+Elite now; captured evidence is complete and saved before implementation.
+
+### October 12: ownership correction built and installed
+
+Final reviewed source compiled and linked in the absolute-path full build;
+`full_deferred_inverse_ownership_20261012_final.log` exits 1 on the same five
+Wine `run_jobs` process-control failures. No full-build receipt, commit or
+promotion. Fresh MSVC temporal test
+`/tmp/edvr-deferred-inverse-msvc-ownership.log` passes deferred camera and
+failure snapshot tests with zero failures, 17 traces/46 unchanged frames and
+collector policy PASS. Binding code is unchanged since the B390 GPU rig.
+
+Installed with the sanctioned flat installer after dry-run, then verify-only.
+Both live and mirrored flat INIs retain SHA256
+`85aa64ab9f41dcdee88e8bf0e4b7ff2abece9016fe549c30e604cbaffd7bff02`. Installed
+DLL is 18,603,520 bytes, build `v0.19.1-29-gdac1916e-dirty`, PE/link 2026-10-12
+22:32:53 UTC, SHA256
+`aef81a330b4c7577626175ba4ece95bd0eb7b3ac31a0f25197ffd7361e2e4bdf`. Next human
+check: previously working cockpit, then Type 9 Off -> XeSS and view movement;
+if practical Type 11 or Lynx Highliner in the same session. Check both stable
+scene AA and clear HUD/menus, then read the correct build's history/refusal
+counters. No manual capture is needed.
+
+### October 12: automatic activation blocked in cold probes
+
+User reports better results after the ownership correction, but first loading
+and switching T9 <-> Lynx leave AA visually inactive. Cycling to FSR or Off and
+then XeSS restores it. No explicit "Forced Off" menu label was seen.
+`edvr_gfx_20261012_165802.log` verifies build 6ACD6015/link 22:32:53 UTC.
+Stand-down enters at 16:58:44 for NoScene and remains for 80.3 seconds/52
+probes until mode change wakes Full at 17:00:04.450. A later 7.5-second
+stand-down also ends on mode change. Initial no-output stand-down did
+automatically recover when the menu became selectable; do not call that
+interval backend warmup.
+
+Probe frame6379/q767: primary H7A9A0270, source7A99F730, actual/input=1,
+canonical donor B1=7A9B34F0/lastq763, but CB2=null, first/count=0,
+original/current=0, relation unavailable, accepted/warmed=0, phase0. After
+manual Full wake, frame6947/q810 has the same H/source/donor, CB2=7E43C9E0,
+first0/count49, original/current=1, current writeq809/donorq806, relation
+match, accepted/warmed=1. Nonzero strict inverse preparation/binding resumes
+next. This is unavailable paused tracking, not proof that the game's actual CB2
+is unbound. No propagation failure or automatic failure trace; late H writes=0.
+
+Source confirms Full -> Probe/Paused releases projection runtime/context and
+original shadows, and runtime recreation is Full-only. Probe still calls the
+typed H verifier but cannot supply its required current original CB2 bytes;
+only a selector-certified Treatable probe can resume Full. NoScene itself is
+camera-independent, so its entry reason is not a matrix-failure verdict. Ruled
+out: an explicit AA-mode Forced Off latch, because requested mode stays XeSS
+and the user reports visual inactivity only. Ruled out: old phase-H identity
+alone blocks zero-phase reacquisition, because the ownership gate is inactive
+at phase0 and compatibility drops to zero on an untreated frame.
+
+Hypothesis and discriminator: strict cold certification in the existing Probe
+frame should recover the same H/donor without a mode cycle; current original
+CB2 + matrix proof + selected final consumer must all pass before Full resumes.
+Proposal under independent review: give Probe bounded observational shadow
+tracking/context only, prohibit preflight/clone/bind/backend work there, and
+release cold tracking again before Paused. Unsupported/stale/partial/ambiguous
+or consumer-less scenes must remain stood down. No new setting or ship rule.
+
+Cold Probe implementation is now independently reviewed and frozen. Each
+existing probe creates fresh bounded original-shadow tracking and Context1,
+allows only strict current original certification, and lets the real selected
+handoff drive the existing wake. Evidence is discarded when leaving Probe,
+including before fresh Full. Explicit Full gates protect deferred warming,
+compute preparation, backend preflight/readback and raster jitter. The paused
+work description now names the probe's observational exception.
+
+Native deferred/stand-down tests pass with zero failures: real model-driven
+loading -> stand-down -> certified Probe -> selected tone/copy -> Full wake,
+plus ten negative current-data/consumer cases that stay paused. Historical
+corpus remains 17 files/46 unchanged hashes. Final full build and fresh MSVC
+tests are running; no GPU binding implementation change in this step.
+
+Final verification caught a formatter fixture drift: exactly three stand-down
+descriptions still said all shadow tracking was paused. Generated a temporary
+fixture using the existing rig, independently reviewed its diff, then
+regenerated the tracked fixture. All other 28 lines stayed identical. Fresh
+complete MSVC temporal self-test now passes, including camera/snapshot tests,
+17 traces/46 unchanged frames and collector policy. Passing log:
+`/tmp/edvr-deferred-inverse-msvc-coldprobe-fixture.log`.
+
+The final absolute-path full build compiled/linked graphics and OpenXR, then
+stalled in its Wine test-rig gate with no completion/failure output and no
+receipt. This final attempt is incomplete; the prior cold-Probe full attempt
+did exit 1 on the same five Wine process-control failures. Host inspection
+identified `python tools\\run_jobs.py --self-test`, sleeping more than six
+minutes with no descendants or log progress. Terminated only that owned test
+process; build then exited 1. No usual five-failure result was emitted in this
+final attempt. Default sandbox process inspection did not see host processes.
+No commit/promotion/full-green claim, and Windows validation remains pending.
+
+Installed final stable graphics DLL via sanctioned dry-run/install/verify:
+`v0.19.1-29-gdac1916e-dirty`, PE/link 2026-10-12 23:17:22 UTC, 18,603,520
+bytes, SHA256
+`7d1b0d6565fa6c19854782d7116fd29bf7d541d6c3321c16517223f3f53ca459`. Both flat
+INIs remain the same 85aa64ab...7bff02 hash recorded above. Host game/launcher
+check and install guard confirmed closed before installation. Next flight
+requested: fresh XeSS load into T9, switch to Lynx and back without touching
+the AA mode, view/motion for about 20 seconds each, stable scene and HUD/menus;
+leave open for exact-build history/recovery log check, no capture.
+
+### October 12: automatic recovery verified in T9 and Lynx
+
+User confirms fresh load and T9 <-> Lynx changes now engage AA automatically
+and stay stable with clear HUD/menus. Lynx -> T9 appeared inactive briefly,
+then engaged after about one or two seconds without a mode change.
+`edvr_gfx_20261012_174055.log` verifies 6ACD6A82/link 23:17:22 UTC. Only the
+startup `mode=xess` line occurs; no later menu AA-mode transition.
+
+Cold Probe frame6463/q2345: primary H7A975D70/source7A975230, actual/input=1,
+CB2=7D6FD810, first0/count49, original/current=1, current writeq2344, donor
+B1=7A98BA90/lastq2030, relation match, accepted1, prepared0/warmed0, phase0,
+work=probe. Same frame's selected chain resumes Full automatically. Frame6464
+is Full with the same matched original/current data and warmed1; frame6468
+applies the certified missing inverse phase with prepared1. This confirms
+observation-only cold proof followed by fresh normal preparation.
+
+Final sampled runtime totals: 12,198 treated, seven accepted resets and 12,191
+continuations, five lost-history events across load/scene transitions, zero
+backend failures/camera cuts, treated streak4,812. Refusal total stays685 while
+treatment continues; no deferred propagation failure or automatic failure
+snapshot. Separate native HDR route still refuses R1248x780 below E1920x1200;
+the admitted main copy route executes XeSS upscaling. This is not AA
+inactivity.
+
+Stand-down totals22.9/73.5/6.2 seconds include absence/loading and lack ship
+identifiers. They all end on selector recognition, so do not claim that the log
+proves exact one-to-two-second readiness latency. Human observation is
+consistent with the existing 1.5-second probe cadence once the new scene is
+available. Type11 was not part of this final human check; generalized checks
+use camera/resource ownership and matrix proof, not ship identity.
+
+User can close Elite; evidence is saved. Final read-only branch audit requested
+before pushing `codex/xess-flat` for the user's Windows check. User's earlier
+instruction keeps this work on a branch until that test; no main merge or
+full-green build claim. Windows/Nvidia-main comparison still changes GPU, OS
+and branch, and does not isolate why its scene witness differs.
+
+Final read-only audit is clear. All five new headers, reviewed runtime/tests,
+formatter fixture and this arc are saved on `codex/xess-flat` for the user's
+explicit branch pull/Windows test. Main is not merged. The locally verified
+installed DLL keeps its recorded dirty version/PE/hash; no receipt-guarded
+promotion or unnecessary rebuild was performed. Native Windows full build,
+installer gates and final Type11 check remain pending.

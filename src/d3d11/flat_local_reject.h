@@ -16,6 +16,17 @@
 // hand-matched copies. See docs/design-flat-temporal-aa-2026-09-23.md.
 namespace edvr {
 
+// Certified Upstream ownership does not consume legacy recipe preparation or
+// private-row bindings. Auditing those paths may report a refusal, but must
+// not invalidate the raster phase or its accepted history, on draws or dispatches.
+// Identity, viewport, extent, depth and foreign-work violations remain live.
+inline bool flatUpstreamIgnoresLegacyRefusal(bool upstreamOwns, const char* reason) {
+    if (!upstreamOwns || !reason) return false;
+    return std::strcmp(reason, "unknown-scene-projection-recipe") == 0 ||
+        std::strcmp(reason, "projection-preparation-refused") == 0 ||
+        std::strcmp(reason, "draw-binding-refused") == 0;
+}
+
 // The exact per-draw failPhase reasons local refusal turns into
 // invalidate-and-observe. Every other reason stays frame-global by calling
 // failPhase directly: render-extent-changed, invalid-render-extent,

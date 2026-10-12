@@ -27,12 +27,42 @@ void get(ID3D11DeviceContext1* context, FlatProjectionStage stage, UINT slot,
     }
 }
 void set(ID3D11DeviceContext1* context, FlatProjectionStage stage, UINT slot,
-         ID3D11Buffer* buffer, UINT first, UINT count) {
+         ID3D11Buffer* buffer, UINT first, UINT count, bool whole = false) {
+    if(whole) {
+        switch(stage) {
+        case FlatProjectionStage::Vertex: context->VSSetConstantBuffers(slot,1,&buffer);break;
+        case FlatProjectionStage::Pixel: context->PSSetConstantBuffers(slot,1,&buffer);break;
+        case FlatProjectionStage::Compute: context->CSSetConstantBuffers(slot,1,&buffer);break;
+        }
+        return;
+    }
     switch (stage) {
     case FlatProjectionStage::Vertex: context->VSSetConstantBuffers1(slot, 1, &buffer, &first, &count); break;
     case FlatProjectionStage::Pixel: context->PSSetConstantBuffers1(slot, 1, &buffer, &first, &count); break;
     case FlatProjectionStage::Compute: context->CSSetConstantBuffers1(slot, 1, &buffer, &first, &count); break;
     }
+}
+bool ordinaryMatches(ID3D11DeviceContext1* context,FlatProjectionStage stage,UINT slot,ID3D11Buffer* expected) {
+    Microsoft::WRL::ComPtr<ID3D11Buffer> actual;
+    switch(stage) {
+    case FlatProjectionStage::Vertex:context->VSGetConstantBuffers(slot,1,actual.GetAddressOf());break;
+    case FlatProjectionStage::Pixel:context->PSGetConstantBuffers(slot,1,actual.GetAddressOf());break;
+    case FlatProjectionStage::Compute:context->CSGetConstantBuffers(slot,1,actual.GetAddressOf());break;
+    }
+    return actual.Get()==expected;
+}
+void restore(ID3D11DeviceContext1* context,FlatProjectionStage stage,UINT slot,
+    ID3D11Buffer* original,UINT first,UINT count,bool whole) {
+    set(context,stage,slot,original,first,count,whole);
+    if(!whole)return;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> actual;UINT observedFirst=0,observedCount=0;
+    get(context,stage,slot,actual.GetAddressOf(),&observedFirst,&observedCount);
+    // A full-size ranged binding can resemble a natural whole binding before
+    // install. Preserve its exact original range if ordinary Set reports a
+    // different natural representation. Never send nonaligned ranges to Set1.
+    if((actual.Get()!=original || observedFirst!=first || observedCount!=count) &&
+        first%16==0 && count && count<=4096 && count%16==0)
+        set(context,stage,slot,original,first,count);
 }
 }
 
@@ -57,6 +87,7 @@ bool FlatProjectionPrivateBuffer::initialize(ID3D11DeviceContext1* context,
     scratch_ = std::move(scratch); original_ = original; context_ = context;
     width_ = desc.ByteWidth; identityGeneration_ = identityGeneration;
     prepared_->original = original_.Get(); prepared_->replacement = replacement_.Get();
+    prepared_->uploadedBytes=scratch_.get();prepared_->byteWidth=width_;
     return true;
 }
 
@@ -106,7 +137,8 @@ bool FlatProjectionBindingPlan::initialize(ID3D11DeviceContext1* context,
         if (!stageValid(request.stage) || request.slot >= D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT ||
             !request.original || !request.replacement || request.original == request.replacement ||
             request.firstConstant > 4096 || request.constantCount == 0 || request.constantCount > 4096 ||
-            request.firstConstant % 16 || request.constantCount % 16) return false;
+            (request.wholeBuffer ? request.firstConstant!=0 :
+                (request.firstConstant % 16 || request.constantCount % 16))) return false;
         if (!request.prepared || !request.prepared->ready || !request.revision ||
             request.prepared->revision != request.revision || request.prepared->original != request.original ||
             request.prepared->replacement != request.replacement) return false;
@@ -116,6 +148,8 @@ bool FlatProjectionBindingPlan::initialize(ID3D11DeviceContext1* context,
         request.original->GetDesc(&original); request.replacement->GetDesc(&replacement);
         if (original.ByteWidth == 0 || original.ByteWidth > 65536 || original.ByteWidth != replacement.ByteWidth ||
             original.BindFlags != D3D11_BIND_CONSTANT_BUFFER || replacement.BindFlags != D3D11_BIND_CONSTANT_BUFFER) return false;
+        if(request.wholeBuffer && (original.ByteWidth%16 || request.constantCount!=original.ByteWidth/16 ||
+            request.prepared->byteWidth!=original.ByteWidth))return false;
         Microsoft::WRL::ComPtr<ID3D11Device> sourceDevice, replacementDevice;
         request.original->GetDevice(sourceDevice.GetAddressOf());
         request.replacement->GetDevice(replacementDevice.GetAddressOf());
@@ -124,6 +158,7 @@ bool FlatProjectionBindingPlan::initialize(ID3D11DeviceContext1* context,
         saved.original = request.original; saved.first = request.firstConstant; saved.count = request.constantCount;
         saved.stage = request.stage; saved.slot = request.slot; saved.replacement = request.replacement;
         saved.prepared = request.prepared; saved.revision = request.revision;
+        saved.wholeBuffer=request.wholeBuffer;
     }
     context_ = context; count_ = count;
     return true;
@@ -143,10 +178,12 @@ bool FlatProjectionBindingPlan::retargetPrepared(ID3D11DeviceContext1* context,
         if (!stageValid(request.stage) || request.slot >= D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT ||
             !request.original || !request.replacement || request.original == request.replacement ||
             request.firstConstant != 0 || request.constantCount == 0 || request.constantCount > 4096 ||
-            request.constantCount % 16 || !request.prepared || !request.prepared->ready ||
+            (!request.wholeBuffer && request.constantCount % 16) || !request.prepared || !request.prepared->ready ||
             !request.revision || request.prepared->revision != request.revision ||
             request.prepared->original != request.original || request.prepared->replacement != request.replacement)
             return false;
+        if(request.wholeBuffer && (!request.prepared->byteWidth || request.prepared->byteWidth%16 ||
+            request.constantCount!=request.prepared->byteWidth/16))return false;
         for (size_t j = 0; j < i; ++j)
             if (bindings[j].stage == request.stage && bindings[j].slot == request.slot) return false;
     }
@@ -157,6 +194,7 @@ bool FlatProjectionBindingPlan::retargetPrepared(ID3D11DeviceContext1* context,
         saved.first = request.firstConstant; saved.count = request.constantCount;
         saved.stage = request.stage; saved.slot = request.slot;
         saved.prepared = request.prepared; saved.revision = request.revision;
+        saved.wholeBuffer=request.wholeBuffer;
     }
     context_ = context; count_ = count;
     return true;
@@ -172,6 +210,19 @@ bool FlatProjectionBindingPlan::refreshPrepared() {
     for (size_t i = 0; i < count_; ++i) saved_[i].revision = saved_[i].prepared->revision;
     return true;
 }
+bool FlatProjectionBindingPlan::copyUploadedConstants(FlatProjectionStage stage,UINT slot,
+    uint32_t offset,uint32_t count,void* out) const {
+    if(!out || !count || !context_)return false;
+    for(size_t i=0;i<count_;++i) {
+        const auto& saved=saved_[i];if(saved.stage!=stage || saved.slot!=slot)continue;
+        const auto& p=saved.prepared;
+        if(!p || !p->ready || !saved.revision || p->revision!=saved.revision ||
+           p->original!=saved.original.Get() || p->replacement!=saved.replacement.Get() ||
+           !p->uploadedBytes || offset>p->byteWidth || count>p->byteWidth-offset)return false;
+        std::memcpy(out,p->uploadedBytes+offset,count);return true;
+    }
+    return false;
+}
 
 FlatProjectionBindingScope::FlatProjectionBindingScope(const FlatProjectionBindingPlan& plan) {
     if (!plan.context_ || !plan.count_) return;
@@ -182,12 +233,25 @@ FlatProjectionBindingScope::FlatProjectionBindingScope(const FlatProjectionBindi
         if (!expected.prepared || !expected.prepared->ready || expected.prepared->revision != expected.revision) return;
         get(plan.context_.Get(), expected.stage, expected.slot, saved.original.GetAddressOf(), &saved.first, &saved.count);
         if (saved.original.Get() != expected.original.Get() || saved.first != expected.first || saved.count != expected.count) return;
+        if(expected.wholeBuffer && !ordinaryMatches(plan.context_.Get(),expected.stage,expected.slot,saved.original.Get()))return;
         saved.stage = expected.stage; saved.slot = expected.slot; saved.replacement = expected.replacement;
+        saved.wholeBuffer=expected.wholeBuffer;
     }
     context_ = plan.context_; count_ = plan.count_;
     for (size_t i = 0; i < count_; ++i) {
         const auto& saved = saved_[i];
-        set(context_.Get(), saved.stage, saved.slot, saved.replacement.Get(), saved.first, saved.count);
+        set(context_.Get(), saved.stage, saved.slot, saved.replacement.Get(), saved.first, saved.count,saved.wholeBuffer);
+    }
+    for(size_t i=0;i<count_;++i) {
+        const auto& saved=saved_[i];
+        Microsoft::WRL::ComPtr<ID3D11Buffer> actual;UINT first=0,count=0;
+        get(context_.Get(),saved.stage,saved.slot,actual.GetAddressOf(),&first,&count);
+        if(actual.Get()!=saved.replacement.Get() || first!=saved.first || count!=saved.count ||
+           (saved.wholeBuffer && !ordinaryMatches(context_.Get(),saved.stage,saved.slot,saved.replacement.Get()))) {
+            for(size_t j=count_;j-- >0;) {const auto& rollback=saved_[j];
+                restore(context_.Get(),rollback.stage,rollback.slot,rollback.original.Get(),rollback.first,rollback.count,rollback.wholeBuffer);}
+            count_=0;context_.Reset();return;
+        }
     }
     active_ = true;
     plan_ = &plan;
@@ -199,7 +263,7 @@ FlatProjectionBindingScope::~FlatProjectionBindingScope() {
     FlatComputeInternalScope internal;
     for (size_t i = count_; i-- > 0;) {
         const auto& saved = saved_[i];
-        set(context_.Get(), saved.stage, saved.slot, saved.original.Get(), saved.first, saved.count);
+        restore(context_.Get(), saved.stage, saved.slot, saved.original.Get(), saved.first, saved.count,saved.wholeBuffer);
     }
     --plan_->activeScopes_;
 }

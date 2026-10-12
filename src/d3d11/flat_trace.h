@@ -73,6 +73,8 @@ constexpr uint32_t kFlatTraceStencilWrite = 1u << 9;
 // bits, zero in every committed trace, so the corpus replays as it always did.
 constexpr uint32_t kFlatTraceFirstPersonCohort = 1u << 10;
 constexpr uint32_t kFlatTraceAlternateHdr = 1u << 11;
+constexpr uint32_t kFlatTraceDeferredHdrVerified = 1u << 14;
+constexpr uint32_t kFlatTraceDeferredInverseRepaired = 1u << 15;
 // A pool family's vertex shader left stock, drawn into the scene's depth (FlatRuntimeDraw::poolFamilyVs, section 104). Appended the same way.
 constexpr uint32_t kFlatTracePoolFamilyVs = 1u << 12;
 
@@ -89,6 +91,8 @@ inline FlatTraceEvent flatTraceEventFromDraw(const FlatRuntimeDraw& d, bool fore
     e.flags |= d.hdrCopyVerified ? kFlatTraceHdrCopyVerified : 0;
     e.flags |= d.menuHdrCopyVerified ? kFlatTraceMenuCopyVerified : 0;
     e.flags |= d.imageSourceCameraIndependentVerified ? kFlatTraceImageSourceVerified : 0;
+    e.flags |= d.deferredHdrVerified ? kFlatTraceDeferredHdrVerified : 0;
+    e.flags |= d.deferredInverseRepaired ? kFlatTraceDeferredInverseRepaired : 0;
     e.flags |= foreignWork ? kFlatTraceForeignWork : 0;
     e.flags |= d.overlayProtected ? kFlatTraceOverlayProtected : 0;
     e.flags |= d.effectiveDepthWrite ? kFlatTraceDepthWrite : 0;
@@ -129,6 +133,8 @@ inline FlatRuntimeDraw flatTraceEventToDraw(const FlatTraceEvent& e) {
     d.hdrCopyVerified = (e.flags & kFlatTraceHdrCopyVerified) != 0;
     d.menuHdrCopyVerified = (e.flags & kFlatTraceMenuCopyVerified) != 0;
     d.imageSourceCameraIndependentVerified = (e.flags & kFlatTraceImageSourceVerified) != 0;
+    d.deferredHdrVerified = (e.flags & kFlatTraceDeferredHdrVerified) != 0;
+    d.deferredInverseRepaired = (e.flags & kFlatTraceDeferredInverseRepaired) != 0;
     d.overlayProtected = (e.flags & kFlatTraceOverlayProtected) != 0;
     d.effectiveDepthWrite = (e.flags & kFlatTraceDepthWrite) != 0;
     d.effectiveStencilWrite = (e.flags & kFlatTraceStencilWrite) != 0;
@@ -172,6 +178,7 @@ struct FlatTraceRing {
     uint32_t attempted[kFlatTraceFrames]{}; // live-only; never serialized
     uint32_t slot = 0;
     bool slotUsed[kFlatTraceFrames]{};
+    bool slotSealed[kFlatTraceFrames]{}; // live-only, never serialized
 };
 static_assert(sizeof(FlatTraceRing) <= kFlatTraceStorageBudgetBytes,
               "flat trace ring exceeds its fixed storage budget");
@@ -193,6 +200,7 @@ inline FlatTraceStats flatTraceStats(const FlatTraceRing& r) {
 }
 inline bool flatTraceCanAppend(FlatTraceRing& r) {
     if (!r.slotUsed[r.slot]) return false;
+    r.slotSealed[r.slot]=false;
     auto& attempted = r.attempted[r.slot];
     if (attempted != 0xffffffffu) ++attempted;
     auto& h = r.headers[r.slot];
@@ -208,6 +216,7 @@ inline void flatTraceBeginFrame(FlatTraceRing& r, uint64_t frame, const void* ou
     h.frame = frame; h.output = output; h.width = width; h.height = height; h.format = format;
     r.attempted[r.slot] = 0;
     r.slotUsed[r.slot] = true;
+    r.slotSealed[r.slot] = false;
 }
 inline void flatTraceRecord(FlatTraceRing& r, const FlatRuntimeDraw& d, bool foreignWork,
                             const void* const* hdrSrv = nullptr, uint32_t drawSequence = 0) {
@@ -234,23 +243,48 @@ inline void flatTraceSeal(FlatTraceRing& r, bool produced, uint64_t contractHash
     if (!r.slotUsed[r.slot]) return;
     r.headers[r.slot].produced = produced ? 1u : 0u;
     r.headers[r.slot].contractHash = contractHash;
+    r.slotSealed[r.slot]=true;
 }
 
+// Only an explicit completed-current diagnostic may include this slot.
+// Appending any event revokes its seal, including an overflow attempt.
+inline bool flatTraceEmittable(const FlatTraceRing& r,uint32_t slot,bool includeCompletedCurrent=false) {
+    return slot<kFlatTraceFrames && r.slotUsed[slot] && !r.headers[slot].truncated &&
+        r.headers[slot].eventCount && (!includeCompletedCurrent || r.slotSealed[slot]) && (slot!=r.slot || (includeCompletedCurrent && r.slotSealed[slot]));
+}
+// One automatic failure snapshot per process or manual rearm. A rearm cannot
+// discard a pending failure; completion or explicit expiration consumes it.
+struct FlatTraceFailureCapture {
+    uint64_t pendingFrame=0,deadline=0;
+    uint32_t attempts=0;
+    bool available=true,neverRanReported=false;
+    void arm(){available=true;attempts=0;neverRanReported=false;if(!pendingFrame)deadline=0;}
+    bool reportNeverRan(){if(attempts || !available || neverRanReported)return false;neverRanReported=true;return true;}
+    bool request(uint64_t frame){
+        if(!available || pendingFrame || !frame || attempts>=2 || (deadline && frame>deadline))return false;
+        available=false;pendingFrame=frame;++attempts;if(!deadline)deadline=frame+900;return true;
+    }
+    bool ready(uint64_t completedFrame) const{return pendingFrame && completedFrame>=pendingFrame;}
+    bool fullWindow(uint64_t frame) const{return pendingFrame || (available && attempts && frame<=deadline);}
+    bool expired(uint64_t frame) const{return !pendingFrame && available && attempts && frame>deadline;}
+    void finish(bool emitted){pendingFrame=0;available=!emitted && attempts<2;}
+    void cancel(){pendingFrame=0;available=false;}
+};
 // Serialize complete frames oldest-first, skipping the current slot: its
 // frame is mid-flight, unsealed and partial. Returns total bytes written.
 template <class Write>
-inline uint32_t flatTraceDump(const FlatTraceRing& r, Write&& write) {
+inline uint32_t flatTraceDump(const FlatTraceRing& r, Write&& write, bool includeCompletedCurrent=false) {
     FlatTraceHeader header{};
     for (uint32_t i = 0; i < kFlatTraceFrames; ++i) {
         const uint32_t slot = (r.slot + 1 + i) % kFlatTraceFrames;
         const auto& h = r.headers[slot];
-        if (slot != r.slot && r.slotUsed[slot] && !h.truncated && h.eventCount)
+        if (flatTraceEmittable(r,slot,includeCompletedCurrent))
             ++header.frameCount;
     }
     uint32_t bytes = write(&header, sizeof(header));
     for (uint32_t i = 0; i < kFlatTraceFrames; ++i) {
         const uint32_t slot = (r.slot + 1 + i) % kFlatTraceFrames;
-        if (slot == r.slot || !r.slotUsed[slot]) continue;
+        if (!flatTraceEmittable(r,slot,includeCompletedCurrent)) continue;
         const auto& h = r.headers[slot];
         if (h.truncated || !h.eventCount) continue;
         bytes += write(&h, sizeof(h));

@@ -87,6 +87,13 @@ inline uint64_t flatFrameContractHash(const FlatFrameContract& c) {
         mix(&r.firstWriteEpoch, sizeof(r.firstWriteEpoch));
         mix(&r.lastWriteEpoch, sizeof(r.lastWriteEpoch));
         mix(&r.firstWriteSeq, sizeof(r.firstWriteSeq)); mix(&r.lastWriteSeq, sizeof(r.lastWriteSeq));
+        // Preserve every legacy corpus hash; the new typed witness contributes
+        // its separate donor identity only when it actually exists.
+        if(r.deferredCamera) {
+            if(r.deferredInverseRepaired)mix(&r.deferredInverseRepaired,sizeof(r.deferredInverseRepaired));
+            mix(&r.deferredCamera,sizeof(r.deferredCamera));mix(&r.sceneCameraB1,sizeof(r.sceneCameraB1));
+            mix(&r.sceneCameraWriteEpoch,sizeof(r.sceneCameraWriteEpoch));mix(&r.sceneCameraWriteSeq,sizeof(r.sceneCameraWriteSeq));
+        }
     }
     mix(&c.copiesUsed, sizeof(c.copiesUsed));
     mix(&c.copiesOverflowed, sizeof(c.copiesOverflowed));

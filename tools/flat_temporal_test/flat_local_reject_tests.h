@@ -1,7 +1,9 @@
 #pragma once
 
 #include <cstdio>
+#include <initializer_list>
 #include "../../src/d3d11/flat_local_reject.h"
+#include "../../src/d3d11/flat_live_phase.h"
 
 inline int flatLocalRejectTests() {
     using edvr::flatLocalRefusalReason;
@@ -47,6 +49,49 @@ inline int flatLocalRejectTests() {
            flatObservationToggle(true, false, false) &&
            !flatObservationToggle(false, true, false),
            "only the on-to-off toggle ends observation explicitly");
+
+    // Captured Type 11 frames 7793..7795: two unused compute plans refused
+    // during the Upstream audit. A phase already applied to geometry must
+    // retain its accepted history exactly as it does with the audit off.
+    auto frame = [](bool upstream, bool audit, const char* reason) {
+        edvr::FlatLivePhase phase;
+        for (unsigned i = 0; i < 2; ++i) {
+            phase.beginFrame(true, i != 0, 1248, 780, 19);
+            phase.finish(true, true);
+        }
+        phase.beginFrame(true, true, 1248, 780, 19);
+        phase.noteApplied();
+        if (audit) {
+            for (unsigned i = 0; i < 2; ++i)
+                if (!edvr::flatUpstreamIgnoresLegacyRefusal(upstream, reason))
+                    phase.fail();
+        }
+        phase.finish(true, true);
+        return phase;
+    };
+    const auto normal = frame(true, false, "projection-preparation-refused");
+    const auto audited = frame(true, true, "projection-preparation-refused");
+    expect(normal.previousAcceptedValid && audited.previousAcceptedValid &&
+           !audited.failed && !audited.needsSpatialFallback() &&
+           audited.currentX == normal.currentX && audited.currentY == normal.currentY &&
+           audited.previousX == normal.previousX && audited.previousY == normal.previousY &&
+           audited.phaseSequence == normal.phaseSequence && audited.applied == normal.applied,
+           "unused Upstream compute preparation audit preserves raster phase and history");
+    const auto legacy = frame(false, true, "projection-preparation-refused");
+    expect(legacy.failed && legacy.needsSpatialFallback() && !legacy.previousAcceptedValid,
+           "consumed Legacy preparation refusal invalidates history after raster application");
+    for (const char* reason : {"render-extent-changed", "scene-depth-changed",
+                              "scene-projection-depth-unassociated", "foreign-work",
+                              "actual-shader-mismatch", "projection-viewport-mismatch",
+                              "deferred-inverse-preparation-failed", "deferred-inverse-binding-failed",
+                              "deferred-inverse-unproven"}) {
+        const auto violated = frame(true, true, reason);
+        expect(violated.failed && violated.needsSpatialFallback() &&
+               !violated.previousAcceptedValid,
+               "true Upstream scene or binding violation still invalidates history");
+    }
+    expect(!edvr::flatUpstreamIgnoresLegacyRefusal(true, nullptr),
+           "null refusal is never bypassed");
 
     return failures;
 }

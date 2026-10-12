@@ -170,6 +170,7 @@ struct FlatRuntimeDrawScope {
     uint32_t weaponDrawCount = 0, weaponDrawStart = 0, weaponDrawInstances = 0, weaponDrawStartInstance = 0;
     int32_t weaponDrawBase = 0;
     std::optional<FlatProjectionBindingScope> projection;
+    std::optional<FlatProjectionBindingScope> deferredProjection;
     FlatRuntimeDrawScope(ID3D11DeviceContext*, uint32_t instances,
                          char kind='?', uint32_t count=0, uint32_t start=0,
                          int32_t base=0, uint32_t startInstance=0);

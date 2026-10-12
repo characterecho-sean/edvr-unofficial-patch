@@ -373,7 +373,7 @@ inline FlatMonoFrame flatSelectHdrFrame(const FlatMonoFrameInput& in, const void
     // name for what the route resolved. There is no tone output and no output copy on this route.
     out.color = hdrResource; out.hdr = hdrResource;
     out.depth = hdr->key.depth; out.dsv = hdr->key.dsv; out.depthFormat = hdr->key.depthFormat;
-    out.sceneConstants = hdrCamera->key.b1; out.output = in.output;
+    out.sceneConstants = cameraIdentity(*hdrCamera); out.output = in.output;
     out.renderWidth = w; out.renderHeight = h;
     out.outputWidth = in.outputWidth; out.outputHeight = in.outputHeight;
     std::memcpy(out.camera, camera, sizeof(camera));

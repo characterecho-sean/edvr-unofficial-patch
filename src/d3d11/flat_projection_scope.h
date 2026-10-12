@@ -15,6 +15,8 @@ struct FlatProjectionPreparedState {
     ID3D11Buffer* replacement = nullptr;
     uint64_t revision = 0;
     bool ready = false;
+    const unsigned char* uploadedBytes = nullptr;
+    uint32_t byteWidth = 0;
 };
 struct FlatPrivateProjectionBinding {
     FlatProjectionStage stage = FlatProjectionStage::Vertex;
@@ -25,6 +27,7 @@ struct FlatPrivateProjectionBinding {
     UINT constantCount = 4096;
     std::shared_ptr<const FlatProjectionPreparedState> prepared;
     uint64_t revision = 0;
+    bool wholeBuffer = false;
 };
 class FlatProjectionRuntime;
 
@@ -76,6 +79,9 @@ public:
     // After successful uploads into the same resources, refresh only the tokens.
     // Failed preparation or a destroyed private-buffer owner rejects old plans.
     bool refreshPrepared();
+    // CPU bytes copied by the successful upload, never an original-shadow fallback.
+    bool copyUploadedConstants(FlatProjectionStage, UINT slot, uint32_t offset,
+                               uint32_t count, void* out) const;
 private:
     friend class FlatProjectionRuntime;
     // Runtime-only live retarget: the caller has already established Context1
@@ -91,6 +97,7 @@ private:
         Microsoft::WRL::ComPtr<ID3D11Buffer> original, replacement;
         std::shared_ptr<const FlatProjectionPreparedState> prepared;
         uint64_t revision = 0;
+        bool wholeBuffer = false;
     };
     Microsoft::WRL::ComPtr<ID3D11DeviceContext1> context_;
     Saved saved_[kCapacity]{};

@@ -231,6 +231,13 @@ struct FlatContractObservation {
 struct FlatContractRecord {
     FlatContractObservation key{};  // key.camera is not retained
     unsigned char camera[kFlatCameraBytes] = {};
+    // Typed inherited scene identity; key.b1 remains the ACTUAL H draw binding.
+    // H's first/write provenance remains its own CB2, never the donor's draw.
+    bool deferredCamera = false;
+    bool deferredInverseRepaired = false;
+    const void* sceneCameraB1 = nullptr;
+    uint64_t sceneCameraWriteEpoch = 0;
+    uint32_t sceneCameraWriteSeq = 0;
     uint32_t draws = 0, first = 0, last = 0;
     uint32_t firstCount = 0, firstInstances = 0;
     uint32_t lastCount = 0, lastInstances = 0;

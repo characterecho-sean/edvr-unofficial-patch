@@ -208,15 +208,25 @@ inline bool hdrViewport(uint32_t count, const float* viewport, uint32_t w, uint3
 inline bool hdrViewport(const FlatContractObservation& k, uint32_t w, uint32_t h) {
     return hdrViewport(k.viewportCount, k.viewport, w, h);
 }
+inline const void* cameraIdentity(const FlatContractRecord& r) {
+    return r.deferredCamera ? r.sceneCameraB1 : r.key.b1;
+}
 inline bool cameraCurrent(const FlatContractRecord& r, uint64_t epoch) {
-    return ordered(r) && r.key.b1 && r.key.camera &&
+    if(r.deferredCamera) {
+        const auto& projection=r.key.projection[1];
+        if(!r.sceneCameraB1 || r.sceneCameraWriteEpoch!=epoch || !r.sceneCameraWriteSeq ||
+           r.sceneCameraWriteSeq>=r.first || !projection.resource ||
+           projection.status!=FlatProjectionStatus::Available || projection.copied!=112 ||
+           projection.writeEpoch!=epoch || !projection.writeSeq || projection.writeSeq>r.first)return false;
+    }
+    return ordered(r) && cameraIdentity(r) && r.key.camera &&
         r.firstWriteEpoch == epoch && r.lastWriteEpoch == epoch &&
         r.firstWriteSeq && r.firstWriteSeq <= r.first &&
         r.lastWriteSeq >= r.firstWriteSeq && r.lastWriteSeq <= r.last &&
         r.key.cameraHash == flatCameraHash(r.camera);
 }
 inline bool sameCamera(const FlatContractRecord& a, const FlatContractRecord& b) {
-    return a.key.b1 == b.key.b1 && a.key.camera && b.key.camera &&
+    return cameraIdentity(a) == cameraIdentity(b) && a.key.camera && b.key.camera &&
         a.key.cameraHash == b.key.cameraHash &&
         std::memcmp(a.camera, b.camera, kFlatCameraBytes) == 0;
 }
@@ -407,7 +417,7 @@ inline FlatMonoFrame flatSelectMonoFrame(const FlatMonoFrameInput& in) {
     }
     out.color = tk.color; out.hdr = tk.srvResource[hdrSlot];
     out.depth = hdr->key.depth; out.dsv = hdr->key.dsv; out.depthFormat = hdr->key.depthFormat;
-    out.sceneConstants = hdrCamera->key.b1; out.output = in.output;
+    out.sceneConstants = cameraIdentity(*hdrCamera); out.output = in.output;
     out.renderWidth = tk.width; out.renderHeight = tk.height;
     out.outputWidth = in.outputWidth; out.outputHeight = in.outputHeight;
     std::memcpy(out.camera, camera, sizeof(camera));

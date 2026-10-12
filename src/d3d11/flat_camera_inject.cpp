@@ -16,6 +16,7 @@
 #include "flat_camera_stubs.h"
 #include "flat_camera_vr.h"
 #include "flat_cpu.h"
+#include "flat_local_reject.h"
 #include "flat_runtime.h"
 
 extern "C" DWORD _tls_index; // CRT-provided once a __declspec(thread) exists
@@ -851,7 +852,6 @@ bool flatCameraInjectUpstreamOwns() {
 }
 
 bool flatCameraInjectBypassRefusal(const char* reason) {
-    if (!flatCameraInjectUpstreamOwns() || !reason) return false;
     // The legacy-only classes: reasons that can only arise from the legacy
     // route's own preparation and binding, which Upstream ownership suppresses
     // -- an unknown recipe on a certified camera lineage, a private
@@ -859,9 +859,7 @@ bool flatCameraInjectBypassRefusal(const char* reason) {
     // them may veto a route that does not consume them. True violations (a
     // scene depth that changed, a render extent that moved, a foreign write)
     // keep refusing in flat_runtime.
-    return std::strcmp(reason, "unknown-scene-projection-recipe") == 0 ||
-           std::strcmp(reason, "projection-preparation-refused") == 0 ||
-           std::strcmp(reason, "draw-binding-refused") == 0;
+    return flatUpstreamIgnoresLegacyRefusal(flatCameraInjectUpstreamOwns(), reason);
 }
 
 FlatCameraRoute flatCameraInjectRoute() {

@@ -20,7 +20,11 @@ void projectionRuntimeTests(ID3D11Device* device, ID3D11DeviceContext* base) {
         ID3D11Buffer* noCb[14]{};ID3D11ShaderResourceView* noSrv[128]{};ctx->VSSetConstantBuffers(0,14,noCb);ctx->VSSetShaderResources(0,128,noSrv);
         auto* boundCamera=cameraBuffer.Get();ctx->VSSetConstantBuffers(1,1,&boundCamera);
         check(flatForegroundBoundPhase(ctx.Get(),&phaseRuntime,0,0,3840,2160,.025f),"foreground actual zero phase accepted");
-        FlatProjectionRuntimeRequest phaseRequest{};phaseRequest.stage=FlatProjectionStage::Vertex;phaseRequest.slot=1;phaseRequest.original=cameraBuffer.Get();phaseRequest.constantCount=4096;phaseRequest.patchCount=1;
+        ComPtr<ID3D11Buffer> actualCamera;UINT cameraFirst=0,cameraCount=0;
+        ctx->VSGetConstantBuffers1(1,1,actualCamera.GetAddressOf(),&cameraFirst,&cameraCount);
+        check(actualCamera.Get()==cameraBuffer.Get() && cameraFirst==0 && cameraCount>=274 && cameraCount<=4096 && cameraCount%16==0,
+            "foreground fixture uses actual aligned Context1 range");
+        FlatProjectionRuntimeRequest phaseRequest{};phaseRequest.stage=FlatProjectionStage::Vertex;phaseRequest.slot=1;phaseRequest.original=cameraBuffer.Get();phaseRequest.firstConstant=cameraFirst;phaseRequest.constantCount=cameraCount;phaseRequest.patchCount=1;
         phaseRequest.patches[0]={FlatProjectionPatchLayout::ForwardColumns,270*16,{}};
         FlatProjectionJitter jitter{};check(flatProjectionJitter(.25f,-.125f,3840,2160,jitter),"foreground centered nonzero phase fixture");
         check(phaseRuntime.preflight(&phaseRequest,1,jitter,1),"foreground private phase preflight");
@@ -73,6 +77,18 @@ void projectionRuntimeTests(ID3D11Device* device, ID3D11DeviceContext* base) {
         check(seen.Get()!=original.Get() && f==0 && n==4096,"private binding preserves exact range");
         float actual[sizeof(raw)/sizeof(float)]{};
         check(runtime.copyConstants(seen.Get(),0,sizeof(actual),actual),"nonzero-phase actual private CB has complete CPU upload certificate");
+        auto overlapping=request;overlapping.patches[0].byteOffset+=16;
+        check(!runtime.preflight(&overlapping,1,phase,2,false) &&
+            runtime.failure().branch && std::strcmp(runtime.failure().branch,"preflight-private-buffer-active")==0,
+            "active scope prevents a different legacy recipe overwriting its private buffer");
+        check(runtime.prepare(&overlapping,1,phase,2)==nullptr,
+            "active scope also refuses direct prepare without invalidating uploaded revision");
+        float unchanged[sizeof(raw)/sizeof(float)]{};
+        check(plan->copyUploadedConstants(FlatProjectionStage::Vertex,1,0,sizeof(unchanged),unchanged) &&
+            std::memcmp(actual,unchanged,sizeof(actual))==0,"active upload certificate remains ready and unchanged after overlap refusal");
+        check(runtime.prepare(nullptr,0,phase,2)==nullptr &&
+            !plan->copyUploadedConstants(FlatProjectionStage::Vertex,1,0,sizeof(unchanged),unchanged),
+            "global invalidation revokes active plan certificate while preserving uploaded GPU bytes");
         D3D11_BUFFER_DESC readDesc{};seen->GetDesc(&readDesc);readDesc.Usage=D3D11_USAGE_STAGING;
         readDesc.BindFlags=0;readDesc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
         ComPtr<ID3D11Buffer> staging;
@@ -88,6 +104,7 @@ void projectionRuntimeTests(ID3D11Device* device, ID3D11DeviceContext* base) {
     {ComPtr<ID3D11Buffer> seen;UINT f=999,n=0;
      ctx->VSGetConstantBuffers1(1,1,seen.GetAddressOf(),&f,&n);
      check(seen.Get()==original.Get() && f==0 && n==4096,"scope restores original binding");}
+    if(plan){FlatProjectionBindingScope stale(*plan);check(!stale.active(),"globally invalidated plan cannot reactivate after exact restoration");}
     const auto plansBeforePhases=runtime.status().preflights;
     const auto zeroBeforePhases=runtime.status().zeroPhaseReady;
     bool phasesReady=true;
@@ -367,8 +384,8 @@ void projectionRuntimeTests(ID3D11Device* device, ID3D11DeviceContext* base) {
             FlatProjectionRuntimeRequest another=two;another.slot=2;
             ctx->VSSetConstantBuffers1(2,1,&lateBound,&first,&count);
             check(!tail.preflight(&another,1,phase,3,false) &&
-                  std::strcmp(tail.failure().branch,"topology-live-plan-in-use")==0,
-                  "live plan cannot retarget while its prior scope is active");
+                  std::strcmp(tail.failure().branch,"preflight-private-buffer-active")==0,
+                  "active private buffer refuses overlapping topology before live-plan retarget");
         }
         FlatProjectionRuntimeRequest unknown=two;unknown.original=unready.Get();
         auto* unreadyBound=unready.Get();ctx->VSSetConstantBuffers1(1,1,&unreadyBound,&first,&count);
@@ -583,5 +600,53 @@ void projectionRuntimeTests(ID3D11Device* device, ID3D11DeviceContext* base) {
         check(shared.preflight(&rq65, 1, pz, 65),
               "a plan for the 65th buffer preflights after the retirements");
         shared.reset();
+    }
+    {
+        float bytes[196]{};bytes[56]=2;bytes[59]=3;
+        D3D11_BUFFER_DESC bd{};bd.ByteWidth=sizeof(bytes);bd.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
+        D3D11_SUBRESOURCE_DATA data{};data.pSysMem=bytes;ComPtr<ID3D11Buffer> cb;
+        check(SUCCEEDED(device->CreateBuffer(&bd,&data,cb.GetAddressOf())),"runtime 49-constant whole fixture");
+        FlatProjectionRuntime whole;check(whole.initialize(base) && whole.observeCreateBuffer(cb.Get(),bytes),"runtime whole original tracked");
+        FlatProjectionRuntimeRequest rq{};rq.original=cb.Get();rq.slot=2;rq.constantCount=49;rq.patchCount=1;
+        rq.patches[0]={FlatProjectionPatchLayout::InverseUvRay,14*16,{}};
+        FlatProjectionJitter j{};flatProjectionJitter(1,0,16,16,j);
+        check(!whole.preflight(&rq,1,j,1),"runtime preserves ranged alignment rule");rq.wholeBuffer=true;
+        check(whole.preflight(&rq,1,j,1),"runtime explicit natural whole request prepares");
+        auto bad=rq;bad.constantCount=48;check(!whole.preflight(&bad,1,j,1),"runtime rejects whole count differing from original width");
+        check(whole.preflight(&rq,1,j,1),"runtime whole plan recovers after refusal");
+        auto* originalWhole=cb.Get();base->VSSetConstantBuffers(2,1,&originalWhole);
+        ComPtr<ID3D11DeviceContext1> c1;base->QueryInterface(IID_PPV_ARGS(c1.GetAddressOf()));
+        ComPtr<ID3D11Buffer> actual;UINT f=0,n=0;c1->VSGetConstantBuffers1(2,1,actual.GetAddressOf(),&f,&n);
+        const bool natural=actual.Get()==cb.Get() && f==0 && n==49;
+        const auto* prepared=whole.prepare(&rq,1,j,1);
+        check(bool(prepared)==natural,"runtime requires actual ordinary plus natural Context1 binding");
+        bool bound=false;
+        if(prepared){float out=0;check(prepared->copyUploadedConstants(FlatProjectionStage::Vertex,2,14*16+12,4,&out)&&out==2.875f,
+            "runtime whole plan certifies private inverse bytes");
+            FlatProjectionBindingScope scope(*prepared);bound=scope.active();
+            check(bound,"runtime natural49 prepared clone actually binds");
+            ComPtr<ID3D11Buffer> ordinary,installed;UINT installedFirst=0,installedCount=0;
+            c1->VSGetConstantBuffers(2,1,ordinary.GetAddressOf());c1->VSGetConstantBuffers1(2,1,installed.GetAddressOf(),&installedFirst,&installedCount);
+            check(bound && installed && installed.Get()!=cb.Get() && ordinary.Get()==installed.Get() && installedFirst==0 && installedCount==49,
+                "runtime natural49 execution attests replacement through both binding APIs");
+        }
+        std::printf("projection runtime natural49: first=%u count=%u qualified=%u prepared=%u bound=%u\n",f,n,natural?1u:0u,prepared?1u:0u,bound?1u:0u);
+        ComPtr<ID3D11Buffer> restoredOrdinary,restoredRange;UINT restoredFirst=0,restoredCount=0;
+        c1->VSGetConstantBuffers(2,1,restoredOrdinary.GetAddressOf());c1->VSGetConstantBuffers1(2,1,restoredRange.GetAddressOf(),&restoredFirst,&restoredCount);
+        check(restoredOrdinary.Get()==cb.Get() && restoredRange.Get()==cb.Get() && restoredFirst==f && restoredCount==n && (!natural || restoredCount==49),
+            "runtime natural49 execution restores original ordinary and Context1 binding");
+        whole.reset();
+    }
+    {
+        float bytes[256]{};D3D11_BUFFER_DESC bd{};bd.ByteWidth=sizeof(bytes);bd.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
+        D3D11_SUBRESOURCE_DATA data{};data.pSysMem=bytes;ComPtr<ID3D11Buffer> cb;
+        check(SUCCEEDED(device->CreateBuffer(&bd,&data,cb.GetAddressOf())),"binding-mode cache fixture");
+        FlatProjectionRuntime modes;check(modes.initialize(base)&&modes.observeCreateBuffer(cb.Get(),bytes),"binding-mode cache tracks original");
+        FlatProjectionRuntimeRequest rq{};rq.original=cb.Get();rq.slot=2;rq.constantCount=64;rq.patchCount=1;
+        rq.patches[0]={FlatProjectionPatchLayout::InverseUvRay,14*16,{}};FlatProjectionJitter j{};flatProjectionJitter(1,0,16,16,j);
+        ComPtr<ID3D11DeviceContext1> c1;base->QueryInterface(IID_PPV_ARGS(c1.GetAddressOf()));UINT f=0,n=64;auto* source=cb.Get();c1->VSSetConstantBuffers1(2,1,&source,&f,&n);
+        check(modes.preflight(&rq,1,j,1),"ranged mode cache preflight");const auto* ranged=modes.prepare(&rq,1,j,1);
+        rq.wholeBuffer=true;check(modes.preflight(&rq,1,j,1),"whole mode cache preflight");const auto* full=modes.prepare(&rq,1,j,1);
+        check(ranged && full && ranged!=full,"binding mode participates in exact and topology cache identity");modes.reset();
     }
 }

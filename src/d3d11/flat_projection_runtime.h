@@ -17,6 +17,7 @@ struct FlatProjectionRuntimeRequest {
     UINT constantCount = 4096;
     FlatProjectionPatchRequest patches[8]{};
     uint32_t patchCount = 0;
+    bool wholeBuffer = false;
 };
 
 enum class FlatProjectionRuntimeRefusal : uint8_t {
@@ -61,6 +62,8 @@ struct FlatProjectionShadowMetadata {
     bool tracked = false, mapped = false, pending = false, shadowPresent = false;
     uint32_t width = 0;
     uint64_t generation = 0, mutationSerial = 0, writeGeneration = 0, bankEpoch = 0;
+    uint64_t writeFrame = 0;
+    uint32_t writeSequence = 0;
 };
 struct FlatProjectionBounceSource {
     uint32_t width = 0;
@@ -77,7 +80,7 @@ public:
     void pollColdReadbacks(); // owner Present; never flushes or blocks on Map
     bool observeCreateBuffer(ID3D11Buffer* buffer, const void* initialData);
     void observeMap(ID3D11Resource* resource, D3D11_MAP type, const void* bytes);
-    void observeUnmap(ID3D11Resource* resource);
+    void observeUnmap(ID3D11Resource* resource, uint64_t frame = 0, uint32_t sequence = 0);
     // Called after the real Map and before observeMap invalidates the shadow.
     FlatProjectionBounceSource bounceSource(ID3D11Resource* resource);
     bool containsTracked(ID3D11Resource* resource) { return find(resource) != nullptr; }
@@ -91,7 +94,8 @@ public:
         bounceMapped_ = mapped; bounceFullWrite_ = fullWrite;
         bounceRegistered_ = registered;
     }
-    void observeUpdate(ID3D11Resource* resource, const void* bytes, const D3D11_BOX* box);
+    void observeUpdate(ID3D11Resource* resource, const void* bytes, const D3D11_BOX* box,
+                       uint64_t frame = 0, uint32_t sequence = 0);
     void invalidate(ID3D11Resource* resource);
     void invalidateAll();
 
@@ -130,6 +134,8 @@ private:
         bool mapped = false, promoted = false, privateReady = false, pending = false;
         bool mutationOverflow = false;
         uint64_t mutationSerial = 1;
+        uint64_t writeFrame = 0;
+        uint32_t writeSequence = 0;
         const void* mapBytes = nullptr;
         FlatProjectionPrivateBuffer privateBuffer;
         // Live plans referencing this buffer; promoted only while nonzero, so
@@ -203,6 +209,7 @@ private:
     CachedPlan* findPlan(const FlatProjectionRuntimeRequest* requests, uint32_t count,
                          const FlatProjectionJitter& jitter, uint32_t phase);
     CachedPlan* findTopology(const FlatProjectionRuntimeRequest* requests, uint32_t count);
+    bool privateBufferActive(ID3D11Buffer*) const;
     void invalidatePreparedPlans();
     bool actualBindings(const FlatProjectionRuntimeRequest* requests, uint32_t count);
 };

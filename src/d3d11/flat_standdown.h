@@ -119,7 +119,8 @@ enum class FlatStandDownEvent : uint8_t { None, Entered, Resumed };
 inline constexpr const char* kFlatStandDownPausedWork =
     "per-draw coverage classification and legacy projection readiness "
     "(shader/viewport/binding checks, jitter preparation), constant-buffer shadow "
-    "tracking on every Map/Unmap/Update, the camera-write witness, the camera "
+    "tracking except original cold certification in the bounded probe frame, "
+    "the camera-write witness, the camera "
     "refresh hook, engine-motion hooks and shader/render-target substitution, the "
     "discovery observers, the draw-capture and audit probes; kept: the O(1) state "
     "trackers (viewport, constant-buffer binds, ClearState)";
