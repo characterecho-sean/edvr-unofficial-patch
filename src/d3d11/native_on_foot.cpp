@@ -727,6 +727,361 @@ void avatarCensusLine(uint64_t nowMs) {
     for (uint32_t i = 0; i < n; ++i) logAvatarRow(rows[i]);
 }
 
+// ---- F4: the two read-only instruments (TEMPORARY; they go when the arc closes) -------------------------------------------------------
+// Each hook reads game memory under SEH, records what it read, then calls the original with the same registers (the relay jumps here, and
+// the trampoline is the original). Nothing is written to the game. One relay page and one gate per hook; the identity check and the
+// prologue bytes are compared before any patch, as the setter hook does. A read that faults 16 times stops that hook's reads for the session.
+// The tables are guarded by a tiny spinlock (the hooks run on the game's threads); the frame thread takes the window and resets it.
+std::atomic_flag g_hudLock = ATOMIC_FLAG_INIT;
+struct HudLockGuard {
+    HudLockGuard() noexcept {
+        while (g_hudLock.test_and_set(std::memory_order_acquire)) _mm_pause();
+    }
+    ~HudLockGuard() { g_hudLock.clear(std::memory_order_release); }
+};
+struct HudItemKey {
+    uint64_t view = 0, mask = 0, calls = 0, pass = 0, rec = 0;   // rec: the recorder's image RVA, 0 when unreadable
+    uint32_t enable = 0;                                         // the item's enable byte; 0x100 when it did not read
+    bool recDone = false;
+};
+struct HudGroupKey {
+    uint64_t vtRva = 0, calls = 0;
+    uint32_t byte30 = 0, n = 0;   // n: the last dword [sub+0x88] seen in the window; 0xFFFFFFFF when unreadable
+    bool vtOk = false;            // false: the vtable is outside the image (printed as "?")
+};
+HudItemKey g_hudItems[nofoot::kHudItemPairs];     // guarded by g_hudLock
+size_t g_hudItemsUsed = 0;
+uint64_t g_hudItemCalls = 0, g_hudItemOverflow = 0, g_hudItemFaults = 0;
+HudGroupKey g_hudGroups[nofoot::kHudGroupPairs];  // guarded by g_hudLock
+size_t g_hudGroupsUsed = 0;
+uint64_t g_hudGroupCalls = 0, g_hudGroupOverflow = 0, g_hudGroupFaults = 0;
+uint64_t g_hudFrames = 0;                         // frame boundaries in the window; guarded by g_hudLock
+std::atomic<bool> g_hudItemStop{false}, g_hudGroupStop{false};
+std::atomic<uintptr_t> g_hudBase{0};              // the game image base, set before either hook is patched
+bool g_hudTried = false;                          // frame thread only
+bool g_hudItemArmed = false, g_hudGroupArmed = false;
+uint64_t g_hudWindowMs = 0;
+
+// The recorder the item names (H1's recorder chain), read under SEH: its function as an image RVA, or 0 when a read fails or the
+// value is outside the image.
+uint64_t hudRecorderRva(void* self, void* item) noexcept {
+    const uintptr_t base = g_hudBase.load(std::memory_order_relaxed);
+    uint64_t p = 0, node = 0, x = 0, fn = 0;
+    uint32_t idx = 0;
+    if (!guardedRead(reinterpret_cast<uintptr_t>(self) + nofoot::kHudRecSourceOff, &p, 8) || p < 0x10000) return 0;
+    if (!guardedRead(static_cast<uintptr_t>(p) + nofoot::kHudRecIndexOff, &idx, 4) || idx >= 0x1000) return 0;
+    const uintptr_t slot = reinterpret_cast<uintptr_t>(item) + nofoot::kHudItemNodesOff + static_cast<uintptr_t>(idx) * 8;
+    if (!guardedRead(slot, &node, 8) || node < 0x10000) return 0;
+    if (!guardedRead(static_cast<uintptr_t>(node) + nofoot::kHudNodeXOff, &x, 8) || x < 0x10000) return 0;
+    if (!guardedRead(static_cast<uintptr_t>(x) + nofoot::kHudXFnOff, &fn, 8)) return 0;
+    if (fn < base || fn >= base + ecm::kExpectedImageSize) return 0;
+    return fn - base;
+}
+
+void hudItemRecord(void* self, void* item) noexcept {
+    uint64_t view = 0, mask = 0;
+    uint8_t enable = 0;
+    const uintptr_t s = reinterpret_cast<uintptr_t>(self), it = reinterpret_cast<uintptr_t>(item);
+    const bool okView = guardedRead(s + nofoot::kHudViewOff, &view, 8);
+    const bool okMask = guardedRead(it + nofoot::kHudItemMaskOff, &mask, 8);
+    const bool okEnable = guardedRead(it + nofoot::kHudItemEnableOff, &enable, 1);
+    HudLockGuard lock;
+    ++g_hudItemCalls;
+    if (!okView || !okMask) {
+        if (++g_hudItemFaults >= 16) g_hudItemStop.store(true, std::memory_order_relaxed);
+        return;
+    }
+    HudItemKey* key = nullptr;
+    for (size_t i = 0; i < g_hudItemsUsed; ++i) {
+        if (g_hudItems[i].view == view && g_hudItems[i].mask == mask) {
+            key = &g_hudItems[i];
+            break;
+        }
+    }
+    if (!key) {
+        if (g_hudItemsUsed >= nofoot::kHudItemPairs) {
+            ++g_hudItemOverflow;
+            return;
+        }
+        key = &g_hudItems[g_hudItemsUsed++];
+        key->view = view;
+        key->mask = mask;
+    }
+    ++key->calls;
+    if (nofoot::hudItemPass(view, mask)) ++key->pass;
+    key->enable = okEnable ? enable : 0x100u;
+    if (!key->recDone) {
+        key->rec = hudRecorderRva(self, item);   // the first sight of this pair, once per window
+        key->recDone = true;
+    }
+}
+
+void hudGroupRecord(void* sub) noexcept {
+    uint64_t vt = 0;
+    uint8_t b = 0;
+    uint32_t n = 0;
+    const uintptr_t s = reinterpret_cast<uintptr_t>(sub);
+    const uintptr_t base = g_hudBase.load(std::memory_order_relaxed);
+    const bool okVt = guardedRead(s, &vt, 8);
+    const bool okB = guardedRead(s + nofoot::kHudGroupByteOff, &b, 1);
+    const bool okN = guardedRead(s + nofoot::kHudGroupCountOff, &n, 4);
+    const bool inImage = okVt && vt >= base && vt < base + ecm::kExpectedImageSize;
+    HudLockGuard lock;
+    ++g_hudGroupCalls;
+    if (!okVt || !okB) {
+        if (++g_hudGroupFaults >= 16) g_hudGroupStop.store(true, std::memory_order_relaxed);
+        return;
+    }
+    const uint64_t vtRva = inImage ? vt - base : 0;
+    HudGroupKey* key = nullptr;
+    for (size_t i = 0; i < g_hudGroupsUsed; ++i) {
+        if (g_hudGroups[i].vtOk == inImage && g_hudGroups[i].vtRva == vtRva && g_hudGroups[i].byte30 == b) {
+            key = &g_hudGroups[i];
+            break;
+        }
+    }
+    if (!key) {
+        if (g_hudGroupsUsed >= nofoot::kHudGroupPairs) {
+            ++g_hudGroupOverflow;
+            return;
+        }
+        key = &g_hudGroups[g_hudGroupsUsed++];
+        key->vtOk = inImage;
+        key->vtRva = vtRva;
+        key->byte30 = b;
+    }
+    ++key->calls;
+    key->n = okN ? n : 0xFFFFFFFFu;
+}
+
+// The two hooks. Each is called by its relay in place of the game's function, with the game's registers; it reads, then forwards.
+using HudItemFn = uint64_t(__fastcall*)(void*, void*, uint64_t, uint64_t);
+using HudGroupFn = uint64_t(__fastcall*)(void*, void*, uint64_t, uint64_t);
+HudItemFn g_hudItemOriginal = nullptr;      // the trampoline, set by prepareHudItemRelay before the patch
+HudGroupFn g_hudGroupOriginal = nullptr;
+uint8_t* g_hudItemRelay = nullptr;
+uint8_t* g_hudGroupRelay = nullptr;
+alignas(8) std::atomic<uintptr_t> g_hudItemGate{0};
+alignas(8) std::atomic<uintptr_t> g_hudGroupGate{0};
+CodeHook* g_hudItemHook = nullptr;          // deliberately never deleted, as g_hook
+CodeHook* g_hudGroupHook = nullptr;
+
+uint64_t __fastcall hudItemHooked(void* self, void* item, uint64_t a3, uint64_t a4) {
+    const HudItemFn original = g_hudItemOriginal;
+    if (!original) return 0;
+    if (!g_hudItemStop.load(std::memory_order_relaxed)) hudItemRecord(self, item);   // BEFORE the call: the game may change these
+    return original(self, item, a3, a4);
+}
+
+uint64_t __fastcall hudGroupHooked(void* sub, void* a2, uint64_t a3, uint64_t a4) {
+    const HudGroupFn original = g_hudGroupOriginal;
+    if (!original) return 0;
+    if (!g_hudGroupStop.load(std::memory_order_relaxed)) hudGroupRecord(sub);
+    return original(sub, a2, a3, a4);
+}
+
+// Puts a trampoline into a relay and makes the relay executable (the setter's prepareRelay, for these two relays).
+bool finishHudRelay(uint8_t* relay, void* trampoline) noexcept {
+    const uintptr_t address = reinterpret_cast<uintptr_t>(trampoline);
+    std::memcpy(relay + ecm::kCallbackRelayTrampolineAt, &address, 8);
+    DWORD oldProtect = 0;
+    return VirtualProtect(relay, 4096, PAGE_EXECUTE_READ, &oldProtect) &&
+           FlushInstructionCache(GetCurrentProcess(), relay, ecm::kCallbackRelayBytes);
+}
+bool prepareHudItemRelay(void* trampoline, void*) noexcept {
+    if (!finishHudRelay(g_hudItemRelay, trampoline)) return false;
+    g_hudItemOriginal = reinterpret_cast<HudItemFn>(trampoline);
+    return true;
+}
+bool prepareHudGroupRelay(void* trampoline, void*) noexcept {
+    if (!finishHudRelay(g_hudGroupRelay, trampoline)) return false;
+    g_hudGroupOriginal = reinterpret_cast<HudGroupFn>(trampoline);
+    return true;
+}
+
+struct HudHookSpec {
+    const char* name;
+    uintptr_t rva;
+    const uint8_t* prologue;
+    size_t stolen;
+    void* callback;
+    CodeHook::Prepare prepare;
+    uint8_t** relay;
+    std::atomic<uintptr_t>* gate;
+    CodeHook** hook;
+};
+
+// Installs one read-only hook: the prologue bytes, the stolen length on an instruction boundary, a relay within reach, then CodeHook.
+// Returns false with `whyOut` set, having changed nothing that remains.
+bool installHudHook(const HudHookSpec& s, uintptr_t base, size_t* stolenOut, std::string* whyOut) {
+    const uintptr_t target = base + s.rva;
+    if (!bytesMatch(target, s.prologue, nofoot::kHudPrologueBytes)) {
+        *whyOut = "the 32 prologue bytes are not build 332841's";
+        return false;
+    }
+    size_t covered = 0;
+    while (covered < s.stolen) {
+        size_t rip = 0;
+        const size_t len = codeInstructionLength(reinterpret_cast<const uint8_t*>(target + covered), nofoot::kHudPrologueBytes - covered, &rip);
+        if (!len) {
+            *whyOut = "a prologue instruction is one the decoder does not recognise";
+            return false;
+        }
+        covered += len;
+    }
+    if (covered != s.stolen) {
+        *whyOut = "the prologue does not end on an instruction boundary at the expected byte";
+        return false;
+    }
+    *s.relay = allocateRelay(target);
+    if (!*s.relay) {
+        *whyOut = "no executable memory within two gigabytes of the target";
+        return false;
+    }
+    ecm::buildCallbackRelay(*s.relay, s.gate, s.callback);
+    *s.hook = new CodeHook();
+    if (!(*s.hook)->install(reinterpret_cast<void*>(target), *s.relay, nullptr, s.name, s.prepare, nullptr)) {
+        const char* why = (*s.hook)->refusal();
+        VirtualFree(*s.relay, 0, MEM_RELEASE);
+        *s.relay = nullptr;
+        *whyOut = why[0] ? why : "CodeHook gave no reason";
+        return false;
+    }
+    s.gate->store(1, std::memory_order_seq_cst);
+    *stolenOut = (*s.hook)->stolenBytes();
+    return true;
+}
+
+// Frame thread, once: the VR profile only, behind the identity check. Logs one line per hook, installed or refused.
+void installHudGateOnce() {
+    if (g_hudTried) return;
+    g_hudTried = true;
+    if (!runtimeVrProfile()) {
+        Log::get().note("native on foot hud gate: the read-only instruments are not installed (the flat profile)");
+        return;
+    }
+    const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    const char* peWhy = nullptr;
+    if (!base || !checkIdentity(base, &peWhy)) {
+        Log::get().note("native on foot hud gate: NOT installed -- identity mismatch (%s); the game was not touched.", peWhy ? peWhy : "no module");
+        return;
+    }
+    g_hudBase.store(base, std::memory_order_relaxed);
+    const HudHookSpec item{"native-on-foot-hud-item", nofoot::kHudItemRva, nofoot::kHudItemPrologue, nofoot::kHudItemStolen,
+                           reinterpret_cast<void*>(&hudItemHooked), &prepareHudItemRelay, &g_hudItemRelay, &g_hudItemGate, &g_hudItemHook};
+    const HudHookSpec group{"native-on-foot-hud-group", nofoot::kHudGroupRva, nofoot::kHudGroupPrologue, nofoot::kHudGroupStolen,
+                            reinterpret_cast<void*>(&hudGroupHooked), &prepareHudGroupRelay, &g_hudGroupRelay, &g_hudGroupGate, &g_hudGroupHook};
+    size_t stolen = 0;
+    std::string why;
+    if (installHudHook(item, base, &stolen, &why)) {
+        g_hudItemArmed = true;
+        Log::get().note("native on foot hud gate: installed item hook at EliteDangerous64.exe+0x%llX (per render item, read only), stolen=%zu bytes, "
+                        "prologue %zu bytes verified, relay at 0x%llX.",
+                        static_cast<unsigned long long>(nofoot::kHudItemRva), stolen, nofoot::kHudPrologueBytes,
+                        static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(g_hudItemRelay)));
+    } else {
+        Log::get().note("native on foot hud gate: item hook NOT installed at EliteDangerous64.exe+0x%llX -- %s. The game was not touched by it.",
+                        static_cast<unsigned long long>(nofoot::kHudItemRva), why.c_str());
+    }
+    why.clear();
+    if (installHudHook(group, base, &stolen, &why)) {
+        g_hudGroupArmed = true;
+        Log::get().note("native on foot hud gate: installed group hook at EliteDangerous64.exe+0x%llX (per group, read only), stolen=%zu bytes, "
+                        "prologue %zu bytes verified, relay at 0x%llX.",
+                        static_cast<unsigned long long>(nofoot::kHudGroupRva), stolen, nofoot::kHudPrologueBytes,
+                        static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(g_hudGroupRelay)));
+    } else {
+        Log::get().note("native on foot hud gate: group hook NOT installed at EliteDangerous64.exe+0x%llX -- %s. The game was not touched by it.",
+                        static_cast<unsigned long long>(nofoot::kHudGroupRva), why.c_str());
+    }
+}
+
+// Frame thread, every frame: counts the window's frames and, every 5 s, logs the item pairs (top 24), the groups, and the per-frame totals,
+// tagged with the state the window ends in. Then resets the tables.
+void hudGateTick(uint64_t nowMs) {
+    if (!g_hudItemArmed && !g_hudGroupArmed) return;
+    if (g_hudWindowMs == 0) g_hudWindowMs = nowMs;
+    HudItemKey items[nofoot::kHudItemPairs];
+    HudGroupKey groups[nofoot::kHudGroupPairs];
+    size_t nItems = 0, nGroups = 0;
+    uint64_t itemCalls = 0, groupCalls = 0, itemOver = 0, groupOver = 0, itemFaults = 0, groupFaults = 0, frames = 0;
+    {
+        HudLockGuard lock;
+        ++g_hudFrames;
+        if (nowMs - g_hudWindowMs < 5000) return;
+        nItems = g_hudItemsUsed;
+        for (size_t i = 0; i < nItems; ++i) items[i] = g_hudItems[i];
+        nGroups = g_hudGroupsUsed;
+        for (size_t i = 0; i < nGroups; ++i) groups[i] = g_hudGroups[i];
+        itemCalls = g_hudItemCalls;
+        groupCalls = g_hudGroupCalls;
+        itemOver = g_hudItemOverflow;
+        groupOver = g_hudGroupOverflow;
+        itemFaults = g_hudItemFaults;
+        groupFaults = g_hudGroupFaults;
+        frames = g_hudFrames;
+        for (auto& k : g_hudItems) k = HudItemKey{};
+        for (auto& k : g_hudGroups) k = HudGroupKey{};
+        g_hudItemsUsed = 0;
+        g_hudGroupsUsed = 0;
+        g_hudItemCalls = g_hudGroupCalls = g_hudItemOverflow = g_hudGroupOverflow = 0;
+        g_hudItemFaults = g_hudGroupFaults = 0;
+        g_hudFrames = 0;
+    }
+    g_hudWindowMs = nowMs;
+    const char* state = nativeOnFootActive() ? "native" : (journalOnFootKnown() && journalOnFoot()) ? "cinema" : "ship/other";
+    // Top by calls: a simple insertion sort over at most 64 pairs.
+    for (size_t i = 1; i < nItems; ++i) {
+        for (size_t j = i; j > 0 && items[j].calls > items[j - 1].calls; --j) {
+            const HudItemKey t = items[j];
+            items[j] = items[j - 1];
+            items[j - 1] = t;
+        }
+    }
+    if (nItems == 0) Log::get().note("native on foot hud gate items [%s]: no item calls in the window", state);
+    uint64_t moreCalls = 0;
+    for (size_t i = 0; i < nItems; ++i) {
+        const HudItemKey& k = items[i];
+        if (i >= nofoot::kHudLogItems) {
+            moreCalls += k.calls;
+            continue;
+        }
+        char rec[24];
+        if (k.rec) std::snprintf(rec, sizeof(rec), "+0x%llX", static_cast<unsigned long long>(k.rec));
+        else std::snprintf(rec, sizeof(rec), "?");
+        Log::get().note("native on foot hud gate items [%s]: V=0x%016llX M=0x%016llX calls=%llu pass=%llu rec=%s e=0x%03X", state,
+                        static_cast<unsigned long long>(k.view), static_cast<unsigned long long>(k.mask), static_cast<unsigned long long>(k.calls),
+                        static_cast<unsigned long long>(k.pass), rec, k.enable);
+    }
+    if (nItems > nofoot::kHudLogItems) {
+        Log::get().note("native on foot hud gate items [%s]: ... %zu more pairs (%llu calls)%s", state, nItems - nofoot::kHudLogItems,
+                        static_cast<unsigned long long>(moreCalls), itemOver ? " and some not keyed (table full)" : "");
+    }
+    if (nGroups == 0) Log::get().note("native on foot hud gate groups [%s]: no group calls in the window", state);
+    for (size_t i = 1; i < nGroups; ++i) {
+        for (size_t j = i; j > 0 && groups[j].calls > groups[j - 1].calls; --j) {
+            const HudGroupKey t = groups[j];
+            groups[j] = groups[j - 1];
+            groups[j - 1] = t;
+        }
+    }
+    for (size_t i = 0; i < nGroups; ++i) {
+        const HudGroupKey& g = groups[i];
+        char vt[24];
+        if (g.vtOk) std::snprintf(vt, sizeof(vt), "+0x%llX", static_cast<unsigned long long>(g.vtRva));
+        else std::snprintf(vt, sizeof(vt), "?");
+        Log::get().note("native on foot hud gate groups [%s]: vt=%s byte30=%u calls=%llu n=%u", state, vt, g.byte30,
+                        static_cast<unsigned long long>(g.calls), g.n);
+    }
+    const double f = frames ? static_cast<double>(frames) : 1.0;
+    Log::get().note("native on foot hud gate totals [%s]: frames=%llu item_calls=%llu (%.1f per frame) group_calls=%llu (%.1f per frame) "
+                    "item_faults=%llu group_faults=%llu overflow=%llu/%llu",
+                    state, static_cast<unsigned long long>(frames), static_cast<unsigned long long>(itemCalls),
+                    static_cast<double>(itemCalls) / f, static_cast<unsigned long long>(groupCalls), static_cast<double>(groupCalls) / f,
+                    static_cast<unsigned long long>(itemFaults), static_cast<unsigned long long>(groupFaults),
+                    static_cast<unsigned long long>(itemOver), static_cast<unsigned long long>(groupOver));
+}
+
 }  // namespace
 
 // The probe's capture (declared in native_on_foot.h, called from beginPanelOverride on the draw thread for the two HUD issuers). One load,
@@ -756,6 +1111,7 @@ void nativeOnFootHudCapture(int index, uint64_t vs) {
 void nativeOnFootFrameBoundary(uint32_t frameNo) {
     (void)frameNo;
     if (g_install == InstallState::NotTried) installOnce();
+    installHudGateOnce();   // F4: the two read-only instruments (VR profile; once)
     if (g_install == InstallState::Armed) readKey();
     drainEvents();
     if (!g_hudArmedNoted) {
@@ -786,6 +1142,7 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
     gateLine(now);
     avatarLine(now);
     avatarCensusLine(now);
+    hudGateTick(now);
     neckLine(now);
 }
 

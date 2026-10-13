@@ -124,5 +124,30 @@ inline int hudIssuerIndex(uint64_t vs) {
     return vs == kHudIssuerVs[0] ? 0 : vs == kHudIssuerVs[1] ? 1 : -1;
 }
 
+// ---- F4: two read-only instruments (TEMPORARY; they go when the arc closes). native_on_foot.cpp holds the hooks. ----
+// H1: the per-item function. rcx = this (the render-item owner), rdx = item. Its stolen prefix is mov r11,rsp (3) / push rdi (1) / push
+// r14 (2), so the 5-byte jump is rounded up to 6 bytes at the instruction boundary.
+constexpr uintptr_t kHudItemRva = 0x594D90;
+constexpr size_t kHudItemStolen = 6;
+// H2: the per-group function, vtable slot 3. rcx = sub (the group). Its stolen prefix is mov [rsp+8],rbx: exactly 5 bytes.
+constexpr uintptr_t kHudGroupRva = 0x58AF30;
+constexpr size_t kHudGroupStolen = 5;
+constexpr size_t kHudPrologueBytes = 32;
+constexpr uint8_t kHudItemPrologue[kHudPrologueBytes] = {
+    0x4c, 0x8b, 0xdc, 0x57, 0x41, 0x56, 0x48, 0x81, 0xec, 0x58, 0x04, 0x00, 0x00, 0x48, 0x8b, 0x81,
+    0x70, 0x02, 0x00, 0x00, 0x4c, 0x8b, 0xf2, 0x48, 0x89, 0x91, 0x60, 0x02, 0x00, 0x00, 0x48, 0x8b};
+constexpr uint8_t kHudGroupPrologue[kHudPrologueBytes] = {
+    0x48, 0x89, 0x5c, 0x24, 0x08, 0x48, 0x89, 0x74, 0x24, 0x10, 0x57, 0x48, 0x83, 0xec, 0x20, 0x80,
+    0x79, 0x30, 0x00, 0x48, 0x8b, 0xf2, 0x48, 0x8b, 0xd9, 0x74, 0x37, 0x33, 0xff, 0x39, 0xb9, 0x88};
+// The fields read. Item: V = [this+0x270] (the view mask), M = [item+0x30] (the item mask), E = [item+0x38]. The recorder: idx =
+// dword [[this+0x250]+0x8e8]; node = qword [item+0x40+idx*8]; X = qword [node+0x20]; fn = qword [X+8]. Group: vt = qword [sub],
+// B = byte [sub+0x30], N = dword [sub+0x88].
+constexpr uint32_t kHudViewOff = 0x270, kHudItemMaskOff = 0x30, kHudItemEnableOff = 0x38, kHudRecSourceOff = 0x250, kHudRecIndexOff = 0x8e8,
+                   kHudItemNodesOff = 0x40, kHudNodeXOff = 0x20, kHudXFnOff = 0x8;
+constexpr uint32_t kHudGroupByteOff = 0x30, kHudGroupCountOff = 0x88;
+constexpr size_t kHudItemPairs = 64, kHudGroupPairs = 32, kHudLogItems = 24;
+// Pass: the view and the item share a bit (the item is visible from this view).
+inline bool hudItemPass(uint64_t view, uint64_t mask) { return (view & mask) != 0; }
+
 }  // namespace nofoot
 }  // namespace edvr
