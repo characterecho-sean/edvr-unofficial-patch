@@ -8,11 +8,13 @@
 // ecm::kExpectedImageSize) has a render-mode setter, a virtual function reached only through the vtable at image RVA 0x52E9608, slot 5
 // (byte offset 0x28), at function RVA 0x28723C0. Its signature is void(__fastcall*)(void* selector, uint32_t mode). It records the mode
 // it was asked for in selector+0x20 (the source mode); selector+0x58 is the renderer owner, and owner+0x60 points back at selector.
-// Mode 3 is HMD stereo, mode 5 is Cinema (the flat screen shown in the headset). Elite asks for 5 when the commander disembarks and 3
-// when they return aboard.
+// The modes come in pairs: each cinema mode (the flat screen shown in the headset) has an HMD partner (the headset's own stereo). The
+// setter's remap at 0x28873C0 uses the same pairs. Pair A is 5 (cinema) and 3 (HMD); pair B is 6 (cinema) and 4 (HMD). Flight F0 on
+// Epic (Pimax OpenXR) logged mode 6 at disembark, with the rig's HMD mode 4; the first build assumed only the A pair and never fired.
 //
-// THE SUBSTITUTION. An incoming 5 is forwarded as 3, once, on the caller's thread, when every gate below admits it. Anything else is
-// forwarded unchanged. Nothing here calls the setter itself, writes selector+0x20, or touches the settings words.
+// THE SUBSTITUTION. An incoming cinema mode (5 or 6) is forwarded as its HMD partner (3 or 4), once, on the caller's thread, when every
+// gate below admits it. Anything else is forwarded unchanged. Nothing here calls the setter itself, writes selector+0x20, or touches
+// the settings words.
 
 #include <cstddef>
 #include <cstdint>
@@ -25,8 +27,10 @@ namespace nofoot {
 constexpr uintptr_t kSetterRva = 0x28723C0;          // the render-mode setter's entry (EliteDangerous64.exe+0x28723C0)
 constexpr uintptr_t kSetterVtableRva = 0x52E9608;    // the vtable that holds the setter
 constexpr size_t kSetterSlotOffset = 0x28;           // slot 5 of that vtable (5 * 8)
-constexpr uint32_t kModeHmd = 3;                     // HMD stereo
-constexpr uint32_t kModeCinema = 5;                  // the flat cinema screen, shown in the headset
+constexpr uint32_t kModeHmdA = 3;                    // HMD stereo, pair A
+constexpr uint32_t kModeCinemaA = 5;                 // the flat cinema screen shown in the headset, pair A
+constexpr uint32_t kModeHmdB = 4;                    // HMD stereo, pair B (the rig Sean flies on: the main menu runs in 4 too)
+constexpr uint32_t kModeCinemaB = 6;                 // the flat cinema screen shown in the headset, pair B
 constexpr size_t kSourceModeOffset = 0x20;           // selector+0x20: the source mode the setter writes
 constexpr size_t kOwnerOffset = 0x58;                // selector+0x58: the renderer owner
 constexpr size_t kOwnerSelectorOffset = 0x60;        // owner+0x60: must be the selector again
@@ -48,11 +52,11 @@ constexpr uint8_t kPrologue[kPrologueBytes] = {
 
 // Why a call was or was not substituted. The order is the order of the checks.
 enum class Reason : uint8_t {
-    NotCinema,        // the incoming mode is not 5: forwarded unchanged (3 always is; so is anything else)
-    KeyOff,           // incoming 5, but fix.native_on_foot is off
-    SelectorInvalid,  // incoming 5, but the selector's owner does not point back at it: not a renderer this build knows
-    SelectorMismatch, // incoming 5 on a selector other than the one frozen at the first valid call
-    NoGameSession,    // incoming 5 with the key on, but the journal has not seen LoadGame (or has seen Shutdown): a menu, not a session
+    NotCinema,        // the incoming mode is not a cinema mode (5 or 6): forwarded unchanged (HMD modes always are)
+    KeyOff,           // incoming cinema mode, but fix.native_on_foot is off
+    SelectorInvalid,  // incoming cinema mode, but the selector's owner does not point back at it: not a renderer this build knows
+    SelectorMismatch, // incoming cinema mode on a selector other than the one frozen at the first valid call
+    NoGameSession,    // incoming cinema mode with the key on, but the journal has not seen LoadGame (or has seen Shutdown): a menu, not a session
     Admitted          // substituted: forwarded as 3
 };
 
@@ -64,9 +68,12 @@ struct Inputs {
     bool gameSession = false;      // journalGameplay(): LoadGame seen in this process and no Shutdown since
 };
 
+inline bool isCinemaMode(uint32_t mode) { return mode == kModeCinemaA || mode == kModeCinemaB; }
+inline bool isHmdMode(uint32_t mode) { return mode == kModeHmdA || mode == kModeHmdB; }
+
 // The admission rule. Pure: the hook supplies the facts it has just read, and the answer is the only thing that substitutes.
 inline Reason admit(const Inputs& in) {
-    if (in.incoming != kModeCinema) return Reason::NotCinema;
+    if (!isCinemaMode(in.incoming)) return Reason::NotCinema;
     if (!in.keyOn) return Reason::KeyOff;
     if (!in.selectorValid) return Reason::SelectorInvalid;
     if (!in.selectorFrozen) return Reason::SelectorMismatch;
@@ -74,9 +81,10 @@ inline Reason admit(const Inputs& in) {
     return Reason::Admitted;
 }
 
-// The mode the original is forwarded with: 3 for an admitted 5, otherwise what was asked.
+// The mode the original is forwarded with: the HMD partner of an admitted cinema mode (5 -> 3, 6 -> 4), otherwise what was asked.
 inline uint32_t effectiveMode(Reason r, uint32_t incoming) {
-    return r == Reason::Admitted ? kModeHmd : incoming;
+    if (r != Reason::Admitted) return incoming;
+    return incoming == kModeCinemaA ? kModeHmdA : kModeHmdB;
 }
 
 inline const char* reasonName(Reason r) {

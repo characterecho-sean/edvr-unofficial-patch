@@ -3,7 +3,7 @@
 //
 // THE HOOK (VR profile only). A CodeHook on the game's render-mode setter (EliteDangerous64.exe+0x28723C0, build 332841), installed
 // by the first frame boundary. It is installed whether or not fix.native_on_foot is on, so every natural mode request is logged. An
-// incoming 5 (Cinema) is forwarded as 3 (HMD stereo) when the key is on, the selector is the one frozen at the first valid call, and
+// an incoming cinema mode (5 or 6) is forwarded as its HMD partner (3 or 4) when the key is on, the selector is the one frozen at the first valid call, and
 // the journal says a game session is live. Everything else is forwarded unchanged.
 //
 // THE KEY. fix.native_on_foot, on/off, default off. TEMPORARY (F0): it goes away when the feature ships as behaviour. The frame
@@ -12,7 +12,7 @@
 // THE LOG. One line per setter call (the rare ones), queued by the game's thread and written at the frame boundary; one line every
 // 5 s while the native stereo flag is set, with the gate counters (cumulative since launch).
 //
-// THE FLAG. nativeOnFootActive() is true from a substitution until the next forwarded natural 3.
+// THE FLAG. nativeOnFootActive() is true from a substitution until the next forwarded natural HMD mode (3 or 4).
 //
 // THE GATES. Log-only counters, no behaviour: each engaged gate calls nativeOnFootCountGate() and counts only while the flag is set.
 #include <atomic>
@@ -37,7 +37,7 @@ enum class NativeOnFootGate : uint8_t {
 inline std::atomic<bool> g_nativeOnFootActive{false};
 inline std::atomic<uint64_t> g_nativeOnFootGates[size_t(NativeOnFootGate::Count)];
 
-// The native stereo flag: true from a substitution until the next forwarded natural 3.
+// The native stereo flag: true from a substitution until the next forwarded natural HMD mode (3 or 4).
 inline bool nativeOnFootActive() { return g_nativeOnFootActive.load(std::memory_order_relaxed); }
 
 // Count one engagement of a gate, only while the flag is set. A relaxed atomic add, safe from any thread.

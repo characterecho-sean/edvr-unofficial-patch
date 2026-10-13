@@ -129,7 +129,7 @@ void __fastcall setterHooked(void* selectorPtr, uint32_t incoming) {
     ev.seated = journalSeatedKnown() ? (journalSeated() ? 1 : 0) : 2;
     // The flag is set before the call, so a frame boundary that runs while the original is inside it sees the session.
     if (ev.admitted) g_nativeOnFootActive.store(true, std::memory_order_relaxed);
-    else if (ev.effective == nofoot::kModeHmd) g_nativeOnFootActive.store(false, std::memory_order_relaxed);
+    else if (nofoot::isHmdMode(ev.effective)) g_nativeOnFootActive.store(false, std::memory_order_relaxed);
     g_original(selectorPtr, ev.effective);
     uint32_t after = 0;
     ev.sourceReadOk = guardedRead(selector + nofoot::kSourceModeOffset, &after, sizeof(after));
