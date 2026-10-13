@@ -1,7 +1,9 @@
-// Hardware integration rig for the exact EDVR XeSS bridge. Run --gpu-test
-// inside the disposable Proton prefix with the selected Intel Vulkan ICD.
+// Hardware integration rig for the exact EDVR XeSS bridge. --gpu-test is
+// strict; --gpu-test-if-available skips only absent required capabilities.
 #include <windows.h>
 #include <d3d11_4.h>
+#include <d3d12.h>
+#include <dxgi1_2.h>
 #include <wrl/client.h>
 #include <cstdarg>
 #include <cstdio>
@@ -9,6 +11,8 @@
 
 #include "../../src/common/log.h"
 #include "../../src/d3d11/xess_engine.h"
+#include "../../src/d3d11/xess_feature_latch.h"
+#include "../../src/d3d11/xess_runtime_version.h"
 
 using Microsoft::WRL::ComPtr;
 
@@ -27,6 +31,149 @@ namespace {
 bool check(bool okay, const char* stage) {
     if (!okay) std::fprintf(stderr, "xess_engine_test: FAILED %s\n", stage);
     return okay;
+}
+
+bool latchSelfTest() {
+    edvr::XessFeatureFailureLatch latch;
+    const edvr::XessFeatureKey original{640, 360, 1280, 720, false};
+    if (!check(!latch.matches(original), "new key is not failed")) return false;
+    latch.record(original, "xessD3D12Init returned 7");
+    if (!check(latch.matches(original) &&
+               std::strcmp(latch.reason(), "xessD3D12Init returned 7") == 0,
+               "failed key keeps its precise reason")) return false;
+    latch.clearIfDifferent(original);
+    if (!check(latch.matches(original), "same key stays failed without retry")) return false;
+    const edvr::XessFeatureKey changes[] = {
+        {641, 360, 1280, 720, false}, {640, 361, 1280, 720, false},
+        {640, 360, 1281, 720, false}, {640, 360, 1280, 721, false},
+        {640, 360, 1280, 720, true},
+    };
+    for (const auto& changed : changes) {
+        latch.record(original, "unavailable quality");
+        latch.clearIfDifferent(changed);
+        if (!check(!latch.matches(original) && !latch.matches(changed),
+                   "size or HDR change clears failed key")) return false;
+    }
+    latch.record(original, "shared texture failed");
+    latch.clear();
+    return check(!latch.matches(original), "mode reset clears failed key");
+}
+
+bool missingCapability(HRESULT hr) {
+    return hr == DXGI_ERROR_UNSUPPORTED || hr == DXGI_ERROR_NOT_FOUND;
+}
+
+bool xessUnsupportedDeviceOrDriver(const char* reason) {
+    if (!reason) return false;
+    return std::strcmp(reason, "xessD3D12CreateContext returned -1") == 0 ||
+           std::strcmp(reason, "xessD3D12CreateContext returned -2") == 0 ||
+           std::strcmp(reason, "xessD3D12Init returned -1") == 0 ||
+           std::strcmp(reason, "xessD3D12Init returned -2") == 0;
+}
+
+bool gateSelfTest() {
+    return check(edvr::xessSrRuntimeCompatible(2, 0, 2) &&
+                 edvr::xessSrRuntimeCompatible(2, 0, 89) &&
+                 !edvr::xessSrRuntimeCompatible(2, 1, 0) &&
+                 !edvr::xessSrRuntimeCompatible(3, 0, 2) &&
+                 !edvr::xessSrRuntimeCompatible(2, 0, 90),
+                 "XeSS-SR version gate rejects incompatible ABI") &&
+           check(missingCapability(DXGI_ERROR_UNSUPPORTED) &&
+                 missingCapability(DXGI_ERROR_NOT_FOUND) &&
+                 !missingCapability(E_FAIL) &&
+                 !missingCapability(DXGI_ERROR_DEVICE_REMOVED),
+                 "GPU gate skips only explicit missing capabilities") &&
+           check(xessUnsupportedDeviceOrDriver("xessD3D12CreateContext returned -1") &&
+                 xessUnsupportedDeviceOrDriver("xessD3D12Init returned -2") &&
+                 !xessUnsupportedDeviceOrDriver("xessD3D12Init returned -6") &&
+                 !xessUnsupportedDeviceOrDriver("D3D11 output Wait failed"),
+                 "GPU gate fails real bridge and runtime errors");
+}
+
+enum class Probe { Ready, Skip, Fail };
+
+Probe hardwareAdapterPresent() {
+    ComPtr<IDXGIFactory1> factory;
+    HRESULT hr = CreateDXGIFactory1(IID_PPV_ARGS(factory.GetAddressOf()));
+    if (FAILED(hr)) {
+        std::fprintf(stderr, "xess_engine_test: FAILED DXGI factory 0x%08X\n", unsigned(hr));
+        return Probe::Fail;
+    }
+    for (UINT index = 0;; ++index) {
+        ComPtr<IDXGIAdapter1> adapter;
+        hr = factory->EnumAdapters1(index, adapter.GetAddressOf());
+        if (hr == DXGI_ERROR_NOT_FOUND) break;
+        if (FAILED(hr)) {
+            std::fprintf(stderr, "xess_engine_test: FAILED DXGI adapter enumeration 0x%08X\n", unsigned(hr));
+            return Probe::Fail;
+        }
+        DXGI_ADAPTER_DESC1 desc{};
+        hr = adapter->GetDesc1(&desc);
+        if (FAILED(hr)) {
+            std::fprintf(stderr, "xess_engine_test: FAILED DXGI adapter description 0x%08X\n", unsigned(hr));
+            return Probe::Fail;
+        }
+        if (!(desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)) return Probe::Ready;
+    }
+    std::puts("xess_engine_test: SKIP no hardware DXGI adapter");
+    return Probe::Skip;
+}
+
+Probe optionalHardwareProbe(ID3D11Device* device) {
+    ComPtr<ID3D11Device5> d11v5;
+    HRESULT hr = device->QueryInterface(IID_PPV_ARGS(d11v5.GetAddressOf()));
+    if (hr == E_NOINTERFACE) {
+        std::puts("xess_engine_test: SKIP no ID3D11Device5/shared fences");
+        return Probe::Skip;
+    }
+    if (FAILED(hr)) {
+        std::fprintf(stderr, "xess_engine_test: FAILED ID3D11Device5 query 0x%08X\n", unsigned(hr));
+        return Probe::Fail;
+    }
+    ComPtr<IDXGIDevice> dxgi;
+    ComPtr<IDXGIAdapter> adapter;
+    if (FAILED(hr = device->QueryInterface(IID_PPV_ARGS(dxgi.GetAddressOf()))) ||
+        FAILED(hr = dxgi->GetAdapter(adapter.GetAddressOf()))) {
+        std::fprintf(stderr, "xess_engine_test: FAILED D3D11 adapter query 0x%08X\n", unsigned(hr));
+        return Probe::Fail;
+    }
+    struct Module {
+        HMODULE handle = LoadLibraryExW(L"d3d12.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        ~Module() { if (handle) FreeLibrary(handle); }
+    } module;
+    if (!module.handle) {
+        std::fprintf(stderr, "xess_engine_test: FAILED System32 d3d12.dll load Win32=%lu\n", GetLastError());
+        return Probe::Fail;
+    }
+    using CreateDevice = HRESULT(WINAPI*)(IUnknown*, D3D_FEATURE_LEVEL, REFIID, void**);
+    const auto create = reinterpret_cast<CreateDevice>(GetProcAddress(module.handle, "D3D12CreateDevice"));
+    if (!create) {
+        std::puts("xess_engine_test: FAILED D3D12CreateDevice export missing");
+        return Probe::Fail;
+    }
+    ComPtr<ID3D12Device> d12;
+    hr = create(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(d12.GetAddressOf()));
+    if (hr == DXGI_ERROR_UNSUPPORTED) {
+        std::puts("xess_engine_test: SKIP adapter has no D3D12 device");
+        return Probe::Skip;
+    }
+    if (FAILED(hr)) {
+        std::fprintf(stderr, "xess_engine_test: FAILED D3D12CreateDevice 0x%08X\n", unsigned(hr));
+        return Probe::Fail;
+    }
+    D3D12_FEATURE_DATA_SHADER_MODEL model{D3D_SHADER_MODEL_6_4};
+    hr = d12->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &model, sizeof(model));
+    if (FAILED(hr)) {
+        std::fprintf(stderr, "xess_engine_test: FAILED D3D12 shader model query 0x%08X\n", unsigned(hr));
+        return Probe::Fail;
+    }
+    if (model.HighestShaderModel < D3D_SHADER_MODEL_6_4) {
+        std::fprintf(stdout, "xess_engine_test: SKIP Shader Model %u below XeSS minimum 6.4\n",
+                     unsigned(model.HighestShaderModel));
+        return Probe::Skip;
+    }
+    std::puts("xess_engine_test: GPU capability present (D3D11 shared fences, D3D12 Shader Model >=6.4)");
+    return Probe::Ready;
 }
 
 ComPtr<ID3D11Texture2D> texture(ID3D11Device* device, UINT width, UINT height,
@@ -74,7 +221,9 @@ bool hasPixel(ID3D11Device* device, ID3D11DeviceContext* context, ID3D11Texture2
 }
 
 bool flight(ID3D11Device* device, ID3D11DeviceContext* context,
-            UINT width, UINT height, UINT outW, UINT outH, bool hdr) {
+            UINT width, UINT height, UINT outW, UINT outH, bool hdr,
+            const char** failureReason = nullptr) {
+    if (failureReason) *failureReason = nullptr;
     const DXGI_FORMAT colorFormat = hdr ? DXGI_FORMAT_R11G11B10_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM;
     const DXGI_FORMAT outFormat = hdr ? DXGI_FORMAT_R16G16B16A16_FLOAT : colorFormat;
     const UINT inBinds = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
@@ -94,6 +243,7 @@ bool flight(ID3D11Device* device, ID3D11DeviceContext* context,
         if (!edvr::xessEvaluate(context, 0, color.Get(), depth.Get(), motion.Get(),
                                 output.Get(), width, height, outW, outH,
                                 0.0f, 0.0f, frame == 0, hdr, &why)) {
+            if (failureReason) *failureReason = why;
             std::fprintf(stderr, "xess_engine_test: frame %u refused: %s\n", frame,
                          why ? why : "unspecified");
             return false;
@@ -109,25 +259,51 @@ bool flight(ID3D11Device* device, ID3D11DeviceContext* context,
 int main(int argc, char** argv) {
     if (argc != 2) return 2;
     if (std::strcmp(argv[1], "--dry-run") == 0) {
-        std::puts("xess_engine_test: hardware flights planned; no files or device created");
+        std::puts("xess_engine_test: strict and capability-gated GPU flights planned; no files or device created");
         return 0;
     }
     if (std::strcmp(argv[1], "--self-test") == 0)
-        return check(edvr::xessBuiltIn(), "backend compiled into rig") ? 0 : 1;
-    if (std::strcmp(argv[1], "--gpu-test") != 0) return 2;
+        return check(edvr::xessBuiltIn(), "backend compiled into rig") &&
+               latchSelfTest() && gateSelfTest() ? 0 : 1;
+    const bool optional = std::strcmp(argv[1], "--gpu-test-if-available") == 0;
+    if (!optional && std::strcmp(argv[1], "--gpu-test") != 0) return 2;
+    if (optional) {
+        const Probe adapters = hardwareAdapterPresent();
+        if (adapters != Probe::Ready) return adapters == Probe::Skip ? 0 : 1;
+    }
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> context;
     D3D_FEATURE_LEVEL level{};
     HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0,
                                     nullptr, 0, D3D11_SDK_VERSION, device.GetAddressOf(),
                                     &level, context.GetAddressOf());
-    if (!check(SUCCEEDED(hr) && level >= D3D_FEATURE_LEVEL_11_0, "hardware D3D11 device")) return 1;
+    if (optional && missingCapability(hr)) {
+        std::fprintf(stdout, "xess_engine_test: SKIP hardware D3D11 device unavailable 0x%08X\n", unsigned(hr));
+        return 0;
+    }
+    if (!check(SUCCEEDED(hr), "hardware D3D11 device")) return 1;
+    if (optional && level < D3D_FEATURE_LEVEL_11_0) {
+        std::puts("xess_engine_test: SKIP hardware D3D11 feature level below 11_0");
+        return 0;
+    }
+    if (!check(level >= D3D_FEATURE_LEVEL_11_0, "D3D11 feature level 11_0")) return 1;
+    if (optional) {
+        const Probe capability = optionalHardwareProbe(device.Get());
+        if (capability != Probe::Ready) return capability == Probe::Skip ? 0 : 1;
+    }
     const char* why = nullptr;
     if (!edvr::xessAvailable(device.Get(), &why)) {
         std::fprintf(stderr, "xess_engine_test: unavailable: %s\n", why ? why : "unspecified");
         return 1;
     }
-    const bool good = flight(device.Get(), context.Get(), 640, 360, 640, 360, false) &&
+    const char* firstFailure = nullptr;
+    const bool first = flight(device.Get(), context.Get(), 640, 360, 640, 360, false, &firstFailure);
+    if (!first && optional && xessUnsupportedDeviceOrDriver(firstFailure)) {
+        std::fprintf(stdout, "xess_engine_test: SKIP XeSS reported unsupported GPU/driver: %s\n", firstFailure);
+        edvr::xessShutdown();
+        return 0;
+    }
+    const bool good = first &&
                       flight(device.Get(), context.Get(), 640, 360, 1280, 720, false) &&
                       flight(device.Get(), context.Get(), 640, 360, 1280, 720, true);
     edvr::xessReleaseFeatures();

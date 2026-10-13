@@ -183,11 +183,14 @@ inline int flatCopyWeaponTests() {
             {true, false, M::Dlss, &above, R::Hdr, "auto, DLSS supersampled"},
             {true, false, M::Fsr, &at, R::Hdr, "auto, FSR at the output"},
             {true, false, M::Fsr, &above, R::Hdr, "auto, FSR supersampled"},
+            {true, false, M::Xess, &at, R::Hdr, "auto, XeSS at the output"},
+            {true, false, M::Xess, &above, R::Hdr, "auto, XeSS supersampled"},
             {true, false, M::Dlaa, &at, R::Hdr, "auto, DLAA at the output"},
             {true, false, M::Taa, &at, R::Hdr, "auto, TAA at the output"},
             // ... and the copy route judges the rest: the upscalers below the output
             {true, false, M::Dlss, &below, R::Copy, "auto, DLSS below the output"},
             {true, false, M::Fsr, &below, R::Copy, "auto, FSR below the output"},
+            {true, false, M::Xess, &below, R::Copy, "auto, XeSS below the output"},
             // EDVR's TAA and DLAA keep what they had where the HDR route does not treat the frame (DLAA has no route below the output)
             {true, false, M::Dlaa, &below, R::Unchanged, "auto, DLAA below the output (no route)"},
             {true, false, M::Taa, &below, R::Unchanged, "auto, TAA below the output"},
@@ -197,11 +200,13 @@ inline int flatCopyWeaponTests() {
             {false, false, M::Dlss, &at, R::Copy, "key off, DLSS at the output"},
             {false, false, M::Dlss, &above, R::Copy, "key off, DLSS supersampled"},
             {false, false, M::Fsr, &at, R::Copy, "key off, FSR at the output"},
+            {false, false, M::Xess, &at, R::Copy, "key off, XeSS at the output"},
             {false, false, M::Dlaa, &at, R::Unchanged, "key off, DLAA"},
             {false, false, M::Taa, &at, R::Unchanged, "key off, TAA"},
             // the route latched off for the session: as the key off
             {true, true, M::Dlss, &at, R::Copy, "auto but latched, DLSS at the output"},
             {true, true, M::Fsr, &above, R::Copy, "auto but latched, FSR supersampled"},
+            {true, true, M::Xess, &above, R::Copy, "auto but latched, XeSS supersampled"},
             {true, true, M::Dlaa, &at, R::Unchanged, "auto but latched, DLAA"},
         };
         bool all = true;

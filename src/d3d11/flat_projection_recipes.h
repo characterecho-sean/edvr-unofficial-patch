@@ -1,5 +1,6 @@
 #pragma once
 #include "flat_projection_runtime.h"
+#include "flat_deferred_camera.h"
 #include "engine_velocity_families.h"
 
 namespace edvr {
@@ -49,10 +50,10 @@ inline FlatProjectionRecipes flatProjectionDrawRecipes(uint64_t vs, uint64_t ps)
     case 0x1F3AD1584D7FA3C8ull: case 0x4D516EF05C68FFA5ull: case 0x8BD7C37ABCEE7E45ull:
     case 0x94D5C556DFD6D705ull:
         result.add(S::Vertex,0,L::ForwardDp4,4); break;
-    case 0x7E38A6AA1269C901ull:
-        result.add(S::Vertex,2,L::ForwardDp4,10);
+    case kFlatDeferredHdrVs:
+        result.add(S::Vertex,kFlatDeferredCameraSlot,L::ForwardDp4,kFlatDeferredCameraFirstRow);
         result.requests[0].patchCount = 2;
-        result.requests[0].patches[1] = {L::InverseUvRay,14*16,{}}; break;
+        result.requests[0].patches[1] = {L::InverseUvRay,kFlatDeferredInverseFirstRow*16,{}}; break;
     case 0xF8FA801F2CB1E27Cull: result.add(S::Vertex,2,L::InverseClip,11); break;
     case 0x5453D19B6D362364ull:
         if (ps == 0xF321711CF47EB970ull) result.add(S::Vertex,2,L::ForwardColumns,6); break;

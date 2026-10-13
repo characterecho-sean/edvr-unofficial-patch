@@ -379,7 +379,7 @@ vscreenfit::RouteFacts routeFactsFromConfig(Config& cfg) {
     const std::string quality = cfg.getString("fix.ui_quality", "100");
     bool recognized = true;
     const float target = uiQualityParse(quality.c_str(), &recognized, nullptr);
-    const bool temporal = temporalModeEnabled(cfg.getString("fix.temporal_aa", "off"));
+    const bool temporal = temporalModeEnabledFor(cfg.getString("fix.temporal_aa", "off"), f.flatProfile);
     const bool jitterAsShipped = true;
     f.layerWhy = uiLayerNotLiveReasonFor(target, temporal, jitterAsShipped, /*stoodDown=*/false);
 

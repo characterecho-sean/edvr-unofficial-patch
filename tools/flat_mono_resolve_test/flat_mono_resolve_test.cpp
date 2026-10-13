@@ -288,6 +288,16 @@ int main(int argc,char** argv) {
           edvr::flatMonoResolveStats().initializations==beforeInvalidPreflight.initializations &&
           edvr::flatMonoResolveStats().allocations==beforeInvalidPreflight.allocations,
           "bad extent preflight refuses before renderer allocation or backend work");
+    auto xessPlan=planned;xessPlan.mode=edvr::FlatMonoResolveMode::Xess;
+    xessPlan.jitterCycle=8;
+    const auto beforeXessCycle=edvr::flatMonoResolveStats();
+    preflight=edvr::flatMonoResolvePreflight(device.Get(),context.Get(),xessPlan);
+    check(preflight.status==edvr::FlatMonoResolvePreflightStatus::InvalidMetadata &&
+          !preflight.readyForRasterJitter() && preflight.reason &&
+          !std::strcmp(preflight.reason,"flat-preflight-xess-jitter-cycle-too-short") &&
+          edvr::flatMonoResolveStats().initializations==beforeXessCycle.initializations &&
+          edvr::flatMonoResolveStats().allocations==beforeXessCycle.allocations,
+          "XeSS upscale refuses an eight-phase camera cycle before allocating or authorizing jitter");
     preflight=edvr::flatMonoResolvePreflight(device.Get(),context.Get(),planned);
     check(preflight.readyForRasterJitter() && preflight.spatialFallbackReady &&
           preflight.backendAvailable && preflight.backendFeatureCreationDeferred &&
@@ -866,6 +876,24 @@ int main(int argc,char** argv) {
     taaHistoryDepthGpuTests(device.Get(),context.Get());
     // The resolver's context isolation (the swap, and the explicit capture DXMT gets): also before the message check, so its calls are held to it.
     contextIsolationGpuTests(device.Get(),context.Get());
+    xessPlan.jitterCycle=64;
+    preflight=edvr::flatMonoResolvePreflight(device.Get(),context.Get(),xessPlan);
+    check(preflight.readyForRasterJitter(),"XeSS upscale preflight accepts a sufficient camera cycle");
+    edvr::FlatMonoResolveFrame xessSlotFrame{};
+    xessSlotFrame.renderWidth=w;xessSlotFrame.renderHeight=h;
+    xessSlotFrame.outputWidth=xessSlotFrame.outputHeight=32;
+    xessSlotFrame.mode=edvr::FlatMonoResolveMode::Xess;
+    xessSlotFrame.slot=1;xessSlotFrame.jitterCycle=64;
+    camera(xessSlotFrame.camera);camera(xessSlotFrame.previousCamera);
+    ComPtr<ID3D11ShaderResourceView> xessSlotOutput;const char* xessSlotReason=nullptr;
+    check(!edvr::flatMonoResolve(device.Get(),context.Get(),xessSlotFrame,xessSlotOutput.GetAddressOf(),&xessSlotReason) &&
+          !xessSlotOutput && xessSlotReason && !std::strcmp(xessSlotReason,"flat-xess-slot-zero-only"),
+          "XeSS refuses a non-flat backend slot before touching the backend");
+    xessSlotFrame.slot=0;xessSlotFrame.jitterCycle=1;
+    xessSlotReason=nullptr;
+    check(!edvr::flatMonoResolve(device.Get(),context.Get(),xessSlotFrame,xessSlotOutput.GetAddressOf(),&xessSlotReason) &&
+          !xessSlotOutput && xessSlotReason && !std::strcmp(xessSlotReason,"flat-xess-jitter-cycle-too-short"),
+          "XeSS resolve retains its cycle guard even when preflight is bypassed");
     if(messages)for(UINT64 i=0;i<messages->GetNumStoredMessages();++i){SIZE_T n=0;messages->GetMessage(i,nullptr,&n);std::vector<unsigned char> bytes(n);
         auto* msg=reinterpret_cast<D3D11_MESSAGE*>(bytes.data());messages->GetMessage(i,msg,&n);
         if(msg->Severity<=D3D11_MESSAGE_SEVERITY_WARNING){std::printf("D3D: %s\n",msg->pDescription);check(false,"no D3D resource hazards/errors/warnings");}}

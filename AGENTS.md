@@ -137,7 +137,8 @@ minutes after a flight finally reproduced the effect being chased.
   receipt check fails, run the full build again. The receipt fingerprints
   tracked files, untracked files git does not ignore, and the ignored
   dependency folders (`third_party\ngx`, `third_party\ffx-dx11`,
-  `third_party\openxr\loader`); `docs\`, `reviews\` and other ignored paths
+  `third_party\openxr\loader`, `third_party\xess`); `docs\`, `reviews\` and
+  other ignored paths
   are not inputs, so writing a review or a doc does not stale it
   (`tools\build_receipt.py` states the rule and its self-test pins it).
 - After editing, re-read the changed region for the things that have bitten

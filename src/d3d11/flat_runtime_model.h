@@ -1,5 +1,6 @@
 #pragma once
 #include "flat_mono_frame.h"
+#include "flat_deferred_camera.h"
 #include <optional>
 
 namespace edvr {
@@ -194,7 +195,7 @@ inline bool flatRuntimeCameraCurrent(const FlatRuntimeDraw& d, uint32_t q, uint6
 inline const FlatContractRecord* flatRuntimeDeferredDonor(const FlatRuntimePrefix& p,
         const FlatContractObservation& k,uint32_t q) {
     using namespace flat_mono_detail;
-    if(p.uncertain || k.format!=26 || k.vs!=0x7E38A6AA1269C901ull || k.ps!=0x7CECABDE34FFBE9Eull ||
+    if(p.uncertain || k.format!=kFlatDeferredHdrFormat || k.vs!=kFlatDeferredHdrVs || k.ps!=kFlatDeferredHdrPs ||
        !k.color || !k.rtv || !k.depth || !k.dsv || k.depthWidth!=k.width || k.depthHeight!=k.height ||
        !k.srvView[0] || !k.srvResource[0] || !fullViewport(k,k.width,k.height))return nullptr;
     const FlatContractRecord* donor=nullptr;
@@ -215,8 +216,8 @@ inline bool flatRuntimeQualifiedDeferredCamera(const FlatRuntimePrefix& p,const 
     const auto* donor=flatRuntimeDeferredDonor(p,d.key,q);const auto& projection=d.key.projection[1];
     return donor && d.key.cameraHash==donor->key.cameraHash &&
         std::memcmp(d.camera,donor->camera,kFlatCameraBytes)==0 && projection.resource &&
-        projection.status==FlatProjectionStatus::Available && projection.width>=272 &&
-        projection.copied==112 && projection.hash && projection.writeEpoch==p.frame &&
+        projection.status==FlatProjectionStatus::Available && projection.width>=kFlatDeferredCameraMinWidth &&
+        projection.copied==kFlatDeferredCameraBytes && projection.hash && projection.writeEpoch==p.frame &&
         projection.writeSeq && projection.writeSeq<=q;
 }
 inline bool flatRuntimeQualifiedLaserSceneCamera(const FlatRuntimePrefix& p,

@@ -2604,7 +2604,7 @@ void hookDevice(ID3D11Device* device) {
     vrSsaaGateStartup();  // log only: the 3D mode file, the .fxcfg's Supersampling and HMD Quality, once per process
     {
         const int aniso = sentinelCfg.getIntInRange("advanced.texture_anisotropy", 0, 0, 16);
-        const bool temporal = temporalModeEnabled(sentinelCfg.getString("fix.temporal_aa", "off"));
+        const bool temporal = temporalModeEnabledFor(sentinelCfg.getString("fix.temporal_aa", "off"), runtimeFlatProfile());
         const std::string biasKey = sentinelCfg.getString("advanced.texture_lod_bias", temporal ? "auto" : "0");
         float bias = 0.0f;
         if (_stricmp(biasKey.c_str(), "auto") == 0) {

@@ -255,6 +255,11 @@ bool preflightMetadataValid(const FlatMonoResolvePreflight& f,const char** reaso
     // another grid (EDVR's TAA above D), stays on the copy route (section 81, decision (c)).
     const uint32_t plannedEvalW=(f.evalWidth&&f.evalHeight)?f.evalWidth:route.evalWidth;
     const uint32_t plannedEvalH=(f.evalWidth&&f.evalHeight)?f.evalHeight:route.evalHeight;
+    if(f.mode==FlatMonoResolveMode::Xess &&
+       f.jitterCycle<temporalXessJitterPhases(kTemporalJitterCount,f.renderWidth,f.renderHeight,plannedEvalW,plannedEvalH)) {
+        if(reason)*reason="flat-preflight-xess-jitter-cycle-too-short";
+        return false;
+    }
     if(f.hdr && (plannedEvalW!=f.renderWidth || plannedEvalH!=f.renderHeight ||
                  f.renderWidth<f.outputWidth || f.renderHeight<f.outputHeight)) {
         if(reason)*reason="flat-preflight-hdr-requires-render-size-evaluation";

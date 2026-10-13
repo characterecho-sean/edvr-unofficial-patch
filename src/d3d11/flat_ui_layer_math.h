@@ -84,12 +84,46 @@ constexpr uint64_t kFlatUiSourceTonePs = 0xE8948389387DA083ull;
 inline bool flatUiSourceTonePair(uint64_t vs, uint64_t ps) {
     return ps == kFlatUiSourceTonePs && (vs == kFlatUiSourceToneVsSteady || vs == kFlatUiSourceToneVsTransition);
 }
+// Process-lifetime diagnostic budget for physically qualifying unknown pairs.
+// No frame, route or resize resets it; exhausted is reported once.
+struct FlatUiUnknownSourceToneLog {
+    static constexpr uint32_t kCapacity = 16;
+    struct Pair { uint64_t vs = 0, ps = 0; };
+    Pair pairs[kCapacity]{};
+    uint32_t count = 0;
+    bool exhausted = false;
+    enum class Result { NewPair, Duplicate, CapacityReached, Full };
+    bool shouldInspect(uint64_t vs, uint64_t ps) const {
+        if (exhausted) return false;
+        for (uint32_t i = 0; i < count; ++i)
+            if (pairs[i].vs == vs && pairs[i].ps == ps) return false;
+        return true;
+    }
+    Result record(uint64_t vs, uint64_t ps) {
+        if (exhausted) return Result::Full;
+        for (uint32_t i = 0; i < count; ++i)
+            if (pairs[i].vs == vs && pairs[i].ps == ps) return Result::Duplicate;
+        if (count == kCapacity) { exhausted = true; return Result::CapacityReached; }
+        pairs[count++] = {vs, ps};
+        return Result::NewPair;
+    }
+};
 inline bool flatUiSourceToneShape(uint32_t renderW, uint32_t renderH, uint32_t cachedOutW, uint32_t cachedOutH,
                                   uint32_t physicalOutW, uint32_t physicalOutH, uint32_t physicalOutViewFmt,
                                   uint32_t hdrW, uint32_t hdrH, uint32_t hdrViewFmt,
                                   bool lut3D, bool hdr2D, bool fullViewport) {
     return renderW && renderH && cachedOutW == renderW && cachedOutH == renderH &&
            physicalOutW == renderW && physicalOutH == renderH && physicalOutViewFmt == 28 &&
+           hdrW == renderW && hdrH == renderH && hdrViewFmt == 26 && lut3D && hdr2D && fullViewport;
+}
+// Diagnostics can report an unverified 8-bit LDR view format; admission above
+// keeps the exact format 28 that the two E894 pairs physically used.
+inline bool flatUiUnknownSourceToneShape(uint32_t renderW, uint32_t renderH, uint32_t cachedOutW, uint32_t cachedOutH,
+                                         uint32_t physicalOutW, uint32_t physicalOutH, uint32_t physicalOutViewFmt,
+                                         uint32_t hdrW, uint32_t hdrH, uint32_t hdrViewFmt,
+                                         bool lut3D, bool hdr2D, bool fullViewport) {
+    return renderW && renderH && cachedOutW == renderW && cachedOutH == renderH &&
+           physicalOutW == renderW && physicalOutH == renderH && flatUiIs8bit(physicalOutViewFmt) &&
            hdrW == renderW && hdrH == renderH && hdrViewFmt == 26 && lut3D && hdr2D && fullViewport;
 }
 inline bool flatUiSourceToneDirectHud(const void* cachedHud, const void* physicalHud, const void* physicalInput) {

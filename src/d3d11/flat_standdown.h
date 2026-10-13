@@ -90,7 +90,7 @@ inline bool flatMonoReasonWarrantsWarning(FlatMonoReason reason) {
 
 // What the runtime does in the frame that starts now.
 //   Full    everything, exactly as before the stand-down existed
-//   Probe   one whole frame with the contract observation only (a stand-down probe)
+//   Probe   one whole watched frame, including CPU projection shadows for admission evidence
 //   Paused  nothing per draw or per call beyond the O(1) state trackers
 enum class FlatWork : uint8_t { Full, Probe, Paused };
 inline const char* flatWorkName(FlatWork work) {

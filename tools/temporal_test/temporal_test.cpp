@@ -97,6 +97,15 @@ int main() {
     for (const char* mode : {"off", "OFF", "", "bogus"}) {
         if (edvr::temporalModeEnabled(mode)) { ++g_fails; printf("FAIL: inactive temporal mode %s\n", mode); }
     }
+    for (const char* mode : {"on", "dlaa", "dlss", "fsr"}) {
+        check(edvr::temporalModeEnabledFor(mode, true) && edvr::temporalModeEnabledFor(mode, false),
+              "existing temporal modes stay active in flat and VR");
+    }
+    check(edvr::temporalModeEnabledFor("XeSS", true) && !edvr::temporalModeEnabledFor("XeSS", false),
+          "XeSS producers arm only for flat profile, including mixed-case ini value");
+    check(!edvr::temporalModeEnabledFor("off", true) && !edvr::temporalModeEnabledFor("off", false) &&
+          !edvr::temporalModeEnabledFor("bogus", true) && !edvr::temporalModeEnabledFor("bogus", false),
+          "off and unknown modes stay inactive in both profiles");
     {
         using edvr::temporalCameraFollowScore;
         int score = -30;

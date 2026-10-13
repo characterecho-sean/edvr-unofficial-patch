@@ -605,13 +605,15 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
             const bool present = file.cur->kind != DllKind::Absent;
             const bool ours = present && !previous[i].empty() && file.cur->sha256 == previous[i];
             if (file.cur->kind == DllKind::Unreadable) {
-                plan.problems.push_back("An XeSS destination cannot be read; nothing will be installed.");
-                plan.blocked = true; return plan;
+                plan.problems.push_back("The XeSS destination " + say(file.leaf) +
+                                        " cannot be read; this optional file was left untouched.");
+                continue;
             }
             if (present && file.cur->sha256 == *file.desired && !o.repair) {
                 *file.recorded = *file.desired;
             } else if (present && !ours && file.cur->sha256 != *file.desired) {
                 plan.notes.push_back("A different " + say(file.leaf) + " is present; left alone.");
+                file.recorded->clear();
             } else {
                 const std::wstring dst = joinPath(s.game.dir, file.leaf);
                 if (present) backup(dst, "the XeSS file EDVR placed, being replaced");
@@ -811,7 +813,13 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
         next.iniSha = sha256Bytes(merged.data(), merged.size());
     }
 
-    if (!changed && !o.repair) {
+    const bool ownershipChanged = next.xessSha != s.state.xessSha ||
+                                  next.xessLicenseSha != s.state.xessLicenseSha ||
+                                  next.xessThirdPartySha != s.state.xessThirdPartySha;
+    const bool stateOnly = !changed && body.empty() && ownershipChanged && !o.repair;
+    if (stateOnly)
+        plan.notes.push_back("Optional runtime ownership changed; only the install record will be updated.");
+    if (!changed && !ownershipChanged && !o.repair) {
         plan.nothingToDo = true;
         plan.notes.push_back("Everything is already in place. Nothing to do.");
     }
@@ -841,13 +849,15 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
         mkState.why = "holds the install record";
         plan.steps.push_back(mkState);
 
-        Step base;
-        base.action = Action::WriteText;
-        base.text = p.iniText;
-        base.to = baseIniPath(s.game.dir);
-        base.why = "keeps this version's default " + toUtf8(settingsLeafFor(p.profile)) +
-                   ", so the next update can tell your changes from a changed default";
-        plan.steps.push_back(base);
+        if (!stateOnly) {
+            Step base;
+            base.action = Action::WriteText;
+            base.text = p.iniText;
+            base.to = baseIniPath(s.game.dir);
+            base.why = "keeps this version's default " + toUtf8(settingsLeafFor(p.profile)) +
+                       ", so the next update can tell your changes from a changed default";
+            plan.steps.push_back(base);
+        }
 
         Step rec;
         rec.action = Action::WriteText;

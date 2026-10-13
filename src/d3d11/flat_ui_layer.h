@@ -79,6 +79,12 @@ bool flatUiLayerToneCandidate(ID3D11DeviceContext* ctx, uint64_t frame, uint32_t
 bool flatUiLayerSourceToneCandidate(ID3D11DeviceContext* ctx, uint64_t frame, uint32_t renderW, uint32_t renderH,
                                     uint64_t vs, uint64_t ps, const void* cachedOutput,
                                     uint32_t outW, uint32_t outH, const char* route);
+// Diagnostic only: log each unknown pair once (up to a process-lifetime cap)
+// if the physical HUD/tone shape, bloom binding and exact fullscreen draw match.
+void flatUiLayerProbeUnknownSourceTone(ID3D11DeviceContext* ctx, uint64_t frame, uint32_t renderW, uint32_t renderH,
+                                       uint64_t vs, uint64_t ps, const void* cachedOutput,
+                                       uint32_t outW, uint32_t outH, char kind, uint32_t count,
+                                       uint32_t instances, uint32_t startInstance);
 // A plain copy (the game's copy pixel shader) from `source` into `output` this frame: when the source is the HUD's HDR
 // target, the output is the copy the tone may read instead (the HDR route's post chain does).
 void flatUiLayerNoteCopy(uint64_t frame, const void* source, const void* output);

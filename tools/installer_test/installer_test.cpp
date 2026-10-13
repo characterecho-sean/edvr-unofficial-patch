@@ -1998,6 +1998,102 @@ static Survey installedFlatSurvey(const std::wstring& dir, const PayloadInfo& in
     return s;
 }
 
+static void testXessPlanner() {
+    printf("\noptional XeSS files: planning and ownership\n");
+    const std::wstring dir = L"C:\\Games\\ED\\Products\\elite-dangerous-odyssey-64";
+    PayloadInfo p = flatPayloadFor(kFlatTemplate);
+    p.haveXess = true;
+    p.xessSha = "xess-runtime-new";
+    p.xessLicenseSha = "xess-license-new";
+    p.xessThirdPartySha = "xess-third-party-new";
+    const Options options = testOptions();
+    auto current = [&](const wchar_t* leaf, const std::string& hash, DllKind kind = DllKind::Foreign) {
+        return fakeDll(kind, joinPath(dir, leaf), hash);
+    };
+    auto installed = [&]() {
+        Survey s = installedFlatSurvey(dir, p);
+        s.d3d11.sha256 = p.d3d11Sha;
+        s.state.d3d11Sha = p.d3d11Sha;
+        s.flatIniPresent = true;
+        s.flatIniText = p.iniText;
+        s.baseIniText = p.iniText;
+        s.xess = current(L"libxess.dll", p.xessSha);
+        s.xessLicense = current(L"INTEL-XESS-LICENSE.txt", p.xessLicenseSha);
+        s.xessThirdParty = current(L"INTEL-XESS-THIRD-PARTY.txt", p.xessThirdPartySha);
+        return s;
+    };
+
+    {   // All three identical files can have arrived manually. Record their
+        // ownership without replacing any payload, settings, or base INI.
+        Survey s = installed();
+        const Plan plan = planInstall(s, options, p);
+        check(!plan.blocked && !plan.nothingToDo, "identical XeSS files need a metadata-only adoption");
+        check(plan.steps.size() == 2 &&
+              hasStep(plan, Action::MakeDir, nullptr, L"edvr_install") &&
+              hasStep(plan, Action::WriteText, nullptr, L"state.ini") &&
+              !hasStep(plan, Action::WriteText, nullptr, L"edvr.ini.base") &&
+              !hasStep(plan, Action::WriteText, nullptr, L"edvr-flat.ini") &&
+              !hasStep(plan, Action::WritePayload, nullptr, L"libxess.dll"),
+              "adoption writes only the ownership record, not existing files");
+        const InstallState adopted = parseState(plannedText(plan, L"state.ini"));
+        check(adopted.xessSha == p.xessSha && adopted.xessLicenseSha == p.xessLicenseSha &&
+              adopted.xessThirdPartySha == p.xessThirdPartySha,
+              "[xess] hashes survive the planned state round-trip");
+        s.state = adopted;
+        const Plan removal = planUninstall(s, options);
+        check(hasStep(removal, Action::Delete, L"libxess.dll", nullptr) &&
+              hasStep(removal, Action::Delete, L"INTEL-XESS-LICENSE.txt", nullptr) &&
+              hasStep(removal, Action::Delete, L"INTEL-XESS-THIRD-PARTY.txt", nullptr),
+              "uninstall removes each adopted file by its recorded hash");
+    }
+    {   // A foreign runtime is left alone, even when the notices are ours.
+        Survey s = installed();
+        s.xess.sha256 = "foreign-runtime";
+        s.state.xessSha = "old-ours";
+        const Plan plan = planInstall(s, options, p);
+        check(!plan.blocked && !hasStep(plan, Action::WritePayload, nullptr, L"libxess.dll") &&
+              notesMention(plan, "different libxess.dll"), "foreign XeSS runtime is preserved");
+        check(plan.nextState.xessSha.empty() && plan.nextState.xessLicenseSha == p.xessLicenseSha,
+              "foreign runtime ownership is cleared while identical notice is adopted");
+        s.state = plan.nextState;
+        const Plan removal = planUninstall(s, options);
+        check(!hasStep(removal, Action::Delete, L"libxess.dll", nullptr),
+              "uninstall leaves the foreign runtime alone");
+    }
+    {   // An old runtime whose hash matches our record can be replaced.
+        Survey s = installed();
+        s.xess.sha256 = "old-ours";
+        s.state.xessSha = "old-ours";
+        const Plan plan = planInstall(s, options, p);
+        check(hasStep(plan, Action::Backup, L"libxess.dll", L"libxess.dll") &&
+              hasStep(plan, Action::WritePayload, nullptr, L"libxess.dll") &&
+              plan.nextState.xessSha == p.xessSha,
+              "stale XeSS file that EDVR placed is backed up and updated");
+    }
+    {   // A scanner may make only the optional runtime unreadable. Core
+        // graphics and other XeSS files must still proceed.
+        Survey s = installed();
+        s.d3d11.sha256 = "old-graphics";
+        s.state.d3d11Sha = "old-graphics";
+        s.xess = current(L"libxess.dll", "", DllKind::Unreadable);
+        s.state.xessSha = "previous-ownership";
+        const Plan plan = planInstall(s, options, p);
+        check(!plan.blocked && hasStep(plan, Action::WritePayload, nullptr, L"d3d11.dll") &&
+              !hasStep(plan, Action::WritePayload, nullptr, L"libxess.dll") &&
+              notesMention(plan, "libxess.dll cannot be read"),
+              "unreadable optional runtime does not block graphics update");
+        check(plan.nextState.xessSha == "previous-ownership",
+              "unreadable destination retains previous ownership evidence");
+    }
+    {   // A broken installer payload is still rejected before any writes.
+        PayloadInfo missing = p;
+        missing.xessLicenseSha.clear();
+        const Plan plan = planInstall(installed(), options, missing);
+        check(plan.blocked && plan.steps.empty() && notesMention(plan, "license notices"),
+              "XeSS payload missing a license notice is rejected");
+    }
+}
+
 static void testFlatSettingsPlanner() {
     printf("\nthe flat edition's settings file: planning\n");
     const std::wstring dir = L"C:\\Games\\ED\\Products\\elite-dangerous-odyssey-64";
@@ -4964,6 +5060,9 @@ static void testState() {
     state.openvrOrigName = L"openvr_api_orig.dll";
     state.openvrOrigSha = "9abc";
     state.iniSha = "def0";
+    state.xessSha = "xess-runtime";
+    state.xessLicenseSha = "xess-license";
+    state.xessThirdPartySha = "xess-notices";
 
     const InstallState back = parseState(serializeState(state));
     check(back.present, "a written record reads back as present");
@@ -4971,6 +5070,9 @@ static void testState() {
     expectEq(toUtf8(back.chainTarget), "d3d11_edhm.dll", "the chain target survives");
     expectEq(toUtf8(back.openvrDir), "Openvr\\win64", "the openvr folder survives");
     expectEq(back.openvrOrigSha, "9abc", "the original runtime's hash survives");
+    expectEq(back.xessSha, state.xessSha, "the XeSS runtime ownership survives");
+    expectEq(back.xessLicenseSha, state.xessLicenseSha, "the XeSS license ownership survives");
+    expectEq(back.xessThirdPartySha, state.xessThirdPartySha, "the XeSS third-party ownership survives");
     check(!parseState("").present, "an empty record is not a record");
     check(!parseState("[edvr]\r\nsomething = else\r\n").present,
           "a file that merely parses is not a record either");
@@ -4996,6 +5098,7 @@ int wmain(int argc, wchar_t** argv) {
     testPlanner();
     testNativePlanner();
     testFlatPlanner();
+    testXessPlanner();
     testFlatSettingsPlanner();
     testApply(scratch);
     testMirror(scratch);

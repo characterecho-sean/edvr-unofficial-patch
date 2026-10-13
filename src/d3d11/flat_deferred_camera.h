@@ -1,11 +1,26 @@
 #pragma once
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <limits>
 #include <initializer_list>
 #include "flat_projection_math.h"
 
 namespace edvr {
+// The one physically certified deferred HDR pair and its CB2 projection span.
+// These identify a recipe; the caller still proves target, donor and current bytes.
+constexpr uint64_t kFlatDeferredHdrVs = 0x7E38A6AA1269C901ull;
+constexpr uint64_t kFlatDeferredHdrPs = 0x7CECABDE34FFBE9Eull;
+constexpr uint32_t kFlatDeferredHdrFormat = 26;
+constexpr uint32_t kFlatDeferredCameraSlot = 2;
+constexpr uint32_t kFlatDeferredCameraFirstRow = 10;
+constexpr uint32_t kFlatDeferredCameraRows = 7;
+constexpr uint32_t kFlatDeferredInverseFirstRow = 14;
+constexpr uint32_t kFlatDeferredInverseOffsetRows =
+    kFlatDeferredInverseFirstRow - kFlatDeferredCameraFirstRow;
+constexpr uint32_t kFlatDeferredCameraBytes = kFlatDeferredCameraRows * 16;
+constexpr uint32_t kFlatDeferredCameraMinWidth =
+    (kFlatDeferredCameraFirstRow + kFlatDeferredCameraRows) * 16;
 enum class FlatDeferredPhaseDomain { Outside, KnownHdr, SceneDepthExtent };
 // Ownership is independent of camera/projection proof: broken evidence on the
 // selected target must still fail closed. A named HDR excludes other targets,
@@ -44,7 +59,7 @@ inline double flatDeferredFloatBound(unsigned operations,double magnitude) {
 inline FlatDeferredCameraMatch flatMatchDeferredCamera(const unsigned char* cameraBytes,
                                                        const unsigned char* cb2Bytes) {
     if(!cameraBytes || !cb2Bytes)return FlatDeferredCameraMatch::Unavailable;
-    float camera[6][4],rows[7][4];
+    float camera[6][4],rows[kFlatDeferredCameraRows][4];
     std::memcpy(camera,cameraBytes,sizeof(camera));std::memcpy(rows,cb2Bytes,sizeof(rows));
     for(const auto& r:camera)for(float x:r)if(!std::isfinite(x))return FlatDeferredCameraMatch::Unavailable;
     for(const auto& r:rows)for(float x:r)if(!std::isfinite(x))return FlatDeferredCameraMatch::Unavailable;
@@ -72,7 +87,7 @@ inline FlatDeferredCameraMatch flatMatchDeferredCamera(const unsigned char* came
     double residual[3][3]{},bounds[3][3]{};
     for(unsigned r=0;r<3;++r)for(unsigned c=0;c<3;++c) {
         double sum=0,magnitude=std::abs(expected[r][c]);
-        for(unsigned i=0;i<3;++i){const double term=double(rows[clipRows[r]][i])*rows[4+i][rayColumns[c]];sum+=term;magnitude+=std::abs(term);}
+        for(unsigned i=0;i<3;++i){const double term=double(rows[clipRows[r]][i])*rows[kFlatDeferredInverseOffsetRows+i][rayColumns[c]];sum+=term;magnitude+=std::abs(term);}
         // Three products/two sums plus independently rounded forward/inverse
         // coefficients and their jitter updates are enclosed by gamma(12).
         residual[r][c]=sum-expected[r][c];bounds[r][c]=flatDeferredFloatBound(12,magnitude);
@@ -103,7 +118,7 @@ inline bool flatRepairDeferredMissingPhase(const unsigned char* cameraBytes,
     if(!corrected || !flat_projection_detail::finite(jitter) ||
        (jitter.ndcX==0 && jitter.ndcY==0) ||
        flatMatchDeferredCamera(cameraBytes,original)!=FlatDeferredCameraMatch::Inverse)return false;
-    float camera[6][4],rows[7][4];
+    float camera[6][4],rows[kFlatDeferredCameraRows][4];
     std::memcpy(camera,cameraBytes,sizeof(camera));std::memcpy(rows,original,sizeof(rows));
     FlatProjectionJitter undo=jitter;
     undo.ndcX=-undo.ndcX;undo.ndcY=-undo.ndcY;undo.uvX=-undo.uvX;undo.uvY=-undo.uvY;
@@ -114,9 +129,9 @@ inline bool flatRepairDeferredMissingPhase(const unsigned char* cameraBytes,
     if(flatMatchDeferredCamera(reinterpret_cast<unsigned char*>(camera),
                                reinterpret_cast<unsigned char*>(rows))!=FlatDeferredCameraMatch::Match)return false;
     std::memcpy(rows,original,sizeof(rows));
-    float rays[3][4];std::memcpy(rays,rows+4,sizeof(rays));
+    float rays[3][4];std::memcpy(rays,rows+kFlatDeferredInverseOffsetRows,sizeof(rays));
     if(!flatJitterInverseUvRay(rays,jitter))return false;
-    std::memcpy(rows+4,rays,sizeof(rays));
+    std::memcpy(rows+kFlatDeferredInverseOffsetRows,rays,sizeof(rays));
     if(flatMatchDeferredCamera(cameraBytes,reinterpret_cast<unsigned char*>(rows))!=FlatDeferredCameraMatch::Match)return false;
     std::memcpy(corrected,rows,sizeof(rows));return true;
 }

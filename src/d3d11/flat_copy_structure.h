@@ -89,7 +89,7 @@ inline FlatSceneFacts flatSceneFacts(const FlatRuntimePrefix& p, uint32_t outW, 
 // cohort. The copy route has none of that, and until the copy route learned the weapon every such frame was refused (section 104).
 //   Hdr:       the frame is the HDR route's (the key auto, the route not latched, a mode that resolves at the render size): what
 //              the runtime does for it has not changed.
-//   Copy:      the copy route judges it, for DLSS and FSR: the glow pass is admitted as an alternate HDR writer (no overlay), the
+//   Copy:      the copy route judges it, for external upscalers: the glow pass is admitted as an alternate HDR writer (no overlay), the
 //              cohort stays out of the sources and makes the frame mixed-camera, and the foreground contract qualifies it at the
 //              final copy. This is every frame the HDR route will not treat, which includes the key off at any size.
 //   Unchanged: EDVR's TAA and DLAA, where the HDR route will not treat the frame: they keep what they always had.
@@ -116,8 +116,10 @@ inline FlatWeaponRoute flatWeaponRoute(bool keyAuto, bool routeLatched, FlatMono
                                        uint32_t renderW, uint32_t renderH, uint32_t outputW, uint32_t outputH) {
     if (keyAuto && !routeLatched && flatHdrRouteEvaluatesAtRender(mode, renderW, renderH, outputW, outputH))
         return FlatWeaponRoute::Hdr;
-    return mode == FlatMonoResolveMode::Dlss || mode == FlatMonoResolveMode::Fsr ? FlatWeaponRoute::Copy
-                                                                                : FlatWeaponRoute::Unchanged;
+    // TAA and DLAA have their existing ownership; every external upscaler is
+    // judged by the copy route whenever the HDR route does not take the frame.
+    return mode == FlatMonoResolveMode::Taa || mode == FlatMonoResolveMode::Dlaa
+        ? FlatWeaponRoute::Unchanged : FlatWeaponRoute::Copy;
 }
 
 // ---- the admission --------------------------------------------------------------------------------------------

@@ -10,11 +10,16 @@ namespace edvr {
 // Start/Back, thumb clicks and X/Y always remain the game's.
 constexpr uint16_t kMenuPadMask = 0x000F | 0x0300 | 0x3000;
 constexpr int kMenuPadCount = 8;
-constexpr uint64_t kMenuPadOwnershipMs = 100;
+// Present may block for seconds while a temporal backend creates its device.
+// Keep the request bounded, and revoke immediately when focus is lost.
+constexpr uint64_t kMenuPadOwnershipMs = 5000;
 constexpr uint64_t kMenuPadDoorFreshMs = 500;
+inline bool menuPadOwnsButton(uint16_t buttons, uint8_t trigger) {
+    return trigger == 0 && (buttons & kMenuPadMask) != 0;
+}
 inline bool menuPadMayOwn(int index, int requested, uint64_t requestMs, uint64_t now,
-                          bool installed, bool retired) {
-    return installed && !retired && index >= 0 && index < 4 && requested == index &&
+                          bool installed, bool retired, bool focused) {
+    return installed && !retired && focused && index >= 0 && index < 4 && requested == index &&
            requestMs != 0 && now >= requestMs && now - requestMs <= kMenuPadOwnershipMs;
 }
 constexpr uint16_t kMenuPadButtons[kMenuPadCount] = {

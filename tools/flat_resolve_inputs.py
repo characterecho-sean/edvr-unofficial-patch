@@ -10,7 +10,7 @@ CAP = 384 << 20
 CHUNK = 64 << 20
 ROLES = {'color', 'depth', 'clean_color', 'overlay_coverage', 'untrusted_coverage', 'slots'}
 BUFFERS = {'pool', 'scene_now', 'scene_previous'}
-MODES = {'taa', 'dlaa', 'dlss', 'fsr'}
+MODES = {'taa', 'dlaa', 'dlss', 'fsr', 'xess'}
 PARTIAL = {'queued', 'cancelled', 'timeout', 'frame-gap', 'expired-arm', 'budget-cap', 'invalid-input', 'staging-failed', 'map-failed', 'write-failed', 'metadata-write-failed'}
 
 def leaf(root, name):
@@ -157,6 +157,9 @@ def self_test():
         result = inspect(p);mask = next(t for t in result[0]['textures'] if t['name'] == 'overlay_coverage')
         assert mask['marked'] == 2 and mask['bounds_inclusive'] == [1,0,1,1]
         assert before == {f: f.read_bytes() for f in root.iterdir()}
+        m['mode'] = 'xess';p.write_text(json.dumps(m))
+        assert inspect(p)[0]['mode'] == 'xess'
+        m['mode'] = 'fsr';p.write_text(json.dumps(m))
         session = dict(schema='edvr-flat-resolve-input-session', version=1, stage='prebackend', backend_status='not-run', status='ready', byte_cap=CAP, reserved_bytes=sum(t['byte_size'] for t in m['textures']), attempts=1, pending=0, samples=[p.name])
         sp = root/'manifest.json';sp.write_text(json.dumps(session));assert inspect(sp)[0]['complete']
         session['reserved_bytes'] = 0;sp.write_text(json.dumps(session))

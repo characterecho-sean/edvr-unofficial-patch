@@ -13,6 +13,7 @@
 #include "../common/guard.h"
 #include "../common/log.h"
 #include "../common/temporal_mode.h"
+#include "../common/runtime_profile.h"
 #include "../common/timing.h"
 #include "binding_shadow.h"
 #include "draw_census.h"
@@ -1329,7 +1330,8 @@ void objectProbeConfigure(Config& cfg) {
     g_verbose = cfg.getBool("advanced.object_probe", false);
     g_eyeDepthCapture.configure(cfg.getBool("advanced.eye_depth_capture", false));
     cullGateProbe.configure(cfg.getBool("advanced.cull_gate_capture", false));
-    detail::g_objectProbeOn = g_verbose || temporalModeEnabled(cfg.getString("fix.temporal_aa", "off"));
+    detail::g_objectProbeOn = g_verbose ||
+        temporalModeEnabledFor(cfg.getString("fix.temporal_aa", "off"), runtimeFlatProfile());
 }
 
 void objectProbeNoteSourceDraw(ID3D11DeviceContext* ctx,char kind,uint32_t count,uint32_t instances,

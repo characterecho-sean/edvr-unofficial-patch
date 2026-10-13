@@ -381,6 +381,11 @@ void projectionRuntimeTests(ID3D11Device* device, ID3D11DeviceContext* base) {
         if(livePlan){
             FlatProjectionBindingScope active(*livePlan);
             check(active.active(),"late live plan binds the existing private buffer");
+            FlatProjectionRuntimeRequest otherSource=two;
+            otherSource.original=unready.Get();
+            check(!tail.preflight(&otherSource,1,phase,3,false) &&
+                  std::strcmp(tail.failure().branch,"topology-live-plan-in-use")==0,
+                  "different original cannot retarget a nonidle live plan");
             FlatProjectionRuntimeRequest another=two;another.slot=2;
             ctx->VSSetConstantBuffers1(2,1,&lateBound,&first,&count);
             check(!tail.preflight(&another,1,phase,3,false) &&

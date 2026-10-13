@@ -5,6 +5,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <cwchar>
 
 #include "../common/log.h"
 
@@ -22,6 +23,8 @@
 #include <dxgi1_2.h>
 #include <wrl/client.h>
 #include <xess/xess_d3d12.h>
+#include "xess_feature_latch.h"
+#include "xess_runtime_version.h"
 #include "temporal_shader_bytecode.h"
 using Microsoft::WRL::ComPtr;
 #endif
@@ -29,6 +32,13 @@ using Microsoft::WRL::ComPtr;
 namespace edvr {
 namespace {
 char g_reason[320] = "XeSS has not been checked";
+bool g_quietFeatureFailure = false;
+
+struct QuietFeatureFailure {
+    const bool prior = g_quietFeatureFailure;
+    QuietFeatureFailure() { g_quietFeatureFailure = true; }
+    ~QuietFeatureFailure() { g_quietFeatureFailure = prior; }
+};
 
 bool fail(const char** why, const char* format, ...) {
     va_list args;
@@ -37,7 +47,7 @@ bool fail(const char** why, const char* format, ...) {
     va_end(args);
     g_reason[sizeof(g_reason) - 1] = '\0';
     if (why) *why = g_reason;
-    Log::get().note("xess: refused: %s", g_reason);
+    if (!g_quietFeatureFailure) Log::get().note("xess: refused: %s", g_reason);
     return false;
 }
 
@@ -109,6 +119,7 @@ struct State {
     uint32_t evaluations = 0, resets = 0, failures = 0;
     bool untrackedSubmission = false;
     bool untrackedRefusalLogged = false;
+    XessFeatureFailureLatch failedFeature;
     std::unique_ptr<Feature> feature;
     ~State() {
         // Normal shutdown has already destroyed the XeSS context after the
@@ -136,7 +147,8 @@ struct State {
 // there is "do the minimum and leak the rest" (d3d11_proxy.cpp). The
 // FreeLibrary-unload teardown leaks it too: that path can hold the loader lock
 // and must issue no context commands (device_hook.cpp, shutdownDeviceHooks),
-// while xessShutdown signals, flushes and waits. Only the rigs call it.
+// while xessShutdown signals, flushes and waits. The render-thread device-
+// change path and rigs may call it; loader-lock teardown must not.
 State* g_state = nullptr;
 bool g_tried = false;
 bool g_available = false;
@@ -285,14 +297,13 @@ bool qualityFor(State& state, Feature& feature, const char** why) {
 
 bool makeFeature(State& state, uint32_t w, uint32_t h, uint32_t outW,
                  uint32_t outH, bool hdr, const char** why) {
-    if (!releaseFeature(state, why)) return false;
     auto feature = std::make_unique<Feature>();
     feature->inW = w; feature->inH = h; feature->outW = outW;
     feature->outH = outH; feature->hdr = hdr;
     const xess_result_t created = state.api.createContext(state.d12.Get(), &feature->context);
-    Log::get().note("xess: D3D12 context create rc=%d ptr=%p", int(created), feature->context);
     if (created != XESS_RESULT_SUCCESS || !feature->context)
         return fail(why, "xessD3D12CreateContext returned %d", int(created));
+    Log::get().note("xess: D3D12 context create rc=%d ptr=%p", int(created), feature->context);
     // From this point every failure destroys the XeSS context before the
     // temporary shared textures and D3D12 objects leave scope.
     auto abandon = [&]() -> bool {
@@ -310,12 +321,12 @@ bool makeFeature(State& state, uint32_t w, uint32_t h, uint32_t outW,
     init.initFlags = XESS_INIT_FLAG_INVERTED_DEPTH |
                      (hdr ? XESS_INIT_FLAG_ENABLE_AUTOEXPOSURE : XESS_INIT_FLAG_LDR_INPUT_COLOR);
     const xess_result_t initialized = state.api.init(feature->context, &init);
-    Log::get().note("xess: D3D12 init rc=%d flags=0x%X quality=%u output=%ux%u",
-                    int(initialized), init.initFlags, unsigned(feature->quality), outW, outH);
     if (initialized != XESS_RESULT_SUCCESS) {
         fail(why, "xessD3D12Init returned %d", int(initialized));
         return abandon();
     }
+    Log::get().note("xess: D3D12 init rc=%d flags=0x%X quality=%u output=%ux%u",
+                    int(initialized), init.initFlags, unsigned(feature->quality), outW, outH);
     xess_version_t intel{};
     const xess_result_t intelRc = state.api.getIntelVersion(feature->context, &intel);
     Log::get().note("xess: Intel XeFX query rc=%d version=%u.%u.%u.%u (diagnostic only)",
@@ -455,7 +466,7 @@ bool xessAvailable(ID3D11Device* device, const char** why) {
     DXGI_ADAPTER_DESC desc{};
     hr = adapter->GetDesc(&desc);
     if (FAILED(hr)) return fail(why, "D3D11 adapter description failed 0x%08X", unsigned(hr));
-    state->d3d12Module = LoadLibraryW(L"d3d12.dll");
+    state->d3d12Module = LoadLibraryExW(L"d3d12.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
     if (!state->d3d12Module) return fail(why, "d3d12.dll unavailable (Win32=%lu)", GetLastError());
     CreateD3D12DeviceFn createD3D12 = nullptr;
     if (!loadProc(state->d3d12Module, "D3D12CreateDevice", createD3D12))
@@ -468,13 +479,47 @@ bool xessAvailable(ID3D11Device* device, const char** why) {
     Log::get().note("xess: D3D11/D3D12 adapter matched LUID=%08X:%08X vendor=0x%04X device=0x%04X",
                     unsigned(desc.AdapterLuid.HighPart), unsigned(desc.AdapterLuid.LowPart),
                     desc.VendorId, desc.DeviceId);
-    state->xessModule = LoadLibraryW(L"libxess.dll");
-    if (!state->xessModule) return fail(why, "libxess.dll unavailable beside the game (Win32=%lu)", GetLastError());
-    char xessPath[MAX_PATH]{};
-    if (!GetModuleFileNameA(state->xessModule, xessPath, MAX_PATH) ||
-        std::strlen(xessPath) >= MAX_PATH - 1)
+    // Resolve from this module, not the process working directory or an
+    // already-loaded foreign copy. The rig resolves beside its executable.
+    HMODULE self = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            reinterpret_cast<LPCWSTR>(&xessBuiltIn), &self) || !self)
+        return fail(why, "EDVR module for libxess.dll could not be located (Win32=%lu)", GetLastError());
+    wchar_t xessDll[MAX_PATH]{};
+    const DWORD selfLength = GetModuleFileNameW(self, xessDll, MAX_PATH);
+    if (!selfLength || selfLength >= MAX_PATH)
+        return fail(why, "EDVR module path for libxess.dll could not be read (Win32=%lu)", GetLastError());
+    wchar_t* const slash = wcsrchr(xessDll, L'\\');
+    constexpr wchar_t kXessDllName[] = L"libxess.dll";
+    if (!slash || size_t(slash + 1 - xessDll) + (sizeof(kXessDllName) / sizeof(wchar_t)) > MAX_PATH)
+        return fail(why, "EDVR module directory path is too long for libxess.dll");
+    wcscpy_s(slash + 1, MAX_PATH - size_t(slash + 1 - xessDll), kXessDllName);
+    const DWORD attributes = GetFileAttributesW(xessDll);
+    if (attributes == INVALID_FILE_ATTRIBUTES) {
+        const DWORD code = GetLastError();
+        if (code == ERROR_FILE_NOT_FOUND || code == ERROR_PATH_NOT_FOUND)
+            return fail(why, "libxess.dll is missing beside EDVR");
+        return fail(why, "libxess.dll beside EDVR cannot be inspected (Win32=%lu)", code);
+    }
+    if (attributes & FILE_ATTRIBUTE_DIRECTORY)
+        return fail(why, "libxess.dll beside EDVR is a directory");
+    state->xessModule = LoadLibraryExW(xessDll, nullptr,
+                                       LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+    if (!state->xessModule) {
+        const DWORD code = GetLastError();
+        if (code == ERROR_MOD_NOT_FOUND)
+            return fail(why, "libxess.dll exists beside EDVR but a dependency could not be loaded (Win32=126; check the VC++ 2015+ runtime)");
+        return fail(why, "libxess.dll beside EDVR failed to load (Win32=%lu)", code);
+    }
+    wchar_t loadedXessDll[MAX_PATH]{};
+    const DWORD loadedLength = GetModuleFileNameW(state->xessModule, loadedXessDll, MAX_PATH);
+    if (!loadedLength || loadedLength >= MAX_PATH)
         return fail(why, "loaded XeSS DLL path could not be verified");
-    Log::get().note("xess: runtime module %s", xessPath);
+    if (_wcsicmp(loadedXessDll, xessDll) != 0)
+        return fail(why, "libxess.dll resolved to another module (expected %ls, loaded %ls)",
+                    xessDll, loadedXessDll);
+    Log::get().note("xess: runtime module %ls", loadedXessDll);
     XessApi& api = state->api;
     if (!loadProc(state->xessModule, "xessGetVersion", api.getVersion) ||
         !loadProc(state->xessModule, "xessGetIntelXeFXVersion", api.getIntelVersion) ||
@@ -488,6 +533,11 @@ bool xessAvailable(ID3D11Device* device, const char** why) {
     const xess_result_t versionRc = api.getVersion(&version);
     if (versionRc != XESS_RESULT_SUCCESS)
         return fail(why, "xessGetVersion returned %d", int(versionRc));
+    // The pinned SDK package is 3.0.2, but its SR runtime ABI is 2.0.2.
+    // Development-stage patches (90+) may change that ABI too.
+    if (!xessSrRuntimeCompatible(version.major, version.minor, version.patch))
+        return fail(why, "libxess.dll has incompatible XeSS-SR runtime %u.%u.%u.%u (expected 2.0.x)",
+                    version.major, version.minor, version.patch, version.reserved);
     Log::get().note("xess: SDK runtime version %u.%u.%u.%u loaded; D3D12 SR exports present",
                     version.major, version.minor, version.patch, version.reserved);
     D3D12_COMMAND_QUEUE_DESC queueDesc{};
@@ -556,10 +606,31 @@ bool xessEvaluate(ID3D11DeviceContext* context, unsigned slot,
         !validateTexture(output, outputWidth, outputHeight,
                          hdr ? DXGI_FORMAT_R16G16B16A16_FLOAT : colorFormat, "output", why))
         return false;
+    const XessFeatureKey key{width, height, outputWidth, outputHeight, hdr};
+    state.failedFeature.clearIfDifferent(key);
+    if (state.failedFeature.matches(key)) {
+        if (why) *why = state.failedFeature.reason();
+        return false;
+    }
     if (!state.feature || state.feature->inW != width || state.feature->inH != height ||
         state.feature->outW != outputWidth || state.feature->outH != outputHeight ||
         state.feature->hdr != hdr) {
-        if (!makeFeature(state, width, height, outputWidth, outputHeight, hdr, why)) return false;
+        // A fence-drain refusal is transient; only a failed create is latched.
+        if (!releaseFeature(state, why)) return false;
+        const char* createWhy = nullptr;
+        bool created = false;
+        {
+            QuietFeatureFailure quiet;
+            created = makeFeature(state, width, height, outputWidth, outputHeight, hdr, &createWhy);
+        }
+        if (!created) {
+            state.failedFeature.record(key, createWhy);
+            Log::get().note("xess: feature create failed in=%ux%u out=%ux%u hdr=%u: %s; this key will not retry until the key or mode changes",
+                            width, height, outputWidth, outputHeight, hdr ? 1u : 0u,
+                            state.failedFeature.reason());
+            if (why) *why = state.failedFeature.reason();
+            return false;
+        }
     }
     Feature& feature = *state.feature;
     CommandSlot& command = feature.commands[feature.nextCommand++ % kCommandRing];
@@ -689,6 +760,7 @@ bool xessEvaluate(ID3D11DeviceContext* context, unsigned slot,
 
 void xessReleaseFeatures() {
 #if EDVR_HAVE_XESS
+    if (g_state) g_state->failedFeature.clear();
     if (g_state && !releaseFeature(*g_state, nullptr))
         Log::get().note("xess: retained feature after bounded GPU wait refusal; it cannot be freed in flight");
 #endif

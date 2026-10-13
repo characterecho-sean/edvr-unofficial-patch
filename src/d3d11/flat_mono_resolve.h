@@ -238,6 +238,8 @@ struct FlatMonoResolveFrame {
 // size-specific feature from incomplete or stale inputs.
 struct FlatMonoResolvePreflight {
     uint32_t renderWidth = 0, renderHeight = 0, outputWidth = 0, outputHeight = 0;
+    // The camera route's actual cycle for the frame this plan will authorize.
+    uint32_t jitterCycle = 8;
     // Negotiated evaluation size override, same contract as the frame's: the
     // preflight allocates at the E the resolve will evaluate at (gate-2 review
     // F1), because the resolve's resource cache keys on E.

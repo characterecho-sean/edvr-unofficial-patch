@@ -2315,7 +2315,7 @@ void buildContent(MenuContent& c) {
     // side (menu_panel.cpp: pad = cap * 8 / 10).
     if (runtimeFlatProfile()) {
         const char* status = "";
-        if (!s.flatKeysReadyShown && !s.padReady) status = " | keyboard gate unavailable";
+        if (!s.flatKeysReadyShown) status = " | keyboard gate unavailable";
         else if (s.lastWrite.compare(0, 8, "writing ") == 0) status = " | saving";
         else if (s.lastWrite.compare(0, 7, "FAILED:") == 0) status = " | write failed";
         else if (!s.lastWrite.empty()) status = " | saved";
@@ -3218,6 +3218,7 @@ void buildRowContext(int def, RowDecisionInput* in) {
     in->ctx.nUses = static_cast<int>(in->uses.size());
     in->ctx.scope = clashScopeOf(kMenuRows[def]);
     in->ctx.explorerCamSession = explorerCamSessionActive();
+    in->ctx.flatPadNavigation = runtimeFlatProfile();
 }
 
 // A locked row says so on the row, in the footer and in the log, and nothing is written.
@@ -3231,6 +3232,12 @@ void noteLocked(int def) {
 // Enter on a hotkey row. Explorer Cam's key is locked while a session is on (the key being
 // edited is the key that gets the player out): the row says so and nothing starts.
 void beginCapture(int entryIndex, int defIndex) {
+    if (runtimeFlatProfile() && !g_s.flatKeysReadyShown) {
+        const char* note = "Hotkey capture needs the keyboard gate";
+        Log::get().note("menu: %s; the game's keyboard has not reached the gate.", note);
+        setHotkeyNote(defIndex, "capture unavailable", note);
+        return;
+    }
     HotkeyRowContext c;
     c.rowKey = kMenuRows[defIndex].key;
     c.explorerCamSession = explorerCamSessionActive();
@@ -3279,8 +3286,10 @@ void applyDecision(int def, const CaptureDecision& dec) {
             Log::get().note("menu: %s: %s refused -- it is one of the menu's own navigation keys.", dotted.c_str(),
                             text.c_str());
             setHotkeyNote(def, "the menu's own key",
-                          text + " has a key this menu navigates with (arrows, Enter, Space, Tab, PageUp/Down, Home, End, R, Esc), "
-                          "with any modifier; pick another key.");
+                          dec.binding.kind == HotkeyKind::Pad
+                              ? text + " navigates the flat panel (D-pad, A/B, LB/RB); pick another button."
+                              : text + " has a key this menu navigates with (arrows, Enter, Space, Tab, PageUp/Down, Home, End, R, Esc), "
+                                "with any modifier; pick another key.");
             return;
         case CaptureOutcome::Duplicate: {
             const int other = hotkeyRowByDotted(dec.check.duplicateOf);
@@ -3625,7 +3634,7 @@ void preparePadNavigation(uint64_t now, bool visibleFocused) {
     (void)now;
 }
 
-void handlePadNavigation(uint64_t now, bool keyboardReady) {
+void handlePadNavigation(uint64_t now) {
     State& s = g_s;
     if (!s.open || !s.padReady) return;
     // Controller ownership is independent of the keyboard door. Do not reuse
@@ -3634,7 +3643,6 @@ void handlePadNavigation(uint64_t now, bool keyboardReady) {
     uint16_t buttons = 0;
     if (!xinputSlotSnapshot(static_cast<unsigned>(s.padIndex), &buttons)) return;
     if (s.captureEntry >= 0) {
-        if (!keyboardReady) handleCapture(now);
         // Captured inputs never double as navigation, even on the completion tick.
         s.padNavigation.prime(buttons);
         return;
@@ -4194,7 +4202,14 @@ void menuTick(ID3D11Device* dev) {
             tickHeldEdit(now);   // a held numeric edit whose burst has ended is written now (menu_edit_hold.h)
             s.tickMs = now;
             drainWrites();
-            if (s.summon.pressed()) {
+            const bool summonPressed = s.summon.pressed();
+            // A pad binding in an existing ini may overlap panel navigation.
+            // Its opening edge still works; once open, the panel owns that
+            // button (A selects, B backs out, and the others navigate).
+            const HotkeyBinding& summonBinding = s.summon.binding();
+            const bool padNavSummon = summonBinding.kind == HotkeyKind::Pad &&
+                menuPadOwnsButton(summonBinding.padButtons, summonBinding.padTrigger);
+            if (summonPressed && !(s.open && padNavSummon)) {
                 if (s.open) closeMenu("the menu key");
                 else openMenu(now);
             }
@@ -4228,6 +4243,11 @@ void menuTick(ID3D11Device* dev) {
                 s.flatKeysReadyShown = keysReady;
                 s.contentDirty = true;
             }
+            if (!keysReady && s.captureEntry >= 0) {
+                const int def = s.captureDef;
+                endCapture();
+                setHotkeyNote(def, "capture cancelled", "Keyboard gate unavailable");
+            }
             const bool nativeScale = flatRuntimeNativeScale();
             if (nativeScale != s.flatNativeScaleShown) {
                 s.flatNativeScaleShown = nativeScale;
@@ -4236,7 +4256,7 @@ void menuTick(ID3D11Device* dev) {
             flatWarningTick(now);
             preparePadNavigation(now, drawnFresh && gameHasFocus());
             if (keysReady) handleKeys(now);
-            handlePadNavigation(now, keysReady);
+            handlePadNavigation(now);
             if (s.open && dev && !menuPanelFlatRasterReady()) s.contentDirty = true;
             if (s.open && s.contentDirty) {
                 s.contentDirty = false;

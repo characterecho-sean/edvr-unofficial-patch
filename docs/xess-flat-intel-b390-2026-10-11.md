@@ -2,61 +2,52 @@
 
 ## Status
 
-- State: generalized camera repair and automatic recovery verified locally for
-  T9 <-> Lynx. Correct 6ACD6A82/174055.log has no AA mode cycle: current
-  original CB2 certifies in Probe without preparation; selected handoff wakes
-  Full, then strict inverse-only repair runs. Later 4,812-frame treated streak,
-  12,198 treated, zero backend failures; user reports stable scene/HUD/menus.
-  Brief ship-switch delay fits existing 1.5s probes; logs cannot time
-  readiness. Type 11 shares the original issue but was not retested in this
-  final flight. Root evidence: 070705 proves omitted H inverse phase (CS/sky
-  already phased); 162004/trace6060 proves unrelated 256x256 veto; 165802
-  proves missing paused shadow/context. All are corrected without ship/size
-  rules. Native/MSVC/B390 binding tests and all 46 replay hashes pass. Final
-  full Wine gate was stopped after a stall; no receipt. `codex/xess-flat` is
-  ready for user Windows validation. Windows main works on another Nvidia PC;
-  hardware/OS comparison remains open.
-- Environment: ONEXPLAYER 3, Intel Arc B390 PTL 8086:b080; CachyOS xe; Proton
-  Experimental experimental-11.0-20261001-x86_64; DXVK
-  v3.1.1-47-g685301564ea3486; private Mesa 26.3.0-devel git-37bf953a58. Elite
-  reaches the menu; see planetary-startup-intel-b390-2026-10-11.md.
-- Branch adds fix.temporal_aa=xess for flat only, a pinned SDK fetcher, a
-  D3D11/D3D12 shared-texture/fence backend and installer payloads. Existing
-  modes and defaults stay unchanged. The latest Type 11 capture logs XeSS.
-- SDK v3.0.2, commit 8fe81bdbbaf00b3c1b733fd0d830c333dc84e6f0; XeSS-SR runtime
-  2.0.2. Package and component versions differ.
-- Windows SDK handoff: `python tools/fetch_xess.py --dest third_party/xess` and
-  `python tools/fetch_ffx_dx11.py --dest third_party/ffx-dx11` before full
-  build. Fetchers pin/verify dependencies; installers carry required notices.
-- Ruled-out pointer: capability entries below record D3D11 unsupported-driver
-  refusal and the missing enabled Vulkan extension on DXVK's device. Separate
-  Vulkan execution passed; the confirmed D3D12 bridge is the branch backend.
-- Confirmed: B390 bridge GPU rig passed 20 evaluations across native LDR, 2x
-  LDR/HDR and HDR recreation, four resets and zero failures. XeFX version is
-  0.0.0.0; XMX acceleration remains unverified. Local gameplay now executes.
-- XeSS jitter minimum follows ceil(8 * max(E/R)^2), including 72 phases at 3x.
-  Legacy/Off camera routes stay at eight and explicitly refuse XeSS upscaling
-  when insufficient; native AA can use eight.
-- Build: portable MSVC/SDK compiles production DLLs and installers. Full build
-  fails unchanged run_jobs and installer sharing tests under Wine; Windows
-  validation is required. User authorized branch-only work pending that check.
-- Gameplay flight: correct 0f700706, 103114.log. Native HDR AA at 1920x1200
-  completes every step. SS 0.75 upscales 1440x900 to 1920x1200 on the LDR copy
-  route with 15 jitter phases; XeSS init/evaluations return rc=0.
-- User: mostly stable. Station surface below the hangar's Welcome to sign
-  flickers at native and stops below 1; sizes imply 0.75. This changes resolve
-  route and jitter as well as resolution, so it does not isolate the cause.
-- Confirmed: correct 4b7bfec4, 120427.log; E894 UI proof bootstraps and every
-  steady frame composites HUD/menus. User reports stable. Cleanup 02f50bd7 and
-  exact-pair guard evidence are in design-flat-ui-quality-2026-10-05.md. Native
-  surface flicker still needs evidence. FSR3 flight 125209.log treats 463
-  frames without SDK fallback; sampled FSR HUD counters remain unmeasured.
-- Type 11 AA: October 12 flight 050205.log is correct dirty build 6ACC18CC; AA
-  worked until switching cockpit. Trace flat_trace_9189.bin now records the
-  original conflict. The earlier 93/93 passing capture did not prove recovery;
-  see the journal for both distinct failures.
-- Local: temporal_aa=xess, UI 125, sharpness 0.75, menu F8; M2 and desktop
-  work. Human flight confirms pad and normal Elite controls after close.
+- State: Windows review fixes pulled at 829dcf00. The reviewer reports a green
+  native Windows 11/MSVC/RTX 5090 full build (140 rigs, receipt) and 20 XeSS
+  GPU evaluations. This closes the earlier Windows build gap for that tree;
+  follow-up source compiles, focused tests and GPU bridge pass; its full native
+  Windows validation and gameplay remain pending.
+- Local check: exact 829dcf00 XeSS bridge compiled with MSVC and passed all
+  four Intel B390/Proton GPU flights: 20 evaluations, four resets, no failures.
+  D3D11 key acquisition preserves the measured DXVK shared-resource flags.
+- Prior final gameplay: T9 <-> Lynx automatic recovery passed on the verified
+  dac1916e-dirty DLL, PE 6ACD6A82, 174055.log: 12,198 treated frames, later
+  4,812-frame streak, zero backend failures. It was not a clean fd26814e build.
+- Environment: ONEXPLAYER 3, Intel Arc B390 PTL 8086:b080, CachyOS xe, Proton
+  Experimental experimental-11.0-20261001-x86_64, DXVK
+  v3.1.1-47-g685301564ea3486, private Mesa 26.3.0-devel git-37bf953a58; flat
+  only, no headset/eye targets.
+- Current Elite file: Custom preset, BloomQuality 0, DOFEnabled 0, AOQuality 0,
+  BlurEnabled false, SSAAMultiplier 0.65. Custom.4.4.fxcfg mtime is October 11
+  22:32:20 UTC. Earlier captures did not snapshot those settings independently.
+  Current files cannot prove every historical flight's settings.
+- Branch: flat fix.temporal_aa=xess, pinned SDK v3.0.2 at
+  8fe81bdbbaf00b3c1b733fd0d830c333dc84e6f0, SR runtime 2.0.2; D3D11/D3D12
+  bridge and payload notices. XeSS is flat only; existing AA modes/defaults
+  remain.
+- Confirmed camera causes: omitted H inverse phase (070705); unrelated 256x256
+  domain veto (162004/trace6060); missing paused shadow/context (165802).
+  Current proof and ownership repair has no ship/size whitelist. Standdown
+  recovery retains the 1.5-second probe cadence, with no GPU work in probes.
+- Open hypotheses: final Type 11 behavior, native hangar-surface flicker,
+  graphics-setting dependence across systems, bit-1 propagation/culling,
+  on-foot weapon continuity at SS < 1, and XeSS GPU-copy cost remain unflown.
+- Ruled-out pointer: capability, first-gameplay, nonzero-T9 propagation,
+  secondary-domain and cold-probe entries below contain the dated exclusions.
+  The Windows comparison did not control OS, GPU or post settings together.
+- Next flight: after follow-up checks, test on foot with weapon raised at SS <
+  1, then Type 11 load/switch and Off -> XeSS. Windows comparison should cover
+  Bloom 3 / DoF 2 and off, with settings recorded. Bit-1 A/B needs a separate
+  instrumented culling check; it is not enabled in this repair.
+- Build handoff: fetch tools/fetch_xess.py and tools/fetch_ffx_dx11.py pinned
+  dependencies, run normal build.bat by absolute path, require the receipt. New
+  source has not inherited the prior Windows receipt.
+- Review policy: retain controller support explicitly requested by the user;
+  retain bounded diagnostics pending Type 11 evidence. Keep exact UI and
+  deferred-consumer admission; unknown UI shader pairs can be logged safely.
+- Local input setup moved to onexplayer-elite-local-setup-2026-10-11.md. Mesa
+  and MinEdLauncher setup remain in planetary-startup-intel-b390-2026-10-11.md.
+  Temporary paths identify historical artifacts rather than portable evidence.
 
 ## October 11: D3D11 capability probe
 
@@ -448,182 +439,11 @@ incompatibility, because enabling the missing dependency passes the hardware
 rig and produces successful FSR gameplay evaluations. This confirms the tested
 flat Proton/DXVK environment, not native Windows or an untested VR runtime.
 
-## October 11: local rear-right menu binding
+## Local rear-right input setup
 
-The user requested the menu on the ONEXPLAYER rear-right button for this
-install. The local hid-oxp driver identifies M1 as report 0x22 and M2 as 0x23;
-the ONEXPLAYER 3 setup project's measured left paddle is 0x22, so rear-right is
-M2. Live sysfs button_m2 is KEY_F16. EDVR's existing hotkey parser supports
-F16; no C++ change or repository default change is needed.
-
-The initial focused keyboard test received no rear-button event. InputPlumber
-owned the physical keyboard, but its active output was only deck-uhid, with no
-keyboard target, no keyboard output capabilities and no F16 translation in the
-current Default profile. Ruled out: changing the INI alone could deliver
-rear-right in that state, because the input manager discarded keyboard output
-before desktop/Proton delivery. KDE has no F15/F16 shortcut.
-
-The existing device YAML already requests deck-uhid, keyboard and mouse. The
-current outputs were set to deck-uhid plus keyboard, preserving the controller
-and restoring only the keyboard route needed here; no system file was edited.
-The Default profile has no target override. The earlier remover is unknown, and
-persistence across reboot has not been verified. Do not add a launch wrapper
-for an unobserved future reset.
-
-The live edvr-flat.ini and its existing LocalAppData mirror now have
-hotkey.menu=F16. They match exactly, SHA256
-614057eddf2587a8869e56b02b5d09bfe8077045feb601420212334734969058. The reviewed
-byte diff changes only menu=F8 to menu=F16 and its comment; CRLF,
-temporal_aa=fsr, UI 125, sharpness 0.75 and all other settings remain. The
-original is staged at /tmp/edvr-rear-right-original.ini, SHA256
-c2ecc7487c6633000b93600a97fbbbffd4928c6b76be61ad9e6c5c2fe3d1c6e5. User
-confirmation initially failed. Correct-build 131338.log loads the F16 hotkey
-but records no menu opening; the user reports rear-right does not work.
-InputPlumber's keyboard target remains active after that launch.
-
-Ruled out: a stale F8 config or removal of the restored keyboard target caused
-this failure, because 131338.log announces F16 and active targets still include
-keyboard. Forwarding the declared M2 key is insufficient; capture the actual
-press before choosing another binding or changing device mappings.
-
-The keyboard target alone did not make the button work. The user also reported
-desktop clicks stopped registering after using the focused tester. All test
-processes were already closed. Restoring the on-disk target list
-deck-uhid/keyboard/mouse did not recover clicks; reverting to the exact
-original active target list, deck-uhid only, also did not immediately recover
-them. No system files or mappings were edited for these target changes.
-
-Read-only XWayland checks reported core button1 down and no held Ctrl/Alt/Meta
-modifiers. XInput2 reported no buttons held on individual pointer devices and
-identified touch as the last core-pointer source. One conditioned XTest
-button-release event, with no motion or press, left the core mask unchanged at
-0x110. Ruled out: that release cleared the reported core state, because the
-before/after masks were identical. The user then recovered physical
-mouse/trackpad clicks by pressing the right controller's back button. The core
-mask still read 0x110 after practical recovery, so it is not a reliable measure
-of this user's physical click problem. The cause remains unknown; do not
-disable the touchscreen or restart the compositor on that stale reading.
-
-Input experiments are back to the original controller-only active output. The
-next button diagnosis must measure the actual normalized source event, with a
-known controller button as a positive capture check, and must retain the
-existing controller instance. No more focused-window tests are needed.
-
-The headless debug capture at 13:28:41 retained the exact gamepad0 instance,
-advertised F16 and standard controller button capabilities, and confirmed
-DPadUp down/up at 13:29:55. The user then pressed rear-right, but reports
-remained at two with no additional event. Ruled out: the declared sysfs
-M2=KEY_F16 is confirmed input on the current composite path, because the
-positive control arrived and the rear press did not. Inspect the separate input
-nodes/firmware route before choosing a new binding.
-
-The follow-up driver-source read corrects the initial M2 assumption:
-map_button_show reads the cached mapping index; gamepad_mode_show reads the
-cached mode. Probe seeds F15/F16 and XInput before delayed MCU setup attempts
-the actual firmware writes. Failed transport leaves those sysfs defaults
-visible. Ruled out: the displayed F16 alone proves what the button emits,
-because it is not firmware readback. No kernel-journal mapping error was found,
-which does not prove the write succeeded.
-
-Every physical ONEX input and HIDraw channel is root-only. Event6 is the
-separate consumer/mouse node outside the current composite's event18/event16
-sources. Only Steam's virtual controller is readable as deck; another virtual
-capture cannot establish the missing physical route. The next discriminating
-test needs a read-only, no-grab administrator observer on the ONEX physical
-nodes, filtering function-key and mouse/controller button identities only.
-
-F8 and its original comment were restored in both live and mirrored flat INIs
-while Elite was closed. Both match the original byte-for-byte, SHA256
-c2ecc7487c6633000b93600a97fbbbffd4928c6b76be61ad9e6c5c2fe3d1c6e5. FSR3, UI 125
-and sharpness 0.75 remain. User confirms only desktop clicks recovered, not the
-EDVR menu. The rear-right request remains open; no new binding is justified
-yet.
-
-The authenticated physical observer opened event18 (keyboard) and event6
-(consumer/mouse), both identified by the exact 1a86:fe00 USB ancestor. After
-READY the user pressed and released rear-right; no function-key or actual BTN_*
-identity was reported, while heartbeats continued. It made no grabs, input
-injections, mappings or configuration changes. Event18 is grabbed by
-InputPlumber and the filter excludes other keyboard codes, so this does not
-prove the hardware emits no report. Ruled out: rear-right emits an observed
-function-key or mouse/controller-button event on the ungrabbed event6 path in
-this test. The next test needs HID reports and aggregate event counts to
-distinguish another keyboard code, a grabbed interface and firmware-side
-silence.
-
-The combined authenticated capture opened event18, event6 and hidraw1/2/6 with
-zero report/event baselines. The user pressed front Console then rear-right.
-hidraw6 first recorded six boot-keyboard reports, then hidraw2 recorded two
-vendor reports; all evdev counters and hidraw1 stayed zero. No function-key or
-mouse-button identity appeared. This confirms that the raw reader bypasses the
-grabbed keyboard and can see hardware reports. Ruled out: event18's grab
-explains an unseen F16 keyboard emission during this test, because hidraw6 was
-observed directly and reported no F16. The rear sequence is associated with
-vendor-channel activity, but the counts-only observer discarded its payload;
-decode the exact vendor fields before claiming a button identity or changing
-firmware mappings.
-
-The vendor-only decoder confirmed the actual rear-right packet: CID 0xB2,
-matching 0x3f markers/footer, byte6=0x23 (M2/RightPaddle1), byte12=1 on press
-and 2 on release, packet type 0x01, flag 0x80, function 0x02. The source's
-`pressed = report.press_state == 1` agrees; its function byte is opaque and
-only logged. The first decoder assumed release=0, so it correctly preserved the
-actual state2 as rejected protocol metadata rather than falsely labeling it.
-Forwarding must use the observed 1/2 pair. No more identity test is needed.
-
-InputPlumber v0.81's existing OXP HID driver recognizes this B2 format, but the
-current composite has only evdev18 and evdev16 sources. Kernel hid-oxp
-raw_event handles B8 RGB replies and does not convert B2 buttons into keyboard
-events. Ruled out: choosing another INI key alone fixes the current vendor
-route, because the actual M2 packet never reaches a keyboard target. A narrow
-per-install bridge can read only the vendor interface and send F8 through a
-standalone InputPlumber keyboard target while Elite has focus, then
-release/stop that target on exit. This avoids changing the main controller's
-target list or global controller mappings. Implementation and local menu
-testing are still pending.
-
-The staged bridge passes measured M2 1/2 protocol and focus/debounce/release
-tests. Live host PID 244679 is deck-owned, has the exact Odyssey game cwd and
-matches the XWayland window's _NET_WM_PID; its class is steam_app_359320.
-Dry-run identifies Elite foreground and leaves gamepad0 unchanged, with no
-device open, target creation, key sends or file writes. Live DBus creation,
-SendKey signature introspection and removal of an unattached keyboard0 target
-also passed without sending keys or altering the main target. Subsequent local
-installation and user-authorized testing confirmed menu forwarding; details
-follow.
-
-The user explicitly approved a read-only udev rule and the per-install bridge.
-`pkexec /usr/bin/python3 -I -B /tmp/edvr_install_rear_read_access.py --install`
-succeeded. The installed `/etc/udev/rules.d/70-edvr-onex-rear-button.rules`
-matches hidraw only by USB bus, VID 1a86, PID fe00 and interface 02, assigning
-group deck and mode 0640. The rule changed access only for hidraw2: owner root,
-group ID 1000, mode 0640; deck UID 1000 can open it read-only and cannot write.
-hidraw1 and hidraw6 remain root:root 0600 and unreadable to deck. The original
-permissions snapshot is
-`/etc/udev/rules.d/.70-edvr-onex-rear-button.state.json`; rollback is available
-through `/home/deck/.local/share/elite-mesa-37bf953a58/rear_menu_access.py
---rollback` with local root authorization.
-
-The bridge is installed at
-`/home/deck/.local/share/elite-mesa-37bf953a58/rear_menu.py` (SHA256
-bea553d04f0e88436bead487237186892b025db2971295bab046383de61762db). Its launcher
-is `launch.py` (SHA256
-0438254d21a8e6fce4228ef5ba4993505032d33b23b5bf1e8c4966b9621ad4f7), with the
-original saved as `launch.py.before-rear-menu` (SHA256
-781f898a252b7a5350313407bdae90b8933f5b884a1e51f9dcc94c4ca5b86c4e). The current
-Steam launch options are unchanged; original Mesa setup and `execvpe` behavior
-are preserved. Each launch creates its own keyboard target and forwards only M2
-to F8 while the exact Elite PID and cwd are foreground; it closes on exit. The
-test log records two F8 down/up pairs and `CLOSED main_targets_unchanged=True`.
-User confirmed rear-right opens and closes the EDVR menu and desktop clicks
-work.
-
-At this earlier checkpoint controller navigation was still open. Source
-inspection showed `menu.cpp` keyboard-only at lines 2763 and 3450; flat
-navigation at line 4140 used `handleKeys`, XInput served hotkey capture at line
-3311, and `input_gate.h` excluded pads at line 49. No existing INI key enabled
-pad navigation. The implementation and validation status below supersedes that
-checkpoint. Preserve the XeSS/FSR3 Windows build-gate caveats above.
+The verified device-specific capture and bridge setup is preserved in
+[onexplayer-elite-local-setup-2026-10-11.md](onexplayer-elite-local-setup-2026-10-11.md).
+It does not add a bundled installer feature.
 
 ## October 11: native flat controller navigation
 
@@ -1452,3 +1272,114 @@ explicit branch pull/Windows test. Main is not merged. The locally verified
 installed DLL keeps its recorded dirty version/PE/hash; no receipt-guarded
 promotion or unnecessary rebuild was performed. Native Windows full build,
 installer gates and final Type11 check remain pending.
+
+## October 13: Windows review and Proton bridge verification
+
+PR 88 review 5497823856 reports full native Windows validation at 829dcf00. The
+two upstream commits fix native D3D11 keyed-mutex enforcement, avoid
+loader-lock teardown of the XeSS bridge, and re-pin the unchanged-behavior
+flatHelpers region. Local HEAD fast-forwarded; main was not merged.
+
+A frozen snapshot of 829dcf00 was built with portable MSVC and run in the
+existing disposable Proton prefix with the private Intel ICD. All four LDR/HDR
+native/upscale/recreation flights passed: 20 evaluations, four resets, zero
+failures. Compile and GPU logs are /tmp/edvr-pr88-gpu-829dcf00/compile.log and
+gpu-test.log. Those files are local historical artifacts. The Windows review
+itself persists at PR 88, review 5497823856.
+
+The live Elite graphics XML currently records BloomQuality 0, DOFEnabled 0,
+AOQuality 0, BlurEnabled false, SS 0.65 and Custom preset, with the custom file
+last written on October 11 at 22:32:20 UTC. That differs from the review's
+Bloom 3 / DoF 2 comparison. A current file is useful evidence for the next
+flight, but cannot replace missing per-flight settings snapshots. Therefore
+post-chain settings remain a hypothesis rather than the established sole cause
+of the cross-system difference.
+
+The controller feature was an explicit user request in this task, so it stays
+in this branch. Diagnostic removal is deferred until Type 11's final retest.
+Raising camera dirty bit 1 is also deferred: it changes shared ray/frustum and
+culling data, and no flight proves that it replaces the draw-local repair. The
+shader recipe identifies known semantics; physical topology alone cannot admit
+every unknown shader. The qualified laser witness covers a later camera-bearing
+source and remains distinct from the first-H deferred witness. GPU-copy
+optimization and pipeline prebuild require a measured profile first.
+
+### Review follow-up validation and dispositions
+
+The corrected source compiled and linked both production graphics and OpenXR
+DLLs via the normal absolute-path build. The full gate returned 1 on the same
+five run_jobs process-control failures under Wine; no receipt was produced. The
+earlier green Windows receipt applies to 829dcf00, not this follow-up. Full
+build log: /tmp/edvr-msvc-bootstrap-20261011/full_pr88_review_fixes.log.
+
+Nine focused repository rigs passed: flat temporal, flat camera VR, hotkey
+capture (636 checks), pad navigation (51 checks), temporal math, input gate,
+menu held edits, virtual-screen fitting and XeSS engine. The latter includes
+the optional hardware gate and another 20 GPU evaluations/four resets with zero
+failures. The strict hardware rig also passed after backend edits.
+
+The UI rig now has exactly the same 206 failing checks as the prior Wine
+baseline (3,810 checks total); its new CPU and wiring checks pass. Installer
+has the same eight sharing/replace failures as baseline; new XeSS planner,
+adoption, uninstall and ownership round-trip checks pass. Linux developer
+installer self-test still encounters the pre-existing POSIX read-only-file
+prune mismatch; its isolated XeSS opt-in/dry-run/verify checks pass.
+
+The full mono rig is blocked by Wine's predication/null-read failure. The
+unchanged baseline executable fails at the equivalent point in the same prefix.
+A temporary MSVC-built copy isolated the new positive/negative XeSS preflight,
+nonzero-slot refusal and resolve cycle guard, with projection scope/runtime
+checks, and passed without reaching the unrelated failing GPU suite. Files:
+/tmp/edvr-pr88-mono-probe/compile.log and run.log. No production code was
+changed for this isolation. These checks are supplementary evidence, not a
+replacement for native Windows's full suite.
+
+Disposition of PR 88 review 5497823856, by inline thread:
+
+- 4253867146: keyed mutex verified on exact reviewed source and corrected
+  source, preserving NT-handle flags and shared-fence ordering.
+- 4253867155: feature creation failure latches input/output/HDR key and reason;
+  same key does not recreate/log; size, mode and device changes permit retry.
+- 4253867156: XeSS uses external-upscaler weapon copy ownership below native;
+  capture manifests and Python reader name it xess. On-foot flight is pending.
+- 4253867161: profile-aware predicate guards the six cited VR readers; existing
+  temporal modes remain enabled in both profiles and XeSS remains flat only.
+- 4253867164: shadow payload bytes no longer zero-fill at probe allocation;
+  full-write validity still precedes reads. Legacy plan is Full-only; comments
+  name CPU probe tracking. Cached old admission cannot certify current writes,
+  and a scene-start hint alone cannot prove a current camera, so those narrower
+  wake alternatives do not replace the bounded fresh probe evidence.
+- 4253867170 and 4253867174: retained verified admission semantics, named
+  deferred pair/layout constants, added bounded once-per-pair unknown UI tone
+  logging with no admission. The later laser witness remains a distinct case.
+- 4253867183 and 4253867197: bit-1/culling A/B and GPU-copy/pipeline
+  optimization await measured flights; no unproved propagation or performance
+  change.
+- 4253867185: deferred admission logs use the existing five-second throttle.
+- 4253867191 and 4253867192: render-thread device change resets the binding;
+  mode change releases features/latch. Module-relative XeSS and System32 D3D12
+  loads require SR 2.0.x; error 126 distinguishes present DLL/dependency
+  failure.
+- 4253867204: optional unreadable XeSS files stay untouched, adoption persists
+  ownership with a state-only write, and dev installation requires --xess (or
+  --all). Focused planner/round-trip/dry-run tests cover the requested cells.
+  No adjacent NGX behavior change was kept.
+- 4253867208 and 4253867231: controller lease survives ordinary long frames but
+  revokes on focus loss and expires after five seconds. Navigation reserves pad
+  buttons while the panel is open; keyboard capture requires its own gate.
+- 4253867212: different-original/non-idle topology refusal has a live-plan
+  case.
+- 4253867216: full build now runs an optional hardware XeSS gate, with explicit
+  capability-only skips; loader, bridge, execution and readback errors fail.
+  Motion/jitter image-registration expansion remains a separate GPU fixture.
+- 4253867219 and 4253867224: Status includes open hypotheses, next flight,
+  current graphics settings and the build distinction; local rear-button setup
+  moved to its own small doc, and AGENTS lists the XeSS receipt dependency.
+- 4253867228: preflight rejects an insufficient XeSS jitter cycle before Ready
+  or raster jitter; cycle changes recheck the plan even at unchanged
+  dimensions. Positive and short-cycle preflight, slot refusal and resolve
+  guard checks pass.
+
+All review changes remain on the feature branch for Windows re-review and full
+validation. Controller support is retained because the user explicitly
+requested it; bounded diagnostics remain until Type 11's final flight.

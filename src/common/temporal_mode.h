@@ -16,6 +16,12 @@ inline bool temporalModeEnabled(const std::string& mode) {
            _stricmp(mode.c_str(), "xess") == 0;
 }
 
+// XeSS resolves only in the flat profile. VR producers must not arm for a
+// hand-edited xess value when no VR resolve will consume their outputs.
+inline bool temporalModeEnabledFor(const std::string& mode, bool flatProfile) {
+    return temporalModeEnabled(mode) && (flatProfile || _stricmp(mode.c_str(), "xess") != 0);
+}
+
 struct TemporalPresetSelection {
     unsigned full = 11;
     bool known = true;

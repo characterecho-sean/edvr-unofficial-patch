@@ -254,6 +254,12 @@ PadDoorSlot g_padSlot[4];
 int g_padRequested = -1;
 uint64_t g_padRequestMs = 0;
 
+bool padForegroundOwns() {
+    const HWND fg = GetForegroundWindow();
+    DWORD pid = 0;
+    return fg && GetWindowThreadProcessId(fg, &pid) && pid == GetCurrentProcessId();
+}
+
 DWORD WINAPI hookPadGetState(DWORD index, XINPUT_STATE* state) {
     DWORD result = ERROR_DEVICE_NOT_CONNECTED;
     // iatHookInstall publishes patch.original BEFORE exchanging the slot.
@@ -287,11 +293,15 @@ DWORD WINAPI hookPadGetState(DWORD index, XINPUT_STATE* state) {
     raw.leftX = value.Gamepad.sThumbLX; raw.leftY = value.Gamepad.sThumbLY;
     raw.rightX = value.Gamepad.sThumbRX; raw.rightY = value.Gamepad.sThumbRY;
     const uint64_t now = stampMs();
+    const bool focused = padForegroundOwns();
     AcquireSRWLockExclusive(&g_padLock);
     PadDoorSlot& slot = g_padSlot[index];
     slot.seenMs = now;
+    // A blocked Present cannot run menuTick to release the request. Once
+    // focus has left Elite, do not re-arm it until that tick runs again.
+    if (!focused) g_padRequested = -1;
     const bool own = menuPadMayOwn(static_cast<int>(index), g_padRequested, g_padRequestMs, now,
-                                  g_padInstalled.load(), g_padRetired.load());
+                                  g_padInstalled.load(), g_padRetired.load(), focused);
     const MenuPadSample visible = slot.gate.filter(raw, own);
     const bool note = own && !slot.privateNoted;
     if (note) slot.privateNoted = true;
@@ -1565,7 +1575,7 @@ bool inputGatePadPrivate(int index) {
     const uint64_t now = stampMs();
     AcquireSRWLockShared(&g_padLock);
     const bool own = menuPadMayOwn(index, g_padRequested, g_padRequestMs, now,
-                                  g_padInstalled.load(), g_padRetired.load()) &&
+                                  g_padInstalled.load(), g_padRetired.load(), padForegroundOwns()) &&
                      g_padSlot[index].gate.owned && g_padSlot[index].seenMs != 0 &&
                      now >= g_padSlot[index].seenMs &&
                      now - g_padSlot[index].seenMs <= kMenuPadDoorFreshMs;

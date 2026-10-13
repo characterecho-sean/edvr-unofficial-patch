@@ -2485,8 +2485,8 @@ if errorlevel 1 ( echo [edvr] ERROR: OpenXR shared texture test build failed & e
 exit /b 0
 
 :rig_xess_engine_test
-REM XeSS bridge's CPU contract. Hardware execution is an explicit disposable
-REM Proton test, never part of the routine build or the game's live prefix.
+REM XeSS bridge contracts and hardware readback. GPU-less or unsupported
+REM adapters skip explicitly; a supported adapter must pass the bridge.
 if not defined XESS (
     echo [edvr] xess_engine_test: no XeSS SDK in this build -- skipping.
     exit /b 0
@@ -2500,8 +2500,11 @@ cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /D_CRT_SECURE_NO_WARNINGS ^
     "tools\xess_engine_test\xess_engine_test.cpp" "src\d3d11\xess_engine.cpp" ^
     /link /INCREMENTAL:NO d3d11.lib dxgi.lib
 if errorlevel 1 ( echo [edvr] ERROR: XeSS engine test build failed & exit /b 1 )
+copy /y "%BUILD%\libxess.dll" "%OBJ%\xess_engine_test\libxess.dll" >nul
+if errorlevel 1 ( echo [edvr] ERROR: XeSS engine test runtime staging failed & exit /b 1 )
 "%OBJ%\xess_engine_test\xess_engine_test.exe" --dry-run || exit /b 1
 "%OBJ%\xess_engine_test\xess_engine_test.exe" --self-test || exit /b 1
+"%OBJ%\xess_engine_test\xess_engine_test.exe" --gpu-test-if-available || exit /b 1
 exit /b 0
 
 :rig_fsr3_engine_test

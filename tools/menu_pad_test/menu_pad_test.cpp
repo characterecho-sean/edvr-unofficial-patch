@@ -15,26 +15,45 @@ MenuPadSample sample(uint32_t packet, uint16_t buttons = 0) {
     MenuPadSample s; s.packet = packet; s.buttons = buttons; return s;
 }
 void ownershipCases() {
-    check(menuPadMayOwn(3, 3, 500, 600, true, false),
-          "ownership heartbeat is valid at exactly 100ms for slot 3");
-    check(!menuPadMayOwn(3, 3, 500, 601, true, false),
-          "ownership heartbeat expires at 101ms");
-    check(!menuPadMayOwn(-1, -1, 500, 500, true, false),
+    check(menuPadMayOwn(3, 3, 500, 600, true, false, true),
+          "ownership survives a frame over 100ms for slot 3");
+    check(menuPadMayOwn(3, 3, 500, 5500, true, false, true),
+          "ownership survives a blocking five-second backend creation");
+    check(!menuPadMayOwn(3, 3, 500, 5501, true, false, true),
+          "stale request expires beyond the bounded lease");
+    check(!menuPadMayOwn(3, 3, 500, 600, true, false, false),
+          "focus loss revokes ownership before lease expiry");
+    check(!menuPadMayOwn(-1, -1, 500, 500, true, false, true),
           "negative requested controller slot is invalid");
-    check(!menuPadMayOwn(4, 4, 500, 500, true, false),
+    check(!menuPadMayOwn(4, 4, 500, 500, true, false, true),
           "controller slot 4 is outside valid 0 through 3 range");
-    check(!menuPadMayOwn(0, -1, 500, 500, true, false),
+    check(!menuPadMayOwn(0, -1, 500, 500, true, false, true),
           "not-drawn request sentinel does not grant ownership");
-    check(!menuPadMayOwn(0, 0, 500, 500, false, false),
+    check(!menuPadMayOwn(0, 0, 500, 500, false, false, true),
           "missing installed door cannot grant ownership");
-    check(!menuPadMayOwn(0, 0, 500, 500, true, true),
+    check(!menuPadMayOwn(0, 0, 500, 500, true, true, true),
           "retired door cannot grant ownership");
-    check(!menuPadMayOwn(0, 0, 501, 500, true, false),
+    check(!menuPadMayOwn(0, 0, 501, 500, true, false, true),
           "future request timestamp cannot grant ownership");
-    check(!menuPadMayOwn(0, 0, 0, 0, true, false),
+    check(!menuPadMayOwn(0, 0, 0, 0, true, false, true),
           "zero request timestamp cannot grant ownership");
+    check(menuPadOwnsButton(0x1000, 0) && menuPadOwnsButton(0x0008, 0) &&
+          !menuPadOwnsButton(0x4000, 0) && !menuPadOwnsButton(0x1000, 1),
+          "panel owns only its button set, not X/Y or trigger chords");
 }
 void gateCases() {
+    MenuPadGate longFrame;
+    longFrame.filter(sample(1, 0), menuPadMayOwn(0, 0, 100, 100, true, false, true));
+    check(longFrame.filter(sample(2, 0x1000),
+                                menuPadMayOwn(0, 0, 100, 1200, true, false, true)).buttons == 0,
+          "fresh A during a 1.1-second blocked Present remains private");
+    check(longFrame.filter(sample(3, 0x1000),
+                                menuPadMayOwn(0, 0, 100, 1201, true, false, false)).buttons == 0,
+          "focus loss keeps a held panel button hidden as a release tail");
+    longFrame.filter(sample(4, 0), false);
+    check(longFrame.filter(sample(5, 0x1000), false).buttons == 0x1000,
+          "fresh press after focus loss and release reaches Elite");
+
     MenuPadGate packetModel;
     MenuPadSample largeInitial = packetModel.filter(sample(0xDEADBEEFu, 0x0000), false);
     check(largeInitial.packet == 0xDEADBEEFu,

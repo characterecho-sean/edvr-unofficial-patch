@@ -24,6 +24,7 @@
 
 #include "../common/config.h"
 #include "../common/temporal_mode.h"
+#include "../common/runtime_profile.h"
 #include "../common/guard.h"
 #include "../common/log.h"
 #include "binding_shadow.h"
@@ -2396,7 +2397,7 @@ void uiDepthConfigure(Config& cfg) {
     g_cockpitMetres = kTemporalShipMetres;
     // UI and smoke depth are required inputs of every temporal mode.
     const std::string aa = cfg.getString("fix.temporal_aa", "off");
-    g_passOn = temporalModeEnabled(aa);
+    g_passOn = temporalModeEnabledFor(aa, runtimeFlatProfile());
     g_keyOn = g_passOn;
     // The legacy fixed bias is NVIDIA-only. Coverage and adaptive history
     // are used by every external, trained engine (NVIDIA's or AMD's).

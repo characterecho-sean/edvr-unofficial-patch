@@ -52,7 +52,9 @@ class FlatProjectionShadowBank {
         uint32_t width = 0;
         bool valid = false;
         bool mapping = false;
-        unsigned char bytes[MaxWidth] = {};
+        // Read only after a complete write sets valid; zeroing this 4 MiB
+        // bank on every stand-down probe serves no observer.
+        unsigned char bytes[MaxWidth];
     };
     std::unique_ptr<Entry[]> entries_;
     uint64_t epoch_ = 1;

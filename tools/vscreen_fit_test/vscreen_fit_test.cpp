@@ -1070,7 +1070,7 @@ void caseR12() {
     for (const char* read : {"getString(\"fix.ui_quality\", \"100\")", "getString(\"fix.temporal_aa\", \"off\")"}) {
         checkf(has(res, read) && has(layer, read), "R12c: the resolver and uiLayerConfigure read the layer's key the same way: %s", read);
     }
-    check(has(res, "temporalModeEnabled(") && has(layer, "temporalModeEnabled(") && has(res, "uiQualityParse(") && has(layer, "uiQualityParse(") &&
+    check(has(res, "temporalModeEnabledFor(") && has(layer, "temporalModeEnabledFor(") && has(res, "uiQualityParse(") && has(layer, "uiQualityParse(") &&
               has(res, "uiLayerNotLiveReasonFor(target, temporal, jitterAsShipped, /*stoodDown=*/false)"),
           "R12c: through the same parsers, and the layer's own words for why it is not live");
     check(has(res, "f.flatProfile = runtimeFlatProfile();") && has(res, "vscreenfit::decide(in)"),

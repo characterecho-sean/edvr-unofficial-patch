@@ -979,9 +979,17 @@ void testChecks() {
     check(hotkeyCheckBinding(key(VK_BACK, kHotkeyCtrl), others, n, nullptr, 0, ClashScope::AnyContext).verdict == BindVerdict::Ok &&
               hotkeyCheckBinding(key(VK_F12, kHotkeyAlt), others, n, nullptr, 0, ClashScope::AnyContext).verdict == BindVerdict::Ok,
           "...and so do the chords on keys the menu does not read");
-    check(hotkeyCheckBinding(pad(kPadA), others, n, nullptr, 0, ClashScope::AnyContext).verdict == BindVerdict::Ok &&
+    for (uint16_t button : {kPadUp, kPadDown, kPadLeft, kPadRight,
+                            kPadA, kPadB, kPadLeftShoulder, kPadRightShoulder}) {
+        check(hotkeyCheckBinding(pad(button), others, n, nullptr, 0, ClashScope::AnyContext, true).verdict ==
+                  BindVerdict::Reserved,
+              "each flat panel navigation button is reserved during hotkey capture");
+    }
+    check(hotkeyCheckBinding(pad(kPadA), others, n, nullptr, 0, ClashScope::AnyContext).verdict == BindVerdict::Ok,
+          "VR retains gamepad hotkey capture when it has no pad navigation");
+    check(hotkeyCheckBinding(pad(kPadX), others, n, nullptr, 0, ClashScope::AnyContext).verdict == BindVerdict::Ok &&
               hotkeyCheckBinding(joy(kGladiator, 0), others, n, nullptr, 0, ClashScope::AnyContext).verdict == BindVerdict::Ok,
-          "a pad or HOTAS button is never the menu's key (the menu is navigated by the keyboard)");
+          "other pad buttons and HOTAS remain available for hotkeys");
 
     // Elite's own bindings WARN: the key is watched, not captured, so the game sees it too.
     const EliteBindUse uses[] = {

@@ -13,7 +13,8 @@
 //     has been released -- the Enter that started the capture cannot become the
 //     binding it was meant to open.
 //   * hotkeyCheckBinding: the checks on a captured binding. A key the menu
-//     itself navigates with is refused; an exact copy of another EDVR hotkey is
+//     itself navigates with, or a flat panel navigation button, is refused;
+//     an exact copy of another EDVR hotkey is
 //     refused, naming which; a press that Elite's own bindings also act on is a
 //     WARNING and not a refusal, because these keys are watched and never
 //     captured, so the game sees the press as well.
@@ -88,7 +89,7 @@ struct HotkeyOther {
 enum class BindVerdict : uint8_t {
     Ok,
     Duplicate,   // exactly another EDVR hotkey's binding: refused, `duplicateOf` says which
-    Reserved,    // a key the menu navigates with: refused
+    Reserved,    // a key, or flat pad button, the menu navigates with: refused
 };
 
 // Where Elite's bindings can matter for the hotkey being set. The menu key and
@@ -118,11 +119,13 @@ bool eliteElementIsOnFoot(const char* element);
 // Page Up, Page Down, Home, End, R, Escape), with ANY modifiers: the menu reads them raw, so
 // a chord on one of them is still that key to the menu and the hotkey would fire with it.
 // Refused for every hotkey, the menu key included (CTRL+ALT+ESCAPE would open the panel and
-// close it in the same tick).
-bool hotkeyReservedByMenu(const HotkeyBinding& b);
+// close it in the same tick). Flat navigation reserves DPad/A/B/LB/RB;
+// VR keeps those available for hotkeys.
+bool hotkeyReservedByMenu(const HotkeyBinding& b, bool flatPadNavigation = false);
 
 BindCheck hotkeyCheckBinding(const HotkeyBinding& b, const HotkeyOther* others, int nOthers,
-                             const EliteBindUse* uses, int nUses, ClashScope scope);
+                             const EliteBindUse* uses, int nUses, ClashScope scope,
+                             bool flatPadNavigation = false);
 
 // ---- deciding what a capture step does to a row -----------------------------
 
@@ -146,6 +149,7 @@ struct HotkeyRowContext {
     int                 nUses = 0;
     ClashScope          scope = ClashScope::AnyContext;
     bool                explorerCamSession = false;   // explorerCamSessionActive()
+    bool                flatPadNavigation = false;    // flat panel owns DPad/A/B/LB/RB
 };
 
 enum class CaptureOutcome : uint8_t {

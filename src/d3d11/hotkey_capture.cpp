@@ -1,4 +1,5 @@
 #include "hotkey_capture.h"
+#include "menu_pad.h"
 
 #include <cstdio>
 #include <cstring>
@@ -125,7 +126,9 @@ bool eliteElementIsOnFoot(const char* element) {
     return false;
 }
 
-bool hotkeyReservedByMenu(const HotkeyBinding& b) {
+bool hotkeyReservedByMenu(const HotkeyBinding& b, bool flatPadNavigation) {
+    if (b.kind == HotkeyKind::Pad)
+        return flatPadNavigation && menuPadOwnsButton(b.padButtons, b.padTrigger);
     if (b.kind != HotkeyKind::Key) return false;
     // WHATEVER THE MODIFIERS (review 2026-10-08, finding 2). The menu reads these keys raw
     // (GetAsyncKeyState) and never asks what else is held, so CTRL+ENTER pressed in the
@@ -144,10 +147,11 @@ bool hotkeyReservedByMenu(const HotkeyBinding& b) {
 }
 
 BindCheck hotkeyCheckBinding(const HotkeyBinding& b, const HotkeyOther* others, int nOthers,
-                             const EliteBindUse* uses, int nUses, ClashScope scope) {
+                             const EliteBindUse* uses, int nUses, ClashScope scope,
+                             bool flatPadNavigation) {
     BindCheck r;
     if (b.kind == HotkeyKind::None) return r;
-    if (hotkeyReservedByMenu(b)) {
+    if (hotkeyReservedByMenu(b, flatPadNavigation)) {
         r.verdict = BindVerdict::Reserved;
         return r;
     }
@@ -230,7 +234,8 @@ CaptureDecision hotkeyDecide(const CaptureStep& step, const HotkeyRowContext& ct
     }
     // Captured.
     d.binding = step.binding;
-    d.check = hotkeyCheckBinding(step.binding, ctx.others, ctx.nOthers, ctx.uses, ctx.nUses, ctx.scope);
+    d.check = hotkeyCheckBinding(step.binding, ctx.others, ctx.nOthers, ctx.uses, ctx.nUses,
+                                ctx.scope, ctx.flatPadNavigation);
     if (d.check.verdict == BindVerdict::Reserved) {
         d.outcome = CaptureOutcome::Reserved;
         return d;

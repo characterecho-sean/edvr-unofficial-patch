@@ -15,6 +15,7 @@
 #include "vscreen.h"
 #include "../common/config.h"
 #include "../common/temporal_mode.h"
+#include "../common/runtime_profile.h"
 #include "../common/log.h"
 
 namespace edvr {
@@ -220,7 +221,7 @@ bool prepare(ID3D11DeviceContext* ctx,ID3D11Device* dev,Screen& e,unsigned w,uns
 }
 }
 void screenMotionConfigure(Config& cfg) {
-    bool on=temporalModeEnabled(cfg.getString("fix.temporal_aa","off"));
+    bool on=temporalModeEnabledFor(cfg.getString("fix.temporal_aa","off"), runtimeFlatProfile());
     if(on!=detail::g_screenMotionEnabled){g_gpu.close();g=State{};detail::g_screenMotionEnabled=on;detail::g_screenMotionFailed=false;}
     if(on&&!g_gpu.policyNoted){g_gpu.policyNoted=true;Log::get().note("on-foot motion GPU diagnostics: enabled for screen UI clears/reissues, per-eye screen projection, and weapon identify/capture/raster; exact sparse query intervals only, one admission per category per frame, 1800 source-frame windows and a 120-frame no-wait drain.");}
     const bool weapon=cfg.getBool("fix.weapon_stability",true);

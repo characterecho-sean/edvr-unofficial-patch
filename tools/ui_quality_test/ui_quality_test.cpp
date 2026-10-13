@@ -1228,6 +1228,22 @@ void testFlatLayerRules() {
               !flatUiSourceTonePair(0xF9CFC798F21E9AEAull, 0xE8948389387DA082ull) &&
               !flatUiSourceTonePair(0xCFA91824129ECBBCull, 0xE8948389387DA083ull),
           "E894 UI source tone: both observed exact pairs qualify, neighbouring PS and unrelated VS do not");
+    {
+        FlatUiUnknownSourceToneLog log;
+        check(log.shouldInspect(1, 2) &&
+              log.record(1, 2) == FlatUiUnknownSourceToneLog::Result::NewPair &&
+              !log.shouldInspect(1, 2) &&
+              log.record(1, 2) == FlatUiUnknownSourceToneLog::Result::Duplicate,
+              "unknown UI tone diagnostic records each shader pair only once");
+        for (uint32_t i = 1; i < FlatUiUnknownSourceToneLog::kCapacity; ++i)
+            check(log.record(i + 1, 2) == FlatUiUnknownSourceToneLog::Result::NewPair,
+                  "unknown UI tone diagnostic accepts a pair within its fixed cap");
+        check(log.count == FlatUiUnknownSourceToneLog::kCapacity &&
+              log.record(99, 2) == FlatUiUnknownSourceToneLog::Result::CapacityReached &&
+              log.record(100, 2) == FlatUiUnknownSourceToneLog::Result::Full &&
+              !log.shouldInspect(101, 2),
+              "unknown UI tone diagnostic reports capacity once and stops probing");
+    }
     check(flatUiMapToneSlotOf(0xF9CFC798F21E9AEAull, 0xE8948389387DA083ull) == ~0u,
           "E894 UI source tone: the map table remains unchanged");
     check(flatUiSourceToneShape(1720, 720, 1720, 720, 1720, 720, 28, 1720, 720, 26, true, true, true) &&
@@ -1236,6 +1252,10 @@ void testFlatLayerRules() {
               !flatUiSourceToneShape(1720, 720, 1720, 720, 1720, 720, 27, 1720, 720, 26, true, true, true) &&
               !flatUiSourceToneShape(1720, 720, 1720, 720, 1720, 720, 28, 1720, 720, 26, false, true, true),
           "E894 UI source tone: full-size LDR RTV, R11 HUD source, LUT and viewport are required");
+    check(flatUiUnknownSourceToneShape(1720, 720, 1720, 720, 1720, 720, 29, 1720, 720, 26, true, true, true) &&
+              !flatUiSourceToneShape(1720, 720, 1720, 720, 1720, 720, 29, 1720, 720, 26, true, true, true) &&
+              !flatUiUnknownSourceToneShape(1720, 720, 1720, 720, 1720, 720, 10, 1720, 720, 26, true, true, true),
+          "unknown UI source tone: diagnostics can name an LDR view variant without widening admission");
     static int kE894Hud = 0, kE894Other = 0;
     check(flatUiSourceToneDirectHud(&kE894Hud, &kE894Hud, &kE894Hud) &&
               !flatUiSourceToneDirectHud(&kE894Hud, &kE894Other, &kE894Hud) &&
@@ -1448,14 +1468,37 @@ void testFlatLayerRules() {
                   adapter.find("flatUiToneProofCopy(g_proof, frame, source, output)") != std::string::npos &&
                   runtime.find("flatUiLayerNoteCopy(s.prefix.frame, copySource.Get(), k.color)") != std::string::npos,
               "wiring: the original plain-copy tone proof remains after diagnostic cleanup");
+        const size_t physicalShape = adapter.find("bool sourceTonePhysicalShape(");
+        const size_t afterPhysicalShape = adapter.find("uint32_t g_candidateLines", physicalShape);
         const size_t sourceTone = adapter.find("bool flatUiLayerSourceToneCandidate(");
-        const size_t afterSourceTone = adapter.find("bool flatUiLayerToneCandidate(", sourceTone);
-        check(sourceTone != std::string::npos && afterSourceTone != std::string::npos &&
-                  adapter.substr(sourceTone, afterSourceTone - sourceTone).find("tonemapAdmitStructure(ctx, ps, shape)") != std::string::npos &&
-                  adapter.substr(sourceTone, afterSourceTone - sourceTone).find("flatUiSourceToneDirectHud(") != std::string::npos &&
-                  adapter.substr(sourceTone, afterSourceTone - sourceTone).find("return flatUiLayerToneCandidate(") != std::string::npos &&
+        const size_t afterSourceTone = adapter.find("void flatUiLayerProbeUnknownSourceTone(", sourceTone);
+        const std::string physical = physicalShape != std::string::npos && afterPhysicalShape != std::string::npos
+            ? adapter.substr(physicalShape, afterPhysicalShape - physicalShape) : "";
+        const std::string source = sourceTone != std::string::npos && afterSourceTone != std::string::npos
+            ? adapter.substr(sourceTone, afterSourceTone - sourceTone) : "";
+        const size_t structure = physical.find("tonemapAdmitStructure(ctx, ps, shape)");
+        const size_t directHud = physical.find("flatUiSourceToneDirectHud(");
+        const size_t pairGate = source.find("flatUiSourceTonePair(vs, ps)");
+        const size_t physicalCall = source.find("sourceTonePhysicalShape(ctx, frame, renderW, renderH, vs, ps, cachedOutput, outW, outH, false, shape)");
+        const size_t proofCall = source.find("return flatUiLayerToneCandidate(");
+        check(!physical.empty() && !source.empty() && structure != std::string::npos &&
+                  directHud != std::string::npos && structure < directHud &&
+                  physical.find("flatUiSourceToneShape") != std::string::npos &&
+                  pairGate != std::string::npos && physicalCall != std::string::npos &&
+                  proofCall != std::string::npos && pairGate < physicalCall && physicalCall < proofCall &&
                   runtime.find("flatUiLayerSourceToneCandidate(ctx, s.prefix.frame") != std::string::npos,
               "wiring: physical E894 shape and direct-HUD identity qualify before the ordinary flat UI tone proof");
+        const size_t afterProbe = adapter.find("bool flatUiLayerToneCandidate(", afterSourceTone);
+        const std::string probe = afterSourceTone != std::string::npos && afterProbe != std::string::npos
+            ? adapter.substr(afterSourceTone, afterProbe - afterSourceTone) : "";
+        const size_t probeShape = probe.find("sourceTonePhysicalShape(ctx, frame, renderW, renderH, vs, ps, cachedOutput, outW, outH, true, shape)");
+        const size_t bloom = probe.find("ctx->PSGetShaderResources(2, 1, &bloom)");
+        const size_t record = probe.find("g_unknownSourceToneLog.record(vs, ps)");
+        check(!probe.empty() && probeShape != std::string::npos && bloom != std::string::npos &&
+                  record != std::string::npos && probeShape < bloom && bloom < record &&
+                  probe.find("flatUiLayerToneCandidate(") == std::string::npos &&
+                  runtime.find("flatUiLayerProbeUnknownSourceTone(ctx, s.prefix.frame") != std::string::npos,
+              "wiring: unknown source-tone pairs are logged only after physical shape and t2 checks, without granting proof");
         check(adapter.find("flat ui tone probe") == std::string::npos &&
                   runtime.find("flatUiLayerProbeTone(") == std::string::npos &&
                   adapter.find("FlatUiToneProbeBudget") == std::string::npos,
