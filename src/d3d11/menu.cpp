@@ -2315,9 +2315,9 @@ void buildContent(MenuContent& c) {
     // side (menu_panel.cpp: pad = cap * 8 / 10).
     if (runtimeFlatProfile()) {
         const char* status = "";
-        if (!s.flatKeysReadyShown) status = " | keyboard gate unavailable";
+        if (s.lastWrite.compare(0, 7, "FAILED:") == 0) status = " | write failed";
         else if (s.lastWrite.compare(0, 8, "writing ") == 0) status = " | saving";
-        else if (s.lastWrite.compare(0, 7, "FAILED:") == 0) status = " | write failed";
+        else if (!s.flatKeysReadyShown) status = " | keyboard gate unavailable";
         else if (!s.lastWrite.empty()) status = " | saved";
         if (s.padReady)
             snprintf(c.footer, sizeof(c.footer), "D-pad move/change  A select  B back\nLB/RB pages  %s close%s",
@@ -3881,11 +3881,23 @@ void closeMenu(const char* why) {
     inputGateSetPrivate(false);
     inputGateSetPadPrivate(false, -1);
     s.padReady = false;
+    if (runtimeFlatProfile()) hotkeysPrimeAll(); // a held navigation key must not become a hotkey on close
     perfMonitorNoteEvent(kEvMenu);
     Log::get().note("menu: closed (%s).", why);
 }
 
 }  // namespace
+
+bool menuFlatPadOwnsHotkey(uint16_t buttons, uint8_t trigger) {
+    const State& s = g_s;
+    if (!runtimeFlatProfile() || !s.open || !s.padReady || !gameHasFocus() ||
+        !inputGatePadPrivate(s.padIndex) || !menuPadOwnsButton(buttons, trigger)) return false;
+    // The existing menu binding still has to reach menuTick, which decides
+    // whether a press closes the panel or becomes navigation.
+    const HotkeyBinding& summon = s.summon.binding();
+    return summon.kind != HotkeyKind::Pad || summon.padButtons != buttons ||
+           summon.padTrigger != trigger;
+}
 
 // ---------------------------------------------------------------------------
 
@@ -4209,7 +4221,7 @@ void menuTick(ID3D11Device* dev) {
             const HotkeyBinding& summonBinding = s.summon.binding();
             const bool padNavSummon = summonBinding.kind == HotkeyKind::Pad &&
                 menuPadOwnsButton(summonBinding.padButtons, summonBinding.padTrigger);
-            if (summonPressed && !(s.open && padNavSummon)) {
+            if (summonPressed && !(s.open && padNavSummon && s.padReady)) {
                 if (s.open) closeMenu("the menu key");
                 else openMenu(now);
             }

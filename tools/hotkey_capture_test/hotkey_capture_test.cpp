@@ -1214,6 +1214,13 @@ void testDecide() {
         d = hotkeyDecide(stepFor(padPress), c);
         check(d.outcome == CaptureOutcome::Bind && d.binding.kind == HotkeyKind::Pad && d.check.clashCount == 1,
               "a pad button: written, and Elite's use of it is the warning");
+        HotkeyRowContext flat = c;
+        flat.flatPadNavigation = true;
+        padPress.padButtons = 0x1000; // A is owned by the flat panel
+        check(hotkeyDecide(stepFor(padPress), flat).outcome == CaptureOutcome::Reserved,
+              "flatPadNavigation reaches hotkeyDecide and reserves A");
+        check(hotkeyDecide(stepFor(padPress), c).outcome != CaptureOutcome::Reserved,
+              "the same pad button is available without flat navigation");
         CaptureSnapshot stick;
         stick.joy.count = 1;
         stick.joy.dev[0].id = kGladiator;
@@ -1512,6 +1519,46 @@ void testCaptureWiringPins(const char* root) {
           "menu.cpp: handleCapture decides, then ends the capture, then applies the decision");
     const std::string start = bodyOf("void startCapture(int entryIndex, int defIndex) {");
     check(start.find("hotkeysSuspend(true)") != std::string::npos, "menu.cpp: a capture that starts suspends the hotkeys");
+    const std::string begin = bodyOf("void beginCapture(int entryIndex, int defIndex) {");
+    check(begin.find("runtimeFlatProfile() && !g_s.flatKeysReadyShown") != std::string::npos &&
+          begin.find("return;") < begin.find("startCapture(entryIndex, defIndex)"),
+          "menu.cpp: flat capture refuses an unproven keyboard gate before starting");
+    check(handle.find("buildRowContext(def, &in)") != std::string::npos &&
+          bodyOf("void buildRowContext(int def, RowDecisionInput* in) {").find(
+              "in->ctx.flatPadNavigation = runtimeFlatProfile()") != std::string::npos,
+          "menu.cpp: the live flat profile reaches hotkeyDecide through the row context");
+    const std::string close = bodyOf("void closeMenu(const char* why) {");
+    check(close.find("inputGateSetPadPrivate(false, -1)") != std::string::npos &&
+          close.find("hotkeysPrimeAll()") != std::string::npos,
+          "menu.cpp: closing releases pad ownership and consumes held hotkey edges");
+    const std::string tick = bodyOf("void menuTick(ID3D11Device* dev) {");
+    check(tick.find("s.open && padNavSummon && s.padReady") != std::string::npos,
+          "menu.cpp: overlapping summon is suppressed only after navigation is private");
+    const std::string keys = bodyOf("void handleKeys(uint64_t now) {");
+    const std::string apply = bodyOf("void applyDecision(int def, const CaptureDecision& dec) {");
+    check(tick.find("if (keysReady) handleKeys(now)") != std::string::npos &&
+          keys.find("if (s.captureEntry >= 0)") < keys.find("handleCapture(now)") &&
+          handle.find("hotkeyDecide(st, in.ctx)") != std::string::npos &&
+          apply.find("case CaptureOutcome::Cancelled:") != std::string::npos,
+          "menu.cpp: a ready keyboard tick reaches capture and applies its cancel decision");
+    const std::string padOwner = bodyOf("bool menuFlatPadOwnsHotkey(uint16_t buttons, uint8_t trigger) {");
+    check(padOwner.find("s.open") != std::string::npos &&
+          padOwner.find("s.padReady") != std::string::npos &&
+          padOwner.find("inputGatePadPrivate(s.padIndex)") != std::string::npos,
+          "menu.cpp: raw pad hotkey suppression requires an open, proven private panel");
+    {
+        const std::string path = std::string(root) + "\\src\\d3d11\\device_hook.cpp";
+        FILE* f = fopen(path.c_str(), "rb");
+        bool wired = false;
+        if (f) {
+            char line[2048];
+            while (fgets(line, sizeof(line), f))
+                wired |= strstr(line, "if (menuFlatPadOwnsHotkey(b.padButtons, b.padTrigger)) return false;") != nullptr;
+            fclose(f);
+        }
+        check(wired,
+              "device_hook.cpp: the raw XInput hotkey reader obeys panel ownership");
+    }
 
     // The Explorer Cam page (2026-10-08): built for everyone -- ahead of, and outside, the developer pages -- from the `explorer_cam` rows, and its numbers
     // are shown and stepped by menu_schema.h's helpers (the ones testExplorerPage holds to "+0.15 m" and 0.01).

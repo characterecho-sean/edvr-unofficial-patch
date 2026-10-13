@@ -58,6 +58,10 @@ void menuTick(ID3D11Device* dev);
 void menuFlatBeforePresent(IDXGISwapChain* swap, unsigned flags);
 void menuFlatResize();
 
+// Raw pad hotkeys are read independently of Elite's XInput door. While the
+// drawn flat panel owns navigation, suppress conflicting existing ini bindings.
+bool menuFlatPadOwnsHotkey(uint16_t buttons, uint8_t trigger);
+
 // The reload poll re-read edvr.ini: refresh every row's value, diff the
 // restart snapshot, and toast what changed from outside the menu.
 void menuNoteConfigReloaded();

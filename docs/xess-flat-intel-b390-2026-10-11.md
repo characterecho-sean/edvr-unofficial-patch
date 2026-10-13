@@ -2,13 +2,13 @@
 
 ## Status
 
-- State: Windows review fixes pulled at 829dcf00. The reviewer reports a green
-  native Windows 11/MSVC/RTX 5090 full build (140 rigs, receipt) and 20 XeSS
-  GPU evaluations. This closes the earlier Windows build gap for that tree;
-  follow-up source compiles, focused tests and GPU bridge pass; its full native
-  Windows validation and gameplay remain pending.
-- Local check: exact 829dcf00 XeSS bridge compiled with MSVC and passed all
-  four Intel B390/Proton GPU flights: 20 evaluations, four resets, no failures.
+- State: round-2 Windows review and test correction pulled at 770069b6. The
+  reviewer reports a green Windows 11/MSVC/RTX 5090 full build (140 rigs,
+  receipt) and four hardware XeSS flights for that tree. New lifecycle,
+  diagnostic and input/install follow-up compiles and passes focused local
+  checks; its native Windows full validation and gameplay remain pending.
+- Local check: round-2 backend passes isolated MSVC compilation and five Intel
+  B390/Proton GPU flights, including a latched failure and device replacement.
   D3D11 key acquisition preserves the measured DXVK shared-resource flags.
 - Prior final gameplay: T9 <-> Lynx automatic recovery passed on the verified
   dac1916e-dirty DLL, PE 6ACD6A82, 174055.log: 12,198 treated frames, later
@@ -458,7 +458,8 @@ controller footer on actual readiness, reconnect/reselect and priming, and
 physical Shift refresh.
 
 The pure `menu_pad.h` model covers mask 0x330F, per-slot isolation, changing
-and stable packets, release-tail handling, 100 ms ownership expiry, held-open
+and stable packets, release-tail handling, the original 100 ms ownership expiry
+(raised to five seconds in the Windows-review follow-up), held-open
 reacquisition seeding, repeat, and action edges. Its native-host rig passes all
 45 checks. `input_gate_test` passes; `menu_edit_hold` passes 95 checks and 38
 mutation anchors; `hotkey_capture` passes 627 checks. Their logs are under
@@ -1383,3 +1384,59 @@ Disposition of PR 88 review 5497823856, by inline thread:
 All review changes remain on the feature branch for Windows re-review and full
 validation. Controller support is retained because the user explicitly
 requested it; bounded diagnostics remain until Type 11's final flight.
+
+## October 13: Windows review round 2
+
+Review 5502633003 identified a stale terrain mutation anchor in 432afc5a.
+Windows commit 770069b6 changes only that test anchor; the reviewer reports all
+140 rigs and the hardware XeSS gate passing on Windows 11/MSVC/RTX 5090. That
+green receipt covers 770069b6, not the new follow-up source.
+
+Confirmed static causes: flatRuntimeResize can clear its device before the old
+rebind guard compares it; the latched reason pointed into State that
+xessShutdown deletes; rejected unknown-tone shapes were not remembered; raw pad
+hotkeys bypassed panel navigation ownership. The corrections follow those
+specific branches and fields, without changing camera admission.
+
+Disposition of the six new inline threads:
+
+- 4257900173: xessAvailable compares the actual backend device and tears down
+  before rebinding, independent of the flat runtime's resize state.
+- 4257900186: latched reasons copy to stable g_reason storage. Key acquisition
+  failures latch by feature key; repeated execution errors log first and every
+  300th failure. The hardware rig reproduces an invalid feature key, repeats
+  its failure, replaces the device and reads the retained reason before a
+  successful replacement-device flight.
+- 4257900190: a separate 16-pair negative set stops repeated descriptor
+  inspection; exhaustion stops further unknown inspections with one notice.
+  Both caches are diagnostic only and cannot grant source-tone proof.
+- 4257900194: the overlapping summon guard requires proven pad ownership.
+  Saving/write failure status takes priority over the keyboard-gate warning.
+- 4257900199: plain flat verification checks runtime and notices when the
+  effective flat ini selects XeSS, failing with explicit --xess guidance if
+  missing or stale. Other modes preserve optional runtime behavior. The
+  sanctioned example and installer/build-receipt introductions are corrected.
+- 4257900210: raw navigation-button hotkeys yield only while the focused panel
+  owns its pad; its summon binding remains available. Closing primes held
+  edges. The input-gate rig drives the actual hook through request, foreground
+  loss and release; the capture rig exercises flatPadNavigation and pins the
+  live summon/capture/cancel/release call chain. Full menu.cpp side effects are
+  not simulated in an executable rig; that is the remaining coverage limit.
+
+The normal absolute-path build compiled production DLLs with no C++ or link
+errors, then failed the same five Wine run_jobs gates; no receipt was written.
+Log: /tmp/edvr-msvc-bootstrap-20261011/full_pr88_round2.log. Focused MSVC rigs
+pass for input gate, hotkey capture (645 checks), pad navigation (51 checks),
+held edits, terrain checkerboard and XeSS. The UI rig's final isolated run has
+3,815 checks and the same 206 baseline failures, with no new failure names; an
+initial concurrent run had a transient module-enumeration failure that did not
+repeat. New positive/negative cache checks pass.
+
+Strict and in-build XeSS runs both complete 20 original GPU evaluations plus
+five on the replacement device, with no execution failures. The intentional
+invalid-key failure is separately asserted. XeSS opt-in/selected-runtime
+installer cases and build-receipt self-tests pass. Fresh local gameplay and the
+updated native Windows full build remain pending. The low-priority Legacy
+XeSS-upscale repeated refusal is still deferred; the corrected preflight guard
+is covered separately, and no new standdown behavior is inferred without
+evidence.

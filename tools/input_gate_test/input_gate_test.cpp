@@ -1,6 +1,11 @@
 // Exercise the production hooks with distinct overlay-style COM tables,
 // then the executable's real DirectInput import. No keys are injected.
+#include <windows.h>
+static HWND testPadForeground = nullptr;
+static HWND WINAPI testGetForegroundWindow() { return testPadForeground; }
+#define GetForegroundWindow testGetForegroundWindow
 #include "../../src/d3d11/input_gate.cpp"
+#undef GetForegroundWindow
 
 #include <array>
 
@@ -11,6 +16,43 @@ int failures = 0;
 void check(bool value, const char* name) {
     printf("  %s  %s\n", value ? "ok  " : "FAIL", name);
     if (!value) ++failures;
+}
+XINPUT_STATE testPadState{};
+DWORD WINAPI testPadOriginal(DWORD index, XINPUT_STATE* state) {
+    if (index != 0 || !state) return ERROR_DEVICE_NOT_CONNECTED;
+    *state = testPadState;
+    return ERROR_SUCCESS;
+}
+void padHookCases() {
+    HWND ownWindow = CreateWindowExW(0, L"STATIC", L"EDVR pad gate rig", 0,
+                                    0, 0, 1, 1, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    check(ownWindow != nullptr, "pad hook rig creates a same-process foreground window");
+    if (!ownWindow) return;
+    g_padImport.original = reinterpret_cast<void*>(&testPadOriginal);
+    g_padInstalled.store(true);
+    g_padRetired.store(false);
+    testPadForeground = ownWindow;
+    testPadState.dwPacketNumber = 1;
+    testPadState.Gamepad.wButtons = 0x1000;
+    XINPUT_STATE seen{};
+    check(hookPadGetState(0, &seen) == ERROR_SUCCESS && seen.Gamepad.wButtons == 0x1000 &&
+          !inputGatePadPrivate(0), "observed pad alone is not private before the panel requests it");
+    inputGateSetPadPrivate(true, 0);
+    check(hookPadGetState(0, &seen) == ERROR_SUCCESS && seen.Gamepad.wButtons == 0 &&
+          inputGatePadPrivate(0), "the actual hook masks A after a focused request and proves the slot private");
+    testPadForeground = nullptr;
+    check(hookPadGetState(0, &seen) == ERROR_SUCCESS && seen.Gamepad.wButtons == 0 &&
+          !inputGatePadPrivate(0), "actual foreground loss revokes the request and hides the held release tail");
+    testPadForeground = ownWindow;
+    testPadState.Gamepad.wButtons = 0;
+    hookPadGetState(0, &seen);
+    testPadState.Gamepad.wButtons = 0x1000;
+    check(hookPadGetState(0, &seen) == ERROR_SUCCESS && seen.Gamepad.wButtons == 0x1000,
+          "after release, an unowned fresh A press reaches the game");
+    inputGateSetPadPrivate(false, -1);
+    g_padInstalled.store(false);
+    g_padImport.original = nullptr;
+    DestroyWindow(ownWindow);
 }
 HRESULT STDMETHODCALLTYPE unused() { return E_NOTIMPL; }
 
@@ -267,6 +309,7 @@ HRESULT readStickRows(Stick& s, DIDEVICEOBJECTDATA (&out)[6], DWORD& count, DWOR
 }
 
 int main() {
+    padHookCases();
     auto dummyTable = deviceTable(), table1 = deviceTable(), table2 = deviceTable();
     auto ftable1 = factoryTable(), ftable2 = factoryTable();
     Device dummy{dummyTable.data()}, keyboard{table1.data()}, second{table2.data()};

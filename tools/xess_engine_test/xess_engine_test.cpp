@@ -254,6 +254,44 @@ bool flight(ID3D11Device* device, ID3D11DeviceContext* context,
                  hdr ? "HDR" : "LDR", width, height, outW, outH);
     return true;
 }
+
+bool rebindAfterFailedFeature(ID3D11Device* device, ID3D11DeviceContext* context) {
+    constexpr UINT tiny = 1;
+    constexpr UINT outputSize = 1280;
+    constexpr UINT inBinds = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+    auto color = texture(device, tiny, tiny, DXGI_FORMAT_R8G8B8A8_UNORM, inBinds);
+    auto depth = texture(device, tiny, tiny, DXGI_FORMAT_R32_FLOAT, inBinds);
+    auto motion = texture(device, tiny, tiny, DXGI_FORMAT_R16G16_FLOAT, inBinds);
+    auto output = texture(device, outputSize, outputSize, DXGI_FORMAT_R8G8B8A8_UNORM,
+                          D3D11_BIND_RENDER_TARGET | D3D11_BIND_UNORDERED_ACCESS);
+    if (!check(color && depth && motion && output, "create out-of-range feature inputs")) return false;
+    const char* reason = nullptr;
+    const auto evaluate = [&]() {
+        return edvr::xessEvaluate(context, 0, color.Get(), depth.Get(), motion.Get(),
+                                  output.Get(), tiny, tiny, outputSize, outputSize,
+                                  0.0f, 0.0f, false, false, &reason);
+    };
+    if (!check(!evaluate() && reason && std::strstr(reason, "no XeSS quality accepts input"),
+               "out-of-range feature is latched with its precise reason")) return false;
+    const char* retainedReason = reason;
+    if (!check(!evaluate() && reason == retainedReason,
+               "failed feature repeats through stable reason storage")) return false;
+
+    ComPtr<ID3D11Device> replacement;
+    ComPtr<ID3D11DeviceContext> replacementContext;
+    D3D_FEATURE_LEVEL level{};
+    const HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0,
+                                         nullptr, 0, D3D11_SDK_VERSION,
+                                         replacement.GetAddressOf(), &level,
+                                         replacementContext.GetAddressOf());
+    if (!check(SUCCEEDED(hr) && replacement.Get() != device, "create replacement D3D11 device")) return false;
+    const char* availableWhy = nullptr;
+    if (!check(edvr::xessAvailable(replacement.Get(), &availableWhy),
+               "XeSS rebinds directly when the D3D11 device changes")) return false;
+    if (!check(std::strstr(retainedReason, "no XeSS quality accepts input") != nullptr,
+               "failure reason remains readable after old State is destroyed")) return false;
+    return flight(replacement.Get(), replacementContext.Get(), 640, 360, 640, 360, false);
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -308,6 +346,7 @@ int main(int argc, char** argv) {
                       flight(device.Get(), context.Get(), 640, 360, 1280, 720, true);
     edvr::xessReleaseFeatures();
     const bool recreated = good && flight(device.Get(), context.Get(), 640, 360, 1280, 720, true);
+    const bool rebound = recreated && rebindAfterFailedFeature(device.Get(), context.Get());
     edvr::xessShutdown();
-    return recreated ? 0 : 1;
+    return rebound ? 0 : 1;
 }

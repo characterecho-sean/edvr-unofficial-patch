@@ -79,6 +79,8 @@ named without the maintainer's consent.
 ```bash
 python tools\install_edvr.py --target steam --dry-run
 python tools\install_edvr.py --target steam
+python tools\install_edvr.py --target steam --profile flat --xess
+python tools\install_edvr.py --target steam --profile flat --verify-only
 python tools\edvr_log.py --target steam --expect-build HEAD --version
 ```
 

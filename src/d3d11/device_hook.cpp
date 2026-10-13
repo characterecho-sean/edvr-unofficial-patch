@@ -1919,6 +1919,7 @@ void menuActionMarker(void*) {
 // (joy_watch.h) -- EDVR opens no device of its own for either.
 bool nonKeyboardHotkeyHeld(const HotkeyBinding& b) {
     if (b.kind == HotkeyKind::Pad) {
+        if (menuFlatPadOwnsHotkey(b.padButtons, b.padTrigger)) return false;
         xinputWatchTick();
         XinputBinding x;
         x.buttons = b.padButtons;

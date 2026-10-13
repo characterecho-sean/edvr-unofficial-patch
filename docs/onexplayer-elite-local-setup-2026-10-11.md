@@ -6,11 +6,12 @@
   confirmed menu open/close and desktop clicks; controller navigation follows
   in the XeSS investigation. This setup is for this installation only.
 - Environment: ONEXPLAYER 3, CachyOS, Steam/Proton Experimental, flat EDVR.
-- Open hypotheses: none for the verified rear-button bridge.
+- Open hypotheses: desktop clicks intermittently fail for mouse and controller;
+  QAM restores them. The component holding desktop input is not identified.
 - Ruled-out pointer: the dated capture sequence below records why keyboard,
   evdev and generic controller mappings did not identify the rear button.
-- Next check: repeat rear-right open/close and controller navigation after
-  installing a reviewed build.
+- Next check: repeat rear-right and menu navigation on the reviewed build;
+  record input state before another desktop click failure is cleared.
 - Mesa/MinEdLauncher setup and rollback remain recorded in
   planetary-startup-intel-b390-2026-10-11.md. Temporary paths below identify
   historical evidence; they are not portable Windows handoff instructions.
@@ -192,3 +193,19 @@ navigation at line 4140 used `handleKeys`, XInput served hotkey capture at line
 pad navigation. The implementation and validation status in the main XeSS
 investigation supersedes that checkpoint. Its Windows build-gate caveats still
 apply.
+
+## October 13: desktop cursor and click recovery
+
+The user reported the right stick moving the cursor only on the desktop, then
+both physical mouse/trackpad and controller clicks failing. Pressing the front
+QAM button restored clicks before a capture was made. No input settings were
+changed during this investigation.
+
+The live composite retained Default, deck-uhid as its only controller target,
+and intercept mode none; its profile has no joystick-to-mouse mapping. Elite
+and the per-launch rear-button bridge were absent. This suggests desktop input
+state associated with Steam or InputPlumber, but does not identify the owner of
+a held button or grab. Ruled out: the rear-button bridge actively holding
+desktop input in this occurrence, because it was not running. No focused test
+window, device restart, target replacement or firmware write was used. QAM
+recovery is a measured workaround, not a permanent repair.

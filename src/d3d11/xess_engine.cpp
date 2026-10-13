@@ -153,6 +153,13 @@ State* g_state = nullptr;
 bool g_tried = false;
 bool g_available = false;
 
+bool returnLatchedFailure(const XessFeatureFailureLatch& latch, const char** why) {
+    // The caller may retain this pointer after a device change destroys State.
+    std::snprintf(g_reason, sizeof(g_reason), "%s", latch.reason());
+    if (why) *why = g_reason;
+    return false;
+}
+
 template <typename T> bool loadProc(HMODULE module, const char* name, T& target) {
     target = reinterpret_cast<T>(GetProcAddress(module, name));
     return target != nullptr;
@@ -442,6 +449,12 @@ bool xessAvailable(ID3D11Device* device, const char** why) {
     (void)device;
     return fail(why, "this build has no XeSS SDK (EDVR_HAVE_XESS=0)");
 #else
+    // flatRuntimeResize can clear its device pointer before it sees the new
+    // one. The backend itself must detect a changed owner on every entry.
+    if (device && g_available && g_state && g_state->d11.Get() != device) {
+        Log::get().note("xess: D3D11 device changed; releasing old backend before rebind");
+        xessShutdown();
+    }
     if (g_tried) {
         if (g_available && g_state && g_state->d11.Get() == device) {
             if (why) *why = nullptr;
@@ -608,10 +621,7 @@ bool xessEvaluate(ID3D11DeviceContext* context, unsigned slot,
         return false;
     const XessFeatureKey key{width, height, outputWidth, outputHeight, hdr};
     state.failedFeature.clearIfDifferent(key);
-    if (state.failedFeature.matches(key)) {
-        if (why) *why = state.failedFeature.reason();
-        return false;
-    }
+    if (state.failedFeature.matches(key)) return returnLatchedFailure(state.failedFeature, why);
     if (!state.feature || state.feature->inW != width || state.feature->inH != height ||
         state.feature->outW != outputWidth || state.feature->outH != outputHeight ||
         state.feature->hdr != hdr) {
@@ -628,8 +638,7 @@ bool xessEvaluate(ID3D11DeviceContext* context, unsigned slot,
             Log::get().note("xess: feature create failed in=%ux%u out=%ux%u hdr=%u: %s; this key will not retry until the key or mode changes",
                             width, height, outputWidth, outputHeight, hdr ? 1u : 0u,
                             state.failedFeature.reason());
-            if (why) *why = state.failedFeature.reason();
-            return false;
+            return returnLatchedFailure(state.failedFeature, why);
         }
     }
     Feature& feature = *state.feature;
@@ -642,9 +651,11 @@ bool xessEvaluate(ID3D11DeviceContext* context, unsigned slot,
     hr = command.list->Reset(command.allocator.Get(), nullptr);
     if (FAILED(hr)) return fail(why, "D3D12 command list reset failed 0x%08X", unsigned(hr));
     SharedTexture* const inputs[] = {&feature.color, &feature.motion, &feature.depth};
-    if (!takeKeys(inputs, why, "D3D11 input copy")) {
+    const char* keyWhy = nullptr;
+    if (!takeKeys(inputs, &keyWhy, "D3D11 input copy")) {
         command.list->Close(); // Reset opened it; no D3D12 work was submitted.
-        return false;
+        state.failedFeature.record(key, keyWhy);
+        return returnLatchedFailure(state.failedFeature, why);
     }
     context->CopyResource(feature.color.d11.Get(), colour);
     context->CopyResource(feature.motion.d11.Get(), motion);
@@ -697,6 +708,10 @@ bool xessEvaluate(ID3D11DeviceContext* context, unsigned slot,
         // The command list was never submitted; it is safe to close/reset on
         // the next frame, while the producer signal remains a no-op handoff.
         list->Close();
+        if (state.failures != 1 && state.failures % 300 != 0) {
+            QuietFeatureFailure quiet;
+            return fail(why, "xessD3D12Execute returned %d (frame %u)", int(rc), state.evaluations + 1);
+        }
         return fail(why, "xessD3D12Execute returned %d (frame %u)", int(rc), state.evaluations + 1);
     }
     transition(list, feature.color.d12.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
@@ -724,7 +739,10 @@ bool xessEvaluate(ID3D11DeviceContext* context, unsigned slot,
     if (FAILED(hr)) return fail(why, "D3D11 output Wait(%llu) failed 0x%08X",
                                 static_cast<unsigned long long>(done), unsigned(hr));
     SharedTexture* const result[] = {&feature.output};
-    if (!takeKeys(result, why, "D3D11 output copy")) return false;
+    if (!takeKeys(result, &keyWhy, "D3D11 output copy")) {
+        state.failedFeature.record(key, keyWhy);
+        return returnLatchedFailure(state.failedFeature, why);
+    }
     if (hdr) {
         const bool widened = widenHdr(context, feature, output, why);
         giveKeys(result);

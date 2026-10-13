@@ -15,9 +15,9 @@ THE INPUT RULE (2026-10-01).  The fingerprint covers exactly:
   2. every untracked file git does not ignore (a new source file that has not
      been `git add`ed yet is still an input);
   3. every file under the named ignored dependency folders, DEPENDENCY_ROOTS:
-     the fetched NVIDIA SDK, the FidelityFX checkout and the pinned OpenXR
-     loader are git-ignored (licence, size) but ARE compiled or linked into the
-     DLLs, so a change to one must change the fingerprint.
+     the fetched NVIDIA SDK, FidelityFX checkout, pinned OpenXR loader and
+     XeSS SDK are git-ignored (licence, size) but ARE compiled or linked into
+     the DLLs, so a change to one must change the fingerprint.
 Everything else git ignores is not an input: reviews/ (local review write-ups),
 logs, build output, scratch.  Writing or updating a local review therefore
 cannot make `build.bat --dll-only` refuse when no compiled input changed.  The

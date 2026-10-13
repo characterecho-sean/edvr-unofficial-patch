@@ -90,19 +90,33 @@ struct FlatUiUnknownSourceToneLog {
     static constexpr uint32_t kCapacity = 16;
     struct Pair { uint64_t vs = 0, ps = 0; };
     Pair pairs[kCapacity]{};
+    Pair rejectedPairs[kCapacity]{};
     uint32_t count = 0;
+    uint32_t rejectedCount = 0;
     bool exhausted = false;
     enum class Result { NewPair, Duplicate, CapacityReached, Full };
     bool shouldInspect(uint64_t vs, uint64_t ps) const {
-        if (exhausted) return false;
+        if (exhausted || rejectedCount == kCapacity) return false;
         for (uint32_t i = 0; i < count; ++i)
             if (pairs[i].vs == vs && pairs[i].ps == ps) return false;
+        for (uint32_t i = 0; i < rejectedCount; ++i)
+            if (rejectedPairs[i].vs == vs && rejectedPairs[i].ps == ps) return false;
         return true;
     }
+    // Negative observations suppress diagnostics only, never qualify a shader.
+    // At capacity stop inspecting ALL unknown pairs, rather than evicting and
+    // repeatedly querying descriptors. The true return reports exhaustion once.
+    bool reject(uint64_t vs, uint64_t ps) {
+        if (!shouldInspect(vs, ps)) return false;
+        rejectedPairs[rejectedCount++] = {vs, ps};
+        return rejectedCount == kCapacity;
+    }
     Result record(uint64_t vs, uint64_t ps) {
-        if (exhausted) return Result::Full;
+        if (exhausted || rejectedCount == kCapacity) return Result::Full;
         for (uint32_t i = 0; i < count; ++i)
             if (pairs[i].vs == vs && pairs[i].ps == ps) return Result::Duplicate;
+        for (uint32_t i = 0; i < rejectedCount; ++i)
+            if (rejectedPairs[i].vs == vs && rejectedPairs[i].ps == ps) return Result::Duplicate;
         if (count == kCapacity) { exhausted = true; return Result::CapacityReached; }
         pairs[count++] = {vs, ps};
         return Result::NewPair;

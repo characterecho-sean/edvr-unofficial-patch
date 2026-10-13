@@ -1244,6 +1244,36 @@ void testFlatLayerRules() {
               !log.shouldInspect(101, 2),
               "unknown UI tone diagnostic reports capacity once and stops probing");
     }
+    {
+        FlatUiUnknownSourceToneLog log;
+        unsigned inspections = 0, reports = 0, overflowReports = 0;
+        auto inspect = [&](uint64_t vs, uint64_t ps, bool physicalShape, bool bloom2D) {
+            if (!log.shouldInspect(vs, ps)) return;
+            ++inspections;
+            if (!physicalShape || !bloom2D) { overflowReports += log.reject(vs, ps) ? 1 : 0; return; }
+            reports += log.record(vs, ps) == FlatUiUnknownSourceToneLog::Result::NewPair ? 1 : 0;
+        };
+        inspect(1, 2, false, true);
+        inspect(1, 2, true, true);
+        inspect(2, 2, true, false);
+        inspect(2, 2, true, true);
+        check(inspections == 2 && reports == 0 && log.count == 0 && log.rejectedCount == 2 &&
+                  log.record(1, 2) == FlatUiUnknownSourceToneLog::Result::Duplicate,
+              "unknown tone physical and bloom rejection is remembered without positive reports or admission");
+        inspect(3, 2, true, true);inspect(3, 2, true, true);
+        check(inspections == 3 && reports == 1 && log.count == 1 && !flatUiSourceTonePair(3, 2),
+              "uncached positive diagnostic reports once but never changes exact source-tone admission");
+        for (uint32_t i = 2; i < FlatUiUnknownSourceToneLog::kCapacity; ++i)
+            inspect(i + 100, 2, false, false);
+        const unsigned bounded = inspections;
+        for (uint32_t i = 0; i < 1000; ++i) inspect(i + 1000, 2, true, true);
+        check(log.rejectedCount == FlatUiUnknownSourceToneLog::kCapacity && overflowReports == 1 &&
+                  inspections == bounded && reports == 1 && !log.reject(9999, 2),
+              "negative capacity reports once and stops all further unknown descriptor inspections without eviction");
+        check(flatUiSourceTonePair(kFlatUiSourceToneVsSteady, kFlatUiSourceTonePs) &&
+                  flatUiSourceTonePair(kFlatUiSourceToneVsTransition, kFlatUiSourceTonePs),
+              "exhausted unknown diagnostic cache does not affect known exact pair admission");
+    }
     check(flatUiMapToneSlotOf(0xF9CFC798F21E9AEAull, 0xE8948389387DA083ull) == ~0u,
           "E894 UI source tone: the map table remains unchanged");
     check(flatUiSourceToneShape(1720, 720, 1720, 720, 1720, 720, 28, 1720, 720, 26, true, true, true) &&
@@ -1494,6 +1524,13 @@ void testFlatLayerRules() {
         const size_t probeShape = probe.find("sourceTonePhysicalShape(ctx, frame, renderW, renderH, vs, ps, cachedOutput, outW, outH, true, shape)");
         const size_t bloom = probe.find("ctx->PSGetShaderResources(2, 1, &bloom)");
         const size_t record = probe.find("g_unknownSourceToneLog.record(vs, ps)");
+        check(probe.find("g_unknownSourceToneLog.shouldInspect(vs, ps)") < probeShape &&
+                  probe.find("g_unknownSourceToneLog.reject(vs, ps)") != std::string::npos &&
+                  probe.find("true, shape)) { reject(); return; }") != std::string::npos &&
+                  probe.find("if (!bloom) { reject(); return; }") != std::string::npos &&
+                  probe.find("if (bloomView.ViewDimension != D3D11_SRV_DIMENSION_TEXTURE2D) { reject(); return; }") != std::string::npos &&
+                  probe.find("if (!bloomResource) { reject(); return; }") != std::string::npos,
+              "wiring: cache precedes expensive queries and every physical/bloom rejection is negatively cached");
         check(!probe.empty() && probeShape != std::string::npos && bloom != std::string::npos &&
                   record != std::string::npos && probeShape < bloom && bloom < record &&
                   probe.find("flatUiLayerToneCandidate(") == std::string::npos &&

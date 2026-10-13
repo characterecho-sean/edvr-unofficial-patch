@@ -52,7 +52,8 @@ that wrote files is a bug this project has already shipped once.
 
 The flat XeSS DLL and its notices are optional in this developer tool:
 --xess includes them explicitly, and --all includes them when built. A plain
---verify-only checks the core profile without requiring an optional XeSS copy.
+--verify-only also verifies XeSS runtime/notices when the effective flat ini
+selects xess; other modes need only the core profile.
 
 Exit 0 when everything asked for landed and verified, 1 otherwise.
 """
@@ -1198,6 +1199,30 @@ def _ini_target(target, profile):
     return os.path.join(target, "edvr.ini" if profile == "vr" else "edvr-flat.ini")
 
 
+def _flat_selects_xess(target):
+    """Read the flat profile's effective temporal mode, including its ini fallback."""
+    ini = _ini_target(target, "flat")
+    if not os.path.isfile(ini):
+        ini = os.path.join(target, "edvr.ini")
+    if not os.path.isfile(ini):
+        return False
+    section = ""
+    mode = "off"
+    with open(ini, "r", encoding="utf-8-sig", errors="replace") as stream:
+        for line in stream:
+            line = line.strip()
+            if not line or line[0] in "#;":
+                continue
+            if line.startswith("[") and "]" in line:
+                section = line[1:line.index("]")]
+            elif "=" in line:
+                key, value = line.split("=", 1)
+                key = (section + "." + key if section else key).strip().lower()
+                if key == "fix.temporal_aa":
+                    mode = re.split(r"\s[;#]", value, maxsplit=1)[0].strip().lower()
+    return mode == "xess"
+
+
 def _flat_vr_leftovers(target):
     """Recognized EDVR VR state needs the GUI's original-file recovery."""
     xr = os.path.join(target, "Openvr", "win64")
@@ -1299,6 +1324,18 @@ def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
                 src = os.path.join(root, "build", name); dst = os.path.join(target, name)
                 if not os.path.isfile(dst) or sha256(dst) != sha256(src):
                     print("[edvr] %s verify mismatch: %s" % (profile, dst)); ok = False
+        elif not native and _flat_selects_xess(target):
+            # A plain install intentionally preserves a foreign optional DLL.
+            # A selected XeSS mode must never be reported as fully verified
+            # unless the runtime and its notices match this build.
+            missing = [name for _, name in xess_names
+                       if not os.path.isfile(os.path.join(root, "build", name)) or
+                       not os.path.isfile(os.path.join(target, name)) or
+                       sha256(os.path.join(root, "build", name)) != sha256(os.path.join(target, name))]
+            if missing:
+                print("[edvr] WARNING: flat ini selects XeSS but its runtime/notices are not verified "
+                      "(%s); install with --profile flat --xess" % ", ".join(missing))
+                ok = False
         if include_ini:
             ini_target = _ini_target(target, profile)
             if (not os.path.isfile(ini_target) or not os.path.isfile(ini_source) or
@@ -1998,6 +2035,10 @@ def _xess_opt_in_self_test():
             "plain verify-only started requiring XeSS"
         assert main(args + ["--xess", "--verify-only"]) == 1, \
             "explicit XeSS verify accepted the foreign DLL"
+        (game / "edvr-flat.ini").write_bytes(b"[fix]\ntemporal_aa = xess ; selected\n")
+        assert main(args + ["--verify-only"]) == 1, \
+            "plain verify accepted selected XeSS with a foreign DLL"
+        (game / "edvr-flat.ini").unlink()
         assert restore_native(str(game / "edvr_flat_receipt.json")) == 0
         assert (game / "libxess.dll").read_bytes() == b"FOREIGN-XESS"
         before = snapshot()
@@ -2009,6 +2050,12 @@ def _xess_opt_in_self_test():
                    for p in game.glob("libxess.dll.pre-*.bak")), \
             "explicit XeSS install did not back up the foreign DLL"
         assert main(args + ["--xess", "--verify-only"]) == 0
+        (game / "edvr-flat.ini").write_bytes(b"[fix]\ntemporal_aa = xess\n")
+        assert main(args + ["--verify-only"]) == 0, \
+            "plain verify rejected selected XeSS with a verified runtime"
+        (game / "libxess.dll").write_bytes(b"STALE-XESS")
+        assert main(args + ["--verify-only"]) == 1, \
+            "plain verify accepted selected XeSS after the runtime went stale"
         return True
     except (AssertionError, OSError, ValueError, SystemExit) as exc:
         print("XeSS opt-in self-test failed: %s" % exc)

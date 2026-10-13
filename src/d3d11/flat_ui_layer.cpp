@@ -360,18 +360,23 @@ void flatUiLayerProbeUnknownSourceTone(ID3D11DeviceContext* ctx, uint64_t frame,
         !g_unknownSourceToneLog.shouldInspect(vs, ps)) return;
     FlatComputeInternalScope internal;
     ToneAdmit shape{};
-    if (!sourceTonePhysicalShape(ctx, frame, renderW, renderH, vs, ps, cachedOutput, outW, outH, true, shape)) return;
+    const auto reject = [&]() {
+        if (g_unknownSourceToneLog.reject(vs, ps))
+            Log::get().note("flat ui layer: unknown source-tone rejection capacity=%u exhausted; later unknown pairs are not inspected",
+                            FlatUiUnknownSourceToneLog::kCapacity);
+    };
+    if (!sourceTonePhysicalShape(ctx, frame, renderW, renderH, vs, ps, cachedOutput, outW, outH, true, shape)) { reject(); return; }
     // The unknown draw must also bind the measured bloom input at PS t2.
     // A 2D resource proves the binding shape, not what an unknown shader does with it.
     Ptr<ID3D11ShaderResourceView> bloom;
     ctx->PSGetShaderResources(2, 1, &bloom);
-    if (!bloom) return;
+    if (!bloom) { reject(); return; }
     D3D11_SHADER_RESOURCE_VIEW_DESC bloomView{};
     bloom->GetDesc(&bloomView);
-    if (bloomView.ViewDimension != D3D11_SRV_DIMENSION_TEXTURE2D) return;
+    if (bloomView.ViewDimension != D3D11_SRV_DIMENSION_TEXTURE2D) { reject(); return; }
     Ptr<ID3D11Resource> bloomResource;
     bloom->GetResource(&bloomResource);
-    if (!bloomResource) return;
+    if (!bloomResource) { reject(); return; }
     const auto result = g_unknownSourceToneLog.record(vs, ps);
     if (result == FlatUiUnknownSourceToneLog::Result::NewPair)
         Log::get().note("flat ui layer: unknown source-tone probe -- frame %llu VS %016llX PS %016llX, physical HUD t1=%p, LDR RTV=%p fmt=%u, bound 2D t2=%p R=%ux%u; candidate shape only, no source-tone proof or admission",
