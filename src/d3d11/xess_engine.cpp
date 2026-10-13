@@ -45,6 +45,9 @@ bool fail(const char** why, const char* format, ...) {
 constexpr unsigned kFlatSlot = 0;
 constexpr unsigned kCommandRing = 3;
 constexpr DWORD kGpuWaitMs = 5000;
+// Only this device ever takes a shared texture's key, always key 0, so an
+// acquire is immediate; one that waits at all is a fault, not contention.
+constexpr DWORD kKeyWaitMs = 100;
 
 using CreateD3D12DeviceFn = HRESULT (WINAPI*)(IUnknown*, D3D_FEATURE_LEVEL, REFIID, void**);
 
@@ -60,6 +63,7 @@ struct XessApi {
 
 struct SharedTexture {
     ComPtr<ID3D11Texture2D> d11;
+    ComPtr<IDXGIKeyedMutex> key;  // null only where the runtime exposes none
     ComPtr<ID3D12Resource> d12;
     HANDLE handle = nullptr;
     SharedTexture() = default;
@@ -125,7 +129,13 @@ struct State {
     }
 };
 
-std::unique_ptr<State> g_state;
+// A raw owner on purpose. A static destructor would run at DLL_PROCESS_DETACH
+// on process exit, releasing D3D12 objects and FreeLibrary-ing libxess.dll and
+// d3d12.dll under the loader lock after the game's other threads are gone;
+// DllMain forbids FreeLibrary during process termination, and the proxy's rule
+// there is "do the minimum and leak the rest" (d3d11_proxy.cpp). Only
+// xessShutdown deletes it: the FreeLibrary-unload teardown and the rigs.
+State* g_state = nullptr;
 bool g_tried = false;
 bool g_available = false;
 
@@ -185,6 +195,13 @@ bool makeShared(State& state, SharedTexture& target, const char* role,
     HRESULT hr = state.d11->CreateTexture2D(&desc, nullptr, target.d11.GetAddressOf());
     if (FAILED(hr)) return fail(why, "shared %s D3D11 texture %ux%u format=%u failed 0x%08X",
                                 role, width, height, unsigned(format), unsigned(hr));
+    // The native D3D11 runtime enforces the keyed mutex: it drops any copy or
+    // dispatch that touches the texture while this device holds no key, and
+    // XeSS then reads and returns zeros (xess_engine_test --gpu-test failed
+    // so on an RTX 5090 under Windows 11; DXVK does not enforce it). Every D3D11
+    // access takes key 0 (takeKeys); D3D12 never takes it, and the shared
+    // fences alone order the two APIs.
+    if (FAILED(target.d11.As(&target.key))) target.key.Reset();
     ComPtr<IDXGIResource1> resource;
     hr = target.d11.As(&resource);
     if (FAILED(hr)) return fail(why, "shared %s IDXGIResource1 unavailable 0x%08X", role, unsigned(hr));
@@ -197,6 +214,28 @@ bool makeShared(State& state, SharedTexture& target, const char* role,
     Log::get().note("xess: shared %s %ux%u format=%u D3D11->D3D12 open ok",
                     role, width, height, unsigned(format));
     return true;
+}
+
+// AcquireSync reports WAIT_TIMEOUT and WAIT_ABANDONED as success HRESULTs, so
+// only S_OK means the key is held. A failed take gives back what it took.
+template <size_t N>
+bool takeKeys(SharedTexture* const (&textures)[N], const char** why, const char* stage) {
+    for (size_t i = 0; i < N; ++i) {
+        IDXGIKeyedMutex* key = textures[i]->key.Get();
+        if (!key) continue;
+        const HRESULT hr = key->AcquireSync(0, kKeyWaitMs);
+        if (hr == S_OK) continue;
+        if (hr == static_cast<HRESULT>(WAIT_ABANDONED)) key->ReleaseSync(0);
+        while (i--) if (textures[i]->key) textures[i]->key->ReleaseSync(0);
+        return fail(why, "%s: keyed mutex AcquireSync(0) returned 0x%08X", stage, unsigned(hr));
+    }
+    return true;
+}
+
+template <size_t N>
+void giveKeys(SharedTexture* const (&textures)[N]) {
+    for (SharedTexture* texture : textures)
+        if (texture->key) texture->key->ReleaseSync(0);
 }
 
 bool qualityFor(State& state, Feature& feature, const char** why) {
@@ -465,7 +504,7 @@ bool xessAvailable(ID3D11Device* device, const char** why) {
     state->cpuEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     if (!state->cpuEvent) return fail(why, "GPU fence CPU event failed (Win32=%lu)", GetLastError());
     Log::get().note("xess: D3D11/D3D12 shared queue and fence ready");
-    g_state = std::move(state);
+    g_state = state.release();
     g_available = true;
     if (why) *why = nullptr;
     return true;
@@ -529,9 +568,15 @@ bool xessEvaluate(ID3D11DeviceContext* context, unsigned slot,
     if (FAILED(hr)) return fail(why, "D3D12 command allocator reset failed 0x%08X", unsigned(hr));
     hr = command.list->Reset(command.allocator.Get(), nullptr);
     if (FAILED(hr)) return fail(why, "D3D12 command list reset failed 0x%08X", unsigned(hr));
+    SharedTexture* const inputs[] = {&feature.color, &feature.motion, &feature.depth};
+    if (!takeKeys(inputs, why, "D3D11 input copy")) {
+        command.list->Close(); // Reset opened it; no D3D12 work was submitted.
+        return false;
+    }
     context->CopyResource(feature.color.d11.Get(), colour);
     context->CopyResource(feature.motion.d11.Get(), motion);
     context->CopyResource(feature.depth.d11.Get(), depth);
+    giveKeys(inputs);
     const uint64_t producer = ++state.nextFenceValue;
     hr = ctx4->Signal(state.fence11.Get(), producer);
     if (FAILED(hr)) {
@@ -605,10 +650,15 @@ bool xessEvaluate(ID3D11DeviceContext* context, unsigned slot,
     hr = ctx4->Wait(state.fence11.Get(), done);
     if (FAILED(hr)) return fail(why, "D3D11 output Wait(%llu) failed 0x%08X",
                                 static_cast<unsigned long long>(done), unsigned(hr));
+    SharedTexture* const result[] = {&feature.output};
+    if (!takeKeys(result, why, "D3D11 output copy")) return false;
     if (hdr) {
-        if (!widenHdr(context, feature, output, why)) return false;
+        const bool widened = widenHdr(context, feature, output, why);
+        giveKeys(result);
+        if (!widened) return false;
     } else {
         context->CopyResource(output, feature.output.d11.Get());
+        giveKeys(result);
     }
     const uint64_t consumer = ++state.nextFenceValue;
     hr = ctx4->Signal(state.fence11.Get(), consumer);
@@ -652,8 +702,10 @@ void xessShutdown() {
             // shared textures. Process teardown will reclaim them; releasing
             // them here would be a use-after-free on a hung device.
             Log::get().note("xess: GPU did not drain; retaining backend objects until process exit");
-            g_state.release();
-        } else g_state.reset();
+        } else {
+            delete g_state;
+        }
+        g_state = nullptr;
     }
     g_tried = false;
     g_available = false;

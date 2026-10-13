@@ -1116,7 +1116,8 @@ struct Golden { const char* name; const char* start; const char* end; uint64_t h
 
 // The regions of flat_camera_inject.cpp that are the flat profile's and the census's own, hashed from the file as it was before the VR
 // mode (commit 51a9b134). "preFlat" is the body of refreshPre from the census's switch on; "postFlat" is refreshPost from the observe
-// branch on; the VR branch sits above both and the regions do not contain it.
+// branch on; the VR branch sits above both and the regions do not contain it. "flatHelpers" was re-pinned at fd26814e, a flat-side
+// change: flatCameraInjectBypassRefusal's predicate moved verbatim into flatUpstreamIgnoresLegacyRefusal (flat_local_reject.h).
 const Golden kInjectGolden[] = {
     {"observeCall", "void observeCall(", nullptr, 0x7510B08D1E22A3EAull},
     {"observeOffThread", "void observeOffThread(uintptr_t r0, uintptr_t camera) noexcept {", nullptr, 0xFA29885A0B99C0E6ull},
@@ -1131,7 +1132,7 @@ const Golden kInjectGolden[] = {
     {"flatArmDisarm", "// The window opens once the frame's phase is chosen; every Present edge closes\n",
      "void flatCameraInjectDisarm() { g_inject.gate.disarm(GetCurrentThreadId()); }\n", 0xABEAABA979ABCC45ull},
     {"flatHelpers", "bool flatCameraInjectUpstreamOwns() {",
-     "bool flatCameraInjectTakeHistoryReset() { return g_inject.wanted && g_inject.core.takeHistoryReset(); }\n", 0xC71200FE2FD8D993ull},
+     "bool flatCameraInjectTakeHistoryReset() { return g_inject.wanted && g_inject.core.takeHistoryReset(); }\n", 0x2CD14076AE575252ull},
 };
 // The regions of flat_camera_phase.h the VR mode reuses and the brief says stay exactly as they are.
 const Golden kPhaseGolden[] = {
