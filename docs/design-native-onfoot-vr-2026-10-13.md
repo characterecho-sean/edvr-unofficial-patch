@@ -2,9 +2,8 @@
 
 ## Status
 
-- **State:** F0 FLOWN OK (Epic, 10:50). F1 FLOWN (Epic). F2 FLOWN 2026-10-13 (journal).
-  F3 BUILT 24009be8 (log only; full build green), NOT FLOWN. Branch
-  `claude/native-onfoot-vr-completion-219ffa`, off main until ready (Sean). Not pushed.
+- **State:** F0, F1, F2 FLOWN (Epic). F3 FLOWN (journal). F4 BUILT cdae7a4d (instruments
+  only), NOT FLOWN. Branch `claude/native-onfoot-vr-completion-219ffa`; not pushed.
 - **Origin:** a user's handoff. A Cinema-to-HMD swap on disembark gave native
   stereo on foot; the HUD, radar, left panel and inventory were missing.
 - **Build:** Sean's installs hash to the handoff's exe (332841).
@@ -22,17 +21,19 @@
 - **Key finding:** every static test of the mode treats 3..6 as one class, so the
   missing HUD is not a mode branch to flip. H1 (leading): the on-foot HUD is
   screen-space, built for the flat frame; EDVR must place it.
+- **F3 findings (flown):** every cinema HUD draw comes through ONE stack; the path from
+  0x2868C30 down is unconditional (static RE: scratchpad re_hudstack). The first-person
+  AMC (mode 2) has EVASuit_Arms, EVASuit_Hands and FirstPersonSkeleton; its masks are
+  0x60BC0000C05E. The 3P body (mode 3) has 0x60BD8000C05E.
 - **Open hypotheses:**
-  - H1 (flat-frame HUD) is not refuted: the issuers have zero draws in native, which
-    is what H6 also predicts.
-  - H6: the on-foot HUD's issuing code skips in HMD mode behind a gate. Discriminator:
-    F3's stacks of 0x46546443FD3C3F88 and 0x95D01BA609BF7500 in cinema, then the same
-    frames absent in native.
-  - Body route 1 (add the HMD view's bit to the 3P body masks, hide the FP body) needs
-    the first-person masks from F3's avatar census.
-- **F3 changes (24009be8, log only):** `native on foot hud stack: vs=.. ps=.. frames: ..`
-  (any key state, once per shader per 10 s, from beginPanelOverride); `native on foot
-  avatars: amc=.. mode=.. parts=N dist=.. [name masks ..]` (every 5 s on foot).
+  - H6: the HUD is held back by a DATA gate on that path. Candidates: A the sub+0x30
+    enable byte (0x6BF91A, 0x58AF49); B the item mask test at 0x594DB1 (test qword
+    [rdx+0x30], rax) against [this+0x270]; C the P predicate at 0x1EE082. F4 counts A and B.
+  - Body: the view-mask exclusion is ruled out (see Ruled out).
+- **F4 instruments (cdae7a4d, TEMPORARY; remove after F4):** read-only hooks at
+  EliteDangerous64.exe+0x594D90 (per item, stolen 6) and +0x58AF30 (per group, stolen 5);
+  lines `native on foot hud gate items|groups|totals [state]`. F3's `native on foot hud
+  stack` and `native on foot avatars` lines stay until the arc closes.
 - **OPEN, RemLok on foot:** the on-foot visor overlay is not yet identified. It
   needs a skip-probe or a diff census that excludes the tonemap PS
   0x99C21CEB7A699821 (tonemap_admit.h:39).
@@ -52,9 +53,9 @@
   parts hidden)` / `off (fade restored -1: <why>)`. The F1 census lines are unchanged.
 - **Install:** Epic only (Sean: Frontier carries another feature test). `edvr.ini`
   is not touched unless `--ini` says so.
-- **Next:** Sean flies F3 on Epic: key on, method gate, cinema first (the reference
-  stacks), then disembark, walk, open the menu, board. Read the hud stack lines in
-  both modes and the avatar lines on foot.
+- **Next:** F4 on Epic: key on, method gate, cinema first, then disembark, walk, open
+  the menu, board. Read the `native on foot hud gate` lines per state, and the totals
+  for the per-frame cost.
 
 ## What "finished" means
 
@@ -190,6 +191,7 @@ mode and its context); W3 step 1-2 (dump comparison, offline).
 
 - ruled out: the HUD is gated on the cinema re-request loop (H4), because under the gate method the game requested HMD itself with no re-requests and still drew no HUD (F2 13:09:43-13:12:23).
 - ruled out: EDVR's UI layer hides the HUD (H5), because fix.ui_quality was off from 13:25:06 through a native window 13:25:44-13:27:03, and still no HUD.
+- ruled out: the view masks exclude the 3P body from the native view, because its masks are a superset of the FP body's (F3 14:06:20).
 - ruled out: forcing the avatar fade opaque shows the third-person body in native, because the fade was 0 from 13:10:55 and the 13:11:52 eye dump shows only the game's first-person body (arms, half torso with an open neck, legs), no third-person parts.
 
 ## Journal
@@ -247,3 +249,16 @@ mode and its context); W3 step 1-2 (dump comparison, offline).
   only on a match, once per shader per 10 s). The first-person avatar census reads each
   AMC the fade hook sees on foot, within 8 m of the local avatar, every 5 s. The
   requester comment is corrected (the cinema partner is kept while the byte is non-zero).
+- **2026-10-13, F3 FLOWN (Epic; logs from ~13:58 and 14:06).** The HUD stack probe
+  captured one stack for every cinema HUD draw: the same frames each time, the same
+  path from 0x2868C30 down. Static RE of that path (scratchpad re_hudstack, hook_out.txt
+  and ra_out.txt) finds it unconditional; the HUD is held back by a DATA gate. The
+  avatar census: the first-person AMC is mode 2, with parts EVASuit_Arms, EVASuit_Hands
+  and FirstPersonSkeleton, masks 0x60BC0000C05E; the 3P body is mode 3, masks
+  0x60BD8000C05E. Ruled out: the view masks exclude the 3P body from the native view
+  (see Ruled out).
+- **2026-10-13, F4 built (cdae7a4d, instruments only, NOT FLOWN).** Two read-only hooks
+  for the data gate: H1 at EliteDangerous64.exe+0x594D90 (per render item, V = [this+0x270],
+  M = [item+0x30], E = [item+0x38]; first sight of each pair samples the recorder), and
+  H2 at +0x58AF30 (per group, vt, B = [sub+0x30], N = [sub+0x88]). Both are temporary
+  and log every 5 s in every state, with the calls per frame for pricing.
