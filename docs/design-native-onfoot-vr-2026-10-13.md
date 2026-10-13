@@ -2,18 +2,18 @@
 
 ## Status
 
-- **State:** F0 FLOWN OK (Epic, 10:50). F1 FLOWN (Epic; results below). F2 BUILT
-  c884e218 (code; full build green), NOT FLOWN. Branch
+- **State:** F0 FLOWN OK (Epic, 10:50). F1 FLOWN (Epic). F2 FLOWN 2026-10-13 (journal).
+  F3 BUILT 24009be8 (log only; full build green), NOT FLOWN. Branch
   `claude/native-onfoot-vr-completion-219ffa`, off main until ready (Sean). Not pushed.
 - **Origin:** a user's handoff. A Cinema-to-HMD swap on disembark gave native
   stereo on foot; the HUD, radar, left panel and inventory were missing.
 - **Build:** Sean's installs hash to the handoff's exe (332841).
 - **Verified offline:** the setter is vtable 0x52E9608 slot 5 = 0x28723C0. The
   selector is embedded in its owner at +0x60. No direct callers.
-- **Requester gate (build 332841):** in 0x28873C0 the base HMD mode is kept only
+- **Requester gate (build 332841):** in 0x28873C0 the cinema partner mode is kept only
   if `call [rax+0xb0]` returns non-zero AND the byte at EliteDangerous64.exe+0x5E82B3E
-  is non-zero. Otherwise 0x2887B06 re-reads the base mode and the game requests HMD
-  itself. The byte is in .data (initial 01), has one reader (0x2887AF9) and no
+  is non-zero. At 0 the requester falls back to the base HMD mode (0x2887B06 re-reads
+  it), so the game requests HMD itself. The byte is in .data (initial 01), has one reader (0x2887AF9) and no
   writer. Its neighbours 0x5E82B3C and 0x5E82B3F have other readers: never write them.
 - **F1 results (Epic):** avatar view masks of the local head parts non-zero; the
   fade global read -1 (auto) throughout, so nothing had forced the body opaque;
@@ -23,11 +23,16 @@
   missing HUD is not a mode branch to flip. H1 (leading): the on-foot HUD is
   screen-space, built for the flat frame; EDVR must place it.
 - **Open hypotheses:**
-  - H1: the HUD is built for the flat frame. Discriminator: the HUD draws under
-    gate with the requester on HMD (F2).
-  - H4: the game re-requests 6 about once a frame while substituted, so an on-foot
-    state machine never sees cinema applied. Discriminator under gate: the setter
-    stops receiving 6 each frame and the gate counters move.
+  - H1 (flat-frame HUD) is not refuted: the issuers have zero draws in native, which
+    is what H6 also predicts.
+  - H6: the on-foot HUD's issuing code skips in HMD mode behind a gate. Discriminator:
+    F3's stacks of 0x46546443FD3C3F88 and 0x95D01BA609BF7500 in cinema, then the same
+    frames absent in native.
+  - Body route 1 (add the HMD view's bit to the 3P body masks, hide the FP body) needs
+    the first-person masks from F3's avatar census.
+- **F3 changes (24009be8, log only):** `native on foot hud stack: vs=.. ps=.. frames: ..`
+  (any key state, once per shader per 10 s, from beginPanelOverride); `native on foot
+  avatars: amc=.. mode=.. parts=N dist=.. [name masks ..]` (every 5 s on foot).
 - **OPEN, RemLok on foot:** the on-foot visor overlay is not yet identified. It
   needs a skip-probe or a diff census that excludes the tonemap PS
   0x99C21CEB7A699821 (tonemap_admit.h:39).
@@ -47,8 +52,9 @@
   parts hidden)` / `off (fade restored -1: <why>)`. The F1 census lines are unchanged.
 - **Install:** Epic only (Sean: Frontier carries another feature test). `edvr.ini`
   is not touched unless `--ini` says so.
-- **Next:** Sean flies F2 on Epic: key on, method gate, disembark, walk, open the
-  menu and the map, board, then method swap for the A/B.
+- **Next:** Sean flies F3 on Epic: key on, method gate, cinema first (the reference
+  stacks), then disembark, walk, open the menu, board. Read the hud stack lines in
+  both modes and the avatar lines on foot.
 
 ## What "finished" means
 
@@ -182,6 +188,10 @@ mode and its context); W3 step 1-2 (dump comparison, offline).
 
 - ruled out: the on-foot RemLok overlay is the 3-vertex draw with PS 0x99C21CEB7A699821, because that is the tonemap (HDR-to-display) pass (tonemap_admit.h:39); the F1 census candidate was misidentified, caught before flight.
 
+- ruled out: the HUD is gated on the cinema re-request loop (H4), because under the gate method the game requested HMD itself with no re-requests and still drew no HUD (F2 13:09:43-13:12:23).
+- ruled out: EDVR's UI layer hides the HUD (H5), because fix.ui_quality was off from 13:25:06 through a native window 13:25:44-13:27:03, and still no HUD.
+- ruled out: forcing the avatar fade opaque shows the third-person body in native, because the fade was 0 from 13:10:55 and the 13:11:52 eye dump shows only the game's first-person body (arms, half torso with an open neck, legs), no third-person parts.
+
 ## Journal
 
 - **2026-10-13, F0 flight 3 (Epic, Pimax OpenXR, build v0.19.1-25-g15eb62b5,
@@ -225,3 +235,15 @@ mode and its context); W3 step 1-2 (dump comparison, offline).
   comparison.
 
 - **2026-10-13, F2 correction (c884e218).** The on-foot RemLok matcher in the earlier F2 build (d1e5ba54) keyed on PS 0x99C21CEB7A699821, which is the flight-verified tonemap pass, not the visor. With remlok_lines = outer it would have scissored the whole eye. Removed; remlok_fix is back to 0a99c094. The method key moved from [advanced] to [fix] (F8 Fixes page) at the maintainer's request.
+
+- **2026-10-13, F2 FLOWN (Epic).** The gate method works: no setter calls on foot, the
+  game stays in mode 4, and its own requester asks for HMD. The swap method brings back
+  about 440 re-requests per 5 s. Forcing the body fade opaque had no visible effect.
+  RemLok on foot opens. HUD: in native the issuers 0x46546443FD3C3F88 and
+  0x95D01BA609BF7500 have zero draws (cinema: about 39 and 28 a frame). The on-foot menu
+  opens and accepts input (audio), and nothing is visible.
+- **2026-10-13, F3 built (24009be8, log only, NOT FLOWN).** The HUD issuer stack probe
+  sits at the top of beginPanelOverride (one hash compare per draw; the capture runs
+  only on a match, once per shader per 10 s). The first-person avatar census reads each
+  AMC the fade hook sees on foot, within 8 m of the local avatar, every 5 s. The
+  requester comment is corrected (the cinema partner is kept while the byte is non-zero).
