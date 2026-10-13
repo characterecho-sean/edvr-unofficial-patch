@@ -33,7 +33,8 @@ constexpr uint32_t kModeHmdB = 4;                    // HMD stereo, pair B (the 
 constexpr uint32_t kModeCinemaB = 6;                 // the flat cinema screen shown in the headset, pair B
 constexpr size_t kSourceModeOffset = 0x20;           // selector+0x20: the source mode the setter writes
 constexpr size_t kOwnerOffset = 0x58;                // selector+0x58: the renderer owner
-constexpr size_t kOwnerSelectorOffset = 0x60;        // owner+0x60: must be the selector again
+constexpr size_t kOwnerSelectorOffset = 0x60;        // the selector is EMBEDDED in its owner at +0x60: owner+0x60 IS the selector (address arithmetic;
+                                                     // nothing is read there). The selector's own first qword is the setter's vtable.
 
 // The first 27 bytes of the setter, read from build 332841's executable: `mov [rsp+10h],rbx; push rdi; sub rsp,20h; mov edi,edx;
 // mov rbx,rcx; cmp [rcx+20h],edx; jne +0Dh; cmp dword [rcx+2B4h],0`. No rip-relative byte. CodeHook steals the first instruction
@@ -57,7 +58,7 @@ enum class Reason : uint8_t {
     SelectorInvalid,  // incoming cinema mode, but the selector's owner does not point back at it: not a renderer this build knows
     SelectorMismatch, // incoming cinema mode on a selector other than the one frozen at the first valid call
     NoGameSession,    // incoming cinema mode with the key on, but the journal has not seen LoadGame (or has seen Shutdown): a menu, not a session
-    Admitted          // substituted: forwarded as 3
+    Admitted          // substituted: forwarded as its HMD partner (5 as 3, 6 as 4)
 };
 
 struct Inputs {
@@ -97,6 +98,14 @@ inline const char* reasonName(Reason r) {
         case Reason::Admitted: return "admitted";
     }
     return "unknown";
+}
+
+// A selector is the setter's renderer object when its vtable is the setter's vtable and its owner's embedded selector is it. The caller
+// passes 0 for any value that could not be read; 0 never passes. Pure: no reads here.
+inline bool selectorShapeOk(uintptr_t vtable, uintptr_t expectedVtable, uintptr_t owner, uintptr_t selector) {
+    if (!selector || !owner || !vtable) return false;
+    if (vtable != expectedVtable) return false;
+    return owner + kOwnerSelectorOffset == selector;
 }
 
 // The identity check's answer for a PE stamp and image size: build 332841 or not.

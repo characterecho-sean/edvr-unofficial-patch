@@ -27,6 +27,7 @@ CodeHook* g_hook = nullptr;
 SetterFn g_original = nullptr;                     // the trampoline: the setter as it was
 std::atomic<uintptr_t> g_frozenSelector{0};        // the first selector whose owner points back at it
 std::atomic<bool> g_keyOn{false};                  // fix.native_on_foot, as the frame thread last read it
+uintptr_t g_base = 0;                              // the game image base; set by installOnce before the hook can run
 
 // Frame thread only.
 enum class InstallState : uint8_t { NotTried, Armed, Refused };
@@ -43,6 +44,8 @@ struct SetterEvent {
     bool sourceReadOk = false, keyOn = false, admitted = false;
     nofoot::Reason reason = nofoot::Reason::NotCinema;
     uint8_t onFoot = 2, seated = 2;   // 0 no, 1 yes, 2 unknown
+    uintptr_t selector = 0, vtRva = 0, owner = 0;
+    bool vtReadOk = false, ownerReadOk = false, ownerBack = false;
 };
 constexpr size_t kEventRing = 64;
 std::mutex g_eventMutex;
@@ -69,12 +72,22 @@ __declspec(noinline) bool bytesMatch(uintptr_t address, const uint8_t* expected,
 }
 
 // A selector is a renderer's when its owner points back at it. A bad pointer anywhere along the way is simply not one.
-bool selectorValid(uintptr_t selector) noexcept {
-    if (!selector) return false;
-    uintptr_t owner = 0, back = 0;
-    if (!guardedRead(selector + nofoot::kOwnerOffset, &owner, sizeof(owner)) || !owner) return false;
-    if (!guardedRead(owner + nofoot::kOwnerSelectorOffset, &back, sizeof(back))) return false;
-    return back == selector;
+// What the setter's selector looks like, read under SEH: its first qword (its vtable) and its owner (+0x58). The selector is embedded in
+// the owner at +0x60, so owner+0x60 is compared by address and never read.
+struct SelectorProbe {
+    bool vtReadOk = false, ownerReadOk = false;
+    uintptr_t vt = 0, owner = 0;
+};
+SelectorProbe probeSelector(uintptr_t selector) noexcept {
+    SelectorProbe p;
+    if (!selector) return p;
+    p.vtReadOk = guardedRead(selector, &p.vt, sizeof(p.vt));
+    p.ownerReadOk = guardedRead(selector + nofoot::kOwnerOffset, &p.owner, sizeof(p.owner));
+    return p;
+}
+// Valid iff the selector's vtable is the setter's (image base + 0x52E9608), its owner is non-null, and owner+0x60 is the selector.
+bool selectorValid(uintptr_t selector, const SelectorProbe& p) noexcept {
+    return nofoot::selectorShapeOk(p.vtReadOk ? p.vt : 0, g_base + nofoot::kSetterVtableRva, p.ownerReadOk ? p.owner : 0, selector);
 }
 
 // The same PE check explorer_cam.cpp makes (its constants, in explorer_cam_core.h, are the ones shared here).
@@ -107,7 +120,14 @@ void __fastcall setterHooked(void* selectorPtr, uint32_t incoming) {
     SetterEvent ev;
     ev.tMs = GetTickCount64();
     const uintptr_t selector = reinterpret_cast<uintptr_t>(selectorPtr);
-    const bool valid = selectorValid(selector);
+    const SelectorProbe probe = probeSelector(selector);
+    const bool valid = selectorValid(selector, probe);
+    ev.selector = selector;
+    ev.vtReadOk = probe.vtReadOk;
+    ev.vtRva = probe.vt - g_base;
+    ev.ownerReadOk = probe.ownerReadOk;
+    ev.owner = probe.owner;
+    ev.ownerBack = probe.ownerReadOk && probe.owner != 0 && probe.owner + nofoot::kOwnerSelectorOffset == selector;
     uintptr_t frozen = g_frozenSelector.load(std::memory_order_acquire);
     if (!frozen && valid) {
         uintptr_t expected = 0;
@@ -234,6 +254,7 @@ void installOnce() {
     // The relay first: within two gigabytes of the setter, so CodeHook's five-byte jump reaches it. The gate stays shut until the patch
     // is live, so a call that arrives in between goes straight to the original.
     const uintptr_t target = base + nofoot::kSetterRva;
+    g_base = base;
     g_relay = allocateRelay(target);
     if (!g_relay) {
         refuse("no executable memory could be placed within two gigabytes of the setter, so the relay cannot reach it; nothing was patched");
@@ -305,10 +326,18 @@ void drainEvents() {
         if (ev.sourceReadOk) std::snprintf(source, sizeof(source), "%u", ev.sourceAfter);
         else std::snprintf(source, sizeof(source), "unreadable");
         static const char* const kYesNoUnknown[3] = {"no", "yes", "unknown"};
-        Log::get().note("native on foot: incoming=%u effective=%u source_after=%s key=%s admitted=%s reason=%s onfoot=%s seated=%s t=%llu",
+        char vt[32];
+        if (ev.vtReadOk) std::snprintf(vt, sizeof(vt), "+0x%llX", static_cast<unsigned long long>(ev.vtRva));
+        else std::snprintf(vt, sizeof(vt), "unreadable");
+        char owner[32];
+        if (ev.ownerReadOk) std::snprintf(owner, sizeof(owner), "0x%llX", static_cast<unsigned long long>(ev.owner));
+        else std::snprintf(owner, sizeof(owner), "unreadable");
+        Log::get().note("native on foot: incoming=%u effective=%u source_after=%s key=%s admitted=%s reason=%s onfoot=%s seated=%s t=%llu "
+                        "sel=0x%llX vt=%s owner=%s owner_back=%s",
                         ev.incoming, ev.effective, source, ev.keyOn ? "on" : "off", ev.admitted ? "yes" : "no",
                         nofoot::reasonName(ev.reason), kYesNoUnknown[ev.onFoot], kYesNoUnknown[ev.seated],
-                        static_cast<unsigned long long>(ev.tMs));
+                        static_cast<unsigned long long>(ev.tMs), static_cast<unsigned long long>(ev.selector), vt, owner,
+                        ev.ownerBack ? "yes" : "no");
     }
 }
 
