@@ -2,8 +2,8 @@
 
 ## Status
 
-- **State:** F0, F1, F2 FLOWN (Epic). F3 FLOWN (journal). F4 BUILT cdae7a4d (instruments
-  only), NOT FLOWN. Branch `claude/native-onfoot-vr-completion-219ffa`; not pushed.
+- **State:** F0-F4 FLOWN (Epic; journal). F5 BUILT e4f927bb (probes only), NOT FLOWN.
+  Branch `claude/native-onfoot-vr-completion-219ffa`; not pushed.
 - **Origin:** a user's handoff. A Cinema-to-HMD swap on disembark gave native
   stereo on foot; the HUD, radar, left panel and inventory were missing.
 - **Build:** Sean's installs hash to the handoff's exe (332841).
@@ -26,14 +26,15 @@
   AMC (mode 2) has EVASuit_Arms, EVASuit_Hands and FirstPersonSkeleton; its masks are
   0x60BC0000C05E. The 3P body (mode 3) has 0x60BD8000C05E.
 - **Open hypotheses:**
-  - H6: the HUD is held back by a DATA gate on that path. Candidates: A the sub+0x30
-    enable byte (0x6BF91A, 0x58AF49); B the item mask test at 0x594DB1 (test qword
-    [rdx+0x30], rax) against [this+0x270]; C the P predicate at 0x1EE082. F4 counts A and B.
-  - Body: the view-mask exclusion is ruled out (see Ruled out).
-- **F4 instruments (cdae7a4d, TEMPORARY; remove after F4):** read-only hooks at
-  EliteDangerous64.exe+0x594D90 (per item, stolen 6) and +0x58AF30 (per group, stolen 5);
-  lines `native on foot hud gate items|groups|totals [state]`. F3's `native on foot hud
-  stack` and `native on foot avatars` lines stay until the arc closes.
+  - F4 (flown): every group enable byte reads 1 in cinema and native, and no view drops
+    out; the HUD items are never queued. The data-gate candidates are not the answer.
+  - H7: the render-pass setup. Four slots (Primary, Secondary, Thumbnail, Auxiliary); the
+    PostGUI view nodes are created by 0x28A4B90 only when a pass's [p+0x2E0] is non-null
+    (the gate at 0x28A5577).
+- **F5 instruments (e4f927bb, TEMPORARY; remove after F5):** read-only hooks P1
+  +0x2854FA0 (pass enable), P2 +0x28A4D30 (the +0x2E0 gate), P3 +0x28A4B90 (view nodes),
+  each stolen 5; lines `native on foot pass enable|slot|hudnode [state]`. F3's stack and
+  avatar lines stay until the arc closes. F4's hooks are gone (history: cdae7a4d).
 - **OPEN, RemLok on foot:** the on-foot visor overlay is not yet identified. It
   needs a skip-probe or a diff census that excludes the tonemap PS
   0x99C21CEB7A699821 (tonemap_admit.h:39).
@@ -53,9 +54,9 @@
   parts hidden)` / `off (fade restored -1: <why>)`. The F1 census lines are unchanged.
 - **Install:** Epic only (Sean: Frontier carries another feature test). `edvr.ini`
   is not touched unless `--ini` says so.
-- **Next:** F4 on Epic: key on, method gate, cinema first, then disembark, walk, open
-  the menu, board. Read the `native on foot hud gate` lines per state, and the totals
-  for the per-frame cost.
+- **Next:** F5 on Epic: key on, method gate, cinema first, then disembark, walk, open the
+  menu, board. Read the `native on foot pass` lines per state; the first-sighting lines
+  mark each mode and slot change.
 
 ## What "finished" means
 
@@ -191,6 +192,8 @@ mode and its context); W3 step 1-2 (dump comparison, offline).
 
 - ruled out: the HUD is gated on the cinema re-request loop (H4), because under the gate method the game requested HMD itself with no re-requests and still drew no HUD (F2 13:09:43-13:12:23).
 - ruled out: EDVR's UI layer hides the HUD (H5), because fix.ui_quality was off from 13:25:06 through a native window 13:25:44-13:27:03, and still no HUD.
+- ruled out: the HUD is gated by a per-group enable byte (+0x30), because all 25 group vtables read 1 in cinema and native (F4).
+- ruled out: the HUD is dropped by the per-item view-mask test, because that test selects views (one-hot masks) and native serves a superset of cinema's views (F4).
 - ruled out: the view masks exclude the 3P body from the native view, because its masks are a superset of the FP body's (F3 14:06:20).
 - ruled out: forcing the avatar fade opaque shows the third-person body in native, because the fade was 0 from 13:10:55 and the 13:11:52 eye dump shows only the game's first-person body (arms, half torso with an open neck, legs), no third-person parts.
 
@@ -261,4 +264,16 @@ mode and its context); W3 step 1-2 (dump comparison, offline).
   for the data gate: H1 at EliteDangerous64.exe+0x594D90 (per render item, V = [this+0x270],
   M = [item+0x30], E = [item+0x38]; first sight of each pair samples the recorder), and
   H2 at +0x58AF30 (per group, vt, B = [sub+0x30], N = [sub+0x88]). Both are temporary
-  and log every 5 s in every state, with the calls per frame for pricing.
+  and log every 5 s in every state, with the calls per frame for pricing.- **2026-10-13, F4 FLOWN (Epic).** Groups and views are identical in cinema and native:
+  all 25 group vtables read byte30 = 1 in both, and no render group or view drops out.
+  The HUD items are never queued. So the HUD is not dropped by a group enable byte, nor
+  by the per-item view-mask test: that test selects views (one-hot masks), and native
+  serves a superset of cinema's views. String-led RE: the render graph has nodes for the
+  HUD's views; 0x2854FA0 reads [[W+0x28]+0x9D4] and only changes the slot-1 registration
+  flags (dl, r12) between modes 4 and 6; the PostGUI view nodes are created by 0x28A4B90,
+  and that creation is gated on [p+0x2E0] at 0x28A5577.
+- **2026-10-13, F5 built (e4f927bb, read-only probes, NOT FLOWN).** The F4 hooks are
+  removed (history: cdae7a4d). Three probes, all VR profile only: P1 pass enable
+  (0x2854FA0), P2 the +0x2E0 gate (0x28A4D30), P3 view-node creation (0x28A4B90). Each
+  reads under SEH and forwards the registers unchanged. Aggregates every 5 s per state;
+  the first sighting of each mode or slot change is written at the next frame boundary.
