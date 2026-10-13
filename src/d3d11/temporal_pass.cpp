@@ -34,7 +34,6 @@
 #include "luma_probe.h"
 #include "dlaa.h"
 #include "fsr3_engine.h"
-#include "xess_engine.h"
 #include "object_probe.h"   // objectProbeArmLedger: the armed frame's draw ledger
 #include "pixel_probe.h"    // pixelProbeArm: who drew this pixel, the same armed frame
 #include "ui_depth.h"   // the interface's coverage mask and resolve tuning
@@ -5421,7 +5420,8 @@ void temporalPassShutdown() {
     { std::lock_guard<std::mutex> lock(g_temporalHistoryMutex);g_temporalHistory.clear(); }
     dlaaShutdown();
     fsr3Shutdown();
-    xessShutdown();  // the flat XeSS bridge; at process exit it is leaked instead (xess_engine.cpp, g_state)
+    // No xessShutdown here: it signals, flushes and waits on the GPU, and this teardown can run under the loader lock
+    // (device_hook.cpp, shutdownDeviceHooks). The XeSS bridge is left for the process, as at exit (xess_engine.cpp, g_state).
     if (g_csMv) { g_csMv->Release(); g_csMv = nullptr; }
     if (g_csMvFast) { g_csMvFast->Release(); g_csMvFast = nullptr; }
     if (g_csMvTrace) { g_csMvTrace->Release(); g_csMvTrace = nullptr; }

@@ -133,8 +133,10 @@ struct State {
 // on process exit, releasing D3D12 objects and FreeLibrary-ing libxess.dll and
 // d3d12.dll under the loader lock after the game's other threads are gone;
 // DllMain forbids FreeLibrary during process termination, and the proxy's rule
-// there is "do the minimum and leak the rest" (d3d11_proxy.cpp). Only
-// xessShutdown deletes it: the FreeLibrary-unload teardown and the rigs.
+// there is "do the minimum and leak the rest" (d3d11_proxy.cpp). The
+// FreeLibrary-unload teardown leaks it too: that path can hold the loader lock
+// and must issue no context commands (device_hook.cpp, shutdownDeviceHooks),
+// while xessShutdown signals, flushes and waits. Only the rigs call it.
 State* g_state = nullptr;
 bool g_tried = false;
 bool g_available = false;
