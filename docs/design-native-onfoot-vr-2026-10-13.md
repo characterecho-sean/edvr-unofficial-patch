@@ -2,8 +2,9 @@
 
 ## Status
 
-- **State:** F0 BUILT 1535fb59, NOT FLOWN. Full build green; installed to
-  Frontier (VR profile, no --ini), `--verify-only` green. Branch
+- **State:** F0 REBUILT 84d0f3d4 (relay fix; 1535fb59 never installed on
+  Epic: CodeHook refused the five-byte jump, 2 GB), NOT FLOWN. Ruled out
+  nothing. Branch
   `claude/native-onfoot-vr-completion-219ffa`; stays off main until ready to
   ship (Sean, 2026-10-13).
 - **Origin:** a user's handoff (not in the repo). They hooked Elite's
@@ -37,8 +38,10 @@
   W1 ships as behaviour; nothing removes it before then.
 - **F0 instruments (1535fb59):** `src\d3d11\native_on_foot.cpp` (the setter
   hook), `native_on_foot_core.h` (admission), `src\openxr\submit_shape.h`.
-  Hook: CodeHook on the setter at +0x28723C0, prologue and vtable slot
-  verified under SEH. Admission: key on, incoming 5, selector frozen at the
+  Hook: CodeHook on the setter at +0x28723C0, through a near relay (the
+  five-byte jump reaches only 2 GB; the relay is placed within reach, as
+  skin_entity_hook does). Prologue and vtable slot verified under SEH.
+  A refusal now quotes CodeHook's own reason. Admission: key on, incoming 5, selector frozen at the
   first valid call, and `journalGameplay()` (LoadGame seen, no Shutdown since).
 - **Read after the flight, in the d3d11 log:**
   - `native on foot: installed --` or `NOT installed -- <reason>` (once, at the
