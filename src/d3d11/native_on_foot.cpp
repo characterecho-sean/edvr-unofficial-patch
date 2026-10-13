@@ -727,202 +727,291 @@ void avatarCensusLine(uint64_t nowMs) {
     for (uint32_t i = 0; i < n; ++i) logAvatarRow(rows[i]);
 }
 
-// ---- F4: the two read-only instruments (TEMPORARY; they go when the arc closes) -------------------------------------------------------
-// Each hook reads game memory under SEH, records what it read, then calls the original with the same registers (the relay jumps here, and
-// the trampoline is the original). Nothing is written to the game. One relay page and one gate per hook; the identity check and the
-// prologue bytes are compared before any patch, as the setter hook does. A read that faults 16 times stops that hook's reads for the session.
-// The tables are guarded by a tiny spinlock (the hooks run on the game's threads); the frame thread takes the window and resets it.
-std::atomic_flag g_hudLock = ATOMIC_FLAG_INIT;
+// ---- F5: three read-only pass probes (TEMPORARY; they go when the arc closes) ---------------------------------------------------------
+// P1 (+0x2854FA0, pass enable), P2 (+0x28A4D30, the +0x2E0 gate), P3 (+0x28A4B90, creates the PostGUI view nodes). Each reads game memory
+// under SEH, forwards the game's registers to the original, and changes nothing. One relay page and one gate per probe; the identity check,
+// the 32 prologue bytes and the instruction boundary of the stolen prefix are checked before any patch. A read that faults 16 times stops
+// that probe's reads for the session. No game thread writes a line: first sightings are queued and written at the next frame boundary,
+// and the aggregates every 5 s.
+std::atomic_flag g_hudLock = ATOMIC_FLAG_INIT;   // a tiny spinlock: the aggregates, the first-sighting queue and the frame counter
 struct HudLockGuard {
     HudLockGuard() noexcept {
         while (g_hudLock.test_and_set(std::memory_order_acquire)) _mm_pause();
     }
     ~HudLockGuard() { g_hudLock.clear(std::memory_order_release); }
 };
-struct HudItemKey {
-    uint64_t view = 0, mask = 0, calls = 0, pass = 0, rec = 0;   // rec: the recorder's image RVA, 0 when unreadable
-    uint32_t enable = 0;                                         // the item's enable byte; 0x100 when it did not read
-    bool recDone = false;
-};
-struct HudGroupKey {
-    uint64_t vtRva = 0, calls = 0;
-    uint32_t byte30 = 0, n = 0;   // n: the last dword [sub+0x88] seen in the window; 0xFFFFFFFF when unreadable
-    bool vtOk = false;            // false: the vtable is outside the image (printed as "?")
-};
-HudItemKey g_hudItems[nofoot::kHudItemPairs];     // guarded by g_hudLock
-size_t g_hudItemsUsed = 0;
-uint64_t g_hudItemCalls = 0, g_hudItemOverflow = 0, g_hudItemFaults = 0;
-HudGroupKey g_hudGroups[nofoot::kHudGroupPairs];  // guarded by g_hudLock
-size_t g_hudGroupsUsed = 0;
-uint64_t g_hudGroupCalls = 0, g_hudGroupOverflow = 0, g_hudGroupFaults = 0;
-uint64_t g_hudFrames = 0;                         // frame boundaries in the window; guarded by g_hudLock
-std::atomic<bool> g_hudItemStop{false}, g_hudGroupStop{false};
-std::atomic<uintptr_t> g_hudBase{0};              // the game image base, set before either hook is patched
-bool g_hudTried = false;                          // frame thread only
-bool g_hudItemArmed = false, g_hudGroupArmed = false;
-uint64_t g_hudWindowMs = 0;
 
-// The recorder the item names (H1's recorder chain), read under SEH: its function as an image RVA, or 0 when a read fails or the
-// value is outside the image.
-uint64_t hudRecorderRva(void* self, void* item) noexcept {
-    const uintptr_t base = g_hudBase.load(std::memory_order_relaxed);
-    uint64_t p = 0, node = 0, x = 0, fn = 0;
-    uint32_t idx = 0;
-    if (!guardedRead(reinterpret_cast<uintptr_t>(self) + nofoot::kHudRecSourceOff, &p, 8) || p < 0x10000) return 0;
-    if (!guardedRead(static_cast<uintptr_t>(p) + nofoot::kHudRecIndexOff, &idx, 4) || idx >= 0x1000) return 0;
-    const uintptr_t slot = reinterpret_cast<uintptr_t>(item) + nofoot::kHudItemNodesOff + static_cast<uintptr_t>(idx) * 8;
-    if (!guardedRead(slot, &node, 8) || node < 0x10000) return 0;
-    if (!guardedRead(static_cast<uintptr_t>(node) + nofoot::kHudNodeXOff, &x, 8) || x < 0x10000) return 0;
-    if (!guardedRead(static_cast<uintptr_t>(x) + nofoot::kHudXFnOff, &fn, 8)) return 0;
-    if (fn < base || fn >= base + ecm::kExpectedImageSize) return 0;
-    return fn - base;
+constexpr uint8_t kStateNative = 0, kStateCinema = 1, kStateOther = 2;
+const char* const kStateName[3] = {"native", "cinema", "ship/other"};
+// The state of one call: native stereo on foot, else cinema (on foot, key off), else the rest. Both reads are the setter's own.
+uint8_t passState() noexcept {
+    if (nativeOnFootActive()) return kStateNative;
+    if (journalOnFootKnown() && journalOnFoot()) return kStateCinema;
+    return kStateOther;
 }
 
-void hudItemRecord(void* self, void* item) noexcept {
-    uint64_t view = 0, mask = 0;
-    uint8_t enable = 0;
-    const uintptr_t s = reinterpret_cast<uintptr_t>(self), it = reinterpret_cast<uintptr_t>(item);
-    const bool okView = guardedRead(s + nofoot::kHudViewOff, &view, 8);
-    const bool okMask = guardedRead(it + nofoot::kHudItemMaskOff, &mask, 8);
-    const bool okEnable = guardedRead(it + nofoot::kHudItemEnableOff, &enable, 1);
-    HudLockGuard lock;
-    ++g_hudItemCalls;
-    if (!okView || !okMask) {
-        if (++g_hudItemFaults >= 16) g_hudItemStop.store(true, std::memory_order_relaxed);
+using PassFn = uint64_t(__fastcall*)(void*, void*, uint64_t, uint64_t);
+
+// One probe: its relay page, its gate, the trampoline (the original), and its CodeHook (never deleted, as g_hook).
+struct PassProbe {
+    uint8_t* relay = nullptr;
+    alignas(8) std::atomic<uintptr_t> gate{0};
+    PassFn original = nullptr;
+    CodeHook* hook = nullptr;
+};
+PassProbe g_probe[nofoot::kPassCount];
+std::atomic<bool> g_passStop[nofoot::kPassCount]{};
+std::atomic<uint32_t> g_passFaults[nofoot::kPassCount]{};
+bool g_passTried = false;                  // frame thread only
+bool g_passArmed[nofoot::kPassCount] = {};  // frame thread only
+uint64_t g_passWindowMs = 0;               // frame thread only
+
+// The aggregates (the window) and the session memory (what has been announced once).
+struct PassEnableAgg {
+    uint64_t calls = 0, modeUnread = 0;
+    uint32_t modes[8] = {};
+    uint8_t nModes = 0;
+    uint8_t w[5] = {};
+    bool wSeen = false;
+};
+struct PassSlotAgg {
+    uint64_t calls = 0, qNonNull = 0, qNull = 0;
+    uint8_t f[7] = {};
+    bool fSeen = false;
+    uint8_t p2d0 = 2;   // 0 null, 1 non-null, 2 not read
+};
+struct PassNodeAgg {
+    uint64_t calls = 0, nodeNonNull = 0;
+};
+// A first sighting, queued by the game's thread and written by the frame thread. kind 1: P1 mode (value = mode; aux bit 0 = w34..38 read,
+// bytes = those five). kind 2: P2 (slot; aux bit 0 = q non-null, bit 1 = flags read, bytes = the seven flag bytes, value = d0 0/1, 2 unread).
+// kind 3: P3 (slot; aux bit 0 = node non-null). kind 4: a slot word outside 0..3 (value = the word).
+struct PassFirst {
+    uint8_t kind = 0, state = 0, slot = 0, aux = 0;
+    uint32_t value = 0;
+    uint8_t bytes[7] = {};
+};
+constexpr size_t kPassRing = 64;
+PassEnableAgg g_p1[3];                      // guarded by g_hudLock
+PassSlotAgg g_p2[3][4];
+PassNodeAgg g_p3[3][4];
+uint32_t g_p1Known[3][16] = {};             // session-wide: the modes first announced, per state
+uint8_t g_p1NKnown[3] = {};
+uint8_t g_p2Seen[3][4] = {};                // session-wide: bit 0 q null seen, bit 1 q non-null seen
+uint8_t g_p3Seen[3][4] = {};                // session-wide: bit 0 node null seen, bit 1 node non-null seen
+bool g_slotOutSeen = false;
+PassFirst g_passRing[kPassRing];            // guarded by g_hudLock
+uint64_t g_passWritten = 0, g_passRead = 0, g_passDropped = 0;
+uint64_t g_passFrames = 0;                  // frame boundaries in the window; guarded by g_hudLock
+
+void passPushFirstLocked(const PassFirst& f) noexcept {   // g_hudLock held
+    if (g_passWritten - g_passRead >= kPassRing) {
+        ++g_passDropped;
         return;
     }
-    HudItemKey* key = nullptr;
-    for (size_t i = 0; i < g_hudItemsUsed; ++i) {
-        if (g_hudItems[i].view == view && g_hudItems[i].mask == mask) {
-            key = &g_hudItems[i];
-            break;
-        }
-    }
-    if (!key) {
-        if (g_hudItemsUsed >= nofoot::kHudItemPairs) {
-            ++g_hudItemOverflow;
-            return;
-        }
-        key = &g_hudItems[g_hudItemsUsed++];
-        key->view = view;
-        key->mask = mask;
-    }
-    ++key->calls;
-    if (nofoot::hudItemPass(view, mask)) ++key->pass;
-    key->enable = okEnable ? enable : 0x100u;
-    if (!key->recDone) {
-        key->rec = hudRecorderRva(self, item);   // the first sight of this pair, once per window
-        key->recDone = true;
-    }
+    g_passRing[g_passWritten % kPassRing] = f;
+    ++g_passWritten;
 }
 
-void hudGroupRecord(void* sub) noexcept {
-    uint64_t vt = 0;
-    uint8_t b = 0;
-    uint32_t n = 0;
-    const uintptr_t s = reinterpret_cast<uintptr_t>(sub);
-    const uintptr_t base = g_hudBase.load(std::memory_order_relaxed);
-    const bool okVt = guardedRead(s, &vt, 8);
-    const bool okB = guardedRead(s + nofoot::kHudGroupByteOff, &b, 1);
-    const bool okN = guardedRead(s + nofoot::kHudGroupCountOff, &n, 4);
-    const bool inImage = okVt && vt >= base && vt < base + ecm::kExpectedImageSize;
+void passSlotOutLocked(uint8_t st, uint32_t slot) noexcept {   // g_hudLock held: a slot word outside 0..3, announced once
+    if (g_slotOutSeen) return;
+    g_slotOutSeen = true;
+    PassFirst x;
+    x.kind = 4;
+    x.state = st;
+    x.value = slot;
+    passPushFirstLocked(x);
+}
+
+// A read under SEH. A fault counts against the probe; sixteen stop that probe's reads.
+bool passRead(size_t probe, uintptr_t address, void* out, size_t bytes) noexcept {
+    if (guardedRead(address, out, bytes)) return true;
+    if (g_passFaults[probe].fetch_add(1, std::memory_order_relaxed) + 1 >= 16) g_passStop[probe].store(true, std::memory_order_relaxed);
+    return false;
+}
+
+void passEnableRecord(uint8_t st, bool okMode, uint32_t mode, bool okW, const uint8_t* w34) noexcept {
     HudLockGuard lock;
-    ++g_hudGroupCalls;
-    if (!okVt || !okB) {
-        if (++g_hudGroupFaults >= 16) g_hudGroupStop.store(true, std::memory_order_relaxed);
+    PassEnableAgg& a = g_p1[st];
+    ++a.calls;
+    if (okW) {
+        std::memcpy(a.w, w34, 5);
+        a.wSeen = true;
+    }
+    if (!okMode) {
+        ++a.modeUnread;
         return;
     }
-    const uint64_t vtRva = inImage ? vt - base : 0;
-    HudGroupKey* key = nullptr;
-    for (size_t i = 0; i < g_hudGroupsUsed; ++i) {
-        if (g_hudGroups[i].vtOk == inImage && g_hudGroups[i].vtRva == vtRva && g_hudGroups[i].byte30 == b) {
-            key = &g_hudGroups[i];
-            break;
+    bool inWindow = false;
+    for (uint8_t i = 0; i < a.nModes; ++i) {
+        if (a.modes[i] == mode) inWindow = true;
+    }
+    if (!inWindow && a.nModes < 8) a.modes[a.nModes++] = mode;
+    bool known = false;
+    for (uint8_t i = 0; i < g_p1NKnown[st]; ++i) {
+        if (g_p1Known[st][i] == mode) known = true;
+    }
+    if (known || g_p1NKnown[st] >= 16) return;
+    g_p1Known[st][g_p1NKnown[st]++] = mode;
+    PassFirst f;
+    f.kind = 1;
+    f.state = st;
+    f.value = mode;
+    f.aux = okW ? 1 : 0;
+    if (okW) std::memcpy(f.bytes, w34, 5);
+    passPushFirstLocked(f);
+}
+
+// P1: rcx = W. Reads the mode before the call and W+0x34..0x38 after it; forwards rcx, rdx, r8, r9 and returns rax.
+uint64_t __fastcall passEnableHooked(void* w, void* a2, uint64_t a3, uint64_t a4) {
+    const PassFn original = g_probe[0].original;
+    if (!original) return 0;
+    const uint8_t st = passState();
+    const uintptr_t wa = reinterpret_cast<uintptr_t>(w);
+    const bool live = !g_passStop[0].load(std::memory_order_relaxed);
+    bool okMode = false;
+    uint32_t mode = 0;
+    if (live) {
+        uint64_t sub = 0;
+        if (passRead(0, wa + nofoot::kPassSubOff, &sub, 8) && sub >= 0x10000)
+            okMode = passRead(0, static_cast<uintptr_t>(sub) + nofoot::kPassModeOff, &mode, 4);
+    }
+    const uint64_t rax = original(w, a2, a3, a4);
+    uint8_t w34[5] = {};
+    bool okW = false;
+    if (live && !g_passStop[0].load(std::memory_order_relaxed)) okW = passRead(0, wa + nofoot::kPassWOff, w34, 5);
+    passEnableRecord(st, okMode, mode, okW, w34);
+    return rax;
+}
+
+void passGateRecord(uint8_t st, void* p) noexcept {
+    const uintptr_t pa = reinterpret_cast<uintptr_t>(p);
+    uint32_t slot = 0;
+    const bool okSlot = passRead(1, pa + nofoot::kPassSlotOff, &slot, 4);
+    uint64_t q = 0;
+    const bool okQ = passRead(1, pa + nofoot::kPassViewOff, &q, 8);
+    uint8_t f[7] = {};
+    bool okF = true;
+    for (size_t i = 0; i < 7; ++i) okF = passRead(1, pa + nofoot::kPassFlagOff[i], &f[i], 1) && okF;
+    uint64_t d0 = 0;
+    const bool okD0 = passRead(1, pa + nofoot::kPassD0Off, &d0, 8);
+    if (!okSlot) return;
+    HudLockGuard lock;
+    if (slot >= 4) {
+        passSlotOutLocked(st, slot);
+        return;
+    }
+    PassSlotAgg& a = g_p2[st][slot];
+    ++a.calls;
+    const bool qn = okQ && q != 0;
+    if (okQ) {
+        if (qn) ++a.qNonNull;
+        else ++a.qNull;
+    }
+    if (okF) {
+        std::memcpy(a.f, f, 7);
+        a.fSeen = true;
+    }
+    if (okD0) a.p2d0 = d0 != 0 ? 1 : 0;
+    if (okQ) {
+        const uint8_t bit = qn ? 2 : 1;
+        if (!(g_p2Seen[st][slot] & bit)) {
+            g_p2Seen[st][slot] |= bit;
+            PassFirst x;
+            x.kind = 2;
+            x.state = st;
+            x.slot = static_cast<uint8_t>(slot);
+            x.aux = static_cast<uint8_t>((qn ? 1 : 0) | (okF ? 2 : 0));
+            x.value = okD0 ? (d0 != 0 ? 1u : 0u) : 2u;
+            if (okF) std::memcpy(x.bytes, f, 7);
+            passPushFirstLocked(x);
         }
     }
-    if (!key) {
-        if (g_hudGroupsUsed >= nofoot::kHudGroupPairs) {
-            ++g_hudGroupOverflow;
-            return;
-        }
-        key = &g_hudGroups[g_hudGroupsUsed++];
-        key->vtOk = inImage;
-        key->vtRva = vtRva;
-        key->byte30 = b;
+}
+
+// P2: rcx = p (the pass). Reads its fields before the call, then forwards.
+uint64_t __fastcall passGateHooked(void* p, void* a2, uint64_t a3, uint64_t a4) {
+    const PassFn original = g_probe[1].original;
+    if (!original) return 0;
+    if (!g_passStop[1].load(std::memory_order_relaxed)) passGateRecord(passState(), p);
+    return original(p, a2, a3, a4);
+}
+
+void passNodeRecord(uint8_t st, uint32_t slot, bool okSlot, bool okNode, uint64_t node) noexcept {
+    if (!okSlot) return;
+    HudLockGuard lock;
+    if (slot >= 4) {
+        passSlotOutLocked(st, slot);
+        return;
     }
-    ++key->calls;
-    key->n = okN ? n : 0xFFFFFFFFu;
+    PassNodeAgg& a = g_p3[st][slot];
+    ++a.calls;
+    const bool nn = okNode && node != 0;
+    if (nn) ++a.nodeNonNull;
+    const uint8_t bit = nn ? 2 : 1;
+    if (!(g_p3Seen[st][slot] & bit)) {
+        g_p3Seen[st][slot] |= bit;
+        PassFirst x;
+        x.kind = 3;
+        x.state = st;
+        x.slot = static_cast<uint8_t>(slot);
+        x.aux = nn ? 1 : 0;
+        passPushFirstLocked(x);
+    }
 }
 
-// The two hooks. Each is called by its relay in place of the game's function, with the game's registers; it reads, then forwards.
-using HudItemFn = uint64_t(__fastcall*)(void*, void*, uint64_t, uint64_t);
-using HudGroupFn = uint64_t(__fastcall*)(void*, void*, uint64_t, uint64_t);
-HudItemFn g_hudItemOriginal = nullptr;      // the trampoline, set by prepareHudItemRelay before the patch
-HudGroupFn g_hudGroupOriginal = nullptr;
-uint8_t* g_hudItemRelay = nullptr;
-uint8_t* g_hudGroupRelay = nullptr;
-alignas(8) std::atomic<uintptr_t> g_hudItemGate{0};
-alignas(8) std::atomic<uintptr_t> g_hudGroupGate{0};
-CodeHook* g_hudItemHook = nullptr;          // deliberately never deleted, as g_hook
-CodeHook* g_hudGroupHook = nullptr;
-
-uint64_t __fastcall hudItemHooked(void* self, void* item, uint64_t a3, uint64_t a4) {
-    const HudItemFn original = g_hudItemOriginal;
+// P3: rcx = [p+0x2E0] (the view), rdx = p. The slot is read before the call; the created node (view+0x58) after it.
+uint64_t __fastcall passNodeHooked(void* view, void* p, uint64_t a3, uint64_t a4) {
+    const PassFn original = g_probe[2].original;
     if (!original) return 0;
-    if (!g_hudItemStop.load(std::memory_order_relaxed)) hudItemRecord(self, item);   // BEFORE the call: the game may change these
-    return original(self, item, a3, a4);
+    const uint8_t st = passState();
+    const uintptr_t pa = reinterpret_cast<uintptr_t>(p);
+    const bool live = !g_passStop[2].load(std::memory_order_relaxed);
+    uint32_t slot = 0;
+    const bool okSlot = live && passRead(2, pa + nofoot::kPassSlotOff, &slot, 4);
+    const uint64_t rax = original(view, p, a3, a4);
+    uint64_t node = 0;
+    const bool okNode = okSlot && !g_passStop[2].load(std::memory_order_relaxed) &&
+                        passRead(2, reinterpret_cast<uintptr_t>(view) + nofoot::kPassNodeOff, &node, 8);
+    passNodeRecord(st, slot, okSlot, okNode, node);
+    return rax;
 }
 
-uint64_t __fastcall hudGroupHooked(void* sub, void* a2, uint64_t a3, uint64_t a4) {
-    const HudGroupFn original = g_hudGroupOriginal;
-    if (!original) return 0;
-    if (!g_hudGroupStop.load(std::memory_order_relaxed)) hudGroupRecord(sub);
-    return original(sub, a2, a3, a4);
-}
-
-// Puts a trampoline into a relay and makes the relay executable (the setter's prepareRelay, for these two relays).
-bool finishHudRelay(uint8_t* relay, void* trampoline) noexcept {
+// The relay's trampoline and the relay's executable state (CodeHook's Prepare, with the probe as its context).
+bool preparePassRelay(void* trampoline, void* context) noexcept {
+    PassProbe* probe = static_cast<PassProbe*>(context);
     const uintptr_t address = reinterpret_cast<uintptr_t>(trampoline);
-    std::memcpy(relay + ecm::kCallbackRelayTrampolineAt, &address, 8);
+    std::memcpy(probe->relay + ecm::kCallbackRelayTrampolineAt, &address, 8);
     DWORD oldProtect = 0;
-    return VirtualProtect(relay, 4096, PAGE_EXECUTE_READ, &oldProtect) &&
-           FlushInstructionCache(GetCurrentProcess(), relay, ecm::kCallbackRelayBytes);
-}
-bool prepareHudItemRelay(void* trampoline, void*) noexcept {
-    if (!finishHudRelay(g_hudItemRelay, trampoline)) return false;
-    g_hudItemOriginal = reinterpret_cast<HudItemFn>(trampoline);
-    return true;
-}
-bool prepareHudGroupRelay(void* trampoline, void*) noexcept {
-    if (!finishHudRelay(g_hudGroupRelay, trampoline)) return false;
-    g_hudGroupOriginal = reinterpret_cast<HudGroupFn>(trampoline);
+    if (!VirtualProtect(probe->relay, 4096, PAGE_EXECUTE_READ, &oldProtect) ||
+        !FlushInstructionCache(GetCurrentProcess(), probe->relay, ecm::kCallbackRelayBytes))
+        return false;
+    probe->original = reinterpret_cast<PassFn>(trampoline);
     return true;
 }
 
-struct HudHookSpec {
+struct PassProbeSpec {
     const char* name;
     uintptr_t rva;
     const uint8_t* prologue;
     size_t stolen;
     void* callback;
-    CodeHook::Prepare prepare;
-    uint8_t** relay;
-    std::atomic<uintptr_t>* gate;
-    CodeHook** hook;
+    const char* label;
 };
 
-// Installs one read-only hook: the prologue bytes, the stolen length on an instruction boundary, a relay within reach, then CodeHook.
-// Returns false with `whyOut` set, having changed nothing that remains.
-bool installHudHook(const HudHookSpec& s, uintptr_t base, size_t* stolenOut, std::string* whyOut) {
+// Installs probe `i`: the prologue bytes, the stolen length on an instruction boundary, a relay within reach, then CodeHook. Returns false
+// with `whyOut` set, having changed nothing that remains.
+bool installPassProbe(size_t i, const PassProbeSpec& s, uintptr_t base, size_t* stolenOut, std::string* whyOut) {
+    PassProbe& pr = g_probe[i];
     const uintptr_t target = base + s.rva;
-    if (!bytesMatch(target, s.prologue, nofoot::kHudPrologueBytes)) {
+    if (!bytesMatch(target, s.prologue, nofoot::kPassPrologueBytes)) {
         *whyOut = "the 32 prologue bytes are not build 332841's";
         return false;
     }
     size_t covered = 0;
     while (covered < s.stolen) {
         size_t rip = 0;
-        const size_t len = codeInstructionLength(reinterpret_cast<const uint8_t*>(target + covered), nofoot::kHudPrologueBytes - covered, &rip);
+        const size_t len = codeInstructionLength(reinterpret_cast<const uint8_t*>(target + covered), nofoot::kPassPrologueBytes - covered, &rip);
         if (!len) {
             *whyOut = "a prologue instruction is one the decoder does not recognise";
             return false;
@@ -933,153 +1022,175 @@ bool installHudHook(const HudHookSpec& s, uintptr_t base, size_t* stolenOut, std
         *whyOut = "the prologue does not end on an instruction boundary at the expected byte";
         return false;
     }
-    *s.relay = allocateRelay(target);
-    if (!*s.relay) {
+    pr.relay = allocateRelay(target);
+    if (!pr.relay) {
         *whyOut = "no executable memory within two gigabytes of the target";
         return false;
     }
-    ecm::buildCallbackRelay(*s.relay, s.gate, s.callback);
-    *s.hook = new CodeHook();
-    if (!(*s.hook)->install(reinterpret_cast<void*>(target), *s.relay, nullptr, s.name, s.prepare, nullptr)) {
-        const char* why = (*s.hook)->refusal();
-        VirtualFree(*s.relay, 0, MEM_RELEASE);
-        *s.relay = nullptr;
+    ecm::buildCallbackRelay(pr.relay, &pr.gate, s.callback);
+    pr.hook = new CodeHook();
+    if (!pr.hook->install(reinterpret_cast<void*>(target), pr.relay, nullptr, s.name, &preparePassRelay, &pr)) {
+        const char* why = pr.hook->refusal();
+        VirtualFree(pr.relay, 0, MEM_RELEASE);
+        pr.relay = nullptr;
         *whyOut = why[0] ? why : "CodeHook gave no reason";
         return false;
     }
-    s.gate->store(1, std::memory_order_seq_cst);
-    *stolenOut = (*s.hook)->stolenBytes();
+    pr.gate.store(1, std::memory_order_seq_cst);
+    *stolenOut = pr.hook->stolenBytes();
     return true;
 }
 
-// Frame thread, once: the VR profile only, behind the identity check. Logs one line per hook, installed or refused.
-void installHudGateOnce() {
-    if (g_hudTried) return;
-    g_hudTried = true;
+// Frame thread, once: the VR profile only, behind the identity check. One line per probe, installed or refused.
+void installPassProbesOnce() {
+    if (g_passTried) return;
+    g_passTried = true;
     if (!runtimeVrProfile()) {
-        Log::get().note("native on foot hud gate: the read-only instruments are not installed (the flat profile)");
+        Log::get().note("native on foot pass probes: not installed (the flat profile)");
         return;
     }
     const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     const char* peWhy = nullptr;
     if (!base || !checkIdentity(base, &peWhy)) {
-        Log::get().note("native on foot hud gate: NOT installed -- identity mismatch (%s); the game was not touched.", peWhy ? peWhy : "no module");
+        Log::get().note("native on foot pass probes: NOT installed -- identity mismatch (%s); the game was not touched.", peWhy ? peWhy : "no module");
         return;
     }
-    g_hudBase.store(base, std::memory_order_relaxed);
-    const HudHookSpec item{"native-on-foot-hud-item", nofoot::kHudItemRva, nofoot::kHudItemPrologue, nofoot::kHudItemStolen,
-                           reinterpret_cast<void*>(&hudItemHooked), &prepareHudItemRelay, &g_hudItemRelay, &g_hudItemGate, &g_hudItemHook};
-    const HudHookSpec group{"native-on-foot-hud-group", nofoot::kHudGroupRva, nofoot::kHudGroupPrologue, nofoot::kHudGroupStolen,
-                            reinterpret_cast<void*>(&hudGroupHooked), &prepareHudGroupRelay, &g_hudGroupRelay, &g_hudGroupGate, &g_hudGroupHook};
-    size_t stolen = 0;
-    std::string why;
-    if (installHudHook(item, base, &stolen, &why)) {
-        g_hudItemArmed = true;
-        Log::get().note("native on foot hud gate: installed item hook at EliteDangerous64.exe+0x%llX (per render item, read only), stolen=%zu bytes, "
-                        "prologue %zu bytes verified, relay at 0x%llX.",
-                        static_cast<unsigned long long>(nofoot::kHudItemRva), stolen, nofoot::kHudPrologueBytes,
-                        static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(g_hudItemRelay)));
-    } else {
-        Log::get().note("native on foot hud gate: item hook NOT installed at EliteDangerous64.exe+0x%llX -- %s. The game was not touched by it.",
-                        static_cast<unsigned long long>(nofoot::kHudItemRva), why.c_str());
-    }
-    why.clear();
-    if (installHudHook(group, base, &stolen, &why)) {
-        g_hudGroupArmed = true;
-        Log::get().note("native on foot hud gate: installed group hook at EliteDangerous64.exe+0x%llX (per group, read only), stolen=%zu bytes, "
-                        "prologue %zu bytes verified, relay at 0x%llX.",
-                        static_cast<unsigned long long>(nofoot::kHudGroupRva), stolen, nofoot::kHudPrologueBytes,
-                        static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(g_hudGroupRelay)));
-    } else {
-        Log::get().note("native on foot hud gate: group hook NOT installed at EliteDangerous64.exe+0x%llX -- %s. The game was not touched by it.",
-                        static_cast<unsigned long long>(nofoot::kHudGroupRva), why.c_str());
+    const PassProbeSpec specs[nofoot::kPassCount] = {
+        {"native-on-foot-pass-enable", nofoot::kPassEnableRva, nofoot::kPassEnablePrologue, nofoot::kPassEnableStolen,
+         reinterpret_cast<void*>(&passEnableHooked), "P1 (pass enable)"},
+        {"native-on-foot-pass-gate", nofoot::kPassGateRva, nofoot::kPassGatePrologue, nofoot::kPassGateStolen,
+         reinterpret_cast<void*>(&passGateHooked), "P2 (the +0x2E0 gate)"},
+        {"native-on-foot-pass-node", nofoot::kPassNodeRva, nofoot::kPassNodePrologue, nofoot::kPassNodeStolen,
+         reinterpret_cast<void*>(&passNodeHooked), "P3 (PostGUI view nodes)"},
+    };
+    for (size_t i = 0; i < nofoot::kPassCount; ++i) {
+        const PassProbeSpec& s = specs[i];
+        size_t stolen = 0;
+        std::string why;
+        if (installPassProbe(i, s, base, &stolen, &why)) {
+            g_passArmed[i] = true;
+            Log::get().note("native on foot pass probe: installed %s at EliteDangerous64.exe+0x%llX, stolen=%zu bytes, prologue %zu bytes "
+                            "verified, relay at 0x%llX (read only; temporary).",
+                            s.label, static_cast<unsigned long long>(s.rva), stolen, nofoot::kPassPrologueBytes,
+                            static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(g_probe[i].relay)));
+        } else {
+            Log::get().note("native on foot pass probe: %s NOT installed at EliteDangerous64.exe+0x%llX -- %s. The game was not touched by it.",
+                            s.label, static_cast<unsigned long long>(s.rva), why.c_str());
+        }
     }
 }
 
-// Frame thread, every frame: counts the window's frames and, every 5 s, logs the item pairs (top 24), the groups, and the per-frame totals,
-// tagged with the state the window ends in. Then resets the tables.
-void hudGateTick(uint64_t nowMs) {
-    if (!g_hudItemArmed && !g_hudGroupArmed) return;
-    if (g_hudWindowMs == 0) g_hudWindowMs = nowMs;
-    HudItemKey items[nofoot::kHudItemPairs];
-    HudGroupKey groups[nofoot::kHudGroupPairs];
-    size_t nItems = 0, nGroups = 0;
-    uint64_t itemCalls = 0, groupCalls = 0, itemOver = 0, groupOver = 0, itemFaults = 0, groupFaults = 0, frames = 0;
+// The text of a byte, or "-" when it was not read.
+std::string passHex(uint8_t v, bool ok) {
+    if (!ok) return "-";
+    char b[4];
+    std::snprintf(b, sizeof(b), "%02X", static_cast<unsigned>(v));
+    return b;
+}
+std::string passHexRun(const uint8_t* v, size_t n, bool ok) {
+    if (!ok) return "-";
+    std::string s;
+    for (size_t i = 0; i < n; ++i) s += passHex(v[i], true);
+    return s;
+}
+
+void passLogFirst(const PassFirst& f) {
+    const char* st = kStateName[f.state < 3 ? f.state : 2];
+    switch (f.kind) {
+        case 1:
+            Log::get().note("native on foot pass enable [%s]: first sighting mode=%u w34..38=%s", st, f.value,
+                            passHexRun(f.bytes, 5, (f.aux & 1) != 0).c_str());
+            break;
+        case 2: {
+            const bool okF = (f.aux & 2) != 0;
+            const uint8_t* b = f.bytes;
+            Log::get().note("native on foot pass slot [%s]: slot=%u first q=%s f329=%s f32D=%s f32E=%s f32F=%s f330=%s f336=%s f337=%s p2D0=%s", st,
+                            static_cast<unsigned>(f.slot), (f.aux & 1) ? "nonnull" : "null", passHex(b[0], okF).c_str(),
+                            passHex(b[1], okF).c_str(), passHex(b[2], okF).c_str(), passHex(b[3], okF).c_str(), passHex(b[4], okF).c_str(),
+                            passHex(b[5], okF).c_str(), passHex(b[6], okF).c_str(), f.value == 1 ? "nonnull" : f.value == 0 ? "null" : "-");
+            break;
+        }
+        case 3:
+            Log::get().note("native on foot pass hudnode [%s]: slot=%u first node_%s", st, static_cast<unsigned>(f.slot),
+                            (f.aux & 1) ? "nonnull" : "null");
+            break;
+        default:
+            Log::get().note("native on foot pass slot: a slot word of %u is outside 0..3 (first seen in state %s)", f.value, st);
+            break;
+    }
+}
+
+void passLogWindow(uint8_t st, const PassEnableAgg& a) {
+    std::string modes;
+    for (uint8_t i = 0; i < a.nModes; ++i) {
+        if (!modes.empty()) modes += ',';
+        modes += std::to_string(a.modes[i]);
+    }
+    if (modes.empty()) modes = "-";
+    Log::get().note("native on foot pass enable [%s]: calls=%llu mode=%s w34..38=%s%s", kStateName[st], static_cast<unsigned long long>(a.calls),
+                    modes.c_str(), passHexRun(a.w, 5, a.wSeen).c_str(),
+                    a.modeUnread ? (std::string(" unread=") + std::to_string(a.modeUnread)).c_str() : "");
+}
+
+void passLogSlot(uint8_t st, size_t slot, const PassSlotAgg& a) {
+    const char* d0 = a.p2d0 == 1 ? "nonnull" : a.p2d0 == 0 ? "null" : "-";
+    Log::get().note("native on foot pass slot [%s]: slot=%u calls=%llu q_nonnull=%llu q_null=%llu f329=%s f32D=%s f32E=%s f32F=%s f330=%s "
+                    "f336=%s f337=%s p2D0=%s",
+                    kStateName[st], static_cast<unsigned>(slot), static_cast<unsigned long long>(a.calls),
+                    static_cast<unsigned long long>(a.qNonNull), static_cast<unsigned long long>(a.qNull),
+                    passHex(a.f[0], a.fSeen).c_str(), passHex(a.f[1], a.fSeen).c_str(), passHex(a.f[2], a.fSeen).c_str(),
+                    passHex(a.f[3], a.fSeen).c_str(), passHex(a.f[4], a.fSeen).c_str(), passHex(a.f[5], a.fSeen).c_str(),
+                    passHex(a.f[6], a.fSeen).c_str(), d0);
+}
+
+void passLogNode(uint8_t st, size_t slot, const PassNodeAgg& a) {
+    Log::get().note("native on foot pass hudnode [%s]: slot=%u calls=%llu node_nonnull=%llu", kStateName[st], static_cast<unsigned>(slot),
+                    static_cast<unsigned long long>(a.calls), static_cast<unsigned long long>(a.nodeNonNull));
+}
+
+// Frame thread, every frame: writes the queued first sightings, and every 5 s the window's lines for each state and slot, then resets.
+void passProbeTick(uint64_t nowMs) {
+    if (!g_passArmed[0] && !g_passArmed[1] && !g_passArmed[2]) return;
+    if (g_passWindowMs == 0) g_passWindowMs = nowMs;
+    PassFirst first[kPassRing];
+    size_t nFirst = 0;
+    uint64_t dropped = 0, frames = 0;
+    bool due = false;
+    PassEnableAgg p1[3];
+    PassSlotAgg p2[3][4];
+    PassNodeAgg p3[3][4];
     {
         HudLockGuard lock;
-        ++g_hudFrames;
-        if (nowMs - g_hudWindowMs < 5000) return;
-        nItems = g_hudItemsUsed;
-        for (size_t i = 0; i < nItems; ++i) items[i] = g_hudItems[i];
-        nGroups = g_hudGroupsUsed;
-        for (size_t i = 0; i < nGroups; ++i) groups[i] = g_hudGroups[i];
-        itemCalls = g_hudItemCalls;
-        groupCalls = g_hudGroupCalls;
-        itemOver = g_hudItemOverflow;
-        groupOver = g_hudGroupOverflow;
-        itemFaults = g_hudItemFaults;
-        groupFaults = g_hudGroupFaults;
-        frames = g_hudFrames;
-        for (auto& k : g_hudItems) k = HudItemKey{};
-        for (auto& k : g_hudGroups) k = HudGroupKey{};
-        g_hudItemsUsed = 0;
-        g_hudGroupsUsed = 0;
-        g_hudItemCalls = g_hudGroupCalls = g_hudItemOverflow = g_hudGroupOverflow = 0;
-        g_hudItemFaults = g_hudGroupFaults = 0;
-        g_hudFrames = 0;
-    }
-    g_hudWindowMs = nowMs;
-    const char* state = nativeOnFootActive() ? "native" : (journalOnFootKnown() && journalOnFoot()) ? "cinema" : "ship/other";
-    // Top by calls: a simple insertion sort over at most 64 pairs.
-    for (size_t i = 1; i < nItems; ++i) {
-        for (size_t j = i; j > 0 && items[j].calls > items[j - 1].calls; --j) {
-            const HudItemKey t = items[j];
-            items[j] = items[j - 1];
-            items[j - 1] = t;
+        while (g_passRead < g_passWritten && nFirst < kPassRing) first[nFirst++] = g_passRing[(g_passRead++) % kPassRing];
+        dropped = g_passDropped;
+        g_passDropped = 0;
+        ++g_passFrames;
+        due = nowMs - g_passWindowMs >= 5000;
+        if (due) {
+            for (size_t s = 0; s < 3; ++s) {
+                p1[s] = g_p1[s];
+                g_p1[s] = PassEnableAgg{};
+                for (size_t k = 0; k < 4; ++k) {
+                    p2[s][k] = g_p2[s][k];
+                    g_p2[s][k] = PassSlotAgg{};
+                    p3[s][k] = g_p3[s][k];
+                    g_p3[s][k] = PassNodeAgg{};
+                }
+            }
+            frames = g_passFrames;
+            g_passFrames = 0;
         }
     }
-    if (nItems == 0) Log::get().note("native on foot hud gate items [%s]: no item calls in the window", state);
-    uint64_t moreCalls = 0;
-    for (size_t i = 0; i < nItems; ++i) {
-        const HudItemKey& k = items[i];
-        if (i >= nofoot::kHudLogItems) {
-            moreCalls += k.calls;
-            continue;
-        }
-        char rec[24];
-        if (k.rec) std::snprintf(rec, sizeof(rec), "+0x%llX", static_cast<unsigned long long>(k.rec));
-        else std::snprintf(rec, sizeof(rec), "?");
-        Log::get().note("native on foot hud gate items [%s]: V=0x%016llX M=0x%016llX calls=%llu pass=%llu rec=%s e=0x%03X", state,
-                        static_cast<unsigned long long>(k.view), static_cast<unsigned long long>(k.mask), static_cast<unsigned long long>(k.calls),
-                        static_cast<unsigned long long>(k.pass), rec, k.enable);
+    for (size_t i = 0; i < nFirst; ++i) passLogFirst(first[i]);
+    if (dropped) Log::get().note("native on foot pass: %llu first sighting(s) dropped (the queue of %zu was full)", static_cast<unsigned long long>(dropped), kPassRing);
+    if (!due) return;
+    g_passWindowMs = nowMs;
+    Log::get().note("native on foot pass window: frames=%llu (5 s)", static_cast<unsigned long long>(frames));
+    for (uint8_t s = 0; s < 3; ++s) {
+        passLogWindow(s, p1[s]);
+        for (size_t k = 0; k < 4; ++k) passLogSlot(s, k, p2[s][k]);
+        for (size_t k = 0; k < 4; ++k) passLogNode(s, k, p3[s][k]);
     }
-    if (nItems > nofoot::kHudLogItems) {
-        Log::get().note("native on foot hud gate items [%s]: ... %zu more pairs (%llu calls)%s", state, nItems - nofoot::kHudLogItems,
-                        static_cast<unsigned long long>(moreCalls), itemOver ? " and some not keyed (table full)" : "");
-    }
-    if (nGroups == 0) Log::get().note("native on foot hud gate groups [%s]: no group calls in the window", state);
-    for (size_t i = 1; i < nGroups; ++i) {
-        for (size_t j = i; j > 0 && groups[j].calls > groups[j - 1].calls; --j) {
-            const HudGroupKey t = groups[j];
-            groups[j] = groups[j - 1];
-            groups[j - 1] = t;
-        }
-    }
-    for (size_t i = 0; i < nGroups; ++i) {
-        const HudGroupKey& g = groups[i];
-        char vt[24];
-        if (g.vtOk) std::snprintf(vt, sizeof(vt), "+0x%llX", static_cast<unsigned long long>(g.vtRva));
-        else std::snprintf(vt, sizeof(vt), "?");
-        Log::get().note("native on foot hud gate groups [%s]: vt=%s byte30=%u calls=%llu n=%u", state, vt, g.byte30,
-                        static_cast<unsigned long long>(g.calls), g.n);
-    }
-    const double f = frames ? static_cast<double>(frames) : 1.0;
-    Log::get().note("native on foot hud gate totals [%s]: frames=%llu item_calls=%llu (%.1f per frame) group_calls=%llu (%.1f per frame) "
-                    "item_faults=%llu group_faults=%llu overflow=%llu/%llu",
-                    state, static_cast<unsigned long long>(frames), static_cast<unsigned long long>(itemCalls),
-                    static_cast<double>(itemCalls) / f, static_cast<unsigned long long>(groupCalls), static_cast<double>(groupCalls) / f,
-                    static_cast<unsigned long long>(itemFaults), static_cast<unsigned long long>(groupFaults),
-                    static_cast<unsigned long long>(itemOver), static_cast<unsigned long long>(groupOver));
 }
 
 }  // namespace
@@ -1111,7 +1222,7 @@ void nativeOnFootHudCapture(int index, uint64_t vs) {
 void nativeOnFootFrameBoundary(uint32_t frameNo) {
     (void)frameNo;
     if (g_install == InstallState::NotTried) installOnce();
-    installHudGateOnce();   // F4: the two read-only instruments (VR profile; once)
+    installPassProbesOnce();   // F5: the three read-only pass probes (VR profile; once)
     if (g_install == InstallState::Armed) readKey();
     drainEvents();
     if (!g_hudArmedNoted) {
@@ -1142,7 +1253,7 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
     gateLine(now);
     avatarLine(now);
     avatarCensusLine(now);
-    hudGateTick(now);
+    passProbeTick(now);
     neckLine(now);
 }
 

@@ -124,30 +124,33 @@ inline int hudIssuerIndex(uint64_t vs) {
     return vs == kHudIssuerVs[0] ? 0 : vs == kHudIssuerVs[1] ? 1 : -1;
 }
 
-// ---- F4: two read-only instruments (TEMPORARY; they go when the arc closes). native_on_foot.cpp holds the hooks. ----
-// H1: the per-item function. rcx = this (the render-item owner), rdx = item. Its stolen prefix is mov r11,rsp (3) / push rdi (1) / push
-// r14 (2), so the 5-byte jump is rounded up to 6 bytes at the instruction boundary.
-constexpr uintptr_t kHudItemRva = 0x594D90;
-constexpr size_t kHudItemStolen = 6;
-// H2: the per-group function, vtable slot 3. rcx = sub (the group). Its stolen prefix is mov [rsp+8],rbx: exactly 5 bytes.
-constexpr uintptr_t kHudGroupRva = 0x58AF30;
-constexpr size_t kHudGroupStolen = 5;
-constexpr size_t kHudPrologueBytes = 32;
-constexpr uint8_t kHudItemPrologue[kHudPrologueBytes] = {
-    0x4c, 0x8b, 0xdc, 0x57, 0x41, 0x56, 0x48, 0x81, 0xec, 0x58, 0x04, 0x00, 0x00, 0x48, 0x8b, 0x81,
-    0x70, 0x02, 0x00, 0x00, 0x4c, 0x8b, 0xf2, 0x48, 0x89, 0x91, 0x60, 0x02, 0x00, 0x00, 0x48, 0x8b};
-constexpr uint8_t kHudGroupPrologue[kHudPrologueBytes] = {
-    0x48, 0x89, 0x5c, 0x24, 0x08, 0x48, 0x89, 0x74, 0x24, 0x10, 0x57, 0x48, 0x83, 0xec, 0x20, 0x80,
-    0x79, 0x30, 0x00, 0x48, 0x8b, 0xf2, 0x48, 0x8b, 0xd9, 0x74, 0x37, 0x33, 0xff, 0x39, 0xb9, 0x88};
-// The fields read. Item: V = [this+0x270] (the view mask), M = [item+0x30] (the item mask), E = [item+0x38]. The recorder: idx =
-// dword [[this+0x250]+0x8e8]; node = qword [item+0x40+idx*8]; X = qword [node+0x20]; fn = qword [X+8]. Group: vt = qword [sub],
-// B = byte [sub+0x30], N = dword [sub+0x88].
-constexpr uint32_t kHudViewOff = 0x270, kHudItemMaskOff = 0x30, kHudItemEnableOff = 0x38, kHudRecSourceOff = 0x250, kHudRecIndexOff = 0x8e8,
-                   kHudItemNodesOff = 0x40, kHudNodeXOff = 0x20, kHudXFnOff = 0x8;
-constexpr uint32_t kHudGroupByteOff = 0x30, kHudGroupCountOff = 0x88;
-constexpr size_t kHudItemPairs = 64, kHudGroupPairs = 32, kHudLogItems = 24;
-// Pass: the view and the item share a bit (the item is visible from this view).
-inline bool hudItemPass(uint64_t view, uint64_t mask) { return (view & mask) != 0; }
+// ---- F5: three read-only pass probes (TEMPORARY; they go when the arc closes). native_on_foot.cpp holds the hooks. ----
+constexpr size_t kPassCount = 3;
+constexpr size_t kPassPrologueBytes = 32;
+// P1: pass enable. rcx = W. Stolen prefix: push rbp (REX-prefixed, 2 bytes), push rbx, push rsi, push rdi: 5 bytes.
+constexpr uintptr_t kPassEnableRva = 0x2854FA0;
+constexpr size_t kPassEnableStolen = 5;
+constexpr uint8_t kPassEnablePrologue[kPassPrologueBytes] = {
+    0x40, 0x55, 0x53, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48, 0x8B, 0xEC,
+    0x48, 0x83, 0xEC, 0x58, 0x48, 0x8B, 0x41, 0x28, 0x48, 0x8B, 0xF9, 0xC6, 0x45, 0x50, 0x01, 0x66};
+// P2: the +0x2E0 gate. rcx = p (the pass). Stolen prefix: mov [rsp+0x10],rbx: 5 bytes.
+constexpr uintptr_t kPassGateRva = 0x28A4D30;
+constexpr size_t kPassGateStolen = 5;
+constexpr uint8_t kPassGatePrologue[kPassPrologueBytes] = {
+    0x48, 0x89, 0x5C, 0x24, 0x10, 0x48, 0x89, 0x6C, 0x24, 0x18, 0x48, 0x89, 0x74, 0x24, 0x20, 0x57,
+    0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48, 0x81, 0xEC, 0x50, 0x03, 0x00, 0x00, 0x48};
+// P3: creates the PostGUI view nodes. rcx = [p+0x2E0], rdx = p. Stolen prefix: mov [rsp+0x10],rbx: 5 bytes; the call at +0x1D is outside it.
+constexpr uintptr_t kPassNodeRva = 0x28A4B90;
+constexpr size_t kPassNodeStolen = 5;
+constexpr uint8_t kPassNodePrologue[kPassPrologueBytes] = {
+    0x48, 0x89, 0x5C, 0x24, 0x10, 0x48, 0x89, 0x6C, 0x24, 0x18, 0x56, 0x57, 0x41, 0x56, 0x48, 0x83,
+    0xEC, 0x30, 0x48, 0x8B, 0xE9, 0x48, 0x8B, 0xF2, 0xB9, 0x48, 0x00, 0x00, 0x00, 0xE8, 0xDE, 0x59};
+// Field offsets. P1: sub = qword [W+0x28], mode = dword [sub+0x9D4], W+0x34..0x38 read after the call. P2: slot = dword [p+8],
+// q = qword [p+0x2E0], the seven flag bytes at kPassFlagOff, d0 = qword [p+0x2D0]. P3: slot = dword [p+8] before the call,
+// node = qword [view+0x58] after it.
+constexpr uint32_t kPassSubOff = 0x28, kPassModeOff = 0x9D4, kPassWOff = 0x34, kPassSlotOff = 0x8, kPassViewOff = 0x2E0, kPassD0Off = 0x2D0,
+                   kPassNodeOff = 0x58;
+constexpr uint32_t kPassFlagOff[7] = {0x329, 0x32D, 0x32E, 0x32F, 0x330, 0x336, 0x337};
 
 }  // namespace nofoot
 }  // namespace edvr
