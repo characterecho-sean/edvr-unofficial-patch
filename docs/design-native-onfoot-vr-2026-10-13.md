@@ -2,8 +2,10 @@
 
 ## Status
 
-- **State:** F0 REBUILT 84d0f3d4 (relay fix; 1535fb59 was refused on Epic at
-  2 GB), NOT FLOWN. Ruled out nothing. Branch
+- **State:** F0 REBUILT e4c6e52c (the 4/6 pair). Epic flight 10:13 (build
+  v0.19.1-23-g915332f2): the hook installed through the relay and logged every
+  call, but never substituted: the rig's cinema request is 6, HMD 4. Not
+  flown with a substitution yet. Branch
   `claude/native-onfoot-vr-completion-219ffa`, off main until ready (Sean).
 - **Origin:** a user's handoff (not in the repo). They hooked Elite's
   render-mode setter, swapped an incoming 5 (Cinema) for 3 (HMD) while
@@ -28,7 +30,7 @@
   than the setter (UNVERIFIED); H3: EDVR's on-foot gates key on the journal's
   OnFoot flag and will misfire on stereo eyes (world route, UI layer,
   footSplit, weapon pacing).
-- **Ruled out:** see the end of this doc.
+- **Ruled out:** the cinema request is always 5 (see the end of this doc).
 - **Temporary keys:** `fix.native_on_foot` (on/off, default off, VR only),
   added by F0 (1535fb59) on the Fixes page. Removal is proposed, quoted, when
   W1 ships as behaviour; nothing removes it before then.
@@ -37,14 +39,15 @@
   Hook: CodeHook on the setter at +0x28723C0, through a near relay (the
   five-byte jump reaches only 2 GB; the relay is placed within reach, as
   skin_entity_hook does). Prologue and vtable slot verified under SEH.
-  A refusal quotes CodeHook's reason. Admission: key on, incoming 5, selector
-  frozen at the first valid call, `journalGameplay()` (LoadGame, no Shutdown).
+  A refusal quotes CodeHook's reason. Admission: key on, incoming 5 or 6
+  (forwarded as its HMD partner, 3 or 4), selector frozen at the first valid
+  call, `journalGameplay()` (LoadGame, no Shutdown).
 - **Read after the flight, in the d3d11 log:**
   - `native on foot: installed --` or `NOT installed -- <reason>` (once, at the
     first VR frame). Refusal reasons: identity, slot, prologue, CodeHook, flat.
   - `native on foot: incoming=N effective=N source_after=N key=on|off
     admitted=yes|no reason=... onfoot=... seated=... t=ms`: one per setter
-    call, key off or on. A natural incoming 3 is `admitted=no reason=not_cinema`.
+    call, key off or on. A natural incoming 3 or 4 is `admitted=no reason=not_cinema`.
   - `native on foot gates: frames=N world_route=N ui_layer=N foot_split=N
     deferred_pacing=N panel_shape=N transition_flash=N` every 5 s while native
     stereo is on. Cumulative since launch.
@@ -52,9 +55,8 @@
     bounds=... same_texture=yes|no`, once a second while frames are submitted.
     Stereo eyes read as two eye-sized textures; the cinema panel as one shared
     16:9 texture (`same_texture=yes`).
-- **Install:** Frontier holds befe91c1 (pre-relay). 84d0f3d4 is NOT installed:
-  the game was running (pid 26864), so it stopped rather than force. Promotion
-  build v0.19.1-21-g1327d891 passed. `edvr.ini` untouched.
+- **Install:** Frontier and Epic get the `--dll-only` build stamped with the
+  commit that carries this line. `edvr.ini` is never touched.
 - **Next:** Sean flies F0 (the flight below). Nothing builds before that.
 
 ## What "finished" means
@@ -151,3 +153,7 @@ mode and its context); W3 step 1-2 (dump comparison, offline).
 - ruled out: a mode branch that hides the HUD in 3 but shows it in 5, because
   all 17 static readers of settings+0x3694/0x3698 test the 3..6 range, never 3
   vs 5 (re_modes scan, 2026-10-13). Indirect readers are not covered.
+- ruled out: the cinema request is always 5, because flight F0 (10:15:48,
+  Epic, Pimax OpenXR) logged incoming=6 at disembark, with the VR world route
+  engaging 2 s later. This rig's HMD mode is 4, and the main menu also runs in
+  4 (10:14:01, incoming=4). The pairs are 5/3 and 6/4.
