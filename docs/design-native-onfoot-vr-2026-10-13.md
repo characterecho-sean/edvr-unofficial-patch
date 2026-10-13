@@ -2,10 +2,9 @@
 
 ## Status
 
-- **State:** F0 REBUILT e4c6e52c (the 4/6 pair). Epic flight 10:13 (build
-  v0.19.1-23-g915332f2): the hook installed through the relay and logged every
-  call, but never substituted: the rig's cinema request is 6, HMD 4. Not
-  flown with a substitution yet. Branch
+- **State:** F0 REBUILT d4875a12 (the selector check fixed; see the journal at
+  the end). Flight 3 (Epic, 10:36) reached admission for cinema 6 and refused
+  it: selector_invalid, from our own check. Not flown with a substitution yet. Branch
   `claude/native-onfoot-vr-completion-219ffa`, off main until ready (Sean).
 - **Origin:** a user's handoff (not in the repo). They hooked Elite's
   render-mode setter, swapped an incoming 5 (Cinema) for 3 (HMD) while
@@ -157,3 +156,15 @@ mode and its context); W3 step 1-2 (dump comparison, offline).
   Epic, Pimax OpenXR) logged incoming=6 at disembark, with the VR world route
   engaging 2 s later. This rig's HMD mode is 4, and the main menu also runs in
   4 (10:14:01, incoming=4). The pairs are 5/3 and 6/4.
+
+## Journal
+
+- **2026-10-13, F0 flight 3 (Epic, Pimax OpenXR, build v0.19.1-25-g15eb62b5,
+  10:36).** The 6 reached admission and was refused: `reason=selector_invalid`
+  on both disembark requests. Cause: our check. It read owner+0x60 and
+  compared it with the selector. But the selector is embedded in its owner at
+  +0x60, and owner+0x60 holds the selector's vtable (the constructor 0x27FBFC0
+  writes it there). The check now reads the selector's vtable, requires it to
+  be the setter's (image base + 0x52E9608), and compares owner+0x60 with the
+  selector by address only (d4875a12). Every setter line now shows `sel`, `vt`,
+  `owner` and `owner_back`, so a refusal shows which part failed.
