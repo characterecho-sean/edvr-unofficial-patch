@@ -685,7 +685,7 @@ int main(int argc,char** argv){
  // A triangle may straddle either camera's eye plane. Its visible current
  // fragments still have actual finite correspondence through old.xy/old.w;
  // an all-three-vertices positive-W test incorrectly discarded all of it.
- const char* straddleSource="cbuffer P:register(b1){float mouse,projection,a,b;float clip;float3 pad;} StructuredBuffer<float4> Bones:register(t38);struct O{uint2 extra:DATA0;float4 normal:DATA1;float4 p:SV_Position;};O main(float4 p:POSITION){O o;o.extra=0;o.normal=1;o.p=float4((p.x+mouse)*projection,p.y,clip,p.z+lerp(Bones[0].z,Bones[1].z,p.w));return o;}";
+ const char* straddleSource="cbuffer P:register(b1){float mouse,projection,a,b;float clip;float3 pad;} StructuredBuffer<float4> Bones:register(t38);struct O{float4 p:SV_Position;uint2 extra:DATA0;float4 normal:DATA1;};O main(float4 p:POSITION){O o;o.extra=0;o.normal=1;o.p=float4((p.x+mouse)*projection,p.y,clip,p.z+lerp(Bones[0].z,Bones[1].z,p.w));return o;}";
  auto straddleCode=compile(straddleSource,"vs_5_0");ComPtr<ID3D11VertexShader> straddleVs;hr(dev->CreateVertexShader(straddleCode->GetBufferPointer(),straddleCode->GetBufferSize(),nullptr,&straddleVs));
  AnimatedVertexHistory::rememberShader(straddleVs.Get(),straddleCode->GetBufferPointer(),straddleCode->GetBufferSize());
  auto straddleRaster=[&](float nearOffset,float farOffset=0){bind(foreignOld,false);ctx->VSSetShader(straddleVs.Get(),nullptr,0);float boneDepths[8]={0,0,nearOffset,0,0,0,farOffset,0};ctx->UpdateSubresource(bones.Get(),0,nullptr,boneDepths,0,0);
