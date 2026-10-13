@@ -143,10 +143,53 @@ void refuse(const char* why) {
     Log::get().note("native on foot: NOT installed -- %s. The game was not touched; every mode request passes through as it always did.", why);
 }
 
-// CodeHook's Prepare: runs after the trampoline exists and before the entry is patched, so g_original is set before any call can
-// reach the hook.
-bool prepareOriginal(void* trampoline, void*) noexcept {
-    g_original = reinterpret_cast<SetterFn>(trampoline);
+// The near relay. CodeHook's five-byte jump reaches only two gigabytes, and EDVR's DLL loads more than that from the game, so the
+// replacement is a relay placed within reach of the setter (explorer_cam.cpp's and skin_entity_hook.cpp's pattern: ecm::buildCallbackRelay
+// in explorer_cam_core.h, and allocateRelay below, copied from skin_entity_hook.cpp). The relay compares g_gate with zero: zero jumps to the
+// original (the trampoline), anything else jumps to setterHooked.
+uint8_t* g_relay = nullptr;
+alignas(8) std::atomic<uintptr_t> g_gate{0};
+
+// A page of executable memory within two gigabytes of `target`, or null. Same search as skin_entity_hook.cpp's allocateRelay.
+uint8_t* allocateRelay(uintptr_t target) noexcept {
+    SYSTEM_INFO info{};
+    GetSystemInfo(&info);
+    const uintptr_t granularity = info.dwAllocationGranularity;
+    const uintptr_t floor = reinterpret_cast<uintptr_t>(info.lpMinimumApplicationAddress);
+    const uintptr_t ceiling = reinterpret_cast<uintptr_t>(info.lpMaximumApplicationAddress);
+    const uintptr_t distance = uintptr_t(INT32_MAX) - 0x10000u;
+    uintptr_t at = target > distance ? target - distance : floor;
+    if (at < floor) at = floor;
+    const uintptr_t limit = target > ceiling - distance ? ceiling : target + distance;
+    while (at < limit) {
+        MEMORY_BASIC_INFORMATION region{};
+        if (!VirtualQuery(reinterpret_cast<void*>(at), &region, sizeof(region))) break;
+        const uintptr_t start = reinterpret_cast<uintptr_t>(region.BaseAddress);
+        if (region.RegionSize > UINTPTR_MAX - start) break;
+        const uintptr_t end = start + region.RegionSize;
+        if (region.State == MEM_FREE) {
+            uintptr_t candidate = at > start ? at : start;
+            if (candidate > UINTPTR_MAX - (granularity - 1)) break;
+            candidate = (candidate + granularity - 1) & ~(granularity - 1);
+            if (candidate < limit && candidate < end && end - candidate >= 4096) {
+                auto* p = static_cast<uint8_t*>(VirtualAlloc(reinterpret_cast<void*>(candidate), 4096, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+                if (p) return p;
+            }
+        }
+        if (end <= at) break;
+        at = end;
+    }
+    return nullptr;
+}
+
+// CodeHook's Prepare: runs after the trampoline exists and before the entry is patched. It puts the trampoline into the relay, makes the
+// relay executable, and sets g_original, so the original is reachable before any call can reach the hook.
+bool prepareRelay(void* trampoline, void*) noexcept {
+    const uintptr_t address = reinterpret_cast<uintptr_t>(trampoline);
+    std::memcpy(g_relay + ecm::kCallbackRelayTrampolineAt, &address, 8);
+    DWORD oldProtect = 0;
+    if (!VirtualProtect(g_relay, 4096, PAGE_EXECUTE_READ, &oldProtect) || !FlushInstructionCache(GetCurrentProcess(), g_relay, ecm::kCallbackRelayBytes)) return false;
+    g_original = reinterpret_cast<SetterFn>(address);
     return true;
 }
 
@@ -188,18 +231,32 @@ void installOnce() {
         refuse(b);
         return;
     }
-    void* original = nullptr;
-    g_hook = new CodeHook();   // deliberately never deleted (see g_hook)
-    if (!g_hook->install(reinterpret_cast<void*>(base + nofoot::kSetterRva), reinterpret_cast<void*>(&setterHooked), &original,
-                         "native-on-foot-setter", &prepareOriginal, nullptr)) {
-        refuse("CodeHook refused the setter's prologue (its own line above says why)");
+    // The relay first: within two gigabytes of the setter, so CodeHook's five-byte jump reaches it. The gate stays shut until the patch
+    // is live, so a call that arrives in between goes straight to the original.
+    const uintptr_t target = base + nofoot::kSetterRva;
+    g_relay = allocateRelay(target);
+    if (!g_relay) {
+        refuse("no executable memory could be placed within two gigabytes of the setter, so the relay cannot reach it; nothing was patched");
         return;
     }
+    ecm::buildCallbackRelay(g_relay, &g_gate, reinterpret_cast<const void*>(&setterHooked));
+    g_hook = new CodeHook();   // deliberately never deleted (see g_hook)
+    if (!g_hook->install(reinterpret_cast<void*>(target), g_relay, nullptr, "native-on-foot-setter", &prepareRelay, nullptr)) {
+        VirtualFree(g_relay, 0, MEM_RELEASE);
+        g_relay = nullptr;
+        char b[480];
+        const char* why = g_hook->refusal()[0] ? g_hook->refusal() : "CodeHook gave no reason";
+        std::snprintf(b, sizeof(b), "CodeHook refused the install: %s", why);
+        refuse(b);
+        return;
+    }
+    g_gate.store(1, std::memory_order_seq_cst);
     g_install = InstallState::Armed;
     Log::get().note("native on foot: installed -- the render-mode setter at EliteDangerous64.exe+0x%llX (vtable +0x%llX slot 5, build 332841), "
-                    "stolen=%zu bytes, prologue %zu bytes verified; every setter call is logged from here, whatever fix.native_on_foot says.",
+                    "stolen=%zu bytes, prologue %zu bytes verified, relay at 0x%llX; every setter call is logged from here, whatever "
+                    "fix.native_on_foot says.",
                     static_cast<unsigned long long>(nofoot::kSetterRva), static_cast<unsigned long long>(nofoot::kSetterVtableRva),
-                    g_hook->stolenBytes(), nofoot::kPrologueBytes);
+                    g_hook->stolenBytes(), nofoot::kPrologueBytes, static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(g_relay)));
 }
 
 // The key, re-read when the configuration changes (Config::generation()). Read by its literal name (tools/gen_settings_schema.py).
