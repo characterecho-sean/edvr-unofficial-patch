@@ -73,7 +73,7 @@ inline void run(const lifecycle_tests::Harness& h) {
     using namespace edvr;
     using Microsoft::WRL::ComPtr;
     recordedMarkerTests(h);
-    const auto previous=g_runtimeProfile;g_runtimeProfile=RuntimeProfile::Flat;
+    const RuntimeProfile previous=g_runtimeProfile;g_runtimeProfile=RuntimeProfile::Flat;
     lifecycle_tests::Game game(h);game.setup();game.makeSource(40,24);
     const auto code=game.compile(std::string(shader_tests::kVsCommon)+shader_tests::kVsB,"vs_5_0");
     ComPtr<ID3D11VertexShader> vs;

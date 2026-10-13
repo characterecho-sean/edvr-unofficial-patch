@@ -51,7 +51,7 @@ inline void run(const lifecycle_tests::Harness& h) {
     using lifecycle_tests::readBuffer;
     using lifecycle_tests::readTexture;
     using lifecycle_tests::release;
-    const auto previous = g_runtimeProfile;
+    const RuntimeProfile previous = g_runtimeProfile;
     size_t mark = lifecycle_fake::g_log.size();
 
     lifecycle_tests::Game game(h);

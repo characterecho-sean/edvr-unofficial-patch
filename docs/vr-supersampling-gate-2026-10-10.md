@@ -17,6 +17,7 @@
   - Gap 1 (falsified): the one field does not cover every consumer. New depth targets were sized from the menu value (2227 = trunc(2620 x 0.85)) while the field read 1.0. H7 names the sizing caller and is open.
   - H8: does the startup write reach the render context's field? The first setter call's `before` value decides it (0.85 means no, 1.0 means yes).
   - H9: what mode 4 is.
+- **Ruled out (2026-10-12):** the corruption's PresentInterval 2 pacing VR, because 22 Frontier VR sessions (10-11 16:00 to 10-12 13:58) and the two Steam flights after it logged `present_sync_nonzero=0` over about 600,000 Presents: with VSync false Elite presents with sync interval 0 in VR. VSync true is unmeasured. Sean: no enforcement needed. Entry at the end.
 - **Ruled out:** H4, the loader object and the render context are different allocations, so the startup write does not touch the field the setter reads. A static-address read of the 3D mode: the mode sits behind virtual calls on heap objects.
 - **Retired:** the write watchpoint and the settings and sizing watches of the earlier steps. No watch code is in `vr_ssaa_*.cpp` or `vr_window_trampolines.cpp`; do not reintroduce them. `vr_display_observer` still logs the game window's style and size, read only.
 - **Doc rule:** dated entries below; keep this block current.
@@ -161,6 +162,13 @@ Lines:
 - GUARD: src\d3d11\vr_display_config_guard.h (pure): a side must be 640..16384, FullScreen 0..2, VSync 0..1, PresentInterval 0..4. Rig cases are in tools\vr_ssaa_hold_test (they refuse the values that corrupted the save).
 - ACTION: the 0x7F9F00 hold is removed from the trampolines (no install, no write). The request-block restore stays. The corrupted DisplaySettings.xml is NOT touched by EDVR; the maintainer fixes VSync and FullScreen in-game before the next flight.
 - NEXT (to re-enable the save hold): prove the object's field offsets for ScreenWidth, ScreenHeight and FullScreen (trace the value source of each name's call in 0x7F9F00, and the object's writers at its callers 0x7F8E78 and 0x7FA7C6), and write only those three, guarded by displaycfg::plausibleObject.
+
+## PresentInterval 2 left by the corruption (2026-10-12)
+
+- The shared DisplaySettings.xml still reads `<VSync>false</VSync>` and `<PresentInterval>2</PresentInterval>` (written 2026-10-12 13:31); FullScreen was fixed in-game, PresentInterval was not.
+- Question: does interval 2 make Elite's monitor Present wait for every second vertical blank in VR, pacing the headset by the monitor?
+- Evidence: the runtime's `native_post_submit_window` lines count Presents with a nonzero sync interval (`present_sync_nonzero`, from the Present trace in `hookedPresent`, the game's own argument). Frontier, 22 sessions from 10-11 16:00 to 10-12 13:58: 0 of about 590,000. Steam, 16:38 and 16:58 on 10-10 (after the 13:58 corruption): 0.
+- ruled out: PresentInterval 2 pacing VR with VSync false, because Elite passed sync interval 0 on every timed Present. Sean (2026-10-12): Elite already presents unsynced in VR, so EDVR does not enforce it. Unmeasured: VSync true; a report of VR paced by the monitor would show as a nonzero `present_sync_nonzero` in that user's openxr log.
 
 ## Verified in the build
 

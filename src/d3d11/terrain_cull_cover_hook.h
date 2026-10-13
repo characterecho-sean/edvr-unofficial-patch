@@ -11,8 +11,9 @@
 
 namespace edvr {
 
-// Install the hook (once; later calls do nothing). Called from device_hook after the other startup installers. `flatProfile` true: say it is inert and patch nothing.
-void terrainCullCoverInstall(bool flatProfile);
+// Install the hook (once; later calls do nothing). Called from device_hook after the other startup installers. `noVrScope` true: say it is inert and patch nothing.
+// Installed for any scope with VR in it; the detour then passes the builder's call through in the flat profile.
+void terrainCullCoverInstall(bool noVrScope);
 
 // Once a second from device_hook's config tick: the ten-minute heartbeat, while the hook is live. `nowMs` is a monotonic millisecond clock.
 void terrainCullCoverPoll(uint64_t nowMs);

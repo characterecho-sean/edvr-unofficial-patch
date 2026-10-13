@@ -855,7 +855,8 @@ int boundarySourceChecks(const std::string& root) {
     verify(tickCalls >= 20, "presentFrameBoundary() runs its work as ticks");
     verify(withoutSpaces(body) ==
                "++g_state->frameCounter;if(graphicsRuntimeDisabled())return;"
-               "if(menuTakeConfigPollRequest()||dueMs(g_state->configPollMs,kConfigPollMs))"
+               "if(menuTakeConfigPollRequest()||dueMs(g_state->configPollMs,kConfigPollMs)"
+               "||g_configRefreshRequested.load(std::memory_order_acquire))"
                "{g_state->configPollMs=stampMs();}",
            "outside its ticks presentFrameBoundary() holds only the frame counter, the "
            "graphics-off test and the config-poll decision -- anything else added there "
@@ -909,7 +910,8 @@ int boundarySourceChecks(const std::string& root) {
     {
         // The ini's reload lives in vScreenRefreshConfig, the only place it is re-read. It must come BEFORE the State check: with vScreen transport-only there is no State, and a
         // reload that waited for one never happened -- a hotkey.explorer_cam bound while the game runs (or any live edit, the F8 menu's writes) would never apply.
-        const size_t at = screenText.find("void vScreenRefreshConfig() {");
+        // The one body both refreshes run (vScreenRefreshConfigBody): the forced one skips the gate, the plain one reads the ini first.
+        const size_t at = screenText.find("void vScreenRefreshConfigBody(bool forced) {");
         std::string flat;
         if (at != std::string::npos) {
             const size_t end = screenText.find("\n}", at);

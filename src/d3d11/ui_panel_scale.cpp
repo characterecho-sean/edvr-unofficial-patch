@@ -10,6 +10,7 @@
 #include "vr_ssaa_gate.h"     // the step-1 instruments: log only
 #include "vr_ssaa_hold.h"     // the Supersampling hold: the setter's value, and the held field the panel factor follows
 #include "vr_ssaa_hold_math.h"  // ssaahold::kHeldValue
+#include "mode_watch.h"         // modeWatchHint: the setter is a hint for the 3D mode watch
 
 #include "../common/log.h"
 #include "../common/native_render_settings.h"  // edvrQueryNativeRenderSizing: W_out
@@ -442,6 +443,7 @@ void setterAfterThunk(void* self, float x) { setterAfterImpl(self, x); }
 void getterNoteThunk(void* self, float) { getterNoteImpl(self); }
 
 void __fastcall hookedSetter(void* self, float x) {
+    modeWatchHint(ModeHint::Setter);  // the mode watch re-reads Settings.xml now (mode_watch.h); the setter is how Supersampling is set
     x = vrSsaaHoldSetterValue(x);  // the Supersampling hold (vr_ssaa_hold.h): 1.0 while the 3D mode is on, else the game's value
     guardedRun(setterBeforeThunk, self, x);
     const SetterFn orig = g_origSetter.load(std::memory_order_acquire);

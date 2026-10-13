@@ -492,9 +492,9 @@ static void caseHook() {
     // a flat session: inert, nothing patched
     terrainCullCoverTestSetImage(s.base);
     terrainCullCoverInstall(true);
-    check(lines().size() == 1 && lines()[0] == "terrain cull cover: inert: the flat profile has no stereo frustum to cover; nothing was patched" && std::memcmp(before, fn, 16) == 0 &&
+    check(lines().size() == 1 && lines()[0] == "terrain cull cover: inert: the install scope has no VR, so there is no stereo frustum to cover; nothing was patched" && std::memcmp(before, fn, 16) == 0 &&
               !terrainCullCoverTestState().installed,
-          "C5.b a flat session says it is inert in one line and patches nothing");
+          "C5.b a flat-only scope says it is inert in one line and patches nothing");
     terrainCullCoverInstall(false);
     check(lines().size() == 1, "C5.c ...and a second install attempt in the same session does nothing (once, ever)");
     terrainCullCoverPoll(1000);
@@ -742,8 +742,8 @@ int main(int argc, char** argv) {
         const std::string core = slurp(root + "\\src\\d3d11\\terrain_cull_cover_core.h");
         const std::string build = slurp(root + "\\build.bat");
         const std::string ini = slurp(root + "\\edvr.ini");
-        check(occurrencesLive(device, "terrainCullCoverInstall(runtimeFlatProfile());") == 1 && precedes(device, "vertexResyncInstall();", "terrainCullCoverInstall(runtimeFlatProfile());"),
-              "C7.a device_hook.cpp installs the cover once, with the profile, in the startup block");
+        check(occurrencesLive(device, "terrainCullCoverInstall(!runtimeScopeIncludesVr());") == 1 && precedes(device, "vertexResyncInstall();", "terrainCullCoverInstall(!runtimeScopeIncludesVr());"),
+              "C7.a device_hook.cpp installs the cover once, with the install scope, in the startup block");
         check(occurrencesLive(device, "terrainCullCoverPoll(stampMs());") == 1 && precedes(device, "vScreenRefreshConfig();", "terrainCullCoverPoll(stampMs());"), "C7.b ...and polls it once a second after the config reload");
         check(occurrencesLive(temporal, "edvr::terrainCullCoverNoteFrusta(s->frusta);") == 1 &&
                   precedes(temporal, "std::memcpy(s->frusta,f->frusta,sizeof(s->frusta));", "edvr::terrainCullCoverNoteFrusta(s->frusta);") &&

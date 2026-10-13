@@ -454,6 +454,12 @@ void drawButton(const DRAWITEMSTRUCT* item, UINT dpi) {
     if (focused && !disabled) strokeRounded(dc, rect, radius, t.accent, dp(2, dpi));
 
     RECT textRect = rect;
+    if (owned->style == ButtonStyle::Link) {
+        // A link reads as part of the line it sits in: the caption font that line is painted in, from the box's top-left, so its
+        // baseline and size match the words before it (gui.cpp sizes the box to the measured label).
+        drawText(dc, label, textRect, fonts().caption, ink, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX);
+        return;
+    }
     drawText(dc, label, textRect, owned->style == ButtonStyle::TabActive ? fonts().bodyBold
                                                                         : fonts().body,
              ink, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);

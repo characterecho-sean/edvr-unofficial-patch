@@ -12,6 +12,7 @@
 
 #include <string>
 
+#include "../common/install_scope.h"
 #include "plan.h"
 
 namespace edvr::installer {
@@ -21,10 +22,11 @@ struct AppArgs {
 
     Act          action = Act::None;
     std::wstring dir;                    // --dir, the game folder
+    std::string  scope;                  // --scope both|vr|flat; empty means the folder's own, else both
     bool         keepSettings = true;    // --replace-settings
     bool         removeSettings = false; // --remove-settings (uninstall)
     bool         dryRun = false;         // --dry-run
-    bool         convertProfile = false; // --convert-profile
+    bool         convertProfile = false; // --convert-profile: accepted, and no longer needed
     bool         autorun = false;        // set on the elevated relaunch: already confirmed
     bool         help = false;
     bool         badArg = false;
@@ -36,10 +38,17 @@ std::string usageText();
 
 Options optionsFor(const AppArgs& args, bool repair);
 
+// The scope a run installs: the one asked for, else the folder's own, else both.
+std::string scopeFor(const AppArgs& args, const Survey& survey);
+
+// Elite's 3D mode, from the Settings.xml the game keeps under the Windows profile.
+// Unknown when the file is missing or unreadable.
+edvr::ModeRead eliteGameMode();
+
 // What is in this folder right now, in the words the user needs: which halves
 // are installed, which other mod is in the chain, whether the game's original
 // runtime is safe.
-std::string statusReport(const Survey& survey, const PayloadInfo& payload);
+std::string statusReport(const Survey& survey, const PayloadInfo& payload, const std::string& scope);
 
 // Everything the plan will do, then everything the merge decided.
 std::string planReport(const Plan& plan);

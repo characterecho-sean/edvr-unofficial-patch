@@ -215,5 +215,7 @@ bool dlaaTotals(uint32_t* evaluations, double* avgMs, double* maxMs,
 bool dlaaFullTotals(int eye, uint32_t* evaluations, double* avgMs, double* maxMs);
 
 void dlaaShutdown();
+// Called at a profile switch, render thread, frame boundary: releases every live DLSS feature, NGX stays initialised.
+void dlaaReleaseForSwitch();
 
 }  // namespace edvr

@@ -57,6 +57,11 @@ void menuTick(ID3D11Device* dev);
 // before Present. The model/raster still advances from menuTick after Present.
 void menuFlatBeforePresent(IDXGISwapChain* swap, unsigned flags);
 void menuFlatResize();
+// Called at a profile switch, render thread, frame boundary: closes the menu, releases the flat panel's raster, and makes the
+// next menuConfigure run the first-time block of the profile now active.
+void menuProfileSwitch();
+// Whether the menu has run its configure block for the profile now active (tools\profile_switch_test reads it).
+bool menuIsConfigured();
 
 // Raw pad hotkeys are read independently of Elite's XInput door. While the
 // drawn flat panel owns navigation, suppress conflicting existing ini bindings.

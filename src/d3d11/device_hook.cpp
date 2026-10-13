@@ -49,6 +49,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "vr_ssaa_gate.h"   // the step-1 Supersampling gate instruments (log only)
 #include "vr_ssaa_hold.h"   // the Supersampling hold's shutdown (the loader slot goes back)
 #include "vr_display_observer.h"  // the game window's state (read only) and its handle
+#include "mode_watch.h"     // modeWatchFrameBoundary: the 3D mode watch's commit, at the frame boundary
 
 #include <intrin.h>         // _ReturnAddress: the caller of each observed call
 #include "orbital_width.h" // orbitalWidthRememberVs: the orbit lines' shader, captured at its creation
@@ -82,6 +83,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "vram_tick.h"       // vramWatchTick: the graphics memory watch, once per owned Present
 #include "vertex_resync_hook.h"   // vertexResyncInstall at startup, vertexResyncPoll once a second: the f3d vertex-buffer cache repair (both profiles)
 #include "terrain_cull_cover_hook.h"   // terrainCullCoverInstall at startup, terrainCullCoverPoll once a second: the terrain cull frustum cover (VR)
+#include "cross_profile_cost.h"   // the flat hooks' and the creation captures' cost while VR is active (log only)
 #include "frame_ticks.h"     // g_frameTicks: what the Present hook's own work cost, by name
 #include "boundary_tick.h"   // one fault budget per frame-boundary tick
 #include "vscreen.h"
@@ -447,6 +449,10 @@ constexpr uint64_t kBindsCheckMs = 5000;
 // How often edvr.ini is re-read so live tuning takes effect. Once a second.
 constexpr uint64_t kConfigPollMs = 1000;
 
+// Set by deviceHookRequestConfigRefresh (a profile switch); the config-poll block takes it at the next frame boundary, runs the
+// sweep whatever its timer says, and clears it there.
+std::atomic<bool> g_configRefreshRequested{false};
+
 // How many times a session to point out that a history-key press was ignored
 // because another window had focus. Three is enough to be noticed and few
 // enough that a player who works with a browser focused is not papered with it.
@@ -608,7 +614,7 @@ void captureFlatShader(char stage, uint64_t hash, const void* bytecode, SIZE_T l
                     unsigned(result.error));
 }
 void rememberFlatProbeShader(char stage, uint64_t hash, const void* bytecode, SIZE_T len) {
-    if (!runtimeFlatProfile() || !bytecode || !len) return;
+    if (!runtimeScopeIncludesFlat() || !bytecode || !len) return;
     auto& s = *g_state;
     std::lock_guard<std::mutex> lock(s.flatProbeShaderMutex);
     const auto key = std::make_pair(stage, hash);
@@ -683,7 +689,8 @@ HRESULT STDMETHODCALLTYPE hookedCreateLayout(ID3D11Device* self,const D3D11_INPU
     const HRESULT hr=g_state->realCreateLayout(self,elements,count,bytecode,len,out);
     if(self==g_state->device && SUCCEEDED(hr) && bytecode && len && out && *out)
         guardedBudget(g_createBudget,[&]{
-            if(runtimeFlatProfile() && elements && count<=32) {
+            if(runtimeScopeIncludesFlat() && elements && count<=32) {
+                cross_profile::CaptureScope capture(!runtimeFlatProfile());   // the flat layout capture, while VR runs (cross_profile_cost.h)
                 std::vector<FlatPacketInputElement> kept;bool valid=true;
                 for(UINT i=0;i<count;++i){const auto& e=elements[i];FlatPacketInputElement k{};
                     if(!e.SemanticName || std::strlen(e.SemanticName)>=sizeof(k.semantic)){valid=false;break;}
@@ -711,7 +718,7 @@ HRESULT STDMETHODCALLTYPE hookedCreateVS(ID3D11Device* self, const void* bytecod
         if (FAILED(hr) || !bytecode || len == 0 || !out || !*out) return;
         const uint64_t hash = fnv1a64(bytecode, len);
         captureFlatShader('v', hash, bytecode, len);
-        rememberFlatProbeShader('v', hash, bytecode, len);
+        { cross_profile::CaptureScope capture(!runtimeFlatProfile()); rememberFlatProbeShader('v', hash, bytecode, len); }
         registerShaderHash(*out, hash);
         engineVelocityRememberVs(static_cast<ID3D11VertexShader*>(*out),hash,bytecode,static_cast<size_t>(len),linkage!=nullptr);
         weaponMotionRememberShader(static_cast<ID3D11VertexShader*>(*out),hash,bytecode,static_cast<size_t>(len));
@@ -728,7 +735,7 @@ HRESULT STDMETHODCALLTYPE hookedCreateVS(ID3D11Device* self, const void* bytecod
 HRESULT packetCreateShader(ID3D11Device* self,const void* bytes,SIZE_T n,ID3D11ClassLinkage* link,void** out,PFN_CreateShader real,char stage) {
     const HRESULT hr=real(self,bytes,n,link,out);
     if(self==g_state->device && SUCCEEDED(hr) && bytes && n && out && *out)
-        guardedBudget(g_createBudget,[&]{const uint64_t hash=fnv1a64(bytes,n);rememberFlatProbeShader(stage,hash,bytes,n);registerShaderHash(*out,hash);
+        guardedBudget(g_createBudget,[&]{cross_profile::CaptureScope capture(!runtimeFlatProfile());const uint64_t hash=fnv1a64(bytes,n);rememberFlatProbeShader(stage,hash,bytes,n);registerShaderHash(*out,hash);
             if(stage=='g')packetGeometryCreation(static_cast<ID3D11GeometryShader*>(*out),nullptr,0,nullptr,0,0,false);});
     return hr;
 }
@@ -737,7 +744,7 @@ HRESULT STDMETHODCALLTYPE hookedCreateDS(ID3D11Device* d,const void* b,SIZE_T n,
 HRESULT STDMETHODCALLTYPE hookedCreateGS(ID3D11Device* d,const void* b,SIZE_T n,ID3D11ClassLinkage* l,void** o){return packetCreateShader(d,b,n,l,o,g_state->realCreateGS,'g');}
 HRESULT STDMETHODCALLTYPE hookedCreateGSSO(ID3D11Device* d,const void* b,SIZE_T n,const D3D11_SO_DECLARATION_ENTRY* e,UINT ec,const UINT* s,UINT sc,UINT r,ID3D11ClassLinkage* l,void** o) {
     const HRESULT hr=g_state->realCreateGSSO(d,b,n,e,ec,s,sc,r,l,o);
-    if(d==g_state->device && SUCCEEDED(hr) && b && n && o && *o)guardedBudget(g_createBudget,[&]{const uint64_t h=fnv1a64(b,n);rememberFlatProbeShader('g',h,b,n);registerShaderHash(*o,h);packetGeometryCreation(static_cast<ID3D11GeometryShader*>(*o),e,ec,s,sc,r,true);});return hr;
+    if(d==g_state->device && SUCCEEDED(hr) && b && n && o && *o)guardedBudget(g_createBudget,[&]{cross_profile::CaptureScope capture(!runtimeFlatProfile());const uint64_t h=fnv1a64(b,n);rememberFlatProbeShader('g',h,b,n);registerShaderHash(*o,h);packetGeometryCreation(static_cast<ID3D11GeometryShader*>(*o),e,ec,s,sc,r,true);});return hr;
 }
 
 HRESULT STDMETHODCALLTYPE hookedCreatePS(ID3D11Device* self, const void* bytecode,
@@ -752,11 +759,14 @@ HRESULT STDMETHODCALLTYPE hookedCreatePS(ID3D11Device* self, const void* bytecod
         if (FAILED(hr) || !bytecode || len == 0 || !out || !*out) return;
         const uint64_t hash = fnv1a64(bytecode, len);
         captureFlatShader('p', hash, bytecode, len);
-        rememberFlatProbeShader('p', hash, bytecode, len);
+        { cross_profile::CaptureScope capture(!runtimeFlatProfile()); rememberFlatProbeShader('p', hash, bytecode, len); }
         registerShaderHash(*out, hash);
         engineVelocityRememberPs(static_cast<ID3D11PixelShader*>(*out),hash,bytecode,static_cast<size_t>(len),linkage!=nullptr);
-        if (runtimeFlatProfile()) FlatOverlayLayer::rememberPixelShader(static_cast<ID3D11PixelShader*>(*out),
-            bytecode,static_cast<size_t>(len),linkage!=nullptr);
+        if (runtimeScopeIncludesFlat()) {
+            cross_profile::CaptureScope capture(!runtimeFlatProfile());
+            FlatOverlayLayer::rememberPixelShader(static_cast<ID3D11PixelShader*>(*out),
+                bytecode,static_cast<size_t>(len),linkage!=nullptr);
+        }
         uiLayerRememberHoloPs(static_cast<ID3D11PixelShader*>(*out),hash,bytecode,static_cast<size_t>(len),linkage!=nullptr);
         if(hash==EyeDrawSnapshot::kVscreenPs || hash==EyeDrawSnapshot::kSpritePs || hash==EyeDrawSnapshot::kUnknownAPs || hash==EyeDrawSnapshot::kUnknownBPs || EyeDrawSnapshot::solarPixel(hash)) EyeDrawSnapshot::rememberShader(hash,bytecode,static_cast<size_t>(len));
         EyeTonemapSnapshot::rememberShader(hash,bytecode,static_cast<size_t>(len));
@@ -1085,7 +1095,7 @@ HRESULT STDMETHODCALLTYPE hookedCreateCS(ID3D11Device* self, const void* bytecod
         const uint64_t hash = fnv1a64(bytecode, len);
         registerShaderHash(*out, hash);
         // COMPUTE shaders dump too (2026-09-07), and they had to start.
-        rememberFlatProbeShader('c', hash, bytecode, len);
+        { cross_profile::CaptureScope capture(!runtimeFlatProfile()); rememberFlatProbeShader('c', hash, bytecode, len); }
         //
         // This hook has registered their hashes since it was written, so a
         // census could NAME a dispatch -- and the dump wrote only vs_ and
@@ -1153,6 +1163,10 @@ void flatResizeNote(const char* api, UINT count, UINT width, UINT height, DXGI_F
 }
 
 HRESULT STDMETHODCALLTYPE hookedFlatResizeBuffers(IDXGISwapChain* self, UINT count, UINT width, UINT height, DXGI_FORMAT format, UINT flags) {
+    if (!runtimeFlatProfile()) {
+        cross_profile::enterSite(cross_profile::Site::FlatResizeBuffers, true).stop();   // inactive while VR runs (cross_profile_cost.h)
+        return g_state->realResizeBuffers(self, count, width, height, format, flags);
+    }
     const bool ours = self == g_state->swapChain;
     long refs = -1;
     if (ours) { menuFlatResize(); flatRuntimeResize(); refs = flatResizeBackBufferRefs(self); }
@@ -1162,6 +1176,10 @@ HRESULT STDMETHODCALLTYPE hookedFlatResizeBuffers(IDXGISwapChain* self, UINT cou
 }
 
 HRESULT STDMETHODCALLTYPE hookedFlatResizeBuffers1(IDXGISwapChain3* self, UINT count, UINT width, UINT height, DXGI_FORMAT format, UINT flags, const UINT* masks, IUnknown* const* queues) {
+    if (!runtimeFlatProfile()) {
+        cross_profile::enterSite(cross_profile::Site::FlatResizeBuffers, true).stop();   // inactive while VR runs (cross_profile_cost.h)
+        return g_state->realResizeBuffers1(self, count, width, height, format, flags, masks, queues);
+    }
     const bool ours = static_cast<IDXGISwapChain*>(self) == g_state->swapChain;
     long refs = -1;
     if (ours) { menuFlatResize(); flatRuntimeResize(); refs = flatResizeBackBufferRefs(self); }
@@ -1198,6 +1216,8 @@ HRESULT STDMETHODCALLTYPE hookedFlatResizeBuffers1(IDXGISwapChain3* self, UINT c
 // A fault no longer ends the frame's boundary either: the next tick runs the same
 // frame. What is not under a budget is arithmetic and flag reads that cannot
 // fault: the frame counter, the graphics-off test, whether the config poll is due.
+EDVR_BOUNDARY_TICK(tkModeWatch, "mode_watch");
+EDVR_BOUNDARY_TICK(tkCrossProfile, "cross_profile");
 EDVR_BOUNDARY_TICK(tkKinematicProbe, "kinematic_probe");
 EDVR_BOUNDARY_TICK(tkEngineVelocityClock, "engine_velocity_clock");
 EDVR_BOUNDARY_TICK(tkSchedulerProbe, "scheduler_probe");
@@ -1511,6 +1531,10 @@ void presentFrameBoundary() {
     // whether the table changed before the hang or after it, and neither
     // number could answer it. One counter, published here, printed by both.
     ++g_state->frameCounter;
+    // The cross-profile cost's window (cross_profile_cost.h): once a frame in both profiles, so the flat profile's line prints too.
+    tkCrossProfile.run([] { perfMonitorCrossProfileFrame(); });
+    // The 3D mode watch's commit (mode_watch.h): a posted mode is applied here, at the one point no draw of the next frame has started.
+    tkModeWatch.run([] { modeWatchFrameBoundary(); });
     // The kinematic probe's clock: exactly once per owned Present. Here,
     // not beside vScreenFrameBoundary below -- that site sits behind the
     // graphicsRuntimeDisabled early return and would skip those presents.
@@ -1616,12 +1640,16 @@ void presentFrameBoundary() {
     // The menu asks for the poll NOW after each write it made, so the
     // change lands this frame through the same configure path a hand
     // edit takes -- nothing applies a value except the reload.
-    if (menuTakeConfigPollRequest() || dueMs(g_state->configPollMs, kConfigPollMs)) {
+    if (menuTakeConfigPollRequest() || dueMs(g_state->configPollMs, kConfigPollMs) ||
+        g_configRefreshRequested.load(std::memory_order_acquire)) {
         g_state->configPollMs = stampMs();
         // The reload and what is derived from it are one group: with the reload
         // stood down there is nothing new to derive from.
         tkConfigRefresh.run([] {
-            vScreenRefreshConfig();
+            // A profile switch asked for the sweep without the reload's gate. The flag is taken inside the tick, so a
+            // stood-down tick leaves it set rather than losing the request.
+            if (g_configRefreshRequested.exchange(false, std::memory_order_acq_rel)) vScreenForceRefreshConfig();
+            else vScreenRefreshConfig();
             // The vertex-buffer resync's 60 s count and its ten-minute heartbeat: it needs no vScreen State, so it is asked here, after the reload, in both profiles.
             vertexResyncPoll(stampMs());
             // The terrain cull cover's ten-minute heartbeat (written while its hook is live, zero counts included).
@@ -2581,7 +2609,7 @@ void hookDevice(ID3D11Device* device) {
     s.deviceHook.replace(kDevCreateInputLayout,&hookedCreateLayout,reinterpret_cast<void**>(&s.realCreateLayout));
     s.deviceHook.replace(kDevCreatePixelShader, &hookedCreatePS,
                          reinterpret_cast<void**>(&s.realCreatePS));
-    if(runtimeFlatProfile()) {
+    if(runtimeScopeIncludesFlat()) {
         s.deviceHook.replace(kDevCreateHullShader,&hookedCreateHS,reinterpret_cast<void**>(&s.realCreateHS));
         s.deviceHook.replace(kDevCreateDomainShader,&hookedCreateDS,reinterpret_cast<void**>(&s.realCreateDS));
         s.deviceHook.replace(kDevCreateGeometryShader,&hookedCreateGS,reinterpret_cast<void**>(&s.realCreateGS));
@@ -2851,9 +2879,9 @@ void hookDevice(ID3D11Device* device) {
             // The game's own vertex-buffer cache repair (vertex_resync_hook.cpp): a CodeHook on Frontier's input-assembler flush, once, in BOTH profiles -- the stale
             // cache is the game's, not VR's. A build that is not 332841 is one log line and nothing patched.
             vertexResyncInstall();
-            // The terrain cull cover (terrain_cull_cover_hook.cpp; docs/terrain-culling.md): a CodeHook on the game's cull-plane builder, always on, VR only (a flat session says
-            // it is inert). A build that is not 332841 is scanned for the call site; anything short of one match is one log line and nothing patched.
-            terrainCullCoverInstall(runtimeFlatProfile());
+            // The terrain cull cover (terrain_cull_cover_hook.cpp; docs/terrain-culling.md): a CodeHook on the game's cull-plane builder, always on for a scope with VR (the flat
+            // profile passes through per call). A build that is not 332841 is scanned for the call site; anything short of one match is one log line and nothing patched.
+            terrainCullCoverInstall(!runtimeScopeIncludesVr());
 
             // AFTER BOTH INSTALLERS, and the order is the whole point. EDVR's
             // own commit writes two dozen entries of this table in the shared
@@ -2942,11 +2970,28 @@ void forceWindowForeground(HWND hwnd) {
     Log::get().note("window: focus-on-launch %s", ok ? "applied" : "refused by Windows");
 }
 
+namespace {
+// Cleared only by a VR launch whose ResizeBuffers hook failed. Without that hook a switch into flat runs passthrough.
+std::atomic<bool> g_flatSwitchAvailable{true};
+}
+bool flatSwitchAvailable() { return g_flatSwitchAvailable.load(std::memory_order_relaxed); }
+
 void hookSwapChain(IDXGISwapChain* swapChain) {
     if (!swapChain) return;
     State& s = ensureState();
     if (s.recoveryDisabled) return;
-    if (s.swapChain) return;
+    if (s.swapChain) {
+        // Only the first swap chain is hooked. A new one (a toggle that recreates it, say) is never hooked, so its Present is never
+        // seen; the line says so (H7). The callers are the two swap chain creations, so this is not per frame, and the last pointer is
+        // kept so a repeat of the same one logs nothing.
+        static IDXGISwapChain* lastUnhooked = nullptr;
+        if (swapChain != s.swapChain && swapChain != lastUnhooked) {
+            lastUnhooked = swapChain;
+            Log::get().note("swap chain: a new swap chain %p after %p is not hooked (H7)", static_cast<void*>(swapChain),
+                            static_cast<void*>(s.swapChain));
+        }
+        return;
+    }
 
     if (!s.swapChainHook.attach(swapChain) ||
         s.swapChainHook.executablePrefix() <= kSwapPresent) {
@@ -2955,7 +3000,7 @@ void hookSwapChain(IDXGISwapChain* swapChain) {
     }
     s.swapChainHook.replace(kSwapPresent, &hookedPresent,
                             reinterpret_cast<void**>(&s.realPresent));
-    if (runtimeFlatProfile()) {
+    if (runtimeScopeIncludesFlat()) {
         const bool resize = s.swapChainHook.replace(kSwapResizeBuffers, &hookedFlatResizeBuffers,
             reinterpret_cast<void**>(&s.realResizeBuffers));
         IDXGISwapChain3* third = nullptr;
@@ -2967,8 +3012,14 @@ void hookSwapChain(IDXGISwapChain* swapChain) {
         }
         Log::get().note("flat runtime resize hooks: ResizeBuffers=%u ResizeBuffers1=%u; release owned backbuffer references before forwarding", resize?1u:0u, resize1?1u:0u);
         if (!resize) {
-            s.swapChainHook.uninstall();
-            return;
+            // The abort also takes the Present hook down. A VR launch keeps it: the flat hooks are only missing, and a switch into
+            // flat runs passthrough this session.
+            if (runtimeLaunchProfile() == RuntimeProfile::Flat) {
+                s.swapChainHook.uninstall();
+                return;
+            }
+            g_flatSwitchAvailable.store(false, std::memory_order_relaxed);
+            Log::get().note("flat runtime resize hooks: ResizeBuffers could not be hooked; a switch into the flat profile will run passthrough this session");
         }
     }
     if (!s.swapChainHook.commit()) {
@@ -3043,6 +3094,10 @@ bool deviceHookTakeFssZoomPress() {
     if (!g_state || !g_state->fssZoomPressPending) return false;
     g_state->fssZoomPressPending = false;
     return true;
+}
+
+void deviceHookRequestConfigRefresh() {
+    g_configRefreshRequested.store(true, std::memory_order_release);
 }
 
 bool deviceHookHmdQuality(float* multiplier) {

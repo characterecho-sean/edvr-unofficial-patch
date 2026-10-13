@@ -14,15 +14,16 @@ native package.
    hand](#running-alongside-edhm-by-hand) below. Never overwrite another mod's
    only DLL.
 4. Place the release's `d3d11.dll` beside `EliteDangerous64.exe`. Copy
-   `edvr.ini` there only if you do not already have one; otherwise keep your
-   existing settings.
-5. Preserve the game's original `Openvr\win64\openvr_api.dll` as
-   `openvr_api_orig.dll`. If that original already exists, use the installer
+   `edvr.ini` and `edvr-flat.ini` there only if you do not already have them;
+   otherwise keep your existing settings.
+5. For a VR install, preserve the game's original `Openvr\win64\openvr_api.dll`
+   as `openvr_api_orig.dll`. If that original already exists, use the installer
    rather than renaming a previously installed EDVR DLL over it. The original
    is for uninstall; native EDVR never loads it.
-6. Copy all three files from the release's `openvr` directory into
-   `Openvr\win64`: `openvr_api.dll`, `openxr_loader.dll`, and
-   `OPENXR-LOADER-LICENSE.txt`.
+6. For a VR install, copy all three files from the release's `openvr` directory
+   into `Openvr\win64`: `openvr_api.dll`, `openxr_loader.dll`, and
+   `OPENXR-LOADER-LICENSE.txt`. A flat-only install skips steps 5 and 6, so the
+   game's own `openvr_api.dll` stays.
 7. If supplied and wanted for DLSS/DLAA, place `nvngx_dlss.dll` and its NVIDIA
    license beside the game. Preserve a deliberately installed newer DLSS
    version.
@@ -43,6 +44,30 @@ For uninstall, close Elite and use the installer, or remove the EDVR files and
 restore the original `openvr_api.dll` and any graphics-mod chain. Restore the
 original before launching the unmodified game. Preserve your `edvr.ini` if you
 intend to reinstall.
+
+## Which files each scope needs
+
+The installer asks "Install EDVR for:" and writes the choice to a small
+descriptor, `edvr_profile.ini`, beside the game:
+
+```
+[install]
+schema = 2
+scope = both
+```
+
+`scope` is `both` (VR and flat), `vr` or `flat`. A folder with no descriptor
+counts as `both`. A hand install may write this file, or leave it out. The
+scope says what is installed; Elite's 3D mode decides which of those runs.
+
+| Scope | Files |
+|---|---|
+| `both` | `d3d11.dll`, the `Openvr\win64` runtime from steps 5 and 6, `edvr.ini` and `edvr-flat.ini` |
+| `vr` | the same, without `edvr-flat.ini` |
+| `flat` | `d3d11.dll` and `edvr-flat.ini`; no runtime files, so the game's `openvr_api.dll` stays |
+
+With no `edvr-flat.ini`, the flat fixes read `edvr.ini` instead, so a `both` or
+`vr` install without the second file still runs.
 
 ## Running alongside EDHM by hand
 

@@ -2,6 +2,7 @@
 #include "vr_display_observer.h"
 
 #include "vr_ssaa_gate.h"  // vrSsaaGateFrame: the frame number the line carries
+#include "mode_watch.h"    // modeWatchHint: a window change is a hint for the 3D mode watch
 
 #include "../common/log.h"
 
@@ -45,6 +46,8 @@ void vrDisplayObserveFrame() {
     else
         Log::get().note("vr display: game window at the first frame: style 0x%llX client %ldx%ld, frame %u",
                         static_cast<unsigned long long>(style), cw, ch, frame);
+    // A change, not the first look: the 3D mode watch re-reads Settings.xml now (mode_watch.h).
+    if (seen) modeWatchHint(ModeHint::Window);
     g_style = style;
     g_cw = cw;
     g_ch = ch;

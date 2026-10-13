@@ -150,6 +150,8 @@ DepthViews g_depthViews;
 
 FlatMonoResolveMode resolveModeFromConfig(bool* known) {
     const std::string m = Config::get().getString("fix.temporal_aa", "off");
+    // XeSS stays on the world route's fallback: the route's jitter is the flat profile's phase cycle, which has no XeSS minimum
+    // (only flat_runtime's own, flat_mono_resolve.cpp:259 refuses a short one), so the route would not get its jitter right.
     if (known) *known = temporalModeEnabled(m) && _stricmp(m.c_str(), "xess") != 0;
     if (_stricmp(m.c_str(), "fsr") == 0) return FlatMonoResolveMode::Fsr;
     if (_stricmp(m.c_str(), "dlss") == 0) return FlatMonoResolveMode::Dlss;

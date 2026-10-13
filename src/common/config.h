@@ -43,13 +43,20 @@ public:
     // says edvr.ini, because that is the file it read. Before init() there is
     // no path, and the profile answers. Inline, so a test that stubs some of
     // Config's members and compiles a module which names the file still links.
+    // m_path is replaced under the exclusive lock (switchProfile), so it is read under the shared one.
     const char* iniName() const {
-        return m_path.empty() ? (runtimeFlatProfile() ? kIniNameFlat : kIniNameVr)
-                              : iniNameOfPath(m_path);
+        AcquireSRWLockShared(&m_lock);
+        const char* name = iniNameLocked();
+        ReleaseSRWLockShared(&m_lock);
+        return name;
     }
 
     // Returns true if the file changed and values were re-read.
     bool reloadIfChanged();
+
+    // Re-picks the settings file for the profile now active (the caller flips it first) and reads it from defaults. True when the file changed.
+    // Needs init() first. Called on the render thread at a frame boundary, never from a getter.
+    bool switchProfile();
 
     // A number that differs whenever the values may differ: it moves with every parse that swaps a new map in (reloadIfChanged, init) and with every set(). A
     // module that keeps parsed settings re-reads them when the number is not the one it read them under -- read the number BEFORE the values, so a swap that lands
@@ -92,12 +99,28 @@ public:
     // make the log and the ini disagree about what is running.
     void set(const char* key, const char* value);
 
-    const std::wstring& path() const { return m_path; }
+    // A copy, read under the lock: switchProfile can replace m_path while a caller holds it.
+    std::wstring path() const {
+        AcquireSRWLockShared(&m_lock);
+        std::wstring p = m_path;
+        ReleaseSRWLockShared(&m_lock);
+        return p;
+    }
     const std::wstring& logDir() const { return m_logDir; }
 
 private:
     Config() = default;
-    void parse();
+    // Reads m_path and swaps the result in. fromDefaults: a file that is missing or unreadable
+    // still replaces the map (with an empty one), which is what a profile switch needs.
+    void parse(bool fromDefaults = false);
+    // The settings file for the active profile: the first candidate that exists, else the first.
+    // Takes no lock, so init() and switchProfile() call it before taking the exclusive one.
+    std::wstring chooseSettingsPath() const;
+    // The name of m_path (or the profile's, before one is chosen). The caller holds m_lock.
+    const char* iniNameLocked() const {
+        return m_path.empty() ? (runtimeFlatProfile() ? kIniNameFlat : kIniNameVr)
+                              : iniNameOfPath(m_path);
+    }
     // Called with m_lock held exclusively; queues findings, never logs them.
     void auditResolve(void* parsedMap);
     // Writes queued audit findings once the log is open. Takes m_lock itself,
@@ -110,6 +133,9 @@ private:
 
     struct Impl;
     Impl*        m_impl = nullptr;
+    // The directory init() was given: the candidates for m_path are built from it, so switchProfile can re-pick.
+    std::wstring m_moduleDir;
+    // Written under the exclusive lock; read under either (path(), iniName(), reloadIfChanged, parse).
     std::wstring m_path;
     std::wstring m_logDir;
     FILETIME     m_lastWrite{};

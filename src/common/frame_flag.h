@@ -24,7 +24,7 @@ namespace edvr {
 //
 // Both DLLs compile frame_flag.cpp, and the shared block's layout changes
 // with it, so the block's name carries the version
-// (Local\edvr_glitch_frame_v37_<pid>): halves from different builds never
+// (Local\edvr_glitch_frame_v38_<pid>): halves from different builds never
 // share one. That kept a mismatched pair inert, but silently. Since v34
 // each half also signs a small version-independent roll-call with the
 // version it was built with, and looks for the last unsigned layout's
@@ -32,7 +32,7 @@ namespace edvr {
 // version REFUSES the channel -- from then on every call here reads as "no
 // answer" and writes nothing -- and frameFlagPeerMismatch() names the
 // partner's version so the caller's log can say both.
-constexpr uint32_t kFrameFlagVersion = 37;
+constexpr uint32_t kFrameFlagVersion = 38;
 
 // The partner half's layout version when it differs from kFrameFlagVersion,
 // else 0. Nonzero means the channel is refused. Each half asks on a cadence
@@ -224,6 +224,18 @@ void clearIntroRecentreRequest();
 // path once per call (one load); a mismatched pair reads 0, which is "no hold".
 void requestEndFrameHold(uint32_t ms);
 uint32_t endFrameHoldMs();
+
+// Whether the game is in its VR profile, written by d3d11.dll at launch and at every profile switch (design
+// unified-install section 12). While it reads not-VR and the game makes no frame call, openvr_api.dll's owner runs
+// its own empty frames so the headset does not keep the last frame the game left. Nobody has written it -- an absent
+// or mismatched graphics half -- reads as VR, so nothing changes for a pair that never announced a profile.
+void setVrProfileActive(bool active);
+bool vrProfileActive();
+
+// The word's encoding, pure so the rig can pin the default: 0 (nobody wrote) and 1 read as VR.
+constexpr uint32_t kVrProfileWordVr = 1;
+constexpr uint32_t kVrProfileWordNotVr = 2;
+constexpr bool vrProfileWordIsVr(uint32_t word) { return word != kVrProfileWordNotVr; }
 
 // The size of the texture the game hands the headset, as openvr_api.dll read it
 // off the Submit argument.

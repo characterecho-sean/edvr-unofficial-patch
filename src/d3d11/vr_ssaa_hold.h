@@ -41,6 +41,8 @@ bool vrSsaaHoldVrLive();
 
 // The render thread, once a frame: reads the live VR decision and applies a transition (see the .cpp).
 void vrSsaaHoldFrameBoundary();
+// Called at a profile switch, render thread, frame boundary: the hold follows the active profile, not only the live VR session.
+void vrSsaaHoldProfileChanged();
 
 // The settings copy's hold (called from the W relay with the render context, after the copy). Writes nothing when VR is not live.
 void vrSsaaHoldAfterCopy(uintptr_t ctx);

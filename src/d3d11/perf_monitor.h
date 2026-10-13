@@ -36,6 +36,12 @@ namespace edvr {
 
 // Every frame, from the frame boundary: the interval ring.
 void perfMonitorFrame(ID3D11Device* dev);
+// Once a frame at the owned Present's boundary, in both profiles: the cross-profile cost's 30 s and 5-minute lines (cross_profile_cost.h).
+void perfMonitorCrossProfileFrame();
+
+// Called at a profile switch, on the render thread, at the frame boundary: the next perfMonitorFrame starts a fresh interval, so the
+// stretch the other profile ran (no perfMonitorFrame) is no long frame.
+void perfMonitorProfileSwitch();
 
 // The page is showing (or not): starts and stops the once-a-second samplers.
 void perfMonitorSetActive(bool active);

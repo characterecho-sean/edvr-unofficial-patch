@@ -31,6 +31,7 @@
 #include "format_support_log.h"
 #include "input_gate.h"
 #include "vr_ssaa_hold.h"  // vrSsaaHoldEarlyInstall: the Supersampling hold's hooks at DLL load
+#include "mode_watch.h"    // modeWatchStart: the 3D mode watch, started after the profile lines
 #include "oculus_route.h"
 
 extern "C" const EdvrNativeStartupRouting edvrNativeStartupRouting = {
@@ -286,10 +287,11 @@ BOOL CALLBACK initOnceCallback(PINIT_ONCE, PVOID, PVOID*) {
     // tick and a frame boundary, comes through the two creation exports that call
     // this.
     edvr::pinGraphicsModuleOnce(reinterpret_cast<const void*>(&initOnceCallback));
-    edvr::Log::get().note("installation profile: %s; %s", edvr::runtimeProfileName(),
-        edvr::runtimeFlatProfile() ? "experimental mono temporal adapter; qualified projection jitter; stereo and unrelated fixes suppressed" :
-        edvr::runtimeFeaturesAllowed() ? "VR configuration retained" :
-        "invalid edvr_profile.ini; fixes disabled, proxy chaining retained; repair the installation");
+    edvr::Log::get().note("%s", edvr::runtimeProfileLogLine().c_str());
+    // The launch's profile, for the runtime's headset-while-flat frames (frame_flag.h).
+    edvr::setVrProfileActive(edvr::runtimeVrProfile());
+    edvr::Log::get().note("game command line: %s", edvr::runtimeGameCommandLine().c_str());
+    edvr::modeWatchStart();  // after the profile lines: the watch's first line follows them (mode_watch.h)
     edvr::oculusRouteReport();
 
     const std::string build = edvr::gameBuildVersion();

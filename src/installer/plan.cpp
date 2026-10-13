@@ -3,11 +3,58 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <cstring>
 #include <cwctype>
 #include <utility>
 
+#include "../common/install_scope.h"
+
 namespace edvr::installer {
 namespace {
+
+// The descriptors EDVR writes, by their exact bytes (CRLF, as every writer produces them). Schema 1 is what the installer and the
+// flat edition wrote before the unified install; schema 2 is what install_edvr.py and the unified installer write. A file is EDVR's
+// only as one of these bytes: a modified or unknown descriptor matches none of them, whatever it says.
+const char* const kDescriptorTexts[] = {
+    "[install]\r\nschema = 1\r\nprofile = vr\r\n",
+    "[install]\r\nschema = 1\r\nprofile = flat\r\n",
+    "[install]\r\nschema = 2\r\nscope = both\r\n",
+    "[install]\r\nschema = 2\r\nscope = vr\r\n",
+    "[install]\r\nschema = 2\r\nscope = flat\r\n",
+};
+
+// The scope a canonical descriptor declares, read through the same parser the DLL uses. False when the hash is none of EDVR's texts.
+bool ownDescriptorScope(const std::string& sha, edvr::InstallScope* scope) {
+    for (const char* text : kDescriptorTexts) {
+        const std::string bytes(text);
+        if (sha != sha256Bytes(bytes.data(), bytes.size())) continue;
+        *scope = edvr::parseInstallDescriptor(bytes).scope;
+        return true;
+    }
+    return false;
+}
+
+// The edition a scope installs: both and vr carry the VR runtime, so they are the VR edition; flat is the flat edition.
+std::string editionOfScope(edvr::InstallScope scope) {
+    return scope == edvr::InstallScope::Flat ? "flat" : "vr";
+}
+
+// Whether `sha` is one of EDVR's own descriptor texts for `edition`.
+bool isOwnDescriptor(const std::string& sha, const std::string& edition) {
+    edvr::InstallScope scope = edvr::InstallScope::Invalid;
+    return ownDescriptorScope(sha, &scope) && editionOfScope(scope) == edition;
+}
+
+// The scopes the installer installs, by the names the descriptor and the record use.
+bool knownScope(const std::string& scope) { return scope == "both" || scope == "vr" || scope == "flat"; }
+
+// The descriptor a scope writes: the canonical schema-2 text, byte for byte (kDescriptorTexts holds the same bytes).
+std::string descriptorTextFor(const std::string& scope) {
+    return "[install]\r\nschema = 2\r\nscope = " + scope + "\r\n";
+}
+
+// The edition a scope belongs to, as the record's profile names it: flat for the flat scope, vr for the others.
+std::string editionFor(const std::string& scope) { return scope == "flat" ? "flat" : "vr"; }
 
 const wchar_t* kD3d11 = L"d3d11.dll";
 const wchar_t* kProfile = L"edvr_profile.ini";
@@ -104,16 +151,208 @@ std::wstring relativeOpenvr(const std::wstring& gameDir, const std::wstring& ope
     return openvrDir;
 }
 
+bool isCanonicalDescriptor(const std::string& sha) {
+    edvr::InstallScope scope = edvr::InstallScope::Invalid;
+    return ownDescriptorScope(sha, &scope);
+}
+
+std::string trimmedSpaces(const std::string& text) {
+    const size_t first = text.find_first_not_of(" \t");
+    if (first == std::string::npos) return std::string();
+    return text.substr(first, text.find_last_not_of(" \t") - first + 1);
+}
+
+// Whether `text` is an EDVR startup config that names the loader and graphics paths given. The grammar is the runtime's own
+// (src\openxr\native_local_config.h): one [openxr] section, version=1, and loader, graphics, runtime and separate_device=1 each
+// once; frame_thread_priority and frame_end_overlap are optional. LF and CRLF both parse.
+bool isEdvrStartupConfig(const std::string& text, const std::wstring& loaderPath, const std::wstring& graphicsPath) {
+    bool section = false;
+    std::vector<std::string> keys;
+    std::wstring loader, graphics;
+    size_t pos = 0;
+    while (pos < text.size()) {
+        size_t end = text.find('\n', pos);
+        if (end == std::string::npos) end = text.size();
+        std::string line = text.substr(pos, end - pos);
+        pos = end + 1;
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        line = trimmedSpaces(line);
+        if (line.empty()) continue;
+        if (line == "[openxr]") {
+            if (section) return false;
+            section = true;
+            continue;
+        }
+        const size_t equal = line.find('=');
+        if (!section || equal == std::string::npos) return false;
+        const std::string key = trimmedSpaces(line.substr(0, equal));
+        const std::string value = trimmedSpaces(line.substr(equal + 1));
+        if (std::find(keys.begin(), keys.end(), key) != keys.end()) return false;
+        keys.push_back(key);
+        if (key == "version") {
+            if (value != "1") return false;
+        } else if (key == "loader") {
+            loader = fromUtf8(value);
+        } else if (key == "graphics") {
+            graphics = fromUtf8(value);
+        } else if (key == "runtime") {
+            if (value.empty()) return false;
+        } else if (key == "separate_device") {
+            if (value != "1") return false;
+        } else if (key == "frame_thread_priority") {
+            if (value != "high" && value != "normal") return false;
+        } else if (key == "frame_end_overlap") {
+            if (value != "on" && value != "off") return false;
+        } else {
+            return false;
+        }
+    }
+    for (const char* required : {"version", "loader", "graphics", "runtime", "separate_device"}) {
+        if (std::find(keys.begin(), keys.end(), std::string(required)) == keys.end()) return false;
+    }
+    return section && _wcsicmp(loader.c_str(), loaderPath.c_str()) == 0 &&
+           _wcsicmp(graphics.c_str(), graphicsPath.c_str()) == 0;
+}
+
+// The Openvr folder the OpenXR files are written into: the surveyed one, else the default beside the game.
+std::wstring nativeDirOf(const Survey& s) {
+    return s.game.openvrDir.empty() ? joinPath(s.game.dir, L"Openvr\\win64") : s.game.openvrDir;
+}
+
+bool sameSha(const std::string& a, const std::string& b) {
+    return !a.empty() && _stricmp(a.c_str(), b.c_str()) == 0;
+}
+
+// The tool's receipt lists this path as a file it placed. What the tool REPLACED is somebody else's by definition, so only the placed
+// hash is a proof of EDVR's bytes.
+bool toolListsPath(const Survey& s, const std::wstring& path) {
+    for (const ToolReceipt& r : s.toolReceipts)
+        for (const ToolReceiptFile& f : r.files)
+            if (_wcsicmp(f.target.c_str(), path.c_str()) == 0) return true;
+    return false;
+}
+
+bool toolPlacedHash(const Survey& s, const std::wstring& path, const std::string& sha) {
+    for (const ToolReceipt& r : s.toolReceipts)
+        for (const ToolReceiptFile& f : r.files)
+            if (_wcsicmp(f.target.c_str(), path.c_str()) == 0 && sameSha(f.installedSha, sha)) return true;
+    return false;
+}
+
+// A file is EDVR's to remove only with PROVENANCE -- the record or the tool's receipt lists it, or the proof the caller names -- AND its
+// bytes confirmed: the ones the record kept, the tool placed, or this installer carries. Either part alone is not enough. Matching bytes
+// alone are what another mod's copy of a standard vendor binary looks like, and a provenance alone is not proof the file is intact.
+// A file that is absent or unreadable is not EDVR's by anything.
+bool ownedFile(const Survey& s, const DllInfo& info, bool provenance, const std::string& recorded,
+               const std::string& carried) {
+    if (!provenance || info.kind == DllKind::Absent || info.kind == DllKind::Unreadable || info.sha256.empty())
+        return false;
+    return sameSha(info.sha256, recorded) || sameSha(info.sha256, carried) ||
+           toolPlacedHash(s, info.path, info.sha256);
+}
+
+// The startup config names this folder's loader and graphics paths, the same paths the planner writes into it.
+bool startupConfigIsEdvrs(const Survey& s) {
+    if (s.nativeConfig.kind == DllKind::Absent || s.nativeConfig.kind == DllKind::Unreadable) return false;
+    return isEdvrStartupConfig(s.nativeConfigText, joinPath(nativeDirOf(s), L"openxr_loader.dll"),
+                               joinPath(s.game.dir, kD3d11));
+}
+
+// The OpenXR files beside the game's VR runtime have three proofs of provenance: the record lists them, the tool's receipt lists them,
+// or EDVR's startup config for this folder names the loader they travel with.
+bool openxrProvenance(const Survey& s, const DllInfo& info, const std::string& recorded) {
+    return !recorded.empty() || toolListsPath(s, info.path) || startupConfigIsEdvrs(s);
+}
+
+bool loaderOwned(const Survey& s, const std::string& carriedSha) {
+    return ownedFile(s, s.openxrLoader, openxrProvenance(s, s.openxrLoader, s.state.openxrLoaderSha),
+                     s.state.openxrLoaderSha, carriedSha);
+}
+
+bool licenseOwned(const Survey& s, const std::string& carriedSha) {
+    return ownedFile(s, s.openxrLicense, openxrProvenance(s, s.openxrLicense, s.state.openxrLicenseSha),
+                     s.state.openxrLicenseSha, carriedSha);
+}
+
+// The startup config is EDVR's by its own text, which names this folder's paths; or by its record or the tool's receipt and its bytes.
+bool startupConfigOwned(const Survey& s) {
+    if (ownedFile(s, s.nativeConfig,
+                  !s.state.nativeConfigSha.empty() || toolListsPath(s, s.nativeConfig.path),
+                  s.state.nativeConfigSha, std::string()))
+        return true;
+    return startupConfigIsEdvrs(s);
+}
+
+// The note for a file whose bytes are EDVR's but which nothing shows EDVR placed: another mod's identical copy looks exactly like this.
+const char* kMatchesNoProof = "matches EDVR's copy but nothing shows EDVR placed it; left alone";
+
+// The game's original runtime that the tool kept when it installed over it: the native receipt's runtime entry, whose backup sits beside
+// the runtime. It is adopted only when every proof holds: the receipt names this folder (readToolReceipts), the entry is this folder's
+// openvr_api.dll, the backup is in the same Openvr folder, its hash is the one the receipt recorded, and probeDll reads it as a genuine
+// OpenVR runtime (not EDVR's). Anything else adopts nothing and stays rejected, as before.
+void adoptToolOriginal(Survey& s) {
+    const std::wstring runtimePath = joinPath(s.game.openvrDir, kOpenvr);
+    auto folderOf = [](const std::wstring& path) {
+        const size_t slash = path.find_last_of(L"\\/");
+        return slash == std::wstring::npos ? std::wstring() : path.substr(0, slash);
+    };
+    for (const ToolReceipt& receipt : s.toolReceipts) {
+        if (!receipt.native) continue;
+        const ToolReceiptFile* runtime = nullptr;
+        for (const ToolReceiptFile& file : receipt.files) {
+            if (file.key == "runtime" || file.key == "native") { runtime = &file; break; }
+        }
+        if (!runtime || runtime->backup.empty() || runtime->beforeSha.empty()) return;
+        if (_wcsicmp(runtime->target.c_str(), runtimePath.c_str()) != 0) return;
+        if (_wcsicmp(folderOf(runtime->backup).c_str(), s.game.openvrDir.c_str()) != 0) return;
+        if (!fileExists(runtime->backup) || !sameSha(sha256File(runtime->backup), runtime->beforeSha)) return;
+        const DllInfo copy = probeDll(runtime->backup);
+        if (copy.kind != DllKind::OpenVrRuntime) return;
+        s.toolOriginal = copy;
+        s.openvrOrigInBackups.insert(s.openvrOrigInBackups.begin(), runtime->backup);
+        return;
+    }
+}
+
 }  // namespace
 
-std::string installedProfile(const Survey& s) {
-    if (s.state.present) return s.state.profile;
+// The descriptor on disk is what the DLL reads, so a canonical one names the scope and the record is only the fallback. A record
+// left by an earlier install (a flat GUI install, say) must not outvote the files: that made a both install look flat.
+std::string descriptorScopeOf(const Survey& s) {
     if (!s.descriptorPresent || s.descriptorSha.empty()) return std::string();
-    for (const char* profile : {"flat", "vr"}) {
-        const std::string text = std::string("[install]\r\nschema = 1\r\nprofile = ") + profile + "\r\n";
-        if (s.descriptorSha == sha256Bytes(text.data(), text.size())) return profile;
-    }
+    edvr::InstallScope scope = edvr::InstallScope::Invalid;
+    if (!ownDescriptorScope(s.descriptorSha, &scope)) return std::string();
+    return edvr::scopeName(scope);
+}
+
+std::string canonicalDescriptorScope(const std::string& text) {
+    edvr::InstallScope scope = edvr::InstallScope::Invalid;
+    if (!ownDescriptorScope(sha256Bytes(text.data(), text.size()), &scope)) return std::string();
+    return edvr::scopeName(scope);
+}
+
+std::string installedScope(const Survey& s) {
+    const std::string fromDescriptor = descriptorScopeOf(s);
+    if (!fromDescriptor.empty()) return fromDescriptor;
+    if (s.state.present) return recordedScope(s.state);
     return std::string();
+}
+
+// The record names a different scope than the descriptor on disk: the install is older than the files here, and Update refreshes it.
+bool installRecordStale(const Survey& s) {
+    const std::string fromDescriptor = descriptorScopeOf(s);
+    return s.state.present && !fromDescriptor.empty() && recordedScope(s.state) != fromDescriptor;
+}
+
+std::string defaultScope(const Survey& s) {
+    const std::string installed = installedScope(s);
+    return installed.empty() ? std::string("both") : installed;
+}
+
+std::string installedProfile(const Survey& s) {
+    const std::string scope = installedScope(s);
+    if (scope.empty()) return std::string();
+    return editionFor(scope);
 }
 
 bool hasSettingsFor(const Survey& s, const std::string& profile) {
@@ -150,7 +389,9 @@ Survey surveyTarget(const GameInstall& game) {
     s.flatIniPresent = fileExists(flatIniPath);
     if (s.flatIniPresent) s.flatIniText = readTextFile(flatIniPath);
     s.baseIniText = readTextFile(baseIniPath(game.dir));
+    s.flatBaseIniText = readTextFile(flatBaseIniPath(game.dir));
     s.state = readState(game.dir);
+    if (!game.dir.empty()) s.toolReceipts = readToolReceipts(game.dir);
     s.descriptorPresent = fileExists(joinPath(game.dir, kProfile));
     if (s.descriptorPresent) s.descriptorSha = sha256File(joinPath(game.dir, kProfile));
     s.ngx = probeDll(joinPath(game.dir, kNgx));
@@ -181,6 +422,8 @@ Survey surveyTarget(const GameInstall& game) {
             return info;
         };
         s.nativeConfig=surveyText(L"edvr_openxr.ini");
+        if(s.nativeConfig.kind!=DllKind::Absent && s.nativeConfig.kind!=DllKind::Unreadable)
+            s.nativeConfigText=readTextFile(s.nativeConfig.path);
         s.openxrLicense=surveyText(L"OPENXR-LOADER-LICENSE.txt");
         s.openvrCurrent = probeDll(joinPath(s.game.openvrDir, kOpenvr));
 
@@ -208,6 +451,8 @@ Survey surveyTarget(const GameInstall& game) {
             if (info.kind == DllKind::OpenVrRuntime) s.openvrOrigInBackups.push_back(candidate);
         }
     }
+    // The tool's backup of the original is adopted last and placed first: its receipt names exactly which runtime it replaced.
+    if (s.haveOpenvrDir) adoptToolOriginal(s);
     return s;
 }
 
@@ -233,53 +478,62 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
         plan.problems.push_back(kRunStateUnknown);
         return plan;
     }
-    const bool flat = p.profile == "flat";
-    const std::string expectedDescriptor = "[install]\r\nschema = 1\r\nprofile = " + p.profile + "\r\n";
-    if ((p.profile != "flat" && p.profile != "vr") || !p.haveD3d11 ||
-        (flat ? !p.nativeGraphicsValid
-              : (!p.haveOpenvr || !p.haveOpenxrLoader || !p.haveOpenxrLicense || !p.nativePairValid)) ||
-        p.iniText.empty() || p.descriptorText != expectedDescriptor ||
-        p.descriptorSha != sha256Bytes(expectedDescriptor.data(), expectedDescriptor.size())) {
-        plan.blocked = true;
-        plan.problems.push_back("This installer's profile payload is incomplete or invalid. Nothing will be installed.");
-        return plan;
-    }
-    if (s.state.present && s.state.profile != "vr" && s.state.profile != "flat") {
+    // The scope this run installs: the one asked for, else the one the folder already has, else both. A payload with no VR runtime
+    // is refused below for a scope that needs one, rather than quietly installing flat.
+    const std::string installed = installedScope(s);
+    if (s.state.present && !knownScope(installed)) {
         plan.blocked = true; plan.problems.push_back("The existing install record has an unknown profile. Repair it before changing editions."); return plan;
     }
-    const std::string existingProfile = installedProfile(s);
-    const bool conversion = !existingProfile.empty() && existingProfile != p.profile;
-    if (conversion && !o.convertProfile) {
+    const bool payloadHasRuntime = p.haveOpenvr && p.haveOpenxrLoader && p.haveOpenxrLicense && p.nativePairValid;
+    const std::string scope = o.scope.empty() ? defaultScope(s) : o.scope;
+    if (!knownScope(scope)) {
+        plan.blocked = true; plan.problems.push_back("Unknown scope \"" + scope + "\": use both, vr or flat."); return plan;
+    }
+    const bool flat = scope == "flat";           // no VR runtime: the game keeps its own openvr_api.dll
+    const bool wantsVrIni = scopeHasVrIni(scope);
+    const bool wantsFlatIni = scopeHasFlatIni(scope);
+    if (!flat && !payloadHasRuntime) {
         plan.blocked = true;
-        plan.problems.push_back("This folder has the " + existingProfile + " edition. Use --convert-profile or confirm edition conversion in the window.");
+        plan.problems.push_back("This installer carries no VR runtime, so it cannot install scope " + scope +
+                                ". Install scope flat, or use the VR installer. Nothing will be installed.");
         return plan;
     }
-    const std::string oldDescriptor = "[install]\r\nschema = 1\r\nprofile = " +
-                                      existingProfile + "\r\n";
-    if (s.descriptorPresent && (s.descriptorSha.empty() ||
-        (!s.state.descriptorSha.empty() && s.descriptorSha != s.state.descriptorSha) ||
-        (s.state.descriptorSha.empty() && s.descriptorSha != p.descriptorSha &&
-         s.descriptorSha != sha256Bytes(oldDescriptor.data(), oldDescriptor.size())))) {
+    if (!p.haveD3d11 || !p.nativeGraphicsValid || (wantsVrIni && !p.haveIni) || (wantsFlatIni && !p.haveFlatIni)) {
+        plan.blocked = true;
+        plan.problems.push_back("This installer's payload is incomplete or invalid for scope " + scope + ". Nothing will be installed.");
+        return plan;
+    }
+    // Each scope's descriptor is the planner's own canonical text. Moving to flat from a scope with the VR runtime is the conversion
+    // whose proofs follow; no confirmation is asked for it, and no settings file is deleted by it.
+    const std::string descriptor = descriptorTextFor(scope);
+    const std::string descriptorSha = sha256Bytes(descriptor.data(), descriptor.size());
+    const std::string existingProfile = installedProfile(s);
+    // Flat retires the VR runtime only when the file in Openvr\win64 is EDVR's own build. The descriptor and the record say what the last
+    // run wrote; what is on disk decides whether anything needs retiring. A folder whose runtime is the game's original (a leftover
+    // descriptor, a stale record) has nothing to prove, and its openvr_api.dll is left alone.
+    const bool retireRuntime = flat && s.openvrCurrent.kind == DllKind::Edvr;
+    // The file on disk is the one the record names, or the planner's own text for the scope, or any of EDVR's texts for the edition
+    // this folder already has (schema 1 or 2, whichever an earlier install or the tool wrote). That last clause upgrades such a file in
+    // place; a modified or unknown file matches none of them and is refused.
+    const bool ownEdition = !existingProfile.empty() && isOwnDescriptor(s.descriptorSha, existingProfile);
+    const bool recordAgrees = s.state.descriptorSha.empty() ? s.descriptorSha == descriptorSha
+                                                            : s.descriptorSha == s.state.descriptorSha;
+    if (s.descriptorPresent && (s.descriptorSha.empty() || (!recordAgrees && !ownEdition))) {
         plan.blocked = true; plan.problems.push_back("edvr_profile.ini differs from the recorded file; it was left untouched."); return plan;
     }
-    if (flat && (conversion || (!s.state.present && s.openvrCurrent.nativeRuntimeExports))) {
-        const bool stockRestored = s.openvrCurrent.kind == DllKind::OpenVrRuntime &&
-            !s.state.openvrOrigSha.empty() && s.openvrCurrent.sha256 == s.state.openvrOrigSha;
-        const bool ownedVr = s.openvrCurrent.kind == DllKind::Edvr &&
-            !s.state.openvrSha.empty() && s.openvrCurrent.sha256 == s.state.openvrSha &&
+    if (retireRuntime) {
+        const bool ownedVr = !s.state.openvrSha.empty() && s.openvrCurrent.sha256 == s.state.openvrSha &&
             (s.openvrOrig.kind == DllKind::OpenVrRuntime || !s.openvrOrigInBackups.empty()) &&
             (s.openvrOrig.kind != DllKind::OpenVrRuntime || s.state.openvrOrigSha.empty() ||
              s.openvrOrig.sha256 == s.state.openvrOrigSha);
-        if (!s.state.present || (!stockRestored && !ownedVr)) {
+        if (!s.state.present || !ownedVr) {
             plan.blocked = true; plan.problems.push_back("Cannot prove EDVR's VR runtime and the game's original; flat conversion left the VR files intact."); return plan;
         }
-        for (const auto& asset : {std::make_pair(&s.openxrLoader, &s.state.openxrLoaderSha),
-                                  std::make_pair(&s.openxrLicense, &s.state.openxrLicenseSha),
-                                  std::make_pair(&s.nativeConfig, &s.state.nativeConfigSha)}) {
-            if (asset.first->kind != DllKind::Absent &&
-                (asset.second->empty() || asset.first->sha256 != *asset.second)) {
-                plan.blocked = true; plan.problems.push_back("An OpenXR asset differs from EDVR's record; conversion cannot retire it safely."); return plan;
-            }
+        // The OpenXR files beside the runtime are retired with it, so each must be EDVR's by a proof; a changed one refuses the conversion.
+        if ((s.openxrLoader.kind != DllKind::Absent && !loaderOwned(s, p.openxrLoaderSha)) ||
+            (s.openxrLicense.kind != DllKind::Absent && !licenseOwned(s, p.openxrLicenseSha)) ||
+            (s.nativeConfig.kind != DllKind::Absent && !startupConfigOwned(s))) {
+            plan.blocked = true; plan.problems.push_back("An OpenXR asset differs from EDVR's record; conversion cannot retire it safely."); return plan;
         }
     }
     switch (s.eliteKind) {
@@ -308,7 +562,7 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
         }
     }
     for (const DllInfo* item : {&s.d3d11,&s.openvrCurrent,&s.openxrLoader,&s.nativeConfig,&s.openxrLicense}) {
-        if (flat && item != &s.d3d11 && !conversion) continue;
+        if (flat && item != &s.d3d11 && !retireRuntime) continue;
         if(item->kind==DllKind::Unreadable) {
             plan.blocked=true;plan.problems.push_back("A native OpenXR destination cannot be read. Nothing will be installed.");return plan;
         }
@@ -325,10 +579,15 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
     next.present = true;
     next.edvrVersion = p.version;
     next.installedUtc = o.nowUtc;
-    next.profile = p.profile;
-    next.descriptorSha = p.descriptorSha;
-    next.components = flat ? "graphics,profile,ini,ngx-optional,xess-optional" :
-        "graphics,profile,ini,openvr,openxr-loader,openxr-license,openxr-config,ngx-optional";
+    next.profile = editionFor(scope);
+    next.scope = scope;
+    next.descriptorSha = descriptorSha;
+    std::string components = "graphics,profile";
+    if (wantsVrIni) components += ",ini";
+    if (wantsFlatIni) components += ",flat-ini";
+    if (!flat) components += ",openvr,openxr-loader,openxr-license,openxr-config";
+    components += ",ngx-optional,xess-optional";
+    next.components = components;
     next.openvrDir = flat ? std::wstring() : relativeOpenvr(s.game.dir, nativeDir);
     next.nativeInstalled=!flat;
 
@@ -584,9 +843,11 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
             "is left where it is.");
     }
 
-    // XeSS-SR belongs only to the flat edition. Preserve foreign or changed
-    // files; replacement and uninstall are limited to hashes EDVR recorded.
-    if (flat && p.haveXess) {
+    // XeSS-SR ships with every scope, and is present only when the build
+    // carried it. Preserve foreign or changed files; replacement and uninstall
+    // are limited to hashes EDVR recorded. Like the DLSS runtime above, the
+    // report says what happened to it in one line, whatever the outcome.
+    if (p.haveXess) {
         if (p.xessLicenseSha.empty() || p.xessThirdPartySha.empty()) {
             plan.blocked = true;
             plan.problems.push_back("XeSS runtime lacks its license notices; nothing will be installed.");
@@ -600,6 +861,7 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
             {"xess_third_party", kXessThirdParty, &s.xessThirdParty, &p.xessThirdPartySha, &next.xessThirdPartySha},
         };
         const std::string previous[] = {s.state.xessSha, s.state.xessLicenseSha, s.state.xessThirdPartySha};
+        unsigned placed = 0, updated = 0, current = 0;
         for (unsigned i=0; i<3; ++i) {
             const auto& file = files[i];
             const bool present = file.cur->kind != DllKind::Absent;
@@ -611,6 +873,7 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
             }
             if (present && file.cur->sha256 == *file.desired && !o.repair) {
                 *file.recorded = *file.desired;
+                ++current;
             } else if (present && !ours && file.cur->sha256 != *file.desired) {
                 plan.notes.push_back("A different " + say(file.leaf) + " is present; left alone.");
                 file.recorded->clear();
@@ -619,8 +882,15 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
                 if (present) backup(dst, "the XeSS file EDVR placed, being replaced");
                 writePayload(file.item, dst, "places Intel XeSS-SR runtime or notice");
                 *file.recorded = *file.desired;
+                ++(present ? updated : placed);
             }
         }
+        if (placed || updated)
+            plan.notes.push_back(placed && !updated
+                ? "Placing libxess.dll (Intel's XeSS-SR runtime, for temporal_aa = xess) and its licence notices."
+                : "Updating libxess.dll (Intel's XeSS-SR runtime) and its licence notices.");
+        else if (current == 3)
+            plan.notes.push_back("libxess.dll (Intel's XeSS-SR runtime) is already this build's -- left alone.");
     }
 
     if (!flat) {
@@ -634,6 +904,17 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
     const DllInfo& saved=s.openvrOrig;
     next.openvrOrigName=originalName;
     next.openvrOrigSha=saved.kind==DllKind::OpenVrRuntime?saved.sha256:std::string();
+    // The tool kept the game's original under its own name. Copy it to the name this installer keeps it under, so the record and the
+    // next survey find it as any other original, and a later flat conversion or uninstall can restore it. The tool's backup stays put.
+    // Not when the game's own runtime is in place: that one is renamed to the original name below, as it always was.
+    if(saved.kind==DllKind::Absent && current.kind!=DllKind::OpenVrRuntime && s.toolOriginal.kind==DllKind::OpenVrRuntime) {
+        Step adopt;adopt.action=Action::Backup;adopt.from=s.toolOriginal.path;adopt.to=original;
+        adopt.expectSha=s.toolOriginal.sha256;adopt.required=true;
+        adopt.why="keeps the game's original VR library, from the backup the tool made, where EDVR can restore it";
+        body.push_back(adopt);changed=true;
+        next.openvrOrigSha=s.toolOriginal.sha256;
+        plan.notes.push_back("Adopting the game's original VR library from the backup the tool made, so it can be restored later.");
+    }
     if(current.kind==DllKind::Edvr && current.sha256==p.openvrSha && !o.repair) {
         plan.notes.push_back("Native OpenXR runtime is already this build -- left alone.");
     } else {
@@ -681,10 +962,11 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
         }
         writeText(config,destination,"selects the Windows OpenXR runtime");changed=true;
     }
-    } else if (conversion) {
-        // Only the files proved to belong to the recorded VR edition are retired.
+    } else {
+        // Flat owns no VR runtime. What a VR install left in Openvr\win64 is retired only by its proofs: the runtime when it is EDVR's
+        // build (proved above), and each OpenXR file by its hash or its content, whether or not this folder's record lists it.
         const std::wstring runtime = joinPath(nativeDir, kOpenvr);
-        if (s.openvrCurrent.kind == DllKind::Edvr) {
+        if (retireRuntime) {
             backup(runtime, "the EDVR VR runtime being retired");
             body.back().required = true; body.back().expectSha = s.openvrCurrent.sha256;
             Step removeRuntime; removeRuntime.action = Action::Delete; removeRuntime.from = runtime;
@@ -700,82 +982,103 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
             restoreOriginal.why = "restores the game's original VR library";
             body.push_back(restoreOriginal);
         }
-        for (const DllInfo* asset : {&s.openxrLoader, &s.openxrLicense, &s.nativeConfig}) {
-            if (asset->kind == DllKind::Absent) continue;
-            backup(asset->path, "the EDVR OpenXR asset being retired");
-            body.back().required = true; body.back().expectSha = asset->sha256;
-            Step retire; retire.action = Action::Delete; retire.from = asset->path;
-            retire.expectSha = asset->sha256; retire.why = "retires EDVR's OpenXR asset";
+        const struct NativeFile { const DllInfo* info; bool owned; bool matches; } nativeFiles[] = {
+            {&s.openxrLoader, loaderOwned(s, p.openxrLoaderSha), sameSha(s.openxrLoader.sha256, p.openxrLoaderSha)},
+            {&s.openxrLicense, licenseOwned(s, p.openxrLicenseSha), sameSha(s.openxrLicense.sha256, p.openxrLicenseSha)},
+            {&s.nativeConfig, startupConfigOwned(s), false},
+        };
+        for (const NativeFile& file : nativeFiles) {
+            if (file.info->kind == DllKind::Absent) continue;
+            if (!file.owned) {
+                plan.notes.push_back(file.matches
+                    ? say(leafOf(file.info->path)) + " " + kMatchesNoProof
+                    : "Keeping a changed OpenXR file: " + say(leafOf(file.info->path)));
+                continue;
+            }
+            backup(file.info->path, "the EDVR OpenXR asset being retired");
+            body.back().required = true; body.back().expectSha = file.info->sha256;
+            Step retire; retire.action = Action::Delete; retire.from = file.info->path;
+            retire.expectSha = file.info->sha256; retire.why = "retires EDVR's OpenXR asset";
             body.push_back(retire);
+            changed = true;
         }
         next.openvrInstalled = false; next.openvrSha.clear();
         next.openvrOrigName.clear(); next.openvrOrigSha.clear();
         next.nativeRuntimeSha.clear(); next.openxrLoaderSha.clear();
         next.openxrLicenseSha.clear(); next.nativeConfigSha.clear();
         next.nativeOriginalName.clear(); next.nativeOriginalSha.clear();
-        plan.notes.push_back("Converting VR to flat: the game's original VR library is in place and verified EDVR OpenXR assets are retired.");
+        if (retireRuntime) {
+            plan.notes.push_back("Converting VR to flat: the game's original VR library is in place and verified EDVR OpenXR assets are retired.");
+        } else if (!installed.empty() && installed != "flat") {
+            plan.notes.push_back("Converting to flat: the VR library here is not EDVR's, so it is left where it is.");
+        }
     }
     if (flat) next.nativeGraphicsSha = p.d3d11Sha;
 
+    // The descriptor is the scope's canonical text, not the payload's: a scope change rewrites it.
     const std::wstring descriptorPath = joinPath(s.game.dir, kProfile);
-    if (!s.descriptorPresent || s.descriptorSha != p.descriptorSha || o.repair) {
+    if (!s.descriptorPresent || s.descriptorSha != descriptorSha || o.repair) {
         if (s.descriptorPresent) {
             backup(descriptorPath, "the previous EDVR profile descriptor");
             body.back().required = true; body.back().expectSha = s.descriptorSha;
         }
-        writePayload("profile", descriptorPath, "declares the installed EDVR profile");
+        writeText(descriptor, descriptorPath, "declares the installed EDVR scope");
+        changed = true;
     }
 
     // ------------------------------------------------------------------
-    // The settings file of the edition being installed: edvr.ini for VR,
-    // edvr-flat.ini for flat. Last, because the chain decision above forces a
-    // value into it.
+    // The settings files the scope installs: edvr.ini for vr and both, edvr-flat.ini for flat and both. Last, because the chain
+    // decision above forces a value into them.
     //
-    // The OTHER edition's file is neither merged from nor written. The flat
+    // A file the scope does not install is neither merged from nor written. The flat
     // runtime reads edvr-flat.ini and only falls back to edvr.ini while there is
     // none (config.cpp), so a flat install that merged into edvr.ini reported
     // success while the game went on reading the old flat file -- and, where
-    // there was no flat file, changed the VR profile's tuning instead.
+    // there was no flat file, changed the VR profile's tuning instead. A scope
+    // change leaves the file it stops managing exactly where it is.
     // ------------------------------------------------------------------
-    const std::string iniName = toUtf8(settingsLeafFor(p.profile));
-    plan.settingsFile = iniName;
-    if (p.iniText.empty()) {
-        plan.problems.push_back("This installer carries no " + iniName + ".");
-    } else {
-        const std::wstring iniPath = settingsPathFor(s.game.dir, p.profile);
-        const bool ownPresent = flat ? s.flatIniPresent : s.iniPresent;
-        const std::string& ownText = flat ? s.flatIniText : s.iniText;
+    // Each settings file the scope installs is merged on its own, against its own base. The flat file is done first, so the VR
+    // file's merge report (plan.merge) is the one left when both are installed.
+    plan.settingsFile = wantsVrIni ? "edvr.ini" : "edvr-flat.ini";
+    // The base is the shipped text of the version that last wrote the file: edvr.ini.base for edvr.ini, edvr-flat.ini.base for
+    // edvr-flat.ini. Which version wrote edvr.ini.base is the RECORD's question, not the descriptor's: the descriptor says what this
+    // run installs, and an older flat record left its flat defaults in that base. So the base vouches for the VR file only under a
+    // VR-scope record (vr or both); a flat record, or none, vouches for nothing. Where a base does not describe the file, the merge
+    // is two-way.
+    const std::string baseWriter = s.state.present ? recordedScope(s.state) : std::string();
+    const bool vrBaseDescribes = baseWriter == "vr" || baseWriter == "both";
+    const std::string* vrBase = (vrBaseDescribes && !s.baseIniText.empty()) ? &s.baseIniText : nullptr;
+    const std::string* flatBase = s.flatBaseIniText.empty() ? nullptr : &s.flatBaseIniText;
+    std::string vrSha, flatSha;
+
+    auto manageSettings = [&](bool isFlat) {
+        const char* profile = isFlat ? "flat" : "vr";
+        const std::string iniName = toUtf8(settingsLeafFor(profile));
+        const std::string& payloadText = isFlat ? p.flatIniText : p.iniText;
+        const std::wstring iniPath = settingsPathFor(s.game.dir, profile);
+        const bool ownPresent = isFlat ? s.flatIniPresent : s.iniPresent;
+        const std::string& ownText = isFlat ? s.flatIniText : s.iniText;
 
         // A flat install that finds only the shared edvr.ini starts its own file
         // from it, so the settings the flat runtime has been reading carry over
         // (install_edvr.py seeds the same way); edvr.ini itself is not touched.
         // Somebody who asked for fresh defaults gets them instead.
-        const bool seed = flat && !ownPresent && s.iniPresent && o.keepSettings;
-
-        // The base is the shipped settings of the version the record says is
-        // installed: the defaults of the file that edition wrote. Merging into this
-        // edition's OWN file, it is only a base when the record is for this
-        // edition -- another edition's shipped file is the default of nothing
-        // here, and a three-way merge against it would read a setting the person
-        // changed as one they never touched. The shared edvr.ini a flat install
-        // seeds from is different: every edition before this one wrote it, so the
-        // base describes it whichever edition the record names, and it is what
-        // tells the settings somebody chose from the VR defaults they never did.
-        const bool baseDescribesText = seed || !(s.state.present && s.state.profile != p.profile);
-        const std::string* base =
-            (s.baseIniText.empty() || !baseDescribesText) ? nullptr : &s.baseIniText;
+        const bool seed = isFlat && !ownPresent && s.iniPresent && o.keepSettings;
+        // A seed is edvr.ini's text, so it merges against edvr.ini's base. The file's own base is the one
+        // edvr-flat.ini.base the flat install that wrote it kept.
+        const std::string* base = (isFlat && !seed) ? flatBase : vrBase;
 
         std::string merged;
         if (seed) {
-            merged = mergeIni(p.iniText, s.iniText, base, forced, &plan.merge);
+            merged = mergeIni(payloadText, s.iniText, base, forced, &plan.merge);
             plan.notes.push_back(
                 "Creating " + iniName + " from your edvr.ini: the flat edition keeps its own "
                 "settings now, and edvr.ini is left exactly as it is.");
         } else if (!ownPresent) {
-            merged = mergeIni(p.iniText, std::string(), nullptr, forced, &plan.merge);
+            merged = mergeIni(payloadText, std::string(), nullptr, forced, &plan.merge);
             plan.notes.push_back("Writing " + iniName + " (every setting at its default).");
         } else if (!o.keepSettings) {
-            merged = mergeIni(p.iniText, std::string(), nullptr, forced, &plan.merge);
+            merged = mergeIni(payloadText, std::string(), nullptr, forced, &plan.merge);
             backup(iniPath, "your " + iniName + ", before it is replaced");
             plan.notes.push_back(
                 "Replacing " + iniName + " with the shipped defaults. Your old file is in the "
@@ -783,7 +1086,7 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
         } else {
             // The user's text is this edition's own file, so a setting this version dropped is
             // "carried over from your" that file: edvr-flat.ini for the flat edition.
-            merged = mergeIni(p.iniText, ownText, base, forced, &plan.merge, iniName.c_str());
+            merged = mergeIni(payloadText, ownText, base, forced, &plan.merge, iniName.c_str());
             if (merged != ownText) {
                 backup(iniPath, "your " + iniName + ", before it is updated");
 
@@ -810,8 +1113,12 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
             // alone" is two lines contradicting each other about the same file.
             plan.notes.push_back(iniName + " already says what it should -- left alone.");
         }
-        next.iniSha = sha256Bytes(merged.data(), merged.size());
-    }
+        (isFlat ? flatSha : vrSha) = sha256Bytes(merged.data(), merged.size());
+    };
+    if (wantsFlatIni) manageSettings(true);
+    if (wantsVrIni) manageSettings(false);
+    // The record's settings digest is the VR file's when the scope has one (the file the older records named), else the flat file's.
+    next.iniSha = wantsVrIni ? vrSha : flatSha;
 
     const bool ownershipChanged = next.xessSha != s.state.xessSha ||
                                   next.xessLicenseSha != s.state.xessLicenseSha ||
@@ -849,14 +1156,24 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
         mkState.why = "holds the install record";
         plan.steps.push_back(mkState);
 
+        // Each base is written from its own payload file, by the install that manages that file.
         if (!stateOnly) {
-            Step base;
-            base.action = Action::WriteText;
-            base.text = p.iniText;
-            base.to = baseIniPath(s.game.dir);
-            base.why = "keeps this version's default " + toUtf8(settingsLeafFor(p.profile)) +
-                       ", so the next update can tell your changes from a changed default";
-            plan.steps.push_back(base);
+            if (wantsVrIni) {
+                Step baseStep;
+                baseStep.action = Action::WriteText;
+                baseStep.text = p.iniText;
+                baseStep.to = baseIniPath(s.game.dir);
+                baseStep.why = "keeps this version's default edvr.ini, so the next update can tell your changes from a changed default";
+                plan.steps.push_back(baseStep);
+            }
+            if (wantsFlatIni) {
+                Step baseStep;
+                baseStep.action = Action::WriteText;
+                baseStep.text = p.flatIniText;
+                baseStep.to = flatBaseIniPath(s.game.dir);
+                baseStep.why = "keeps this version's default edvr-flat.ini, so the next update can tell your changes from a changed default";
+                plan.steps.push_back(baseStep);
+            }
         }
 
         Step rec;
@@ -871,7 +1188,7 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
     return plan;
 }
 
-Plan planUninstall(const Survey& s, const Options& o) {
+Plan planUninstall(const Survey& s, const Options& o, const PayloadInfo& p) {
     Plan plan;
     if((s.state.nativeInstalled || s.openvrCurrent.nativeRuntimeExports) && s.openvrCurrent.kind==DllKind::Edvr &&
        s.openvrOrig.kind!=DllKind::OpenVrRuntime && s.openvrOrigInBackups.empty()) {
@@ -892,12 +1209,13 @@ Plan planUninstall(const Survey& s, const Options& o) {
     }
     if (s.gameRunningElsewhere) plan.notes.push_back(kRunningElsewhere);
 
-    // Which edition this uninstall removes, and so which settings file is its own.
+    // Which scope this uninstall removes, and so which settings files are its own.
     // A folder with no record and no descriptor counts as a VR one: the flat
     // edition always writes a descriptor.
-    const std::string edition = installedProfile(s) == "flat" ? "flat" : "vr";
-    const bool flatEdition = edition == "flat";
-    // What that edition's runtime reads: the flat one falls back to the shared
+    const std::string installed = installedScope(s);
+    const std::string scope = installed.empty() ? std::string("vr") : installed;
+    const bool flatEdition = scope == "flat";
+    // What the runtime reads for the chain: the flat one falls back to the shared
     // edvr.ini until it has a file of its own.
     const bool runtimeReadsFlatFile = flatEdition && s.flatIniPresent;
     const std::string& runtimeIniText = runtimeReadsFlatFile ? s.flatIniText : s.iniText;
@@ -961,6 +1279,9 @@ Plan planUninstall(const Survey& s, const Options& o) {
         std::wstring chain = safeSiblingName(s.state.chainTarget, kD3d11);
         if (chain.empty())
             chain = safeSiblingName(fromUtf8(iniValue(runtimeIniText, "advanced.real_dll")), kD3d11);
+        // A both install's flat file carries the same chain key; it answers when the VR file does not.
+        if (chain.empty() && scope == "both")
+            chain = safeSiblingName(fromUtf8(iniValue(s.flatIniText, "advanced.real_dll")), kD3d11);
         const DllInfo* target = chain.empty() ? nullptr : siblingNamed(s.otherD3d11, chain);
         if (target && target->kind != DllKind::Absent) {
             rename(target->path, d3d11Path,
@@ -1032,18 +1353,22 @@ Plan planUninstall(const Survey& s, const Options& o) {
         }
     }
 
-    if(s.state.nativeInstalled) {
-        auto retire=[&](const DllInfo& info,const std::string& owned) {
+    // The OpenXR files EDVR placed beside the VR runtime are removed by their proofs, whether or not this folder's record lists them
+    // (a record from an older flat install lists none); a changed one is kept.
+    {
+        auto retire=[&](const DllInfo& info,bool owned,bool matches) {
             if(info.kind==DllKind::Absent)return;
-            if(owned.empty() || info.sha256!=owned) {
-                plan.notes.push_back("Keeping a changed OpenXR file: "+say(leafOf(info.path)));return;
+            if(!owned) {
+                plan.notes.push_back(matches ? say(leafOf(info.path))+" "+kMatchesNoProof
+                                             : "Keeping a changed OpenXR file: "+say(leafOf(info.path)));
+                return;
             }
             backup(info.path,"the native OpenXR file being removed");
             remove(info.path,"removes EDVR's OpenXR dependency",info.sha256);
         };
-        retire(s.openxrLoader,s.state.openxrLoaderSha);
-        retire(s.openxrLicense,s.state.openxrLicenseSha);
-        retire(s.nativeConfig,s.state.nativeConfigSha);
+        retire(s.openxrLoader,loaderOwned(s,p.openxrLoaderSha),sameSha(s.openxrLoader.sha256,p.openxrLoaderSha));
+        retire(s.openxrLicense,licenseOwned(s,p.openxrLicenseSha),sameSha(s.openxrLicense.sha256,p.openxrLicenseSha));
+        retire(s.nativeConfig,startupConfigOwned(s),false);
     }
 
     // ---- NVIDIA's DLSS runtime ----------------------------------------
@@ -1063,54 +1388,68 @@ Plan planUninstall(const Survey& s, const Options& o) {
     const DllInfo* xessFiles[] = {&s.xess, &s.xessLicense, &s.xessThirdParty};
     const std::string* xessOwned[] = {&s.state.xessSha, &s.state.xessLicenseSha,
                                      &s.state.xessThirdPartySha};
+    const std::string* xessCarried[] = {&p.xessSha, &p.xessLicenseSha, &p.xessThirdPartySha};
     for (unsigned i=0; i<3; ++i) {
         const DllInfo& cur = *xessFiles[i];
         if (cur.kind == DllKind::Absent) continue;
-        if (xessOwned[i]->empty() || cur.sha256 != *xessOwned[i]) {
-            plan.notes.push_back("Keeping a changed XeSS file: " + say(leafOf(cur.path)));
+        // EDVR's when the record or the tool's receipt lists it AND its bytes are the record's, the tool's or the payload's. A file with
+        // matching bytes and no provenance is someone's to keep; a changed one is kept too.
+        const bool provenance = !xessOwned[i]->empty() || toolListsPath(s, cur.path);
+        if (!ownedFile(s, cur, provenance, *xessOwned[i], *xessCarried[i])) {
+            const bool matches = sameSha(cur.sha256, *xessCarried[i]);
+            plan.notes.push_back(matches ? say(leafOf(cur.path)) + " " + kMatchesNoProof
+                                         : "Keeping a changed XeSS file: " + say(leafOf(cur.path)));
             continue;
         }
         remove(cur.path, "removes Intel XeSS-SR file EDVR placed", cur.sha256);
     }
 
     // ---- settings and record ------------------------------------------
-    // The settings file of the edition being removed, and only that one: the flat
+    // The settings files of the scope being removed, and only those: the flat
     // profile's edvr-flat.ini and the VR profile's edvr.ini are separate people's
-    // tuning, and an uninstall that took the other edition's file with it
-    // destroyed settings it had no business touching.
-    const std::wstring iniPath = settingsPathFor(s.game.dir, edition);
-    const std::string iniName = toUtf8(settingsLeafFor(edition));
-    plan.settingsFile = iniName;
-    const bool ownPresent = flatEdition ? s.flatIniPresent : s.iniPresent;
-    if (ownPresent) {
-        if (o.removeSettings) {
-            backup(iniPath, "your " + iniName);
-            remove(iniPath, "removes " + iniName);
-            plan.notes.push_back("Removing " + iniName + " (a copy is kept in the backup folder).");
-        } else {
+    // tuning, and an uninstall that took a file outside its scope destroyed
+    // settings it had no business touching. edvr.ini for vr and both, edvr-flat.ini for flat and both.
+    plan.settingsFile = flatEdition ? "edvr-flat.ini" : "edvr.ini";
+    for (const bool flatFile : {false, true}) {
+        if (flatFile ? scope == "vr" : scope == "flat") continue;
+        const char* profile = flatFile ? "flat" : "vr";
+        const std::wstring iniPath = settingsPathFor(s.game.dir, profile);
+        const std::string iniName = toUtf8(settingsLeafFor(profile));
+        const bool ownPresent = flatFile ? s.flatIniPresent : s.iniPresent;
+        if (ownPresent) {
+            if (o.removeSettings) {
+                backup(iniPath, "your " + iniName);
+                remove(iniPath, "removes " + iniName);
+                plan.notes.push_back("Removing " + iniName + " (a copy is kept in the backup folder).");
+            } else {
+                plan.notes.push_back(
+                    "Leaving " + iniName + " in place, so a reinstall finds your settings again.");
+            }
+        } else if (flatFile && flatEdition && s.iniPresent) {
+            // A flat install that never got a file of its own -- one made before
+            // edvr-flat.ini existed -- has been reading the shared edvr.ini, which the
+            // VR profile uses too. It is not the flat edition's to remove.
             plan.notes.push_back(
-                "Leaving " + iniName + " in place, so a reinstall finds your settings again.");
+                o.removeSettings
+                    ? "This flat install has no edvr-flat.ini of its own: it was reading edvr.ini, "
+                      "which the VR profile uses too, so edvr.ini was left in place."
+                    : "Leaving edvr.ini in place, so a reinstall finds your settings again.");
         }
-    } else if (flatEdition && s.iniPresent) {
-        // A flat install that never got a file of its own -- one made before
-        // edvr-flat.ini existed -- has been reading the shared edvr.ini, which the
-        // VR profile uses too. It is not the flat edition's to remove.
-        plan.notes.push_back(
-            o.removeSettings
-                ? "This flat install has no edvr-flat.ini of its own: it was reading edvr.ini, "
-                  "which the VR profile uses too, so edvr.ini was left in place."
-                : "Leaving edvr.ini in place, so a reinstall finds your settings again.");
     }
     if (fileExists(statePath(s.game.dir))) remove(statePath(s.game.dir), "removes the install record");
     const std::wstring descriptorPath = joinPath(s.game.dir, kProfile);
-    if (s.descriptorPresent && !s.state.descriptorSha.empty() &&
-        s.descriptorSha == s.state.descriptorSha) {
+    // Its bytes are one of EDVR's descriptor texts, or its hash is the one the record kept: a leftover from an install whose record is gone
+    // says `scope = both` in exactly EDVR's bytes, and is EDVR's whatever the record says.
+    if (s.descriptorPresent && ((!s.state.descriptorSha.empty() && s.descriptorSha == s.state.descriptorSha) ||
+                                isCanonicalDescriptor(s.descriptorSha))) {
         remove(descriptorPath, "removes EDVR's profile descriptor", s.descriptorSha);
     } else if (s.descriptorPresent) {
         plan.notes.push_back("Keeping an unverified edvr_profile.ini; its ownership could not be proved.");
     }
     if (fileExists(baseIniPath(s.game.dir)))
-        remove(baseIniPath(s.game.dir), "removes the kept default " + iniName);
+        remove(baseIniPath(s.game.dir), "removes the kept default edvr.ini");
+    if (fileExists(flatBaseIniPath(s.game.dir)))
+        remove(flatBaseIniPath(s.game.dir), "removes the kept default edvr-flat.ini");
 
     if (!changed) {
         plan.nothingToDo = true;

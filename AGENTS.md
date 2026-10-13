@@ -79,8 +79,8 @@ named without the maintainer's consent.
 ```bash
 python tools\install_edvr.py --target steam --dry-run
 python tools\install_edvr.py --target steam
-python tools\install_edvr.py --target steam --profile flat --xess
-python tools\install_edvr.py --target steam --profile flat --verify-only
+python tools\install_edvr.py --target steam --scope flat --xess
+python tools\install_edvr.py --target steam --scope flat --verify-only
 python tools\edvr_log.py --target steam --expect-build HEAD --version
 ```
 
@@ -160,11 +160,12 @@ minutes after a flight finally reproduced the effect being chased.
 - `edvr.ini` in a game directory carries the settings of whoever flew
   last. A reinstall does not undo an edit to it. `install_edvr.py` does not
   touch it unless `--ini` says so, and backs it up when it does.
-- `edvr-flat.ini` is the flat profile's own settings file: the flat build
-  reads it first and falls back to `edvr.ini`, `--profile flat --ini`
-  writes it (never `edvr.ini`), and a flat install seeds it from
-  `edvr.ini` when the game directory has none yet. Everything above about
-  a live `edvr.ini` applies to it verbatim.
+- `edvr-flat.ini` is the flat profile's own settings file: while the flat
+  profile is active, EDVR reads it first and falls back to `edvr.ini`.
+  `--scope flat --ini` writes it (never `edvr.ini`), `--scope both --ini`
+  writes both, and a scope that includes flat seeds it from `edvr.ini` when
+  the game directory has none yet. Everything above about a live `edvr.ini`
+  applies to it verbatim.
 - Settings mirror to `%LOCALAPPDATA%\EDVR\<leaf>-<store>\` and are restored
   from there, because a game update once wiped the whole install directory
   including the ini.

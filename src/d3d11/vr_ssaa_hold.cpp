@@ -181,6 +181,9 @@ bool readMode(int* mode, char* raw, size_t rawLen) {
 // The loader's own thunk: the game's wrapper, then the startup hold's write on the loader's temporary.
 void afterLoader(uintptr_t obj);
 
+// The VR profile allows the hold: never under the flat profile, and only where the runtime's features are on.
+bool holdAllowedNow() { return !runtimeFlatProfile() && runtimeFeaturesAllowed(); }
+
 bool loaderHoldThunk(void* a, void* b, void* c) {
     WrapperFn orig = g_wrapperOrig.load(std::memory_order_acquire);
     const bool r = orig ? orig(a, b, c) : true;
@@ -194,7 +197,7 @@ void afterLoader(uintptr_t obj) {
     if (!obj) return;
     g_loaderObj.store(obj, std::memory_order_release);
     edvrGraphicsEnsureInitialised();  // the config and the log, the same as the first device creation sets up (a no-op after it)
-    const bool allowed = !runtimeFlatProfile() && runtimeFeaturesAllowed();
+    const bool allowed = holdAllowedNow();
     g_holdAllowed.store(allowed, std::memory_order_release);
     int mode = -1;
     char raw[24] = {};
@@ -327,33 +330,57 @@ bool vrSsaaHoldVrLive() { return g_vrLive.load(std::memory_order_acquire); }
 // The render thread, once a frame. The live VR decision comes from the runtime's render sizing record (valid while an OpenXR session
 // has published its eye sizes; the runtime clears it at teardown): VR active -> the field is set to 1.0 at once; VR inactive -> the
 // game's own value is restored, so flat uses the user's Supersampling and the panels follow it.
+// The live-rise path: VR is live and the active profile allows the hold, so the field goes to 1.0 at once. Shared by the frame
+// boundary and vrSsaaHoldProfileChanged.
+static void holdEngageLive() {
+    if (!g_holdAllowed.load(std::memory_order_acquire)) return;
+    const uintptr_t ctx = g_ctx.load(std::memory_order_acquire);
+    const uint32_t gameBits = g_gameBits.load(std::memory_order_acquire);
+    char gameText[24] = "unknown";
+    if (gameBits != kNoneBits) std::snprintf(gameText, sizeof(gameText), "%.4f", static_cast<double>(floatOf(gameBits)));
+    if (ctx && writeFloatGuarded(ctx + kCtxSsOff, ssaahold::kHeldValue)) {
+        g_held.store(true, std::memory_order_release);
+        g_requestedBits.store(gameBits, std::memory_order_release);
+        Log::get().note("vr ssaa gate: VR active -> holding at 1.0 (game's %s)", gameText);
+    } else {
+        Log::get().note("vr ssaa gate: VR active -> not held yet (game's %s; no render context or write failed)", gameText);
+    }
+}
+
+// The release path: the game's own value goes back into the field, if the hold was on. Shared by the frame boundary (VR went
+// inactive) and vrSsaaHoldProfileChanged (the profile no longer allows the hold).
+static void holdRelease() {
+    if (!g_held.exchange(false, std::memory_order_acq_rel)) return;
+    const uintptr_t ctx = g_ctx.load(std::memory_order_acquire);
+    const uint32_t gameBits = g_gameBits.load(std::memory_order_acquire);
+    if (ctx && gameBits != kNoneBits && writeFloatGuarded(ctx + kCtxSsOff, floatOf(gameBits)))
+        Log::get().note("vr ssaa gate: VR inactive -> released: the game's %.4f restored", static_cast<double>(floatOf(gameBits)));
+    else
+        Log::get().note("vr ssaa gate: VR inactive -> released; the game's value could not be restored (no render context or value)");
+}
+
 void vrSsaaHoldFrameBoundary() {
     if (g_slotState.load(std::memory_order_acquire) != 1) return;
     EdvrNativeRenderSizing sizing{};
     const bool live = edvrQueryNativeRenderSizing(EDVR_NATIVE_RENDER_SIZING_VERSION_1, sizeof(sizing), &sizing) && sizing.valid == 1;
     const bool was = g_vrLive.exchange(live, std::memory_order_acq_rel);
     if (live == was) return;
-    const uintptr_t ctx = g_ctx.load(std::memory_order_acquire);
-    if (live) {
-        if (!g_holdAllowed.load(std::memory_order_acquire)) return;
-        const uint32_t gameBits = g_gameBits.load(std::memory_order_acquire);
-        char gameText[24] = "unknown";
-        if (gameBits != kNoneBits) std::snprintf(gameText, sizeof(gameText), "%.4f", static_cast<double>(floatOf(gameBits)));
-        if (ctx && writeFloatGuarded(ctx + kCtxSsOff, ssaahold::kHeldValue)) {
-            g_held.store(true, std::memory_order_release);
-            g_requestedBits.store(gameBits, std::memory_order_release);
-            Log::get().note("vr ssaa gate: VR active -> holding at 1.0 (game's %s)", gameText);
-        } else {
-            Log::get().note("vr ssaa gate: VR active -> not held yet (game's %s; no render context or write failed)", gameText);
-        }
-        return;
+    if (live) holdEngageLive();
+    else holdRelease();
+}
+
+// Called at a profile switch, render thread, frame boundary (vr_ssaa_hold.h). The hold follows the active profile as well as the live
+// session: g_holdAllowed is recomputed, and the field is released or engaged to match by the two paths above. Does nothing until
+// the loader hook is installed; safe to call twice (the second call finds the field already where it should be).
+void vrSsaaHoldProfileChanged() {
+    if (g_slotState.load(std::memory_order_acquire) != 1) return;
+    g_holdAllowed.store(holdAllowedNow(), std::memory_order_release);
+    switch (ssaahold::profileChangeAction(g_holdAllowed.load(std::memory_order_acquire), g_vrLive.load(std::memory_order_acquire),
+                                          g_held.load(std::memory_order_acquire))) {
+        case ssaahold::ProfileAction::Release: holdRelease(); break;
+        case ssaahold::ProfileAction::Engage: holdEngageLive(); break;
+        case ssaahold::ProfileAction::None: break;
     }
-    if (!g_held.exchange(false, std::memory_order_acq_rel)) return;
-    const uint32_t gameBits = g_gameBits.load(std::memory_order_acquire);
-    if (ctx && gameBits != kNoneBits && writeFloatGuarded(ctx + kCtxSsOff, floatOf(gameBits)))
-        Log::get().note("vr ssaa gate: VR inactive -> released: the game's %.4f restored", static_cast<double>(floatOf(gameBits)));
-    else
-        Log::get().note("vr ssaa gate: VR inactive -> released; the game's value could not be restored (no render context or value)");
 }
 
 // The settings copy's hold (the W relay in vr_window_trampolines.cpp): after the game copies its settings into the render context,

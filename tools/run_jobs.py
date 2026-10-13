@@ -208,7 +208,7 @@ STALE_EXE_DIR = re.compile(r"^.+[-_]\d+[-_]\d+$")
 # happened to match STALE_EXE_DIR -- belt-and-suspenders alongside the shape
 # check and the directories-only, top-level-only rule in stale_exe_dirs.
 PROTECTED_EXE_DIR_ENTRIES = {
-    "d3d11.dll", "openvr_api.dll", "edvr-installer.exe", "edvr-flat-installer.exe", "gen", "gen-flat", "obj",
+    "d3d11.dll", "openvr_api.dll", "edvr-installer.exe", "gen", "obj",
     "edvr_logs",
 }
 
@@ -446,15 +446,39 @@ def log_dir(exe_dir, job):
     return os.path.join(exe_dir, "edvr_logs", job.rig.label)
 
 
-def child_env(env, job, exe_dir=None):
-    """The child's environment: the runner's, plus the step for a split rig
-    and, given --exe-dir, the log directory for the rig's processes there."""
+# The Settings.xml every rig child reads: 3D mode 4, which is VR, the profile every rig was written against.
+RIG_SETTINGS_XML = ('<?xml version="1.0" encoding="UTF-8" ?>\r\n<GraphicsConfig>\r\n\t'
+                    '<StereoscopicMode>4</StereoscopicMode>\r\n</GraphicsConfig>\r\n')
+
+
+def rig_localappdata(exe_dir):
+    """A LOCALAPPDATA for the rig children, holding a Settings.xml at mode 4: under exe_dir/rig_localappdata when --exe-dir is given
+    (the run's files stay with its build), else a fresh temporary directory. The DLL's profile follows Settings.xml's 3D mode
+    (runtime_profile.h), so a rig must not depend on the mode the maintainer last flew; and the DLL's settings mirror
+    (%LOCALAPPDATA%\\EDVR) stays out of the real profile. A rig that sets LOCALAPPDATA itself still overrides it in its own process."""
+    if exe_dir is not None:
+        root = os.path.join(exe_dir, "rig_localappdata")
+    else:
+        root = tempfile.mkdtemp(prefix="edvr-rig-localappdata-")
+    graphics = os.path.join(root, "Frontier Developments", "Elite Dangerous", "Options", "Graphics")
+    os.makedirs(graphics, exist_ok=True)
+    with open(os.path.join(graphics, "Settings.xml"), "wb") as stream:
+        stream.write(RIG_SETTINGS_XML.encode("utf-8"))
+    return root
+
+
+def child_env(env, job, exe_dir=None, localappdata=None):
+    """The child's environment: the runner's, plus the step for a split rig,
+    given --exe-dir the log directory for the rig's processes there, and given
+    localappdata (rig_localappdata) the LOCALAPPDATA every rig child runs under."""
     child = dict(env)
     if job.step is not None:
         child["EDVR_RIG_STEP"] = job.step
     if exe_dir is not None:
         child["EDVR_LOG_DIR"] = log_dir(exe_dir, job)
         child["EDVR_LOG_DIR_FOR"] = exe_dir
+    if localappdata is not None:
+        child["LOCALAPPDATA"] = localappdata
     return child
 
 
@@ -689,17 +713,18 @@ def focus_error(findings):
             "tools\\focus_watch.py finds them again.\n" % (len(findings), ", ".join(exes), ", ".join(jobs)))
 
 
-def spawner(script, root, env, exe_dir=None, timeout_for=None):
+def spawner(script, root, env, exe_dir=None, timeout_for=None, localappdata=None):
     """spawn(job) for run_group: runs the job's `build.bat --rig` child and
     returns (exit code, output, limit_hit) as run_rig does, under the
-    timeout timeout_for(job) names (a function of the job; None: none)."""
+    timeout timeout_for(job) names (a function of the job; None: none). The
+    child runs under localappdata when one is given (rig_localappdata)."""
     def spawn(job):
         if exe_dir is not None:
             # Log::open and the sentinel create one level; this is two.
             os.makedirs(log_dir(exe_dir, job), exist_ok=True)
         limit = timeout_for(job) if timeout_for is not None else None
         return run_rig(job.title, child_command(script, job.rig.label), str(root),
-                       child_env(env, job, exe_dir), rig_log_path(exe_dir, job), limit)
+                       child_env(env, job, exe_dir, localappdata), rig_log_path(exe_dir, job), limit)
     return spawn
 
 
@@ -990,16 +1015,19 @@ def run(script, jobs, mp, quiet, times_path, dry_run, out, spawn=None, clock=tim
         out.flush()
         return 0
     quiet_spawn = spawn
+    rig_root = None
     if spawn is None:
         env = dict(os.environ)
         env["CL"] = mp_flag
+        # The rig children's LOCALAPPDATA: made here, after the dry run's return, so a dry run writes nothing.
+        rig_root = rig_localappdata(exe_dir)
 
         def timeout_for(job):
             return rig_timeout(job, times, timeout_scale, timeout_override)
 
-        spawn = spawner(script, script.parent, env, exe_dir, timeout_for)
+        spawn = spawner(script, script.parent, env, exe_dir, timeout_for, rig_root)
         # A quiet rig has the machine to itself, so its compiles may use every core.
-        quiet_spawn = spawner(script, script.parent, dict(env, CL="/MP"), exe_dir, timeout_for)
+        quiet_spawn = spawner(script, script.parent, dict(env, CL="/MP"), exe_dir, timeout_for, rig_root)
     watch = start_focus_guard(focus, out)
     try:
         started = clock()
@@ -1015,6 +1043,9 @@ def run(script, jobs, mp, quiet, times_path, dry_run, out, spawn=None, clock=tim
     finally:
         # Also when a group raised: the watch's threads must not outlive the run.
         findings = finish_focus_guard(watch, out)
+        # A temporary fixture root (no --exe-dir) goes once every child has finished; the one under exe_dir stays with its build.
+        if rig_root is not None and exe_dir is None:
+            shutil.rmtree(rig_root, ignore_errors=True)
     results += quiet_results
     failures += quiet_failures
     if times_path is not None:
@@ -1268,6 +1299,23 @@ def self_test():
     check(child_env(env, Job(alpha), exe_dir)["EDVR_LOG_DIR"] == os.path.join(exe_dir, "edvr_logs", "alpha")
           and "EDVR_RIG_STEP" not in child_env(env, Job(alpha), exe_dir),
           "a whole rig's child gets the log directory too, and still no step")
+    fixture = os.path.join(exe_dir, "rig_localappdata")
+    check(child_env(env, Job(alpha), exe_dir, fixture)["LOCALAPPDATA"] == fixture
+          and "LOCALAPPDATA" not in child_env(env, Job(alpha), exe_dir) and "LOCALAPPDATA" not in env,
+          "a child given the fixture root runs under it; a child given none keeps the runner's LOCALAPPDATA")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = rig_localappdata(tmp)
+        with open(os.path.join(root, "Frontier Developments", "Elite Dangerous", "Options", "Graphics", "Settings.xml"), "rb") as f:
+            xml = f.read()
+        mode = re.search(rb"<StereoscopicMode>(\d+)</StereoscopicMode>", xml)
+        check(root == os.path.join(tmp, "rig_localappdata") and xml == RIG_SETTINGS_XML.encode("utf-8")
+              and mode is not None and mode.group(1) == b"4",
+              "the fixture root sits under exe_dir and its Settings.xml parses to 3D mode 4")
+    temporary = rig_localappdata(None)
+    check(os.path.isfile(os.path.join(temporary, "Frontier Developments", "Elite Dangerous", "Options", "Graphics", "Settings.xml"))
+          and os.path.basename(temporary).startswith("edvr-rig-localappdata-"),
+          "without --exe-dir the fixture root is a temporary directory with the same Settings.xml")
+    shutil.rmtree(temporary, ignore_errors=True)
 
     # plan() marks the rigs with their serial groups; the direct run_group
     # tests below want none.
@@ -1414,6 +1462,8 @@ def self_test():
         check(code == 0 and not os.path.exists(os.path.join(scratch, "edvr_logs"))
               and os.path.join(scratch, "edvr_logs", "<rig>").encode() in out.getvalue(),
               "a dry run names the rigs' log directories and makes none: %r" % out.getvalue())
+        check(not os.path.exists(os.path.join(scratch, "rig_localappdata")),
+              "a dry run makes no rig LOCALAPPDATA fixture either")
         if os.name == "nt":
             spawner(script, script.parent, dict(os.environ), scratch)(Job(timing))
             check(os.path.isdir(os.path.join(scratch, "edvr_logs", "timing")),

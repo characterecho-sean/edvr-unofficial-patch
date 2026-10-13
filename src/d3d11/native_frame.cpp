@@ -10,6 +10,7 @@
 #include "native_render_labels.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -19,6 +20,9 @@
 
 namespace {
 constexpr unsigned kPoolSize = 16;
+
+// Frame pairs latched by latchSubmit; read by nativeFrameLatchedFrames().
+std::atomic<uint64_t> g_latchedFrames{0};
 
 struct State {
     ID3D11Device* device = nullptr; // borrowed; the host owns its lifetime
@@ -381,6 +385,9 @@ HRESULT WINAPI latchSubmit(void* context, uint64_t sequence,
         !decision || decision->size != sizeof(*decision) ||
         decision->version != EDVR_NATIVE_FRAME_VERSION_1 || sequence == 0 ||
         sequence != state->sequenceFloor || state->invalidated) return E_INVALIDARG;
+    // Counted before any fix is read: beginFrame sets `began` whatever the fixes, so this counts the frame pairs the game submits
+    // (the mode watch's file-independent signal, mode_watch.cpp). Once per frame pair: the runtime latches only its first eye.
+    g_latchedFrames.fetch_add(1, std::memory_order_relaxed);
 
     if (!state->latched) {
         const bool marked = edvr::glitchFrameMarked();
@@ -453,6 +460,8 @@ void nativeFrameFovTrimDegrees(uint32_t out[3]) {
         for (size_t i = 0; i < kTrimCount; ++i) out[i] = g_trim.degrees[i];
     }
 }
+
+uint64_t nativeFrameLatchedFrames() { return g_latchedFrames.load(std::memory_order_relaxed); }
 
 }  // namespace edvr
 

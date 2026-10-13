@@ -1,11 +1,11 @@
 # EDVR: an unofficial patch for Elite Dangerous in VR
 
-DLSS and FSR upscaling for Elite in VR, and two dozen fixes for things that
-make Odyssey uncomfortable in a headset, in a native OpenXR package that takes
-about three minutes to install. [Upscaling: DLSS and
-FSR](#upscaling-dlss-and-fsr) covers the upscalers. The short list of fixes is
-under [What it fixes](#what-it-fixes), and [docs/fixes.md](docs/fixes.md)
-describes each one in full.
+DLSS, FSR and XeSS upscaling for Elite in VR, and two dozen fixes for things
+that make Odyssey uncomfortable in a headset, in a native OpenXR package that
+takes about three minutes to install. [Upscaling: DLSS, FSR and
+XeSS](#upscaling-dlss-fsr-and-xess) covers the upscalers. The short list of
+fixes is under [What it fixes](#what-it-fixes), and
+[docs/fixes.md](docs/fixes.md) describes each one in full.
 
 If something is not working, [open an
 issue](https://github.com/characterecho-sean/edvr-unofficial-patch/issues/new/choose).
@@ -59,19 +59,18 @@ with PimaxXR, it shows a notice in the headset.
 ## Install
 
 **Download `edvr-installer-<version>.zip` from the release, unzip it, and run
-`edvr-installer.exe`.** It is a single file once unzipped, with nothing else
-to extract or put in the right folder, and it carries the native
-graphics/runtime pair, the bundled OpenXR loader and its notice, `edvr.ini`,
+`edvr-installer.exe`.** It is a single file once unzipped, with nothing else to
+extract or put in the right folder, and it carries the native graphics/runtime
+pair, the bundled OpenXR loader and its notice, `edvr.ini`, `edvr-flat.ini`,
 and the optional DLSS runtime. It finds the game and keeps your settings and
 other mods working. Before it changes anything, it shows you exactly what it is
 about to do and waits for a yes, and it copies every file it replaces into
 `edvr_backup\` first. [docs/installer.md](docs/installer.md) covers its buttons
 and explains what it decides and why.
 
-Players on a flat screen, with no headset, use
-`edvr-flat-installer-<version>.zip` the same way: unzip it and run
-`edvr-flat-installer.exe`. It installs the flat edition only and carries no VR
-support.
+The same installer serves flat-screen players. Under "Install EDVR for:",
+choose "VR and flat" (the default), "VR only" or "Flat only"; the choice can be
+changed later with an ordinary Update, and no settings file is deleted by it.
 
 Because the installer is unsigned, Windows will say the program is
 unrecognised; choose **More info → Run anyway**. Every release lists the
@@ -100,8 +99,9 @@ EDVR detected the flash and let it through or never detected it at all.
 
 **Run `edvr-installer.exe` and press Save logs.** It writes one zip to your
 Desktop with the last session's two logs, `edvr_breadcrumbs.txt`, any
-`edvr_FATAL.txt` and your `edvr.ini`. That is everything listed below, all from
-the right session. Then **open an issue** and attach the zip.
+`edvr_FATAL.txt`, your `edvr.ini` and, on a VR install, the OpenXR runtime's
+`edvr_openxr.ini`. That is everything listed below, all from the right session.
+Then **open an issue** and attach the zip.
 
 If the game crashed in that session, Save logs also writes a second zip,
 `edvr-crash-dump-<time>.zip`, with the game's crash dump. The dump holds a copy
@@ -132,23 +132,28 @@ To uninstall by hand, delete `d3d11.dll` and `edvr.ini` from the game folder,
 then, in whichever `Openvr` folder you used, delete EDVR's `openvr_api.dll` and
 rename `openvr_api_orig.dll` back.
 
-## Upscaling: DLSS and FSR
+## Upscaling: DLSS, FSR and XeSS
 
 EDVR can hand each frame to an upscaler that calms the shimmer: NVIDIA's
-trained DLSS on an RTX card, or AMD's FSR 3.1, which runs on any GPU and needs
-no extra file. With Elite's HMD Quality below 1.0 the game renders smaller and
-DLSS brings it back to size, which is what saves frame time; FSR works at the
-same sizes. At 1.0 or above DLSS runs at your full render size, which is DLAA.
+trained DLSS on an RTX card; AMD's FSR 3.1, which runs on any GPU and needs no
+extra file; or Intel's XeSS-SR, which also runs on any GPU and is fastest on an
+Intel Arc card. On other cards XeSS costs more than DLSS or FSR: on an RTX 5090
+in VR it took about 1.2 ms a frame more than DLSS. With Elite's HMD Quality
+below 1.0 the game renders smaller and the upscaler brings it back to size,
+which is what saves frame time. At 1.0 or above DLSS runs at your full render
+size, which is DLAA.
 
 **Important** Do *not* change the Supersample Quality (leave at 1.0).
 
-Pick DLSS or FSR in the Anti-aliasing row on the in-headset menu's Performance
-page, or set `fix.temporal_aa = dlss` or `fsr`. It is off by default and takes
-effect at the next frame; set Elite's own anti-aliasing to Off or SMAA with it
-on. DLSS needs NVIDIA's runtime, which the installer places on a machine with
-an NVIDIA card; without an RTX card or the runtime it runs EDVR's own TAA
-instead and says so in the log. The DLSS preset, on the same page, is K by
-default (`fix.temporal_aa_model = k`). Sharpening, also on that page
+Pick DLSS, FSR or XeSS-SR in the Anti-aliasing row on the in-headset menu's
+Performance page, or set `fix.temporal_aa = dlss`, `fsr` or `xess`. It is off
+by default and takes effect at the next frame; set Elite's own anti-aliasing to
+Off or SMAA with it on. DLSS needs NVIDIA's runtime, which the installer places
+on a machine with an NVIDIA card; without an RTX card or the runtime it runs
+EDVR's own TAA instead and says so in the log. XeSS needs Intel's runtime,
+`libxess.dll`, which the installer places beside the game with its licence
+notices. The DLSS preset, on the same page, is K by default
+(`fix.temporal_aa_model = k`). Sharpening, also on that page
 (`fix.render_sharpness`, 0 to 1, off by default), runs AMD's RCAS to hand back
 some of the edge contrast the temporal pass trades for calm; 0.3 is a fair
 start.
@@ -171,8 +176,8 @@ instead of standing in the world, or sized for a screen you are not looking at.
   the splash screen's own surface.
 - The one-frame flash each time you jump or drop out of supercruise is detected
   and not sent, so the runtime holds the previous frame.
-- For shimmer and frame time there is DLSS or FSR, under [Upscaling: DLSS and
-  FSR](#upscaling-dlss-and-fsr).
+- For shimmer and frame time there is DLSS, FSR or XeSS, under [Upscaling:
+  DLSS, FSR and XeSS](#upscaling-dlss-fsr-and-xess).
 - Over planets, Elite culled terrain with a head pose about 42 ms older than
   the one it drew with, so squares of ground at the edges of view went undrawn
   when you moved your head. EDVR answers the game's request for the head pose
@@ -206,9 +211,9 @@ first person 3D** and does not try; the flat screen stays flat.
 
 It gives you no capability you do not already have: inside the camera you
 cannot act, and Explorer Cam changes only where the camera is and what you see
-from it. While it is on, it writes the free camera's pose, the camera's own
-key presses, and how your commander's avatar is drawn, on your machine only,
-and gives them back when you leave; it touches nothing shared.
+from it. While it is on, it writes the free camera's pose, the camera's own key
+presses, and how your commander's avatar is drawn, on your machine only, and
+gives them back when you leave; it touches nothing shared.
 [docs/explorer-cam.md](docs/explorer-cam.md) covers setting it up and what it
 does under the hood, safeguards included.
 
@@ -279,8 +284,8 @@ to Windows' real `d3d11.dll`, and its `openvr_api.dll` is EDVR's own OpenXR
 runtime. Most of the fixes work on the frames and never touch the game. A few
 change the running game in memory: by default the resolution fix rewrites
 twelve numbers in the game's code, and two of the game's imports are always
-redirected so that EDVR handles VR startup and the menu's keyboard. DLSS, FSR
-and TAA hook the game's object updates while they are on.
+redirected so that EDVR handles VR startup and the menu's keyboard. DLSS, FSR,
+XeSS and TAA hook the game's object updates while they are on.
 [docs/fixes.md](docs/fixes.md#what-the-fixes-touch) lists each change, its
 safeguards, and which settings turn it off.
 

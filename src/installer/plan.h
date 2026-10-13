@@ -29,7 +29,6 @@ namespace edvr::installer {
 // build" without reading the payload itself.
 struct PayloadInfo {
     std::string version;
-    std::string profile = "vr"; // fixed by the artifact, never inferred from edvr.ini
     std::string descriptorText;
     std::string descriptorSha;
     bool        haveD3d11 = false;
@@ -46,9 +45,13 @@ struct PayloadInfo {
     std::string openxrLoaderSha;
     bool        haveOpenxrLicense = false;
     std::string openxrLicenseSha;
-    // The shipped default settings of this edition: edvr.ini's text for VR,
-    // edvr-flat.ini's for flat (state.h: settingsLeafFor names the file it becomes).
+    // The shipped default settings, one text per settings file (state.h: settingsLeafFor
+    // names each). The VR edition carries edvr.ini; both editions carry edvr-flat.ini. The
+    // scope the install was asked for decides which of these it writes.
+    bool        haveIni = false;      // edvr.ini
     std::string iniText;
+    bool        haveFlatIni = false;  // edvr-flat.ini
+    std::string flatIniText;
 };
 
 // The folder as it is right now.
@@ -71,6 +74,8 @@ struct Survey {
     DllInfo              d3d11;       // <game>\d3d11.dll
     DllInfo              openxrLoader; // <game>\Openvr\win64\openxr_loader.dll
     DllInfo              nativeConfig; // edvr_openxr.ini
+    // edvr_openxr.ini's text, read only when the file is present: a file is EDVR's by what it says as well as by its hash (planner).
+    std::string          nativeConfigText;
     DllInfo              openxrLicense; // Khronos notice
     std::vector<DllInfo> otherD3d11;  // d3d11_*.dll beside it: chain targets, ours or theirs
     bool                 iniPresent = false;
@@ -83,9 +88,11 @@ struct Survey {
     // operation and a VR one never touch each other's tuning.
     bool        flatIniPresent = false;
     std::string flatIniText;
-    // The shipped settings of the installed edition's version, if kept. One file
-    // for both editions: it belongs to whichever the record says is installed.
+    // The shipped defaults each settings file was last merged against: edvr.ini.base
+    // and edvr-flat.ini.base (state.h). Each is only as good as the install that
+    // wrote it; the planner decides whether it describes the file (planInstall).
     std::string baseIniText;
+    std::string flatBaseIniText;
 
     // NVIDIA's DLSS runtime beside the game, and whether this machine has a
     // card for it: an NVIDIA adapter by DXGI's vendor id. A machine with an
@@ -109,6 +116,13 @@ struct Survey {
     // a trip through the launcher's file verification.
     std::vector<std::wstring> openvrOrigInBackups;
 
+    // The tool's receipts for this folder (state.h readToolReceipts). They are provenance for the files they list: a file the tool placed
+    // is EDVR's, by its hash, whether or not the installer's own record lists it.
+    std::vector<ToolReceipt> toolReceipts;
+    // The game's original runtime the tool kept beside EDVR's, when the tool's receipt and the file itself prove it (adoptToolOriginal in
+    // plan.cpp). Its kind is Absent when nothing is adopted; it is also first in openvrOrigInBackups when it is.
+    DllInfo toolOriginal;
+
     InstallState state;
     // Which Elite Dangerous the folder's executable is; the gate refuses
     // everything but OdysseyQualified and says why per case.
@@ -118,9 +132,24 @@ struct Survey {
 
 Survey surveyTarget(const GameInstall& game);
 
-// The state record is optional; a canonical runtime descriptor still identifies
-// the installed edition after a developer install or lost installer record.
+// The state record is optional; a canonical descriptor (schema 1 or 2, by its exact
+// bytes) still identifies the installed edition after a tool install or a lost
+// installer record. Its scope names the edition: both and vr are "vr", flat is "flat".
 std::string installedProfile(const Survey& survey);
+
+// The scope the folder's install covers: both, vr or flat, from the record (recordedScope) or, without a record, from a canonical
+// descriptor. Empty when the folder has neither.
+std::string installedScope(const Survey& survey);
+
+// The scope a descriptor text declares when it is one of EDVR's own canonical texts (both, vr or flat), else empty. installedScope
+// reads the same texts from the file on disk; the log bundler reads the file's text.
+std::string canonicalDescriptorScope(const std::string& text);
+
+// The scope an install runs when none was asked for: the folder's own, else both.
+std::string defaultScope(const Survey& survey);
+
+// The installer record names a different scope than the descriptor on disk: an install older than the files here.
+bool installRecordStale(const Survey& survey);
 
 // Whether the folder holds a settings file `profile` would read: its own, or, for
 // flat, the shared edvr.ini that the flat runtime falls back to until it has one
@@ -133,9 +162,11 @@ struct Options {
     // install with only one of them is a support thread waiting to happen --
     // the log says a fix stood down, and the person reading it has no idea they
     // opted out of it. What this installer carries is what it installs.
-    bool keepSettings = true;   // merge the edition's settings file rather than replace it
+    // What the install covers: "both" (VR runtime and both settings files), "vr" (runtime and edvr.ini) or "flat" (edvr-flat.ini,
+    // no runtime). Empty means defaultScope: the scope the folder already has, else both.
+    std::string scope;
+    bool keepSettings = true;   // merge each settings file the scope installs rather than replace it
     bool repair = false;        // rewrite our files even when they look right
-    bool convertProfile = false; // explicit edition conversion
     bool removeSettings = false;  // uninstall: delete the installed edition's settings file too
     std::wstring backupStamp;   // folder name under edvr_backup\; caller supplies the clock
     std::string  nowUtc;        // stamped into the install record
@@ -188,7 +219,9 @@ struct Plan {
 };
 
 Plan planInstall(const Survey& survey, const Options& options, const PayloadInfo& payload);
-Plan planUninstall(const Survey& survey, const Options& options);
+// The payload says which OpenXR and XeSS files are EDVR's by their bytes. Without one (an empty PayloadInfo) only the record proves a
+// file, which can only keep more files than the full proof would: callers that remove files pass the payload the installer carries.
+Plan planUninstall(const Survey& survey, const Options& options, const PayloadInfo& payload = PayloadInfo());
 
 // The one-paragraph summary shown before anything is done.
 std::string planSummary(const Plan& plan);

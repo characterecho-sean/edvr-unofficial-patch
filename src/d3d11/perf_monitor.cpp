@@ -1,5 +1,6 @@
 #include "perf_monitor.h"
 #include "config_refresh_line.h"
+#include "cross_profile_cost.h"
 #include "engine_motion_cpu.h"
 #include "frame_ticks.h"
 #include "gpu_frame_timing.h"
@@ -22,6 +23,7 @@
 #include "../common/guard.h"
 #include "../common/log.h"
 #include "../common/perf_math.h"
+#include "../common/runtime_profile.h"  // runtimeFlatProfile, runtimeVrProfile: which profile the cross-profile cost line names
 #include "../common/slow_test.h"
 #include "../common/timing.h"
 #include "../common/vtable_hook.h"  // vtableWatchDumpRecent, the flip timeline
@@ -120,6 +122,11 @@ void logEngineMotion(const emcpu::WindowReport& r) {
     emcpu::formatOtherParts(text, sizeof(text), r);
     Log::get().note("%s", text);
 }
+
+// What each profile pays for the other (cross_profile_cost.h): the 30 s window's lines for the owners that ran hooks in the window, and the
+// 5-minute session lines. Read once a frame at the owned Present's boundary (perfMonitorCrossProfileFrame), because perfMonitorFrame runs
+// only while VR is active: a flat frame returns before it, and the flat profile's window line would never print.
+cross_profile::Reporter g_crossProfile;
 
 // ---- NvAPI, the two entry points the page wants ---------------------------
 typedef void* (*PFN_NvQueryInterface)(uint32_t id);
@@ -1003,6 +1010,17 @@ void logNativeBenchmark(State& s, const NativeBenchmarkReport& report) {
 }
 
 }  // namespace
+
+void perfMonitorProfileSwitch() {
+    // A zero clock reads as "no previous frame", which perfMonitorFrame already gives the first frame and the 5 s loading gaps (presentMs 0).
+    g_s.lastQpc = 0;
+}
+
+void perfMonitorCrossProfileFrame() {
+    cross_profile::Reporter::Lines lines;
+    g_crossProfile.frame(nowMs(), static_cast<uint64_t>(qpcFrequency()), runtimeFlatProfile(), runtimeVrProfile(), lines);
+    for (int i = 0; i < lines.count; ++i) Log::get().note("%s", lines.text[i]);
+}
 
 void perfMonitorFrame(ID3D11Device* dev) {
     State& s = g_s;

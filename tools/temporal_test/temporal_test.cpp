@@ -101,8 +101,18 @@ int main() {
         check(edvr::temporalModeEnabledFor(mode, true) && edvr::temporalModeEnabledFor(mode, false),
               "existing temporal modes stay active in flat and VR");
     }
-    check(edvr::temporalModeEnabledFor("XeSS", true) && !edvr::temporalModeEnabledFor("XeSS", false),
-          "XeSS producers arm only for flat profile, including mixed-case ini value");
+    check(edvr::temporalModeEnabledFor("XeSS", true) && edvr::temporalModeEnabledFor("XeSS", false),
+          "XeSS producers arm in flat and VR, including mixed-case ini value");
+    check(edvr::temporalEngineFor("XeSS") == edvr::TemporalEngine::Intel &&
+          edvr::temporalExternalEngine("xess") && edvr::temporalEngineFor("dlss") == edvr::TemporalEngine::Nvidia,
+          "xess maps to the Intel engine, an external one, in VR");
+    check(edvr::temporalEngineForProfile("xess", true) == edvr::TemporalEngine::Own &&
+          edvr::temporalEngineForProfile("xess", false) == edvr::TemporalEngine::Intel &&
+          !edvr::temporalExternalEngineFor("xess", true) && edvr::temporalExternalEngineFor("xess", false),
+          "flat keeps xess as Own for the trained readers; VR sees Intel");
+    check(edvr::temporalEngineForProfile("fsr", true) == edvr::TemporalEngine::Amd &&
+          edvr::temporalEngineForProfile("dlaa", false) == edvr::TemporalEngine::Nvidia,
+          "the profile-aware engine leaves the other engines unchanged");
     check(!edvr::temporalModeEnabledFor("off", true) && !edvr::temporalModeEnabledFor("off", false) &&
           !edvr::temporalModeEnabledFor("bogus", true) && !edvr::temporalModeEnabledFor("bogus", false),
           "off and unknown modes stay inactive in both profiles");

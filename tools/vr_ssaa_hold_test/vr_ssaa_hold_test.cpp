@@ -68,7 +68,10 @@ void parseCases() {
     int m = -1;
     check(parseStereoscopicMode("<StereoscopicMode>3</StereoscopicMode>", &m) && m == 3, "mode 3 parses");
     check(parseStereoscopicMode("<A/>\r\n  <StereoscopicMode>\t5 \r\n</StereoscopicMode>", &m) && m == 5, "mode 5 with whitespace parses");
-    check(parseStereoscopicMode("<StereoscopicMode>0<", &m) && m == 0, "mode 0 parses (off)");
+    check(parseStereoscopicMode("<StereoscopicMode>0</StereoscopicMode>", &m) && m == 0, "mode 0 parses (off)");
+    m = -7;
+    check(!parseStereoscopicMode("<StereoscopicMode>0<", &m) && m == -7, "a lone '<' after the number is refused (no closing tag)");
+    check(!parseStereoscopicMode("<StereoscopicMode>0</Stereo", &m) && m == -7, "a partial closing tag is refused");
     check(parseStereoscopicMode("<StereoscopicMode>6</StereoscopicMode>", &m) && m == 6, "mode 6 (the top of the game's clamp) parses");
     m = -7;
     check(!parseStereoscopicMode("<StereoscopicMode>7</StereoscopicMode>", &m) && m == -7, "mode 7 is refused and *mode is untouched");
@@ -101,6 +104,15 @@ void decideCases() {
     check(!d.hold && same(d.value, 0.5f), "VR, mode unknown: not held, the requested 0.5 passes");
     d = decide(true, false, 3, 0.5f);
     check(!d.hold && same(d.value, 0.5f), "VR, mode unknown even with a stale 3: not held");
+    // A profile change: to flat while held releases, to VR while live holds, and nothing else acts.
+    using edvr::ssaahold::ProfileAction;
+    using edvr::ssaahold::profileChangeAction;
+    check(profileChangeAction(false, true, true) == ProfileAction::Release, "held, profile to flat (not allowed), VR live: released");
+    check(profileChangeAction(true, false, true) == ProfileAction::Release, "held, VR not live: released");
+    check(profileChangeAction(true, true, false) == ProfileAction::Engage, "not held, profile to VR while VR live: held");
+    check(profileChangeAction(false, true, false) == ProfileAction::None, "not held, flat profile: nothing to do");
+    check(profileChangeAction(true, true, true) == ProfileAction::None, "held and allowed while live: nothing to do");
+    check(profileChangeAction(false, false, false) == ProfileAction::None, "flat and not live, not held: nothing to do");
 }
 
 void toastCases() {

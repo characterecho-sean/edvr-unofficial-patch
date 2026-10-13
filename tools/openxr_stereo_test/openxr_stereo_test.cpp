@@ -2,6 +2,7 @@
 #define NOMINMAX
 #include "../../src/openxr/d3d11_stereo.h"
 #include "../../src/openxr/gpu_work_observer.h"
+#include "../../src/openxr/flat_notice_placement.h"
 #include "../../src/common/system_d3d11.h"
 #include <cstdio>
 #include <cstring>
@@ -124,6 +125,61 @@ struct Fixture {
     uint32_t value=0;std::memcpy(&value,static_cast<const char*>(map.pData)+y*map.RowPitch+x*4,4);runtime.context->Unmap(read.Get(),0);return value;
   }
 };
+// The whole of one swapchain image, read back row by row (the fixture's pixel() reads one texel per copy).
+std::vector<uint32_t> readWhole(Fixture& f,unsigned eye,unsigned image){
+  auto* source=f.runtime.eyes[eye].images[image].Get();D3D11_TEXTURE2D_DESC desc{};source->GetDesc(&desc);
+  desc.Usage=D3D11_USAGE_STAGING;desc.BindFlags=0;desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+  ComPtr<ID3D11Texture2D> read;check(SUCCEEDED(f.runtime.device->CreateTexture2D(&desc,nullptr,&read)),"notice readback allocation");
+  f.runtime.context->CopyResource(read.Get(),source);D3D11_MAPPED_SUBRESOURCE map{};
+  std::vector<uint32_t> pixels(size_t(desc.Width)*desc.Height,0);
+  if(FAILED(f.runtime.context->Map(read.Get(),0,D3D11_MAP_READ,0,&map))){check(false,"notice readback map");return pixels;}
+  for(unsigned y=0;y<desc.Height;++y)std::memcpy(&pixels[size_t(y)*desc.Width],static_cast<const char*>(map.pData)+size_t(y)*map.RowPitch,size_t(desc.Width)*4);
+  f.runtime.context->Unmap(read.Get(),0);return pixels;
+}
+// The flat notice (renderNotice, the separate device's path): each eye image is cleared black outside the panel, and the panel's white
+// text sits centred on that eye's optical centre, which the view's own canted fov puts off the image middle.
+void noticeSelfTest(){
+  Fixture f;
+  for(unsigned i=0;i<2;++i)f.sizes[i].recommendedImageRectWidth=f.sizes[i].recommendedImageRectHeight=512;
+  f.runtime.width=f.runtime.height=512;
+  check(f.init(true)==XR_SUCCESS,"notice initialize on an owned device");
+  check(f.renderer.noticeFormatSupported(),"notice: the renderer's format is one the notice converts to");
+  // Canted views: the left eye's straight-ahead lies left of centre, the right eye's right of centre.
+  f.views[0].fov={-0.6f,0.9f,0.7f,-0.5f};
+  f.views[1].fov={-0.9f,0.6f,0.5f,-0.7f};
+  XrCompositionLayerProjection layer{};
+  check(f.renderer.renderNotice(f.views,space,layer)==XR_SUCCESS,"notice renders");
+  check(layer.space==space&&layer.viewCount==2&&layer.views&&layer.views[0].fov.angleLeft==f.views[0].fov.angleLeft&&
+        layer.views[1].fov.angleLeft==f.views[1].fov.angleLeft,"notice layer carries each view's own fov");
+  uint32_t pw=0,ph=0;
+  check(f.renderer.noticeSize(0,&pw,&ph)&&pw==205&&ph>0,"notice panel is 40% of the 512 px eye image");
+  for(unsigned eye=0;eye<2;++eye){
+    const auto pixels=readWhole(f,eye,0);
+    const auto& fov=f.views[eye].fov;NoticeRect rect{};
+    check(flatNoticeRect(512,512,int32_t(pw),int32_t(ph),std::tan(fov.angleLeft),std::tan(fov.angleRight),std::tan(fov.angleUp),std::tan(fov.angleDown),rect),
+          "notice expected rectangle");
+    const uint32_t black=0xff000000u,white=0xffffffffu;
+    bool outsideBlack=true;int minX=1<<20,minY=1<<20,maxX=-1,maxY=-1;unsigned whites=0;
+    for(unsigned y=0;y<512;++y)for(unsigned x=0;x<512;++x){
+      const uint32_t p=pixels[size_t(y)*512+x];
+      const bool inside=int(x)>=rect.x&&int(x)<rect.x+rect.width&&int(y)>=rect.y&&int(y)<rect.y+rect.height;
+      if(!inside){if(p!=black)outsideBlack=false;continue;}
+      if(p==white){++whites;minX=std::min(minX,int(x));maxX=std::max(maxX,int(x));minY=std::min(minY,int(y));maxY=std::max(maxY,int(y));}
+    }
+    check(outsideBlack,eye?"notice: right eye, outside the panel is black":"notice: left eye, outside the panel is black");
+    check(whites>0&&minX>=rect.x&&maxX<rect.x+rect.width&&minY>=rect.y&&maxY<rect.y+rect.height,
+          eye?"notice: right eye, white text lies inside the panel":"notice: left eye, white text lies inside the panel");
+    // The ink's bounds centre on the panel's centre: the lines are centred and the margins are equal (tolerance for glyph ink).
+    const double centreX=(minX+maxX)/2.0,centreY=(minY+maxY)/2.0;
+    const double panelX=rect.x+rect.width/2.0,panelY=rect.y+rect.height/2.0;
+    check(std::abs(centreX-panelX)<=3.0&&std::abs(centreY-panelY)<=6.0,
+          eye?"notice: right eye, the text is centred on its optical centre":"notice: left eye, the text is centred on its optical centre");
+    // The canted centre is off the image middle, in the direction its fov says.
+    const double opticalX=rect.x+rect.width/2.0;
+    check(eye==0?opticalX<256.0-40.0:opticalX>256.0+40.0,eye?"notice: right eye's centre is right of the middle":"notice: left eye's centre is left of the middle");
+  }
+}
+
 unsigned encode(double linear){return unsigned(std::lround((linear<=.0031308?12.92*linear:1.055*std::pow(linear,1/2.4)-.055)*255));}
 
 ComPtr<ID3D11Texture2D> pattern(Fixture& f,bool bgra) {
@@ -868,6 +924,7 @@ void embeddedShaderPin() {
 }
 
 int selfTest(){
+  noticeSelfTest();
   for(bool unorm:{false,true}){
     Fixture f;f.runtime.unorm=unorm;f.runtime.grow=true;check(f.init()==XR_SUCCESS,"initialize actual swapchains/RTVs/shaders");
     check(f.runtime.formatCalls==3,"growing format count retry");XrCompositionLayerProjection layer{};

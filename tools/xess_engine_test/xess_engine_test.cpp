@@ -90,6 +90,22 @@ bool gateSelfTest() {
                  "GPU gate fails real bridge and runtime errors");
 }
 
+// The slot check runs before any device use, so a null context proves the
+// range without a GPU: slot 3 is refused by range, and slot 2 (the last of
+// kUpscalerSlots = 3) passes it and stops at the context check.
+bool slotRangeSelfTest() {
+    const char* why = nullptr;
+    const bool refusedFourth = !edvr::xessEvaluate(nullptr, 3, nullptr, nullptr, nullptr, nullptr,
+                                                   1, 1, 1, 1, 0.0f, 0.0f, false, false, &why);
+    if (!check(refusedFourth && why && std::strstr(why, "slot 3") != nullptr,
+               "upscaler slot 3 is refused by range")) return false;
+    why = nullptr;
+    const bool acceptedLast = !edvr::xessEvaluate(nullptr, 2, nullptr, nullptr, nullptr, nullptr,
+                                                  1, 1, 1, 1, 0.0f, 0.0f, false, false, &why);
+    return check(acceptedLast && why && std::strstr(why, "invalid XeSS") != nullptr,
+                 "upscaler slot 2 passes the range check");
+}
+
 enum class Probe { Ready, Skip, Fail };
 
 Probe hardwareAdapterPresent() {
@@ -222,7 +238,7 @@ bool hasPixel(ID3D11Device* device, ID3D11DeviceContext* context, ID3D11Texture2
 
 bool flight(ID3D11Device* device, ID3D11DeviceContext* context,
             UINT width, UINT height, UINT outW, UINT outH, bool hdr,
-            const char** failureReason = nullptr) {
+            const char** failureReason = nullptr, unsigned slot = 0) {
     if (failureReason) *failureReason = nullptr;
     const DXGI_FORMAT colorFormat = hdr ? DXGI_FORMAT_R11G11B10_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM;
     const DXGI_FORMAT outFormat = hdr ? DXGI_FORMAT_R16G16B16A16_FLOAT : colorFormat;
@@ -240,7 +256,7 @@ bool flight(ID3D11Device* device, ID3D11DeviceContext* context,
                clear(device, context, motion.Get(), farDepth), "clear render-grid inputs")) return false;
     for (unsigned frame = 0; frame < 5; ++frame) {
         const char* why = nullptr;
-        if (!edvr::xessEvaluate(context, 0, color.Get(), depth.Get(), motion.Get(),
+        if (!edvr::xessEvaluate(context, slot, color.Get(), depth.Get(), motion.Get(),
                                 output.Get(), width, height, outW, outH,
                                 0.0f, 0.0f, frame == 0, hdr, &why)) {
             if (failureReason) *failureReason = why;
@@ -250,8 +266,8 @@ bool flight(ID3D11Device* device, ID3D11DeviceContext* context,
         }
     }
     if (!check(hasPixel(device, context, output.Get()), "D3D11 readback nonzero center pixel")) return false;
-    std::fprintf(stderr, "xess_engine_test: PASS %s %ux%u -> %ux%u, 5 frames\n",
-                 hdr ? "HDR" : "LDR", width, height, outW, outH);
+    std::fprintf(stderr, "xess_engine_test: PASS %s %ux%u -> %ux%u, 5 frames slot=%u\n",
+                 hdr ? "HDR" : "LDR", width, height, outW, outH, slot);
     return true;
 }
 
@@ -292,6 +308,136 @@ bool rebindAfterFailedFeature(ID3D11Device* device, ID3D11DeviceContext* context
                "failure reason remains readable after old State is destroyed")) return false;
     return flight(replacement.Get(), replacementContext.Get(), 640, 360, 640, 360, false);
 }
+
+// Upscaler slots keep separate features. Slot 1 changing size builds slot 1
+// alone and leaves slot 0 unbuilt; slot 0 keeps its feature while slot 1 runs;
+// slot 3 is refused; the profile switch's release frees every slot, and a freed
+// slot rebuilds on its next use. Builds are counted from the backend's start,
+// so every check is against a baseline taken after the release.
+bool slotIsolation(ID3D11Device* device, ID3D11DeviceContext* context) {
+    edvr::xessReleaseFeatures();
+    const uint32_t base0 = edvr::xessTestFeatureCreations(0);
+    const uint32_t base1 = edvr::xessTestFeatureCreations(1);
+    if (!check(!edvr::xessTestFeatureLive(0) && !edvr::xessTestFeatureLive(1),
+               "release leaves no slot live")) return false;
+    if (!flight(device, context, 640, 360, 1280, 720, false, nullptr, 0)) return false;
+    if (!check(edvr::xessTestFeatureLive(0) && !edvr::xessTestFeatureLive(1) &&
+               edvr::xessTestFeatureCreations(0) == base0 + 1 && edvr::xessTestFeatureCreations(1) == base1,
+               "slot 0 builds alone")) return false;
+    if (!flight(device, context, 800, 450, 1600, 900, false, nullptr, 1)) return false;
+    if (!check(edvr::xessTestFeatureLive(0) && edvr::xessTestFeatureLive(1) &&
+               edvr::xessTestFeatureCreations(0) == base0 + 1 && edvr::xessTestFeatureCreations(1) == base1 + 1,
+               "slot 1 at another size builds without rebuilding slot 0")) return false;
+    if (!flight(device, context, 640, 360, 1280, 720, false, nullptr, 0)) return false;
+    if (!check(edvr::xessTestFeatureCreations(0) == base0 + 1,
+               "slot 0 keeps its feature while slot 1 runs")) return false;
+    const char* refusal = nullptr;
+    if (!check(!flight(device, context, 640, 360, 1280, 720, false, &refusal, 3) &&
+               refusal && std::strstr(refusal, "slot 3") != nullptr,
+               "upscaler slot 3 is refused on the GPU path")) return false;
+    edvr::xessReleaseFeatures();
+    if (!check(!edvr::xessTestFeatureLive(0) && !edvr::xessTestFeatureLive(1) &&
+               edvr::xessTestFeatureCreations(0) == base0 + 1 && edvr::xessTestFeatureCreations(1) == base1 + 1,
+               "release frees every slot without counting a rebuild")) return false;
+    if (!flight(device, context, 800, 450, 1600, 900, false, nullptr, 1)) return false;
+    return check(edvr::xessTestFeatureLive(1) && edvr::xessTestFeatureCreations(1) == base1 + 2,
+                 "a released slot rebuilds on its next use");
+}
+
+// Two eyes at an eye-like size, evaluated alternately (slot 0, slot 1, slot 0, ...) for five frames each. Both pass, and
+// each eye builds its feature once: the other eye's evaluations never rebuild it, and the outputs hold their own pixels.
+bool eyeAlternation(ID3D11Device* device, ID3D11DeviceContext* context) {
+    edvr::xessReleaseFeatures();
+    const uint32_t base0 = edvr::xessTestFeatureCreations(0);
+    const uint32_t base1 = edvr::xessTestFeatureCreations(1);
+    constexpr UINT size = 1000;
+    constexpr UINT outSize = 2000;
+    const UINT inBinds = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+    const UINT outBinds = D3D11_BIND_RENDER_TARGET | D3D11_BIND_UNORDERED_ACCESS;
+    ComPtr<ID3D11Texture2D> color[2], depth[2], motion[2], output[2];
+    constexpr FLOAT lit[4] = {0.25f, 0.5f, 0.75f, 1.0f};
+    constexpr FLOAT farDepth[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    for (unsigned eye = 0; eye < 2; ++eye) {
+        color[eye] = texture(device, size, size, DXGI_FORMAT_R8G8B8A8_UNORM, inBinds);
+        depth[eye] = texture(device, size, size, DXGI_FORMAT_R32_FLOAT, inBinds);
+        motion[eye] = texture(device, size, size, DXGI_FORMAT_R16G16_FLOAT, inBinds);
+        output[eye] = texture(device, outSize, outSize, DXGI_FORMAT_R8G8B8A8_UNORM, outBinds);
+        if (!check(color[eye] && depth[eye] && motion[eye] && output[eye], "create eye textures")) return false;
+        if (!check(clear(device, context, color[eye].Get(), lit) &&
+                   clear(device, context, depth[eye].Get(), farDepth) &&
+                   clear(device, context, motion[eye].Get(), farDepth), "clear eye inputs")) return false;
+    }
+    for (unsigned frame = 0; frame < 5; ++frame) {
+        for (unsigned eye = 0; eye < 2; ++eye) {
+            const char* why = nullptr;
+            if (!edvr::xessEvaluate(context, eye, color[eye].Get(), depth[eye].Get(), motion[eye].Get(),
+                                    output[eye].Get(), size, size, outSize, outSize,
+                                    0.0f, 0.0f, frame == 0, false, &why)) {
+                std::fprintf(stderr, "xess_engine_test: eye %u frame %u refused: %s\n", eye, frame,
+                             why ? why : "unspecified");
+                return check(false, "alternating eye evaluation passes");
+            }
+        }
+    }
+    for (unsigned eye = 0; eye < 2; ++eye)
+        if (!check(hasPixel(device, context, output[eye].Get()), "alternating eye output has a nonzero pixel")) return false;
+    if (!check(edvr::xessTestFeatureCreations(0) == base0 + 1 && edvr::xessTestFeatureCreations(1) == base1 + 1,
+               "each eye builds its feature once; alternation rebuilds neither")) return false;
+    std::fprintf(stderr, "xess_engine_test: PASS alternating eyes %ux%u -> %ux%u, 5 frames each slot=0,1\n",
+                 size, size, outSize, outSize);
+    return true;
+}
+// Forty evaluations alternate over slots 0 and 1 at the eye size. Timing is read back without waiting, so the rig sweeps
+// (bounded) until nothing is unread, then reports each slot. Each slot must show both D3D11 and D3D12 samples, with
+// nonzero execute and wait medians.
+bool bridgeTiming(ID3D11Device* device, ID3D11DeviceContext* context) {
+    // A fresh window: the lines below cover only the evaluations of this case.
+    edvr::XessBridgeTiming discard;
+    for (unsigned slot = 0; slot < 2; ++slot) edvr::xessBridgeTimingReport(context, slot, &discard);
+    constexpr UINT size = 1000;
+    constexpr UINT outSize = 2000;
+    const UINT inBinds = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+    const UINT outBinds = D3D11_BIND_RENDER_TARGET | D3D11_BIND_UNORDERED_ACCESS;
+    ComPtr<ID3D11Texture2D> color[2], depth[2], motion[2], output[2];
+    constexpr FLOAT lit[4] = {0.25f, 0.5f, 0.75f, 1.0f};
+    constexpr FLOAT farDepth[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    for (unsigned eye = 0; eye < 2; ++eye) {
+        color[eye] = texture(device, size, size, DXGI_FORMAT_R8G8B8A8_UNORM, inBinds);
+        depth[eye] = texture(device, size, size, DXGI_FORMAT_R32_FLOAT, inBinds);
+        motion[eye] = texture(device, size, size, DXGI_FORMAT_R16G16_FLOAT, inBinds);
+        output[eye] = texture(device, outSize, outSize, DXGI_FORMAT_R8G8B8A8_UNORM, outBinds);
+        if (!check(color[eye] && depth[eye] && motion[eye] && output[eye], "create bridge timing textures")) return false;
+        if (!check(clear(device, context, color[eye].Get(), lit) &&
+                   clear(device, context, depth[eye].Get(), farDepth) &&
+                   clear(device, context, motion[eye].Get(), farDepth), "clear bridge timing inputs")) return false;
+    }
+    for (unsigned n = 0; n < 40; ++n) {
+        const unsigned eye = n % 2;
+        const char* why = nullptr;
+        if (!edvr::xessEvaluate(context, eye, color[eye].Get(), depth[eye].Get(), motion[eye].Get(),
+                                output[eye].Get(), size, size, outSize, outSize,
+                                0.0f, 0.0f, n < 2, false, &why)) {
+            std::fprintf(stderr, "xess_engine_test: bridge timing evaluation %u refused: %s\n", n,
+                         why ? why : "unspecified");
+            return check(false, "bridge timing evaluations pass");
+        }
+    }
+    const ULONGLONG deadline = GetTickCount64() + 5000;
+    while (edvr::xessBridgeTimingSweep(context) != 0 && GetTickCount64() < deadline) Sleep(2);
+    for (unsigned slot = 0; slot < 2; ++slot) {
+        edvr::XessBridgeTiming timing;
+        // The engine logs the line itself (timing.line holds the same text), so the build log carries the measured numbers.
+        if (!check(edvr::xessBridgeTimingReport(context, slot, &timing), "bridge timing reports slot")) return false;
+        if (!check(timing.d11Samples > 0 && timing.d12Samples > 0 &&
+                   timing.executeMedian > 0.0 && timing.waitMedian > 0.0,
+                   "bridge timing reads D3D11 and D3D12 with nonzero execute and wait")) return false;
+        if (!check(timing.cpuEvals > 0 && timing.evalMedian > 0.0 && timing.allocMedian >= 0.0 &&
+                   timing.blocked <= timing.cpuEvals && timing.submitTimed,
+                   "bridge timing carries CPU spans with nonzero eval time")) return false;
+    }
+    std::fprintf(stderr, "xess_engine_test: PASS bridge timing, 40 evals on slots 0,1\n");
+    return true;
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -302,7 +448,7 @@ int main(int argc, char** argv) {
     }
     if (std::strcmp(argv[1], "--self-test") == 0)
         return check(edvr::xessBuiltIn(), "backend compiled into rig") &&
-               latchSelfTest() && gateSelfTest() ? 0 : 1;
+               latchSelfTest() && gateSelfTest() && slotRangeSelfTest() ? 0 : 1;
     const bool optional = std::strcmp(argv[1], "--gpu-test-if-available") == 0;
     if (!optional && std::strcmp(argv[1], "--gpu-test") != 0) return 2;
     if (optional) {
@@ -346,7 +492,10 @@ int main(int argc, char** argv) {
                       flight(device.Get(), context.Get(), 640, 360, 1280, 720, true);
     edvr::xessReleaseFeatures();
     const bool recreated = good && flight(device.Get(), context.Get(), 640, 360, 1280, 720, true);
-    const bool rebound = recreated && rebindAfterFailedFeature(device.Get(), context.Get());
+    const bool slots = recreated && slotIsolation(device.Get(), context.Get());
+    const bool eyes = slots && eyeAlternation(device.Get(), context.Get());
+    const bool bridge = eyes && bridgeTiming(device.Get(), context.Get());
+    const bool rebound = bridge && rebindAfterFailedFeature(device.Get(), context.Get());
     edvr::xessShutdown();
     return rebound ? 0 : 1;
 }

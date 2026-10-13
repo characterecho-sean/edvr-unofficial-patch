@@ -2401,7 +2401,7 @@ void uiDepthConfigure(Config& cfg) {
     g_keyOn = g_passOn;
     // The legacy fixed bias is NVIDIA-only. Coverage and adaptive history
     // are used by every external, trained engine (NVIDIA's or AMD's).
-    g_trained = temporalExternalEngine(aa);
+    g_trained = temporalExternalEngineFor(aa, runtimeFlatProfile());
     // The direct list: the flight HUD, then the drives' smoke.
     g_familyCount = 0;
     g_families[g_familyCount++] = kFlightHud;

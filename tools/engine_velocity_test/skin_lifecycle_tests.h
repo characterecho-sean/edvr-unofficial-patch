@@ -1246,7 +1246,7 @@ inline void run(const lt::Harness& h) {
     }
     // the flat profile has no target 7: skinned draws in it, on foot or in an eye pass, create none, the views carry none and the log says nothing of one
     {
-        const auto previous = edvr::g_runtimeProfile;
+        const edvr::RuntimeProfile previous = edvr::g_runtimeProfile;
         edvr::g_runtimeProfile = edvr::RuntimeProfile::Flat;
         const size_t flatMark = lt::g_log.size();
         Fixture::SourceEye flatSource;

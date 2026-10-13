@@ -71,6 +71,8 @@ struct State {
   uint32_t width[2]{}, height[2]{};
   uint32_t recW=0,recH=0; bool flipped[2]{};
   uint32_t frameCounter = 0;
+  // The jitter cycle each eye last advertised (jitterCycleFor): 8 for every engine but Intel's XeSS, whose ratio sets it.
+  uint32_t jitterCycle[2]{};
   bool treated[2]{};
   History history[2];
   uint64_t continuity[2]{};
@@ -162,15 +164,13 @@ bool sameDevice(ID3D11Device* expected, ID3D11Texture2D* source) {
 }
 Settings readConfig() {
   Settings s; auto& c=edvr::Config::get(); const auto mode=c.getString("fix.temporal_aa","off");
-  // XeSS is offered only by the flat runtime. A copied flat setting cannot
-  // silently start the VR eye path with EDVR's own TAA under a XeSS label.
-  s.on=edvr::temporalModeEnabled(mode) && _stricmp(mode.c_str(),"xess")!=0;
+  s.on=edvr::temporalModeEnabled(mode);
   s.engine=edvr::temporalEngineFor(mode);
   s.dlaa=edvr::temporalExternalEngine(mode);
-  // fsr takes the same sizes dlss does (design doc 3.1): 1:1 at the
+  // fsr and xess take the same sizes dlss does (design doc 3.1): 1:1 at the
   // runtime's size, an upscale when the game renders smaller. "dlaa" stays
   // pinned to 1:1 on purpose (menu.cpp's "DLAA, even below HMD Quality 1").
-  s.upscale=_stricmp(mode.c_str(),"dlss")==0||_stricmp(mode.c_str(),"fsr")==0;
+  s.upscale=_stricmp(mode.c_str(),"dlss")==0||_stricmp(mode.c_str(),"fsr")==0||_stricmp(mode.c_str(),"xess")==0;
   // The shipped values: jitter on, blend .90, clamp 1.0, depth-derived motion, the jitter sign as is, no lag.
   s.jitter=true; s.blend=.90f; s.clamp=1.f; s.motion=3; s.signX=s.signY=1; s.lag=false; return s;
 }
@@ -189,6 +189,7 @@ bool sameHistorySettings(const Settings& a,const Settings& b) {
 const char* mode(const Settings& s) {
   if (!s.on) return "off";
   if (s.engine==edvr::TemporalEngine::Amd) return "fsr";
+  if (s.engine==edvr::TemporalEngine::Intel) return "xess";
   return s.upscale?"dlss":s.dlaa?"dlaa":"on";
 }
 
@@ -349,6 +350,20 @@ bool layerOnlyTreat(State& s,uint64_t seq,unsigned eye,uint32_t outW,uint32_t ou
   return true;
 }
 
+// The VR jitter's cycle for one eye. Every engine keeps the fixed eight except XeSS, which needs ceil(8 x scale^2) phases
+// for the ratio treat() upscales by (temporal_math.h). An eye that treat() does not upscale takes eight.
+uint32_t jitterCycleFor(State& s,unsigned eye) {
+  const uint32_t w=s.width[eye],h=s.height[eye];
+  if(s.currentSettings.engine!=edvr::TemporalEngine::Intel||!w||!h||!s.recW||!s.recH) return edvr::kTemporalJitterCount;
+  if(!(w*50<s.recW*49&&h*50<s.recH*49)) return edvr::kTemporalJitterCount;
+  const uint32_t cycle=edvr::temporalXessJitterPhases(edvr::kTemporalJitterCount,w,h,s.recW,s.recH);
+  if(cycle!=s.jitterCycle[eye]) {
+    s.jitterCycle[eye]=cycle;
+    edvr::Log::get().note("temporal aa: xess jitter cycle %u phases (scale %.2f)",cycle,std::max(double(s.recW)/w,double(s.recH)/h));
+  }
+  return cycle;
+}
+
 HRESULT WINAPI begin(void* p,const EdvrNativeTemporalFrame* f,EdvrNativeTemporalProjection* out) {
   std::lock_guard<std::mutex> lock(mutex); State* s=identify(p);
   if(!s||!s->active||s!=current||!f||!out||f->size!=sizeof(*f)||f->version!=EDVR_NATIVE_TEMPORAL_VERSION_1||
@@ -388,7 +403,7 @@ HRESULT WINAPI begin(void* p,const EdvrNativeTemporalFrame* f,EdvrNativeTemporal
   // image, the layer holds each eye's screen, and an eye shift with no eye pass to resolve it would be a shimmer.
   // While the route owns nothing this is what it always was.
   if(s->currentSettings.on&&!s->standDown&&s->currentSettings.jitter&&!edvr::vrWorldRouteOwnsNextFrame()) for(int e=0;e<2;++e) if(s->width[e]&&s->height[e]&&!s->flipped[e]) {
-    edvr::temporalJitter(s->frameCounter,&jx,&jy); float dx=0,dy=0;
+    edvr::temporalJitter(s->frameCounter,&jx,&jy,jitterCycleFor(*s,unsigned(e))); float dx=0,dy=0;
     edvr::temporalJitterToTangents(jx,jy,s->frusta[e],s->width[e],s->height[e],&dx,&dy);
     out->tangentShift[e][0]=dx;out->tangentShift[e][1]=dy;
     s->shift[e][0]=out->tangentShift[e][0];s->shift[e][1]=out->tangentShift[e][1];
@@ -482,11 +497,13 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
     pd=delta;pt=trans;pto=transOther;
   }
   // bit 6 (temporal_pass.h's own comment): the external engine (bit 1) is
-  // AMD's FSR rather than NVIDIA's. Bits 2-5 are the reset's own sub-reasons
-  // (g_dlResetsHeld/Returned/Unjudged/NoDelta, temporal_pass.cpp) that this,
-  // the ABI's one caller, has never set; left alone rather than reused.
+  // AMD's FSR rather than NVIDIA's. Bit 7 is XeSS (Intel). Bits 2-5 are the
+  // reset's own sub-reasons (g_dlResetsHeld/Returned/Unjudged/NoDelta,
+  // temporal_pass.cpp) that this, the ABI's one caller, has never set; left
+  // alone rather than reused.
   const unsigned flags=(resetHistory?1u:0u)|(s->currentSettings.dlaa?2u:0u)|
-      (s->currentSettings.engine==edvr::TemporalEngine::Amd?64u:0u);float prev[4];std::memcpy(prev,s->history[eye].valid?s->history[eye].frustum:s->frusta[eye],16);
+      (s->currentSettings.engine==edvr::TemporalEngine::Amd?64u:0u)|
+      (s->currentSettings.engine==edvr::TemporalEngine::Intel?128u:0u);float prev[4];std::memcpy(prev,s->history[eye].valid?s->history[eye].frustum:s->frusta[eye],16);
   const float outJx=s->shift[eye][0],outJy=s->shift[eye][1]; float px=0,py=0;
   if(w){px=-outJx*float(w)/(s->frusta[eye][1]-s->frusta[eye][0]);} if(h){py=outJy*float(h)/(s->frusta[eye][3]-s->frusta[eye][2]);}
   s->renderedJitter[eye][0]=px;s->renderedJitter[eye][1]=py;

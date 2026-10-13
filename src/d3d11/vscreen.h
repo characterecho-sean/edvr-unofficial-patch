@@ -198,6 +198,8 @@ bool vScreenPanelSize(uint32_t* width, uint32_t* height);
 // nothing, which is indistinguishable from the fix being broken -- and that is
 // what it was reported as.
 void vScreenRefreshConfig();
+// Called at a profile switch, render thread, frame boundary: the same configure sweep with the reload's gate taken away.
+void vScreenForceRefreshConfig();
 
 // Called once per frame. The panel composite is identified partly by how many
 // draws reach the eye textures in a frame, which is only knowable at the end

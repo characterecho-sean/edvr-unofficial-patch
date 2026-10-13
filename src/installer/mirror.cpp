@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <shlobj.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cwctype>
 #include <string>
@@ -16,6 +17,7 @@ namespace {
 const wchar_t* kIni = L"edvr.ini";
 const wchar_t* kFlatIni = L"edvr-flat.ini";
 const wchar_t* kBaseIni = L"edvr.ini.base";
+const wchar_t* kFlatBaseIni = L"edvr-flat.ini.base";
 const wchar_t* kStateIni = L"state.ini";
 const wchar_t* kD3d11 = L"d3d11.dll";
 const wchar_t* kOpenvr = L"openvr_api.dll";
@@ -138,6 +140,7 @@ MirrorInfo readMirror(const std::wstring& mirrorDir) {
     info.hasIni = !iniPath.empty();
     info.hasFlatIni = !flatIniPath.empty();
     info.hasBaseIni = fileExists(joinPath(mirrorDir, kBaseIni));
+    info.hasFlatBaseIni = fileExists(joinPath(mirrorDir, kFlatBaseIni));
     info.hasState = fileExists(joinPath(mirrorDir, kStateIni));
     // The mirror preserves ownership metadata, not the active runtime scope.
     // The selected artifact writes a fresh descriptor during repair.
@@ -154,14 +157,22 @@ MirrorInfo readMirror(const std::wstring& mirrorDir) {
     return info;
 }
 
-bool MirrorInfo::holdsSettings() const { return hasIni || hasFlatIni; }
-
-bool MirrorInfo::holdsSettingsFor(const std::string& profile) const {
-    return profile == "flat" ? (hasFlatIni || hasIni) : hasIni;
+std::vector<std::string> settingsToRestore(const std::wstring& gameDir, const MirrorInfo& mirror,
+                                           const std::string& scope) {
+    std::vector<std::string> names;
+    if (scopeHasVrIni(scope) && mirror.hasIni && !fileExists(joinPath(gameDir, kIni)))
+        names.push_back("edvr.ini");
+    // A flat install is offered its own file even though the runtime would read edvr.ini while it has none: the scope's file is what
+    // the scope is restored to.
+    if (scopeHasFlatIni(scope) && mirror.hasFlatIni && !fileExists(joinPath(gameDir, kFlatIni)))
+        names.push_back("edvr-flat.ini");
+    return names;
 }
 
-bool offerRestore(bool folderHasSettings, const MirrorInfo& mirror, const std::string& profile) {
-    return !folderHasSettings && mirror.holdsSettingsFor(profile);
+std::string settingsNamesOf(const std::vector<std::string>& names) {
+    std::string out;
+    for (const std::string& name : names) out += (out.empty() ? "" : " and ") + name;
+    return out;
 }
 
 MirrorResult updateMirror(const std::wstring& gameDir, const std::wstring& backupDir,
@@ -187,6 +198,10 @@ MirrorResult updateMirror(const std::wstring& gameDir, const std::wstring& backu
     const std::wstring basePath = baseIniPath(gameDir);
     if (fileExists(basePath) && copyOver(basePath, joinPath(mirrorDir, kBaseIni)))
         result.saved.push_back("edvr.ini.base");
+
+    const std::wstring flatBasePath = flatBaseIniPath(gameDir);
+    if (fileExists(flatBasePath) && copyOver(flatBasePath, joinPath(mirrorDir, kFlatBaseIni)))
+        result.saved.push_back("edvr-flat.ini.base");
 
     const std::wstring statePathSrc = statePath(gameDir);
     if (fileExists(statePathSrc) && copyOver(statePathSrc, joinPath(mirrorDir, kStateIni)))
@@ -237,31 +252,34 @@ MirrorResult updateMirrorIni(const std::wstring& gameDir, const std::wstring& mi
     return result;
 }
 
-bool restoreFromMirror(const std::wstring& gameDir, const MirrorInfo& info,
+bool restoreFromMirror(const std::wstring& gameDir, const MirrorInfo& info, const std::string& scope,
                        std::vector<std::string>* notes) {
-    if (!info.holdsSettings()) return false;
     auto note = [&](const std::string& s) {
         if (notes) notes->push_back(s);
     };
 
-    // Every settings file the mirror holds, each from the newest generation there
-    // is: the one readMirror judged worth offering. Either is enough on its own
-    // (a flat install mirrors edvr-flat.ini alone), and neither's failure is
-    // hidden behind the other's success: the flat profile's file lost while the
-    // shared edvr.ini came back is a restore that did not happen, and it says so.
+    // The settings files to bring back: the scope's, absent from the folder, held
+    // by the mirror. Nothing else is copied, so a file the folder has is never
+    // overwritten. Each is copied from its newest generation, and neither's
+    // failure is hidden behind the other's success: the flat profile's file lost
+    // while the shared edvr.ini came back is a restore that did not happen, and it
+    // says so.
+    const std::vector<std::string> wanted = settingsToRestore(gameDir, info, scope);
+    if (wanted.empty()) return false;
+
     bool restoredAll = true;
     bool restoredAny = false;
     struct Settings {
         const wchar_t* leaf;
-        bool           held;
+        const char*    name;
         const char*    what;
     };
     const Settings settings[] = {
-        {kIni, info.hasIni, "edvr.ini"},
-        {kFlatIni, info.hasFlatIni, "edvr-flat.ini (the flat profile's own settings)"},
+        {kIni, "edvr.ini", "edvr.ini"},
+        {kFlatIni, "edvr-flat.ini", "edvr-flat.ini (the flat profile's own settings)"},
     };
     for (const Settings& one : settings) {
-        if (!one.held) continue;
+        if (std::find(wanted.begin(), wanted.end(), std::string(one.name)) == wanted.end()) continue;
         const std::wstring source = newestGeneration(info.dir, one.leaf);
         if (source.empty() || !copyOver(source, joinPath(gameDir, one.leaf))) {
             note(std::string("Could not restore ") + one.what +
@@ -276,12 +294,18 @@ bool restoreFromMirror(const std::wstring& gameDir, const MirrorInfo& info,
     // putting into a folder that could not take its settings.
     if (!restoredAny) return false;
 
-    if (info.hasBaseIni || info.hasState) {
+    // The record and the bases are restored only where the folder lacks them. A
+    // present one is the current install's, and a mirror copy of it can be an
+    // older one whose hashes would fail the ownership proofs: a scope-based offer
+    // fires when only one settings file is missing, with the rest still there.
+    if (info.hasBaseIni || info.hasFlatBaseIni || info.hasState) {
         if (ensureDirTree(stateDirPath(gameDir))) {
             bool copiedAny = false;
-            if (info.hasBaseIni)
+            if (info.hasBaseIni && !fileExists(baseIniPath(gameDir)))
                 copiedAny |= copyOver(joinPath(info.dir, kBaseIni), baseIniPath(gameDir));
-            if (info.hasState)
+            if (info.hasFlatBaseIni && !fileExists(flatBaseIniPath(gameDir)))
+                copiedAny |= copyOver(joinPath(info.dir, kFlatBaseIni), flatBaseIniPath(gameDir));
+            if (info.hasState && !fileExists(statePath(gameDir)))
                 copiedAny |= copyOver(joinPath(info.dir, kStateIni), statePath(gameDir));
             if (copiedAny) {
                 note("Restored the install record too, so this still merges as an update rather "

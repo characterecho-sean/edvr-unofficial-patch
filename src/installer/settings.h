@@ -118,6 +118,7 @@ private:
 
     bool                   m_loaded = false;
     bool                   m_backedUp = false;  // one copy per session, before the first change
+    std::string            m_profile;           // "vr" or "flat": which file, and which rows (flat shows the keys flat reads)
     std::wstring           m_gameDir;
     std::wstring           m_iniPath;     // the edition's own file: where every write goes
     std::wstring           m_sharedPath;  // flat only: the edvr.ini it falls back to; else empty

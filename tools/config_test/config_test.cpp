@@ -130,6 +130,19 @@ static bool writeIni(const std::wstring& dir, const char* body,
     return true;
 }
 
+// Points LOCALAPPDATA at root, with a Settings.xml whose 3D mode is mode. The launch decision reads that file (runtime_profile.h):
+// a flat descriptor is flat only in mode 0, and a VR-mode file makes a flat scope Passthrough. A case that depends on the profile pins
+// it rather than inherit the machine's own Settings.xml: mode 0 is flat, 4 is VR.
+static bool pinGraphicsMode(const std::wstring& root, int mode) {
+    CreateDirectoryW(root.c_str(), nullptr);
+    CreateDirectoryW((root + L"\\Frontier Developments").c_str(), nullptr);
+    CreateDirectoryW((root + L"\\Frontier Developments\\Elite Dangerous").c_str(), nullptr);
+    CreateDirectoryW((root + L"\\Frontier Developments\\Elite Dangerous\\Options").c_str(), nullptr);
+    const std::wstring graphics = root + L"\\Frontier Developments\\Elite Dangerous\\Options\\Graphics";
+    const std::string xml = "<Settings>\r\n<StereoscopicMode>" + std::to_string(mode) + "</StereoscopicMode>\r\n</Settings>\r\n";
+    return writeIni(graphics, xml.c_str(), L"Settings.xml") && SetEnvironmentVariableW(L"LOCALAPPDATA", root.c_str()) != 0;
+}
+
 // The text of a file under the repo root, or empty: for the checks that hold
 // the shipped ini and the code that reads it to one answer.
 static std::string readRepoFile(const std::wstring& root, const wchar_t* relative) {
@@ -749,6 +762,8 @@ static void iniNameFixtures(const std::wstring& scratch) {
             continue;
         }
         cfg.setAuditTables(kKnown, 2, kMoved, 3);
+        // Its own root: this child shares the parent's scratch dir, and the parent's pinned Settings.xml must not change under it.
+        pinGraphicsMode(scratch + L"_ininame_localappdata", std::strstr(f.descriptor, "profile = flat") ? 0 : 4);
         cfg.init(dir);
         const std::string got = cfg.iniName();
         if (got == f.wantName) ok(f.what);
@@ -1231,6 +1246,165 @@ static void retiredKeyScan(const std::wstring& root) {
     }
 }
 
+// switchProfile (2026-10-12): the settings file follows the profile the frame boundary has set, and a switch reads that
+// file from defaults. Each case has its own directory and starts from init() under VR, then flips g_runtimeProfile itself,
+// the way the frame boundary will. fix.render_sharpness is read under every profile that runs fixes, so it carries the values.
+// Run only by the --ininame-cases child, in a directory holding no ini of its own: see iniNameFixtures.
+static void switchCheck(bool condition, const char* what, const std::string& detail) {
+    if (condition) ok(what);
+    else fail(what, detail);
+}
+
+static void switchProfileCases(const std::wstring& scratch) {
+    const RuntimeProfile savedProfile = g_runtimeProfile;
+    Config& cfg = Config::get();
+    const char* const kKey = "fix.render_sharpness";
+
+    auto freshDir = [&](const wchar_t* tag) {
+        const std::wstring dir = scratch + tag;
+        CreateDirectoryW(dir.c_str(), nullptr);
+        removeIniFile(dir, L"edvr.ini");
+        removeIniFile(dir, L"edvr-flat.ini");
+        return dir;
+    };
+    // init() takes its profile from the launch decision, not from g_runtimeProfile, and picks the file under that profile. So each
+    // case lands on the VR file by a switch of its own before it starts, and the cases' own switches are the only ones it measures.
+    auto toProfile = [&](RuntimeProfile p) {
+        runtimeProfileSet(p);
+        return cfg.switchProfile();
+    };
+
+    // flat present (A), then VR (B): each switch lands on its own file, and a switch bumps the generation once.
+    {
+        const std::wstring dir = freshDir(L"_switch_flat_then_vr");
+        if (!writeIni(dir, "[fix]\r\nrender_sharpness = 0.3\r\n", L"edvr-flat.ini") ||
+            !writeIni(dir, "[fix]\r\nrender_sharpness = 0.7\r\n", L"edvr.ini")) {
+            fail("switch: the flat and VR fixtures", "could not write them");
+        } else {
+            cfg.init(dir);
+            toProfile(RuntimeProfile::Vr);
+            runtimeProfileSet(RuntimeProfile::Flat);
+            const bool toFlat = cfg.switchProfile();
+            const std::string flatValue = cfg.getString(kKey, "unset");
+            switchCheck(toFlat && flatValue == "0.3" && std::string(cfg.iniName()) == "edvr-flat.ini",
+                        "switch to flat reads edvr-flat.ini (0.3)",
+                        "changed=" + std::to_string(toFlat) + " value=" + flatValue + " file=" + cfg.iniName());
+            runtimeProfileSet(RuntimeProfile::Vr);
+            const uint32_t gen0 = cfg.generation();
+            const bool toVr = cfg.switchProfile();
+            const std::string vrValue = cfg.getString(kKey, "unset");
+            switchCheck(toVr && vrValue == "0.7" && std::string(cfg.iniName()) == "edvr.ini",
+                        "switch to VR reads edvr.ini (0.7)",
+                        "changed=" + std::to_string(toVr) + " value=" + vrValue + " file=" + cfg.iniName());
+            switchCheck(cfg.generation() == gen0 + 1, "a switch bumps the generation once",
+                        "generation moved by " + std::to_string(cfg.generation() - gen0));
+        }
+    }
+
+    // VR, then flat with no edvr-flat.ini: the flat profile falls back to edvr.ini, the same file, so nothing changes.
+    {
+        const std::wstring dir = freshDir(L"_switch_vr_then_flat");
+        if (!writeIni(dir, "[fix]\r\nrender_sharpness = 0.7\r\n", L"edvr.ini")) {
+            fail("switch: the VR-only fixture", "could not write it");
+        } else {
+            cfg.init(dir);
+            toProfile(RuntimeProfile::Vr);
+            runtimeProfileSet(RuntimeProfile::Flat);
+            const bool changed = cfg.switchProfile();
+            const std::string value = cfg.getString(kKey, "unset");
+            switchCheck(!changed && value == "0.7" && std::string(cfg.iniName()) == "edvr.ini",
+                        "flat without edvr-flat.ini falls back to edvr.ini (0.7)",
+                        "changed=" + std::to_string(changed) + " value=" + value + " file=" + cfg.iniName());
+        }
+    }
+
+    // Flat values only, then VR with no edvr.ini: the switch to VR reads defaults, so the flat values do not carry over.
+    {
+        const std::wstring dir = freshDir(L"_switch_flat_only");
+        if (!writeIni(dir, "[fix]\r\nrender_sharpness = 0.3\r\n", L"edvr-flat.ini")) {
+            fail("switch: the flat-only fixture", "could not write it");
+        } else {
+            cfg.init(dir);
+            toProfile(RuntimeProfile::Vr);
+            runtimeProfileSet(RuntimeProfile::Flat);
+            const bool toFlat = cfg.switchProfile();
+            if (!toFlat || cfg.getString(kKey, "unset") != "0.3")
+                fail("switch: flat-only fixture reads edvr-flat.ini", "the flat switch did not read 0.3");
+            runtimeProfileSet(RuntimeProfile::Vr);
+            const bool toVr = cfg.switchProfile();
+            const std::string value = cfg.getString(kKey, "unset");
+            switchCheck(toVr && value == "unset" && std::string(cfg.iniName()) == "edvr.ini",
+                        "switch to VR with no edvr.ini reads defaults, not the flat values",
+                        "changed=" + std::to_string(toVr) + " value=" + value + " file=" + cfg.iniName());
+        }
+    }
+
+    // A switch to the same file is not a change, and still re-reads it: the edit made in place is picked up.
+    {
+        const std::wstring dir = freshDir(L"_switch_same");
+        if (!writeIni(dir, "[fix]\r\nrender_sharpness = 0.7\r\n", L"edvr.ini")) {
+            fail("switch: the same-file fixture", "could not write it");
+        } else {
+            cfg.init(dir);
+            toProfile(RuntimeProfile::Vr);
+            if (!rewriteIni(dir, "[fix]\r\nrender_sharpness = 0.9\r\n", L"edvr.ini")) {
+                fail("switch: the same-file edit", "could not rewrite edvr.ini");
+            } else {
+                const bool changed = cfg.switchProfile();
+                const std::string value = cfg.getString(kKey, "unset");
+                switchCheck(!changed && value == "0.9",
+                            "a switch to the same file returns false and reads the edit (0.9)",
+                            "changed=" + std::to_string(changed) + " value=" + value);
+            }
+        }
+    }
+
+    // After a switch, reloadIfChanged watches the NEW file: an edit to it reloads, an edit to the old file does not.
+    {
+        const std::wstring dir = freshDir(L"_switch_reload");
+        if (!writeIni(dir, "[fix]\r\nrender_sharpness = 0.3\r\n", L"edvr-flat.ini") ||
+            !writeIni(dir, "[fix]\r\nrender_sharpness = 0.7\r\n", L"edvr.ini")) {
+            fail("switch: the reload fixtures", "could not write them");
+        } else {
+            cfg.init(dir);
+            toProfile(RuntimeProfile::Vr);
+            runtimeProfileSet(RuntimeProfile::Flat);
+            cfg.switchProfile();
+            toProfile(RuntimeProfile::Vr);
+            if (!rewriteIni(dir, "[fix]\r\nrender_sharpness = 0.8\r\n", L"edvr.ini") || !cfg.reloadIfChanged())
+                fail("reload after a switch picks up the new file", "an edit to edvr.ini did not reload");
+            else switchCheck(cfg.getString(kKey, "unset") == "0.8", "reload after a switch picks up an edit to the new file (0.8)",
+                             "value=" + cfg.getString(kKey, "unset"));
+            if (!rewriteIni(dir, "[fix]\r\nrender_sharpness = 0.2\r\n", L"edvr-flat.ini"))
+                fail("reload after a switch ignores the old file", "could not rewrite edvr-flat.ini");
+            else switchCheck(!cfg.reloadIfChanged() && cfg.getString(kKey, "unset") == "0.8",
+                             "reload after a switch ignores an edit to the old file",
+                             "the old file reloaded, or the value moved");
+        }
+    }
+
+    // Passthrough runs no fix and reads edvr.ini, whatever file was open before.
+    {
+        const std::wstring dir = freshDir(L"_switch_passthrough");
+        if (!writeIni(dir, "[fix]\r\nrender_sharpness = 0.3\r\n", L"edvr-flat.ini") ||
+            !writeIni(dir, "[fix]\r\nrender_sharpness = 0.7\r\n", L"edvr.ini")) {
+            fail("switch: the passthrough fixtures", "could not write them");
+        } else {
+            cfg.init(dir);
+            toProfile(RuntimeProfile::Vr);
+            runtimeProfileSet(RuntimeProfile::Flat);
+            cfg.switchProfile();
+            runtimeProfileSet(RuntimeProfile::Passthrough);
+            const bool changed = cfg.switchProfile();
+            switchCheck(changed && std::string(cfg.iniName()) == "edvr.ini",
+                        "passthrough switches from edvr-flat.ini to edvr.ini",
+                        std::string("changed=") + std::to_string(changed) + " file=" + cfg.iniName());
+        }
+    }
+
+    runtimeProfileSet(savedProfile);
+}
+
 int main(int argc, char** argv) {
     // Unbuffered, so a crash does not take the output with it: the first run of
     // this test appeared to die before its first printf, which was only the
@@ -1239,8 +1413,10 @@ int main(int argc, char** argv) {
 
     // The child iniNameFixturesIsolated() starts from a directory of its own: only the resolver's
     // four real-file situations, no shipped ini read, and an exit code that says whether all held.
+    // switchProfile's cases run here too, for the same reason: their flat-fallback case is decided by the exe's directory.
     if (argc == 3 && std::strcmp(argv[1], "--ininame-cases") == 0) {
         iniNameFixtures(widen(argv[2]));
+        switchProfileCases(widen(argv[2]));
         return g_fails == 0 ? 0 : 1;
     }
 
@@ -1250,6 +1426,8 @@ int main(int argc, char** argv) {
     }
     const std::wstring dir = widen(argv[1]);
 
+    // The shipped edvr.ini is read as a VR install (mode 4), whatever the machine's own Settings.xml says.
+    if (argc >= 3) pinGraphicsMode(widen(argv[2]) + L"_localappdata", 4);
     Config::get().init(dir);
     if (Config::get().path().empty()) {
         printf("  FAIL  no edvr.ini found under %s\n", argv[1]);
@@ -2074,12 +2252,12 @@ int main(int argc, char** argv) {
     // getters whose ordinary fallback or lower bound would turn a fix on.
     const RuntimeProfile savedProfile = g_runtimeProfile;
     const char* descriptor = "[install]\r\nschema = 1\r\nprofile = flat\r\n";
-    if (parseRuntimeProfile(descriptor) != RuntimeProfile::Flat ||
-        parseRuntimeProfile("[install]\nschema=1\nprofile=vr\n") != RuntimeProfile::Vr ||
-        parseRuntimeProfile("[install]\nschema=2\nprofile=flat\n") != RuntimeProfile::Invalid ||
-        parseRuntimeProfile("[install]\nschema=1\nprofile=flat\nprofile=vr\n") != RuntimeProfile::Invalid ||
-        parseRuntimeProfile("[install]\nprofile=flat\n") != RuntimeProfile::Invalid ||
-        parseRuntimeProfile(std::string(4097, 'x')) != RuntimeProfile::Invalid)
+    if (parseInstallDescriptor(descriptor).scope != InstallScope::Flat ||
+        parseInstallDescriptor("[install]\nschema=1\nprofile=vr\n").scope != InstallScope::Both ||
+        parseInstallDescriptor("[install]\nschema=2\nprofile=flat\n").scope != InstallScope::Invalid ||
+        parseInstallDescriptor("[install]\nschema=1\nprofile=flat\nprofile=vr\n").scope != InstallScope::Invalid ||
+        parseInstallDescriptor("[install]\nprofile=flat\n").scope != InstallScope::Invalid ||
+        parseInstallDescriptor(std::string(4097, 'x')).scope != InstallScope::Invalid)
         fail("profile descriptor", "invalid schema/duplicate/oversize admitted");
     else ok("profile descriptor refuses ambiguous or unsupported scope");
     g_runtimeProfile = RuntimeProfile::Flat;
@@ -2217,6 +2395,7 @@ int main(int argc, char** argv) {
             !rewriteIni(flatDir, "[fix]\r\nrender_sharpness = 0.4\r\n", flatLeaf)) {
             fail("flat sharpening reload", "could not write the scratch inis");
         } else {
+            pinGraphicsMode(flatDir + L"_localappdata", 0);
             Config::get().init(flatDir);
             if (!runtimeFlatProfile()) fail("flat sharpening reload", "the descriptor did not select flat");
             expectFloat("fix.render_sharpness", 0.4f,

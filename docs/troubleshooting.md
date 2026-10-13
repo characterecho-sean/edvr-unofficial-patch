@@ -22,22 +22,37 @@ subdirectories for log files. The installer bundles everything automatically:
 1. **Close Elite Dangerous completely.** If the game crashed or froze, verify
    in Task Manager (`Ctrl+Shift+Esc`) that `EliteDangerous64.exe` is not hung
    in the background.
-2. **Open the installer:**
-   - **Flat screen players:** Unzip `edvr-flat-installer-<version>.zip` and run
-     `edvr-flat-installer.exe`.
-   - **VR players:** Unzip `edvr-installer-<version>.zip` and run
-     `edvr-installer.exe`.
+2. **Open the installer:** unzip `edvr-installer-<version>.zip` and run
+   `edvr-installer.exe`. It serves VR and flat players alike; under "Install
+   EDVR for:", "Flat only" installs the flat fixes alone.
 3. **Click "Save logs"** on the bottom bar of the installer window.
 4. A zip file is written directly to your Desktop:
    `edvr-logs-YYYYMMDD_HHMMSS.zip`.
 5. Attach that zip file to your GitHub issue or Discord post.
 
 The bundle automatically includes the latest graphics and OpenXR logs,
-`edvr_breadcrumbs.txt`, `edvr_FATAL.txt`, `edvr.ini`, `edvr_install_state.ini`,
-`GraphicsConfiguration.xml`, and your local graphics display profiles from
-`%LOCALAPPDATA%`.
+`edvr_breadcrumbs.txt`, `edvr_FATAL.txt`, `edvr.ini`, `edvr-flat.ini`,
+`edvr_install_state.ini`, `GraphicsConfiguration.xml`, and your local graphics
+display profiles from `%LOCALAPPDATA%`.
 
 ---
+
+## Which Profile Runs
+
+### Elite always starts in VR (or flat) whatever I set
+
+- **Symptom:** Elite starts in VR (or in flat) whatever its 3D setting says.
+- **Why it happens:** a launch switch overrides the 3D setting for that launch.
+  `/vr` forces VR and `/novr` forces flat. Steam's VR and non-VR launch choices
+  add one of them to the command line, and EDLaunch passes it on. EDVR follows
+  the same switch, so it always runs the fixes for the mode the game is
+  actually in.
+- **Fix:** pick the launch choice for the mode you want: Steam's VR option for
+  VR, its normal option for flat. After a flat (`/novr`) launch the game offers
+  no headset option in its 3D menu, so restart with the VR option to go back to
+  VR. After a VR launch, turning 3D off and on in the game's graphics options
+  switches EDVR's fixes within about half a second; settings fixed at startup
+  follow at the next launch.
 
 ## Flat Screen Troubleshooting
 
@@ -61,7 +76,7 @@ motion vectors and jitter cancellation.
      and state discovery, plus the usual routing and refusal reports, in
      `edvr_gfx_*.log`. Shift plus `NumLock` requests the full capture, which
      is slow and large; use it only if asked.
-  4. Exit the game, run `edvr-flat-installer.exe`, and click **Save logs**.
+  4. Exit the game, run `edvr-installer.exe`, and click **Save logs**.
 
 ### Flat mode: EDHM side-menu haze or blurry angled panels
 

@@ -16,10 +16,10 @@ inline bool temporalModeEnabled(const std::string& mode) {
            _stricmp(mode.c_str(), "xess") == 0;
 }
 
-// XeSS resolves only in the flat profile. VR producers must not arm for a
-// hand-edited xess value when no VR resolve will consume their outputs.
+// Every profile arms the producers for every mode: XeSS is offered in flat and in VR (the VR eye pass's Intel engine).
 inline bool temporalModeEnabledFor(const std::string& mode, bool flatProfile) {
-    return temporalModeEnabled(mode) && (flatProfile || _stricmp(mode.c_str(), "xess") != 0);
+    (void)flatProfile;
+    return temporalModeEnabled(mode);
 }
 
 struct TemporalPresetSelection {
@@ -154,27 +154,40 @@ struct TemporalFootTracker {
 };
 
 // Which history the temporal pass hands the frame to. Own is the pass's own
-// clip; Nvidia and Amd are the two external, trained upscalers (docs\
-// fsr-upscaler-design-2026-09-16.md, section 3). Anything the mode string
+// clip; Nvidia, Amd and Intel are the external, trained upscalers (docs\
+// fsr-upscaler-design-2026-09-16.md, section 3); Intel is XeSS-SR. Anything the mode string
 // does not name (off included) reads as Own: off never reaches the seam,
 // and an unrecognised value already falls back to the pass's own history
 // (temporalModeEnabled above), so there is nothing else to run.
-enum class TemporalEngine { Own, Nvidia, Amd };
+// Intel is XeSS-SR, the third external engine (the VR eye pass runs it per eye; flat runs it through flat_mono_resolve).
+enum class TemporalEngine { Own, Nvidia, Amd, Intel };
 
 inline TemporalEngine temporalEngineFor(const std::string& mode) {
     if (_stricmp(mode.c_str(), "dlaa") == 0 || _stricmp(mode.c_str(), "dlss") == 0) {
         return TemporalEngine::Nvidia;
     }
     if (_stricmp(mode.c_str(), "fsr") == 0) return TemporalEngine::Amd;
+    if (_stricmp(mode.c_str(), "xess") == 0) return TemporalEngine::Intel;
     return TemporalEngine::Own;
 }
 
+// The engine as the flat profile's trained-engine readers see it. Flat runs XeSS through its own resolver, so the
+// readers that warm an engine or set UI depth's trained coverage keep flat's xess as Own, exactly as before the VR route.
+inline TemporalEngine temporalEngineForProfile(const std::string& mode, bool flatProfile) {
+    const TemporalEngine engine = temporalEngineFor(mode);
+    return flatProfile && engine == TemporalEngine::Intel ? TemporalEngine::Own : engine;
+}
+
 // True for every mode that hands the frame to an external, trained engine
-// (NVIDIA's or AMD's) rather than the pass's own history -- the test every
+// (NVIDIA's, AMD's or Intel's) rather than the pass's own history -- the test every
 // "a trained engine wants X" reader in src\ shares, so fsr reaches UI depth
 // and the rest the same way dlss and dlaa do.
 inline bool temporalExternalEngine(const std::string& mode) {
     return temporalEngineFor(mode) != TemporalEngine::Own;
+}
+
+inline bool temporalExternalEngineFor(const std::string& mode, bool flatProfile) {
+    return temporalEngineForProfile(mode, flatProfile) != TemporalEngine::Own;
 }
 
 // A display name only: automatic NVIDIA mode remains "dlss" in the ini.

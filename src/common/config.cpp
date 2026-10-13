@@ -130,6 +130,40 @@ std::wstring defaultLogDirectory() {
 }
 }  // namespace
 
+// The flat profile keeps its settings in a file of its own, so a flat install over a VR one
+// (or back) never clobbers the other profile's tuning. A flat install without edvr-flat.ini yet
+// falls back to edvr.ini, which is how existing flat installs keep their settings until the
+// installer seeds the separate file. init() and switchProfile() both pick through here.
+std::wstring Config::chooseSettingsPath() const {
+    std::wstring candidates[4];
+    size_t count = 0;
+    if (runtimeFlatProfile()) {
+        candidates[count++] = m_moduleDir + L"\\" + kIniNameFlatW;
+        candidates[count++] = executableDirectory() + L"\\" + kIniNameFlatW;
+    }
+    candidates[count++] = m_moduleDir + L"\\" + kIniNameVrW;
+    candidates[count++] = executableDirectory() + L"\\" + kIniNameVrW;
+    for (size_t i = 0; i < count; ++i) {
+        if (GetFileAttributesW(candidates[i].c_str()) != INVALID_FILE_ATTRIBUTES) return candidates[i];
+    }
+    return candidates[0];
+}
+
+bool Config::switchProfile() {
+    const std::wstring next = chooseSettingsPath();
+    bool changed = false;
+    {
+        WriteGuard g(m_lock);
+        changed = next != m_path;
+        m_path = next;
+        // Reset, so the next reloadIfChanged reads whichever file this is. parse() stamps the new
+        // file's time on success; on a failed read the stamp stays clear and the next poll retries.
+        m_lastWrite = FILETIME{};
+    }
+    parse(true);
+    return changed;
+}
+
 void Config::init(const std::wstring& moduleDir) {
     runtimeProfileInitialize(moduleDir, executableDirectory());
     {
@@ -147,20 +181,11 @@ void Config::init(const std::wstring& moduleDir) {
     //
     // One file is read, whole: m_path is the first candidate that exists, and iniName()
     // (config.h) names it for every message that has to say which file it means.
-    std::wstring candidates[4];
-    size_t count = 0;
-    if (runtimeFlatProfile()) {
-        candidates[count++] = moduleDir + L"\\" + kIniNameFlatW;
-        candidates[count++] = executableDirectory() + L"\\" + kIniNameFlatW;
-    }
-    candidates[count++] = moduleDir + L"\\" + kIniNameVrW;
-    candidates[count++] = executableDirectory() + L"\\" + kIniNameVrW;
-    m_path = candidates[0];
-    for (size_t i = 0; i < count; ++i) {
-        if (GetFileAttributesW(candidates[i].c_str()) != INVALID_FILE_ATTRIBUTES) {
-            m_path = candidates[i];
-            break;
-        }
+    m_moduleDir = moduleDir;
+    const std::wstring chosen = chooseSettingsPath();
+    {
+        WriteGuard g(m_lock);
+        m_path = chosen;
     }
     parse();
 
@@ -178,7 +203,7 @@ void Config::init(const std::wstring& moduleDir) {
     // logging turned off leaves no empty directory behind.
 }
 
-void Config::parse() {
+void Config::parse(bool fromDefaults) {
     // Parsed into a local and swapped in only on success.
     //
     // This used to clear every value first and then open the file. A failed open
@@ -192,6 +217,39 @@ void Config::parse() {
     // part -- a 148 KB ini -- and it touches nothing another thread can see.
     // The lock is taken once, below, to swap the result in.
     ValueMap parsed;
+
+    // The path is copied under the shared lock: switchProfile replaces it under the exclusive one.
+    std::wstring settingsPath;
+    {
+        ReadGuard g(m_lock);
+        settingsPath = m_path;
+    }
+
+    // The one place a parse ends: `parsed` replaces the map, under the lock, and the generation
+    // moves. `parsed` then owns the PREVIOUS map, freed when this function returns, after the
+    // lock is gone, so a reader is never held up by the destructor of a map it is not using.
+    auto commit = [this, &parsed](const BY_HANDLE_FILE_INFORMATION* info) {
+        {
+            // The only stretch of parse() under the lock: the audit's bookkeeping,
+            // the swap, the note set's reset and the stamp. Nothing in here calls
+            // a getter or the log, so it cannot meet the lock again.
+            WriteGuard g(m_lock);
+            auditResolve(&parsed);
+            m_impl->values.swap(parsed);
+            m_impl->noteNoted.clear();
+            m_generation.fetch_add(1, std::memory_order_release);   // after the swap: a reader that sees the new number sees the new values
+            // Stamped only now, on the success path.
+            //
+            // Stamping it up front meant a read that failed -- an editor holding
+            // the file mid-save -- kept the old values, correctly, but recorded
+            // the new timestamp with them. reloadIfChanged() then saw nothing to
+            // do and that edit was never picked up for the rest of the session.
+            // The size-check bail above already avoided this; the read path did
+            // not.
+            if (info) m_lastWrite = info->ftLastWriteTime;
+        }
+        auditFlush();
+    };
 
     // FILE_SHARE_DELETE, so that reading the ini does not stop it being replaced,
     // renamed or deleted. The in-headset menu and the installer's settings window
@@ -207,10 +265,16 @@ void Config::parse() {
     // POSIX renames are unsupported, is refused while ANY handle to the target is
     // open, this share included -- measured on Windows 11 build 26200 -- and there
     // it is the writer's retry that waits this read out. See iniedit.h.)
-    HANDLE f = CreateFileW(m_path.c_str(), GENERIC_READ,
+    HANDLE f = CreateFileW(settingsPath.c_str(), GENERIC_READ,
                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (f == INVALID_HANDLE_VALUE) {
+        // A switch to a file that is not there starts from defaults: the other
+        // profile's values must not carry over.
+        if (fromDefaults) {
+            commit(nullptr);
+            return;
+        }
         // An ini that is genuinely absent means "all defaults", which is only
         // true on the FIRST parse; later it means the file went away mid-session
         // and the values we already have are better than nothing.
@@ -230,6 +294,7 @@ void Config::parse() {
         // again if it came back with the same timestamp, which is what restoring
         // a backup or a git checkout does.
         CloseHandle(f);
+        if (fromDefaults) commit(nullptr);
         return;
     }
 
@@ -244,7 +309,10 @@ void Config::parse() {
     // installed an empty map -- every setting reverted to its compiled-in
     // default for the rest of the session, because m_lastWrite had already been
     // stamped. Exactly what the swap-on-success was added to prevent.
-    if (!readOk || read < size) return;
+    if (!readOk || read < size) {
+        if (fromDefaults) commit(nullptr);
+        return;
+    }
 
     const char* p = text.data();
     const char* end = p + read;
@@ -321,29 +389,7 @@ void Config::parse() {
         // right.
         parsed[lowered(section.empty() ? key : section + "." + key)] = val;
     }
-    {
-        // The only stretch of parse() under the lock: the audit's bookkeeping,
-        // the swap, the note set's reset and the stamp. Nothing in here calls
-        // a getter or the log, so it cannot meet the lock again.
-        WriteGuard g(m_lock);
-        auditResolve(&parsed);
-        m_impl->values.swap(parsed);
-        m_impl->noteNoted.clear();
-        m_generation.fetch_add(1, std::memory_order_release);   // after the swap: a reader that sees the new number sees the new values
-        // Stamped only now, on the success path.
-        //
-        // Stamping it up front meant a read that failed -- an editor holding
-        // the file mid-save -- kept the old values, correctly, but recorded
-        // the new timestamp with them. reloadIfChanged() then saw nothing to
-        // do and that edit was never picked up for the rest of the session.
-        // The size-check bail above already avoided this; the read path did
-        // not.
-        if (haveInfo) m_lastWrite = info.ftLastWriteTime;
-    }
-    // `parsed` now owns the PREVIOUS map. It is freed when this function
-    // returns, after the lock is gone, so a reader is never held up by the
-    // destructor of a map it is not using.
-    auditFlush();
+    commit(haveInfo ? &info : nullptr);
 }
 
 // The parsed file against the registered tables: moved keys resolved, dead
@@ -358,7 +404,7 @@ void Config::auditResolve(void* parsedMap) {
     auto& parsed = *static_cast<ValueMap*>(parsedMap);
 
     // The file every finding below is about: the one this parse read.
-    const std::string file = iniName();
+    const std::string file = iniNameLocked();   // the caller holds m_lock: iniName() would deadlock here
     std::set<std::string> movedOld;
     std::set<std::string> synthesized;
     for (size_t i = 0; i < g_auditMovedCount; ++i) {
@@ -481,8 +527,13 @@ void Config::auditFlush() const {
 }
 
 bool Config::reloadIfChanged() {
+    std::wstring settingsPath;
+    {
+        ReadGuard g(m_lock);
+        settingsPath = m_path;
+    }
     WIN32_FILE_ATTRIBUTE_DATA data{};
-    if (!GetFileAttributesExW(m_path.c_str(), GetFileExInfoStandard, &data)) return false;
+    if (!GetFileAttributesExW(settingsPath.c_str(), GetFileExInfoStandard, &data)) return false;
     // m_lastWrite is stamped by parse() under the lock, so it is read under it.
     FILETIME last;
     {

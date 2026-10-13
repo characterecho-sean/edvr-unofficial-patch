@@ -426,6 +426,13 @@ design.
   stopped the crash. It is a required part of the chain, not incidental.
 - A stale build: `edvr_log.py --expect-build v0.17.0` matched on both logs,
   both flights.
+- A fixed 31 ms gap after the shutdown returns (the Status "Open" bullet's
+  cadence idea): the 2026-10-13 bundle (v0.19.1 build 6ACAF769, the
+  uninstrumented DLL again, so no new evidence on the cause) crashed 16 ms
+  after `module_shutdown_return` (tick 135427156 against 135427140). The gap
+  is "the render thread's next Present", not a constant. Same call site
+  (`d3d11.dll+0x2E1EC4`), same `0xF780` low bits, and now six crashes in the
+  breadcrumb file.
 - SteamVR as the VR runtime: the second flight ran on VirtualDesktopXR /
   Meta Quest 3, no SteamVR anywhere in the picture, and reproduced the
   identical crash. The runtime backend is not a factor; the D3D11-side

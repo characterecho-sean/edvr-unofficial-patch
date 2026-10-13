@@ -179,6 +179,10 @@ struct Shared {
     // holds every xrEndFrame for, inside the call's timed region, while the
     // test is running; 0 is no hold (requestEndFrameHold, frame_flag.h).
     volatile LONG     endFrameHold;
+    // vrProfileState  d3d11 -> openvr, the game's profile (setVrProfileActive, frame_flag.h): 0 = nobody has written
+    //                 (reads as VR), 1 = VR, 2 = not VR. Zero is the fresh mapping's own value, which is why not-VR
+    //                 is the 2 and not the 0.
+    volatile LONG     vrProfileState;
 };
 
 // Per PROCESS, not per logon session.
@@ -195,6 +199,8 @@ struct Shared {
 // The name is built once, at first use. The two DLLs are in the same process,
 // so the channel between them is unaffected.
 //
+// _v38 because the game's VR-profile bit joined (vrProfileState), for the headset while flat (design
+// unified-install section 12).
 // _v37 because the external-camera pair left the layout (externalCam and
 // externalCamStamp) with the old Explorer Cam route, whose gate wrote them
 // and whose pose offset read them; Explorer Cam is now the free-camera
@@ -272,7 +278,7 @@ const wchar_t* mappingName() {
     static wchar_t name[64];
     static bool built = false;
     if (!built) {
-        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v37_%lu",
+        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v38_%lu",
                      GetCurrentProcessId());
         built = true;
     }
@@ -744,6 +750,18 @@ uint32_t endFrameHoldMs() {
     if (!s) return 0;
     const LONG v = InterlockedCompareExchange(&s->endFrameHold, 0, 0);
     return v > 0 ? static_cast<uint32_t>(v) : 0u;
+}
+
+void setVrProfileActive(bool active) {
+    Shared* s = map();
+    if (s) InterlockedExchange(&s->vrProfileState, static_cast<LONG>(active ? kVrProfileWordVr : kVrProfileWordNotVr));
+}
+
+bool vrProfileActive() {
+    // No answer (no block, or a refused partner) reads as VR, so the runtime's own frames stay off.
+    Shared* s = map();
+    if (!s) return true;
+    return vrProfileWordIsVr(static_cast<uint32_t>(InterlockedCompareExchange(&s->vrProfileState, 0, 0)));
 }
 
 }  // namespace edvr

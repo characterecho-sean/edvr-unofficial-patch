@@ -358,7 +358,7 @@ int main() {
           "non-keyboard GUID creation bypasses keyboard capture without querying capabilities");
     factory.next = &keyboard;
 
-    const auto savedProfile = g_runtimeProfile;
+    const RuntimeProfile savedProfile = g_runtimeProfile;
     g_runtimeProfile = RuntimeProfile::Flat;
     check(runtimeProfileAllowsKey("advanced.input_gate"),
           "flat profile allowlist includes advanced.input_gate");

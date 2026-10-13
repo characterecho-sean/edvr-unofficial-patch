@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <exception>
 #include "../common/comfort_fade.h"
+#include "flat_notice_placement.h"
+#include "flat_notice_raster.h"
 
 namespace edvr::openxr {
 namespace {
@@ -135,6 +137,9 @@ XrResult D3D11Stereo::shutdown() {
   completion_.Reset();
   immediateExecutor_=nullptr;
   ownedImmediateScene_=false;sceneOwnerThread_=0;
+  // The notice's textures belong to this device; they go before it does.
+  for(unsigned i=0;i<2;++i){notice_[i].Reset();noticeWidth_[i]=noticeHeight_[i]=noticeEyeWidth_[i]=noticeEyeHeight_[i]=0;}
+  noticeFormat_=0;
   context_.Reset();immediateContext_.Reset();device_.Reset();session_=XR_NULL_HANDLE;format_=0;dispatch_={};lastResult_=XR_SUCCESS;
   for(auto& view:layerViews_)view={XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
   return first;
@@ -453,6 +458,87 @@ XrResult D3D11Stereo::renderSkybox(const XrView (&views)[2], XrSpace space,
     auto& view=layerViews_[i];view={XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
     view.pose=views[i].pose;view.fov=views[i].fov;
     view.subImage={eyes_[i].swapchain,{{0,0},{int32_t(eyes_[i].width),int32_t(eyes_[i].height)}},0};
+  }
+  layer.space=space;layer.viewCount=2;layer.views=layerViews_;return XR_SUCCESS;
+}
+bool D3D11Stereo::noticeFormatSupported() const {
+  return format_==DXGI_FORMAT_R8G8B8A8_UNORM_SRGB||format_==DXGI_FORMAT_B8G8R8A8_UNORM_SRGB||
+         format_==DXGI_FORMAT_R8G8B8A8_UNORM||format_==DXGI_FORMAT_B8G8R8A8_UNORM;
+}
+bool D3D11Stereo::noticeSize(unsigned eye,uint32_t* width,uint32_t* height) const {
+  if(eye>1||!notice_[eye])return false;
+  if(width)*width=noticeWidth_[eye];
+  if(height)*height=noticeHeight_[eye];
+  return true;
+}
+// The notice's text as a DEFAULT texture in the swapchain's own format, so CopySubresourceRegion is legal. Made once per eye image size
+// and format; rasterised on the owner thread, where this runs.
+XrResult D3D11Stereo::ensureNotice() {
+  bool created=false;
+  for(unsigned i=0;i<2;++i) {
+    const auto& e=eyes_[i];
+    if(notice_[i]&&noticeEyeWidth_[i]==e.width&&noticeEyeHeight_[i]==e.height&&noticeFormat_==format_)continue;
+    NoticeBitmap bitmap;
+    if(!rasterizeFlatNotice(noticePanelWidth(e.width),e.height,bitmap))return XR_ERROR_RUNTIME_FAILURE;
+    std::vector<uint8_t> bytes;
+    if(!noticeBytesFor(DXGI_FORMAT(format_),bitmap,bytes))return XR_ERROR_SWAPCHAIN_FORMAT_UNSUPPORTED;
+    D3D11_TEXTURE2D_DESC td{};
+    td.Width=uint32_t(bitmap.width);td.Height=uint32_t(bitmap.height);td.MipLevels=td.ArraySize=1;
+    td.Format=DXGI_FORMAT(format_);td.SampleDesc.Count=1;td.Usage=D3D11_USAGE_DEFAULT;
+    const D3D11_SUBRESOURCE_DATA initial{bytes.data(),uint32_t(bitmap.width)*4,0};
+    ComPtr<ID3D11Texture2D> texture;
+    if(FAILED(device_->CreateTexture2D(&td,&initial,&texture)))return XR_ERROR_RUNTIME_FAILURE;
+    notice_[i]=texture;noticeWidth_[i]=td.Width;noticeHeight_[i]=td.Height;
+    noticeEyeWidth_[i]=e.width;noticeEyeHeight_[i]=e.height;noticeFormat_=format_;
+    created=true;
+  }
+  if(created)++noticeGeneration_;
+  return XR_SUCCESS;
+}
+XrResult D3D11Stereo::renderNotice(const XrView (&views)[2],XrSpace space,XrCompositionLayerProjection& layer) {
+  layer={XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+  if(!ready_||!context_)return lastResult_==XR_SUCCESS?XR_ERROR_CALL_ORDER_INVALID:lastResult_;
+  if(!space)return XR_ERROR_HANDLE_INVALID;
+  if(!noticeFormatSupported())return XR_ERROR_SWAPCHAIN_FORMAT_UNSUPPORTED;
+  if(FAILED(device_->GetDeviceRemovedReason()))return XR_ERROR_GRAPHICS_DEVICE_INVALID;
+  for(unsigned i=0;i<2;++i)
+    if(views[i].type!=XR_TYPE_VIEW||views[i].next||!poseValid(views[i].pose))return XR_ERROR_VALIDATION_FAILURE;
+  if(const XrResult made=ensureNotice();made!=XR_SUCCESS)return made;
+  // Each eye's rectangle comes from that view's own tangents: a canted display's optical centre is not the image centre.
+  NoticeRect rects[2];
+  for(unsigned i=0;i<2;++i) {
+    const auto& f=views[i].fov;
+    if(!flatNoticeRect(eyes_[i].width,eyes_[i].height,int32_t(noticeWidth_[i]),int32_t(noticeHeight_[i]),
+        std::tan(double(f.angleLeft)),std::tan(double(f.angleRight)),std::tan(double(f.angleUp)),std::tan(double(f.angleDown)),rects[i]))
+      return XR_ERROR_VALIDATION_FAILURE;
+  }
+  for(unsigned i=0;i<2;++i) {
+    auto& e=eyes_[i];
+    XrSwapchainImageAcquireInfo ai{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};uint32_t index=0;
+    XrResult r=dispatch_.acquireSwapchainImage(e.swapchain,&ai,&index);
+    if(r!=XR_SUCCESS)return r;
+    if(index>=e.images.size()||index>=e.rtvs.size())return XR_ERROR_RUNTIME_FAILURE;
+    XrSwapchainImageWaitInfo wi{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};wi.timeout=1000000000LL;
+    r=dispatch_.waitSwapchainImage(e.swapchain,&wi);
+    if(r!=XR_SUCCESS)return r; // timeout does not permit drawing/release
+    context_->ClearState();
+    const float black[]={0,0,0,1};context_->ClearRenderTargetView(e.rtvs[index].Get(),black);
+    const D3D11_BOX box{0,0,0,noticeWidth_[i],noticeHeight_[i],1};
+    context_->CopySubresourceRegion(e.images[index],0,uint32_t(rects[i].x),uint32_t(rects[i].y),0,notice_[i].Get(),0,&box);
+    context_->OMSetRenderTargets(0,nullptr,nullptr);
+    r=submitCommands();
+    // A failed submit has reset the recording context, so the renderer stops being ready, as every other stereo failure does.
+    if(r!=XR_SUCCESS){ready_=false;lastResult_=r;}
+    else if(FAILED(device_->GetDeviceRemovedReason()))r=XR_ERROR_GRAPHICS_DEVICE_INVALID;
+    XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+    const XrResult released=dispatch_.releaseSwapchainImage(e.swapchain,&ri);
+    if(r!=XR_SUCCESS)return r;
+    if(released!=XR_SUCCESS)return released;
+  }
+  for(unsigned i=0;i<2;++i) {
+    auto& v=layerViews_[i];v={XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
+    v.pose=views[i].pose;v.fov=views[i].fov;
+    v.subImage={eyes_[i].swapchain,{{0,0},{int32_t(eyes_[i].width),int32_t(eyes_[i].height)}},0};
   }
   layer.space=space;layer.viewCount=2;layer.views=layerViews_;return XR_SUCCESS;
 }

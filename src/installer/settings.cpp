@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include "detect.h"
+#include "../common/flat_profile_keys.h"
 #include "../common/iniedit.h"
 #include "state.h"
 
@@ -160,6 +161,7 @@ const std::vector<SettingDef>& settingDefs() {
 bool SettingsModel::load(const std::wstring& gameDir, const std::string& profile) {
     m_gameDir = gameDir;
     m_backedUp = false;
+    m_profile = profile;
     m_iniPath = settingsPathFor(gameDir, profile);
     m_sharedPath = profile == "flat" ? settingsPathFor(gameDir, "vr") : std::wstring();
     bool fromShared = false;
@@ -182,14 +184,15 @@ std::string SettingsModel::currentText(bool* fromShared) const {
 
 void SettingsModel::refreshRows() {
     m_rows.clear();
+    // The flat selection shows the rows the flat profile reads (flat_profile_keys.h, the runtime's own list); the
+    // VR selection shows every setting.
+    const bool flatRows = m_profile == "flat";
     for (const SettingDef& def : settingDefs()) {
-#ifdef EDVR_INSTALLER_FLAT
-        const std::string key = def.key;
-        const std::string section = def.section;
-        if (!(section == "advanced" && key == "real_dll") &&
-            !(section == "hotkey" && key == "dump_draws") &&
-            !(section == "log" && key == "enabled")) continue;
-#endif
+        if (flatRows) {
+            const std::string dotted = std::string(def.section) + "." + def.key;
+            // fix.temporal_aa is read by the flat runtime through Config::requestedTemporalMode, which skips the allow-list.
+            if (!edvr::flatProfileReadsKey(dotted.c_str()) && dotted != "fix.temporal_aa") continue;
+        }
         SettingRow row;
         row.def = &def;
         row.choices = splitChoices(def.choices);

@@ -6,11 +6,15 @@
 #include <new>
 
 #include <algorithm>
+#include <string>
 #include <vector>
+#include <wchar.h>
 
 #include "detect.h"
+#include "plan.h"
 #include "../common/elite_graphics_folder.h"
 #include "../common/iniedit.h"
+#include "../common/install_scope.h"
 #include "state.h"
 
 namespace edvr::installer {
@@ -21,14 +25,37 @@ namespace {
 // session.
 const long long kSessionWindowSeconds = 180;
 
-// The edition installed in this folder, as far as it can be told without a
-// survey: the record when there is one, else the descriptor the flat edition
-// always writes. Everything else is VR.
-std::string editionOf(const std::wstring& gameDir) {
-    const InstallState state = readState(gameDir);
-    if (state.present) return state.profile;
+// The scope installed in this folder, as far as it can be told without a survey, in the planner's order (plan.cpp installedScope):
+// a canonical descriptor first, so a record an older install left cannot outvote the files; then the record; then the descriptor's own
+// text (schema 1 `profile = flat`). Everything else is VR.
+std::string scopeOf(const std::wstring& gameDir) {
     const std::string descriptor = readTextFile(joinPath(gameDir, L"edvr_profile.ini"));
-    return iniValue(descriptor, "install.profile") == "flat" ? "flat" : "vr";
+    const std::string canonical = canonicalDescriptorScope(descriptor);
+    if (!canonical.empty()) return canonical;
+    const InstallState state = readState(gameDir);
+    if (state.present && !recordedScope(state).empty()) return recordedScope(state);
+    const edvr::InstallScope parsed = edvr::parseInstallDescriptor(descriptor).scope;
+    return parsed == edvr::InstallScope::Invalid ? std::string("vr") : std::string(edvr::scopeName(parsed));
+}
+
+// The log folder one settings file names: its log.dir, or edvr_logs beside the game when the file is absent or names none. The runtime
+// resolves it the same way.
+std::wstring logDirOf(const std::wstring& gameDir, const std::wstring& iniPath) {
+    const std::string configured = iniValue(readTextFile(iniPath), "log.dir");
+    return configured.empty() ? joinPath(gameDir, L"edvr_logs") : fromUtf8(configured);
+}
+
+// The zip prefix for a file from log folder `folder` (0-based) whose plain name the zip already holds: two folders can each hold a file
+// of one name (a shader dumped by both runs, say), and the zip cannot hold two entries of one name.
+std::wstring zipPrefixFor(size_t folder) { return L"log-folder-" + std::to_wstring(folder + 1) + L"/"; }
+
+// The index of the log folder a path sits in, 0 when none of them is.
+size_t folderIndexOf(const std::wstring& path, const std::vector<std::wstring>& dirs) {
+    for (size_t i = 0; i < dirs.size(); ++i) {
+        const size_t n = dirs[i].size();
+        if (path.size() > n && path[n] == L'\\' && _wcsnicmp(path.c_str(), dirs[i].c_str(), n) == 0) return i;
+    }
+    return 0;
 }
 
 unsigned long crc32Of(const unsigned char* data, size_t size, unsigned long running) {
@@ -507,23 +534,28 @@ LogBundle collectLogs(const std::wstring& gameDir, const std::wstring& outDir,
         return bundle;
     }
 
-    // Where the logs are is a setting, so ask the file rather than assume -- the
-    // file the installed edition's runtime reads: the flat edition's edvr-flat.ini
-    // (edvr.ini only while it has none), the VR edition's edvr.ini.
-    const bool flatEdition = editionOf(gameDir) == "flat";
-    const std::wstring flatIniPath = joinPath(gameDir, L"edvr-flat.ini");
+    // Where the logs are is a setting, and each settings file names its own: edvr.ini
+    // and edvr-flat.ini may point at different folders, so both are read and each
+    // distinct folder is swept (the same folder twice is swept once).
     const std::wstring sharedIniPath = joinPath(gameDir, L"edvr.ini");
-    const std::string iniText =
-        readTextFile(flatEdition && fileExists(flatIniPath) ? flatIniPath : sharedIniPath);
-    const std::string configured = iniValue(iniText, "log.dir");
-    const std::wstring logDir =
-        configured.empty() ? joinPath(gameDir, L"edvr_logs") : fromUtf8(configured);
+    const std::wstring flatIniPath = joinPath(gameDir, L"edvr-flat.ini");
+    std::vector<std::wstring> logDirs;
+    for (const std::wstring& dir : {logDirOf(gameDir, sharedIniPath), logDirOf(gameDir, flatIniPath)}) {
+        const bool seen = std::any_of(logDirs.begin(), logDirs.end(),
+                                      [&](const std::wstring& d) { return _wcsicmp(d.c_str(), dir.c_str()) == 0; });
+        if (!seen) logDirs.push_back(dir);
+    }
+
+    // The scope is the one thing the summary of a bundle states: which settings file is this install's own.
+    const std::string scope = scopeOf(gameDir);
+    bundle.notes.push_back("Install scope: " + scope);
 
     std::vector<Found> take;
 
     // ---- the newest session's logs ------------------------------------
     struct LogFile {
         std::wstring name;
+        std::wstring path;
         FILETIME     written{};
         FILETIME     actualWritten{};
     };
@@ -531,13 +563,15 @@ LogBundle collectLogs(const std::wstring& gameDir, const std::wstring& outDir,
     FILETIME sessionStart{}, sessionEnd{};
     bool haveNewestLog = false;
     std::vector<LogFile> logs;
-    WIN32_FIND_DATAW fd{};
-    HANDLE h = FindFirstFileW(joinPath(logDir, L"edvr_*.log").c_str(), &fd);
-    if (h != INVALID_HANDLE_VALUE) {
+    for (size_t folder = 0; folder < logDirs.size(); ++folder) {
+        WIN32_FIND_DATAW fd{};
+        HANDLE h = FindFirstFileW(joinPath(logDirs[folder], L"edvr_*.log").c_str(), &fd);
+        if (h == INVALID_HANDLE_VALUE) continue;
         do {
             if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
             LogFile log;
             log.name = fd.cFileName;
+            log.path = joinPath(logDirs[folder], log.name);
             log.actualWritten = fd.ftLastWriteTime;
             // The name first, the write time only when the name does not carry
             // a stamp -- a log from a custom log.dir, or one somebody renamed.
@@ -548,8 +582,9 @@ LogBundle collectLogs(const std::wstring& gameDir, const std::wstring& outDir,
     }
 
     if (logs.empty()) {
-        bundle.notes.push_back("No logs in " + toUtf8(logDir) +
-                               " -- has the game been started since EDVR was installed?");
+        std::string where;
+        for (const std::wstring& dir : logDirs) where += (where.empty() ? "" : " or ") + toUtf8(dir);
+        bundle.notes.push_back("No logs in " + where + " -- has the game been started since EDVR was installed?");
     } else {
         const LogFile* newest = &logs.front();
         for (const LogFile& log : logs) {
@@ -564,7 +599,7 @@ LogBundle collectLogs(const std::wstring& gameDir, const std::wstring& outDir,
             if (secondsBetween(log.written, newest->written) > kSessionWindowSeconds) continue;
             if(CompareFileTime(&log.written,&sessionStart)<0) sessionStart=log.written;
             if(CompareFileTime(&log.actualWritten,&sessionEnd)>0) sessionEnd=log.actualWritten;
-            take.push_back({joinPath(logDir, log.name), log.name});
+            take.push_back({log.path, log.name});
             ++sessionCount;
         }
         char line[160];
@@ -579,16 +614,32 @@ LogBundle collectLogs(const std::wstring& gameDir, const std::wstring& outDir,
         std::wstring name;
         const char*  missing;  // note when it is not there, or nullptr to stay quiet
     };
+    // The native OpenXR runtime's startup file, beside its openvr_api.dll: the
+    // folder the installer itself resolves (detect.cpp). It carries keys that
+    // change what the runtime does -- frame_end_overlap, pose_cache, the runtime
+    // manifest -- and none of them are in edvr.ini, so a log can only say what
+    // the runtime did with the file, never what the file said. A flat install has
+    // no such runtime, so it contributes nothing. A VR install without the file
+    // is a valid one (the runtime then starts from its packaged defaults and its
+    // log says source=packaged-default), so a missing file is not noted.
+    std::wstring nativeIniPath;
+    if (scope != "flat") {  // the runtime is installed for both and vr scopes
+        const std::wstring openvrDir = findOpenvrDir(gameDir);
+        nativeIniPath = joinPath(openvrDir.empty() ? joinPath(gameDir, L"Openvr\\win64") : openvrDir,
+                                 L"edvr_openxr.ini");
+    }
     const Extra extras[] = {
         {joinPath(gameDir, L"edvr_breadcrumbs.txt"), L"edvr_breadcrumbs.txt", nullptr},
         {joinPath(gameDir, L"edvr_FATAL.txt"), L"edvr_FATAL.txt", nullptr},
-        // Each edition's settings file is the one to miss when it is that
-        // edition's: a flat install that reads only edvr-flat.ini is not short of
-        // an edvr.ini, and a VR one has no use for a flat file.
-        {sharedIniPath, L"edvr.ini", flatEdition ? nullptr : "edvr.ini is not there"},
+        // Each settings file is the one to miss when the scope installs it. A flat
+        // scope's runtime falls back to edvr.ini while it has no edvr-flat.ini, so
+        // there a missing edvr-flat.ini is only missed without an edvr.ini either.
+        {sharedIniPath, L"edvr.ini", scopeHasVrIni(scope) ? "edvr.ini is not there" : nullptr},
         {flatIniPath, L"edvr-flat.ini",
-         flatEdition && !fileExists(sharedIniPath) ? "edvr-flat.ini is not there" : nullptr},
+         scopeHasFlatIni(scope) && (scope != "flat" || !fileExists(sharedIniPath)) ? "edvr-flat.ini is not there"
+                                                                                    : nullptr},
         {statePath(gameDir), L"edvr_install_state.ini", nullptr},
+        {nativeIniPath, L"edvr_openxr.ini", nullptr},
     };
     for (const Extra& extra : extras) {
         if (fileExists(extra.path)) {
@@ -622,10 +673,19 @@ LogBundle collectLogs(const std::wstring& gameDir, const std::wstring& outDir,
             unsigned long long size = 0;
             bool unsafe = false;
         };
+        // Every capture root of every log folder.
+        struct CaptureRoot {
+            std::wstring dir;
+            const wchar_t* name;
+        };
+        std::vector<CaptureRoot> roots;
+        for (const std::wstring& dir : logDirs)
+            for (const wchar_t* name : captureRoots) roots.push_back({dir, name});
         std::vector<CapFile> caps;
-        for (const wchar_t* root : captureRoots) {
+        for (const CaptureRoot& captureRoot : roots) {
+            const wchar_t* root = captureRoot.name;
             const bool packetRoot=wcscmp(root,L"flat_draw_packets")==0;
-            const std::wstring rootPath = joinPath(logDir, root);
+            const std::wstring rootPath = joinPath(captureRoot.dir, root);
             WIN32_FIND_DATAW cfd{};
             HANDLE ch = FindFirstFileW(joinPath(rootPath, L"*").c_str(), &cfd);
             if (ch == INVALID_HANDLE_VALUE) continue;
@@ -829,10 +889,14 @@ LogBundle collectLogs(const std::wstring& gameDir, const std::wstring& outDir,
     const std::wstring stamp = timestampName();
     bundle.zipPath = joinPath(where, L"edvr-logs-" + stamp + L".zip");
 
+    // Names are the files' own, except where the zip already holds one of that name: the later copy then carries its folder's prefix.
     std::vector<std::wstring> files, names;
     for (const Found& found : take) {
+        std::wstring name = found.name;
+        if (std::find(names.begin(), names.end(), name) != names.end())
+            name = zipPrefixFor(folderIndexOf(found.path, logDirs)) + found.name;
         files.push_back(found.path);
-        names.push_back(found.name);
+        names.push_back(name);
     }
     std::string error;
     std::vector<std::wstring> skipped;

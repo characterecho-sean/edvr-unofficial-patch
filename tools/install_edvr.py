@@ -5,8 +5,9 @@
     python tools/install_edvr.py --target steam
     python tools/install_edvr.py --target frontier --openvr --tag stepped
     python tools/install_edvr.py --target steam --verify-only
-    python tools/install_edvr.py --target steam --profile flat --dry-run
-    python tools/install_edvr.py --target steam --profile flat --xess --dry-run
+    python tools/install_edvr.py --target steam --scope flat --dry-run
+    python tools/install_edvr.py --target steam --scope both --ini
+    python tools/install_edvr.py --target steam --scope both --xess --dry-run
     python tools/install_edvr.py --target frontier --native-openxr --dll \
         --native-receipt C:\\temp\\edvr-native.json
     python tools/install_edvr.py --restore-native C:\\temp\\edvr-native.json
@@ -41,19 +42,27 @@ Three things it does that a `copy` does not:
 edvr.ini is NOT copied unless --ini says so. It is the one file in the
 payload that carries the settings of whoever flew last, a reinstall does
 not undo an edit to it, and clobbering it has cost a session. --ini backs
-it up first and says loudly what it did. The flat profile's settings live
-in edvr-flat.ini instead: --ini flat writes that file, and a flat install
-that finds no edvr-flat.ini yet seeds one from the existing edvr.ini, so
-the two profiles stop sharing one file's settings.
+it up first and says loudly what it did. The flat half's settings live in
+edvr-flat.ini instead. --ini writes the settings files of the chosen scope:
+both writes edvr.ini and edvr-flat.ini, vr writes edvr.ini, flat writes
+edvr-flat.ini. A scope that includes flat seeds a missing edvr-flat.ini from
+the existing edvr.ini, so the two halves stop sharing one file's settings.
+
+--scope both|vr|flat (default both) is what the install is for. Every scope
+except flat installs the VR payload (runtime, graphics, loader, notice,
+edvr_openxr.ini); flat installs the flat graphics alone. The descriptor
+edvr_profile.ini is always written in schema 2 with the scope in it, which
+is what the DLL reads to choose its profile. --profile vr|flat is the old
+spelling of --scope and still works, with a deprecation line.
 
 --dry-run prints the plan and writes nothing at all -- no copies, no
 backups, no directories. The self-test asserts that, because a --dry-run
 that wrote files is a bug this project has already shipped once.
 
-The flat XeSS DLL and its notices are optional in this developer tool:
---xess includes them explicitly, and --all includes them when built. A plain
---verify-only also verifies XeSS runtime/notices when the effective flat ini
-selects xess; other modes need only the core profile.
+The XeSS-SR DLL and its notices are optional in this developer tool, for every
+scope: --xess includes them explicitly, and --all includes them when built. A
+plain --verify-only also verifies them when the scope's effective ini selects
+xess; other modes need only the core profile.
 
 Exit 0 when everything asked for landed and verified, 1 otherwise.
 """
@@ -87,8 +96,32 @@ BACKUP_FILE = re.compile(r"^(?P<file>.+?)\.pre-(?P<tag>[^\\/]+)-(?P<stamp>\d{8}-
 RECEIPT_NAMES = ("edvr_native_receipt.json", "edvr_flat_receipt.json")
 
 
-def profile_bytes(profile):
-    return ("[install]\r\nschema = 1\r\nprofile = %s\r\n" % profile).encode("utf-8")
+SCOPES = ("both", "vr", "flat")
+
+
+def profile_bytes(scope):
+    """The descriptor the DLL reads: schema 2, with the scope the install is for."""
+    return ("[install]\r\nschema = 2\r\nscope = %s\r\n" % scope).encode("utf-8")
+
+
+def _descriptor_scope(path):
+    """What the descriptor on disk says: None when absent, the scope for a
+    schema-2 descriptor, `both` or `flat` for a schema-1 one (`profile = vr`
+    is the VR half, which now means both; `profile = flat` means flat, as the
+    DLL reads it), and "unknown" for anything else, including unreadable."""
+    if not os.path.isfile(path):
+        return None
+    try:
+        data = Path(path).read_bytes()
+    except OSError:
+        return "unknown"
+    for scope in SCOPES:
+        if data == profile_bytes(scope):
+            return scope
+    for profile, scope in (("vr", "both"), ("flat", "flat")):
+        if data == ("[install]\r\nschema = 1\r\nprofile = %s\r\n" % profile).encode("utf-8"):
+            return scope
+    return "unknown"
 
 
 def native_paths(root, target):
@@ -729,6 +762,8 @@ def _validate_v2_receipt(r):
                    xess=os.path.join(target, "libxess.dll"),
                    xess_license=os.path.join(target, "INTEL-XESS-LICENSE.txt"),
                    xess_third_party=os.path.join(target, "INTEL-XESS-THIRD-PARTY.txt"))
+    # A both install records the flat half's settings file as its own entry.
+    if r["kind"] == NATIVE_KIND: targets["ini_flat"] = _ini_target(target, "flat")
     keys = [e["key"] for e in files]
     if len(keys) != len(set(keys)) or not required.issubset(keys) or set(keys) - targets.keys():
         raise ValueError("incomplete or duplicate EDVR v2 components")
@@ -1188,21 +1223,42 @@ def _flat_paths(root, target):
             "game": os.path.join(target, GAME_EXE)}
 
 
-def _ini_source(root, profile):
-    return os.path.join(root, "edvr.ini") if profile == "vr" else \
+def _ini_source(root, half):
+    """The template for a settings file: `vr` or `flat`, one per half."""
+    return os.path.join(root, "edvr.ini") if half == "vr" else \
         os.path.join(root, "build", "edvr-flat.ini")
 
 
-def _ini_target(target, profile):
-    """The flat profile keeps its settings in a file of its own, so one
-    profile's install never clobbers the other profile's tuning."""
-    return os.path.join(target, "edvr.ini" if profile == "vr" else "edvr-flat.ini")
+def _ini_target(target, half):
+    """The flat half keeps its settings in a file of its own, so one half's
+    install never clobbers the other half's tuning."""
+    return os.path.join(target, "edvr.ini" if half == "vr" else "edvr-flat.ini")
 
 
-def _flat_selects_xess(target):
-    """Read the flat profile's effective temporal mode, including its ini fallback."""
-    ini = _ini_target(target, "flat")
-    if not os.path.isfile(ini):
+def _ini_pairs(root, target, scope):
+    """(source, target, receipt key) for each settings file the scope owns. A
+    both install's flat file is keyed ini_flat; a flat install's is ini, as
+    its receipt has always named it."""
+    pairs = []
+    if scope in ("both", "vr"):
+        pairs.append((_ini_source(root, "vr"), _ini_target(target, "vr"), "ini"))
+    if scope in ("both", "flat"):
+        pairs.append((_ini_source(root, "flat"), _ini_target(target, "flat"),
+                      "ini" if scope == "flat" else "ini_flat"))
+    return pairs
+
+
+def _selects_xess(target, scope):
+    """Whether the settings a scope's game reads select XeSS-SR. The flat half
+    reads edvr-flat.ini and falls back to edvr.ini; the VR half reads edvr.ini."""
+    halves = {"both": ("vr", "flat"), "vr": ("vr",), "flat": ("flat",)}[scope]
+    return any(_ini_selects_xess(target, half) for half in halves)
+
+
+def _ini_selects_xess(target, half):
+    """Read one half's effective temporal mode, including the flat half's ini fallback."""
+    ini = _ini_target(target, half)
+    if half == "flat" and not os.path.isfile(ini):
         ini = os.path.join(target, "edvr.ini")
     if not os.path.isfile(ini):
         return False
@@ -1242,12 +1298,12 @@ def _equivalent_startup_config(actual, expected):
 
 
 def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
-                            include_dlss=False, include_xess=False, include_ini=False, profile="vr",
+                            include_dlss=False, include_xess=False, include_ini=False, scope="both",
                             keep_backups=KEEP_BACKUPS):
-    """Stage a profile's graphics payload and optional native components. A
+    """Stage a scope's graphics payload and optional native components. A
     good install ends by pruning old backups (prune_backups); a dry run says
     what that would remove."""
-    native = profile == "vr"
+    native = scope in ("both", "vr")
     p = _standard_native_paths(root, target) if native else _flat_paths(root, target)
     payload = ("runtime", "graphics", "loader", "notice") if native else ("graphics",)
     errors = ["missing %s source %s" % ("native" if native else "flat", p[k]) for k in payload
@@ -1256,20 +1312,22 @@ def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
         errors.append("missing optional DLSS source %s" % os.path.join(root, "build", "nvngx_dlss.dll"))
     xess_names = (("xess", "libxess.dll"), ("xess_license", "INTEL-XESS-LICENSE.txt"),
                   ("xess_third_party", "INTEL-XESS-THIRD-PARTY.txt"))
-    if include_xess and native:
-        raise SystemExit("[edvr] --xess applies only to --profile flat")
+    # XeSS-SR ships with every scope: the flat half and the VR half both select it.
     if include_xess:
         for key, name in xess_names:
             if not os.path.isfile(os.path.join(root, "build", name)):
                 errors.append("missing XeSS source %s" % os.path.join(root, "build", name))
-    ini_source = _ini_source(root, profile)
-    if include_ini and not os.path.isfile(ini_source):
-        errors.append("missing %s INI source %s" % (profile, ini_source))
+    # Each settings file the scope owns, as (source, target, receipt key).
+    ini_pairs = _ini_pairs(root, target, scope)
+    if include_ini:
+        for source, _, _ in ini_pairs:
+            if not os.path.isfile(source):
+                errors.append("missing %s INI source %s" % (scope, source))
     if not os.path.isfile(p["game"]):
         errors.append("missing target executable %s" % p["game"])
     if errors:
         raise SystemExit("[edvr] %s preflight failed:\n       %s" %
-                         (profile, "\n       ".join(errors)))
+                         (scope, "\n       ".join(errors)))
     if native:
         try:
             import fetch_openxr_loader
@@ -1292,39 +1350,43 @@ def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
                      (os.path.abspath(p["loader_target"]),
                       os.path.abspath(p["graphics_target"]))).encode("utf-8") if native else None)
     descriptor = os.path.join(target, PROFILE_FILE)
-    descriptor_bytes = profile_bytes(profile)
-    if not verify_only and not native:
+    descriptor_bytes = profile_bytes(scope)
+    if not verify_only and scope == "flat":
+        # A flat install refuses VR state. A descriptor that already says flat
+        # is not state; one that says both or vr, or that is unreadable, is.
         leftovers = _flat_vr_leftovers(target)
-        if os.path.isfile(descriptor) and Path(descriptor).read_bytes() != descriptor_bytes:
+        if _descriptor_scope(descriptor) not in (None, "flat"):
             leftovers.append(descriptor)
         if leftovers:
             raise SystemExit("[edvr] flat preflight refused existing VR or unknown profile state; "
-                             "use edvr-installer.exe to convert and restore originals:\n       " +
+                             "use edvr-installer.exe to convert and restore originals (run its "
+                             "update/repair once first if this install was made by this tool, so "
+                             "it records the files it must prove before converting):\n       " +
                              "\n       ".join(leftovers))
     if verify_only:
         ok = True
         for key in payload:
             dst = p[key + "_target"]
             if not os.path.isfile(dst) or sha256(dst) != sha256(p[key]):
-                print("[edvr] %s verify mismatch: %s" % (profile, dst)); ok = False
+                print("[edvr] %s verify mismatch: %s" % (scope, dst)); ok = False
         if native and (not os.path.isfile(p["config"]) or
                 not _equivalent_startup_config(open(p["config"], "rb").read(), config_bytes)):
             print("[edvr] native verify mismatch: %s" % p["config"]); ok = False
         if not os.path.isfile(descriptor) or Path(descriptor).read_bytes() != descriptor_bytes:
-            print("[edvr] %s verify mismatch: %s" % (profile, descriptor)); ok = False
-        if not native and _flat_vr_leftovers(target):
+            print("[edvr] %s verify mismatch: %s" % (scope, descriptor)); ok = False
+        if scope == "flat" and _flat_vr_leftovers(target):
             print("[edvr] flat verify mismatch: VR components remain"); ok = False
         if include_dlss:
             dlss = os.path.join(root, "build", "nvngx_dlss.dll")
             dst = os.path.join(target, "nvngx_dlss.dll")
             if not os.path.isfile(dst) or sha256(dst) != sha256(dlss):
-                print("[edvr] %s verify mismatch: %s" % (profile, dst)); ok = False
+                print("[edvr] %s verify mismatch: %s" % (scope, dst)); ok = False
         if include_xess:
             for key, name in xess_names:
                 src = os.path.join(root, "build", name); dst = os.path.join(target, name)
                 if not os.path.isfile(dst) or sha256(dst) != sha256(src):
-                    print("[edvr] %s verify mismatch: %s" % (profile, dst)); ok = False
-        elif not native and _flat_selects_xess(target):
+                    print("[edvr] %s verify mismatch: %s" % (scope, dst)); ok = False
+        elif _selects_xess(target, scope):
             # A plain install intentionally preserves a foreign optional DLL.
             # A selected XeSS mode must never be reported as fully verified
             # unless the runtime and its notices match this build.
@@ -1333,15 +1395,15 @@ def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
                        not os.path.isfile(os.path.join(target, name)) or
                        sha256(os.path.join(root, "build", name)) != sha256(os.path.join(target, name))]
             if missing:
-                print("[edvr] WARNING: flat ini selects XeSS but its runtime/notices are not verified "
-                      "(%s); install with --profile flat --xess" % ", ".join(missing))
+                print("[edvr] WARNING: the ini selects XeSS but its runtime/notices are not verified "
+                      "(%s); install with --xess" % ", ".join(missing))
                 ok = False
         if include_ini:
-            ini_target = _ini_target(target, profile)
-            if (not os.path.isfile(ini_target) or not os.path.isfile(ini_source) or
-                    open(ini_target, "rb").read() != open(ini_source, "rb").read()):
-                print("[edvr] %s verify mismatch: %s" % (profile, ini_target)); ok = False
-        if ok: print("[edvr] %s payload and profile verified" % profile)
+            for source, ini_target, _ in ini_pairs:
+                if (not os.path.isfile(ini_target) or not os.path.isfile(source) or
+                        open(ini_target, "rb").read() != open(source, "rb").read()):
+                    print("[edvr] %s verify mismatch: %s" % (scope, ini_target)); ok = False
+        if ok: print("[edvr] %s payload and descriptor verified" % scope)
         return 0 if ok else 1
     if os.path.isfile(p["graphics_target"]):
         try:
@@ -1379,11 +1441,11 @@ def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
                             "before_sha256": sha256(dst) if os.path.isfile(dst) else None,
                             "installed_sha256": sha256(src)})
     if include_ini:
-        src = ini_source; dst = _ini_target(target, profile)
-        entries.append({"key": "ini", "source": os.path.abspath(src), "target": os.path.abspath(dst),
-                        "backup": _native_backup_name(dst, tag, stamp) if os.path.isfile(dst) else None,
-                        "before_sha256": sha256(dst) if os.path.isfile(dst) else None,
-                        "installed_sha256": sha256(src)})
+        for src, dst, key in ini_pairs:
+            entries.append({"key": key, "source": os.path.abspath(src), "target": os.path.abspath(dst),
+                            "backup": _native_backup_name(dst, tag, stamp) if os.path.isfile(dst) else None,
+                            "before_sha256": sha256(dst) if os.path.isfile(dst) else None,
+                            "installed_sha256": sha256(src)})
     if native:
         entries.append({"key": "config", "source": "generated", "target": os.path.abspath(p["config"]),
                         "backup": _native_backup_name(p["config"], tag, stamp) if os.path.isfile(p["config"]) else None,
@@ -1393,15 +1455,15 @@ def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
                     "backup": _native_backup_name(descriptor, tag, stamp) if os.path.isfile(descriptor) else None,
                     "before_sha256": sha256(descriptor) if os.path.isfile(descriptor) else None,
                     "installed_sha256": hashlib.sha256(descriptor_bytes).hexdigest().upper()})
-    # A flat install with no edvr-flat.ini yet inherits the settings of
-    # whoever flew last by seeding the new file from edvr.ini. Not journaled:
-    # the seed is a brand-new file no prior state needs restoring into, and
-    # keeping it out of the receipt means a later edit of edvr-flat.ini is
-    # not "the installed file changed" to repair/restore.
-    seed_ini = (not native and not include_ini and
+    # A scope that includes the flat half, with no edvr-flat.ini yet, inherits
+    # the settings of whoever flew last by seeding the new file from edvr.ini.
+    # Not journaled: the seed is a brand-new file no prior state needs
+    # restoring into, and keeping it out of the receipt means a later edit of
+    # edvr-flat.ini is not "the installed file changed" to repair/restore.
+    seed_ini = (scope in ("both", "flat") and not include_ini and
                 not os.path.isfile(_ini_target(target, "flat")) and
                 os.path.isfile(os.path.join(target, "edvr.ini")))
-    print("[edvr] %s plan%s: %s" % (profile, " (DRY RUN -- nothing will be written)" if dry_run else "", target))
+    print("[edvr] %s plan%s: %s" % (scope, " (DRY RUN -- nothing will be written)" if dry_run else "", target))
     for e in entries: print("       %-7s %s" % (e["key"], e["target"]))
     if seed_ini:
         print("       seed     %s (from edvr.ini; a new file, so no backup)" % _ini_target(target, "flat"))
@@ -1464,7 +1526,7 @@ def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
                   _ini_target(target, "flat"))
         except OSError as exc:
             print("[edvr] WARNING: flat settings seed failed (%s); copy edvr.ini to edvr-flat.ini by hand to keep your settings" % exc)
-    print("[edvr] %s package installed and verified; receipt: %s" % (profile, receipt))
+    print("[edvr] %s package installed and verified; receipt: %s" % (scope, receipt))
     _prune_quietly(target, keep_backups, receipts=(receipt,))
     return 0
 
@@ -1576,13 +1638,234 @@ def _suspend_self_test():
     return ok
 
 
+def _scope_self_test():
+    """--scope and the --profile alias: the schema-2 descriptor each scope
+    writes, the settings files each owns under --ini (both writes two, backed
+    up each), a dry run that writes nothing, the flat scope's refusal of VR
+    state (a schema-2 flat descriptor is not state), and --verify-only against
+    the chosen scope."""
+    import contextlib
+    import io
+    import openxr_pe as _scope_pe
+    import fetch_openxr_loader as _scope_loader
+
+    ok = True
+    tmp = tempfile.mkdtemp(prefix="edvr_scope_test_")
+    saved = (globals()["validate_elite_game"], globals()["strict_game_running"],
+             _scope_pe.validate_native_pair, _scope_loader.verify, _scope_pe.Image, _scope_pe._exports)
+
+    def check(cond, what):
+        nonlocal ok
+        if not cond:
+            print("scope self-test: %s" % what); ok = False
+
+    try:
+        root = os.path.join(tmp, "repo")
+        os.makedirs(os.path.join(root, "build"))
+        for rel, data in (("build/edvr_openxr_runtime.dll", b"RUNTIME"),
+                          ("build/edvr_openxr_graphics.dll", b"NATIVE-GRAPHICS"),
+                          ("build/openxr_loader.dll", b"LOADER"),
+                          ("build/OPENXR-LOADER-LICENSE.txt", b"LICENSE"),
+                          ("build/d3d11.dll", b"FLAT-GRAPHICS"),
+                          ("build/nvngx_dlss.dll", b"DLSS"),
+                          ("build/edvr-flat.ini", b"[fix]\r\ntemporal_aa = off\r\n"),
+                          ("edvr.ini", b"[fix]\nvr_template = 1\n")):
+            Path(root, rel.replace("/", os.sep)).write_bytes(data)
+        _scope_loader.verify = lambda path: None
+        _scope_pe.validate_native_pair = lambda *args: None
+        # An installed d3d11.dll from an earlier case is not a PE image here;
+        # reads as an EDVR build, as the prune self-test does.
+        _scope_pe.Image = lambda data: data
+        _scope_pe._exports = lambda image: ({0: "edvr_graphics"}, None)
+        globals()["validate_elite_game"] = lambda path: None
+        globals()["strict_game_running"] = lambda *args: (True, False)
+
+        def game(name, user_ini=None):
+            g = os.path.join(tmp, name)
+            os.makedirs(os.path.join(g, "Openvr", "win64"))
+            Path(g, GAME_EXE).write_bytes(b"GAME")
+            if user_ini is not None:
+                Path(g, "edvr.ini").write_bytes(user_ini)
+            return g
+
+        def tree(g):
+            return sorted((str(p.relative_to(g)), p.read_bytes() if p.is_file() else None)
+                          for p in Path(g).rglob("*"))
+
+        def run(argv):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                try:
+                    return main(argv), out.getvalue()
+                except SystemExit:
+                    return "refused", out.getvalue()
+
+        def args_for(g, *extra, tag="t"):
+            return ["--root", root, "--target", g, "--tag", tag] + list(extra)
+
+        # --scope both --ini: two settings files, each backed up, the VR payload.
+        g = game("both", user_ini=b"[user]\nkeep=1\n")
+        Path(g, "edvr-flat.ini").write_bytes(b"[user]\nflat=1\n")
+        before = tree(g)
+        code, _ = run(args_for(g, "--scope", "both", "--ini", "--dry-run", tag="both"))
+        check(code == 0 and tree(g) == before, "--scope both --ini --dry-run wrote files or directories")
+        code, text = run(args_for(g, "--scope", "both", "--ini", tag="both"))
+        check(code == 0, "--scope both --ini failed: %r" % text)
+        check(Path(g, PROFILE_FILE).read_bytes() == b"[install]\r\nschema = 2\r\nscope = both\r\n",
+              "scope both wrote the wrong descriptor")
+        check(Path(g, "edvr.ini").read_bytes() == b"[fix]\nvr_template = 1\n",
+              "scope both did not write edvr.ini from the repo root")
+        check(Path(g, "edvr-flat.ini").read_bytes() == b"[fix]\r\ntemporal_aa = off\r\n",
+              "scope both did not write edvr-flat.ini from build/")
+        ini_backup = list(Path(g).glob("edvr.ini.pre-both-*.bak"))
+        flat_backup = list(Path(g).glob("edvr-flat.ini.pre-both-*.bak"))
+        check(len(ini_backup) == 1 and ini_backup[0].read_bytes() == b"[user]\nkeep=1\n",
+              "scope both did not back up edvr.ini")
+        check(len(flat_backup) == 1 and flat_backup[0].read_bytes() == b"[user]\nflat=1\n",
+              "scope both did not back up edvr-flat.ini")
+        check(Path(g, "Openvr", "win64", "openvr_api.dll").read_bytes() == b"RUNTIME"
+              and Path(g, "d3d11.dll").read_bytes() == b"NATIVE-GRAPHICS"
+              and Path(g, "Openvr", "win64", "edvr_openxr.ini").is_file(),
+              "scope both did not install the VR payload")
+        receipt = os.path.join(g, "edvr_native_receipt.json")
+        keys = {e["key"] for e in json.loads(Path(receipt).read_text(encoding="utf-8"))["files"]}
+        check({"ini", "ini_flat"} <= keys, "scope both receipt lacks the two ini entries: %r" % keys)
+        check(verify_native_receipt(receipt, g)["version"] == 2,
+              "scope both receipt does not verify")
+        code, _ = run(args_for(g, "--scope", "both", "--ini", "--verify-only"))
+        check(code == 0, "--verify-only failed after a scope both install")
+        Path(g, PROFILE_FILE).write_bytes(profile_bytes("vr"))
+        code, _ = run(args_for(g, "--scope", "both", "--ini", "--verify-only"))
+        check(code == 1, "--verify-only passed with a scope vr descriptor")
+        Path(g, PROFILE_FILE).write_bytes(profile_bytes("both"))
+        Path(g, "edvr-flat.ini").write_bytes(b"[fix]\ntemporal_aa=dlss\n")
+        code, _ = run(args_for(g, "--scope", "both", "--ini", "--verify-only"))
+        check(code == 1, "--verify-only passed with an edited edvr-flat.ini")
+
+        # Restoring a both install puts back both settings files the user had.
+        g = game("both-restore", user_ini=b"[user]\nkeep=6\n")
+        Path(g, "edvr-flat.ini").write_bytes(b"[user]\nflat=6\n")
+        code, _ = run(args_for(g, "--scope", "both", "--ini", tag="bothrestore"))
+        check(code == 0, "--scope both --ini failed before the restore case")
+        restored, _ = run(["--restore-native", os.path.join(g, "edvr_native_receipt.json")])
+        check(restored == 0, "restoring a scope both install failed")
+        check(Path(g, "edvr.ini").read_bytes() == b"[user]\nkeep=6\n"
+              and Path(g, "edvr-flat.ini").read_bytes() == b"[user]\nflat=6\n"
+              and not Path(g, "d3d11.dll").exists(),
+              "restoring a scope both install did not put back both settings files")
+
+        # --scope vr --ini writes edvr.ini only; a missing edvr-flat.ini is not seeded.
+        g = game("vr", user_ini=b"[user]\nkeep=2\n")
+        Path(g, "edvr-flat.ini").write_bytes(b"[user]\nflat=2\n")
+        code, _ = run(args_for(g, "--scope", "vr", "--ini", tag="vr"))
+        check(code == 0, "--scope vr --ini failed")
+        check(Path(g, "edvr-flat.ini").read_bytes() == b"[user]\nflat=2\n",
+              "--scope vr touched edvr-flat.ini")
+        check(Path(g, "edvr.ini").read_bytes() == b"[fix]\nvr_template = 1\n",
+              "--scope vr --ini did not write edvr.ini")
+        check(Path(g, PROFILE_FILE).read_bytes() == profile_bytes("vr"),
+              "--scope vr wrote the wrong descriptor")
+        g = game("vr-noseed", user_ini=b"[user]\nkeep=3\n")
+        code, _ = run(args_for(g, "--scope", "vr", tag="vrnoseed"))
+        check(code == 0 and not Path(g, "edvr-flat.ini").exists(),
+              "--scope vr seeded edvr-flat.ini")
+
+        # --scope flat: the flat graphics alone, no VR payload, and --ini writes
+        # only edvr-flat.ini.
+        g = game("flat", user_ini=b"[user]\nkeep=4\n")
+        code, _ = run(args_for(g, "--scope", "flat", "--ini", tag="flat"))
+        check(code == 0, "--scope flat --ini failed")
+        check(Path(g, PROFILE_FILE).read_bytes() == profile_bytes("flat"),
+              "--scope flat wrote the wrong descriptor")
+        check(Path(g, "d3d11.dll").read_bytes() == b"FLAT-GRAPHICS"
+              and not Path(g, "Openvr", "win64", "openvr_api.dll").exists(),
+              "--scope flat installed VR files")
+        check(Path(g, "edvr.ini").read_bytes() == b"[user]\nkeep=4\n"
+              and Path(g, "edvr-flat.ini").read_bytes() == b"[fix]\r\ntemporal_aa = off\r\n",
+              "--scope flat --ini touched the wrong settings file")
+
+        # Without --ini a flat install seeds edvr-flat.ini from edvr.ini once.
+        g = game("flat-seed", user_ini=b"[user]\nkeep=5\n")
+        code, _ = run(args_for(g, "--scope", "flat", tag="flatseed"))
+        check(code == 0 and Path(g, "edvr-flat.ini").read_bytes() == b"[user]\nkeep=5\n",
+              "--scope flat did not seed edvr-flat.ini")
+        # A schema-2 flat descriptor is not VR state: the reinstall goes through.
+        code, _ = run(args_for(g, "--scope", "flat", tag="flatagain"))
+        check(code == 0, "a schema-2 flat descriptor was refused as state")
+        # Schema-1 flat is the flat install an older tool made: also not state.
+        Path(g, PROFILE_FILE).write_bytes(b"[install]\r\nschema = 1\r\nprofile = flat\r\n")
+        code, _ = run(args_for(g, "--scope", "flat", tag="flatold"))
+        check(code == 0, "a schema-1 flat descriptor was refused as state")
+        # A descriptor that says both, or vr, is VR state and refused, with
+        # nothing written.
+        for name, descriptor in (("both", profile_bytes("both")),
+                                 ("vr1", b"[install]\r\nschema = 1\r\nprofile = vr\r\n"),
+                                 ("junk", b"[install]\r\nschema = 9\r\n")):
+            g = game("flat-refuse-" + name)
+            Path(g, PROFILE_FILE).write_bytes(descriptor)
+            before = tree(g)
+            code, _ = run(args_for(g, "--scope", "flat", tag="refuse"))
+            check(code == "refused" and tree(g) == before,
+                  "--scope flat accepted a %s descriptor" % name)
+
+        # --profile is the old spelling: it still installs, says so once, and
+        # cannot be combined with --scope.
+        g = game("alias-vr")
+        code, text = run(args_for(g, "--profile", "vr", tag="alias"))
+        check(code == 0 and text.count("[edvr] --profile is deprecated; use --scope vr") == 1,
+              "--profile vr did not warn once and install")
+        check(Path(g, PROFILE_FILE).read_bytes() == profile_bytes("vr"),
+              "--profile vr did not write scope vr")
+        g = game("alias-flat")
+        code, text = run(args_for(g, "--profile", "flat", tag="alias"))
+        check(code == 0 and "[edvr] --profile is deprecated; use --scope flat" in text
+              and Path(g, PROFILE_FILE).read_bytes() == profile_bytes("flat"),
+              "--profile flat did not map to scope flat")
+        g = game("alias-both")
+        before = tree(g)
+        code, _ = run(args_for(g, "--profile", "vr", "--scope", "vr", tag="alias"))
+        check(code == "refused" and tree(g) == before, "--profile with --scope was accepted")
+
+        # XeSS-SR for the VR scope: --xess installs the three files beside the
+        # game (a dry run writes nothing), and verify flags a VR ini that selects
+        # xess while its runtime is missing.
+        for name, data in (("libxess.dll", b"XESS-RUNTIME"),
+                           ("INTEL-XESS-LICENSE.txt", b"XESS-LICENSE"),
+                           ("INTEL-XESS-THIRD-PARTY.txt", b"XESS-NOTICES")):
+            Path(root, "build", name).write_bytes(data)
+        g = game("vr-xess")
+        before = tree(g)
+        code, _ = run(args_for(g, "--scope", "vr", "--xess", "--dry-run", tag="vrxess"))
+        check(code == 0 and tree(g) == before, "--scope vr --xess --dry-run wrote files or directories")
+        code, text = run(args_for(g, "--scope", "vr", "--xess", tag="vrxess"))
+        check(code == 0, "--scope vr --xess failed: %r" % text)
+        check(Path(g, "libxess.dll").read_bytes() == b"XESS-RUNTIME" and
+              Path(g, "INTEL-XESS-LICENSE.txt").read_bytes() == b"XESS-LICENSE" and
+              Path(g, "INTEL-XESS-THIRD-PARTY.txt").read_bytes() == b"XESS-NOTICES",
+              "--scope vr --xess did not install the three XeSS files")
+        Path(g, "edvr.ini").write_bytes(b"[fix]\ntemporal_aa = xess\n")
+        code, _ = run(args_for(g, "--scope", "vr", "--verify-only", tag="vrxess"))
+        check(code == 0, "--scope vr verify rejected a selected XeSS with its files verified")
+        Path(g, "libxess.dll").unlink()
+        code, text = run(args_for(g, "--scope", "vr", "--verify-only", tag="vrxess"))
+        check(code == 1 and "ini selects XeSS" in text,
+              "--scope vr verify did not warn for a VR ini selecting XeSS without its runtime")
+    finally:
+        (globals()["validate_elite_game"], globals()["strict_game_running"],
+         _scope_pe.validate_native_pair, _scope_loader.verify, _scope_pe.Image, _scope_pe._exports) = saved
+        shutil.rmtree(tmp, ignore_errors=True)
+    return ok
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         description="Install a built EDVR into a game directory, verified.")
     ap.add_argument("--target", default="steam",
                     help="steam, frontier, or a path to the game directory")
-    ap.add_argument("--profile", choices=("vr", "flat"), default="vr",
-                    help="install profile (default: vr)")
+    ap.add_argument("--scope", choices=SCOPES, default=None,
+                    help="what the install is for: both (default), vr, or flat")
+    ap.add_argument("--profile", choices=("vr", "flat"), default=None,
+                    help="deprecated: the old spelling of --scope vr or --scope flat")
     ap.add_argument("--root", default=None,
                     help="the tree to install FROM; defaults to this "
                          "script's own repository, which is what you want "
@@ -1594,13 +1877,13 @@ def main(argv=None):
     ap.add_argument("--dlss", action="store_true",
                     help="also install build/nvngx_dlss.dll")
     ap.add_argument("--xess", action="store_true",
-                    help="also install the XeSS runtime and notices for --profile flat")
+                    help="also install the XeSS-SR runtime and its notices (either scope)")
     ap.add_argument("--ini", action="store_true",
-                    help="also overwrite the selected profile's settings file "
-                         "(edvr.ini for vr, edvr-flat.ini for flat) with its "
-                         "template -- this discards tuned settings")
+                    help="also overwrite the scope's settings files (edvr.ini "
+                         "for both and vr, edvr-flat.ini for both and flat) "
+                         "with their templates -- this discards tuned settings")
     ap.add_argument("--all", action="store_true",
-                    help="selected profile plus available DLSS and, for flat, XeSS (never ini)")
+                    help="selected scope plus available DLSS and XeSS (never ini)")
     ap.add_argument("--native-openxr", action="store_true",
                      help="stage the experimental native OpenXR DLL and its "
                          "paired native graphics DLL as d3d11.dll (requires --dll, plus a receipt "
@@ -1639,6 +1922,12 @@ def main(argv=None):
     if args.self_test:
         return self_test()
 
+    if args.profile is not None and args.scope is not None:
+        ap.error("--profile is a deprecated alias for --scope; pass one or the other")
+    if args.profile is not None:
+        print("[edvr] --profile is deprecated; use --scope %s" % args.profile)
+    scope = args.scope or args.profile or "both"
+
     if args.keep_backups < 1:
         ap.error("--keep-backups must be at least 1: the newest backup is never pruned")
 
@@ -1648,7 +1937,7 @@ def main(argv=None):
     if args.restore_native:
         if any((args.native_openxr, args.native_receipt, args.dll, args.openvr,
                 args.dlss, args.xess, args.ini, args.all, args.verify_only, args.force,
-                args.no_backup, args.tag)) or args.profile != "vr":
+                args.no_backup, args.tag)) or args.scope is not None or args.profile not in (None, "vr"):
             ap.error("--restore-native cannot be combined with install options")
         if not os.path.isabs(args.restore_native):
             ap.error("--restore-native requires an absolute receipt path")
@@ -1669,8 +1958,8 @@ def main(argv=None):
     if args.native_receipt and not os.path.isabs(args.native_receipt):
         ap.error("--native-receipt must be an absolute new path")
     if args.native_openxr:
-        if args.profile != "vr":
-            ap.error("--native-openxr requires --profile vr")
+        if scope not in ("both", "vr"):
+            ap.error("--native-openxr requires --scope both or vr")
         if not args.dll:
             ap.error("--native-openxr requires --dll; it stages the paired "
                      "graphics DLL as part of the native package")
@@ -1721,10 +2010,8 @@ def main(argv=None):
     dlss_source = os.path.join(root, "build", "nvngx_dlss.dll")
     if args.force or args.no_backup:
         ap.error("normal native installation requires a stopped game and transactional backups")
-    if args.profile == "flat" and (args.dll or args.openvr):
-        ap.error("--profile flat cannot be combined with --dll or --openvr")
-    if args.xess and args.profile != "flat":
-        ap.error("--xess requires --profile flat")
+    if scope == "flat" and (args.dll or args.openvr):
+        ap.error("--scope flat cannot be combined with --dll or --openvr")
     if args.dlss and not os.path.isfile(dlss_source):
         ap.error("--dlss requested but build/nvngx_dlss.dll is missing")
     xess_source = os.path.join(root, "build", "libxess.dll")
@@ -1733,8 +2020,8 @@ def main(argv=None):
     return standard_native_install(root, target, tag, args.dry_run,
                                    args.verify_only,
                                    include_dlss=(args.dlss or (args.all and os.path.isfile(dlss_source))),
-                                   include_xess=(args.xess or (args.all and args.profile == "flat" and os.path.isfile(xess_source))),
-                                   include_ini=args.ini, profile=args.profile,
+                                   include_xess=(args.xess or (args.all and os.path.isfile(xess_source))),
+                                   include_ini=args.ini, scope=scope,
                                    keep_backups=args.keep_backups)
 
 
@@ -1979,7 +2266,7 @@ def _prune_self_test():
         globals()["validate_elite_game"] = lambda path: None
         globals()["strict_game_running"] = lambda *args: (True, False)
         try:
-            flat_args = ["--root", fsroot, "--target", fgame, "--profile", "flat", "--tag", "flat2"]
+            flat_args = ["--root", fsroot, "--target", fgame, "--scope", "flat", "--tag", "flat2"]
             before = tree(fgame)
             code, text = quiet(main, flat_args + ["--dry-run"])
             dry_pruned = pruned(text)
@@ -2131,7 +2418,7 @@ def self_test():
                            for b, _, ns in os.walk(sgame) for n in ns)
             if before != after: print("standard dry run wrote files"); ok = False
             if main(["--root", sroot, "--target", sgame, "--all"]) != 0: ok = False
-            assert Path(sgame, PROFILE_FILE).read_bytes() == profile_bytes("vr")
+            assert Path(sgame, PROFILE_FILE).read_bytes() == profile_bytes("both")
             sp = _standard_native_paths(sroot, sgame)
             if any(sha256(sp[k + "_target"]) != sha256(sp[k]) for k in ("runtime", "graphics", "loader", "notice")):
                 print("standard native payload mismatch"); ok = False
@@ -2281,7 +2568,7 @@ def self_test():
                                          for p in Path(fxr).rglob("*") if p.is_file())
             before = snapshot()
             before_xr = xr_snapshot()
-            args = ["--root", froot, "--target", fgame, "--profile", "flat", "--all"]
+            args = ["--root", froot, "--target", fgame, "--scope", "flat", "--all"]
             assert main(args + ["--dry-run"]) == 0
             assert snapshot() == before, "flat dry run wrote files"
             assert main(args) == 0
@@ -2371,7 +2658,7 @@ def self_test():
                 os.makedirs(os.path.join(game, "Openvr", "win64"))
                 Path(game, GAME_EXE).write_bytes(b"GAME")
                 live = {"graphics": (Path(game, "d3d11.dll"), b"RC3-FLAT-GRAPHICS"),
-                        "profile": (Path(game, PROFILE_FILE), profile_bytes("flat")),
+                        "profile": (Path(game, PROFILE_FILE), b"[install]\r\nschema = 1\r\nprofile = flat\r\n"),
                         "ini": (Path(game, ini_relative), installed)}
                 sources = {"graphics": os.path.abspath(os.path.join(froot, "build", "d3d11.dll")),
                            "profile": "generated",
@@ -3020,6 +3307,8 @@ def self_test():
     if not _prune_self_test():
         ok = False
     if not _suspend_self_test():
+        ok = False
+    if not _scope_self_test():
         ok = False
 
     print("self-test: %s" % ("ok" if ok else "FAILED"))

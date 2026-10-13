@@ -785,6 +785,16 @@ void dlaaSetPreset(unsigned preset) {
 #endif
 }
 
+// Called at a profile switch, render thread, frame boundary: every live feature is released and recreated on its next
+// evaluation. NGX itself stays initialised (dlaaShutdown is not called). Safe when DLAA never started: no handle is held, and
+// the generation bump only makes an evaluation that has not happened yet create its feature.
+void dlaaReleaseForSwitch() {
+#ifdef EDVR_HAVE_NGX
+    releaseFeatures();
+    ++g_presetGen;
+#endif
+}
+
 bool dlaaTotals(uint32_t* evaluations, double* avgMs, double* maxMs,
                 uint32_t* resets) {
     if (g_evaluations == 0) return false;

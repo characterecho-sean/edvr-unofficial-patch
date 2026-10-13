@@ -80,6 +80,16 @@ class D3D11Stereo final {
                           float fade = 0.0f);
   XrResult renderSkybox(const XrView (&)[2], XrSpace, const SkyboxCapture&,
                         XrCompositionLayerProjection&, float fade = 0.0f);
+  // The flat-mode notice (docs/design-unified-install-2026-10-12.md section 12, N2): each eye image is cleared black and the
+  // notice's text is copied in with its centre on that eye's optical centre, found from the view's own fov (flat_notice_placement.h).
+  // Same swapchain handling as renderSkybox: acquire, wait, draw, submit, release, for each eye. Every path releases what it acquired.
+  // The renderer stays ready whatever this returns, except a GPU submit failure, which leaves it unready like any stereo failure.
+  XrResult renderNotice(const XrView (&)[2], XrSpace, XrCompositionLayerProjection&);
+  // The text's format is one this renderer can convert it to (the four it chooses from).
+  bool noticeFormatSupported() const;
+  // Counts the notice textures made, so the host traces each creation once. noticeSize is the texture's size for one eye.
+  uint32_t noticeGeneration() const { return noticeGeneration_; }
+  bool noticeSize(unsigned eye, uint32_t* width, uint32_t* height) const;
   // Complete submitted GPU work before retiring the render caller. Uses its
   // immediate-context boundary, without changing pipeline state. Timeout or
   // unavailable admission leaves resources alive for an explicit retry.
@@ -138,6 +148,14 @@ class D3D11Stereo final {
   bool ready_ = false;
   XrResult lastResult_ = XR_SUCCESS;
   double initSwapchainMs_ = 0.0, initShaderMs_ = 0.0;
+
+  // The notice's text, one texture per eye, made again when the eye image's size or the chosen format changes.
+  XrResult ensureNotice();
+  Microsoft::WRL::ComPtr<ID3D11Texture2D> notice_[2];
+  uint32_t noticeWidth_[2]{}, noticeHeight_[2]{};
+  uint32_t noticeEyeWidth_[2]{}, noticeEyeHeight_[2]{};
+  int64_t noticeFormat_ = 0;
+  uint32_t noticeGeneration_ = 0;
 
   XrResult submitCommands(GpuWorkObserver* observer = nullptr, unsigned phase = 0);
 };

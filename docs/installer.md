@@ -1,13 +1,28 @@
 # The installer
 
 `edvr-installer.exe` — one executable, carrying the native graphics/runtime
-pair, `openxr_loader.dll`, its license notice, `edvr.ini` and optional NVIDIA
-DLSS runtime as resources. It finds the game, installs or updates EDVR,
-preserves the settings you have changed, keeps other mods working, and can put
-everything back.
+pair, `openxr_loader.dll`, its license notice, `edvr.ini`, `edvr-flat.ini` and
+optional NVIDIA DLSS runtime as resources. It finds the game, installs or
+updates EDVR, preserves the settings you have changed, keeps other mods
+working, and can put everything back.
 
 This file is why it does what it does. Using it is one paragraph in the
 [README](../README.md).
+
+## Status
+
+- **One installer:** `edvr-installer.exe` covers VR and flat; the flat
+  installer is retired.
+- **Scope:** "Install EDVR for:" offers VR and flat (recommended), VR only, or
+  Flat only; `--scope both|vr|flat` does the same. A new install gets both; an
+  existing install keeps its scope.
+- **Scope on disk:** the canonical `edvr_profile.ini` decides the scope. When
+  the record (`edvr_install\state.ini`) names another scope, it is stale and
+  Update refreshes it.
+- **Settings:** `edvr.ini` (VR) and `edvr-flat.ini` (flat), each merged against
+  its own kept default, `edvr_install\edvr.ini.base` and
+  `edvr_install\edvr-flat.ini.base`. A scope change deletes no settings file.
+- **Which profile runs** is set by Elite's 3D mode, not the installer.
 
 ## Why it exists
 
@@ -152,48 +167,59 @@ versions reads as an edit — and the report says so rather than pretending it
 was a three-way merge. In that mode it does **not** infer deletions: a setting
 your older file never had must arrive live, not commented out.
 
-### The flat edition has a settings file of its own
+### Two settings files: VR and flat
 
-The flat runtime reads `edvr-flat.ini` first and falls back to `edvr.ini` only
-while there is none (`config.cpp`), so the two editions never share tuning. The
-installer follows the same split, for every operation, in both installers:
+The VR profile reads `edvr.ini` and the flat profile reads `edvr-flat.ini`, so
+the two never share tuning. The flat runtime reads `edvr-flat.ini` first and
+falls back to `edvr.ini` only while there is none (`config.cpp`). The installer
+follows the same split for every operation:
 
-- **Install, update and repair** merge into the file of the edition being
-  installed -- `edvr-flat.ini` for flat, `edvr.ini` for VR -- and never read,
-  back up, replace or remove the other. The chain decision (`advanced.real_dll`)
-  lands in the file that runtime reads.
+- **The scope** says which files an install carries. VR and flat (`both`) keeps
+  both. VR only (`vr`) carries `edvr.ini` and the OpenXR runtime. Flat only
+  (`flat`) carries `edvr-flat.ini` and no runtime, so the game's own
+  `openvr_api.dll` stays.
+- **Changing the scope** is an ordinary Update. Moving to flat only removes the
+  runtime, and moving from it installs the runtime. No settings file is
+  deleted.
+- **Install, update and repair** merge into each file the scope carries, and
+  never read, back up, replace or remove a file outside it. The chain decision
+  (`advanced.real_dll`) lands in the file that runtime reads.
 - **A flat install that finds only `edvr.ini`** (one made before the split, or a
   fresh flat install over a VR one) starts `edvr-flat.ini` from it through the
   same merge, so the settings the flat runtime was reading carry over and the
   chain key is forced in; `edvr.ini` is left exactly as it is.
   `--replace-settings` gives fresh defaults instead. `tools/install_edvr.py`
   seeds the file too, by copying `edvr.ini` as it stands.
-- **The kept base** (`edvr_install\edvr.ini.base`) is one file for both editions:
-  it is the shipped defaults of whichever edition the record says is installed. A
-  merge into the other edition's own file does not use it as a base (that would
-  read a value you changed as one you never touched); the shared `edvr.ini` a flat
-  install seeds from is the exception, since every earlier edition wrote it.
-- **Uninstall** removes the installed edition's file when asked (`--remove-settings`)
-  and no other. A flat install that never had its own file was reading the shared
+- **The kept defaults** are two files, `edvr_install\edvr.ini.base` and
+  `edvr_install\edvr-flat.ini.base`. Each is the shipped default of the version
+  that last wrote its file, and a merge uses only its own file's base. Where a
+  base does not describe its file (an older install kept one shared base, which
+  a flat-only record does not vouch for), the merge is two-way, as described
+  above.
+- **Uninstall** removes the settings files of the installed scope when asked
+  (`--remove-settings`): both files for VR and flat, and only one for a single
+  scope. A flat install that never had its own file was reading the shared
   `edvr.ini`, which the VR profile uses too, and that stays.
-- **The settings screen** shows and writes the installer's own edition's file;
-  under a flat installer with no `edvr-flat.ini` yet it shows what the runtime is
-  reading (`edvr.ini`) and the first change starts `edvr-flat.ini` from it.
-- **The mirror** keeps both files, and an `edvr-flat.ini` alone is enough for the
-  restore offer and the copy back. A restore that could not copy back every
+- **The settings screen** has a VR/Flat selector, limited to the scope, that
+  picks which file the list edits. It starts on `edvr.ini`, or on
+  `edvr-flat.ini` for a flat-only install. With no `edvr-flat.ini` yet it shows
+  what the runtime is reading (`edvr.ini`), and the first change starts
+  `edvr-flat.ini` from it.
+- **The mirror** keeps both files, and an `edvr-flat.ini` alone is enough for
+  the restore offer and the copy back. A restore that could not copy back every
   settings file it holds says which one failed and reports failure, so a flat
   file lost behind a shared file that did come back is not a success.
-- **The flat archive** ships its defaults as `edvr-flat.ini`, and its installer
-  carries them under that name.
+- **The release** carries one installer, which carries both shipped defaults,
+  `edvr.ini` and `edvr-flat.ini`.
 
 ## The settings screen
 
 The second tab is every EDVR setting, with what it does, the value it ships
 with, and the range it will accept — edited there instead of in Notepad.
-Changes are written straight into `edvr.ini` (`edvr-flat.ini` in the flat
-installer), keeping its layout and comments, and the game re-reads that file
-about once a second, so there is no Apply button: the change is live by the
-time the mouse is up.
+Changes are written straight into `edvr.ini` (or `edvr-flat.ini` when the Flat
+selector is set), keeping its layout and comments, and the game re-reads that
+file about once a second, so there is no Apply button: the change is live by
+the time the mouse is up.
 
 **Under each control, one line: the word it is set to, and one link.** A switch
 shows a position, not a word, and nothing else on the row says that on writes
@@ -402,18 +428,20 @@ The window is the product; the command line is what makes it testable and
 scriptable.
 
 ```
-edvr-installer.exe --install [--dir D] [--dry-run]
+edvr-installer.exe --install [--dir D] [--scope both|vr|flat] [--dry-run]
 edvr-installer.exe --repair [--dir D]
 edvr-installer.exe --uninstall [--dir D] [--remove-settings]
 edvr-installer.exe --collect-logs [--dir D]
 edvr-installer.exe --help
 ```
 
-`--replace-settings` does what it says. Without `--dir` it finds the installs
-itself and refuses to guess when there is more than one. `--dry-run` prints the
-plan and touches nothing. It is a GUI-subsystem program, so a command-line run
-borrows the calling console; run it with `start /wait` if the interleaved
-prompt bothers you.
+`--scope` is the window's "Install EDVR for:" choice: `both` (VR and flat),
+`vr` or `flat`. Without it, the scope already installed is kept, and a new
+install gets `both`. `--replace-settings` does what it says. Without `--dir` it
+finds the installs itself and refuses to guess when there is more than one.
+`--dry-run` prints the plan and touches nothing. It is a GUI-subsystem program,
+so a command-line run borrows the calling console; run it with `start /wait` if
+the interleaved prompt bothers you.
 
 ## How it is built and tested
 

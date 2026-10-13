@@ -22,6 +22,7 @@
     python tools/edvr_log.py --target frontier --route-curve --expect-build HEAD
     python tools/edvr_log.py --target steam --map-bounce --expect-build HEAD
     python tools/edvr_log.py --target steam --freezes --expect-build HEAD
+    python tools/edvr_log.py --target steam --switches
     python tools/edvr_log.py --list
 
 This is the sanctioned replacement for `Get-Content <some path> -Tail 200 |
@@ -51,6 +52,15 @@ is exactly when you would rather not be told there are no logs.
 
 Read-only by construction: it opens files for reading and nothing else,
 which is why it has no --dry-run.
+
+--version also prints the launch's profile line (the scope, the 3D mode
+and the command line that decided the profile) and the game's command
+line, when the log has them. --switches lists the launch, the mode
+watch's hints, writes, reads and posts, and the profile switch, one row
+per line in log order with the watch's own milliseconds, and then a
+summary: the hints by kind, the posts, the time from each post back to
+the nearest earlier hint and write, and when openvr_api.dll loaded. It
+exits 3 when the log has none of those lines.
 
 --tally vh aggregates a draw-census log instead of dumping lines: it
 counts eye-texture DC lines per vh= shader-content hash, splits each
@@ -9700,6 +9710,231 @@ def self_test_slow_regime():
     return ok
 
 
+# The launch, watch and switch lines behind --switches and --version. The formats are the ones src/d3d11/mode_watch.cpp (the watch and its
+# commit), src/common/install_scope.h (the launch's profile line) and src/d3d11/d3d11_proxy.cpp (the game command line) print. An older
+# log's `installation profile:` line is still read; it names the profile and nothing else.
+LAUNCH_CLOCK_RE = re.compile(r"^\[(?P<clock>\d{2}:\d{2}:\d{2}\.\d{3})\] (?P<body>.*)$")
+PROFILE_DETAIL_RE = re.compile(
+    r"^profile: (?P<active>flat|vr|passthrough) \(scope (?P<scope>both|vr|flat)"
+    r"(?: from schema-1 descriptor| with no descriptor)?; 3D mode (?P<mode>\d+|unknown) from .*?"
+    r"(?: \(file absent\))?; command line (?P<cmd>none|/novr|/vr)(?: applied| not applied(?:, H2 open)?)?\)$")
+PROFILE_ANY_RE = re.compile(r"^profile: (?P<active>\w+)(?: \((?P<rest>.*)\))?$")
+OLD_PROFILE_RE = re.compile(r"^installation profile: (?P<rest>.*)$")
+WATCH_START_RE = re.compile(r"^mode watch: started on .*; launch file mode (?P<mode>\d+|unknown) \((?P<cls>flat|vr)\)"
+                            r"(?:; launch mode (?P<launch>flat|vr))?; scope (?P<scope>both|vr|flat)$")
+WATCH_HINT_RE = re.compile(r"^mode watch: hint (?P<kind>setter|window|live-rise) t=(?P<t>\d+)$")
+# Every write and read line ends with the last full second's eye submits (mode_watch.cpp's submitSuffix). The suffix is optional here so an
+# older log still parses; a read or write without it has submits None.
+SUBMIT_SUFFIX = r"(?: \(eye submits last 1 s: (?P<submits>\d+)\))?"
+WATCH_WRITE_RE = re.compile(r"^mode watch: write t=(?P<t>\d+)(?P<stat> \(stat\))?" + SUBMIT_SUFFIX + "$")
+WATCH_READ_RE = re.compile(r"^mode watch: read t=(?P<t>\d+) mode (?P<mode>\d+|unknown) -> "
+                           r"(?P<result>ignored(?: \(stale file\))?|same|dropped|nothing|pending (?P<pending>flat|vr) confirm at t=(?P<due>\d+)"
+                           r"|posted (?P<post>flat|vr))"
+                           + SUBMIT_SUFFIX + "$")
+WATCH_FAIL_RE = re.compile(r"^mode watch: read failed t=(?P<t>\d+) \(error (?P<err>\d+)\); (?P<what>.*?)" + SUBMIT_SUFFIX + "$")
+WATCH_LIVE_RE = re.compile(r"^mode watch: live-rise t=(?P<t>\d+) -> (?P<result>posted vr|nothing)$")
+WATCH_OPENVR_RE = re.compile(r"^mode watch: openvr_api\.dll (?P<state>loaded|unloaded) t=(?P<t>\d+)$")
+# The eye-submit transitions: a second with none after one with some (stopped), and the reverse (resumed, with that second's count).
+WATCH_SUBMIT_STOP_RE = re.compile(r"^mode watch: eye submits stopped t=(?P<t>\d+)$")
+WATCH_SUBMIT_RESUME_RE = re.compile(r"^mode watch: eye submits resumed t=(?P<t>\d+) \((?P<n>\d+)/s\)$")
+# One kept setting in the switch line: key=value in effect (new: value in the file now), as mode_watch.cpp's commit writes it.
+KEPT_ITEM = r"[\w.]+=\S+ \(new: \S+\)"
+SWITCH_RES = (
+    # The live switch (phase 2). `kept` lists the patched settings whose file value now differs from the launch's, or none.
+    ("switched", re.compile(
+        r"^profile switch: (?P<cur>flat|vr|passthrough) -> (?P<target>flat|vr|passthrough) \(posted (?P<cls>flat|vr) t=(?P<t>\d+) from "
+        r"(?P<src>file|live-rise); settings (?P<ini>[\w.-]+)(?P<missing> \(not found: defaults\))?; kept until restart: "
+        r"(?P<kept>none|" + KEPT_ITEM + r"(?:, " + KEPT_ITEM + r")*)\)$")),
+    ("stays", re.compile(
+        r"^profile switch: none, stays (?P<cur>flat|vr|passthrough) \(posted (?P<cls>flat|vr) t=(?P<t>\d+) from (?P<src>file|live-rise)\)$")),
+    # Phase 1's lines, which an older build wrote: kept so an older log still reads.
+    ("passthrough until restart", re.compile(
+        r"^profile switch: none, passthrough until restart \(posted (?P<cls>flat|vr) t=(?P<t>\d+) from (?P<src>file|live-rise)\)$")),
+    ("to passthrough", re.compile(
+        r"^profile switch: (?P<cur>flat|vr) -> passthrough \(posted (?P<cls>flat|vr) t=(?P<t>\d+) from (?P<src>file|live-rise);"
+        r" this build does not switch live: restart Elite to run the (?P<target>flat|vr|passthrough) profile\)$")),
+)
+SWAP_RE = re.compile(r"^swap chain: a new swap chain \S+ after \S+ is not hooked \(H7\)$")
+
+
+def _log_body(line):
+    """(clock, body) of a log line: the [HH:MM:SS.mmm] prefix and the text after it. A line without one has no clock."""
+    m = LAUNCH_CLOCK_RE.match(line.strip())
+    if m:
+        return m.group("clock"), m.group("body")
+    return None, line.strip()
+
+
+def launch_lines(text):
+    """The launch's own lines for --version: the profile decision, the game command line, and an older log's installation profile."""
+    out = []
+    for line in text.splitlines():
+        _, body = _log_body(line)
+        if body.startswith(("profile: ", "game command line: ", "installation profile: ")):
+            out.append(line.strip())
+    return out
+
+
+def _switch_event(body):
+    """The launch, watch or switch event a log body is, or None for a line that is none of them. Every event has a kind and a t (the
+    watch's own clock in ms, or None when the line carries none). A `mode watch:` or `profile switch:` line the formats above do not
+    match is kept as a note, so a format that drifts still shows in the table."""
+    m = PROFILE_DETAIL_RE.match(body)
+    if m:
+        return {"kind": "launch", "t": None, "active": m.group("active"), "scope": m.group("scope"), "cmd": m.group("cmd")}
+    m = PROFILE_ANY_RE.match(body)
+    if m:
+        return {"kind": "launch", "t": None, "active": m.group("active"), "scope": None, "cmd": None}
+    m = OLD_PROFILE_RE.match(body)
+    if m:
+        return {"kind": "launch", "t": None, "active": m.group("rest").split(";")[0].strip(), "scope": None, "cmd": None}
+    m = WATCH_START_RE.match(body)
+    if m:
+        return {"kind": "start", "t": None, "mode": m.group("mode"), "cls": m.group("cls"), "scope": m.group("scope")}
+    m = WATCH_HINT_RE.match(body)
+    if m:
+        return {"kind": "hint", "t": int(m.group("t")), "hint": m.group("kind")}
+    m = WATCH_WRITE_RE.match(body)
+    if m:
+        submits = None if m.group("submits") is None else int(m.group("submits"))
+        return {"kind": "write", "t": int(m.group("t")), "stat": m.group("stat") is not None, "submits": submits}
+    m = WATCH_READ_RE.match(body)
+    if m:
+        post = m.group("post")
+        result = m.group("result")
+        # "ignored (stale file)" is an ignored read the watch refused because the file is stale (mode_watch_logic.h): outcome ignored, stale set.
+        stale = result.startswith("ignored (stale file)")
+        outcome = "pending" if m.group("pending") else ("posted" if post else ("ignored" if stale else result))
+        submits = None if m.group("submits") is None else int(m.group("submits"))
+        return {"kind": "read", "t": int(m.group("t")), "mode": m.group("mode"), "outcome": outcome, "post": post, "stale": stale,
+                "submits": submits}
+    m = WATCH_FAIL_RE.match(body)
+    if m:
+        submits = None if m.group("submits") is None else int(m.group("submits"))
+        return {"kind": "read-failed", "t": int(m.group("t")), "err": m.group("err"), "submits": submits}
+    m = WATCH_SUBMIT_STOP_RE.match(body)
+    if m:
+        return {"kind": "submits", "t": int(m.group("t")), "state": "stopped", "n": None}
+    m = WATCH_SUBMIT_RESUME_RE.match(body)
+    if m:
+        return {"kind": "submits", "t": int(m.group("t")), "state": "resumed", "n": int(m.group("n"))}
+    m = WATCH_LIVE_RE.match(body)
+    if m:
+        posted = m.group("result") == "posted vr"
+        return {"kind": "live", "t": int(m.group("t")), "outcome": "posted" if posted else "nothing", "post": "vr" if posted else None}
+    m = WATCH_OPENVR_RE.match(body)
+    if m:
+        return {"kind": "openvr", "t": int(m.group("t")), "state": m.group("state")}
+    for result, rx in SWITCH_RES:
+        m = rx.match(body)
+        if m:
+            ev = {"kind": "switch", "t": int(m.group("t")), "result": result, "posted": m.group("cls"), "src": m.group("src")}
+            if "cur" in rx.groupindex:
+                ev["cur"] = m.group("cur")
+            if "kept" in rx.groupindex:
+                # The live switch's own fields: the target, the settings file it read (and whether it was missing), and the kept settings.
+                ev.update(target=m.group("target"), ini=m.group("ini"), missing=m.group("missing") is not None,
+                          kept=[] if m.group("kept") == "none" else m.group("kept").split(", "))
+            return ev
+    if SWAP_RE.match(body):
+        return {"kind": "swap", "t": None}
+    if body.startswith(("mode watch: ", "profile switch: ")):
+        return {"kind": "note", "t": None}
+    return None
+
+
+def switch_events(text):
+    """Every launch, watch and switch line in log order, each with its clock (or None) and its body."""
+    events = []
+    for line in text.splitlines():
+        clock, body = _log_body(line)
+        ev = _switch_event(body)
+        if ev is not None:
+            ev["clock"], ev["body"] = clock, body
+            events.append(ev)
+    return events
+
+
+def switch_rows(events):
+    """Each event with d_prev, the ms from the previous event that carries a t, and d_hint, the ms from the most recent hint before it;
+    None where there is no such event. A hint's d_hint is from the hint before it."""
+    rows, prev_t, hint_t = [], None, None
+    for ev in events:
+        t = ev["t"]
+        row = dict(ev)
+        row["d_prev"] = None if t is None or prev_t is None else t - prev_t
+        row["d_hint"] = None if t is None or hint_t is None else t - hint_t
+        rows.append(row)
+        if t is not None:
+            prev_t = t
+        if ev["kind"] == "hint":
+            hint_t = t
+    return rows
+
+
+def _nearest_before(rows, index, kind):
+    """The last row before `index` of this kind that carries a t, or None."""
+    for row in reversed(rows[:index]):
+        if row["kind"] == kind and row["t"] is not None:
+            return row
+    return None
+
+
+def print_switches(text):
+    """The --switches report: one row per launch, watch and switch line in log order, then a summary. Returns 0, or 3 when the log has no
+    such line (a build from before the profile lines, or a log that never reached its launch)."""
+    rows = switch_rows(switch_events(text))
+    if not rows:
+        print("[edvr] no launch, mode watch or profile switch line in this log: a build from before the profile lines, or a log that "
+              "never reached the launch.")
+        return 3
+
+    def ms(value):
+        return "-" if value is None else "%d" % value
+
+    print("[edvr] switches: %d line(s), in log order; t= is the watch's own clock in ms" % len(rows))
+    print("       %-12s %-10s %9s %9s  %s" % ("clock", "t=", "+prev ms", "+hint ms", "event"))
+    for row in rows:
+        print("       %-12s %-10s %9s %9s  %s" % (row["clock"] or "-", "-" if row["t"] is None else "t=%d" % row["t"],
+                                                  ms(row["d_prev"]), ms(row["d_hint"]), row["body"]))
+
+    hints = [r for r in rows if r["kind"] == "hint"]
+    kinds = [(k, sum(1 for r in hints if r["hint"] == k)) for k in ("setter", "window", "live-rise")]
+    writes = [r for r in rows if r["kind"] == "write"]
+    posts = [i for i, r in enumerate(rows) if r["kind"] in ("read", "live") and r.get("post")]
+    switches = [r for r in rows if r["kind"] == "switch"]
+    print("[edvr] summary:")
+    print("       hints: %d (%s)" % (len(hints), ", ".join("%s %d" % kv for kv in kinds)))
+    print("       writes: %d" % len(writes))
+    print("       posts: %d" % len(posts))
+    submit_rows = [r for r in rows if r["kind"] == "submits"]
+    if submit_rows:
+        print("       eye submits: %d stopped, %d resumed" % (sum(1 for r in submit_rows if r["state"] == "stopped"),
+                                                              sum(1 for r in submit_rows if r["state"] == "resumed")))
+    if switches:
+        counts = [(res, sum(1 for r in switches if r["result"] == res)) for res, _ in SWITCH_RES]
+        print("       switches: %d (%s)" % (len(switches), ", ".join("%s %d" % kv for kv in counts if kv[1])))
+    else:
+        print("       switches: 0")
+    for i in posts:
+        row = rows[i]
+        hint = _nearest_before(rows, i, "hint")
+        write = _nearest_before(rows, i, "write")
+        parts = []
+        for name, ref, label in (("hint", hint, "hint %s" % (hint["hint"] if hint else "")), ("write", write, "write")):
+            if ref is None:
+                parts.append("no earlier %s" % name)
+            else:
+                parts.append("%d ms after %s at t=%d" % (row["t"] - ref["t"], label.strip(), ref["t"]))
+        print("       posted %s at t=%d (%s): %s" % (row["post"], row["t"], row["clock"] or "-", "; ".join(parts)))
+    loads = [r for r in rows if r["kind"] == "openvr"]
+    if loads:
+        print("       openvr_api.dll: %s" % "; ".join("%s at t=%d (%s)" % (r["state"], r["t"], r["clock"] or "-") for r in loads))
+    else:
+        print("       openvr_api.dll: no load line in this log")
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         description="Locate and read EDVR flight logs.")
@@ -9718,7 +9953,8 @@ def main(argv=None):
     ap.add_argument("--list", action="store_true",
                     help="list the logs found and stop")
     ap.add_argument("--version", action="store_true",
-                    help="print the log's version line and stop")
+                    help="print the log's version line, its profile and game "
+                         "command line lines when present, and stop")
     ap.add_argument("--expect-build", default=None,
                     help="a git ref (HEAD) or literal version; exit 2 if the "
                          "log was not written by that build")
@@ -9823,6 +10059,12 @@ def main(argv=None):
                          "STOP, 2 for a wrong build, 3 when the log holds none of the freeze "
                          "lines (a build from before the freeze logging), 4 for a slow regime "
                          "the vendor runtime or EDVR holds (and no STOP)")
+    ap.add_argument("--switches", action="store_true",
+                    help="report the launch's profile decision, the 3D-mode watch "
+                         "(hints, writes, reads, posts, openvr_api.dll loads) and the "
+                         "profile switch: one row per line in log order with the "
+                         "watch's ms since the previous line and since the last hint, "
+                         "then a summary; exit 3 when the log has none of those lines")
     ap.add_argument("--window-ms", type=float, default=100.0,
                     help="with --tally periodic, a long frame coincides with a "
                          "periodic event when the event's end time is inside "
@@ -9914,6 +10156,9 @@ def main(argv=None):
     else:
         print("[edvr] WARNING: this log has no version line -- it may be "
               "truncated, or not an EDVR log.")
+    if args.version:
+        for launch in launch_lines(text):
+            print("[edvr] %s" % launch)
 
     want = None
     if args.expect_build:
@@ -9952,6 +10197,8 @@ def main(argv=None):
         return print_route_curve(text, path)
     if args.map_bounce:
         return print_map_bounce(text, path)
+    if args.switches:
+        return print_switches(text)
     if args.freezes:
         return print_freezes(path, text, ver, want, args, native_dirs)
     if args.tally == "periodic":
@@ -10071,6 +10318,209 @@ def self_test_map_bounce():
     return ok
 
 
+def self_test_switches():
+    """--switches and --version's launch lines on synthetic logs in the formats the DLL writes (mode_watch.cpp, install_scope.h,
+    d3d11_proxy.cpp): the rows and their deltas, the summary, a live post, an older log's installation profile line, a log with no such
+    line (exit 3), and the lines a drifted format leaves as notes. Returns ok."""
+    import contextlib
+    import io
+    import shutil
+    import tempfile
+    ok = True
+
+    def fail(msg):
+        nonlocal ok
+        ok = False
+        print("switches self-test: %s" % msg)
+
+    version = "[00:00:00.001] version 0.19.2-5-gabcdef0 (build 1A2B3C4D) -- this DLL was linked 2026-10-12 10:00:00 UTC"
+    flight = "\n".join([
+        version,
+        "[00:00:00.010] profile: flat (scope both; 3D mode 0 from C:\\Game\\Options\\Graphics\\Settings.xml; command line none)",
+        "[00:00:00.011] game command line: EliteDangerous64.exe /autorun",
+        "[00:00:00.020] mode watch: started on C:\\Game\\Options\\Graphics; launch file mode 0 (flat); scope both",
+        "[00:00:01.000] mode watch: hint setter t=1000",
+        "[00:00:01.200] mode watch: hint window t=1200",
+        "[00:00:01.500] mode watch: hint live-rise t=1500",
+        "[00:00:01.600] mode watch: write t=1600 (stat)",
+        "[00:00:01.620] mode watch: read t=1620 mode 2 -> pending vr confirm at t=2120",
+        "[00:00:02.130] mode watch: read t=2130 mode 2 -> posted vr",
+        "[00:00:02.130] profile switch: flat -> passthrough (posted vr t=2130 from file; this build does not switch live: restart Elite "
+        "to run the vr profile)",
+        "[00:00:02.400] mode watch: openvr_api.dll loaded t=2400",
+        "",
+    ])
+    # Kind, the ms from the previous t, and the ms from the most recent hint, for each row in log order.
+    want = [("launch", None, None), ("start", None, None), ("hint", None, None), ("hint", 200, 200), ("hint", 300, 300),
+            ("write", 100, 100), ("read", 20, 120), ("read", 510, 630), ("switch", 0, 630), ("openvr", 270, 900)]
+    got = [(r["kind"], r["d_prev"], r["d_hint"]) for r in switch_rows(switch_events(flight))]
+    if got != want:
+        fail("rows (kind, +prev, +hint) %r, want %r" % (got, want))
+
+    # The live-rise, the pending read and the profile switch's own shape, parsed as the DLL prints them.
+    drift = "\n".join([
+        "[00:00:00.010] profile: invalid (edvr_profile.ini malformed; fixes disabled, proxy chaining retained; repair the installation)",
+        "[00:00:00.020] profile: vr (scope vr from schema-1 descriptor; 3D mode unknown from C:\\Game\\Options\\Graphics\\Settings.xml "
+        "(file absent); command line /novr not applied, H2 open)",
+        "[00:00:00.030] mode watch: not started (no Settings.xml path; LOCALAPPDATA is not set)",
+        "[00:00:00.040] mode watch: read failed t=3000 (error 32); retry in 100 ms",
+        "[00:00:03.100] mode watch: live-rise t=3100 -> posted vr",
+        "[00:00:03.200] mode watch: live-rise t=3200 -> nothing",
+        "[00:00:03.300] profile switch: sideways (posted vr t=3300)",
+        "[00:00:03.400] swap chain: a new swap chain 0x1234 after 0x1000 is not hooked (H7)",
+        "",
+    ])
+    rows = switch_rows(switch_events(drift))
+    kinds = [r["kind"] for r in rows]
+    if kinds != ["launch", "launch", "note", "read-failed", "live", "live", "note", "swap"]:
+        fail("drift kinds %r" % kinds)
+    else:
+        if rows[0]["active"] != "invalid" or rows[1]["scope"] != "vr" or rows[1]["cmd"] != "/novr":
+            fail("drift launch lines parsed as %r and %r" % (rows[0], rows[1]))
+        if rows[4]["post"] != "vr" or rows[5]["outcome"] != "nothing" or rows[5]["post"] is not None:
+            fail("drift live-rise lines parsed as %r and %r" % (rows[4], rows[5]))
+
+    # The eye-submit suffix on the write, read and failed-read lines, and the stopped and resumed lines (mode_watch.cpp's sampler).
+    submit = "\n".join([
+        "[00:00:00.020] mode watch: started on C:\\Game\\Options\\Graphics; launch file mode 4 (vr); scope both",
+        "[00:00:01.000] mode watch: write t=1000 (eye submits last 1 s: 0)",
+        "[00:00:02.000] mode watch: eye submits resumed t=2000 (88/s)",
+        "[00:00:02.100] mode watch: read t=2100 mode 4 -> same (eye submits last 1 s: 88)",
+        "[00:00:03.000] mode watch: eye submits stopped t=3000",
+        "[00:00:03.200] mode watch: read failed t=3200 (error 32); retry in 100 ms (eye submits last 1 s: 0)",
+        "[00:00:03.300] mode watch: read t=3300 mode 4 -> posted vr (eye submits last 1 s: 0)",
+        "[00:00:03.350] mode watch: read t=3350 mode 0 -> ignored (stale file) (eye submits last 1 s: 0)",
+        "",
+    ])
+    srows = switch_rows(switch_events(submit))
+    skinds = [r["kind"] for r in srows]
+    if skinds != ["start", "write", "submits", "read", "submits", "read-failed", "read", "read"]:
+        fail("eye-submit kinds %r" % skinds)
+    else:
+        if not (srows[7]["outcome"] == "ignored" and srows[7]["stale"] is True and srows[7]["submits"] == 0 and srows[6]["stale"] is False):
+            fail("stale-file read parsed as %r" % srows[7])
+        if [srows[1]["submits"], srows[3]["submits"], srows[5]["submits"], srows[6]["submits"]] != [0, 88, 0, 0]:
+            fail("eye-submit suffixes parsed as %r" % [r.get("submits") for r in srows])
+        if (srows[2]["state"], srows[2]["n"], srows[4]["state"], srows[4]["n"]) != ("resumed", 88, "stopped", None):
+            fail("eye-submit transitions parsed as %r and %r" % (srows[2], srows[4]))
+        if srows[6]["post"] != "vr" or srows[1].get("stat") is not False:
+            fail("eye-submit read or write parsed as %r and %r" % (srows[6], srows[1]))
+        shown = io.StringIO()
+        with contextlib.redirect_stdout(shown):
+            print_switches(submit)
+        if "eye submits: 1 stopped, 1 resumed" not in shown.getvalue():
+            fail("--switches summary lacks the eye-submit counts: %r" % shown.getvalue()[-300:])
+
+    # The live switch's line (mode_watch.cpp's commit, phase 2): with kept settings, with none and from a live rise, from a missing file, the
+    # stays and refused lines, and a kept list that does not parse (a note, so drift shows in the table).
+    live = "\n".join([
+        "[00:00:00.020] mode watch: started on C:\\Game\\Options\\Graphics; launch file mode 4 (vr); scope both",
+        "[00:00:02.130] mode watch: read t=2130 mode 0 -> posted flat (eye submits last 1 s: 0)",
+        "[00:00:02.130] profile switch: vr -> flat (posted flat t=2130 from file; settings edvr-flat.ini; kept until restart: "
+        "advanced.texture_anisotropy=0 (new: 8), fix.vscreen_res_width=auto (new: 2880))",
+        "[00:00:03.000] mode watch: read t=3000 mode 4 -> posted vr (eye submits last 1 s: 0)",
+        "[00:00:03.000] profile switch: flat -> vr (posted vr t=3000 from live-rise; settings edvr.ini; kept until restart: none)",
+        "[00:00:04.000] mode watch: read t=4000 mode 0 -> posted flat (eye submits last 1 s: 0)",
+        "[00:00:04.000] profile switch: vr -> flat (posted flat t=4000 from file; settings edvr-flat.ini (not found: defaults); "
+        "kept until restart: none)",
+        "[00:00:05.000] profile switch: none, stays passthrough (posted vr t=5000 from file)",
+        "[00:00:06.000] profile switch: flat refused, ResizeBuffers was not hooked this session (posted flat t=6000 from file); the switch runs "
+        "as passthrough",
+        "[00:00:07.000] profile switch: vr -> flat (posted flat t=7000 from file; settings edvr-flat.ini; kept until restart: "
+        "advanced.texture_anisotropy=0)",
+        "",
+    ])
+    lrows = switch_rows(switch_events(live))
+    lkinds = [r["kind"] for r in lrows]
+    if lkinds != ["start", "read", "switch", "read", "switch", "read", "switch", "switch", "note", "note"]:
+        fail("live switch kinds %r" % lkinds)
+    else:
+        first, second, third, stays = lrows[2], lrows[4], lrows[6], lrows[7]
+        if (first["result"], first["cur"], first["target"], first["ini"], first["missing"], first["posted"], first["src"]) != (
+                "switched", "vr", "flat", "edvr-flat.ini", False, "flat", "file") \
+                or first["kept"] != ["advanced.texture_anisotropy=0 (new: 8)", "fix.vscreen_res_width=auto (new: 2880)"]:
+            fail("live switch with kept settings parsed as %r" % first)
+        if second["result"] != "switched" or second["src"] != "live-rise" or second["kept"] != [] or second["ini"] != "edvr.ini":
+            fail("live switch with no kept settings parsed as %r" % second)
+        if third["result"] != "switched" or third["missing"] is not True or third["ini"] != "edvr-flat.ini":
+            fail("live switch from a missing file parsed as %r" % third)
+        if stays["result"] != "stays" or stays["cur"] != "passthrough" or stays["posted"] != "vr":
+            fail("stays passthrough parsed as %r" % stays)
+        if lrows[8]["kind"] != "note" or lrows[9]["kind"] != "note":
+            fail("refused or malformed switch lines parsed as %r and %r" % (lrows[8], lrows[9]))
+        shown = io.StringIO()
+        with contextlib.redirect_stdout(shown):
+            print_switches(live)
+        if "switches: 4 (switched 3, stays 1)" not in shown.getvalue():
+            fail("--switches summary lacks the live switch counts: %r" % shown.getvalue()[-400:])
+
+    tmp = tempfile.mkdtemp(prefix="edvr_switches_test_")
+    try:
+        def log(name, body):
+            path = os.path.join(tmp, name + ".log")
+            with open(path, "wb") as f:
+                f.write(body.encode("utf-8"))
+            return path
+
+        def cli(path, *extra):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = main(["--file", path] + list(extra))
+            return rc, buf.getvalue()
+
+        flight_path = log("flight", flight)
+        rc, out = cli(flight_path, "--switches")
+        if rc != 0:
+            fail("--switches on the flight log exited %d:\n%s" % (rc, out))
+        for line in ("hints: 3 (setter 1, window 1, live-rise 1)",
+                     "writes: 1",
+                     "posts: 1",
+                     "switches: 1 (to passthrough 1)",
+                     "posted vr at t=2130 (00:00:02.130): 630 ms after hint live-rise at t=1500; 530 ms after write at t=1600",
+                     "openvr_api.dll: loaded at t=2400 (00:00:02.400)"):
+            if line not in out:
+                fail("--switches summary lacks %r:\n%s" % (line, out))
+        if not re.search(r"00:00:01\.600\s+t=1600\s+100\s+100\s+mode watch: write t=1600 \(stat\)", out):
+            fail("--switches row for the write lacks its clock, t and deltas:\n%s" % out)
+
+        rc, out = cli(flight_path, "--version")
+        if rc != 0 or "profile: flat (scope both; 3D mode 0 from C:\\Game\\Options\\Graphics\\Settings.xml; command line none)" not in out \
+                or 'game command line: EliteDangerous64.exe /autorun' not in out:
+            fail("--version on the flight log lacks its profile or game command line:\n%s" % out)
+        if "mode watch" in out or "switches:" in out:
+            fail("--version printed past its own lines:\n%s" % out)
+
+        old = version + "\n[00:00:00.010] installation profile: vr; VR configuration retained\n"
+        old_path = log("old", old)
+        rc, out = cli(old_path, "--version")
+        if rc != 0 or "installation profile: vr; VR configuration retained" not in out:
+            fail("--version on an older log lacks its installation profile line (exit %d):\n%s" % (rc, out))
+        rc, out = cli(old_path, "--switches")
+        if rc != 0 or [(r["kind"], r["active"]) for r in switch_rows(switch_events(old))] != [("launch", "vr")]:
+            fail("--switches on an older log did not show its one launch row (exit %d):\n%s" % (rc, out))
+
+        bare_path = log("bare", version + "\n[00:00:00.500] the game started\n")
+        rc, out = cli(bare_path, "--switches")
+        if rc != 3:
+            fail("--switches on a log with no such line exited %d, want 3:\n%s" % (rc, out))
+        rc, out = cli(bare_path, "--version")
+        if rc != 0 or "profile:" in out:
+            fail("--version on a log with no profile line (exit %d):\n%s" % (rc, out))
+
+        rc, out = cli(log("drift", drift), "--switches")
+        if rc != 0:
+            fail("--switches on the drifted log exited %d:\n%s" % (rc, out))
+        for line in ("posts: 1",
+                     "switches: 0",
+                     "posted vr at t=3100 (00:00:03.100): no earlier hint; no earlier write",
+                     "openvr_api.dll: no load line in this log"):
+            if line not in out:
+                fail("--switches on the drifted log lacks %r:\n%s" % (line, out))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return ok
+
+
 def self_test():
     ok = True
 
@@ -10156,7 +10606,9 @@ def self_test():
                          "2026-09-09 20:34:39 UTC\n"
                          "[00:00:12.400] Stats[40] ships 3\n"
                          "[00:00:12.400] Stats[41] ships 0\n"
-                         "[00:00:12.401] something else\n").encode("utf-8"))
+                         "[00:00:12.401] something else\n"
+                         "[00:00:12.402] cross-profile cost: flat hooks while vr: psConstantBuffers=130/0.12, resizeBuffers=0/0.00; "
+                         "captures 0 in 0.00 ms (session 0 in 0.00 ms) over 1800 frames\n").encode("utf-8"))
         with open(os.path.join(logs, "edvr_vr_20260910_060000.log"),
                   "wb") as f:
             f.write(b"[00:00:00.001] version 0.14.1-93-gf78eba4 "
@@ -10257,13 +10709,21 @@ def self_test():
             print("a missing log did not exit 1")
             ok = False
 
+        import contextlib
+        import io
+
+        # The cross-profile cost line (src\d3d11\cross_profile_cost.h's window line, from perf_monitor.cpp): --grep finds it, once.
+        grep_out = io.StringIO()
+        with contextlib.redirect_stdout(grep_out):
+            grep_rc = main(["--dir", logs, "--tag", "gfx", "--grep", "cross-profile cost"])
+        if grep_rc != 0 or "1 line(s) match" not in grep_out.getvalue():
+            print("--grep did not find the cross-profile cost line once")
+            ok = False
+
         # --tally vh: the fixture feeds the parser the way a located log
         # does, through main() on a directory the tool discovers on its
         # own. Frame 2 carries only a DC frame summary -- the shape a
         # truncated census leaves behind.
-        import contextlib
-        import io
-
         census_dir = os.path.join(tmp, "census_logs")
         os.makedirs(census_dir)
         census_lines = [
@@ -10411,6 +10871,8 @@ def self_test():
     if not self_test_pose():
         ok = False
     if not self_test_cover():
+        ok = False
+    if not self_test_switches():
         ok = False
 
     print("self-test: %s" % ("ok" if ok else "FAILED"))

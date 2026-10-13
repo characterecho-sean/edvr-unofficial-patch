@@ -48,6 +48,10 @@
 - Local input setup moved to onexplayer-elite-local-setup-2026-10-11.md. Mesa
   and MinEdLauncher setup remain in planetary-startup-intel-b390-2026-10-11.md.
   Temporary paths identify historical artifacts rather than portable evidence.
+- XeSS in VR (Sean, 2026-10-13): designed on branch
+  `claude/unified-install-feature-74bc24`, section "October 13: XeSS in VR"
+  at the end; X1 d150a2bd, X2 252c53c8, X3 314ac46a BUILT, NOT FLOWN
+  (Steam, `--scope both --xess`). World route (on foot) stays on its fallback.
 
 ## October 11: D3D11 capability probe
 
@@ -1440,3 +1444,60 @@ updated native Windows full build remain pending. The low-priority Legacy
 XeSS-upscale repeated refusal is still deferred; the corrected preflight guard
 is covered separately, and no new standdown behavior is inferred without
 evidence.
+
+## October 13: XeSS in VR (design)
+
+Sean asked for XeSS in the VR profile too (2026-10-13), built on the unified-install branch. Environment of the first flights:
+Sean's RTX 5090, Pimax headset on Pimax's OpenXR runtime, per-eye output about 4032x4034, XeSS SDK 3.0.2 / runtime SR 2.0.2
+through the D3D12 bridge.
+
+Facts (inventory of e177e912): the engine holds ONE feature keyed by (in, out, hdr) (xess_engine.cpp:123, :625-627) and accepts
+slot 0 only (:55, :591); every evaluation copies colour, depth and motion into shared D3D12 textures, waits on two fences and copies
+the output back (:660-751); the first evaluation pins one thread and context (:608-611). VR runs DLSS or FSR per eye through
+temporal_pass.cpp (dispatch :3979-3987) with one context per slot (eye 0, eye 1, world = 2; kUpscalerSlots = 3); xess maps to
+TemporalEngine::Own and VR refuses it (temporal_mode.h:19-23, temporal_pass.cpp:4495, native_temporal readConfig). VR's jitter is a
+fixed 8-phase cycle; XeSS needs ceil(8 x scale^2) phases (temporal_math.h:100-116). The installer and package ship libxess for flat
+only (plan.cpp:589, gen_installer_rc.py:402-405, package_native.py:74, install_edvr.py). The live profile switch never calls
+xessReleaseFeatures directly.
+
+Units (each behind the full build; Haiku implementers, reviewed):
+- X1, engine: one feature per slot (kUpscalerSlots), each keyed and rebuilt on its own; shared textures per slot; the slot check
+  widened; xessReleaseFeatures releases every slot; the profile switch's teardown calls it. Flat keeps slot 0, unchanged.
+- X2, VR route: `fix.temporal_aa = xess` enabled in VR as a third external engine (TemporalEngine::Intel) beside Nvidia and Amd:
+  availability and warm as FSR's, dispatch per eye into xessEvaluate(slot = eye), release on an engine change, a totals line with
+  ms per eye. The VR jitter cycle takes the engine's phase count (XeSS: ceil(8 x scale^2)), so the cycle matches what XeSS needs.
+  The world route (slot 2) maps xess to the same engine if its route allows a third engine without restructuring; otherwise it
+  stays on its current fallback and the report says so.
+- X3, config, menu and payload: the VR choices line gains `xess=XeSS-SR` (edvr.ini, menu schema), and libxess.dll with its two
+  licence files installs and packages for every scope (install_edvr.py --xess for vr too; installer plan; package).
+- Hypotheses for the first flight: XH1 the bridge's copies and fences cost under 1 ms per eye at about 4032x4034 on the 5090 (read
+  the totals line); XH2 the jitter sign matches (a wrong sign shows as shimmering or a half-pixel swim on static edges); XH3 two
+  slots keep independent history (a wrong sharing shows as ghosting that alternates between eyes).
+### October 13: first XeSS-in-VR flight (Sean, Steam, build 314ac46a, edvr_gfx_20261013_093519)
+
+- Environment: RTX 5090, Pimax headset on Pimax's OpenXR runtime, 2016x2017 -> 4032x4034 per eye (Balanced, 2x), XeSS runtime
+  2.0.2 through the D3D12 bridge; DLSS, FSR 3.1 and XeSS toggled live in the menu, same scene.
+- Engaged cleanly: slot 0 and slot 1 contexts, 32-phase jitter cycle, every execute rc=0.
+- Cost (same session): temporal bracket per stereo pair, median: DLSS 3.45 ms, XeSS 4.61-4.70 ms (FSR's windows were too short for
+  a price line). Runtime frame GPU p50: XeSS 8.4-8.6 ms, FSR 5.8-6.0 ms, DLSS about 7.5 ms (one window). Render-thread CPU p50: XeSS
+  2.3-2.5 ms, others about 1.9 ms. Sean: "more expensive than FSR or DLSS even".
+- XH1 (bridge under 1 ms per eye): not decidable from the bracket alone (it holds XeSS's own compute, DP4a on NVIDIA, plus four copies
+  and two fence waits per eye). Next: an instrument splitting execute (D3D12 timestamps) from copy-in, wait and copy-out (D3D11
+  timestamps). XH2 (jitter sign) and XH3 (per-eye history): Sean's visual report pending.- Bridge split (f76a9fef, edvr_gfx_20261013_101700, four 30 s windows agree), per eye, ms median: slot 0 copy-in 0.04, wait 2.36,
+  execute 2.05, copy-out 0.04, total 2.45; slot 1 0.04 / 2.13 / 1.73 / 0.05 / 2.21. Per pair: execute ~3.8 ms (81%), queue handoff
+  (wait - execute) ~0.7 ms (15%), copies ~0.16 ms (3%); the sum matches the 4.7 ms bracket. XH1 holds for the copies; the handoff is
+  the bridge's real cost. ruled out: removing the copies (shared pass textures) as worth building, because they are 0.16 ms per pair.
+  The rest is XeSS's own DP4a compute on NVIDIA. Render-thread CPU p50 rose from ~1.9 to 2.4-2.9 ms with XeSS: leading suspect the
+  allocator-reuse wait (xess_engine.cpp:932, three allocators per slot, two evals a frame); unmeasured.- Shimmer (Sean: "some shimmering in places on my ship"; DLSS shows it too, "more muted"): eye dumps 102338 (XeSS) and 102353 (DLSS),
+  16 frames per eye, main-menu hangar, 2016x2017 -> 4032x4034. Code check: XeSS's flags (0x42 = INVERTED_DEPTH | LDR_INPUT_COLOR,
+  unjittered low-res motion vectors) match DLSS's VR feature (MVLowRes | DepthInverted, hdr_backend_flags.h:27-29); jitter and
+  motion-vector units and sign match the flat XeSS path that flew clean. ruled out: a jitter-sign or jittered-MV mismatch, because
+  the conventions match DLSS's and flat XeSS's. Frame-to-frame change after aligning each frame's head drift (6-9 px): XeSS L/R mean
+  1.47/1.55, DLSS 1.66/2.15; both hot on the same fine detail (an engraved disc, grilles, thin seams), with no XeSS-only pattern
+  (no eye disagreement, no whole-image swim). Residual head motion dominates the numbers, so they do not rank the engines. Reading:
+  input-limited fine detail at a 2x upscale, present for both; XH2 and XH3 hold. Check: a higher HMD Image Quality calms both.- CPU split (d4b5006e, edvr_gfx_20261013_111824, two 30 s windows per eye): allocator-reuse wait blocked 0 of ~2600 evals per eye.
+  ruled out: the allocator wait as the extra render-thread CPU, because it never blocked in the game (the rig's 15 of 20 came from
+  back-to-back evals). XeSS eval CPU median 0.31 / 0.26 ms per eye (submit calls 0.03 ms), about 0.57 ms per frame, matching the
+  render-thread p50 of 2.53 ms with XeSS against 2.07-2.14 ms with DLSS in the same session. The rest is XeSS's own recording inside
+  xessD3D12Execute; moving it off the render thread is a restructure for about 0.5 ms and is not proposed. Closed for Sean's rig:
+  on an RTX 5090, VR XeSS costs about 1.2 ms GPU per frame over DLSS plus about 0.5 ms render-thread CPU, nearly all XeSS itself.

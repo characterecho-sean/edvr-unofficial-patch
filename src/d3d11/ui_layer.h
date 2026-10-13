@@ -395,6 +395,9 @@ bool uiLayerFlatRelease();
 // shader and its parameter buffer, the route's timers, the hologram remap's prepared shaders -- released, with their
 // creation-attempt and format-support flags reset, so the next use builds them on the new device. Never on a resize.
 void uiLayerDeviceReset();
+// Called at a profile switch, render thread, frame boundary: uiLayerFlatRelease's forgetting, and the flat profile's panel
+// factor cleared (ui_panel_scale.h), so the layers rebuild for the profile now active.
+void uiLayerProfileSwitch();
 
 // Once per frame, from vScreenFrameBoundary: first, the settle of a fence a
 // failed hologram restore raised (uiLayerIssueBlocked above); then the

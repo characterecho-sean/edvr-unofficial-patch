@@ -12,6 +12,26 @@ INSTALLER
 Close Elite Dangerous, run edvr-installer.exe, select the game directory and
 install. The installer validates the native pair before writing, preserves the
 game's original OpenVR DLL for recovery, and creates a local OpenXR config.
+The "Install EDVR for" choice says what goes in: VR and flat (the default),
+VR only, or flat only. On the command line, --scope both|vr|flat does the same.
+
+FLAT (3D MODE OFF)
+------------------
+
+With Elite's 3D mode off, EDVR runs its flat fixes from an install whose scope
+includes flat: "VR and flat" (the default) or "Flat only". The flat fixes are
+experimental; their visual quality is not yet qualified.
+
+- Its settings live in edvr-flat.ini. The installer never writes the VR
+  profile's edvr.ini for them. The settings screen's Flat selection edits that
+  file.
+- Press F8 for the AA menu. Up/Down selects a row; Left/Right changes it.
+- Choose Off, TAA, DLSS, FSR3 or XeSS-SR and the DLSS model preset; settings save live.
+- Press F8 or Escape to close. Game keys are private while the menu is drawn.
+- [fix] temporal_aa also accepts off, on (TAA), dlaa, dlss, fsr or xess (default off).
+- XeSS-SR needs libxess.dll beside the game; the installer includes it when built with the SDK.
+- Game supersampling controls render scale; DLAA requires native SS.
+- Press NumLock while the issue is visible to collect a diagnostic capture.
 
 MANUAL INSTALL
 --------------

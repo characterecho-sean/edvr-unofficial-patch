@@ -40,6 +40,8 @@ class ModuleBackend final : public RuntimeBackend {
     const HRESULT acquired=generation->binding.acquire(options_.graphicsProxy,[generation] {
       if (!generation->loadingAdmitted.load(std::memory_order_acquire)) return;
       if (generation->host->consumeOverlappedPresent()) return;
+      // Flat: the game's Present never parks on the runtime. The owner's empty frames (flat_clear_state.h) carry the headset instead.
+      if (!edvr::vrProfileActive()) return;
       if (!generation->route.invoke([generation] { generation->host->loadingBoundary(); }))
         throw std::runtime_error("native loading boundary unavailable");
     });

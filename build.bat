@@ -327,6 +327,9 @@ python "tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --extra-export edvr_selftest_flat_sdk_owner_view ^
     --extra-export edvr_selftest_flat_sdk_foreground_map ^
     --extra-export edvr_selftest_binding ^
+    --extra-export edvr_selftest_profile_post ^
+    --extra-export edvr_selftest_profile_state ^
+    --extra-export edvr_selftest_profile_skip_teardown ^
     --extra-export edvrAcquireGraphicsBridge ^
     --extra-export edvrAcquireRenderBoundary ^
     --extra-export edvrAcquireNativeGraphics ^
@@ -583,6 +586,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% %XESSFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\remlok_fix.cpp" "src\d3d11\holo_fix.cpp" ^
     "src\d3d11\target_sharp.cpp" "src\d3d11\night_vision.cpp" ^
     "src\d3d11\wake_pulse.cpp" "src\d3d11\vr_ssaa_gate.cpp" "src\d3d11\vr_ssaa_hold.cpp" "src\d3d11\vr_display_observer.cpp" "src\d3d11\vr_window_trampolines.cpp" ^
+    "src\d3d11\mode_watch.cpp" ^
     "src\d3d11\ui_depth.cpp" ^
     "src\d3d11\ui_layer.cpp" "src\d3d11\ui_surfaces.cpp" "src\d3d11\ui_panel_scale.cpp" "src\d3d11\orbital_width.cpp" "src\d3d11\supercruise_bars.cpp" ^
     "third_party\dxbc_hash\DxilHash.cpp" ^
@@ -669,7 +673,7 @@ cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /LD /D_CRT_SECURE_NO_WARNINGS %EDVR_
     "src\openxr\device_gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
     "src\openxr\openvr_compositor.cpp" "src\openxr\openvr_auxiliary.cpp" ^
     "src\common\frame_flag.cpp" ^
-    /link /INCREMENTAL:NO %EDVR_CPU_LINK% /PDB:"%BUILD%\edvr_openxr_runtime.pdb" /DEF:"src\openxr\native_module.def" "%OBJ%\openxr_module\version.res" d3d11.lib dxgi.lib user32.lib
+    /link /INCREMENTAL:NO %EDVR_CPU_LINK% /PDB:"%BUILD%\edvr_openxr_runtime.pdb" /DEF:"src\openxr\native_module.def" "%OBJ%\openxr_module\version.res" d3d11.lib dxgi.lib user32.lib gdi32.lib
 if errorlevel 1 ( echo [edvr] ERROR: native runtime module build failed & exit /b 1 )
 
 REM Shared by the installer and installer_test rigs below.
@@ -1465,7 +1469,7 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     "src\d3d11\vr_world_route.cpp" "src\d3d11\binding_shadow.cpp" "src\d3d11\flat_mono_resolve.cpp" "src\d3d11\map_easu.cpp" "src\d3d11\map_smaa.cpp" ^
     "src\d3d11\flat_projection_scope.cpp" "src\d3d11\flat_projection_runtime.cpp" ^
     "src\common\config.cpp" "src\common\proxy.cpp" "src\common\guard.cpp" ^
-    /link /INCREMENTAL:NO dxgi.lib d3dcompiler.lib user32.lib version.lib
+    /link /INCREMENTAL:NO dxgi.lib d3dcompiler.lib user32.lib gdi32.lib version.lib
 if errorlevel 1 ( echo [edvr] ERROR: vr world route GPU test build failed & exit /b 1 )
 "%BUILD%\vr_world_route_gpu_test.exe" --dry-run || exit /b 1
 "%BUILD%\vr_world_route_gpu_test.exe" --self-test || exit /b 1
@@ -1477,7 +1481,7 @@ if not exist "%OBJ%\flat_sdk_integration_test" mkdir "%OBJ%\flat_sdk_integration
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /Fo"%OBJ%\flat_sdk_integration_test\\" /Fe"%BUILD%\flat_sdk_integration_test.exe" ^
     "tools\flat_sdk_integration_test\flat_sdk_integration_test.cpp" ^
-    /link /INCREMENTAL:NO dxgi.lib d3dcompiler.lib user32.lib
+    /link /INCREMENTAL:NO dxgi.lib d3dcompiler.lib user32.lib gdi32.lib
 if errorlevel 1 ( echo [edvr] ERROR: flat SDK integration bench compile failed & exit /b 1 )
 "%BUILD%\flat_sdk_integration_test.exe" --dry-run || exit /b 1
 "%BUILD%\flat_sdk_integration_test.exe" --self-test || exit /b 1
@@ -1719,6 +1723,26 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
 if errorlevel 1 ( echo [edvr] ERROR: journal_unload_test build failed & exit /b 1 )
 "%BUILD%\journal_unload_test.exe" "%BUILD%\d3d11.dll" || (
     echo [edvr] ERROR: the graphics DLL's pin does not keep its code mapped under a running worker
+    exit /b 1
+)
+exit /b 0
+
+:rig_profile_switch_test
+echo [edvr] === profile_switch_test.exe ===
+REM The live profile switch's mechanics (src\d3d11\mode_watch.cpp commitPosted; docs\design-unified-install-2026-10-12.md section 6). The rig
+REM loads a copy of the real build\d3d11.dll on WARP and presents synthetic frames through its real Present hook, so each flip is committed
+REM at a real frame boundary. It pins the state each switch leaves, the log lines, the 50-cycle count and memory, the settings-file
+REM fallback, and a control in a second process that skips the teardown and must be detected. It cannot reach the flat runtime or the VR
+REM UI layers under real draws (they key on Elite's shaders); that is a flight's job. The exe sits in obj, not build: a build\ exe would
+REM read build\edvr-flat.ini as the settings file's fallback.
+if not exist "%OBJ%\profileswitch" mkdir "%OBJ%\profileswitch"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\profileswitch\\" /Fe"%OBJ%\profileswitch\profile_switch_test.exe" ^
+    "tools\profile_switch_test\profile_switch_test.cpp" ^
+    /link /INCREMENTAL:NO user32.lib psapi.lib
+if errorlevel 1 ( echo [edvr] ERROR: profile_switch_test build failed & exit /b 1 )
+"%OBJ%\profileswitch\profile_switch_test.exe" "%BUILD%\d3d11.dll" || (
+    echo [edvr] ERROR: the live profile switch's mechanics failed their test
     exit /b 1
 )
 exit /b 0
@@ -2334,7 +2358,7 @@ for %%T in (native stereo) do (
         "src\openxr\openvr_compositor.cpp" "tools\openxr_native_test\compositor_caller.cpp" ^
         "src\openxr\openvr_auxiliary.cpp" "src\openxr\runtime_exports.cpp" ^
         "src\common\frame_flag.cpp" ^
-        /link /INCREMENTAL:NO dxgi.lib d3dcompiler.lib user32.lib
+        /link /INCREMENTAL:NO dxgi.lib d3dcompiler.lib user32.lib gdi32.lib
     if errorlevel 1 ( echo [edvr] ERROR: OpenXR %%T test build failed & exit /b 1 )
 )
 for %%T in (native stereo) do (
@@ -2437,7 +2461,7 @@ cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /I"third_party\openxr\include" /I"%G
     "tools\openxr_proxy_state_test\openxr_proxy_state_test.cpp" ^
     "src\openxr\d3d11_stereo.cpp" "src\openxr\eye_capture.cpp" "src\openxr\skybox_capture.cpp" ^
     "src\openxr\shared_texture_transfer.cpp" "src\openxr\producer_gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
-    /link /INCREMENTAL:NO dxgi.lib d3dcompiler.lib
+    /link /INCREMENTAL:NO dxgi.lib d3dcompiler.lib user32.lib gdi32.lib
 if errorlevel 1 ( echo [edvr] ERROR: OpenXR proxy state test build failed & exit /b 1 )
 "%BUILD%\openxr_proxy_state_test.exe" --dry-run || exit /b 1
 "%BUILD%\openxr_proxy_state_test.exe" --self-test || exit /b 1
@@ -2497,7 +2521,7 @@ REM build would accidentally load EDVR's proxy instead of the system DLL.
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /D_CRT_SECURE_NO_WARNINGS ^
     /DWIN32_LEAN_AND_MEAN /DNOMINMAX %XESSFLAGS% /I"%GEN%" ^
     /Fo"%OBJ%\xess_engine_test\\" /Fe"%OBJ%\xess_engine_test\xess_engine_test.exe" ^
-    "tools\xess_engine_test\xess_engine_test.cpp" "src\d3d11\xess_engine.cpp" ^
+    "tools\xess_engine_test\xess_engine_test.cpp" "src\d3d11\xess_engine.cpp" "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
     /link /INCREMENTAL:NO d3d11.lib dxgi.lib
 if errorlevel 1 ( echo [edvr] ERROR: XeSS engine test build failed & exit /b 1 )
 copy /y "%BUILD%\libxess.dll" "%OBJ%\xess_engine_test\libxess.dll" >nul
@@ -2602,7 +2626,7 @@ if not exist "%OBJ%\openxr_module_test" mkdir "%OBJ%\openxr_module_test"
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /D_CRT_SECURE_NO_WARNINGS ^
     /Fo"%OBJ%\openxr_module_test\\" /Fe"%BUILD%\openxr_module_test.exe" ^
     "tools\openxr_module_test\openxr_module_test.cpp" ^
-    /link /INCREMENTAL:NO dxgi.lib d3dcompiler.lib user32.lib
+    /link /INCREMENTAL:NO dxgi.lib d3dcompiler.lib user32.lib gdi32.lib
 if errorlevel 1 ( echo [edvr] ERROR: native runtime module test build failed & exit /b 1 )
 "%BUILD%\openxr_module_test.exe" --dry-run || exit /b 1
 "%BUILD%\openxr_module_test.exe" --self-test || exit /b 1
@@ -2652,26 +2676,6 @@ REM sees. --help reads nothing and writes nothing.
 )
 exit /b 0
 
-:rig_flat_installer
-echo [edvr] === edvr-flat-installer.exe ===
-if not exist "%OBJ%\flatinstaller" mkdir "%OBJ%\flatinstaller"
-if not exist "%BUILD%\gen-flat" mkdir "%BUILD%\gen-flat"
-python "tools\gen_installer_rc.py" --root "%ROOT%" --build "%BUILD%" ^
-    --out "%BUILD%\gen-flat" --version "%EDVR_VER%" --profile flat
-if errorlevel 1 ( echo [edvr] ERROR: flat installer resource generation failed & exit /b 1 )
-rc.exe /nologo /fo "%OBJ%\flatinstaller\payload.res" "%BUILD%\gen-flat\payload.rc"
-if errorlevel 1 ( echo [edvr] ERROR: flat installer resources failed & exit /b 1 )
-cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /GR- /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
-    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /I"%GEN%" ^
-    /DEDVR_INSTALLER_FLAT=1 /DEDVR_VERSION_STRING=\"%EDVR_VER%\" ^
-    /Fo"%OBJ%\flatinstaller"\ /Fe"%BUILD%\edvr-flat-installer.exe" ^
-    %INSTALLER_SRC% "%OBJ%\flatinstaller\payload.res" ^
-    /link /INCREMENTAL:NO /SUBSYSTEM:WINDOWS /MANIFEST:NO %INSTALLER_LIBS%
-if errorlevel 1 ( echo [edvr] ERROR: flat installer build failed & exit /b 1 )
-"%BUILD%\edvr-flat-installer.exe" --help >nul || exit /b 1
-python "tools\package_native.py" --check-installer --profile flat || exit /b 1
-exit /b 0
-
 :rig_installer_test
 echo [edvr] === installer_test.exe ===
 REM The planner over folders that are hard to arrange on a real machine: EDHM
@@ -2689,6 +2693,7 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /GR- /DWIN32_LEAN_AND_MEAN /DNOMINMA
     "src\common\iniedit.cpp" "src\installer\state.cpp" ^
     "src\installer\mirror.cpp" ^
     "src\installer\settings.cpp" "src\installer\logbundle.cpp" ^
+    "src\installer\app.cpp" "src\installer\payload.cpp" ^
     /link /INCREMENTAL:NO %INSTALLER_LIBS%
 if errorlevel 1 ( echo [edvr] ERROR: installer_test build failed & exit /b 1 )
 "%BUILD%\installer_test.exe" "%ROOT%" "%BUILD%\insttest_scratch" || (
@@ -3534,6 +3539,66 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /utf-8 /DWIN32_LEAN_AND_MEAN /DNOMIN
 if errorlevel 1 ( echo [edvr] ERROR: vr_ssaa_hold_test build failed & exit /b 1 )
 "%OBJ%\vrssaahold\vr_ssaa_hold_test.exe" --dry-run || exit /b 1
 "%OBJ%\vrssaahold\vr_ssaa_hold_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_runtime_profile_test
+echo [edvr] === runtime_profile_test.exe ===
+REM The launch decision's pure rules (src\common\install_scope.h, docs\design-unified-install-2026-10-12.md section 3.1): the descriptor
+REM parse for schema 1 and 2, the frozen v1 parser an older DLL runs, Settings.xml's 3D mode, the command line's switch, the profile by
+REM scope and mode, and the launch's log line. No Windows API: the rig includes only the two pure headers.
+if not exist "%OBJ%\runtimeprofile" mkdir "%OBJ%\runtimeprofile"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /utf-8 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\runtimeprofile\\" /Fe"%OBJ%\runtimeprofile\runtime_profile_test.exe" ^
+    "tools\runtime_profile_test\runtime_profile_test.cpp" ^
+    /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: runtime_profile_test build failed & exit /b 1 )
+"%OBJ%\runtimeprofile\runtime_profile_test.exe" --dry-run || exit /b 1
+"%OBJ%\runtimeprofile\runtime_profile_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_mode_watch_test
+echo [edvr] === mode_watch_test.exe ===
+REM The mode watch's decisions (src\d3d11\mode_watch_logic.h, docs\design-unified-install-2026-10-12.md section 3.2): the 250 ms
+REM confirm, half-written reads ignored, a flip-flop dropped, the live rise, the toggles in order and the unknown launch. No Windows
+REM API: the rig includes only the pure headers.
+if not exist "%OBJ%\modewatch" mkdir "%OBJ%\modewatch"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /utf-8 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\modewatch\\" /Fe"%OBJ%\modewatch\mode_watch_test.exe" ^
+    "tools\mode_watch_test\mode_watch_test.cpp" ^
+    /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: mode_watch_test build failed & exit /b 1 )
+"%OBJ%\modewatch\mode_watch_test.exe" --dry-run || exit /b 1
+"%OBJ%\modewatch\mode_watch_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_cross_profile_test
+echo [edvr] === cross_profile_test.exe ===
+REM The cross-profile cost instrument's arithmetic and sampling (src\d3d11\cross_profile_cost.h, docs\design-unified-install-2026-10-12.md section
+REM 3.3): the 1-in-64 scaling, the per-frame division, the capture scope, and the report's 30 s windows and 5-minute session totals with the
+REM profile gate. Pure: the header's only Windows call is QueryPerformanceCounter.
+if not exist "%OBJ%\crossprofile" mkdir "%OBJ%\crossprofile"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /utf-8 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\crossprofile\\" /Fe"%OBJ%\crossprofile\cross_profile_test.exe" ^
+    "tools\cross_profile_test\cross_profile_test.cpp" ^
+    /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: cross_profile_test build failed & exit /b 1 )
+"%OBJ%\crossprofile\cross_profile_test.exe" --dry-run || exit /b 1
+"%OBJ%\crossprofile\cross_profile_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_flat_clear_test
+echo [edvr] === flat_clear_test.exe ===
+REM The headset while flat's policy (src\openxr\flat_clear_state.h, docs\design-unified-install-2026-10-12.md section 12): the 250 ms quiet
+REM window at its edges, the four gates, the start and stop transitions with their reasons, and the word the graphics half writes that
+REM reads as VR when nobody has written it. No Windows API: the rig includes only the pure headers.
+if not exist "%OBJ%\flatclear" mkdir "%OBJ%\flatclear"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /utf-8 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\flatclear\\" /Fe"%OBJ%\flatclear\flat_clear_test.exe" ^
+    "tools\flat_clear_test\flat_clear_test.cpp" ^
+    /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: flat_clear_test build failed & exit /b 1 )
+"%OBJ%\flatclear\flat_clear_test.exe" --dry-run || exit /b 1
+"%OBJ%\flatclear\flat_clear_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_orbital_width_test

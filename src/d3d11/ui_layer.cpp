@@ -4776,6 +4776,16 @@ bool uiLayerFlatRelease() {
     return any;
 }
 
+// Called at a profile switch, render thread, frame boundary. The layers and the door go exactly as on a swap-chain resize
+// (uiLayerFlatRelease: it is releaseLayers plus the door, the target cache and the per-draw facts), so the next armed eye builds
+// its layers afresh for the profile now active. The flat profile's panel factor (ui_panel_scale.cpp) is also cleared here:
+// its only setter runs under the flat profile and nothing else ever cleared it. Safe when the layer never started: every
+// release tests for nothing to release.
+void uiLayerProfileSwitch() {
+    uiLayerFlatRelease();
+    uiPanelScaleSetFlatTemporal(false);
+}
+
 namespace {
 // Every child of the device the shared layer holds -- the layers and their depth targets, the composite's output and
 // frame views, the route's timers, the blend cache, the depth seeder and its deferred context, the coverage pass's

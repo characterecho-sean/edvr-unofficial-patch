@@ -71,6 +71,7 @@
 #include "map_wait.h"         // the game's time inside Map, for the native timing line
 #include "flat_runtime.h"
 #include "flat_temporal.h"   // bounded, flat-profile-only scene discovery
+#include "cross_profile_cost.h"   // the flat PS constant-buffer observer's cost while VR is active (log only)
 #include "../common/runtime_profile.h"
 #include "intro_panel.h"
 #include "intro_curve.h"     // the splash's recogniser: which composite draws are the game's own world-space panel
@@ -2984,6 +2985,13 @@ void STDMETHODCALLTYPE hookedVSSetConstantBuffers(ID3D11DeviceContext* self, UIN
 
 void STDMETHODCALLTYPE hookedPSSetConstantBuffers(ID3D11DeviceContext* self, UINT start,
                                                   UINT n, ID3D11Buffer* const* bufs) {
+    // Hot: every PS constant-buffer bind. Installed for the flat scope, so a VR launch passes through here.
+    if (!runtimeFlatProfile()) {
+        // Inactive while VR runs: timed from here to the forward call (cross_profile_cost.h).
+        cross_profile::enterSite(cross_profile::Site::FlatPsConstantBuffers, true).stop();
+        g_state->realPSSetConstantBuffers(self, start, n, bufs);
+        return;
+    }
     if (g_flatComputeInternal) { g_state->realPSSetConstantBuffers(self, start, n, bufs); return; }
     // Installed only for flat discovery. Forward exactly once, including
     // foreign contexts and every call outside the bounded capture window.
@@ -5529,7 +5537,9 @@ uint32_t vScreenEyeDrawsThisFrame() {
     return s ? s->eyeDrawsThisFrame : 0;
 }
 
-void vScreenRefreshConfig() {
+// The one refresh. vScreenRefreshConfig runs it behind the reload's gate; vScreenForceRefreshConfig runs it with the gate taken away.
+// The configure calls stay in this one body: the reload gate is the only difference between the two.
+static void vScreenRefreshConfigBody(bool forced) {
     State* s = g_state;
     Config& cfg = Config::get();
     // Cheap: one GetFileAttributesEx, and only when the write time moved.
@@ -5537,8 +5547,12 @@ void vScreenRefreshConfig() {
     // THE RELOAD COMES BEFORE THE STATE CHECK. This is the only place the ini is re-read, and its readers outside vScreen (hotkey.explorer_cam, the diagnostic keys,
     // each read live from Config) need no vScreen State: with vScreen installed transport-only (no State) a reload that waited for one never happened, and a key
     // bound or cleared while the game runs never applied (review 2026-10-08, finding 3; tools\gate_test pins the order, the transport fixture binds a key live).
-    if (!cfg.reloadIfChanged()) return;
+    if (!forced && !cfg.reloadIfChanged()) return;
     if (!s) return;   // nothing of vScreen's to re-derive
+    if (forced) {
+        // The quiet-pass counters go back to zero with the sweep: the vouch list is rebuilt from silence the new profile earns.
+        for (uint8_t& q : s->quietPasses) q = 0;
+    }
     const bool gpuTimingEnabled = cfg.getBool("advanced.app_gpu_timing", true);
     gpuFrameConfigure(gpuTimingEnabled);
     // A reload -- the parse of a 124 KB ini and every module's reconfigure,
@@ -5628,9 +5642,19 @@ void vScreenRefreshConfig() {
     // is where every one of them learns its new value. Re-sample the real
     // condition here rather than merely raising the gate: the answer is
     // knowable now, and waiting for the next frame boundary would cost the
-    // newly enabled fix its first frame of draws. This runs only on a change
-    // -- the reloadIfChanged early return above sees to that.
+    // newly enabled fix its first frame of draws. A refresh runs this only on a change -- the reloadIfChanged early return in
+    // vScreenRefreshConfig sees to that. A forced refresh (a profile switch) runs it with no change to wait for.
     drawGateSet(drawGateSubscribed(s));
+}
+
+void vScreenRefreshConfig() {
+    vScreenRefreshConfigBody(false);
+}
+
+// Called at a profile switch, render thread, frame boundary: the same refresh without its reloadIfChanged gate, so every *Configure
+// runs again whether or not the file's write time moved (a profile switch changes which settings are live, not the file).
+void vScreenForceRefreshConfig() {
+    vScreenRefreshConfigBody(true);
 }
 
 bool vScreenReclaimHooks() {
@@ -6911,10 +6935,10 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
                    reinterpret_cast<void**>(&s.realPSSetShader));
     s.hook.replace(kSlotVSSetConstantBuffers, &hookedVSSetConstantBuffers,
                    reinterpret_cast<void**>(&s.realVSSetConstantBuffers));
-    if (runtimeFlatProfile()) {
+    if (runtimeScopeIncludesFlat()) {
         const bool installed = s.hook.replace(kSlotPSSetConstantBuffers, &hookedPSSetConstantBuffers,
             reinterpret_cast<void**>(&s.realPSSetConstantBuffers));
-        Log::get().note("flat discover PS constant-buffer observer: slot=%zu installed=%u; active only during owned capture",
+        Log::get().note("flat discover PS constant-buffer observer: slot=%zu installed=%u for flat; active only in flat during owned capture",
                        kSlotPSSetConstantBuffers, installed && s.realPSSetConstantBuffers ? 1u : 0u);
     }
     s.hook.replace(kSlotVSSetShaderResources, &hookedVSSetShaderResources,

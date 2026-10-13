@@ -54,6 +54,7 @@
 #include "vscreen.h"        // vScreenRenderBelowEye: Elite's Supersampling below 1, from the sizes
 #include "vr_ssaa_hold.h"       // vrSsaaHoldNoticeDue: the Supersampling hold's toast (a requested value held at 1.0)
 #include "vr_ssaa_hold_math.h"  // ssaahold::formatHoldToast
+#include "mode_watch.h"         // modeWatchNoticeDue: the 3D mode watch's toast, once per commit
 #include "vscreen_res.h"
 #include "xinput_watch.h"   // the Hotkeys page's capture reads the pad
 // fsr3_engine.h is deliberately NOT included: the Temporal AA status line
@@ -942,9 +943,6 @@ std::vector<ChoiceItem> choicesOf(const MenuRowDef& d) {
         }
         pos = bar + 1;
     }
-    // The shipped row is shared with VR; XeSS is a flat-only choice.
-    if (runtimeFlatProfile() && strcmp(d.section, "fix") == 0 && strcmp(d.key, "temporal_aa") == 0)
-        out.push_back({"xess", "XeSS-SR"});
     return out;
 }
 
@@ -3888,6 +3886,23 @@ void closeMenu(const char* why) {
 
 }  // namespace
 
+// Called at a profile switch, render thread, frame boundary. The menu closes; the flat panel's raster and its device objects
+// are let go by calling menuPanelFlatResize directly (menuFlatResize returns early unless the flat profile is active, and the
+// profile now active may be VR); and the first-time block of menuConfigure runs again under the new profile. Safe when the menu
+// never configured: menuPanelFlatResize tests each pointer, and inputGateSetPrivate(false) is a no-op while the flag is clear.
+void menuProfileSwitch() {
+    State& s = g_s;
+    if (s.open) closeMenu("profile switch");
+    inputGateSetPrivate(false);
+    menuPanelFlatResize();
+    s.lastDrawn = menuDrawnValue();
+    s.lastDrawnMs = 0;
+    s.contentDirty = true;
+    s.configured = false;
+}
+
+bool menuIsConfigured() { return g_s.configured; }
+
 bool menuFlatPadOwnsHotkey(uint16_t buttons, uint8_t trigger) {
     const State& s = g_s;
     if (!runtimeFlatProfile() || !s.open || !s.padReady || !gameHasFocus() ||
@@ -4363,6 +4378,20 @@ void menuTick(ID3D11Device* dev) {
                     Log::get().note("vr ssaa gate: notice queued as a toast (\"%s\")", holdToast);
                 } else {
                     Log::get().note("vr ssaa gate: notice not queued: menu.toasts is off");
+                }
+                s.contentDirty = true;
+            }
+        }
+
+        // The 3D mode watch (mode_watch.h): a commit says once, as a toast, which profile EDVR is running now, or that it is paused.
+        {
+            char modeToast[160];
+            if (modeWatchNoticeDue(modeToast, sizeof(modeToast))) {
+                if (s.toasts) {
+                    s.toastQueue.push_back(modeToast);
+                    Log::get().note("mode watch: notice queued as a toast (\"%s\")", modeToast);
+                } else {
+                    Log::get().note("mode watch: notice not queued: menu.toasts is off");
                 }
                 s.contentDirty = true;
             }

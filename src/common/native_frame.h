@@ -149,4 +149,8 @@ namespace edvr {
 // numbers in-process rather than across the DLL boundary above.
 void nativeFrameFovTrimDegrees(uint32_t out[3]);
 
+// The frame pairs the runtime has latched through latchSubmit, since the DLL loaded. Counted whatever the fixes; the mode watch
+// samples it once a second (mode_watch.cpp).
+uint64_t nativeFrameLatchedFrames();
+
 }  // namespace edvr

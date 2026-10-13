@@ -1,13 +1,16 @@
 #include "app.h"
 
 #include <shellapi.h>
+#include <shlobj.h>
 
 #include <cstdio>
 
 #include "apply.h"
+#include "detect.h"
 #include "logbundle.h"
 #include "mirror.h"
 #include "payload.h"
+#include "../common/elite_graphics_folder.h"
 
 namespace edvr::installer {
 namespace {
@@ -36,32 +39,34 @@ std::string bullets(const char* title, const std::vector<std::string>& items) {
 }  // namespace
 
 std::string usageText() {
-    const bool flat = payloadInfo().profile == "flat";
-    const char* exe = flat ? "edvr-flat-installer.exe" : "edvr-installer.exe";
-    // The settings file of this edition: the flat one keeps its own, so its
-    // options and its mirror are about edvr-flat.ini, never the VR profile's edvr.ini.
-    const std::string ini = toUtf8(settingsLeafFor(payloadInfo().profile));
-    std::string out = flat ? "EDVR flat capture qualification installer\r\n" : "EDVR VR installer\r\n";
+    const char* exe = "edvr-installer.exe";
+    std::string out = "EDVR installer\r\n";
     out +=
            "\r\n"
            "  " + std::string(exe) + "                        open the window\r\n"
            "  " + std::string(exe) + " --install [--dir D]    install or update\r\n"
-           "  " + std::string(exe) + " --repair  [--dir D]    repair this edition\r\n"
+           "  " + std::string(exe) + " --repair  [--dir D]    repair this install\r\n"
            "  " + std::string(exe) + " --uninstall [--dir D]  remove EDVR, restoring what it replaced\r\n"
            "  " + std::string(exe) + " --collect-logs         zip the latest logs onto the Desktop\r\n"
            "\r\n"
            "  --dir <path>         the folder holding EliteDangerous64.exe. Without it, the\r\n"
            "                       installer finds your installs itself and uses the only one.\r\n"
+           "  --scope both|vr|flat what to install: both (VR and flat), vr (VR only) or flat\r\n"
+           "                       (flat only). Without it, the scope already installed is kept,\r\n"
+           "                       and a new install gets both.\r\n"
            "  --dry-run            say what would happen; touch nothing.\r\n"
-           "  --convert-profile    explicitly convert the installed VR/flat edition.\r\n"
-           "  --replace-settings   overwrite " + ini + " instead of keeping your values.\r\n"
-           "  --remove-settings    with --uninstall, delete the installed edition's settings file too.\r\n"
+           "  --convert-profile    accepted for older scripts; no longer needed. A scope change\r\n"
+           "                       is an ordinary install with --scope.\r\n"
+           "  --replace-settings   replace your settings files with the shipped defaults instead\r\n"
+           "                       of keeping your values.\r\n"
+           "  --remove-settings    with --uninstall, delete the settings files of the installed\r\n"
+           "                       scope too.\r\n"
            "  --help               this.\r\n"
            "\r\n"
-           "  A copy of " + ini + " (and the install record) is kept outside the game folder, in\r\n"
-           "  %LOCALAPPDATA%\\EDVR, so a game update that wipes the folder cannot take it too.\r\n"
-           "  --install restores from it automatically when the folder has no " + ini + " of its\r\n"
-           "  own, unless --replace-settings says you want fresh defaults instead.\r\n";
+           "  A copy of your settings files (and the install record) is kept outside the game\r\n"
+           "  folder, in %LOCALAPPDATA%\\EDVR, so a game update that wipes the folder cannot take\r\n"
+           "  it too. --install restores from it automatically when the folder has no settings\r\n"
+           "  file of its own, unless --replace-settings says you want fresh defaults instead.\r\n";
     return out;
 }
 
@@ -78,6 +83,14 @@ AppArgs parseArgs(int argc, wchar_t** argv) {
             a.badArgText = arg + L" needs a value";
             return false;
         };
+        auto setScope = [&](const std::wstring& value) {
+            if (value == L"both" || value == L"vr" || value == L"flat") {
+                a.scope = toUtf8(value);
+                return;
+            }
+            a.badArg = true;
+            a.badArgText = L"--scope takes both, vr or flat, not \"" + value + L"\"";
+        };
         if (arg == L"--install")
             a.action = AppArgs::Act::Install;
         else if (arg == L"--repair")
@@ -90,6 +103,11 @@ AppArgs parseArgs(int argc, wchar_t** argv) {
             next(&a.dir);
         else if (arg.rfind(L"--dir=", 0) == 0)
             a.dir = arg.substr(6);
+        else if (arg == L"--scope") {
+            std::wstring value;
+            if (next(&value)) setScope(value);
+        } else if (arg.rfind(L"--scope=", 0) == 0)
+            setScope(arg.substr(8));
         else if (arg == L"--dry-run")
             a.dryRun = true;
         else if (arg == L"--convert-profile")
@@ -112,24 +130,44 @@ AppArgs parseArgs(int argc, wchar_t** argv) {
 
 Options optionsFor(const AppArgs& args, bool repair) {
     Options o;
+    o.scope = args.scope;
     o.keepSettings = args.keepSettings;
     o.removeSettings = args.removeSettings;
     o.repair = repair;
-    o.convertProfile = args.convertProfile;
     o.backupStamp = timestampName();
     o.nowUtc = utcNow();
     return o;
 }
 
-std::string statusReport(const Survey& s, const PayloadInfo& payload) {
+std::string scopeFor(const AppArgs& args, const Survey& survey) {
+    return args.scope.empty() ? defaultScope(survey) : args.scope;
+}
+
+edvr::ModeRead eliteGameMode() {
+    PWSTR path = nullptr;
+    std::wstring base;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &path)) && path) {
+        base = path;
+        CoTaskMemFree(path);
+    } else {
+        wchar_t env[MAX_PATH]{};
+        if (GetEnvironmentVariableW(L"LOCALAPPDATA", env, MAX_PATH)) base = env;
+    }
+    const std::wstring folder = edvr::eliteGraphicsFolderUnder(base);
+    if (folder.empty()) return edvr::readGameMode(nullptr);
+    const std::string xml = readTextFile(joinPath(folder, L"Settings.xml"));
+    return edvr::readGameMode(xml.empty() ? nullptr : xml.c_str());
+}
+
+std::string statusReport(const Survey& s, const PayloadInfo& payload, const std::string& scope) {
     std::string out;
     out += "Folder:  " + toUtf8(s.game.dir) + "\r\n";
     out += "Found by: " + toUtf8(s.game.source);
     if (!s.game.product.empty()) out += "   (" + toUtf8(s.game.product) + ")";
     out += "\r\n\r\n";
-    const std::string detected = installedProfile(s);
-    out += "Installed edition: " + (detected.empty() ? std::string("none") : detected) +
-           "   Installer edition: " + payload.profile + "\r\n";
+    const std::string detected = installedScope(s);
+    out += "Installed scope: " + (detected.empty() ? std::string("none") : detected) +
+           "   Install scope: " + scope + "\r\n";
 
     out += "d3d11.dll         " + toUtf8(describeDll(s.d3d11)) + "\r\n";
     if (s.haveOpenvrDir) {
@@ -148,10 +186,10 @@ std::string statusReport(const Survey& s, const PayloadInfo& payload) {
         out += "openvr_api.dll    the game's own copy was not found under this folder\r\n";
     }
     out += std::string("edvr.ini          ") + (s.iniPresent ? "present" : "not present") + "\r\n";
-    // The flat profile's own settings file, for the edition that uses it (and
-    // whenever one is there): "not present" beside a present edvr.ini means the
-    // flat edition has yet to start its own from it.
-    if (payload.profile == "flat" || s.flatIniPresent)
+    // The flat settings file: shown when the scope installs flat, or whenever one is there.
+    // "not present" beside a present edvr.ini means the flat runtime reads edvr.ini until
+    // the first flat change starts its own from it.
+    if (scope != "vr" || s.flatIniPresent)
         out += std::string("edvr-flat.ini     ") + (s.flatIniPresent ? "present" : "not present") + "\r\n";
     out += std::string("nvngx_dlss.dll    ") +
            (s.ngx.kind == DllKind::Absent ? std::string("not present (NVIDIA's DLSS runtime)")
@@ -173,7 +211,6 @@ std::string statusReport(const Survey& s, const PayloadInfo& payload) {
         }
     }
     if (!payload.version.empty()) out += "\r\nThis installer carries EDVR " + payload.version + ".\r\n";
-    if (payload.profile == "flat") out += "Experimental flat temporal build: zero-jitter testing. Game supersampling controls render scale. Press NumLock for a diagnostic capture.\r\n";
     if (s.gameRunningHere) {
         out += "\r\n!  Elite Dangerous is running. Close it before installing anything.\r\n";
     } else if (s.gameRunningElsewhere) {
@@ -237,6 +274,7 @@ bool relaunchElevated(const AppArgs& args) {
         case AppArgs::Act::None: break;
     }
     if (!args.dir.empty()) cmd += L"--dir \"" + args.dir + L"\" ";
+    if (!args.scope.empty()) cmd += L"--scope " + fromUtf8(args.scope) + L" ";
     if (!args.keepSettings) cmd += L"--replace-settings ";
     if (args.removeSettings) cmd += L"--remove-settings ";
     if (args.dryRun) cmd += L"--dry-run ";
@@ -287,7 +325,12 @@ int runConsole(const AppArgs& args) {
 
     Survey survey = surveyTarget(game);
     const PayloadInfo& payload = payloadInfo();
-    writeOut(statusReport(survey, payload) + "\r\n");
+    std::string scope = scopeFor(args, survey);
+    writeOut(statusReport(survey, payload, scope) + "\r\n");
+    if (args.convertProfile) {
+        writeOut("--convert-profile is no longer needed: a scope change is an ordinary install "
+                 "(--scope). Nothing was converted.\r\n");
+    }
 
     if (args.action == AppArgs::Act::None) return 0;
 
@@ -317,13 +360,14 @@ int runConsole(const AppArgs& args) {
     // week's settings appear anyway. --dry-run promises to touch nothing, and
     // a restore is a write, so it is only ever described there, never done.
     //
-    // "A settings file" and "a mirror of one" are asked in the edition's terms:
-    // the flat edition's is edvr-flat.ini (or the shared edvr.ini it falls back
-    // to), and a mirror holding only edvr-flat.ini is one worth offering.
+    // "A settings file" and "a mirror of one" are asked in the chosen scope's
+    // terms: each file the scope installs that the folder lacks, if the mirror
+    // holds it. A file the folder has is never restored over.
     if (canMirror && args.keepSettings) {
         const MirrorInfo mirror = readMirror(mirrorDir);
-        if (offerRestore(hasSettingsFor(survey, payload.profile), mirror, payload.profile)) {
-            const std::string wanted = payload.profile == "flat" ? "edvr-flat.ini or edvr.ini" : "edvr.ini";
+        const std::vector<std::string> missing = settingsToRestore(survey.game.dir, mirror, scope);
+        if (!missing.empty()) {
+            const std::string wanted = settingsNamesOf(missing);
             writeOut("This folder has no " + wanted + ", but settings from an earlier install of it "
                      "were found outside the game folder (" + toUtf8(mirror.dir) + "), last saved " +
                      mirror.savedUtc + ".\r\n");
@@ -333,7 +377,7 @@ int runConsole(const AppArgs& args) {
                          ".\r\n\r\n");
             } else {
                 std::vector<std::string> notes;
-                const bool restored = restoreFromMirror(survey.game.dir, mirror, &notes);
+                const bool restored = restoreFromMirror(survey.game.dir, mirror, scope, &notes);
                 for (const std::string& n : notes) writeOut("  " + n + "\r\n");
                 if (!restored) {
                     writeOut("  Could not restore all of it -- carrying on with what is in the "
@@ -342,13 +386,14 @@ int runConsole(const AppArgs& args) {
                 // Whatever did come back is what the plan is for, whether or not
                 // all of it did.
                 survey = surveyTarget(game);
+                scope = scopeFor(args, survey);
                 writeOut("\r\n");
             }
         }
     }
 
     const Options options = optionsFor(args, args.action == AppArgs::Act::Repair);
-    const Plan plan = args.action == AppArgs::Act::Uninstall ? planUninstall(survey, options)
+    const Plan plan = args.action == AppArgs::Act::Uninstall ? planUninstall(survey, options, payload)
                                                              : planInstall(survey, options, payload);
     writeOut(planReport(plan));
 
