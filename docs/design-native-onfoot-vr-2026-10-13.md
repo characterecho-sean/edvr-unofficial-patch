@@ -2,21 +2,16 @@
 
 ## Status
 
-- **State:** F0 REBUILT d4875a12 (the selector check fixed; see the journal at
-  the end). Flight 3 (Epic, 10:36) reached admission for cinema 6 and refused
-  it: selector_invalid, from our own check. Not flown with a substitution yet. Branch
-  `claude/native-onfoot-vr-completion-219ffa`, off main until ready (Sean).
-- **Origin:** a user's handoff (not in the repo). They hooked Elite's
-  render-mode setter, swapped an incoming 5 (Cinema) for 3 (HMD) while
-  disembarking, and got native stereo on foot, interactive, not the external
-  camera. Missing: the normal HUD, top radar, left panel and inventory. A
-  later experiment of theirs restored the reticle and weapon label.
+- **State:** F0 FLOWN OK on Epic (10:50, build 27-g88bba7b0; journal below).
+  F1 BUILT 507940d3 (log only: repeat collapse, caller, flag rule, avatar and
+  neck census), NOT FLOWN. Branch `claude/native-onfoot-vr-completion-219ffa`,
+  off main until ready (Sean).
+- **Origin:** a user's handoff. A Cinema-to-HMD swap on disembark gave native
+  stereo on foot; the HUD, radar, left panel and inventory were missing.
 - **Build:** Sean's installs hash to the handoff's exe (`e6be8bbe…8e988`, 332841).
-- **Verified offline (capstone, 2026-10-13):** setter = vtable 0x52E9608
-  slot 5 = 0x28723C0; it writes selector+0x20 at 0x2872441; selector =
-  owner+0x60, selector+0x58 = owner (ctor 0x27FBFC0); 0x2890B30 copies
-  requested settings+0x3698 into current +0x3694. No direct callers exist; the
-  setter is reached only through the vtable.
+- **Verified offline:** setter = vtable 0x52E9608 slot 5 = 0x28723C0. The
+  selector is embedded in its owner at +0x60; its vtable is its first qword.
+  No direct callers; the setter is reached only through the vtable.
 - **Key finding:** every static test of the mode in the game treats 3..6 as
   one class (`sub 3; cmp 3; ja`). Nothing reading +0x3694 tells 3 from 5. So
   the missing HUD is not a mode branch to flip. Leading hypothesis (H1): the
@@ -28,7 +23,9 @@
   be the natural "this context wants cinema" decision, and a cleaner hook point
   than the setter (UNVERIFIED); H3: EDVR's on-foot gates key on the journal's
   OnFoot flag and will misfire on stereo eyes (world route, UI layer,
-  footSplit, weapon pacing).
+  footSplit, weapon pacing). H4 (F1): the game re-requests 6 about once a
+  frame while substituted, so some on-foot state machine never sees cinema
+  applied; the HUD may be gated on that. The F1 caller RVA locates the requester.
 - **Ruled out:** the cinema request is always 5 (see the end of this doc).
 - **Temporary keys:** `fix.native_on_foot` (on/off, default off, VR only),
   added by F0 (1535fb59) on the Fixes page. Removal is proposed, quoted, when
@@ -50,27 +47,32 @@
   - `native on foot gates: frames=N world_route=N ui_layer=N foot_split=N
     deferred_pacing=N panel_shape=N transition_flash=N` every 5 s while native
     stereo is on. Cumulative since launch.
+  - F1: `native on foot: repeated N x (...) over T ms` (repeats collapsed; every
+    setter line now ends `caller=+0x<RVA>`); `native on foot avatar: part=...
+    masks=...` every 5 s (the body's view masks, the fade global); `native on
+    foot neck: head=... cam=... d=...` once a second (two spaces, not a camera).
   - In the openvr runtime trace: `submit shape: left=WxH bounds=... right=WxH
     bounds=... same_texture=yes|no`, once a second while frames are submitted.
     Stereo eyes read as two eye-sized textures; the cinema panel as one shared
     16:9 texture (`same_texture=yes`).
-- **Install:** Frontier and Epic get the `--dll-only` build stamped with the
-  commit that carries this line. `edvr.ini` is never touched.
+- **Install:** Epic only, from now on (Sean: Frontier carries another feature
+  test). `edvr.ini` is never touched.
 - **Next:** Sean flies F0 (the flight below). Nothing builds before that.
 
 ## What "finished" means
 
 Explorer Cam goes. Pressing nothing, the commander leaves the ship in native
 stereo, with a usable HUD, inventory, weapons and menus, and returns aboard
-unchanged. Five workstreams, in dependency order:
+unchanged. Six workstreams, in dependency order:
 
 | # | Work | Size | Risk |
 |---|---|---|---|
 | W1 | Activation: hook the setter's vtable slot, swap 5→3 only when admitted | small (CodeHook pattern, ~300 lines + rig) | low; addresses verified |
 | W2 | EDVR frame path: re-key on-foot gates from "journal on foot" to "eyes are stereo" | medium; ~6 gates | medium; regressions on the panel path |
-| W3 | HUD: find the on-foot HUD targets, composite them into the eyes as a placed layer | **large**; the bulk of the arc | high; RE + several flights |
+| W3 | HUD: port the on-foot UI elements into projected 3D space (three stages, below) | **large**; the bulk of the arc | high; RE + several flights |
 | W4 | Contexts: inventory cursor, radial menus, maps, contacts, SRV, elevators, Apex, loading, intro video, deaths | medium; mostly per-context admission | medium |
 | W5 | Remove Explorer Cam (6 files, ~5.7k lines, 8 keys, F5 hotkey, F8 page) | small | none, once W1-W4 fly; keys quoted and asked first |
+| W6 | Body and view: show a full body like Explorer Cam's, with a ~200 ms damper on the view (not body yaw) | medium | medium; the neck census decides the damper's shape |
 
 ### W1 — activation
 
@@ -106,25 +108,55 @@ From the code map, these key on "on foot" and assume a mono panel:
 branch that behaves like the cockpit. The F2 skin join is NOT coupled to
 Explorer Cam (`engine_velocity.cpp:2496-2502`); it stays.
 
-### W3 — the HUD
+RemLok (F0 log, 10:50-10:54): in native stereo on foot the helmet lines show
+the replicated nasal-line bug that the cockpit fix solved (`fix.remlok_lines =
+outer`, angle 46, `remlok_fix.cpp`, matched by shape N:3 i=1 no-DSV PS0
+1024x512 in `vscreen.cpp` ~2467). The startup line says `remlok lines: outer`,
+but the GPU census reads `RemLok overlay -` in every 30 s window, so the match
+never fired on foot. Hypotheses: (a) the on-foot overlay is a different draw
+(texture size or shape); (b) the eye-draw verdict path is not reached on foot
+in native mode, because an earlier on-foot gate turns it away. Discriminator:
+a `dump_draws` pair on foot in native mode, helmet down and helmet up, diffed
+with `tools\diff_draw_census.py`. No code change for this in F1.
 
-The handoff's runtime comparison saw the HUD resources still produced in
-mode 3, with their usual PS-SRV composite consumers absent. EDVR already has
-the machinery to place a 2D layer in the eyes (the UI layer path,
-`ui_layer_math.h:8-13`, `kScreen` family at :583-587). The work:
+### W3 — the HUD: port the on-foot UI into projected 3D space
 
-1. In cinema on foot, identify the HUD composite draws and their source
-   targets by draw census (`dump_draws` already exists). Expect separate
-   targets for radar, left panel, inventory and reticle.
-2. In forced mode 3 on foot, confirm the same targets are written and not
-   read by anything that reaches the eyes.
-3. Composite them into each eye as a body- or head-locked quad at a
-   comfortable depth (reticle at the aim depth, as fix.ui_depth does in the
-   cockpit). Inventory and radial menus need the cursor mapped onto that quad.
+Goal (Sean, 2026-10-13): the on-foot UI elements (radar, left panel,
+inventory, radial menus, reticle, weapon label, prompts) placed in the
+headset as projected 3D surfaces, not one flat HUD quad. Three stages:
 
-Fallback if (2) fails, i.e. the game skips the HUD render entirely in mode 3:
-find what skips it, starting at 0x28540B0 (mode 3..6 AND settings+0x2AE0==1
+1. **Does the game already place on-foot UI in 3D behind a gate?** The
+   handoff restored the reticle and weapon label in both eyes in a later
+   experiment, and the game re-requests cinema every frame in native mode (H4).
+   F1's caller RVA locates the requester. Question: is there a 3D placement
+   path, behind a gate, that the requester can reach?
+2. **Element inventory from a `dump_draws` pair (cinema against native).** Per
+   element: its draws, its source target and its screen rect, and whether the
+   elements separate cleanly. Done offline from the dumps.
+3. **Per-element placement and interaction.** Each element is body-locked,
+   world-locked or head-lazy, at its own depth, composited by EDVR. Interaction
+   maps a cursor or pointer onto the placed surfaces for inventory and radial
+   menus. Placement choices are Sean's call after stage 2.
+
+The machinery to composite a 2D layer into the eyes already exists (the UI
+layer path, `ui_layer_math.h:8-13`, `kScreen` family at :583-587). The
+handoff's runtime comparison saw the HUD resources still produced in mode 3,
+with their usual PS-SRV composite consumers absent.
+
+Fallback if stage 1 finds that the game skips the HUD render entirely in mode
+3: find what skips it, starting at 0x28540B0 (mode 3..6 AND settings+0x2AE0==1
 predicate, no direct callers).
+
+### W6 — body and view
+
+Sean: show a full body like Explorer Cam's, and damp the view. F1's census
+shows the third-person body exists in native mode with zero view masks (the
+F0 flight, 10:50:56: the local AMC with 15 of 54 parts instanced, including
+EVASuit_Torso, EVASuit_Arms and EVASuit_Legs). The neck census (F1) says
+whether the view rides the animated neck. The head joint and the camera are
+not yet in one space, so the census logs both with their spaces named.
+Plan: a ~200 ms damper on the view that follows the neck bob, not body yaw.
+Read-only until W6 is designed.
 
 ## Proposed first flight F0 (one flight, several hypotheses)
 
@@ -168,3 +200,14 @@ mode and its context); W3 step 1-2 (dump comparison, offline).
   be the setter's (image base + 0x52E9608), and compares owner+0x60 with the
   selector by address only (d4875a12). Every setter line now shows `sel`, `vt`,
   `owner` and `owner_back`, so a refusal shows which part failed.
+- **2026-10-13, F0 FLOWN OK (Epic, log edvr_gfx_20261013_104913.log, build
+  v0.19.1-27-g88bba7b0).** From 10:50:56 the game's `incoming=6 effective=4
+  source_after=4 admitted=yes owner_back=yes` was substituted every frame.
+  Sean: full native stereo on foot; he can interact, open menus and talk to
+  NPCs. NO HUD. The body shows arms and legs but no torso. Key off at 10:53:54,
+  and cinema is back by 10:53:59 (the world route owns the frame). While
+  substituted the game re-requested 6 about once a frame (14273 setter lines in
+  three minutes, 4 MB). Gate counters at 10:54:06 read frames=16461
+  world_route=1838 ui_layer=545 foot_split=28708 deferred_pacing=0
+  panel_shape=26663 transition_flash=629. They are contaminated: the flag stayed
+  set after the key went off (a forwarded 6 did not clear it). Fixed in F1.
