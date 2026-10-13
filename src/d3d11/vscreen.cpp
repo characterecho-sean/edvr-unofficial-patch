@@ -50,6 +50,7 @@
 #include "temporal_pass.h"     // and the temporal pass: warm-up, the camera capture, totals
 #include "glitch_frame.h"
 #include "explorer_cam.h"        // Explorer Cam (hotkey.explorer_cam): the free camera placed at the commander's head and locked (the Explorer Cam redesign)
+#include "native_on_foot.h"      // the HUD issuer probe (F3): nativeOnFootHudProbe, one compare per draw
 #include "transition_flash_eye_base.h"
 #include "holo_fix.h"
 #include "target_sharp.h"
@@ -1793,6 +1794,9 @@ void pixelProbeAfterEye(State* s, ID3D11DeviceContext* self, uint32_t count,
 // to them.
 DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
                                UINT instances, const DrawArgs& args) {
+    // F3 (native on foot): the on-foot HUD issuers' stacks. Ahead of everything else, so every game draw of the four VR-path thunks is
+    // seen; the EDVR-internal reissues return before this call. One shader-hash load and two compares, the rest only on a match.
+    nativeOnFootHudProbe(bindingShaderHash(BindSlot::Vs));
     State* s = g_state;
     // A draw on somebody else's context is not our panel and not an eye draw.
     // This one early return covers all four draw thunks, and it covers them

@@ -27,12 +27,14 @@
 #include "explorer_cam_fade_core.h"
 #include "explorer_cam_follow_core.h"
 #include "explorer_cam_settings_core.h"
+#include "native_on_foot.h"   // nativeOnFootActive: the F3 avatar census collects only while native stereo is on foot
 
 #include <windows.h>
 #include <intrin.h>
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
@@ -1526,6 +1528,46 @@ bool neckCensusCopy(NeckCensusReading* out) {
     return g_neck.stamp != 0;
 }
 
+// ---- Native on-foot F3 census (log only): the AMCs the fade hook sees while native stereo is on foot, one window at a time ----------
+// The hook (game's submit job) notes each distinct AMC once per window and reads its origin there, while the object is live. The frame
+// thread takes the window (avatarCensusTake) and reads the parts from its own side under SEH; a freed AMC faults inside the guard.
+constexpr size_t kFpSlots = 8;
+struct FpSlot {
+    uintptr_t amc = 0;               // zero: free
+    float origin[3] = {};
+    bool originOk = false;           // false while the origin is pending or was not readable
+};
+std::mutex g_fpMutex;                // guards the slots and the drop count; never held across a game call
+FpSlot g_fpSlots[kFpSlots];
+uint32_t g_fpDropped = 0;
+
+__declspec(noinline) void avatarCensusNote(void* amcPtr) noexcept {
+    const uintptr_t a = reinterpret_cast<uintptr_t>(amcPtr);
+    {
+        std::lock_guard<std::mutex> lock(g_fpMutex);
+        size_t freeSlot = kFpSlots;
+        for (size_t i = 0; i < kFpSlots; ++i) {
+            if (g_fpSlots[i].amc == a) return;   // already in this window
+            if (g_fpSlots[i].amc == 0 && freeSlot == kFpSlots) freeSlot = i;
+        }
+        if (freeSlot == kFpSlots) {
+            ++g_fpDropped;
+            return;
+        }
+        g_fpSlots[freeSlot].amc = a;             // reserved; the origin follows below
+        g_fpSlots[freeSlot].originOk = false;
+    }
+    float origin[3] = {};
+    const int got = sehAmcOrigin(static_cast<const uint8_t*>(amcPtr), origin);   // the game's transform call: the object is live here
+    std::lock_guard<std::mutex> lock(g_fpMutex);
+    for (size_t i = 0; i < kFpSlots; ++i) {
+        if (g_fpSlots[i].amc != a) continue;
+        g_fpSlots[i].originOk = got > 0;
+        std::memcpy(g_fpSlots[i].origin, origin, sizeof(origin));
+        break;
+    }
+}
+
 __declspec(noinline) uint64_t __fastcall avatarFadeHooked(void* a, void* b, void* c, void* d) noexcept {
     const auto forward = reinterpret_cast<ForwardFn>(g_forward[kHkFade].load(std::memory_order_acquire));
     if (!forward) return 0;
@@ -1534,6 +1576,7 @@ __declspec(noinline) uint64_t __fastcall avatarFadeHooked(void* a, void* b, void
         headHideStep(a);
         neckCensusStep();
     }
+    if (a && nativeOnFootActive()) avatarCensusNote(a);
     return result;
 }
 
@@ -2706,6 +2749,104 @@ bool avatarFadeModeRead(int32_t* mode) {
     if (!base || !mode) return false;
     return sehReadFadeMode(base + ecm::kFadeModeRva, mode);
 }
+// The F3 census row, read under SEH: the mode, the instanced parts with their four view masks, and whether an EVASuit arms, hands or legs
+// part is instanced (parts 28, 29 and 30 of kPartNames). Read-only.
+__declspec(noinline) bool sehReadAvatarRow(const uint8_t* amc, AvatarCensusRow* row) noexcept {
+    __try {
+        uint64_t params = 0;
+        std::memcpy(&params, amc + ecm::kOffAmcParams, 8);
+        row->mode = -1;
+        if (plausiblePointer(params)) std::memcpy(&row->mode, reinterpret_cast<const uint8_t*>(params) + ecm::kOffParamsMode, 4);
+        uint32_t n = 0;
+        bool eva = false;
+        for (uint32_t idx = 0; idx < ecm::kPartCount; ++idx) {
+            const uint32_t at = idx * ecm::kPartStride;
+            uint64_t inst[ecm::kPartVariants] = {}, mask[ecm::kPartVariants] = {};
+            uint32_t bits = 0;
+            for (uint32_t k = 0; k < ecm::kPartVariants; ++k) {
+                std::memcpy(&inst[k], amc + ecm::kOffAmcInstances + at + 8 * k, 8);
+                std::memcpy(&mask[k], amc + ecm::kOffAmcMasks + at + 8 * k, 8);
+                if (inst[k] != 0) bits |= 1u << k;
+            }
+            if (bits == 0) continue;
+            AvatarCensusPart& p = row->part[n++];
+            p.name = ecm::kPartNames[idx];
+            p.idx = idx;
+            p.variants = bits;
+            std::memcpy(p.masks, mask, sizeof(p.masks));
+            if (idx == 28 || idx == 29 || idx == 30) eva = true;
+        }
+        row->parts = n;
+        row->evaSet = eva;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+uint32_t avatarCensusTake(AvatarCensusRow* out, uint32_t cap, uint32_t* seen, uint32_t* dropped) {
+    FpSlot snap[kFpSlots];
+    uint32_t drop = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_fpMutex);
+        std::memcpy(snap, g_fpSlots, sizeof(snap));
+        for (FpSlot& s : g_fpSlots) s = FpSlot{};
+        drop = g_fpDropped;
+        g_fpDropped = 0;
+    }
+    uint32_t distinct = 0;
+    for (const FpSlot& s : snap)
+        if (s.amc) ++distinct;
+    if (seen) *seen = distinct;
+    if (dropped) *dropped = drop;
+    if (!out || cap == 0) return 0;
+    // The local avatar's origin, when the latched third-person AMC was in this window and its origin was read.
+    const uint64_t local = g_amcLocal.load(std::memory_order_acquire);
+    bool haveLocal = false;
+    float lo[3] = {};
+    for (const FpSlot& s : snap) {
+        if (s.amc && s.amc == local && s.originOk) {
+            haveLocal = true;
+            std::memcpy(lo, s.origin, sizeof(lo));
+        }
+    }
+    AvatarCensusRow cand[kFpSlots];
+    uint32_t n = 0;
+    for (const FpSlot& s : snap) {
+        if (!s.amc) continue;
+        AvatarCensusRow& r = cand[n];
+        r = AvatarCensusRow{};
+        r.amc = s.amc;
+        if (haveLocal && s.originOk) {
+            const float dx = s.origin[0] - lo[0], dy = s.origin[1] - lo[1], dz = s.origin[2] - lo[2];
+            r.dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+            r.distOk = true;
+            if (r.dist > 8.0f) continue;   // an NPC far away
+        }
+        if (!sehReadAvatarRow(reinterpret_cast<const uint8_t*>(s.amc), &r)) r.parts = 0;   // a faulting read keeps its row, with no parts
+        ++n;
+    }
+    // Insertion sort, at most eight rows: the EVASuit arms/hands/legs first, then the nearest to the local avatar, then the rest.
+    for (uint32_t i = 1; i < n; ++i) {
+        for (uint32_t j = i; j > 0; --j) {
+            const AvatarCensusRow& a = cand[j - 1];
+            const AvatarCensusRow& b = cand[j];
+            bool bFirst = false;
+            if (a.evaSet != b.evaSet) bFirst = b.evaSet;
+            else if (a.distOk != b.distOk) bFirst = b.distOk;
+            else if (a.distOk && a.dist != b.dist) bFirst = b.dist < a.dist;
+            else bFirst = b.amc < a.amc;
+            if (!bFirst) break;
+            const AvatarCensusRow tmp = cand[j - 1];
+            cand[j - 1] = cand[j];
+            cand[j] = tmp;
+        }
+    }
+    const uint32_t m = n < cap ? n : cap;
+    for (uint32_t i = 0; i < m; ++i) out[i] = cand[i];
+    return m;
+}
+
 void explorerCamNativeBody(bool wanted, bool body, const char* reason) {
     g_nativeWant.store(wanted, std::memory_order_release);
     g_nativeBody.store(body, std::memory_order_release);

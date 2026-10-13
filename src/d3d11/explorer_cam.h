@@ -76,6 +76,28 @@ uint32_t localAvatarParts(LocalAvatarPart* out, uint32_t cap, uint64_t* amc);
 // The dither-fade mode global (-1 auto, 0 off), read under SEH. False when unreadable.
 bool avatarFadeModeRead(int32_t* mode);
 
+// Native on-foot F3 census (log only, read-only): every distinct avatar model component (AMC) the avatar-fade hook saw while native stereo
+// was on foot, collected for one window and taken by the frame thread. An AMC whose origin is more than 8 m from the latched local
+// avatar's is left out (an NPC far away); the rest are ranked by "has EVASuit_Arms, Hands or Legs" and then by distance to the local one.
+struct AvatarCensusPart {
+    const char* name = nullptr;
+    uint32_t idx = 0;
+    uint32_t variants = 0;          // bit k: instance k is set
+    uint64_t masks[4] = {};         // the view mask of each instance (raw)
+};
+struct AvatarCensusRow {
+    uint64_t amc = 0;
+    int32_t mode = -1;              // AMC creation params +0x14 (3 = third-person)
+    uint32_t parts = 0;             // parts with at least one instance
+    float dist = 0.0f;
+    bool distOk = false;            // both origins were read
+    bool evaSet = false;            // instances of EVASuit_Arms, EVASuit_Hands or EVASuit_Legs
+    AvatarCensusPart part[54];
+};
+// Takes the window: writes up to `cap` rows, `*seen` (distinct AMCs collected, before the distance filter) and `*dropped` (AMCs that did not
+// fit the eight slots). Clears the window. Returns the number of rows written.
+uint32_t avatarCensusTake(AvatarCensusRow* out, uint32_t cap, uint32_t* seen, uint32_t* dropped);
+
 // Native on-foot F2 body (frame thread; native_on_foot.cpp calls it once a frame). `wanted`: the native key is on, so the head-hiding hooks are
 // installed from launch (the capture must be in place before the first on-foot avatar attaches), whatever Explorer Cam's own key says. `body`:
 // native stereo is on foot now, so the fade global goes to 0 (its own guard; Explorer Cam's claim wins) and the local third-person avatar's

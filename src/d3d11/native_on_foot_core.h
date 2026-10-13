@@ -117,5 +117,12 @@ inline bool identityMatches(uint32_t timestamp, uint32_t imageSize) {
     return timestamp == ecm::kExpectedTimestamp && imageSize == ecm::kExpectedImageSize;
 }
 
+// The on-foot HUD issuers (F3 stack probe; flat_projection_recipes.h:154-155 names both as vertex-projected UI). Drawn into the flat frame
+// in cinema, with zero draws in native stereo on foot (F2). The index is the table position, or -1 for any other vertex shader.
+constexpr uint64_t kHudIssuerVs[2] = {0x46546443FD3C3F88ull, 0x95D01BA609BF7500ull};
+inline int hudIssuerIndex(uint64_t vs) {
+    return vs == kHudIssuerVs[0] ? 0 : vs == kHudIssuerVs[1] ? 1 : -1;
+}
+
 }  // namespace nofoot
 }  // namespace edvr

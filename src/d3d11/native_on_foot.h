@@ -29,6 +29,8 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "native_on_foot_core.h"   // nofoot::hudIssuerIndex: the on-foot HUD issuers' vertex shaders
+
 namespace edvr {
 
 enum class NativeOnFootGate : uint8_t {
@@ -61,5 +63,14 @@ void nativeOnFootFrameBoundary(uint32_t frameNo);
 
 // Shutdown (device_hook.cpp, before explorerCamShutdown): puts the gate byte back to 1 if EDVR holds it at 0. Frame-thread context.
 void nativeOnFootShutdown();
+
+// THE HUD ISSUER PROBE (F3, log only, always on, any key state). beginPanelOverride (vscreen.cpp) passes every VR-path draw's bound
+// vertex shader here: the common case is one load and two compares. A match captures the call stack (the draw thread), at most once per
+// vertex shader per 10 s, into a ring of eight; the frame boundary resolves the frames and logs them. Not called on the flat profile.
+void nativeOnFootHudCapture(int index, uint64_t vs);   // native_on_foot.cpp
+inline void nativeOnFootHudProbe(uint64_t vs) {
+    const int index = nofoot::hudIssuerIndex(vs);
+    if (index >= 0) nativeOnFootHudCapture(index, vs);
+}
 
 }  // namespace edvr

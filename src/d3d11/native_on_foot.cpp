@@ -5,6 +5,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <cwchar>
 #include <mutex>
 #include <string>
 
@@ -12,7 +13,8 @@
 #include "../common/config.h"
 #include "../common/log.h"
 #include "../common/runtime_profile.h"
-#include "explorer_cam.h"   // localAvatarParts, avatarFadeModeRead: the avatar census (F1)
+#include "binding_shadow.h"   // bindingShaderHash: the HUD issuer probe's pixel shader
+#include "explorer_cam.h"   // localAvatarParts, avatarFadeModeRead, avatarCensusTake: the avatar census (F1, F3)
 #include "journal_watch.h"
 #include "native_on_foot_core.h"
 
@@ -451,8 +453,8 @@ void drainEvents() {
 }
 
 // ---- the gate byte (F2, method gate; frame thread) ---------------------------------------------------------------------------------
-// The requester at 0x28873C0 keeps the base HMD mode only while the byte at EliteDangerous64.exe+0x5E82B3E is non-zero (verified,
-// build 332841; the design doc). With the byte at 0 it falls through and the game requests HMD itself, so nothing is substituted in
+// The requester at 0x28873C0 keeps the cinema partner mode only while the byte at EliteDangerous64.exe+0x5E82B3E is non-zero (verified,
+// build 332841; the design doc). At 0 it falls back to the base HMD mode, so the game requests HMD itself and nothing is substituted in
 // the setter. The byte is written only after the identity check passes and only when it reads 1, and it is put back to 1 when the want
 // ends. A refusal is logged once per reason.
 constexpr uintptr_t kGateByteRva = 0x5E82B3E;
@@ -608,13 +610,161 @@ void gateLine(uint64_t nowMs) {
                     static_cast<unsigned long long>(v[6]));
 }
 
+// ---- the HUD issuer stack probe (F3, log only) ---------------------------------------------------------------------------------------
+// The capture runs on the draw thread (nativeOnFootHudCapture, below) for a matching vertex shader, at most once per shader per 10 s; the
+// frame thread resolves the frames and logs them. The ring holds eight records; a full ring drops the newest and counts it.
+constexpr size_t kHudRing = 8;
+constexpr size_t kHudFrames = 32;
+constexpr uint64_t kHudIntervalMs = 10000;
+struct HudStackRecord {
+    uint64_t vs = 0, ps = 0;
+    uint32_t n = 0;
+    uintptr_t frames[kHudFrames] = {};
+};
+std::mutex g_hudMutex;                                   // the ring and its counters; taken only by a capture the rate limit lets through
+HudStackRecord g_hudRing[kHudRing];
+uint64_t g_hudWritten = 0, g_hudRead = 0, g_hudDropped = 0;   // guarded by g_hudMutex
+std::atomic<uint64_t> g_hudLastMs[2]{};                  // per table index; zero = never captured
+bool g_hudArmedNoted = false;                            // frame thread only
+
+// One frame as text: "+0xRVA" in EliteDangerous64.exe, "d3d11+0xRVA" in EDVR's proxy, "edvr+0xRVA" in openvr_api.dll (EDVR's), else "?".
+void hudFrameText(uintptr_t address, char* out, size_t cap) {
+    HMODULE mod = nullptr;
+    if (!address || !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                        reinterpret_cast<LPCWSTR>(address), &mod) || !mod) {
+        std::snprintf(out, cap, "?");
+        return;
+    }
+    const uintptr_t rva = address - reinterpret_cast<uintptr_t>(mod);
+    if (mod == GetModuleHandleW(nullptr)) {
+        std::snprintf(out, cap, "+0x%llX", static_cast<unsigned long long>(rva));
+        return;
+    }
+    wchar_t path[MAX_PATH] = {};
+    GetModuleFileNameW(mod, path, MAX_PATH);
+    const wchar_t* leaf = std::wcsrchr(path, L'\\');
+    leaf = leaf ? leaf + 1 : path;
+    if (_wcsnicmp(leaf, L"d3d11", 5) == 0) std::snprintf(out, cap, "d3d11+0x%llX", static_cast<unsigned long long>(rva));
+    else if (_wcsnicmp(leaf, L"openvr_api", 10) == 0) std::snprintf(out, cap, "edvr+0x%llX", static_cast<unsigned long long>(rva));
+    else std::snprintf(out, cap, "?");
+}
+
+void hudStackDrain() {
+    HudStackRecord local[kHudRing];
+    size_t n = 0;
+    uint64_t dropped = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_hudMutex);
+        while (g_hudRead < g_hudWritten && n < kHudRing) local[n++] = g_hudRing[(g_hudRead++) % kHudRing];
+        dropped = g_hudDropped;
+        g_hudDropped = 0;
+    }
+    if (dropped) {
+        Log::get().note("native on foot hud stack: %llu capture(s) dropped (the ring of %zu was full)", static_cast<unsigned long long>(dropped), kHudRing);
+    }
+    for (size_t i = 0; i < n; ++i) {
+        std::string text;
+        for (uint32_t f = 0; f < local[i].n && f < kHudFrames; ++f) {
+            char item[40];
+            hudFrameText(local[i].frames[f], item, sizeof(item));
+            if (!text.empty()) text += ' ';
+            text += item;
+        }
+        Log::get().note("native on foot hud stack: vs=0x%016llX ps=0x%016llX frames: %s", static_cast<unsigned long long>(local[i].vs),
+                        static_cast<unsigned long long>(local[i].ps), text.c_str());
+    }
+}
+
+// ---- the avatar census (F3, log only) -----------------------------------------------------------------------------------------------
+// Every 5 s while native stereo is on foot: the AMCs the fade hook collected in the window (explorer_cam.cpp), at most six, one line each
+// (a second line for the parts that do not fit one).
+constexpr uint32_t kFpRows = 6;
+uint64_t g_lastFpMs = 0;   // frame thread only
+
+void logAvatarRow(const AvatarCensusRow& r) {
+    char dist[24];
+    if (r.distOk) std::snprintf(dist, sizeof(dist), "%.2fm", static_cast<double>(r.dist));
+    else std::snprintf(dist, sizeof(dist), "n/a");
+    char head[160];
+    std::snprintf(head, sizeof(head), "native on foot avatars: amc=0x%llX mode=%d parts=%u dist=%s",
+                  static_cast<unsigned long long>(r.amc), r.mode, r.parts, dist);
+    if (r.parts == 0) {
+        Log::get().note("%s []", head);
+        return;
+    }
+    uint32_t i = 0;
+    bool first = true;
+    while (i < r.parts) {
+        std::string body;
+        for (; i < r.parts; ++i) {
+            const AvatarCensusPart& p = r.part[i];
+            char item[160];
+            std::snprintf(item, sizeof(item), "%s 0x%llX,0x%llX,0x%llX,0x%llX", p.name,
+                          static_cast<unsigned long long>(p.masks[0]), static_cast<unsigned long long>(p.masks[1]),
+                          static_cast<unsigned long long>(p.masks[2]), static_cast<unsigned long long>(p.masks[3]));
+            if (!body.empty() && body.size() + 1 + std::strlen(item) > 800) break;   // the next line takes this part
+            if (!body.empty()) body += ' ';
+            body += item;
+        }
+        if (first) Log::get().note("%s [%s]", head, body.c_str());
+        else Log::get().note("native on foot avatars: amc=0x%llX (cont.) [%s]", static_cast<unsigned long long>(r.amc), body.c_str());
+        first = false;
+    }
+}
+
+void avatarCensusLine(uint64_t nowMs) {
+    if (nowMs - g_lastFpMs < 5000) return;
+    g_lastFpMs = nowMs;
+    static AvatarCensusRow rows[kFpRows];   // about 18 KB, frame thread only
+    uint32_t seen = 0, dropped = 0;
+    const uint32_t n = avatarCensusTake(rows, kFpRows, &seen, &dropped);   // clears the window even when the key is off
+    if (!nativeOnFootActive()) return;
+    if (dropped) Log::get().note("native on foot avatars: %u AMC(s) not collected in the last 5 s (eight slots were full)", dropped);
+    if (n == 0) {
+        Log::get().note("native on foot avatars: none kept in the last 5 s (seen=%u)", seen);
+        return;
+    }
+    for (uint32_t i = 0; i < n; ++i) logAvatarRow(rows[i]);
+}
+
 }  // namespace
+
+// The probe's capture (declared in native_on_foot.h, called from beginPanelOverride on the draw thread for the two HUD issuers). One load,
+// one clock read and a CAS per match; the stack is captured outside the lock.
+void nativeOnFootHudCapture(int index, uint64_t vs) {
+    if (index < 0 || index >= 2) return;
+    const uint64_t now = GetTickCount64();
+    uint64_t last = g_hudLastMs[index].load(std::memory_order_relaxed);
+    if (last != 0 && now - last < kHudIntervalMs) return;
+    if (!g_hudLastMs[index].compare_exchange_strong(last, now, std::memory_order_relaxed)) return;
+    void* stack[kHudFrames] = {};
+    const USHORT got = CaptureStackBackTrace(0, static_cast<ULONG>(kHudFrames), stack, nullptr);
+    HudStackRecord rec;
+    rec.vs = vs;
+    rec.ps = bindingShaderHash(BindSlot::Ps);
+    rec.n = got;
+    for (uint32_t i = 0; i < got && i < kHudFrames; ++i) rec.frames[i] = reinterpret_cast<uintptr_t>(stack[i]);
+    std::lock_guard<std::mutex> lock(g_hudMutex);
+    if (g_hudWritten - g_hudRead >= kHudRing) {
+        ++g_hudDropped;
+        return;
+    }
+    g_hudRing[g_hudWritten % kHudRing] = rec;
+    ++g_hudWritten;
+}
 
 void nativeOnFootFrameBoundary(uint32_t frameNo) {
     (void)frameNo;
     if (g_install == InstallState::NotTried) installOnce();
     if (g_install == InstallState::Armed) readKey();
     drainEvents();
+    if (!g_hudArmedNoted) {
+        g_hudArmedNoted = true;
+        Log::get().note("native on foot hud stack: probe armed on the VR draw path for vs=0x%016llX and vs=0x%016llX (one capture per shader per "
+                        "10 s; the flat profile is not probed)",
+                        static_cast<unsigned long long>(nofoot::kHudIssuerVs[0]), static_cast<unsigned long long>(nofoot::kHudIssuerVs[1]));
+    }
+    hudStackDrain();
     const uint64_t now = GetTickCount64();
     const bool keyOn = g_keyOn.load(std::memory_order_relaxed);
     const bool gate = g_methodGate.load(std::memory_order_relaxed);
@@ -635,6 +785,7 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
     explorerCamNativeBody(keyOn, nativeOnFootActive(), bodyWhy);
     gateLine(now);
     avatarLine(now);
+    avatarCensusLine(now);
     neckLine(now);
 }
 
