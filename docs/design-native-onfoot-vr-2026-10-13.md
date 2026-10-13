@@ -2,19 +2,15 @@
 
 ## Status
 
-- **State:** F0 REBUILT 84d0f3d4 (relay fix; 1535fb59 never installed on
-  Epic: CodeHook refused the five-byte jump, 2 GB), NOT FLOWN. Ruled out
-  nothing. Branch
-  `claude/native-onfoot-vr-completion-219ffa`; stays off main until ready to
-  ship (Sean, 2026-10-13).
+- **State:** F0 REBUILT 84d0f3d4 (relay fix; 1535fb59 was refused on Epic at
+  2 GB), NOT FLOWN. Ruled out nothing. Branch
+  `claude/native-onfoot-vr-completion-219ffa`, off main until ready (Sean).
 - **Origin:** a user's handoff (not in the repo). They hooked Elite's
   render-mode setter, swapped an incoming 5 (Cinema) for 3 (HMD) while
   disembarking, and got native stereo on foot, interactive, not the external
   camera. Missing: the normal HUD, top radar, left panel and inventory. A
   later experiment of theirs restored the reticle and weapon label.
-- **Build:** both of Sean's installs (Frontier, Epic) hash to the handoff's
-  exe, SHA256 `e6be8bbe…8e988`. That is the same build Explorer Cam pins
-  (332841).
+- **Build:** Sean's installs hash to the handoff's exe (`e6be8bbe…8e988`, 332841).
 - **Verified offline (capstone, 2026-10-13):** setter = vtable 0x52E9608
   slot 5 = 0x28723C0; it writes selector+0x20 at 0x2872441; selector =
   owner+0x60, selector+0x58 = owner (ctor 0x27FBFC0); 0x2890B30 copies
@@ -41,8 +37,8 @@
   Hook: CodeHook on the setter at +0x28723C0, through a near relay (the
   five-byte jump reaches only 2 GB; the relay is placed within reach, as
   skin_entity_hook does). Prologue and vtable slot verified under SEH.
-  A refusal now quotes CodeHook's own reason. Admission: key on, incoming 5, selector frozen at the
-  first valid call, and `journalGameplay()` (LoadGame seen, no Shutdown since).
+  A refusal quotes CodeHook's reason. Admission: key on, incoming 5, selector
+  frozen at the first valid call, `journalGameplay()` (LoadGame, no Shutdown).
 - **Read after the flight, in the d3d11 log:**
   - `native on foot: installed --` or `NOT installed -- <reason>` (once, at the
     first VR frame). Refusal reasons: identity, slot, prologue, CodeHook, flat.
@@ -56,11 +52,9 @@
     bounds=... same_texture=yes|no`, once a second while frames are submitted.
     Stereo eyes read as two eye-sized textures; the cinema panel as one shared
     16:9 texture (`same_texture=yes`).
-- **Install:** Frontier holds the befe91c1 build (pre-relay; its hook status
-  on Frontier is not yet read from a log). 84d0f3d4 is NOT
-  installed: the game was running (pid 26864), so the install was stopped
-  rather than forced. The promotion build is v0.19.1-21-g1327d891 (`--dll-only`
-  passed). `edvr.ini` was not touched.
+- **Install:** Frontier holds befe91c1 (pre-relay). 84d0f3d4 is NOT installed:
+  the game was running (pid 26864), so it stopped rather than force. Promotion
+  build v0.19.1-21-g1327d891 passed. `edvr.ini` untouched.
 - **Next:** Sean flies F0 (the flight below). Nothing builds before that.
 
 ## What "finished" means
