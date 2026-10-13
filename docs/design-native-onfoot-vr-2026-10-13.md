@@ -2,62 +2,56 @@
 
 ## Status
 
-- **State:** F0 FLOWN OK on Epic (10:50, build 27-g88bba7b0; journal below).
-  F1 BUILT 507940d3 (log only: repeat collapse, caller, flag rule, avatar and
-  neck census), NOT FLOWN. Branch `claude/native-onfoot-vr-completion-219ffa`,
-  off main until ready (Sean).
+- **State:** F0 FLOWN OK (Epic, 10:50). F1 FLOWN (Epic; results below). F2 BUILT
+  d1e5ba54 (code, full build green), NOT FLOWN. Branch `claude/native-onfoot-vr-completion-219ffa`, off main until
+  ready (Sean). Not pushed.
 - **Origin:** a user's handoff. A Cinema-to-HMD swap on disembark gave native
   stereo on foot; the HUD, radar, left panel and inventory were missing.
-- **Build:** Sean's installs hash to the handoff's exe (`e6be8bbe…8e988`, 332841).
-- **Verified offline:** setter = vtable 0x52E9608 slot 5 = 0x28723C0. The
-  selector is embedded in its owner at +0x60; its vtable is its first qword.
-  No direct callers; the setter is reached only through the vtable.
-- **Key finding:** every static test of the mode in the game treats 3..6 as
-  one class (`sub 3; cmp 3; ja`). Nothing reading +0x3694 tells 3 from 5. So
-  the missing HUD is not a mode branch to flip. Leading hypothesis (H1): the
-  on-foot HUD is screen-space, built for the flat frame. Cinema mode composites
-  it into the 2D image; HMD mode has no on-foot path that places it in the
-  eyes. Finishing the feature means **EDVR places the HUD itself**.
-- **Open hypotheses:** H1 (above); H2: the only 3→5 / 4→6 remap is in
-  0x28873C0 (2887ABC..2887ACB), from a vcall on [owner+0x1188]+0x18. This may
-  be the natural "this context wants cinema" decision, and a cleaner hook point
-  than the setter (UNVERIFIED); H3: EDVR's on-foot gates key on the journal's
-  OnFoot flag and will misfire on stereo eyes (world route, UI layer,
-  footSplit, weapon pacing). H4 (F1): the game re-requests 6 about once a
-  frame while substituted, so some on-foot state machine never sees cinema
-  applied; the HUD may be gated on that. The F1 caller RVA locates the requester.
+- **Build:** Sean's installs hash to the handoff's exe (332841).
+- **Verified offline:** the setter is vtable 0x52E9608 slot 5 = 0x28723C0. The
+  selector is embedded in its owner at +0x60. No direct callers.
+- **Requester gate (build 332841):** in 0x28873C0 the base HMD mode is kept only
+  if `call [rax+0xb0]` returns non-zero AND the byte at EliteDangerous64.exe+0x5E82B3E
+  is non-zero. Otherwise 0x2887B06 re-reads the base mode and the game requests HMD
+  itself. The byte is in .data (initial 01), has one reader (0x2887AF9) and no
+  writer. Its neighbours 0x5E82B3C and 0x5E82B3F have other readers: never write them.
+- **F1 results (Epic):** avatar view masks of the local head parts non-zero; the
+  fade global read -1 (auto) throughout, so nothing had forced the body opaque;
+  neck: the stance drop is real, the walk bob is not (pilot); RemLok on foot is a
+  different draw (confirmed by census: PS 0x99C21CEB7A699821, DrawInstanced 3 x 1,
+  no depth, PS slot 1 2016x2016).
+- **Key finding:** every static test of the mode treats 3..6 as one class, so the
+  missing HUD is not a mode branch to flip. H1 (leading): the on-foot HUD is
+  screen-space, built for the flat frame; EDVR must place it.
+- **Open hypotheses:**
+  - H1: the HUD is built for the flat frame. Discriminator: the HUD draws under
+    gate with the requester on HMD (F2).
+  - H4: the game re-requests 6 about once a frame while substituted, so an on-foot
+    state machine never sees cinema applied. Discriminator under gate: the setter
+    stops receiving 6 each frame and the gate counters move.
+  - H5 (F2): the on-foot visor shares its PS hash with the HDR-to-display pass
+    (eye_tonemap_snapshot.h). Discriminator: the on-foot count is exactly 2 a frame,
+    and the picture is intact.
 - **Ruled out:** the cinema request is always 5 (see the end of this doc).
-- **Temporary keys:** `fix.native_on_foot` (on/off, default off, VR only),
-  added by F0 (1535fb59) on the Fixes page. Removal is proposed, quoted, when
-  W1 ships as behaviour; nothing removes it before then.
-- **F0 instruments (1535fb59):** `src\d3d11\native_on_foot.cpp` (the setter
-  hook), `native_on_foot_core.h` (admission), `src\openxr\submit_shape.h`.
-  Hook: CodeHook on the setter at +0x28723C0, through a near relay (the
-  five-byte jump reaches only 2 GB; the relay is placed within reach, as
-  skin_entity_hook does). Prologue and vtable slot verified under SEH.
-  A refusal quotes CodeHook's reason. Admission: key on, incoming 5 or 6
-  (forwarded as its HMD partner, 3 or 4), selector frozen at the first valid
-  call, `journalGameplay()` (LoadGame, no Shutdown).
-- **Read after the flight, in the d3d11 log:**
-  - `native on foot: installed --` or `NOT installed -- <reason>` (once, at the
-    first VR frame). Refusal reasons: identity, slot, prologue, CodeHook, flat.
-  - `native on foot: incoming=N effective=N source_after=N key=on|off
-    admitted=yes|no reason=... onfoot=... seated=... t=ms`: one per setter
-    call, key off or on. A natural incoming 3 or 4 is `admitted=no reason=not_cinema`.
-  - `native on foot gates: frames=N world_route=N ui_layer=N foot_split=N
-    deferred_pacing=N panel_shape=N transition_flash=N` every 5 s while native
-    stereo is on. Cumulative since launch.
-  - F1: `native on foot: repeated N x (...) over T ms` (repeats collapsed; every
-    setter line now ends `caller=+0x<RVA>`); `native on foot avatar: part=...
-    masks=...` every 5 s (the body's view masks, the fade global); `native on
-    foot neck: head=... cam=... d=...` once a second (two spaces, not a camera).
-  - In the openvr runtime trace: `submit shape: left=WxH bounds=... right=WxH
-    bounds=... same_texture=yes|no`, once a second while frames are submitted.
-    Stereo eyes read as two eye-sized textures; the cinema panel as one shared
-    16:9 texture (`same_texture=yes`).
-- **Install:** Epic only, from now on (Sean: Frontier carries another feature
-  test). `edvr.ini` is never touched.
-- **Next:** Sean flies F0 (the flight below). Nothing builds before that.
+- **Temporary keys (both go when the arc picks one):** `fix.native_on_foot`
+  (on/off, default off, VR, F8 Fixes page, live) and
+  `advanced.native_on_foot_method` (swap | gate, default gate, live, [advanced],
+  developer tier: no Fixes row).
+- **F2 changes (d1e5ba54):** gate: the setter never substitutes; EDVR holds the byte
+  at 0 while the key is on and a game session is live (identity and byte checked
+  first). Native body: while native stereo is on foot, the fade global goes -1 to 0
+  and the local head parts are zeroed, through Explorer Cam's code and its own
+  guard. RemLok: the on-foot visor signature, in native stereo only, own count.
+- **F2 log lines:** `native on foot: advanced.native_on_foot_method is gate|swap`;
+  `native on foot: gate byte EliteDangerous64.exe+0x5E82B3E 1 -> 0 (method gate)`,
+  `0 -> 1 (restored: <why>)`, or `NOT written -- <why>`; setter lines read
+  `reason=method_gate` under gate; `native on foot body: on (fade mode -1 -> 0, head
+  parts hidden)` / `off (fade restored -1: <why>)`; `remlok lines on foot: N overlay
+  draw(s) matched ...`. The F1 census lines are unchanged.
+- **Install:** Epic only (Sean: Frontier carries another feature test). `edvr.ini`
+  is not touched unless `--ini` says so.
+- **Next:** Sean flies F2 on Epic: key on, method gate, disembark, walk, open the
+  menu and the map, board, then method swap for the A/B.
 
 ## What "finished" means
 
@@ -211,3 +205,22 @@ mode and its context); W3 step 1-2 (dump comparison, offline).
   world_route=1838 ui_layer=545 foot_split=28708 deferred_pacing=0
   panel_shape=26663 transition_flash=629. They are contaminated: the flag stayed
   set after the key went off (a forwarded 6 did not clear it). Fixed in F1.
+
+- **2026-10-13, F1 FLOWN (Epic). Correction to the F1 notes:** the cinema NUMLOCK
+  census held only 2 draws a frame, because cinema has no eye-sized targets. The
+  cinema baseline therefore needs the INSERT eye dump, which arms an offscreen
+  census.
+- **2026-10-13, F2 BUILT d1e5ba54, NOT FLOWN.** Three parts, as in Status: the
+  method key with the gate byte (identity checked, byte must read 1, restored on
+  every way out), the native body (Explorer Cam's fade and head-part code, its own
+  fade guard, Explorer Cam's claim wins; the head hooks are wanted from launch
+  while the key is on), and the on-foot RemLok matcher (native stereo only).
+  Decisions the maintainer should see: (1) `advanced.native_on_foot_method` is in
+  [advanced], so it reaches the developer tier only, not the F8 Fixes page; moving
+  it to [fix] is one line, if wanted. (2) Its values name the mechanism (swap,
+  gate), against the ini rule; they are a temporary A/B and were specified so.
+  (3) Unverified risk: PS 0x99C21CEB7A699821 is also the HDR-to-display pass named
+  in eye_tonemap_snapshot.h. Nothing but native stereo and the slot-1 size tells
+  the visor draw from that pass. First flight: the on-foot count should read 2 a
+  frame, and the picture should be intact with `remlok_lines = stock` as the
+  comparison.
