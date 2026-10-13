@@ -166,6 +166,10 @@ python tools\release_credits.py --self-test || exit /b 1
 python tools\flash_patch_residual.py --self-test || exit /b 1
 python tools\check_status_blocks.py --self-test || exit /b 1
 python tools\check_status_blocks.py || exit /b 1
+REM Agent material (AGENTS.md, CLAUDE.md, .agents\) is export-ignore, and no
+REM tracked text hides zero-width, bidi or tag characters.
+python tools\check_agent_material.py --self-test || exit /b 1
+python tools\check_agent_material.py || exit /b 1
 REM The fixtures of the supercruise layer rigs (tools\orbit_layer_test, tools\supercruise_census_test): the writers' encoders and readers, the census
 REM parser, every writer's --dry-run, and the three fixtures in the repo read back and held to their shape.
 python tools\layer_fixtures.py --self-test || exit /b 1

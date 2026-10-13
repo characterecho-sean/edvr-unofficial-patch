@@ -137,7 +137,7 @@ def keys_documented(duplicate_sections=None):
         return found
     with open(INI, encoding='utf-8', errors='replace') as f:
         for i, raw in enumerate(f, 1):
-            line = raw.strip().lstrip('﻿')
+            line = raw.strip().lstrip('\ufeff')
             m = re.match(r'^\[([^\]]+)\]', line)
             if m:
                 section = m.group(1).strip()
@@ -171,7 +171,7 @@ def keys_moved():
         return out
     with open(INI, encoding='utf-8', errors='replace') as f:
         for raw in f:
-            line = raw.strip().lstrip('﻿')
+            line = raw.strip().lstrip('\ufeff')
             m = re.match(r'^\[([^\]]+)\]', line)
             if m:
                 section = m.group(1).strip()
