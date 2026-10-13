@@ -29,7 +29,9 @@ CodeHook* g_hook = nullptr;
 SetterFn g_original = nullptr;                     // the trampoline: the setter as it was
 std::atomic<uintptr_t> g_frozenSelector{0};        // the first selector whose owner points back at it
 std::atomic<bool> g_keyOn{false};                  // fix.native_on_foot, as the frame thread last read it
-uintptr_t g_base = 0;                              // the game image base; set by installOnce before the hook can run
+std::atomic<bool> g_methodGate{true};              // advanced.native_on_foot_method is gate (F2); the setter substitutes only when it is swap
+std::atomic<bool> g_lastForwardedHmd{false};       // the most recent setter call forwarded an HMD mode (3 or 4): the gate method's flag reads it
+uintptr_t g_base = 0;                             // the game image base; set by installOnce before the hook can run
 
 // Frame thread only.
 enum class InstallState : uint8_t { NotTried, Armed, Refused };
@@ -38,6 +40,12 @@ bool g_cfgRead = false;
 uint32_t g_cfgGeneration = 0;
 bool g_keyLast = false;
 uint64_t g_lastGateLineMs = 0;
+bool g_methodLast = true;          // the method as last read (and logged)
+bool g_methodWasGate = true;       // the method on the previous frame boundary (a change clears the gate method's flag)
+// The gate byte (F2, method gate): EDVR holds it at 0 while the key is on and a game session is live.
+bool g_gateWritten = false;        // EDVR holds the byte at 0 and owes the game a 1 back
+std::string g_gateRefusalText;     // the reason the last refusal gave; a refusal is logged once per reason
+bool g_gateRestoreFailedNoted = false;
 
 // One record per setter call, written by the game's thread and read at the frame boundary (the hook never logs).
 struct SetterEvent {
@@ -71,6 +79,22 @@ __declspec(noinline) bool bytesMatch(uintptr_t address, const uint8_t* expected,
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
     }
+}
+
+// The one write the gate method makes: a single byte in the game's .data (writable, checked first, and SEH-guarded like every other access).
+__declspec(noinline) bool guardedWriteByte(uintptr_t address, uint8_t value) noexcept {
+    __try {
+        *reinterpret_cast<volatile uint8_t*>(address) = value;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+bool writableByte(uintptr_t address) noexcept {
+    MEMORY_BASIC_INFORMATION region{};
+    if (!VirtualQuery(reinterpret_cast<void*>(address), &region, sizeof(region))) return false;
+    if (region.State != MEM_COMMIT || (region.Protect & (PAGE_GUARD | PAGE_NOACCESS))) return false;
+    return (region.Protect & (PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) != 0;
 }
 
 // A selector is a renderer's when its owner points back at it. A bad pointer anywhere along the way is simply not one.
@@ -140,6 +164,7 @@ void __fastcall setterHooked(void* selectorPtr, uint32_t incoming) {
     }
     nofoot::Inputs in;
     in.keyOn = g_keyOn.load(std::memory_order_relaxed);
+    in.gateMethod = g_methodGate.load(std::memory_order_relaxed);
     in.incoming = incoming;
     in.selectorValid = valid;
     in.selectorFrozen = valid && frozen == selector;
@@ -154,9 +179,13 @@ void __fastcall setterHooked(void* selectorPtr, uint32_t incoming) {
     // The flag is set before the call, so a frame boundary that runs while the original is inside it sees the session.
     // A call that is not substituted ends the flag: an HMD mode (the game's own stereo), or a cinema mode the game asks for while
     // the key is off or the call was refused (the game is back on the flat screen).
-    if (ev.admitted) g_nativeOnFootActive.store(true, std::memory_order_relaxed);
-    else if (nofoot::isHmdMode(incoming) || nofoot::isCinemaMode(incoming)) g_nativeOnFootActive.store(false, std::memory_order_relaxed);
+    // Under the gate method the flag is the frame thread's to compute (nativeOnFootActive, native_on_foot.h): the setter never sets it there.
+    if (!in.gateMethod) {
+        if (ev.admitted) g_nativeOnFootActive.store(true, std::memory_order_relaxed);
+        else if (nofoot::isHmdMode(incoming) || nofoot::isCinemaMode(incoming)) g_nativeOnFootActive.store(false, std::memory_order_relaxed);
+    }
     g_original(selectorPtr, ev.effective);
+    g_lastForwardedHmd.store(nofoot::isHmdMode(ev.effective), std::memory_order_relaxed);
     uint32_t after = 0;
     ev.sourceReadOk = guardedRead(selector + nofoot::kSourceModeOffset, &after, sizeof(after));
     ev.sourceAfter = after;
@@ -302,9 +331,24 @@ void readKey() {
     g_keyOn.store(on, std::memory_order_relaxed);
     if (first || on != g_keyLast) {
         Log::get().note("native on foot: fix.native_on_foot is %s%s", on ? "on" : "off",
-                        on ? " (F0: an on-foot Cinema request is forwarded as HMD stereo while a game session is live)"
+                        on ? " (an on-foot Cinema request is answered as HMD stereo, by the method below, while a game session is live)"
                            : " (every natural mode request passes through unchanged)");
         g_keyLast = on;
+    }
+    // TEMPORARY A/B (F2): swap substitutes in the setter (F0's behaviour); gate writes one byte and lets the game's own requester ask for HMD.
+    const std::string method = cfg.getString("advanced.native_on_foot_method", "gate");
+    bool gate = true;
+    if (method == "swap") {
+        gate = false;
+    } else if (method != "gate") {
+        Log::get().note("native on foot: advanced.native_on_foot_method = %s is not swap or gate; using gate.", method.c_str());
+    }
+    g_methodGate.store(gate, std::memory_order_relaxed);
+    if (first || gate != g_methodLast) {
+        Log::get().note("native on foot: advanced.native_on_foot_method is %s (%s)", gate ? "gate" : "swap",
+                        gate ? "the setter never substitutes; one byte at EliteDangerous64.exe+0x5E82B3E is held at 0 while the key is on and a game session is live"
+                             : "the setter substitutes an on-foot Cinema request as HMD stereo, as F0 did");
+        g_methodLast = gate;
     }
 }
 
@@ -404,6 +448,66 @@ void drainEvents() {
     }
     for (size_t i = 0; i < count; ++i) noteSetterEvent(local[i]);
     if (g_run.open && g_run.repeats && GetTickCount64() - g_run.windowStartMs >= 5000) emitRepeats();
+}
+
+// ---- the gate byte (F2, method gate; frame thread) ---------------------------------------------------------------------------------
+// The requester at 0x28873C0 keeps the base HMD mode only while the byte at EliteDangerous64.exe+0x5E82B3E is non-zero (verified,
+// build 332841; the design doc). With the byte at 0 it falls through and the game requests HMD itself, so nothing is substituted in
+// the setter. The byte is written only after the identity check passes and only when it reads 1, and it is put back to 1 when the want
+// ends. A refusal is logged once per reason.
+constexpr uintptr_t kGateByteRva = 0x5E82B3E;
+
+void refuseGate(const std::string& why) {
+    if (why == g_gateRefusalText) return;   // the same reason: already said
+    g_gateRefusalText = why;
+    Log::get().note("native on foot: gate byte EliteDangerous64.exe+0x%llX NOT written -- %s. The requester is left as the game has it.",
+                    static_cast<unsigned long long>(kGateByteRva), why.c_str());
+}
+
+// `wantByte`: the byte should read 0 now. `restoreReason` (a literal) says why it is being put back.
+void gateByteTick(bool wantByte, const char* restoreReason) {
+    const uintptr_t address = g_base + kGateByteRva;
+    if (wantByte) {
+        if (g_gateWritten || g_install != InstallState::Armed) return;
+        const char* idWhy = nullptr;
+        if (!checkIdentity(g_base, &idWhy)) {
+            refuseGate(std::string("the PE identity check failed (") + idWhy + ")");
+            return;
+        }
+        uint8_t current = 0;
+        if (!guardedRead(address, &current, 1)) {
+            refuseGate("the byte could not be read");
+            return;
+        }
+        if (current != 1) {
+            char b[128];
+            std::snprintf(b, sizeof(b), "the byte reads %u, not 1, so it is someone else's and is left alone", static_cast<unsigned>(current));
+            refuseGate(b);
+            return;
+        }
+        if (!writableByte(address) || !guardedWriteByte(address, 0)) {
+            refuseGate("the byte is not writable");
+            return;
+        }
+        g_gateWritten = true;
+        g_gateRefusalText.clear();
+        Log::get().note("native on foot: gate byte EliteDangerous64.exe+0x5E82B3E 1 -> 0 (method gate)");
+        return;
+    }
+    if (!g_gateWritten) {
+        g_gateRefusalText.clear();
+        return;
+    }
+    if (!writableByte(address) || !guardedWriteByte(address, 1)) {
+        if (!g_gateRestoreFailedNoted) {
+            g_gateRestoreFailedNoted = true;
+            Log::get().note("native on foot: gate byte EliteDangerous64.exe+0x5E82B3E could not be put back to 1 (%s); retrying each frame.", restoreReason);
+        }
+        return;
+    }
+    g_gateWritten = false;
+    g_gateRestoreFailedNoted = false;
+    Log::get().note("native on foot: gate byte EliteDangerous64.exe+0x5E82B3E 0 -> 1 (restored: %s)", restoreReason);
 }
 
 // The avatar census (F1, log only): the local third-person avatar's parts and view masks, from Explorer Cam's head-hiding capture, read-only.
@@ -512,9 +616,30 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
     if (g_install == InstallState::Armed) readKey();
     drainEvents();
     const uint64_t now = GetTickCount64();
+    const bool keyOn = g_keyOn.load(std::memory_order_relaxed);
+    const bool gate = g_methodGate.load(std::memory_order_relaxed);
+    const bool session = journalGameplay();
+    // The native flag. Under the gate method it is computed here (native_on_foot.h, THE FLAG): the byte is ours, the game's last forwarded
+    // mode was HMD, and the journal says on foot. Under swap the setter sets and clears it, as F0 did.
+    if (gate) {
+        g_nativeOnFootActive.store(g_gateWritten && g_lastForwardedHmd.load(std::memory_order_relaxed) && journalOnFootKnown() && journalOnFoot(),
+                                   std::memory_order_relaxed);
+    } else if (g_methodWasGate) {
+        g_nativeOnFootActive.store(false, std::memory_order_relaxed);
+    }
+    g_methodWasGate = gate;
+    const char* byteWhy = !keyOn ? "fix.native_on_foot is off" : !gate ? "advanced.native_on_foot_method is swap" : "the game session ended";
+    gateByteTick(keyOn && gate && session, byteWhy);
+    // The body (F2): Explorer Cam's fade and head-part code runs while native stereo is on foot. Its head hooks are wanted from launch while the key is on.
+    const char* bodyWhy = !keyOn ? "fix.native_on_foot is off" : !session ? "the game session ended" : "native stereo ended (boarded or seated, or the game asked for its own mode)";
+    explorerCamNativeBody(keyOn, nativeOnFootActive(), bodyWhy);
     gateLine(now);
     avatarLine(now);
     neckLine(now);
+}
+
+void nativeOnFootShutdown() {
+    gateByteTick(false, "the game is shutting down");
 }
 
 }  // namespace edvr

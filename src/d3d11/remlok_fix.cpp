@@ -10,6 +10,7 @@
 #include "../common/frame_flag.h"
 #include "../common/log.h"
 #include "binding_shadow.h"
+#include "native_on_foot.h"   // nativeOnFootActive(): the on-foot visor signature is asked only in native stereo (F2)
 
 namespace edvr {
 
@@ -220,6 +221,26 @@ float effectiveScale() {
     return s;
 }
 
+// The on-foot visor overlay (native on foot, F2): the same shape, no depth bound, and the pixel shader the draw census read in native stereo,
+// 0x99C21CEB7A699821, with PS slot 1 the 2016x2016 eye texture (its slot 0 is not the 1024x512 overlay image). Only while native stereo is on
+// foot. Its own counter, so the log can tell it from the cockpit overlay. CAVEAT: this pixel shader hash is also the one
+// eye_tonemap_snapshot.h names for the HDR-to-display conversion. Nothing here tells that pass apart from the visor draw except the
+// native-stereo gate and the slot-1 size, so the first flight must check the on-foot count (two a frame, one per eye) and the picture
+// (docs\design-native-onfoot-vr-2026-10-13.md, F2).
+constexpr uint64_t kOnFootPs = 0x99C21CEB7A699821ull;
+constexpr uint32_t kOnFootEyeW = 2016;
+constexpr uint32_t kOnFootEyeH = 2016;
+uint64_t g_onFootMatches = 0;       // on-foot signature matches since launch (draw path only)
+uint64_t g_onFootNoted = 0;         // the count last written to the log
+uint64_t g_onFootNotedMs = 0;       // when it was last written
+
+bool onFootSignature() {
+    if (!nativeOnFootActive()) return false;
+    if (bindingShaderHash(BindSlot::Ps) != kOnFootPs) return false;
+    ResourceInfo info;
+    return bindingResolve(bindingGet(BindSlot::PsSrv1), &info) && info.isTexture2D && info.a == kOnFootEyeW && info.b == kOnFootEyeH;
+}
+
 }  // namespace
 
 RemlokAction remlokOnEyeDraw(char kind, uint32_t count, uint32_t instances) {
@@ -232,9 +253,13 @@ RemlokAction remlokOnEyeDraw(char kind, uint32_t count, uint32_t instances) {
     // triangles, which are a handful a frame.
     if (bindingGet(BindSlot::Dsv0) != nullptr) return RemlokAction::kNone;
     ResourceInfo info;
-    if (!bindingResolve(bindingGet(BindSlot::PsSrv0), &info) ||
-        !info.isTexture2D || info.a != kSrvW || info.b != kSrvH) {
-        return RemlokAction::kNone;
+    const bool cockpit = bindingResolve(bindingGet(BindSlot::PsSrv0), &info) &&
+                         info.isTexture2D && info.a == kSrvW && info.b == kSrvH;
+    // The cockpit overlay first; the on-foot visor overlay (F2) only when that does not match, and only in native stereo.
+    if (!cockpit && !onFootSignature()) return RemlokAction::kNone;
+    const bool onFoot = !cockpit;
+    if (onFoot) {
+        ++g_onFootMatches;
     }
 
     const uint32_t match = g_matchesThisFrame++;
@@ -346,7 +371,19 @@ void remlokScissorEnd(ID3D11DeviceContext* ctx) {
     }
 }
 
-void remlokFrameBoundary() { g_matchesThisFrame = 0; }
+void remlokFrameBoundary() {
+    g_matchesThisFrame = 0;
+    // The on-foot signature's count, the first time it moves and then at most every 5 s. Frame thread.
+    if (g_onFootMatches == g_onFootNoted) return;
+    const uint64_t now = GetTickCount64();
+    if (g_onFootNoted != 0 && now - g_onFootNotedMs < 5000) return;
+    g_onFootNoted = g_onFootMatches;
+    g_onFootNotedMs = now;
+    Log::get().note("remlok lines on foot: %llu overlay draw(s) matched the on-foot visor signature since launch (native stereo; PS 0x%llX, "
+                    "DrawInstanced 3 x 1, no depth, PS slot 1 %ux%u Texture2D); mode %s.",
+                    static_cast<unsigned long long>(g_onFootMatches), static_cast<unsigned long long>(kOnFootPs), kOnFootEyeW, kOnFootEyeH,
+                    detail::g_remlokMode == Mode::kHide ? "hide" : "outer");
+}
 
 void remlokShutdown() {
     if (g_clone) {

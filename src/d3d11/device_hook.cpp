@@ -3153,6 +3153,7 @@ void shutdownDeviceHooks() {
     journalWatchShutdown();
     // Explorer Cam: the avatar dither-fade global goes back to -1 if EDVR still holds it at 0 (explorer_cam.h). The hooks are CodeHooks
     // and come off with their own destructors.
+    nativeOnFootShutdown();   // F2: the gate byte goes back to 1 if EDVR holds it at 0
     explorerCamShutdown();
     // The probe's reference on the device. Read-only for its whole life, so
     // there is nothing to put back -- only the reference to let go.

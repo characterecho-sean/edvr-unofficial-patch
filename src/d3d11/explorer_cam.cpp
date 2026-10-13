@@ -227,6 +227,15 @@ ecm::FadeGuard g_fade;
 int32_t* g_fadeMode = nullptr;
 float* g_fadeAmount = nullptr;
 
+// Native on-foot body (F2). g_nativeWant: the native key is on, so the head-hiding hooks are installed from launch (frame thread writes).
+// g_nativeBody: native stereo is on foot now, so headHideStep may zero the head parts without a placement (frame thread writes, the hook
+// threads read). g_nativeReason and g_nativeFade are frame thread only: why the body last ended, and the native claim on the fade global
+// (its own guard; Explorer Cam's g_fade wins while it holds the global).
+std::atomic<bool> g_nativeWant{false};
+std::atomic<bool> g_nativeBody{false};
+const char* g_nativeReason = "";
+ecm::FadeGuard g_nativeFade;
+
 
 #ifdef EDVR_EXPLORER_CAM_TEST
 uintptr_t g_testTargets[kHkCount] = {};   // the rig's synthetic functions, installed in place of the game's
@@ -1434,8 +1443,10 @@ void headHideStep(void* amcPtr) noexcept {
             g_busyWitness.store(false, std::memory_order_release);
         }
     }
-    // The writes need a placement (Explorer Cam's own). Native on foot's census runs this function with none, and reads only.
-    if (!g_placeActive.load(std::memory_order_acquire) || g_placedActivity.load(std::memory_order_acquire) == 0) return;
+    // The writes need a placement (Explorer Cam's own) or native stereo's body (F2, explorerCamNativeBody). Native on foot's census runs this
+    // function with neither, and reads only.
+    const bool placed = g_placeActive.load(std::memory_order_acquire) && g_placedActivity.load(std::memory_order_acquire) != 0;
+    if (!placed && !g_nativeBody.load(std::memory_order_acquire)) return;
     uint32_t zeroed = 0;
     if (!sehZeroHeadMasks(amc, &zeroed)) {
         hideFault();
@@ -1916,6 +1927,44 @@ void fadeTick(bool active, bool placed, bool session, uint32_t frame, bool unloa
     }
 }
 
+// ---- the native body's fade claim (native on foot, F2; frame thread) ---------------------------------------------------------------
+// The same global, the same guard rules as fadeTick, with a guard of its own. While native stereo is on foot the guard sees a placement
+// and a session (active, placed, session = body) and the camera as closed (ctlMode 0), so the release waits for the body alone: it ends
+// when the body does, never while the camera is in the body, because the body is not the camera. Explorer Cam's claim wins: nothing is
+// written while g_fade holds the global, and a Foreign value is left alone.
+void nativeFadeTick(bool body, const char* reason, const ecm::Sink& sink) {
+    if (!body && !g_nativeFade.ours()) return;     // nothing of ours to put back
+    if (body && g_fade.ours()) return;             // Explorer Cam holds the global; its claim wins
+    if (!fadeResolve()) return;
+    ecm::FadeIn in;
+    in.active = body;
+    in.placed = body;
+    in.session = body;
+    in.ctlMode = 0;
+    if (g_nativeFade.ours() || body) in.readOk = sehReadInt32(g_fadeMode, &in.value);
+    const ecm::FadeStep st = g_nativeFade.step(in);
+    if (st.act == ecm::FadeStep::Act::Write) {
+        if (fadeStore(0)) {
+            say(sink, "native on foot body: on (fade mode -1 -> 0, head parts hidden)");
+        } else {
+            g_nativeFade.writeFailed();
+            say(sink, "native on foot body: the avatar fade mode could not be written; the body is left as the game draws it");
+        }
+    } else if (st.act == ecm::FadeStep::Act::Restore) {
+        if (fadeStore(ecm::kFadeAuto)) {
+            say(sink, "native on foot body: off (fade restored -1: %s)", reason);
+        } else {
+            g_nativeFade.restoreFailed();   // stays ours: the next frame tries again
+        }
+    } else if (st.ev == ecm::FadeEvent::Foreign) {
+        say(sink, "native on foot body: the avatar fade mode reads %d, not -1 (auto), so it is someone else's and is left alone", st.seen);
+    } else if (st.ev == ecm::FadeEvent::ChangedUnderUs) {
+        say(sink, "native on foot body: the avatar fade mode changed while EDVR held it (now %d); it is not put back", st.seen);
+    } else if (st.ev == ecm::FadeEvent::Unreadable) {
+        say(sink, "native on foot body: the avatar fade mode could not be read; the body is left as the game draws it");
+    }
+}
+
 // ---- head hiding, frame-thread half ------------------------------------------------------------------------------------------------
 __declspec(noinline) bool sehNameIs(uintptr_t tableEntry, const char* expected) noexcept {
     __try {
@@ -2188,6 +2237,13 @@ void boundaryAt(uint32_t frame, uint64_t nowMs, const FrameInput& in, const ecm:
         if (allArmed && g_hooks[kHkZoom].state == kHookStateNotTried) tryHook(kHkZoom, sink);
         checkPartNames(sink);
     }
+    // Native on foot (F2): while the native key is on, the head hiding's two hooks are wanted from launch, whatever Explorer Cam's own key says,
+    // so the FindJoint capture is in place before the first on-foot avatar attaches. Optional, as above: a stand-down costs the head hiding only.
+    if (g_nativeWant.load(std::memory_order_relaxed)) {
+        if (g_hooks[kHkFind].state == kHookStateNotTried) tryHook(kHkFind, sink);
+        if (g_hooks[kHkFade].state == kHookStateNotTried) tryHook(kHkFade, sink);
+        checkPartNames(sink);
+    }
 
     // 3. Active = on, every required hook armed, and the fault budget not spent. A change starts the hook threads' machines over.
     const bool active = on && armed(kHkFree) && armed(kHkCollision) && armed(kHkBox) && armed(kHkCtl) &&
@@ -2260,6 +2316,7 @@ void boundaryAt(uint32_t frame, uint64_t nowMs, const FrameInput& in, const ecm:
 
     // 6b. The avatar fade global. Before the not-active clean-up below, so a feature turned off while the camera is closed puts it back.
     fadeTick(active, g_placedActivity.load(std::memory_order_acquire) != 0, g_sessionActive.load(std::memory_order_acquire), frame, false, sink);
+    nativeFadeTick(g_nativeBody.load(std::memory_order_acquire), g_nativeReason, sink);
     updateGates();
 
     // 6c. The comfort fade: how black the view is this frame, and whether F5's request may go (not before the view is dark). Before the not-active return below, so
@@ -2576,6 +2633,7 @@ void explorerCamShutdown() {
     comfort::clear();   // an unload: the runtime reads no fade from here on
     // An unload (FreeLibrary): the dither-fade global goes back to -1 if EDVR still holds it at 0. A process exit does not come here, and
     // needs nothing: the global dies with the process.
+    nativeFadeTick(false, "the game is shutting down", ecm::Sink{&logSink, nullptr});
     fadeTick(false, false, false, 0, true, ecm::Sink{&logSink, nullptr});
     g_fadeOurs.store(g_fade.ours(), std::memory_order_release);
 }
@@ -2647,6 +2705,11 @@ bool avatarFadeModeRead(int32_t* mode) {
     const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     if (!base || !mode) return false;
     return sehReadFadeMode(base + ecm::kFadeModeRva, mode);
+}
+void explorerCamNativeBody(bool wanted, bool body, const char* reason) {
+    g_nativeWant.store(wanted, std::memory_order_release);
+    g_nativeBody.store(body, std::memory_order_release);
+    g_nativeReason = reason ? reason : "";
 }
 bool neckCensusRead(NeckCensusReading* out) { return neckCensusCopy(out); }
 

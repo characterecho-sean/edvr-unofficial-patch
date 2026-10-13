@@ -12,7 +12,17 @@
 // THE LOG. One line per setter call (the rare ones), queued by the game's thread and written at the frame boundary; one line every
 // 5 s while the native stereo flag is set, with the gate counters (cumulative since launch).
 //
-// THE FLAG. nativeOnFootActive() is true from a substitution until the next forwarded natural HMD mode (3 or 4).
+// THE FLAG. nativeOnFootActive() under method swap (F0 behaviour): true from a substitution until the next forwarded natural HMD mode (3 or 4).
+// Under method gate (F2): true only while ALL of these hold, computed once a frame at the boundary: the gate byte is EDVR's (written, not
+// refused), the most recent setter call forwarded an HMD mode, and the journal says on foot (journalOnFootKnown && journalOnFoot). The setter
+// never substitutes under gate, so the flag is not set by it.
+//
+// THE METHOD (F2, TEMPORARY A/B). advanced.native_on_foot_method, swap or gate, default gate, live. swap: the setter substitutes (F0). gate: no
+// substitution; while the key is on and a game session is live EDVR holds the byte at EliteDangerous64.exe+0x5E82B3E at 0, so the game's own
+// requester asks for HMD. Goes away when the arc picks one.
+//
+// THE BODY (F2). While the flag is set, explorerCamNativeBody(...) runs Explorer Cam's fade and head-part code for the local avatar, once a
+// frame, under either method. Its head hooks are wanted from launch while fix.native_on_foot is on.
 //
 // THE GATES. Log-only counters, no behaviour: each engaged gate calls nativeOnFootCountGate() and counts only while the flag is set.
 #include <atomic>
@@ -48,5 +58,8 @@ inline void nativeOnFootCountGate(NativeOnFootGate gate) {
 // Render thread, once a frame at the Present boundary (device_hook.cpp's tick). Installs the hook the first time (VR only), re-reads the
 // key when the configuration changes, writes the queued setter lines and the 5 s gate line.
 void nativeOnFootFrameBoundary(uint32_t frameNo);
+
+// Shutdown (device_hook.cpp, before explorerCamShutdown): puts the gate byte back to 1 if EDVR holds it at 0. Frame-thread context.
+void nativeOnFootShutdown();
 
 }  // namespace edvr

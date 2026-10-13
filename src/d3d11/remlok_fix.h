@@ -81,6 +81,8 @@ inline bool remlokOverlayShape(char kind, uint32_t count, uint32_t instances) {
     // A fullscreen triangle, one instance, DrawInstanced ('N').
     return kind == 'N' && count == 3 && instances == 1;
 }
+// Also matches the on-foot visor overlay of native stereo (F2): the same shape, no depth, and the pixel shader 0x99C21CEB7A699821 with a
+// 2016x2016 slot 1, only while nativeOnFootActive(). Same modes, same scissor, its own count (remlok_fix.cpp, onFootSignature).
 RemlokAction remlokOnEyeDraw(char kind, uint32_t count, uint32_t instances);
 
 // Around the real draw, for kScissor: set a scissor-enabled rasterizer

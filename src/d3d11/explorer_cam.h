@@ -76,6 +76,13 @@ uint32_t localAvatarParts(LocalAvatarPart* out, uint32_t cap, uint64_t* amc);
 // The dither-fade mode global (-1 auto, 0 off), read under SEH. False when unreadable.
 bool avatarFadeModeRead(int32_t* mode);
 
+// Native on-foot F2 body (frame thread; native_on_foot.cpp calls it once a frame). `wanted`: the native key is on, so the head-hiding hooks are
+// installed from launch (the capture must be in place before the first on-foot avatar attaches), whatever Explorer Cam's own key says. `body`:
+// native stereo is on foot now, so the fade global goes to 0 (its own guard; Explorer Cam's claim wins) and the local third-person avatar's
+// head parts are zeroed, with Explorer Cam's own code paths. The first-person arms and legs are not touched. `reason` (a literal) says why a
+// body ends; it is logged with the restore. The body ends with the native flag, never mid-transition on Explorer Cam's terms.
+void explorerCamNativeBody(bool wanted, bool body, const char* reason);
+
 // Native on-foot F1 neck census (log only, read-only; explorer_cam.cpp neckCensusStep): the newest sample. `state` 5 means the head joint
 // was read, in avatar-root model space; `amc` is the local AMC's origin in world space (`amcState` 1 when read). Two different spaces:
 // the difference between them is not a camera offset. False until a sample exists.
