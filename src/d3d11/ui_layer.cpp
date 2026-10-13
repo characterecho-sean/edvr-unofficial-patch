@@ -44,6 +44,7 @@
 #include "vscreen.h"       // the raw OM/RS entry points, vScreenIsEyeSized, vScreenPanelSize
 #include "vr_world_mips.h"  // the VR world route: the mipped screen and its sampler (the re-issue's inputs)
 #include "vr_world_route.h" // ...and what the route publishes: may the layer take, which eye was taken
+#include "native_on_foot.h" // the F0 gate counters (log only)
 
 #include "../common/config.h"
 #include "../common/guard.h"
@@ -2372,6 +2373,7 @@ void onFootGateTick() {
     const bool byDepth = uiLayerWorldScreenStep(g_world, counted, draws);
     ++g_win.gateReads;
     if (byJournal && byDepth) {
+        edvr::nativeOnFootCountGate(edvr::NativeOnFootGate::UiLayer);   // F0 gate counter (log only)
         ++g_win.heldBoth;
     } else if (byJournal) {
         ++g_win.heldJournal;

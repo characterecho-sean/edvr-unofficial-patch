@@ -38,6 +38,8 @@
 #include <cstring>
 #include <string>
 
+#include "native_on_foot.h"   // F0 gate counter (log only)
+
 namespace edvr {
 
 static_assert(kVrWorldFeatureSlot < kUpscalerSlots && kVrWorldFeatureSlot >= kUpscalerEyeSlots,
@@ -873,6 +875,7 @@ void vrWorldRouteFrameBoundary() {
 
     // The state the next frame starts in.
     g_ownsNext.store(g_machine.owned(), std::memory_order_release);
+    if (g_machine.owned()) nativeOnFootCountGate(NativeOnFootGate::WorldRoute);   // F0 gate counter: an owned frame (log only)
     g_startedOwned = g_machine.owned();
     g_vrWorldWants = g_census || (key == VrWorldKey::Auto && g_machine.wantsDraws() && gate && layerLive);
     g_vrWorldWatchWrites = false;

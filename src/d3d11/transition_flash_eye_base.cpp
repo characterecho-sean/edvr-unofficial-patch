@@ -1,6 +1,7 @@
 #include "transition_flash_eye_base.h"
 #include "transition_flash_eye_base_core.h"
 #include "glitch_frame.h"
+#include "native_on_foot.h"   // the F0 gate counter (log only)
 #include "../common/code_hook.h"
 #include "../common/config.h"
 #include "../common/log.h"
@@ -294,6 +295,7 @@ void noteConsume(int32_t gameMode, const float m[16]) noexcept {
         next = tfeb::updateConsecutiveUnrefilled(cur, gameMode, unrefilled);
     } while (!g_ebConsecutiveUnrefilled.compare_exchange_weak(cur, next, std::memory_order_relaxed));
     if (unrefilled && gameMode == 2) {
+        edvr::nativeOnFootCountGate(edvr::NativeOnFootGate::TransitionFlash);   // F0 gate counter (log only)
         const uint32_t frame = g_frame.load(std::memory_order_relaxed);
         if (edge == tfeb::ModeSwitchEdge::Entry) {
             armEvent(frame);

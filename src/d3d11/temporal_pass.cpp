@@ -44,6 +44,7 @@
 #include "engine_velocity.h"
 #include "celestial_motion.h"   // planet patch motion: each body's own rigid motion on its pixels (decision path 12)
 #include "scheduler_stack_probe.h"
+#include "native_on_foot.h"  // the F0 gate counters (log only)
 #include "journal_watch.h"   // the ship split on foot: Status.json's word on whether the commander is on foot (temporal_mode.h)
 #include "perf_monitor.h"
 #include "shader_swap.h"
@@ -1568,6 +1569,7 @@ bool footSplitNow() {
             }
         }
     }
+    if (g_foot.on) edvr::nativeOnFootCountGate(edvr::NativeOnFootGate::FootSplit);   // F0 gate counter (log only)
     return g_foot.on;
 }
 

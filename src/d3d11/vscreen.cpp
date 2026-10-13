@@ -75,6 +75,7 @@
 #include "intro_curve.h"     // the splash's recogniser: which composite draws are the game's own world-space panel
 #include "intro_skip.h"
 #include "intro_upscale.h"
+#include "native_on_foot.h"  // the F0 gate counters (log only)
 #include "journal_watch.h"  // gameplay started, for the low-peak notice
 #include "loader_panel.h"
 #include "splash_dim.h"
@@ -1222,6 +1223,7 @@ bool targetIsEyeSized(void* rtv, int* candOut = nullptr) {
     // Beyond 2560x2560). Reached only when the published size did not claim
     // this target, so a 16:9 headset is no longer caught by it.
     if (isPanelShaped(info.a, info.b)) {
+        edvr::nativeOnFootCountGate(edvr::NativeOnFootGate::PanelShape);   // F0 gate counter (log only)
         ++s->panelExclusions;
         noteUncountedTarget(s, info.a, info.b);
         return false;

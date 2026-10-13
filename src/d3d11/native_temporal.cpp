@@ -7,6 +7,7 @@
 #include "ui_layer_shaders.h"  // uiLayerFrameView: the 8-bit families a composite can run over
 #include "ui_surfaces.h"
 #include "vr_world_route.h"    // the VR world route: does it own the next frame, did the layer take this eye
+#include "native_on_foot.h"    // the F0 gate counters (log only): the route's engagements while native stereo is on foot
 #include "vscreen.h"           // vScreenClearRenderTargetViewRaw: the black frame's one clear
 #include "vr_camera_census.h"   // nativeTemporalEyeGeometry's declaration, so its definition below is checked against it
 #include "terrain_cull_cover_hook.h"   // the terrain cull cover (docs/terrain-culling.md): begin() tells it the frusta the game is handed
@@ -340,6 +341,7 @@ bool layerOnlyTreat(State& s,uint64_t seq,unsigned eye,uint32_t outW,uint32_t ou
   outBox[0]=b[0]>b[2]?1.f:0.f;outBox[2]=b[0]>b[2]?0.f:1.f;outBox[1]=b[1]>b[3]?1.f:0.f;outBox[3]=b[1]>b[3]?0.f:1.f;
   edvr::uiLayerNoteTemporal(seq,eye,frame);
   ++s.layerOnly;
+  edvr::nativeOnFootCountGate(edvr::NativeOnFootGate::WorldRoute);   // F0 gate counter: a layer-only eye treat (log only)
   if(!s.layerOnlyNoted){s.layerOnlyNoted=true;edvr::Log::get().note("native temporal: LAYER-ONLY engaged, eye %u, sequence %llu: the UI layer "
       "holds the whole eye (the VR world route's resolved world, or a map's or a menu's 2D screen on foot), "
       "so no upscaler runs for it -- a black %ux%u frame is handed on and the layer is composited over it (the eye's history is left "

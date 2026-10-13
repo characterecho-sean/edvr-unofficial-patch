@@ -41,6 +41,7 @@
 #include "device_gpu_timing.h"
 #include "producer_gpu_timing.h"
 #include "submission_stats.h"
+#include "submit_shape.h"   // native on-foot F0: the submit shape line (one a second while frames are submitted)
 #include "frame_cycle_stats.h"
 #include "long_cycle_line.h"
 #include "vendor_events.h"
@@ -1294,6 +1295,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   }
   vr::EVRCompositorError submitEye(uint64_t generation,vr::EVREye eye,const vr::Texture_t* texture,
       const vr::VRTextureBounds_t* bounds,vr::EVRSubmitFlags flags) override {
+    // Native on-foot F0: the submit shape, one line a second (submit_shape.h). Records what was handed over; changes nothing.
+    submitshape::submitShapeNote(int(eye),texture?texture->handle:nullptr,texture&&texture->eType==vr::API_DirectX,bounds!=nullptr,
+      bounds?bounds->uMin:0.0f,bounds?bounds->vMin:0.0f,bounds?bounds->uMax:0.0f,bounds?bounds->vMax:0.0f,GetTickCount64());
     const auto admission=clearOverlapHandoff();
     return submitEyeAdmitted(generation,eye,texture,bounds,flags,admission);
   }

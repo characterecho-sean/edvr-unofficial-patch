@@ -41,6 +41,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "../common/hotkey.h"
 #include "fss_res.h"
 #include "journal_watch.h"
+#include "native_on_foot.h"  // nativeOnFootFrameBoundary (the render-mode setter hook, flight F0)
 #include "explorer_cam.h"   // explorerCamFrameBoundary (the frame tick) and explorerCamShutdown (the avatar dither-fade global goes back at an unload)
 #include "ui_surfaces.h"   // the glyph atlas and sizing chain instruments
 #include "ui_panel_scale.h" // uiPanelScaleShutdown: the panel operands put back
@@ -1211,6 +1212,8 @@ EDVR_BOUNDARY_TICK(tkCelestialStatus, "celestial_status");
 // boundary until 2026-10-08, which only exists when vScreen installs a State: with fix.black_void off, fix.panel_distance 1, no flash observation,
 // advanced.app_gpu_timing off and advanced.panel_hooks_always off it installs transport-only and F5 did nothing. Here it runs every owned Present.
 EDVR_BOUNDARY_TICK(tkExplorerCam, "explorer_cam");
+// Native on-foot VR, flight F0 (native_on_foot.h): installs the render-mode setter's hook once in VR, reads fix.native_on_foot and writes the setter's log lines.
+EDVR_BOUNDARY_TICK(tkNativeOnFoot, "native_on_foot");
 EDVR_BOUNDARY_TICK(tkFssModeLatch, "fss_mode_latch");
 EDVR_BOUNDARY_TICK(tkMenu, "menu");
 EDVR_BOUNDARY_TICK(tkBindingBoundary, "binding_boundary");
@@ -1556,6 +1559,7 @@ void presentFrameBoundary() {
     // Explorer Cam (Phase 1), after the journal's tick it reads (on foot, GuiFocus, gameplay). Unconditional: an EMPTY hotkey.explorer_cam is read here
     // every frame too, so binding it live arms the feature on the next one.
     tkExplorerCam.run([] { explorerCamFrameBoundary(static_cast<uint32_t>(g_state->frameCounter)); });
+    tkNativeOnFoot.run([] { nativeOnFootFrameBoundary(static_cast<uint32_t>(g_state->frameCounter)); });
     tkFssModeLatch.run(tickFssModeLatch);
     // The settings menu (docs/settings-menu.md): its summon key, its
     // navigation keys and head-aim, its fade, the keyboard gate that

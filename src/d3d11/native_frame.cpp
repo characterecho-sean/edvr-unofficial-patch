@@ -6,6 +6,7 @@
 #include "../common/log.h"
 #include "../common/openxr_resolution_entries.h"
 #include "journal_watch.h"
+#include "native_on_foot.h"
 #include "native_render_labels.h"
 
 #include <algorithm>
@@ -309,6 +310,7 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
     result.deferredPacing =
         (weaponStability && edvr::journalOnFootKnown() && edvr::journalOnFoot())
             ? 1u : 0u;
+    if (result.deferredPacing) edvr::nativeOnFootCountGate(edvr::NativeOnFootGate::DeferredPacing);   // F0 gate counter (log only)
     if (!state->weaponStabilityNoted ||
         state->lastWeaponStability != weaponStability) {
         edvr::Log::get().note(
