@@ -17,7 +17,7 @@
 // refused), the most recent setter call forwarded an HMD mode, and the journal says on foot (journalOnFootKnown && journalOnFoot). The setter
 // never substitutes under gate, so the flag is not set by it.
 //
-// THE METHOD (F2, TEMPORARY A/B). advanced.native_on_foot_method, swap or gate, default gate, live. swap: the setter substitutes (F0). gate: no
+// THE METHOD (F2, TEMPORARY A/B). fix.native_on_foot_method, swap or gate, default gate, live. swap: the setter substitutes (F0). gate: no
 // substitution; while the key is on and a game session is live EDVR holds the byte at EliteDangerous64.exe+0x5E82B3E at 0, so the game's own
 // requester asks for HMD. Goes away when the arc picks one.
 //

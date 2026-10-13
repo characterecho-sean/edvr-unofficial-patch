@@ -29,7 +29,7 @@ CodeHook* g_hook = nullptr;
 SetterFn g_original = nullptr;                     // the trampoline: the setter as it was
 std::atomic<uintptr_t> g_frozenSelector{0};        // the first selector whose owner points back at it
 std::atomic<bool> g_keyOn{false};                  // fix.native_on_foot, as the frame thread last read it
-std::atomic<bool> g_methodGate{true};              // advanced.native_on_foot_method is gate (F2); the setter substitutes only when it is swap
+std::atomic<bool> g_methodGate{true};              // fix.native_on_foot_method is gate (F2); the setter substitutes only when it is swap
 std::atomic<bool> g_lastForwardedHmd{false};       // the most recent setter call forwarded an HMD mode (3 or 4): the gate method's flag reads it
 uintptr_t g_base = 0;                             // the game image base; set by installOnce before the hook can run
 
@@ -336,16 +336,16 @@ void readKey() {
         g_keyLast = on;
     }
     // TEMPORARY A/B (F2): swap substitutes in the setter (F0's behaviour); gate writes one byte and lets the game's own requester ask for HMD.
-    const std::string method = cfg.getString("advanced.native_on_foot_method", "gate");
+    const std::string method = cfg.getString("fix.native_on_foot_method", "gate");
     bool gate = true;
     if (method == "swap") {
         gate = false;
     } else if (method != "gate") {
-        Log::get().note("native on foot: advanced.native_on_foot_method = %s is not swap or gate; using gate.", method.c_str());
+        Log::get().note("native on foot: fix.native_on_foot_method = %s is not swap or gate; using gate.", method.c_str());
     }
     g_methodGate.store(gate, std::memory_order_relaxed);
     if (first || gate != g_methodLast) {
-        Log::get().note("native on foot: advanced.native_on_foot_method is %s (%s)", gate ? "gate" : "swap",
+        Log::get().note("native on foot: fix.native_on_foot_method is %s (%s)", gate ? "gate" : "swap",
                         gate ? "the setter never substitutes; one byte at EliteDangerous64.exe+0x5E82B3E is held at 0 while the key is on and a game session is live"
                              : "the setter substitutes an on-foot Cinema request as HMD stereo, as F0 did");
         g_methodLast = gate;
@@ -628,7 +628,7 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
         g_nativeOnFootActive.store(false, std::memory_order_relaxed);
     }
     g_methodWasGate = gate;
-    const char* byteWhy = !keyOn ? "fix.native_on_foot is off" : !gate ? "advanced.native_on_foot_method is swap" : "the game session ended";
+    const char* byteWhy = !keyOn ? "fix.native_on_foot is off" : !gate ? "fix.native_on_foot_method is swap" : "the game session ended";
     gateByteTick(keyOn && gate && session, byteWhy);
     // The body (F2): Explorer Cam's fade and head-part code runs while native stereo is on foot. Its head hooks are wanted from launch while the key is on.
     const char* bodyWhy = !keyOn ? "fix.native_on_foot is off" : !session ? "the game session ended" : "native stereo ended (boarded or seated, or the game asked for its own mode)";

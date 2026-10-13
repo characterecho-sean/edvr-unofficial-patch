@@ -55,7 +55,7 @@ constexpr uint8_t kPrologue[kPrologueBytes] = {
 enum class Reason : uint8_t {
     NotCinema,        // the incoming mode is not a cinema mode (5 or 6): forwarded unchanged (HMD modes always are)
     KeyOff,           // incoming cinema mode, but fix.native_on_foot is off
-    GateMethod,       // incoming cinema mode, key on, but advanced.native_on_foot_method is gate: the setter never substitutes (F2)
+    GateMethod,       // incoming cinema mode, key on, but fix.native_on_foot_method is gate: the setter never substitutes (F2)
     SelectorInvalid,  // incoming cinema mode, but the selector's owner does not point back at it: not a renderer this build knows
     SelectorMismatch, // incoming cinema mode on a selector other than the one frozen at the first valid call
     NoGameSession,    // incoming cinema mode with the key on, but the journal has not seen LoadGame (or has seen Shutdown): a menu, not a session
@@ -64,7 +64,7 @@ enum class Reason : uint8_t {
 
 struct Inputs {
     bool keyOn = false;            // fix.native_on_foot read as on (published by the frame thread)
-    bool gateMethod = false;       // advanced.native_on_foot_method is gate (F2): the byte does the work, the setter only logs
+    bool gateMethod = false;       // fix.native_on_foot_method is gate (F2): the byte does the work, the setter only logs
     uint32_t incoming = 0;         // the mode the caller asked for
     bool selectorValid = false;    // selector+0x58 -> owner and owner+0x60 == selector, read under SEH
     bool selectorFrozen = false;   // the selector is the one frozen at the first valid call
