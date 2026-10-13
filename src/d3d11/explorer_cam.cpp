@@ -36,6 +36,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
 #include <string>
 
 #include "../common/code_hook.h"
@@ -45,6 +46,7 @@
 #include "../common/log.h"
 #include "elite_binds.h"
 #include "journal_watch.h"
+#include "native_on_foot.h"   // nativeOnFootActive(): the head-hiding capture also runs (read-only) while native stereo is on foot
 
 namespace edvr {
 namespace {
@@ -1432,7 +1434,8 @@ void headHideStep(void* amcPtr) noexcept {
             g_busyWitness.store(false, std::memory_order_release);
         }
     }
-    if (g_placedActivity.load(std::memory_order_acquire) == 0) return;
+    // The writes need a placement (Explorer Cam's own). Native on foot's census runs this function with none, and reads only.
+    if (!g_placeActive.load(std::memory_order_acquire) || g_placedActivity.load(std::memory_order_acquire) == 0) return;
     uint32_t zeroed = 0;
     if (!sehZeroHeadMasks(amc, &zeroed)) {
         hideFault();
@@ -1443,11 +1446,83 @@ void headHideStep(void* amcPtr) noexcept {
 }
 
 // ---- the avatar-fade hook (the head hiding's post-call) ------------------------------------------------------------------------
+// ---- the neck census (native on foot, F1: log only, read-only) ------------------------------------------------------------------
+// Every 100 ms while native stereo is on foot, on the game's job thread: the local third-person head joint in avatar-root model space
+// (skVerify, FindJoint "def_c_head_joint", the +0x58 model call: the same reads followEye makes), and the local AMC's origin in world space
+// (sehAmcOrigin, the witness's read). Both are reads the game already makes. The frame thread reads the newest sample under the mutex.
+struct NeckSnapshot {
+    uint32_t state = 0;          // 0 not tried, 1 no skeleton latched, 2 vtable not verified, 3 no head joint, 4 head matrix not plausible, 5 head read
+    uint64_t stamp = 0;          // GetTickCount64 of the sample
+    float head[3] = {};          // avatar-root model space (row vectors; translation in the fourth row)
+    float amc[3] = {};           // world space: the AMC's origin
+    int amcState = 0;            // sehAmcOrigin: 1 read, 0 not available, -1 faulted
+};
+std::mutex g_neckMutex;
+NeckSnapshot g_neck;                                  // guarded by g_neckMutex
+std::atomic<uint64_t> g_neckNextMs{0};
+std::atomic<bool> g_busyNeck{false};
+
+void neckCensusStep() noexcept {
+    if (!nativeOnFootActive()) return;
+    const uint64_t now = GetTickCount64();
+    if (now < g_neckNextMs.load(std::memory_order_relaxed)) return;
+    if (g_busyNeck.exchange(true, std::memory_order_acquire)) return;
+    g_neckNextMs.store(now + 100, std::memory_order_relaxed);
+    NeckSnapshot s;
+    s.stamp = now;
+    const uint64_t iface = g_skelIface[0].load(std::memory_order_acquire);
+    if (!iface) {
+        s.state = 1;
+    } else {
+        SkSlots sl;
+        if (skVerify(static_cast<uintptr_t>(iface), ecm::HeadKind::None, &sl) != SkVerify::Ok) {
+            s.state = 2;
+        } else {
+            uint32_t headIdx = ecm::kNoJoint;
+            if (!sehCallFind(sl.fn[1], static_cast<uintptr_t>(iface), ecm::kHeadName, &headIdx)) {
+                s.state = 3;
+            } else {
+                headIdx &= 0xFFFFu;
+                alignas(16) float m[16] = {};
+                if (!sehCallModel(sl.fn[3], static_cast<uintptr_t>(iface), headIdx, m) || !ecm::headMatrixPlausible(m)) {
+                    s.state = 4;
+                } else {
+                    s.state = 5;
+                    s.head[0] = m[12];
+                    s.head[1] = m[13];
+                    s.head[2] = m[14];
+                }
+            }
+        }
+    }
+    const uint64_t amc = g_amcLocal.load(std::memory_order_acquire);
+    if (amc) s.amcState = sehAmcOrigin(reinterpret_cast<const uint8_t*>(amc), s.amc);
+    {
+        std::lock_guard<std::mutex> lock(g_neckMutex);
+        g_neck = s;
+    }
+    g_busyNeck.store(false, std::memory_order_release);
+}
+
+bool neckCensusCopy(NeckCensusReading* out) {
+    if (!out) return false;
+    std::lock_guard<std::mutex> lock(g_neckMutex);
+    out->state = g_neck.state;
+    out->stamp = g_neck.stamp;
+    std::memcpy(out->head, g_neck.head, sizeof(out->head));
+    std::memcpy(out->amc, g_neck.amc, sizeof(out->amc));
+    out->amcState = g_neck.amcState;
+    return g_neck.stamp != 0;
+}
+
 __declspec(noinline) uint64_t __fastcall avatarFadeHooked(void* a, void* b, void* c, void* d) noexcept {
     const auto forward = reinterpret_cast<ForwardFn>(g_forward[kHkFade].load(std::memory_order_acquire));
     if (!forward) return 0;
     const uint64_t result = forward(a, b, c, d);   // the original FIRST: the hide follows what it left
-    if (g_hideOn.load(std::memory_order_acquire)) headHideStep(a);
+    if (g_hideOn.load(std::memory_order_acquire)) {
+        headHideStep(a);
+        neckCensusStep();
+    }
     return result;
 }
 
@@ -1671,10 +1746,13 @@ void updateGates() {
     g_gate[kHkCtl].store(armed(kHkCtl) && (active || g_fadeOurs.load(std::memory_order_relaxed)) ? 1u : 0u, std::memory_order_release);
     // Head hiding needs both optional hooks, the part names verified, and a placement-capable Explorer Cam; it also needs the FindJoint capture from
     // launch (the attach runs every frame, but the hook must be in place), so the capture's share of the gate is open whenever Explorer Cam is active.
-    const bool hideOn = active && armed(kHkFade) && armed(kHkFind) && g_partNames.load(std::memory_order_relaxed) == 1 && !g_hideDown.load(std::memory_order_relaxed);
+    // Native on foot (F0 census, flight F1): the same capture also runs while native stereo is on foot, read-only. Placement stays Explorer
+    // Cam's: headHideStep writes the view masks only while a placement stands (checked there, not just here).
+    const bool capture = active || nativeOnFootActive();
+    const bool hideOn = capture && armed(kHkFade) && armed(kHkFind) && g_partNames.load(std::memory_order_relaxed) == 1 && !g_hideDown.load(std::memory_order_relaxed);
     g_hideOn.store(hideOn, std::memory_order_release);
     g_gate[kHkFade].store(armed(kHkFade) && hideOn ? 1u : 0u, std::memory_order_release);
-    g_gate[kHkFind].store(armed(kHkFind) && active ? 1u : 0u, std::memory_order_release);
+    g_gate[kHkFind].store(armed(kHkFind) && capture ? 1u : 0u, std::memory_order_release);
     g_gate[kHkUi].store(armed(kHkUi) && (active || g_uiHeld.load(std::memory_order_relaxed)) ? 1u : 0u, std::memory_order_release);
     g_gate[kHkZoom].store(armed(kHkZoom) && active ? 1u : 0u, std::memory_order_release);
 }
@@ -2532,6 +2610,45 @@ ExplorerCamSkeleton explorerCamSkeleton(int site) {
 }
 uint64_t explorerCamFindJointSeen() { return g_findSeen.load(std::memory_order_relaxed); }
 bool explorerCamSessionActive() { return g_sessionActive.load(std::memory_order_acquire); }
+
+// Native on-foot F1 census (log only, read-only): the latched local third-person avatar's parts and their view masks, read under SEH.
+// Writes nothing. Production code, not the rig's seam.
+__declspec(noinline) bool sehReadPartMasks(const uint8_t* amc, uint32_t idx, uint64_t* masks) noexcept {
+    __try {
+        for (uint32_t k = 0; k < ecm::kPartVariants; ++k) std::memcpy(&masks[k], amc + ecm::kOffAmcMasks + idx * ecm::kPartStride + 8 * k, 8);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+__declspec(noinline) bool sehReadFadeMode(uintptr_t address, int32_t* mode) noexcept {
+    __try {
+        std::memcpy(mode, reinterpret_cast<const void*>(address), sizeof(*mode));
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+uint32_t localAvatarParts(LocalAvatarPart* out, uint32_t cap, uint64_t* amcOut) {
+    const uint64_t amc = g_amcLocal.load(std::memory_order_acquire);
+    if (amcOut) *amcOut = amc;
+    if (!amc || !out) return 0;
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < ecm::kPartCount && n < cap; ++i, ++n) {
+        LocalAvatarPart& p = out[n];
+        p.name = ecm::kPartNames[i];
+        p.head = ecm::isHeadPart(i);
+        p.ok = sehReadPartMasks(reinterpret_cast<const uint8_t*>(amc), i, p.masks);
+        if (!p.ok) std::memset(p.masks, 0, sizeof(p.masks));
+    }
+    return n;
+}
+bool avatarFadeModeRead(int32_t* mode) {
+    const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    if (!base || !mode) return false;
+    return sehReadFadeMode(base + ecm::kFadeModeRva, mode);
+}
+bool neckCensusRead(NeckCensusReading* out) { return neckCensusCopy(out); }
 
 #ifdef EDVR_EXPLORER_CAM_TEST
 namespace explorercamtest {

@@ -63,6 +63,31 @@ void explorerCamShutdown();
 // answer is cached for the session. The fade global and the follow's head-joint reads resolve their addresses from it.
 bool explorerCamBuildKnown(uintptr_t* base, char* why, size_t whyCap);
 
+// Native on-foot F1 census (log only, read-only): the local third-person avatar's parts as the head-hiding capture latched them. `masks`
+// holds the part's four view-mask words; `ok` is false when the read faulted. Returns the number of parts written; `*amc` is the latched
+// avatar (0 when none is latched yet, then nothing is written).
+struct LocalAvatarPart {
+    const char* name = nullptr;
+    bool head = false;
+    bool ok = false;
+    uint64_t masks[4] = {};
+};
+uint32_t localAvatarParts(LocalAvatarPart* out, uint32_t cap, uint64_t* amc);
+// The dither-fade mode global (-1 auto, 0 off), read under SEH. False when unreadable.
+bool avatarFadeModeRead(int32_t* mode);
+
+// Native on-foot F1 neck census (log only, read-only; explorer_cam.cpp neckCensusStep): the newest sample. `state` 5 means the head joint
+// was read, in avatar-root model space; `amc` is the local AMC's origin in world space (`amcState` 1 when read). Two different spaces:
+// the difference between them is not a camera offset. False until a sample exists.
+struct NeckCensusReading {
+    uint32_t state = 0;
+    uint64_t stamp = 0;
+    float head[3] = {};
+    float amc[3] = {};
+    int amcState = 0;
+};
+bool neckCensusRead(NeckCensusReading* out);
+
 #ifdef EDVR_EXPLORER_CAM_TEST
 // The rig's seam (tools\explorer_cam_test): the same boundary with a scripted clock and scripted
 // inputs, synthetic functions in place of the game's, and the shared state to look at.

@@ -1,6 +1,7 @@
 #include "native_on_foot.h"
 
 #include <windows.h>
+#include <intrin.h>
 
 #include <cstdio>
 #include <cstring>
@@ -11,6 +12,7 @@
 #include "../common/config.h"
 #include "../common/log.h"
 #include "../common/runtime_profile.h"
+#include "explorer_cam.h"   // localAvatarParts, avatarFadeModeRead: the avatar census (F1)
 #include "journal_watch.h"
 #include "native_on_foot_core.h"
 
@@ -44,7 +46,7 @@ struct SetterEvent {
     bool sourceReadOk = false, keyOn = false, admitted = false;
     nofoot::Reason reason = nofoot::Reason::NotCinema;
     uint8_t onFoot = 2, seated = 2;   // 0 no, 1 yes, 2 unknown
-    uintptr_t selector = 0, vtRva = 0, owner = 0;
+    uintptr_t selector = 0, vtRva = 0, owner = 0, caller = 0;
     bool vtReadOk = false, ownerReadOk = false, ownerBack = false;
 };
 constexpr size_t kEventRing = 64;
@@ -119,6 +121,8 @@ void __fastcall setterHooked(void* selectorPtr, uint32_t incoming) {
     if (!g_original) return;   // unreachable: the hook is armed only after the trampoline is set
     SetterEvent ev;
     ev.tMs = GetTickCount64();
+    // The relay reaches this function by a jmp (buildCallbackRelay's `jmp qword ptr [rip+0]`), not a call, so the return address on entry is the game's caller.
+    ev.caller = reinterpret_cast<uintptr_t>(_ReturnAddress());
     const uintptr_t selector = reinterpret_cast<uintptr_t>(selectorPtr);
     const SelectorProbe probe = probeSelector(selector);
     const bool valid = selectorValid(selector, probe);
@@ -148,8 +152,10 @@ void __fastcall setterHooked(void* selectorPtr, uint32_t incoming) {
     ev.onFoot = journalOnFootKnown() ? (journalOnFoot() ? 1 : 0) : 2;
     ev.seated = journalSeatedKnown() ? (journalSeated() ? 1 : 0) : 2;
     // The flag is set before the call, so a frame boundary that runs while the original is inside it sees the session.
+    // A call that is not substituted ends the flag: an HMD mode (the game's own stereo), or a cinema mode the game asks for while
+    // the key is off or the call was refused (the game is back on the flat screen).
     if (ev.admitted) g_nativeOnFootActive.store(true, std::memory_order_relaxed);
-    else if (nofoot::isHmdMode(ev.effective)) g_nativeOnFootActive.store(false, std::memory_order_relaxed);
+    else if (nofoot::isHmdMode(incoming) || nofoot::isCinemaMode(incoming)) g_nativeOnFootActive.store(false, std::memory_order_relaxed);
     g_original(selectorPtr, ev.effective);
     uint32_t after = 0;
     ev.sourceReadOk = guardedRead(selector + nofoot::kSourceModeOffset, &after, sizeof(after));
@@ -302,6 +308,82 @@ void readKey() {
     }
 }
 
+// The caller's address, image-relative; "+0x?" when it is not inside the game image.
+void callerText(uintptr_t caller, char* out, size_t cap) {
+    if (g_base && caller >= g_base && caller < g_base + ecm::kExpectedImageSize) {
+        std::snprintf(out, cap, "+0x%llX", static_cast<unsigned long long>(caller - g_base));
+    } else {
+        std::snprintf(out, cap, "+0x?");
+    }
+}
+
+// One setter call, in full.
+void logSetterLine(const SetterEvent& ev) {
+    char source[16];
+    if (ev.sourceReadOk) std::snprintf(source, sizeof(source), "%u", ev.sourceAfter);
+    else std::snprintf(source, sizeof(source), "unreadable");
+    static const char* const kYesNoUnknown[3] = {"no", "yes", "unknown"};
+    char vt[32];
+    if (ev.vtReadOk) std::snprintf(vt, sizeof(vt), "+0x%llX", static_cast<unsigned long long>(ev.vtRva));
+    else std::snprintf(vt, sizeof(vt), "unreadable");
+    char owner[32];
+    if (ev.ownerReadOk) std::snprintf(owner, sizeof(owner), "0x%llX", static_cast<unsigned long long>(ev.owner));
+    else std::snprintf(owner, sizeof(owner), "unreadable");
+    char caller[32];
+    callerText(ev.caller, caller, sizeof(caller));
+    Log::get().note("native on foot: incoming=%u effective=%u source_after=%s key=%s admitted=%s reason=%s onfoot=%s seated=%s t=%llu "
+                    "sel=0x%llX vt=%s owner=%s owner_back=%s caller=%s",
+                    ev.incoming, ev.effective, source, ev.keyOn ? "on" : "off", ev.admitted ? "yes" : "no",
+                    nofoot::reasonName(ev.reason), kYesNoUnknown[ev.onFoot], kYesNoUnknown[ev.seated],
+                    static_cast<unsigned long long>(ev.tMs), static_cast<unsigned long long>(ev.selector), vt, owner,
+                    ev.ownerBack ? "yes" : "no", caller);
+}
+
+// ---- collapsing repeats (frame thread only) -------------------------------------------------------------------------------------
+// The game asks for the same mode on nearly every frame. A call identical to the one before it (incoming, effective, reason,
+// selector, caller) is counted, not logged. The first call of each kind is logged in full; the repeats are summarised every five
+// seconds, and again when a different call arrives.
+struct RunState {
+    bool open = false;
+    SetterEvent first;             // the kind being counted (its first call was logged in full)
+    uint64_t repeats = 0;          // repeats not yet summarised
+    uint64_t windowStartMs = 0;    // the start of the window the next summary covers
+    uint64_t lastMs = 0;           // the newest repeat's time
+};
+RunState g_run;
+
+bool sameKind(const SetterEvent& a, const SetterEvent& b) {
+    return a.incoming == b.incoming && a.effective == b.effective && a.reason == b.reason && a.selector == b.selector && a.caller == b.caller;
+}
+
+void emitRepeats() {
+    if (!g_run.repeats) return;
+    char caller[32];
+    callerText(g_run.first.caller, caller, sizeof(caller));
+    Log::get().note("native on foot: repeated %llu x (incoming=%u effective=%u reason=%s caller=%s) over %llu ms",
+                    static_cast<unsigned long long>(g_run.repeats), g_run.first.incoming, g_run.first.effective,
+                    nofoot::reasonName(g_run.first.reason), caller,
+                    static_cast<unsigned long long>(g_run.lastMs - g_run.windowStartMs));
+    g_run.repeats = 0;
+    g_run.windowStartMs = g_run.lastMs;
+}
+
+void noteSetterEvent(const SetterEvent& ev) {
+    if (g_run.open && sameKind(ev, g_run.first)) {
+        ++g_run.repeats;
+        g_run.lastMs = ev.tMs;
+        if (ev.tMs - g_run.windowStartMs >= 5000) emitRepeats();
+        return;
+    }
+    emitRepeats();   // the previous kind's count, before the new kind
+    logSetterLine(ev);
+    g_run.open = true;
+    g_run.first = ev;
+    g_run.repeats = 0;
+    g_run.windowStartMs = ev.tMs;
+    g_run.lastMs = ev.tMs;
+}
+
 void drainEvents() {
     SetterEvent local[kEventRing];
     size_t count = 0;
@@ -320,25 +402,92 @@ void drainEvents() {
         Log::get().note("native on foot: %llu setter call(s) were not logged (more than %zu between two frames)",
                         static_cast<unsigned long long>(dropped), kEventRing);
     }
-    for (size_t i = 0; i < count; ++i) {
-        const SetterEvent& ev = local[i];
-        char source[16];
-        if (ev.sourceReadOk) std::snprintf(source, sizeof(source), "%u", ev.sourceAfter);
-        else std::snprintf(source, sizeof(source), "unreadable");
-        static const char* const kYesNoUnknown[3] = {"no", "yes", "unknown"};
-        char vt[32];
-        if (ev.vtReadOk) std::snprintf(vt, sizeof(vt), "+0x%llX", static_cast<unsigned long long>(ev.vtRva));
-        else std::snprintf(vt, sizeof(vt), "unreadable");
-        char owner[32];
-        if (ev.ownerReadOk) std::snprintf(owner, sizeof(owner), "0x%llX", static_cast<unsigned long long>(ev.owner));
-        else std::snprintf(owner, sizeof(owner), "unreadable");
-        Log::get().note("native on foot: incoming=%u effective=%u source_after=%s key=%s admitted=%s reason=%s onfoot=%s seated=%s t=%llu "
-                        "sel=0x%llX vt=%s owner=%s owner_back=%s",
-                        ev.incoming, ev.effective, source, ev.keyOn ? "on" : "off", ev.admitted ? "yes" : "no",
-                        nofoot::reasonName(ev.reason), kYesNoUnknown[ev.onFoot], kYesNoUnknown[ev.seated],
-                        static_cast<unsigned long long>(ev.tMs), static_cast<unsigned long long>(ev.selector), vt, owner,
-                        ev.ownerBack ? "yes" : "no");
+    for (size_t i = 0; i < count; ++i) noteSetterEvent(local[i]);
+    if (g_run.open && g_run.repeats && GetTickCount64() - g_run.windowStartMs >= 5000) emitRepeats();
+}
+
+// The avatar census (F1, log only): the local third-person avatar's parts and view masks, from Explorer Cam's head-hiding capture, read-only.
+uint64_t g_lastAvatarMs = 0;   // frame thread only
+void avatarLine(uint64_t nowMs) {
+    if (!nativeOnFootActive()) return;
+    if (nowMs - g_lastAvatarMs < 5000) return;
+    g_lastAvatarMs = nowMs;
+    int32_t fade = 0;
+    char fadeText[24];
+    if (avatarFadeModeRead(&fade)) std::snprintf(fadeText, sizeof(fadeText), "%d", fade);
+    else std::snprintf(fadeText, sizeof(fadeText), "unreadable");
+    static LocalAvatarPart parts[64];
+    uint64_t amc = 0;
+    const uint32_t count = localAvatarParts(parts, 64, &amc);
+    if (!amc) {
+        Log::get().note("native on foot avatar: no local third-person avatar latched yet; fade mode %s (-1 auto, 0 off)", fadeText);
+        return;
     }
+    Log::get().note("native on foot avatar: local AMC 0x%llX, %u parts, fade mode %s (-1 auto, 0 off)", static_cast<unsigned long long>(amc),
+                    count, fadeText);
+    for (uint32_t i = 0; i < count; ++i) {
+        const LocalAvatarPart& p = parts[i];
+        if (!p.ok) {
+            Log::get().note("native on foot avatar: part=%s head=%s masks=unreadable", p.name, p.head ? "yes" : "no");
+            continue;
+        }
+        Log::get().note("native on foot avatar: part=%s head=%s masks=0x%llX,0x%llX,0x%llX,0x%llX", p.name, p.head ? "yes" : "no",
+                        static_cast<unsigned long long>(p.masks[0]), static_cast<unsigned long long>(p.masks[1]),
+                        static_cast<unsigned long long>(p.masks[2]), static_cast<unsigned long long>(p.masks[3]));
+    }
+}
+
+// The neck census (F1, log only): once a second, the head joint and the AMC origin the game's job thread sampled every 100 ms, and the
+// min and max of d = head - amc over that second. The spaces differ (avatar-root model space, then world), so d is not a camera offset;
+// the line names each space and says so.
+uint64_t g_neckWindowMs = 0;        // frame thread only: the start of the current second
+uint64_t g_neckStampSeen = 0;
+NeckCensusReading g_neckLast;
+bool g_neckHave = false;
+uint32_t g_neckSamples = 0;         // valid (head and amc read) samples in this second
+float g_neckDMin[3] = {}, g_neckDMax[3] = {};
+
+void neckFormat(const float* v, bool ok, char* out, size_t cap) {
+    if (ok) std::snprintf(out, cap, "(%.3f,%.3f,%.3f)", static_cast<double>(v[0]), static_cast<double>(v[1]), static_cast<double>(v[2]));
+    else std::snprintf(out, cap, "n/a");
+}
+
+void neckLine(uint64_t nowMs) {
+    if (!nativeOnFootActive()) {
+        g_neckSamples = 0;
+        g_neckWindowMs = 0;
+        return;
+    }
+    if (g_neckWindowMs == 0) g_neckWindowMs = nowMs;
+    NeckCensusReading r;
+    if (neckCensusRead(&r) && r.stamp != g_neckStampSeen) {
+        g_neckStampSeen = r.stamp;
+        g_neckLast = r;
+        g_neckHave = true;
+        if (r.state == 5 && r.amcState == 1) {
+            const float d[3] = {r.head[0] - r.amc[0], r.head[1] - r.amc[1], r.head[2] - r.amc[2]};
+            for (int i = 0; i < 3; ++i) {
+                if (g_neckSamples == 0 || d[i] < g_neckDMin[i]) g_neckDMin[i] = d[i];
+                if (g_neckSamples == 0 || d[i] > g_neckDMax[i]) g_neckDMax[i] = d[i];
+            }
+            ++g_neckSamples;
+        }
+    }
+    if (nowMs - g_neckWindowMs < 1000) return;
+    g_neckWindowMs = nowMs;
+    if (!g_neckHave) return;
+    const bool headOk = g_neckLast.state == 5, camOk = g_neckLast.amcState == 1 && headOk;
+    char head[64], cam[64], d[64], dmin[64], dmax[64];
+    neckFormat(g_neckLast.head, headOk, head, sizeof(head));
+    neckFormat(g_neckLast.amc, camOk, cam, sizeof(cam));
+    const float dNow[3] = {g_neckLast.head[0] - g_neckLast.amc[0], g_neckLast.head[1] - g_neckLast.amc[1], g_neckLast.head[2] - g_neckLast.amc[2]};
+    neckFormat(dNow, camOk, d, sizeof(d));
+    neckFormat(g_neckDMin, g_neckSamples > 0, dmin, sizeof(dmin));
+    neckFormat(g_neckDMax, g_neckSamples > 0, dmax, sizeof(dmax));
+    Log::get().note("native on foot neck: state=%u head=%s [avatar-root model space] cam=%s [AMC origin, world; the game camera is not read here] "
+                    "d=%s [two spaces: not a camera offset] d_min=%s d_max=%s samples=%u",
+                    g_neckLast.state, head, cam, d, dmin, dmax, g_neckSamples);
+    g_neckSamples = 0;
 }
 
 void gateLine(uint64_t nowMs) {
@@ -362,7 +511,10 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
     if (g_install == InstallState::NotTried) installOnce();
     if (g_install == InstallState::Armed) readKey();
     drainEvents();
-    gateLine(GetTickCount64());
+    const uint64_t now = GetTickCount64();
+    gateLine(now);
+    avatarLine(now);
+    neckLine(now);
 }
 
 }  // namespace edvr
