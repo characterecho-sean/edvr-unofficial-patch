@@ -3,8 +3,8 @@
 ## Status
 
 - **State:** F0 FLOWN OK (Epic, 10:50). F1 FLOWN (Epic; results below). F2 BUILT
-  d1e5ba54 (code, full build green), NOT FLOWN. Branch `claude/native-onfoot-vr-completion-219ffa`, off main until
-  ready (Sean). Not pushed.
+  c884e218 (code; full build green), NOT FLOWN. Branch
+  `claude/native-onfoot-vr-completion-219ffa`, off main until ready (Sean). Not pushed.
 - **Origin:** a user's handoff. A Cinema-to-HMD swap on disembark gave native
   stereo on foot; the HUD, radar, left panel and inventory were missing.
 - **Build:** Sean's installs hash to the handoff's exe (332841).
@@ -18,8 +18,7 @@
 - **F1 results (Epic):** avatar view masks of the local head parts non-zero; the
   fade global read -1 (auto) throughout, so nothing had forced the body opaque;
   neck: the stance drop is real, the walk bob is not (pilot); RemLok on foot is a
-  different draw (confirmed by census: PS 0x99C21CEB7A699821, DrawInstanced 3 x 1,
-  no depth, PS slot 1 2016x2016).
+  different draw (see Ruled out: that identification was wrong).
 - **Key finding:** every static test of the mode treats 3..6 as one class, so the
   missing HUD is not a mode branch to flip. H1 (leading): the on-foot HUD is
   screen-space, built for the flat frame; EDVR must place it.
@@ -29,25 +28,23 @@
   - H4: the game re-requests 6 about once a frame while substituted, so an on-foot
     state machine never sees cinema applied. Discriminator under gate: the setter
     stops receiving 6 each frame and the gate counters move.
-  - H5 (F2): the on-foot visor shares its PS hash with the HDR-to-display pass
-    (eye_tonemap_snapshot.h). Discriminator: the on-foot count is exactly 2 a frame,
-    and the picture is intact.
+- **OPEN, RemLok on foot:** the on-foot visor overlay is not yet identified. It
+  needs a skip-probe or a diff census that excludes the tonemap PS
+  0x99C21CEB7A699821 (tonemap_admit.h:39).
 - **Ruled out:** the cinema request is always 5 (see the end of this doc).
 - **Temporary keys (both go when the arc picks one):** `fix.native_on_foot`
-  (on/off, default off, VR, F8 Fixes page, live) and
-  `advanced.native_on_foot_method` (swap | gate, default gate, live, [advanced],
-  developer tier: no Fixes row).
-- **F2 changes (d1e5ba54):** gate: the setter never substitutes; EDVR holds the byte
+  (on/off, default off, VR, F8 Fixes page, live) and `fix.native_on_foot_method`
+  (swap | gate, default gate, live, F8 Fixes page directly under the one above).
+- **F2 changes (c884e218):** gate: the setter never substitutes; EDVR holds the byte
   at 0 while the key is on and a game session is live (identity and byte checked
   first). Native body: while native stereo is on foot, the fade global goes -1 to 0
   and the local head parts are zeroed, through Explorer Cam's code and its own
-  guard. RemLok: the on-foot visor signature, in native stereo only, own count.
-- **F2 log lines:** `native on foot: advanced.native_on_foot_method is gate|swap`;
+  guard. RemLok: unchanged from 0a99c094 (the on-foot matcher was removed).
+- **F2 log lines:** `native on foot: fix.native_on_foot_method is gate|swap`;
   `native on foot: gate byte EliteDangerous64.exe+0x5E82B3E 1 -> 0 (method gate)`,
   `0 -> 1 (restored: <why>)`, or `NOT written -- <why>`; setter lines read
   `reason=method_gate` under gate; `native on foot body: on (fade mode -1 -> 0, head
-  parts hidden)` / `off (fade restored -1: <why>)`; `remlok lines on foot: N overlay
-  draw(s) matched ...`. The F1 census lines are unchanged.
+  parts hidden)` / `off (fade restored -1: <why>)`. The F1 census lines are unchanged.
 - **Install:** Epic only (Sean: Frontier carries another feature test). `edvr.ini`
   is not touched unless `--ini` says so.
 - **Next:** Sean flies F2 on Epic: key on, method gate, disembark, walk, open the
@@ -183,6 +180,8 @@ mode and its context); W3 step 1-2 (dump comparison, offline).
   engaging 2 s later. This rig's HMD mode is 4, and the main menu also runs in
   4 (10:14:01, incoming=4). The pairs are 5/3 and 6/4.
 
+- ruled out: the on-foot RemLok overlay is the 3-vertex draw with PS 0x99C21CEB7A699821, because that is the tonemap (HDR-to-display) pass (tonemap_admit.h:39); the F1 census candidate was misidentified, caught before flight.
+
 ## Journal
 
 - **2026-10-13, F0 flight 3 (Epic, Pimax OpenXR, build v0.19.1-25-g15eb62b5,
@@ -224,3 +223,5 @@ mode and its context); W3 step 1-2 (dump comparison, offline).
   the visor draw from that pass. First flight: the on-foot count should read 2 a
   frame, and the picture should be intact with `remlok_lines = stock` as the
   comparison.
+
+- **2026-10-13, F2 correction (c884e218).** The on-foot RemLok matcher in the earlier F2 build (d1e5ba54) keyed on PS 0x99C21CEB7A699821, which is the flight-verified tonemap pass, not the visor. With remlok_lines = outer it would have scissored the whole eye. Removed; remlok_fix is back to 0a99c094. The method key moved from [advanced] to [fix] (F8 Fixes page) at the maintainer's request.
