@@ -2,7 +2,8 @@
 
 ## Status
 
-- **State:** EXPLORATION. No source changed. Branch
+- **State:** F0 BUILT 1535fb59, NOT FLOWN. Full build green; installed to
+  Frontier (VR profile, no --ini), `--verify-only` green. Branch
   `claude/native-onfoot-vr-completion-219ffa`; stays off main until ready to
   ship (Sean, 2026-10-13).
 - **Origin:** a user's handoff (not in the repo). They hooked Elite's
@@ -31,8 +32,30 @@
   OnFoot flag and will misfire on stereo eyes (world route, UI layer,
   footSplit, weapon pacing).
 - **Ruled out:** see the end of this doc.
-- **Temporary keys:** none yet. F0 would add one (`fix.native_on_foot`).
-- **Next:** Sean decides on F0 (below). Nothing builds before that.
+- **Temporary keys:** `fix.native_on_foot` (on/off, default off, VR only),
+  added by F0 (1535fb59) on the Fixes page. Removal is proposed, quoted, when
+  W1 ships as behaviour; nothing removes it before then.
+- **F0 instruments (1535fb59):** `src\d3d11\native_on_foot.cpp` (the setter
+  hook), `native_on_foot_core.h` (admission), `src\openxr\submit_shape.h`.
+  Hook: CodeHook on the setter at +0x28723C0, prologue and vtable slot
+  verified under SEH. Admission: key on, incoming 5, selector frozen at the
+  first valid call, and `journalGameplay()` (LoadGame seen, no Shutdown since).
+- **Read after the flight, in the d3d11 log:**
+  - `native on foot: installed --` or `NOT installed -- <reason>` (once, at the
+    first VR frame). Refusal reasons: identity, slot, prologue, CodeHook, flat.
+  - `native on foot: incoming=N effective=N source_after=N key=on|off
+    admitted=yes|no reason=... onfoot=... seated=... t=ms`: one per setter
+    call, key off or on. A natural incoming 3 is `admitted=no reason=not_cinema`.
+  - `native on foot gates: frames=N world_route=N ui_layer=N foot_split=N
+    deferred_pacing=N panel_shape=N transition_flash=N` every 5 s while native
+    stereo is on. Cumulative since launch.
+  - In the openvr runtime trace: `submit shape: left=WxH bounds=... right=WxH
+    bounds=... same_texture=yes|no`, once a second while frames are submitted.
+    Stereo eyes read as two eye-sized textures; the cinema panel as one shared
+    16:9 texture (`same_texture=yes`).
+- **Install:** Frontier, 1535fb59's tree. The install pruned 7 old backups
+  (newest 5 kept per file). `edvr.ini` was not touched.
+- **Next:** Sean flies F0 (the flight below). Nothing builds before that.
 
 ## What "finished" means
 
