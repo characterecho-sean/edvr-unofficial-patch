@@ -56,8 +56,11 @@
     bounds=... same_texture=yes|no`, once a second while frames are submitted.
     Stereo eyes read as two eye-sized textures; the cinema panel as one shared
     16:9 texture (`same_texture=yes`).
-- **Install:** Frontier, 1535fb59's tree. The install pruned 7 old backups
-  (newest 5 kept per file). `edvr.ini` was not touched.
+- **Install:** Frontier holds the befe91c1 build (pre-relay; its hook status
+  on Frontier is not yet read from a log). 84d0f3d4 is NOT
+  installed: the game was running (pid 26864), so the install was stopped
+  rather than forced. The promotion build is v0.19.1-21-g1327d891 (`--dll-only`
+  passed). `edvr.ini` was not touched.
 - **Next:** Sean flies F0 (the flight below). Nothing builds before that.
 
 ## What "finished" means
