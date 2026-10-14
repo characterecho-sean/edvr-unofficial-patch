@@ -2,7 +2,7 @@
 
 ## Status
 
-- **State:** F0-F12 FLOWN (Epic; journal). F13 BUILT (fe5fc500; green), NOT FLOWN.
+- **State:** F0-F12 FLOWN (Epic; journal). F13 and F14 BUILT (2484625d; green), NOT FLOWN.
   Branch `claude/native-onfoot-vr-completion-219ffa`; not pushed.
 - **Origin:** a user's handoff. A Cinema-to-HMD swap on disembark gave native
   stereo on foot; the HUD, radar, left panel and inventory were missing.
@@ -42,8 +42,8 @@
   0x99C21CEB7A699821 (tonemap_admit.h:39).
 - **Ruled out:** the cinema request is always 5 (see the end of this doc).
 - **Temporary keys (all go when the arc picks one):** `fix.native_on_foot`, `_method`, `_hud`,
-  `_panels`, `_hud_mesh`, `_hud_mesh_world`, `_hud_follow_order` and `_visor_up`, on the F8 page
-  "Native on foot". All default off and live.
+  `_panels`, `_hud_mesh`, `_hud_mesh_world`, `_hud_follow_order`, `_visor_up` and `_reticle_probe`,
+  on the F8 page "Native on foot". All default off and live.
 - **F2 changes (c884e218):** gate: the setter never substitutes; EDVR holds the byte
   at 0 while the key is on and a game session is live (identity and byte checked
   first). Native body: while native stereo is on foot, the fade global goes -1 to 0
@@ -425,3 +425,19 @@ mode and its context); W3 step 1-2 (dump comparison, offline).
   before: C . M). The head transform C comes from the list-B views' rotation rows and the mean of
   the first two views' positions. The composition order is base, then distance, then size, then
   the head. The visor override is a temporary test key.
+- **2026-10-14, F14 built (2484625d, NOT FLOWN).** Three pieces.
+  (1) Spread, a user setting (0.0..0.45, default 0, live): while native stereo is on foot and the
+  creation patch is in, the HUD margins +0x5E7A754 (x, game 0.027) and +0x5E7A758 (y, game 0.06) are
+  written 0.027 + spread and 0.06 + spread (clamped below 0.489). The game re-sends the layout when
+  the HRC's copies differ from these globals (0x1AB32F0), so nothing is forced. Restored on any stop.
+  (2) Layout probe (read only) on 0x1A0DCD0: the prologue was read from the exe with capstone; the
+  first five bytes are mov [rsp+0x20],rbx, with no rip-relative operand and no branch, so the steal
+  is clean. Each HUD part's layout re-send logs one line (name, anchor, offset, align, scale, out,
+  canvas size, the HRC's floats).
+  (3) Reticle identification stub (temporary, fix.native_on_foot_reticle_probe): the call at
+  0x1A15644 (call 0x434ECC0, preceded by mov rcx,[rsi+0x60] at 0x1A15640) was verified byte for
+  byte, with its rel32 target at 0x434ECC0. A stub passes the instance and node to a read-only probe,
+  then calls the real function. The probe writes nothing to the instance. The rel32 is one 4-byte
+  store inside a single 64-byte cache line, so it is single-copy atomic on x86; a qword CAS was not used.
+  Reticle setting: "Reticle follows: aim | head" is approved in principle; it is built once the
+  identification is known.
