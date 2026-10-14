@@ -2,8 +2,8 @@
 
 ## Status
 
-- **State:** F0-F4 FLOWN (Epic; journal). F5 BUILT e4f927bb (probes only), NOT FLOWN.
-  Branch `claude/native-onfoot-vr-completion-219ffa`; not pushed.
+- **State:** F0-F5 FLOWN (Epic; journal). F6 BUILT (95e491d7, merge c14e845b; green),
+  NOT FLOWN. Branch `claude/native-onfoot-vr-completion-219ffa`; not pushed.
 - **Origin:** a user's handoff. A Cinema-to-HMD swap on disembark gave native
   stereo on foot; the HUD, radar, left panel and inventory were missing.
 - **Build:** Sean's installs hash to the handoff's exe (332841).
@@ -28,13 +28,14 @@
 - **Open hypotheses:**
   - F4 (flown): every group enable byte reads 1 in cinema and native, and no view drops
     out; the HUD items are never queued. The data-gate candidates are not the answer.
-  - H7: the render-pass setup. Four slots (Primary, Secondary, Thumbnail, Auxiliary); the
-    PostGUI view nodes are created by 0x28A4B90 only when a pass's [p+0x2E0] is non-null
-    (the gate at 0x28A5577).
-- **F5 instruments (e4f927bb, TEMPORARY; remove after F5):** read-only hooks P1
-  +0x2854FA0 (pass enable), P2 +0x28A4D30 (the +0x2E0 gate), P3 +0x28A4B90 (view nodes),
-  each stolen 5; lines `native on foot pass enable|slot|hudnode [state]`. F3's stack and
-  avatar lines stay until the arc closes. F4's hooks are gone (history: cdae7a4d).
+  - H7 (ruled out, F5): the HUD view nodes are built once at startup in both modes, and the
+    only per-mode pass difference, W+0x38, has no reader.
+  - H8: the stereo eye index. A caller of the eye-index query drops mono-tagged HUD items
+    in stereo. E1 and E2 count the callers and the results per state.
+- **F6 instruments (95e491d7 + c14e845b, TEMPORARY; remove after F6):** read-only hooks E1
+  +0x2842FD0 (eye-index query, stolen 11) and E2 +0x28540B0 (stereo predicate, stolen 10);
+  lines `native on foot eye query|stereo pred [state]` and `native on foot eye totals`.
+  F5's pass probes are removed (history: e4f927bb). F3's stack and avatar lines stay.
 - **OPEN, RemLok on foot:** the on-foot visor overlay is not yet identified. It
   needs a skip-probe or a diff census that excludes the tonemap PS
   0x99C21CEB7A699821 (tonemap_admit.h:39).
@@ -54,9 +55,9 @@
   parts hidden)` / `off (fade restored -1: <why>)`. The F1 census lines are unchanged.
 - **Install:** Epic only (Sean: Frontier carries another feature test). `edvr.ini`
   is not touched unless `--ini` says so.
-- **Next:** F5 on Epic: key on, method gate, cinema first, then disembark, walk, open the
-  menu, board. Read the `native on foot pass` lines per state; the first-sighting lines
-  mark each mode and slot change.
+- **Next:** F6 on Epic: key on, method gate, cinema first, then disembark, walk, open the
+  menu, board. Read `native on foot eye query` and `stereo pred` per state: the caller and
+  the node class, and the totals for the per-frame cost.
 
 ## What "finished" means
 
@@ -192,6 +193,8 @@ mode and its context); W3 step 1-2 (dump comparison, offline).
 
 - ruled out: the HUD is gated on the cinema re-request loop (H4), because under the gate method the game requested HMD itself with no re-requests and still drew no HUD (F2 13:09:43-13:12:23).
 - ruled out: EDVR's UI layer hides the HUD (H5), because fix.ui_quality was off from 13:25:06 through a native window 13:25:44-13:27:03, and still no HUD.
+- ruled out: the HUD view node is missing in HMD mode, because 0x28A4B90 built slot 0/1 nodes once at startup and never re-ran across mode switches (F5).
+- ruled out: the cinema flag W+0x38 gates the HUD, because nothing reads it (static, 4 methods).
 - ruled out: the HUD is gated by a per-group enable byte (+0x30), because all 25 group vtables read 1 in cinema and native (F4).
 - ruled out: the HUD is dropped by the per-item view-mask test, because that test selects views (one-hot masks) and native serves a superset of cinema's views (F4).
 - ruled out: the view masks exclude the 3P body from the native view, because its masks are a superset of the FP body's (F3 14:06:20).
@@ -277,3 +280,17 @@ mode and its context); W3 step 1-2 (dump comparison, offline).
   (0x2854FA0), P2 the +0x2E0 gate (0x28A4D30), P3 view-node creation (0x28A4B90). Each
   reads under SEH and forwards the registers unchanged. Aggregates every 5 s per state;
   the first sighting of each mode or slot change is written at the next frame boundary.
+- **2026-10-13, F5 FLOWN (Epic).** The PostGUI view nodes are built once at startup in both
+  modes. The only per-mode pass difference is W+0x38, and static RE finds nothing reads it.
+  Next candidate: a stereo eye-index query, reached only through vtables. Ruled out: the HUD
+  view node is missing in HMD mode (see Ruled out). The cinema bit gates only the
+  CinemaPipelineFeature, its node and output, not the UI (+0x2D0) or PostGUI (+0x2E0)
+  features. The 0x4C82A40 recorder is the generic gfModel batch executor. No game-side HUD
+  code reads VR state directly.
+- **2026-10-13, F6 built (95e491d7, merged main twice: b355af9a and c14e845b; green, NOT
+  FLOWN).** The F5 pass probes are removed (history e4f927bb). Two read-only probes: E1 the
+  eye-index query at 0x2842FD0 (returns 0, 1 or 2; classifies the node as slot0, slot1 or
+  other against the two slot nodes) and E2 the stereo leaf predicate at 0x28540B0 (returns
+  al; reads the mode and the flag byte at [S+0x2AE0]). Aggregates per 5 s, per state; a key
+  is announced when first seen. The local debug layer is now present, so the debug-layer
+  checks are real here (main fixed the isolation check in 3fd97a97).
