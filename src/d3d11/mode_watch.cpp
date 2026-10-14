@@ -44,7 +44,8 @@ using modewatch::Step;
 using modewatch::Watch;
 
 constexpr DWORD kMaxWaitMs = 1000;     // the stat backup and the openvr check run at this interval
-constexpr uint64_t kRetryMs = 100;     // a read that cannot open its file is retried this often
+constexpr uint64_t kSubmitPollMs = 250;  // while a live rise waits for the first eye submit, the wait ends this often
+constexpr uint64_t kRetryMs = 100;    // a read that cannot open its file is retried this often
 constexpr int kMaxRetries = 20;        // per write; then the watch waits for the next event
 constexpr uint64_t kIgnoredLogMs = 1000;  // an unknown read repeats while the file stays invalid; its log line comes this often at most
 constexpr size_t kMaxSettingsBytes = 1024 * 1024;
@@ -126,6 +127,8 @@ private:
             const uint64_t next = timedReadAt();
             if (next && next < wake) wake = next;
             const uint64_t now = nowMs();
+            // While a live rise waits for the first eye submit the wait is short, so the flip follows the first submit closely.
+            if (watch_.awaitingSubmits() && (wake == 0 || wake > now + kSubmitPollMs)) wake = now + kSubmitPollMs;
             DWORD timeout = kMaxWaitMs;
             if (wake) timeout = wake > now ? static_cast<DWORD>(std::min<uint64_t>(kMaxWaitMs, wake - now)) : 0;
 
@@ -140,6 +143,7 @@ private:
                 // A hint can land before the event exists or be missed while the worker is between waits; the bits are read here too.
                 if (g_hints.load(std::memory_order_acquire)) handleHints();
                 sampleSubmits(nowMs());
+                checkAwaitedSubmits(nowMs());
                 checkWrite(true);
                 checkOpenVr();
             } else {
@@ -174,11 +178,17 @@ private:
             Log::get().note("mode watch: hint window t=%llu", static_cast<unsigned long long>(now));
         if (bits & static_cast<uint32_t>(ModeHint::LiveRise)) {
             Log::get().note("mode watch: hint live-rise t=%llu", static_cast<unsigned long long>(now));
-            // A live runtime with no file write (Epic's "Launch in VR") posts Vr here, before the read below.
-            const Step s = watch_.onLiveRise(now);
-            if (s.outcome == Outcome::Posted) {
-                postMode(now, GameMode::Vr, true);
-                Log::get().note("mode watch: live-rise t=%llu -> posted vr", static_cast<unsigned long long>(now));
+            // A live runtime alone does not post Vr: the runtime goes live for a cold flat start too (Elite loads openvr_api.dll with
+            // no /novr). A live runtime with no file write (Epic's "Launch in VR") posts Vr once the game submits an eye frame
+            // (checkAwaitedSubmits), a second or two later.
+            const bool wasWaiting = watch_.awaitingSubmits();
+            watch_.onLiveRise(now);
+            if (watch_.awaitingSubmits()) {
+                if (!wasWaiting) {
+                    riseSubmits_ = submitsAtSample_;  // submits since the last sample count: Epic's can start before the hint lands
+                    Log::get().note("mode watch: live session without eye submits -- staying flat until the game submits (eye submits last "
+                                    "1 s: %llu)", static_cast<unsigned long long>(lastSecondSubmits_));
+                }
             } else {
                 Log::get().note("mode watch: live-rise t=%llu -> nothing", static_cast<unsigned long long>(now));
             }
@@ -215,6 +225,17 @@ private:
         else if (!flowing && flowing_)
             Log::get().note("mode watch: eye submits stopped t=%llu", static_cast<unsigned long long>(now));
         flowing_ = flowing;
+    }
+
+    // A live rise found the profile flat and is waiting for the game's first eye submit. The first submit past the rise's baseline posts
+    // Vr (source "live-rise"); a flat start never submits one, so it stays flat.
+    void checkAwaitedSubmits(uint64_t now) {
+        if (!watch_.awaitingSubmits() || nativeFrameLatchedFrames() <= riseSubmits_) return;
+        const Step s = watch_.onEyeSubmits(now);
+        if (s.outcome != Outcome::Posted) return;
+        postMode(now, GameMode::Vr, true);
+        Log::get().note("mode watch: eye submits began after the live session; the game is a VR game");
+        Log::get().note("mode watch: live-rise t=%llu -> posted vr", static_cast<unsigned long long>(now));  // edvr_log.py parses this line
     }
 
     // The suffix every read and write line carries: the last full second's eye submits (zero until the first sample completes).
@@ -353,6 +374,7 @@ private:
     uint64_t nextSampleMs_ = 0;
     uint64_t lastSecondSubmits_ = 0;
     bool flowing_ = false;
+    uint64_t riseSubmits_ = 0;  // the eye-submit counter a live rise's wait starts from
 };
 
 // The settings patched into the game or the device at creation (design section 3.4, Q7). They keep the launch's values until the next

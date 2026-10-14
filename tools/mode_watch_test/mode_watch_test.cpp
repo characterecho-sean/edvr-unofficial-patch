@@ -98,32 +98,89 @@ void hintNoChange() {
     check(!vr.stale() && !flat.stale(), "launches whose file matches the class they run are not stale");
 }
 
+// A live rise over a flat commit that the game has begun submitting eye frames to: the rise only starts the wait, the first submit posts.
+Step riseThenSubmits(Watch& w, uint64_t t) {
+    w.onLiveRise(t);
+    return w.onEyeSubmits(t + 1000);
+}
+
 void liveRise() {
     Watch flat(GameMode::Flat, GameMode::Flat);
     const Step rise = flat.onLiveRise(0);
-    check(outcomeIs(rise, Outcome::Posted) && rise.mode == GameMode::Vr && flat.committed() == GameMode::Vr,
-        "live rise from a flat launch: posted Vr");
+    check(outcomeIs(rise, Outcome::Nothing) && flat.committed() == GameMode::Flat && flat.awaitingSubmits(),
+        "live rise from a flat launch: nothing posted, flat stays, the wait for eye submits starts");
+    const Step submits = flat.onEyeSubmits(1000);
+    check(outcomeIs(submits, Outcome::Posted) && submits.mode == GameMode::Vr && flat.committed() == GameMode::Vr && !flat.awaitingSubmits(),
+        "live rise then eye submits from a flat launch: posted Vr");
 
     Watch vr(GameMode::Vr, GameMode::Vr);
-    check(outcomeIs(vr.onLiveRise(0), Outcome::Nothing) && vr.committed() == GameMode::Vr,
-        "live rise from a Vr launch: nothing");
+    check(outcomeIs(vr.onLiveRise(0), Outcome::Nothing) && vr.committed() == GameMode::Vr && !vr.awaitingSubmits(),
+        "live rise from a Vr launch: nothing, no wait");
+    check(outcomeIs(vr.onEyeSubmits(10), Outcome::Nothing) && vr.committed() == GameMode::Vr,
+        "eye submits from a Vr launch: nothing");
 
     Watch after(GameMode::Vr, GameMode::Vr);
     afterWrite(after, 0, readOf(GameMode::Flat));
     afterWrite(after, 250, readOf(GameMode::Flat));
     check(after.committed() == GameMode::Flat, "live rise after a posted Flat: flat committed first");
-    const Step again = after.onLiveRise(300);
+    const Step again = riseThenSubmits(after, 300);
     check(outcomeIs(again, Outcome::Posted) && again.mode == GameMode::Vr && after.committed() == GameMode::Vr,
-        "live rise after a posted Flat: posted Vr");
+        "live rise then eye submits after a posted Flat: posted Vr");
+}
+
+// A cold flat start: Elite loads openvr_api.dll, the runtime goes live, the game never submits a stereo frame. The profile must stay Flat,
+// however many times the watch is asked, and the file's unchanged 0 reads as plain same (nothing stale).
+void liveWithoutSubmitsStaysFlat() {
+    Watch w(GameMode::Flat, GameMode::Flat);
+    w.onLiveRise(2000);
+    check(w.committed() == GameMode::Flat && w.awaitingSubmits() && !w.stale(),
+        "live session with zero eye submits: stays flat, waiting, the file is not stale");
+    const Step hinted = hint(w, 2000, readOf(GameMode::Flat));
+    check(outcomeIs(hinted, Outcome::Same) && w.committed() == GameMode::Flat,
+        "live session with zero eye submits: the hint read of the file's 0 is same, flat");
+    w.onLiveRise(5000);
+    check(w.committed() == GameMode::Flat && w.awaitingSubmits(), "a second live rise with zero eye submits: still flat, still waiting");
+    const Step toVr = afterWrite(w, 9000, readOf(GameMode::Vr));
+    check(outcomeIs(toVr, Outcome::Pending) && toVr.mode == GameMode::Vr, "live session with zero submits: a later write of 4 is pending Vr");
+    const Step toVrConfirm = w.onRead(9250, readOf(GameMode::Vr), false);
+    check(outcomeIs(toVrConfirm, Outcome::Posted) && w.committed() == GameMode::Vr && !w.awaitingSubmits(),
+        "live session with zero submits: the confirmed file write posts Vr and ends the wait");
+}
+
+// Eye submits with no live rise before them (a submit counter that moves in a process whose rise was never seen) post nothing: the wait is
+// what arms the flip.
+void submitsWithoutRiseDoNothing() {
+    Watch w(GameMode::Flat, GameMode::Flat);
+    check(outcomeIs(w.onEyeSubmits(0), Outcome::Nothing) && w.committed() == GameMode::Flat,
+        "eye submits with no live rise: nothing posted");
+}
+
+// A /vr launch and a /novr launch are unchanged by the wait: /vr runs Vr from the start (a rise is nothing, no wait); /novr runs Flat over
+// a Vr file, and its live session (the runtime still loads) stays flat until a submit, which a /novr process never makes.
+void launchOverridesUnchanged() {
+    Watch vrLaunch(GameMode::Flat, GameMode::Vr);
+    check(vrLaunch.committed() == GameMode::Vr, "/vr launch: runs Vr from the start");
+    check(outcomeIs(vrLaunch.onLiveRise(50), Outcome::Nothing) && vrLaunch.committed() == GameMode::Vr && !vrLaunch.awaitingSubmits(),
+        "/vr launch: a live rise is nothing and starts no wait");
+    check(vrLaunch.stale(), "/vr launch over a flat file: the file stays stale");
+
+    Watch novrLaunch(GameMode::Vr, GameMode::Flat);
+    check(novrLaunch.committed() == GameMode::Flat && novrLaunch.stale(), "/novr launch over a Vr file: runs Flat, the file is stale");
+    novrLaunch.onLiveRise(50);
+    check(novrLaunch.committed() == GameMode::Flat, "/novr launch: a live rise alone stays flat");
+    const Step unchanged = hint(novrLaunch, 60, readOf(GameMode::Vr));
+    check(outcomeIs(unchanged, Outcome::Ignored) && unchanged.staleFile && novrLaunch.committed() == GameMode::Flat,
+        "/novr launch: the hint read of the Vr file is ignored (stale), flat stays");
 }
 
 // A live rise does not cancel a pending file change; the confirm of that change finds the class already posted.
 void liveRiseDuringPending() {
     Watch w(GameMode::Flat, GameMode::Flat);
     afterWrite(w, 0, readOf(GameMode::Vr));
-    const Step rise = w.onLiveRise(100);
+    w.onLiveRise(100);
+    const Step rise = w.onEyeSubmits(1100);
     check(outcomeIs(rise, Outcome::Posted) && rise.mode == GameMode::Vr && w.committed() == GameMode::Vr,
-        "live rise while a Vr file change is pending: posted Vr");
+        "live rise then eye submits while a Vr file change is pending: posted Vr");
     check(w.pending() && w.confirmDueMs() == 250, "live rise while pending: the pending change is kept, due unchanged");
     const Step confirm = w.onRead(250, readOf(GameMode::Vr), false);
     check(outcomeIs(confirm, Outcome::Same) && w.committed() == GameMode::Vr && !w.pending(),
@@ -134,9 +191,9 @@ void liveRiseDuringPending() {
 // of that unchanged 0 is ignored (stale); a write that holds Vr clears the staleness with nothing posted; a later write of 0 posts Flat.
 void liveRiseOverFlatFile() {
     Watch w(GameMode::Flat, GameMode::Flat);
-    const Step rise = w.onLiveRise(0);
+    const Step rise = riseThenSubmits(w, 0);
     check(outcomeIs(rise, Outcome::Posted) && rise.mode == GameMode::Vr && w.committed() == GameMode::Vr && w.stale(),
-        "live rise over a flat file: posted Vr, the file is stale");
+        "live rise then eye submits over a flat file: posted Vr, the file is stale");
     const Step hinted = hint(w, 100, readOf(GameMode::Flat));
     check(outcomeIs(hinted, Outcome::Ignored) && hinted.staleFile && !w.pending() && w.committed() == GameMode::Vr,
         "live rise over a flat file: a hint read of the unchanged 0 is ignored (stale file), nothing posted");
@@ -309,6 +366,9 @@ int main(int argc, char** argv) {
     confirmDisagrees();
     hintNoChange();
     liveRise();
+    liveWithoutSubmitsStaysFlat();
+    submitsWithoutRiseDoNothing();
+    launchOverridesUnchanged();
     liveRiseDuringPending();
     liveRiseOverFlatFile();
     threeToggles();

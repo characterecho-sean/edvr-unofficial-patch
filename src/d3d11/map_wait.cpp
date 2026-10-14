@@ -20,11 +20,13 @@ void mapWaitArm(bool on) {
 MapWaitTotals mapWaitTake() {
     MapWaitTotals t;
     t.readCalls = detail::g_readCalls.exchange(0, std::memory_order_relaxed);
-    t.readTicks = detail::g_readTicks.exchange(0, std::memory_order_relaxed);
+    // The calls are exact. The sampled ticks and slow calls are scaled to the whole (map_wait_sample.h); the longest
+    // is a real measured call, not an estimate, so it is not scaled.
+    t.readTicks = mapWaitScaleSampled(detail::g_readTicks.exchange(0, std::memory_order_relaxed));
     t.writeCalls = detail::g_writeCalls.exchange(0, std::memory_order_relaxed);
-    t.writeTicks = detail::g_writeTicks.exchange(0, std::memory_order_relaxed);
+    t.writeTicks = mapWaitScaleSampled(detail::g_writeTicks.exchange(0, std::memory_order_relaxed));
     t.longestTicks = detail::g_longestTicks.exchange(0, std::memory_order_relaxed);
-    t.slowCalls = detail::g_slowCalls.exchange(0, std::memory_order_relaxed);
+    t.slowCalls = mapWaitScaleSampled(detail::g_slowCalls.exchange(0, std::memory_order_relaxed));
     return t;
 }
 

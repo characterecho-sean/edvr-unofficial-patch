@@ -50,6 +50,10 @@
   its four sibling keys and `advanced.cull_guard_channel`) no longer exists; the
   tables below that list it are the 2026-09-30 design, not the code. The FOV
   trim stays, on its own engine (`native_fov_trim.h`).
+- **Removed 2026-10-13 (transition flash switch):** `fix.transition_flash` no
+  longer exists; the flash hold is always on in the VR profile and the fallback
+  detector is gone. The "comfort" rows below that list the flash fix as a
+  switchable plugin are the 2026-09-30 design, not the code.
 - **Ruled out while designing:** loading every DLL found in a folder (DLL
   planting; the installer's receipts already know what it installed), a
   stable ABI for first-party plugins (they ship with the core; freezing

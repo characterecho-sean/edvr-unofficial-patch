@@ -28,7 +28,9 @@ static std::vector<LegacyContract> extraLegacyContracts() { return {
     {"fss_heal_cs","main","cs_5_0",nullptr,0xE8DA07272D9394EBull},
     {"fss_mirror_cs","main","cs_5_0",nullptr,0xCF8ED1F8A5128648ull},
     {"depth_probe_cs","main","cs_5_0",nullptr,0x81178F52E95106A3ull},
-    {"render_sharpen_cs","main","cs_5_0",nullptr,0x55C78550EA904C99ull},
+    // Re-pinned 2026-10-13 on purpose: the thread group is 16x16, not 8x8 (the launch of 254,000 groups was the cost of the pass at the eye's
+    // size: 0.131 ms an eye against 0.089; ui_holo_pass_test --bench-groups holds the two byte for byte). Was 0x55C78550EA904C99.
+    {"render_sharpen_cs","main","cs_5_0",nullptr,0xB73534CE8AA56CDBull},
     {"intro easu","main","cs_5_0",nullptr,0x4637348A10CA6AD8ull},
     {"intro rcas","main","cs_5_0",nullptr,0xCB221BA6DFFEE904ull},
     {"intro cubic","main","cs_5_0",nullptr,0x996C28B7D66A5782ull},

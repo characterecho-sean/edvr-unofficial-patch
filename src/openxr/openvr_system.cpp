@@ -256,7 +256,13 @@ void OpenVRSystem::GetDeviceToAbsoluteTrackingPose(ETrackingUniverseOrigin origi
   const bool located=source_.locateHeadFor(s.generation,origin,prediction,call,p);if(located)poses[0]=p;
   trace.finishVoid(located?1:0);
 }
-void OpenVRSystem::ResetSeatedZeroPose() { const auto s=source_.read();if(!live(s)||!source_.resetSeated(s.generation))unavailable(11); }
+void OpenVRSystem::ResetSeatedZeroPose() {
+  // Who asked, taken here on the caller's own thread (the owner the reset hops to cannot tell): the seat memory logs it with every reset.
+  const auto caller=reinterpret_cast<uintptr_t>(_ReturnAddress());
+  const auto s=source_.read();
+  HeadCall call;call.thread=GetCurrentThreadId();call.rva=frameRva(exe_,caller);
+  if(!live(s)||!source_.resetSeatedFor(s.generation,call))unavailable(11);
+}
 HmdMatrix34_t OpenVRSystem::GetSeatedZeroPoseToStandingAbsoluteTrackingPose() {
   const auto s=source_.read();if(live(s)&&s.seatedToStandingValid)return s.seatedToStanding;unavailable(12);return {};
 }

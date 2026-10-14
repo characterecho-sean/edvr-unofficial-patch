@@ -97,6 +97,10 @@ UiFlatPanelRefuse g_flatRefuse = UiFlatPanelRefuse::kUnknown;  // this frame's r
 uint64_t g_flatRefusedFrames = 0;             // frames the inputs were refused, this 30 s window
 bool g_flatAaOff = false;                     // the factor is held at 1 because the anti-aliasing is off
 
+// ------------------------------------------- the VR profile's anti-aliasing gate (2026-10-13)
+std::atomic<bool> g_vrTemporal{false};        // VR's temporal anti-aliasing is on (uiPanelScaleSetVrTemporal)
+std::atomic<bool> g_vrAaOn{true};             // the last reading (read by the 30 s line too); a change is logged once (no line while it stays on)
+
 // ------------------------------------------------------------ the checks
 
 // No destructors in the guarded readers: __try is illegal where unwinding is
@@ -773,6 +777,27 @@ void uiPanelScaleFrameBoundary() {
         flatFrameBoundary(target);
         return;
     }
+    // VR with anti-aliasing off (2026-10-13): the key's panels are the game's own size, as with the key off. One line on each change.
+    const bool vrAaOn = g_vrTemporal.load(std::memory_order_acquire);
+    const UiPanelAaEdge aaEdge = uiPanelAaEdge(g_vrAaOn, vrAaOn);
+    g_vrAaOn = vrAaOn;
+    if (aaEdge == UiPanelAaEdge::kOff)
+        Log::get().note("ui quality: panel scaling off while temporal AA is off (the setting stays %.0f%%)",
+                        static_cast<double>(target) * 100.0);
+    else if (aaEdge == UiPanelAaEdge::kOn)
+        Log::get().note("ui quality: panel scaling on again: temporal AA is on (the setting stays %.0f%%)",
+                        static_cast<double>(target) * 100.0);
+    if (!vrAaOn) {
+        if (g_live.load(std::memory_order_acquire) || g_written != 1.0) {
+            writeFloats(1.0);
+            g_written = 1.0;
+            g_lastSsEff = 1.0;
+            g_live.store(false, std::memory_order_release);
+        }
+        g_pending = -1.0;
+        g_settle = 0;
+        return;
+    }
     UiPanelInputs in;
     uint32_t askW = 0, askH = 0;
     float hmd = 0.0f, up = 0.0f, down = 0.0f, trueUp = 0.0f, trueDown = 0.0f;
@@ -871,6 +896,8 @@ void uiPanelScaleFrameBoundary() {
 }
 
 void uiPanelScaleSetFlatTemporal(bool on) { g_flatTemporal.store(on, std::memory_order_release); }
+
+void uiPanelScaleSetVrTemporal(bool on) { g_vrTemporal.store(on, std::memory_order_release); }
 
 namespace {
 
@@ -1084,11 +1111,11 @@ void uiPanelScaleLog() {
     }
     if (!g_live.load(std::memory_order_acquire)) {
         Log::get().note("ui quality: panels: patched, not sizing -- %s. Supersampling: %s. %s.",
-                        g_target.load(std::memory_order_acquire) > 0.0f
-                            ? "the factor's inputs are not all known yet (HMD Quality, Elite's "
-                              "Supersampling, the frame's frustum, the headset's, the runtime's size); "
-                              "until they are the panels stay at the game's own size"
-                            : "the key is off: the game's own sizes",
+                        g_target.load(std::memory_order_acquire) <= 0.0f ? "the key is off: the game's own sizes"
+                        : !g_vrAaOn ? "temporal AA is off: the game's own sizes until it is on"
+                        : "the factor's inputs are not all known yet (HMD Quality, Elite's "
+                          "Supersampling, the frame's frustum, the headset's, the runtime's size); "
+                          "until they are the panels stay at the game's own size",
                         live, net);
         return;
     }

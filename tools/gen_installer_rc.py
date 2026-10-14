@@ -53,7 +53,10 @@ def flat_ini_bytes():
             b'[fix]\r\ntemporal_aa = off\r\ntemporal_aa_model = k\r\nui_quality = 100\r\n\r\n'
             b'[hotkey]\r\nmenu = F8\r\ndump_draws = NUMLOCK\r\n\r\n'
             b'[log]\r\nenabled = 1\r\n\r\n'
-            b'[advanced]\r\nreal_dll =\r\n')
+            b'[advanced]\r\n'
+            b'# The mod EDVR chains through (EDHM, ReShade) is set once, in edvr.ini, and applies to the flat profile too.\r\n'
+            b'# Leave this empty to use that. A file name here overrides it for flat; none runs flat without the chain.\r\n'
+            b'real_dll =\r\n')
 
 
 def descriptor_bytes():

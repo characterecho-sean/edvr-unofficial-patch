@@ -20,6 +20,7 @@
 #include "../../src/common/system_d3d11.h"
 #include "../../src/d3d11/glitch_frame.h"
 #include "../../src/d3d11/transition_flash_eye_base.h"
+#include "../../src/common/runtime_profile.h"
 #pragma comment(linker, "/EXPORT:edvrAcquireNativeTemporal")
 using Microsoft::WRL::ComPtr;
 unsigned checks=0,failures=0,dumps=0;
@@ -78,6 +79,9 @@ void vrWorldRouteNoteSceneReset(){++worldRouteSceneResets;}}
 // The terrain cull cover (src/d3d11/terrain_cull_cover_hook.cpp, docs/terrain-culling.md), which begin() tells the frusta the game is handed: recorded here, asserted below.
 unsigned coverNotes=0;float coverLast[2][4]{};
 namespace edvr{void terrainCullCoverNoteFrusta(const float f[2][4]){++coverNotes;std::memcpy(coverLast,f,sizeof(coverLast));}}
+// The light grid cache's jitter probe (src/d3d11/light_grid_cache_hook.cpp), which begin() tells this frame's jitter: recorded here, asserted below.
+unsigned jitterNotes=0;float jitterLastShift[2][2]{};
+namespace edvr{void lightGridCacheNoteJitter(uint64_t,float,float,const float shift[2][2]){++jitterNotes;std::memcpy(jitterLastShift,shift,sizeof(jitterLastShift));}}
 // The served floor's NGX query (dlaa.cpp), shaped the way the flights'
 // modes lines read (edvr_gfx_20260923_153446.log line 435): quality,
 // balanced and performance take half the output up to the output, ultra
@@ -143,7 +147,7 @@ HRESULT treat(EdvrNativeTemporalTable& t,uint64_t seq,unsigned eye,ID3D11Texture
 
 // ---- The glue rig (review of 33ffc76e, finding F) ---------------------------------------------------------------------------
 // The chain no other rig covers end to end, on the production pieces: the engine fix's consume classifier -> event ->
-// the detector's camera-buffer Unmap tap (glitch_frame.cpp's glitchFrameObserve) -> the hold mark -> the two eye submits as
+// the camera-buffer Unmap tap (glitch_frame.cpp's glitchFrameObserve) -> the hold mark -> the two eye submits as
 // native_frame.cpp's latchSubmit hands them to the temporal channel (marked -> skipEye with the verdict word read at that
 // moment, otherwise treat) -> the frame boundary that owes the verdict -> the first resumed treat. Linked: glitch_frame.cpp,
 // transition_flash_eye_base.cpp, frame_flag.cpp, native_temporal.cpp. Not linked: the game hooks (the consume is fed a
@@ -169,7 +173,7 @@ void glueStep(GlueRig& r,bool consumeReset,unsigned headFills,unsigned worldFill
     if(marked){check(r.t->skipEye(r.t->context,r.seq,eye,1,verdict)==S_OK,"glue: the held eye is skipped");++r.skippedEyes;}
     else{check(treat(*r.t,r.seq,eye,r.src)==S_OK,"glue: an unheld eye is treated");++r.treated;if(calls.back().flags&1)++r.resets;}
   }
-  edvr::glitchFrameBoundary(0);
+  edvr::glitchFrameBoundary();
   edvr::transitionFlashEyeBaseFrameBoundary(++r.boundary);
 }
 void glueSettle(GlueRig& r){for(unsigned i=0;i<8;++i)glueStep(r,false,0,1);}
@@ -182,7 +186,9 @@ void glue(EdvrNativeTemporalTable& t,ID3D11Texture2D* source,uint64_t gen,uint64
   std::memset(g_glueCbHead,0,sizeof(g_glueCbHead));std::memset(g_glueCbWorld,0,sizeof(g_glueCbWorld));
   g_glueCbHead[1100]=0.05f;g_glueCbHead[1101]=-0.016f;g_glueCbHead[1102]=0.016f;      // the bad frame's row 275 (flight 060955)
   g_glueCbWorld[1100]=6.119f;g_glueCbWorld[1101]=-3.432f;g_glueCbWorld[1102]=11.511f; // an ordinary eye origin
-  edvr::Config::get().set("fix.transition_flash","1");
+  // A stale "off" line from an older edvr.ini, kept in the config the whole case: the setting is gone, so every hold
+  // below runs with it present and must not care. (The install path's own no-key check is the last block.)
+  edvr::Config::get().set("fix.transition_flash","0");
   edvr::installGlitchFrameFix();
   char why[256]="";
   check(edvr::glitchFrameEngineTapAvailable(why,sizeof(why)),"glue: the tap is available with the default buffer");
@@ -257,6 +263,28 @@ void glue(EdvrNativeTemporalTable& t,ID3D11Texture2D* source,uint64_t gen,uint64
     check(b.skipped==a.skipped&&r.resets==baseResets,"glue: an unarmed engine fix leaves the temporal pass alone");
     edvr::transitionFlashEyeBaseArmForTest();
   }
+  { // The install path reads no setting: the hold is always on in the VR profile. Run for real (the test process is not
+    // build 332841, so the identity check refuses and nothing is hooked; what is asserted is that install RAN).
+    edvr::transitionFlashEyeBaseResetForTest();
+    check(!edvr::transitionFlashEyeBaseInstallAttemptedForTest(),"glue: install: the reset leaves a process that never installed");
+    edvr::Config::get().set("fix.transition_flash","0");
+    edvr::transitionFlashEyeBaseInstall();
+    check(edvr::transitionFlashEyeBaseInstallAttemptedForTest(),"glue: install: runs with a stale fix.transition_flash = 0 present (the hold has no key)");
+    check(!edvr::transitionFlashEyeBaseArmed(),"glue: install: the test process is not the game build, so nothing is armed");
+    edvr::transitionFlashEyeBaseResetForTest();
+    edvr::Config::get().set("fix.transition_flash","1");
+    edvr::transitionFlashEyeBaseInstall();
+    check(edvr::transitionFlashEyeBaseInstallAttemptedForTest(),"glue: install: runs with the old \"on\" line present too");
+    edvr::transitionFlashEyeBaseResetForTest();
+    edvr::runtimeProfileSet(edvr::RuntimeProfile::Flat);
+    edvr::transitionFlashEyeBaseInstall();
+    check(!edvr::transitionFlashEyeBaseInstallAttemptedForTest(),"glue: install: the flat profile has no compositor to hold a frame and installs nothing");
+    edvr::runtimeProfileSet(edvr::RuntimeProfile::Vr);
+    edvr::transitionFlashEyeBaseInstall();
+    check(edvr::transitionFlashEyeBaseInstallAttemptedForTest(),"glue: install: a switch to the VR profile installs it then");
+    edvr::transitionFlashEyeBaseResetForTest();
+    edvr::runtimeProfileSet(edvr::RuntimeProfile::LegacyVr);
+  }
   edvr::shutdownGlitchFrameFix();
 }
 
@@ -268,6 +296,7 @@ void run(){
   check(!edvr::nativeTemporalWarmTarget(&warmDev,&warmThread),"no warm target before any channel is acquired");
   Device d;auto source=d.texture();auto t=acquire(d,11);auto f=frame(11,1);auto p=begin(t,f);
   check(coverNotes>=1&&std::memcmp(coverLast,f.frusta,sizeof(coverLast))==0,"the terrain cull cover is told the frusta the game is handed (the begun frame's, as given)");
+  check(jitterNotes>=1&&jitterLastShift[0][0]==p.tangentShift[0][0]&&jitterLastShift[1][1]==p.tangentShift[1][1],"the light grid cache's jitter probe is told the shift the game is handed (the begun frame's)");
   warmDev=nullptr;warmThread=0;
   check(edvr::nativeTemporalWarmTarget(&warmDev,&warmThread)&&warmDev==d.device.Get()&&warmThread==GetCurrentThreadId(),
       "warm target names the acquiring thread and device");

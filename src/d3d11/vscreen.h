@@ -43,8 +43,8 @@ void vScreenExecuteCommandListRaw(ID3D11DeviceContext*,ID3D11CommandList*,int re
 // rendered rather than a menu.
 //
 // Measured, not chosen: menu-only sessions peak at 20 and 22 (2026-08-14
-// 15:48, 2026-08-15 16:21, neither reaching LoadGame) and the flash detector's
-// own validation saw 0-to-22 over 300 menu frames, while gameplay clears 100
+// 15:48, 2026-08-15 16:21, neither reaching LoadGame) and a
+// 300-frame validation saw 0-to-22 over menu frames, while gameplay clears 100
 // even in sessions quit seconds after loading in (peaks of 119 and 126)
 // against session peaks of 975 on a Quest 3 and 1074 on a Pimax.
 //
@@ -67,7 +67,7 @@ constexpr uint32_t kSceneEyeDraws = 100;
 // (FSR and NIS "ultra quality" are exactly this 1.3x) do. The exact-size test
 // matched only the handful of final passes, so the eye-draw count read 18 for
 // a whole session and EVERY fix keyed to it was inert: Explorer Cam, the
-// transition flash detector, the RemLok lines, the loading hologram and the
+// RemLok lines, the loading hologram and the
 // witchspace star.
 //
 // Shape and scale only, which is deliberately not enough on its own -- a
@@ -118,6 +118,9 @@ bool vScreenRenderBelowEye(uint32_t* renderW, uint32_t* renderH, uint32_t* eyeW,
 // frame's submits come before its Present, so a door asked at Submit reads the whole frame's count. The on-foot maps gate's door
 // (ui_layer.cpp uiLayerDoorLayerOnly) compares it with the draws the layer took: when every one was taken the eye holds nothing else.
 uint32_t vScreenEyeDrawsThisFrame();
+// VR's temporal anti-aliasing reads off, as the draw path last took it from the config (the AA-off fast path,
+// draw_fast_path.h). For the draw hook CPU line only.
+bool vScreenAaOffForDraws();
 
 // The context's OMSetRenderTargets through the ORIGINAL entry, past the
 // hook and the binding shadow: for a fix that rebinds around one draw and

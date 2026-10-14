@@ -1161,11 +1161,11 @@ void sourcePins() {
     // The internal-call early return on every draw and dispatch thunk, BEFORE anything the VR path does with the call.
     struct Thunk { const char* head; const char* first; };
     const Thunk thunks[] = {
-        {"void STDMETHODCALLTYPE hookedDraw(", "gpuFrameCommand(self);"},
+        {"void STDMETHODCALLTYPE hookedDraw(", "gpuFrameCommandIfLive(self);"},
         {"void STDMETHODCALLTYPE hookedDrawAuto(", "uiLayerIssueBlocked()"},
-        {"void STDMETHODCALLTYPE hookedDrawIndexed(", "gpuFrameCommand(self);"},
-        {"void STDMETHODCALLTYPE hookedDrawInstanced(", "gpuFrameCommand(self);"},
-        {"void STDMETHODCALLTYPE hookedDrawIndexedInstanced(", "gpuFrameCommand(self);"},
+        {"void STDMETHODCALLTYPE hookedDrawIndexed(", "gpuFrameCommandIfLive(self);"},
+        {"void STDMETHODCALLTYPE hookedDrawInstanced(", "gpuFrameCommandIfLive(self);"},
+        {"void STDMETHODCALLTYPE hookedDrawIndexedInstanced(", "gpuFrameCommandIfLive(self);"},
         {"void STDMETHODCALLTYPE hookedDrawIndexedInstancedIndirect(", "uiLayerIssueBlocked()"},
         {"void STDMETHODCALLTYPE hookedDrawInstancedIndirect(", "uiLayerIssueBlocked()"},
     };
@@ -1182,7 +1182,7 @@ void sourcePins() {
     check(count(vs, "if (g_vrWorldInternal)") == 7, "hooks: g_vrWorldInternal is tested in exactly the seven draw thunks (no other hook)");
     const std::string d1 = functionBody(ex, "void STDMETHODCALLTYPE hookedDispatch(");
     const std::string d2 = functionBody(ex, "void STDMETHODCALLTYPE hookedDispatchIndirect(");
-    check(before(d1, "if (g_vrWorldInternal)", "gpuFrameCommand(self);") && before(d2, "if (g_vrWorldInternal)", "gpuFrameCommand(self);"),
+    check(before(d1, "if (g_vrWorldInternal)", "gpuFrameCommandIfLive(self);") && before(d2, "if (g_vrWorldInternal)", "gpuFrameCommandIfLive(self);"),
           "hooks: both dispatch thunks step aside for the route's own dispatches (the exposure fix would read them as the game's)");
     check(before(d1, "vrWorldRouteNoteDispatch();", "drawCensusDispatch") , "hooks: a dispatch after the trigger tells the route what its UAVs write");
     const std::string cs = functionBody(ex, "void STDMETHODCALLTYPE hookedClearState(");

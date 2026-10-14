@@ -572,7 +572,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% %XESSFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\map_wait.cpp" ^
     "src\d3d11\native_render_settings.cpp" ^
     "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_frame_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
-    "src\d3d11\gpu_census.cpp" ^
+    "src\d3d11\gpu_census.cpp" "src\d3d11\gpu_pass_profile.cpp" "src\d3d11\blend_probe.cpp" ^
     "src\d3d11\d3d11_proxy.cpp" "src\d3d11\device_hook.cpp" ^
     "src\d3d11\format_support_log.cpp" ^
     "src\d3d11\graphics_bridge.cpp" ^
@@ -599,7 +599,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% %XESSFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\fss_panel.cpp" ^
     "src\d3d11\fss_reveal.cpp" ^
     "src\d3d11\fss_heal.cpp" ^
-    "src\d3d11\vertex_resync_hook.cpp" ^
+    "src\d3d11\vertex_resync_hook.cpp" "src\d3d11\light_grid_cache_hook.cpp" ^
     "src\d3d11\xinput_watch.cpp" ^
     "src\d3d11\fss_panel_rect.cpp" ^
     "src\d3d11\panel_curve.cpp" "src\d3d11\screen_motion.cpp" "src\d3d11\weapon_motion.cpp" ^
@@ -620,6 +620,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% %XESSFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\temporal_pass.cpp" ^
     "src\d3d11\depth_probe.cpp" ^
     "src\d3d11\luma_probe.cpp" ^
+    "src\d3d11\sky_ring.cpp" ^
     "src\d3d11\terrain_cull_cover_hook.cpp" ^
     "src\d3d11\dlaa.cpp" ^
     "src\d3d11\fsr3_engine.cpp" ^
@@ -757,7 +758,7 @@ set "RUN_JOBS_ARGS="
 if defined EDVR_JOBS set "RUN_JOBS_ARGS=--jobs %EDVR_JOBS%"
 python tools\run_jobs.py --self-test || exit /b 1
 python tools\run_jobs.py --script "%ROOT%\build.bat" --times "%BUILD%\rig_times.json" ^
-    --exe-dir "%BUILD%" --quiet native_timing_test,gpu_timing_test,gpu_census_test,vtable_test,stall_sampler_test ^
+    --exe-dir "%BUILD%" --quiet native_timing_test,gpu_timing_test,gpu_census_test,gpu_pass_profile_test,vtable_test,stall_sampler_test ^
     --after openxr_module_test=openxr_exports_test ^
     %RUN_JOBS_ARGS% || exit /b 1
 
@@ -1769,21 +1770,21 @@ exit /b 0
 
 :rig_glitch_test
 echo [edvr] === glitch_test.exe ===
-REM The transition-flash detector, replayed without the game. This repo SHIPS
-REM that fix, and until now had no way to run its test -- which is how a signal
-REM the private ledger had already refuted stayed in a release until a user felt
-REM it as judder on a planet surface.
+REM The transition-flash engine fix's camera-buffer tap (glitch_frame.cpp),
+REM driven without the game: nomination until Armed, the event window gating the
+REM hand-over, the frame counter, the geometry checks (and that a stale
+REM fix.transition_flash line changes nothing), and a hold's mark and verdict.
 if not exist "%OBJ%\glitchtest" mkdir "%OBJ%\glitchtest"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\glitchtest"\ ^
     /Fe"%BUILD%\glitch_test.exe" "tools\glitch_test\glitch_test.cpp" ^
-    "src\d3d11\glitch_frame.cpp" "src\d3d11\vr_runtime.cpp" ^
+    "src\d3d11\glitch_frame.cpp" ^
     "src\common\config.cpp" ^
     "src\common\frame_flag.cpp" "src\common\log.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib
 if errorlevel 1 ( echo [edvr] ERROR: glitch_test build failed & exit /b 1 )
 "%BUILD%\glitch_test.exe" "%BUILD%\glitchscratch" || (
-    echo [edvr] ERROR: the transition flash detector failed its own test
+    echo [edvr] ERROR: the transition flash camera tap failed its own test
     exit /b 1
 )
 exit /b 0
@@ -1828,6 +1829,23 @@ if errorlevel 1 ( echo [edvr] ERROR: temporal_test build failed & exit /b 1 )
     echo [edvr] ERROR: the temporal pass's arithmetic is wrong
     exit /b 1
 )
+exit /b 0
+
+:rig_sky_flicker_test
+echo [edvr] === sky_flicker_test.exe ===
+REM The sky-flicker diagnostic build (docs\sky-flicker-2026-10-13.md, TEMPORARY): the camera-row event detector on synthetic rows built from the
+REM review's numbers, the pick rules and the eye-target filter on the probe-face sequence, the burst offset, the P3 mini-render record and its join,
+REM the sky ring's entry layout and ring arithmetic, the flat scene picker's candidate log -- and the sky ring's shipped HLSL run on WARP against its
+REM CPU reference, across the ring's wrap and an asynchronous readback. Needs no real GPU.
+if not exist "%OBJ%\skyflickertest" mkdir "%OBJ%\skyflickertest"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /I"src\d3d11" ^
+    /Fo"%OBJ%\skyflickertest"\ /Fe"%OBJ%\skyflickertest\sky_flicker_test.exe" ^
+    "tools\sky_flicker_test\sky_flicker_test.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib dxguid.lib
+if errorlevel 1 ( echo [edvr] ERROR: sky_flicker_test build failed & exit /b 1 )
+"%OBJ%\skyflickertest\sky_flicker_test.exe" --dry-run || exit /b 1
+"%OBJ%\skyflickertest\sky_flicker_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_ui_depth
@@ -2171,6 +2189,36 @@ if errorlevel 1 ( echo [edvr] ERROR: optimized station test build failed & exit 
 "%BUILD%\optimized_station_test.exe" --self-test || exit /b 1
 exit /b 0
 
+:rig_exposure_chain_test
+echo [edvr] === exposure_chain_test.exe ===
+REM The exposure engine path (src\d3d11\exposure_chain.h, the always-on exposure sharing): the pure decision (learning, the second-eye skip, every decline,
+REM fallback and latch), three pipelines of stand-in chain shaders on a WARP device with the debug layer (stock, the old share copy, the engine
+REM path: eye 0 and eye 1 must come out bit-identical frame by frame through engaging, a lost confirmation and a stand-down), and source pins on
+REM the hook's glue and on the removal of the Scroll Lock toggle. No DLL, no game, no window.
+if not exist "%OBJ%\exposurechain" mkdir "%OBJ%\exposurechain"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\exposurechain\\" ^
+    /Fe"%BUILD%\exposure_chain_test.exe" "tools\exposure_chain_test\exposure_chain_test.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib d3dcompiler.lib
+if errorlevel 1 ( echo [edvr] ERROR: exposure chain test build failed & exit /b 1 )
+"%BUILD%\exposure_chain_test.exe" --dry-run || exit /b 1
+"%BUILD%\exposure_chain_test.exe" --self-test "%ROOT%" || exit /b 1
+exit /b 0
+
+:rig_light_grid_cache_test
+echo [edvr] === light_grid_cache_test.exe ===
+REM The light grid cache's pure half (src\d3d11\light_grid_cache_core.h): the identity and pin decision, the key built as the game builds its own, the state regions, the
+REM bit-exact compare and the LRU, whole-state swaps against a fake builder that owns tracked allocations (an ownership audit after every frame), the forward reasons, the
+REM verify-and-disable path, faults in the memory policy, the thread rule, the jitter probe and the exact line texts. No DLL and no game.
+if not exist "%OBJ%\lightgridcache" mkdir "%OBJ%\lightgridcache"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\lightgridcache\\" ^
+    /Fe"%BUILD%\light_grid_cache_test.exe" "tools\light_grid_cache_test\light_grid_cache_test.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: light grid cache test build failed & exit /b 1 )
+"%BUILD%\light_grid_cache_test.exe" --self-test || exit /b 1
+exit /b 0
+
 :rig_pad_state_test
 echo [edvr] === pad_state_test.exe ===
 REM The pad-state probe's pure half (src\d3d11\pad_state_core.h): the identity and prologue decision, change detection, the exact line texts, the
@@ -2271,6 +2319,30 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
 if errorlevel 1 ( echo [edvr] ERROR: GPU census test build failed & exit /b 1 )
 "%OBJ%\gpucensus\gpu_census_test.exe" --dry-run || exit /b 1
 "%OBJ%\gpucensus\gpu_census_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_gpu_pass_profile_test
+REM TEMPORARY GPU pass profiler (2026-10-12): the pure logic of src\d3d11\gpu_pass_profile_core.h -- classification, cube
+REM runs, the stamp budget, the shader tally, the summary arithmetic and the CSV text. No D3D11 here.
+if not exist "%OBJ%\gpupassprofile" mkdir "%OBJ%\gpupassprofile"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\gpupassprofile\\" ^
+    /Fe"%OBJ%\gpupassprofile\gpu_pass_profile_test.exe" "tools\gpu_pass_profile_test\gpu_pass_profile_test.cpp" ^
+    /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: GPU pass profile test build failed & exit /b 1 )
+"%OBJ%\gpupassprofile\gpu_pass_profile_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_blend_probe_test
+REM TEMPORARY blend probe (2026-10-14): the pure logic of src\d3d11\blend_probe_core.h -- the window, which draws are rows, the row and
+REM grid text and its line length against the log buffer, the refusal reasons and the grid indexing. No D3D11 here.
+if not exist "%OBJ%\blendprobe" mkdir "%OBJ%\blendprobe"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\blendprobe\\" ^
+    /Fe"%OBJ%\blendprobe\blend_probe_test.exe" "tools\blend_probe_test\blend_probe_test.cpp" ^
+    /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: blend probe test build failed & exit /b 1 )
+"%OBJ%\blendprobe\blend_probe_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_vr_world_mips_test
@@ -2625,6 +2697,18 @@ cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /I"third_party\openxr\include" ^
 if errorlevel 1 ( echo [edvr] ERROR: OpenXR launch centering test build failed & exit /b 1 )
 "%BUILD%\openxr_launch_centre_test.exe" --dry-run || exit /b 1
 "%BUILD%\openxr_launch_centre_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_seat_memory_test
+REM The seat memory's decisions and its file (src\openxr\seat_memory.h, seat_store.h, src\common\seat_context.h): the decision table, the
+REM transitions, the start and intro plans, the capture, the LOCAL-change compensation and the persistence round trip in a scratch folder.
+if not exist "%OBJ%\seat_memory_test" mkdir "%OBJ%\seat_memory_test"
+cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\seat_memory_test\\" /Fe"%BUILD%\seat_memory_test.exe" ^
+    "tools\seat_memory_test\seat_memory_test.cpp" /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: seat memory test build failed & exit /b 1 )
+"%BUILD%\seat_memory_test.exe" --dry-run || exit /b 1
+"%BUILD%\seat_memory_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_openxr_compositor_test
@@ -3300,6 +3384,20 @@ cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNO
 if errorlevel 1 ( echo [edvr] ERROR: ui quality test build failed & exit /b 1 )
 "%BUILD%\ui_quality_test.exe" --dry-run || exit /b 1
 "%BUILD%\ui_quality_test.exe" --self-test || exit /b 1
+REM The AA-off draw path (draw_fast_path.h), the Map timer's sampler and its exact call counts (map_wait.h,
+REM map_wait_sample.h), and the GPU timing guard that keeps off-state draw thunks from calling it (gpu_frame_timing.h),
+REM 2026-10-13. The Map timer is linked from its own source; the GPU call is a counting stub.
+:rig_aa_off_test
+echo [edvr] === aa_off_test.exe ===
+if not exist "%OBJ%\aaofftest" mkdir "%OBJ%\aaofftest"
+cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\aaofftest\\" /Fe"%BUILD%\aa_off_test.exe" ^
+    "tools\aa_off_test\aa_off_test.cpp" "src\d3d11\map_wait.cpp" ^
+    /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: aa_off test build failed & exit /b 1 )
+"%BUILD%\aa_off_test.exe" --dry-run || exit /b 1
+"%BUILD%\aa_off_test.exe" --self-test || exit /b 1
 REM The layer's depth-stencil seed on its own (ui_layer_seed.h): the three
 REM depth formats, every stencil value class, a scale, a jitter and a reused
 REM seeder, read back texel for texel. Built outside build\ so its imported

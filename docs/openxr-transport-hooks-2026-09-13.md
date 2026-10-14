@@ -58,7 +58,7 @@ command list on the same adapter.
 INI for each child. Three cases exercise shared, private-copy and LiveCopy with
 optional vScreen hooks disabled; two cases verify that the deliberate swap/live
 context probes keep native graphics and callback acquisition unavailable. The
-fixture disables camera observation with `advanced.camera_buffer_bytes = 0`:
+fixture disables camera observation with the environment variable `EDVR_TEST_NO_CAMERA_TAP=1` (it was the ini key `advanced.camera_buffer_bytes = 0` until 2026-10-14, when the key was removed):
 turning `fix.transition_flash` off alone still records history and therefore
 still requests vScreen hooks. Temporary files are removed after each child
 exits. Its self-tests cover a no-write dry run, child failure and timeout

@@ -72,6 +72,8 @@
 #include "seated_origin.h"
 #include "launch_centre_policy.h"
 #include "seated_space.h"
+#include "seat_memory.h"
+#include "seat_store.h"
 #include "reference_changes.h"
 #include "reset_events.h"
 #include "runtime_exports.h"
@@ -146,6 +148,7 @@ struct Api {
   PFN_xrEnumerateReferenceSpaces spaces=nullptr; PFN_xrCreateReferenceSpace createSpace=nullptr;
   PFN_xrDestroySpace destroySpace=nullptr; PFN_xrLocateViews locateViews=nullptr;
   PFN_xrLocateSpace locateSpace=nullptr; PFN_xrRequestExitSession requestExit=nullptr;
+  PFN_xrGetReferenceSpaceBoundsRect spaceBounds=nullptr;   // optional: the seat memory's one-time reference-space report
   Dispatch frames{}; StereoDispatch stereo{};
 };
 inline bool result(const char* operation,XrResult r) {
@@ -159,6 +162,28 @@ template<class T> bool load(Api& a,XrInstance instance,const char* name,T& desti
   destination=reinterpret_cast<T>(fn); return true;
 }
 inline bool counterNow(LARGE_INTEGER* value) { return QueryPerformanceCounter(value)!=FALSE; }
+// The seat memory's pose type against OpenXR's. A seated origin is a position and a heading about +Y (seated_origin.h builds exactly that); a
+// pose that may carry a little pitch or roll (a runtime's poseInPreviousSpace) is reduced to its heading the way seatedOriginFromHead does.
+inline SeatPose seatPoseFromXr(const XrPosef& p) {
+  return SeatPose{double(p.position.x),double(p.position.y),double(p.position.z),2.0*std::atan2(double(p.orientation.y),double(p.orientation.w))};
+}
+inline SeatPose seatPoseYawOf(const XrPosef& p) {
+  const double x=p.orientation.x,y=p.orientation.y,z=p.orientation.z,w=p.orientation.w;
+  return SeatPose{double(p.position.x),double(p.position.y),double(p.position.z),std::atan2(2.0*(x*z+w*y),1.0-2.0*(x*x+y*y))};
+}
+inline XrPosef xrFromSeatPose(const SeatPose& s) {
+  XrPosef p{};
+  p.position={float(s.x),float(s.y),float(s.z)};
+  p.orientation={0.0f,float(std::sin(s.yaw*0.5)),0.0f,float(std::cos(s.yaw*0.5))};
+  return p;
+}
+inline std::string seatUtf8(const std::wstring& w) {
+  if(w.empty())return std::string();
+  const int n=WideCharToMultiByte(CP_UTF8,0,w.data(),int(w.size()),nullptr,0,nullptr,nullptr);
+  std::string s(n>0?size_t(n):0,'\0');
+  if(n>0)WideCharToMultiByte(CP_UTF8,0,w.data(),int(w.size()),&s[0],n,nullptr,nullptr);
+  return s;
+}
 inline uint64_t nextRenderSizingGeneration() {
   static std::atomic<uint64_t> generation{0};
   return generation.fetch_add(1,std::memory_order_relaxed)+1;
@@ -322,6 +347,18 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   XrResult lastResetResult=XR_SUCCESS;
   XrTime lastResetTime=0;
   float resetPositionError=0,resetYawError=0;
+  // Seat memory (seat_memory.h, docs/seat-memory-2026-10-14.md). Owner thread only, like the seated space it moves.
+  SeatMemory seat;SeatCapture seatCapture;
+  std::vector<SeatRecord> seatBook;std::wstring seatFile;std::string seatKeyText;
+  bool seatLoaded=false,seatRefsTraced=false,seatContextTraced=false;
+  SeatPose currentOrigin;                    // the seated origin in natural LOCAL: identity until the first reset
+  unsigned seatResetCount=0,seatContextLines=0;
+  SeatContext lastTracedContext{};
+  bool seatRetroPending=false;uint64_t seatRetroAgeMs=0;     // a deferred recentre was just taken back: the apply that follows says so (retro=1)
+  const char* seatWhy="";                    // the last transition's reason, for the apply it triggers and the meter it schedules
+  uint64_t seatMeterDueAt=0,seatMeterNextPeriodic=0;
+  const char* seatTraceDecision="head";HeadCall seatTraceCall{};bool seatTraceHasCall=false;
+  uint64_t localNoted=0,localHandled=0;     // LOCAL reference-space changes the runtime announced / the seat memory has answered
   // Declared before boundary: boundary's constructor stores its address, and
   // it must already exist to be bound (native_frame's own reset() sequence
   // below binds it once the session that owns its xrWaitFrame exists).
@@ -1075,6 +1112,11 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(buffer.type==XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING) {
       const auto& event=*reinterpret_cast<const XrEventDataReferenceSpaceChangePending*>(&buffer);
       if(!host.changes.note(event))nativeTracePuts("error,reference_change_policy");
+      else if(event.session==host.session&&event.referenceSpaceType==XR_REFERENCE_SPACE_TYPE_LOCAL) {
+        // The runtime recentred (SteamVR's dashboard, Pimax Play): the seat memory counts it as the player's own recentre, answered once the
+        // change itself has taken effect (seatProcessRuntimeRecentre).
+        ++host.localNoted;
+      }
     }
     if(buffer.type==XR_TYPE_EVENT_DATA_PERF_SETTINGS_EXT && host.perfSettingsExtension) {
       const auto& event=*reinterpret_cast<const XrEventDataPerfSettingsEXT*>(&buffer);
@@ -1218,9 +1260,16 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         }
       }
     }
+    if(seatPoll())return vr::VRCompositorError_InvalidTexture;     // the stored seat went back: this frame's pose update is given up, as an intro recentre's is
     if(introRecentreRequested()) {
-      if(applyIntroRecentre())clearIntroRecentreRequest();
-      return vr::VRCompositorError_InvalidTexture;
+      switch(seatIntro()) {
+        case SeatIntro::Todays:
+          if(applyIntroRecentre())clearIntroRecentreRequest();
+          return vr::VRCompositorError_InvalidTexture;
+        case SeatIntro::Applied: clearIntroRecentreRequest();return vr::VRCompositorError_InvalidTexture;
+        case SeatIntro::Skipped: clearIntroRecentreRequest();break;
+        case SeatIntro::Sampling: case SeatIntro::Retry: break;     // the ask stays; the next frame samples or applies again
+      }
     }
     timingRetire(); // Provider waitBegin rejects an unfinished previous pair.
     timingSequence=timing.waitBegin(); timingFrameActive=timingSequence!=0;
@@ -2494,8 +2543,12 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(pose.bPoseIsValid){double matrix[4][4];detail::rigid(head.pose,matrix);if(!detail::narrow(matrix,pose.mDeviceToAbsoluteTracking))return false;}
     out=pose;return true;
   }
-  bool resetSeated(uint64_t generation) override {
-    if(!service.isOwner()) {bool result=false;return service.invoke([&]{result=resetSeated(generation);})&&result;}
+  bool resetSeated(uint64_t generation) override {return resetSeatedFor(generation,HeadCall{});}
+  // The game's ResetSeatedZeroPose. What the seat memory does with it is seat_memory.h's decision table (SeatMemory::classifyReset): in
+  // in a menu or a load, or before the graphics half has spoken, it is honoured exactly as before; aboard or on foot (onFootIsSeated, seat_memory.h)
+  // inside a transition window the stored seat replaces the head pose; outside a window it is the player's own recentre, honoured and remembered.
+  bool resetSeatedFor(uint64_t generation,const HeadCall& call) override {
+    if(!service.isOwner()) {bool result=false;return service.invoke([&]{result=resetSeatedFor(generation,call);})&&result;}
     if(GetCurrentThreadId()!=ownerThread)return false;
     auto operation=gate.tryEnter(runtimeGeneration);
     if(!operation||generation!=geometryGeneration||!state.running()||state.terminal()||
@@ -2505,19 +2558,46 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
     lastResetResult=HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,view,local,0,head,&lastResetTime,counterNow,nullptr,boundary.estimateNow());
     if(lastResetResult!=XR_SUCCESS)return false;
-    return applySeatedReset(head,"seated_reset",true);
+    const uint64_t now=GetTickCount64();
+    seatEnsureLoaded();seatSync(now);
+    const SeatResetDecision decision=seat.classifyReset(now);
+    seatTraceCall=call;seatTraceHasCall=true;seatTraceDecision=seatResetDecisionName(decision);
+    XrPosef replacement{};const XrPosef* over=nullptr;
+    if(decision==SeatResetDecision::ReplaceWithSeat){replacement=xrFromSeatPose(seat.seat());over=&replacement;}
+    const SeatPose previousSeat=seat.seat();const bool hadSeat=seat.has();
+    const bool ok=applySeatedReset(head,"seated_reset",true,over);
+    if(ok) {
+      // A player-looking recentre over a stored seat is held for SeatMemory::kRetroMs before the disk hears of it: a transition inside that time
+      // takes it back (the ramp's reset lands before the boarding flip is visible).
+      if(seat.noteReset(decision,currentOrigin,now))seatSave("manual_reset");
+      else if(decision==SeatResetDecision::HonourStore&&hadSeat)
+        nativeTracePrintf("seat_store,action=defer,why=manual_reset,prev=%.3f/%.3f/%.3f/%.1f,new=%.3f/%.3f/%.3f/%.1f,commit_after_ms=%llu\n",
+            previousSeat.x,previousSeat.y,previousSeat.z,seatRadToDeg(previousSeat.yaw),currentOrigin.x,currentOrigin.y,currentOrigin.z,
+            seatRadToDeg(currentOrigin.yaw),(unsigned long long)SeatMemory::kRetroMs);
+    }
+    return ok;
   }
   // Owner-only, with no open frame. Both startup and explicit game resets
   // use a pose in the natural LOCAL space, so resets never accumulate offsets.
-  bool applySeatedReset(const XrSpaceLocation& head,const char* reason,bool notifyGame) {
+  // `overrideOrigin` is the seat memory's: the origin to put there instead of the one the head would make (the head is then only the
+  // event-time sample the game's reset event carries). Every call is traced as `seat_reset` (traceSeatReset), win or lose.
+  bool applySeatedReset(const XrSpaceLocation& head,const char* reason,bool notifyGame,const XrPosef* overrideOrigin=nullptr) {
+    const SeatPose before=currentOrigin;
+    const bool ok=applySeatedResetCore(head,reason,notifyGame,overrideOrigin);
+    traceSeatReset(reason,head,before,ok);
+    return ok;
+  }
+  bool applySeatedResetCore(const XrSpaceLocation& head,const char* reason,bool notifyGame,const XrPosef* overrideOrigin) {
     if(GetCurrentThreadId()!=ownerThread||state.frameOpen()||!seated.space()||
        (notifyGame&&!resetEvents.room(geometryGeneration))) {
       lastResetResult=XR_ERROR_CALL_ORDER_INVALID;return false;
     }
     XrPosef origin{};
-    if(!seatedOriginFromHead(head.pose,head.locationFlags,origin)){lastResetResult=XR_ERROR_POSE_INVALID;return false;}
+    if(overrideOrigin)origin=*overrideOrigin;
+    else if(!seatedOriginFromHead(head.pose,head.locationFlags,origin)){lastResetResult=XR_ERROR_POSE_INVALID;return false;}
     lastResetResult=seated.replace(origin);
     if(lastResetResult!=XR_SUCCESS){geometry.invalidate(geometryGeneration);poses.invalidate(compositorGeneration);dropPoseFrame();return false;}
+    currentOrigin=seatPoseFromXr(origin);
     if(!invalidateOrigin(reason)){lastResetResult=XR_ERROR_LIMIT_REACHED;return false;}
     // Verify and attach an event-time sample, not a later cached render pose.
     TimedHeadPose atReset{};
@@ -2548,7 +2628,275 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
     lastResetResult=HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,view,local,0,head,&lastResetTime,counterNow,nullptr,boundary.estimateNow());
     if(lastResetResult!=XR_SUCCESS)return false;
-    return applySeatedReset(head,"intro_recentre",true);
+    seatTraceDecision="intro_head";
+    const bool ok=applySeatedReset(head,"intro_recentre",true);
+    if(ok)seat.noteOrigin(false);
+    return ok;
+  }
+  // ---- Seat memory. What the player's real seat is, kept in natural LOCAL; see seat_memory.h for the decisions and the review for why.
+  // Everything here is a log line first: a build whose seat code never ran writes no `seat_` line at all (seat_memory,init is the first).
+  static const char* seatModeName(const SeatContext& c) {return !c.published?"unpublished":c.keep?"keep":"game";}
+  void seatEnsureLoaded() {
+    if(seatLoaded)return;
+    seatLoaded=true;
+    seatKeyText=edvr::native_render::headsetKey(edvr::native_render::headsetToken(runtimeLabel,sizeof(runtimeLabel)),
+        edvr::native_render::headsetToken(systemLabel,sizeof(systemLabel)));
+    const std::wstring dir=seatMirrorDir(false);
+    if(!dir.empty())seatFile=dir+L"\\"+kSeatFileName;
+    unsigned skipped=0;bool existed=false,readOk=true;
+    if(!seatFile.empty())readOk=seatBookLoadFile(seatFile,seatBook,&skipped,&existed);
+    SeatPose stored{};
+    const bool found=readOk&&seatBookFind(seatBook,seatKeyText,stored)&&seatPoseFinite(stored);
+    if(found)seat.setSeat(stored);
+    const SeatContext c=decodeSeatContext(seatContextWord());
+    nativeTracePrintf("seat_memory,init=1,mode=%s,key=%s,stored=%u,seat=%.3f/%.3f/%.3f/%.1f,file=%s,file_exists=%u,read_ok=%u,records=%u,skipped_lines=%u\n",
+        seatModeName(c),seatKeyText.c_str(),unsigned(found),stored.x,stored.y,stored.z,seatRadToDeg(stored.yaw),
+        seatFile.empty()?"(no mirror folder yet)":seatUtf8(seatFile).c_str(),unsigned(existed),unsigned(readOk),unsigned(seatBook.size()),skipped);
+  }
+  void seatSave(const char* why,uint64_t deferredMs=0) {
+    if(!seat.has())return;
+    seatBookPut(seatBook,seatKeyText,seat.seat());
+    if(seatFile.empty()) {const std::wstring dir=seatMirrorDir(true);if(!dir.empty())seatFile=dir+L"\\"+kSeatFileName;}
+    const bool ok=!seatFile.empty()&&seatBookSaveFile(seatFile,seatBook);
+    const SeatPose& s=seat.seat();
+    nativeTracePrintf("seat_store,action=save,why=%s,deferred_ms=%llu,ok=%u,key=%s,seat=%.3f/%.3f/%.3f/%.1f,file=%s\n",why,(unsigned long long)deferredMs,
+        unsigned(ok),seatKeyText.c_str(),s.x,s.y,s.z,seatRadToDeg(s.yaw),seatFile.empty()?"(none)":seatUtf8(seatFile).c_str());
+  }
+  // The head in natural LOCAL, as the heading-and-position pose a seat is. Samples only; touches no reset state.
+  bool seatHeadLocal(SeatPose& out,bool requireTracked=true) {
+    XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};XrTime exact=0;
+    const XrResult r=HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,view,local,0,head,&exact,counterNow,nullptr,boundary.estimateNow());
+    if(r!=XR_SUCCESS)return false;
+    constexpr XrSpaceLocationFlags tracked=XR_SPACE_LOCATION_POSITION_TRACKED_BIT|XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT;
+    if(requireTracked&&(head.locationFlags&tracked)!=tracked)return false;
+    XrPosef origin{};
+    if(!seatedOriginFromHead(head.pose,head.locationFlags,origin))return false;
+    out=seatPoseFromXr(origin);return true;
+  }
+  void traceSeatReset(const char* reason,const XrSpaceLocation& head,const SeatPose& before,bool ok) {
+    SeatPose headLocal{};XrPosef o{};
+    if(seatedOriginFromHead(head.pose,head.locationFlags,o))headLocal=seatPoseFromXr(o);
+    const SeatContext& c=seat.context();const uint64_t now=GetTickCount64();
+    const SeatMeter after=seatMeter(headLocal,currentOrigin);
+    const bool retro=seatRetroPending&&std::strcmp(reason,"seat_transition")==0;
+    nativeTracePrintf("seat_reset,n=%u,reason=%s,decision=%s,mode=%s,where=%s,window=%u,window_age_ms=%llu,stored=%u,origin_was_seat=%u,"
+        "caller_thread=%lu,caller_rva=0x%X,head_local=%.3f/%.3f/%.3f/%.1f,from=%.3f/%.3f/%.3f/%.1f,to=%.3f/%.3f/%.3f/%.1f,"
+        "moved_cm=%.1f,moved_deg=%.1f,after_offset_cm=%.1f,after_height_cm=%.1f,after_yaw_deg=%.1f,retro=%u,age_ms=%llu,result=%d,ok=%u\n",
+        ++seatResetCount,reason,seatTraceDecision,seatModeName(c),seatWhereName(seat.where()),unsigned(seat.inWindow(now)),
+        (unsigned long long)seat.windowAgeMs(now),unsigned(seat.has()),unsigned(seat.originIsSeat()),
+        seatTraceHasCall?(unsigned long)seatTraceCall.thread:0ul,seatTraceHasCall?seatTraceCall.rva:0u,
+        headLocal.x,headLocal.y,headLocal.z,seatRadToDeg(headLocal.yaw),before.x,before.y,before.z,seatRadToDeg(before.yaw),
+        currentOrigin.x,currentOrigin.y,currentOrigin.z,seatRadToDeg(currentOrigin.yaw),
+        seatDistance(before,currentOrigin)*100.0,std::fabs(seatRadToDeg(seatWrap(currentOrigin.yaw-before.yaw))),
+        after.offsetCm,after.heightCm,after.yawDeg,unsigned(retro),(unsigned long long)(retro?seatRetroAgeMs:0),int(lastResetResult),unsigned(ok));
+    if(retro&&ok)seatRetroPending=false;
+    seatTraceDecision="head";seatTraceHasCall=false;seatTraceCall=HeadCall{};
+  }
+  // Take the graphics half's word and let the memory decide. Called every WaitGetPoses and before a reset is classified, so a change this
+  // frame is seen first. A transition (a window opening, an apply due) is a line of its own.
+  void seatSync(uint64_t now) {
+    const SeatContext c=decodeSeatContext(seatContextWord());
+    const bool changed=!seatContextTraced||c.published!=lastTracedContext.published||c.keep!=lastTracedContext.keep||
+      c.gameplay!=lastTracedContext.gameplay||c.seatedKnown!=lastTracedContext.seatedKnown||c.seated!=lastTracedContext.seated||
+      c.onFootKnown!=lastTracedContext.onFootKnown||c.onFoot!=lastTracedContext.onFoot||c.cameraOpen!=lastTracedContext.cameraOpen||
+      c.seatKind!=lastTracedContext.seatKind||c.transitions!=lastTracedContext.transitions;
+    const SeatEvents ev=seat.onContext(c,now);
+    if(changed&&seatContextLines<300) {
+      ++seatContextLines;seatContextTraced=true;lastTracedContext=c;
+      nativeTracePrintf("seat_context,published=%u,mode=%s,gameplay=%u,seated=%u/%u,on_foot=%u/%u,camera=%u,seat_kind=0x%X,transitions=%u,where=%s\n",
+          unsigned(c.published),seatModeName(c),unsigned(c.gameplay),unsigned(c.seatedKnown),unsigned(c.seated),unsigned(c.onFootKnown),
+          unsigned(c.onFoot),unsigned(c.cameraOpen),c.seatKind,c.transitions,seatWhereName(seat.where()));
+    }
+    if(ev.discardedPending) {
+      seatRetroPending=true;seatRetroAgeMs=ev.discardAgeMs;
+      nativeTracePrintf("seat_store,action=discard_pending,why=transition_within_%llus,age_ms=%llu,transition=%s,discarded=%.3f/%.3f/%.3f/%.1f,restored=%.3f/%.3f/%.3f/%.1f\n",
+          (unsigned long long)(SeatMemory::kRetroMs/1000),(unsigned long long)ev.discardAgeMs,ev.why,ev.discardedSeat.x,ev.discardedSeat.y,ev.discardedSeat.z,seatRadToDeg(ev.discardedSeat.yaw),
+          ev.restoredSeat.x,ev.restoredSeat.y,ev.restoredSeat.z,seatRadToDeg(ev.restoredSeat.yaw));
+    }
+    if(ev.windowOpened||ev.applyWanted||ev.noSeat) {
+      seatWhy=ev.why;
+      nativeTracePrintf("seat_event,why=%s,window_opened=%u,apply_wanted=%u,no_seat=%u,where=%s,seat_kind=0x%X,transitions=%u,camera=%u,stored=%u,origin_is_seat=%u,mode=%s\n",
+          ev.why,unsigned(ev.windowOpened),unsigned(ev.applyWanted),unsigned(ev.noSeat),seatWhereName(seat.where()),c.seatKind,c.transitions,
+          unsigned(c.cameraOpen),unsigned(seat.has()),unsigned(seat.originIsSeat()),seatModeName(c));
+      if(ev.windowOpened&&seatHolds(seat.where())&&c.published){seatMeterDueAt=now+2000;seatMeterNextPeriodic=now+30000;}
+    }
+  }
+  // The misalignment meter: the head in the seated space, as a person reads it (offset, height, heading). Aligned and seated normally: about 0.
+  void seatMeterLine(const char* when) {
+    const SeatContext& c=seat.context();SeatPose h{};
+    if(!seatHeadLocal(h)) {
+      nativeTracePrintf("seat_meter,when=%s,why=%s,where=%s,mode=%s,head=untracked\n",when,seatWhy,seatWhereName(seat.where()),seatModeName(c));
+      return;
+    }
+    const SeatMeter m=seatMeter(h,currentOrigin);
+    nativeTracePrintf("seat_meter,when=%s,why=%s,where=%s,mode=%s,stored=%u,origin_is_seat=%u,offset_cm=%.1f,height_cm=%.1f,yaw_deg=%.1f,"
+        "head_local=%.3f/%.3f/%.3f/%.1f,origin=%.3f/%.3f/%.3f/%.1f\n",when,seatWhy,seatWhereName(seat.where()),seatModeName(c),
+        unsigned(seat.has()),unsigned(seat.originIsSeat()),m.offsetCm,m.heightCm,m.yawDeg,h.x,h.y,h.z,seatRadToDeg(h.yaw),
+        currentOrigin.x,currentOrigin.y,currentOrigin.z,seatRadToDeg(currentOrigin.yaw));
+  }
+  // Once, at the first poll: which reference spaces the runtime offers, STAGE's bounds, and where STAGE sits in LOCAL (the play-space centre
+  // against the origin the seat is measured in).
+  void seatTraceReferenceSpaces() {
+    if(seatRefsTraced)return;
+    seatRefsTraced=true;
+    uint32_t count=0;
+    if(!api.spaces||api.spaces(session,0,&count,nullptr)!=XR_SUCCESS) {nativeTracePuts("reference_spaces,enumerate=failed");return;}
+    std::vector<XrReferenceSpaceType> types(count);
+    if(count&&api.spaces(session,count,&count,types.data())!=XR_SUCCESS) {nativeTracePuts("reference_spaces,enumerate=failed");return;}
+    std::string names;bool stage=false;
+    for(uint32_t i=0;i<count&&i<types.size();++i) {
+      const char* n=types[i]==XR_REFERENCE_SPACE_TYPE_VIEW?"VIEW":types[i]==XR_REFERENCE_SPACE_TYPE_LOCAL?"LOCAL":types[i]==XR_REFERENCE_SPACE_TYPE_STAGE?"STAGE":"OTHER";
+      if(types[i]==XR_REFERENCE_SPACE_TYPE_STAGE)stage=true;
+      if(!names.empty())names+="|";
+      names+=n;
+    }
+    nativeTracePrintf("reference_spaces,count=%u,types=%s,stage=%u\n",count,names.c_str(),unsigned(stage));
+    if(!stage)return;
+    if(api.spaceBounds) {
+      XrExtent2Df bounds{};
+      const XrResult r=api.spaceBounds(session,XR_REFERENCE_SPACE_TYPE_STAGE,&bounds);
+      nativeTracePrintf("stage_bounds,result=%d,width_m=%.3f,height_m=%.3f\n",int(r),double(bounds.width),double(bounds.height));
+    } else nativeTracePuts("stage_bounds,result=entry_point_absent");
+    XrReferenceSpaceCreateInfo info{XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
+    info.referenceSpaceType=XR_REFERENCE_SPACE_TYPE_STAGE;info.poseInReferenceSpace.orientation.w=1;
+    XrSpace stageSpace=XR_NULL_HANDLE;
+    const XrResult made=api.createSpace(session,&info,&stageSpace);
+    if(made!=XR_SUCCESS||!stageSpace) {nativeTracePrintf("stage_in_local,create_result=%d\n",int(made));return;}
+    XrTime t=0;
+    XrSpaceLocation where{XR_TYPE_SPACE_LOCATION};
+    XrResult r=HeadLocator{}.currentTime({api.convertTime,api.locateSpace},instance,counterNow,nullptr,boundary.estimateNow(),t);
+    if(r==XR_SUCCESS)r=api.locateSpace(stageSpace,local,t,&where);
+    if(r==XR_SUCCESS) {
+      const SeatPose p=seatPoseYawOf(where.pose);
+      nativeTracePrintf("stage_in_local,result=0,flags=%llu,position=%.3f/%.3f/%.3f,heading_deg=%.1f\n",
+          (unsigned long long)where.locationFlags,p.x,p.y,p.z,seatRadToDeg(p.yaw));
+    } else nativeTracePrintf("stage_in_local,result=%d\n",int(r));
+    api.destroySpace(stageSpace);
+  }
+  // The runtime moved LOCAL (a recentre in SteamVR's dashboard or Pimax Play). That is always the player: the head as it is in the new LOCAL is
+  // honoured as the seated origin and stored as the seat, aboard or on foot, in a window or out of one. Acted on once the change has taken
+  // effect (the geometry refresh counted it), so the head is sampled in the new LOCAL. Head not tracked: LOCAL's own origin is the seat, applied
+  // when a frame allows. A frame in the way is a retry next poll. In game mode nothing changes (the origin keeps its offset as it always did).
+  void seatProcessRuntimeRecentre() {
+    if(localHandled>=localNoted||referenceChanges<localNoted)return;
+    if(!seat.keep()) {
+      nativeTracePrintf("seat_local_changed,events=%llu,action=ignored_game_mode\n",(unsigned long long)(localNoted-localHandled));
+      localHandled=localNoted;return;
+    }
+    if(state.frameOpen()||!changes.active())return;
+    XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
+    lastResetResult=HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,view,local,0,head,&lastResetTime,counterNow,nullptr,boundary.estimateNow());
+    constexpr XrSpaceLocationFlags tracked=XR_SPACE_LOCATION_POSITION_TRACKED_BIT|XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT;
+    XrPosef o{};
+    const bool headOk=lastResetResult==XR_SUCCESS&&(head.locationFlags&tracked)==tracked&&seatedOriginFromHead(head.pose,head.locationFlags,o);
+    const unsigned long long events=(unsigned long long)(localNoted-localHandled);
+    if(headOk) {
+      seatTraceDecision="honour_store";seatTraceHasCall=false;
+      if(!applySeatedReset(head,"runtime_recentre",true))return;     // retried next poll
+      seat.noteRuntimeRecentre(currentOrigin);     // always the player: stored at once, never held
+      seatSave("runtime_recentre");
+      const SeatPose& s=seat.seat();
+      nativeTracePrintf("seat_local_changed,events=%llu,head=tracked,action=store_as_manual,where=%s,window=%u,seat=%.3f/%.3f/%.3f/%.1f\n",
+          events,seatWhereName(seat.where()),unsigned(seat.inWindow(GetTickCount64())),s.x,s.y,s.z,seatRadToDeg(s.yaw));
+    } else {
+      seat.storeAndApplyLater(SeatPose{});
+      seatSave("runtime_recentre_untracked");
+      nativeTracePrintf("seat_local_changed,events=%llu,head=untracked,action=store_as_manual,fallback=local_identity,where=%s,seat=0.000/0.000/0.000/0.0\n",
+          events,seatWhereName(seat.where()));
+    }
+    localHandled=localNoted;
+  }
+  // The stored seat becomes the origin. A retry is the caller's: this answers false when a frame is open, the head is not tracked, or the
+  // reset-event queue is full, and the apply stays pending.
+  bool applyStoredSeat(const char* reason,const char* decision,bool notifyGame) {
+    if(!seat.has()||!seat.keep()||GetCurrentThreadId()!=ownerThread||state.frameOpen())return false;
+    XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
+    lastResetResult=HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,view,local,0,head,&lastResetTime,counterNow,nullptr,boundary.estimateNow());
+    if(lastResetResult!=XR_SUCCESS)return false;
+    const XrPosef origin=xrFromSeatPose(seat.seat());
+    seatTraceDecision=decision;
+    const bool ok=applySeatedReset(head,reason,notifyGame,&origin);
+    if(ok){seat.noteOrigin(true);seat.applyDone();}
+    return ok;
+  }
+  // WaitGetPoses, no frame open. True when the origin moved (the caller gives up this frame's pose update, as the intro recentre always did).
+  bool seatPoll() {
+    if(GetCurrentThreadId()!=ownerThread)return false;
+    seatEnsureLoaded();
+    const uint64_t now=GetTickCount64();
+    if(!seatRefsTraced)seatTraceReferenceSpaces();
+    seatSync(now);
+    seatProcessRuntimeRecentre();
+    uint64_t deferredMs=0;
+    if(seat.takeCommit(now,deferredMs))seatSave("manual_reset",deferredMs);     // kRetroMs and no transition: it was the player's
+    bool moved=false;
+    if(seat.keep()&&seat.applyPending()&&!state.frameOpen()&&changes.active()) {
+      moved=applyStoredSeat("seat_transition",seatRetroPending?"replace_with_seat":"transition_seat",true);
+      if(moved)seatMeterDueAt=now+2000;
+    }
+    if(seatMeterDueAt&&now>=seatMeterDueAt){seatMeterDueAt=0;seatMeterLine("transition_2s");}
+    if(seat.context().published&&now>=seatMeterNextPeriodic) {
+      seatMeterNextPeriodic=now+30000;
+      seatMeterLine("periodic");
+    }
+    return moved;
+  }
+  enum class SeatIntro {Todays,Applied,Skipped,Sampling,Retry};
+  // The intro recentre's ask (requestIntroRecentre). With a stored seat the seat is already the origin and the ask is a no-op; with none, the
+  // splash is where it is captured, once the head is still, and if that fails the ask is today's recentre on the head as it is.
+  SeatIntro seatIntro() {
+    const uint64_t now=GetTickCount64();
+    seatEnsureLoaded();seatSync(now);
+    const SeatIntroPlan plan=seatIntroPlan(seat.keep(),seat.has(),seat.originIsSeat());
+    if(plan==SeatIntroPlan::TodaysRecentre) {
+      seatTraceDecision="intro_head";
+      return SeatIntro::Todays;
+    }
+    if(plan==SeatIntroPlan::SkipSeatInPlace) {
+      nativeTracePuts("seat_intro,plan=skip_seat_in_place,action=no_recentre");
+      return SeatIntro::Skipped;
+    }
+    if(plan==SeatIntroPlan::ApplySeat) {
+      nativeTracePuts("seat_intro,plan=apply_seat");
+      return applyStoredSeat("intro_recentre","intro_seat",true)?SeatIntro::Applied:SeatIntro::Retry;
+    }
+    // Capture
+    if(seatCapture.state()==SeatCapture::State::Idle) {
+      seatCapture.begin(now);
+      nativeTracePuts("seat_capture,state=begin");
+    }
+    SeatPose head{};
+    const bool located=seatHeadLocal(head);
+    const SeatCapture::State st=located?seatCapture.add(now,head):seatCapture.state();
+    const auto& stats=seatCapture.last();
+    if(st==SeatCapture::State::Sampling) {
+      if(seatCapture.elapsed(now)>=SeatCapture::kTimeoutMs) {
+        nativeTracePrintf("seat_capture,state=gave_up,reason=head_untracked,elapsed_ms=%llu,fallback=todays_recentre\n",(unsigned long long)seatCapture.elapsed(now));
+        seatTraceDecision="intro_head";return SeatIntro::Todays;
+      }
+      return SeatIntro::Sampling;
+    }
+    if(st==SeatCapture::State::GaveUp) {
+      nativeTracePrintf("seat_capture,state=gave_up,reason=not_still,n=%zu,span_ms=%llu,spread_cm=%.1f,yaw_spread_deg=%.1f,elapsed_ms=%llu,fallback=todays_recentre\n",
+          stats.n,(unsigned long long)stats.spanMs,stats.spreadCm,stats.yawSpreadDeg,(unsigned long long)seatCapture.elapsed(now));
+      seatTraceDecision="intro_head";return SeatIntro::Todays;
+    }
+    if(st!=SeatCapture::State::Done)return SeatIntro::Sampling;
+    const SeatPick pick=pickSeatFromHead(seatCapture.result());
+    nativeTracePrintf("seat_capture,state=done,n=%zu,span_ms=%llu,spread_cm=%.1f,yaw_spread_deg=%.1f,elapsed_ms=%llu,mean=%.3f/%.3f/%.3f/%.1f,"
+        "dist_from_local_cm=%.1f,heading_from_local_deg=%.1f,snapped=%u,seat=%.3f/%.3f/%.3f/%.1f\n",
+        stats.n,(unsigned long long)stats.spanMs,stats.spreadCm,stats.yawSpreadDeg,(unsigned long long)seatCapture.elapsed(now),
+        stats.mean.x,stats.mean.y,stats.mean.z,seatRadToDeg(stats.mean.yaw),pick.distanceM*100.0,pick.yawDeg,unsigned(pick.snapped),
+        pick.seat.x,pick.seat.y,pick.seat.z,seatRadToDeg(pick.seat.yaw));
+    seat.setSeat(pick.seat);
+    if(applyStoredSeat("intro_recentre",pick.snapped?"capture_snap_local":"capture_head",true)) {
+      seatSave("captured");
+      return SeatIntro::Applied;
+    }
+    // The seat is held but not applied (a frame was open, the reset-event queue full): the capture is Done, so the next ask is the stored-seat
+    // plan and applies it. Persisted now so a quit before that does not lose it.
+    seatSave("captured_unapplied");
+    return SeatIntro::Retry;
   }
   bool centreAtStartup(bool& refresh) {
     refresh=false;
@@ -2589,9 +2937,18 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         (unsigned long long)launchCentreSamples,double(head.pose.position.x),double(head.pose.position.y),double(head.pose.position.z),
         double(head.pose.orientation.x),double(head.pose.orientation.y),double(head.pose.orientation.z),double(head.pose.orientation.w),
         (unsigned long long)head.locationFlags);
-      if(!applySeatedReset(head,"launch_centre",false)) {
+      // The seat memory puts a stored seat here instead of the head as it happens to be near the first tracked pose; with none stored, or
+      // before the graphics half has spoken, it is the head as it always was.
+      seatEnsureLoaded();seatSync(now);
+      const SeatStartPlan startPlan=seatStartPlan(seat.keep(),seat.has());
+      nativeTracePrintf("seat_start,plan=%s,mode=%s,stored=%u\n",seatStartPlanName(startPlan),seatModeName(seat.context()),unsigned(seat.has()));
+      XrPosef startSeat{};const XrPosef* startOver=nullptr;
+      if(startPlan==SeatStartPlan::ApplySeat){startSeat=xrFromSeatPose(seat.seat());startOver=&startSeat;}
+      seatTraceDecision=startOver?"start_seat":"start_head";
+      if(!applySeatedReset(head,"launch_centre",false,startOver)) {
         result("launch_centre_reset",lastResetResult);return false;
       }
+      seat.noteOrigin(startOver!=nullptr);
       nativeTracePrintf("native_launch_centre,applied=1,position_error=%.6f,yaw_error_rad=%.6f,origin_generation=%llu\n",
         double(resetPositionError),double(resetYawError),(unsigned long long)poses.read().originGeneration);
       refresh=true;return true;
@@ -2875,6 +3232,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     LOAD("xrDestroySpace",destroySpace); LOAD("xrCreateReferenceSpace",createSpace);
     LOAD("xrEnumerateReferenceSpaces",spaces); LOAD("xrLocateViews",locateViews);
     LOAD("xrLocateSpace",locateSpace); LOAD("xrRequestExitSession",requestExit);
+    if(!load(api,instance,"xrGetReferenceSpaceBoundsRect",api.spaceBounds))api.spaceBounds=nullptr;
     LOAD("xrPollEvent",frames.pollEvent); LOAD("xrBeginSession",frames.beginSession);
     LOAD("xrEndSession",frames.endSession); LOAD("xrWaitFrame",frames.waitFrame);
     LOAD("xrBeginFrame",frames.beginFrame); LOAD("xrEndFrame",frames.endFrame);

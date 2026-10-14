@@ -26,6 +26,7 @@ ID3D11DeviceContext* seederContext();
 ID3D11VertexShader* coverageVs();
 ID3D11PixelShader* coveragePs();
 ID3D11ComputeShader* compositeCs();
+ID3D11ComputeShader* compositeInPlaceCs();
 ID3D11Buffer* compositeCb();
 ID3D11Texture2D* layerTexture();
 ID3D11Texture2D* hdrLayerTexture();
@@ -76,13 +77,14 @@ bool allOwnedBy(ID3D11DeviceContext* ctx, ID3D11Device* dev) {
     ok = ownedBy(devtest::coverageVs(), dev) && ok;
     ok = ownedBy(devtest::coveragePs(), dev) && ok;
     ok = ownedBy(devtest::compositeCs(), dev) && ok;
+    ok = ownedBy(devtest::compositeInPlaceCs(), dev) && ok;
     ok = ownedBy(devtest::compositeCb(), dev) && ok;
     ok = ownedBy(devtest::layerTexture(), dev) && ok;
     ok = ownedBy(devtest::hdrLayerTexture(), dev) && ok;
     return ok;
 }
 
-ComPtr<ID3D11Texture2D> frameTexture(ID3D11Device* dev, uint32_t w, uint32_t h, const uint8_t rgba[4]) {
+ComPtr<ID3D11Texture2D> frameTexture(ID3D11Device* dev, uint32_t w, uint32_t h, const uint8_t rgba[4], bool uav = false) {
     std::vector<uint8_t> px(static_cast<size_t>(w) * h * 4);
     for (size_t i = 0; i < px.size(); i += 4) std::memcpy(&px[i], rgba, 4);
     D3D11_TEXTURE2D_DESC d{};
@@ -92,7 +94,7 @@ ComPtr<ID3D11Texture2D> frameTexture(ID3D11Device* dev, uint32_t w, uint32_t h, 
     d.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     d.SampleDesc.Count = 1;
     d.Usage = D3D11_USAGE_DEFAULT;
-    d.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+    d.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET | (uav ? D3D11_BIND_UNORDERED_ACCESS : 0u);
     D3D11_SUBRESOURCE_DATA init{px.data(), w * 4, 0};
     ComPtr<ID3D11Texture2D> t;
     dev->CreateTexture2D(&d, &init, &t);
@@ -120,10 +122,11 @@ bool near8(uint8_t a, int b) { return std::abs(static_cast<int>(a) - b) <= 2; }
 
 // One frame of the flat layer on `dev`: the door, the take's dependencies, the HUD through the coverage pass, the
 // composite over a frame -- the pixel read back, and the caller's bindings around both passes compared.
-void frameRound(ID3D11Device* dev, ID3D11DeviceContext* ctx, uint64_t seq, uint32_t w, uint32_t h, const char* label) {
+void frameRound(ID3D11Device* dev, ID3D11DeviceContext* ctx, uint64_t seq, uint32_t w, uint32_t h, const char* label,
+                bool inPlace = false) {
     char what[200];
     const uint8_t frameRgba[4] = {51, 102, 153, 255};  // 0.2, 0.4, 0.6
-    ComPtr<ID3D11Texture2D> frame = frameTexture(dev, w, h, frameRgba);
+    ComPtr<ID3D11Texture2D> frame = frameTexture(dev, w, h, frameRgba, inPlace);
     std::snprintf(what, sizeof(what), "%s: the frame texture", label);
     check(frame != nullptr, what);
     if (!frame) return;
@@ -176,7 +179,7 @@ void frameRound(ID3D11Device* dev, ID3D11DeviceContext* ctx, uint64_t seq, uint3
     ctx->CSSetShaderResources(0, 1, srvs);
     const uint32_t region[4] = {0, 0, w, h};
     const float uv[4] = {0.0f, 0.0f, 1.0f, 1.0f};
-    ID3D11Texture2D* out = uiLayerComposite(seq, 0, frame.Get(), region, uv);
+    ID3D11Texture2D* out = uiLayerComposite(seq, 0, frame.Get(), region, uv, inPlace);
     ComPtr<ID3D11Buffer> cbAfter;
     ComPtr<ID3D11ShaderResourceView> srvAfter;
     ctx->CSGetConstantBuffers(0, 1, &cbAfter);
@@ -188,6 +191,19 @@ void frameRound(ID3D11Device* dev, ID3D11DeviceContext* ctx, uint64_t seq, uint3
     if (!out) return;
     std::snprintf(what, sizeof(what), "%s: the composite's output belongs to this device", label);
     check(ownedBy(out, dev), what);
+    if (inPlace) {
+        // The frame was handed over as EDVR's own, UAV-bindable, whole: where the GPU loads typed UAVs the answer is the
+        // frame itself (no output texture), and where it does not the composite took the out-of-place path.
+        D3D11_FEATURE_DATA_FORMAT_SUPPORT2 fs{DXGI_FORMAT_R8G8B8A8_UNORM, 0};
+        const bool typedLoad = SUCCEEDED(dev->CheckFeatureSupport(D3D11_FEATURE_FORMAT_SUPPORT2, &fs, sizeof(fs))) &&
+                               (fs.OutFormatSupport2 & D3D11_FORMAT_SUPPORT2_UAV_TYPED_LOAD) != 0;
+        std::snprintf(what, sizeof(what), "%s: the owned frame is composited in place (the returned texture IS the frame) iff the GPU loads typed UAVs (%s)",
+                      label, typedLoad ? "it does" : "it does not");
+        check((out == frame.Get()) == typedLoad, what);
+    } else {
+        std::snprintf(what, sizeof(what), "%s: a frame that is not handed over as owned gets its own output texture", label);
+        check(out != frame.Get(), what);
+    }
     uint8_t px[4] = {};
     // out = L.rgb + F.rgb * L.a, L.a the HDR layer's 0.5 (128/255) through the coverage pass.
     const double a = 128.0 / 255.0;
@@ -245,6 +261,10 @@ int main(int argc, char** argv) {
           "a same-device resize rebuilds no shader, buffer, blend or deferred context");
     check(devtest::layerWidth() == 48, "control: the resize really re-made the size-bound layer (48 wide)");
     check(allOwnedBy(ctxB.Get(), devB.Get()), "device B after a resize: every retained device child is still B's");
+
+    // The in-place composite on the production code path: an owned, UAV-bindable, whole frame.
+    frameRound(devB.Get(), ctxB.Get(), 40, 48, 32, "device B, an owned frame composited in place", true);
+    check(allOwnedBy(ctxB.Get(), devB.Get()), "device B after the in-place composite: every retained device child is still B's");
 
     uiLayerShutdown();
     std::printf("ui_layer_device_test: %u checks, %u failures\n", g_checks, g_fails);

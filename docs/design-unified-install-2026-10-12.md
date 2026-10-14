@@ -48,6 +48,9 @@
   9edf70c7, d410c3dc). Main (XeSS) merged; XeSS in VR in its own doc.
 - **Phase 3 BUILT, the installer NOT YET RUN for real** (section 13):
   a7a2c916, 756fb251, 9b642c02, f30817fa, 31b96980, 7ce8a77d, af948bcb.
+- **2026-10-14, cold flat start flipped to VR (BUILT, NOT FLOWN; section 14):** a live runtime alone no longer posts Vr; the live
+  rise now waits for the game's first eye submit. Flight check: cold flat start (no `/novr`) on a headset rig, F8 opens "flat graphics
+  panel open", no `profile switch: flat -> vr`; Epic "Launch in VR" still flips about a second after going live.
 - **Next:** the release (notes via reflow_notes.py, credits via
   release_credits.py; the Release build workflow is the CI pass). Not yet
   flown: an Epic install through the GUI, a Frontier launcher launch.
@@ -598,3 +601,32 @@ Units, one at a time behind the full build (Haiku implementers, reviewed):
   sha) -> `--scope flat` (stock runtime back, loader, licence and edvr_openxr.ini removed, both inis kept) -> `--scope both` (runtime
   back) -> `--uninstall` (d3d11.dll, XeSS trio, DLSS runtime, record and descriptor removed; stock runtime back; both inis kept). Every
   step exit 0, none blocked. %LOCALAPPDATA%\EDVR: only a new edvr-throwaway-test-* mirror; the real mirrors untouched.
+
+## 14. 2026-10-14: a cold flat start flipped to VR (fixed, not flown)
+
+Evidence (reviews\flat-menu-and-real-dll-2026-10-14.md, kept out of git; logs edvr_gfx_20261014_062858 and _063544, Steam, SteamVR
+OpenXR present): Elite loads `openvr_api.dll` on a flat start with no `/novr`, EDVR's runtime opens a live session, and
+`onLiveRise` posted Vr about 2 s in (`mode watch: live-rise ... -> posted vr`, `profile switch: flat -> vr`) although the game never
+submitted a stereo frame (`eye submits last 1 s: 0`, no `eye submits resumed` line). Consequences, all seen: F8 took the VR path
+("no compositor consumer"), flat AA stood down, `edvr.ini` was read instead of `edvr-flat.ini`. The design's live rise (3.2) covered
+"a VR start that writes no file, such as Epic's Launch in VR"; a cold flat start on a rig with a headset runtime was never flown
+(flights A-E were all `/vr` or `/novr`).
+
+Root cause: the live flag means "a session exists" (native_render_settings.cpp), not "the game submits eye frames". The runtime also
+sits live while the game is flat on purpose (section 12), so live cannot tell Epic's Launch in VR from a cold flat start.
+
+Fix: `Watch::onLiveRise` (mode_watch_logic.h) over a flat commit only starts a wait; `Watch::onEyeSubmits` posts Vr. The worker
+(mode_watch.cpp `checkAwaitedSubmits`) feeds it when `nativeFrameLatchedFrames()` passes the count at the last one-second sample
+before the rise, polling every 250 ms while the wait is open. A file post (a confirmed Settings.xml change) ends the wait. A `/vr`
+launch runs Vr from the start (a rise is nothing) and a `/novr` launch stays flat until a submit, which `/novr` never makes. Log:
+`mode watch: live session without eye submits -- staying flat until the game submits` once per rise; when submits begin,
+`mode watch: eye submits began after the live session; the game is a VR game` then the unchanged `live-rise t=N -> posted vr` line
+(edvr_log.py parses that one). Cost: Epic's Launch in VR flips up to about 1.25 s later (one-second sample plus the poll).
+
+Tests: tools\mode_watch_test: live with zero submits stays Flat (and the file's 0 reads same, not stale); live then submits flips to Vr;
+submits with no rise do nothing; `/vr` and `/novr` launches unchanged; the older live-rise cases drive rise then submits.
+
+ruled out: EDHM's chain as the cause of the dead flat F8, because the 06:35:44 log has no chain line and F8 stayed dead with
+`real_dll` commented out.
+
+Open: the second half of that review (`advanced.real_dll` read once from the launch profile's one file) is not part of this fix.

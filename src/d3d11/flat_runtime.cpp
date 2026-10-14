@@ -4,6 +4,7 @@
 #include "flat_runtime_model.h"
 #include "flat_hdr_route.h"
 #include "flat_copy_structure.h"
+#include "flat_scene_log.h"   // TEMPORARY: the scene picker's candidates (docs/sky-flicker-2026-10-13.md)
 #include "flat_hdr_crumbs.h"
 #include "flat_context_state.h"
 #include "flat_mono_resolve.h"
@@ -590,6 +591,8 @@ struct State {
     // copy route is the whitelist alone, as before, and the admission only names what it sees (no scene, a render size
     // that does not fit). Nothing here touches a D3D object.
     FlatCopyWindow copyWindow{};     // the 5 s window of the census line
+    FlatSceneLog sceneLog{};         // TEMPORARY (flat_scene_log.h): the scene picker's candidates and the frames each size won
+    uint32_t sceneLogShownW = 0, sceneLogShownH = 0;   // the winner the last candidate line named
     // The copy route's weapon support (flat_copy_structure.h, flatWeaponRoute): cohort draws flagged, glow draws admitted as
     // alternate HDR writers, frames selected mixed-camera and the foreground contract's H qualification at the copy.
     FlatCopyWeaponWindow copyWeaponWindow{};
@@ -3590,6 +3593,28 @@ static FlatMonoFrame copyAdmit(State& s, const FlatRuntimeDraw& d, const FlatMon
             s.copyDeclineSeen[s.copyDeclineLines++] = diag.why;
             flatCopyFormatDeclined(text, sizeof(text), s.prefix.frame, diag);
             Log::get().note("%s", text);
+        }
+    }
+    // TEMPORARY (flat_scene_log.h): every candidate for the scene, with its size, format and draws, once per 5 s and whenever the winner changes, the
+    // frames each size has won, and what the flat counterpart of the VR eye-target rule WOULD drop (it is not applied: unflown). Reads the prefix model;
+    // changes nothing.
+    {
+        const FlatSceneFacts winner = flatSceneFacts(s.prefix, s.prefix.width, s.prefix.height);
+        const uint64_t nowMs = GetTickCount64();
+        const bool onShape = winner.onShape;
+        const uint32_t winW = (onShape || winner.offShape) ? winner.width : 0u;
+        const uint32_t winH = (onShape || winner.offShape) ? winner.height : 0u;
+        const bool due = s.sceneLog.note(nowMs, winW, winH, winW && flatTinySquare(winW, winH, s.prefix.width, s.prefix.height));
+        if (due) {
+            FlatSceneCandidate cands[kFlatSceneMaxCandidates];
+            const uint32_t candN = flatSceneCandidates(s.prefix, s.prefix.width, s.prefix.height, cands);
+            char line[1100];
+            const bool changed = s.sceneLogShownW != winW || s.sceneLogShownH != winH;
+            if (flatSceneFormatLine(line, sizeof(line), s.prefix.frame, s.prefix.width, s.prefix.height, winner, cands, candN,
+                                    s.sceneLog, changed ? "the winner changed or the first look" : "every 5 s") > 0)
+                Log::get().note("%s", line);
+            s.sceneLogShownW = winW; s.sceneLogShownH = winH;
+            s.sceneLog.resetWindow();
         }
     }
     return out;

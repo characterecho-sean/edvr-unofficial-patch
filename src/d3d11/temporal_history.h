@@ -2,6 +2,8 @@
 #include <array>
 #include <cstdint>
 
+#include "../common/camera_target_tag.h"
+
 namespace edvr {
 // CPU-only evidence retained between diagnostic key presses. No GPU queries
 // or readbacks; the caller serializes access and logs a copy outside its lock.
@@ -32,6 +34,11 @@ struct TemporalHistoryEntry {
     float selectedDrawRotationDeg = 0;
     float drawTranslation[3] = {};     // this eye's draw rows, current -> previous view
     float drawRotationDeg = 0;
+    // The render target the selected write was drawn into (the first draw after the write), and the tagged eye draw's own
+    // (docs/sky-flicker-2026-10-13.md). Unknown (src 0) when no draw followed the write.
+    camtag::Target selectedTarget, drawTarget;
+    uint32_t selectedDraws = 0;        // the owner-context draws made between the selected write and the next write
+    uint32_t rejectedWrites = 0;      // writes this frame's chooser rejected as not drawn into an eye-sized target or drawn into the submitted texture (the eye-target rule)
 };
 
 template<uint32_t Capacity = 4096> class TemporalHistory {

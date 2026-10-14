@@ -18,6 +18,8 @@
 #include "binding_shadow.h"
 #include "device_hook.h"  // contextHookModeFor
 #include "draw_census.h"  // drawCensusDispatch: the census records compute
+#include "exposure_chain.h"  // the engine path: which of the second eye's dispatches are not forwarded (pure half)
+#include "gpu_pass_profile.h"  // TEMPORARY GPU pass profiler: a dispatch is a pass boundary
 #include "engine_velocity.h"  // F2: the palette chain's dispatch feeds the second skin's join
 #include "skin_join.h"        // kChainHash
 #include "flat_runtime.h"
@@ -119,11 +121,25 @@ struct State {
     uint32_t thunkHits[kHitCount] = {};
     uint8_t  quietPasses[kHitCount] = {};
 
+    // Both eyes share one exposure in the VR profile, always: the setting that switched it off was retired 2026-10-14 after the engine path
+    // flew clean (docs/eye-brightness.md). Set once at install; false only in the flat profile, which has one eye and never shared (the flat
+    // key allow-list never listed the old setting, so it read false there). False is stock: both chains run and nothing is copied.
     bool     enabled = false;
     uint64_t targetHash = 0;      // pinned by config, or learned by detection
     bool     pinned = false;      // true if the hash came from config
-    uint32_t copyMask = 0xF;
-    bool     copyBtoA = false;
+
+    // The engine path (exposure_chain.h): the second eye's two dispatches are not forwarded and the copy lands where the second exposure
+    // dispatch would have run. `uav` mirrors the compute shader's UAV slots 0-7 as the game bound them (identity for the shape test; the
+    // views of slots 0-4 are also what the copy reads, as before for 0-3). Owner context only.
+    exposurechain::Chain chain;
+    void*    uav[8] = {};
+    uint64_t chainLogMs = 0;              // the 30 s line
+    uint64_t chainLogSkipped = 0;
+    uint64_t chainLogFallbacks = 0;
+    bool     chainEngagedNoted = false;
+    bool     chainStoodDownNoted = false;
+    bool     chainFallbackNoted = false;
+    uint32_t chainStuckFrames = 0;        // frames confirmed-twice but not engaged for a reason the learner can name
 
     // The dispatch-skip probe (advanced.census_skip_dispatch): compute
     // shaders named by content hash are NOT forwarded while the spec is set.
@@ -168,7 +184,7 @@ struct State {
     // Whether the game did ANY compute work this frame. The give-up notice
     // counts these frames rather than all frames -- see exposureFixFrameBoundary.
     bool     computeThisFrame = false;
-    ID3D11UnorderedAccessView* firstEye[4] = {nullptr, nullptr, nullptr, nullptr};
+    ID3D11UnorderedAccessView* firstEye[5] = {};
     uint64_t applied = 0;
     bool     rejected = false;
 
@@ -320,13 +336,22 @@ bool copyCompatible(ID3D11Resource* a, ID3D11Resource* b) {
     return false;
 }
 
-void shareExposure(ID3D11DeviceContext* ctx, ID3D11UnorderedAccessView* const* first,
-                   ID3D11UnorderedAccessView* const* second) {
+// Eye 0's exposure outputs over eye 1's: the pass's five UAVs, u0 (bounds) to u4 (the cumulative histogram). Direction was measured: first
+// eye to second keeps the scene bright, the reverse dims everything. Not settings. Slots 0-3 are what this fix has always shared (sharing only
+// the first was tried and did nothing visible: the value the tonemap reads is the strip in u1); u4 is new with the engine path, because eye 1's
+// own chain no longer refreshes it and a copy keeps every output of the pass coherent between the eyes.
+//
+// THE COPY IS KEPT, NOT REPLACED BY A BINDING SUBSTITUTION, on purpose. The one proven reader of eye 1's result is the tonemap draw's vertex
+// shader (t0 at 0,0 of the strip); the census cannot see vertex-stage slot 0, and cannot show who else reads strip texels 1-5 or the
+// histograms. Pointing the readers at eye 0's resource would mean hooking the shader-resource bind calls (a hot path in a CPU-bound game)
+// for a gain of five tiny copies (24 B, 8 B and three 1.5 KB textures), and any reader missed would then see stale data. The copy keeps every
+// reader exactly where it is. Returns how many of the five slots it covered.
+uint32_t shareExposure(ID3D11DeviceContext* ctx, ID3D11UnorderedAccessView* const* first,
+                       ID3D11UnorderedAccessView* const* second) {
     State* s = g_state;
     uint32_t copied = 0, skipped = 0;
 
-    for (uint32_t slot = 0; slot < 4; ++slot) {
-        if ((s->copyMask & (1u << slot)) == 0) continue;
+    for (uint32_t slot = 0; slot < exposurechain::kShareSlots; ++slot) {
         if (!first[slot] || !second[slot]) continue;
 
         ID3D11Resource* a = nullptr;
@@ -335,8 +360,7 @@ void shareExposure(ID3D11DeviceContext* ctx, ID3D11UnorderedAccessView* const* f
         second[slot]->GetResource(&b);
 
         if (copyCompatible(a, b)) {
-            if (s->copyBtoA) ctx->CopyResource(a, b);
-            else             ctx->CopyResource(b, a);
+            ctx->CopyResource(b, a);
             ++copied;
         } else {
             ++skipped;
@@ -349,18 +373,18 @@ void shareExposure(ID3D11DeviceContext* ctx, ID3D11UnorderedAccessView* const* f
         if (copied == 0) {
             s->rejected = true;
             Log::get().note("exposure fix DISABLED: no compatible resource pairs "
-                            "(mask 0x%X, %u skipped). The configured shader is not the "
-                            "exposure pass on this game build.", s->copyMask, skipped);
+                            "(%u skipped). The configured shader is not the "
+                            "exposure pass on this game build.", skipped);
         } else {
-            Log::get().note("exposure fix ACTIVE: sharing %u slot(s) %s each frame",
-                            copied,
-                            s->copyBtoA ? "second eye -> first" : "first eye -> second");
+            Log::get().note("exposure fix ACTIVE: sharing %u slot(s) first eye -> second each frame",
+                            copied);
         }
     }
+    return copied;
 }
 
 // One damping step, run right after the second eye's dispatch with the
-// pass's UAVs still bound and share_exposure's copy already landed:
+// pass's UAVs still bound and the share copy already landed:
 // queue this frame's strip readback, consume last frame's, filter, and
 // write the damped strip over both eyes' copies -- after the passes,
 // before the tonemaps at frame end that read it.
@@ -612,6 +636,8 @@ void STDMETHODCALLTYPE hookedCSSetUAVs(ID3D11DeviceContext* self, UINT start, UI
             bindingSet(static_cast<BindSlot>(static_cast<uint32_t>(BindSlot::CsUav0) + slot),
                        uavs[i]);
         }
+        // The engine path's own mirror, slots 0-7: u4 is the exposure pass's fifth UAV and the shared shadow stops at u3.
+        if (slot < 8) g_state->uav[slot] = uavs[i];
     }
     if (flatRuntimeActive()) flatRuntimeUavs(start, n, uavs);
     g_state->realCSSetUAVs(self, start, n, uavs, counts);
@@ -634,16 +660,16 @@ void STDMETHODCALLTYPE hookedClearState(ID3D11DeviceContext* self) {
         return;
     }
     bindingForgetAll();
+    for (void*& v : g_state->uav) v = nullptr;
     g_state->realClearState(self);
 }
 
 // Is this dispatch the exposure pass? Pinned hash if configured, otherwise
 // shape detection, cached per shader so the cost is one evaluation each.
-bool isExposureDispatch() {
+bool isExposureDispatch(uint64_t h) {
     State* s = g_state;
     if (!s->enabled || s->rejected) return false;
 
-    const uint64_t h = hashOf(bindingGet(BindSlot::Cs));
     if (h == 0) return false;
     if (s->targetHash != 0) return h == s->targetHash;
     if (s->pinned) return false;   // pinned but not matching: do nothing
@@ -677,7 +703,7 @@ void STDMETHODCALLTYPE hookedDispatchIndirect(ID3D11DeviceContext* self,
         return;
     }
     if (g_vrWorldInternal) { g_state->realDispatchIndirect(self, args, off); return; }   // the world route's own (vr_world_route.h)
-    gpuFrameCommand(self);
+    gpuFrameCommandIfLive(self);
     State* s = g_state;
     if (drawCensusArmed()) {
         drawCensusDispatch(self, 0, 0, 0, foreignContext(self), args, off);
@@ -698,6 +724,7 @@ bool skinChainBound() {
 }
 
 void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y, UINT z) {
+    if (gpuPassProfileCapturing()) gpuPassProfileNoteDispatch(self, x, y, z);
     if (runtimeFlatProfile()) {
         ++g_state->thunkHits[kHitDispatch];
         if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDispatch(self, x, y, z);
@@ -706,7 +733,7 @@ void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y,
         return;
     }
     if (g_vrWorldInternal) { g_state->realDispatch(self, x, y, z); return; }   // the world route's own: not the game's exposure pass
-    gpuFrameCommand(self);
+    gpuFrameCommandIfLive(self);
     State* s = g_state;
     ++s->thunkHits[kHitDispatch];
     if (g_vrWorldWatchWrites && !foreignContext(self)) vrWorldRouteNoteDispatch();   // a UAV write into H after the resolve is the latch's
@@ -774,15 +801,46 @@ void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y,
     // views, and the probe would run on them with no SEH at all. The budget is
     // the same one the copy uses: if we cannot classify, we cannot act, so
     // there is nothing to keep alive separately.
+    //
+    // The engine path's decision is made in the same guarded region, from the same hash: the facts are the shader's content hash, whether it is
+    // the exposure shader, and the UAV slots as the game bound them. One lookup per dispatch, as before. Off (the flat profile, or the fix
+    // rejected itself) costs one branch and the chain is never consulted.
     bool isTarget = false;
-    guardedBudget(g_budget, [&] { isTarget = isExposureDispatch(); });
+    exposurechain::Decision dec;
+    guardedBudget(g_budget, [&] {
+        const uint64_t h = hashOf(bindingGet(BindSlot::Cs));
+        isTarget = isExposureDispatch(h);
+        if (!s->enabled || s->rejected) return;
+        exposurechain::Facts f;
+        f.hash = h;
+        f.isTarget = isTarget;
+        f.u0 = reinterpret_cast<uintptr_t>(s->uav[0]);
+        for (uint32_t i = 0; i < 8; ++i) {
+            if (s->uav[i]) f.uavMask |= 1u << i;
+        }
+        dec = s->chain.onDispatch(f, true, s->pinned || s->detectStreak >= kConfirmFrames);
+        if (dec.action == exposurechain::Action::Skip && !s->chainEngagedNoted) {
+            s->chainEngagedNoted = true;
+            Log::get().note("share exposure: the second eye's exposure chain is NOT sent to the GPU (predecessor %016llX, exposure shader "
+                            "%016llX); eye 0's result is copied into eye 1's u0-u4 where the second exposure dispatch would have run.",
+                            static_cast<unsigned long long>(s->chain.preHash()),
+                            static_cast<unsigned long long>(h));
+        }
+        if (dec.fallback && !s->chainFallbackNoted) {
+            s->chainFallbackNoted = true;
+            Log::get().note("share exposure: the second eye's chain ran as stock (first time: %s; exposure shader UAV mask 0x%X); every such "
+                            "dispatch is counted in the 30 s line.", exposurechain::whyText(dec.why), f.uavMask);
+        }
+    });
 
     // Any compute work at all means the game is rendering a scene, which is the
     // only condition under which the exposure pass could appear. Menus and
     // loading screens do not count -- see the frame counter at the boundary.
     s->computeThisFrame = true;
 
-    s->realDispatch(self, x, y, z);
+    // A skipped dispatch still counts as seen below (the census recorded it above, as the game SUBMITTED it).
+    const bool skipped = dec.action == exposurechain::Action::Skip;
+    if (!skipped) s->realDispatch(self, x, y, z);
     if (!isTarget) return;
 
     guardedBudget(g_budget, [&] {
@@ -792,6 +850,7 @@ void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y,
                 s->firstEye[i] = static_cast<ID3D11UnorderedAccessView*>(
                     bindingGet(uavSlot(i)));
             }
+            s->firstEye[4] = static_cast<ID3D11UnorderedAccessView*>(s->uav[4]);
         } else if (s->seenThisFrame == 2) {
             // Running exactly twice a frame is the other half of the signature:
             // once per eye. A shader that merely has the right resource shape
@@ -800,10 +859,11 @@ void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y,
             // a pinned hash is trusted immediately.
             if (!s->pinned && s->detectStreak < kConfirmFrames) return;
 
-            ID3D11UnorderedAccessView* second[4];
+            ID3D11UnorderedAccessView* second[5];
             for (uint32_t i = 0; i < 4; ++i) {
                 second[i] = static_cast<ID3D11UnorderedAccessView*>(bindingGet(uavSlot(i)));
             }
+            second[4] = static_cast<ID3D11UnorderedAccessView*>(s->uav[4]);
             if (!s->announced) {
                 s->announced = true;
                 // The key is advanced.exposure_shader. It said fix.b1_exposure_cs,
@@ -816,7 +876,8 @@ void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y,
                                 static_cast<unsigned long long>(hashOf(bindingGet(BindSlot::Cs))),
                                 Config::get().iniName());
             }
-            shareExposure(self, s->firstEye, second);
+            const uint32_t covered = shareExposure(self, s->firstEye, second);
+            s->chain.onShareCopied(covered, skipped);
             if (s->dampK > 0.0f) exposureDamp(self, s->firstEye[1]);
         }
     });
@@ -942,9 +1003,56 @@ void registerShaderHash(void* shader, uint64_t hash) {
     detail::g_shaderRegistryGen.fetch_add(1, std::memory_order_release);
 }
 
+// The engine path's per-frame bookkeeping and its two kinds of sentence: the ones said once (stood down, stuck learning) and the 30 s line.
+static void chainFrameBoundary(State* s) {
+    s->chain.frameBoundary();
+    if (!s->enabled || !s->announced) return;
+
+    const bool confirmed = s->pinned || s->detectStreak >= kConfirmFrames;
+    if (s->chain.latched() != exposurechain::Why::None) {
+        if (!s->chainStoodDownNoted) {
+            s->chainStoodDownNoted = true;
+            Log::get().note("share exposure: the second eye's chain runs as stock for the rest of this session: %s. (Both eyes still share "
+                            "one brightness; only the saving is gone.)", exposurechain::whyText(s->chain.latched()));
+        }
+    } else if (confirmed && !s->chain.engagedNow(confirmed) && s->chain.learnVerdict() != exposurechain::Why::None) {
+        // Twice a frame, confirmed, and the learner keeps saying the chain is not the shape it expects: say which, once, after 300 frames.
+        if (++s->chainStuckFrames == 300 && !s->chainStoodDownNoted) {
+            s->chainStoodDownNoted = true;
+            Log::get().note("share exposure: the second eye's chain is NOT being skipped: %s (shader predecessor %016llX). Both eyes still "
+                            "share one brightness the stock way.", exposurechain::whyText(s->chain.learnVerdict()),
+                            static_cast<unsigned long long>(s->chain.preHash()));
+        }
+    } else {
+        s->chainStuckFrames = 0;
+    }
+
+    const uint64_t now = nowMs();
+    if (s->chainLogMs == 0) {
+        s->chainLogMs = now;
+    } else if (now - s->chainLogMs >= 30000) {
+        const uint64_t skipped = s->chain.skippedPre() + s->chain.skippedTarget();
+        const uint64_t fallbacks = s->chain.fallbacks();
+        if (skipped != 0 || fallbacks != 0 || s->chain.engagedNow(confirmed)) {
+            Log::get().note("share exposure: eye-1 chain skipped %llu dispatches (saved ~%.0f ms by the census), fallbacks %llu "
+                            "[last 30 s: %llu skipped, %llu fallbacks; %s; census figure %.3f ms per second-eye chain, pass profile "
+                            "2026-10-13]",
+                            static_cast<unsigned long long>(skipped), s->chain.savedMs(), static_cast<unsigned long long>(fallbacks),
+                            static_cast<unsigned long long>(skipped - s->chainLogSkipped),
+                            static_cast<unsigned long long>(fallbacks - s->chainLogFallbacks),
+                            s->chain.engagedNow(confirmed) ? "engaged" : "not engaged",
+                            exposurechain::kPreMs + exposurechain::kTargetMs);
+        }
+        s->chainLogSkipped = skipped;
+        s->chainLogFallbacks = fallbacks;
+        s->chainLogMs = now;
+    }
+}
+
 void exposureFixFrameBoundary() {
     State* s = g_state;
     if (!s) return;
+    chainFrameBoundary(s);
     // Exactly two dispatches means one per eye. Anything else breaks the streak,
     // so a shader that only sometimes runs twice never gets promoted.
     if (s->seenThisFrame == 2) {
@@ -1010,21 +1118,6 @@ void exposureFixFrameBoundary() {
     }
 }
 
-void toggleExposureFix() {
-    State* s = g_state;
-    // Deliberately does NOT require a pinned hash. It used to, from when one was
-    // mandatory, and making detection the default silently disabled the toggle:
-    // with nothing pinned, targetHash is zero and this returned immediately.
-    if (!s || !s->hook.committed()) return;
-
-    s->enabled = !s->enabled;
-    if (s->enabled) s->rejected = false;
-    Log::get().note("exposure fix toggled %s (applied %llu times so far, target %s)",
-                    s->enabled ? "ON" : "OFF",
-                    static_cast<unsigned long long>(s->applied),
-                    s->pinned ? "pinned" : (s->announced ? "detected" : "not yet found"));
-}
-
 bool exposureDampingActive() { return g_state && g_state->dampK > 0.0f; }
 
 void installExposureFix(ID3D11Device* device, HookMode mode) {
@@ -1046,13 +1139,10 @@ void installExposureFix(ID3D11Device* device, HookMode mode) {
         g_state->targetHash = strtoull(hashText.c_str(), nullptr, 16);
         g_state->pinned = g_state->targetHash != 0;
     }
-    g_state->enabled = cfg.getBool("fix.share_exposure", true);
-    // Not settings. All four of the pass's outputs have to be shared -- sharing
-    // only the first was tried and did nothing visible, because the value the
-    // tonemap actually reads is in another one. Direction was measured too:
-    // first eye to second keeps the scene bright, the reverse dims everything.
-    g_state->copyMask = 0xF;
-    g_state->copyBtoA = false;
+    // Always on in VR, no setting and no live toggle (the Scroll Lock key went 2026-10-13, the setting 2026-10-14). The flat profile keeps what it
+    // always had: the old setting was not on its key allow-list, so Config::getBool answered false for it there, and the flat dispatch hook
+    // returns before any of this runs.
+    g_state->enabled = !runtimeFlatProfile();
 
     State& s = *g_state;
     s.ownerCtx = ctx;

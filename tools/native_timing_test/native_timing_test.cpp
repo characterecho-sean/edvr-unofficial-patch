@@ -45,6 +45,8 @@ static EdvrNativeTimingTable acquire(ID3D11Device* d,uint64_t gen,Checks& c){
 int wmain(int argc,wchar_t** argv){
     if(argc!=2)return 2;if(!std::wcscmp(argv[1],L"--dry-run")){std::puts("native_timing_test: dry-run (no WARP device)");return 0;}if(std::wcscmp(argv[1],L"--self-test"))return 2;
     SetErrorMode(3);
+    // The GPU timing default is off (2026-10-13): this rig exercises the on path, so it says so.
+    edvr::Config::get().set("advanced.app_gpu_timing","true");
     Checks c;ComPtr<ID3D11Device>d;ComPtr<ID3D11DeviceContext>dc;D3D_FEATURE_LEVEL fl{};
     const auto create=edvr::systemD3D11CreateDevice();
     c.check(create!=nullptr,"System32 D3D11CreateDevice");if(!create)return 1;

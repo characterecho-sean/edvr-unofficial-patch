@@ -156,6 +156,8 @@ static std::string plannedIni(const Plan& plan) {
     return std::string();
 }
 
+static std::string plannedText(const Plan& plan, const wchar_t* leaf);   // defined with the flat-edition cases
+
 static DllInfo fakeDll(DllKind kind, const std::wstring& path, const std::string& sha,
                        const wchar_t* product = nullptr) {
     DllInfo d;
@@ -1131,6 +1133,83 @@ static void testShippedIni(const std::wstring& root) {
                   "a file without the six lines carries nothing: the new file stands as shipped");
         }
     }
+
+    // 2026-10-13: fix.transition_flash removed. The one-frame-flash hold is always on in the VR profile and has no setting; the key shipped LIVE
+    // as `1` in [fix] (so every install of the previous version has the line written out), with a menu row ("Stop the one-frame flash on jumps").
+    // A line somebody set (0 is the interesting one: it used to turn the hold off) is carried with its value under "this version no longer uses
+    // it", reported as retired, not adopted, and the DLL never reads it -- at run time the config audit names it as a line this build does not
+    // read. Nothing else in the file moves; a second merge adds no copy.
+    check(shipped.find("transition_flash") == std::string::npos,
+          "the shipped ini documents no fix.transition_flash line");
+    {
+        const std::string anchor = "\n# Stop the sun's glare riding your head";
+        const size_t at = shipped.find(anchor);
+        check(at != std::string::npos, "the shipped ini still has the line the removed-transition-flash fixture anchors on");
+        if (at != std::string::npos) {
+            std::string previous = shipped;
+            previous.insert(at + 1,
+                std::string("# Stop the one-frame flash of a wrong viewpoint when you jump, drop out of") + eol +
+                "# supercruise, or close the galaxy map. 1 on, 0 off. Needs a game restart." + eol +
+                "# ui: Stop the one-frame flash on jumps | menu" + eol +
+                "transition_flash = 1" + eol + eol);
+            const auto setLine = [&](std::string text, const std::string& oldLine, const std::string& newLine) {
+                const size_t p = text.find("\n" + oldLine + eol);
+                if (p != std::string::npos) text.replace(p + 1, oldLine.size(), newLine);
+                return text;
+            };
+            const auto copies = [](const std::string& text, const std::string& needle) {
+                size_t n = 0, from = 0;
+                while ((from = text.find(needle, from)) != std::string::npos) {
+                    ++n;
+                    from += 1;
+                }
+                return n;
+            };
+            const std::string carriedNote = "# carried over from your edvr.ini; this version no longer uses it";
+            const auto carriedAs = [&](const std::string& merged, const std::string& line) {
+                return merged.find(carriedNote + "\n" + line) != std::string::npos ||
+                       merged.find(carriedNote + "\r\n" + line) != std::string::npos;
+            };
+
+            // 1. The previous version's own file: the live `1` is carried.
+            {
+                MergeReport rep;
+                const std::string merged = mergeIni(shipped, previous, &previous, {}, &rep);
+                expectEq(iniValue(merged, "fix.transition_flash"), "1", "the previous version's own transition_flash line is carried, not eaten");
+                check(rep.retired.size() == 1 && rep.carried.empty(),
+                      "...reported as a retired setting, not as a key this version never shipped",
+                      std::to_string(rep.retired.size()) + " retired, " + std::to_string(rep.carried.size()) + " carried");
+                check(carriedAs(merged, "transition_flash = 1"), "...after a note saying this version no longer uses it");
+            }
+
+            // 2. A rig that had turned the hold off: the 0 is carried too, and is inert (nothing reads it).
+            {
+                const std::string off = setLine(previous, "transition_flash = 1", "transition_flash = 0");
+                MergeReport rep;
+                const std::string merged = mergeIni(shipped, off, &previous, {}, &rep);
+                expectEq(iniValue(merged, "fix.transition_flash"), "0", "a transition_flash = 0 line is carried with its value");
+                check(rep.retired.size() == 1 && rep.carried.empty(), "...and reported as retired");
+                check(carriedAs(merged, "transition_flash = 0"), "...after the note");
+                check(merged.find("Stop the one-frame flash") == std::string::npos,
+                      "the removed setting's documentation block and menu row are not resurrected");
+
+                MergeReport again;
+                const std::string twice = mergeIni(shipped, merged, &shipped, {}, &again);
+                check(copies(twice, "transition_flash = 0") == 1, "a second merge does not duplicate the carried line");
+
+                MergeReport bareRep;
+                const std::string bare = mergeIni(shipped, off, nullptr, {}, &bareRep);
+                check(iniValue(bare, "fix.transition_flash") == "0" && bareRep.carried.size() == 1 && bareRep.retired.empty(),
+                      "with no base copy it is still carried, reported as a key this version never shipped");
+            }
+
+            // A file with no such line carries nothing.
+            MergeReport freshRep;
+            const std::string fresh = mergeIni(shipped, shipped, &previous, {}, &freshRep);
+            check(fresh == shipped && freshRep.retired.empty() && freshRep.carried.empty(),
+                  "a file without the transition_flash line carries nothing: the new file stands as shipped");
+        }
+    }
 }
 
 // A shipped default that CHANGED, against the real edvr.ini: fix.ui_quality went
@@ -1535,6 +1614,25 @@ static void testPlanner() {
         const Plan plan = planInstall(s, options, payload);
         check(hasStep(plan, Action::WritePayload, nullptr, L"d3d11.dll"), "EDVR is put back");
         check(notesMention(plan, "Keeping the chain"), "and the chain to EDHM is kept");
+        expectEq(iniValue(plannedIni(plan), "advanced.real_dll"), "d3d11_edhm.dll",
+                 "and written to the new edvr.ini, the one place both profiles read it from");
+        expectEq(iniValue(plannedText(plan, L"edvr-flat.ini"), "advanced.real_dll", "<absent>"), "",
+                 "while the new edvr-flat.ini holds no second copy");
+
+        // An edvr.ini that exists and was emptied on purpose is the user's: a kept chain does not write itself back.
+        Survey emptied = s;
+        emptied.iniPresent = true;
+        emptied.iniText = std::string(kNextIni);
+        emptied.baseIniText = kNextIni;
+        const Plan quiet = planInstall(emptied, options, payload);
+        expectEq(iniValue(plannedIni(quiet).empty() ? emptied.iniText : plannedIni(quiet), "advanced.real_dll", "<absent>"), "",
+                 "an existing edvr.ini whose chain was emptied is not refilled by a kept chain");
+        // ...but a run that replaces the settings with the shipped defaults makes the file new, and the chain goes into it.
+        Options fresh = options;
+        fresh.keepSettings = false;
+        const Plan replaced = planInstall(emptied, fresh, payload);
+        expectEq(iniValue(plannedIni(replaced), "advanced.real_dll"), "d3d11_edhm.dll",
+                 "settings replaced by the shipped defaults still carry the kept chain");
     }
 
     {   // The mod EDVR was chaining to has been uninstalled properly.
@@ -1960,6 +2058,12 @@ static const char* kFlatOwnIni =
     "\r\n"
     "[advanced]\r\n"
     "real_dll =\r\n";
+
+// What a dry run says when advanced.real_dll is in edvr-flat.ini alone and edvr.ini has none (installer.md quotes it).
+static const char* kMoveNote =
+    "Moving advanced.real_dll (d3d11_edhm.dll) from edvr-flat.ini to edvr.ini, so it is set once and applies to both the VR and flat "
+    "profiles. Both files are backed up first; edvr-flat.ini keeps no value for it (write real_dll = none there to run flat without "
+    "the chain).";
 
 // The payload the flat installer carries, for an apply on real files.
 static PayloadProvider flatProvider() {
@@ -2818,6 +2922,8 @@ static void testFlatSettingsPlanner() {
     // these ask for scope flat, and the VR cases below ask for their own scope.
     Options options = testOptions();
     options.scope = "flat";
+    Options bothScope = testOptions();   // the VR payload's default scope, for the chain cases that need both files
+    bothScope.scope = "both";
 
     {   // The legacy shared-INI install: a flat install from before edvr-flat.ini
         // existed has only edvr.ini. The flat runtime has been reading it, so its
@@ -2957,9 +3063,10 @@ static void testFlatSettingsPlanner() {
               "and names the file that needed nothing");
     }
 
-    {   // A graphics mod in the d3d11.dll slot: the chain decision forces
-        // advanced.real_dll into the file the flat runtime reads. In edvr.ini it
-        // would change nothing the flat edition does.
+    {   // A graphics mod in the d3d11.dll slot: the chain decision is ONE value, kept in the shared
+        // edvr.ini (both profiles read it from there; the flat runtime reads edvr-flat.ini first
+        // only for an override or `none`). The flat file gets none, and edvr.ini is changed in
+        // that one key alone, after a copy of it goes to the backup folder.
         Survey s = baseSurvey(dir);
         s.haveOpenvrDir = false;
         s.d3d11 = fakeDll(DllKind::D3d11Provider, joinPath(dir, L"d3d11.dll"), "edhm", L"3Dmigoto");
@@ -2968,9 +3075,133 @@ static void testFlatSettingsPlanner() {
         const Plan plan = planInstall(s, options, flatOld);
         check(hasStep(plan, Action::Rename, L"d3d11.dll", L"d3d11_edhm.dll"),
               "a flat install chains to the mod already in the slot");
-        expectEq(iniValue(plannedText(plan, L"edvr-flat.ini"), "advanced.real_dll"),
-                 "d3d11_edhm.dll", "and the chain target is in the file the flat runtime reads");
-        check(!touchesLive(plan, dir, L"edvr.ini"), "not in edvr.ini, which is left alone");
+        expectEq(iniValue(plannedText(plan, L"edvr.ini"), "advanced.real_dll"),
+                 "d3d11_edhm.dll", "and the chain target is kept once, in the shared edvr.ini");
+        expectEq(plannedText(plan, L"edvr.ini"),
+                 std::string(kSharedIni).substr(0, std::string(kSharedIni).rfind("real_dll =")) +
+                     "real_dll = d3d11_edhm.dll\r\n",
+                 "changing that one line of it and nothing else");
+        check(hasStep(plan, Action::Backup, L"edvr.ini", L"edvr.ini"),
+              "after a copy of edvr.ini goes to the backup folder");
+        expectEq(iniValue(plannedText(plan, L"edvr-flat.ini"), "advanced.real_dll", "<absent>"), "",
+                 "while edvr-flat.ini holds no second copy");
+    }
+
+    {   // The same flat install with no edvr.ini at all: the shared place is made, holding only the chain.
+        Survey s = baseSurvey(dir);
+        s.haveOpenvrDir = false;
+        s.d3d11 = fakeDll(DllKind::D3d11Provider, joinPath(dir, L"d3d11.dll"), "edhm", L"3Dmigoto");
+        const Plan plan = planInstall(s, options, flatOld);
+        expectEq(iniValue(plannedText(plan, L"edvr.ini"), "advanced.real_dll"), "d3d11_edhm.dll",
+                 "a flat install with no edvr.ini creates one for the chain");
+        expectEq(iniValue(plannedText(plan, L"edvr.ini"), "fix.temporal_aa", "<absent>"), "<absent>",
+                 "holding nothing else");
+        check(!hasStep(plan, Action::Backup, L"edvr.ini", L"edvr.ini"), "and a new file has nothing to back up");
+        expectEq(iniValue(plannedText(plan, L"edvr-flat.ini"), "advanced.real_dll", "<absent>"), "",
+                 "while edvr-flat.ini holds no second copy");
+    }
+
+    {   // THE USER'S CASE. A hand- or earlier-installer-made layout: advanced.real_dll only in
+    // edvr-flat.ini, edvr.ini empty. The install moves it: edvr.ini gets the value, edvr-flat.ini
+    // is emptied of it, both are backed up, and the plan says so.
+        const PayloadInfo vr = testPayload(kNextIni);
+        Survey s = baseSurvey(dir);
+        s.iniPresent = true;
+        s.iniText = kSharedIni;                                    // real_dll empty
+        s.flatIniPresent = true;
+        s.flatIniText = std::string(kFlatOwnIni).substr(0, std::string(kFlatOwnIni).rfind("real_dll =")) +
+                        "real_dll = d3d11_edhm.dll\r\n";            // the value, here alone
+        const Plan plan = planInstall(s, bothScope, vr);
+        check(!plan.blocked, "an install over the split layout plans");
+        expectEq(iniValue(plannedText(plan, L"edvr.ini"), "advanced.real_dll"), "d3d11_edhm.dll",
+                 "edvr.ini receives the chain");
+        expectEq(iniValue(plannedText(plan, L"edvr-flat.ini"), "advanced.real_dll", "<absent>"), "",
+                 "edvr-flat.ini is emptied of it");
+        expectEq(iniValue(plannedText(plan, L"edvr-flat.ini"), "fix.temporal_aa"), "fsr",
+                 "and keeps the rest of the person's flat settings");
+        check(hasStep(plan, Action::Backup, L"edvr.ini", L"edvr.ini") &&
+                  hasStep(plan, Action::Backup, L"edvr-flat.ini", L"edvr-flat.ini"),
+              "both files are backed up first");
+        check(notesMention(plan, kMoveNote),
+              "the dry-run report says what moved, from where to where, and how to opt flat out");
+        check(std::string(planSummary(plan)).find(std::string("  - ") + kMoveNote + "\r\n") != std::string::npos,
+              "word for word, as the installer prints it");
+
+        // Run again over the result: nothing left to move.
+        Survey after = s;
+        after.iniText = plannedText(plan, L"edvr.ini");
+        after.flatIniText = plannedText(plan, L"edvr-flat.ini");
+        const Plan second = planInstall(after, bothScope, vr);
+        check(!notesMention(second, "Moving advanced.real_dll"), "a second run moves nothing");
+        check(!touchesLive(second, dir, L"edvr.ini") || plannedText(second, L"edvr.ini") == after.iniText,
+              "and does not change edvr.ini");
+    }
+
+    {   // Values that are somebody's decision are not migrated or overwritten.
+        const PayloadInfo vr = testPayload(kNextIni);
+        auto withChain = [&](const char* sharedValue, const char* flatValue) {
+            Survey s = baseSurvey(dir);
+            s.iniPresent = true;
+            s.iniText = std::string("[advanced]\r\nreal_dll = ") + sharedValue + "\r\n";
+            s.flatIniPresent = true;
+            s.flatIniText = std::string("[advanced]\r\nreal_dll = ") + flatValue + "\r\n";
+            return planInstall(s, bothScope, vr);
+        };
+        Plan p = withChain("d3d11_reshade.dll", "d3d11_edhm.dll");
+        check(!notesMention(p, "Moving advanced.real_dll"), "edvr.ini already names a mod: a flat override is not moved");
+        expectEq(iniValue(plannedText(p, L"edvr-flat.ini"), "advanced.real_dll", "<kept>"), "d3d11_edhm.dll",
+                 "and stays as the flat override");
+        expectEq(iniValue(plannedText(p, L"edvr.ini"), "advanced.real_dll", "<kept>"), "d3d11_reshade.dll",
+                 "while edvr.ini keeps its own");
+        p = withChain("", "none");
+        check(!notesMention(p, "Moving advanced.real_dll"), "`none` in edvr-flat.ini is not moved");
+        expectEq(iniValue(plannedText(p, L"edvr-flat.ini"), "advanced.real_dll", "<kept>"), "none",
+                 "and is kept");
+        p = withChain("none", "d3d11_edhm.dll");
+        check(!notesMention(p, "Moving advanced.real_dll"), "`none` in edvr.ini is not overwritten from the flat file");
+    }
+
+    {   // A VR-only install does not manage edvr-flat.ini: it copies the value to edvr.ini and leaves the flat file as it is.
+        const PayloadInfo vr = testPayload(kNextIni);
+        Survey s = baseSurvey(dir);
+        s.iniPresent = true;
+        s.iniText = kSharedIni;
+        s.flatIniPresent = true;
+        s.flatIniText = "[advanced]\r\nreal_dll = d3d11_edhm.dll\r\n";
+        Options vrOnly = options;
+        vrOnly.scope = "vr";
+        const Plan plan = planInstall(s, vrOnly, vr);
+        expectEq(iniValue(plannedText(plan, L"edvr.ini"), "advanced.real_dll"), "d3d11_edhm.dll",
+                 "a VR install copies the flat file's chain to edvr.ini");
+        check(!touchesLive(plan, dir, L"edvr-flat.ini"), "and leaves edvr-flat.ini, outside its scope, alone");
+    }
+
+    {   // Flat-only over a flat file that holds it, with edvr.ini present but empty: edvr.ini gets the value in that line alone.
+        Survey s = installedFlatSurvey(dir, flatOld);
+        s.d3d11.sha256 = flatOld.d3d11Sha;
+        s.state.d3d11Sha = flatOld.d3d11Sha;
+        s.flatIniPresent = true;
+        s.flatIniText = "[advanced]\r\nreal_dll = d3d11_edhm.dll\r\n";
+        s.iniPresent = true;
+        s.iniText = kSharedIni;
+        const Plan plan = planInstall(s, options, flatOld);
+        expectEq(iniValue(plannedText(plan, L"edvr.ini"), "advanced.real_dll"), "d3d11_edhm.dll",
+                 "a flat-only install moves it into the shared edvr.ini too");
+        expectEq(iniValue(plannedText(plan, L"edvr.ini"), "fix.black_void"), "0",
+                 "leaving the rest of edvr.ini as it was");
+        expectEq(iniValue(plannedText(plan, L"edvr-flat.ini"), "advanced.real_dll", "<absent>"), "",
+                 "and emptying edvr-flat.ini of it");
+    }
+
+    {   // A flat file made new from the shared one (the seed) carries no second copy of the chain.
+        Survey s = baseSurvey(dir);
+        s.haveOpenvrDir = false;
+        s.iniPresent = true;
+        s.iniText = "[advanced]\r\nreal_dll = d3d11_edhm.dll\r\n";
+        const Plan plan = planInstall(s, options, flatOld);
+        expectEq(iniValue(plannedText(plan, L"edvr-flat.ini"), "advanced.real_dll", "<absent>"), "",
+                 "a seeded edvr-flat.ini keeps no copy of the shared chain value");
+        check(!touchesLive(plan, dir, L"edvr.ini"), "and edvr.ini is not touched");
     }
 
     {   // The mirror image: the VR edition works on edvr.ini and leaves the flat
@@ -3127,6 +3358,17 @@ static void testFlatSettingsPlanner() {
         vr.otherD3d11.push_back(s.otherD3d11.front());
         check(hasStep(planUninstall(vr, options), Action::Rename, L"d3d11_edhm.dll", L"d3d11.dll"),
               "a VR uninstall reads edvr.ini for it, whatever the flat file says");
+
+        // The chain lives in edvr.ini now: a flat uninstall finds it there when the flat file holds none, and honours `none`.
+        Survey shared = installedFlat(true, true);
+        shared.iniText = "[advanced]\r\nreal_dll = d3d11_edhm.dll\r\n";
+        shared.flatIniText = kFlatOwnIni;
+        shared.otherD3d11.push_back(s.otherD3d11.front());
+        check(hasStep(planUninstall(shared, options), Action::Rename, L"d3d11_edhm.dll", L"d3d11.dll"),
+              "a flat uninstall puts back the mod edvr.ini names, the flat file holding none");
+        shared.flatIniText = "[advanced]\r\nreal_dll = none\r\n";
+        check(hasStep(planUninstall(shared, options), Action::Rename, L"d3d11_edhm.dll", L"d3d11.dll"),
+              "and still puts it back when the flat file says none: that only switched the chain off for flat");
     }
 }
 
@@ -3223,6 +3465,39 @@ static void testApply(const std::wstring& scratch) {
         const InstallState state = readState(gameDir);
         check(state.present, "the record parses back");
         expectEq(state.edvrVersion, payload.version, "and names the version installed");
+    }
+
+    {   // advanced.real_dll in edvr-flat.ini alone, on real files: planning (what --dry-run does) writes
+        // nothing at all; applying moves the value to edvr.ini, backs up both, and changes nothing else.
+        layOutScratchGame(gameDir);
+        const std::string sharedBefore = "[fix]\r\nblack_void = 0\r\n\r\n[advanced]\r\nreal_dll =\r\nexposure_shader =\r\n";
+        const std::string flatBefore = "[fix]\r\ntemporal_aa = fsr\r\n\r\n[advanced]\r\nreal_dll = d3d11_edhm.dll\r\n";
+        writeAll(joinPath(gameDir, L"edvr.ini"), sharedBefore);
+        writeAll(joinPath(gameDir, L"edvr-flat.ini"), flatBefore);
+        Survey s = scratchSurvey(gameDir);
+        s.iniPresent = true;
+        s.iniText = sharedBefore;
+        s.flatIniPresent = true;
+        s.flatIniText = flatBefore;
+        const Plan plan = planInstall(s, options, payload);
+        check(notesMention(plan, kMoveNote), "the plan names the move");
+        expectEq(readAll(joinPath(gameDir, L"edvr.ini")), sharedBefore, "planning leaves edvr.ini as it was");
+        expectEq(readAll(joinPath(gameDir, L"edvr-flat.ini")), flatBefore, "and edvr-flat.ini");
+        check(!fileExists(joinPath(gameDir, L"d3d11.dll")) && !fileExists(joinPath(gameDir, L"edvr_backup")) &&
+                  !fileExists(joinPath(gameDir, L"edvr_install")),
+              "and writes no file, backup or folder anywhere (a --dry-run stops here)");
+        const ApplyResult result = applyPlan(plan, provider(false));
+        check(result.ok, "the plan applies", result.error);
+        const std::string sharedAfter = readAll(joinPath(gameDir, L"edvr.ini"));
+        const std::string flatAfter = readAll(joinPath(gameDir, L"edvr-flat.ini"));
+        expectEq(iniValue(sharedAfter, "advanced.real_dll"), "d3d11_edhm.dll", "edvr.ini now holds the chain");
+        expectEq(iniValue(sharedAfter, "fix.black_void"), "0", "beside the person's own settings");
+        expectEq(iniValue(flatAfter, "advanced.real_dll", "<absent>"), "", "edvr-flat.ini holds none");
+        expectEq(iniValue(flatAfter, "fix.temporal_aa"), "fsr", "and keeps the person's own settings");
+        expectEq(readAll(joinPath(gameDir, L"edvr_backup\\20260827-120000\\edvr.ini")), sharedBefore,
+                 "edvr.ini is in the backup folder as it was");
+        expectEq(readAll(joinPath(gameDir, L"edvr_backup\\20260827-120000\\edvr-flat.ini")), flatBefore,
+                 "and so is edvr-flat.ini");
     }
 
     {   // The failure that matters: the rename has happened, then the write

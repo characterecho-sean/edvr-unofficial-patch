@@ -1,25 +1,31 @@
-// glitch_test -- drives the transition-flash detector without the game.
+// glitch_test -- drives the transition-flash engine fix's camera-buffer tap
+// (src/d3d11/glitch_frame.cpp) without the game.
 //
-// The port of glitch_frame.cpp into this repo compiled, linked, and passed
-// every existing test on the first try. None of that is evidence that it WORKS:
-// the detector is fed entirely through hooks in context_hook.cpp, and a wiring
-// mistake there -- a call in the wrong place, an eye-draw count that is one
-// frame stale, a Map gate that never hands it the buffer -- produces exactly
-// the same clean build and a fix that silently never fires.
+// The tap is the half of the fix that SEES a frame: vScreen's Map and Unmap hooks
+// hand it every fill of the game's 5376-byte scene constant buffer, and while the
+// engine fix has an event window open it passes the fill on. A wiring mistake
+// there -- a Map gate that never nominates the buffer, a window that does not
+// reach the tap, a frame counter that does not advance -- produces a clean build
+// and a fix that silently never fires, so each of those is asserted here.
 //
-// So the module is driven directly here, with synthetic camera writes, and
-// asked to do the thing it exists for. What this proves:
+// What this proves:
 //
-//   1. It validates on smooth motion rather than disabling itself.
-//   2. It withholds the frame where the camera jumps.
-//   3. It does NOT withhold ordinary frames, including fast smooth ones --
-//      the failure that matters more, because a detector that marks everything
-//      is judder, and judder is worse than the flash it replaces.
-//   4. It refuses to act on frames that do not look like a rendered scene,
-//      which is what stops it firing in menus and loading screens.
+//   1. The tap nominates the 5376-byte scene buffer (the sun-glare fix and the
+//      temporal pass read the same block) whether or not the engine fix is armed.
+//   2. It passes a fill on only while the engine fix's window is open, with the
+//      pre-advance frame number, and never a non-finite or wrong-sized fill.
+//   3. The frame counter the engine fix's window tests count in advances once
+//      per boundary.
+//   4. The camera geometry settings are checked before the engine fix may report
+//      Armed (a size of 0, an offset outside the buffer, another size), and a
+//      stale fix.transition_flash line in the ini changes nothing: there is no
+//      key, and the tap is available with none.
+//   5. A hold marks the frame, reports whether a compositor was there to honour
+//      it, and the verdict word changes when the boundary behind it publishes.
 //
-// What it does NOT prove: that the hooks in context_hook.cpp call any of this.
-// That needs the game. See docs/TESTING.md.
+// What it does NOT prove: that the hooks in vscreen.cpp call any of this, or that
+// the engine fix finds the right frame. tools\native_temporal_test drives the
+// engine fix through the tap end to end, and the flights prove the rest.
 //
 // Usage: glitch_test.exe <scratch dir>
 #include <windows.h>
@@ -31,14 +37,23 @@
 
 #include "../../src/common/config.h"
 #include "../../src/common/frame_flag.h"
-#include "../../src/common/timing.h"
 #include "../../src/d3d11/glitch_frame.h"
 
+namespace {
+unsigned g_noteCalls = 0;
+uint32_t g_noteFrame = 0;
+size_t g_noteBytes = 0;
+}  // namespace
+
 namespace edvr {
-// Linker stub: this rig drives glitch_frame.cpp alone, without the engine
-// fix's module (transition_flash_eye_base.cpp, which needs CodeHook and the
-// game). The camera-CB tap it would run is a no-op here.
-void transitionFlashEyeBaseNoteSceneCB(uint32_t, const void*, size_t) {}
+// Linker stub: this rig drives glitch_frame.cpp alone, without the engine fix's
+// module (transition_flash_eye_base.cpp, which needs CodeHook and the game). It
+// records what the tap hands over.
+void transitionFlashEyeBaseNoteSceneCB(uint32_t frame, const void*, size_t bytes) {
+    ++g_noteCalls;
+    g_noteFrame = frame;
+    g_noteBytes = bytes;
+}
 }  // namespace edvr
 
 using namespace edvr;
@@ -46,31 +61,6 @@ using namespace edvr;
 namespace {
 
 int g_fails = 0;
-
-// The detector's tuning used to be twelve advanced.transition_flash_* keys read
-// at install; it is a constant struct now (glitch_frame.h) and this rig sets
-// its own through glitchFrameSetTuningForTest. tune() keeps the call sites
-// reading as they did: the key name without its prefix, the value as text.
-// The baseline is what the suite was written against: a separation memory
-// that ACTS and no burst governor (limit 30).
-GlitchTuning g_tune;
-void resetTuning() {
-    g_tune = GlitchTuning{};
-    g_tune.separationMode = 2;
-    g_tune.burstLimit = 30;
-    glitchFrameSetTuningForTest(g_tune);
-}
-void tune(const char* key, const char* value) {
-    const std::string k(key), v(value);
-    if (k == "repeat_percent") g_tune.repeatPercent = static_cast<float>(atof(value));
-    else if (k == "separation") g_tune.separationMode = v == "act" ? 2u : (v == "off" ? 0u : 1u);
-    else if (k == "burst_limit") g_tune.burstLimit = static_cast<uint32_t>(atoi(value));
-    else if (k == "burst_window") g_tune.burstWindow = static_cast<uint32_t>(atoi(value));
-    else if (k == "drift_pct") g_tune.driftPct = static_cast<float>(atof(value));
-    else if (k == "max_consecutive") g_tune.maxConsecutive = static_cast<uint32_t>(atoi(value));
-    else { printf("  FAIL  unknown tuning key %s\n", key); ++g_fails; }
-    glitchFrameSetTuningForTest(g_tune);
-}
 
 void ok(const char* what) { printf("  ok    %s\n", what); }
 
@@ -93,107 +83,16 @@ std::wstring widen(const char* p) {
 constexpr uint32_t kBytes = 5376;
 constexpr uint32_t kOffset = 1100;      // in floats
 constexpr uint32_t kFloats = kBytes / 4;
-constexpr uint32_t kEyeDraws = 500;     // comfortably over minEyeDraws (100)
 
 // One 5376-byte constant buffer with a camera position in it.
 struct Buffer {
     float f[kFloats] = {};
-    const void* res = reinterpret_cast<const void*>(0xC0FFEE);
-
     void setPos(float x, float y, float z) {
         f[kOffset + 0] = x;
         f[kOffset + 1] = y;
         f[kOffset + 2] = z;
     }
 };
-
-// One frame, in the order the real one happens.
-//
-// The verdict is sampled after the write and BEFORE the boundary, because that
-// is where the compositor reads it: the real call order is Submit, Submit,
-// Present, WaitGetPoses, so by the time the boundary runs the frame has already
-// gone to the headset. Sampling after the boundary would test a flag nobody
-// acts on -- and would have passed while the fix withheld nothing at all, which
-// is a mistake this module's own comments record being made.
-// A FAKE CLOCK, ADVANCED ONE FRAME PERIOD PER BOUNDARY.
-//
-// The burst governor's stand-down and the rebase cooldown are durations now
-// (src/common/timing.h), so a fixture that steps frames without time passing
-// would leave both permanently engaged and the detector permanently mute --
-// which is exactly what fourteen of these fixtures reported the moment the
-// conversion landed. Advancing here keeps the suite instant while making the
-// stand-downs expire on the schedule the detector actually uses.
-//
-// 90Hz, because every fixture in this file is a replay of a capture taken at
-// 90Hz and its frame indices are quoted from those logs. Rate-invariance is
-// asserted in gate_test, which owns scenarios rather than replays.
-uint64_t g_fakeUs = 0;
-uint64_t g_fakeMs = 0;
-uint64_t fakeClock() { return g_fakeMs; }
-void advanceOneFrame() {
-    g_fakeUs += 1000000ull / 90ull;
-    g_fakeMs = g_fakeUs / 1000ull;
-}
-
-bool frame(Buffer& b, float x, float y, float z, uint32_t eyeDraws = kEyeDraws) {
-    b.setPos(x, y, z);
-    glitchFrameObserve(b.f, kBytes, b.res);
-    const bool marked = glitchFrameMarked();
-    advanceOneFrame();
-    glitchFrameBoundary(eyeDraws);
-    clearGlitchFrame();
-    return marked;
-}
-
-// A stretch of ordinary flight in which one frame in three reports the far
-// shadow cascade instead of the near camera, then returns to the path.
-//
-// THE FIELD SHAPE, not an invention. Frames 20736, 20739, 20742, 20744, 20747,
-// 20751, 20754, 20758, 20761 of one session: nine of these inside a second, each
-// returning immediately -- which is why the rebase cooldown never engaged and
-// the detector withheld every one of them.
-//
-// `sep` wobbles by a fraction of a percent per flip, because the real one does:
-// the measured pair ranged 562,949 to 571,365. A fixture with a constant
-// magnitude would pass with an equality test, which is the implementation this
-// data refutes.
-uint32_t cascadeFlips(Buffer& b, float& x, float sep, uint32_t frames) {
-    uint32_t withheld = 0;
-    for (uint32_t i = 0; i < frames; ++i) {
-        x += 30.0f;
-        if ((i % 3) == 2) {
-            // static_cast<int>, and it is not decoration: `i` is unsigned, so
-            // `(i % 5) - 2` wraps to about 4.29 billion whenever i % 5 is 0 or 1.
-            // The first version of this fixture did exactly that and invented a
-            // second separation out of the overflow -- which the detector then
-            // handled correctly, costing one frame each, and the test read that
-            // as the suppression failing. Same wrap as EDVR-99.
-            const float wobble =
-                sep * (1.0f + 0.007f * static_cast<float>(static_cast<int>(i % 5) - 2));
-            if (frame(b, x, wobble, 0.0f)) ++withheld;
-        } else {
-            if (frame(b, x, 0.0f, 0.0f)) ++withheld;
-        }
-    }
-    return withheld;
-}
-
-// Ordinary flight, long enough to rebuild the prediction and settle.
-void settle(Buffer& b, float& x, uint32_t frames = 20) {
-    for (uint32_t i = 0; i < frames; ++i) {
-        x += 30.0f;
-        frame(b, x, 0.0f, 0.0f);
-    }
-}
-
-// One frame off the path by `units`, returning the next frame. A real flash.
-bool oneFrameExcursion(Buffer& b, float& x, float units) {
-    x += 30.0f;
-    const bool marked = frame(b, x, units, 0.0f);
-    x += 30.0f;
-    frame(b, x, 0.0f, 0.0f);
-    return marked;
-}
 
 bool writeIni(const std::wstring& dir, const char* body) {
     CreateDirectoryW(dir.c_str(), nullptr);
@@ -207,1635 +106,161 @@ bool writeIni(const std::wstring& dir, const char* body) {
     return true;
 }
 
+// Reinstall the tap from an ini body and report Armed, the way the engine fix
+// does once its consumer hook is in.
+void reinstall(const std::wstring& scratch, const char* ini) {
+    shutdownGlitchFrameFix();
+    glitchFrameEngineWindow(false);
+    glitchFrameNoteEngineFix(false);
+    writeIni(scratch, ini);
+    Config::get().init(scratch);
+    installGlitchFrameFix();
+}
+
+void resetNotes() {
+    g_noteCalls = 0;
+    g_noteFrame = 0;
+    g_noteBytes = 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     setvbuf(stdout, nullptr, _IONBF, 0);
-    // See the note on advanceOneFrame: the detector's stand-downs are timed
-    // now, so the replays have to carry a clock alongside their frames.
-    edvr::g_clockForTest = &fakeClock;
     if (argc < 2) {
         printf("usage: glitch_test.exe <scratch dir>\n");
         return 2;
     }
     const std::wstring scratch = widen(argv[1]);
 
-    // Its own ini, not this repo's: the test states every value it depends on,
-    // so a change to edvr.ini cannot quietly turn the detector off and leave
-    // this passing vacuously.
-    static const char kIni[] =
-        "[fix]\r\n"
-        "transition_flash = 1\r\n"
-        "[advanced]\r\n"
-        "camera_buffer_bytes = 5376\r\n"
-        "camera_buffer_offset = 1100\r\n"
-        "[log]\r\n"
-        "enabled = 0\r\n";
-    if (!writeIni(scratch, kIni)) {
-        printf("  FAIL  could not write the scratch ini\n");
-        return 1;
-    }
-    Config::get().init(scratch);
-    resetTuning();
-    installGlitchFrameFix();
-
-    check("the detector arms", glitchFrameNeedsEyeDraws(),
-          "it disabled itself at install");
-    check("it wants the configured buffer", glitchFrameWantsBuffer(kBytes));
+    // --- 1. Nomination: nothing until Armed, the scene buffer after -----------
+    //
+    // The ini states no fix.transition_flash line at all: the fix has no key.
+    SetEnvironmentVariableA("EDVR_TEST_NO_CAMERA_TAP", nullptr);
+    reinstall(scratch, "[log]\r\nenabled = 0\r\n");
+    check("the tap wants vScreen's hooks with the shipped geometry", glitchFrameWantsHooks());
+    // The sun-glare fix and the temporal pass read the same block through vScreen's
+    // Unmap tee on this nomination, so it must not wait for, or follow, the engine fix.
+    check("it nominates the 5376-byte scene buffer before the engine fix reports", glitchFrameWantsBuffer(kBytes));
     check("...and no other size", !glitchFrameWantsBuffer(256));
+    glitchFrameNoteEngineFix(true);
+    check("it still nominates it once Armed", glitchFrameWantsBuffer(kBytes));
+    glitchFrameNoteEngineFix(false);
+    check("...and when the engine fix reports Not armed (the other readers keep their feed)", glitchFrameWantsBuffer(kBytes));
+    glitchFrameNoteEngineFix(true);
 
+    // --- 2. The window gates the hand-over --------------------------------------
     Buffer b;
-    float x = 1000.0f;
+    b.setPos(1000.0f, 0.0f, 0.0f);
+    resetNotes();
+    glitchFrameObserve(b.f, kBytes, nullptr);
+    check("a fill outside the engine fix's event window is not handed over", g_noteCalls == 0);
 
-    // --- 1. Validation on smooth motion -----------------------------------
+    glitchFrameEngineWindow(true);
+    glitchFrameObserve(b.f, kBytes, nullptr);
+    check("a fill inside the window is handed over once", g_noteCalls == 1,
+          std::to_string(g_noteCalls) + " calls");
+    check("...with the buffer's size", g_noteBytes == kBytes);
+
+    resetNotes();
+    glitchFrameObserve(b.f, 256, nullptr);
+    check("a fill of another size is not handed over", g_noteCalls == 0);
+
+    Buffer nan;
+    nan.setPos(NAN, 0.0f, 0.0f);
+    glitchFrameObserve(nan.f, kBytes, nullptr);
+    check("a non-finite camera position is not handed over", g_noteCalls == 0);
+    Buffer inf;
+    inf.setPos(0.0f, INFINITY, 0.0f);
+    glitchFrameObserve(inf.f, kBytes, nullptr);
+    check("an infinite camera position is not handed over", g_noteCalls == 0);
+
+    // A head-only row is a perfectly finite position near the origin: the tap
+    // does not judge it (the engine fix does), it passes it on.
+    Buffer head;
+    head.setPos(0.1f, 1.2f, -0.3f);
+    glitchFrameObserve(head.f, kBytes, nullptr);
+    check("a head-pose position is passed on for the engine fix to judge", g_noteCalls == 1);
+
+    glitchFrameEngineWindow(false);
+    resetNotes();
+    glitchFrameObserve(b.f, kBytes, nullptr);
+    check("a fill after the window closes is not handed over", g_noteCalls == 0);
+
+    // --- 3. The frame counter ----------------------------------------------------
+    glitchFrameEngineWindow(true);
+    glitchFrameObserve(b.f, kBytes, nullptr);
+    const uint32_t before = g_noteFrame;
+    glitchFrameBoundary();
+    glitchFrameObserve(b.f, kBytes, nullptr);
+    check("the frame number a fill carries advances by one per boundary", g_noteFrame == before + 1,
+          std::to_string(before) + " then " + std::to_string(g_noteFrame));
+    glitchFrameBoundary();
+    glitchFrameBoundary();
+    glitchFrameObserve(b.f, kBytes, nullptr);
+    check("...and by two across two boundaries", g_noteFrame == before + 3,
+          std::to_string(before) + " then " + std::to_string(g_noteFrame));
+    glitchFrameEngineWindow(false);
+
+    // --- 4. Geometry before Armed ------------------------------------------------
     //
-    // 300 rendered frames with the camera moving. Anything less and the
-    // detector is still deciding whether it has found a camera at all, and
-    // refuses to act -- which is the state a naive test would mistake for
-    // "no false positives".
-    for (uint32_t i = 0; i < 400; ++i) {
-        x += 30.0f;                      // ordinary flight, ~30 units a frame
-        frame(b, x, 0.0f, 0.0f);
-    }
-    check("validation passes on smooth motion", glitchFrameNeedsEyeDraws(),
-          "the detector stood down instead of validating");
-
-    // --- 2. Ordinary frames are left alone --------------------------------
-    uint32_t falsePositives = 0;
-    for (uint32_t i = 0; i < 200; ++i) {
-        x += 30.0f;
-        if (frame(b, x, 0.0f, 0.0f)) ++falsePositives;
-    }
-    check("ordinary frames are not withheld", falsePositives == 0,
-          std::to_string(falsePositives) + " of 200 marked");
-
-    // Fast but smooth: accelerating to supercruise speeds, far past the
-    // 2000-unit floor, which must NOT fire -- the floor is compared against a
-    // PREDICTION rather than against the last position, and the speed term
-    // covers the acceleration on top.
-    //
-    // Ramped, not stepped. The first version of this test went from 30 to 4000
-    // units a frame in one frame and then asserted nothing fired. That step IS
-    // a discontinuity by any definition, the detector was right to mark it, and
-    // the test was wrong: real acceleration is gradual, and asserting otherwise
-    // would have meant weakening a detector that was working.
-    float step = 30.0f;
-    uint32_t fastFalsePositives = 0;
-    for (uint32_t i = 0; i < 300; ++i) {
-        if (step < 4000.0f) step *= 1.05f;    // 5% a frame
-        x += step;
-        if (frame(b, x, 0.0f, 0.0f)) ++fastFalsePositives;
-    }
-    check("smooth acceleration to supercruise is not withheld",
-          fastFalsePositives == 0,
-          std::to_string(fastFalsePositives) + " of 300 marked while accelerating");
-
-    // Back down to ordinary flight, symmetrically, and settle there.
-    while (step > 30.0f) {
-        step /= 1.05f;
-        x += step;
-        frame(b, x, 0.0f, 0.0f);
-    }
-    for (uint32_t i = 0; i < 20; ++i) {
-        x += 30.0f;
-        frame(b, x, 0.0f, 0.0f);
-    }
-
-    // --- 3. The frame that jumps IS withheld ------------------------------
-    //
-    // The measured shape, from the ring dump quoted in edvr.ini: the camera
-    // leaves for somewhere about 18000 units away and returns the next frame,
-    // against ordinary frame-to-frame movement of around 30.
-    const bool markedOnJump = frame(b, x + 18000.0f, 9000.0f, -3000.0f);
-    check("the jump frame is withheld", markedOnJump,
-          "a frame 18000 units off its prediction was not marked");
-
-    // And the return is not marked a second time.
-    x += 30.0f;
-    const bool markedOnReturn = frame(b, x, 0.0f, 0.0f);
-    check("...and only that frame", !markedOnReturn,
-          "the frame that came back was withheld too, which is judder");
-
-    // --- 4. Menus and loading screens are refused -------------------------
-    //
-    // The same jump on frames that did not draw a scene. This is the gate that
-    // stops the galaxy map and every loading screen reading as a glitch: the
-    // camera legitimately teleports there and withholding achieves nothing.
-    for (uint32_t i = 0; i < 5; ++i) {
-        x += 30.0f;
-        frame(b, x, 0.0f, 0.0f, 20);     // 20 eye draws: a menu, not a scene
-    }
-    const bool markedInMenu = frame(b, x + 18000.0f, 9000.0f, -3000.0f, 20);
-    check("a jump with no scene drawn is IGNORED", !markedInMenu,
-          "it would fire in the galaxy map and in every loading screen");
-
-    // --- 5. Render-pass flips are not transitions -------------------------
-    //
-    // EVIDENCE 6v: the signal this detector watches -- the frame's furthest
-    // camera -- is selected by which passes ran, not by where the view is. On a
-    // planet surface the frame alternates between two shadow cascades and the
-    // "jump" between them is their fixed separation, repeating forever while the
-    // player flies straight.
-    //
-    // Measured in the field before this was fixed: forty logged jumps, thirty
-    // eight of them between 562,949 and 571,365 units, withheld in bursts of
-    // nine inside a second, until the runaway guard took the whole fix off the
-    // field for the session.
-    settle(b, x, 40);
-
-    // FIRST, WITHOUT THE FIX, so the fixture is known to reproduce the failure.
-    // A harness that cannot produce the field failure proves nothing about a
-    // change that makes it stop -- and this file's own history has an assertion
-    // that passed against a detector that withheld nothing at all.
-    tune("repeat_percent", "0");
-    installGlitchFrameFix();
-    settle(b, x, 10);
-    const uint32_t unsuppressed = cascadeFlips(b, x, 568000.0f, 30);
-    check("the fixture reproduces the judder without suppression",
-          unsuppressed >= 5,
-          std::to_string(unsuppressed) +
-              " of 30 frames withheld; the field cadence is one in three, so a "
-              "low number here means the fixture is not exercising the bug");
-
-    tune("repeat_percent", "2.0");
-    installGlitchFrameFix();
-    settle(b, x, 10);
-
-    // The first flip of a magnitude cannot be known to repeat, so it is
-    // withheld. Every one after it is recognised.
-    const uint32_t firstRun = cascadeFlips(b, x, 568000.0f, 30);
-    // COST RAISED BY THE TRUST BAR, deliberately. A separation is believed after
-    // three marks rather than two (1e step 4), so a novel magnitude costs three
-    // frames before it stops costing anything. That is the price of not letting
-    // one low wake excuse the next; it is paid once per magnitude, and the burst
-    // governor bounds it.
-    check("a recurring separation costs three frames, not thirty",
-          firstRun <= 3,
-          std::to_string(firstRun) + " frames withheld in 30");
-    const uint32_t secondRun = cascadeFlips(b, x, 568000.0f, 60);
-    check("...and not at all once it is recognised", secondRun == 0,
-          std::to_string(secondRun) + " frames withheld in a further 60");
-
-    // --- 6. The real thing is still caught --------------------------------
-    //
-    // The regression guard for this whole change. A one-frame excursion on a
-    // magnitude nothing has seen before is exactly what the fix exists to
-    // withhold, and suppression must not have touched it.
-    settle(b, x, 20);
-    check("a novel one-frame excursion is still withheld",
-          oneFrameExcursion(b, x, 18000.0f),
-          "the suppression swallowed a genuine transition");
-
-    // Two genuine transitions of SIMILAR but not equal size both fire. This is
-    // the tolerance's real boundary: 2,468 and 2,609 are the closest pair among
-    // fourteen measured genuine residuals, 5.7% apart, and 2% must not merge
-    // them. Set against separations that repeat inside 1.5%, that is the whole
-    // margin this approach runs on -- so it is asserted rather than assumed.
-    settle(b, x, 20);
-    const bool near1 = oneFrameExcursion(b, x, 2468.0f);
-    settle(b, x, 20);
-    const bool near2 = oneFrameExcursion(b, x, 2609.0f);
-    check("two genuine transitions 5.7% apart are both withheld", near1 && near2,
-          std::string("first ") + (near1 ? "fired" : "MISSED") + ", second " +
-              (near2 ? "fired" : "MISSED"));
-
-    // --- 6b. A pass flip must not blind the detector to a real one --------
-    //
-    // The consequential one, and the reason this is not only a judder fix.
-    //
-    // 6v.4: arrivals and wakes churn the pass mix FOR SECONDS -- which is
-    // exactly when genuine transitions happen. Every mark costs the detector its
-    // next frame or two while the prediction is rebuilt. So a cascade flip
-    // firing shortly before the real bad frame spends the shot early, and the
-    // flash the fix exists to remove is shown, with a spurious hitch on top.
-    // That is the fix defeated at precisely its target event, and it plausibly
-    // accounts for some share of "detected and let through" reports.
-    //
-    // Asserted at several spacings because the blindness is one to two frames
-    // and a single spacing could miss it by luck.
-    // The genuine magnitudes DIFFER, and they have to.
-    //
-    // The first version of this fixture used 15,000 five times, and four of them
-    // were suppressed -- correctly. Five transitions of identical size are a
-    // repeating residual by any definition, which is the one thing this fix
-    // treats as not-a-transition. That is the tradeoff stated plainly: genuine
-    // flashes are separated because real motion varies (fourteen measured, the
-    // closest pair 5.7% apart), and if a build ever produced identical ones this
-    // would suppress them. transition_flash_repeat_percent = 0 is the escape.
-    settle(b, x, 20);
-    const float kGenuine[5] = {15000.0f, 17000.0f, 19500.0f, 22500.0f, 26000.0f};
-    uint32_t missedAfterFlip = 0;
-    for (uint32_t gap = 1; gap <= 5; ++gap) {
-        settle(b, x, 20);
-        // A flip of a magnitude already known to recur...
-        x += 30.0f;
-        frame(b, x, 568000.0f, 0.0f);
-        // ...then the genuine excursion, `gap` frames later.
-        for (uint32_t i = 0; i < gap; ++i) {
-            x += 30.0f;
-            frame(b, x, 0.0f, 0.0f);
-        }
-        x += 30.0f;
-        if (!frame(b, x, kGenuine[gap - 1], 0.0f)) ++missedAfterFlip;
-        x += 30.0f;
-        frame(b, x, 0.0f, 0.0f);
-    }
-    check("a recognised pass flip does not blind the detector to a real one",
-          missedAfterFlip == 0,
-          std::to_string(missedAfterFlip) +
-              " of 5 genuine excursions were missed because a shadow-cascade flip "
-              "had just spent the detector's shot");
-
-    // --- 7. Several separations coexist -----------------------------------
-    //
-    // A station arrival churns the pass mix and produces more than one pair.
-    // Each novel one costs a single frame; none of them costs a stream.
-    settle(b, x, 20);
-    uint32_t churn = 0;
-    for (uint32_t round = 0; round < 3; ++round) {
-        churn += cascadeFlips(b, x, 120000.0f + 40000.0f * round, 30);
-    }
-    check("three distinct separations cost three frames each, not thirty",
-          churn <= 9,
-          std::to_string(churn) + " frames withheld across three separations");
-
-    // --- 7b. SEVERAL CAMERAS IN ONE FRAME ---------------------------------
-    //
-    // The failure the first version of this fix shipped with, and the reason the
-    // replay below is not enough on its own: the ring records one camera per
-    // frame -- the furthest -- while the real frame hands the detector several,
-    // in increasing distance, and it re-decides on each.
-    //
-    // The verdict used to be taken on the FIRST magnitude to cross the
-    // threshold, while the residual the boundary logs and remembers is the LAST
-    // one evaluated. So a frame opening on a novel magnitude and closing on a
-    // known one was withheld AND recorded as recurring, and the field log has
-    // exactly that: "a jump of about 564596 world units ... 2 times" followed by
-    // "frame 13438 was drawn from 564654 world units ... Withheld", same
-    // millisecond, same frame, both from the withheld branch.
-    settle(b, x, 40);
+    // The geometry is fixed (5376 bytes, float 1100) and has no ini key: the two
+    // advanced keys that carried it were removed 2026-10-14. A stale line in an old
+    // file, whatever it says, is a line this build does not read, and the tap is the
+    // same. The test rigs' switch (EDVR_TEST_NO_CAMERA_TAP=1) is the only way off.
     {
-        // Teach it the separation, on a frame with a single camera.
-        x += 30.0f;
-        frame(b, x, 568000.0f, 0.0f);
-        settle(b, x, 20);
-        x += 30.0f;
-        frame(b, x, 568000.0f, 0.0f);
-        settle(b, x, 20);
-
-        // Now a frame carrying TWO cameras beyond the near one: a novel
-        // magnitude first, then the known separation, which is further out and
-        // so is what the boundary will see.
-        x += 30.0f;
-        b.setPos(x, 0.0f, 0.0f);
-        glitchFrameObserve(b.f, kBytes, b.res);          // the near camera
-        b.setPos(x, 300000.0f, 0.0f);
-        glitchFrameObserve(b.f, kBytes, b.res);          // novel, crosses first
-        b.setPos(x, 568000.0f, 0.0f);
-        glitchFrameObserve(b.f, kBytes, b.res);          // the known separation
-        const bool marked = glitchFrameMarked();
-        advanceOneFrame();
-        glitchFrameBoundary(kEyeDraws);
-        clearGlitchFrame();
-        check("the verdict follows the camera the frame is judged on", !marked,
-              "a frame whose furthest camera is a recognised separation was "
-              "withheld because an earlier, novel candidate had already decided "
-              "it -- the two halves are reading different residuals");
-        settle(b, x, 20);
-    }
-
-    // --- 7c. The separation DRIFTS ----------------------------------------
-    //
-    // It is not a fixed number. Measured over four minutes of one flight:
-    // 563,308 then 548,012 then 532,120, each 2.7-2.9% from the last, so each
-    // fell outside its predecessor's 2% window and cost a frame -- while all the
-    // sightings in between matched fine and kept refreshing an entry pinned to a
-    // number nothing had reported for a minute.
-    //
-    // The rate here is 0.5% per sighting, which is roughly two hundred times
-    // what the field showed -- the flips arrive about thirty a second, so those
-    // three readings are 0.002% apart each. Deliberately harsher than reality,
-    // and still inside what the running mean can hold: the lag is d/(w-d), so
-    // 0.5% at weight 0.5 settles 1.0% behind against a 2% window.
-    //
-    // Sixty sightings, so the total travel is 26%. No fixed tolerance covers
-    // that, and one wide enough to try would be wider than the 5.7% gap between
-    // the closest pair of genuine transitions.
-    settle(b, x, 40);
-    {
-        uint32_t drifted = 0;
-        float sep = 563308.0f;
-        for (uint32_t i = 0; i < 60; ++i) {
-            settle(b, x, 6);
-            x += 30.0f;
-            if (frame(b, x, sep, 0.0f)) ++drifted;
-            x += 30.0f;
-            frame(b, x, 0.0f, 0.0f);
-            sep *= 0.995f;
-        }
-        check("a separation that drifts is followed, not re-learned", drifted <= 1,
-              std::to_string(drifted) +
-                  " frames withheld tracking one separation across 26% of drift "
-                  "-- the entry is being left behind rather than following");
-    }
-
-    // --- 7d. A frame where the buffer is not a camera ---------------------
-    //
-    // The offset EDVR watches stops holding a camera during heavy frames.
-    // Measured in a station arrival, from a ring the player dumped himself:
-    // |pos| of 1.03e26 and 2.71e17 across six consecutive frames at 2,200+ eye
-    // draws. finite3 passes those -- 1e26 is a perfectly finite float -- and then
-    // squaring it gives 1e52 against a float ceiling of 3.4e38, so the residual
-    // is infinity.
-    //
-    // Infinity does not merely produce a wrong answer, it POISONS the memory:
-    // fabsf(entry - inf) <= inf is true, so an infinite residual matches
-    // whichever entry it meets first and the running mean then drags that entry
-    // to infinity. A separation learned over a minute of flight is destroyed by
-    // one garbage frame, and the cascade it was suppressing starts costing
-    // frames again with nothing connecting the two.
-    settle(b, x, 40);
-    {
-        // Teach it a separation and confirm it is being suppressed.
-        x += 30.0f;
-        frame(b, x, 568000.0f, 0.0f);
-        settle(b, x, 10);
-        x += 30.0f;
-        frame(b, x, 568000.0f, 0.0f);
-        settle(b, x, 10);
-        // Three more, because the bar needs three marks before it suppresses.
-        for (uint32_t i = 0; i < 3; ++i) {
-            x += 30.0f;
-            frame(b, x, 568000.0f, 0.0f);
-            x += 30.0f;
-            frame(b, x, 0.0f, 0.0f);
-        }
-        x += 30.0f;
-        const bool suppressedBefore = !frame(b, x, 568000.0f, 0.0f);
-        check("the separation is being suppressed before the garbage frame",
-              suppressedBefore, "the fixture is not set up");
-
-        // Now the buffer stops being a camera.
-        settle(b, x, 10);
-        x += 30.0f;
-        frame(b, x, 1.03e26f, 0.0f);
-        settle(b, x, 10);
-
-        // The separation must still be recognised.
-        //
-        // This pins the guard inside the memory rather than the one at the
-        // caller, and cannot separate them: with infinity, EVERY entry matches,
-        // so the poisoning lands on whichever slot is at index 0 -- arbitrary,
-        // and the first version of this case passed because it happened to miss
-        // the entry under test. The assertion is kept as the property that
-        // matters (a garbage frame must not cost a learned separation); the
-        // caller-side check is defence in depth that no fixture can isolate.
-        x += 30.0f;
-        check("a garbage frame does not destroy a learned separation",
-              !frame(b, x, 568000.0f, 0.0f),
-              "an infinite residual matched a real entry and dragged it away");
-        settle(b, x, 20);
-    }
-
-    // --- 7e. A frame with no world camera in it ---------------------------
-    //
-    // Elite renders camera-relative, so the main view's transform lives in head
-    // space at magnitude ~0.09 and the only world-space cameras in a frame come
-    // from auxiliary passes. A frame where none of those ran therefore reports
-    // its furthest camera at the origin -- and the "jump" that produces is just
-    // the distance from the last world camera to zero.
-    //
-    // Three field instances, each a good frame withheld: 7,618 units "from"
-    // (-0 -0 +0), 10,277 from (-0 +0 +0), 6,856 from (+0 +0 -0). The first is
-    // the frame a player reported a flash on.
-    //
-    // The repeat suppression cannot catch these: the magnitude is wherever the
-    // previous world camera happened to be, so it never repeats.
-    settle(b, x, 40);
-    {
-        // Flying along with a world-space pass running, as usual.
-        for (uint32_t i = 0; i < 20; ++i) {
-            x += 30.0f;
-            frame(b, x, 4000.0f, 0.0f);
-        }
-        // Now a frame in which no auxiliary pass ran. The camera it reports is
-        // the head-space one, a fraction of a unit from the origin.
-        x += 30.0f;
-        const bool markedOnOrigin = frame(b, 0.04f, -0.02f, 0.07f);
-        check("a frame with no world camera is not a jump", !markedOnOrigin,
-              "the furthest camera collapsing to the origin was read as motion");
-
-        // ...and the world pass coming back is not one either, which is the
-        // other half: if the origin frame had entered the track, the return to
-        // the real camera would look like the same jump reversed.
-        x += 30.0f;
-        const bool markedOnWorldReturn = frame(b, x, 4000.0f, 0.0f);
-        check("...and neither is the world camera coming back", !markedOnWorldReturn,
-              "the origin frame got into the prediction and the recovery fired");
-        settle(b, x, 20);
-    }
-
-    // --- 7f. The swing: a camera orbiting at a fixed radius ---------------
-    //
-    // Fixture E. The six positions below are measured, not invented -- the
-    // withheld frames of the 19:18 session, six of ten sharing one radius
-    // (7,609-7,635, inside 0.3%) while pointing in wildly different directions.
-    // An auxiliary camera at a fixed distance, swinging as the player turns.
-    //
-    // The separation memory keys on jump size, which varies with where the swing
-    // came from; it caught two of these six in the field. The radius does not
-    // vary, and a sphere can be certified by watching rather than by paying a
-    // withheld frame per magnitude.
-    settle(b, x, 40);
-    {
-        // THE DIRECTION SWEEPS CONTINUOUSLY, and that is what makes this a test
-        // of the radius rather than of the memory beside it.
-        //
-        // The first draft cycled the six measured positions in a fixed order --
-        // which makes the jumps between them a repeating set of six magnitudes,
-        // exactly what the separation memory already catches. It passed with the
-        // sphere switched off, so it was testing the wrong invariant. The field
-        // swing was continuous: a camera at one distance pointing somewhere new
-        // each time, so no jump size ever repeats.
-        //
-        // Radius 7,619 with a 0.15% wobble, both from the measurement (six
-        // withholds spanning 7,609-7,635). The direction advances 27-39 degrees
-        // a step, so consecutive positions are always new.
-        // THE FRAME ALTERNATES between a near camera and the sphere, which is
-        // what the field did -- the sphere is an auxiliary pass that runs on
-        // some frames, and the jump is from the near track out to it.
-        //
-        // A sweep with nothing to alternate against produces no jumps at all:
-        // the step-to-step motion along a sphere is smooth, so the speed term in
-        // the threshold covers it and nothing is ever marked. That draft passed
-        // with the sphere switched off because there was nothing to suppress.
-        //
-        // The near track is deliberately kept SMALL. With it out at a hundred
-        // thousand units the jump length is dominated by the track and barely
-        // moves as the sphere swings, which puts consecutive jumps inside 2% of
-        // each other -- and then the separation memory catches them and the
-        // fixture is, again, testing the wrong invariant. In the field the two
-        // were comparable and the jumps ranged 6,639 to 10,111, which is what
-        // this reproduces.
-        const float kRadius = 7619.0f;
-        float ang = 0.0f, nx = 1500.0f;
-        uint32_t withheldEarly = 0, withheldLate = 0;
-        for (uint32_t i = 0; i < 240; ++i) {
-            nx += 7.0f;
-            bool marked = false;
-            if ((i % 3) == 2) {
-                // The turn RATE drifts, so no two jumps are the same size. A
-                // fixed step gives a handful of repeating magnitudes, which is
-                // exactly what the memory beside this one already handles.
-                ang += 0.31f + 0.0037f * static_cast<float>(i);
-                const float r = kRadius * (1.0f + 0.0015f * sinf(ang * 2.7f));
-                // Components chosen so x^2 + y^2 + z^2 is exactly r^2: the
-                // radius is the constant under test and must not wander with
-                // the direction.
-                marked = frame(b, r * cosf(ang), r * sinf(ang) * 0.8f,
-                               r * sinf(ang) * 0.6f);
-            } else {
-                marked = frame(b, nx, 0.0f, 0.0f);
-            }
-            if (i < 90) { if (marked) ++withheldEarly; }
-            else        { if (marked) ++withheldLate; }
-        }
-        check("an orbiting camera certifies and stops costing frames",
-              withheldLate == 0,
-              std::to_string(withheldLate) +
-                  " frames still withheld after the sphere should have certified "
-                  "(" + std::to_string(withheldEarly) + " before it did)");
-    }
-
-    // --- 7g. The real thing during a swing --------------------------------
-    //
-    // Fixture F, and the regression guard for the whole idea. With a certified
-    // sphere active, a genuine one-frame excursion whose camera lands on NO
-    // certified shell must still be withheld.
-    {
-        // THE SEPARATION MEMORY IS SWITCHED OFF FOR THIS CASE, so the assertion
-        // can only be about the shell.
-        //
-        // With both active the test cannot say which one acted, and that is not
-        // hypothetical: two drafts of this case failed because an earlier fixture
-        // had taught the separation table a magnitude within 2% of the excursion.
-        // The detector was right both times; the test was measuring the wrong
-        // thing. Isolating the invariant under test is what makes a pass mean
-        // what the name says.
-        tune("repeat_percent", "0");
-        installGlitchFrameFix();
-
-        // LONGER THAN THE REBASE COOLDOWN, which is 120 frames.
-        //
-        // The swing ends on a jump, the return to the smooth track is a change
-        // of reference frame, and that stands the detector down for 120 frames.
-        // A 20-frame settle left the excursion below inside that window, so it
-        // was not marked -- and the assertion read that as the sphere swallowing
-        // it. The next case has the same requirement for the same reason.
-        settle(b, x, 150);
-        x += 30.0f;
-        // 11,662 off the path -- inside the measured genuine band of 2,300 to
-        // 24,000, and at a radius on no certified shell.
-        const bool caught = frame(b, x, 10000.0f, -6000.0f);
-        check("a genuine excursion off every shell is still withheld", caught,
-              "the sphere swallowed a transition that was nowhere near it");
-        x += 30.0f;
-        frame(b, x, 0.0f, 0.0f);
-    }
-
-    // THE ACCEPTED LIMIT, asserted rather than left to be discovered.
-    //
-    // A real wrong-viewpoint frame that lands ON a certified shell, within half a
-    // percent, is suppressed and therefore shown. The shell is thin and a glitch
-    // offset is a vector sum with the excursion rather than a swing, so landing
-    // on it is a coincidence -- and a rarer one than the blindness windows the
-    // false positives themselves open at every transition (6a.1). This test
-    // exists so the limit is documented by something that fails if it changes,
-    // not by a comment.
-    {
-        settle(b, x, 150);   // past the rebase cooldown, as above
-        // Straight onto the shell: same distance, a direction not seen before.
-        const float onShell[3] = {0.0f, -7619.0f, 0.0f};
-        x += 30.0f;
-        const bool suppressedOnShell = !frame(b, onShell[0], onShell[1], onShell[2]);
-        check("an excursion landing exactly on a certified shell is NOT withheld",
-              suppressedOnShell,
-              "this is the accepted limit of the radius invariant; if this now "
-              "fires, the shell has been widened or the rule has changed");
-        x += 30.0f;
-        frame(b, x, 0.0f, 0.0f);
-
-        // Back on, for the complementarity case below -- which is about the
-        // separation memory doing the work the shell cannot.
-        tune("repeat_percent", "2.0");
-        installGlitchFrameFix();
-    }
-
-    // --- 7i. The parked camera --------------------------------------------
-    //
-    // Fixture H. The two measured landings, verbatim: four units apart at a
-    // radius of 69,000. The sphere refuses them -- one direction, which is
-    // fixture G's rule and must not bend -- and the separation memory missed
-    // them by 0.05 of a percentage point, 73,460 against 71,958 across a 2%
-    // window. Keyed on the destination, they are the same place every time.
-    settle(b, x, 150);
-    {
-        const float kPark[3] = {-33141.0f, -32695.0f, -50433.0f};
-
-        // THE SEPARATION MEMORY IS OFF FOR THIS WHOLE CASE, as it is for
-        // fixture F, and for the same reason: with it on, the assertion cannot
-        // say which invariant acted.
-        //
-        // Three drafts tried to defeat it geometrically instead and each failed
-        // differently -- a near track at 7 units a frame keeps the jump sizes
-        // inside 2% so the separation memory covers everything; at 300 it sweeps
-        // smoothly and the drift-following tracks it; at 600 the returns start
-        // rebasing and a 120-frame cooldown swallows the fixture, so it passed
-        // with the park switched off, vacuously. Tuning a fixture until it fails
-        // for the reason you wanted is not the same as testing the thing.
-        tune("repeat_percent", "0");
-        installGlitchFrameFix();
-
-        float nx = 1500.0f;
-        uint32_t withheldEarly = 0, withheldLate = 0;
-        for (uint32_t i = 0; i < 150; ++i) {
-            nx += 7.0f;
-            bool marked = false;
-            if ((i % 3) == 2) {
-                // The four-unit wobble the field showed, so an exact-match
-                // implementation would not pass this.
-                const float j = static_cast<float>(static_cast<int>(i % 5) - 2);
-                marked = frame(b, kPark[0] + j, kPark[1], kPark[2] - j);
-            } else {
-                marked = frame(b, nx, 0.0f, 0.0f);
-            }
-            if (i < 90) { if (marked) ++withheldEarly; }
-            else        { if (marked) ++withheldLate; }
-        }
-        check("a parked camera certifies and stops costing frames",
-              withheldLate == 0 && withheldEarly > 0,
-              std::to_string(withheldLate) +
-                  " frames still withheld after the park should have certified, and " +
-                  std::to_string(withheldEarly) +
-                  " before it did -- if that second number is 0 the fixture withheld "
-                  "nothing at all and proves nothing");
-
-        // A genuine excursion 500 units off the park still marks.
-        settle(b, x, 150);
-        x += 30.0f;
-        const bool caught = frame(b, kPark[0] + 500.0f, kPark[1] - 500.0f,
-                                  kPark[2] + 500.0f);
-        check("an excursion 500 units off a certified park is still withheld",
-              caught, "the park's tolerance is swallowing frames well outside it");
-        x += 30.0f;
-        frame(b, x, 0.0f, 0.0f);
-        tune("repeat_percent", "2.0");
-        installGlitchFrameFix();
-    }
-
-    // --- 7h. Complementarity ----------------------------------------------
-    //
-    // Fixture G. 6v's measured block alternation holds two FIXED positions, so
-    // each has one direction and can never certify a sphere -- if it did, a
-    // parked camera would be enough to switch the detector off. The separation
-    // memory is what takes that case. Two invariants, neither redundant.
-    settle(b, x, 40);
-    {
-        // 6v: A = (+9082 -135976 -5865), |A| = 136,405, in blocks of 4-6 frames.
-        //
-        // Since the park invariant landed, this is what catches it -- a fixed
-        // position IS a park, and that is the right answer. What the case still
-        // proves, and the reason it stays, is the negative half: the sphere must
-        // never certify a camera with one bearing, whatever else does.
-        uint32_t withheld = 0;
-        for (uint32_t i = 0; i < 90; ++i) {
-            x += 30.0f;
-            if ((i % 5) == 4) {
-                if (frame(b, 9082.0f, -135976.0f, -5865.0f)) ++withheld;
-            } else {
-                frame(b, x, 0.0f, 0.0f);
-            }
-        }
-        check("a parked auxiliary camera is caught, and not by the sphere",
-              withheld <= 3,
-              std::to_string(withheld) +
-                  " frames withheld on the 6v block pair; it has one direction, so "
-                  "the separation memory has to be the thing that catches it");
-    }
-
-    // --- 7j. Recognised geometry must not blind the detector --------------
-    //
-    // The one that mattered most, and the one every earlier fixture missed
-    // because they all asked "was this frame withheld" and never "can the
-    // detector still see".
-    //
-    // A suppressed jump used to arm the return test anyway. An auxiliary camera
-    // never returns to the view's path -- it alternates -- so the test failed
-    // and bought a 120-frame stand-down, every time. On foot the frame
-    // alternates every four to six frames, so the stand-down was re-armed
-    // roughly twenty times over before it could expire and the detector was
-    // blind for the entire mode. Measured: 40 rebase notes, zero withheld
-    // frames, and a one-frame excursion to radius 339,722 sitting unjudged in
-    // the middle of it at the exact transition a player reported flashing.
-    settle(b, x, 150);
-    {
-        // Teach it a park, the way the on-foot alternation does.
-        const float kAux[3] = {-25522.0f, 2704.0f, 47190.0f};
-        float nx = 1500.0f;
-        for (uint32_t i = 0; i < 150; ++i) {
-            nx += 7.0f;
-            if ((i % 5) == 4) frame(b, kAux[0], kAux[1], kAux[2]);
-            else              frame(b, nx, 0.0f, 0.0f);
-        }
-        // CLEAR THE COOLDOWN THE LEARNING PHASE LEFT BEHIND, before measuring
-        // anything. Until the park certifies, the alternation is marked like any
-        // other jump, and each of those stands the detector down for 120 frames.
-        // Measuring inside that window makes "costs no frames" true for the
-        // wrong reason -- it was true here for exactly that reason until the
-        // excursion assertion below started failing and gave it away.
-        for (uint32_t i = 0; i < 200; ++i) { nx += 7.0f; frame(b, nx, 0.0f, 0.0f); }
-
-        // It is recognised now: alternating onto it costs nothing.
-        uint32_t cost = 0;
-        for (uint32_t i = 0; i < 30; ++i) {
-            nx += 7.0f;
-            if ((i % 5) == 4) { if (frame(b, kAux[0], kAux[1], kAux[2])) ++cost; }
-            else              { if (frame(b, nx, 0.0f, 0.0f)) ++cost; }
-        }
-        check("alternating onto recognised geometry costs no frames", cost == 0,
-              std::to_string(cost) + " withheld while alternating onto a known park");
-
-        // AND THE DETECTOR CAN STILL SEE. A genuine one-frame excursion, in the
-        // middle of that alternation, must still be caught -- which it cannot be
-        // if the alternation has stood it down.
-        //
-        // Deliberately enormous -- radius and residual both about 1.5 million,
-        // clear of every magnitude and every shell any earlier fixture in this
-        // file has taught the detector. A smaller one kept colliding with them,
-        // and a collision here reads as blindness when it is the opposite.
-        nx += 7.0f;
-        const bool caught = frame(b, nx, 1200000.0f, -900000.0f);
-        check("...and a real excursion during it is still caught", caught,
-              "the alternation blinded the detector -- suppressing the mark is "
-              "not enough, the rebase has to go too");
-        nx += 7.0f;
-        frame(b, nx, 0.0f, 0.0f);
-    }
-
-    // --- 7k. A glitch that lasts TWO frames --------------------------------
-    //
-    // "Below the planet surface for a frame or two before being positioned
-    // correctly" -- a player describing the flash that survived every fix so
-    // far. One frame withheld, the second shown, and the flash remains.
-    //
-    // transition_flash_max_consecutive has shipped at 2 since the beginning and
-    // has never once been reachable: a marked frame discarded the prediction, so
-    // the frame after a withhold could not be judged at all. This file's own
-    // comment on the setting said so.
-    settle(b, x, 150);
-    {
-        uint32_t caught = 0;
-        // Two consecutive frames off the path, then back.
-        x += 30.0f;
-        if (frame(b, x, 21000.0f, -9000.0f)) ++caught;
-        x += 30.0f;
-        if (frame(b, x, 21500.0f, -9200.0f)) ++caught;
-        x += 30.0f;
-        const bool third = frame(b, x, 0.0f, 0.0f);
-        check("both frames of a two-frame glitch are withheld", caught == 2,
-              std::to_string(caught) + " of 2 withheld -- the frame after a "
-              "withhold is not being judged at all");
-        check("...and the frame it returns on is not", !third,
-              "the run ran past the excursion");
-        settle(b, x, 150);
-    }
-
-    // AND THE RUN IS STILL BOUNDED. A camera that leaves and stays away is a
-    // change of reference frame, not a glitch, and must not be withheld
-    // indefinitely -- anchoring to a stale prediction once withheld 44 frames
-    // instead of 2, which is the reason the prediction used to be discarded.
-    {
-        uint32_t run = 0;
-        for (uint32_t i = 0; i < 40; ++i) {
-            x += 30.0f;
-            if (frame(b, x + 60000.0f, 40000.0f, 0.0f)) ++run;
-        }
-        check("a camera that leaves and stays is not withheld indefinitely",
-              run <= 2,
-              std::to_string(run) + " of 40 withheld after the reference frame "
-              "moved -- max_consecutive is not bounding the run");
-        settle(b, x, 150);
-    }
-
-    // --- 8. The field replay ----------------------------------------------
-    //
-    // Not a shape derived from the field: the field itself. These are the
-    // furthest-camera positions and eye-draw counts EDVR recorded in its own ring
-    // buffer, dumped with the Pause key during a burst of judder over a planet
-    // surface on 2026-08-14, frames 13425-13470.
-    //
-    // The synthetic fixtures above all pass while this one reproduces judder,
-    // which is the whole reason it is here. A fixture written from a description
-    // of a bug tests the description.
-    settle(b, x, 200);
-    {
-        struct Rec { float x, y, z; uint32_t eye; };
-        static const Rec kRing[] = {
-#include "field_ring_13425.inc"
-        };
-        uint32_t withheld = 0, farFrames = 0;
-        for (const Rec& r : kRing) {
-            const bool isFar = r.y < -100000.0f;
-            if (isFar) ++farFrames;
-            b.setPos(r.x, r.y, r.z);
-            glitchFrameObserve(b.f, kBytes, b.res);
-            const bool marked = glitchFrameMarked();
-            advanceOneFrame();
-            glitchFrameBoundary(r.eye);
-            clearGlitchFrame();
-            if (marked) ++withheld;
-        }
-        printf("      [dbg] replay: %u far frames, %u withheld\n", farFrames, withheld);
-        check("the field burst costs three frames, not one every three",
-              withheld <= 3,
-              std::to_string(withheld) + " of " + std::to_string(farFrames) +
-                  " cascade frames withheld replaying the recorded ring");
-    }
-
-    // --- 8b. Fixture J: the flight radius must never certify ---------------
-    //
-    // PASSES VISIT; THE VIEW STAYS. Recorded field data: the ring EDVR wrote
-    // while flying near a body on 2026-08-15, the segment that certified "a
-    // camera orbiting at radius 6864 in 3 distinct directions" when 6864 was THE
-    // SHIP. The certification then exempted a genuine bad frame that landed 0.37%
-    // off it, a third of a second later (EVIDENCE 6ai).
-    //
-    // Two assertions, because refusing is not the same as taking it back: a
-    // radius that is safe out in space can become the flight radius on arrival,
-    // so a shell certified BEFORE this data arrives has to lose its certification
-    // to it.
-    settle(b, x, 200);
-    {
-        // THE SEPARATION MEMORY IS OFF FOR THIS FIXTURE, and that is not a
-        // convenience. The visiting pass below has to jump between a near track
-        // and radius 6864 to certify at all, which teaches magnitudes in the
-        // same range as the field excursion this fixture ends by probing -- so
-        // with the memory on, the probe is suppressed by a size the fixture
-        // itself taught, and the shell rule under test is never reached. Same
-        // collision fixtures F and H are set up around.
-        tune("repeat_percent", "0");
-        installGlitchFrameFix();
-
-        struct Rec { float x, y, z; uint32_t eye; };
-        static const Rec kFlight[] = {
-#include "field_ring_flight_6864.inc"
-        };
-
-        // First, hand it a genuine orbiting pass at the same radius, the way
-        // fixture E does -- alternating, so it VISITS. This certifies 6864
-        // legitimately, and is what the replay below has to revoke.
-        float ang = 0.0f, nx = 900.0f;
-        for (uint32_t i = 0; i < 240; ++i) {
-            nx += 7.0f;
-            if ((i % 3) == 2) {
-                ang += 0.31f + 0.0037f * static_cast<float>(i);
-                const float r = 6864.0f * (1.0f + 0.0012f * sinf(ang * 2.7f));
-                frame(b, r * cosf(ang), r * sinf(ang) * 0.8f, r * sinf(ang) * 0.6f);
-            } else {
-                frame(b, nx, 0.0f, 0.0f);
-            }
-        }
-        const uint32_t certifiedBefore = glitchFrameCertifiedShells();
-        check("the alternating pass at 6864 certifies, so there is something to revoke",
-              certifiedBefore > 0,
-              "fixture J cannot test revocation: nothing certified from the "
-              "visiting pass, so the replay below would prove only refusal");
-
-        // INDEX 495 is the real bad frame -- f11645, one frame out to
-        // (-163.5 -499.6 6818.2) and back to the prior position exactly on the
-        // next. It is replayed in its own context rather than probed for
-        // synthetically afterwards: a synthetic approach has to jump to reach
-        // the position, and the jump it makes to get there teaches the
-        // separation memory a magnitude close to the one being tested. The
-        // recorded frames arrive with the history the field gave them.
-        constexpr size_t kBadFrame = 495;
-        uint32_t withheld = 0;
-        bool markedBad = false;
-        for (size_t i = 0; i < sizeof(kFlight) / sizeof(kFlight[0]); ++i) {
-            const Rec& r = kFlight[i];
-            b.setPos(r.x, r.y, r.z);
-            glitchFrameObserve(b.f, kBytes, b.res);
-            const bool marked = glitchFrameMarked();
-            advanceOneFrame();
-            glitchFrameBoundary(r.eye);
-            clearGlitchFrame();
-            if (marked) ++withheld;
-            if (i == kBadFrame) markedBad = marked;
-        }
-        printf("      [dbg] flight replay: %u frames, %u withheld, %u shells "
-               "certified before, %u after\n",
-               static_cast<uint32_t>(sizeof(kFlight) / sizeof(kFlight[0])), withheld,
-               certifiedBefore, glitchFrameCertifiedShells());
-
-        check("living at a radius revokes it",
-              glitchFrameCertifiedShells() < certifiedBefore,
-              "the recorded flight ring sat on 6864 for 474 consecutive frames and "
-              "the certification survived it");
-
-        check("the bad frame that was excused by the flight radius is withheld again",
-              markedBad,
-              "frame 11645, the recorded wrong viewpoint, is still being treated as "
-              "an auxiliary pass");
-        tune("repeat_percent", "2.0");
-        settle(b, x, 60);
-    }
-
-    // --- 8c. Fixture K: the normal-flight corpus --------------------------
-    //
-    // THE PREMISE FAILURE ABOVE WAS CAUGHT BY LUCK -- a flash happened to land
-    // in-band during a capture somebody dumped. This is the systematic version:
-    // several minutes of ordinary play across four sessions, with one assertion
-    // over all of it. NOTHING THE VIEW DOES MAY CERTIFY.
-    //
-    // It is checked as a count rather than by behaviour on purpose. Firing a
-    // probe excursion at each radius the corpus visited would leave every radius
-    // not probed as a premise failure that ships, which is exactly how the last
-    // one shipped.
-    //
-    // Note what this does NOT establish: the corpus is near-body flight and
-    // wake transitions, recorded on one machine. Station interiors, canyons and
-    // deep supercruise are not in it yet, so a premise that fails only there
-    // still fails silently. Adding a session is appending a segment.
-    {
-        Config::get().set("fix.transition_flash", "1");
-        installGlitchFrameFix();
-        struct Rec { float x, y, z; uint32_t eye; };
-        static const Rec kCorpus[] = {
-#include "field_corpus_flight.inc"
-        };
-        for (const Rec& r : kCorpus) {
-            b.setPos(r.x, r.y, r.z);
-            glitchFrameObserve(b.f, kBytes, b.res);
-            glitchFrameMarked();
-            advanceOneFrame();
-            glitchFrameBoundary(r.eye);
-            clearGlitchFrame();
-        }
-        const uint32_t certified = glitchFrameCertifiedShells();
-        printf("      [dbg] corpus: %u frames of ordinary flight, %u shells certified\n",
-               static_cast<uint32_t>(sizeof(kCorpus) / sizeof(kCorpus[0])), certified);
-        check("nothing the view does may certify",
-              certified == 0,
-              std::to_string(certified) +
-                  " shell(s) certified replaying ordinary flight -- a radius the "
-                  "player occupies is exempting the player's own bad frames");
-    }
-
-    // --- 8c2. One frame, one unit of budget --------------------------------
-    {
-        // ONE FRAME MUST COST ONE UNIT OF BUDGET, whatever it carries.
-        //
-        // glitchFrameObserve runs on every new furthest camera within a frame,
-        // so a frame carrying several candidates used to write several budget
-        // entries under one frame number -- and the governor read its whole
-        // budget as spent on a single withheld frame. Shipped and caught in one
-        // turn: a session that withheld ONE frame stood the fix down and let two
-        // reported flashes through.
-        //
-        // Two writes per frame here, which is what the field frame carried.
-        tune("separation", "off");
-        tune("burst_limit", "3");
-        installGlitchFrameFix();
-        settle(b, x, 200);
-        uint32_t multi = 0;
-        for (uint32_t i = 0; i < 3; ++i) {
-            x += 30.0f;
-            // Two candidates in one frame: a near camera, then a further one.
-            // The second is the frame's furthest and is the one judged.
-            b.setPos(x, 9000.0f, 0.0f);
-            glitchFrameObserve(b.f, kBytes, b.res);
-            b.setPos(x, 40000.0f + 900.0f * static_cast<float>(i), 0.0f);
-            glitchFrameObserve(b.f, kBytes, b.res);
-            if (glitchFrameMarked()) ++multi;
-            advanceOneFrame();
-        glitchFrameBoundary(kEyeDraws);
-            clearGlitchFrame();
-            settle(b, x, 4);
-        }
-        check("a frame with several candidates costs one unit of budget",
-              multi >= 2,
-              std::to_string(multi) +
-                  " of 3 withheld; the governor is counting candidates rather "
-                  "than frames, so one withheld frame spends the whole budget");
-
-        // A FRAME THAT IS NOT WITHHELD MUST COST NOTHING, which is the half the
-        // first fix missed and which is NOT tested here. It could not be built:
-        // withdrawing a mark needs a later candidate that is FURTHER from the
-        // origin -- otherwise glitchFrameObserve returns before re-deciding --
-        // and also not itself a jump, and a position far enough out to be the
-        // frame's furthest is necessarily far from the predicted track. The
-        // reachable withdrawal is a further candidate that is SUPPRESSED, which
-        // needs a certified park or a learned separation set up first.
-        //
-        // So the boundary-charging fix rests on the field log and on the code
-        // reading, not on a fixture: a session with zero frames withheld by
-        // either counter in which the governor spent its whole budget four
-        // times. Charging where the counting happens makes the two the same
-        // predicate, which is the property that matters, and 8c2 above pins the
-        // per-frame half of it. Worth building properly when the park fixtures
-        // can be reused for it.        settle(b, x, 200);
-    }
-
-    // --- 8d. The burst governor: the fix may not cost more than the artefact -
-    //
-    // FIELD SERIES, verbatim. One camera separating steadily from the view on
-    // 2026-08-15: magnitudes 5068, 5492, 5796, 6008, 6225, 6500, 6803, 8769,
-    // each 3.5 to 8 per cent above the last, so the 2 per cent match window
-    // never fired and every one was a novel magnitude. Eight withholds inside
-    // 170 ms of game time, alternating so max_consecutive never saw two in a
-    // row, each costing about 80 ms of stall -- roughly 650 ms spent hiding an
-    // artefact that would have cost a fraction of it.
-    //
-    // Every suppression is off for this, deliberately. The governor has to hold
-    // when nothing else does, because its job is to bound storms no invariant
-    // models yet -- and the drift rule that will handle THIS storm properly is
-    // not written.
-    {
-        tune("separation", "off");
-        tune("burst_limit", "3");
-        tune("burst_window", "60");
-        installGlitchFrameFix();
-        settle(b, x, 200);
-
-        static const float kDrift[] = {5068.0f, 5492.0f, 5796.0f, 6008.0f,
-                                       6225.0f, 6500.0f, 6803.0f, 8769.0f};
-        uint32_t withheld = 0;
-        for (float mag : kDrift) {
-            x += 30.0f;
-            if (frame(b, x, mag, 0.0f)) ++withheld;
-            x += 30.0f;
-            frame(b, x, 0.0f, 0.0f);
-        }
-        check("the governor bounds a storm no invariant recognises",
-              withheld <= 3,
-              std::to_string(withheld) +
-                  " frames withheld replaying the measured drift series; at about "
-                  "80 ms of stall each that is what the player felt as judder, and "
-                  "the whole point of the bound is that it does not depend on "
-                  "recognising why the storm is happening");
-        settle(b, x, 200);
-    }
-
-    // --- 8e. Fixture L: a transition must not excuse the next transition ------
-    //
-    // THE FAILURE, from the field. Two low wakes in one session, minutes apart.
-    // The first was withheld -- correctly -- and in being withheld it taught the
-    // separation memory its magnitude. The second produced a jump of nearly the
-    // same size, because both go to the same fixed reset position from a similar
-    // view radius, and the memory excused it: "let through: a repeating jump
-    // size", 726 ms before the player reached the key.
-    //
-    // That is the premise failing, not the implementation. A repeating magnitude
-    // IS a pass separation when it repeats at frame rate; a transition repeats it
-    // too, twice a session, and the rule cannot tell them apart because it is
-    // keyed on the jump rather than on where the jump landed.
-    //
-    // Both directions are asserted, because "the fix works now" is not the claim
-    // -- the claim is that this specific change is what makes the difference.
-    {
-        const float kFirst = 17515.0f, kSecond = 17551.0f;   // 0.2% apart
-
-        tune("burst_limit", "30");
-        tune("separation", "act");
-        installGlitchFrameFix();
-        settle(b, x, 200);
-        oneFrameExcursion(b, x, kFirst);
-        settle(b, x, 200);
-        // RETIRED ASSERTION. This used to check that the field failure still
-        // reproduced with the memory acting -- one low wake excusing the next.
-        // The trust bar (1e step 4) makes that unreachable in ct too: two
-        // marks minutes apart restart the count instead of accumulating, so
-        // there is no configuration left in which the first wake excuses the
-        // second. Fixture 8f's L half is the live version of this.
-        const bool actExcused = !oneFrameExcursion(b, x, kSecond);
-        check("...and the bar makes that unreachable even with the memory acting",
-              !actExcused,
-              "the second wake is still being excused by the first with "
-              "nothing about the change that stops it");
-
-        tune("separation", "log");
-        installGlitchFrameFix();
-        settle(b, x, 200);
-        oneFrameExcursion(b, x, kFirst);
-        settle(b, x, 200);
-        const bool logWithheld = oneFrameExcursion(b, x, kSecond);
-        check("with the memory log-only, the second wake is withheld",
-              logWithheld,
-              "the second transition is still being excused by the first");
-        settle(b, x, 200);
-    }
-    // --- 8f. The trust bar: O, P and L against one rule ----------------------
-    //
-    // PAIRS CO-MOVE. All three cases are measured, and the bar has to admit two
-    // of them and refuse the third -- which is the only reason to believe the
-    // numbers rather than merely to have chosen them.
-    //
-    //   O  descent, 2026-08-15: pairs 166 frames apart, ~5000 units, 17 of 40
-    //      withholds in one session. Both cameras track the moving view, so no
-    //      park and no shell can certify it -- 0 by orbit, 0 by park in the log.
-    //   P  the 568k planetary cascade: marks every 12.6 s.
-    //   L  two low wakes minutes apart, 17515 then 17551 units, where the first
-    //      taught the memory to excuse the second.
-    {
-        tune("separation", "act");
-        tune("burst_limit", "30");
-
-        // O -- must certify quickly and stop costing frames.
-        installGlitchFrameFix();
-        settle(b, x, 200);
-        uint32_t oWithheld = 0;
-        for (uint32_t pair = 0; pair < 6; ++pair) {
-            for (uint32_t k = 0; k < 2; ++k) {
-                x += 30.0f;
-                if (frame(b, x, 4950.0f + 40.0f * static_cast<float>(k), 0.0f)) {
-                    ++oWithheld;
-                }
-                x += 30.0f;
-                frame(b, x, 0.0f, 0.0f);
-            }
-            settle(b, x, 160);          // the measured 166-frame cadence
-        }
-        check("O: a co-moving pair certifies and stops costing frames",
-              oWithheld <= 4,
-              std::to_string(oWithheld) +
-                  " of 12 withheld across six descent pairs; the bar is too high "
-                  "for the case the separation memory exists to catch");
-
-        // P -- the cascade, marking every 12.6 s, must reach the bar too.
-        installGlitchFrameFix();
-        settle(b, x, 200);
-        uint32_t pWithheld = 0;
-        for (uint32_t i = 0; i < 5; ++i) {
-            x += 30.0f;
-            if (frame(b, x, 568000.0f + 900.0f * static_cast<float>(i), 0.0f)) {
-                ++pWithheld;
-            }
-            x += 30.0f;
-            frame(b, x, 0.0f, 0.0f);
-            settle(b, x, 1130);         // 12.6 s at 90 Hz
-        }
-        check("P: a cascade 12.6 s apart still certifies", pWithheld <= 3,
-              std::to_string(pWithheld) +
-                  " of 5 withheld; the window is too narrow for the slowest "
-                  "measured pass separation, which is the one that set it");
-
-        // L -- minutes apart, must NEVER certify.
-        installGlitchFrameFix();
-        settle(b, x, 200);
-        oneFrameExcursion(b, x, 17515.0f);
-        settle(b, x, 5600);             // over a minute: outside the window
-        const bool lWithheld = oneFrameExcursion(b, x, 17551.0f);
-        check("L: a transition minutes later is still withheld", lWithheld,
-              "the second low wake is being excused by the first again, which is "
-              "the failure the bar was built to prevent");
-        settle(b, x, 200);
-    }
-
-    // --- 8g. Rule B: fixtures M and N -----------------------------------------
-    //
-    // THE FIRST MARK ALWAYS MARKS; everything after it in the band, landing
-    // nearby, is the same camera still separating. Fixture M is the measured
-    // storm verbatim; fixture N is the adversarial case that forces the landing
-    // term to exist -- a magnitude inside the band cannot be excused on size
-    // alone, because a transition mid-drift can land at its reset position with
-    // a size that happens to fit.
-    //
-    // M runs BOTH directions in one binary, fixture-L style: with the rule off
-    // (drift_pct = 0) the storm must reproduce, because a fixture that cannot
-    // produce the failure proves nothing about the fix. The governor is raised
-    // out of the way in both halves -- it caps this storm too (fixture 8d), and
-    // a cap is exactly what would let a broken Rule B pass "at most two".
-    {
-        static const float kSeries[] = {5068.0f, 5492.0f, 5796.0f, 6008.0f,
-                                        6225.0f, 6500.0f, 6803.0f, 8769.0f};
-
-        // M, first direction: the rule off, the storm real.
-        tune("separation", "act");
-        tune("burst_limit", "30");
-        tune("drift_pct", "0");
-        installGlitchFrameFix();
-        settle(b, x, 200);
-        uint32_t preWithheld = 0;
-        for (float mag : kSeries) {
-            x += 30.0f;
-            if (frame(b, x, mag, 0.0f)) ++preWithheld;
-            x += 30.0f;
-            if (frame(b, x, 0.0f, 0.0f)) ++preWithheld;
-        }
-        check("M reproduces the drift storm with Rule B off", preWithheld >= 6,
-              std::to_string(preWithheld) +
-                  " of 8 withheld; a low number here means the fixture is not "
-                  "exercising the failure Rule B exists to remove");
-
-        // M, second direction: the rule on. Two marks are the specification --
-        // the first, which nothing may excuse, and the 6803->8769 step, which is
-        // +28.9% and OUTSIDE the one-sided band: a step that size is a fresh
-        // event, and excusing it would widen the band by argument rather than
-        // by measurement.
-        //
-        // THE LONG SETTLE IS LOAD-BEARING. State survives install (the static
-        // State is the game's semantics, on purpose), so the first half's
-        // eight withholds put all eight magnitudes in the separation table --
-        // and drift YIELDS to recognised magnitudes, so a fresh replay would
-        // be handed to the separation path and withheld 8 of 8. The system's
-        // own decay is the isolation: entries unseen for a runaway window no
-        // longer match, which is also the semantics the field build runs on.
-        tune("drift_pct", "10");
-        installGlitchFrameFix();
-        settle(b, x, 2100);
-        uint32_t postWithheld = 0;
-        bool firstMarked = false;
-        for (uint32_t i = 0; i < 8; ++i) {
-            x += 30.0f;
-            const bool m = frame(b, x, kSeries[i], 0.0f);
-            if (i == 0) firstMarked = m;
-            if (m) ++postWithheld;
-            x += 30.0f;
-            if (frame(b, x, 0.0f, 0.0f)) ++postWithheld;
-        }
-        check("M: the first mark always marks", firstMarked,
-              "the opening frame of the storm was excused with no chain to "
-              "continue -- the density guard's exact failure, rebuilt");
-        check("M: the drift costs at most two frames", postWithheld <= 2,
-              std::to_string(postWithheld) +
-                  " of 8 withheld with Rule B on; the chain is not following "
-                  "the measured 3.5-8.4% steps");
-        settle(b, x, 200);
-
-        // N. Chain live -- seed withheld, one step suppressed -- then a jump
-        // whose SIZE fits the band and whose LANDING is the far side of the
-        // path, which is the reset-position shape of a real flash. It must
-        // still be withheld, whatever its size says.
-        //
-        // Same long settle, same reason: M's halves left 5068 in the table
-        // with two marks, and N's seed is 5068 -- a third mark inside the
-        // window would CERTIFY it and suppress the very seed the fixture
-        // needs withheld.
-        installGlitchFrameFix();
-        settle(b, x, 2100);
-        x += 30.0f;
-        const bool nSeed = frame(b, x, 5068.0f, 0.0f);
-        x += 30.0f;
-        frame(b, x, 0.0f, 0.0f);
-        x += 30.0f;
-        const bool nStep = frame(b, x, 5350.0f, 0.0f);   // +5.6%, lands 288 away
-        x += 30.0f;
-        frame(b, x, 0.0f, 0.0f);
-        x += 30.0f;
-        const bool nFlash = frame(b, x, -5600.0f, 0.0f); // +4.7% by size; lands
-        x += 30.0f;                                      // ~11,000 units away
-        frame(b, x, 0.0f, 0.0f);
-        check("N: the chain is live when the flash arrives", nSeed && !nStep,
-              std::string(nSeed ? "" : "the seed mark was not withheld; ") +
-                  (nStep ? "the drift step was withheld, so nothing was being "
-                           "excused and the assertion below is vacuous"
-                         : ""));
-        check("N: a real flash mid-drift, in band by size, is still withheld",
-              nFlash,
-              "the flash was excused on magnitude alone -- the landing term is "
-              "missing or too loose, and this version must not ship (1e step 3)");
-        settle(b, x, 200);
-    }
-
-    // --- 9. The instrument outlives the fix -------------------------------
-    //
-    // transition_flash = 0 is the control a bug report needs: with nothing
-    // withheld, whatever the player saw was not EDVR. That configuration used to
-    // take the viewpoint history down with the fix and answer "the transition
-    // flash fix is off, so nothing has been recorded" -- the instrument refusing
-    // to measure the one case it exists to settle.
-    {
-        Config::get().set("fix.transition_flash", "0");
-        installGlitchFrameFix();
-
-        // Still watching: the Map gate is what feeds the history, so if this
-        // goes false nothing is recorded whatever else is true.
-        check("the history still records with the fix switched off",
-              glitchFrameWantsBuffer(kBytes),
-              "fix.transition_flash = 0 took the instrument down with the fix");
-
-        // And still not acting. A jump that would certainly be withheld with the
-        // fix on must produce nothing at all with it off.
-        Buffer c;
-        float cx = 1000.0f;
-        for (uint32_t i = 0; i < 400; ++i) { cx += 30.0f; frame(c, cx, 0.0f, 0.0f); }
-        uint32_t marked = 0;
-        for (uint32_t i = 0; i < 5; ++i) {
-            cx += 30.0f;
-            if (frame(c, cx, 30000.0f, -20000.0f)) ++marked;
-            cx += 30.0f;
-            frame(c, cx, 0.0f, 0.0f);
-        }
-        check("...and still withholds nothing", marked == 0,
-              std::to_string(marked) + " frames withheld by a fix that is switched off");
-
-        Config::get().set("fix.transition_flash", "1");
-        installGlitchFrameFix();
-    }
-
-    // --- R. THE LOW WAKE DROP: a 13.5-unit camera is not a world camera ----
-    //
-    // Field capture, Pimax at 72Hz, 2026-08-17, and the same camera an hour
-    // earlier in a second session. In supercruise the tracked camera climbs
-    // smoothly through the low thousands; at the drop it reads
-    // (+6.05 +11.85 +2.50), magnitude 13.54.
-    //
-    // The world-camera floor was 10, so 13.54 cleared it and the frame counted
-    // as a reading. Composing it against the previous world camera at 4,214
-    // produced a phantom jump of 4,201 -- the number in the log -- and three
-    // frames were withheld on it. Withheld frames hold the PREVIOUS image, so
-    // at 72Hz that is 42 ms of supercruise pasted over the moment of the drop:
-    // the fix generating the artifact it exists to remove.
-    //
-    // This is the case the floor was written for. It was a hair too low.
-    // A PAIRED CONTROL, because the assertion "nothing was withheld" passes just
-    // as happily when the detector is switched off. The two halves run the same
-    // shape and differ only in the magnitude of the camera landed on: 13.54,
-    // which must be ignored, and 4,358, which must not.
-    //
-    // The separation memory is turned OFF for both. installGlitchFrameFix keeps
-    // a `static State`, so this block inherits every separation, shell and park
-    // the seventeen fixtures above it certified -- and the first version of this
-    // control was silently excused by one of them, which read as "raising the
-    // floor broke the detector". Fixtures here are not isolated; anything
-    // asserting a jump IS caught has to say which rules it is asking about.
-    auto wakeDrop = [&](float lx, float ly, float lz, const char* sep) {
-        tune("separation", sep);
-        tune("max_consecutive", "3");
-        installGlitchFrameFix();
-        Buffer r;
-        float wx = 2000.0f, wy = 2200.0f, wz = 430.0f;
-        for (uint32_t i = 0; i < 400; ++i) {   // supercruise, climbing smoothly
-            wx += 3.2f; wy += 3.5f; wz += 0.7f;
-            frame(r, wx, wy, wz);
-        }
-        uint32_t withheld = 0;
-        for (uint32_t i = 0; i < 12; ++i) {    // the drop, and the frames after
-            if (frame(r, lx, ly, lz)) ++withheld;
-        }
-        return withheld;
-    };
-    {
-        const uint32_t low = wakeDrop(6.05f, 11.85f, 2.50f, "off");
-        check("R: a 13.5-unit camera at a wake drop withholds nothing", low == 0,
-              std::to_string(low) + " frame(s) withheld on a camera below the "
-              "world floor -- each one holds the previous image over the drop, "
-              "which is the flash the player reports");
-
-        const uint32_t high = wakeDrop(-3000.0f, -3000.0f, -1000.0f, "off");
-        check("R: ...and the same shape onto a 4,358-unit camera still is",
-              high > 0,
-              "the floor is now high enough to switch the detector off, which "
-              "buys silence rather than correctness");
-
-        tune("separation", "act");
-        tune("max_consecutive", "2");
-        installGlitchFrameFix();
-    }
-
-    // --- 10. The churn instrument (spec §1g) --------------------------------
-    //
-    // The recognition machinery churned with the terrain guard's margin (the
-    // guard was removed 2026-10-09) -- 6bp measured 29 recognitions at guard-off
-    // against 3,277 at half margin, 36 withheld. Whether that cost is this table
-    // THRASHING (H1) or genuine novelty (H2) decides between two different
-    // fixes, so the instrument ships first and the mechanism waits for a field
-    // session. These cells pin the instrument itself: the eviction and relearn
-    // counters count exactly the thing they claim. Nothing here asserts a
-    // decision change, because the instrument must not make one.
-    //
-    // The shell-side eviction counter mirrors the separation counter's tested
-    // shape; there is no measured 64-slot shell eviction to replay, and staging
-    // one synthetically would take thousands of frames to say nothing a code
-    // read does not -- stated here rather than tested silently.
-    // A FRESH BUFFER AND A FRESH, SMALL TRACK for the remaining cells, and
-    // the reason is a trap the first draft of this section fell straight
-    // into. The suite's main track sits near two million units by now, so
-    // resuming it after R's buffers is a "jump" of that whole displacement
-    // -- and R's own buffer switches (at max_consecutive = 3) had already
-    // put three marks on switch-sized magnitudes, CERTIFYING one. Every
-    // frame of the resumed track then matched a certified separation and
-    // was suppressed, and a suppressed frame deliberately contributes
-    // nothing -- no mark, no rebase, no track entry -- so the track never
-    // rebuilt and every later assertion drowned in suppressions. A fixture
-    // lives with the game's semantics, so this one enters the way a session
-    // does: one bounded switch (two marks at the default consecutive cap),
-    // a rebase, four hundred quiet frames, and a canary that fails loudly
-    // if the wedge ever comes back.
-    Buffer m;
-    float mx = 1000.0f;
-    settle(m, mx, 400);
-    {
-        uint32_t canary = 0;
-        for (uint32_t i = 0; i < 50; ++i) {
-            mx += 30.0f;
-            if (frame(m, mx, 0.0f, 0.0f)) ++canary;
-        }
-        check("churn cells: the fresh track settles clean", canary == 0,
-              std::to_string(canary) +
-                  " of 50 settled frames withheld -- the track never rebuilt "
-                  "after the buffer switch, so nothing below can be trusted");
-    }
-    {
-        // The learning-cost counters.
-        //
-        // Twenty distinct magnitudes, each 17% above the last -- outside the
-        // 2% match window and the 10% drift band -- every one novel to the
-        // sixteen-slot table: the first sixteen-and-change learn, the rest
-        // evict live entries. Then the FIRST magnitude returns. The table
-        // has forgotten it, so it is withheld again -- and the relearn
-        // counter is what makes that second payment visible, which is the
-        // H1 number the field session reads.
-        settle(m, mx, 200);
-        const GlitchFrameChurnStats before = glitchFrameChurnStats();
-        float mag = 50000.0f;
-        const float firstMag = mag;
-        uint32_t stormWithheld = 0;
-        for (uint32_t i = 0; i < 20; ++i) {
-            if (oneFrameExcursion(m, mx, mag)) ++stormWithheld;
-            settle(m, mx, 30);       // outlives the drift chain's 8-frame gap
-            mag *= 1.17f;
-        }
-        const GlitchFrameChurnStats mid = glitchFrameChurnStats();
-        check("churn: every novel magnitude paid its frame and was learned",
-              stormWithheld == 20 && mid.sepInsertions >= before.sepInsertions + 20,
-              std::to_string(stormWithheld) + " of 20 withheld, " +
-                  std::to_string(mid.sepInsertions - before.sepInsertions) +
-                  " insertions counted");
-        check("churn: a population past sixteen slots evicts live entries",
-              mid.sepEvictedLive >= before.sepEvictedLive + 4,
-              std::to_string(mid.sepEvictedLive - before.sepEvictedLive) +
-                  " live evictions; twenty in-window magnitudes against "
-                  "sixteen slots must lose some");
-        check("churn: distinct novelty is NOT counted as relearning",
-              mid.sepRelearned == before.sepRelearned,
-              std::to_string(mid.sepRelearned - before.sepRelearned) +
-                  " relearns counted for magnitudes never seen before");
-
-        const bool relearnMarked = oneFrameExcursion(m, mx, firstMag);
-        const GlitchFrameChurnStats after = glitchFrameChurnStats();
-        check("churn: an evicted magnitude returning is withheld again and "
-              "counted as a relearn",
-              relearnMarked && after.sepRelearned == mid.sepRelearned + 1,
-              relearnMarked
-                  ? std::to_string(after.sepRelearned - mid.sepRelearned) +
-                        " relearns counted -- expected exactly 1"
-                  : "the returning magnitude was not withheld, so the table "
-                    "still knew it and nothing was relearned");
-        settle(m, mx, 200);
-    }
-
-    // A certified separation must survive a temporary excursion of its
-    // running mean. The 16:17 Pause capture had four slots, no evictions,
-    // but its ~6868 certified value had walked to 7593, then 8252. The
-    // next occurrence of ~6868 was being charged all three marks again.
-    {
-        shutdownGlitchFrameFix();
-        writeIni(scratch,kIni); Config::get().init(scratch); resetTuning(); installGlitchFrameFix();
-        Buffer m; float mx=10000.f;
-        settle(m,mx,2400); // expire the earlier fixtures' observation tables
-        uint32_t training=0;
-        for(unsigned i=0;i<3;++i){training+=oneFrameExcursion(m,mx,6868.f);settle(m,mx,20);}
-        check("returning-separation fixture pays all three certification marks",training==3,std::to_string(training));
-        uint32_t cost=0;
-        for(unsigned i=1;i<=300;++i){
-            if(oneFrameExcursion(m,mx,6868.f+4.6f*i))++cost;
-        }
-        check("certified separation still follows continuous drift",cost==0,std::to_string(cost));
-        settle(m,mx,20);
-        check("the gap between certified start and moving mean is not excused",
-              oneFrameExcursion(m,mx,7550.f),"unobserved intermediate magnitude was trusted");
-        settle(m,mx,20);
-        check("returning certified magnitude survives drift without relearning",
-              !oneFrameExcursion(m,mx,6868.f),"the moving mean erased its certified starting magnitude");
-        for(unsigned i=1;i<=300;++i)oneFrameExcursion(m,mx,6868.f+4.6f*i);
-        for(unsigned i=0;i<1100;++i)oneFrameExcursion(m,mx,8248.f);
-        check("unseen certified start expires despite a refreshed moving mean",
-              oneFrameExcursion(m,mx,6868.f),"drift kept an unseen old magnitude trusted indefinitely");
-    }
-
-    // The bound-camera diagnostic selects the last current write of its
-    // own buffer, not the last or furthest camera written by another pass.
-    {
-        Buffer sceneBuffer,auxBuffer;auxBuffer.res=reinterpret_cast<void*>(0xCAFE);
-        float sampled[3]{};
-        check("pure scene shader classifier rejects an unknown shader",!glitchFrameIsSceneDraw(0));
-        check("pure scene shader classifier accepts a known rigid shader",glitchFrameIsSceneDraw(0x66DE2CADB1F4AE6Bull));
-        check("unknown mesh shader does not request a scene-camera sample",!glitchFrameWantsSceneDraw(0));
-        check("known hull shader requests a scene-camera sample",glitchFrameWantsSceneDraw(0x66DE2CADB1F4AE6Bull));
-        sceneBuffer.setPos(1000,2000,3000);glitchFrameObserve(sceneBuffer.f,kBytes,sceneBuffer.res);
-        auxBuffer.setPos(90000,80000,70000);glitchFrameObserve(auxBuffer.f,kBytes,auxBuffer.res);
-        const bool marked=glitchFrameMarked();
-        check("bound-camera sample uses the right resource",glitchFrameNoteSceneDraw(sceneBuffer.res,sampled) && sampled[0]==1000 && sampled[2]==3000);
-        check("bound-camera observation cannot change the withhold decision",glitchFrameMarked()==marked);
-        check("later draws do not replace the first eye's sample",!glitchFrameNoteSceneDraw(auxBuffer.res));
-        advanceOneFrame();glitchFrameBoundary(kEyeDraws);clearGlitchFrame();
-        check("previous-frame writes cannot become a fresh scene sample",!glitchFrameNoteSceneDraw(sceneBuffer.res));
-        sceneBuffer.setPos(1,2,3);glitchFrameObserve(sceneBuffer.f,kBytes,sceneBuffer.res);
-        sceneBuffer.setPos(NAN,0,0);glitchFrameObserve(sceneBuffer.f,kBytes,sceneBuffer.res);
-        check("an invalid new write invalidates an earlier finite sample",!glitchFrameNoteSceneDraw(sceneBuffer.res));
-        sceneBuffer.setPos(0,0,0);glitchFrameObserve(sceneBuffer.f,kBytes,sceneBuffer.res);
-        check("diagnostic preserves an origin at zero",glitchFrameNoteSceneDraw(sceneBuffer.res,sampled) && sampled[0]==0 && sampled[2]==0);
-    }
-    // The geometry observation must distinguish a shared origin change
-    // from a camera displaced relative to its objects. Production observes
-    // the pool before Unmap and claims
-    // the fresh write at the recognised eye draw, before either Submit.
-    {
-        advanceOneFrame();glitchFrameBoundary(kEyeDraws);clearGlitchFrame();
-        constexpr unsigned count=glitch_scene_detail::kSamples;
-        uint32_t pool[count*84]{};
-        const void* resource=reinterpret_cast<const void*>(0x123456);
-        Buffer scene;
-        auto positions=[&](float offset){
-            for(unsigned i=0;i<count;++i){
-                auto* p=pool+i*84;p[0]=0;p[1]=0x3f800000;p[2]=0x7fff7fff;p[3]=0xffff7fff;p[7]=i+1;
-                float v[3]={1000.f+offset+i*2,200.f+i,300.f};memcpy(p+4,v,sizeof(v));
-            }
-        };
-        auto begin=[&](float camera,bool write=true){
-            if(write)glitchFrameObservePool(resource,pool,sizeof(pool));
-            scene.setPos(camera,0,0);glitchFrameObserve(scene.f,kBytes,scene.res);
-            glitchFrameNoteSceneDraw(scene.res);
-        };
-        auto end=[&](){advanceOneFrame();glitchFrameBoundary(kEyeDraws);clearGlitchFrame();};
-        positions(0);begin(1000);glitchFrameNoteScenePool(resource,sizeof(pool));
-        check("pool observation waits for a write after nomination",glitchFrameSceneGeometry().matched==0);
-        check("pool reads stop after the first claimed eye draw",glitchFrameWantsPool(resource)==0);end();
-        check("only the nominated pool is watched on the next frame",glitchFrameWantsPool(resource)==sizeof(pool) && glitchFrameWantsPool(nullptr)==0);
-        positions(1);begin(1001);glitchFrameNoteScenePool(resource,sizeof(pool));end();
-        positions(2);begin(1002);glitchFrameNoteScenePool(resource,sizeof(pool));
-        check("fresh same-frame pool pair is compared",glitchFrameSceneGeometry().matched==count);end();
-        positions(5002);begin(6002);glitchFrameNoteScenePool(resource,sizeof(pool));
-        auto g=glitchFrameSceneGeometry();
-        check("a shared 5 km origin move cancels in camera-relative geometry",g.matched==count && g.predicted==count && g.cameraStep==5000 && g.poolStep==5000 && g.relativeP90<.001f && g.predictionP90<.001f);
-        check("coherent geometry leaves the shared origin move unmarked",!glitchFrameMarked());end();
-        begin(6015.54f);glitchFrameNoteScenePool(resource,sizeof(pool));g=glitchFrameSceneGeometry();
-        check("camera-only placement error remains visible after an origin move",g.matched==count && g.relativeP90>13.5f && g.predictionP90>13.5f);end();
-        pool[7]=0x7654321;begin(6015.54f);glitchFrameNoteScenePool(resource,sizeof(pool));
-        check("reused pool slots do not acquire old geometry identity",glitchFrameSceneGeometry().matched==count-1);end();
-        begin(6015.54f,false);glitchFrameNoteScenePool(resource,sizeof(pool));
-        check("an old pool write is not a current observation",glitchFrameSceneGeometry().matched==0);end();
-        begin(6015.54f);glitchFrameInvalidatePool(resource);glitchFrameNoteScenePool(resource,sizeof(pool));
-        check("an unobserved overwrite invalidates the pending pool sample",glitchFrameSceneGeometry().matched==0);end();
-        begin(6015.54f);glitchFrameNoteScenePool(resource,sizeof(pool));
-        check("missing frame pairs are explicitly unavailable",glitchFrameSceneGeometry().matched==0);end();
-        begin(6015.54f);glitchFrameNoteScenePool(resource,sizeof(pool));
-        check("pool observation recovers after consecutive fresh frames",glitchFrameSceneGeometry().matched==count);end();
-        for(unsigned i=0;i<count;++i)pool[i*84]=1;
-        begin(6015.54f);glitchFrameNoteScenePool(resource,sizeof(pool));
-        check("skinned records do not masquerade as rigid geometry",glitchFrameSceneGeometry().matched==0);end();
-        positions(5002);begin(6015.54f);
-        for(unsigned i=0;i<4;++i)glitchFrameObservePool(resource,pool,sizeof(pool));
-        glitchFrameNoteScenePool(resource,sizeof(pool));
-        check("the read budget refuses stale data after too many writes",glitchFrameSceneGeometry().matched==0);end();
-        for(unsigned i=0;i<3;++i){begin(6015.54f,false);end();}
-        check("unbound pool watches expire",glitchFrameWantsPool(resource)==0);
-    }
-
-    // Captured field decisions, including the frame with no world camera.
-    {
-        const float nearOrigin[3]={-.02f,0,-.01f},away[3]={4.83f,-11.66f,-4.79f};
-        GlitchSceneGeometry g{128,128,4998.652f,4998.652f,0,.001f,.001f};
-        check("field normal-flight 5 km rebase is coherent",glitchSceneDecision(g,away)==GlitchSceneDecision::Coherent);
-        g={59,59,4247.484f,1600.022f,4207.028f,4241.066f,4241.066f};
-        check("first clean high wake catches its first reset",glitchSceneDecision(g,nearOrigin)==GlitchSceneDecision::CameraReset);
-        g={65,65,13.505f,0,13.505f,1580.476f,1580.476f};
-        check("later high wake catches reset below the world-camera floor",glitchSceneDecision(g,nearOrigin)==GlitchSceneDecision::CameraReset);
-        check("moving objects without a camera reset cannot trip the new detector",glitchSceneDecision(g,away)==GlitchSceneDecision::Unknown);
-        g.matched=31;check("a small population cannot decide a frame",glitchSceneDecision(g,nearOrigin)==GlitchSceneDecision::Unknown);
-        g.matched=65;g.predicted=0;check("a missing third frame cannot decide a reset",glitchSceneDecision(g,nearOrigin)==GlitchSceneDecision::Unknown);
-        g={128,128,0,0,0,0,0};const float invalid[3]={NAN,0,0};
-        check("invalid camera cannot excuse a frame",glitchSceneDecision(g,invalid)==GlitchSceneDecision::Unknown);
-    }
-    // Drive writes, claimed draws and Submit-time flags together. A later
-    // auxiliary write must neither restore a false mark nor erase a reset.
-    for(unsigned disabled=0;disabled<2;++disabled){
-        shutdownGlitchFrameFix();
-        writeIni(scratch,disabled?"[fix]\ntransition_flash=0\n":kIni);
-        Config::get().init(scratch);resetTuning();installGlitchFrameFix();
-        Buffer scene,aux;aux.res=reinterpret_cast<const void*>(0x4545);
-        constexpr unsigned count=128;uint32_t pool[count*84]{};
-        const void* resource=reinterpret_cast<const void*>(0x9898);
-        auto begin=[&](float camera,float object,float farCamera,bool claim=true){
-            for(unsigned i=0;i<count;++i){auto* p=pool+i*84;
-                p[1]=0x3f800000;p[2]=0x7fff7fff;p[3]=0xffff7fff;p[7]=i+1;
-                float pos[3]={object+1000.f+i*2,200.f+i,300.f};memcpy(p+4,pos,sizeof(pos));}
-            glitchFrameObservePool(resource,pool,sizeof(pool));
-            scene.setPos(camera,0,0);glitchFrameObserve(scene.f,kBytes,scene.res);
-            aux.setPos(farCamera,0,0);glitchFrameObserve(aux.f,kBytes,aux.res);
-            if(claim){glitchFrameNoteSceneDraw(scene.res);glitchFrameNoteScenePool(resource,sizeof(pool));}
-        };
-        auto end=[&](){advanceOneFrame();glitchFrameBoundary(kEyeDraws);clearGlitchFrame();};
-        for(unsigned i=0;i<500;++i){begin(1000.f+i,1000.f+i,10000.f+i);end();}
-        begin(6500,6500,30000);
-        check("first coherent rebase is unmarked before Submit",!glitchFrameMarked());
-        aux.setPos(90000,0,0);glitchFrameObserve(aux.f,kBytes,aux.res);
-        check("later shadow camera cannot restore a false mark",!glitchFrameMarked());end();
-        for(unsigned i=0;i<4;++i){begin(13.54f,13.54f,10000);end();}
-        // No auxiliary world camera, precisely the missed field frame.
-        begin(0,13.54f,0);
-        check(disabled?"fix off cannot mark an eye reset":"eye reset marks before Submit without any world camera",glitchFrameMarked()==!disabled);
-        aux.setPos(95000,0,0);glitchFrameObserve(aux.f,kBytes,aux.res);
-        check("later auxiliary candidate preserves the eye reset verdict",glitchFrameMarked()==!disabled);end();
-        begin(13.54f,13.54f,200000);
-        check("the second withheld frame uses the existing consecutive budget",glitchFrameMarked()==!disabled);end();
-        begin(0,13.54f,0);
-        check("an eye reset cannot bypass the consecutive-frame limit",!glitchFrameMarked());end();
-        for(unsigned repeat=0;repeat<3;++repeat){
-            for(unsigned i=0;i<200;++i){begin(13.54f,13.54f,10000.f+i);end();}
-            begin(0,13.54f,0);
-            check("repeated high-wake resets are never learned as harmless separations",glitchFrameMarked()==!disabled);end();
-        }
-        // Freshness is mandatory: omit the draw, so the previous frame's
-        // coherent result cannot override the legacy detector next frame.
-        for(unsigned i=0;i<200;++i){begin(1000.f+i,1000.f+i,10000.f+i);end();}
-        begin(1200,1200,45000,false);
-        check("missing eye sample retains legacy behavior",glitchFrameMarked()==!disabled);end();
-    }
-
-    // --- the engine fix's tap availability (review of 33ffc76e, finding 1) -----
-    //
-    // "Armed" may only be reported when the camera-buffer tap can deliver a
-    // fill: the detector must be OBSERVING a 5376-byte buffer. Each of these
-    // writes its own ini and reinstalls.
-    {
-        struct Case { const char* name; const char* ini; bool tap; bool detector; };
+        struct Case { const char* name; const char* ini; const char* env; bool tap; bool hooks; };
         const Case cases[] = {
-            {"defaults", "[fix]\ntransition_flash=1\n", true, true},
-            {"the explicit shipped geometry", "[fix]\ntransition_flash=1\n[advanced]\ncamera_buffer_bytes=5376\ncamera_buffer_offset=1100\n", true, true},
-            {"buffer size 0", "[fix]\ntransition_flash=1\n[advanced]\ncamera_buffer_bytes=0\n", false, false},
-            {"offset outside the buffer", "[fix]\ntransition_flash=1\n[advanced]\ncamera_buffer_offset=5000\n", false, false},
-            {"a buffer of another size", "[fix]\ntransition_flash=1\n[advanced]\ncamera_buffer_bytes=4096\ncamera_buffer_offset=100\n", false, true},
-            {"the fix switched off", "[fix]\ntransition_flash=0\n", true, false},
+            {"no settings at all", "[log]\r\nenabled = 0\r\n", nullptr, true, true},
+            {"a stale buffer size 0 line", "[advanced]\r\ncamera_buffer_bytes=0\r\n", nullptr, true, true},
+            {"a stale offset line outside the buffer", "[advanced]\r\ncamera_buffer_offset=5000\r\n", nullptr, true, true},
+            {"a stale buffer of another size", "[advanced]\r\ncamera_buffer_bytes=4096\r\ncamera_buffer_offset=100\r\n", nullptr, true, true},
+            {"a stale fix.transition_flash = 0 line", "[fix]\r\ntransition_flash=0\r\n", nullptr, true, true},
+            {"a stale fix.transition_flash = 1 line", "[fix]\r\ntransition_flash=1\r\n", nullptr, true, true},
+            {"the test switch set to 1", "[log]\r\nenabled = 0\r\n", "1", false, false},
+            {"the test switch set to 0 (only 1 switches it)", "[log]\r\nenabled = 0\r\n", "0", true, true},
+            {"the test switch set to 11 (only exactly 1)", "[log]\r\nenabled = 0\r\n", "11", true, true},
+            {"the test switch set to an empty string", "[log]\r\nenabled = 0\r\n", "", true, true},
         };
         for (const Case& c : cases) {
-            shutdownGlitchFrameFix();
-            writeIni(scratch, c.ini);
-            Config::get().init(scratch);
-            resetTuning();
-            installGlitchFrameFix();
+            SetEnvironmentVariableA("EDVR_TEST_NO_CAMERA_TAP", c.env);
+            reinstall(scratch, c.ini);
+            SetEnvironmentVariableA("EDVR_TEST_NO_CAMERA_TAP", nullptr);
             char why[256] = "";
             const bool tap = glitchFrameEngineTapAvailable(why, sizeof(why));
             check((std::string("tap availability: ") + c.name).c_str(), tap == c.tap,
                   tap ? "the tap reported available" : why);
-            check((std::string("fallback detector runs: ") + c.name).c_str(), glitchFrameDetectorRuns() == c.detector,
-                  "the detector's willingness to watch differs");
+            check((std::string("wants vScreen's hooks: ") + c.name).c_str(), glitchFrameWantsHooks() == c.hooks,
+                  "the hook request differs");
             if (!c.tap) check((std::string("a reason is given: ") + c.name).c_str(), why[0] != '\0', "no reason text");
         }
     }
 
+    // A tap that was never installed answers "not available" with a reason.
+    shutdownGlitchFrameFix();
+    {
+        char why[256] = "";
+        check("a tap that is not installed is not available", !glitchFrameEngineTapAvailable(why, sizeof(why)) && why[0] != '\0');
+        check("...and asks for no hooks", !glitchFrameWantsHooks());
+    }
+
+    // --- 5. A hold ---------------------------------------------------------------
+    reinstall(scratch, "[log]\r\nenabled = 0\r\n");
     clearGlitchFrame();
+    check("no frame is marked before a hold", !glitchFrameMarked());
+    const bool honoured = glitchFrameEngineFixHold();
+    check("a hold marks the frame", glitchFrameMarked());
+    check("...and reports whether a compositor was there to honour it", honoured == glitchConsumerPresent());
+    clearGlitchFrame();
+    check("clearing the frame at its boundary releases the mark", !glitchFrameMarked());
+    const uint32_t verdictBefore = jumpVerdictPacked();
+    glitchFrameEngineFixVerdict();
+    check("the verdict word changes when the boundary behind a hold publishes it",
+          jumpVerdictPacked() != verdictBefore);
+    check("...to \"the camera stayed\" (2)", (jumpVerdictPacked() & 3u) == 2u);
+    check("a hold notes a world jump for the arrival census", (glitchFrameEngineFixHold(), takeWorldJump()));
+    clearGlitchFrame();
+
     shutdownGlitchFrameFix();
 
     if (g_fails) {
@@ -1845,4 +270,3 @@ int main(int argc, char** argv) {
     printf("GLITCH TEST PASSED\n");
     return 0;
 }
-

@@ -118,6 +118,9 @@ struct Published {
     // Built v14.21: Status.json Flags bits 24-26 only (InMainShip, InFighter, InSRV), the in-vehicle half of the seat test without Flags2.
     bool     vehicleKnown = false;
     bool     vehicle = false;
+    // Which seat, for the seat memory (src/openxr/seat_memory.h): Flags bits 24-26 in bits 0-2, Flags2 bits 1-2 (taxi, multicrew) in bits 3-4.
+    // Meaningful with seatedKnown. A change from one non-zero kind to another is a change of cockpit (ship to SRV, SRV to ship, fighter).
+    uint32_t seatKind = 0;
     // GuiFocus from Status.json: 9 is the Full System Scanner. The game
     // states the MODE outright -- entry and exit by any path (keybind,
     // ESC, an interdiction yanking the player out of supercruise) all
@@ -150,6 +153,7 @@ struct Visible {
     std::atomic<bool>     seated{false};
     std::atomic<bool>     vehicleKnown{false};
     std::atomic<bool>     vehicle{false};
+    std::atomic<uint32_t> seatKind{0};
     std::atomic<bool>     fssFocusKnown{false};
     std::atomic<bool>     fssFocus{false};
     std::atomic<uint32_t> guiFocus{0};
@@ -182,6 +186,7 @@ void applyPublished(const Published& p) {
     g_v.seated.store(p.seated, kRelaxed);
     g_v.vehicleKnown.store(p.vehicleKnown, kRelaxed);
     g_v.vehicle.store(p.vehicle, kRelaxed);
+    g_v.seatKind.store(p.seatKind, kRelaxed);
     g_v.fssFocusKnown.store(p.fssFocusKnown, kRelaxed);
     g_v.fssFocus.store(p.fssFocus, kRelaxed);
     g_v.guiFocus.store(p.guiFocus, kRelaxed);
@@ -461,6 +466,7 @@ void pollStatus(Session& s) {
         // Built v14.21: the in-vehicle bits of Flags alone (the station's undock rule); the menu and the load read Flags 0 and are not in a vehicle.
         s.pub.vehicleKnown = sawFlags;
         s.pub.vehicle = sawFlags && (flags & kStatusFlagsSeated) != 0;
+        s.pub.seatKind = sawFlags ? (((flags >> 24) & 0x7u) | (((sawFlags2 ? flags2 : 0u) >> 1 & 0x3u) << 3)) : 0u;
         // Bit 30 of Flags: the FSD jump itself -- the tunnel, not the
         // countdown before it. The distinction is what scopes the witchspace
         // star fix off the forming-wormhole phase, where the game still
@@ -496,6 +502,7 @@ void pollStatus(Session& s) {
         s.pub.dockedKnown = false;
         s.pub.seatedKnown = false;
         s.pub.vehicleKnown = false;
+        s.pub.seatKind = 0;
         s.pub.fsdJumpKnown = false;
         s.pub.fssFocusKnown = false;
         s.pub.fssFocus = false;
@@ -1032,11 +1039,14 @@ bool journalInJumpTunnel() {
 bool journalOnFootKnown() { return journalWatchActive() && peek(g_v.onFootKnown); }
 bool journalOnFoot() { return !runtimeFlatProfile() && peek(g_v.onFoot); }
 bool journalDockedKnown() { return journalWatchActive() && peek(g_v.dockedKnown); }
+bool journalStatusDockedKnown() { return g_v.active.load(std::memory_order_acquire) && peek(g_v.dockedKnown); }
+bool journalStatusDocked() { return peek(g_v.docked); }
 bool journalDocked() { return !runtimeFlatProfile() && peek(g_v.docked); }
 bool journalSeatedKnown() { return journalWatchActive() && peek(g_v.seatedKnown); }
 bool journalSeated() { return !runtimeFlatProfile() && peek(g_v.seated); }
 bool journalVehicleKnown() { return journalWatchActive() && peek(g_v.vehicleKnown); }
 bool journalVehicle() { return !runtimeFlatProfile() && peek(g_v.vehicle); }
+uint32_t journalSeatKind() { return runtimeFlatProfile() ? 0u : peek(g_v.seatKind); }
 uint32_t journalStatusSamples() { return runtimeFlatProfile() ? 0u : peek(g_v.statusSamples); }
 
 JournalRawStatus journalRawStatus() {

@@ -43,6 +43,43 @@ public:
     void reset(ID3D11DeviceContext* = nullptr) noexcept;
 };
 
+// The GPU pass profiler's own frequency scopes (gpu_pass_profile.cpp): one per captured frame, held in its slot from open until
+// its result is read and released. Open refuses while ANY scope is open (a census timer, the application-frame ring, or another
+// slot), so the profiler never borrows a scope it did not open and each frame's stamps lie inside exactly that frame's scope.
+// GPU pass profile v3: one slot per captured frame (slot = frame index), so this must be at least the profiler's kMaxCaptureFrames;
+// gpu_pass_profile.cpp static_asserts it. v2 had 4, and every frame from the fifth was refused as "already open".
+constexpr unsigned kPassScopeSlots = 128;
+bool gpuTimingPassScopeOpen(ID3D11DeviceContext*, unsigned slot, uint64_t now) noexcept;
+// True while any scope on the shared clock is open (not necessarily the profiler's): the profiler waits at the boundary for it to end.
+bool gpuTimingPassScopeHeld() noexcept;
+bool gpuTimingPassScopeClose(ID3D11DeviceContext*, unsigned slot, uint64_t now) noexcept;
+enum class GpuPassScopeStatus { Pending, Ready, Failed };
+struct GpuPassScopeResult {
+    GpuPassScopeStatus status = GpuPassScopeStatus::Pending;
+    uint64_t frequency = 0;     // valid when Ready
+    const char* reason = "";    // said when Failed
+};
+GpuPassScopeResult gpuTimingPassScopePoll(ID3D11DeviceContext*, unsigned slot, uint64_t now) noexcept;
+void gpuTimingPassScopeRelease(ID3D11DeviceContext*, unsigned slot, uint64_t now) noexcept;
+
+// The GPU pass profiler's yield (TEMPORARY, Built v13.6). While a capture is armed or running, the timers and the application-frame timing
+// refuse NEW leases on the shared clock, so the profiler's frame scopes can open; a refusal is counted, never a stall. gpuTimingSetYield is the
+// profiler's switch (set at the press, cleared at the last profiled frame's close); gpuTimingTakeYieldRefusals returns and clears the count of
+// refused timer leases (the application frames are counted by gpuFrameTakeYieldSkips, gpu_frame_timing.h).
+void gpuTimingSetYield(bool on) noexcept;
+bool gpuTimingYielding() noexcept;
+uint64_t gpuTimingTakeYieldRefusals() noexcept;
+
+// The GPU census's own frequency scope (2026-10-14). Every census span (a GpuTimer pair) borrows a scope that is already open; with none open,
+// each span opens a TIMESTAMP_DISJOINT of its own, takes one of the clock's eight records, and holds it until its result is polled four or more
+// frames later. The application-frame clock (advanced.app_gpu_timing) kept one scope open across the render, so every census span borrowed it; with
+// that clock off (the default since the AA-off cuts) a frame's two to nine spans needed two to nine records each and the pool ran out: 85-90% of
+// spans failed in the 2026-10-13 flight. EnsureCensus opens ONE scope on the first timed span of a frame (refused while another scope is open or
+// the profiler yields) and EndCensus closes it at the frame boundary. Owner context only; the caller opens it only while the application-frame clock is off.
+bool gpuTimingCensusScopeEnsure(ID3D11DeviceContext*, uint64_t now) noexcept;
+void gpuTimingCensusScopeEnd(ID3D11DeviceContext*, uint64_t now) noexcept;
+bool gpuTimingCensusScopeOpen() noexcept;
+
 enum class GpuTimerPoll { Pending, Ready, Invalid };
 
 // A reusable timestamp pair that borrows the domain's disjoint interval.

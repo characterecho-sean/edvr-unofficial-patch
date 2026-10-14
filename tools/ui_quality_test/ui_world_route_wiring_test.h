@@ -357,7 +357,7 @@ void testWiringDoor() {
         check(has(layerOnly, "++s->layerOnlyBlack;") && has(layerOnly, "returnS_FALSE;") && has(layerOnly, "s->layerOnlyBlack<=8"),
               "sharpen: a composite that does not run for a layer-only eye is counted, and the first eight named");
         const std::string rest = sharpen.substr(ordinary);
-        check(rest.find("edvrSharpen(source,int(eye),bounds,s->strength)") < rest.find("edvr::uiLayerComposite(seq,eye,result,whole,layerUv)"),
+        check(rest.find("edvrSharpen(source,int(eye),bounds,s->strength)") < rest.find("edvr::uiLayerComposite(seq,eye,result,whole,layerUv,true)"),
               "sharpen: every other eye keeps the ordinary order (RCAS on the frame, then the layer over it)");
     }
     check(countOf(sharpen, "uiLayerDoorLayerOnly(") == 1, "sharpen asks the layer's door predicate once");

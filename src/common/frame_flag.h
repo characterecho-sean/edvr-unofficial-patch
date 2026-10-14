@@ -50,22 +50,8 @@ void markGlitchFrame();
 // True if the frame in progress has been marked.
 bool glitchFrameMarked();
 
-// Withdraw a mark WITHIN the frame that made it.
-//
-// The detector re-decides several times per frame, as each new camera candidate
-// arrives, and an early candidate can look like a jump while the frame's final
-// verdict is no.
-//
-// Identical to clearGlitchFrame() today, and kept as its own name because the
-// two mean different things to a reader: one is "I was wrong", the other is
-// "this frame is over". They used to differ -- a `counted` field distinguished
-// them, so a withdrawn mark would not be tallied twice -- but that total moved
-// into glitch_frame.cpp and the field became write-only. It has been removed
-// rather than left as a mechanism the header describes and nothing implements.
-void unmarkGlitchFrame();
-
 // Called once per frame, so a mark applies to exactly one frame. Without this a
-// single detection would suppress every frame that followed.
+// single hold would suppress every frame that followed.
 void clearGlitchFrame();
 
 // The submitted eye textures, one slot per eye (0 left, 1 right), raw
@@ -127,9 +113,9 @@ void bumpFssArrivalStamp();
 long fssArrivalStampValue();
 
 // A camera-jump latch WITHIN d3d11.dll (plain process state, not the
-// mapping): the glitch detector notes every world-camera jump; the
+// mapping): the transition-flash engine fix notes every held frame; the
 // arrival census takes the latch at the frame boundary. Lives here so
-// the standalone glitch test, which links this file, resolves it.
+// the standalone rigs that link this file resolve it.
 void noteWorldJump();
 bool takeWorldJump();
 
@@ -144,7 +130,7 @@ void announceGlitchConsumer();
 void retireGlitchConsumer();
 bool glitchConsumerPresent();
 
-// The detector's verdict on the last jump, d3d11 -> openvr. A jump is withheld
+// The transition-flash fix's verdict on the last jump, d3d11 -> openvr. A jump is withheld
 // the frame it happens, and only the NEXT frame's camera says which it was: it
 // came back (1, a glitch -- the guard's own case) or it stayed (2, a change of
 // reference frame: a station arrival, a map, and the game's floating origin
@@ -171,7 +157,7 @@ uint32_t jumpVerdictPacked();
 // wrong about.
 //
 // It exists because during that transition Elite draws several frames from
-// somewhere the player is not -- confirmed with fix.transition_flash = 0, so it
+// somewhere the player is not -- confirmed with the flash hold switched off, so it
 // is the game's and not ours -- and detection cannot help: withholding shows the
 // PREVIOUS frame, and by the time a detector has recognised a bad one, the
 // previous frame is already bad too. Starting at the press means the frame being
@@ -225,6 +211,12 @@ void clearIntroRecentreRequest();
 void requestEndFrameHold(uint32_t ms);
 uint32_t endFrameHoldMs();
 
+// The seat memory's word (src/common/seat_context.h, src/openxr/seat_memory.h): d3d11.dll writes the cockpit-centre setting and the commander's
+// seat (Status.json) and journal boundary count; openvr_api.dll reads it each WaitGetPoses. One word, so the pair never tears. 0 is "nobody has
+// written" -- a graphics half that predates it, or a mapping not yet touched -- and reads as game mode: today's behaviour, nothing remembered.
+void publishSeatContext(uint32_t word);
+uint32_t seatContextWord();
+
 // Whether the game is in its VR profile, written by d3d11.dll at launch and at every profile switch (design
 // unified-install section 12). While it reads not-VR and the game makes no frame call, openvr_api.dll's owner runs
 // its own empty frames so the headset does not keep the last frame the game left. Nobody has written it -- an absent
@@ -242,8 +234,7 @@ constexpr bool vrProfileWordIsVr(uint32_t word) { return word != kVrProfileWordN
 //
 // WHY THIS IS A CHANNEL AND NOT A CONSTANT. The d3d11 half has to decide, per
 // render target, whether it is one of the eyes -- everything downstream of that
-// answer (the black void, the panel distance, the transition-flash detector's
-// "is a scene being drawn") is fed by it. It cannot
+// answer (the black void, the panel distance) is fed by it. It cannot
 // see a Submit, so it guessed by size: 2048x2048 or larger. A guess is what the
 // openvr half never has to make, because the texture is handed to it by name.
 //
@@ -384,8 +375,8 @@ constexpr int32_t kHeadLockBias = 1800;
 // ONE VERDICT PER FRAME, over a channel that carries no frame identity.
 //
 // The mark above is read once per eye, at each Submit, and it legitimately
-// changes DURING a frame: the detector re-decides on every new furthest camera
-// and can set, withdraw and re-raise it by design. So a transition landing
+// changes DURING a frame: the fix that sets it works from the render thread's
+// view of the camera, a frame boundary away from Submit. So a transition landing
 // between Submit(left) and Submit(right) shows one eye this frame and the other
 // a reprojection of the last one -- a one-frame binocular mismatch, which is
 // what a flash feels like. The fix for flashes, producing one.

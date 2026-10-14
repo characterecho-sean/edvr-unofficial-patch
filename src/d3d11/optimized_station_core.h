@@ -1029,7 +1029,7 @@ enum class ReleaseWhy : uint8_t { kNone = 0, kSettingOff, kUndocked, kCameraLeft
 
 // The own pad's game state this tick (the caller fills it from the probe and GameTrack): freshness is decided by the caller in milliseconds.
 struct SealInputs {
-    bool setting = false;        // fix.optimized_station is on
+    bool setting = false;        // fix.optimized_stations is on
     bool docked = false;         // Status.json Flags bit 0
     bool ownKnown = false;       // the game has named the own pad this dock (r0 was called on it)
     bool r1Fresh = false;        // the own pad's r1 was called within kPadStateFreshMs

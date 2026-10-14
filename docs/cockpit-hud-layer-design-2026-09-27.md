@@ -75,7 +75,7 @@ summary above points here.
   flat-AA arc's tone admission identifies them by VS set and per-PS HDR slot
   (design-flat-temporal-aa-2026-09-23.md sections 63-65). Reuse that rather
   than one hash.
-- **Exposure:** `fix.share_exposure` copies eye 0's exposure over eye 1's
+- **Exposure:** the always-on exposure sharing copies eye 0's exposure over eye 1's
   (exposure_fix.h). A re-issue that binds the game's own exposure SRV inherits
   it.
 - **Bloom:** BELIEVED baked into the HDR source by the composite pass. It is

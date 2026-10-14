@@ -7,10 +7,11 @@ static chain: see "Flight 184826".*
 ## Status
 
 - **State: SHIPPED (2026-10-09, build 33ffc76e; flight 095137 clean; Build 2d
-  is the cleanup).** An EXACT WITHHOLD. The HMDCamera is deactivated at S-1 and
+  is the cleanup). 2026-10-13: ALWAYS ON, no key, and the fallback detector is
+  gone (docs\transition-flash.md, last entry).** An EXACT WITHHOLD. The HMDCamera is deactivated at S-1 and
   re-activated AFTER the S consume, so the controller tick is absent on the
   frame whose mailbox the consume reads (050558) and the frame is drawn from
-  the wrong place. `fix.transition_flash = 1` (default) arms it: the consumer
+  the wrong place. It arms itself (formerly `fix.transition_flash = 1`, removed): the consumer
   hook (`0x28431D0`, build- and prologue-keyed) arms an event at the ENTRY of a
   run of reset mailboxes; at tap frames skip+1 (and skip+2 while the gap lasts)
   the first camera-CB fill with a head-only row 275 (< 1 m) withholds the
@@ -27,11 +28,12 @@ static chain: see "Flight 184826".*
   not `history_kept = held frames`: `skipped` is one per omitted eye per frame,
   `history_kept` one per resolved run per eye (two consecutive holds of an eye:
   skipped +2, kept +1; native_temporal_test asserts it).
-- **The old detector** is dormant while armed and only the FALLBACK when
-  identity, the hook or the tap fails (Armed/Lost, once, from install). Its
-  twelve tuning keys are gone; it runs on constants. Armed and idle it records
-  no camera history, so the history key says so; `fix.transition_flash = 0`
-  (restart) records it, the clean control for a flash report.
+- **The old detector is REMOVED (2026-10-13).** When identity, the hook or the
+  tap fails the log says `engine fix NOT armed (<why>) ... No frame will be
+  held` (Armed/Lost, once, from install) and nothing is held. The history key
+  now dumps the temporal pass's camera history only and says whether the fix
+  was armed; the detector's own camera ring and the `fix.transition_flash = 0`
+  control are gone.
 - **Ruled out (details at the end):** the catch-up tick, the pool selector as
   the gate, in-place correction (builds 2a/2b), a consume-time write,
   `ship+0x130`. Hyperspace needs no base choice: a hold has none to make.

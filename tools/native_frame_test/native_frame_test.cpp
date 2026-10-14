@@ -87,7 +87,6 @@ int wmain(int argc, wchar_t** argv) {
     edvr::Config::get().set("fix.cull_guard_fraction_v", "nan");
     edvr::Config::get().set("fix.cull_guard_headsets",
                             "94x99, 120x130junk, 95X84, 10x20, 95x84 ");
-    edvr::Config::get().set("fix.transition_flash", "1");
     edvr::Config::get().set("advanced.cull_guard_channel", "Matrix");
     // The three field-of-view trims are per-headset lists keyed like
     // fix.openxr_resolution, resolved against the headset the last v2
@@ -221,8 +220,8 @@ int wmain(int argc, wchar_t** argv) {
     check(table.beginFrame(table.context, &next, &lostOutput) == S_OK,
           "greater sequence recovers after invalidation");
 
-    // Explicit camera holds survive transition_flash being turned off, and a
-    // prepared frame that never reaches Submit does not consume the hold.
+    // An explicit camera hold is unaffected by a stale fix.transition_flash line (retired 2026-10-13; see the block
+    // before the close below), and a prepared frame that never reaches Submit does not consume the hold.
     edvr::Config::get().set("fix.transition_flash", "0");
     edvr::requestSubmitHold(1);
     EdvrNativeFrameInput holdFrame = input(41, 7, 5);
@@ -235,7 +234,7 @@ int wmain(int argc, wchar_t** argv) {
         sizeof(hold), EDVR_NATIVE_FRAME_VERSION_1};
     check(table.latchSubmit(table.context, 6, &hold) == S_OK && hold.withhold &&
               !hold.jumpOnly,
-          "explicit hold survives transition setting");
+          "an explicit hold withholds, whatever an old ini says about the retired setting");
     EdvrNativeFrameInput afterHold = input(41, 7, 7);
     check(table.beginFrame(table.context, &afterHold, &lostOutput) == S_OK,
           "begin frame after consumed hold");
@@ -428,6 +427,26 @@ int wmain(int argc, wchar_t** argv) {
         EdvrNativeFrameInput mismatchFrame2 = input(41, 7, ++seq);
         check(table.beginFrame(table.context, &mismatchFrame2, &v4AsV5) == E_INVALIDARG, "...and a version 4 sized struct claiming version 5 is refused: it is never half-answered");
         edvr::comfort::clear();
+    }
+
+    // ---- The hold has no setting (fix.transition_flash, retired 2026-10-13) -------------------------------------------------------------------------------
+    // A frame the engine fix marked is withheld as a jump (not as an explicit hold) whatever an old ini still carries: nothing reads the
+    // line, and the output's transition word is always on. Both values of the stale line, so neither is special.
+    {
+        uint64_t seq = 99;
+        for (const char* stale : {"0", "1", "off", ""}) {
+            edvr::Config::get().set("fix.transition_flash", stale);
+            EdvrNativeFrameOutput o{sizeof(o), EDVR_NATIVE_FRAME_VERSION_5};
+            EdvrNativeFrameInput f = input(41, 7, ++seq);
+            const bool began = table.beginFrame(table.context, &f, &o) == S_OK;
+            check(began && o.transitionEnabled == 1u,
+                  (std::string("the transition word is always on, with the stale line at \"") + stale + "\"").c_str());
+            edvr::markGlitchFrame();   // the engine fix's hold, set between the begin and the latch
+            EdvrNativeFrameDecision d{sizeof(d), EDVR_NATIVE_FRAME_VERSION_1};
+            check(table.latchSubmit(table.context, seq, &d) == S_OK && d.withhold && d.jumpOnly,
+                  (std::string("a marked frame is withheld as a jump, with the stale line at \"") + stale + "\"").c_str());
+        }
+        edvr::clearGlitchFrame();
     }
 
     check(table.close(table.context) == S_OK && !edvr::glitchConsumerPresent(),

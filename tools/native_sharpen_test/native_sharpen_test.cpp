@@ -32,7 +32,7 @@ extern "C" void* edvrSharpen(void* source,int eye,const float* bounds,float valu
 // -- to the UI layer's composite, which answers null when nothing was drawn
 // into the layer this frame. Stubbed: null by default, so every contract
 // above holds unchanged; `layeredOut` makes it answer a texture.
-unsigned doorSeen=0,composites=0; uint64_t doorSeq=0; unsigned doorEye=9;
+unsigned doorSeen=0,composites=0; uint64_t doorSeq=0; unsigned doorEye=9; bool doorFromPassAnswer=false,lastOwned=false;
 unsigned finalCalls=0; ID3D11Texture2D* finalTexture=nullptr;
 uint64_t finalSequence=0;uint32_t finalEye=9,finalRegion[4]{};
 bool finalComposite=false,finalFlipU=false,finalFlipV=false;
@@ -46,8 +46,11 @@ void uiLayerDoorSeen(uint64_t seq,uint32_t eye,ID3D11Texture2D*){++doorSeen;door
 // The layer's one predicate for a layer-only eye (src/d3d11/ui_layer.h): the VR world route's re-issued world or, with
 // the on-foot maps gate, a map's or menu's 2D screen the layer took. The door cannot tell which, and a stub answers for both.
 bool uiLayerDoorLayerOnly(uint32_t eye,uint64_t seq){return eye<2&&layerOnlyEye[eye]&&seq!=0&&layerOnlySeq==seq;}
-ID3D11Texture2D* uiLayerComposite(uint64_t,uint32_t,ID3D11Texture2D* frame,const uint32_t region[4],const float layerUv[4]) {
-  ++composites; order+='C'; lastFrame=frame; std::memcpy(lastRegion,region,sizeof(lastRegion)); std::memcpy(lastUv,layerUv,sizeof(lastUv));
+// The door's answer to "is the frame that arrived the temporal pass's own output" (src/d3d11/ui_layer.h uiLayerDoorFromPass) and the `ownedFrame` the
+// composite was handed: the door may let the layer composite IN PLACE only on a frame EDVR owns.
+bool uiLayerDoorFromPass(uint32_t){return doorFromPassAnswer;}
+ID3D11Texture2D* uiLayerComposite(uint64_t,uint32_t,ID3D11Texture2D* frame,const uint32_t region[4],const float layerUv[4],bool owned) {
+  ++composites; order+='C'; lastOwned=owned; lastFrame=frame; std::memcpy(lastRegion,region,sizeof(lastRegion)); std::memcpy(lastUv,layerUv,sizeof(lastUv));
   if(layeredOut){layeredOut->AddRef();return layeredOut;} return nullptr;
 }
 }
@@ -157,6 +160,7 @@ void run() {
           box[0]==0&&box[1]==0&&box[2]==1&&box[3]==1,"sharpening on: the layer's composite is what leaves, full bounds");
     check(lastFrame==source.Get()&&lastRegion[0]==0&&lastRegion[1]==0&&lastRegion[2]==32&&lastRegion[3]==24,
           "the composite is handed the sharpened, region-sized texture whole");
+    check(lastOwned,"the sharpened texture is RCAS's own output: the composite is told it may be made in place");
     check(refs(layer.Get())==2,"the provider returns exactly one owned reference to the layered frame");
     check(finalTexture==layer.Get()&&finalComposite&&finalSequence==1&&finalEye==0,"sharpened composite final hook captures layered output");
     if(out)out->Release(); out=nullptr;
@@ -165,14 +169,20 @@ void run() {
           "the strength is frozen for the pair: the second eye is sharpened and layered too");
     if(out)out->Release(); out=nullptr;
     const float half[4]={0,0,.5f,1};
+    doorFromPassAnswer=false;
     check(door.treatEye(door.context,2,0,source.Get(),half,&out,box)==S_OK&&out==layer.Get()&&lastFrame==source.Get()&&
           lastRegion[0]==0&&lastRegion[2]==16&&lastRegion[3]==24,"sharpening off: the layer lands on the frame as it arrived, over its region");
+    check(!lastOwned,"sharpening off, the frame is not the pass's output (the game's own image, a healed copy): not owned, never composited in place");
     check(lastUv[0]==0&&lastUv[1]==0&&lastUv[2]==.5f&&lastUv[3]==1,"the layer's rectangle is the rounded region over the source's size");
     check(finalTexture==layer.Get()&&finalComposite&&finalRegion[0]==0&&finalRegion[2]==16,"off composite final hook uses returned cropped output coordinates");
     if(out)out->Release(); out=nullptr;
     check(doorSeen==seenBefore+3&&doorSeq==2&&doorEye==0&&composites==compositesBefore+3,"the door is noted for every eye, before its composite");
-    layeredOut=nullptr;
-    check(door.treatEye(door.context,2,1,source.Get(),nullptr,&out,box)==S_FALSE&&!out,
+    layeredOut=layer.Get();doorFromPassAnswer=true;
+    check(door.treatEye(door.context,2,1,source.Get(),nullptr,&out,box)==S_OK&&out==layer.Get()&&lastOwned,
+          "sharpening off, the frame IS the temporal pass's output: the composite is told it is owned");
+    if(out)out->Release(); out=nullptr;
+    layeredOut=nullptr;doorFromPassAnswer=false;
+    check(door.treatEye(door.context,3,1,source.Get(),nullptr,&out,box)==S_FALSE&&!out,
           "nothing in the layer and sharpening off: the eye passes through exactly as before");
     check(finalTexture==source.Get()&&!finalComposite&&finalRegion[2]==32,"off empty-layer final hook captures unchanged source");
     const auto seenInvalid=doorSeen;
@@ -208,6 +218,7 @@ void run() {
     layerOnlyEye[0]=layerOnlyEye[1]=true;layerOnlySeq=2;order.clear();sharpenSource=nullptr;
     const auto doorsBefore=doorSeen,finalsBefore=finalCalls;
     check(door.treatEye(door.context,2,0,black.Get(),nullptr,&out,box)==S_OK&&out==layer.Get(),"a layer-only eye: S_OK with the composited frame");
+    check(!lastOwned,"...and a layer-only eye's black frame is never handed over as owned (it is shared by the eyes and never rewritten)");
     check(order=="CS"&&lastFrame==black.Get()&&sharpenSource==layer.Get(),
           "...the UI layer is composited FIRST (over the black frame the door handed on) and RCAS runs over the composited eye");
     check(box[0]==0&&box[1]==0&&box[2]==1&&box[3]==1&&lastRegion[0]==0&&lastRegion[2]==32&&lastRegion[3]==24,"...full bounds, the whole region");

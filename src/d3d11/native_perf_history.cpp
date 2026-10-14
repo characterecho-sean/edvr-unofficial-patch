@@ -121,7 +121,9 @@ void NativePerfHistory::observe(bool native,const NativeTimingSnapshot& t,const 
         g.result.reason == GpuSpanReason::Valid &&
         g.result.sequence >= firstSequence_ && age(now, gpuAt, 2000) &&
         duration(g.result.outerMs);
-    if (!applicationGpuOk) applicationGpu_.reset(g.haveResult ? g.result.sequence : 0);
+    // With the application clock off (2026-10-14) the series is fed by noteFrameWork, not by these snapshots: it is not reset here,
+    // and its samples age out of the windows the readers ask for.
+    if (!applicationGpuOk) { if (g.enabled) applicationGpu_.reset(g.haveResult ? g.result.sequence : 0); }
     else applicationGpu_.add(g.result.sequence, gpuAt, g.result.outerMs);
     const auto& d=t.deviceGpu;
     bool deviceOk=t.haveDeviceGpu&&d.sequence>=firstSequence_&&d.status==EdvrNativeGpuValid&&age(now,d.completedAtMs,2000);
@@ -138,6 +140,10 @@ void NativePerfHistory::observe(bool native,const NativeTimingSnapshot& t,const 
 NativePerfAverage NativePerfHistory::submit(uint64_t n,uint64_t w)const noexcept{return cpu_.average(0,n,w);}
 NativePerfAverage NativePerfHistory::applicationCpu(uint64_t n,uint64_t w)const noexcept{return applicationCpu_.average(0,n,w);}
 NativePerfAverage NativePerfHistory::applicationGpu(uint64_t n,uint64_t w)const noexcept{return applicationGpu_.average(0,n,w);}
+void NativePerfHistory::noteFrameWork(uint64_t sequence,uint64_t now,double ms) noexcept {
+    // The frame's GPU work span with the application clock off (gpu_census.cpp): the same series the application render reads.
+    if (sequence && duration(ms)) applicationGpu_.add(sequence,now,ms);
+}
 NativePerfAverage NativePerfHistory::wait(uint64_t n,uint64_t w)const noexcept{return cpu_.average(1,n,w);}
 NativePerfAverage NativePerfHistory::producer(uint64_t n,uint64_t w)const noexcept{return producer_.average(0,n,w);}
 NativePerfAverage NativePerfHistory::transfer(uint64_t n,uint64_t w)const noexcept{return device_.average(0,n,w);}

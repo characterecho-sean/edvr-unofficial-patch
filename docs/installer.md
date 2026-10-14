@@ -97,7 +97,7 @@ gets renamed to (`d3d11_edhm.dll`). An unrecognised one becomes
 | nothing | ours is written |
 | ours, same build | left alone (Repair rewrites it anyway) |
 | ours, older | backed up, replaced |
-| another mod | backed up, renamed `d3d11_<mod>.dll`, ours takes the name, `advanced.real_dll` points at it |
+| another mod | backed up, renamed `d3d11_<mod>.dll`, ours takes the name, `advanced.real_dll` in `edvr.ini` points at it (one value for both profiles, below) |
 | another mod, and we were installed here before | the same, reported as "it has replaced EDVR's d3d11.dll" |
 | another mod, and its own older copy is already parked under that name | the older copy goes to the backup folder, the newcomer takes its place in the chain |
 | unreadable (locked, or not a PE) | nothing is touched, and the report says why |
@@ -106,6 +106,52 @@ A chain target that has gone away — the other mod was uninstalled properly —
 clears `advanced.real_dll` rather than leaving it naming a file that is not
 there. That question is asked on every run, including one that does not touch
 `d3d11.dll` at all.
+
+### The chain is one value, in `edvr.ini`
+
+`advanced.real_dll` is one decision for the install, not one per profile
+(`src/common/real_dll_choice.h`). The game reads it from `edvr.ini` for both
+the VR and the flat profile. `edvr-flat.ini` is read for this key only to
+override it with another name, or to say `none`, which runs the flat profile
+without the chain. The game logs one line that names the value and the file
+that supplied it:
+
+```
+real dll: d3d11_edhm.dll (from edvr.ini, shared)
+real dll: d3d11_edhm.dll (from edvr-flat.ini, the flat override)
+real dll: none: chain disabled for the flat profile by edvr-flat.ini
+real dll: d3d11_edhm.dll (from edvr-flat.ini; the installer will move it to edvr.ini)
+```
+
+The last line is the layout from before this rule (the value in
+`edvr-flat.ini` and none in `edvr.ini`). It is honoured, and the installer
+moves it on its next run: it copies the value to `edvr.ini`, empties it in
+`edvr-flat.ini`, backs both up, and says so in the plan and in `--dry-run`:
+
+```
+- Moving advanced.real_dll (d3d11_edhm.dll) from edvr-flat.ini to edvr.ini, so it is set once and applies to both the VR and flat profiles. Both files are backed up first; edvr-flat.ini keeps no value for it (write real_dll = none there to run flat without the chain).
+```
+
+A value or a `none` that someone wrote on purpose is never moved or
+overwritten. A chain found in the `d3d11.dll` slot is written to `edvr.ini`
+only (a name left in `edvr-flat.ini` is cleared, since the new chain
+supersedes it). A chain the installer keeps is written into an `edvr.ini` that
+is made new (absent, or replaced by `--replace-settings`); an `edvr.ini` whose
+chain was emptied by hand stays emptied. A flat-only install does not manage
+`edvr.ini`, but writes this one key into it (a new file holding only the key
+if there is none), because that is where the flat profile reads it from.
+`tools/install_edvr.py` does the same move on a run that leaves the settings
+alone; `--ini` replaces both files with their templates and says so.
+
+**Consequence for VR.** Once the value is set, EDHM (or whatever is chained)
+runs in VR too. That is the agreed expectation: it is set once and applies to
+both. The risks that kept it out of VR are resolved: the LoadLibrary-redirect
+failure was fixed (the chain target is resolved by full path) and confirmed,
+and the black-cockpit report was the game's shaders, not EDHM
+(`docs/edhm-black-cockpit-2026-09-15.md`). **Pre-release VR check:** one VR
+session with EDHM chained on the build being released. The EDHM HUD shows, the
+gfx log carries the `real dll: ... (from edvr.ini, shared)` line, and the
+openxr log has no `error,D3D11Device,80070005`.
 
 Repair is for when another mod's installer overwrites EDVR's files. A common
 case is EDHM's uninstaller running `del d3d11.dll`, which after an EDVR install
@@ -182,12 +228,14 @@ follows the same split for every operation:
   runtime, and moving from it installs the runtime. No settings file is
   deleted.
 - **Install, update and repair** merge into each file the scope carries, and
-  never read, back up, replace or remove a file outside it. The chain decision
-  (`advanced.real_dll`) lands in the file that runtime reads.
+  never read, back up, replace or remove a file outside it, with one
+  exception: the chain (`advanced.real_dll`) is one value in the shared
+  `edvr.ini`, so a flat-only install that has to write it writes that one key
+  there (see "The chain is one value", above).
 - **A flat install that finds only `edvr.ini`** (one made before the split, or a
   fresh flat install over a VR one) starts `edvr-flat.ini` from it through the
-  same merge, so the settings the flat runtime was reading carry over and the
-  chain key is forced in; `edvr.ini` is left exactly as it is.
+  same merge, so the settings the flat runtime was reading carry over; the
+  chain value stays in `edvr.ini` alone, which is left exactly as it is.
   `--replace-settings` gives fresh defaults instead. `tools/install_edvr.py`
   seeds the file too, by copying `edvr.ini` as it stands.
 - **The kept defaults** are two files, `edvr_install\edvr.ini.base` and
@@ -293,7 +341,7 @@ so the rule cannot drift by accident.
 
 **Every row says when it takes effect.** Most settings are live — EDVR re-reads
 `edvr.ini` about once a second — and those that are not are marked *restart the
-game*: at present `share_exposure`, `transition_flash`, `openxr_resolution`,
+game*: at present `openxr_resolution`,
 and the two `vscreen_res_*` sizes. That fact is not a fourth list either: it
 comes from what the comment block in `edvr.ini` already says ("Live." or the
 sentence naming a restart), and a setting whose prose says neither fails the

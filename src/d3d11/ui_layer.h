@@ -363,8 +363,22 @@ void uiLayerDoorSeen(uint64_t sequence, uint32_t eye, ID3D11Texture2D* source);
 // full bounds -- or null: nothing was redirected into this eye this frame,
 // or the composite refused (said once; a refusal with UI in the layer
 // stands the layer down).
+//
+// `ownedFrame` says `frame` is an EDVR texture rewritten in full on every frame before the door
+// (the RCAS output; the temporal pass's output when it is what arrived at the door:
+// uiLayerDoorFromPass). Then, when `region` is the whole texture, it was made UAV-bindable and
+// the GPU loads typed UAVs of its format, the composite is made IN PLACE: the same arithmetic as
+// below, stored back into `frame` (a typed read-modify-write that leaves every texel the layer
+// does not cover untouched), and the returned texture is `frame` itself, AddRef'd. Otherwise,
+// and always for a frame that is not EDVR's (the game's own image, a black layer-only frame, a
+// healed copy, the flat profile's picture), it writes its own output texture as before. The
+// caller must not use `frame` as the pre-composite image after a non-null return.
 ID3D11Texture2D* uiLayerComposite(uint64_t sequence, uint32_t eye, ID3D11Texture2D* frame,
-                                  const uint32_t region[4], const float layerUv[4]);
+                                  const uint32_t region[4], const float layerUv[4],
+                                  bool ownedFrame = false);
+// The frame that arrived at this eye's door this sequence is exactly the temporal pass's output
+// (EDVR's own, rewritten in full each frame): the `ownedFrame` of a composite over `source`.
+bool uiLayerDoorFromPass(uint32_t eye);
 
 // ---- the flat profile's mono adapter (flat_ui_layer.h; docs/design-flat-ui-quality-2026-10-05.md) ----
 //
@@ -383,6 +397,10 @@ int uiLayerCrispAdmitFlat(ID3D11DeviceContext* ctx, int hdrSlot, const void* ali
                           size_t whyN);
 // The UiLayerDecision (as an int) the last uiLayerDecide came to: the adapter names its refusals by it.
 int uiLayerLastDecision();
+// How many decisions uiLayerDecide has come to since the DLL loaded: the blend probe (TEMPORARY) compares it before and after a draw's
+// routing to tell "decided: left, with this reason" from "no decision ran for this draw", which uiLayerLastDecision alone cannot (it
+// keeps the previous draw's value, and 0 is a take).
+uint32_t uiLayerDecisionCount();
 // A game draw the layer did not take, while watching: a write of the depth-stencil buffer a seed copied makes the seed
 // stale (uiLayerNoteOther's first step, alone -- the flat profile has no after-the-UI take).
 void uiLayerNoteSceneDraw(ID3D11DeviceContext* ctx, uint32_t count, uint32_t instances, char drawKind);

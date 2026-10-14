@@ -895,7 +895,7 @@ int boundarySourceChecks(const std::string& root) {
     verify(declared >= 50, "device_hook.cpp and vscreen.cpp declare their boundary ticks");
 
     // EXPLORER CAM'S TICK IS THE DEVICE HOOK'S, NOT vSCREEN'S (review 2026-10-08, finding 3). It used to be run from vScreenFrameBoundary, which only exists when vScreen
-    // installs a State; with fix.black_void off, fix.panel_distance 1, fix.transition_flash 0, advanced.app_gpu_timing off and advanced.panel_hooks_always off vScreen installs
+    // installs a State; with fix.black_void off, fix.panel_distance 1, the camera-buffer tap off (the test-only variable EDVR_TEST_NO_CAMERA_TAP=1), advanced.app_gpu_timing off and advanced.panel_hooks_always off vScreen installs
     // transport-only, that function never runs, and F5 did nothing -- whatever hotkey.explorer_cam held. Moving it back under vScreen (or behind a condition) makes this fail.
     // (tools\test_openxr_transport.py drives the same minimal config through the real d3d11.dll and asks for the boundary's lines: the behaviour, not just this text.)
     const std::string flatTicks = withoutSpaces(tickBody);

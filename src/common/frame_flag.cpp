@@ -146,7 +146,7 @@ struct Shared {
     // The overlay's head lock: bit 31 on, then yaw and pitch as tenths of a
     // degree, each biased into twelve bits (kHeadLockBias).
     volatile LONG     menuHeadLock;
-    // The detector's verdict on the last jump, d3d11 -> openvr: bits 0-1 say
+    // The transition-flash fix's verdict on the last jump, d3d11 -> openvr: bits 0-1 say
     // whether the camera came back (1, a glitch) or stayed (2, a change of
     // reference frame), and the bits above them count the verdicts, so a
     // reader that remembers the value at a withhold can tell a NEW verdict
@@ -162,11 +162,15 @@ struct Shared {
     //                current head pose", taken (cleared) by the vr half's
     //                own poll. See frame_flag.h.
     volatile LONG     introRecentre;
+    // seatContext  d3d11 -> openvr, the seat memory's word (src/common/seat_context.h, publishSeatContext in frame_flag.h): the setting, what
+    //              Status.json says about the commander's seat, the journal's boundary count. 0 = nobody has written, which the runtime reads
+    //              as "game": today's behaviour. This slot was reservedPoseReader0, padding that nothing read or wrote (below), so the layout
+    //              and the mapping name do not change: a peer that predates it never writes a non-zero here.
+    volatile LONG     seatContext;
     // UNUSED since advanced.eye_origin_readers was removed (2026-10-09): the
     // pose-reader hunt's request flag and per-call snapshot. Kept as padding
     // so the layout -- and the mapping name the two halves agree on -- does
     // not change; nothing reads or writes them.
-    volatile LONG     reservedPoseReader0;
     volatile LONG     reservedPoseReader1;
     volatile LONG64   reservedPoseReader2;
     volatile LONG64   reservedPoseReader3;
@@ -224,7 +228,7 @@ struct Shared {
 // nothing native replaced it.
 // _v31 because the runtime's hidden-area-mesh triangle counts joined
 // (runtimeMaskTri), for fix.eye_mask's auto mode (frame_flag.h).
-// _v30 because the detector's verdict on a jump crosses to the openvr half
+// _v30 because the fix's verdict on a jump crosses to the openvr half
 // (jumpVerdict), which waits for it before restarting the history.
 // _v29 because the head lock's two angles are packed with a bias that fits
 // the field they are masked into; the old pair would read each other's
@@ -480,11 +484,6 @@ void markGlitchFrame() {
 bool glitchFrameMarked() {
     Shared* s = map();
     return s && InterlockedCompareExchange(&s->flag, 0, 0) != 0;
-}
-
-void unmarkGlitchFrame() {
-    Shared* s = map();
-    if (s) InterlockedExchange(&s->flag, 0);
 }
 
 void clearGlitchFrame() {
@@ -750,6 +749,16 @@ uint32_t endFrameHoldMs() {
     if (!s) return 0;
     const LONG v = InterlockedCompareExchange(&s->endFrameHold, 0, 0);
     return v > 0 ? static_cast<uint32_t>(v) : 0u;
+}
+
+void publishSeatContext(uint32_t word) {
+    Shared* s = map();
+    if (s) InterlockedExchange(&s->seatContext, static_cast<LONG>(word));
+}
+
+uint32_t seatContextWord() {
+    Shared* s = map();
+    return s ? static_cast<uint32_t>(InterlockedCompareExchange(&s->seatContext, 0, 0)) : 0u;
 }
 
 void setVrProfileActive(bool active) {

@@ -134,6 +134,21 @@ void selfTest() {
         check(c.shutdown(3)&&b.ends==1,"shutdown closes open parent even with outstanding leases");
         check(!c.release(child,4)&&!c.startFrame(4)&&!c.shutdown(4),"shutdown invalidates tokens and is terminal");b.clean();
     }
+    {
+        // Built v13.6: the GPU pass profiler's yield on the clock. An application frame open across the profiler's boundary holds the clock: the
+        // profiler's standalone scope and a second frame are refused. Ending that frame (what gpuFrameYieldBegin's invalidate does through the
+        // span ring's close) releases the clock, and the profiler's scope then opens, is closed and is released.
+        Backend b;DisjointClock c(b);
+        auto appFrame=c.startFrame(1);
+        check(bool(appFrame)&&c.scopeOpen(),"an application frame holds the shared clock");
+        // The profiler's open refuses on scopeOpen() before it acquires (gpuTimingPassScopeOpen); a standalone acquire by itself would borrow the open frame.
+        check(c.scopeOpen()&&!c.startFrame(2),"while it is open, the profiler's open condition (scopeOpen) holds and a second frame is refused");
+        check(c.finishFrame(appFrame,3)&&!c.scopeOpen(),"ending the application frame releases the clock");
+        auto prof=c.acquireInterval(4);
+        check(bool(prof)&&c.scopeOpen(),"after the yield the profiler's standalone scope opens");
+        check(c.endInterval(prof,5)&&c.release(prof,6),"the profiler's scope closes and is released");
+        check(c.shutdown(7)&&b.ends==2,"shutdown after the yield sequence closes nothing extra");b.clean();
+    }
     std::printf("PASS: %u shared-disjoint ownership/lifetime checks\n",checks);
 }
 }

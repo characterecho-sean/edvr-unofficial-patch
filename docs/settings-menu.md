@@ -166,7 +166,7 @@ ruled-out list); the summary above points here.
 ### Hotkeys page (2026-10-08)
 
 BUILT, NOT FLOWN. A page after Fixes: `hotkey.menu`, `.explorer_cam`,
-`.toggle_exposure`, `.dump_camera`, and with `menu.developer` also
+`.dump_camera`, and with `menu.developer` also
 `.dump_draws`, `.dump_eyes` (`# ui: ... | hotkey | live` is a row for
 everyone, `# dev: label ... | hotkey` a developer-only one). Enter waits for
 the NEXT input: a key with Ctrl/Shift/Alt held, a pad button or trigger, or a
@@ -1349,8 +1349,8 @@ stays in the desktop window only.
 scheme, 75 bare keyboard keys and 7 chords are used (`CTRL+ALT+SPACE`,
 `CTRL+SPACE`, `SHIFT+W/A/S/D`, and one pad chord); the whole cursor
 cluster (Insert, Home, End, Delete, PageUp, PageDown) is taken by the thrust
-bindings, and the Pause cluster is already EDVR's (`SCROLLLOCK`, `PAUSE`,
-`NUMLOCK` earmarked). F2 through F9 are bound in no stock scheme; F1 is,
+bindings, and the Pause cluster is already EDVR's (`PAUSE`, `NUMLOCK` earmarked;
+`SCROLLLOCK` was the brightness-fix toggle until 2026-10-13, when that key was removed). F2 through F9 are bound in no stock scheme; F1 is,
 F10 and Alt+F10 are the game's hard-coded screenshot keys, F12 is Steam's,
 Escape is the game menu. F8 is layout-independent and findable blind in
 the F5-F8 group. Because the press is swallowed, a player who has bound F8

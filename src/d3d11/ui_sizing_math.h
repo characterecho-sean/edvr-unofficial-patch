@@ -386,6 +386,12 @@ struct UiFlatPanelInputs {
     uint32_t outputW = 0, outputH = 0;  // D: the swap chain's back buffer
     float target = 0.0f;                // T: 1.0 or 1.25
 };
+// fix.ui_quality follows temporal AA in both profiles (2026-10-13): with AA off the panels are the game's own size, as at
+// ui_quality off. The edge between two readings of the AA gate is what the render thread logs once per change.
+enum class UiPanelAaEdge : uint8_t { kNone = 0, kOff, kOn };
+inline UiPanelAaEdge uiPanelAaEdge(bool wasOn, bool nowOn) {
+    return wasOn == nowOn ? UiPanelAaEdge::kNone : nowOn ? UiPanelAaEdge::kOn : UiPanelAaEdge::kOff;
+}
 enum class UiFlatPanelRefuse : uint8_t { kNone = 0, kUnknown, kAspect };
 inline const char* uiFlatPanelRefuseName(UiFlatPanelRefuse r) {
     return r == UiFlatPanelRefuse::kUnknown ? "the render or display size is not known yet"

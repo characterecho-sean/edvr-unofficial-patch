@@ -214,7 +214,6 @@ const char* kSampleIni =
     "# the menu\r\n"
     "menu = F8\r\n"
     "explorer_cam = F5\r\n"
-    "toggle_exposure = SCROLLLOCK\r\n"
     "dump_camera = PAUSE\r\n"
     "# Developer instrument. Empty is off.\r\n"
     "#dump_draws =\r\n"
@@ -234,7 +233,7 @@ void testIniRoundTrip() {
         {"explorer_cam", pad(0, 2)},
         {"explorer_cam", joy(kGladiator, 11)},
         {"explorer_cam", joy(kGunfighter, 41)},
-        {"toggle_exposure", joy(kGladiator, kJoyPovBase + 1)},
+        {"dump_camera", joy(kGladiator, kJoyPovBase + 1)},
         {"dump_camera", key(VK_F12, kHotkeyAlt)},
         {"dump_draws", key(VK_NUMLOCK)},          // a commented-out key becomes a live one
         {"dump_draws", joy(kGladiator, 0)},
@@ -916,10 +915,9 @@ void testChecks() {
     printf("checks\n");
     const HotkeyOther others[] = {
         {"hotkey.menu", key(VK_F8)},
-        {"hotkey.toggle_exposure", key(VK_SCROLL)},
         {"hotkey.dump_camera", pad(kPadBack)},
         {"hotkey.dump_draws", joy(kGladiator, 3)},
-        {"hotkey.dump_eyes", HotkeyBinding()},
+        {"hotkey.dump_eyes", key(VK_SCROLL)},
     };
     const int n = static_cast<int>(sizeof(others) / sizeof(others[0]));
 
@@ -927,7 +925,7 @@ void testChecks() {
     BindCheck c = hotkeyCheckBinding(key(VK_F8), others, n, nullptr, 0, ClashScope::AnyContext);
     check(c.verdict == BindVerdict::Duplicate && strcmp(c.duplicateOf, "hotkey.menu") == 0, "F8 is the menu key: refused, and says so");
     c = hotkeyCheckBinding(key(VK_SCROLL), others, n, nullptr, 0, ClashScope::OnFoot);
-    check(c.verdict == BindVerdict::Duplicate && strcmp(c.duplicateOf, "hotkey.toggle_exposure") == 0, "Scroll Lock: refused, names the exposure toggle");
+    check(c.verdict == BindVerdict::Duplicate && strcmp(c.duplicateOf, "hotkey.dump_eyes") == 0, "Scroll Lock: refused, names the hotkey that has it");
     c = hotkeyCheckBinding(pad(kPadBack), others, n, nullptr, 0, ClashScope::AnyContext);
     check(c.verdict == BindVerdict::Duplicate && strcmp(c.duplicateOf, "hotkey.dump_camera") == 0, "a pad button already used: refused");
     c = hotkeyCheckBinding(joy(kGladiator, 3), others, n, nullptr, 0, ClashScope::AnyContext);
@@ -1091,10 +1089,9 @@ void testDecide() {
     printf("decisions\n");
     HotkeyOther others[] = {
         {"hotkey.menu", key(VK_F8)},
-        {"hotkey.toggle_exposure", key(VK_SCROLL)},
         {"hotkey.dump_camera", key(VK_PAUSE)},
         {"hotkey.dump_draws", HotkeyBinding()},
-        {"hotkey.dump_eyes", HotkeyBinding()},
+        {"hotkey.dump_eyes", key(VK_SCROLL)},
     };
     EliteBindUse uses[] = {use("HumanoidJumpButton", key(VK_F9)), use("HumanoidSprintButton", pad(kPadBack)),
                            use("Hyperspace", key(VK_F7))};
@@ -1160,13 +1157,13 @@ void testDecide() {
         check(strcmp(words, "Leave Explorer Cam (its key) to change its key") == 0, "...and a fallback for none");
         check(hotkeyRowLocked("explorer_cam", true) && !hotkeyRowLocked("explorer_cam", false), "the row is locked only while the session is");
         // No other hotkey row is ever locked by it.
-        for (const char* other : {"menu", "toggle_exposure", "dump_camera", "dump_draws", "dump_eyes"}) {
+        for (const char* other : {"menu", "dump_camera", "dump_draws", "dump_eyes"}) {
             const HotkeyRowContext oc = ctxFor(other, "", ClashScope::AnyContext);
             checkf(hotkeyCaptureMayBegin(oc) && !hotkeyRowLocked(other, true), "hotkey.%s is not locked by a session", other);
         }
-        const HotkeyRowContext toggle = ctxFor("toggle_exposure", "SCROLLLOCK", ClashScope::AnyContext);
+        const HotkeyRowContext toggle = ctxFor("dump_eyes", "SCROLLLOCK", ClashScope::AnyContext);
         check(hotkeyDecide(stepFor(pressing(VK_F11)), toggle).outcome == CaptureOutcome::Bind,
-              "...so the exposure key is still written during a session");
+              "...so the eye dump key is still written during a session");
     }
     // And unlocked again once the session ends: the stub flips, the row follows.
     g_session = false;
@@ -1195,7 +1192,7 @@ void testDecide() {
         check(d.outcome == CaptureOutcome::Reserved, "the menu key cannot become CTRL+ALT+ESCAPE: refused as a menu key");
         d = hotkeyDecide(stepFor(pressing(VK_RETURN, kHotkeyCtrl)), c);
         check(d.outcome == CaptureOutcome::Reserved, "...nor CTRL+ENTER");
-        const HotkeyRowContext toggleCtx = ctxFor("toggle_exposure", "SCROLLLOCK", ClashScope::AnyContext);
+        const HotkeyRowContext toggleCtx = ctxFor("dump_eyes", "SCROLLLOCK", ClashScope::AnyContext);
         d = hotkeyDecide(stepFor(pressing(VK_RETURN, kHotkeyCtrl)), toggleCtx);
         check(d.outcome == CaptureOutcome::Reserved, "a diagnostic hotkey cannot become CTRL+ENTER either");
         d = hotkeyDecide(stepFor(pressing(VK_F9, kHotkeyCtrl | kHotkeyShift)), toggleCtx);
@@ -1203,7 +1200,7 @@ void testDecide() {
         d = hotkeyDecide(stepFor(pressing(VK_F8)), c);
         check(d.outcome == CaptureOutcome::Unchanged, "F8 on the menu key is what it already is");
         d = hotkeyDecide(stepFor(pressing(VK_SCROLL)), c);
-        check(d.outcome == CaptureOutcome::Duplicate && strcmp(d.check.duplicateOf, "hotkey.toggle_exposure") == 0,
+        check(d.outcome == CaptureOutcome::Duplicate && strcmp(d.check.duplicateOf, "hotkey.dump_eyes") == 0,
               "a key another hotkey has: refused, and it says which");
         d = hotkeyDecide(stepFor(pressing(VK_UP)), c);
         check(d.outcome == CaptureOutcome::Reserved, "a navigation key: refused");
@@ -1396,27 +1393,27 @@ void testCaptureLeak() {
         // The press is the Explorer binding itself, captured on ANOTHER row: refused as a duplicate,
         // and it must not also be Explorer Cam's key press.
         snprintf(name, sizeof(name), "Duplicate (%s)", kinds[k]);
-        runLeakCell({name, explorers[k], "toggle_exposure", "SCROLLLOCK", e, CaptureOutcome::Duplicate});
+        runLeakCell({name, explorers[k], "dump_eyes", "SCROLLLOCK", e, CaptureOutcome::Duplicate});
         // ...captured on the Explorer row itself: unchanged.
         snprintf(name, sizeof(name), "Unchanged (%s)", kinds[k]);
         runLeakCell({name, explorers[k], "explorer_cam", explorers[k], e, CaptureOutcome::Unchanged});
         // Esc cancels. (The cell for a keyboard Explorer key that IS Esc is below.)
         snprintf(name, sizeof(name), "Cancelled (%s)", kinds[k]);
-        runLeakCell({name, explorers[k], "toggle_exposure", "SCROLLLOCK", key(VK_ESCAPE), CaptureOutcome::Cancelled});
+        runLeakCell({name, explorers[k], "dump_eyes", "SCROLLLOCK", key(VK_ESCAPE), CaptureOutcome::Cancelled});
     }
     // A successful Bind that is a different press of the same key: Explorer = F5 is a subset of CTRL+F5.
-    runLeakCell({"Bind (keyboard, CTRL+F5 over an F5 Explorer key)", "F5", "toggle_exposure", "SCROLLLOCK", key(VK_F5, kHotkeyCtrl),
+    runLeakCell({"Bind (keyboard, CTRL+F5 over an F5 Explorer key)", "F5", "dump_eyes", "SCROLLLOCK", key(VK_F5, kHotkeyCtrl),
                  CaptureOutcome::Bind});
-    runLeakCell({"Bind (pad, Start over a Back Explorer key)", "GamePad_Back", "toggle_exposure", "SCROLLLOCK", pad(kPadStart),
+    runLeakCell({"Bind (pad, Start over a Back Explorer key)", "GamePad_Back", "dump_eyes", "SCROLLLOCK", pad(kPadStart),
                  CaptureOutcome::Bind});
-    runLeakCell({"Bind (HOTAS, Joy_3 over a Joy_12 Explorer key)", "231D0200:Joy_12", "toggle_exposure", "SCROLLLOCK",
+    runLeakCell({"Bind (HOTAS, Joy_3 over a Joy_12 Explorer key)", "231D0200:Joy_12", "dump_eyes", "SCROLLLOCK",
                  joy(kGladiator, 2), CaptureOutcome::Bind});
     runLeakCell({"Bind (HOTAS, a hat over a Joy_12 Explorer key)", "231D0200:Joy_12", "dump_camera", "PAUSE",
                  joy(kGladiator, kJoyPovBase), CaptureOutcome::Bind});
     // The same press ending a capture on the MENU row.
     runLeakCell({"Unchanged (keyboard, menu row)", "F5", "menu", "F8", key(VK_F8), CaptureOutcome::Unchanged});
     // An Explorer key that is itself the cancelling key (an ini edit): the Esc that cancels is not a press of it.
-    runLeakCell({"Cancelled (keyboard Explorer key IS Esc)", "ESCAPE", "toggle_exposure", "SCROLLLOCK", key(VK_ESCAPE),
+    runLeakCell({"Cancelled (keyboard Explorer key IS Esc)", "ESCAPE", "dump_eyes", "SCROLLLOCK", key(VK_ESCAPE),
                  CaptureOutcome::Cancelled});
 
     // The registry behind it: every Hotkey is in it, wherever it lives, and copies and
@@ -1732,7 +1729,6 @@ void testEliteBinds(const char* root) {
             struct { const char* what; HotkeyBinding b; ClashScope scope; } defaults[] = {
                 {"menu F8", key(VK_F8), ClashScope::AnyContext},
                 {"explorer_cam F5 (on foot)", key(VK_F5), ClashScope::OnFoot},
-                {"toggle_exposure SCROLLLOCK", key(VK_SCROLL), ClashScope::AnyContext},
                 {"dump_camera PAUSE", key(VK_PAUSE), ClashScope::AnyContext},
             };
             for (const auto& d : defaults) {
@@ -1882,7 +1878,7 @@ void testRows() {
         for (int k = 0; k < n; ++k) if (v[k] == i) return true;
         return false;
     };
-    for (const char* key : {"menu", "explorer_cam", "toggle_exposure", "dump_camera"}) {
+    for (const char* key : {"menu", "explorer_cam", "dump_camera"}) {
         const int i = rowIndex(key);
         checkf(i >= 0, "hotkey.%s has a generated row", key);
         checkf(i >= 0 && kMenuRows[i].kind == MenuKind::Hotkey && kMenuRows[i].tier == MenuTier::Fix &&
@@ -1900,7 +1896,7 @@ void testRows() {
         checkf(!contains(all, nEveryone, i), "hotkey.%s is NOT on the page with developer mode off", key);
         checkf(contains(dev, nDev, i), "hotkey.%s is on the page with developer mode on", key);
     }
-    check(nEveryone == 4 && nDev == 6, "four rows for everyone, six in developer mode");
+    check(nEveryone == 3 && nDev == 5, "three rows for everyone, five in developer mode");
     check(rowIndex("read_game_bindings") < 0, "a plain [hotkey] setting is not a row");
     // Table order is the page's order: the menu key first.
     check(nEveryone > 0 && strcmp(kMenuRows[all[0]].key, "menu") == 0, "the menu key leads the page");

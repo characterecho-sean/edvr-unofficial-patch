@@ -7,6 +7,9 @@
 #include "../../src/d3d11/station_gather_core.h"
 #include "../../src/d3d11/station_lockfree_core.h"
 #include "../../src/d3d11/station_pass_core.h"
+#include "../../src/common/flat_profile_keys.h"
+#include "../../src/d3d11/menu_flat_rows.h"
+#include "../../src/d3d11/view_source.h"
 
 #include <algorithm>
 #include <atomic>
@@ -2296,6 +2299,55 @@ int main(int argc, char** argv) {
         check(a2.armed, "v14.33 arm: and sixty clean passes after it arm");
         a2.reset();
         check(!a2.armed && a2.run == 0, "v14.33 arm: a new seal resets the arm");
+    }
+
+    // ---- Built v14.34: the optimized station in the flat profile -----------------------------------------------------------------------------------------
+    {
+        check(edvr::flatProfileReadsKey("fix.optimized_stations"), "v14.34 flat: fix.optimized_stations is on the flat key list (unlisted, getString answers off and the station never starts)");
+        check(!edvr::flatProfileReadsKey("fix.optimized_station_x") && !edvr::flatProfileReadsKey("fix.supercruise_dust") && !edvr::flatProfileReadsKey("fix.fss_mode_latch"),
+              "v14.34 flat: only that key was added (a near name and other fixes stay off the list)");
+        check(edvr::flatPageHasRow("fix", "optimized_stations"), "v14.34 flat: the F8 flat page has the Optimized station row");
+        const edvr::FlatPageRow* refused = edvr::flatPageFirstRefused([](const char* k) { return edvr::flatProfileReadsKey(k); });
+        check(refused == nullptr, "v14.34 flat: every row of the flat page, the new one included, passes the flat key list");
+        // the flat camera source: no temporal-pass rows and no explorer cam, so the position is the render context's view 0 origin
+        edvr::view::Resolved flat;
+        flat.originOk = true;
+        flat.origin[0] = 120.0f;
+        flat.origin[1] = -40.0f;
+        flat.origin[2] = 7.5f;
+        flat.poseOk = false;
+        float c[3] = {};
+        bool fromRows = true;
+        check(edvr::view::sphereCentre(flat, c, &fromRows) && !fromRows && c[0] == 120.0f && c[1] == -40.0f && c[2] == 7.5f,
+              "v14.34 flat camera: with no pose rows the camera is the view 0 origin");
+        edvr::view::Resolved none;
+        check(!edvr::view::sphereCentre(none, c), "v14.34 flat camera: with neither rows nor origin there is no camera (the station keeps its camera unknown)");
+        edvr::view::Resolved both = flat;
+        both.poseOk = true;
+        both.pose.pos[0] = 1.0f;
+        both.pose.pos[1] = 2.0f;
+        both.pose.pos[2] = 3.0f;
+        check(edvr::view::sphereCentre(both, c, &fromRows) && !fromRows && c[0] == 120.0f, "v14.34 flat camera: rows present as well, the origin stays the source (as in VR)");
+        // the camera rule on that position: inside a small bay box, outside it
+        se::OwnCell cell;
+        cell.has = true;
+        cell.box = true;
+        cell.boxHalf[0] = 76.0f;
+        cell.boxHalf[1] = 37.5f;
+        cell.boxHalf[2] = 129.0f;
+        for (int k = 0; k < 3; ++k) {
+            cell.boxCentre[k] = flat.origin[k];
+        }
+        cell.boxU[0] = 1.0f;
+        cell.boxV[1] = 1.0f;
+        cell.boxW[2] = 1.0f;
+        float x[3] = {};
+        se::boxCoordsOf(cell, c, x);
+        check(std::fabs(x[0]) <= cell.boxHalf[0] && std::fabs(x[1]) <= cell.boxHalf[1] && std::fabs(x[2]) <= cell.boxHalf[2],
+              "v14.34 flat camera: the view 0 origin at the box centre is inside the box");
+        const float away[3] = {flat.origin[0] + 300.0f, flat.origin[1], flat.origin[2]};
+        se::boxCoordsOf(cell, away, x);
+        check(!(std::fabs(x[0]) <= cell.boxHalf[0] + se::kCameraLeaveM), "v14.34 flat camera: 300 m along the box is outside it (the camera rule releases)");
     }
 
     std::printf("optimized_station_test: %d checks, %d failures\n", g_checks, g_failures);

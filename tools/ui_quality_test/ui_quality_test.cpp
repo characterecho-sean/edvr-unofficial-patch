@@ -1133,6 +1133,26 @@ void testFlatPanelScale() {
     check(!uiFlatPanelMove(base.formula, base.base, 0.0f, 1.0f, &p), "...and no move without the value the plan was made at");
 }
 
+// The VR panels' AA gate (2026-10-13, ui_sizing_math.h's uiPanelAaEdge): one edge per change of the reading, none while it
+// stays put, and the first reading is judged against "on" (the constructed default), so an AA-off start logs once.
+void testVrPanelAaGate() {
+    check(uiPanelAaEdge(true, true) == UiPanelAaEdge::kNone && uiPanelAaEdge(false, false) == UiPanelAaEdge::kNone,
+          "VR AA gate: no edge while the AA reading stays on or stays off");
+    check(uiPanelAaEdge(true, false) == UiPanelAaEdge::kOff, "VR AA gate: on -> off is the 'panel scaling off' edge");
+    check(uiPanelAaEdge(false, true) == UiPanelAaEdge::kOn, "VR AA gate: off -> on is the 'panel scaling on again' edge");
+    // A sequence: on, off, off, on, on, off -> edges at the 2nd, 4th and 6th readings only.
+    const bool seq[] = {true, false, false, true, true, false};
+    bool prev = true;
+    int offs = 0, ons = 0;
+    for (bool now : seq) {
+        const UiPanelAaEdge e = uiPanelAaEdge(prev, now);
+        offs += e == UiPanelAaEdge::kOff;
+        ons += e == UiPanelAaEdge::kOn;
+        prev = now;
+    }
+    check(offs == 2 && ons == 1, "VR AA gate: a toggle sequence logs exactly one line per change (2 off, 1 on)");
+}
+
 // The flat layer's adapter rules (flat_ui_layer_math.h, 2026-10-09): the families it asks for, the jitter a draw's camera
 // rows carry, the door.
 void testFlatLayerRules() {
@@ -2565,7 +2585,8 @@ void composite(Gpu& g, const Tex& frame, const uint32_t region[4], const float u
     g.ctx->CSSetShaderResources(0, 3, srvs);
     ID3D11UnorderedAccessView* uav = out.uav.Get();
     g.ctx->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
-    g.ctx->Dispatch((p.outSize[0] + 7) / 8, (p.outSize[1] + 7) / 8, 1);
+    g.ctx->Dispatch((p.outSize[0] + kUiLayerCompositeGroupX - 1) / kUiLayerCompositeGroupX,
+                    (p.outSize[1] + kUiLayerCompositeGroupY - 1) / kUiLayerCompositeGroupY, 1);
     ID3D11ShaderResourceView* nulls[3] = {};
     g.ctx->CSSetShaderResources(0, 3, nulls);
     ID3D11UnorderedAccessView* nullUav = nullptr;
@@ -3288,6 +3309,23 @@ void testWriteBack(Gpu& g) {
 #include "ui_panel_budget_test.h"
 #include "ui_flat_panel_settle_test.h"
 
+// 2026-10-13 instruments: the seed reasons as counters (ui_layer_seed_census.h's tallyUiSeedReasons), one per bit, and the name table.
+void testSeedReasonTally() {
+    uint64_t counts[kUiSeedReasonCount] = {};
+    check(tallyUiSeedReasons(UiSeedOff, counts) == 0, "a seed with no reason is counted under none");
+    for (uint64_t c : counts) check(c == 0, "no reason counted for UiSeedOff");
+    const uint32_t both = UiSeedSourceChanged | UiSeedMissingStencil;   // one seed, two reasons
+    check(tallyUiSeedReasons(both, counts) == 2, "one seed carrying two reasons counts both");
+    check(counts[2] == 1 && counts[7] == 1, "source changed (bit 2) and missing stencil (bit 7) each count once");
+    tallyUiSeedReasons(UiSeedFirstObserved, counts);
+    tallyUiSeedReasons(UiSeedUnknownStale, counts);   // the last bit (256), index 8
+    check(counts[0] == 1 && counts[8] == 1, "the first-observed and unknown-stale bits land at their own index (0 and 8)");
+    check(tallyUiSeedReasons(0x1000u, counts) == 0, "a bit outside the nine named reasons is ignored, not miscounted");
+    check(kUiSeedReasonCount == 9 && std::strcmp(uiSeedReasonName(2), "source changed") == 0 &&
+              std::strcmp(uiSeedReasonName(99), "?") == 0,
+          "each counter has its name in bit order, and an out-of-range index is '?'");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -3319,6 +3357,7 @@ int main(int argc, char** argv) {
     testRenderState();
     testSeedCensusCpu();
     testSeedWriterRule();
+    testSeedReasonTally();
     testKey();
     testSize();
     testMap();
@@ -3342,6 +3381,7 @@ int main(int argc, char** argv) {
     testChains();
     testPanelScale();
     testFlatPanelScale();
+    testVrPanelAaGate();
     testFlatLayerRules();
     panelbudget::testAll();
     panelbudget::testWiring();

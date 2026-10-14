@@ -5266,6 +5266,115 @@ def print_vr_supersampling(text):
     return 0
 
 
+# --gpu-work-span: the overlay's frame GPU work span (src/d3d11/gpu_census.cpp, frame_span_tile.h formatFrameWorkSpanField, 2026-10-14). With
+# advanced.app_gpu_timing off the overlay's GPU figure comes from one timestamp pair a frame, and the census prints, after its window line,
+# `EDVR GPU census, the overlay's GPU time: frame work span: completed N, skipped S, invalid I, last X ms. ...` (all-time counts; `last -` until one completed). The three counts
+# tell apart what the overlay's "--" cannot: a pair that never ran (all zero), one that ran and was voided (skipped/invalid climb, completed
+# does not) and one that works (completed climbs). The clock state comes from the `Render-to-submit GPU: enabled|disabled` line.
+GPUWS_CENSUS_RE = re.compile(r"^\[(?P<ts>[0-9:.]+)\] EDVR GPU census: ")
+GPUWS_LINE_RE = re.compile(r"^\[(?P<ts>[0-9:.]+)\] EDVR GPU census, the overlay's GPU time: ")
+GPUWS_FIELD_RE = re.compile(r"frame work span: completed (?P<c>\d+), skipped (?P<s>\d+), invalid (?P<i>\d+), last (?P<last>-|[0-9.]+) ms")
+GPUWS_CLOCK_RE = re.compile(r"Render-to-submit GPU: (?P<state>enabled|disabled) \(advanced\.app_gpu_timing\)")
+
+
+def parse_gpu_work_span(text):
+    """{windows: [{ts, completed, skipped, invalid, last (float or None)}], census_lines: every census window line, clock: 'on' | 'off' | None (the last
+    Render-to-submit line)}."""
+    out = {"windows": [], "census_lines": 0, "clock": None}
+    for raw in text.splitlines():
+        m = GPUWS_CLOCK_RE.search(raw)
+        if m:
+            out["clock"] = "on" if m.group("state") == "enabled" else "off"
+            continue
+        c = GPUWS_LINE_RE.match(raw.rstrip("\r"))
+        if not c:
+            if GPUWS_CENSUS_RE.match(raw.rstrip("\r")):
+                out["census_lines"] += 1
+            continue
+        f = GPUWS_FIELD_RE.search(raw)
+        if not f:
+            continue
+        last = f.group("last")
+        out["windows"].append({"ts": c.group("ts"), "completed": int(f.group("c")), "skipped": int(f.group("s")),
+                               "invalid": int(f.group("i")), "last": None if last == "-" else float(last)})
+    return out
+
+
+def gpu_work_span_verdict(p):
+    """(verdict, why). NO CENSUS / NO FIELD (a build before the field) / NOT APPLICABLE (the application clock is on; the pair does not run) /
+    NEVER RAN / FAILING / WORKING."""
+    ws = p["windows"]
+    if not p["census_lines"]:
+        return "NO CENSUS", "the log has no EDVR GPU census window line"
+    if not ws:
+        return "NO FIELD", "census lines carry no `frame work span:` field: a build before it, so this log cannot say whether the pair ran"
+    if p["clock"] == "on":
+        return "NOT APPLICABLE", "advanced.app_gpu_timing is on: the application-render clock feeds the overlay and the work span pair does not run"
+    last = ws[-1]
+    if last["completed"] > 0:
+        grew = last["completed"] - ws[0]["completed"]
+        return "WORKING", "%d pair(s) completed by the last window (%d in the logged span), last %s ms; skipped %d, invalid %d" % (
+            last["completed"], grew, "%.3f" % last["last"] if last["last"] is not None else "-", last["skipped"], last["invalid"])
+    if last["skipped"] or last["invalid"]:
+        return "FAILING", "no pair completed; %d skipped, %d invalid: the pair began or ended and the GPU timing voided it" % (last["skipped"], last["invalid"])
+    return "NEVER RAN", "no pair began, completed, skipped or went invalid: the first-command arm or the door end never reached the pair (or the census frame scope never opened)"
+
+
+def print_gpu_work_span(text):
+    """The --gpu-work-span report. Exit 0 for WORKING or NOT APPLICABLE, 1 for NEVER RAN / FAILING / NO FIELD, 3 when the log has no census line."""
+    p = parse_gpu_work_span(text)
+    for w in p["windows"]:
+        print("%s  completed %d, skipped %d, invalid %d, last %s ms" % (
+            w["ts"], w["completed"], w["skipped"], w["invalid"], "-" if w["last"] is None else "%.3f" % w["last"]))
+    verdict, why = gpu_work_span_verdict(p)
+    print("gpu work span verdict: %s (clock %s): %s" % (verdict, p["clock"] or "unknown", why))
+    if verdict == "NO CENSUS":
+        return 3
+    return 0 if verdict in ("WORKING", "NOT APPLICABLE") else 1
+
+
+def self_test_gpu_work_span():
+    """--gpu-work-span on logs built from the DLL's own field text (tools\\aa_off_test pins that text byte for byte). Returns ok."""
+    import contextlib
+    import io
+    ok = True
+
+    def fail(msg):
+        nonlocal ok
+        print("gpu-work-span: %s" % msg)
+        ok = False
+
+    def census(ts, c, s, i, last):
+        field = "frame work span: completed %d, skipped %d, invalid %d, last %s ms" % (c, s, i, last)
+        return ("[%s] EDVR GPU census: 30 s, 2581 frames; EDVR ~3.195 ms/frame = door 2.0 (x) + in-frame 1.1 (y); application render p50 -; "
+                "frame gap - (no pairs); timer floor 0.0 us/pair; spans timed 5422, failed 0.\n"
+                "[%s] EDVR GPU census, the overlay's GPU time: %s. All-time counts." % (ts, ts, field))
+
+    off = "[07:34:40.591] Render-to-submit GPU: disabled (advanced.app_gpu_timing).\n"
+    on = "[07:34:40.591] Render-to-submit GPU: enabled (advanced.app_gpu_timing); independent of compositor timing.\n"
+    cases = [
+        ("working", off + census("07:35:10.000", 2400, 0, 0, "4.257") + "\n" + census("07:35:40.000", 5000, 3, 1, "4.100") + "\n", "WORKING", 0),
+        ("never ran", off + census("07:35:10.000", 0, 0, 0, "-") + "\n" + census("07:35:40.000", 0, 0, 0, "-") + "\n", "NEVER RAN", 1),
+        ("failing", off + census("07:35:10.000", 0, 40, 2400, "-") + "\n", "FAILING", 1),
+        ("clock on", on + census("07:35:10.000", 0, 0, 0, "-") + "\n", "NOT APPLICABLE", 0),
+        ("old build", off + "[07:35:10.000] EDVR GPU census: 30 s, 2581 frames; spans timed 5422, failed 0.\n", "NO FIELD", 1),
+        ("no census", off + "[07:35:10.000] something else\n", "NO CENSUS", 3),
+    ]
+    for name, text, want, rc_want in cases:
+        verdict, _why = gpu_work_span_verdict(parse_gpu_work_span(text))
+        if verdict != want:
+            fail("%s: verdict %s, wanted %s" % (name, verdict, want))
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = print_gpu_work_span(text)
+        if rc != rc_want:
+            fail("%s: exit %d, wanted %d" % (name, rc, rc_want))
+    p = parse_gpu_work_span(cases[0][1])
+    if [w["completed"] for w in p["windows"]] != [2400, 5000] or p["windows"][0]["last"] != 4.257 or p["clock"] != "off":
+        fail("the working log's windows read as %s (clock %s)" % (p["windows"], p["clock"]))
+    return ok
+
+
 # --ui-composites: the interface composites the UI layer left in the scene (docs/ui-layer-2026-09-23.md, "2026-10-01: Disable GUI effects").
 # The layer names an interface draw by its vertex shader; a draw into the lit HDR eye that samples an interface surface and has a vertex shader
 # no family names gets no decision and no refusal line, so it stays in the scene, upscaled with it, and the log said nothing: user 5's cockpit
@@ -10020,6 +10129,11 @@ def main(argv=None):
                          "and pixel shader and family, and INSTRUMENT / DETECTOR / UNCLAIMED / NAMED / OVERFLOW / "
                          "TAKEN lines (a composite no family names, left in the scene, is a STOP); exit 0 for "
                          "PASS or WARN, 1 for STOP, 3 when the log has no such line")
+    ap.add_argument("--gpu-work-span", action="store_true",
+                    help="report whether the overlay's frame GPU work span ran (advanced.app_gpu_timing off): the census window "
+                         "line's `frame work span: completed N, skipped S, invalid I, last X ms` field per window and a verdict "
+                         "WORKING / NEVER RAN / FAILING / NOT APPLICABLE / NO FIELD; exit 0 for WORKING or NOT APPLICABLE, "
+                         "1 otherwise, 3 when the log has no census line")
     ap.add_argument("--terrain-checkerboard", action="store_true",
                     help="report a VR flight's Elite-terrain-checkerboard-rendering notice (design doc section 84): the worker's "
                          "start line, one line for the first read and each change (ON, OFF or unknown with its reason, read from "
@@ -10187,6 +10301,8 @@ def main(argv=None):
         return print_vr_supersampling(text)
     if args.ui_composites:
         return print_ui_composites(text)
+    if args.gpu_work_span:
+        return print_gpu_work_span(text)
     if args.terrain_checkerboard:
         return print_terrain_checkerboard(text)
     if args.camera_census:
@@ -10853,6 +10969,8 @@ def self_test():
     if not self_test_maps_sharp():
         ok = False
     if not self_test_ui_composites():
+        ok = False
+    if not self_test_gpu_work_span():
         ok = False
     if not self_test_vscreen_fit():
         ok = False

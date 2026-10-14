@@ -21,6 +21,7 @@ ID3D11DeviceContext* seederContext() { return g_deferred.Get(); }
 ID3D11VertexShader* coverageVs() { return g_covVs; }
 ID3D11PixelShader* coveragePs() { return g_covPs; }
 ID3D11ComputeShader* compositeCs() { return g_cs; }
+ID3D11ComputeShader* compositeInPlaceCs() { return g_csInPlace; }
 ID3D11Buffer* compositeCb() { return g_cb; }
 ID3D11Texture2D* layerTexture() { return g_eye[0].tex.Get(); }
 ID3D11Texture2D* hdrLayerTexture() { return g_eye[0].hdrTex.Get(); }

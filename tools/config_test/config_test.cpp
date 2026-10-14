@@ -50,6 +50,7 @@
 
 #include "../../src/common/config.h"
 #include "../../src/common/ini_name.h"
+#include "../../src/common/real_dll_choice.h"
 #include "../../src/common/runtime_profile.h"
 #include "../../src/common/temporal_mode.h"
 #include "../../src/common/log.h"
@@ -1011,6 +1012,71 @@ static void collectSources(const std::wstring& dir, const std::wstring& relative
     FindClose(h);
 }
 
+// advanced.real_dll is one value for the install, kept in the shared file and read by both profiles
+// (src/common/real_dll_choice.h): the flat file's own value wins, `none` there turns the chain off for flat,
+// and otherwise the shared file's applies. The decision is a pure function of the two values and the
+// profile; held here on every row, with the log line each one writes, word for word.
+static void realDllChoiceCases(const std::wstring& root) {
+    struct Row {
+        const char* what;
+        bool flat;
+        const char* flatValue;
+        const char* sharedValue;
+        RealDllSource source;
+        const char* chains;   // the file name chained through, "" for none
+        const char* line;     // the log line, "" for no line
+    };
+    const Row rows[] = {
+        {"flat: the flat file names a mod, the shared file too: the flat override", true, "d3d11_reshade.dll", "d3d11_edhm.dll",
+         RealDllSource::FlatOverride, "d3d11_reshade.dll", "real dll: d3d11_reshade.dll (from edvr-flat.ini, the flat override)"},
+        {"flat: the flat file names a mod, the shared one nothing: the old layout, honoured", true, "d3d11_edhm.dll", "",
+         RealDllSource::FlatLegacy, "d3d11_edhm.dll",
+         "real dll: d3d11_edhm.dll (from edvr-flat.ini; the installer will move it to edvr.ini)"},
+        {"flat: the flat file says none: no chain for flat, the shared value or not", true, "none", "d3d11_edhm.dll",
+         RealDllSource::DisabledByFlat, "", "real dll: none: chain disabled for the flat profile by edvr-flat.ini"},
+        {"flat: none in any case, with blanks around it", true, "  NoNe ", "d3d11_edhm.dll", RealDllSource::DisabledByFlat, "",
+         "real dll: none: chain disabled for the flat profile by edvr-flat.ini"},
+        {"flat: the flat file empty: the shared value applies", true, "", "d3d11_edhm.dll", RealDllSource::Shared, "d3d11_edhm.dll",
+         "real dll: d3d11_edhm.dll (from edvr.ini, shared)"},
+        {"flat: neither names a mod: nothing to chain, nothing to say", true, "", "", RealDllSource::NoneSet, "", ""},
+        {"flat: the shared file says none, the flat file nothing: no chain", true, "", "none", RealDllSource::DisabledByShared, "",
+         "real dll: none: chain disabled for the flat profile by edvr.ini"},
+        {"flat: the shared file says none, the flat file names a mod: that override applies", true, "d3d11_edhm.dll", "none",
+         RealDllSource::FlatOverride, "d3d11_edhm.dll", "real dll: d3d11_edhm.dll (from edvr-flat.ini, the flat override)"},
+        {"VR: the shared value applies", false, "", "d3d11_edhm.dll", RealDllSource::Shared, "d3d11_edhm.dll",
+         "real dll: d3d11_edhm.dll (from edvr.ini, shared)"},
+        {"VR: a value only in the flat file is not VR's: no chain (the installer moves it)", false, "d3d11_edhm.dll", "",
+         RealDllSource::NoneSet, "", ""},
+        {"VR: the flat file's none or override changes nothing for VR", false, "none", "d3d11_edhm.dll", RealDllSource::Shared,
+         "d3d11_edhm.dll", "real dll: d3d11_edhm.dll (from edvr.ini, shared)"},
+        {"VR: the shared file says none", false, "", "none", RealDllSource::DisabledByShared, "",
+         "real dll: none: chain disabled for the VR profile by edvr.ini"},
+        {"VR: neither names a mod", false, "", "", RealDllSource::NoneSet, "", ""},
+    };
+    int bad = 0;
+    for (const Row& r : rows) {
+        const RealDllChoice c = chooseRealDll(r.flat, r.flatValue, r.sharedValue);
+        const std::string line = realDllLogLine(c, r.flat, kIniNameVr, kIniNameFlat);
+        if (c.source != r.source || c.value != r.chains || line != r.line) {
+            ++bad;
+            fail(r.what, "chose source " + std::to_string(static_cast<int>(c.source)) + ", chain \"" + c.value + "\", line \"" +
+                             line + "\"");
+        }
+    }
+    if (!bad) ok("advanced.real_dll resolves from the flat file's own value, else the shared file's, and logs the file that supplied it");
+
+    // The shipped edvr.ini says what the rule is, in the comment above the key: both profiles, and the flat override.
+    const std::string ini = readRepoFile(root, L"edvr.ini");
+    const size_t key = ini.find("\nreal_dll =");
+    const size_t above = key == std::string::npos ? std::string::npos : ini.rfind("\n\n", key - 1);
+    const std::string comment = above == std::string::npos ? std::string() : ini.substr(above, key - above);
+    if (comment.find("both") != std::string::npos && comment.find("edvr-flat.ini") != std::string::npos &&
+        comment.find("none") != std::string::npos)
+        ok("the shipped edvr.ini's real_dll comment says it applies to both profiles and what edvr-flat.ini can do with it");
+    else
+        fail("the shipped edvr.ini's real_dll comment", "it must say both profiles, edvr-flat.ini and none; got: " + comment);
+}
+
 static void iniNameScan(const std::wstring& root) {
     // The scanner itself first: it must find what it is for, and only that.
     const std::string violating =
@@ -1124,6 +1190,9 @@ static const char* const kRetiredKeys[] = {
     "cull_guard",
     // The scanned-body lend, 2026-10-09: fix.scanner_body is gone with the lend. The cause is fixed at the game's own flush (vertex_resync_hook.cpp, which has no key).
     "scanner_body",
+    // The camera-buffer geometry, 2026-10-14: the game's 5376-byte scene buffer with the camera origin at float 1100 are constants in glitch_frame.cpp now; a wrong
+    // pair could only switch the transition-flash hold off. The test rigs' switch for the tap is an environment variable (EDVR_TEST_NO_CAMERA_TAP), not a key.
+    "camera_buffer_bytes", "camera_buffer_offset",
 };
 static const int kRetiredKeyCount = int(sizeof(kRetiredKeys) / sizeof(kRetiredKeys[0]));
 
@@ -1138,6 +1207,19 @@ static const char* const kRetiredExactKeys[] = {
     // and the world route's switch (its _jitter and _steady_detail siblings went on 2026-10-01).
     "temporal_aa_jitter",
     "temporal_aa_on_foot_world",
+    // fix.transition_flash, removed 2026-10-13: the engine fix's hold is always on in the VR profile and has no setting (docs/transition-flash.md). The bare
+    // name is also the start of the engine fix's file and function names (transition_flash_eye_base.cpp), so only the qualified spelling is held out of the
+    // sources and the shipped file; a user's old line is carried over by the installer under "no longer used by this version", never read by the DLL, and
+    // named in the log by the config audit as a line this build does not read.
+    "fix.transition_flash",
+    // fix.share_exposure, removed 2026-10-14: both eyes always share one exposure in the VR profile (docs/eye-brightness.md). The flat profile never read it
+    // (its key allow-list never listed it), so nothing changed there.
+    "fix.share_exposure",
+    // fix.camera_eye_target, retired 2026-10-14: the eye-target rule (a camera write drawn into the submitted eye texture or a non-eye-sized target is not a
+    // candidate for the pick) is behaviour in the VR profile, with no key (docs/sky-flicker-2026-10-13.md). The flat profile's counterpart is unflown and
+    // only logged what it would drop. Only the qualified spelling is held out of the sources and the shipped file; an old line in a user's ini is carried over
+    // by the installer under "no longer used by this version" and never read.
+    "fix.camera_eye_target",
 };
 static const int kRetiredExactKeyCount = int(sizeof(kRetiredExactKeys) / sizeof(kRetiredExactKeys[0]));
 
@@ -1205,11 +1287,36 @@ static void retiredKeyScan(const std::wstring& root) {
         bool foundAll = true, passedAll = true;
         for (const std::string& t : retired) foundAll = foundAll && spellsRetiredKey(t) != nullptr && std::strcmp(spellsRetiredKey(t), kRetiredExactKeys[0]) == 0;
         for (const std::string& t : liveKeys) passedAll = passedAll && spellsRetiredKey(t) == nullptr;
-        if (foundAll && passedAll && kRetiredExactKeyCount == 3)
+        if (foundAll && passedAll && kRetiredExactKeyCount == 6)
             ok("the exact-name scan finds fix.explorer_cam in a read, a message, a comment and at the end of a sentence, and passes hotkey.explorer_cam, "
                "fix.explorer_cam_eye_*, the trims and the smoothing beside it");
         else
             fail("the exact-name scan's own control", std::string(foundAll ? "" : "a retired spelling was missed; ") + (passedAll ? "" : "a live key was flagged"));
+    }
+
+    // The retired transition-flash switch, by its qualified name: found in a read, a message, a comment and at the end of a sentence, and the engine fix's own
+    // file and function names (which begin with the same words) pass.
+    {
+        const std::string retired[] = {
+            "Config::get().getBool(\"fix.transition_flash\", true)",
+            "the log says set fix.transition_flash = 0 and restart",
+            "# fix.transition_flash = 1\n",
+            "turns it off (fix.transition_flash).",
+            "fix.transition_flash",
+        };
+        const std::string liveNames[] = {
+            "#include \"transition_flash_eye_base.h\"",
+            "\"src\\d3d11\\transition_flash_eye_base.cpp\"",
+            "transitionFlashEyeBaseInstall();",
+            "transition flash: frame 12 held (event skip 11)",
+        };
+        bool foundAll = true, passedAll = true;
+        for (const std::string& t2 : retired) foundAll = foundAll && spellsRetiredKey(t2) != nullptr && std::strcmp(spellsRetiredKey(t2), "fix.transition_flash") == 0;
+        for (const std::string& t2 : liveNames) passedAll = passedAll && spellsRetiredKey(t2) == nullptr;
+        if (foundAll && passedAll)
+            ok("the exact-name scan finds fix.transition_flash in a read, a message, a comment and at the end of a sentence, and passes the engine fix's file and function names");
+        else
+            fail("the transition-flash exact-name scan's own control", std::string(foundAll ? "" : "a retired spelling was missed; ") + (passedAll ? "" : "a live name was flagged"));
     }
 
     // The shipped file: no template, no comment, no mention.
@@ -1552,10 +1659,14 @@ int main(int argc, char** argv) {
     // and its key retired 2026-09-24; the whole shading-rate feature, keys
     // and all, was removed 2026-09-29.
     expectStr("experimental.foveation_centre", "<unset>", "the retired foveation centre key is absent");
-    expectBool("fix.share_exposure", true, "a key in the first [fix] reads");
-    expectBool("fix.transition_flash", true, "...and another beside it");
-    expectStr("hotkey.toggle_exposure", "SCROLLLOCK",
+    expectBool("fix.weapon_stability", true, "a key in the first [fix] reads");
+    // fix.share_exposure, retired 2026-10-14: both eyes always share one exposure in VR. Held out of the sources and the shipped file by
+    // kRetiredExactKeys; a stale line in a user's ini is carried over by the installer and named once by the config audit.
+    expectStr("fix.share_exposure", "<unset>", "the retired exposure-sharing key is absent from the template");
+    expectStr("hotkey.dump_camera", "PAUSE",
               "a key in the first [hotkey] reads");
+    // The brightness fix's Scroll Lock toggle was removed 2026-10-13.
+    expectStr("hotkey.toggle_exposure", "<unset>", "the retired brightness-toggle key is absent from the template");
     // The eye-run depth instrument ships as a commented template like the
     // other developer instruments: the compiled default is what a user gets.
     if (Config::get().getBool("advanced.eye_depth_capture", false) == false &&
@@ -1676,6 +1787,9 @@ int main(int argc, char** argv) {
     expectFloat("fix.explorer_cam_eye_trim_right", 0.0f, "...right 0.0,");
     expectFloat("fix.explorer_cam_follow_smoothing_ms", 0.0f, "...and the follow smoothing at 0 (exact follow)");
     expectStr("advanced.explorer_cam_probe", "<unset>", "the retired Explorer Cam probe key is absent from the shipped file (removed 2026-10-09; kRetiredKeys holds its name out of every source)");
+    // The transition-flash switch (removed 2026-10-13) is a bare [fix] key like fix.explorer_cam was: the exact-name scan holds its qualified name out of the
+    // sources and the file's text, and this lookup holds the [fix] line itself out.
+    expectStr("fix.transition_flash", "<unset>", "the retired transition-flash switch is absent from the shipped file (the hold is always on in the VR profile and has no setting)");
     expectFloat("fix.explorer_cam_eye_trim_up", ecm::kTrimUpDefault, "the shipped up trim is the code constant ecm::kTrimUpDefault");
     expectFloat("fix.explorer_cam_eye_trim_forward", ecm::kTrimForwardDefault, "...the shipped forward trim is ecm::kTrimForwardDefault");
     expectFloat("fix.explorer_cam_eye_trim_right", ecm::kTrimRightDefault, "...the shipped right trim is ecm::kTrimRightDefault");
@@ -1744,7 +1858,7 @@ int main(int argc, char** argv) {
             "\xEF\xBB\xBF"          // BOM: the byte that used to eat [fix]
             "[fix]\r\n"
             "black_void = 1  # trailing comment, not part of the value\r\n"
-            "share_exposure = YES\r\n"
+            "fixture_flag = YES\r\n"
             "panel_distance = 2.5   ; semicolon comment\r\n"
             "[d3d11]\r\n"
             "inventory = no\r\n"
@@ -1764,7 +1878,7 @@ int main(int argc, char** argv) {
             fail("scratch ini", "could not write it");
         } else {
             Config::get().init(scratch);
-            expectBool("fix.share_exposure", true, "getBool accepts YES");
+            expectBool("fix.fixture_flag", true, "getBool accepts YES");
             expectBool("d3d11.inventory", false, "...and no");
             expectFloat("fix.panel_distance", 2.5f, "a ; comment is not part of the value");
             expectInt("fix.fixture_value", 3,
@@ -2238,6 +2352,7 @@ int main(int argc, char** argv) {
     // Before the profile cases below: those switch g_runtimeProfile to flat and
     // invalid, under which these scratch keys would read as suppressed.
     iniNameScan(dir);
+    realDllChoiceCases(dir);
     retiredKeyScan(dir);
     if (argc >= 3) {
         const std::wstring scratch = widen(argv[2]);
@@ -2345,7 +2460,7 @@ int main(int argc, char** argv) {
     // says: no error, no log line, a row that does nothing.
     Config::get().set("fix.render_sharpness", "0.3");
     expectFloat("fix.render_sharpness", 0.3f, "flat scope permits the sharpening setting");
-    expectStr("hotkey.toggle_exposure", "", "flat menu exception leaves unrelated hotkeys suppressed");
+    expectStr("hotkey.dump_camera", "", "flat menu exception leaves unrelated hotkeys suppressed");
     const struct { const char* name; unsigned full, fovea; bool known; } presets[] = {
         {"auto",0,0,true},{"default",0,0,true},{"j",10,10,true},
         {"K",11,11,true},{"l",12,12,true},{"m",13,13,true},

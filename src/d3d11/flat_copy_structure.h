@@ -64,6 +64,14 @@ inline bool flatRenderFitsOutput(uint32_t w, uint32_t h, uint32_t ow, uint32_t o
     return flatUniformScale(w, h, ow, oh) && uint64_t(w) * 2 >= ow && uint64_t(h) * 2 >= oh &&
            uint64_t(w) <= uint64_t(ow) * 2 && uint64_t(h) <= uint64_t(oh) * 2;
 }
+// A SQUARE target under a sixteenth of the output's area is not Elite's scene (its scene is never square at the output's aspect): the reflection probe's 256x256
+// deferred view, which on some frames out-draws the scene and, with no on-shape candidate, won as the off-shape one, flipping `scene=` between 1440x810 and
+// 256x256 (edvr_gfx_20261001_103559; INFERRED to be the probe, never proven on flat). The VR eye-target rule (docs/sky-flicker-2026-10-13.md) is proven in
+// flight; this flat counterpart is NOT flown, so flatSceneFacts below does not apply it: the picker is what it was. flat_scene_log.h counts what the
+// rule would drop and whether it would change the winner (the candidate line), so a flat flight can decide.
+inline bool flatTinySquare(uint32_t w, uint32_t h, uint32_t ow, uint32_t oh) {
+    return w == h && uint64_t(w) * h * 16u < uint64_t(ow) * oh;
+}
 inline FlatSceneFacts flatSceneFacts(const FlatRuntimePrefix& p, uint32_t outW, uint32_t outH) {
     FlatSceneFacts on{}, off{};
     for (uint32_t i = 0; i < p.targetsUsed; ++i) {

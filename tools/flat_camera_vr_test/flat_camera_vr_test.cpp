@@ -934,6 +934,42 @@ void testModeWord() {
         check(o.plan.admit == Admit::Inject && o.landed && p.plan.admit == Admit::Observed && p.flushed,
               "R8i", "an injection frame stays injecting after the census's step; a released frame with the census watching is observe-only, and still flushes what was injected");
     }
+    // THE FLAT TAKEOVER (2026-10-14): a process that started VR leaves the detour observe-only and the route's word at "driven"; a live
+    // switch to flat re-arms it for injection only once the VR side is out of the way.
+    {
+        const auto t = [](bool observeOnly, bool observer, uint32_t bits, bool setEmpty) { return flatCameraFlatTakeover(observeOnly, observer, bits, setEmpty); };
+        const auto none = [](const FlatCameraFlatTakeover& x) { return !x.clearObserveOnly && !x.clearVrBits; };
+        check(none(t(false, false, 0, true)) && none(t(false, true, 0, true)),
+              "R8j", "a flat process that never ran VR (not observe-only, word zero): the takeover changes nothing");
+        const FlatCameraFlatTakeover censusOnly = t(true, false, 0, true);
+        check(censusOnly.clearObserveOnly && !censusOnly.clearVrBits,
+              "R8k", "a VR process the census alone drove (observe-only, word zero, observer detached): the flat step clears observe-only and leaves the word");
+        const FlatCameraFlatTakeover routeLeft = t(true, false, D, true);
+        const FlatCameraFlatTakeover routePassThrough = t(false, false, D, true);
+        check(routeLeft.clearObserveOnly && routeLeft.clearVrBits && !routePassThrough.clearObserveOnly && routePassThrough.clearVrBits,
+              "R8l", "the route's stale 'driven, pass-through' word is zeroed with observe-only (or alone): otherwise the flat detour passes every call through");
+        check(none(t(true, true, 0, true)) && none(t(true, true, D, true)) && none(t(false, true, D, true)),
+              "R8m", "a census observer still registered holds the takeover off: nothing is cleared, the frame stays Legacy's (begin's observeOnly argument)");
+        check(none(t(true, false, D | O, true)) && none(t(true, false, D | I, true)) && none(t(true, false, D | I | O, true)) && none(t(true, false, D, false)),
+              "R8n", "while the route injects or observes, or a camera it injected still waits for its flush, the takeover waits (the route winds down first)");
+        // Exhaustive: whatever the inputs, the takeover never fires over a live VR side, and what it clears is what it was asked about.
+        bool safe = true, minimal = true, convergent = true;
+        for (uint32_t bits = 0; bits < 8; ++bits)
+            for (int observeOnly = 0; observeOnly < 2; ++observeOnly)
+                for (int observer = 0; observer < 2; ++observer)
+                    for (int setEmpty = 0; setEmpty < 2; ++setEmpty) {
+                        const FlatCameraFlatTakeover x = t(observeOnly != 0, observer != 0, bits, setEmpty != 0);
+                        if ((x.clearObserveOnly || x.clearVrBits) && (observer || (bits != 0 && !flatCameraVrQuietFor(bits, setEmpty != 0)))) safe = false;
+                        if ((x.clearObserveOnly && !observeOnly) || (x.clearVrBits && bits == 0)) minimal = false;
+                        // After applying it, a second takeover has nothing left to do (it converges in one step).
+                        const uint32_t nextBits = x.clearVrBits ? 0u : bits;
+                        const bool nextObserve = x.clearObserveOnly ? false : observeOnly != 0;
+                        const FlatCameraFlatTakeover y = t(nextObserve, observer != 0, nextBits, setEmpty != 0);
+                        if (y.clearObserveOnly || y.clearVrBits) convergent = false;
+                    }
+        check(safe, "R8o", "never clears while an observer is registered, the route injects or observes, or a flush is pending");
+        check(minimal && convergent, "R8p", "clears observe-only only when set and the word only when non-zero, and one application leaves nothing for a second");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1123,9 +1159,12 @@ const Golden kInjectGolden[] = {
     {"observeOffThread", "void observeOffThread(uintptr_t r0, uintptr_t camera) noexcept {", nullptr, 0xFA29885A0B99C0E6ull},
     {"preThread", "    // The thread first. The phase machine, the decision, the census and the\n",
      "    const FlatCameraGateVerdict gate = g_inject.gate.check(GetCurrentThreadId(), GetTickCount64());\n", 0x10741B8A5965C7CCull},
-    {"preFlat", "    // The VR camera census's switch: a process that observes only never leaves it (flatCameraInjectObserveFrame).\n", nullptr, 0xCED9706398525B45ull},
+    // preFlat and flatFrame were re-pinned 2026-10-14 for the kind-3 signature instrument (flat_camera_signature.h): a sampled call
+    // reads its frustum and is counted by signature at every exit (five noteSignature calls), and the 5 s tick prints one more line.
+    // Log-only; no write, no key, no change to what is injected. Re-pinned again 2026-10-14 (flat-switch fixes): the signature sample moved\n    // ahead of the observe-only return (reads only, ahead of every write), kind3Seen is set after the admission and not for an Observed call,\n    // and the flat frame step takes the detour over from the VR side (takeOverFromVr) and begins the ownership machine with the hook's mode.
+    {"preFlat", "    // The VR camera census's switch: a process that observes only stays observe-only until the flat step re-arms it (takeOverFromVr).\n", nullptr, 0xE8749FAF6BB4D69Aull},
     {"postFlat", "    if (g_refreshTls.observe) {\n", nullptr, 0xD8A87AE0BF95ACF3ull},
-    {"flatFrame", "void flatCameraInjectFrame(uint64_t frame, bool temporalModeEnabled) {", nullptr, 0x72226A8849CEA69Cull},
+    {"flatFrame", "void flatCameraInjectFrame(uint64_t frame, bool temporalModeEnabled) {", nullptr, 0x730964946BE20D2Cull},
     {"flatPause", "void flatCameraInjectPause(bool paused) {", nullptr, 0x90A83A563BF10BA2ull},
     {"flatClose", "void flatCameraInjectClose(bool phaseNonzero, bool applied, bool clean, bool sceneNamed) {", nullptr, 0x28890A6E5363AED4ull},
     {"flatReset", "void flatCameraInjectReset() {", nullptr, 0xEF58F30F176668DAull},
@@ -1198,11 +1237,34 @@ void testSourcePins() {
                              "    sehWriteF32(camera + kCamBoundX, g_refreshTls.entryX);\n"}) &&
               lacksAll(post.substr(0, pos(post, vrPost)), {"sehWrite", "flatRuntimeNoteCameraApplied"}),
               "R11g", "refreshPost hands a VR call to refreshPostVr right after it disarms and reads the camera, ahead of the census-only branch and the flat restore, with no write above it");
-        check(count(cpp, "g_vrBits.store(") == 4 && count(cpp, "g_vrBits.load(") == 3 && count(cpp, "g_vrBits") == 9,
-              "R11h", "the mode word is touched in these places and no other: its declaration, refreshPre's load, the census step (a load and a store), the route's frame step (three stores), quiet's load (and one comment)");
+        check(count(cpp, "g_vrBits.store(") == 5 && count(cpp, "g_vrBits.load(") == 4 && count(cpp, "g_vrBits") == 11,
+              "R11h", "the mode word is touched in these places and no other: its declaration, refreshPre's load, the census step (a load and a store), the route's frame step (three stores), quiet's load, the flat takeover's load and its one store of zero (and one comment)");
         std::string flatOnly = region(cpp, "void flatCameraInjectFrame(uint64_t frame, bool temporalModeEnabled) {", nullptr);
         check(!flatOnly.empty() && flatOnly.find("g_vr") == std::string::npos && kInjectGolden[5].hash == fnv1a(flatOnly),
-              "R11i", "the flat frame step never touches the mode word or the VR state: only flatCameraVrFrame sets it, and the flat profile never calls that");
+              "R11i", "the flat frame step never touches the mode word or the VR state itself: it calls takeOverFromVr (pinned below), and only flatCameraVrFrame sets the word, which the flat profile never calls");
+    }
+    {   // 2026-10-14: the flat takeover, the miss counting and the signature sample's position.
+        const std::string take = functionBody(cpp, "void takeOverFromVr() {");
+        const std::string flatFrame = functionBody(cpp, "void flatCameraInjectFrame(uint64_t frame, bool temporalModeEnabled) {");
+        check(!take.empty() && count(cpp, "observeOnly.store(false") == 1 && count(take, "observeOnly.store(false") == 1 && count(cpp, "g_vrBits.store(0u") == 1 &&
+              ordered(take, {"flatCameraFlatTakeover(observeOnly, g_observer.load(std::memory_order_acquire) != nullptr, bits,", "g_vrBits.store(0u, std::memory_order_release);",
+                             "g_inject.observeOnly.store(false, std::memory_order_release);", "g_inject.core.reset();",
+                             "flat camera inject: switched from observe-only (VR census) to injection after a profile switch"}) &&
+              count(cpp, "flat camera inject: stays observe-only; legacy owns") == 1 && take.find("sehWrite") == std::string::npos,
+              "R11aq", "observe-only is cleared in exactly one place, takeOverFromVr: after the pure takeover rule says the VR side is out of the way, with a fresh ownership contract, and the log names the switch (or, once, that it stays observe-only and Legacy owns)");
+        check(!flatFrame.empty() && count(flatFrame, "takeOverFromVr();") == 1 &&
+              ordered(flatFrame, {"g_inject.frame = frame;", "takeOverFromVr();", "g_inject.core.begin(", "g_inject.observeOnly.load(std::memory_order_acquire));"}),
+              "R11ar", "the flat frame step takes the detour over once per frame, before the ownership machine begins, and begins it with the hook's observe-only state (an observe-only hook is never offered Upstream)");
+        const std::string pre2 = functionBody(cpp, "void refreshPre(uintptr_t r0, uintptr_t ctx, uintptr_t p2, uintptr_t camera) noexcept {");
+        check(!pre2.empty() && count(cpp, "g_inject.signatures.noteKind3Call()") == 1 && count(pre2, "g_inject.signatures.noteKind3Call()") == 1 &&
+              ordered(pre2, {"g_inject.signatures.noteKind3Call()", "readFrustum(camera)", "if (observe) noteSignature(false);", "if (observe) {\n        observeCall("}) &&
+              lacksAll(pre2.substr(0, pre2.find("if (observe) {\n        observeCall(")), {"sehWrite", "flushCamera", "noteInjected"}),
+              "R11as", "the signature sample (one kind-3 call in sixteen: four reads) sits ahead of the observe-only return and ahead of every write, so it measures in both modes; the observe-only exit reports it uninjected");
+        check(!pre2.empty() && count(cpp, "kind3Seen.store(true") == 1 &&
+              ordered(pre2, {"const FlatCameraAdmit admit = flatCameraAdmit(admission);",
+                             "if (readable && kind == 3 && flatCameraAdmitCountsForRelease(admit)) g_inject.kind3Seen.store(true, std::memory_order_relaxed);",
+                             "if (observe) {\n        observeCall("}),
+              "R11at", "kind3Seen (the fallback's release run) is set once, after the admission and only for admissions the injector could inject on: an Observed call is a miss, so no observe-only state can release Legacy");
     }
 
     // ---- the call's steps, in order -------------------------------------------------------------------------------------------
@@ -1264,7 +1326,7 @@ void testSourcePins() {
               commit.find("g_refreshTls.armed = 1u;") > commit.find("sehWriteU64("),
               "R11r", "the return-slot redirect is the last step (after the bound pair and the flag word), the TLS state is published after it, and the camera joins the flush set only when the phase landed");
         // The injection writes are the flat injector's own statements.
-        const std::string flatRegion = region(cpp, "    // The VR camera census's switch: a process that observes only never leaves it (flatCameraInjectObserveFrame).\n", nullptr);
+        const std::string flatRegion = region(cpp, "    // The VR camera census's switch: a process that observes only stays observe-only until the flat step re-arms it (takeOverFromVr).\n", nullptr);
         const char* same[] = {"const bool wroteX = sehWriteF32(camera + kCamBoundX, jitX);", "const bool wroteY = wroteX && sehWriteF32(camera + kCamBoundY, jitY);",
                               "const bool wroteAll = wroteY && (!haveFlags || sehWriteU32(camera + kCamFlags, flags | kFlagProj | kFlagVP));",
                               "if (wroteX) sehWriteF32(camera + kCamBoundX, entryX);", "if (wroteY) sehWriteF32(camera + kCamBoundY, entryY);",
@@ -1284,7 +1346,7 @@ void testSourcePins() {
             if (count(commit, s) != 1) saved = false;
         for (const char* s : {"g_refreshTls.realRet = realRet;", "g_refreshTls.entryX = entryX;", "g_refreshTls.entryY = entryY;", "g_refreshTls.flags = flags;",
                               "g_refreshTls.haveFlags = haveFlags ? 1u : 0u;", "g_refreshTls.armed = 1u;"})
-            if (count(region(cpp, "    // The VR camera census's switch: a process that observes only never leaves it (flatCameraInjectObserveFrame).\n", nullptr), s) != 1) saved = false;
+            if (count(region(cpp, "    // The VR camera census's switch: a process that observes only stays observe-only until the flat step re-arms it (takeOverFromVr).\n", nullptr), s) != 1) saved = false;
         check(saved, "R11am", "vrCommit saves what the post half restores from, exactly as the flat injector does (the entry bound pair, the flag word and whether it was read), and marks the call VR, reporting and restoring as asked");
         // The failure branches: each failed read or write ends the injection, is counted, and leaves the body to run pristine.
         check(count(commit, "inject = false;") == 2 && count(commit, "g_vr.tally().noteWriteFailure();") == 3 && count(commit, "return false;") == 3 &&

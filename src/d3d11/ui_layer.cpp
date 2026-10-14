@@ -210,6 +210,7 @@ struct FlatDraw {
 };
 FlatDraw g_flatDraw;
 int g_lastDecision = 0;  // the last uiLayerDecide's UiLayerDecision, for the flat adapter's refusal names
+uint32_t g_decisionCount = 0;  // decisions come to (uiLayerDecisionCount: the blend probe's before/after compare)
 
 bool layerDrawJitter(uint32_t eye, uint64_t* seq, float* jx, float* jy, uint32_t* w, uint32_t* h) {
     if (!runtimeFlatProfile()) return nativeTemporalDrawJitter(eye, seq, jx, jy, w, h);
@@ -334,6 +335,10 @@ struct Eye {
     void* frameRes = nullptr;
     Ptr<ID3D11ShaderResourceView> frameSrv;
     DXGI_FORMAT frameView = DXGI_FORMAT_UNKNOWN;
+    // The same frame as a UAV, for the in-place composite, cached on exactly that resource.
+    void* frameUavRes = nullptr;
+    Ptr<ID3D11UnorderedAccessView> frameUav;
+    DXGI_FORMAT frameUavView = DXGI_FORMAT_UNKNOWN;
     // The copy-through, for a frame that refuses a shader view.
     Ptr<ID3D11Texture2D> copy;
     Ptr<ID3D11ShaderResourceView> copySrv;
@@ -485,7 +490,7 @@ struct Window {
     uint64_t redirected = 0, refusedAtIssue = 0;
     uint64_t viewportRemaps = 0, scissorRemaps = 0, jitterCancels = 0, clears = 0;
     uint64_t multiplies = 0, writeBacks = 0, dsTested = 0, seeds = 0, seedFailures = 0;
-    uint64_t lostLayers = 0, doors = 0, treated = 0, composites = 0, overGameImage = 0;
+    uint64_t lostLayers = 0, doors = 0, treated = 0, composites = 0, overGameImage = 0, compositesInPlace = 0;
     uint64_t compositeRefused = 0, afterWrites = 0, afterReads = 0;
     // afterWrites' own breakdown: taken into the layer after the UI (kept
     // over it), left as a post pass (an eye-sized input), or refused at
@@ -506,6 +511,10 @@ struct Window {
     uint64_t hdrDrawTimingEligible = 0, hdrDrawTimingDisabled = 0, hdrDrawTimingIssued = 0;
     uint64_t hdrDrawTimingAborted = 0;
     uint64_t hdrDeclined[static_cast<size_t>(CrispToneDecline::kCount)] = {};
+    // The seed census's counts for the 30 s line (2026-10-13): every issued seed by reason, the same by reason for a layer's second or
+    // later seed in its frame (a layer seeded again within one frame), and the passes the seeds planned.
+    uint64_t seedReason[kUiSeedReasonCount] = {}, seedLaterReason[kUiSeedReasonCount] = {};
+    uint64_t seedsCounted = 0, seedsLater = 0, seedPassTotal = 0;
     // The VR world route (ui_layer.h): 2D screen draws re-issued into the layer, draws the game left in an eye
     // image after its screen was re-issued (lost while the route owns that eye), and the route's own refusals by
     // reason (the decision's refusals are in decided[kScreen][...] as for any family).
@@ -534,6 +543,28 @@ struct Window {
     UiSceneCompositeWindow scene;
 };
 Window g_win;
+
+// The seed census's by-reason counts (Window::seedReason). A layer is keyed by eye and HDR-ness; a seed is "later" when that layer was
+// already seeded in this frame (g_seedSeenSeq is the frame's sequence, g_seedSeenMask its layers so far). Counted only while the census is
+// armed, which the seed itself already requires (its plan comes from the census).
+uint64_t g_seedSeenSeq = ~0ull;
+uint32_t g_seedSeenMask = 0;
+void noteSeedCounts(uint64_t frameSeq, int eye, bool hdr, const UiSeedPlan& plan) {
+    if (frameSeq != g_seedSeenSeq) {
+        g_seedSeenSeq = frameSeq;
+        g_seedSeenMask = 0;
+    }
+    const uint32_t bit = 1u << static_cast<uint32_t>((eye & 1) * 2 + (hdr ? 1 : 0));
+    const bool later = (g_seedSeenMask & bit) != 0;
+    g_seedSeenMask |= bit;
+    ++g_win.seedsCounted;
+    g_win.seedPassTotal += plan.passes;
+    tallyUiSeedReasons(plan.reason, g_win.seedReason);
+    if (later) {
+        ++g_win.seedsLater;
+        tallyUiSeedReasons(plan.reason, g_win.seedLaterReason);
+    }
+}
 
 // A change of the door's size (a FOV-trim adoption, an HMD
 // Quality change, a per-eye width): the families the layer took in the two
@@ -599,7 +630,10 @@ struct RouteSlot {
     uint64_t seq = 0;
     UiRouteCoverageFlags coverage;
 };
-constexpr uint32_t kRouteRing = 512;  // live timer slots; one interval each. 64 covered the
+constexpr uint32_t kRouteRing = 1024; // live timer slots; one interval each (2026-10-14: 512 -> 1024: the
+                                      // flight's 130-160 pairs a frame, read four to five frames
+                                      // later, are 600-800 in flight; the lease table is 512 a frame,
+                                      // gpu_disjoint_clock.h). 64 covered the
                                       // pre-crisp route (~8/eye-frame); the crisp take adds a
                                       // seed and a write-back per HUD draw-group (tens a frame
                                       // at 0.5-quality), and a full ring silently drops whole
@@ -613,7 +647,10 @@ uint64_t g_routeLatestSeq = 0;              // the newest frame a stage began in
 constexpr size_t kStages = static_cast<size_t>(UiRouteStage::kCount);
 constexpr size_t kRouteTotal = kStages;     // the stats slot of the whole route's sum
 constexpr size_t kRouteWithMoved = kStages + 1;
-constexpr bool g_hdrDrawTimingOn = false;  // the per-draw timing census is off
+// Off since 2026-10-14 (it was on for the 2026-10-13 measurement build). On, it prices the HDR HUD draws' shading in the 4032^2 layer (the
+// moved draw's census item, AlteredHdrHud, and the "HDR draw price" line) and runs the seed census and its by-reason counters, by arming
+// per-draw timers on the shared clock. Turn it on for a measurement flight, not for shipping. Its note: docs\gpu-pass-profile-2026-10-12.md.
+constexpr bool g_hdrDrawTimingOn = false;
 UiSeedCensus g_seedCensus;
 UiHdrSeedGpuProbe g_hdrSeedGpu;
 UiHdrSeedGpuProbe::Token g_hdrSeedActive = 0; // explicit outer-guard recovery for SEH
@@ -698,6 +735,9 @@ int routeBegin(ID3D11DeviceContext* ctx, UiRouteStage stage, int eye, uint64_t s
     s.stage = stage;
     s.eye = eye;
     s.seq = seq;
+    // The moved HDR draw's census item (gpu_census.h AlteredHdrHud): opened with its route timer, closed in routeEnd. A begin that
+    // fails never reaches here, so the census never opens without its timer.
+    if (stage == UiRouteStage::kHdrMovedDraw) gpuCensusBegin(ctx, GpuCensusSection::AlteredHdrHud);
     s.coverage = g_routeCoverage.begin(stage, eye, seq, g_hdrDrawTimingOn);
     if (s.coverage.combined) ++g_routeCombinedArmedPending;
     if (stage == UiRouteStage::kHdrMovedDraw) ++g_routeHdrMovedPending;
@@ -709,11 +749,14 @@ int routeBegin(ID3D11DeviceContext* ctx, UiRouteStage stage, int eye, uint64_t s
 
 void routeEnd(ID3D11DeviceContext* ctx, int idx) {
     if (idx < 0 || idx >= static_cast<int>(kRouteRing) || !ctx) return;
+    // Closes the moved HDR draw's census item opened by routeBegin (the same slot, the same stage).
+    if (g_route[idx].stage == UiRouteStage::kHdrMovedDraw) gpuCensusEnd(ctx, GpuCensusSection::AlteredHdrHud);
     g_route[idx].timer.end(ctx);  // a failed end reads back as not measured
 }
 
 void routeAbort(ID3D11DeviceContext* ctx, int idx) {
     if (idx < 0 || idx >= static_cast<int>(kRouteRing) || !ctx) return;
+    if (g_route[idx].stage == UiRouteStage::kHdrMovedDraw) gpuCensusEnd(ctx, GpuCensusSection::AlteredHdrHud);
     // Keep the FIFO entry: routePoll consumes it as Invalid and spoils its
     // stage/combined eye-frame. Reset cancels its lease on the owner context.
     g_route[idx].timer.reset(ctx);
@@ -957,7 +1000,7 @@ void releaseLayerDs(LayerDs& l) {
 bool releaseLayers() {
     bool any = false;
     for (Eye& e : g_eye) {
-        any = any || e.tex || e.mTex || e.ds.tex || e.dsCopy || e.out || e.copy || e.frameSrv ||
+        any = any || e.tex || e.mTex || e.ds.tex || e.dsCopy || e.out || e.copy || e.frameSrv || e.frameUav ||
               e.hdrTex || e.hdrDs.tex;
         e.coverage.reset();
         e.tex.Reset();
@@ -997,6 +1040,9 @@ bool releaseLayers() {
         e.frameSrv.Reset();
         e.frameRes = nullptr;
         e.frameView = DXGI_FORMAT_UNKNOWN;
+        e.frameUav.Reset();
+        e.frameUavRes = nullptr;
+        e.frameUavView = DXGI_FORMAT_UNKNOWN;
         e.copy.Reset();
         e.copySrv.Reset();
         e.copyW = e.copyH = 0;
@@ -1678,6 +1724,7 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
                                 g_draw.hdr ? "a cockpit HUD draw" : "a UI draw", seedPlan);
             if (g_seedCensus.enabled) g_seedCensus.seed(g_draw.eye, g_draw.hdr, g_draw.seq,
                 gameDs, layerW, layerH, seedPlan, seeded);
+            if (g_seedCensus.enabled && seeded) noteSeedCounts(g_draw.seq, static_cast<int>(g_draw.eye), g_draw.hdr, seedPlan);
             if (!seeded) {
                 ++g_win.seedFailures;
                 releaseSaved();
@@ -1882,11 +1929,19 @@ ID3D11ComputeShader* g_cs = nullptr;
 bool g_csTried = false;
 ID3D11Buffer* g_cb = nullptr;
 bool g_fmtChecked[2] = {}, g_fmtOk[2] = {};
+// The in-place twin of the composite (kUiLayerCompositeInPlaceBytecode), and whether the GPU loads typed
+// UAVs of each frame view (D3D11_FORMAT_SUPPORT2_UAV_TYPED_LOAD: an optional capability for every format
+// but R32). Either missing and the in-place composite is simply not taken: the out-of-place one is.
+ID3D11ComputeShader* g_csInPlace = nullptr;
+bool g_loadChecked[2] = {}, g_loadOk[2] = {};
+unsigned g_inPlaceDeclinedNoted = 0;   // bit per reason, said once
+bool g_inPlaceNoted = false;
 
 void compileOnce(ID3D11DeviceContext* ctx) {
     if (g_cs || g_csTried || !ctx) return;
     g_csTried = true;
     g_cs = shaderSwapCreateCs(ctx,kUiLayerCompositeBytecode,sizeof(kUiLayerCompositeBytecode),"ui_layer_composite_cs","ui quality: layer");
+    g_csInPlace = shaderSwapCreateCs(ctx,kUiLayerCompositeInPlaceBytecode,sizeof(kUiLayerCompositeInPlaceBytecode),"ui_layer_composite_inplace_cs","ui quality: layer");
 }
 
 bool makeTex(ID3D11Device* dev, uint32_t w, uint32_t h, DXGI_FORMAT texFmt, DXGI_FORMAT viewFmt,
@@ -1919,9 +1974,53 @@ bool makeTex(ID3D11Device* dev, uint32_t w, uint32_t h, DXGI_FORMAT texFmt, DXGI
     return true;
 }
 
+// The UAV over `frame` for the in-place composite, or null with the reason said once: the caller did not
+// say the frame is EDVR's to rewrite, the region is not the whole of it, it was not made UAV-bindable, the GPU
+// does not load typed UAVs of its view, the in-place shader is missing, or the view could not be made.
+// A null is never an error: the out-of-place composite runs instead.
+ID3D11UnorderedAccessView* inPlaceUavFor(Eye& e, ID3D11Device* dev, ID3D11Texture2D* frame,
+                                         const D3D11_TEXTURE2D_DESC& fd, DXGI_FORMAT view,
+                                         const uint32_t region[4], int fi) {
+    auto decline = [&](unsigned bit, const char* reason) -> ID3D11UnorderedAccessView* {
+        if (!(g_inPlaceDeclinedNoted & bit)) {
+            g_inPlaceDeclinedNoted |= bit;
+            Log::get().note("ui quality: layer: the in-place composite is not taken (%s); the composite writes "
+                            "its own output texture instead.", reason);
+        }
+        return nullptr;
+    };
+    if (!g_csInPlace) return decline(1u, "its shader did not load");
+    if (region[0] != 0 || region[1] != 0 || region[2] != fd.Width || region[3] != fd.Height)
+        return decline(2u, "the frame's region is not the whole texture, and the frame handed on would not be the frame composited");
+    if (!(fd.BindFlags & D3D11_BIND_UNORDERED_ACCESS))
+        return decline(4u, "the frame was not made unordered-access bindable");
+    if (!g_loadChecked[fi]) {
+        g_loadChecked[fi] = true;
+        D3D11_FEATURE_DATA_FORMAT_SUPPORT2 fs{view, 0};
+        g_loadOk[fi] = SUCCEEDED(dev->CheckFeatureSupport(D3D11_FEATURE_FORMAT_SUPPORT2, &fs, sizeof(fs))) &&
+                       (fs.OutFormatSupport2 & D3D11_FORMAT_SUPPORT2_UAV_TYPED_LOAD) != 0;
+    }
+    if (!g_loadOk[fi]) return decline(8u, "this GPU does not load typed unordered-access views of the frame's format");
+    if (e.frameUavRes != static_cast<void*>(frame) || !e.frameUav || e.frameUavView != view) {
+        e.frameUav.Reset();
+        e.frameUavRes = nullptr;
+        D3D11_UNORDERED_ACCESS_VIEW_DESC ud{};
+        ud.Format = view;
+        ud.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
+        if (SUCCEEDED(dev->CreateUnorderedAccessView(frame, &ud, &e.frameUav)) && e.frameUav) {
+            e.frameUavRes = frame;
+            e.frameUavView = view;
+        } else {
+            e.frameUav.Reset();
+            return decline(16u, "the frame refused an unordered-access view in the composite's format");
+        }
+    }
+    return e.frameUav.Get();
+}
+
 ID3D11Texture2D* compositeInner(Eye& e, uint32_t eye, ID3D11Texture2D* frame,
                                 const uint32_t region[4], const float layerUv[4], bool useMult,
-                                const char** why) {
+                                bool ownedFrame, const char** why) {
     D3D11_TEXTURE2D_DESC fd{};
     frame->GetDesc(&fd);
     const DXGI_FORMAT view = uiLayerFrameView(fd.Format);
@@ -2000,11 +2099,17 @@ ID3D11Texture2D* compositeInner(Eye& e, uint32_t eye, ID3D11Texture2D* frame,
             return nullptr;
         }
     }
+    // In place, when the caller says the frame is EDVR's own, rewritten in full every frame (the RCAS
+    // output; the temporal pass's output when it is what arrived at the door), and everything the
+    // in-place shader needs is there. Then there is no view for reading the frame, no copy and no
+    // output texture: the one view is the frame as a UAV, which the shader loads and stores through.
+    ID3D11UnorderedAccessView* inPlaceUav =
+        ownedFrame ? inPlaceUavFor(e, dev.Get(), frame, fd, view, region, fi) : nullptr;
     // The frame's view: over it directly when it allows one, else its region
     // copied out first (the sharpen's rule, for the same reason).
     ID3D11ShaderResourceView* frameSrv = nullptr;
     bool viaCopy = false;
-    if (fd.BindFlags & D3D11_BIND_SHADER_RESOURCE) {
+    if (!inPlaceUav && (fd.BindFlags & D3D11_BIND_SHADER_RESOURCE)) {
         if (e.frameRes != static_cast<void*>(frame) || !e.frameSrv || e.frameView != view) {
             e.frameSrv.Reset();
             e.frameRes = nullptr;
@@ -2019,7 +2124,7 @@ ID3D11Texture2D* compositeInner(Eye& e, uint32_t eye, ID3D11Texture2D* frame,
         }
         frameSrv = e.frameSrv.Get();
     }
-    if (!frameSrv) {
+    if (!inPlaceUav && !frameSrv) {
         viaCopy = true;
         if (!e.copy || e.copyW != rw || e.copyH != rh || e.copyFmt != fd.Format) {
             e.copyW = e.copyH = 0;
@@ -2036,7 +2141,7 @@ ID3D11Texture2D* compositeInner(Eye& e, uint32_t eye, ID3D11Texture2D* frame,
         }
         frameSrv = e.copySrv.Get();
     }
-    if (!e.out || e.outW != rw || e.outH != rh || e.outFmt != fd.Format) {
+    if (!inPlaceUav && (!e.out || e.outW != rw || e.outH != rh || e.outFmt != fd.Format)) {
         e.outW = e.outH = 0;
         e.out.Reset();
         e.outUav.Reset();
@@ -2100,13 +2205,17 @@ ID3D11Texture2D* compositeInner(Eye& e, uint32_t eye, ID3D11Texture2D* frame,
     ID3D11UnorderedAccessView* nullUav = nullptr;
     ctx->CSSetShaderResources(0, 3, nullSrv);
     ctx->CSSetUnorderedAccessViews(0, 1, &nullUav, nullptr);
-    ctx->CSSetShader(g_cs, nullptr, 0);
+    ctx->CSSetShader(inPlaceUav ? g_csInPlace : g_cs, nullptr, 0);
     ctx->CSSetConstantBuffers(0, 1, &g_cb);
-    ID3D11ShaderResourceView* srvs[3] = {frameSrv, e.srv.Get(), useMult ? e.mSrv.Get() : nullptr};
+    // In place the frame is bound ONLY as the UAV: slot 0 stays null, so the one texture is never an
+    // SRV and a UAV in the same dispatch (the hazard D3D11 resolves by silently dropping a binding).
+    ID3D11ShaderResourceView* srvs[3] = {inPlaceUav ? nullptr : frameSrv, e.srv.Get(),
+                                         useMult ? e.mSrv.Get() : nullptr};
     ctx->CSSetShaderResources(0, 3, srvs);
-    ID3D11UnorderedAccessView* uav = e.outUav.Get();
+    ID3D11UnorderedAccessView* uav = inPlaceUav ? inPlaceUav : e.outUav.Get();
     ctx->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
-    ctx->Dispatch((rw + 7) / 8, (rh + 7) / 8, 1);
+    ctx->Dispatch((rw + kUiLayerCompositeGroupX - 1) / kUiLayerCompositeGroupX,
+                  (rh + kUiLayerCompositeGroupY - 1) / kUiLayerCompositeGroupY, 1);
     routeEnd(ctx.Get(), qs);
     gpuCensusEnd(ctx.Get(), GpuCensusSection::DoorUiLayerComposite);
 
@@ -2123,6 +2232,21 @@ ID3D11Texture2D* compositeInner(Eye& e, uint32_t eye, ID3D11Texture2D* frame,
     if (savedCb) savedCb->Release();
 
     ++g_win.composites;
+    if (inPlaceUav) {
+        ++g_win.compositesInPlace;
+        if (!g_inPlaceNoted) {
+            g_inPlaceNoted = true;
+            Log::get().note(
+                "ui quality: layer: first in-place composite -- the %s eye's layer blended into the %ux%u "
+                "%s frame itself (a typed read-modify-write through its UAV, %ux%u threads a group; the "
+                "texels the layer leaves alone are neither read nor written), so this eye has no output "
+                "texture. Same arithmetic as the out-of-place composite, byte for byte "
+                "(ui_holo_pass_test). The layer line counts the in-place composites; a line that never "
+                "says 'in place' is the out-of-place path.",
+                eye == 0 ? "left" : "right", rw, rh, viewName(view), kUiLayerCompositeGroupX,
+                kUiLayerCompositeGroupY);
+        }
+    }
     if (!e.doorFromPass) ++g_win.overGameImage;
     if (!g_compositeNoted) {
         g_compositeNoted = true;
@@ -2135,9 +2259,11 @@ ID3D11Texture2D* compositeInner(Eye& e, uint32_t eye, ID3D11Texture2D* frame,
             eye == 0 ? "left" : "right", e.w, e.h, rw, rh, viewName(view),
             static_cast<double>(uv[0]), static_cast<double>(uv[2]), static_cast<double>(uv[1]),
             static_cast<double>(uv[3]),
-            "");
+            inPlaceUav ? ", in place on the frame itself (no output texture)" : "");
     }
-    ID3D11Texture2D* out = e.out.Get();
+    // In place the result is the frame: the caller already holds the texture it passed in, and gets
+    // its own reference to it, as it gets one to the output texture otherwise.
+    ID3D11Texture2D* out = inPlaceUav ? frame : e.out.Get();
     out->AddRef();
     return out;
 }
@@ -2678,7 +2804,8 @@ void logTotals(double seconds) {
         "ui quality: layer: %.0f s, %llu frames, %ux%u per eye + composite output %ux%u; %.2f draws "
         "a frame redirected (%s), %.2f multiplies, %.2f depth/stencil write-backs, %.2f tested "
         "against a seeded copy (%llu seeds, %llu failed, %llu stale); per frame %.2f viewport remaps, "
-        "%.2f scissor remaps, %.2f jitter cancels; %llu composites (%llu over the game's own image); "
+        "%.2f scissor remaps, %.2f jitter cancels; %llu composites (%llu over the game's own image, "
+        "%llu in place on the frame, with no output texture); "
         "GPU ms per eye-frame, median/p95 (eye-frames): %s.",
         seconds, static_cast<unsigned long long>(g_win.frames), l.w, l.h, l.outW, l.outH,
         static_cast<double>(g_win.redirected) / frames, taken.empty() ? "none" : taken.c_str(),
@@ -2692,7 +2819,30 @@ void logTotals(double seconds) {
         static_cast<double>(g_win.scissorRemaps) / frames,
         static_cast<double>(g_win.jitterCancels) / frames,
         static_cast<unsigned long long>(g_win.composites),
-        static_cast<unsigned long long>(g_win.overGameImage), price.c_str());
+        static_cast<unsigned long long>(g_win.overGameImage),
+        static_cast<unsigned long long>(g_win.compositesInPlace), price.c_str());
+    // The seed census's counts (2026-10-13): per frame, every issued seed by reason, and the same for a layer's second or later seed
+    // in its frame; the passes each seed planned. Printed only while the census is armed (it is with g_hdrDrawTimingOn).
+    if (g_seedCensus.enabled) {
+        const double perFrame = frames ? static_cast<double>(frames) : 1.0;
+        std::string all, later;
+        char cell[64];
+        for (size_t i = 0; i < kUiSeedReasonCount; ++i) {
+            std::snprintf(cell, sizeof(cell), "%s%s %.2f", i ? ", " : "", uiSeedReasonName(i),
+                          static_cast<double>(g_win.seedReason[i]) / perFrame);
+            all += cell;
+            std::snprintf(cell, sizeof(cell), "%s%s %.2f", i ? ", " : "", uiSeedReasonName(i),
+                          static_cast<double>(g_win.seedLaterReason[i]) / perFrame);
+            later += cell;
+        }
+        const double seeds = static_cast<double>(g_win.seedsCounted);
+        Log::get().note(
+            "ui quality: layer seeds: %.2f a frame issued (%.2f the second or a later seed of a layer in its frame), %.2f planned "
+            "passes a seed; by reason, a frame, all seeds: %s; by reason, a frame, second or later seeds: %s. A reason can "
+            "appear with others on one seed.",
+            seeds / perFrame, static_cast<double>(g_win.seedsLater) / perFrame,
+            seeds > 0 ? static_cast<double>(g_win.seedPassTotal) / seeds : 0.0, all.c_str(), later.c_str());
+    }
     std::string moved, combined;
     const size_t movedStage = static_cast<size_t>(UiRouteStage::kHdrMovedDraw);
     appendPrice(moved, movedStage);
@@ -2874,6 +3024,9 @@ void uiLayerConfigure(Config& cfg) {
     // The panels follow the same key -- one setting, both halves -- and the
     // instruments with them.
     uiSurfacesSetTarget(target);
+    // The panels' AA gate (2026-10-13): VR's temporal AA (the same reading as `temporal` here), set before the first
+    // configure with the key on can apply the patch.
+    if (!runtimeFlatProfile()) uiPanelScaleSetVrTemporal(temporalVr);
     uiPanelScaleSetTarget(target);
     // The flat profile's panel factor (ui_panel_scale.cpp) needs its anti-aliasing on too.
     if (runtimeFlatProfile()) uiPanelScaleSetFlatTemporal(flatAa);
@@ -3313,6 +3466,7 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
         if (dsv) dsv->Release();
     }
     g_lastDecision = static_cast<int>(d);
+    ++g_decisionCount;
     if (uiLayerWorldRouteMode(family, f.worldScreen, f.worldRoute)) {
         // The route's mode: never a take. A draw that passed every test is held for the re-issue after the game's
         // own issue (counted when it lands, as a re-issue -- not as "redirected": the layer took nothing from the
@@ -4577,8 +4731,12 @@ void uiLayerNoteSubmitted(uint64_t sequence, uint32_t eye, const void* submitted
     g_eye[eye].submittedSeq = sequence;
 }
 
+bool uiLayerDoorFromPass(uint32_t eye) {
+    return eye <= 1 && g_eye[eye].doorFromPass;
+}
+
 ID3D11Texture2D* uiLayerComposite(uint64_t sequence, uint32_t eye, ID3D11Texture2D* frame,
-                                  const uint32_t region[4], const float layerUv[4]) {
+                                  const uint32_t region[4], const float layerUv[4], bool ownedFrame) {
     if (eye > 1 || !frame || !region || !layerUv) return nullptr;
     g_seedCensus.door(eye, sequence);
     Eye& e = g_eye[eye];
@@ -4618,7 +4776,7 @@ ID3D11Texture2D* uiLayerComposite(uint64_t sequence, uint32_t eye, ID3D11Texture
     ID3D11Texture2D* result = nullptr;
     const char* why = nullptr;
     const bool ran = guardedBudget(g_compositeBudget, [&] {
-        result = compositeInner(e, eye, frame, region, layerUv, useMult, &why);
+        result = compositeInner(e, eye, frame, region, layerUv, useMult, ownedFrame, &why);
     });
     if (!result) {
         ++g_win.compositeRefused;
@@ -4759,6 +4917,7 @@ void uiLayerFlatSetDraw(uint64_t frame, float jx, float jy, uint32_t renderW, ui
 }
 
 int uiLayerLastDecision() { return g_lastDecision; }
+uint32_t uiLayerDecisionCount() { return g_decisionCount; }
 
 bool uiLayerFlatRelease() {
     const bool any = releaseLayers();
@@ -4828,8 +4987,12 @@ void releaseDeviceObjects() {
         g_cs->Release();
         g_cs = nullptr;
     }
+    if (g_csInPlace) {
+        g_csInPlace->Release();
+        g_csInPlace = nullptr;
+    }
     g_csTried = false;
-    for (int i = 0; i < 2; ++i) g_fmtChecked[i] = g_fmtOk[i] = false;
+    for (int i = 0; i < 2; ++i) g_fmtChecked[i] = g_fmtOk[i] = g_loadChecked[i] = g_loadOk[i] = false;
 }
 }  // namespace
 

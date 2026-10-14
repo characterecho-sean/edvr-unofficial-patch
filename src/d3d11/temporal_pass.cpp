@@ -38,6 +38,7 @@
 #include "object_probe.h"   // objectProbeArmLedger: the armed frame's draw ledger
 #include "pixel_probe.h"    // pixelProbeArm: who drew this pixel, the same armed frame
 #include "ui_depth.h"   // the interface's coverage mask and resolve tuning
+#include "blend_probe.h"   // TEMPORARY blend probe: asks for eye 0's per-pixel decisions, one relaxed load a frame unarmed
 #include "ui_resolve.h"
 #include "screen_motion.h"
 #include "weapon_motion.h"
@@ -51,6 +52,13 @@
 #include "shader_swap.h"
 #include "gpu_timing.h"
 #include "gpu_census.h"   // issue #38: the per-feature GPU cost census
+#include "binding_shadow.h"   // the render target a camera write is drawn into (bindingGet, bindingResolve)
+#include "sky_ring.h"   // I-2: the sky ring (diag.sky_ring, TEMPORARY; docs/sky-flicker-2026-10-13.md)
+#include "../common/camera_nearest.h"       // the nearest write: a veto on the legacy pick (fix.camera_nearest, TEMPORARY A/B)
+#include "../common/camera_jump_guard.h"    // the jump guard: a legacy pick's jump replaced by the next-best candidate (fix.camera_jump_guard, TEMPORARY A/B)
+#include "../common/camera_row_events.h"    // I-1: rot= mv= on the dump's TEMP lines and the event summary
+#include "../common/camera_target_tag.h"    // the render target a camera write is drawn into, the eye-target rule, the burst offset
+#include "../common/mini_render.h"          // P3: the 256x256 deferred mini-render, joined to the events
 #include "temporal_shader_bytecode.h"
 
 namespace edvr {
@@ -61,6 +69,9 @@ static void beginEyeRun();
 // fold a cross-TU getter.
 namespace detail {
 bool g_temporalPassWantedFssChrome = false;
+// temporalPassWantsDraw reads this likewise: true while a camera-block write waits for the draw that tags it, or a mini-render pass is bound.
+bool g_cameraDrawWatch = false;
+uint32_t g_cameraDrawCount = 0;
 }  // namespace detail
 
 namespace {
@@ -2144,6 +2155,13 @@ struct RowsWrite {
     uint32_t    seq = 0;
     uint32_t    observedSeq = 0; // diagnostic clock, includes rejected non-rotation writes
     bool        valid = false;
+    // The render target the first draw after this write went into (camera_target_tag.h): unknown until such a draw, and for a write overwritten before
+    // one. Set by temporalPassNoteDraw, read by chooseCameraRows (the eye-target rule) and the dump.
+    camtag::Target tag;
+    // The owner-context draws made between this write and the next (saturating): a write with none or a few is an orphan, one the scene was drawn with has
+    // hundreds. drawBase is the draw count at the write; drawsAfter is set when the next write (or the frame boundary) closes it.
+    uint32_t    drawBase = 0;
+    uint16_t    drawsAfter = 0;
 };
 enum CameraChoiceFlag : uint32_t {
     kChoiceValid          = 1u << 0,
@@ -2156,6 +2174,10 @@ enum CameraChoiceFlag : uint32_t {
     kChoiceResync         = 1u << 7,
     kChoiceRefollow       = 1u << 8,
     kChoiceBoundLatchRows = 1u << 9,
+    // 10..12 are the IPD pair's and the headset tag's on the branch that refuted them (not on main); kept free so the numbers read the same.
+    kChoiceNearest        = 1u << 13,   // the nearest-write rule took a write other than the legacy pick (fix.camera_nearest on)
+    kChoiceJumpReplaced   = 1u << 14,   // the jump guard replaced the legacy pick with the next-best candidate (fix.camera_jump_guard on)
+    kChoiceEyeTargetCut   = 1u << 15,   // the eye-target rule: this frame's chooser rejected at least one write (drawn into a non-eye target or the submitted texture)
 };
 enum CameraDrawFlag : uint32_t {
     kDrawSeen             = 1u << 0,
@@ -2178,11 +2200,15 @@ struct RowsChoiceCapture {
     uint32_t observedEvictionsAtChoice = 0;
     uint32_t candidates = 0, boundCandidates = 0;
     uint32_t continuousCandidates = 0, twinCandidates = 0;
+    camtag::Target selectedTarget;      // the render target the selected write was drawn into (unknown when no draw followed it)
+    uint32_t selectedDraws = 0;         // the draws made between the selected write and the next one
+    uint32_t rejectedWrites = 0;        // writes the eye-target rule rejected: drawn into a non-eye-sized target or into the submitted eye texture
 };
 struct RigidDrawRows {
     const void* resource = nullptr;
     float rows[12] = {};
     float proj[2] = {};
+    camtag::Target tag;                 // the render target bound at this tagged eye draw
     uint64_t vsHash = 0;
     uint32_t frame = 0, seq = 0, writesAtDraw = 0, observedWritesAtDraw = 0;
     uint32_t observedEvictionsAtDraw = 0;
@@ -2242,6 +2268,83 @@ bool     g_camNoted = false;
 RowsChoiceCapture g_rowsChoice;
 RigidDrawRows g_rigidDraw[2];
 RigidDrawRows g_prevRigidDraw[2];
+
+// ---- the sky-flicker diagnostic build (docs/sky-flicker-2026-10-13.md) ---------------------------------------------------------------------------------
+// The eye-target rule (a filter on the chooser's candidates) is behaviour in VR, with no key (it was a temporary A/B key until 2026-10-14; proven in the
+// hangar flight). Two TEMPORARY A/B keys remain, default off, read live in temporalPassConfigure and VR only (the flat allow-list does not list them, so
+// flat reads off): fix.camera_nearest and fix.camera_jump_guard (rules on its pick). The nearest-write rule and the jump guard are mutually exclusive: with
+// both on, the nearest write wins and the guard only counts. Each runs and counts with its key off too, on the pick, so the 30 s lines say what it would
+// have done on the flown track.
+// The eye-target rule is on in the VR profile and not in the flat one (whose scene picker has its own, unflown, rule that only logs: flat_scene_log.h).
+inline bool eyeTargetRuleOn() { return !runtimeFlatProfile(); }
+bool                 g_nearKeyOn = false;
+bool                 g_jumpKeyAsked = false;      // fix.camera_jump_guard as asked; it applies only when g_nearKeyOn is off
+camnearest::State    g_nearState;
+camnearest::Stats    g_nearStats;
+jumpguard::Guard     g_jumpGuard;
+jumpguard::Stats     g_jumpStats;
+camtag::Stats        g_eyeTargetStats;
+int64_t              g_diagWindowTicks = 0;       // the 30 s clock of the four lines below, read at the frame boundary
+uint32_t             g_chooseEyeW = 0, g_chooseEyeH = 0;   // the eye render size the chooser judges targets against (set by the treat that chooses)
+camtag::Submit       g_chooseSubmit;                       // ...and the submitted eye texture's format and size: a write drawn into it is a late-frame write
+int                  g_lastWriteIdx = -1;                  // the newest write's ring slot, whose draws-after is still counting
+inline bool jumpGuardApplies() { return g_jumpKeyAsked && !g_nearKeyOn; }
+// The target tag: the camera write waiting for the draw that tags it (an index into the rows ring), and the colour targets the last OM set bound.
+int                  g_pendingTagIdx = -1;
+unsigned             g_omColours = 0;
+camtag::BurstTracker g_burst;                         // per-frame camera-write counts and the burst offset of each
+// P3, the third view: the mini-render passes by frame, and whether one is bound now. The ring is written by the render thread only.
+minirender::Ring     g_mini;
+bool                 g_miniBound = false;
+uint32_t             g_miniFramesSeen = 0;            // frames the P3 detector has covered (the kept window of the ring is at most 2048)
+uint32_t             g_miniWindowFrames = 0, g_miniWindowHits = 0;
+uint32_t             g_miniWindowPasses = 0, g_miniWindowDraws = 0;
+uint32_t             g_miniWindowRva = 0;             // the first return address seen in the window, for the 30 s line
+// The tag of a view as the first draw after a write sees it: RTV0's size and format, else (a depth-only pass) the DSV's.
+camtag::Target currentTargetTag() {
+    // Answered once per binding: the shadow bumps a slot's generation at every rebind and once a frame, so a run of draws into one target resolves once.
+    static uint32_t cachedRtvGen = 0, cachedDsvGen = 0;
+    static unsigned cachedColours = ~0u;
+    static camtag::Target cached;
+    const uint32_t rg = bindingGeneration(BindSlot::Rtv0), dg = bindingGeneration(BindSlot::Dsv0);
+    if (rg == cachedRtvGen && dg == cachedDsvGen && g_omColours == cachedColours) return cached;
+    camtag::Target t;
+    ResourceInfo info;
+    void* rtv = bindingGet(BindSlot::Rtv0);
+    bool have = false;
+    if (rtv && bindingResolve(rtv, &info) && info.isTexture2D && info.a && info.b) {
+        t.src = 1;
+        have = true;
+    } else {
+        void* dsv = bindingGet(BindSlot::Dsv0);
+        if (dsv && bindingResolve(dsv, &info) && info.isTexture2D && info.a && info.b) {
+            t.src = 2;
+            have = true;
+        }
+    }
+    if (have) {
+        t.w = static_cast<uint16_t>(std::min<uint32_t>(info.a, 0xFFFFu));
+        t.h = static_cast<uint16_t>(std::min<uint32_t>(info.b, 0xFFFFu));
+        t.fmt = static_cast<uint16_t>(info.fmt);
+        t.colours = static_cast<uint8_t>(std::min(g_omColours, 8u));
+    }
+    cachedRtvGen = rg; cachedDsvGen = dg; cachedColours = g_omColours; cached = t;
+    return t;
+}
+
+// The draws between a write and the next: closed when the next write arrives or the frame ends; a write still open (the frame's last, at the time the
+// chooser looks) reads the live count.
+void closeWriteDraws() {
+    if (g_lastWriteIdx < 0) return;
+    RowsWrite& p = g_rowsRing[g_lastWriteIdx];
+    const uint32_t d = detail::g_cameraDrawCount - p.drawBase;
+    p.drawsAfter = static_cast<uint16_t>(std::min<uint32_t>(d, 0xFFFFu));
+    g_lastWriteIdx = -1;
+}
+uint32_t drawsAfterOf(int idx) {
+    if (idx == g_lastWriteIdx) return std::min<uint32_t>(detail::g_cameraDrawCount - g_rowsRing[idx].drawBase, 0xFFFFu);
+    return g_rowsRing[idx].drawsAfter;
+}
 
 ObservedRowsWrite* observedRowsSlot(const void* resource) {
     int freeSlot = -1, oldest = 0;
@@ -2320,9 +2423,73 @@ void chooseCameraRows() {
         temporalRot3Of34(g_prevRows, rp);
         temporalTranspose3(rp, rpT);
     }
+    // The eye-target rule (camera_target_tag.h; always on in VR): a write qualifies as the scene's camera only if its first draw went into an eye-sized
+    // target that is NOT the texture being submitted. The reflection probe's cube faces share the eyes' scene block and are picked when one lies within
+    // the 3 degree gate: most are drawn into 256, 512, 1024 or 2048x1024 targets (the size rule), but the forward face has no draw of its own and the
+    // next draw of the frame is a late pass into the submitted image itself (the 2026-10-13 hangar flight: rt=2016x2016 format 27, the game's submit
+    // format, on 4 of 4 bad picks), so the identity rule rejects writes drawn into the submitted texture. Judged here, at the first treat, when every
+    // draw of the frame has tagged its write; a write no draw followed is unknown and kept. Fail open twice: if
+    // nothing at all would be eligible the filter stands down for the frame, and if the filter leaves no continuous candidate the unfiltered set is used.
+    g_eyeTargetStats.eyeW = g_chooseEyeW;
+    g_eyeTargetStats.eyeH = g_chooseEyeH;
+    g_eyeTargetStats.submit = g_chooseSubmit;
+    ++g_eyeTargetStats.frames;
+    camtag::Filter eyeVerdict;
     for (int i = 0; i < kRowsRing; ++i) {
         const RowsWrite& w = g_rowsRing[i];
         if (!w.valid || w.frame != g_rowsFrame) continue;
+        ++g_eyeTargetStats.writes;
+        if (w.tag.known()) ++g_eyeTargetStats.tagged; else ++g_eyeTargetStats.unknown;
+        eyeVerdict.note(w.tag, g_chooseEyeW, g_chooseEyeH, g_chooseSubmit);
+        const camtag::Why why = camtag::judge(w.tag, g_chooseEyeW, g_chooseEyeH, g_chooseSubmit);
+        if (why == camtag::Why::NotEyeSized) camtag::noteRejected(g_eyeTargetStats, w.tag.w, w.tag.h);
+        else if (why == camtag::Why::SubmitTarget) { ++g_eyeTargetStats.rejected; ++g_eyeTargetStats.submitRejected; }
+    }
+    const uint32_t cutWrites = eyeVerdict.cut;
+    if (cutWrites) ++g_eyeTargetStats.rejectFrames;
+    if (eyeVerdict.failedOpen(eyeTargetRuleOn())) ++g_eyeTargetStats.failOpen;
+    bool eyeFilter = eyeVerdict.active(eyeTargetRuleOn());
+    g_rowsChoice.rejectedWrites = cutWrites;
+    // The pick the legacy chooser and the filtered one would each make, for the stats alone (light: continuity, the twin skip, the bound-then-latest
+    // preference): how often, and by how much, the filter changes the rows.
+    auto lightBest = [&](bool filter) {
+        int best = -1;
+        uint32_t bSeq = 0;
+        bool bBound = false;
+        for (int i = 0; i < kRowsRing; ++i) {
+            const RowsWrite& w = g_rowsRing[i];
+            if (!w.valid || w.frame != g_rowsFrame) continue;
+            if (filter && camtag::rejectsFor(w.tag, g_chooseEyeW, g_chooseEyeH, g_chooseSubmit)) continue;
+            if (!g_prevValid) continue;
+            float rn[9], d[9];
+            temporalRot3Of34(w.rows, rn);
+            temporalMul3(rpT, rn, d);
+            if (!(temporalRotationAngleDeg(d) < 3.0f)) continue;
+            if (memcmp(w.rows, g_prevRows, sizeof(w.rows)) == 0) continue;
+            const bool bound = g_boundSeen && w.buf == g_boundBuf;
+            if (best < 0 || (bound && !bBound) || (bound == bBound && w.seq > bSeq)) { best = i; bSeq = w.seq; bBound = bound; }
+        }
+        return best;
+    };
+    if (cutWrites && eyeVerdict.eligibleAny) {
+        const int a = lightBest(false), b = lightBest(true);
+        if (a >= 0 && b >= 0 && memcmp(g_rowsRing[a].rows, g_rowsRing[b].rows, sizeof(g_rowsRing[a].rows)) != 0) {
+            ++g_eyeTargetStats.pickChanges;
+            const float dm = campose::translationM(g_rowsRing[a].rows, g_rowsRing[b].rows);
+            const float dd = campose::rotationDeg(g_rowsRing[a].rows, g_rowsRing[b].rows);
+            if (dm > g_eyeTargetStats.maxPickDiffM) g_eyeTargetStats.maxPickDiffM = dm;
+            if (dd > g_eyeTargetStats.maxPickDiffDeg) g_eyeTargetStats.maxPickDiffDeg = dd;
+        }
+        if (eyeFilter && lightBest(true) < 0 && lightBest(false) >= 0) {   // the filter would leave nothing continuous: use the unfiltered set
+            eyeFilter = false;
+            ++g_eyeTargetStats.failOpenNoCont;
+        }
+    }
+    if (eyeFilter) g_rowsChoice.flags |= kChoiceEyeTargetCut;
+    for (int i = 0; i < kRowsRing; ++i) {
+        const RowsWrite& w = g_rowsRing[i];
+        if (!w.valid || w.frame != g_rowsFrame) continue;
+        if (eyeFilter && camtag::rejectsFor(w.tag, g_chooseEyeW, g_chooseEyeH, g_chooseSubmit)) continue;
         ++count;
         const bool bound = g_boundSeen && w.buf == g_boundBuf;
         if (bound) ++boundCount;
@@ -2408,6 +2575,7 @@ void chooseCameraRows() {
         }
     }
     int pick = bestIdx;
+    bool abJudged = false;   // the pick is a continuous frame's legacy pick: the two A/B pick rules judge it
     // The resync (2026-09-08, a station approach): continuity is self-
     // reinforcing. Once the chain has landed on another object's camera --
     // an auxiliary pass of the station's, written every frame and
@@ -2431,6 +2599,7 @@ void chooseCameraRows() {
         g_rowsChoice.flags |= kChoiceContinuous;
         if (twinFallback) g_rowsChoice.flags |= kChoiceTwinFallback;
         if (bestBound) ++g_chooseBound; else ++g_chooseOther;
+        abJudged = true;
     } else if (fallIdx >= 0) {
         pick = fallIdx;
         g_rowsChoice.flags |= kChoiceResync;
@@ -2439,17 +2608,57 @@ void chooseCameraRows() {
         ++g_chooseNone;
     }
     if (pick >= 0) {
+        // The two pick rules (TEMPORARY A/B; camera_nearest.h, camera_jump_guard.h) judge the legacy pick of a continuous frame -- not a refollow or a
+        // resync, whose pick is meant to leave the chain. Their candidates are the continuous writes this chooser considered (after the eye-target
+        // filter), the bound object's first, then the latest; never the twin (last frame's rows again). Both run and count with their keys off, on the
+        // legacy track; the nearest-write rule wins when both are on. Their state follows whatever is applied, every frame that has a pick.
+        int applyIdx = pick;
+        bool guardReplaced = false;
+        const float* legacy = g_rowsRing[pick].rows;
+        const bool nearAgreed = camnearest::legacyAgrees(g_nearState, legacy);
+        camnearest::noteLegacy(g_nearState, legacy);
+        if (abJudged) {
+            std::sort(contIdx, contIdx + contN, [](int a, int b) {
+                const RowsWrite& x = g_rowsRing[a];
+                const RowsWrite& y = g_rowsRing[b];
+                const bool bx = g_boundSeen && x.buf == g_boundBuf;
+                const bool by = g_boundSeen && y.buf == g_boundBuf;
+                if (bx != by) return bx;
+                return x.seq > y.seq;
+            });
+            const float* altRows[kRowsRing];
+            for (int k = 0; k < contN; ++k) altRows[k] = g_rowsRing[contIdx[k]].rows;
+            const camnearest::Verdict nv = camnearest::decide(g_nearState, legacy, altRows, contN, nearAgreed);
+            const bool nearDiffers = nv.index >= 0 && contIdx[nv.index] != pick;
+            camnearest::note(g_nearStats, nv, nearDiffers);
+            const jumpguard::Decision jd = jumpguard::decide(g_jumpGuard, legacy, altRows, contN);
+            jumpguard::note(g_jumpStats, jd);
+            const int nearUse = camnearest::applied(g_nearKeyOn, nv);
+            const int jumpUse = jumpguard::applied(jumpGuardApplies(), jd);
+            if (nearUse >= 0 && contIdx[nearUse] != pick) {
+                applyIdx = contIdx[nearUse];
+                g_rowsChoice.flags |= kChoiceNearest;
+            } else if (jumpUse >= 0 && contIdx[jumpUse] != pick) {
+                applyIdx = contIdx[jumpUse];
+                guardReplaced = true;
+                g_rowsChoice.flags |= kChoiceJumpReplaced;
+            }
+        }
         g_rowsChoice.flags |= kChoiceValid;
-        g_rowsChoice.selectedResource = g_rowsRing[pick].buf;
-        g_rowsChoice.selectedSeq = g_rowsRing[pick].observedSeq;
-        memcpy(g_rowsChoice.selectedRows, g_rowsRing[pick].rows, sizeof(g_rowsChoice.selectedRows));
-        memcpy(g_rowsChoice.selectedProj, g_rowsRing[pick].proj, sizeof(g_rowsChoice.selectedProj));
-        memcpy(g_curRows, g_rowsRing[pick].rows, sizeof(g_curRows));
-        g_curProj[0] = g_rowsRing[pick].proj[0];
-        g_curProj[1] = g_rowsRing[pick].proj[1];
+        g_rowsChoice.selectedResource = g_rowsRing[applyIdx].buf;
+        g_rowsChoice.selectedSeq = g_rowsRing[applyIdx].observedSeq;
+        g_rowsChoice.selectedTarget = g_rowsRing[applyIdx].tag;
+        g_rowsChoice.selectedDraws = drawsAfterOf(applyIdx);
+        memcpy(g_rowsChoice.selectedRows, g_rowsRing[applyIdx].rows, sizeof(g_rowsChoice.selectedRows));
+        memcpy(g_rowsChoice.selectedProj, g_rowsRing[applyIdx].proj, sizeof(g_rowsChoice.selectedProj));
+        memcpy(g_curRows, g_rowsRing[applyIdx].rows, sizeof(g_curRows));
+        g_curProj[0] = g_rowsRing[applyIdx].proj[0];
+        g_curProj[1] = g_rowsRing[applyIdx].proj[1];
         g_curValid = true;
-        g_curRowsBound = g_boundSeen && g_rowsRing[pick].buf == g_boundBuf;
+        g_curRowsBound = g_boundSeen && g_rowsRing[applyIdx].buf == g_boundBuf;
         if (g_curRowsBound) g_rowsChoice.flags |= kChoiceSelectedBound;
+        camnearest::commit(g_nearState, g_rowsRing[applyIdx].rows);
+        jumpguard::commit(g_jumpGuard, g_rowsRing[applyIdx].rows, guardReplaced);
     }
 }
 
@@ -3006,7 +3215,12 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             e.zPrevValid = false;
         }
 
-        // This frame's camera rows, chosen from the frame's writes (once).
+        // This frame's camera rows, chosen from the frame's writes (once), against this eye's render size (the region the pass is treating).
+        g_chooseEyeW = w;
+        g_chooseEyeH = h;
+        g_chooseSubmit.fmt = static_cast<uint16_t>(sd.Format);
+        g_chooseSubmit.w = static_cast<uint16_t>(std::min<uint32_t>(w, 0xFFFFu));   // the region, as the "first trained frame" line names it: 2016x2016 per eye
+        g_chooseSubmit.h = static_cast<uint16_t>(std::min<uint32_t>(h, 0xFFFFu));
         chooseCameraRows();
         // The rotation delta for this frame's motion source. The depth
         // motion is the head's rotation with its translation term, and
@@ -3408,6 +3622,9 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             trace.boundResource = reinterpret_cast<uintptr_t>(g_rowsChoice.boundResource);
             memcpy(trace.selectedRows, g_rowsChoice.selectedRows, sizeof(trace.selectedRows));
             memcpy(trace.selectedProj, g_rowsChoice.selectedProj, sizeof(trace.selectedProj));
+            trace.selectedTarget = g_rowsChoice.selectedTarget;
+            trace.selectedDraws = g_rowsChoice.selectedDraws;
+            trace.rejectedWrites = g_rowsChoice.rejectedWrites;
         }
         const RigidDrawRows& draw = g_rigidDraw[eye];
         if (draw.seen && draw.frame == g_rowsFrame) {
@@ -3418,6 +3635,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             trace.observedEvictionsAtDraw = draw.observedEvictionsAtDraw;
             trace.drawResource = reinterpret_cast<uintptr_t>(draw.resource);
             trace.drawVsHash = draw.vsHash;
+            trace.drawTarget = draw.tag;
             if (draw.observed) trace.cameraDrawFlags |= kDrawWriteObserved;
             if (draw.valid) {
                 trace.cameraDrawFlags |= kDrawRowsValid;
@@ -3755,8 +3973,20 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 }
             } else {
                 ID3D11ComputeShader* mvCs = motionShader(ctx, diagnostics);
-                const bool traceRequested = eye == 0 && g_eyeRunLeft > 0 &&
-                                            g_eyeRunTaken < kEyeRun && !amdEngine && !intelEngine;
+                const bool eyeRunTrace = eye == 0 && g_eyeRunLeft > 0 &&
+                                         g_eyeRunTaken < kEyeRun && !amdEngine && !intelEngine;
+                // TEMPORARY, the blend probe (blend_probe.h): a collecting capture wants eye 0's per-pixel decisions too. The same
+                // capture-only shader variant, which leaves the production motion output as it was.
+                const bool probeTrace = eye == 0 && blendProbeGridWanted();
+                if (probeTrace && (amdEngine || intelEngine))
+                    blendProbeGridRefuse("the upscaler path is not NVIDIA's: the capture-only decision shader runs only for DLSS");
+                const bool traceRequested = eyeRunTrace || (probeTrace && !amdEngine && !intelEngine);
+                // The blend probe's decision texture (65 MB at the DLAA size) is not kept past its capture; an eye run releases its own
+                // with its artifacts, so only a texture nobody is waiting for goes.
+                if (!traceRequested && eye == 0 && e.dlDecision && g_eyeRunLeft <= 0 && !g_eyeRunReady) {
+                    if (e.dlDecisionUav) { e.dlDecisionUav->Release(); e.dlDecisionUav = nullptr; }
+                    e.dlDecision->Release(); e.dlDecision = nullptr;
+                }
                 // The size to come back at: the frame's own, or the larger
                 // one asked for (DLSS proper).
                 const uint32_t oW = (outW && outH && (outW != w || outH != h)) ? outW : w;
@@ -3806,11 +4036,17 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     ID3D11ComputeShader* traceCs = motionTraceShader(ctx);
                     traceReady = traceCs && ensureDecisionTexture(dev, e, w, h);
                     if (traceReady) mvCs = traceCs;
-                    else g_eyeDecisions[g_eyeRunTaken].error = traceCs ? "decision_texture_unavailable"
-                                                                       : "decision_shader_unavailable";
+                    else {
+                        if (eyeRunTrace) g_eyeDecisions[g_eyeRunTaken].error = traceCs ? "decision_texture_unavailable"
+                                                                                       : "decision_shader_unavailable";
+                        if (probeTrace) blendProbeGridRefuse(traceCs ? "the decision texture could not be made"
+                                                                      : "the capture-only decision shader could not be created");
+                    }
                 } else if (eye == 0 && g_eyeRunLeft > 0 &&
                            g_eyeRunTaken < kEyeRun && (amdEngine || intelEngine)) {
                     g_eyeDecisions[g_eyeRunTaken].error = "non_nvidia_trace_unsupported";
+                } else if (probeTrace && !made) {
+                    blendProbeGridRefuse("the pass's own textures were not made this frame");
                 }
                 if (made && setParams(ctx, p)) {
                     if(uiTrack && e.dlSubmitUav && !g_csUiResolveTried) {
@@ -3938,7 +4174,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     }
                     ctx->CSSetShaderResources(0, srvCountM, nullSrvM);
                     ctx->CSSetUnorderedAccessViews(0, traceReady ? 8 : 7, nullUavM, nullptr);
-                    if (traceReady) {
+                    if (traceReady && eyeRunTrace) {
                         EyeDecisionFrame& decision = g_eyeDecisions[g_eyeRunTaken];
                         uint32_t cw=0,ch=0,cx=0,cy=0;
                         if (stageEyeCrop(ctx,e.dlDecision,&g_eyeDecisionStaging[g_eyeRunTaken],&cw,&ch,
@@ -3948,6 +4184,23 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                             decision.decisionCrop[2]=cw;decision.decisionCrop[3]=ch;
                             decision.error="dlss_treatment_failed";
                         } else decision.error="decision_stage_failed";
+                    }
+                    // TEMPORARY, the blend probe: the window of this eye's decisions, depth, coverage and bias, staged for a read at the
+                    // next frame boundaries. Read-only copies of the pass's textures; nothing it binds or writes changes. The camera term is
+                    // the pass's own delta rotation (the trace of dR0..2) and the world translation (tvCam) for this frame.
+                    if (traceReady && probeTrace) {
+                        BlendGridIn gi;
+                        gi.decision = e.dlDecision;
+                        gi.depth = e.dlDepth;
+                        gi.coverage = coverageMask;
+                        gi.bias = e.dlMask;
+                        gi.w = w;
+                        gi.h = h;
+                        gi.sceneFrame = g_rowsFrame;
+                        gi.rotTrace = p.dR0[0] + p.dR1[1] + p.dR2[2];
+                        gi.transLen = std::sqrt(p.tvCam[0] * p.tvCam[0] + p.tvCam[1] * p.tvCam[1] + p.tvCam[2] * p.tvCam[2]);
+                        gi.transValid = p.tvCam[3] != 0.0f;
+                        blendProbeGridOffer(ctx, gi);
                     }
                     if (traceReady) {
                         ctx->CSSetUnorderedAccessViews(7,1,&savedTraceUav,nullptr);
@@ -4185,6 +4438,15 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     // here on every usedDlaa path, UI-resolved or copied
                     // straight from e.dlOut above.
                     lumaProbeSample(ctx, usedDlaa ? e.dlSubmit : nullptr, eye, 1);
+                    // I-2, the sky ring (diag.sky_ring, TEMPORARY; docs/sky-flicker-2026-10-13.md): one small dispatch over the eye's far-depth samples,
+                    // on the textures this frame's upscaler was handed and what it answered. The key off costs the branch. Timed by the census as
+                    // "sky ring" (nested inside the temporal whole, in no total); a window without the key reads "sky ring -".
+                    if (usedDlaa && skyRingOn()) {
+                        gpuCensusBegin(ctx, GpuCensusSection::DoorSkyRing);
+                        skyRingEyeFrame(dev, ctx, static_cast<uint32_t>(eye), g_rowsFrame, e.dlColourSrv, e.dlOutSrv, e.dlMvSrv, e.dlDepthSrv,
+                                        w, h, oW, oH, projA, zcWritten);
+                        gpuCensusEnd(ctx, GpuCensusSection::DoorSkyRing);
+                    }
                 }
             }
         }
@@ -4481,28 +4743,69 @@ void temporalPassDumpHistory(const char* trigger) {
     Log::get().note(
         "TCAM legend: choice flags 1 valid,2 bound seen,4 bound write observed,8 selected bound,"
         "10 continuous,20 identical-to-previous twin present,40 twin fallback,80 resync,100 refollow,"
-        "200 bound rows valid. Draw flags 1 eligible draw seen,2 mapped write observed,4 rows valid,"
+        "200 bound rows valid,2000 chosen by the nearest-write rule (fix.camera_nearest),4000 replaced by the jump guard (fix.camera_jump_guard),"
+        "8000 the eye-target rule rejected a write this frame. Draw flags 1 eligible draw seen,2 mapped write observed,4 rows valid,"
         "8 previous draw rows valid,10 same resource,20 same observed write,40 same rows,80 selection later. "
+        "rt= is the render target the selected write's first following draw went into (WxH:DXGI format/rtv or dsv/colour targets bound; - when no draw "
+        "followed it); drt= is the tagged eye draw's; burst= is the frame's offset in a burst of camera writes (- outside one) and wr= the frame's full "
+        "write count over its quiet baseline; rej= the writes the eye-target rule rejected (not eye-sized, or drawn into the submitted "
+        "eye texture itself); dr= the draws made between the selected write and the next write (a write the scene was drawn with has hundreds, an orphan "
+        "few). "
+        "TEMP rot= and mv= are the selected rows' rotation (deg) and translation (m) from the previous same-eye frame (gap= when that is not the previous "
+        "frame), and ev=N marks a row inside a camera-row event of N frames. "
         "Rows are literal scene rows; their origin is not assumed to be headset centre or eye pose. "
         "Detailed rows follow for the newest %zu of %zu eye calls; %zu older calls retain TEMP only.",
         entries.size() - tcamFirst, entries.size(), tcamFirst);
     if(entries.empty())Log::get().note("TEMP no temporal submissions recorded; this is not evidence that AA ran successfully.");
+
+    // I-1 (docs/sky-flicker-2026-10-13.md): the selected rows' step from the previous same-eye frame on every row, and the events (an excursion of one
+    // to three frames over 0.5 deg or 0.05 m that returns) with their frames, the leader-to-partner gaps and the period. CPU only, on the history.
+    std::vector<camevents::Row> evRows(entries.size());
+    for (size_t i = 0; i < entries.size(); ++i) {
+        evRows[i].frame = entries[i].frame;
+        evRows[i].eye = entries[i].eye;
+        evRows[i].qpc = static_cast<int64_t>(entries[i].qpc);
+        evRows[i].valid = (entries[i].cameraChoiceFlags & kChoiceValid) != 0;
+        std::memcpy(evRows[i].rows, entries[i].selectedRows, sizeof(evRows[i].rows));
+    }
+    std::vector<camevents::Step> evSteps(entries.size());
+    if (!entries.empty()) camevents::computeSteps(evRows.data(), evRows.size(), evSteps.data());
+    const std::vector<camevents::Event> events = entries.empty() ? std::vector<camevents::Event>{} : camevents::detectEvents(evRows.data(), evRows.size());
+    {
+        std::vector<uint32_t> distinct;
+        for (const auto& r : evRows) if (r.valid) distinct.push_back(r.frame);
+        std::sort(distinct.begin(), distinct.end());
+        distinct.erase(std::unique(distinct.begin(), distinct.end()), distinct.end());
+        const camevents::Summary sum = camevents::summarize(events, static_cast<uint32_t>(distinct.size()), double(freq.QuadPart));
+        char line[900];
+        if (camevents::formatSummary(line, sizeof(line), sum, events) > 0) Log::get().note("%s", line);
+        else Log::get().note("camera-row events: the summary did not fit its line (%u events)", sum.events);
+    }
     size_t entryIndex = 0;
     for(const auto& e:entries) {
+        const size_t ei = entryIndex;
         const double ago=freq.QuadPart?double(int64_t(e.qpc)-now.QuadPart)*1000.0/double(freq.QuadPart):0;
+        char stepText[64] = "";
+        camevents::formatStep(stepText, sizeof(stepText), evSteps[ei]);
+        char evText[16] = "";
+        if (const uint32_t run = camevents::eventCovering(events, e.frame)) std::snprintf(evText, sizeof(evText), " ev=%u", run);
         Log::get().note("TEMP %+.1fms f%u eye=%u flags=%X events=%X inputs=%X out=%u size=%ux%u->%ux%u "
-            "jitter=(%+.5f,%+.5f) world=(%+.7g,%+.7g,%+.7g)",
+            "jitter=(%+.5f,%+.5f) world=(%+.7g,%+.7g,%+.7g)%s%s",
             ago,e.frame,e.eye,e.flags,e.events,e.inputs,e.output,e.width,e.height,e.outputWidth,e.outputHeight,
             double(e.jitterX),double(e.jitterY),double(e.worldTranslation[0]),double(e.worldTranslation[1]),
-            double(e.worldTranslation[2]));
+            double(e.worldTranslation[2]),stepText,evText);
         if (entryIndex++ < tcamFirst) continue;
+        char rtText[48] = "-", drtText[48] = "-", burstText[48] = "";
+        camtag::formatTarget(rtText, sizeof(rtText), e.selectedTarget);
+        camtag::formatTarget(drtText, sizeof(drtText), e.drawTarget);
+        camtag::formatBurst(burstText, sizeof(burstText), g_burst, e.frame);
         Log::get().note(
             "TCAM f%u eye=%u cf=%X df=%X sel=%p:%u bound=%p:%u twin=%u "
             "cand=%u/%u/%u/%u writes=%u/%u evict=%u draw=%p:%u@%u/%u evict=%u vs=%016llX "
             "sel-draw=(%+.9g,%+.9g,%+.9g;%.7gdeg) draw-delta=(%+.9g,%+.9g,%+.9g;%.7gdeg) "
             "proj=(%+.9g,%+.9g)/(%+.9g,%+.9g) "
             "S=[%+.9g,%+.9g,%+.9g,%+.9g;%+.9g,%+.9g,%+.9g,%+.9g;%+.9g,%+.9g,%+.9g,%+.9g] "
-            "D=[%+.9g,%+.9g,%+.9g,%+.9g;%+.9g,%+.9g,%+.9g,%+.9g;%+.9g,%+.9g,%+.9g,%+.9g]",
+            "D=[%+.9g,%+.9g,%+.9g,%+.9g;%+.9g,%+.9g,%+.9g,%+.9g;%+.9g,%+.9g,%+.9g,%+.9g] rt=%s drt=%s%s rej=%u dr=%u",
             e.frame,e.eye,e.cameraChoiceFlags,e.cameraDrawFlags,
             reinterpret_cast<void*>(static_cast<uintptr_t>(e.selectedResource)),e.selectedSeq,
             reinterpret_cast<void*>(static_cast<uintptr_t>(e.boundResource)),e.boundLatchSeq,e.twinSeq,
@@ -4521,9 +4824,54 @@ void temporalPassDumpHistory(const char* trigger) {
             double(e.selectedRows[8]),double(e.selectedRows[9]),double(e.selectedRows[10]),double(e.selectedRows[11]),
             double(e.drawRows[0]),double(e.drawRows[1]),double(e.drawRows[2]),double(e.drawRows[3]),
             double(e.drawRows[4]),double(e.drawRows[5]),double(e.drawRows[6]),double(e.drawRows[7]),
-            double(e.drawRows[8]),double(e.drawRows[9]),double(e.drawRows[10]),double(e.drawRows[11]));
+            double(e.drawRows[8]),double(e.drawRows[9]),double(e.drawRows[10]),double(e.drawRows[11]),
+            rtText,drtText,burstText,e.rejectedWrites,e.selectedDraws);
     }
     Log::get().note("--- end temporal submission history ---");
+
+    // P3 (reviews/vr-view-caches-2026-10-13.md): the frames in which Elite rendered a small square deferred view of its own -- four colour targets, a depth
+    // view of 1024 or less, square -- with the draws made into it, the game-side caller's RVA, and the camera writes that were drawn into it (their first
+    // rows, if any). Then the join: for each camera-row event, was there a mini-render that frame or the frame before? The mini ring and this dump run on
+    // the frame path; a torn read costs one line, nothing else.
+    {
+        char line[400];
+        if (minirender::formatSummary(line, sizeof(line), g_mini, g_miniFramesSeen) > 0) Log::get().note("%s", line);
+        const std::vector<uint32_t> miniFrames = g_mini.frames();
+        const size_t firstShown = miniFrames.size() > 40 ? miniFrames.size() - 40 : 0;
+        if (firstShown) Log::get().note("P3 frames: the newest 40 of %zu are listed", miniFrames.size());
+        for (size_t i = firstShown; i < miniFrames.size(); ++i) {
+            const minirender::Frame* f = g_mini.find(miniFrames[i]);
+            if (f && minirender::formatFrame(line, sizeof(line), *f) > 0) Log::get().note("%s", line);
+        }
+        std::vector<uint32_t> eventFrames;
+        for (const auto& ev : events) eventFrames.push_back(ev.frame);
+        const uint32_t newestKept = g_rowsFrame;
+        const uint32_t oldestKept = newestKept > minirender::kKeepFrames ? newestKept - minirender::kKeepFrames : 0u;
+        const minirender::Join join = minirender::joinEvents(g_mini, eventFrames, oldestKept, newestKept);
+        if (minirender::formatJoin(line, sizeof(line), join) > 0) Log::get().note("%s", line);
+        // One line per event with its answer, up to 24.
+        for (size_t i = 0; i < events.size() && i < 24; ++i) {
+            const uint32_t f = events[i].frame;
+            const bool a = g_mini.find(f) != nullptr, b = g_mini.find(f - 1) != nullptr;
+            Log::get().note("P3 event f%u run=%u: mini-render same frame=%s, frame before=%s", f, events[i].run, a ? "yes" : "no", b ? "yes" : "no");
+        }
+    }
+
+    // I-2: the sky ring's lines around each event, from the ring (read back without waiting; they follow this dump a few frames later), or the
+    // "no samples" line at once when the ring never ran.
+    {
+        std::vector<std::pair<uint32_t, uint32_t>> evPairs;
+        for (const auto& ev : events) evPairs.emplace_back(ev.frame, ev.run);
+        std::vector<SkyJoinRow> joinRows(entries.size());
+        for (size_t i = 0; i < entries.size(); ++i) {
+            joinRows[i].frame = entries[i].frame;
+            joinRows[i].eye = entries[i].eye;
+            joinRows[i].have = evSteps[i].have && evSteps[i].gap == 1;
+            joinRows[i].rotDeg = evSteps[i].rotDeg;
+            joinRows[i].mvM = evSteps[i].mvM;
+        }
+        skyRingRequestDump(trigger ? trigger : "diagnostic request", evPairs, joinRows);
+    }
 }
 
 // Engine motion's diagnostics (the 2026-09-23 performance review, item 1):
@@ -4556,6 +4904,30 @@ void temporalPassConfigure(Config& cfg) {
         g_boundLatchSeq = 0;
         g_boundLatchValid = false;
         g_boundLatchRowsValid = false;
+        g_pendingTagIdx = -1;
+        g_lastWriteIdx = -1;
+        g_miniBound = false;
+        detail::g_cameraDrawWatch = false;
+    }
+    // The sky-flicker build's TEMPORARY keys (docs/sky-flicker-2026-10-13.md), both default off, both live (this runs on every config reload), VR only: the
+    // flat allow-list lists neither, so flat reads off. A change is told once, with the rule that wins when two pick rules are on.
+    {
+        const bool nearest = cfg.getString("fix.camera_nearest", "off") == "on";
+        const bool guardAsked = cfg.getString("fix.camera_jump_guard", "off") == "on";
+        static bool told = false;   // said once even when both read off, so a log names the state it was flown in
+        const bool changed = nearest != g_nearKeyOn || guardAsked != g_jumpKeyAsked;
+        g_nearKeyOn = nearest;
+        g_jumpKeyAsked = guardAsked;
+        if (!runtimeFlatProfile() && (!told || changed)) {
+            told = true;
+            Log::get().note(
+                "temporal camera keys (TEMPORARY A/B): "
+                "fix.camera_nearest=%s (the continuous write nearest the last pick replaces a legacy pick beyond its limit), fix.camera_jump_guard=%s%s.",
+                nearest ? "on" : "off", guardAsked ? "on" : "off",
+                (nearest && guardAsked) ? " -- ASKED but superseded: with both pick rules on, the nearest-write rule wins and the jump guard only counts"
+                                        : "");
+        }
+        skyRingConfigure(cfg.getString("diag.sky_ring", "off") == "on");
     }
     // The same test native_temporal.cpp's Settings::dlaa makes (flags bit 1
     // at the treat): only an external engine (dlaa, dlss, fsr) touches NGX
@@ -4905,8 +5277,18 @@ void temporalPassNoteSceneWrite(const void* res, const void* data, uint32_t byte
     // earlier valid write from the same buffer.
     if (!rowsValid) return;
     ++g_rowsWrites;
-    RowsWrite& w = g_rowsRing[g_rowsSeq % kRowsRing];
+    const uint32_t slot = g_rowsSeq % kRowsRing;
+    RowsWrite& w = g_rowsRing[slot];
     w.buf = res;
+    // The next draw tags this write with its render target (temporalPassNoteDraw). A write already waiting loses its chance: a write no draw
+    // followed stays unknown, and an unknown write is never rejected.
+    w.tag = camtag::Target{};
+    closeWriteDraws();
+    w.drawBase = detail::g_cameraDrawCount;
+    w.drawsAfter = 0;
+    g_lastWriteIdx = static_cast<int>(slot);
+    g_pendingTagIdx = static_cast<int>(slot);
+    detail::g_cameraDrawWatch = true;
     memcpy(w.rows, f, sizeof(w.rows));
     // The projection's z row sits at row 198 of the same block (float
     // offset 792), read the column-vector way the x and y rows' off-centre
@@ -4986,6 +5368,7 @@ void temporalPassNoteRigidDraw(int eye, const void* resource, uint64_t vertexSha
     sample.writesAtDraw = g_rowsWrites;
     sample.observedWritesAtDraw = g_rowsObservedWrites;
     sample.observedEvictionsAtDraw = g_rowsObservedEvictions;
+    sample.tag = currentTargetTag();   // once per eye per frame; the eye's own target is the reference the tags are read against
     const ObservedRowsWrite* observed = observedRowsCurrent(resource);
     if (observed) {
         sample.observed = true;
@@ -4997,6 +5380,79 @@ void temporalPassNoteRigidDraw(int eye, const void* resource, uint64_t vertexSha
         }
     }
     g_rigidDraw[eye] = sample;
+}
+
+namespace {
+// The game module's extent and the first return address of this thread's stack inside it, as an RVA (0 when none): P3's "caller RVA". One walk per
+// frame at most, on the first bind of a mini-render pass.
+uintptr_t gameImageBase() {
+    static const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    return base;
+}
+uintptr_t gameImageSize() {
+    static const uintptr_t size = [] {
+        const uintptr_t base = gameImageBase();
+        if (!base) return uintptr_t(0);
+        const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+        if (dos->e_magic != IMAGE_DOS_SIGNATURE) return uintptr_t(0);
+        const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+        if (nt->Signature != IMAGE_NT_SIGNATURE) return uintptr_t(0);
+        return static_cast<uintptr_t>(nt->OptionalHeader.SizeOfImage);
+    }();
+    return size;
+}
+uint32_t firstGameFrameRva() {
+    void* frames[32] = {};
+    const USHORT n = CaptureStackBackTrace(1, 32, frames, nullptr);
+    const uintptr_t base = gameImageBase(), size = gameImageSize();
+    if (!base || !size) return 0;
+    for (USHORT i = 0; i < n; ++i) {
+        const uintptr_t a = reinterpret_cast<uintptr_t>(frames[i]);
+        if (a >= base && a < base + size) return static_cast<uint32_t>(a - base);
+    }
+    return 0;
+}
+}  // namespace
+
+// The first draw after a camera-block write tags the write with the render target it draws into (camera_target_tag.h); and, while a mini-render pass is
+// bound (P3), counts the pass's draws. Called by vscreen.cpp's draw thunks on the owner context while temporalPassWantsDraw() is true.
+void temporalPassNoteDraw(ID3D11DeviceContext* ctx) {
+    (void)ctx;
+    if (g_pendingTagIdx >= 0) {
+        RowsWrite& w = g_rowsRing[g_pendingTagIdx];
+        g_pendingTagIdx = -1;
+        if (w.valid && w.frame == g_rowsFrame) {
+            w.tag = currentTargetTag();
+            if (g_miniBound && w.tag.known()) g_mini.noteWrite(g_rowsFrame, w.rows);   // P3: this camera write was drawn into a mini view
+        }
+    }
+    if (g_miniBound) {
+        g_mini.noteDraw(g_rowsFrame);
+        ++g_miniWindowDraws;
+    }
+    detail::g_cameraDrawWatch = g_miniBound;
+}
+
+// An OM set just bound `colours` render targets (the binding shadow already holds the new views). P3: four or more colour targets with a small square
+// depth view start a mini-render pass; the first bind of a frame walks the stack to the game's caller and keeps its RVA.
+void temporalPassNoteOmSet(unsigned colours) {
+    if (!detail::g_temporalPassWantedFssChrome) return;
+    g_omColours = colours;
+    bool mini = false;
+    if (colours >= minirender::kMinColours) {
+        ResourceInfo info;
+        void* dsv = bindingGet(BindSlot::Dsv0);
+        if (dsv && bindingResolve(dsv, &info) && info.isTexture2D && minirender::isMiniBind(colours, info.a, info.b)) {
+            mini = true;
+            const bool first = !g_mini.find(g_rowsFrame);
+            const uint32_t rva = first ? firstGameFrameRva() : 0u;
+            g_mini.notePass(g_rowsFrame, info.a, info.b, colours, rva);
+            ++g_miniWindowPasses;
+            if (rva && !g_miniWindowRva) g_miniWindowRva = rva;
+        }
+    }
+    g_miniBound = mini;
+    detail::g_cameraDrawWatch = mini || g_pendingTagIdx >= 0;
 }
 
 void temporalPassNoteHead(int eye, const float* prevPose, const float* nowPose,
@@ -5011,6 +5467,40 @@ void temporalPassNoteHead(int eye, const float* prevPose, const float* nowPose,
     e.headNoted = true;
 }
 
+// The sky-flicker build's 30 s lines (docs/sky-flicker-2026-10-13.md), on one clock read at the frame boundary: the three A/B arms and P3. The A/B lines
+// print with their keys off too (the counts run either way: they say what the arm would have done on the flown track); no line in a window means the
+// chooser never ran in it (no frame was treated), not that the arm saw nothing. P3's line prints "none seen" when no mini-render happened, distinct from
+// a build without the probe (no line at all).
+static void temporalPassSkyDiagTick() {
+    const int64_t now = qpcNow();
+    const int64_t freq = qpcFrequency();
+    if (g_diagWindowTicks == 0) {
+        g_diagWindowTicks = now;
+        return;
+    }
+    if (freq <= 0 || now - g_diagWindowTicks < 30 * freq) return;
+    g_diagWindowTicks = now;
+    char line[512];
+    if (g_eyeTargetStats.frames && camtag::formatReport(line, sizeof(line), g_eyeTargetStats) > 0) Log::get().note("%s", line);
+    camtag::resetWindow(g_eyeTargetStats);
+    if (g_nearStats.frames && camnearest::formatReport(line, sizeof(line), g_nearStats, g_nearKeyOn) > 0) Log::get().note("%s", line);
+    camnearest::resetWindow(g_nearStats);
+    const char* jumpKey = jumpGuardApplies() ? "on" : (g_jumpKeyAsked ? "superseded" : "off");
+    if (g_jumpStats.frames && jumpguard::formatReport(line, sizeof(line), g_jumpStats, jumpKey) > 0) Log::get().note("%s", line);
+    jumpguard::resetWindow(g_jumpStats);
+    // P3: the mini-render (a 256x256-class deferred view: four colour targets and a small square depth view) in this window.
+    if (g_miniWindowHits) {
+        Log::get().note("temporal P3 mini-render: frames=%u with=%u (%.1f%%) pass_binds=%u draws=%u first_caller_rva=0x%X",
+                        g_miniWindowFrames, g_miniWindowHits,
+                        g_miniWindowFrames ? 100.0 * g_miniWindowHits / g_miniWindowFrames : 0.0,
+                        g_miniWindowPasses, g_miniWindowDraws, g_miniWindowRva);
+    } else {
+        Log::get().note("temporal P3 mini-render: frames=%u with=0 (none seen in this window) pass_binds=%u", g_miniWindowFrames, g_miniWindowPasses);
+    }
+    g_miniWindowFrames = g_miniWindowHits = g_miniWindowPasses = g_miniWindowDraws = 0;
+    g_miniWindowRva = 0;
+}
+
 void temporalPassFrameBoundary() {
     g_eyeFinalClock.boundary(g_eyeFinalRun.armed);
     if (!detail::g_temporalPassWantedFssChrome) return;
@@ -5021,6 +5511,16 @@ void temporalPassFrameBoundary() {
             g_prevRigidDraw[eye] = RigidDrawRows{};
         }
     }
+    // The frame's full camera-write count, for the burst offset the dump joins by frame; P3's window; no write waits for a draw across a frame.
+    closeWriteDraws();
+    g_burst.push(g_rowsFrame, g_rowsWrites);
+    ++g_miniWindowFrames;
+    if (g_mini.find(g_rowsFrame)) ++g_miniWindowHits;
+    if (g_miniFramesSeen < minirender::kKeepFrames) ++g_miniFramesSeen;
+    g_pendingTagIdx = -1;
+    g_miniBound = false;
+    detail::g_cameraDrawWatch = false;
+    temporalPassSkyDiagTick();
     ++g_rowsFrame;
     g_rowsWritesSum += g_rowsWrites;
     ++g_rowsFramesSum;
@@ -5494,6 +5994,7 @@ static void beginEyeRun() {
 void temporalPassShutdown() {
     if(g_eyeFinalRun.armed)writeFinalEyeRun(nullptr,"shutdown_missing_final");
     { std::lock_guard<std::mutex> lock(g_temporalHistoryMutex);g_temporalHistory.clear(); }
+    skyRingShutdown();   // stops the dispatches and drops the waiting dumps; the ring itself is left to the process (sky_ring.cpp)
     dlaaShutdown();
     fsr3Shutdown();
     // No xessShutdown here: it signals, flushes and waits on the GPU, and this teardown can run under the loader lock

@@ -192,7 +192,9 @@ cbuffer P : register(b0) {
     uint   useMult;    // 1: a multiply drew into M this frame
     uint2  pad;
 };
-[numthreads(8, 8, 1)]
+// 32x8 (ui_layer_shaders.h kUiLayerCompositeGroupX/Y), not 8x8: at the eye's size the 8x8 group launches 254,000 groups
+// and the launch, not the bytes, is the cost (0.120 ms an eye against 0.090).
+[numthreads(32, 8, 1)]
 void main(uint3 id : SV_DispatchThreadID) {
     if (id.x >= outSize.x || id.y >= outSize.y) return;
     int2 p = region.xy + int2(id.xy);
@@ -221,6 +223,61 @@ void main(uint3 id : SV_DispatchThreadID) {
     float3 c = mode == 1 ? l.rgb + float3(0.0, 0.08, 0.25) * (1.0 - l.a * dot(m, 1.0 / 3.0))
                          : l.rgb + f.rgb * l.a * m;
     Out[id.xy] = float4(saturate(c), f.a);
+}
+)HLSL";
+
+// The same composite, in place: the frame is the UAV, read and written by the
+// one thread that owns the texel, so there is no output texture and no copy of
+// the pixels the layer does not touch. Arithmetic is the out-of-place shader's
+// line for line (same loads, same order, same saturate and store), so the bytes
+// match; a texel whose layer is exactly "nothing here" (0,0,0,1, no multiply)
+// would store its own value back and is skipped, which is also exact.
+// Needs a typed UAV load of the frame's format (D3D11_FORMAT_SUPPORT2_UAV_TYPED_LOAD).
+// The group is 32x8 (ui_layer_shaders.h kUiLayerCompositeGroupX/Y): the same shader at 8x8 is
+// launch-bound at the eye's size.
+constexpr char kUiLayerCompositeInPlaceHlsl[] = R"HLSL(
+RWTexture2D<unorm float4> Frame : register(u0);
+Texture2D<float4> Layer : register(t1);
+Texture2D<float4> Mult : register(t2);
+cbuffer P : register(b0) {
+    int4   region;     // the frame's region in Frame: x0, y0, x1, y1 (exclusive)
+    float4 uv;         // the layer's rectangle for that region: u0, v0, u1, v1
+    float2 layerSize;  // the layer, texels
+    uint2  outSize;    // the region's size
+    uint   mode;       // 0 the composite, 1 the ui_layer debug view
+    uint   useMult;    // 1: a multiply drew into M this frame
+    uint2  pad;
+};
+[numthreads(32, 8, 1)]
+void main(uint3 id : SV_DispatchThreadID) {
+    if (id.x >= outSize.x || id.y >= outSize.y) return;
+    int2 p = region.xy + int2(id.xy);
+    float2 span = (uv.zw - uv.xy) * layerSize / float2(outSize);
+    float2 x0 = uv.xy * layerSize + float2(id.xy) * span;
+    float2 x1 = x0 + span;
+    int2 k0 = max(int2(floor(x0)), int2(0, 0));
+    int2 k1 = min(int2(ceil(x1)) - 1, int2(layerSize) - 1);
+    float4 acc = float4(0, 0, 0, 0);
+    float3 accM = float3(0, 0, 0);
+    float wsum = 0;
+    [loop] for (int j = k0.y; j <= min(k1.y, k0.y + 3); ++j) {
+        float wy = min(x1.y, (float)j + 1.0) - max(x0.y, (float)j);
+        if (wy <= 0) continue;
+        [loop] for (int i = k0.x; i <= min(k1.x, k0.x + 3); ++i) {
+            float wx = min(x1.x, (float)i + 1.0) - max(x0.x, (float)i);
+            if (wx <= 0) continue;
+            acc += Layer.Load(int3(i, j, 0)) * (wx * wy);
+            if (useMult != 0) accM += Mult.Load(int3(i, j, 0)).rgb * (wx * wy);
+            wsum += wx * wy;
+        }
+    }
+    float4 l = wsum > 0 ? acc / wsum : float4(0, 0, 0, 1);
+    float3 m = (useMult != 0 && wsum > 0) ? accM / wsum : float3(1, 1, 1);
+    if (mode == 0 && all(l.rgb == float3(0, 0, 0)) && l.a == 1.0 && all(m == float3(1, 1, 1))) return;
+    float4 f = Frame[p];
+    float3 c = mode == 1 ? l.rgb + float3(0.0, 0.08, 0.25) * (1.0 - l.a * dot(m, 1.0 / 3.0))
+                         : l.rgb + f.rgb * l.a * m;
+    Frame[p] = float4(saturate(c), f.a);
 }
 )HLSL";
 
@@ -564,6 +621,8 @@ constexpr char kHoloResolvePsHlsl[] =
     "    }\n"
     "}\n";
 
+// One 16x16 group holds four of the 8x8 blocks the map is made of (each with its own flag in groupshared and its own texel): one
+// block a group launched 63,000 groups for 3 small elements and cost 0.031 ms an eye against 0.010 (ui_holo_pass_test --bench-groups).
 constexpr char kHoloNearLightCsHlsl[] =
     "Texture2D<float4> Contribution : register(t0);\n"
     "Texture2D<float> ElementDepth : register(t1);\n"
@@ -573,9 +632,11 @@ constexpr char kHoloNearLightCsHlsl[] =
     "cbuffer HoloResolveCB : register(b0) { float floorValue; float share; uint flags; float radiusDepth;\n"
     "                                       float fillerDepth; float pad0; float pad1; float pad2; }\n"
     "float3 srgbEncode(float3 c) { c = saturate(c); return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1.0/2.4) - 0.055; }\n"
-    "groupshared uint lightAny;\n"
-    "[numthreads(8,8,1)] void main(uint3 id : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID, uint3 gid : SV_GroupID) {\n"
-    "    if (all(tid.xy == uint2(0, 0))) lightAny = 0;\n"
+    "groupshared uint lightAny[4];\n"
+    "[numthreads(16,16,1)] void main(uint3 id : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID, uint3 gid : SV_GroupID) {\n"
+    "    uint blk = (tid.y >> 3) * 2u + (tid.x >> 3);\n"
+    "    uint2 loc = tid.xy & 7u;\n"
+    "    if (all(loc == uint2(0, 0))) lightAny[blk] = 0;\n"
     "    GroupMemoryBarrierWithGroupSync();\n"
     "    bool linearBlend = (flags & 1u) != 0;\n"
     "    bool haveTarget = (flags & 2u) != 0;\n"
@@ -600,11 +661,11 @@ constexpr char kHoloNearLightCsHlsl[] =
     "                float lumaF = dot(f, float3(0.299, 0.587, 0.114));\n"
     "                ok = lumaE >= share * lumaF;\n"
     "            }\n"
-    "            if (ok) InterlockedOr(lightAny, 1u);\n"
+    "            if (ok) InterlockedOr(lightAny[blk], 1u);\n"
     "        }\n"
     "    }\n"
     "    GroupMemoryBarrierWithGroupSync();\n"
-    "    if (all(tid.xy == uint2(0, 0))) NearLight[gid.xy] = lightAny ? 1.0 : 0.0;\n"
+    "    if (all(loc == uint2(0, 0))) NearLight[gid.xy * 2u + uint2(blk & 1u, blk >> 1u)] = lightAny[blk] ? 1.0 : 0.0;\n"
     "}\n";
 
 constexpr char kHoloMarkerReticleDepthPsHlsl[] =

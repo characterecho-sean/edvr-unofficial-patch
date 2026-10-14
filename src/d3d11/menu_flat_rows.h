@@ -35,6 +35,7 @@ inline constexpr FlatPageRow kFlatPageRows[] = {
     {"fix", "temporal_aa_model", FlatRowRead::Allowlist},
     {"fix", "render_sharpness",  FlatRowRead::Allowlist},
     {"fix", "ui_quality",        FlatRowRead::Allowlist},
+    {"fix", "optimized_stations", FlatRowRead::Allowlist},
 };
 inline constexpr size_t kFlatPageRowCount = sizeof(kFlatPageRows) / sizeof(kFlatPageRows[0]);
 

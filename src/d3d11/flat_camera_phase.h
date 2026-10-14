@@ -316,6 +316,16 @@ inline const char* flatCameraAdmitName(FlatCameraAdmit a) {
     return "?";
 }
 
+// Whether a call counts as "a kind-3 camera reached the injector" for the Legacy fallback's release run (closeFrame's kind3Called). The
+// four answers are the ones the injector could still have injected on. An Observed call can never inject, so it is a MISS for the release:
+// a hook left observe-only (installed by the VR census, then the process switched to flat on a live profile switch) must not be able to
+// count its way out of Legacy, hand the frame to Upstream, fail three frames and be handed back -- the 69-frame AA on/off cycle of the
+// 2026-10-14 06:21 log. Every other answer is not a kind-3 call at all.
+inline bool flatCameraAdmitCountsForRelease(FlatCameraAdmit a) {
+    return a == FlatCameraAdmit::Inject || a == FlatCameraAdmit::Warming || a == FlatCameraAdmit::NotUpstream ||
+           a == FlatCameraAdmit::GateClosed;
+}
+
 // ---------------------------------------------------------------------------
 // The flush. The injection is transient (the bound pair is restored after the
 // call) but the derived blocks keep the phase they were derived with, and the
@@ -468,10 +478,12 @@ class FlatCameraFrameCore {
 public:
     // legacyPlanExists is flat_runtime's own fact (a legacy projection plan is
     // available); everything else the selection needs the core knows.
-    const FlatCameraOwnershipDecision& begin(bool legacyPlanExists) {
+    // observeOnly: the refresh hook is in observe-only mode (the VR camera census installed it and the process has not re-armed it
+    // for the flat profile). Such a hook can never inject, so Upstream is not certified and Legacy owns from the first flat frame.
+    const FlatCameraOwnershipDecision& begin(bool legacyPlanExists, bool observeOnly = false) {
         flatCameraOwnerBegin(owner_);
         FlatCameraGroupInput in;
-        in.upstreamCertified = true;              // the detour re-verifies kind 3 per call
+        in.upstreamCertified = !observeOnly;      // the detour re-verifies kind 3 per call; an observe-only hook cannot inject at all
         in.upstreamUnsupported = fallback_.active();
         in.legacyEligible = legacyPlanExists;
         decision_ = flatCameraOwnerSelect(owner_, in);

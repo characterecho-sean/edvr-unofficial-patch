@@ -401,6 +401,25 @@ inline bool flatCameraVrQuietFor(uint32_t bits, bool injectedSetEmpty) {
     return (bits & (kFlatCameraVrBitInject | kFlatCameraVrBitObserve)) == 0u && injectedSetEmpty;
 }
 
+// What the flat profile's frame step does with the detour's mode when it takes the frame over. A process that started VR leaves the
+// detour in observe-only mode for its whole life (the census's switch is never cleared by the census) and may leave the route's
+// per-frame word at "driven, pass-through". After a live switch to flat both would keep the flat profile from injecting a single
+// camera. The flat step re-arms the hook for injection once the VR side is provably out of the way: no census observer registered,
+// and the route's word zero or quiet (nothing injecting or observing, no camera waiting for its flush). Until then it changes
+// nothing, and the frame is handed to Legacy (FlatCameraFrameCore::begin's observeOnly argument).
+struct FlatCameraFlatTakeover {
+    bool clearObserveOnly = false;  // the detour may inject again: observe-only is cleared
+    bool clearVrBits = false;       // the route's stale per-frame word is zeroed
+};
+inline FlatCameraFlatTakeover flatCameraFlatTakeover(bool observeOnly, bool observerRegistered, uint32_t vrBits, bool injectedSetEmpty) {
+    FlatCameraFlatTakeover t;
+    if (observerRegistered) return t;
+    if (vrBits != 0u && !flatCameraVrQuietFor(vrBits, injectedSetEmpty)) return t;
+    t.clearVrBits = vrBits != 0u;
+    t.clearObserveOnly = observeOnly;
+    return t;
+}
+
 // The route's frame step is the detour's Present edge: in an INJECTING frame a window the step armed is honoured for the frame
 // window's own expiry (FlatCameraGate::kExpiryMs) from the STEP, even when something else (the census's per-frame re-arm) keeps
 // the gate itself open, so a route that stopped stepping cannot leave the last frame's phase injecting. Every other mode keeps

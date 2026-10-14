@@ -368,13 +368,14 @@ HRESULT WINAPI publishCpu(void* p, const EdvrNativeTimingFrame* frame) {
         const edvr::MapWaitTotals mw = edvr::mapWaitTake();
         edvr::Log::get().note("native timing CPU: seq %llu, wait %.3f ms, submits %.3f ms, "
             "temporal %.3f menu %.3f transfer %.3f compose %.3f ms; wall elapsed includes waits, "
-            "not exclusive CPU or GPU; valid waits %llu invalid waits %llu. Game Map over %llu frames: "
+            "not exclusive CPU or GPU; valid waits %llu invalid waits %llu. Game Map over %llu frames, "
+            "sampled 1 in %u (calls exact; the ms and the past-0.1 ms count are scaled from the sampled Maps): "
             "reads %llu calls %.3f ms/frame, writes %llu calls %.3f ms/frame, longest %.3f ms, %llu past 0.1 ms.",
             (unsigned long long)frame->sequence,snapshot.waitMs,frame->submitMs[0]+frame->submitMs[1],
             frame->temporalMs[0]+frame->temporalMs[1],frame->menuMs[0]+frame->menuMs[1],
             frame->transferMs[0]+frame->transferMs[1],frame->composeMs,
             (unsigned long long)c->validCount,(unsigned long long)c->invalidCount,
-            (unsigned long long)mapFrames,
+            (unsigned long long)mapFrames, (unsigned)edvr::kMapWaitSampleRate,
             (unsigned long long)mw.readCalls, edvr::mapWaitMs(mw.readTicks) / double(mapFrames),
             (unsigned long long)mw.writeCalls, edvr::mapWaitMs(mw.writeTicks) / double(mapFrames),
             edvr::mapWaitMs(mw.longestTicks), (unsigned long long)mw.slowCalls);
@@ -399,7 +400,7 @@ uint32_t WINAPI gpuEnabled(void* p) {
     std::lock_guard<std::mutex> lock(lifetime);
     Context* c = identify(p);
     if (!c || !c->active || c != current) return 0u;
-    const bool enabled = edvr::Config::get().getBool("advanced.app_gpu_timing", true);
+    const bool enabled = edvr::Config::get().getBool("advanced.app_gpu_timing", false);
     if (!enabled) {
         clearDeviceGpu();
         // Older asynchronous work must not reappear after a disable/re-enable.
@@ -426,7 +427,7 @@ HRESULT WINAPI publishDeviceGpu(void* p, const EdvrNativeDeviceGpuSample* sample
            sample->status == EdvrNativeGpuValid)) ||
         !sample->completedAtMs || sample->completedAtMs > now ||
         (now - sample->completedAtMs > 2000 && sample->status != EdvrNativeGpuStale) ||
-        (!edvr::Config::get().getBool("advanced.app_gpu_timing", true) && sample->status != EdvrNativeGpuDisabled) ||
+        (!edvr::Config::get().getBool("advanced.app_gpu_timing", false) && sample->status != EdvrNativeGpuDisabled) ||
         sample->status > EdvrNativeGpuNotSeparate)
         return E_INVALIDARG;
     for (double value : sample->transferMs)
@@ -434,7 +435,8 @@ HRESULT WINAPI publishDeviceGpu(void* p, const EdvrNativeDeviceGpuSample* sample
     for (double value : sample->composeMs)
         if (!finiteNonnegative(value)) return E_INVALIDARG;
     c->lastGpuSequence = sample->sequence;
-    if (sample->status != EdvrNativeGpuPending &&
+    // Off (2026-10-13): the disabled sample is published for the monitor, but its zero spans are not a measurement and are not logged.
+    if (sample->status != EdvrNativeGpuPending && sample->status != EdvrNativeGpuDisabled &&
         (!c->lastGpuLogMs || now - c->lastGpuLogMs >= 5000 ||
          (sample->status == EdvrNativeGpuValid && !c->gpuLoggedValid))) {
         c->lastGpuLogMs = now;

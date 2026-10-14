@@ -8,9 +8,14 @@
 #include <utility>
 
 #include "../common/install_scope.h"
+#include "../common/real_dll_choice.h"
 
 namespace edvr::installer {
 namespace {
+
+// The one settings key the chain lives in. It is one decision for the install, kept once in the shared edvr.ini and read by both
+// profiles (real_dll_choice.h); edvr-flat.ini holds it only to say `none` for the flat profile.
+const char* const kChainKey = "advanced.real_dll";
 
 // The descriptors EDVR writes, by their exact bytes (CRLF, as every writer produces them). Schema 1 is what the installer and the
 // flat edition wrote before the unified install; schema 2 is what install_edvr.py and the unified installer write. A file is EDVR's
@@ -719,7 +724,7 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
                    cur.sha256);
             writePayload("d3d11", dst, "installs EDVR's d3d11.dll in its place");
 
-            forced.emplace_back("advanced.real_dll", say(chainLeaf));
+            forced.emplace_back(kChainKey, say(chainLeaf));
             next.chainTarget = chainLeaf;
             next.chainMod = modName;
 
@@ -769,14 +774,20 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
     // and falls back to the system DLL. Whether the mod we were passing calls
     // through to is still there is asked on every run, including one that did
     // not touch d3d11.dll at all.
+    //
+    // A kept chain is NOT forced into a settings file that already exists: whoever emptied the key to turn the chain off meant it, and
+    // writing it back on every update would undo that. It is written where a settings file is made new (absent, or replaced by the
+    // shipped defaults), which is where it used to be lost -- see the settings block below.
+    bool keptChain = false;
     if (next.chainTarget.empty() && !s.state.chainTarget.empty()) {
         const DllInfo* target = siblingNamed(s.otherD3d11, s.state.chainTarget);
         if (target && target->kind != DllKind::Absent) {
             next.chainTarget = s.state.chainTarget;
             next.chainMod = s.state.chainMod;
+            keptChain = true;
             plan.notes.push_back("Keeping the chain to " + say(s.state.chainTarget) + ".");
         } else {
-            forced.emplace_back("advanced.real_dll", "");
+            forced.emplace_back(kChainKey, "");
             plan.notes.push_back("The mod EDVR was passing calls through to (" +
                                  say(s.state.chainTarget) +
                                  ") is no longer there, so advanced.real_dll has been cleared.");
@@ -1051,6 +1062,57 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
     const std::string* flatBase = s.flatBaseIniText.empty() ? nullptr : &s.flatBaseIniText;
     std::string vrSha, flatSha;
 
+    // ---- advanced.real_dll: set once, in the shared edvr.ini ----
+    // Both profiles read it from there (real_dll_choice.h); edvr-flat.ini may hold `none` to run flat without the chain, or a name to
+    // override it. The chain decision above (`forced`) is routed here instead of being written into every file:
+    //   a chain found in the d3d11.dll slot      -> edvr.ini; a name left in edvr-flat.ini is cleared, the new chain supersedes it
+    //   a chain whose target has gone            -> cleared in edvr.ini, and a name in edvr-flat.ini
+    //   a name only in edvr-flat.ini (the layout before this rule) -> moved: copied to edvr.ini, cleared in edvr-flat.ini
+    //   a kept chain and a new edvr.ini          -> edvr.ini (see "Keeping the chain" above for why only a new one)
+    // `none` in either file is a decision of the user's and is never touched.
+    bool setShared = false, setFlat = false;
+    std::string sharedSet;
+    {
+        bool decided = false;
+        std::string decision;
+        for (auto it = forced.begin(); it != forced.end();) {
+            if (it->first == kChainKey) { decided = true; decision = it->second; it = forced.erase(it); }
+            else ++it;
+        }
+        const std::string sharedNow = s.iniPresent ? realDllTrimmed(iniValue(s.iniText, kChainKey)) : std::string();
+        const std::string flatNow = s.flatIniPresent ? realDllTrimmed(iniValue(s.flatIniText, kChainKey)) : std::string();
+        const bool flatNames = !flatNow.empty() && !realDllIsNone(flatNow) && o.keepSettings;
+        const bool sharedNames = !sharedNow.empty() && !realDllIsNone(sharedNow);
+        if (decided && !decision.empty()) {
+            setShared = true; sharedSet = decision;
+            setFlat = flatNames && wantsFlatIni;
+            if (setFlat)
+                plan.notes.push_back("advanced.real_dll in edvr-flat.ini (" + flatNow + ") is cleared: the chain to " + decision +
+                                     " is kept once, in edvr.ini, and applies to both profiles.");
+        } else if (decided) {
+            setShared = sharedNames;
+            setFlat = flatNames && wantsFlatIni;
+        } else if (flatNames && sharedNow.empty()) {
+            setShared = true; sharedSet = flatNow;
+            setFlat = wantsFlatIni;
+            plan.notes.push_back(
+                "Moving advanced.real_dll (" + flatNow + ") from edvr-flat.ini to edvr.ini, so it is set once and applies to both the VR and "
+                "flat profiles." +
+                (wantsFlatIni ? std::string(" Both files are backed up first; edvr-flat.ini keeps no value for it (write real_dll = none "
+                                            "there to run flat without the chain).")
+                              : std::string(" edvr-flat.ini is outside this install and is left as it is.")));
+        } else if (keptChain && sharedNow.empty() && (!s.iniPresent || !o.keepSettings)) {
+            setShared = true; sharedSet = say(next.chainTarget);
+            plan.notes.push_back("Writing advanced.real_dll = " + sharedSet + " to " +
+                                 (s.iniPresent ? "the new edvr.ini" : "edvr.ini") +
+                                 ": the kept chain applies to both the VR and flat profiles.");
+        }
+    }
+    using IniPairs = std::vector<std::pair<std::string, std::string>>;
+    IniPairs vrForced = forced, flatForced = forced;
+    if (setShared) vrForced.emplace_back(kChainKey, sharedSet);
+    if (setFlat) flatForced.emplace_back(kChainKey, "");
+
     auto manageSettings = [&](bool isFlat) {
         const char* profile = isFlat ? "flat" : "vr";
         const std::string iniName = toUtf8(settingsLeafFor(profile));
@@ -1067,18 +1129,24 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
         // A seed is edvr.ini's text, so it merges against edvr.ini's base. The file's own base is the one
         // edvr-flat.ini.base the flat install that wrote it kept.
         const std::string* base = (isFlat && !seed) ? flatBase : vrBase;
+        // A seed is edvr.ini's text, so it carries the shared chain value; the flat file keeps none (it is the shared file's to hold).
+        IniPairs useForced = isFlat ? flatForced : vrForced;
+        if (seed) {
+            const std::string carried = realDllTrimmed(iniValue(s.iniText, kChainKey));
+            if (!carried.empty() && !realDllIsNone(carried)) useForced.emplace_back(kChainKey, "");
+        }
 
         std::string merged;
         if (seed) {
-            merged = mergeIni(payloadText, s.iniText, base, forced, &plan.merge);
+            merged = mergeIni(payloadText, s.iniText, base, useForced, &plan.merge);
             plan.notes.push_back(
                 "Creating " + iniName + " from your edvr.ini: the flat edition keeps its own "
                 "settings now, and edvr.ini is left exactly as it is.");
         } else if (!ownPresent) {
-            merged = mergeIni(payloadText, std::string(), nullptr, forced, &plan.merge);
+            merged = mergeIni(payloadText, std::string(), nullptr, useForced, &plan.merge);
             plan.notes.push_back("Writing " + iniName + " (every setting at its default).");
         } else if (!o.keepSettings) {
-            merged = mergeIni(payloadText, std::string(), nullptr, forced, &plan.merge);
+            merged = mergeIni(payloadText, std::string(), nullptr, useForced, &plan.merge);
             backup(iniPath, "your " + iniName + ", before it is replaced");
             plan.notes.push_back(
                 "Replacing " + iniName + " with the shipped defaults. Your old file is in the "
@@ -1086,7 +1154,7 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
         } else {
             // The user's text is this edition's own file, so a setting this version dropped is
             // "carried over from your" that file: edvr-flat.ini for the flat edition.
-            merged = mergeIni(payloadText, ownText, base, forced, &plan.merge, iniName.c_str());
+            merged = mergeIni(payloadText, ownText, base, useForced, &plan.merge, iniName.c_str());
             if (merged != ownText) {
                 backup(iniPath, "your " + iniName + ", before it is updated");
 
@@ -1117,6 +1185,27 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
     };
     if (wantsFlatIni) manageSettings(true);
     if (wantsVrIni) manageSettings(false);
+    // A flat-only install does not manage edvr.ini, but the chain lives there: the one value both profiles read. Only that key is
+    // written, into the file as it is (everything else in it stays byte for byte), or into a new file that holds nothing else. A copy
+    // goes to the backup folder first, as for any file this installer changes.
+    if (!wantsVrIni && setShared && (s.iniPresent || !sharedSet.empty())) {
+        const std::wstring sharedPath = settingsPathFor(s.game.dir, "vr");
+        std::string text;
+        if (s.iniPresent) {
+            text = mergeIni(s.iniText, s.iniText, &s.iniText, IniPairs{{kChainKey, sharedSet}}, nullptr);
+        } else {
+            text = "# EDVR settings shared by the VR and flat profiles. advanced.real_dll names the mod EDVR chains through;\r\n"
+                   "# edvr-flat.ini can override it for the flat profile, or say real_dll = none to run flat without it.\r\n"
+                   "[advanced]\r\nreal_dll = " + sharedSet + "\r\n";
+        }
+        if (text != s.iniText) {
+            if (s.iniPresent) backup(sharedPath, "your edvr.ini, before the chain is written to it");
+            writeText(text, sharedPath, "writes advanced.real_dll to edvr.ini");
+            changed = true;
+            plan.notes.push_back(std::string(s.iniPresent ? "Updating" : "Creating") +
+                                 " edvr.ini: advanced.real_dll = " + sharedSet + ", the one place both profiles read it from.");
+        }
+    }
     // The record's settings digest is the VR file's when the scope has one (the file the older records named), else the flat file's.
     next.iniSha = wantsVrIni ? vrSha : flatSha;
 
@@ -1215,11 +1304,8 @@ Plan planUninstall(const Survey& s, const Options& o, const PayloadInfo& p) {
     const std::string installed = installedScope(s);
     const std::string scope = installed.empty() ? std::string("vr") : installed;
     const bool flatEdition = scope == "flat";
-    // What the runtime reads for the chain: the flat one falls back to the shared
-    // edvr.ini until it has a file of its own.
-    const bool runtimeReadsFlatFile = flatEdition && s.flatIniPresent;
-    const std::string& runtimeIniText = runtimeReadsFlatFile ? s.flatIniText : s.iniText;
-    const std::string runtimeIniName = runtimeReadsFlatFile ? "edvr-flat.ini" : "edvr.ini";
+    // The file the chain was read from, for the report: edvr.ini unless the flat file supplied it.
+    std::string runtimeIniName = "edvr.ini";
 
     std::vector<Step> body;
     bool wantBackupDir = false;
@@ -1277,11 +1363,20 @@ Plan planUninstall(const Survey& s, const Options& o, const PayloadInfo& p) {
         // this, uninstalling EDVR silently uninstalls the other mod too: its
         // file is still on disk but under a name nothing loads.
         std::wstring chain = safeSiblingName(s.state.chainTarget, kD3d11);
-        if (chain.empty())
-            chain = safeSiblingName(fromUtf8(iniValue(runtimeIniText, "advanced.real_dll")), kD3d11);
-        // A both install's flat file carries the same chain key; it answers when the VR file does not.
-        if (chain.empty() && scope == "both")
-            chain = safeSiblingName(fromUtf8(iniValue(s.flatIniText, "advanced.real_dll")), kD3d11);
+        // The value the runtime would chain through: the shared edvr.ini's, which the flat file may override (real_dll_choice.h). The
+        // flat file counts for the scopes that install it; a VR install ignores a flat file lying beside it.
+        // A `none` only switches the chain off for a profile; the mod it left parked still has to go back, so a name in either file
+        // answers when the effective value does not.
+        if (chain.empty()) {
+            const std::string sharedValue = iniValue(s.iniText, kChainKey);
+            const std::string flatValue = scope != "vr" ? iniValue(s.flatIniText, kChainKey) : std::string();
+            const RealDllChoice c = chooseRealDll(scope != "vr", flatValue, sharedValue);
+            std::string name = c.value;
+            if (name.empty() && !realDllIsNone(sharedValue)) name = realDllTrimmed(sharedValue);
+            if (name.empty() && !realDllIsNone(flatValue)) name = realDllTrimmed(flatValue);
+            if (!name.empty()) chain = safeSiblingName(fromUtf8(name), kD3d11);
+            if (name == realDllTrimmed(flatValue) && name != realDllTrimmed(sharedValue)) runtimeIniName = "edvr-flat.ini";
+        }
         const DllInfo* target = chain.empty() ? nullptr : siblingNamed(s.otherD3d11, chain);
         if (target && target->kind != DllKind::Absent) {
             rename(target->path, d3d11Path,

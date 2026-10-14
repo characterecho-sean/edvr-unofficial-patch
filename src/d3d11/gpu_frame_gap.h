@@ -220,7 +220,10 @@ inline size_t formatGapDetail(char* buf, size_t cap, const GpuFrameGap::Report& 
         add("p50 %.2f ms, p95 %.2f ms, max %.2f ms over %u pairs of %u valid frames", r.p50Ms, r.p95Ms, r.maxMs, r.pairs,
             r.frames);
     } else {
-        add("no pairs this window (%u valid frames; a frame's neighbour was missing or invalid)", r.frames);
+        if (r.frames == 0)
+            add("no valid frames this window (Application-render GPU timing is off, or none completed)");
+        else
+            add("no pairs this window (%u valid frames; a frame's neighbour was missing or invalid)", r.frames);
     }
     if (r.rejected)
         add(", %u pairs rejected as not comparable (overlapping, or another clock)", r.rejected);

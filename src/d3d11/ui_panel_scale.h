@@ -76,6 +76,11 @@ void uiPanelScaleSetTarget(float target);
 // scene would only shrink them back, so the floats hold the game's own 1080 and 1920.
 void uiPanelScaleSetFlatTemporal(bool on);
 
+// THE VR PROFILE (2026-10-13): the same gate as the flat one, on VR's own temporal anti-aliasing (fix.temporal_aa, as
+// uiLayerConfigure reads it). With it off the panels are the game's own size -- exactly as with the key off -- and the
+// render thread logs one line on each change. Called from uiLayerConfigure before uiPanelScaleSetTarget.
+void uiPanelScaleSetVrTemporal(bool on);
+
 // Once a frame, on the render thread (uiLayerFrameBoundary): the factor from
 // its inputs, written when they have settled on a new value.
 void uiPanelScaleFrameBoundary();

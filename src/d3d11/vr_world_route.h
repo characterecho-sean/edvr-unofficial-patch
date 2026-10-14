@@ -87,7 +87,7 @@ bool vrWorldRouteLayerMayTake();
 void vrWorldRouteNoteEyeTaken(uint32_t eye, uint64_t sequence);
 // The door runs layer-only for this eye in this sequence (the layer took its screen draw).
 bool vrWorldRouteDoorLayerOnly(uint32_t eye, uint64_t sequence);
-// The transition detector reset the eyes' history (boarding, disembarking, a jump, a withheld frame): the route lets go
+// The transition-flash fix reset the eyes' history (boarding, disembarking, a jump, a withheld frame): the route lets go
 // and restarts its warm-up, and the resolver's history resets with it.
 void vrWorldRouteNoteSceneReset();
 // Progress through the current frame's draws, for the camera census (camera_census): the number of game draws the route

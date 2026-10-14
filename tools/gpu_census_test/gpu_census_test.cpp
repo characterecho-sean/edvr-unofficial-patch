@@ -22,10 +22,12 @@
 #include <cstring>
 #include <fstream>
 #include <iterator>
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
+#include "../../src/common/gpu_disjoint_clock.h"
 #include "../../src/common/system_d3d11.h"
 #include "../../src/common/log.h"
 
@@ -56,6 +58,13 @@ void Log::note(const char* fmt, ...) {
 } // namespace edvr
 
 #include "../../src/d3d11/gpu_census.cpp"
+
+// gpu_census.cpp calls the GPU pass profiler's two entry points (gpu_pass_profile.cpp is not linked into this rig,
+// and its own rig is tools\gpu_pass_profile_test): unarmed, the flag stays false and they are never reached.
+namespace edvr {
+namespace detail { bool g_gpuPassCapturing = false; }
+void gpuPassProfileNoteEdvr(ID3D11DeviceContext*, bool) {}
+}
 
 namespace {
 unsigned g_checks = 0;
@@ -154,7 +163,10 @@ void rotationAndRealTimerCase(Device& d) {
     check(gpuTimingBind(d.dev.Get(), d.ctx.Get()), "bind canonical WARP timer owner");
     check(occurrenceCapFor(GpuCensusSection::DoorSharpen) == 4, "K cap: a door section caps at 4 (both eyes, two occurrences each)");
     check(occurrenceCapFor(GpuCensusSection::FrameUiLayerReissues) == 8, "K cap: a per-draw section caps at 8");
-    check(isDoorSection(GpuCensusSection::DoorFssHeal), "section split: the last door section is still door");
+    check(isDoorSection(GpuCensusSection::DoorFssHeal) && isDoorSection(GpuCensusSection::DoorSkyRing),
+          "section split: the last door section (the sky ring's) is still door");
+    check(static_cast<size_t>(GpuCensusSection::DoorSkyRing) + 1 == static_cast<size_t>(GpuCensusSection::FrameHologramPasses),
+          "section split: the sky ring is the last door section, nested inside the whole and in no top-level door total");
     check(!isDoorSection(GpuCensusSection::FrameHologramPasses), "section split: the first in-frame section is not door");
 
     ComPtr<ID3D11RenderTargetView> rtv;
@@ -248,6 +260,7 @@ void rotationAndRealTimerCase(Device& d) {
     const uint64_t deadline = GetTickCount64() + 1500;
     while ((st.sampler.totals.samples == 0 || st.nullSampler.totals.samples == 0) && GetTickCount64() < deadline) {
         gpuCensusFrame(d.ctx.Get());
+        d.ctx->Flush();   // the boundary closed the census scope: its End reaches WARP only with a flush (the game's Present does this)
         if (st.sampler.totals.samples == 0 || st.nullSampler.totals.samples == 0) Sleep(1);
     }
     check(st.sampler.totals.samples > 0,
@@ -264,6 +277,7 @@ void rotationAndRealTimerCase(Device& d) {
         const uint64_t drainBy = GetTickCount64() + 1500;
         while ((st.sampler.totals.samples < 4 || st.nullSampler.totals.samples < 1) && GetTickCount64() < drainBy) {
             gpuCensusFrame(d.ctx.Get());
+            d.ctx->Flush();
             Sleep(1);
         }
         check(st.sampler.totals.samples == 4, "WARP round trip: the door section's four samples all completed before the seed's are taken");
@@ -287,6 +301,7 @@ void rotationAndRealTimerCase(Device& d) {
         const uint64_t seedDeadline = GetTickCount64() + 1500;
         while ((seed.sampler.totals.samples < 2 || seed.nullSampler.totals.samples < 1) && GetTickCount64() < seedDeadline) {
             gpuCensusFrame(d.ctx.Get());
+            d.ctx->Flush();
             if (seed.sampler.totals.samples < 2 || seed.nullSampler.totals.samples < 1) Sleep(1);
         }
         check(seed.sampler.totals.samples == 2 && seed.sampler.totals.invalid == 0,
@@ -550,7 +565,7 @@ void gapCases() {
     logAndResetWindow(start + 30000);
     detail = lineWith("EDVR GPU census, frame gap:");
     check(g_lastLog.find("frame gap - (no pairs);") != std::string::npos && g_lastLog.find("frame gap p50") == std::string::npos &&
-              detail && detail->find("no pairs this window (0 valid frames") != std::string::npos,
+              detail && detail->find("no valid frames this window (Application-render GPU timing is off") != std::string::npos,
           "gap: a window with no spans reads '-', not 0.00, on both lines");
     // One frame alone: valid, but no neighbour.
     freshWindow(start);
@@ -697,7 +712,8 @@ void alteredLineCases() {
     logAndResetWindow(start + 30000);
     line = lineWith("EDVR GPU census, Elite's own draws that EDVR alters");
     check(line && line->find("pool-family draws (EDVR's slot target and shaders) -, "
-                             "UI draws (redirected to EDVR's layer) -, other fix-wrapped draws -;") != std::string::npos &&
+                             "UI draws (redirected to EDVR's layer) -, HUD draws moved into the HDR HUD layer "
+                             "(the game's shading at the layer size) -, other fix-wrapped draws -;") != std::string::npos &&
               line->find("\"-\" means no such draw ran this window") != std::string::npos,
           "altered line: a window with no altered draw prints '-' for all three and says what that means");
     // The timer floor and the spans count include the altered sections' own timers.
@@ -713,6 +729,13 @@ void alteredLineCases() {
     check(line && line->find("UI draws (redirected to EDVR's layer) 0.015 (0.10/frame)") != std::string::npos &&
               g_lastLog.find("timer floor 50.0 us/pair") != std::string::npos && g_lastLog.find("spans timed 2,") != std::string::npos,
           "altered line: a class is corrected by its own null pair ((0.4/2 - 0.1/2) x 0.1 = 0.015), and its spans count in the census's totals");
+    // The overlay's work span pair is accounted on a census line of its own (2026-10-14): without it a span that never ran and one that ran
+    // and failed read the same, and the tile's and the overlay's "--" could not be told apart from a flight log. tools\edvr_log.py --gpu-work-span
+    // parses this text.
+    line = lineWith("EDVR GPU census, the overlay's GPU time: ");
+    check(line && line->find("frame work span: completed ") != std::string::npos && line->find(", skipped ") != std::string::npos &&
+              line->find(", invalid ") != std::string::npos && line->find(", last ") != std::string::npos && line->find(" ms.") != std::string::npos,
+          "work span line: the census prints the frame work span field (completed, skipped, invalid, last)");
 }
 
 // ---- 7: the draws another fix wraps, named fix by fix ---------------------------------------------------------
@@ -765,9 +788,9 @@ void alteredFixCases() {
         ++cycle;
         onlyOwners = onlyOwners && turnOwnerOf(static_cast<GpuCensusSection>(at)) == static_cast<GpuCensusSection>(at);
     } while (at != 0 && cycle < 200);
-    check(onlyOwners && cycle == static_cast<unsigned>(kSections) - kAlteredFixCount + 1 - static_cast<unsigned>(kWorldSections) - static_cast<unsigned>(kSkinSections) && cycle == 20,
-          "turns: the rotation lands only on turn owners, and a cycle is one turn for each section but the later fix ones and the idle world-route and second-skin ones (20: the 22 there were before the terrain's two sections went, 2026-10-01; the key off changes nothing)");
-    // The same cycle once the VR world route's three sections have been called this window: they take turns, 23.
+    check(onlyOwners && cycle == static_cast<unsigned>(kSections) - kAlteredFixCount + 1 - static_cast<unsigned>(kWorldSections) - static_cast<unsigned>(kSkinSections) && cycle == 25,
+          "turns: the rotation lands only on turn owners, and a cycle is one turn for each section but the later fix ones and the idle world-route and second-skin ones (25: the 20 there were after the terrain's two sections went, 2026-10-01, plus the three hologram sub-sections and the moved HDR HUD draw, 2026-10-13, and the sky ring's door section, 2026-10-13; the key off changes nothing)");
+    // The same cycle once the VR world route's three sections have been called this window: they take turns, 28.
     for (size_t i = kWorldFirst; i < kWorldFirst + kWorldSections; ++i) g_section[i].occurrences = 1;
     at = 0;
     cycle = 0;
@@ -778,8 +801,8 @@ void alteredFixCases() {
         if (static_cast<size_t>(at) >= kWorldFirst && static_cast<size_t>(at) < kWorldFirst + kWorldSections)
             worldVisited[static_cast<size_t>(at) - kWorldFirst] = true;
     } while (at != 0 && cycle < 200);
-    check(cycle == 23 && worldVisited[0] && worldVisited[1] && worldVisited[2],
-          "turns: a world-route section that has been called this window takes its turn (23: the 20 and the three)");
+    check(cycle == 28 && worldVisited[0] && worldVisited[1] && worldVisited[2],
+          "turns: a world-route section that has been called this window takes its turn (28: the 20 and the three world ones, then 2026-10-13's five: the hologram sub-sections, the moved HDR HUD draw and the sky ring)");
     for (size_t i = kWorldFirst; i < kWorldFirst + kWorldSections; ++i) g_section[i].occurrences = 0;
     for (auto& s : g_section) s = SectionState{};
     g_section[kAlteredFixFirst + 2].occurrences = 7;
@@ -799,7 +822,7 @@ void alteredFixCases() {
     particle.occurrences = 100;
     owner.turns = 3;
     g_windowFrames = 9;        // gpuCensusFrame counts this frame first: 10
-    g_activeSection = static_cast<int>(GpuCensusSection::AlteredUiLayer);
+    g_activeSection = static_cast<int>(GpuCensusSection::AlteredHdrHud);   // the last class before the fix sections (2026-10-13)
     gpuCensusFrame(nullptr);
     check(g_activeSection == static_cast<int>(GpuCensusSection::AlteredFixFirst),
           "shared turn: the rotation lands on it after the last class");
@@ -1291,8 +1314,8 @@ void skinTurnCases() {
         const size_t a = static_cast<size_t>(at);
         if (a >= kSkinFirst && a < kSkinFirst + kSkinSections) skinVisited[a - kSkinFirst] = true;
     } while (at != 0 && cycle < 200);
-    check(cycle == 20 && !skinVisited[0] && !skinVisited[1] && !skinVisited[2] && !skinVisited[3] && !skinVisited[4],
-          "second skin turns: with none called this window the rotation gives them no turn (the cycle is the 20 it was before they existed)");
+    check(cycle == 25 && !skinVisited[0] && !skinVisited[1] && !skinVisited[2] && !skinVisited[3] && !skinVisited[4],
+          "second skin turns: with none called this window the rotation gives them no turn (the cycle is the 25 it is now: the 20 before they existed and five added on 2026-10-13)");
     for (size_t i = 0; i < kSkinSections; ++i) skinSection(i).occurrences = 1;
     at = 0;
     cycle = 0;
@@ -1303,8 +1326,8 @@ void skinTurnCases() {
         const size_t a = static_cast<size_t>(at);
         if (a >= kSkinFirst && a < kSkinFirst + kSkinSections) skinVisited[a - kSkinFirst] = true;
     } while (at != 0 && cycle < 200);
-    check(cycle == 25 && skinVisited[0] && skinVisited[1] && skinVisited[2] && skinVisited[3] && skinVisited[4],
-          "second skin turns: once called this window each takes its turn (25: the 20 and the five)");
+    check(cycle == 30 && skinVisited[0] && skinVisited[1] && skinVisited[2] && skinVisited[3] && skinVisited[4],
+          "second skin turns: once called this window each takes its turn (30: the 25 and the five)");
     // one of them alone
     for (size_t i = 0; i < kSkinSections; ++i) skinSection(i).occurrences = 0;
     skinSection(3).occurrences = 1;
@@ -1318,7 +1341,7 @@ void skinTurnCases() {
         if (a == kSkinFirst + 3) ++joinTurns;
         else if (a >= kSkinFirst && a < kSkinFirst + kSkinSections) ++otherSkin;
     } while (at != 0 && cycle < 200);
-    check(cycle == 21 && joinTurns == 1 && otherSkin == 0, "second skin turns: the join called alone has one turn a cycle and the others none");
+    check(cycle == 26 && joinTurns == 1 && otherSkin == 0, "second skin turns: the join called alone has one turn a cycle and the others none");
     for (auto& s : g_section) s = SectionState{};
 }
 
@@ -1456,7 +1479,231 @@ void lineLengths() {
     }
 }
 
+// 2026-10-13 instruments: the hologram sub-sections nest in the umbrella's place, the moved HDR draw is an altered class, and the reissue
+// count tells real passes from empty scopes (the section's issued counter; an empty scope never reaches it).
+void instrumentCases() {
+    check(static_cast<size_t>(GpuCensusSection::DoorHoloDepthCopy) == static_cast<size_t>(GpuCensusSection::DoorHologramResolve) + 1 &&
+              static_cast<size_t>(GpuCensusSection::DoorHoloResolveDraw) == static_cast<size_t>(GpuCensusSection::DoorUiResolve) - 1,
+          "instruments: the hologram sub-sections sit between the resolve umbrella and UI resolve");
+    check(isDoorSection(GpuCensusSection::DoorHoloNearLight), "instruments: the hologram sub-sections are door sections (K=4)");
+    check(occurrenceCapFor(GpuCensusSection::DoorHoloResolveDraw) == 4, "instruments: a hologram sub-section caps at the door's 4");
+    check(kDoorBreakdownCount == 12, "instruments: twelve door items after the temporal whole (the profiler's eleven, then the sky ring)");
+    check(GpuCensusSection::AlteredHdrHud > GpuCensusSection::AlteredUiLayer && GpuCensusSection::AlteredHdrHud < GpuCensusSection::AlteredFixFirst,
+          "instruments: the moved HDR draw is an altered class, before the fix sections");
+    check(kAlteredClassSections == 3 && std::strstr(kAlteredNames[2], "HDR HUD") != nullptr, "instruments: the altered class has its name");
+
+    // The issued counter: real passes only. Three occurrences in the window: two issued a pass, one was an empty scope (no note).
+    SectionState& st = g_section[static_cast<size_t>(GpuCensusSection::FrameUiLayerReissues)];
+    const uint64_t before = st.issued;
+    gpuCensusNoteIssued(GpuCensusSection::FrameUiLayerReissues);
+    gpuCensusNoteIssued(GpuCensusSection::FrameUiLayerReissues);
+    check(st.issued - before == 2, "issued: two issued passes are counted, and an empty scope adds nothing");
+    gpuCensusNoteIssued(GpuCensusSection::Count);   // out of range: ignored, never a write past the table
+    check(st.issued - before == 2, "issued: an out-of-range section is ignored");
+    st.issued = before;   // put the window's count back as it was
+}
+
+// ---- the 2026-10-13 flight's failure rate, reproduced: the merged section set with NO application-frame scope open ----------------------------
+// The flight (build 57f5393e, advanced.app_gpu_timing off by default since the AA-off cuts) logged "spans timed 665, failed 4963" a window: with
+// no scope open, every census span opened a TIMESTAMP_DISJOINT of its own and held one of the clock's eight records until its result was polled
+// (four-plus frames later). This drives the real gpuCensusBegin/End/Frame, the real GpuIntervals and GpuTimer and the real DisjointClock over a
+// scripted query backend (a result is readable `latency` frames after its End), with the per-frame span counts of that flight's log: the door
+// sections twice a frame (the whole around four nested ones), the three hologram sub-sections, and the in-frame sections at their counts.
+// The census rotation is the real one, so every merged section takes its turn (the cycle is 25 with the sky ring and the sub-sections).
+struct ScriptedQuery { bool disjoint = false; bool ended = false; unsigned endFrame = 0; };
+struct ScriptedBackend {
+    std::map<ID3D11Asynchronous*, ScriptedQuery> queries;
+    unsigned frame = 0;
+    unsigned latency = 3;
+    uint64_t nextTick = 1000;
+    unsigned disjointBegins = 0;
+};
+HRESULT scriptedCreate(void* user, ID3D11Device* dev, const D3D11_QUERY_DESC* desc, ID3D11Query** out) {
+    const HRESULT h = dev->CreateQuery(desc, out);
+    if (SUCCEEDED(h) && *out) static_cast<ScriptedBackend*>(user)->queries[*out] = ScriptedQuery{desc->Query == D3D11_QUERY_TIMESTAMP_DISJOINT, false, 0};
+    return h;
+}
+HRESULT scriptedBegin(void* user, ID3D11DeviceContext*, ID3D11Asynchronous* q) {
+    auto* b = static_cast<ScriptedBackend*>(user);
+    if (b->queries[q].disjoint) ++b->disjointBegins;
+    return S_OK;
+}
+HRESULT scriptedEnd(void* user, ID3D11DeviceContext*, ID3D11Asynchronous* q) {
+    auto* b = static_cast<ScriptedBackend*>(user);
+    auto& s = b->queries[q];
+    s.ended = true;
+    s.endFrame = b->frame;
+    return S_OK;
+}
+HRESULT scriptedData(void* user, ID3D11DeviceContext*, ID3D11Asynchronous* q, void* out, UINT size, UINT) {
+    auto* b = static_cast<ScriptedBackend*>(user);
+    const auto it = b->queries.find(q);
+    if (it == b->queries.end() || !it->second.ended) return E_FAIL;
+    if (b->frame < it->second.endFrame + b->latency) return S_FALSE;
+    if (it->second.disjoint) {
+        if (size != sizeof(D3D11_QUERY_DATA_TIMESTAMP_DISJOINT)) return E_FAIL;
+        *static_cast<D3D11_QUERY_DATA_TIMESTAMP_DISJOINT*>(out) = {1000000000ull, FALSE};
+        return S_OK;
+    }
+    if (size != sizeof(uint64_t)) return E_FAIL;
+    *static_cast<uint64_t*>(out) = (b->nextTick += 50000);   // 0.05 ms between two successive reads: end > begin
+    return S_OK;
+}
+void scriptedRelease(void*, ID3D11Query* q) noexcept { q->Release(); }
+
+struct FailureRate { uint64_t timed = 0, failed = 0, routeTimed = 0, routeIssued = 0, routeRefused = 0; unsigned disjointBegins = 0; unsigned sectionsTimed = 0; };
+
+// One simulated run of `frames` presented frames. appClockLive models the build: true = advanced.app_gpu_timing on and its frame clock open
+// (the old default: the shared scope is held by the application frame, which this rig does not open, so true here means NOTHING owns a scope -- the
+// flight's failure, produced without touching the census); false = the clock off, so the census opens its own scope (the fix).
+FailureRate simulateCensus(Device& d, ScriptedBackend& backend, unsigned frames, bool appClockLive, unsigned routePairsPerFrame = 3) {
+    for (auto& s : g_section) { s.sampler.reset(d.ctx.Get()); s.nullSampler.reset(d.ctx.Get()); s = SectionState{}; }
+    gpuTimingCensusScopeEnd(d.ctx.Get(), GetTickCount64());
+    g_activeSection = 0;
+    g_activeCalls = g_activeTimed = 0;
+    g_activeStride = 1;
+    g_activeOffset = 0;
+    g_activeNullDone = false;
+    g_windowFrames = 0;
+    g_windowStartMs = GetTickCount64() + 3600000;   // no 30 s window closes during the run
+    detail::g_gpuFrameCommandLive.store(appClockLive, std::memory_order_relaxed);
+    // The scripted GPU clock keeps counting between runs: a query left over from the last run is still read at its own time, not stranded.
+    backend.disjointBegins = 0;
+
+    const auto span = [&](GpuCensusSection section) {
+        gpuCensusBegin(d.ctx.Get(), section);
+        gpuCensusEnd(d.ctx.Get(), section);
+    };
+    // Timer pairs that are not the census's but share its clock: the HUD route's per-draw spans (ui_layer.cpp, g_hdrDrawTimingOn = true in the
+    // flight build) were taking three or more records a frame between them in the flight, so the census found fewer still.
+    // The route's own ring (ui_layer.cpp g_route, kRouteRing): a FIFO of GpuTimers, one begun per pair in the order issued and read oldest first,
+    // stopping at the first not ready. This is what the moved HDR HUD draws' per-draw timers (g_hdrDrawTimingOn) are.
+    constexpr unsigned kRing = 2048;
+    static GpuTimer ring[kRing];
+    unsigned ringHead = 0, ringTail = 0;
+    uint64_t routeIssued = 0, routeRefused = 0, routeRead = 0;
+    Microsoft::WRL::ComPtr<ID3D11Device> routeDev;
+    d.ctx->GetDevice(&routeDev);
+    const struct { GpuCensusSection section; unsigned perFrame; } inFrame[] = {
+        {GpuCensusSection::FrameHologramPasses, 4}, {GpuCensusSection::FrameUiDepthCoverage, 3}, {GpuCensusSection::FramePlanet, 1},
+        {GpuCensusSection::FrameEngineVelocity, 6}, {GpuCensusSection::FrameUiLayerReissues, 60}, {GpuCensusSection::FrameUiLayerHdrSeed, 6},
+    };
+    for (unsigned f = 0; f < frames; ++f) {
+        ++backend.frame;
+        for (int eye = 0; eye < 2; ++eye) {
+            gpuCensusBegin(d.ctx.Get(), GpuCensusSection::DoorTemporalWhole);   // the whole temporal call, the rest nested inside it
+            span(GpuCensusSection::DoorUpscaler);
+            span(GpuCensusSection::DoorMotionPrep);
+            gpuCensusBegin(d.ctx.Get(), GpuCensusSection::DoorHologramResolve);
+            span(GpuCensusSection::DoorHoloDepthCopy);
+            span(GpuCensusSection::DoorHoloNearLight);
+            span(GpuCensusSection::DoorHoloResolveDraw);
+            gpuCensusEnd(d.ctx.Get(), GpuCensusSection::DoorHologramResolve);
+            span(GpuCensusSection::DoorUiResolve);
+            gpuCensusEnd(d.ctx.Get(), GpuCensusSection::DoorTemporalWhole);
+            span(GpuCensusSection::DoorSharpen);
+            span(GpuCensusSection::DoorMenu);
+            span(GpuCensusSection::DoorUiLayerComposite);
+        }
+        // The route's pairs come first in the frame (the HUD layer's draws), the door's at its end.
+        for (unsigned i = 0; i < routePairsPerFrame; ++i) {
+            GpuTimer& slot = ring[ringHead % kRing];
+            if (ringHead - ringTail < kRing && slot.begin(routeDev.Get(), d.ctx.Get())) {
+                slot.end(d.ctx.Get());
+                ++ringHead;
+                ++routeIssued;
+            } else ++routeRefused;
+        }
+        for (const auto& item : inFrame) for (unsigned i = 0; i < item.perFrame; ++i) span(item.section);
+        gpuCensusFrame(d.ctx.Get());
+        while (ringTail != ringHead) {
+            double ms = 0.0;
+            if (ring[ringTail % kRing].poll(d.ctx.Get(), ms) == GpuTimerPoll::Pending) break;
+            ++routeRead;
+            ++ringTail;
+        }
+    }
+    FailureRate out;
+    out.routeTimed = routeRead;
+    out.routeIssued = routeIssued;
+    out.routeRefused = routeRefused;
+    for (unsigned i = ringTail; i != ringHead; ++i) ring[i % kRing].reset(d.ctx.Get());
+    for (const auto& s : g_section) {
+        out.timed += s.sampler.totals.samples;
+        out.failed += s.skippedThisWindow + s.sampler.totals.invalid;
+        if (s.sampler.totals.samples) ++out.sectionsTimed;
+    }
+    out.disjointBegins = backend.disjointBegins;
+    detail::g_gpuFrameCommandLive.store(false, std::memory_order_relaxed);
+    return out;
+}
+
+void failureRateCases() {
+    Runtime runtime;
+    Device d(runtime);
+    ScriptedBackend backend;
+    const GpuSpanD3D11Ops ops{&backend, scriptedCreate, scriptedBegin, scriptedEnd, scriptedData, scriptedRelease};
+    check(gpuTimingBind(d.dev.Get(), d.ctx.Get(), ops), "failure rate: bind the scripted timing owner");
+
+    // The merged section set takes 25 turns a cycle (the rotation cases above pin it), so 25 * 40 frames give every section forty turns.
+    const unsigned frames = 25 * 40;
+    const FailureRate noScope = simulateCensus(d, backend, frames, true);
+    std::printf("failure rate, nothing owning a scope (the flight): spans timed %llu, failed %llu, %u sections timed, %u disjoint scopes opened, route pairs timed %llu\n",
+                static_cast<unsigned long long>(noScope.timed), static_cast<unsigned long long>(noScope.failed), noScope.sectionsTimed,
+                noScope.disjointBegins, static_cast<unsigned long long>(noScope.routeTimed));
+    const FailureRate owned = simulateCensus(d, backend, frames, false);
+    std::printf("failure rate, the census owning its scope (the fix): spans timed %llu, failed %llu, %u sections timed, %u disjoint scopes opened, route pairs timed %llu\n",
+                static_cast<unsigned long long>(owned.timed), static_cast<unsigned long long>(owned.failed), owned.sectionsTimed,
+                owned.disjointBegins, static_cast<unsigned long long>(owned.routeTimed));
+
+    // The flight: 85-90% of spans failed (665 timed, 4963 failed). The unowned run must show the same collapse, so this rig fails on a census
+    // that stops taking its own scope.
+    check(noScope.failed * 100 >= (noScope.timed + noScope.failed) * 60,
+          "failure rate: with no scope open, at least 60% of the census spans fail (the flight logged 85-90%)");
+    // The fix: a frame's spans share one scope. Nothing fails once the first results are back; a span a window opens on may.
+    check(owned.failed * 100 <= (owned.timed + owned.failed) * 2,
+          "failure rate: the census opening its own scope keeps failed spans under 2% of the total");
+    check(owned.timed > noScope.timed * 3, "failure rate: the census timed more than three times as many spans as the unowned run");
+    check(owned.routeTimed > noScope.routeTimed, "failure rate: the other timer pairs sharing the clock are timed more often too, not starved by the census");
+    check(owned.sectionsTimed == 17, "failure rate: all 17 sections the run drives (the whole, nine door parts, the six in-frame ones) took samples");
+    // One disjoint scope a frame at most (a frame whose turn times nothing opens none), not one per span.
+    check(owned.disjointBegins <= frames + 1, "failure rate: one disjoint scope a frame, not one per span");
+    // ---- the 2026-10-14 flight: the clock owned, but 130-160 timer pairs a frame on ONE record (g_hdrDrawTimingOn's per-draw HUD timers) ----
+    // 33% of the spans failed there ("timed 4792, failed 2309"), the whole door among them: the pairs of a frame are leases on the frame's one
+    // record, and the record held 128. The door runs at the frame's end, after the HUD draws had taken the leases. The load is the flight's peak:
+    // 90 route pairs a frame issued and 25-35 more refused, plus the seeds, price timers and census spans.
+    constexpr unsigned kFlightPeakPairs = 160;
+    static_assert(DisjointClock::kLeases >= 3 * kFlightPeakPairs, "a record holds three times the flight's peak of timer pairs a frame");
+    const FailureRate heavy = simulateCensus(d, backend, frames, false, kFlightPeakPairs);
+    std::printf("failure rate, the census owning its scope, %u route pairs a frame (the flight's peak): spans timed %llu, failed %llu; route pairs issued %llu, refused %llu, read %llu\n",
+                kFlightPeakPairs, static_cast<unsigned long long>(heavy.timed), static_cast<unsigned long long>(heavy.failed),
+                static_cast<unsigned long long>(heavy.routeIssued), static_cast<unsigned long long>(heavy.routeRefused),
+                static_cast<unsigned long long>(heavy.routeTimed));
+    check(heavy.failed == 0 && heavy.timed >= 1900, "route load: with 160 other timer pairs a frame no census span fails, the door's included");
+    check(heavy.routeRefused == 0 && heavy.routeTimed + 3000 >= heavy.routeIssued, "route load: every route pair gets a lease and is read");
+    // Over the record's capacity the late spans are the ones lost: the shape of the flight's failure, produced by the load alone.
+    const FailureRate over = simulateCensus(d, backend, frames, false, DisjointClock::kLeases + 40);
+    check(over.failed > 0 && over.routeRefused > 0, "route load: more pairs a frame than a record has leases makes spans fail (the limit is real and is what the flight hit)");
+
+    // simulateCensus ended on a boundary: the scope is open for the next frame's spans, and closes when asked (yield, shutdown, the clock turning on).
+    check(gpuTimingCensusScopeOpen(), "failure rate: the boundary leaves the next frame's scope open");
+    gpuTimingCensusScopeEnd(d.ctx.Get(), GetTickCount64());
+    check(!gpuTimingCensusScopeOpen(), "failure rate: ending the census scope closes it");
+    gpuTimingSetYield(true);
+    gpuCensusFrame(d.ctx.Get());
+    check(!gpuTimingCensusScopeOpen(), "failure rate: while the pass profiler yields the clock, the census opens no scope");
+    gpuTimingSetYield(false);
+    detail::g_gpuFrameCommandLive.store(true, std::memory_order_relaxed);
+    gpuCensusFrame(d.ctx.Get());
+    check(!gpuTimingCensusScopeOpen(), "failure rate: with the application-frame clock on, the census leaves the scope to it");
+    detail::g_gpuFrameCommandLive.store(false, std::memory_order_relaxed);
+
+    for (auto& s : g_section) { s.sampler.reset(d.ctx.Get()); s.nullSampler.reset(d.ctx.Get()); s = SectionState{}; }
+    check(gpuTimingShutdown(d.ctx.Get()), "failure rate: release the scripted owner so the real WARP timer cases bind their own");
+}
+
 void run() {
+    instrumentCases();
     estimatorMathCases();
     calibrationMathCases();
     logFormatCase();
@@ -1473,6 +1720,7 @@ void run() {
     skinTurnCases();
     skinWiringCases();
     lineLengths();
+    failureRateCases();
     Runtime runtime;
     Device device(runtime);
     rotationAndRealTimerCase(device);

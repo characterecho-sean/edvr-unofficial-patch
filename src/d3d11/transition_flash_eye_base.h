@@ -8,14 +8,14 @@
 // reads the reset value, the eye composes against the head pose alone, and the
 // frame is drawn from the wrong place: the one-frame flash.
 //
-// fix.transition_flash arms this module (on by default). It then:
+// This module is always on, with no setting: in the VR profile it
 //   * hooks the consumer (build- and prologue-keyed; stands down and says why
 //     on a mismatch) and arms an EVENT at the ENTRY of a run of reset
 //     mailboxes (mode-2 consumes);
 //   * at the camera-CB Unmap tap (glitch_frame.cpp hands it every fill while
 //     an event window is open), on the bad renders (tap frames skip+1, and
 //     skip+2 while the gap lasted), at the frame's first fill whose row 275 is
-//     head-only, WITHHOLDS the frame (glitchFrameEngineFixEvent) -- one held
+//     head-only, HOLDS the frame (glitchFrameEngineFixHold) -- one held
 //     frame per transition, nothing written to the game's buffer, no game
 //     function called (flights 091951 and 095137: correcting the frame in
 //     place still flashed; holding it did not);
@@ -23,9 +23,9 @@
 //     camera stayed (glitchFrameEngineFixVerdict), so its history is kept;
 //   * logs one line per held frame and counts events, held frames and holds
 //     the compositor could not honour.
-// While armed the old transition-flash DETECTOR (glitch_frame.cpp) is
-// dormant; when identity or the hook fails, doInstall reports it to the
-// detector (glitchFrameNoteEngineFix) and the detector runs as before.
+// When identity, the hook or the tap fails it reports Not armed
+// (glitchFrameNoteEngineFix), says why in the log, and holds nothing: there is no
+// other transition protection (the old detector was removed 2026-10-13).
 //
 // The pure logic (reset-mailbox compare, ENTRY/EXIT classifier, event window,
 // head-only test) is in transition_flash_eye_base_core.h, which
@@ -35,13 +35,14 @@
 
 namespace edvr {
 
-class Config;
-
 // Called on every config reload (vscreen.cpp, both call sites). The FIRST call
-// reads fix.transition_flash: off, one log line and nothing installed; on, it
-// installs the consumer hook and reports Armed or Lost to the detector exactly
-// once. Later calls do nothing.
-void transitionFlashEyeBaseConfigure(Config& cfg);
+// in a VR profile installs the consumer hook and reports Armed or Lost to the
+// tap (glitch_frame.cpp) exactly once; there is no setting that turns it off.
+// Calls in another profile log once and install nothing. Later calls do nothing.
+void transitionFlashEyeBaseInstall();
+
+// Is the engine fix armed (identity matched, hook installed, tap delivering)?
+bool transitionFlashEyeBaseArmed();
 
 // Once a frame, from vscreen.cpp after glitchFrameBoundary. Publishes the
 // frame number the consumer hook reads (it can run on a scheduler job thread,
@@ -52,7 +53,7 @@ void transitionFlashEyeBaseFrameBoundary(uint32_t frameNo);
 
 // The camera-CB fill tap: glitch_frame.cpp's glitchFrameObserve reads the
 // 5376-byte scene CB pre-Unmap and calls this for every fill while an event
-// window is open. `frame` is the detector's frame attribution (s->frameNo at
+// window is open. `frame` is the tap's frame attribution (s->frameNo at
 // Unmap time -- the PRE-advance counter, so a fill of the frame the boundary
 // records as F carries F-1; the module compensates).
 void transitionFlashEyeBaseNoteSceneCB(uint32_t frame, const void* mapped, size_t sizeBytes);
@@ -62,6 +63,11 @@ void transitionFlashEyeBaseNoteSceneCB(uint32_t frame, const void* mapped, size_
 // the consumer hook does with the 64 bytes it read. The glue rig drives
 // consume -> event -> tap -> mark -> verdict through these.
 void transitionFlashEyeBaseArmForTest();
+// Has install run (armed or not)? ResetForTest returns the module to a process
+// that never installed, so a rig can run the real install path under different
+// settings.
+bool transitionFlashEyeBaseInstallAttemptedForTest();
+void transitionFlashEyeBaseResetForTest();
 void transitionFlashEyeBaseConsumeForTest(int32_t gameMode, const float mailbox[16]);
 void transitionFlashEyeBaseDisarmForTest();
 void transitionFlashEyeBaseCountersForTest(uint64_t* events, uint64_t* framesHeld, uint64_t* noHeadOnly,

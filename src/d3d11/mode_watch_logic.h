@@ -77,15 +77,31 @@ public:
         pending_ = false;
         if (!confirmed) return Step{Outcome::Dropped, r.mode};
         fileMode_ = mode;
-        // A live rise may already have posted this class; then the confirmed file changes nothing EDVR runs.
+        // The file has spoken: a live rise's wait for eye submits is over (a file post to Vr is the answer, a post to Flat means the
+        // game left VR).
+        liveWaiting_ = false;
+        // A submit-driven post may already have set this class; then the confirmed file changes nothing EDVR runs.
         if (mode == committed_) return Step{Outcome::Same, committed_};
         committed_ = mode;
         return Step{Outcome::Posted, committed_};
     }
 
-    // Touches committed_ only, except that a Vr post over a flat fileMode_ makes the file stale: the file still says flat. A pending file
-    // change stays pending, and its confirm is unaffected.
+    // The runtime's live flag rose. A live session alone does not make the game a VR game: the runtime goes live for any process that
+    // loads openvr_api.dll, and a cold flat start with a headset runtime present does so with no stereo frame ever submitted (the 06:35
+    // log of 2026-10-14). So a rise over a flat commit only starts the wait for the first eye submit (onEyeSubmits posts); Epic's
+    // "Launch in VR" submits within a second or two of going live and still flips, slightly later. From Vr a rise is nothing.
+    // Touches no mode: only liveWaiting_.
     Step onLiveRise(uint64_t /*nowMs*/) {
+        if (committed_ != GameMode::Flat) return Step{Outcome::Nothing, committed_};
+        liveWaiting_ = true;
+        return Step{Outcome::Nothing, committed_};
+    }
+
+    // Eye submits have flowed since a live rise that found the commit flat. Touches committed_ only, except that a Vr post over a flat
+    // fileMode_ makes the file stale: the file still says flat. A pending file change stays pending, and its confirm is unaffected.
+    Step onEyeSubmits(uint64_t /*nowMs*/) {
+        if (!liveWaiting_) return Step{Outcome::Nothing, committed_};
+        liveWaiting_ = false;
         if (committed_ != GameMode::Flat) return Step{Outcome::Nothing, committed_};
         committed_ = GameMode::Vr;
         if (fileMode_ == GameMode::Flat) {
@@ -94,6 +110,9 @@ public:
         }
         return Step{Outcome::Posted, committed_};
     }
+
+    // True from a live rise over a flat commit until the first eye submit (or a file post) ends the wait.
+    bool awaitingSubmits() const { return liveWaiting_; }
 
     // The time the pending mode is confirmed, or 0 when nothing is pending.
     uint64_t confirmDueMs() const { return pending_ ? due_ : 0; }
@@ -111,6 +130,7 @@ private:
     GameMode committed_;
     GameMode fileMode_;
     bool fileStale_;
+    bool liveWaiting_ = false;  // a live rise found the commit flat; waiting for the first eye submit
     bool pending_ = false;
     GameMode pendingMode_ = GameMode::Vr;
     uint64_t due_ = 0;

@@ -18,6 +18,9 @@
 using Microsoft::WRL::ComPtr;
 ComPtr<ID3DBlob> compile(const char*,const char*);
 namespace edvr {
+// The GPU census's spans (ui_depth.cpp's hologram sub-sections, 2026-10-13). This rig does not run the census, so they are inert here.
+bool gpuCensusBegin(ID3D11DeviceContext*, GpuCensusSection) noexcept { return false; }
+void gpuCensusEnd(ID3D11DeviceContext*, GpuCensusSection) noexcept {}
 ID3D11VertexShader* shaderSwapCreateVs(ID3D11DeviceContext* ctx,const void* bytes,size_t size,const char*,const char*) {
     ComPtr<ID3D11Device> dev;ctx->GetDevice(&dev);ID3D11VertexShader* shader=nullptr;
     if(FAILED(dev->CreateVertexShader(bytes,size,nullptr,&shader)))return nullptr;return shader;
