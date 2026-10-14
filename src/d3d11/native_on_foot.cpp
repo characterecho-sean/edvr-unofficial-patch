@@ -33,6 +33,10 @@ SetterFn g_original = nullptr;                     // the trampoline: the setter
 std::atomic<uintptr_t> g_frozenSelector{0};        // the first selector whose owner points back at it
 std::atomic<bool> g_panelsKeyOn{false};            // fix.native_on_foot_panels, as the frame thread last read it (F9)
 std::atomic<bool> g_meshKeyOn{false};              // fix.native_on_foot_hud_mesh, as the frame thread last read it (F9)
+std::atomic<float> g_hudSpread{0.0f};                           // fix.native_on_foot_hud_spread, live (F14)
+float g_hudSpreadLast = -1.0f;                                  // frame thread only: as last logged (F14)
+std::atomic<bool> g_reticleKeyOn{false};                        // fix.native_on_foot_reticle_probe, live (F14, temporary)
+bool g_reticleKeyLast = false;                                  // frame thread only (F14)
 std::atomic<float> g_hudSize{nofoot::kHudSizeDefault};          // fix.native_on_foot_hud_size, live (F13)
 std::atomic<bool> g_followHead{true};                           // fix.native_on_foot_hud_follow is head (F13)
 std::atomic<bool> g_followBefore{false};                        // fix.native_on_foot_hud_follow_order is before (F13, temporary)
@@ -438,6 +442,21 @@ void readKey() {
     if (first || visorOn != g_visorKeyLast) {
         Log::get().note("native on foot: fix.native_on_foot_visor_up is %s", visorOn ? "on" : "off");
         g_visorKeyLast = visorOn;
+    }
+    // F14: the HUD spread (a user setting, live) and the reticle probe key (temporary).
+    float spread = cfg.getFloat("fix.native_on_foot_hud_spread", 0.0f);
+    if (spread < 0.0f) spread = 0.0f;
+    if (spread > 0.45f) spread = 0.45f;
+    g_hudSpread.store(spread, std::memory_order_relaxed);
+    if (first || spread != g_hudSpreadLast) {
+        Log::get().note("native on foot hud spread: %.2f (pulls the elements toward the centre)", static_cast<double>(spread));
+        g_hudSpreadLast = spread;
+    }
+    const bool reticleOn = cfg.getString("fix.native_on_foot_reticle_probe", "off") == "on";
+    g_reticleKeyOn.store(reticleOn, std::memory_order_relaxed);
+    if (first || reticleOn != g_reticleKeyLast) {
+        Log::get().note("native on foot: fix.native_on_foot_reticle_probe is %s", reticleOn ? "on" : "off");
+        g_reticleKeyLast = reticleOn;
     }
 }
 
@@ -1782,6 +1801,405 @@ void visorTick(bool want, const char* restoreReason) {
                     static_cast<unsigned long long>(nofoot::kVisorOverrideRva), restoreReason);
 }
 
+// ---- F14: the HUD spread (a user setting), the HUD layout probe (read only), and the reticle identification stub (TEMPORARY) --------------
+// SPREAD. While native stereo is on foot, the creation patch is in, and spread > 0, the game's HUD margins at +0x5E7A754 (x, game 0.027) and
+// +0x5E7A758 (y, game 0.06) are written 0.027 + spread and 0.06 + spread, clamped below 0.489. The game re-sends the HUD layout when the HRC's
+// own copies differ from these globals, so nothing is forced. The current values must be the game's own or ours; otherwise nothing is written.
+constexpr uintptr_t kMarginXRva = 0x5E7A754;
+constexpr uintptr_t kMarginYRva = 0x5E7A758;
+constexpr float kMarginXGame = 0.027f;
+constexpr float kMarginYGame = 0.06f;
+constexpr float kMarginCap = 0.489f;
+bool g_spreadWritten = false;                 // frame thread only: we hold the margins at our values
+float g_spreadWrittenX = 0.0f, g_spreadWrittenY = 0.0f;
+std::string g_spreadRefusal;                  // frame thread only
+bool g_spreadRestoreNoted = false;            // frame thread only
+
+__declspec(noinline) bool guardedWriteFloat(uintptr_t address, float v) noexcept {
+    __try {
+        *reinterpret_cast<volatile float*>(address) = v;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+void refuseSpread(const std::string& why) {
+    if (why == g_spreadRefusal) return;
+    g_spreadRefusal = why;
+    Log::get().note("native on foot hud spread: margins EliteDangerous64.exe+0x%llX, +0x%llX NOT written -- %s. The game's values are left as they are.",
+                    static_cast<unsigned long long>(kMarginXRva), static_cast<unsigned long long>(kMarginYRva), why.c_str());
+}
+
+// `want`: the spread should be applied now (its value is `spread`). `reason` (a literal) says why it is being put back.
+void spreadTick(bool want, float spread, const char* reason) {
+    const uintptr_t ax = g_base + kMarginXRva;
+    const uintptr_t ay = g_base + kMarginYRva;
+    if (want) {
+        const char* idWhy = nullptr;
+        if (!checkIdentity(g_base, &idWhy)) {
+            refuseSpread(std::string("the PE identity check failed (") + idWhy + ")");
+            return;
+        }
+        float cx = 0.0f, cy = 0.0f;
+        if (!guardedRead(ax, &cx, 4) || !guardedRead(ay, &cy, 4)) {
+            refuseSpread("the margins could not be read");
+            return;
+        }
+        const bool okX = f12Near(cx, kMarginXGame) || (g_spreadWritten && f12Near(cx, g_spreadWrittenX));
+        const bool okY = f12Near(cy, kMarginYGame) || (g_spreadWritten && f12Near(cy, g_spreadWrittenY));
+        if (!okX || !okY) {
+            char b[160];
+            std::snprintf(b, sizeof(b), "the margins read %.4f,%.4f, not the game's 0.027,0.060 or our last values, so they are left alone",
+                          static_cast<double>(cx), static_cast<double>(cy));
+            refuseSpread(b);
+            return;
+        }
+        if (!writableByte(ax) || !writableByte(ay)) {
+            refuseSpread("the margins are not writable");
+            return;
+        }
+        float nx = kMarginXGame + spread;
+        float ny = kMarginYGame + spread;
+        if (nx > kMarginCap) nx = kMarginCap;
+        if (ny > kMarginCap) ny = kMarginCap;
+        if (g_spreadWritten && f12Near(nx, g_spreadWrittenX) && f12Near(ny, g_spreadWrittenY)) return;   // already there
+        if (!guardedWriteFloat(ax, nx) || !guardedWriteFloat(ay, ny)) {
+            refuseSpread("the write failed");
+            return;
+        }
+        g_spreadWritten = true;
+        g_spreadWrittenX = nx;
+        g_spreadWrittenY = ny;
+        g_spreadRefusal.clear();
+        Log::get().note("native on foot hud spread: margins 0.027,0.060 -> %.3f,%.3f", static_cast<double>(nx), static_cast<double>(ny));
+        return;
+    }
+    if (!g_spreadWritten) {
+        g_spreadRefusal.clear();
+        return;
+    }
+    float cx = 0.0f, cy = 0.0f;
+    if (!guardedRead(ax, &cx, 4) || !guardedRead(ay, &cy, 4)) return;   // retried next frame
+    if (!f12Near(cx, g_spreadWrittenX) || !f12Near(cy, g_spreadWrittenY)) {
+        g_spreadWritten = false;
+        Log::get().note("native on foot hud spread: margins NOT restored -- they read %.4f,%.4f, not ours (restore: %s)",
+                        static_cast<double>(cx), static_cast<double>(cy), reason);
+        return;
+    }
+    if (!writableByte(ax) || !writableByte(ay) || !guardedWriteFloat(ax, kMarginXGame) || !guardedWriteFloat(ay, kMarginYGame)) {
+        if (!g_spreadRestoreNoted) {
+            g_spreadRestoreNoted = true;
+            Log::get().note("native on foot hud spread: margins could not be restored (%s); retrying each frame.", reason);
+        }
+        return;
+    }
+    g_spreadWritten = false;
+    g_spreadRestoreNoted = false;
+    Log::get().note("native on foot hud spread: margins -> 0.027,0.060 (restored: %s)", reason);
+}
+
+// LAYOUT PROBE (read only). EliteDangerous64.exe+0x1A0DCD0 (args rcx = HRC, rdx = float out[2], r8 = &rec; rec+0 = const char* part name), called
+// once per HUD part per layout re-send. The prologue is verified (the first five bytes are mov [rsp+0x20],rbx: no rip-relative operand, no
+// branch). The original runs first; then the fields are read under SEH and one line is queued for the frame thread. Six arguments are forwarded.
+struct F14Line {
+    char text[240];
+};
+constexpr size_t kF14Ring = 32;
+F14Line g_f14Ring[kF14Ring];                  // guarded by g_f9Lock
+uint64_t g_f14Written = 0, g_f14Read = 0, g_f14Dropped = 0;   // guarded by g_f9Lock
+std::atomic<uint64_t> g_f14Calls{0};          // the layout hook's calls in this session
+F9Probe g_f14Layout;                          // the layout probe's relay, gate, trampoline and CodeHook
+std::atomic<bool> g_f14LayoutStop{false};
+bool g_f14LayoutArmed = false;                // frame thread only
+bool g_f14LayoutLogged = false;               // frame thread only
+
+void f14Queue(const char* text) noexcept {
+    F9Lock lock;
+    if (g_f14Written - g_f14Read >= kF14Ring) {
+        ++g_f14Dropped;
+        return;
+    }
+    std::snprintf(g_f14Ring[g_f14Written % kF14Ring].text, sizeof(g_f14Ring[0].text), "%s", text);
+    ++g_f14Written;
+}
+
+void f14LogPart(void* hrc, void* out, void* rec) noexcept {
+    const uint64_t n = g_f14Calls.fetch_add(1, std::memory_order_relaxed) + 1;
+    const uintptr_t h = reinterpret_cast<uintptr_t>(hrc);
+    const uintptr_t r = reinterpret_cast<uintptr_t>(rec);
+    const uintptr_t o = reinterpret_cast<uintptr_t>(out);
+    const float nanv = std::nanf("");
+    // The name: copied up to 64 characters from *(const char**)rec; "?" when unreadable.
+    char name[72] = "?";
+    uint64_t np = 0;
+    if (guardedRead(r, &np, 8) && np >= 0x10000) {
+        size_t i = 0;
+        for (; i < 64; ++i) {
+            char c = 0;
+            if (!guardedRead(static_cast<uintptr_t>(np) + i, &c, 1)) break;
+            name[i] = (c >= 32 && c < 127) ? c : '.';
+            if (c == 0) break;
+        }
+        name[i] = 0;
+        if (i == 0) std::snprintf(name, sizeof(name), "?");
+    }
+    float rec8 = nanv, recC = nanv, rec10 = nanv, rec14 = nanv, rec1C = nanv;
+    guardedRead(r + 0x8, &rec8, 4);
+    guardedRead(r + 0xC, &recC, 4);
+    guardedRead(r + 0x10, &rec10, 4);
+    guardedRead(r + 0x14, &rec14, 4);
+    guardedRead(r + 0x1C, &rec1C, 4);
+    uint8_t b18 = 0, b19 = 0;
+    const bool okB = guardedRead(r + 0x18, &b18, 1) && guardedRead(r + 0x19, &b19, 1);
+    float hrc4C4 = nanv, hrc4C8 = nanv, hrc4CC = nanv;
+    guardedRead(h + 0x4C4, &hrc4C4, 4);
+    guardedRead(h + 0x4C8, &hrc4C8, 4);
+    guardedRead(h + 0x4CC, &hrc4CC, 4);
+    float canvasW = nanv, canvasH = nanv;
+    uint64_t canvas = 0;
+    if (guardedRead(h + 0x1B8, &canvas, 8) && canvas >= 0x10000) {
+        guardedRead(static_cast<uintptr_t>(canvas) + 0x3E8, &canvasW, 4);
+        guardedRead(static_cast<uintptr_t>(canvas) + 0x3EC, &canvasH, 4);
+    }
+    float out0 = nanv, out1 = nanv;
+    guardedRead(o, &out0, 4);
+    guardedRead(o + 4, &out1, 4);
+    char line[240];
+    std::snprintf(line, sizeof(line),
+                  "native on foot hud part: name=%s anchor=(%.3f,%.3f) off=(%.3f,%.3f) align=(%u,%u) scale=%.3f out=(%.3f,%.3f) canvas=%.0fx%.0f "
+                  "hrc=(%.3f,%.3f,%.3f) calls=%llu",
+                  name, static_cast<double>(rec8), static_cast<double>(recC), static_cast<double>(rec10), static_cast<double>(rec14),
+                  okB ? static_cast<unsigned>(b18) : 0u, okB ? static_cast<unsigned>(b19) : 0u, static_cast<double>(rec1C),
+                  static_cast<double>(out0), static_cast<double>(out1), static_cast<double>(canvasW), static_cast<double>(canvasH),
+                  static_cast<double>(hrc4C4), static_cast<double>(hrc4C8), static_cast<double>(hrc4CC), static_cast<unsigned long long>(n));
+    f14Queue(line);
+}
+
+uint64_t __fastcall layoutHooked(void* hrc, void* out, void* rec, uint64_t a4, uint64_t a5, uint64_t a6) {
+    const F9Fn6 original = reinterpret_cast<F9Fn6>(g_f14Layout.original);
+    if (!original) return 0;
+    const uint64_t rax = original(hrc, out, reinterpret_cast<uint64_t>(rec), a4, a5, a6);
+    if (!g_f14LayoutStop.load(std::memory_order_relaxed)) f14LogPart(hrc, out, rec);
+    return rax;
+}
+
+// RETICLE INDICATOR PROBE (read only). The stub below calls this with rcx = the instance and rdx = the node of the marker component's call at
+// EliteDangerous64.exe+0x1A15644 (the call to 0x434ECC0, preceded by mov rcx,[rsi+0x60]). Nothing is written to the instance.
+struct F14Key {
+    bool used = false;
+    uint32_t key = 0;
+    uint64_t n = 0;                 // calls in the window
+    uint8_t f30 = 0, f31 = 0, f32 = 0;
+    float fl34 = 0.0f, fl38 = 0.0f;  // the node's floats at +0x34 and +0x38 (last seen)
+    float scale = 0.0f;             // the instance scale at +0x50 (last seen)
+    float pos[3] = {};              // the instance's translation row at +0x40..+0x48 (last seen)
+    bool posOk = false;
+};
+constexpr size_t kF14Keys = 16;
+F14Key g_f14Keys[kF14Keys];         // guarded by g_f9Lock
+
+void __fastcall reticleIndicatorProbe(void* instance, void* node) noexcept {
+    const uintptr_t ia = reinterpret_cast<uintptr_t>(instance);
+    const uintptr_t na = reinterpret_cast<uintptr_t>(node);
+    uint32_t key = 0;
+    uint8_t b30 = 0, b31 = 0, b32 = 0;
+    float fl34 = 0.0f, fl38 = 0.0f, scale = 0.0f;
+    float pos[3] = {};
+    const bool okKey = guardedRead(na + 0x20, &key, 4);
+    const bool okB = guardedRead(na + 0x30, &b30, 1) && guardedRead(na + 0x31, &b31, 1) && guardedRead(na + 0x32, &b32, 1);
+    guardedRead(na + 0x34, &fl34, 4);
+    guardedRead(na + 0x38, &fl38, 4);
+    guardedRead(ia + 0x50, &scale, 4);
+    const bool okPos = guardedRead(ia + 0x40, &pos[0], 4) && guardedRead(ia + 0x44, &pos[1], 4) && guardedRead(ia + 0x48, &pos[2], 4);
+    if (!okKey || !okB) return;
+    F9Lock lock;
+    F14Key* row = nullptr;
+    for (auto& r : g_f14Keys) {
+        if (r.used && r.key == key) {
+            row = &r;
+            break;
+        }
+    }
+    if (!row) {
+        for (auto& r : g_f14Keys) {
+            if (!r.used) {
+                row = &r;
+                break;
+            }
+        }
+        if (!row) return;
+        row->used = true;
+        row->key = key;
+    }
+    ++row->n;
+    row->f30 = b30;
+    row->f31 = b31;
+    row->f32 = b32;
+    row->fl34 = fl34;
+    row->fl38 = fl38;
+    row->scale = scale;
+    row->posOk = okPos;
+    if (okPos) std::memcpy(row->pos, pos, sizeof(pos));
+}
+
+// The stub: push rdx; sub rsp,0x20; mov rdx,rsi; mov rax,probe; call rax; add rsp,0x20; pop rdx; mov rcx,[rsi+0x60]; mov rax,real; jmp rax.
+// The probe gets rcx (the instance, as the game passed it) and rdx = rsi (the node); rdx is preserved for the real function.
+constexpr uintptr_t kReticleCallRva = 0x1A15644;      // the 5-byte call E8 rel32
+constexpr uintptr_t kReticleLoadRva = 0x1A15640;      // mov rcx,[rsi+0x60] (48 8B 4E 60), the 4 bytes before the call
+constexpr uintptr_t kReticleFnRva = 0x434ECC0;        // the real function the call targets
+const uint8_t kReticleExpect[9] = {0x48, 0x8B, 0x4E, 0x60, 0xE8, 0x77, 0x96, 0x93, 0x02};
+uint8_t* g_reticleStub = nullptr;                     // frame thread only: the stub page (kept after a restore)
+bool g_reticleInstalled = false;                      // frame thread only: the call points at the stub
+int32_t g_reticleOrigRel = 0;                         // the original rel32 (0x02939677)
+bool g_reticleRefusalNoted = false;                   // frame thread only
+
+__declspec(noinline) bool guardedStoreDword(uintptr_t address, uint32_t value) noexcept {
+    __try {
+        *reinterpret_cast<volatile uint32_t*>(address) = value;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+// A single 4-byte store to the rel32 at call+1. The rel32 lies within one 64-byte cache line (its bytes are 0x1A15645..0x1A15648), so one
+// store is single-copy atomic on x86; the instruction is not torn for a thread that is executing it.
+bool storeRel32(uintptr_t address, int32_t rel) noexcept {
+    DWORD old = 0;
+    if (!VirtualProtect(reinterpret_cast<void*>(address), 4, PAGE_EXECUTE_READWRITE, &old)) return false;
+    const bool ok = guardedStoreDword(address, static_cast<uint32_t>(rel));
+    DWORD ignored = 0;
+    VirtualProtect(reinterpret_cast<void*>(address), 4, old, &ignored);
+    FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void*>(address), 4);
+    return ok;
+}
+
+void refuseReticle(const std::string& why) {
+    if (g_reticleRefusalNoted) return;
+    g_reticleRefusalNoted = true;
+    Log::get().note("native on foot indicator: NOT installed -- %s. The game's code is left as it is.", why.c_str());
+}
+
+// `want`: the stub should be in place. Installs the stub once (verified bytes, a stub within reach), and restores the original rel32 otherwise.
+void reticleTick(bool want, const char* reason) {
+    const uintptr_t call = g_base + kReticleCallRva;
+    if (want) {
+        if (g_reticleInstalled) return;
+        const char* idWhy = nullptr;
+        if (!checkIdentity(g_base, &idWhy)) {
+            refuseReticle(std::string("the PE identity check failed (") + idWhy + ")");
+            return;
+        }
+        uint8_t cur[9] = {};
+        if (!guardedRead(g_base + kReticleLoadRva, cur, sizeof(cur))) {
+            refuseReticle("the bytes could not be read");
+            return;
+        }
+        if (std::memcmp(cur, kReticleExpect, sizeof(cur)) != 0) {
+            refuseReticle("the bytes at +0x1A15640 are not mov rcx,[rsi+0x60] and call 0x434ECC0");
+            return;
+        }
+        int32_t origRel = 0;
+        std::memcpy(&origRel, cur + 5, 4);
+        if (!g_reticleStub) {
+            g_reticleStub = allocateRelay(call);
+            if (!g_reticleStub) {
+                refuseReticle("no executable memory within two gigabytes of the call");
+                return;
+            }
+            uint8_t* p = g_reticleStub;
+            size_t i = 0;
+            const uint8_t head[] = {0x52, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x89, 0xF2, 0x48, 0xB8};
+            std::memcpy(p + i, head, sizeof(head));
+            i += sizeof(head);
+            const uint64_t probe = reinterpret_cast<uint64_t>(&reticleIndicatorProbe);
+            std::memcpy(p + i, &probe, 8);
+            i += 8;
+            const uint8_t mid[] = {0xFF, 0xD0, 0x48, 0x83, 0xC4, 0x20, 0x5A, 0x48, 0x8B, 0x4E, 0x60, 0x48, 0xB8};
+            std::memcpy(p + i, mid, sizeof(mid));
+            i += sizeof(mid);
+            const uint64_t real = g_base + kReticleFnRva;
+            std::memcpy(p + i, &real, 8);
+            i += 8;
+            const uint8_t tail[] = {0xFF, 0xE0};
+            std::memcpy(p + i, tail, sizeof(tail));
+            i += sizeof(tail);
+            DWORD old = 0;
+            if (!VirtualProtect(p, 4096, PAGE_EXECUTE_READ, &old) || !FlushInstructionCache(GetCurrentProcess(), p, i)) {
+                refuseReticle("the stub page could not be made executable");
+                return;
+            }
+        }
+        const int64_t rel = static_cast<int64_t>(reinterpret_cast<uintptr_t>(g_reticleStub)) - static_cast<int64_t>(call + 5);
+        if (rel < INT32_MIN || rel > INT32_MAX) {
+            refuseReticle("the stub is out of reach of the call");
+            return;
+        }
+        if (!storeRel32(call + 1, static_cast<int32_t>(rel))) {
+            refuseReticle("the call could not be written");
+            return;
+        }
+        g_reticleOrigRel = origRel;
+        g_reticleInstalled = true;
+        g_reticleRefusalNoted = false;
+        Log::get().note("native on foot indicator: call EliteDangerous64.exe+0x%llX -> stub (probe) for the marker component",
+                        static_cast<unsigned long long>(kReticleCallRva));
+        return;
+    }
+    if (!g_reticleInstalled) return;
+    int32_t cur = 0;
+    if (!guardedRead(call + 1, &cur, 4)) return;   // retried next frame
+    if (cur != static_cast<int32_t>(reinterpret_cast<int64_t>(g_reticleStub) - static_cast<int64_t>(call + 5))) {
+        g_reticleInstalled = false;
+        Log::get().note("native on foot indicator: call NOT restored -- the rel32 reads %d, not ours (restore: %s)", static_cast<int>(cur), reason);
+        return;
+    }
+    if (!storeRel32(call + 1, g_reticleOrigRel)) return;
+    g_reticleInstalled = false;
+    Log::get().note("native on foot indicator: call EliteDangerous64.exe+0x%llX -> the game's own (restored: %s)",
+                    static_cast<unsigned long long>(kReticleCallRva), reason);
+}
+
+// Frame thread: installs the layout probe once (VR only); drains the layout lines; logs the reticle indicator rows every 5 s.
+struct F14Probes {
+    static constexpr size_t kLayoutSlot = 0;
+};
+bool g_f14Tried = false;                       // frame thread only
+uint64_t g_f14IndicatorMs = 0;                 // frame thread only
+
+// Frame thread, every frame: the layout lines; every 5 s the reticle indicator rows.
+void f14FrameTick(uint64_t nowMs) {
+    F14Line lines[kF14Ring];
+    size_t n = 0;
+    uint64_t dropped = 0;
+    {
+        F9Lock lock;
+        while (g_f14Read < g_f14Written && n < kF14Ring) lines[n++] = g_f14Ring[(g_f14Read++) % kF14Ring];
+        dropped = g_f14Dropped;
+        g_f14Dropped = 0;
+    }
+    for (size_t i = 0; i < n; ++i) Log::get().note("%s", lines[i].text);
+    if (dropped) Log::get().note("native on foot hud part: %llu line(s) dropped (the queue of %zu was full)", static_cast<unsigned long long>(dropped), kF14Ring);
+    if (g_f14IndicatorMs == 0) g_f14IndicatorMs = nowMs;
+    if (nowMs - g_f14IndicatorMs < 5000) return;
+    g_f14IndicatorMs = nowMs;
+    F14Key rows[kF14Keys];
+    {
+        F9Lock lock;
+        for (size_t i = 0; i < kF14Keys; ++i) rows[i] = g_f14Keys[i];
+        for (auto& r : g_f14Keys) r.n = 0;
+    }
+    for (const F14Key& r : rows) {
+        if (!r.used || r.n == 0) continue;
+        char pos[64];
+        if (r.posOk) std::snprintf(pos, sizeof(pos), "(%.3f,%.3f,%.3f)", static_cast<double>(r.pos[0]), static_cast<double>(r.pos[1]), static_cast<double>(r.pos[2]));
+        else std::snprintf(pos, sizeof(pos), "?");
+        Log::get().note("native on foot indicator: key=%u n=%llu f30=%u f31=%u f32=%u scale=%.3f pos=%s fl=(%.3f,%.3f)", static_cast<unsigned>(r.key),
+                        static_cast<unsigned long long>(r.n), static_cast<unsigned>(r.f30), static_cast<unsigned>(r.f31), static_cast<unsigned>(r.f32),
+                        static_cast<double>(r.scale), pos, static_cast<double>(r.fl34), static_cast<double>(r.fl38));
+    }
+}
+
 // P2: rcx = HRC, and five more arguments, all forwarded (the later chunks were not scanned for stack arguments).
 uint64_t __fastcall f9HrcSubmitHooked(void* hrc, void* a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     const F9Fn6 original = reinterpret_cast<F9Fn6>(g_f9Probe[1].original);
@@ -1826,8 +2244,7 @@ struct F9ProbeSpec {
     const char* label;
 };
 
-bool installF9Probe(size_t i, const F9ProbeSpec& s, uintptr_t base, size_t* stolenOut, std::string* whyOut) {
-    F9Probe& pr = g_f9Probe[i];
+bool installF9ProbeInto(F9Probe& pr, const F9ProbeSpec& s, uintptr_t base, size_t* stolenOut, std::string* whyOut) {
     const uintptr_t target = base + s.rva;
     if (!bytesMatch(target, s.prologue, s.prologueBytes)) {
         *whyOut = "the prologue bytes are not build 332841's";
@@ -1864,6 +2281,10 @@ bool installF9Probe(size_t i, const F9ProbeSpec& s, uintptr_t base, size_t* stol
     pr.gate.store(1, std::memory_order_seq_cst);
     *stolenOut = pr.hook->stolenBytes();
     return true;
+}
+
+bool installF9Probe(size_t i, const F9ProbeSpec& s, uintptr_t base, size_t* stolenOut, std::string* whyOut) {
+    return installF9ProbeInto(g_f9Probe[i], s, base, stolenOut, whyOut);
 }
 
 // Frame thread, once: VR only, behind the identity check. One line per probe, installed or refused.
@@ -1928,6 +2349,32 @@ std::string f9HrcValues(const F9HrcState& s) {
     else std::snprintf(dep, sizeof(dep), "?");
     return std::string("g291=") + g[0] + " g470=" + g[1] + " g4C0=" + g[2] + " inst=" + inst + " dep=" + dep +
            " dep.vt=" + f9RvaText(s.depVt, s.depVtOk);
+}
+
+void installF14ProbesOnce() {
+    if (g_f14Tried) return;
+    g_f14Tried = true;
+    if (!runtimeVrProfile()) return;
+    const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    const char* peWhy = nullptr;
+    if (!base || !checkIdentity(base, &peWhy)) {
+        Log::get().note("native on foot hud layout: NOT installed -- identity mismatch (%s); the game was not touched.", peWhy ? peWhy : "no module");
+        return;
+    }
+    if (!g_base) g_base = base;
+    static const uint8_t kLayoutPrologue[32] = {0x48, 0x89, 0x5C, 0x24, 0x20, 0x55, 0x56, 0x57, 0x48, 0x8B, 0xEC, 0x48, 0x83, 0xEC, 0x40, 0x48,
+                                               0x8B, 0xF9, 0x0F, 0x29, 0x74, 0x24, 0x30, 0x48, 0x8B, 0x89, 0xB8, 0x01, 0x00, 0x00, 0x48, 0x8B};
+    const F9ProbeSpec spec{"native-on-foot-hud-layout", 0x1A0DCD0, kLayoutPrologue, 32, 5, reinterpret_cast<void*>(&layoutHooked),
+                           "P4 (HUD layout)"};
+    size_t stolen = 0;
+    std::string why;
+    if (installF9ProbeInto(g_f14Layout, spec, base, &stolen, &why)) {
+        g_f14LayoutArmed = true;
+        Log::get().note("native on foot hud layout: hook installed at EliteDangerous64.exe+0x1A0DCD0, stolen=%zu bytes, prologue 32 bytes verified "
+                        "(read only; temporary).", stolen);
+    } else {
+        Log::get().note("native on foot hud layout: hook NOT installed -- %s. The game was not touched by it.", why.c_str());
+    }
 }
 
 // Frame thread, every frame: every 5 s the window's panel callers, the HRC matrices, and the HRC and instance rows; and the HRC line whenever
@@ -2079,6 +2526,19 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
                  g_meshWorldKeyOn.load(std::memory_order_relaxed) ? f9Why : "fix.native_on_foot_hud_mesh_world is off");
     f9ProbeTick(now);
     f13FrameTick(now);
+    // F14: the layout probe, its lines, the HUD spread, and the reticle probe (temporary).
+    installF14ProbesOnce();
+    f14FrameTick(now);
+    {
+        const float spreadNow = g_hudSpread.load(std::memory_order_relaxed);
+        const bool spreadWant = spreadNow > 0.0f && nativeOnFootActive() && g_meshCreateLive.load(std::memory_order_relaxed) && session;
+        spreadTick(spreadWant, spreadNow,
+                   !(spreadNow > 0.0f) ? "the HUD spread is 0" : !nativeOnFootActive() ? "native stereo on foot ended"
+                   : !g_meshCreateLive.load(std::memory_order_relaxed) ? "the HUD mesh is off" : "the game session ended");
+        const bool reticleKey = g_reticleKeyOn.load(std::memory_order_relaxed);
+        const bool reticleWant = reticleKey && nativeOnFootActive() && session;
+        reticleTick(reticleWant, !reticleKey ? "fix.native_on_foot_reticle_probe is off" : !nativeOnFootActive() ? "native stereo on foot ended" : "the game session ended");
+    }
     // F13 (TEMPORARY): the visor override, while native stereo is on foot and its test key is on.
     const bool visorKeyOn = g_visorKeyOn.load(std::memory_order_relaxed);
     const bool visorWant = visorKeyOn && nativeOnFootActive() && session;
@@ -2093,6 +2553,8 @@ void nativeOnFootShutdown() {
     meshSiteTick(g_meshCreate, false, "the game is shutting down");
     meshSiteTick(g_meshWorld, false, "the game is shutting down");
     visorTick(false, "the game is shutting down");
+    spreadTick(false, 0.0f, "the game is shutting down");
+    reticleTick(false, "the game is shutting down");
 }
 
 }  // namespace edvr
