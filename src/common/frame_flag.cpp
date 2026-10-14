@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include <cstdio>  // _snwprintf_s
+#include <cstring>  // memcpy, memset: the HMD key labels
 
 namespace edvr {
 namespace {
@@ -171,14 +172,19 @@ struct Shared {
     // pose-reader hunt's request flag and per-call snapshot. Kept as padding
     // so the layout -- and the mapping name the two halves agree on -- does
     // not change; nothing reads or writes them.
-    volatile LONG     reservedPoseReader1;
-    volatile LONG64   reservedPoseReader2;
-    volatile LONG64   reservedPoseReader3;
-    volatile LONG64   reservedPoseReader4;
-    volatile LONG     reservedPoseReader5;
-    volatile LONG     reservedPoseReader6;
-    volatile LONG     reservedPoseReader7;
-    volatile LONG     reservedPoseReader8;
+    // The slots below carried nothing until 2026-10-14 and now carry the HMD recentre key's press (publishHmdResetPress in frame_flag.h; the
+    // words are src/common/seat_context.h's). Same layout, same mapping name: a peer that predates them never writes a non-zero value here.
+    //   hmdPressState  d3d11 -> openvr, encodeHmdPress (status, held now, press count); 0 = nobody has written
+    //   hmdPressTick   d3d11 -> openvr, GetTickCount64 at the last press edge; 0 = none yet
+    //   hmdLabel0/1    the two bound slots' text, 16 bytes each over (A, B0, B1), for the runtime's log lines
+    volatile LONG     hmdPressState;
+    volatile LONG64   hmdPressTick;
+    volatile LONG64   hmdLabel0A;
+    volatile LONG64   hmdLabel1A;
+    volatile LONG     hmdLabel0B0;
+    volatile LONG     hmdLabel0B1;
+    volatile LONG     hmdLabel1B0;
+    volatile LONG     hmdLabel1B1;
     // advanced.slow_test_ms: d3d11 -> openvr, the milliseconds the runtime
     // holds every xrEndFrame for, inside the call's timed region, while the
     // test is running; 0 is no hold (requestEndFrameHold, frame_flag.h).
@@ -759,6 +765,53 @@ void publishSeatContext(uint32_t word) {
 uint32_t seatContextWord() {
     Shared* s = map();
     return s ? static_cast<uint32_t>(InterlockedCompareExchange(&s->seatContext, 0, 0)) : 0u;
+}
+
+void publishHmdResetPress(uint32_t state, uint64_t pressTick) {
+    Shared* s = map();
+    if (!s) return;
+    InterlockedExchange64(&s->hmdPressTick, static_cast<LONG64>(pressTick));
+    InterlockedExchange(&s->hmdPressState, static_cast<LONG>(state));
+}
+
+uint32_t hmdResetPressState() {
+    Shared* s = map();
+    return s ? static_cast<uint32_t>(InterlockedCompareExchange(&s->hmdPressState, 0, 0)) : 0u;
+}
+
+uint64_t hmdResetPressTick() {
+    Shared* s = map();
+    return s ? static_cast<uint64_t>(InterlockedCompareExchange64(&s->hmdPressTick, 0, 0)) : 0u;
+}
+
+void publishHmdResetLabels(const char (&labels)[2][16]) {
+    Shared* s = map();
+    if (!s) return;
+    LONG64 a[2];
+    LONG b[2][2];
+    for (int i = 0; i < 2; ++i) {
+        std::memcpy(&a[i], labels[i], 8);
+        std::memcpy(b[i], labels[i] + 8, 8);
+    }
+    InterlockedExchange64(&s->hmdLabel0A, a[0]);
+    InterlockedExchange(&s->hmdLabel0B0, b[0][0]);
+    InterlockedExchange(&s->hmdLabel0B1, b[0][1]);
+    InterlockedExchange64(&s->hmdLabel1A, a[1]);
+    InterlockedExchange(&s->hmdLabel1B0, b[1][0]);
+    InterlockedExchange(&s->hmdLabel1B1, b[1][1]);
+}
+
+void hmdResetLabel(int slot, char (&out)[17]) {
+    std::memset(out, 0, sizeof out);
+    Shared* s = map();
+    if (!s || slot < 0 || slot > 1) return;
+    const LONG64 a = InterlockedCompareExchange64(slot ? &s->hmdLabel1A : &s->hmdLabel0A, 0, 0);
+    const LONG b0 = InterlockedCompareExchange(slot ? &s->hmdLabel1B0 : &s->hmdLabel0B0, 0, 0);
+    const LONG b1 = InterlockedCompareExchange(slot ? &s->hmdLabel1B1 : &s->hmdLabel0B1, 0, 0);
+    std::memcpy(out, &a, 8);
+    std::memcpy(out + 8, &b0, 4);
+    std::memcpy(out + 12, &b1, 4);
+    for (int i = 0; i < 16; ++i) if (static_cast<unsigned char>(out[i]) < 32 || static_cast<unsigned char>(out[i]) > 126) out[i] = out[i] ? '?' : out[i];
 }
 
 void setVrProfileActive(bool active) {

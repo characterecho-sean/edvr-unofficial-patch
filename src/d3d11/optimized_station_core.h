@@ -1025,12 +1025,30 @@ constexpr uint8_t kReaderMoving = 1;    // r0 1: moving in or locked in
 constexpr uint8_t kReaderDescent = 3;   // r0 3: the descent has started
 
 enum class SealAction : uint8_t { kNone = 0, kRequestEngage = 1, kRelease = 2 };
-enum class ReleaseWhy : uint8_t { kNone = 0, kSettingOff, kUndocked, kCameraLeft, kPadMoved, kHangarChanged, kLaunch, kMechanism, kInHangarLeft };
+enum class ReleaseWhy : uint8_t { kNone = 0, kSettingOff, kUndocked, kCameraLeft, kPadMoved, kHangarChanged, kLaunch, kMechanism, kInHangarLeft, kOnFoot };
+
+// Release blocker for v0.20.0 (2026-10-14): the seal is for the commander sitting in the ship on the pad. The sealed box is tall (152 x 75 x 258 m for a small pad), so the lift
+// shaft and the concourse above it can lie inside it, and a camera that rode the lift up stayed "in the bay" while the culling hid the station's geometry. The game states the seat
+// itself: Status.json Flags bits 24-26 (main ship, fighter, SRV) and Flags2 bits 1-2 (taxi, multicrew). The seal needs it, and drops with it. Unknown (no file, a menu, the
+// watcher off) is not aboard. Flags2 bits, from the journal documentation: 0 OnFoot, 3 OnFootInStation, 13 OnFootInHangar, 14 OnFootSocialSpace.
+constexpr uint32_t kFlags2OnFoot = 1u << 0, kFlags2OnFootInHangar = 1u << 13, kFlags2OnFootSocialSpace = 1u << 14;
+// One phrase for the log: the words and the bits that matter here. `known` false: "Status Flags unknown".
+inline void describeStatusFlags(char* out, size_t cap, bool known, uint32_t flags, uint32_t flags2) noexcept {
+    if (cap == 0) return;
+    if (!known) {
+        std::snprintf(out, cap, "Status Flags unknown");
+        return;
+    }
+    std::snprintf(out, cap, "Status Flags 0x%08x Flags2 0x%08x: docked %d, in main ship %d, in fighter %d, in SRV %d, taxi %d, multicrew %d, on foot %d, in hangar %d, social space %d",
+                  flags, flags2, (flags & 1u) != 0, (flags >> 24 & 1u) != 0, (flags >> 25 & 1u) != 0, (flags >> 26 & 1u) != 0, (flags2 >> 1 & 1u) != 0, (flags2 >> 2 & 1u) != 0,
+                  (flags2 & kFlags2OnFoot) != 0, (flags2 & kFlags2OnFootInHangar) != 0, (flags2 & kFlags2OnFootSocialSpace) != 0);
+}
 
 // The own pad's game state this tick (the caller fills it from the probe and GameTrack): freshness is decided by the caller in milliseconds.
 struct SealInputs {
     bool setting = false;        // fix.optimized_stations is on
     bool docked = false;         // Status.json Flags bit 0
+    bool aboard = false;         // the commander is seated (Status.json: Flags bits 24-26 or Flags2 bits 1-2) and that is known; unknown reads false
     bool ownKnown = false;       // the game has named the own pad this dock (r0 was called on it)
     bool r1Fresh = false;        // the own pad's r1 was called within kPadStateFreshMs
     bool inHangar = false;       // the own pad's r1 is 1 (meaningful only with r1Fresh)
@@ -1809,6 +1827,7 @@ inline SealAction sealStep(const SealInputs& in, SealState* st, ReleaseWhy* why)
     if (in.held) {
         ReleaseWhy w = ReleaseWhy::kNone;
         if (!in.docked) w = ReleaseWhy::kUndocked;
+        else if (!in.aboard) w = ReleaseWhy::kOnFoot;   // the seat left: on foot in the hangar, the lift, the concourse. No edge is needed to seal again when the seat comes back
         else if (st->camOutRun >= kCameraFrames) w = ReleaseWhy::kCameraLeft;
         else if (in.mechanismMoved) w = ReleaseWhy::kMechanism;   // the hatch or the lift moved: the launch
         else if (in.padMoved) w = ReleaseWhy::kPadMoved;
@@ -1834,6 +1853,10 @@ inline SealAction sealStep(const SealInputs& in, SealState* st, ReleaseWhy* why)
         st->reseal = 0;
         st->mechanism = false;
         st->poseRun = 0;
+        return SealAction::kNone;
+    }
+    if (!in.aboard) {   // on foot (or the seat unknown): never seal; a request in flight is withdrawn
+        clearTrigger(st);
         return SealAction::kNone;
     }
     if (in.padHeld) return SealAction::kNone;   // a short absence: the trigger keeps its state

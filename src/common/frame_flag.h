@@ -217,6 +217,16 @@ uint32_t endFrameHoldMs();
 void publishSeatContext(uint32_t word);
 uint32_t seatContextWord();
 
+// The HMD recentre key (Elite's HMDReset action) as d3d11.dll sees it, for the seat memory's telling a player's press from the game's own reset
+// (src/common/seat_context.h HmdResetPress). `state` is encodeHmdPress; `pressTick` is GetTickCount64 at the last press edge of any watched slot
+// (0 = none). The labels are the two slots' text ("Key_F12", "231D0200:Joy_33", 15 characters at most), for the runtime's log lines. 0 and empty
+// are "nobody has written", which the runtime reads as unobservable: a graphics half that predates this changes nothing.
+void publishHmdResetPress(uint32_t state, uint64_t pressTick);
+uint32_t hmdResetPressState();
+uint64_t hmdResetPressTick();
+void publishHmdResetLabels(const char (&labels)[2][16]);
+void hmdResetLabel(int slot, char (&out)[17]);
+
 // Whether the game is in its VR profile, written by d3d11.dll at launch and at every profile switch (design
 // unified-install section 12). While it reads not-VR and the game makes no frame call, openvr_api.dll's owner runs
 // its own empty frames so the headset does not keep the last frame the game left. Nobody has written it -- an absent

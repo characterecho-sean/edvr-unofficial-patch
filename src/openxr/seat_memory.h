@@ -280,13 +280,39 @@ inline const char* seatWhereName(SeatWhere w) {
   return w == SeatWhere::Aboard ? "aboard" : w == SeatWhere::OnFoot ? "on_foot" : "unknown";
 }
 
+// ---- The player's key press, observed by the graphics half (seat_context.h HmdResetPress) -----------------------------------------------------
+// A press of the HMD recentre key within kPressWindowMs before the game's reset is the player's. No press, with the key observable, is the
+// game's own. A key that cannot be observed (not bound, an unwatchable device, a pad or joystick not yet proven to see its own presses,
+// the graphics half silent) leaves the timing rules below as they were.
+enum class PressState { Unobservable, None, Seen };
+constexpr const char* pressStateName(PressState s) { return s == PressState::Seen ? "seen" : s == PressState::None ? "none" : "unobservable"; }
+constexpr uint64_t kPressWindowMs = 1000;     // a press up to this long before the reset counts (the logged gap is for tuning it)
+constexpr uint64_t kLatePressMs = 300;        // a press seen up to this long AFTER a reset answered "none": the frame poll lost the race with the game
+struct PressInfo {
+  PressState state = PressState::Unobservable;
+  int64_t gapMs = -1;               // now - the press, when there is one
+  const char* why = "unpublished";  // why unobservable, or "held" / "edge" / "no_press_in_window" / "no_press_yet"
+};
+inline PressInfo pressInfoFrom(const HmdResetPress& p, uint64_t lastPressTick, uint64_t nowTick) {
+  PressInfo r;
+  if (p.status != HmdPressStatus::Observable) { r.why = hmdPressStatusName(p.status); return r; }
+  if (p.heldNow) { r.state = PressState::Seen; r.gapMs = 0; r.why = "held"; return r; }
+  if (!lastPressTick) { r.state = PressState::None; r.why = "no_press_yet"; return r; }
+  if (nowTick < lastPressTick) { r.state = PressState::Seen; r.gapMs = 0; r.why = "edge"; return r; }     // the two clocks are one; this is a poll that ran just after
+  r.gapMs = static_cast<int64_t>(nowTick - lastPressTick);
+  if (static_cast<uint64_t>(r.gapMs) <= kPressWindowMs) { r.state = PressState::Seen; r.why = "edge"; }
+  else { r.state = PressState::None; r.why = "no_press_in_window"; }
+  return r;
+}
+
 // What to do with a ResetSeatedZeroPose the game just made.
 enum class SeatResetDecision {
   GameMode,          // the graphics half has not spoken (the word is 0), or the memory is switched off: honoured, nothing remembered (the old behaviour)
   PassThrough,       // in a menu or a load (or on foot, when onFootIsSeated() is false): honoured, nothing remembered
   ReplaceWithSeat,   // aboard or on foot, inside a transition window, a seat is stored: the stored seat replaces the head pose
   HonourNoSeat,      // aboard, inside a window, nothing stored: honoured as today (an automatic reset is not evidence of where the player sits)
-  HonourStore        // aboard, outside a window: the player's own recentre; honoured and remembered
+  HonourStore,       // aboard or on foot, key not observable, outside a window: believed to be the player's after kRetroMs (written then, taken back by a transition)
+  HonourPress        // the player's key press was seen just before: honoured and remembered AT ONCE, in or out of a window, never held
 };
 inline const char* seatResetDecisionName(SeatResetDecision d) {
   switch (d) {
@@ -295,6 +321,7 @@ inline const char* seatResetDecisionName(SeatResetDecision d) {
     case SeatResetDecision::ReplaceWithSeat: return "replace_with_seat";
     case SeatResetDecision::HonourNoSeat: return "honour_no_seat";
     case SeatResetDecision::HonourStore: return "honour_store";
+    case SeatResetDecision::HonourPress: return "honour_press";
   }
   return "unknown";
 }
@@ -418,9 +445,12 @@ class SeatMemory {
     return ev;
   }
 
-  SeatResetDecision classifyReset(uint64_t now) const {
+  SeatResetDecision classifyReset(uint64_t now, const PressInfo& press = PressInfo{}) const {
     if (!keep()) return SeatResetDecision::GameMode;
     if (!seatHolds(where_)) return SeatResetDecision::PassThrough;
+    if (press.state == PressState::Seen) return SeatResetDecision::HonourPress;                 // the player's, whatever the window says
+    if (press.state == PressState::None) return has_ ? SeatResetDecision::ReplaceWithSeat       // the game's own: the seat, in or out of a window,
+                                                    : SeatResetDecision::HonourNoSeat;           // and no 5 s hold to wait out
     if (inWindow(now)) return has_ ? SeatResetDecision::ReplaceWithSeat : SeatResetDecision::HonourNoSeat;
     return SeatResetDecision::HonourStore;
   }
@@ -440,8 +470,19 @@ class SeatMemory {
         pendingAt_ = now;
         return !deferred;
       }
+      case SeatResetDecision::HonourPress:
+        seat_ = origin; has_ = true; originIsSeat_ = true; pendingApply_ = false; pendingStore_ = false;
+        return true;
       default: originIsSeat_ = false; return false;
     }
+  }
+  // A reset was answered "no press" with the stored seat: remember when, so a press the frame poll sees a moment later (it lost the race with the
+  // game) is read as that reset's. takeLatePress is true once, for a press seen within kLatePressMs of it.
+  void noteReplacedByNoPress(uint64_t now) { lateWatchAt_ = now; lateWatch_ = true; }
+  bool takeLatePress(uint64_t now) {
+    if (!lateWatch_) return false;
+    lateWatch_ = false;
+    return now >= lateWatchAt_ && now - lateWatchAt_ <= kLatePressMs;
   }
 
  private:
@@ -467,6 +508,8 @@ class SeatMemory {
   bool seen_ = false;
   bool has_ = false, originIsSeat_ = false, pendingApply_ = false;
   bool pendingStore_ = false;
+  bool lateWatch_ = false;
+  uint64_t lateWatchAt_ = 0;
   uint64_t pendingAt_ = 0;
   SeatPose pendingPrev_;
   bool windowOpen_ = false;

@@ -119,6 +119,9 @@ struct Published {
     // not in a ship or SRV". Known whenever Flags is in the file.
     bool     seatedKnown = false;
     bool     seated = false;
+    // Built v14.35: the raw words of the last sample (0 while the field is absent), for the station's on-foot release line and its flag-change instrument.
+    uint32_t flags = 0;
+    uint32_t flags2 = 0;
     // Built v14.21: Status.json Flags bits 24-26 only (InMainShip, InFighter, InSRV), the in-vehicle half of the seat test without Flags2.
     bool     vehicleKnown = false;
     bool     vehicle = false;
@@ -158,6 +161,8 @@ struct Visible {
     std::atomic<bool>     docked{false};
     std::atomic<bool>     seatedKnown{false};
     std::atomic<bool>     seated{false};
+    std::atomic<uint32_t> flags{0};
+    std::atomic<uint32_t> flags2{0};
     std::atomic<bool>     vehicleKnown{false};
     std::atomic<bool>     vehicle{false};
     std::atomic<uint32_t> seatKind{0};
@@ -194,6 +199,8 @@ void applyPublished(const Published& p) {
     g_v.docked.store(p.docked, kRelaxed);
     g_v.seatedKnown.store(p.seatedKnown, kRelaxed);
     g_v.seated.store(p.seated, kRelaxed);
+    g_v.flags.store(p.flags, kRelaxed);
+    g_v.flags2.store(p.flags2, kRelaxed);
     g_v.vehicleKnown.store(p.vehicleKnown, kRelaxed);
     g_v.vehicle.store(p.vehicle, kRelaxed);
     g_v.seatKind.store(p.seatKind, kRelaxed);
@@ -476,6 +483,8 @@ void pollStatus(Session& s) {
         // as zero here; the pair is only consulted with onFootKnown too.
         s.pub.seatedKnown = sawFlags;
         s.pub.seated = sawFlags && journalSeatedFromFlags(flags, sawFlags2 ? flags2 : 0u);
+        s.pub.flags = sawFlags ? flags : 0u;
+        s.pub.flags2 = sawFlags2 ? flags2 : 0u;
         // Built v14.21: the in-vehicle bits of Flags alone (the station's undock rule); the menu and the load read Flags 0 and are not in a vehicle.
         s.pub.vehicleKnown = sawFlags;
         s.pub.vehicle = sawFlags && (flags & kStatusFlagsSeated) != 0;
@@ -517,6 +526,8 @@ void pollStatus(Session& s) {
         s.pub.flags2 = 0;
         s.pub.dockedKnown = false;
         s.pub.seatedKnown = false;
+        s.pub.flags = 0;
+        s.pub.flags2 = 0;
         s.pub.vehicleKnown = false;
         s.pub.seatKind = 0;
         s.pub.fsdJumpKnown = false;
@@ -1060,6 +1071,10 @@ uint32_t journalFlags2() { return peek(g_v.flags2); }
 bool journalDockedKnown() { return journalWatchActive() && peek(g_v.dockedKnown); }
 bool journalStatusDockedKnown() { return g_v.active.load(std::memory_order_acquire) && peek(g_v.dockedKnown); }
 bool journalStatusDocked() { return peek(g_v.docked); }
+bool journalStatusSeatedKnown() { return g_v.active.load(std::memory_order_acquire) && peek(g_v.seatedKnown); }
+bool journalStatusSeated() { return peek(g_v.seated); }
+uint32_t journalStatusFlags() { return peek(g_v.flags); }
+uint32_t journalStatusFlags2() { return peek(g_v.flags2); }
 bool journalDocked() { return !runtimeFlatProfile() && peek(g_v.docked); }
 bool journalSeatedKnown() { return journalWatchActive() && peek(g_v.seatedKnown); }
 bool journalSeated() { return !runtimeFlatProfile() && peek(g_v.seated); }

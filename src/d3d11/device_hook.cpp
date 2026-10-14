@@ -38,6 +38,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "../common/runtime_profile.h"
 #include "../common/eye_sync.h"
 #include "../common/frame_flag.h"
+#include "hmd_reset_press.h"   // hmdResetPressFrame: the players HMD recentre key, watched for the seat memory
 #include "../common/seat_context.h"   // seatContextPublish: the seat memory's word for the runtime
 #include "../common/guard.h"
 #include "../common/hotkey.h"
@@ -1601,7 +1602,7 @@ void presentFrameBoundary() {
     // The game's own journal, polled about once a second: it states the
     // boundaries EDVR used to infer -- gameplay starting (LoadGame) and
     // on-foot sessions beginning (Disembark).
-    tkJournalWatch.run([] { journalWatchTick(); seatContextPublish(); });
+    tkJournalWatch.run([] { journalWatchTick(); seatContextPublish(); hmdResetPressFrame(); });
     tkCelestialStatus.run(tickCelestialStatus);
     // Explorer Cam (Phase 1), after the journal's tick it reads (on foot, GuiFocus, gameplay). Unconditional: an EMPTY hotkey.explorer_cam is read here
     // every frame too, so binding it live arms the feature on the next one.

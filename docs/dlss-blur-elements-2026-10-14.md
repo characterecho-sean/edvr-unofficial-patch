@@ -2,6 +2,9 @@
 
 ## Status
 
+- **Sixth case, SRV driving (2026-10-14): ROOT CAUSE, fix BUILT, NOT FLOWN** (`claude/srv-split`). Terrain 5 to 8 m from an SRV took the head
+  path because the ship's 10 m cockpit radius applied to the SRV; now 3.5 m in a seated SRV. Not one of the five elements; see
+  docs/per-object-motion.md "The split in an SRV, 2026-10-14". The same question for a docking slot inside 10 m of a ship cockpit is open and unmeasured.
 - **State (2026-10-14):** triage done, no element root-caused, no fix tried. The log-only blend probe is BUILT, NOT FLOWN, on
   `claude/blend-probe` (cut from `claude/flight-2026-10-14`, 57f5393e). Its rig is `tools\blend_probe_test`, in the build gate.
 - **The five elements:** (1) the hologram projected over the landing pad in the station (the user confirmed: not the cockpit docking

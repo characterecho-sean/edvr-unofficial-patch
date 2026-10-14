@@ -1556,6 +1556,7 @@ TemporalFootTracker g_foot;                          // the mode, its reason, th
 uint32_t        g_footEyeFrames = 0;                         // eye evaluations since the totals line last printed
 uint32_t        g_footOnFrames = 0;                          // ...with the mode on
 uint32_t        g_footWorldFrames = 0;                       // ...and the world path on too: the split mattered
+uint32_t        g_footSrvFrames = 0;                         // ...with the SRV mode on instead (split kTemporalSrvMetres)
 ULONGLONG       g_footLineMs = 0;                            // when the totals line last printed
 constexpr uint32_t kFootNoteCap = 40;                        // changes the log tells; later ones are counted, not told
 
@@ -1567,6 +1568,7 @@ bool footSplitNow() {
     f.onFoot = journalOnFoot();
     f.vehicleKnown = journalSeatedKnown();
     f.seated = journalSeated();
+    f.seatKind = journalSeatKind();
     if (g_foot.step(GetTickCount64(), f, journalStatusSamples())) {
         if (g_foot.changes <= kFootNoteCap) {
             if (g_foot.on) {
@@ -1575,7 +1577,7 @@ bool footSplitNow() {
                     "the head and the commander's walk together, at every depth; the far plane as before). Status.json says "
                     "on foot and not seated (scene frame %u, change %u)%s",
                     g_rowsFrame, g_foot.changes,
-                    "; in a ship or SRV the split stays at the ship radius.");
+                    "; in a ship the split stays at the ship radius, in an SRV it is the SRV radius.");
             } else {
                 Log::get().note(
                     "temporal aa: no longer on foot (%s) -- the ship split is back at %.0f m: pixels nearer take the head's "
@@ -1586,6 +1588,19 @@ bool footSplitNow() {
         }
     }
     if (g_foot.on) edvr::nativeOnFootCountGate(edvr::NativeOnFootGate::FootSplit);   // F0 gate counter (log only)
+    if (g_foot.srvChanged && g_foot.srvChanges <= kFootNoteCap) {
+        if (g_foot.srv) {
+            Log::get().note(
+                "temporal aa: in an SRV -- the ship split is %.1f m, not %.0f m: the ground beyond the SRV's body takes the world "
+                "path (the game's camera rows) and only the cab, bonnet and wheels the head's delta. Status.json says Flags bit 26 "
+                "(seat kind 0x%X, scene frame %u, SRV change %u)",
+                static_cast<double>(kTemporalSrvMetres), static_cast<double>(kTemporalShipMetres), journalSeatKind(), g_rowsFrame,
+                g_foot.srvChanges);
+        } else {
+            Log::get().note("temporal aa: no longer in an SRV -- the ship split is back at the configured %.0f m (scene frame %u, SRV change %u)",
+                            static_cast<double>(kTemporalShipMetres), g_rowsFrame, g_foot.srvChanges);
+        }
+    }
     return g_foot.on;
 }
 
@@ -3516,7 +3531,9 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             ++g_footOnFrames;
             if (worldOn) ++g_footWorldFrames;
         }
-        p.split[0] = temporalShipSplitMetres(kTemporalShipMetres, footSplit);
+        const bool srvSplit = g_foot.srv;   // set by footSplitNow() just above; never with footSplit (a seated verdict is not on foot)
+        if (srvSplit) ++g_footSrvFrames;
+        p.split[0] = temporalSplitMetres(kTemporalShipMetres, footSplit, srvSplit);
         for (int c = 0; c < 3; ++c) {
             p.dR0[c] = delta[0 * 3 + c];
             p.dR1[c] = delta[1 * 3 + c];
@@ -5591,12 +5608,15 @@ void temporalPassNoteFootTotals() {
     }
     Log::get().note(
         "temporal aa on foot: the ship split was off for %u of %u eye-frames%s (the world path on for %u of them); the journal "
-        "says now: %s; in a ship or SRV the split is the ship radius, %.0f m; %u change%s of mode this session.",
+        "says now: %s; in a ship the split is the ship radius, %.0f m; split was srv (%.1f m) for %u of them; %u change%s of mode "
+        "this session (%u of the SRV mode).",
         g_footOnFrames, g_footEyeFrames, span, g_footWorldFrames, temporalFootWhyName(g_foot.why),
-        static_cast<double>(kTemporalShipMetres), g_foot.changes, g_foot.changes == 1 ? "" : "s");
+        static_cast<double>(kTemporalShipMetres), static_cast<double>(kTemporalSrvMetres), g_footSrvFrames, g_foot.changes,
+        g_foot.changes == 1 ? "" : "s", g_foot.srvChanges);
     g_footEyeFrames = 0;
     g_footOnFrames = 0;
     g_footWorldFrames = 0;
+    g_footSrvFrames = 0;
     g_footLineMs = now;
 }
 

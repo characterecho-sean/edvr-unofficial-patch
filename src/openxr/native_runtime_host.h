@@ -358,6 +358,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   const char* seatWhy="";                    // the last transition's reason, for the apply it triggers and the meter it schedules
   uint64_t seatMeterDueAt=0,seatMeterNextPeriodic=0;
   const char* seatTraceDecision="head";HeadCall seatTraceCall{};bool seatTraceHasCall=false;
+  PressInfo seatTracePress{};bool seatTraceHasPress=false;      // the HMD key press that went with the reset being traced (seat_memory.h PressInfo)
+  bool seatPressLogged=false;HmdPressStatus seatPressLoggedStatus=HmdPressStatus::Unpublished;uint32_t seatPressSeq=0;
+  uint64_t seatNoPressAt=0;bool seatLatePressPending=false;uint64_t seatLateAfterMs=0;     // a reset answered "no press" and a press arrived just after
   uint64_t localHandled=0;     // LOCAL reference-space changes (referenceChanges counts each as it takes effect) the seat memory has answered
   // Declared before boundary: boundary's constructor stores its address, and
   // it must already exist to be bound (native_frame's own reset() sequence
@@ -2564,8 +2567,12 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(lastResetResult!=XR_SUCCESS)return false;
     const uint64_t now=GetTickCount64();
     seatEnsureLoaded();seatSync(now);
-    const SeatResetDecision decision=seat.classifyReset(now);
+    // The player's key, if the graphics half can see it: a press just before this call makes it the player's; none, with the key observable,
+    // makes it the game's own (the stored seat replaces it, window or not, and nothing is held). Not observable: the timing rules, as before.
+    const PressInfo press=pressInfoFrom(decodeHmdPress(hmdResetPressState()),hmdResetPressTick(),now);
+    const SeatResetDecision decision=seat.classifyReset(now,press);
     seatTraceCall=call;seatTraceHasCall=true;seatTraceDecision=seatResetDecisionName(decision);
+    seatTracePress=press;seatTraceHasPress=true;
     XrPosef replacement{};const XrPosef* over=nullptr;
     if(decision==SeatResetDecision::ReplaceWithSeat){replacement=xrFromSeatPose(seat.seat());over=&replacement;}
     const SeatPose previousSeat=seat.seat();const bool hadSeat=seat.has();
@@ -2573,12 +2580,13 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(ok) {
       // A player-looking recentre over a stored seat is held for SeatMemory::kRetroMs before the disk hears of it: a transition inside that time
       // takes it back (the ramp's reset lands before the boarding flip is visible).
-      if(seat.noteReset(decision,currentOrigin,now))seatSave("manual_reset");
+      if(seat.noteReset(decision,currentOrigin,now))seatSave(decision==SeatResetDecision::HonourPress?"manual_reset_press":"manual_reset");
       else if(decision==SeatResetDecision::HonourStore&&hadSeat)
         nativeTracePrintf("seat_store,action=defer,why=manual_reset,prev=%.3f/%.3f/%.3f/%.1f,new=%.3f/%.3f/%.3f/%.1f,commit_after_ms=%llu\n",
             previousSeat.x,previousSeat.y,previousSeat.z,seatRadToDeg(previousSeat.yaw),currentOrigin.x,currentOrigin.y,currentOrigin.z,
             seatRadToDeg(currentOrigin.yaw),(unsigned long long)SeatMemory::kRetroMs);
     }
+    if(ok&&decision==SeatResetDecision::ReplaceWithSeat&&press.state==PressState::None){seat.noteReplacedByNoPress(now);seatNoPressAt=now;}
     return ok;
   }
   // Owner-only, with no open frame. Both startup and explicit game resets
@@ -2683,18 +2691,23 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     const SeatContext& c=seat.context();const uint64_t now=GetTickCount64();
     const SeatMeter after=seatMeter(headLocal,currentOrigin);
     const bool retro=seatRetroPending&&std::strcmp(reason,"seat_transition")==0;
+    char bind[40]="-";
+    {char a[17],b[17];hmdResetLabel(0,a);hmdResetLabel(1,b);
+     if(a[0]&&b[0])snprintf(bind,sizeof bind,"%s|%s",a,b);else if(a[0]||b[0])snprintf(bind,sizeof bind,"%s",a[0]?a:b);}
     nativeTracePrintf("seat_reset,n=%u,reason=%s,decision=%s,mode=%s,where=%s,window=%u,window_age_ms=%llu,stored=%u,origin_was_seat=%u,"
         "caller_thread=%lu,caller_rva=0x%X,head_local=%.3f/%.3f/%.3f/%.1f,from=%.3f/%.3f/%.3f/%.1f,to=%.3f/%.3f/%.3f/%.1f,"
-        "moved_cm=%.1f,moved_deg=%.1f,after_offset_cm=%.1f,after_height_cm=%.1f,after_yaw_deg=%.1f,retro=%u,age_ms=%llu,result=%d,ok=%u\n",
+        "moved_cm=%.1f,moved_deg=%.1f,after_offset_cm=%.1f,after_height_cm=%.1f,after_yaw_deg=%.1f,retro=%u,age_ms=%llu,press=%s,press_gap_ms=%lld,press_why=%s,bind=%s,result=%d,ok=%u\n",
         ++seatResetCount,reason,seatTraceDecision,seatModeName(c),seatWhereName(seat.where()),unsigned(seat.inWindow(now)),
         (unsigned long long)seat.windowAgeMs(now),unsigned(seat.has()),unsigned(seat.originIsSeat()),
         seatTraceHasCall?(unsigned long)seatTraceCall.thread:0ul,seatTraceHasCall?seatTraceCall.rva:0u,
         headLocal.x,headLocal.y,headLocal.z,seatRadToDeg(headLocal.yaw),before.x,before.y,before.z,seatRadToDeg(before.yaw),
         currentOrigin.x,currentOrigin.y,currentOrigin.z,seatRadToDeg(currentOrigin.yaw),
         seatDistance(before,currentOrigin)*100.0,std::fabs(seatRadToDeg(seatWrap(currentOrigin.yaw-before.yaw))),
-        after.offsetCm,after.heightCm,after.yawDeg,unsigned(retro),(unsigned long long)(retro?seatRetroAgeMs:0),int(lastResetResult),unsigned(ok));
+        after.offsetCm,after.heightCm,after.yawDeg,unsigned(retro),(unsigned long long)(retro?seatRetroAgeMs:0),
+        seatTraceHasPress?pressStateName(seatTracePress.state):"na",seatTraceHasPress?(long long)seatTracePress.gapMs:-1ll,seatTraceHasPress?seatTracePress.why:"-",bind,
+        int(lastResetResult),unsigned(ok));
     if(retro&&ok)seatRetroPending=false;
-    seatTraceDecision="head";seatTraceHasCall=false;seatTraceCall=HeadCall{};
+    seatTraceDecision="head";seatTraceHasCall=false;seatTraceCall=HeadCall{};seatTraceHasPress=false;seatTracePress=PressInfo{};
   }
   // Take the graphics half's word and let the memory decide. Called every WaitGetPoses and before a reset is classified, so a change this
   // frame is seen first. A transition (a window opening, an apply due) is a line of its own.
@@ -2710,6 +2723,21 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       nativeTracePrintf("seat_context,published=%u,mode=%s,gameplay=%u,seated=%u/%u,on_foot=%u/%u,camera=%u,seat_kind=0x%X,transitions=%u,where=%s\n",
           unsigned(c.published),seatModeName(c),unsigned(c.gameplay),unsigned(c.seatedKnown),unsigned(c.seated),unsigned(c.onFootKnown),
           unsigned(c.onFoot),unsigned(c.cameraOpen),c.seatKind,c.transitions,seatWhereName(seat.where()));
+    }
+    {
+      const HmdResetPress pr=decodeHmdPress(hmdResetPressState());
+      if(!seatPressLogged||pr.status!=seatPressLoggedStatus) {
+        seatPressLogged=true;seatPressLoggedStatus=pr.status;
+        char a[17],b[17];hmdResetLabel(0,a);hmdResetLabel(1,b);
+        nativeTracePrintf("seat_press,status=%s,observable=%u,bind0=%s,bind1=%s,seq=%u,rule=%s\n",hmdPressStatusName(pr.status),
+            unsigned(pr.status==HmdPressStatus::Observable),a[0]?a:"-",b[0]?b:"-",pr.seq,
+            pr.status==HmdPressStatus::Observable?"press_decides":"timing_window_and_hold");
+      }
+      if(pr.seq!=seatPressSeq) {
+        seatPressSeq=pr.seq;
+        // A press the frame poll saw just AFTER a reset it was not there for: the game's call beat the poll, and that reset was the player's.
+        if(seat.takeLatePress(now)){seatLatePressPending=true;seatLateAfterMs=now-seatNoPressAt;}
+      }
     }
     if(ev.discardedPending) {
       seatRetroPending=true;seatRetroAgeMs=ev.discardAgeMs;
@@ -2869,6 +2897,20 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(seat.keep()&&seat.applyPending()&&!state.frameOpen()&&changes.active()) {
       moved=applyStoredSeat("seat_transition",seatRetroPending?"replace_with_seat":"transition_seat",true);
       if(moved)seatMeterDueAt=now+2000;
+    }
+    if(seatLatePressPending&&!state.frameOpen()&&changes.active()) {
+      seatLatePressPending=false;
+      XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
+      lastResetResult=HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,view,local,0,head,&lastResetTime,counterNow,nullptr,boundary.estimateNow());
+      if(lastResetResult==XR_SUCCESS) {
+        seatTraceDecision="honour_press_late";
+        seatTracePress=PressInfo{PressState::Seen,-(long long)seatLateAfterMs,"press_after_reset"};seatTraceHasPress=true;
+        if(applySeatedReset(head,"seated_reset",true,nullptr)) {
+          seat.noteReset(SeatResetDecision::HonourPress,currentOrigin,now);
+          seatSave("manual_reset_press_late");
+          moved=true;
+        }
+      }
     }
     if(seatMeterDueAt&&now>=seatMeterDueAt){seatMeterDueAt=0;seatMeterLine("transition_2s");}
     if(seat.context().published&&now>=seatMeterNextPeriodic) {

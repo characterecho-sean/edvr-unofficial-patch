@@ -1155,6 +1155,15 @@ bool g_storeWanted = false;                // the store observer is wanted (the 
 std::atomic<bool> g_dockedNow{false};     // Status.json Flags bit 0 (Docked), read at each tick while known (the store thread reads it)
 bool g_dockedWasNow = false;               // built v14.20 (review 4): the docked flag at the last tick (an undock is a lifecycle point)
 std::atomic<bool> g_dockedKnownNow{false};// Status.json has a Flags sample (the waiting line says unknown until then)
+// Built v14.35 (a v0.20.0 blocker): the seat from the same sample (Flags bits 24-26, Flags2 bits 1-2), and the raw words for the release line and the change instrument.
+bool g_aboardNow = false;                 // seated, and known
+bool g_statusKnownNow = false;
+uint32_t g_statusFlagsNow = 0, g_statusFlags2Now = 0;
+bool g_flagLogSet = false;                // the change instrument: the last words logged
+uint32_t g_flagLogFlags = 0, g_flagLogFlags2 = 0;
+bool g_flagLogKnown = false;
+uint32_t g_flagLogN = 0;
+char g_onFootText[320] = "on foot";
 sealed::GameView g_waitLast;              // the waiting line last written (built v14.23: the game's pad state)
 bool g_waitLastSet = false;
 sealed::GameView g_waitCand;              // built v14.27: the key this tick had, and how long it has held (the line is written on a stable change)
@@ -1306,6 +1315,12 @@ const char* releaseText(sealed::ReleaseWhy w) noexcept {
         case sealed::ReleaseWhy::kLaunch: return "launch (the pad's state object flipped)";
         case sealed::ReleaseWhy::kMechanism: return g_releaseWhy;
         case sealed::ReleaseWhy::kInHangarLeft: return "the own pad left the hangar (the game's r1 went from 1 to 0)";
+        case sealed::ReleaseWhy::kOnFoot: {   // the words at the moment of the release, with the bits that matter
+            char t[300];
+            sealed::describeStatusFlags(t, sizeof(t), g_statusKnownNow, g_statusFlagsNow, g_statusFlags2Now);
+            std::snprintf(g_onFootText, sizeof(g_onFootText), "on foot, not seated in the ship (%s); the seal is for the cockpit only", t);
+            return g_onFootText;
+        }
         default: return "released";
     }
 }
@@ -2495,6 +2510,23 @@ void optimizedStationFrameBody(uint32_t frame) {
     // Built v14.34: the Status.json docked flag under either profile (the flat profile's journal accessors answer the no-journal values).
     g_dockedKnownNow.store(journalStatusDockedKnown(), std::memory_order_release);
     g_dockedNow.store(journalStatusDockedKnown() && journalStatusDocked(), std::memory_order_release);
+    g_statusKnownNow = journalStatusSeatedKnown();
+    g_aboardNow = g_statusKnownNow && journalStatusSeated();
+    g_statusFlagsNow = journalStatusFlags();
+    g_statusFlags2Now = journalStatusFlags2();
+    {   // The flag-change instrument: every change of the two words (known or not) is one line, so one flight shows when each bit moves against the lift's own events.
+        const bool changed = !g_flagLogSet || g_flagLogKnown != g_statusKnownNow || g_flagLogFlags != g_statusFlagsNow || g_flagLogFlags2 != g_statusFlags2Now;
+        if (changed && g_flagLogN < 400 && (g_dockedNow.load(std::memory_order_acquire) || g_heldValid || g_flagLogSet)) {
+            g_flagLogSet = true;
+            g_flagLogKnown = g_statusKnownNow;
+            g_flagLogFlags = g_statusFlagsNow;
+            g_flagLogFlags2 = g_statusFlags2Now;
+            ++g_flagLogN;
+            char text[300];
+            sealed::describeStatusFlags(text, sizeof(text), g_statusKnownNow, g_statusFlagsNow, g_statusFlags2Now);
+            Log::get().note("optimized station: status flags changed (frame %u): %s; aboard %s; seal %s.", frame, text, g_aboardNow ? "yes" : "no", g_heldValid ? "held" : "not held");
+        }
+    }
     // Built v14.20 (review 4): an undock is a lifecycle point: the rig and collection tables start afresh.
     if (g_dockedWasNow && !g_dockedNow.load(std::memory_order_acquire)) {
         bumpRigEpoch();
@@ -2688,6 +2720,7 @@ void optimizedStationFrameBody(uint32_t frame) {
     sealed::SealInputs in;
     in.setting = true;   // the tick returns above while the setting is off
     in.docked = g_dockedNow;
+    in.aboard = g_aboardNow;
     in.ownKnown = g_game.ownKnown;
     in.poseBack = mechanismPoseTick(now);   // built v14.24: the latched records back at their sealed poses (the mechanism re-seal)
     in.r1Fresh = g_game.r1Fresh;

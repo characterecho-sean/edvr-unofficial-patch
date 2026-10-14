@@ -53,4 +53,44 @@ constexpr SeatContext decodeSeatContext(uint32_t w) {
     return c;
 }
 
+// ---- The HMD recentre key, as the graphics half sees it (docs/seat-memory-2026-10-14.md, "the press"). -------------------------------------------
+// The game's automatic recentres and the player's key press arrive through the SAME caller, so only the press itself can tell them apart.
+// d3d11.dll reads the binding of Elite's HMDReset action from the active .binds file, watches those inputs (the keyboard with its modifiers, the
+// XInput pad, a joystick button the game is seen reading) without consuming anything, and publishes two words: this state, and the tick of the
+// last press edge (GetTickCount64, one clock for both halves).
+//
+//   bits 0-3     status       HmdPressStatus
+//   bit  4       heldNow      a watched slot is held at the last poll
+//   bits 8-31    seq          press edges seen (24 bits, wraps)
+enum class HmdPressStatus : uint32_t {
+    Unpublished = 0,        // the graphics half has not written the word (or an older one): nothing is known
+    Observable = 1,         // a bound slot is watched and has been proven to see its own presses (the keyboard always; a pad or joystick after its first press)
+    NoBind = 2,             // HMDReset has no usable slot in the active .binds (unbound, or reading the game's bindings is off)
+    UnobservableDevice = 3, // every bound slot is on a device nothing here can watch (the mouse, an axis, a key with no name)
+    Unreadable = 4,         // no preset or no readable .binds file
+    Unproven = 5            // a pad or joystick slot is watched but has not yet seen one press: its absence proves nothing yet
+};
+struct HmdResetPress {
+    HmdPressStatus status = HmdPressStatus::Unpublished;
+    bool heldNow = false;
+    uint32_t seq = 0;
+};
+constexpr uint32_t kHmdPressSeqMask = 0xFFFFFFu;
+constexpr uint32_t encodeHmdPress(const HmdResetPress& p) {
+    return (static_cast<uint32_t>(p.status) & 0xFu) | (p.heldNow ? 16u : 0u) | ((p.seq & kHmdPressSeqMask) << 8);
+}
+constexpr HmdResetPress decodeHmdPress(uint32_t w) {
+    HmdResetPress p{};
+    const uint32_t s = w & 0xFu;
+    p.status = s <= 5u ? static_cast<HmdPressStatus>(s) : HmdPressStatus::Unpublished;
+    p.heldNow = (w & 16u) != 0;
+    p.seq = (w >> 8) & kHmdPressSeqMask;
+    return p;
+}
+constexpr const char* hmdPressStatusName(HmdPressStatus s) {
+    return s == HmdPressStatus::Observable ? "observable" : s == HmdPressStatus::NoBind ? "no_bind"
+         : s == HmdPressStatus::UnobservableDevice ? "unobservable_device" : s == HmdPressStatus::Unreadable ? "unreadable"
+         : s == HmdPressStatus::Unproven ? "unproven_device" : "unpublished";
+}
+
 }  // namespace edvr

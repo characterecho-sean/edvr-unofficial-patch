@@ -590,7 +590,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% %XESSFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\pixel_probe.cpp" ^
     "src\d3d11\object_record_writer_probe.cpp" "src\d3d11\object_record_writer_hook.cpp" ^
     "src\d3d11\kinematic_eval_probe.cpp" "src\d3d11\kinematic_eval_hook.cpp" ^
-    "src\d3d11\store_hook.cpp" "src\d3d11\view_source.cpp" "src\d3d11\optimized_station.cpp" "src\d3d11\pad_state_probe.cpp" ^
+    "src\d3d11\store_hook.cpp" "src\d3d11\view_source.cpp" "src\d3d11\optimized_station.cpp" "src\d3d11\pad_state_probe.cpp" "src\d3d11\hmd_reset_press.cpp" ^
     "src\d3d11\scheduler_stack_probe.cpp" "src\d3d11\scheduler_stack_hook.cpp" ^
     "src\d3d11\cull_gate_probe.cpp" ^
     "src\d3d11\engine_velocity.cpp" "src\d3d11\skin_join_gpu.cpp" "src\d3d11\skin_entity_hook.cpp" ^
@@ -2709,6 +2709,19 @@ cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /D_CRT_SECURE_NO_WARNINGS ^
 if errorlevel 1 ( echo [edvr] ERROR: seat memory test build failed & exit /b 1 )
 "%BUILD%\seat_memory_test.exe" --dry-run || exit /b 1
 "%BUILD%\seat_memory_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_seat_press_test
+REM Elite's HMDReset action out of .binds text (src\d3d11\elite_binds.cpp eliteBindsHmdReset): the keyboard with modifiers, a HOTAS button, a pad
+REM button, and what nothing here can watch (the mouse, an axis); the active preset's newest file answers. No device, no window, no game.
+if not exist "%OBJ%\seat_press_test" mkdir "%OBJ%\seat_press_test"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\seat_press_test\\" /Fe"%BUILD%\seat_press_test.exe" "tools\seat_press_test\seat_press_test.cpp" ^
+    "src\common\hotkey.cpp" "src\d3d11\elite_binds.cpp" "src\common\iniedit.cpp" "src\common\config.cpp" "src\common\log.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib version.lib
+if errorlevel 1 ( echo [edvr] ERROR: seat press test build failed & exit /b 1 )
+"%BUILD%\seat_press_test.exe" --dry-run || exit /b 1
+"%BUILD%\seat_press_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_openxr_compositor_test

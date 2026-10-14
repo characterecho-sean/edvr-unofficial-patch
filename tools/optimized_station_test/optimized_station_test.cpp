@@ -4,6 +4,7 @@
 // prefix and sphere, the bay's volume, and the unreadable rule. No DLL and no game.
 #include "../../src/d3d11/optimized_station_core.h"
 #include "../../src/d3d11/explorer_cam_core.h"
+#include "../../src/d3d11/journal_watch.h"   // journalSeatedFromFlags (a constexpr; the rig does not link the watcher)
 #include "../../src/d3d11/station_gather_core.h"
 #include "../../src/d3d11/station_lockfree_core.h"
 #include "../../src/d3d11/station_pass_core.h"
@@ -44,6 +45,7 @@ se::SealInputs inHangar(uint64_t now) {
     se::SealInputs in;
     in.setting = true;
     in.docked = true;
+    in.aboard = true;   // seated in the ship on the pad (Status.json); the on-foot cases clear it
     in.ownKnown = true;
     in.r1Fresh = true;
     in.inHangar = true;
@@ -989,6 +991,75 @@ int main(int argc, char** argv) {
         se::SealInputs noPick = inHangar(0);
         noPick.pickOk = false;
         check(firstEngage(&st, noPick, 0, 20000) == 0, "v14.1: no pad gathered (pickOk false): the seal is never requested");
+    }
+
+    // ---- Release blocker for v0.20.0 (2026-10-14): the seal is for the commander seated in the ship; on foot it never holds -------------------------
+    {
+        // Aboard, docked, the pad in the hangar: seals; the seat leaving (Disembark: on foot in the hangar) releases at once, with its own reason.
+        se::SealState st;
+        se::SealInputs in = inHangar(0);
+        check(firstEngage(&st, in, 100, 1000) == 100, "on foot: aboard in the hangar seals");
+        in.held = true;
+        se::ReleaseWhy why = se::ReleaseWhy::kNone;
+        check(se::sealStep(in, &st, &why) == se::SealAction::kNone && why == se::ReleaseWhy::kNone, "on foot: aboard and held keeps the seal");
+        in.aboard = false;   // on foot in the hangar (Flags2 OnFoot | OnFootInHangar): the seat is gone
+        check(se::sealStep(in, &st, &why) == se::SealAction::kRelease && why == se::ReleaseWhy::kOnFoot, "on foot: the seat leaving releases the seal, reason kOnFoot");
+        // The release wins over the camera rule: the lift ride up (the camera still inside the tall box) keeps it released, and nothing re-seals on foot.
+        in.held = false;
+        st = se::SealState{};   // as after a release: no request in flight
+        for (int i = 0; i < 400; ++i) {
+            in.nowMs = 1000 + 100u * static_cast<uint64_t>(i);
+            check(se::sealStep(in, &st, &why) == se::SealAction::kNone, "on foot: the lift ride and the concourse, the camera in the tall box, never re-seal");
+        }
+        // Back aboard (boarding again on the pad, the hangar unchanged): the seal returns on the normal conditions.
+        in.aboard = true;
+        check(firstEngage(&st, in, 200000, 202000) != 0, "on foot: boarding again seals again");
+    }
+    {
+        // The lift door and the concourse: on foot at the concourse level the pad is no longer in the hangar for the game (r1 0) or the camera has left the box; neither matters,
+        // and the seat alone keeps the seal off. A held seal released by the seat is not re-armed by the r1 edge either way.
+        se::SealState st;
+        se::SealInputs in = inHangar(0);
+        in.held = true;
+        in.aboard = false;
+        in.cameraInBox = false;
+        in.cameraOutside = true;
+        se::ReleaseWhy why = se::ReleaseWhy::kNone;
+        check(se::sealStep(in, &st, &why) == se::SealAction::kRelease && why == se::ReleaseWhy::kOnFoot, "on foot in the concourse: released for the seat before the camera rule is consulted");
+        check(st.reseal == 0, "on foot: the release asks for no r1 edge, only the seat returning");
+        // Undocked still reads as undocked, ahead of the seat: the existing reason is kept.
+        se::SealState st2;
+        se::SealInputs und = inHangar(0);
+        und.held = true;
+        und.docked = false;
+        und.aboard = false;
+        check(se::sealStep(und, &st2, &why) == se::SealAction::kRelease && why == se::ReleaseWhy::kUndocked, "an undock keeps its own release reason ahead of the seat");
+    }
+    {
+        // Flags missing or stale: the commander is not known to be aboard, so nothing seals and a held seal drops. The station feeds aboard = seatedKnown && seated.
+        se::SealState st;
+        se::SealInputs in = inHangar(0);
+        in.aboard = false;   // Status.json unreadable, a menu (Flags 0), or the watcher off
+        check(firstEngage(&st, in, 0, 60000) == 0, "flags unknown: a docked station in the hangar never seals");
+        in.held = true;
+        se::ReleaseWhy why = se::ReleaseWhy::kNone;
+        check(se::sealStep(in, &st, &why) == se::SealAction::kRelease && why == se::ReleaseWhy::kOnFoot, "flags unknown: a held seal is released");
+        // the gate the station applies
+        auto aboardOf = [](bool known, bool seated) { return known && seated; };
+        check(!aboardOf(false, true) && !aboardOf(true, false) && aboardOf(true, true), "aboard needs the seat known AND seated (a stale 'seated' with the sample unknown is not aboard)");
+        check(edvr::journalSeatedFromFlags(1u << 24, 0) && edvr::journalSeatedFromFlags(0, 1u << 1) && !edvr::journalSeatedFromFlags(0, se::kFlags2OnFoot | se::kFlags2OnFootInHangar) &&
+                  !edvr::journalSeatedFromFlags(1u, se::kFlags2OnFoot | se::kFlags2OnFootSocialSpace),
+              "the seat from the words: the ship's bit or a taxi seat is aboard; on foot in the hangar or in social space, docked bit alone, is not");
+    }
+    {
+        char text[400];
+        se::describeStatusFlags(text, sizeof(text), true, 0x00000001u, 0x00002001u);
+        check(std::strstr(text, "Flags 0x00000001 Flags2 0x00002001") && std::strstr(text, "on foot 1, in hangar 1, social space 0") && std::strstr(text, "docked 1, in main ship 0"),
+              "the on-foot release line names both words and the bits (docked, ship, on foot, in hangar, social space)");
+        se::describeStatusFlags(text, sizeof(text), false, 0, 0);
+        check(std::strcmp(text, "Status Flags unknown") == 0, "an unknown sample says so");
+        se::describeStatusFlags(text, sizeof(text), true, 0x01000001u, 0x0u);
+        check(std::strstr(text, "in main ship 1") && std::strstr(text, "on foot 0"), "aboard in the main ship reads as such");
     }
 
     // ---- Built v14.24 (2026-10-13, the review of the 013c6122 flight) -----------------------------------------------------------------------------

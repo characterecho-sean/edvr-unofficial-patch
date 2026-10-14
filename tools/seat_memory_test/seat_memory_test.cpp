@@ -556,6 +556,142 @@ void retroWindow() {
     }
 }
 
+// ---- the player's key press tells the game's reset from the player's
+PressInfo seen(int64_t gap = 100) { PressInfo p; p.state = PressState::Seen; p.gapMs = gap; p.why = "edge"; return p; }
+PressInfo none() { PressInfo p; p.state = PressState::None; p.why = "no_press_in_window"; return p; }
+PressInfo unobs() { return PressInfo{}; }
+
+void pressRules() {
+    const SeatPose seat{-0.53, 0.45, -1.11, seatDegToRad(-28)}, mine{-0.50, 0.46, -1.05, seatDegToRad(-25)};
+    // decision table: where x window x stored x press
+    for (int w = 0; w < 3; ++w)
+    for (int inWin = 0; inWin < 2; ++inWin)
+    for (int stored = 0; stored < 2; ++stored)
+    for (int p = 0; p < 3; ++p) {
+        SeatMemory m;
+        if (stored) m.setSeat(seat);
+        const SeatWhere where = w == 0 ? SeatWhere::Unknown : w == 1 ? SeatWhere::OnFoot : SeatWhere::Aboard;
+        m.onContext(ctx(true, SeatWhere::Unknown), 1000);
+        m.onContext(ctx(true, where), 2000);
+        const uint64_t at = inWin ? 2000 + 9000 : 2000 + 10001;
+        const PressInfo press = p == 0 ? seen() : p == 1 ? none() : unobs();
+        SeatResetDecision expect;
+        if (where == SeatWhere::Unknown) expect = SeatResetDecision::PassThrough;
+        else if (p == 0) expect = SeatResetDecision::HonourPress;
+        else if (p == 1) expect = stored ? SeatResetDecision::ReplaceWithSeat : SeatResetDecision::HonourNoSeat;
+        else if (inWin) expect = stored ? SeatResetDecision::ReplaceWithSeat : SeatResetDecision::HonourNoSeat;
+        else expect = SeatResetDecision::HonourStore;
+        const SeatResetDecision got = m.classifyReset(at, press);
+        char text[200];
+        std::snprintf(text, sizeof text, "press table: where=%d window=%d stored=%d press=%s -> %s (got %s)", w, inWin, stored, pressStateName(press.state),
+                      seatResetDecisionName(expect), seatResetDecisionName(got));
+        check(got == expect, text);
+    }
+    // Without the graphics half (no argument) the old rules stand exactly.
+    {
+        SeatMemory m; m.setSeat(seat);
+        m.onContext(ctx(true, SeatWhere::Unknown), 0);
+        m.onContext(ctx(true, SeatWhere::Aboard), 1000);
+        check(m.classifyReset(2000) == SeatResetDecision::ReplaceWithSeat && m.classifyReset(20000) == SeatResetDecision::HonourStore,
+              "no press information: the window and the hold, as before");
+    }
+    // Game mode and the unpublished word ignore a press altogether.
+    {
+        SeatMemory m; m.setSeat(seat);
+        m.onContext(ctx(false, SeatWhere::Aboard), 0);
+        check(m.classifyReset(500, seen()) == SeatResetDecision::GameMode && m.classifyReset(500, none()) == SeatResetDecision::GameMode,
+              "with the memory inactive a press changes nothing");
+    }
+    // The store: a press is the player's, written at once, never held, and it cancels a hold.
+    {
+        SeatMemory m; m.setSeat(seat);
+        m.onContext(ctx(true, SeatWhere::Aboard), 0);
+        m.noteOrigin(true);
+        check(m.noteReset(SeatResetDecision::HonourPress, mine, 50000) && nearPose(m.seat(), mine) && m.originIsSeat() && !m.storePending(),
+              "a press-confirmed recentre is written at once, outside any window");
+        uint64_t w = 0;
+        check(!m.takeCommit(99999, w), "...and nothing is left waiting to commit");
+        const SeatEvents ev = m.onContext(ctx(true, SeatWhere::Aboard, 1, 3), 51000);
+        check(!ev.discardedPending && nearPose(m.seat(), mine), "...so a transition one second later cannot take it back (the 15:25:10 case)");
+        SeatMemory h; h.setSeat(seat);
+        h.onContext(ctx(true, SeatWhere::Aboard), 0); h.noteOrigin(true);
+        h.noteReset(SeatResetDecision::HonourStore, SeatPose{0.1, 0, 0, 0}, 60000);
+        check(h.storePending(), "(a timing-rule store is held)");
+        check(h.noteReset(SeatResetDecision::HonourPress, mine, 61000) && !h.storePending() && nearPose(h.seat(), mine), "a press-confirmed recentre cancels a hold and is written");
+    }
+    // The game's own reset, press observable and none seen: the seat, with no hold and no window needed
+    {
+        SeatMemory m; m.setSeat(seat);
+        m.onContext(ctx(true, SeatWhere::OnFoot), 0); m.applyDone(); m.noteOrigin(true);
+        check(m.classifyReset(60000, none()) == SeatResetDecision::ReplaceWithSeat, "the ramp's reset 30 s into a walk, no press: replaced, not held");
+        check(!m.noteReset(SeatResetDecision::ReplaceWithSeat, seat, 60000) && !m.storePending() && nearPose(m.seat(), seat), "...nothing to store, nothing to commit");
+    }
+    // pressInfoFrom: the words to a verdict, and the edges of the one-second window
+    {
+        HmdResetPress p; p.status = HmdPressStatus::Observable;
+        PressInfo r = pressInfoFrom(p, 0, 5000);
+        check(r.state == PressState::None && r.gapMs == -1, "observable and no press yet: none");
+        r = pressInfoFrom(p, 4001, 5000);
+        check(r.state == PressState::Seen && r.gapMs == 999, "a press 999 ms before: seen, gap logged");
+        r = pressInfoFrom(p, 4000, 5000);
+        check(r.state == PressState::Seen && r.gapMs == 1000, "exactly 1000 ms before: still seen");
+        r = pressInfoFrom(p, 3999, 5000);
+        check(r.state == PressState::None && r.gapMs == 1001, "1001 ms before: none, the gap still logged");
+        r = pressInfoFrom(p, 5000, 5000);
+        check(r.state == PressState::Seen && r.gapMs == 0, "a press in the same millisecond: seen, gap 0");
+        r = pressInfoFrom(p, 5003, 5000);
+        check(r.state == PressState::Seen && r.gapMs == 0, "a press stamped a moment after the reset (the poll ran in between) is read as seen");
+        p.heldNow = true;
+        r = pressInfoFrom(p, 0, 5000);
+        check(r.state == PressState::Seen && r.gapMs == 0, "a slot held now is a press");
+        p.heldNow = false;
+        const HmdPressStatus statuses[] = {HmdPressStatus::Unpublished, HmdPressStatus::NoBind, HmdPressStatus::UnobservableDevice, HmdPressStatus::Unreadable, HmdPressStatus::Unproven};
+        for (HmdPressStatus s : statuses) {
+            p.status = s;
+            r = pressInfoFrom(p, 4900, 5000);
+            check(r.state == PressState::Unobservable && std::string(r.why) == hmdPressStatusName(s), "any status but observable leaves the timing rules, and says why");
+        }
+        check(std::string(hmdPressStatusName(HmdPressStatus::Unproven)) == "unproven_device" && std::string(pressStateName(PressState::Unobservable)) == "unobservable",
+              "the log's words");
+    }
+    // the word between the halves
+    {
+        HmdResetPress p; p.status = HmdPressStatus::Unproven; p.heldNow = true; p.seq = 0xABCDEF;
+        const HmdResetPress q = decodeHmdPress(encodeHmdPress(p));
+        check(q.status == HmdPressStatus::Unproven && q.heldNow && q.seq == 0xABCDEF, "status, held and count survive the word");
+        HmdResetPress big; big.status = HmdPressStatus::Observable; big.seq = 0xFFFFFFFFu;
+        check(decodeHmdPress(encodeHmdPress(big)).seq == kHmdPressSeqMask, "the count wraps into its field");
+        check(decodeHmdPress(0).status == HmdPressStatus::Unpublished && decodeHmdPress(0xF).status == HmdPressStatus::Unpublished, "0 and an unknown status read as unpublished");
+    }
+    // a press the frame poll saw just after a reset it was not there for
+    {
+        SeatMemory m;
+        check(!m.takeLatePress(1000), "no watch, no late press");
+        m.noteReplacedByNoPress(1000);
+        check(m.takeLatePress(1299) && !m.takeLatePress(1300), "a press 299 ms after is the reset's, once");
+        m.noteReplacedByNoPress(1000);
+        check(m.takeLatePress(1300), "300 ms is inside");
+        m.noteReplacedByNoPress(1000);
+        check(!m.takeLatePress(1301), "301 ms is not");
+        m.noteReplacedByNoPress(2000);
+        check(!m.takeLatePress(1500), "a clock before the reset is not a late press");
+    }
+    // the afternoon in one story: a ramp reset with no press, then a real press, then boarding
+    {
+        SeatMemory m; m.setSeat(seat);
+        m.onContext(ctx(true, SeatWhere::Unknown), 0);
+        m.onContext(ctx(true, SeatWhere::OnFoot, 0, 1), 1000); m.applyDone(); m.noteOrigin(true);
+        check(m.classifyReset(30000, none()) == SeatResetDecision::ReplaceWithSeat, "the ramp's reset, no press: the stored seat");
+        m.noteReset(SeatResetDecision::ReplaceWithSeat, seat, 30000);
+        SeatEvents ev = m.onContext(ctx(true, SeatWhere::Aboard, 1, 2), 33000);
+        check(ev.windowOpened && !ev.applyWanted && !ev.discardedPending && nearPose(m.seat(), seat), "boarding 3 s later: the seat stands, nothing to take back");
+        check(m.classifyReset(60000, seen(120)) == SeatResetDecision::HonourPress, "a press then a reset, a minute later: the player's");
+        m.noteReset(SeatResetDecision::HonourPress, mine, 60000);
+        ev = m.onContext(ctx(true, SeatWhere::OnFoot, 0, 3), 62000);
+        check(!ev.discardedPending && nearPose(m.seat(), mine), "disembarking 2 s after the press keeps it: no 5 s hold");
+    }
+}
+
 // ---- the whole story, as the first flight will tell it
 void story() {
     const SeatPose seat{-0.53, 0.45, -1.11, seatDegToRad(-28)};
@@ -618,6 +754,7 @@ int wmain(int argc, wchar_t** argv) {
     picking();
     stillness();
     runtimeRecentre();
+    pressRules();
     retroWindow();
     meter();
     bookText();
