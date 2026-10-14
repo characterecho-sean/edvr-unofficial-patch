@@ -2,7 +2,7 @@
 
 ## Status
 
-- **State:** F0-F10 FLOWN (Epic; journal). F11 BUILT (f9150ae5; green), NOT FLOWN.
+- **State:** F0-F11 FLOWN (Epic; journal). F12 BUILT (7440ec3b; green), NOT FLOWN.
   Branch `claude/native-onfoot-vr-completion-219ffa`; not pushed.
 - **Origin:** a user's handoff. A Cinema-to-HMD swap on disembark gave native
   stereo on foot; the HUD, radar, left panel and inventory were missing.
@@ -33,18 +33,19 @@
     only per-mode pass difference, W+0x38, has no reader.
   - H8 (ruled out, F6): the stereo predicate and the eye-index query.
   - H10 (F8, flown): the override brings the FP node back, but only the reticle shows.
-    F10: the meshes are created and drawn, but invisible; the placement byte 0x1A36453 is wrong (F11 A/B).
-- **F9-F11 instruments (TEMPORARY, remove after F11):** patches `fix.native_on_foot_panels`
-  (76 73 -> 90 90 at +0x19B1587), `fix.native_on_foot_hud_mesh` (80 -> 78 at +0x1A149A8, the
-  creation gate) and `fix.native_on_foot_hud_mesh_world` (74 -> EB at +0x1A36453, the
-  placement A/B); probes P1, P2, P3. F8's override and census stay until F11 closes.
+    F11: the HUD shows head-locked with the creation patch alone (the placement patch is wrong).
+- **F9-F12 instruments (TEMPORARY, remove after F12):** patches `fix.native_on_foot_panels`
+  (76 73 -> 90 90 at +0x19B1587), `fix.native_on_foot_hud_mesh` (80 -> 78 at +0x1A149A8) and
+  `fix.native_on_foot_hud_mesh_world` (74 -> EB at +0x1A36453, off); probes P1, P2, P3. The HUD
+  distance (`fix.native_on_foot_hud_distance`) is a user setting, not temporary.
 - **OPEN, RemLok on foot:** the on-foot visor overlay is not yet identified. It
   needs a skip-probe or a diff census that excludes the tonemap PS
   0x99C21CEB7A699821 (tonemap_admit.h:39).
 - **Ruled out:** the cinema request is always 5 (see the end of this doc).
 - **Temporary keys (all go when the arc picks one):** the six `fix.native_on_foot*` keys on
   the F8 page "Native on foot", after Explorer Cam, in this order: native_on_foot, method,
-  hud, panels, hud_mesh, hud_mesh_world. All default off and live.
+  hud, panels, hud_mesh, hud_mesh_world. All default off and live. The HUD distance is a
+  user setting, live, on the same page.
 - **F2 changes (c884e218):** gate: the setter never substitutes; EDVR holds the byte
   at 0 while the key is on and a game session is live (identity and byte checked
   first). Native body: while native stereo is on foot, the fade global goes -1 to 0
@@ -54,9 +55,9 @@
   the journal; the F1 census lines are unchanged.
 - **Install:** Epic only (Sean: Frontier carries another feature test). `edvr.ini`
   is not touched unless `--ini` says so.
-- **Next:** F11 on Epic, one key at a time: hud_mesh (creation) first, then hud_mesh_world
-  (placement A/B). Read the `hrc submit` rotation rows and the `hrc matrix` line: a near-identity
-  rotation means camera space.
+- **Next:** F12 on Epic: the HUD distance at 0.12, 0.192 and 0.25 in native, and tune it. Then
+  the reticle depth against the HUD depth, a damper or lazy-follow mode, RemLok's visor edge
+  (Sonnet RE running), full body, the neck damper, and Explorer Cam's removal (ask Sean; quote the keys).
 
 ## What "finished" means
 
@@ -199,6 +200,7 @@ mode and its context); W3 step 1-2 (dump comparison, offline).
 - ruled out: EDVR's UI layer hides the HUD (H5), because fix.ui_quality was off from 13:25:06 through a native window 13:25:44-13:27:03, and still no HUD.
 - ruled out: the HUD is gated on the stereo leaf predicate 0x28540B0, because it returns 1 in cinema (mode 6) too, from the same callers (F6).
 - ruled out: a per-item eye-index match drops HUD items in stereo, because the eye-index query's only caller runs once per mode change, not per frame (F6).
+- ruled out: the 0x1A36453 world-placement patch is needed, because with it off the HUD shows head-locked in camera space (F11).
 - ruled out: vs:5E417E9DF2E7F9E6 is the on-foot RemLok line's draw, because skipping its draws did not remove the lines (F10; it also drives the smoke).
 - ruled out: vs:3064D7F445192FDD is the on-foot RemLok line's draw, because skipping its draws did not remove the lines (F10).
 - ruled out: vs:B75A6FF2CA9FA5D6 is the on-foot RemLok line's draw, because skipping its draws did not remove the lines (F10).
@@ -386,3 +388,17 @@ mode and its context); W3 step 1-2 (dump comparison, offline).
   floats (+0x20..+0x4C) with its camera position; P2 logs the HRC's matrix (+0x430..+0x46F) once
   per 5 s per state. The six native on-foot keys now sit on the F8 page "Native on foot",
   after Explorer Cam.
+- **2026-10-14, F11 FLOWN, HUD VISIBLE (Epic).** With fix.native_on_foot_hud_mesh on and
+  fix.native_on_foot_hud_mesh_world off, the HUD elements (radar, compass, frame) are visible in
+  native stereo and head-locked. The quick access menu (the utility wheel) shows too. The
+  elevator interaction panel was visible earlier (panel patch). The pilot says the HUD sits a
+  little too far out from the face. The placement patch (0x1A36453) is not needed for the HUD
+  to show.
+- **2026-10-14, F12 built (7440ec3b, NOT FLOWN).** A user setting, fix.native_on_foot_hud_distance
+  (0.08..0.40 m, default 0.192, live, the Native on foot page under the mesh rows). While native
+  stereo is on foot and the creation patch is in, the two HRC placement matrices (+0x430 and
+  +0x480) are scaled by distance / 0.192: the basis and the translation's x, y, z, with the w
+  column kept, so the angular size is kept and only the depth changes. Each matrix keeps the
+  game's base values and what it last wrote, so a scale is never compounded. A fault stands the
+  writes down for the session, logged once. At the default distance, EDVR puts the base back once
+  and stops claiming the matrix.
