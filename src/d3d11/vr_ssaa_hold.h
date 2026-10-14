@@ -44,7 +44,7 @@ void vrSsaaHoldFrameBoundary();
 // Called at a profile switch, render thread, frame boundary: the hold follows the active profile, not only the live VR session.
 void vrSsaaHoldProfileChanged();
 
-// The settings copy's hold (called from the W relay with the render context, after the copy). Writes nothing when VR is not live.
+// The settings copy's hold (called from the W relay with the render context, after the copy). Holds 1.0 when the copied block's 3D mode (settings object +0x30) is on, whatever the profile and the session (vr_ssaa_hold_math.h copyHolds).
 void vrSsaaHoldAfterCopy(uintptr_t ctx);
 
 // ui_panel_scale.cpp's setter and getter thunks: the render context the call was made on.

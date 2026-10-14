@@ -462,23 +462,44 @@ static void logCopyBlockChange(uintptr_t ctx, uint32_t call) {
     g_blockBusy.clear(std::memory_order_release);
 }
 
+// The game's 3D mode in the settings object (+0x30, the dword W copies to ctx+0x33D0): Settings.xml's StereoscopicMode, 0 when 3D is off.
+// False when the object or the dword does not read, or the value is not 0..6.
+static bool readBlockMode(uintptr_t ctx, unsigned* mode) {
+    uint64_t obj = 0;
+    uint32_t raw = 0;
+    if (!readGame(reinterpret_cast<const uint8_t*>(ctx + kCtxSettingsObjOff), &obj, 8) || !obj) return false;
+    if (!readGame(reinterpret_cast<const uint8_t*>(obj + kHeadFrom), &raw, 4) || !ssaahold::blockModeKnown(raw)) return false;
+    *mode = raw;
+    return true;
+}
+
+static std::atomic<int> g_lastBlockMode{-1};  // the previous copy's block mode (-1 none yet): a rise from 0 is a 3D-on apply
+
 // The settings copy's hold (the W relay in vr_window_trampolines.cpp): after the game copies its settings into the render context,
-// the copied value is the game's own, and while VR is live the field is set to 1.0 (the size writer reads it next). The source block
-// is not written. Writes nothing when VR is not live. "Allowed" is the VR profile or an arriving 3D-on (VR live under a flat profile).
-// Every call is counted; a line is logged on the first calls and whenever (allowed, live, arriving, wrote) or the copied value changes
-// (capped at 64), so the next log says whether a sizing pass ran after the hold armed and what it saw.
+// the copied value is the game's own, and when the copy says 3D is on the field is set to 1.0 (the size writer reads it next). The source
+// block is not written. The decision is ssaahold::copyHolds: the block's own 3D mode when it reads (any profile, any live state, since the
+// apply runs 0.7 s before the profile switch and the runtime session never drops on a live switch), else the VR profile or an arriving
+// 3D-on with a live session. Every call is counted; a line is logged on the first calls and whenever the inputs, the result or the copied
+// value change (capped at 64), so the next log says what each sizing pass saw.
 void vrSsaaHoldAfterCopy(uintptr_t ctx) {
     if (!ctx || g_slotState.load(std::memory_order_acquire) != 1) return;
     const uint32_t call = g_copyCalls.fetch_add(1, std::memory_order_relaxed) + 1;
-    const bool allowed = g_holdAllowed.load(std::memory_order_acquire);
     const bool live = g_vrLive.load(std::memory_order_acquire);
     const bool arriving = g_arriving.load(std::memory_order_acquire);
+    const bool profileAllows = holdAllowedNow();
     g_ctx.store(ctx, std::memory_order_release);
     float copied = 0.0f;
     const bool haveCopied = readFloatGuarded(ctx + kCtxSsOff, &copied);
     if (haveCopied) g_gameBits.store(bitsOf(copied), std::memory_order_release);  // the copy is the game's own value in every profile
+    unsigned blockMode = 0;
+    const bool modeKnown = readBlockMode(ctx, &blockMode);
+    const int lastMode = g_lastBlockMode.exchange(modeKnown ? static_cast<int>(blockMode) : -1, std::memory_order_acq_rel);
+    const bool modeRose = modeKnown && lastMode == 0 && blockMode != 0;
+    const bool holds = ssaahold::copyHolds(modeKnown, blockMode, modeRose, runtimeScopeIncludesVr(), runtimeFeaturesAllowed(), profileAllows,
+                                           live, arriving);
+    const bool allowed = holds;  // the instrument line's "hold allowed" is the decision
     int wrote = 0;  // 0 not written, 1 written 1.0, -1 write failed
-    if (allowed && live) {
+    if (holds) {
         if (writeFloatGuarded(ctx + kCtxSsOff, ssaahold::kHeldValue)) {
             wrote = 1;
             g_held.store(true, std::memory_order_release);
@@ -491,7 +512,8 @@ void vrSsaaHoldAfterCopy(uintptr_t ctx) {
     }
     // The instrument line.
     const uint32_t bits = haveCopied ? bitsOf(copied) : kNoneBits;
-    const uint32_t key = (allowed ? 1u : 0u) | (live ? 2u : 0u) | (arriving ? 4u : 0u) | (wrote == 1 ? 8u : wrote < 0 ? 16u : 0u);
+    const uint32_t key = (allowed ? 1u : 0u) | (live ? 2u : 0u) | (arriving ? 4u : 0u) | (wrote == 1 ? 8u : wrote < 0 ? 16u : 0u) |
+                         (profileAllows ? 32u : 0u) | (modeKnown ? 64u : 0u) | (modeRose ? 128u : 0u) | ((blockMode & 0x7u) << 8);
     if (g_copyLines.load(std::memory_order_relaxed) < 64 &&
         (call <= 6 || key != g_copyLastKey.load(std::memory_order_relaxed) || bits != g_copyLastBits.load(std::memory_order_relaxed))) {
         g_copyLastKey.store(key, std::memory_order_relaxed);
@@ -499,9 +521,11 @@ void vrSsaaHoldAfterCopy(uintptr_t ctx) {
         g_copyLines.fetch_add(1, std::memory_order_relaxed);
         char copiedText[24] = "unknown";
         if (haveCopied) std::snprintf(copiedText, sizeof(copiedText), "%.4f", static_cast<double>(copied));
-        Log::get().note("vr ssaa gate: copy call %u (W 0x281C0D0), frame %u: profile %s, hold allowed %d (VR profile %d, arriving %d), VR "
-                        "live %d; copied %s, %s; ctx 0x%llX",
-                        call, vrSsaaGateFrame(), runtimeProfileName(), allowed ? 1 : 0, holdAllowedNow() ? 1 : 0, arriving ? 1 : 0,
+        char modeText[24] = "unreadable";
+        if (modeKnown) std::snprintf(modeText, sizeof(modeText), "%u%s", blockMode, modeRose ? " (rose from 0)" : "");
+        Log::get().note("vr ssaa gate: copy call %u (W 0x281C0D0), frame %u: profile %s, block 3D mode %s, hold %d (VR profile %d, arriving "
+                        "%d), VR live %d; copied %s, %s; ctx 0x%llX",
+                        call, vrSsaaGateFrame(), runtimeProfileName(), modeText, allowed ? 1 : 0, profileAllows ? 1 : 0, arriving ? 1 : 0,
                         live ? 1 : 0, copiedText,
                         wrote == 1 ? "wrote 1.0" : wrote < 0 ? "write FAILED" : "wrote nothing (the sizing pass reads the copied value)",
                         static_cast<unsigned long long>(ctx));

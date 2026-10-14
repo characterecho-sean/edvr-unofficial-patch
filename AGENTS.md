@@ -229,4 +229,4 @@ minutes after a flight finally reproduced the effect being chased.
 | `tools\` | Python tools, each with `--self-test`; C++ test rigs in subdirs |
 | `docs\` | one investigation doc per arc — read its `## Status` block first |
 | `build.bat` | full build, all gates; `--dll-only` is the receipt-guarded promotion path |
-| `package.bat <version>` | builds, tests, then packages a release |
+| `package.bat <version>` | packages a release from the last full build; it does not build, and refuses unless the build's receipt matches the tree (run `build.bat --wait-lock` first) |

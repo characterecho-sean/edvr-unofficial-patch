@@ -139,6 +139,34 @@ void decideCases() {
     // A VR-to-flat switch while the session is still tearing down is not an arrival: flat profile, latch clear, so it releases.
     check(profileChangeAction(holdAllowedFor(false, false), true, true) == ProfileAction::Release,
           "VR to flat with the session still live: released (no arrival was armed)");
+
+    // The settings copy reads the game's own 3D mode from its block (flight 2026-10-14 11:58: o+0x30 0 -> 4 at the apply, 0.7 s before the
+    // profile switch, VR live 1 throughout flat, no rising edge). The arguments: modeKnown, mode, modeRose, scopeIncludesVr,
+    // featuresAllowed, profileAllows, vrLive, arriving.
+    using edvr::ssaahold::blockModeKnown;
+    using edvr::ssaahold::copyHolds;
+    check(blockModeKnown(0) && blockModeKnown(4) && blockModeKnown(6), "block mode 0, 4 and 6 are Settings.xml values");
+    check(!blockModeKnown(7) && !blockModeKnown(4294967295u), "block mode 7 and a stray dword are not read as a mode");
+    // The shakedown: flat profile, the session still live, the block says 3D on (mode 4, just risen from 0): hold.
+    check(copyHolds(true, 4, true, true, true, false, true, false), "flat profile, VR live, block mode 4 (rose): hold");
+    check(copyHolds(true, 4, true, true, true, false, false, false), "flat profile, no session yet, block mode 4 just rose: hold");
+    check(copyHolds(true, 3, false, true, true, false, true, false), "flat profile, VR live, block mode 3: hold (any nonzero mode)");
+    // 3D off in the block: never a hold, whatever the profile and the session.
+    check(!copyHolds(true, 0, false, true, true, false, true, false), "flat profile, VR live, block mode 0: no hold (the user's 0.65 sizes flat)");
+    check(!copyHolds(true, 0, false, true, true, true, true, true), "VR profile, live, arriving, block mode 0: no hold");
+    // Not a VR install, or the profile's features are off (passthrough): never.
+    check(!copyHolds(true, 4, true, false, true, false, true, false), "flat-only scope: no hold even for mode 4");
+    check(!copyHolds(true, 4, true, true, false, false, true, false), "features off (passthrough): no hold");
+    // Mode on, flat profile, no session and no rise (a stale mode-4 file with no VR runtime): the flat launch stays unheld.
+    check(!copyHolds(true, 4, false, true, true, false, false, false), "flat profile, no session, mode 4 but not risen: no hold");
+    // VR profile with the mode on holds at once, live or not (the startup copy).
+    check(copyHolds(true, 4, false, true, true, true, false, false), "VR profile, block mode 4, session not yet live: hold");
+    check(copyHolds(true, 4, false, true, true, true, true, false), "VR profile, block mode 4, live: hold (as before)");
+    // The block did not read: the earlier rule (VR profile or arriving, and live).
+    check(copyHolds(false, 0, false, true, true, true, true, false), "block unreadable, VR profile, live: hold (as before)");
+    check(!copyHolds(false, 0, false, true, true, true, false, false), "block unreadable, VR profile, not live: no hold (as before)");
+    check(copyHolds(false, 0, false, true, true, false, true, true), "block unreadable, flat, arriving, live: hold (the fallback latch)");
+    check(!copyHolds(false, 0, false, true, true, false, true, false), "block unreadable, flat, live, not arriving: no hold");
 }
 
 void toastCases() {
