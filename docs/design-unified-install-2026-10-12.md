@@ -44,7 +44,7 @@
 - **Temporary keys:** none. No user-facing key is added.
 - **Phase 2 FLOWN OK:** the live switch (e1262071 and its units), no leak
   over 12 switches (10-13), the headset panel while flat (45c51b0f, flown
-  OK on Pimax's runtime). Review f519b1d7: three findings fixed (8f13cddf,
+  OK on Pimax's runtime; panel timing now 10 s text, 1 s black, then zero-layer frames, section 12). Review f519b1d7: three findings fixed (8f13cddf,
   9edf70c7, d410c3dc). Main (XeSS) merged; XeSS in VR in its own doc.
 - **Phase 3 BUILT, the installer NOT YET RUN for real** (section 13):
   a7a2c916, 756fb251, 9b642c02, f30817fa, 31b96980, 7ce8a77d, af948bcb.
@@ -525,7 +525,9 @@ launches. The phase-1 build switches to Passthrough rather than live.
     The game's next WaitGetPoses takes priority and the runtime's frames stop at once.
   - N2, panel (separate device only): the same frames carry a projection layer: both eye images cleared to black with a head-locked
     message rasterised by GDI in the runtime ("Elite is in flat mode. Turn 3D on in Elite's graphics options to return to VR.").
-    Borrowed-device mode keeps N1's empty frames.
+    Borrowed-device mode keeps N1's empty frames. Timing (2026-10-13, Sean): the text shows for 10 s from the stretch's first
+    panel frame, the black frames then draw for 1 s more (the compositor holds the last projection frame, so the black has to be
+    what it holds), and after that the frames carry no layers (`flat_clear,panel=dark` and `panel=empty`).
 - Hypothesis N-H1: the runtime shows its own environment, not the frozen frame, while the app submits zero-layer frames.
   REFUTED on Pimax's runtime (2026-10-13 06:39, build caa65815): the clear ran (1638 and 742 empty frames) and the headset still
   showed the frozen frame. ruled out: zero-layer frames as the fix, because Pimax's compositor keeps the last projection image.

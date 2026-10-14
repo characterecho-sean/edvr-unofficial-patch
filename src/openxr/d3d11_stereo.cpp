@@ -139,7 +139,7 @@ XrResult D3D11Stereo::shutdown() {
   ownedImmediateScene_=false;sceneOwnerThread_=0;
   // The notice's textures belong to this device; they go before it does.
   for(unsigned i=0;i<2;++i){notice_[i].Reset();noticeWidth_[i]=noticeHeight_[i]=noticeEyeWidth_[i]=noticeEyeHeight_[i]=0;}
-  noticeFormat_=0;
+  noticeFormat_=0;noticeFallback_=false;
   context_.Reset();immediateContext_.Reset();device_.Reset();session_=XR_NULL_HANDLE;format_=0;dispatch_={};lastResult_=XR_SUCCESS;
   for(auto& view:layerViews_)view={XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
   return first;
@@ -489,13 +489,13 @@ XrResult D3D11Stereo::ensureNotice() {
     ComPtr<ID3D11Texture2D> texture;
     if(FAILED(device_->CreateTexture2D(&td,&initial,&texture)))return XR_ERROR_RUNTIME_FAILURE;
     notice_[i]=texture;noticeWidth_[i]=td.Width;noticeHeight_[i]=td.Height;
-    noticeEyeWidth_[i]=e.width;noticeEyeHeight_[i]=e.height;noticeFormat_=format_;
+    noticeEyeWidth_[i]=e.width;noticeEyeHeight_[i]=e.height;noticeFormat_=format_;noticeFallback_=bitmap.fallbackFace;
     created=true;
   }
   if(created)++noticeGeneration_;
   return XR_SUCCESS;
 }
-XrResult D3D11Stereo::renderNotice(const XrView (&views)[2],XrSpace space,XrCompositionLayerProjection& layer) {
+XrResult D3D11Stereo::renderNotice(const XrView (&views)[2],XrSpace space,XrCompositionLayerProjection& layer,bool text) {
   layer={XR_TYPE_COMPOSITION_LAYER_PROJECTION};
   if(!ready_||!context_)return lastResult_==XR_SUCCESS?XR_ERROR_CALL_ORDER_INVALID:lastResult_;
   if(!space)return XR_ERROR_HANDLE_INVALID;
@@ -503,14 +503,16 @@ XrResult D3D11Stereo::renderNotice(const XrView (&views)[2],XrSpace space,XrComp
   if(FAILED(device_->GetDeviceRemovedReason()))return XR_ERROR_GRAPHICS_DEVICE_INVALID;
   for(unsigned i=0;i<2;++i)
     if(views[i].type!=XR_TYPE_VIEW||views[i].next||!poseValid(views[i].pose))return XR_ERROR_VALIDATION_FAILURE;
-  if(const XrResult made=ensureNotice();made!=XR_SUCCESS)return made;
   // Each eye's rectangle comes from that view's own tangents: a canted display's optical centre is not the image centre.
-  NoticeRect rects[2];
-  for(unsigned i=0;i<2;++i) {
-    const auto& f=views[i].fov;
-    if(!flatNoticeRect(eyes_[i].width,eyes_[i].height,int32_t(noticeWidth_[i]),int32_t(noticeHeight_[i]),
-        std::tan(double(f.angleLeft)),std::tan(double(f.angleRight)),std::tan(double(f.angleUp)),std::tan(double(f.angleDown)),rects[i]))
-      return XR_ERROR_VALIDATION_FAILURE;
+  NoticeRect rects[2]{};
+  if(text){
+    if(const XrResult made=ensureNotice();made!=XR_SUCCESS)return made;
+    for(unsigned i=0;i<2;++i) {
+      const auto& f=views[i].fov;
+      if(!flatNoticeRect(eyes_[i].width,eyes_[i].height,int32_t(noticeWidth_[i]),int32_t(noticeHeight_[i]),
+          std::tan(double(f.angleLeft)),std::tan(double(f.angleRight)),std::tan(double(f.angleUp)),std::tan(double(f.angleDown)),rects[i]))
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
   }
   for(unsigned i=0;i<2;++i) {
     auto& e=eyes_[i];
@@ -523,8 +525,10 @@ XrResult D3D11Stereo::renderNotice(const XrView (&views)[2],XrSpace space,XrComp
     if(r!=XR_SUCCESS)return r; // timeout does not permit drawing/release
     context_->ClearState();
     const float black[]={0,0,0,1};context_->ClearRenderTargetView(e.rtvs[index].Get(),black);
-    const D3D11_BOX box{0,0,0,noticeWidth_[i],noticeHeight_[i],1};
-    context_->CopySubresourceRegion(e.images[index],0,uint32_t(rects[i].x),uint32_t(rects[i].y),0,notice_[i].Get(),0,&box);
+    if(text){
+      const D3D11_BOX box{0,0,0,noticeWidth_[i],noticeHeight_[i],1};
+      context_->CopySubresourceRegion(e.images[index],0,uint32_t(rects[i].x),uint32_t(rects[i].y),0,notice_[i].Get(),0,&box);
+    }
     context_->OMSetRenderTargets(0,nullptr,nullptr);
     r=submitCommands();
     // A failed submit has reset the recording context, so the renderer stops being ready, as every other stereo failure does.

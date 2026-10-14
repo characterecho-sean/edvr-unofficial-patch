@@ -133,4 +133,22 @@ bool kinematicEvalBuilderHooked() noexcept;
 // "builder frame/call-site mismatch at RVA 0x...", "CodeHook refused the patch").
 const char* kinematicEvalPartTestStatus() noexcept;
 
+
+// The optimized station's producer-0 veto (FUN_144312E00, the emit hook's bracket): called with the record (rcx) and the owner (rdx) before the
+// forward. True skips the forward and the emit observers after it: nothing is appended for the record. Producer 1 is never vetoed. Null = off.
+using DirectVetoFn = bool (*)(uintptr_t rec, uintptr_t owner) noexcept;
+void kinematicEvalSetDirectVeto(DirectVetoFn fn) noexcept;
+// The veto's own want on the bracket (it installs the bracket with the shared install if needed). "installed" or why not.
+const char* kinematicEvalDirectVetoAttach() noexcept;
+void kinematicEvalDirectVetoDetach() noexcept;
+// The early rig veto (0x431AFE0's entry): the decision returns true to veto; the hook then performs Elite's off-screen branch for the rig and
+// returns without the forward. Attach/detach hold the relay gate.
+using RigVetoFn = bool (*)(uintptr_t rig, uintptr_t ctx) noexcept;
+void kinematicEvalSetRigVeto(RigVetoFn fn) noexcept;
+const char* kinematicEvalRigVetoAttach() noexcept;
+void kinematicEvalRigVetoDetach() noexcept;
+uint64_t kinematicEvalRigEmulateFaults() noexcept;
+// The rig whose evaluation forward is running on this thread (0 outside one); the store's synchronous association reads it.
+uintptr_t kinematicEvalCurrentRig() noexcept;
+
 } // namespace edvr

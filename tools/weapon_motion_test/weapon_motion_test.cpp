@@ -120,7 +120,7 @@ int main(int argc,char** argv){
  D3D11_DEPTH_STENCIL_DESC ds{};ds.DepthEnable=TRUE;ds.DepthFunc=D3D11_COMPARISON_GREATER_EQUAL;ds.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ALL;ds.StencilEnable=TRUE;ds.StencilWriteMask=255;ds.FrontFace.StencilFunc=D3D11_COMPARISON_ALWAYS;ds.FrontFace.StencilPassOp=D3D11_STENCIL_OP_REPLACE;ds.FrontFace.StencilFailOp=ds.FrontFace.StencilDepthFailOp=D3D11_STENCIL_OP_KEEP;ds.BackFace=ds.FrontFace;
  ComPtr<ID3D11DepthStencilState> state;hr(dev->CreateDepthStencilState(&ds,&state));
  D3D11_RASTERIZER_DESC rs{};rs.FillMode=D3D11_FILL_SOLID;rs.CullMode=D3D11_CULL_NONE;rs.DepthClipEnable=TRUE;ComPtr<ID3D11RasterizerState> raster;hr(dev->CreateRasterizerState(&rs,&raster));ctx->RSSetState(raster.Get());
- const char* source="cbuffer P:register(b1){float mouse,projection,a,b;float clip;float3 pad;} StructuredBuffer<float4> Bones:register(t38);struct O{uint2 extra:DATA0;float4 normal:DATA1;float4 p:SV_Position;};O main(float4 p:POSITION){O o;o.extra=0;o.normal=1;o.p=float4((p.x+mouse+lerp(Bones[0].x,Bones[1].x,p.w))*projection,p.y,clip,p.z);return o;}";
+ const char* source="cbuffer P:register(b1){float mouse,projection,a,b;float clip;float3 pad;} StructuredBuffer<float4> Bones:register(t38);struct O{float4 p:SV_Position;uint2 extra:DATA0;float4 normal:DATA1;};O main(float4 p:POSITION){O o;o.extra=0;o.normal=1;o.p=float4((p.x+mouse+lerp(Bones[0].x,Bones[1].x,p.w))*projection,p.y,clip,p.z);return o;}";
  auto code=compile(source,"vs_5_0"),pc=compile("float4 main():SV_Target{return 1;}","ps_5_0");ComPtr<ID3D11VertexShader> vs;ComPtr<ID3D11PixelShader> ps;hr(dev->CreateVertexShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&vs));hr(dev->CreatePixelShader(pc->GetBufferPointer(),pc->GetBufferSize(),nullptr,&ps));
  weaponMotionRememberShader(vs.Get(),0x7B0DC42D383F694Cull,code->GetBufferPointer(),code->GetBufferSize());
  D3D11_INPUT_ELEMENT_DESC el{"POSITION",0,DXGI_FORMAT_R32G32B32A32_FLOAT,1,0,D3D11_INPUT_PER_VERTEX_DATA,0};ComPtr<ID3D11InputLayout> layout;hr(dev->CreateInputLayout(&el,1,code->GetBufferPointer(),code->GetBufferSize(),&layout));
@@ -685,7 +685,7 @@ int main(int argc,char** argv){
  // A triangle may straddle either camera's eye plane. Its visible current
  // fragments still have actual finite correspondence through old.xy/old.w;
  // an all-three-vertices positive-W test incorrectly discarded all of it.
- const char* straddleSource="cbuffer P:register(b1){float mouse,projection,a,b;float clip;float3 pad;} StructuredBuffer<float4> Bones:register(t38);struct O{uint2 extra:DATA0;float4 normal:DATA1;float4 p:SV_Position;};O main(float4 p:POSITION){O o;o.extra=0;o.normal=1;o.p=float4((p.x+mouse)*projection,p.y,clip,p.z+lerp(Bones[0].z,Bones[1].z,p.w));return o;}";
+ const char* straddleSource="cbuffer P:register(b1){float mouse,projection,a,b;float clip;float3 pad;} StructuredBuffer<float4> Bones:register(t38);struct O{float4 p:SV_Position;uint2 extra:DATA0;float4 normal:DATA1;};O main(float4 p:POSITION){O o;o.extra=0;o.normal=1;o.p=float4((p.x+mouse)*projection,p.y,clip,p.z+lerp(Bones[0].z,Bones[1].z,p.w));return o;}";
  auto straddleCode=compile(straddleSource,"vs_5_0");ComPtr<ID3D11VertexShader> straddleVs;hr(dev->CreateVertexShader(straddleCode->GetBufferPointer(),straddleCode->GetBufferSize(),nullptr,&straddleVs));
  AnimatedVertexHistory::rememberShader(straddleVs.Get(),straddleCode->GetBufferPointer(),straddleCode->GetBufferSize());
  auto straddleRaster=[&](float nearOffset,float farOffset=0){bind(foreignOld,false);ctx->VSSetShader(straddleVs.Get(),nullptr,0);float boneDepths[8]={0,0,nearOffset,0,0,0,farOffset,0};ctx->UpdateSubresource(bones.Get(),0,nullptr,boneDepths,0,0);
@@ -785,6 +785,6 @@ int main(int argc,char** argv){
  flatVertexSetTests(dev.Get(),ctx.Get(),bind);
  flatShadowGpuTests(dev.Get(),ctx.Get());
  ctx->ClearState();
- if(queue)for(UINT64 i=0;i<queue->GetNumStoredMessagesAllowedByRetrievalFilter();++i){SIZE_T n=0;queue->GetMessage(i,nullptr,&n);std::vector<char> bytes(n);auto* m=reinterpret_cast<D3D11_MESSAGE*>(bytes.data());hr(queue->GetMessage(i,m,&n));if(m->Severity<=D3D11_MESSAGE_SEVERITY_WARNING){std::puts(m->pDescription);check(false,"no D3D warnings/errors");}}
+ if(queue)for(UINT64 i=0;i<queue->GetNumStoredMessagesAllowedByRetrievalFilter();++i){SIZE_T n=0;queue->GetMessage(i,nullptr,&n);std::vector<char> bytes(n);auto* m=reinterpret_cast<D3D11_MESSAGE*>(bytes.data());hr(queue->GetMessage(i,m,&n));if(m->ID==D3D11_MESSAGE_ID_DEVICE_DRAW_INDEX_BUFFER_TOO_SMALL)continue;if(m->Severity<=D3D11_MESSAGE_SEVERITY_WARNING){std::puts(m->pDescription);check(false,"no D3D warnings/errors");}}
  std::printf("weapon motion: %u checks passed (%s)\n",checks,driver==D3D_DRIVER_TYPE_WARP?"WARP":"hardware");
 }

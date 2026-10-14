@@ -3,6 +3,7 @@
 #include "../../src/openxr/d3d11_stereo.h"
 #include "../../src/openxr/gpu_work_observer.h"
 #include "../../src/openxr/flat_notice_placement.h"
+#include "../../src/openxr/flat_notice_raster.h"
 #include "../../src/common/system_d3d11.h"
 #include <cstdio>
 #include <cstring>
@@ -136,8 +137,14 @@ std::vector<uint32_t> readWhole(Fixture& f,unsigned eye,unsigned image){
   for(unsigned y=0;y<desc.Height;++y)std::memcpy(&pixels[size_t(y)*desc.Width],static_cast<const char*>(map.pData)+size_t(y)*map.RowPitch,size_t(desc.Width)*4);
   f.runtime.context->Unmap(read.Get(),0);return pixels;
 }
-// The flat notice (renderNotice, the separate device's path): each eye image is cleared black outside the panel, and the panel's white
-// text sits centred on that eye's optical centre, which the view's own canted fov puts off the image middle.
+// The red, green and blue of one readback texel for the swapchain's format: the readback is little-endian, so byte 0 is the low byte.
+void rgbOf(DXGI_FORMAT format,uint32_t p,unsigned& r,unsigned& g,unsigned& b){
+  const bool bgra=format==DXGI_FORMAT_B8G8R8A8_UNORM||format==DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+  const unsigned c0=p&255,c1=(p>>8)&255,c2=(p>>16)&255;
+  r=bgra?c2:c0;g=c1;b=bgra?c0:c2;
+}
+// The flat notice (renderNotice, the separate device's path): each eye image is cleared black outside the panel, and the panel's orange
+// text sits centred on that eye's optical centre, which the view's own canted fov puts off the image middle. The text-hidden frame is black.
 void noticeSelfTest(){
   Fixture f;
   for(unsigned i=0;i<2;++i)f.sizes[i].recommendedImageRectWidth=f.sizes[i].recommendedImageRectHeight=512;
@@ -158,17 +165,26 @@ void noticeSelfTest(){
     const auto& fov=f.views[eye].fov;NoticeRect rect{};
     check(flatNoticeRect(512,512,int32_t(pw),int32_t(ph),std::tan(fov.angleLeft),std::tan(fov.angleRight),std::tan(fov.angleUp),std::tan(fov.angleDown),rect),
           "notice expected rectangle");
-    const uint32_t black=0xff000000u,white=0xffffffffu;
-    bool outsideBlack=true;int minX=1<<20,minY=1<<20,maxX=-1,maxY=-1;unsigned whites=0;
+    const uint32_t black=0xff000000u;
+    const DXGI_FORMAT format=DXGI_FORMAT(f.renderer.format());
+    bool outsideBlack=true,orange=true;int minX=1<<20,minY=1<<20,maxX=-1,maxY=-1;unsigned ink=0,peakRed=0;
     for(unsigned y=0;y<512;++y)for(unsigned x=0;x<512;++x){
       const uint32_t p=pixels[size_t(y)*512+x];
       const bool inside=int(x)>=rect.x&&int(x)<rect.x+rect.width&&int(y)>=rect.y&&int(y)<rect.y+rect.height;
       if(!inside){if(p!=black)outsideBlack=false;continue;}
-      if(p==white){++whites;minX=std::min(minX,int(x));maxX=std::max(maxX,int(x));minY=std::min(minY,int(y));maxY=std::max(maxY,int(y));}
+      if(p==black)continue;
+      unsigned r=0,g=0,b=0;rgbOf(format,p,r,g,b);
+      // Orange on black: blue is zero and green is 0.44 of red (Elite's heading and detail). A white fringe would break both.
+      if(b!=0||r==0||std::abs(int(g)-int(0.44*r+0.5))>2)orange=false;
+      ++ink;peakRed=std::max(peakRed,r);
+      minX=std::min(minX,int(x));maxX=std::max(maxX,int(x));minY=std::min(minY,int(y));maxY=std::max(maxY,int(y));
     }
     check(outsideBlack,eye?"notice: right eye, outside the panel is black":"notice: left eye, outside the panel is black");
-    check(whites>0&&minX>=rect.x&&maxX<rect.x+rect.width&&minY>=rect.y&&maxY<rect.y+rect.height,
-          eye?"notice: right eye, white text lies inside the panel":"notice: left eye, white text lies inside the panel");
+    check(ink>0&&orange,eye?"notice: right eye, the text is orange on black (blue 0, green 0.44 of red), no white fringe":
+          "notice: left eye, the text is orange on black (blue 0, green 0.44 of red), no white fringe");
+    check(peakRed>=200,eye?"notice: right eye, the heading reaches Elite's full orange":"notice: left eye, the heading reaches Elite's full orange");
+    check(ink>0&&minX>=rect.x&&maxX<rect.x+rect.width&&minY>=rect.y&&maxY<rect.y+rect.height,
+          eye?"notice: right eye, the text lies inside the panel":"notice: left eye, the text lies inside the panel");
     // The ink's bounds centre on the panel's centre: the lines are centred and the margins are equal (tolerance for glyph ink).
     const double centreX=(minX+maxX)/2.0,centreY=(minY+maxY)/2.0;
     const double panelX=rect.x+rect.width/2.0,panelY=rect.y+rect.height/2.0;
@@ -177,6 +193,20 @@ void noticeSelfTest(){
     // The canted centre is off the image middle, in the direction its fov says.
     const double opticalX=rect.x+rect.width/2.0;
     check(eye==0?opticalX<256.0-40.0:opticalX>256.0+40.0,eye?"notice: right eye's centre is right of the middle":"notice: left eye's centre is left of the middle");
+  }
+  // The face the rasteriser selected on this machine (Bahnschrift where installed), and the renderer's flag for it.
+  NoticeBitmap heading;
+  check(rasterizeFlatNotice(205,512,heading)&&!heading.face.empty()&&heading.fallbackFace==f.renderer.noticeFontFallback(),
+        "notice: the font face is chosen and the renderer reports the same fallback");
+  std::printf("notice font: %ls (fallback=%d)\n",heading.face.c_str(),int(heading.fallbackFace));
+  // Past ten seconds the same panel frame carries no text: the eye images are black on both eyes, still a layer that renders.
+  XrCompositionLayerProjection dark{};
+  check(f.renderer.renderNotice(f.views,space,dark,false)==XR_SUCCESS&&dark.viewCount==2,"notice: the text-hidden frame renders");
+  for(unsigned eye=0;eye<2;++eye){
+    const auto pixels=readWhole(f,eye,f.runtime.eyes[eye].index);
+    bool allBlack=true;
+    for(const uint32_t p:pixels)if(p!=0xff000000u){allBlack=false;break;}
+    check(allBlack,eye?"notice: right eye, the text-hidden frame is all black":"notice: left eye, the text-hidden frame is all black");
   }
 }
 

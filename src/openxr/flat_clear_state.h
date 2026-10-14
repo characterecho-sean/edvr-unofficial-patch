@@ -34,7 +34,44 @@ class FlatClearState final {
     if (step.stopped)
       step.reason = vrProfileActive ? Stop::VrProfile : !sessionRunning ? Stop::Session : Stop::GameFrame;
     active_ = step.run;
+    // A new stretch starts the panel's clock again.
+    if (step.started) panelStarted_ = darkNoted_ = emptyNoted_ = false;
     return step;
+  }
+
+  // The notice's text shows for kPanelTextMs from the stretch's first panel frame. Then the eye images are black for
+  // kPanelBlackSettleMs, still as a projection layer: the compositor holds the last projection frame, so black has to be
+  // what it holds. After that draw is false and the owner ends frames with no layers. panelFrame runs once per panel frame
+  // with the owner's ms clock. wentDark and wentEmpty are each set on the one frame they first apply, with afterMs its age then.
+  static constexpr uint64_t kPanelTextMs = 10000;
+  static constexpr uint64_t kPanelBlackSettleMs = 1000;
+  struct PanelFrame {
+    bool text = true;
+    bool draw = true;  // false once the black has settled: the frame carries no layers
+    bool wentDark = false;
+    bool wentEmpty = false;
+    uint64_t afterMs = 0;
+  };
+  PanelFrame panelFrame(uint64_t nowMs) {
+    if (!panelStarted_) {
+      panelStarted_ = true;
+      panelStartMs_ = nowMs;
+    }
+    PanelFrame frame;
+    const uint64_t after = nowMs >= panelStartMs_ ? nowMs - panelStartMs_ : 0;
+    frame.text = after < kPanelTextMs;
+    frame.draw = after < kPanelTextMs + kPanelBlackSettleMs;
+    if (!frame.text && !darkNoted_) {
+      darkNoted_ = true;
+      frame.wentDark = true;
+      frame.afterMs = after;
+    }
+    if (!frame.draw && !emptyNoted_) {
+      emptyNoted_ = true;
+      frame.wentEmpty = true;
+      frame.afterMs = after;
+    }
+    return frame;
   }
 
   // An empty frame failed. Clearing is optional, so it stops and stays stopped until the graphics half reads VR again: the
@@ -54,6 +91,8 @@ class FlatClearState final {
  private:
   bool active_ = false;
   bool failed_ = false;
+  bool panelStarted_ = false, darkNoted_ = false, emptyNoted_ = false;
+  uint64_t panelStartMs_ = 0;
 };
 
 }  // namespace edvr::openxr

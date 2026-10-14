@@ -1,5 +1,6 @@
 #include "vscreen.h"
 #include "gpu_timing.h"
+#include "optimized_station.h"   // the station's sun skip while sealed (optimized_station.cpp)
 #include "gpu_frame_timing.h"
 #include "gpu_census.h"       // issue #38: the per-feature GPU cost census
 #include "../common/d3d11_gpu_command_slots.h"
@@ -1910,6 +1911,9 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         }
         return DrawVerdict::kNone;
     }
+    // The optimized station's sun skip: while the ship is sealed in a hangar, the sun pair is not drawn. It sits after the foreign-context return,
+    // because the bindings are the immediate context's.
+    if (optimizedStationSkipsDraw(bindingShaderHash(BindSlot::Vs), bindingShaderHash(BindSlot::Ps))) return DrawVerdict::kSkip;
     if (flatTemporalCapturing()) flatTemporalDraw(self, count, instances);
     // Cleared before anything can set it, on every draw, so a substitution
     // can never be attributed to a draw that did not ask for one.

@@ -164,6 +164,36 @@ void failureLatch() {
     check(again.run && again.started, "VR then flat again re-arms clearing and runs");
 }
 
+// The panel's clock (kPanelTextMs = 10 s of text from a stretch's first panel frame, then kPanelBlackSettleMs = 1 s of black
+// that still draws, then no layers): each edge is traced once, and a new stretch starts the clock again.
+void panelClock() {
+    FlatClearState s;
+    pump(s, flatQuiet());
+    const uint64_t t0 = 5000;
+    const auto first = s.panelFrame(t0);
+    check(first.text && first.draw && !first.wentDark && !first.wentEmpty, "the first panel frame of a stretch shows the text and starts the clock");
+    check(s.panelFrame(t0 + 9999).text, "9.999 s after the first panel frame the text still shows");
+    const auto dark = s.panelFrame(t0 + 10000);
+    check(!dark.text && dark.draw && dark.wentDark && !dark.wentEmpty && dark.afterMs == 10000,
+          "10 s after it the text is gone and the black still draws, traced once with after_ms 10000");
+    check(!s.panelFrame(t0 + 10999).text && s.panelFrame(t0 + 10999).draw, "10.999 s: black, still drawing");
+    const auto empty = s.panelFrame(t0 + 11000);
+    check(!empty.draw && empty.wentEmpty && !empty.wentDark && empty.afterMs == 11000,
+          "11 s after it the frames stop drawing, traced once with after_ms 11000");
+    const auto later = s.panelFrame(t0 + 15000);
+    check(!later.draw && !later.wentEmpty && !later.wentDark, "the frames after that trace nothing more");
+    Pump vr = flatQuiet();
+    vr.vrProfile = true;
+    pump(s, vr);
+    pump(s, flatQuiet());
+    const uint64_t t1 = t0 + 130000;
+    check(s.panelFrame(t1).text && s.panelFrame(t1 + 9999).text, "a new stretch starts the clock again: the text shows 9.999 s in");
+    const auto again = s.panelFrame(t1 + 10000);
+    check(!again.text && again.draw && again.wentDark && again.afterMs == 10000, "the new stretch goes dark 10 s after its own first panel frame, traced once");
+    const auto againEmpty = s.panelFrame(t1 + 11000);
+    check(!againEmpty.draw && againEmpty.wentEmpty && againEmpty.afterMs == 11000, "and stops drawing 11 s in, traced once");
+}
+
 // The notice's placement (flat_notice_placement.h): the panel's centre is the eye's optical centre from its own tangents.
 void noticeGeometry() {
     using namespace edvr::openxr;
@@ -217,6 +247,7 @@ int main(int argc, char** argv) {
     vrFromTheStart();
     staleEdges();
     failureLatch();
+    panelClock();
     noticeGeometry();
     defaultWordReadsVr();
     if (g_fails) {
@@ -224,6 +255,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     std::printf("PASS: flat_clear_test %d checks (quiet edges 249/250 ms, gates, start and stop transitions with reasons, "
-                "restart, stale game frame edges 999/1000 ms, failure latch re-armed by VR, default word reads VR)\n", g_checks);
+                "restart, stale game frame edges 999/1000 ms, failure latch re-armed by VR, panel text 9.999 s, dark at 10 s, empty at 11 s, "
+                "default word reads VR)\n", g_checks);
     return 0;
 }

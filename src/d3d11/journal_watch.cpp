@@ -85,6 +85,8 @@ struct Published {
     bool     gameplay = false;
     uint32_t disembarks = 0;
     uint32_t embarks = 0;
+    uint32_t loadGames = 0;   // built v14.19: every LoadGame (a load is never a dock arrival)
+    uint32_t undocks = 0;     // built v14.19: every Undocked event
     // When a jump tunnel MAY be on screen: armed at StartJump, cleared by
     // the event that resolves it (FSDJump for hyperspace, SupercruiseEntry
     // for the other branch -- StartJump fires for both, and telling them
@@ -106,10 +108,16 @@ struct Published {
     // shutdown states -- Status then carries only "Flags":0.
     bool     onFootKnown = false;
     bool     onFoot = false;
+    // Built v14 (optimized station): Status.json Flags bit 0 is Docked (the same field whose bit 4 is supercruise, read above).
+    bool     dockedKnown = false;
+    bool     docked = false;
     // Seated in a ship, a fighter, an SRV, a taxi or multicrew (journalSeatedFromFlags): the other half of "on foot, and
     // not in a ship or SRV". Known whenever Flags is in the file.
     bool     seatedKnown = false;
     bool     seated = false;
+    // Built v14.21: Status.json Flags bits 24-26 only (InMainShip, InFighter, InSRV), the in-vehicle half of the seat test without Flags2.
+    bool     vehicleKnown = false;
+    bool     vehicle = false;
     // GuiFocus from Status.json: 9 is the Full System Scanner. The game
     // states the MODE outright -- entry and exit by any path (keybind,
     // ESC, an interdiction yanking the player out of supercruise) all
@@ -129,13 +137,19 @@ struct Visible {
     std::atomic<bool>     gameplay{false};
     std::atomic<uint32_t> disembarks{0};
     std::atomic<uint32_t> embarks{0};
+    std::atomic<uint32_t> loadGames{0};
+    std::atomic<uint32_t> undocks{0};
     std::atomic<uint64_t> jumpArmedMs{0};
     std::atomic<bool>     fsdJumpKnown{false};
     std::atomic<bool>     fsdJumpLive{false};
     std::atomic<bool>     onFootKnown{false};
     std::atomic<bool>     onFoot{false};
+    std::atomic<bool>     dockedKnown{false};
+    std::atomic<bool>     docked{false};
     std::atomic<bool>     seatedKnown{false};
     std::atomic<bool>     seated{false};
+    std::atomic<bool>     vehicleKnown{false};
+    std::atomic<bool>     vehicle{false};
     std::atomic<bool>     fssFocusKnown{false};
     std::atomic<bool>     fssFocus{false};
     std::atomic<uint32_t> guiFocus{0};
@@ -155,13 +169,19 @@ void applyPublished(const Published& p) {
     g_v.gameplay.store(p.gameplay, kRelaxed);
     g_v.disembarks.store(p.disembarks, kRelaxed);
     g_v.embarks.store(p.embarks, kRelaxed);
+    g_v.loadGames.store(p.loadGames, kRelaxed);
+    g_v.undocks.store(p.undocks, kRelaxed);
     g_v.jumpArmedMs.store(p.jumpArmedMs, kRelaxed);
     g_v.fsdJumpKnown.store(p.fsdJumpKnown, kRelaxed);
     g_v.fsdJumpLive.store(p.fsdJumpLive, kRelaxed);
     g_v.onFootKnown.store(p.onFootKnown, kRelaxed);
     g_v.onFoot.store(p.onFoot, kRelaxed);
+    g_v.dockedKnown.store(p.dockedKnown, kRelaxed);
+    g_v.docked.store(p.docked, kRelaxed);
     g_v.seatedKnown.store(p.seatedKnown, kRelaxed);
     g_v.seated.store(p.seated, kRelaxed);
+    g_v.vehicleKnown.store(p.vehicleKnown, kRelaxed);
+    g_v.vehicle.store(p.vehicle, kRelaxed);
     g_v.fssFocusKnown.store(p.fssFocusKnown, kRelaxed);
     g_v.fssFocus.store(p.fssFocus, kRelaxed);
     g_v.guiFocus.store(p.guiFocus, kRelaxed);
@@ -329,6 +349,7 @@ void onEvent(Session& s, const char* name, uint32_t len) {
     // business, and not keeping it is the privacy posture: names only, and
     // only these names do anything.
     if (len == 8 && memcmp(name, "LoadGame", 8) == 0) {
+        ++s.pub.loadGames;   // built v14.19: the station's arrival rule counts loads
         if (!s.pub.gameplay) {
             s.pub.gameplay = true;
             Log::get().note("journal: LoadGame -- gameplay has started, so the "
@@ -344,6 +365,8 @@ void onEvent(Session& s, const char* name, uint32_t len) {
         // journal and a fresh LoadGame.
         s.pub.gameplay = false;
         s.pub.jumpArmedMs = 0;
+    } else if (len == 8 && memcmp(name, "Undocked", 8) == 0) {
+        ++s.pub.undocks;   // built v14.19: the station's arrival rule counts undocks
     } else if (len == 9 && memcmp(name, "StartJump", 9) == 0) {
         s.pub.jumpArmedMs = stampMs();
     } else if (len == 7 && memcmp(name, "FSDJump", 7) == 0) {
@@ -429,10 +452,15 @@ void pollStatus(Session& s) {
         ++s.pub.statusSamples;
         s.pub.onFootKnown = sawFlags2;
         s.pub.onFoot = sawFlags2 && (flags2 & 0x01u) != 0;
+        s.pub.dockedKnown = sawFlags;
+        s.pub.docked = sawFlags && (flags & 0x01u) != 0;
         // The same sample's seat: Flags bits 24-26 and Flags2 bits 1-2 (journal_watch.h). A Flags2 that is absent is read
         // as zero here; the pair is only consulted with onFootKnown too.
         s.pub.seatedKnown = sawFlags;
         s.pub.seated = sawFlags && journalSeatedFromFlags(flags, sawFlags2 ? flags2 : 0u);
+        // Built v14.21: the in-vehicle bits of Flags alone (the station's undock rule); the menu and the load read Flags 0 and are not in a vehicle.
+        s.pub.vehicleKnown = sawFlags;
+        s.pub.vehicle = sawFlags && (flags & kStatusFlagsSeated) != 0;
         // Bit 30 of Flags: the FSD jump itself -- the tunnel, not the
         // countdown before it. The distinction is what scopes the witchspace
         // star fix off the forming-wormhole phase, where the game still
@@ -465,7 +493,9 @@ void pollStatus(Session& s) {
         }
     } else if (++s.statusMisses >= 3) {
         s.pub.onFootKnown = false;
+        s.pub.dockedKnown = false;
         s.pub.seatedKnown = false;
+        s.pub.vehicleKnown = false;
         s.pub.fsdJumpKnown = false;
         s.pub.fssFocusKnown = false;
         s.pub.fssFocus = false;
@@ -977,6 +1007,8 @@ bool journalSupercruise() { return journalWatchActive() && peek(g_v.supercruise)
 bool journalGameplay() { return !runtimeFlatProfile() && peek(g_v.gameplay); }
 uint32_t journalDisembarks() { return runtimeFlatProfile() ? 0u : peek(g_v.disembarks); }
 uint32_t journalEmbarks() { return runtimeFlatProfile() ? 0u : peek(g_v.embarks); }
+uint32_t journalLoadGames() { return runtimeFlatProfile() ? 0u : peek(g_v.loadGames); }
+uint32_t journalUndocks() { return runtimeFlatProfile() ? 0u : peek(g_v.undocks); }
 
 bool journalInJumpTunnel() {
     if (runtimeFlatProfile()) return false;
@@ -999,8 +1031,12 @@ bool journalInJumpTunnel() {
 }
 bool journalOnFootKnown() { return journalWatchActive() && peek(g_v.onFootKnown); }
 bool journalOnFoot() { return !runtimeFlatProfile() && peek(g_v.onFoot); }
+bool journalDockedKnown() { return journalWatchActive() && peek(g_v.dockedKnown); }
+bool journalDocked() { return !runtimeFlatProfile() && peek(g_v.docked); }
 bool journalSeatedKnown() { return journalWatchActive() && peek(g_v.seatedKnown); }
 bool journalSeated() { return !runtimeFlatProfile() && peek(g_v.seated); }
+bool journalVehicleKnown() { return journalWatchActive() && peek(g_v.vehicleKnown); }
+bool journalVehicle() { return !runtimeFlatProfile() && peek(g_v.vehicle); }
 uint32_t journalStatusSamples() { return runtimeFlatProfile() ? 0u : peek(g_v.statusSamples); }
 
 JournalRawStatus journalRawStatus() {

@@ -82,9 +82,12 @@ class D3D11Stereo final {
                         XrCompositionLayerProjection&, float fade = 0.0f);
   // The flat-mode notice (docs/design-unified-install-2026-10-12.md section 12, N2): each eye image is cleared black and the
   // notice's text is copied in with its centre on that eye's optical centre, found from the view's own fov (flat_notice_placement.h).
+  // text false draws the same black frame with no text: the eye images are cleared and nothing is copied in.
   // Same swapchain handling as renderSkybox: acquire, wait, draw, submit, release, for each eye. Every path releases what it acquired.
   // The renderer stays ready whatever this returns, except a GPU submit failure, which leaves it unready like any stereo failure.
-  XrResult renderNotice(const XrView (&)[2], XrSpace, XrCompositionLayerProjection&);
+  XrResult renderNotice(const XrView (&)[2], XrSpace, XrCompositionLayerProjection&, bool text = true);
+  // True when the notice's face is the fallback (Segoe UI, not Bahnschrift), as of the current notice texture.
+  bool noticeFontFallback() const { return noticeFallback_; }
   // The text's format is one this renderer can convert it to (the four it chooses from).
   bool noticeFormatSupported() const;
   // Counts the notice textures made, so the host traces each creation once. noticeSize is the texture's size for one eye.
@@ -155,6 +158,7 @@ class D3D11Stereo final {
   uint32_t noticeWidth_[2]{}, noticeHeight_[2]{};
   uint32_t noticeEyeWidth_[2]{}, noticeEyeHeight_[2]{};
   int64_t noticeFormat_ = 0;
+  bool noticeFallback_ = false;
   uint32_t noticeGeneration_ = 0;
 
   XrResult submitCommands(GpuWorkObserver* observer = nullptr, unsigned phase = 0);

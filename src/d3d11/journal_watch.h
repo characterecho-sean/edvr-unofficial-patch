@@ -121,6 +121,11 @@ uint32_t journalDisembarks();
 // ...and boarded.
 uint32_t journalEmbarks();
 
+// Built v14.19 (optimized station): how many LoadGame events and Undocked events this process has read. A change is a load or an undock; the
+// station's dock arrival rule (DockWatch) counts them, so a load is never an arrival.
+uint32_t journalLoadGames();
+uint32_t journalUndocks();
+
 // The live on-foot state from Status.json, updated by the game about once a
 // second. 6bb measured the flags HOLDING through the entire external-camera
 // window (Flags2 0x8011, frozen, across eight view changes); boarding drops
@@ -130,6 +135,9 @@ uint32_t journalEmbarks();
 // heuristics.
 bool journalOnFootKnown();
 bool journalOnFoot();
+// Built v14 (optimized station): the commander is docked, from Status.json Flags bit 0. Known whenever Flags is in the file.
+bool journalDockedKnown();
+bool journalDocked();
 
 // The commander is SEATED in something, by the same Status.json read: Flags bit 24 (the main ship), 25 (a fighter) or 26 (an
 // SRV), or Flags2 bit 1 (a taxi) or 2 (someone else's ship). On foot is Flags2 bit 0 and none of these; the game writes both
@@ -143,6 +151,9 @@ constexpr bool journalSeatedFromFlags(uint32_t flags, uint32_t flags2) {
 }
 bool journalSeatedKnown();
 bool journalSeated();
+// Built v14.21 (optimized station): Status.json Flags bits 24-26 alone (in a main ship, a fighter or an SRV). Flags 0 (menu, loading) is not in a vehicle.
+bool journalVehicleKnown();
+bool journalVehicle();
 
 // How many Status.json samples have been read: lets a caller require a sample
 // taken AFTER some event, since the previous one can be a second stale.

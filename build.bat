@@ -571,6 +571,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% %XESSFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\pixel_probe.cpp" ^
     "src\d3d11\object_record_writer_probe.cpp" "src\d3d11\object_record_writer_hook.cpp" ^
     "src\d3d11\kinematic_eval_probe.cpp" "src\d3d11\kinematic_eval_hook.cpp" ^
+    "src\d3d11\store_hook.cpp" "src\d3d11\view_source.cpp" "src\d3d11\optimized_station.cpp" "src\d3d11\pad_state_probe.cpp" ^
     "src\d3d11\scheduler_stack_probe.cpp" "src\d3d11\scheduler_stack_hook.cpp" ^
     "src\d3d11\cull_gate_probe.cpp" ^
     "src\d3d11\engine_velocity.cpp" "src\d3d11\skin_join_gpu.cpp" "src\d3d11\skin_entity_hook.cpp" ^
@@ -2136,6 +2137,32 @@ cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT ^
     "tools\gpu_span_state_test\gpu_span_state_test.cpp" /link /INCREMENTAL:NO
 if errorlevel 1 ( echo [edvr] ERROR: GPU span state test build failed & exit /b 1 )
 "%BUILD%\gpu_span_state_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_optimized_station_test
+echo [edvr] === optimized_station_test.exe ===
+REM The optimized station's pure half (src\d3d11\optimized_station_core.h): the seal trigger, the release rules, the pad-local frame, the
+REM per-size floors, the own-ship rules and the bay volume. No DLL and no game.
+if not exist "%OBJ%\optimizedstation" mkdir "%OBJ%\optimizedstation"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\optimizedstation\\" ^
+    /Fe"%BUILD%\optimized_station_test.exe" "tools\optimized_station_test\optimized_station_test.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: optimized station test build failed & exit /b 1 )
+"%BUILD%\optimized_station_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_pad_state_test
+echo [edvr] === pad_state_test.exe ===
+REM The pad-state probe's pure half (src\d3d11\pad_state_core.h): the identity and prologue decision, change detection, the exact line texts, the
+REM bounded object table and its full-table fallback, and the line cap. Temporary, log only. No DLL and no game.
+if not exist "%OBJ%\padstate" mkdir "%OBJ%\padstate"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\padstate\\" ^
+    /Fe"%BUILD%\pad_state_test.exe" "tools\pad_state_test\pad_state_test.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: pad state test build failed & exit /b 1 )
+"%BUILD%\pad_state_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_gpu_disjoint_clock_test

@@ -311,7 +311,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   // The flat notice (N2): the layer flatClearFrame rendered before it ends the frame, which composeBackground hands over instead of
   // drawing the skybox; the trace's last texture generation; and the once-only unavailable reason.
   XrCompositionLayerProjection flatNoticeLayer{};
-  bool flatNoticeReady=false,flatPanelNoted=false;
+  bool flatNoticeReady=false,flatPanelNoted=false,flatFontFallbackNoted=false;
   uint32_t flatNoticeGeneration=0;
   // The panel needs the runtime's own device (separate_device=1), where the owner's context can draw the eye images, and a text
   // format the renderer converts to. Otherwise the clear frames stay black.
@@ -1019,6 +1019,14 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     auto frame=boundary.frame();
     if(!applyFrameSequence(frame)){boundary.clear();return XR_ERROR_LIMIT_REACHED;}
     if(!flatPanelAvailable()||!frame.shouldRender)return boundary.clear();
+    // The clock starts at the stretch's first panel frame. The text shows for ten seconds, the eye images are black for one more,
+    // then the frames carry no layers: the compositor holds the last projection frame, so the black settles before it stops.
+    const auto panel=flatClear.panelFrame(GetTickCount64());
+    if(panel.wentDark)nativeTracePrintf("flat_clear,panel=dark,after_ms=%llu\n",(unsigned long long)panel.afterMs);
+    if(!panel.draw){
+      if(panel.wentEmpty)nativeTracePrintf("flat_clear,panel=empty,after_ms=%llu\n",(unsigned long long)panel.afterMs);
+      return boundary.clear();
+    }
     // The views, located as loadingStep locates its skybox frame.
     uint64_t applied=0;
     if(!changes.advance(frame.predictedDisplayTime,applied)){boundary.clear();return XR_ERROR_TIME_INVALID;}
@@ -1034,12 +1042,16 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     boundary.setGeometryReady(valid);
     if(!valid)return boundary.clear();
     XrCompositionLayerProjection layer{};
-    r=stereo.renderNotice(frameViews,frameSpace,layer);
+    r=stereo.renderNotice(frameViews,frameSpace,layer,panel.text);
     if(r!=XR_SUCCESS){boundary.clear();return r;}
     if(stereo.noticeGeneration()!=flatNoticeGeneration){
       flatNoticeGeneration=stereo.noticeGeneration();
       uint32_t lw=0,lh=0,rw=0,rh=0;stereo.noticeSize(0,&lw,&lh);stereo.noticeSize(1,&rw,&rh);
       nativeTracePrintf("flat_clear,panel=ready,size=%ux%u,size_right=%ux%u,format=%d\n",lw,lh,rw,rh,int(stereo.format()));
+      if(stereo.noticeFontFallback()&&!flatFontFallbackNoted){
+        flatFontFallbackNoted=true;
+        nativeTracePrintf("flat_clear,panel_font=fallback\n");
+      }
     }
     flatNoticeLayer=layer;flatNoticeReady=true;
     r=boundary.background();
