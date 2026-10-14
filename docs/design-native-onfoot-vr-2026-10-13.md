@@ -2,59 +2,30 @@
 
 ## Status
 
-- **State:** F0-F17 FLOWN (Epic; F16 and F17 flown 10-14). **F18 BUILT** (full build green, receipt
-  written; commit and `--dll-only` in the journal), **NOT FLOWN**. Branch `claude/native-onfoot-vr-completion-219ffa`; not pushed.
-- **Origin:** a user's handoff. A Cinema-to-HMD swap on disembark gave native
-  stereo on foot; the HUD, radar, left panel and inventory were missing.
+- **State:** F0-F18 FLOWN (Epic). **F19 BUILT** (full build green, receipt written; commit and `--dll-only` in the journal), **NOT FLOWN**. Branch `claude/native-onfoot-vr-completion-219ffa`; not pushed.
+- **Origin:** a user's handoff. A Cinema-to-HMD swap on disembark gave native stereo on foot; the HUD, radar, left panel and inventory were missing.
 - **Build:** Sean's installs hash to the handoff's exe (332841). Epic is the install target.
-- **Verified offline:** the setter is vtable 0x52E9608 slot 5 = 0x28723C0. The
-  selector is embedded in its owner at +0x60. No direct callers.
-- **Requester gate (build 332841):** in 0x28873C0 the cinema partner mode is kept only
-  if `call [rax+0xb0]` returns non-zero AND the byte at EliteDangerous64.exe+0x5E82B3E
-  is non-zero. The byte has one reader and no writer. Never write its neighbours 0x5E82B3C and 0x5E82B3F.
-- **Key findings:** the game tests the selector mode in {3, 4} at about 50 sites (F8); the HUD is held
-  back by the first-person pass's enable (F8, fixed by the override). F3: the first-person AMC (mode 2)
-  has the EVASuit arms, hands and FirstPersonSkeleton; the 3P body (mode 3) has masks 0x60BD8000C05E.
-  F15: hiding the FP body leaves the 3P legs, which is fine. F17: the HUD clip is the canvas edge (stage
-  2008x1206, RTT 4915x2952); a bigger canvas adds no room.
-- **F18 (BUILT, NOT FLOWN):**
-  1. Reticle: `fix.native_on_foot_reticle_follow`. `aim` (default) zeroes key 10's translation x and y
-     (the F16 centring); `head` is F17. The reticle stub is installed whenever native on foot is active.
-  2. Body torso cull test (TEMPORARY, `fix.native_on_foot_body_cull` = game | none | front). The local 3P
-     body is 5 draws: VS 0x9D800F45B12A6AAC / PS 0x194DD6A677084A74 at 13260, 30216, 23784, 7692 indices,
-     and VS 0x7B0DC42D383F694C / PS 0x0DF03E64DF9DBEF1 at 37080; all instance count 1, stencil ref 21 checked
-     (OMGetDepthStencilState, only on a matched draw). The swap is a wrapper in vscreen.cpp around the
-     forwardWithVerdict call (not a verdict), with the game's RS cloned at the other CullMode and put back
-     after the draw. Log: `native on foot body cull: <mode> matched N draws (by index count: ...)` every 5 s.
-  3. HUD room (`fix.native_on_foot_hud_room`, 1.00..2.50): element scale k_eff = k_base / room, mesh size
-     = hud_size x room. k_base is the element-scale setting, or the game's own S ([HRC+0x4C4], cached
-     while the override is off) when the setting is 0; with no S yet, the room is not applied.
-     Log: `native on foot hud room: <r> (element scale <k>, size <s>)`.
-  4. Probe P1 (TEMPORARY, no key; installed while native on foot is active): the avatar visibility job
-     EliteDangerous64.exe+0x3DA2C80, prologue verified (32 bytes, build 332841), steal 5. Once a second,
-     for the local 3P AMC: cam_in_body, head_in_body, cam_minus_head. Assumes the head (avatar-root model
-     space) goes through the AMC's world matrix. Log: `native on foot eye vs body: ...`.
+- **Verified offline:** the setter is vtable 0x52E9608 slot 5 = 0x28723C0. The selector is embedded in its owner at +0x60. No direct callers.
+- **Requester gate (build 332841):** in 0x28873C0 the cinema partner mode is kept only if `call [rax+0xb0]` returns non-zero AND the byte at EliteDangerous64.exe+0x5E82B3E is non-zero. The byte has one reader and no writer. Never write its neighbours 0x5E82B3C and 0x5E82B3F.
+- **Key findings:** the game tests the selector mode in {3, 4} at about 50 sites (F8); the HUD is held back by the first-person pass's enable (F8, fixed by the override). F3: the first-person AMC (mode 2) has the EVASuit arms, hands and FirstPersonSkeleton; the 3P body (mode 3) has masks 0x60BD8000C05E. F15: hiding the FP body leaves the 3P legs. F17: the HUD clip is the canvas edge (stage 2008x1206, RTT 4915x2952); a bigger canvas adds no room.
+- **F18 FLOWN (10-14):** the torso was not visible with CULL_FRONT, so back-face culling is ruled out (Ruled out). The `none` mode matched 0 draws: a bug in the F18 count, so no `none` result is evidence. The cull code stays as it is; the cull is superseded.
+- **F19 (BUILT, NOT FLOWN):**
+  1. Body unclip, TEMPORARY `fix.native_on_foot_body_unclip` (on | off, off). While native stereo is on foot, after each fade call, the local third-person AMC's clip modifier (part+0x610: enable at +0xC, dirty at +0xD) is written enable 0, dirty 1 for EVASuit_Torso, _Arms, _Hands, Shoulder_Left, Shoulder_Right. Verified in the exe against the item-apply function 0x3DD9EA0 (the journal has the quoted instructions). Nothing is restored when it goes off.
+  2. Clip probe (no key; on while native stereo is on foot): 5 s lines `native on foot body clip:` for the five parts plus EVASuit_Legs, EVASuit_Feet and FirstPersonSkeleton (only where the AMC has them); `native on foot body clip flags:` once per AMC ([AMC+0x321], [AMC+0x322], [AMC+0x378]). Read before the same call's write.
+  3. Constants probe, TEMPORARY `fix.native_on_foot_body_cb_probe` (on | off, off), native or Explorer Cam on foot. Logs `native on foot body cb2:` rows 5..9 once per 5 s per (VS, PS, index count). No CPU copy of constant-buffer bytes exists (binding_shadow keeps pointers only), so it is a 352-byte GPU copy to a staging buffer, mapped with DO_NOT_WAIT on a later matched draw.
+  4. HUD defaults (Sean's tuning, repo ini and code fallbacks): element scale 1.35, size 1.60, distance 0.01, spread 0.04, left x 0.18 and y 0.02, top y -0.07. Room stays 1.00.
 - **Open hypotheses:**
-  - H-body: the torso's cull (F18 `front` or `none`) shows whether the 3P torso blocks the view.
-  - H-eye: P1's cam_minus_head sizes an eye offset; the head-in-body assumption is unverified.
+  - H-clip: the torso is hidden by its clip modifier (enable 1 with the amount above cb2[5].w). F19 tests it: unclip on should show the torso; the clip probe shows whether the game re-applies enable 1 between our writes.
+  - H-threshold: cb2 row 5, w is the discard threshold. The cb2 probe reads it; if the amounts sit below it, H-clip is refuted.
+  - H-eye: P1's cam_minus_head sizes an eye offset; the head-in-body assumption is unverified (F18 values looked implausible, not used).
   - H-room: whether the game's own S at [HRC+0x4C4] matches the element scale it lays out (not re-checked).
-- **Ruled out:** the cinema request is always 5 (see the end of this doc).
-- **Temporary keys (all go when the arc picks one):** `fix.native_on_foot`, `_method`, `_hud`, `_panels`,
-  `_hud_mesh`, `_hud_mesh_world`, `_hud_follow_order`, `_reticle_probe`, `_hide_fp_body`, `_body_cull` (F18).
-  All default off or game, and live.
-- **User settings:** `_breathable_visor` (up | game, up), `_reticle_follow` (aim | head, aim), the eight
-  `_hud_<left|top|right|centre>_<x|y>` offsets (0), `_hud_element_scale` (0 = game, else 0.30..2.00),
-  `_hud_room` (1.00..2.50, F18), and the tuned defaults: distance 0.03 (min 0.01), size 1.50 (max 3.00),
-  spread 0.15, smoothing 40 ms.
-- **OPEN, RemLok on foot:** the on-foot visor overlay is not yet identified. It needs a skip-probe or a
-  diff census that excludes the tonemap PS 0x99C21CEB7A699821 (tonemap_admit.h:39).
-- **F2 (c884e218):** the gate holds the byte at 0 while the key is on; the native body zeroes the local
-  head parts. Log lines and details are in the journal.
-- **Install:** Epic only (Sean: Frontier carries another feature test). `edvr.ini` is not touched unless
-  `--ini` says so.
-- **Next:** flight F18 on Epic with `--scope vr`. Check: the reticle in aim (the dot on the aim axis) and
-  head; `body cull ... matched N` with mode `none` or `front` (N > 0 in a third-person view); `hud room`
-  lines and the HUD edge; the P1 line in a station and on foot. Then the body-cull and P1 questions above.
+- **Ruled out:** the cinema request is always 5 (see the end of this doc). Back-face culling hides the native torso (F18).
+- **Temporary keys (all go when the arc picks one):** `fix.native_on_foot`, `_method`, `_hud`, `_panels`, `_hud_mesh`, `_hud_mesh_world`, `_hud_follow_order`, `_reticle_probe`, `_hide_fp_body`, `_body_cull` (F18), `_body_unclip` and `_body_cb_probe` (F19). All default off or game, and live.
+- **User settings:** `_breathable_visor` (up | game, up), `_reticle_follow` (aim | head, aim), the eight `_hud_<left|top|right|centre>_<x|y>` offsets (F19: left 0.18, 0.02; top y -0.07), `_hud_element_scale` (F19: 1.35; 0 = game, else 0.30..2.00), `_hud_room` (1.00..2.50), and the tuned defaults: distance 0.01 (min 0.01), size 1.60 (max 3.00), spread 0.04, smoothing 40 ms.
+- **OPEN, RemLok on foot:** the on-foot visor overlay is not yet identified. It needs a skip-probe or a diff census that excludes the tonemap PS 0x99C21CEB7A699821 (tonemap_admit.h:39).
+- **F2 (c884e218):** the gate holds the byte at 0 while the key is on; the native body zeroes the local head parts. Log lines and details are in the journal.
+- **Install:** Epic only (Sean: Frontier carries another feature test). `edvr.ini` is not touched unless `--ini` says so. `--target` takes the game directory path.
+- **Next:** flight F19 on Epic with `--scope vr`, keys `body_unclip = on` and `body_cb_probe = on` for one run. Check: the torso on the native body (unclip on vs off); `body clip` enable and dirty values; `body cb2` row 5 w against the clip amounts; the P1 line on foot.
 
 ## What "finished" means
 
@@ -182,6 +153,8 @@ Decides: H3 (gate counters); W4's admission list (every natural incoming
 mode and its context); W3 step 1-2 (dump comparison, offline).
 
 ## Ruled out
+
+- ruled out: back-face culling hides the native torso, because CULL_FRONT on the matched 37080 torso draw changed nothing (F18).
 
 - ruled out: a mode branch that hides the HUD in 3 but shows it in 5, because
   all 17 static readers of settings+0x3694/0x3698 test the 3..6 range, never 3
@@ -554,3 +527,43 @@ mode and its context); W3 step 1-2 (dump comparison, offline).
   second while native stereo is on foot. Not checked in this build: the claim that no branch lands in
   +1..+16 of the entry; the head-through-the-AMC mapping is the assumption it tests.
   Build: the full build.bat gate passed (the self-tests' injected failures are the expected ERROR lines).
+
+- **2026-10-14, F18 FLOWN (Epic; log edvr_gfx_20261014_141730.log).** Results, in order:
+  (1) Torso: not visible with the front-face cull, so back-face culling is ruled out:
+  `ruled out: back-face culling hides the native torso, because CULL_FRONT on the matched 37080 torso draw changed nothing (F18)`.
+  (2) BUG: the `none` mode matched 0 draws (its count line says 0), so no `none` result is evidence. The F18 code is left as it is; the cull is superseded by F19.
+  (3) The eye dump shows the full HUD. (4) The weapon floats with the first-person body hidden, so the weapon-attach RE is running.
+  (5) Sean wants the game's ADS kept (a hybrid is planned). (6) P1's eye-vs-head values are implausible; not used, and H-eye stays open.
+- **2026-10-14, F19 BUILT (NOT FLOWN).** Four changes on the native on-foot page; all temporary keys are live and default off.
+  (1) Body unclip, `fix.native_on_foot_body_unclip` (on | off). The modifier that the game's item-apply function gives each body part, `pVertexClipAmount`,
+  sits at part+0x610 (part = AMC + 0x11B0 + idx*0x680), with the float amount at +8, the enable byte at +0xC and the dirty byte at +0xD. The shader
+  (PS 0DF03E64DF9DBEF1) discards a pixel whose clip value exceeds cb2[5].w, so enable 0 keeps those pixels. The write is after the fade
+  returns, on the same thread, to the local third-person AMC only (identified as headHideStep does: isLocalAmc, mode 3). Parts by name:
+  EVASuit_Torso, EVASuit_Arms, EVASuit_Hands, Shoulder_Left, Shoulder_Right.
+  Verification in the exe (EliteDangerous64.exe build 332841, capstone, item-apply 0x3DD9EA0; scratch script, not in the repo):
+  - `3DDA307: mov qword ptr [r14 + 0x610], rsi` (the modifier is stored at part+0x610; r14 = the part entry)
+  - `3DDA30E: mov byte ptr [rsi + 0xd], 1` (dirty set on the new modifier)
+  - `3DDA36A: movss xmm1, dword ptr [rdi + 0x54]` and `3DDA37B: movss dword ptr [rsi + 8], xmm0` (the amount, min of the source and xmm7)
+  - `3DDA3B1: movzx edx, byte ptr [rbp + 0x321]`, `3DDA3B8: shr dl, 3`, `3DDA3BB: and dl, 1` (enable = [AMC+0x321] bit 3)
+  - `3DDA3BE: mov rax, qword ptr [r14 + 0x610]`, `3DDA3C5: mov byte ptr [rax + 0xc], dl` (the enable byte at modifier+0xC)
+  - Switch: the table at 0x3DDA8F8 / 0x3DDA8F0 resolves parts 17, 19, 21-23, 27-29, 33-42, 48 and 50, 51 to 3DDA3B1 (bit 3). Parts 30 (EVASuit_Legs),
+    31 (EVASuit_Feet) and 49 (FirstPersonSkeleton) resolve to the default 3DDA3BE with dl = 1 from 3DDA388 (always on). The verification passed, so the
+    code was written.
+  - Not checked: at 3DDA35A the amount's pointer is reloaded from [AMC+0x17C0 + rax]. 0x17C0 = part 0's +0x610, so this is the same part's modifier
+    if rax is idx*0x680 (inferred, not read).
+  (2) Clip probe (no key; while native stereo is on foot, from the same hook): every 5 s, the five parts plus EVASuit_Legs, EVASuit_Feet and
+  FirstPersonSkeleton where the AMC has them (`native on foot body clip: <part> mod=.. enable=.. dirty=.. amount=..`), and the flags once per AMC.
+  It reads before that call's write, so enable 1 at a probe means the game re-applied after our last write.
+  (3) Constants probe, `fix.native_on_foot_body_cb_probe` (native or Explorer Cam on foot, by the journal). binding_shadow keeps the
+  buffer pointers, not the bytes, so there is no CPU copy to read. The draw thunk matches the body draws (the F18 pairs at any index count,
+  one instance, stencil ref 21) and, once per 5 s per (VS, PS, index count), copies the first 352 bytes of PS cb2 to a staging buffer. The next
+  matched draw maps it with D3D11_MAP_FLAG_DO_NOT_WAIT (no stall; a "still drawing" result waits for the next draw). Rows 5..9 go to a queue the
+  frame thread logs: `native on foot body cb2: vs= ps= n= r5=(..) .. r9=(..)`.
+  (4) HUD defaults from Sean's tuning, in the repo ini and the code fallbacks: element scale 1.35, size 1.60, distance 0.01, spread 0.04,
+  left x 0.18 and y 0.02, top y -0.07. Room stays 1.00. The live ini is not touched.
+  Reads of the F19 flight: `native on foot body unclip: on` once, then `N modifier writes in the last 5 s` (N > 0 while the body is drawn);
+  the clip lines with enable 0 for the five parts (and enable 1 for the comparison parts, always); the cb2 lines, row 5 w against the clip amounts.
+  Trace (before the flight): with the key on and no local AMC at the hook, the log says so once after 5 s (`has not reached the fade hook`);
+  with no matched body draw, the cb2 probe logs `0 body draws matched in the last 5 s`. A silent probe is therefore not a quiet one.
+  Build: source commit eab40235. The full build (`build.bat --wait-lock`) passed twice; the second run added the two trace lines above.
+  Receipt: `build\full_build_receipt.json` written at 15:35 for this source tree (docs are not receipt inputs).
