@@ -2,7 +2,7 @@
 
 ## Status
 
-- **State:** F0-F11 FLOWN (Epic; journal). F12 BUILT (7440ec3b; green), NOT FLOWN.
+- **State:** F0-F12 FLOWN (Epic; journal). F13 BUILT (fe5fc500; green), NOT FLOWN.
   Branch `claude/native-onfoot-vr-completion-219ffa`; not pushed.
 - **Origin:** a user's handoff. A Cinema-to-HMD swap on disembark gave native
   stereo on foot; the HUD, radar, left panel and inventory were missing.
@@ -34,18 +34,16 @@
   - H8 (ruled out, F6): the stereo predicate and the eye-index query.
   - H10 (F8, flown): the override brings the FP node back, but only the reticle shows.
     F11: the HUD shows head-locked with the creation patch alone (the placement patch is wrong).
-- **F9-F12 instruments (TEMPORARY, remove after F12):** patches `fix.native_on_foot_panels`
-  (76 73 -> 90 90 at +0x19B1587), `fix.native_on_foot_hud_mesh` (80 -> 78 at +0x1A149A8) and
-  `fix.native_on_foot_hud_mesh_world` (74 -> EB at +0x1A36453, off); probes P1, P2, P3. The HUD
-  distance (`fix.native_on_foot_hud_distance`) is a user setting, not temporary.
+- **F9-F13 instruments (TEMPORARY):** patches `fix.native_on_foot_panels`, `_hud_mesh` and
+  `_hud_mesh_world` (off); probes P1-P3; `fix.native_on_foot_hud_follow_order` (A/B) and
+  `fix.native_on_foot_visor_up` (RemLok test). The distance, size, follow and smoothing are user settings.
 - **OPEN, RemLok on foot:** the on-foot visor overlay is not yet identified. It
   needs a skip-probe or a diff census that excludes the tonemap PS
   0x99C21CEB7A699821 (tonemap_admit.h:39).
 - **Ruled out:** the cinema request is always 5 (see the end of this doc).
-- **Temporary keys (all go when the arc picks one):** the six `fix.native_on_foot*` keys on
-  the F8 page "Native on foot", after Explorer Cam, in this order: native_on_foot, method,
-  hud, panels, hud_mesh, hud_mesh_world. All default off and live. The HUD distance is a
-  user setting, live, on the same page.
+- **Temporary keys (all go when the arc picks one):** `fix.native_on_foot`, `_method`, `_hud`,
+  `_panels`, `_hud_mesh`, `_hud_mesh_world`, `_hud_follow_order` and `_visor_up`, on the F8 page
+  "Native on foot". All default off and live.
 - **F2 changes (c884e218):** gate: the setter never substitutes; EDVR holds the byte
   at 0 while the key is on and a game session is live (identity and byte checked
   first). Native body: while native stereo is on foot, the fade global goes -1 to 0
@@ -55,9 +53,9 @@
   the journal; the F1 census lines are unchanged.
 - **Install:** Epic only (Sean: Frontier carries another feature test). `edvr.ini`
   is not touched unless `--ini` says so.
-- **Next:** F12 on Epic: the HUD distance at 0.12, 0.192 and 0.25 in native, and tune it. Then
-  the reticle depth against the HUD depth, a damper or lazy-follow mode, RemLok's visor edge
-  (Sonnet RE running), full body, the neck damper, and Explorer Cam's removal (ask Sean; quote the keys).
+- **Next:** F13 on Epic: head against body follow, the smoothing, the size (down to 0.6), the
+  distance down to 0.03, and the visor test (RemLok). Then the reticle depth against the HUD
+  depth, the full body, the neck damper, and Explorer Cam's removal (ask Sean; quote the keys).
 
 ## What "finished" means
 
@@ -201,6 +199,8 @@ mode and its context); W3 step 1-2 (dump comparison, offline).
 - ruled out: the HUD is gated on the stereo leaf predicate 0x28540B0, because it returns 1 in cinema (mode 6) too, from the same callers (F6).
 - ruled out: a per-item eye-index match drops HUD items in stereo, because the eye-index query's only caller runs once per mode change, not per frame (F6).
 - ruled out: the 0x1A36453 world-placement patch is needed, because with it off the HUD shows head-locked in camera space (F11).
+- ruled out: vs:53211E8C072CD02E is the on-foot RemLok line's draw, because skipping its draws did not remove the lines (F10; flight 2026-10-14 08:20, 24888 draws dropped, the lines stayed).
+- ruled out: vs:4AEC439CEC7FFDCE is the on-foot RemLok line's draw, because skipping its draws did not remove the lines (F10; flight 2026-10-14 08:20, 24888 draws dropped, the lines stayed).
 - ruled out: vs:5E417E9DF2E7F9E6 is the on-foot RemLok line's draw, because skipping its draws did not remove the lines (F10; it also drives the smoke).
 - ruled out: vs:3064D7F445192FDD is the on-foot RemLok line's draw, because skipping its draws did not remove the lines (F10).
 - ruled out: vs:B75A6FF2CA9FA5D6 is the on-foot RemLok line's draw, because skipping its draws did not remove the lines (F10).
@@ -402,3 +402,26 @@ mode and its context); W3 step 1-2 (dump comparison, offline).
   game's base values and what it last wrote, so a scale is never compounded. A fault stands the
   writes down for the session, logged once. At the default distance, EDVR puts the base back once
   and stops claiming the matrix.
+- **2026-10-14, F12 FLOWN (Epic).** The HUD sits too far out (Sean wants under 0.08 m) and does
+  NOT follow the head: it is anchored to the body or the aim camera, and it stays behind when he
+  turns his head. A negative distance is not meaningful: it would put the HUD behind the eye. The
+  distance slider keeps the angular size by design, so it cannot spread or narrow the layout. Size
+  is the control for spread: F13 adds it as the HUD's basis scale at the same depth.
+- **2026-10-14, evidence check for the head follow (F13).** The list-B view rotation rows
+  (P3, the view's +0x20..+0x4C) change over time, so they carry the head pose. Samples from
+  edvr_gfx_20261014_081619.log, view 2, instance 0: at 08:18:24.875 campos=(-0.044,0.014,-0.047)
+  rot=(0.911,0.014,0.413,0.000,-0.090,0.982,0.167,0.000,-0.403,-0.189,0.896,0.000); at 08:19:04.920
+  campos=(-0.327,-0.070,0.373) rot=(0.728,0.258,-0.635,0.000,-0.278,0.958,0.072,0.000,0.627,0.124,0.769,0.000);
+  at 08:21:10.614 campos=(-0.047,0.006,-0.047) rot=(0.767,0.058,0.639,0.000,-0.108,0.993,0.039,0.000,-0.633,-0.099,0.768,0.000).
+  They are not identity, so the views are head-rotated.
+- **2026-10-14, the visor override RE (F13).** HumanoidVisorComponent update 0x1A1F630 and state
+  0x1A18610 read visorDown = byte[0x5F741B7] ? byte[0x5F741B8] : this[+0x108]->vfunc+0x20(); the
+  factor ramps at 3 per second. SuitUI (0x1A503D0) also follows the override, so its value is
+  forced to 0 while it is on (an expected side effect). F13 writes B8 = 0 first, then B7 = 1, and
+  restores B7 = 0 only while it still reads 1.
+- **2026-10-14, F13 built (fe5fc500, NOT FLOWN).** The user settings: distance (minimum now 0.03),
+  size (0.30..1.50, the basis rows only, the translation kept), follow (head or body), smoothing
+  (0..500 ms, slerp and lerp, dt clamped to 0.1 s), and the temporary order A/B (after: M . C;
+  before: C . M). The head transform C comes from the list-B views' rotation rows and the mean of
+  the first two views' positions. The composition order is base, then distance, then size, then
+  the head. The visor override is a temporary test key.
