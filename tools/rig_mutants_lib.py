@@ -328,7 +328,7 @@ def self_test(cfg, mutants_all, build_bat=None):
     check(block is not None, "build.bat has %s" % cfg.rig_label)
     if block:
         text = "\n".join(block)
-        cl = next((l for l in block if l.strip().lower().startswith("cl.exe")), "")
+        cl = next((l for l in block if l.strip().lower().startswith(("cl.exe", "%cc%"))), "")
         for flag in cfg.cl_flags:
             check(flag in cl, "build.bat's rig compile has %s" % flag)
         for d in cfg.include_dirs:

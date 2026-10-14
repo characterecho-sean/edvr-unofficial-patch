@@ -392,7 +392,7 @@ def self_test():
     check(block is not None, "build.bat has %s" % RIG_LABEL)
     if block:
         text = "\n".join(block)
-        cl = next((l for l in block if l.strip().lower().startswith("cl.exe")), "")
+        cl = next((l for l in block if l.strip().lower().startswith(("cl.exe", "%cc%"))), "")
         for flag in CL_FLAGS:
             check(flag in cl, "build.bat's rig compile has %s" % flag)
         check("tools\\on_foot_maps_test\\on_foot_maps_test.cpp" in cl, "build.bat compiles the rig")

@@ -498,7 +498,7 @@ def self_test():
     check(block is not None, "build.bat has %s" % RIG_LABEL)
     if block:
         text = "\n".join(block)
-        cl = next((l for l in block if l.strip().lower().startswith("cl.exe")), "")
+        cl = next((l for l in block if l.strip().lower().startswith(("cl.exe", "%cc%"))), "")
         for flag in CL_FLAGS:
             check(flag in cl, "build.bat's rig compile has %s" % flag)
         check("tools\\vr_world_mips_test\\vr_world_mips_test.cpp" in cl and "src\\d3d11\\vr_world_mips.cpp" in cl, "build.bat compiles the rig and the production module")

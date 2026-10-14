@@ -255,7 +255,10 @@ inline void sdkForegroundScenario(ID3D11Device* device, ID3D11DeviceContext* con
 // each flip (a scenario that cannot fail proves nothing), and the unmutated source compiled here must pass through the same seam.
 inline void sdkForegroundGpuTests(ID3D11Device* device, ID3D11DeviceContext* context) {
     using namespace edvr;
-    sdkForegroundScenario(device,context);
+    // Sharded by case (flat_mono_resolve_test.cpp's kUnits): the shipped-prep scenario, the control, and each mutant are independent runs -- each
+    // installs its own prep bytecode and resets the resolver first -- so they may land in different processes.
+    if(shardRuns("sdkForeground:shipped"))sdkForegroundScenario(device,context);
+    bool ranMutated=false;
     struct Mutant {const char* name;const char* from;const char* to;};
     static const Mutant mutants[]={
         {"a negative mark is first person at any depth (the rule before section 104)",
@@ -293,10 +296,17 @@ inline void sdkForegroundGpuTests(ID3D11Device* device, ID3D11DeviceContext* con
     };
     {   // The control: the same source, compiled here and run through the same seam, is the shipped prep and passes.
         int failed=0;std::string first;
+        if(shardRuns("sdkForeground:control")){
+        ranMutated=true;
         const bool ran=runMutated(shipped,&failed,&first);
         check(ran && failed==0,"SDK foreground mutations: control: the unmutated prep, compiled here and run through the test seam, passes the whole scenario");
+        }
     }
+    int mutantNumber=0;
     for(const Mutant& m:mutants) {
+        char unit[40];std::snprintf(unit,sizeof(unit),"sdkForeground:mutant%d",++mutantNumber);
+        if(!shardRuns(unit))continue;
+        ranMutated=true;
         bool once=false;
         const std::string hlsl=fpgpu::replaceOnce(shipped,m.from,m.to,&once);
         char what[320];
@@ -311,7 +321,7 @@ inline void sdkForegroundGpuTests(ID3D11Device* device, ID3D11DeviceContext* con
         check(failed>0,what);
         std::printf("flat mono resolve: SDK foreground mutation \"%s\": %d checks fail; first: %s\n",m.name,failed,first.c_str());
     }
-    flatMonoResolveTestPrepBytecode(nullptr,0);flatMonoResolveReset();
+    if(ranMutated){flatMonoResolveTestPrepBytecode(nullptr,0);flatMonoResolveReset();}
 }
 
 // ---- the SDK foreground contract above the output: the supersampled on-foot frame (section 104) -----------------------------------------

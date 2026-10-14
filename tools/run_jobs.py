@@ -165,7 +165,9 @@ BUILD_GUARD = 'if "%EDVR_RIG_STEP%"=="build" exit /b 0'
 # What d3d11_in_build looks for in a rig's compiler commands: a cl command that
 # links (no /c) d3d11.lib -- after /link, or as a plain input, which cl hands to
 # the linker as well -- into a /Fe output that sits directly in %BUILD%.
-CL_COMMAND = re.compile(r"^\s*cl(?:\.exe)?\s", re.IGNORECASE)
+# build.bat spells the compiler %CC% (the compile cache prefix); a plain cl or
+# cl.exe still counts. A line this misses would turn the guard silently inert.
+CL_COMMAND = re.compile(r"^\s*(?:cl(?:\.exe)?|%CC%)\s", re.IGNORECASE)
 COMPILE_ONLY = re.compile(r"\s/c(?:\s|$)", re.IGNORECASE)
 EXE_OUTPUT = re.compile(r'/Fe:?\s*"?([^"\s]+)"?', re.IGNORECASE)
 BUILD_ROOT_OUTPUT = re.compile(r"^%BUILD%\\[^\\/]+$", re.IGNORECASE)
@@ -1177,6 +1179,15 @@ def self_test():
           is not None
           and refusal(":rig_five", 'cl.exe /Fe"%BUILD%\\five.exe" "t.cpp" d3d11.lib', "exit /b 0") is not None,
           "a plain d3d11.lib input, which cl hands to the linker too, is read as well")
+    cc_one = one.replace("cl.exe", "%CC%", 1)
+    text = refusal(":rig_cc", cc_one, "exit /b 0")
+    check(text is not None and ":rig_cc," in text and "%BUILD%\\one.exe" in text
+          and refusal(":rig_cc", "    " + cc_one, "exit /b 0") is not None
+          and refusal(":rig_cc", "%cc% " + one[len("cl.exe "):], "exit /b 0") is not None,
+          "a %%CC%% (compile cache) line is read like cl.exe, indented or in any case: %r" % text)
+    check(refusal(":rig_cc", '%CC% /c /Fe"%BUILD%\\x.exe" "t.cpp" d3d11.lib', "exit /b 0") is None
+          and refusal(":rig_cc", '%CC% /Fe"%OBJ%\\x\\x.exe" "t.cpp" /link d3d11.lib', "exit /b 0") is None,
+          "%CC% lines keep the /c and %OBJ% exemptions")
     text = refusal(":rig_a", one, ":rig_b", one.replace("one.exe", "b.exe"), "exit /b 0")
     check(text is not None and ":rig_a," in text and ":rig_b," in text and text.startswith("2 rig link(s)"),
           "every offending rig is named: %r" % text)

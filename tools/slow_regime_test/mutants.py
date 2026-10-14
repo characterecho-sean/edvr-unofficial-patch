@@ -714,7 +714,7 @@ def self_test(build_bat=BUILD_BAT):
     check(block is not None, "build.bat has %s" % RIG_LABEL)
     if block:
         text = "\n".join(block)
-        cl = next((l for l in block if l.strip().lower().startswith("cl.exe")), "")
+        cl = next((l for l in block if l.strip().lower().startswith(("cl.exe", "%cc%"))), "")
         for flag in CL_FLAGS:
             check(flag in cl, "build.bat's rig compile has %s" % flag)
         for d in BAT_INCLUDES:

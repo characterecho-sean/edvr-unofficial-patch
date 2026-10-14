@@ -399,7 +399,7 @@ def self_test(build_bat=BUILD_BAT):
     check(block is not None, "build.bat has %s" % RIG_LABEL)
     if block:
         text = "\n".join(block)
-        cls = [l for l in block if l.strip().lower().startswith("cl.exe")]
+        cls = [l for l in block if l.strip().lower().startswith(("cl.exe", "%cc%"))]
         check(len(cls) == 2, "build.bat's rig has two compiles, the DLL and the exe (%d)" % len(cls))
         exe_cl = next((l for l in cls if "stall_sampler_test.cpp" in l), "")
         dll_cl = next((l for l in cls if "stall_target_dll.cpp" in l), "")
