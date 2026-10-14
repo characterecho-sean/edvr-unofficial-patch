@@ -9,10 +9,39 @@
 #include "../common/comfort_fade.h"
 #include "flat_notice_placement.h"
 #include "flat_notice_raster.h"
+#include "../../include/edvr_plugin_api.h"
 
 namespace edvr::openxr {
 namespace {
 using Microsoft::WRL::ComPtr;
+
+struct PluginBridge {
+  typedef int (WINAPI *PFN_HasActive)();
+  typedef void (WINAPI *PFN_Update)(const EdvrPosef*, float);
+  typedef int (WINAPI *PFN_FilterInput)(uint32_t, const void*);
+  typedef void (WINAPI *PFN_RenderEye)(const EdvrEyeRenderContext*);
+
+  PFN_HasActive hasActive = nullptr;
+  PFN_Update update = nullptr;
+  PFN_FilterInput filterInput = nullptr;
+  PFN_RenderEye renderEye = nullptr;
+  bool resolved = false;
+
+  void ensure() {
+    if (resolved) return;
+    HMODULE hD3D11 = GetModuleHandleW(L"d3d11.dll");
+    if (!hD3D11) return;
+    hasActive = reinterpret_cast<PFN_HasActive>(GetProcAddress(hD3D11, "edvrPluginHasActivePlugins"));
+    update = reinterpret_cast<PFN_Update>(GetProcAddress(hD3D11, "edvrPluginDispatchUpdate"));
+    filterInput = reinterpret_cast<PFN_FilterInput>(GetProcAddress(hD3D11, "edvrPluginDispatchFilterInput"));
+    renderEye = reinterpret_cast<PFN_RenderEye>(GetProcAddress(hD3D11, "edvrPluginDispatchRenderEye"));
+    if (hasActive) {
+      resolved = true;
+    }
+  }
+};
+static PluginBridge g_pluginBridge;
+
 struct BlitConstants { float bounds[4], clampUV[4]; float encodeSRGB=0, pad[3]{}; };
 struct SkyConstants { float orient[3][4]; float tangents[4]; float encode=0, pad[3]{}; };
 static_assert(sizeof(SkyConstants)==80,"skybox HLSL constant-buffer packing");
@@ -350,7 +379,53 @@ XrResult D3D11Stereo::renderCaptured(const XrView (&views)[2],XrSpace space,cons
         drawContext->OMSetBlendState(nullptr,nullptr,~0u);
       }
       ID3D11ShaderResourceView* nullSrv=nullptr;drawContext->PSSetShaderResources(0,1,&nullSrv);
+
+      // EDVR 3rd-party extension overlay pass
+      g_pluginBridge.ensure();
+      if (g_pluginBridge.hasActive && g_pluginBridge.hasActive()) {
+        if (i == 0) {
+          const auto& hPose = views[0].pose;
+          EdvrPosef headPose{};
+          headPose.position.x = hPose.position.x;
+          headPose.position.y = hPose.position.y;
+          headPose.position.z = hPose.position.z;
+          headPose.orientation.x = hPose.orientation.x;
+          headPose.orientation.y = hPose.orientation.y;
+          headPose.orientation.z = hPose.orientation.z;
+          headPose.orientation.w = hPose.orientation.w;
+          if (g_pluginBridge.update) {
+            g_pluginBridge.update(&headPose, 0.016f);
+          }
+          if (g_pluginBridge.filterInput) {
+            g_pluginBridge.filterInput(0, nullptr);
+          }
+        }
+
+        if (g_pluginBridge.renderEye) {
+          EdvrEyeRenderContext eyeCtx{};
+          eyeCtx.structSize = sizeof(EdvrEyeRenderContext);
+          eyeCtx.eyeIndex = i;
+          eyeCtx.device = device_.Get();
+          eyeCtx.context = drawContext;
+          eyeCtx.rtv = rtv;
+          eyeCtx.eyePose.position.x = views[i].pose.position.x;
+          eyeCtx.eyePose.position.y = views[i].pose.position.y;
+          eyeCtx.eyePose.position.z = views[i].pose.position.z;
+          eyeCtx.eyePose.orientation.x = views[i].pose.orientation.x;
+          eyeCtx.eyePose.orientation.y = views[i].pose.orientation.y;
+          eyeCtx.eyePose.orientation.z = views[i].pose.orientation.z;
+          eyeCtx.eyePose.orientation.w = views[i].pose.orientation.w;
+          eyeCtx.eyeFov.angleLeft = views[i].fov.angleLeft;
+          eyeCtx.eyeFov.angleRight = views[i].fov.angleRight;
+          eyeCtx.eyeFov.angleUp = views[i].fov.angleUp;
+          eyeCtx.eyeFov.angleDown = views[i].fov.angleDown;
+          eyeCtx.viewportWidth = eyes_[i].width;
+          eyeCtx.viewportHeight = eyes_[i].height;
+          g_pluginBridge.renderEye(&eyeCtx);
+        }
+      }
     }
+
     drawContext->OMSetRenderTargets(0,nullptr,nullptr);
     if(ownedImmediateScene_) {
       if(observer)observer->endGpuWork(2u+i,drawContext);

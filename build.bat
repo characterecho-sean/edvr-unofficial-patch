@@ -352,7 +352,13 @@ python "tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --extra-export edvrQueryNativeRenderSettings ^
     --extra-export edvrPublishNativeRenderSizing ^
     --extra-export edvrQueryNativeRenderSizing ^
-    --extra-export edvrGpuFrameEvent
+    --extra-export edvrGpuFrameEvent ^
+    --extra-export edvrRegisterPluginSetting ^
+    --extra-export edvrSetPluginInputBlock ^
+    --extra-export edvrPluginDispatchUpdate ^
+    --extra-export edvrPluginDispatchRenderEye ^
+    --extra-export edvrPluginDispatchFilterInput ^
+    --extra-export edvrPluginHasActivePlugins
 if errorlevel 1 ( echo [edvr] ERROR: export generation failed & exit /b 1 )
 
 REM Both halves link "%OBJ%\<half>\*.obj" -- a wildcard -- and every build
@@ -609,7 +615,8 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% %XESSFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\loader_panel.cpp" ^
     "src\d3d11\splash_dim.cpp" ^
     "src\d3d11\billboard_fix.cpp" ^
-    "src\d3d11\particle_fix.cpp" "src\d3d11\shader_swap.cpp" "src\d3d11\sunglare_fix.cpp"
+    "src\d3d11\particle_fix.cpp" "src\d3d11\shader_swap.cpp" "src\d3d11\sunglare_fix.cpp" ^
+    "src\plugins\plugin_manager.cpp"
 if errorlevel 1 ( echo [edvr] ERROR: compile failed & exit /b 1 )
 
 REM gdi32.lib: the settings menu's panel is rasterised with GDI (the game
@@ -636,7 +643,7 @@ if errorlevel 1 ( echo [edvr] ERROR: rc.exe failed on the runtime version resour
 
 link.exe /nologo /DLL /MACHINE:X64 /INCREMENTAL:NO %EDVR_CPU_LINK% /PDB:"%BUILD%\d3d11.pdb" ^
     /DEF:"%GEN%\edvr_d3d11.def" /OUT:"%BUILD%\d3d11.dll" ^
-    "%OBJ%\d3d11\*.obj" "%OBJ%\d3d11\dxbc_notice.res" "%OBJ%\d3d11\version.res" kernel32.lib user32.lib gdi32.lib version.lib d3dcompiler.lib %NGXLIB% %FSRLIB%
+    "%OBJ%\d3d11\*.obj" "%OBJ%\d3d11\dxbc_notice.res" "%OBJ%\d3d11\version.res" kernel32.lib user32.lib gdi32.lib version.lib d3dcompiler.lib bcrypt.lib %NGXLIB% %FSRLIB%
 if errorlevel 1 ( echo [edvr] ERROR: link failed & exit /b 1 )
 
 echo [edvr] built %BUILD%\d3d11.dll
@@ -3727,3 +3734,21 @@ if errorlevel 1 ( echo [edvr] ERROR: menu_pad_test build failed & exit /b 1 )
 "%BUILD%\menu_pad_test.exe" --dry-run || exit /b 1
 "%BUILD%\menu_pad_test.exe" --self-test || exit /b 1
 exit /b 0
+
+:rig_addon_manager_test
+echo [edvr] === addon_manager_test.exe ===
+if not exist "%OBJ%\addon_manager_test" mkdir "%OBJ%\addon_manager_test"
+cl.exe /nologo /O2 /MT /LD /std:c++17 /EHsc /W4 /D_CRT_SECURE_NO_WARNINGS ^
+    /I"include" /Fo"%OBJ%\addon_manager_test\\" /Fe"%BUILD%\test_addon_fixture.dll" ^
+    "tools\addon_manager_test\fixture.cpp" /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: addon fixture build failed & exit /b 1 )
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /I"include" /I"%GEN%" /Fo"%OBJ%\addon_manager_test\\" /Fe"%BUILD%\addon_manager_test.exe" ^
+    "tools\addon_manager_test\addon_manager_test.cpp" "src\plugins\plugin_manager.cpp" ^
+    "src\common\config.cpp" "src\common\log.cpp" "src\common\guard.cpp" "src\common\frame_flag.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib version.lib bcrypt.lib
+if errorlevel 1 ( echo [edvr] ERROR: addon_manager_test build failed & exit /b 1 )
+"%BUILD%\addon_manager_test.exe" --dry-run || exit /b 1
+"%BUILD%\addon_manager_test.exe" --self-test || exit /b 1
+exit /b 0
+

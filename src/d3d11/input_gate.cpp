@@ -99,6 +99,7 @@ typedef BOOL(WINAPI* PFN_PeekMessageA)(LPMSG, HWND, UINT, UINT, UINT);
 // reads the old value for one call more is one more call of the state the
 // player was already in.
 std::atomic<int> g_private{0};
+std::atomic<bool> g_pluginBlock{false};
 
 // The summon key, packed so a live rebind cannot tear it: bits 0-7 the
 // virtual key, 8-15 the DirectInput scan code, 16-18 the modifier bits,
@@ -718,13 +719,35 @@ HRESULT filterDeviceState(DiDoor& d, void* self, DWORD cb, LPVOID data) {
     bool other = false;   // a game controller: observed below, never gated; an unknown device is neither
     guardedBudget(g_budgetDi, [&] {
         const DeviceClass cls = classifyDevice(self);
-        if (cls != DeviceClass::Keyboard) {
-            other = cls == DeviceClass::Controller;
+        const bool pluginBlock = g_pluginBlock.load(std::memory_order_relaxed);
+        if (cls == DeviceClass::Controller) {
+            other = true;
+            if (pluginBlock) {
+                if (cb >= sizeof(DIJOYSTATE)) {
+                    DIJOYSTATE* js = static_cast<DIJOYSTATE*>(data);
+                    for (int p = 0; p < 4; ++p) js->rgdwPOV[p] = 0xFFFFFFFFu;
+                    memset(js->rgbButtons, 0, sizeof(js->rgbButtons));
+                    if (cb >= sizeof(DIJOYSTATE2)) {
+                        DIJOYSTATE2* js2 = static_cast<DIJOYSTATE2*>(data);
+                        memset(js2->rgbButtons + 32, 0, 96);
+                    }
+                } else {
+                    memset(data, 0, cb);
+                    constexpr DWORD kPov0 = static_cast<DWORD>(offsetof(DIJOYSTATE, rgdwPOV[0]));
+                    constexpr DWORD kPovEnd = kPov0 + 4 * sizeof(DWORD);
+                    if (cb >= kPovEnd) {
+                        auto* povPtr = reinterpret_cast<DWORD*>(static_cast<uint8_t*>(data) + kPov0);
+                        for (int p = 0; p < 4; ++p) povPtr[p] = 0xFFFFFFFFu;
+                    }
+                }
+                d.zeroed.fetch_add(1, std::memory_order_relaxed);
+            }
             return;
         }
+        if (cls != DeviceClass::Keyboard) return;
         d.stateKeyboard.fetch_add(1, std::memory_order_relaxed);
         if (d.gameDevice) g_gameKeyboardCalls.fetch_add(1, std::memory_order_relaxed);
-        const bool priv = g_private.load(std::memory_order_relaxed) != 0;
+        const bool priv = g_private.load(std::memory_order_relaxed) != 0 || pluginBlock;
         int vk = 0;
         uint8_t dik = 0;
         uint32_t mods = 0;
@@ -775,17 +798,42 @@ HRESULT filterDeviceData(DiDoor& d, void* self, DWORD cbObj, LPDIDEVICEOBJECTDAT
     const DWORD returned = *inOut;
     guardedBudget(g_budgetDi, [&] {
         const DeviceClass cls = classifyDevice(self);
-        if (cls != DeviceClass::Keyboard) {
-            other = cls == DeviceClass::Controller;
+        const bool pluginBlock = g_pluginBlock.load(std::memory_order_relaxed);
+        if (cls == DeviceClass::Controller) {
+            other = true;
+            if (pluginBlock && rgdod && inOut && *inOut > 0) {
+                constexpr DWORD kPov0 = static_cast<DWORD>(offsetof(DIJOYSTATE2, rgdwPOV[0]));
+                constexpr DWORD kPov3 = static_cast<DWORD>(offsetof(DIJOYSTATE2, rgdwPOV[3]));
+                constexpr DWORD kBtn0 = static_cast<DWORD>(offsetof(DIJOYSTATE2, rgbButtons[0]));
+                constexpr DWORD kBtn127 = static_cast<DWORD>(offsetof(DIJOYSTATE2, rgbButtons[127]));
+                const uint32_t before = *inOut;
+                uint32_t kept = 0;
+                for (uint32_t i = 0; i < before; ++i) {
+                    const auto& ev = rgdod[i];
+                    const bool isButton = (ev.dwOfs >= kBtn0 && ev.dwOfs <= kBtn127);
+                    const bool isPov = (ev.dwOfs >= kPov0 && ev.dwOfs < kPov3 + sizeof(DWORD));
+                    if (isButton) {
+                        if (ev.dwData & 0x80) continue; // swallow press, allow release
+                    } else if (isPov) {
+                        continue; // swallow POV hat events
+                    }
+                    rgdod[kept++] = ev;
+                }
+                *inOut = kept;
+                if (kept < before) {
+                    d.zeroed.fetch_add(before - kept, std::memory_order_relaxed);
+                }
+            }
             return;
         }
+        if (cls != DeviceClass::Keyboard) return;
         // An empty read is nothing to filter (the check that used to sit above
         // the type test, which now has to run for a joystick's empty read too:
         // a call that returns nothing still proves the game is reading it).
         if (*inOut == 0) return;
         d.dataKeyboard.fetch_add(1, std::memory_order_relaxed);
         if (d.gameDevice) g_gameKeyboardCalls.fetch_add(1, std::memory_order_relaxed);
-        const bool priv = g_private.load(std::memory_order_relaxed) != 0;
+        const bool priv = g_private.load(std::memory_order_relaxed) != 0 || pluginBlock;
         int vk = 0;
         uint8_t dik = 0;
         uint32_t mods = 0;
@@ -835,7 +883,7 @@ HRESULT STDMETHODCALLTYPE hookGetDeviceData(void* self, DWORD cb, LPDIDEVICEOBJE
 SHORT WINAPI hookGetAsyncKeyState(int vk) {
     g_user.asyncCalls.fetch_add(1, std::memory_order_relaxed);
     if (!g_user.retired2) {
-        if (g_private.load(std::memory_order_relaxed)) return 0;
+        if (g_private.load(std::memory_order_relaxed) || g_pluginBlock.load(std::memory_order_relaxed)) return 0;
         if (releaseTailVk(vk)) return 0;
         const uint32_t packed = g_summon.load(std::memory_order_relaxed);
         if (packed & 0x80000000u) {
@@ -857,7 +905,7 @@ SHORT WINAPI hookGetAsyncKeyState(int vk) {
 SHORT WINAPI hookGetKeyState(int vk) {
     g_user.keyStateCalls.fetch_add(1, std::memory_order_relaxed);
     if (!g_user.retired2) {
-        if (g_private.load(std::memory_order_relaxed)) return 0;
+        if (g_private.load(std::memory_order_relaxed) || g_pluginBlock.load(std::memory_order_relaxed)) return 0;
         if (releaseTailVk(vk)) return 0;
         const uint32_t packed = g_summon.load(std::memory_order_relaxed);
         if (packed & 0x80000000u) {
@@ -884,7 +932,7 @@ BOOL WINAPI hookGetKeyboardState(PBYTE state) {
     g_user.keyboardStateCalls.fetch_add(1, std::memory_order_relaxed);
     if (!r || !state || g_user.retired2) return r;
     guardedBudget(g_budgetUser, [&] {
-        if (g_private.load(std::memory_order_relaxed)) {
+        if (g_private.load(std::memory_order_relaxed) || g_pluginBlock.load(std::memory_order_relaxed)) {
             memset(state, 0, 256);
             return;
         }
@@ -934,7 +982,7 @@ BOOL WINAPI hookPeekMessageA(LPMSG msg, HWND hwnd, UINT lo, UINT hi, UINT remove
         }
         if (!isKeyboardMessage(m)) return;
         g_user.peekKeyMessages.fetch_add(1, std::memory_order_relaxed);
-        if (g_private.load(std::memory_order_relaxed)) {
+        if (g_private.load(std::memory_order_relaxed) || g_pluginBlock.load(std::memory_order_relaxed)) {
             msg->message = WM_NULL;
             g_user.nulled.fetch_add(1, std::memory_order_relaxed);
             return;
@@ -1551,6 +1599,14 @@ void inputGateSetPrivate(bool priv) {
 }
 
 bool inputGatePrivate() { return g_private.load() != 0; }
+
+void inputGateSetPluginBlock(bool block) {
+    g_pluginBlock.store(block, std::memory_order_relaxed);
+}
+
+extern "C" __declspec(dllexport) void WINAPI edvrSetPluginInputBlock(int block) {
+    inputGateSetPluginBlock(block != 0);
+}
 
 void inputGateSetPadPrivate(bool priv, int index) {
     AcquireSRWLockExclusive(&g_padLock);

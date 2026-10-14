@@ -29,6 +29,7 @@
 // compute composite the openvr half calls at the door.
 #pragma once
 
+#include "../../include/edvr_plugin_api.h"
 #include <cstdint>
 
 struct ID3D11Device;
@@ -85,3 +86,6 @@ void menuRegisterAction(const char* label, const char* hint, MenuActionFn fn, vo
 void menuShutdown();
 
 }  // namespace edvr
+
+extern "C" __declspec(dllexport) int WINAPI edvrRegisterPluginSetting(const EdvrPluginSettingDef* setting);
+

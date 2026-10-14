@@ -33,6 +33,7 @@
 #include "vr_ssaa_hold.h"  // vrSsaaHoldEarlyInstall: the Supersampling hold's hooks at DLL load
 #include "mode_watch.h"    // modeWatchStart: the 3D mode watch, started after the profile lines
 #include "oculus_route.h"
+#include "../plugins/plugin_manager.h"
 
 extern "C" const EdvrNativeStartupRouting edvrNativeStartupRouting = {
     sizeof(EdvrNativeStartupRouting), EDVR_NATIVE_STARTUP_VERSION_1,
@@ -345,6 +346,7 @@ BOOL CALLBACK initOnceCallback(PINIT_ONCE, PVOID, PVOID*) {
     // arrive here -- guard.h absorbs those deliberately -- so what this catches
     // is the ones nobody claimed. See breadcrumbInstallCrashHandler.
     edvr::breadcrumbInstallCrashHandler();
+    edvr::plugins::PluginManager::instance().initialize(*g_moduleDir);
     return TRUE;
 }
 
@@ -353,10 +355,12 @@ void ensureInitialised() {
 }
 
 void shutdown() {
+    edvr::plugins::PluginManager::instance().shutdown();
     edvr::oculusRouteReport();
     // Per-site fault totals, so "logged once" does not mean "counted once".
     edvr::reportFaultSites();
     edvr::shutdownDeviceHooks();
+
     // Before the module goes: a filter pointing into an unmapped image would
     // take the game's own crash reporting down with it.
     edvr::breadcrumbRemoveCrashHandler();

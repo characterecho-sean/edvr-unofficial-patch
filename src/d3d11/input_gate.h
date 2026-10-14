@@ -89,6 +89,11 @@ void inputGateInstall();
 void inputGateSetPrivate(bool priv);
 bool inputGatePrivate();
 
+// Set by the plugin manager each frame when any plugin (e.g. MFD) holds
+// input focus. Independent of the menu's private flag: plugin focus
+// suppresses input doors without affecting the menu's own state.
+void inputGateSetPluginBlock(bool block);
+
 // Flat-panel controller ownership, independent of the keyboard door proof.
 // Requests expire without the visible/focused panel's per-frame heartbeat.
 // A slot becomes usable only after the EXE's actual GetState call is observed

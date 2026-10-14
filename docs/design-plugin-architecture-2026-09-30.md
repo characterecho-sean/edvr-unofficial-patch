@@ -2,13 +2,12 @@
 
 ## Status
 
-- **State:** design only, for the release after v0.18.0. Nothing is built.
-  It extends draft PR #46 (Devin Nemec, "generic OpenXR addon and plugin
-  architecture"), which this document reuses as its add-on tier (section 6).
-  The runtime-dependency check is done (section 4.1).
-- **Goal (Sean):** every fix and performance item belongs to one plugin,
-  plugins group features logically, and the user picks which to install in
-  the installer. A plugin that is not installed costs nothing.
+- **State:** 3rd-party add-on tier implemented on feat/third-party-plugins;
+  first-party features remain consolidated in core per user priority.
+  include/edvr_plugin_api.h synchronized with edvr-mfd. Full test gates green.
+- **Goal (Sean):** clean 3rd-party plugin architecture with trust-on-first-use,
+  F8 menu approval, SEH crash containment, and input filtering.
+
 - **Built on:** a read-only inventory of main `4296f142` (25 features, 225
   ini keys, 19 draw verdicts, the services they share; section 2), the flat
   CPU census of 2026-09-30 (hook entry about 1.4 ms over 17,180 calls a frame
@@ -413,3 +412,17 @@ when ReShade was removed). The rules:
   revisions (DllMain returns FALSE); `temporal_aa` or FSS `on` without the
   runtime costs with no output; the vr_runtime "Reinstall" advice
   (vr_runtime.cpp:106-113) and the README's second-log guidance turn wrong.
+
+## 11. Third-party add-on tier implementation (2026-10-13)
+
+Branch `feat/third-party-plugins` implements 3rd-party plugin support (`include/edvr_plugin_api.h` synchronized with `edvr-mfd`):
+- **Consolidated core:** First-party features remain inside the monolithic core (per Sean: users want all features anyway; splitting them into separate internal plugins dropped in priority).
+- **Extension Manager (`src/plugins/plugin_manager.{h,cpp}`):**
+  - **Trust-On-First-Use (TOFU):** Pre-execution SHA-256 hash calculation via Windows BCrypt before loading candidate DLLs. Candidates in `plugins\` are cross-referenced with `[addons] <stem> = <sha256>` in `edvr.ini`.
+  - **In-Headset Approval:** Unapproved add-ons are displayed in the F8 menu "Plugins" tab with an `[Approve]` action button that immediately approves, writes to `edvr.ini`, and loads the plugin into memory.
+  - **SEH Fault Containment:** Non-destructor C wrapper functions isolate all external plugin invocations (`onInitialize`, `onShutdown`, `onUpdate`, `onRenderEye`, `onFilterInput`). Any unhandled access violation is trapped, logged, and disables the offending plugin for the session without crashing the game.
+  - **DirectInput Input Gate Filtering:** Resolves MFD-001 by restoring `rgdwPOV` to `0xFFFFFFFFu` when clearing joystick state and allowing plugins to swallow directional and button events cleanly.
+  - **Menu Setting Persistence:** Resolves MFD-005 by enqueuing writes to `[addon.<header>]` in `edvr.ini` whenever settings change.
+  - **Decoupled OpenXR Render Callbacks:** `openvr_api.dll` dynamically acquires bridge exports from `d3d11.dll` at runtime without static link coupling or duplicating the extension manager instance.
+  - **Test Rig (`addon_manager_test`):** Automated test suite verifying hash verification, unapproved DLL rejection, live approval, input filtering, and SEH containment.
+
