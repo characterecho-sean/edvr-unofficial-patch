@@ -32,6 +32,9 @@ SetterFn g_original = nullptr;                     // the trampoline: the setter
 std::atomic<uintptr_t> g_frozenSelector{0};        // the first selector whose owner points back at it
 std::atomic<bool> g_panelsKeyOn{false};            // fix.native_on_foot_panels, as the frame thread last read it (F9)
 std::atomic<bool> g_meshKeyOn{false};              // fix.native_on_foot_hud_mesh, as the frame thread last read it (F9)
+std::atomic<float> g_hudDistance{nofoot::kHudDefaultDistance};   // fix.native_on_foot_hud_distance, live (F12)
+float g_hudDistanceLast = -1.0f;                   // frame thread only: as last logged (F12)
+std::atomic<bool> g_meshCreateLive{false};         // the creation patch is applied (set by the frame thread; read by the P2 hook, F12)
 std::atomic<bool> g_meshWorldKeyOn{false};         // fix.native_on_foot_hud_mesh_world, as the frame thread last read it (F11)
 bool g_panelsKeyLast = false, g_meshKeyLast = false, g_meshWorldKeyLast = false;   // frame thread only: as last logged
 std::atomic<bool> g_hudKeyOn{false};               // fix.native_on_foot_hud, as the frame thread last read it (F8)
@@ -385,6 +388,16 @@ void readKey() {
     if (first || worldOn != g_meshWorldKeyLast) {
         Log::get().note("native on foot: fix.native_on_foot_hud_mesh_world is %s", worldOn ? "on" : "off");
         g_meshWorldKeyLast = worldOn;
+    }
+    // F12: the HUD distance (a user setting, live), clamped to its range; logged once per change.
+    float dist = cfg.getFloat("fix.native_on_foot_hud_distance", nofoot::kHudDefaultDistance);
+    if (dist < nofoot::kHudDistanceMin) dist = nofoot::kHudDistanceMin;
+    if (dist > nofoot::kHudDistanceMax) dist = nofoot::kHudDistanceMax;
+    g_hudDistance.store(dist, std::memory_order_relaxed);
+    if (first || dist != g_hudDistanceLast) {
+        Log::get().note("native on foot hud distance: %.3f m (scale %.3f)", static_cast<double>(dist),
+                        static_cast<double>(dist / nofoot::kHudDefaultDistance));
+        g_hudDistanceLast = dist;
     }
 }
 
@@ -1341,11 +1354,107 @@ uint64_t __fastcall f9PanelSubmitHooked(void* set, void* view, uint64_t r8, uint
     return original(set, view, r8, r9);
 }
 
+// ---- F12: the HUD distance (a user setting) ---------------------------------------------------------------------------------------
+// While native stereo is on foot, the creation patch is applied, and the distance is not the default, the HRC's two placement matrices
+// (+0x430 and +0x480, 16 floats each) are scaled by s = distance / 0.192 before the HRC submit runs. The scale multiplies the x, y and z
+// of every row (the basis and the translation) and keeps the w column, so the angular size is kept and only the depth changes.
+// The game recomputes the matrices every frame, so each matrix keeps its base values (the game's) and what it last wrote: if the current
+// values still equal what was written, the game has not recomputed and nothing is done; otherwise the scale is applied to the fresh base.
+// A fault in a read or a write stands the writes down for the session, and the frame thread logs that once.
+struct F12Matrix {
+    bool have = false;           // a write of ours is in place for this HRC
+    float base[16] = {};         // the game's values (before our last write)
+    float written[16] = {};      // what we last wrote
+    float writtenScale = 1.0f;
+};
+F12Matrix g_f12Mat[2];                              // game thread (the P2 hook) only
+uintptr_t g_f12Hrc = 0;                             // game thread only: the HRC the state belongs to
+std::atomic<bool> g_f12Stop{false};
+std::atomic<const char*> g_f12StopWhy{nullptr};
+bool g_f12StopNoted = false;                        // frame thread only
+
+bool f12Near(float a, float b) noexcept {
+    const float d = a - b;
+    return d < 1e-6f && d > -1e-6f;
+}
+
+void f12Stand(const char* why) noexcept {
+    g_f12StopWhy.store(why, std::memory_order_relaxed);
+    g_f12Stop.store(true, std::memory_order_relaxed);
+}
+
+// Writes the 16 floats at `address` under SEH.
+__declspec(noinline) bool guardedWriteFloats16(uintptr_t address, const float* v) noexcept {
+    __try {
+        std::memcpy(reinterpret_cast<void*>(address), v, 16 * sizeof(float));
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+void f12ScaleHud(void* hrcPtr) noexcept {
+    if (g_f12Stop.load(std::memory_order_relaxed)) return;
+    if (!nativeOnFootActive() || !g_meshCreateLive.load(std::memory_order_relaxed)) return;
+    const float d = g_hudDistance.load(std::memory_order_relaxed);
+    const bool atDefault = f12Near(d, nofoot::kHudDefaultDistance);
+    const float s = d / nofoot::kHudDefaultDistance;
+    const uintptr_t h = reinterpret_cast<uintptr_t>(hrcPtr);
+    if (!h) return;
+    if (h != g_f12Hrc) {
+        g_f12Hrc = h;
+        for (auto& m : g_f12Mat) m = F12Matrix{};
+    }
+    const uint32_t offs[2] = {nofoot::kF9HrcMatrixOff, nofoot::kHudMatrix2Off};
+    for (size_t i = 0; i < 2; ++i) {
+        float cur[16] = {};
+        if (!guardedRead(h + offs[i], cur, sizeof(cur))) {
+            f12Stand("a placement matrix could not be read");
+            return;
+        }
+        F12Matrix& m = g_f12Mat[i];
+        const bool ours = m.have && std::memcmp(cur, m.written, sizeof(cur)) == 0;
+        if (ours) {
+            if (atDefault) {
+                // Back at the game's own distance: put the base back once, then stop claiming the matrix.
+                if (!guardedWriteFloats16(h + offs[i], m.base)) {
+                    f12Stand("a placement matrix could not be written");
+                    return;
+                }
+                m.have = false;
+                continue;
+            }
+            if (f12Near(m.writtenScale, s)) continue;   // already scaled: the game has not recomputed
+        } else {
+            if (atDefault) continue;                    // the game's own values, at the default distance
+            std::memcpy(m.base, cur, sizeof(cur));      // a fresh recompute: these are the new base values
+        }
+        float target[16] = {};
+        for (size_t k = 0; k < 16; ++k) target[k] = m.base[k] * (((k & 3) == 3) ? 1.0f : s);
+        if (!guardedWriteFloats16(h + offs[i], target)) {
+            f12Stand("a placement matrix could not be written");
+            return;
+        }
+        std::memcpy(m.written, target, sizeof(target));
+        m.writtenScale = s;
+        m.have = true;
+    }
+}
+
+// Frame thread: logs a stand-down once.
+void f12Tick() {
+    if (!g_f12Stop.load(std::memory_order_relaxed) || g_f12StopNoted) return;
+    g_f12StopNoted = true;
+    const char* why = g_f12StopWhy.load(std::memory_order_relaxed);
+    Log::get().note("native on foot hud distance: writes standing down -- %s", why ? why : "a fault");
+}
+
 // P2: rcx = HRC, and five more arguments, all forwarded (the later chunks were not scanned for stack arguments).
 uint64_t __fastcall f9HrcSubmitHooked(void* hrc, void* a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     const F9Fn6 original = reinterpret_cast<F9Fn6>(g_f9Probe[1].original);
     if (!original) return 0;
     if (!g_f9Stop[1].load(std::memory_order_relaxed)) f9RecordHrc(f9State(), hrc);   // reads before the call
+    f12ScaleHud(hrc);   // F12: the HUD distance, before the original runs
     return original(hrc, a2, a3, a4, a5, a6);
 }
 
@@ -1632,9 +1741,11 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
                   g_panelsKeyOn.load(std::memory_order_relaxed) ? f9Why : "fix.native_on_foot_panels is off");
     meshSiteTick(g_meshCreate, g_meshKeyOn.load(std::memory_order_relaxed) && f9Active,
                  g_meshKeyOn.load(std::memory_order_relaxed) ? f9Why : "fix.native_on_foot_hud_mesh is off");
+    g_meshCreateLive.store(g_meshCreate.applied, std::memory_order_relaxed);   // F12: the HUD distance writes only while the creation patch is in
     meshSiteTick(g_meshWorld, g_meshWorldKeyOn.load(std::memory_order_relaxed) && f9Active,
                  g_meshWorldKeyOn.load(std::memory_order_relaxed) ? f9Why : "fix.native_on_foot_hud_mesh_world is off");
     f9ProbeTick(now);
+    f12Tick();
     neckLine(now);
 }
 

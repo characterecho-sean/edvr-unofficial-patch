@@ -178,5 +178,9 @@ constexpr uint32_t kF9HrcG291Off = 0x291, kF9HrcG470Off = 0x470, kF9HrcG4C0Off =
                    kF9ViewIdOff = 0x8E8, kF9ViewCamOff = 0x50;
 // F11: the view's rotation rows start at +0x20 (the camera position follows at +0x50); the HRC's world matrix is 16 floats at +0x430.
 constexpr uint32_t kF9ViewRotOff = 0x20, kF9HrcMatrixOff = 0x430;
+// F12: the HUD distance. The second placement matrix sits at +0x480; the default distance is the game's own (0.192 m), and the range is the setting's.
+constexpr uint32_t kHudMatrix2Off = 0x480;
+constexpr float kHudDefaultDistance = 0.192f;
+constexpr float kHudDistanceMin = 0.08f, kHudDistanceMax = 0.40f;
 }  // namespace nofoot
 }  // namespace edvr
