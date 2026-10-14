@@ -2,7 +2,7 @@
 
 ## Status
 
-- **State:** F0-F9 FLOWN (Epic; journal). F10 BUILT (20a57e54; green), NOT FLOWN.
+- **State:** F0-F10 FLOWN (Epic; journal). F11 BUILT (f9150ae5; green), NOT FLOWN.
   Branch `claude/native-onfoot-vr-completion-219ffa`; not pushed.
 - **Origin:** a user's handoff. A Cinema-to-HMD swap on disembark gave native
   stereo on foot; the HUD, radar, left panel and inventory were missing.
@@ -33,19 +33,18 @@
     only per-mode pass difference, W+0x38, has no reader.
   - H8 (ruled out, F6): the stereo predicate and the eye-index query.
   - H10 (F8, flown): the override brings the FP node back, but only the reticle shows.
-    F9: the panels show with patch A. The HRC instances are created only past the gate at 0x1A149A8 (F10).
-- **F9-F10 instruments (TEMPORARY, remove after F10):** patches `fix.native_on_foot_panels`
-  (76 73 -> 90 90 at +0x19B1587) and `fix.native_on_foot_hud_mesh` (74 -> EB at +0x1A36453
-  and 80 -> 78 at +0x1A149A8, all or nothing); probes P1, P2, P3. F8's override and census
-  stay until F10 closes.
+    F10: the meshes are created and drawn, but invisible; the placement byte 0x1A36453 is wrong (F11 A/B).
+- **F9-F11 instruments (TEMPORARY, remove after F11):** patches `fix.native_on_foot_panels`
+  (76 73 -> 90 90 at +0x19B1587), `fix.native_on_foot_hud_mesh` (80 -> 78 at +0x1A149A8, the
+  creation gate) and `fix.native_on_foot_hud_mesh_world` (74 -> EB at +0x1A36453, the
+  placement A/B); probes P1, P2, P3. F8's override and census stay until F11 closes.
 - **OPEN, RemLok on foot:** the on-foot visor overlay is not yet identified. It
   needs a skip-probe or a diff census that excludes the tonemap PS
   0x99C21CEB7A699821 (tonemap_admit.h:39).
 - **Ruled out:** the cinema request is always 5 (see the end of this doc).
-- **Temporary keys (all go when the arc picks one):** `fix.native_on_foot` (F8 Fixes
-  page), `fix.native_on_foot_method` (swap | gate), `fix.native_on_foot_hud` (F8 row under
-  the method), `fix.native_on_foot_panels` and `fix.native_on_foot_hud_mesh` (F9 rows under
-  the hud row). All are default off and live.
+- **Temporary keys (all go when the arc picks one):** the six `fix.native_on_foot*` keys on
+  the F8 page "Native on foot", after Explorer Cam, in this order: native_on_foot, method,
+  hud, panels, hud_mesh, hud_mesh_world. All default off and live.
 - **F2 changes (c884e218):** gate: the setter never substitutes; EDVR holds the byte
   at 0 while the key is on and a game session is live (identity and byte checked
   first). Native body: while native stereo is on foot, the fade global goes -1 to 0
@@ -55,8 +54,9 @@
   the journal; the F1 census lines are unchanged.
 - **Install:** Epic only (Sean: Frontier carries another feature test). `edvr.ini`
   is not touched unless `--ini` says so.
-- **Next:** F10 on Epic: the hud key, the panels key and the mesh key on, in native on
-  foot. Read the mesh unit line, then the `hrc` lines (inst non-zero, placement).
+- **Next:** F11 on Epic, one key at a time: hud_mesh (creation) first, then hud_mesh_world
+  (placement A/B). Read the `hrc submit` rotation rows and the `hrc matrix` line: a near-identity
+  rotation means camera space.
 
 ## What "finished" means
 
@@ -108,9 +108,9 @@ branch that behaves like the cockpit. The F2 skin join is NOT coupled to
 Explorer Cam (`engine_velocity.cpp:2496-2502`); it stays.
 
 RemLok, F9 (2026-10-14): in native stereo the RemLok lines are ALWAYS drawn, even in a
-breathable station. Planned: identify the overlay draw with census_skip, excluding the
-tonemap PS, then hide it when Status.json says the atmosphere is breathable (verify the
-Flags2 bit), and show it outside. The helmet-state handling may be another cinema-only path.
+breathable station. F10 census_skip found no separate overlay draw: the on-foot lines are not
+the cockpit overlay, and they likely sit inside a post pass (see the F10 journal). No code
+change for RemLok in this build. The helmet-state handling may be another cinema-only path.
 
 RemLok (F0 log, 10:50-10:54): in native stereo on foot the helmet lines show
 the replicated nasal-line bug that the cockpit fix solved (`fix.remlok_lines =
@@ -199,6 +199,12 @@ mode and its context); W3 step 1-2 (dump comparison, offline).
 - ruled out: EDVR's UI layer hides the HUD (H5), because fix.ui_quality was off from 13:25:06 through a native window 13:25:44-13:27:03, and still no HUD.
 - ruled out: the HUD is gated on the stereo leaf predicate 0x28540B0, because it returns 1 in cinema (mode 6) too, from the same callers (F6).
 - ruled out: a per-item eye-index match drops HUD items in stereo, because the eye-index query's only caller runs once per mode change, not per frame (F6).
+- ruled out: vs:5E417E9DF2E7F9E6 is the on-foot RemLok line's draw, because skipping its draws did not remove the lines (F10; it also drives the smoke).
+- ruled out: vs:3064D7F445192FDD is the on-foot RemLok line's draw, because skipping its draws did not remove the lines (F10).
+- ruled out: vs:B75A6FF2CA9FA5D6 is the on-foot RemLok line's draw, because skipping its draws did not remove the lines (F10).
+- ruled out: vs:D1281DF454A153AD is the on-foot RemLok line's draw, because skipping its draws did not remove the lines (F10).
+- ruled out: vs:D95905C18B7FAD93 is the on-foot RemLok line's draw, because skipping its draws did not remove the lines (F10).
+- ruled out: vs:CFA91824129ECBBC is the on-foot RemLok line's draw, because skipping its draws did not remove the lines (F10).
 - ruled out: T slot +0xB0 is the HUD gate, because it is the counter R+0x780>0 and nothing in the HUD reads it (static).
 - CORRECTION: the game code does test the selector mode in {3, 4} at about 50 sites (the "all readers treat 3..6 alike" claim held only for settings+0x3694/0x3698).
 - CORRECTION: F4's "native serves a superset of cinema's views" is withdrawn (V is an OR of content masks).
@@ -356,3 +362,27 @@ mode and its context); W3 step 1-2 (dump comparison, offline).
 - **2026-10-14, F10 built (20a57e54, NOT FLOWN).** The mesh unit patches both sites, all or
   nothing: 0x1A36453 74 -> EB and 0x1A149A8 80 -> 78, verified together before either write,
   and restored together only while both still read as this unit left them.
+- **2026-10-14, F10 FLOWN (Epic).** With the mesh unit on, the three HRC meshes are created,
+  submitted, and their draws (VS 0x46546443..., 0x95D01BA6..., 8 per eye) reach the HDR eye
+  targets. Nothing is visible. Captures: the HUD families draw 8 per eye, depth-tested
+  (func 7, no depth write); the wheel opens and adds no eye draws, so the wheel is likely drawn
+  inside the HumanoidHUD canvas on the HRC meshes. The elevator interaction panel is visible
+  with the panel patch. UI quality 125 sharpens the on-foot panels.
+- **2026-10-14, Opus correction (F10).** The EB patch at 0x1A36453 is WRONG. On foot the HRC and
+  the reticle's marker component draw in camera space into list B (the data byte 0x5E7A752 is
+  1). EB hands list B a world-space matrix, so the meshes land off-axis. The reticle is
+  HumanoidMarkerRenderComponent (0x1A14D80), on the camera-space path. Predicate call sites:
+  HumanoidARComponent (0x1A6DD4F, the +0x80 site); if AR overlays turn out missing, the I1-style
+  byte is 0x1A6DD51. The near plane on foot is 0.025 m, which is fine.
+- **2026-10-14, RemLok (F10).** The on-foot RemLok lines are NOT the cockpit overlay. census_skip
+  of six draw families did not remove them: vs:5E417E9DF2E7F9E6 (which also drives the smoke),
+  vs:3064D7F445192FDD, vs:B75A6FF2CA9FA5D6, vs:D1281DF454A153AD, vs:D95905C18B7FAD93 and
+  vs:CFA91824129ECBBC (see Ruled out). The mirror (the post-tonemap eye copy) shows them. The
+  hypothesis: the visor edge is inside a post pass, most likely the tonemap, driven by visor
+  constants. Under investigation.
+- **2026-10-14, F11 built (f9150ae5, NOT FLOWN).** The creation gate (fix.native_on_foot_hud_mesh,
+  80 -> 78 at +0x1A149A8) and the placement A/B (fix.native_on_foot_hud_mesh_world, 74 -> EB at
+  +0x1A36453) are separate keys, each verified before its write. P3 logs each view's rotation
+  floats (+0x20..+0x4C) with its camera position; P2 logs the HRC's matrix (+0x430..+0x46F) once
+  per 5 s per state. The six native on-foot keys now sit on the F8 page "Native on foot",
+  after Explorer Cam.
