@@ -18,6 +18,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 
 #include "explorer_cam_core.h"   // ecm::kExpectedTimestamp and ecm::kExpectedImageSize: build 332841's PE identity, shared with the other build-keyed hooks
 
@@ -182,9 +183,35 @@ constexpr uint32_t kF9ViewRotOff = 0x20, kF9HrcMatrixOff = 0x430;
 constexpr uint32_t kHudMatrix2Off = 0x480;
 constexpr float kHudDefaultDistance = 0.192f;
 constexpr float kHudDistanceMin = 0.03f, kHudDistanceMax = 0.40f;
+// F16: the setting's default distance (Sean's tuning), which is not the game's 0.192 above; used only as the setting's fallback.
+constexpr float kHudDistanceSettingDefault = 0.03f;
 // F13: the HUD size (the basis rows only), the head follow's smoothing (ms), and the visor override test (TEMPORARY).
-constexpr float kHudSizeMin = 0.30f, kHudSizeMax = 1.50f, kHudSizeDefault = 1.00f;
-constexpr int kHudSmoothMin = 0, kHudSmoothMax = 500, kHudSmoothDefault = 200;
+// F16: size's default is 1.50 and its maximum 3.00 (Sean's tuning hit the old maximum); smoothing's default is 40 ms.
+constexpr float kHudSizeMin = 0.30f, kHudSizeMax = 3.00f, kHudSizeDefault = 1.50f;
+constexpr int kHudSmoothMin = 0, kHudSmoothMax = 500, kHudSmoothDefault = 40;
+// F16: the per-group HUD offsets (a fraction of the HUD canvas, live), and the default spread (the margins' extra, F14).
+constexpr float kHudOffsetMin = -0.30f, kHudOffsetMax = 0.30f;
+constexpr float kHudSpreadDefault = 0.15f;
+// F16: the HUD group of a layout part, by the name the layout passes (rec+0). 0 left, 1 top, 2 right, 3 centre; -1 is a name not in the table: no
+// offset for it, and the layout logs it once. The names are the ones the F14 layout probe logged.
+constexpr int kHudGroupCount = 4;
+inline int hudGroupOf(const char* name) {
+    struct Entry {
+        const char* name;
+        int group;
+    };
+    static const Entry kEntries[] = {
+        {"RadarComponent", 0},       {"Vitals", 0},           {"AccessWheel", 0},  {"ItemWheel", 0},
+        {"ChatWindow", 0},           {"WingMembers", 0},      {"Compass", 1},      {"Alerts", 1},
+        {"ConflictZoneStatus", 1},   {"CapturePointProgress", 1}, {"ToolProgress", 1}, {"HumanoidInfoPanel", 2},
+        {"ConversationInfo", 2},     {"MiningRigMeters", 2},  {"GrenadeIndicator", 3}, {"SamplingTool", 3},
+        {"TutorialMessage", 3},
+    };
+    if (!name) return -1;
+    for (const Entry& e : kEntries)
+        if (std::strcmp(name, e.name) == 0) return e.group;
+    return -1;
+}
 constexpr uintptr_t kVisorOverrideRva = 0x5F741B7;   // byte: 1 = the visor override is active (the RE: visorDown = byte[B7] ? byte[B8] : vfunc)
 constexpr uintptr_t kVisorDownRva = 0x5F741B8;       // byte: the forced visor state while the override is active (0 = up)
 }  // namespace nofoot

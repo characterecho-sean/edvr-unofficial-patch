@@ -162,6 +162,16 @@ bool journalVehicle();
 // bits 3-4. 0 when none, when Flags is not in the file, or in flat. The seat memory (src/openxr/seat_memory.h) treats a change of this
 // word, aboard before and after, as a change of cockpit.
 uint32_t journalSeatKind();
+// Built F16 (native on foot, the breathable visor): Status.json Flags2 bit 16 (0x10000), BreathableAtmosphere: on foot on a planet whose air the
+// commander can breathe. `known` is false whenever Flags2 is not in the file (menus, the watcher off). Frontier's documented bit; confirmed by the
+// F16 flight log (the raw Flags2 is logged with each transition).
+constexpr uint32_t kStatusFlags2Breathable = 1u << 16;
+constexpr bool journalBreathableFromFlags2(uint32_t flags2) {
+    return (flags2 & kStatusFlags2Breathable) != 0;
+}
+bool journalBreathableKnown();
+bool journalBreathable();
+uint32_t journalFlags2();   // the last Flags2 read (0 when not in the file); for the logs
 
 // How many Status.json samples have been read: lets a caller require a sample
 // taken AFTER some event, since the previous one can be a second stale.

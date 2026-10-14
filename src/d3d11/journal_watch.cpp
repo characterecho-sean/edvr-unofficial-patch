@@ -108,6 +108,10 @@ struct Published {
     // shutdown states -- Status then carries only "Flags":0.
     bool     onFootKnown = false;
     bool     onFoot = false;
+    // Built F16: Flags2 bit 16 (BreathableAtmosphere, journal_watch.h) and the raw Flags2 word, from the same sample.
+    bool     breathableKnown = false;
+    bool     breathable = false;
+    uint32_t flags2 = 0;
     // Built v14 (optimized station): Status.json Flags bit 0 is Docked (the same field whose bit 4 is supercruise, read above).
     bool     dockedKnown = false;
     bool     docked = false;
@@ -147,6 +151,9 @@ struct Visible {
     std::atomic<bool>     fsdJumpLive{false};
     std::atomic<bool>     onFootKnown{false};
     std::atomic<bool>     onFoot{false};
+    std::atomic<bool>     breathableKnown{false};
+    std::atomic<bool>     breathable{false};
+    std::atomic<uint32_t> flags2{0};
     std::atomic<bool>     dockedKnown{false};
     std::atomic<bool>     docked{false};
     std::atomic<bool>     seatedKnown{false};
@@ -180,6 +187,9 @@ void applyPublished(const Published& p) {
     g_v.fsdJumpLive.store(p.fsdJumpLive, kRelaxed);
     g_v.onFootKnown.store(p.onFootKnown, kRelaxed);
     g_v.onFoot.store(p.onFoot, kRelaxed);
+    g_v.breathableKnown.store(p.breathableKnown, kRelaxed);
+    g_v.breathable.store(p.breathable, kRelaxed);
+    g_v.flags2.store(p.flags2, kRelaxed);
     g_v.dockedKnown.store(p.dockedKnown, kRelaxed);
     g_v.docked.store(p.docked, kRelaxed);
     g_v.seatedKnown.store(p.seatedKnown, kRelaxed);
@@ -457,6 +467,9 @@ void pollStatus(Session& s) {
         ++s.pub.statusSamples;
         s.pub.onFootKnown = sawFlags2;
         s.pub.onFoot = sawFlags2 && (flags2 & 0x01u) != 0;
+        s.pub.breathableKnown = sawFlags2;
+        s.pub.breathable = sawFlags2 && journalBreathableFromFlags2(flags2);
+        s.pub.flags2 = sawFlags2 ? flags2 : 0u;
         s.pub.dockedKnown = sawFlags;
         s.pub.docked = sawFlags && (flags & 0x01u) != 0;
         // The same sample's seat: Flags bits 24-26 and Flags2 bits 1-2 (journal_watch.h). A Flags2 that is absent is read
@@ -499,6 +512,9 @@ void pollStatus(Session& s) {
         }
     } else if (++s.statusMisses >= 3) {
         s.pub.onFootKnown = false;
+        s.pub.breathableKnown = false;
+        s.pub.breathable = false;
+        s.pub.flags2 = 0;
         s.pub.dockedKnown = false;
         s.pub.seatedKnown = false;
         s.pub.vehicleKnown = false;
@@ -1038,6 +1054,9 @@ bool journalInJumpTunnel() {
 }
 bool journalOnFootKnown() { return journalWatchActive() && peek(g_v.onFootKnown); }
 bool journalOnFoot() { return !runtimeFlatProfile() && peek(g_v.onFoot); }
+bool journalBreathableKnown() { return journalWatchActive() && peek(g_v.breathableKnown); }
+bool journalBreathable() { return !runtimeFlatProfile() && peek(g_v.breathable); }
+uint32_t journalFlags2() { return peek(g_v.flags2); }
 bool journalDockedKnown() { return journalWatchActive() && peek(g_v.dockedKnown); }
 bool journalStatusDockedKnown() { return g_v.active.load(std::memory_order_acquire) && peek(g_v.dockedKnown); }
 bool journalStatusDocked() { return peek(g_v.docked); }

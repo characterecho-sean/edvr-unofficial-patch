@@ -43,9 +43,17 @@ std::atomic<float> g_hudSize{nofoot::kHudSizeDefault};          // fix.native_on
 std::atomic<bool> g_followHead{true};                           // fix.native_on_foot_hud_follow is head (F13)
 std::atomic<bool> g_followBefore{false};                        // fix.native_on_foot_hud_follow_order is before (F13, temporary)
 std::atomic<int> g_followSmoothMs{nofoot::kHudSmoothDefault};   // fix.native_on_foot_hud_follow_smoothing_ms, live (F13)
-std::atomic<bool> g_visorKeyOn{false};                          // fix.native_on_foot_visor_up, as the frame thread last read it (F13, temporary)
+std::atomic<bool> g_visorUpSetting{true};                       // fix.native_on_foot_breathable_visor is up, as the frame thread last read it (F16)
 float g_hudSizeLast = -1.0f;                                    // frame thread only: as last logged (F13)
-bool g_followHeadLast = true, g_followBeforeLast = false, g_visorKeyLast = false;   // frame thread only (F13)
+bool g_followHeadLast = true, g_followBeforeLast = false, g_visorUpLast = true;   // frame thread only (F13, F16)
+bool g_visorBreathLast = false;                                 // frame thread only: the breathable air state as last logged, on foot (F16)
+std::atomic<bool> g_reticleHead{false};                         // fix.native_on_foot_reticle_follow is head (F16)
+std::atomic<bool> g_reticleWriteOn{false};                      // the key 10 centring is wanted now: head, on foot, session (frame thread; the probe reads it, F16)
+bool g_reticleHeadLast = false, g_reticleWriteLast = false;     // frame thread only (F16)
+float g_hudOffsetLast[nofoot::kHudGroupCount * 2] = {};         // frame thread only: the group offsets as last read (F16)
+float g_hudOffsetRead[nofoot::kHudGroupCount * 2] = {};         // written by the frame thread under g_f9Lock; the layout hook reads it (F16)
+bool g_hudOffsetOn = false;                                     // under g_f9Lock: the offsets apply now, native stereo on foot (F16)
+uintptr_t g_layoutHrc = 0;                                      // under g_f9Lock: the HRC the layout hook last ran for (F16)
 std::atomic<float> g_hudDistance{nofoot::kHudDefaultDistance};   // fix.native_on_foot_hud_distance, live (F12)
 float g_hudDistanceLast = -1.0f;                   // frame thread only: as last logged (F12)
 std::atomic<bool> g_meshCreateLive{false};         // the creation patch is applied (set by the frame thread; read by the P2 hook, F12)
@@ -57,6 +65,14 @@ std::atomic<bool> g_keyOn{false};                  // fix.native_on_foot, as the
 std::atomic<bool> g_methodGate{true};              // fix.native_on_foot_method is gate (F2); the setter substitutes only when it is swap
 std::atomic<bool> g_lastForwardedHmd{false};       // the most recent setter call forwarded an HMD mode (3 or 4): the gate method's flag reads it
 uintptr_t g_base = 0;
+// The spinlock the F9-F16 probes and the frame thread share (moved up from the F9 section in F16: readKey uses it first).
+std::atomic_flag g_f9Lock = ATOMIC_FLAG_INIT;
+struct F9Lock {
+    F9Lock() noexcept {
+        while (g_f9Lock.test_and_set(std::memory_order_acquire)) _mm_pause();
+    }
+    ~F9Lock() { g_f9Lock.clear(std::memory_order_release); }
+};
 std::atomic<uint64_t> g_setterCalls{0};            // every setter call (F7: the request census reads after one)                             // the game image base; set by installOnce before the hook can run
 
 // Frame thread only.
@@ -404,7 +420,7 @@ void readKey() {
         g_meshWorldKeyLast = worldOn;
     }
     // F12: the HUD distance (a user setting, live), clamped to its range; logged once per change.
-    float dist = cfg.getFloat("fix.native_on_foot_hud_distance", nofoot::kHudDefaultDistance);
+    float dist = cfg.getFloat("fix.native_on_foot_hud_distance", nofoot::kHudDistanceSettingDefault);
     if (dist < nofoot::kHudDistanceMin) dist = nofoot::kHudDistanceMin;
     if (dist > nofoot::kHudDistanceMax) dist = nofoot::kHudDistanceMax;
     g_hudDistance.store(dist, std::memory_order_relaxed);
@@ -439,14 +455,50 @@ void readKey() {
         Log::get().note("native on foot hud follow order: %s (temporary)", followBefore ? "before" : "after");
         g_followBeforeLast = followBefore;
     }
-    const bool visorOn = cfg.getString("fix.native_on_foot_visor_up", "off") == "on";
-    g_visorKeyOn.store(visorOn, std::memory_order_relaxed);
-    if (first || visorOn != g_visorKeyLast) {
-        Log::get().note("native on foot: fix.native_on_foot_visor_up is %s", visorOn ? "on" : "off");
-        g_visorKeyLast = visorOn;
+    // F16: the visor in breathable air (a user setting): up holds the visor override while Status.json says breathable air; game leaves it alone.
+    const bool visorUp = cfg.getString("fix.native_on_foot_breathable_visor", "up") == "up";
+    g_visorUpSetting.store(visorUp, std::memory_order_relaxed);
+    if (first || visorUp != g_visorUpLast) {
+        Log::get().note("native on foot visor in breathable air: %s", visorUp ? "up" : "game");
+        g_visorUpLast = visorUp;
+    }
+    // F16: the reticle follows aim (the game's own position, the default) or head (key 10 centred on the view axis).
+    const bool reticleHead = cfg.getString("fix.native_on_foot_reticle_follow", "aim") == "head";
+    g_reticleHead.store(reticleHead, std::memory_order_relaxed);
+    if (first || reticleHead != g_reticleHeadLast) {
+        Log::get().note("native on foot reticle follows: %s", reticleHead ? "head" : "aim");
+        g_reticleHeadLast = reticleHead;
+    }
+    // F16: the per-group HUD offsets (user settings, live): x and y per group, a fraction of the HUD canvas, read under the layout hook's lock.
+    {
+        // Each key is spelled out in its own call: the settings generator scans the source for typed reads with a literal key.
+        auto offsetClamp = [](float v) {
+            if (v < nofoot::kHudOffsetMin) return nofoot::kHudOffsetMin;
+            if (v > nofoot::kHudOffsetMax) return nofoot::kHudOffsetMax;
+            return v;
+        };
+        float offs[nofoot::kHudGroupCount * 2] = {};
+        offs[0] = offsetClamp(cfg.getFloat("fix.native_on_foot_hud_left_x", 0.0f));
+        offs[1] = offsetClamp(cfg.getFloat("fix.native_on_foot_hud_left_y", 0.0f));
+        offs[2] = offsetClamp(cfg.getFloat("fix.native_on_foot_hud_top_x", 0.0f));
+        offs[3] = offsetClamp(cfg.getFloat("fix.native_on_foot_hud_top_y", 0.0f));
+        offs[4] = offsetClamp(cfg.getFloat("fix.native_on_foot_hud_right_x", 0.0f));
+        offs[5] = offsetClamp(cfg.getFloat("fix.native_on_foot_hud_right_y", 0.0f));
+        offs[6] = offsetClamp(cfg.getFloat("fix.native_on_foot_hud_centre_x", 0.0f));
+        offs[7] = offsetClamp(cfg.getFloat("fix.native_on_foot_hud_centre_y", 0.0f));
+        {
+            F9Lock lock;
+            std::memcpy(g_hudOffsetRead, offs, sizeof(offs));
+        }
+        if (first || std::memcmp(offs, g_hudOffsetLast, sizeof(offs)) != 0) {
+            Log::get().note("native on foot hud offsets (fraction of the canvas): left %.2f,%.2f top %.2f,%.2f right %.2f,%.2f centre %.2f,%.2f",
+                            static_cast<double>(offs[0]), static_cast<double>(offs[1]), static_cast<double>(offs[2]), static_cast<double>(offs[3]),
+                            static_cast<double>(offs[4]), static_cast<double>(offs[5]), static_cast<double>(offs[6]), static_cast<double>(offs[7]));
+            std::memcpy(g_hudOffsetLast, offs, sizeof(offs));
+        }
     }
     // F14: the HUD spread (a user setting, live) and the reticle probe key (temporary).
-    float spread = cfg.getFloat("fix.native_on_foot_hud_spread", 0.0f);
+    float spread = cfg.getFloat("fix.native_on_foot_hud_spread", nofoot::kHudSpreadDefault);
     if (spread < 0.0f) spread = 0.0f;
     if (spread > 0.45f) spread = 0.45f;
     g_hudSpread.store(spread, std::memory_order_relaxed);
@@ -1235,13 +1287,6 @@ void meshSiteTick(MeshSite& s, bool want, const char* reason) {
 // P1 (panel submit), P2 (the HRC submit; six arguments forwarded), P3 (the per-instance submit: the HRC's instances only). Each reads game
 // memory under SEH and forwards the registers unchanged; a probe stands down after sixteen faults. Aggregates are per 5 s and per state;
 // the HRC line is also written when its values change. No game thread writes a line.
-std::atomic_flag g_f9Lock = ATOMIC_FLAG_INIT;
-struct F9Lock {
-    F9Lock() noexcept {
-        while (g_f9Lock.test_and_set(std::memory_order_acquire)) _mm_pause();
-    }
-    ~F9Lock() { g_f9Lock.clear(std::memory_order_release); }
-};
 const char* const g_f9StateName[3] = {"native", "cinema", "ship/other"};
 uint8_t f9State() noexcept {
     if (nativeOnFootActive()) return 0;
@@ -1757,7 +1802,7 @@ void f13FrameTick(uint64_t nowMs) {
 }
 
 // ---- F13: the visor override (TEMPORARY; the RemLok test; approved by Sean 2026-10-14) ------------------------------------------
-// While native stereo is on foot, fix.native_on_foot_visor_up is on, and the identity check passes: both bytes must read 0; +0x5F741B8 is
+// While native stereo is on foot, breathable air holds (fix.native_on_foot_breathable_visor is up, F16), and the identity check passes: both bytes must read 0; +0x5F741B8 is
 // written 0 (the forced visor state, up) first, then +0x5F741B7 is written 1 (the override is active). The restore writes +0x5F741B7 back to
 // 0 only while it still reads our 1; +0x5F741B8 stays 0. A refusal is logged once per reason (as the gate byte).
 bool g_visorWritten = false;               // frame thread only: EDVR holds the override and owes the game a 0 back
@@ -1932,7 +1977,7 @@ void spreadTick(bool want, float spread, const char* reason) {
     Log::get().note("native on foot hud spread: margins -> 0.027,0.060 (restored: %s)", reason);
 }
 
-// LAYOUT PROBE (read only). EliteDangerous64.exe+0x1A0DCD0 (args rcx = HRC, rdx = float out[2], r8 = &rec; rec+0 = const char* part name), called
+// LAYOUT HOOK (F14 probe; F16 writer). EliteDangerous64.exe+0x1A0DCD0 (args rcx = HRC, rdx = float out[2], r8 = &rec; rec+0 = const char* part name), called
 // once per HUD part per layout re-send. The prologue is verified (the first five bytes are mov [rsp+0x20],rbx: no rip-relative operand, no
 // branch). The original runs first; then the fields are read under SEH and one line is queued for the frame thread. Six arguments are forwarded.
 struct F14Line {
@@ -1957,7 +2002,73 @@ void f14Queue(const char* text) noexcept {
     ++g_f14Written;
 }
 
-void f14LogPart(void* hrc, void* out, void* rec) noexcept {
+// F16: the layout lines are logged on change, per part name (under g_f9Lock). 0 = nothing new; 1 = this part's layout changed or is new; 2 = a name the
+// group table does not know, logged once with its consequence (no offset).
+struct F16SeenPart {
+    char name[40];
+    float out0, out1;
+    bool used, unknownNoted;
+};
+constexpr size_t kF16Seen = 32;
+F16SeenPart g_f16Seen[kF16Seen];   // guarded by g_f9Lock
+
+bool sameBits(float a, float b) noexcept {
+    return std::memcmp(&a, &b, sizeof(float)) == 0;
+}
+
+int noteSeenPart(const char* name, float out0, float out1, int group) noexcept {
+    F9Lock lock;
+    F16SeenPart* row = nullptr;
+    for (auto& r : g_f16Seen) {
+        if (r.used && std::strcmp(r.name, name) == 0) {
+            row = &r;
+            break;
+        }
+    }
+    int result = 0;
+    if (!row) {
+        for (auto& r : g_f16Seen) {
+            if (!r.used) {
+                row = &r;
+                break;
+            }
+        }
+        if (!row) return 0;
+        row->used = true;
+        std::snprintf(row->name, sizeof(row->name), "%s", name);
+        row->unknownNoted = false;
+        row->out0 = out0;
+        row->out1 = out1;
+        result = 1;
+    } else if (!sameBits(row->out0, out0) || !sameBits(row->out1, out1)) {
+        row->out0 = out0;
+        row->out1 = out1;
+        result = 1;
+    }
+    if (group < 0 && !row->unknownNoted) {
+        row->unknownNoted = true;
+        result = 2;
+    }
+    return result;
+}
+
+// The part's name (rec+0 is a const char*), up to cap-1 characters; "?" when unreadable.
+void readPartName(uintptr_t rec, char* name, size_t cap) noexcept {
+    std::snprintf(name, cap, "?");
+    uint64_t np = 0;
+    if (!guardedRead(rec, &np, 8) || np < 0x10000) return;
+    size_t i = 0;
+    for (; i + 1 < cap; ++i) {
+        char c = 0;
+        if (!guardedRead(static_cast<uintptr_t>(np) + i, &c, 1)) break;
+        name[i] = (c >= 32 && c < 127) ? c : '.';
+        if (c == 0) break;
+    }
+    name[i] = 0;
+    if (i == 0) std::snprintf(name, cap, "?");
+}
+
+void f14LogPart(void* hrc, void* out, void* rec, int group) noexcept {
     const uint64_t n = g_f14Calls.fetch_add(1, std::memory_order_relaxed) + 1;
     const uintptr_t h = reinterpret_cast<uintptr_t>(hrc);
     const uintptr_t r = reinterpret_cast<uintptr_t>(rec);
@@ -1998,27 +2109,62 @@ void f14LogPart(void* hrc, void* out, void* rec) noexcept {
     float out0 = nanv, out1 = nanv;
     guardedRead(o, &out0, 4);
     guardedRead(o + 4, &out1, 4);
+    // F16: one line per change of a part's layout (the values after any group offset), and once for a name the group table does not know.
+    const int seen = noteSeenPart(name, out0, out1, group);
+    if (seen == 0) return;
+    const char* groupNote = seen == 2 ? " (not in the HUD group table: no offset)" : "";
     char line[240];
     std::snprintf(line, sizeof(line),
                   "native on foot hud part: name=%s anchor=(%.3f,%.3f) off=(%.3f,%.3f) align=(%u,%u) scale=%.3f out=(%.3f,%.3f) canvas=%.0fx%.0f "
-                  "hrc=(%.3f,%.3f,%.3f) calls=%llu",
+                  "hrc=(%.3f,%.3f,%.3f) calls=%llu%s",
                   name, static_cast<double>(rec8), static_cast<double>(recC), static_cast<double>(rec10), static_cast<double>(rec14),
                   okB ? static_cast<unsigned>(b18) : 0u, okB ? static_cast<unsigned>(b19) : 0u, static_cast<double>(rec1C),
                   static_cast<double>(out0), static_cast<double>(out1), static_cast<double>(canvasW), static_cast<double>(canvasH),
-                  static_cast<double>(hrc4C4), static_cast<double>(hrc4C8), static_cast<double>(hrc4CC), static_cast<unsigned long long>(n));
+                  static_cast<double>(hrc4C4), static_cast<double>(hrc4C8), static_cast<double>(hrc4CC), static_cast<unsigned long long>(n), groupNote);
     f14Queue(line);
+}
+
+// F16: the group's offset (fraction of the canvas, x and y), added to the layout's own value after the original returns, while native stereo is on
+// foot. The canvas is [[HRC+0x1B8]+0x3E8] by [+0x3EC]; the offset is applied to out[0] and out[1] only, and each call starts from the game's value,
+// so nothing compounds. The HRC is kept for the layout re-send (layoutResendTick).
+void applyHudOffset(uintptr_t h, uintptr_t o, int group) noexcept {
+    float offX = 0.0f, offY = 0.0f;
+    bool on = false;
+    {
+        F9Lock lock;
+        g_layoutHrc = h;
+        on = g_hudOffsetOn;
+        if (group >= 0) {
+            offX = g_hudOffsetRead[group * 2];
+            offY = g_hudOffsetRead[group * 2 + 1];
+        }
+    }
+    if (!on || group < 0 || !o || (offX == 0.0f && offY == 0.0f)) return;
+    uint64_t canvas = 0;
+    float cw = 0.0f, ch = 0.0f;
+    if (!guardedRead(h + 0x1B8, &canvas, 8) || canvas < 0x10000) return;
+    if (!guardedRead(static_cast<uintptr_t>(canvas) + 0x3E8, &cw, 4) || !guardedRead(static_cast<uintptr_t>(canvas) + 0x3EC, &ch, 4)) return;
+    if (!(cw > 0.0f && ch > 0.0f && cw < 1.0e5f && ch < 1.0e5f)) return;
+    float v0 = 0.0f, v1 = 0.0f;
+    if (!guardedRead(o, &v0, 4) || !guardedRead(o + 4, &v1, 4)) return;
+    guardedWriteFloat(o, v0 + offX * cw);
+    guardedWriteFloat(o + 4, v1 + offY * ch);
 }
 
 uint64_t __fastcall layoutHooked(void* hrc, void* out, void* rec, uint64_t a4, uint64_t a5, uint64_t a6) {
     const F9Fn6 original = reinterpret_cast<F9Fn6>(g_f14Layout.original);
     if (!original) return 0;
     const uint64_t rax = original(hrc, out, reinterpret_cast<uint64_t>(rec), a4, a5, a6);
-    if (!g_f14LayoutStop.load(std::memory_order_relaxed)) f14LogPart(hrc, out, rec);
+    char name[72] = "?";
+    readPartName(reinterpret_cast<uintptr_t>(rec), name, sizeof(name));
+    const int group = nofoot::hudGroupOf(name);
+    applyHudOffset(reinterpret_cast<uintptr_t>(hrc), reinterpret_cast<uintptr_t>(out), group);
+    if (!g_f14LayoutStop.load(std::memory_order_relaxed)) f14LogPart(hrc, out, rec, group);
     return rax;
 }
 
-// RETICLE INDICATOR PROBE (read only). The stub below calls this with rcx = the instance and rdx = the node of the marker component's call at
-// EliteDangerous64.exe+0x1A15644 (the call to 0x434ECC0, preceded by mov rcx,[rsi+0x60]). Nothing is written to the instance.
+// RETICLE INDICATOR PROBE (read only, except key 10 under reticle follow = head, F16). The stub below calls this with rcx = the instance and rdx = the node of the marker component's call at
+// EliteDangerous64.exe+0x1A15644 (the call to 0x434ECC0, preceded by mov rcx,[rsi+0x60]). It writes nothing except, under reticle follow = head (F16), key 10's translation x and y.
 struct F14Key {
     bool used = false;
     uint32_t key = 0;
@@ -2046,6 +2192,12 @@ void __fastcall reticleIndicatorProbe(void* instance, void* node) noexcept {
     guardedRead(ia + 0x50, &scale, 4);
     const bool okPos = guardedRead(ia + 0x40, &pos[0], 4) && guardedRead(ia + 0x44, &pos[1], 4) && guardedRead(ia + 0x48, &pos[2], 4);
     if (!okKey || !okB) return;
+    // F16: while the reticle follows head, key 10 (the aim reticle) is centred on the view axis at its own distance: the translation's x and y are
+    // zeroed; z, w, the basis rows and the scale stay. Written only for key 10 and only while g_reticleWriteOn (frame thread). Guarded.
+    if (key == 10 && g_reticleWriteOn.load(std::memory_order_relaxed)) {
+        guardedWriteFloat(ia + 0x40, 0.0f);
+        guardedWriteFloat(ia + 0x44, 0.0f);
+    }
     F9Lock lock;
     F14Key* row = nullptr;
     for (auto& r : g_f14Keys) {
@@ -2191,6 +2343,46 @@ void reticleTick(bool want, const char* reason) {
     g_reticleInstalled = false;
     Log::get().note("native on foot indicator: call EliteDangerous64.exe+0x%llX -> the game's own (restored: %s)",
                     static_cast<unsigned long long>(kReticleCallRva), reason);
+}
+
+// F16: the game re-sends the HUD layout only when its own margins or [HRC+0x290] say so (RE: the byte is set to 1 again after the re-send, at
+// 0x1AB385B). When the on-state, a group offset or the spread changes, one re-send is asked for by writing 0 to [HRC+0x290] (guarded). The hook above
+// then applies the offsets, or their absence, to the new layout.
+struct LayoutStamp {
+    bool on = false;
+    float off[nofoot::kHudGroupCount * 2] = {};
+    float spread = 0.0f;
+};
+bool g_layoutStampValid = false;   // frame thread only
+LayoutStamp g_layoutStampLast;     // frame thread only
+
+bool sameStamp(const LayoutStamp& a, const LayoutStamp& b) noexcept {
+    if (a.on != b.on || !sameBits(a.spread, b.spread)) return false;
+    for (int i = 0; i < nofoot::kHudGroupCount * 2; ++i)
+        if (!sameBits(a.off[i], b.off[i])) return false;
+    return true;
+}
+
+void layoutResendTick(bool on) {
+    LayoutStamp now;
+    now.on = on;
+    uintptr_t hrc = 0;
+    {
+        F9Lock lock;
+        std::memcpy(now.off, g_hudOffsetRead, sizeof(now.off));
+        hrc = g_layoutHrc;
+    }
+    now.spread = g_hudSpread.load(std::memory_order_relaxed);
+    if (g_layoutStampValid && sameStamp(now, g_layoutStampLast)) return;
+    g_layoutStampValid = true;
+    g_layoutStampLast = now;
+    if (!hrc) return;   // no layout has run yet: the first one the game sends applies the values
+    if (!guardedWriteByte(hrc + 0x290, 0)) {
+        Log::get().note("native on foot hud: layout re-send NOT asked -- HRC+0x290 could not be written; the layout keeps its last values");
+        return;
+    }
+    Log::get().note("native on foot hud: layout re-send asked (HRC+0x290 = 0): on %s, spread %.2f", on ? "yes" : "no",
+                    static_cast<double>(now.spread));
 }
 
 // Frame thread: installs the layout probe once (VR only); drains the layout lines; logs the reticle indicator rows every 5 s.
@@ -2568,14 +2760,41 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
         spreadTick(spreadWant, spreadNow,
                    !(spreadNow > 0.0f) ? "the HUD spread is 0" : !nativeOnFootActive() ? "native stereo on foot ended"
                    : !g_meshCreateLive.load(std::memory_order_relaxed) ? "the HUD mesh is off" : "the game session ended");
+        // F16: the reticle stub is in place while the probe key or the reticle follow (head) is on; the centring is written only while follow is head.
         const bool reticleKey = g_reticleKeyOn.load(std::memory_order_relaxed);
-        const bool reticleWant = reticleKey && nativeOnFootActive() && session;
-        reticleTick(reticleWant, !reticleKey ? "fix.native_on_foot_reticle_probe is off" : !nativeOnFootActive() ? "native stereo on foot ended" : "the game session ended");
+        const bool reticleHead = g_reticleHead.load(std::memory_order_relaxed);
+        const bool reticleWant = (reticleKey || reticleHead) && nativeOnFootActive() && session;
+        reticleTick(reticleWant, !(reticleKey || reticleHead) ? "the reticle probe and the reticle follow are both off"
+                                 : !nativeOnFootActive()      ? "native stereo on foot ended"
+                                                              : "the game session ended");
+        const bool writeNow = reticleHead && nativeOnFootActive() && session;
+        g_reticleWriteOn.store(writeNow, std::memory_order_relaxed);
+        if (writeNow != g_reticleWriteLast) {
+            if (writeNow) Log::get().note("native on foot reticle: follows head (key 10 centred)");
+            else
+                Log::get().note("native on foot reticle: follows aim (the game's own position; %s)",
+                                !reticleHead ? "the setting is aim" : !nativeOnFootActive() ? "native stereo on foot ended" : "the game session ended");
+            g_reticleWriteLast = writeNow;
+        }
+        // F16: the HUD group offsets are applied by the layout hook while native stereo is on foot; any change of that state, of an offset or of the
+        // spread asks for one layout re-send.
+        const bool layoutOn = nativeOnFootActive() && session;
+        {
+            F9Lock lock;
+            g_hudOffsetOn = layoutOn;
+        }
+        layoutResendTick(layoutOn);
     }
-    // F13 (TEMPORARY): the visor override, while native stereo is on foot and its test key is on.
-    const bool visorKeyOn = g_visorKeyOn.load(std::memory_order_relaxed);
-    const bool visorWant = visorKeyOn && nativeOnFootActive() && session;
-    visorTick(visorWant, !visorKeyOn ? "fix.native_on_foot_visor_up is off" : !nativeOnFootActive() ? "native stereo on foot ended" : "the game session ended");
+    // F16: the visor override in breathable air (replaces the F13 test key). Held while the setting is up, native stereo is on foot, and Status.json's
+    // Flags2 says breathable air. The override itself is the F13 code path (visorTick: B8 = 0, then B7 = 1; restored when this stops).
+    const bool visorUp = g_visorUpSetting.load(std::memory_order_relaxed);
+    const bool breathable = journalBreathableKnown() && journalBreathable();
+    if (nativeOnFootActive() && breathable != g_visorBreathLast) {
+        Log::get().note("native on foot visor: breathable air %s (Flags2 0x%08X)", breathable ? "on" : "off", static_cast<unsigned>(journalFlags2()));
+        g_visorBreathLast = breathable;
+    }
+    const bool visorWant = visorUp && breathable && nativeOnFootActive() && session;
+    visorTick(visorWant, !visorUp ? "the visor in breathable air is game" : !breathable ? "breathable air off" : !nativeOnFootActive() ? "native stereo on foot ended" : "the game session ended");
     // F15 (TEMPORARY): the first-person body hide (explorer_cam.cpp), while native stereo is on foot and its key is on.
     const bool fpKey = g_fpKeyOn.load(std::memory_order_relaxed);
     explorerCamFpBody(fpKey && nativeOnFootActive(), !fpKey ? "fix.native_on_foot_hide_fp_body is off" : "native stereo on foot ended");
@@ -2591,6 +2810,11 @@ void nativeOnFootShutdown() {
     visorTick(false, "the game is shutting down");
     spreadTick(false, 0.0f, "the game is shutting down");
     reticleTick(false, "the game is shutting down");
+    g_reticleWriteOn.store(false, std::memory_order_relaxed);   // F16: no more centring writes
+    {
+        F9Lock lock;
+        g_hudOffsetOn = false;                                  // F16: the layout hook applies no offsets from here
+    }
     explorerCamFpBody(false, "the game is shutting down");
 }
 
