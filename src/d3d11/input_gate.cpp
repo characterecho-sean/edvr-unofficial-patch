@@ -1092,13 +1092,35 @@ void captureKeyboard(void* device, std::index_sequence<I...>) {
                     "is left untouched. Please report this log.", kGameDeviceDoors);
 }
 
-// ---- the joystick doors: observation only ---------------------------------
+// ---- the joystick doors: observation and plugin gating ------------------
 
 template <size_t Index>
 HRESULT STDMETHODCALLTYPE joyDeviceState(void* self, DWORD cb, LPVOID data) {
     JoyDoor& j = g_joyDoors[Index];
     const HRESULT hr = j.origState(self, cb, data);
     if (SUCCEEDED(hr) && data) {
+        if (g_pluginBlock.load(std::memory_order_relaxed)) {
+            if (cb >= sizeof(DIJOYSTATE)) {
+                DIJOYSTATE* js = static_cast<DIJOYSTATE*>(data);
+                for (int p = 0; p < 4; ++p) js->rgdwPOV[p] = 0xFFFFFFFFu;
+                memset(js->rgbButtons, 0, sizeof(js->rgbButtons));
+                if (cb >= sizeof(DIJOYSTATE2)) {
+                    DIJOYSTATE2* js2 = static_cast<DIJOYSTATE2*>(data);
+                    memset(js2->rgbButtons + 32, 0, 96);
+                }
+            } else {
+                constexpr DWORD kPov0 = static_cast<DWORD>(offsetof(DIJOYSTATE, rgdwPOV[0]));
+                constexpr DWORD kPovEnd = kPov0 + 4 * sizeof(DWORD);
+                if (cb >= kPovEnd) {
+                    auto* povPtr = reinterpret_cast<DWORD*>(static_cast<uint8_t*>(data) + kPov0);
+                    for (int p = 0; p < 4; ++p) povPtr[p] = 0xFFFFFFFFu;
+                }
+                constexpr DWORD kBtn0 = static_cast<DWORD>(offsetof(DIJOYSTATE, rgbButtons[0]));
+                if (cb > kBtn0) {
+                    memset(static_cast<uint8_t*>(data) + kBtn0, 0, cb - kBtn0);
+                }
+            }
+        }
         guardedBudget(g_budgetJoy, [&] { observeControllerState(self, cb, data); });
     }
     return hr;
@@ -1111,7 +1133,26 @@ HRESULT STDMETHODCALLTYPE joyDeviceData(void* self, DWORD cb, LPDIDEVICEOBJECTDA
     const HRESULT hr = j.origData(self, cb, data, count, flags);
     if (SUCCEEDED(hr) && data && count && cb == sizeof(DIDEVICEOBJECTDATA)) {
         const DWORD returned = *count;
-        guardedBudget(g_budgetJoy, [&] { observeControllerData(self, data, returned); });
+        if (g_pluginBlock.load(std::memory_order_relaxed) && returned > 0) {
+            constexpr DWORD kPov0 = static_cast<DWORD>(offsetof(DIJOYSTATE2, rgdwPOV[0]));
+            constexpr DWORD kPov3 = static_cast<DWORD>(offsetof(DIJOYSTATE2, rgdwPOV[3]));
+            constexpr DWORD kBtn0 = static_cast<DWORD>(offsetof(DIJOYSTATE2, rgbButtons[0]));
+            constexpr DWORD kBtn127 = static_cast<DWORD>(offsetof(DIJOYSTATE2, rgbButtons[127]));
+            uint32_t kept = 0;
+            for (uint32_t i = 0; i < returned; ++i) {
+                const auto& ev = data[i];
+                const bool isButton = (ev.dwOfs >= kBtn0 && ev.dwOfs <= kBtn127);
+                const bool isPov = (ev.dwOfs >= kPov0 && ev.dwOfs < kPov3 + sizeof(DWORD));
+                if (isButton) {
+                    if (ev.dwData & 0x80) continue; // swallow press, allow release
+                } else if (isPov) {
+                    continue; // swallow POV hat events
+                }
+                data[kept++] = ev;
+            }
+            *count = kept;
+        }
+        guardedBudget(g_budgetJoy, [&] { observeControllerData(self, data, *count); });
     }
     return hr;
 }

@@ -221,6 +221,18 @@ void chainThroughOtherProxy(edvr::Config& cfg) {
         return;
     }
 
+    // Preload D3DCompiler before loading the chained proxy (EDHM / 3Dmigoto / ReShade)
+    // so that subsequent runtime shader compilations do not trigger ReShade's LoadLibrary
+    // deadlock guard when compiling HUD override shaders.
+    if (!GetModuleHandleW(L"d3dcompiler_47.dll")) {
+        std::wstring compilerPath = *g_moduleDir + L"\\d3dcompiler_47.dll";
+        if (GetFileAttributesW(compilerPath.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            LoadLibraryW(compilerPath.c_str());
+        } else {
+            LoadLibraryW(L"d3dcompiler_47.dll");
+        }
+    }
+
     const HMODULE chained = LoadLibraryW(path.c_str());
     if (!chained) {
         edvr::Log::get().note(
