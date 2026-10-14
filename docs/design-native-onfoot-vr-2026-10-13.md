@@ -2,7 +2,7 @@
 
 ## Status
 
-- **State:** F0-F12 FLOWN (Epic; journal). F13 and F14 BUILT (2484625d; green), NOT FLOWN.
+- **State:** F0-F12 FLOWN (Epic; journal). F13, F14 BUILT (2484625d), F15 BUILT (202d39b9; green), NOT FLOWN.
   Branch `claude/native-onfoot-vr-completion-219ffa`; not pushed.
 - **Origin:** a user's handoff. A Cinema-to-HMD swap on disembark gave native
   stereo on foot; the HUD, radar, left panel and inventory were missing.
@@ -34,6 +34,9 @@
   - H8 (ruled out, F6): the stereo predicate and the eye-index query.
   - H10 (F8, flown): the override brings the FP node back, but only the reticle shows.
     F11: the HUD shows head-locked with the creation patch alone (the placement patch is wrong).
+  - F15 (BUILT, E1, not flown): the 3P body is drawn but hidden behind or inside the FP body,
+    and backface-culled from inside. E1 zeroes the FP masks. Discriminator: the 3P masks stay
+    non-zero, and the body shows once the FP masks are 0.
 - **F9-F13 instruments (TEMPORARY):** patches `fix.native_on_foot_panels`, `_hud_mesh` and
   `_hud_mesh_world` (off); probes P1-P3; `fix.native_on_foot_hud_follow_order` (A/B) and
   `fix.native_on_foot_visor_up` (RemLok test). The distance, size, follow and smoothing are user settings.
@@ -42,8 +45,8 @@
   0x99C21CEB7A699821 (tonemap_admit.h:39).
 - **Ruled out:** the cinema request is always 5 (see the end of this doc).
 - **Temporary keys (all go when the arc picks one):** `fix.native_on_foot`, `_method`, `_hud`,
-  `_panels`, `_hud_mesh`, `_hud_mesh_world`, `_hud_follow_order`, `_visor_up` and `_reticle_probe`,
-  on the F8 page "Native on foot". All default off and live.
+  `_panels`, `_hud_mesh`, `_hud_mesh_world`, `_hud_follow_order`, `_visor_up`, `_reticle_probe`
+  and `_hide_fp_body` (F15), on the F8 page "Native on foot". All default off and live.
 - **F2 changes (c884e218):** gate: the setter never substitutes; EDVR holds the byte
   at 0 while the key is on and a game session is live (identity and byte checked
   first). Native body: while native stereo is on foot, the fade global goes -1 to 0
@@ -53,9 +56,9 @@
   the journal; the F1 census lines are unchanged.
 - **Install:** Epic only (Sean: Frontier carries another feature test). `edvr.ini`
   is not touched unless `--ini` says so.
-- **Next:** F13 on Epic: head against body follow, the smoothing, the size (down to 0.6), the
-  distance down to 0.03, and the visor test (RemLok). Then the reticle depth against the HUD
-  depth, the full body, the neck damper, and Explorer Cam's removal (ask Sean; quote the keys).
+- **Next:** F15 on Epic: `fix.native_on_foot_hide_fp_body` on, then the 3P body in the eye views.
+  If nothing appears, the read-only visibility-job probe at 0x3DA2C80. Still open from F13:
+  head against body follow, smoothing, size, distance, the visor test (RemLok), the reticle depth.
 
 ## What "finished" means
 
@@ -440,4 +443,26 @@ mode and its context); W3 step 1-2 (dump comparison, offline).
   then calls the real function. The probe writes nothing to the instance. The rel32 is one 4-byte
   store inside a single 64-byte cache line, so it is single-copy atomic on x86; a qword CAS was not used.
   Reticle setting: "Reticle follows: aim | head" is approved in principle; it is built once the
+- **2026-10-14, F15 built (202d39b9, NOT FLOWN).** The body RE, static, from the F3 census and
+  the visibility job: the local third-person AMC already passes the job in the eye views (view
+  filter 1, alpha 1.0), and its masks are a superset of the first-person AMC's. Hypothesis: the
+  3P body is drawn but hidden behind or inside the FP body, and backface-culled from inside.
+  E1 tests it: `fix.native_on_foot_hide_fp_body` (temporary, default off) zeroes the four masks of
+  EVASuit_Arms, EVASuit_Hands and FirstPersonSkeleton on the local mode-2 AMC, after the fade and
+  after headHideStep (explorer_cam.cpp fpBodyStep; the frame side is explorerCamFpBody). Nothing is
+  restored, and alpha, the view filter and the flag bytes are not touched.
+  Identification: mode 2 (the creation parameter at +0x14). The code's note at isLocalPair says only
+  the local player has a first-person avatar, so mode 2 is taken as local. The census row for that
+  AMC carries its distance from the local 3P AMC; expect about 1.65 m.
+  Log lines: `native on foot body: first-person body hidden (... on AMC 0x...)` once per transition;
+  `... shown again (<why>)`; `no first-person AMC (mode 2) reached the fade hook ...` after 5 s; and
+  every 5 s `first-person masks after the zero: ...`, read straight after the write. The frame
+  thread's own census read can land after the game's next-frame rewrite, so the readback line is
+  the evidence that the zero happened.
+  Reading the flight: (a) readback 0 on the three parts and the body shows in the eye views: the
+  hypothesis holds. (b) readback 0 and nothing shows: the 3P body is not hidden by the FP body;
+  next is the read-only visibility-job probe at 0x3DA2C80. (c) no mode-2 line: the fade hook does not
+  see the FP AMC; read the census. (d) a name missing from the table: logged once, that part is skipped.
+  Gates: build.bat --wait-lock, full gates passed, receipt written. The census now sorts mode-2 rows
+  first, so the FP AMC is printed.
   identification is known.
