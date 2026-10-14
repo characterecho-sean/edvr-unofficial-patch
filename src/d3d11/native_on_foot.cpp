@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <intrin.h>
 
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <cwchar>
@@ -32,6 +33,13 @@ SetterFn g_original = nullptr;                     // the trampoline: the setter
 std::atomic<uintptr_t> g_frozenSelector{0};        // the first selector whose owner points back at it
 std::atomic<bool> g_panelsKeyOn{false};            // fix.native_on_foot_panels, as the frame thread last read it (F9)
 std::atomic<bool> g_meshKeyOn{false};              // fix.native_on_foot_hud_mesh, as the frame thread last read it (F9)
+std::atomic<float> g_hudSize{nofoot::kHudSizeDefault};          // fix.native_on_foot_hud_size, live (F13)
+std::atomic<bool> g_followHead{true};                           // fix.native_on_foot_hud_follow is head (F13)
+std::atomic<bool> g_followBefore{false};                        // fix.native_on_foot_hud_follow_order is before (F13, temporary)
+std::atomic<int> g_followSmoothMs{nofoot::kHudSmoothDefault};   // fix.native_on_foot_hud_follow_smoothing_ms, live (F13)
+std::atomic<bool> g_visorKeyOn{false};                          // fix.native_on_foot_visor_up, as the frame thread last read it (F13, temporary)
+float g_hudSizeLast = -1.0f;                                    // frame thread only: as last logged (F13)
+bool g_followHeadLast = true, g_followBeforeLast = false, g_visorKeyLast = false;   // frame thread only (F13)
 std::atomic<float> g_hudDistance{nofoot::kHudDefaultDistance};   // fix.native_on_foot_hud_distance, live (F12)
 float g_hudDistanceLast = -1.0f;                   // frame thread only: as last logged (F12)
 std::atomic<bool> g_meshCreateLive{false};         // the creation patch is applied (set by the frame thread; read by the P2 hook, F12)
@@ -398,6 +406,38 @@ void readKey() {
         Log::get().note("native on foot hud distance: %.3f m (scale %.3f)", static_cast<double>(dist),
                         static_cast<double>(dist / nofoot::kHudDefaultDistance));
         g_hudDistanceLast = dist;
+    }
+    // F13: the HUD size, the follow mode, the smoothing and the order (temporary), and the visor test key (temporary); live.
+    float size = cfg.getFloat("fix.native_on_foot_hud_size", nofoot::kHudSizeDefault);
+    if (size < nofoot::kHudSizeMin) size = nofoot::kHudSizeMin;
+    if (size > nofoot::kHudSizeMax) size = nofoot::kHudSizeMax;
+    g_hudSize.store(size, std::memory_order_relaxed);
+    if (first || size != g_hudSizeLast) {
+        Log::get().note("native on foot hud size: %.2f", static_cast<double>(size));
+        g_hudSizeLast = size;
+    }
+    const std::string follow = cfg.getString("fix.native_on_foot_hud_follow", "head");
+    const bool followHead = follow != "body";
+    g_followHead.store(followHead, std::memory_order_relaxed);
+    if (first || followHead != g_followHeadLast) {
+        Log::get().note("native on foot hud follow: %s", followHead ? "head" : "body");
+        g_followHeadLast = followHead;
+    }
+    int smooth = cfg.getInt("fix.native_on_foot_hud_follow_smoothing_ms", nofoot::kHudSmoothDefault);
+    if (smooth < nofoot::kHudSmoothMin) smooth = nofoot::kHudSmoothMin;
+    if (smooth > nofoot::kHudSmoothMax) smooth = nofoot::kHudSmoothMax;
+    g_followSmoothMs.store(smooth, std::memory_order_relaxed);
+    const bool followBefore = cfg.getString("fix.native_on_foot_hud_follow_order", "after") == "before";
+    g_followBefore.store(followBefore, std::memory_order_relaxed);
+    if (first || followBefore != g_followBeforeLast) {
+        Log::get().note("native on foot hud follow order: %s (temporary)", followBefore ? "before" : "after");
+        g_followBeforeLast = followBefore;
+    }
+    const bool visorOn = cfg.getString("fix.native_on_foot_visor_up", "off") == "on";
+    g_visorKeyOn.store(visorOn, std::memory_order_relaxed);
+    if (first || visorOn != g_visorKeyLast) {
+        Log::get().note("native on foot: fix.native_on_foot_visor_up is %s", visorOn ? "on" : "off");
+        g_visorKeyLast = visorOn;
     }
 }
 
@@ -1354,24 +1394,43 @@ uint64_t __fastcall f9PanelSubmitHooked(void* set, void* view, uint64_t r8, uint
     return original(set, view, r8, r9);
 }
 
-// ---- F12: the HUD distance (a user setting) ---------------------------------------------------------------------------------------
-// While native stereo is on foot, the creation patch is applied, and the distance is not the default, the HRC's two placement matrices
-// (+0x430 and +0x480, 16 floats each) are scaled by s = distance / 0.192 before the HRC submit runs. The scale multiplies the x, y and z
-// of every row (the basis and the translation) and keeps the w column, so the angular size is kept and only the depth changes.
-// The game recomputes the matrices every frame, so each matrix keeps its base values (the game's) and what it last wrote: if the current
-// values still equal what was written, the game has not recomputed and nothing is done; otherwise the scale is applied to the fresh base.
-// A fault in a read or a write stands the writes down for the session, and the frame thread logs that once.
+// ---- F12 + F13: the HUD placement (user settings) -------------------------------------------------------------------------------------
+// While native stereo is on foot and the creation patch is in, each HRC placement matrix (+0x430 and +0x480, 16 floats, row-major, row-vector
+// convention p' = p . M, translation in row 3) is built from the game's fresh values (its base) in this order:
+//   1. distance: s = distance / 0.192 scales x, y, z of every row (the basis and the translation); w kept.
+//   2. size: the basis rows (0-2) x, y, z times size; the translation row is unchanged (it stays at the same depth).
+//   3. follow = head: M' = M . C (or C . M with fix.native_on_foot_hud_follow_order = before), C = the head transform from the list-B views:
+//      rows 0-2 of the first view, and row 3 = the mean position of the first two views; smoothed toward the raw C (slerp + lerp).
+// No compounding: each matrix keeps its base and what was last written with which inputs. The game recomputes the matrices every frame; if
+// the current values equal what was written and the inputs are the same, nothing is done; if the inputs changed, the final is rebuilt from the
+// base. Neutral inputs (distance at its default, size 1, follow body) put the base back once. A fault stands the writes down for the session.
+struct F13Inputs {
+    float s = 1.0f;
+    float size = 1.0f;
+    bool head = false;
+    bool before = false;
+    float C[16] = {};
+};
 struct F12Matrix {
     bool have = false;           // a write of ours is in place for this HRC
     float base[16] = {};         // the game's values (before our last write)
     float written[16] = {};      // what we last wrote
-    float writtenScale = 1.0f;
+    F13Inputs in;                // the inputs of that write
 };
 F12Matrix g_f12Mat[2];                              // game thread (the P2 hook) only
 uintptr_t g_f12Hrc = 0;                             // game thread only: the HRC the state belongs to
 std::atomic<bool> g_f12Stop{false};
 std::atomic<const char*> g_f12StopWhy{nullptr};
 bool g_f12StopNoted = false;                        // frame thread only
+
+struct F13Head {
+    bool valid = false;
+    float C[16] = {};
+};
+F13Head g_f13Raw;                                   // guarded by g_f9Lock: the head transform read by the P2 hook
+F13Head g_f13Smooth;                                // guarded by g_f9Lock: the smoothed one (the frame thread)
+uint64_t g_f13LastQpc = 0;                          // frame thread only
+uint64_t g_f13LogMs = 0;                            // frame thread only
 
 bool f12Near(float a, float b) noexcept {
     const float d = a - b;
@@ -1393,14 +1452,166 @@ __declspec(noinline) bool guardedWriteFloats16(uintptr_t address, const float* v
     }
 }
 
-void f12ScaleHud(void* hrcPtr) noexcept {
+// out = A . B, 4x4 row-major.
+void f13Mul(const float* A, const float* B, float* out) noexcept {
+    float t[16];
+    for (size_t i = 0; i < 4; ++i) {
+        for (size_t j = 0; j < 4; ++j) {
+            float acc = 0.0f;
+            for (size_t k = 0; k < 4; ++k) acc += A[i * 4 + k] * B[k * 4 + j];
+            t[i * 4 + j] = acc;
+        }
+    }
+    std::memcpy(out, t, sizeof(t));
+}
+
+// The quaternion (w, x, y, z) of the rotation whose rows are m[0..2], m[4..6], m[8..10] (a 4x4 row-major matrix).
+void f13QuatFromRows(const float* m, float* q) noexcept {
+    const float r00 = m[0], r01 = m[1], r02 = m[2];
+    const float r10 = m[4], r11 = m[5], r12 = m[6];
+    const float r20 = m[8], r21 = m[9], r22 = m[10];
+    const float tr = r00 + r11 + r22;
+    if (tr > 0.0f) {
+        const float s = std::sqrt(tr + 1.0f) * 2.0f;
+        q[0] = 0.25f * s; q[1] = (r21 - r12) / s; q[2] = (r02 - r20) / s; q[3] = (r10 - r01) / s;
+    } else if (r00 > r11 && r00 > r22) {
+        const float s = std::sqrt(1.0f + r00 - r11 - r22) * 2.0f;
+        q[0] = (r21 - r12) / s; q[1] = 0.25f * s; q[2] = (r01 + r10) / s; q[3] = (r02 + r20) / s;
+    } else if (r11 > r22) {
+        const float s = std::sqrt(1.0f + r11 - r00 - r22) * 2.0f;
+        q[0] = (r02 - r20) / s; q[1] = (r01 + r10) / s; q[2] = 0.25f * s; q[3] = (r12 + r21) / s;
+    } else {
+        const float s = std::sqrt(1.0f + r22 - r00 - r11) * 2.0f;
+        q[0] = (r10 - r01) / s; q[1] = (r02 + r20) / s; q[2] = (r12 + r21) / s; q[3] = 0.25f * s;
+    }
+    const float n = std::sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
+    if (n > 0.0f) for (size_t i = 0; i < 4; ++i) q[i] /= n;
+}
+
+// Writes the rotation of q into the rows of the 4x4 m (the w column and the translation row are left as they are).
+void f13RowsFromQuat(const float* q, float* m) noexcept {
+    const float w = q[0], x = q[1], y = q[2], z = q[3];
+    m[0] = 1.0f - 2.0f * (y * y + z * z); m[1] = 2.0f * (x * y - w * z);        m[2] = 2.0f * (x * z + w * y);
+    m[4] = 2.0f * (x * y + w * z);        m[5] = 1.0f - 2.0f * (x * x + z * z); m[6] = 2.0f * (y * z - w * x);
+    m[8] = 2.0f * (x * z - w * y);        m[9] = 2.0f * (y * z + w * x);        m[10] = 1.0f - 2.0f * (x * x + y * y);
+}
+
+// Spherical interpolation of two unit quaternions, t in [0, 1].
+void f13Slerp(const float* a, const float* b, float t, float* out) noexcept {
+    float bb[4] = {b[0], b[1], b[2], b[3]};
+    float d = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
+    if (d < 0.0f) {
+        d = -d;
+        for (size_t i = 0; i < 4; ++i) bb[i] = -bb[i];
+    }
+    float sa = 1.0f - t, sb = t;
+    if (d < 0.9995f) {
+        const float theta = std::acos(d);
+        const float sinTheta = std::sin(theta);
+        sa = std::sin((1.0f - t) * theta) / sinTheta;
+        sb = std::sin(t * theta) / sinTheta;
+    }
+    for (size_t i = 0; i < 4; ++i) out[i] = sa * a[i] + sb * bb[i];
+    const float n = std::sqrt(out[0] * out[0] + out[1] * out[1] + out[2] * out[2] + out[3] * out[3]);
+    if (n > 0.0f) for (size_t i = 0; i < 4; ++i) out[i] /= n;
+}
+
+// The head transform from the list-B views (P2, game thread): a3 is list B's {begin, end}; its entries are view pointers. A read or a
+// shape that is not as expected stands the writes down.
+void f13ReadHead(uintptr_t listB) noexcept {
+    uint64_t begin = 0, end = 0;
+    if (!guardedRead(listB, &begin, 8) || !guardedRead(listB + 8, &end, 8)) {
+        f12Stand("list B could not be read");
+        return;
+    }
+    if (begin < 0x10000 || end < begin || end - begin < 16) {
+        f12Stand("list B does not hold two views");
+        return;
+    }
+    uint64_t v0 = 0, v1 = 0;
+    if (!guardedRead(static_cast<uintptr_t>(begin), &v0, 8) || !guardedRead(static_cast<uintptr_t>(begin) + 8, &v1, 8)) {
+        f12Stand("list B could not be read");
+        return;
+    }
+    auto plausible = [](uint64_t p) { return p >= 0x10000 && p < 0x00007FFF00000000ull; };
+    if (!plausible(v0) || !plausible(v1)) {
+        f12Stand("list B entries are not view pointers");
+        return;
+    }
+    float a[16] = {}, b[16] = {};
+    if (!guardedRead(static_cast<uintptr_t>(v0) + nofoot::kF9ViewRotOff, a, sizeof(a)) ||
+        !guardedRead(static_cast<uintptr_t>(v1) + nofoot::kF9ViewRotOff, b, sizeof(b))) {
+        f12Stand("a list-B view could not be read");
+        return;
+    }
+    F13Head raw;
+    raw.valid = true;
+    for (size_t r = 0; r < 3; ++r) {
+        for (size_t c = 0; c < 3; ++c) raw.C[r * 4 + c] = a[r * 4 + c];
+        raw.C[r * 4 + 3] = 0.0f;
+    }
+    raw.C[12] = 0.5f * (a[12] + b[12]);
+    raw.C[13] = 0.5f * (a[13] + b[13]);
+    raw.C[14] = 0.5f * (a[14] + b[14]);
+    raw.C[15] = 1.0f;
+    raw.C[3] = raw.C[7] = raw.C[11] = 0.0f;
+    F9Lock lock;
+    g_f13Raw = raw;
+}
+
+// The inputs of a placement, for the no-compounding comparison.
+bool f13SameInputs(const F13Inputs& a, const F13Inputs& b) noexcept {
+    if (!f12Near(a.s, b.s) || !f12Near(a.size, b.size) || a.head != b.head || a.before != b.before) return false;
+    return !a.head || std::memcmp(a.C, b.C, sizeof(a.C)) == 0;
+}
+
+// The final matrix from a base and the inputs: distance, then size (the basis only), then the head transform.
+void f13Compose(const float* base, const F13Inputs& in, float* out) noexcept {
+    float S[16];
+    for (size_t r = 0; r < 4; ++r) {
+        for (size_t c = 0; c < 4; ++c) {
+            float v = base[r * 4 + c];
+            if (c < 3) v *= in.s;
+            if (r < 3 && c < 3) v *= in.size;
+            S[r * 4 + c] = v;
+        }
+    }
+    if (in.head) {
+        float T[16];
+        if (in.before) f13Mul(in.C, S, T);
+        else f13Mul(S, in.C, T);
+        std::memcpy(out, T, sizeof(T));
+    } else {
+        std::memcpy(out, S, sizeof(S));
+    }
+}
+
+// Game thread, the P2 hook, before the original: builds the placement of the two matrices from the current settings.
+void f13PlaceHud(void* hrcPtr, uintptr_t listB) noexcept {
     if (g_f12Stop.load(std::memory_order_relaxed)) return;
     if (!nativeOnFootActive() || !g_meshCreateLive.load(std::memory_order_relaxed)) return;
     const float d = g_hudDistance.load(std::memory_order_relaxed);
-    const bool atDefault = f12Near(d, nofoot::kHudDefaultDistance);
     const float s = d / nofoot::kHudDefaultDistance;
+    const float size = g_hudSize.load(std::memory_order_relaxed);
+    const bool wantHead = g_followHead.load(std::memory_order_relaxed);
+    const bool before = g_followBefore.load(std::memory_order_relaxed);
     const uintptr_t h = reinterpret_cast<uintptr_t>(hrcPtr);
     if (!h) return;
+    if (wantHead) {
+        f13ReadHead(listB);
+        if (g_f12Stop.load(std::memory_order_relaxed)) return;
+    }
+    F13Inputs in;
+    in.s = s;
+    in.size = size;
+    in.before = before;
+    {
+        F9Lock lock;
+        const F13Head& src = g_f13Smooth.valid ? g_f13Smooth : g_f13Raw;
+        in.head = wantHead && src.valid;
+        if (in.head) std::memcpy(in.C, src.C, sizeof(in.C));
+    }
+    const bool neutral = f12Near(s, 1.0f) && f12Near(size, 1.0f) && !in.head;
     if (h != g_f12Hrc) {
         g_f12Hrc = h;
         for (auto& m : g_f12Mat) m = F12Matrix{};
@@ -1414,39 +1625,161 @@ void f12ScaleHud(void* hrcPtr) noexcept {
         }
         F12Matrix& m = g_f12Mat[i];
         const bool ours = m.have && std::memcmp(cur, m.written, sizeof(cur)) == 0;
-        if (ours) {
-            if (atDefault) {
-                // Back at the game's own distance: put the base back once, then stop claiming the matrix.
-                if (!guardedWriteFloats16(h + offs[i], m.base)) {
-                    f12Stand("a placement matrix could not be written");
-                    return;
-                }
-                m.have = false;
-                continue;
+        if (ours && neutral) {
+            // Back at the game's own placement: put the base back once, then stop claiming the matrix.
+            if (!guardedWriteFloats16(h + offs[i], m.base)) {
+                f12Stand("a placement matrix could not be written");
+                return;
             }
-            if (f12Near(m.writtenScale, s)) continue;   // already scaled: the game has not recomputed
-        } else {
-            if (atDefault) continue;                    // the game's own values, at the default distance
-            std::memcpy(m.base, cur, sizeof(cur));      // a fresh recompute: these are the new base values
+            m.have = false;
+            continue;
         }
+        if (ours && f13SameInputs(m.in, in)) continue;   // already built from these inputs: the game has not recomputed
+        if (!ours && neutral) continue;                    // the game's own values, and nothing to change
+        if (!ours) std::memcpy(m.base, cur, sizeof(cur)); // a fresh recompute: these are the new base values
         float target[16] = {};
-        for (size_t k = 0; k < 16; ++k) target[k] = m.base[k] * (((k & 3) == 3) ? 1.0f : s);
+        f13Compose(m.base, in, target);
         if (!guardedWriteFloats16(h + offs[i], target)) {
             f12Stand("a placement matrix could not be written");
             return;
         }
         std::memcpy(m.written, target, sizeof(target));
-        m.writtenScale = s;
+        m.in = in;
         m.have = true;
     }
 }
 
-// Frame thread: logs a stand-down once.
-void f12Tick() {
-    if (!g_f12Stop.load(std::memory_order_relaxed) || g_f12StopNoted) return;
-    g_f12StopNoted = true;
-    const char* why = g_f12StopWhy.load(std::memory_order_relaxed);
-    Log::get().note("native on foot hud distance: writes standing down -- %s", why ? why : "a fault");
+double f13YawDeg(const float* C) noexcept {
+    return std::atan2(static_cast<double>(C[8]), static_cast<double>(C[10])) * 180.0 / 3.14159265358979323846;
+}
+double f13PitchDeg(const float* C) noexcept {
+    double y = static_cast<double>(C[9]);
+    if (y > 1.0) y = 1.0;
+    if (y < -1.0) y = -1.0;
+    return std::asin(y) * 180.0 / 3.14159265358979323846;
+}
+
+// Frame thread, every frame: smooths the head transform toward the raw one (alpha = 1 - exp(-dt / tau), tau = the setting in seconds; 0 =
+// exact), and every 5 s while the head follow is on in native stereo, logs the head pose. Writes the stand-down once.
+void f13FrameTick(uint64_t nowMs) {
+    if (g_f12Stop.load(std::memory_order_relaxed) && !g_f12StopNoted) {
+        g_f12StopNoted = true;
+        const char* why = g_f12StopWhy.load(std::memory_order_relaxed);
+        Log::get().note("native on foot hud placement: writes standing down -- %s", why ? why : "a fault");
+    }
+    LARGE_INTEGER now{}, freq{};
+    QueryPerformanceCounter(&now);
+    QueryPerformanceFrequency(&freq);
+    double dt = 0.0;
+    if (g_f13LastQpc != 0 && freq.QuadPart > 0) dt = static_cast<double>(now.QuadPart - static_cast<LONGLONG>(g_f13LastQpc)) / static_cast<double>(freq.QuadPart);
+    g_f13LastQpc = static_cast<uint64_t>(now.QuadPart);
+    if (dt < 0.0) dt = 0.0;
+    if (dt > 0.1) dt = 0.1;
+    const int smoothMs = g_followSmoothMs.load(std::memory_order_relaxed);
+    const double tau = smoothMs / 1000.0;
+    const float alpha = tau <= 0.0 ? 1.0f : static_cast<float>(1.0 - std::exp(-dt / tau));
+    F13Head raw, smooth;
+    {
+        F9Lock lock;
+        raw = g_f13Raw;
+        if (raw.valid) {
+            if (!g_f13Smooth.valid) {
+                g_f13Smooth = raw;
+            } else {
+                float qa[4], qb[4], qs[4];
+                f13QuatFromRows(g_f13Smooth.C, qa);
+                f13QuatFromRows(raw.C, qb);
+                f13Slerp(qa, qb, alpha, qs);
+                f13RowsFromQuat(qs, g_f13Smooth.C);
+                for (size_t k = 12; k < 15; ++k) g_f13Smooth.C[k] += alpha * (raw.C[k] - g_f13Smooth.C[k]);
+            }
+        }
+        smooth = g_f13Smooth;
+    }
+    if (!raw.valid || !smooth.valid) return;
+    if (!g_followHead.load(std::memory_order_relaxed) || !nativeOnFootActive() || !g_meshCreateLive.load(std::memory_order_relaxed)) return;
+    if (nowMs - g_f13LogMs < 5000 && g_f13LogMs != 0) return;
+    g_f13LogMs = nowMs;
+    Log::get().note("native on foot hud follow: head yaw=%.1f pitch=%.1f (smoothed yaw=%.1f pitch=%.1f) dist=%.3f",
+                    f13YawDeg(raw.C), f13PitchDeg(raw.C), f13YawDeg(smooth.C), f13PitchDeg(smooth.C), static_cast<double>(g_hudDistance.load()));
+}
+
+// ---- F13: the visor override (TEMPORARY; the RemLok test; approved by Sean 2026-10-14) ------------------------------------------
+// While native stereo is on foot, fix.native_on_foot_visor_up is on, and the identity check passes: both bytes must read 0; +0x5F741B8 is
+// written 0 (the forced visor state, up) first, then +0x5F741B7 is written 1 (the override is active). The restore writes +0x5F741B7 back to
+// 0 only while it still reads our 1; +0x5F741B8 stays 0. A refusal is logged once per reason (as the gate byte).
+bool g_visorWritten = false;               // frame thread only: EDVR holds the override and owes the game a 0 back
+std::string g_visorRefusalText;            // frame thread only
+bool g_visorRestoreFailedNoted = false;    // frame thread only
+
+void refuseVisor(const std::string& why) {
+    if (why == g_visorRefusalText) return;
+    g_visorRefusalText = why;
+    Log::get().note("native on foot visor: override EliteDangerous64.exe+0x%llX NOT written -- %s. The game's visor is left as it is.",
+                    static_cast<unsigned long long>(nofoot::kVisorOverrideRva), why.c_str());
+}
+
+// `want`: the override should be active now. `restoreReason` (a literal) says why it is being put back.
+void visorTick(bool want, const char* restoreReason) {
+    const uintptr_t a7 = g_base + nofoot::kVisorOverrideRva;
+    const uintptr_t a8 = g_base + nofoot::kVisorDownRva;
+    if (want) {
+        if (g_visorWritten || g_install != InstallState::Armed) return;
+        const char* idWhy = nullptr;
+        if (!checkIdentity(g_base, &idWhy)) {
+            refuseVisor(std::string("the PE identity check failed (") + idWhy + ")");
+            return;
+        }
+        uint8_t c7 = 0, c8 = 0;
+        if (!guardedRead(a7, &c7, 1) || !guardedRead(a8, &c8, 1)) {
+            refuseVisor("the bytes could not be read");
+            return;
+        }
+        if (c7 != 0 || c8 != 0) {
+            char b[128];
+            std::snprintf(b, sizeof(b), "the bytes read %u and %u, not 0 and 0, so they are someone else's and are left alone",
+                          static_cast<unsigned>(c7), static_cast<unsigned>(c8));
+            refuseVisor(b);
+            return;
+        }
+        if (!writableByte(a7) || !writableByte(a8)) {
+            refuseVisor("the bytes are not writable");
+            return;
+        }
+        if (!guardedWriteByte(a8, 0) || !guardedWriteByte(a7, 1)) {
+            refuseVisor("the write failed");
+            return;
+        }
+        g_visorWritten = true;
+        g_visorRefusalText.clear();
+        Log::get().note("native on foot visor: override EliteDangerous64.exe+0x%llX 0 -> 1 (B8 = 0)",
+                        static_cast<unsigned long long>(nofoot::kVisorOverrideRva));
+        return;
+    }
+    if (!g_visorWritten) {
+        g_visorRefusalText.clear();
+        return;
+    }
+    uint8_t c7 = 0;
+    if (!guardedRead(a7, &c7, 1)) return;   // retried next frame
+    if (c7 != 1) {
+        g_visorWritten = false;
+        Log::get().note("native on foot visor: override EliteDangerous64.exe+0x%llX reads %u, not our 1, so it is left alone (restore: %s)",
+                        static_cast<unsigned long long>(nofoot::kVisorOverrideRva), static_cast<unsigned>(c7), restoreReason);
+        return;
+    }
+    if (!writableByte(a7) || !guardedWriteByte(a7, 0)) {
+        if (!g_visorRestoreFailedNoted) {
+            g_visorRestoreFailedNoted = true;
+            Log::get().note("native on foot visor: override EliteDangerous64.exe+0x%llX could not be put back to 0 (%s); retrying each frame.",
+                            static_cast<unsigned long long>(nofoot::kVisorOverrideRva), restoreReason);
+        }
+        return;
+    }
+    g_visorWritten = false;
+    g_visorRestoreFailedNoted = false;
+    Log::get().note("native on foot visor: override EliteDangerous64.exe+0x%llX 1 -> 0 (restored: %s)",
+                    static_cast<unsigned long long>(nofoot::kVisorOverrideRva), restoreReason);
 }
 
 // P2: rcx = HRC, and five more arguments, all forwarded (the later chunks were not scanned for stack arguments).
@@ -1454,7 +1787,7 @@ uint64_t __fastcall f9HrcSubmitHooked(void* hrc, void* a2, uint64_t a3, uint64_t
     const F9Fn6 original = reinterpret_cast<F9Fn6>(g_f9Probe[1].original);
     if (!original) return 0;
     if (!g_f9Stop[1].load(std::memory_order_relaxed)) f9RecordHrc(f9State(), hrc);   // reads before the call
-    f12ScaleHud(hrc);   // F12: the HUD distance, before the original runs
+    f13PlaceHud(hrc, static_cast<uintptr_t>(a3));   // F12/F13: the HUD placement (distance, size, head), before the original runs
     return original(hrc, a2, a3, a4, a5, a6);
 }
 
@@ -1745,7 +2078,11 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
     meshSiteTick(g_meshWorld, g_meshWorldKeyOn.load(std::memory_order_relaxed) && f9Active,
                  g_meshWorldKeyOn.load(std::memory_order_relaxed) ? f9Why : "fix.native_on_foot_hud_mesh_world is off");
     f9ProbeTick(now);
-    f12Tick();
+    f13FrameTick(now);
+    // F13 (TEMPORARY): the visor override, while native stereo is on foot and its test key is on.
+    const bool visorKeyOn = g_visorKeyOn.load(std::memory_order_relaxed);
+    const bool visorWant = visorKeyOn && nativeOnFootActive() && session;
+    visorTick(visorWant, !visorKeyOn ? "fix.native_on_foot_visor_up is off" : !nativeOnFootActive() ? "native stereo on foot ended" : "the game session ended");
     neckLine(now);
 }
 
@@ -1755,6 +2092,7 @@ void nativeOnFootShutdown() {
     codePatchTick(g_panelPatch, false, "the game is shutting down");
     meshSiteTick(g_meshCreate, false, "the game is shutting down");
     meshSiteTick(g_meshWorld, false, "the game is shutting down");
+    visorTick(false, "the game is shutting down");
 }
 
 }  // namespace edvr

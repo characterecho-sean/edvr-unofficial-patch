@@ -181,6 +181,11 @@ constexpr uint32_t kF9ViewRotOff = 0x20, kF9HrcMatrixOff = 0x430;
 // F12: the HUD distance. The second placement matrix sits at +0x480; the default distance is the game's own (0.192 m), and the range is the setting's.
 constexpr uint32_t kHudMatrix2Off = 0x480;
 constexpr float kHudDefaultDistance = 0.192f;
-constexpr float kHudDistanceMin = 0.08f, kHudDistanceMax = 0.40f;
+constexpr float kHudDistanceMin = 0.03f, kHudDistanceMax = 0.40f;
+// F13: the HUD size (the basis rows only), the head follow's smoothing (ms), and the visor override test (TEMPORARY).
+constexpr float kHudSizeMin = 0.30f, kHudSizeMax = 1.50f, kHudSizeDefault = 1.00f;
+constexpr int kHudSmoothMin = 0, kHudSmoothMax = 500, kHudSmoothDefault = 200;
+constexpr uintptr_t kVisorOverrideRva = 0x5F741B7;   // byte: 1 = the visor override is active (the RE: visorDown = byte[B7] ? byte[B8] : vfunc)
+constexpr uintptr_t kVisorDownRva = 0x5F741B8;       // byte: the forced visor state while the override is active (0 = up)
 }  // namespace nofoot
 }  // namespace edvr
