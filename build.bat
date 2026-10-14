@@ -136,6 +136,9 @@ pushd "%ROOT%"
 if not exist "%BUILD%" mkdir "%BUILD%"
 if not exist "%GEN%" mkdir "%GEN%"
 if not exist "%OBJ%" mkdir "%OBJ%"
+REM Wall-clock phase clock: build\phase_times.json (tools\build_phases.py); build\rig_times.json holds per-rig times.
+set "PHASES=%BUILD%\phase_times.json"
+python tools\build_phases.py --start "%PHASES%"
 
 REM A rig (or a child it stages) that ever creates its own per-instance
 REM directory straight under %BUILD% -- own copy of d3d11.dll, own edvr.ini --
@@ -155,29 +158,52 @@ REM Dependency cache survives --clean. Never discover a loader in SteamVR.
 python tools\fetch_openxr_loader.py --verify || exit /b 1
 copy /y "%ROOT%\third_party\openxr\loader\openxr_loader.dll" "%BUILD%\openxr_loader.dll" >nul || exit /b 1
 copy /y "%ROOT%\third_party\openxr\loader\OPENXR-LOADER-LICENSE.txt" "%BUILD%\OPENXR-LOADER-LICENSE.txt" >nul || exit /b 1
-python tools\fetch_openxr_loader.py --self-test || exit /b 1
-python tools\fetch_xess.py --self-test || exit /b 1
-python tools\gen_installer_rc.py --self-test || exit /b 1
-python tools\package_native.py --self-test || exit /b 1
-python tools\build_diff.py --self-test || exit /b 1
-python tools\build_receipt.py --self-test || exit /b 1
-python tools\build_lock.py --self-test || exit /b 1
-python tools\release_credits.py --self-test || exit /b 1
-python tools\flash_patch_residual.py --self-test || exit /b 1
-python tools\check_status_blocks.py --self-test || exit /b 1
-python tools\check_status_blocks.py || exit /b 1
-REM The fixtures of the supercruise layer rigs (tools\orbit_layer_test, tools\supercruise_census_test): the writers' encoders and readers, the census
-REM parser, every writer's --dry-run, and the three fixtures in the repo read back and held to their shape.
-python tools\layer_fixtures.py --self-test || exit /b 1
-REM The physics the black-hole shader is held to (docs\black-holes.md).
-python tools\blackhole_optics.py --self-test || exit /b 1
-REM Kerr optics and the hot flow the Sagittarius A* design is held to
-REM (docs\design-sagittarius-a-2026-09-30.md).
-python tools\sgra_optics.py --self-test || exit /b 1
-REM The guard tools\run_jobs.py holds every rig to (no window, no console, no
-REM move of the keyboard focus); its own self-test, run below with the rigs,
-REM starts it on real processes, so this one fails first and fast.
-python tools\focus_watch.py --self-test || exit /b 1
+REM The runner is proven before it is trusted with the gates below (and the rigs,
+REM much later, use the same file).
+python tools\run_jobs.py --self-test || exit /b 1
+
+REM The Python gates: every tool's --self-test, the pure ones that used to sit
+REM beside their generators further down (those generators still run where they
+REM were), and the two source-only checks. They share nothing -- each builds its
+REM fixtures in its own temp folder and reads only the checkout -- so
+REM tools\run_jobs.py --gate runs them at once (--jobs, default every core),
+REM prints each one's output whole under a header with its seconds, prints the
+REM failures LAST so the tail of the log names them, and ends with
+REM "gates: N passed in X s (serial sum Y s)": wall time against what it was.
+REM Add a gate as one more --gate line; it must write nowhere but its own temp
+REM folder. Notes on a few: layer_fixtures reads the three fixtures in the repo;
+REM blackhole_optics (docs\black-holes.md) and sgra_optics
+REM (docs\design-sagittarius-a-2026-09-30.md) are the physics those shaders are
+REM held to; focus_watch is the guard run_jobs holds every rig to (no window, no
+REM console, no keyboard-focus move) and its self-test starts it on real
+REM processes; check_status_blocks (plain) checks the docs' Status blocks;
+REM check_config_contract (plain) holds the keys the code reads, edvr.ini and the
+REM log text to one another -- it reads only src\ and edvr.ini.
+python tools\run_jobs.py ^
+    --gate "tools\fetch_openxr_loader.py --self-test" ^
+    --gate "tools\fetch_xess.py --self-test" ^
+    --gate "tools\gen_installer_rc.py --self-test" ^
+    --gate "tools\package_native.py --self-test" ^
+    --gate "tools\build_diff.py --self-test" ^
+    --gate "tools\build_receipt.py --self-test" ^
+    --gate "tools\build_lock.py --self-test" ^
+    --gate "tools\release_credits.py --self-test" ^
+    --gate "tools\flash_patch_residual.py --self-test" ^
+    --gate "tools\check_status_blocks.py --self-test" ^
+    --gate "tools\check_status_blocks.py" ^
+    --gate "tools\layer_fixtures.py --self-test" ^
+    --gate "tools\blackhole_optics.py --self-test" ^
+    --gate "tools\sgra_optics.py --self-test" ^
+    --gate "tools\focus_watch.py --self-test" ^
+    --gate "tools\check_config_contract.py --self-test" ^
+    --gate "tools\check_config_contract.py" ^
+    --gate "tools\gen_fsr_hlsl.py --self-test" ^
+    --gate "tools\gen_smaa_hlsl.py --self-test" ^
+    --gate "tools\gen_settings_schema.py --self-test" ^
+    --gate "tools\gen_exports.py --self-test" ^
+    --gate "tools\fetch_ngx.py --self-test" ^
+    --gate "tools\build_flat_sdk_bench_proxy.py --self-test" ^
+    --gate "tools\build_phases.py --self-test" || exit /b 1
 
 REM The version baked into both DLLs, printed in the second line of every log.
 REM
@@ -247,16 +273,22 @@ if "%EDVR_PROFILE_SYMBOLS%"=="1" (
 )
 set CFLAGS=/nologo /c /O2 /MT /std:c++17 /EHs /W4 /GR- %EDVR_CPU_COMPILE% ^
  /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE ^
- /DEDVR_VERSION_STRING=\"%EDVR_VER%\" ^
+ /DEDVR_HAVE_VERSION_HEADER=1 ^
  /I"%GEN%"
 
 echo.
+REM The version used to be a /D flag, which changed every TU's flags on every
+REM commit or dirty flip. It is now edvr_version.h, rewritten only when the
+REM version changes; the flag is constant, so rigs that compile these files
+REM without it keep their #ifndef fallbacks.
+python "tools\gen_installer_rc.py" --version-header --version "%EDVR_VER%" --out "%GEN%"
+if errorlevel 1 ( echo [edvr] ERROR: version header generation failed & exit /b 1 )
 REM The runtime config audit data: known keys + the moved-from map,
 REM generated from the same sources the late contract check verifies.
-python "tools\check_config_contract.py" --self-test || exit /b 1
 python "tools\check_config_contract.py" --quiet --emit "%GEN%\config_contract_gen.h"
 if errorlevel 1 ( echo [edvr] ERROR: contract header generation failed & exit /b 1 )
 
+python tools\build_phases.py --mark "%PHASES%" "python gates and setup"
 echo [edvr] === precompiled temporal shaders ===
 REM Fixed HLSL belongs in the build: compiling it in the first Present delayed
 REM the intro by 18 seconds. The header carries a key over the HLSL, the
@@ -266,11 +298,9 @@ REM unchanged shader costs nothing instead of the AA variant's 19 s of fxc on
 REM every build (measured 2026-09-15). The generator tests never initialize a GPU.
 REM AMD FSR 1.0 as embeddable HLSL. Generated rather than committed so the
 REM vendored headers stay byte-identical to upstream (src\d3d11\fsr\).
-python "tools\gen_fsr_hlsl.py" --self-test || exit /b 1
 python "tools\gen_fsr_hlsl.py" --root "%ROOT%" --out "%GEN%"
 if errorlevel 1 ( echo [edvr] ERROR: FSR shader embedding failed & exit /b 1 )
 REM SMAA 1x (MIT, src\d3d11\smaa\, pinned to upstream commit 71c806a8) as embeddable HLSL, the same way: the map temporal-off frames below native.
-python "tools\gen_smaa_hlsl.py" --self-test || exit /b 1
 python "tools\gen_smaa_hlsl.py" --root "%ROOT%" --out "%GEN%"
 if errorlevel 1 ( echo [edvr] ERROR: SMAA shader embedding failed & exit /b 1 )
 
@@ -289,6 +319,7 @@ REM build if either DLL imports the compiler again.
 "%OBJ%\temporalshader\temporal_shader_build.exe" --output "%GEN%\temporal_shader_bytecode.h" --stereo-output "%GEN%\openxr_stereo_shader_bytecode.h" --dry-run || exit /b 1
 "%OBJ%\temporalshader\temporal_shader_build.exe" --output "%GEN%\temporal_shader_bytecode.h" --stereo-output "%GEN%\openxr_stereo_shader_bytecode.h" || exit /b 1
 
+python tools\build_phases.py --mark "%PHASES%" "shader generation"
 echo [edvr] === d3d11.dll ===
 REM The settings schema -- the installer's window AND the in-headset menu's
 REM row table (docs\settings-menu.md) -- generated from edvr.ini and the
@@ -307,17 +338,12 @@ REM type from the typed read, not from whichever file is walked first. The
 REM menu's getString echo of fix.render_sharpness once typed the window's
 REM Sharpening row as text, and a text row that shows percentages wrote a
 REM typed 20 as 2000% (issue 35). That rule fails here now, not in the window.
-python "tools\gen_settings_schema.py" --self-test || (
-    echo [edvr] ERROR: the settings schema generator failed its own test
-    exit /b 1
-)
 python "tools\gen_settings_schema.py" --root "%ROOT%" --out "%GEN%"
 if errorlevel 1 (
     echo [edvr] ERROR: the settings schema is incomplete ^(see above^)
     exit /b 1
 )
 
-python "tools\gen_exports.py" --self-test || exit /b 1
 python "tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --tag d3d11 --out "%GEN%" ^
     --wrap D3D11CreateDevice --wrap D3D11CreateDeviceAndSwapChain ^
@@ -387,7 +413,6 @@ REM Without any SDK the build still succeeds, since the code compiles
 REM either way, but says so loudly: that build has no DLAA and its
 REM installer carries no runtime, which is not a release (package.bat
 REM refuses it unless told --no-dlss).
-python "tools\fetch_ngx.py" --self-test || exit /b 1
 set NGX=
 if defined EDVR_NGX_SDK set NGX=%EDVR_NGX_SDK%
 if not defined NGX if exist "%ROOT%\third_party\ngx\include\nvsdk_ngx.h" set NGX=%ROOT%\third_party\ngx
@@ -647,15 +672,16 @@ link.exe /nologo /DLL /MACHINE:X64 /INCREMENTAL:NO %EDVR_CPU_LINK% /PDB:"%BUILD%
 if errorlevel 1 ( echo [edvr] ERROR: link failed & exit /b 1 )
 
 echo [edvr] built %BUILD%\d3d11.dll
+python tools\build_phases.py --mark "%PHASES%" "d3d11.dll"
 copy /y "%BUILD%\d3d11.dll" "%BUILD%\edvr_openxr_graphics.dll" >nul || exit /b 1
 echo [edvr] built %BUILD%\edvr_openxr_graphics.dll
 
 REM Offline-only test-link proxy: all normal production objects except one
 REM engine_velocity object built with its existing rig guard and an inert emit
 REM fixture. Never copied into an installer or game directory.
-python "tools\build_flat_sdk_bench_proxy.py" --self-test || exit /b 1
 python "tools\build_flat_sdk_bench_proxy.py" --dry-run || exit /b 1
 python "tools\build_flat_sdk_bench_proxy.py" || exit /b 1
+python tools\build_phases.py --mark "%PHASES%" "bench proxy"
 
 echo.
 REM Gated with `||`, not `if errorlevel 1`.
@@ -673,7 +699,7 @@ REM Its application fixture calls the game-imported ABI without linking the host
 if not exist "%OBJ%\openxr_module" mkdir "%OBJ%\openxr_module"
 cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /LD /D_CRT_SECURE_NO_WARNINGS %EDVR_CPU_COMPILE% ^
     /I"third_party\openxr\include" /I"%GEN%" /Fo"%OBJ%\openxr_module\\" ^
-    /DEDVR_VERSION_STRING=\"%EDVR_VER%\" ^
+    /DEDVR_HAVE_VERSION_HEADER=1 ^
     /Fe"%BUILD%\edvr_openxr_runtime.dll" "src\openxr\native_module.cpp" ^
     "src\openxr\d3d11_stereo.cpp" "src\openxr\session_binding.cpp" "src\openxr\openvr_system.cpp" ^
     "src\openxr\eye_capture.cpp" "src\openxr\skybox_capture.cpp" ^
@@ -683,6 +709,7 @@ cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT /LD /D_CRT_SECURE_NO_WARNINGS %EDVR_
     "src\common\frame_flag.cpp" ^
     /link /INCREMENTAL:NO %EDVR_CPU_LINK% /PDB:"%BUILD%\edvr_openxr_runtime.pdb" /DEF:"src\openxr\native_module.def" "%OBJ%\openxr_module\version.res" d3d11.lib dxgi.lib user32.lib gdi32.lib
 if errorlevel 1 ( echo [edvr] ERROR: native runtime module build failed & exit /b 1 )
+python tools\build_phases.py --mark "%PHASES%" "runtime dll"
 
 REM Shared by the installer and installer_test rigs below.
 set INSTALLER_SRC="src\installer\main.cpp" "src\installer\gui.cpp" ^
@@ -743,23 +770,13 @@ REM that needs a window for one uses tools\openxr_native_test\present_device.h,
 REM whose window is a child of a message-only one.
 set "RUN_JOBS_ARGS="
 if defined EDVR_JOBS set "RUN_JOBS_ARGS=--jobs %EDVR_JOBS%"
-python tools\run_jobs.py --self-test || exit /b 1
 python tools\run_jobs.py --script "%ROOT%\build.bat" --times "%BUILD%\rig_times.json" ^
     --exe-dir "%BUILD%" --quiet native_timing_test,gpu_timing_test,gpu_census_test,vtable_test,stall_sampler_test ^
     --after openxr_module_test=openxr_exports_test ^
     %RUN_JOBS_ARGS% || exit /b 1
+python tools\build_phases.py --mark "%PHASES%" "test rigs"
 
-echo [edvr] === config contract ===
-where python >nul 2>&1
-if errorlevel 1 (
-    echo [edvr] NOTE: python not found, skipping the config contract check
-) else (
-    python "tools\check_config_contract.py" || (
-        echo [edvr] ERROR: config contract check failed or crashed
-        exit /b 1
-    )
-)
-
+REM The config contract check (tools\check_config_contract.py) runs with the gates at the top: it reads only src\ and edvr.ini.
 
 REM The native OpenXR build is the only build; nothing above ran a legacy path.
 REM --forbid-import: neither DLL may import the HLSL compiler at load time. The runtime did (four D3DCompile calls, moved to build time 2026-10-01: its link line
@@ -792,6 +809,8 @@ python tools\build_receipt.py --write "%BUILD%\full_build_receipt.json" ^
     --context "ffx_request=%EDVR_FFX_DX11%" ^
     --context "ffx=%FFX%" ^
     --context "fsr_none=%FSR_NONE%" || exit /b 1
+python tools\build_phases.py --mark "%PHASES%" "final checks and receipt"
+python tools\build_phases.py --report "%PHASES%"
 echo [edvr] Native OpenXR build and all gates passed.
 echo [edvr] Install both native DLLs and the bundled loader for a test flight:
 echo        python tools\install_edvr.py --target frontier --dry-run
@@ -812,6 +831,8 @@ echo [edvr] === DLL-only promotion outputs ===
 copy /y "%BUILD%\edvr_openxr_runtime.dll" "%BUILD%\openvr_api.dll" >nul || exit /b 1
 python tools\openxr_pe.py --native "%BUILD%\openvr_api.dll" --forbid-import d3dcompiler_47.dll || exit /b 1
 python tools\openxr_pe.py --graphics "%BUILD%\d3d11.dll" --forbid-import d3dcompiler_47.dll || exit /b 1
+python tools\build_phases.py --mark "%PHASES%" "dll-only outputs"
+python tools\build_phases.py --report "%PHASES%"
 echo [edvr] DLL-only build passed: production DLLs and loader are ready to install.
 echo [edvr] Test rigs and the self-contained installer were skipped; use a full build
 echo        before distributing an installer or accepting new source changes.

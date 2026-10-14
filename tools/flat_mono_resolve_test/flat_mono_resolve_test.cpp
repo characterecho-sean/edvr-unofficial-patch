@@ -13,6 +13,7 @@
 #include <d3d11sdklayers.h>
 #include <wrl/client.h>
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdarg>
 #include <cstring>
@@ -24,6 +25,11 @@
 #include "../../src/common/system_d3d11.h"
 using Microsoft::WRL::ComPtr;
 namespace {
+// One line per suite with its wall time, so a slow rig can be sharded by measurement, not by guess.
+struct SuiteTimer{const char* name;std::chrono::steady_clock::time_point t0=std::chrono::steady_clock::now();
+    explicit SuiteTimer(const char* n):name(n){}
+    ~SuiteTimer(){std::printf("suite %s %lld ms\n",name,(long long)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-t0).count());}};
+template<class F> decltype(auto) timedSuite(const char* name,F&& f){SuiteTimer t(name);return f();}
 int failures=0,backendCalls=0;
 bool backendFail=false,backendReset=false,infiniteSeen=false;
 std::vector<std::string> resetEvents;
@@ -241,8 +247,8 @@ int main(int argc,char** argv) {
     check(SUCCEEDED(hr),"WARP device");if(FAILED(hr))return 1;
     check(edvr::reportSystemD3D11Only("flat_mono_resolve_test"),"the rig runs on System32's d3d11.dll and on no other d3d11.dll");
     ComPtr<ID3D11InfoQueue> messages;device.As(&messages);
-    projectionScopeTests(device.Get(), context.Get());
-    projectionRuntimeTests(device.Get(), context.Get());
+    timedSuite("projectionScopeTests",[&]{return projectionScopeTests(device.Get(), context.Get());});
+    timedSuite("projectionRuntimeTests",[&]{return projectionRuntimeTests(device.Get(), context.Get());});
     const UINT w=16,h=16;std::vector<uint32_t> red(w*h,0xff0000ff);std::vector<float> z(w*h,.01f),slots(w*h*2);
     for(size_t i=0;i<slots.size();i+=2){slots[i]=-1;slots[i+1]=.01f;}
     auto color=texture(device.Get(),w,h,DXGI_FORMAT_R8G8B8A8_UNORM,D3D11_BIND_SHADER_RESOURCE,red.data(),w*4);
@@ -839,43 +845,43 @@ int main(int argc,char** argv) {
         }
     }
     context->ClearState();
-    failures+=flatPixelCaptureGpuTests(device.Get(),context.Get());
-    failures+=flatDrawCaptureGpuTests(device.Get(),context.Get());
-    failures+=flatDrawPacketGpuTests(device.Get(),context.Get());
-    failures+=flatWeaponFootprintGpuTests(device.Get(),context.Get());
-    failures+=flatOverlayLayerGpuTests(device.Get(),context.Get());
-    failures+=flatLoopOutputGpuTests(device.Get(),context.Get());
-    failures+=flatResolveInputGpuTests(device.Get(),context.Get());
-    failures+=flatForegroundOwnershipGpuTests(device.Get(),context.Get());
+    failures+=timedSuite("flatPixelCaptureGpuTests",[&]{return flatPixelCaptureGpuTests(device.Get(),context.Get());});
+    failures+=timedSuite("flatDrawCaptureGpuTests",[&]{return flatDrawCaptureGpuTests(device.Get(),context.Get());});
+    failures+=timedSuite("flatDrawPacketGpuTests",[&]{return flatDrawPacketGpuTests(device.Get(),context.Get());});
+    failures+=timedSuite("flatWeaponFootprintGpuTests",[&]{return flatWeaponFootprintGpuTests(device.Get(),context.Get());});
+    failures+=timedSuite("flatOverlayLayerGpuTests",[&]{return flatOverlayLayerGpuTests(device.Get(),context.Get());});
+    failures+=timedSuite("flatLoopOutputGpuTests",[&]{return flatLoopOutputGpuTests(device.Get(),context.Get());});
+    failures+=timedSuite("flatResolveInputGpuTests",[&]{return flatResolveInputGpuTests(device.Get(),context.Get());});
+    failures+=timedSuite("flatForegroundOwnershipGpuTests",[&]{return flatForegroundOwnershipGpuTests(device.Get(),context.Get());});
     // The HDR route's resolver half (design section 81): before the D3D message check below, so its draws are held to it.
-    hdrRouteGpuTests(device.Get(),context.Get());
-    sdkForegroundGpuTests(device.Get(),context.Get());
-    mapEasuGpuTests(device.Get(),context.Get());
-    mapSmaaLookupLeakTests(device.Get(),context.Get());
+    timedSuite("hdrRouteGpuTests",[&]{return hdrRouteGpuTests(device.Get(),context.Get());});
+    timedSuite("sdkForegroundGpuTests",[&]{return sdkForegroundGpuTests(device.Get(),context.Get());});
+    timedSuite("mapEasuGpuTests",[&]{return mapEasuGpuTests(device.Get(),context.Get());});
+    timedSuite("mapSmaaLookupLeakTests",[&]{return mapSmaaLookupLeakTests(device.Get(),context.Get());});
     // The same SDK foreground contract above the output (the supersampled on-foot frame), and the untrusted-coverage clause's other two sides.
-    sdkForegroundSupersampleGpuTests(device.Get(),context.Get());
+    timedSuite("sdkForegroundSupersampleGpuTests",[&]{return sdkForegroundSupersampleGpuTests(device.Get(),context.Get());});
     // The VR world route's seams (section 82): the third upscaler slot, the first-person map and stencil in the prep, and the phase term
     // the map's vector gets when the world and the first-person camera are jittered (stage 2).
-    upscalerSlotGpuTests(device.Get(),context.Get());
-    firstPersonGpuTests(device.Get(),context.Get());
-    firstPersonPhaseGpuTests(device.Get(),context.Get());
+    timedSuite("upscalerSlotGpuTests",[&]{return upscalerSlotGpuTests(device.Get(),context.Get());});
+    timedSuite("firstPersonGpuTests",[&]{return firstPersonGpuTests(device.Get(),context.Get());});
+    timedSuite("firstPersonPhaseGpuTests",[&]{return firstPersonPhaseGpuTests(device.Get(),context.Get());});
     // The stage 2 experiment build's refusal census and view: the prep's class byte, the counting pass and its read-back, the steady-detail
     // rule's effect on the counts, and the HDR finish's paint.
-    refusalGpuTests(device.Get(),context.Get());
-    skinGpuTests(device.Get(),context.Get());
+    timedSuite("refusalGpuTests",[&]{return refusalGpuTests(device.Get(),context.Get());});
+    timedSuite("skinGpuTests",[&]{return skinGpuTests(device.Get(),context.Get());});
     // The same view on the copy route (hdr off): the compute finish paints it for the SDK backends, EDVR's own TAA there asks for nothing.
-    copyRefusalViewGpuTests(device.Get(),context.Get());
+    timedSuite("copyRefusalViewGpuTests",[&]{return copyRefusalViewGpuTests(device.Get(),context.Get());});
     // The first-person contract on the copy route (the weapon support below the output): a qualified map reaches the DLSS and FSR stubs, the
     // refusals stay by name, a mask still refuses there, and EDVR's TAA never asks.
-    copyForegroundGpuTests(device.Get(),context.Get());
+    timedSuite("copyForegroundGpuTests",[&]{return copyForegroundGpuTests(device.Get(),context.Get());});
     // The depth-validated steady detail (the same section, the key's second form): the prep's depth check, its tolerance and its previous depth,
     // through the DLSS and FSR stubs and EDVR's own TAA, and the same scenario against the prep with one rule flipped at a time.
-    steadyDepthGpuTests(device.Get(),context.Get());
+    timedSuite("steadyDepthGpuTests",[&]{return steadyDepthGpuTests(device.Get(),context.Get());});
     // EDVR's own TAA's history depth check (section 104): the best of four texels, shared with the check above. A jittered silhouette keeps its
     // history, a true disocclusion still resets, and both tests against the kernel with the old single-texel rule (and others) in: they must fail.
-    taaHistoryDepthGpuTests(device.Get(),context.Get());
+    timedSuite("taaHistoryDepthGpuTests",[&]{return taaHistoryDepthGpuTests(device.Get(),context.Get());});
     // The resolver's context isolation (the swap, and the explicit capture DXMT gets): also before the message check, so its calls are held to it.
-    contextIsolationGpuTests(device.Get(),context.Get());
+    timedSuite("contextIsolationGpuTests",[&]{return contextIsolationGpuTests(device.Get(),context.Get());});
     xessPlan.jitterCycle=64;
     preflight=edvr::flatMonoResolvePreflight(device.Get(),context.Get(),xessPlan);
     check(preflight.readyForRasterJitter(),"XeSS upscale preflight accepts a sufficient camera cycle");

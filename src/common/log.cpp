@@ -3,6 +3,9 @@
 // Set by build.bat from `git describe` for the two shipped DLLs. The test
 // binaries that link this file compile without the define, and the fallback
 // says what it is rather than impersonating a release.
+#ifdef EDVR_HAVE_VERSION_HEADER
+#include "edvr_version.h"
+#endif
 #ifndef EDVR_VERSION_STRING
 #define EDVR_VERSION_STRING "unversioned test build"
 #endif
