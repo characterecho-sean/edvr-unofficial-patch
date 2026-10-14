@@ -201,6 +201,13 @@ void panelTable(const std::string& root, const std::string& gen) {
     const FlatPageRow* m3 = flatPageFirstRefused(lacksUiQuality);
     check(m3 && std::strcmp(m3->key, "ui_quality") == 0,
           "control: a gate without fix.ui_quality is caught, by name");
+    const auto lacksIntro = [](const char* dotted) {
+        return runtimeProfileAllowsKey(dotted) && std::strcmp(dotted, "fix.intro_video") != 0;
+    };
+    const FlatPageRow* m4 = flatPageFirstRefused(lacksIntro);
+    check(m4 && std::strcmp(m4->key, "intro_video") == 0,
+          "control: a gate without fix.intro_video is caught, by name");
+    check(flatPageHasRow("fix", "intro_video"), "the flat page has the Intro movie row (skip, flat 2026-10-14)");
     check(flatPageFirstRefused([](const char*) { return false; }) != nullptr,
           "control: a gate that refuses everything is caught");
     // And the gate as shipped really does refuse what it should, so the check above

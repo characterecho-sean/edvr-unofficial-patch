@@ -26,6 +26,8 @@ using ValueMap = std::map<std::string, std::string, std::less<>>;
 
 struct Config::Impl {
     ValueMap values;
+    // Runtime-only overrides (setRuntimeOverride): answered before `values`, never written anywhere, and kept across a parse. Lowercase keys.
+    ValueMap overrides;
     // The config audit's session memory: findings queued until the log can
     // take them (the first parse runs before Log::open), and a set of what
     // has already been said so a reload does not repeat it.
@@ -156,6 +158,11 @@ bool Config::switchProfile() {
         WriteGuard g(m_lock);
         changed = next != m_path;
         m_path = next;
+        // A runtime override belongs to the profile it was made in: the other one reads another file.
+        if (m_impl && !m_impl->overrides.empty()) {
+            m_impl->overrides.clear();
+            m_overrideDirty.store(true, std::memory_order_release);
+        }
         // Reset, so the next reloadIfChanged reads whichever file this is. parse() stamps the new
         // file's time on success; on a failed read the stamp stays clear and the next poll retries.
         m_lastWrite = FILETIME{};
@@ -527,6 +534,9 @@ void Config::auditFlush() const {
 }
 
 bool Config::reloadIfChanged() {
+    // An override set or cleared since the last call: report a change so the caller's sweep re-reads every setting, as it does for a hand
+    // edit. The file is checked on the next call as usual.
+    if (m_overrideDirty.exchange(false, std::memory_order_acq_rel)) return true;
     std::wstring settingsPath;
     {
         ReadGuard g(m_lock);
@@ -558,6 +568,10 @@ std::string Config::getString(const char* key, const char* def) const {
         // reference or a const char*.
         ReadGuard g(m_lock);
         if (m_impl) {
+            if (!m_impl->overrides.empty()) {
+                const auto ov = m_impl->overrides.find(key);
+                if (ov != m_impl->overrides.end()) return ov->second;
+            }
             const auto it = m_impl->values.find(key);
             if (it != m_impl->values.end()) return it->second;
         }
@@ -568,8 +582,48 @@ std::string Config::getString(const char* key, const char* def) const {
 std::string Config::requestedTemporalMode() const {
     ReadGuard g(m_lock);
     if (!m_impl) return "off";
+    if (!m_impl->overrides.empty()) {
+        const auto ov = m_impl->overrides.find("fix.temporal_aa");
+        if (ov != m_impl->overrides.end()) return ov->second;
+    }
     const auto it = m_impl->values.find("fix.temporal_aa");
     return it == m_impl->values.end() ? "off" : it->second;
+}
+
+std::string Config::configuredTemporalMode() const {
+    ReadGuard g(m_lock);
+    if (!m_impl) return "off";
+    const auto it = m_impl->values.find("fix.temporal_aa");
+    return it == m_impl->values.end() ? "off" : it->second;
+}
+
+void Config::setRuntimeOverride(const char* key, const char* value) {
+    if (!key || !value) return;
+    std::string k(key);
+    for (char& c : k) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+    WriteGuard g(m_lock);
+    if (!m_impl) m_impl = new Impl();
+    m_impl->overrides[k] = value;
+    m_impl->noteNoted.erase(k);
+    m_generation.fetch_add(1, std::memory_order_release);
+    m_overrideDirty.store(true, std::memory_order_release);
+}
+
+void Config::clearRuntimeOverride(const char* key) {
+    if (!key) return;
+    std::string k(key);
+    for (char& c : k) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+    WriteGuard g(m_lock);
+    if (!m_impl || m_impl->overrides.erase(k) == 0) return;
+    m_impl->noteNoted.erase(k);
+    m_generation.fetch_add(1, std::memory_order_release);
+    m_overrideDirty.store(true, std::memory_order_release);
+}
+
+bool Config::hasRuntimeOverride(const char* key) const {
+    if (!key) return false;
+    ReadGuard g(m_lock);
+    return m_impl && !m_impl->overrides.empty() && m_impl->overrides.find(key) != m_impl->overrides.end();
 }
 
 // Said once per key per successful parse, and only once the log can take it.

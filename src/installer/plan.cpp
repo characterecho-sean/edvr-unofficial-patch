@@ -169,7 +169,7 @@ std::string trimmedSpaces(const std::string& text) {
 
 // Whether `text` is an EDVR startup config that names the loader and graphics paths given. The grammar is the runtime's own
 // (src\openxr\native_local_config.h): one [openxr] section, version=1, and loader, graphics, runtime and separate_device=1 each
-// once; frame_thread_priority and frame_end_overlap are optional. LF and CRLF both parse.
+// once; frame_thread_priority, frame_end_overlap and pose_cache are optional. LF and CRLF both parse.
 bool isEdvrStartupConfig(const std::string& text, const std::wstring& loaderPath, const std::wstring& graphicsPath) {
     bool section = false;
     std::vector<std::string> keys;
@@ -207,6 +207,8 @@ bool isEdvrStartupConfig(const std::string& text, const std::wstring& loaderPath
         } else if (key == "frame_thread_priority") {
             if (value != "high" && value != "normal") return false;
         } else if (key == "frame_end_overlap") {
+            if (value != "on" && value != "off") return false;
+        } else if (key == "pose_cache") {
             if (value != "on" && value != "off") return false;
         } else {
             return false;

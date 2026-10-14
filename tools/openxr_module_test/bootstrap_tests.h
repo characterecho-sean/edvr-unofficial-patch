@@ -118,6 +118,20 @@ void runBootstrapTests(Check&& check) {
       !config.frameThreadPriorityHigh&&!config.frameEndOverlap,
       "frame_thread_priority=normal and frame_end_overlap=off both parse switched off");
   }
+  {
+    // pose_cache (temporary A/B key, src/openxr/pose_cache.h) is optional too: absent is on, on/off parse, anything else or a duplicate fails closed.
+    const std::string head="[openxr]\nversion=1\nloader=C:\\loader.dll\ngraphics=D:\\d3d11.dll\nruntime=E:\\runtime.json\nseparate_device=1\n";
+    LocalConfig config;
+    check(writeLocalFixture(localPath,head)&&readLocalConfig(localPath,config)==LocalConfigResult::Ready&&config.poseCache,
+      "pose_cache defaults to on when absent");
+    check(writeLocalFixture(localPath,head+"pose_cache=off\n")&&readLocalConfig(localPath,config)==LocalConfigResult::Ready&&!config.poseCache,
+      "pose_cache=off switches the pose cache off");
+    check(writeLocalFixture(localPath,head+"pose_cache=on\n")&&readLocalConfig(localPath,config)==LocalConfigResult::Ready&&config.poseCache,
+      "pose_cache=on keeps it on");
+    check(writeLocalFixture(localPath,head+"pose_cache=maybe\n")&&readLocalConfig(localPath,config)==LocalConfigResult::Invalid&&
+      writeLocalFixture(localPath,head+"pose_cache=on\npose_cache=off\n")&&readLocalConfig(localPath,config)==LocalConfigResult::Invalid,
+      "a bad pose_cache value, or the key twice, fails closed");
+  }
   for(const std::string& badNewKey:{
       "[openxr]\nversion=1\nloader=C:\\loader.dll\ngraphics=D:\\d3d11.dll\nruntime=E:\\runtime.json\nseparate_device=1\nframe_thread_priority=low\n",
       "[openxr]\nversion=1\nloader=C:\\loader.dll\ngraphics=D:\\d3d11.dll\nruntime=E:\\runtime.json\nseparate_device=1\nframe_end_overlap=1\n",

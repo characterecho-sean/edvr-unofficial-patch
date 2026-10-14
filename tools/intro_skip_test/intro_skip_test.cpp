@@ -82,6 +82,71 @@ void test(){
     WIN32_FILE_ATTRIBUTE_DATA info{};
     check(GetFileAttributesExW(files.ident.c_str(),GetFileExInfoStandard,&info) && info.nFileSizeLow==4096,"intro file on disk was never changed");
     check(edvrIntroSkipSelftest()==3,"existing path and direct-refusal regressions still pass");
+
+    // ---- the flat profile (2026-10-14): the same key, the same hooks, a verdict that does not need eye draws -------------------
+    // The parse: in flat only `skip` does anything. screen (the default), stock and the dev values play the game's own movie, so
+    // the VR panel and resample read through introVideoParseFor and stay off however the key is spelled.
+    for(const char* spelling:{"screen","stock","head","sharp","off","on","fsr","","SCREEN"}){
+        const IntroVideoMode f=introVideoParseFor(spelling,true);
+        check(!f.skip && !f.screen && !f.worldLock && f.upscale==0,"flat: every spelling but skip leaves the game's own movie");
+    }
+    for(const char* spelling:{"skip","SKIP","none"}){
+        const IntroVideoMode f=introVideoParseFor(spelling,true),v=introVideoParseFor(spelling,false);
+        check(f.skip && !f.screen && !f.worldLock && f.upscale==0,"flat: skip skips and keeps the panel and resample off");
+        check(v.skip && v.screen && v.worldLock && v.upscale==2,"VR: skip is unchanged (the panel stays armed as the fallback)");
+    }
+    check(!introVideoParseFor("banana",true).recognised && introVideoParseFor("skip",true).recognised,"flat: an unknown spelling is still reported");
+    check(introVideoParseFor("screen",false).screen && introVideoParseFor("screen",false).upscale==2 &&
+          !introVideoParseFor("stock",false).screen,"VR: screen and stock are what they were");
+    // The flat verdict's clock: refusals then four quiet seconds, or ninety seconds of nothing.
+    check(!introFlatVerdictDue(1,500,0) && !introFlatVerdictDue(3,9000,kIntroFlatSettleMs-1) && introFlatVerdictDue(3,9000,kIntroFlatSettleMs),
+          "flat: with refusals the verdict waits for the game to stop asking");
+    check(!introFlatVerdictDue(0,kIntroFlatGiveUpMs-1,0) && introFlatVerdictDue(0,kIntroFlatGiveUpMs,0) && !introFlatVerdictDue(0,10000,99999),
+          "flat: with none refused the verdict waits for the give-up time, whatever the quiet clock says");
+
+    runtimeProfileSet(RuntimeProfile::Flat);
+    check(runtimeFlatProfile(),"the rig is in the flat profile");
+    g_armedSaid=false;g_verdictSaid=false;g_refused.store(0);g_refusalLines.store(0);g_otherMovieOpens.store(0);g_movieDrew.store(0);g_lastRefusalMs.store(0);
+    messages.clear();
+    testMode="screen";introSkipConfigure(Config::get());
+    check(!g_armed.load() && !g_installTried && !g_reader,"flat: the default (screen) installs nothing and refuses nothing");
+    testMode="stock";introSkipConfigure(Config::get());
+    check(!g_armed.load() && !g_installTried,"flat: stock installs nothing either");
+    testMode="skip";introSkipConfigure(Config::get());
+    check(g_armed.load() && g_readerCreateW.applied && g_reader,"flat: skip arms the same DirectShow reader hook");
+    bool armedFlat=false;
+    for(const auto& line:messages) armedFlat|=line.find("intro skip: ARMED (flat)")!=std::string::npos;
+    check(armedFlat,"flat: the ARMED line names the flat profile");
+    check(readerLoad(files.ident)==HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND),"flat: the actual DirectShow ident load is refused");
+    check(SUCCEEDED(readerLoad(files.loop)) && SUCCEEDED(readerLoad(files.story)),"flat: the front end's loops and story videos load");
+    auto sawFlat=[&](const char* what){for(const auto& line:messages) if(line.find(what)!=std::string::npos) return true;return false;};
+    introSkipTickFlat();
+    check(!sawFlat("WORKED (flat)"),"flat: no verdict the moment after a refusal");
+    introSkipTick(true);
+    check(!sawFlat("intro skip: WORKED") && !sawFlat("did not take"),"flat: the eye-draw signal of the VR verdict closes nothing");
+    g_lastRefusalMs.store(nowMs()-kIntroFlatSettleMs-1);
+    introSkipTickFlat();
+    check(sawFlat("intro skip: WORKED (flat) -- 1 refusal(s)"),"flat: four quiet seconds after the refusal the log says WORKED (flat)");
+    const size_t msgCount=messages.size();
+    introSkipTickFlat();
+    check(messages.size()==msgCount,"flat: the verdict is said once");
+    // Nothing was ever asked for: the give-up line, not a success.
+    introSkipShutdown();
+    g_verdictSaid=false;g_refused.store(0);g_otherMovieOpens.store(0);g_lastRefusalMs.store(0);messages.clear();
+    testMode="skip";introSkipConfigure(Config::get());
+    g_armedAtMs=nowMs()-kIntroFlatGiveUpMs-1;
+    introSkipTickFlat();
+    check(sawFlat("intro skip: no ident was asked for (flat)") && !sawFlat("WORKED"),"flat: nothing refused for ninety seconds is reported as such");
+    // The VR profile is untouched by all of it: its tick still closes on a scene frame.
+    introSkipShutdown();
+    runtimeProfileSet(RuntimeProfile::LegacyVr);
+    g_verdictSaid=false;g_refused.store(0);g_movieDrew.store(0);messages.clear();
+    testMode="skip";introSkipConfigure(Config::get());
+    introSkipTickFlat();
+    check(!g_verdictSaid && !sawFlat("(flat)"),"VR: the flat tick does nothing outside the flat profile");
+    introSkipTick(true);
+    check(g_verdictSaid && sawFlat("intro skip: no ident was asked for through"),"VR: the scene-frame verdict still closes it");
+    introSkipShutdown();
     CoUninitialize();
 }
 int main(int argc,char** argv){

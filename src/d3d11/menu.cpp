@@ -30,6 +30,7 @@
 #include "../common/temporal_mode.h"
 #include "../common/vr_supersample_notice.h"
 #include "../common/vscreen_fit.h"
+#include "aa_compare.h"     // aaCompareNoteMenuEdit(): an F8 pick of the AA mode ends an AA comparison
 #include "device_hook.h"
 #include "elite_binds.h"
 #include "flat_elite_settings.h"
@@ -90,6 +91,8 @@ constexpr uint64_t kNotDrawnCloseMs = 1500;
 // A toast's life, and the pitch it sits below the look direction.
 constexpr uint64_t kToastMs = 2500;
 constexpr float    kToastPitchDeg = -12.0f;
+// The tallest raster that is a notice and not the menu (a one-line card is about 130 px; the menu's smallest page is over 300).
+constexpr int      kFlatNoticeMaxPx = 200;
 // The Status page's live values are refreshed at this cadence while shown;
 // the Monitor page's at four a second, so its digits read as a gauge and
 // not a flicker.
@@ -307,6 +310,17 @@ struct State {
     float    toastAlpha = 0.0f;
     uint64_t toastUntilMs = 0;
     std::string toastText;
+
+    // menuShowNotice in the flat profile, which draws no toasts: the notice is the panel's raster at a toast's size, composited in the
+    // upper left corner while it is up. `Shown` is set once that raster (not the menu's) is the live one; `RasterStale` holds the panel
+    // back after a notice until the menu's own content has been rasterised, so a toast-sized card never flashes as the menu.
+    std::string flatNoticeText;
+    bool     flatNoticeDue = false;
+    bool     flatNoticeUp = false;
+    bool     flatNoticeShown = false;
+    bool     flatRasterStale = false;
+    uint64_t flatNoticeUntilMs = 0;
+    uint32_t flatNoticeSerial = 0;
 
     // The head-locked readout (menu.fps_overlay), shown while the menu is
     // down: re-anchored to the head every frame, re-rasterised twice a
@@ -2432,6 +2446,8 @@ void enqueueChange(WriteJob& job, bool held = false) {
         g_rows[job.def].pending = rowPending(d, job.value, g_rows[job.def].snapshot);
     }
     s.menuWroteDotted = job.dotted;
+    // An F8 pick of the anti-aliasing mode ends an AA comparison that is showing it off (aa_compare.h): the player's choice wins.
+    if (job.dotted == "fix.temporal_aa") aaCompareNoteMenuEdit();
     s.lastWrite = job.headset.empty() ? "writing " + job.dotted + " = " + job.value
                                       : "writing " + job.headset + " = " + job.toValue;
     s.contentDirty = true;
@@ -4136,10 +4152,43 @@ void menuRegisterAction(const char* label, const char* hint, MenuActionFn fn, vo
     if (g_s.configured && g_s.developer) buildPages();
 }
 
+void menuRequestConfigPoll() { g_s.pollRequest = true; }
+
 bool menuTakeConfigPollRequest() {
     const bool r = g_s.pollRequest;
     g_s.pollRequest = false;
     return r;
+}
+
+void menuShowNotice(const char* text) {
+    State& s = g_s;
+    if (!text || !*text) return;
+    if (!s.configured) {
+        Log::get().note("menu: notice \"%s\" not shown: the menu is not configured in this profile.", text);
+        return;
+    }
+    if (runtimeFlatProfile()) {
+        s.flatNoticeText = text;
+        s.flatNoticeDue = true;
+        Log::get().note("menu: notice \"%s\" queued for the flat screen (upper left, about %llu s).", text,
+                        static_cast<unsigned long long>((kToastMs + 500) / 1000));
+        return;
+    }
+    if (!s.toasts) {
+        Log::get().note("menu: notice \"%s\" not queued: menu.toasts is off.", text);
+        return;
+    }
+    // The newest AA notice replaces an older one still waiting or on screen: a quick second press must not queue behind the first.
+    for (size_t i = s.toastQueue.size(); i-- > 0;) {
+        if (s.toastQueue[i].compare(0, 3, "AA ") == 0) s.toastQueue.erase(s.toastQueue.begin() + static_cast<std::ptrdiff_t>(i));
+    }
+    if (s.toastUp && s.toastText.compare(0, 3, "AA ") == 0) s.toastUntilMs = 0;
+    s.toastQueue.push_back(text);
+    Log::get().note("menu: notice \"%s\" queued as a toast.", text);
+}
+
+void menuNoteOwnChange(const char* dotted) {
+    if (dotted) g_s.menuWroteDotted = dotted;
 }
 
 void menuNoteConfigReloaded() {
@@ -4213,7 +4262,7 @@ void menuNoteConfigReloaded() {
 }
 
 void menuFlatBeforePresent(IDXGISwapChain* swap, unsigned flags) {
-    if (!runtimeFlatProfile() || !g_s.configured || !g_s.open ||
+    if (!runtimeFlatProfile() || !g_s.configured || !(g_s.open || g_s.flatNoticeShown) ||
         (flags & DXGI_PRESENT_TEST)) return;
     menuPanelCompositeFlat(swap);
 }
@@ -4300,11 +4349,38 @@ void menuTick(ID3D11Device* dev) {
                 buildContent(c);
                 menuPanelSubmit(c);
             }
+            // A notice from outside the menu (menuShowNotice): rasterised at a toast's size, composited once that raster is the live one.
+            if (s.flatNoticeDue) {
+                s.flatNoticeDue = false;
+                if (!s.open) {
+                    s.flatNoticeUp = true;
+                    s.flatNoticeShown = false;
+                    s.flatNoticeUntilMs = now + kToastMs;
+                    s.flatNoticeSerial = menuPanelRasterSerial();
+                    MenuContent n;
+                    buildToastContent(n, s.flatNoticeText, kToastWidthDeg, 1.0f);
+                    menuPanelSubmit(n);
+                }
+            }
+            if (s.flatNoticeUp) {
+                int rasterH = 0;
+                if (s.open || now >= s.flatNoticeUntilMs) {
+                    s.flatNoticeUp = false;
+                    s.flatNoticeShown = false;
+                    s.flatRasterStale = true;
+                    s.flatNoticeSerial = menuPanelRasterSerial();
+                    s.contentDirty = true;   // the menu's content must be re-sent after a notice
+                } else if (!s.flatNoticeShown && menuPanelRasterSerial() != s.flatNoticeSerial &&
+                           menuPanelStats(nullptr, &rasterH, nullptr, nullptr) && rasterH > 0 && rasterH < kFlatNoticeMaxPx) {
+                    s.flatNoticeShown = true;
+                }
+            }
+            if (s.flatRasterStale && !s.flatNoticeUp && menuPanelRasterSerial() != s.flatNoticeSerial) s.flatRasterStale = false;
             MenuGeometry g;
             g.dist = 1.0f;
             g.curve = 0.0f;
             g.halfW = 0.62f;
-            g.alpha = s.open ? 1.0f : 0.0f;
+            g.alpha = ((s.open && !s.flatRasterStale) || (s.flatNoticeUp && s.flatNoticeShown)) ? 1.0f : 0.0f;
             menuPanelSetGeometry(g);
             inputGateTick();
             if (dev) menuPanelTick(dev);

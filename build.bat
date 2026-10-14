@@ -616,6 +616,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% %XESSFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\intro_panel.cpp" ^
     "src\d3d11\intro_curve.cpp" ^
     "src\d3d11\intro_skip.cpp" ^
+    "src\d3d11\aa_compare.cpp" ^
     "src\d3d11\intro_upscale.cpp" ^
     "src\d3d11\temporal_pass.cpp" ^
     "src\d3d11\depth_probe.cpp" ^
@@ -1985,6 +1986,19 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
     /link /INCREMENTAL:NO ole32.lib strmiids.lib || exit /b 1
 "%OBJ%\introskip\intro_skip_test.exe" --self-test || exit /b 1
 python "tools\holo_motion.py" --self-test || exit /b 1
+exit /b 0
+
+:rig_aa_compare_test
+echo [edvr] === AA comparison key (hotkey.compare_aa) ===
+REM The toggle's state machine and notice words, the key-clash rule, Config's runtime override (set, survives a reload, never
+REM writes the ini, dropped by a profile switch, honoured by the flat gate's mode read), and the source pins that wire the key.
+if not exist "%OBJ%\aacompare" mkdir "%OBJ%\aacompare"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\aacompare\\" /Fe"%OBJ%\aacompare\aa_compare_test.exe" ^
+    "tools\aa_compare_test\aa_compare_test.cpp" "src\common\config.cpp" "src\common\log.cpp" ^
+    /link /INCREMENTAL:NO user32.lib || exit /b 1
+"%OBJ%\aacompare\aa_compare_test.exe" "%ROOT%" || exit /b 1
 exit /b 0
 
 :rig_stellar_motion

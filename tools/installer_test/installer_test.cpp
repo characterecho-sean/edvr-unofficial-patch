@@ -5525,7 +5525,7 @@ static void testFlatSettingsWindow(const std::wstring& root, const std::wstring&
         vr.load(dir, "vr");
         check(rowFor(flat, "fix.ui_quality") != static_cast<size_t>(-1), "the flat view shows fix.ui_quality");
         check(rowFor(flat, "fix.temporal_aa") != static_cast<size_t>(-1), "the flat view shows fix.temporal_aa");
-        check(rowFor(flat, "fix.black_void") == static_cast<size_t>(-1), "a VR-only row is hidden under Flat");
+        check(rowFor(flat, "fix.intro_video") != static_cast<size_t>(-1), "the flat view shows fix.intro_video (skip works in flat)");        check(rowFor(flat, "fix.black_void") == static_cast<size_t>(-1), "a VR-only row is hidden under Flat");
         check(rowFor(vr, "fix.black_void") != static_cast<size_t>(-1), "and shown under VR");
         check(rowFor(vr, "fix.ui_quality") != static_cast<size_t>(-1), "and VR shows the rows flat shows");
     }

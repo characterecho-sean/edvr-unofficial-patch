@@ -31,6 +31,7 @@ struct FlatPageRow {
 };
 
 inline constexpr FlatPageRow kFlatPageRows[] = {
+    {"fix", "intro_video",       FlatRowRead::Allowlist},   // flat: skip, or the game's own movie (2026-10-14)
     {"fix", "temporal_aa",       FlatRowRead::RequestedMode},
     {"fix", "temporal_aa_model", FlatRowRead::Allowlist},
     {"fix", "render_sharpness",  FlatRowRead::Allowlist},

@@ -81,6 +81,8 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "flat_hdr_crumbs.h"   // the flat HDR route's crash-safe breadcrumbs: the real Present's pair
 #include "format_support_log.h"   // the device capability log: the two hooks' reports and its closing tick
 #include "flat_temporal.h"   // flat profile discovery at owned Present
+#include "aa_compare.h"      // the AA comparison key's tick (hotkey.compare_aa)
+#include "intro_skip.h"      // the flat profile arms and closes the launch-movie skip from here (vScreen's State is not its owner there)
 #include "flat_shader_capture.h"
 #include "perf_monitor.h"
 #include "gpu_pass_profile.h"   // TEMPORARY hotkey.gpu_pass_profile: the GPU pass profiler's request
@@ -1232,6 +1234,8 @@ EDVR_BOUNDARY_TICK(tkVrRuntime, "vr_runtime");
 EDVR_BOUNDARY_TICK(tkOptimizedStation, "optimized_station");
 EDVR_BOUNDARY_TICK(tkLightGridCache, "light_grid_cache");
 EDVR_BOUNDARY_TICK(tkHotkeys, "hotkeys");
+EDVR_BOUNDARY_TICK(tkAaCompare, "aa_compare");   // hotkey.compare_aa: the AA comparison toggle (aa_compare.h); one key poll when idle
+EDVR_BOUNDARY_TICK(tkIntroSkipFlat, "intro_skip_flat");   // the flat profile's verdict for fix.intro_video = skip (intro_skip.h); one load outside flat
 EDVR_BOUNDARY_TICK(tkEliteBinds, "elite_binds");
 EDVR_BOUNDARY_TICK(tkJournalWatch, "journal_watch");
 EDVR_BOUNDARY_TICK(tkCelestialStatus, "celestial_status");
@@ -1598,6 +1602,8 @@ void presentFrameBoundary() {
     tkOptimizedStation.run([] { optimizedStationFrame(static_cast<uint32_t>(g_state->frameCounter)); });
     tkLightGridCache.run([] { lightGridCacheNoteFrame(g_state->frameCounter); });   // the frame count for the grid cache's 30 s line
     tkHotkeys.run(tickHotkeys);
+    tkIntroSkipFlat.run([] { introSkipTickFlat(); });
+    tkAaCompare.run([] { aaCompareTick(); });
     tkEliteBinds.run(tickEliteBinds);
     // The game's own journal, polled about once a second: it states the
     // boundaries EDVR used to infer -- gameplay starting (LoadGame) and
@@ -1674,6 +1680,9 @@ void presentFrameBoundary() {
             // stood-down tick leaves it set rather than losing the request.
             if (g_configRefreshRequested.exchange(false, std::memory_order_acq_rel)) vScreenForceRefreshConfig();
             else vScreenRefreshConfig();
+            // The flat profile's launch-movie skip follows the file here too: vScreen's sweep above does it only while vScreen has a State,
+            // and the skip needs no State. Idempotent beside that call (it acts on a change of the parsed mode only).
+            if (runtimeFlatProfile()) introSkipConfigure(Config::get());
             // The vertex-buffer resync's 60 s count and its ten-minute heartbeat: it needs no vScreen State, so it is asked here, after the reload, in both profiles.
             vertexResyncPoll(stampMs());
             lightGridCachePoll(stampMs());
@@ -2949,6 +2958,9 @@ void hookDevice(ID3D11Device* device) {
             // order.
             installGlitchFrameFix();
             installVScreenFixes(device, ctxMode);
+            // fix.intro_video = skip in the flat profile (2026-10-14): armed here, at device creation, before the game opens the ident. vScreen's
+            // own install does it too when it has a State; this call does not depend on that and is idempotent beside it.
+            if (runtimeFlatProfile()) introSkipConfigure(Config::get());
             flatTemporalStart(device);
             // The game's own vertex-buffer cache repair (vertex_resync_hook.cpp): a CodeHook on Frontier's input-assembler flush, once, in BOTH profiles -- the stale
             // cache is the game's, not VR's. A build that is not 332841 is one log line and nothing patched.

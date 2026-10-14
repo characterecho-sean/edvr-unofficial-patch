@@ -10992,9 +10992,64 @@ def self_test():
         ok = False
     if not self_test_switches():
         ok = False
+    if not self_test_owner_invoke():
+        ok = False
 
     print("self-test: %s" % ("ok" if ok else "FAILED"))
     return 0 if ok else 1
+
+
+def _wl_value(text):
+    return None if text == "na" else float(text)
+
+
+# native_owner_invoke: one line per OwnerService kind per frame-cycle window (src/openxr/owner_invoke_stats.h formatOwnerInvokeLine):
+# the caller's wait for a hop to the owner thread, split into queue and run. ms, or None where the line says na.
+OWNER_INVOKE_NAME = "native_owner_invoke"
+
+
+def parse_owner_invoke(msg):
+    """The fields of a native_owner_invoke line, or None when msg is not one or a field is missing or not a number."""
+    f = _fz_fields(msg)
+    if f["_name"] != OWNER_INVOKE_NAME:
+        return None
+    try:
+        return {"window": int(f["window"]), "kind": f["kind"], "calls": int(f["calls"]),
+                "per_frame": _wl_value(f["per_frame"]), "queue": _wl_pair(f["queue_p50/p95"]), "run": _wl_pair(f["run_p50/p95"]),
+                "behind_wait": int(f["behind_wait"]), "dropped": int(f["dropped"])}
+    except (KeyError, ValueError):
+        return None
+
+
+def _wl_pair(text):
+    parts = text.split("/")
+    if len(parts) != 2:
+        raise ValueError(text)
+    return tuple(_wl_value(p) for p in parts)
+
+
+def self_test_owner_invoke():
+    ok = True
+    got = parse_owner_invoke("native_owner_invoke,window=4,kind=waitPoses,calls=3,per_frame=0.300,queue_p50/p95=1.000/3.000,"
+                             "run_p50/p95=9.000/9.500,behind_wait=1,dropped=0\n")
+    want = {"window": 4, "kind": "waitPoses", "calls": 3, "per_frame": 0.3, "queue": (1.0, 3.0), "run": (9.0, 9.5),
+            "behind_wait": 1, "dropped": 0}
+    if got != want:
+        print("parse_owner_invoke steady -> %r" % (got,))
+        ok = False
+    got = parse_owner_invoke("native_owner_invoke,window=5,kind=locateHead,calls=0,per_frame=na,queue_p50/p95=na/na,"
+                             "run_p50/p95=na/na,behind_wait=0,dropped=0")
+    if got is None or got["per_frame"] is not None or got["queue"] != (None, None) or got["calls"] != 0:
+        print("parse_owner_invoke empty kind -> %r" % (got,))
+        ok = False
+    for bad in ("native_owner_invoke,window=5,kind=poll,calls=1,per_frame=0.1,queue_p50/p95=1.0/2.0,run_p50/p95=1.0,"
+                "behind_wait=0,dropped=0",
+                "native_owner_invoke,window=5,kind=poll,calls=1,per_frame=0.1,queue_p50/p95=1.0/2.0,run_p50/p95=1.0/2.0,behind_wait=0",
+                "native_wait_lead,window=5,lead_p5/p50/p95=na/na/na"):
+        if parse_owner_invoke(bad) is not None:
+            print("parse_owner_invoke accepted %r" % (bad,))
+            ok = False
+    return ok
 
 
 FLATU_FIXTURE = "flat_upscale_fixture.log"

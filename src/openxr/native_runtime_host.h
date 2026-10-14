@@ -68,6 +68,8 @@
 #include "flat_clear_state.h"
 #include "openvr_compositor.h"
 #include "compositor_publication.h"
+#include "pose_cache.h"
+#include "poll_ring.h"
 #include "space_pose.h"
 #include "seated_origin.h"
 #include "launch_centre_policy.h"
@@ -101,6 +103,8 @@ struct RuntimeOptions {
   // p50 0.006 ms.
   bool frameThreadPriorityHigh=true;
   bool frameEndOverlap=true;
+  // edvr_openxr.ini pose_cache=on|off (temporary A/B key, pose_cache.h). Off is the owner-hop path exactly as before.
+  bool poseCache=true;
 };
 template<class T,class F> XrResult enumerate(F call,std::vector<T>& out,T initial=T{}) {
   out.clear(); uint32_t n=0; XrResult r=call(0,&n,nullptr);
@@ -191,7 +195,11 @@ inline uint64_t nextRenderSizingGeneration() {
 class NativeRuntimeHost : public SystemSource, public FrameSink, public CompositorSource, public AuxiliarySource, public RuntimeBackend {
  public:
   NativeRuntimeHost(OwnerService& owner,RenderThreadDispatcher& dispatcher,RenderRoute& route,ID3D11Device* supplied=nullptr)
-      :service(owner),renderRoute(route),graphicsCalls(dispatcher),externalDevice(supplied){}
+      :service(owner),renderRoute(route),graphicsCalls(dispatcher),externalDevice(supplied){
+    // Set before the first invoke: the owner reads the pointer while it runs requests (owner_service.h setInvokeStats).
+    service.setInvokeStats(ownerInvoke,&NativeRuntimeHost::frameCycleUs);
+    poseCache.setClock(&NativeRuntimeHost::frameCycleUs);
+  }
   OwnerService& service;
   RenderRoute& renderRoute;
   CountedGraphics graphicsCalls;
@@ -216,10 +224,18 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   std::atomic<uint64_t> publishedPumps{0};
   bool serviceStopped=false,serviceFailed=false;
   // A terminal OpenXR event is surfaced through the OpenVR event queue.  The
-  // owner records it here; pollEvent is also marshalled to the owner, so no
-  // cross-thread event queue is needed.
+  // owner records it here. With the pose cache off pollEvent is marshalled to
+  // the owner; with it on, the owner fills pollRing and pollEvent drains it.
+  // quitEventPending and its generation are guarded by quitMutex_ (the owner queues, pollEvent takes): with the pose cache on, pollEvent
+  // runs on the caller's thread.
+  std::mutex quitMutex_;
   bool quitEventPending=false;
   uint64_t quitEventGeneration=0;
+  // native_pose_cache (pose_cache.h, poll_ring.h). poseCacheOn is set once at startup from pose_cache; with it off none of the
+  // publication, the ring or the caller-side answers run. pollRing is filled by the owner (fillPollRing) and drained by pollEvent.
+  std::atomic<bool> poseCacheOn{false};
+  PoseCache poseCache;
+  PollRing pollRing;
   Lifecycle tracedLifecycle=Lifecycle::Uninitialized;
   OpenVRExtendedDisplay displayInterface{*this};OpenVRChaperone chaperoneInterface{*this};
   Api api; XrInstance instance=XR_NULL_HANDLE; XrSession session=XR_NULL_HANDLE;
@@ -276,6 +292,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   SubmissionStats submitStats;
   SubmissionStats::Sample submitSample;
   FrameCycleStats frameCycles;
+  // Caller-side wait of each OwnerService::invoke, split into queue and run (native_owner_invoke, owner_invoke_stats.h).
+  std::shared_ptr<OwnerInvokeStats> ownerInvoke=std::make_shared<OwnerInvokeStats>();
   std::atomic<bool> frameCycleEnabledNoted{false},frameCycleFirstNoted{false},postSubmitFirstNoted{false};
   std::atomic<uint64_t> frameCycleWaitToken{0},frameCycleSubmitToken{0},frameCycleSequence{0};
   // Phase-0 timing (src/common/periodic_work.h) of the 30 s frame-cycle report: built by makeReport's sorts
@@ -343,7 +361,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   bool flatPanelAvailable() const {return separateGraphics()&&stereo.noticeFormatSupported();}
   SeatedSpace seated;ReferenceChanges changes;ResetEvents resetEvents;
   XrSpace frameSpace=XR_NULL_HANDLE;
-  uint64_t recenters=0,resetPolls=0,referenceChanges=0;
+  uint64_t recenters=0,referenceChanges=0;
+  // Written by pollEvent on any thread when the pose cache is on (the ring drain), so atomic.
+  std::atomic<uint64_t> resetPolls{0};
   XrResult lastResetResult=XR_SUCCESS;
   XrTime lastResetTime=0;
   float resetPositionError=0,resetYawError=0;
@@ -454,7 +474,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     float orientation[4]{0,0,0,1};
     double speedDegPerSec=0;
   } latestPoseFrame;
-  void dropPoseFrame() {latestPoseFrame=PoseFrame{};}
+  // Every place that drops the frame the game holds also drops the pose publication made from it (pose_cache.h).
+  // `why` is only the log's category (pose_cache.h PoseInvalidation); every call withdraws the publication.
+  void dropPoseFrame(PoseInvalidation why=PoseInvalidation::Other) {latestPoseFrame=PoseFrame{};poseCache.invalidate(why);}
   // The clock Elite's "now" pose calls read (a rig substitutes its own so "now" is a number it chooses), and the explicit-time locates the runtime
   // refused with XR_ERROR_TIME_INVALID and that were located at now + prediction instead.
   CounterNow headClock=counterNow;
@@ -798,6 +820,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     nativeTracePrintf("native_frame_end_overlap,enabled=%u,reason=%s\n",
       unsigned(frameEndOverlapEnabled&&startupOptions.separateDevice),
       !frameEndOverlapEnabled?"config":!startupOptions.separateDevice?"borrowed_device":"config");
+    poseCacheOn.store(startupOptions.poseCache,std::memory_order_release);
+    nativeTracePrintf("native_pose_cache_config,enabled=%u,key=pose_cache\n",unsigned(startupOptions.poseCache));
     const auto openBegan=StepClock::now();
     if(!open(startupOptions))return vr::VRInitError_Init_Internal;
     const double openMs=stepMs(openBegan);
@@ -874,6 +898,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   }
   void pumpEvents() {
     if(GetCurrentThreadId()!=ownerThread||!runtimeGeneration||serviceFailed)return;
+    fillPollRing();
     // owner_service.h's idle callback: fires when the queue is empty, but
     // also on its own 5 ms cadence right after ANY request finishes, whether
     // or not another one is already queued behind it. A frame_end_overlap
@@ -953,6 +978,80 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     latestPoseFrame.speedDegPerSec=latestPoseFrame.speedKnown?angularSpeedDegrees(angularVelocity.x,angularVelocity.y,angularVelocity.z):0.0;
     poseGap.noteWait();
     poseGap.flushIfDue(nowMs,sink);
+  }
+  // Owner, after a waitPoses published its frame (publishPoseGap has set latestPoseFrame). Locates the two instants an Elite "now" call can
+  // be answered at (pose_cache.h) and publishes them under the keys they were made with. A failure to locate or to read the clock leaves no
+  // publication, so every display call takes the hop, which is the answer the cache must equal.
+  void publishPoseCache() {
+    if(GetCurrentThreadId()!=ownerThread)return;
+    // Every failure below invalidates. The previous publication is kept until publish replaces it: its `next` slot is what the in-wait
+    // error is measured against.
+    const auto fail=[&]{poseCache.invalidate();};
+    if(!latestPoseFrame.valid||latestPoseFrame.displayTime<=0||!seated.space()){fail();return;}
+    const LocatorDispatch dispatch{api.convertTime,api.locateSpace};
+    const XrTime display=latestPoseFrame.displayTime;const XrDuration period=latestPoseFrame.period;
+    XrTime t1=0,t2=0,nowAt=0;HeadLocatorStage stage=HeadLocatorStage::None;
+    // The same arithmetic as answerTime (head_pose_time.h): display + period, unless the cut lies between them.
+    if(!nextPredictionTime(display,period,t1)||changes.crosses(display,t1)){fail();return;}
+    if(HeadLocator{}.currentTime(dispatch,instance,headClock,&stage,boundary.estimateNow(),nowAt)!=XR_SUCCESS){fail();return;}
+    PoseCacheRecord fresh;
+    fresh.keys={geometryGeneration,poses.read().originGeneration};
+    fresh.display=display;fresh.period=period;fresh.nowAtPublish=nowAt;
+    fresh.frameOrientationKnown=latestPoseFrame.orientationKnown;
+    for(unsigned i=0;i<4;++i)fresh.frameOrientation[i]=latestPoseFrame.orientation[i];
+    fresh.speedKnown=latestPoseFrame.speedKnown;fresh.speedDegPerSec=latestPoseFrame.speedDegPerSec;
+    if(!locatePoseCacheSlot(dispatch,t1,fresh.now)){fail();return;}
+    // The next frame's answer, one period further on. Optional: without it a call made during the next wait takes the hop.
+    if(nextPredictionTime(t1,period,t2)&&!changes.crosses(t1,t2))locatePoseCacheSlot(dispatch,t2,fresh.next);
+    poseCache.publish(fresh,poseCache.clockUs());
+  }
+  bool locatePoseCacheSlot(const LocatorDispatch& dispatch,XrTime target,PoseCacheSlot& slot) {
+    XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
+    if(HeadLocator{}.locateAt(dispatch,view,seated.space(),target,head)!=XR_SUCCESS)return false;
+    vr::TrackedDevicePose_t pose{};
+    if(!headPoseFrom(head,pose))return false;
+    slot=PoseCacheSlot{};slot.valid=true;slot.target=target;slot.pose=pose;
+    slot.orientation[0]=head.pose.orientation.x;slot.orientation[1]=head.pose.orientation.y;
+    slot.orientation[2]=head.pose.orientation.z;slot.orientation[3]=head.pose.orientation.w;
+    return true;
+  }
+  // Owner (waitPoses, each idle pump). Moves queued seated resets of the current geometry generation into pollRing while it has room; the
+  // ring's drop policy is in poll_ring.h.
+  void fillPollRing() {
+    if(GetCurrentThreadId()!=ownerThread||!poseCacheOn.load(std::memory_order_acquire))return;
+    pollRing.retireExcept(geometryGeneration);
+    while(pollRing.room()) {
+      PollRing::Item item;item.generation=geometryGeneration;
+      if(!resetEvents.takeFor(geometryGeneration,item.reset))break;
+      pollRing.push(item);
+    }
+  }
+  // pollEvent with the pose cache on: any thread, no owner hop. A queued quit first (guarded by quitMutex_), then the ring's head reset.
+  bool pollEventLocal(uint64_t generation,vr::ETrackingUniverseOrigin origin,vr::VREvent_t& event,vr::TrackedDevicePose_t& pose) {
+    {
+      std::lock_guard<std::mutex> lock(quitMutex_);
+      if(quitEventPending&&quitEventGeneration==generation) {
+        event={};event.eventType=vr::VREvent_Quit;
+        event.trackedDeviceIndex=vr::k_unTrackedDeviceIndexInvalid;
+        event.eventAgeSeconds=0.0f;pose=invalidHeadPose(true);
+        quitEventPending=false;return true;
+      }
+    }
+    PollRing::Item item;
+    if(!pollRing.pop(generation,item))return false;
+    seatedResetEvent(item.reset,origin,poses.read().originGeneration,GetTickCount64(),event,pose);
+    ++resetPolls;
+    return true;
+  }
+  // Caller-side pose cache and poll ring: one native_pose_cache line per frame-cycle window, only while the key is on.
+  void emitPoseCache(uint64_t window) {
+    if(!poseCacheOn.load(std::memory_order_acquire))return;
+    uint64_t drained=0,dropped=0;pollRing.takeCounts(drained,dropped);
+    PoseCacheReport report{};poseCache.takeWindow(report);
+    char line[480]{};
+    if(formatPoseCacheLine(window,report,drained,dropped,line,sizeof line))nativeTracePrintf("%s",line);
+    char drops[240]{};
+    if(formatPoseInvalidationLine(window,report,drops,sizeof drops))nativeTracePrintf("%s",drops);
   }
   // Whether the runtime's hidden-area mesh may be handed to the game this frame.
   // It is cut for the runtime's own frustum and Elite reads it once, so a trim,
@@ -1121,6 +1220,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(buffer.type==XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING) {
       const auto& event=*reinterpret_cast<const XrEventDataReferenceSpaceChangePending*>(&buffer);
       if(!host.changes.note(event))nativeTracePuts("error,reference_change_policy");
+      // A cut is now pending: a publication made before it may hold a slot on the far side of it (publishPoseCache checks crosses() only when it
+      // publishes). Withdraw it; the next wait publishes under the new rule, and the calls in between take the hop, which checks crosses() itself.
+      host.poseCache.invalidate(PoseInvalidation::RuntimeRecentre);
     }
     if(buffer.type==XR_TYPE_EVENT_DATA_PERF_SETTINGS_EXT && host.perfSettingsExtension) {
       const auto& event=*reinterpret_cast<const XrEventDataPerfSettingsEXT*>(&buffer);
@@ -1166,7 +1268,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     features.invalidate();previousPairValid=false;
     timingInvalidate();
     geometry.invalidate(geometryGeneration);frameGeometryAvailable=false;
-    dropPoseFrame();
+    dropPoseFrame(poseInvalidationForReason(reason));
     if(originInvalidationNotes++<16)nativeTracePrintf("geometry_invalidated,reason=%s,generation=%llu,recenters=%llu,reference_changes=%llu\n",
       reason,(unsigned long long)geometryGeneration,(unsigned long long)recenters,(unsigned long long)referenceChanges);
     return poses.resetOrigin(compositorGeneration);
@@ -1197,7 +1299,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         cycleShape.sceneReady=featureFrameKnown&&featureFrame.sceneReady?1u:0u;
         for(unsigned i=0;i<2;++i){const auto submitted=fovTrim.lastSubmitted(i);cycleShape.width[i]=submitted.width;cycleShape.height[i]=submitted.height;cycleShape.outputWidth[i]=sizes[i].recommendedImageRectWidth;cycleShape.outputHeight[i]=sizes[i].recommendedImageRectHeight;}
         frameCycles.waitOwnerEnd(cycleToken,frameCycleUs());frameCycleWaitToken.store(0,std::memory_order_release);
-      });
+      },OwnerCallKind::WaitPoses);
       // Start after the route returns so the dispatch/rendezvous is outside
       // the application interval. Direct owner calls have no producer-side
       // route return and therefore do not claim this interval.
@@ -1296,6 +1398,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       nativeTracePrintf("native_pacing,mode=%s,sequence=%llu,changes=%llu\n",
         pacing==FramePacing::Deferred?"deferred":"runtime",
         (unsigned long long)(frameSequenceOffset+compositorWaits),(unsigned long long)pacingChanges);}
+    // A call made from here until the publish below is answered from the cache's `next` slot (pose_cache.h).
+    if(poseCacheOn.load(std::memory_order_acquire))poseCache.beginWait();
     lastCompositorResult=boundary.waitAndBegin(pacing);
     if(lastCompositorResult!=XR_SUCCESS&&lastCompositorResult!=XR_FRAME_DISCARDED&&lastCompositorResult!=XR_SESSION_LOSS_PENDING)
       return fail(lastCompositorResult);
@@ -1455,6 +1559,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     out=snapshot;lastCompositorResult=XR_SUCCESS;
     publishPoseGap(frame.predictedDisplayTime,frame.predictedDisplayPeriod,located.headPose,render.pose.bPoseIsValid,
       velocity.velocityFlags,velocity.angularVelocity,GetTickCount64(),[](const char* gapLine){nativeTracePuts(gapLine);});
+    if(poseCacheOn.load(std::memory_order_acquire))publishPoseCache();
     if(timingFrameActive && FAILED(timing.waitEnd(timingSequence,true,static_cast<int64_t>(frame.predictedDisplayPeriod))))
       timingInvalidate();
     if(timingFrameActive) {
@@ -1466,6 +1571,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         timing.publishDeviceGpu(missing);
       }
     }
+    fillPollRing();
     return vr::VRCompositorError_None;
   }
   bool setTrackingSpace(uint64_t generation,vr::ETrackingUniverseOrigin origin) override {
@@ -1803,7 +1909,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         return accepted;
       }
       bool result=false;
-      const bool dispatched=service.invoke([&]{result=handoff(generation);});
+      const bool dispatched=service.invoke([&]{result=handoff(generation);},OwnerCallKind::Submit);
       frameCycles.noteHandoff(began,frameCycleUs(),sequence,caller,dispatched&&result);
       return dispatched&&result;
     }
@@ -2111,6 +2217,15 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   static uint64_t frameCycleUs() noexcept {
     return edvrNativeTraceNowUs();
   }
+  // Caller-side owner hops, one native_owner_invoke line per kind at each frame-cycle window. frames is the window's valid cycles.
+  void emitOwnerInvoke(uint64_t window,unsigned frames) {
+    OwnerInvokeStats::KindReport rows[OwnerInvokeStats::kinds]{};
+    ownerInvoke->takeWindow(rows);
+    for(unsigned k=0;k<OwnerInvokeStats::kinds;++k){
+      char line[320]{};
+      if(formatOwnerInvokeLine(window,OwnerCallKind(k),rows[k],frames,line,sizeof line))nativeTracePrintf("%s",line);
+    }
+  }
   // One line per completed cycle longer than twice the runtime's last real
   // predicted period: the outlier a 30-second window's mean/p95 hides. The
   // phases are this one cycle's, not a window's. sequence is the timing
@@ -2314,6 +2429,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     maybeLongCycleCounts();
     if(!frameCycleFirstNoted&&frameCycles.firstComplete()) {frameCycleFirstNoted=true;nativeTracePrintf("native_frame_cycle,first_complete=1\n");}
     FrameCycleStats::Report r{};if(!frameCycles.takeReport(r))return;
+    emitOwnerInvoke(r.window,r.valid);
+    emitPoseCache(r.window);
     const uint64_t writeBegan=frameCycleUs();
     const auto& c=r.cycle;const double validSum=c.mean*double(r.valid);
     nativeTracePrintf("native_frame_cycle_window,window=%llu,boundary=host_wait_return_to_next_host_wait_return,admitted=%llu,valid=%u,first=%llu,last=%llu,elapsed_ms=%llu,valid_cycle_sum_ms=%.3f,caller_wait_fps=%.3f,valid_sample_fps=%.3f,caller_thread=%u,wait_thread=%u,thread_consistent=%u,input=%ux%u/%ux%u,output=%ux%u/%ux%u,pacing=%u,should_render=%u,scene_ready=%u,generation=%llu,feature_epoch=%llu,missing_clock=%llu,missing_reentrant=%llu,missing_thread=%llu,missing_sequence=%llu,missing_partial=%llu,missing_duplicate_eye=%llu,missing_direct_owner=%llu,missing_scope=%llu,missing_overflow=%llu,late_frames=%llu,frame_end_overlap=%u\n",
@@ -2459,7 +2576,23 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     poseGap.note(sample);
   }
   bool locateHeadFor(uint64_t generation,vr::ETrackingUniverseOrigin origin,float prediction,const HeadCall& call,vr::TrackedDevicePose_t& out) override {
-    if(!service.isOwner()) {bool result=false;return service.invoke([&]{result=locateHeadFor(generation,origin,prediction,call,out);})&&result;}
+    // A display call under a live publication is answered from it, on this thread, with no owner hop (pose_cache.h). Any other call, and any
+    // this cannot answer, takes the hop below unchanged. Not on the owner: the hop re-enters here on the owner thread, and that second
+    // pass must locate, not answer from the publication it was sent to replace.
+    if(call.display&&origin==vr::TrackingUniverseSeated&&poseCacheOn.load(std::memory_order_acquire)&&!service.isOwner()) {
+      PoseCacheAnswer answer;PoseCacheMiss why=PoseCacheMiss::Unpublished;
+      if(poseCache.answer(generation,poses.read().originGeneration,call.rva,answer,why)) {
+        PoseGapStats::Sample sample{};sample.thread=call.thread;sample.rva=call.rva;sample.predictionSec=prediction;sample.located=true;
+        sample.gapKnown=true;sample.gapMs=double(answer.target-answer.display)/1e6;
+        if(answer.pose.bPoseIsValid&&answer.frameOrientationKnown){
+          sample.angleKnown=true;sample.angleDeg=quaternionAngleDegrees(answer.frameOrientation,answer.returnedOrientation);
+        }
+        if(answer.speedKnown){sample.speedKnown=true;sample.speedDegPerSec=answer.speedDegPerSec;}
+        poseGap.note(sample);
+        out=answer.pose;return true;
+      }
+    }
+    if(!service.isOwner()) {bool result=false;return service.invoke([&]{result=locateHeadFor(generation,origin,prediction,call,out);},OwnerCallKind::LocateHead)&&result;}
     PoseGapStats::Sample sample{};sample.thread=call.thread;sample.rva=call.rva;sample.predictionSec=prediction;
     const bool located=locateHeadOwned(generation,origin,prediction,call,out,sample);
     sample.located=located;
@@ -2607,8 +2740,11 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     XrPosef origin{};
     if(overrideOrigin)origin=*overrideOrigin;
     else if(!seatedOriginFromHead(head.pose,head.locationFlags,origin)){lastResetResult=XR_ERROR_POSE_INVALID;return false;}
+    // The publication is withdrawn BEFORE the seated space is replaced (not only by invalidateOrigin below): no cached answer in the old space
+    // can be served from the first instant the space changes. Owner thread, so no publish can follow until this call is done.
+    poseCache.invalidate(poseInvalidationForReason(reason));
     lastResetResult=seated.replace(origin);
-    if(lastResetResult!=XR_SUCCESS){geometry.invalidate(geometryGeneration);poses.invalidate(compositorGeneration);dropPoseFrame();return false;}
+    if(lastResetResult!=XR_SUCCESS){geometry.invalidate(geometryGeneration);poses.invalidate(compositorGeneration);dropPoseFrame(poseInvalidationForReason(reason));return false;}
     currentOrigin=seatPoseFromXr(origin);
     if(!invalidateOrigin(reason)){lastResetResult=XR_ERROR_LIMIT_REACHED;return false;}
     // Verify and attach an event-time sample, not a later cached render pose.
@@ -2622,6 +2758,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(notifyGame&&!resetEvents.push(geometryGeneration,poses.read().originGeneration,GetTickCount64(),atReset.pose)){
       lastResetResult=XR_ERROR_LIMIT_REACHED;return false;
     }
+    fillPollRing();
     ++recenters;return true;
   }
   // intro_panel.cpp's one-shot ask (frame_flag.h, requestIntroRecentre):
@@ -3036,7 +3173,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     return true;
   }
   bool pollEvent(uint64_t generation,vr::ETrackingUniverseOrigin origin,vr::VREvent_t& event,vr::TrackedDevicePose_t& pose) override {
-    if(!service.isOwner()) {bool result=false;return service.invoke([&]{result=pollEvent(generation,origin,event,pose);})&&result;}
+    if(poseCacheOn.load(std::memory_order_acquire))return pollEventLocal(generation,origin,event,pose);
+    if(!service.isOwner()) {bool result=false;return service.invoke([&]{result=pollEvent(generation,origin,event,pose);},OwnerCallKind::PollEvent)&&result;}
     if(generation!=geometryGeneration)return false;
     if(quitEventPending&&quitEventGeneration==generation) {
       event={};event.eventType=vr::VREvent_Quit;
@@ -3048,7 +3186,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(found)++resetPolls;return found;
   }
   void unsupported(unsigned slot) noexcept override {nativeTracePrintf("system_unavailable,slot=%u\n",slot);}
-  ~NativeRuntimeHost() {close();}
+  // The owner shares ownerInvoke (the constructor's setInvokeStats). Detach it once this host is gone, so the owner stops counting for a host
+  // that no longer exists; an invoke already in flight keeps its own reference.
+  ~NativeRuntimeHost() {close();service.setInvokeStats(std::shared_ptr<OwnerInvokeStats>{},nullptr);}
   void invalidateEyeTreatments() { temporal.invalidate(); sharpen.invalidate(); fss.invalidate(); deferredEye={}; }
   void publishFatalFailure(XrResult error,const char* operation) noexcept {
     clearOverlapHandoff();
@@ -3076,8 +3216,11 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     return true;
   }
   void queueQuitEvent(XrResult r) noexcept {
-    if(quitEventPending&&quitEventGeneration==geometryGeneration)return;
-    quitEventPending=true;quitEventGeneration=geometryGeneration;
+    {
+      std::lock_guard<std::mutex> lock(quitMutex_);
+      if(quitEventPending&&quitEventGeneration==geometryGeneration)return;
+      quitEventPending=true;quitEventGeneration=geometryGeneration;
+    }
     nativeTracePrintf("openvr_quit_event,generation=%llu,result=%d\n",
       (unsigned long long)geometryGeneration,int(r));
   }
@@ -3175,7 +3318,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     geometry.retire(geometryGeneration);
     poses.retire(compositorGeneration);
     resetEvents.retire(geometryGeneration);changes.clear();
-    quitEventPending=false;quitEventGeneration=0;
+    {std::lock_guard<std::mutex> lock(quitMutex_);quitEventPending=false;quitEventGeneration=0;}
+    pollRing.clear();
     loading={};
     if(separateGraphics()) {
       // Rendering may still reference capture outputs. Drain the XR context

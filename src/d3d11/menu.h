@@ -71,10 +71,23 @@ bool menuFlatPadOwnsHotkey(uint16_t buttons, uint8_t trigger);
 // restart snapshot, and toast what changed from outside the menu.
 void menuNoteConfigReloaded();
 
+// A short notice from outside the menu (the AA comparison key's "AA off (comparison)..."). VR: a toast, in place of any queued AA toast
+// and gated on menu.toasts like every toast. Flat, which has no toasts: a small card in the screen's upper left for about 2.5 s, drawn
+// from the menu's own raster, and dropped if the menu is open. Logged either way, so a notice that did not show says why.
+void menuShowNotice(const char* text);
+
+// The caller changed `dotted` itself (a runtime override, not an ini write), so the reload that follows must not toast it as an edit
+// made from outside. One-shot, like the menu's own write mark.
+void menuNoteOwnChange(const char* dotted);
+
 // Does the menu want the config poll to run NOW rather than at its cadence?
 // True once after each write the menu made, so the change lands this frame
 // through the same configure path a hand edit takes.
 bool menuTakeConfigPollRequest();
+
+// Ask for that poll now without the menu having written anything: for a change made in memory (Config's runtime override, the AA
+// comparison key), whose reload reports it and runs the configure sweep every module re-reads its setting in.
+void menuRequestConfigPoll();
 
 // An action row for the Instruments page: `fn(user)` runs on the frame
 // thread when the row is activated. Registered by device_hook for the

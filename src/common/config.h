@@ -51,7 +51,8 @@ public:
         return name;
     }
 
-    // Returns true if the file changed and values were re-read.
+    // Returns true if the file changed and values were re-read -- or if a runtime override was set or cleared since the last
+    // call, so the caller's configure sweep runs exactly as it does for a hand edit.
     bool reloadIfChanged();
 
     // Re-picks the settings file for the profile now active (the caller flips it first) and reads it from defaults. True when the file changed.
@@ -72,8 +73,20 @@ public:
     // is the failure that is hardest to attribute from a log.
     int         getIntInRange(const char* key, int def, int lo, int hi) const;
     std::string getString(const char* key, const char* def) const;
-    // Diagnostic intent, before scope filtering; never enables a feature.
+    // Diagnostic intent, before scope filtering; never enables a feature. Honours a runtime override of fix.temporal_aa.
     std::string requestedTemporalMode() const;
+    // The same read with the runtime override ignored: what the settings FILE says (what a restore goes back to).
+    std::string configuredTemporalMode() const;
+
+    // A runtime-only override of one key (aa_compare.h: the AA comparison key). It lives in memory beside the parsed file and
+    // NEVER reaches it: no ini is written, a reload of the file leaves it in place, and getString / requestedTemporalMode answer
+    // the override instead of the file while it is set. A profile switch clears every override (switchProfile): the other
+    // profile reads another file and the comparison belongs to the one it was made in. Setting or clearing moves generation()
+    // and makes the next reloadIfChanged() report a change, so the frame loop's configure sweep re-reads every module's
+    // setting. The key is the dotted, lowercase name ("fix.temporal_aa"). Unlike set(), which is for rigs, the DLLs use this.
+    void setRuntimeOverride(const char* key, const char* value);
+    void clearRuntimeOverride(const char* key);
+    bool hasRuntimeOverride(const char* key) const;
 
     // The config audit's data: every key this build reads or documents
     // (lowercase), and the moved-from map ({old, new} dotted names) parsed at
@@ -160,6 +173,9 @@ private:
 
     // generation(): bumped under the exclusive lock after the values it describes are in place.
     std::atomic<uint32_t> m_generation{0};
+
+    // A runtime override was set or cleared since reloadIfChanged() last said so.
+    std::atomic<bool> m_overrideDirty{false};
 };
 
 // Directory containing the given loaded module, without trailing slash.

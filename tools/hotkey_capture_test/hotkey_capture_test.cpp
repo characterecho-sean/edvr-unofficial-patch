@@ -1878,7 +1878,7 @@ void testRows() {
         for (int k = 0; k < n; ++k) if (v[k] == i) return true;
         return false;
     };
-    for (const char* key : {"menu", "explorer_cam", "dump_camera"}) {
+    for (const char* key : {"menu", "explorer_cam", "compare_aa", "dump_camera"}) {
         const int i = rowIndex(key);
         checkf(i >= 0, "hotkey.%s has a generated row", key);
         checkf(i >= 0 && kMenuRows[i].kind == MenuKind::Hotkey && kMenuRows[i].tier == MenuTier::Fix &&
@@ -1896,7 +1896,7 @@ void testRows() {
         checkf(!contains(all, nEveryone, i), "hotkey.%s is NOT on the page with developer mode off", key);
         checkf(contains(dev, nDev, i), "hotkey.%s is on the page with developer mode on", key);
     }
-    check(nEveryone == 3 && nDev == 5, "three rows for everyone, five in developer mode");
+    check(nEveryone == 4 && nDev == 6, "four rows for everyone (menu, Explorer Cam, AA comparison, camera history), six in developer mode");
     check(rowIndex("read_game_bindings") < 0, "a plain [hotkey] setting is not a row");
     // Table order is the page's order: the menu key first.
     check(nEveryone > 0 && strcmp(kMenuRows[all[0]].key, "menu") == 0, "the menu key leads the page");
