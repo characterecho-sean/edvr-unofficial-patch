@@ -927,8 +927,6 @@ struct CodePatch {
 };
 CodePatch g_panelPatch{"panels", nofoot::kPanelPatchRva, {nofoot::kPanelPatchFrom[0], nofoot::kPanelPatchFrom[1]},
                        {nofoot::kPanelPatchTo[0], nofoot::kPanelPatchTo[1]}, nofoot::kPanelPatchLen, "76 73 -> 90 90"};
-CodePatch g_meshPatch{"hud mesh", nofoot::kMeshPatchRva, {nofoot::kMeshPatchFrom[0], nofoot::kMeshPatchFrom[1]},
-                      {nofoot::kMeshPatchTo[0], nofoot::kMeshPatchTo[1]}, nofoot::kMeshPatchLen, "74 -> EB"};
 
 // A store of `len` bytes (2, or 1) at `address`, under VirtualProtect to PAGE_EXECUTE_READWRITE and back, with the instruction cache flushed.
 __declspec(noinline) bool guardedStoreBytes(uintptr_t address, uint16_t value, size_t len) noexcept {
@@ -1016,6 +1014,104 @@ void codePatchTick(CodePatch& p, bool want, const char* reason) {
     Log::get().note("native on foot %s: patch EliteDangerous64.exe+0x%llX restored (%s; %02X %02X -> %02X %02X)", p.name,
                     static_cast<unsigned long long>(p.rva), reason, static_cast<unsigned>(p.to[0]), static_cast<unsigned>(p.to[1]),
                     static_cast<unsigned>(p.from[0]), static_cast<unsigned>(p.from[1]));
+}
+
+// ---- F10: the mesh unit (TEMPORARY; approved by Sean 2026-10-14) ----------------------------------------------------------------------
+// Two sites, applied and restored together: site 1 (+0x1A36453) 74 2A -> EB 2A (the first byte); site 2 (+0x1A149A8) the byte 80 -> 78 in the
+// six bytes FF 90 80 00 00 00 at +0x1A149A6. Both are verified before either is written; if the second write fails, the first is put back.
+// A restore writes back only when both read as this unit left them. Scope as the panels patch.
+bool g_meshApplied = false;               // frame thread only
+std::string g_meshRefusal;                // frame thread only
+bool g_meshRestoreNoted = false;          // frame thread only
+
+void refuseMesh(const std::string& why) {
+    if (why == g_meshRefusal) return;
+    g_meshRefusal = why;
+    Log::get().note("native on foot hud mesh: patch EliteDangerous64.exe+0x%llX, +0x%llX NOT patched -- %s. The game's bytes are left as they are.",
+                    static_cast<unsigned long long>(nofoot::kMeshPatchRva), static_cast<unsigned long long>(nofoot::kMeshSite2Rva + nofoot::kMeshSite2ByteOff),
+                    why.c_str());
+}
+
+// `want`: the unit should be applied now. `reason` (a literal) says why it is being put back.
+void meshUnitTick(bool want, const char* reason) {
+    const uintptr_t a1 = g_base + nofoot::kMeshPatchRva;
+    const uintptr_t a2 = g_base + nofoot::kMeshSite2Rva;
+    const uintptr_t b2 = a2 + nofoot::kMeshSite2ByteOff;
+    if (want) {
+        if (g_meshApplied || g_install != InstallState::Armed) return;
+        const char* idWhy = nullptr;
+        if (!checkIdentity(g_base, &idWhy)) {
+            refuseMesh(std::string("the PE identity check failed (") + idWhy + ")");
+            return;
+        }
+        uint8_t c1[2] = {};
+        if (!guardedRead(a1, c1, 2)) {
+            refuseMesh("site 1 could not be read");
+            return;
+        }
+        if (c1[0] != nofoot::kMeshPatchFrom[0] || c1[1] != nofoot::kMeshPatchFrom[1]) {
+            char b[160];
+            std::snprintf(b, sizeof(b), "site 1 reads %02X %02X, not 74 2A, so it is left alone", static_cast<unsigned>(c1[0]), static_cast<unsigned>(c1[1]));
+            refuseMesh(b);
+            return;
+        }
+        uint8_t c2[6] = {};
+        if (!guardedRead(a2, c2, 6)) {
+            refuseMesh("site 2 could not be read");
+            return;
+        }
+        for (size_t i = 0; i < 6; ++i) {
+            if (c2[i] != nofoot::kMeshSite2Expect[i]) {
+                char b[200];
+                std::snprintf(b, sizeof(b), "site 2 reads %02X %02X %02X %02X %02X %02X, not FF 90 80 00 00 00, so it is left alone",
+                              static_cast<unsigned>(c2[0]), static_cast<unsigned>(c2[1]), static_cast<unsigned>(c2[2]), static_cast<unsigned>(c2[3]),
+                              static_cast<unsigned>(c2[4]), static_cast<unsigned>(c2[5]));
+                refuseMesh(b);
+                return;
+            }
+        }
+        if (!storeCodeBytes(a1, 0xEB, 1)) {
+            refuseMesh("site 1 is not writable");
+            return;
+        }
+        if (!storeCodeBytes(b2, nofoot::kMeshSite2Patched[nofoot::kMeshSite2ByteOff], 1)) {
+            storeCodeBytes(a1, nofoot::kMeshPatchFrom[0], 1);   // put site 1 back: the unit is all or nothing
+            refuseMesh("site 2 is not writable (site 1 put back)");
+            return;
+        }
+        g_meshApplied = true;
+        g_meshRefusal.clear();
+        Log::get().note("native on foot hud mesh: patch EliteDangerous64.exe+0x%llX 74 -> EB, +0x%llX 80 -> 78",
+                        static_cast<unsigned long long>(nofoot::kMeshPatchRva), static_cast<unsigned long long>(b2));
+        return;
+    }
+    if (!g_meshApplied) {
+        g_meshRefusal.clear();
+        return;
+    }
+    uint8_t c1[2] = {};
+    uint8_t c2[6] = {};
+    if (!guardedRead(a1, c1, 2) || !guardedRead(a2, c2, 6)) return;   // retried next frame
+    bool site2Ours = true;
+    for (size_t i = 0; i < 6; ++i) site2Ours = site2Ours && c2[i] == nofoot::kMeshSite2Patched[i];
+    if (!(c1[0] == nofoot::kMeshPatchTo[0] && c1[1] == nofoot::kMeshPatchTo[1]) || !site2Ours) {
+        g_meshApplied = false;
+        Log::get().note("native on foot hud mesh: patch NOT restored -- the bytes are not this unit's (site 1 %02X %02X, site 2 %02X %02X %02X %02X %02X %02X; restore: %s)",
+                        static_cast<unsigned>(c1[0]), static_cast<unsigned>(c1[1]), static_cast<unsigned>(c2[0]), static_cast<unsigned>(c2[1]),
+                        static_cast<unsigned>(c2[2]), static_cast<unsigned>(c2[3]), static_cast<unsigned>(c2[4]), static_cast<unsigned>(c2[5]), reason);
+        return;
+    }
+    if (!storeCodeBytes(b2, nofoot::kMeshSite2Expect[nofoot::kMeshSite2ByteOff], 1) || !storeCodeBytes(a1, nofoot::kMeshPatchFrom[0], 1)) {
+        if (!g_meshRestoreNoted) {
+            g_meshRestoreNoted = true;
+            Log::get().note("native on foot hud mesh: patch could not be restored (%s); retrying each frame.", reason);
+        }
+        return;
+    }
+    g_meshApplied = false;
+    g_meshRestoreNoted = false;
+    Log::get().note("native on foot hud mesh: patch EliteDangerous64.exe+0x%llX EB -> 74, +0x%llX 78 -> 80 (restored: %s)",
+                    static_cast<unsigned long long>(nofoot::kMeshPatchRva), static_cast<unsigned long long>(b2), reason);
 }
 
 // ---- F9: three read-only probes (TEMPORARY) -----------------------------------------------------------------------------------------
@@ -1483,7 +1579,7 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
     const char* f9Why = !g_hudOverrideHeld ? "the first-person HUD override is off" : !nativeOnFootActive() ? "native stereo on foot ended" : "the game session ended";
     codePatchTick(g_panelPatch, g_panelsKeyOn.load(std::memory_order_relaxed) && f9Active,
                   g_panelsKeyOn.load(std::memory_order_relaxed) ? f9Why : "fix.native_on_foot_panels is off");
-    codePatchTick(g_meshPatch, g_meshKeyOn.load(std::memory_order_relaxed) && f9Active,
+    meshUnitTick(g_meshKeyOn.load(std::memory_order_relaxed) && f9Active,
                   g_meshKeyOn.load(std::memory_order_relaxed) ? f9Why : "fix.native_on_foot_hud_mesh is off");
     f9ProbeTick(now);
     neckLine(now);
@@ -1493,7 +1589,7 @@ void nativeOnFootShutdown() {
     gateByteTick(false, "the game is shutting down");
     hudOverrideTick(false, "the game is shutting down");
     codePatchTick(g_panelPatch, false, "the game is shutting down");
-    codePatchTick(g_meshPatch, false, "the game is shutting down");
+    meshUnitTick(false, "the game is shutting down");
 }
 
 }  // namespace edvr

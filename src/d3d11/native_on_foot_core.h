@@ -145,6 +145,12 @@ constexpr uintptr_t kMeshPatchRva = 0x1A36453;
 constexpr size_t kMeshPatchLen = 1;
 constexpr uint8_t kMeshPatchFrom[2] = {0x74, 0x2A};
 constexpr uint8_t kMeshPatchTo[2] = {0xEB, 0x2A};
+// Site 2 of the mesh unit (F10): the HRC's creation gate. The six bytes at +0x1A149A6 are the call qword ptr [rax+0x80] on dep = [HRC+0x1D0]
+// (the predicate in slot 0x1A8D190); the patch changes the call's displacement byte at +0x1A149A8 from 0x80 to 0x78 (the slot 0x78).
+constexpr uintptr_t kMeshSite2Rva = 0x1A149A6;
+constexpr uint8_t kMeshSite2Expect[6] = {0xFF, 0x90, 0x80, 0x00, 0x00, 0x00};
+constexpr uint8_t kMeshSite2Patched[6] = {0xFF, 0x90, 0x78, 0x00, 0x00, 0x00};
+constexpr size_t kMeshSite2ByteOff = 2;
 // Probes. P1: panel submit (rcx = set, rdx = view, r8b = flag); P2: the HRC submit (six arguments; rcx = HRC); P3: the per-instance submit.
 constexpr size_t kF9ProbeCount = 3;
 constexpr size_t kF9Hrc = 3;
