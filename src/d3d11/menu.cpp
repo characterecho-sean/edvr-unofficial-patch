@@ -1469,6 +1469,15 @@ void buildPages() {
         s.pages.push_back(p);
     }
     {
+        // Native on foot (2026-10-14): every native on-foot key, temporary test rows, next to Explorer Cam. The rows are the
+        // `menu native_on_foot` rows of edvr.ini, in the file's order; no group headings, the page is the group.
+        Page p;
+        p.name = "Native on foot";
+        addSettingRows(p, MenuTier::Fix, "native_on_foot", false);
+        firstSelectable(p);
+        s.pages.push_back(p);
+    }
+    {
         // The hotkeys: the rows the generator made from [hotkey]'s annotations. A
         // `# ui:` row is here always, a `# dev:` row only with developer mode on
         // (hotkeyPageRows says which, and a rig pins it). No group headings: the

@@ -176,5 +176,7 @@ constexpr uint8_t kInstSubmitPrologue[kInstSubmitPrologueBytes] = {
 // View (the instance submit's rdx): dword [+0x8E8] (the view id); floats [+0x50], [+0x54], [+0x58] (the camera position).
 constexpr uint32_t kF9HrcG291Off = 0x291, kF9HrcG470Off = 0x470, kF9HrcG4C0Off = 0x4C0, kF9HrcInst0Off = 0x418, kF9HrcDepOff = 0x1D0,
                    kF9ViewIdOff = 0x8E8, kF9ViewCamOff = 0x50;
+// F11: the view's rotation rows start at +0x20 (the camera position follows at +0x50); the HRC's world matrix is 16 floats at +0x430.
+constexpr uint32_t kF9ViewRotOff = 0x20, kF9HrcMatrixOff = 0x430;
 }  // namespace nofoot
 }  // namespace edvr

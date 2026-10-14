@@ -32,7 +32,8 @@ SetterFn g_original = nullptr;                     // the trampoline: the setter
 std::atomic<uintptr_t> g_frozenSelector{0};        // the first selector whose owner points back at it
 std::atomic<bool> g_panelsKeyOn{false};            // fix.native_on_foot_panels, as the frame thread last read it (F9)
 std::atomic<bool> g_meshKeyOn{false};              // fix.native_on_foot_hud_mesh, as the frame thread last read it (F9)
-bool g_panelsKeyLast = false, g_meshKeyLast = false;   // frame thread only: as last logged
+std::atomic<bool> g_meshWorldKeyOn{false};         // fix.native_on_foot_hud_mesh_world, as the frame thread last read it (F11)
+bool g_panelsKeyLast = false, g_meshKeyLast = false, g_meshWorldKeyLast = false;   // frame thread only: as last logged
 std::atomic<bool> g_hudKeyOn{false};               // fix.native_on_foot_hud, as the frame thread last read it (F8)
 bool g_hudKeyLast = false;                         // frame thread only: the hud key as last logged
 std::atomic<bool> g_keyOn{false};                  // fix.native_on_foot, as the frame thread last read it
@@ -377,6 +378,13 @@ void readKey() {
     if (first || meshOn != g_meshKeyLast) {
         Log::get().note("native on foot: fix.native_on_foot_hud_mesh is %s", meshOn ? "on" : "off");
         g_meshKeyLast = meshOn;
+    }
+    // F11 (TEMPORARY): the world placement A/B, live.
+    const bool worldOn = cfg.getString("fix.native_on_foot_hud_mesh_world", "off") == "on";
+    g_meshWorldKeyOn.store(worldOn, std::memory_order_relaxed);
+    if (first || worldOn != g_meshWorldKeyLast) {
+        Log::get().note("native on foot: fix.native_on_foot_hud_mesh_world is %s", worldOn ? "on" : "off");
+        g_meshWorldKeyLast = worldOn;
     }
 }
 
@@ -1016,102 +1024,106 @@ void codePatchTick(CodePatch& p, bool want, const char* reason) {
                     static_cast<unsigned>(p.from[0]), static_cast<unsigned>(p.from[1]));
 }
 
-// ---- F10: the mesh unit (TEMPORARY; approved by Sean 2026-10-14) ----------------------------------------------------------------------
-// Two sites, applied and restored together: site 1 (+0x1A36453) 74 2A -> EB 2A (the first byte); site 2 (+0x1A149A8) the byte 80 -> 78 in the
-// six bytes FF 90 80 00 00 00 at +0x1A149A6. Both are verified before either is written; if the second write fails, the first is put back.
-// A restore writes back only when both read as this unit left them. Scope as the panels patch.
-bool g_meshApplied = false;               // frame thread only
-std::string g_meshRefusal;                // frame thread only
-bool g_meshRestoreNoted = false;          // frame thread only
+// ---- F11: the two mesh patches (TEMPORARY; approved by Sean 2026-10-14) ------------------------------------------------------------
+// fix.native_on_foot_hud_mesh: the HRC creation gate, 80 -> 78 at +0x1A149A8 (verify FF 90 80 00 00 00 at +0x1A149A6).
+// fix.native_on_foot_hud_mesh_world (A/B): the placement branch, 74 -> EB at +0x1A36453 (verify 74 2A).
+// Each is applied only while native stereo is on foot and the first-person HUD override is held. Its bytes are verified before the write
+// (refused and logged otherwise), and the original byte is restored only while the verified bytes still read as this patch left them.
+struct MeshSite {
+    const char* name;        // the log's name: "hud mesh" or "hud mesh world"
+    uintptr_t verifyRva;     // where the expected bytes are read
+    size_t verifyLen;        // 6 for the creation gate, 2 for the placement branch
+    uint8_t before[6];       // the bytes before the write
+    uint8_t after[6];        // the bytes after it (what a restore expects)
+    uintptr_t writeRva;      // the one byte written
+    uint8_t writeFrom;       // its original value
+    uint8_t writeTo;         // its patched value
+    const char* shape;       // the log's shape: "80 -> 78" or "74 -> EB"
+    bool applied = false;    // frame thread only
+    std::string refusal;     // frame thread only
+    bool restoreNoted = false;
+};
+MeshSite g_meshCreate{"hud mesh", 0x1A149A6, 6, {0xFF, 0x90, 0x80, 0x00, 0x00, 0x00}, {0xFF, 0x90, 0x78, 0x00, 0x00, 0x00}, 0x1A149A8,
+                      0x80, 0x78, "80 -> 78"};
+MeshSite g_meshWorld{"hud mesh world", 0x1A36453, 2, {0x74, 0x2A, 0, 0, 0, 0}, {0xEB, 0x2A, 0, 0, 0, 0}, 0x1A36453, 0x74, 0xEB, "74 -> EB"};
 
-void refuseMesh(const std::string& why) {
-    if (why == g_meshRefusal) return;
-    g_meshRefusal = why;
-    Log::get().note("native on foot hud mesh: patch EliteDangerous64.exe+0x%llX, +0x%llX NOT patched -- %s. The game's bytes are left as they are.",
-                    static_cast<unsigned long long>(nofoot::kMeshPatchRva), static_cast<unsigned long long>(nofoot::kMeshSite2Rva + nofoot::kMeshSite2ByteOff),
-                    why.c_str());
+// "FF 90 80 00 00 00" for the first `n` bytes.
+std::string meshHex(const uint8_t* b, size_t n) {
+    std::string s;
+    for (size_t i = 0; i < n; ++i) {
+        char t[4];
+        std::snprintf(t, sizeof(t), i ? " %02X" : "%02X", static_cast<unsigned>(b[i]));
+        s += t;
+    }
+    return s;
 }
 
-// `want`: the unit should be applied now. `reason` (a literal) says why it is being put back.
-void meshUnitTick(bool want, const char* reason) {
-    const uintptr_t a1 = g_base + nofoot::kMeshPatchRva;
-    const uintptr_t a2 = g_base + nofoot::kMeshSite2Rva;
-    const uintptr_t b2 = a2 + nofoot::kMeshSite2ByteOff;
+void refuseMeshSite(MeshSite& s, const std::string& why) {
+    if (why == s.refusal) return;   // the same reason: already said
+    s.refusal = why;
+    Log::get().note("native on foot %s: patch EliteDangerous64.exe+0x%llX NOT patched -- %s. The game's bytes are left as they are.", s.name,
+                    static_cast<unsigned long long>(s.writeRva), why.c_str());
+}
+
+// `want`: the patch should be applied now. `reason` (a literal) says why it is being put back.
+void meshSiteTick(MeshSite& s, bool want, const char* reason) {
+    const uintptr_t va = g_base + s.verifyRva;
+    const uintptr_t wa = g_base + s.writeRva;
     if (want) {
-        if (g_meshApplied || g_install != InstallState::Armed) return;
+        if (s.applied || g_install != InstallState::Armed) return;
         const char* idWhy = nullptr;
         if (!checkIdentity(g_base, &idWhy)) {
-            refuseMesh(std::string("the PE identity check failed (") + idWhy + ")");
+            refuseMeshSite(s, std::string("the PE identity check failed (") + idWhy + ")");
             return;
         }
-        uint8_t c1[2] = {};
-        if (!guardedRead(a1, c1, 2)) {
-            refuseMesh("site 1 could not be read");
+        uint8_t cur[6] = {};
+        if (!guardedRead(va, cur, s.verifyLen)) {
+            refuseMeshSite(s, "the bytes could not be read");
             return;
         }
-        if (c1[0] != nofoot::kMeshPatchFrom[0] || c1[1] != nofoot::kMeshPatchFrom[1]) {
-            char b[160];
-            std::snprintf(b, sizeof(b), "site 1 reads %02X %02X, not 74 2A, so it is left alone", static_cast<unsigned>(c1[0]), static_cast<unsigned>(c1[1]));
-            refuseMesh(b);
-            return;
-        }
-        uint8_t c2[6] = {};
-        if (!guardedRead(a2, c2, 6)) {
-            refuseMesh("site 2 could not be read");
-            return;
-        }
-        for (size_t i = 0; i < 6; ++i) {
-            if (c2[i] != nofoot::kMeshSite2Expect[i]) {
-                char b[200];
-                std::snprintf(b, sizeof(b), "site 2 reads %02X %02X %02X %02X %02X %02X, not FF 90 80 00 00 00, so it is left alone",
-                              static_cast<unsigned>(c2[0]), static_cast<unsigned>(c2[1]), static_cast<unsigned>(c2[2]), static_cast<unsigned>(c2[3]),
-                              static_cast<unsigned>(c2[4]), static_cast<unsigned>(c2[5]));
-                refuseMesh(b);
+        for (size_t i = 0; i < s.verifyLen; ++i) {
+            if (cur[i] != s.before[i]) {
+                refuseMeshSite(s, "the bytes are " + meshHex(cur, s.verifyLen) + ", not " + meshHex(s.before, s.verifyLen) +
+                                      ", so they are someone else's and are left alone");
                 return;
             }
         }
-        if (!storeCodeBytes(a1, 0xEB, 1)) {
-            refuseMesh("site 1 is not writable");
+        if (!storeCodeBytes(wa, s.writeTo, 1)) {
+            refuseMeshSite(s, "the byte is not writable");
             return;
         }
-        if (!storeCodeBytes(b2, nofoot::kMeshSite2Patched[nofoot::kMeshSite2ByteOff], 1)) {
-            storeCodeBytes(a1, nofoot::kMeshPatchFrom[0], 1);   // put site 1 back: the unit is all or nothing
-            refuseMesh("site 2 is not writable (site 1 put back)");
+        s.applied = true;
+        s.refusal.clear();
+        Log::get().note("native on foot %s: patch EliteDangerous64.exe+0x%llX %s", s.name, static_cast<unsigned long long>(s.writeRva), s.shape);
+        return;
+    }
+    if (!s.applied) {
+        s.refusal.clear();
+        return;
+    }
+    uint8_t cur[6] = {};
+    if (!guardedRead(va, cur, s.verifyLen)) return;   // retried next frame
+    for (size_t i = 0; i < s.verifyLen; ++i) {
+        if (cur[i] != s.after[i]) {
+            s.applied = false;
+            Log::get().note("native on foot %s: patch EliteDangerous64.exe+0x%llX NOT restored -- the bytes are %s, not ours (restore: %s)", s.name,
+                            static_cast<unsigned long long>(s.writeRva), meshHex(cur, s.verifyLen).c_str(), reason);
             return;
         }
-        g_meshApplied = true;
-        g_meshRefusal.clear();
-        Log::get().note("native on foot hud mesh: patch EliteDangerous64.exe+0x%llX 74 -> EB, +0x%llX 80 -> 78",
-                        static_cast<unsigned long long>(nofoot::kMeshPatchRva), static_cast<unsigned long long>(b2));
-        return;
     }
-    if (!g_meshApplied) {
-        g_meshRefusal.clear();
-        return;
-    }
-    uint8_t c1[2] = {};
-    uint8_t c2[6] = {};
-    if (!guardedRead(a1, c1, 2) || !guardedRead(a2, c2, 6)) return;   // retried next frame
-    bool site2Ours = true;
-    for (size_t i = 0; i < 6; ++i) site2Ours = site2Ours && c2[i] == nofoot::kMeshSite2Patched[i];
-    if (!(c1[0] == nofoot::kMeshPatchTo[0] && c1[1] == nofoot::kMeshPatchTo[1]) || !site2Ours) {
-        g_meshApplied = false;
-        Log::get().note("native on foot hud mesh: patch NOT restored -- the bytes are not this unit's (site 1 %02X %02X, site 2 %02X %02X %02X %02X %02X %02X; restore: %s)",
-                        static_cast<unsigned>(c1[0]), static_cast<unsigned>(c1[1]), static_cast<unsigned>(c2[0]), static_cast<unsigned>(c2[1]),
-                        static_cast<unsigned>(c2[2]), static_cast<unsigned>(c2[3]), static_cast<unsigned>(c2[4]), static_cast<unsigned>(c2[5]), reason);
-        return;
-    }
-    if (!storeCodeBytes(b2, nofoot::kMeshSite2Expect[nofoot::kMeshSite2ByteOff], 1) || !storeCodeBytes(a1, nofoot::kMeshPatchFrom[0], 1)) {
-        if (!g_meshRestoreNoted) {
-            g_meshRestoreNoted = true;
-            Log::get().note("native on foot hud mesh: patch could not be restored (%s); retrying each frame.", reason);
+    if (!storeCodeBytes(wa, s.writeFrom, 1)) {
+        if (!s.restoreNoted) {
+            s.restoreNoted = true;
+            Log::get().note("native on foot %s: patch could not be restored (%s); retrying each frame.", s.name, reason);
         }
         return;
     }
-    g_meshApplied = false;
-    g_meshRestoreNoted = false;
-    Log::get().note("native on foot hud mesh: patch EliteDangerous64.exe+0x%llX EB -> 74, +0x%llX 78 -> 80 (restored: %s)",
-                    static_cast<unsigned long long>(nofoot::kMeshPatchRva), static_cast<unsigned long long>(b2), reason);
+    s.applied = false;
+    s.restoreNoted = false;
+    char shape[16];
+    std::snprintf(shape, sizeof(shape), "%02X -> %02X", static_cast<unsigned>(s.writeTo), static_cast<unsigned>(s.writeFrom));
+    Log::get().note("native on foot %s: patch EliteDangerous64.exe+0x%llX %s (restored: %s)", s.name, static_cast<unsigned long long>(s.writeRva), shape,
+                    reason);
 }
 
 // ---- F9: three read-only probes (TEMPORARY) -----------------------------------------------------------------------------------------
@@ -1188,6 +1200,10 @@ struct F9HrcState {
     uint32_t depVt = 0;
     bool depOk = false, depVtOk = false;
     uint64_t window = 0;
+    uint64_t hrc = 0;            // the HRC's address (the matrix line names it)
+    uint64_t matMs = 0;          // when the matrix was last sampled (GetTickCount64)
+    bool matOk = false;
+    float mat[16] = {};          // the HRC's matrix at +0x430..0x46F
 };
 F9HrcState g_f9Hrc[3];   // guarded by g_f9Lock
 
@@ -1199,6 +1215,7 @@ struct F9InstRow {
     bool viewOk = false;
     uint64_t calls = 0, window = 0;
     float cam[3] = {};
+    float rot[12] = {};          // the view's floats at +0x20..+0x4C (camOk covers both)
     bool camOk = false;
 };
 constexpr size_t kF9Insts = 16;
@@ -1240,6 +1257,15 @@ void f9RecordHrc(uint8_t st, void* hrc) noexcept {
     const bool depOk = f9Read(1, h + nofoot::kF9HrcDepOff, &dep, 8);
     const bool depVtOk = depOk && dep >= 0x10000 && f9Read(1, static_cast<uintptr_t>(dep), &vt, 8);
     const uint32_t depVt = depVtOk ? f9Rva(vt) : 0;
+    // The HRC's world-to-view matrix (16 floats), at most once per 5 s per state.
+    const uint64_t now = GetTickCount64();
+    bool wantMat = false;
+    {
+        F9Lock lock;
+        wantMat = g_f9Hrc[st].matMs == 0 || now - g_f9Hrc[st].matMs >= 5000;
+    }
+    float mat[16] = {};
+    const bool matOk = wantMat && f9Read(1, h + nofoot::kF9HrcMatrixOff, mat, 64);
     F9Lock lock;
     F9HrcState& s = g_f9Hrc[st];
     s.seen = true;
@@ -1253,6 +1279,12 @@ void f9RecordHrc(uint8_t st, void* hrc) noexcept {
     s.depOk = depOk;
     s.depVt = depVt;
     s.depVtOk = depVtOk;
+    s.hrc = h;
+    if (wantMat) {
+        s.matMs = now;
+        s.matOk = matOk;
+        if (matOk) std::memcpy(s.mat, mat, sizeof(mat));
+    }
     ++s.window;
 }
 
@@ -1260,8 +1292,9 @@ void f9RecordInst(uint8_t st, uint8_t k, void* view) noexcept {
     const uintptr_t v = reinterpret_cast<uintptr_t>(view);
     uint32_t vid = 0;
     const bool okId = v && f9Read(2, v + nofoot::kF9ViewIdOff, &vid, 4);
-    float cam[3] = {};
-    const bool okCam = v && f9Read(2, v + nofoot::kF9ViewCamOff, cam, 12);
+    // The view's floats from +0x20 to +0x5B: the rotation rows (+0x20..+0x4C, twelve floats) and the camera position (+0x50, +0x54, +0x58).
+    float blk[15] = {};
+    const bool okBlk = v && f9Read(2, v + nofoot::kF9ViewRotOff, blk, sizeof(blk));
     F9Lock lock;
     F9InstRow* row = nullptr;
     for (auto& r : g_f9Insts) {
@@ -1286,10 +1319,11 @@ void f9RecordInst(uint8_t st, uint8_t k, void* view) noexcept {
     }
     ++row->calls;
     ++row->window;
-    if (okCam) {
-        row->cam[0] = cam[0];
-        row->cam[1] = cam[1];
-        row->cam[2] = cam[2];
+    if (okBlk) {
+        std::memcpy(row->rot, blk, sizeof(row->rot));
+        row->cam[0] = blk[12];
+        row->cam[1] = blk[13];
+        row->cam[2] = blk[14];
         row->camOk = true;
     }
 }
@@ -1454,7 +1488,8 @@ std::string f9HrcValues(const F9HrcState& s) {
            " dep.vt=" + f9RvaText(s.depVt, s.depVtOk);
 }
 
-// Frame thread, every frame: every 5 s the window's panel callers, HRC and instance rows; and the HRC line whenever its values change.
+// Frame thread, every frame: every 5 s the window's panel callers, the HRC matrices, and the HRC and instance rows; and the HRC line whenever
+// its values change.
 void f9ProbeTick(uint64_t nowMs) {
     if (!g_f9Armed[0] && !g_f9Armed[1] && !g_f9Armed[2]) return;
     const bool due = g_f9LastMs == 0 || nowMs - g_f9LastMs >= 5000;
@@ -1497,18 +1532,34 @@ void f9ProbeTick(uint64_t nowMs) {
         Log::get().note("native on foot hrc [%s]: %s calls=%llu", g_f9StateName[st], f9HrcValues(hrc[st]).c_str(),
                         static_cast<unsigned long long>(hrc[st].window));
     }
+    for (uint8_t st = 0; st < 3; ++st) {
+        if (!hrc[st].matOk) continue;
+        char m[480];
+        int n = std::snprintf(m, sizeof(m), "native on foot hrc matrix [%s]: hrc=0x%llX m=(", g_f9StateName[st], static_cast<unsigned long long>(hrc[st].hrc));
+        for (size_t i = 0; i < 16 && n > 0 && static_cast<size_t>(n) < sizeof(m) - 16; ++i) {
+            n += std::snprintf(m + n, sizeof(m) - static_cast<size_t>(n), "%s%.3f", i ? "," : "", static_cast<double>(hrc[st].mat[i]));
+        }
+        std::snprintf(m + n, sizeof(m) - static_cast<size_t>(n), ")");
+        Log::get().note("%s", m);
+    }
     for (const F9InstRow& r : insts) {
         if (!r.used || r.window == 0) continue;
-        char view[24], cam[64];
+        char view[24], cam[64], rot[200];
         if (r.viewOk) std::snprintf(view, sizeof(view), "%u", static_cast<unsigned>(r.viewId));
         else std::snprintf(view, sizeof(view), "?");
         if (r.camOk) std::snprintf(cam, sizeof(cam), "(%.3f,%.3f,%.3f)", static_cast<double>(r.cam[0]), static_cast<double>(r.cam[1]), static_cast<double>(r.cam[2]));
         else std::snprintf(cam, sizeof(cam), "?");
-        Log::get().note("native on foot hrc submit [%s]: inst=%u view=%s calls=%llu campos=%s", g_f9StateName[r.st], static_cast<unsigned>(r.k), view,
-                        static_cast<unsigned long long>(r.window), cam);
+        if (r.camOk) {
+            int n = std::snprintf(rot, sizeof(rot), "(");
+            for (size_t i = 0; i < 12 && n > 0; ++i) n += std::snprintf(rot + n, sizeof(rot) - static_cast<size_t>(n), "%s%.3f", i ? "," : "", static_cast<double>(r.rot[i]));
+            std::snprintf(rot + n, sizeof(rot) - static_cast<size_t>(n), ")");
+        } else {
+            std::snprintf(rot, sizeof(rot), "?");
+        }
+        Log::get().note("native on foot hrc submit [%s]: inst=%u view=%s calls=%llu campos=%s rot=%s", g_f9StateName[r.st], static_cast<unsigned>(r.k),
+                        view, static_cast<unsigned long long>(r.window), cam, rot);
     }
 }
-
 }  // namespace
 
 // The probe's capture (declared in native_on_foot.h, called from beginPanelOverride on the draw thread for the two HUD issuers). One load,
@@ -1579,8 +1630,10 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
     const char* f9Why = !g_hudOverrideHeld ? "the first-person HUD override is off" : !nativeOnFootActive() ? "native stereo on foot ended" : "the game session ended";
     codePatchTick(g_panelPatch, g_panelsKeyOn.load(std::memory_order_relaxed) && f9Active,
                   g_panelsKeyOn.load(std::memory_order_relaxed) ? f9Why : "fix.native_on_foot_panels is off");
-    meshUnitTick(g_meshKeyOn.load(std::memory_order_relaxed) && f9Active,
-                  g_meshKeyOn.load(std::memory_order_relaxed) ? f9Why : "fix.native_on_foot_hud_mesh is off");
+    meshSiteTick(g_meshCreate, g_meshKeyOn.load(std::memory_order_relaxed) && f9Active,
+                 g_meshKeyOn.load(std::memory_order_relaxed) ? f9Why : "fix.native_on_foot_hud_mesh is off");
+    meshSiteTick(g_meshWorld, g_meshWorldKeyOn.load(std::memory_order_relaxed) && f9Active,
+                 g_meshWorldKeyOn.load(std::memory_order_relaxed) ? f9Why : "fix.native_on_foot_hud_mesh_world is off");
     f9ProbeTick(now);
     neckLine(now);
 }
@@ -1589,7 +1642,8 @@ void nativeOnFootShutdown() {
     gateByteTick(false, "the game is shutting down");
     hudOverrideTick(false, "the game is shutting down");
     codePatchTick(g_panelPatch, false, "the game is shutting down");
-    meshUnitTick(false, "the game is shutting down");
+    meshSiteTick(g_meshCreate, false, "the game is shutting down");
+    meshSiteTick(g_meshWorld, false, "the game is shutting down");
 }
 
 }  // namespace edvr

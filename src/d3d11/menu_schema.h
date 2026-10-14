@@ -51,7 +51,7 @@ struct MenuRowDef {
     bool        headset;
     int         applies;   // 0 not documented, 1 live, 2 needs a game restart
     MenuTier    tier;
-    const char* page;      // "performance" | "fixes" | "explorer_cam" | "hotkeys" | the section for developer rows
+    const char* page;      // "performance" | "fixes" | "explorer_cam" | "native_on_foot" | "hotkeys" | the section for developer rows
     const char* group;     // the ini's heading above it
     // How a NUMBER row is stepped and shown (the ui: line's `step`, `unit`, `zero`, `signed`; empty / false for every other row).
     const char* step;      // the arrow keys' step, in place of the range's twentieth
