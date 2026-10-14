@@ -5002,6 +5002,8 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     // would take the draw off engine-record velocity's verdict-free path just below and change what this test measures. Matched here, right
     // after the verdict and before engine velocity can substitute shaders, so the hashes are the game's. With the key at game this is one
     // relaxed load of a zero.
+    // F19 (TEMPORARY, fix.native_on_foot_body_cb_probe): the body's constant-buffer read, a copy only (no binding change), before the draw.
+    if (nativeOnFootBodyProbeWanted() && self == g_state->ownerCtx) nativeOnFootBodyProbeDraw(self, perInstance, instances);
     const bool bodyCull = nativeOnFootBodyCullWanted() && self == g_state->ownerCtx &&
                           nativeOnFootBodyCullBegin(self, perInstance, instances);
     // Engine-record velocity (with fix.temporal_aa): four generation

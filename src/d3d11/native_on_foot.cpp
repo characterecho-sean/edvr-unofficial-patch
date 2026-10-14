@@ -42,6 +42,10 @@ bool g_reticleKeyLast = false;                                  // frame thread 
 std::atomic<bool> g_fpKeyOn{false};                             // fix.native_on_foot_hide_fp_body, as the frame thread last read it (F15, temporary)
 bool g_fpKeyLast = false;                                       // frame thread only: as last logged (F15)
 uint8_t g_bodyCullKeyLast = 0;                                  // frame thread only: fix.native_on_foot_body_cull as last logged (F18, temporary)
+std::atomic<bool> g_unclipKeyOn{false};                         // fix.native_on_foot_body_unclip, as the frame thread last read it (F19, temporary)
+bool g_unclipKeyLast = false;                                   // frame thread only: as last logged (F19)
+std::atomic<bool> g_cbProbeKeyOn{false};                        // fix.native_on_foot_body_cb_probe, as the frame thread last read it (F19, temporary)
+bool g_cbProbeKeyLast = false;                                  // frame thread only: as last logged (F19)
 std::atomic<float> g_hudSize{nofoot::kHudSizeDefault};          // fix.native_on_foot_hud_size, live (F13)
 std::atomic<bool> g_followHead{true};                           // fix.native_on_foot_hud_follow is head (F13)
 std::atomic<bool> g_followBefore{false};                        // fix.native_on_foot_hud_follow_order is before (F13, temporary)
@@ -489,10 +493,11 @@ void readKey() {
             return v;
         };
         float offs[nofoot::kHudGroupCount * 2] = {};
-        offs[0] = offsetClamp(cfg.getFloat("fix.native_on_foot_hud_left_x", 0.0f));
-        offs[1] = offsetClamp(cfg.getFloat("fix.native_on_foot_hud_left_y", 0.0f));
+        // F19: the left group's defaults are Sean's tuning (0.18, 0.02) and the top group's y is -0.07; the other offsets stay at 0.
+        offs[0] = offsetClamp(cfg.getFloat("fix.native_on_foot_hud_left_x", 0.18f));
+        offs[1] = offsetClamp(cfg.getFloat("fix.native_on_foot_hud_left_y", 0.02f));
         offs[2] = offsetClamp(cfg.getFloat("fix.native_on_foot_hud_top_x", 0.0f));
-        offs[3] = offsetClamp(cfg.getFloat("fix.native_on_foot_hud_top_y", 0.0f));
+        offs[3] = offsetClamp(cfg.getFloat("fix.native_on_foot_hud_top_y", -0.07f));
         offs[4] = offsetClamp(cfg.getFloat("fix.native_on_foot_hud_right_x", 0.0f));
         offs[5] = offsetClamp(cfg.getFloat("fix.native_on_foot_hud_right_y", 0.0f));
         offs[6] = offsetClamp(cfg.getFloat("fix.native_on_foot_hud_centre_x", 0.0f));
@@ -518,7 +523,7 @@ void readKey() {
         g_hudSpreadLast = spread;
     }
     // F17: the HUD element scale (a user setting, live): 0 = the game's own scale; otherwise 0.30..2.00 (a value under 0.30 is 0.30).
-    float elem = cfg.getFloat("fix.native_on_foot_hud_element_scale", 0.0f);
+    float elem = cfg.getFloat("fix.native_on_foot_hud_element_scale", 1.35f);   // F19: Sean's tuning is 1.35 (the default; 0 = the game's own)
     if (elem < 0.0f) elem = 0.0f;
     if (elem > 0.0f && elem < nofoot::kHudElemScaleMin) elem = nofoot::kHudElemScaleMin;
     if (elem > nofoot::kHudElemScaleMax) elem = nofoot::kHudElemScaleMax;
@@ -562,6 +567,20 @@ void readKey() {
         static const char* const kBodyCullNames[3] = {"game", "none", "front"};
         Log::get().note("native on foot: fix.native_on_foot_body_cull is %s (temporary)", kBodyCullNames[bodyCullMode]);
         g_bodyCullKeyLast = bodyCullMode;
+    }
+    // F19 (TEMPORARY): the body unclip, explorer_cam.cpp (explorerCamBodyClipTick, the fade hook's bodyClipStep). Written while native stereo is on foot.
+    const bool unclipOn = cfg.getString("fix.native_on_foot_body_unclip", "off") == "on";
+    g_unclipKeyOn.store(unclipOn, std::memory_order_relaxed);
+    if (first || unclipOn != g_unclipKeyLast) {
+        Log::get().note("native on foot: fix.native_on_foot_body_unclip is %s (temporary)", unclipOn ? "on" : "off");
+        g_unclipKeyLast = unclipOn;
+    }
+    // F19 (TEMPORARY): the body constant-buffer probe (nativeOnFootBodyProbeDraw, on the draw thunk). On foot: native stereo or Explorer Cam.
+    const bool cbProbeOn = cfg.getString("fix.native_on_foot_body_cb_probe", "off") == "on";
+    g_cbProbeKeyOn.store(cbProbeOn, std::memory_order_relaxed);
+    if (first || cbProbeOn != g_cbProbeKeyLast) {
+        Log::get().note("native on foot: fix.native_on_foot_body_cb_probe is %s (temporary)", cbProbeOn ? "on" : "off");
+        g_cbProbeKeyLast = cbProbeOn;
     }
 }
 
@@ -3230,6 +3249,7 @@ void nativeOnFootBodyCullShutdown() {
         g_bodyCullSavedRS->Release();
         g_bodyCullSavedRS = nullptr;
     }
+    nativeOnFootBodyProbeShutdown();   // F19 (TEMPORARY): the cb2 probe's staging copy
 }
 
 // The probe's capture (declared in native_on_foot.h, called from beginPanelOverride on the draw thread for the two HUD issuers). One load,
@@ -3382,6 +3402,13 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
     // F15 (TEMPORARY): the first-person body hide (explorer_cam.cpp), while native stereo is on foot and its key is on.
     const bool fpKey = g_fpKeyOn.load(std::memory_order_relaxed);
     explorerCamFpBody(fpKey && nativeOnFootActive(), !fpKey ? "fix.native_on_foot_hide_fp_body is off" : "native stereo on foot ended");
+    // F19 (TEMPORARY): the body's clip modifiers (unclip, written while native stereo is on foot) and their 5 s probe (explorer_cam.cpp).
+    const bool unclipKey = g_unclipKeyOn.load(std::memory_order_relaxed);
+    explorerCamBodyClipTick(now, unclipKey && nativeOnFootActive(), nativeOnFootActive(),
+                            !unclipKey ? "fix.native_on_foot_body_unclip is off" : "native stereo on foot ended");
+    // F19 (TEMPORARY): the constant-buffer probe's flag (on foot, native or Explorer Cam) and the drain of its readings.
+    g_nativeOnFootBodyProbe.store(g_cbProbeKeyOn.load(std::memory_order_relaxed) && journalOnFootKnown() && journalOnFoot(), std::memory_order_relaxed);
+    bodyCbProbeLine();
     bodyCullLine(now);   // F18 (TEMPORARY): the torso cull's 5 s count line (the swap itself is on the draw thread, nativeOnFootBodyCullBegin)
     neckLine(now);
     eyeProbeLine();   // F18 (TEMPORARY): P1's one-a-second line
@@ -3407,6 +3434,209 @@ void nativeOnFootShutdown() {
         g_hudOffsetOn = false;                                  // F16: the layout hook applies no offsets from here
     }
     explorerCamFpBody(false, "the game is shutting down");
+    explorerCamBodyClipTick(GetTickCount64(), false, false, "the game is shutting down");   // F19
+    g_nativeOnFootBodyProbe.store(false, std::memory_order_relaxed);                       // F19
+}
+
+// ---- F19 (TEMPORARY): the body's pixel constant buffer 2 (fix.native_on_foot_body_cb_probe) ---------------------------------------------
+// No CPU copy of a constant buffer's bytes exists (binding_shadow keeps the buffer pointers only), so the read is a GPU copy: once per 5 s per
+// (VS, PS, index count) the first 352 bytes of cb2 (rows 0..21) are copied to a staging buffer on the matched draw, and mapped with
+// D3D11_MAP_FLAG_DO_NOT_WAIT on a later matched draw. Until the GPU has the copy the map says "still drawing" and the read waits for the next
+// draw; nothing stalls. Rows 5..9 go to a small queue that the frame thread logs (the draw thread never logs). Draw thread only, except the queue.
+namespace {
+constexpr uint64_t kCbProbeBytes = 352;                 // cb2 rows 0..21, float4 each
+constexpr uint64_t kCbProbeIntervalMs = 5000;
+constexpr size_t kCbProbeKeys = 8;
+constexpr size_t kCbProbeQueue = 8;
+struct CbProbeKey {
+    uint64_t vs = 0, ps = 0;
+    uint32_t n = 0;
+    uint64_t lastMs = 0;
+    bool used = false;
+};
+struct CbProbeLine {
+    uint64_t vs = 0, ps = 0;
+    uint32_t n = 0;
+    float rows[5][4] = {};   // cb2 rows 5..9
+};
+ID3D11Buffer* g_cbStage = nullptr;                      // draw thread: the staging copy (released at shutdown)
+bool g_cbPending = false;                               // draw thread: a copy is in flight
+CbProbeKey g_cbPendKey;                                 // draw thread: the key the pending copy belongs to
+CbProbeKey g_cbKeys[kCbProbeKeys];                      // draw thread
+bool g_cbStageFailedNoted = false;                      // draw thread
+bool g_cbSmallNoted = false;                            // draw thread
+std::atomic<uint32_t> g_cbMapFailHr{0};                 // draw thread: the last map failure (not "still drawing"); the frame thread logs it once
+std::atomic<uint64_t> g_cbMatched{0};                   // draw thread: matched body draws (stencil ref 21 included); the frame thread's window counts them
+bool g_cbMapFailNoted = false;                          // frame thread only
+uint64_t g_cbWindowMs = 0;                              // frame thread only: the start of the current 5 s window
+bool g_cbWindowOpen = false;                            // frame thread only
+std::mutex g_cbQueueMutex;
+CbProbeLine g_cbQueue[kCbProbeQueue];                   // guarded by g_cbQueueMutex
+size_t g_cbQueued = 0;                                  // guarded by g_cbQueueMutex
+uint32_t g_cbDropped = 0;                               // guarded by g_cbQueueMutex
+
+void cbProbePush(const CbProbeLine& line) {
+    std::lock_guard<std::mutex> lock(g_cbQueueMutex);
+    if (g_cbQueued < kCbProbeQueue) g_cbQueue[g_cbQueued++] = line;
+    else ++g_cbDropped;
+}
+
+bool cbProbeCreateStage(ID3D11DeviceContext* ctx) {
+    ID3D11Device* dev = nullptr;
+    ctx->GetDevice(&dev);
+    if (!dev) return false;
+    D3D11_BUFFER_DESC bd{};
+    bd.ByteWidth = static_cast<UINT>(kCbProbeBytes);
+    bd.Usage = D3D11_USAGE_STAGING;
+    bd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    const HRESULT hr = dev->CreateBuffer(&bd, nullptr, &g_cbStage);
+    dev->Release();
+    if (FAILED(hr) || !g_cbStage) {
+        if (!g_cbStageFailedNoted) {
+            g_cbStageFailedNoted = true;
+            Log::get().note("native on foot body cb2: could not create the staging buffer (hr=0x%08X); the probe reads nothing", static_cast<unsigned>(hr));
+        }
+        g_cbStage = nullptr;
+        return false;
+    }
+    return true;
+}
+}  // namespace
+
+// F19 (declared in native_on_foot.h): the DrawIndexedInstanced thunk calls this for every owner-context draw while the probe is wanted. It
+// reads the game's state and issues one copy; it changes no binding (the staging map needs none).
+void nativeOnFootBodyProbeDraw(ID3D11DeviceContext* ctx, uint32_t indexCount, uint32_t instances) {
+    if (instances != 1) return;
+    const uint64_t vs = bindingShaderHash(BindSlot::Vs);
+    const uint64_t ps = bindingShaderHash(BindSlot::Ps);
+    const bool matchA = vs == kBodyVsA && ps == kBodyPsA;
+    const bool matchB = vs == kBodyVsB && ps == kBodyPsB;
+    if (!matchA && !matchB) return;
+    ID3D11DepthStencilState* ds = nullptr;
+    UINT ref = 0;
+    ctx->OMGetDepthStencilState(&ds, &ref);
+    if (ds) ds->Release();
+    if (ref != kBodyStencilRef) return;
+    g_cbMatched.fetch_add(1, std::memory_order_relaxed);
+    // 1. A pending copy: map it without waiting. "Still drawing" starts nothing new on this draw.
+    if (g_cbPending) {
+        D3D11_MAPPED_SUBRESOURCE m{};
+        const HRESULT hr = ctx->Map(g_cbStage, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m);
+        if (hr == DXGI_ERROR_WAS_STILL_DRAWING) return;
+        if (SUCCEEDED(hr)) {
+            CbProbeLine line;
+            line.vs = g_cbPendKey.vs;
+            line.ps = g_cbPendKey.ps;
+            line.n = g_cbPendKey.n;
+            std::memcpy(line.rows, static_cast<const uint8_t*>(m.pData) + 5 * 16, sizeof(line.rows));   // rows 5..9 = bytes 80..159
+            ctx->Unmap(g_cbStage, 0);
+            cbProbePush(line);
+        } else {
+            g_cbMapFailHr.store(static_cast<uint32_t>(hr), std::memory_order_relaxed);
+        }
+        g_cbPending = false;
+    }
+    // 2. A new copy for this key, once per interval.
+    CbProbeKey* k = nullptr;
+    for (auto& e : g_cbKeys) {
+        if (e.used && e.vs == vs && e.ps == ps && e.n == indexCount) {
+            k = &e;
+            break;
+        }
+    }
+    const uint64_t now = GetTickCount64();
+    if (k && now - k->lastMs < kCbProbeIntervalMs) return;
+    if (!k) {
+        for (auto& e : g_cbKeys) {
+            if (!e.used) {
+                k = &e;
+                break;
+            }
+        }
+        if (!k) return;   // eight keys is more than the body has (five); a ninth is simply not probed
+        k->used = true;
+        k->vs = vs;
+        k->ps = ps;
+        k->n = indexCount;
+    }
+    k->lastMs = now;
+    ID3D11Buffer* cb = nullptr;
+    ctx->PSGetConstantBuffers(2, 1, &cb);   // AddRef'd when non-null
+    if (!cb) return;
+    D3D11_BUFFER_DESC bd{};
+    cb->GetDesc(&bd);
+    if (bd.ByteWidth < kCbProbeBytes) {
+        if (!g_cbSmallNoted) {
+            g_cbSmallNoted = true;
+            Log::get().note("native on foot body cb2: the bound pixel constant buffer 2 is %u bytes, under %llu; the probe reads nothing",
+                            static_cast<unsigned>(bd.ByteWidth), static_cast<unsigned long long>(kCbProbeBytes));
+        }
+        cb->Release();
+        return;
+    }
+    if (!g_cbStage && !cbProbeCreateStage(ctx)) {
+        cb->Release();
+        return;
+    }
+    const D3D11_BOX box{0, 0, 0, static_cast<UINT>(kCbProbeBytes), 1, 1};
+    ctx->CopySubresourceRegion(g_cbStage, 0, 0, 0, 0, cb, 0, &box);
+    cb->Release();
+    g_cbPendKey = *k;
+    g_cbPending = true;
+}
+
+// F19 (TEMPORARY), frame thread, every frame: drains the probe's queue into the log. Only the frame thread logs.
+void bodyCbProbeLine() {
+    const uint32_t hr = g_cbMapFailHr.exchange(0, std::memory_order_relaxed);
+    if (hr != 0 && !g_cbMapFailNoted) {
+        g_cbMapFailNoted = true;
+        Log::get().note("native on foot body cb2: the staging read failed (hr=0x%08X); the probe stops reading", hr);
+    }
+    // A 5 s count of the matched body draws while the probe is on, written even at 0 so a silent probe cannot pass for a quiet one.
+    if (nativeOnFootBodyProbeWanted()) {
+        const uint64_t now = GetTickCount64();
+        if (!g_cbWindowOpen) {
+            g_cbWindowOpen = true;
+            g_cbWindowMs = now;
+            g_cbMatched.exchange(0, std::memory_order_relaxed);
+        } else if (now - g_cbWindowMs >= 5000) {
+            g_cbWindowMs = now;
+            const uint64_t matched = g_cbMatched.exchange(0, std::memory_order_relaxed);
+            Log::get().note("native on foot body cb2: %llu body draws matched in the last 5 s", static_cast<unsigned long long>(matched));
+        }
+    } else {
+        g_cbWindowOpen = false;
+    }
+    CbProbeLine lines[kCbProbeQueue];
+    size_t n = 0;
+    uint32_t dropped = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_cbQueueMutex);
+        n = g_cbQueued;
+        for (size_t i = 0; i < n; ++i) lines[i] = g_cbQueue[i];
+        g_cbQueued = 0;
+        dropped = g_cbDropped;
+        g_cbDropped = 0;
+    }
+    for (size_t i = 0; i < n; ++i) {
+        const CbProbeLine& l = lines[i];
+        Log::get().note("native on foot body cb2: vs=%016llX ps=%016llX n=%u r5=(%.4f,%.4f,%.4f,%.4f) r6=(%.4f,%.4f,%.4f,%.4f) r7=(%.4f,%.4f,%.4f,%.4f) "
+                        "r8=(%.4f,%.4f,%.4f,%.4f) r9=(%.4f,%.4f,%.4f,%.4f)",
+                        static_cast<unsigned long long>(l.vs), static_cast<unsigned long long>(l.ps), static_cast<unsigned>(l.n),
+                        static_cast<double>(l.rows[0][0]), static_cast<double>(l.rows[0][1]), static_cast<double>(l.rows[0][2]), static_cast<double>(l.rows[0][3]),
+                        static_cast<double>(l.rows[1][0]), static_cast<double>(l.rows[1][1]), static_cast<double>(l.rows[1][2]), static_cast<double>(l.rows[1][3]),
+                        static_cast<double>(l.rows[2][0]), static_cast<double>(l.rows[2][1]), static_cast<double>(l.rows[2][2]), static_cast<double>(l.rows[2][3]),
+                        static_cast<double>(l.rows[3][0]), static_cast<double>(l.rows[3][1]), static_cast<double>(l.rows[3][2]), static_cast<double>(l.rows[3][3]),
+                        static_cast<double>(l.rows[4][0]), static_cast<double>(l.rows[4][1]), static_cast<double>(l.rows[4][2]), static_cast<double>(l.rows[4][3]));
+    }
+    if (dropped != 0) Log::get().note("native on foot body cb2: %u readings dropped (the queue was full)", static_cast<unsigned>(dropped));
+}
+
+// F19: the staging copy goes at vScreen's shutdown (nativeOnFootBodyCullShutdown calls this). Draw thread.
+void nativeOnFootBodyProbeShutdown() {
+    if (g_cbStage) g_cbStage->Release();
+    g_cbStage = nullptr;
+    g_cbPending = false;
 }
 
 }  // namespace edvr

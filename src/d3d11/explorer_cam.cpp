@@ -1515,6 +1515,131 @@ void fpBodyStep(void* amcPtr) noexcept {
     std::memcpy(g_fpReadback.masks, masks, sizeof(masks));
 }
 
+// ---- F19 (TEMPORARY): the body's clip modifiers (fix.native_on_foot_body_unclip) and their 5 s probe ----------------------------------
+// The item-apply function (EliteDangerous64.exe+0x3DD9EA0) gives each part of a mode-3 avatar a "pVertexClipAmount" modifier at part+0x610:
+// +8 the float amount, +0xC the enable byte, +0xD the dirty byte. The enable byte is [AMC+0x321] bit 3 for EVASuit_Torso, _Arms, _Hands and
+// Shoulder_Left/_Right (the bit-3 switch case, 0x3DD9EA0+0x3B1), and 1 for EVASuit_Legs, EVASuit_Feet and FirstPersonSkeleton (the default case).
+// The body shader discards a pixel whose clip value exceeds cb2[5].w, so an enable of 0 keeps those pixels. The unclip writes enable 0 and dirty 1
+// after the fade returns, on the same thread, for the local third-person AMC only (isLocalAmc, as headHideStep identifies it). Nothing is restored.
+// The probe reads the same bytes every 5 s (before that call's write), with the flags [AMC+0x321], [AMC+0x322], [AMC+0x378] once per AMC.
+constexpr size_t kClipParts = 8;             // the five unclip parts, then the comparison parts (EVASuit_Legs, EVASuit_Feet, FirstPersonSkeleton)
+constexpr size_t kClipUnclipParts = 5;
+inline constexpr const char* kClipPartNames[kClipParts] = {"EVASuit_Torso", "EVASuit_Arms", "EVASuit_Hands", "Shoulder_Left", "Shoulder_Right",
+                                                           "EVASuit_Legs", "EVASuit_Feet", "FirstPersonSkeleton"};
+struct ClipPart {
+    bool named = false;         // the name is in the part-name table (index resolved)
+    bool present = false;       // any instance of the part is on the AMC
+    bool readOk = false;        // the modifier's bytes were read
+    uint64_t mod = 0;           // the modifier pointer at part+0x610 (0 = none)
+    uint8_t enable = 0, dirty = 0;
+    float amount = 0.0f;
+};
+struct BodyClipSnap {
+    uint64_t stamp = 0;         // GetTickCount64 of the read (0 = none yet)
+    uint64_t amc = 0;
+    bool flagsOk = false;
+    uint8_t flags[3] = {};      // [AMC+0x321], [AMC+0x322], [AMC+0x378]
+    ClipPart part[kClipParts];
+};
+std::atomic<bool> g_unclipWant{false};       // frame thread: fix.native_on_foot_body_unclip is on and native stereo is on foot
+std::atomic<bool> g_clipProbeWant{false};    // frame thread: native stereo is on foot (the 5 s read runs)
+std::atomic<uint64_t> g_clipWrites{0};       // hook thread: modifier writes since the frame thread last logged
+std::atomic<uint64_t> g_clipWriteFaults{0};  // hook thread: guarded writes that faulted
+std::atomic<uint64_t> g_clipNextMs{0};       // hook thread: the next probe read
+BodyClipSnap g_clipSnap;                     // guarded by g_fpBodyMutex
+int g_clipIdx[kClipParts] = {-1, -1, -1, -1, -1, -1, -1, -1};   // guarded by g_fpBodyMutex: the part index of each name, -1 when absent
+
+__declspec(noinline) bool sehReadClipFlags(const uint8_t* amc, uint8_t* out) noexcept {
+    __try {
+        out[0] = amc[0x321];
+        out[1] = amc[0x322];
+        out[2] = amc[0x378];
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+// The part's instances (present) and its modifier (pointer and bytes). False only on a fault.
+__declspec(noinline) bool sehReadClipPart(const uint8_t* amc, uint32_t idx, ClipPart* p) noexcept {
+    __try {
+        const uint32_t at = ecm::kOffAmcParts + idx * ecm::kPartStride;
+        uint64_t any = 0;
+        for (uint32_t k = 0; k < ecm::kPartVariants; ++k) {
+            uint64_t inst = 0;
+            std::memcpy(&inst, amc + ecm::kOffAmcInstances + idx * ecm::kPartStride + 8 * k, 8);
+            any |= inst;
+        }
+        p->present = any != 0;
+        std::memcpy(&p->mod, amc + at + ecm::kOffPartClipMod, 8);
+        p->readOk = false;
+        if (plausiblePointer(p->mod)) {
+            const uint8_t* m = reinterpret_cast<const uint8_t*>(p->mod);
+            std::memcpy(&p->enable, m + ecm::kClipModEnable, 1);
+            std::memcpy(&p->dirty, m + ecm::kClipModDirty, 1);
+            std::memcpy(&p->amount, m + ecm::kClipModAmount, 4);
+            p->readOk = true;
+        }
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+// The unclip write: enable 0, dirty 1. 1 = written, 0 = no modifier (nothing written), -1 = a fault.
+__declspec(noinline) int sehWriteClipPart(uint8_t* amc, uint32_t idx) noexcept {
+    __try {
+        uint64_t mod = 0;
+        std::memcpy(&mod, amc + ecm::kOffAmcParts + idx * ecm::kPartStride + ecm::kOffPartClipMod, 8);
+        if (!plausiblePointer(mod)) return 0;
+        volatile uint8_t* m = reinterpret_cast<volatile uint8_t*>(mod);
+        m[ecm::kClipModEnable] = 0;
+        m[ecm::kClipModDirty] = 1;
+        return 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -1;
+    }
+}
+// The hook (after the fade, beside fpBodyStep): the local third-person AMC only, identified as headHideStep does it.
+void bodyClipStep(void* amcPtr) noexcept {
+    if (!amcPtr) return;
+    const bool unclip = g_unclipWant.load(std::memory_order_acquire);
+    const bool probe = g_clipProbeWant.load(std::memory_order_acquire);
+    if (!unclip && !probe) return;
+    uint8_t* const amc = static_cast<uint8_t*>(amcPtr);
+    AmcIdent id;
+    if (!sehReadAmcIdent(amc, &id)) return;
+    const uint64_t skeleton = g_skelIface[0].load(std::memory_order_acquire);
+    if (!ecm::isLocalAmc(id.id, id.pose, skeleton, id.mode)) return;
+    int idx[kClipParts];
+    {
+        std::lock_guard<std::mutex> lock(g_fpBodyMutex);
+        for (size_t i = 0; i < kClipParts; ++i) idx[i] = g_clipIdx[i];
+    }
+    if (probe) {   // read first: what the game left since our last write (the probe's enable reads 1 if the game re-applied)
+        const uint64_t now = GetTickCount64();
+        if (now >= g_clipNextMs.load(std::memory_order_relaxed)) {
+            g_clipNextMs.store(now + 5000, std::memory_order_relaxed);
+            BodyClipSnap s;
+            s.stamp = now;
+            s.amc = reinterpret_cast<uint64_t>(amcPtr);
+            s.flagsOk = sehReadClipFlags(amc, s.flags);
+            for (size_t i = 0; i < kClipParts; ++i) {
+                s.part[i].named = idx[i] >= 0;
+                if (idx[i] >= 0 && !sehReadClipPart(amc, static_cast<uint32_t>(idx[i]), &s.part[i])) s.part[i].named = false;
+            }
+            std::lock_guard<std::mutex> lock(g_fpBodyMutex);
+            g_clipSnap = s;
+        }
+    }
+    if (unclip) {
+        for (size_t i = 0; i < kClipUnclipParts; ++i) {
+            if (idx[i] < 0) continue;
+            const int r = sehWriteClipPart(amc, static_cast<uint32_t>(idx[i]));
+            if (r > 0) g_clipWrites.fetch_add(1, std::memory_order_relaxed);
+            else if (r < 0) g_clipWriteFaults.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+}
+
 // ---- the avatar-fade hook (the head hiding's post-call) ------------------------------------------------------------------------
 // ---- the neck census (native on foot, F1: log only, read-only) ------------------------------------------------------------------
 // Every 100 ms while native stereo is on foot, on the game's job thread: the local third-person head joint in avatar-root model space
@@ -1633,6 +1758,7 @@ __declspec(noinline) uint64_t __fastcall avatarFadeHooked(void* a, void* b, void
         headHideStep(a);
         neckCensusStep();
         fpBodyStep(a);   // F15 (E1): the first-person body, after the head hiding; a no-op unless the frame thread wants it
+        bodyClipStep(a); // F19 (TEMPORARY): the body's clip modifiers (unclip) and their 5 s probe; the local third-person AMC only
     }
     if (a && nativeOnFootActive()) avatarCensusNote(a);
     return result;
@@ -2977,6 +3103,89 @@ void explorerCamFpBody(bool want, const char* reason) {
     if (!g_fpNoMode2Noted && now - g_fpWantSinceMs >= 5000 && g_fpMode2Seen.load(std::memory_order_relaxed) == g_fpMode2AtStart) {
         g_fpNoMode2Noted = true;
         Log::get().note("native on foot body: no first-person AMC (mode 2) reached the fade hook in the first 5 s with the key on; nothing is hidden");
+    }
+}
+
+// F19 (TEMPORARY), frame thread, every frame: the unclip's on/off (its transitions are logged), the probe's and the unclip's wants for the hook, and
+// the 5 s lines from the hook's last snapshot. Names are resolved once the part-name table is verified (g_partNames == 1).
+namespace {
+bool g_clipWantLast = false;         // the unclip was wanted on the last frame
+uint64_t g_clipOnMs = 0;             // when the unclip was last turned on
+bool g_clipUnseenNoted = false;      // the no-AMC line was written for this turn-on
+uint64_t g_clipLogStamp = 0;         // the snapshot stamp last logged
+uint64_t g_clipLogMs = 0;            // when a snapshot was last logged
+uint64_t g_clipFlagsAmc = 0;         // the AMC whose flags were logged (0 = none)
+bool g_clipResolved = false;         // the names were looked up
+}  // namespace
+
+void explorerCamBodyClipTick(uint64_t now, bool unclipWant, bool probeWant, const char* reason) {
+    const char* why = reason ? reason : "";
+    if (!g_clipResolved && g_partNames.load(std::memory_order_relaxed) == 1) {
+        int found[kClipParts];
+        std::string missing;
+        {
+            for (size_t i = 0; i < kClipParts; ++i) {
+                found[i] = ecm::partIndexByName(kClipPartNames[i]);
+                if (found[i] < 0) {
+                    if (!missing.empty()) missing += ", ";
+                    missing += kClipPartNames[i];
+                }
+            }
+            std::lock_guard<std::mutex> lock(g_fpBodyMutex);
+            for (size_t i = 0; i < kClipParts; ++i) g_clipIdx[i] = found[i];
+        }
+        g_clipResolved = true;
+        if (!missing.empty()) Log::get().note("native on foot body clip: part(s) not in the part-name table, left alone: %s", missing.c_str());
+    }
+    g_unclipWant.store(unclipWant, std::memory_order_release);
+    g_clipProbeWant.store(probeWant, std::memory_order_release);
+    if (unclipWant && !g_clipWantLast) {
+        g_clipOnMs = now;
+        g_clipUnseenNoted = false;
+        Log::get().note("native on foot body unclip: on (EVASuit torso, arms and hands, both shoulders: enable 0, dirty 1, local third-person AMC)");
+    }
+    if (!unclipWant && g_clipWantLast)
+        Log::get().note("native on foot body unclip: off (%s); nothing is restored: the game writes its own enable on its next item apply, and the value it had was not kept", why);
+    g_clipWantLast = unclipWant;
+    if (!unclipWant && !probeWant) return;
+    BodyClipSnap s;
+    {
+        std::lock_guard<std::mutex> lock(g_fpBodyMutex);
+        s = g_clipSnap;
+    }
+    // The hook never saw the local third-person AMC: say so, so "no lines" cannot be read as "all written".
+    if (unclipWant && s.stamp == 0 && !g_clipUnseenNoted && now - g_clipOnMs >= 5000) {
+        g_clipUnseenNoted = true;
+        Log::get().note("native on foot body unclip: the local third-person AMC has not reached the fade hook in the first 5 s with the key on; nothing is written");
+    }
+    if (now - g_clipLogMs < 5000) return;
+    if (s.stamp == 0 || s.stamp == g_clipLogStamp) return;
+    g_clipLogStamp = s.stamp;
+    g_clipLogMs = now;
+    if (unclipWant) {
+        const uint64_t writes = g_clipWrites.exchange(0, std::memory_order_relaxed);
+        const uint64_t faults = g_clipWriteFaults.load(std::memory_order_relaxed);
+        Log::get().note("native on foot body unclip: %llu modifier writes in the last 5 s (AMC 0x%llX, faults so far %llu)",
+                        static_cast<unsigned long long>(writes), static_cast<unsigned long long>(s.amc),
+                        static_cast<unsigned long long>(faults));
+    } else {
+        g_clipWrites.store(0, std::memory_order_relaxed);
+    }
+    if (s.amc != g_clipFlagsAmc) {
+        g_clipFlagsAmc = s.amc;
+        if (s.flagsOk)
+            Log::get().note("native on foot body clip flags: [AMC+0x321]=0x%02X [AMC+0x322]=0x%02X [AMC+0x378]=0x%02X", s.flags[0], s.flags[1], s.flags[2]);
+        else
+            Log::get().note("native on foot body clip flags: not readable");
+    }
+    for (size_t i = 0; i < kClipParts; ++i) {
+        if (!s.part[i].named) continue;
+        const ClipPart& p = s.part[i];
+        if (i >= kClipUnclipParts && !p.present) continue;   // the comparison parts only where the AMC has them
+        Log::get().note("native on foot body clip: %s mod=0x%llX enable=%u dirty=%u amount=%.4f%s", kClipPartNames[i],
+                        static_cast<unsigned long long>(p.mod), static_cast<unsigned>(p.enable), static_cast<unsigned>(p.dirty),
+                        static_cast<double>(p.amount),
+                        !p.present ? " (no instance on this AMC)" : (p.mod != 0 && !p.readOk) ? " (modifier not readable)" : "");
     }
 }
 

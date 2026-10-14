@@ -184,14 +184,17 @@ constexpr uint32_t kHudMatrix2Off = 0x480;
 constexpr float kHudDefaultDistance = 0.192f;
 constexpr float kHudDistanceMin = 0.01f, kHudDistanceMax = 0.40f;
 // F16: the setting's default distance (Sean's tuning), which is not the game's 0.192 above; used only as the setting's fallback.
-constexpr float kHudDistanceSettingDefault = 0.03f;
+// F19: Sean's tuning is 0.01 (the minimum of the range).
+constexpr float kHudDistanceSettingDefault = 0.01f;
 // F13: the HUD size (the basis rows only), the head follow's smoothing (ms), and the visor override test (TEMPORARY).
 // F16: size's default is 1.50 and its maximum 3.00 (Sean's tuning hit the old maximum); smoothing's default is 40 ms.
-constexpr float kHudSizeMin = 0.30f, kHudSizeMax = 3.00f, kHudSizeDefault = 1.50f;
+// F19: size's default is Sean's 1.60.
+constexpr float kHudSizeMin = 0.30f, kHudSizeMax = 3.00f, kHudSizeDefault = 1.60f;
 constexpr int kHudSmoothMin = 0, kHudSmoothMax = 500, kHudSmoothDefault = 40;
 // F16: the per-group HUD offsets (a fraction of the HUD canvas, live), and the default spread (the margins' extra, F14).
+// F19: the spread's default is Sean's 0.04.
 constexpr float kHudOffsetMin = -0.30f, kHudOffsetMax = 0.30f;
-constexpr float kHudSpreadDefault = 0.15f;
+constexpr float kHudSpreadDefault = 0.04f;
 // F16: the HUD group of a layout part, by the name the layout passes (rec+0). 0 left, 1 top, 2 right, 3 centre; -1 is a name not in the table: no
 // offset for it, and the layout logs it once. The names are the ones the F14 layout probe logged.
 constexpr int kHudGroupCount = 4;

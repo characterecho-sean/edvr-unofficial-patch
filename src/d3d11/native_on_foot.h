@@ -89,4 +89,15 @@ void nativeOnFootBodyCullEnd(ID3D11DeviceContext* ctx);
 // vScreen's shutdown, beside remlokShutdown: releases the cached clones and the game states they were made from.
 void nativeOnFootBodyCullShutdown();
 
+// F19 (TEMPORARY, fix.native_on_foot_body_cb_probe): the frame thread sets the flag on foot (native stereo or Explorer Cam, the journal).
+// The DrawIndexedInstanced thunk asks nativeOnFootBodyProbeWanted() for owner-context draws; the probe matches the body draws and reads
+// pixel constant buffer 2 through a staging copy (native_on_foot.cpp). bodyCbProbeLine() is the frame thread's drain of its readings.
+inline std::atomic<bool> g_nativeOnFootBodyProbe{false};
+inline bool nativeOnFootBodyProbeWanted() {
+    return g_nativeOnFootBodyProbe.load(std::memory_order_relaxed);
+}
+void nativeOnFootBodyProbeDraw(ID3D11DeviceContext* ctx, uint32_t indexCount, uint32_t instances);   // draw thread, owner context
+void bodyCbProbeLine();                                                                              // frame thread
+void nativeOnFootBodyProbeShutdown();                                                                // draw thread (from the cull's shutdown)
+
 }  // namespace edvr

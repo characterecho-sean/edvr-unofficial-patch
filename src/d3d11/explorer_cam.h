@@ -110,6 +110,8 @@ void explorerCamNativeBody(bool wanted, bool body, const char* reason);
 // (mode 2), with the head hiding's SEH method. Nothing is restored: the game rewrites the masks every frame. Alpha, the view filter and flag bytes are
 // not touched. Logs the transitions once; `reason` (a literal) says why it ends.
 void explorerCamFpBody(bool want, const char* reason);
+// F19 (TEMPORARY): the body's clip modifiers. unclipWant = write them (fix.native_on_foot_body_unclip on, native on foot); probeWant = the 5 s read.
+void explorerCamBodyClipTick(uint64_t nowMs, bool unclipWant, bool probeWant, const char* reason);
 struct FpBodyReadback {
     uint64_t amc = 0;               // the first-person AMC last zeroed (0 = none yet this session)
     uint32_t parts = 0;             // how many of the three names were found in the table
