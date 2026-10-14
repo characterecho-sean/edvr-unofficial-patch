@@ -2,7 +2,7 @@
 
 ## Status
 
-- **State:** F0-F18 FLOWN (Epic). **F19 BUILT** (full build green, receipt written; commit and `--dll-only` in the journal), **NOT FLOWN**. Branch `claude/native-onfoot-vr-completion-219ffa`; not pushed.
+- **State:** F0-F18 FLOWN (Epic). **F19 BUILT and installed to Epic** (commit eab40235), **F20 BUILT** (commit 816c1d80), **both NOT FLOWN**. F19 and F20 fly together. Branch `claude/native-onfoot-vr-completion-219ffa`; not pushed.
 - **Origin:** a user's handoff. A Cinema-to-HMD swap on disembark gave native stereo on foot; the HUD, radar, left panel and inventory were missing.
 - **Build:** Sean's installs hash to the handoff's exe (332841). Epic is the install target.
 - **Verified offline:** the setter is vtable 0x52E9608 slot 5 = 0x28723C0. The selector is embedded in its owner at +0x60. No direct callers.
@@ -14,18 +14,19 @@
   2. Clip probe (no key; on while native stereo is on foot): 5 s lines `native on foot body clip:` for the five parts plus EVASuit_Legs, EVASuit_Feet and FirstPersonSkeleton (only where the AMC has them); `native on foot body clip flags:` once per AMC ([AMC+0x321], [AMC+0x322], [AMC+0x378]). Read before the same call's write.
   3. Constants probe, TEMPORARY `fix.native_on_foot_body_cb_probe` (on | off, off), native or Explorer Cam on foot. Logs `native on foot body cb2:` rows 5..9 once per 5 s per (VS, PS, index count). No CPU copy of constant-buffer bytes exists (binding_shadow keeps pointers only), so it is a 352-byte GPU copy to a staging buffer, mapped with DO_NOT_WAIT on a later matched draw.
   4. HUD defaults (Sean's tuning, repo ini and code fallbacks): element scale 1.35, size 1.60, distance 0.01, spread 0.04, left x 0.18 and y 0.02, top y -0.07. Room stays 1.00.
+- **F20 (BUILT, NOT FLOWN; flies with F19):** TEMPORARY `fix.native_on_foot_body_mode` (game | third; default game). While native stereo is on foot and not aiming down sights, the game's own model mode is third (first-person avatar hidden, third-person body and weapon shown); ADS (Flags2 bit 5) uses first-person models. Two hooks, installed when the key first reads third: a SetMode detour (EliteDangerous64.exe+0x1A112B0, 22-byte prologue verified) that rewrites the game's request 0 to 1 (0 under ADS) for the local manager only, and a povCamera entry hook (+0x19B1240, 32 bytes verified, steal 6) that holds the local manager's mode and restores the game's once when the hold ends. Explorer Cam's FindJoint sites (+0x19B12D5, +0x19B1359) are past the steal.
 - **Open hypotheses:**
   - H-clip: the torso is hidden by its clip modifier (enable 1 with the amount above cb2[5].w). F19 tests it: unclip on should show the torso; the clip probe shows whether the game re-applies enable 1 between our writes.
   - H-threshold: cb2 row 5, w is the discard threshold. The cb2 probe reads it; if the amounts sit below it, H-clip is refuted.
   - H-eye: P1's cam_minus_head sizes an eye offset; the head-in-body assumption is unverified (F18 values looked implausible, not used).
   - H-room: whether the game's own S at [HRC+0x4C4] matches the element scale it lays out (not re-checked).
 - **Ruled out:** the cinema request is always 5 (see the end of this doc). Back-face culling hides the native torso (F18).
-- **Temporary keys (all go when the arc picks one):** `fix.native_on_foot`, `_method`, `_hud`, `_panels`, `_hud_mesh`, `_hud_mesh_world`, `_hud_follow_order`, `_reticle_probe`, `_hide_fp_body`, `_body_cull` (F18), `_body_unclip` and `_body_cb_probe` (F19). All default off or game, and live.
+- **Temporary keys (all go when the arc picks one):** `fix.native_on_foot`, `_method`, `_hud`, `_panels`, `_hud_mesh`, `_hud_mesh_world`, `_hud_follow_order`, `_reticle_probe`, `_hide_fp_body`, `_body_cull` (F18), `_body_unclip` and `_body_cb_probe` (F19), `_body_mode` (F20). All default off or game, and live.
 - **User settings:** `_breathable_visor` (up | game, up), `_reticle_follow` (aim | head, aim), the eight `_hud_<left|top|right|centre>_<x|y>` offsets (F19: left 0.18, 0.02; top y -0.07), `_hud_element_scale` (F19: 1.35; 0 = game, else 0.30..2.00), `_hud_room` (1.00..2.50), and the tuned defaults: distance 0.01 (min 0.01), size 1.60 (max 3.00), spread 0.04, smoothing 40 ms.
 - **OPEN, RemLok on foot:** the on-foot visor overlay is not yet identified. It needs a skip-probe or a diff census that excludes the tonemap PS 0x99C21CEB7A699821 (tonemap_admit.h:39).
 - **F2 (c884e218):** the gate holds the byte at 0 while the key is on; the native body zeroes the local head parts. Log lines and details are in the journal.
 - **Install:** Epic only (Sean: Frontier carries another feature test). `edvr.ini` is not touched unless `--ini` says so. `--target` takes the game directory path.
-- **Next:** flight F19 on Epic with `--scope vr`, keys `body_unclip = on` and `body_cb_probe = on` for one run. Check: the torso on the native body (unclip on vs off); `body clip` enable and dirty values; `body cb2` row 5 w against the clip amounts; the P1 line on foot.
+- **Next:** flight F19 and F20 on Epic with `--scope vr`, keys `body_unclip = on`, `body_cb_probe = on` and `body_mode = third` for one run. Check: the torso on the native body (unclip on vs off); `body clip` enable and dirty values; `body cb2` row 5 w against the clip amounts; the P1 line on foot.
 
 ## What "finished" means
 
@@ -567,3 +568,33 @@ mode and its context); W3 step 1-2 (dump comparison, offline).
   with no matched body draw, the cb2 probe logs `0 body draws matched in the last 5 s`. A silent probe is therefore not a quiet one.
   Build: source commit eab40235. The full build (`build.bat --wait-lock`) passed twice; the second run added the two trace lines above.
   Receipt: `build\full_build_receipt.json` written at 15:35 for this source tree (docs are not receipt inputs).
+
+- **2026-10-14, F20 BUILT (NOT FLOWN; flies with F19).** The game's own model mode, with the native first-person view kept.
+  Approved by Sean. Temporary key `fix.native_on_foot_body_mode` (game | third; default game; F8 row on the native on-foot page).
+  RE, build 332841 (checked in the Epic exe with capstone; the scratch script is not in the repo):
+  - `HumanoidModelManager::SetMode` is at EliteDangerous64.exe+0x1A112B0, vtable slot 0x30 of the manager whose vtable is +0x5200F90. Its first
+    22 bytes `40 53 48 83 EC 20 48 8B D9 39 91 30 02 00 00 75 05 45 84 C0 74 1F` (push rbx; sub rsp,0x20; mov rbx,rcx; cmp [rcx+0x230],edx; ...).
+    Args: rcx = manager, edx = mode (0 first-person models, 1 third-person), r8b = force. The mode is stored at [manager+0x230].
+  - The per-frame hook is the povCamera joint handler at EliteDangerous64.exe+0x19B1240, entered for every humanoid. Its first 32 bytes
+    `40 53 48 83 EC 20 48 85 D2 48 89 74 24 30 48 8D B2 B0 01 00 00 B8 A0 02 00 00 48 0F 44 F0 48 8D` match the brief. The manager is
+    `[rdx+0x1B0]` (rdx = the receiver). Local player only: `[manager+0x238] != 0` and `[manager] == base+0x5200F90`.
+  - Conflict check: Explorer Cam's FindJoint sites are return addresses +0x19B12D5 and +0x19B1359, both past the 6 bytes this hook steals
+    (+0x19B1240..+0x19B1245, `push rbx; sub rsp,0x20`). No other hook in the tree touches either entry.
+  Mechanism: the SetMode detour (a callback relay, ecm::buildCallbackRelay) records the game's requests for the captured local manager and,
+  while the body is wanted as third person, forwards a request for 0 as 1 (as 0 while aiming down sights; ADS is Status.json Flags2 bit 5,
+  `journalAds()` beside the F16 breathable flag). A request for 1 is never changed. The povCamera hook runs the original first, then holds
+  the local manager at the desired mode through the SetMode trampoline, so EDVR's own calls never reach the detour. When the hold ends
+  (key to game, native ended, session ended, shutdown) the game's own mode is restored once. The game's mode is the last game request,
+  or the value read before the first hold when no request was seen. A captured manager not seen for 60 frames is dropped without a restore.
+  The two hooks install when the key first reads third, after the identity check, the vtable slot check and both prologue checks; the
+  relays are placed within two gigabytes; nothing is patched if any check fails. Flat profile: refused.
+  Logs (the hook threads never log; they queue, and the frame boundary writes):
+  - install: `native on foot body mode: installed -- SetMode at EliteDangerous64.exe+0x1A112B0 ..., stolen=N bytes, prologue 22 bytes verified, relay at 0x.. (thread T)` and the povCamera line with 32 bytes.
+  - `native on foot body mode: game asked M (thread T) -> forwarded M'` (on a change only)
+  - `native on foot body mode: set M (ADS a, frame thread T2)` (each EDVR call)
+  - `native on foot body mode: restored to M (reason, frame thread T2)`
+  Read it this way: a `game asked 0 -> forwarded 1` with `set 1` and no `restored` is the hold working; an install line with no `set` line
+  means the local manager was never captured (the `local third-person humanoid seen` line says it was).
+  Note: the first run of this build will not show the body's model change in the logs, only the calls; the visible result is the flight's.
+  F19 keys are unchanged. F19 and F20 fly together: the body clip (F19) and the model mode (F20) are separate hooks.
+  Build: source commit 816c1d80. The first full build failed on two duplicate `flags2` declarations in journal_watch.cpp, left by merging main into HEAD (65cdfc7b); the commit removes the duplicates (identical copies). The second full build passed (`all gates passed`, receipt written). The shared build lock was held by other worktrees for about an hour before it started.
