@@ -134,5 +134,41 @@ constexpr uint32_t kCensusOwnerOff = 0x58, kCensusSettingsOff = 0x1180, kCensusR
                    kCensusSelModeOff = 0x20, kCensusWOff = 0x2CB8, kCensusSlotA = 0x90, kCensusSlotB = 0x98, kCensusPassOff = 0x2E0,
                    kCensusF70Off = 0x70, kCensusNodeOff = 0x30, kCensusNodeOnOff = 0x30, kCensusPgOff = 0x38, kCensusPg250Off = 0x250;
 
+// ---- F9 (TEMPORARY; native_on_foot.cpp holds the code). Two game code patches (approved by Sean 2026-10-14) and three read-only probes. ----
+// Patch A (fix.native_on_foot_panels): 76 73 (jbe 0x19B15FC) -> 90 90, in the panel gate of HumanoidPanelComponent (0x19B14E0).
+constexpr uintptr_t kPanelPatchRva = 0x19B1587;
+constexpr size_t kPanelPatchLen = 2;
+constexpr uint8_t kPanelPatchFrom[2] = {0x76, 0x73};
+constexpr uint8_t kPanelPatchTo[2] = {0x90, 0x90};
+// Patch B (fix.native_on_foot_hud_mesh): 74 2A (jz +0x2A) -> EB 2A; the first byte only is written (the HRC camera-space placement branch).
+constexpr uintptr_t kMeshPatchRva = 0x1A36453;
+constexpr size_t kMeshPatchLen = 1;
+constexpr uint8_t kMeshPatchFrom[2] = {0x74, 0x2A};
+constexpr uint8_t kMeshPatchTo[2] = {0xEB, 0x2A};
+// Probes. P1: panel submit (rcx = set, rdx = view, r8b = flag); P2: the HRC submit (six arguments; rcx = HRC); P3: the per-instance submit.
+constexpr size_t kF9ProbeCount = 3;
+constexpr size_t kF9Hrc = 3;
+constexpr uintptr_t kPanelSubmitRva = 0x4714FE0;
+constexpr size_t kPanelSubmitStolen = 5;
+constexpr size_t kPanelSubmitPrologueBytes = 32;
+constexpr uint8_t kPanelSubmitPrologue[kPanelSubmitPrologueBytes] = {
+    0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18, 0x48, 0x89, 0x7C, 0x24, 0x20,
+    0x41, 0x56, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0x99, 0xB8, 0x01, 0x00};
+constexpr uintptr_t kHrcSubmitRva = 0x1A14970;
+constexpr size_t kHrcSubmitStolen = 5;   // push rbp (2), push rbx (1), push r12 (2); the rip-relative cookie load at +0x13 is NOT stolen
+constexpr size_t kHrcSubmitPrologueBytes = 26;
+constexpr uint8_t kHrcSubmitPrologue[kHrcSubmitPrologueBytes] = {
+    0x40, 0x55, 0x53, 0x41, 0x54, 0x41, 0x56, 0x48, 0x8D, 0x6C, 0x24, 0xC1, 0x48, 0x81, 0xEC, 0xA8,
+    0x00, 0x00, 0x00, 0x48, 0x8B, 0x05, 0xDE, 0x1F, 0x49, 0x04};
+constexpr uintptr_t kInstSubmitRva = 0x434D320;
+constexpr size_t kInstSubmitStolen = 5;
+constexpr size_t kInstSubmitPrologueBytes = 32;
+constexpr uint8_t kInstSubmitPrologue[kInstSubmitPrologueBytes] = {
+    0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18, 0x57,
+    0x48, 0x83, 0xEC, 0x30, 0x48, 0x8B, 0xF9, 0x41, 0x8B, 0xD8, 0x48, 0x8B, 0x89, 0x50, 0x01, 0x00};
+// The fields. HRC: byte [+0x291], [+0x470], [+0x4C0]; qwords [+0x418], [+0x420], [+0x428] (the three mesh instances); dep = qword [+0x1D0].
+// View (the instance submit's rdx): dword [+0x8E8] (the view id); floats [+0x50], [+0x54], [+0x58] (the camera position).
+constexpr uint32_t kF9HrcG291Off = 0x291, kF9HrcG470Off = 0x470, kF9HrcG4C0Off = 0x4C0, kF9HrcInst0Off = 0x418, kF9HrcDepOff = 0x1D0,
+                   kF9ViewIdOff = 0x8E8, kF9ViewCamOff = 0x50;
 }  // namespace nofoot
 }  // namespace edvr

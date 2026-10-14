@@ -30,6 +30,9 @@ using SetterFn = void(__fastcall*)(void*, uint32_t);
 CodeHook* g_hook = nullptr;
 SetterFn g_original = nullptr;                     // the trampoline: the setter as it was
 std::atomic<uintptr_t> g_frozenSelector{0};        // the first selector whose owner points back at it
+std::atomic<bool> g_panelsKeyOn{false};            // fix.native_on_foot_panels, as the frame thread last read it (F9)
+std::atomic<bool> g_meshKeyOn{false};              // fix.native_on_foot_hud_mesh, as the frame thread last read it (F9)
+bool g_panelsKeyLast = false, g_meshKeyLast = false;   // frame thread only: as last logged
 std::atomic<bool> g_hudKeyOn{false};               // fix.native_on_foot_hud, as the frame thread last read it (F8)
 bool g_hudKeyLast = false;                         // frame thread only: the hud key as last logged
 std::atomic<bool> g_keyOn{false};                  // fix.native_on_foot, as the frame thread last read it
@@ -361,6 +364,19 @@ void readKey() {
     if (first || hudOn != g_hudKeyLast) {
         Log::get().note("native on foot: fix.native_on_foot_hud is %s", hudOn ? "on" : "off");
         g_hudKeyLast = hudOn;
+    }
+    // F9 (TEMPORARY): the two code patches' keys, live.
+    const bool panelsOn = cfg.getString("fix.native_on_foot_panels", "off") == "on";
+    const bool meshOn = cfg.getString("fix.native_on_foot_hud_mesh", "off") == "on";
+    g_panelsKeyOn.store(panelsOn, std::memory_order_relaxed);
+    g_meshKeyOn.store(meshOn, std::memory_order_relaxed);
+    if (first || panelsOn != g_panelsKeyLast) {
+        Log::get().note("native on foot: fix.native_on_foot_panels is %s", panelsOn ? "on" : "off");
+        g_panelsKeyLast = panelsOn;
+    }
+    if (first || meshOn != g_meshKeyLast) {
+        Log::get().note("native on foot: fix.native_on_foot_hud_mesh is %s", meshOn ? "on" : "off");
+        g_meshKeyLast = meshOn;
     }
 }
 
@@ -894,6 +910,509 @@ void hudCensusTick(uint64_t nowMs, bool session) {
     }
 }
 
+// ---- F9: two code patches (TEMPORARY; approved by Sean 2026-10-14) -----------------------------------------------------------------
+// Each patch is applied only while native stereo is on foot, its own key is on, and the first-person HUD override (F8) is held. The bytes
+// are verified before the write (refused and logged otherwise), and restored to the exact original bytes when any of those stops holding,
+// at shutdown, or when a check fails. A restore writes back only while the bytes still read as this patch left them.
+struct CodePatch {
+    const char* name;        // the log's name: "panels" or "hud mesh"
+    uintptr_t rva;
+    uint8_t from[2];         // the bytes the patch expects (both checked)
+    uint8_t to[2];           // the bytes it leaves (both checked on a restore)
+    size_t len;              // bytes written: 2, or 1 for the mesh patch
+    const char* shape;       // the log's shape, for example "76 73 -> 90 90"
+    bool applied = false;    // frame thread only
+    std::string refusal;     // frame thread only
+    bool restoreNoted = false;
+};
+CodePatch g_panelPatch{"panels", nofoot::kPanelPatchRva, {nofoot::kPanelPatchFrom[0], nofoot::kPanelPatchFrom[1]},
+                       {nofoot::kPanelPatchTo[0], nofoot::kPanelPatchTo[1]}, nofoot::kPanelPatchLen, "76 73 -> 90 90"};
+CodePatch g_meshPatch{"hud mesh", nofoot::kMeshPatchRva, {nofoot::kMeshPatchFrom[0], nofoot::kMeshPatchFrom[1]},
+                      {nofoot::kMeshPatchTo[0], nofoot::kMeshPatchTo[1]}, nofoot::kMeshPatchLen, "74 -> EB"};
+
+// A store of `len` bytes (2, or 1) at `address`, under VirtualProtect to PAGE_EXECUTE_READWRITE and back, with the instruction cache flushed.
+__declspec(noinline) bool guardedStoreBytes(uintptr_t address, uint16_t value, size_t len) noexcept {
+    __try {
+        if (len == 2) *reinterpret_cast<volatile uint16_t*>(address) = value;
+        else *reinterpret_cast<volatile uint8_t*>(address) = static_cast<uint8_t>(value);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+bool storeCodeBytes(uintptr_t address, uint16_t value, size_t len) noexcept {
+    DWORD old = 0;
+    if (!VirtualProtect(reinterpret_cast<void*>(address), len, PAGE_EXECUTE_READWRITE, &old)) return false;
+    const bool ok = guardedStoreBytes(address, value, len);
+    DWORD ignored = 0;
+    VirtualProtect(reinterpret_cast<void*>(address), len, old, &ignored);
+    FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void*>(address), len);
+    return ok;
+}
+
+void refusePatch(CodePatch& p, const std::string& why) {
+    if (why == p.refusal) return;   // the same reason: already said
+    p.refusal = why;
+    Log::get().note("native on foot %s: patch EliteDangerous64.exe+0x%llX NOT patched -- %s. The game's bytes are left as they are.", p.name,
+                    static_cast<unsigned long long>(p.rva), why.c_str());
+}
+
+// `want`: the patch should be applied now. `reason` (a literal) says why it is being put back.
+void codePatchTick(CodePatch& p, bool want, const char* reason) {
+    const uintptr_t address = g_base + p.rva;
+    if (want) {
+        if (p.applied || g_install != InstallState::Armed) return;
+        const char* idWhy = nullptr;
+        if (!checkIdentity(g_base, &idWhy)) {
+            refusePatch(p, std::string("the PE identity check failed (") + idWhy + ")");
+            return;
+        }
+        uint8_t cur[2] = {};
+        if (!guardedRead(address, cur, 2)) {
+            refusePatch(p, "the bytes could not be read");
+            return;
+        }
+        if (cur[0] != p.from[0] || cur[1] != p.from[1]) {
+            char b[160];
+            std::snprintf(b, sizeof(b), "the bytes are %02X %02X, not %02X %02X, so they are someone else's and are left alone",
+                          static_cast<unsigned>(cur[0]), static_cast<unsigned>(cur[1]), static_cast<unsigned>(p.from[0]),
+                          static_cast<unsigned>(p.from[1]));
+            refusePatch(p, b);
+            return;
+        }
+        const uint16_t value = static_cast<uint16_t>(p.to[0] | (p.to[1] << 8));
+        if (!storeCodeBytes(address, value, p.len)) {
+            refusePatch(p, "the bytes are not writable");
+            return;
+        }
+        p.applied = true;
+        p.refusal.clear();
+        Log::get().note("native on foot %s: patch EliteDangerous64.exe+0x%llX %s", p.name, static_cast<unsigned long long>(p.rva), p.shape);
+        return;
+    }
+    if (!p.applied) {
+        p.refusal.clear();
+        return;
+    }
+    uint8_t cur[2] = {};
+    if (!guardedRead(address, cur, 2)) return;   // retried next frame
+    if (cur[0] != p.to[0] || cur[1] != p.to[1]) {
+        p.applied = false;
+        Log::get().note("native on foot %s: patch EliteDangerous64.exe+0x%llX NOT restored -- the bytes are %02X %02X, not ours (restore: %s)",
+                        p.name, static_cast<unsigned long long>(p.rva), static_cast<unsigned>(cur[0]), static_cast<unsigned>(cur[1]), reason);
+        return;
+    }
+    const uint16_t value = static_cast<uint16_t>(p.from[0] | (p.from[1] << 8));
+    if (!storeCodeBytes(address, value, p.len)) {
+        if (!p.restoreNoted) {
+            p.restoreNoted = true;
+            Log::get().note("native on foot %s: patch EliteDangerous64.exe+0x%llX could not be restored (%s); retrying each frame.", p.name,
+                            static_cast<unsigned long long>(p.rva), reason);
+        }
+        return;
+    }
+    p.applied = false;
+    p.restoreNoted = false;
+    Log::get().note("native on foot %s: patch EliteDangerous64.exe+0x%llX restored (%s; %02X %02X -> %02X %02X)", p.name,
+                    static_cast<unsigned long long>(p.rva), reason, static_cast<unsigned>(p.to[0]), static_cast<unsigned>(p.to[1]),
+                    static_cast<unsigned>(p.from[0]), static_cast<unsigned>(p.from[1]));
+}
+
+// ---- F9: three read-only probes (TEMPORARY) -----------------------------------------------------------------------------------------
+// P1 (panel submit), P2 (the HRC submit; six arguments forwarded), P3 (the per-instance submit: the HRC's instances only). Each reads game
+// memory under SEH and forwards the registers unchanged; a probe stands down after sixteen faults. Aggregates are per 5 s and per state;
+// the HRC line is also written when its values change. No game thread writes a line.
+std::atomic_flag g_f9Lock = ATOMIC_FLAG_INIT;
+struct F9Lock {
+    F9Lock() noexcept {
+        while (g_f9Lock.test_and_set(std::memory_order_acquire)) _mm_pause();
+    }
+    ~F9Lock() { g_f9Lock.clear(std::memory_order_release); }
+};
+const char* const g_f9StateName[3] = {"native", "cinema", "ship/other"};
+uint8_t f9State() noexcept {
+    if (nativeOnFootActive()) return 0;
+    if (journalOnFootKnown() && journalOnFoot()) return 1;
+    return 2;
+}
+
+struct F9Probe {
+    uint8_t* relay = nullptr;
+    alignas(8) std::atomic<uintptr_t> gate{0};
+    void* original = nullptr;   // the trampoline; cast at the call (four or six arguments)
+    CodeHook* hook = nullptr;
+};
+F9Probe g_f9Probe[nofoot::kF9ProbeCount];
+std::atomic<bool> g_f9Stop[nofoot::kF9ProbeCount]{};
+std::atomic<uint32_t> g_f9Faults[nofoot::kF9ProbeCount]{};
+std::atomic<uintptr_t> g_hrcInst[nofoot::kF9Hrc]{};   // published by P2 each call, read by P3
+bool g_f9Tried = false;                               // frame thread only
+bool g_f9Armed[nofoot::kF9ProbeCount] = {};           // frame thread only
+uint64_t g_f9LastMs = 0;                              // frame thread only
+
+using F9Fn4 = uint64_t(__fastcall*)(void*, void*, uint64_t, uint64_t);
+using F9Fn6 = uint64_t(__fastcall*)(void*, void*, uint64_t, uint64_t, uint64_t, uint64_t);
+
+bool f9Read(size_t probe, uintptr_t address, void* out, size_t bytes) noexcept {
+    if (guardedRead(address, out, bytes)) return true;
+    if (g_f9Faults[probe].fetch_add(1, std::memory_order_relaxed) + 1 >= 16) g_f9Stop[probe].store(true, std::memory_order_relaxed);
+    return false;
+}
+// An image RVA of a pointer value, 0 when it is outside the image.
+uint32_t f9Rva(uint64_t value) noexcept {
+    const uintptr_t base = g_base;
+    if (!base || value < base || value >= base + ecm::kExpectedImageSize) return 0;
+    return static_cast<uint32_t>(value - base);
+}
+std::string f9RvaText(uint32_t rva, bool ok) {
+    if (!ok || !rva) return "?";
+    char b[24];
+    std::snprintf(b, sizeof(b), "+0x%X", static_cast<unsigned>(rva));
+    return b;
+}
+
+// P1 aggregates: per (state, caller RVA).
+struct F9CallerRow {
+    bool used = false;
+    uint8_t st = 0;
+    uint32_t caller = 0;
+    uint64_t calls = 0, window = 0;
+};
+constexpr size_t kF9Callers = 8;
+F9CallerRow g_f9Callers[kF9Callers];   // guarded by g_f9Lock
+
+// P2 aggregates: per state, the last values and the window's calls.
+struct F9HrcState {
+    bool seen = false;
+    uint8_t g291 = 0, g470 = 0, g4C0 = 0;
+    bool ok291 = false, ok470 = false, ok4C0 = false;
+    uint64_t inst[nofoot::kF9Hrc] = {};
+    bool instOk[nofoot::kF9Hrc] = {};
+    uint64_t dep = 0;
+    uint32_t depVt = 0;
+    bool depOk = false, depVtOk = false;
+    uint64_t window = 0;
+};
+F9HrcState g_f9Hrc[3];   // guarded by g_f9Lock
+
+// P3 aggregates: per (state, instance, view id), the last camera position.
+struct F9InstRow {
+    bool used = false;
+    uint8_t st = 0, k = 0;
+    uint32_t viewId = 0;
+    bool viewOk = false;
+    uint64_t calls = 0, window = 0;
+    float cam[3] = {};
+    bool camOk = false;
+};
+constexpr size_t kF9Insts = 16;
+F9InstRow g_f9Insts[kF9Insts];   // guarded by g_f9Lock
+
+void f9RecordCaller(uint8_t st, uint32_t caller) noexcept {
+    F9Lock lock;
+    for (auto& r : g_f9Callers) {
+        if (r.used && r.st == st && r.caller == caller) {
+            ++r.calls;
+            ++r.window;
+            return;
+        }
+    }
+    for (auto& r : g_f9Callers) {
+        if (!r.used) {
+            r.used = true;
+            r.st = st;
+            r.caller = caller;
+            r.calls = r.window = 1;
+            return;
+        }
+    }
+}
+
+void f9RecordHrc(uint8_t st, void* hrc) noexcept {
+    const uintptr_t h = reinterpret_cast<uintptr_t>(hrc);
+    uint8_t g291 = 0, g470 = 0, g4C0 = 0;
+    const bool ok291 = f9Read(1, h + nofoot::kF9HrcG291Off, &g291, 1);
+    const bool ok470 = f9Read(1, h + nofoot::kF9HrcG470Off, &g470, 1);
+    const bool ok4C0 = f9Read(1, h + nofoot::kF9HrcG4C0Off, &g4C0, 1);
+    uint64_t inst[nofoot::kF9Hrc] = {};
+    bool instOk[nofoot::kF9Hrc] = {};
+    for (size_t k = 0; k < nofoot::kF9Hrc; ++k) {
+        instOk[k] = f9Read(1, h + nofoot::kF9HrcInst0Off + 8 * k, &inst[k], 8);
+        g_hrcInst[k].store(instOk[k] ? static_cast<uintptr_t>(inst[k]) : 0, std::memory_order_relaxed);
+    }
+    uint64_t dep = 0, vt = 0;
+    const bool depOk = f9Read(1, h + nofoot::kF9HrcDepOff, &dep, 8);
+    const bool depVtOk = depOk && dep >= 0x10000 && f9Read(1, static_cast<uintptr_t>(dep), &vt, 8);
+    const uint32_t depVt = depVtOk ? f9Rva(vt) : 0;
+    F9Lock lock;
+    F9HrcState& s = g_f9Hrc[st];
+    s.seen = true;
+    s.g291 = g291; s.g470 = g470; s.g4C0 = g4C0;
+    s.ok291 = ok291; s.ok470 = ok470; s.ok4C0 = ok4C0;
+    for (size_t k = 0; k < nofoot::kF9Hrc; ++k) {
+        s.inst[k] = inst[k];
+        s.instOk[k] = instOk[k];
+    }
+    s.dep = dep;
+    s.depOk = depOk;
+    s.depVt = depVt;
+    s.depVtOk = depVtOk;
+    ++s.window;
+}
+
+void f9RecordInst(uint8_t st, uint8_t k, void* view) noexcept {
+    const uintptr_t v = reinterpret_cast<uintptr_t>(view);
+    uint32_t vid = 0;
+    const bool okId = v && f9Read(2, v + nofoot::kF9ViewIdOff, &vid, 4);
+    float cam[3] = {};
+    const bool okCam = v && f9Read(2, v + nofoot::kF9ViewCamOff, cam, 12);
+    F9Lock lock;
+    F9InstRow* row = nullptr;
+    for (auto& r : g_f9Insts) {
+        if (r.used && r.st == st && r.k == k && r.viewOk == okId && r.viewId == vid) {
+            row = &r;
+            break;
+        }
+    }
+    if (!row) {
+        for (auto& r : g_f9Insts) {
+            if (!r.used) {
+                row = &r;
+                break;
+            }
+        }
+        if (!row) return;
+        row->used = true;
+        row->st = st;
+        row->k = k;
+        row->viewId = vid;
+        row->viewOk = okId;
+    }
+    ++row->calls;
+    ++row->window;
+    if (okCam) {
+        row->cam[0] = cam[0];
+        row->cam[1] = cam[1];
+        row->cam[2] = cam[2];
+        row->camOk = true;
+    }
+}
+
+// P1: rcx = set, rdx = view, r8 = flag, r9. The caller is taken at entry (the relay jumps here, so it is the game's return address).
+uint64_t __fastcall f9PanelSubmitHooked(void* set, void* view, uint64_t r8, uint64_t r9) {
+    void* caller = _ReturnAddress();
+    const F9Fn4 original = reinterpret_cast<F9Fn4>(g_f9Probe[0].original);
+    if (!original) return 0;
+    if (!g_f9Stop[0].load(std::memory_order_relaxed)) {
+        const uintptr_t c = reinterpret_cast<uintptr_t>(caller);
+        const uint32_t rva = f9Rva(c);
+        f9RecordCaller(f9State(), rva);
+    }
+    return original(set, view, r8, r9);
+}
+
+// P2: rcx = HRC, and five more arguments, all forwarded (the later chunks were not scanned for stack arguments).
+uint64_t __fastcall f9HrcSubmitHooked(void* hrc, void* a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    const F9Fn6 original = reinterpret_cast<F9Fn6>(g_f9Probe[1].original);
+    if (!original) return 0;
+    if (!g_f9Stop[1].load(std::memory_order_relaxed)) f9RecordHrc(f9State(), hrc);   // reads before the call
+    return original(hrc, a2, a3, a4, a5, a6);
+}
+
+// P3: rcx = instance, rdx = view, r8d. Compares rcx against the three HRC instances only.
+uint64_t __fastcall f9InstSubmitHooked(void* inst, void* view, uint64_t r8, uint64_t r9) {
+    const F9Fn4 original = reinterpret_cast<F9Fn4>(g_f9Probe[2].original);
+    if (!original) return 0;
+    const uintptr_t ia = reinterpret_cast<uintptr_t>(inst);
+    int k = -1;
+    for (size_t i = 0; i < nofoot::kF9Hrc; ++i) {
+        if (ia && g_hrcInst[i].load(std::memory_order_relaxed) == ia) k = static_cast<int>(i);
+    }
+    if (k >= 0 && !g_f9Stop[2].load(std::memory_order_relaxed)) f9RecordInst(f9State(), static_cast<uint8_t>(k), view);
+    return original(inst, view, r8, r9);
+}
+
+bool prepareF9Relay(void* trampoline, void* context) noexcept {
+    F9Probe* probe = static_cast<F9Probe*>(context);
+    const uintptr_t address = reinterpret_cast<uintptr_t>(trampoline);
+    std::memcpy(probe->relay + ecm::kCallbackRelayTrampolineAt, &address, 8);
+    DWORD oldProtect = 0;
+    if (!VirtualProtect(probe->relay, 4096, PAGE_EXECUTE_READ, &oldProtect) ||
+        !FlushInstructionCache(GetCurrentProcess(), probe->relay, ecm::kCallbackRelayBytes))
+        return false;
+    probe->original = trampoline;
+    return true;
+}
+
+struct F9ProbeSpec {
+    const char* name;
+    uintptr_t rva;
+    const uint8_t* prologue;
+    size_t prologueBytes;
+    size_t stolen;
+    void* callback;
+    const char* label;
+};
+
+bool installF9Probe(size_t i, const F9ProbeSpec& s, uintptr_t base, size_t* stolenOut, std::string* whyOut) {
+    F9Probe& pr = g_f9Probe[i];
+    const uintptr_t target = base + s.rva;
+    if (!bytesMatch(target, s.prologue, s.prologueBytes)) {
+        *whyOut = "the prologue bytes are not build 332841's";
+        return false;
+    }
+    size_t covered = 0;
+    while (covered < s.stolen) {
+        size_t rip = 0;
+        const size_t len = codeInstructionLength(reinterpret_cast<const uint8_t*>(target + covered), s.prologueBytes - covered, &rip);
+        if (!len) {
+            *whyOut = "a prologue instruction is one the decoder does not recognise";
+            return false;
+        }
+        covered += len;
+    }
+    if (covered != s.stolen) {
+        *whyOut = "the prologue does not end on an instruction boundary at the expected byte";
+        return false;
+    }
+    pr.relay = allocateRelay(target);
+    if (!pr.relay) {
+        *whyOut = "no executable memory within two gigabytes of the target";
+        return false;
+    }
+    ecm::buildCallbackRelay(pr.relay, &pr.gate, s.callback);
+    pr.hook = new CodeHook();
+    if (!pr.hook->install(reinterpret_cast<void*>(target), pr.relay, nullptr, s.name, &prepareF9Relay, &pr)) {
+        const char* why = pr.hook->refusal();
+        VirtualFree(pr.relay, 0, MEM_RELEASE);
+        pr.relay = nullptr;
+        *whyOut = why[0] ? why : "CodeHook gave no reason";
+        return false;
+    }
+    pr.gate.store(1, std::memory_order_seq_cst);
+    *stolenOut = pr.hook->stolenBytes();
+    return true;
+}
+
+// Frame thread, once: VR only, behind the identity check. One line per probe, installed or refused.
+void installF9ProbesOnce() {
+    if (g_f9Tried) return;
+    g_f9Tried = true;
+    if (!runtimeVrProfile()) {
+        Log::get().note("native on foot probes: not installed (the flat profile)");
+        return;
+    }
+    const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    const char* peWhy = nullptr;
+    if (!base || !checkIdentity(base, &peWhy)) {
+        Log::get().note("native on foot probes: NOT installed -- identity mismatch (%s); the game was not touched.", peWhy ? peWhy : "no module");
+        return;
+    }
+    if (!g_base) g_base = base;
+    const F9ProbeSpec specs[nofoot::kF9ProbeCount] = {
+        {"native-on-foot-panel-submit", nofoot::kPanelSubmitRva, nofoot::kPanelSubmitPrologue, nofoot::kPanelSubmitPrologueBytes,
+         nofoot::kPanelSubmitStolen, reinterpret_cast<void*>(&f9PanelSubmitHooked), "P1 (panel submit)"},
+        {"native-on-foot-hrc-submit", nofoot::kHrcSubmitRva, nofoot::kHrcSubmitPrologue, nofoot::kHrcSubmitPrologueBytes,
+         nofoot::kHrcSubmitStolen, reinterpret_cast<void*>(&f9HrcSubmitHooked), "P2 (HRC submit)"},
+        {"native-on-foot-inst-submit", nofoot::kInstSubmitRva, nofoot::kInstSubmitPrologue, nofoot::kInstSubmitPrologueBytes,
+         nofoot::kInstSubmitStolen, reinterpret_cast<void*>(&f9InstSubmitHooked), "P3 (instance submit)"},
+    };
+    for (size_t i = 0; i < nofoot::kF9ProbeCount; ++i) {
+        const F9ProbeSpec& s = specs[i];
+        size_t stolen = 0;
+        std::string why;
+        if (installF9Probe(i, s, base, &stolen, &why)) {
+            g_f9Armed[i] = true;
+            Log::get().note("native on foot probe: installed %s at EliteDangerous64.exe+0x%llX, stolen=%zu bytes, prologue %zu bytes verified, "
+                            "relay at 0x%llX (read only; temporary).",
+                            s.label, static_cast<unsigned long long>(s.rva), stolen, s.prologueBytes,
+                            static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(g_f9Probe[i].relay)));
+        } else {
+            Log::get().note("native on foot probe: %s NOT installed at EliteDangerous64.exe+0x%llX -- %s. The game was not touched by it.",
+                            s.label, static_cast<unsigned long long>(s.rva), why.c_str());
+        }
+    }
+}
+
+// The HRC line's values, without the window's calls (the change key).
+std::string f9HrcValues(const F9HrcState& s) {
+    char g[3][8];
+    const bool oks[3] = {s.ok291, s.ok470, s.ok4C0};
+    const uint8_t vals[3] = {s.g291, s.g470, s.g4C0};
+    for (int i = 0; i < 3; ++i) {
+        if (oks[i]) std::snprintf(g[i], sizeof(g[i]), "%02X", static_cast<unsigned>(vals[i]));
+        else std::snprintf(g[i], sizeof(g[i]), "?");
+    }
+    std::string inst;
+    for (size_t k = 0; k < nofoot::kF9Hrc; ++k) {
+        char b[24];
+        if (s.instOk[k]) std::snprintf(b, sizeof(b), "0x%llX", static_cast<unsigned long long>(s.inst[k]));
+        else std::snprintf(b, sizeof(b), "?");
+        if (k) inst += ',';
+        inst += b;
+    }
+    char dep[24];
+    if (s.depOk) std::snprintf(dep, sizeof(dep), "0x%llX", static_cast<unsigned long long>(s.dep));
+    else std::snprintf(dep, sizeof(dep), "?");
+    return std::string("g291=") + g[0] + " g470=" + g[1] + " g4C0=" + g[2] + " inst=" + inst + " dep=" + dep +
+           " dep.vt=" + f9RvaText(s.depVt, s.depVtOk);
+}
+
+// Frame thread, every frame: every 5 s the window's panel callers, HRC and instance rows; and the HRC line whenever its values change.
+void f9ProbeTick(uint64_t nowMs) {
+    if (!g_f9Armed[0] && !g_f9Armed[1] && !g_f9Armed[2]) return;
+    const bool due = g_f9LastMs == 0 || nowMs - g_f9LastMs >= 5000;
+    F9CallerRow callers[kF9Callers];
+    F9HrcState hrc[3];
+    F9InstRow insts[kF9Insts];
+    {
+        F9Lock lock;
+        for (size_t i = 0; i < kF9Callers; ++i) callers[i] = g_f9Callers[i];
+        for (size_t i = 0; i < 3; ++i) hrc[i] = g_f9Hrc[i];
+        for (size_t i = 0; i < kF9Insts; ++i) insts[i] = g_f9Insts[i];
+        if (due) {
+            for (auto& r : g_f9Callers) r.window = 0;
+            for (auto& s : g_f9Hrc) s.window = 0;
+            for (auto& r : g_f9Insts) r.window = 0;
+        }
+    }
+    static std::string lastKey[3];   // frame thread only: the HRC values last written, per state
+    bool hrcWritten[3] = {false, false, false};
+    for (uint8_t st = 0; st < 3; ++st) {
+        if (!hrc[st].seen) continue;
+        const std::string key = f9HrcValues(hrc[st]);
+        if (key != lastKey[st]) {
+            lastKey[st] = key;
+            hrcWritten[st] = true;
+            Log::get().note("native on foot hrc [%s]: %s calls=%llu", g_f9StateName[st], key.c_str(), static_cast<unsigned long long>(hrc[st].window));
+        }
+    }
+    if (!due) return;
+    g_f9LastMs = nowMs;
+    for (const F9CallerRow& r : callers) {
+        if (!r.used || r.window == 0) continue;
+        char caller[24];
+        if (r.caller) std::snprintf(caller, sizeof(caller), "+0x%X", static_cast<unsigned>(r.caller));
+        else std::snprintf(caller, sizeof(caller), "?");
+        Log::get().note("native on foot panel submit [%s]: caller=%s calls=%llu", g_f9StateName[r.st], caller, static_cast<unsigned long long>(r.window));
+    }
+    for (uint8_t st = 0; st < 3; ++st) {
+        if (!hrc[st].seen || hrcWritten[st]) continue;
+        Log::get().note("native on foot hrc [%s]: %s calls=%llu", g_f9StateName[st], f9HrcValues(hrc[st]).c_str(),
+                        static_cast<unsigned long long>(hrc[st].window));
+    }
+    for (const F9InstRow& r : insts) {
+        if (!r.used || r.window == 0) continue;
+        char view[24], cam[64];
+        if (r.viewOk) std::snprintf(view, sizeof(view), "%u", static_cast<unsigned>(r.viewId));
+        else std::snprintf(view, sizeof(view), "?");
+        if (r.camOk) std::snprintf(cam, sizeof(cam), "(%.3f,%.3f,%.3f)", static_cast<double>(r.cam[0]), static_cast<double>(r.cam[1]), static_cast<double>(r.cam[2]));
+        else std::snprintf(cam, sizeof(cam), "?");
+        Log::get().note("native on foot hrc submit [%s]: inst=%u view=%s calls=%llu campos=%s", g_f9StateName[r.st], static_cast<unsigned>(r.k), view,
+                        static_cast<unsigned long long>(r.window), cam);
+    }
+}
+
 }  // namespace
 
 // The probe's capture (declared in native_on_foot.h, called from beginPanelOverride on the draw thread for the two HUD issuers). One load,
@@ -958,12 +1477,23 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
     avatarLine(now);
     avatarCensusLine(now);
     hudCensusTick(now, session);
+    // F9 (TEMPORARY): the two code patches, while native stereo is on foot and the first-person HUD override (F8) is held; and the probes.
+    installF9ProbesOnce();
+    const bool f9Active = nativeOnFootActive() && g_hudOverrideHeld && session;
+    const char* f9Why = !g_hudOverrideHeld ? "the first-person HUD override is off" : !nativeOnFootActive() ? "native stereo on foot ended" : "the game session ended";
+    codePatchTick(g_panelPatch, g_panelsKeyOn.load(std::memory_order_relaxed) && f9Active,
+                  g_panelsKeyOn.load(std::memory_order_relaxed) ? f9Why : "fix.native_on_foot_panels is off");
+    codePatchTick(g_meshPatch, g_meshKeyOn.load(std::memory_order_relaxed) && f9Active,
+                  g_meshKeyOn.load(std::memory_order_relaxed) ? f9Why : "fix.native_on_foot_hud_mesh is off");
+    f9ProbeTick(now);
     neckLine(now);
 }
 
 void nativeOnFootShutdown() {
     gateByteTick(false, "the game is shutting down");
     hudOverrideTick(false, "the game is shutting down");
+    codePatchTick(g_panelPatch, false, "the game is shutting down");
+    codePatchTick(g_meshPatch, false, "the game is shutting down");
 }
 
 }  // namespace edvr
