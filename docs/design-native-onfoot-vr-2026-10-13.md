@@ -2,8 +2,8 @@
 
 ## Status
 
-- **State:** F0-F12 FLOWN (Epic; journal). F13, F14 BUILT (2484625d), F15 BUILT (202d39b9; green), NOT FLOWN.
-  Branch `claude/native-onfoot-vr-completion-219ffa`; not pushed.
+- **State:** F0-F15 FLOWN (Epic; F13-F15 flown 10-14, log edvr_gfx_20261014_103132). F16 BUILT
+  (see the journal), NOT FLOWN. Branch `claude/native-onfoot-vr-completion-219ffa`; not pushed.
 - **Origin:** a user's handoff. A Cinema-to-HMD swap on disembark gave native
   stereo on foot; the HUD, radar, left panel and inventory were missing.
 - **Build:** Sean's installs hash to the handoff's exe (332841).
@@ -34,31 +34,28 @@
   - H8 (ruled out, F6): the stereo predicate and the eye-index query.
   - H10 (F8, flown): the override brings the FP node back, but only the reticle shows.
     F11: the HUD shows head-locked with the creation patch alone (the placement patch is wrong).
-  - F15 (BUILT, E1, not flown): the 3P body is drawn but hidden behind or inside the FP body,
-    and backface-culled from inside. E1 zeroes the FP masks. Discriminator: the 3P masks stay
-    non-zero, and the body shows once the FP masks are 0.
-- **F9-F13 instruments (TEMPORARY):** patches `fix.native_on_foot_panels`, `_hud_mesh` and
-  `_hud_mesh_world` (off); probes P1-P3; `fix.native_on_foot_hud_follow_order` (A/B) and
-  `fix.native_on_foot_visor_up` (RemLok test). The distance, size, follow and smoothing are user settings.
+  - F15 (flown): `fix.native_on_foot_hide_fp_body` removes the FP arms; the legs left are the
+    3P body's, which is fine. The F15 hypothesis (3P hidden behind the FP body) is not settled.
+- **F9-F16 instruments (TEMPORARY):** patches `fix.native_on_foot_panels`, `_hud_mesh` and
+  `_hud_mesh_world` (off); probes P1-P3; `_hud_follow_order` (A/B). Flown 10-14 (F13-F15):
+  the HUD follows the head; key 10 is the aim reticle (~90 calls/s, camera-space ~5 m out).
 - **OPEN, RemLok on foot:** the on-foot visor overlay is not yet identified. It
   needs a skip-probe or a diff census that excludes the tonemap PS
   0x99C21CEB7A699821 (tonemap_admit.h:39).
 - **Ruled out:** the cinema request is always 5 (see the end of this doc).
 - **Temporary keys (all go when the arc picks one):** `fix.native_on_foot`, `_method`, `_hud`,
-  `_panels`, `_hud_mesh`, `_hud_mesh_world`, `_hud_follow_order`, `_visor_up`, `_reticle_probe`
-  and `_hide_fp_body` (F15), on the F8 page "Native on foot". All default off and live.
-- **F2 changes (c884e218):** gate: the setter never substitutes; EDVR holds the byte
-  at 0 while the key is on and a game session is live (identity and byte checked
-  first). Native body: while native stereo is on foot, the fade global goes -1 to 0
-  and the local head parts are zeroed, through Explorer Cam's code and its own
-  guard. RemLok: unchanged from 0a99c094 (the on-foot matcher was removed).
-- **Log lines:** the F2 gate and body lines and the F8 override and census lines are in
-  the journal; the F1 census lines are unchanged.
+  `_panels`, `_hud_mesh`, `_hud_mesh_world`, `_hud_follow_order`, `_reticle_probe`, `_hide_fp_body`.
+  All default off and live. The visor test key `_visor_up` is gone (F16: `_breathable_visor`).
+- **User settings (F16):** `_breathable_visor` (up | game, default up), `_reticle_follow` (aim | head,
+  default aim), the eight `_hud_<left|top|right|centre>_<x|y>` offsets (default 0), and the tuned
+  defaults: distance 0.03, size 1.50 (max 3.00), spread 0.15, smoothing 40 ms.
+- **F2 (c884e218):** the gate holds the byte at 0 while the key is on; the native body
+  zeroes the local head parts. Log lines and details are in the journal.
 - **Install:** Epic only (Sean: Frontier carries another feature test). `edvr.ini`
   is not touched unless `--ini` says so.
-- **Next:** F15 on Epic: `fix.native_on_foot_hide_fp_body` on, then the 3P body in the eye views.
-  If nothing appears, the read-only visibility-job probe at 0x3DA2C80. Still open from F13:
-  head against body follow, smoothing, size, distance, the visor test (RemLok), the reticle depth.
+- **Next:** F16 on Epic: the breathable visor (up holds the RemLok edge lines hidden in breathable
+  air on foot), reticle follows head, and the HUD group offsets. Open: the 3P legs question, the
+  RemLok on-foot overlay identity, the reticle depth.
 
 ## What "finished" means
 
@@ -465,4 +462,32 @@ mode and its context); W3 step 1-2 (dump comparison, offline).
   see the FP AMC; read the census. (d) a name missing from the table: logged once, that part is skipped.
   Gates: build.bat --wait-lock, full gates passed, receipt written. The census now sorts mode-2 rows
   first, so the FP AMC is printed.
+- **2026-10-14, F13-F15 FLOWN (Epic; log edvr_gfx_20261014_103132; build v0.19.1-262-g0762bc87,
+  the merge of main).** HUD head-follow works (F13). The visor override (F13's visor_up) REMOVES the
+  RemLok edge lines: they are the visor's. F15's hide_fp_body removes the FP arms; the legs left are
+  the third-person body's, which is fine. Reticle probe: the only indicator node is key 10 (about
+  90 calls a second; f30=1 f31=1 f32=0; camera-space position about 5 m out, drifting off-axis as the
+  head turns away from the aim): the aim reticle. Layout probe: 17 HUD parts. Sean's tuning: distance
+  0.03, size 1.50 (it hit the maximum), spread 0.15, smoothing 40 ms, follow head, order after.
+- **2026-10-14, F16 built (NOT FLOWN).** Four changes, all on the native on-foot page.
+  (1) Breathable visor: `fix.native_on_foot_breathable_visor` (up | game, default up) replaces the
+  visor_up test key. While up, native stereo is on foot, and Status.json's Flags2 bit 16
+  (0x10000, BreathableAtmosphere, Frontier's documented bit; not yet checked against a sample) is
+  set, the F13 override code path holds the visor up (B8 = 0, then B7 = 1; restored when the
+  condition stops). journal_watch.cpp reads the bit beside OnFoot and publishes the raw Flags2;
+  on_foot_split_test checks the bit (R2h, R2i). The log line `native on foot visor: breathable air
+  on|off (Flags2 0x...)` is the check: it should read on at a planet surface on foot.
+  (2) Reticle follows: `fix.native_on_foot_reticle_follow` (aim | head, default aim). Under head,
+  the F14 stub (installed by the probe key or by head) zeroes key 10's translation x and y, keeping
+  z, w, the basis and the scale. Log: `native on foot reticle: follows head (key 10 centred)` / aim.
+  (3) Defaults: distance 0.03 (the setting's fallback is kHudDistanceSettingDefault; the game's 0.192
+  stays the scale denominator), size 1.50 with max 3.00, smoothing 40, spread 0.15.
+  (4) HUD group offsets: eight keys `fix.native_on_foot_hud_<left|top|right|centre>_<x|y>`, -0.30..0.30,
+  default 0, a fraction of the canvas (W = [[HRC+0x1B8]+0x3E8], H = +0x3EC). The layout hook
+  (0x1A0DCD0) is now a writer: after the original returns it adds (x * W, y * H) to out[0] and out[1]
+  by the part's group (native_on_foot_core.h hudGroupOf; unknown names get no offset and are logged
+  once). The layout is re-sent when the on-state, an offset or the spread changes: one write of 0 to
+  [HRC+0x290] (RE: the game sets it back to 1 at 0x1AB385B). The layout log line now prints on change.
+  Read the flight this way: a moved group after a setting change means the re-send took; if the HUD
+  does not move, the layout lines show whether the offset reached out[0]/out[1].
   identification is known.
