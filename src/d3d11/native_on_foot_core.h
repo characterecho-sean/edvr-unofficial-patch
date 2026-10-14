@@ -124,25 +124,9 @@ inline int hudIssuerIndex(uint64_t vs) {
     return vs == kHudIssuerVs[0] ? 0 : vs == kHudIssuerVs[1] ? 1 : -1;
 }
 
-// ---- F6: two read-only eye-index probes (TEMPORARY; they go when the arc closes). native_on_foot.cpp holds the hooks. ----
-constexpr size_t kEyeCount = 2;
-// E1: the eye-index query. rcx = this, rdx = node; returns eax 0, 1 or 2. Stolen: sub rsp,0x28 (4) + mov rcx,[rcx+0x830] (7) = 11.
-constexpr uintptr_t kEyeQueryRva = 0x2842FD0;
-constexpr size_t kEyeQueryStolen = 11;
-constexpr size_t kEyeQueryPrologueBytes = 25;
-constexpr uint8_t kEyeQueryPrologue[kEyeQueryPrologueBytes] = {
-    0x48, 0x83, 0xEC, 0x28, 0x48, 0x8B, 0x89, 0x30, 0x08, 0x00, 0x00, 0x8B, 0x81, 0x94, 0x36, 0x00,
-    0x00, 0x83, 0xE8, 0x03, 0x83, 0xF8, 0x03, 0x77, 0x31};
-// E2: the stereo leaf predicate (no pdata). rcx = this; returns al. Stolen: mov rdx,[rcx+0x38] (4) + mov eax,[rdx+0x3694] (6) = 10.
-constexpr uintptr_t kStereoPredRva = 0x28540B0;
-constexpr size_t kStereoPredStolen = 10;
-constexpr size_t kStereoPredPrologueBytes = 18;
-constexpr uint8_t kStereoPredPrologue[kStereoPredPrologueBytes] = {
-    0x48, 0x8B, 0x51, 0x38, 0x8B, 0x82, 0x94, 0x36, 0x00, 0x00, 0x83, 0xE8, 0x03, 0x83, 0xF8, 0x03, 0x77, 0x0C};
-// Fields. E1: S = [this+0x830]; mode = dword [S+0x3694]; W = [S+0x2CB8]; slot0 = [W+0x90], slot1 = [W+0x98]; node = [slot+0x48].
-// E2: S = [this+0x38]; mode = dword [S+0x3694]; flag = byte [S+0x2AE0].
-constexpr uint32_t kEyeSceneOff = 0x830, kEyeModeOff = 0x3694, kEyeWOff = 0x2CB8, kEyeSlot0Off = 0x90, kEyeSlot1Off = 0x98,
-                   kEyeNodeOff = 0x48, kStereoSceneOff = 0x38, kStereoFlagOff = 0x2AE0;
+// ---- F7: the render request's objects (read only; TEMPORARY). native_on_foot.cpp reads them. ----
+// owner = [selector+0x58]; R = [owner+0x1188]; T = [R+0x10]; S18 = [R+0x18].
+constexpr uint32_t kCensusOwnerOff = 0x58, kCensusRequestOff = 0x1188, kCensusTOff = 0x10, kCensusSOff = 0x18;
 
 }  // namespace nofoot
 }  // namespace edvr

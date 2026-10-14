@@ -33,7 +33,8 @@ std::atomic<uintptr_t> g_frozenSelector{0};        // the first selector whose o
 std::atomic<bool> g_keyOn{false};                  // fix.native_on_foot, as the frame thread last read it
 std::atomic<bool> g_methodGate{true};              // fix.native_on_foot_method is gate (F2); the setter substitutes only when it is swap
 std::atomic<bool> g_lastForwardedHmd{false};       // the most recent setter call forwarded an HMD mode (3 or 4): the gate method's flag reads it
-uintptr_t g_base = 0;                             // the game image base; set by installOnce before the hook can run
+uintptr_t g_base = 0;
+std::atomic<uint64_t> g_setterCalls{0};            // every setter call (F7: the request census reads after one)                             // the game image base; set by installOnce before the hook can run
 
 // Frame thread only.
 enum class InstallState : uint8_t { NotTried, Armed, Refused };
@@ -145,6 +146,7 @@ void pushEvent(const SetterEvent& ev) {
 // Nothing here waits on the frame thread; the journal and the key are atomic reads.
 void __fastcall setterHooked(void* selectorPtr, uint32_t incoming) {
     if (!g_original) return;   // unreachable: the hook is armed only after the trampoline is set
+    g_setterCalls.fetch_add(1, std::memory_order_relaxed);
     SetterEvent ev;
     ev.tMs = GetTickCount64();
     // The relay reaches this function by a jmp (buildCallbackRelay's `jmp qword ptr [rip+0]`), not a call, so the return address on entry is the game's caller.
@@ -727,367 +729,85 @@ void avatarCensusLine(uint64_t nowMs) {
     for (uint32_t i = 0; i < n; ++i) logAvatarRow(rows[i]);
 }
 
-// ---- F6: two read-only eye-index probes (TEMPORARY; they go when the arc closes) --------------------------------------------------------
-// E1 (+0x2842FD0, the eye-index query; returns 0, 1 or 2) and E2 (+0x28540B0, the stereo leaf predicate; returns al). Each calls the
-// original first, then reads game memory under SEH, and returns the original's result unchanged. One relay page and one gate per probe;
-// the identity check, the prologue bytes and the instruction boundary of the stolen prefix are checked before any patch. Sixteen faults
-// stop a probe's reads for the session. Aggregates are per 5 s window and per state; a key is announced once, when first seen. No game
-// thread writes a line: first sightings are queued and written at the next frame boundary.
-std::atomic_flag g_hudLock = ATOMIC_FLAG_INIT;   // a tiny spinlock: the keys, the window counters and the first-sighting queue
-struct HudLockGuard {
-    HudLockGuard() noexcept {
-        while (g_hudLock.test_and_set(std::memory_order_acquire)) _mm_pause();
-    }
-    ~HudLockGuard() { g_hudLock.clear(std::memory_order_release); }
-};
+// ---- F7: the render request's objects (read only; TEMPORARY) ----------------------------------------------------------------------
+// On the frame thread, the frame after each setter call (g_setterCalls) and every 5 s while a game session is live: owner = [sel+0x58] for
+// the frozen selector; R = [owner+0x1188]; T = [R+0x10]; S18 = [R+0x18]. For T and S18: the object's vtable as an exe RVA and six of its
+// vtable slots. Nothing is called and nothing is written. The text is logged when it changes, and at the first session frame. (The reads
+// are on the frame thread, not inside the setter.)
+uint64_t g_censusSetterSeen = 0;   // frame thread only
+uint64_t g_censusMs = 0;           // frame thread only
+std::string g_censusLast;          // frame thread only
 
-constexpr uint8_t kStateNative = 0, kStateCinema = 1, kStateOther = 2;
-const char* const kStateName[3] = {"native", "cinema", "ship/other"};
-// The state of one call: native stereo on foot, else cinema (on foot, key off), else the rest.
-uint8_t probeState() noexcept {
-    if (nativeOnFootActive()) return kStateNative;
-    if (journalOnFootKnown() && journalOnFoot()) return kStateCinema;
-    return kStateOther;
-}
-
-using EyeFn = uint64_t(__fastcall*)(void*, void*, uint64_t, uint64_t);
-
-// One probe: its relay page, its gate, the trampoline (the original), and its CodeHook (never deleted, as g_hook).
-struct EyeProbe {
-    uint8_t* relay = nullptr;
-    alignas(8) std::atomic<uintptr_t> gate{0};
-    EyeFn original = nullptr;
-    CodeHook* hook = nullptr;
-};
-EyeProbe g_eyeProbe[nofoot::kEyeCount];
-std::atomic<bool> g_eyeStop[nofoot::kEyeCount]{};
-std::atomic<uint32_t> g_eyeFaults[nofoot::kEyeCount]{};
-std::atomic<uintptr_t> g_eyeBase{0};          // the image base, set before either probe is patched
-bool g_eyeTried = false;                      // frame thread only
-bool g_eyeArmed[nofoot::kEyeCount] = {};      // frame thread only
-uint64_t g_eyeWindowMs = 0;                   // frame thread only
-
-constexpr uint32_t kModeUnread = 0xFFFFFFFFu;  // mode not read
-constexpr uint8_t kFlagUnread = 0xFF;          // [S+0x2AE0] not read (and always for E1)
-constexpr uint8_t kClassSlot0 = 0, kClassSlot1 = 1, kClassOther = 2, kClassNone = 3;
-constexpr size_t kEyeKeys = 64;
-constexpr size_t kEyeRing = 32;
-
-// A key: (probe, state, caller RVA, node class, result, mode, flag). `calls` is the session total; `windowCalls` is the window's.
-struct EyeKey {
-    bool used = false;
-    uint8_t hook = 0, state = 0, cls = kClassNone, result = 0, flag = kFlagUnread;
-    uint32_t caller = 0;   // RVA; 0 when the caller is outside the image
-    uint32_t mode = kModeUnread;
-    uint64_t calls = 0, windowCalls = 0;
-};
-EyeKey g_eyeKeys[kEyeKeys];                  // guarded by g_hudLock
-uint64_t g_eyeWinCalls[nofoot::kEyeCount] = {};  // guarded by g_hudLock: calls this window, per probe
-uint64_t g_eyeWinOverflow = 0;               // guarded by g_hudLock: calls with no free key this window
-uint64_t g_eyeFrames = 0;                    // guarded by g_hudLock
-
-// A first sighting, queued by the game's thread and written by the frame thread.
-struct EyeFirst {
-    EyeKey key;
-};
-EyeFirst g_eyeRing[kEyeRing];                // guarded by g_hudLock
-uint64_t g_eyeWritten = 0, g_eyeRead = 0, g_eyeDropped = 0;
-
-uint32_t eyeCallerRva(void* caller) noexcept {
-    const uintptr_t base = g_eyeBase.load(std::memory_order_relaxed);
-    const uintptr_t c = reinterpret_cast<uintptr_t>(caller);
-    if (!base || c < base || c >= base + ecm::kExpectedImageSize) return 0;
-    return static_cast<uint32_t>(c - base);
-}
-
-// A read under SEH. A fault counts against the probe; sixteen stop that probe's reads.
-bool eyeRead(size_t probe, uintptr_t address, void* out, size_t bytes) noexcept {
-    if (guardedRead(address, out, bytes)) return true;
-    if (g_eyeFaults[probe].fetch_add(1, std::memory_order_relaxed) + 1 >= 16) g_eyeStop[probe].store(true, std::memory_order_relaxed);
-    return false;
-}
-
-// Counts one call under the key (hook, state, caller, class, result, mode, flag). A new key is queued for its first-sighting line.
-void eyeKeyNote(uint8_t hook, uint8_t st, uint32_t caller, uint8_t cls, uint8_t result, uint32_t mode, uint8_t flag) noexcept {
-    HudLockGuard lock;
-    ++g_eyeWinCalls[hook];
-    EyeKey* key = nullptr;
-    for (size_t i = 0; i < kEyeKeys; ++i) {
-        const EyeKey& k = g_eyeKeys[i];
-        if (k.used && k.hook == hook && k.state == st && k.caller == caller && k.cls == cls && k.result == result && k.mode == mode && k.flag == flag) {
-            key = &g_eyeKeys[i];
-            break;
-        }
-    }
-    if (!key) {
-        for (size_t i = 0; i < kEyeKeys && !key; ++i) {
-            if (!g_eyeKeys[i].used) key = &g_eyeKeys[i];
-        }
-        if (!key) {
-            ++g_eyeWinOverflow;
-            return;
-        }
-        key->used = true;
-        key->hook = hook;
-        key->state = st;
-        key->caller = caller;
-        key->cls = cls;
-        key->result = result;
-        key->mode = mode;
-        key->flag = flag;
-        if (g_eyeWritten - g_eyeRead < kEyeRing) {
-            g_eyeRing[g_eyeWritten % kEyeRing].key = *key;
-            ++g_eyeWritten;
-        } else {
-            ++g_eyeDropped;
-        }
-    }
-    ++key->calls;
-    ++key->windowCalls;
-}
-
-// E1: rcx = this, rdx = node. The original runs first; then the scene, the mode, and the two slot nodes are read.
-void eyeQueryRecord(uint8_t st, void* self, void* node, void* caller, uint64_t rax) noexcept {
-    const uintptr_t sa = reinterpret_cast<uintptr_t>(self);
-    uint64_t scene = 0, w = 0, n0 = 0, n1 = 0;
-    uint32_t mode = kModeUnread;
-    bool okScene = eyeRead(0, sa + nofoot::kEyeSceneOff, &scene, 8) && scene >= 0x10000;
-    if (okScene && !eyeRead(0, static_cast<uintptr_t>(scene) + nofoot::kEyeModeOff, &mode, 4)) mode = kModeUnread;
-    bool okN0 = false, okN1 = false;
-    if (okScene && eyeRead(0, static_cast<uintptr_t>(scene) + nofoot::kEyeWOff, &w, 8) && w >= 0x10000) {
-        uint64_t s0 = 0, s1 = 0;
-        if (eyeRead(0, static_cast<uintptr_t>(w) + nofoot::kEyeSlot0Off, &s0, 8) && s0 >= 0x10000)
-            okN0 = eyeRead(0, static_cast<uintptr_t>(s0) + nofoot::kEyeNodeOff, &n0, 8);
-        if (eyeRead(0, static_cast<uintptr_t>(w) + nofoot::kEyeSlot1Off, &s1, 8) && s1 >= 0x10000)
-            okN1 = eyeRead(0, static_cast<uintptr_t>(s1) + nofoot::kEyeNodeOff, &n1, 8);
-    }
-    const uint64_t nodeV = reinterpret_cast<uint64_t>(node);
-    uint8_t cls = kClassOther;
-    if (okN0 && nodeV == n0) cls = kClassSlot0;
-    else if (okN1 && nodeV == n1) cls = kClassSlot1;
-    eyeKeyNote(0, st, eyeCallerRva(caller), cls, static_cast<uint8_t>(rax & 0xFF), mode, kFlagUnread);
-}
-
-// E2: rcx = this. The original runs first; then the scene, the mode and the flag byte are read.
-void stereoPredRecord(uint8_t st, void* self, void* caller, uint64_t rax) noexcept {
-    const uintptr_t sa = reinterpret_cast<uintptr_t>(self);
-    uint64_t scene = 0;
-    uint32_t mode = kModeUnread;
-    uint8_t flag = kFlagUnread;
-    if (eyeRead(1, sa + nofoot::kStereoSceneOff, &scene, 8) && scene >= 0x10000) {
-        if (!eyeRead(1, static_cast<uintptr_t>(scene) + nofoot::kEyeModeOff, &mode, 4)) mode = kModeUnread;
-        uint8_t f = 0;
-        if (eyeRead(1, static_cast<uintptr_t>(scene) + nofoot::kStereoFlagOff, &f, 1)) flag = f;
-    }
-    eyeKeyNote(1, st, eyeCallerRva(caller), kClassNone, static_cast<uint8_t>(rax & 0xFF), mode, flag);
-}
-
-uint64_t __fastcall eyeQueryHooked(void* self, void* node, uint64_t a3, uint64_t a4) {
-    const EyeFn original = g_eyeProbe[0].original;
-    if (!original) return 0;
-    void* caller = _ReturnAddress();
-    const uint8_t st = probeState();
-    const uint64_t rax = original(self, node, a3, a4);
-    if (!g_eyeStop[0].load(std::memory_order_relaxed)) eyeQueryRecord(st, self, node, caller, rax);
-    return rax;
-}
-
-uint64_t __fastcall stereoPredHooked(void* self, void* a2, uint64_t a3, uint64_t a4) {
-    const EyeFn original = g_eyeProbe[1].original;
-    if (!original) return 0;
-    void* caller = _ReturnAddress();
-    const uint8_t st = probeState();
-    const uint64_t rax = original(self, a2, a3, a4);
-    if (!g_eyeStop[1].load(std::memory_order_relaxed)) stereoPredRecord(st, self, caller, rax);
-    return rax;
-}
-
-// The relay's trampoline and its executable state (CodeHook's Prepare, with the probe as its context).
-bool prepareEyeRelay(void* trampoline, void* context) noexcept {
-    EyeProbe* probe = static_cast<EyeProbe*>(context);
-    const uintptr_t address = reinterpret_cast<uintptr_t>(trampoline);
-    std::memcpy(probe->relay + ecm::kCallbackRelayTrampolineAt, &address, 8);
-    DWORD oldProtect = 0;
-    if (!VirtualProtect(probe->relay, 4096, PAGE_EXECUTE_READ, &oldProtect) ||
-        !FlushInstructionCache(GetCurrentProcess(), probe->relay, ecm::kCallbackRelayBytes))
-        return false;
-    probe->original = reinterpret_cast<EyeFn>(trampoline);
-    return true;
-}
-
-struct EyeProbeSpec {
-    const char* name;
-    uintptr_t rva;
-    const uint8_t* prologue;
-    size_t prologueBytes;
-    size_t stolen;
-    void* callback;
-    const char* label;
-};
-
-// Installs probe `i`: the prologue bytes, the stolen length on an instruction boundary, a relay within reach, then CodeHook. Returns false
-// with `whyOut` set, having changed nothing that remains.
-bool installEyeProbe(size_t i, const EyeProbeSpec& s, uintptr_t base, size_t* stolenOut, std::string* whyOut) {
-    EyeProbe& pr = g_eyeProbe[i];
-    const uintptr_t target = base + s.rva;
-    if (!bytesMatch(target, s.prologue, s.prologueBytes)) {
-        *whyOut = "the prologue bytes are not build 332841's";
-        return false;
-    }
-    size_t covered = 0;
-    while (covered < s.stolen) {
-        size_t rip = 0;
-        const size_t len = codeInstructionLength(reinterpret_cast<const uint8_t*>(target + covered), s.prologueBytes - covered, &rip);
-        if (!len) {
-            *whyOut = "a prologue instruction is one the decoder does not recognise";
-            return false;
-        }
-        covered += len;
-    }
-    if (covered != s.stolen) {
-        *whyOut = "the prologue does not end on an instruction boundary at the expected byte";
-        return false;
-    }
-    pr.relay = allocateRelay(target);
-    if (!pr.relay) {
-        *whyOut = "no executable memory within two gigabytes of the target";
-        return false;
-    }
-    ecm::buildCallbackRelay(pr.relay, &pr.gate, s.callback);
-    pr.hook = new CodeHook();
-    if (!pr.hook->install(reinterpret_cast<void*>(target), pr.relay, nullptr, s.name, &prepareEyeRelay, &pr)) {
-        const char* why = pr.hook->refusal();
-        VirtualFree(pr.relay, 0, MEM_RELEASE);
-        pr.relay = nullptr;
-        *whyOut = why[0] ? why : "CodeHook gave no reason";
-        return false;
-    }
-    pr.gate.store(1, std::memory_order_seq_cst);
-    *stolenOut = pr.hook->stolenBytes();
-    return true;
-}
-
-// Frame thread, once: the VR profile only, behind the identity check. One line per probe, installed or refused.
-void installEyeProbesOnce() {
-    if (g_eyeTried) return;
-    g_eyeTried = true;
-    if (!runtimeVrProfile()) {
-        Log::get().note("native on foot eye probes: not installed (the flat profile)");
-        return;
-    }
-    const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
-    const char* peWhy = nullptr;
-    if (!base || !checkIdentity(base, &peWhy)) {
-        Log::get().note("native on foot eye probes: NOT installed -- identity mismatch (%s); the game was not touched.", peWhy ? peWhy : "no module");
-        return;
-    }
-    g_eyeBase.store(base, std::memory_order_relaxed);
-    const EyeProbeSpec specs[nofoot::kEyeCount] = {
-        {"native-on-foot-eye-query", nofoot::kEyeQueryRva, nofoot::kEyeQueryPrologue, nofoot::kEyeQueryPrologueBytes, nofoot::kEyeQueryStolen,
-         reinterpret_cast<void*>(&eyeQueryHooked), "E1 (eye-index query)"},
-        {"native-on-foot-stereo-pred", nofoot::kStereoPredRva, nofoot::kStereoPredPrologue, nofoot::kStereoPredPrologueBytes,
-         nofoot::kStereoPredStolen, reinterpret_cast<void*>(&stereoPredHooked), "E2 (stereo leaf predicate)"},
-    };
-    for (size_t i = 0; i < nofoot::kEyeCount; ++i) {
-        const EyeProbeSpec& s = specs[i];
-        size_t stolen = 0;
-        std::string why;
-        if (installEyeProbe(i, s, base, &stolen, &why)) {
-            g_eyeArmed[i] = true;
-            Log::get().note("native on foot eye probe: installed %s at EliteDangerous64.exe+0x%llX, stolen=%zu bytes, prologue %zu bytes "
-                            "verified, relay at 0x%llX (read only; temporary).",
-                            s.label, static_cast<unsigned long long>(s.rva), stolen, s.prologueBytes,
-                            static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(g_eyeProbe[i].relay)));
-        } else {
-            Log::get().note("native on foot eye probe: %s NOT installed at EliteDangerous64.exe+0x%llX -- %s. The game was not touched by it.",
-                            s.label, static_cast<unsigned long long>(s.rva), why.c_str());
-        }
-    }
-}
-
-// The text of an eye key's caller, class, result, mode and flag.
-std::string eyeCallerText(uint32_t caller) {
-    if (!caller) return "?";
+// An exe RVA as text: "+0x.." inside the image, "?" outside it, "-" for null.
+std::string censusRva(uint64_t value, uintptr_t base) {
+    if (!value) return "-";
+    if (!base || value < base || value >= base + ecm::kExpectedImageSize) return "?";
     char b[24];
-    std::snprintf(b, sizeof(b), "+0x%llX", static_cast<unsigned long long>(caller));
+    std::snprintf(b, sizeof(b), "+0x%llX", static_cast<unsigned long long>(value - base));
     return b;
 }
-std::string eyeModeText(uint32_t mode) {
-    if (mode == kModeUnread) return "?";
-    return std::to_string(mode);
-}
-const char* eyeClassText(uint8_t cls) {
-    return cls == kClassSlot0 ? "slot0" : cls == kClassSlot1 ? "slot1" : cls == kClassOther ? "other" : "-";
+
+constexpr uint32_t kCensusSlots[6] = {0x08, 0x10, 0x18, 0x28, 0x30, 0xB0};
+
+// One object: its pointer, its vtable, and six vtable slots, appended to `out` as " NAME=0x.. NAME.vt=.. NAME[+0x08]=..".
+void censusObject(const char* name, uint64_t ptr, bool ptrOk, uintptr_t base, std::string& out) {
+    char b[48];
+    if (ptrOk) std::snprintf(b, sizeof(b), " %s=%s", name, ptr ? "" : "-");
+    else std::snprintf(b, sizeof(b), " %s=?", name);
+    out += b;
+    if (ptrOk && ptr) {
+        char hex[24];
+        std::snprintf(hex, sizeof(hex), "0x%llX", static_cast<unsigned long long>(ptr));
+        out += hex;
+    }
+    uint64_t vt = 0;
+    const bool okVt = ptrOk && ptr && guardedRead(static_cast<uintptr_t>(ptr), &vt, 8);
+    out += std::string(" ") + name + ".vt=" + (okVt ? censusRva(vt, base) : (ptrOk && !ptr ? std::string("-") : std::string("?")));
+    for (uint32_t off : kCensusSlots) {
+        std::string v = "-";
+        if (okVt && vt) {
+            uint64_t fn = 0;
+            v = guardedRead(static_cast<uintptr_t>(vt) + off, &fn, 8) ? censusRva(fn, base) : "?";
+        } else if (!okVt && ptrOk && ptr) {
+            v = "?";
+        }
+        char lab[32];
+        std::snprintf(lab, sizeof(lab), " %s[+0x%02X]=", name, static_cast<unsigned>(off));
+        out += lab;
+        out += v;
+    }
 }
 
-void eyeLogKey(const EyeKey& k, bool first) {
-    const char* st = kStateName[k.state < 3 ? k.state : 2];
-    if (k.hook == 0) {
-        if (first) {
-            Log::get().note("native on foot eye query [%s]: first sighting caller=%s node=%s result=%u mode=%s", st,
-                            eyeCallerText(k.caller).c_str(), eyeClassText(k.cls), static_cast<unsigned>(k.result), eyeModeText(k.mode).c_str());
-        } else {
-            Log::get().note("native on foot eye query [%s]: caller=%s node=%s result=%u mode=%s calls=%llu", st, eyeCallerText(k.caller).c_str(),
-                            eyeClassText(k.cls), static_cast<unsigned>(k.result), eyeModeText(k.mode).c_str(),
-                            static_cast<unsigned long long>(k.windowCalls));
-        }
+void requestCensusTick(uint64_t nowMs) {
+    if (!journalGameplay()) return;
+    const uint64_t calls = g_setterCalls.load(std::memory_order_relaxed);
+    const bool changed = calls != g_censusSetterSeen;
+    if (!changed && g_censusMs != 0 && nowMs - g_censusMs < 5000) return;
+    g_censusSetterSeen = calls;
+    g_censusMs = nowMs;
+    const uint64_t sel = g_frozenSelector.load(std::memory_order_acquire);
+    const uintptr_t base = g_base;
+    std::string text = "native on foot request objects:";
+    if (!sel) {
+        text += " no selector frozen yet";
     } else {
-        char flag[8];
-        if (k.flag == kFlagUnread) std::snprintf(flag, sizeof(flag), "?");
-        else std::snprintf(flag, sizeof(flag), "%u", static_cast<unsigned>(k.flag));
-        if (first) {
-            Log::get().note("native on foot stereo pred [%s]: first sighting caller=%s result=%u mode=%s flag2AE0=%s", st,
-                            eyeCallerText(k.caller).c_str(), static_cast<unsigned>(k.result), eyeModeText(k.mode).c_str(), flag);
-        } else {
-            Log::get().note("native on foot stereo pred [%s]: caller=%s result=%u mode=%s flag2AE0=%s calls=%llu", st,
-                            eyeCallerText(k.caller).c_str(), static_cast<unsigned>(k.result), eyeModeText(k.mode).c_str(), flag,
-                            static_cast<unsigned long long>(k.windowCalls));
-        }
+        uint64_t owner = 0, R = 0, T = 0, S = 0;
+        const bool okO = guardedRead(static_cast<uintptr_t>(sel) + nofoot::kCensusOwnerOff, &owner, 8) && owner;
+        const bool okR = okO && guardedRead(static_cast<uintptr_t>(owner) + nofoot::kCensusRequestOff, &R, 8) && R;
+        const bool okT = okR && guardedRead(static_cast<uintptr_t>(R) + nofoot::kCensusTOff, &T, 8);
+        const bool okS = okR && guardedRead(static_cast<uintptr_t>(R) + nofoot::kCensusSOff, &S, 8);
+        char rb[40];
+        if (!okO) std::snprintf(rb, sizeof(rb), " R=?");
+        else if (!okR) std::snprintf(rb, sizeof(rb), " R=?");
+        else std::snprintf(rb, sizeof(rb), " R=0x%llX", static_cast<unsigned long long>(R));
+        text += rb;
+        censusObject("T", T, okT, base, text);
+        censusObject("S18", S, okS, base, text);
     }
-}
-
-// Frame thread, every frame: writes the queued first sightings at once, and every 5 s the window's keys (by state), the totals, then resets.
-void eyeProbeTick(uint64_t nowMs) {
-    if (!g_eyeArmed[0] && !g_eyeArmed[1]) return;
-    if (g_eyeWindowMs == 0) g_eyeWindowMs = nowMs;
-    EyeFirst first[kEyeRing];
-    size_t nFirst = 0;
-    uint64_t dropped = 0, frames = 0, calls[nofoot::kEyeCount] = {}, overflow = 0;
-    bool due = false;
-    EyeKey snap[kEyeKeys];
-    size_t nSnap = 0;
-    {
-        HudLockGuard lock;
-        while (g_eyeRead < g_eyeWritten && nFirst < kEyeRing) first[nFirst++] = g_eyeRing[(g_eyeRead++) % kEyeRing];
-        dropped = g_eyeDropped;
-        g_eyeDropped = 0;
-        ++g_eyeFrames;
-        due = nowMs - g_eyeWindowMs >= 5000;
-        if (due) {
-            for (size_t i = 0; i < kEyeKeys; ++i) {
-                if (g_eyeKeys[i].used && g_eyeKeys[i].windowCalls) snap[nSnap++] = g_eyeKeys[i];
-                g_eyeKeys[i].windowCalls = 0;
-            }
-            for (size_t p = 0; p < nofoot::kEyeCount; ++p) {
-                calls[p] = g_eyeWinCalls[p];
-                g_eyeWinCalls[p] = 0;
-            }
-            overflow = g_eyeWinOverflow;
-            g_eyeWinOverflow = 0;
-            frames = g_eyeFrames;
-            g_eyeFrames = 0;
-        }
+    if (text != g_censusLast) {
+        g_censusLast = text;
+        Log::get().note("%s", text.c_str());
     }
-    for (size_t i = 0; i < nFirst; ++i) eyeLogKey(first[i].key, true);
-    if (dropped) Log::get().note("native on foot eye: %llu first sighting(s) dropped (the queue of %zu was full)", static_cast<unsigned long long>(dropped), kEyeRing);
-    if (!due) return;
-    g_eyeWindowMs = nowMs;
-    const double f = frames ? static_cast<double>(frames) : 1.0;
-    Log::get().note("native on foot eye totals: frames=%llu eye_calls=%llu (%.2f per frame) stereo_calls=%llu (%.2f per frame) keys=%zu overflow=%llu",
-                    static_cast<unsigned long long>(frames), static_cast<unsigned long long>(calls[0]), static_cast<double>(calls[0]) / f,
-                    static_cast<unsigned long long>(calls[1]), static_cast<double>(calls[1]) / f, nSnap, static_cast<unsigned long long>(overflow));
-    if (nSnap == 0) Log::get().note("native on foot eye: no calls in the window");
-    for (size_t i = 0; i < nSnap; ++i) eyeLogKey(snap[i], false);
 }
 
 }  // namespace
@@ -1119,7 +839,6 @@ void nativeOnFootHudCapture(int index, uint64_t vs) {
 void nativeOnFootFrameBoundary(uint32_t frameNo) {
     (void)frameNo;
     if (g_install == InstallState::NotTried) installOnce();
-    installEyeProbesOnce();   // F6: the two read-only eye probes (VR profile; once)
     if (g_install == InstallState::Armed) readKey();
     drainEvents();
     if (!g_hudArmedNoted) {
@@ -1150,7 +869,7 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
     gateLine(now);
     avatarLine(now);
     avatarCensusLine(now);
-    eyeProbeTick(now);
+    requestCensusTick(now);
     neckLine(now);
 }
 
