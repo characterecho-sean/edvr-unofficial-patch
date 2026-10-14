@@ -37,6 +37,8 @@ std::atomic<float> g_hudSpread{0.0f};                           // fix.native_on
 float g_hudSpreadLast = -1.0f;                                  // frame thread only: as last logged (F14)
 std::atomic<bool> g_reticleKeyOn{false};                        // fix.native_on_foot_reticle_probe, live (F14, temporary)
 bool g_reticleKeyLast = false;                                  // frame thread only (F14)
+std::atomic<bool> g_fpKeyOn{false};                             // fix.native_on_foot_hide_fp_body, as the frame thread last read it (F15, temporary)
+bool g_fpKeyLast = false;                                       // frame thread only: as last logged (F15)
 std::atomic<float> g_hudSize{nofoot::kHudSizeDefault};          // fix.native_on_foot_hud_size, live (F13)
 std::atomic<bool> g_followHead{true};                           // fix.native_on_foot_hud_follow is head (F13)
 std::atomic<bool> g_followBefore{false};                        // fix.native_on_foot_hud_follow_order is before (F13, temporary)
@@ -458,6 +460,13 @@ void readKey() {
         Log::get().note("native on foot: fix.native_on_foot_reticle_probe is %s", reticleOn ? "on" : "off");
         g_reticleKeyLast = reticleOn;
     }
+    // F15 (TEMPORARY): the first-person body hide (explorer_cam.cpp, explorerCamFpBody).
+    const bool fpOn = cfg.getString("fix.native_on_foot_hide_fp_body", "off") == "on";
+    g_fpKeyOn.store(fpOn, std::memory_order_relaxed);
+    if (first || fpOn != g_fpKeyLast) {
+        Log::get().note("native on foot: fix.native_on_foot_hide_fp_body is %s (temporary)", fpOn ? "on" : "off");
+        g_fpKeyLast = fpOn;
+    }
 }
 
 // The caller's address, image-relative; "+0x?" when it is not inside the game image.
@@ -818,6 +827,29 @@ void logAvatarRow(const AvatarCensusRow& r) {
     }
 }
 
+// F15 (TEMPORARY): the first-person body hide's zeroes as the hook left them, read straight after the write. The frame thread's own census read can
+// land after the game's next-frame rewrite, so this line is the evidence that the zero happened.
+void logFpBodyReadback() {
+    const FpBodyReadback rb = explorerCamFpBodyReadback();
+    if (rb.amc == 0) {
+        Log::get().note("native on foot body: first-person masks not zeroed yet (parts found=%u, first-person AMC calls=%llu)", rb.parts,
+                        static_cast<unsigned long long>(rb.mode2Seen));
+        return;
+    }
+    std::string text;
+    for (uint32_t i = 0; i < 3; ++i) {
+        if (!rb.name[i]) continue;
+        char item[160];
+        std::snprintf(item, sizeof(item), "%s 0x%llX,0x%llX,0x%llX,0x%llX", rb.name[i], static_cast<unsigned long long>(rb.masks[i][0]),
+                      static_cast<unsigned long long>(rb.masks[i][1]), static_cast<unsigned long long>(rb.masks[i][2]),
+                      static_cast<unsigned long long>(rb.masks[i][3]));
+        if (!text.empty()) text += ' ';
+        text += item;
+    }
+    Log::get().note("native on foot body: first-person masks after the zero: amc=0x%llX first-person AMC calls=%llu [%s]",
+                    static_cast<unsigned long long>(rb.amc), static_cast<unsigned long long>(rb.mode2Seen), text.c_str());
+}
+
 void avatarCensusLine(uint64_t nowMs) {
     if (nowMs - g_lastFpMs < 5000) return;
     g_lastFpMs = nowMs;
@@ -825,6 +857,7 @@ void avatarCensusLine(uint64_t nowMs) {
     uint32_t seen = 0, dropped = 0;
     const uint32_t n = avatarCensusTake(rows, kFpRows, &seen, &dropped);   // clears the window even when the key is off
     if (!nativeOnFootActive()) return;
+    if (g_fpKeyOn.load(std::memory_order_relaxed)) logFpBodyReadback();
     if (dropped) Log::get().note("native on foot avatars: %u AMC(s) not collected in the last 5 s (eight slots were full)", dropped);
     if (n == 0) {
         Log::get().note("native on foot avatars: none kept in the last 5 s (seen=%u)", seen);
@@ -2543,6 +2576,9 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
     const bool visorKeyOn = g_visorKeyOn.load(std::memory_order_relaxed);
     const bool visorWant = visorKeyOn && nativeOnFootActive() && session;
     visorTick(visorWant, !visorKeyOn ? "fix.native_on_foot_visor_up is off" : !nativeOnFootActive() ? "native stereo on foot ended" : "the game session ended");
+    // F15 (TEMPORARY): the first-person body hide (explorer_cam.cpp), while native stereo is on foot and its key is on.
+    const bool fpKey = g_fpKeyOn.load(std::memory_order_relaxed);
+    explorerCamFpBody(fpKey && nativeOnFootActive(), !fpKey ? "fix.native_on_foot_hide_fp_body is off" : "native stereo on foot ended");
     neckLine(now);
 }
 
@@ -2555,6 +2591,7 @@ void nativeOnFootShutdown() {
     visorTick(false, "the game is shutting down");
     spreadTick(false, 0.0f, "the game is shutting down");
     reticleTick(false, "the game is shutting down");
+    explorerCamFpBody(false, "the game is shutting down");
 }
 
 }  // namespace edvr

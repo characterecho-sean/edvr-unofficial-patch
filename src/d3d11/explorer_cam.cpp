@@ -115,6 +115,13 @@ std::atomic<uint64_t> g_amcLocal{0}, g_amcLocalPose{0}, g_amcCand{0}, g_amcCandP
 std::atomic<bool> g_busyAmc{false};
 uint64_t g_amcCensused = 0;                            // g_busyAmc
 ecm::Ring<ecm::AmcCensus, 2> g_censusRing;
+// F15 (native on foot E1, TEMPORARY): the first-person body hide. The frame thread writes g_fpHideWant and the names (g_fpIdx); the hook thread writes the
+// readback and counts the first-person AMC calls. g_fpBodyMutex guards g_fpIdx and g_fpReadback.
+std::atomic<bool> g_fpHideWant{false};
+std::atomic<uint64_t> g_fpMode2Seen{0};
+std::mutex g_fpBodyMutex;
+int g_fpIdx[3] = {-1, -1, -1};                         // guarded by g_fpBodyMutex: the part index of each kFpBodyPartNames entry, -1 when absent
+FpBodyReadback g_fpReadback;                           // guarded by g_fpBodyMutex (its parts, names and mode2Seen fields are filled on read)
 
 std::atomic<bool> g_placeActive{false};                 // on, every required hook armed, not stood down by faults (frame thread)
 std::atomic<uint32_t> g_resetRequest{0};                // the free-camera hook's placement machine starts over
@@ -1458,6 +1465,56 @@ void headHideStep(void* amcPtr) noexcept {
     g_hideZeroed.fetch_add(zeroed, std::memory_order_relaxed);
 }
 
+// ---- F15: the first-person body (E1, TEMPORARY) --------------------------------------------------------------------------------------
+// The local first-person AMC is the one at mode 2 (its creation parameters say first person): only the local player has one (isLocalPair, above).
+// Its three body parts get the same zeroing headHideStep gives the head parts, after the fade, on the same thread. Nothing is restored.
+__declspec(noinline) bool sehZeroFpMasks(uint8_t* amc, const int* idx, uint32_t* zeroed, uint64_t (*readback)[ecm::kPartVariants]) noexcept {
+    __try {
+        uint32_t n = 0;
+        for (uint32_t i = 0; i < 3; ++i) {
+            if (idx[i] < 0) continue;
+            volatile uint64_t* masks = reinterpret_cast<volatile uint64_t*>(amc + ecm::kOffAmcMasks + static_cast<uint32_t>(idx[i]) * ecm::kPartStride);
+            for (uint32_t k = 0; k < ecm::kPartVariants; ++k) {
+                if (masks[k] != 0) {
+                    masks[k] = 0;
+                    ++n;
+                }
+                readback[i][k] = masks[k];
+            }
+        }
+        *zeroed = n;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+void fpBodyStep(void* amcPtr) noexcept {
+    if (!amcPtr || !g_fpHideWant.load(std::memory_order_acquire) || g_hideDown.load(std::memory_order_acquire)) return;
+    uint8_t* const amc = static_cast<uint8_t*>(amcPtr);
+    AmcIdent id;
+    if (!sehReadAmcIdent(amc, &id)) {
+        hideFault();
+        return;
+    }
+    if (id.mode != 2) return;
+    g_fpMode2Seen.fetch_add(1, std::memory_order_relaxed);
+    int idx[3] = {-1, -1, -1};
+    {
+        std::lock_guard<std::mutex> lock(g_fpBodyMutex);
+        for (int i = 0; i < 3; ++i) idx[i] = g_fpIdx[i];
+    }
+    if (idx[0] < 0 && idx[1] < 0 && idx[2] < 0) return;   // no name resolved: nothing to zero (the frame thread logs why)
+    uint64_t masks[3][ecm::kPartVariants] = {};
+    uint32_t zeroed = 0;
+    if (!sehZeroFpMasks(amc, idx, &zeroed, masks)) {
+        hideFault();
+        return;
+    }
+    std::lock_guard<std::mutex> lock(g_fpBodyMutex);
+    g_fpReadback.amc = reinterpret_cast<uint64_t>(amcPtr);
+    std::memcpy(g_fpReadback.masks, masks, sizeof(masks));
+}
+
 // ---- the avatar-fade hook (the head hiding's post-call) ------------------------------------------------------------------------
 // ---- the neck census (native on foot, F1: log only, read-only) ------------------------------------------------------------------
 // Every 100 ms while native stereo is on foot, on the game's job thread: the local third-person head joint in avatar-root model space
@@ -1575,6 +1632,7 @@ __declspec(noinline) uint64_t __fastcall avatarFadeHooked(void* a, void* b, void
     if (g_hideOn.load(std::memory_order_acquire)) {
         headHideStep(a);
         neckCensusStep();
+        fpBodyStep(a);   // F15 (E1): the first-person body, after the head hiding; a no-op unless the frame thread wants it
     }
     if (a && nativeOnFootActive()) avatarCensusNote(a);
     return result;
@@ -2826,13 +2884,15 @@ uint32_t avatarCensusTake(AvatarCensusRow* out, uint32_t cap, uint32_t* seen, ui
         if (!sehReadAvatarRow(reinterpret_cast<const uint8_t*>(s.amc), &r)) r.parts = 0;   // a faulting read keeps its row, with no parts
         ++n;
     }
-    // Insertion sort, at most eight rows: the EVASuit arms/hands/legs first, then the nearest to the local avatar, then the rest.
+    // Insertion sort, at most eight rows: the first-person AMC (mode 2, F15: the body hide's target) first, then the EVASuit arms/hands/legs, then the
+    // nearest to the local avatar, then the rest.
     for (uint32_t i = 1; i < n; ++i) {
         for (uint32_t j = i; j > 0; --j) {
             const AvatarCensusRow& a = cand[j - 1];
             const AvatarCensusRow& b = cand[j];
             bool bFirst = false;
-            if (a.evaSet != b.evaSet) bFirst = b.evaSet;
+            if ((a.mode == 2) != (b.mode == 2)) bFirst = b.mode == 2;
+            else if (a.evaSet != b.evaSet) bFirst = b.evaSet;
             else if (a.distOk != b.distOk) bFirst = b.distOk;
             else if (a.distOk && a.dist != b.dist) bFirst = b.dist < a.dist;
             else bFirst = b.amc < a.amc;
@@ -2851,6 +2911,89 @@ void explorerCamNativeBody(bool wanted, bool body, const char* reason) {
     g_nativeWant.store(wanted, std::memory_order_release);
     g_nativeBody.store(body, std::memory_order_release);
     g_nativeReason = reason ? reason : "";
+}
+
+// F15 (E1, TEMPORARY): the first-person body hide, frame thread. Logs the transitions and resolves the three names once the exe's part-name table
+// is verified (g_partNames == 1, checkPartNames). The hook (fpBodyStep) does the zeroing.
+namespace {
+bool g_fpWantLast = false;           // the body was wanted on the last frame
+uint64_t g_fpWantSinceMs = 0;        // when it was last turned on
+uint64_t g_fpMode2AtStart = 0;       // g_fpMode2Seen when it was last turned on
+uint64_t g_fpLoggedAmc = 0;          // the first-person AMC last logged as hidden (0 = none)
+bool g_fpResolved = false;           // the names were looked up
+bool g_fpNoMode2Noted = false;       // the no-first-person-AMC line, once per turn-on
+std::string g_fpNamesText;           // the names found, as the hidden line spells them
+}  // namespace
+
+void explorerCamFpBody(bool want, const char* reason) {
+    const char* why = reason ? reason : "";
+    if (!want) {
+        g_fpHideWant.store(false, std::memory_order_release);
+        if (g_fpWantLast) {
+            {
+                std::lock_guard<std::mutex> lock(g_fpBodyMutex);
+                g_fpReadback.amc = 0;
+            }
+            if (g_fpLoggedAmc != 0) Log::get().note("native on foot body: first-person body shown again (%s)", why);
+        }
+        g_fpLoggedAmc = 0;
+        g_fpWantLast = false;
+        return;
+    }
+    const uint64_t now = GetTickCount64();
+    if (!g_fpWantLast) {
+        g_fpWantSinceMs = now;
+        g_fpMode2AtStart = g_fpMode2Seen.load(std::memory_order_relaxed);
+        g_fpNoMode2Noted = false;
+    }
+    if (!g_fpResolved && g_partNames.load(std::memory_order_relaxed) == 1) {
+        int found[3] = {-1, -1, -1};
+        std::string names, missing;
+        for (uint32_t i = 0; i < 3; ++i) {
+            found[i] = ecm::partIndexByName(ecm::kFpBodyPartNames[i]);
+            std::string& list = found[i] >= 0 ? names : missing;
+            if (!list.empty()) list += ", ";
+            list += ecm::kFpBodyPartNames[i];
+        }
+        {
+            std::lock_guard<std::mutex> lock(g_fpBodyMutex);
+            for (uint32_t i = 0; i < 3; ++i) g_fpIdx[i] = found[i];
+        }
+        g_fpNamesText = names;
+        g_fpResolved = true;
+        if (!missing.empty()) Log::get().note("native on foot body: first-person part(s) not in the part-name table, left alone: %s", missing.c_str());
+    }
+    g_fpHideWant.store(true, std::memory_order_release);
+    g_fpWantLast = true;
+    uint64_t amc = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_fpBodyMutex);
+        amc = g_fpReadback.amc;
+    }
+    if (amc != 0 && amc != g_fpLoggedAmc) {
+        g_fpLoggedAmc = amc;
+        Log::get().note("native on foot body: first-person body hidden (%s on AMC 0x%llX)", g_fpNamesText.c_str(), static_cast<unsigned long long>(amc));
+    }
+    if (!g_fpNoMode2Noted && now - g_fpWantSinceMs >= 5000 && g_fpMode2Seen.load(std::memory_order_relaxed) == g_fpMode2AtStart) {
+        g_fpNoMode2Noted = true;
+        Log::get().note("native on foot body: no first-person AMC (mode 2) reached the fade hook in the first 5 s with the key on; nothing is hidden");
+    }
+}
+
+FpBodyReadback explorerCamFpBodyReadback() {
+    FpBodyReadback out;
+    {
+        std::lock_guard<std::mutex> lock(g_fpBodyMutex);
+        out.amc = g_fpReadback.amc;
+        std::memcpy(out.masks, g_fpReadback.masks, sizeof(out.masks));
+        for (uint32_t i = 0; i < 3; ++i) {
+            if (g_fpIdx[i] < 0) continue;
+            out.name[i] = ecm::kFpBodyPartNames[i];
+            ++out.parts;
+        }
+    }
+    out.mode2Seen = g_fpMode2Seen.load(std::memory_order_relaxed);
+    return out;
 }
 bool neckCensusRead(NeckCensusReading* out) { return neckCensusCopy(out); }
 

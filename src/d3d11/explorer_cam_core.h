@@ -1519,6 +1519,14 @@ inline bool isHeadPart(uint32_t idx) {
         if (h == idx) return true;
     return false;
 }
+// F15 (native on foot, TEMPORARY E1): the first-person body's parts, hidden on the local first-person AMC (mode 2). Looked up by name in the part-name
+// table, never by index; -1 when the name is not in the table.
+inline constexpr const char* kFpBodyPartNames[3] = {"EVASuit_Arms", "EVASuit_Hands", "FirstPersonSkeleton"};
+inline int partIndexByName(const char* name) {
+    for (uint32_t i = 0; i < kPartCount; ++i)
+        if (std::strcmp(kPartNames[i], name) == 0) return static_cast<int>(i);
+    return -1;
+}
 // The local third-person avatar: its AvatarPose handle is resolved (the id dword reads 0xFFFFFFFF), the resolved pointer minus 0x30 is the skeleton
 // interface the game called FindJoint on for the local player's third-person body (site 1), and its creation parameters say third person (mode 3).
 inline bool isLocalAmc(uint32_t avatarPoseId, uint64_t avatarPose, uint64_t skeleton, int32_t mode) {
