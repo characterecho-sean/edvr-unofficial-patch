@@ -50,6 +50,9 @@ bool g_visorBreathLast = false;                                 // frame thread 
 std::atomic<bool> g_reticleHead{false};                         // fix.native_on_foot_reticle_follow is head (F16)
 std::atomic<bool> g_reticleWriteOn{false};                      // the key 10 centring is wanted now: head, on foot, session (frame thread; the probe reads it, F16)
 bool g_reticleHeadLast = false, g_reticleWriteLast = false;     // frame thread only (F16)
+std::atomic<bool> g_reticleLogWanted{false};                    // set by the frame thread on a switch to head; the probe consumes it once and queues the line (F17)
+std::atomic<float> g_hudElemScale{0.0f};                        // fix.native_on_foot_hud_element_scale, live: 0 = the game's own (F17)
+float g_hudElemLast = -1.0f;                                    // frame thread only: as last logged (F17)
 float g_hudOffsetLast[nofoot::kHudGroupCount * 2] = {};         // frame thread only: the group offsets as last read (F16)
 float g_hudOffsetRead[nofoot::kHudGroupCount * 2] = {};         // written by the frame thread under g_f9Lock; the layout hook reads it (F16)
 bool g_hudOffsetOn = false;                                     // under g_f9Lock: the offsets apply now, native stereo on foot (F16)
@@ -462,7 +465,7 @@ void readKey() {
         Log::get().note("native on foot visor in breathable air: %s", visorUp ? "up" : "game");
         g_visorUpLast = visorUp;
     }
-    // F16: the reticle follows aim (the game's own position, the default) or head (key 10 centred on the view axis).
+    // F16: the reticle follows aim (the game's own position, the default) or head (key 10 placed along the head direction, F17).
     const bool reticleHead = cfg.getString("fix.native_on_foot_reticle_follow", "aim") == "head";
     g_reticleHead.store(reticleHead, std::memory_order_relaxed);
     if (first || reticleHead != g_reticleHeadLast) {
@@ -505,6 +508,17 @@ void readKey() {
     if (first || spread != g_hudSpreadLast) {
         Log::get().note("native on foot hud spread: %.2f (pulls the elements toward the centre)", static_cast<double>(spread));
         g_hudSpreadLast = spread;
+    }
+    // F17: the HUD element scale (a user setting, live): 0 = the game's own scale; otherwise 0.30..2.00 (a value under 0.30 is 0.30).
+    float elem = cfg.getFloat("fix.native_on_foot_hud_element_scale", 0.0f);
+    if (elem < 0.0f) elem = 0.0f;
+    if (elem > 0.0f && elem < nofoot::kHudElemScaleMin) elem = nofoot::kHudElemScaleMin;
+    if (elem > nofoot::kHudElemScaleMax) elem = nofoot::kHudElemScaleMax;
+    g_hudElemScale.store(elem, std::memory_order_relaxed);
+    if (first || elem != g_hudElemLast) {
+        if (elem > 0.0f) Log::get().note("native on foot hud element scale setting: %.2f", static_cast<double>(elem));
+        else Log::get().note("native on foot hud element scale setting: 0 (the game's own scale)");
+        g_hudElemLast = elem;
     }
     const bool reticleOn = cfg.getString("fix.native_on_foot_reticle_probe", "off") == "on";
     g_reticleKeyOn.store(reticleOn, std::memory_order_relaxed);
@@ -1977,6 +1991,101 @@ void spreadTick(bool want, float spread, const char* reason) {
     Log::get().note("native on foot hud spread: margins -> 0.027,0.060 (restored: %s)", reason);
 }
 
+// ---- F17: the HUD element scale (a user setting, live) ----------------------------------------------------------------------------------
+// RE (the layout routine 0x1AB32F0, branch at 0x1AB3351): when the byte at +0x5F741CA is non-zero, the layout scale S is the float at +0x5E7A760
+// (1.0 in the file); when it is zero, S = min(1, aspect / 1.7222). S multiplies every part's scale and its spread around the centre. While the setting
+// is 0.30..2.00 (0 leaves the game's own scale: nothing is written), native stereo is on foot and the HUD mesh patch is in, the float is written k
+// first and the byte 1 second; the layout re-send (layoutResendTick) then applies it. Put back (the byte 0, then the float 1.0) when the setting goes
+// to 0 or the wanted state ends. The values must be the game's own (0 and 1.0) or ours; otherwise nothing is written.
+constexpr float kElemGame = 1.0f;
+bool g_elemWritten = false;             // frame thread only: we hold the byte at 1 and the float at g_elemWrittenK
+float g_elemWrittenK = 0.0f;            // frame thread only
+std::string g_elemRefusal;              // frame thread only
+bool g_elemRestoreFailedNoted = false;  // frame thread only
+
+void refuseElem(const std::string& why) {
+    if (why == g_elemRefusal) return;
+    g_elemRefusal = why;
+    Log::get().note("native on foot hud element scale: EliteDangerous64.exe+0x%llX and +0x%llX NOT written -- %s. The game's layout is left as it is.",
+                    static_cast<unsigned long long>(nofoot::kElemScaleModeRva), static_cast<unsigned long long>(nofoot::kElemScaleRva), why.c_str());
+}
+
+// `want`: the layout scale should be k now (0.30..2.00). `reason` (a literal) says why it is being put back.
+void elemScaleTick(bool want, float k, const char* reason) {
+    const uintptr_t am = g_base + nofoot::kElemScaleModeRva;
+    const uintptr_t af = g_base + nofoot::kElemScaleRva;
+    if (want) {
+        const char* idWhy = nullptr;
+        if (!checkIdentity(g_base, &idWhy)) {
+            refuseElem(std::string("the PE identity check failed (") + idWhy + ")");
+            return;
+        }
+        uint8_t cm = 0;
+        float cf = 0.0f;
+        if (!guardedRead(am, &cm, 1) || !guardedRead(af, &cf, 4)) {
+            refuseElem("the values could not be read");
+            return;
+        }
+        const bool modeOk = cm == 0 || (g_elemWritten && cm == 1);
+        const bool scaleOk = f12Near(cf, kElemGame) || (g_elemWritten && f12Near(cf, g_elemWrittenK));
+        if (!modeOk || !scaleOk) {
+            char b[200];
+            std::snprintf(b, sizeof(b), "the byte reads %u and the float %.4f, not the game's 0 and 1.0 or our own, so they are left alone",
+                          static_cast<unsigned>(cm), static_cast<double>(cf));
+            refuseElem(b);
+            return;
+        }
+        if (g_elemWritten && cm == 1 && f12Near(cf, k)) return;   // already there
+        if (!writableByte(am) || !writableByte(af)) {
+            refuseElem("the values are not writable");
+            return;
+        }
+        if (!guardedWriteFloat(af, k)) {   // the float first: the byte then turns the layout onto it
+            refuseElem("the write failed");
+            return;
+        }
+        if (!guardedWriteByte(am, 1)) {
+            guardedWriteFloat(af, kElemGame);   // the byte did not take: the float goes back to the game's own
+            refuseElem("the write failed");
+            return;
+        }
+        const bool first = !g_elemWritten;
+        const float was = g_elemWrittenK;
+        g_elemWritten = true;
+        g_elemWrittenK = k;
+        g_elemRefusal.clear();
+        if (first) Log::get().note("native on foot hud element scale: %.2f (override 0 -> 1)", static_cast<double>(k));
+        else Log::get().note("native on foot hud element scale: %.2f (was %.2f)", static_cast<double>(k), static_cast<double>(was));
+        return;
+    }
+    if (!g_elemWritten) {
+        g_elemRefusal.clear();
+        return;
+    }
+    uint8_t cm = 0;
+    float cf = 0.0f;
+    if (!guardedRead(am, &cm, 1) || !guardedRead(af, &cf, 4)) return;   // retried next frame
+    const bool modeOurs = cm == 1;
+    const bool scaleOurs = f12Near(cf, g_elemWrittenK);
+    const bool partial = cm == 0 && scaleOurs;   // a restore that stopped after the byte: the float is still ours
+    if (!partial && (!modeOurs || !scaleOurs)) {
+        g_elemWritten = false;
+        Log::get().note("native on foot hud element scale: NOT restored -- the byte reads %u and the float %.4f, not ours, so they are left alone (restore: %s)",
+                        static_cast<unsigned>(cm), static_cast<double>(cf), reason);
+        return;
+    }
+    if (!writableByte(am) || !writableByte(af) || (modeOurs && !guardedWriteByte(am, 0)) || !guardedWriteFloat(af, kElemGame)) {
+        if (!g_elemRestoreFailedNoted) {
+            g_elemRestoreFailedNoted = true;
+            Log::get().note("native on foot hud element scale: could not be put back to the game's (%s); retrying each frame.", reason);
+        }
+        return;
+    }
+    g_elemWritten = false;
+    g_elemRestoreFailedNoted = false;
+    Log::get().note("native on foot hud element scale: restored to the game's own (1.0, byte 0; %s)", reason);
+}
+
 // LAYOUT HOOK (F14 probe; F16 writer). EliteDangerous64.exe+0x1A0DCD0 (args rcx = HRC, rdx = float out[2], r8 = &rec; rec+0 = const char* part name), called
 // once per HUD part per layout re-send. The prologue is verified (the first five bytes are mov [rsp+0x20],rbx: no rip-relative operand, no
 // branch). The original runs first; then the fields are read under SEH and one line is queued for the frame thread. Six arguments are forwarded.
@@ -2178,6 +2287,89 @@ struct F14Key {
 constexpr size_t kF14Keys = 16;
 F14Key g_f14Keys[kF14Keys];         // guarded by g_f9Lock
 
+// ---- F17: the reticle follows head (key 10 only; game thread, from the probe) --------------------------------------------------------
+// The aim reticle is an instance matrix in the body camera space: basis rows 0-2 at +0x10, +0x20, +0x30 (xyz each; w is not written) and the
+// translation at +0x40..+0x48. While `want`, with C = the smoothed head transform the HUD follows (g_f13Smooth, under g_f9Lock):
+//   translation t' = d * row2(C) + row3(C), where d = |t| is the game's own distance (the point (0, 0, d) of head space, taken into body space);
+//   each basis row b' = b . R(C), R the rotation of C.
+// rec.base keeps the game's own values. A call that finds our values in place (the game has not recomputed the instance) composes from that base
+// again, so nothing compounds. Without a head transform, or once `want` ends, the game's own values are put back.
+struct F17Reticle {
+    bool have = false;          // our values are in place in the instance at `inst`
+    uintptr_t inst = 0;
+    float base[12] = {};        // the game's values before our last write: basis rows 0-2 (xyz each), then the translation (xyz)
+    float written[12] = {};     // what we last wrote, in the same order
+};
+F17Reticle g_f17Ret;                // game thread only
+bool g_f17WriteFailNoted = false;   // game thread only
+
+// Value k (0..11) of the instance: matrix rows 0-3 start at +0x10 and are 0x10 apart; the w of each row is not one of the twelve.
+inline uintptr_t f17Addr(uintptr_t ia, size_t k) noexcept { return ia + 0x10 + (k / 3) * 0x10 + (k % 3) * 4; }
+
+bool f17WriteAll(uintptr_t ia, const float* v) noexcept {
+    for (size_t k = 0; k < 12; ++k)
+        if (!guardedWriteFloat(f17Addr(ia, k), v[k])) return false;
+    return true;
+}
+
+void reticleFollowHead(uintptr_t ia, bool want) noexcept {
+    F17Reticle& rec = g_f17Ret;
+    float cur[12] = {};
+    for (size_t k = 0; k < 12; ++k)
+        if (!guardedRead(f17Addr(ia, k), &cur[k], 4)) return;
+    const bool announce = g_reticleLogWanted.exchange(false, std::memory_order_relaxed);
+    const bool ours = rec.have && rec.inst == ia && std::memcmp(cur, rec.written, sizeof(cur)) == 0;
+    if (!ours) {
+        // The game's own values (its first call, or a fresh recompute of the instance): these are the base.
+        std::memcpy(rec.base, cur, sizeof(cur));
+        rec.have = false;
+        rec.inst = ia;
+    }
+    float C[16] = {};
+    bool pose = false;
+    if (want) {
+        F9Lock lock;
+        if (g_followHead.load(std::memory_order_relaxed) && g_f13Smooth.valid) {
+            std::memcpy(C, g_f13Smooth.C, sizeof(C));
+            pose = true;
+        }
+    }
+    if (!pose) {
+        if (ours) {   // back to the game's own values, once
+            if (!f17WriteAll(ia, rec.base) && !g_f17WriteFailNoted) {
+                g_f17WriteFailNoted = true;
+                f14Queue("native on foot reticle: the game's values could not be put back; key 10 may stay where it was placed");
+            }
+            rec.have = false;
+        }
+        if (want && announce) f14Queue("native on foot reticle: no head pose yet (the HUD follow is body, or the head views are not read); key 10 stays at the game's aim");
+        return;
+    }
+    const float* rows[3] = {rec.base, rec.base + 3, rec.base + 6};
+    const float* tb = rec.base + 9;
+    const float d = std::sqrt(tb[0] * tb[0] + tb[1] * tb[1] + tb[2] * tb[2]);
+    float target[12] = {};
+    for (size_t r = 0; r < 3; ++r)
+        for (size_t j = 0; j < 3; ++j) target[3 * r + j] = rows[r][0] * C[j] + rows[r][1] * C[4 + j] + rows[r][2] * C[8 + j];
+    for (size_t j = 0; j < 3; ++j) target[9 + j] = d * C[8 + j] + C[12 + j];
+    if (!f17WriteAll(ia, target)) {
+        rec.have = false;
+        if (!g_f17WriteFailNoted) {
+            g_f17WriteFailNoted = true;
+            f14Queue("native on foot reticle: NOT written -- the instance could not be written; key 10 stays at the game's aim");
+        }
+        return;
+    }
+    std::memcpy(rec.written, target, sizeof(target));
+    rec.have = true;
+    rec.inst = ia;
+    if (announce) {
+        char line[160];
+        std::snprintf(line, sizeof(line), "native on foot reticle: follows head (placed along the head direction at d=%.2fm)", static_cast<double>(d));
+        f14Queue(line);
+    }
+}
+
 void __fastcall reticleIndicatorProbe(void* instance, void* node) noexcept {
     const uintptr_t ia = reinterpret_cast<uintptr_t>(instance);
     const uintptr_t na = reinterpret_cast<uintptr_t>(node);
@@ -2192,12 +2384,8 @@ void __fastcall reticleIndicatorProbe(void* instance, void* node) noexcept {
     guardedRead(ia + 0x50, &scale, 4);
     const bool okPos = guardedRead(ia + 0x40, &pos[0], 4) && guardedRead(ia + 0x44, &pos[1], 4) && guardedRead(ia + 0x48, &pos[2], 4);
     if (!okKey || !okB) return;
-    // F16: while the reticle follows head, key 10 (the aim reticle) is centred on the view axis at its own distance: the translation's x and y are
-    // zeroed; z, w, the basis rows and the scale stay. Written only for key 10 and only while g_reticleWriteOn (frame thread). Guarded.
-    if (key == 10 && g_reticleWriteOn.load(std::memory_order_relaxed)) {
-        guardedWriteFloat(ia + 0x40, 0.0f);
-        guardedWriteFloat(ia + 0x44, 0.0f);
-    }
+    // F17: key 10 (the aim reticle) is placed along the head while g_reticleWriteOn (the frame thread's flag); otherwise its own values are kept.
+    if (key == 10) reticleFollowHead(ia, g_reticleWriteOn.load(std::memory_order_relaxed));
     F9Lock lock;
     F14Key* row = nullptr;
     for (auto& r : g_f14Keys) {
@@ -2352,20 +2540,23 @@ struct LayoutStamp {
     bool on = false;
     float off[nofoot::kHudGroupCount * 2] = {};
     float spread = 0.0f;
+    float elem = 0.0f;     // F17: the element scale the layout is to use (0 = the game's own; the value written otherwise)
 };
 bool g_layoutStampValid = false;   // frame thread only
 LayoutStamp g_layoutStampLast;     // frame thread only
 
 bool sameStamp(const LayoutStamp& a, const LayoutStamp& b) noexcept {
-    if (a.on != b.on || !sameBits(a.spread, b.spread)) return false;
+    if (a.on != b.on || !sameBits(a.spread, b.spread) || !sameBits(a.elem, b.elem)) return false;
     for (int i = 0; i < nofoot::kHudGroupCount * 2; ++i)
         if (!sameBits(a.off[i], b.off[i])) return false;
     return true;
 }
 
-void layoutResendTick(bool on) {
+// `elem` is the element scale the layout is to use now (F17), 0 for the game's own.
+void layoutResendTick(bool on, float elem) {
     LayoutStamp now;
     now.on = on;
+    now.elem = elem;
     uintptr_t hrc = 0;
     {
         F9Lock lock;
@@ -2381,8 +2572,8 @@ void layoutResendTick(bool on) {
         Log::get().note("native on foot hud: layout re-send NOT asked -- HRC+0x290 could not be written; the layout keeps its last values");
         return;
     }
-    Log::get().note("native on foot hud: layout re-send asked (HRC+0x290 = 0): on %s, spread %.2f", on ? "yes" : "no",
-                    static_cast<double>(now.spread));
+    Log::get().note("native on foot hud: layout re-send asked (HRC+0x290 = 0): on %s, spread %.2f, element scale %.2f", on ? "yes" : "no",
+                    static_cast<double>(now.spread), static_cast<double>(elem));
 }
 
 // Frame thread: installs the layout probe once (VR only); drains the layout lines; logs the reticle indicator rows every 5 s.
@@ -2760,6 +2951,12 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
         spreadTick(spreadWant, spreadNow,
                    !(spreadNow > 0.0f) ? "the HUD spread is 0" : !nativeOnFootActive() ? "native stereo on foot ended"
                    : !g_meshCreateLive.load(std::memory_order_relaxed) ? "the HUD mesh is off" : "the game session ended");
+        // F17: the HUD element scale (the user setting), while native stereo is on foot and the HUD mesh patch is in. Before the layout re-send below.
+        const float elemK = g_hudElemScale.load(std::memory_order_relaxed);
+        const bool elemWant = elemK > 0.0f && nativeOnFootActive() && g_meshCreateLive.load(std::memory_order_relaxed) && session;
+        elemScaleTick(elemWant, elemK,
+                      !(elemK > 0.0f) ? "the setting is 0" : !nativeOnFootActive() ? "native stereo on foot ended"
+                      : !g_meshCreateLive.load(std::memory_order_relaxed) ? "the HUD mesh is off" : "the game session ended");
         // F16: the reticle stub is in place while the probe key or the reticle follow (head) is on; the centring is written only while follow is head.
         const bool reticleKey = g_reticleKeyOn.load(std::memory_order_relaxed);
         const bool reticleHead = g_reticleHead.load(std::memory_order_relaxed);
@@ -2770,7 +2967,7 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
         const bool writeNow = reticleHead && nativeOnFootActive() && session;
         g_reticleWriteOn.store(writeNow, std::memory_order_relaxed);
         if (writeNow != g_reticleWriteLast) {
-            if (writeNow) Log::get().note("native on foot reticle: follows head (key 10 centred)");
+            if (writeNow) g_reticleLogWanted.store(true, std::memory_order_relaxed);   // the probe queues the line, with d, on its next call
             else
                 Log::get().note("native on foot reticle: follows aim (the game's own position; %s)",
                                 !reticleHead ? "the setting is aim" : !nativeOnFootActive() ? "native stereo on foot ended" : "the game session ended");
@@ -2783,7 +2980,7 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
             F9Lock lock;
             g_hudOffsetOn = layoutOn;
         }
-        layoutResendTick(layoutOn);
+        layoutResendTick(layoutOn, g_elemWritten ? g_elemWrittenK : 0.0f);
     }
     // F16: the visor override in breathable air (replaces the F13 test key). Held while the setting is up, native stereo is on foot, and Status.json's
     // Flags2 says breathable air. The override itself is the F13 code path (visorTick: B8 = 0, then B7 = 1; restored when this stops).
@@ -2809,6 +3006,7 @@ void nativeOnFootShutdown() {
     meshSiteTick(g_meshWorld, false, "the game is shutting down");
     visorTick(false, "the game is shutting down");
     spreadTick(false, 0.0f, "the game is shutting down");
+    elemScaleTick(false, 0.0f, "the game is shutting down");
     reticleTick(false, "the game is shutting down");
     g_reticleWriteOn.store(false, std::memory_order_relaxed);   // F16: no more centring writes
     {

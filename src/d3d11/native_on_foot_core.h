@@ -182,7 +182,7 @@ constexpr uint32_t kF9ViewRotOff = 0x20, kF9HrcMatrixOff = 0x430;
 // F12: the HUD distance. The second placement matrix sits at +0x480; the default distance is the game's own (0.192 m), and the range is the setting's.
 constexpr uint32_t kHudMatrix2Off = 0x480;
 constexpr float kHudDefaultDistance = 0.192f;
-constexpr float kHudDistanceMin = 0.03f, kHudDistanceMax = 0.40f;
+constexpr float kHudDistanceMin = 0.01f, kHudDistanceMax = 0.40f;
 // F16: the setting's default distance (Sean's tuning), which is not the game's 0.192 above; used only as the setting's fallback.
 constexpr float kHudDistanceSettingDefault = 0.03f;
 // F13: the HUD size (the basis rows only), the head follow's smoothing (ms), and the visor override test (TEMPORARY).
@@ -214,5 +214,10 @@ inline int hudGroupOf(const char* name) {
 }
 constexpr uintptr_t kVisorOverrideRva = 0x5F741B7;   // byte: 1 = the visor override is active (the RE: visorDown = byte[B7] ? byte[B8] : vfunc)
 constexpr uintptr_t kVisorDownRva = 0x5F741B8;       // byte: the forced visor state while the override is active (0 = up)
+// F17: the HUD element scale (the layout routine 0x1AB32F0, branch at 0x1AB3351). The byte: non-zero means the layout scale S is the float below;
+// zero means S = min(1, aspect / 1.7222), the game's own. The float: S itself (1.0 in the file). The user's setting is 0 (the game's own) or 0.30..2.00.
+constexpr uintptr_t kElemScaleModeRva = 0x5F741CA;   // byte
+constexpr uintptr_t kElemScaleRva = 0x5E7A760;       // float
+constexpr float kHudElemScaleMin = 0.30f, kHudElemScaleMax = 2.00f;
 }  // namespace nofoot
 }  // namespace edvr
