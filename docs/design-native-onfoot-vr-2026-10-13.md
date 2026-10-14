@@ -2,8 +2,8 @@
 
 ## Status
 
-- **State:** F0-F15 FLOWN (Epic; F13-F15 flown 10-14, log edvr_gfx_20261014_103132). F16 BUILT
-  (see the journal), NOT FLOWN. Branch `claude/native-onfoot-vr-completion-219ffa`; not pushed.
+- **State:** F0-F16 FLOWN (Epic; F16 flown 10-14, log edvr_gfx_20261014_1209*). F17 BUILT
+  (commit c77e1ff2; see the journal), NOT FLOWN. Branch `claude/native-onfoot-vr-completion-219ffa`; not pushed.
 - **Origin:** a user's handoff. A Cinema-to-HMD swap on disembark gave native
   stereo on foot; the HUD, radar, left panel and inventory were missing.
 - **Build:** Sean's installs hash to the handoff's exe (332841).
@@ -46,16 +46,18 @@
 - **Temporary keys (all go when the arc picks one):** `fix.native_on_foot`, `_method`, `_hud`,
   `_panels`, `_hud_mesh`, `_hud_mesh_world`, `_hud_follow_order`, `_reticle_probe`, `_hide_fp_body`.
   All default off and live. The visor test key `_visor_up` is gone (F16: `_breathable_visor`).
-- **User settings (F16):** `_breathable_visor` (up | game, default up), `_reticle_follow` (aim | head,
-  default aim), the eight `_hud_<left|top|right|centre>_<x|y>` offsets (default 0), and the tuned
-  defaults: distance 0.03, size 1.50 (max 3.00), spread 0.15, smoothing 40 ms.
+- **User settings (F17):** `_breathable_visor` (up | game, default up), `_reticle_follow` (aim | head,
+  default aim; head places the reticle along the head direction), the eight `_hud_<left|top|right|centre>_<x|y>`
+  offsets (default 0), `_hud_element_scale` (0 = the game's own, else 0.30..2.00, default 0), and the tuned
+  defaults: distance 0.03 (min 0.01), size 1.50 (max 3.00), spread 0.15, smoothing 40 ms.
 - **F2 (c884e218):** the gate holds the byte at 0 while the key is on; the native body
   zeroes the local head parts. Log lines and details are in the journal.
 - **Install:** Epic only (Sean: Frontier carries another feature test). `edvr.ini`
   is not touched unless `--ini` says so.
-- **Next:** F16 on Epic: the breathable visor (up holds the RemLok edge lines hidden in breathable
-  air on foot), reticle follows head, and the HUD group offsets. Open: the 3P legs question, the
-  RemLok on-foot overlay identity, the reticle depth.
+- **Next:** F17 on Epic: the reticle on the head (the `follows head (placed along the head direction
+  at d=..m)` line, then whether the dot stays with the head), distance down to 0.01, and the element
+  scale (0 = the game's own; then 1.00 and 1.50). Open: the body capture (F16 was flown in a station
+  only), the 3P legs question, the RemLok on-foot overlay identity.
 
 ## What "finished" means
 
@@ -491,3 +493,34 @@ mode and its context); W3 step 1-2 (dump comparison, offline).
   Read the flight this way: a moved group after a setting change means the re-send took; if the HUD
   does not move, the layout lines show whether the offset reached out[0]/out[1].
   identification is known.
+- **2026-10-14, F16 FLOWN (Epic, log edvr_gfx_20261014_1209*).** The breathable visor works: in a station,
+  Status.json's Flags2 reads 0x00016009 (bit 16 set) and the override holds. The HUD group offsets work.
+  The HUD head-follow works (C_s from the list-B views, applied as M' = M . C). The reticle follow does
+  not. F16 zeroed key 10's translation x and y, but key 10 is in the body/aim camera space, the same space
+  the HUD matrices are in before C is applied, so zeroing x and y only centres the dot on the aim line.
+  Feedback: the HUD at 0.03 is wanted closer still (the minimum is now 0.01); the element size needs its
+  own control (F17). The body capture is still pending: the flight was in a station, not on a surface.
+- **2026-10-14, F17 built (NOT FLOWN; commit c77e1ff2).** Three changes on the native on-foot page.
+  (1) Reticle follows head (key 10 only, fix.native_on_foot_reticle_follow = head): the translation becomes
+  d * row2(C) + row3(C), where d = |t| is the game's own distance, and each basis row (+0x10, +0x20, +0x30)
+  is multiplied by the rotation of C, the smoothed head transform the HUD follows (g_f13Smooth, under
+  g_f9Lock). The game's values are the base. A call that finds our values in place composes from that base
+  again, so nothing compounds whether or not the game recomputes the instance each frame. Without a head
+  transform (the HUD follow is body, or no list-B views yet) the game's values are left alone. Log:
+  `native on foot reticle: follows head (placed along the head direction at d=..m)`, once per switch.
+  (2) fix.native_on_foot_hud_distance minimum 0.03 -> 0.01 (the default stays 0.03).
+  (3) fix.native_on_foot_hud_element_scale (0 = the game's own; 0.30..2.00; a value under 0.30 is read as
+  0.30; F8 slider `HUD element scale (0 = game)` under HUD size). RE, the layout routine 0x1AB32F0: a
+  non-zero byte at EliteDangerous64.exe+0x5F741CA selects the layout scale S = the float at +0x5E7A760
+  (1.0 in the file); zero selects S = min(1, aspect / 1.7222). S multiplies every part's scale and its
+  spread around the centre. While the setting is not 0, native stereo is on foot and the HUD mesh patch is
+  in, the float is written k first and the byte 1 second, and the layout is re-sent through the existing
+  [HRC+0x290] = 0 path (the layout stamp now includes the element scale). It is put back (byte 0, then the
+  float 1.0) when the setting goes to 0, native ends, the session ends, or the game shuts down. Both values
+  must read as the game's own (0, 1.0) or ours, or nothing is written. Log lines: `native on foot hud element
+  scale: <k> (override 0 -> 1)`, `(was <k>)`, `restored to the game's own`, `NOT written -- <why>`, `NOT
+  restored -- <why>`.
+  Read the flight this way: `override 0 -> 1` appears only with the mesh patch on and native on foot. A change
+  of the element scale should move the elements toward the centre and scale them, not only their margins
+  (spread). The layout re-send line prints the element scale it asked for. Unverified: the 0x1AB32F0 branch
+  is from the design notes and was not re-read in this build; the first flight checks it.
