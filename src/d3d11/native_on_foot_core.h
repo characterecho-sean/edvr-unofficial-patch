@@ -124,33 +124,25 @@ inline int hudIssuerIndex(uint64_t vs) {
     return vs == kHudIssuerVs[0] ? 0 : vs == kHudIssuerVs[1] ? 1 : -1;
 }
 
-// ---- F5: three read-only pass probes (TEMPORARY; they go when the arc closes). native_on_foot.cpp holds the hooks. ----
-constexpr size_t kPassCount = 3;
-constexpr size_t kPassPrologueBytes = 32;
-// P1: pass enable. rcx = W. Stolen prefix: push rbp (REX-prefixed, 2 bytes), push rbx, push rsi, push rdi: 5 bytes.
-constexpr uintptr_t kPassEnableRva = 0x2854FA0;
-constexpr size_t kPassEnableStolen = 5;
-constexpr uint8_t kPassEnablePrologue[kPassPrologueBytes] = {
-    0x40, 0x55, 0x53, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48, 0x8B, 0xEC,
-    0x48, 0x83, 0xEC, 0x58, 0x48, 0x8B, 0x41, 0x28, 0x48, 0x8B, 0xF9, 0xC6, 0x45, 0x50, 0x01, 0x66};
-// P2: the +0x2E0 gate. rcx = p (the pass). Stolen prefix: mov [rsp+0x10],rbx: 5 bytes.
-constexpr uintptr_t kPassGateRva = 0x28A4D30;
-constexpr size_t kPassGateStolen = 5;
-constexpr uint8_t kPassGatePrologue[kPassPrologueBytes] = {
-    0x48, 0x89, 0x5C, 0x24, 0x10, 0x48, 0x89, 0x6C, 0x24, 0x18, 0x48, 0x89, 0x74, 0x24, 0x20, 0x57,
-    0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48, 0x81, 0xEC, 0x50, 0x03, 0x00, 0x00, 0x48};
-// P3: creates the PostGUI view nodes. rcx = [p+0x2E0], rdx = p. Stolen prefix: mov [rsp+0x10],rbx: 5 bytes; the call at +0x1D is outside it.
-constexpr uintptr_t kPassNodeRva = 0x28A4B90;
-constexpr size_t kPassNodeStolen = 5;
-constexpr uint8_t kPassNodePrologue[kPassPrologueBytes] = {
-    0x48, 0x89, 0x5C, 0x24, 0x10, 0x48, 0x89, 0x6C, 0x24, 0x18, 0x56, 0x57, 0x41, 0x56, 0x48, 0x83,
-    0xEC, 0x30, 0x48, 0x8B, 0xE9, 0x48, 0x8B, 0xF2, 0xB9, 0x48, 0x00, 0x00, 0x00, 0xE8, 0xDE, 0x59};
-// Field offsets. P1: sub = qword [W+0x28], mode = dword [sub+0x9D4], W+0x34..0x38 read after the call. P2: slot = dword [p+8],
-// q = qword [p+0x2E0], the seven flag bytes at kPassFlagOff, d0 = qword [p+0x2D0]. P3: slot = dword [p+8] before the call,
-// node = qword [view+0x58] after it.
-constexpr uint32_t kPassSubOff = 0x28, kPassModeOff = 0x9D4, kPassWOff = 0x34, kPassSlotOff = 0x8, kPassViewOff = 0x2E0, kPassD0Off = 0x2D0,
-                   kPassNodeOff = 0x58;
-constexpr uint32_t kPassFlagOff[7] = {0x329, 0x32D, 0x32E, 0x32F, 0x330, 0x336, 0x337};
+// ---- F6: two read-only eye-index probes (TEMPORARY; they go when the arc closes). native_on_foot.cpp holds the hooks. ----
+constexpr size_t kEyeCount = 2;
+// E1: the eye-index query. rcx = this, rdx = node; returns eax 0, 1 or 2. Stolen: sub rsp,0x28 (4) + mov rcx,[rcx+0x830] (7) = 11.
+constexpr uintptr_t kEyeQueryRva = 0x2842FD0;
+constexpr size_t kEyeQueryStolen = 11;
+constexpr size_t kEyeQueryPrologueBytes = 25;
+constexpr uint8_t kEyeQueryPrologue[kEyeQueryPrologueBytes] = {
+    0x48, 0x83, 0xEC, 0x28, 0x48, 0x8B, 0x89, 0x30, 0x08, 0x00, 0x00, 0x8B, 0x81, 0x94, 0x36, 0x00,
+    0x00, 0x83, 0xE8, 0x03, 0x83, 0xF8, 0x03, 0x77, 0x31};
+// E2: the stereo leaf predicate (no pdata). rcx = this; returns al. Stolen: mov rdx,[rcx+0x38] (4) + mov eax,[rdx+0x3694] (6) = 10.
+constexpr uintptr_t kStereoPredRva = 0x28540B0;
+constexpr size_t kStereoPredStolen = 10;
+constexpr size_t kStereoPredPrologueBytes = 18;
+constexpr uint8_t kStereoPredPrologue[kStereoPredPrologueBytes] = {
+    0x48, 0x8B, 0x51, 0x38, 0x8B, 0x82, 0x94, 0x36, 0x00, 0x00, 0x83, 0xE8, 0x03, 0x83, 0xF8, 0x03, 0x77, 0x0C};
+// Fields. E1: S = [this+0x830]; mode = dword [S+0x3694]; W = [S+0x2CB8]; slot0 = [W+0x90], slot1 = [W+0x98]; node = [slot+0x48].
+// E2: S = [this+0x38]; mode = dword [S+0x3694]; flag = byte [S+0x2AE0].
+constexpr uint32_t kEyeSceneOff = 0x830, kEyeModeOff = 0x3694, kEyeWOff = 0x2CB8, kEyeSlot0Off = 0x90, kEyeSlot1Off = 0x98,
+                   kEyeNodeOff = 0x48, kStereoSceneOff = 0x38, kStereoFlagOff = 0x2AE0;
 
 }  // namespace nofoot
 }  // namespace edvr

@@ -727,13 +727,13 @@ void avatarCensusLine(uint64_t nowMs) {
     for (uint32_t i = 0; i < n; ++i) logAvatarRow(rows[i]);
 }
 
-// ---- F5: three read-only pass probes (TEMPORARY; they go when the arc closes) ---------------------------------------------------------
-// P1 (+0x2854FA0, pass enable), P2 (+0x28A4D30, the +0x2E0 gate), P3 (+0x28A4B90, creates the PostGUI view nodes). Each reads game memory
-// under SEH, forwards the game's registers to the original, and changes nothing. One relay page and one gate per probe; the identity check,
-// the 32 prologue bytes and the instruction boundary of the stolen prefix are checked before any patch. A read that faults 16 times stops
-// that probe's reads for the session. No game thread writes a line: first sightings are queued and written at the next frame boundary,
-// and the aggregates every 5 s.
-std::atomic_flag g_hudLock = ATOMIC_FLAG_INIT;   // a tiny spinlock: the aggregates, the first-sighting queue and the frame counter
+// ---- F6: two read-only eye-index probes (TEMPORARY; they go when the arc closes) --------------------------------------------------------
+// E1 (+0x2842FD0, the eye-index query; returns 0, 1 or 2) and E2 (+0x28540B0, the stereo leaf predicate; returns al). Each calls the
+// original first, then reads game memory under SEH, and returns the original's result unchanged. One relay page and one gate per probe;
+// the identity check, the prologue bytes and the instruction boundary of the stolen prefix are checked before any patch. Sixteen faults
+// stop a probe's reads for the session. Aggregates are per 5 s window and per state; a key is announced once, when first seen. No game
+// thread writes a line: first sightings are queued and written at the next frame boundary.
+std::atomic_flag g_hudLock = ATOMIC_FLAG_INIT;   // a tiny spinlock: the keys, the window counters and the first-sighting queue
 struct HudLockGuard {
     HudLockGuard() noexcept {
         while (g_hudLock.test_and_set(std::memory_order_acquire)) _mm_pause();
@@ -743,257 +743,183 @@ struct HudLockGuard {
 
 constexpr uint8_t kStateNative = 0, kStateCinema = 1, kStateOther = 2;
 const char* const kStateName[3] = {"native", "cinema", "ship/other"};
-// The state of one call: native stereo on foot, else cinema (on foot, key off), else the rest. Both reads are the setter's own.
-uint8_t passState() noexcept {
+// The state of one call: native stereo on foot, else cinema (on foot, key off), else the rest.
+uint8_t probeState() noexcept {
     if (nativeOnFootActive()) return kStateNative;
     if (journalOnFootKnown() && journalOnFoot()) return kStateCinema;
     return kStateOther;
 }
 
-using PassFn = uint64_t(__fastcall*)(void*, void*, uint64_t, uint64_t);
+using EyeFn = uint64_t(__fastcall*)(void*, void*, uint64_t, uint64_t);
 
 // One probe: its relay page, its gate, the trampoline (the original), and its CodeHook (never deleted, as g_hook).
-struct PassProbe {
+struct EyeProbe {
     uint8_t* relay = nullptr;
     alignas(8) std::atomic<uintptr_t> gate{0};
-    PassFn original = nullptr;
+    EyeFn original = nullptr;
     CodeHook* hook = nullptr;
 };
-PassProbe g_probe[nofoot::kPassCount];
-std::atomic<bool> g_passStop[nofoot::kPassCount]{};
-std::atomic<uint32_t> g_passFaults[nofoot::kPassCount]{};
-bool g_passTried = false;                  // frame thread only
-bool g_passArmed[nofoot::kPassCount] = {};  // frame thread only
-uint64_t g_passWindowMs = 0;               // frame thread only
+EyeProbe g_eyeProbe[nofoot::kEyeCount];
+std::atomic<bool> g_eyeStop[nofoot::kEyeCount]{};
+std::atomic<uint32_t> g_eyeFaults[nofoot::kEyeCount]{};
+std::atomic<uintptr_t> g_eyeBase{0};          // the image base, set before either probe is patched
+bool g_eyeTried = false;                      // frame thread only
+bool g_eyeArmed[nofoot::kEyeCount] = {};      // frame thread only
+uint64_t g_eyeWindowMs = 0;                   // frame thread only
 
-// The aggregates (the window) and the session memory (what has been announced once).
-struct PassEnableAgg {
-    uint64_t calls = 0, modeUnread = 0;
-    uint32_t modes[8] = {};
-    uint8_t nModes = 0;
-    uint8_t w[5] = {};
-    bool wSeen = false;
-};
-struct PassSlotAgg {
-    uint64_t calls = 0, qNonNull = 0, qNull = 0;
-    uint8_t f[7] = {};
-    bool fSeen = false;
-    uint8_t p2d0 = 2;   // 0 null, 1 non-null, 2 not read
-};
-struct PassNodeAgg {
-    uint64_t calls = 0, nodeNonNull = 0;
-};
-// A first sighting, queued by the game's thread and written by the frame thread. kind 1: P1 mode (value = mode; aux bit 0 = w34..38 read,
-// bytes = those five). kind 2: P2 (slot; aux bit 0 = q non-null, bit 1 = flags read, bytes = the seven flag bytes, value = d0 0/1, 2 unread).
-// kind 3: P3 (slot; aux bit 0 = node non-null). kind 4: a slot word outside 0..3 (value = the word).
-struct PassFirst {
-    uint8_t kind = 0, state = 0, slot = 0, aux = 0;
-    uint32_t value = 0;
-    uint8_t bytes[7] = {};
-};
-constexpr size_t kPassRing = 64;
-PassEnableAgg g_p1[3];                      // guarded by g_hudLock
-PassSlotAgg g_p2[3][4];
-PassNodeAgg g_p3[3][4];
-uint32_t g_p1Known[3][16] = {};             // session-wide: the modes first announced, per state
-uint8_t g_p1NKnown[3] = {};
-uint8_t g_p2Seen[3][4] = {};                // session-wide: bit 0 q null seen, bit 1 q non-null seen
-uint8_t g_p3Seen[3][4] = {};                // session-wide: bit 0 node null seen, bit 1 node non-null seen
-bool g_slotOutSeen = false;
-PassFirst g_passRing[kPassRing];            // guarded by g_hudLock
-uint64_t g_passWritten = 0, g_passRead = 0, g_passDropped = 0;
-uint64_t g_passFrames = 0;                  // frame boundaries in the window; guarded by g_hudLock
+constexpr uint32_t kModeUnread = 0xFFFFFFFFu;  // mode not read
+constexpr uint8_t kFlagUnread = 0xFF;          // [S+0x2AE0] not read (and always for E1)
+constexpr uint8_t kClassSlot0 = 0, kClassSlot1 = 1, kClassOther = 2, kClassNone = 3;
+constexpr size_t kEyeKeys = 64;
+constexpr size_t kEyeRing = 32;
 
-void passPushFirstLocked(const PassFirst& f) noexcept {   // g_hudLock held
-    if (g_passWritten - g_passRead >= kPassRing) {
-        ++g_passDropped;
-        return;
-    }
-    g_passRing[g_passWritten % kPassRing] = f;
-    ++g_passWritten;
-}
+// A key: (probe, state, caller RVA, node class, result, mode, flag). `calls` is the session total; `windowCalls` is the window's.
+struct EyeKey {
+    bool used = false;
+    uint8_t hook = 0, state = 0, cls = kClassNone, result = 0, flag = kFlagUnread;
+    uint32_t caller = 0;   // RVA; 0 when the caller is outside the image
+    uint32_t mode = kModeUnread;
+    uint64_t calls = 0, windowCalls = 0;
+};
+EyeKey g_eyeKeys[kEyeKeys];                  // guarded by g_hudLock
+uint64_t g_eyeWinCalls[nofoot::kEyeCount] = {};  // guarded by g_hudLock: calls this window, per probe
+uint64_t g_eyeWinOverflow = 0;               // guarded by g_hudLock: calls with no free key this window
+uint64_t g_eyeFrames = 0;                    // guarded by g_hudLock
 
-void passSlotOutLocked(uint8_t st, uint32_t slot) noexcept {   // g_hudLock held: a slot word outside 0..3, announced once
-    if (g_slotOutSeen) return;
-    g_slotOutSeen = true;
-    PassFirst x;
-    x.kind = 4;
-    x.state = st;
-    x.value = slot;
-    passPushFirstLocked(x);
+// A first sighting, queued by the game's thread and written by the frame thread.
+struct EyeFirst {
+    EyeKey key;
+};
+EyeFirst g_eyeRing[kEyeRing];                // guarded by g_hudLock
+uint64_t g_eyeWritten = 0, g_eyeRead = 0, g_eyeDropped = 0;
+
+uint32_t eyeCallerRva(void* caller) noexcept {
+    const uintptr_t base = g_eyeBase.load(std::memory_order_relaxed);
+    const uintptr_t c = reinterpret_cast<uintptr_t>(caller);
+    if (!base || c < base || c >= base + ecm::kExpectedImageSize) return 0;
+    return static_cast<uint32_t>(c - base);
 }
 
 // A read under SEH. A fault counts against the probe; sixteen stop that probe's reads.
-bool passRead(size_t probe, uintptr_t address, void* out, size_t bytes) noexcept {
+bool eyeRead(size_t probe, uintptr_t address, void* out, size_t bytes) noexcept {
     if (guardedRead(address, out, bytes)) return true;
-    if (g_passFaults[probe].fetch_add(1, std::memory_order_relaxed) + 1 >= 16) g_passStop[probe].store(true, std::memory_order_relaxed);
+    if (g_eyeFaults[probe].fetch_add(1, std::memory_order_relaxed) + 1 >= 16) g_eyeStop[probe].store(true, std::memory_order_relaxed);
     return false;
 }
 
-void passEnableRecord(uint8_t st, bool okMode, uint32_t mode, bool okW, const uint8_t* w34) noexcept {
+// Counts one call under the key (hook, state, caller, class, result, mode, flag). A new key is queued for its first-sighting line.
+void eyeKeyNote(uint8_t hook, uint8_t st, uint32_t caller, uint8_t cls, uint8_t result, uint32_t mode, uint8_t flag) noexcept {
     HudLockGuard lock;
-    PassEnableAgg& a = g_p1[st];
-    ++a.calls;
-    if (okW) {
-        std::memcpy(a.w, w34, 5);
-        a.wSeen = true;
-    }
-    if (!okMode) {
-        ++a.modeUnread;
-        return;
-    }
-    bool inWindow = false;
-    for (uint8_t i = 0; i < a.nModes; ++i) {
-        if (a.modes[i] == mode) inWindow = true;
-    }
-    if (!inWindow && a.nModes < 8) a.modes[a.nModes++] = mode;
-    bool known = false;
-    for (uint8_t i = 0; i < g_p1NKnown[st]; ++i) {
-        if (g_p1Known[st][i] == mode) known = true;
-    }
-    if (known || g_p1NKnown[st] >= 16) return;
-    g_p1Known[st][g_p1NKnown[st]++] = mode;
-    PassFirst f;
-    f.kind = 1;
-    f.state = st;
-    f.value = mode;
-    f.aux = okW ? 1 : 0;
-    if (okW) std::memcpy(f.bytes, w34, 5);
-    passPushFirstLocked(f);
-}
-
-// P1: rcx = W. Reads the mode before the call and W+0x34..0x38 after it; forwards rcx, rdx, r8, r9 and returns rax.
-uint64_t __fastcall passEnableHooked(void* w, void* a2, uint64_t a3, uint64_t a4) {
-    const PassFn original = g_probe[0].original;
-    if (!original) return 0;
-    const uint8_t st = passState();
-    const uintptr_t wa = reinterpret_cast<uintptr_t>(w);
-    const bool live = !g_passStop[0].load(std::memory_order_relaxed);
-    bool okMode = false;
-    uint32_t mode = 0;
-    if (live) {
-        uint64_t sub = 0;
-        if (passRead(0, wa + nofoot::kPassSubOff, &sub, 8) && sub >= 0x10000)
-            okMode = passRead(0, static_cast<uintptr_t>(sub) + nofoot::kPassModeOff, &mode, 4);
-    }
-    const uint64_t rax = original(w, a2, a3, a4);
-    uint8_t w34[5] = {};
-    bool okW = false;
-    if (live && !g_passStop[0].load(std::memory_order_relaxed)) okW = passRead(0, wa + nofoot::kPassWOff, w34, 5);
-    passEnableRecord(st, okMode, mode, okW, w34);
-    return rax;
-}
-
-void passGateRecord(uint8_t st, void* p) noexcept {
-    const uintptr_t pa = reinterpret_cast<uintptr_t>(p);
-    uint32_t slot = 0;
-    const bool okSlot = passRead(1, pa + nofoot::kPassSlotOff, &slot, 4);
-    uint64_t q = 0;
-    const bool okQ = passRead(1, pa + nofoot::kPassViewOff, &q, 8);
-    uint8_t f[7] = {};
-    bool okF = true;
-    for (size_t i = 0; i < 7; ++i) okF = passRead(1, pa + nofoot::kPassFlagOff[i], &f[i], 1) && okF;
-    uint64_t d0 = 0;
-    const bool okD0 = passRead(1, pa + nofoot::kPassD0Off, &d0, 8);
-    if (!okSlot) return;
-    HudLockGuard lock;
-    if (slot >= 4) {
-        passSlotOutLocked(st, slot);
-        return;
-    }
-    PassSlotAgg& a = g_p2[st][slot];
-    ++a.calls;
-    const bool qn = okQ && q != 0;
-    if (okQ) {
-        if (qn) ++a.qNonNull;
-        else ++a.qNull;
-    }
-    if (okF) {
-        std::memcpy(a.f, f, 7);
-        a.fSeen = true;
-    }
-    if (okD0) a.p2d0 = d0 != 0 ? 1 : 0;
-    if (okQ) {
-        const uint8_t bit = qn ? 2 : 1;
-        if (!(g_p2Seen[st][slot] & bit)) {
-            g_p2Seen[st][slot] |= bit;
-            PassFirst x;
-            x.kind = 2;
-            x.state = st;
-            x.slot = static_cast<uint8_t>(slot);
-            x.aux = static_cast<uint8_t>((qn ? 1 : 0) | (okF ? 2 : 0));
-            x.value = okD0 ? (d0 != 0 ? 1u : 0u) : 2u;
-            if (okF) std::memcpy(x.bytes, f, 7);
-            passPushFirstLocked(x);
+    ++g_eyeWinCalls[hook];
+    EyeKey* key = nullptr;
+    for (size_t i = 0; i < kEyeKeys; ++i) {
+        const EyeKey& k = g_eyeKeys[i];
+        if (k.used && k.hook == hook && k.state == st && k.caller == caller && k.cls == cls && k.result == result && k.mode == mode && k.flag == flag) {
+            key = &g_eyeKeys[i];
+            break;
         }
     }
-}
-
-// P2: rcx = p (the pass). Reads its fields before the call, then forwards.
-uint64_t __fastcall passGateHooked(void* p, void* a2, uint64_t a3, uint64_t a4) {
-    const PassFn original = g_probe[1].original;
-    if (!original) return 0;
-    if (!g_passStop[1].load(std::memory_order_relaxed)) passGateRecord(passState(), p);
-    return original(p, a2, a3, a4);
-}
-
-void passNodeRecord(uint8_t st, uint32_t slot, bool okSlot, bool okNode, uint64_t node) noexcept {
-    if (!okSlot) return;
-    HudLockGuard lock;
-    if (slot >= 4) {
-        passSlotOutLocked(st, slot);
-        return;
+    if (!key) {
+        for (size_t i = 0; i < kEyeKeys && !key; ++i) {
+            if (!g_eyeKeys[i].used) key = &g_eyeKeys[i];
+        }
+        if (!key) {
+            ++g_eyeWinOverflow;
+            return;
+        }
+        key->used = true;
+        key->hook = hook;
+        key->state = st;
+        key->caller = caller;
+        key->cls = cls;
+        key->result = result;
+        key->mode = mode;
+        key->flag = flag;
+        if (g_eyeWritten - g_eyeRead < kEyeRing) {
+            g_eyeRing[g_eyeWritten % kEyeRing].key = *key;
+            ++g_eyeWritten;
+        } else {
+            ++g_eyeDropped;
+        }
     }
-    PassNodeAgg& a = g_p3[st][slot];
-    ++a.calls;
-    const bool nn = okNode && node != 0;
-    if (nn) ++a.nodeNonNull;
-    const uint8_t bit = nn ? 2 : 1;
-    if (!(g_p3Seen[st][slot] & bit)) {
-        g_p3Seen[st][slot] |= bit;
-        PassFirst x;
-        x.kind = 3;
-        x.state = st;
-        x.slot = static_cast<uint8_t>(slot);
-        x.aux = nn ? 1 : 0;
-        passPushFirstLocked(x);
-    }
+    ++key->calls;
+    ++key->windowCalls;
 }
 
-// P3: rcx = [p+0x2E0] (the view), rdx = p. The slot is read before the call; the created node (view+0x58) after it.
-uint64_t __fastcall passNodeHooked(void* view, void* p, uint64_t a3, uint64_t a4) {
-    const PassFn original = g_probe[2].original;
+// E1: rcx = this, rdx = node. The original runs first; then the scene, the mode, and the two slot nodes are read.
+void eyeQueryRecord(uint8_t st, void* self, void* node, void* caller, uint64_t rax) noexcept {
+    const uintptr_t sa = reinterpret_cast<uintptr_t>(self);
+    uint64_t scene = 0, w = 0, n0 = 0, n1 = 0;
+    uint32_t mode = kModeUnread;
+    bool okScene = eyeRead(0, sa + nofoot::kEyeSceneOff, &scene, 8) && scene >= 0x10000;
+    if (okScene && !eyeRead(0, static_cast<uintptr_t>(scene) + nofoot::kEyeModeOff, &mode, 4)) mode = kModeUnread;
+    bool okN0 = false, okN1 = false;
+    if (okScene && eyeRead(0, static_cast<uintptr_t>(scene) + nofoot::kEyeWOff, &w, 8) && w >= 0x10000) {
+        uint64_t s0 = 0, s1 = 0;
+        if (eyeRead(0, static_cast<uintptr_t>(w) + nofoot::kEyeSlot0Off, &s0, 8) && s0 >= 0x10000)
+            okN0 = eyeRead(0, static_cast<uintptr_t>(s0) + nofoot::kEyeNodeOff, &n0, 8);
+        if (eyeRead(0, static_cast<uintptr_t>(w) + nofoot::kEyeSlot1Off, &s1, 8) && s1 >= 0x10000)
+            okN1 = eyeRead(0, static_cast<uintptr_t>(s1) + nofoot::kEyeNodeOff, &n1, 8);
+    }
+    const uint64_t nodeV = reinterpret_cast<uint64_t>(node);
+    uint8_t cls = kClassOther;
+    if (okN0 && nodeV == n0) cls = kClassSlot0;
+    else if (okN1 && nodeV == n1) cls = kClassSlot1;
+    eyeKeyNote(0, st, eyeCallerRva(caller), cls, static_cast<uint8_t>(rax & 0xFF), mode, kFlagUnread);
+}
+
+// E2: rcx = this. The original runs first; then the scene, the mode and the flag byte are read.
+void stereoPredRecord(uint8_t st, void* self, void* caller, uint64_t rax) noexcept {
+    const uintptr_t sa = reinterpret_cast<uintptr_t>(self);
+    uint64_t scene = 0;
+    uint32_t mode = kModeUnread;
+    uint8_t flag = kFlagUnread;
+    if (eyeRead(1, sa + nofoot::kStereoSceneOff, &scene, 8) && scene >= 0x10000) {
+        if (!eyeRead(1, static_cast<uintptr_t>(scene) + nofoot::kEyeModeOff, &mode, 4)) mode = kModeUnread;
+        uint8_t f = 0;
+        if (eyeRead(1, static_cast<uintptr_t>(scene) + nofoot::kStereoFlagOff, &f, 1)) flag = f;
+    }
+    eyeKeyNote(1, st, eyeCallerRva(caller), kClassNone, static_cast<uint8_t>(rax & 0xFF), mode, flag);
+}
+
+uint64_t __fastcall eyeQueryHooked(void* self, void* node, uint64_t a3, uint64_t a4) {
+    const EyeFn original = g_eyeProbe[0].original;
     if (!original) return 0;
-    const uint8_t st = passState();
-    const uintptr_t pa = reinterpret_cast<uintptr_t>(p);
-    const bool live = !g_passStop[2].load(std::memory_order_relaxed);
-    uint32_t slot = 0;
-    const bool okSlot = live && passRead(2, pa + nofoot::kPassSlotOff, &slot, 4);
-    const uint64_t rax = original(view, p, a3, a4);
-    uint64_t node = 0;
-    const bool okNode = okSlot && !g_passStop[2].load(std::memory_order_relaxed) &&
-                        passRead(2, reinterpret_cast<uintptr_t>(view) + nofoot::kPassNodeOff, &node, 8);
-    passNodeRecord(st, slot, okSlot, okNode, node);
+    void* caller = _ReturnAddress();
+    const uint8_t st = probeState();
+    const uint64_t rax = original(self, node, a3, a4);
+    if (!g_eyeStop[0].load(std::memory_order_relaxed)) eyeQueryRecord(st, self, node, caller, rax);
     return rax;
 }
 
-// The relay's trampoline and the relay's executable state (CodeHook's Prepare, with the probe as its context).
-bool preparePassRelay(void* trampoline, void* context) noexcept {
-    PassProbe* probe = static_cast<PassProbe*>(context);
+uint64_t __fastcall stereoPredHooked(void* self, void* a2, uint64_t a3, uint64_t a4) {
+    const EyeFn original = g_eyeProbe[1].original;
+    if (!original) return 0;
+    void* caller = _ReturnAddress();
+    const uint8_t st = probeState();
+    const uint64_t rax = original(self, a2, a3, a4);
+    if (!g_eyeStop[1].load(std::memory_order_relaxed)) stereoPredRecord(st, self, caller, rax);
+    return rax;
+}
+
+// The relay's trampoline and its executable state (CodeHook's Prepare, with the probe as its context).
+bool prepareEyeRelay(void* trampoline, void* context) noexcept {
+    EyeProbe* probe = static_cast<EyeProbe*>(context);
     const uintptr_t address = reinterpret_cast<uintptr_t>(trampoline);
     std::memcpy(probe->relay + ecm::kCallbackRelayTrampolineAt, &address, 8);
     DWORD oldProtect = 0;
     if (!VirtualProtect(probe->relay, 4096, PAGE_EXECUTE_READ, &oldProtect) ||
         !FlushInstructionCache(GetCurrentProcess(), probe->relay, ecm::kCallbackRelayBytes))
         return false;
-    probe->original = reinterpret_cast<PassFn>(trampoline);
+    probe->original = reinterpret_cast<EyeFn>(trampoline);
     return true;
 }
 
-struct PassProbeSpec {
+struct EyeProbeSpec {
     const char* name;
     uintptr_t rva;
     const uint8_t* prologue;
+    size_t prologueBytes;
     size_t stolen;
     void* callback;
     const char* label;
@@ -1001,17 +927,17 @@ struct PassProbeSpec {
 
 // Installs probe `i`: the prologue bytes, the stolen length on an instruction boundary, a relay within reach, then CodeHook. Returns false
 // with `whyOut` set, having changed nothing that remains.
-bool installPassProbe(size_t i, const PassProbeSpec& s, uintptr_t base, size_t* stolenOut, std::string* whyOut) {
-    PassProbe& pr = g_probe[i];
+bool installEyeProbe(size_t i, const EyeProbeSpec& s, uintptr_t base, size_t* stolenOut, std::string* whyOut) {
+    EyeProbe& pr = g_eyeProbe[i];
     const uintptr_t target = base + s.rva;
-    if (!bytesMatch(target, s.prologue, nofoot::kPassPrologueBytes)) {
-        *whyOut = "the 32 prologue bytes are not build 332841's";
+    if (!bytesMatch(target, s.prologue, s.prologueBytes)) {
+        *whyOut = "the prologue bytes are not build 332841's";
         return false;
     }
     size_t covered = 0;
     while (covered < s.stolen) {
         size_t rip = 0;
-        const size_t len = codeInstructionLength(reinterpret_cast<const uint8_t*>(target + covered), nofoot::kPassPrologueBytes - covered, &rip);
+        const size_t len = codeInstructionLength(reinterpret_cast<const uint8_t*>(target + covered), s.prologueBytes - covered, &rip);
         if (!len) {
             *whyOut = "a prologue instruction is one the decoder does not recognise";
             return false;
@@ -1029,7 +955,7 @@ bool installPassProbe(size_t i, const PassProbeSpec& s, uintptr_t base, size_t* 
     }
     ecm::buildCallbackRelay(pr.relay, &pr.gate, s.callback);
     pr.hook = new CodeHook();
-    if (!pr.hook->install(reinterpret_cast<void*>(target), pr.relay, nullptr, s.name, &preparePassRelay, &pr)) {
+    if (!pr.hook->install(reinterpret_cast<void*>(target), pr.relay, nullptr, s.name, &prepareEyeRelay, &pr)) {
         const char* why = pr.hook->refusal();
         VirtualFree(pr.relay, 0, MEM_RELEASE);
         pr.relay = nullptr;
@@ -1042,155 +968,126 @@ bool installPassProbe(size_t i, const PassProbeSpec& s, uintptr_t base, size_t* 
 }
 
 // Frame thread, once: the VR profile only, behind the identity check. One line per probe, installed or refused.
-void installPassProbesOnce() {
-    if (g_passTried) return;
-    g_passTried = true;
+void installEyeProbesOnce() {
+    if (g_eyeTried) return;
+    g_eyeTried = true;
     if (!runtimeVrProfile()) {
-        Log::get().note("native on foot pass probes: not installed (the flat profile)");
+        Log::get().note("native on foot eye probes: not installed (the flat profile)");
         return;
     }
     const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     const char* peWhy = nullptr;
     if (!base || !checkIdentity(base, &peWhy)) {
-        Log::get().note("native on foot pass probes: NOT installed -- identity mismatch (%s); the game was not touched.", peWhy ? peWhy : "no module");
+        Log::get().note("native on foot eye probes: NOT installed -- identity mismatch (%s); the game was not touched.", peWhy ? peWhy : "no module");
         return;
     }
-    const PassProbeSpec specs[nofoot::kPassCount] = {
-        {"native-on-foot-pass-enable", nofoot::kPassEnableRva, nofoot::kPassEnablePrologue, nofoot::kPassEnableStolen,
-         reinterpret_cast<void*>(&passEnableHooked), "P1 (pass enable)"},
-        {"native-on-foot-pass-gate", nofoot::kPassGateRva, nofoot::kPassGatePrologue, nofoot::kPassGateStolen,
-         reinterpret_cast<void*>(&passGateHooked), "P2 (the +0x2E0 gate)"},
-        {"native-on-foot-pass-node", nofoot::kPassNodeRva, nofoot::kPassNodePrologue, nofoot::kPassNodeStolen,
-         reinterpret_cast<void*>(&passNodeHooked), "P3 (PostGUI view nodes)"},
+    g_eyeBase.store(base, std::memory_order_relaxed);
+    const EyeProbeSpec specs[nofoot::kEyeCount] = {
+        {"native-on-foot-eye-query", nofoot::kEyeQueryRva, nofoot::kEyeQueryPrologue, nofoot::kEyeQueryPrologueBytes, nofoot::kEyeQueryStolen,
+         reinterpret_cast<void*>(&eyeQueryHooked), "E1 (eye-index query)"},
+        {"native-on-foot-stereo-pred", nofoot::kStereoPredRva, nofoot::kStereoPredPrologue, nofoot::kStereoPredPrologueBytes,
+         nofoot::kStereoPredStolen, reinterpret_cast<void*>(&stereoPredHooked), "E2 (stereo leaf predicate)"},
     };
-    for (size_t i = 0; i < nofoot::kPassCount; ++i) {
-        const PassProbeSpec& s = specs[i];
+    for (size_t i = 0; i < nofoot::kEyeCount; ++i) {
+        const EyeProbeSpec& s = specs[i];
         size_t stolen = 0;
         std::string why;
-        if (installPassProbe(i, s, base, &stolen, &why)) {
-            g_passArmed[i] = true;
-            Log::get().note("native on foot pass probe: installed %s at EliteDangerous64.exe+0x%llX, stolen=%zu bytes, prologue %zu bytes "
+        if (installEyeProbe(i, s, base, &stolen, &why)) {
+            g_eyeArmed[i] = true;
+            Log::get().note("native on foot eye probe: installed %s at EliteDangerous64.exe+0x%llX, stolen=%zu bytes, prologue %zu bytes "
                             "verified, relay at 0x%llX (read only; temporary).",
-                            s.label, static_cast<unsigned long long>(s.rva), stolen, nofoot::kPassPrologueBytes,
-                            static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(g_probe[i].relay)));
+                            s.label, static_cast<unsigned long long>(s.rva), stolen, s.prologueBytes,
+                            static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(g_eyeProbe[i].relay)));
         } else {
-            Log::get().note("native on foot pass probe: %s NOT installed at EliteDangerous64.exe+0x%llX -- %s. The game was not touched by it.",
+            Log::get().note("native on foot eye probe: %s NOT installed at EliteDangerous64.exe+0x%llX -- %s. The game was not touched by it.",
                             s.label, static_cast<unsigned long long>(s.rva), why.c_str());
         }
     }
 }
 
-// The text of a byte, or "-" when it was not read.
-std::string passHex(uint8_t v, bool ok) {
-    if (!ok) return "-";
-    char b[4];
-    std::snprintf(b, sizeof(b), "%02X", static_cast<unsigned>(v));
+// The text of an eye key's caller, class, result, mode and flag.
+std::string eyeCallerText(uint32_t caller) {
+    if (!caller) return "?";
+    char b[24];
+    std::snprintf(b, sizeof(b), "+0x%llX", static_cast<unsigned long long>(caller));
     return b;
 }
-std::string passHexRun(const uint8_t* v, size_t n, bool ok) {
-    if (!ok) return "-";
-    std::string s;
-    for (size_t i = 0; i < n; ++i) s += passHex(v[i], true);
-    return s;
+std::string eyeModeText(uint32_t mode) {
+    if (mode == kModeUnread) return "?";
+    return std::to_string(mode);
+}
+const char* eyeClassText(uint8_t cls) {
+    return cls == kClassSlot0 ? "slot0" : cls == kClassSlot1 ? "slot1" : cls == kClassOther ? "other" : "-";
 }
 
-void passLogFirst(const PassFirst& f) {
-    const char* st = kStateName[f.state < 3 ? f.state : 2];
-    switch (f.kind) {
-        case 1:
-            Log::get().note("native on foot pass enable [%s]: first sighting mode=%u w34..38=%s", st, f.value,
-                            passHexRun(f.bytes, 5, (f.aux & 1) != 0).c_str());
-            break;
-        case 2: {
-            const bool okF = (f.aux & 2) != 0;
-            const uint8_t* b = f.bytes;
-            Log::get().note("native on foot pass slot [%s]: slot=%u first q=%s f329=%s f32D=%s f32E=%s f32F=%s f330=%s f336=%s f337=%s p2D0=%s", st,
-                            static_cast<unsigned>(f.slot), (f.aux & 1) ? "nonnull" : "null", passHex(b[0], okF).c_str(),
-                            passHex(b[1], okF).c_str(), passHex(b[2], okF).c_str(), passHex(b[3], okF).c_str(), passHex(b[4], okF).c_str(),
-                            passHex(b[5], okF).c_str(), passHex(b[6], okF).c_str(), f.value == 1 ? "nonnull" : f.value == 0 ? "null" : "-");
-            break;
+void eyeLogKey(const EyeKey& k, bool first) {
+    const char* st = kStateName[k.state < 3 ? k.state : 2];
+    if (k.hook == 0) {
+        if (first) {
+            Log::get().note("native on foot eye query [%s]: first sighting caller=%s node=%s result=%u mode=%s", st,
+                            eyeCallerText(k.caller).c_str(), eyeClassText(k.cls), static_cast<unsigned>(k.result), eyeModeText(k.mode).c_str());
+        } else {
+            Log::get().note("native on foot eye query [%s]: caller=%s node=%s result=%u mode=%s calls=%llu", st, eyeCallerText(k.caller).c_str(),
+                            eyeClassText(k.cls), static_cast<unsigned>(k.result), eyeModeText(k.mode).c_str(),
+                            static_cast<unsigned long long>(k.windowCalls));
         }
-        case 3:
-            Log::get().note("native on foot pass hudnode [%s]: slot=%u first node_%s", st, static_cast<unsigned>(f.slot),
-                            (f.aux & 1) ? "nonnull" : "null");
-            break;
-        default:
-            Log::get().note("native on foot pass slot: a slot word of %u is outside 0..3 (first seen in state %s)", f.value, st);
-            break;
+    } else {
+        char flag[8];
+        if (k.flag == kFlagUnread) std::snprintf(flag, sizeof(flag), "?");
+        else std::snprintf(flag, sizeof(flag), "%u", static_cast<unsigned>(k.flag));
+        if (first) {
+            Log::get().note("native on foot stereo pred [%s]: first sighting caller=%s result=%u mode=%s flag2AE0=%s", st,
+                            eyeCallerText(k.caller).c_str(), static_cast<unsigned>(k.result), eyeModeText(k.mode).c_str(), flag);
+        } else {
+            Log::get().note("native on foot stereo pred [%s]: caller=%s result=%u mode=%s flag2AE0=%s calls=%llu", st,
+                            eyeCallerText(k.caller).c_str(), static_cast<unsigned>(k.result), eyeModeText(k.mode).c_str(), flag,
+                            static_cast<unsigned long long>(k.windowCalls));
+        }
     }
 }
 
-void passLogWindow(uint8_t st, const PassEnableAgg& a) {
-    std::string modes;
-    for (uint8_t i = 0; i < a.nModes; ++i) {
-        if (!modes.empty()) modes += ',';
-        modes += std::to_string(a.modes[i]);
-    }
-    if (modes.empty()) modes = "-";
-    Log::get().note("native on foot pass enable [%s]: calls=%llu mode=%s w34..38=%s%s", kStateName[st], static_cast<unsigned long long>(a.calls),
-                    modes.c_str(), passHexRun(a.w, 5, a.wSeen).c_str(),
-                    a.modeUnread ? (std::string(" unread=") + std::to_string(a.modeUnread)).c_str() : "");
-}
-
-void passLogSlot(uint8_t st, size_t slot, const PassSlotAgg& a) {
-    const char* d0 = a.p2d0 == 1 ? "nonnull" : a.p2d0 == 0 ? "null" : "-";
-    Log::get().note("native on foot pass slot [%s]: slot=%u calls=%llu q_nonnull=%llu q_null=%llu f329=%s f32D=%s f32E=%s f32F=%s f330=%s "
-                    "f336=%s f337=%s p2D0=%s",
-                    kStateName[st], static_cast<unsigned>(slot), static_cast<unsigned long long>(a.calls),
-                    static_cast<unsigned long long>(a.qNonNull), static_cast<unsigned long long>(a.qNull),
-                    passHex(a.f[0], a.fSeen).c_str(), passHex(a.f[1], a.fSeen).c_str(), passHex(a.f[2], a.fSeen).c_str(),
-                    passHex(a.f[3], a.fSeen).c_str(), passHex(a.f[4], a.fSeen).c_str(), passHex(a.f[5], a.fSeen).c_str(),
-                    passHex(a.f[6], a.fSeen).c_str(), d0);
-}
-
-void passLogNode(uint8_t st, size_t slot, const PassNodeAgg& a) {
-    Log::get().note("native on foot pass hudnode [%s]: slot=%u calls=%llu node_nonnull=%llu", kStateName[st], static_cast<unsigned>(slot),
-                    static_cast<unsigned long long>(a.calls), static_cast<unsigned long long>(a.nodeNonNull));
-}
-
-// Frame thread, every frame: writes the queued first sightings, and every 5 s the window's lines for each state and slot, then resets.
-void passProbeTick(uint64_t nowMs) {
-    if (!g_passArmed[0] && !g_passArmed[1] && !g_passArmed[2]) return;
-    if (g_passWindowMs == 0) g_passWindowMs = nowMs;
-    PassFirst first[kPassRing];
+// Frame thread, every frame: writes the queued first sightings at once, and every 5 s the window's keys (by state), the totals, then resets.
+void eyeProbeTick(uint64_t nowMs) {
+    if (!g_eyeArmed[0] && !g_eyeArmed[1]) return;
+    if (g_eyeWindowMs == 0) g_eyeWindowMs = nowMs;
+    EyeFirst first[kEyeRing];
     size_t nFirst = 0;
-    uint64_t dropped = 0, frames = 0;
+    uint64_t dropped = 0, frames = 0, calls[nofoot::kEyeCount] = {}, overflow = 0;
     bool due = false;
-    PassEnableAgg p1[3];
-    PassSlotAgg p2[3][4];
-    PassNodeAgg p3[3][4];
+    EyeKey snap[kEyeKeys];
+    size_t nSnap = 0;
     {
         HudLockGuard lock;
-        while (g_passRead < g_passWritten && nFirst < kPassRing) first[nFirst++] = g_passRing[(g_passRead++) % kPassRing];
-        dropped = g_passDropped;
-        g_passDropped = 0;
-        ++g_passFrames;
-        due = nowMs - g_passWindowMs >= 5000;
+        while (g_eyeRead < g_eyeWritten && nFirst < kEyeRing) first[nFirst++] = g_eyeRing[(g_eyeRead++) % kEyeRing];
+        dropped = g_eyeDropped;
+        g_eyeDropped = 0;
+        ++g_eyeFrames;
+        due = nowMs - g_eyeWindowMs >= 5000;
         if (due) {
-            for (size_t s = 0; s < 3; ++s) {
-                p1[s] = g_p1[s];
-                g_p1[s] = PassEnableAgg{};
-                for (size_t k = 0; k < 4; ++k) {
-                    p2[s][k] = g_p2[s][k];
-                    g_p2[s][k] = PassSlotAgg{};
-                    p3[s][k] = g_p3[s][k];
-                    g_p3[s][k] = PassNodeAgg{};
-                }
+            for (size_t i = 0; i < kEyeKeys; ++i) {
+                if (g_eyeKeys[i].used && g_eyeKeys[i].windowCalls) snap[nSnap++] = g_eyeKeys[i];
+                g_eyeKeys[i].windowCalls = 0;
             }
-            frames = g_passFrames;
-            g_passFrames = 0;
+            for (size_t p = 0; p < nofoot::kEyeCount; ++p) {
+                calls[p] = g_eyeWinCalls[p];
+                g_eyeWinCalls[p] = 0;
+            }
+            overflow = g_eyeWinOverflow;
+            g_eyeWinOverflow = 0;
+            frames = g_eyeFrames;
+            g_eyeFrames = 0;
         }
     }
-    for (size_t i = 0; i < nFirst; ++i) passLogFirst(first[i]);
-    if (dropped) Log::get().note("native on foot pass: %llu first sighting(s) dropped (the queue of %zu was full)", static_cast<unsigned long long>(dropped), kPassRing);
+    for (size_t i = 0; i < nFirst; ++i) eyeLogKey(first[i].key, true);
+    if (dropped) Log::get().note("native on foot eye: %llu first sighting(s) dropped (the queue of %zu was full)", static_cast<unsigned long long>(dropped), kEyeRing);
     if (!due) return;
-    g_passWindowMs = nowMs;
-    Log::get().note("native on foot pass window: frames=%llu (5 s)", static_cast<unsigned long long>(frames));
-    for (uint8_t s = 0; s < 3; ++s) {
-        passLogWindow(s, p1[s]);
-        for (size_t k = 0; k < 4; ++k) passLogSlot(s, k, p2[s][k]);
-        for (size_t k = 0; k < 4; ++k) passLogNode(s, k, p3[s][k]);
-    }
+    g_eyeWindowMs = nowMs;
+    const double f = frames ? static_cast<double>(frames) : 1.0;
+    Log::get().note("native on foot eye totals: frames=%llu eye_calls=%llu (%.2f per frame) stereo_calls=%llu (%.2f per frame) keys=%zu overflow=%llu",
+                    static_cast<unsigned long long>(frames), static_cast<unsigned long long>(calls[0]), static_cast<double>(calls[0]) / f,
+                    static_cast<unsigned long long>(calls[1]), static_cast<double>(calls[1]) / f, nSnap, static_cast<unsigned long long>(overflow));
+    if (nSnap == 0) Log::get().note("native on foot eye: no calls in the window");
+    for (size_t i = 0; i < nSnap; ++i) eyeLogKey(snap[i], false);
 }
 
 }  // namespace
@@ -1222,7 +1119,7 @@ void nativeOnFootHudCapture(int index, uint64_t vs) {
 void nativeOnFootFrameBoundary(uint32_t frameNo) {
     (void)frameNo;
     if (g_install == InstallState::NotTried) installOnce();
-    installPassProbesOnce();   // F5: the three read-only pass probes (VR profile; once)
+    installEyeProbesOnce();   // F6: the two read-only eye probes (VR profile; once)
     if (g_install == InstallState::Armed) readKey();
     drainEvents();
     if (!g_hudArmedNoted) {
@@ -1253,7 +1150,7 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
     gateLine(now);
     avatarLine(now);
     avatarCensusLine(now);
-    passProbeTick(now);
+    eyeProbeTick(now);
     neckLine(now);
 }
 
