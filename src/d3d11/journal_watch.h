@@ -179,6 +179,14 @@ constexpr bool journalBreathableFromFlags2(uint32_t flags2) {
 }
 bool journalBreathableKnown();
 bool journalBreathable();
+// Built F20 (the on-foot third-person model mode, fix.native_on_foot_body_mode): Status.json Flags2 bit 5 (0x20, AimDownSight). Known whenever
+// Flags2 is in the file, as breathable is. Read beside the breathable flag, from the same sample.
+constexpr uint32_t kStatusFlags2AimDownSight = 1u << 5;
+constexpr bool journalAdsFromFlags2(uint32_t flags2) {
+    return (flags2 & kStatusFlags2AimDownSight) != 0;
+}
+bool journalAdsKnown();
+bool journalAds();
 uint32_t journalFlags2();   // the last Flags2 read (0 when not in the file); for the logs
 
 // How many Status.json samples have been read: lets a caller require a sample

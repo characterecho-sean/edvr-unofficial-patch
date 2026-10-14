@@ -3276,6 +3276,355 @@ void nativeOnFootHudCapture(int index, uint64_t vs) {
     ++g_hudWritten;
 }
 
+// ---- F20 (TEMPORARY): the game's own third-person model mode (fix.native_on_foot_body_mode = game | third) ----------------------------
+// HumanoidModelManager::SetMode (vtable slot 0x30 of the manager at EliteDangerous64.exe+0x5200F90, build 332841) sets the model mode: 0 =
+// first-person models, 1 = third-person models (the first-person avatar hidden, the third-person body and its weapon shown). It does not touch
+// the camera type, so the first-person view, the HUD gate and isFirstPerson stay as they are. Two hooks, both relays (ecm::buildCallbackRelay):
+//   - a detour on SetMode: the game's requests for the local player are recorded and, while the body is wanted as third person, a request for
+//     0 (first-person models) is forwarded as 1, or as 0 while aiming down sights. EDVR's own calls go through the trampoline, never the detour.
+//   - an entry hook on the povCamera handler (EliteDangerous64.exe+0x19B1240, every humanoid, every frame): the original runs first, then the
+//     local player's mode is held at the desired value through the SetMode trampoline.
+// The hook threads never log: they queue events, and the frame boundary writes them.
+namespace {
+constexpr uintptr_t kModeSetRva = 0x1A112B0;                 // HumanoidModelManager::SetMode
+constexpr uintptr_t kModeVtableRva = 0x5200F90;              // the manager's vtable; SetMode is its slot 0x30
+constexpr uintptr_t kModeSetSlotOffset = 0x30;
+constexpr size_t kModeSetPrologueBytes = 22;
+constexpr uint8_t kModeSetPrologue[kModeSetPrologueBytes] = {0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0xD9, 0x39, 0x91,
+                                                            0x30, 0x02, 0x00, 0x00, 0x75, 0x05, 0x45, 0x84, 0xC0, 0x74, 0x1F};
+constexpr uintptr_t kPovRva = 0x19B1240;                     // the povCamera joint handler, entered every frame for every humanoid
+constexpr size_t kPovPrologueBytes = 32;
+constexpr uint8_t kPovPrologue[kPovPrologueBytes] = {0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x85, 0xD2, 0x48, 0x89, 0x74, 0x24, 0x30,
+                                                    0x48, 0x8D, 0xB2, 0xB0, 0x01, 0x00, 0x00, 0xB8, 0xA0, 0x02, 0x00, 0x00, 0x48, 0x0F,
+                                                    0x44, 0xF0, 0x48, 0x8D};
+constexpr uintptr_t kHmmIfaceOff = 0x1B0;                    // rdx + this = the manager pointer (rdx = the receiver)
+constexpr uintptr_t kHmmLocalOff = 0x238;                    // non-zero only for the local player (the first-person avatar)
+constexpr uintptr_t kHmmModeOff = 0x230;                     // the current model mode (dword)
+constexpr uint64_t kModeUnseenFrames = 60;                   // frames the captured local manager may go unseen before it is dropped
+constexpr size_t kModeEvents = 16;
+
+using ModeSetFn = void(__fastcall*)(void*, uint32_t, uint8_t);
+using PovFn = uint64_t(__fastcall*)(void*, void*);
+ModeSetFn g_modeSetOriginal = nullptr;                       // the SetMode trampoline (the original bytes)
+PovFn g_povOriginal = nullptr;                               // the povCamera trampoline
+uint8_t* g_modeSetRelay = nullptr;
+uint8_t* g_povRelay = nullptr;
+alignas(8) std::atomic<uintptr_t> g_modeSetGate{0};          // zero: the relay runs the original
+alignas(8) std::atomic<uintptr_t> g_povGate{0};
+CodeHook* g_modeSetHook = nullptr;                           // never deleted (the same choice as g_hook)
+CodeHook* g_povHook = nullptr;
+bool g_modeInstallTried = false;                             // frame thread
+bool g_modeCfgRead = false;                                  // frame thread
+uint32_t g_modeCfgGen = 0;                                   // frame thread
+bool g_modeThirdLast = false;                                // frame thread: the key as last logged
+std::atomic<bool> g_modeArmed{false};                        // both hooks are live (set last, by the frame thread's install)
+std::atomic<bool> g_modeThird{false};                        // fix.native_on_foot_body_mode is third (frame thread writes)
+std::atomic<bool> g_modeWant{false};                         // third, native stereo on foot, session: the body is held (frame thread writes)
+std::atomic<bool> g_modeAds{false};                          // aiming down sights now (journal Flags2 bit 5; frame thread writes)
+std::atomic<uint32_t> g_modeWhy{0};                          // why the hold ends: 1 key game, 2 native ended, 3 session ended, 4 shutdown
+std::atomic<uintptr_t> g_modeIface{0};                       // the captured local manager (written by the povCamera hook)
+std::atomic<uint64_t> g_modeFrame{0};                        // frame boundaries (frame thread)
+std::atomic<uint64_t> g_modeSeenFrame{0};                    // the frame the captured manager was last seen in
+std::atomic<bool> g_modeOverride{false};                     // the hold is applied (hook threads)
+std::atomic<bool> g_modeGameKnown{false};                    // the game's own mode is known (a request, or read before the first hold)
+std::atomic<uint32_t> g_modeGame{0};                         // the game's own mode (last request, or read before the first hold)
+std::atomic<uint32_t> g_modeLastReq{0xFFFFFFFFu};            // detour: last logged request, forward and thread
+std::atomic<uint32_t> g_modeLastFwd{0xFFFFFFFFu};
+std::atomic<uint32_t> g_modeLastThread{0};
+
+// The events the hooks queue for the frame boundary to log.
+enum class ModeEv : uint8_t { Asked, Set, Restore, Captured, Dropped };
+struct ModeEvent {
+    ModeEv kind = ModeEv::Asked;
+    uint32_t a = 0, b = 0, thread = 0, why = 0;
+    uint64_t iface = 0;
+};
+std::mutex g_modeEvMutex;
+ModeEvent g_modeEv[kModeEvents];                             // guarded by g_modeEvMutex
+size_t g_modeEvN = 0;                                        // guarded by g_modeEvMutex
+uint32_t g_modeEvDropped = 0;                                // guarded by g_modeEvMutex
+
+void modePush(const ModeEvent& e) {
+    std::lock_guard<std::mutex> lock(g_modeEvMutex);
+    if (g_modeEvN < kModeEvents) g_modeEv[g_modeEvN++] = e;
+    else ++g_modeEvDropped;
+}
+
+bool prepareModeSetRelay(void* trampoline, void*) noexcept {
+    const uintptr_t address = reinterpret_cast<uintptr_t>(trampoline);
+    std::memcpy(g_modeSetRelay + ecm::kCallbackRelayTrampolineAt, &address, 8);
+    DWORD oldProtect = 0;
+    if (!VirtualProtect(g_modeSetRelay, 4096, PAGE_EXECUTE_READ, &oldProtect) || !FlushInstructionCache(GetCurrentProcess(), g_modeSetRelay, ecm::kCallbackRelayBytes))
+        return false;
+    g_modeSetOriginal = reinterpret_cast<ModeSetFn>(address);
+    return true;
+}
+bool preparePovRelay(void* trampoline, void*) noexcept {
+    const uintptr_t address = reinterpret_cast<uintptr_t>(trampoline);
+    std::memcpy(g_povRelay + ecm::kCallbackRelayTrampolineAt, &address, 8);
+    DWORD oldProtect = 0;
+    if (!VirtualProtect(g_povRelay, 4096, PAGE_EXECUTE_READ, &oldProtect) || !FlushInstructionCache(GetCurrentProcess(), g_povRelay, ecm::kCallbackRelayBytes))
+        return false;
+    g_povOriginal = reinterpret_cast<PovFn>(address);
+    return true;
+}
+
+// The SetMode detour. Its arguments are the game's: rcx = manager, edx = the requested mode, r8b = force.
+void __fastcall modeSetCallback(void* iface, uint32_t mode, uint8_t force) noexcept {
+    uint32_t forward = mode;
+    const uintptr_t key = reinterpret_cast<uintptr_t>(iface);
+    if (key != 0 && key == g_modeIface.load(std::memory_order_acquire)) {
+        const uint32_t thread = static_cast<uint32_t>(GetCurrentThreadId());
+        if (mode == 0 && g_modeWant.load(std::memory_order_acquire)) forward = g_modeAds.load(std::memory_order_relaxed) ? 0u : 1u;
+        g_modeGame.store(mode, std::memory_order_relaxed);
+        g_modeGameKnown.store(true, std::memory_order_relaxed);
+        if (mode != g_modeLastReq.load(std::memory_order_relaxed) || forward != g_modeLastFwd.load(std::memory_order_relaxed) ||
+            thread != g_modeLastThread.load(std::memory_order_relaxed)) {
+            g_modeLastReq.store(mode, std::memory_order_relaxed);
+            g_modeLastFwd.store(forward, std::memory_order_relaxed);
+            g_modeLastThread.store(thread, std::memory_order_relaxed);
+            ModeEvent e;
+            e.kind = ModeEv::Asked;
+            e.a = mode;
+            e.b = forward;
+            e.thread = thread;
+            modePush(e);
+        }
+    }
+    g_modeSetOriginal(iface, forward, force);
+}
+
+// The per-frame step for the local manager, on the povCamera hook's thread: hold the desired mode, or restore the game's once the hold ends.
+void modeFrameStep(uintptr_t iface) noexcept {
+    const uint32_t thread = static_cast<uint32_t>(GetCurrentThreadId());
+    g_modeSeenFrame.store(g_modeFrame.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    if (g_modeIface.load(std::memory_order_acquire) != iface) {
+        // A different local manager: the old one is not restored (its object may be gone); the hold starts again on this one.
+        g_modeOverride.store(false, std::memory_order_relaxed);
+        g_modeGameKnown.store(false, std::memory_order_relaxed);
+        g_modeLastReq.store(0xFFFFFFFFu, std::memory_order_relaxed);
+        g_modeLastFwd.store(0xFFFFFFFFu, std::memory_order_relaxed);
+        g_modeIface.store(iface, std::memory_order_release);
+        ModeEvent e;
+        e.kind = ModeEv::Captured;
+        e.iface = iface;
+        e.thread = thread;
+        modePush(e);
+    }
+    uint32_t cur = 0;
+    if (!guardedRead(iface + kHmmModeOff, &cur, sizeof(cur))) return;
+    if (g_modeWant.load(std::memory_order_acquire)) {
+        const bool ads = g_modeAds.load(std::memory_order_relaxed);
+        const uint32_t desired = ads ? 0u : 1u;
+        if (!g_modeOverride.load(std::memory_order_relaxed)) {
+            if (!g_modeGameKnown.load(std::memory_order_relaxed)) {
+                g_modeGame.store(cur, std::memory_order_relaxed);   // no request seen yet: the game's mode is what it is now
+                g_modeGameKnown.store(true, std::memory_order_relaxed);
+            }
+            g_modeOverride.store(true, std::memory_order_relaxed);
+        }
+        if (cur != desired) {
+            g_modeSetOriginal(reinterpret_cast<void*>(iface), desired, 1);   // the trampoline: the detour never sees this call
+            ModeEvent e;
+            e.kind = ModeEv::Set;
+            e.a = desired;
+            e.b = ads ? 1u : 0u;
+            e.thread = thread;
+            modePush(e);
+        }
+    } else if (g_modeOverride.load(std::memory_order_relaxed)) {
+        const uint32_t back = g_modeGame.load(std::memory_order_relaxed);
+        g_modeSetOriginal(reinterpret_cast<void*>(iface), back, 1);
+        g_modeOverride.store(false, std::memory_order_relaxed);
+        ModeEvent e;
+        e.kind = ModeEv::Restore;
+        e.a = back;
+        e.why = g_modeWhy.load(std::memory_order_relaxed);
+        e.thread = thread;
+        modePush(e);
+    }
+}
+
+// The povCamera hook. rcx = the event context (unused), rdx = the humanoid (the receiver). The original runs first; its result is returned.
+uint64_t __fastcall povCallback(void* ctx, void* rcv) noexcept {
+    uintptr_t iface = 0;
+    bool local = false;
+    if (rcv && guardedRead(reinterpret_cast<uintptr_t>(rcv) + kHmmIfaceOff, &iface, sizeof(iface)) && iface) {
+        uintptr_t vt = 0, avatar = 0;
+        if (guardedRead(iface, &vt, sizeof(vt)) && vt == g_base + kModeVtableRva && guardedRead(iface + kHmmLocalOff, &avatar, sizeof(avatar)) &&
+            avatar != 0)
+            local = true;
+    }
+    const uint64_t result = g_povOriginal(ctx, rcv);
+    if (local && g_modeArmed.load(std::memory_order_acquire)) modeFrameStep(iface);
+    return result;
+}
+
+void modeRefuse(const char* why) {
+    Log::get().note("native on foot body mode: NOT installed -- %s. The game was not touched; the model mode stays the game's.", why);
+}
+
+// Frame thread, once, when the key first reads third. Identity, the vtable slot and both prologues are checked before anything is patched.
+void installModeHooks() {
+    g_modeInstallTried = true;
+    if (!runtimeVrProfile()) {
+        modeRefuse("the flat profile (the model mode is a VR fix)");
+        return;
+    }
+    const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    if (!base) {
+        modeRefuse("the game module could not be resolved");
+        return;
+    }
+    const char* peWhy = nullptr;
+    if (!checkIdentity(base, &peWhy)) {
+        char b[400];
+        std::snprintf(b, sizeof(b), "identity mismatch (%s)", peWhy ? peWhy : "unknown");
+        modeRefuse(b);
+        return;
+    }
+    uintptr_t slot = 0;
+    if (!guardedRead(base + kModeVtableRva + kModeSetSlotOffset, &slot, sizeof(slot)) || slot != base + kModeSetRva) {
+        modeRefuse("vtable slot 0x30 of the manager at EliteDangerous64.exe+0x5200F90 is not SetMode at +0x1A112B0");
+        return;
+    }
+    if (!bytesMatch(base + kModeSetRva, kModeSetPrologue, kModeSetPrologueBytes)) {
+        modeRefuse("the 22-byte prologue at EliteDangerous64.exe+0x1A112B0 is not build 332841's SetMode");
+        return;
+    }
+    if (!bytesMatch(base + kPovRva, kPovPrologue, kPovPrologueBytes)) {
+        modeRefuse("the 32-byte prologue at EliteDangerous64.exe+0x19B1240 is not build 332841's povCamera handler");
+        return;
+    }
+    g_base = base;
+    g_modeSetRelay = allocateRelay(base + kModeSetRva);
+    g_povRelay = allocateRelay(base + kPovRva);
+    if (!g_modeSetRelay || !g_povRelay) {
+        modeRefuse("no executable memory within two gigabytes of the targets for the relays");
+        return;
+    }
+    ecm::buildCallbackRelay(g_modeSetRelay, &g_modeSetGate, reinterpret_cast<const void*>(&modeSetCallback));
+    ecm::buildCallbackRelay(g_povRelay, &g_povGate, reinterpret_cast<const void*>(&povCallback));
+    g_modeSetHook = new CodeHook();
+    if (!g_modeSetHook->install(reinterpret_cast<void*>(base + kModeSetRva), g_modeSetRelay, nullptr, "native-on-foot-body-mode-set",
+                                &prepareModeSetRelay, nullptr)) {
+        const char* why = g_modeSetHook->refusal()[0] ? g_modeSetHook->refusal() : "CodeHook gave no reason";
+        char b[480];
+        std::snprintf(b, sizeof(b), "CodeHook refused SetMode: %s", why);
+        modeRefuse(b);
+        return;
+    }
+    Log::get().note("native on foot body mode: installed -- SetMode at EliteDangerous64.exe+0x1A112B0 (vtable slot 0x30 of the manager at +0x5200F90), "
+                    "stolen=%zu bytes, prologue %zu bytes verified, relay at 0x%llX (thread %u)",
+                    g_modeSetHook->stolenBytes(), kModeSetPrologueBytes, static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(g_modeSetRelay)),
+                    static_cast<unsigned>(GetCurrentThreadId()));
+    g_povHook = new CodeHook();
+    if (!g_povHook->install(reinterpret_cast<void*>(base + kPovRva), g_povRelay, nullptr, "native-on-foot-body-mode-pov", &preparePovRelay, nullptr)) {
+        // SetMode is patched but its gate is still zero: the detour passes every call through. Nothing is held.
+        const char* why = g_povHook->refusal()[0] ? g_povHook->refusal() : "CodeHook gave no reason";
+        char b[480];
+        std::snprintf(b, sizeof(b), "CodeHook refused the povCamera hook: %s (SetMode passes through; no hold)", why);
+        modeRefuse(b);
+        return;
+    }
+    Log::get().note("native on foot body mode: installed -- the per-frame hook at EliteDangerous64.exe+0x19B1240 (the povCamera handler), "
+                    "stolen=%zu bytes, prologue %zu bytes verified, relay at 0x%llX (thread %u)",
+                    g_povHook->stolenBytes(), kPovPrologueBytes, static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(g_povRelay)),
+                    static_cast<unsigned>(GetCurrentThreadId()));
+    g_modeSetGate.store(1, std::memory_order_seq_cst);
+    g_povGate.store(1, std::memory_order_seq_cst);
+    g_modeArmed.store(true, std::memory_order_release);
+}
+
+const char* modeReasonText(uint32_t why) {
+    switch (why) {
+        case 1: return "fix.native_on_foot_body_mode is game";
+        case 2: return "native stereo on foot ended";
+        case 3: return "the game session ended";
+        case 4: return "the game is shutting down";
+        default: return "unknown";
+    }
+}
+
+// Frame thread, every frame: the key, the install, the wants for the hooks, the drop of a manager that has gone unseen, and the queued lines.
+void bodyModeTick(uint64_t now, bool session) {
+    (void)now;
+    Config& cfg = Config::get();
+    const uint32_t gen = cfg.generation();
+    if (!g_modeCfgRead || gen != g_modeCfgGen) {
+        g_modeCfgRead = true;
+        g_modeCfgGen = gen;
+        const bool third = cfg.getString("fix.native_on_foot_body_mode", "game") == "third";
+        g_modeThird.store(third, std::memory_order_relaxed);
+        if (third != g_modeThirdLast) {
+            Log::get().note("native on foot: fix.native_on_foot_body_mode is %s (temporary)", third ? "third" : "game");
+            g_modeThirdLast = third;
+        }
+    }
+    const bool third = g_modeThird.load(std::memory_order_relaxed);
+    const uint64_t frame = g_modeFrame.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (third && !g_modeInstallTried) installModeHooks();
+    const bool native = nativeOnFootActive();
+    const uint32_t why = !third ? 1u : !native ? 2u : !session ? 3u : 0u;
+    g_modeWhy.store(why, std::memory_order_relaxed);
+    g_modeWant.store(third && native && session && g_modeArmed.load(std::memory_order_acquire), std::memory_order_release);
+    g_modeAds.store(journalAdsKnown() && journalAds(), std::memory_order_relaxed);
+    const uintptr_t cap = g_modeIface.load(std::memory_order_acquire);
+    if (cap != 0 && frame - g_modeSeenFrame.load(std::memory_order_relaxed) > kModeUnseenFrames) {
+        // Not restored: the manager has not been called for 60 frames, so it may be gone.
+        g_modeIface.store(0, std::memory_order_release);
+        g_modeOverride.store(false, std::memory_order_relaxed);
+        g_modeGameKnown.store(false, std::memory_order_relaxed);
+        ModeEvent e;
+        e.kind = ModeEv::Dropped;
+        e.iface = cap;
+        e.thread = static_cast<uint32_t>(GetCurrentThreadId());
+        modePush(e);
+    }
+    // Drain.
+    ModeEvent ev[kModeEvents];
+    size_t n = 0;
+    uint32_t dropped = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_modeEvMutex);
+        n = g_modeEvN;
+        for (size_t i = 0; i < n; ++i) ev[i] = g_modeEv[i];
+        g_modeEvN = 0;
+        dropped = g_modeEvDropped;
+        g_modeEvDropped = 0;
+    }
+    for (size_t i = 0; i < n; ++i) {
+        const ModeEvent& e = ev[i];
+        switch (e.kind) {
+            case ModeEv::Asked:
+                Log::get().note("native on foot body mode: game asked %u (thread %u) -> forwarded %u", e.a, e.thread, e.b);
+                break;
+            case ModeEv::Set:
+                Log::get().note("native on foot body mode: set %u (ADS %u, frame thread %u)", e.a, e.b, e.thread);
+                break;
+            case ModeEv::Restore:
+                Log::get().note("native on foot body mode: restored to %u (%s, frame thread %u)", e.a, modeReasonText(e.why), e.thread);
+                break;
+            case ModeEv::Captured:
+                Log::get().note("native on foot body mode: local third-person humanoid seen at 0x%llX (thread %u)",
+                                static_cast<unsigned long long>(e.iface), e.thread);
+                break;
+            case ModeEv::Dropped:
+                Log::get().note("native on foot body mode: the local humanoid 0x%llX was not seen for %llu frames; dropped without a restore (thread %u)",
+                                static_cast<unsigned long long>(e.iface), static_cast<unsigned long long>(kModeUnseenFrames), e.thread);
+                break;
+        }
+    }
+    if (dropped != 0) Log::get().note("native on foot body mode: %u events dropped (the queue was full)", static_cast<unsigned>(dropped));
+}
+
+// Shutdown: the hold ends at the manager's next call (the restore is the hook's, once).
+void bodyModeShutdown() {
+    g_modeWhy.store(4, std::memory_order_relaxed);
+    g_modeWant.store(false, std::memory_order_release);
+}
+}  // namespace
+
 void nativeOnFootFrameBoundary(uint32_t frameNo) {
     (void)frameNo;
     if (g_install == InstallState::NotTried) installOnce();
@@ -3409,6 +3758,7 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
     // F19 (TEMPORARY): the constant-buffer probe's flag (on foot, native or Explorer Cam) and the drain of its readings.
     g_nativeOnFootBodyProbe.store(g_cbProbeKeyOn.load(std::memory_order_relaxed) && journalOnFootKnown() && journalOnFoot(), std::memory_order_relaxed);
     bodyCbProbeLine();
+    bodyModeTick(now, session);   // F20 (TEMPORARY): the model mode (fix.native_on_foot_body_mode), the hooks' wants and their lines
     bodyCullLine(now);   // F18 (TEMPORARY): the torso cull's 5 s count line (the swap itself is on the draw thread, nativeOnFootBodyCullBegin)
     neckLine(now);
     eyeProbeLine();   // F18 (TEMPORARY): P1's one-a-second line
@@ -3436,6 +3786,7 @@ void nativeOnFootShutdown() {
     explorerCamFpBody(false, "the game is shutting down");
     explorerCamBodyClipTick(GetTickCount64(), false, false, "the game is shutting down");   // F19
     g_nativeOnFootBodyProbe.store(false, std::memory_order_relaxed);                       // F19
+    bodyModeShutdown();                                                                    // F20
 }
 
 // ---- F19 (TEMPORARY): the body's pixel constant buffer 2 (fix.native_on_foot_body_cb_probe) ---------------------------------------------
