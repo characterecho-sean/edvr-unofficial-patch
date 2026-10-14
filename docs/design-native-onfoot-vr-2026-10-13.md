@@ -2,7 +2,7 @@
 
 ## Status
 
-- **State:** F0-F6 FLOWN (Epic; journal). F7 BUILT (read-only census; green), NOT FLOWN.
+- **State:** F0-F7 FLOWN (Epic; journal). F8 BUILT (e9823a26; green), NOT FLOWN.
   Branch `claude/native-onfoot-vr-completion-219ffa`; not pushed.
 - **Origin:** a user's handoff. A Cinema-to-HMD swap on disembark gave native
   stereo on foot; the HUD, radar, left panel and inventory were missing.
@@ -18,9 +18,10 @@
   fade global read -1 (auto) throughout, so nothing had forced the body opaque;
   neck: the stance drop is real, the walk bob is not (pilot); RemLok on foot is a
   different draw (see Ruled out: that identification was wrong).
-- **Key finding:** every static test of the mode treats 3..6 as one class, so the
-  missing HUD is not a mode branch to flip. H1 (leading): the on-foot HUD is
-  screen-space, built for the flat frame; EDVR must place it.
+- **Key finding (F8, corrected):** the game does test the selector mode in {3, 4} at
+  about 50 sites; "all readers treat 3..6 alike" held only for settings+0x3694/0x3698.
+  The HUD is held back by the first-person pass's enable (the requester at 0x2887A15
+  reads the override dword at 0x5E82B48 and sets the FP node's enable byte).
 - **F3 findings (flown):** every cinema HUD draw comes through ONE stack; the path from
   0x2868C30 down is unconditional (static RE: scratchpad re_hudstack). The first-person
   AMC (mode 2) has EVASuit_Arms, EVASuit_Hands and FirstPersonSkeleton; its masks are
@@ -30,19 +31,19 @@
     out; the HUD items are never queued. The data-gate candidates are not the answer.
   - H7 (ruled out, F5): the HUD view nodes are built once at startup in both modes, and the
     only per-mode pass difference, W+0x38, has no reader.
-  - H8 (F6, ruled out as the HUD gate): the stereo predicate and the eye-index query.
-  - H9: the game's "wants cinema on foot" state (T.vt+0xB0) is also what the HUD consults.
-    To be traced statically once T's class is known.
-- **F7 instruments (TEMPORARY; remove after F7):** the request census `native on foot
-  request objects:` (R, T and S18 vtables and six slots; one line per change). E1 and E2
-  are removed (history: 95e491d7). F3's stack and avatar lines stay.
+  - H8 (ruled out, F6): the stereo predicate and the eye-index query.
+  - H10 (F8): the override (1 at 0x5E82B48) brings the first-person HUD node back.
+- **F8 instruments (TEMPORARY, remove after F8):** the override `fix.native_on_foot_hud`
+  (writes EliteDangerous64.exe+0x5E82B48 while native stereo is on foot) and the census
+  `native on foot hud census:`. F7's request census is removed (history 2e5fd9bb).
 - **OPEN, RemLok on foot:** the on-foot visor overlay is not yet identified. It
   needs a skip-probe or a diff census that excludes the tonemap PS
   0x99C21CEB7A699821 (tonemap_admit.h:39).
 - **Ruled out:** the cinema request is always 5 (see the end of this doc).
-- **Temporary keys (both go when the arc picks one):** `fix.native_on_foot`
-  (on/off, default off, VR, F8 Fixes page, live) and `fix.native_on_foot_method`
-  (swap | gate, default gate, live, F8 Fixes page directly under the one above).
+- **Temporary keys (all go when the arc picks one):** `fix.native_on_foot` (on/off,
+  default off, VR, F8 Fixes page, live), `fix.native_on_foot_method` (swap | gate,
+  default gate, live) and `fix.native_on_foot_hud` (on/off, default off, live; F8 row
+  directly under the method).
 - **F2 changes (c884e218):** gate: the setter never substitutes; EDVR holds the byte
   at 0 while the key is on and a game session is live (identity and byte checked
   first). Native body: while native stereo is on foot, the fade global goes -1 to 0
@@ -55,8 +56,9 @@
   parts hidden)` / `off (fade restored -1: <why>)`. The F1 census lines are unchanged.
 - **Install:** Epic only (Sean: Frontier carries another feature test). `edvr.ini`
   is not touched unless `--ini` says so.
-- **Next:** F7 on Epic: key on, method gate, cinema, then on foot. Read the `request
-  objects` line in each state: T's class (T.vt) and T[+0xB0].
+- **Next:** F8 on Epic: key on, method gate, cinema first, then native with
+  `fix.native_on_foot_hud` on. Read the `hud census` lines (fp_on, pg250 per slot) and
+  the override lines.
 
 ## What "finished" means
 
@@ -194,6 +196,9 @@ mode and its context); W3 step 1-2 (dump comparison, offline).
 - ruled out: EDVR's UI layer hides the HUD (H5), because fix.ui_quality was off from 13:25:06 through a native window 13:25:44-13:27:03, and still no HUD.
 - ruled out: the HUD is gated on the stereo leaf predicate 0x28540B0, because it returns 1 in cinema (mode 6) too, from the same callers (F6).
 - ruled out: a per-item eye-index match drops HUD items in stereo, because the eye-index query's only caller runs once per mode change, not per frame (F6).
+- ruled out: T slot +0xB0 is the HUD gate, because it is the counter R+0x780>0 and nothing in the HUD reads it (static).
+- CORRECTION: the game code does test the selector mode in {3, 4} at about 50 sites (the "all readers treat 3..6 alike" claim held only for settings+0x3694/0x3698).
+- CORRECTION: F4's "native serves a superset of cinema's views" is withdrawn (V is an OR of content masks).
 - ruled out: the HUD view node is missing in HMD mode, because 0x28A4B90 built slot 0/1 nodes once at startup and never re-ran across mode switches (F5).
 - ruled out: the cinema flag W+0x38 gates the HUD, because nothing reads it (static, 4 methods).
 - ruled out: the HUD is gated by a per-group enable byte (+0x30), because all 25 group vtables read 1 in cinema and native (F4).
@@ -305,3 +310,19 @@ mode and its context); W3 step 1-2 (dump comparison, offline).
   [R+0x10]; S18 = [R+0x18]; the vtables and six slots of T and S18. Logged on change. The
   reads sit on the frame thread, not inside the setter, so the setter hook is unchanged apart
   from one counter.
+- **2026-10-13, F7 FLOWN (Epic).** The request census (T and S18) did not single out the
+  HUD. An Opus static pass then found the gate. In HMD modes the game disables the render
+  graph node FirstPersonPostGUIViewNode every frame. The chain: the HUD gate test 0x1A6058C
+  in 0x1A60560 (a HumanoidComponent interface, slot +0x30); the handler 0x19B1090 sets the
+  FOV RC+0x16C (-1.0 in HMD); the requester at 0x2887A15 and 0x2887A39 reads the override
+  dword at 0x5E82B48 (-1 auto, sole reader, no writer in the image); 0x28AAE60 then sets the
+  FP node's enable byte [[F+0x30]+0x30] and the PostGUIViewNode collect flag
+  [[F+0x38]+0x250] for slot0 and slot1; the stage loop at 0x6BF91A skips disabled nodes, so
+  the FP lists (FP_WeaponAR, FP_PanelBackground, FP_PanelForeground, FP_HUD) are never drawn.
+  Ruled out: `T slot +0xB0 is the HUD gate, because it is the counter R+0x780>0 and nothing
+  in the HUD reads it (static)`.
+- **2026-10-13, F8 built (e9823a26, NOT FLOWN).** With Sean's approval: the temporary key
+  `fix.native_on_foot_hud` writes 1 to the dword at 0x5E82B48 while native stereo is on foot
+  (identity checked, the value must read -1, four-byte write, refused if not writable), and
+  restores -1 when the key goes off, native ends, the session ends, at shutdown, or on a
+  failed check. A read-only census of the first-person pass state runs alongside it.
