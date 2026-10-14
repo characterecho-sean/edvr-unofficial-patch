@@ -11,7 +11,7 @@ REM
 REM  Needs Visual Studio 2022 C++ and Python. Fetch the pinned loader once with
 REM  python tools\fetch_openxr_loader.py. The build verifies it offline.
 REM
-REM  Usage:  build.bat [--clean] [--jobs N] [--dll-only]
+REM  Usage:  build.bat [--clean] [--jobs N] [--dll-only] [--wait-lock]
 REM
 REM  Once the DLLs are built, the test rigs run concurrently, --jobs at a time
 REM  (default: one per logical core), through tools\run_jobs.py. Each rig is a
@@ -24,9 +24,11 @@ REM  and the self-contained installer.
 REM
 REM  Only one top-level build runs at a time on this machine (tools\
 REM  build_lock.py): a second invocation is refused immediately with a
-REM  message saying to wait, rather than contending with the first one for
-REM  the same CPU cores -- the documented cause of the vtable_test timing
-REM  gate's flakes under load. --rig children run concurrently by design
+REM  message saying to wait, and exits 1, rather than contending with the
+REM  first one for the same CPU cores -- the documented cause of the
+REM  vtable_test timing gate's flakes under load. --wait-lock instead waits
+REM  for the lock to free and takes it in the same step, so no other build
+REM  can take it in between. --rig children run concurrently by design
 REM  under the parent's own lock and are unaffected.
 REM ===========================================================================
 
@@ -46,8 +48,13 @@ if /I "%~1"=="--clean" goto arg_clean
 if /I "%~1"=="--jobs" goto arg_jobs
 if /I "%~1"=="--dll-only" goto arg_dll_only
 if /I "%~1"=="--rig" goto arg_rig
+if /I "%~1"=="--wait-lock" goto arg_wait_lock
 echo [edvr] unknown argument: %~1
 exit /b 1
+:arg_wait_lock
+set "EDVR_WAIT_LOCK=1"
+shift
+goto parse_args
 :arg_clean
 set "DO_CLEAN=1"
 shift
@@ -84,8 +91,15 @@ REM  in this file already does the right thing without any further changes.
 REM ===========================================================================
 if not defined EDVR_BUILD_GUARDED (
     REM SHIFT in parse_args changes %%0; ROOT retains the original script path.
-    python "%ROOT%\tools\build_lock.py" --acquire --note "build.bat %*"
-    if errorlevel 1 exit /b 1
+    REM --wait-lock: the lock is taken in the same step that finds it free.
+    if defined EDVR_WAIT_LOCK (
+        python "%ROOT%\tools\build_lock.py" --acquire --wait --note "build.bat %*"
+    ) else (
+        python "%ROOT%\tools\build_lock.py" --acquire --note "build.bat %*"
+    )
+    REM A refusal must leave through :lock_refused. A literal "exit /b 1" inside
+    REM this block stops the batch but exits 0 under cmd /c (tested 2026-10-14).
+    if errorlevel 1 goto lock_refused
     set "EDVR_BUILD_GUARDED=1"
     call "%ROOT%\build.bat" %*
     set "EDVR_BUILD_RC=!errorlevel!"
@@ -102,6 +116,11 @@ where cl.exe >nul 2>&1
 if errorlevel 1 call :find_vs
 if errorlevel 1 exit /b 1
 goto toolchain_ok
+
+REM Reached only by goto from the lock guard above. The refusal message is
+REM build_lock.py's own; this exit is what carries the failure to the caller.
+:lock_refused
+exit /b 1
 
 :find_vs
 set "VSWHERE=%PROGFILES86%\Microsoft Visual Studio\Installer\vswhere.exe"
