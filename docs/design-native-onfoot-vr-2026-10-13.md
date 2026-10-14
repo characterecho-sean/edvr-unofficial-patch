@@ -2,62 +2,59 @@
 
 ## Status
 
-- **State:** F0-F16 FLOWN (Epic; F16 flown 10-14, log edvr_gfx_20261014_1209*). F17 BUILT
-  (commit c77e1ff2; see the journal), NOT FLOWN. Branch `claude/native-onfoot-vr-completion-219ffa`; not pushed.
+- **State:** F0-F17 FLOWN (Epic; F16 and F17 flown 10-14). **F18 BUILT** (full build green, receipt
+  written; commit and `--dll-only` in the journal), **NOT FLOWN**. Branch `claude/native-onfoot-vr-completion-219ffa`; not pushed.
 - **Origin:** a user's handoff. A Cinema-to-HMD swap on disembark gave native
   stereo on foot; the HUD, radar, left panel and inventory were missing.
-- **Build:** Sean's installs hash to the handoff's exe (332841).
+- **Build:** Sean's installs hash to the handoff's exe (332841). Epic is the install target.
 - **Verified offline:** the setter is vtable 0x52E9608 slot 5 = 0x28723C0. The
   selector is embedded in its owner at +0x60. No direct callers.
 - **Requester gate (build 332841):** in 0x28873C0 the cinema partner mode is kept only
   if `call [rax+0xb0]` returns non-zero AND the byte at EliteDangerous64.exe+0x5E82B3E
-  is non-zero. At 0 the requester falls back to the base HMD mode (0x2887B06 re-reads
-  it), so the game requests HMD itself. The byte is in .data (initial 01), has one reader (0x2887AF9) and no
-  writer. Its neighbours 0x5E82B3C and 0x5E82B3F have other readers: never write them.
-- **F1 results (Epic):** avatar view masks of the local head parts non-zero; the
-  fade global read -1 (auto) throughout, so nothing had forced the body opaque;
-  neck: the stance drop is real, the walk bob is not (pilot); RemLok on foot is a
-  different draw (see Ruled out: that identification was wrong).
-- **Key finding (F8, corrected):** the game does test the selector mode in {3, 4} at
-  about 50 sites; "all readers treat 3..6 alike" held only for settings+0x3694/0x3698.
-  The HUD is held back by the first-person pass's enable (the requester at 0x2887A15
-  reads the override dword at 0x5E82B48 and sets the FP node's enable byte).
-- **F3 findings (flown):** every cinema HUD draw comes through ONE stack; the path from
-  0x2868C30 down is unconditional (static RE: scratchpad re_hudstack). The first-person
-  AMC (mode 2) has EVASuit_Arms, EVASuit_Hands and FirstPersonSkeleton; its masks are
-  0x60BC0000C05E. The 3P body (mode 3) has 0x60BD8000C05E.
+  is non-zero. The byte has one reader and no writer. Never write its neighbours 0x5E82B3C and 0x5E82B3F.
+- **Key findings:** the game tests the selector mode in {3, 4} at about 50 sites (F8); the HUD is held
+  back by the first-person pass's enable (F8, fixed by the override). F3: the first-person AMC (mode 2)
+  has the EVASuit arms, hands and FirstPersonSkeleton; the 3P body (mode 3) has masks 0x60BD8000C05E.
+  F15: hiding the FP body leaves the 3P legs, which is fine. F17: the HUD clip is the canvas edge (stage
+  2008x1206, RTT 4915x2952); a bigger canvas adds no room.
+- **F18 (BUILT, NOT FLOWN):**
+  1. Reticle: `fix.native_on_foot_reticle_follow`. `aim` (default) zeroes key 10's translation x and y
+     (the F16 centring); `head` is F17. The reticle stub is installed whenever native on foot is active.
+  2. Body torso cull test (TEMPORARY, `fix.native_on_foot_body_cull` = game | none | front). The local 3P
+     body is 5 draws: VS 0x9D800F45B12A6AAC / PS 0x194DD6A677084A74 at 13260, 30216, 23784, 7692 indices,
+     and VS 0x7B0DC42D383F694C / PS 0x0DF03E64DF9DBEF1 at 37080; all instance count 1, stencil ref 21 checked
+     (OMGetDepthStencilState, only on a matched draw). The swap is a wrapper in vscreen.cpp around the
+     forwardWithVerdict call (not a verdict), with the game's RS cloned at the other CullMode and put back
+     after the draw. Log: `native on foot body cull: <mode> matched N draws (by index count: ...)` every 5 s.
+  3. HUD room (`fix.native_on_foot_hud_room`, 1.00..2.50): element scale k_eff = k_base / room, mesh size
+     = hud_size x room. k_base is the element-scale setting, or the game's own S ([HRC+0x4C4], cached
+     while the override is off) when the setting is 0; with no S yet, the room is not applied.
+     Log: `native on foot hud room: <r> (element scale <k>, size <s>)`.
+  4. Probe P1 (TEMPORARY, no key; installed while native on foot is active): the avatar visibility job
+     EliteDangerous64.exe+0x3DA2C80, prologue verified (32 bytes, build 332841), steal 5. Once a second,
+     for the local 3P AMC: cam_in_body, head_in_body, cam_minus_head. Assumes the head (avatar-root model
+     space) goes through the AMC's world matrix. Log: `native on foot eye vs body: ...`.
 - **Open hypotheses:**
-  - F4 (flown): every group enable byte reads 1 in cinema and native, and no view drops
-    out; the HUD items are never queued. The data-gate candidates are not the answer.
-  - H7 (ruled out, F5): the HUD view nodes are built once at startup in both modes, and the
-    only per-mode pass difference, W+0x38, has no reader.
-  - H8 (ruled out, F6): the stereo predicate and the eye-index query.
-  - H10 (F8, flown): the override brings the FP node back, but only the reticle shows.
-    F11: the HUD shows head-locked with the creation patch alone (the placement patch is wrong).
-  - F15 (flown): `fix.native_on_foot_hide_fp_body` removes the FP arms; the legs left are the
-    3P body's, which is fine. The F15 hypothesis (3P hidden behind the FP body) is not settled.
-- **F9-F16 instruments (TEMPORARY):** patches `fix.native_on_foot_panels`, `_hud_mesh` and
-  `_hud_mesh_world` (off); probes P1-P3; `_hud_follow_order` (A/B). Flown 10-14 (F13-F15):
-  the HUD follows the head; key 10 is the aim reticle (~90 calls/s, camera-space ~5 m out).
-- **OPEN, RemLok on foot:** the on-foot visor overlay is not yet identified. It
-  needs a skip-probe or a diff census that excludes the tonemap PS
-  0x99C21CEB7A699821 (tonemap_admit.h:39).
+  - H-body: the torso's cull (F18 `front` or `none`) shows whether the 3P torso blocks the view.
+  - H-eye: P1's cam_minus_head sizes an eye offset; the head-in-body assumption is unverified.
+  - H-room: whether the game's own S at [HRC+0x4C4] matches the element scale it lays out (not re-checked).
 - **Ruled out:** the cinema request is always 5 (see the end of this doc).
-- **Temporary keys (all go when the arc picks one):** `fix.native_on_foot`, `_method`, `_hud`,
-  `_panels`, `_hud_mesh`, `_hud_mesh_world`, `_hud_follow_order`, `_reticle_probe`, `_hide_fp_body`.
-  All default off and live. The visor test key `_visor_up` is gone (F16: `_breathable_visor`).
-- **User settings (F17):** `_breathable_visor` (up | game, default up), `_reticle_follow` (aim | head,
-  default aim; head places the reticle along the head direction), the eight `_hud_<left|top|right|centre>_<x|y>`
-  offsets (default 0), `_hud_element_scale` (0 = the game's own, else 0.30..2.00, default 0), and the tuned
-  defaults: distance 0.03 (min 0.01), size 1.50 (max 3.00), spread 0.15, smoothing 40 ms.
-- **F2 (c884e218):** the gate holds the byte at 0 while the key is on; the native body
-  zeroes the local head parts. Log lines and details are in the journal.
-- **Install:** Epic only (Sean: Frontier carries another feature test). `edvr.ini`
-  is not touched unless `--ini` says so.
-- **Next:** F17 on Epic: the reticle on the head (the `follows head (placed along the head direction
-  at d=..m)` line, then whether the dot stays with the head), distance down to 0.01, and the element
-  scale (0 = the game's own; then 1.00 and 1.50). Open: the body capture (F16 was flown in a station
-  only), the 3P legs question, the RemLok on-foot overlay identity.
+- **Temporary keys (all go when the arc picks one):** `fix.native_on_foot`, `_method`, `_hud`, `_panels`,
+  `_hud_mesh`, `_hud_mesh_world`, `_hud_follow_order`, `_reticle_probe`, `_hide_fp_body`, `_body_cull` (F18).
+  All default off or game, and live.
+- **User settings:** `_breathable_visor` (up | game, up), `_reticle_follow` (aim | head, aim), the eight
+  `_hud_<left|top|right|centre>_<x|y>` offsets (0), `_hud_element_scale` (0 = game, else 0.30..2.00),
+  `_hud_room` (1.00..2.50, F18), and the tuned defaults: distance 0.03 (min 0.01), size 1.50 (max 3.00),
+  spread 0.15, smoothing 40 ms.
+- **OPEN, RemLok on foot:** the on-foot visor overlay is not yet identified. It needs a skip-probe or a
+  diff census that excludes the tonemap PS 0x99C21CEB7A699821 (tonemap_admit.h:39).
+- **F2 (c884e218):** the gate holds the byte at 0 while the key is on; the native body zeroes the local
+  head parts. Log lines and details are in the journal.
+- **Install:** Epic only (Sean: Frontier carries another feature test). `edvr.ini` is not touched unless
+  `--ini` says so.
+- **Next:** flight F18 on Epic with `--scope vr`. Check: the reticle in aim (the dot on the aim axis) and
+  head; `body cull ... matched N` with mode `none` or `front` (N > 0 in a third-person view); `hud room`
+  lines and the HUD edge; the P1 line in a station and on foot. Then the body-cull and P1 questions above.
 
 ## What "finished" means
 
@@ -523,4 +520,37 @@ mode and its context); W3 step 1-2 (dump comparison, offline).
   Read the flight this way: `override 0 -> 1` appears only with the mesh patch on and native on foot. A change
   of the element scale should move the elements toward the centre and scale them, not only their margins
   (spread). The layout re-send line prints the element scale it asked for. Unverified: the 0x1AB32F0 branch
-  is from the design notes and was not re-read in this build; the first flight checks it.
+  is from the design notes and was not re-read in this build; the first flight checks it.- **2026-10-14, F17 FLOWN (Epic).** The reticle on the head works (`follows head`
+  line, the dot stays with the head). Sean: aim is the F16 behaviour (key 10's x and y zeroed), so F18 makes
+  aim do that and head stays F17. HUD clip: the clip is the canvas edge (stage 2008x1206, RTT 4915x2952);
+  enlarging the canvas adds no room, so "HUD room" couples the element scale and the mesh size (F18).
+  Body capture: the local third-person body is 5 draws (the keys in F18); the torso is issued every frame and
+  the census has no cull state for these draws. The head
+  position sits in front of the torso: F18 probe P1 reads the camera position the visibility job uses
+  (EliteDangerous64.exe+0x3DA2C80) to size an eye offset.
+- **2026-10-14, F18 built (NOT FLOWN).** Four changes, all on the native on-foot page.
+  (1) Reticle follows aim (default) now zeroes key 10's translation x and y, as F16 did; head is F17. The
+  reticle stub is installed whenever native stereo is on foot. Log: `native on foot reticle: follows aim
+  (key 10 centred on the aim axis: x and y zeroed)`, once per on-foot start.
+  (2) Body torso cull, TEMPORARY `fix.native_on_foot_body_cull` (game | none | front). The local third-person
+  body is five draws (the Status block). Match: DrawIndexedInstanced, one instance, the two shader pairs at
+  their index counts, and stencil ref 21 read with OMGetDepthStencilState only after the hashes and count
+  match (the binding shadow does not track it). The swap is a wrapper around forwardWithVerdict in vscreen.cpp
+  (not a DrawVerdict, so engine velocity sees the same draws); the cloned RS (cached per game RS and mode,
+  16 slots, shutdown release) differs only in CullMode; the game's RS is restored after the draw. Count line
+  every 5 s, zero included: `native on foot body cull: <mode> matched N draws (by index count: 13260=..,
+  30216=.., 23784=.., 7692=.., 37080=..)`.
+  (3) HUD room, `fix.native_on_foot_hud_room` (1.00..2.50, live, F8 slider under HUD element scale). With the
+  element scale at 0 the base is the game's own S read from [HRC+0x4C4] while our override is off (RE, not
+  re-checked), so the room waits until S has been read. k_eff = base / room (clamped to 0.30..2.00); the mesh
+  is multiplied by the room in f13PlaceHud (g_hudRoomEff). Log: `native on foot hud room: <r> (element scale
+  <k>, size <s>)`, on change.
+  (4) Probe P1 (TEMPORARY, no key): the avatar visibility job at EliteDangerous64.exe+0x3DA2C80 (rcx = AMC,
+  rdx = job context). Prologue verified in the exe, 32 bytes, steal 5 (mov [rsp+0x10],rdx). The callback
+  samples the local third-person AMC (explorer_cam's latch, localAmcPointer) once a second before the
+  game runs, reads the camera from [rdx] and the AMC's world matrix (origin +0x30, basis rows 0-2), and takes
+  the head from the neck census through that matrix. The camera and head are then expressed in the AMC's
+  axes. Log: `native on foot eye vs body: cam_in_body=(..) head_in_body=(..) cam_minus_head=(..)`, one line a
+  second while native stereo is on foot. Not checked in this build: the claim that no branch lands in
+  +1..+16 of the entry; the head-through-the-AMC mapping is the assumption it tests.
+  Build: the full build.bat gate passed (the self-tests' injected failures are the expected ERROR lines).
