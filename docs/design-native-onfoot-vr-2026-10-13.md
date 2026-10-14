@@ -2,8 +2,8 @@
 
 ## Status
 
-- **State:** F0-F5 FLOWN (Epic; journal). F6 BUILT (95e491d7, merge c14e845b; green),
-  NOT FLOWN. Branch `claude/native-onfoot-vr-completion-219ffa`; not pushed.
+- **State:** F0-F6 FLOWN (Epic; journal). F7 BUILT (read-only census; green), NOT FLOWN.
+  Branch `claude/native-onfoot-vr-completion-219ffa`; not pushed.
 - **Origin:** a user's handoff. A Cinema-to-HMD swap on disembark gave native
   stereo on foot; the HUD, radar, left panel and inventory were missing.
 - **Build:** Sean's installs hash to the handoff's exe (332841).
@@ -30,12 +30,12 @@
     out; the HUD items are never queued. The data-gate candidates are not the answer.
   - H7 (ruled out, F5): the HUD view nodes are built once at startup in both modes, and the
     only per-mode pass difference, W+0x38, has no reader.
-  - H8: the stereo eye index. A caller of the eye-index query drops mono-tagged HUD items
-    in stereo. E1 and E2 count the callers and the results per state.
-- **F6 instruments (95e491d7 + c14e845b, TEMPORARY; remove after F6):** read-only hooks E1
-  +0x2842FD0 (eye-index query, stolen 11) and E2 +0x28540B0 (stereo predicate, stolen 10);
-  lines `native on foot eye query|stereo pred [state]` and `native on foot eye totals`.
-  F5's pass probes are removed (history: e4f927bb). F3's stack and avatar lines stay.
+  - H8 (F6, ruled out as the HUD gate): the stereo predicate and the eye-index query.
+  - H9: the game's "wants cinema on foot" state (T.vt+0xB0) is also what the HUD consults.
+    To be traced statically once T's class is known.
+- **F7 instruments (TEMPORARY; remove after F7):** the request census `native on foot
+  request objects:` (R, T and S18 vtables and six slots; one line per change). E1 and E2
+  are removed (history: 95e491d7). F3's stack and avatar lines stay.
 - **OPEN, RemLok on foot:** the on-foot visor overlay is not yet identified. It
   needs a skip-probe or a diff census that excludes the tonemap PS
   0x99C21CEB7A699821 (tonemap_admit.h:39).
@@ -55,9 +55,8 @@
   parts hidden)` / `off (fade restored -1: <why>)`. The F1 census lines are unchanged.
 - **Install:** Epic only (Sean: Frontier carries another feature test). `edvr.ini`
   is not touched unless `--ini` says so.
-- **Next:** F6 on Epic: key on, method gate, cinema first, then disembark, walk, open the
-  menu, board. Read `native on foot eye query` and `stereo pred` per state: the caller and
-  the node class, and the totals for the per-frame cost.
+- **Next:** F7 on Epic: key on, method gate, cinema, then on foot. Read the `request
+  objects` line in each state: T's class (T.vt) and T[+0xB0].
 
 ## What "finished" means
 
@@ -193,6 +192,8 @@ mode and its context); W3 step 1-2 (dump comparison, offline).
 
 - ruled out: the HUD is gated on the cinema re-request loop (H4), because under the gate method the game requested HMD itself with no re-requests and still drew no HUD (F2 13:09:43-13:12:23).
 - ruled out: EDVR's UI layer hides the HUD (H5), because fix.ui_quality was off from 13:25:06 through a native window 13:25:44-13:27:03, and still no HUD.
+- ruled out: the HUD is gated on the stereo leaf predicate 0x28540B0, because it returns 1 in cinema (mode 6) too, from the same callers (F6).
+- ruled out: a per-item eye-index match drops HUD items in stereo, because the eye-index query's only caller runs once per mode change, not per frame (F6).
 - ruled out: the HUD view node is missing in HMD mode, because 0x28A4B90 built slot 0/1 nodes once at startup and never re-ran across mode switches (F5).
 - ruled out: the cinema flag W+0x38 gates the HUD, because nothing reads it (static, 4 methods).
 - ruled out: the HUD is gated by a per-group enable byte (+0x30), because all 25 group vtables read 1 in cinema and native (F4).
@@ -294,3 +295,13 @@ mode and its context); W3 step 1-2 (dump comparison, offline).
   al; reads the mode and the flag byte at [S+0x2AE0]). Aggregates per 5 s, per state; a key
   is announced when first seen. The local debug layer is now present, so the debug-layer
   checks are real here (main fixed the isolation check in 3fd97a97).
+- **2026-10-13, F6 FLOWN (Epic, log 20:27, build v0.19.1-175-g05993233).** The stereo leaf
+  predicate 0x28540B0 returns 1 in mode 6 (cinema) as in mode 4, from every caller. The
+  eye-index query 0x2842FD0 has one caller, +0x2840445, which runs once per mode change
+  (slot0=1, slot1=2 in mode 4; slot0=0 in mode 6). Neither gates the HUD per item.
+- **2026-10-13, F7 built (read only, NOT FLOWN).** The E1 and E2 probes are removed
+  (history 95e491d7). A census of the request objects runs on the frame thread after each
+  setter call and every 5 s in a session: owner = [sel+0x58]; R = [owner+0x1188]; T =
+  [R+0x10]; S18 = [R+0x18]; the vtables and six slots of T and S18. Logged on change. The
+  reads sit on the frame thread, not inside the setter, so the setter hook is unchanged apart
+  from one counter.
