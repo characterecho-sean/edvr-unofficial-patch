@@ -30,6 +30,8 @@ using SetterFn = void(__fastcall*)(void*, uint32_t);
 CodeHook* g_hook = nullptr;
 SetterFn g_original = nullptr;                     // the trampoline: the setter as it was
 std::atomic<uintptr_t> g_frozenSelector{0};        // the first selector whose owner points back at it
+std::atomic<bool> g_hudKeyOn{false};               // fix.native_on_foot_hud, as the frame thread last read it (F8)
+bool g_hudKeyLast = false;                         // frame thread only: the hud key as last logged
 std::atomic<bool> g_keyOn{false};                  // fix.native_on_foot, as the frame thread last read it
 std::atomic<bool> g_methodGate{true};              // fix.native_on_foot_method is gate (F2); the setter substitutes only when it is swap
 std::atomic<bool> g_lastForwardedHmd{false};       // the most recent setter call forwarded an HMD mode (3 or 4): the gate method's flag reads it
@@ -146,7 +148,6 @@ void pushEvent(const SetterEvent& ev) {
 // Nothing here waits on the frame thread; the journal and the key are atomic reads.
 void __fastcall setterHooked(void* selectorPtr, uint32_t incoming) {
     if (!g_original) return;   // unreachable: the hook is armed only after the trampoline is set
-    g_setterCalls.fetch_add(1, std::memory_order_relaxed);
     SetterEvent ev;
     ev.tMs = GetTickCount64();
     // The relay reaches this function by a jmp (buildCallbackRelay's `jmp qword ptr [rip+0]`), not a call, so the return address on entry is the game's caller.
@@ -353,6 +354,13 @@ void readKey() {
                         gate ? "the setter never substitutes; one byte at EliteDangerous64.exe+0x5E82B3E is held at 0 while the key is on and a game session is live"
                              : "the setter substitutes an on-foot Cinema request as HMD stereo, as F0 did");
         g_methodLast = gate;
+    }
+    // F8 (TEMPORARY): the first-person HUD override, on or off, live. hudOverrideTick reads the key each frame.
+    const bool hudOn = cfg.getString("fix.native_on_foot_hud", "off") == "on";
+    g_hudKeyOn.store(hudOn, std::memory_order_relaxed);
+    if (first || hudOn != g_hudKeyLast) {
+        Log::get().note("native on foot: fix.native_on_foot_hud is %s", hudOn ? "on" : "off");
+        g_hudKeyLast = hudOn;
     }
 }
 
@@ -729,83 +737,159 @@ void avatarCensusLine(uint64_t nowMs) {
     for (uint32_t i = 0; i < n; ++i) logAvatarRow(rows[i]);
 }
 
-// ---- F7: the render request's objects (read only; TEMPORARY) ----------------------------------------------------------------------
-// On the frame thread, the frame after each setter call (g_setterCalls) and every 5 s while a game session is live: owner = [sel+0x58] for
-// the frozen selector; R = [owner+0x1188]; T = [R+0x10]; S18 = [R+0x18]. For T and S18: the object's vtable as an exe RVA and six of its
-// vtable slots. Nothing is called and nothing is written. The text is logged when it changes, and at the first session frame. (The reads
-// are on the frame thread, not inside the setter.)
-uint64_t g_censusSetterSeen = 0;   // frame thread only
-uint64_t g_censusMs = 0;           // frame thread only
-std::string g_censusLast;          // frame thread only
+// ---- F8: the first-person HUD override (TEMPORARY; approved by Sean 2026-10-13) ----------------------------------------------------
+// While native stereo is on foot, fix.native_on_foot_hud is on, and the identity check passes, the int32 at EliteDangerous64.exe+0x5E82B48
+// is written from -1 (auto) to 1: the first-person HUD's enable input, which the requester at 0x2887A15 reads (the design doc). It is put
+// back to -1 when any of those stops holding, at shutdown, or when a check fails. It is written only while it reads -1, and put back only
+// while it reads our 1; any other value is someone else's and is left alone. The write is four bytes (guardedWriteDword).
+bool g_hudOverrideHeld = false;                 // frame thread only: EDVR holds the override at 1 and owes the game a -1 back
+std::string g_hudRefusalText;              // frame thread only
+bool g_hudRestoreFailedNoted = false;      // frame thread only
 
-// An exe RVA as text: "+0x.." inside the image, "?" outside it, "-" for null.
-std::string censusRva(uint64_t value, uintptr_t base) {
-    if (!value) return "-";
-    if (!base || value < base || value >= base + ecm::kExpectedImageSize) return "?";
-    char b[24];
-    std::snprintf(b, sizeof(b), "+0x%llX", static_cast<unsigned long long>(value - base));
+__declspec(noinline) bool guardedWriteDword(uintptr_t address, int32_t value) noexcept {
+    __try {
+        *reinterpret_cast<volatile int32_t*>(address) = value;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+void refuseHud(const std::string& why) {
+    if (why == g_hudRefusalText) return;   // the same reason: already said
+    g_hudRefusalText = why;
+    Log::get().note("native on foot hud: override EliteDangerous64.exe+0x%llX NOT written -- %s. The game's value is left as it is.",
+                    static_cast<unsigned long long>(nofoot::kHudOverrideRva), why.c_str());
+}
+
+// `want`: the override should be at 1 now. `restoreReason` (a literal) says why it is being put back.
+void hudOverrideTick(bool want, const char* restoreReason) {
+    const uintptr_t address = g_base + nofoot::kHudOverrideRva;
+    if (want) {
+        if (g_hudOverrideHeld || g_install != InstallState::Armed) return;
+        const char* idWhy = nullptr;
+        if (!checkIdentity(g_base, &idWhy)) {
+            refuseHud(std::string("the PE identity check failed (") + idWhy + ")");
+            return;
+        }
+        int32_t current = 0;
+        if (!guardedRead(address, &current, 4)) {
+            refuseHud("the value could not be read");
+            return;
+        }
+        if (current != -1) {
+            char b[128];
+            std::snprintf(b, sizeof(b), "the value reads %d, not -1, so it is someone else's and is left alone", static_cast<int>(current));
+            refuseHud(b);
+            return;
+        }
+        if (!writableByte(address) || !guardedWriteDword(address, 1)) {
+            refuseHud("the value is not writable");
+            return;
+        }
+        g_hudOverrideHeld = true;
+        g_hudRefusalText.clear();
+        Log::get().note("native on foot hud: override EliteDangerous64.exe+0x%llX -1 -> 1", static_cast<unsigned long long>(nofoot::kHudOverrideRva));
+        return;
+    }
+    if (!g_hudOverrideHeld) {
+        g_hudRefusalText.clear();
+        return;
+    }
+    int32_t current = 0;
+    if (!guardedRead(address, &current, 4)) return;   // retried next frame
+    if (current == -1) {
+        g_hudOverrideHeld = false;
+        Log::get().note("native on foot hud: override EliteDangerous64.exe+0x%llX already -1 (restore: %s)",
+                        static_cast<unsigned long long>(nofoot::kHudOverrideRva), restoreReason);
+        return;
+    }
+    if (current != 1) {
+        g_hudOverrideHeld = false;
+        Log::get().note("native on foot hud: override EliteDangerous64.exe+0x%llX reads %d, not our 1, so it is left alone (restore: %s)",
+                        static_cast<unsigned long long>(nofoot::kHudOverrideRva), static_cast<int>(current), restoreReason);
+        return;
+    }
+    if (!writableByte(address) || !guardedWriteDword(address, -1)) {
+        if (!g_hudRestoreFailedNoted) {
+            g_hudRestoreFailedNoted = true;
+            Log::get().note("native on foot hud: override EliteDangerous64.exe+0x%llX could not be put back to -1 (%s); retrying each frame.",
+                            static_cast<unsigned long long>(nofoot::kHudOverrideRva), restoreReason);
+        }
+        return;
+    }
+    g_hudOverrideHeld = false;
+    g_hudRestoreFailedNoted = false;
+    Log::get().note("native on foot hud: override EliteDangerous64.exe+0x%llX 1 -> -1 (restored: %s)",
+                    static_cast<unsigned long long>(nofoot::kHudOverrideRva), restoreReason);
+}
+
+// ---- F8: the first-person HUD census (read only; frame thread) ---------------------------------------------------------------------
+// Each frame during a game session the state is read from the frozen selector; the line is written every 5 s, and at most every 200 ms
+// when the text changes.
+uint64_t g_hudCensusLogMs = 0;             // frame thread only: when the last line was written
+std::string g_hudCensusLast;               // frame thread only
+
+std::string censusByteText(bool ok, uint8_t v) {
+    if (!ok) return "?";
+    char b[8];
+    std::snprintf(b, sizeof(b), "%02X", static_cast<unsigned>(v));
     return b;
 }
 
-constexpr uint32_t kCensusSlots[6] = {0x08, 0x10, 0x18, 0x28, 0x30, 0xB0};
-
-// One object: its pointer, its vtable, and six vtable slots, appended to `out` as " NAME=0x.. NAME.vt=.. NAME[+0x08]=..".
-void censusObject(const char* name, uint64_t ptr, bool ptrOk, uintptr_t base, std::string& out) {
-    char b[48];
-    if (ptrOk) std::snprintf(b, sizeof(b), " %s=%s", name, ptr ? "" : "-");
-    else std::snprintf(b, sizeof(b), " %s=?", name);
-    out += b;
-    if (ptrOk && ptr) {
-        char hex[24];
-        std::snprintf(hex, sizeof(hex), "0x%llX", static_cast<unsigned long long>(ptr));
-        out += hex;
-    }
-    uint64_t vt = 0;
-    const bool okVt = ptrOk && ptr && guardedRead(static_cast<uintptr_t>(ptr), &vt, 8);
-    out += std::string(" ") + name + ".vt=" + (okVt ? censusRva(vt, base) : (ptrOk && !ptr ? std::string("-") : std::string("?")));
-    for (uint32_t off : kCensusSlots) {
-        std::string v = "-";
-        if (okVt && vt) {
-            uint64_t fn = 0;
-            v = guardedRead(static_cast<uintptr_t>(vt) + off, &fn, 8) ? censusRva(fn, base) : "?";
-        } else if (!okVt && ptrOk && ptr) {
-            v = "?";
-        }
-        char lab[32];
-        std::snprintf(lab, sizeof(lab), " %s[+0x%02X]=", name, static_cast<unsigned>(off));
-        out += lab;
-        out += v;
-    }
+// One slot (0 or 1) of the request's pass list: F70, fp_on and pg250.
+std::string censusSlotText(const char* label, bool okW, uintptr_t slotAddr) {
+    uint64_t slot = 0, F = 0, node = 0, pg = 0;
+    uint8_t f70 = 0, fpOn = 0, pg250 = 0;
+    const bool okSlot = okW && guardedRead(slotAddr, &slot, 8) && slot;
+    const bool okF = okSlot && guardedRead(static_cast<uintptr_t>(slot) + nofoot::kCensusPassOff, &F, 8) && F;
+    const bool okF70 = okF && guardedRead(static_cast<uintptr_t>(F) + nofoot::kCensusF70Off, &f70, 1);
+    const bool okNode = okF && guardedRead(static_cast<uintptr_t>(F) + nofoot::kCensusNodeOff, &node, 8) && node;
+    const bool okFpOn = okNode && guardedRead(static_cast<uintptr_t>(node) + nofoot::kCensusNodeOnOff, &fpOn, 1);
+    const bool okPg = okF && guardedRead(static_cast<uintptr_t>(F) + nofoot::kCensusPgOff, &pg, 8) && pg;
+    const bool okPg250 = okPg && guardedRead(static_cast<uintptr_t>(pg) + nofoot::kCensusPg250Off, &pg250, 1);
+    return std::string(" ") + label + " F70=" + censusByteText(okF70, f70) + " fp_on=" + censusByteText(okFpOn, fpOn) +
+           " pg250=" + censusByteText(okPg250, pg250);
 }
 
-void requestCensusTick(uint64_t nowMs) {
-    if (!journalGameplay()) return;
-    const uint64_t calls = g_setterCalls.load(std::memory_order_relaxed);
-    const bool changed = calls != g_censusSetterSeen;
-    if (!changed && g_censusMs != 0 && nowMs - g_censusMs < 5000) return;
-    g_censusSetterSeen = calls;
-    g_censusMs = nowMs;
+void hudCensusTick(uint64_t nowMs, bool session) {
+    if (!session) return;
     const uint64_t sel = g_frozenSelector.load(std::memory_order_acquire);
-    const uintptr_t base = g_base;
-    std::string text = "native on foot request objects:";
+    std::string text = "native on foot hud census:";
     if (!sel) {
         text += " no selector frozen yet";
     } else {
-        uint64_t owner = 0, R = 0, T = 0, S = 0;
+        uint64_t owner = 0, settings = 0, rc = 0, w = 0;
         const bool okO = guardedRead(static_cast<uintptr_t>(sel) + nofoot::kCensusOwnerOff, &owner, 8) && owner;
-        const bool okR = okO && guardedRead(static_cast<uintptr_t>(owner) + nofoot::kCensusRequestOff, &R, 8) && R;
-        const bool okT = okR && guardedRead(static_cast<uintptr_t>(R) + nofoot::kCensusTOff, &T, 8);
-        const bool okS = okR && guardedRead(static_cast<uintptr_t>(R) + nofoot::kCensusSOff, &S, 8);
-        char rb[40];
-        if (!okO) std::snprintf(rb, sizeof(rb), " R=?");
-        else if (!okR) std::snprintf(rb, sizeof(rb), " R=?");
-        else std::snprintf(rb, sizeof(rb), " R=0x%llX", static_cast<unsigned long long>(R));
-        text += rb;
-        censusObject("T", T, okT, base, text);
-        censusObject("S18", S, okS, base, text);
+        const bool okS = okO && guardedRead(static_cast<uintptr_t>(owner) + nofoot::kCensusSettingsOff, &settings, 8) && settings;
+        const bool okRc = okS && guardedRead(static_cast<uintptr_t>(settings) + nofoot::kCensusRcOff, &rc, 8) && rc;
+        float fov = 0.0f;
+        const bool okFov = okRc && guardedRead(static_cast<uintptr_t>(rc) + nofoot::kCensusFovOff, &fov, 4);
+        uint32_t mode = 0;
+        const bool okMode = okS && guardedRead(static_cast<uintptr_t>(settings) + nofoot::kCensusModeOff, &mode, 4);
+        uint32_t selMode = 0;
+        const bool okSel = guardedRead(static_cast<uintptr_t>(sel) + nofoot::kCensusSelModeOff, &selMode, 4);
+        int32_t ovr = 0;
+        const bool okOvr = guardedRead(g_base + nofoot::kHudOverrideRva, &ovr, 4);
+        const bool okW = okS && guardedRead(static_cast<uintptr_t>(settings) + nofoot::kCensusWOff, &w, 8) && w;
+        char fovB[24], modeB[16], selB[16], ovrB[16];
+        if (okFov) std::snprintf(fovB, sizeof(fovB), "%.3f", static_cast<double>(fov));
+        else std::snprintf(fovB, sizeof(fovB), "?");
+        if (okMode) std::snprintf(modeB, sizeof(modeB), "%u", static_cast<unsigned>(mode));
+        else std::snprintf(modeB, sizeof(modeB), "?");
+        if (okSel) std::snprintf(selB, sizeof(selB), "%u", static_cast<unsigned>(selMode));
+        else std::snprintf(selB, sizeof(selB), "?");
+        if (okOvr) std::snprintf(ovrB, sizeof(ovrB), "%d", static_cast<int>(ovr));
+        else std::snprintf(ovrB, sizeof(ovrB), "?");
+        text += std::string(" fov=") + fovB + " mode=" + modeB + " sel=" + selB + " ovr=" + ovrB;
+        text += censusSlotText("slot0", okW, static_cast<uintptr_t>(w) + nofoot::kCensusSlotA);
+        text += censusSlotText("slot1", okW, static_cast<uintptr_t>(w) + nofoot::kCensusSlotB);
     }
-    if (text != g_censusLast) {
-        g_censusLast = text;
+    const bool due5 = g_hudCensusLogMs == 0 || nowMs - g_hudCensusLogMs >= 5000;
+    const bool changedNow = text != g_hudCensusLast && (g_hudCensusLogMs == 0 || nowMs - g_hudCensusLogMs >= 200);
+    if (due5 || changedNow) {
+        g_hudCensusLast = text;
+        g_hudCensusLogMs = nowMs;
         Log::get().note("%s", text.c_str());
     }
 }
@@ -863,18 +947,23 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
     g_methodWasGate = gate;
     const char* byteWhy = !keyOn ? "fix.native_on_foot is off" : !gate ? "fix.native_on_foot_method is swap" : "the game session ended";
     gateByteTick(keyOn && gate && session, byteWhy);
+    // F8 (TEMPORARY): the first-person HUD override, while native stereo is on foot and the key is on (hudOverrideTick restores otherwise).
+    const bool hudKeyOn = g_hudKeyOn.load(std::memory_order_relaxed);
+    const char* hudWhy = !hudKeyOn ? "fix.native_on_foot_hud is off" : !nativeOnFootActive() ? "native stereo on foot ended" : "the game session ended";
+    hudOverrideTick(hudKeyOn && nativeOnFootActive() && session, hudWhy);
     // The body (F2): Explorer Cam's fade and head-part code runs while native stereo is on foot. Its head hooks are wanted from launch while the key is on.
     const char* bodyWhy = !keyOn ? "fix.native_on_foot is off" : !session ? "the game session ended" : "native stereo ended (boarded or seated, or the game asked for its own mode)";
     explorerCamNativeBody(keyOn, nativeOnFootActive(), bodyWhy);
     gateLine(now);
     avatarLine(now);
     avatarCensusLine(now);
-    requestCensusTick(now);
+    hudCensusTick(now, session);
     neckLine(now);
 }
 
 void nativeOnFootShutdown() {
     gateByteTick(false, "the game is shutting down");
+    hudOverrideTick(false, "the game is shutting down");
 }
 
 }  // namespace edvr
