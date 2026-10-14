@@ -2,7 +2,7 @@
 
 ## Status
 
-- **State:** F0-F7 FLOWN (Epic; journal). F8 BUILT (e9823a26; green), NOT FLOWN.
+- **State:** F0-F8 FLOWN (Epic; journal). F9 BUILT (b1ba2714; green), NOT FLOWN.
   Branch `claude/native-onfoot-vr-completion-219ffa`; not pushed.
 - **Origin:** a user's handoff. A Cinema-to-HMD swap on disembark gave native
   stereo on foot; the HUD, radar, left panel and inventory were missing.
@@ -32,33 +32,31 @@
   - H7 (ruled out, F5): the HUD view nodes are built once at startup in both modes, and the
     only per-mode pass difference, W+0x38, has no reader.
   - H8 (ruled out, F6): the stereo predicate and the eye-index query.
-  - H10 (F8): the override (1 at 0x5E82B48) brings the first-person HUD node back.
-- **F8 instruments (TEMPORARY, remove after F8):** the override `fix.native_on_foot_hud`
-  (writes EliteDangerous64.exe+0x5E82B48 while native stereo is on foot) and the census
-  `native on foot hud census:`. F7's request census is removed (history 2e5fd9bb).
+  - H10 (F8, flown): the override brings the FP node back, but only the reticle shows.
+    Next: the panels gate (0x19B1587) and the HRC mesh placement (0x1A36453), at F9.
+- **F9 instruments (TEMPORARY, remove after F9):** patches `fix.native_on_foot_panels`
+  (76 73 -> 90 90 at +0x19B1587) and `fix.native_on_foot_hud_mesh` (74 -> EB at +0x1A36453);
+  probes P1, P2, P3 (`native on foot panel submit|hrc|hrc submit`). F8's override and census
+  stay until F9 closes.
 - **OPEN, RemLok on foot:** the on-foot visor overlay is not yet identified. It
   needs a skip-probe or a diff census that excludes the tonemap PS
   0x99C21CEB7A699821 (tonemap_admit.h:39).
 - **Ruled out:** the cinema request is always 5 (see the end of this doc).
-- **Temporary keys (all go when the arc picks one):** `fix.native_on_foot` (on/off,
-  default off, VR, F8 Fixes page, live), `fix.native_on_foot_method` (swap | gate,
-  default gate, live) and `fix.native_on_foot_hud` (on/off, default off, live; F8 row
-  directly under the method).
+- **Temporary keys (all go when the arc picks one):** `fix.native_on_foot` (F8 Fixes
+  page), `fix.native_on_foot_method` (swap | gate), `fix.native_on_foot_hud` (F8 row under
+  the method), `fix.native_on_foot_panels` and `fix.native_on_foot_hud_mesh` (F9 rows under
+  the hud row). All are default off and live.
 - **F2 changes (c884e218):** gate: the setter never substitutes; EDVR holds the byte
   at 0 while the key is on and a game session is live (identity and byte checked
   first). Native body: while native stereo is on foot, the fade global goes -1 to 0
   and the local head parts are zeroed, through Explorer Cam's code and its own
   guard. RemLok: unchanged from 0a99c094 (the on-foot matcher was removed).
-- **F2 log lines:** `native on foot: fix.native_on_foot_method is gate|swap`;
-  `native on foot: gate byte EliteDangerous64.exe+0x5E82B3E 1 -> 0 (method gate)`,
-  `0 -> 1 (restored: <why>)`, or `NOT written -- <why>`; setter lines read
-  `reason=method_gate` under gate; `native on foot body: on (fade mode -1 -> 0, head
-  parts hidden)` / `off (fade restored -1: <why>)`. The F1 census lines are unchanged.
+- **Log lines:** the F2 gate and body lines and the F8 override and census lines are in
+  the journal; the F1 census lines are unchanged.
 - **Install:** Epic only (Sean: Frontier carries another feature test). `edvr.ini`
   is not touched unless `--ini` says so.
-- **Next:** F8 on Epic: key on, method gate, cinema first, then native with
-  `fix.native_on_foot_hud` on. Read the `hud census` lines (fp_on, pg250 per slot) and
-  the override lines.
+- **Next:** F9 on Epic, one key at a time in native on foot with the hud key on: panels,
+  then mesh. Read the patch lines, then the `hrc` and `panel submit` lines per state.
 
 ## What "finished" means
 
@@ -326,3 +324,15 @@ mode and its context); W3 step 1-2 (dump comparison, offline).
   (identity checked, the value must read -1, four-byte write, refused if not writable), and
   restores -1 when the key goes off, native ends, the session ends, at shutdown, or on a
   failed check. A read-only census of the first-person pass state runs alongside it.
+- **2026-10-14, F8 FLOWN (Epic).** The override (1 at 0x5E82B48) brings the first-person
+  HUD node back on both slots. Only the reticle appears, and it moves opposite to the head,
+  so it is anchored to the aim. Opus follow-up findings: the FOV value only overrides the
+  projection (no skip); the panel gate is 0x19B1587, in 0x19B14E0 (HumanoidPanelComponent);
+  the HRC camera-space placement branch is 0x1A36453, and its data byte 0x5E7A752 must NOT be
+  written; the reticle path 0x1A14D80 has explicit HMD handling.
+- **2026-10-14, F9 built (b1ba2714, NOT FLOWN).** Two code patches behind temporary keys,
+  applied only while native stereo is on foot and the override is held, each verified byte
+  for byte before the write and restored to its exact original bytes: panels 76 73 -> 90 90
+  at +0x19B1587; mesh 74 -> EB (the first byte) at +0x1A36453. Read-only probes: P1 panel
+  submit (by caller), P2 HRC submit (the three mesh instances, dep and its vtable), P3 the
+  per-instance submit for those three instances (view id, camera position).
