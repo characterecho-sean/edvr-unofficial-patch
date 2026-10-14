@@ -2,7 +2,7 @@
 
 ## Status
 
-- **State:** F0-F8 FLOWN (Epic; journal). F9 BUILT (b1ba2714; green), NOT FLOWN.
+- **State:** F0-F9 FLOWN (Epic; journal). F10 BUILT (20a57e54; green), NOT FLOWN.
   Branch `claude/native-onfoot-vr-completion-219ffa`; not pushed.
 - **Origin:** a user's handoff. A Cinema-to-HMD swap on disembark gave native
   stereo on foot; the HUD, radar, left panel and inventory were missing.
@@ -33,11 +33,11 @@
     only per-mode pass difference, W+0x38, has no reader.
   - H8 (ruled out, F6): the stereo predicate and the eye-index query.
   - H10 (F8, flown): the override brings the FP node back, but only the reticle shows.
-    Next: the panels gate (0x19B1587) and the HRC mesh placement (0x1A36453), at F9.
-- **F9 instruments (TEMPORARY, remove after F9):** patches `fix.native_on_foot_panels`
-  (76 73 -> 90 90 at +0x19B1587) and `fix.native_on_foot_hud_mesh` (74 -> EB at +0x1A36453);
-  probes P1, P2, P3 (`native on foot panel submit|hrc|hrc submit`). F8's override and census
-  stay until F9 closes.
+    F9: the panels show with patch A. The HRC instances are created only past the gate at 0x1A149A8 (F10).
+- **F9-F10 instruments (TEMPORARY, remove after F10):** patches `fix.native_on_foot_panels`
+  (76 73 -> 90 90 at +0x19B1587) and `fix.native_on_foot_hud_mesh` (74 -> EB at +0x1A36453
+  and 80 -> 78 at +0x1A149A8, all or nothing); probes P1, P2, P3. F8's override and census
+  stay until F10 closes.
 - **OPEN, RemLok on foot:** the on-foot visor overlay is not yet identified. It
   needs a skip-probe or a diff census that excludes the tonemap PS
   0x99C21CEB7A699821 (tonemap_admit.h:39).
@@ -55,8 +55,8 @@
   the journal; the F1 census lines are unchanged.
 - **Install:** Epic only (Sean: Frontier carries another feature test). `edvr.ini`
   is not touched unless `--ini` says so.
-- **Next:** F9 on Epic, one key at a time in native on foot with the hud key on: panels,
-  then mesh. Read the patch lines, then the `hrc` and `panel submit` lines per state.
+- **Next:** F10 on Epic: the hud key, the panels key and the mesh key on, in native on
+  foot. Read the mesh unit line, then the `hrc` lines (inst non-zero, placement).
 
 ## What "finished" means
 
@@ -106,6 +106,11 @@ From the code map, these key on "on foot" and assume a mono panel:
 `transition_flash_eye_base.cpp:285-315`. Each needs a "native stereo on foot"
 branch that behaves like the cockpit. The F2 skin join is NOT coupled to
 Explorer Cam (`engine_velocity.cpp:2496-2502`); it stays.
+
+RemLok, F9 (2026-10-14): in native stereo the RemLok lines are ALWAYS drawn, even in a
+breathable station. Planned: identify the overlay draw with census_skip, excluding the
+tonemap PS, then hide it when Status.json says the atmosphere is breathable (verify the
+Flags2 bit), and show it outside. The helmet-state handling may be another cinema-only path.
 
 RemLok (F0 log, 10:50-10:54): in native stereo on foot the helmet lines show
 the replicated nasal-line bug that the cockpit fix solved (`fix.remlok_lines =
@@ -336,3 +341,18 @@ mode and its context); W3 step 1-2 (dump comparison, offline).
   at +0x19B1587; mesh 74 -> EB (the first byte) at +0x1A36453. Read-only probes: P1 panel
   submit (by caller), P2 HRC submit (the three mesh instances, dep and its vtable), P3 the
   per-instance submit for those three instances (view id, camera position).
+- **2026-10-14, F9 FLOWN (Epic).** The panels are visible with patch A (76 73 -> 90 90
+  at +0x19B1587). The HUD mesh patch alone did nothing. P2 showed the HRC instances
+  ([HRC+0x418/0x420/0x428]) at 0 in native; in a cinema check they were created about 10 ms
+  after g291 went to 1.
+- **2026-10-14, Opus gate finding (F9).** 0x1A14970 calls `call qword ptr [rax+0x80]` on
+  dep = [HRC+0x1D0] (vtable slot 0x1A8D190: HUD visible AND [dep+0x380] == 0 AND the selector
+  mode is not 3 or 4; `jbe` at 0x1A8D1CE returns 0 in modes 3 and 4). Then `je 0x1A14D4E`
+  at 0x1A149AE skips both the creation and the submit. Site I1 is 0x1A149A8, 80 -> 78.
+  Expected placement: like the reticle, about 0.19 m from the aim camera. Later placement
+  could rewrite [HRC+0x430..0x46F] and [+0x480..0x4BF] at the 0x1A14970 entry, or use quad
+  layers. The panel sizing is likely the generic GUI-panel path that ui_quality already
+  patches (UNVERIFIED; test UI quality 125).
+- **2026-10-14, F10 built (20a57e54, NOT FLOWN).** The mesh unit patches both sites, all or
+  nothing: 0x1A36453 74 -> EB and 0x1A149A8 80 -> 78, verified together before either write,
+  and restored together only while both still read as this unit left them.
