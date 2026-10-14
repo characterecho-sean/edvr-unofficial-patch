@@ -2996,6 +2996,7 @@ FpBodyReadback explorerCamFpBodyReadback() {
     return out;
 }
 bool neckCensusRead(NeckCensusReading* out) { return neckCensusCopy(out); }
+uint64_t localAmcPointer() { return g_amcLocal.load(); }   // F18
 
 #ifdef EDVR_EXPLORER_CAM_TEST
 namespace explorercamtest {

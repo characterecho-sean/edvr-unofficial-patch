@@ -1,8 +1,10 @@
 #include "native_on_foot.h"
 
 #include <windows.h>
+#include <d3d11.h>   // F18: the body cull's rasterizer-state clones
 #include <intrin.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -39,6 +41,7 @@ std::atomic<bool> g_reticleKeyOn{false};                        // fix.native_on
 bool g_reticleKeyLast = false;                                  // frame thread only (F14)
 std::atomic<bool> g_fpKeyOn{false};                             // fix.native_on_foot_hide_fp_body, as the frame thread last read it (F15, temporary)
 bool g_fpKeyLast = false;                                       // frame thread only: as last logged (F15)
+uint8_t g_bodyCullKeyLast = 0;                                  // frame thread only: fix.native_on_foot_body_cull as last logged (F18, temporary)
 std::atomic<float> g_hudSize{nofoot::kHudSizeDefault};          // fix.native_on_foot_hud_size, live (F13)
 std::atomic<bool> g_followHead{true};                           // fix.native_on_foot_hud_follow is head (F13)
 std::atomic<bool> g_followBefore{false};                        // fix.native_on_foot_hud_follow_order is before (F13, temporary)
@@ -53,6 +56,11 @@ bool g_reticleHeadLast = false, g_reticleWriteLast = false;     // frame thread 
 std::atomic<bool> g_reticleLogWanted{false};                    // set by the frame thread on a switch to head; the probe consumes it once and queues the line (F17)
 std::atomic<float> g_hudElemScale{0.0f};                        // fix.native_on_foot_hud_element_scale, live: 0 = the game's own (F17)
 float g_hudElemLast = -1.0f;                                    // frame thread only: as last logged (F17)
+std::atomic<float> g_hudRoomSetting{1.0f};                      // fix.native_on_foot_hud_room, live, 1.00..2.50 (F18)
+std::atomic<float> g_hudRoomEff{1.0f};                          // the room the mesh is built with now: 1 unless the room is applied (F18; game thread reads)
+std::atomic<bool> g_elemOverrideOn{false};                      // the element-scale override is held now (frame thread publishes; F18)
+std::atomic<float> g_sGame{0.0f};                               // the game's own layout scale, [HRC+0x4C4], last read while the override was off; 0 = not known (F18)
+float g_roomLastR = -1.0f, g_roomLastK = -1.0f, g_roomLastS = -1.0f;   // frame thread only: as last logged (F18)
 float g_hudOffsetLast[nofoot::kHudGroupCount * 2] = {};         // frame thread only: the group offsets as last read (F16)
 float g_hudOffsetRead[nofoot::kHudGroupCount * 2] = {};         // written by the frame thread under g_f9Lock; the layout hook reads it (F16)
 bool g_hudOffsetOn = false;                                     // under g_f9Lock: the offsets apply now, native stereo on foot (F16)
@@ -520,7 +528,13 @@ void readKey() {
         else Log::get().note("native on foot hud element scale setting: 0 (the game's own scale)");
         g_hudElemLast = elem;
     }
-    const bool reticleOn = cfg.getString("fix.native_on_foot_reticle_probe", "off") == "on";
+    // F18: the HUD room (a user setting, live): 1.00..2.50. Elements keep their angular size; the element scale is divided by the room and the
+    // mesh is multiplied by it (the room is applied only when the game's scale is known; see hudRoomTick).
+    float room = cfg.getFloat("fix.native_on_foot_hud_room", 1.0f);
+    if (room < 1.0f) room = 1.0f;
+    if (room > 2.5f) room = 2.5f;
+    g_hudRoomSetting.store(room, std::memory_order_relaxed);
+    const bool reticleOn =cfg.getString("fix.native_on_foot_reticle_probe", "off") == "on";
     g_reticleKeyOn.store(reticleOn, std::memory_order_relaxed);
     if (first || reticleOn != g_reticleKeyLast) {
         Log::get().note("native on foot: fix.native_on_foot_reticle_probe is %s", reticleOn ? "on" : "off");
@@ -532,6 +546,22 @@ void readKey() {
     if (first || fpOn != g_fpKeyLast) {
         Log::get().note("native on foot: fix.native_on_foot_hide_fp_body is %s (temporary)", fpOn ? "on" : "off");
         g_fpKeyLast = fpOn;
+    }
+    // F18 (TEMPORARY): the third-person torso's cull mode (nativeOnFootBodyCullBegin, below). 0 game, 1 none, 2 front.
+    const std::string bodyCull = cfg.getString("fix.native_on_foot_body_cull", "game");
+    uint8_t bodyCullMode = 0;
+    if (bodyCull == "none") {
+        bodyCullMode = 1;
+    } else if (bodyCull == "front") {
+        bodyCullMode = 2;
+    } else if (bodyCull != "game") {
+        Log::get().note("native on foot: fix.native_on_foot_body_cull = %s is not game, none or front; leaving it game.", bodyCull.c_str());
+    }
+    g_nativeOnFootBodyCull.store(bodyCullMode, std::memory_order_relaxed);
+    if (first || bodyCullMode != g_bodyCullKeyLast) {
+        static const char* const kBodyCullNames[3] = {"game", "none", "front"};
+        Log::get().note("native on foot: fix.native_on_foot_body_cull is %s (temporary)", kBodyCullNames[bodyCullMode]);
+        g_bodyCullKeyLast = bodyCullMode;
     }
 }
 
@@ -1703,11 +1733,17 @@ void f13PlaceHud(void* hrcPtr, uintptr_t listB) noexcept {
     if (!nativeOnFootActive() || !g_meshCreateLive.load(std::memory_order_relaxed)) return;
     const float d = g_hudDistance.load(std::memory_order_relaxed);
     const float s = d / nofoot::kHudDefaultDistance;
-    const float size = g_hudSize.load(std::memory_order_relaxed);
+    // F18: the mesh is the size setting times the room that is applied now (1 unless the room is in effect).
+    const float size = g_hudSize.load(std::memory_order_relaxed) * g_hudRoomEff.load(std::memory_order_relaxed);
     const bool wantHead = g_followHead.load(std::memory_order_relaxed);
     const bool before = g_followBefore.load(std::memory_order_relaxed);
     const uintptr_t h = reinterpret_cast<uintptr_t>(hrcPtr);
     if (!h) return;
+    // F18: the game's own layout scale, read while our element-scale override is off (the field holds the S the layout used; RE, not re-checked).
+    if (!g_elemOverrideOn.load(std::memory_order_relaxed)) {
+        float sg = 0.0f;
+        if (guardedRead(h + 0x4C4, &sg, 4) && sg > 0.0f && sg <= 8.0f) g_sGame.store(sg, std::memory_order_relaxed);
+    }
     if (wantHead) {
         f13ReadHead(listB);
         if (g_f12Stop.load(std::memory_order_relaxed)) return;
@@ -2272,8 +2308,8 @@ uint64_t __fastcall layoutHooked(void* hrc, void* out, void* rec, uint64_t a4, u
     return rax;
 }
 
-// RETICLE INDICATOR PROBE (read only, except key 10 under reticle follow = head, F16). The stub below calls this with rcx = the instance and rdx = the node of the marker component's call at
-// EliteDangerous64.exe+0x1A15644 (the call to 0x434ECC0, preceded by mov rcx,[rsi+0x60]). It writes nothing except, under reticle follow = head (F16), key 10's translation x and y.
+// RETICLE INDICATOR PROBE (read only, except key 10 while native stereo is on foot, F16-F18). The stub below calls this with rcx = the instance and rdx = the node of the marker component's call at
+// EliteDangerous64.exe+0x1A15644 (the call to 0x434ECC0, preceded by mov rcx,[rsi+0x60]). It writes nothing except key 10: reticle follows aim (F18, default) zeroes its translation x and y; head (F17) places it along the head.
 struct F14Key {
     bool used = false;
     uint32_t key = 0;
@@ -2312,12 +2348,11 @@ bool f17WriteAll(uintptr_t ia, const float* v) noexcept {
     return true;
 }
 
-void reticleFollowHead(uintptr_t ia, bool want) noexcept {
+void reticleFollowHead(uintptr_t ia, bool want, bool announce) noexcept {
     F17Reticle& rec = g_f17Ret;
     float cur[12] = {};
     for (size_t k = 0; k < 12; ++k)
         if (!guardedRead(f17Addr(ia, k), &cur[k], 4)) return;
-    const bool announce = g_reticleLogWanted.exchange(false, std::memory_order_relaxed);
     const bool ours = rec.have && rec.inst == ia && std::memcmp(cur, rec.written, sizeof(cur)) == 0;
     if (!ours) {
         // The game's own values (its first call, or a fresh recompute of the instance): these are the base.
@@ -2370,6 +2405,18 @@ void reticleFollowHead(uintptr_t ia, bool want) noexcept {
     }
 }
 
+// F18: reticle follows aim (the default, key 10 only): the translation's x and y are zeroed, so the dot sits on the mouse-aim axis. That is the
+// F16 centring, which the head mode used to be; z, w, the basis and the scale stay. Written only while g_reticleWriteOn (frame thread). Guarded.
+bool g_f18AimFailNoted = false;     // game thread only
+void reticleAimCentre(uintptr_t ia, bool announce) noexcept {
+    const bool ok = guardedWriteFloat(ia + 0x40, 0.0f) && guardedWriteFloat(ia + 0x44, 0.0f);
+    if (!ok && !g_f18AimFailNoted) {
+        g_f18AimFailNoted = true;
+        f14Queue("native on foot reticle: NOT centred -- the instance could not be written; key 10 stays at the game's aim");
+    }
+    if (ok && announce) f14Queue("native on foot reticle: follows aim (key 10 centred on the aim axis: x and y zeroed)");
+}
+
 void __fastcall reticleIndicatorProbe(void* instance, void* node) noexcept {
     const uintptr_t ia = reinterpret_cast<uintptr_t>(instance);
     const uintptr_t na = reinterpret_cast<uintptr_t>(node);
@@ -2384,8 +2431,18 @@ void __fastcall reticleIndicatorProbe(void* instance, void* node) noexcept {
     guardedRead(ia + 0x50, &scale, 4);
     const bool okPos = guardedRead(ia + 0x40, &pos[0], 4) && guardedRead(ia + 0x44, &pos[1], 4) && guardedRead(ia + 0x48, &pos[2], 4);
     if (!okKey || !okB) return;
-    // F17: key 10 (the aim reticle) is placed along the head while g_reticleWriteOn (the frame thread's flag); otherwise its own values are kept.
-    if (key == 10) reticleFollowHead(ia, g_reticleWriteOn.load(std::memory_order_relaxed));
+    // Key 10 (the aim reticle), while g_reticleWriteOn (the frame thread's flag). F18: reticle follows head (F17) places it along the head; aim
+    // (the default) zeroes its x and y. The head placement is handed back first when the mode is aim, so a switch leaves no residue.
+    if (key == 10) {
+        const bool writeOn = g_reticleWriteOn.load(std::memory_order_relaxed);
+        const bool announce = g_reticleLogWanted.exchange(false, std::memory_order_relaxed);
+        if (g_reticleHead.load(std::memory_order_relaxed)) {
+            reticleFollowHead(ia, writeOn, announce);
+        } else {
+            reticleFollowHead(ia, false, false);
+            if (writeOn) reticleAimCentre(ia, announce);
+        }
+    }
     F9Lock lock;
     F14Key* row = nullptr;
     for (auto& r : g_f14Keys) {
@@ -2767,6 +2824,143 @@ std::string f9HrcValues(const F9HrcState& s) {
            " dep.vt=" + f9RvaText(s.depVt, s.depVtOk);
 }
 
+// ---- F18 (TEMPORARY), probe P1: the eye against the body --------------------------------------------------------------------------------
+// EliteDangerous64.exe+0x3DA2C80 is the avatar visibility job: rcx = the AMC, rdx = the job context, whose floats [rdx+0..8] are the camera position
+// the visibility code subtracts from the AMC origin. Read-only. The callback samples the local third-person AMC (amcLocal(), the same match as the
+// fade hook) once a second, under SEH, BEFORE it forwards to the game with its own arguments. The camera is read from [rdx]; the AMC's world matrix
+// comes from its transform call (origin at +0x30, rows 0-2 the basis); the body coordinates are (p - origin) dotted with each basis row. The head is
+// the neck census's head joint (avatar-root model space) taken through the same world matrix: that mapping is the assumption this probe tests.
+using F9Fn2 = uint64_t(__fastcall*)(void*, void*);
+constexpr uintptr_t kEyeProbeRva = 0x3DA2C80;
+constexpr size_t kEyeProbeStolen = 5;   // mov [rsp+0x10],rdx (48 89 54 24 10); the next instructions are push, push, push, sub: no relative operand
+const uint8_t kEyeProbePrologue[32] = {0x48, 0x89, 0x54, 0x24, 0x10, 0x53, 0x57, 0x41, 0x56, 0x48, 0x81, 0xEC, 0xC0, 0x00, 0x00, 0x00,
+                                       0x80, 0xA1, 0x23, 0x03, 0x00, 0x00, 0xFB, 0x48, 0x8D, 0x81, 0xA8, 0x17, 0x00, 0x00, 0x48, 0x8B};
+F9Probe g_eyeProbe;                      // the relay, gate, trampoline and CodeHook
+std::atomic<bool> g_eyeStop{false};      // set at shutdown: the callback still forwards, but samples nothing
+bool g_eyeTried = false;                 // frame thread only
+uint64_t g_eyeLastMs = 0;                // game thread only: the last sample's time
+struct EyeSample {
+    bool valid = false;
+    bool headOk = false;
+    uint64_t stamp = 0;
+    float cam[3] = {}, head[3] = {}, camBody[3] = {}, headBody[3] = {};
+};
+std::mutex g_eyeMutex;                   // guards g_eyeSample (game thread writes, frame thread reads)
+EyeSample g_eyeSample;
+uint64_t g_eyeLoggedStamp = 0;           // frame thread only
+
+// The AMC's world matrix (the transform call of sehAmcOrigin, the whole 4x4 this time). False when a pointer on the chain is implausible or a fault.
+__declspec(noinline) bool sehAmcMatrix(const uint8_t* amc, float* out16) noexcept {
+    __try {
+        uint64_t obj = 0, vt = 0, fn = 0;
+        std::memcpy(&obj, amc + ecm::kOffAmcTransform, 8);
+        if (obj < 0x10000u || obj >= 0x00007FFF00000000ull) return false;
+        std::memcpy(&vt, reinterpret_cast<const void*>(obj), 8);
+        if (vt < 0x10000u || vt >= 0x00007FFF00000000ull) return false;
+        std::memcpy(&fn, reinterpret_cast<const void*>(vt + ecm::kTransformMatrixSlot), 8);
+        if (fn < 0x10000u || fn >= 0x00007FFF00000000ull) return false;
+        const uint64_t m = reinterpret_cast<uint64_t(__fastcall*)(uint64_t)>(fn)(obj);
+        if (m < 0x10000u || m >= 0x00007FFF00000000ull) return false;
+        std::memcpy(out16, reinterpret_cast<const void*>(m), 64);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// Game thread, from the callback, at most once a second, for the local third-person AMC only. Read-only.
+void eyeSample(void* amcPtr, void* jobPtr, uint64_t now) noexcept {
+    float cam[3] = {};
+    if (!guardedRead(reinterpret_cast<uintptr_t>(jobPtr), cam, sizeof(cam))) return;
+    float M[16] = {};
+    if (!sehAmcMatrix(static_cast<const uint8_t*>(amcPtr), M)) return;
+    EyeSample s;
+    s.valid = true;
+    s.stamp = now;
+    std::memcpy(s.cam, cam, sizeof(cam));
+    NeckCensusReading nk;
+    s.headOk = neckCensusRead(&nk) && nk.state == 5;
+    float head[3] = {};
+    if (s.headOk) {
+        // [h 1] times the world matrix (row vectors): the head joint in world space.
+        for (size_t j = 0; j < 3; ++j) {
+            head[j] = nk.head[0] * M[j] + nk.head[1] * M[4 + j] + nk.head[2] * M[8 + j] + M[12 + j];
+        }
+        std::memcpy(s.head, head, sizeof(head));
+    }
+    const float* o = M + 12;   // the origin (row 3)
+    for (size_t i = 0; i < 3; ++i) {
+        const float* b = M + 4 * i;   // basis row i
+        float dc = 0.0f, dh = 0.0f;
+        for (size_t j = 0; j < 3; ++j) {
+            dc += (cam[j] - o[j]) * b[j];
+            dh += (head[j] - o[j]) * b[j];
+        }
+        s.camBody[i] = dc;
+        s.headBody[i] = dh;
+    }
+    std::lock_guard<std::mutex> lock(g_eyeMutex);
+    g_eyeSample = s;
+}
+
+// The callback: the game jumps here with rcx, rdx intact (the relay's tail jump), so the original is called with the same two arguments.
+uint64_t __fastcall eyeProbeHooked(void* amc, void* job) noexcept {
+    const F9Fn2 original = reinterpret_cast<F9Fn2>(g_eyeProbe.original);
+    if (!original) return 0;
+    const uint64_t now = GetTickCount64();
+    if (!g_eyeStop.load(std::memory_order_relaxed) && amc && job && nativeOnFootActive() && now - g_eyeLastMs >= 1000 &&
+        reinterpret_cast<uint64_t>(amc) == localAmcPointer()) {
+        g_eyeLastMs = now;
+        eyeSample(amc, job, now);
+    }
+    return original(amc, job);
+}
+
+// Frame thread, every frame: logs the newest sample once (one per second at most). Stays silent while native stereo is off foot.
+void eyeProbeLine() {
+    if (!nativeOnFootActive()) return;
+    EyeSample s;
+    {
+        std::lock_guard<std::mutex> lock(g_eyeMutex);
+        s = g_eyeSample;
+    }
+    if (!s.valid || s.stamp == g_eyeLoggedStamp) return;
+    g_eyeLoggedStamp = s.stamp;
+    const float dx = s.camBody[0] - s.headBody[0], dy = s.camBody[1] - s.headBody[1], dz = s.camBody[2] - s.headBody[2];
+    if (s.headOk) {
+        Log::get().note("native on foot eye vs body: cam_in_body=(%.3f,%.3f,%.3f) head_in_body=(%.3f,%.3f,%.3f) cam_minus_head=(%.3f,%.3f,%.3f)",
+                        static_cast<double>(s.camBody[0]), static_cast<double>(s.camBody[1]), static_cast<double>(s.camBody[2]),
+                        static_cast<double>(s.headBody[0]), static_cast<double>(s.headBody[1]), static_cast<double>(s.headBody[2]),
+                        static_cast<double>(dx), static_cast<double>(dy), static_cast<double>(dz));
+    } else {
+        Log::get().note("native on foot eye vs body: cam_in_body=(%.3f,%.3f,%.3f) head_in_body=(unread: the neck census has no head sample) cam_minus_head=(unread)",
+                        static_cast<double>(s.camBody[0]), static_cast<double>(s.camBody[1]), static_cast<double>(s.camBody[2]));
+    }
+}
+
+void installEyeProbeOnce() {
+    if (g_eyeTried) return;
+    g_eyeTried = true;
+    if (!runtimeVrProfile()) return;
+    const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    const char* peWhy = nullptr;
+    if (!base || !checkIdentity(base, &peWhy)) {
+        Log::get().note("native on foot eye vs body: NOT installed -- identity mismatch (%s); the game was not touched.", peWhy ? peWhy : "no module");
+        return;
+    }
+    if (!g_base) g_base = base;
+    const F9ProbeSpec spec{"native-on-foot-eye-vs-body", kEyeProbeRva, kEyeProbePrologue, 32, kEyeProbeStolen,
+                           reinterpret_cast<void*>(&eyeProbeHooked), "P1 (eye vs body)"};
+    size_t stolen = 0;
+    std::string why;
+    if (installF9ProbeInto(g_eyeProbe, spec, base, &stolen, &why)) {
+        Log::get().note("native on foot eye vs body: hook installed at EliteDangerous64.exe+0x3DA2C80, stolen=%zu bytes, prologue 32 bytes verified "
+                        "(read only; temporary).", stolen);
+    } else {
+        Log::get().note("native on foot eye vs body: hook NOT installed -- %s. The game was not touched by it.", why.c_str());
+    }
+}
+
 void installF14ProbesOnce() {
     if (g_f14Tried) return;
     g_f14Tried = true;
@@ -2865,7 +3059,178 @@ void f9ProbeTick(uint64_t nowMs) {
                         view, static_cast<unsigned long long>(r.window), cam, rot);
     }
 }
+
+// ---- F18 (TEMPORARY): the third-person torso's cull mode (fix.native_on_foot_body_cull) ------------------------------------------------
+// The match: DrawIndexedInstanced, one instance, one of two shader pairs at one of five index counts, stencil ref 21 (the local player's
+// body; other people draw with the same meshes). The stencil ref is read with OMGetDepthStencilState only for a draw that already matched
+// the hashes and the count -- a handful a frame -- because the binding shadow does not track it. The swap mirrors remlok_fix.cpp's
+// remlokScissorBegin/End: the game's state is cloned with one field changed, bound for the draw, and the game's own put back after it.
+constexpr uint64_t kBodyVsA = 0x9D800F45B12A6AACull, kBodyPsA = 0x194DD6A677084A74ull;   // the torso pieces at 13260, 30216, 23784, 7692
+constexpr uint64_t kBodyVsB = 0x7B0DC42D383F694Cull, kBodyPsB = 0x0DF03E64DF9DBEF1ull;   // the piece at 37080
+constexpr UINT kBodyStencilRef = 21;
+constexpr size_t kBodyCounts = 5;                       // the index counts, in the log line's order
+std::atomic<uint64_t> g_bodyMatched[kBodyCounts]{};     // draw thread adds, frame thread takes (exchange) every 5 s
+std::atomic<uint64_t> g_bodyStencilMiss{0};             // draw thread, once: 1<<63 | count<<32 | ref of the first torso-shaped draw with another ref
+bool g_bodyStencilMissNoted = false;                    // frame thread only
+uint64_t g_lastBodyCullLineMs = 0;                      // frame thread only
+
+// Draw thread only. A cache of clones keyed by the game's state and the mode; each entry holds a reference on the game's state so its
+// address cannot be reused by another state while the clone is cached. A null source is the default state (no object to ask).
+struct BodyCullClone {
+    ID3D11RasterizerState* source = nullptr;
+    ID3D11RasterizerState* clone = nullptr;
+    uint8_t mode = 0;
+};
+constexpr size_t kBodyCullCache = 16;
+BodyCullClone g_bodyCullCache[kBodyCullCache];
+size_t g_bodyCullCached = 0;
+bool g_bodyCullEngaged = false;                         // what Begin set, for End to put back (remlok's g_engaged contract)
+ID3D11RasterizerState* g_bodyCullSavedRS = nullptr;     // the game's state, referenced by RSGetState, released by End
+bool g_bodyCullCloneFailedNoted = false;
+bool g_bodyCullCacheFullNoted = false;
+
+int bodyCullIndex(uint32_t indexCount) noexcept {
+    const uint64_t vs = bindingShaderHash(BindSlot::Vs);
+    if (vs == kBodyVsA) {
+        if (bindingShaderHash(BindSlot::Ps) != kBodyPsA) return -1;
+        switch (indexCount) {
+            case 13260: return 0;
+            case 30216: return 1;
+            case 23784: return 2;
+            case 7692: return 3;
+            default: return -1;
+        }
+    }
+    if (vs == kBodyVsB && indexCount == 37080 && bindingShaderHash(BindSlot::Ps) == kBodyPsB) return 4;
+    return -1;
+}
+
+ID3D11RasterizerState* bodyCullClone(ID3D11DeviceContext* ctx, ID3D11RasterizerState* source, uint8_t mode) {
+    for (size_t i = 0; i < g_bodyCullCached; ++i) {
+        if (g_bodyCullCache[i].source == source && g_bodyCullCache[i].mode == mode) return g_bodyCullCache[i].clone;
+    }
+    if (g_bodyCullCached >= kBodyCullCache) {
+        if (!g_bodyCullCacheFullNoted) {
+            g_bodyCullCacheFullNoted = true;
+            Log::get().note("native on foot body cull: the clone cache is full (%zu game rasterizer states); further states draw untouched.",
+                            kBodyCullCache);
+        }
+        return nullptr;
+    }
+    D3D11_RASTERIZER_DESC d{};
+    if (source) {
+        source->GetDesc(&d);
+    } else {
+        // The documented defaults of the null rasterizer state.
+        d.FillMode = D3D11_FILL_SOLID;
+        d.CullMode = D3D11_CULL_BACK;
+        d.DepthClipEnable = TRUE;
+    }
+    d.CullMode = mode == 2 ? D3D11_CULL_FRONT : D3D11_CULL_NONE;
+    ID3D11Device* dev = nullptr;
+    ctx->GetDevice(&dev);
+    if (!dev) return nullptr;
+    ID3D11RasterizerState* clone = nullptr;
+    const HRESULT hr = dev->CreateRasterizerState(&d, &clone);
+    dev->Release();
+    if (FAILED(hr) || !clone) {
+        if (!g_bodyCullCloneFailedNoted) {
+            g_bodyCullCloneFailedNoted = true;
+            Log::get().note("native on foot body cull: could not create the culled rasterizer state (hr=0x%08X); the torso draws untouched.",
+                            static_cast<unsigned>(hr));
+        }
+        return nullptr;
+    }
+    if (source) source->AddRef();
+    g_bodyCullCache[g_bodyCullCached].source = source;
+    g_bodyCullCache[g_bodyCullCached].clone = clone;
+    g_bodyCullCache[g_bodyCullCached].mode = mode;
+    ++g_bodyCullCached;
+    return clone;
+}
+
+// Frame thread, every frame: the one-time stencil note, and the 5 s count line while the mode is not game and native stereo is on foot
+// (written even at 0, so a flight can tell the code ran). The counts are those since the previous line.
+void bodyCullLine(uint64_t nowMs) {
+    const uint64_t miss = g_bodyStencilMiss.load(std::memory_order_relaxed);
+    if (miss != 0 && !g_bodyStencilMissNoted) {
+        g_bodyStencilMissNoted = true;
+        Log::get().note("native on foot body cull: a torso-shaped draw (index count %u) had stencil ref %u, not %u, and was left alone "
+                        "(logged once)",
+                        static_cast<unsigned>((miss >> 32) & 0x7FFFFFFFu), static_cast<unsigned>(miss & 0xFFFFFFFFu),
+                        static_cast<unsigned>(kBodyStencilRef));
+    }
+    const uint8_t mode = g_nativeOnFootBodyCull.load(std::memory_order_relaxed);
+    if (mode == 0 || !nativeOnFootActive()) return;
+    if (nowMs - g_lastBodyCullLineMs < 5000) return;
+    g_lastBodyCullLineMs = nowMs;
+    uint64_t n[kBodyCounts];
+    uint64_t total = 0;
+    for (size_t i = 0; i < kBodyCounts; ++i) {
+        n[i] = g_bodyMatched[i].exchange(0, std::memory_order_relaxed);
+        total += n[i];
+    }
+    Log::get().note("native on foot body cull: %s matched %llu draws (by index count: 13260=%llu, 30216=%llu, 23784=%llu, 7692=%llu, 37080=%llu)",
+                    mode == 2 ? "front" : "none", static_cast<unsigned long long>(total), static_cast<unsigned long long>(n[0]),
+                    static_cast<unsigned long long>(n[1]), static_cast<unsigned long long>(n[2]), static_cast<unsigned long long>(n[3]),
+                    static_cast<unsigned long long>(n[4]));
+}
 }  // namespace
+
+// F18 (declared in native_on_foot.h): the DrawIndexedInstanced thunk calls this only when nativeOnFootBodyCullWanted() and on the owner
+// context. The same shape as remlokScissorBegin: read the game's state, bind the clone, keep the game's reference for End.
+bool nativeOnFootBodyCullBegin(ID3D11DeviceContext* ctx, uint32_t indexCount, uint32_t instances) {
+    g_bodyCullEngaged = false;
+    const uint8_t mode = g_nativeOnFootBodyCull.load(std::memory_order_relaxed);
+    if (mode == 0 || instances != 1) return false;
+    const int index = bodyCullIndex(indexCount);
+    if (index < 0) return false;
+    ID3D11DepthStencilState* ds = nullptr;
+    UINT ref = 0;
+    ctx->OMGetDepthStencilState(&ds, &ref);
+    if (ds) ds->Release();
+    if (ref != kBodyStencilRef) {
+        uint64_t none = 0;
+        g_bodyStencilMiss.compare_exchange_strong(none, (1ull << 63) | (static_cast<uint64_t>(indexCount) << 32) | ref, std::memory_order_relaxed);
+        return false;
+    }
+    ID3D11RasterizerState* current = nullptr;
+    ctx->RSGetState(&current);   // AddRef'd when non-null
+    ID3D11RasterizerState* culled = bodyCullClone(ctx, current, mode);
+    if (!culled) {
+        if (current) current->Release();
+        return false;   // the draw runs untouched
+    }
+    g_bodyCullSavedRS = current;   // keep the reference until End restores it
+    ctx->RSSetState(culled);
+    g_bodyCullEngaged = true;
+    g_bodyMatched[index].fetch_add(1, std::memory_order_relaxed);
+    return true;
+}
+
+void nativeOnFootBodyCullEnd(ID3D11DeviceContext* ctx) {
+    if (!g_bodyCullEngaged) return;
+    g_bodyCullEngaged = false;
+    ctx->RSSetState(g_bodyCullSavedRS);
+    if (g_bodyCullSavedRS) {
+        g_bodyCullSavedRS->Release();
+        g_bodyCullSavedRS = nullptr;
+    }
+}
+
+void nativeOnFootBodyCullShutdown() {
+    for (size_t i = 0; i < g_bodyCullCached; ++i) {
+        if (g_bodyCullCache[i].clone) g_bodyCullCache[i].clone->Release();
+        if (g_bodyCullCache[i].source) g_bodyCullCache[i].source->Release();
+        g_bodyCullCache[i] = BodyCullClone{};
+    }
+    g_bodyCullCached = 0;
+    g_bodyCullEngaged = false;
+    if (g_bodyCullSavedRS) {
+        g_bodyCullSavedRS->Release();
+        g_bodyCullSavedRS = nullptr;
+    }
+}
 
 // The probe's capture (declared in native_on_foot.h, called from beginPanelOverride on the draw thread for the two HUD issuers). One load,
 // one clock read and a CAS per match; the stack is captured outside the lock.
@@ -2944,6 +3309,7 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
     f13FrameTick(now);
     // F14: the layout probe, its lines, the HUD spread, and the reticle probe (temporary).
     installF14ProbesOnce();
+    installEyeProbeOnce();   // F18 (TEMPORARY): probe P1, read only
     f14FrameTick(now);
     {
         const float spreadNow = g_hudSpread.load(std::memory_order_relaxed);
@@ -2952,25 +3318,46 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
                    !(spreadNow > 0.0f) ? "the HUD spread is 0" : !nativeOnFootActive() ? "native stereo on foot ended"
                    : !g_meshCreateLive.load(std::memory_order_relaxed) ? "the HUD mesh is off" : "the game session ended");
         // F17: the HUD element scale (the user setting), while native stereo is on foot and the HUD mesh patch is in. Before the layout re-send below.
-        const float elemK = g_hudElemScale.load(std::memory_order_relaxed);
-        const bool elemWant = elemK > 0.0f && nativeOnFootActive() && g_meshCreateLive.load(std::memory_order_relaxed) && session;
+        // F18: the HUD room. The base scale is the setting, or the game's own S when the setting is 0 (and S has been read). The room divides the base
+        // (k_eff = base / room) and multiplies the mesh (g_hudRoomEff). With the room at 1 and the setting at 0 nothing is written, as before.
+        const float elemSet = g_hudElemScale.load(std::memory_order_relaxed);
+        const float roomSet = g_hudRoomSetting.load(std::memory_order_relaxed);
+        const bool onHud = nativeOnFootActive() && g_meshCreateLive.load(std::memory_order_relaxed) && session;
+        const float sGame = g_sGame.load(std::memory_order_relaxed);
+        const float kBase = elemSet > 0.0f ? elemSet : sGame;
+        const float roomEff = (roomSet > 1.0f && kBase > 0.0f && onHud) ? roomSet : 1.0f;
+        const float elemK = std::min(2.0f, std::max(nofoot::kHudElemScaleMin, kBase / roomEff));
+        const bool elemWant = onHud && kBase > 0.0f && (elemSet > 0.0f || roomEff > 1.0f);
         elemScaleTick(elemWant, elemK,
-                      !(elemK > 0.0f) ? "the setting is 0" : !nativeOnFootActive() ? "native stereo on foot ended"
-                      : !g_meshCreateLive.load(std::memory_order_relaxed) ? "the HUD mesh is off" : "the game session ended");
-        // F16: the reticle stub is in place while the probe key or the reticle follow (head) is on; the centring is written only while follow is head.
+                      !elemWant ? (!nativeOnFootActive() ? "native stereo on foot ended" : !g_meshCreateLive.load(std::memory_order_relaxed) ? "the HUD mesh is off"
+                                   : !session ? "the game session ended" : "the setting is 0 and the room is 1")
+                      : "the game session ended");
+        g_elemOverrideOn.store(g_elemWritten, std::memory_order_relaxed);
+        g_hudRoomEff.store(onHud ? roomEff : 1.0f, std::memory_order_relaxed);
+        if (onHud && (roomEff != g_roomLastR || elemK != g_roomLastK || g_hudSize.load(std::memory_order_relaxed) * roomEff != g_roomLastS)) {
+            // Logged on change only; the room's own line (and its reason when the room waits for S).
+            const float sizeEff = g_hudSize.load(std::memory_order_relaxed) * roomEff;
+            if (roomSet > 1.0f && kBase <= 0.0f)
+                Log::get().note("native on foot hud room: %.2f waits for the game's own element scale (not read yet); the room is not applied", static_cast<double>(roomSet));
+            else
+                Log::get().note("native on foot hud room: %.2f (element scale %.2f, size %.2f)", static_cast<double>(roomEff), static_cast<double>(elemWant ? elemK : 0.0f), static_cast<double>(sizeEff));
+            g_roomLastR = roomEff;
+            g_roomLastK = elemK;
+            g_roomLastS = sizeEff;
+        }
+        // F18: the reticle stub is in place whenever native stereo is on foot (both modes write key 10), or while the probe key is on.
         const bool reticleKey = g_reticleKeyOn.load(std::memory_order_relaxed);
-        const bool reticleHead = g_reticleHead.load(std::memory_order_relaxed);
-        const bool reticleWant = (reticleKey || reticleHead) && nativeOnFootActive() && session;
-        reticleTick(reticleWant, !(reticleKey || reticleHead) ? "the reticle probe and the reticle follow are both off"
-                                 : !nativeOnFootActive()      ? "native stereo on foot ended"
-                                                              : "the game session ended");
-        const bool writeNow = reticleHead && nativeOnFootActive() && session;
+        const bool reticleWant = (reticleKey || nativeOnFootActive()) && session;
+        reticleTick(reticleWant, !(reticleKey || nativeOnFootActive()) ? "the reticle probe is off and native stereo on foot is not active"
+                                 : !nativeOnFootActive()                ? "native stereo on foot ended"
+                                                                        : "the game session ended");
+        const bool writeNow = nativeOnFootActive() && session;
         g_reticleWriteOn.store(writeNow, std::memory_order_relaxed);
         if (writeNow != g_reticleWriteLast) {
-            if (writeNow) g_reticleLogWanted.store(true, std::memory_order_relaxed);   // the probe queues the line, with d, on its next call
+            if (writeNow) g_reticleLogWanted.store(true, std::memory_order_relaxed);   // the probe queues the line on its next call (aim or head)
             else
-                Log::get().note("native on foot reticle: follows aim (the game's own position; %s)",
-                                !reticleHead ? "the setting is aim" : !nativeOnFootActive() ? "native stereo on foot ended" : "the game session ended");
+                Log::get().note("native on foot reticle: writes stop (%s)",
+                                !nativeOnFootActive() ? "native stereo on foot ended" : "the game session ended");
             g_reticleWriteLast = writeNow;
         }
         // F16: the HUD group offsets are applied by the layout hook while native stereo is on foot; any change of that state, of an offset or of the
@@ -2995,7 +3382,9 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
     // F15 (TEMPORARY): the first-person body hide (explorer_cam.cpp), while native stereo is on foot and its key is on.
     const bool fpKey = g_fpKeyOn.load(std::memory_order_relaxed);
     explorerCamFpBody(fpKey && nativeOnFootActive(), !fpKey ? "fix.native_on_foot_hide_fp_body is off" : "native stereo on foot ended");
+    bodyCullLine(now);   // F18 (TEMPORARY): the torso cull's 5 s count line (the swap itself is on the draw thread, nativeOnFootBodyCullBegin)
     neckLine(now);
+    eyeProbeLine();   // F18 (TEMPORARY): P1's one-a-second line
 }
 
 void nativeOnFootShutdown() {
@@ -3007,6 +3396,10 @@ void nativeOnFootShutdown() {
     visorTick(false, "the game is shutting down");
     spreadTick(false, 0.0f, "the game is shutting down");
     elemScaleTick(false, 0.0f, "the game is shutting down");
+    g_eyeStop.store(true, std::memory_order_relaxed);          // F18: P1 samples nothing from here
+    g_elemOverrideOn.store(false, std::memory_order_relaxed);   // F18: the room's state is per session
+    g_hudRoomEff.store(1.0f, std::memory_order_relaxed);
+    g_sGame.store(0.0f, std::memory_order_relaxed);
     reticleTick(false, "the game is shutting down");
     g_reticleWriteOn.store(false, std::memory_order_relaxed);   // F16: no more centring writes
     {

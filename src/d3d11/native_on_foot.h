@@ -31,6 +31,8 @@
 
 #include "native_on_foot_core.h"   // nofoot::hudIssuerIndex: the on-foot HUD issuers' vertex shaders
 
+struct ID3D11DeviceContext;   // the F18 body cull's Begin/End (d3d11.h is not needed by the rigs that include this header)
+
 namespace edvr {
 
 enum class NativeOnFootGate : uint8_t {
@@ -72,5 +74,19 @@ inline void nativeOnFootHudProbe(uint64_t vs) {
     const int index = nofoot::hudIssuerIndex(vs);
     if (index >= 0) nativeOnFootHudCapture(index, vs);
 }
+
+// F18 (TEMPORARY, fix.native_on_foot_body_cull: game | none | front). The frame thread publishes the mode here (readKey: 0 game, 1 none,
+// 2 front); the DrawIndexedInstanced thunk (vscreen.cpp) asks nativeOnFootBodyCullWanted() for every VR-path draw -- two relaxed loads --
+// and only then calls Begin, which matches the local player's third-person torso draws (shader hashes, index count, one instance,
+// stencil ref 21) and binds a clone of the game's rasterizer state with only CullMode changed. End puts the game's own state back.
+inline std::atomic<uint8_t> g_nativeOnFootBodyCull{0};
+inline bool nativeOnFootBodyCullWanted() {
+    return g_nativeOnFootBodyCull.load(std::memory_order_relaxed) != 0 && nativeOnFootActive();
+}
+// Draw thread, owner context only. True when the culled clone is bound: the caller owes exactly one End after the draw.
+bool nativeOnFootBodyCullBegin(ID3D11DeviceContext* ctx, uint32_t indexCount, uint32_t instances);   // native_on_foot.cpp
+void nativeOnFootBodyCullEnd(ID3D11DeviceContext* ctx);
+// vScreen's shutdown, beside remlokShutdown: releases the cached clones and the game states they were made from.
+void nativeOnFootBodyCullShutdown();
 
 }  // namespace edvr

@@ -130,6 +130,7 @@ struct NeckCensusReading {
     int amcState = 0;
 };
 bool neckCensusRead(NeckCensusReading* out);
+uint64_t localAmcPointer();   // F18: the local third-person AMC last matched by the fade hook (0 = none); the latch the census reads
 
 #ifdef EDVR_EXPLORER_CAM_TEST
 // The rig's seam (tools\explorer_cam_test): the same boundary with a scripted clock and scripted

@@ -4997,6 +4997,13 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     args.base = baseVertex;
     args.startInstance = startInstance;
     const DrawVerdict v = beginPanelOverride(self, 'X', perInstance, instances, args);
+    // F18 (TEMPORARY, fix.native_on_foot_body_cull; native_on_foot.h): the local player's third-person torso drawn with the game's
+    // rasterizer state cloned at another CullMode, and the game's put back after forwardWithVerdict. A wrapper, not a DrawVerdict: a verdict
+    // would take the draw off engine-record velocity's verdict-free path just below and change what this test measures. Matched here, right
+    // after the verdict and before engine velocity can substitute shaders, so the hashes are the game's. With the key at game this is one
+    // relaxed load of a zero.
+    const bool bodyCull = nativeOnFootBodyCullWanted() && self == g_state->ownerCtx &&
+                          nativeOnFootBodyCullBegin(self, perInstance, instances);
     // Engine-record velocity (with fix.temporal_aa): four generation
     // compares; the pool families' substituted shaders and MRT6 are bound
     // only when the game has rebound something since the last look. After the
@@ -5087,6 +5094,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
         }
         return true;  // the original draw was issued
     });
+    if (bodyCull) nativeOnFootBodyCullEnd(self);   // F18 (TEMPORARY): the game's rasterizer state back
     if (v == DrawVerdict::kPanel) endPanelOverride(self);
     if (v == DrawVerdict::kIntroPanel) introPanelEndDraw(self);
     // The splash's numbers are put away after the draw and the dim have used them (forwardWithVerdict), and the flag with them, on every way out of
@@ -7184,6 +7192,7 @@ void shutdownVScreenFixes() {
         g_state->ourCb = nullptr;
     }
     remlokShutdown();
+    nativeOnFootBodyCullShutdown();   // F18 (TEMPORARY): the torso cull's cached rasterizer-state clones
     holoShutdown();
     uiDepthShutdown();
     uiLayerShutdown();
