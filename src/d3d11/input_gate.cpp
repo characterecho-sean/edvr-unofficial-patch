@@ -326,7 +326,9 @@ void installPadDoor() {
                     installed ? "installed" : "unavailable");
 }
 
-bool g_installTried = false;
+bool g_installTried = false;   // the keyboard doors: tried once, by whichever menu opens first
+bool g_gateEnabled = false;    // advanced.input_gate was on when that first try ran
+bool g_padTried = false;       // the controller door has its own state: only the flat panel wants it, and the first try may be VR's
 bool g_probe = false;
 bool g_privateWanted = true;   // menu.keyboard = private
 uint64_t g_probeMs = 0;
@@ -1499,13 +1501,7 @@ void inputGateConfigure(Config& cfg) {
     }
 }
 
-void inputGateInstall() {
-    if (g_installTried) return;
-    g_installTried = true;
-    if (!Config::get().getBool("advanced.input_gate", true)) {
-        Log::get().note("keyboard gate: advanced.input_gate is off; input doors are not installed.");
-        return;
-    }
+static void installKeyboardDoors() {
     guarded("inputGate/install", [&] {
         bool captured = false;
         for (const auto& d : g_gameDi) captured |= d.installed;
@@ -1528,8 +1524,25 @@ void inputGateInstall() {
                                          &shared);
         }
         installUserDoors();
-        if (runtimeFlatProfile()) installPadDoor();
     });
+}
+
+// The keyboard doors are installed once, by whichever menu opens first. The controller door is the flat panel's alone and has its own
+// state: a VR menu opened first, then a switch to the flat profile, must still install it when the flat panel opens (review finding 7).
+void inputGateInstall() {
+    if (!g_installTried) {
+        g_installTried = true;
+        if (!Config::get().getBool("advanced.input_gate", true)) {
+            Log::get().note("keyboard gate: advanced.input_gate is off; input doors are not installed.");
+            return;
+        }
+        g_gateEnabled = true;
+        installKeyboardDoors();
+    }
+    if (g_gateEnabled && !g_padTried && runtimeFlatProfile()) {
+        g_padTried = true;
+        guarded("inputGate/installPad", [&] { installPadDoor(); });
+    }
 }
 
 void inputGateSetPrivate(bool priv) {

@@ -60,9 +60,10 @@ enum class GpuCensusSection : uint8_t {
                               // engineVelocityBeforeDraw's call sites, which mostly return
                               // without reaching the slow path at all
     FrameUiLayerReissues,     // the UI layer's multiply/write-back reissues
-    FrameUiLayerHdrSeed,      // the HDR HUD layer's depth-stencil seed: the copy of the game's depth-stencil and the
-                              // Seeder's passes into the layer's own target (ui_layer.cpp seedLayerDepth), counted
-                              // once for each seed and only for that layer (GpuCensusSeedScope below)
+    FrameUiLayerHdrSeed,      // the HDR HUD layer's depth-stencil seed: the Seeder's passes into the layer's own target, reading the
+                              // game's depth-stencil where it lies (a copy of it first only when the game's texture refuses a
+                              // shader view; ui_layer.cpp seedLayerDepth), counted once for each seed and only for that layer
+                              // (GpuCensusSeedScope below)
     // The VR on-foot world route's own GPU work (vr_world_route.cpp, design doc section 82), EDVR's cost like the
     // sections above. They run only while the on-foot world route works; the
     // rotation gives a turn to none of the three until one has been called (nextTurnOwner, gpu_census.cpp), so with

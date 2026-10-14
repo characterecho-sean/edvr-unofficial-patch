@@ -2911,6 +2911,72 @@ static void testToolAdoption(const std::wstring& scratch) {
               "and flat conversion is still blocked with today's message");
         check(planUninstall(s, testOptions(), vr).blocked, "and uninstall is still blocked");
     }
+
+    // Two tool installs, as install_edvr.py leaves them: the first receipt (plain name) backs up the game's runtime, the second (a
+    // backup-named sibling, the current one) backs up the first EDVR runtime. The stock runtime is in the older receipt's backup only.
+    const std::wstring firstBackup = joinPath(openvr, L"openvr_api.dll.pre-first-20261012-101500.bak");
+    const std::wstring secondBackup = joinPath(openvr, L"openvr_api.dll.pre-second-20261013-101500.bak");
+    const std::string firstEdvr = syntheticPe({"VR_InitInternal", "edvrFirstVersion"});
+    auto layTwo = [&](const std::string& olderBeforeSha) {
+        removeTree(gameDir);
+        makeTree(openvr);
+        writeAll(joinPath(gameDir, L"EliteDangerous64.exe"), "not really the game");
+        writeAll(joinPath(openvr, L"openvr_api.dll"), edvr);
+        writeAll(firstBackup, stock);
+        writeAll(secondBackup, firstEdvr);
+        auto receipt = [&](const std::wstring& bak, const std::string& before, const std::string& installed) {
+            return "{\"version\": 2, \"kind\": \"edvr-native-openxr\", \"target\": " + jsonString(gameDir) +
+                   ", \"state\": \"installed\", \"files\": [{\"key\": \"runtime\", \"target\": " +
+                   jsonString(joinPath(openvr, L"openvr_api.dll")) + ", \"backup\": " + jsonString(bak) +
+                   ", \"before_sha256\": \"" + before + "\", \"installed_sha256\": \"" + installed + "\"}]}";
+        };
+        writeAll(joinPath(gameDir, L"edvr_native_receipt.json"), receipt(firstBackup, olderBeforeSha, shaOfText(firstEdvr)));
+        writeAll(joinPath(gameDir, L"edvr_native_receipt.json.pre-second-20261013-101500.bak"),
+                 receipt(secondBackup, shaOfText(firstEdvr), shaOfText(edvr)));
+    };
+    layTwo(shaOfText(stock));
+    {
+        const Survey s = survey();
+        check(s.toolReceipts.size() == 1 && s.toolReceipts[0].path.find(L".pre-second-") != std::wstring::npos,
+              "after two tool installs the newest receipt is still the one read as the current receipt");
+        check(s.toolOriginal.kind == DllKind::OpenVrRuntime && s.toolOriginal.sha256 == shaOfText(stock) &&
+              s.toolOriginal.path == firstBackup,
+              "the original is recovered from the older receipt's backup, not the current one's");
+        check(s.toolReceiptHistory.size() == 1, "and the older receipt is kept apart as history, not as ownership evidence");
+    }
+    update();
+    {
+        const Survey s = survey();
+        check(s.state.present && s.openvrOrig.kind == DllKind::OpenVrRuntime && s.state.openvrOrigSha == shaOfText(stock),
+              "after the update over two tool installs the state records the original's hash");
+        const Plan conversion = planInstall(s, flatOptions, flat);
+        check(!conversion.blocked, "switching to flat-only after the update is not blocked", unifiedProblems(conversion));
+        check(applyPlan(conversion, provide).ok, "and the flat conversion applies");
+        expectEq(readAll(joinPath(openvr, L"openvr_api.dll")), stock, "the game's own openvr_api.dll is back after conversion");
+    }
+    layTwo(shaOfText(stock));
+    update();
+    {
+        const Survey s = survey();
+        const Plan removal = planUninstall(s, testOptions(), vr);
+        check(!removal.blocked, "uninstall after the update over two tool installs is not blocked", unifiedProblems(removal));
+        check(applyPlan(removal, provide).ok, "and the uninstall applies");
+        expectEq(readAll(joinPath(openvr, L"openvr_api.dll")), stock, "the game's own openvr_api.dll is back after uninstall");
+    }
+    // The older receipt gets no softer proofs: a backup whose hash it does not record, or one that is an EDVR runtime, adopts nothing.
+    layTwo(shaOfText("a runtime the older receipt never recorded"));
+    {
+        const Survey s = survey();
+        check(s.toolOriginal.kind != DllKind::OpenVrRuntime && s.openvrOrigInBackups.empty(),
+              "an older receipt whose recorded hash is not its backup's adopts nothing");
+    }
+    layTwo(shaOfText(firstEdvr));
+    writeAll(firstBackup, firstEdvr);
+    {
+        const Survey s = survey();
+        check(s.toolOriginal.kind != DllKind::OpenVrRuntime && s.openvrOrigInBackups.empty(),
+              "an older receipt whose backup is an EDVR runtime adopts nothing");
+    }
 }
 
 static void testFlatSettingsPlanner() {

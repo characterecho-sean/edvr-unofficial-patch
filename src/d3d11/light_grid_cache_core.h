@@ -399,6 +399,7 @@ struct Stats {
     double missMs = 0.0, hitMs = 0.0, missOverheadMs = 0.0, refreshMs = 0.0, deriveMs = 0.0;
     uint64_t verifyChecks = 0, verifyPadding = 0, verifyMismatches = 0;
     uint64_t selfOk = 0, selfFail = 0, selfRace = 0, capacityMisses = 0;
+    uint64_t statesKept = 0;   // parked states a reset (a new context life, a new renderer) kept as stale slots for the game's rebuild to reuse, instead of dropping them
     // the jitter probe
     uint64_t jNeighbour = 0, jOnly02 = 0, jOther = 0;
     uint64_t jDiffers[16] = {};
@@ -419,14 +420,14 @@ inline size_t formatMainLine(char* out, size_t cap, const Stats& s, uint64_t sec
         "forwarded whole %llu (first call %llu, dirty view %llu, rows not derivable %llu, forced rebuild %llu, unbuildable %llu, no template %llu, renderer change %llu, "
         "other thread %llu, contexts full %llu, unreadable %llu, swap fault %llu); estimated saving %.2f ms (%.3f ms a frame, from %.3f ms a miss); "
         "swap cost %.4f ms a hit, %.4f ms a miss; verify %llu checks, %llu padding-only, %llu mismatches; key self-check %llu ok, %llu failed, %llu with the view block changing under the call; "
-        "misses on a key evicted lately %llu; %u slots in use, %u contexts.",
+        "misses on a key evicted lately %llu; %u slots in use, %u contexts; states kept for reuse by resets %llu.",
         u(seconds), u(s.calls), u(frames), static_cast<double>(s.calls) / fr, u(s.pathOverride), u(s.pathPlain), u(s.gameMemo), u(s.hits),
         100.0 * static_cast<double>(s.hits) / calls, u(s.misses), s.misses ? s.missMs / static_cast<double>(s.misses) : 0.0, u(s.derived),
         s.derived ? s.deriveMs / static_cast<double>(s.derived) : 0.0, u(s.refreshes), s.refreshes ? s.refreshMs / static_cast<double>(s.refreshes) : 0.0, u(s.forwarded),
         u(s.byReason[kFirst]), u(s.byReason[kDirtyView]), u(s.byReason[kNoRows]), u(s.byReason[kForceRebuild]), u(s.byReason[kUnbuildable]), u(s.byReason[kNoTemplate]),
         u(s.byReason[kRendererChange]), u(s.byReason[kOtherThread]), u(s.byReason[kContextsFull]), u(s.byReason[kUnreadable]), u(s.byReason[kSwapFault]), saved, saved / fr,
         estMissMs, s.hits ? s.hitMs / static_cast<double>(s.hits) : 0.0, s.misses ? s.missOverheadMs / static_cast<double>(s.misses) : 0.0, u(s.verifyChecks),
-        u(s.verifyPadding), u(s.verifyMismatches), u(s.selfOk), u(s.selfFail), u(s.selfRace), u(s.capacityMisses), slotsInUse, contexts);
+        u(s.verifyPadding), u(s.verifyMismatches), u(s.selfOk), u(s.selfFail), u(s.selfRace), u(s.capacityMisses), slotsInUse, contexts, u(s.statesKept));
     return n < 0 ? 0 : static_cast<size_t>(n);
 }
 
@@ -534,11 +535,33 @@ public:
         return n;
     }
 
-    // Forget every slot of a group (a new context life or a new renderer). The states in them are left where they are: they are the game's allocations and not ours to free.
-    void resetGroup(int g) noexcept {
+    // A new context life or a new renderer: no kept state may be served again, and none may be lost. A parked state owns the game's vector blocks and four refcounted GPU objects,
+    // and nothing else will ever release them: the game frees only the state in its context. So a populated slot is NOT cleared (that would drop the pointers: a leak). It becomes a
+    // stale slot: dead (never matched, recycled before anything else) with its key zeroed, so that no call's key can equal it, neither the cache's find nor the game's own memo when a
+    // miss later swaps it into the context. The next miss that recycles it swaps it into the context and the game's build runs over it, which resizes its vectors in place and releases
+    // and recreates its four GPU objects exactly as it does for its own state: the game's own release path frees it. (An unpopulated slot holds the empty template and owns nothing.)
+    // Returns how many states were kept.
+    int resetGroup(int g) noexcept {
+        int kept = 0;
         for (Slot& s : slots_) {
-            if (s.owner == g) s = Slot{};
+            if (s.owner != g) continue;
+            if (!s.populated) {
+                s = Slot{};
+                continue;
+            }
+            std::memset(s.state, 0, kKeyBytes);
+            s.extra = kExtraUnknown;
+            s.dead = true;
+            ++kept;
         }
+        stats.statesKept += static_cast<uint64_t>(kept);
+        return kept;
+    }
+    // The slots a call could be served from: populated, and not stale or duplicate.
+    int slotsMatchable() const noexcept {
+        int n = 0;
+        for (const Slot& s : slots_) n += (s.owner >= 0 && s.populated && !s.dead) ? 1 : 0;
+        return n;
     }
 
     // The populated, live slot of the group whose key equals `key` bit for bit, other than `skip`.
@@ -694,7 +717,7 @@ inline Result serve(Cache& c, uint8_t* ctx, const CallInputs& in, Fwd&& fwd, Clo
         makeEmptyTemplate(ctxState, grp.templ);
         if (created) describeState(ctxState, flag, grp.firstSeen, sizeof(grp.firstSeen));
     }
-    // The first call of a context (the game constructs it with this byte set and the call clears it): a new life. Its kept states, if any, are dropped.
+    // The first call of a context (the game constructs it with this byte set and the call clears it): a new life. Its kept states, if any, are made stale and kept (resetGroup), never dropped.
     if (flag != 0) {
         c.resetGroup(g);
         grp.renderer = in.renderer;

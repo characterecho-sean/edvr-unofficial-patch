@@ -142,19 +142,26 @@ void resolvePixel(uint3 id,uint unbound){
             // no seam. Rigs that bind no b1 read zero: no hold.
             float2 at=(float2(ox,oy)+.5)*float2(size)/float2(extent)-.5+jit.xy;
             int2 corner=int2(floor(at));int2 centre=int2(round(at));
-            float3 lo=1e10,hi=-1e10;float lumaLo=1e10,lumaHi=-1e10;
-            [unroll] for(int ny=-1;ny<=1;++ny)[unroll] for(int nx=-1;nx<=1;++nx){
-                float3 c=Raw.Load(int3(clamp(centre+int2(nx,ny),0,size-1),0)).rgb;
-                float l=dot(c,float3(.299,.587,.114));lumaLo=min(lumaLo,l);lumaHi=max(lumaHi,l);
+            // The centre texel first. lumaHi is at least its luma, and faint is zero from lumaHi = the limit up, so a centre at
+            // or above the limit leaves w at zero and the pixel as it is: the other twelve fetches would change nothing. (Were
+            // the two readings of that luma to differ by an ulp at the limit, w would be about 1e-7 and move the stored value by
+            // 3e-5 of a step: the same byte.) ui_holo_pass_test holds the output to the pass as it was, byte for byte.
+            float3 cc=Raw.Load(int3(clamp(centre,0,size-1),0)).rgb;
+            if(dot(cc,float3(.299,.587,.114))<resolve.y){
+                float3 lo=1e10,hi=-1e10;float lumaLo=1e10,lumaHi=-1e10;
+                [unroll] for(int ny=-1;ny<=1;++ny)[unroll] for(int nx=-1;nx<=1;++nx){
+                    float3 c=Raw.Load(int3(clamp(centre+int2(nx,ny),0,size-1),0)).rgb;
+                    float l=dot(c,float3(.299,.587,.114));lumaLo=min(lumaLo,l);lumaHi=max(lumaHi,l);
+                }
+                [unroll] for(int cy=0;cy<2;++cy)[unroll] for(int cx=0;cx<2;++cx){
+                    float3 c=Raw.Load(int3(clamp(corner+int2(cx,cy),0,size-1),0)).rgb;
+                    lo=min(lo,c);hi=max(hi,c);
+                }
+                float faint=1-smoothstep(resolve.y*.75,resolve.y,lumaHi);
+                float flat=1-smoothstep(8.0/255.0,16.0/255.0,lumaHi-lumaLo);
+                float w=faint*flat;
+                if(w>0){float3 held=clamp(v.rgb,lo-1.0/255.0,hi+1.0/255.0);v.rgb=lerp(v.rgb,held,w);}
             }
-            [unroll] for(int cy=0;cy<2;++cy)[unroll] for(int cx=0;cx<2;++cx){
-                float3 c=Raw.Load(int3(clamp(corner+int2(cx,cy),0,size-1),0)).rgb;
-                lo=min(lo,c);hi=max(hi,c);
-            }
-            float faint=1-smoothstep(resolve.y*.75,resolve.y,lumaHi);
-            float flat=1-smoothstep(8.0/255.0,16.0/255.0,lumaHi-lumaLo);
-            float w=faint*flat;
-            if(w>0){float3 held=clamp(v.rgb,lo-1.0/255.0,hi+1.0/255.0);v.rgb=lerp(v.rgb,held,w);}
         }
         Output[uint2(ox,oy)]=v;
     }

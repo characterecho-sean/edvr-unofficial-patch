@@ -23,6 +23,10 @@ This file is why it does what it does. Using it is one paragraph in the
   its own kept default, `edvr_install\edvr.ini.base` and
   `edvr_install\edvr-flat.ini.base`. A scope change deletes no settings file.
 - **Which profile runs** is set by Elite's 3D mode, not the installer.
+- **Installs by `tools\install_edvr.py` (2026-10-14):** the game's original
+  runtime is recovered from the newest receipt that still holds it, so an
+  update, a switch to flat-only and an uninstall work after two tool installs
+  (see "Receipts from the tool"). `installer_test` pins it over real files.
 
 ## Why it exists
 
@@ -87,6 +91,25 @@ aside believing it had found the game's original.
 what EDHM ships), or DXVK — which is both what the report calls it and what it
 gets renamed to (`d3d11_edhm.dll`). An unrecognised one becomes
 `d3d11_other.dll` rather than being called by a name it might not deserve.
+
+### Receipts from the tool
+
+`tools/install_edvr.py` leaves a receipt beside the game for each install:
+`edvr_native_receipt.json` the first time, then a `.pre-<tag>-<stamp>.bak`
+sibling for each later one. The newest receipt is the evidence of who owns the
+files now, and it is the only one the installer reads for that.
+
+Its backup of the runtime is the runtime the tool replaced. After one tool
+install that is the game's own `openvr_api.dll`. After two it is the first EDVR
+runtime, and the game's own is in the older receipt's backup. The installer
+therefore looks for the original in the current receipt first and then in the
+older native receipts, newest first (`readNativeReceiptHistory`,
+`adoptToolOriginal`). An older receipt gets no softer proof than the current
+one: it must be an installed receipt for this folder, name this folder's
+`openvr_api.dll`, keep the backup beside it, record the backup's hash, and the
+backup must probe as a genuine OpenVR runtime and not as EDVR's. Without one
+that passes, nothing is adopted, and flat conversion and uninstall stay blocked
+as before.
 
 ## The two halves
 

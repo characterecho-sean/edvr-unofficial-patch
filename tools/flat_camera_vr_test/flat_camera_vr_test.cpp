@@ -970,6 +970,82 @@ void testModeWord() {
         check(safe, "R8o", "never clears while an observer is registered, the route injects or observes, or a flush is pending");
         check(minimal && convergent, "R8p", "clears observe-only only when set and the word only when non-zero, and one application leaves nothing for a second");
     }
+    // WHO OWNS THE RELAY GATE (2026-10-14, the 09:34:29 flight): a script of the three writers against the pure rule. The refresh reaches
+    // the detour only while the gate is open (the relay jumps straight to the game's body when it is closed, before any counter).
+    {
+        struct GateSim {
+            bool open = true;          // g_gate != 0
+            bool flatProfile = false;  // runtimeFlatProfile()
+            bool workFull = true;      // the flat work tier
+            void flatWrite(bool paused) { open = !paused; }                                      // applyWork: flatCameraInjectPauseFlat
+            void vrWrite(bool paused) { if (flatCameraGateWritableByVr(flatProfile)) open = !paused; }   // route / census: flatCameraInjectPause
+            void takeover() { open = flatCameraGateOpenForWork(workFull); }                      // takeOverFromVr
+            // Does one kind-3 call of a flat frame under Upstream reach the injector and inject? (gate open, hook re-armed, window open)
+            bool injects(bool observeOnly) const {
+                if (!open) return false;
+                FlatCameraAdmitInput in;
+                in.readable = true; in.kind = 3; in.gate = FlatCameraGateVerdict::Admit; in.upstreamOwns = true; in.phaseNonzero = true;
+                in.observeOnly = observeOnly;
+                return flatCameraAdmit(in) == FlatCameraAdmit::Inject;
+            }
+        };
+        check(flatCameraGateWritableByVr(false) && !flatCameraGateWritableByVr(true) && flatCameraGateOpenForWork(true) && !flatCameraGateOpenForWork(false),
+              "R8q", "the VR side may write the gate only while the profile is not flat; the flat tier opens it at Full and closes it otherwise");
+        {   // The flight: VR quiet closes the gate, the switch, the route's wind-down (a no-op now), the takeover opens it.
+            GateSim g;
+            g.vrWrite(true);                         // VR: the route is quiet, the injected set empty: closed (unchanged VR behaviour)
+            const bool closedInVr = !g.open;
+            g.flatProfile = true;                    // the switch
+            g.vrWrite(true);                         // the route winds down after the switch, and the census deactivates
+            g.takeover();                            // the flat step takes over: Full, so open
+            g.vrWrite(true);                         // a late census deactivate or route step
+            check(closedInVr && g.open && g.injects(false) && !g.injects(true),
+                  "R8r", "route quiet after the switch, then the takeover: the gate is open, and a kind-3 call reaches injection (it still cannot while observe-only)");
+        }
+        {   // The VR write lands first, before the switch is visible to it: the takeover still repairs the gate.
+            GateSim g;
+            g.vrWrite(true);
+            g.flatProfile = true;
+            g.takeover();
+            check(g.open && g.injects(false), "R8s", "a gate the VR side closed before the switch is opened by the takeover from flat's Full tier");
+        }
+        {   // The census's deactivate after the switch, with no route: the flight's second writer.
+            GateSim g;
+            g.flatProfile = true;
+            g.takeover();
+            g.vrWrite(flatCameraVrQuietFor(0, true));   // deactivate(): Pause(flatCameraVrQuiet()) with the word zero and nothing injected = true
+            check(g.open, "R8t", "a census deactivate after the switch does not close the gate (flatCameraVrQuiet() is true for a census-only process)");
+        }
+        {   // The flat runtime's own stand-down still closes it, a later Full reopens it, and the VR side cannot interfere in between.
+            GateSim g;
+            g.flatProfile = true;
+            g.takeover();
+            g.workFull = false; g.flatWrite(true);   // applyWork: Full -> Paused
+            const bool closed = !g.open;
+            g.vrWrite(false);                        // a stray VR open (the census's key-on edge) must not undo the stand-down
+            const bool stillClosed = !g.open;
+            g.workFull = true; g.flatWrite(false);   // applyWork: Paused -> Full
+            check(closed && stillClosed && g.open && g.injects(false),
+                  "R8u", "flat stand-down still closes the gate, the VR side cannot reopen it, and the next Full reopens it");
+        }
+        {   // A takeover during a non-Full tier leaves the gate closed until the tier returns to Full.
+            GateSim g;
+            g.flatProfile = true; g.workFull = false;
+            g.takeover();
+            const bool closed = !g.open;
+            g.workFull = true; g.flatWrite(false);
+            check(closed && g.open, "R8v", "a takeover while the flat work is stood down sets the gate closed; the return to Full opens it");
+        }
+        {   // Back to VR: the VR side owns the gate again.
+            GateSim g;
+            g.flatProfile = true; g.takeover();
+            g.flatProfile = false;                   // flat -> VR
+            g.vrWrite(true);
+            const bool vrClosed = !g.open;
+            g.vrWrite(false);
+            check(vrClosed && g.open, "R8w", "after a switch back to VR the route and the census write the gate again");
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1162,10 +1238,11 @@ const Golden kInjectGolden[] = {
     // preFlat and flatFrame were re-pinned 2026-10-14 for the kind-3 signature instrument (flat_camera_signature.h): a sampled call
     // reads its frustum and is counted by signature at every exit (five noteSignature calls), and the 5 s tick prints one more line.
     // Log-only; no write, no key, no change to what is injected. Re-pinned again 2026-10-14 (flat-switch fixes): the signature sample moved\n    // ahead of the observe-only return (reads only, ahead of every write), kind3Seen is set after the admission and not for an Observed call,\n    // and the flat frame step takes the detour over from the VR side (takeOverFromVr) and begins the ownership machine with the hook's mode.
+    // flatPause was re-pinned for the gate fix: the original body is now flatCameraInjectPauseFlat (the flat runtime's own write), and\n    // flatCameraInjectPause is the VR side's guarded entry (a no-op while the flat profile is active).
     {"preFlat", "    // The VR camera census's switch: a process that observes only stays observe-only until the flat step re-arms it (takeOverFromVr).\n", nullptr, 0xE8749FAF6BB4D69Aull},
     {"postFlat", "    if (g_refreshTls.observe) {\n", nullptr, 0xD8A87AE0BF95ACF3ull},
     {"flatFrame", "void flatCameraInjectFrame(uint64_t frame, bool temporalModeEnabled) {", nullptr, 0x730964946BE20D2Cull},
-    {"flatPause", "void flatCameraInjectPause(bool paused) {", nullptr, 0x90A83A563BF10BA2ull},
+    {"flatPause", "void flatCameraInjectPauseFlat(bool paused) {", nullptr, 0xC9482D7BA404941Bull},
     {"flatClose", "void flatCameraInjectClose(bool phaseNonzero, bool applied, bool clean, bool sceneNamed) {", nullptr, 0x28890A6E5363AED4ull},
     {"flatReset", "void flatCameraInjectReset() {", nullptr, 0xEF58F30F176668DAull},
     {"flatArmDisarm", "// The window opens once the frame's phase is chosen; every Present edge closes\n",
@@ -1255,6 +1332,24 @@ void testSourcePins() {
         check(!flatFrame.empty() && count(flatFrame, "takeOverFromVr();") == 1 &&
               ordered(flatFrame, {"g_inject.frame = frame;", "takeOverFromVr();", "g_inject.core.begin(", "g_inject.observeOnly.load(std::memory_order_acquire));"}),
               "R11ar", "the flat frame step takes the detour over once per frame, before the ownership machine begins, and begins it with the hook's observe-only state (an observe-only hook is never offered Upstream)");
+        {   // 2026-10-14 (flat gate fix): one owner of the relay gate per profile.
+            const std::string pauseVr = functionBody(cpp, "void flatCameraInjectPause(bool paused) {");
+            const std::string pauseFlat = functionBody(cpp, "void flatCameraInjectPauseFlat(bool paused) {");
+            const std::string runtimeCpp = slurp("src/d3d11/flat_runtime.cpp");
+            check(!pauseVr.empty() && !pauseFlat.empty() && count(cpp, "g_gate.store(paused ? 0 : 1") == 1 && count(pauseFlat, "g_gate.store(paused ? 0 : 1") == 1 &&
+                  ordered(pauseVr, {"if (!flatCameraGateWritableByVr(runtimeFlatProfile())) return;", "flatCameraInjectPauseFlat(paused);"}) &&
+                  pauseVr.find("g_gate") == std::string::npos,
+                  "R11au", "the gate is written in one place (flatCameraInjectPauseFlat); the VR side's flatCameraInjectPause returns first while the flat profile is active and only forwards otherwise");
+            check(count(runtimeCpp, "flatCameraInjectPauseFlat(next != FlatWork::Full);") == 1 && count(runtimeCpp, "flatCameraInjectPause(") == 0 &&
+                  count(cpp, "flatCameraInjectPause(flatCameraVrQuiet());") == 1 &&
+                  count(slurp("src/d3d11/vr_camera_census.cpp"), "flatCameraInjectPauseFlat") == 0,
+                  "R11av", "the flat runtime's tier edges write the gate through the flat entry; the route and the census keep the VR entry (which is a no-op while flat)");
+            check(!take.empty() &&
+                  ordered(take, {"g_vrBits.store(0u, std::memory_order_release);", "const unsigned gateBefore = ",
+                                 "flatCameraInjectPauseFlat(!flatCameraGateOpenForWork(flatRuntimeWorkFull()))", "const unsigned gateAfter = ",
+                                 "g_inject.observeOnly.store(false, std::memory_order_release);", "(gate=%u->%u)"}),
+                  "R11aw", "the takeover sets the gate from the flat work tier (open at Full) and the takeover line names gate=before->after");
+        }
         const std::string pre2 = functionBody(cpp, "void refreshPre(uintptr_t r0, uintptr_t ctx, uintptr_t p2, uintptr_t camera) noexcept {");
         check(!pre2.empty() && count(cpp, "g_inject.signatures.noteKind3Call()") == 1 && count(pre2, "g_inject.signatures.noteKind3Call()") == 1 &&
               ordered(pre2, {"g_inject.signatures.noteKind3Call()", "readFrustum(camera)", "if (observe) noteSignature(false);", "if (observe) {\n        observeCall("}) &&

@@ -110,8 +110,9 @@ void refreshUserSize() {
 // (kind 0) gets the remembered block restored before the original runs, so the apply builds the remembered mode. Nothing is changed
 // while VR is inactive.
 uint64_t requestReplacement(void* a, void* b, void* c, void* d, void* e, void* f, void* g, void* h) {
-    // Timed while the VR profile is not active (cross_profile_cost.h): from entry to the forward call, the rewrite included.
-    cross_profile::Probe probe = cross_profile::enterSite(cross_profile::Site::VrModeRequest, !runtimeVrProfile());
+    // Timed while the flat profile is active (cross_profile_cost.h inactiveFor): from entry to the forward call, the rewrite included.
+    cross_profile::Probe probe = cross_profile::enterSite(cross_profile::Site::VrModeRequest,
+        cross_profile::inactiveFor(cross_profile::Owner::Vr, runtimeFlatProfile(), runtimeVrProfile()));
     // Before any read of the saved mode. Flat and Passthrough rewrite only with VR in scope and a live session (vr_window_gate.h).
     if (!vrWindowRewriteAllowed(runtimeProfileValue(), runtimeScopeIncludesVr(), vrSsaaHoldVrLive())) {
         probe.stop();
@@ -170,8 +171,9 @@ uint64_t requestReplacement(void* a, void* b, void* c, void* d, void* e, void* f
 // The settings copy (W): the original copies the settings block into the render context; then the hold (vrSsaaHoldAfterCopy) reads
 // the copied value and, while VR is live, sets the field to 1.0. ctx is the first argument's +0x1180, read before the copy.
 uint64_t copyReplacement(void* a, void* b, void* c, void* d, void* e, void* f, void* g, void* h) {
-    // Timed while the VR profile is not active (cross_profile_cost.h): the read before the copy and the hold after it, not the copy.
-    cross_profile::Probe probe = cross_profile::enterSite(cross_profile::Site::VrSettingsCopy, !runtimeVrProfile());
+    // Timed while the flat profile is active (cross_profile_cost.h inactiveFor): the read before the copy and the hold after it, not the copy.
+    cross_profile::Probe probe = cross_profile::enterSite(cross_profile::Site::VrSettingsCopy,
+        cross_profile::inactiveFor(cross_profile::Owner::Vr, runtimeFlatProfile(), runtimeVrProfile()));
     uint64_t ctx = 0;
     readU64(reinterpret_cast<uintptr_t>(a) + 0x1180, &ctx);
     probe.stop();

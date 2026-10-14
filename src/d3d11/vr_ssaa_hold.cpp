@@ -1,6 +1,7 @@
 // The VR Supersampling hold (vr_ssaa_hold.h says what and why). The decision is vr_ssaa_hold_math.h's; this file is the game's side.
 #include "vr_ssaa_hold.h"
 
+#include "vr_ssaa_gate.h"       // vrSsaaGateFrame: the frame number the instrument line carries
 #include "vr_ssaa_hold_math.h"
 #include "ui_panel_scale.h"  // uiPanelScaleEarlyHooks: the setter and getter hooks, installed at DLL load
 #include "ui_sizing_math.h"  // kUiPanelStamp, kUiPanelImageSize: build 332841
@@ -46,6 +47,11 @@ bool g_setterIn = false;                  // the setter and getter hooks (ui_pan
 char g_setterWhy[200] = "";
 DWORD g_slotErr = 0;
 std::atomic<bool> g_holdAllowed{false};   // the VR profile: set when the loader runs (config is up by then)
+std::atomic<bool> g_arriving{false};      // VR went live under a flat profile: a 3D-on apply ahead of the profile switch (armed on the rise)
+std::atomic<uint32_t> g_copyCalls{0};     // the settings copy relay's calls (the instrument)
+std::atomic<uint32_t> g_copyLines{0};     // the lines it logged (capped)
+std::atomic<uint32_t> g_copyLastKey{0xFFFFFFFFu};  // its last logged (allowed, live, arriving, wrote) and copied bits: a change logs
+std::atomic<uint32_t> g_copyLastBits{kNoneBits};
 std::atomic<bool> g_modeKnown{false};     // Settings.xml's mode, read at the loader only (startup)
 std::atomic<int> g_mode{-1};
 std::atomic<bool> g_held{false};          // the field is held at 1.0 right now; the panel factor reads 1.0 then
@@ -341,7 +347,8 @@ static void holdEngageLive() {
     if (ctx && writeFloatGuarded(ctx + kCtxSsOff, ssaahold::kHeldValue)) {
         g_held.store(true, std::memory_order_release);
         g_requestedBits.store(gameBits, std::memory_order_release);
-        Log::get().note("vr ssaa gate: VR active -> holding at 1.0 (game's %s)", gameText);
+        Log::get().note("vr ssaa gate: VR active -> holding at 1.0 (game's %s%s)", gameText,
+                        g_arriving.load(std::memory_order_acquire) ? "; ahead of the profile switch, 3D turning on" : "");
     } else {
         Log::get().note("vr ssaa gate: VR active -> not held yet (game's %s; no render context or write failed)", gameText);
     }
@@ -365,8 +372,23 @@ void vrSsaaHoldFrameBoundary() {
     const bool live = edvrQueryNativeRenderSizing(EDVR_NATIVE_RENDER_SIZING_VERSION_1, sizeof(sizing), &sizing) && sizing.valid == 1;
     const bool was = g_vrLive.exchange(live, std::memory_order_acq_rel);
     if (live == was) return;
-    if (live) holdEngageLive();
-    else holdRelease();
+    const bool profileAllows = holdAllowedNow();
+    if (live) {
+        // A rise under a flat profile is a 3D-on whose apply runs before the profile switch commits (~0.5 s later in the 2026-10-14
+        // flight): the hold is armed now so the next sizing pass reads 1.0, not the flat 0.65. The profile switch clears the latch.
+        const bool arriving = ssaahold::arrivingAtRise(profileAllows, runtimeScopeIncludesVr(), runtimeFeaturesAllowed());
+        g_arriving.store(arriving, std::memory_order_release);
+        g_holdAllowed.store(ssaahold::holdAllowedFor(profileAllows, arriving), std::memory_order_release);
+        if (arriving)
+            Log::get().note("vr ssaa gate: VR session live under the %s profile (3D turning on): the hold is armed ahead of the profile "
+                            "switch; settings copies so far %u",
+                            runtimeProfileName(), g_copyCalls.load(std::memory_order_relaxed));
+        holdEngageLive();
+    } else {
+        g_arriving.store(false, std::memory_order_release);
+        g_holdAllowed.store(profileAllows, std::memory_order_release);
+        holdRelease();
+    }
 }
 
 // Called at a profile switch, render thread, frame boundary (vr_ssaa_hold.h). The hold follows the active profile as well as the live
@@ -374,6 +396,7 @@ void vrSsaaHoldFrameBoundary() {
 // the loader hook is installed; safe to call twice (the second call finds the field already where it should be).
 void vrSsaaHoldProfileChanged() {
     if (g_slotState.load(std::memory_order_acquire) != 1) return;
+    g_arriving.store(false, std::memory_order_release);  // the profile now decides
     g_holdAllowed.store(holdAllowedNow(), std::memory_order_release);
     switch (ssaahold::profileChangeAction(g_holdAllowed.load(std::memory_order_acquire), g_vrLive.load(std::memory_order_acquire),
                                           g_held.load(std::memory_order_acquire))) {
@@ -383,36 +406,119 @@ void vrSsaaHoldProfileChanged() {
     }
 }
 
+// The copy's source block, for the instrument only (log): W copies 0x160 bytes of the active preset entry, [[ctx+0x33C8]+0x230] +
+// index*0x178 + 0x14 (index [obj+0x258], count [obj+0x228]), to ctx+0x3428, and a small header of the object (+0x30, +0x58..+0x80) to
+// ctx+0x33D0.. (read from 0x281C0D0..0x281C3EB, build 332841). Nothing in it is proven to hold the 3D mode; this logs which dwords change
+// between copies, so a 3D-on apply shows the mode field if it is there. Never written.
+constexpr uintptr_t kCtxSettingsObjOff = 0x33C8;
+constexpr uint32_t kBlockBytes = 0x160, kHeadFrom = 0x30, kHeadBytes = 0x54;  // object +0x30 .. +0x84
+constexpr uint32_t kBlockDwords = (kBlockBytes + kHeadBytes) / 4;
+static uint32_t g_blockPrev[kBlockDwords] = {};
+static bool g_blockHavePrev = false;
+static uint32_t g_blockLines = 0;
+static std::atomic_flag g_blockBusy = ATOMIC_FLAG_INIT;
+
+// Reads the block into out (kBlockDwords dwords) and the preset index and count. False when any pointer does not read.
+static bool readCopyBlock(uintptr_t ctx, uint32_t* out, uint32_t* index, uint32_t* count) {
+    uint64_t obj = 0, table = 0;
+    if (!readGame(reinterpret_cast<const uint8_t*>(ctx + kCtxSettingsObjOff), &obj, 8) || !obj) return false;
+    if (!readGame(reinterpret_cast<const uint8_t*>(obj + 0x258), index, 4)) return false;
+    if (!readGame(reinterpret_cast<const uint8_t*>(obj + 0x228), count, 4)) return false;
+    if (!readGame(reinterpret_cast<const uint8_t*>(obj + 0x230), &table, 8) || !table || *index >= *count) return false;
+    if (!readGame(reinterpret_cast<const uint8_t*>(table + static_cast<uint64_t>(*index) * 0x178 + 0x14), out, kBlockBytes)) return false;
+    return readGame(reinterpret_cast<const uint8_t*>(obj + kHeadFrom), out + kBlockBytes / 4, kHeadBytes);
+}
+
+// One line per copy that changed any dword (first 10 changes named), capped at 40 lines: "e+0x<off>" is the preset entry, "o+0x<off>" the
+// object header. The entry's offset 0x13C is the Supersampling field.
+static void logCopyBlockChange(uintptr_t ctx, uint32_t call) {
+    if (g_blockBusy.test_and_set(std::memory_order_acquire)) return;  // another thread is in it: this copy is simply not compared
+    uint32_t cur[kBlockDwords] = {};
+    uint32_t index = 0, count = 0;
+    if (!readCopyBlock(ctx, cur, &index, &count)) {
+        g_blockBusy.clear(std::memory_order_release);
+        return;
+    }
+    if (g_blockHavePrev && g_blockLines < 40) {
+        char list[400] = {};
+        size_t at = 0;
+        uint32_t changed = 0;
+        for (uint32_t i = 0; i < kBlockDwords; ++i) {
+            if (cur[i] == g_blockPrev[i]) continue;
+            if (++changed > 10) continue;
+            const bool entry = i < kBlockBytes / 4;
+            const uint32_t off = entry ? i * 4 : kHeadFrom + (i - kBlockBytes / 4) * 4;
+            const int w = std::snprintf(list + at, sizeof(list) - at, " %c+0x%X %u->%u;", entry ? 'e' : 'o', off, g_blockPrev[i], cur[i]);
+            if (w > 0 && at + static_cast<size_t>(w) < sizeof(list)) at += static_cast<size_t>(w);
+        }
+        if (changed) {
+            ++g_blockLines;
+            Log::get().note("vr ssaa gate: copy call %u: preset %u of %u; %u dword(s) of the copied block changed since the last copy:%s%s",
+                            call, index, count, changed, list, changed > 10 ? " (more)" : "");
+        }
+    }
+    std::memcpy(g_blockPrev, cur, sizeof(cur));
+    g_blockHavePrev = true;
+    g_blockBusy.clear(std::memory_order_release);
+}
+
 // The settings copy's hold (the W relay in vr_window_trampolines.cpp): after the game copies its settings into the render context,
 // the copied value is the game's own, and while VR is live the field is set to 1.0 (the size writer reads it next). The source block
-// is not written. Writes nothing when VR is not live.
+// is not written. Writes nothing when VR is not live. "Allowed" is the VR profile or an arriving 3D-on (VR live under a flat profile).
+// Every call is counted; a line is logged on the first calls and whenever (allowed, live, arriving, wrote) or the copied value changes
+// (capped at 64), so the next log says whether a sizing pass ran after the hold armed and what it saw.
 void vrSsaaHoldAfterCopy(uintptr_t ctx) {
-    if (!ctx || g_slotState.load(std::memory_order_acquire) != 1 || !g_holdAllowed.load(std::memory_order_acquire)) return;
+    if (!ctx || g_slotState.load(std::memory_order_acquire) != 1) return;
+    const uint32_t call = g_copyCalls.fetch_add(1, std::memory_order_relaxed) + 1;
+    const bool allowed = g_holdAllowed.load(std::memory_order_acquire);
+    const bool live = g_vrLive.load(std::memory_order_acquire);
+    const bool arriving = g_arriving.load(std::memory_order_acquire);
     g_ctx.store(ctx, std::memory_order_release);
     float copied = 0.0f;
     const bool haveCopied = readFloatGuarded(ctx + kCtxSsOff, &copied);
-    if (haveCopied) g_gameBits.store(bitsOf(copied), std::memory_order_release);
-    if (!g_vrLive.load(std::memory_order_acquire)) {
+    if (haveCopied) g_gameBits.store(bitsOf(copied), std::memory_order_release);  // the copy is the game's own value in every profile
+    int wrote = 0;  // 0 not written, 1 written 1.0, -1 write failed
+    if (allowed && live) {
+        if (writeFloatGuarded(ctx + kCtxSsOff, ssaahold::kHeldValue)) {
+            wrote = 1;
+            g_held.store(true, std::memory_order_release);
+            g_requestedBits.store(haveCopied ? bitsOf(copied) : kNoneBits, std::memory_order_release);
+        } else {
+            wrote = -1;
+        }
+    } else {
         g_copyHeld.store(false, std::memory_order_release);
-        return;
     }
-    if (!writeFloatGuarded(ctx + kCtxSsOff, ssaahold::kHeldValue)) {
+    // The instrument line.
+    const uint32_t bits = haveCopied ? bitsOf(copied) : kNoneBits;
+    const uint32_t key = (allowed ? 1u : 0u) | (live ? 2u : 0u) | (arriving ? 4u : 0u) | (wrote == 1 ? 8u : wrote < 0 ? 16u : 0u);
+    if (g_copyLines.load(std::memory_order_relaxed) < 64 &&
+        (call <= 6 || key != g_copyLastKey.load(std::memory_order_relaxed) || bits != g_copyLastBits.load(std::memory_order_relaxed))) {
+        g_copyLastKey.store(key, std::memory_order_relaxed);
+        g_copyLastBits.store(bits, std::memory_order_relaxed);
+        g_copyLines.fetch_add(1, std::memory_order_relaxed);
+        char copiedText[24] = "unknown";
+        if (haveCopied) std::snprintf(copiedText, sizeof(copiedText), "%.4f", static_cast<double>(copied));
+        Log::get().note("vr ssaa gate: copy call %u (W 0x281C0D0), frame %u: profile %s, hold allowed %d (VR profile %d, arriving %d), VR "
+                        "live %d; copied %s, %s; ctx 0x%llX",
+                        call, vrSsaaGateFrame(), runtimeProfileName(), allowed ? 1 : 0, holdAllowedNow() ? 1 : 0, arriving ? 1 : 0,
+                        live ? 1 : 0, copiedText,
+                        wrote == 1 ? "wrote 1.0" : wrote < 0 ? "write FAILED" : "wrote nothing (the sizing pass reads the copied value)",
+                        static_cast<unsigned long long>(ctx));
+    }
+    logCopyBlockChange(ctx, call);
+    if (wrote < 0) {
         Log::get().note("vr ssaa gate: holding Supersampling at 1.0 after the settings copy failed: the field at 0x%llX could not be "
                         "written",
                         static_cast<unsigned long long>(ctx + kCtxSsOff));
         return;
     }
-    g_held.store(true, std::memory_order_release);
-    const uint32_t bits = haveCopied ? bitsOf(copied) : kNoneBits;
-    g_requestedBits.store(bits, std::memory_order_release);
-    if (!g_copyHeld.load(std::memory_order_acquire) || bits != g_copyBits.load(std::memory_order_acquire)) {
+    if (wrote == 1 && (!g_copyHeld.load(std::memory_order_acquire) || bits != g_copyBits.load(std::memory_order_acquire))) {
         g_copyHeld.store(true, std::memory_order_release);
         g_copyBits.store(bits, std::memory_order_release);
-        char copiedText[24] = "unknown";
-        if (haveCopied) std::snprintf(copiedText, sizeof(copiedText), "%.4f", static_cast<double>(copied));
         Log::get().note("vr ssaa gate: holding Supersampling at 1.0 after the settings copy (W 0x281C0D0): copied %s, held 1.0, "
                         "VR live 1",
-                        copiedText);
+                        haveCopied ? "(see the copy call line)" : "unknown");
     }
 }
 

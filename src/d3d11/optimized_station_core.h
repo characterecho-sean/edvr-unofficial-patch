@@ -1244,6 +1244,23 @@ inline void rigForgetBounds(bool* curValid, bool* lastValid, uint8_t* verdict, u
     *vetoedRun = 0;
 }
 
+// The first record's name a rig keeps for the own-ship prefix test (RigSlot::named, RigSlot::name). Recorded once, while the slot has none.
+inline bool rigRecordName(bool* named, char* dst, size_t cap, const char* recordName) noexcept {
+    if (*named || cap == 0) return false;
+    *named = true;
+    std::snprintf(dst, cap, "%s", recordName ? recordName : "");
+    return true;
+}
+
+// Release review 2026-10-14 finding 4: a rig's collection changed, so the rig is a different object's. Everything read from the old object is forgotten together: the bounds,
+// the verdict, the run of vetoes (rigForgetBounds) AND the first record's name, because the own-ship prefix exemption reads the name and a name kept from the old object
+// classed the new one by the old one's prefix. The next record names the rig afresh.
+inline void rigReassociate(bool* curValid, bool* lastValid, uint8_t* verdict, uint32_t* vetoedRun, bool* named, char* name, size_t nameCap) noexcept {
+    rigForgetBounds(curValid, lastValid, verdict, vetoedRun);
+    *named = false;
+    if (nameCap > 0) std::memset(name, 0, nameCap);
+}
+
 // A table entry names a rig whose collection is still the one it was filed under (a stale entry names a rig whose collection changed).
 inline bool collAssociationIs(uintptr_t rigColl, uintptr_t key) noexcept { return rigColl != 0 && rigColl == key; }
 

@@ -264,6 +264,29 @@ bool auditOwnership(Rig& r, std::vector<Ctx*> ctxs) {
     return ok;
 }
 
+// The reverse of auditOwnership: every live allocation is held by a context or a kept slot. A state parked in a slot is the only place its blocks are recorded; the game frees the
+// state in its context and nothing else, so a live block no slot or context holds can never be freed (a leak). Returns how many live blocks nothing holds.
+size_t unreachableBlocks(Rig& r, std::vector<Ctx*> ctxs) {
+    std::set<uint64_t> held;
+    auto take = [&](const uint8_t* state, bool ctxLayout) {
+        const uint8_t* vec[3] = {state + (ctxLayout ? 0x80 : lg::kVecOff[0]), state + (ctxLayout ? 0xA0 : lg::kVecOff[1]), state + (ctxLayout ? 0x110 : lg::kVecOff[2])};
+        for (const uint8_t* v : vec) {
+            if (ld64(v + 0x18) != 0) held.insert(ld64(v + 0x18));
+        }
+        const uint8_t* gpu = state + (ctxLayout ? 0x130 : lg::kGpuOff);
+        for (int g = 0; g < 4; ++g) {
+            if (ld64(gpu + 8 * g) != 0) held.insert(ld64(gpu + 8 * g));
+        }
+    };
+    for (Ctx* c : ctxs) take(c->mem, true);
+    for (int i = 0; i < lg::kPoolSlots; ++i) {
+        if (r.cache.slot(i).owner >= 0 && r.cache.slot(i).populated) take(r.cache.slot(i).state, false);
+    }
+    size_t lost = 0;
+    for (const auto& kv : r.h.live) lost += held.count(static_cast<uint64_t>(kv.first)) ? 0 : 1;
+    return lost;
+}
+
 // The state must be coherent: the views name the buffers, the buffers hold the tables, the key is the stored one.
 bool coherent(Ctx& c) {
     for (int t = 0; t < 2; ++t) {
@@ -683,7 +706,7 @@ void testForwardReasons() {
     in = mk(0, 2);
     in.renderer = 0xBEEF;
     r.call(c, in);
-    check(r.cache.stats.byReason[lg::kRendererChange] == 1 && r.cache.slotsInUse() == 0, "a new renderer drops every kept state and is forwarded");
+    check(r.cache.stats.byReason[lg::kRendererChange] == 1 && r.cache.slotsMatchable() == 0, "a new renderer makes every kept state unmatchable and is forwarded");
     // the first-call flag appearing again is a new life of the context
     r.call(c, mk(0, 3));
     r.call(c, mk(0, 4));
@@ -702,7 +725,74 @@ void testForwardReasons() {
     }
     const uint64_t firsts = r.cache.stats.byReason[lg::kFirst];
     r.call(c, mk(0, 0));
-    check(r.cache.stats.byReason[lg::kFirst] == firsts + 1 && r.cache.slotsInUse() == 0, "a context whose first-call flag is set again starts over: its kept states are dropped");
+    check(r.cache.stats.byReason[lg::kFirst] == firsts + 1 && r.cache.slotsMatchable() == 0, "a context whose first-call flag is set again starts over: its kept states can no longer be served");
+}
+
+// A reset (a new renderer, a reborn context) used to clear every parked slot, losing the pointers of the states in them: the blocks stayed allocated and nothing could free them.
+// Now the slots are kept as stale ones (never matched, recycled first) and the game's rebuild over a recycled slot reuses and releases them.
+void testResetsLoseNothing() {
+    for (int mode = 0; mode < 2; ++mode) {   // 0: a renderer change, 1: a context rebirth (the first-call flag set again)
+        const char* name = mode == 0 ? "a renderer change keeps every parked state" : "a context rebirth keeps every parked state";
+        Rig r;
+        Ctx c;
+        std::vector<lg::CallInputs> keys;
+        for (int i = 0; i < 12; ++i) keys.push_back(mk(i % 2, i / 2));
+        r.call(c, keys[0]);
+        for (int round = 0; round < 3; ++round) {
+            for (const lg::CallInputs& in : keys) r.call(c, in);
+        }
+        check(unreachableBlocks(r, {&c}) == 0, "before a reset every live block is held by the context or a slot");
+        const int parked = r.cache.slotsInUse();   // populated slots, matchable or a verified duplicate: a reset keeps them all
+        check(parked >= 10, "the run parked a dozen states");
+        const uint64_t keptBefore = r.cache.stats.statesKept;
+        const uint64_t renderer = mode == 0 ? 0xBEEFull : 0xABCDull;
+        auto asCall = [&](lg::CallInputs in) {
+            in.renderer = renderer;
+            return in;
+        };
+        if (mode == 1) {
+            // the game's own destroy and construct of the context frees ITS state only (the parked ones are not its to free)
+            c.mem[lg::kCtxFirstFlag] = 1;
+            std::memset(c.mem, 0, 0x78);
+            for (int t = 0; t < 3; ++t) {
+                const size_t off = t == 0 ? 0x80 : t == 1 ? 0xA0 : 0x110;
+                r.h.release(reinterpret_cast<void*>(static_cast<uintptr_t>(ld64(c.mem + off + 0x18))));
+                std::memset(c.mem + off, 0, 0x20);
+            }
+            for (int g = 0; g < 4; ++g) {
+                r.h.release(reinterpret_cast<void*>(static_cast<uintptr_t>(ld64(c.mem + 0x130 + 8 * g))));
+                st64(c.mem + 0x130 + 8 * g, 0);
+            }
+        }
+        const uint64_t blocksBefore = r.h.live.size();
+        r.call(c, asCall(keys[0]));
+        check(r.cache.stats.statesKept - keptBefore == static_cast<uint64_t>(parked), name);
+        check(r.cache.slotsMatchable() == 0, "after the reset no kept state can be served");
+        check(unreachableBlocks(r, {&c}) == 0, "after the reset every live block is still held (reverse reachability)");
+        check(auditOwnership(r, {&c}), "after the reset every held pointer is live and held once");
+        check(r.h.live.size() >= blocksBefore - 7 * 2, "the parked blocks stay allocated until the game's rebuild reuses them");
+        // Stale states are never served: a first pass over the old keys misses every time and leaves exactly the fresh build.
+        const uint64_t hitsBefore = r.cache.stats.hits;
+        const uint64_t freesBefore = r.h.frees;
+        for (const lg::CallInputs& in : keys) {
+            r.call(c, asCall(in));
+            Oracle o;
+            o.build(asCall(in));
+            check(sameTables(c.mem, o.c.mem) && std::memcmp(c.mem, o.c.mem, lg::kKeyBytes) == 0, "a call after a reset leaves the fresh build, never a stale state");
+            check(coherent(c), "and a coherent one");
+            check(unreachableBlocks(r, {&c}) == 0, "no block is lost while the stale slots are recycled");
+            check(r.h.live.size() <= static_cast<size_t>(lg::kSlotsPerContext + 1) * 7, "recycling stale slots does not grow the heap");
+        }
+        check(r.cache.stats.hits == hitsBefore, "the first pass after a reset never hits a stale state");
+        check(r.h.frees > freesBefore, "the game's rebuild released stale blocks (its own release path, not ours)");
+        for (int round = 0; round < 3; ++round) {
+            for (const lg::CallInputs& in : keys) r.call(c, asCall(in));
+        }
+        check(r.cache.stats.hits > hitsBefore + 10, "the cache serves again after a reset");
+        check(unreachableBlocks(r, {&c}) == 0 && auditOwnership(r, {&c}), "and still loses nothing");
+        check(!r.cache.disabled && r.cache.stats.selfFail == 0 && r.cache.stats.verifyMismatches == 0, "a reset is not a failure");
+        check(r.h.live.size() <= static_cast<size_t>(lg::kSlotsPerContext + 1) * 7, "the heap stays bounded by the states held");
+    }
 }
 
 void testExtraNear() {
@@ -1090,12 +1180,12 @@ void testLines() {
     check(main == "light grid cache: last 30 s: 4400 calls in 2000 frames (2.20 a frame); rows by the override path 4400, by the plain path 0; the game's own memo 12, cache hits 4000 (90.9% of calls), misses 60 (0.290 ms each); "
                   "rows derived ahead 4400 times (0.0005 ms each), dirty view refreshed ahead 0 times (0.0000 ms each); forwarded whole 28 (first call 2, dirty view 26, rows not derivable 0, forced rebuild 0, unbuildable 0, no template 0, renderer change 0, other thread 0, "
                   "contexts full 0, unreadable 0, swap fault 0); estimated saving 1140.00 ms (0.570 ms a frame, from 0.285 ms a miss); swap cost 0.0002 ms a hit, 0.0010 ms a miss; "
-                  "verify 67 checks, 0 padding-only, 0 mismatches; key self-check 60 ok, 0 failed, 0 with the view block changing under the call; misses on a key evicted lately 3; 17 slots in use, 1 contexts.",
+                  "verify 67 checks, 0 padding-only, 0 mismatches; key self-check 60 ok, 0 failed, 0 with the view block changing under the call; misses on a key evicted lately 3; 17 slots in use, 1 contexts; states kept for reuse by resets 0.",
           "the 30 s line has exactly this text");
     if (main != "light grid cache: last 30 s: 4400 calls in 2000 frames (2.20 a frame); rows by the override path 4400, by the plain path 0; the game's own memo 12, cache hits 4000 (90.9% of calls), misses 60 (0.290 ms each); "
                 "rows derived ahead 4400 times (0.0005 ms each), dirty view refreshed ahead 0 times (0.0000 ms each); forwarded whole 28 (first call 2, dirty view 26, rows not derivable 0, forced rebuild 0, unbuildable 0, no template 0, renderer change 0, other thread 0, "
                 "contexts full 0, unreadable 0, swap fault 0); estimated saving 1140.00 ms (0.570 ms a frame, from 0.285 ms a miss); swap cost 0.0002 ms a hit, 0.0010 ms a miss; "
-                "verify 67 checks, 0 padding-only, 0 mismatches; key self-check 60 ok, 0 failed, 0 with the view block changing under the call; misses on a key evicted lately 3; 17 slots in use, 1 contexts.") {
+                "verify 67 checks, 0 padding-only, 0 mismatches; key self-check 60 ok, 0 failed, 0 with the view block changing under the call; misses on a key evicted lately 3; 17 slots in use, 1 contexts; states kept for reuse by resets 0.") {
         std::printf("  got: %s\n", main.c_str());
     }
     s.jNeighbour = 40;
@@ -1150,6 +1240,7 @@ int main(int argc, char** argv) {
     testCapacityMissAndThrash();
     testTwoContexts();
     testForwardReasons();
+    testResetsLoseNothing();
     testExtraNear();
     testAlreadyBuilt();
     testSelfCheckDiagnosis();

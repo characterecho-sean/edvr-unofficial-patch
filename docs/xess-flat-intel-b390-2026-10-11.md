@@ -52,6 +52,10 @@
   `claude/unified-install-feature-74bc24`, section "October 13: XeSS in VR"
   at the end; X1 d150a2bd, X2 252c53c8, X3 314ac46a BUILT, NOT FLOWN
   (Steam, `--scope both --xess`). World route (on foot) stays on its fallback.
+- Failed availability probe (2026-10-14, release review finding 6): the failure
+  is remembered with the D3D11 device it ran on, and a different device is
+  probed afresh with no `xessShutdown` between. xess_engine_test pins it
+  GPU-free (self-test) and on a supported device (the GPU flight).
 
 ## October 11: D3D11 capability probe
 

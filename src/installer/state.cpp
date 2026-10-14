@@ -4,6 +4,7 @@
 
 #include <wchar.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <vector>
@@ -244,11 +245,12 @@ bool backupTail(const std::wstring& tail, std::wstring* stamp, unsigned long* co
     return true;
 }
 
-// install_edvr.py's current receipt of one family: the newest backup-named sibling when there is one, else the receipt itself.
-std::wstring currentReceiptPath(const std::wstring& gameDir, const std::wstring& family) {
+// Every receipt path of one family, newest first, as install_edvr.py orders them: the backup-named siblings by stamp, then counter, and
+// the plain receipt last (it is the oldest: each later install writes a backup-named one beside it). The first is the current receipt.
+std::vector<std::wstring> receiptPathsNewestFirst(const std::wstring& gameDir, const std::wstring& family) {
+    struct Entry { std::wstring path, stamp; unsigned long counter; };
+    std::vector<Entry> siblings;
     const std::wstring prefix = family + L".pre-";
-    std::wstring best, bestStamp;
-    unsigned long bestCounter = 0;
     WIN32_FIND_DATAW fd{};
     HANDLE h = FindFirstFileW(joinPath(gameDir, L"*").c_str(), &fd);
     if (h != INVALID_HANDLE_VALUE) {
@@ -256,20 +258,22 @@ std::wstring currentReceiptPath(const std::wstring& gameDir, const std::wstring&
             if (fd.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) continue;
             const std::wstring name = fd.cFileName;
             if (name.size() <= prefix.size() || _wcsnicmp(name.c_str(), prefix.c_str(), prefix.size()) != 0) continue;
-            std::wstring stamp;
-            unsigned long counter = 0;
-            if (!backupTail(name.substr(prefix.size()), &stamp, &counter)) continue;
-            if (best.empty() || stamp > bestStamp || (stamp == bestStamp && counter > bestCounter)) {
-                best = joinPath(gameDir, name);
-                bestStamp = stamp;
-                bestCounter = counter;
-            }
+            Entry e;
+            e.counter = 0;
+            if (!backupTail(name.substr(prefix.size()), &e.stamp, &e.counter)) continue;
+            e.path = joinPath(gameDir, name);
+            siblings.push_back(e);
         } while (FindNextFileW(h, &fd));
         FindClose(h);
     }
-    if (!best.empty()) return best;
+    std::sort(siblings.begin(), siblings.end(), [](const Entry& a, const Entry& b) {
+        return a.stamp != b.stamp ? a.stamp > b.stamp : a.counter > b.counter;
+    });
+    std::vector<std::wstring> out;
+    for (const Entry& e : siblings) out.push_back(e.path);
     const std::wstring base = joinPath(gameDir, family);
-    return fileExists(base) ? base : std::wstring();
+    if (fileExists(base)) out.push_back(base);
+    return out;
 }
 
 // The receipt as the tool wrote it, or false when it is not one of its installed receipts for this folder.
@@ -313,9 +317,19 @@ bool readOneReceipt(const std::wstring& gameDir, const std::wstring& path, ToolR
 std::vector<ToolReceipt> readToolReceipts(const std::wstring& gameDir) {
     std::vector<ToolReceipt> out;
     for (const wchar_t* family : {L"edvr_native_receipt.json", L"edvr_flat_receipt.json"}) {
-        const std::wstring path = currentReceiptPath(gameDir, family);
+        const std::vector<std::wstring> paths = receiptPathsNewestFirst(gameDir, family);
         ToolReceipt receipt;
-        if (!path.empty() && readOneReceipt(gameDir, path, &receipt)) out.push_back(receipt);
+        if (!paths.empty() && readOneReceipt(gameDir, paths.front(), &receipt)) out.push_back(receipt);
+    }
+    return out;
+}
+
+std::vector<ToolReceipt> readNativeReceiptHistory(const std::wstring& gameDir) {
+    std::vector<ToolReceipt> out;
+    const std::vector<std::wstring> paths = receiptPathsNewestFirst(gameDir, L"edvr_native_receipt.json");
+    for (size_t i = 1; i < paths.size(); ++i) {
+        ToolReceipt receipt;
+        if (readOneReceipt(gameDir, paths[i], &receipt)) out.push_back(receipt);
     }
     return out;
 }

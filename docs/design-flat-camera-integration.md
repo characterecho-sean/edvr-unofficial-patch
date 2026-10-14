@@ -50,9 +50,9 @@
   fixed"; static-scene-frames 2,480 of 2,481 accepted menu frames; the
   unkeyed census empty in all 60 ticks; row-pair mismatches 0. Open:
   main-versus-auxiliary camera grouping; c2_coexist C7's unbounded loop
-  (a mutation hangs the rig instead of failing it). 2026-10-14, BUILT, NOT
-  FLOWN, no key: the `flat camera signatures 5s:` line (1 in 16 kind-3 calls);
-  a live VR-to-flat switch no longer leaves the hook observe-only (last entry).
+  (a mutation hangs the rig instead of failing it). 2026-10-14, BUILT, NOT FLOWN:
+  `flat camera signatures 5s:`; flat owns the relay gate (refresh-calls=0 flight). OPEN
+  on foot: foreground-active-query refusals, 2.5 min; `flat replay query rejected` logs why (last entry).
 - Environment: Windows x64, D3D11 flat mono; headset/runtime N/A. VR
   comparison: EDVR's OpenVR/OpenXR route. Record GPU/driver, executable and
   build identities, backend versions, dimensions, formats and mod chain.
@@ -1458,3 +1458,62 @@ injection itself is failing, and the signature line names the frustum.
 
 ruled out: the reflection probe cycle as the cause of these resets, because the cadence is 69 frames against the probe's 91 and the edges
 are ownership flips logged at exact frames. ruled out: the scene picker, because the winner is on-shape in every window.
+
+## 2026-10-14 (flight 091433): the takeover ran, the relay gate stayed shut (BUILT, NOT FLOWN)
+
+Flight (Frontier, v0.19.1-213-g7116598f, edvr_gfx_20261014_091433): the live VR-to-flat switch at 09:34:29.374 logged `stays observe-only; legacy
+owns (... route word 5)` and, 39 ms later, `switched from observe-only (VR census) to injection`. Legacy treated 440 frames a 5 s window with
+no 69-frame cycle (AA held). But every `flat camera inject 5s` line from 09:34:34 read `refresh-calls=0`, `lastcall` stayed at
+#14616390, and every `flat camera signatures 5s` line read `kind3-calls=0`; the window at 09:34:29.386 had counted 14,616,390 calls. Upstream
+took frames 102037-102045, found nothing to inject, and was handed back to Legacy (`upstream -> legacy ... fallback=legacy`).
+
+Cause (the leading explanation: the log does not print the gate, and nothing else sits ahead of the counter): `refreshCalls` is counted on the
+first line of `refreshPre` (flat_camera_inject.cpp), behind the relay gate `g_gate`. A closed gate sends the game's refresh straight to the original body
+before any counter, the census and the route. Four writers: the install, the census's key edges (vr_camera_census.cpp activate/deactivate),
+the VR world route's frame step (`flatCameraVrFrame`: `Pause(flatCameraVrQuiet())`) and the flat runtime's `applyWork`, which writes only on a
+tier EDGE (`next != Full || was != Full`). After the switch the route winds down (word 5 -> Driven only = quiet, nothing injected) and closes the
+gate; flat stays Full to Full and never reopens it. The takeover zeroed the word and cleared observe-only but never touched the gate.
+Corroboration: the 06:21 log of the same day shows refresh-calls 0 from 06:22:44 and calls resuming at 06:23:34, right after a "stood down"
+stretch ended (a tier edge, `Pause(false)`).
+
+Fix (one owner of the gate per profile):
+- `flatCameraInjectPauseFlat` (new) is the flat runtime's own write and always applies: `applyWork` uses it. `flatCameraInjectPause` is now the
+  VR side's entry (the route and the census keep calling it) and does nothing while the flat profile is active
+  (`flatCameraGateWritableByVr`, flat_camera_vr.h).
+- `takeOverFromVr`, when it clears anything, sets the gate from the flat work tier (`flatRuntimeWorkFull()`: open at Full, closed otherwise) and
+  logs `gate=<before>-><after>` on the takeover line (`switched from observe-only (VR census) to injection after a profile switch (gate=0->1)`,
+  or, when only the route's word was stale, `took the detour over from the VR route ... (route word N cleared, gate=0->1)`).
+- Flat's deliberate stand-down closes are untouched: a stand-down closes the gate, the VR side cannot reopen it, the next Full does.
+- Tests: flat_camera_vr_test R8q-R8w (a script of the three writers: route quiet after the switch then takeover = open and a kind-3 call injects;
+  a census deactivate after the switch does not close it; a stand-down still closes and the next Full reopens; a takeover during a stand-down
+  leaves it closed; back to VR the VR side writes again) and R11au-R11aw (source pins). `flatPause` golden re-pinned (the original body is now
+  `flatCameraInjectPauseFlat`); flat_temporal_test's stand-down pin follows the rename.
+
+Log signature of the fix working: the takeover line carries `gate=0->1` (or `1->1`), then `flat camera inject 5s` shows `refresh-calls` in the tens
+of thousands, `injected>0 owner=upstream`, `flat camera signatures 5s` shows `kind3-calls>0`, and `fallbacks` stops at 0 or 1.
+
+On foot, 09:34:54-09:37:34 (a separate gap, not fixed here). The refused frames name their reason: `flat jitter failure reason:
+flat-resolve-foreground-contract-unqualified` (309-449 frames a window, `accepted-frames=0`, first frame 103704 at about 09:34:51), and
+`flat foreground first failure: stage=state reason=foreground-active-query` (`H-attempts=309 H-qualified=0`, `captured=0`). That reason comes from
+flat_runtime.cpp (`queriesUnsafe = opaque && bytes && !replayQueriesSafe(ctx)`, around :6713/:6722): a foreground (weapon/hand) draw issued with
+an active D3D query cannot be replayed safely, so the frame's foreground contract fails and the frame is refused. It does not read the camera
+owner, so it is independent of Upstream receiving refresh calls. The 06:21 log shows the same reason from 06:23:50 to 06:26:30 under
+`owner=upstream`, on the build before the takeover. It began when Sean changed AA modes (`flat runtime: mode=fsr` 09:34:51.495, `mode=dlss` 09:34:51.761)
+about 6 s after Status.json lost its GuiFocus field at 09:34:45.355 (the census comment notes it is unreadable on foot): that is the nearest the log
+gets to the disembark. The journal reader does not write Disembark lines, so the exact time is not recorded. Next flight, to separate the two:
+log which query kind `replayQueriesSafe` rejects (occlusion, predicate, statistics) and the draw (VS/PS) it was on.
+
+The on-foot instrument (BUILT, NOT FLOWN, log only, no key). When the foreground draw's replay-safety test refuses (`replayQueriesSafe(ctx)` false:
+the stage=state reason `foreground-active-query`, the cause of the 09:34:54-09:37:34 refusals), flat_runtime.cpp's `noteReplayQueryCheck` counts the
+check and logs why, with the tracker's own view of the context (flat_replay_query_reject.h, pure):
+- the first 8 rejections of the session, one line each:
+  `flat replay query rejected 3/8: frame=104910 mode=dlss VS=7B0DC42D383F694C PS=0DF03E64DF9DBEF1 target=3840x2160 queries=OCCLUSION_PREDICATE#5(predicate)+PIPELINE_STATISTICS#4 open-brackets=3`
+  (`queries=` is the open count-bearing brackets' D3D11_QUERY names and numbers, read back from the objects the tracker holds; `(predicate)` marks
+  OCCLUSION_PREDICATE and the SO overflow predicates; `UNCERTAIN_BRACKET#100`, `TABLE_FULL#101`, `NOT_IMMEDIATE_CONTEXT#102` and `UNREADABLE_QUERY#103` are
+  the tracker's reasons with no query to name);
+- then a window line every 5 s, with the foreground report, counted per (primary query kind, VS, PS), top 4:
+  `flat replay query rejections 5s: checked=N rejected=M distinct=K overflow=O total-checked=.. total-rejected=.. logged=8/8 mode=dlss top=[NAME#code VS=.. PS=.. n=..| ...]`.
+  No line at all = the instrument did not run; `checked=0` = no foreground draw reached the test; `rejected=0` with `checked>0` = none refused.
+The decision itself is unchanged (`queriesUnsafe = opaque && bytes && !replayQueriesSafe(ctx)`, pinned). Tests: flat_temporal_test's
+flat_replay_query_reject_tests.h (the words, the counting, the wiring pins). To read on the next flight: which query kind and which VS/PS dominate the
+refused on-foot frames, and whether the first rejection falls at the disembark or at the AA-mode change.

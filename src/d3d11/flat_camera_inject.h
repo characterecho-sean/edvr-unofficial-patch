@@ -61,6 +61,12 @@ void flatCameraInjectReset();
 // (write failures) is never reopened by it, and the gate closes only once no camera
 // still holds an injected phase, because that camera's first un-injected call is the
 // flush and a closed relay would never see it.
+//
+// THE GATE HAS ONE OWNER PER PROFILE (flat_camera_vr.h flatCameraGateWritableByVr). flatCameraInjectPauseFlat is the flat runtime's
+// own write (applyWork, and the takeover after a live switch); it always applies. flatCameraInjectPause is the VR side's (the world route's
+// frame step and the census's key edges) and does nothing while the flat profile is active, so a VR route winding down after a live switch
+// to flat cannot close the gate the flat runtime means to keep open.
+void flatCameraInjectPauseFlat(bool paused);
 void flatCameraInjectPause(bool paused);
 
 // What the rest of flat_runtime needs:

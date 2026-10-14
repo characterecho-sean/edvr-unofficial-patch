@@ -294,8 +294,9 @@ void formatSeedDetail(char* out, size_t n, const Snapshot& s, uint64_t notes, bo
         std::snprintf(target, sizeof(target), "the target changed inside this window, so the figure mixes them: first %s; then %s", a, b);
     }
     std::snprintf(out, n,
-                  "EDVR GPU census, the HDR HUD depth-stencil seed above (the copy of the game's depth-stencil, then the passes "
-                  "that write it into the HUD layer's own): %.2f seeds a frame, %s; %s.",
+                  "EDVR GPU census, the HDR HUD depth-stencil seed above (the passes that write the game's depth-stencil, read "
+                  "where it lies, into the HUD layer's own; a copy of it first only when the game's texture refuses a shader view): "
+                  "%.2f seeds a frame, %s; %s.",
                   s.perFrame, cost, target);
 }
 

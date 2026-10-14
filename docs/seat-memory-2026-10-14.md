@@ -17,6 +17,13 @@ the arc's status, the log lines the build writes, and the flight checklist.
   `src\openxr\seat_memory.h`, read through `seatHolds(where)` by the decision table, every transition, and the host's meter schedule.
   Native on-foot VR (standing, room scale) flips it in that one place: false makes on foot a pass-through again and applies no seat. Not a
   config key, on purpose. The `where=` field still says `on_foot` in every log line, so the flight separates the two.
+- **Order of a runtime recentre (review of 498e4b16, finding 3, fixed on `claude/review-seat-order`).** The seat used to be polled before the
+  frame's pending reference changes were advanced, so the first frame at or after the change time located and published ONE pose in the old
+  seated space and the new origin landed a poll later. Now every frame opener (WaitGetPoses, the loading skybox frame, the flat panel frame)
+  advances through `advanceReferenceChanges`; when a LOCAL change takes effect on that frame and the seat memory answers, the frame is GIVEN
+  UP (closed, nothing located or published, the origin replaced with no frame open) and the game asks again: a pose update is withheld, not
+  published late. Several changes due at once are one withheld frame and one answer; a change whose time is still ahead waits for its own
+  frame; with the memory inactive nothing is withheld. Tests: `tools\openxr_native_test\seat_order_cases.h`.
 - **A runtime recentre is a manual recentre (Sean).** A LOCAL reference-space change (SteamVR's dashboard, Pimax Play) is always the player:
   once it has taken effect the head as it is in the new LOCAL is honoured as the seated origin and stored as the seat, aboard, on foot, in a
   window or out of one. Head untracked at that moment: LOCAL's own origin is the seat, applied when a frame allows. The compensate and

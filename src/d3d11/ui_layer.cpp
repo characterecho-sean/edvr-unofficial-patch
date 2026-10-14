@@ -283,12 +283,26 @@ struct Eye {
     // The 8-bit layer's depth-stencil target, for UI that TESTS depth or
     // stencil.
     LayerDs ds;
-    // The copy of the game's depth-stencil the seed reads (shared by both
-    // layers' seeds: it is the game's size, not the layer's).
+    // The copy of the game's depth-stencil the seed reads when it cannot read the game's in place (dsDirect* below); shared
+    // by both layers' seeds: it is the game's size, not the layer's.
     Ptr<ID3D11Texture2D> dsCopy;
     Ptr<ID3D11ShaderResourceView> dsCopyDepth, dsCopyStencil;
     uint32_t dsCopyW = 0, dsCopyH = 0;
     DXGI_FORMAT dsCopyFmt = DXGI_FORMAT_UNKNOWN;
+    // The seed's source when the game's own depth texture admits shader views over it (a typeless family format bound as
+    // depth AND shader resource, one sample, one mip, one slice: Elite's R32G8X24_TYPELESS, bind flags 0x48): views over
+    // that texture, so the seed reads it where it lies and nothing is copied first (the copy was 0.025-0.030 ms a seed on an
+    // RTX 5090, a quarter of the seed). A view keeps its texture alive, so a texture pointer held with its views cannot be
+    // reused for another texture. Two entries, replaced in turn, so a game that alternates two depth textures an eye does not
+    // remake its views every seed; dsDirectRefused remembers a texture whose views could not be made, so the copy runs for it
+    // without a new attempt every seed.
+    struct DsDirect {
+        const void* tex = nullptr;
+        Ptr<ID3D11ShaderResourceView> depth, stencil;
+    };
+    DsDirect dsDirect[2];
+    uint32_t dsDirectNext = 0;
+    const void* dsDirectRefused = nullptr;
 
     // the crisp-HUD half's of fix.ui_quality HDR HUD layer: R16G16B16A16_FLOAT at the 8-bit layer's
     // size (the door's output x the same target), holding the cockpit HUD
@@ -1000,7 +1014,7 @@ void releaseLayerDs(LayerDs& l) {
 bool releaseLayers() {
     bool any = false;
     for (Eye& e : g_eye) {
-        any = any || e.tex || e.mTex || e.ds.tex || e.dsCopy || e.out || e.copy || e.frameSrv || e.frameUav ||
+        any = any || e.tex || e.mTex || e.ds.tex || e.dsCopy || e.dsDirect[0].depth || e.dsDirect[1].depth || e.out || e.copy || e.frameSrv || e.frameUav ||
               e.hdrTex || e.hdrDs.tex;
         e.coverage.reset();
         e.tex.Reset();
@@ -1033,6 +1047,9 @@ bool releaseLayers() {
         e.dsCopyStencil.Reset();
         e.dsCopyW = e.dsCopyH = 0;
         e.dsCopyFmt = DXGI_FORMAT_UNKNOWN;
+        for (Eye::DsDirect& d : e.dsDirect) d = Eye::DsDirect{};
+        e.dsDirectNext = 0;
+        e.dsDirectRefused = nullptr;
         e.out.Reset();
         e.outUav.Reset();
         e.outW = e.outH = 0;
@@ -1210,9 +1227,56 @@ bool seedLayerDepth(ID3D11DeviceContext* ctx, Eye& e, LayerDs& l, int eye, uint3
     Ptr<ID3D11Device> dev;
     ctx->GetDevice(&dev);
     if (!dev) return false;
-    // The copy the seed reads: the game's texture as it stands, so a view of
-    // it is never bound while the game's own depth view is.
-    if (!e.dsCopy || e.dsCopyW != td.Width || e.dsCopyH != td.Height || e.dsCopyFmt != tf) {
+    // What the seed reads: the game's texture where it lies, when it admits shader views (the usual case). The seed's
+    // commands run in a command list executed with the context's state saved and restored, and the list binds only the layer's
+    // own target, so the game's depth view that is bound on the immediate context is not bound while the list reads its texture;
+    // the copy that used to stand in for it (a snapshot "so a view of it is never bound while the game's own depth view is")
+    // read the very same bytes at the very same point in the stream. ui_layer_seed_test holds the two reads byte for byte.
+    ID3D11ShaderResourceView* srcDepth = nullptr;
+    ID3D11ShaderResourceView* srcStencil = nullptr;
+    bool direct = false;
+    if (td.Format == tf && td.SampleDesc.Count == 1 && td.ArraySize == 1 && td.MipLevels == 1 &&
+        (td.BindFlags & D3D11_BIND_SHADER_RESOURCE) != 0 && e.dsDirectRefused != tex.Get()) {
+        Eye::DsDirect* use = nullptr;
+        for (Eye::DsDirect& d : e.dsDirect)
+            if (d.tex == tex.Get() && d.depth && (sf == DXGI_FORMAT_UNKNOWN || d.stencil)) use = &d;
+        if (!use) {
+            Eye::DsDirect fresh;
+            D3D11_SHADER_RESOURCE_VIEW_DESC dvd{};
+            dvd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+            dvd.Texture2D.MipLevels = 1;
+            dvd.Format = df;
+            bool made = SUCCEEDED(dev->CreateShaderResourceView(tex.Get(), &dvd, &fresh.depth));
+            if (made && sf != DXGI_FORMAT_UNKNOWN) {
+                dvd.Format = sf;
+                made = SUCCEEDED(dev->CreateShaderResourceView(tex.Get(), &dvd, &fresh.stencil));
+            }
+            if (made) {
+                fresh.tex = tex.Get();
+                use = &e.dsDirect[e.dsDirectNext];
+                e.dsDirectNext = (e.dsDirectNext + 1) % 2;
+                *use = std::move(fresh);
+                static bool directNoted = false;
+                if (!directNoted) {
+                    directNoted = true;
+                    Log::get().note("ui quality: layer: the depth-stencil seed reads the game's own %ux%u %s texture in place "
+                                    "(views over it; no copy of it is made).",
+                                    td.Width, td.Height, viewName(vd.Format));
+                }
+            } else {
+                e.dsDirectRefused = tex.Get();
+                Log::get().note("ui quality: layer: the game's own depth-stencil texture refused shader views; the seed reads "
+                                "a copy of it instead.");
+            }
+        }
+        if (use) {
+            direct = true;
+            srcDepth = use->depth.Get();
+            srcStencil = use->stencil.Get();
+        }
+    }
+    // The copy the seed reads otherwise: the game's texture as it stands.
+    if (!direct && (!e.dsCopy || e.dsCopyW != td.Width || e.dsCopyH != td.Height || e.dsCopyFmt != tf)) {
         e.dsCopy.Reset();
         e.dsCopyDepth.Reset();
         e.dsCopyStencil.Reset();
@@ -1247,6 +1311,10 @@ bool seedLayerDepth(ID3D11DeviceContext* ctx, Eye& e, LayerDs& l, int eye, uint3
         e.dsCopyH = td.Height;
         e.dsCopyFmt = tf;
     }
+    if (!direct) {
+        srcDepth = e.dsCopyDepth.Get();
+        srcStencil = e.dsCopyStencil.Get();
+    }
     // The layer's own target, at the layer's size, in the game's format.
     if (!l.tex || l.w != outW || l.h != outH || l.viewFmt != vd.Format) {
         l.tex.Reset();
@@ -1275,12 +1343,12 @@ bool seedLayerDepth(ID3D11DeviceContext* ctx, Eye& e, LayerDs& l, int eye, uint3
         l.viewFmt = vd.Format;
         const uint32_t bpp = dsBytesPerPixel(vd.Format);
         Log::get().note("ui quality: layer: %s eye's depth-stencil target created at %ux%u (%s, "
-                        "%.1f MB; with the copy of the game's it reads, %.1f MB) -- %s tests "
-                        "the game's depth or stencil.",
+                        "%.1f MB; %s, %.1f MB) -- %s tests the game's depth or stencil.",
                         eye == 0 ? "left" : "right", outW, outH, viewName(vd.Format),
                         uiLayerMB(uiLayerBytes(outW, outH, bpp)),
+                        direct ? "reading the game's own in place, no copy of it" : "with the copy of the game's it reads",
                         uiLayerMB(uiLayerBytes(outW, outH, bpp) +
-                                  uiLayerBytes(td.Width, td.Height, bpp)),
+                                  (direct ? 0 : uiLayerBytes(td.Width, td.Height, bpp))),
                         who);
     }
     // The GPU census's section for the HDR HUD layer's seed (issue #38): every seed counted, a few timed on the
@@ -1314,11 +1382,11 @@ bool seedLayerDepth(ID3D11DeviceContext* ctx, Eye& e, LayerDs& l, int eye, uint3
             }
         }
     } seedProbe{ctx, seedToken};
-    vScreenCopyResourceRaw(ctx, e.dsCopy.Get(), tex.Get());
+    if (!direct) vScreenCopyResourceRaw(ctx, e.dsCopy.Get(), tex.Get());
     if (seedToken) g_hdrSeedGpu.endCopy(ctx, seedToken);
     bool recorded = false;
     try {
-        g_seeder->seed(g_deferred.Get(), e.dsCopyDepth.Get(), e.dsCopyStencil.Get(), l.dsv.Get(),
+        g_seeder->seed(g_deferred.Get(), srcDepth, srcStencil, l.dsv.Get(),
                        td.Width, td.Height, outW, outH, g_draw.jx, g_draw.jy, stencilMask,
                        needDepth);
         recorded = true;
@@ -1343,7 +1411,7 @@ bool seedLayerDepth(ID3D11DeviceContext* ctx, Eye& e, LayerDs& l, int eye, uint3
     // What the seed wrote: with SV_StencilRef, one pass copies the depth and
     // all eight stencil bits whenever it draws at all; without it, the depth
     // when asked and one pass per asked bit (the rest cleared to 0).
-    const bool hasStencil = e.dsCopyStencil != nullptr;
+    const bool hasStencil = srcStencil != nullptr;
     const bool full = hasStencil && g_seeder->usesSpecifiedStencilRef() && (needDepth || stencilMask);
     l.seq = g_draw.seq;
     l.source = tex.Get();

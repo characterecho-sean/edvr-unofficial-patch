@@ -21,6 +21,7 @@
 #include "flat_weapon_footprint.h"
 #include "flat_overlay_layer.h"
 #include "flat_replay_query_tracker.h"
+#include "flat_replay_query_reject.h"
 #include "flat_untrusted_coverage.h"
 #include "flat_foreground_probe.h"
 #include "flat_foreground_motion.h"
@@ -320,6 +321,7 @@ struct State {
     // Draws whose near plane was the reference's and whose projection scale was not (aiming down sights: the weapon camera takes the
     // world's near): classified as first-person draws, not as the world. One 5 s window, on the `flat foreground SDK domain` line.
     uint64_t predictedScaleRejectedWindow=0;
+    FlatQueryRejectStats queryReject;   // the foreground replay-safety instrument (flat_replay_query_reject.h); owner thread
     FlatUntrustedCoverage untrusted;
     bool untrustedUnknown = false;
     bool untrustedSupportedAlternate = false;
@@ -919,6 +921,11 @@ static void reportForegroundDomain(State& s) {
     // "none" here even while every frame was refused (section 104, supersampled 4K).
     s.foregroundHRefusalWindow=nullptr;
     s.predictedScaleRejectedWindow=0;
+    {   // The replay-safety instrument's window line: printed every window, so checked=0 and rejected=0 are visible and an absent line means it did not run.
+        char rejectLine[1000];
+        s.queryReject.formatWindow(rejectLine,sizeof(rejectLine),flatMonoResolveModeName(s.engine));
+        Log::get().note("%s",rejectLine);
+    }
     const auto& f=s.foregroundFirstFailure;
     Log::get().note("flat foreground first failure: configured=%s frame=%llu q=%u VS=%016llX PS=%016llX format=%u camera=%016llX depth=%p stage=%s reason=%s pending-world-null=%u selected-H-frame=%llu selected-depth=%p candidates=%u cap=%u overflow=%u candidate-present=%u; first failure on selected H depth in the most recent failed frame, not a shader allowlist",
         flatMonoResolveModeName(s.engine),(unsigned long long)f.frame,f.q,(unsigned long long)f.vs,(unsigned long long)f.ps,
@@ -1111,6 +1118,45 @@ FlatReplayQueryTracker::Kind replayQueryKind(ID3D11Asynchronous* async) {
         return FlatReplayQueryTracker::Kind::Count;
     default: return FlatReplayQueryTracker::Kind::Unknown;
     }
+}
+// The instrument (log only): why replayQueriesSafe said no. Read under the observer's lock, after the safety test already decided; the
+// decision itself is untouched. Returns the open count-bearing brackets' D3D11_QUERY codes (held objects read back with GetDesc) and the
+// tracker's own reasons (an uncertain bracket, a full table, a deferred context).
+FlatQueryReject replayQueryRejection(ID3D11DeviceContext* ctx) {
+    FlatQueryReject r;
+    auto add=[&](uint32_t code){ if(r.count<kFlatQueryRejectCodes)r.codes[r.count++]=code;else ++r.extra; };
+    if(!ctx || ctx->GetType()!=D3D11_DEVICE_CONTEXT_IMMEDIATE) { add(kFlatQueryNotImmediate);return r; }
+    auto& observer=replayQueryObserver();std::lock_guard<std::mutex> lock(observer.mutex);
+    auto* entry=observer.find(ctx);
+    if(observer.overflow || !entry)add(kFlatQueryTableFull);
+    if(!entry) return r;
+    if(entry->tracker.uncertain)add(kFlatQueryUncertain);
+    for(size_t i=0;i<64;++i) {
+        const auto& active=entry->tracker.active[i];
+        if(!active.identity)continue;
+        ++r.active;
+        if(active.kind==FlatReplayQueryTracker::Kind::Timing || active.kind==FlatReplayQueryTracker::Kind::EndOnly)continue;
+        uint32_t code=kFlatQueryUnheld;
+        Ptr<ID3D11Query> query;
+        if(entry->holds[i] && SUCCEEDED(entry->holds[i]->QueryInterface(IID_PPV_ARGS(&query)))) {
+            D3D11_QUERY_DESC desc{};query->GetDesc(&desc);code=static_cast<uint32_t>(desc.Query);
+        }
+        add(code);
+    }
+    if(!r.count)add(kFlatQueryUnheld);
+    return r;
+}
+// Counts one foreground draw that reached the safety test and, when it was refused, logs the first kFlatQueryRejectFirst of the session
+// (the 5 s window line is printed by reportForegroundDomain). Owner thread, inside the foreground draw's beginActualDraw.
+static void noteReplayQueryCheck(State& s,ID3D11DeviceContext* ctx,bool rejected,uint64_t vs,uint64_t ps,unsigned width,unsigned height) {
+    s.queryReject.noteChecked();
+    if(!rejected)return;
+    const FlatQueryReject why=replayQueryRejection(ctx);
+    const uint32_t ordinal=s.queryReject.noteRejected(why,vs,ps);
+    if(!ordinal)return;
+    char text[640];
+    flatQueryRejectFormatEvent(text,sizeof(text),ordinal,s.prefix.frame,flatMonoResolveModeName(s.engine),vs,ps,width,height,why);
+    Log::get().note("%s",text);
 }
 FlatMapBounce& mapBounce() {
     static FlatMapBounceD3DDriver* driver = new FlatMapBounceD3DDriver;
@@ -2802,7 +2848,7 @@ void applyWork(State& s, FlatWork next) {
     const FlatWork was = s.work;
     s.work = next;
     if (was != next) flatTemporalSetPaused(next == FlatWork::Paused);
-    if (next != FlatWork::Full || was != FlatWork::Full) flatCameraInjectPause(next != FlatWork::Full);
+    if (next != FlatWork::Full || was != FlatWork::Full) flatCameraInjectPauseFlat(next != FlatWork::Full);
     if ((was == FlatWork::Paused) != (next == FlatWork::Paused)) {
         // The UAV tracker stops with the pause and starts again from unknown, the
         // state ExecuteCommandList leaves it in, so a stale binding never reads as live.
@@ -2991,6 +3037,8 @@ void flatRuntimePhaseState(float* x, float* y, uint32_t* w, uint32_t* h, uint32_
     if (applied) *applied = s.phase.applied;
 }
 void flatRuntimeNoteCameraApplied() { auto& s = state(); s.phase.noteApplied(); ++s.jitterDraws; }
+// The work tier is Full: the relay gate is meant to be open (applyWork). Read by the camera injector's takeover after a live profile switch.
+bool flatRuntimeWorkFull() { return state().work==FlatWork::Full; }
 bool flatRuntimeLegacyPlanExists() { const auto& s=state(); return s.work==FlatWork::Full && s.projection!=nullptr; }
 void flatRuntimeArmProjectionAudit(bool full) { if(runtimeFlatProfile()) projectionAuditRequested.request(full); }
 void flatRuntimeCreateBuffer(ID3D11Buffer* buffer, const void* initialData) {
@@ -6710,7 +6758,9 @@ void FlatRuntimeDrawScope::beginActualDraw(ID3D11Buffer* indirectArgs,UINT indir
         const bool opaque=rasterRefusal==nullptr;
         const bool colorWrites=flatDomainWritesColor(projection,bd,boundColors);
         if(domainPs && colorWrites)candidate->colorWritten=true;
-        const bool queriesUnsafe=opaque && bytes && !replayQueriesSafe(ctx);
+        const bool queriesChecked=opaque && bytes;
+        const bool queriesUnsafe=queriesChecked && !replayQueriesSafe(ctx);
+        if(queriesChecked)noteReplayQueryCheck(s,ctx,queriesUnsafe,domainVs,domainPs,domainWidth,domainHeight);
         const bool unplannable=!opaque || !bytes || queriesUnsafe || indirectArgs;
         if(unplannable && flatDomainPreservesSurface(dd)) {
             // No depth write: the last depth writer's surface and owner mark

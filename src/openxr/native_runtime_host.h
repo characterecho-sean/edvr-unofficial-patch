@@ -358,7 +358,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   const char* seatWhy="";                    // the last transition's reason, for the apply it triggers and the meter it schedules
   uint64_t seatMeterDueAt=0,seatMeterNextPeriodic=0;
   const char* seatTraceDecision="head";HeadCall seatTraceCall{};bool seatTraceHasCall=false;
-  uint64_t localNoted=0,localHandled=0;     // LOCAL reference-space changes the runtime announced / the seat memory has answered
+  uint64_t localHandled=0;     // LOCAL reference-space changes (referenceChanges counts each as it takes effect) the seat memory has answered
   // Declared before boundary: boundary's constructor stores its address, and
   // it must already exist to be bound (native_frame's own reset() sequence
   // below binds it once the session that owns its xrWaitFrame exists).
@@ -973,9 +973,12 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       if(r==XR_SUCCESS){loading.emptyCompleted();++loadingClears;++loadingFrames;++loadingEmpty;}
       return r;
     }
-    uint64_t applied=0;
-    if(!changes.advance(frame.predictedDisplayTime,applied))return XR_ERROR_TIME_INVALID;
-    if(applied){referenceChanges+=applied;if(!invalidateOrigin())return XR_ERROR_LIMIT_REACHED;}
+    XrResult changeError=XR_SUCCESS;
+    switch(advanceReferenceChanges(frame,changeError,false)) {
+      case ChangeStep::Error: return changeError;
+      case ChangeStep::Withheld: return XR_SUCCESS;     // the frame was given up for a runtime recentre; the next one is in the new seated space
+      case ChangeStep::Ok: break;
+    }
     frameSpace=seated.space();
     GeometryInput located{};
     r=locateGeometry({api.locateViews,api.locateSpace},binding,frame,geometryGeneration,sizes,located,nullptr,frameSpace);
@@ -1065,9 +1068,12 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       return boundary.clear();
     }
     // The views, located as loadingStep locates its skybox frame.
-    uint64_t applied=0;
-    if(!changes.advance(frame.predictedDisplayTime,applied)){boundary.clear();return XR_ERROR_TIME_INVALID;}
-    if(applied){referenceChanges+=applied;if(!invalidateOrigin()){boundary.clear();return XR_ERROR_LIMIT_REACHED;}}
+    XrResult changeError=XR_SUCCESS;
+    switch(advanceReferenceChanges(frame,changeError,true)) {
+      case ChangeStep::Error: return changeError;
+      case ChangeStep::Withheld: return XR_SUCCESS;     // the frame was given up for a runtime recentre; the next one is in the new seated space
+      case ChangeStep::Ok: break;
+    }
     frameSpace=seated.space();
     GeometryInput located{};
     r=locateGeometry({api.locateViews,api.locateSpace},binding,frame,geometryGeneration,sizes,located,nullptr,frameSpace);
@@ -1112,11 +1118,6 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(buffer.type==XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING) {
       const auto& event=*reinterpret_cast<const XrEventDataReferenceSpaceChangePending*>(&buffer);
       if(!host.changes.note(event))nativeTracePuts("error,reference_change_policy");
-      else if(event.session==host.session&&event.referenceSpaceType==XR_REFERENCE_SPACE_TYPE_LOCAL) {
-        // The runtime recentred (SteamVR's dashboard, Pimax Play): the seat memory counts it as the player's own recentre, answered once the
-        // change itself has taken effect (seatProcessRuntimeRecentre).
-        ++host.localNoted;
-      }
     }
     if(buffer.type==XR_TYPE_EVENT_DATA_PERF_SETTINGS_EXT && host.perfSettingsExtension) {
       const auto& event=*reinterpret_cast<const XrEventDataPerfSettingsEXT*>(&buffer);
@@ -1299,9 +1300,12 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     Frame frame=boundary.frame();
     if(!applyFrameSequence(frame)){boundary.clear();return fail(XR_ERROR_LIMIT_REACHED);}
     if(state.terminal()){boundary.clear();return fail(XR_SESSION_LOSS_PENDING);}
-    uint64_t applied=0;
-    if(!changes.advance(frame.predictedDisplayTime,applied)){boundary.clear();return fail(XR_ERROR_TIME_INVALID);}
-    if(applied){referenceChanges+=applied;if(!invalidateOrigin()){boundary.clear();return fail(XR_ERROR_LIMIT_REACHED);}}
+    XrResult changeError=XR_SUCCESS;
+    switch(advanceReferenceChanges(frame,changeError,true)) {
+      case ChangeStep::Error: return fail(changeError);
+      case ChangeStep::Withheld: return vr::VRCompositorError_InvalidTexture;     // a runtime recentre took effect on this frame: no pose from the old seated space
+      case ChangeStep::Ok: break;
+    }
     frameSpace=seated.space();
     GeometryInput located{};XrSpaceVelocity velocity{XR_TYPE_SPACE_VELOCITY};
     auto r=locateGeometry({api.locateViews,api.locateSpace},binding,frame,geometryGeneration,sizes,located,&velocity,frameSpace);
@@ -2773,15 +2777,47 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     } else nativeTracePrintf("stage_in_local,result=%d\n",int(r));
     api.destroySpace(stageSpace);
   }
+  // THE ORDER OF A RUNTIME RECENTRE. Every place that opens a frame and then locates in the seated space (WaitGetPoses, the loading skybox frame,
+  // the flat panel frame) advances the pending reference changes first, through here. The seated space is a LOCAL child with an offset and
+  // cannot be replaced while a frame is open, so when this advance makes a LOCAL change take effect and the seat memory has an answer to give
+  // it (the head in the new LOCAL becomes the seat, seatProcessRuntimeRecentre), the frame is GIVEN UP: closed, nothing located from the stale
+  // space and nothing published from it, the origin replaced with no frame open, and the caller returns without a pose (the game asks again
+  // and the next frame is in the new space). The alternative, answering from inside the open frame, is impossible; the earlier order (answer on
+  // the NEXT poll, locate this frame in the old space) published one pose with the old offset (review of 498e4b16, finding 3). Several events
+  // due at once are one frame given up and one answer; an event whose change time is still ahead waits for its own frame. With the seat memory
+  // inactive nothing is given up and the advance is what it always was. `clearOnError` keeps the loading path's old behaviour (it left the
+  // frame open on an error).
+  enum class ChangeStep {Ok,Withheld,Error};
+  ChangeStep advanceReferenceChanges(const Frame& frame,XrResult& error,bool clearOnError) {
+    uint64_t applied=0;
+    if(!changes.advance(frame.predictedDisplayTime,applied)){
+      if(clearOnError)boundary.clear();
+      error=XR_ERROR_TIME_INVALID;return ChangeStep::Error;
+    }
+    if(applied) {
+      referenceChanges+=applied;
+      if(!invalidateOrigin()){
+        if(clearOnError)boundary.clear();
+        error=XR_ERROR_LIMIT_REACHED;return ChangeStep::Error;
+      }
+      if(seat.keep()&&referenceChanges>localHandled&&changes.active()) {
+        boundary.clear();
+        timingInvalidate();
+        seatProcessRuntimeRecentre();     // no frame is open now; if it cannot land yet, seatPoll retries at the next WaitGetPoses
+        return ChangeStep::Withheld;
+      }
+    }
+    error=XR_SUCCESS;return ChangeStep::Ok;
+  }
   // The runtime moved LOCAL (a recentre in SteamVR's dashboard or Pimax Play). That is always the player: the head as it is in the new LOCAL is
   // honoured as the seated origin and stored as the seat, aboard or on foot, in a window or out of one. Acted on once the change has taken
   // effect (the geometry refresh counted it), so the head is sampled in the new LOCAL. Head not tracked: LOCAL's own origin is the seat, applied
   // when a frame allows. A frame in the way is a retry next poll. In game mode nothing changes (the origin keeps its offset as it always did).
   void seatProcessRuntimeRecentre() {
-    if(localHandled>=localNoted||referenceChanges<localNoted)return;
+    if(referenceChanges<=localHandled)return;
     if(!seat.keep()) {
-      nativeTracePrintf("seat_local_changed,events=%llu,action=ignored_game_mode\n",(unsigned long long)(localNoted-localHandled));
-      localHandled=localNoted;return;
+      nativeTracePrintf("seat_local_changed,events=%llu,action=ignored_game_mode\n",(unsigned long long)(referenceChanges-localHandled));
+      localHandled=referenceChanges;return;
     }
     if(state.frameOpen()||!changes.active())return;
     XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
@@ -2789,7 +2825,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     constexpr XrSpaceLocationFlags tracked=XR_SPACE_LOCATION_POSITION_TRACKED_BIT|XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT;
     XrPosef o{};
     const bool headOk=lastResetResult==XR_SUCCESS&&(head.locationFlags&tracked)==tracked&&seatedOriginFromHead(head.pose,head.locationFlags,o);
-    const unsigned long long events=(unsigned long long)(localNoted-localHandled);
+    const unsigned long long events=(unsigned long long)(referenceChanges-localHandled);
     if(headOk) {
       seatTraceDecision="honour_store";seatTraceHasCall=false;
       if(!applySeatedReset(head,"runtime_recentre",true))return;     // retried next poll
@@ -2804,7 +2840,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       nativeTracePrintf("seat_local_changed,events=%llu,head=untracked,action=store_as_manual,fallback=local_identity,where=%s,seat=0.000/0.000/0.000/0.0\n",
           events,seatWhereName(seat.where()));
     }
-    localHandled=localNoted;
+    localHandled=referenceChanges;
   }
   // The stored seat becomes the origin. A retry is the caller's: this answers false when a frame is open, the head is not tracked, or the
   // reset-event queue is full, and the apply stays pending.

@@ -536,8 +536,10 @@ void modeWatchFrameBoundary() {
     // The runtime's live flag, sampled once a frame; a rise asks the worker for a re-read (a VR start may write no file).
     static bool lastLive = false;
     EdvrNativeRenderSizing sizing{};
-    // The VR-side query, timed while VR is not active (cross_profile_cost.h).
-    cross_profile::Probe probe = cross_profile::enterSite(cross_profile::Site::VrModeWatchFrame, !runtimeVrProfile());
+    // The VR-side query always runs (switch detection needs it, Passthrough included), but is timed only while flat is the active profile:
+    // the report divides this site by flat frames, and Passthrough counts none (cross_profile_cost.h inactiveFor).
+    cross_profile::Probe probe = cross_profile::enterSite(cross_profile::Site::VrModeWatchFrame,
+        cross_profile::inactiveFor(cross_profile::Owner::Vr, runtimeFlatProfile(), runtimeVrProfile()));
     const bool live = edvrQueryNativeRenderSizing(EDVR_NATIVE_RENDER_SIZING_VERSION_1, sizeof(sizing), &sizing) && sizing.valid == 1;
     probe.stop();
     if (live && !lastLive) modeWatchHint(ModeHint::LiveRise);

@@ -885,6 +885,11 @@ void takeOverFromVr() {
     const FlatCameraFlatTakeover t = flatCameraFlatTakeover(observeOnly, g_observer.load(std::memory_order_acquire) != nullptr, bits,
                                                             g_inject.injected.empty());
     if (t.clearVrBits) g_vrBits.store(0u, std::memory_order_release);
+    // The relay gate is the flat runtime's from here on. The VR route's wind-down after the switch may already have closed it (quiet, nothing
+    // injected) and flat's own tier edges would never reopen it from Full to Full: set it from the current tier, open at Full.
+    const unsigned gateBefore = g_gate.load(std::memory_order_acquire) != 0 ? 1u : 0u;
+    if (t.clearVrBits || t.clearObserveOnly) flatCameraInjectPauseFlat(!flatCameraGateOpenForWork(flatRuntimeWorkFull()));
+    const unsigned gateAfter = g_gate.load(std::memory_order_acquire) != 0 ? 1u : 0u;
     if (t.clearObserveOnly) {
         g_inject.observeOnly.store(false, std::memory_order_release);
         // A new contract: the decision, the history and the fallback's verdict were made under observation, and the VR census's window
@@ -894,7 +899,11 @@ void takeOverFromVr() {
         g_inject.signatures.reset();
         g_inject.windowFrames = 0;
         g_inject.stayObserveLogged = false;
-        Log::get().note("flat camera inject: switched from observe-only (VR census) to injection after a profile switch");
+        Log::get().note("flat camera inject: switched from observe-only (VR census) to injection after a profile switch (gate=%u->%u)",
+                        gateBefore, gateAfter);
+    } else if (t.clearVrBits) {
+        Log::get().note("flat camera inject: took the detour over from the VR route after a profile switch (route word %u cleared, gate=%u->%u)",
+                        bits, gateBefore, gateAfter);
     } else if (observeOnly && !g_inject.stayObserveLogged) {
         g_inject.stayObserveLogged = true;
         Log::get().note("flat camera inject: stays observe-only; legacy owns (a VR census observer or the VR world route still holds the "
@@ -933,7 +942,7 @@ void flatCameraInjectArm() {
 }
 void flatCameraInjectDisarm() { g_inject.gate.disarm(GetCurrentThreadId()); }
 
-void flatCameraInjectPause(bool paused) {
+void flatCameraInjectPauseFlat(bool paused) {
     g_inject.paused.store(paused, std::memory_order_release);
     if (!g_inject.installed.load(std::memory_order_acquire)) return; // the install opens the gate unless paused
     if (g_inject.permanentlyDown.load(std::memory_order_acquire)) return; // never reopen a hook that failed for good
@@ -942,6 +951,13 @@ void flatCameraInjectPause(bool paused) {
     // runtime asks again every frame, so the gate closes the frame after the set empties.
     if (paused && !g_inject.injected.empty()) return;
     g_gate.store(paused ? 0 : 1, std::memory_order_release);
+}
+
+// The VR side's gate write (the world route's frame step, the census's key edges): a no-op while the flat profile is active, whose runtime
+// owns the gate (flatCameraGateWritableByVr).
+void flatCameraInjectPause(bool paused) {
+    if (!flatCameraGateWritableByVr(runtimeFlatProfile())) return;
+    flatCameraInjectPauseFlat(paused);
 }
 
 void flatCameraInjectClose(bool phaseNonzero, bool applied, bool clean, bool sceneNamed) {

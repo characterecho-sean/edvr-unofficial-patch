@@ -1833,19 +1833,19 @@ void applyRigNote(const GatherEntry& e) {
     }
     s->curValid = true;
     if (!s->named) {
-        s->named = true;
         char name[64] = {};
         if (!cachedName(e.record, name, sizeof(name))) std::snprintf(name, sizeof(name), "(none)");
-        std::snprintf(s->name, sizeof(s->name), "%s", name);   // Built v13: the own-ship prefix test reads it
+        sealed::rigRecordName(&s->named, s->name, sizeof(s->name), name);   // Built v13: the own-ship prefix test reads it
     }
 }
 
-// A rig's collection moved (its veto found the new one): its bounds are forgotten, the association is recorded, and its run of vetoes starts afresh.
+// A rig's collection moved (its veto found the new one): its bounds and its first record's name are forgotten (the name decides the own-ship exemption, so it goes with the
+// bounds it was read beside; release review 2026-10-14 finding 4), the association is recorded, and its run of vetoes starts afresh.
 void applyRigAssoc(uintptr_t rig, uintptr_t coll) {
     RigSlot* s = rigFind(rig, true);
     if (!s || coll == s->coll) return;
     uint32_t run = 0;
-    sealed::rigForgetBounds(&s->curValid, &s->lastValid, &s->verdict, &run);
+    sealed::rigReassociate(&s->curValid, &s->lastValid, &s->verdict, &run, &s->named, s->name, sizeof(s->name));
     s->coll = coll;
     collInsert(coll, rig);
     size_t idx = 0;

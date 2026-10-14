@@ -295,28 +295,34 @@ const char* kMatchesNoProof = "matches EDVR's copy but nothing shows EDVR placed
 // the runtime. It is adopted only when every proof holds: the receipt names this folder (readToolReceipts), the entry is this folder's
 // openvr_api.dll, the backup is in the same Openvr folder, its hash is the one the receipt recorded, and probeDll reads it as a genuine
 // OpenVR runtime (not EDVR's). Anything else adopts nothing and stays rejected, as before.
+// The current receipt is tried first. After a second tool install its backup is the previous EDVR runtime, which probeDll refuses, and
+// the game's own runtime sits in an older receipt's backup; those are tried newest first, each under the same proofs in full.
 void adoptToolOriginal(Survey& s) {
     const std::wstring runtimePath = joinPath(s.game.openvrDir, kOpenvr);
     auto folderOf = [](const std::wstring& path) {
         const size_t slash = path.find_last_of(L"\\/");
         return slash == std::wstring::npos ? std::wstring() : path.substr(0, slash);
     };
-    for (const ToolReceipt& receipt : s.toolReceipts) {
-        if (!receipt.native) continue;
+    auto adoptFrom = [&](const ToolReceipt& receipt) {
+        if (!receipt.native) return false;
         const ToolReceiptFile* runtime = nullptr;
         for (const ToolReceiptFile& file : receipt.files) {
             if (file.key == "runtime" || file.key == "native") { runtime = &file; break; }
         }
-        if (!runtime || runtime->backup.empty() || runtime->beforeSha.empty()) return;
-        if (_wcsicmp(runtime->target.c_str(), runtimePath.c_str()) != 0) return;
-        if (_wcsicmp(folderOf(runtime->backup).c_str(), s.game.openvrDir.c_str()) != 0) return;
-        if (!fileExists(runtime->backup) || !sameSha(sha256File(runtime->backup), runtime->beforeSha)) return;
+        if (!runtime || runtime->backup.empty() || runtime->beforeSha.empty()) return false;
+        if (_wcsicmp(runtime->target.c_str(), runtimePath.c_str()) != 0) return false;
+        if (_wcsicmp(folderOf(runtime->backup).c_str(), s.game.openvrDir.c_str()) != 0) return false;
+        if (!fileExists(runtime->backup) || !sameSha(sha256File(runtime->backup), runtime->beforeSha)) return false;
         const DllInfo copy = probeDll(runtime->backup);
-        if (copy.kind != DllKind::OpenVrRuntime) return;
+        if (copy.kind != DllKind::OpenVrRuntime) return false;
         s.toolOriginal = copy;
         s.openvrOrigInBackups.insert(s.openvrOrigInBackups.begin(), runtime->backup);
-        return;
-    }
+        return true;
+    };
+    for (const ToolReceipt& receipt : s.toolReceipts)
+        if (adoptFrom(receipt)) return;
+    for (const ToolReceipt& receipt : s.toolReceiptHistory)
+        if (adoptFrom(receipt)) return;
 }
 
 }  // namespace
@@ -396,7 +402,10 @@ Survey surveyTarget(const GameInstall& game) {
     s.baseIniText = readTextFile(baseIniPath(game.dir));
     s.flatBaseIniText = readTextFile(flatBaseIniPath(game.dir));
     s.state = readState(game.dir);
-    if (!game.dir.empty()) s.toolReceipts = readToolReceipts(game.dir);
+    if (!game.dir.empty()) {
+        s.toolReceipts = readToolReceipts(game.dir);
+        s.toolReceiptHistory = readNativeReceiptHistory(game.dir);
+    }
     s.descriptorPresent = fileExists(joinPath(game.dir, kProfile));
     if (s.descriptorPresent) s.descriptorSha = sha256File(joinPath(game.dir, kProfile));
     s.ngx = probeDll(joinPath(game.dir, kNgx));

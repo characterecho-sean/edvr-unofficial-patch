@@ -54,6 +54,10 @@
 - **Next:** the release (notes via reflow_notes.py, credits via
   release_credits.py; the Release build workflow is the CI pass). Not yet
   flown: an Epic install through the GUI, a Frontier launcher launch.
+- **Review fixes (2026-10-14):** the flat pad door installs after a VR-first
+  menu (input_gate_test); cross-profile cost is sampled only while its
+  profile is active, so Passthrough adds none (cross_profile_test); the
+  tool's original runtime is found in older receipts (installer.md).
 
 ## 1. What exists today
 

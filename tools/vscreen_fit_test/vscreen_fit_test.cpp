@@ -986,9 +986,18 @@ void caseR11() {
         check(!lockedSave && err != 0, "R11g: a destination held open with no sharing: the save returns false and gives the Win32 error");
         check(slurpFile(dest) == good && !pathExists(tmp), "R11g: and the file holds exactly what it held, with no temp file left behind");
         // The lock gone, the same record again: it saves (a window whose p10 has not moved, retried after a failed save).
+        // One check per condition, each saying what it saw. This was a single compound check that failed once in a full build (2026-10-14,
+        // under 104 concurrent jobs) and named no condition. The save follows R11g's failed one, which created this temp name and deleted it
+        // a moment ago: a scanner holding either the temp or the destination for an instant would fail it, and these lines would say which.
         err = 99;
-        check(edvr::noteMeasuredPanelFootprint(dir, w2, &err) && err == 0 && edvr::lastKnownPanelFootprint(dir, &r) && closeTo(r.fractionAtUnit, 0.58, 1e-5) && !pathExists(tmp),
-              "R11h: the same record again with the lock gone: true, and it reads back");
+        const bool again = edvr::noteMeasuredPanelFootprint(dir, w2, &err);
+        checkf(again, "R11h: the same record again with the lock gone: the save returned false (Win32 error %u; want true)", err);
+        checkf(err == 0, "R11h: the same record again: the error out parameter is %u, want 0", err);
+        const bool readBack = edvr::lastKnownPanelFootprint(dir, &r);
+        checkf(readBack && closeTo(r.fractionAtUnit, 0.58, 1e-5), "R11h: the same record again: it %s (fraction %.6f, want 0.58)",
+               readBack ? "reads back wrong" : "does not read back", r.fractionAtUnit);
+        checkf(!pathExists(tmp), "R11h: the same record again: a temp file was left behind (attributes 0x%08lX)",
+               static_cast<unsigned long>(GetFileAttributesW(tmp.c_str())));
         const std::string good2 = slurpFile(dest);
         // A reader holding the file open (read and write sharing, but not delete) stops a replace too; a write straight into the file would
         // get through it, so this is what tells a temp file moved over the destination from the destination written in place.

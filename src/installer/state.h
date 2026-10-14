@@ -107,6 +107,11 @@ struct ToolReceipt {
 // its state is "installed". Anything that does not parse as one is absent.
 std::vector<ToolReceipt> readToolReceipts(const std::wstring& gameDir);
 
+// The native receipts older than the current one, newest first, each read under the same rules. The current receipt alone is the
+// evidence of ownership; these only let the planner look further back for the game's original runtime, which the current receipt's
+// backup no longer holds once the tool has installed twice (its backup is then the previous EDVR runtime).
+std::vector<ToolReceipt> readNativeReceiptHistory(const std::wstring& gameDir);
+
 InstallState readState(const std::wstring& gameDir);
 InstallState parseState(const std::string& text);
 std::string  serializeState(const InstallState& state);
