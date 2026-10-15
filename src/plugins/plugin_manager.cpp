@@ -91,14 +91,14 @@ PluginManager::~PluginManager() {
     shutdown();
 }
 
-std::string PluginManager::calculateSha256(const std::wstring& path) {
-    HANDLE f = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
-                           nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (f == INVALID_HANDLE_VALUE) return "";
+namespace {
+
+// Hashes the whole file behind an open handle, from offset 0. The caller keeps the handle.
+std::string sha256OfHandle(HANDLE f) {
+    if (SetFilePointer(f, 0, nullptr, FILE_BEGIN) == INVALID_SET_FILE_POINTER) return "";
 
     BCRYPT_ALG_HANDLE alg = nullptr;
     if (BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA256_ALGORITHM, nullptr, 0) != 0) {
-        CloseHandle(f);
         return "";
     }
 
@@ -132,6 +132,21 @@ std::string PluginManager::calculateSha256(const std::wstring& path) {
         BCryptDestroyHash(hash);
     }
     BCryptCloseAlgorithmProvider(alg, 0);
+    return hex;
+}
+
+std::string lowered(std::string s) {
+    for (char& c : s) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+    return s;
+}
+
+} // namespace
+
+std::string PluginManager::calculateSha256(const std::wstring& path) {
+    HANDLE f = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                           nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return "";
+    std::string hex = sha256OfHandle(f);
     CloseHandle(f);
     return hex;
 }
@@ -190,7 +205,7 @@ bool PluginManager::initialize(const std::wstring& rootDir) {
 
         if (!approvedShaLower.empty() && approvedShaLower == candShaLower) {
             cand.approved = true;
-            loadPlugin(cand);
+            loadPlugin(cand, cand.sha256);
         } else {
             cand.approved = false;
             Log::get().note("plugin_manager: discovered unapproved addon '%s' (sha256=%s)",
@@ -203,8 +218,31 @@ bool PluginManager::initialize(const std::wstring& rootDir) {
     return true;
 }
 
-bool PluginManager::loadPlugin(const CandidatePlugin& cand) {
+bool PluginManager::loadPlugin(CandidatePlugin& cand, const std::string& approvedSha) {
+    // Approval names a hash, so the bytes that run must be the bytes that hash. Hold the file with
+    // write and delete sharing denied, hash it through that handle, and load it while the handle is
+    // still open: nothing can swap the file between the check and the load.
+    HANDLE hold = CreateFileW(cand.path.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                              nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hold == INVALID_HANDLE_VALUE) {
+        Log::get().note("plugin_manager: cannot hold %ls for verification (err=%lu)", cand.path.c_str(), GetLastError());
+        return false;
+    }
+    std::string actualSha = sha256OfHandle(hold);
+    if (actualSha.empty() || lowered(actualSha) != lowered(approvedSha)) {
+        Log::get().note("plugin_manager: addon %s changed since it was approved (approved %s, now %s); "
+                        "not loaded, needs approval again",
+                        cand.stem.c_str(), approvedSha.c_str(), actualSha.c_str());
+        CloseHandle(hold);
+        if (!actualSha.empty()) {
+            cand.sha256 = actualSha;
+            cand.approved = false;
+        }
+        return false;
+    }
+
     HMODULE hMod = LoadLibraryW(cand.path.c_str());
+    CloseHandle(hold);
     if (!hMod) {
         Log::get().note("plugin_manager: failed to load %ls (err=%lu)", cand.path.c_str(), GetLastError());
         return false;
@@ -316,7 +354,7 @@ bool PluginManager::approvePlugin(const std::string& stem, const std::string& sh
     for (auto& cand : m_candidates) {
         if (cand.stem == stem && cand.sha256 == sha256) {
             cand.approved = true;
-            return loadPlugin(cand);
+            return loadPlugin(cand, sha256);
         }
     }
     return false;

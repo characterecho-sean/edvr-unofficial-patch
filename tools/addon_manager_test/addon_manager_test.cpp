@@ -203,6 +203,38 @@ int main(int argc, char** argv) {
         std::filesystem::remove_all(sb, ec7);
     }
 
+    // Case 8 (PR #92 review): approval binds to the bytes loaded, not the bytes seen at discovery.
+    {
+        auto sb = makeSandbox(L"swap");
+        dropFixture(sb, L"", L"swap.dll");
+        pm.initialize(sb.wstring());
+        auto* cand = findCandidate(pm, "swap");
+        check(cand != nullptr, "swap: candidate discovered");
+        std::string shaA = cand ? cand->sha256 : "";
+        // Replace the file after discovery, before the user approves the hash they were shown.
+        dropFixture(sb, L"b", L"swap.dll");
+        std::string shaB = edvr::plugins::PluginManager::calculateSha256((sb / L"plugins" / L"swap.dll").wstring());
+        check(!shaA.empty() && !shaB.empty() && shaA != shaB, "swap: the replacement has a different hash");
+
+        bool loaded = pm.approvePlugin("swap", shaA);
+        check(!loaded, "swap: approval of the old hash does not load the replaced file");
+        check(GetModuleHandleW(L"swap.dll") == nullptr, "swap: the replacement DLL was never loaded");
+        check(pm.activePluginCount() == 0, "swap: nothing active after the refused load");
+        auto* after = findCandidate(pm, "swap");
+        check(after && after->sha256 == shaB && !after->approved,
+              "swap: the changed file is resurfaced as an unapproved candidate under its new hash");
+
+        bool reloaded = pm.approvePlugin("swap", shaB);
+        check(reloaded, "swap: approving the new hash loads the file");
+        HMODULE hB = GetModuleHandleW(L"swap.dll");
+        typedef int (WINAPI *PFN_GetVariant)();
+        auto getVariant = hB ? reinterpret_cast<PFN_GetVariant>(GetProcAddress(hB, "fixtureGetVariant")) : nullptr;
+        check(getVariant && getVariant() == 2, "swap: the code that loaded is the approved replacement");
+        pm.shutdown();
+        std::error_code ec8;
+        std::filesystem::remove_all(sb, ec8);
+    }
+
     // Cleanup sandbox
     std::error_code ec;
     std::filesystem::remove_all(sandbox, ec);

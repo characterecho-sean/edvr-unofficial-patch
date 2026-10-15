@@ -54,7 +54,8 @@ public:
     static std::string calculateSha256(const std::wstring& path);
 
 private:
-    bool loadPlugin(const CandidatePlugin& cand);
+    // Loads only if the file on disk still hashes to approvedSha; otherwise resurfaces cand under its new hash.
+    bool loadPlugin(CandidatePlugin& cand, const std::string& approvedSha);
     void unloadAll();
 
     std::recursive_mutex m_mutex;
