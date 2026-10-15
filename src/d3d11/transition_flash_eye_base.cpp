@@ -23,8 +23,8 @@
 // needs no game is in transition_flash_eye_base_core.h.
 
 namespace edvr {
-// F24: probe A's reader (native_on_foot.cpp), read only.
-void nativeOnFootDriverProbe(uintptr_t driver, uint32_t mode);
+// F24: probe A's sink (read only). native_on_foot.cpp sets it at VR install; the rigs never set it, so the call is a no-op there.
+std::atomic<void (*)(uintptr_t, uint32_t)> g_driverProbeSink{nullptr};
 namespace {
 
 // --- Identity: build 332841, the same pair pose_reader_watch.cpp keys on (and
@@ -315,7 +315,7 @@ void noteConsume(int32_t gameMode, const float m[16]) noexcept {
 void __fastcall consumerObserved(uintptr_t cameraObj, int32_t gameMode, uintptr_t ptr3) noexcept {
     const auto forward = reinterpret_cast<ConsumerFn>(g_consumerEntry.forward.load(std::memory_order_acquire));
     if (!forward) return;  // stood down at install; the relay is unreachable then
-    nativeOnFootDriverProbe(cameraObj, static_cast<uint32_t>(gameMode));   // F24 probe A (read only)
+    if (auto sink = g_driverProbeSink.load(std::memory_order_acquire)) sink(cameraObj, static_cast<uint32_t>(gameMode));   // F24 probe A (read only)
     if (g_engineOn.load(std::memory_order_relaxed)) {
         uint64_t ship = 0;
         float m[16];

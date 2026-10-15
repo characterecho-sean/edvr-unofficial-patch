@@ -24,6 +24,8 @@
 #include "native_on_foot_core.h"
 
 namespace edvr {
+extern std::atomic<void (*)(uintptr_t, uint32_t)> g_driverProbeSink;   // transition_flash_eye_base.cpp (F24 probe A)
+void nativeOnFootDriverProbe(uintptr_t driver, uint32_t mode);         // defined at the end of this file (F24 probe A)
 
 namespace {
 
@@ -3645,6 +3647,7 @@ void installF22ProbesOnce() {
     if (g_f22ProbesTried) return;
     g_f22ProbesTried = true;
     if (!runtimeVrProfile()) return;
+    g_driverProbeSink.store(&nativeOnFootDriverProbe, std::memory_order_release);   // F24: probe A reads through the transition-flash consumer
     const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     const char* peWhy = nullptr;
     if (!base || !checkIdentity(base, &peWhy)) {

@@ -130,6 +130,13 @@ void resolveWindow(uint64_t nowMs) {
         g_window.why = "OpenThread refused (the window thread cannot be stopped)";
         return;
     }
+    // The thread id came from an enumeration of this process, but it can be reused: confirm the handle is still this process's thread
+    // before any stop. A thread of another process is never suspended.
+    if (GetProcessIdOfThread(h) != GetCurrentProcessId()) {
+        CloseHandle(h);
+        g_window.why = "the window thread's handle belongs to another process (refused, never stopped)";
+        return;
+    }
     HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
     NtQueryInformationThreadFn query = ntdll ? reinterpret_cast<NtQueryInformationThreadFn>(GetProcAddress(ntdll, "NtQueryInformationThread")) : nullptr;
     ThreadBasicInfo info{};
