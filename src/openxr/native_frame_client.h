@@ -3,6 +3,7 @@
 #include "geometry_snapshot.h"
 #include "now_head_publication.h"   // F31: the "now" head the version 2 input carries
 #include "native_trace.h"
+#include "head_pose_time.h"   // F40: the live now-pose flag
 #include <cstring>
 
 namespace edvr::openxr {
@@ -20,7 +21,7 @@ class NativeFrameClient final {
     if(candidate.size!=sizeof(candidate)||candidate.version!=EDVR_NATIVE_FRAME_VERSION_1||!candidate.context||
        !owned(provider,candidate.beginFrame)||!owned(provider,candidate.latchSubmit)||
        !owned(provider,candidate.invalidate)||!owned(provider,candidate.close))return E_NOINTERFACE;
-    table_=candidate;generation_=generation;providerVersion_=EDVR_NATIVE_FRAME_VERSION_8;return S_OK;
+    table_=candidate;generation_=generation;providerVersion_=EDVR_NATIVE_FRAME_VERSION_9;return S_OK;
   }
   bool acquired()const{return table_.context!=nullptr;}
   HRESULT begin(const GeometryInput& geometry,uint64_t reference,EdvrNativeFrameOutput& out) {
@@ -53,6 +54,8 @@ class NativeFrameClient final {
       if(version<EDVR_NATIVE_FRAME_VERSION_7){sent.size=EDVR_NATIVE_FRAME_INPUT_SIZE_1;sent.version=EDVR_NATIVE_FRAME_INPUT_VERSION_1;}
       return table_.beginFrame(table_.context,&sent,&o);
     },providerVersion_,out);
+    // F40: the live now-pose flag from the provider's answer (version 9 only; a version 8 answer carries none, so the default holds).
+    if(result==S_OK) applyNowPose(out.nowPoseRender!=0);
     // F32: the negotiation is visible: each step down, and the version the provider accepted.
     if(providerVersion_!=askedBefore)nativeTracePrintf("frame input: the provider refused version %u; asking version %u from now on\n",askedBefore,providerVersion_);
     if(result==S_OK&&providerVersion_!=loggedVersion_){loggedVersion_=providerVersion_;
@@ -87,6 +90,8 @@ class NativeFrameClient final {
     if(r!=S_OK||out.version<EDVR_NATIVE_FRAME_VERSION_8||!(out.eyeAlign[0]==out.eyeAlign[0])||!(out.eyeAlign[1]==out.eyeAlign[1])||!(out.eyeAlign[2]==out.eyeAlign[2])) {
       out.eyeAlign[0]=out.eyeAlign[1]=out.eyeAlign[2]=0;out.eyeAlignSerial=0;
     }
+    // F40: the now-pose flag is off unless a version 9 answer carried it.
+    if(r!=S_OK||out.version<EDVR_NATIVE_FRAME_VERSION_9) out.nowPoseRender=0;
     return r;
   }
   HRESULT latch(uint64_t sequence,EdvrNativeFrameDecision& out) {
@@ -94,10 +99,20 @@ class NativeFrameClient final {
     return acquired()?table_.latchSubmit(table_.context,sequence,&out):S_FALSE;
   }
   HRESULT invalidate(){return acquired()?table_.invalidate(table_.context):S_FALSE;}
-  HRESULT close(){if(!acquired())return S_FALSE;const auto r=table_.close(table_.context);if(SUCCEEDED(r)){table_={};providerVersion_=EDVR_NATIVE_FRAME_VERSION_8;}return r;}
+  HRESULT close(){if(!acquired())return S_FALSE;const auto r=table_.close(table_.context);if(SUCCEEDED(r)){table_={};providerVersion_=EDVR_NATIVE_FRAME_VERSION_9;}return r;}
+  // F40: the runtime's now-pose flag, set from the provider's answer and logged at the first value and at each change.
+  static void applyNowPose(bool render) {
+    static bool logged = false;
+    const bool was = g_nowPoseRender.exchange(render, std::memory_order_acq_rel);
+    if (!logged || was != render) {
+      logged = true;
+      nativeTracePrintf("now pose: %s (Elite's now request is answered %s)\n", render ? "render" : "next",
+                        render ? "at the instant the frame draws at (the WaitGetPoses latch)" : "one display period ahead (today's behaviour)");
+    }
+  }
   static EdvrNativeFrameOutput ask(uint32_t version) {
     if(version>=EDVR_NATIVE_FRAME_VERSION_8)
-      return EdvrNativeFrameOutput{sizeof(EdvrNativeFrameOutput),EDVR_NATIVE_FRAME_VERSION_8};
+      return EdvrNativeFrameOutput{sizeof(EdvrNativeFrameOutput),version>=EDVR_NATIVE_FRAME_VERSION_9?EDVR_NATIVE_FRAME_VERSION_9:EDVR_NATIVE_FRAME_VERSION_8};
     if(version>=EDVR_NATIVE_FRAME_VERSION_6)
       return EdvrNativeFrameOutput{EDVR_NATIVE_FRAME_OUTPUT_SIZE_6,EDVR_NATIVE_FRAME_VERSION_6};
     if(version==EDVR_NATIVE_FRAME_VERSION_5)
@@ -119,7 +134,7 @@ class NativeFrameClient final {
   EdvrNativeFrameTable table_{};uint64_t generation_=0;
   // The shape (5/4/3/2/1) the provider last accepted; begin() asks this one
   // first, so a provider once found to be older is not re-probed every frame.
-  uint32_t providerVersion_=EDVR_NATIVE_FRAME_VERSION_8;   // F33: starts at 8 (the eye alignment; F31's input version 2 rides with it); a refusal steps down
+  uint32_t providerVersion_=EDVR_NATIVE_FRAME_VERSION_9;   // F33: starts at 8 (the eye alignment; F31's input version 2 rides with it); a refusal steps down
   uint32_t loggedVersion_=0;   // F32: the version last logged as negotiated
   float ring_[8][12]{};uint64_t ringSeq_[8]{},ringQpc_[8]{};uint32_t ringNewest_=0,ringCount_=0;   // F37: the render head ring
 };

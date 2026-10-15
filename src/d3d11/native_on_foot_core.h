@@ -264,5 +264,33 @@ inline void leadPose(const float r0[12], const float r1[12], double L, float out
         out[4 * i + 3] = static_cast<float>(t0 + L * (t0 - t1));
     }
 }
+// F40: rotation about +y by psi: out = Ry(psi) . v, Ry = [c 0 s; 0 1 0; -s 0 c].
+inline void ryApply(double psi, const double v[3], double out[3]) noexcept {
+    const double c = std::cos(psi), s = std::sin(psi);
+    out[0] = c * v[0] + s * v[2];
+    out[1] = v[1];
+    out[2] = -s * v[0] + c * v[2];
+}
+// F40: the body error (target minus camera, body axes) to the seated offset: seated = D . Ry(psi) . body, D = diag(-1, -1, +1).
+inline void seatedFromBody(const double body[3], double psi, double out[3]) noexcept {
+    double r[3] = {};
+    ryApply(psi, body, r);
+    out[0] = -r[0];
+    out[1] = -r[1];
+    out[2] = r[2];
+}
+// F40: the head's seated translation, in body axes: Ry(psi)^-1 . diag(1, 1, -1) . tS (OpenXR +z is back, body +z is forward).
+inline void hmdInBody(const double ts[3], double psi, double out[3]) noexcept {
+    const double v[3] = {ts[0], ts[1], -ts[2]};
+    ryApply(-psi, v, out);
+}
+// F40: psi, the yaw from the seated frame to the body: the seated head yaw (render row 2) less the headset's yaw in the body, which is the
+// list-B view's yaw (C row 2) less the body's yaw (the AMC basis row 2). The same atan2(row x, row z) convention as the headset yaw log.
+inline double viewPsi(const float render[12], const float C[16], const float rows[9]) noexcept {
+    const double seated = std::atan2(static_cast<double>(render[8]), static_cast<double>(render[10]));
+    const double headWorld = std::atan2(static_cast<double>(C[8]), static_cast<double>(C[10]));
+    const double bodyYaw = std::atan2(static_cast<double>(rows[6]), static_cast<double>(rows[8]));
+    return seated - (headWorld - bodyYaw);
+}
 }  // namespace nofoot
 }  // namespace edvr

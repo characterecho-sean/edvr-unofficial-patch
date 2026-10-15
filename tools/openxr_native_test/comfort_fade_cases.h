@@ -82,8 +82,8 @@ template<class Check> void runComfortFadeCases(Check&& check) {
   check(Client::ask(8).size==sizeof(EdvrNativeFrameOutput)&&Client::ask(8).version==8&&Client::ask(7).size==EDVR_NATIVE_FRAME_OUTPUT_SIZE_6&&Client::ask(7).version==6&&
         Client::ask(8).eyeAlign[0]==0.0f&&Client::ask(8).eyeAlignSerial==0,"F33: 8 is the whole struct, 7 asks the version 6 shape (the input version 2 step), a fresh ask has no alignment");
   check(Client::ask(6).size==EDVR_NATIVE_FRAME_OUTPUT_SIZE_6&&Client::ask(6).version==6&&Client::ask(5).size==EDVR_NATIVE_FRAME_OUTPUT_SIZE_5&&Client::ask(5).version==5&&
-        Client::ask(4).size==EDVR_NATIVE_FRAME_OUTPUT_SIZE_4&&Client::ask(4).version==4&&Client::ask(9).version==8&&Client::ask(0).version==1,
-        "the shapes the client asks for: 6 stops before the eye alignment, 5 stops before the look's words, 4 stops before the fade slot, anything above is 8, 0 is 1");
+        Client::ask(4).size==EDVR_NATIVE_FRAME_OUTPUT_SIZE_4&&Client::ask(4).version==4&&Client::ask(9).version==9&&Client::ask(9).size==sizeof(EdvrNativeFrameOutput)&&Client::ask(0).version==1,
+        "the shapes the client asks for: 6 stops before the eye alignment, 5 stops before the look's words, 4 stops before the fade slot, 8 is 8, 9 and above is 9 (F40), 0 is 1");
   check(Client::ask(6).fadeAlpha==0.0f&&Client::ask(6).lookYawTotal==0.0f,"a fresh ask carries fade 0 and look total 0 (no fade, no compensation) until a provider says otherwise");
 }
 } // namespace edvr::openxr::test

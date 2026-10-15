@@ -835,6 +835,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       !frameEndOverlapEnabled?"config":!startupOptions.separateDevice?"borrowed_device":"config");
     poseCacheOn.store(startupOptions.poseCache,std::memory_order_release);
     nativeTracePrintf("native_pose_cache_config,enabled=%u,key=pose_cache\n",unsigned(startupOptions.poseCache));
+    nativeTracePrintf("native_now_pose_config,key=fix.now_pose,default=next,live=1 (the d3d11 half sends each frame; logged on change)\n");
     const auto openBegan=StepClock::now();
     if(!open(startupOptions))return vr::VRInitError_Init_Internal;
     const double openMs=stepMs(openBegan);
@@ -2603,7 +2604,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     // pass must locate, not answer from the publication it was sent to replace.
     if(call.display&&origin==vr::TrackingUniverseSeated&&poseCacheOn.load(std::memory_order_acquire)&&!service.isOwner()) {
       PoseCacheAnswer answer;PoseCacheMiss why=PoseCacheMiss::Unpublished;
-      if(poseCache.answer(generation,poses.read().originGeneration,call.rva,answer,why)) {
+      // F40: with now_pose render the cache's display slots (one period ahead) are not used: every display call takes the owner path.
+      if(!g_nowPoseRender.load(std::memory_order_relaxed)&&poseCache.answer(generation,poses.read().originGeneration,call.rva,answer,why)) {
         PoseGapStats::Sample sample{};sample.thread=call.thread;sample.rva=call.rva;sample.predictionSec=prediction;sample.located=true;
         sample.gapKnown=true;sample.gapMs=double(answer.target-answer.display)/1e6;
         if(answer.pose.bPoseIsValid&&answer.frameOrientationKnown){
@@ -2628,6 +2630,11 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   // display time and the target -- and the call is located at now + prediction as it always was.
   bool poseTargetFor(bool display,XrTime now,XrTime& target) {
     if(!display||!latestPoseFrame.valid)return false;
+    // F40 (live now_pose = render): the instant the frame draws at, the WaitGetPoses latch's own time, not one period on.
+    if(g_nowPoseRender.load(std::memory_order_relaxed))
+      return answerTime(latestPoseFrame.displayTime,latestPoseFrame.period,now,
+        [](int64_t shown,int64_t,int64_t& out){out=shown;return true;},
+        [&](int64_t from,int64_t to){return changes.crosses(from,to);},&target);
     return answerTime(latestPoseFrame.displayTime,latestPoseFrame.period,now,
       [](int64_t shown,int64_t period,int64_t& out){return nextPredictionTime(shown,period,out);},
       [&](int64_t from,int64_t to){return changes.crosses(from,to);},&target);

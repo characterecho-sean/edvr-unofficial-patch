@@ -78,6 +78,7 @@ bool g_nativeEdgeLast = false;                // F26: frame thread only
 std::atomic<bool> g_alignKeyOn{false};
 std::atomic<int> g_alignMode{0};   // F35: 0 off, 1 view (F33), 2 body (F35)
 double g_alignTrimCm[3] = {};   // [0] right, [1] up, [2] forward (body axes)
+uint64_t g_f40MarkerLogMs = 0;   // F40: the marker angle line's last time
 std::atomic<double> g_worldLeadFrames{2.5};   // F38: fix.native_on_foot_world_markers_lead, 0 to 5 frames (forward_lead); live
 std::atomic<int> g_worldMarkersMode{6};        // F27/F31/F37: fix.native_on_foot_world_markers: 0 fixed, 1 forward (C), 2 game, 3 forward_now (H_M), 4 forward_hist (the ring's matched pose), 5 forward_k2 (the ring's pose two frames back), 6 forward_lead (the newest ring pose carried ahead, default); live; key 10 is never touched
 uint64_t g_worldLineMs = 0;                    // frame thread and game thread: the 5 s line (the post hook writes it, once per 5 s)
@@ -539,6 +540,9 @@ void readKey() {
     // F25 (TEMPORARY): the world markers (the waypoint and the others, not key 10): fixed takes the head out of their placement, game leaves them as the game has them.
     {
         const std::string wm = cfg.getString("fix.native_on_foot_world_markers", "forward_lead");
+        // F40 (TEMPORARY, live A/B): the runtime answers Elite's "now" request one display period ahead (next, today) or at the instant the
+        // frame draws at (render). Carried in the native frame output; the runtime logs each change.
+        nativeFrameSetNowPoseRender(cfg.getString("fix.now_pose", "next") == "render");
         g_worldMarkersMode.store(wm == "forward" ? 1 : wm == "fixed" ? 0 : wm == "game" ? 2 : wm == "forward_now" ? 3 : wm == "forward_k2" ? 5 : wm == "forward_hist" ? 4 : 6, std::memory_order_relaxed);
         // F38: the waypoint lead in frames (forward_lead), clamped to 0..5; a value that does not parse reads as 2.5.
         double lead = std::atof(cfg.getString("fix.native_on_foot_world_markers_lead", "2.5").c_str());
@@ -548,7 +552,7 @@ void readKey() {
     // F33 (TEMPORARY, live): the body align and its trims (cm, clamped to +-30).
     {
         const std::string alignMode = cfg.getString("fix.native_on_foot_body_align", "off");
-        const int mode = alignMode == "body" ? 2 : (alignMode == "view" || alignMode == "on") ? 1 : 0;   // the old "on" is view
+        const int mode = alignMode == "body" ? 2 : alignMode == "calibrate" ? 3 : (alignMode == "view" || alignMode == "on") ? 1 : 0;   // the old "on" is view
         g_alignMode.store(mode, std::memory_order_relaxed);
         g_alignKeyOn.store(mode != 0, std::memory_order_relaxed);
         const std::string trims[3] = {cfg.getString("fix.native_on_foot_body_align_trim_right_cm", "0"),
@@ -2907,6 +2911,19 @@ void __fastcall reticleWorldPost(void* node) noexcept {
                 Log::get().note("native on foot world markers: forward_lead: L %.2f frames, rotation %.3f deg per frame, the lead is %.3f deg "
                                 "from the newest pose (ring %u)", L, perFrame, leadDeg, static_cast<unsigned>(rp.ringCount));
             }
+        }
+    }
+    // F40: M (the marker camera read at entry, F37) against this call's list-B view (C) and against the runtime's now answer, every 5 s.
+    if (sc.valid && sc.mOk && now - g_f40MarkerLogMs >= 5000) {
+        EdvrNativeNowPose q{};
+        if (nativeFrameNowPose(q) && q.nowValid) {
+            float nowM[16] = {};
+            for (size_t i = 0; i < 3; ++i)
+                for (size_t j = 0; j < 4; ++j) nowM[4 * i + j] = q.now[4 * i + j];
+            nowM[15] = 1.0f;
+            g_f40MarkerLogMs = now;
+            Log::get().note("native on foot world markers: M against C (this call's list-B view) %.3f deg, M against the now answer %.3f deg "
+                            "(mode %d)", f31AngleDeg(sc.mMat, sc.head.C), f31AngleDeg(sc.mMat, nowM), wmMode);
         }
     }
     if (!havePose) {
@@ -5333,13 +5350,17 @@ void bodyShiftApply(uint64_t amc) noexcept {
     g_bodyShifted.fetch_add(shifted, std::memory_order_relaxed);
     g_bodySkipped.fetch_add(skipped, std::memory_order_relaxed);
     if (table) {
+        uint32_t partsPresent = 0, partsShifted = 0;
         for (int idx = 0; idx < bodyrec::kBlocks; ++idx)
             for (int k = 0; k < bodyrec::kSlots; ++k) {
-                if (!present[idx][k]) continue;
-                Log::get().note("native on foot body shift part: block %d slot %d name %s mask %016llX shifted %s", idx, k,
-                                idx < ecm::kPartCount ? ecm::kPartNames[idx] : "?", static_cast<unsigned long long>(maskAt[idx][k]),
-                                movedAt[idx][k] ? "yes" : "no");
+                if (present[idx][k]) ++partsPresent;
+                if (!movedAt[idx][k]) continue;
+                ++partsShifted;
+                Log::get().note("native on foot body shift part: block %d slot %d name %s mask %016llX shifted", idx, k,
+                                idx < ecm::kPartCount ? ecm::kPartNames[idx] : "?", static_cast<unsigned long long>(maskAt[idx][k]));
             }
+        Log::get().note("native on foot body shift: %u parts present, %u shifted this pass (%llu records shifted, %llu skipped)", partsPresent,
+                        partsShifted, static_cast<unsigned long long>(shifted), static_cast<unsigned long long>(skipped));
     }
 }
 uint64_t __fastcall bodyShiftHooked(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t s5, uint64_t s6, uint64_t s7, uint64_t s8) {
@@ -5423,6 +5444,85 @@ struct F37Prev {
 F37Prev g_f37Prev;
 double g_f37SignToward = 0.0, g_f37SignApplied = 0.0;   // metres: the cam's motion since the last step, toward the pov and along the applied step
 
+// F40: the calibration schedule (one flight, mode calibrate): six 1 s steps, +5 cm seated X, rest, +5 cm Y, rest, +5 cm Z, rest, repeating. The
+// offsets are scheduled, not driven by the error: the loop and the guard are off. At each step's start the step that just ended is measured:
+// the camera's body position and tS, the mean over its last 0.5 s less the mean over the 0.5 s before that step began.
+struct CalSample {
+    uint64_t t = 0;
+    double cam[3] = {}, ts[3] = {};
+};
+constexpr uint32_t kCalRing = 256;
+CalSample g_calRing[kCalRing];
+uint32_t g_calHead = 0, g_calCount = 0;
+uint64_t g_calT0 = 0;
+int g_calStep = -1;
+uint64_t g_f40ViewLogMs = 0;
+double g_f40Psi = 0.0;
+const double kCalOffsets[6][3] = {{0.05, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.05, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.05}, {0.0, 0.0, 0.0}};
+const char* const kCalNames[6] = {"+X 5 cm", "rest", "+Y 5 cm", "rest", "+Z 5 cm", "rest"};
+
+void calibrateReset() noexcept {
+    g_calT0 = 0;
+    g_calStep = -1;
+    g_calHead = 0;
+    g_calCount = 0;
+}
+
+// The mean over the samples taken in [from, to), and how many there were.
+uint32_t calWindow(uint64_t from, uint64_t to, double cam[3], double ts[3]) noexcept {
+    uint32_t n = 0;
+    for (size_t i = 0; i < 3; ++i) cam[i] = ts[i] = 0.0;
+    for (uint32_t k = 0; k < g_calCount; ++k) {
+        const CalSample& c = g_calRing[(g_calHead + kCalRing - 1 - k) % kCalRing];
+        if (c.t < from || c.t >= to) continue;
+        ++n;
+        for (size_t i = 0; i < 3; ++i) {
+            cam[i] += c.cam[i];
+            ts[i] += c.ts[i];
+        }
+    }
+    if (n > 0)
+        for (size_t i = 0; i < 3; ++i) {
+            cam[i] /= n;
+            ts[i] /= n;
+        }
+    return n;
+}
+
+void calibrateStep(uint64_t now, const double cam[3], const double ts[3], bool haveSample, AlignRun& a) noexcept {
+    if (g_calT0 == 0) g_calT0 = now;
+    const int step = static_cast<int>(((now - g_calT0) / 1000u) % 6u);
+    if (haveSample) {
+        CalSample& c = g_calRing[g_calHead];
+        c.t = now;
+        for (size_t i = 0; i < 3; ++i) {
+            c.cam[i] = cam[i];
+            c.ts[i] = ts[i];
+        }
+        g_calHead = (g_calHead + 1) % kCalRing;
+        if (g_calCount < kCalRing) ++g_calCount;
+    }
+    if (step != g_calStep) {
+        if (g_calStep >= 0) {
+            // The step that just ended began 1000 ms ago: its last 0.5 s, and the 0.5 s before it began.
+            double aCam[3] = {}, aTs[3] = {}, bCam[3] = {}, bTs[3] = {};
+            const uint32_t na = calWindow(now - 500, now, aCam, aTs);
+            const uint32_t nb = calWindow(now - 1500, now - 1000, bCam, bTs);
+            if (na < 5 || nb < 5) {
+                Log::get().note("native on foot calibrate: step %s: too few samples (%u and %u); not measured", kCalNames[g_calStep], na, nb);
+            } else {
+                Log::get().note("native on foot calibrate: step %s (seated offset %.3f %.3f %.3f m, psi %.1f deg): camera body delta %.4f %.4f %.4f m, "
+                                "tS delta %.4f %.4f %.4f m (%u and %u samples)",
+                                kCalNames[g_calStep], kCalOffsets[g_calStep][0], kCalOffsets[g_calStep][1], kCalOffsets[g_calStep][2],
+                                g_f40Psi * 180.0 / 3.14159265358979323846, aCam[0] - bCam[0], aCam[1] - bCam[1], aCam[2] - bCam[2],
+                                aTs[0] - bTs[0], aTs[1] - bTs[1], aTs[2] - bTs[2], na, nb);
+            }
+        }
+        g_calStep = step;
+    }
+    for (size_t i = 0; i < 3; ++i) a.pos[i] = haveSample ? kCalOffsets[step][i] : 0.0;
+}
+
 void alignTick(uint64_t now) noexcept {
     static int lastMode = -1;
     const int mode = g_alignMode.load(std::memory_order_relaxed);   // 0 off, 1 view, 2 body
@@ -5430,7 +5530,7 @@ void alignTick(uint64_t now) noexcept {
     AlignRun& other = mode == 2 ? g_align : g_alignBody;
     const bool on = mode != 0;
     if (mode != lastMode) {
-        static const char* const kNames[3] = {"off", "view", "body"};
+        static const char* const kNames[4] = {"off", "view", "body", "calibrate"};
         Log::get().note("native on foot body align: mode %s (was %s); trims right %.1f, up %.1f, forward %.1f cm; gain 0.2 per frame, tau 250 ms, "
                         "clamp 0.6 m, 5 cm per frame at most; guard 2 s", kNames[mode], lastMode < 0 ? "none" : kNames[lastMode], g_alignTrimCm[0],
                         g_alignTrimCm[1], g_alignTrimCm[2]);
@@ -5441,6 +5541,7 @@ void alignTick(uint64_t now) noexcept {
         g_f38Valid = false;
         g_f38LpValid = false;
         g_f38LineMs = 0;
+        if (mode == 3) calibrateReset();
         if (mode == 1) g_f37TS0Valid = false;                                      // F37: a new head reference on entering view
     }
     const double dt = (a.lastMs && now > a.lastMs) ? std::min(0.05, static_cast<double>(now - a.lastMs) / 1000.0) : 0.0;
@@ -5471,8 +5572,8 @@ void alignTick(uint64_t now) noexcept {
     else if (!s.valid || now - s.stamp > static_cast<uint64_t>(align::kStaleMs)) wait = "the local third-person AMC sample is missing or over 100 ms old";
     else if (!s.headOk) wait = "no head joint (the neck census has no sample)";
     else if (!s.povOk) wait = "no pov (the neck census has no head sample)";
-    else if (mode == 1 && !haveView) wait = "no list-B view (the P2 sample is missing or over 500 ms old)";
-    else if (mode == 1 && !haveFrame) wait = "no render head from the runtime";
+    else if ((mode == 1 || mode == 3) && !haveView) wait = "no list-B view (the P2 sample is missing or over 500 ms old)";
+    else if ((mode == 1 || mode == 3) && !haveFrame) wait = "no render head from the runtime";
     else if (ads) wait = "held: aiming down sights";
     if (wait && on && now - a.waitLineMs >= 5000) {
         a.waitLineMs = now;
@@ -5575,28 +5676,23 @@ void alignTick(uint64_t now) noexcept {
                                 static_cast<unsigned>(g_f37TS0Gen));
             }
             for (size_t i = 0; i < 3; ++i) g_f37TSNow[i] = headTrue[i] - g_f37TS0[i];
-            double vH[3] = {}, dwH[3] = {};
-            for (size_t j = 0; j < 3; ++j)
-                for (size_t i = 0; i < 3; ++i) vH[j] += static_cast<double>(np.render[4 * i + j]) * g_f37TSNow[i];
-            for (size_t k = 0; k < 3; ++k)
-                for (size_t j = 0; j < 3; ++j) dwH[k] += static_cast<double>(C[4 * k + j]) * vH[j];
-            for (size_t i = 0; i < 3; ++i) {
-                hmdB[i] = 0.0;
-                for (size_t j = 0; j < 3; ++j) hmdB[i] += dwH[j] * static_cast<double>(s.rows[3 * i + j]);
-            }
-            double errB[3] = {};
+            // F40: the body-to-seated map, seated = D . Ry(psi) . body, D = diag(-1, -1, +1). psi is the seated head yaw less the headset's yaw in the
+            // body (viewPsi). The head's motion in body axes is Ry(psi)^-1 . diag(1, 1, -1) . tS. The error is the target minus the camera (the
+            // trims sit in the target), so the integral's step, through the map, closes it. The C-chain of F37 is gone.
+            const double psi = nofoot::viewPsi(np.render, C, s.rows);
+            g_f40Psi = psi;
+            nofoot::hmdInBody(g_f37TSNow, psi, hmdB);
+            double errBody[3] = {};
             for (size_t i = 0; i < 3; ++i) {
                 deltaB[i] = (camB[i] - hmdB[i]) - povEqB[i];
-                errB[i] = deltaB[i] - trimB[i];
+                errBody[i] = -(deltaB[i] - trimB[i]);
             }
-            double dw[3] = {};
-            for (size_t j = 0; j < 3; ++j)
-                for (size_t i = 0; i < 3; ++i) dw[j] += errB[i] * static_cast<double>(s.rows[3 * i + j]);
-            double tmp[3] = {};
-            for (size_t j = 0; j < 3; ++j)
-                for (size_t k = 0; k < 3; ++k) tmp[j] += static_cast<double>(C[4 * k + j]) * dw[k];
-            for (size_t i = 0; i < 3; ++i)
-                for (size_t j = 0; j < 3; ++j) err[i] += static_cast<double>(np.render[4 * i + j]) * tmp[j];
+            nofoot::seatedFromBody(errBody, psi, err);
+            if (now - g_f40ViewLogMs >= 5000 || g_f40ViewLogMs == 0) {
+                g_f40ViewLogMs = now;
+                Log::get().note("native on foot body align: view map: psi %.1f deg; target minus camera (body) %.3f %.3f %.3f m; seated offset %.3f %.3f %.3f m",
+                                psi * 180.0 / 3.14159265358979323846, errBody[0], errBody[1], errBody[2], err[0], err[1], err[2]);
+            }
         }
     }
     const double errMag = std::sqrt(err[0] * err[0] + err[1] * err[1] + err[2] * err[2]);
@@ -5636,7 +5732,11 @@ void alignTick(uint64_t now) noexcept {
     }
 
     // The active run takes the filter step; the other decays to zero and publishes zero.
-    alignFilter(a, err, on && !a.tripped && !wait, !on || a.tripped, dt, now, mode != 2);   // F37: the body run has no guard
+    if (mode == 3) {
+        calibrateStep(now, camB, g_f37TSNow, !wait, a);   // F40: scheduled, no loop, no guard
+    } else {
+        alignFilter(a, err, on && !a.tripped && !wait, !on || a.tripped, dt, now, mode != 2);   // F37: the body run has no guard
+    }
     if (wait && on) ++a.holds;
     const double zero[3] = {0.0, 0.0, 0.0};
     alignFilter(other, zero, false, true, dt, now, mode == 2);

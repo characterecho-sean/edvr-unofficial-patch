@@ -10,6 +10,7 @@
 #include <d3d11.h>
 #include <wrl/client.h>
 
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -284,9 +285,9 @@ int wmain(int argc, wchar_t** argv) {
     check(EDVR_NATIVE_FRAME_OUTPUT_SIZE_5 + sizeof(float) + 2 * sizeof(uint32_t) ==
               EDVR_NATIVE_FRAME_OUTPUT_SIZE_6,
           "version 6 adds exactly the look-to-aim total, its game frame and its reset serial (F22, F25)");
-    check(EDVR_NATIVE_FRAME_OUTPUT_SIZE_6 + 3 * sizeof(float) + sizeof(uint32_t) ==
+    check(EDVR_NATIVE_FRAME_OUTPUT_SIZE_6 + 3 * sizeof(float) + sizeof(uint32_t) + sizeof(uint32_t) ==
               sizeof(EdvrNativeFrameOutput),
-          "version 8 adds exactly the eye alignment and its serial (F33)");
+          "version 8 adds exactly the eye alignment and its serial (F33); version 9 (F40) adds the now-pose word after them");
 
     // A runtime-only entry applies to any headset on that runtime with no
     // entry of its own; a key with no entry for the worn headset is no trim,
@@ -452,6 +453,72 @@ int wmain(int argc, wchar_t** argv) {
               "F38: a lead of zero frames returns the newest pose");
     }
 
+    // F40 (pure math): the view map. seated = D . Ry(psi) . body; the head in body axes is Ry(psi)^-1 . diag(1,1,-1) . tS; psi is the seated head
+    // yaw less the headset's yaw in the body. The plant is the measured one at psi 0 (cam_body moves by D . applied), mapped the same way; the
+    // controller is the filter's 0.2 gain, so the body error (a 34 cm start, z) must fall monotonically to under 1 cm within 180 frames (2 s at 90 Hz).
+    {
+        const double pi = 3.14159265358979323846;
+        const auto ryRef = [](double psi, const double v[3], double out[3]) {
+            const double c = std::cos(psi), s = std::sin(psi);
+            out[0] = c * v[0] + s * v[2];
+            out[1] = v[1];
+            out[2] = -s * v[0] + c * v[2];
+        };
+        const double psis[3] = {0.0, 37.0 * pi / 180.0, 180.0 * pi / 180.0};
+        for (double psi : psis) {
+            const double body[3] = {0.02, -0.01, -0.34};
+            double seated[3] = {};
+            edvr::nofoot::seatedFromBody(body, psi, seated);
+            const double dS[3] = {-seated[0], -seated[1], seated[2]};
+            double back[3] = {};
+            ryRef(-psi, dS, back);
+            const double inv = std::fabs(back[0] - body[0]) + std::fabs(back[1] - body[1]) + std::fabs(back[2] - body[2]);
+            check(inv < 1e-9, "F40: the seated map inverts through Ry(-psi) . D (the body error comes back unchanged)");
+            // the plant: cam = cam0 + Ry(-psi) . D . applied; the target is the origin, so the error is minus the camera.
+            const double cam0[3] = {0.0, 0.0, 0.34};
+            const auto camAt = [&](const double applied[3]) {
+                const double vD[3] = {-applied[0], -applied[1], applied[2]};
+                double u[3] = {};
+                ryRef(-psi, vD, u);
+                return std::array<double, 3>{cam0[0] + u[0], cam0[1] + u[1], cam0[2] + u[2]};
+            };
+            double applied[3] = {};
+            double prev = 1e9;
+            bool monotone = true;
+            for (int f = 0; f < 180; ++f) {
+                const auto cam = camAt(applied);
+                const double e[3] = {-cam[0], -cam[1], -cam[2]};
+                const double n = std::sqrt(e[0] * e[0] + e[1] * e[1] + e[2] * e[2]);
+                if (n > prev + 1e-12) monotone = false;
+                prev = n;
+                double sd[3] = {};
+                edvr::nofoot::seatedFromBody(e, psi, sd);
+                for (size_t i = 0; i < 3; ++i) applied[i] += 0.2 * sd[i];
+            }
+            const auto camEnd = camAt(applied);
+            const double endErr = std::sqrt(camEnd[0] * camEnd[0] + camEnd[1] * camEnd[1] + camEnd[2] * camEnd[2]);
+            check(monotone && endErr < 0.01, "F40: the view map closes a 34 cm body error monotonically to under 1 cm in 180 frames (psi 0, 37, 180)");
+        }
+        // the head's own motion: Ry(psi)^-1 . diag(1,1,-1) . tS, and its inverse
+        const double ts[3] = {0.1, 0.2, 0.3};
+        double hb[3] = {};
+        edvr::nofoot::hmdInBody(ts, 0.4, hb);
+        double hbBack[3] = {};
+        ryRef(0.4, hb, hbBack);
+        check(std::fabs(hbBack[0] - 0.1) < 1e-9 && std::fabs(hbBack[1] - 0.2) < 1e-9 && std::fabs(hbBack[2] + 0.3) < 1e-9,
+              "F40: the head in body axes is Ry(psi)^-1 . diag(1,1,-1) . tS");
+        // psi: the seated head yaw (render row 2) less the headset's yaw (C row 2) less the body's yaw (rows row 2)
+        float render[12] = {}, C[16] = {}, rows[9] = {};
+        render[8] = static_cast<float>(std::sin(0.5));
+        render[10] = static_cast<float>(std::cos(0.5));
+        C[8] = static_cast<float>(std::sin(1.0));
+        C[10] = static_cast<float>(std::cos(1.0));
+        rows[6] = static_cast<float>(std::sin(0.2));
+        rows[8] = static_cast<float>(std::cos(0.2));
+        check(std::fabs(edvr::nofoot::viewPsi(render, C, rows) - (0.5 - (1.0 - 0.2))) < 1e-6,
+              "F40: psi is the seated head yaw less the headset's yaw in the body");
+    }
+
     // F36: weapon stability defers pacing on foot, and steps aside while native HMD stereo on foot is active (the key is untouched).
     edvr::Config::get().set("fix.weapon_stability", "1");
     g_journalActive = g_onFootKnown = g_onFoot = true;
@@ -465,6 +532,19 @@ int wmain(int argc, wchar_t** argv) {
     EdvrNativeFrameInput steppedFrame = input(41, 7, 24);
     check(table.beginFrame(table.context, &steppedFrame, &steppedOut) == S_OK && steppedOut.deferredPacing == 0,
           "F36: weapon stability steps aside while native on foot is active (no deferred pacing)");
+    // F40: the now-pose flag rides version 9 output. Asked as 9, the provider answers 9 with the flag set by nativeFrameSetNowPoseRender.
+    edvr::nativeFrameSetNowPoseRender(true);
+    EdvrNativeFrameOutput v9Render{sizeof(v9Render), EDVR_NATIVE_FRAME_VERSION_9};
+    EdvrNativeFrameInput v9RenderFrame = input(41, 7, 25);
+    check(table.beginFrame(table.context, &v9RenderFrame, &v9Render) == S_OK && v9Render.version == EDVR_NATIVE_FRAME_VERSION_9 &&
+              v9Render.nowPoseRender == 1,
+          "F40: a version 9 answer carries the now-pose flag (render)");
+    edvr::nativeFrameSetNowPoseRender(false);
+    EdvrNativeFrameOutput v9Next{sizeof(v9Next), EDVR_NATIVE_FRAME_VERSION_9};
+    EdvrNativeFrameInput v9NextFrame = input(41, 7, 26);
+    check(table.beginFrame(table.context, &v9NextFrame, &v9Next) == S_OK && v9Next.version == EDVR_NATIVE_FRAME_VERSION_9 &&
+              v9Next.nowPoseRender == 0,
+          "F40: a version 9 answer carries the now-pose flag clear (next, the default)");
     edvr::g_nativeOnFootActive.store(false);
     g_journalActive = g_onFootKnown = g_onFoot = false;
 

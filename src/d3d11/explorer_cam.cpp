@@ -1720,6 +1720,27 @@ struct NeckJointCache {
 NeckJointCache g_neckJoint;
 constexpr const char* kNeckJointNames[] = {"def_c_neck_joint", "def_c_neck", "def_c_spine2_joint", "def_c_spine1_joint", "def_c_spine_joint"};
 // 1 read (out = the translation of the matrix, model space), 2 no candidate answered, 3 the matrix is not plausible.
+// F40: the head joint's parent in the skeleton's pose arrays (the walk Explorer Cam's rest offset reads), read here without Explorer Cam, once per
+// skeleton (the caller caches the answer). The walk enumerates joint indices and parents, not names: there is no name list to log from it.
+float g_neckWalkLocals[ecm::kMaxWalkJoints * ecm::kJointFloats];
+uint16_t g_neckWalkParents[ecm::kMaxWalkJoints];
+bool neckWalkIndex(uintptr_t iface, const SkSlots& sl, uint32_t* out) noexcept {
+    uintptr_t pose = 0;
+    if (!sehCallPose(sl.fn[0], iface, &pose) || pose == 0) return false;
+    uint16_t joints = 0;
+    if (!sehReadU16At(pose, &joints) || joints == 0 || joints > ecm::kMaxWalkJoints) return false;
+    uint32_t headIdx = ecm::kNoJoint;
+    if (!sehCallFind(sl.fn[1], iface, ecm::kHeadName, &headIdx)) return false;
+    headIdx &= 0xFFFFu;
+    if (headIdx >= joints) return false;
+    if (!sehReadPoseArrays(pose, joints, g_neckWalkLocals, g_neckWalkParents)) return false;
+    const uint16_t parent = g_neckWalkParents[headIdx];
+    Log::get().note("native on foot neck census: the walk gives the head joint index %u and its parent %u (%u joints; the walk enumerates "
+                    "indices and parents, not names)", static_cast<unsigned>(headIdx), static_cast<unsigned>(parent), static_cast<unsigned>(joints));
+    if (parent == 0xFFFFu || parent >= joints) return false;
+    *out = parent;
+    return true;
+}
 uint32_t neckJointRead(uintptr_t iface, const SkSlots& sl, float out[3]) noexcept {
     if (!g_neckJoint.tried || g_neckJoint.iface != static_cast<uint64_t>(iface)) {
         g_neckJoint = NeckJointCache{};
@@ -1735,6 +1756,14 @@ uint32_t neckJointRead(uintptr_t iface, const SkSlots& sl, float out[3]) noexcep
             g_neckJoint.index = idx;
             g_neckJoint.name = name;
             break;
+        }
+        if (!g_neckJoint.name) {
+            // F40: no candidate name answered: the head's parent in the walk, read here, not by Explorer Cam.
+            uint32_t walkIdx = 0xFFFFu;
+            if (neckWalkIndex(iface, sl, &walkIdx)) {
+                g_neckJoint.index = walkIdx;
+                g_neckJoint.name = "the walk's parent of the head joint";
+            }
         }
         Log::get().note("native on foot neck census: neck joint on the local third-person skeleton: %s",
                         g_neckJoint.name ? g_neckJoint.name : "none of the candidate names answered (the pov falls back to the low-passed head)");

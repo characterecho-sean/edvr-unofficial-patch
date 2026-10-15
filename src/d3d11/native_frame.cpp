@@ -58,6 +58,7 @@ uint32_t g_lookReset = 0;   // F25: the reset serial
 // F33: the body-align translation (seated-space metres) and its serial, for version 8 (set by nativeFrameSetEyeAlign; guarded by g_mutex).
 float g_eyeAlign[3] = {};
 uint32_t g_eyeAlignSerial = 0;
+std::atomic<bool> g_nowPoseRender{false};   // F40: fix.now_pose (render true, next false), carried in version 9 output
 // F31: the latest beginFrame's render head and the runtime's "now" head (version 2 input), for the world markers (guarded by g_mutex).
 float g_renderHead[12] = {};
 float g_nowHeadPose[12] = {};
@@ -267,7 +268,7 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
     // F22: version 6 is the struct through the look's three words (after the fade); version 5 is the struct through the fade, which a version 5 caller has.
     // F33: version 8 is the whole struct (the eye alignment after the look); version 6 is now the struct through lookYawReset.
     const bool wantsEyeAlign = output &&
-        output->version == EDVR_NATIVE_FRAME_VERSION_8 &&
+        (output->version == EDVR_NATIVE_FRAME_VERSION_8 || output->version == EDVR_NATIVE_FRAME_VERSION_9) &&
         output->size == sizeof(*output);
     const bool wantsLook = output && !wantsEyeAlign &&
         output->version == EDVR_NATIVE_FRAME_VERSION_6 &&
@@ -315,7 +316,7 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
                  : wantsPacing ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_3
                  : wantsTrim  ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_2
                               : EDVR_NATIVE_FRAME_OUTPUT_SIZE_1;
-    result.version = wantsEyeAlign ? EDVR_NATIVE_FRAME_VERSION_8
+    result.version = wantsEyeAlign ? (output->version == EDVR_NATIVE_FRAME_VERSION_9 ? EDVR_NATIVE_FRAME_VERSION_9 : EDVR_NATIVE_FRAME_VERSION_8)
                     : wantsLook ? EDVR_NATIVE_FRAME_VERSION_6
                     : wantsFade ? EDVR_NATIVE_FRAME_VERSION_5
                     : wantsChannel ? EDVR_NATIVE_FRAME_VERSION_4
@@ -337,6 +338,9 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
         for (int i = 0; i < 3; ++i) result.eyeAlign[i] = g_eyeAlign[i];
         result.eyeAlignSerial = g_eyeAlignSerial;
     }
+    // F40: the now-pose choice (version 9 only; every older shape never learns of it).
+    if (wantsEyeAlign && output->version == EDVR_NATIVE_FRAME_VERSION_9)
+        result.nowPoseRender = g_nowPoseRender.load(std::memory_order_relaxed) ? 1u : 0u;
     // The old Explorer Cam's headset offset (headOffset, yawRadians,
     // offsetEnabled, offsetGamePoses) is retired: those slots stay zero, so a
     // runtime built before 2026-10-07 reads "no offset" and applies none.
@@ -565,6 +569,16 @@ void nativeFrameSetLookYaw(float total, uint32_t gameFrame, uint32_t resetSerial
 }
 
 // F33: the body-align translation the next version 8 beginFrame hands the runtime.
+// F40: fix.now_pose from the config (readKey). Logged at the first value and at each change.
+void nativeFrameSetNowPoseRender(bool render) {
+    static bool logged = false;
+    const bool was = g_nowPoseRender.exchange(render, std::memory_order_relaxed);
+    if (!logged || was != render) {
+        logged = true;
+        edvr::Log::get().note("now pose: %s (the runtime answers Elite's now request %s; live, fix.now_pose)", render ? "render" : "next",
+                              render ? "at the instant the frame draws at, the WaitGetPoses latch" : "one display period ahead, as today");
+    }
+}
 void nativeFrameSetEyeAlign(const float o[3], uint32_t serial) {
     std::lock_guard<std::mutex> lock(g_mutex);
     for (int i = 0; i < 3; ++i) g_eyeAlign[i] = o[i];
