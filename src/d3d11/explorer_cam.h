@@ -136,6 +136,7 @@ struct NeckCensusReading {
     int amcState = 0;
 };
 bool neckCensusRead(NeckCensusReading* out);
+bool explorerCamNeckModel(float out[3]);   // F38: the neck (the head joint's parent) in model space, once Explorer Cam's walk derived it
 bool explorerCamRestPovDelta(float out[3]);   // F33: the povCamera joint minus the head joint in model space, once Explorer Cam's walk derived it
 uint64_t localAmcPointer();   // F18: the local third-person AMC last matched by the fade hook (0 = none); the latch the census reads
 

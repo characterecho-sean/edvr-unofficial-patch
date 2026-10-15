@@ -770,6 +770,8 @@ float g_walkLocals[ecm::kMaxWalkJoints * ecm::kJointFloats];
 std::mutex g_restPovMutex;     // F33
 float g_restPovDelta[3] = {};  // F33: the povCamera joint minus the head joint, model space (the rest offset Explorer Cam derives)
 bool g_restPovKnown = false;   // F33
+float g_neckModel[3] = {};     // F38: the head joint's parent (the neck) in model space, from the same walk
+bool g_neckKnown = false;      // F38
 uint16_t g_walkParents[ecm::kMaxWalkJoints];
 
 void followFault() noexcept {
@@ -874,6 +876,12 @@ ecm::FixedWhy followDerive(uint64_t iface, FollowCache& c) noexcept {
         std::lock_guard<std::mutex> lock(g_restPovMutex);   // F33: the latest derived rest offset, for the body align
         std::memcpy(g_restPovDelta, rest.delta, sizeof(g_restPovDelta));
         g_restPovKnown = true;
+        // F38: the neck is the head joint's parent in the walk (no joint name is needed); unknown when the parent is the root.
+        const uint16_t parent = headIdx < joints ? g_walkParents[headIdx] : uint16_t(0xFFFFu);
+        float neck[3] = {};
+        uint32_t neckDepth = 0;
+        g_neckKnown = parent != 0xFFFFu && parent < joints && ecm::walkJointToModel(g_walkLocals, g_walkParents, joints, parent, neck, &neckDepth);
+        if (g_neckKnown) std::memcpy(g_neckModel, neck, sizeof(g_neckModel));
     }
     note.kind = static_cast<uint32_t>(ecm::FollowNoteKind::Rest);
     note.headDepth = rest.headDepth;
@@ -3314,6 +3322,12 @@ FpBodyReadback explorerCamFpBodyReadback() {
 }
 bool neckCensusRead(NeckCensusReading* out) { return neckCensusCopy(out); }
 uint64_t localAmcPointer() { return g_amcLocal.load(); }   // F18
+bool explorerCamNeckModel(float out[3]) {   // F38: the neck (the head's parent) in model space, once the walk derived it
+    std::lock_guard<std::mutex> lock(g_restPovMutex);
+    if (!g_neckKnown) return false;
+    std::memcpy(out, g_neckModel, sizeof(g_neckModel));
+    return true;
+}
 bool explorerCamRestPovDelta(float out[3]) {   // F33
     std::lock_guard<std::mutex> lock(g_restPovMutex);
     if (!g_restPovKnown) return false;

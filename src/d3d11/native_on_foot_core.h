@@ -16,6 +16,8 @@
 // gate below admits it. Anything else is forwarded unchanged. Nothing here calls the setter itself, writes selector+0x20, or touches
 // the settings words.
 
+#include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -208,5 +210,59 @@ constexpr uintptr_t kVisorDownRva = 0x5F741B8;       // byte: the forced visor s
 constexpr uintptr_t kElemScaleModeRva = 0x5F741CA;   // byte
 constexpr uintptr_t kElemScaleRva = 0x5E7A760;       // float
 constexpr float kHudElemScaleMin = 0.30f, kHudElemScaleMax = 2.00f;
+// F38: the render head's own translation. The runtime folds the applied eye offset into the seated origin, so the render pose's translation is
+// the head less that offset: the head is render + applied. The F38 flight's 1 s line prints both to confirm the sign.
+inline void alignHeadTrue(const float render[12], const double applied[3], double out[3]) noexcept {
+    for (size_t i = 0; i < 3; ++i) out[i] = static_cast<double>(render[4 * i + 3]) + applied[i];
+}
+// F38: the angle in degrees between the rotations of two 3x4 poses (rotation in [4i+j], translation in column 3): arccos((trace(Ra Rb^T) - 1) / 2).
+inline double rotDeltaDeg(const float a[12], const float b[12]) noexcept {
+    double tr = 0.0;
+    for (size_t i = 0; i < 3; ++i)
+        for (size_t k = 0; k < 3; ++k) tr += static_cast<double>(a[4 * i + k]) * static_cast<double>(b[4 * i + k]);
+    const double c = std::max(-1.0, std::min(1.0, (tr - 1.0) * 0.5));
+    return std::acos(c) * 180.0 / 3.14159265358979323846;
+}
+// F38: the waypoint lead. r0 is the newest pose, r1 the one before it. D = R0 R1^T is the rotation over one frame; its axis and angle, scaled
+// by L, give D^L, applied to R0 (Rodrigues). The translation runs on linearly: t0 + L (t0 - t1). out takes the same 3x4 layout.
+inline void leadPose(const float r0[12], const float r1[12], double L, float out[12]) noexcept {
+    double R0[3][3], D[3][3];
+    for (size_t i = 0; i < 3; ++i)
+        for (size_t j = 0; j < 3; ++j) {
+            R0[i][j] = static_cast<double>(r0[4 * i + j]);
+            double acc = 0.0;
+            for (size_t k = 0; k < 3; ++k) acc += static_cast<double>(r0[4 * i + k]) * static_cast<double>(r1[4 * j + k]);
+            D[i][j] = acc;
+        }
+    const double tr = D[0][0] + D[1][1] + D[2][2];
+    const double th = std::acos(std::max(-1.0, std::min(1.0, (tr - 1.0) * 0.5)));
+    const double s = std::sin(th);
+    double K[3][3] = {};
+    if (th > 1e-9 && s > 1e-9) {
+        const double ax = (D[2][1] - D[1][2]) / (2.0 * s);
+        const double ay = (D[0][2] - D[2][0]) / (2.0 * s);
+        const double az = (D[1][0] - D[0][1]) / (2.0 * s);
+        K[0][1] = -az; K[0][2] = ay;
+        K[1][0] = az;  K[1][2] = -ax;
+        K[2][0] = -ay; K[2][1] = ax;
+    }
+    const double phi = L * th;
+    const double sp = std::sin(phi), cp = std::cos(phi);
+    double K2[3][3] = {}, Rl[3][3] = {}, P[3][3] = {};
+    for (size_t i = 0; i < 3; ++i)
+        for (size_t j = 0; j < 3; ++j)
+            for (size_t k = 0; k < 3; ++k) K2[i][j] += K[i][k] * K[k][j];
+    for (size_t i = 0; i < 3; ++i)
+        for (size_t j = 0; j < 3; ++j) Rl[i][j] = (i == j ? 1.0 : 0.0) + sp * K[i][j] + (1.0 - cp) * K2[i][j];
+    for (size_t i = 0; i < 3; ++i)
+        for (size_t j = 0; j < 3; ++j)
+            for (size_t k = 0; k < 3; ++k) P[i][j] += Rl[i][k] * R0[k][j];
+    for (size_t i = 0; i < 3; ++i) {
+        for (size_t j = 0; j < 3; ++j) out[4 * i + j] = static_cast<float>(P[i][j]);
+        const double t0 = static_cast<double>(r0[4 * i + 3]);
+        const double t1 = static_cast<double>(r1[4 * i + 3]);
+        out[4 * i + 3] = static_cast<float>(t0 + L * (t0 - t1));
+    }
+}
 }  // namespace nofoot
 }  // namespace edvr

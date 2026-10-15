@@ -421,6 +421,37 @@ int wmain(int argc, wchar_t** argv) {
         edvr::nativeFrameSetEyeAlign(zero, 0);
     }
 
+    // F38 (pure math, no frame): the true head is the render translation plus the applied offset; the waypoint lead carries a yaw spin on
+    // L frames (yaw(a) yaw(b)^T = yaw(a - b), so the lead is yaw(0.12 + L (0.12 - 0.10)) = yaw(0.17) at L = 2.5).
+    {
+        const float render[12] = {1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f, 0.0f, 2.0f, 0.0f, 0.0f, 1.0f, 3.0f};
+        const double applied[3] = {0.1, -0.2, 0.3};
+        double head[3] = {};
+        edvr::nofoot::alignHeadTrue(render, applied, head);
+        check(std::fabs(head[0] - 1.1) < 1e-9 && std::fabs(head[1] - 1.8) < 1e-9 && std::fabs(head[2] - 3.3) < 1e-9,
+              "F38: the true head is the render translation plus the applied offset");
+        const auto yaw = [](double th, float* m) {
+            const float c = static_cast<float>(std::cos(th)), s = static_cast<float>(std::sin(th));
+            const float r[12] = {c, 0.0f, s, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, -s, 0.0f, c, 0.0f};
+            std::memcpy(m, r, sizeof(r));
+        };
+        float r0[12] = {}, r1[12] = {}, lead[12] = {}, same[12] = {};
+        yaw(0.12, r0);
+        yaw(0.10, r1);
+        r0[3] = 0.01f;
+        edvr::nofoot::leadPose(r0, r1, 2.5, lead);
+        const double s17 = std::sin(0.17), c17 = std::cos(0.17);
+        check(std::fabs(lead[0] - c17) < 1e-4 && std::fabs(lead[2] - s17) < 1e-4 && std::fabs(lead[8] + s17) < 1e-4 && std::fabs(lead[10] - c17) < 1e-4,
+              "F38: the lead carries a yaw spin on 2.5 frames (0.12 + 2.5 x 0.02 rad)");
+        check(std::fabs(lead[3] - 0.035) < 1e-5 && std::fabs(lead[7]) < 1e-6 && std::fabs(lead[11]) < 1e-6,
+              "F38: the lead's translation runs on linearly (t0 + L (t0 - t1))");
+        check(std::fabs(edvr::nofoot::rotDeltaDeg(r0, r1) - 0.02 * 180.0 / 3.14159265358979323846) < 1e-3,
+              "F38: the rotation delta between two frames reads as 0.02 rad");
+        edvr::nofoot::leadPose(r0, r1, 0.0, same);
+        check(std::fabs(edvr::nofoot::rotDeltaDeg(same, r0)) < 1e-3 && std::fabs(same[3] - 0.01) < 1e-6,
+              "F38: a lead of zero frames returns the newest pose");
+    }
+
     // F36: weapon stability defers pacing on foot, and steps aside while native HMD stereo on foot is active (the key is untouched).
     edvr::Config::get().set("fix.weapon_stability", "1");
     g_journalActive = g_onFootKnown = g_onFoot = true;

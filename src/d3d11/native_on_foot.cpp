@@ -78,7 +78,8 @@ bool g_nativeEdgeLast = false;                // F26: frame thread only
 std::atomic<bool> g_alignKeyOn{false};
 std::atomic<int> g_alignMode{0};   // F35: 0 off, 1 view (F33), 2 body (F35)
 double g_alignTrimCm[3] = {};   // [0] right, [1] up, [2] forward (body axes)
-std::atomic<int> g_worldMarkersMode{4};        // F27/F31/F37: fix.native_on_foot_world_markers: 0 fixed, 1 forward (C), 2 game, 3 forward_now (H_M), 4 forward_hist (the ring's matched pose, default), 5 forward_k2 (the ring's pose two frames back); live; key 10 is never touched
+std::atomic<double> g_worldLeadFrames{2.5};   // F38: fix.native_on_foot_world_markers_lead, 0 to 5 frames (forward_lead); live
+std::atomic<int> g_worldMarkersMode{6};        // F27/F31/F37: fix.native_on_foot_world_markers: 0 fixed, 1 forward (C), 2 game, 3 forward_now (H_M), 4 forward_hist (the ring's matched pose), 5 forward_k2 (the ring's pose two frames back), 6 forward_lead (the newest ring pose carried ahead, default); live; key 10 is never touched
 uint64_t g_worldLineMs = 0;                    // frame thread and game thread: the 5 s line (the post hook writes it, once per 5 s)
                // fix.native_on_foot_look_to_aim_comp_delay (temporary): 0 or 1 frames
 bool g_lookOnLast = true;                      // frame thread only: the look keys as last logged (readKey)
@@ -537,8 +538,12 @@ void readKey() {
     }
     // F25 (TEMPORARY): the world markers (the waypoint and the others, not key 10): fixed takes the head out of their placement, game leaves them as the game has them.
     {
-        const std::string wm = cfg.getString("fix.native_on_foot_world_markers", "forward_hist");
-        g_worldMarkersMode.store(wm == "forward" ? 1 : wm == "fixed" ? 0 : wm == "game" ? 2 : wm == "forward_now" ? 3 : wm == "forward_k2" ? 5 : 4, std::memory_order_relaxed);
+        const std::string wm = cfg.getString("fix.native_on_foot_world_markers", "forward_lead");
+        g_worldMarkersMode.store(wm == "forward" ? 1 : wm == "fixed" ? 0 : wm == "game" ? 2 : wm == "forward_now" ? 3 : wm == "forward_k2" ? 5 : wm == "forward_hist" ? 4 : 6, std::memory_order_relaxed);
+        // F38: the waypoint lead in frames (forward_lead), clamped to 0..5; a value that does not parse reads as 2.5.
+        double lead = std::atof(cfg.getString("fix.native_on_foot_world_markers_lead", "2.5").c_str());
+        if (!(lead == lead)) lead = 2.5;
+        g_worldLeadFrames.store(std::max(0.0, std::min(5.0, lead)), std::memory_order_relaxed);
     }
     // F33 (TEMPORARY, live): the body align and its trims (cm, clamped to +-30).
     {
@@ -1728,6 +1733,7 @@ uint32_t g_f31NowSeq = 0;
 uint64_t g_f31FrameSeq = 0, g_f31NoNow = 0;
 // F37: the ring match: the chosen k histogram, the residual (degrees, M against the chosen view), the fallbacks, and the QPC ages (us).
 int g_f37K = -1;
+uint64_t g_f38LeadLineMs = 0;   // F38: the forward_lead line's last time
 uint64_t g_f37Hist[8] = {}, g_f37Fallback = 0, g_f37ResN = 0;
 double g_f37ResSum = 0.0;
 uint64_t g_f37AgePickMax = 0, g_f37AgeNewMax = 0;
@@ -2879,7 +2885,31 @@ void __fastcall reticleWorldPost(void* node) noexcept {
             g_f37AgePickMax = std::max(g_f37AgePickMax, agePick);
             g_f37AgeNewMax = std::max(g_f37AgeNewMax, ageNew);
         }
-    }    if (!havePose) {
+    }
+    // F38 (waypoint lead, mode 6, the default): the newest ring pose carried L frames on along its own motion; the one before it sets the rate.
+    // The view under the lead pose goes into C, as the ring pick does.
+    if (havePose && wmMode == 6) {
+        EdvrNativeNowPose rp{};
+        if (nativeFrameNowPose(rp) && rp.renderValid && rp.ringCount > 0) {
+            const uint32_t i0 = rp.ringNewest % 8u;
+            const uint32_t i1 = (rp.ringNewest + 7u) % 8u;
+            const double L = g_worldLeadFrames.load(std::memory_order_relaxed);
+            float lead[12] = {};
+            if (rp.ringCount >= 2) nofoot::leadPose(rp.ringHead[i0], rp.ringHead[i1], L, lead);
+            else std::memcpy(lead, rp.ringHead[i0], sizeof(lead));
+            float H[16] = {};
+            f31NowMatrix(C, rp.render, lead, H);
+            std::memcpy(C, H, sizeof(C));
+            if (now - g_f38LeadLineMs >= 5000 || g_f38LeadLineMs == 0) {
+                g_f38LeadLineMs = now;
+                const double perFrame = rp.ringCount >= 2 ? nofoot::rotDeltaDeg(rp.ringHead[i0], rp.ringHead[i1]) : 0.0;
+                const double leadDeg = nofoot::rotDeltaDeg(rp.ringHead[i0], lead);
+                Log::get().note("native on foot world markers: forward_lead: L %.2f frames, rotation %.3f deg per frame, the lead is %.3f deg "
+                                "from the newest pose (ring %u)", L, perFrame, leadDeg, static_cast<unsigned>(rp.ringCount));
+            }
+        }
+    }
+    if (!havePose) {
         if (now - g_worldLineMs >= 5000 || g_worldLineMs == 0) {
             g_worldLineMs = now;
             Log::get().note("native on foot world markers: fixed, but no fresh head pose (no list-B sample in 0.5 s); markers are left as the game places them");
@@ -4957,6 +4987,9 @@ struct EyeSample {
     bool rootOk = false, amcPosOk = false;
     float root[3] = {}, amcPos[3] = {};
     float pov[3] = {};
+    // F38: the neck (the head joint's parent in Explorer Cam's walk) in world space, when the walk has derived it (on foot it usually has not).
+    bool neckOk = false;
+    float neck[3] = {};
 };
 std::mutex g_eyeMutex;                   // guards g_eyeSample (game thread writes, frame thread reads)
 EyeSample g_eyeSample;
@@ -5026,6 +5059,14 @@ void eyeSample(void* amcPtr, void* jobPtr, uint64_t now) noexcept {
         const float pm[3] = {nk.head[0] + rest[0], nk.head[1] + rest[1], nk.head[2] + rest[2]};
         for (size_t j = 0; j < 3; ++j) s.pov[j] = pm[0] * M[j] + pm[1] * M[4 + j] + pm[2] * M[8 + j] + M[12 + j];
         s.povOk = true;
+    }
+    // F38: the neck, through the same matrix as the head.
+    {
+        float nm[3] = {};
+        s.neckOk = s.headOk && explorerCamNeckModel(nm);
+        if (s.neckOk) {
+            for (size_t j = 0; j < 3; ++j) s.neck[j] = nm[0] * M[j] + nm[1] * M[4 + j] + nm[2] * M[8 + j] + M[12 + j];
+        }
     }
     {
         const uintptr_t amc = reinterpret_cast<uintptr_t>(amcPtr);
@@ -5364,8 +5405,14 @@ void alignFilter(AlignRun& a, const double err[3], bool driving, bool decay, dou
 // The frame thread's one call per frame. The view offset is seated metres (the runtime moves the seated origin by it); the body offset is world
 // metres (the submit job's hook moves the records by it). The other run's offset decays to zero.
 // F37: the view's head motion reference (tS0), the sign check's previous step, and the last values the 1 s lines print.
+// F38: the pov target's state (frame thread). Reset on entering a mode; the first second of an entry sets the neck offset and the
+// camera-above-FP mean; the head is low-passed in body axes (tau 1 s) when the neck is not known.
+bool g_f38Valid = false, g_f38LpValid = false;
+uint64_t g_f38StartMs = 0, g_f38LineMs = 0;
+double g_f38R0[3] = {}, g_f38CamFp[3] = {}, g_f38Lp[3] = {};
+int g_f38R0N = 0, g_f38CamFpN = 0;
 bool g_f37TS0Valid = false;
-float g_f37TS0[3] = {};
+double g_f37TS0[3] = {};
 uint32_t g_f37TS0Gen = 0;
 double g_f37TSNow[3] = {};
 struct F37Prev {
@@ -5390,6 +5437,9 @@ void alignTick(uint64_t now) noexcept {
         a.guardArmed = false;
         lastMode = mode;
         if (mode == 2) g_f37TableWanted.store(true, std::memory_order_relaxed);   // F37: the per-part table on entering body
+        g_f38Valid = false;
+        g_f38LpValid = false;
+        g_f38LineMs = 0;
         if (mode == 1) g_f37TS0Valid = false;                                      // F37: a new head reference on entering view
     }
     const double dt = (a.lastMs && now > a.lastMs) ? std::min(0.05, static_cast<double>(now - a.lastMs) / 1000.0) : 0.0;
@@ -5448,6 +5498,52 @@ void alignTick(uint64_t now) noexcept {
         const float* camUse = (mode == 2 && fpFresh) ? fp.origin : s.cam;   // F37: body mode anchors on the FP root
         body(camUse, camB);
         body(s.pov, povB);
+        // F38: the pov target, in body axes. With the neck, the neck plus the head-to-neck offset (pov minus neck) captured over the first
+        // second of this entry; otherwise the pov low-passed in body axes (tau 1 s), so the head's own swing drops out and the body's turns
+        // do not lag. The means are frozen after the first second. The camera minus the FP root is logged, not applied.
+        double neckB[3] = {}, jobB[3] = {}, fpB[3] = {};
+        if (s.neckOk) body(s.neck, neckB);
+        body(s.cam, jobB);
+        if (fpFresh) body(fp.origin, fpB);
+        if (!g_f38Valid) {
+            g_f38Valid = true;
+            g_f38StartMs = now;
+            g_f38R0N = 0;
+            g_f38CamFpN = 0;
+            for (size_t i = 0; i < 3; ++i) g_f38R0[i] = g_f38CamFp[i] = 0.0;
+        }
+        const bool inWin = now - g_f38StartMs < 1000;
+        if (!g_f38LpValid) {
+            for (size_t i = 0; i < 3; ++i) g_f38Lp[i] = povB[i];
+            g_f38LpValid = true;
+        }
+        const double alpha = dt > 0.0 ? 1.0 - std::exp(-dt / 1.0) : 0.0;   // tau 1 s
+        for (size_t i = 0; i < 3; ++i) g_f38Lp[i] += alpha * (povB[i] - g_f38Lp[i]);
+        if (inWin && s.neckOk) {
+            ++g_f38R0N;
+            for (size_t i = 0; i < 3; ++i) g_f38R0[i] += ((povB[i] - neckB[i]) - g_f38R0[i]) / static_cast<double>(g_f38R0N);
+        }
+        if (inWin && fpFresh) {
+            ++g_f38CamFpN;
+            for (size_t i = 0; i < 3; ++i) g_f38CamFp[i] += ((jobB[i] - fpB[i]) - g_f38CamFp[i]) / static_cast<double>(g_f38CamFpN);
+        }
+        const bool useNeck = s.neckOk && g_f38R0N > 0;
+        double povEqB[3] = {}, povEqW[3] = {};
+        for (size_t i = 0; i < 3; ++i) povEqB[i] = useNeck ? neckB[i] + g_f38R0[i] : g_f38Lp[i];
+        for (size_t j = 0; j < 3; ++j) {
+            povEqW[j] = static_cast<double>(s.origin[j]);
+            for (size_t i = 0; i < 3; ++i) povEqW[j] += povEqB[i] * static_cast<double>(s.rows[3 * i + j]);
+        }
+        if (now - g_f38LineMs >= 5000 || g_f38LineMs == 0) {
+            g_f38LineMs = now;
+            double off = 0.0;
+            for (size_t i = 0; i < 3; ++i) off += (povEqB[i] - povB[i]) * (povEqB[i] - povB[i]);
+            Log::get().note("native on foot body align: pov target from %s: pov minus neck (body) %.3f %.3f %.3f m, target minus pov %.3f m, "
+                            "neck %s; camera minus fp root (body) %.3f %.3f %.3f m%s",
+                            useNeck ? "the neck" : "the low-passed head", g_f38R0[0], g_f38R0[1], g_f38R0[2], std::sqrt(off),
+                            s.neckOk ? "known" : "unknown (walk not run)", g_f38CamFp[0], g_f38CamFp[1], g_f38CamFp[2],
+                            fpFresh ? "" : " (fp root not fresh)");
+        }
         double trimB[3] = {g_alignTrimCm[0] / 100.0, g_alignTrimCm[1] / 100.0, g_alignTrimCm[2] / 100.0};   // right, up, forward
         if (mode == 2) {
             // body: the world error is the camera minus the pov, the trims in world axes, and the offset already applied (the pov the render
@@ -5456,23 +5552,23 @@ void alignTick(uint64_t now) noexcept {
             for (size_t j = 0; j < 3; ++j)
                 for (size_t i = 0; i < 3; ++i) tw[j] += trimB[i] * static_cast<double>(s.rows[3 * i + j]);
             for (size_t j = 0; j < 3; ++j)
-                err[j] = (static_cast<double>(camUse[j]) - static_cast<double>(s.pov[j])) - tw[j] - a.pos[j];
-            for (size_t i = 0; i < 3; ++i) deltaB[i] = camB[i] - povB[i] - trimB[i];
+                err[j] = (static_cast<double>(camUse[j]) - povEqW[j]) - tw[j] - a.pos[j];
+            for (size_t i = 0; i < 3; ++i) deltaB[i] = camB[i] - povEqB[i] - trimB[i];
         } else {
             // F37: the head's motion only. tS is the render head's translation in seated metres, less tS0 (the first head of this reference
             // generation: captured when the view starts and at each recentre). Mapped to body axes: v = R^T tS, dw = C.rot v, hmd_i = row_i . dw
             // (a vector, no origin subtraction). The sign is the sign check's to prove (the 1 s line).
+            double headTrue[3] = {};
+            nofoot::alignHeadTrue(np.render, a.applied, headTrue);   // F38: the head is the render translation plus the applied offset
             if (!g_f37TS0Valid || np.referenceGeneration != g_f37TS0Gen) {
-                g_f37TS0[0] = np.render[3];
-                g_f37TS0[1] = np.render[7];
-                g_f37TS0[2] = np.render[11];
+                for (size_t i = 0; i < 3; ++i) g_f37TS0[i] = headTrue[i];
                 g_f37TS0Gen = np.referenceGeneration;
                 g_f37TS0Valid = true;
                 Log::get().note("native on foot body align: head reference tS0 captured at (%.3f, %.3f, %.3f) m seated (reference generation %u)",
                                 static_cast<double>(g_f37TS0[0]), static_cast<double>(g_f37TS0[1]), static_cast<double>(g_f37TS0[2]),
                                 static_cast<unsigned>(g_f37TS0Gen));
             }
-            for (size_t i = 0; i < 3; ++i) g_f37TSNow[i] = static_cast<double>(np.render[4 * i + 3]) - static_cast<double>(g_f37TS0[i]);
+            for (size_t i = 0; i < 3; ++i) g_f37TSNow[i] = headTrue[i] - g_f37TS0[i];
             double vH[3] = {}, dwH[3] = {};
             for (size_t j = 0; j < 3; ++j)
                 for (size_t i = 0; i < 3; ++i) vH[j] += static_cast<double>(np.render[4 * i + j]) * g_f37TSNow[i];
@@ -5484,7 +5580,7 @@ void alignTick(uint64_t now) noexcept {
             }
             double errB[3] = {};
             for (size_t i = 0; i < 3; ++i) {
-                deltaB[i] = (camB[i] - hmdB[i]) - povB[i];
+                deltaB[i] = (camB[i] - hmdB[i]) - povEqB[i];
                 errB[i] = deltaB[i] - trimB[i];
             }
             double dw[3] = {};
