@@ -90,6 +90,7 @@ std::atomic<int> g_alignMode{0};   // F35: 0 off, 1 view (F33), 2 body (F35)
 double g_alignTrimCm[3] = {};   // [0] right, [1] up, [2] forward (body axes)
 std::atomic<int> g_alignAnchorMode{2};   // F48: fix.native_on_foot_body_align_anchor: 0 neck (F46), 1 clavicles (F43/F45), 2 pov (the default)
 std::atomic<bool> g_alignVertical{false};   // F50 (TEMPORARY): fix.native_on_foot_body_align_vertical: off (the default) locks the body's height
+std::atomic<bool> g_raiseFpKey{true};       // F51 (TEMPORARY): fix.native_on_foot_body_raise_fp: on (the default) raises the FP rig and the view in body mode
 uint64_t g_f40MarkerLogMs = 0;   // F40: the marker angle line's last time
 std::atomic<double> g_worldLeadFrames{2.5};   // F38: fix.native_on_foot_world_markers_lead, 0 to 5 frames (forward_lead); live
 std::atomic<int> g_worldMarkersMode{6};        // F27/F31/F37: fix.native_on_foot_world_markers: 0 fixed, 1 forward (C), 2 game, 3 forward_now (H_M), 4 forward_hist (the ring's matched pose), 5 forward_k2 (the ring's pose two frames back), 6 forward_lead (the newest ring pose carried ahead, default); live; key 10 is never touched
@@ -601,6 +602,14 @@ void readKey() {
                             "the body in all three axes (F48)" : "off -- in body mode d moves the body only along its right and forward axes; its "
                             "up component (and the up trim) is dropped and logged");
         g_alignVertical.store(vertical, std::memory_order_relaxed);
+        // F51 (TEMPORARY, live): the FP rig and view raise in body mode. on (the default): the view rises by dh (a seated y offset) and the FP
+        // AMC's records by dh along the body's up axis, dh = (3P pov height - FP side height), low-passed, 0..0.5 m. off: neither. Body mode only.
+        const bool raiseFp = cfg.getString("fix.native_on_foot_body_raise_fp", "on") != "off";
+        if (first || raiseFp != g_raiseFpKey.load(std::memory_order_relaxed))
+            Log::get().note("native on foot body raise (F51, TEMPORARY): fix.native_on_foot_body_raise_fp is %s", raiseFp ? "on -- in body mode the "
+                            "view and the first-person AMC's records rise by dh = (3P pov height - FP side height), low-passed 1 s, 0..0.5 m" : "off -- "
+                            "nothing is raised");
+        g_raiseFpKey.store(raiseFp, std::memory_order_relaxed);
         // F49 (TEMPORARY, live): the pose freeze: off, probe (the default: the Animate post-hook measures and writes nothing) or on.
         const std::string freeze = cfg.getString("fix.native_on_foot_pose_freeze", "probe");
         pfz::g_mode.store(freeze == "on" ? 2 : freeze == "off" ? 0 : 1, std::memory_order_relaxed);
@@ -5270,6 +5279,7 @@ struct FpRootSnap {
     uint64_t stamp = 0;
 };
 FpRootSnap g_fpRoot;   // under g_eyeMutex
+std::atomic<uint64_t> g_fpAmcLocal{0};   // F51: the mode-2 (FP) AMC fpRootTrack last saw (the body-shift post-hook's FP match; it re-reads the mode)
 // F48 (census, read only): every populated part entry of a mode-2 (FP) AMC, once per AMC: each entry whose four instance pointers, four view
 // masks or flag byte are not all zero, with all four of each, the flag byte, state, pending and current. The F1/F3 census lines keep skipping
 // parts without an instance; this dump does not. Game thread (the P1 callback); every read guarded.
@@ -5308,6 +5318,7 @@ void fpRootTrack(void* amcPtr, uint64_t now) noexcept {
     uintptr_t p = 0;
     uint32_t mode = 0;
     if (!guardedRead(a + 0x50, &p, 8) || !p || !guardedRead(p + 0x14, &mode, 4) || mode != 2) return;
+    g_fpAmcLocal.store(static_cast<uint64_t>(a), std::memory_order_relaxed);   // F51
     fpPartTableDump(a);   // F48 (census): once per FP AMC
     uintptr_t obj = 0, vt = 0, fn = 0, mat = 0;
     float m[16] = {};
@@ -5569,12 +5580,103 @@ void bodyShiftApply(uint64_t amc) noexcept {
                         partsShifted, static_cast<unsigned long long>(shifted), static_cast<unsigned long long>(skipped), dz ? "zero" : "not zero");
     }
 }
+// ---- F51 (TEMPORARY): the FP rig raise, the hook's half ------------------------------------------------------------------------------
+// The frame thread publishes the FP offset (world metres: dh along the body's up row) through a seqlock, and g_f51FpOn (body mode and the key on).
+// The post-hook moves the FP (mode 2) AMC's records by it under the 3P rule (a record moves only while it equals the AMC origin, so a second pass
+// leaves it alone). Inside the hook: no allocation, logging or locks; every read and write under SEH; counters go to the frame thread.
+std::atomic<bool> g_f51FpOn{false};
+std::atomic<uint32_t> g_fpRaiseSeq{0};
+std::atomic<float> g_fpRaiseD[3]{};
+void fpRaisePublish(const double d[3]) noexcept {
+    g_fpRaiseSeq.fetch_add(1, std::memory_order_acq_rel);
+    for (size_t i = 0; i < 3; ++i) g_fpRaiseD[i].store(static_cast<float>(d[i]), std::memory_order_relaxed);
+    g_fpRaiseSeq.fetch_add(1, std::memory_order_release);
+}
+bool fpRaiseRead(float d[3]) noexcept {
+    for (int tries = 0; tries < 4; ++tries) {
+        const uint32_t s1 = g_fpRaiseSeq.load(std::memory_order_acquire);
+        if (s1 & 1u) continue;
+        for (size_t i = 0; i < 3; ++i) d[i] = g_fpRaiseD[i].load(std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if (g_fpRaiseSeq.load(std::memory_order_relaxed) == s1) return true;
+    }
+    return false;   // being written: this pass skips (the next one moves the records)
+}
+std::atomic<uint64_t> g_fpShifted{0}, g_fpSkipped{0}, g_fpPasses{0}, g_fpPartsMask{0}, g_fpNotMode2{0};
+struct F51First {
+    std::atomic<uint32_t> seq{0};
+    float pre[3] = {}, post[3] = {};
+    uint32_t block = 0;
+};
+F51First g_f51First;   // the first FP record shifted in the latest pass (the 1 s line)
+void fpRaiseApply(uint64_t amc) noexcept {
+    uint64_t params = 0;
+    uint32_t mode = 0;
+    if (!guardedRead(amc + 0x50, &params, 8) || !params || !guardedRead(params + 0x14, &mode, 4) || mode != 2) {
+        g_fpNotMode2.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    uint8_t flags = 0;
+    if (!guardedRead(amc + bodyrec::kFlags, &flags, 1) || !(flags & 4)) return;
+    float d[3] = {};
+    if (!fpRaiseRead(d) || (d[0] == 0.0f && d[1] == 0.0f && d[2] == 0.0f)) return;
+    float origin[3] = {};
+    if (!guardedRead(amc + bodyrec::kOrigin, origin, sizeof(origin))) return;
+    g_fpPasses.fetch_add(1, std::memory_order_relaxed);
+    uint64_t shifted = 0, skipped = 0, parts = 0;
+    bool first = true;
+    for (int idx = 0; idx < bodyrec::kBlocks; ++idx) {
+        for (int k = 0; k < bodyrec::kSlots; ++k) {
+            uint64_t inst = 0, mask = 0, instField = 0;
+            const uintptr_t slot = static_cast<uintptr_t>(idx) * bodyrec::kStride + static_cast<uintptr_t>(k) * 8u;
+            if (!guardedRead(amc + bodyrec::kInstBase + slot, &inst, 8) || !inst) continue;
+            if (!guardedRead(amc + bodyrec::kMaskBase + slot, &mask, 8) || !mask) continue;
+            if (!guardedRead(static_cast<uintptr_t>(inst) + bodyrec::kInstOff, &instField, 8) || !instField) continue;
+            const uintptr_t rec = amc + bodyrec::kRecBase + static_cast<uintptr_t>(idx) * bodyrec::kStride +
+                                  static_cast<uintptr_t>(k) * bodyrec::kRecSize;
+            float pos[3] = {}, pre[3] = {};
+            if (!guardedRead(rec + bodyrec::kRecPos, pos, sizeof(pos))) {
+                ++skipped;
+                continue;
+            }
+            std::memcpy(pre, pos, sizeof(pre));
+            if (!nofoot::shiftIfAtOrigin(pos, origin, d)) {   // already placed (or moved by an earlier pass): not ours to move
+                ++skipped;
+                continue;
+            }
+            float prev[3] = {};
+            const bool okPrev = guardedRead(rec + bodyrec::kPrev, prev, sizeof(prev));
+            for (int i = 0; i < 3; ++i) {
+                guardedWriteFloat(rec + bodyrec::kRecPos + 4u * static_cast<uintptr_t>(i), pos[i]);
+                if (okPrev) guardedWriteFloat(rec + bodyrec::kPrev + 4u * static_cast<uintptr_t>(i), prev[i] + d[i]);
+            }
+            parts |= 1ull << idx;
+            if (first) {
+                first = false;
+                g_f51First.seq.fetch_add(1, std::memory_order_acq_rel);
+                std::memcpy(g_f51First.pre, pre, sizeof(pre));
+                std::memcpy(g_f51First.post, pos, sizeof(pos));
+                g_f51First.block = static_cast<uint32_t>(idx);
+                g_f51First.seq.fetch_add(1, std::memory_order_release);
+            }
+            ++shifted;
+        }
+    }
+    g_fpShifted.fetch_add(shifted, std::memory_order_relaxed);
+    g_fpSkipped.fetch_add(skipped, std::memory_order_relaxed);
+    if (parts) g_fpPartsMask.fetch_or(parts, std::memory_order_relaxed);
+}
+static_assert(bodyrec::kBlocks <= 64, "the FP parts mask holds one bit per block");
+
 uint64_t __fastcall bodyShiftHooked(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t s5, uint64_t s6, uint64_t s7, uint64_t s8) {
     const F35Fn original = reinterpret_cast<F35Fn>(g_bodyShift.original);
     if (!original) return 0;
     const uint64_t r = original(a1, a2, a3, a4, s5, s6, s7, s8);
     g_bodyCalls.fetch_add(1, std::memory_order_relaxed);
-    if (g_alignMode.load(std::memory_order_relaxed) == 2 && a1 && a1 == localAmcPointer()) bodyShiftApply(a1);
+    if (g_alignMode.load(std::memory_order_relaxed) == 2 && a1) {
+        if (a1 == localAmcPointer()) bodyShiftApply(a1);
+        else if (g_f51FpOn.load(std::memory_order_relaxed) && a1 == g_fpAmcLocal.load(std::memory_order_relaxed)) fpRaiseApply(a1);   // F51
+    }
     return r;
 }
 
@@ -5741,6 +5843,80 @@ void calibrateStep(uint64_t now, const double cam[3], const double ts[3], bool h
     for (size_t i = 0; i < 3; ++i) a.pos[i] = haveSample ? kCalOffsets[step][i] : 0.0;
 }
 
+// F51: the raise's frame-thread state: dh's filter, the applied raise (metres; the view's seated y is minus it, the FP records move by it along
+// the body's up row), the last published eye align (the view run plus the raise) and FP offset, the body's last up row, and the 1 s line's time.
+nofoot::RaiseDh g_f51Dh;
+double g_f51Applied = 0.0;
+double g_f51EyePub[3] = {}, g_f51FpPub[3] = {};
+double g_f51Up[3] = {0.0, 1.0, 0.0};
+double g_f51PovUp = 0.0, g_f51FpUp = 0.0;
+int g_f51Src = -1;   // 0 the 3P povCamera joint, 1 the head plus 0.038 m
+uint64_t g_f51LogMs = 0;
+
+// F51: the once-a-second line in body mode: dh, the view offset, the FP records shifted (count and part names), the weapon's status.
+void f51Line(const EyeSample& s, const FpRootSnap& fp, bool fpFresh, bool raiseOn) noexcept {
+    const uint64_t shifted = g_fpShifted.exchange(0, std::memory_order_relaxed), skipped = g_fpSkipped.exchange(0, std::memory_order_relaxed),
+                   passes = g_fpPasses.exchange(0, std::memory_order_relaxed), parts = g_fpPartsMask.exchange(0, std::memory_order_relaxed),
+                   notMode2 = g_fpNotMode2.exchange(0, std::memory_order_relaxed);
+    char names[700] = {};
+    size_t at = 0;
+    for (uint32_t idx = 0; idx < ecm::kPartCount && idx < 64; ++idx) {
+        if (!(parts & (1ull << idx))) continue;
+        const int w = std::snprintf(names + at, sizeof(names) - at, "%s%s", at ? " " : "", ecm::kPartNames[idx]);
+        if (w <= 0 || static_cast<size_t>(w) >= sizeof(names) - at) break;
+        at += static_cast<size_t>(w);
+    }
+    float pre[3] = {}, post[3] = {};
+    uint32_t block = 0;
+    bool firstOk = false;
+    for (int tries = 0; tries < 4 && !firstOk; ++tries) {
+        const uint32_t s1 = g_f51First.seq.load(std::memory_order_acquire);
+        if (s1 & 1u || s1 == 0) break;
+        std::memcpy(pre, g_f51First.pre, sizeof(pre));
+        std::memcpy(post, g_f51First.post, sizeof(post));
+        block = g_f51First.block;
+        std::atomic_thread_fence(std::memory_order_acquire);
+        firstOk = g_f51First.seq.load(std::memory_order_relaxed) == s1;
+    }
+    double raiseS[3] = {};
+    nofoot::raiseSeated(g_f51Applied, raiseS);
+    Log::get().note("native on foot body raise (F51, key %s): dh measured %.3f m (3P pov up %.3f m from %s, FP side up %.3f m, body axes), low-passed "
+                    "%.3f m (tau 1 s, 0..0.5 m), applied %.3f m; view: seated offset (0, %.3f, 0) m, eye align published (%.3f, %.3f, %.3f) m; FP "
+                    "records (AMC %016llX): %llu shifted, %llu skipped over %llu passes this second%s, along the up row (%.3f, %.3f, %.3f); parts: %s; "
+                    "first shifted %s: block %u %s, before (%.3f, %.3f, %.3f) after (%.3f, %.3f, %.3f)",
+                    raiseOn ? "on" : g_raiseFpKey.load(std::memory_order_relaxed) ? "on, not active" : "off", g_f51Dh.raw, g_f51PovUp,
+                    g_f51Src == 0 ? "the povCamera joint" : g_f51Src == 1 ? "the head + 0.038 m" : "nothing yet", g_f51FpUp, g_f51Dh.lp, g_f51Applied,
+                    raiseS[1], g_f51EyePub[0], g_f51EyePub[1], g_f51EyePub[2], static_cast<unsigned long long>(g_fpAmcLocal.load(std::memory_order_relaxed)),
+                    static_cast<unsigned long long>(shifted), static_cast<unsigned long long>(skipped), static_cast<unsigned long long>(passes),
+                    notMode2 ? " (the latched FP AMC was not mode 2 on some calls)" : "", g_f51Up[0], g_f51Up[1], g_f51Up[2], at ? names : "none",
+                    firstOk ? "record" : "(none yet)", block, block < ecm::kPartCount ? ecm::kPartNames[block] : "?", static_cast<double>(pre[0]),
+                    static_cast<double>(pre[1]), static_cast<double>(pre[2]), static_cast<double>(post[0]), static_cast<double>(post[1]),
+                    static_cast<double>(post[2]));
+    // The weapon: the FP handAttach joints (FP 52 L, 51 R) in world through the FP root's yaw (as F45), as the skeleton places them (where a weapon
+    // attached to the joint draws) and where the shifted arms put them (+ the applied raise along up).
+    if (s.extOkFp && fpFresh) {
+        const double rn = std::sqrt(static_cast<double>(fp.rows[6]) * fp.rows[6] + static_cast<double>(fp.rows[8]) * fp.rows[8]);
+        const double cy = rn > 1e-6 ? fp.rows[8] / rn : 1.0, sy = rn > 1e-6 ? fp.rows[6] / rn : 0.0;
+        double w[2][3] = {};
+        for (size_t side = 0; side < 2; ++side) {
+            const float* m = &s.extFpM[3 * (2 + side)];
+            w[side][0] = static_cast<double>(fp.origin[0]) + m[0] * cy + m[2] * sy;
+            w[side][1] = static_cast<double>(fp.origin[1]) + m[1];
+            w[side][2] = static_cast<double>(fp.origin[2]) - m[0] * sy + m[2] * cy;
+        }
+        const double r = g_f51Applied;
+        Log::get().note("native on foot body raise (F51): hand attach (world) L: skeleton (%.3f, %.3f, %.3f), with the arms' shift (%.3f, %.3f, %.3f); R: "
+                        "skeleton (%.3f, %.3f, %.3f), with the arms' shift (%.3f, %.3f, %.3f); weapon: not shifted by this build -- it is not one of the "
+                        "AMC's 54 parts, so the record shift does not reach it, and what draws it (attached at the handAttach joints) is not found yet; "
+                        "if it follows the skeleton it draws %.3f m below the hands while the raise is applied",
+                        w[0][0], w[0][1], w[0][2], w[0][0] + r * g_f51Up[0], w[0][1] + r * g_f51Up[1], w[0][2] + r * g_f51Up[2], w[1][0], w[1][1],
+                        w[1][2], w[1][0] + r * g_f51Up[0], w[1][1] + r * g_f51Up[1], w[1][2] + r * g_f51Up[2], r);
+    } else {
+        Log::get().note("native on foot body raise (F51): hand attach: not read (%s); weapon: not shifted by this build (not an AMC part; its draw "
+                        "path is not found yet)", !s.extOkFp ? "the FP attach joints are not in the census" : "the FP root is not fresh");
+    }
+}
+
 void alignTick(uint64_t now) noexcept {
     static int lastMode = -1;
     const int mode = g_alignMode.load(std::memory_order_relaxed);   // 0 off, 1 view, 2 body
@@ -5848,6 +6024,8 @@ void alignTick(uint64_t now) noexcept {
     // F43: the shoulder anchor's state for this frame (set in the !wait block; zero when the anchor is not the shoulders).
     bool shoulderAnchor = false;
     double fpShW[3] = {}, tpShW[3] = {};
+    bool f51Have = false;   // F51: this frame measured dh (body mode, inputs fresh, the FP root fresh)
+    double f51Raw = 0.0;
     if (!wait) {
         const auto body = [&](const float p[3], double out[3]) {
             for (size_t i = 0; i < 3; ++i) {
@@ -5978,6 +6156,22 @@ void alignTick(uint64_t now) noexcept {
             for (size_t i = 0; i < 3; ++i) {
                 g_f48SrcB[i] = srcB[i];
                 g_f48CamB[i] = anchorB[i];
+            }
+            // F51: dh's measurement, whatever the anchor: the 3P povCamera joint's height (the head plus 0.038 m without it) less the FP side's
+            // (the FP root), body axes up, both live (the vertical lock and the standing height do not enter it).
+            if (fpFresh) {
+                double pj[3] = {};
+                if (s.povJOk) {
+                    body(s.povJ, pj);
+                } else {
+                    body(s.head, pj);
+                    pj[1] += 0.038;
+                }
+                g_f51PovUp = pj[1];
+                g_f51FpUp = camB[1];
+                g_f51Src = s.povJOk ? 0 : 1;
+                f51Raw = g_f51PovUp - g_f51FpUp;
+                f51Have = true;
             }
             if (!g_f41LpValid) {
                 for (size_t i = 0; i < 3; ++i) {
@@ -6193,24 +6387,61 @@ void alignTick(uint64_t now) noexcept {
     for (size_t i = 0; i < 3; ++i) change = std::max(change, std::fabs(a.pos[i] - a.applied[i]));
     if (change > 1e-6) {
         for (size_t i = 0; i < 3; ++i) a.applied[i] = a.pos[i];
-        if (mode == 2) {
-            bodyOffsetPublish(a.applied);
-        } else {
-            const float f[3] = {static_cast<float>(a.applied[0]), static_cast<float>(a.applied[1]), static_cast<float>(a.applied[2])};
-            nativeFrameSetEyeAlign(f, ++a.serial);
-        }
+        if (mode == 2) bodyOffsetPublish(a.applied);   // the view run's value goes out below, with the F51 raise
     }
     // The other run's published value goes to zero (the view's eye offset when body is on, the body's offset when view is on).
     double otherChange = 0.0;
     for (size_t i = 0; i < 3; ++i) otherChange = std::max(otherChange, std::fabs(other.pos[i] - other.applied[i]));
     if (otherChange > 1e-6) {
         for (size_t i = 0; i < 3; ++i) other.applied[i] = other.pos[i];
-        if (mode == 2) {
-            const float f[3] = {static_cast<float>(other.applied[0]), static_cast<float>(other.applied[1]), static_cast<float>(other.applied[2])};
-            nativeFrameSetEyeAlign(f, ++other.serial);
-        } else {
-            bodyOffsetPublish(other.applied);
+        if (mode != 2) bodyOffsetPublish(other.applied);
+    }
+
+    // F51: the raise. Body mode with the key on and native stereo on foot: dh through its filter (held on a frame without a measurement); the
+    // applied raise follows it at 5 cm a frame at most. Anywhere else the filter resets and the applied raise returns to zero at the same cap (the
+    // undo of body mode's raise; nothing is raised outside body mode). The view's seated y is minus the applied raise; the FP records move by it
+    // along the body's up row (AMC row 1, world), the axis dh is measured on.
+    const bool raiseOn = mode == 2 && g_raiseFpKey.load(std::memory_order_relaxed) && nativeOnFootActive();
+    if (raiseOn) g_f51Dh.step(f51Raw, f51Have, dt);
+    else g_f51Dh.reset();
+    g_f51Applied = nofoot::capToward(g_f51Applied, raiseOn ? g_f51Dh.lp : 0.0, align::kCapPerFrameM);
+    if (!raiseOn && std::fabs(g_f51Applied) < 1e-9) g_f51Applied = 0.0;
+    g_f51FpOn.store(raiseOn, std::memory_order_relaxed);
+    if (s.valid) {
+        const double un = std::sqrt(static_cast<double>(s.rows[3]) * s.rows[3] + static_cast<double>(s.rows[4]) * s.rows[4] +
+                                    static_cast<double>(s.rows[5]) * s.rows[5]);
+        if (un > 1e-6)
+            for (size_t i = 0; i < 3; ++i) g_f51Up[i] = static_cast<double>(s.rows[3 + i]) / un;
+    }
+    {
+        double fpD[3] = {};
+        for (size_t i = 0; i < 3; ++i) fpD[i] = raiseOn ? g_f51Applied * g_f51Up[i] : 0.0;
+        double fpChange = 0.0;
+        for (size_t i = 0; i < 3; ++i) fpChange = std::max(fpChange, std::fabs(fpD[i] - g_f51FpPub[i]));
+        if (fpChange > 1e-6) {
+            for (size_t i = 0; i < 3; ++i) g_f51FpPub[i] = fpD[i];
+            fpRaisePublish(fpD);
         }
+    }
+    // The eye align: the view run (g_align: the active run in view and calibrate, decaying to zero in body) plus the raise's seated term (zero
+    // outside body mode once the raise has returned). One serial, g_align's, as before.
+    {
+        double raiseS[3] = {};
+        nofoot::raiseSeated(g_f51Applied, raiseS);
+        double eye[3] = {}, eyeChange = 0.0;
+        for (size_t i = 0; i < 3; ++i) {
+            eye[i] = g_align.applied[i] + raiseS[i];
+            eyeChange = std::max(eyeChange, std::fabs(eye[i] - g_f51EyePub[i]));
+        }
+        if (eyeChange > 1e-6) {
+            for (size_t i = 0; i < 3; ++i) g_f51EyePub[i] = eye[i];
+            const float f[3] = {static_cast<float>(eye[0]), static_cast<float>(eye[1]), static_cast<float>(eye[2])};
+            nativeFrameSetEyeAlign(f, ++g_align.serial);
+        }
+    }
+    if (mode == 2 && (now - g_f51LogMs >= 1000 || g_f51LogMs == 0)) {
+        g_f51LogMs = now;
+        f51Line(s, fp, fpFresh, raiseOn);
     }
 
     // The once-a-second line while the offset is live.
@@ -6459,14 +6690,15 @@ uint64_t __fastcall pfzAnimateHooked(uint64_t a1, uint64_t a2, uint64_t a3, uint
     if (!original) return 0;
     const uint64_t r = original(a1, a2, a3, a4, s5, s6, s7, s8);   // the original first, with its arguments
     g_pfzCalls.fetch_add(1, std::memory_order_relaxed);
-    const uint64_t lx = pfz::g_localX.load(std::memory_order_acquire);
-    if (!lx || !a2 || pfz::g_mode.load(std::memory_order_relaxed) == 0) return r;
+    if (!a2 || pfz::g_mode.load(std::memory_order_relaxed) == 0) return r;
     uint64_t x = 0;
     if (!guardedRead(a2, &x, 8)) {
         pfzFail(kPfzFailJob);
         return r;
     }
-    if (x != lx) return r;   // only the local avatar's evaluator
+    pfz::xNote(x);   // F51: every evaluator Animate sees, by call count (the census matches the local one against it)
+    const uint64_t lx = pfz::g_localX.load(std::memory_order_acquire);
+    if (!lx || x != lx) return r;   // only the local avatar's evaluator
     g_pfzLocalCalls.fetch_add(1, std::memory_order_relaxed);
     if (g_pfzBusy.exchange(true, std::memory_order_acquire)) {
         g_pfzBusySkips.fetch_add(1, std::memory_order_relaxed);
@@ -6502,11 +6734,100 @@ void pfzInstallOnce() {
 }
 
 nofoot::PfzHeadRest g_pfzRest;   // frame thread only
+nofoot::PfzLocoRest g_pfzLoco;   // F51: the no-locomotion gate (frame thread only)
+uint64_t g_pfzLocoStamp = 0;     // F51: the body sample the gate last took
 nofoot::PfzBlend g_pfzBlend;
 uint64_t g_pfzLastMs = 0, g_pfzLineMs = 0;
 uint32_t g_pfzFailNamed = 0;
 const char* g_pfzWhyLast = "(none)";
 uint64_t g_pfzCallsLast = 0, g_pfzLocalLast = 0, g_pfzBusyLast = 0;
+uint64_t g_pfzOverflowLast = 0;
+
+// F51 (frame thread, every 5 s with the statistics): the local X's identification. The X table's banks turn over (the bank about to be active is
+// cleared first, so the one left behind keeps the last full 5 s for the census); the left bank's top 8 X by Animate calls, each with P = [X+8] and
+// what it matches; then each latched skeleton's candidates as the census published them; then the freeze gate's inputs.
+void pfzIdentLine(int mode, bool ads, bool headFresh) noexcept {
+    static const char* const kModeNames[3] = {"off", "probe", "on"};
+    const uint32_t left = pfz::g_xBank.load(std::memory_order_relaxed) & 1u, next = left ^ 1u;
+    for (uint32_t i = 0; i < pfz::kXSlots; ++i) {
+        pfz::g_xTable[next][i].n.store(0, std::memory_order_relaxed);
+        pfz::g_xTable[next][i].x.store(0, std::memory_order_relaxed);
+    }
+    pfz::g_xBank.store(next, std::memory_order_relaxed);
+    uint64_t xs[pfz::kXSlots] = {}, ns[pfz::kXSlots] = {};
+    uint32_t used = 0;
+    for (uint32_t i = 0; i < pfz::kXSlots; ++i) {
+        const uint64_t x = pfz::g_xTable[left][i].x.load(std::memory_order_relaxed);
+        if (!x) continue;
+        xs[used] = x;
+        ns[used] = pfz::g_xTable[left][i].n.load(std::memory_order_relaxed);
+        ++used;
+    }
+    const uint64_t gp3 = pfz::g_cand[0].gp.load(std::memory_order_relaxed), gpFp = pfz::g_cand[1].gp.load(std::memory_order_relaxed);
+    const uint64_t lx = pfz::g_localX.load(std::memory_order_relaxed);
+    const uint64_t c0a = pfz::g_cand[0].x2B8.load(std::memory_order_relaxed), c0b = pfz::g_cand[0].x120.load(std::memory_order_relaxed);
+    const uint64_t c1a = pfz::g_cand[1].x2B8.load(std::memory_order_relaxed), c1b = pfz::g_cand[1].x120.load(std::memory_order_relaxed);
+    char top[1400] = {};
+    size_t at = 0;
+    uint32_t sameP3 = 0;
+    for (uint32_t i = 0; i < used; ++i) {
+        uint64_t p = 0;
+        if (gp3 && guardedRead(static_cast<uintptr_t>(xs[i]) + 8u, &p, 8) && p == gp3) ++sameP3;
+    }
+    for (uint32_t rank = 0; rank < 8 && rank < used; ++rank) {
+        uint32_t best = rank;
+        for (uint32_t j = rank + 1; j < used; ++j)
+            if (ns[j] > ns[best]) best = j;
+        std::swap(xs[rank], xs[best]);
+        std::swap(ns[rank], ns[best]);
+        uint64_t p = 0;
+        const bool pOk = guardedRead(static_cast<uintptr_t>(xs[rank]) + 8u, &p, 8);
+        const uint64_t x = xs[rank];
+        const int w = std::snprintf(top + at, sizeof(top) - at, "%s%016llX x%llu P=%s%016llX%s%s%s%s", rank ? "; " : "", static_cast<unsigned long long>(x),
+                                    static_cast<unsigned long long>(ns[rank]), pOk ? "" : "unread ", static_cast<unsigned long long>(p),
+                                    pOk && gp3 && p == gp3 ? " (= 3P GetPoseData)" : "", pOk && gpFp && p == gpFp ? " (= FP GetPoseData)" : "",
+                                    x == lx ? " [the local X]" : "",
+                                    x == c0a || x == c0b ? " [a 3P iface X]" : x == c1a || x == c1b ? " [an FP iface X]" : "");
+        if (w <= 0 || static_cast<size_t>(w) >= sizeof(top) - at) break;
+        at += static_cast<size_t>(w);
+    }
+    const uint64_t overflow = pfz::g_xOverflow.load(std::memory_order_relaxed);
+    Log::get().note("native on foot pose freeze (F51, %s): Animate X table, the last 5 s: %u distinct X (%llu not counted: the table was full); "
+                    "%u with [X+8] = the 3P GetPoseData; top by calls: %s", kModeNames[mode], used,
+                    static_cast<unsigned long long>(overflow - g_pfzOverflowLast), sameP3, at ? top : "none");
+    g_pfzOverflowLast = overflow;
+    static const char* const kHow[5] = {"none", "the kind's X (seen in Animate)", "matched by P = [X+8] (the one X seen with it)",
+                                        "the kind's X, NOT seen in Animate (no unique P match)", "the kind's X; P is AMBIGUOUS (several X seen with it)"};
+    for (uint32_t slot = 0; slot < 2; ++slot) {
+        const pfz::Candidates& c = pfz::g_cand[slot];
+        const uint64_t stamp = c.stamp.load(std::memory_order_relaxed);
+        if (!stamp) {
+            Log::get().note("native on foot pose freeze (F51): %s skeleton: no census sample yet", slot ? "FP" : "3P (local)");
+            continue;
+        }
+        const uint64_t gp = c.gp.load(std::memory_order_relaxed), xa = c.x2B8.load(std::memory_order_relaxed),
+                       xb = c.x120.load(std::memory_order_relaxed), pa = c.p2B8.load(std::memory_order_relaxed),
+                       pb = c.p120.load(std::memory_order_relaxed), how = c.how.load(std::memory_order_relaxed);
+        const uint64_t nowMs = GetTickCount64();
+        Log::get().note("native on foot pose freeze (F51): %s skeleton iface %016llX (%s, %llu ms ago): GetPoseData %016llX; X=*(iface+0x2B8) %016llX "
+                        "(P %016llX%s, %llu Animate calls in 5-10 s), X=*(iface+0x120) %016llX (P %016llX%s, %llu calls); [iface+0x2C0]=%016llX "
+                        "[iface+0xF8]=%016llX; the census takes %016llX: %s (%llu X seen with P = GetPoseData)",
+                        slot ? "FP" : "3P (local, g_skelIface[0])", static_cast<unsigned long long>(c.iface.load(std::memory_order_relaxed)),
+                        ecm::hkindText(static_cast<uint32_t>(c.kind.load(std::memory_order_relaxed))),
+                        static_cast<unsigned long long>(nowMs >= stamp ? nowMs - stamp : 0), static_cast<unsigned long long>(gp),
+                        static_cast<unsigned long long>(xa), static_cast<unsigned long long>(pa), gp && pa == gp ? " = GetPoseData" : "",
+                        static_cast<unsigned long long>(pfz::xCount(xa)), static_cast<unsigned long long>(xb), static_cast<unsigned long long>(pb),
+                        gp && pb == gp ? " = GetPoseData" : "", static_cast<unsigned long long>(pfz::xCount(xb)),
+                        static_cast<unsigned long long>(c.f2C0.load(std::memory_order_relaxed)),
+                        static_cast<unsigned long long>(c.fF8.load(std::memory_order_relaxed)),
+                        static_cast<unsigned long long>(c.chosen.load(std::memory_order_relaxed)), how < 5 ? kHow[how] : "?",
+                        static_cast<unsigned long long>(c.pMatches.load(std::memory_order_relaxed)));
+    }
+    Log::get().note("native on foot pose freeze (F51): gate: body horizontal speed %.2f m/s (moving above %.2f), %s; ADS %s; animated head %s (F49's "
+                    "steady test, logged only: %s)", g_pfzLoco.speed, nofoot::PfzLocoRest::kMoveMps,
+                    g_pfzLoco.resting ? "no locomotion (freeze allowed)" : "locomotion or within 0.3 s of it", ads ? "yes" : "no",
+                    headFresh ? "fresh" : "stale", g_pfzRest.resting ? "steady" : "not steady");
+}
 
 void pfzTick(uint64_t now) {
     const int mode = pfz::g_mode.load(std::memory_order_relaxed);
@@ -6515,7 +6836,8 @@ void pfzTick(uint64_t now) {
     if (mode != lastMode) {
         Log::get().note("native on foot pose freeze: fix.native_on_foot_pose_freeze = %s (was %s)%s", kModeNames[mode],
                         lastMode < 0 ? "none" : kModeNames[lastMode],
-                        mode == 2 ? "; writes while standing idle (not ADS, the animated head steady for 1 s), blended over 0.3 s" : "; nothing is written");
+                        mode == 2 ? "; writes while not walking or running (F51: a weapon out freezes too; not ADS), blended over 0.3 s"
+                                  : "; nothing is written");
         lastMode = mode;
     }
     if (mode != 0) pfzInstallOnce();
@@ -6527,19 +6849,36 @@ void pfzTick(uint64_t now) {
     const bool ads = journalAds();
     const uint64_t headMs = g_pfzHeadMs.load(std::memory_order_relaxed);
     const bool headFresh = headMs != 0 && now >= headMs && now - headMs < 500;
-    bool resting = false;
-    if (headFresh) resting = g_pfzRest.step(now, static_cast<double>(g_pfzHeadUp.load(std::memory_order_relaxed)), ads);
+    if (headFresh) g_pfzRest.step(now, static_cast<double>(g_pfzHeadUp.load(std::memory_order_relaxed)), ads);   // F49's head test: logged only
     else g_pfzRest = nofoot::PfzHeadRest{};
+    // F51: the gate is no locomotion (the body's horizontal speed, from the P1 body sample), so a weapon out freezes too; ADS stays excluded.
+    bool bodyFresh = false;
+    {
+        EyeSample es;
+        {
+            std::lock_guard<std::mutex> lock(g_eyeMutex);
+            es = g_eyeSample;
+        }
+        bodyFresh = es.valid && now >= es.stamp && now - es.stamp < 1500;
+        if (bodyFresh && es.stamp != g_pfzLocoStamp) {
+            g_pfzLocoStamp = es.stamp;
+            const double pos[3] = {es.origin[0], es.origin[1], es.origin[2]}, up[3] = {es.rows[3], es.rows[4], es.rows[5]};
+            g_pfzLoco.step(es.stamp, pos, up, ads);
+        }
+        if (!bodyFresh) g_pfzLoco = nofoot::PfzLocoRest{};
+    }
+    const bool resting = bodyFresh && g_pfzLoco.resting;
     const char* why = mode != 2 ? "the key is not on" : !nativeOnFootActive() ? "not native stereo on foot"
                     : g_pfzWriteDown.load(std::memory_order_relaxed) ? "the writes stood down" : ads ? "aiming down sights"
-                    : !headFresh ? "no animated head from the hook in 500 ms" : !resting ? "the animated head is not steady for 1 s" : nullptr;
+                    : !headFresh ? "no animated head from the hook in 500 ms" : !bodyFresh ? "no body sample in 1.5 s"
+                    : !resting ? "walking or running (or still within 0.3 s of it)" : nullptr;
     g_pfzBlend.step(why == nullptr, dt);
     if (mode != 2) g_pfzBlend = nofoot::PfzBlend{};   // every write path is behind the key: off or probe writes nothing at once
     g_pfzWeight.store(g_pfzBlend.w, std::memory_order_relaxed);
     if (mode == 2) {
         const char* whyNow = why ? why : "freezing";
         if (std::strcmp(whyNow, g_pfzWhyLast) != 0) {
-            Log::get().note("native on foot pose freeze: %s%s (weight %.2f)", why ? "held: " : "freezing: standing idle", why ? why : "",
+            Log::get().note("native on foot pose freeze: %s%s (weight %.2f)", why ? "held: " : "freezing: no locomotion", why ? why : "",
                             static_cast<double>(g_pfzBlend.w));
             g_pfzWhyLast = whyNow;
         }
@@ -6574,6 +6913,7 @@ void pfzTick(uint64_t now) {
     g_pfzCallsLast = calls;
     g_pfzLocalLast = local;
     g_pfzBusyLast = busy;
+    pfzIdentLine(mode, ads, headFresh);   // F51: the local X's identification (candidates, the Animate X table), the gate's state
     if (!got || st.calls == 0) {
         Log::get().note("native on foot pose freeze (F49, %s): %llu Animate calls in 5 s, %llu for the local X %016llX (%llu skipped busy); %s",
                         kModeNames[mode], static_cast<unsigned long long>(dCalls), static_cast<unsigned long long>(dLocal),

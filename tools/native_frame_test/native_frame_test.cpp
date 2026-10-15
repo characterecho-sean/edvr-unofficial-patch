@@ -835,6 +835,68 @@ int wmain(int argc, wchar_t** argv) {
             bool rest2 = false;
             for (uint64_t t = 0; t <= 1100; t += 11) rest2 = hr2.step(t, 1.60, false);
             check(rest2, "F49: a head steady for 1 s is at rest");
+
+            // F51: dh is clamped to 0..0.5 m and low-passed (tau 1 s) from 0; a frame without a measurement holds it.
+            nf::RaiseDh dh;
+            for (int i = 0; i < 90; ++i) dh.step(0.231, true, 1.0 / 90.0);   // 1 s at 90 Hz: 1 - 1/e of the way
+            const bool oneTau = std::fabs(dh.lp - 0.231 * (1.0 - std::exp(-1.0))) < 1e-6;
+            for (int i = 0; i < 900; ++i) dh.step(0.231, true, 1.0 / 90.0);
+            const bool settled = std::fabs(dh.lp - 0.231) < 1e-4;
+            const double before = dh.lp;
+            dh.step(0.9, false, 1.0 / 90.0);
+            const bool held = dh.lp == before;
+            nf::RaiseDh hi, lo;
+            for (int i = 0; i < 2000; ++i) {
+                hi.step(0.9, true, 1.0 / 90.0);
+                lo.step(-0.2, true, 1.0 / 90.0);
+            }
+            check(oneTau && settled && held && std::fabs(hi.lp - 0.5) < 1e-6 && lo.lp == 0.0 && std::fabs(lo.raw + 0.2) < 1e-12,
+                  "F51: dh low-passes from 0 (tau 1 s), holds without a measurement, and is clamped to 0..0.5 m");
+            // The view's sign: seated y = -dh, the same as seatedFromBody({0, dh, 0}, 0); through the calibration (body = diag(-1,-1,+1) . seated)
+            // that raises the camera by dh.
+            double rs[3] = {}, viaMap[3] = {};
+            nf::raiseSeated(0.23, rs);
+            const double up[3] = {0.0, 0.23, 0.0};
+            nf::seatedFromBody(up, 0.0, viaMap);
+            const double camUp = -rs[1];   // body y = -seated y
+            check(rs[0] == 0.0 && rs[2] == 0.0 && std::fabs(rs[1] + 0.23) < 1e-12 && std::fabs(viaMap[1] - rs[1]) < 1e-12 && std::fabs(camUp - 0.23) < 1e-12,
+                  "F51: the view raise is seated y = -dh, which raises the camera by dh (the body-to-seated map's own sign)");
+            // The applied raise follows at 5 cm a frame at most, both ways.
+            const double a1 = nf::capToward(0.0, 0.23, 0.05), a2 = nf::capToward(0.2, 0.23, 0.05), a3 = nf::capToward(0.23, 0.0, 0.05);
+            check(std::fabs(a1 - 0.05) < 1e-12 && std::fabs(a2 - 0.23) < 1e-12 && std::fabs(a3 - 0.18) < 1e-12,
+                  "F51: the applied raise moves 5 cm a frame at most");
+            // The shift rule: a record at the AMC origin moves by d once; a second pass over it leaves it alone; a record elsewhere never moves.
+            const float origin[3] = {10.0f, 2.0f, -3.0f}, d[3] = {0.0f, 0.231f, 0.0f};
+            float rec[3] = {10.0f, 2.0f, -3.0f}, other[3] = {10.5f, 2.0f, -3.0f};
+            const bool firstPass = nf::shiftIfAtOrigin(rec, origin, d);
+            const float afterFirst[3] = {rec[0], rec[1], rec[2]};
+            const bool secondPass = nf::shiftIfAtOrigin(rec, origin, d);
+            const bool elsewhere = nf::shiftIfAtOrigin(other, origin, d);
+            check(firstPass && !secondPass && !elsewhere && rec[1] == afterFirst[1] && rec[1] == 2.0f + 0.231f && other[0] == 10.5f && other[1] == 2.0f,
+                  "F51: the FP shift moves a record at the AMC origin once and is idempotent; a placed record is left alone");
+            // The freeze gate: no locomotion. Standing (a weapon out does not enter it) rests after 0.3 s; walking at 1.4 m/s does not; a fall
+            // (vertical motion only) is not locomotion; ADS ends the rest.
+            const double upAxis[3] = {0.0, 1.0, 0.0};
+            nf::PfzLocoRest lr;
+            double pos[3] = {5.0, 1.0, 5.0};
+            bool r = false;
+            for (uint64_t t = 0; t <= 400; t += 11) r = lr.step(t, pos, upAxis, false);
+            const bool standRests = r;
+            for (uint64_t t = 411; t <= 1400; t += 11) {
+                pos[2] += 1.4 * 0.011;
+                r = lr.step(t, pos, upAxis, false);
+            }
+            const bool walkMoves = !r && lr.speed > 1.0;
+            nf::PfzLocoRest fall;
+            double fp[3] = {0.0, 10.0, 0.0};
+            bool fr = false;
+            for (uint64_t t = 0; t <= 600; t += 11) {
+                fp[1] -= 0.05;
+                fr = fall.step(t, fp, upAxis, false);
+            }
+            const bool adsEnds = !fall.step(611, fp, upAxis, true);
+            check(standRests && walkMoves && fr && adsEnds, "F51: the freeze gate rests without locomotion, not while walking, not under ADS; "
+                                                            "vertical motion is not locomotion");
         }
     }
 

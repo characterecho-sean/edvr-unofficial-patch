@@ -2057,14 +2057,76 @@ void pfzBuildPlan(uint64_t iface, uint64_t x, const SkSlots& sl) noexcept {
     pfz::g_localX.store(x, std::memory_order_release);
 }
 
+// F51: one latched skeleton's evaluator candidates, published for the frame thread's 5 s line (slot 0 the local 3P skeleton, 1 the FP one): X =
+// *(iface+0x2B8) (the RR rule) and *(iface+0x120) (the AO rule), each with P = [X+8], against the iface's GetPoseData; [iface+0x2C0] and
+// [iface+0xF8] (the readers' gates). The X the pose freeze takes: the kind's own X when the Animate hook has counted it in the last 5 to 10 s;
+// else the one X the hook counted whose [X+8] is GetPoseData's pointer; else (no match, or several X share P: the skeleton asset may be shared
+// by every humanoid) the kind's own X, the F49 behaviour. Read only; every read under SEH.
+uint64_t pfzCandidates(uint32_t slot, uint64_t iface, const SkSlots& sl) noexcept {
+    pfz::Candidates& c = pfz::g_cand[slot & 1u];
+    const uintptr_t ifc = static_cast<uintptr_t>(iface);
+    uint64_t x2B8 = 0, x120 = 0, p2B8 = 0, p120 = 0, f2C0 = 0, fF8 = 0;
+    const bool ok2B8 = sehReadU64At(ifc + 0x2B8, &x2B8) && plausibleUserPointer(x2B8);
+    const bool ok120 = sehReadU64At(ifc + 0x120, &x120) && plausibleUserPointer(x120);
+    if (ok2B8 && !sehReadU64At(static_cast<uintptr_t>(x2B8) + 8u, &p2B8)) p2B8 = 0;
+    if (ok120 && !sehReadU64At(static_cast<uintptr_t>(x120) + 8u, &p120)) p120 = 0;
+    if (!sehReadU64At(ifc + 0x2C0, &f2C0)) f2C0 = ~0ull;
+    if (!sehReadU64At(ifc + 0xF8, &fF8)) fF8 = ~0ull;
+    uintptr_t gp = 0;
+    if (!sehCallPose(sl.fn[0], ifc, &gp)) gp = 0;
+    const uint64_t direct = sl.kind == ecm::HeadKind::Runtime ? (ok2B8 ? x2B8 : 0) : (ok120 ? x120 : 0);
+    uint64_t chosen = 0, how = 0, matches = 0;
+    if (direct && pfz::xCount(direct) > 0) {
+        chosen = direct;
+        how = 1;
+    } else {
+        uint64_t found[4] = {};
+        if (gp) {
+            for (uint32_t b = 0; b < 2; ++b)
+                for (uint32_t i = 0; i < pfz::kXSlots; ++i) {
+                    const uint64_t x = pfz::g_xTable[b][i].x.load(std::memory_order_relaxed);
+                    if (!plausibleUserPointer(x)) continue;
+                    bool dup = false;
+                    for (uint64_t k = 0; k < matches && k < 4; ++k) dup = dup || found[k] == x;
+                    if (dup) continue;
+                    uint64_t p = 0;
+                    if (!sehReadU64At(static_cast<uintptr_t>(x) + 8u, &p) || p != gp) continue;
+                    if (matches < 4) found[matches] = x;
+                    ++matches;
+                }
+        }
+        if (matches == 1) {
+            chosen = found[0];
+            how = 2;
+        } else {
+            chosen = direct;
+            how = matches > 1 ? 4 : direct ? 3 : 0;
+        }
+    }
+    c.iface.store(iface, std::memory_order_relaxed);
+    c.kind.store(static_cast<uint64_t>(sl.kind), std::memory_order_relaxed);
+    c.x2B8.store(x2B8, std::memory_order_relaxed);
+    c.x120.store(x120, std::memory_order_relaxed);
+    c.f2C0.store(f2C0, std::memory_order_relaxed);
+    c.fF8.store(fF8, std::memory_order_relaxed);
+    c.gp.store(gp, std::memory_order_relaxed);
+    c.p2B8.store(p2B8, std::memory_order_relaxed);
+    c.p120.store(p120, std::memory_order_relaxed);
+    c.chosen.store(chosen, std::memory_order_relaxed);
+    c.pMatches.store(matches, std::memory_order_relaxed);
+    c.how.store(how, std::memory_order_relaxed);
+    c.stamp.store(GetTickCount64(), std::memory_order_relaxed);
+    return chosen;
+}
+
 void pfzCensusStep(uint64_t iface, const SkSlots& sl) noexcept {
     if (pfz::g_mode.load(std::memory_order_relaxed) == 0) {
         pfz::g_localX.store(0, std::memory_order_relaxed);
         return;
     }
     const uint32_t off = sl.kind == ecm::HeadKind::Runtime ? 0x2B8u : 0x120u;
-    uint64_t x = 0;
-    if (!sehReadU64At(static_cast<uintptr_t>(iface) + off, &x) || !plausibleUserPointer(x)) {
+    uint64_t x = pfzCandidates(0, iface, sl);   // F51: the kind's X when Animate sees it, else the unique P match, else the kind's X
+    if (!plausibleUserPointer(x)) {
         if (!g_pfzCensus.xNoted) {
             g_pfzCensus.xNoted = true;
             Log::get().note("native on foot pose freeze: the evaluator X = *(iface+0x%X) on the local 3P skeleton %016llX is not readable (%016llX); waiting",
@@ -2184,6 +2246,7 @@ void neckCensusStep() noexcept {
     if (fpIface) {
         SkSlots slf;
         if (skVerify(static_cast<uintptr_t>(fpIface), ecm::HeadKind::None, &slf) == SkVerify::Ok) {
+            if (pfz::g_mode.load(std::memory_order_relaxed) != 0) pfzCandidates(1, fpIface, slf);   // F51: the FP skeleton's X, for the line only
             shoulderProbe(fpIface, slf, g_shProbeFP, "FP");
             if (g_shProbeFP.l != 0xFFFFu && g_shProbeFP.r != 0xFFFFu && jointModelAt(fpIface, slf, g_shProbeFP.l, &s.shFp[0]) &&
                 jointModelAt(fpIface, slf, g_shProbeFP.r, &s.shFp[3]))

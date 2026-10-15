@@ -369,6 +369,76 @@ inline double dropAlong(double v[3], const double axis[3]) noexcept {
     return k;
 }
 
+// ---- F51 (TEMPORARY): the first-person rig and view raise, pure half --------------------------------------------------------------
+// dh = (3P pov height - FP side height), both body axes up, clamped to 0..kMaxM, then low-passed (tau kTauSec). Starts at 0 on reset, so the
+// raise eases in. A frame without a measurement (`have` false: ADS, a stale input) holds the value.
+struct RaiseDh {
+    static constexpr double kTauSec = 1.0;
+    static constexpr double kMaxM = 0.5;
+    double lp = 0.0;
+    double raw = 0.0;   // the last measurement, unclamped (logged)
+    void reset() noexcept { *this = RaiseDh{}; }
+    static double clamp(double v) noexcept { return !(v > 0.0) ? 0.0 : v > kMaxM ? kMaxM : v; }
+    double step(double measured, bool have, double dtSec) noexcept {
+        if (!have || !(dtSec > 0.0) || !(measured == measured)) return lp;
+        raw = measured;
+        lp += (1.0 - std::exp(-dtSec / kTauSec)) * (clamp(measured) - lp);
+        return lp;
+    }
+};
+// The view's share of the raise: a vertical-only seated offset. The calibration (body = diag(-1, -1, +1) . seated at psi 0) makes seated y = -dh
+// raise the camera by dh; this is seatedFromBody({0, dh, 0}, 0).
+inline void raiseSeated(double dh, double out[3]) noexcept {
+    out[0] = 0.0;
+    out[1] = -dh;
+    out[2] = 0.0;
+}
+// One frame's move of `applied` toward `target`, at most `cap` (the 5 cm a frame every published offset keeps).
+inline double capToward(double applied, double target, double cap) noexcept {
+    const double d = target - applied;
+    return applied + (d > cap ? cap : d < -cap ? -cap : d);
+}
+// The shift rule the 3P body shift uses, for the FP records: a record moves only while its position equals the AMC origin bit for bit, so a second
+// pass over a shifted record leaves it alone. True when it moved.
+inline bool shiftIfAtOrigin(float pos[3], const float origin[3], const float d[3]) noexcept {
+    if (std::memcmp(pos, origin, 3 * sizeof(float)) != 0) return false;
+    for (size_t i = 0; i < 3; ++i) pos[i] += d[i];
+    return true;
+}
+// F51: the pose freeze's gate: no locomotion. The body's horizontal speed (its world position less the part along its up axis), low-passed
+// (tau kTauSec), under kMoveMps for kStillMs; ADS ends it (ADS stays excluded). A weapon out does not end it. Fed only new samples.
+struct PfzLocoRest {
+    static constexpr double kMoveMps = 0.35;
+    static constexpr double kTauSec = 0.2;
+    static constexpr uint64_t kStillMs = 300;
+    bool have = false, resting = false;
+    double p[3] = {}, speed = 0.0;
+    uint64_t t = 0, stillSince = 0;
+    bool step(uint64_t now, const double pos[3], const double up[3], bool ads) noexcept {
+        if (!have) {
+            have = true;
+            for (size_t i = 0; i < 3; ++i) p[i] = pos[i];
+            t = stillSince = now;
+            speed = 0.0;
+            return resting = false;
+        }
+        if (now > t) {
+            const double dtS = static_cast<double>(now - t) / 1000.0;
+            double d[3] = {pos[0] - p[0], pos[1] - p[1], pos[2] - p[2]};
+            dropAlong(d, up);
+            const double v = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]) / dtS;
+            speed += (1.0 - std::exp(-dtS / kTauSec)) * (v - speed);
+            for (size_t i = 0; i < 3; ++i) p[i] = pos[i];
+            t = now;
+        }
+        if (ads || speed > kMoveMps) {
+            stillSince = now;
+            return resting = false;
+        }
+        return resting = now - stillSince >= kStillMs;
+    }
+};
+
 // ---- F49 (TEMPORARY): the pose freeze, pure half -------------------------------------------------------------------------------
 // The frAnim Animate handler writes one 64-byte row-vector model matrix per joint: rows 0..2 the rotation (w 0), row 3 the position (w 1), and
 // out[j] = local[j] x out[parent(j)]. The rest local of a joint is the pose's 32-byte record (position vec4, then the quaternion) as R(q) with the

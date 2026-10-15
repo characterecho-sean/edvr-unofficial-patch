@@ -87,6 +87,52 @@ inline float g_span34Written[16] = {};
 inline bool g_span34WasWritten = false;
 inline uint64_t g_span34Ms = 0;
 inline uint32_t g_span34Buffer = 0;                  // 0 [job+0x28], 1 [[X+0x1F0]+0xA0]
+// F51: the evaluators the Animate hook sees, by call count. Two banks of open-addressed slots (no locks, no allocation; lossy by design): the hook
+// counts into the active bank; every 5 s the frame thread clears the other bank, makes it the active one and reports the bank it left. So the
+// inactive bank always holds the last full 5 s, and the census can ask whether an X was animated in the last 5 to 10 s.
+constexpr uint32_t kXSlots = 64, kXProbe = 8;
+struct XSlot {
+    std::atomic<uint64_t> x{0};
+    std::atomic<uint64_t> n{0};
+};
+inline XSlot g_xTable[2][kXSlots];
+inline std::atomic<uint32_t> g_xBank{0};
+inline std::atomic<uint64_t> g_xOverflow{0};
+inline uint32_t xHash(uint64_t x) noexcept { return static_cast<uint32_t>(((x >> 4) * 0x9E3779B97F4A7C15ull) >> 58); }   // 6 bits: 64 slots
+inline void xNote(uint64_t x) noexcept {
+    if (!x) return;
+    XSlot* bank = g_xTable[g_xBank.load(std::memory_order_relaxed) & 1u];
+    const uint32_t h = xHash(x);
+    for (uint32_t i = 0; i < kXProbe; ++i) {
+        XSlot& s = bank[(h + i) % kXSlots];
+        uint64_t cur = s.x.load(std::memory_order_relaxed);
+        if (cur == 0 && s.x.compare_exchange_strong(cur, x, std::memory_order_relaxed)) cur = x;
+        if (cur == x) {
+            s.n.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+    }
+    g_xOverflow.fetch_add(1, std::memory_order_relaxed);
+}
+// The calls counted for x in both banks (the last 5 to 10 s).
+inline uint64_t xCount(uint64_t x) noexcept {
+    if (!x) return 0;
+    uint64_t total = 0;
+    const uint32_t h = xHash(x);
+    for (uint32_t b = 0; b < 2; ++b)
+        for (uint32_t i = 0; i < kXProbe; ++i) {
+            const XSlot& s = g_xTable[b][(h + i) % kXSlots];
+            if (s.x.load(std::memory_order_relaxed) == x) total += s.n.load(std::memory_order_relaxed);
+        }
+    return total;
+}
+// F51: the census's candidates per latched skeleton ([0] the local 3P one, [1] the FP one), for the frame thread's 5 s line. Relaxed: a line may mix
+// two census steps. how: 0 none, 1 the iface's X (seen in Animate), 2 matched by P = [X+8] == GetPoseData (unique among the X seen), 3 the iface's X
+// unseen in Animate and no unique P match (the F49 behaviour), 4 ambiguous P (several X share it; none taken).
+struct Candidates {
+    std::atomic<uint64_t> iface{0}, kind{0}, x2B8{0}, x120{0}, f2C0{0}, fF8{0}, gp{0}, p2B8{0}, p120{0}, chosen{0}, pMatches{0}, how{0}, stamp{0};
+};
+inline Candidates g_cand[2];
 }  // namespace pfz
 
 // Render thread, once a frame at the Present boundary (device_hook.cpp's tick). Installs the hook the first time (VR only), re-reads the
