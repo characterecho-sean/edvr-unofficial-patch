@@ -78,7 +78,7 @@ std::atomic<int> g_lookSmoothMs{150};          // fix.native_on_foot_look_to_aim
 std::atomic<int> g_lookSign{1};               // fix.native_on_foot_look_to_aim_yaw_sign (temporary, F24 default -1): 1 or -1, on the controller's input only
 std::atomic<int> g_lookDelay{0};
 bool g_nativeEdgeLast = false;                // F26: frame thread only
-std::atomic<bool> g_worldMarkersFixed{true};   // F25: fix.native_on_foot_world_markers = fixed (default) | game, live: key 10 is never touched
+std::atomic<int> g_worldMarkersMode{1};        // F27: fix.native_on_foot_world_markers: 0 fixed (inverse), 1 forward (default), 2 game; live; key 10 is never touched
 uint64_t g_worldLineMs = 0;                    // frame thread and game thread: the 5 s line (the post hook writes it, once per 5 s)
 // F25 (TEMPORARY A/B): the visor param block's translation source floats (.bss, normally 0, no writer in the exe): the values the key sets.
 constexpr uintptr_t kVisorShiftRva = 0x5FCA8B0;   // x at +0, y at +4
@@ -237,6 +237,15 @@ bool checkIdentity(uintptr_t base, const char** why) noexcept {
 }
 
 // ---- the hook --------------------------------------------------------------------------------------------------------------
+// F27: the eye order and the render-mode edge, at the setter's mode switch (the game's render mode, not 'native on foot active', which comes later).
+void setNativeEyeOrder(bool on) {
+    if (g_nativeEyeOrderFlip.load(std::memory_order_relaxed) == on) return;
+    g_nativeEyeOrderFlip.store(on, std::memory_order_relaxed);
+    g_nativeModeEdges.fetch_add(1, std::memory_order_relaxed);
+    Log::get().note("ui quality: eye order rule: %s (the first target of a frame is the %s eye); changed at the game's render-mode switch (the setter)",
+                    on ? "native on foot" : "cockpit", on ? "right" : "left");
+}
+
 // F22: the native session test. journalGameplay() (LoadGame seen), or Status.json says on foot now: a training scenario started from the main menu
 // writes no LoadGame. Logs once, when the fallback is what admits (journal_watch.h journalSessionOrOnFoot).
 bool nativeGameSession() {
@@ -291,6 +300,7 @@ void __fastcall setterHooked(void* selectorPtr, uint32_t incoming) {
     ev.keyOn = in.keyOn;
     ev.incoming = incoming;
     ev.effective = nofoot::effectiveMode(ev.reason, incoming);
+    setNativeEyeOrder(ev.admitted);   // F27: the eye order follows the substitution at the mode switch
     ev.onFoot = journalOnFootKnown() ? (journalOnFoot() ? 1 : 0) : 2;
     ev.seated = journalSeatedKnown() ? (journalSeated() ? 1 : 0) : 2;
     // The flag is set before the call, so a frame boundary that runs while the original is inside it sees the session.
@@ -550,7 +560,10 @@ void readKey() {
         g_reticleGameLast = reticleGame;
     }
     // F25 (TEMPORARY): the world markers (the waypoint and the others, not key 10): fixed takes the head out of their placement, game leaves them as the game has them.
-    g_worldMarkersFixed.store(cfg.getString("fix.native_on_foot_world_markers", "fixed") != "game", std::memory_order_relaxed);
+    {
+        const std::string wm = cfg.getString("fix.native_on_foot_world_markers", "forward");
+        g_worldMarkersMode.store(wm == "game" ? 2 : wm == "fixed" ? 0 : 1, std::memory_order_relaxed);
+    }
     // F26 (TEMPORARY, live): the sharp on-foot HUD. Off by default; read on each frame through g_sharpHudKeyOn.
     g_nativeOnFootSharpHudKey.store(cfg.getString("fix.native_on_foot_sharp_hud", "off") == "on" && runtimeVrProfile(), std::memory_order_relaxed);
     // F25 (TEMPORARY A/B): fix.native_on_foot_visor_shift = off | x,y. Live.
@@ -1704,7 +1717,9 @@ struct F13Head {
     float viewY = 0.0f;   // F22: the list-B eye 0 view's row 2, column 1 (asin = its pitch); set by f13ReadHeadInto only
     float viewYaw = 0.0f; // F24: the list-B eye 0 view's forward yaw (atan2 of row 2), set by f13ReadHeadInto only
 };
-F13Head g_f13Raw;                                   // guarded by g_f9Lock: the head transform read by the P2 hook
+F13Head g_f13Raw;
+F13Head g_worldC;                                  // F27: the list-B head sample from the P2 hook, for the world markers (any HUD follow); under g_f9Lock
+uint64_t g_worldCMs = 0;                            // F27: GetTickCount64 of g_worldC's sample                                   // guarded by g_f9Lock: the head transform read by the P2 hook
 F13Head g_f13Smooth;                                // guarded by g_f9Lock: the smoothed one (the frame thread)
 uint64_t g_f13LastQpc = 0;                          // frame thread only
 uint64_t g_f13LogMs = 0;                            // frame thread only
@@ -2701,31 +2716,39 @@ void __fastcall reticleWorldPost(void* node) noexcept {
     uint32_t key = 0;
     if (!na || !guardedRead(na + 0x60, &ia, 8) || !ia || !guardedRead(na + 0x20, &key, 4)) return;
     if (key == 10) return;
-    if (!g_worldMarkersFixed.load(std::memory_order_relaxed) || !nativeOnFootActive()) return;
+    const int wmMode = g_worldMarkersMode.load(std::memory_order_relaxed);
+    if (wmMode == 2 || !nativeOnFootActive()) return;
     float C[16] = {};
     bool havePose = false;
+    const uint64_t now = GetTickCount64();
     {
+        // F27: the head transform whatever the HUD follow is: the smoothed one when the HUD follows the head, else the list-B sample the look reads.
         F9Lock lock;
         if (g_followHead.load(std::memory_order_relaxed) && g_f13Smooth.valid) {
             std::memcpy(C, g_f13Smooth.C, sizeof(C));
             havePose = true;
+        } else if (g_worldC.valid && now - g_worldCMs < 500) {
+            std::memcpy(C, g_worldC.C, sizeof(C));
+            havePose = true;
         }
     }
-    const uint64_t now = GetTickCount64();
     if (!havePose) {
         if (now - g_worldLineMs >= 5000 || g_worldLineMs == 0) {
             g_worldLineMs = now;
-            Log::get().note("native on foot world markers: fixed, but no head pose (the HUD follow is body or the head is not read); markers are left as the game places them");
+            Log::get().note("native on foot world markers: fixed, but no fresh head pose (no list-B sample in 0.5 s); markers are left as the game places them");
         }
         return;
     }
     float t[3] = {};
     if (!guardedRead(ia + 0x40, t, sizeof(t))) return;
+    // F27: fixed = the inverse, t' = (t - row3) . R^T (the flight ruled it out as the cure: it applied an extra -C yaw);
+    // forward = t' = t . R + row3, the map the reticle head mode uses for its direction (the default).
     float tp[3] = {};
     for (size_t j = 0; j < 3; ++j) {
         float acc = 0.0f;
-        for (size_t i = 0; i < 3; ++i) acc += (t[i] - C[12 + i]) * C[4 * j + i];
-        tp[j] = acc;
+        for (size_t i = 0; i < 3; ++i)
+            acc += wmMode == 0 ? (t[i] - C[12 + i]) * C[4 * j + i] : t[i] * C[4 * i + j];
+        tp[j] = acc + (wmMode == 0 ? 0.0f : C[12 + j]);
     }
     if (!guardedWriteFloat(ia + 0x40, tp[0]) || !guardedWriteFloat(ia + 0x44, tp[1]) || !guardedWriteFloat(ia + 0x48, tp[2])) {
         if (now - g_worldLineMs >= 5000 || g_worldLineMs == 0) {
@@ -2737,9 +2760,10 @@ void __fastcall reticleWorldPost(void* node) noexcept {
     if (now - g_worldLineMs >= 5000 || g_worldLineMs == 0) {
         g_worldLineMs = now;
         const float yawC = static_cast<float>(std::atan2(static_cast<double>(C[8]), static_cast<double>(C[10])) * 180.0 / 3.14159265358979323846);
-        Log::get().note("native on foot world markers: key %u: t (game) (%.3f, %.3f, %.3f) -> t' (written) (%.3f, %.3f, %.3f); C yaw %.2f deg (row 2 x, z)",
-                        static_cast<unsigned>(key), static_cast<double>(t[0]), static_cast<double>(t[1]), static_cast<double>(t[2]),
-                        static_cast<double>(tp[0]), static_cast<double>(tp[1]), static_cast<double>(tp[2]), static_cast<double>(yawC));
+        Log::get().note("native on foot world markers: key %u: mode %s; t (game) (%.3f, %.3f, %.3f) -> t' (written) (%.3f, %.3f, %.3f); C yaw %.2f deg (row 2 x, z)",
+                        static_cast<unsigned>(key), wmMode == 0 ? "fixed" : "forward", static_cast<double>(t[0]), static_cast<double>(t[1]),
+                        static_cast<double>(t[2]), static_cast<double>(tp[0]), static_cast<double>(tp[1]), static_cast<double>(tp[2]),
+                        static_cast<double>(yawC));
     }
 }
 
@@ -3689,6 +3713,8 @@ void lookReadHeadP2(uintptr_t listB) noexcept {
     }
     g_lookHead = raw;
     g_lookHeadMs = GetTickCount64();
+    g_worldC = raw;   // F27: the same sample, for the world markers
+    g_worldCMs = g_lookHeadMs;
 }
 
 // The update hook (game thread): while engaged with a non-zero input, writes rotate-abs = old + ours for this call only and restores old after it.

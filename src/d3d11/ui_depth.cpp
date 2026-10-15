@@ -1,6 +1,7 @@
 #include "temporal_shader_bytecode.h"
 #include "fixed_shader_source.h"
 #include "ui_depth.h"
+#include "native_on_foot.h"   // F27: nativeEyeOrderFlipped, the native eye order
 #include "ui_depth_layer.h"
 #include "stellar_coverage.h"
 #include "orbital_width.h"    // the orbit lines' factor and the twin's private b13 (fix.ui_quality)
@@ -2247,8 +2248,9 @@ int eyeIndexFor(const void* rtvRes, uint32_t w, uint32_t h, uint32_t fmt) {
     t.w = w;
     t.h = h;
     t.fmt = fmt;
-    t.eye = ofShape;
-    return static_cast<int>(ofShape);
+    // F27: the native eye order: in native on foot the game renders the right eye first, so the first target is the right eye.
+    t.eye = nativeEyeOrderFlipped() ? 1u - ofShape : ofShape;
+    return static_cast<int>(t.eye);
 }
 
 // The viewport depth range that carries the encoding correction, and its

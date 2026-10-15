@@ -4830,7 +4830,7 @@ ID3D11Texture2D* uiLayerComposite(uint64_t sequence, uint32_t eye, ID3D11Texture
         // game submitted (or copied into what it submitted) for THIS eye?
         // F26: a native on-foot enter or leave re-arms it: the submitted tables are reset, and a mismatch is tolerated for
         // kEyeSwapPersist composites after the change. A mismatch that persists through that window stands down, and the log says which.
-        const uint32_t edges = nativeOnFootEdges();
+        const uint32_t edges = g_nativeModeEdges.load(std::memory_order_relaxed);   // F27: the setter's render-mode edges
         if (edges != g_eyeEdgeSeen) {
             g_eyeEdgeSeen = edges;
             g_eyeSinceRearm = 0;

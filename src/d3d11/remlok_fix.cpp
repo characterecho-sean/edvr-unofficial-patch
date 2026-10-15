@@ -11,6 +11,11 @@
 #include "../common/log.h"
 #include "binding_shadow.h"
 #include "native_on_foot.h"   // F25: nativeOnFootActive for the on-foot visor match
+#include "dxbc_container.h"   // F27: the visor variant's checksum (ComputeHashRetail)
+#include "ui_depth.h"         // F27: uiDepthEyeOfTargetReadOnly, the bound target's eye
+#include <cstring>
+#include <string>
+#include <vector>
 
 namespace edvr {
 
@@ -42,6 +47,8 @@ static_assert(kKind == 'N' && kVertices == 3 && kInstances == 1,
 
 float g_keep = 0.55f;
 bool  g_swap = false;
+// F27: the eye parity's swap with the native eye order (in native on foot the game renders the right eye first).
+inline bool remlokSwapNow() { return g_swap != nativeEyeOrderFlipped(); }
 // Scale of the substituted viewport for the overlay draw, centred. Below 1
 // the whole helmet frame renders smaller, which pulls the edge lines INWARD
 // from the image border -- on a wide-FOV headset the border is the lens rim,
@@ -233,6 +240,125 @@ bool onFootVisorMatches() {
     return bindingShaderHash(BindSlot::Vs) == kOnFootVisorVs;
 }
 
+// ---- F27: the on-foot visor's per-eye pixel shader ---------------------------------------------------------------------------------------
+// PS 68ABCB9FEF6CA66C draws the visor edge lines with a screen-x-keyed weight (`add_sat r2.z, |r2.z|, -0.666667`): 1 at both eye edges, 0 in the
+// middle, so the lines show on both sides. The LEFT variant makes the operand -|r2.z| (weight 1 at x = 0, the temple; 0 for x >= 0.5); the RIGHT
+// variant drops the modifier (weight 1 at x = 1, the temple; 0 for x <= 0.5). The change is one byte: the extended operand token's modifier at file
+// offset 1724 (0x81 abs -> 0x41 neg, or -> 0x01 none). The length is unchanged, and the DXBC checksum (header bytes 4-19) is recomputed. The 20 bytes
+// from offset 1720 must match first, or the variant is refused. The variant is bound by the eye identity (the bound target's eye from the eye filing,
+// NOT parity); remlok_swap_eyes swaps the two as a control. Only the outer mode uses it; the draw is not scissored any more.
+namespace {
+constexpr uint64_t kVisorPsHash = 0x68ABCB9FEF6CA66Cull;
+constexpr size_t kVisorEyeOffset = 1724;
+const uint8_t kVisorEyeSeq[20] = {0x2A, 0x00, 0x10, 0x80, 0x81, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01, 0x40, 0x00, 0x00, 0xAB, 0xAA, 0x2A, 0xBF};
+std::vector<uint8_t> g_visorPsBytes;               // the game's bytecode, kept when the game creates the shader
+bool g_visorPsKept = false;
+ID3D11PixelShader* g_visorPsVariant[2] = {nullptr, nullptr};   // 0 left, 1 right: created once, kept for the session
+bool g_visorPsTried = false;
+bool g_visorPending = false;                       // set by remlokOnEyeDraw for the on-foot match in outer mode; consumed by the begin
+bool g_visorActive = false;                        // a variant is bound for the draw in flight
+ID3D11PixelShader* g_visorSaved = nullptr;         // the game's pixel shader, restored after the draw
+uint64_t g_visorUses[2] = {0, 0};                  // per 30 s window
+uint64_t g_visorRefusals = 0;
+uint64_t g_visorWindowMs = 0;
+}  // namespace
+
+// Called from the device's pixel-shader creation hook: keeps the visor shader's bytecode (only that hash, once).
+void remlokRememberVisorPs(uint64_t hash, const void* bytecode, size_t bytes) {
+    if (hash != kVisorPsHash || g_visorPsKept || !bytecode || bytes < kVisorEyeOffset + sizeof(kVisorEyeSeq)) return;
+    g_visorPsBytes.assign(static_cast<const uint8_t*>(bytecode), static_cast<const uint8_t*>(bytecode) + bytes);
+    g_visorPsKept = true;
+}
+
+// The patched bytecode for one side, or why not. Verifies the sequence and the container magic before the one-byte change.
+bool visorVariantBytes(bool right, std::vector<uint8_t>& out, std::string& why) {
+    const std::vector<uint8_t>& in = g_visorPsBytes;
+    if (in.size() < kVisorEyeOffset + sizeof(kVisorEyeSeq) || in[0] != 'D' || in[1] != 'X' || in[2] != 'B' || in[3] != 'C') {
+        why = "the kept bytecode is not a DXBC container of the expected size";
+        return false;
+    }
+    if (std::memcmp(in.data() + kVisorEyeOffset - 4, kVisorEyeSeq, sizeof(kVisorEyeSeq)) != 0 || in[kVisorEyeOffset] != 0x81) {
+        why = "the token bytes at offset 1720 are not the expected sequence (the modifier at 1724 is not 0x81)";
+        return false;
+    }
+    out = in;
+    out[kVisorEyeOffset] = right ? 0x01 : 0x41;
+    ComputeHashRetail(out.data() + 20, static_cast<UINT>(out.size() - 20), out.data() + 4);
+    return true;
+}
+
+// The variant for a side, created on first use (both sides together). Null when refused; the refusal is logged once.
+ID3D11PixelShader* visorVariant(ID3D11DeviceContext* ctx, bool right) {
+    if (!g_visorPsTried) {
+        g_visorPsTried = true;
+        std::string why = g_visorPsKept ? "" : "the visor shader's bytecode was not seen at creation";
+        ID3D11Device* dev = nullptr;
+        if (why.empty()) ctx->GetDevice(&dev);
+        for (int side = 0; side < 2 && why.empty(); ++side) {
+            std::vector<uint8_t> bytes;
+            if (!visorVariantBytes(side == 1, bytes, why)) break;
+            ID3D11PixelShader* ps = nullptr;
+            const HRESULT hr = dev ? dev->CreatePixelShader(bytes.data(), bytes.size(), nullptr, &ps) : E_FAIL;
+            if (FAILED(hr) || !ps) {
+                char t[64];
+                _snprintf_s(t, _TRUNCATE, "CreatePixelShader 0x%08X", static_cast<unsigned>(hr));
+                why = t;
+                break;
+            }
+            g_visorPsVariant[side] = ps;
+        }
+        if (dev) dev->Release();
+        if (why.empty()) {
+            Log::get().note("remlok lines (on foot): patched PS created (L, R): the visor's edge weight is per eye (68ABCB9FEF6CA66C, byte 1724 %s / %s, checksum recomputed)",
+                            "0x41", "0x01");
+        } else {
+            ++g_visorRefusals;
+            Log::get().note("remlok lines (on foot): NOT patched -- %s. The visor draws unchanged this session.", why.c_str());
+        }
+    }
+    return g_visorPsVariant[right ? 1 : 0];
+}
+
+// The begin of the on-foot visor draw (outer mode): binds the variant for this draw's eye, and keeps the game's shader for the end.
+void visorSwapBegin(ID3D11DeviceContext* ctx) {
+    g_visorPending = false;
+    ResourceInfo rt{};
+    if (!bindingResolve(bindingGet(BindSlot::Rtv0), &rt)) {
+        ++g_visorRefusals;
+        return;
+    }
+    const int eye = uiDepthEyeOfTargetReadOnly(rt.resource);   // never registers: the eye the filing gave this target (native order included)
+    if (eye < 0) {
+        ++g_visorRefusals;
+        return;
+    }
+    const bool right = (eye == 1) != g_swap;                   // the control (remlok_swap_eyes) swaps the two
+    ID3D11PixelShader* variant = visorVariant(ctx, right);
+    if (!variant) return;
+    ctx->PSGetShader(&g_visorSaved, nullptr, nullptr);         // AddRef'd: released at the end
+    ctx->PSSetShader(variant, nullptr, 0);
+    g_visorActive = true;
+    ++g_visorUses[right ? 1 : 0];
+    const uint64_t now = GetTickCount64();
+    if (!g_visorWindowMs) {
+        g_visorWindowMs = now;
+    } else if (now - g_visorWindowMs >= 30000) {
+        Log::get().note("remlok lines (on foot): visor PS variants bound in the last 30 s: left eye %llu, right eye %llu (%llu refusals); eye rule %s",
+                        static_cast<unsigned long long>(g_visorUses[0]), static_cast<unsigned long long>(g_visorUses[1]),
+                        static_cast<unsigned long long>(g_visorRefusals), nativeEyeOrderFlipped() ? "native (first = right)" : "cockpit (first = left)");
+        g_visorUses[0] = g_visorUses[1] = 0;
+        g_visorWindowMs = now;
+    }
+}
+
+void visorSwapEnd(ID3D11DeviceContext* ctx) {
+    if (!g_visorActive) return;
+    g_visorActive = false;
+    ctx->PSSetShader(g_visorSaved, nullptr, 0);
+    if (g_visorSaved) g_visorSaved->Release();
+    g_visorSaved = nullptr;
+}
+
 // F26: the one-shot diagnostic for the on-foot visor draw (the flight: the match never fired). The first time per session, and every 30 s while
 // the draw keeps coming, it logs every attribute the matcher can see and which test rejects the draw. Read only.
 void remlokOnFootDiagnose(char kind, uint32_t count, uint32_t instances) {
@@ -249,7 +375,7 @@ void remlokOnFootDiagnose(char kind, uint32_t count, uint32_t instances) {
     const bool dsv = bindingGet(BindSlot::Dsv0) != nullptr;
     const bool onFoot = nativeOnFootActive();
     const bool wanted = remlokWantsDraws();
-    const bool right = (((g_matchesThisFrame & 1u) != 0u) != g_swap);
+    const bool right = (((g_matchesThisFrame & 1u) != 0u) != remlokSwapNow());
     const char* rejected = "none: the draw matches (VS and shape)";
     if (!wanted) rejected = "fix.remlok_lines is stock (remlokWantsDraws)";
     else if (kind != 'N') rejected = "indexed draw (the shape wants non-indexed)";
@@ -286,15 +412,25 @@ RemlokAction remlokOnEyeDraw(char kind, uint32_t count, uint32_t instances) {
 
     const uint32_t match = g_matchesThisFrame++;
     if (footVisor) {
-        // F25: the on-foot match, logged once and then every 30 s (the cockpit's census line's rhythm): its eye parity is the match's parity, as on the cockpit.
-        static uint64_t footCount = 0, footLastMs = 0;
+        // F27: the outer mode binds the per-eye variant at the draw (visorSwapBegin); not the scissor.
+        g_visorPending = detail::g_remlokMode == Mode::kOuter;
+        // F27: per-eye counts over each 30 s window prove the parity (the eye rule follows the native eye order, F27).
+        static uint64_t footCount = 0, footLeft = 0, footRight = 0, footLastMs = 0;
         ++footCount;
+        const bool rightEye = ((match & 1u) != 0u) != remlokSwapNow();
+        if (rightEye) ++footRight; else ++footLeft;
         const uint64_t nowMs = GetTickCount64();
-        if (footLastMs == 0 || nowMs - footLastMs >= 30000) {
+        if (footLastMs == 0) {
             footLastMs = nowMs;
-            Log::get().note("remlok lines (on foot): matched VS B553BB479B7C0B97 (non-indexed, 3 vertices, 1 instance): %llu matches this session, "
-                            "this match is for the %s eye",
-                            static_cast<unsigned long long>(footCount), (((match & 1u) != 0u) != g_swap) ? "right" : "left");
+            Log::get().note("remlok lines (on foot): first match of VS B553BB479B7C0B97 (non-indexed, 3 vertices, 1 instance): the %s eye; eye rule %s",
+                            rightEye ? "right" : "left", nativeEyeOrderFlipped() ? "native (first = right)" : "cockpit (first = left)");
+        } else if (nowMs - footLastMs >= 30000) {
+            Log::get().note("remlok lines (on foot): %llu matches in the last 30 s: left eye %llu, right eye %llu (%llu this session); eye rule %s",
+                            static_cast<unsigned long long>(footLeft + footRight), static_cast<unsigned long long>(footLeft),
+                            static_cast<unsigned long long>(footRight), static_cast<unsigned long long>(footCount),
+                            nativeEyeOrderFlipped() ? "native (first = right)" : "cockpit (first = left)");
+            footLastMs = nowMs;
+            footLeft = footRight = 0;
         }
     }
     if (detail::g_remlokMode == Mode::kHide) {
@@ -304,12 +440,16 @@ RemlokAction remlokOnEyeDraw(char kind, uint32_t count, uint32_t instances) {
         }
         return RemlokAction::kHide;
     }
-    g_pendingRight = ((match & 1u) != 0u) != g_swap;
+    g_pendingRight = ((match & 1u) != 0u) != remlokSwapNow();
     return RemlokAction::kScissor;
 }
 
 void remlokScissorBegin(ID3D11DeviceContext* ctx) {
     g_engaged = false;
+    if (g_visorPending) {   // F27: the on-foot visor draw takes the per-eye variant, not the scissor
+        visorSwapBegin(ctx);
+        return;
+    }
 
     ID3D11RasterizerState* current = nullptr;
     ctx->RSGetState(&current);   // AddRef'd when non-null
@@ -389,6 +529,10 @@ void remlokScissorBegin(ID3D11DeviceContext* ctx) {
 }
 
 void remlokScissorEnd(ID3D11DeviceContext* ctx) {
+    if (g_visorActive) {   // F27: restores the game's pixel shader after the visor draw
+        visorSwapEnd(ctx);
+        return;
+    }
     if (!g_engaged) return;
     g_engaged = false;
     ctx->RSSetState(g_savedRS);

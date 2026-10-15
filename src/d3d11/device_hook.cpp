@@ -87,7 +87,8 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "perf_monitor.h"
 #include "gpu_pass_profile.h"   // TEMPORARY hotkey.gpu_pass_profile: the GPU pass profiler's request
 #include "blend_probe.h"       // TEMPORARY hotkey.blend_probe: the blend probe's install and request
-#include "stall_watch.h"     // stallWatchBeat: the stall sampler's heartbeat, once per owned Present
+#include "stall_watch.h"
+#include "remlok_fix.h"   // F27: remlokRememberVisorPs     // stallWatchBeat: the stall sampler's heartbeat, once per owned Present
 #include "vram_tick.h"       // vramWatchTick: the graphics memory watch, once per owned Present
 #include "vertex_resync_hook.h"   // vertexResyncInstall at startup, vertexResyncPoll once a second: the f3d vertex-buffer cache repair (both profiles)
 #include "light_grid_cache_hook.h"   // lightGridCacheInstall at startup, lightGridCachePoll once a second, lightGridCacheNoteFrame per Present: the fragment-culling grid cache (both profiles)
@@ -772,6 +773,7 @@ HRESULT STDMETHODCALLTYPE hookedCreatePS(ID3D11Device* self, const void* bytecod
         { cross_profile::CaptureScope capture(!runtimeFlatProfile()); rememberFlatProbeShader('p', hash, bytecode, len); }
         registerShaderHash(*out, hash);
         engineVelocityRememberPs(static_cast<ID3D11PixelShader*>(*out),hash,bytecode,static_cast<size_t>(len),linkage!=nullptr);
+        remlokRememberVisorPs(hash, bytecode, static_cast<size_t>(len));   // F27: the visor shader's bytes, for the per-eye variants
         if (runtimeScopeIncludesFlat()) {
             cross_profile::CaptureScope capture(!runtimeFlatProfile());
             FlatOverlayLayer::rememberPixelShader(static_cast<ID3D11PixelShader*>(*out),

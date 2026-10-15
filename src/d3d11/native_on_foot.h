@@ -105,5 +105,11 @@ inline uint32_t nativeOnFootEdges() { return g_nativeOnFootEdges.load(std::memor
 // F26: fix.native_on_foot_sharp_hud is on (live, VR only; set by readKey). The sharp on-foot HUD is wanted while this and native stereo on foot hold.
 inline std::atomic<bool> g_nativeOnFootSharpHudKey{false};
 inline bool nativeOnFootSharpHudWanted() { return g_nativeOnFootSharpHudKey.load(std::memory_order_relaxed) && nativeOnFootActive(); }
+// F27: the native eye order. The game renders the RIGHT eye first in native on foot, so while the setter has it substituted the eye rule is flipped
+// (the first target of a frame is the right eye). Set by the setter hook at the mode switch; the cockpit never sees it set.
+inline std::atomic<bool> g_nativeEyeOrderFlip{false};
+inline bool nativeEyeOrderFlipped() { return g_nativeEyeOrderFlip.load(std::memory_order_relaxed); }
+// F27: the game's render-mode changes as the setter sees them (the UI layer's eye check re-arms on a change, not on 'native on foot active').
+inline std::atomic<uint32_t> g_nativeModeEdges{0};
 
 }  // namespace edvr
