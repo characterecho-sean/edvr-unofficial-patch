@@ -3339,6 +3339,275 @@ void loadStagesFrameTick(uint64_t nowMs) {
     }
 }
 
+// ---- F28 (TEMPORARY, read only): the training connect probe (fix.training_connect_probe = on | off, read at launch) ---------------------------
+// The ConnectToServerActivity (CTSA) and its state machine, probed at their entries. Every hook is a pre-hook: the original runs with the same
+// arguments and its result is returned unchanged. Integer-argument targets forward rcx, rdx, r8, r9 and the four stack slots (entry+0x28 .. +0x48) as
+// the composer fix needs. The two with dt in xmm1 (Run and SGMM) call through a shim that moves xmm2 to xmm1 and jumps to the trampoline: the same move
+// the thunk makes, so the original sees what the game gave it. The shim's jump target is a slot written after the install (before the gate opens).
+// Prologues verified before writing (F9Probe install). Lines: "training connect:".
+namespace f28 {
+constexpr uintptr_t kRunRva = 0x1D15300, kStartRva = 0x1D818D0, kStopRva = 0x1D4A710, kDtorRva = 0x1D0FBA0, kCtorRva = 0x1CFBBE0,
+                    kStateRva = 0x1D7C8E0, kRirRva = 0x653C50, kDeactRva = 0x831A10, kSgmmRva = 0x1D1CDF0;
+const uint8_t kRunB[8] = {0x48, 0x89, 0x5C, 0x24, 0x10, 0x55, 0x56, 0x57};
+const uint8_t kStartB[9] = {0x40, 0x53, 0x48, 0x83, 0xEC, 0x30, 0x48, 0x8B, 0xD9};
+const uint8_t kStopB[9] = {0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0xD9};
+const uint8_t kDtorB[10] = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83, 0xEC, 0x20};
+const uint8_t kCtorB[16] = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18, 0x57};
+const uint8_t kStateB[13] = {0x48, 0x89, 0x5C, 0x24, 0x18, 0x57, 0x48, 0x81, 0xEC, 0xA0, 0x00, 0x00, 0x00};
+const uint8_t kRirB[8] = {0x48, 0x81, 0x79, 0x18, 0x00, 0x10, 0x00, 0x00};
+const uint8_t kDeactB[9] = {0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0xD9};
+const uint8_t kSgmmB[15] = {0x48, 0x89, 0x5C, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18, 0x48, 0x89, 0x7C, 0x24, 0x20};
+enum { kRun, kStart, kStop, kDtor, kCtor, kState, kRir, kDeact, kSgmm, kCount };
+const char* const kNames[kCount] = {"Run", "Start", "Stop", "Dtor", "Ctor", "State", "RIR", "Deact", "SGMM"};
+}  // namespace f28
+
+F9Probe g_f28[f28::kCount];
+std::atomic<uint64_t> g_f28Calls[f28::kCount];
+bool g_f28Installed = false;      // frame thread: the install ran (any probe)
+uint64_t g_f28InstallMs = 0;      // frame thread
+uint8_t* g_f28RunShim = nullptr;  // the shims (RWX pages, the jump slot at +9)
+uint8_t* g_f28SgmmShim = nullptr;
+std::mutex g_f28Mutex;            // the CTSA list and the per-second accumulators
+uint64_t g_f28Ctsa[4] = {};       // tracked CTSA objects (0 = free)
+uint64_t g_f28RunSecCalls = 0, g_f28RunRcx = 0, g_f28RunRa = 0, g_f28RunTid = 0;   // per second (under the mutex)
+float g_f28RunDt = 0.0f;
+uint64_t g_f28RirSecCalls = 0, g_f28RirRcx = 0;
+uint64_t g_f28RirRa[4] = {}, g_f28RirRaN[4] = {};   // the RA counts this second (the first four distinct)
+uint64_t g_f28LastSecMs = 0, g_f28RunLastRcx = 0;
+uint32_t g_f28SgmmLast = 0xFFFFFFFFu;
+uint64_t g_f28SgmmLastMs = 0;
+
+std::string f28State(uint32_t s) { return s == 0 ? "0 (waiting)" : s == 1 ? "1 (running)" : s == 2 ? "2 (done)" : std::to_string(s); }
+
+// The shim: movaps xmm1,xmm2; jmp qword ptr [rip+0] (the slot at +9 holds the trampoline).
+uint8_t* f28MakeShim() {
+    uint8_t* p = static_cast<uint8_t*>(VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+    if (!p) return nullptr;
+    const uint8_t code[9] = {0x0F, 0x28, 0xCA, 0xFF, 0x25, 0x00, 0x00, 0x00, 0x00};
+    std::memcpy(p, code, sizeof(code));
+    std::memset(p + 9, 0, 8);
+    return p;
+}
+
+// One line for an entry-type probe: the object, its state, the caller and the thread. Every call.
+void f28Entry(int k, uint64_t self, uint64_t ra) {
+    uint32_t st = 0;
+    const bool okSt = self && guardedRead(self + 0x30, &st, 4);
+    char stText[24];
+    if (okSt) std::snprintf(stText, sizeof(stText), "%u", static_cast<unsigned>(st));
+    else std::snprintf(stText, sizeof(stText), "unread");
+    Log::get().note("training connect: %s: object 0x%llX, [+0x30] %s, RA 0x%llX, tid %lu (%llu calls)", f28::kNames[k],
+                    static_cast<unsigned long long>(self), stText, static_cast<unsigned long long>(ra), static_cast<unsigned long>(GetCurrentThreadId()),
+                    static_cast<unsigned long long>(g_f28Calls[k].load()));
+}
+
+void f28Track(uint64_t act) {
+    std::lock_guard<std::mutex> lock(g_f28Mutex);
+    for (uint64_t& slot : g_f28Ctsa) {
+        if (!slot) { slot = act; return; }
+    }
+}
+void f28Untrack(uint64_t act) {
+    std::lock_guard<std::mutex> lock(g_f28Mutex);
+    for (uint64_t& slot : g_f28Ctsa) {
+        if (slot == act) slot = 0;
+    }
+}
+
+// Forwards the eight argument slots to the trampoline. Integer arguments only: the callee reads them as they came.
+using F28Fn = uint64_t(__fastcall*)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+uint64_t f28Forward(int k, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t s5, uint64_t s6, uint64_t s7, uint64_t s8) {
+    const F28Fn orig = reinterpret_cast<F28Fn>(g_f28[k].original);
+    if (!orig) return 0;
+    return orig(a1, a2, a3, a4, s5, s6, s7, s8);
+}
+
+uint64_t __fastcall f28StartHooked(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t s5, uint64_t s6, uint64_t s7, uint64_t s8) {
+    g_f28Calls[f28::kStart].fetch_add(1);
+    f28Entry(f28::kStart, a1, reinterpret_cast<uint64_t>(_ReturnAddress()));
+    return f28Forward(f28::kStart, a1, a2, a3, a4, s5, s6, s7, s8);
+}
+uint64_t __fastcall f28StopHooked(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t s5, uint64_t s6, uint64_t s7, uint64_t s8) {
+    g_f28Calls[f28::kStop].fetch_add(1);
+    f28Entry(f28::kStop, a1, reinterpret_cast<uint64_t>(_ReturnAddress()));
+    return f28Forward(f28::kStop, a1, a2, a3, a4, s5, s6, s7, s8);
+}
+uint64_t __fastcall f28DtorHooked(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t s5, uint64_t s6, uint64_t s7, uint64_t s8) {
+    g_f28Calls[f28::kDtor].fetch_add(1);
+    f28Entry(f28::kDtor, a1, reinterpret_cast<uint64_t>(_ReturnAddress()));
+    f28Untrack(a1);   // the object is freed by the dtor: stop reading it
+    return f28Forward(f28::kDtor, a1, a2, a3, a4, s5, s6, s7, s8);
+}
+uint64_t __fastcall f28CtorHooked(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t s5, uint64_t s6, uint64_t s7, uint64_t s8) {
+    g_f28Calls[f28::kCtor].fetch_add(1);
+    f28Entry(f28::kCtor, a1, reinterpret_cast<uint64_t>(_ReturnAddress()));
+    const uint64_t r = f28Forward(f28::kCtor, a1, a2, a3, a4, s5, s6, s7, s8);
+    f28Track(a1);   // the object exists once the constructor has returned
+    return r;
+}
+uint64_t __fastcall f28DeactHooked(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t s5, uint64_t s6, uint64_t s7, uint64_t s8) {
+    g_f28Calls[f28::kDeact].fetch_add(1);
+    f28Entry(f28::kDeact, a1, reinterpret_cast<uint64_t>(_ReturnAddress()));   // IrcGameClient::Deactivate: the menu closes here
+    return f28Forward(f28::kDeact, a1, a2, a3, a4, s5, s6, s7, s8);
+}
+// State setter: (act, new state, RA, tid) on every call.
+uint64_t __fastcall f28StateHooked(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t s5, uint64_t s6, uint64_t s7, uint64_t s8) {
+    g_f28Calls[f28::kState].fetch_add(1);
+    Log::get().note("training connect: state setter: act 0x%llX, new state %s, RA 0x%llX, tid %lu", static_cast<unsigned long long>(a1),
+                    f28State(static_cast<uint32_t>(a2)).c_str(), static_cast<unsigned long long>(reinterpret_cast<uint64_t>(_ReturnAddress())),
+                    static_cast<unsigned long>(GetCurrentThreadId()));
+    return f28Forward(f28::kState, a1, a2, a3, a4, s5, s6, s7, s8);
+}
+// ReadyToAllocIDs: counted per second (the frame tick prints the count and the top callers).
+uint64_t __fastcall f28RirHooked(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t s5, uint64_t s6, uint64_t s7, uint64_t s8) {
+    g_f28Calls[f28::kRir].fetch_add(1);
+    const uint64_t ra = reinterpret_cast<uint64_t>(_ReturnAddress());
+    {
+        std::lock_guard<std::mutex> lock(g_f28Mutex);
+        ++g_f28RirSecCalls;
+        g_f28RirRcx = a1;
+        bool seen = false;
+        for (int i = 0; i < 4 && !seen; ++i) {
+            if (g_f28RirRa[i] == ra) { ++g_f28RirRaN[i]; seen = true; }
+        }
+        for (int i = 0; i < 4 && !seen; ++i) {
+            if (!g_f28RirRa[i]) { g_f28RirRa[i] = ra; g_f28RirRaN[i] = 1; seen = true; }
+        }
+    }
+    return f28Forward(f28::kRir, a1, a2, a3, a4, s5, s6, s7, s8);
+}
+// Run (dt in xmm1, via the shim): per second, the count, rcx, [rcx+0x30], dt, RA and tid; a new rcx is logged at once.
+using F28ShimFn = uint64_t(__fastcall*)(void*, void*, float);
+uint64_t __fastcall f28RunHooked(void* act, float dt) {
+    g_f28Calls[f28::kRun].fetch_add(1);
+    const uint64_t ra = reinterpret_cast<uint64_t>(_ReturnAddress());
+    {
+        std::lock_guard<std::mutex> lock(g_f28Mutex);
+        ++g_f28RunSecCalls;
+        g_f28RunRcx = reinterpret_cast<uint64_t>(act);
+        g_f28RunRa = ra;
+        g_f28RunTid = GetCurrentThreadId();
+        g_f28RunDt = dt;
+        if (g_f28RunRcx != g_f28RunLastRcx) {
+            g_f28RunLastRcx = g_f28RunRcx;
+            Log::get().note("training connect: Run: a new instance 0x%llX (RA 0x%llX, tid %lu)", static_cast<unsigned long long>(g_f28RunRcx),
+                            static_cast<unsigned long long>(ra), static_cast<unsigned long>(g_f28RunTid));
+        }
+    }
+    return reinterpret_cast<F28ShimFn>(g_f28RunShim)(act, static_cast<uint8_t*>(act) + 0x20, dt);   // rdx = act+0x20 (the thunk's value)
+}
+// SGMM (dt in xmm1, via the shim): logs the changes of [this+0x138], with a timestamp. State 2 = the pending StartTutorial.
+uint64_t __fastcall f28SgmmHooked(void* self, float dt) {
+    g_f28Calls[f28::kSgmm].fetch_add(1);
+    const uint64_t ms = GetTickCount64();
+    const uint64_t r = reinterpret_cast<F28ShimFn>(g_f28SgmmShim)(self, nullptr, dt);
+    uint32_t now = 0;
+    if (self && guardedRead(reinterpret_cast<uintptr_t>(self) + 0x138, &now, 4) && now != g_f28SgmmLast) {
+        const uint32_t was = g_f28SgmmLast;
+        g_f28SgmmLast = now;
+        g_f28SgmmLastMs = ms;
+        Log::get().note("training connect: SGMM [this+0x138] changed %s -> %s at %llu ms (this 0x%llX)",
+                        was == 0xFFFFFFFFu ? "(first read)" : f28State(was).c_str(), f28State(now).c_str(), static_cast<unsigned long long>(ms),
+                        static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(self)));
+    }
+    return r;
+}
+
+// Install: VR only (the probes are read at launch with the key; a refusal is one line each). The shims are built before their hooks, so the
+// gate can open with the jump slot set.
+void installF28ProbesOnce(uintptr_t base) {
+    if (Config::get().getString("fix.training_connect_probe", "on") == "off") {
+        Log::get().note("training connect: probes off (fix.training_connect_probe = off)");
+        return;
+    }
+    g_f28RunShim = f28MakeShim();
+    g_f28SgmmShim = f28MakeShim();
+    const auto install = [&](int k, uintptr_t rva, const uint8_t* prologue, size_t bytes, size_t stolen, void* cb) {
+        const F9ProbeSpec s{f28::kNames[k], rva, prologue, bytes, stolen, cb, "training connect"};
+        size_t got = 0;
+        std::string why;
+        if (installF9ProbeInto(g_f28[k], s, base, &got, &why)) {
+            g_f28Installed = true;
+            Log::get().note("training connect: %s installed at EliteDangerous64.exe+0x%llX, stolen=%zu bytes, prologue %zu bytes verified (read only)",
+                            f28::kNames[k], static_cast<unsigned long long>(rva), got, bytes);
+        } else {
+            Log::get().note("training connect: %s NOT installed at EliteDangerous64.exe+0x%llX -- %s. The game was not touched by it.", f28::kNames[k],
+                            static_cast<unsigned long long>(rva), why.c_str());
+        }
+    };
+    install(f28::kRun, f28::kRunRva, f28::kRunB, sizeof(f28::kRunB), 8, reinterpret_cast<void*>(&f28RunHooked));
+    install(f28::kStart, f28::kStartRva, f28::kStartB, sizeof(f28::kStartB), 9, reinterpret_cast<void*>(&f28StartHooked));
+    install(f28::kStop, f28::kStopRva, f28::kStopB, sizeof(f28::kStopB), 9, reinterpret_cast<void*>(&f28StopHooked));
+    install(f28::kDtor, f28::kDtorRva, f28::kDtorB, sizeof(f28::kDtorB), 10, reinterpret_cast<void*>(&f28DtorHooked));
+    install(f28::kCtor, f28::kCtorRva, f28::kCtorB, sizeof(f28::kCtorB), 10, reinterpret_cast<void*>(&f28CtorHooked));
+    install(f28::kState, f28::kStateRva, f28::kStateB, sizeof(f28::kStateB), 13, reinterpret_cast<void*>(&f28StateHooked));
+    install(f28::kRir, f28::kRirRva, f28::kRirB, sizeof(f28::kRirB), 8, reinterpret_cast<void*>(&f28RirHooked));
+    install(f28::kDeact, f28::kDeactRva, f28::kDeactB, sizeof(f28::kDeactB), 9, reinterpret_cast<void*>(&f28DeactHooked));
+    install(f28::kSgmm, f28::kSgmmRva, f28::kSgmmB, sizeof(f28::kSgmmB), 15, reinterpret_cast<void*>(&f28SgmmHooked));
+    // The shims' jump slots: the trampolines (installed above), written before the probes can run through them.
+    if (g_f28RunShim && g_f28[f28::kRun].original) std::memcpy(g_f28RunShim + 9, &g_f28[f28::kRun].original, 8);
+    if (g_f28SgmmShim && g_f28[f28::kSgmm].original) std::memcpy(g_f28SgmmShim + 9, &g_f28[f28::kSgmm].original, 8);
+    g_f28InstallMs = GetTickCount64();
+}
+
+// Frame thread, every frame: the one-second lines. Run and RIR print their per-second counts (every second while they have calls, else one
+// zero line every 30 s so "never ran" and "ran with no calls" differ); the CTSA objects are read directly (SEH) every second.
+void f28FrameTick(uint64_t nowMs) {
+    if (!g_f28Installed) return;
+    if (g_f28LastSecMs && nowMs - g_f28LastSecMs < 1000) return;
+    g_f28LastSecMs = nowMs;
+    uint64_t runN = 0, rirN = 0, ra[4] = {}, raN[4] = {}, runRcx = 0, runRa = 0, runTid = 0, rirRcx = 0;
+    float runDt = 0.0f;
+    uint64_t ctsa[4] = {};
+    {
+        std::lock_guard<std::mutex> lock(g_f28Mutex);
+        runN = g_f28RunSecCalls; runRcx = g_f28RunRcx; runRa = g_f28RunRa; runTid = g_f28RunTid; runDt = g_f28RunDt;
+        rirN = g_f28RirSecCalls; rirRcx = g_f28RirRcx;
+        for (int i = 0; i < 4; ++i) { ra[i] = g_f28RirRa[i]; raN[i] = g_f28RirRaN[i]; ctsa[i] = g_f28Ctsa[i]; }
+        g_f28RunSecCalls = 0; g_f28RirSecCalls = 0;
+        for (int i = 0; i < 4; ++i) { g_f28RirRa[i] = 0; g_f28RirRaN[i] = 0; }
+    }
+    static uint64_t lastZeroMs = 0;
+    if (runN || rirN || nowMs - lastZeroMs >= 30000) {
+        if (!runN && !rirN) lastZeroMs = nowMs;
+        uint32_t runSt = 0;
+        uint64_t rir18 = 0, rir20 = 0;
+        const bool okRunSt = runRcx && guardedRead(static_cast<uintptr_t>(runRcx) + 0x30, &runSt, 4);
+        const bool okRir18 = rirRcx && guardedRead(static_cast<uintptr_t>(rirRcx) + 0x18, &rir18, 8);
+        const bool okRir20 = rirRcx && guardedRead(static_cast<uintptr_t>(rirRcx) + 0x20, &rir20, 8);
+        char rirA[24], rirB[24], runStText[24];
+        if (okRir18) std::snprintf(rirA, sizeof(rirA), "0x%llX", static_cast<unsigned long long>(rir18)); else std::snprintf(rirA, sizeof(rirA), "unread");
+        if (okRir20) std::snprintf(rirB, sizeof(rirB), "0x%llX", static_cast<unsigned long long>(rir20)); else std::snprintf(rirB, sizeof(rirB), "unread");
+        if (okRunSt) std::snprintf(runStText, sizeof(runStText), "%u", static_cast<unsigned>(runSt)); else std::snprintf(runStText, sizeof(runStText), "unread");
+        Log::get().note("training connect: per second: Run %llu calls (rcx 0x%llX, [rcx+0x30] %s, dt %.4f, RA 0x%llX, tid %lu); RIR %llu calls (rcx 0x%llX, "
+                        "[rcx+0x18] %s, [rcx+0x20] %s)",
+                        static_cast<unsigned long long>(runN), static_cast<unsigned long long>(runRcx), runStText,
+                        static_cast<double>(runDt), static_cast<unsigned long long>(runRa), static_cast<unsigned long>(runTid),
+                        static_cast<unsigned long long>(rirN), static_cast<unsigned long long>(rirRcx), rirA, rirB);
+        std::string top;
+        for (int i = 0; i < 4; ++i) {
+            if (!raN[i]) continue;
+            char b[64];
+            std::snprintf(b, sizeof(b), "%s0x%llX x%llu", top.empty() ? "" : ", ", static_cast<unsigned long long>(ra[i]),
+                          static_cast<unsigned long long>(raN[i]));
+            top += b;
+        }
+        if (!top.empty()) Log::get().note("training connect: RIR callers this second: %s", top.c_str());
+    }
+    // The CTSA objects, read directly every second (SEH-guarded; the dtor removed the freed ones).
+    for (uint64_t act : ctsa) {
+        if (!act) continue;
+        uint32_t st = 0, fails = 0;
+        uint64_t handle = 0;
+        const bool okS = guardedRead(static_cast<uintptr_t>(act) + 0x30, &st, 4);
+        const bool okF = guardedRead(static_cast<uintptr_t>(act) + 0xA8, &fails, 4);
+        const bool okH = guardedRead(static_cast<uintptr_t>(act) + 0xA0, &handle, 8);
+        Log::get().note("training connect: CTSA 0x%llX: state %s, failcount %s, handle %s",
+                        static_cast<unsigned long long>(act), okS ? f28State(st).c_str() : "unread",
+                        okF ? std::to_string(fails).c_str() : "unread", okH ? (std::to_string(handle)).c_str() : "unread");
+    }
+}
+
 // The load wait (read only). The original is called first and its result is returned unchanged; the log says only what changed.
 using F22BoolFn = bool(__fastcall*)(void*, void*, void*, void*);
 bool g_lwInRun = false;          // the wait is in a false run (game thread, the load pipeline)
@@ -3829,6 +4098,7 @@ void installF22ProbesOnce() {
         return;
     }
     if (!g_base) g_base = base;
+    installF28ProbesOnce(base);   // F28: the training connect probe (fix.training_connect_probe), read only
     {
         const F9ProbeSpec s{"native-on-foot-load-wait", kLoadWaitRva, kLoadWaitPrologue, sizeof(kLoadWaitPrologue), 5,
                             reinterpret_cast<void*>(&loadWaitHooked), "F22 training load wait (read only)"};
@@ -5078,6 +5348,7 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
     // and the total the runtime reads for its compensation (every frame).
     installF22ProbesOnce();
     loadStagesFrameTick(now);   // F23 (Part E): the no-call check for the stage hook
+    f28FrameTick(now);   // F28: the training connect probe's one-second lines
     visorShiftTick(g_visorShiftWant.load(std::memory_order_relaxed), g_visorShiftX.load(std::memory_order_relaxed), g_visorShiftY.load(std::memory_order_relaxed));   // F25 A/B
     // F24 (TEMPORARY, read only): the load sampler runs in a menu (no Flags2 in Status.json) and while a load pipeline is running, until its summary.
     {
