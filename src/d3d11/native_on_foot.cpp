@@ -542,7 +542,10 @@ void readKey() {
         const std::string wm = cfg.getString("fix.native_on_foot_world_markers", "forward_lead");
         // F40 (TEMPORARY, live A/B): the runtime answers Elite's "now" request one display period ahead (next, today) or at the instant the
         // frame draws at (render). Carried in the native frame output; the runtime logs each change.
-        nativeFrameSetNowPoseRender(cfg.getString("fix.now_pose", "next") == "render");
+        {
+            const std::string np = cfg.getString("fix.now_pose", "next");
+            nativeFrameSetNowPose(np == "render_locked" ? 2u : np == "render" ? 1u : 0u);
+        }
         g_worldMarkersMode.store(wm == "forward" ? 1 : wm == "fixed" ? 0 : wm == "game" ? 2 : wm == "forward_now" ? 3 : wm == "forward_k2" ? 5 : wm == "forward_hist" ? 4 : 6, std::memory_order_relaxed);
         // F38: the waypoint lead in frames (forward_lead), clamped to 0..5; a value that does not parse reads as 2.5.
         double lead = std::atof(cfg.getString("fix.native_on_foot_world_markers_lead", "2.5").c_str());

@@ -55,7 +55,7 @@ class NativeFrameClient final {
       return table_.beginFrame(table_.context,&sent,&o);
     },providerVersion_,out);
     // F40: the live now-pose flag from the provider's answer (version 9 only; a version 8 answer carries none, so the default holds).
-    if(result==S_OK) applyNowPose(out.nowPoseRender!=0);
+    if(result==S_OK) applyNowPose(out.nowPoseRender<=2u?out.nowPoseRender:0u);
     // F32: the negotiation is visible: each step down, and the version the provider accepted.
     if(providerVersion_!=askedBefore)nativeTracePrintf("frame input: the provider refused version %u; asking version %u from now on\n",askedBefore,providerVersion_);
     if(result==S_OK&&providerVersion_!=loggedVersion_){loggedVersion_=providerVersion_;
@@ -100,14 +100,16 @@ class NativeFrameClient final {
   }
   HRESULT invalidate(){return acquired()?table_.invalidate(table_.context):S_FALSE;}
   HRESULT close(){if(!acquired())return S_FALSE;const auto r=table_.close(table_.context);if(SUCCEEDED(r)){table_={};providerVersion_=EDVR_NATIVE_FRAME_VERSION_9;}return r;}
-  // F40: the runtime's now-pose flag, set from the provider's answer and logged at the first value and at each change.
-  static void applyNowPose(bool render) {
+  // F40/F42: the runtime's now-pose mode (0 next, 1 render, 2 render_locked), from the provider's answer; logged at the first value and at each change.
+  static void applyNowPose(uint32_t mode) {
     static bool logged = false;
-    const bool was = g_nowPoseRender.exchange(render, std::memory_order_acq_rel);
-    if (!logged || was != render) {
+    static const char* const kNames[3] = {"next", "render", "render_locked"};
+    const uint32_t was = g_nowPoseMode.exchange(mode, std::memory_order_acq_rel);
+    if (!logged || was != mode) {
       logged = true;
-      nativeTracePrintf("now pose: %s (Elite's now request is answered %s)\n", render ? "render" : "next",
-                        render ? "at the instant the frame draws at (the WaitGetPoses latch)" : "one display period ahead (today's behaviour)");
+      nativeTracePrintf("now pose: %s (Elite's now request is answered %s)\n", kNames[mode],
+                        mode == 2 ? "with the latched render pose of the frame (one head pose a frame)"
+                        : mode == 1 ? "at the instant the frame draws at (the WaitGetPoses latch)" : "one display period ahead (today's behaviour)");
     }
   }
   static EdvrNativeFrameOutput ask(uint32_t version) {

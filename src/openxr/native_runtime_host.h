@@ -69,6 +69,7 @@
 #include "openvr_compositor.h"
 #include "compositor_publication.h"
 #include "pose_cache.h"
+#include "pose_sample_proof.h"   // F42
 #include "poll_ring.h"
 #include "space_pose.h"
 #include "seated_origin.h"
@@ -486,6 +487,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     XrTime displayTime=0;XrDuration period=0;
     float orientation[4]{0,0,0,1};
     double speedDegPerSec=0;
+    bool latchedKnown=false;vr::TrackedDevicePose_t latched{};   // F42: the render pose WaitGetPoses latched for this frame
   } latestPoseFrame;
   // Every place that drops the frame the game holds also drops the pose publication made from it (pose_cache.h).
   // `why` is only the log's category (pose_cache.h PoseInvalidation); every call withdraws the publication.
@@ -992,6 +994,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     latestPoseFrame.speedDegPerSec=latestPoseFrame.speedKnown?angularSpeedDegrees(angularVelocity.x,angularVelocity.y,angularVelocity.z):0.0;
     poseGap.noteWait();
     poseGap.flushIfDue(nowMs,sink);
+    g_headPoseProof.flushIfDue(nowMs,[](const char* line){nativeTracePuts(line);});   // F42: the per-frame pose proof, once a second, to the trace
   }
   // Owner, after a waitPoses published its frame (publishPoseGap has set latestPoseFrame). Locates the two instants an Elite "now" call can
   // be answered at (pose_cache.h) and publishes them under the keys they were made with. A failure to locate or to read the clock leaves no
@@ -1014,9 +1017,16 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     fresh.frameOrientationKnown=latestPoseFrame.orientationKnown;
     for(unsigned i=0;i<4;++i)fresh.frameOrientation[i]=latestPoseFrame.orientation[i];
     fresh.speedKnown=latestPoseFrame.speedKnown;fresh.speedDegPerSec=latestPoseFrame.speedDegPerSec;
-    if(!locatePoseCacheSlot(dispatch,t1,fresh.now)){fail();return;}
+    const bool locked=g_nowPoseMode.load(std::memory_order_relaxed)==kNowPoseRenderLocked;
+    if(!locked&&!locatePoseCacheSlot(dispatch,t1,fresh.now)){fail();return;}
+    if(locked) {
+      // F42: the latched render pose of this frame is the one answer a render_locked display call takes (no locate for it).
+      fresh.frame.valid=latestPoseFrame.latchedKnown;fresh.frame.target=display;fresh.frame.pose=latestPoseFrame.latched;
+      for(unsigned i=0;i<4;++i)fresh.frame.orientation[i]=latestPoseFrame.orientation[i];
+      if(!fresh.frame.valid){fail();return;}
+    }
     // The next frame's answer, one period further on. Optional: without it a call made during the next wait takes the hop.
-    if(nextPredictionTime(t1,period,t2)&&!changes.crosses(t1,t2))locatePoseCacheSlot(dispatch,t2,fresh.next);
+    if(!locked&&nextPredictionTime(t1,period,t2)&&!changes.crosses(t1,t2))locatePoseCacheSlot(dispatch,t2,fresh.next);
     poseCache.publish(fresh,poseCache.clockUs());
   }
   bool locatePoseCacheSlot(const LocatorDispatch& dispatch,XrTime target,PoseCacheSlot& slot) {
@@ -1436,7 +1446,10 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       {boundary.clear();return fail(XR_ERROR_POSE_INVALID);}
     render.time=frame.predictedDisplayTime;game.pose=invalidHeadPose(true);
     XrTime gameplayTime=0;
-    if(nextPredictionTime(frame.predictedDisplayTime,frame.predictedDisplayPeriod,gameplayTime)&&
+    if(g_nowPoseMode.load(std::memory_order_relaxed)==kNowPoseRenderLocked) {
+      // F42: the game's pose is the render pose: one latched sample a frame, as the game array, GetLastPoses and GetLastPoseForTrackedDeviceIndex read it.
+      game=render;
+    } else if(nextPredictionTime(frame.predictedDisplayTime,frame.predictedDisplayPeriod,gameplayTime)&&
        !changes.crosses(frame.predictedDisplayTime,gameplayTime)) {
       r=locateHeadAt(api.locateSpace,view,frameSpace,gameplayTime,true,game);
       // A runtime may not locate an additional frame ahead. Leave that
@@ -1582,7 +1595,12 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     out=snapshot;lastCompositorResult=XR_SUCCESS;
     publishPoseGap(frame.predictedDisplayTime,frame.predictedDisplayPeriod,located.headPose,render.pose.bPoseIsValid,
       velocity.velocityFlags,velocity.angularVelocity,GetTickCount64(),[](const char* gapLine){nativeTracePuts(gapLine);});
-    if(poseCacheOn.load(std::memory_order_acquire))publishPoseCache();
+    // F42: the frame's latched render pose (the render_locked answers), the frame's proof samples, and the publication for render_locked even with the cache off.
+    latestPoseFrame.latchedKnown=render.pose.bPoseIsValid;latestPoseFrame.latched=render.pose;
+    g_headPoseProof.setFrame(frame.sequence);
+    g_headPoseProof.sample(&render.pose.mDeviceToAbsoluteTracking.m[0][0],render.pose.bPoseIsValid,PoseSamplePath::RenderLatch);
+    g_headPoseProof.sample(&game.pose.mDeviceToAbsoluteTracking.m[0][0],game.pose.bPoseIsValid,PoseSamplePath::GameArray);
+    if(poseCacheOn.load(std::memory_order_acquire)||g_nowPoseMode.load(std::memory_order_relaxed)==kNowPoseRenderLocked)publishPoseCache();
     if(timingFrameActive && FAILED(timing.waitEnd(timingSequence,true,static_cast<int64_t>(frame.predictedDisplayPeriod))))
       timingInvalidate();
     if(timingFrameActive) {
@@ -2599,13 +2617,23 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     poseGap.note(sample);
   }
   bool locateHeadFor(uint64_t generation,vr::ETrackingUniverseOrigin origin,float prediction,const HeadCall& call,vr::TrackedDevicePose_t& out) override {
+    t_nowAnsweredLocked=false;
+    // F42 (now_pose render_locked): a display call is answered with the latched render pose of this frame, before the cache and the owner hop.
+    // A call the latch cannot answer falls through unchanged and is counted.
+    if(call.display&&origin==vr::TrackingUniverseSeated&&g_nowPoseMode.load(std::memory_order_relaxed)==kNowPoseRenderLocked) {
+      PoseCacheAnswer latched;PoseCacheMiss latchWhy=PoseCacheMiss::Unpublished;
+      if(poseCache.answerFrame(generation,poses.read().originGeneration,latched,latchWhy)) {
+        t_nowAnsweredLocked=true;out=latched.pose;return true;
+      }
+      g_headPoseProof.noteFallback();
+    }
     // A display call under a live publication is answered from it, on this thread, with no owner hop (pose_cache.h). Any other call, and any
     // this cannot answer, takes the hop below unchanged. Not on the owner: the hop re-enters here on the owner thread, and that second
     // pass must locate, not answer from the publication it was sent to replace.
     if(call.display&&origin==vr::TrackingUniverseSeated&&poseCacheOn.load(std::memory_order_acquire)&&!service.isOwner()) {
       PoseCacheAnswer answer;PoseCacheMiss why=PoseCacheMiss::Unpublished;
       // F40: with now_pose render the cache's display slots (one period ahead) are not used: every display call takes the owner path.
-      if(!g_nowPoseRender.load(std::memory_order_relaxed)&&poseCache.answer(generation,poses.read().originGeneration,call.rva,answer,why)) {
+      if(g_nowPoseMode.load(std::memory_order_relaxed)==kNowPoseNext&&poseCache.answer(generation,poses.read().originGeneration,call.rva,answer,why)) {
         PoseGapStats::Sample sample{};sample.thread=call.thread;sample.rva=call.rva;sample.predictionSec=prediction;sample.located=true;
         sample.gapKnown=true;sample.gapMs=double(answer.target-answer.display)/1e6;
         if(answer.pose.bPoseIsValid&&answer.frameOrientationKnown){
@@ -2631,7 +2659,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   bool poseTargetFor(bool display,XrTime now,XrTime& target) {
     if(!display||!latestPoseFrame.valid)return false;
     // F40 (live now_pose = render): the instant the frame draws at, the WaitGetPoses latch's own time, not one period on.
-    if(g_nowPoseRender.load(std::memory_order_relaxed))
+    if(g_nowPoseMode.load(std::memory_order_relaxed)!=kNowPoseNext)
       return answerTime(latestPoseFrame.displayTime,latestPoseFrame.period,now,
         [](int64_t shown,int64_t,int64_t& out){out=shown;return true;},
         [&](int64_t from,int64_t to){return changes.crosses(from,to);},&target);

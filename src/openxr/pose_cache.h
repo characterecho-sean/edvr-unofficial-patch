@@ -125,6 +125,7 @@ struct PoseCacheRecord {
   XrTime nowAtPublish = 0; // the runtime's now at the publish, and the cache clock's reading then (microseconds)
   uint64_t publishedUs = 0;
   PoseCacheSlot now;       // display + 1 period: the hop's answer for a call made between waits
+  PoseCacheSlot frame;     // F42: the latched render pose of this frame (target = its display time), for render_locked
   PoseCacheSlot next;      // display + 2 periods: the hop's answer for a call made during the next wait, if that display is one period on
 };
 
@@ -196,6 +197,29 @@ class PoseCache final {
     return true;
   }
 
+  // F42 (render_locked). True when the latched render pose of the published frame answers a display call: the keys match, the display time is
+  // still fresh, and the frame slot is valid. Otherwise `why` says what sends the call on (the caller falls through and counts it).
+  bool answerFrame(uint64_t geometry, uint64_t origin, PoseCacheAnswer& out, PoseCacheMiss& why) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const uint64_t nowUs = clock_();
+    why = PoseCacheMiss::Unpublished;
+    if (!rec_.valid) return false;
+    if (!(rec_.keys == PoseCacheKeys{geometry, origin})) { why = PoseCacheMiss::Keys; return false; }
+    const uint64_t elapsedUs = nowUs >= rec_.publishedUs ? nowUs - rec_.publishedUs : 0;
+    const XrTime nowAt = rec_.nowAtPublish + XrTime(elapsedUs) * 1000;
+    if (!displayTimeFresh(rec_.display, rec_.period, nowAt)) { why = PoseCacheMiss::Stale; return false; }
+    if (!rec_.frame.valid) { why = PoseCacheMiss::Slot; return false; }
+    out = PoseCacheAnswer{};
+    out.pose = rec_.frame.pose;
+    out.target = rec_.frame.target;
+    out.display = rec_.display;
+    out.frameOrientationKnown = rec_.frameOrientationKnown;
+    for (unsigned i = 0; i < 4; ++i) {
+      out.frameOrientation[i] = rec_.frameOrientation[i];
+      out.returnedOrientation[i] = rec_.frame.orientation[i];
+    }
+    return true;
+  }
   // Owner, waitPoses entry: a call made from now until the next publish is answered from `next`.
   void beginWait() {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -224,7 +248,7 @@ class PoseCache final {
       push(angleDeg_, quaternionAngleDegrees(rec_.next.orientation, fresh.now.orientation));
     }
     rec_ = fresh;
-    rec_.valid = fresh.now.valid;
+    rec_.valid = fresh.now.valid || fresh.frame.valid;
     rec_.waiting = false;
     rec_.publishedUs = publishedUs;
     ++publishes_;

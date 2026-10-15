@@ -582,13 +582,13 @@ int wmain(int argc, wchar_t** argv) {
     check(table.beginFrame(table.context, &steppedFrame, &steppedOut) == S_OK && steppedOut.deferredPacing == 0,
           "F36: weapon stability steps aside while native on foot is active (no deferred pacing)");
     // F40: the now-pose flag rides version 9 output. Asked as 9, the provider answers 9 with the flag set by nativeFrameSetNowPoseRender.
-    edvr::nativeFrameSetNowPoseRender(true);
+    edvr::nativeFrameSetNowPose(1u);
     EdvrNativeFrameOutput v9Render{sizeof(v9Render), EDVR_NATIVE_FRAME_VERSION_9};
     EdvrNativeFrameInput v9RenderFrame = input(41, 7, 25);
     check(table.beginFrame(table.context, &v9RenderFrame, &v9Render) == S_OK && v9Render.version == EDVR_NATIVE_FRAME_VERSION_9 &&
               v9Render.nowPoseRender == 1,
           "F40: a version 9 answer carries the now-pose flag (render)");
-    edvr::nativeFrameSetNowPoseRender(false);
+    edvr::nativeFrameSetNowPose(0u);
     EdvrNativeFrameOutput v9Next{sizeof(v9Next), EDVR_NATIVE_FRAME_VERSION_9};
     EdvrNativeFrameInput v9NextFrame = input(41, 7, 26);
     check(table.beginFrame(table.context, &v9NextFrame, &v9Next) == S_OK && v9Next.version == EDVR_NATIVE_FRAME_VERSION_9 &&

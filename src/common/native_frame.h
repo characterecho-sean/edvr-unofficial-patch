@@ -143,7 +143,8 @@ struct EdvrNativeFrameOutput {
     // zero when the feature is off. eyeAlignSerial moves each time the provider takes a new value.
     float eyeAlign[3];
     uint32_t eyeAlignSerial;
-    // Version 9 (F40): 1 answers Elite's "now" pose request at the instant the frame draws at (the WaitGetPoses latch), 0 one display period ahead.
+    // Version 9 (F40, F42): the now-pose mode. 0 one display period ahead (next), 1 at the instant the frame draws at (render), 2 the latched
+    // render pose of the frame itself (render_locked).
     uint32_t nowPoseRender;
 };
 
@@ -226,7 +227,7 @@ void nativeFrameSetLookYaw(float total, uint32_t gameFrame, uint32_t resetSerial
 // F33 (body align): the seated-space translation (metres) the next version 8 beginFrame hands the runtime, and a serial that moves each time the
 // frame thread takes a new value. Set by the d3d11 frame thread; read under the provider's lock by beginFrame.
 void nativeFrameSetEyeAlign(const float offsetSeated[3], uint32_t serial);
-void nativeFrameSetNowPoseRender(bool render);   // F40: the live now-pose choice, carried in version 9 output
+void nativeFrameSetNowPose(uint32_t mode);   // F40/F42: the live now-pose mode (0 next, 1 render, 2 render_locked), carried in version 9 output
 // F31: the latest frame's render head and "now" head (false until a beginFrame has been received). Read on the game thread.
 bool nativeFrameNowPose(EdvrNativeNowPose& out);
 
