@@ -207,6 +207,10 @@ inline std::atomic<bool> g_nativeOnFootMarkerFixKey{false};
 inline bool nativeOnFootMarkerFixLive() {
     return g_nativeOnFootMarkerFixKey.load(std::memory_order_relaxed) && nativeOnFootMarkerProbeLive();
 }
+// F52 (TEMPORARY, fix.native_on_foot_marker_ref = world_first | temporal, default temporal, live): the view the correction measures each eye
+// against (drawtag::RefMode). temporal is used while the temporal pass has the eye's camera rows, world_first otherwise; a change of the
+// reference in use resets the eye's baselines. Set by readKey; read by the render thread.
+inline std::atomic<int> g_nativeOnFootMarkerRefKey{1};
 bool nativeOnFootMarkerFixBegin(ID3D11DeviceContext* ctx);
 void nativeOnFootMarkerFixEnd(ID3D11DeviceContext* ctx);
 

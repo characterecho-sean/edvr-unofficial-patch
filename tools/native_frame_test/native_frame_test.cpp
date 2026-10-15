@@ -599,6 +599,103 @@ int wmain(int argc, wchar_t** argv) {
                       v2[1] == 0.2,
                   "F50: the vertical lock drops the component along the body's up axis (normalised) and leaves a degenerate axis alone");
         }
+        // F52: the per-key tag round trip (every 8-bit key at one frame: a distinct sentinel and cell, the key and frame back, the low bits
+        // through encode and decode), the reference selection's default, the bookkeeping counts, and the key table's reclaim.
+        {
+            bool roundTrip = true, cellsDistinct = true;
+            bool seenC[256] = {};
+            uint32_t sents[256];
+            for (uint32_t key = 0; key < 256; ++key) {
+                const uint32_t sk = dt::sentinel(key, 1234u);
+                sents[key] = sk;
+                float tv[3] = {12.5f, -3.25f, 101.0f};
+                roundTrip = roundTrip && dt::sentinelKey(sk) == key && dt::sentinelFrame(sk) == 1234u && dt::encode(tv, sk) && dt::decode(tv) == sk;
+                const uint32_t c = dt::tagCellOf(key);
+                cellsDistinct = cellsDistinct && c < dt::kTagCells && !seenC[c];
+                seenC[c] = true;
+            }
+            bool sentDistinct = true;
+            for (uint32_t a = 0; a < 256 && sentDistinct; ++a)
+                for (uint32_t b = a + 1; b < 256 && sentDistinct; ++b) sentDistinct = sents[a] != sents[b];
+            check(roundTrip && cellsDistinct && sentDistinct,
+                  "F52: every tag key has its own sentinel and its own cell, and the key, frame and low bits come back");
+            check(dt::parseRefMode(nullptr) == dt::kRefTemporal && dt::parseRefMode("temporal") == dt::kRefTemporal &&
+                      dt::parseRefMode("world_first") == dt::kRefWorldFirst && dt::parseRefMode("off") == dt::kRefTemporal &&
+                      dt::chooseReference(dt::kRefTemporal, true) == dt::kRefTemporal &&
+                      dt::chooseReference(dt::kRefTemporal, false) == dt::kRefWorldFirst &&
+                      dt::chooseReference(dt::kRefWorldFirst, true) == dt::kRefWorldFirst,
+                  "F52: the reference defaults to temporal while the temporal rows are there, else world_first; world_first is always world_first");
+            dt::B10bTally t;
+            t.note(true, true);
+            t.note(true, true);
+            t.note(true, false);
+            t.note(true, false);
+            t.note(true, false);
+            t.note(false, false);
+            t.note(false, true);   // not copied: never tagged, whatever the match says
+            check(t.draws == 7 && t.tagged == 2 && t.untagged() == 3 && t.notCopied == 2,
+                  "F52: the marker composite bookkeeping counts tagged, NOT tagged and not copied draws");
+            dt::KeyIndex<3> idx;
+            bool f1 = false, f2 = false, f3 = false, f4 = false, f5 = false;
+            const int s43 = idx.acquire(43, 10, &f1), s44 = idx.acquire(44, 11, &f2), s45 = idx.acquire(45, 12, &f3);
+            const int again = idx.acquire(43, 20, &f4);   // 43 seen again: 44 is now the oldest
+            const int s46 = idx.acquire(46, 21, &f5);
+            check(f1 && f2 && f3 && !f4 && again == s43 && f5 && s46 == s44 && idx.find(44) < 0 && idx.find(45) == s45 && idx.find(46) == s46,
+                  "F52: the key table finds a key's slot, and a new key reclaims the slot seen longest ago");
+        }
+        // F52: the reference's geometry. The world rows above (forward +z, eye at o) give the basis right x, up y, forward z; a camera turned
+        // 2 degrees about up (its rows view->world with z back) gives forward = minus column 2, the bases 2 degrees apart; the world rows
+        // with the camera's rotation put a point straight down the camera's forward at the rows' own x offset (0.1) and keep any eye; with
+        // the world's own basis they come back unchanged.
+        {
+            const double th = 2.0 * 3.14159265358979323846 / 180.0;
+            double rA[3], uA[3], fA[3];
+            const bool okA = dt::worldBasis(wr, rA, uA, fA);
+            const double rB[3] = {std::cos(th), 0.0, -std::sin(th)}, uB[3] = {0.0, 1.0, 0.0}, fB[3] = {std::sin(th), 0.0, std::cos(th)};
+            float cam[12] = {};
+            for (int r = 0; r < 3; ++r) {
+                cam[4 * r + 0] = static_cast<float>(rB[r]);
+                cam[4 * r + 1] = static_cast<float>(uB[r]);
+                cam[4 * r + 2] = static_cast<float>(-fB[r]);
+                cam[4 * r + 3] = 5.0f;
+            }
+            double rC[3], uC[3], fC[3];
+            int sign = 0;
+            const bool okC = dt::cameraBasis(cam, fA, rC, uC, fC, &sign);
+            const dt::BasisDiff d = dt::basisDiff(rA, uA, fA, rC, uC, fC);
+            check(okA && std::fabs(rA[0] - 1.0) < 1e-9 && std::fabs(uA[1] - 1.0) < 1e-9 && std::fabs(fA[2] - 1.0) < 1e-9 && okC && sign == -1 &&
+                      std::fabs(fC[0] - fB[0]) < 1e-6 && d.sameHand && std::fabs(d.total - 2.0) < 1e-3 && std::fabs(d.right - 2.0) < 1e-3 &&
+                      d.up < 1e-3 && std::fabs(d.fwd - 2.0) < 1e-3,
+                  "F52: the world rows' and the camera rows' bases, the camera's forward sign, and the angle between them");
+            float sameRows[16], turned[16];
+            const bool okSame = dt::swapRotation(wr, rA, uA, fA, rA, uA, fA, sameRows);
+            bool unchanged = okSame;
+            for (int i = 0; i < 16; ++i) unchanged = unchanged && std::fabs(sameRows[i] - wr[i]) < 1e-6;
+            const bool okTurned = dt::swapRotation(wr, rA, uA, fA, rC, uC, fC, turned);
+            const double ahead[3] = {wo[0] + fB[0], wo[1] + fB[1], wo[2] + fB[2]};
+            double ca[4], cw[4];
+            dt::worldClip(turned, ahead, wo, ca);
+            dt::worldClip(wr, ahead, wo, cw);
+            const double shift = cw[0] / cw[3] - ca[0] / ca[3];
+            // An eye off o: t_k = -v . c_k for x, y and w (v = (0.5, -0.25, 2)), clip z there 1.025; the turned rows keep both.
+            float we[16];
+            std::memcpy(we, wr, sizeof(we));
+            we[12] = -0.8f;
+            we[13] = 0.375f;
+            we[14] = 0.025f;
+            we[15] = -2.0f;
+            float te[16];
+            const bool okEye = dt::swapRotation(we, rA, uA, fA, rC, uC, fC, te);
+            const double eyeP[3] = {wo[0] + 0.5, wo[1] - 0.25, wo[2] + 2.0};
+            double ce[4], co[4];
+            dt::worldClip(te, eyeP, wo, ce);
+            dt::worldClip(we, eyeP, wo, co);
+            check(unchanged && okTurned && std::fabs(ca[0] / ca[3] - 0.1) < 1e-5 && std::fabs(ca[1] / ca[3] + 0.05) < 1e-5 &&
+                      std::fabs(shift - 1.2 * std::tan(th)) < 1e-5 && okEye && std::fabs(co[0]) < 1e-5 && std::fabs(co[1]) < 1e-5 &&
+                      std::fabs(co[3]) < 1e-5 && std::fabs(ce[0]) < 1e-5 && std::fabs(ce[1]) < 1e-5 && std::fabs(ce[3]) < 1e-5 &&
+                      std::fabs(ce[2] - 1.025) < 1e-5,
+                  "F52: the world rows with the camera's rotation: unchanged under their own basis, the camera's forward at the rows' offset, the eye kept");
+        }
     }
 
     // F40 (pure math): the view map. seated = D . Ry(psi) . body; the head in body axes is Ry(psi)^-1 . diag(1,1,-1) . tS; psi is the seated head

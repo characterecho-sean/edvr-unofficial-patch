@@ -5587,6 +5587,16 @@ bool temporalPassChosenRows(float rows[12], bool* bound) {
     return true;
 }
 
+bool temporalPassEyeRows(int eye, float rows[12], const void** resource, uint64_t* vsHash) {
+    if (!detail::g_temporalPassWantedFssChrome || eye < 0 || eye > 1 || !rows) return false;
+    const RigidDrawRows& r = g_rigidDraw[eye];
+    if (!r.seen || !r.valid || r.frame != g_rowsFrame) return false;
+    memcpy(rows, r.rows, sizeof(r.rows));
+    if (resource) *resource = r.resource;
+    if (vsHash) *vsHash = r.vsHash;
+    return true;
+}
+
 bool temporalPassTotals(uint32_t* treated, double* avgMs, double* maxMs,
                         double* rejectPct, double* clipPct) {
     if (g_treats == 0) return false;

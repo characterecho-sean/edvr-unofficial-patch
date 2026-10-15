@@ -404,6 +404,166 @@ struct LagBaseline {
     bool ready(double W, double H, double maxStdPx) const noexcept { return seeded && stdPx(W, H) < maxStdPx; }
 };
 
+// F52: THE TAG CELLS. One cell per 8-bit tag key (a key's first post of a frame in key & 0xFF; a second post's key carries bit 7), so two
+// keys never share a cell (F47's 32 cells put keys 16 apart in one cell, and the later post overwrote the earlier before it was read).
+constexpr uint32_t kTagCells = 256;
+inline uint32_t tagCellOf(uint32_t key) noexcept { return key & (kTagCells - 1u); }
+
+// F52: THE REFERENCE. Which eye view the marker correction measures against: world_first (F46: b1 rows 270..273 of the eye's first world pool
+// draw) or temporal (the temporal pass's camera rows for the eye, at the world rows' projection and eye: swapRotation). The key's value
+// "world_first" asks for world_first; anything else (the default, "temporal") asks for temporal, which is used while the temporal pass has
+// given the eye's rows recently and world_first otherwise.
+enum RefMode : int { kRefWorldFirst = 0, kRefTemporal = 1 };
+inline int parseRefMode(const char* value) noexcept {
+    return value && std::strcmp(value, "world_first") == 0 ? kRefWorldFirst : kRefTemporal;
+}
+inline int chooseReference(int asked, bool temporalRecent) noexcept {
+    return asked == kRefTemporal && temporalRecent ? kRefTemporal : kRefWorldFirst;
+}
+
+// F52: THE VIEW BASES. World rows' basis: forward = c_w normalised; right = c_x less its forward part, normalised; up = c_y less its forward
+// and right parts, normalised (c_k the 3-vector (rows[k], rows[4 + k], rows[8 + k])). False when a column is degenerate.
+inline bool worldBasis(const float rows[16], double right[3], double up[3], double fwd[3]) noexcept {
+    double cx[3], cy[3], cw[3];
+    for (int i = 0; i < 3; ++i) {
+        cx[i] = rows[4 * i + 0];
+        cy[i] = rows[4 * i + 1];
+        cw[i] = rows[4 * i + 3];
+    }
+    const double lw = length3(cw);
+    if (!(lw > 1e-12)) return false;
+    for (int i = 0; i < 3; ++i) fwd[i] = cw[i] / lw;
+    const double xf = cx[0] * fwd[0] + cx[1] * fwd[1] + cx[2] * fwd[2];
+    for (int i = 0; i < 3; ++i) right[i] = cx[i] - xf * fwd[i];
+    const double lr = length3(right);
+    if (!(lr > 1e-12)) return false;
+    for (int i = 0; i < 3; ++i) right[i] /= lr;
+    const double yf = cy[0] * fwd[0] + cy[1] * fwd[1] + cy[2] * fwd[2], yr = cy[0] * right[0] + cy[1] * right[1] + cy[2] * right[2];
+    for (int i = 0; i < 3; ++i) up[i] = cy[i] - yf * fwd[i] - yr * right[i];
+    const double lu = length3(up);
+    if (!(lu > 1e-12)) return false;
+    for (int i = 0; i < 3; ++i) up[i] /= lu;
+    return true;
+}
+// The temporal pass's camera rows (view->world [R | c], cam[4r + c]) as a basis: right = R column 0, up = column 1, forward = s . column 2,
+// s = +1 or -1 whichever lies nearer fwdRef (the view's z convention is not assumed). False when a column is degenerate.
+inline bool cameraBasis(const float cam[12], const double fwdRef[3], double right[3], double up[3], double fwd[3], int* sign) noexcept {
+    double* out[3] = {right, up, fwd};
+    for (int c = 0; c < 3; ++c) {
+        for (int r = 0; r < 3; ++r) out[c][r] = cam[4 * r + c];
+        const double l = length3(out[c]);
+        if (!(l > 1e-12)) return false;
+        for (int r = 0; r < 3; ++r) out[c][r] /= l;
+    }
+    const double d = fwd[0] * fwdRef[0] + fwd[1] * fwdRef[1] + fwd[2] * fwdRef[2];
+    *sign = d < 0.0 ? -1 : 1;
+    if (d < 0.0)
+        for (int r = 0; r < 3; ++r) fwd[r] = -fwd[r];
+    return true;
+}
+inline double det3(const double a[3], const double b[3], const double c[3]) noexcept {
+    return a[0] * (b[1] * c[2] - b[2] * c[1]) - a[1] * (b[0] * c[2] - b[2] * c[0]) + a[2] * (b[0] * c[1] - b[1] * c[0]);
+}
+// Two bases against each other: each axis's angle (deg), and the rotation angle between them when both have the same handedness (else -1).
+struct BasisDiff {
+    double total = -1.0, right = -1.0, up = -1.0, fwd = -1.0;
+    bool sameHand = false;
+};
+inline BasisDiff basisDiff(const double rA[3], const double uA[3], const double fA[3], const double rB[3], const double uB[3],
+                           const double fB[3]) noexcept {
+    BasisDiff d;
+    d.right = angleDeg(rA, rB);
+    d.up = angleDeg(uA, uB);
+    d.fwd = angleDeg(fA, fB);
+    d.sameHand = (det3(rA, uA, fA) > 0.0) == (det3(rB, uB, fB) > 0.0);
+    if (d.sameHand) {
+        const double tr = rA[0] * rB[0] + rA[1] * rB[1] + rA[2] * rB[2] + uA[0] * uB[0] + uA[1] * uB[1] + uA[2] * uB[2] + fA[0] * fB[0] +
+                          fA[1] * fB[1] + fA[2] * fB[2];
+        double c = (tr - 1.0) * 0.5;
+        if (c > 1.0) c = 1.0;
+        if (c < -1.0) c = -1.0;
+        d.total = std::acos(c) * 180.0 / 3.14159265358979323846;
+    }
+    return d;
+}
+// F52: world rows with their rotation replaced: every column c_k (k = x, y, z, w) keeps its components along the world basis (A) but takes
+// them along basis B; the eye (where clip x, y and w vanish, relative to o) stays where it was, and clip z there keeps its value. With B = A
+// the rows come back unchanged. False when the eye cannot be solved (the x, y, w columns are not independent).
+inline bool swapRotation(const float world[16], const double rA[3], const double uA[3], const double fA[3], const double rB[3], const double uB[3],
+                         const double fB[3], float out[16]) noexcept {
+    double col[4][3], t[4];
+    for (int k = 0; k < 4; ++k) {
+        for (int i = 0; i < 3; ++i) col[k][i] = world[4 * i + k];
+        t[k] = world[12 + k];
+    }
+    // The eye v: v . c_x = -t_x, v . c_y = -t_y, v . c_w = -t_w (Cramer, the columns as the system's rows).
+    const double* M[3] = {col[0], col[1], col[3]};
+    const double rhs[3] = {-t[0], -t[1], -t[3]};
+    const double D = det3(M[0], M[1], M[2]);
+    if (!(std::fabs(D) > 1e-18)) return false;
+    double v[3];
+    for (int j = 0; j < 3; ++j) {
+        double m[3][3];
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c) m[r][c] = c == j ? rhs[r] : M[r][c];
+        v[j] = det3(m[0], m[1], m[2]) / D;
+    }
+    for (int k = 0; k < 4; ++k) {
+        const double a = col[k][0] * rA[0] + col[k][1] * rA[1] + col[k][2] * rA[2];
+        const double b = col[k][0] * uA[0] + col[k][1] * uA[1] + col[k][2] * uA[2];
+        const double c = col[k][0] * fA[0] + col[k][1] * fA[1] + col[k][2] * fA[2];
+        double n[3];
+        for (int i = 0; i < 3; ++i) n[i] = a * rB[i] + b * uB[i] + c * fB[i];
+        const double vOld = v[0] * col[k][0] + v[1] * col[k][1] + v[2] * col[k][2], vNew = v[0] * n[0] + v[1] * n[1] + v[2] * n[2];
+        for (int i = 0; i < 3; ++i) out[4 * i + k] = static_cast<float>(n[i]);
+        out[12 + k] = static_cast<float>(t[k] + vOld - vNew);
+    }
+    return true;
+}
+
+// F52: THE KEY TABLE. N slots, each named by a tag key: find, or acquire (an unused slot, else the one seen longest ago; *fresh says the slot
+// was (re)claimed and its state must be reset by the caller).
+template <uint32_t N>
+struct KeyIndex {
+    uint32_t key[N] = {}, last[N] = {};
+    bool used[N] = {};
+    int find(uint32_t k) const noexcept {
+        for (uint32_t i = 0; i < N; ++i)
+            if (used[i] && key[i] == k) return static_cast<int>(i);
+        return -1;
+    }
+    int acquire(uint32_t k, uint32_t frame, bool* fresh) noexcept {
+        *fresh = false;
+        int i = find(k);
+        if (i < 0) {
+            for (uint32_t j = 0; j < N && i < 0; ++j)
+                if (!used[j]) i = static_cast<int>(j);
+            if (i < 0) {
+                i = 0;
+                for (uint32_t j = 1; j < N; ++j)
+                    if (frame - last[j] > frame - last[i]) i = static_cast<int>(j);
+            }
+            used[i] = true;
+            key[i] = k;
+            *fresh = true;
+        }
+        last[i] = frame;
+        return i;
+    }
+};
+
+// F52: THE BOOKKEEPING. An eye's marker composite draws at read-back: tagged (read a found record by x), read but untagged (its stream read,
+// no record of a find), and not copied (its stream was not staged: unknown).
+struct B10bTally {
+    uint64_t draws = 0, tagged = 0, notCopied = 0;
+    void note(bool streamRead, bool matchedByX) noexcept {
+        ++draws;
+        if (!streamRead) ++notCopied;
+        else if (matchedByX) ++tagged;
+    }
+    uint64_t untagged() const noexcept { return draws - tagged - notCopied; }
+};
+
 }  // namespace drawtag
 }  // namespace edvr
 

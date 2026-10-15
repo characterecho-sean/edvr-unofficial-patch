@@ -107,6 +107,11 @@ void temporalPassFrameBoundary();
 // the pass is not wanted, or the frame has not treated yet (the choice is made at the first treat) or chose none; `rows` is then untouched. `bound` says the chosen
 // write was the block bound at the scene's first draw. Valid at any boundary that runs before temporalPassFrameBoundary (the census's does); render thread.
 bool temporalPassChosenRows(float rows[12], bool* bound);
+// F52 (TEMPORARY, the native on-foot marker arc; docs\design-native-onfoot-vr-2026-10-13.md): this eye's camera rows as the pass's provenance
+// latched them in its current frame (temporalPassNoteRigidDraw: the scene block's view rows, float 932, view->world [R | c], three float4 rows,
+// in the VS b1 of the eye's first recognised scene draw). False when the pass is not wanted, or the eye has no such draw with valid rows this
+// frame; `resource` (identity only) is that b1, `vsHash` that draw's vertex shader. Side-effect free; render thread.
+bool temporalPassEyeRows(int eye, float rows[12], const void** resource, uint64_t* vsHash);
 
 // hotkey.dump_eyes, and the settings menu's "Dump both eyes as seen": the
 // sixteen paired raw/treated left-eye crops, a whole treated overview,
