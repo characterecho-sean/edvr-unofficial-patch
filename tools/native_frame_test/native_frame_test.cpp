@@ -534,6 +534,29 @@ int wmain(int argc, wchar_t** argv) {
         dt::markerClip(r4, r5, r7, wp, wo, mc);
         check(same && std::fabs(mc[0] / mc[2] - (np[0] + 0.01)) < 1e-6 && std::fabs(mc[1] / mc[2] - (np[1] - 0.02)) < 1e-6,
               "F46: the marker composite's rows 4, 5, 7 give the NDC the world rows give, and F47's offset rows move it by (dx, dy)");
+        // F47: the delta of the same P through both views. The marker rows above sit (+0.01, -0.02) off the world's, so the delta is (-0.01,
+        // +0.02); the offset rows built from it bring the delta to zero; a delta past the gate, or P behind either view, is refused.
+        {
+            double ddx = 0.0, ddy = 0.0;
+            const int why = dt::ndcDelta(wr, wo, r4, r5, r7, wo, wp, 0.1, &ddx, &ddy);
+            float q4[4], q5[4];
+            std::memcpy(q4, r4, sizeof(q4));
+            std::memcpy(q5, r5, sizeof(q5));
+            dt::ndcOffsetRows(q4, q5, r7, ddx, ddy);
+            double zx = 1.0, zy = 1.0;
+            const int whyZero = dt::ndcDelta(wr, wo, q4, q5, r7, wo, wp, 0.1, &zx, &zy);
+            double gx = 0.0, gy = 0.0;
+            const int whyGate = dt::ndcDelta(wr, wo, r4, r5, r7, wo, wp, 0.005, &gx, &gy);
+            const double behind[3] = {10.0, 2.0, 1.0};   // o + (0, 0, -1): behind both views
+            double bx = 0.0, by = 0.0;
+            const int whyBehind = dt::ndcDelta(wr, wo, r4, r5, r7, wo, behind, 0.1, &bx, &by);
+            const float r7neg[4] = {0, 0, -1.0f, 0};
+            const int whyMarker = dt::ndcDelta(wr, wo, r4, r5, r7neg, wo, wp, 0.1, &bx, &by);
+            check(why == dt::kDeltaOk && std::fabs(ddx + 0.01) < 1e-6 && std::fabs(ddy - 0.02) < 1e-6 && whyZero == dt::kDeltaOk &&
+                      std::fabs(zx) < 1e-6 && std::fabs(zy) < 1e-6 && whyGate == dt::kDeltaGate && whyBehind == dt::kDeltaWorldBehind &&
+                      whyMarker == dt::kDeltaMarkerBehind,
+                  "F47: the delta of the same P through the world and marker rows, zero after the offset rows, and its gate");
+        }
     }
 
     // F40 (pure math): the view map. seated = D . Ry(psi) . body; the head in body axes is Ry(psi)^-1 . diag(1,1,-1) . tS; psi is the seated head

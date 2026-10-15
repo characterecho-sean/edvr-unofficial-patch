@@ -565,11 +565,19 @@ void readKey() {
     }
     // F44 (TEMPORARY instrument, live): the marker probe, off by default. Measure only (native_on_foot.h; draw_record_tag.h).
     {
-        const bool probe = runtimeVrProfile() && cfg.getString("fix.native_on_foot_marker_probe", "off") == "on";
+        // F47 (TEMPORARY, live): the marker composite's per-eye NDC correction, off by default; on turns the probe's machinery on with it
+        // (the correction needs its tags, finds and read-backs).
+        const bool fix = runtimeVrProfile() && cfg.getString("fix.native_on_foot_marker_fix", "off") == "on";
+        const bool probe = runtimeVrProfile() && (cfg.getString("fix.native_on_foot_marker_probe", "off") == "on" || fix);
         if (first || probe != g_nativeOnFootMarkerProbeKey.load(std::memory_order_relaxed))
-            Log::get().note("native on foot marker probe (F44/F46, TEMPORARY): %s", probe ? "on -- world markers are tagged in t' (low mantissa "
+            Log::get().note("native on foot marker probe (F44/F46/F47, TEMPORARY): %s%s", probe ? "on -- world markers are tagged in t' (low mantissa "
                             "bits), found in the HUD's t33 pool and matched to the marker composite draw (VS B10B032BDFD46700); per eye (the UI "
-                            "layer's), its NDC against P through the eye's world rows (b1 270..273); 1 s lines while on foot; measure only" : "off");
+                            "layer's), its NDC against P through the eye's world rows (b1 270..273); 1 s lines while on foot; measure only" : "off",
+                            probe && fix ? " (on because fix.native_on_foot_marker_fix is on)" : "");
+        if (first || fix != g_nativeOnFootMarkerFixKey.load(std::memory_order_relaxed))
+            Log::get().note("native on foot marker fix (F47, TEMPORARY): %s", fix ? "on -- the marker composite's b0 rows 4 and 5 are moved by "
+                            "(dx, dy) . row 7 on a private copy, per eye, when both eyes' marker draws are matched; 1 s lines while on foot" : "off");
+        g_nativeOnFootMarkerFixKey.store(fix, std::memory_order_relaxed);
         g_nativeOnFootMarkerProbeKey.store(probe, std::memory_order_relaxed);
     }
     // F33 (TEMPORARY, live): the body align and its trims (cm, clamped to +-30).
@@ -2804,17 +2812,26 @@ struct F44TagCell {
     std::atomic<uint32_t> sentinel, key, frame, pOk;
     std::atomic<uint32_t> tp[3], p[3];   // float bits
 };
-constexpr size_t kF44Cells = 16;
+// F47: 32 cells: a key's first post of a frame in cells 0..15 (key mod 16), a second post (its key carries bit 7) in cells 16..31, so the
+// second does not overwrite the first before the render thread reads it.
+constexpr size_t kF44Cells = 32;
 F44TagCell g_f44Cells[kF44Cells];        // zero-initialised (static storage)
 std::atomic<uint32_t> g_f44Frame{0};
 std::atomic<uint64_t> g_f44Tagged{0}, g_f44Untaggable{0}, g_f44CellBusy{0};
+// F47: the post stub's calls per key and frame (game thread): the last frame (+1) each key (mod 128) was posted in, and the second posts.
+constexpr uint32_t kF47SecondPostBit = 0x80u;
+std::atomic<uint32_t> g_f47PostFrame[128];   // zero-initialised (static storage)
+std::atomic<uint64_t> g_f47SecondPosts{0};
 struct F44Tag {
     uint32_t sentinel = 0, key = 0, frame = 0;
     float tp[3] = {}, p[3] = {};
     bool pOk = false;
 };
+size_t f44CellOf(uint32_t key) noexcept {
+    return (key & 0x0Fu) | ((key & kF47SecondPostBit) ? 0x10u : 0u);
+}
 void f44Publish(const F44Tag& t) noexcept {
-    F44TagCell& c = g_f44Cells[t.key % kF44Cells];
+    F44TagCell& c = g_f44Cells[f44CellOf(t.key)];
     uint32_t s = c.seq.load(std::memory_order_relaxed);
     if ((s & 1u) || !c.seq.compare_exchange_strong(s, s + 1, std::memory_order_acq_rel)) {
         g_f44CellBusy.fetch_add(1, std::memory_order_relaxed);
@@ -3027,9 +3044,14 @@ void __fastcall reticleWorldPost(void* node) noexcept {
     float tw[3] = {tp[0], tp[1], tp[2]};
     bool f44Tagged = false;
     if (g_nativeOnFootMarkerProbeKey.load(std::memory_order_relaxed)) {
-        f44.key = key;
         f44.frame = g_f44Frame.load(std::memory_order_relaxed) & 0xFFFFu;
-        f44.sentinel = drawtag::sentinel(key, f44.frame);
+        // F47: a second (or later) post of the same key in one frame gets its own low-bit magic (the key with bit 7 set), so a second marker
+        // record, if the game makes one, is told apart from the first in the pool and in the log.
+        const uint32_t was = g_f47PostFrame[key & 0x7Fu].exchange(f44.frame + 1u, std::memory_order_relaxed);
+        const bool second = was == f44.frame + 1u;
+        if (second) g_f47SecondPosts.fetch_add(1, std::memory_order_relaxed);
+        f44.key = second ? ((key & 0x7Fu) | kF47SecondPostBit) : key;
+        f44.sentinel = drawtag::sentinel(f44.key, f44.frame);
         f44Tagged = drawtag::encode(tw, f44.sentinel);
         if (!f44Tagged) g_f44Untaggable.fetch_add(1, std::memory_order_relaxed);
     }
@@ -6785,6 +6807,14 @@ constexpr uint32_t kTargets = 8;                              // the frame's wor
 constexpr uint32_t kWorldTriesPerEye = 8;                     // world draws a frame that may try an eye's copy
 constexpr uint32_t kSrvCache = 8;
 constexpr double kDefaultTargetSize = 2016.0;                 // the marker target's size when its view did not resolve
+// F47: the correction and its instruments.
+constexpr uint32_t kMatchFresh = 8;      // frames a read-back's match stays an eye's prediction (read-backs land 2..3 frames late)
+constexpr double kGateNdc = 0.1;         // |dx|, |dy| must be under this (NDC)
+constexpr uint32_t kCbShadows = 4;       // marker composite b0 buffers shadowed on the CPU
+constexpr UINT kCb0ShadowBytes = 128;    // b0 rows 0..7
+constexpr uint32_t kBurstFrames = 8;     // per-frame marker composite lines: the first 8 read-back frames of each second
+constexpr uint32_t kCensusEvery = 30;    // a full pool scan every 30 frames even with every key found (a second copy of a record)
+constexpr UINT kPrivateMax = 65536;      // the private b0's size limit (the game's b0 ByteWidth, made once)
 
 enum Refuse : uint32_t { kNoT33, kStride, kNoStream, kConstants, kNoSlot, kBufferFull, kNoTag, kPoolChanged, kScanFault, kRefuseCount };
 const char* const kRefuseName[kRefuseCount] = {
@@ -6827,6 +6857,16 @@ struct Rec {
     char eyeSrc = 0;         // 'L' the layer's redirect mapping, 'T' ui depth's frame table, 'C' remembered, 'O' the order rule
     uint8_t flags = 0;
     char kind = 0;           // the draw call (nativeOnFootMarkerProbeDraw)
+    // F47: every marker composite draw is recorded, its stream copied or not.
+    uint32_t start = 0;                  // StartInstanceLocation
+    uint16_t ordEye = 0, ordAll = 0;     // its place among the frame's marker composite draws of its eye, and of the frame
+    const void* t33 = nullptr;           // its VS t33 resource (identity; any)
+    bool watched = false, findsNow = false;   // bound to a watched pool; that pool had a find this frame or the last
+    bool cpuRows = false;                // the CPU shadow of b0 rows 4..7 at the draw
+    float cpu[16] = {};
+    bool fixApplied = false, fixHeld = false;
+    float fixDx = 0.0f, fixDy = 0.0f;    // the applied delta (NDC)
+    int32_t patchedAt = -1;              // the private b0's rows 4..7 after the patch (staged)
 };
 // F46: an eye's world view as a world draw read it: b1 rows 270..273 and row 275, by frame and eye.
 struct WorldView {
@@ -6856,6 +6896,18 @@ struct EyeStats {
     uint64_t pairs = 0, markerReads = 0, worldViews = 0, noWorld = 0, behind = 0, wZero = 0, wNeg = 0, noP = 0, degN = 0, otherN = 0;
     double pxSum = 0.0, pxMax = 0.0, degSum = 0.0, degMax = 0.0, otherPxSum = 0.0, pwSum = 0.0, xoSum = 0.0;
     double dx = 0.0, dy = 0.0, ndcM[2] = {}, ndcP[2] = {}, pw = 0.0, xo = 0.0, tw = 0.0, th = 0.0;
+    // F47 item 1, at read-back: the delta of the same P through the world rows and the marker rows (unpatched), in pixels and degrees.
+    uint64_t dN = 0, dDegN = 0;
+    double dxSum = 0.0, dySum = 0.0, dxMax = 0.0, dyMax = 0.0, dDegSum = 0.0, dDegMax = 0.0;
+    // F47 item 4: the same through the patched rows (the private b0, staged after its write).
+    uint64_t rN = 0;
+    double rxSum = 0.0, rySum = 0.0, rxMax = 0.0, ryMax = 0.0;
+    // F47 at the draw: applied, held, and why not.
+    uint64_t fPatched = 0, fHeld = 0, fUnmatched[2] = {}, fOtherDraw = 0, fRanged = 0, fNoRows = 0, fNoOrigin = 0, fNoWorld = 0, fNoP = 0,
+             fBehind = 0, fGate = 0, fBind = 0;
+    // F47 at read-back: the patched draw read the record (the prediction held) or not; the CPU b0 rows against the GPU copy.
+    uint64_t predHit = 0, predMiss = 0, cpuAgree = 0, cpuDiffer = 0;
+    double cpuDiffMax = 0.0;
 };
 struct SrvInfo {
     const void* srv = nullptr;
@@ -6902,6 +6954,10 @@ struct Window {
     // The head, from the runtime ring, once a frame.
     uint64_t headN = 0;
     double headSum = 0.0, headMax = 0.0;
+    // F47: every marker composite draw (any pool), the pools learned from them, a second copy of a record in one unmap, the census scans,
+    // the CPU b0 shadow's writes, and the fix's draws with no eye or a stale decision.
+    uint64_t b10bDraws = 0, b10bNoT33 = 0, b10bNotPool = 0, markerLearned = 0, dupFinds = 0, censusScans = 0, cbMapped = 0, cbUpdated = 0,
+             fixNoEye = 0, fixStale = 0, fixLateRestore = 0, fixNotIssued = 0;
 };
 
 Pool g_pools[kPools];
@@ -6939,6 +6995,65 @@ bool g_refuseNoted[kRefuseCount] = {};
 bool g_worldRowsNoted = false;
 uint64_t g_taggedSeen = 0, g_untaggableSeen = 0, g_busySeen = 0;
 uint32_t g_poolNotes = 0;
+
+// ---- F47: the correction's state (render thread only).
+// The CPU shadow of a marker composite's b0 (rows 0..7): learned at a B10B draw that binds it from constant 0, written by the Map/Unmap tees
+// (copied before the real Unmap) and the UpdateSubresource tee. Checked against the GPU copy at read-back.
+struct CbShadow {
+    const void* res = nullptr;   // identity only
+    uint32_t bytes = 0;
+    void* mapped = nullptr;
+    bool valid = false;
+    float rows[8][4] = {};
+};
+CbShadow g_cbShadow[kCbShadows];
+uint32_t g_cbShadowNext = 0;
+// An eye's world view this frame from engine motion's CB shadow (the CPU's: a staged one is not known until its read-back).
+struct CpuWorld {
+    uint32_t frame = ~0u;
+    float rows[16] = {};
+    float o[4] = {};
+};
+CpuWorld g_cpuWorld[2];
+// An eye's latest read-back match: the frame, the matching draw's place among the eye's marker composite draws, and the find's key.
+struct EyeMatch {
+    uint32_t frame = ~0u;
+    uint16_t ord = 0;
+    uint32_t key = 0;
+};
+EyeMatch g_match[2];
+// An eye's last good delta (held one frame on a miss).
+struct Good {
+    uint32_t frame = ~0u;
+    double dx = 0.0, dy = 0.0;
+};
+Good g_good[2];
+uint32_t g_ordFrame = ~0u;
+uint16_t g_ordEye[2] = {}, g_ordAll = 0;
+// The decision the draw tee made for this draw, and the binding Begin made for it.
+struct Fix {
+    bool pending = false, bound = false, held = false;
+    uint64_t serial = 0;
+    ID3D11DeviceContext* ctx = nullptr;   // identity only
+    const void* cb0 = nullptr;            // identity only: the b0 the tee saw
+    int eye = -1;
+    uint32_t frame = 0;
+    int slot = -1;
+    size_t rec = 0;
+    double dx = 0.0, dy = 0.0;
+    float rows45[8] = {};                 // rows 4 and 5, moved
+    ID3D11Buffer* saved = nullptr;        // the game's b0 while ours is bound (a reference held)
+};
+Fix g_fix;
+uint64_t g_drawSerial = 0;
+ID3D11Buffer* g_privCb = nullptr;         // the private b0 (DEFAULT, constant buffer), made once
+ID3D11Buffer* g_workBuf = nullptr;        // the private b0 built here first (DEFAULT, not a constant buffer): the game's b0 copied in,
+                                          // rows 4 and 5 written by a boxed UpdateSubresource, then copied whole into the private b0
+UINT g_privBytes = 0;
+bool g_privFailed = false, g_fixAppliedNoted = false, g_unmatchedNoted[2] = {}, g_bindNoted = false;
+uint32_t g_burstLeft = kBurstFrames;
+uint32_t g_lastCensus = 0;
+uint64_t g_secondPostsSeen = 0;
 
 void refuse(Refuse r) {
     ++g_win.refused[r];
@@ -7055,14 +7170,19 @@ void unmapPool(Pool& p) {
     if (!nWants) return;
     rollFrame(frame);
     ++g_win.unmapsTagged;
-    uint32_t hints[kHistory];
+    uint32_t hints[kHistory + 2 * kHits];
     uint32_t nHints = 0;
-    for (uint32_t k = 0; k < nWants; ++k) {
-        if (!g_haveLast[keys[k]]) continue;
-        bool dup = false;
-        for (uint32_t j = 0; j < nHints && !dup; ++j) dup = hints[j] == g_lastIndex[keys[k]];
-        if (!dup) hints[nHints++] = g_lastIndex[keys[k]];
-    }
+    auto addHint = [&](uint32_t index) {
+        for (uint32_t j = 0; j < nHints; ++j)
+            if (hints[j] == index) return;
+        if (nHints < kHistory + 2 * kHits) hints[nHints++] = index;
+    };
+    for (uint32_t k = 0; k < nWants; ++k)
+        if (g_haveLast[keys[k]]) addHint(g_lastIndex[keys[k]]);
+    // F47: every index this pool's finds had this frame and the last (a second copy of a record is looked for where it was).
+    for (int s = 0; s < 2; ++s)
+        for (uint32_t i = 0; i < g_findN[s]; ++i)
+            if (g_finds[s][i].pool == p.res) addHint(g_finds[s][i].index);
     drawtag::Hit hits[kHits];
     bool fault = false;
     uint32_t n = nHints ? scanGuarded(base, p.bytes, wants, nWants, hints, nHints, false, hits, kHits, &fault) : 0;
@@ -7083,8 +7203,14 @@ void unmapPool(Pool& p) {
         g_scanFrame = frame;
         g_scansThisFrame = 0;
     }
-    if (!fault && missing && g_scansThisFrame < kScansPerFrame && static_cast<int32_t>(frame - g_backoffUntil) >= 0) {
+    // F47: a census scan every kCensusEvery frames even when every key was found, so a second copy of a record at another index shows up.
+    const bool census = !missing && frame - g_lastCensus >= kCensusEvery;
+    if (!fault && (missing || census) && g_scansThisFrame < kScansPerFrame && static_cast<int32_t>(frame - g_backoffUntil) >= 0) {
         ++g_scansThisFrame;
+        if (census) {
+            g_lastCensus = frame;
+            ++g_win.censusScans;
+        }
         const uint64_t t0 = f30Qpc();
         n = scanGuarded(base, p.bytes, wants, nWants, nullptr, 0, true, hits, kHits, &fault);
         const uint64_t us = f30QpcUs(f30Qpc() - t0);
@@ -7101,13 +7227,20 @@ void unmapPool(Pool& p) {
         return;
     }
     if (!n) ++g_win.unmapsNoFind;
-    // Per key, only the newest tag found (a DISCARD map's renamed memory can still hold an older frame's record).
+    // Per key, only the newest tag found (a DISCARD map's renamed memory can still hold an older frame's record). F47: every record that carries
+    // that newest tag is a find (a second copy of the record at another index is kept, and counted).
     for (uint32_t i = 0; i < n; ++i) {
         bool newest = true;
         for (uint32_t j = 0; j < n && newest; ++j)
             newest = j == i || drawtag::sentinelKey(hits[j].sentinel) != drawtag::sentinelKey(hits[i].sentinel) ||
-                     ageOf(hits[j].sentinel) > ageOf(hits[i].sentinel) || (ageOf(hits[j].sentinel) == ageOf(hits[i].sentinel) && j > i);
-        if (newest) addFind(p, hits[i], mapType, frame);
+                     ageOf(hits[j].sentinel) >= ageOf(hits[i].sentinel);
+        if (!newest) continue;
+        for (uint32_t j = 0; j < i; ++j)
+            if (hits[j].sentinel == hits[i].sentinel && hits[j].index != hits[i].index) {
+                ++g_win.dupFinds;
+                break;
+            }
+        addFind(p, hits[i], mapType, frame);
     }
 }
 
@@ -7388,6 +7521,10 @@ void worldDraw(ID3D11DeviceContext* ctx, uint32_t frame, uint64_t vs) {
         std::memcpy(v.rows, shadow, sizeof(v.rows));
         std::memcpy(v.o, shadow[5], sizeof(v.o));
         worldPut(v);
+        // F47: the eye's world view is known on the CPU this frame (the correction's input at the marker composite's draw).
+        g_cpuWorld[e].frame = frame;
+        std::memcpy(g_cpuWorld[e].rows, v.rows, sizeof(v.rows));
+        std::memcpy(g_cpuWorld[e].o, v.o, sizeof(v.o));
         ++g_win.worldShadow;
         ok = true;
     } else if (!covers(cb1, f1 * 16 + kWorldOffset, kWorldBytes)) {
@@ -7437,27 +7574,163 @@ void worldDraw(ID3D11DeviceContext* ctx, uint32_t frame, uint64_t vs) {
     else ++g_win.dsvDisagree;
 }
 
-// F46: a marker composite draw (VS B10B032BDFD46700) bound to a watched pool, in a frame with a find in it: its instance stream, b0 rows 4..7
-// and b1 row 275 are copied into the frame's staging slot, with the UI layer's eye of its target and the target's size. Nothing is written.
-void markerDraw(ID3D11DeviceContext* ctx, uint32_t frame, uint64_t vs, uint32_t instances, uint32_t startInstance, char kind) {
-    ++g_win.scanMarker;
-    SrvInfo t33;
-    if (!t33Of(ctx, frame, t33) || !t33.pool || !poolWatched(t33.res)) return;
-    ++g_win.markerPool;
-    if (kind == 'Y' || kind == 'Z') {   // indirect: the instance range is in a GPU argument buffer
-        ++g_win.indirect;
+// F47: the CPU shadow of the b0 `res` (learning it when `learn`), or null.
+CbShadow* shadowFor(const void* res, bool learn, uint32_t bytes) {
+    if (!res) return nullptr;
+    for (CbShadow& s : g_cbShadow)
+        if (s.res == res) return &s;
+    if (!learn) return nullptr;
+    CbShadow& s = g_cbShadow[g_cbShadowNext];
+    g_cbShadowNext = (g_cbShadowNext + 1) % kCbShadows;
+    s = CbShadow{};
+    s.res = res;
+    s.bytes = bytes;
+    return &s;
+}
+
+// F47: the bound b0 is a whole-buffer bind from constant 0 (a ranged bind is not patched: its restore would need VSSetConstantBuffers1).
+bool vsB0Plain(ID3D11DeviceContext* ctx, ID3D11Buffer** buf) {
+    *buf = nullptr;
+    UINT first = 0, num = 0;
+    ID3D11DeviceContext1* c1 = nullptr;
+    if (SUCCEEDED(ctx->QueryInterface(__uuidof(ID3D11DeviceContext1), reinterpret_cast<void**>(&c1))) && c1) {
+        c1->VSGetConstantBuffers1(0, 1, buf, &first, &num);
+        c1->Release();
+    } else {
+        ctx->VSGetConstantBuffers(0, 1, buf);
+        return *buf != nullptr;
+    }
+    if (!*buf) return false;
+    D3D11_BUFFER_DESC d{};
+    (*buf)->GetDesc(&d);
+    // A plain bind reads back as constant 0 with all 4096 constants (or the buffer's own count).
+    if (first == 0 && (num == 0 || num >= D3D11_REQ_CONSTANT_BUFFER_ELEMENT_COUNT || num * 16u >= d.ByteWidth)) return true;
+    (*buf)->Release();
+    *buf = nullptr;
+    return false;
+}
+
+// F47: the newest find of `key` with P, this frame or the last.
+const Find* findForKey(uint32_t key, uint32_t frame) {
+    const Find* best = nullptr;
+    for (int s = 0; s < 2; ++s)
+        for (uint32_t i = 0; i < g_findN[s]; ++i) {
+            const Find& f = g_finds[s][i];
+            if (f.key != key || !f.haveTag || !f.pOk || frame - f.frame > 1u) continue;
+            if (!best || f.frame > best->frame) best = &f;
+        }
+    return best;
+}
+bool matchFresh(int e, uint32_t frame) {
+    return g_match[e].frame != ~0u && frame - g_match[e].frame <= kMatchFresh;
+}
+
+// F47: the correction's decision at a marker composite draw (the tee, the game's bindings): sets g_fix.pending for this draw, or counts why
+// not. Nothing is bound here; Begin binds.
+void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot, size_t recIndex, ID3D11Buffer* b0Plain, const float* oHud,
+               const CbShadow* sh) {
+    if (r.eye != 0 && r.eye != 1) {
+        ++g_win.fixNoEye;
         return;
     }
-    if (!poolHasFinds(t33.res, frame)) return;
-    ++g_win.markerFinds;
+    const int e = r.eye;
+    EyeStats& s = g_win.eye[e];
+    const bool m[2] = {matchFresh(0, frame), matchFresh(1, frame)};
+    if (!m[0] || !m[1]) {
+        for (int u = 0; u < 2; ++u) {
+            if (m[u]) continue;
+            ++s.fUnmatched[u];
+            if (!g_unmatchedNoted[u]) {
+                g_unmatchedNoted[u] = true;
+                Log::get().note("native on foot marker fix: eye %d unmatched: not applied (no marker composite draw of eye %d read the marker "
+                                "record in the last %u frames' read-backs; both eyes must match). Said once; counted in the 1 s lines", u, u,
+                                kMatchFresh);
+            }
+        }
+        return;
+    }
+    if (r.ordEye != g_match[e].ord) {
+        ++s.fOtherDraw;
+        return;
+    }
+    if (!b0Plain) {
+        ++s.fRanged;
+        return;
+    }
+    if (!sh || !sh->valid) {
+        ++s.fNoRows;
+        return;
+    }
+    if (!oHud) {
+        ++s.fNoOrigin;
+        return;
+    }
+    double dx = 0.0, dy = 0.0;
+    bool have = false, held = false;
+    const CpuWorld& w = g_cpuWorld[e];
+    const Find* f = findForKey(g_match[e].key, frame);
+    int why = -1;
+    if (w.frame != frame) {
+        ++s.fNoWorld;
+    } else if (!f) {
+        ++s.fNoP;
+    } else {
+        const double ow[3] = {w.o[0], w.o[1], w.o[2]}, oh[3] = {oHud[0], oHud[1], oHud[2]}, P[3] = {f->p[0], f->p[1], f->p[2]};
+        why = drawtag::ndcDelta(w.rows, ow, sh->rows[4], sh->rows[5], sh->rows[7], oh, P, kGateNdc, &dx, &dy);
+        if (why == drawtag::kDeltaOk) have = true;
+        else if (why == drawtag::kDeltaGate) ++s.fGate;
+        else ++s.fBehind;
+    }
+    if (have) {
+        g_good[e].frame = frame;
+        g_good[e].dx = dx;
+        g_good[e].dy = dy;
+    } else if (g_good[e].frame != ~0u && g_good[e].frame + 1u == frame) {
+        dx = g_good[e].dx;   // the last good delta, held for one frame
+        dy = g_good[e].dy;
+        have = held = true;
+    }
+    if (!have) return;
+    float r4[4], r5[4];
+    std::memcpy(r4, sh->rows[4], sizeof(r4));
+    std::memcpy(r5, sh->rows[5], sizeof(r5));
+    drawtag::ndcOffsetRows(r4, r5, sh->rows[7], dx, dy);
+    g_fix.pending = true;
+    g_fix.held = held;
+    g_fix.serial = g_drawSerial;
+    g_fix.ctx = ctx;
+    g_fix.cb0 = b0Plain;
+    g_fix.eye = e;
+    g_fix.frame = frame;
+    g_fix.slot = slot;
+    g_fix.rec = recIndex;
+    g_fix.dx = dx;
+    g_fix.dy = dy;
+    std::memcpy(g_fix.rows45, r4, sizeof(r4));
+    std::memcpy(g_fix.rows45 + 4, r5, sizeof(r5));
+}
+
+// F46: a marker composite draw (VS B10B032BDFD46700) bound to a watched pool, in a frame with a find in it: its instance stream, b0 rows 4..7
+// and b1 row 275 are copied into the frame's staging slot, with the UI layer's eye of its target and the target's size. Nothing is written.
+// F47: EVERY marker composite draw is recorded (its eye, its place in the frame, its t33 pool, watched or not) for the per-frame lines; a
+// stride-336 pool it binds that is not watched yet is learned (the Map/Unmap tees then look for the tags in it too); the CPU shadow of its b0
+// is learned and read; and, with fix.native_on_foot_marker_fix on, the correction is decided for this draw (fixDecide).
+void markerDraw(ID3D11DeviceContext* ctx, uint32_t frame, uint64_t vs, uint32_t instances, uint32_t startInstance, char kind) {
+    ++g_win.scanMarker;
+    ++g_win.b10bDraws;
+    if (g_ordFrame != frame) {
+        g_ordFrame = frame;
+        g_ordEye[0] = g_ordEye[1] = 0;
+        g_ordAll = 0;
+    }
     Rec r;
     r.vs = vs;
     r.ps = bindingShaderHash(BindSlot::Ps);
-    r.pool = t33.res;
-    r.first = t33.first;
     r.instances = instances;
+    r.start = startInstance;
     r.kind = kind;
     r.flags = kRecMarker;
+    r.ordAll = g_ordAll++;
     if (void* view = bindingGet(BindSlot::Rtv0)) {
         ResourceInfo ri;
         if (bindingResolveProbe(view, &ri) && ri.isTexture2D && ri.resource) {
@@ -7466,6 +7739,32 @@ void markerDraw(ID3D11DeviceContext* ctx, uint32_t frame, uint64_t vs, uint32_t 
             r.eye = static_cast<int8_t>(targetEye(ri.resource, &r.eyeSrc));
         }
     }
+    if (r.eye == 0 || r.eye == 1) r.ordEye = g_ordEye[r.eye]++;
+    SrvInfo t33;
+    const bool haveT33 = t33Of(ctx, frame, t33);
+    if (!haveT33) ++g_win.b10bNoT33;
+    else if (!t33.pool) ++g_win.b10bNotPool;
+    if (haveT33) {
+        r.t33 = t33.res;
+        r.first = t33.first;
+    }
+    if (haveT33 && t33.pool && !poolWatched(t33.res)) {
+        learnPool(t33.res, t33.bytes, frame);
+        ++g_win.markerLearned;
+    }
+    r.watched = haveT33 && t33.pool && poolWatched(t33.res);
+    if (r.watched) {
+        r.pool = t33.res;
+        ++g_win.markerPool;
+    }
+    bool copy = r.watched;
+    if (copy && (kind == 'Y' || kind == 'Z')) {   // indirect: the instance range is in a GPU argument buffer
+        ++g_win.indirect;
+        copy = false;
+    }
+    if (copy && !poolHasFinds(t33.res, frame)) copy = false;
+    if (copy) ++g_win.markerFinds;
+    r.findsNow = copy;
     ID3D11Buffer* cb0 = nullptr;
     ID3D11Buffer* cb1 = nullptr;
     UINT f0 = 0, f1 = 0;
@@ -7473,10 +7772,24 @@ void markerDraw(ID3D11DeviceContext* ctx, uint32_t frame, uint64_t vs, uint32_t 
     vsConstants(ctx, 1, &cb1, &f1);
     float shadow[6][4] = {};
     const bool shadowO = cb1 && f1 == 0 && engineVelocityShadowSceneRows(cb1, shadow);
+    // F47: the CPU shadow of b0, for a bind from constant 0 (learned here; the tees write it).
+    ID3D11Buffer* b0Plain = nullptr;
+    CbShadow* sh = nullptr;
+    if (vsB0Plain(ctx, &b0Plain)) {
+        D3D11_BUFFER_DESC bd{};
+        b0Plain->GetDesc(&bd);
+        if (bd.ByteWidth >= kCb0ShadowBytes) sh = shadowFor(b0Plain, true, bd.ByteWidth);
+    }
+    if (sh && sh->valid) {
+        r.cpuRows = true;
+        std::memcpy(r.cpu, sh->rows[4], sizeof(r.cpu));
+    }
     ID3D11Buffer* vbs[8] = {};
     UINT strides[8] = {}, offs[8] = {};
-    bool fine = true;
-    if (!covers(cb0, f0 * 16 + kMarkerRowsOffset, kMarkerRowsBytes) || (!shadowO && !covers(cb1, f1 * 16 + kOriginOffset, kOriginBytes))) {
+    const int slot = g_staging.open(ctx, frame);
+    if (slot < 0) refuse(kNoSlot);
+    bool fine = copy && slot >= 0;
+    if (fine && (!covers(cb0, f0 * 16 + kMarkerRowsOffset, kMarkerRowsBytes) || (!shadowO && !covers(cb1, f1 * 16 + kOriginOffset, kOriginBytes)))) {
         refuse(kConstants);
         fine = false;
     }
@@ -7504,38 +7817,40 @@ void markerDraw(ID3D11DeviceContext* ctx, uint32_t frame, uint64_t vs, uint32_t 
         }
     }
     if (fine) {
-        const int slot = g_staging.open(ctx, frame);
-        if (slot < 0) {
-            refuse(kNoSlot);
+        const int64_t sAt = g_staging.append(ctx, vbs[pick], static_cast<UINT>(at), entries * drawtag::kStreamStride);
+        const int64_t rAt = sAt < 0 ? -1 : g_staging.append(ctx, cb0, f0 * 16 + kMarkerRowsOffset, kMarkerRowsBytes);
+        const int64_t oAt = rAt < 0 || shadowO ? -1 : g_staging.append(ctx, cb1, f1 * 16 + kOriginOffset, kOriginBytes);
+        if (sAt < 0 || rAt < 0 || (!shadowO && oAt < 0)) {
+            refuse(kBufferFull);
         } else {
-            const int64_t sAt = g_staging.append(ctx, vbs[pick], static_cast<UINT>(at), entries * drawtag::kStreamStride);
-            const int64_t rAt = sAt < 0 ? -1 : g_staging.append(ctx, cb0, f0 * 16 + kMarkerRowsOffset, kMarkerRowsBytes);
-            const int64_t oAt = rAt < 0 || shadowO ? -1 : g_staging.append(ctx, cb1, f1 * 16 + kOriginOffset, kOriginBytes);
-            if (sAt < 0 || rAt < 0 || (!shadowO && oAt < 0)) {
-                refuse(kBufferFull);
-            } else {
-                if (entries < instances) {
-                    r.flags |= kRecCut;
-                    ++g_win.streamCut;
-                }
-                r.streamAt = static_cast<int32_t>(sAt);
-                r.entries = entries;
-                r.rowsAt = static_cast<int32_t>(rAt);
-                r.originAt = static_cast<int32_t>(oAt);
-                if (shadowO) {
-                    std::memcpy(r.origin, shadow[5], sizeof(r.origin));
-                    r.flags |= kRecShadowO;
-                }
-                recsOf(slot, frame).push_back(r);
-                ++g_win.recs;
-                g_win.stagedBytes += static_cast<uint64_t>(entries) * drawtag::kStreamStride + kMarkerRowsBytes + (shadowO ? 0u : kOriginBytes);
-                ++g_win.streamDraws;
-                g_win.streamEntries += entries;
+            if (entries < instances) {
+                r.flags |= kRecCut;
+                ++g_win.streamCut;
             }
+            r.streamAt = static_cast<int32_t>(sAt);
+            r.entries = entries;
+            r.rowsAt = static_cast<int32_t>(rAt);
+            r.originAt = static_cast<int32_t>(oAt);
+            g_win.stagedBytes += static_cast<uint64_t>(entries) * drawtag::kStreamStride + kMarkerRowsBytes + (shadowO ? 0u : kOriginBytes);
+            ++g_win.streamDraws;
+            g_win.streamEntries += entries;
         }
+    }
+    if (shadowO) {
+        std::memcpy(r.origin, shadow[5], sizeof(r.origin));
+        r.flags |= kRecShadowO;
+    }
+    if (slot >= 0) {
+        std::vector<Rec>& list = recsOf(slot, frame);
+        list.push_back(r);
+        ++g_win.recs;
+        // F47: the correction's decision for this draw (the key on only).
+        if (g_nativeOnFootMarkerFixKey.load(std::memory_order_relaxed))
+            fixDecide(ctx, frame, list.back(), slot, list.size() - 1, b0Plain, shadowO ? shadow[5] : nullptr, sh);
     }
     for (ID3D11Buffer* b : vbs)
         if (b) b->Release();
+    if (b0Plain) b0Plain->Release();   // identity only from here (g_fix.cb0)
     if (cb0) cb0->Release();
     if (cb1) cb1->Release();
 }
@@ -7589,7 +7904,43 @@ void addTuple(const Rec& r, const drawtag::StreamMatch& m) {
 // F46: a marker composite that read a find: ndc_marker = (r4 . p, r5 . p) / |r7 . p|, p = (X0 - o_hud, 1), against ndc_P = P through the
 // world rows of the draw's eye (the UI layer's) at o_w; in pixels of the marker's target and in degrees, and against the other eye's world
 // view beside it (a wrong eye shows as the smaller of the two).
-void pairMarker(const Rec& r, const Find& f, const float rows[16], const float oH[4], uint32_t frame) {
+// F47: also the delta of P itself through the world rows and through the marker rows (item 1), and, for a patched draw, the same through the
+// private b0's rows read back after their write (item 4: about zero when the patch took).
+void f47Measure(EyeStats& s, const WorldView& w, const float rows[16], const double oh[3], const double P[3], double W, double H) {
+    const double ow[3] = {w.o[0], w.o[1], w.o[2]};
+    double dx = 0.0, dy = 0.0;
+    const int why = drawtag::ndcDelta(w.rows, ow, rows, rows + 4, rows + 12, oh, P, 1e30, &dx, &dy);
+    if (why != drawtag::kDeltaOk) return;
+    double wc[4], mc[3];
+    drawtag::worldClip(w.rows, P, ow, wc);
+    drawtag::markerClip(rows, rows + 4, rows + 12, P, oh, mc);
+    const double a[2] = {wc[0] / wc[3], wc[1] / wc[3]}, b[2] = {mc[0] / mc[2], mc[1] / mc[2]};
+    const double px = dx * W * 0.5, py = dy * H * 0.5;
+    ++s.dN;
+    s.dxSum += px;
+    s.dySum += py;
+    if (std::fabs(px) > s.dxMax) s.dxMax = std::fabs(px);
+    if (std::fabs(py) > s.dyMax) s.dyMax = std::fabs(py);
+    const double deg = drawtag::ndcAngleDeg(w.rows, a, b);
+    if (deg >= 0.0) {
+        ++s.dDegN;
+        s.dDegSum += deg;
+        if (deg > s.dDegMax) s.dDegMax = deg;
+    }
+}
+void f47Residual(EyeStats& s, const WorldView& w, const float patched[16], const double oh[3], const double P[3], double W, double H) {
+    const double ow[3] = {w.o[0], w.o[1], w.o[2]};
+    double dx = 0.0, dy = 0.0;
+    if (drawtag::ndcDelta(w.rows, ow, patched, patched + 4, patched + 12, oh, P, 1e30, &dx, &dy) != drawtag::kDeltaOk) return;
+    const double px = dx * W * 0.5, py = dy * H * 0.5;
+    ++s.rN;
+    s.rxSum += px;
+    s.rySum += py;
+    if (std::fabs(px) > s.rxMax) s.rxMax = std::fabs(px);
+    if (std::fabs(py) > s.ryMax) s.ryMax = std::fabs(py);
+}
+
+void pairMarker(const Rec& r, const Find& f, const float rows[16], const float oH[4], uint32_t frame, const float* patched) {
     if (r.eye != 0 && r.eye != 1) {
         ++g_win.markerNoEye;
         return;
@@ -7652,6 +8003,8 @@ void pairMarker(const Rec& r, const Find& f, const float rows[16], const float o
     s.ndcP[1] = ndcP[1];
     s.tw = W;
     s.th = H;
+    f47Measure(s, *w, rows, oh, P, W, H);
+    if (patched) f47Residual(s, *w, patched, oh, P, W, H);
     if (const WorldView* o = worldGet(frame, 1 - e)) {
         const double oo[3] = {o->o[0], o->o[1], o->o[2]};
         double oc[4];
@@ -7666,6 +8019,7 @@ void pairMarker(const Rec& r, const Find& f, const float rows[16], const float o
 
 // One frame's staging slot, read back: its staged world views into the cache first (a marker composite may come before its eye's world
 // draw), then every marker composite's stream against the frame's finds, and the pair for each one that read a find by x.
+void appendf(char* buf, size_t cap, size_t& len, const char* fmt, ...);   // below
 void readFrame(int slot, uint32_t frame, const uint8_t* d, uint32_t used) {
     ++g_win.framesRead;
     if (g_recFrame[slot] != frame) return;
@@ -7683,30 +8037,93 @@ void readFrame(int slot, uint32_t frame, const uint8_t* d, uint32_t used) {
     }
     const Find* finds = g_slotFinds[slot];
     const uint32_t nFinds = g_slotFindN[slot] <= kSlotFinds ? g_slotFindN[slot] : 0;
+    // F47 item 2: one line for this frame listing EVERY marker composite draw (the first kBurstFrames read-back frames of each second).
+    const bool burst = g_burstLeft > 0;
+    char line[4096];
+    size_t len = 0;
+    uint32_t listed = 0;
+    if (burst)
+        appendf(line, sizeof(line), len, "native on foot marker probe: frame %u marker composite draws (#, eye (source), place in the eye, call, instances "
+                "@ start, t33, record read by x / y or -):", frame);
     for (const Rec& r : recs) {
-        if (!(r.flags & kRecMarker) || !inside(r.streamAt, static_cast<uint64_t>(r.entries) * drawtag::kStreamStride)) continue;
-        ++g_win.streamRead;
-        uint32_t wants[kSlotFinds];
-        uint32_t which[kSlotFinds];
-        uint32_t nw = 0;
-        for (uint32_t k = 0; k < nFinds; ++k)
-            if (finds[k].pool == r.pool) {
-                wants[nw] = finds[k].index;
-                which[nw] = k;
-                ++nw;
+        if (!(r.flags & kRecMarker)) continue;
+        // F47: the CPU shadow of b0 rows 4..7 at the draw against the GPU copy of the same rows.
+        if (r.cpuRows && inside(r.rowsAt, kMarkerRowsBytes)) {
+            float g[16];
+            std::memcpy(g, d + r.rowsAt, sizeof(g));
+            double diff = 0.0;
+            for (int i = 0; i < 16; ++i) diff = std::max(diff, std::fabs(static_cast<double>(g[i]) - r.cpu[i]));
+            if (r.eye == 0 || r.eye == 1) {
+                EyeStats& s = g_win.eye[r.eye];
+                if (diff == 0.0) ++s.cpuAgree;
+                else ++s.cpuDiffer;
+                if (diff > s.cpuDiffMax) s.cpuDiffMax = diff;
             }
+        }
         drawtag::StreamMatch m;
-        if (!nw || !drawtag::matchStream(d + r.streamAt, r.entries, r.first, wants, nw, m)) continue;
-        if (m.xHits) ++g_win.readsX;
-        else ++g_win.readsYOnly;
-        addTuple(r, m);
-        if (!m.xHits || !inside(r.rowsAt, kMarkerRowsBytes)) continue;
-        float rows[16], oH[4];
-        std::memcpy(rows, d + r.rowsAt, sizeof(rows));
-        if (r.flags & kRecShadowO) std::memcpy(oH, r.origin, sizeof(oH));
-        else if (inside(r.originAt, kOriginBytes)) std::memcpy(oH, d + r.originAt, sizeof(oH));
-        else continue;
-        pairMarker(r, finds[which[m.want]], rows, oH, frame);
+        bool matched = false;
+        uint32_t key = 0;
+        if (inside(r.streamAt, static_cast<uint64_t>(r.entries) * drawtag::kStreamStride)) {
+            ++g_win.streamRead;
+            uint32_t wants[kSlotFinds];
+            uint32_t which[kSlotFinds];
+            uint32_t nw = 0;
+            for (uint32_t k = 0; k < nFinds; ++k)
+                if (finds[k].pool == r.pool) {
+                    wants[nw] = finds[k].index;
+                    which[nw] = k;
+                    ++nw;
+                }
+            if (nw && drawtag::matchStream(d + r.streamAt, r.entries, r.first, wants, nw, m)) {
+                matched = true;
+                key = finds[which[m.want]].key;
+                if (m.xHits) ++g_win.readsX;
+                else ++g_win.readsYOnly;
+                addTuple(r, m);
+                // F47: the eye's prediction for the correction: this draw's place among the eye's marker composite draws, and the find's key.
+                if (m.xHits && (r.eye == 0 || r.eye == 1) &&
+                    (g_match[r.eye].frame == ~0u || static_cast<int32_t>(frame - g_match[r.eye].frame) >= 0)) {
+                    g_match[r.eye].frame = frame;
+                    g_match[r.eye].ord = r.ordEye;
+                    g_match[r.eye].key = key;
+                }
+                if (m.xHits && inside(r.rowsAt, kMarkerRowsBytes)) {
+                    float rows[16], oH[4];
+                    std::memcpy(rows, d + r.rowsAt, sizeof(rows));
+                    bool haveO = true;
+                    if (r.flags & kRecShadowO) std::memcpy(oH, r.origin, sizeof(oH));
+                    else if (inside(r.originAt, kOriginBytes)) std::memcpy(oH, d + r.originAt, sizeof(oH));
+                    else haveO = false;
+                    float patched[16];
+                    const bool havePatched = r.fixApplied && inside(r.patchedAt, kMarkerRowsBytes);
+                    if (havePatched) std::memcpy(patched, d + r.patchedAt, sizeof(patched));
+                    if (haveO) pairMarker(r, finds[which[m.want]], rows, oH, frame, havePatched ? patched : nullptr);
+                }
+            }
+        }
+        // F47: did the patched draw read the record (the read-back's verdict on the draw-time prediction)?
+        if (r.fixApplied && (r.eye == 0 || r.eye == 1)) {
+            if (matched && m.xHits) ++g_win.eye[r.eye].predHit;
+            else ++g_win.eye[r.eye].predMiss;
+        }
+        if (burst) {
+            ++listed;
+            appendf(line, sizeof(line), len, " [#%u eye %d (%c) %u %c %u@%u t33 %p%s: ", r.ordAll, r.eye, r.eyeSrc ? r.eyeSrc : '-', r.ordEye,
+                    r.kind ? r.kind : '?', r.instances, r.start, r.t33, r.watched ? (r.findsNow ? " watched" : " watched, no find") :
+                    " NOT watched");
+            if (matched) appendf(line, sizeof(line), len, "record %u key %u%s %s, entry %u, x %u y %u", m.record, key,
+                                 (key & kF47SecondPostBit) ? " (second post)" : "", m.viaY ? "by y" : "by x", m.entry, m.xHits, m.yHits);
+            else if (r.streamAt >= 0) appendf(line, sizeof(line), len, "- (stream read, no record of a find)");
+            else appendf(line, sizeof(line), len, "- (stream not copied)");
+            if (r.fixApplied) appendf(line, sizeof(line), len, "; PATCHED dx %+.5f dy %+.5f NDC%s", double(r.fixDx), double(r.fixDy),
+                                      r.fixHeld ? " (held)" : "");
+            appendf(line, sizeof(line), len, "]");
+        }
+    }
+    if (burst && listed) {
+        --g_burstLeft;
+        appendf(line, sizeof(line), len, " (finds in the frame: %u)", nFinds);
+        Log::get().note("%s", line);
     }
 }
 
@@ -7902,7 +8319,41 @@ void report(uint64_t nowMs) {
                 Log::get().note("native on foot marker probe: eye %d: no pair this second: marker side %s; world side %s; head %s", e, mk, wd, head);
             }
         }
+        // F47 items 1, 3 and 4, per eye: the delta of P itself through the world rows and the marker rows (unpatched), what the correction did
+        // at the draw and why not, the delta through the patched rows read back, the prediction's verdict, the CPU b0 against the GPU copy.
+        const bool fixOn = g_nativeOnFootMarkerFixKey.load(std::memory_order_relaxed);
+        for (int e = 0; e < 2; ++e) {
+            const EyeStats& s = w.eye[e];
+            char meas[320], res[200];
+            if (s.dN)
+                std::snprintf(meas, sizeof(meas), "dx mean %+.2f px, max |dx| %.2f px; dy mean %+.2f px, max |dy| %.2f px; %.4f deg mean, %.4f deg "
+                              "max; over %llu pairs", s.dxSum / double(s.dN), s.dxMax, s.dySum / double(s.dN), s.dyMax,
+                              s.dDegN ? s.dDegSum / double(s.dDegN) : -1.0, s.dDegMax, ull(s.dN));
+            else std::snprintf(meas, sizeof(meas), "no pair this second");
+            if (s.rN)
+                std::snprintf(res, sizeof(res), "dx mean %+.2f px, max |dx| %.2f px; dy mean %+.2f px, max |dy| %.2f px; over %llu pairs",
+                              s.rxSum / double(s.rN), s.rxMax, s.rySum / double(s.rN), s.ryMax, ull(s.rN));
+            else std::snprintf(res, sizeof(res), "no patched pair this second");
+            Log::get().note("native on foot marker fix (F47, key %s): eye %d: P through the world rows minus P through the marker rows (unpatched): "
+                            "%s; head %s; patched %llu draws (held %llu); after the patch: %s; not applied: eye 0 unmatched %llu, eye 1 unmatched %llu, "
+                            "another draw of the eye %llu, ranged b0 %llu, no CPU b0 rows %llu, no CPU o_hud %llu, no CPU world view %llu, no P %llu, "
+                            "w <= 0 %llu, gate (|d| >= %.2f NDC) %llu, bind refused %llu; the patched draw read the record at read-back %llu, did not "
+                            "%llu; CPU b0 rows 4..7 against the GPU copy: agree %llu, differ %llu (max %.3g)",
+                            fixOn ? "on" : "off", e, meas, head, ull(s.fPatched), ull(s.fHeld), res, ull(s.fUnmatched[0]), ull(s.fUnmatched[1]),
+                            ull(s.fOtherDraw), ull(s.fRanged), ull(s.fNoRows), ull(s.fNoOrigin), ull(s.fNoWorld), ull(s.fNoP), ull(s.fBehind),
+                            kGateNdc, ull(s.fGate), ull(s.fBind), ull(s.predHit), ull(s.predMiss), ull(s.cpuAgree), ull(s.cpuDiffer), s.cpuDiffMax);
+        }
+        const uint64_t secondAll = g_f47SecondPosts.load(std::memory_order_relaxed);
+        const uint64_t second = secondAll - g_secondPostsSeen;
+        g_secondPostsSeen = secondAll;
+        Log::get().note("native on foot marker probe (F47): marker composite draws %llu (no t33 %llu, t33 not a stride-336 pool %llu), pools "
+                        "learned from them %llu; second posts of a key in one frame %llu (tagged with bit 7 in the key); a second copy of a record "
+                        "in one unmap %llu; census scans %llu; b0 CPU shadow writes: mapped %llu, updated %llu; fix: draws with no eye %llu, stale "
+                        "decisions %llu, decisions with no layered issue %llu, late restores %llu",
+                        ull(w.b10bDraws), ull(w.b10bNoT33), ull(w.b10bNotPool), ull(w.markerLearned), ull(second), ull(w.dupFinds),
+                        ull(w.censusScans), ull(w.cbMapped), ull(w.cbUpdated), ull(w.fixNoEye), ull(w.fixStale), ull(w.fixNotIssued), ull(w.fixLateRestore));
     }
+    g_burstLeft = kBurstFrames;
     // F46 item 4: the cost, every second the draw tee ran: its calls, the draws looked at past the VS hash, the time in them, what was staged.
     if (w.hookCalls || w.hudDraws) {
         uint64_t refusedAll = 0;
@@ -7922,8 +8373,38 @@ void report(uint64_t nowMs) {
 }  // namespace f44
 }  // namespace
 
+namespace {
+namespace f44 {
+// F47: the b0 CPU shadow's copy of a mapped write, before the real Unmap; under SEH (the mapping is the game's).
+__declspec(noinline) bool shadowCopyGuarded(void* dst, const void* src, size_t bytes) noexcept {
+    __try {
+        std::memcpy(dst, src, bytes);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    return true;
+}
+}  // namespace f44
+}  // namespace
+
 void nativeOnFootMarkerProbeMap(ID3D11Resource* res, void* data, int mapType) {
     if (!res || !data) return;
+    // F47: a shadowed marker composite b0: the mapped pointer (the copy is taken before the real Unmap). Still a buffer of its size?
+    for (f44::CbShadow& s : f44::g_cbShadow) {
+        if (s.res != res) continue;
+        D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN;
+        res->GetType(&dim);
+        D3D11_BUFFER_DESC d{};
+        if (dim == D3D11_RESOURCE_DIMENSION_BUFFER) static_cast<ID3D11Buffer*>(res)->GetDesc(&d);
+        if (dim != D3D11_RESOURCE_DIMENSION_BUFFER || d.ByteWidth < f44::kCb0ShadowBytes) {
+            s = f44::CbShadow{};
+            break;
+        }
+        s.bytes = d.ByteWidth;
+        s.mapped = data;
+        s.valid = false;
+        break;
+    }
     for (f44::Pool& p : f44::g_pools) {
         if (p.res != res) continue;
         // The game's live resource here: still a structured buffer of stride 336? (The address may have been re-used since it was learned.)
@@ -7948,6 +8429,13 @@ void nativeOnFootMarkerProbeMap(ID3D11Resource* res, void* data, int mapType) {
 
 void nativeOnFootMarkerProbeUnmap(const ID3D11Resource* res) {
     if (!res) return;
+    for (f44::CbShadow& s : f44::g_cbShadow) {
+        if (s.res != res || !s.mapped) continue;
+        s.valid = f44::shadowCopyGuarded(s.rows, s.mapped, f44::kCb0ShadowBytes);
+        s.mapped = nullptr;
+        if (s.valid) ++f44::g_win.cbMapped;
+        break;
+    }
     for (f44::Pool& p : f44::g_pools)
         if (p.res == res) {
             if (p.mapped) f44::unmapPool(p);
@@ -7957,6 +8445,21 @@ void nativeOnFootMarkerProbeUnmap(const ID3D11Resource* res) {
 
 void nativeOnFootMarkerProbeDraw(ID3D11DeviceContext* ctx, uint32_t instances, uint32_t startInstance, char kind) {
     if (!ctx) return;
+    ++f44::g_drawSerial;   // F47: a decision is for the draw that made it (Begin checks the serial)
+    if (f44::g_fix.pending) ++f44::g_win.fixNotIssued;   // decided, but Begin never ran for it (the draw was not the layer's, or skipped)
+    f44::g_fix.pending = false;
+    // F47: a private b0 still bound from an earlier draw (End did not run): put the game's back only while ours is still the one bound (a
+    // later bind of the game's own stands), and drop the reference either way.
+    if (f44::g_fix.bound) {
+        ID3D11Buffer* now = nullptr;
+        ctx->VSGetConstantBuffers(0, 1, &now);
+        if (now && now == f44::g_privCb) ctx->VSSetConstantBuffers(0, 1, &f44::g_fix.saved);
+        if (now) now->Release();
+        if (f44::g_fix.saved) f44::g_fix.saved->Release();
+        f44::g_fix.saved = nullptr;
+        f44::g_fix.bound = false;
+        ++f44::g_win.fixLateRestore;
+    }
     const uint32_t frame = g_f44Frame.load(std::memory_order_relaxed);
     if (frame != f44::g_polledFrame) {
         f44::g_polledFrame = frame;
@@ -7965,8 +8468,141 @@ void nativeOnFootMarkerProbeDraw(ID3D11DeviceContext* ctx, uint32_t instances, u
     f44::draw(ctx, frame, instances, startInstance, kind);
 }
 
+void nativeOnFootMarkerProbeUpdate(const ID3D11Resource* res, const void* data, bool boxed, uint32_t left, uint32_t right) {
+    if (!res || !data) return;
+    for (f44::CbShadow& s : f44::g_cbShadow) {
+        if (s.res != res) continue;
+        if (!boxed) {
+            s.valid = f44::shadowCopyGuarded(s.rows, data, f44::kCb0ShadowBytes);
+        } else if (left < f44::kCb0ShadowBytes && right > left) {
+            // A ranged write: the part of it in rows 0..7 lands in place; the rest of the shadow keeps what it had.
+            const uint32_t end = right < f44::kCb0ShadowBytes ? right : f44::kCb0ShadowBytes;
+            uint8_t* rows = reinterpret_cast<uint8_t*>(s.rows);
+            if (!f44::shadowCopyGuarded(rows + left, data, end - left)) s.valid = false;
+        }
+        if (s.valid) ++f44::g_win.cbUpdated;
+        break;
+    }
+}
+
+namespace {
+namespace f44 {
+// F47: the private b0 and its work buffer (both the game's b0 size, made once); false (and said once) when they cannot be made, or when the
+// game's b0 is a different size from the one they were made for.
+bool ensurePrivate(ID3D11DeviceContext* ctx, ID3D11Buffer* cb0) {
+    D3D11_BUFFER_DESC d{};
+    cb0->GetDesc(&d);
+    if (g_privCb && g_workBuf) return d.ByteWidth == g_privBytes;
+    if (g_privFailed) return false;
+    g_privFailed = true;   // until both are made
+    if (d.ByteWidth < kCb0ShadowBytes || d.ByteWidth > kPrivateMax || (d.ByteWidth & 15u)) {
+        Log::get().note("native on foot marker fix: the marker composite's b0 is %u bytes (not a multiple of 16 in 128..%u); no private copy is "
+                        "made, nothing is patched this session", d.ByteWidth, kPrivateMax);
+        return false;
+    }
+    ID3D11Device* dev = nullptr;
+    ctx->GetDevice(&dev);
+    if (!dev) return false;
+    D3D11_BUFFER_DESC p{};
+    p.ByteWidth = d.ByteWidth;
+    p.Usage = D3D11_USAGE_DEFAULT;
+    p.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    D3D11_BUFFER_DESC q{};
+    q.ByteWidth = d.ByteWidth;
+    q.Usage = D3D11_USAGE_DEFAULT;
+    q.BindFlags = D3D11_BIND_VERTEX_BUFFER;   // never bound: a boxed UpdateSubresource may write it (a constant buffer's box needs D3D11.1)
+    const HRESULT h1 = dev->CreateBuffer(&p, nullptr, &g_privCb);
+    const HRESULT h2 = SUCCEEDED(h1) ? dev->CreateBuffer(&q, nullptr, &g_workBuf) : E_FAIL;
+    dev->Release();
+    if (FAILED(h1) || FAILED(h2) || !g_privCb || !g_workBuf) {
+        if (g_privCb) g_privCb->Release();
+        if (g_workBuf) g_workBuf->Release();
+        g_privCb = g_workBuf = nullptr;
+        Log::get().note("native on foot marker fix: the private b0 (%u bytes) or its work buffer could not be made (0x%08lX, 0x%08lX); nothing is "
+                        "patched this session", d.ByteWidth, static_cast<unsigned long>(h1), static_cast<unsigned long>(h2));
+        return false;
+    }
+    g_privBytes = d.ByteWidth;
+    g_privFailed = false;
+    return true;
+}
+}  // namespace f44
+}  // namespace
+
+bool nativeOnFootMarkerFixBegin(ID3D11DeviceContext* ctx) {
+    using namespace f44;
+    if (!ctx || !g_fix.pending) return false;
+    g_fix.pending = false;
+    if (g_fix.serial != g_drawSerial || g_fix.ctx != ctx || g_fix.bound || (g_fix.eye != 0 && g_fix.eye != 1)) {
+        ++g_win.fixStale;
+        return false;
+    }
+    EyeStats& s = g_win.eye[g_fix.eye];
+    auto refuseBind = [&s](const char* why) {
+        ++s.fBind;
+        if (!g_bindNoted) {
+            g_bindNoted = true;
+            Log::get().note("native on foot marker fix: a decided draw was drawn unpatched: %s. Said once; counted in the 1 s lines", why);
+        }
+        return false;
+    };
+    if (bindingShaderHash(BindSlot::Vs) != nofoot::kMarkerCompositeVs) return refuseBind("the vertex shader bound at the issue is not the marker composite's");
+    ID3D11Buffer* cb0 = nullptr;
+    if (!vsB0Plain(ctx, &cb0)) return refuseBind("b0 at the issue is not a whole-buffer bind from constant 0");
+    if (static_cast<const void*>(cb0) != g_fix.cb0) {
+        cb0->Release();
+        return refuseBind("b0 at the issue is not the buffer the decision read");
+    }
+    if (!ensurePrivate(ctx, cb0)) {
+        cb0->Release();
+        return refuseBind("no private b0 of the game's b0 size");
+    }
+    // The game's whole b0 into the work buffer, rows 4 and 5 (moved) written over it, the work buffer copied whole into the private b0 (every
+    // copy into the constant buffer is whole), then the private b0 bound. GPU order makes each step see the one before.
+    const D3D11_BOX all{0, 0, 0, g_privBytes, 1, 1};
+    ctx->CopySubresourceRegion(g_workBuf, 0, 0, 0, 0, cb0, 0, &all);
+    const D3D11_BOX rows{4 * 16, 0, 0, 6 * 16, 1, 1};
+    vScreenUpdateSubresourceRaw(ctx, g_workBuf, 0, &rows, g_fix.rows45, 0, 0);
+    ctx->CopySubresourceRegion(g_privCb, 0, 0, 0, 0, g_workBuf, 0, &all);
+    ctx->VSSetConstantBuffers(0, 1, &g_privCb);
+    g_fix.saved = cb0;   // the reference vsB0Plain took, held until End
+    g_fix.bound = true;
+    ++s.fPatched;
+    if (g_fix.held) ++s.fHeld;
+    // Item 4: the private b0's rows 4..7 as written, staged for the re-measure; the record notes what was applied.
+    if (g_fix.slot >= 0 && g_fix.slot == g_staging.openSlot() && g_recFrame[g_fix.slot] == g_fix.frame && g_fix.rec < g_recs[g_fix.slot].size()) {
+        Rec& r = g_recs[g_fix.slot][g_fix.rec];
+        const int64_t at = g_staging.append(ctx, g_privCb, kMarkerRowsOffset, kMarkerRowsBytes);
+        r.fixApplied = true;
+        r.fixHeld = g_fix.held;
+        r.fixDx = static_cast<float>(g_fix.dx);
+        r.fixDy = static_cast<float>(g_fix.dy);
+        r.patchedAt = static_cast<int32_t>(at);
+    }
+    if (!g_fixAppliedNoted) {
+        g_fixAppliedNoted = true;
+        Log::get().note("native on foot marker fix: first patched marker composite draw (eye %d, frame %u): dx %+.5f, dy %+.5f NDC%s", g_fix.eye,
+                        g_fix.frame, g_fix.dx, g_fix.dy, g_fix.held ? " (held)" : "");
+    }
+    return true;
+}
+
+void nativeOnFootMarkerFixEnd(ID3D11DeviceContext* ctx) {
+    using namespace f44;
+    if (!ctx || !g_fix.bound) return;
+    ctx->VSSetConstantBuffers(0, 1, &g_fix.saved);
+    if (g_fix.saved) g_fix.saved->Release();
+    g_fix.saved = nullptr;
+    g_fix.bound = false;
+}
+
 void nativeOnFootMarkerProbeShutdown() {
     f44::g_staging.release();
+    if (f44::g_fix.saved) f44::g_fix.saved->Release();
+    f44::g_fix = f44::Fix{};
+    if (f44::g_privCb) f44::g_privCb->Release();
+    if (f44::g_workBuf) f44::g_workBuf->Release();
+    f44::g_privCb = f44::g_workBuf = nullptr;
 }
 
 void nativeOnFootFrameBoundary(uint32_t frameNo) {

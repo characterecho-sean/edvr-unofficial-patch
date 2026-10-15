@@ -306,13 +306,29 @@ inline double ndcAngleDeg(const float rows[16], const double a[2], const double 
     }
     return angleDeg(ra, rb);
 }
-// F47 (kept ready, NOT used by F46): the per-eye NDC offset on a private copy of the marker composite's b0. row4' = row4 + dx row7 and
-// row5' = row5 + dy row7 move the marker's NDC by (dx, dy) wherever r7 . p > 0 (the shader divides by |w|: behind the eye the move flips).
+// F47: the per-eye NDC offset on a private copy of the marker composite's b0. row4' = row4 + dx row7 and row5' = row5 + dy row7 move the
+// marker's NDC by (dx, dy) wherever r7 . p > 0 (the shader divides by |w|: behind the eye the move flips).
 inline void ndcOffsetRows(float r4[4], float r5[4], const float r7[4], double dx, double dy) noexcept {
     for (int i = 0; i < 4; ++i) {
         r4[i] = static_cast<float>(r4[i] + dx * r7[i]);
         r5[i] = static_cast<float>(r5[i] + dy * r7[i]);
     }
+}
+// F47: THE DELTA. The same point P through both views: (dx, dy) = ndc(P through the world rows at o_w) - ndc(P through the marker composite's
+// rows 4, 5, 7 at o_hud). One point through both cancels the icon's design height above P. The gate: both w > 0 and |dx|, |dy| < gate (NDC).
+enum NdcDeltaWhy : int { kDeltaOk = 0, kDeltaWorldBehind = 1, kDeltaMarkerBehind = 2, kDeltaGate = 3 };
+inline int ndcDelta(const float world[16], const double ow[3], const float r4[4], const float r5[4], const float r7[4], const double oh[3],
+                    const double P[3], double gate, double* dx, double* dy) noexcept {
+    *dx = *dy = 0.0;
+    double wc[4], mc[3];
+    worldClip(world, P, ow, wc);
+    if (!(wc[3] > 1e-9)) return kDeltaWorldBehind;
+    markerClip(r4, r5, r7, P, oh, mc);
+    if (!(mc[2] > 1e-9)) return kDeltaMarkerBehind;
+    *dx = wc[0] / wc[3] - mc[0] / mc[2];
+    *dy = wc[1] / wc[3] - mc[1] / mc[2];
+    if (!(std::fabs(*dx) < gate) || !(std::fabs(*dy) < gate)) return kDeltaGate;
+    return kDeltaOk;
 }
 
 }  // namespace drawtag

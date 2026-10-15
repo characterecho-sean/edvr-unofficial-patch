@@ -117,7 +117,22 @@ inline bool nativeOnFootMarkerProbeLive() {
 void nativeOnFootMarkerProbeMap(ID3D11Resource* resource, void* data, int mapType);
 void nativeOnFootMarkerProbeUnmap(const ID3D11Resource* resource);
 void nativeOnFootMarkerProbeDraw(ID3D11DeviceContext* ctx, uint32_t instances, uint32_t startInstance, char kind);
-// vScreen's shutdown: the staging buffers.
+// F47: the game's UpdateSubresource of a buffer (owner context, before the real call): the marker composite's b0 CPU shadow takes the write.
+// `boxed` with [left, right) the byte range the data covers; otherwise the whole buffer from data.
+void nativeOnFootMarkerProbeUpdate(const ID3D11Resource* resource, const void* data, bool boxed, uint32_t left, uint32_t right);
+// vScreen's shutdown: the staging buffers (and F47's private constant buffers).
 void nativeOnFootMarkerProbeShutdown();
+
+// F47 (TEMPORARY, fix.native_on_foot_marker_fix = off | on, default off, live; it turns the probe's machinery on with it): the marker
+// composite's per-eye NDC correction. The draw tee decides (both eyes' marker draws matched in the recent read-backs, this draw the one that
+// matched, the CPU shadows of its b0 and o_hud and the eye's world view present, |dx|, |dy| < 0.1 NDC and w > 0; the last good delta held one
+// frame on a miss); Begin, inside the UI layer's bracket around the game's own issue, binds a private copy of b0 with rows 4 and 5 moved by
+// (dx, dy) . row 7; End, after the layer's second issues, puts the game's b0 back. Begin returns false (and binds nothing) on every refusal.
+inline std::atomic<bool> g_nativeOnFootMarkerFixKey{false};
+inline bool nativeOnFootMarkerFixLive() {
+    return g_nativeOnFootMarkerFixKey.load(std::memory_order_relaxed) && nativeOnFootMarkerProbeLive();
+}
+bool nativeOnFootMarkerFixBegin(ID3D11DeviceContext* ctx);
+void nativeOnFootMarkerFixEnd(ID3D11DeviceContext* ctx);
 
 }  // namespace edvr
