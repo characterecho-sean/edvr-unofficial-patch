@@ -60,6 +60,7 @@ float g_nowHeadPose[12] = {};
 bool g_renderHeadValid = false, g_nowHeadValid = false, g_haveFrameInput = false;
 uint32_t g_nowHeadSequence = 0;
 uint64_t g_frameSequence = 0;
+uint32_t g_inputVersion = 0;
 
 State* identify(void* context) {
     for (unsigned i = 0; i < g_used; ++i) {
@@ -278,13 +279,20 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
     const bool inputV1 = input && input->version == EDVR_NATIVE_FRAME_INPUT_VERSION_1 &&
         (input->size == EDVR_NATIVE_FRAME_INPUT_SIZE_1 || input->size == sizeof(*input));
     const bool inputV2 = input && input->version == EDVR_NATIVE_FRAME_INPUT_VERSION_2 && input->size == sizeof(*input);
+    if (input && input->version == EDVR_NATIVE_FRAME_INPUT_VERSION_2 && !inputV2) {   // F32: the one way a version 2 input is refused
+        static bool noted = false;
+        if (!noted) {
+            noted = true;
+            edvr::Log::get().note("now head: frame input version 2 REFUSED: size %u, this build's version 2 size is %u (the runtime steps down to version 1)",
+                                  static_cast<unsigned>(input->size), static_cast<unsigned>(sizeof(*input)));
+        }
+    }
     if (!state || state != g_current || !state->active || !input || !output ||
         (!inputV1 && !inputV2) ||
         (!wantsLook && !wantsFade && !wantsChannel && !wantsPacing && !wantsTrim && !legacy) ||
         input->generation != state->generation || input->referenceGeneration == 0 ||
         input->sequence == 0 || input->sequence <= state->sequenceFloor ||
-        input->valid > 1 || (input->valid && !rigidPose(input->physicalHead)) ||
-        (inputV2 && (input->nowValid > 1 || (input->nowValid && !rigidPose(input->nowHead))))) return E_INVALIDARG;
+        input->valid > 1 || (input->valid && !rigidPose(input->physicalHead))) return E_INVALIDARG;
 
     EdvrNativeFrameOutput result{};
     result.size = wantsLook ? sizeof(result)
@@ -318,7 +326,26 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
     g_frameSequence = input->sequence;
     g_renderHeadValid = physicalValid;
     if (physicalValid) std::memcpy(g_renderHead, input->physicalHead, sizeof(g_renderHead));
-    g_nowHeadValid = inputV2 && input->nowValid != 0;
+    // F32: an optional head that is not usable is dropped for this frame, never a refusal of the frame (a refusal steps the runtime's ladder
+    // down for the session). It is logged once.
+    const bool nowUsable = inputV2 && input->nowValid == 1 && rigidPose(input->nowHead);
+    if (inputV2 && input->nowValid != 0 && !nowUsable) {
+        static bool noted = false;
+        if (!noted) {
+            noted = true;
+            edvr::Log::get().note("now head: dropped for this frame (nowValid %u, not a rigid transform): the frame goes on without it", static_cast<unsigned>(input->nowValid));
+        }
+    }
+    g_nowHeadValid = nowUsable;
+    g_inputVersion = input->version;
+    if (inputV2) {
+        static bool accepted = false;
+        if (!accepted) {
+            accepted = true;
+            edvr::Log::get().note("now head: frame input version 2 accepted (nowValid %u, answer #%u, geometry #%llu)", static_cast<unsigned>(input->nowValid),
+                                  static_cast<unsigned>(input->nowSequence), static_cast<unsigned long long>(input->sequence));
+        }
+    }
     if (g_nowHeadValid) {
         std::memcpy(g_nowHeadPose, input->nowHead, sizeof(g_nowHeadPose));
         g_nowHeadSequence = input->nowSequence;
@@ -512,6 +539,7 @@ bool nativeFrameNowPose(EdvrNativeNowPose& out) {
     out.nowValid = g_nowHeadValid;
     out.nowSequence = g_nowHeadSequence;
     out.frameSequence = g_frameSequence;
+    out.inputVersion = g_inputVersion;
     return true;
 }
 

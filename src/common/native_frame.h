@@ -71,6 +71,7 @@ struct EdvrNativeNowPose {
     bool renderValid, nowValid;
     uint32_t nowSequence;
     uint64_t frameSequence;
+    uint32_t inputVersion;   // the frame input version the provider last accepted (1 or 2)
 };
 
 struct EdvrNativeFrameOutput {

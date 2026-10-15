@@ -24,12 +24,13 @@ inline NowHeadPublication& nowHeadPublication() {
 }
 
 // `m` is a 3x4 row-major rigid transform (HmdMatrix34_t::m).
-inline void publishNowHead(const float m[12]) {
+inline uint32_t publishNowHead(const float m[12]) {
   NowHeadPublication& p = nowHeadPublication();
   std::lock_guard<std::mutex> lock(p.mutex);
   std::memcpy(p.pose, m, sizeof(p.pose));
   ++p.sequence;
   p.valid = true;
+  return p.sequence;
 }
 
 // False until an answer has been published.

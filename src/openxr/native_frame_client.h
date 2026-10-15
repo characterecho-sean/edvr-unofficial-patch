@@ -2,6 +2,7 @@
 #include "../common/native_frame.h"
 #include "geometry_snapshot.h"
 #include "now_head_publication.h"   // F31: the "now" head the version 2 input carries
+#include "native_trace.h"
 #include <cstring>
 
 namespace edvr::openxr {
@@ -33,12 +34,18 @@ class NativeFrameClient final {
     uint32_t nowSequence=0;
     in.nowValid=readNowHead(in.nowHead,nowSequence)?1u:0u;
     in.nowSequence=nowSequence;
-    return beginLadder([&](EdvrNativeFrameOutput& o,uint32_t version){
+    const uint32_t askedBefore=providerVersion_;
+    const HRESULT result=beginLadder([&](EdvrNativeFrameOutput& o,uint32_t version){
       // A provider that refuses version 2 is sent the version 1 words, exactly as before (size = the version 1 prefix).
       EdvrNativeFrameInput sent=in;
       if(version<EDVR_NATIVE_FRAME_VERSION_7){sent.size=EDVR_NATIVE_FRAME_INPUT_SIZE_1;sent.version=EDVR_NATIVE_FRAME_INPUT_VERSION_1;}
       return table_.beginFrame(table_.context,&sent,&o);
     },providerVersion_,out);
+    // F32: the negotiation is visible: each step down, and the version the provider accepted.
+    if(providerVersion_!=askedBefore)nativeTracePrintf("frame input: the provider refused version %u; asking version %u from now on\n",askedBefore,providerVersion_);
+    if(result==S_OK&&providerVersion_!=loggedVersion_){loggedVersion_=providerVersion_;
+      nativeTracePrintf("frame input: negotiated version %u (output version %u), now head %s\n",providerVersion_,out.version,in.nowValid?"sent":"none yet");}
+    return result;
   }
   // The version ladder, on its own so a rig can drive it with a provider of any age. A d3d11.dll that does not yet know a newer shape refuses it and
   // consumes nothing when it does, so the same frame can be asked again the only way that one knows: one step down at a time, until version 1 (which every
@@ -95,5 +102,6 @@ class NativeFrameClient final {
   // The shape (5/4/3/2/1) the provider last accepted; begin() asks this one
   // first, so a provider once found to be older is not re-probed every frame.
   uint32_t providerVersion_=EDVR_NATIVE_FRAME_VERSION_7;   // F31: starts at 7 (input version 2); a refusal steps down
+  uint32_t loggedVersion_=0;   // F32: the version last logged as negotiated
 };
 }
