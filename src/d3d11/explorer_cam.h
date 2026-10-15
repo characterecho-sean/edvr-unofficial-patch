@@ -112,6 +112,10 @@ void explorerCamNativeBody(bool wanted, bool body, const char* reason);
 void explorerCamFpBody(bool want, const char* reason);
 // F19 (TEMPORARY): the body's clip modifiers. unclipWant = write them (fix.native_on_foot_body_unclip on, native on foot); probeWant = the 5 s read.
 void explorerCamBodyClipTick(uint64_t nowMs, bool unclipWant, bool probeWant, const char* reason);
+// F21 (TEMPORARY, fix.native_on_foot_body_hybrid; frame thread). `want`: the key is on and native stereo is on foot. While it holds, the hook
+// (bodyClipStep, fpBodyStep) unclips the third-person torso, zeroes the third-person arms, hands and shoulders' view masks, and zeroes only the
+// first-person skeleton's masks on the first-person AMC. Logs the transitions and a 5 s census line.
+void explorerCamHybridTick(uint64_t nowMs, bool want, const char* reason);
 struct FpBodyReadback {
     uint64_t amc = 0;               // the first-person AMC last zeroed (0 = none yet this session)
     uint32_t parts = 0;             // how many of the three names were found in the table

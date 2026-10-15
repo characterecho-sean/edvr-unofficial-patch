@@ -118,6 +118,8 @@ ecm::Ring<ecm::AmcCensus, 2> g_censusRing;
 // F15 (native on foot E1, TEMPORARY): the first-person body hide. The frame thread writes g_fpHideWant and the names (g_fpIdx); the hook thread writes the
 // readback and counts the first-person AMC calls. g_fpBodyMutex guards g_fpIdx and g_fpReadback.
 std::atomic<bool> g_fpHideWant{false};
+std::atomic<bool> g_hybridWant{false};        // F21: the hybrid body is wanted now (frame thread writes; the hook reads)
+std::atomic<uint64_t> g_hybridMaskWrites{0};  // F21: third-person mask words zeroed since the frame thread last logged (hook thread)
 std::atomic<uint64_t> g_fpMode2Seen{0};
 std::mutex g_fpBodyMutex;
 int g_fpIdx[3] = {-1, -1, -1};                         // guarded by g_fpBodyMutex: the part index of each kFpBodyPartNames entry, -1 when absent
@@ -1311,6 +1313,26 @@ __declspec(noinline) bool sehZeroHeadMasks(uint8_t* amc, uint32_t* zeroed) noexc
         return false;
     }
 }
+// F21: zero every view mask word of the parts idx[0..n) (a negative index is skipped). `zeroed` counts the words that were not already zero.
+__declspec(noinline) bool sehZeroPartMasks(uint8_t* amc, const int* idx, size_t n, uint32_t* zeroed) noexcept {
+    __try {
+        uint32_t z = 0;
+        for (size_t i = 0; i < n; ++i) {
+            if (idx[i] < 0) continue;
+            volatile uint64_t* masks = reinterpret_cast<volatile uint64_t*>(amc + ecm::kOffAmcMasks + static_cast<uint32_t>(idx[i]) * ecm::kPartStride);
+            for (uint32_t k = 0; k < ecm::kPartVariants; ++k) {
+                if (masks[k] != 0) {
+                    masks[k] = 0;
+                    ++z;
+                }
+            }
+        }
+        *zeroed = z;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
 __declspec(noinline) bool sehReadCensus(const uint8_t* amc, ecm::AmcCensus* c) noexcept {
     __try {
         std::memcpy(&c->viewFilter, amc + ecm::kOffAmcViewFilter, 4);
@@ -1503,6 +1525,10 @@ void fpBodyStep(void* amcPtr) noexcept {
         std::lock_guard<std::mutex> lock(g_fpBodyMutex);
         for (int i = 0; i < 3; ++i) idx[i] = g_fpIdx[i];
     }
+    if (g_hybridWant.load(std::memory_order_acquire)) {   // F21: the hybrid body hides the first-person skeleton only; its arms and hands hold the weapon
+        idx[0] = -1;
+        idx[1] = -1;
+    }
     if (idx[0] < 0 && idx[1] < 0 && idx[2] < 0) return;   // no name resolved: nothing to zero (the frame thread logs why)
     uint64_t masks[3][ecm::kPartVariants] = {};
     uint32_t zeroed = 0;
@@ -1533,6 +1559,7 @@ struct ClipPart {
     uint64_t mod = 0;           // the modifier pointer at part+0x610 (0 = none)
     uint8_t enable = 0, dirty = 0;
     float amount = 0.0f;
+    uint64_t masks[ecm::kPartVariants] = {};   // F21: the view masks, as the probe read them (before that call's hybrid zero)
 };
 struct BodyClipSnap {
     uint64_t stamp = 0;         // GetTickCount64 of the read (0 = none yet)
@@ -1570,6 +1597,7 @@ __declspec(noinline) bool sehReadClipPart(const uint8_t* amc, uint32_t idx, Clip
             any |= inst;
         }
         p->present = any != 0;
+        std::memcpy(p->masks, amc + ecm::kOffAmcMasks + idx * ecm::kPartStride, 8 * ecm::kPartVariants);
         std::memcpy(&p->mod, amc + at + ecm::kOffPartClipMod, 8);
         p->readOk = false;
         if (plausiblePointer(p->mod)) {
@@ -1603,7 +1631,8 @@ void bodyClipStep(void* amcPtr) noexcept {
     if (!amcPtr) return;
     const bool unclip = g_unclipWant.load(std::memory_order_acquire);
     const bool probe = g_clipProbeWant.load(std::memory_order_acquire);
-    if (!unclip && !probe) return;
+    const bool hybrid = g_hybridWant.load(std::memory_order_acquire);   // F21: the third-person side of the hybrid body
+    if (!unclip && !probe && !hybrid) return;
     uint8_t* const amc = static_cast<uint8_t*>(amcPtr);
     AmcIdent id;
     if (!sehReadAmcIdent(amc, &id)) return;
@@ -1630,8 +1659,18 @@ void bodyClipStep(void* amcPtr) noexcept {
             g_clipSnap = s;
         }
     }
-    if (unclip) {
-        for (size_t i = 0; i < kClipUnclipParts; ++i) {
+    if (hybrid) {   // F21: the third-person arms, hands and both shoulders are hidden by their view masks (the torso is unclipped below)
+        const int maskIdx[4] = {idx[1], idx[2], idx[3], idx[4]};
+        uint32_t zeroed = 0;
+        if (sehZeroPartMasks(amc, maskIdx, 4, &zeroed)) {
+            if (zeroed) g_hybridMaskWrites.fetch_add(zeroed, std::memory_order_relaxed);
+        } else {
+            g_clipWriteFaults.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    if (unclip || hybrid) {
+        const size_t n = hybrid ? 1 : kClipUnclipParts;   // F21: the hybrid body unclips the EVASuit torso only (index 0)
+        for (size_t i = 0; i < n; ++i) {
             if (idx[i] < 0) continue;
             const int r = sehWriteClipPart(amc, static_cast<uint32_t>(idx[i]));
             if (r > 0) g_clipWrites.fetch_add(1, std::memory_order_relaxed);
@@ -3098,7 +3137,9 @@ void explorerCamFpBody(bool want, const char* reason) {
     }
     if (amc != 0 && amc != g_fpLoggedAmc) {
         g_fpLoggedAmc = amc;
-        Log::get().note("native on foot body: first-person body hidden (%s on AMC 0x%llX)", g_fpNamesText.c_str(), static_cast<unsigned long long>(amc));
+        Log::get().note("native on foot body: first-person body hidden (%s on AMC 0x%llX)",
+                        g_hybridWant.load(std::memory_order_acquire) ? "FirstPersonSkeleton only, the hybrid body" : g_fpNamesText.c_str(),
+                        static_cast<unsigned long long>(amc));
     }
     if (!g_fpNoMode2Noted && now - g_fpWantSinceMs >= 5000 && g_fpMode2Seen.load(std::memory_order_relaxed) == g_fpMode2AtStart) {
         g_fpNoMode2Noted = true;
@@ -3186,6 +3227,62 @@ void explorerCamBodyClipTick(uint64_t now, bool unclipWant, bool probeWant, cons
                         static_cast<unsigned long long>(p.mod), static_cast<unsigned>(p.enable), static_cast<unsigned>(p.dirty),
                         static_cast<double>(p.amount),
                         !p.present ? " (no instance on this AMC)" : (p.mod != 0 && !p.readOk) ? " (modifier not readable)" : "");
+    }
+}
+
+// ---- F21 (TEMPORARY): the hybrid first-person body (fix.native_on_foot_body_hybrid) ------------------------------------------------------
+// Frame thread, every frame. The hook does the writes: bodyClipStep (the third-person torso's clip; the arms, hands and shoulders' view masks) and
+// fpBodyStep (the first-person skeleton's masks only). The 5 s census shows what the hook last read, before its write in that call.
+namespace {
+bool g_hybridWantLast = false;      // the hybrid was wanted on the last frame
+uint64_t g_hybridLogMs = 0;         // when the census was last logged
+uint64_t g_hybridLogStamp = 0;      // the clip probe's snapshot stamp last logged
+}  // namespace
+
+void explorerCamHybridTick(uint64_t now, bool want, const char* reason) {
+    const char* why = reason ? reason : "";
+    g_hybridWant.store(want, std::memory_order_release);
+    if (want && !g_hybridWantLast) {
+        g_hybridLogMs = now;
+        g_hybridLogStamp = 0;
+        Log::get().note("native on foot body hybrid: on (first-person AMC: first-person skeleton hidden, its arms and hands kept; "
+                        "third-person AMC: EVASuit torso unclipped, its arms, hands and shoulders hidden)");
+    } else if (!want && g_hybridWantLast) {
+        Log::get().note("native on foot body hybrid: off (%s); nothing is restored: the game writes its own clip on its next item apply", why);
+    }
+    g_hybridWantLast = want;
+    if (!want || now - g_hybridLogMs < 5000) return;
+    g_hybridLogMs = now;
+    BodyClipSnap s;
+    {
+        std::lock_guard<std::mutex> lock(g_fpBodyMutex);
+        s = g_clipSnap;
+    }
+    const FpBodyReadback fp = explorerCamFpBodyReadback();
+    const uint64_t maskWrites = g_hybridMaskWrites.exchange(0, std::memory_order_relaxed);
+    const uint64_t torsoWrites = g_clipWrites.exchange(0, std::memory_order_relaxed);
+    if (s.stamp == 0) {
+        Log::get().note("native on foot body hybrid: the local third-person AMC has not reached the hook yet (no torso or mask writes on it)");
+    } else if (s.stamp != g_hybridLogStamp) {
+        g_hybridLogStamp = s.stamp;
+        const auto orMasks = [](const uint64_t* m) { return m[0] | m[1] | m[2] | m[3]; };   // nonzero = visible
+        const ClipPart& t = s.part[0];
+        Log::get().note("native on foot body hybrid: third-person AMC 0x%llX: torso %s enable=%u dirty=%u | view masks before this call's zero: "
+                        "arms 0x%llX hands 0x%llX shoulder L 0x%llX shoulder R 0x%llX (0 = hidden) | last 5 s: torso writes %llu, mask words zeroed %llu",
+                        static_cast<unsigned long long>(s.amc), t.named ? "named" : "NOT in the part table", static_cast<unsigned>(t.enable),
+                        static_cast<unsigned>(t.dirty), static_cast<unsigned long long>(orMasks(s.part[1].masks)),
+                        static_cast<unsigned long long>(orMasks(s.part[2].masks)), static_cast<unsigned long long>(orMasks(s.part[3].masks)),
+                        static_cast<unsigned long long>(orMasks(s.part[4].masks)), static_cast<unsigned long long>(torsoWrites),
+                        static_cast<unsigned long long>(maskWrites));
+    }
+    if (fp.amc == 0) {
+        Log::get().note("native on foot body hybrid: no first-person AMC has reached the hook yet (nothing hidden on it)");
+    } else {
+        Log::get().note("native on foot body hybrid: first-person AMC 0x%llX: first-person skeleton view masks after the zero 0x%llX (arms 0x%llX, "
+                        "hands 0x%llX kept; 0 = hidden)",
+                        static_cast<unsigned long long>(fp.amc), static_cast<unsigned long long>(fp.masks[2][0] | fp.masks[2][1] | fp.masks[2][2] | fp.masks[2][3]),
+                        static_cast<unsigned long long>(fp.masks[0][0] | fp.masks[0][1] | fp.masks[0][2] | fp.masks[0][3]),
+                        static_cast<unsigned long long>(fp.masks[1][0] | fp.masks[1][1] | fp.masks[1][2] | fp.masks[1][3]));
     }
 }
 

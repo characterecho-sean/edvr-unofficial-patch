@@ -57,6 +57,10 @@ bool g_visorBreathLast = false;                                 // frame thread 
 std::atomic<bool> g_reticleHead{false};                         // fix.native_on_foot_reticle_follow is head (F16)
 std::atomic<bool> g_reticleWriteOn{false};                      // the key 10 centring is wanted now: head, on foot, session (frame thread; the probe reads it, F16)
 bool g_reticleHeadLast = false, g_reticleWriteLast = false;     // frame thread only (F16)
+std::atomic<bool> g_reticleGame{false};                          // fix.native_on_foot_reticle_follow is game (F21): EDVR writes nothing to key 10
+bool g_reticleGameLast = false;                                  // frame thread only: as last logged (F21)
+std::atomic<bool> g_hybridKeyOn{false};                          // fix.native_on_foot_body_hybrid, as the frame thread last read it (F21, temporary)
+bool g_hybridKeyLast = false;                                    // frame thread only: as last logged (F21)
 std::atomic<bool> g_reticleLogWanted{false};                    // set by the frame thread on a switch to head; the probe consumes it once and queues the line (F17)
 std::atomic<float> g_hudElemScale{0.0f};                        // fix.native_on_foot_hud_element_scale, live: 0 = the game's own (F17)
 float g_hudElemLast = -1.0f;                                    // frame thread only: as last logged (F17)
@@ -478,11 +482,16 @@ void readKey() {
         g_visorUpLast = visorUp;
     }
     // F16: the reticle follows aim (the game's own position, the default) or head (key 10 placed along the head direction, F17).
-    const bool reticleHead = cfg.getString("fix.native_on_foot_reticle_follow", "aim") == "head";
+    // F21: "game" leaves key 10 to the game entirely (no aim centring, no head placement; a head placement made before the switch is handed back once).
+    const std::string reticleMode = cfg.getString("fix.native_on_foot_reticle_follow", "aim");
+    const bool reticleHead = reticleMode == "head";
+    const bool reticleGame = reticleMode == "game";
     g_reticleHead.store(reticleHead, std::memory_order_relaxed);
-    if (first || reticleHead != g_reticleHeadLast) {
-        Log::get().note("native on foot reticle follows: %s", reticleHead ? "head" : "aim");
+    g_reticleGame.store(reticleGame, std::memory_order_relaxed);
+    if (first || reticleHead != g_reticleHeadLast || reticleGame != g_reticleGameLast) {
+        Log::get().note("native on foot reticle follows: %s", reticleGame ? "game (EDVR writes nothing to the reticle)" : reticleHead ? "head" : "aim");
         g_reticleHeadLast = reticleHead;
+        g_reticleGameLast = reticleGame;
     }
     // F16: the per-group HUD offsets (user settings, live): x and y per group, a fraction of the HUD canvas, read under the layout hook's lock.
     {
@@ -581,6 +590,14 @@ void readKey() {
     if (first || cbProbeOn != g_cbProbeKeyLast) {
         Log::get().note("native on foot: fix.native_on_foot_body_cb_probe is %s (temporary)", cbProbeOn ? "on" : "off");
         g_cbProbeKeyLast = cbProbeOn;
+    }
+    // F21 (TEMPORARY): the hybrid first-person body (explorer_cam.cpp, explorerCamHybridTick). While it is on and native stereo is on foot it
+    // overrides fix.native_on_foot_hide_fp_body and fix.native_on_foot_body_unclip.
+    const bool hybridOn = cfg.getString("fix.native_on_foot_body_hybrid", "off") == "on";
+    g_hybridKeyOn.store(hybridOn, std::memory_order_relaxed);
+    if (first || hybridOn != g_hybridKeyLast) {
+        Log::get().note("native on foot: fix.native_on_foot_body_hybrid is %s (temporary)", hybridOn ? "on" : "off");
+        g_hybridKeyLast = hybridOn;
     }
 }
 
@@ -2455,7 +2472,11 @@ void __fastcall reticleIndicatorProbe(void* instance, void* node) noexcept {
     if (key == 10) {
         const bool writeOn = g_reticleWriteOn.load(std::memory_order_relaxed);
         const bool announce = g_reticleLogWanted.exchange(false, std::memory_order_relaxed);
-        if (g_reticleHead.load(std::memory_order_relaxed)) {
+        if (g_reticleGame.load(std::memory_order_relaxed)) {
+            // F21: the game places key 10. A head placement made before the switch is handed back once (a no-op when there is none); nothing else is written.
+            reticleFollowHead(ia, false, false);
+            if (writeOn && announce) f14Queue("native on foot reticle: the game places key 10 (EDVR writes nothing to it)");
+        } else if (g_reticleHead.load(std::memory_order_relaxed)) {
             reticleFollowHead(ia, writeOn, announce);
         } else {
             reticleFollowHead(ia, false, false);
@@ -2863,6 +2884,9 @@ struct EyeSample {
     bool headOk = false;
     uint64_t stamp = 0;
     float cam[3] = {}, head[3] = {}, camBody[3] = {}, headBody[3] = {};
+    // F21: the raw inputs of the derived values, read in the same callback: the AMC origin (world), its basis rows (world), the head joint in
+    // avatar-root model space (the +0x58 translation, unconverted).
+    float origin[3] = {}, rows[9] = {}, headModel[3] = {};
 };
 std::mutex g_eyeMutex;                   // guards g_eyeSample (game thread writes, frame thread reads)
 EyeSample g_eyeSample;
@@ -2918,6 +2942,11 @@ void eyeSample(void* amcPtr, void* jobPtr, uint64_t now) noexcept {
         s.camBody[i] = dc;
         s.headBody[i] = dh;
     }
+    for (size_t i = 0; i < 3; ++i) {
+        s.origin[i] = o[i];
+        for (size_t j = 0; j < 3; ++j) s.rows[3 * i + j] = M[4 * i + j];
+    }
+    if (s.headOk) std::memcpy(s.headModel, nk.head, sizeof(s.headModel));
     std::lock_guard<std::mutex> lock(g_eyeMutex);
     g_eyeSample = s;
 }
@@ -2945,6 +2974,31 @@ void eyeProbeLine() {
     }
     if (!s.valid || s.stamp == g_eyeLoggedStamp) return;
     g_eyeLoggedStamp = s.stamp;
+    // F21: the raw inputs, for a hand check of the derived line below. |cam - origin| is the camera's distance from the AMC origin (about the eye
+    // height if both are in one frame); the row lengths are 1 for a plain rotation (anything else is a scale); |head model| is the head's height in
+    // avatar-root space when the root sits at the feet, and it must equal |head world - origin| when the basis is orthonormal.
+    {
+        const float co[3] = {s.cam[0] - s.origin[0], s.cam[1] - s.origin[1], s.cam[2] - s.origin[2]};
+        const float rl[3] = {std::sqrt(s.rows[0] * s.rows[0] + s.rows[1] * s.rows[1] + s.rows[2] * s.rows[2]),
+                             std::sqrt(s.rows[3] * s.rows[3] + s.rows[4] * s.rows[4] + s.rows[5] * s.rows[5]),
+                             std::sqrt(s.rows[6] * s.rows[6] + s.rows[7] * s.rows[7] + s.rows[8] * s.rows[8])};
+        const float hm = std::sqrt(s.headModel[0] * s.headModel[0] + s.headModel[1] * s.headModel[1] + s.headModel[2] * s.headModel[2]);
+        const float ho[3] = {s.head[0] - s.origin[0], s.head[1] - s.origin[1], s.head[2] - s.origin[2]};
+        const float hw = std::sqrt(ho[0] * ho[0] + ho[1] * ho[1] + ho[2] * ho[2]);
+        Log::get().note("native on foot eye inputs: cam=(%.3f,%.3f,%.3f) origin=(%.3f,%.3f,%.3f) |cam-origin|=%.3f "
+                        "row0=(%.4f,%.4f,%.4f) row1=(%.4f,%.4f,%.4f) row2=(%.4f,%.4f,%.4f) row_len=%.4f,%.4f,%.4f "
+                        "head_model=%s(%.3f,%.3f,%.3f) |head_model|=%.3f head_world=%s(%.3f,%.3f,%.3f) |head_world-origin|=%.3f",
+                        static_cast<double>(s.cam[0]), static_cast<double>(s.cam[1]), static_cast<double>(s.cam[2]),
+                        static_cast<double>(s.origin[0]), static_cast<double>(s.origin[1]), static_cast<double>(s.origin[2]),
+                        static_cast<double>(std::sqrt(co[0] * co[0] + co[1] * co[1] + co[2] * co[2])),
+                        static_cast<double>(s.rows[0]), static_cast<double>(s.rows[1]), static_cast<double>(s.rows[2]),
+                        static_cast<double>(s.rows[3]), static_cast<double>(s.rows[4]), static_cast<double>(s.rows[5]),
+                        static_cast<double>(s.rows[6]), static_cast<double>(s.rows[7]), static_cast<double>(s.rows[8]),
+                        static_cast<double>(rl[0]), static_cast<double>(rl[1]), static_cast<double>(rl[2]),
+                        s.headOk ? "" : "unread ", static_cast<double>(s.headModel[0]), static_cast<double>(s.headModel[1]),
+                        static_cast<double>(s.headModel[2]), static_cast<double>(hm), s.headOk ? "" : "unread ",
+                        static_cast<double>(s.head[0]), static_cast<double>(s.head[1]), static_cast<double>(s.head[2]), static_cast<double>(hw));
+    }
     const float dx = s.camBody[0] - s.headBody[0], dy = s.camBody[1] - s.headBody[1], dz = s.camBody[2] - s.headBody[2];
     if (s.headOk) {
         Log::get().note("native on foot eye vs body: cam_in_body=(%.3f,%.3f,%.3f) head_in_body=(%.3f,%.3f,%.3f) cam_minus_head=(%.3f,%.3f,%.3f)",
@@ -3749,12 +3803,17 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
     const bool visorWant = visorUp && breathable && nativeOnFootActive() && session;
     visorTick(visorWant, !visorUp ? "the visor in breathable air is game" : !breathable ? "breathable air off" : !nativeOnFootActive() ? "native stereo on foot ended" : "the game session ended");
     // F15 (TEMPORARY): the first-person body hide (explorer_cam.cpp), while native stereo is on foot and its key is on.
+    // F21 (TEMPORARY): the hybrid body (explorer_cam.cpp, explorerCamHybridTick). While on, it overrides the two body keys below.
+    const bool hybridKey = g_hybridKeyOn.load(std::memory_order_relaxed);
+    const bool hybridWant = hybridKey && nativeOnFootActive();
+    explorerCamHybridTick(now, hybridWant, !hybridKey ? "fix.native_on_foot_body_hybrid is off" : "native stereo on foot ended");
     const bool fpKey = g_fpKeyOn.load(std::memory_order_relaxed);
-    explorerCamFpBody(fpKey && nativeOnFootActive(), !fpKey ? "fix.native_on_foot_hide_fp_body is off" : "native stereo on foot ended");
+    explorerCamFpBody((fpKey || hybridWant) && nativeOnFootActive(),
+                      !(fpKey || hybridWant) ? "fix.native_on_foot_hide_fp_body is off" : "native stereo on foot ended");
     // F19 (TEMPORARY): the body's clip modifiers (unclip, written while native stereo is on foot) and their 5 s probe (explorer_cam.cpp).
     const bool unclipKey = g_unclipKeyOn.load(std::memory_order_relaxed);
-    explorerCamBodyClipTick(now, unclipKey && nativeOnFootActive(), nativeOnFootActive(),
-                            !unclipKey ? "fix.native_on_foot_body_unclip is off" : "native stereo on foot ended");
+    explorerCamBodyClipTick(now, unclipKey && !hybridWant && nativeOnFootActive(), nativeOnFootActive(),
+                            !(unclipKey && !hybridWant) ? "fix.native_on_foot_body_unclip is off or the hybrid body is on" : "native stereo on foot ended");
     // F19 (TEMPORARY): the constant-buffer probe's flag (on foot, native or Explorer Cam) and the drain of its readings.
     g_nativeOnFootBodyProbe.store(g_cbProbeKeyOn.load(std::memory_order_relaxed) && journalOnFootKnown() && journalOnFoot(), std::memory_order_relaxed);
     bodyCbProbeLine();
@@ -3784,6 +3843,7 @@ void nativeOnFootShutdown() {
         g_hudOffsetOn = false;                                  // F16: the layout hook applies no offsets from here
     }
     explorerCamFpBody(false, "the game is shutting down");
+    explorerCamHybridTick(GetTickCount64(), false, "the game is shutting down");            // F21
     explorerCamBodyClipTick(GetTickCount64(), false, false, "the game is shutting down");   // F19
     g_nativeOnFootBodyProbe.store(false, std::memory_order_relaxed);                       // F19
     bodyModeShutdown();                                                                    // F20
