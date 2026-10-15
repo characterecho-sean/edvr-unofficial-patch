@@ -39,4 +39,8 @@ void stallWatchWriteCounts(const char* reason);
 // with the process, and a thread the sampler had stopped cannot exist: the stop never outlasts the capture.)
 void stallWatchShutdown();
 
+// F24 (load sampler, read only): the render thread's handle, stack limits and thread id as the watchdog registered them. False before its first
+// beat. The handle belongs to the watchdog; the caller must not close it.
+bool stallWatchRenderTarget(void** handle, uint64_t* lo, uint64_t* hi, uint32_t* tid);
+
 }  // namespace edvr

@@ -1097,7 +1097,7 @@ void testPins(const std::string& root) {
         {&pass, "const bool footSplit = footSplitNow();", 1, "R5c", "the mode is asked once, where the constants are built"},
         {&pass, "bool footSplitNow() {", 1, "R5d", "the mode has one definition"},
         {&pass, "f.watching = journalWatchActive();", 1, "R5e", "the verdict's input: the journal is read"},
-        {&pass, "f.gameplay = journalGameplay();", 1, "R5e", "the verdict's input: LoadGame"},
+        {&pass, "f.gameplay = journalSessionOrOnFoot(&viaFoot);", 1, "R5e", "the verdict's input: LoadGame, or Status.json on foot (F24: a training scenario)"},
         {&pass, "f.known = journalOnFootKnown();", 1, "R5e", "the verdict's input: Flags2 is in the file"},
         {&pass, "f.onFoot = journalOnFoot();", 1, "R5e", "the verdict's input: Flags2 bit 0"},
         {&pass, "f.vehicleKnown = journalSeatedKnown();", 1, "R5e", "the verdict's input: Flags is in the file"},

@@ -1563,7 +1563,17 @@ constexpr uint32_t kFootNoteCap = 40;                        // changes the log 
 bool footSplitNow() {
     TemporalFoot f;
     f.watching = journalWatchActive();
-    f.gameplay = journalGameplay();
+    // F24: the on-foot split only. A training scenario writes no LoadGame, so the session is also Status.json on foot (journalSessionOrOnFoot,
+    // the same fallback as native on foot, F22). No other user of journalGameplay() changes.
+    bool viaFoot = false;
+    f.gameplay = journalSessionOrOnFoot(&viaFoot);
+    if (viaFoot) {
+        static bool noted = false;
+        if (!noted) {
+            noted = true;
+            Log::get().note("temporal aa: game session from Status.json on foot (no LoadGame: a training scenario); the on-foot ship split uses it");
+        }
+    }
     f.known = journalOnFootKnown();
     f.onFoot = journalOnFoot();
     f.vehicleKnown = journalSeatedKnown();
