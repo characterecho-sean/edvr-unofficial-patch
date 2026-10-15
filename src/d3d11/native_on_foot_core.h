@@ -425,6 +425,28 @@ inline bool shiftIfAtOrigin(float pos[3], const float origin[3], const float d[3
     for (size_t i = 0; i < 3; ++i) pos[i] += d[i];
     return true;
 }
+// F54: the held weapon. The MotionGraphModelComponent submit job (0x43ED820) writes one record per object at obj+0x230, its position at
+// obj+0x240 and a copy at obj+0x354, rewritten from the instance's matrix every run (so an add after the job is not cumulative). The local
+// first-person weapon is an object with a non-zero view mask (obj+0x380), the viewmodel byte (obj+0x1C8) set, and its record, before any
+// shift, within kWeaponMatchM of either FP handAttach joint (51 R, 52 L; world, unshifted).
+constexpr float kWeaponMatchM = 0.3f;
+inline float dist3f(const float a[3], const float b[3]) noexcept {
+    const float x = a[0] - b[0], y = a[1] - b[1], z = a[2] - b[2];
+    return std::sqrt(x * x + y * y + z * z);
+}
+inline bool weaponIsLocalFp(uint64_t mask, uint8_t viewFlag, const float pos[3], const float attach[2][3], bool attachOk) noexcept {
+    if (mask == 0 || viewFlag == 0 || !attachOk) return false;
+    for (int s = 0; s < 2; ++s)
+        if (dist3f(pos, attach[s]) <= kWeaponMatchM) return true;   // a NaN distance never matches
+    return false;
+}
+// The shift: both copies of the record's position move by d (the FP raise, world).
+inline void weaponShift(float pos[3], float copy[3], const float d[3]) noexcept {
+    for (size_t i = 0; i < 3; ++i) {
+        pos[i] += d[i];
+        copy[i] += d[i];
+    }
+}
 // F51: the pose freeze's gate: no locomotion. The body's horizontal speed (its world position less the part along its up axis), low-passed
 // (tau kTauSec), under kMoveMps for kStillMs; ADS ends it (ADS stays excluded). A weapon out does not end it. Fed only new samples.
 struct PfzLocoRest {

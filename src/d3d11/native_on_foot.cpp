@@ -5987,14 +5987,13 @@ void f51Line(const EyeSample& s, const FpRootSnap& fp, bool fpFresh, bool raiseO
         }
         const double r = g_f51Applied;
         Log::get().note("native on foot body raise (F51): hand attach (world) L: skeleton (%.3f, %.3f, %.3f), with the arms' shift (%.3f, %.3f, %.3f); R: "
-                        "skeleton (%.3f, %.3f, %.3f), with the arms' shift (%.3f, %.3f, %.3f); weapon: not shifted by this build -- it is not one of the "
-                        "AMC's 54 parts, so the record shift does not reach it, and what draws it (attached at the handAttach joints) is not found yet; "
-                        "if it follows the skeleton it draws %.3f m below the hands while the raise is applied",
+                        "skeleton (%.3f, %.3f, %.3f), with the arms' shift (%.3f, %.3f, %.3f); weapon: not an AMC part -- F54 shifts it as an MGMC "
+                        "record when it matches (see the F54 lines); unshifted it would draw %.3f m below the hands while the raise is applied",
                         w[0][0], w[0][1], w[0][2], w[0][0] + r * g_f51Up[0], w[0][1] + r * g_f51Up[1], w[0][2] + r * g_f51Up[2], w[1][0], w[1][1],
                         w[1][2], w[1][0] + r * g_f51Up[0], w[1][1] + r * g_f51Up[1], w[1][2] + r * g_f51Up[2], r);
     } else {
-        Log::get().note("native on foot body raise (F51): hand attach: not read (%s); weapon: not shifted by this build (not an AMC part; its draw "
-                        "path is not found yet)", !s.extOkFp ? "the FP attach joints are not in the census" : "the FP root is not fresh");
+        Log::get().note("native on foot body raise (F51): hand attach: not read (%s); weapon: not an AMC part (F54: "
+                        "the MGMC shift needs these joints)",!s.extOkFp ? "the FP attach joints are not in the census" : "the FP root is not fresh");
     }
 }
 
@@ -6593,7 +6592,444 @@ void installBodyShiftOnce() {
                         why.c_str());
 }
 
-// ---- F49 (TEMPORARY): the pose freeze: the frAnim Animate post-hook ---------------------------------------------------------------
+// ---- F54 (TEMPORARY): the held weapon, the MotionGraphModelComponent records ----------------------------------------------------------
+// The static RE (build 332841): the held weapon is most likely a MotionGraphModelComponent (MGMC). Its submit job 0x43ED820 (reached only
+// through the thunk 0x43B796A; rcx = the MGMC) skips an object whose view mask [obj+0x380] is zero, else writes ONE 0x150-byte record at
+// obj+0x230, its position at obj+0x240..0x248 and a copy at obj+0x354..0x35C, rewritten from the instance's matrix every run (an add after
+// the job is not cumulative), and hands the record's pointer to 0x4C837B0, which the renderer reads later (deferred, as the AMC's 0x3DA1DE0).
+// The viewmodel byte is obj+0x1C8. MEASURE (always on in VR, read only; lines once a second while native stereo is on foot): a post-hook on
+// the job tables each MGMC with a non-zero mask (pointer, the byte, the mask, the record position, its distance to the FP and 3P handAttach
+// joints); a pre-hook on 0x4C837B0 tallies its callers by return address (the AMC's excluded) with the record nearest an FP handAttach joint.
+// SHIFT (fix.native_on_foot_body_raise_fp on, body mode, exactly when the FP arms rise): an MGMC that is the local FP weapon (mask non-zero,
+// the byte set, the record within 0.3 m of FP handAttach 51 or 52 before the shift) moves by the FP raise (both copies) after the job returns.
+// Inside both hooks: no allocation, logging or locks (one try-flag that skips, never waits); every read and write under SEH. The frame thread
+// publishes the joints (seqlock) and drains the counters and tables once a second.
+namespace f54 {
+constexpr uintptr_t kMgmcRva = 0x43ED820;
+const uint8_t kMgmcPrologue[35] = {0x48, 0x8B, 0xC4, 0x48, 0x89, 0x70, 0x20, 0x57, 0x48, 0x81, 0xEC, 0xC0, 0x00, 0x00, 0x00, 0x48, 0x8D, 0xB1,
+                                   0x80, 0x03, 0x00, 0x00, 0x48, 0x8B, 0xF9, 0x48, 0x83, 0x3E, 0x00, 0x0F, 0x84, 0xE9, 0x03, 0x00, 0x00};
+constexpr size_t kMgmcStolen = 8;   // mov rax,rsp; mov [rax+0x20],rsi; push rdi (no RIP-relative operand; the relay enters before they run)
+constexpr uintptr_t kRecRva = 0x4C837B0;
+const uint8_t kRecPrologue[24] = {0x4C, 0x8B, 0xDC, 0x4D, 0x89, 0x4B, 0x20, 0x4D, 0x89, 0x43, 0x18, 0x55,
+                                  0x56, 0x57, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48, 0x83, 0xEC, 0x68};
+constexpr size_t kRecStolen = 7;    // mov r11,rsp; mov [r11+0x20],r9
+constexpr uintptr_t kOffViewFlag = 0x1C8, kOffPos = 0x240, kOffPosCopy = 0x354, kOffMask = 0x380;
+constexpr uintptr_t kRecPosInRecord = 0x10;   // a record's position (every 0x4C837B0 caller's records share the AMC layout)
+constexpr uint32_t kRetAmc = 0x3DA2242;
+constexpr uint32_t kRecScanCap = 256;           // records scanned per 0x4C837B0 call for the nearest to the FP hand
+constexpr uint32_t kNoBest = 0xFFFFFFFFu;
+struct KnownCaller {
+    uint32_t ret;
+    const char* name;
+};
+// The 0x4C837B0 call sites the RE found (E8 calls: the return address is the call plus 5).
+const KnownCaller kKnown[] = {{0x3DA2242, "AMC"},           {0x43EDC24, "MGMC"},           {0x434D8D5, "GUI mesh"},
+                              {0x23C72E9, "root 0x23C7100"}, {0x31EC020, "root 0x31EBE90"}, {0x372F491, "root 0x372EF80"},
+                              {0x3C9BF53, "root 0x3C9B760"}, {0x3E75F6D, "root 0x3E75DA0"}};
+const char* knownName(uint32_t rva) noexcept {
+    for (const KnownCaller& k : kKnown)
+        if (k.ret == rva) return k.name;
+    return "unknown";
+}
+
+F9Probe g_mgmcHook, g_recHook;
+bool g_tried = false, g_armedMgmc = false, g_armedRec = false;   // frame thread only
+std::atomic<uintptr_t> g_base{0};
+std::atomic<bool> g_live{false};   // native stereo on foot (frame thread): the hooks table and scan only while it holds
+
+// The joints, world (frame thread publishes each frame; the hooks read): [0] L, [1] R. FP: handAttach 52 L, 51 R through the FP root's yaw (as
+// F45); 3P: handAttach 67 L, 66 R through the AMC matrix. Unshifted (the skeleton's own).
+struct Joints {
+    float fp[2][3] = {}, tp[2][3] = {};
+    bool fpOk = false, tpOk = false;
+};
+std::atomic<uint32_t> g_jSeq{0};
+Joints g_j;
+void jointsPublish(const Joints& j) noexcept {
+    g_jSeq.fetch_add(1, std::memory_order_acq_rel);
+    std::memcpy(&g_j, &j, sizeof(j));
+    g_jSeq.fetch_add(1, std::memory_order_release);
+}
+bool jointsRead(Joints& out) noexcept {
+    for (int tries = 0; tries < 4; ++tries) {
+        const uint32_t s1 = g_jSeq.load(std::memory_order_acquire);
+        if (s1 & 1u) continue;
+        std::memcpy(&out, &g_j, sizeof(out));
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if (g_jSeq.load(std::memory_order_relaxed) == s1) return true;
+    }
+    return false;
+}
+
+// The MGMC table: one slot per object with a non-zero mask this second. The tag is (second's generation << 48) | the object pointer; a slot of an
+// older generation is free to claim. The data is written under the slot's sequence; the frame thread reads the previous generation's slots.
+constexpr uint32_t kSlots = 128, kProbe = 16;
+struct MgmcSlot {
+    std::atomic<uint64_t> tag{0};
+    std::atomic<uint32_t> seq{0};
+    std::atomic<uint32_t> calls{0}, shifted{0};
+    uint8_t flag = 0;
+    uint64_t mask = 0;
+    float pos[3] = {};   // the record position before any shift
+};
+MgmcSlot g_slots[kSlots];
+std::atomic<uint32_t> g_gen{1};
+std::atomic<uint64_t> g_mgmcCalls{0}, g_mgmcMask0{0}, g_mgmcUnread{0}, g_mgmcFull{0}, g_mgmcShifted{0}, g_mgmcMatched{0};
+MgmcSlot* slotFor(uint64_t obj, uint32_t gen) noexcept {
+    const uint64_t want = (static_cast<uint64_t>(gen & 0xFFFFu) << 48) | (obj & 0x0000FFFFFFFFFFFFull);
+    const uint32_t h = static_cast<uint32_t>(((obj >> 4) * 0x9E3779B97F4A7C15ull) >> 57);
+    for (uint32_t i = 0; i < kProbe; ++i) {
+        MgmcSlot& s = g_slots[(h + i) % kSlots];
+        uint64_t t = s.tag.load(std::memory_order_acquire);
+        if (t == want) return &s;
+        if ((t >> 48) == (want >> 48)) continue;   // this second's slot of another object
+        if (s.tag.compare_exchange_strong(t, want, std::memory_order_acq_rel)) {
+            s.calls.store(0, std::memory_order_relaxed);
+            s.shifted.store(0, std::memory_order_relaxed);
+            return &s;
+        }
+        if (t == want) return &s;   // another thread claimed it for this object
+    }
+    return nullptr;
+}
+
+// The MGMC post-hook's work (job threads), after the original returned.
+void mgmcAfterSubmit(uint64_t obj) noexcept {
+    g_mgmcCalls.fetch_add(1, std::memory_order_relaxed);
+    uint64_t mask = 0;
+    if (!guardedRead(obj + kOffMask, &mask, 8)) {
+        g_mgmcUnread.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    if (!mask) {   // the job skipped it: never tabled, never shifted
+        g_mgmcMask0.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    const bool live = g_live.load(std::memory_order_relaxed);
+    const bool shiftOn = g_f51FpOn.load(std::memory_order_relaxed);
+    if (!live && !shiftOn) return;
+    uint8_t flag = 0;
+    float pos[3] = {};
+    if (!guardedRead(obj + kOffViewFlag, &flag, 1) || !guardedRead(obj + kOffPos, pos, sizeof(pos))) {
+        g_mgmcUnread.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    bool shifted = false;
+    Joints j;
+    if (shiftOn && jointsRead(j) && nofoot::weaponIsLocalFp(mask, flag, pos, j.fp, j.fpOk)) {
+        g_mgmcMatched.fetch_add(1, std::memory_order_relaxed);
+        float d[3] = {}, copy[3] = {};
+        if (fpRaiseRead(d) && !(d[0] == 0.0f && d[1] == 0.0f && d[2] == 0.0f) && guardedRead(obj + kOffPosCopy, copy, sizeof(copy))) {
+            float np[3] = {pos[0], pos[1], pos[2]};
+            nofoot::weaponShift(np, copy, d);
+            bool ok = true;
+            for (uintptr_t i = 0; i < 3; ++i) {
+                ok = guardedWriteFloat(obj + kOffPos + 4u * i, np[i]) && ok;
+                ok = guardedWriteFloat(obj + kOffPosCopy + 4u * i, copy[i]) && ok;
+            }
+            shifted = ok;
+        }
+    }
+    if (shifted) g_mgmcShifted.fetch_add(1, std::memory_order_relaxed);
+    if (!live) return;
+    MgmcSlot* s = slotFor(obj, g_gen.load(std::memory_order_relaxed));
+    if (!s) {
+        g_mgmcFull.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    s->seq.fetch_add(1, std::memory_order_acq_rel);
+    s->flag = flag;
+    s->mask = mask;
+    std::memcpy(s->pos, pos, sizeof(pos));
+    s->seq.fetch_add(1, std::memory_order_release);
+    s->calls.fetch_add(1, std::memory_order_relaxed);
+    if (shifted) s->shifted.fetch_add(1, std::memory_order_relaxed);
+}
+
+// The 0x4C837B0 callers, by return address (image RVA; 0xFFFFFFFF outside the image). The nearest record's details are written under a try-flag.
+constexpr uint32_t kCallers = 32;
+struct CallerSlot {
+    std::atomic<uint32_t> rva{0};   // 0 = free
+    std::atomic<uint64_t> calls{0}, records{0};
+    std::atomic<uint32_t> bestMm{kNoBest};
+    std::atomic<bool> busy{false};
+    uint32_t detMm = kNoBest, detIdx = 0, detCount = 0;   // under busy
+    uint64_t detRec = 0;
+    float detPos[3] = {};
+};
+CallerSlot g_callers[kCallers];
+std::atomic<uint64_t> g_recCalls{0}, g_amcCalls{0}, g_callerFull{0};
+CallerSlot* callerFor(uint32_t rva) noexcept {
+    for (uint32_t i = 0; i < kCallers; ++i) {
+        CallerSlot& c = g_callers[(rva * 2654435761u + i) % kCallers];
+        uint32_t r = c.rva.load(std::memory_order_acquire);
+        if (r == rva) return &c;
+        if (r != 0) continue;
+        if (c.rva.compare_exchange_strong(r, rva, std::memory_order_acq_rel) || r == rva) return &c;
+    }
+    return nullptr;
+}
+void recSubmitNote(uintptr_t ret, uint64_t recs, uint64_t stride, uint64_t count) noexcept {
+    g_recCalls.fetch_add(1, std::memory_order_relaxed);
+    const uintptr_t base = g_base.load(std::memory_order_relaxed);
+    const uint32_t rva = (base && ret >= base && ret - base < 0x7FFFFFFFu) ? static_cast<uint32_t>(ret - base) : 0xFFFFFFFFu;
+    if (rva == kRetAmc) {
+        g_amcCalls.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    if (!g_live.load(std::memory_order_relaxed)) return;
+    CallerSlot* c = callerFor(rva ? rva : 0xFFFFFFFFu);
+    if (!c) {
+        g_callerFull.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    const uint32_t n32 = static_cast<uint32_t>(count);
+    c->calls.fetch_add(1, std::memory_order_relaxed);
+    c->records.fetch_add(n32, std::memory_order_relaxed);
+    Joints j;
+    if (!recs || stride < 0x20 || stride > 0x4000 || !jointsRead(j) || !j.fpOk) return;
+    const uint32_t n = std::min(n32, kRecScanCap);
+    float best = 1e30f, bestPos[3] = {};
+    uint32_t bestIdx = 0;
+    for (uint32_t k = 0; k < n; ++k) {
+        float p[3] = {};
+        if (!guardedRead(static_cast<uintptr_t>(recs + k * stride + kRecPosInRecord), p, sizeof(p))) break;
+        const float dk = std::min(nofoot::dist3f(p, j.fp[0]), nofoot::dist3f(p, j.fp[1]));
+        if (dk < best) {   // a NaN never wins
+            best = dk;
+            bestIdx = k;
+            std::memcpy(bestPos, p, sizeof(p));
+        }
+    }
+    if (!(best < 1e6f)) return;
+    const uint32_t mm = static_cast<uint32_t>(best * 1000.0f);
+    uint32_t cur = c->bestMm.load(std::memory_order_relaxed);
+    bool won = false;
+    while (mm < cur) {
+        if (c->bestMm.compare_exchange_weak(cur, mm, std::memory_order_relaxed)) {
+            won = true;
+            break;
+        }
+    }
+    if (!won || c->busy.exchange(true, std::memory_order_acquire)) return;
+    c->detMm = mm;
+    c->detIdx = bestIdx;
+    c->detCount = n32;
+    c->detRec = recs + bestIdx * stride;
+    std::memcpy(c->detPos, bestPos, sizeof(bestPos));
+    c->busy.store(false, std::memory_order_release);
+}
+
+uint64_t __fastcall mgmcSubmitHooked(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t s5, uint64_t s6, uint64_t s7, uint64_t s8) {
+    const F35Fn original = reinterpret_cast<F35Fn>(g_mgmcHook.original);
+    if (!original) return 0;
+    const uint64_t r = original(a1, a2, a3, a4, s5, s6, s7, s8);   // the original first, with its arguments; its return value forwarded unchanged
+    if (a1) mgmcAfterSubmit(a1);
+    return r;
+}
+// The pre-hook: reached by the relay's jmp, so _ReturnAddress is the game's caller. Ten arguments per the RE (r9 = records, [+0x28] stride,
+// [+0x30] count, ... [+0x50]); twelve are forwarded (the two extra are read from the caller's frame and never used by the callee).
+using F54Fn12 = uint64_t(__fastcall*)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                                      uint64_t);
+uint64_t __fastcall recSubmitHooked(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t s5, uint64_t s6, uint64_t s7, uint64_t s8,
+                                    uint64_t s9, uint64_t s10, uint64_t s11, uint64_t s12) {
+    const uintptr_t ret = reinterpret_cast<uintptr_t>(_ReturnAddress());
+    const F54Fn12 original = reinterpret_cast<F54Fn12>(g_recHook.original);
+    if (!original) return 0;
+    recSubmitNote(ret, a4, s5, s6);
+    return original(a1, a2, a3, a4, s5, s6, s7, s8, s9, s10, s11, s12);
+}
+
+// Frame thread, once (VR): both prologues verified against the loaded image; a mismatch refuses that hook with a line, the game untouched.
+void installOnce() noexcept {
+    if (g_tried) return;
+    g_tried = true;
+    if (!runtimeVrProfile()) return;
+    const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    const char* peWhy = nullptr;
+    if (!base || !checkIdentity(base, &peWhy)) {
+        Log::get().note("native on foot weapon (F54): NOT installed -- identity mismatch (%s); the game was not touched.", peWhy ? peWhy : "no module");
+        return;
+    }
+    g_base.store(base, std::memory_order_relaxed);
+    size_t stolen = 0;
+    std::string why;
+    const F9ProbeSpec mspec{"native-on-foot-weapon-mgmc", kMgmcRva, kMgmcPrologue, sizeof(kMgmcPrologue), kMgmcStolen,
+                            reinterpret_cast<void*>(&mgmcSubmitHooked), "F54 MGMC submit"};
+    if (installF9ProbeInto(g_mgmcHook, mspec, base, &stolen, &why)) {
+        g_armedMgmc = true;
+        Log::get().note("native on foot weapon (F54): MGMC submit post-hook installed at EliteDangerous64.exe+0x43ED820, stolen=%zu bytes, prologue %zu "
+                        "bytes verified (measures every MGMC with a non-zero mask; shifts the local FP weapon only with "
+                        "fix.native_on_foot_body_raise_fp on, in body mode)", stolen, sizeof(kMgmcPrologue));
+    } else {
+        Log::get().note("native on foot weapon (F54): MGMC submit post-hook NOT installed at EliteDangerous64.exe+0x43ED820 -- %s. The weapon is "
+                        "neither measured nor shifted; the game was not touched.", why.c_str());
+    }
+    why.clear();
+    stolen = 0;
+    const F9ProbeSpec rspec{"native-on-foot-weapon-records", kRecRva, kRecPrologue, sizeof(kRecPrologue), kRecStolen,
+                            reinterpret_cast<void*>(&recSubmitHooked), "F54 record submit"};
+    if (installF9ProbeInto(g_recHook, rspec, base, &stolen, &why)) {
+        g_armedRec = true;
+        Log::get().note("native on foot weapon (F54): record submit pre-hook installed at EliteDangerous64.exe+0x4C837B0, stolen=%zu bytes, prologue %zu "
+                        "bytes verified (read only: its callers by return address, the AMC's +0x3DA2242 excluded)", stolen, sizeof(kRecPrologue));
+    } else {
+        Log::get().note("native on foot weapon (F54): record submit pre-hook NOT installed at EliteDangerous64.exe+0x4C837B0 -- %s. The game was not "
+                        "touched.", why.c_str());
+    }
+}
+
+struct MgmcRow {
+    uint64_t obj = 0, mask = 0;
+    uint8_t flag = 0;
+    float pos[3] = {};
+    uint32_t calls = 0, shifted = 0;
+    float key = 0.0f;   // the nearest joint distance (sort key)
+};
+uint64_t g_lineMs = 0;   // frame thread only
+
+// Frame thread, every frame: the install, the joints, and once a second the lines (while native stereo is on foot).
+void tick(uint64_t now) noexcept {
+    installOnce();
+    if (!g_armedMgmc && !g_armedRec) return;
+    const bool live = nativeOnFootActive();
+    g_live.store(live, std::memory_order_relaxed);
+    EyeSample s;
+    FpRootSnap fp{};
+    {
+        std::lock_guard<std::mutex> lock(g_eyeMutex);
+        s = g_eyeSample;
+        fp = g_fpRoot;
+    }
+    const bool sFresh = s.valid && now - s.stamp < 100;
+    const bool fpFresh = fp.ok && now - fp.stamp < 100;
+    Joints j;
+    j.fpOk = live && sFresh && s.extOkFp && fpFresh;
+    j.tpOk = live && sFresh && s.extOk3P;
+    if (j.fpOk) {
+        const double rn = std::sqrt(static_cast<double>(fp.rows[6]) * fp.rows[6] + static_cast<double>(fp.rows[8]) * fp.rows[8]);
+        const double cy = rn > 1e-6 ? fp.rows[8] / rn : 1.0, sy = rn > 1e-6 ? fp.rows[6] / rn : 0.0;
+        for (size_t side = 0; side < 2; ++side) {
+            const float* m = &s.extFpM[3 * (2 + side)];
+            j.fp[side][0] = static_cast<float>(static_cast<double>(fp.origin[0]) + m[0] * cy + m[2] * sy);
+            j.fp[side][1] = static_cast<float>(static_cast<double>(fp.origin[1]) + m[1]);
+            j.fp[side][2] = static_cast<float>(static_cast<double>(fp.origin[2]) - m[0] * sy + m[2] * cy);
+        }
+    }
+    if (j.tpOk)
+        for (size_t side = 0; side < 2; ++side)
+            for (size_t k = 0; k < 3; ++k) j.tp[side][k] = s.ext3PW[3 * (2 + side) + k];
+    jointsPublish(j);
+    if (now - g_lineMs < 1000) return;
+    g_lineMs = now;
+    // The second's boundary: a new generation (never 0 in the tag's 16 bits); the previous one's slots are read below.
+    const uint32_t prevGen = g_gen.load(std::memory_order_relaxed);
+    uint32_t nextGen = prevGen + 1;
+    if ((nextGen & 0xFFFFu) == 0) ++nextGen;
+    g_gen.store(nextGen, std::memory_order_relaxed);
+    const uint64_t calls = g_mgmcCalls.exchange(0, std::memory_order_relaxed), mask0 = g_mgmcMask0.exchange(0, std::memory_order_relaxed),
+                   unread = g_mgmcUnread.exchange(0, std::memory_order_relaxed), full = g_mgmcFull.exchange(0, std::memory_order_relaxed),
+                   shifted = g_mgmcShifted.exchange(0, std::memory_order_relaxed), matched = g_mgmcMatched.exchange(0, std::memory_order_relaxed);
+    const uint64_t recCalls = g_recCalls.exchange(0, std::memory_order_relaxed), amcCalls = g_amcCalls.exchange(0, std::memory_order_relaxed),
+                   callerFull = g_callerFull.exchange(0, std::memory_order_relaxed);
+    MgmcRow rows[kSlots];
+    uint32_t nRows = 0;
+    for (uint32_t i = 0; i < kSlots; ++i) {
+        MgmcSlot& sl = g_slots[i];
+        const uint64_t t1 = sl.tag.load(std::memory_order_acquire);
+        if (!t1 || (t1 >> 48) != (prevGen & 0xFFFFu)) continue;
+        const uint32_t q1 = sl.seq.load(std::memory_order_acquire);
+        if (q1 & 1u) continue;
+        MgmcRow r;
+        r.obj = t1 & 0x0000FFFFFFFFFFFFull;
+        r.flag = sl.flag;
+        r.mask = sl.mask;
+        std::memcpy(r.pos, sl.pos, sizeof(r.pos));
+        r.calls = sl.calls.load(std::memory_order_relaxed);
+        r.shifted = sl.shifted.load(std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if (sl.seq.load(std::memory_order_relaxed) != q1 || sl.tag.load(std::memory_order_relaxed) != t1) continue;
+        float key = 1e30f;
+        if (j.fpOk) key = std::min(key, std::min(nofoot::dist3f(r.pos, j.fp[0]), nofoot::dist3f(r.pos, j.fp[1])));
+        if (j.tpOk) key = std::min(key, std::min(nofoot::dist3f(r.pos, j.tp[0]), nofoot::dist3f(r.pos, j.tp[1])));
+        r.key = key == key ? key : 1e30f;
+        rows[nRows++] = r;
+    }
+    struct CallerRow {
+        uint32_t rva = 0, detMm = kNoBest, detIdx = 0, detCount = 0;
+        uint64_t calls = 0, records = 0, detRec = 0;
+        float detPos[3] = {};
+        bool detBusy = false;
+    };
+    CallerRow crow[kCallers];
+    uint32_t nCallers = 0;
+    for (uint32_t i = 0; i < kCallers; ++i) {
+        CallerSlot& c = g_callers[i];
+        const uint32_t rva = c.rva.load(std::memory_order_acquire);
+        if (!rva) continue;
+        CallerRow cr;
+        cr.rva = rva;
+        cr.calls = c.calls.exchange(0, std::memory_order_relaxed);
+        cr.records = c.records.exchange(0, std::memory_order_relaxed);
+        c.bestMm.store(kNoBest, std::memory_order_relaxed);
+        if (!c.busy.exchange(true, std::memory_order_acquire)) {
+            cr.detMm = c.detMm;
+            cr.detIdx = c.detIdx;
+            cr.detCount = c.detCount;
+            cr.detRec = c.detRec;
+            std::memcpy(cr.detPos, c.detPos, sizeof(cr.detPos));
+            c.detMm = kNoBest;
+            c.busy.store(false, std::memory_order_release);
+        } else {
+            cr.detBusy = true;
+        }
+        if (cr.calls) crow[nCallers++] = cr;
+    }
+    if (!live) return;
+    float d[3] = {};
+    const bool dOk = fpRaiseRead(d);
+    Log::get().note("native on foot weapon (F54): MGMC submits %llu this second (%llu mask 0, %llu unreadable), %u tabled with mask != 0 (%llu "
+                    "calls lost: table full); local FP weapon: %llu calls matched, %llu shifted (raise %s, d (%.3f, %.3f, %.3f) m); handAttach (world) "
+                    "FP R51 (%.3f, %.3f, %.3f) L52 (%.3f, %.3f, %.3f) %s; 3P R66 (%.3f, %.3f, %.3f) L67 (%.3f, %.3f, %.3f) %s",
+                    static_cast<unsigned long long>(calls), static_cast<unsigned long long>(mask0), static_cast<unsigned long long>(unread), nRows,
+                    static_cast<unsigned long long>(full), static_cast<unsigned long long>(matched), static_cast<unsigned long long>(shifted),
+                    g_f51FpOn.load(std::memory_order_relaxed) ? "on" : "off", dOk ? d[0] : 0.0f, dOk ? d[1] : 0.0f, dOk ? d[2] : 0.0f,
+                    j.fp[1][0], j.fp[1][1], j.fp[1][2], j.fp[0][0], j.fp[0][1], j.fp[0][2], j.fpOk ? "fresh" : "not known",
+                    j.tp[1][0], j.tp[1][1], j.tp[1][2], j.tp[0][0], j.tp[0][1], j.tp[0][2], j.tpOk ? "fresh" : "not known");
+    std::sort(rows, rows + nRows, [](const MgmcRow& x, const MgmcRow& y) { return x.key < y.key; });
+    constexpr uint32_t kRowLines = 8;
+    for (uint32_t i = 0; i < nRows && i < kRowLines; ++i) {
+        const MgmcRow& r = rows[i];
+        const auto dj = [&](const float jp[3], bool ok) { return ok ? static_cast<double>(nofoot::dist3f(r.pos, jp)) : -1.0; };
+        Log::get().note("native on foot weapon (F54): MGMC %016llX byte+0x1C8 0x%02X mask %016llX pos (%.3f, %.3f, %.3f); distance FP R51 %.3f L52 "
+                        "%.3f, 3P R66 %.3f L67 %.3f m (-1 not known); %u calls, %u shifted%s",
+                        static_cast<unsigned long long>(r.obj), static_cast<unsigned>(r.flag), static_cast<unsigned long long>(r.mask),
+                        static_cast<double>(r.pos[0]), static_cast<double>(r.pos[1]), static_cast<double>(r.pos[2]), dj(j.fp[1], j.fpOk),
+                        dj(j.fp[0], j.fpOk), dj(j.tp[1], j.tpOk), dj(j.tp[0], j.tpOk), r.calls, r.shifted,
+                        r.flag && j.fpOk && r.key <= nofoot::kWeaponMatchM ? " <- within 0.3 m of a hand joint with the byte set" : "");
+    }
+    if (nRows > kRowLines)
+        Log::get().note("native on foot weapon (F54): %u more MGMCs with mask != 0 not listed (farther from the hands)", nRows - kRowLines);
+    Log::get().note("native on foot weapon (F54): 0x4C837B0 calls %llu this second: AMC (+0x3DA2242, excluded) %llu, %u other callers%s",
+                    static_cast<unsigned long long>(recCalls), static_cast<unsigned long long>(amcCalls), nCallers,
+                    callerFull ? " (some calls lost: the caller table is full)" : "");
+    for (uint32_t i = 0; i < nCallers; ++i) {
+        const CallerRow& c = crow[i];
+        if (c.detMm != kNoBest)
+            Log::get().note("native on foot weapon (F54): caller +0x%X (%s): %llu calls, %llu records; nearest the FP hand: record %u of %u at %016llX, "
+                            "pos (%.3f, %.3f, %.3f), %.3f m",
+                            c.rva, knownName(c.rva), static_cast<unsigned long long>(c.calls), static_cast<unsigned long long>(c.records), c.detIdx,
+                            c.detCount, static_cast<unsigned long long>(c.detRec), static_cast<double>(c.detPos[0]), static_cast<double>(c.detPos[1]),
+                            static_cast<double>(c.detPos[2]), c.detMm / 1000.0);
+        else
+            Log::get().note("native on foot weapon (F54): caller +0x%X (%s): %llu calls, %llu records; nearest the FP hand: %s", c.rva, knownName(c.rva),
+                            static_cast<unsigned long long>(c.calls), static_cast<unsigned long long>(c.records),
+                            c.detBusy ? "not read (busy)" : j.fpOk ? "none (no readable record or stride)" : "not measured (FP joints not known)");
+    }
+}
+}  // namespace f54
+
+// ---- F49 (TEMPORARY): the pose freeze: the frAnim Animate post-hook---------------------------------------------------------------
 // The Animate handler 0x741520 (vtable 0x510E370 slot +8; rcx unused, rdx = the job; job[0] = the evaluator X) runs on frAnim worker threads.
 // After the original returns, for the local avatar's X only (pfz::g_localX, the census's plan): the output span ([job+0x28] when [X+0x210] is 0,
 // else [[X+0x1F0]+0xA0] when count-1 < [[X+0x1F0]+0xE0]; 0x43FB740 is never called), the frozen set's rest chain anchored at the hips' animated
@@ -10470,6 +10906,7 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
     installF14ProbesOnce();
     installEyeProbeOnce();   // F18 (TEMPORARY): probe P1, read only
     installBodyShiftOnce();  // F35 (TEMPORARY): the body shift's post-hook on the submit job (body mode only)
+    f54::tick(now);          // F54 (TEMPORARY): the held weapon's MGMC and record-submit hooks (measure always; shift with the FP raise), its lines
     pfzTick(now);            // F49 (TEMPORARY): the pose freeze's Animate post-hook (installed unless the key is off), its gate, blend and lines
     f14FrameTick(now);
     {

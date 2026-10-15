@@ -1061,6 +1061,23 @@ int wmain(int argc, wchar_t** argv) {
             const bool elsewhere = nf::shiftIfAtOrigin(other, origin, d);
             check(firstPass && !secondPass && !elsewhere && rec[1] == afterFirst[1] && rec[1] == 2.0f + 0.231f && other[0] == 10.5f && other[1] == 2.0f,
                   "F51: the FP shift moves a record at the AMC origin once and is idempotent; a placed record is left alone");
+            // F54: the local FP weapon gate (mask, viewmodel byte, 0.3 m of an FP handAttach joint) and the shift of both record copies.
+            {
+                const float attach[2][3] = {{1.0f, 1.2f, 0.5f}, {1.4f, 1.2f, 0.5f}};   // L (52), R (51)
+                const float nearP[3] = {1.4f, 1.0f, 0.5f}, edgeP[3] = {1.0f, 1.2f, 0.79f}, farP[3] = {1.4f, 1.2f, 0.85f};
+                const float nan3[3] = {std::numeric_limits<float>::quiet_NaN(), 1.2f, 0.5f};
+                check(nf::weaponIsLocalFp(1, 1, nearP, attach, true) && nf::weaponIsLocalFp(0x10, 0x80, edgeP, attach, true) &&
+                          !nf::weaponIsLocalFp(1, 1, farP, attach, true) && !nf::weaponIsLocalFp(1, 1, nan3, attach, true),
+                      "F54: a record within 0.3 m of either FP handAttach joint matches; 0.35 m and a NaN position do not");
+                check(!nf::weaponIsLocalFp(0, 1, nearP, attach, true) && !nf::weaponIsLocalFp(1, 0, nearP, attach, true) &&
+                          !nf::weaponIsLocalFp(1, 1, nearP, attach, false),
+                      "F54: a zero mask, a clear viewmodel byte or unknown attach joints never match");
+                float pos[3] = {2.0f, 3.0f, 4.0f}, copy[3] = {2.0f, 3.0f, 4.0f};
+                const float dw[3] = {0.0f, 0.1f, 0.02f};
+                nf::weaponShift(pos, copy, dw);
+                check(pos[0] == 2.0f && pos[1] == 3.0f + 0.1f && pos[2] == 4.0f + 0.02f && std::memcmp(pos, copy, sizeof(pos)) == 0,
+                      "F54: the weapon shift moves the record position and its copy by the same d");
+            }
             // The freeze gate: no locomotion. Standing (a weapon out does not enter it) rests after 0.3 s; walking at 1.4 m/s does not; a fall
             // (vertical motion only) is not locomotion; ADS ends the rest.
             const double upAxis[3] = {0.0, 1.0, 0.0};
