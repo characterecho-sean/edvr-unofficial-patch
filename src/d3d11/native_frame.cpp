@@ -53,6 +53,7 @@ std::mutex g_mutex;
 // F22: the look-to-aim total and the game frame it was taken at, for version 6 (set by nativeFrameSetLookYaw; guarded by g_mutex).
 float g_lookYaw = 0.0f;
 uint32_t g_lookYawFrame = 0;
+uint32_t g_lookReset = 0;   // F25: the reset serial
 
 State* identify(void* context) {
     for (unsigned i = 0; i < g_used; ++i) {
@@ -294,6 +295,7 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
     if (wantsLook) {
         result.lookYawTotal = g_lookYaw;
         result.lookYawGameFrame = g_lookYawFrame;
+        result.lookYawReset = g_lookReset;
     }
     // The old Explorer Cam's headset offset (headOffset, yawRadians,
     // offsetEnabled, offsetGamePoses) is retired: those slots stay zero, so a
@@ -471,10 +473,11 @@ void nativeFrameFovTrimDegrees(uint32_t out[3]) {
 uint64_t nativeFrameLatchedFrames() { return g_latchedFrames.load(std::memory_order_relaxed); }
 
 // F22: the look-to-aim total the next version 6 beginFrame hands the runtime.
-void nativeFrameSetLookYaw(float total, uint32_t gameFrame) {
+void nativeFrameSetLookYaw(float total, uint32_t gameFrame, uint32_t resetSerial) {
     std::lock_guard<std::mutex> lock(g_mutex);
     g_lookYaw = total;
     g_lookYawFrame = gameFrame;
+    g_lookReset = resetSerial;
 }
 
 }  // namespace edvr

@@ -379,6 +379,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   double lookBase=0,lookComp=0,lookWanted=0,lookWindowDeg=0;
   uint64_t lookRuntimeFrames=0,lookApplies=0,lookRefusals=0,lookLineMs=0;uint32_t lookGameFrame=0,lookAppliedGameFrame=0;
   uint64_t lookAppliedFrame=0;const char* lookWhy="";
+  // F25: the reset serial last acted on, the resets taken, and the head's seated yaw (degrees) before and after the last step.
+  uint32_t lookResetSeen=0;uint64_t lookResets=0;double lookYawBeforeDeg=0,lookYawAfterDeg=0;bool lookYawKnown=false;
   unsigned seatResetCount=0,seatContextLines=0;
   SeatContext lastTracedContext{};
   bool seatRetroPending=false;uint64_t seatRetroAgeMs=0;     // a deferred recentre was just taken back: the apply that follows says so (retro=1)
@@ -3038,9 +3040,25 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   // F22: WaitGetPoses, no frame open. Turns the seated space about the HEAD by the change in the compensation the origin should carry. The head keeps
   // its place in the seated space and its reported yaw falls by the body turn the game made for our look input, so the world holds still. Never
   // gives up the frame. A refusal is traced and the origin is left as it was.
+  // F25: the head's yaw in the SEATED space (the space every pose the game reads is located in), in degrees. False when not located.
+  bool lookSeatedHeadYaw(double* yawDeg) {
+    XrSpaceLocation h{XR_TYPE_SPACE_LOCATION};XrTime t=0;
+    const XrResult r=HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,view,seated.space(),0,h,&t,counterNow,nullptr,boundary.estimateNow());
+    if(r!=XR_SUCCESS||!(h.locationFlags&XR_SPACE_LOCATION_ORIENTATION_VALID_BIT)) return false;
+    *yawDeg=seatRadToDeg(seatPoseYawOf(h.pose).yaw);
+    return true;
+  }
   void lookPoll() {
     if(!features.acquired()||!seated.space()||!changes.active()) return;
     if(!lookSeatedKnown) lookRebase();
+    // F25: the controller disengaged (the key went off, the guard tripped): re-base to where the total is now, so the target is 0 and the origin's
+    // compensation is turned back to 0 at once.
+    if(featureFrameKnown&&featureFrame.lookYawReset!=lookResetSeen) {
+      lookResetSeen=featureFrame.lookYawReset;
+      lookBase=lookWanted;
+      ++lookResets;
+      lookWhy="reset: compensation returned to zero";
+    }
     const double target=lookWanted-lookBase;
     const double delta=target-lookComp;
     const uint64_t now=GetTickCount64();
@@ -3054,23 +3072,29 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         const double dx=lookSeated.x-hx,dz=lookSeated.z-hz;
         const double c=std::cos(delta),s=std::sin(delta);
         const SeatPose next{hx+c*dx+s*dz,lookSeated.y,hz-s*dx+c*dz,lookSeated.yaw+delta};
+        double yawBefore=0.0;const bool haveBefore=lookSeatedHeadYaw(&yawBefore);
         const XrResult r=seated.replace(xrFromSeatPose(next));
         if(r!=XR_SUCCESS) {
           ++lookRefusals;lookWhy="seated space replace refused";
         } else {
+          double yawAfter=0.0;const bool haveAfter=lookSeatedHeadYaw(&yawAfter);
           lookSeated=next;lookComp=target;
           dropPoseFrame(PoseInvalidation::Other);
           fillPollRing();
           ++lookApplies;lookWindowDeg+=seatRadToDeg(delta);
           lookAppliedFrame=lookRuntimeFrames;lookAppliedGameFrame=lookGameFrame;lookWhy="";
+          lookYawKnown=haveBefore&&haveAfter;
+          lookYawBeforeDeg=yawBefore;lookYawAfterDeg=yawAfter;
         }
       }
     }
     if(now-lookLineMs>=5000||lookLineMs==0) {
       lookLineMs=now;
-      nativeTracePrintf("look_to_aim_runtime,frame=%llu,game_frame=%u,applies=%llu,window_deg=%.3f,comp_deg=%.3f,wanted_deg=%.3f,base_deg=%.3f,refusals=%llu,why=%s\n",
+      nativeTracePrintf("look_to_aim_runtime,frame=%llu,game_frame=%u,applies=%llu,window_deg=%.3f,comp_deg=%.3f,wanted_deg=%.3f,base_deg=%.3f,refusals=%llu,resets=%llu,"
+          "head_seated_yaw_before_deg=%.3f,head_seated_yaw_after_deg=%.3f,yaw_known=%u,why=%s\n",
           (unsigned long long)lookRuntimeFrames,unsigned(lookAppliedGameFrame),(unsigned long long)lookApplies,lookWindowDeg,seatRadToDeg(lookComp),
-          seatRadToDeg(lookWanted),seatRadToDeg(lookBase),(unsigned long long)lookRefusals,lookWhy);
+          seatRadToDeg(lookWanted),seatRadToDeg(lookBase),(unsigned long long)lookRefusals,(unsigned long long)lookResets,
+          lookYawBeforeDeg,lookYawAfterDeg,unsigned(lookYawKnown),lookWhy);
       lookWindowDeg=0;
     }
   }

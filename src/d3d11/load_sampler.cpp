@@ -1,6 +1,7 @@
 #include "load_sampler.h"
 
 #include <windows.h>
+#include <tlhelp32.h>
 
 #include <algorithm>
 #include <atomic>
@@ -24,10 +25,17 @@ namespace {
 std::atomic<bool> g_wanted{false};
 std::atomic<const char*> g_why{"not started"};
 std::atomic<bool> g_started{false};
-bool g_wasWanted = false;   // frame thread only
-uint64_t g_wantedSinceMs = 0;   // sampler thread only: when the current wanted run began (0 = not wanted)
+bool g_wasWanted = false;         // frame thread only
+uint64_t g_wantedSinceMs = 0;     // sampler thread only: when the current wanted run began (0 = not wanted)
+uint64_t g_lastLineNever = 0;     // sampler thread only
 
-// NtQueryInformationThread, for a thread's TEB (the stack limits live in its NT_TIB: StackBase at +0x08, StackLimit at +0x10).
+// F25: the 5 s thread census (Toolhelp snapshot, GetThreadTimes deltas, start addresses) runs on the sampler's thread.
+constexpr uint64_t kCensusMs = 5000;
+uint64_t g_censusMs = 0;                       // sampler thread only
+std::map<DWORD, uint64_t> g_prevCpu;           // sampler thread only: kernel+user 100 ns per thread at the last census
+bool g_haveCensus = false;                     // sampler thread only
+
+// NtQueryInformationThread: a thread's TEB (the stack limits live in its NT_TIB) and its Win32 start address.
 using NtQueryInformationThreadFn = LONG(WINAPI*)(HANDLE, LONG, PVOID, ULONG, PULONG);
 struct ThreadBasicInfo {
     LONG status;
@@ -38,26 +46,16 @@ struct ThreadBasicInfo {
     LONG priority;
     LONG basePriority;
 };
+constexpr LONG kThreadBasicInformation = 0;
+constexpr LONG kThreadQuerySetWin32StartAddress = 9;
 
-// One thread the sampler stops. The render thread's handle is the watchdog's (never closed); the window thread's is ours (never closed).
-struct Target {
-    const char* name = "";
-    HANDLE handle = nullptr;
-    uint64_t lo = 0, hi = 0;
-    DWORD tid = 0;
-    stall::Capture* cap = nullptr;            // allocated once, outside any stop
-    bool resolved = false;
-    const char* why = "not resolved yet";
-    uint64_t resolveMs = 0;
-    uint32_t samples = 0, failed = 0;         // in the last 5 s
-    uint32_t samplesTotal = 0;
-    double maxStopMs = 0.0;                   // in the last 5 s
-    std::map<std::string, uint32_t> exclusive, callers;   // in the last 5 s
-    uint64_t lineMs = 0;
-};
-Target g_render{"render"};
-Target g_window{"window"};
-uint64_t g_lastLineNever = 0;
+NtQueryInformationThreadFn ntQueryThread() {
+    static NtQueryInformationThreadFn fn = [] {
+        HMODULE nt = GetModuleHandleW(L"ntdll.dll");
+        return nt ? reinterpret_cast<NtQueryInformationThreadFn>(GetProcAddress(nt, "NtQueryInformationThread")) : nullptr;
+    }();
+    return fn;
+}
 
 bool readU64(uintptr_t address, uint64_t* out) noexcept {
     __try {
@@ -66,6 +64,46 @@ bool readU64(uintptr_t address, uint64_t* out) noexcept {
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
     }
+}
+
+// The stack limits of a thread of this process, from its TEB: the reserved region's base and committed limit.
+bool tebStackLimits(HANDLE h, uint64_t* lo, uint64_t* hi) {
+    NtQueryInformationThreadFn query = ntQueryThread();
+    ThreadBasicInfo info{};
+    uint64_t base = 0, limit = 0;
+    if (!query || query(h, kThreadBasicInformation, &info, sizeof(info), nullptr) != 0 || !info.tebBase) return false;
+    if (!readU64(reinterpret_cast<uintptr_t>(info.tebBase) + 0x08, &base) || !readU64(reinterpret_cast<uintptr_t>(info.tebBase) + 0x10, &limit)) return false;
+    if (!base || limit >= base) return false;
+    *lo = limit;
+    *hi = base;
+    return true;
+}
+
+// One thread the sampler stops. The render thread's handle is the watchdog's (never closed); a CPU thread's is ours (closed when dropped).
+struct Target {
+    const char* kind = "";
+    HANDLE handle = nullptr;
+    bool ownsHandle = false;
+    uint64_t lo = 0, hi = 0;
+    DWORD tid = 0;
+    std::string where;                        // the thread's start address, as module+RVA
+    stall::Capture* cap = nullptr;            // allocated once, outside any stop
+    bool resolved = false;
+    const char* why = "not resolved yet";
+    uint64_t resolveMs = 0;
+    uint32_t samples = 0, failed = 0, noGame = 0, samplesTotal = 0;   // in the last 5 s; samplesTotal since the run began
+    double maxStopMs = 0.0;                   // in the last 5 s
+    std::map<std::string, uint32_t> firstGame;   // in the last 5 s: the first EliteDangerous64.exe frame of each stack, innermost first
+    uint64_t lineMs = 0;
+};
+Target g_render{"render"};
+Target g_cpu[3] = {Target{"cpu 1"}, Target{"cpu 2"}, Target{"cpu 3"}};
+
+std::string resolvedName(const stall::Resolved& r) {
+    if (!r.known) return "?";
+    char b[96];
+    std::snprintf(b, sizeof(b), "%s+0x%x", r.module, static_cast<unsigned>(r.rva));
+    return b;
 }
 
 // The render thread: the stall sampler's own registered slot.
@@ -79,6 +117,7 @@ void resolveRender(uint64_t nowMs) {
         return;
     }
     g_render.handle = static_cast<HANDLE>(h);
+    g_render.ownsHandle = false;
     g_render.lo = lo;
     g_render.hi = hi;
     g_render.tid = static_cast<DWORD>(tid);
@@ -91,81 +130,136 @@ void resolveRender(uint64_t nowMs) {
     }
 }
 
-struct FindWindow {
-    DWORD pid;
-    HWND found;
-    DWORD tid;
-    bool foreground;
+// F25: one row of the census.
+struct ThreadRow {
+    DWORD tid = 0;
+    uint64_t delta = 0;     // 100 ns of CPU since the last census
+    std::string where;      // the start address, module+RVA
+    bool edvr = false;      // this DLL's own thread (its start address is in this module, or it is the sampler)
 };
-BOOL CALLBACK findWindowProc(HWND hwnd, LPARAM lp) {
-    FindWindow* f = reinterpret_cast<FindWindow*>(lp);
-    DWORD wpid = 0;
-    const DWORD wtid = GetWindowThreadProcessId(hwnd, &wpid);
-    if (wpid != f->pid || !IsWindowVisible(hwnd) || GetWindowTextLengthW(hwnd) == 0) return TRUE;
-    const bool fg = hwnd == GetForegroundWindow();
-    if (!f->found || (fg && !f->foreground)) {
-        f->found = hwnd;
-        f->tid = wtid;
-        f->foreground = fg;
+
+// The census: every thread of this process, its CPU since the last census, and where it started. Owner: the sampler's thread, never while a
+// thread is stopped.
+std::vector<ThreadRow> censusThreads() {
+    std::vector<ThreadRow> rows;
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snap == INVALID_HANDLE_VALUE) return rows;
+    const DWORD pid = GetCurrentProcessId();
+    const DWORD self = GetCurrentThreadId();
+    std::map<DWORD, uint64_t> now;
+    THREADENTRY32 te{};
+    te.dwSize = sizeof(te);
+    if (Thread32First(snap, &te)) {
+        do {
+            if (te.th32OwnerProcessID != pid) continue;
+            HANDLE h = OpenThread(THREAD_QUERY_INFORMATION, FALSE, te.th32ThreadID);
+            if (!h) continue;
+            FILETIME c{}, e{}, k{}, u{};
+            uint64_t cpu = 0;
+            if (GetThreadTimes(h, &c, &e, &k, &u)) {
+                cpu = (static_cast<uint64_t>(k.dwHighDateTime) << 32 | k.dwLowDateTime) + (static_cast<uint64_t>(u.dwHighDateTime) << 32 | u.dwLowDateTime);
+            }
+            uintptr_t start = 0;
+            NtQueryInformationThreadFn query = ntQueryThread();
+            ULONG got = 0;
+            if (query) query(h, kThreadQuerySetWin32StartAddress, &start, sizeof(start), &got);
+            CloseHandle(h);
+            ThreadRow row;
+            row.tid = te.th32ThreadID;
+            now[row.tid] = cpu;
+            const auto prev = g_prevCpu.find(row.tid);
+            if (g_haveCensus && prev != g_prevCpu.end() && cpu >= prev->second) row.delta = cpu - prev->second;
+            stall::Resolved r;
+            if (start) stall::resolveFrame(start, r);
+            row.where = start ? resolvedName(r) : "?";
+            row.edvr = (start && r.edvr) || row.tid == self;
+            rows.push_back(row);
+        } while (Thread32Next(snap, &te));
     }
-    return TRUE;
+    CloseHandle(snap);
+    g_prevCpu = std::move(now);
+    return rows;
 }
 
-// The game window's thread: found by enumeration (a visible, titled window of this process; the foreground one first), opened by id with the
-// stop rights, and its stack limits read from its TEB. A window thread that is the render thread is not sampled twice.
-void resolveWindow(uint64_t nowMs) {
-    g_window.resolveMs = nowMs;
-    FindWindow f{GetCurrentProcessId(), nullptr, 0, false};
-    EnumWindows(findWindowProc, reinterpret_cast<LPARAM>(&f));
-    if (!f.found || !f.tid) {
-        g_window.why = "no visible titled window of this process";
-        return;
-    }
-    if (g_render.resolved && f.tid == g_render.tid) {
-        g_window.why = "the window's thread is the render thread (sampled as render)";
-        return;
-    }
-    HANDLE h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, f.tid);
+// Opens a CPU thread for sampling: the suspend rights, the owning process checked before any stop, and the stack limits from its TEB.
+bool openCpuTarget(Target& t, DWORD tid) {
+    t.tid = tid;
+    t.resolved = false;
+    HANDLE h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, tid);
     if (!h) {
-        g_window.why = "OpenThread refused (the window thread cannot be stopped)";
-        return;
+        t.why = "OpenThread refused (the thread cannot be stopped)";
+        return false;
     }
-    // The thread id came from an enumeration of this process, but it can be reused: confirm the handle is still this process's thread
-    // before any stop. A thread of another process is never suspended.
     if (GetProcessIdOfThread(h) != GetCurrentProcessId()) {
         CloseHandle(h);
-        g_window.why = "the window thread's handle belongs to another process (refused, never stopped)";
-        return;
+        t.why = "the thread belongs to another process (refused, never stopped)";
+        return false;
     }
-    HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
-    NtQueryInformationThreadFn query = ntdll ? reinterpret_cast<NtQueryInformationThreadFn>(GetProcAddress(ntdll, "NtQueryInformationThread")) : nullptr;
-    ThreadBasicInfo info{};
-    uint64_t base = 0, limit = 0;
-    if (!query || query(h, 0, &info, sizeof(info), nullptr) != 0 || !info.tebBase ||
-        !readU64(reinterpret_cast<uintptr_t>(info.tebBase) + 0x08, &base) || !readU64(reinterpret_cast<uintptr_t>(info.tebBase) + 0x10, &limit) ||
-        !base || limit >= base) {
+    uint64_t lo = 0, hi = 0;
+    if (!tebStackLimits(h, &lo, &hi)) {
         CloseHandle(h);
-        g_window.why = "its stack limits are not readable from the TEB";
-        return;
+        t.why = "its stack limits are not readable from the TEB";
+        return false;
     }
-    g_window.handle = h;
-    g_window.tid = f.tid;
-    g_window.lo = limit;
-    g_window.hi = base;
-    g_window.resolved = true;
-    g_window.why = "resolved by window enumeration";
-    if (!g_window.cap) g_window.cap = new (std::nothrow) stall::Capture;
-    if (!g_window.cap) {
-        g_window.resolved = false;
-        g_window.why = "no memory for the capture";
+    t.handle = h;
+    t.ownsHandle = true;
+    t.lo = lo;
+    t.hi = hi;
+    t.resolved = true;
+    t.why = "opened by the census";
+    if (!t.cap) t.cap = new (std::nothrow) stall::Capture;
+    if (!t.cap) {
+        t.resolved = false;
+        t.why = "no memory for the capture";
     }
+    return t.resolved;
 }
 
-std::string resolvedName(const stall::Resolved& r) {
-    if (!r.known) return "?";
-    char b[64];
-    std::snprintf(b, sizeof(b), "%s+0x%x", r.module, static_cast<unsigned>(r.rva));
-    return b;
+void dropCpuTarget(Target& t) {
+    if (t.handle && t.ownsHandle) CloseHandle(t.handle);
+    t.handle = nullptr;
+    t.ownsHandle = false;
+    t.resolved = false;
+    t.tid = 0;
+    t.where.clear();
+}
+
+// F25: picks the top three non-EDVR threads by CPU since the last census (and not the render thread) as the CPU targets.
+void assignCpuTargets(std::vector<ThreadRow> rows) {
+    rows.erase(std::remove_if(rows.begin(), rows.end(), [](const ThreadRow& r) { return r.edvr; }), rows.end());
+    std::sort(rows.begin(), rows.end(), [](const ThreadRow& a, const ThreadRow& b) { return a.delta > b.delta; });
+    std::string top;
+    unsigned shown = 0;
+    for (const ThreadRow& r : rows) {
+        if (shown >= 8) break;
+        if (g_render.resolved && r.tid == g_render.tid) continue;
+        char b[160];
+        std::snprintf(b, sizeof(b), "%s tid %lu %s %.1f ms", shown ? ";" : "", static_cast<unsigned long>(r.tid), r.where.c_str(),
+                      static_cast<double>(r.delta) / 10000.0);
+        top += b;
+        ++shown;
+    }
+    Log::get().note("load sampler: census (last 5 s, %u threads of this process, EDVR's own skipped): top CPU %s", static_cast<unsigned>(rows.size()),
+                    shown ? top.c_str() : " none (no CPU since the last census)");
+    unsigned slot = 0;
+    for (const ThreadRow& r : rows) {
+        if (slot >= 3) break;
+        if (g_render.resolved && r.tid == g_render.tid) continue;
+        if (r.delta == 0) break;
+        Target& t = g_cpu[slot];
+        if (t.resolved && t.tid == r.tid) {
+            t.where = r.where;
+            ++slot;
+            continue;
+        }
+        dropCpuTarget(t);
+        const bool ok = openCpuTarget(t, r.tid);
+        t.where = r.where;
+        Log::get().note("load sampler: cpu slot %u = tid %lu (%s): %s", slot + 1, static_cast<unsigned long>(r.tid), r.where.c_str(),
+                        ok ? "sampled from now" : t.why);
+        ++slot;
+    }
+    for (; slot < 3; ++slot) dropCpuTarget(g_cpu[slot]);
 }
 
 // One stop of one thread: the capture is the stall sampler's own code. Everything after the resume is the walk and the names.
@@ -188,20 +282,20 @@ void sampleOne(Target& t) {
     }
     ++t.samples;
     ++t.samplesTotal;
-    stall::Resolved r0;
-    stall::resolveFrame(pcs[0], r0);
-    ++t.exclusive[resolvedName(r0)];
-    std::string sig;
-    for (unsigned i = 0; i < n && i < 3; ++i) {
+    // The innermost EliteDangerous64.exe frame among the first eight: a wait inside a system image shows which game function is waiting.
+    bool found = false;
+    for (unsigned i = 0; i < n && i < 8 && !found; ++i) {
         stall::Resolved r;
         stall::resolveFrame(pcs[i], r);
-        if (i) sig += " | ";
-        sig += resolvedName(r);
+        if (r.known && stall::equalsNoCase(r.module, "EliteDangerous64.exe")) {
+            ++t.firstGame[resolvedName(r)];
+            found = true;
+        }
     }
-    ++t.callers[sig];
+    if (!found) ++t.noGame;
 }
 
-// The top k entries, most frequent first.
+// The top entries of a count map, most frequent first.
 std::vector<std::pair<std::string, uint32_t>> topOf(const std::map<std::string, uint32_t>& m, size_t k) {
     std::vector<std::pair<std::string, uint32_t>> v(m.begin(), m.end());
     std::sort(v.begin(), v.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
@@ -209,7 +303,7 @@ std::vector<std::pair<std::string, uint32_t>> topOf(const std::map<std::string, 
     return v;
 }
 
-// The 5 s lines of one thread: its samples, its top exclusive locations, its top three-frame callers.
+// The 5 s line of one target: its samples, its longest stop, and the top first-game-frame aggregates.
 void lineOf(Target& t, uint64_t nowMs) {
     if (!t.lineMs) {
         t.lineMs = nowMs;
@@ -217,35 +311,27 @@ void lineOf(Target& t, uint64_t nowMs) {
     }
     if (nowMs - t.lineMs < 5000) return;
     t.lineMs = nowMs;
-    Log::get().note("load sampler: %s thread (tid %lu): %u samples in the last 5 s, %u failed, longest stop %.3f ms, %s; %u taken this run",
-                    t.name, static_cast<unsigned long>(t.tid), t.samples, t.failed, t.maxStopMs,
-                    t.resolved ? t.why : t.why, t.samplesTotal);
+    Log::get().note("load sampler: %s tid %lu (start %s): %u samples in 5 s, %u failed, no game frame in %u, longest stop %.3f ms%s; %u since the run began (%s)",
+                    t.kind, static_cast<unsigned long>(t.tid), t.where.empty() ? "?" : t.where.c_str(), t.samples, t.failed, t.noGame, t.maxStopMs,
+                    t.maxStopMs > 1.0 ? " (over 1 ms)" : "", t.samplesTotal, t.resolved ? t.why : t.why);
     if (t.samples) {
-        std::string ex;
-        for (const auto& e : topOf(t.exclusive, 8)) {
+        std::string top;
+        for (const auto& e : topOf(t.firstGame, 8)) {
             char b[120];
-            std::snprintf(b, sizeof(b), "%s%s x%u", ex.empty() ? "" : ", ", e.first.c_str(), static_cast<unsigned>(e.second));
-            ex += b;
+            std::snprintf(b, sizeof(b), "%s%s x%u", top.empty() ? "" : ", ", e.first.c_str(), static_cast<unsigned>(e.second));
+            top += b;
         }
-        std::string cs;
-        for (const auto& e : topOf(t.callers, 5)) {
-            char b[200];
-            std::snprintf(b, sizeof(b), "%s[%s] x%u", cs.empty() ? "" : "; ", e.first.c_str(), static_cast<unsigned>(e.second));
-            cs += b;
-        }
-        Log::get().note("load sampler: %s thread top exclusive: %s", t.name, ex.c_str());
-        Log::get().note("load sampler: %s thread top callers (three frames, innermost first): %s", t.name, cs.c_str());
-    } else {
-        Log::get().note("load sampler: %s thread: no sample in the last 5 s (sampled, nothing counted, or not stopped; see the reason above)", t.name);
+        Log::get().note("load sampler: %s tid %lu first game frame (8 frames per stack): %s", t.kind, static_cast<unsigned long>(t.tid),
+                        top.empty() ? " none" : top.c_str());
     }
     t.samples = 0;
     t.failed = 0;
+    t.noGame = 0;
     t.maxStopMs = 0.0;
-    t.exclusive.clear();
-    t.callers.clear();
+    t.firstGame.clear();
 }
 
-// The sampler's thread: wakes every 100 ms. Never exits: the thread is detached and the process ends it.
+// The sampler's thread: wakes every 100 ms while wanted. Never exits: the thread is detached and the process ends it.
 void run() {
     for (;;) {
         Sleep(100);
@@ -256,16 +342,25 @@ void run() {
         }
         if (!g_wantedSinceMs) g_wantedSinceMs = now;
         if (!g_render.resolved && now - g_render.resolveMs >= 2000) resolveRender(now);
-        if (!g_window.resolved && now - g_window.resolveMs >= 2000) resolveWindow(now);
+        if (!g_haveCensus || now - g_censusMs >= kCensusMs) {
+            const bool first = !g_haveCensus;
+            std::vector<ThreadRow> rows = censusThreads();
+            g_haveCensus = true;
+            g_censusMs = now;
+            if (!first) assignCpuTargets(rows);
+            else Log::get().note("load sampler: first census (%u threads); CPU deltas start with the next one", static_cast<unsigned>(rows.size()));
+        }
         sampleOne(g_render);
-        sampleOne(g_window);
+        for (Target& t : g_cpu) sampleOne(t);
         lineOf(g_render, now);
-        lineOf(g_window, now);
+        for (Target& t : g_cpu) lineOf(t, now);
         // The "never sampled" line: wanted for 30 s with no sample from any thread says why, once per 30 s.
-        if (now - g_wantedSinceMs >= 30000 && g_render.samplesTotal == 0 && g_window.samplesTotal == 0 && now - g_lastLineNever >= 30000) {
+        bool anySample = g_render.samplesTotal > 0;
+        for (const Target& t : g_cpu) anySample = anySample || t.samplesTotal > 0;
+        if (now - g_wantedSinceMs >= 30000 && !anySample && now - g_lastLineNever >= 30000) {
             g_lastLineNever = now;
-            Log::get().note("load sampler: never sampled in %.0f s while wanted (render: %s; window: %s)",
-                            static_cast<double>(now - g_wantedSinceMs) / 1000.0, g_render.why, g_window.why);
+            Log::get().note("load sampler: never sampled in %.0f s while wanted (render: %s; cpu 1: %s)",
+                            static_cast<double>(now - g_wantedSinceMs) / 1000.0, g_render.why, g_cpu[0].why);
         }
     }
 }
@@ -282,8 +377,8 @@ void loadSamplerTick(uint64_t nowMs, bool wanted, const char* why) {
     g_wanted.store(wanted, std::memory_order_release);
     if (wanted && !g_started.exchange(true)) {
         std::thread(run).detach();
-        Log::get().note("load sampler: armed (TEMPORARY, read only, no key): the render thread and the game window's thread are stopped once every "
-                        "100 ms while wanted, and the top locations are logged every 5 s per thread");
+        Log::get().note("load sampler: armed (TEMPORARY, read only, no key): every 5 s the process's threads are censused (CPU and start address); the render "
+                        "thread and the top three CPU threads are stopped every 100 ms while wanted, 8 frames per stack, aggregated by the first game frame");
     }
 }
 

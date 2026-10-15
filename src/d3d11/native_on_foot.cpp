@@ -75,8 +75,16 @@ std::atomic<float> g_lookInput{0.0f};          // our rotate-abs input for the n
 std::atomic<uintptr_t> g_lookComp{0};          // the processor's comp, as the processor hook last saw it
 std::atomic<uint32_t> g_lookGameFrame{0};      // processor calls so far: the game frame index the body turn is stamped with
 std::atomic<int> g_lookSmoothMs{150};          // fix.native_on_foot_look_to_aim_smoothing_ms, live (0..1000)
-std::atomic<int> g_lookSign{-1};               // fix.native_on_foot_look_to_aim_yaw_sign (temporary, F24 default -1): 1 or -1, on the controller's input only
-std::atomic<int> g_lookDelay{0};               // fix.native_on_foot_look_to_aim_comp_delay (temporary): 0 or 1 frames
+std::atomic<int> g_lookSign{1};               // fix.native_on_foot_look_to_aim_yaw_sign (temporary, F24 default -1): 1 or -1, on the controller's input only
+std::atomic<int> g_lookDelay{0};
+// F25 (TEMPORARY A/B): the visor param block's translation source floats (.bss, normally 0, no writer in the exe): the values the key sets.
+constexpr uintptr_t kVisorShiftRva = 0x5FCA8B0;   // x at +0, y at +4
+std::atomic<bool> g_visorShiftWant{false};
+std::atomic<float> g_visorShiftX{0.0f}, g_visorShiftY{0.0f};
+bool g_visorShiftWritten = false, g_visorShiftRefused = false;   // frame thread only
+float g_visorShiftLastX = 0.0f, g_visorShiftLastY = 0.0f;       // frame thread only: the values last written
+std::string g_visorShiftSpelled;                                 // frame thread only: the key's text as last logged
+               // fix.native_on_foot_look_to_aim_comp_delay (temporary): 0 or 1 frames
 bool g_lookOnLast = true;                      // frame thread only: the look keys as last logged (readKey)
 int g_lookSignLast = 1, g_lookDelayLast = 0, g_lookCompSignLast = 1;   // frame thread only
 // ---- F23 (after the F22 flight): the yaw convention, the rate cap, the runaway guard, the sign instrument, the runtime's sign ----
@@ -86,6 +94,7 @@ struct LookTurnSample { uint64_t ms; float absPart; };
 LookTurnSample g_lookTurns[kLookTurnRing] = {};
 uint64_t g_lookTurnsN = 0;                     // under g_f9Lock
 std::atomic<uint32_t> g_lookSignMismatch{0};   // frames where sign(game yaw delta) != sign(old + ours) (game thread)
+std::atomic<uint32_t> g_lookResetSerial{0};    // F25: moves each time the controller disengages or the guard trips; the runtime re-bases to zero
 bool g_lookTripped = false;                    // frame thread: the runaway guard stopped the look; cleared by a key toggle or native on foot re-entering
 bool g_lookKeyLast = false, g_lookFootLast = false, g_lookConvLogged = false, g_lookHavePrev = false;   // frame thread only
 double g_lookPrevTotal = 0.0, g_lookPrevErr = 0.0;   // frame thread only: the total and the forward yaw at the last engaged tick
@@ -537,6 +546,19 @@ void readKey() {
         g_reticleHeadLast = reticleHead;
         g_reticleGameLast = reticleGame;
     }
+    // F25 (TEMPORARY A/B): fix.native_on_foot_visor_shift = off | x,y. Live.
+    {
+        const std::string vs = cfg.getString("fix.native_on_foot_visor_shift", "off");
+        float vx = 0.0f, vy = 0.0f;
+        const bool vsOn = vs != "off" && std::sscanf(vs.c_str(), "%f,%f", &vx, &vy) == 2;
+        g_visorShiftWant.store(vsOn, std::memory_order_relaxed);
+        g_visorShiftX.store(vx, std::memory_order_relaxed);
+        g_visorShiftY.store(vy, std::memory_order_relaxed);
+        if (first || vs != g_visorShiftSpelled) {
+            Log::get().note("native on foot visor shift (TEMPORARY A/B): %s", vsOn ? "set (written when the game's block reads 0 0)" : "off");
+            g_visorShiftSpelled = vs;
+        }
+    }
     // F22: look to aim (user settings, live). The body turns to where the head looks while the reticle follows head; the runtime holds the world still.
     // The sign and the delay are TEMPORARY (the flight A/B); the smoothing is the setting. Each key is spelled out in its own call (the generator scans).
     const bool lookOn = cfg.getString("fix.native_on_foot_look_to_aim", "on") == "on";
@@ -545,7 +567,7 @@ void readKey() {
     if (lookSmooth < 0) lookSmooth = 0;
     if (lookSmooth > 1000) lookSmooth = 1000;
     g_lookSmoothMs.store(lookSmooth, std::memory_order_relaxed);
-    const int lookSign = cfg.getInt("fix.native_on_foot_look_to_aim_yaw_sign", -1) < 0 ? -1 : 1;
+    const int lookSign = cfg.getInt("fix.native_on_foot_look_to_aim_yaw_sign", 1) < 0 ? -1 : 1;
     g_lookSign.store(lookSign, std::memory_order_relaxed);
     int lookDelay = cfg.getInt("fix.native_on_foot_look_to_aim_comp_delay", 0);
     if (lookDelay < 0) lookDelay = 0;
@@ -2430,6 +2452,49 @@ uint64_t __fastcall layoutHooked(void* hrc, void* out, void* rec, uint64_t a4, u
 
 // RETICLE INDICATOR PROBE (read only, except key 10 while native stereo is on foot, F16-F18). The stub below calls this with rcx = the instance and rdx = the node of the marker component's call at
 // EliteDangerous64.exe+0x1A15644 (the call to 0x434ECC0, preceded by mov rcx,[rsi+0x60]). It writes nothing except key 10: reticle follows aim (F18, default) zeroes its translation x and y; head (F17) places it along the head.
+// F25 (TEMPORARY A/B): writes the visor shift while wanted, verifies 0 0 before the first write, restores 0 0 when the key goes off.
+void visorShiftTick(bool want, float x, float y) {
+    if (!g_base) return;
+    const uintptr_t a = g_base + kVisorShiftRva;
+    if (!want) {
+        g_visorShiftRefused = false;
+        if (g_visorShiftWritten) {
+            if (guardedWriteFloat(a, 0.0f) && guardedWriteFloat(a + 4, 0.0f)) {
+                Log::get().note("native on foot visor shift: restored 0.0 0.0 (the key is off)");
+            } else {
+                Log::get().note("native on foot visor shift: NOT restored -- the write was refused");
+            }
+            g_visorShiftWritten = false;
+        }
+        return;
+    }
+    if (g_visorShiftRefused) return;
+    if (!g_visorShiftWritten) {
+        float v0 = 1.0f, v1 = 1.0f;
+        if (!guardedRead(a, &v0, 4) || !guardedRead(a + 4, &v1, 4)) {
+            g_visorShiftRefused = true;
+            Log::get().note("native on foot visor shift: NOT written -- the block at +0x5FCA8B0 is not readable");
+            return;
+        }
+        if (v0 != 0.0f || v1 != 0.0f) {
+            g_visorShiftRefused = true;
+            Log::get().note("native on foot visor shift: NOT written -- the block reads %.6f %.6f, not 0 0 (the game uses it); nothing written", static_cast<double>(v0), static_cast<double>(v1));
+            return;
+        }
+        Log::get().note("native on foot visor shift: the block reads 0.0 0.0 before the first write; writing %.4f %.4f", static_cast<double>(x), static_cast<double>(y));
+    }
+    if (!g_visorShiftWritten || x != g_visorShiftLastX || y != g_visorShiftLastY) {
+        if (guardedWriteFloat(a, x) && guardedWriteFloat(a + 4, y)) {
+            g_visorShiftWritten = true;
+            g_visorShiftLastX = x;
+            g_visorShiftLastY = y;
+        } else {
+            g_visorShiftRefused = true;
+            Log::get().note("native on foot visor shift: the write was refused; stopped for this key setting");
+        }
+    }
+}
+
 // F24 (Part F, probe 3): what the reticle probe saw of key 10 and key 43: the node's [node+0x50] and the instance's written +0x40. Read only.
 struct F24KeyRec {
     bool valid = false;
@@ -3754,6 +3819,7 @@ constexpr uint64_t kLookCapStallMs = 1000;                         // at the cap
 // Stops the look until the key toggles or native on foot re-enters. Zeroes the input before the update hook can see it.
 void lookTrip(const char* reason) {
     g_lookTripped = true;
+    g_lookResetSerial.fetch_add(1, std::memory_order_relaxed);   // F25: the compensation goes back to zero
     g_lookEngaged.store(false, std::memory_order_relaxed);
     g_lookInput.store(0.0f, std::memory_order_relaxed);
     g_lookEngagedLast = false;
@@ -3793,6 +3859,7 @@ void lookToAimTick(uint64_t nowMs, bool session) {
                                  : "the game session ended";
             Log::get().note("native on foot look to aim: stops (%s); input zero", offWhy);
         }
+        if (!engagedWant) g_lookResetSerial.fetch_add(1, std::memory_order_relaxed);   // F25: disengage (key off or stopped) resets the compensation
         g_lookEngagedLast = engagedWant;
     }
     g_lookEngaged.store(engagedWant, std::memory_order_relaxed);
@@ -4012,7 +4079,7 @@ void lookPublishTick() {
     const unsigned slot = (head - 1u - delay) & 1u;
     // F23: the runtime's sign (temporary): the compensation is published as the body turn times this sign.
     const double sgn = g_lookCompSign.load(std::memory_order_relaxed) < 0 ? -1.0 : 1.0;
-    nativeFrameSetLookYaw(static_cast<float>(sgn * ring[slot]), ringFrame[slot]);
+    nativeFrameSetLookYaw(static_cast<float>(sgn * ring[slot]), ringFrame[slot], g_lookResetSerial.load(std::memory_order_relaxed));
 }
 
 // The HRC line's values, without the window's calls (the change key).
@@ -4911,6 +4978,7 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
     // and the total the runtime reads for its compensation (every frame).
     installF22ProbesOnce();
     loadStagesFrameTick(now);   // F23 (Part E): the no-call check for the stage hook
+    visorShiftTick(g_visorShiftWant.load(std::memory_order_relaxed), g_visorShiftX.load(std::memory_order_relaxed), g_visorShiftY.load(std::memory_order_relaxed));   // F25 A/B
     // F24 (TEMPORARY, read only): the load sampler runs in a menu (no Flags2 in Status.json) and while a load pipeline is running, until its summary.
     {
         bool pipeline = false;

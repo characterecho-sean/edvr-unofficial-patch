@@ -51,7 +51,7 @@ class NativeFrameClient final {
       out.fadeAlpha=0;
     // F22: the look's total is zero unless a version 6 answer carried it (no compensation, never a stale one).
     if(r!=S_OK||out.version<EDVR_NATIVE_FRAME_VERSION_6||!(out.lookYawTotal==out.lookYawTotal)) {
-      out.lookYawTotal=0;out.lookYawGameFrame=0;
+      out.lookYawTotal=0;out.lookYawGameFrame=0;out.lookYawReset=0;
     }
     return r;
   }

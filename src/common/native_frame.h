@@ -93,6 +93,9 @@ struct EdvrNativeFrameOutput {
     // lookYawGameFrame is the game frame index the total was taken at (the timing line compares it with the runtime's frame).
     float lookYawTotal;
     uint32_t lookYawGameFrame;
+    // F25: a reset serial. Each time the controller disengages (the key goes off, the guard trips), the serial moves on; the runtime turns
+    // its origin's compensation back to zero at once when it sees a new serial, and does not keep the total as a base.
+    uint32_t lookYawReset;
 };
 
 // The size the fields through resubmitEnabled occupy, which is what a
@@ -168,6 +171,6 @@ uint64_t nativeFrameLatchedFrames();
 
 // F22: the look-to-aim compensation the next beginFrame hands the runtime (version 6): the cumulative total in radians and the game frame it was
 // taken at. Set by the frame thread once per frame (native_on_foot.cpp, lookPublishTick); read under the provider's lock by beginFrame.
-void nativeFrameSetLookYaw(float total, uint32_t gameFrame);
+void nativeFrameSetLookYaw(float total, uint32_t gameFrame, uint32_t resetSerial);
 
 }  // namespace edvr

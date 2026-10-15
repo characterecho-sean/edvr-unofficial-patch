@@ -10,6 +10,7 @@
 #include "../common/frame_flag.h"
 #include "../common/log.h"
 #include "binding_shadow.h"
+#include "native_on_foot.h"   // F25: nativeOnFootActive for the on-foot visor match
 
 namespace edvr {
 
@@ -222,11 +223,28 @@ float effectiveScale() {
 
 }  // namespace
 
+// F25: the on-foot visor edge. census_skip of vs:B553BB479B7C0B97 removed it on foot (Sean, F24 flight). The draw is a fullscreen triangle, once per
+// eye before the tonemap, with a DSV bound, PS 68ABCB9FEF6CA66C, RT 2016x2016 R11G11B10, SRV2 1024x1024 BC4 and SRV3 512x512 BC5.
+constexpr uint64_t kOnFootVisorVs = 0xB553BB479B7C0B97ull;
+constexpr uint64_t kOnFootVisorPs = 0x68ABCB9FEF6CA66Cull;
+constexpr uint32_t kOnFootVisorRt = 2016, kOnFootVisorRtFormat = 26;   // DXGI_FORMAT_R11G11B10_FLOAT
+bool onFootVisorMatches() {
+    if (!nativeOnFootActive()) return false;
+    if (bindingShaderHash(BindSlot::Vs) != kOnFootVisorVs || bindingShaderHash(BindSlot::Ps) != kOnFootVisorPs) return false;
+    ResourceInfo rt, s2, s3;
+    if (!bindingResolve(bindingGet(BindSlot::Rtv0), &rt) || rt.a != kOnFootVisorRt || rt.b != kOnFootVisorRt || rt.fmt != kOnFootVisorRtFormat) return false;
+    if (!bindingResolve(bindingGet(BindSlot::PsSrv2), &s2) || !s2.isTexture2D || s2.a != 1024 || s2.b != 1024) return false;
+    if (!bindingResolve(bindingGet(BindSlot::PsSrv3), &s3) || !s3.isTexture2D || s3.a != 512 || s3.b != 512) return false;
+    return true;
+}
+
 RemlokAction remlokOnEyeDraw(char kind, uint32_t count, uint32_t instances) {
     if (detail::g_remlokMode == Mode::kStock) return RemlokAction::kNone;
     if (!remlokOverlayShape(kind, count, instances)) {
         return RemlokAction::kNone;
     }
+    const bool footVisor = onFootVisorMatches();
+    if (!footVisor) {
     // The overlay binds no depth; scene and HUD draws do. Checked before the
     // SRV resolve so the resolve only runs for depthless fullscreen
     // triangles, which are a handful a frame.
@@ -236,8 +254,21 @@ RemlokAction remlokOnEyeDraw(char kind, uint32_t count, uint32_t instances) {
         !info.isTexture2D || info.a != kSrvW || info.b != kSrvH) {
         return RemlokAction::kNone;
     }
+    }
 
     const uint32_t match = g_matchesThisFrame++;
+    if (footVisor) {
+        // F25: the on-foot match, logged once and then every 30 s (the cockpit's census line's rhythm): its eye parity is the match's parity, as on the cockpit.
+        static uint64_t footCount = 0, footLastMs = 0;
+        ++footCount;
+        const uint64_t nowMs = GetTickCount64();
+        if (footLastMs == 0 || nowMs - footLastMs >= 30000) {
+            footLastMs = nowMs;
+            Log::get().note("remlok lines (on foot): the visor edge matched (VS B553BB479B7C0B97, PS 68ABCB9FEF6CA66C, RT %u R11G11B10, SRV2 1024x1024, "
+                            "SRV3 512x512): %llu matches this session, this match is for the %s eye",
+                            kOnFootVisorRt, static_cast<unsigned long long>(footCount), (((match & 1u) != 0u) != g_swap) ? "right" : "left");
+        }
+    }
     if (detail::g_remlokMode == Mode::kHide) {
         if (++g_hidden == 1) {
             Log::get().note("remlok lines: hidden (first overlay draw "

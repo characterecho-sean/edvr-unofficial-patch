@@ -280,7 +280,7 @@ int wmain(int argc, wchar_t** argv) {
     check(EDVR_NATIVE_FRAME_OUTPUT_SIZE_4 + sizeof(float) ==
               EDVR_NATIVE_FRAME_OUTPUT_SIZE_5,
           "version 5 adds exactly the comfort fade level");
-    check(EDVR_NATIVE_FRAME_OUTPUT_SIZE_5 + sizeof(float) + sizeof(uint32_t) ==
+    check(EDVR_NATIVE_FRAME_OUTPUT_SIZE_5 + sizeof(float) + 2 * sizeof(uint32_t) ==
               sizeof(EdvrNativeFrameOutput),
           "version 6 adds exactly the look-to-aim total and its game frame (F22)");
 
