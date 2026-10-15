@@ -24,8 +24,6 @@
 #include "native_on_foot_core.h"
 
 namespace edvr {
-extern std::atomic<void (*)(uintptr_t, uint32_t)> g_driverProbeSink;   // transition_flash_eye_base.cpp (F24 probe A)
-void nativeOnFootDriverProbe(uintptr_t driver, uint32_t mode);         // defined at the end of this file (F24 probe A)
 
 namespace {
 
@@ -41,22 +39,20 @@ std::atomic<bool> g_panelsKeyOn{false};            // fix.native_on_foot_panels,
 std::atomic<bool> g_meshKeyOn{false};              // fix.native_on_foot_hud_mesh, as the frame thread last read it (F9)
 std::atomic<float> g_hudSpread{0.0f};                           // fix.native_on_foot_hud_spread, live (F14)
 float g_hudSpreadLast = -1.0f;                                  // frame thread only: as last logged (F14)
-std::atomic<bool> g_reticleKeyOn{false};                        // fix.native_on_foot_reticle_probe, live (F14, temporary)
 bool g_reticleKeyLast = false;                                  // frame thread only (F14)
 std::atomic<bool> g_fpKeyOn{false};                             // fix.native_on_foot_hide_fp_body, as the frame thread last read it (F15, temporary)
 bool g_fpKeyLast = false;                                       // frame thread only: as last logged (F15)
 uint8_t g_bodyCullKeyLast = 0;                                  // frame thread only: fix.native_on_foot_body_cull as last logged (F18, temporary)
 std::atomic<bool> g_unclipKeyOn{false};                         // fix.native_on_foot_body_unclip, as the frame thread last read it (F19, temporary)
 bool g_unclipKeyLast = false;                                   // frame thread only: as last logged (F19)
-std::atomic<bool> g_cbProbeKeyOn{false};                        // fix.native_on_foot_body_cb_probe, as the frame thread last read it (F19, temporary)
-bool g_cbProbeKeyLast = false;                                  // frame thread only: as last logged (F19)
+
+
 std::atomic<float> g_hudSize{nofoot::kHudSizeDefault};          // fix.native_on_foot_hud_size, live (F13)
 std::atomic<bool> g_followHead{true};                           // fix.native_on_foot_hud_follow is head (F13)
-std::atomic<bool> g_followBefore{false};                        // fix.native_on_foot_hud_follow_order is before (F13, temporary)
 std::atomic<int> g_followSmoothMs{nofoot::kHudSmoothDefault};   // fix.native_on_foot_hud_follow_smoothing_ms, live (F13)
 std::atomic<bool> g_visorUpSetting{true};                       // fix.native_on_foot_breathable_visor is up, as the frame thread last read it (F16)
 float g_hudSizeLast = -1.0f;                                    // frame thread only: as last logged (F13)
-bool g_followHeadLast = true, g_followBeforeLast = false, g_visorUpLast = true;   // frame thread only (F13, F16)
+bool g_followHeadLast = true, g_visorUpLast = true;   // frame thread only (F13, F16)
 bool g_visorBreathLast = false;                                 // frame thread only: the breathable air state as last logged, on foot (F16)
 std::atomic<bool> g_reticleHead{false};                         // fix.native_on_foot_reticle_follow is head (F16)
 std::atomic<bool> g_reticleWriteOn{false};                      // the key 10 centring is wanted now: head, on foot, session (frame thread; the probe reads it, F16)
@@ -83,13 +79,6 @@ std::atomic<bool> g_alignKeyOn{false};
 double g_alignTrimCm[3] = {};   // [0] right, [1] up, [2] forward (body axes)
 std::atomic<int> g_worldMarkersMode{3};        // F27/F31: fix.native_on_foot_world_markers: 0 fixed (inverse), 1 forward (C), 2 game, 3 forward_now (H_M, default); live; key 10 is never touched
 uint64_t g_worldLineMs = 0;                    // frame thread and game thread: the 5 s line (the post hook writes it, once per 5 s)
-// F25 (TEMPORARY A/B): the visor param block's translation source floats (.bss, normally 0, no writer in the exe): the values the key sets.
-constexpr uintptr_t kVisorShiftRva = 0x5FCA8B0;   // x at +0, y at +4
-std::atomic<bool> g_visorShiftWant{false};
-std::atomic<float> g_visorShiftX{0.0f}, g_visorShiftY{0.0f};
-bool g_visorShiftWritten = false, g_visorShiftRefused = false;   // frame thread only
-float g_visorShiftLastX = 0.0f, g_visorShiftLastY = 0.0f;       // frame thread only: the values last written
-std::string g_visorShiftSpelled;                                 // frame thread only: the key's text as last logged
                // fix.native_on_foot_look_to_aim_comp_delay (temporary): 0 or 1 frames
 bool g_lookOnLast = true;                      // frame thread only: the look keys as last logged (readKey)
 int g_lookSignLast = 1, g_lookDelayLast = 0, g_lookCompSignLast = 1;   // frame thread only
@@ -122,8 +111,8 @@ uintptr_t g_layoutHrc = 0;                                      // under g_f9Loc
 std::atomic<float> g_hudDistance{nofoot::kHudDefaultDistance};   // fix.native_on_foot_hud_distance, live (F12)
 float g_hudDistanceLast = -1.0f;                   // frame thread only: as last logged (F12)
 std::atomic<bool> g_meshCreateLive{false};         // the creation patch is applied (set by the frame thread; read by the P2 hook, F12)
-std::atomic<bool> g_meshWorldKeyOn{false};         // fix.native_on_foot_hud_mesh_world, as the frame thread last read it (F11)
-bool g_panelsKeyLast = false, g_meshKeyLast = false, g_meshWorldKeyLast = false;   // frame thread only: as last logged
+
+bool g_panelsKeyLast = false, g_meshKeyLast = false;   // frame thread only: as last logged
 std::atomic<bool> g_hudKeyOn{false};               // fix.native_on_foot_hud, as the frame thread last read it (F8)
 bool g_hudKeyLast = false;                         // frame thread only: the hud key as last logged
 std::atomic<bool> g_keyOn{false};                  // fix.native_on_foot, as the frame thread last read it
@@ -291,13 +280,12 @@ void __fastcall setterHooked(void* selectorPtr, uint32_t incoming) {
     }
     nofoot::Inputs in;
     in.keyOn = g_keyOn.load(std::memory_order_relaxed);
-    in.gateMethod = g_methodGate.load(std::memory_order_relaxed);
     in.incoming = incoming;
     in.selectorValid = valid;
     in.selectorFrozen = valid && frozen == selector;
     in.gameSession = nativeGameSession();
     ev.reason = nofoot::admit(in);
-    ev.admitted = ev.reason == nofoot::Reason::Admitted;
+    ev.admitted = false;   // F34: nothing is substituted (the gate is the only method)
     ev.keyOn = in.keyOn;
     ev.incoming = incoming;
     ev.effective = nofoot::effectiveMode(ev.reason, incoming);
@@ -307,14 +295,7 @@ void __fastcall setterHooked(void* selectorPtr, uint32_t incoming) {
     if (prevEffective != ev.effective) logEyeRule("the setter's render mode edge");
     ev.onFoot = journalOnFootKnown() ? (journalOnFoot() ? 1 : 0) : 2;
     ev.seated = journalSeatedKnown() ? (journalSeated() ? 1 : 0) : 2;
-    // The flag is set before the call, so a frame boundary that runs while the original is inside it sees the session.
-    // A call that is not substituted ends the flag: an HMD mode (the game's own stereo), or a cinema mode the game asks for while
-    // the key is off or the call was refused (the game is back on the flat screen).
-    // Under the gate method the flag is the frame thread's to compute (nativeOnFootActive, native_on_foot.h): the setter never sets it there.
-    if (!in.gateMethod) {
-        if (ev.admitted) g_nativeOnFootActive.store(true, std::memory_order_relaxed);
-        else if (nofoot::isHmdMode(incoming) || nofoot::isCinemaMode(incoming)) g_nativeOnFootActive.store(false, std::memory_order_relaxed);
-    }
+    // F34: under the gate the frame thread computes the native flag (nativeOnFootActive); the setter never sets it.
     g_original(selectorPtr, ev.effective);
     g_lastForwardedHmd.store(nofoot::isHmdMode(ev.effective), std::memory_order_relaxed);
     uint32_t after = 0;
@@ -446,6 +427,21 @@ void installOnce() {
                     g_hook->stolenBytes(), nofoot::kPrologueBytes, static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(g_relay)));
 }
 
+// F34: the keys removed in the cleanup. The shipping file carries them at their last values (silently); a value that differs is named once, here.
+void retiredKeysNote(const Config& cfg, bool first) {
+    if (!first) return;
+    if (cfg.getString("fix.native_on_foot_method", "gate") != "gate") Log::get().note("native on foot: fix.native_on_foot_method is retired (F34): ignored");
+    if (cfg.getString("fix.native_on_foot_hud", "off") != "off") Log::get().note("native on foot: fix.native_on_foot_hud is retired (F34): ignored (it follows fix.native_on_foot)");
+    if (cfg.getString("fix.native_on_foot_panels", "off") != "off") Log::get().note("native on foot: fix.native_on_foot_panels is retired (F34): ignored (it follows fix.native_on_foot)");
+    if (cfg.getString("fix.native_on_foot_hud_mesh", "off") != "off") Log::get().note("native on foot: fix.native_on_foot_hud_mesh is retired (F34): ignored (it follows fix.native_on_foot)");
+    if (cfg.getString("fix.native_on_foot_hud_mesh_world", "off") != "off") Log::get().note("native on foot: fix.native_on_foot_hud_mesh_world is retired (F34): ignored");
+    if (cfg.getString("fix.native_on_foot_hud_follow_order", "after") != "after") Log::get().note("native on foot: fix.native_on_foot_hud_follow_order is retired (F34): ignored (the order is after)");
+    if (cfg.getString("fix.native_on_foot_reticle_probe", "off") != "off") Log::get().note("native on foot: fix.native_on_foot_reticle_probe is retired (F34): ignored");
+    if (cfg.getString("fix.native_on_foot_body_cb_probe", "off") != "off") Log::get().note("native on foot: fix.native_on_foot_body_cb_probe is retired (F34): ignored");
+    if (cfg.getString("fix.native_on_foot_view_probes", "off") != "off") Log::get().note("native on foot: fix.native_on_foot_view_probes is retired (F34): ignored");
+    if (cfg.getString("fix.native_on_foot_visor_shift", "off") != "off") Log::get().note("native on foot: fix.native_on_foot_visor_shift is retired (F34): ignored");
+    if (cfg.getString("fix.native_on_foot_sharp_hud", "off") != "off") Log::get().note("native on foot: fix.native_on_foot_sharp_hud is retired (F34): ignored (it is always on)");
+}
 // The key, re-read when the configuration changes (Config::generation()). Read by its literal name (tools/gen_settings_schema.py).
 void readKey() {
     Config& cfg = Config::get();
@@ -466,48 +462,28 @@ void readKey() {
                            : " (every natural mode request passes through unchanged)");
         g_keyLast = on;
     }
-    // TEMPORARY A/B (F2): swap substitutes in the setter (F0's behaviour); gate writes one byte and lets the game's own requester ask for HMD.
-    const std::string method = cfg.getString("fix.native_on_foot_method", "gate");
-    bool gate = true;
-    if (method == "swap") {
-        gate = false;
-    } else if (method != "gate") {
-        Log::get().note("native on foot: fix.native_on_foot_method = %s is not swap or gate; using gate.", method.c_str());
-    }
-    g_methodGate.store(gate, std::memory_order_relaxed);
-    if (first || gate != g_methodLast) {
-        Log::get().note("native on foot: fix.native_on_foot_method is %s (%s)", gate ? "gate" : "swap",
-                        gate ? "the setter never substitutes; one byte at EliteDangerous64.exe+0x5E82B3E is held at 0 while the key is on and a game session is live"
-                             : "the setter substitutes an on-foot Cinema request as HMD stereo, as F0 did");
-        g_methodLast = gate;
-    }
-    // F8 (TEMPORARY): the first-person HUD override, on or off, live. hudOverrideTick reads the key each frame.
-    const bool hudOn = cfg.getString("fix.native_on_foot_hud", "off") == "on";
+    // F34: the method is the gate (the swap path is gone). The HUD override, the panel and HRC patches follow the master key (F34: they are one
+    // feature now, each write still verified). Keys removed in F34 that a settings file may still carry are named once, by retiredKeysNote below.
+    g_methodGate.store(true, std::memory_order_relaxed);
+    const bool hudOn = on;
     g_hudKeyOn.store(hudOn, std::memory_order_relaxed);
     if (first || hudOn != g_hudKeyLast) {
-        Log::get().note("native on foot: fix.native_on_foot_hud is %s", hudOn ? "on" : "off");
+        Log::get().note("native on foot: the first-person HUD override is %s (it follows fix.native_on_foot)", hudOn ? "on" : "off");
         g_hudKeyLast = hudOn;
     }
-    // F9 (TEMPORARY): the two code patches' keys, live.
-    const bool panelsOn = cfg.getString("fix.native_on_foot_panels", "off") == "on";
-    const bool meshOn = cfg.getString("fix.native_on_foot_hud_mesh", "off") == "on";
+    const bool panelsOn = on;
+    const bool meshOn = on;
     g_panelsKeyOn.store(panelsOn, std::memory_order_relaxed);
     g_meshKeyOn.store(meshOn, std::memory_order_relaxed);
     if (first || panelsOn != g_panelsKeyLast) {
-        Log::get().note("native on foot: fix.native_on_foot_panels is %s", panelsOn ? "on" : "off");
+        Log::get().note("native on foot: the panel patch is %s (it follows fix.native_on_foot)", panelsOn ? "on" : "off");
         g_panelsKeyLast = panelsOn;
     }
     if (first || meshOn != g_meshKeyLast) {
-        Log::get().note("native on foot: fix.native_on_foot_hud_mesh is %s", meshOn ? "on" : "off");
+        Log::get().note("native on foot: the HRC creation patch is %s (it follows fix.native_on_foot)", meshOn ? "on" : "off");
         g_meshKeyLast = meshOn;
     }
-    // F11 (TEMPORARY): the world placement A/B, live.
-    const bool worldOn = cfg.getString("fix.native_on_foot_hud_mesh_world", "off") == "on";
-    g_meshWorldKeyOn.store(worldOn, std::memory_order_relaxed);
-    if (first || worldOn != g_meshWorldKeyLast) {
-        Log::get().note("native on foot: fix.native_on_foot_hud_mesh_world is %s", worldOn ? "on" : "off");
-        g_meshWorldKeyLast = worldOn;
-    }
+    retiredKeysNote(cfg, first);
     // F12: the HUD distance (a user setting, live), clamped to its range; logged once per change.
     float dist = cfg.getFloat("fix.native_on_foot_hud_distance", nofoot::kHudDistanceSettingDefault);
     if (dist < nofoot::kHudDistanceMin) dist = nofoot::kHudDistanceMin;
@@ -538,12 +514,7 @@ void readKey() {
     if (smooth < nofoot::kHudSmoothMin) smooth = nofoot::kHudSmoothMin;
     if (smooth > nofoot::kHudSmoothMax) smooth = nofoot::kHudSmoothMax;
     g_followSmoothMs.store(smooth, std::memory_order_relaxed);
-    const bool followBefore = cfg.getString("fix.native_on_foot_hud_follow_order", "after") == "before";
-    g_followBefore.store(followBefore, std::memory_order_relaxed);
-    if (first || followBefore != g_followBeforeLast) {
-        Log::get().note("native on foot hud follow order: %s (temporary)", followBefore ? "before" : "after");
-        g_followBeforeLast = followBefore;
-    }
+    // F34: the follow order is "after" (the one behaviour; the A/B key is gone).
     // F16: the visor in breathable air (a user setting): up holds the visor override while Status.json says breathable air; game leaves it alone.
     const bool visorUp = cfg.getString("fix.native_on_foot_breathable_visor", "up") == "up";
     g_visorUpSetting.store(visorUp, std::memory_order_relaxed);
@@ -581,20 +552,7 @@ void readKey() {
         }
     }
     // F26 (TEMPORARY, live): the sharp on-foot HUD. Off by default; read on each frame through g_sharpHudKeyOn.
-    g_nativeOnFootSharpHudKey.store(cfg.getString("fix.native_on_foot_sharp_hud", "off") == "on" && runtimeVrProfile(), std::memory_order_relaxed);
-    // F25 (TEMPORARY A/B): fix.native_on_foot_visor_shift = off | x,y. Live.
-    {
-        const std::string vs = cfg.getString("fix.native_on_foot_visor_shift", "off");
-        float vx = 0.0f, vy = 0.0f;
-        const bool vsOn = vs != "off" && std::sscanf(vs.c_str(), "%f,%f", &vx, &vy) == 2;
-        g_visorShiftWant.store(vsOn, std::memory_order_relaxed);
-        g_visorShiftX.store(vx, std::memory_order_relaxed);
-        g_visorShiftY.store(vy, std::memory_order_relaxed);
-        if (first || vs != g_visorShiftSpelled) {
-            Log::get().note("native on foot visor shift (TEMPORARY A/B): %s", vsOn ? "set (written when the game's block reads 0 0)" : "off");
-            g_visorShiftSpelled = vs;
-        }
-    }
+    g_nativeOnFootSharpHudKey.store(runtimeVrProfile(), std::memory_order_relaxed);   // F34: always on in native on foot (the key is gone)
     // F22: look to aim (user settings, live). The body turns to where the head looks while the reticle follows head; the runtime holds the world still.
     // The sign and the delay are TEMPORARY (the flight A/B); the smoothing is the setting. Each key is spelled out in its own call (the generator scans).
     const bool lookOn = cfg.getString("fix.native_on_foot_look_to_aim", "on") == "on";
@@ -630,11 +588,11 @@ void readKey() {
         };
         float offs[nofoot::kHudGroupCount * 2] = {};
         // F19: the left group's defaults are Sean's tuning (0.18, 0.02) and the top group's y is -0.07; the other offsets stay at 0.
-        offs[0] = offsetClamp(cfg.getFloat("fix.native_on_foot_hud_left_x", 0.18f));
+        offs[0] = offsetClamp(cfg.getFloat("fix.native_on_foot_hud_left_x", 0.0f));
         offs[1] = offsetClamp(cfg.getFloat("fix.native_on_foot_hud_left_y", 0.02f));
         offs[2] = offsetClamp(cfg.getFloat("fix.native_on_foot_hud_top_x", 0.0f));
-        offs[3] = offsetClamp(cfg.getFloat("fix.native_on_foot_hud_top_y", -0.07f));
-        offs[4] = offsetClamp(cfg.getFloat("fix.native_on_foot_hud_right_x", 0.0f));
+        offs[3] = offsetClamp(cfg.getFloat("fix.native_on_foot_hud_top_y", -0.09f));
+        offs[4] = offsetClamp(cfg.getFloat("fix.native_on_foot_hud_right_x", -0.07f));
         offs[5] = offsetClamp(cfg.getFloat("fix.native_on_foot_hud_right_y", 0.0f));
         offs[6] = offsetClamp(cfg.getFloat("fix.native_on_foot_hud_centre_x", 0.0f));
         offs[7] = offsetClamp(cfg.getFloat("fix.native_on_foot_hud_centre_y", 0.0f));
@@ -659,7 +617,7 @@ void readKey() {
         g_hudSpreadLast = spread;
     }
     // F17: the HUD element scale (a user setting, live): 0 = the game's own scale; otherwise 0.30..2.00 (a value under 0.30 is 0.30).
-    float elem = cfg.getFloat("fix.native_on_foot_hud_element_scale", 1.35f);   // F19: Sean's tuning is 1.35 (the default; 0 = the game's own)
+    float elem = cfg.getFloat("fix.native_on_foot_hud_element_scale", 1.15f);   // F34: the shipping default (0 = the game's own)
     if (elem < 0.0f) elem = 0.0f;
     if (elem > 0.0f && elem < nofoot::kHudElemScaleMin) elem = nofoot::kHudElemScaleMin;
     if (elem > nofoot::kHudElemScaleMax) elem = nofoot::kHudElemScaleMax;
@@ -671,16 +629,11 @@ void readKey() {
     }
     // F18: the HUD room (a user setting, live): 1.00..2.50. Elements keep their angular size; the element scale is divided by the room and the
     // mesh is multiplied by it (the room is applied only when the game's scale is known; see hudRoomTick).
-    float room = cfg.getFloat("fix.native_on_foot_hud_room", 1.0f);
+    float room = cfg.getFloat("fix.native_on_foot_hud_room", 1.25f);
     if (room < 1.0f) room = 1.0f;
     if (room > 2.5f) room = 2.5f;
     g_hudRoomSetting.store(room, std::memory_order_relaxed);
-    const bool reticleOn =cfg.getString("fix.native_on_foot_reticle_probe", "off") == "on";
-    g_reticleKeyOn.store(reticleOn, std::memory_order_relaxed);
-    if (first || reticleOn != g_reticleKeyLast) {
-        Log::get().note("native on foot: fix.native_on_foot_reticle_probe is %s", reticleOn ? "on" : "off");
-        g_reticleKeyLast = reticleOn;
-    }
+    // F34: the reticle stub is the feature's (key 10 while native stereo is on foot); the probe key is gone.
     // F15 (TEMPORARY): the first-person body hide (explorer_cam.cpp, explorerCamFpBody).
     const bool fpOn = cfg.getString("fix.native_on_foot_hide_fp_body", "off") == "on";
     g_fpKeyOn.store(fpOn, std::memory_order_relaxed);
@@ -710,13 +663,6 @@ void readKey() {
     if (first || unclipOn != g_unclipKeyLast) {
         Log::get().note("native on foot: fix.native_on_foot_body_unclip is %s (temporary)", unclipOn ? "on" : "off");
         g_unclipKeyLast = unclipOn;
-    }
-    // F19 (TEMPORARY): the body constant-buffer probe (nativeOnFootBodyProbeDraw, on the draw thunk). On foot: native stereo or Explorer Cam.
-    const bool cbProbeOn = cfg.getString("fix.native_on_foot_body_cb_probe", "off") == "on";
-    g_cbProbeKeyOn.store(cbProbeOn, std::memory_order_relaxed);
-    if (first || cbProbeOn != g_cbProbeKeyLast) {
-        Log::get().note("native on foot: fix.native_on_foot_body_cb_probe is %s (temporary)", cbProbeOn ? "on" : "off");
-        g_cbProbeKeyLast = cbProbeOn;
     }
     // F21 (TEMPORARY): the hybrid first-person body (explorer_cam.cpp, explorerCamHybridTick). While it is on and native stereo is on foot it
     // overrides fix.native_on_foot_hide_fp_body and fix.native_on_foot_body_unclip.
@@ -1390,7 +1336,7 @@ void codePatchTick(CodePatch& p, bool want, const char* reason) {
 
 // ---- F11: the two mesh patches (TEMPORARY; approved by Sean 2026-10-14) ------------------------------------------------------------
 // fix.native_on_foot_hud_mesh: the HRC creation gate, 80 -> 78 at +0x1A149A8 (verify FF 90 80 00 00 00 at +0x1A149A6).
-// fix.native_on_foot_hud_mesh_world (A/B): the placement branch, 74 -> EB at +0x1A36453 (verify 74 2A).
+// F34: the world placement A/B (74 -> EB at +0x1A36453) is removed with its key.
 // Each is applied only while native stereo is on foot and the first-person HUD override is held. Its bytes are verified before the write
 // (refused and logged otherwise), and the original byte is restored only while the verified bytes still read as this patch left them.
 struct MeshSite {
@@ -1409,7 +1355,7 @@ struct MeshSite {
 };
 MeshSite g_meshCreate{"hud mesh", 0x1A149A6, 6, {0xFF, 0x90, 0x80, 0x00, 0x00, 0x00}, {0xFF, 0x90, 0x78, 0x00, 0x00, 0x00}, 0x1A149A8,
                       0x80, 0x78, "80 -> 78"};
-MeshSite g_meshWorld{"hud mesh world", 0x1A36453, 2, {0x74, 0x2A, 0, 0, 0, 0}, {0xEB, 0x2A, 0, 0, 0, 0}, 0x1A36453, 0x74, 0xEB, "74 -> EB"};
+
 
 // "FF 90 80 00 00 00" for the first `n` bytes.
 std::string meshHex(const uint8_t* b, size_t n) {
@@ -1712,7 +1658,6 @@ struct F13Inputs {
     float s = 1.0f;
     float size = 1.0f;
     bool head = false;
-    bool before = false;
     float C[16] = {};
 };
 struct F12Matrix {
@@ -1929,7 +1874,7 @@ void f13ReadHead(uintptr_t listB) noexcept {
 
 // The inputs of a placement, for the no-compounding comparison.
 bool f13SameInputs(const F13Inputs& a, const F13Inputs& b) noexcept {
-    if (!f12Near(a.s, b.s) || !f12Near(a.size, b.size) || a.head != b.head || a.before != b.before) return false;
+    if (!f12Near(a.s, b.s) || !f12Near(a.size, b.size) || a.head != b.head) return false;
     return !a.head || std::memcmp(a.C, b.C, sizeof(a.C)) == 0;
 }
 
@@ -1946,8 +1891,7 @@ void f13Compose(const float* base, const F13Inputs& in, float* out) noexcept {
     }
     if (in.head) {
         float T[16];
-        if (in.before) f13Mul(in.C, S, T);
-        else f13Mul(S, in.C, T);
+        f13Mul(S, in.C, T);   // F34: the follow order is the one behaviour (after)
         std::memcpy(out, T, sizeof(T));
     } else {
         std::memcpy(out, S, sizeof(S));
@@ -1963,7 +1907,6 @@ void f13PlaceHud(void* hrcPtr, uintptr_t listB) noexcept {
     // F18: the mesh is the size setting times the room that is applied now (1 unless the room is in effect).
     const float size = g_hudSize.load(std::memory_order_relaxed) * g_hudRoomEff.load(std::memory_order_relaxed);
     const bool wantHead = g_followHead.load(std::memory_order_relaxed);
-    const bool before = g_followBefore.load(std::memory_order_relaxed);
     const uintptr_t h = reinterpret_cast<uintptr_t>(hrcPtr);
     if (!h) return;
     // F18: the game's own layout scale, read while our element-scale override is off (the field holds the S the layout used; RE, not re-checked).
@@ -1978,7 +1921,6 @@ void f13PlaceHud(void* hrcPtr, uintptr_t listB) noexcept {
     F13Inputs in;
     in.s = s;
     in.size = size;
-    in.before = before;
     {
         F9Lock lock;
         const F13Head& src = g_f13Smooth.valid ? g_f13Smooth : g_f13Raw;
@@ -2537,58 +2479,6 @@ uint64_t __fastcall layoutHooked(void* hrc, void* out, void* rec, uint64_t a4, u
 
 // RETICLE INDICATOR PROBE (read only, except key 10 while native stereo is on foot, F16-F18). The stub below calls this with rcx = the instance and rdx = the node of the marker component's call at
 // EliteDangerous64.exe+0x1A15644 (the call to 0x434ECC0, preceded by mov rcx,[rsi+0x60]). It writes nothing except key 10: reticle follows aim (F18, default) zeroes its translation x and y; head (F17) places it along the head.
-// F25 (TEMPORARY A/B): writes the visor shift while wanted, verifies 0 0 before the first write, restores 0 0 when the key goes off.
-void visorShiftTick(bool want, float x, float y) {
-    if (!g_base) return;
-    const uintptr_t a = g_base + kVisorShiftRva;
-    if (!want) {
-        g_visorShiftRefused = false;
-        if (g_visorShiftWritten) {
-            if (guardedWriteFloat(a, 0.0f) && guardedWriteFloat(a + 4, 0.0f)) {
-                Log::get().note("native on foot visor shift: restored 0.0 0.0 (the key is off)");
-            } else {
-                Log::get().note("native on foot visor shift: NOT restored -- the write was refused");
-            }
-            g_visorShiftWritten = false;
-        }
-        return;
-    }
-    if (g_visorShiftRefused) return;
-    if (!g_visorShiftWritten) {
-        float v0 = 1.0f, v1 = 1.0f;
-        if (!guardedRead(a, &v0, 4) || !guardedRead(a + 4, &v1, 4)) {
-            g_visorShiftRefused = true;
-            Log::get().note("native on foot visor shift: NOT written -- the block at +0x5FCA8B0 is not readable");
-            return;
-        }
-        if (v0 != 0.0f || v1 != 0.0f) {
-            g_visorShiftRefused = true;
-            Log::get().note("native on foot visor shift: NOT written -- the block reads %.6f %.6f, not 0 0 (the game uses it); nothing written", static_cast<double>(v0), static_cast<double>(v1));
-            return;
-        }
-        Log::get().note("native on foot visor shift: the block reads 0.0 0.0 before the first write; writing %.4f %.4f", static_cast<double>(x), static_cast<double>(y));
-    }
-    if (!g_visorShiftWritten || x != g_visorShiftLastX || y != g_visorShiftLastY) {
-        if (guardedWriteFloat(a, x) && guardedWriteFloat(a + 4, y)) {
-            g_visorShiftWritten = true;
-            g_visorShiftLastX = x;
-            g_visorShiftLastY = y;
-        } else {
-            g_visorShiftRefused = true;
-            Log::get().note("native on foot visor shift: the write was refused; stopped for this key setting");
-        }
-    }
-}
-
-// F24 (Part F, probe 3): what the reticle probe saw of key 10 and key 43: the node's [node+0x50] and the instance's written +0x40. Read only.
-struct F24KeyRec {
-    bool valid = false;
-    uint64_t n = 0;
-    float p[3] = {};
-    float inst[3] = {};
-    bool instOk = false;
-};
-F24KeyRec g_f24Keys[2];   // [0] key 10, [1] key 43; guarded by g_f9Lock
 
 struct F14Key {
     bool used = false;
@@ -2726,17 +2616,6 @@ void __fastcall reticleIndicatorProbe(void* instance, void* node) noexcept {
             reticleFollowHead(ia, false, false);
             if (writeOn) reticleAimCentre(ia, announce);
         }
-    }
-    if (key == 10 || key == 43) {
-        float np[3] = {};
-        const bool okNp = guardedRead(na + 0x50, np, sizeof(np));
-        F9Lock keyLock;
-        F24KeyRec& r = g_f24Keys[key == 43 ? 1 : 0];
-        r.valid = okNp;
-        if (okNp) std::memcpy(r.p, np, sizeof(np));
-        r.instOk = okPos;
-        if (okPos) std::memcpy(r.inst, pos, sizeof(pos));
-        ++r.n;
     }
     F9Lock lock;
     F14Key* row = nullptr;
@@ -4347,39 +4226,6 @@ bool __fastcall loadWaitHooked(void* self, void* a2, void* a3, void* a4) {
     return r;
 }
 
-// Probe A (read only): the camera driver's entry. Rate limited to one line per 5 s per mode value.
-std::atomic<uint64_t> g_driverLastMs[64]{};
-void driverProbeLine(void* driver, uint32_t mode, uint64_t now) {
-    const size_t slot = mode & 63u;
-    const uint64_t last = g_driverLastMs[slot].load(std::memory_order_relaxed);
-    if (last != 0 && now - last < 5000) return;
-    g_driverLastMs[slot].store(now, std::memory_order_relaxed);
-    uintptr_t ship = 0;
-    float m1[16] = {}, m2[16] = {};
-    const bool okShip = driver && guardedRead(reinterpret_cast<uintptr_t>(driver) + 0x50, &ship, 8) && ship != 0;
-    const bool ok1 = okShip && guardedRead(ship + 0x3330, m1, sizeof(m1));
-    const bool ok2 = okShip && guardedRead(ship + 0x130, m2, sizeof(m2));
-    char y1[24], p1[24], y2[24], p2[24];
-    if (ok1) {
-        std::snprintf(y1, sizeof(y1), "%.2f", f13YawDeg(m1));
-        std::snprintf(p1, sizeof(p1), "%.2f", f13PitchDeg(m1));
-    } else {
-        std::snprintf(y1, sizeof(y1), "unread");
-        std::snprintf(p1, sizeof(p1), "unread");
-    }
-    if (ok2) {
-        std::snprintf(y2, sizeof(y2), "%.2f", f13YawDeg(m2));
-        std::snprintf(p2, sizeof(p2), "%.2f", f13PitchDeg(m2));
-    } else {
-        std::snprintf(y2, sizeof(y2), "unread");
-        std::snprintf(p2, sizeof(p2), "unread");
-    }
-    Log::get().note("native on foot rig probe A: mode %u driver=0x%llX ship=%s row2 at +0x3330 yaw %s pitch %s deg; row2 at +0x130 yaw %s pitch %s deg "
-                    "(read only)",
-                    static_cast<unsigned>(mode), static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(driver)), okShip ? "read" : "unread",
-                    y1, p1, y2, p2);
-}
-
 // Probe B (read only), called from the P1 callback for each AMC. The root getter is the game's own call at 0x3DD61AF (rcx = [AMC+0x208], vt+0x20).
 using F22RootFn = float* (__fastcall*)(void*);
 __declspec(noinline) bool callRootGetter(uintptr_t fn, uintptr_t obj, uintptr_t* outMatrix) noexcept {
@@ -4431,220 +4277,18 @@ void rigProbeB(void* amc, uint64_t now) {
     }
 }
 
-// ---- F24 Part F (TEMPORARY, read only): view probes 1, 2 and 3 ---------------------------------------------------------------------------------
-// Prologues verified against the Epic exe (build 332841). Each probe is one hook; a mismatch refuses that probe alone and logs why. Every line
-// says how many calls the hook has seen, so "the hook never ran" (no lines, the install line only) differs from "ran" (lines with a count).
-constexpr uintptr_t kComposerRva = 0x283D4C0;   // the composer: rcx = this, rdx = base 4x4, xmm2 = near, xmm3 = far, [rsp+0x28] flag, [rsp+0x30] mode
-const uint8_t kComposerPrologue[21] = {0x48, 0x8B, 0xC4, 0x48, 0x89, 0x58, 0x10, 0x55, 0x56, 0x57, 0x41, 0x56,
-                                       0x41, 0x57, 0x48, 0x8D, 0xA8, 0xA8, 0xFE, 0xFF, 0xFF};
-constexpr uintptr_t kBucketRva = 0x594D90;      // the bucket draw prep: rcx = RC, rdx = bucket
-const uint8_t kBucketPrologue[13] = {0x4C, 0x8B, 0xDC, 0x57, 0x41, 0x56, 0x48, 0x81, 0xEC, 0x58, 0x04, 0x00, 0x00};
+// ---- F24 Part F, F34: the marker entry (probes 1 to 3 are removed; the marker entry stays, always on in VR, for the same-call head read) ----
 constexpr uintptr_t kMarkerRva = 0x1A14D80;     // the marker render entry: rcx = this, rdx = list A, r8 = list B
 const uint8_t kMarkerPrologue[19] = {0x40, 0x55, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57,
                                      0x48, 0x81, 0xEC, 0xF0, 0x02, 0x00, 0x00};
-constexpr bool kBucketProbeInstalled = false;   // probe 2 stays off even with fix.native_on_foot_view_probes = on, until its fault is proved fixed
-bool f24ViewProbesOn() {
-    return Config::get().getString("fix.native_on_foot_view_probes", "off") == "on";
-}
-F9Probe g_f24Composer;   // probe 1
-F9Probe g_f24Bucket;     // probe 2
-F9Probe g_f24Marker;     // probe 3
-std::atomic<uint64_t> g_cmpCalls{0}, g_bucketCalls{0}, g_markerCalls{0};
-bool g_markerProbeKey = false;   // F30: set at the marker install (fix.native_on_foot_view_probes): the probe-3 lines print
-uint64_t g_cmpLastMs[4] = {};      // probe 1: the last line per mode (slot = mode & 3)
-uint64_t g_markerLastMs = 0;       // probe 3: the last line
-uint64_t g_bucketWinMs = 0;        // probe 2: the window's start (under g_f9Lock)
-
-std::string f24Floats(const float* v, size_t n) {
-    std::string s = "(";
-    for (size_t i = 0; i < n; ++i) {
-        char b[24];
-        std::snprintf(b, sizeof(b), "%s%.4f", i ? " " : "", static_cast<double>(v[i]));
-        s += b;
-    }
-    s += ")";
-    return s;
-}
-
-// Probe 1: the composer's entry. Every 5 s per mode (2 = main eye, 3 = PostGUI), the base matrix, near and far, the flag byte and mode, and the look basis.
-using F24ComposerFn = uint64_t(__fastcall*)(void*, void*, float, float, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-void composerProbeLine(void* self, void* base, float nearV, float farV, uint8_t flag, uint32_t mode, uint64_t now) {
-    const unsigned slot = mode & 3u;
-    if (g_cmpLastMs[slot] && now - g_cmpLastMs[slot] < 5000) return;
-    g_cmpLastMs[slot] = now;
-    float b[16] = {};
-    const bool okB = base && guardedRead(reinterpret_cast<uintptr_t>(base), b, sizeof(b));
-    float basis[12] = {};
-    const uintptr_t comp = g_lookComp.load(std::memory_order_relaxed);
-    const bool okBasis = comp && guardedRead(comp + kCompBasisOff, basis, sizeof(basis));
-    Log::get().note("native on foot view probe 1: composer mode %u (%s) calls %llu, this=0x%llX, base %s, near %.4f far %.4f, flag %u, look basis "
-                    "(comp+0x5B0) %s (read only)",
-                    static_cast<unsigned>(mode), mode == 2 ? "main eye" : mode == 3 ? "PostGUI" : "other",
-                    static_cast<unsigned long long>(g_cmpCalls.load()), static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(self)),
-                    okB ? f24Floats(b, 16).c_str() : "unread", static_cast<double>(nearV), static_cast<double>(farV), static_cast<unsigned>(flag),
-                    okBasis ? f24Floats(basis, 12).c_str() : "unread");
-}
-// The composer takes its 5th to 9th arguments on the stack (entry+0x28 .. +0x48; its callers write +0x28 .. +0x40). A wrapper that forwards only four
-// lost them: the composer read garbage pointers and the copy at +0x59F1B0 faulted (F24 launch crash, 2026-10-14). All of them are forwarded.
-uint64_t __fastcall composerHooked(void* self, void* base, float nearV, float farV, uint64_t s5, uint64_t s6, uint64_t s7, uint64_t s8, uint64_t s9) {
-    const F24ComposerFn original = reinterpret_cast<F24ComposerFn>(g_f24Composer.original);
-    if (!original) return 0;
-    const uint64_t n = g_cmpCalls.fetch_add(1, std::memory_order_relaxed) + 1;
-    if (n == 1) Log::get().note("native on foot view probe 1: first call -- the composer ran (read only)");
-    composerProbeLine(self, base, nearV, farV, static_cast<uint8_t>(s5), static_cast<uint32_t>(s6), GetTickCount64());
-    return original(self, base, nearV, farV, s5, s6, s7, s8, s9);
-}
-
-// Probe 2: the bucket draw prep. Per call only counts and a set of distinct cameras (8 per class per window); the matrices are read once per new
-// camera per window. Every 5 s: one line per class, one per camera.
-struct F24BucketCam {
-    uintptr_t cam = 0;
-    float m[16] = {};
-    float fov = 0.0f;
-    bool okM = false;
-};
-struct F24BucketClass {
-    uint64_t calls = 0;
-    int nCam = 0;
-    F24BucketCam cams[8];
-};
-F24BucketClass g_bkFp, g_bkOther;   // under g_f9Lock
-void bucketWindowLine(uint64_t now) {
-    const auto emit = [&](const char* name, const F24BucketClass& c) {
-        Log::get().note("native on foot view probe 2: %s buckets in the last 5 s: %llu calls (%llu in all), %d distinct camera(s)", name,
-                        static_cast<unsigned long long>(c.calls), static_cast<unsigned long long>(g_bucketCalls.load()), c.nCam);
-        for (int i = 0; i < c.nCam; ++i) {
-            const F24BucketCam& k = c.cams[i];
-            Log::get().note("native on foot view probe 2: %s camera 0x%llX fov(+0x280) %.4f matrix(+0x20) %s", name,
-                            static_cast<unsigned long long>(k.cam), static_cast<double>(k.fov), k.okM ? f24Floats(k.m, 16).c_str() : "unread");
-        }
-    };
-    emit("FP (flag bit 5)", g_bkFp);
-    emit("other", g_bkOther);
-    g_bkFp = F24BucketClass{};
-    g_bkOther = F24BucketClass{};
-    g_bucketWinMs = now;
-}
-uint64_t __fastcall bucketHooked(void* rc, void* bucket) {
-    using F24BucketFn = uint64_t(__fastcall*)(void*, void*);
-    const F24BucketFn original = reinterpret_cast<F24BucketFn>(g_f24Bucket.original);
-    if (!original) return 0;
-    const uint64_t n = g_bucketCalls.fetch_add(1, std::memory_order_relaxed) + 1;
-    if (n == 1) Log::get().note("native on foot view probe 2: first call -- the bucket prep ran (read only)");
-    const uintptr_t ra = reinterpret_cast<uintptr_t>(rc), ba = reinterpret_cast<uintptr_t>(bucket);
-    uint32_t flags = 0;
-    uintptr_t cam = 0;
-    if (ra && ba && guardedRead(ba + 8, &flags, 4)) {
-        const bool fp = (flags & (1u << 5)) != 0;
-        const uint64_t now = GetTickCount64();
-        const bool haveCam = guardedRead(ra + 0x158, &cam, 8) && cam != 0;
-        F9Lock lock;
-        if (!g_bucketWinMs) g_bucketWinMs = now;
-        F24BucketClass& c = fp ? g_bkFp : g_bkOther;
-        ++c.calls;
-        if (haveCam) {
-            bool known = false;
-            for (int i = 0; i < c.nCam; ++i) known = known || c.cams[i].cam == cam;
-            if (!known && c.nCam < 8) {
-                F24BucketCam& k = c.cams[c.nCam++];
-                k.cam = cam;
-                k.okM = guardedRead(cam + 0x20, k.m, sizeof(k.m));
-                k.fov = 0.0f;
-                guardedRead(cam + 0x280, &k.fov, 4);
-            }
-        }
-        if (now - g_bucketWinMs >= 5000) bucketWindowLine(now);
-    }
-    return original(rc, bucket);
-}
-
-// Probe 3: the marker entry. Every 5 s: M = P1->vt+0x58 then ->vt+0x28 (the calls at 0x1A14E32 and 0x1A14E3B), RC2 = P1->vt+0xE8 (0x1A14EE6, rcx = P1),
-// and the key 10 and key 43 rows the reticle probe recorded, with the scale the game applies in the camera-space branch.
-// The getters are the game's own; each is called with rcx = the object, no other argument, under SEH.
-using F24GetterFn = float* (__fastcall*)(void*);
-__declspec(noinline) bool f24CallGetter(uintptr_t obj, uint32_t slot, uintptr_t* out) noexcept {
-    uintptr_t vt = 0, fn = 0;
-    if (!obj || !guardedRead(obj, &vt, 8) || !vt || !guardedRead(vt + slot, &fn, 8) || !fn) return false;
-    __try {
-        const F24GetterFn f = reinterpret_cast<F24GetterFn>(fn);
-        *out = reinterpret_cast<uintptr_t>(f(reinterpret_cast<void*>(obj)));
-        return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
-}
-void markerProbeLine(void* self, void* listB, uint64_t now) {
-    if (g_markerLastMs && now - g_markerLastMs < 5000) return;
-    g_markerLastMs = now;
-    const uintptr_t a = reinterpret_cast<uintptr_t>(self);
-    uintptr_t p1 = 0, x = 0, m = 0, rc2 = 0;
-    const bool okP1 = guardedRead(a + 0x1B0, &p1, 8) && p1 != 0;
-    const bool okX = okP1 && f24CallGetter(p1, 0x58, &x) && x != 0;
-    const bool okM = okX && f24CallGetter(x, 0x28, &m) && m != 0;
-    const bool okRc2 = okP1 && f24CallGetter(p1, 0xE8, &rc2) && rc2 != 0;
-    float mf[16] = {};
-    const bool okMf = okM && guardedRead(m, mf, sizeof(mf));
-    float fovM = 0.0f;
-    const bool okFovM = okM && guardedRead(m + 0x260, &fovM, 4);
-    uintptr_t cam2 = 0;
-    float cam2m[16] = {};
-    const bool okCam2 = okRc2 && guardedRead(rc2 + 0x158, &cam2, 8) && cam2 != 0 && guardedRead(cam2 + 0x20, cam2m, sizeof(cam2m));
-    float fovHud = 0.0f, f16c = 0.0f;
-    const bool okHud = okRc2 && guardedRead(rc2 + 0x17C, &fovHud, 4);
-    const bool ok16c = okRc2 && guardedRead(rc2 + 0x16C, &f16c, 4);
-    // List B (r8), the layout the P2 hook's a3 uses: begin -> view 0, whose rows are at +0x20. Not otherwise verified for this entry.
-    float rows[16] = {};
-    uintptr_t begin = 0, v0 = 0;
-    const bool okRows = listB && guardedRead(reinterpret_cast<uintptr_t>(listB), &begin, 8) && begin != 0 && guardedRead(begin, &v0, 8) && v0 != 0 &&
-                        guardedRead(v0 + 0x20, rows, sizeof(rows));
-    Log::get().note("native on foot view probe 3: marker call calls %llu, this=0x%llX: M %s (vt+0x58, vt+0x28), M fov(+0x260) %s, M %s; RC2 %s, "
-                    "RC2+0x158 floats(+0x20) %s, RC2+0x16C %s, RC2+0x17C (HUD fov) %s; list B (r8) view 0 rows(+0x20) %s (read only)",
-                    static_cast<unsigned long long>(g_markerCalls.load()), static_cast<unsigned long long>(a),
-                    okM ? "found" : "not read", okFovM ? "read" : "unread", okMf ? f24Floats(mf, 16).c_str() : "unread",
-                    okRc2 ? "found" : "not read", okCam2 ? f24Floats(cam2m, 16).c_str() : "unread",
-                    ok16c ? std::to_string(static_cast<double>(f16c)).c_str() : "unread",
-                    okHud ? std::to_string(static_cast<double>(fovHud)).c_str() : "unread", okRows ? f24Floats(rows, 16).c_str() : "unread");
-    // Key 10 and key 43 (recorded by the reticle probe on the stub's call): P = [node+0x50], the row 3 of M, p_c = (P - row3) . rows, and the scale
-    // the camera-space branch applies, tan(HUD fov) / tan(camera fov) per the RE (its sign shows a -1 fov). Nothing is written.
-    F24KeyRec rec[2];
-    {
-        F9Lock lock;
-        rec[0] = g_f24Keys[0];
-        rec[1] = g_f24Keys[1];
-    }
-    for (int k = 0; k < 2; ++k) {
-        const unsigned key = k == 0 ? 10u : 43u;
-        if (!rec[k].valid) {
-            Log::get().note("native on foot view probe 3: key %u: not seen yet (the reticle probe saw no node with this key)", key);
-            continue;
-        }
-        if (!okMf || !okFovM || !okHud) {
-            Log::get().note("native on foot view probe 3: key %u: P (%.3f, %.3f, %.3f) seen %llu times; the camera or the FOVs are unread, so no scale", key,
-                            static_cast<double>(rec[k].p[0]), static_cast<double>(rec[k].p[1]), static_cast<double>(rec[k].p[2]),
-                            static_cast<unsigned long long>(rec[k].n));
-            continue;
-        }
-        const float d[3] = {rec[k].p[0] - mf[12], rec[k].p[1] - mf[13], rec[k].p[2] - mf[14]};
-        const float pc[3] = {d[0] * mf[0] + d[1] * mf[1] + d[2] * mf[2], d[0] * mf[4] + d[1] * mf[5] + d[2] * mf[6],
-                             d[0] * mf[8] + d[1] * mf[9] + d[2] * mf[10]};
-        const double tanHud = std::tan(static_cast<double>(fovHud)), tanCam = std::tan(static_cast<double>(fovM));
-        const double scale = tanCam != 0.0 ? tanHud / tanCam : 0.0;
-        Log::get().note("native on foot view probe 3: key %u: P (%.3f, %.3f, %.3f) row3 (%.3f, %.3f, %.3f) p_c (%.3f, %.3f, %.3f) scale %.4f "
-                        "(tan(HUD fov %.4f) / tan(camera fov %.4f)), sign %+d; instance +0x40 written (%.3f, %.3f, %.3f) (%s); seen %llu times",
-                        key, static_cast<double>(rec[k].p[0]), static_cast<double>(rec[k].p[1]), static_cast<double>(rec[k].p[2]),
-                        static_cast<double>(mf[12]), static_cast<double>(mf[13]), static_cast<double>(mf[14]), static_cast<double>(pc[0]),
-                        static_cast<double>(pc[1]), static_cast<double>(pc[2]), scale, static_cast<double>(fovHud), static_cast<double>(fovM),
-                        scale < 0.0 ? -1 : 1, static_cast<double>(rec[k].inst[0]), static_cast<double>(rec[k].inst[1]),
-                        static_cast<double>(rec[k].inst[2]), rec[k].instOk ? "read" : "unread", static_cast<unsigned long long>(rec[k].n));
-    }
-}
+F9Probe g_f24Marker;   // the marker entry's relay (the name is historical)
+std::atomic<uint64_t> g_markerCalls{0};
 uint64_t __fastcall markerHooked(void* self, void* listA, void* listB, uint64_t r9, uint64_t s5, uint64_t s6, uint64_t s7, uint64_t s8) {
     using F24MarkerFn = uint64_t(__fastcall*)(void*, void*, void*, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
     const F24MarkerFn original = reinterpret_cast<F24MarkerFn>(g_f24Marker.original);
     if (!original) return 0;
     const uint64_t n = g_markerCalls.fetch_add(1, std::memory_order_relaxed) + 1;
     if (n == 1) Log::get().note("native on foot marker entry: first call -- it ran (read only)");
-    if (g_markerProbeKey) markerProbeLine(self, listB, GetTickCount64());
     // F30 part 2: this call's head from list B (r8), for the post stub later in this call. Read only; under the same lock as the P2 read.
     F30SameCall& sc = t_f30SameCall;
     sc.valid = false;
@@ -4667,47 +4311,16 @@ uint64_t __fastcall markerHooked(void* self, void* listA, void* listB, uint64_t 
     }
     return original(self, listA, listB, r9, s5, s6, s7, s8);
 }
-
-// Installs probes 1 to 3 (VR, once, behind the identity check, from installF22ProbesOnce). Each refusal is its own line.
-void installF24ProbesOnce(uintptr_t base) {
-    if (!f24ViewProbesOn()) {
-        Log::get().note("native on foot view probes: off (fix.native_on_foot_view_probes = off, the default): probes 1 to 3 are not installed and probe A's "
-                        "sink is not set; the game is untouched by them");
-        return;
-    }
-    const auto install = [&](F9Probe& pr, const char* name, uintptr_t rva, const uint8_t* prologue, size_t bytes, size_t stolen, void* cb,
-                             const char* label) {
-        const F9ProbeSpec s{name, rva, prologue, bytes, stolen, cb, label};
-        size_t got = 0;
-        std::string why;
-        if (installF9ProbeInto(pr, s, base, &got, &why))
-            Log::get().note("%s: installed at EliteDangerous64.exe+0x%llX, stolen=%zu bytes, prologue %zu bytes verified (read only; temporary).", label,
-                            static_cast<unsigned long long>(rva), got, bytes);
-        else
-            Log::get().note("%s: NOT installed at EliteDangerous64.exe+0x%llX -- %s. The game was not touched by it.", label,
-                            static_cast<unsigned long long>(rva), why.c_str());
-    };
-    install(g_f24Composer, "native-on-foot-view-composer", kComposerRva, kComposerPrologue, sizeof(kComposerPrologue), 10,
-            reinterpret_cast<void*>(&composerHooked), "native on foot view probe 1 (composer)");
-    if (kBucketProbeInstalled)
-        install(g_f24Bucket, "native-on-foot-view-bucket", kBucketRva, kBucketPrologue, sizeof(kBucketPrologue), 13,
-                reinterpret_cast<void*>(&bucketHooked), "native on foot view probe 2 (bucket prep)");
-    else
-        Log::get().note("native on foot view probe 2 (bucket prep): NOT installed -- disabled (F24 launch crash suspect; its fault is not proved clear)");
-}
-
 // F30 part 2: the marker entry, installed in every VR session (not only with the view probes): its pre-hook reads this call's head from list B for
 // the post stub. Prologue-verified (the refuse is one line); the game is not written by it.
 void installMarkerHookOnce(uintptr_t base) {
-    g_markerProbeKey = f24ViewProbesOn();
     const F9ProbeSpec s{"native-on-foot-marker-entry", kMarkerRva, kMarkerPrologue, sizeof(kMarkerPrologue), 12, reinterpret_cast<void*>(&markerHooked),
                         "native on foot marker entry"};
     size_t stolen = 0;
     std::string why;
     if (installF9ProbeInto(g_f24Marker, s, base, &stolen, &why))
         Log::get().note("native on foot marker entry: installed at EliteDangerous64.exe+0x%llX, stolen=%zu bytes, prologue %zu bytes verified (read only; "
-                        "it reads the head in native on foot; probe lines %s)", static_cast<unsigned long long>(kMarkerRva), stolen, sizeof(kMarkerPrologue),
-                        g_markerProbeKey ? "on" : "off");
+                        "it reads the head in native on foot)", static_cast<unsigned long long>(kMarkerRva), stolen, sizeof(kMarkerPrologue));
     else
         Log::get().note("native on foot marker entry: NOT installed at EliteDangerous64.exe+0x%llX -- %s. The waypoints keep the P2 sample (fallback).",
                         static_cast<unsigned long long>(kMarkerRva), why.c_str());
@@ -4834,7 +4447,6 @@ void installF22ProbesOnce() {
     if (g_f22ProbesTried) return;
     g_f22ProbesTried = true;
     if (!runtimeVrProfile()) return;
-    if (f24ViewProbesOn()) g_driverProbeSink.store(&nativeOnFootDriverProbe, std::memory_order_release);   // F24: probe A, behind the same key
     const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     const char* peWhy = nullptr;
     if (!base || !checkIdentity(base, &peWhy)) {
@@ -4855,7 +4467,6 @@ void installF22ProbesOnce() {
             Log::get().note("training load wait: NOT installed at EliteDangerous64.exe+0x%llX -- %s. The game was not touched by it.",
                             static_cast<unsigned long long>(kLoadWaitRva), why.c_str());
     }
-    installF24ProbesOnce(base);   // F24 (Part F): probes 1 to 3; probe A reads through the transition-flash consumer instead
     installMarkerHookOnce(base);  // F30 part 2: the marker entry, always (the same-call head for the waypoints)
     {
         const F9ProbeSpec s{"native-on-foot-load-stages", kStageDispatchRva, kStageDispatchPrologue, sizeof(kStageDispatchPrologue), 8,
@@ -5855,7 +5466,6 @@ void nativeOnFootBodyCullShutdown() {
         g_bodyCullSavedRS->Release();
         g_bodyCullSavedRS = nullptr;
     }
-    nativeOnFootBodyProbeShutdown();   // F19 (TEMPORARY): the cb2 probe's staging copy
 }
 
 // The probe's capture (declared in native_on_foot.h, called from beginPanelOverride on the draw thread for the two HUD issuers). One load,
@@ -6283,8 +5893,7 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
     meshSiteTick(g_meshCreate, g_meshKeyOn.load(std::memory_order_relaxed) && f9Active,
                  g_meshKeyOn.load(std::memory_order_relaxed) ? f9Why : "fix.native_on_foot_hud_mesh is off");
     g_meshCreateLive.store(g_meshCreate.applied, std::memory_order_relaxed);   // F12: the HUD distance writes only while the creation patch is in
-    meshSiteTick(g_meshWorld, g_meshWorldKeyOn.load(std::memory_order_relaxed) && f9Active,
-                 g_meshWorldKeyOn.load(std::memory_order_relaxed) ? f9Why : "fix.native_on_foot_hud_mesh_world is off");
+
     f9ProbeTick(now);
     f13FrameTick(now);
     // F22: the training load wait and probe A (read only, VR, once); the look's two hooks (once, when its key first reads on); the look controller;
@@ -6292,7 +5901,7 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
     installF22ProbesOnce();
     loadStagesFrameTick(now);   // F23 (Part E): the no-call check for the stage hook
     f28FrameTick(now);   // F28: the training connect probe's one-second lines
-    visorShiftTick(g_visorShiftWant.load(std::memory_order_relaxed), g_visorShiftX.load(std::memory_order_relaxed), g_visorShiftY.load(std::memory_order_relaxed));   // F25 A/B
+
     // F24 (TEMPORARY, read only): the load sampler runs in a menu (no Flags2 in Status.json) and while a load pipeline is running, until its summary.
     {
         bool pipeline = false;
@@ -6349,11 +5958,8 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
             g_roomLastS = sizeEff;
         }
         // F18: the reticle stub is in place whenever native stereo is on foot (both modes write key 10), or while the probe key is on.
-        const bool reticleKey = g_reticleKeyOn.load(std::memory_order_relaxed);
-        const bool reticleWant = (reticleKey || nativeOnFootActive()) && session;
-        reticleTick(reticleWant, !(reticleKey || nativeOnFootActive()) ? "the reticle probe is off and native stereo on foot is not active"
-                                 : !nativeOnFootActive()                ? "native stereo on foot ended"
-                                                                        : "the game session ended");
+        const bool reticleWant = nativeOnFootActive() && session;
+        reticleTick(reticleWant, !nativeOnFootActive() ? "native stereo on foot ended" : "the game session ended");
         const bool writeNow = nativeOnFootActive() && session;
         g_reticleWriteOn.store(writeNow, std::memory_order_relaxed);
         if (writeNow != g_reticleWriteLast) {
@@ -6395,8 +6001,6 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
     explorerCamBodyClipTick(now, unclipKey && !hybridWant && nativeOnFootActive(), nativeOnFootActive(),
                             !(unclipKey && !hybridWant) ? "fix.native_on_foot_body_unclip is off or the hybrid body is on" : "native stereo on foot ended");
     // F19 (TEMPORARY): the constant-buffer probe's flag (on foot, native or Explorer Cam) and the drain of its readings.
-    g_nativeOnFootBodyProbe.store(g_cbProbeKeyOn.load(std::memory_order_relaxed) && journalOnFootKnown() && journalOnFoot(), std::memory_order_relaxed);
-    bodyCbProbeLine();
     bodyModeTick(now, session);   // F20 (TEMPORARY): the model mode (fix.native_on_foot_body_mode), the hooks' wants and their lines
     bodyCullLine(now);   // F18 (TEMPORARY): the torso cull's 5 s count line (the swap itself is on the draw thread, nativeOnFootBodyCullBegin)
     neckLine(now);
@@ -6409,7 +6013,7 @@ void nativeOnFootShutdown() {
     hudOverrideTick(false, "the game is shutting down");
     codePatchTick(g_panelPatch, false, "the game is shutting down");
     meshSiteTick(g_meshCreate, false, "the game is shutting down");
-    meshSiteTick(g_meshWorld, false, "the game is shutting down");
+
     visorTick(false, "the game is shutting down");
     spreadTick(false, 0.0f, "the game is shutting down");
     elemScaleTick(false, 0.0f, "the game is shutting down");
@@ -6426,218 +6030,11 @@ void nativeOnFootShutdown() {
     explorerCamFpBody(false, "the game is shutting down");
     explorerCamHybridTick(GetTickCount64(), false, "the game is shutting down");            // F21
     explorerCamBodyClipTick(GetTickCount64(), false, false, "the game is shutting down");   // F19
-    g_nativeOnFootBodyProbe.store(false, std::memory_order_relaxed);                       // F19
     bodyModeShutdown();                                                                    // F20
     g_lookEngaged.store(false, std::memory_order_relaxed);                                 // F22: no more input; the hooks pass through
     g_lookInput.store(0.0f, std::memory_order_relaxed);
     g_lookWantRead.store(false, std::memory_order_relaxed);
 }
 
-// ---- F19 (TEMPORARY): the body's pixel constant buffer 2 (fix.native_on_foot_body_cb_probe) ---------------------------------------------
-// No CPU copy of a constant buffer's bytes exists (binding_shadow keeps the buffer pointers only), so the read is a GPU copy: once per 5 s per
-// (VS, PS, index count) the first 352 bytes of cb2 (rows 0..21) are copied to a staging buffer on the matched draw, and mapped with
-// D3D11_MAP_FLAG_DO_NOT_WAIT on a later matched draw. Until the GPU has the copy the map says "still drawing" and the read waits for the next
-// draw; nothing stalls. Rows 5..9 go to a small queue that the frame thread logs (the draw thread never logs). Draw thread only, except the queue.
-namespace {
-constexpr uint64_t kCbProbeBytes = 352;                 // cb2 rows 0..21, float4 each
-constexpr uint64_t kCbProbeIntervalMs = 5000;
-constexpr size_t kCbProbeKeys = 8;
-constexpr size_t kCbProbeQueue = 8;
-struct CbProbeKey {
-    uint64_t vs = 0, ps = 0;
-    uint32_t n = 0;
-    uint64_t lastMs = 0;
-    bool used = false;
-};
-struct CbProbeLine {
-    uint64_t vs = 0, ps = 0;
-    uint32_t n = 0;
-    float rows[5][4] = {};   // cb2 rows 5..9
-};
-ID3D11Buffer* g_cbStage = nullptr;                      // draw thread: the staging copy (released at shutdown)
-bool g_cbPending = false;                               // draw thread: a copy is in flight
-CbProbeKey g_cbPendKey;                                 // draw thread: the key the pending copy belongs to
-CbProbeKey g_cbKeys[kCbProbeKeys];                      // draw thread
-bool g_cbStageFailedNoted = false;                      // draw thread
-bool g_cbSmallNoted = false;                            // draw thread
-std::atomic<uint32_t> g_cbMapFailHr{0};                 // draw thread: the last map failure (not "still drawing"); the frame thread logs it once
-std::atomic<uint64_t> g_cbMatched{0};                   // draw thread: matched body draws (stencil ref 21 included); the frame thread's window counts them
-bool g_cbMapFailNoted = false;                          // frame thread only
-uint64_t g_cbWindowMs = 0;                              // frame thread only: the start of the current 5 s window
-bool g_cbWindowOpen = false;                            // frame thread only
-std::mutex g_cbQueueMutex;
-CbProbeLine g_cbQueue[kCbProbeQueue];                   // guarded by g_cbQueueMutex
-size_t g_cbQueued = 0;                                  // guarded by g_cbQueueMutex
-uint32_t g_cbDropped = 0;                               // guarded by g_cbQueueMutex
-
-void cbProbePush(const CbProbeLine& line) {
-    std::lock_guard<std::mutex> lock(g_cbQueueMutex);
-    if (g_cbQueued < kCbProbeQueue) g_cbQueue[g_cbQueued++] = line;
-    else ++g_cbDropped;
-}
-
-bool cbProbeCreateStage(ID3D11DeviceContext* ctx) {
-    ID3D11Device* dev = nullptr;
-    ctx->GetDevice(&dev);
-    if (!dev) return false;
-    D3D11_BUFFER_DESC bd{};
-    bd.ByteWidth = static_cast<UINT>(kCbProbeBytes);
-    bd.Usage = D3D11_USAGE_STAGING;
-    bd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    const HRESULT hr = dev->CreateBuffer(&bd, nullptr, &g_cbStage);
-    dev->Release();
-    if (FAILED(hr) || !g_cbStage) {
-        if (!g_cbStageFailedNoted) {
-            g_cbStageFailedNoted = true;
-            Log::get().note("native on foot body cb2: could not create the staging buffer (hr=0x%08X); the probe reads nothing", static_cast<unsigned>(hr));
-        }
-        g_cbStage = nullptr;
-        return false;
-    }
-    return true;
-}
-}  // namespace
-
-// F19 (declared in native_on_foot.h): the DrawIndexedInstanced thunk calls this for every owner-context draw while the probe is wanted. It
-// reads the game's state and issues one copy; it changes no binding (the staging map needs none).
-void nativeOnFootBodyProbeDraw(ID3D11DeviceContext* ctx, uint32_t indexCount, uint32_t instances) {
-    if (instances != 1) return;
-    const uint64_t vs = bindingShaderHash(BindSlot::Vs);
-    const uint64_t ps = bindingShaderHash(BindSlot::Ps);
-    const bool matchA = vs == kBodyVsA && ps == kBodyPsA;
-    const bool matchB = vs == kBodyVsB && ps == kBodyPsB;
-    if (!matchA && !matchB) return;
-    ID3D11DepthStencilState* ds = nullptr;
-    UINT ref = 0;
-    ctx->OMGetDepthStencilState(&ds, &ref);
-    if (ds) ds->Release();
-    if (ref != kBodyStencilRef) return;
-    g_cbMatched.fetch_add(1, std::memory_order_relaxed);
-    // 1. A pending copy: map it without waiting. "Still drawing" starts nothing new on this draw.
-    if (g_cbPending) {
-        D3D11_MAPPED_SUBRESOURCE m{};
-        const HRESULT hr = ctx->Map(g_cbStage, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m);
-        if (hr == DXGI_ERROR_WAS_STILL_DRAWING) return;
-        if (SUCCEEDED(hr)) {
-            CbProbeLine line;
-            line.vs = g_cbPendKey.vs;
-            line.ps = g_cbPendKey.ps;
-            line.n = g_cbPendKey.n;
-            std::memcpy(line.rows, static_cast<const uint8_t*>(m.pData) + 5 * 16, sizeof(line.rows));   // rows 5..9 = bytes 80..159
-            ctx->Unmap(g_cbStage, 0);
-            cbProbePush(line);
-        } else {
-            g_cbMapFailHr.store(static_cast<uint32_t>(hr), std::memory_order_relaxed);
-        }
-        g_cbPending = false;
-    }
-    // 2. A new copy for this key, once per interval.
-    CbProbeKey* k = nullptr;
-    for (auto& e : g_cbKeys) {
-        if (e.used && e.vs == vs && e.ps == ps && e.n == indexCount) {
-            k = &e;
-            break;
-        }
-    }
-    const uint64_t now = GetTickCount64();
-    if (k && now - k->lastMs < kCbProbeIntervalMs) return;
-    if (!k) {
-        for (auto& e : g_cbKeys) {
-            if (!e.used) {
-                k = &e;
-                break;
-            }
-        }
-        if (!k) return;   // eight keys is more than the body has (five); a ninth is simply not probed
-        k->used = true;
-        k->vs = vs;
-        k->ps = ps;
-        k->n = indexCount;
-    }
-    k->lastMs = now;
-    ID3D11Buffer* cb = nullptr;
-    ctx->PSGetConstantBuffers(2, 1, &cb);   // AddRef'd when non-null
-    if (!cb) return;
-    D3D11_BUFFER_DESC bd{};
-    cb->GetDesc(&bd);
-    if (bd.ByteWidth < kCbProbeBytes) {
-        if (!g_cbSmallNoted) {
-            g_cbSmallNoted = true;
-            Log::get().note("native on foot body cb2: the bound pixel constant buffer 2 is %u bytes, under %llu; the probe reads nothing",
-                            static_cast<unsigned>(bd.ByteWidth), static_cast<unsigned long long>(kCbProbeBytes));
-        }
-        cb->Release();
-        return;
-    }
-    if (!g_cbStage && !cbProbeCreateStage(ctx)) {
-        cb->Release();
-        return;
-    }
-    const D3D11_BOX box{0, 0, 0, static_cast<UINT>(kCbProbeBytes), 1, 1};
-    ctx->CopySubresourceRegion(g_cbStage, 0, 0, 0, 0, cb, 0, &box);
-    cb->Release();
-    g_cbPendKey = *k;
-    g_cbPending = true;
-}
-
-// F19 (TEMPORARY), frame thread, every frame: drains the probe's queue into the log. Only the frame thread logs.
-void bodyCbProbeLine() {
-    const uint32_t hr = g_cbMapFailHr.exchange(0, std::memory_order_relaxed);
-    if (hr != 0 && !g_cbMapFailNoted) {
-        g_cbMapFailNoted = true;
-        Log::get().note("native on foot body cb2: the staging read failed (hr=0x%08X); the probe stops reading", hr);
-    }
-    // A 5 s count of the matched body draws while the probe is on, written even at 0 so a silent probe cannot pass for a quiet one.
-    if (nativeOnFootBodyProbeWanted()) {
-        const uint64_t now = GetTickCount64();
-        if (!g_cbWindowOpen) {
-            g_cbWindowOpen = true;
-            g_cbWindowMs = now;
-            g_cbMatched.exchange(0, std::memory_order_relaxed);
-        } else if (now - g_cbWindowMs >= 5000) {
-            g_cbWindowMs = now;
-            const uint64_t matched = g_cbMatched.exchange(0, std::memory_order_relaxed);
-            Log::get().note("native on foot body cb2: %llu body draws matched in the last 5 s", static_cast<unsigned long long>(matched));
-        }
-    } else {
-        g_cbWindowOpen = false;
-    }
-    CbProbeLine lines[kCbProbeQueue];
-    size_t n = 0;
-    uint32_t dropped = 0;
-    {
-        std::lock_guard<std::mutex> lock(g_cbQueueMutex);
-        n = g_cbQueued;
-        for (size_t i = 0; i < n; ++i) lines[i] = g_cbQueue[i];
-        g_cbQueued = 0;
-        dropped = g_cbDropped;
-        g_cbDropped = 0;
-    }
-    for (size_t i = 0; i < n; ++i) {
-        const CbProbeLine& l = lines[i];
-        Log::get().note("native on foot body cb2: vs=%016llX ps=%016llX n=%u r5=(%.4f,%.4f,%.4f,%.4f) r6=(%.4f,%.4f,%.4f,%.4f) r7=(%.4f,%.4f,%.4f,%.4f) "
-                        "r8=(%.4f,%.4f,%.4f,%.4f) r9=(%.4f,%.4f,%.4f,%.4f)",
-                        static_cast<unsigned long long>(l.vs), static_cast<unsigned long long>(l.ps), static_cast<unsigned>(l.n),
-                        static_cast<double>(l.rows[0][0]), static_cast<double>(l.rows[0][1]), static_cast<double>(l.rows[0][2]), static_cast<double>(l.rows[0][3]),
-                        static_cast<double>(l.rows[1][0]), static_cast<double>(l.rows[1][1]), static_cast<double>(l.rows[1][2]), static_cast<double>(l.rows[1][3]),
-                        static_cast<double>(l.rows[2][0]), static_cast<double>(l.rows[2][1]), static_cast<double>(l.rows[2][2]), static_cast<double>(l.rows[2][3]),
-                        static_cast<double>(l.rows[3][0]), static_cast<double>(l.rows[3][1]), static_cast<double>(l.rows[3][2]), static_cast<double>(l.rows[3][3]),
-                        static_cast<double>(l.rows[4][0]), static_cast<double>(l.rows[4][1]), static_cast<double>(l.rows[4][2]), static_cast<double>(l.rows[4][3]));
-    }
-    if (dropped != 0) Log::get().note("native on foot body cb2: %u readings dropped (the queue was full)", static_cast<unsigned>(dropped));
-}
-
-// F19: the staging copy goes at vScreen's shutdown (nativeOnFootBodyCullShutdown calls this). Draw thread.
-void nativeOnFootBodyProbeShutdown() {
-    if (g_cbStage) g_cbStage->Release();
-    g_cbStage = nullptr;
-    g_cbPending = false;
-}
-
-// F24: probe A (read only), called from the transition-flash consumer hook with the driver (rcx) and mode (edx): the mailbox at ship+0x3330 and
-// ship+0x130, one line per 5 s per mode. Reads through driverProbeLine (guarded).
-void nativeOnFootDriverProbe(uintptr_t driver, uint32_t mode) {
-    driverProbeLine(reinterpret_cast<void*>(driver), mode, GetTickCount64());
-}
 
 }  // namespace edvr

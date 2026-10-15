@@ -56,16 +56,11 @@ constexpr uint8_t kPrologue[kPrologueBytes] = {
 enum class Reason : uint8_t {
     NotCinema,        // the incoming mode is not a cinema mode (5 or 6): forwarded unchanged (HMD modes always are)
     KeyOff,           // incoming cinema mode, but fix.native_on_foot is off
-    GateMethod,       // incoming cinema mode, key on, but fix.native_on_foot_method is gate: the setter never substitutes (F2)
-    SelectorInvalid,  // incoming cinema mode, but the selector's owner does not point back at it: not a renderer this build knows
-    SelectorMismatch, // incoming cinema mode on a selector other than the one frozen at the first valid call
-    NoGameSession,    // incoming cinema mode with the key on, but the journal has not seen LoadGame (or has seen Shutdown): a menu, not a session
-    Admitted          // substituted: forwarded as its HMD partner (5 as 3, 6 as 4)
+    GateMethod,       // incoming cinema mode, key on: the gate is the method (F34: the only one), so the setter never substitutes
 };
 
 struct Inputs {
     bool keyOn = false;            // fix.native_on_foot read as on (published by the frame thread)
-    bool gateMethod = false;       // fix.native_on_foot_method is gate (F2): the byte does the work, the setter only logs
     uint32_t incoming = 0;         // the mode the caller asked for
     bool selectorValid = false;    // selector+0x58 -> owner and owner+0x60 == selector, read under SEH
     bool selectorFrozen = false;   // the selector is the one frozen at the first valid call
@@ -79,17 +74,12 @@ inline bool isHmdMode(uint32_t mode) { return mode == kModeHmdA || mode == kMode
 inline Reason admit(const Inputs& in) {
     if (!isCinemaMode(in.incoming)) return Reason::NotCinema;
     if (!in.keyOn) return Reason::KeyOff;
-    if (in.gateMethod) return Reason::GateMethod;
-    if (!in.selectorValid) return Reason::SelectorInvalid;
-    if (!in.selectorFrozen) return Reason::SelectorMismatch;
-    if (!in.gameSession) return Reason::NoGameSession;
-    return Reason::Admitted;
+    return Reason::GateMethod;   // F34: the gate is the only method; nothing is substituted
 }
 
 // The mode the original is forwarded with: the HMD partner of an admitted cinema mode (5 -> 3, 6 -> 4), otherwise what was asked.
-inline uint32_t effectiveMode(Reason r, uint32_t incoming) {
-    if (r != Reason::Admitted) return incoming;
-    return incoming == kModeCinemaA ? kModeHmdA : kModeHmdB;
+inline uint32_t effectiveMode(Reason, uint32_t incoming) {   // F34: nothing is substituted, so the mode forwarded is the one asked for
+    return incoming;
 }
 
 inline const char* reasonName(Reason r) {
@@ -97,10 +87,6 @@ inline const char* reasonName(Reason r) {
         case Reason::NotCinema: return "not_cinema";
         case Reason::KeyOff: return "key_off";
         case Reason::GateMethod: return "method_gate";
-        case Reason::SelectorInvalid: return "selector_invalid";
-        case Reason::SelectorMismatch: return "selector_mismatch";
-        case Reason::NoGameSession: return "no_game_session";
-        case Reason::Admitted: return "admitted";
     }
     return "unknown";
 }
@@ -190,7 +176,7 @@ constexpr float kHudDistanceSettingDefault = 0.01f;
 // F16: size's default is 1.50 and its maximum 3.00 (Sean's tuning hit the old maximum); smoothing's default is 40 ms.
 // F19: size's default is Sean's 1.60.
 constexpr float kHudSizeMin = 0.30f, kHudSizeMax = 3.00f, kHudSizeDefault = 1.60f;
-constexpr int kHudSmoothMin = 0, kHudSmoothMax = 500, kHudSmoothDefault = 40;
+constexpr int kHudSmoothMin = 0, kHudSmoothMax = 500, kHudSmoothDefault = 0;   // F34: the shipping default (Sean's tuning)
 // F16: the per-group HUD offsets (a fraction of the HUD canvas, live), and the default spread (the margins' extra, F14).
 // F19: the spread's default is Sean's 0.04.
 constexpr float kHudOffsetMin = -0.30f, kHudOffsetMax = 0.30f;
