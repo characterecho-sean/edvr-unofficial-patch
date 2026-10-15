@@ -56,8 +56,13 @@ void callFilterInputSafely(void (EDVR_API *fn)(EdvrInputContext*), EdvrInputCont
     } __except (*outFault = GetExceptionCode(), EXCEPTION_EXECUTE_HANDLER) {}
 }
 
+// The addon whose onInitialize is running. Settings may be registered only then, so every one has an
+// owner that can be removed with it. Guarded by PluginManager::m_mutex (loadPlugin holds it).
+const char* g_registeringOwner = nullptr;
+
 int EDVR_API hostRegisterSetting(const EdvrPluginSettingDef* setting) {
-    return edvrRegisterPluginSetting(setting);
+    if (!g_registeringOwner) return -1;
+    return edvr::menuRegisterPluginSetting(g_registeringOwner, setting);
 }
 
 void EDVR_API hostLogNote(const char* msg) {
@@ -283,10 +288,13 @@ bool PluginManager::loadPlugin(CandidatePlugin& cand, const std::string& approve
         host.registerSetting = hostRegisterSetting;
         host.logNote = hostLogNote;
 
+        g_registeringOwner = cand.stem.c_str();
         int initResult = callInitSafely(lp.callbacks.onInitialize, &host, &fault);
+        g_registeringOwner = nullptr;
         if (fault != 0 || initResult != 0) {
             Log::get().note("plugin_manager: addon %s onInitialize failed (code=%d fault=0x%08X)",
                             cand.stem.c_str(), initResult, fault);
+            edvr::menuRemovePluginSettings(cand.stem.c_str());   // its getters and setters point into the DLL about to go
             FreeLibrary(hMod);
             return false;
         }
@@ -319,6 +327,7 @@ void PluginManager::unloadAll() {
                                 p.stem.c_str(), fault);
             }
         }
+        edvr::menuRemovePluginSettings(p.stem.c_str());
         if (p.module) {
             FreeLibrary(p.module);
             p.module = nullptr;

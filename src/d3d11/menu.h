@@ -98,6 +98,11 @@ void menuRegisterAction(const char* label, const char* hint, MenuActionFn fn, vo
 
 void menuShutdown();
 
+// Addon settings on the Plugins page belong to the addon that registered them (its stem). A setting
+// holds the addon's getter, setter and user-data pointers, so they must go before its DLL does.
+int menuRegisterPluginSetting(const char* ownerId, const EdvrPluginSettingDef* setting);
+void menuRemovePluginSettings(const char* ownerId);
+
 }  // namespace edvr
 
 extern "C" __declspec(dllexport) int WINAPI edvrRegisterPluginSetting(const EdvrPluginSettingDef* setting);

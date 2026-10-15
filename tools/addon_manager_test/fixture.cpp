@@ -24,6 +24,7 @@ extern "C" __declspec(dllexport) int WINAPI fixtureGetRenderCount() {
 //   FIXTURE_VARIANT_regfault EdvrPluginRegister writes through a null pointer
 //   FIXTURE_VARIANT_initfail registers two settings, then onInitialize returns an error
 //   FIXTURE_VARIANT_initfault registers two settings, then onInitialize access-violates
+//   FIXTURE_VARIANT_settings registers two settings and initialises cleanly
 #if defined(FIXTURE_VARIANT_b)
 #define FIXTURE_ID 2
 #else
@@ -34,7 +35,14 @@ extern "C" __declspec(dllexport) int WINAPI fixtureGetVariant() {
     return FIXTURE_ID;
 }
 
-#if defined(FIXTURE_VARIANT_initfail) || defined(FIXTURE_VARIANT_initfault)
+#if defined(FIXTURE_VARIANT_initfail) || defined(FIXTURE_VARIANT_initfault) || defined(FIXTURE_VARIANT_settings)
+#if defined(FIXTURE_VARIANT_initfail)
+#define FIXTURE_HEADER "FixtureFail"
+#elif defined(FIXTURE_VARIANT_initfault)
+#define FIXTURE_HEADER "FixtureFault"
+#else
+#define FIXTURE_HEADER "FixtureSettings"
+#endif
 static void EDVR_API settingSetter(const char*, int64_t, void*) {}
 
 static void registerTwoSettings(const EdvrHostServices* host) {
@@ -42,7 +50,7 @@ static void registerTwoSettings(const EdvrHostServices* host) {
     for (int i = 0; i < 2; ++i) {
         EdvrPluginSettingDef d{};
         d.structSize = sizeof(d);
-        d.header = "Fixture";
+        d.header = FIXTURE_HEADER;
         d.key = kKeys[i];
         d.label = kKeys[i];
         d.type = EDVR_PLUGIN_SETTING_BOOL;
@@ -58,6 +66,8 @@ static int EDVR_API pluginOnInitialize(const EdvrHostServices* host) {
 #if defined(FIXTURE_VARIANT_initfail)
     registerTwoSettings(host);
     return -2;
+#elif defined(FIXTURE_VARIANT_settings)
+    registerTwoSettings(host);
 #elif defined(FIXTURE_VARIANT_initfault)
     registerTwoSettings(host);
     *reinterpret_cast<volatile int*>(nullptr) = 42; // deliberate fault

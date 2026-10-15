@@ -134,6 +134,7 @@ struct Action {
 };
 
 struct PluginSettingRow {
+    std::string owner;   // the addon (its stem) whose DLL holds getter, setter and userData; "" for none
     std::string header;
     std::string key;
     std::string label;
@@ -5031,6 +5032,25 @@ void menuTick(ID3D11Device* dev) {
 }
 
 extern "C" __declspec(dllexport) int WINAPI edvrRegisterPluginSetting(const EdvrPluginSettingDef* setting) {
+    return menuRegisterPluginSetting("", setting);
+}
+
+void menuRemovePluginSettings(const char* ownerId) {
+    std::string owner = ownerId ? ownerId : "";
+    bool removed = false;
+    {
+        std::lock_guard<std::recursive_mutex> lock(g_pluginSettingsMutex);
+        for (size_t i = g_pluginSettings.size(); i-- > 0;) {
+            if (g_pluginSettings[i].owner == owner) {
+                g_pluginSettings.erase(g_pluginSettings.begin() + static_cast<ptrdiff_t>(i));
+                removed = true;
+            }
+        }
+        if (removed && g_s.configured) buildPages();
+    }
+}
+
+int menuRegisterPluginSetting(const char* ownerId, const EdvrPluginSettingDef* setting) {
     if (!setting || setting->structSize < sizeof(EdvrPluginSettingDef)) return -1;
     std::lock_guard<std::recursive_mutex> lock(g_pluginSettingsMutex);
 
@@ -5062,6 +5082,7 @@ extern "C" __declspec(dllexport) int WINAPI edvrRegisterPluginSetting(const Edvr
 
     for (auto& existing : g_pluginSettings) {
         if (existing.header == headerStr && existing.key == keyStr) {
+            existing.owner = ownerId ? ownerId : "";
             existing.label = setting->label ? setting->label : keyStr;
             existing.hint = setting->hint ? setting->hint : "";
             existing.type = setting->type;
@@ -5088,6 +5109,7 @@ extern "C" __declspec(dllexport) int WINAPI edvrRegisterPluginSetting(const Edvr
     }
 
     PluginSettingRow row;
+    row.owner = ownerId ? ownerId : "";
     row.header = headerStr;
     row.key = keyStr;
     row.label = setting->label ? setting->label : keyStr;

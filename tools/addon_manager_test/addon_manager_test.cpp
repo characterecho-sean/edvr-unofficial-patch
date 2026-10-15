@@ -17,7 +17,26 @@ extern "C" __declspec(dllexport) int WINAPI edvrRegisterPluginSetting(const Edvr
     return 0;
 }
 
+// The F8 menu's settings registry, reduced to what the manager's ownership contract needs.
+struct FakeSetting { std::string owner; std::string key; };
+static std::vector<FakeSetting> g_fakeSettings;
+static int g_fakeRegisteredEver = 0;
+
 namespace edvr {
+int menuRegisterPluginSetting(const char* ownerId, const EdvrPluginSettingDef* setting) {
+    if (!setting) return -1;
+    g_fakeSettings.push_back({ ownerId ? ownerId : "", setting->key ? setting->key : "" });
+    ++g_fakeRegisteredEver;
+    return 0;
+}
+
+void menuRemovePluginSettings(const char* ownerId) {
+    std::string o = ownerId ? ownerId : "";
+    for (size_t i = g_fakeSettings.size(); i-- > 0;) {
+        if (g_fakeSettings[i].owner == o) g_fakeSettings.erase(g_fakeSettings.begin() + static_cast<ptrdiff_t>(i));
+    }
+}
+
 void inputGateSetPluginBlock(bool block) {
     (void)block;
 }
@@ -37,7 +56,7 @@ void check(bool cond, const char* msg) {
     if (!cond) ++g_failures;
 }
 
-// "" is the healthy default fixture; "b", "regfault", "initfail", "initfault" are its variants.
+// "" is the healthy default fixture; "b", "regfault", "initfail", "initfault", "settings" are its variants.
 std::wstring getFixtureDllPath(const wchar_t* variant = L"") {
     wchar_t exePath[MAX_PATH]{};
     GetModuleFileNameW(nullptr, exePath, MAX_PATH);
@@ -64,6 +83,14 @@ std::filesystem::path makeSandbox(const wchar_t* tag) {
 void dropFixture(const std::filesystem::path& sandbox, const wchar_t* variant, const wchar_t* fileName) {
     std::filesystem::copy_file(getFixtureDllPath(variant), sandbox / L"plugins" / fileName,
                                std::filesystem::copy_options::overwrite_existing);
+}
+
+size_t fakeSettingsOwnedBy(const char* owner) {
+    size_t n = 0;
+    for (const auto& s : g_fakeSettings) {
+        if (s.owner == owner) ++n;
+    }
+    return n;
 }
 
 const edvr::plugins::CandidatePlugin* findCandidate(edvr::plugins::PluginManager& pm, const char* stem) {
@@ -233,6 +260,36 @@ int main(int argc, char** argv) {
         pm.shutdown();
         std::error_code ec8;
         std::filesystem::remove_all(sb, ec8);
+    }
+
+    // Case 9 (PR #92 review): a plugin's settings die with its initialisation or its life.
+    {
+        auto sb = makeSandbox(L"settings");
+        dropFixture(sb, L"settings", L"keeper.dll");
+        dropFixture(sb, L"initfail", L"fails.dll");
+        dropFixture(sb, L"initfault", L"faults.dll");
+        pm.initialize(sb.wstring());
+        g_fakeSettings.clear();
+        g_fakeRegisteredEver = 0;
+        auto* keeper = findCandidate(pm, "keeper");
+        auto* fails = findCandidate(pm, "fails");
+        auto* faults = findCandidate(pm, "faults");
+        check(keeper && fails && faults, "settings: all three candidates discovered");
+        if (keeper && fails && faults) {
+            check(pm.approvePlugin("keeper", keeper->sha256), "settings: the healthy settings addon loads");
+            check(fakeSettingsOwnedBy("keeper") == 2, "settings: the healthy addon's two settings are registered");
+
+            check(!pm.approvePlugin("fails", fails->sha256), "settings: init that returns an error is rejected");
+            check(!pm.approvePlugin("faults", faults->sha256), "settings: init that faults is rejected");
+            check(g_fakeRegisteredEver == 6, "settings: the failing addons really did register settings first");
+            check(fakeSettingsOwnedBy("fails") == 0, "settings: none remain after an init error");
+            check(fakeSettingsOwnedBy("faults") == 0, "settings: none remain after an init fault");
+            check(fakeSettingsOwnedBy("keeper") == 2, "settings: the other addon's settings are untouched");
+        }
+        pm.shutdown();
+        check(g_fakeSettings.empty(), "settings: shutdown removes the retired addon's settings");
+        std::error_code ec9;
+        std::filesystem::remove_all(sb, ec9);
     }
 
     // Cleanup sandbox
