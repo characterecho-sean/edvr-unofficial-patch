@@ -54,6 +54,9 @@ std::mutex g_mutex;
 float g_lookYaw = 0.0f;
 uint32_t g_lookYawFrame = 0;
 uint32_t g_lookReset = 0;   // F25: the reset serial
+// F33: the body-align translation (seated-space metres) and its serial, for version 8 (set by nativeFrameSetEyeAlign; guarded by g_mutex).
+float g_eyeAlign[3] = {};
+uint32_t g_eyeAlignSerial = 0;
 // F31: the latest beginFrame's render head and the runtime's "now" head (version 2 input), for the world markers (guarded by g_mutex).
 float g_renderHead[12] = {};
 float g_nowHeadPose[12] = {};
@@ -255,23 +258,27 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
     // comfort fade (or, earlier, the channel probe, turbo pacing or the
     // field-of-view trim) existed. Each gets exactly the fields it knows
     // about, and whatever it cannot carry stays out of its struct entirely.
-    // F22: version 6 is the whole struct (the look's two words after the fade); version 5 is the struct through the fade, which a version 5 caller has.
-    const bool wantsLook = output &&
-        output->version == EDVR_NATIVE_FRAME_VERSION_6 &&
+    // F22: version 6 is the struct through the look's three words (after the fade); version 5 is the struct through the fade, which a version 5 caller has.
+    // F33: version 8 is the whole struct (the eye alignment after the look); version 6 is now the struct through lookYawReset.
+    const bool wantsEyeAlign = output &&
+        output->version == EDVR_NATIVE_FRAME_VERSION_8 &&
         output->size == sizeof(*output);
-    const bool wantsFade = output && !wantsLook &&
+    const bool wantsLook = output && !wantsEyeAlign &&
+        output->version == EDVR_NATIVE_FRAME_VERSION_6 &&
+        output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_6;
+    const bool wantsFade = output && !wantsEyeAlign && !wantsLook &&
         output->version == EDVR_NATIVE_FRAME_VERSION_5 &&
         output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_5;
-    const bool wantsChannel = output && !wantsFade && !wantsLook &&
+    const bool wantsChannel = output && !wantsEyeAlign && !wantsFade && !wantsLook &&
         output->version == EDVR_NATIVE_FRAME_VERSION_4 &&
         output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_4;
-    const bool wantsPacing = output && !wantsFade && !wantsChannel && !wantsLook &&
+    const bool wantsPacing = output && !wantsEyeAlign && !wantsFade && !wantsChannel && !wantsLook &&
         output->version == EDVR_NATIVE_FRAME_VERSION_3 &&
         output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_3;
-    const bool wantsTrim = output && !wantsFade && !wantsChannel && !wantsPacing && !wantsLook &&
+    const bool wantsTrim = output && !wantsEyeAlign && !wantsFade && !wantsChannel && !wantsPacing && !wantsLook &&
         output->version == EDVR_NATIVE_FRAME_VERSION_2 &&
         output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_2;
-    const bool legacy = output && !wantsFade && !wantsChannel && !wantsPacing && !wantsTrim && !wantsLook &&
+    const bool legacy = output && !wantsEyeAlign && !wantsFade && !wantsChannel && !wantsPacing && !wantsTrim && !wantsLook &&
         output->version == EDVR_NATIVE_FRAME_VERSION_1 &&
         output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_1;
     // F31: input version 1 is the words through valid (its size is that prefix; the full size is accepted too, as the rigs send it). Version 2 is
@@ -289,19 +296,21 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
     }
     if (!state || state != g_current || !state->active || !input || !output ||
         (!inputV1 && !inputV2) ||
-        (!wantsLook && !wantsFade && !wantsChannel && !wantsPacing && !wantsTrim && !legacy) ||
+        (!wantsEyeAlign && !wantsLook && !wantsFade && !wantsChannel && !wantsPacing && !wantsTrim && !legacy) ||
         input->generation != state->generation || input->referenceGeneration == 0 ||
         input->sequence == 0 || input->sequence <= state->sequenceFloor ||
         input->valid > 1 || (input->valid && !rigidPose(input->physicalHead))) return E_INVALIDARG;
 
     EdvrNativeFrameOutput result{};
-    result.size = wantsLook ? sizeof(result)
+    result.size = wantsEyeAlign ? sizeof(result)
+                 : wantsLook ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_6
                  : wantsFade ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_5
                  : wantsChannel ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_4
                  : wantsPacing ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_3
                  : wantsTrim  ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_2
                               : EDVR_NATIVE_FRAME_OUTPUT_SIZE_1;
-    result.version = wantsLook ? EDVR_NATIVE_FRAME_VERSION_6
+    result.version = wantsEyeAlign ? EDVR_NATIVE_FRAME_VERSION_8
+                    : wantsLook ? EDVR_NATIVE_FRAME_VERSION_6
                     : wantsFade ? EDVR_NATIVE_FRAME_VERSION_5
                     : wantsChannel ? EDVR_NATIVE_FRAME_VERSION_4
                     : wantsPacing ? EDVR_NATIVE_FRAME_VERSION_3
@@ -312,10 +321,15 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
     // version 5 caller has the slot; every older shape never learns of it.
     result.fadeAlpha = edvr::comfort::read(GetTickCount64());
     // F22: the look-to-aim total (version 6 only; every other shape never learns of it). The frame thread sets it once a frame.
-    if (wantsLook) {
+    if (wantsLook || wantsEyeAlign) {
         result.lookYawTotal = g_lookYaw;
         result.lookYawGameFrame = g_lookYawFrame;
         result.lookYawReset = g_lookReset;
+    }
+    // F33: the body-align translation (version 8 only; every older shape never learns of it).
+    if (wantsEyeAlign) {
+        for (int i = 0; i < 3; ++i) result.eyeAlign[i] = g_eyeAlign[i];
+        result.eyeAlignSerial = g_eyeAlignSerial;
     }
     // The old Explorer Cam's headset offset (headOffset, yawRadians,
     // offsetEnabled, offsetGamePoses) is retired: those slots stay zero, so a
@@ -527,6 +541,13 @@ void nativeFrameSetLookYaw(float total, uint32_t gameFrame, uint32_t resetSerial
     g_lookYaw = total;
     g_lookYawFrame = gameFrame;
     g_lookReset = resetSerial;
+}
+
+// F33: the body-align translation the next version 8 beginFrame hands the runtime.
+void nativeFrameSetEyeAlign(const float o[3], uint32_t serial) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    for (int i = 0; i < 3; ++i) g_eyeAlign[i] = o[i];
+    g_eyeAlignSerial = serial;
 }
 
 // F31: the latest frame's render head and "now" head (the d3d11 half's world markers).

@@ -33,6 +33,9 @@
 // Version 7 (F31) is a ladder step, not an output field: the runtime asks for EdvrNativeFrameInput version 2 (the "now" head below) with the
 // version 6 output shape. A provider that refuses it steps the runtime down to 6, which sends version 1 input. Same hand-copied-DLLs rule.
 #define EDVR_NATIVE_FRAME_VERSION_7 7u
+// Version 8 (F33, body align) adds eyeAlign and eyeAlignSerial to the END of the output, after version 7's ladder step: a seated-space translation the
+// runtime folds into its seated origin. Same hand-copied-DLLs rule: a provider or runtime older than 8 reads zero (no alignment). Input stays version 2.
+#define EDVR_NATIVE_FRAME_VERSION_8 8u
 #define EDVR_NATIVE_FRAME_INPUT_VERSION_1 1u
 #define EDVR_NATIVE_FRAME_INPUT_VERSION_2 2u
 
@@ -122,6 +125,10 @@ struct EdvrNativeFrameOutput {
     // F25: a reset serial. Each time the controller disengages (the key goes off, the guard trips), the serial moves on; the runtime turns
     // its origin's compensation back to zero at once when it sees a new serial, and does not keep the total as a base.
     uint32_t lookYawReset;
+    // Version 8 and later (F33). Seated-space metres the runtime moves its seated origin by (translation only, no yaw, no origin generation bump);
+    // zero when the feature is off. eyeAlignSerial moves each time the provider takes a new value.
+    float eyeAlign[3];
+    uint32_t eyeAlignSerial;
 };
 
 // The size the fields through resubmitEnabled occupy, which is what a
@@ -146,6 +153,8 @@ struct EdvrNativeFrameOutput {
 // The size the fields through fadeAlpha occupy, which is what a version 5 caller's struct is (F22: the look's two words follow it).
 #define EDVR_NATIVE_FRAME_OUTPUT_SIZE_5 \
     ((uint32_t)offsetof(EdvrNativeFrameOutput, lookYawTotal))
+// The struct through lookYawReset, which is what a version 6 caller's struct is (F33: the eye alignment follows it).
+#define EDVR_NATIVE_FRAME_OUTPUT_SIZE_6 ((uint32_t)offsetof(EdvrNativeFrameOutput, eyeAlign))
 
 struct EdvrNativeFrameDecision {
     uint32_t size, version;
@@ -198,6 +207,9 @@ uint64_t nativeFrameLatchedFrames();
 // F22: the look-to-aim compensation the next beginFrame hands the runtime (version 6): the cumulative total in radians and the game frame it was
 // taken at. Set by the frame thread once per frame (native_on_foot.cpp, lookPublishTick); read under the provider's lock by beginFrame.
 void nativeFrameSetLookYaw(float total, uint32_t gameFrame, uint32_t resetSerial);
+// F33 (body align): the seated-space translation (metres) the next version 8 beginFrame hands the runtime, and a serial that moves each time the
+// frame thread takes a new value. Set by the d3d11 frame thread; read under the provider's lock by beginFrame.
+void nativeFrameSetEyeAlign(const float offsetSeated[3], uint32_t serial);
 // F31: the latest frame's render head and "now" head (false until a beginFrame has been received). Read on the game thread.
 bool nativeFrameNowPose(EdvrNativeNowPose& out);
 

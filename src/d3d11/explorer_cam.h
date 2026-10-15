@@ -136,6 +136,7 @@ struct NeckCensusReading {
     int amcState = 0;
 };
 bool neckCensusRead(NeckCensusReading* out);
+bool explorerCamRestPovDelta(float out[3]);   // F33: the povCamera joint minus the head joint in model space, once Explorer Cam's walk derived it
 uint64_t localAmcPointer();   // F18: the local third-person AMC last matched by the fade hook (0 = none); the latch the census reads
 
 #ifdef EDVR_EXPLORER_CAM_TEST

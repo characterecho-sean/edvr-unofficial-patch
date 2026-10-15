@@ -251,7 +251,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   NativeFrameClient features;
   NativeFssClient fss;
   NativeFovTrim fovTrim;
-  EdvrNativeFrameOutput featureFrame{sizeof(featureFrame),EDVR_NATIVE_FRAME_VERSION_6};
+  EdvrNativeFrameOutput featureFrame{sizeof(featureFrame),EDVR_NATIVE_FRAME_VERSION_8};
   EdvrNativeFrameDecision featureDecision{sizeof(featureDecision),EDVR_NATIVE_FRAME_VERSION_1};
   bool featureFrameKnown=false;
   uint64_t fssHealedEyes[2]{},featureChanges=0;
@@ -381,6 +381,10 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   uint64_t lookAppliedFrame=0;const char* lookWhy="";
   // F25: the reset serial last acted on, the resets taken, and the head's seated yaw (degrees) before and after the last step.
   uint32_t lookResetSeen=0;uint64_t lookResets=0;double lookYawBeforeDeg=0,lookYawAfterDeg=0;bool lookYawKnown=false;
+  // F33 (body align): the seated-space translation (metres) the provider wants the seated origin moved by, and what it carries now. A new
+  // origin (lookRebase) carries none; the wanted value is applied again by delta on the next poll. currentOrigin and the origin generation never move.
+  double eyeWanted[3]={0,0,0},eyeApplied[3]={0,0,0};uint32_t eyeSerialSeen=0;bool eyeProviderSeen=false;
+  uint64_t eyeApplies=0,eyeRefusals=0,eyeLineMs=0;const char* eyeWhy="";bool eyeFirstSeen=false;
   unsigned seatResetCount=0,seatContextLines=0;
   SeatContext lastTracedContext{};
   bool seatRetroPending=false;uint64_t seatRetroAgeMs=0;     // a deferred recentre was just taken back: the apply that follows says so (retro=1)
@@ -1452,13 +1456,21 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       gameGeometry.width[eye]=dims.width;gameGeometry.height[eye]=dims.height;
     }
     if(features.acquired()) {
-      EdvrNativeFrameOutput next{sizeof(next),EDVR_NATIVE_FRAME_VERSION_6};
+      EdvrNativeFrameOutput next{sizeof(next),EDVR_NATIVE_FRAME_VERSION_8};
       if(features.begin(located,poses.read().originGeneration,next)!=S_OK) {
         boundary.clear();return fail(XR_ERROR_VALIDATION_FAILURE);
       }
       if(featureFrameKnown&&next.resubmitEnabled!=featureFrame.resubmitEnabled)previousPairValid=false;
       featureFrame=next;featureFrameKnown=true;
       ++lookRuntimeFrames;lookWanted=double(featureFrame.lookYawTotal);lookGameFrame=featureFrame.lookYawGameFrame;   // F22
+      // F33: the body-align translation (zero from the ladder unless a version 8 answer carried it).
+      eyeProviderSeen=featureFrame.version>=EDVR_NATIVE_FRAME_VERSION_8;
+      for(int i=0;i<3;++i)eyeWanted[i]=double(featureFrame.eyeAlign[i]);
+      eyeSerialSeen=featureFrame.eyeAlignSerial;
+      if(eyeProviderSeen&&!eyeFirstSeen) {
+        eyeFirstSeen=true;
+        nativeTracePrintf("eye_align_runtime: first version 8 output (wanted_m=(%.4f,%.4f,%.4f), serial %u)\n",eyeWanted[0],eyeWanted[1],eyeWanted[2],unsigned(eyeSerialSeen));
+      }
       if(locatedValid) {
         NativeTrimSettings settings{};
         settings.trimOuterDeg=featureFrame.trimOuterDeg;settings.trimNasalDeg=featureFrame.trimNasalDeg;
@@ -3036,6 +3048,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     lookSeated=currentOrigin;lookSeatedKnown=true;
     lookBase=featureFrameKnown&&features.acquired()?double(featureFrame.lookYawTotal):0.0;
     lookWanted=lookBase;lookComp=0;
+    eyeApplied[0]=eyeApplied[1]=eyeApplied[2]=0;   // F33: the new origin carries no body-align translation either
   }
   // F22: WaitGetPoses, no frame open. Turns the seated space about the HEAD by the change in the compensation the origin should carry. The head keeps
   // its place in the seated space and its reported yaw falls by the body turn the game made for our look input, so the world holds still. Never
@@ -3079,6 +3092,10 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         } else {
           double yawAfter=0.0;const bool haveAfter=lookSeatedHeadYaw(&yawAfter);
           lookSeated=next;lookComp=target;
+          // F33: the applied body-align translation is carried in lookSeated, so the look's rotation about the head turns it too. Rotate the
+          // applied value the same way, so eyePoll's delta re-applies the commanded seated offset (the wanted value stays fixed in seated space).
+          {const double ce=std::cos(delta),se=std::sin(delta);const double ex=eyeApplied[0],ez=eyeApplied[2];
+           eyeApplied[0]=ce*ex+se*ez;eyeApplied[2]=-se*ex+ce*ez;}
           dropPoseFrame(PoseInvalidation::Other);
           fillPollRing();
           ++lookApplies;lookWindowDeg+=seatRadToDeg(delta);
@@ -3096,6 +3113,36 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
           seatRadToDeg(lookWanted),seatRadToDeg(lookBase),(unsigned long long)lookRefusals,(unsigned long long)lookResets,
           lookYawBeforeDeg,lookYawAfterDeg,unsigned(lookYawKnown),lookWhy);
       lookWindowDeg=0;
+    }
+  }
+  // F33: WaitGetPoses, no frame open. Moves the seated origin by the change in the provider's body-align translation (seated-space metres; yaw
+  // unchanged). The same mechanism as lookPoll: seated.replace on lookSeated, never currentOrigin and never an origin generation bump.
+  void eyePoll() {
+    if(!eyeProviderSeen||!features.acquired()||!seated.space()||!changes.active()) return;
+    const uint64_t now=GetTickCount64();
+    double delta[3]={eyeWanted[0]-eyeApplied[0],eyeWanted[1]-eyeApplied[1],eyeWanted[2]-eyeApplied[2]};
+    const double biggest=std::fmax(std::fabs(delta[0]),std::fmax(std::fabs(delta[1]),std::fabs(delta[2])));
+    if(biggest>1e-6&&!state.frameOpen()) {
+      if(!lookSeatedKnown) lookRebase();
+      delta[0]=eyeWanted[0]-eyeApplied[0];delta[1]=eyeWanted[1]-eyeApplied[1];delta[2]=eyeWanted[2]-eyeApplied[2];   // lookRebase zeroes eyeApplied
+      SeatPose next=lookSeated;
+      next.x+=delta[0];next.y+=delta[1];next.z+=delta[2];
+      const XrResult r=seated.replace(xrFromSeatPose(next));
+      if(r!=XR_SUCCESS) {
+        ++eyeRefusals;eyeWhy="seated space replace refused";
+      } else {
+        lookSeated=next;
+        for(int i=0;i<3;++i)eyeApplied[i]+=delta[i];
+        dropPoseFrame(PoseInvalidation::Other);
+        fillPollRing();
+        ++eyeApplies;eyeWhy="";
+      }
+    }
+    if(now-eyeLineMs>=5000||eyeLineMs==0) {
+      eyeLineMs=now;
+      nativeTracePrintf("eye_align_runtime,wanted_m=(%.4f,%.4f,%.4f),applied_m=(%.4f,%.4f,%.4f),applies=%llu,refusals=%llu,serial=%u,why=%s\n",
+          eyeWanted[0],eyeWanted[1],eyeWanted[2],eyeApplied[0],eyeApplied[1],eyeApplied[2],
+          (unsigned long long)eyeApplies,(unsigned long long)eyeRefusals,unsigned(eyeSerialSeen),eyeWhy);
     }
   }
   // WaitGetPoses, no frame open. True when the origin moved (the caller gives up this frame's pose update, as the intro recentre always did).
@@ -3133,6 +3180,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       seatMeterLine("periodic");
     }
     lookPoll();   // F22: the look's compensation, applied with no frame open (never gives up the frame)
+    eyePoll();    // F33: the body-align translation, applied the same way
     return moved;
   }
   enum class SeatIntro {Todays,Applied,Skipped,Sampling,Retry};

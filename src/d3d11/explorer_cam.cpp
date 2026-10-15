@@ -1,3 +1,4 @@
+#include <mutex>   // F33: the rest pov offset's lock
 // Explorer Cam: the glue (explorer_cam.h says what it is; explorer_cam_core.h holds every decision, every byte of the relays and the
 // text of every line, driven by tools\explorer_cam_test).
 //
@@ -766,6 +767,9 @@ int g_followHeadLast = -1;            // -1 nothing said yet, 0 fixed, 1 head jo
 uint32_t g_followWhyLast = 0;
 uint32_t g_followSwitchNotes = 0;
 float g_walkLocals[ecm::kMaxWalkJoints * ecm::kJointFloats];
+std::mutex g_restPovMutex;     // F33
+float g_restPovDelta[3] = {};  // F33: the povCamera joint minus the head joint, model space (the rest offset Explorer Cam derives)
+bool g_restPovKnown = false;   // F33
 uint16_t g_walkParents[ecm::kMaxWalkJoints];
 
 void followFault() noexcept {
@@ -866,6 +870,11 @@ ecm::FixedWhy followDerive(uint64_t iface, FollowCache& c) noexcept {
     c.povIdx = note.povIdx;
     c.joints = joints;
     c.rest = rest;
+    {
+        std::lock_guard<std::mutex> lock(g_restPovMutex);   // F33: the latest derived rest offset, for the body align
+        std::memcpy(g_restPovDelta, rest.delta, sizeof(g_restPovDelta));
+        g_restPovKnown = true;
+    }
     note.kind = static_cast<uint32_t>(ecm::FollowNoteKind::Rest);
     note.headDepth = rest.headDepth;
     note.povDepth = rest.povDepth;
@@ -3305,6 +3314,12 @@ FpBodyReadback explorerCamFpBodyReadback() {
 }
 bool neckCensusRead(NeckCensusReading* out) { return neckCensusCopy(out); }
 uint64_t localAmcPointer() { return g_amcLocal.load(); }   // F18
+bool explorerCamRestPovDelta(float out[3]) {   // F33
+    std::lock_guard<std::mutex> lock(g_restPovMutex);
+    if (!g_restPovKnown) return false;
+    std::memcpy(out, g_restPovDelta, sizeof(g_restPovDelta));
+    return true;
+}
 
 #ifdef EDVR_EXPLORER_CAM_TEST
 namespace explorercamtest {

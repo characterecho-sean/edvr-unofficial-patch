@@ -78,6 +78,9 @@ std::atomic<int> g_lookSmoothMs{150};          // fix.native_on_foot_look_to_aim
 std::atomic<int> g_lookSign{1};               // fix.native_on_foot_look_to_aim_yaw_sign (temporary, F24 default -1): 1 or -1, on the controller's input only
 std::atomic<int> g_lookDelay{0};
 bool g_nativeEdgeLast = false;                // F26: frame thread only
+// F33 (TEMPORARY, live): the body align's key and its trims (right, up, forward, in cm; clamped to +-30 at read).
+std::atomic<bool> g_alignKeyOn{false};
+double g_alignTrimCm[3] = {};   // [0] right, [1] up, [2] forward (body axes)
 std::atomic<int> g_worldMarkersMode{3};        // F27/F31: fix.native_on_foot_world_markers: 0 fixed (inverse), 1 forward (C), 2 game, 3 forward_now (H_M, default); live; key 10 is never touched
 uint64_t g_worldLineMs = 0;                    // frame thread and game thread: the 5 s line (the post hook writes it, once per 5 s)
 // F25 (TEMPORARY A/B): the visor param block's translation source floats (.bss, normally 0, no writer in the exe): the values the key sets.
@@ -564,6 +567,18 @@ void readKey() {
     {
         const std::string wm = cfg.getString("fix.native_on_foot_world_markers", "forward_now");
         g_worldMarkersMode.store(wm == "forward" ? 1 : wm == "fixed" ? 0 : wm == "game" ? 2 : 3, std::memory_order_relaxed);
+    }
+    // F33 (TEMPORARY, live): the body align and its trims (cm, clamped to +-30).
+    {
+        g_alignKeyOn.store(cfg.getString("fix.native_on_foot_body_align", "off") == "on", std::memory_order_relaxed);
+        const std::string trims[3] = {cfg.getString("fix.native_on_foot_body_align_trim_right_cm", "0"),
+                                      cfg.getString("fix.native_on_foot_body_align_trim_up_cm", "0"),
+                                      cfg.getString("fix.native_on_foot_body_align_trim_forward_cm", "0")};
+        for (size_t i = 0; i < 3; ++i) {
+            double v = std::atof(trims[i].c_str());
+            if (!(v == v)) v = 0.0;
+            g_alignTrimCm[i] = std::max(-30.0, std::min(30.0, v));
+        }
     }
     // F26 (TEMPORARY, live): the sharp on-foot HUD. Off by default; read on each frame through g_sharpHudKeyOn.
     g_nativeOnFootSharpHudKey.store(cfg.getString("fix.native_on_foot_sharp_hud", "off") == "on" && runtimeVrProfile(), std::memory_order_relaxed);
@@ -5224,6 +5239,10 @@ struct EyeSample {
     // F21: the raw inputs of the derived values, read in the same callback: the AMC origin (world), its basis rows (world), the head joint in
     // avatar-root model space (the +0x58 translation, unconverted).
     float origin[3] = {}, rows[9] = {}, headModel[3] = {};
+    // F33: the third-person pov in world space (the head joint plus the rest offset, through the AMC matrix), when the rest offset is known.
+    bool povOk = false;
+    bool povDerived = false;   // true: Explorer Cam's rest offset; false: the head joint itself (plus the trims)
+    float pov[3] = {};
 };
 std::mutex g_eyeMutex;                   // guards g_eyeSample (game thread writes, frame thread reads)
 EyeSample g_eyeSample;
@@ -5284,6 +5303,16 @@ void eyeSample(void* amcPtr, void* jobPtr, uint64_t now) noexcept {
         for (size_t j = 0; j < 3; ++j) s.rows[3 * i + j] = M[4 * i + j];
     }
     if (s.headOk) std::memcpy(s.headModel, nk.head, sizeof(s.headModel));
+    // F33: the third-person pov: the head joint plus the rest offset (model space), through the AMC matrix (row vectors, as the head above).
+    // The rest offset is Explorer Cam's when its walk has derived one; otherwise the head joint itself (the pov source is logged).
+    float rest[3] = {};
+    s.povDerived = s.headOk && explorerCamRestPovDelta(rest);
+    if (s.headOk) {
+        if (!s.povDerived) rest[0] = rest[1] = rest[2] = 0.0f;
+        const float pm[3] = {nk.head[0] + rest[0], nk.head[1] + rest[1], nk.head[2] + rest[2]};
+        for (size_t j = 0; j < 3; ++j) s.pov[j] = pm[0] * M[j] + pm[1] * M[4 + j] + pm[2] * M[8 + j] + M[12 + j];
+        s.povOk = true;
+    }
     std::lock_guard<std::mutex> lock(g_eyeMutex);
     g_eyeSample = s;
 }
@@ -5295,7 +5324,7 @@ uint64_t __fastcall eyeProbeHooked(void* amc, void* job) noexcept {
     const uint64_t now = GetTickCount64();
     // F22 (read only): probe B, the FP and 3P roots against the head and the look basis, every 5 s per mode while native stereo is on foot.
     if (amc && !g_eyeStop.load(std::memory_order_relaxed) && nativeOnFootActive()) rigProbeB(amc, now);
-    if (!g_eyeStop.load(std::memory_order_relaxed) && amc && job && nativeOnFootActive() && now - g_eyeLastMs >= 1000 &&
+    if (!g_eyeStop.load(std::memory_order_relaxed) && amc && job && nativeOnFootActive() && (g_alignKeyOn.load(std::memory_order_relaxed) || now - g_eyeLastMs >= 1000) &&
         reinterpret_cast<uint64_t>(amc) == localAmcPointer()) {
         g_eyeLastMs = now;
         eyeSample(amc, job, now);
@@ -5347,6 +5376,190 @@ void eyeProbeLine() {
     } else {
         Log::get().note("native on foot eye vs body: cam_in_body=(%.3f,%.3f,%.3f) head_in_body=(unread: the neck census has no head sample) cam_minus_head=(unread)",
                         static_cast<double>(s.camBody[0]), static_cast<double>(s.camBody[1]), static_cast<double>(s.camBody[2]));
+    }
+}
+
+// ---- F33 (TEMPORARY, live): body align. Moves the seated origin so the game's first-person camera sits at the third-person body's pov.
+// The error is (cam - HMD) - pov3P in the body's axes (right, up, forward), with the trims subtracted. HMD is the eye position of the game's own
+// list-B view (the P2 sample), in world axes, so no seated-to-world transform is needed for it. The integral takes 0.2 of the seated error per
+// frame (5 cm at most per frame), clamped to 0.6 m; a critically damped second-order filter (tau 250 ms) follows it, and the published
+// offset moves at 5 cm per frame at most. The body axes map to seated as F31's H_M does (sign and order unverified: the guard catches a sign
+// error). The guard: when the error has not fallen to 90% of its value 2 s after the offset started, the offset goes to zero for good (until the
+// key is toggled). Held while ADS, or while an input is missing or the AMC sample is over 100 ms old.
+namespace align {
+constexpr double kTauSec = 0.25, kGain = 0.2, kClampM = 0.6, kCapPerFrameM = 0.05, kGuardSec = 2.0, kStaleMs = 100.0, kErrOnM = 0.01;
+}
+struct AlignRun {
+    bool keyWasOn = false;
+    bool tripped = false;
+    bool guardArmed = false;
+    double guardErr = 0.0;
+    uint64_t guardMs = 0;
+    double pos[3] = {}, vel[3] = {}, intg[3] = {}, applied[3] = {};
+    uint32_t serial = 0;
+    uint64_t lastMs = 0, lineMs = 0, waitLineMs = 0;
+    uint64_t holds = 0;
+};
+AlignRun g_align;   // frame thread only
+
+// The frame thread's one call per frame. The published offset is seated metres (the runtime moves the seated origin by it).
+void alignTick(uint64_t now) noexcept {
+    AlignRun& a = g_align;
+    const bool on = g_alignKeyOn.load(std::memory_order_relaxed);
+    if (on && !a.keyWasOn) {
+        a.tripped = false;
+        a.guardArmed = false;
+        Log::get().note("native on foot body align: on (trim right %.1f, up %.1f, forward %.1f cm; gain 0.2 per frame, tau 250 ms, clamp 0.6 m, "
+                        "5 cm per frame at most; guard 2 s). Installed; the offset starts when every input is present.",
+                        g_alignTrimCm[0], g_alignTrimCm[1], g_alignTrimCm[2]);
+    }
+    if (!on && a.keyWasOn) Log::get().note("native on foot body align: off; the offset returns to zero");
+    a.keyWasOn = on;
+    const double dt = (a.lastMs && now > a.lastMs) ? std::min(0.05, static_cast<double>(now - a.lastMs) / 1000.0) : 0.0;
+    a.lastMs = now;
+
+    // The inputs: the AMC sample, the list-B view, the render head, ADS.
+    EyeSample s;
+    {
+        std::lock_guard<std::mutex> lock(g_eyeMutex);
+        s = g_eyeSample;
+    }
+    float C[16] = {};
+    bool haveView = false;
+    {
+        F9Lock lock;
+        if (g_worldC.valid && now - g_worldCMs < 500) {
+            std::memcpy(C, g_worldC.C, sizeof(C));
+            haveView = true;
+        }
+    }
+    EdvrNativeNowPose np{};
+    const bool haveFrame = nativeFrameNowPose(np) && np.renderValid;
+    const bool ads = journalAds();
+    const char* wait = nullptr;
+    if (!on) wait = "key off";
+    else if (!nativeOnFootActive()) wait = "not native stereo on foot";
+    else if (!s.valid || now - s.stamp > static_cast<uint64_t>(align::kStaleMs)) wait = "the local third-person AMC sample is missing or over 100 ms old";
+    else if (!s.headOk) wait = "no head joint (the neck census has no sample)";
+    else if (!s.povOk) wait = "no pov (the neck census has no head sample)";
+    else if (!haveView) wait = "no list-B view (the P2 sample is missing or over 500 ms old)";
+    else if (!haveFrame) wait = "no render head from the runtime";
+    else if (ads) wait = "held: aiming down sights";
+    if (wait && on && now - a.waitLineMs >= 5000) {
+        a.waitLineMs = now;
+        Log::get().note("native on foot body align: waiting (%s)", wait);
+    }
+
+    double errS[3] = {}, deltaB[3] = {}, hmdB[3] = {}, camB[3] = {}, povB[3] = {}, ds[3] = {};
+    if (!wait) {
+        // The body axes of a world point: (p - origin) dotted with each basis row (right, up, forward = rows 0, 1, 2 of the AMC matrix).
+        const auto body = [&](const float p[3], double out[3]) {
+            for (size_t i = 0; i < 3; ++i) {
+                double acc = 0.0;
+                for (size_t j = 0; j < 3; ++j) acc += (static_cast<double>(p[j]) - static_cast<double>(s.origin[j])) * static_cast<double>(s.rows[3 * i + j]);
+                out[i] = acc;
+            }
+        };
+        // The eye in world space from the list-B view: p = -t . R^T (the view is p_eye = p . R + t, the camera is where p_eye is zero).
+        float eyeW[3] = {};
+        for (size_t i = 0; i < 3; ++i) {
+            double acc = 0.0;
+            for (size_t k = 0; k < 3; ++k) acc -= static_cast<double>(C[12 + k]) * static_cast<double>(C[4 * i + k]);
+            eyeW[i] = static_cast<float>(acc);
+        }
+        body(eyeW, hmdB);
+        body(s.cam, camB);
+        body(s.pov, povB);
+        for (size_t i = 0; i < 3; ++i) deltaB[i] = (camB[i] - hmdB[i]) - povB[i];
+        // The trims are the wanted offset of the eye from the pov, in body axes: right, up, forward (index 0, 1, 2).
+        double errB[3] = {};
+        for (size_t i = 0; i < 3; ++i) errB[i] = deltaB[i] - g_alignTrimCm[i] / 100.0;
+        // Body to world (the rows are the axes: a body offset e is the sum of e_i times row i), then world to seated through the list-B view and
+        // the render head: ds = R_s . R_w^T . dw, with R_w the view's rotation (C) and R_s the render head's (np.render).
+        double dw[3] = {};
+        for (size_t j = 0; j < 3; ++j)
+            for (size_t i = 0; i < 3; ++i) dw[j] += errB[i] * static_cast<double>(s.rows[3 * i + j]);
+        double tmp[3] = {};
+        for (size_t j = 0; j < 3; ++j)
+            for (size_t k = 0; k < 3; ++k) tmp[j] += static_cast<double>(C[4 * k + j]) * dw[k];
+        for (size_t i = 0; i < 3; ++i)
+            for (size_t j = 0; j < 3; ++j) ds[i] += static_cast<double>(np.render[4 * i + j]) * tmp[j];
+        for (size_t i = 0; i < 3; ++i) errS[i] = ds[i];
+    }
+    const double errMag = std::sqrt(errS[0] * errS[0] + errS[1] * errS[1] + errS[2] * errS[2]);
+
+    // The integral: 0.2 of the seated error per frame, at most 5 cm, clamped; held while waiting, zero while off or tripped.
+    const bool driving = on && !a.tripped && !wait;
+    if (driving) {
+        double step[3] = {align::kGain * errS[0], align::kGain * errS[1], align::kGain * errS[2]};
+        const double sm = std::sqrt(step[0] * step[0] + step[1] * step[1] + step[2] * step[2]);
+        const double capScale = sm > align::kCapPerFrameM ? align::kCapPerFrameM / sm : 1.0;
+        for (size_t i = 0; i < 3; ++i) a.intg[i] += step[i] * capScale;
+        const double im = std::sqrt(a.intg[0] * a.intg[0] + a.intg[1] * a.intg[1] + a.intg[2] * a.intg[2]);
+        if (im > align::kClampM)
+            for (size_t i = 0; i < 3; ++i) a.intg[i] *= align::kClampM / im;
+        // The guard.
+        if (!a.guardArmed) {
+            if (errMag > align::kErrOnM) {
+                a.guardArmed = true;
+                a.guardMs = now;
+                a.guardErr = errMag;
+            }
+        } else if (errMag < align::kErrOnM) {
+            a.guardArmed = false;
+        } else if (now - a.guardMs >= static_cast<uint64_t>(align::kGuardSec * 1000.0)) {
+            if (errMag >= 0.9 * a.guardErr) {
+                a.tripped = true;
+                Log::get().note("native on foot body align: guard tripped: |delta| has not fallen after 2 s (%.1f cm then, %.1f cm now): the offset goes to zero "
+                                "(a sign or order error is the likely cause; toggle the key to re-arm)", a.guardErr * 100.0, errMag * 100.0);
+            } else {
+                a.guardMs = now;
+                a.guardErr = errMag;
+            }
+        }
+    }
+    if (!on || a.tripped) {   // off or tripped: the integral decays toward zero, and the filter takes the offset back with it
+        for (size_t i = 0; i < 3; ++i) a.intg[i] -= a.intg[i] * std::min(1.0, dt / align::kTauSec);
+    }
+    if (wait && on) ++a.holds;
+
+    // The filter: a critically damped second-order follow of the integral (held while waiting: the integral does not move).
+    const double target[3] = {a.intg[0], a.intg[1], a.intg[2]};
+    for (size_t i = 0; i < 3; ++i) {
+        if (dt <= 0.0) break;
+        const double acc = (target[i] - a.pos[i]) / (align::kTauSec * align::kTauSec) - 2.0 * a.vel[i] / align::kTauSec;
+        a.vel[i] += acc * dt;
+        double move = a.vel[i] * dt;
+        if (move > align::kCapPerFrameM) move = align::kCapPerFrameM;
+        if (move < -align::kCapPerFrameM) move = -align::kCapPerFrameM;
+        a.pos[i] += move;
+    }
+    const double pm = std::sqrt(a.pos[0] * a.pos[0] + a.pos[1] * a.pos[1] + a.pos[2] * a.pos[2]);
+    if (pm > align::kClampM)
+        for (size_t i = 0; i < 3; ++i) a.pos[i] *= align::kClampM / pm;
+
+    // Publish when the value moved.
+    double change = 0.0;
+    for (size_t i = 0; i < 3; ++i) change = std::max(change, std::fabs(a.pos[i] - a.applied[i]));
+    if (change > 1e-6) {
+        for (size_t i = 0; i < 3; ++i) a.applied[i] = a.pos[i];
+        const float f[3] = {static_cast<float>(a.applied[0]), static_cast<float>(a.applied[1]), static_cast<float>(a.applied[2])};
+        nativeFrameSetEyeAlign(f, ++a.serial);
+    }
+
+    // The once-a-second line while the offset is live.
+    if (on && !wait && now - a.lineMs >= 1000) {
+        a.lineMs = now;
+        const double ap[3] = {a.applied[0] * 100.0, a.applied[1] * 100.0, a.applied[2] * 100.0};
+        Log::get().note("native on foot body align: pov: %s; fp_root=unread (the mode-2 root cross-check is not wired) job_cam=(%.3f,%.3f,%.3f) "
+                        "pov3P_world=(%.3f,%.3f,%.3f) head3p_world=(%.3f,%.3f,%.3f) hmd_body=(%.3f,%.3f,%.3f) delta_body_cm=(%.1f,%.1f,%.1f) "
+                        "applied_seated_cm=(%.1f,%.1f,%.1f) filt_ms=%.0f ads=%s guard=%s",
+                        s.povDerived ? "derived" : "head joint + trims",
+                        static_cast<double>(s.cam[0]), static_cast<double>(s.cam[1]), static_cast<double>(s.cam[2]),
+                        static_cast<double>(s.pov[0]), static_cast<double>(s.pov[1]), static_cast<double>(s.pov[2]),
+                        static_cast<double>(s.head[0]), static_cast<double>(s.head[1]), static_cast<double>(s.head[2]),
+                        hmdB[0], hmdB[1], hmdB[2], deltaB[0] * 100.0, deltaB[1] * 100.0, deltaB[2] * 100.0, ap[0], ap[1], ap[2],
+                        align::kTauSec * 1000.0, ads ? "yes" : "no", a.tripped ? "tripped" : "ok");
     }
 }
 
@@ -6188,6 +6401,7 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
     bodyCullLine(now);   // F18 (TEMPORARY): the torso cull's 5 s count line (the swap itself is on the draw thread, nativeOnFootBodyCullBegin)
     neckLine(now);
     eyeProbeLine();   // F18 (TEMPORARY): P1's one-a-second line
+    alignTick(GetTickCount64());   // F33: the body align (TEMPORARY, live)
 }
 
 void nativeOnFootShutdown() {
