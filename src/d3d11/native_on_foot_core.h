@@ -284,13 +284,16 @@ inline void hmdInBody(const double ts[3], double psi, double out[3]) noexcept {
     const double v[3] = {ts[0], ts[1], -ts[2]};
     ryApply(-psi, v, out);
 }
-// F40: psi, the yaw from the seated frame to the body: the seated head yaw (render row 2) less the headset's yaw in the body, which is the
-// list-B view's yaw (C row 2) less the body's yaw (the AMC basis row 2). The same atan2(row x, row z) convention as the headset yaw log.
-inline double viewPsi(const float render[12], const float C[16], const float rows[9]) noexcept {
-    const double seated = std::atan2(static_cast<double>(render[8]), static_cast<double>(render[10]));
-    const double headWorld = std::atan2(static_cast<double>(C[8]), static_cast<double>(C[10]));
-    const double bodyYaw = std::atan2(static_cast<double>(rows[6]), static_cast<double>(rows[8]));
-    return seated - (headWorld - bodyYaw);
+// F41: one critically damped step toward `target` (one axis): acceleration (target - pos) / tau^2 - 2 vel / tau, the move at most `cap` a
+// frame. The views' and the body's filters, and the rig, run this one function. dt <= 0 does nothing.
+inline void cdStep(double& pos, double& vel, double target, double tau, double dt, double cap) noexcept {
+    if (dt <= 0.0) return;
+    const double acc = (target - pos) / (tau * tau) - 2.0 * vel / tau;
+    vel += acc * dt;
+    double move = vel * dt;
+    if (move > cap) move = cap;
+    if (move < -cap) move = -cap;
+    pos += move;
 }
 }  // namespace nofoot
 }  // namespace edvr

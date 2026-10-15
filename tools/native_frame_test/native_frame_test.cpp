@@ -507,16 +507,65 @@ int wmain(int argc, wchar_t** argv) {
         ryRef(0.4, hb, hbBack);
         check(std::fabs(hbBack[0] - 0.1) < 1e-9 && std::fabs(hbBack[1] - 0.2) < 1e-9 && std::fabs(hbBack[2] + 0.3) < 1e-9,
               "F40: the head in body axes is Ry(psi)^-1 . diag(1,1,-1) . tS");
-        // psi: the seated head yaw (render row 2) less the headset's yaw (C row 2) less the body's yaw (rows row 2)
-        float render[12] = {}, C[16] = {}, rows[9] = {};
-        render[8] = static_cast<float>(std::sin(0.5));
-        render[10] = static_cast<float>(std::cos(0.5));
-        C[8] = static_cast<float>(std::sin(1.0));
-        C[10] = static_cast<float>(std::cos(1.0));
-        rows[6] = static_cast<float>(std::sin(0.2));
-        rows[8] = static_cast<float>(std::cos(0.2));
-        check(std::fabs(edvr::nofoot::viewPsi(render, C, rows) - (0.5 - (1.0 - 0.2))) < 1e-6,
-              "F40: psi is the seated head yaw less the headset's yaw in the body");
+        // F41: the measured map at psi 0 (the calibration flight): a seated step of +5 cm in X, Y or Z moves the camera's body position by
+        // (-5, 0, 0), (0, -5, 0) and (0, 0, +5) cm within 5 mm; the head's own motion maps as diag(1,1,-1).
+        {
+            const double seatedSteps[3][3] = {{0.05, 0.0, 0.0}, {0.0, 0.05, 0.0}, {0.0, 0.0, 0.05}};
+            const double measured[3][3] = {{-0.050, 0.0, 0.0}, {0.0, -0.050, 0.0}, {0.0, 0.0, 0.050}};
+            for (int k = 0; k < 3; ++k) {
+                const double dS[3] = {-seatedSteps[k][0], -seatedSteps[k][1], seatedSteps[k][2]};   // the plant at psi 0: D . seated
+                bool close = true;
+                for (size_t i = 0; i < 3; ++i) close = close && std::fabs(dS[i] - measured[k][i]) < 0.005;
+                check(close, "F41: a +5 cm seated step moves the camera's body position as the calibration measured (within 5 mm)");
+            }
+            const double err[3] = {0.02, -0.03, 0.10};
+            double sd[3] = {};
+            edvr::nofoot::seatedFromBody(err, 0.0, sd);
+            check(std::fabs(sd[0] + 0.02) < 1e-12 && std::fabs(sd[1] - 0.03) < 1e-12 && std::fabs(sd[2] - 0.10) < 1e-12,
+                  "F41: seatedFromBody(err, 0) = (-ex, -ey, +ez)");
+            const double ts[3] = {0.1, 0.2, 0.3};
+            double hb[3] = {};
+            edvr::nofoot::hmdInBody(ts, 0.0, hb);
+            check(std::fabs(hb[0] - 0.1) < 1e-12 && std::fabs(hb[1] - 0.2) < 1e-12 && std::fabs(hb[2] + 0.3) < 1e-12,
+                  "F41: the head's motion in body axes is diag(1,1,-1) . tS at psi 0");
+        }
+        // F41: body: a 20 cm step in the camera's height through one critically damped filter (tau 0.1 s, 5 cm a frame at most) rises
+        // monotonically, overshoots by under 5%, and has settled within 1 s.
+        {
+            double pos[3] = {}, vel[3] = {};
+            bool monotone = true;
+            double prev = 0.0, peak = 0.0;
+            for (int f = 0; f < 90; ++f) {
+                edvr::nofoot::cdStep(pos[1], vel[1], 0.2, 0.1, 1.0 / 90.0, 0.05);
+                if (pos[1] < prev - 1e-12) monotone = false;
+                prev = pos[1];
+                if (pos[1] > peak) peak = pos[1];
+            }
+            check(monotone && peak <= 0.2 * 1.05 && std::fabs(pos[1] - 0.2) < 0.005,
+                  "F41: a 20 cm step in camera height moves d monotonically, overshoot under 5%, settled within 1 s");
+        }
+        // F41: the view loop, closed: the camera follows the applied offset 250 ms late (22 frames at 90 Hz). The integral (0.02 a frame) into one
+        // critically damped filter (tau 0.1 s) takes a 34 cm body error under 1 cm within 5 s.
+        {
+            const int lag = 22;
+            const double gainView = 0.02, dt = 1.0 / 90.0;
+            const double cam0[3] = {0.0, 0.0, 0.34};
+            double intg[3] = {}, pos[3] = {}, vel[3] = {};
+            std::array<std::array<double, 3>, 450> uHist{};
+            double endErr = 1e9;
+            for (int f = 0; f < 450; ++f) {
+                std::array<double, 3> uD{0.0, 0.0, 0.0};
+                if (f >= lag) uD = uHist[static_cast<size_t>(f - lag)];
+                const double e[3] = {-(cam0[0] + uD[0]), -(cam0[1] + uD[1]), -(cam0[2] + uD[2])};
+                double sd[3] = {};
+                edvr::nofoot::seatedFromBody(e, 0.0, sd);
+                for (size_t i = 0; i < 3; ++i) intg[i] += gainView * sd[i];
+                for (size_t i = 0; i < 3; ++i) edvr::nofoot::cdStep(pos[i], vel[i], intg[i], 0.1, dt, 0.05);
+                uHist[static_cast<size_t>(f)] = {-pos[0], -pos[1], pos[2]};   // D . applied
+                endErr = std::sqrt(e[0] * e[0] + e[1] * e[1] + e[2] * e[2]);
+            }
+            check(endErr < 0.01, "F41: the view loop with a 250 ms lag closes a 34 cm error under 1 cm in 5 s (gain 0.02 a frame)");
+        }
     }
 
     // F36: weapon stability defers pacing on foot, and steps aside while native HMD stereo on foot is active (the key is untouched).

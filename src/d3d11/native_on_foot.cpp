@@ -5217,6 +5217,9 @@ void eyeProbeLine() {
 // goes to zero for good until the key is toggled. Held while ADS, and while an input is missing or the AMC sample is over 100 ms old.
 namespace align {
 constexpr double kTauSec = 0.25, kGain = 0.2, kClampM = 0.6, kCapPerFrameM = 0.05, kGuardSec = 2.0, kStaleMs = 100.0, kErrOnM = 0.01;
+// F41: the view loop is closed (the camera follows the applied offset 250 ms late), so its integral runs at 0.02 a frame into a 100 ms filter;
+// the body is open loop, so it has no integral: the camera and the pov low-passed (0.1 s, 0.4 s), one critically damped filter (0.1 s).
+constexpr double kViewGain = 0.02, kViewTauSec = 0.1, kBodyTauSec = 0.1, kBodyCamTauSec = 0.1, kBodyPovTauSec = 0.4;
 }
 struct AlignRun {
     bool keyWasOn = false;
@@ -5377,7 +5380,7 @@ uint64_t __fastcall bodyShiftHooked(uint64_t a1, uint64_t a2, uint64_t a3, uint6
 void alignFilter(AlignRun& a, const double err[3], bool driving, bool decay, double dt, uint64_t now, bool guardOn) noexcept {
     const double errMag = std::sqrt(err[0] * err[0] + err[1] * err[1] + err[2] * err[2]);
     if (driving) {
-        double step[3] = {align::kGain * err[0], align::kGain * err[1], align::kGain * err[2]};
+        double step[3] = {align::kViewGain * err[0], align::kViewGain * err[1], align::kViewGain * err[2]};
         const double sm = std::sqrt(step[0] * step[0] + step[1] * step[1] + step[2] * step[2]);
         const double capScale = sm > align::kCapPerFrameM ? align::kCapPerFrameM / sm : 1.0;
         for (size_t i = 0; i < 3; ++i) a.intg[i] += step[i] * capScale;
@@ -5405,28 +5408,34 @@ void alignFilter(AlignRun& a, const double err[3], bool driving, bool decay, dou
         }
     }
     if (decay || a.tripped) {
-        for (size_t i = 0; i < 3; ++i) a.intg[i] -= a.intg[i] * std::min(1.0, dt / align::kTauSec);
+        for (size_t i = 0; i < 3; ++i) a.intg[i] -= a.intg[i] * std::min(1.0, dt / align::kViewTauSec);
     }
     const double target[3] = {a.intg[0], a.intg[1], a.intg[2]};
     for (size_t i = 0; i < 3; ++i) {
-        if (dt <= 0.0) break;
-        const double acc = (target[i] - a.pos[i]) / (align::kTauSec * align::kTauSec) - 2.0 * a.vel[i] / align::kTauSec;
-        a.vel[i] += acc * dt;
-        double move = a.vel[i] * dt;
-        if (move > align::kCapPerFrameM) move = align::kCapPerFrameM;
-        if (move < -align::kCapPerFrameM) move = -align::kCapPerFrameM;
-        a.pos[i] += move;
+        nofoot::cdStep(a.pos[i], a.vel[i], target[i], align::kViewTauSec, dt, align::kCapPerFrameM);
     }
     const double pm = std::sqrt(a.pos[0] * a.pos[0] + a.pos[1] * a.pos[1] + a.pos[2] * a.pos[2]);
     if (pm > align::kClampM)
         for (size_t i = 0; i < 3; ++i) a.pos[i] *= align::kClampM / pm;
 }
 
+// F41: the body's one filter: the target (world metres) through one critically damped filter, tau 0.1 s, at most 5 cm a frame, clamped to 0.6 m.
+// No integral: the body is open loop.
+void bodyFilter(AlignRun& a, const double target[3], double dt) noexcept {
+    for (size_t i = 0; i < 3; ++i) nofoot::cdStep(a.pos[i], a.vel[i], target[i], align::kBodyTauSec, dt, align::kCapPerFrameM);
+    const double pm = std::sqrt(a.pos[0] * a.pos[0] + a.pos[1] * a.pos[1] + a.pos[2] * a.pos[2]);
+    if (pm > align::kClampM)
+        for (size_t i = 0; i < 3; ++i) a.pos[i] *= align::kClampM / pm;
+}
 // The frame thread's one call per frame. The view offset is seated metres (the runtime moves the seated origin by it); the body offset is world
 // metres (the submit job's hook moves the records by it). The other run's offset decays to zero.
 // F37: the view's head motion reference (tS0), the sign check's previous step, and the last values the 1 s lines print.
 // F38: the pov target's state (frame thread). Reset on entering a mode; the first second of an entry sets the neck offset and the
 // camera-above-FP mean; the head is low-passed in body axes (tau 1 s) when the neck is not known.
+// F41: the body's low-passes (body axes) and the logged target, frame thread only; reset on entering body.
+bool g_f41LpValid = false;
+double g_f41CamLp[3] = {}, g_f41PovLp[3] = {}, g_f41TgtB[3] = {};
+uint64_t g_f41BodyLogMs = 0;
 bool g_f38Valid = false, g_f38LpValid = false;
 uint64_t g_f38StartMs = 0, g_f38LineMs = 0;
 double g_f38R0[3] = {}, g_f38CamFp[3] = {}, g_f38Lp[3] = {};
@@ -5531,16 +5540,20 @@ void alignTick(uint64_t now) noexcept {
     const bool on = mode != 0;
     if (mode != lastMode) {
         static const char* const kNames[4] = {"off", "view", "body", "calibrate"};
-        Log::get().note("native on foot body align: mode %s (was %s); trims right %.1f, up %.1f, forward %.1f cm; gain 0.2 per frame, tau 250 ms, "
+        Log::get().note("native on foot body align: mode %s (was %s); trims right %.1f, up %.1f, forward %.1f cm; view gain 0.02 per frame, tau 100 ms; body no integral, tau 100 ms (camera 100 ms, pov 400 ms); "
                         "clamp 0.6 m, 5 cm per frame at most; guard 2 s", kNames[mode], lastMode < 0 ? "none" : kNames[lastMode], g_alignTrimCm[0],
                         g_alignTrimCm[1], g_alignTrimCm[2]);
         a.tripped = false;
         a.guardArmed = false;
         lastMode = mode;
-        if (mode == 2) g_f37TableWanted.store(true, std::memory_order_relaxed);   // F37: the per-part table on entering body
+        if (mode == 2) {
+            g_f37TableWanted.store(true, std::memory_order_relaxed);   // the per-part table prints on the next shifted pass of this entry
+            Log::get().note("native on foot body shift table: requested on entering body (printed on the next shifted pass)");
+        }   // F37: the per-part table on entering body
         g_f38Valid = false;
         g_f38LpValid = false;
         g_f38LineMs = 0;
+        g_f41LpValid = false;
         if (mode == 3) calibrateReset();
         if (mode == 1) g_f37TS0Valid = false;                                      // F37: a new head reference on entering view
     }
@@ -5653,14 +5666,27 @@ void alignTick(uint64_t now) noexcept {
         }
         double trimB[3] = {g_alignTrimCm[0] / 100.0, g_alignTrimCm[1] / 100.0, g_alignTrimCm[2] / 100.0};   // right, up, forward
         if (mode == 2) {
-            // body: the world error is the camera minus the pov, the trims in world axes, and the offset already applied (the pov the render
-            // shows is the measured pov plus that offset).
-            double tw[3] = {};
-            for (size_t j = 0; j < 3; ++j)
-                for (size_t i = 0; i < 3; ++i) tw[j] += trimB[i] * static_cast<double>(s.rows[3 * i + j]);
-            for (size_t j = 0; j < 3; ++j)
-                err[j] = (static_cast<double>(camUse[j]) - povEqW[j]) - tw[j] - a.pos[j];
-            for (size_t i = 0; i < 3; ++i) deltaB[i] = camB[i] - povEqB[i] - trimB[i];
+            // F41: body is open loop (the render records move; the camera, the neck and the pov do not), so no integral. The camera and the pov
+            // are low-passed in body axes (0.1 s and 0.4 s: the sway and the camera's jitter out). The target is (camera - pov) - trims, in body
+            // axes; bodyFilter takes it to the offset through one critically damped filter. The target goes to the filter in world axes.
+            if (!g_f41LpValid) {
+                for (size_t i = 0; i < 3; ++i) {
+                    g_f41CamLp[i] = camB[i];
+                    g_f41PovLp[i] = povEqB[i];
+                }
+                g_f41LpValid = true;
+            }
+            const double aCam = 1.0 - std::exp(-dt / align::kBodyCamTauSec);
+            const double aPov = 1.0 - std::exp(-dt / align::kBodyPovTauSec);
+            for (size_t i = 0; i < 3; ++i) {
+                g_f41CamLp[i] += aCam * (camB[i] - g_f41CamLp[i]);
+                g_f41PovLp[i] += aPov * (povEqB[i] - g_f41PovLp[i]);
+                g_f41TgtB[i] = (g_f41CamLp[i] - g_f41PovLp[i]) - trimB[i];
+            }
+            for (size_t j = 0; j < 3; ++j) {
+                err[j] = 0.0;
+                for (size_t i = 0; i < 3; ++i) err[j] += g_f41TgtB[i] * static_cast<double>(s.rows[3 * i + j]);
+            }
         } else {
             // F37: the head's motion only. tS is the render head's translation in seated metres, less tS0 (the first head of this reference
             // generation: captured when the view starts and at each recentre). Mapped to body axes: v = R^T tS, dw = C.rot v, hmd_i = row_i . dw
@@ -5679,7 +5705,7 @@ void alignTick(uint64_t now) noexcept {
             // F40: the body-to-seated map, seated = D . Ry(psi) . body, D = diag(-1, -1, +1). psi is the seated head yaw less the headset's yaw in the
             // body (viewPsi). The head's motion in body axes is Ry(psi)^-1 . diag(1, 1, -1) . tS. The error is the target minus the camera (the
             // trims sit in the target), so the integral's step, through the map, closes it. The C-chain of F37 is gone.
-            const double psi = nofoot::viewPsi(np.render, C, s.rows);
+            const double psi = 0.0;   // F41: psi is zero, the measured map; look_to_aim's seated yaw is not supplied yet (TODO)
             g_f40Psi = psi;
             nofoot::hmdInBody(g_f37TSNow, psi, hmdB);
             double errBody[3] = {};
@@ -5734,8 +5760,19 @@ void alignTick(uint64_t now) noexcept {
     // The active run takes the filter step; the other decays to zero and publishes zero.
     if (mode == 3) {
         calibrateStep(now, camB, g_f37TSNow, !wait, a);   // F40: scheduled, no loop, no guard
+    } else if (mode == 2) {
+        bodyFilter(a, err, dt);
+        if (now - g_f41BodyLogMs >= 1000 || g_f41BodyLogMs == 0) {
+            g_f41BodyLogMs = now;
+            double dB[3] = {};
+            for (size_t i = 0; i < 3; ++i)
+                for (size_t j = 0; j < 3; ++j) dB[i] += a.pos[j] * static_cast<double>(s.rows[3 * i + j]);
+            Log::get().note("native on foot body align: body axes (right, up, forward): target %.3f %.3f %.3f m (camera minus pov, trims in, "
+                            "low-passed); d %.3f %.3f %.3f m; critically damped, tau 100 ms, no integral", g_f41TgtB[0], g_f41TgtB[1], g_f41TgtB[2],
+                            dB[0], dB[1], dB[2]);
+        }
     } else {
-        alignFilter(a, err, on && !a.tripped && !wait, !on || a.tripped, dt, now, mode != 2);   // F37: the body run has no guard
+        alignFilter(a, err, on && !a.tripped && !wait, !on || a.tripped, dt, now, mode != 2);   // F37: the view run
     }
     if (wait && on) ++a.holds;
     const double zero[3] = {0.0, 0.0, 0.0};
