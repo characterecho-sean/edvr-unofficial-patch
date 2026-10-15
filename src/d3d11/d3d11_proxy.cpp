@@ -34,6 +34,7 @@
 #include "mode_watch.h"    // modeWatchStart: the 3D mode watch, started after the profile lines
 #include "oculus_route.h"
 #include "../plugins/plugin_manager.h"
+#include "../common/iat_hook.h"
 
 extern "C" const EdvrNativeStartupRouting edvrNativeStartupRouting = {
     sizeof(EdvrNativeStartupRouting), EDVR_NATIVE_STARTUP_VERSION_1,
@@ -75,6 +76,125 @@ PFN_D3D11CreateDeviceAndSwapChain g_realCreateDeviceAndSwapChain = nullptr;
 // are the only way out of the loop.
 PFN_D3D11CreateDevice             g_systemCreateDevice = nullptr;
 PFN_D3D11CreateDeviceAndSwapChain g_systemCreateDeviceAndSwapChain = nullptr;
+
+edvr::IatPatch g_patchChainedLoadLibraryA;
+edvr::IatPatch g_patchChainedLoadLibraryW;
+edvr::IatPatch g_patchChainedLoadLibraryExW;
+
+edvr::IatPatch g_patchExeLoadLibraryA;
+edvr::IatPatch g_patchExeLoadLibraryW;
+edvr::IatPatch g_patchExeLoadLibraryExA;
+edvr::IatPatch g_patchExeLoadLibraryExW;
+
+HMODULE findLoadedModuleW(LPCWSTR name) {
+    if (!name || !*name) return nullptr;
+    HMODULE mod = nullptr;
+    if (GetModuleHandleExW(0, name, &mod) && mod) return mod;
+
+    const wchar_t* leaf = wcsrchr(name, L'\\');
+    if (!leaf) leaf = wcsrchr(name, L'/');
+    if (leaf && *(leaf + 1)) {
+        if (GetModuleHandleExW(0, leaf + 1, &mod) && mod) return mod;
+        name = leaf + 1;
+    }
+
+    if (!wcschr(name, L'.')) {
+        wchar_t buf[MAX_PATH];
+        if (swprintf_s(buf, L"%s.dll", name) > 0) {
+            if (GetModuleHandleExW(0, buf, &mod) && mod) return mod;
+        }
+    }
+    return nullptr;
+}
+
+HMODULE findLoadedModuleA(LPCSTR name) {
+    if (!name || !*name) return nullptr;
+    HMODULE mod = nullptr;
+    if (GetModuleHandleExA(0, name, &mod) && mod) return mod;
+
+    const char* leaf = strrchr(name, '\\');
+    if (!leaf) leaf = strrchr(name, '/');
+    if (leaf && *(leaf + 1)) {
+        if (GetModuleHandleExA(0, leaf + 1, &mod) && mod) return mod;
+        name = leaf + 1;
+    }
+
+    if (!strchr(name, '.')) {
+        char buf[MAX_PATH];
+        if (sprintf_s(buf, "%s.dll", name) > 0) {
+            if (GetModuleHandleExA(0, buf, &mod) && mod) return mod;
+        }
+    }
+    return nullptr;
+}
+
+HMODULE WINAPI hookedLoadLibraryW(LPCWSTR lpLibFileName) {
+    if (HMODULE mod = findLoadedModuleW(lpLibFileName)) {
+        return mod;
+    }
+    return LoadLibraryW(lpLibFileName);
+}
+
+HMODULE WINAPI hookedLoadLibraryA(LPCSTR lpLibFileName) {
+    if (HMODULE mod = findLoadedModuleA(lpLibFileName)) {
+        return mod;
+    }
+    return LoadLibraryA(lpLibFileName);
+}
+
+HMODULE WINAPI hookedLoadLibraryExW(LPCWSTR lpLibFileName, HANDLE hFile, DWORD dwFlags) {
+    if ((dwFlags & (LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE | LOAD_LIBRARY_AS_IMAGE_RESOURCE)) == 0) {
+        if (HMODULE mod = findLoadedModuleW(lpLibFileName)) {
+            return mod;
+        }
+    }
+    return LoadLibraryExW(lpLibFileName, hFile, dwFlags);
+}
+
+HMODULE WINAPI hookedLoadLibraryExA(LPCSTR lpLibFileName, HANDLE hFile, DWORD dwFlags) {
+    if ((dwFlags & (LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE | LOAD_LIBRARY_AS_IMAGE_RESOURCE)) == 0) {
+        if (HMODULE mod = findLoadedModuleA(lpLibFileName)) {
+            return mod;
+        }
+    }
+    return LoadLibraryExA(lpLibFileName, hFile, dwFlags);
+}
+
+void preloadSystemLibraries() {
+    const wchar_t* const kPreloadModules[] = {
+        L"d3dcompiler_47.dll",
+        L"advapi32.dll",
+        L"user32.dll",
+        L"gdi32.dll",
+        L"hid.dll",
+        L"setupapi.dll",
+        L"dinput.dll",
+        L"dinput8.dll",
+        L"xinput9_1_0.dll",
+        L"xinput1_4.dll",
+        L"xinput1_3.dll",
+        L"cryptnet.dll",
+        L"msasn1.dll",
+        L"wldp.dll",
+        L"cryptbase.dll",
+        L"devobj.dll",
+        L"shlwapi.dll",
+        L"version.dll"
+    };
+
+    for (const wchar_t* modName : kPreloadModules) {
+        if (!GetModuleHandleW(modName)) {
+            if (_wcsicmp(modName, L"d3dcompiler_47.dll") == 0 && g_moduleDir) {
+                std::wstring compilerPath = *g_moduleDir + L"\\d3dcompiler_47.dll";
+                if (GetFileAttributesW(compilerPath.c_str()) != INVALID_FILE_ATTRIBUTES) {
+                    LoadLibraryW(compilerPath.c_str());
+                    continue;
+                }
+            }
+            LoadLibraryW(modName);
+        }
+    }
+}
 
 edvr::FaultBudget g_createBudget("D3D11CreateDevice", 3);
 
@@ -221,17 +341,10 @@ void chainThroughOtherProxy(edvr::Config& cfg) {
         return;
     }
 
-    // Preload D3DCompiler before loading the chained proxy (EDHM / 3Dmigoto / ReShade)
-    // so that subsequent runtime shader compilations do not trigger ReShade's LoadLibrary
-    // deadlock guard when compiling HUD override shaders.
-    if (!GetModuleHandleW(L"d3dcompiler_47.dll")) {
-        std::wstring compilerPath = *g_moduleDir + L"\\d3dcompiler_47.dll";
-        if (GetFileAttributesW(compilerPath.c_str()) != INVALID_FILE_ATTRIBUTES) {
-            LoadLibraryW(compilerPath.c_str());
-        } else {
-            LoadLibraryW(L"d3dcompiler_47.dll");
-        }
-    }
+    // Preload system libraries before loading the chained proxy (EDHM / 3Dmigoto / ReShade)
+    // so that subsequent runtime dynamic loads (e.g. Advapi32 for registry/theme parsing,
+    // Gdi32, User32, Setupapi, Hid, DInput) do not trigger ReShade's LoadLibrary deadlock guard.
+    preloadSystemLibraries();
 
     const HMODULE chained = LoadLibraryW(path.c_str());
     if (!chained) {
@@ -273,6 +386,20 @@ void chainThroughOtherProxy(edvr::Config& cfg) {
         g_realCreateDeviceAndSwapChain = swap;
     }
     // else: keep the system one resolved during the loader phase.
+
+    // Install IAT hooks on the chained proxy for LoadLibrary to bypass ReShade's deadlock guard
+    edvr::iatHookInstallIn(chained, "kernel32.dll", "LoadLibraryA",
+                          reinterpret_cast<void*>(&hookedLoadLibraryA), &g_patchChainedLoadLibraryA);
+    edvr::iatHookInstallIn(chained, "kernel32.dll", "LoadLibraryW",
+                          reinterpret_cast<void*>(&hookedLoadLibraryW), &g_patchChainedLoadLibraryW);
+    edvr::iatHookInstallIn(chained, "kernel32.dll", "LoadLibraryExW",
+                          reinterpret_cast<void*>(&hookedLoadLibraryExW), &g_patchChainedLoadLibraryExW);
+
+    edvr::Log::get().note(
+        "LoadLibrary deadlock bypass installed in chained proxy: (A=%d, W=%d, ExW=%d)",
+        g_patchChainedLoadLibraryA.applied ? 1 : 0,
+        g_patchChainedLoadLibraryW.applied ? 1 : 0,
+        g_patchChainedLoadLibraryExW.applied ? 1 : 0);
 
     edvr::Log::get().note(
         "chaining through %S -- %zu export(s) from it, %zu from the system d3d11.dll, "
@@ -341,6 +468,23 @@ BOOL CALLBACK initOnceCallback(PINIT_ONCE, PVOID, PVOID*) {
             "against this machine's d3d11.dll with build.bat",
             g_missingExports, kExportCount);
     }
+    // Install IAT hooks on the game executable for LoadLibrary deadlock bypass
+    edvr::iatHookInstall("kernel32.dll", "LoadLibraryA",
+                         reinterpret_cast<void*>(&hookedLoadLibraryA), &g_patchExeLoadLibraryA);
+    edvr::iatHookInstall("kernel32.dll", "LoadLibraryW",
+                         reinterpret_cast<void*>(&hookedLoadLibraryW), &g_patchExeLoadLibraryW);
+    edvr::iatHookInstall("kernel32.dll", "LoadLibraryExA",
+                         reinterpret_cast<void*>(&hookedLoadLibraryExA), &g_patchExeLoadLibraryExA);
+    edvr::iatHookInstall("kernel32.dll", "LoadLibraryExW",
+                         reinterpret_cast<void*>(&hookedLoadLibraryExW), &g_patchExeLoadLibraryExW);
+
+    edvr::Log::get().note(
+        "LoadLibrary deadlock bypass installed in executable: (A=%d, W=%d, ExA=%d, ExW=%d)",
+        g_patchExeLoadLibraryA.applied ? 1 : 0,
+        g_patchExeLoadLibraryW.applied ? 1 : 0,
+        g_patchExeLoadLibraryExA.applied ? 1 : 0,
+        g_patchExeLoadLibraryExW.applied ? 1 : 0);
+
     // Now, out from under the loader lock, is when another proxy can safely be
     // brought in.
     chainThroughOtherProxy(cfg);
@@ -372,6 +516,14 @@ void shutdown() {
     // Per-site fault totals, so "logged once" does not mean "counted once".
     edvr::reportFaultSites();
     edvr::shutdownDeviceHooks();
+
+    edvr::iatHookUninstall(&g_patchChainedLoadLibraryA);
+    edvr::iatHookUninstall(&g_patchChainedLoadLibraryW);
+    edvr::iatHookUninstall(&g_patchChainedLoadLibraryExW);
+    edvr::iatHookUninstall(&g_patchExeLoadLibraryA);
+    edvr::iatHookUninstall(&g_patchExeLoadLibraryW);
+    edvr::iatHookUninstall(&g_patchExeLoadLibraryExA);
+    edvr::iatHookUninstall(&g_patchExeLoadLibraryExW);
 
     // Before the module goes: a filter pointing into an unmapped image would
     // take the game's own crash reporting down with it.
