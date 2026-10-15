@@ -1707,6 +1707,8 @@ struct NeckSnapshot {
     uint32_t shState = 0;        // F43: bit 0 the 3P shoulders (L then R) read, bit 1 the FP shoulders read
     float sh3P[6] = {};          // F43: the 3P shoulders, avatar-root model space (L, R)
     float shFp[6] = {};          // F43: the FP shoulders, FP avatar-root model space (L, R)
+    float ext3P[12] = {};        // F45: the 3P hands (L, R) and attach points (L, R), model space
+    float extFp[12] = {};        // F45: the same on the FP skeleton
 };
 std::mutex g_neckMutex;
 NeckSnapshot g_neck;                                  // guarded by g_neckMutex
@@ -1793,6 +1795,7 @@ struct ShoulderProbe {
     bool done = false;
     uint32_t l = 0xFFFFu, r = 0xFFFFu;   // the first answered L and R shoulder: shoulder, then clavicle, then upper arm
     uint32_t neck = 0xFFFFu;
+    uint32_t hl = 0xFFFFu, hr = 0xFFFFu, al = 0xFFFFu, ar = 0xFFFFu;   // F45: the hands (L, R) and the attach points (L, R)
 };
 ShoulderProbe g_shProbe3P, g_shProbeFP;   // census thread only
 
@@ -1837,7 +1840,10 @@ void shoulderProbe(uint64_t iface, const SkSlots& sl, ShoulderProbe& pr, const c
     for (size_t i = 0; i < 15; ++i) {
         uint32_t idx = ecm::kNoJoint;
         found[i] = sehCallFind(sl.fn[1], static_cast<uintptr_t>(iface), kJointProbeNames[i], &idx) ? (idx & 0xFFFFu) : 0xFFFFu;
-        Log::get().note("native on foot joint probe (%s): %s -> %u (0xFFFF: none)", label, kJointProbeNames[i], static_cast<unsigned>(found[i]));
+        if (found[i] == 0xFFFFu)
+            Log::get().note("native on foot joint probe (%s): %s -> none", label, kJointProbeNames[i]);
+        else
+            Log::get().note("native on foot joint probe (%s): %s -> index %u", label, kJointProbeNames[i], static_cast<unsigned>(found[i]));
     }
     const size_t lc[3] = {0, 2, 4}, rc[3] = {1, 3, 5};
     for (size_t c : lc)
@@ -1845,13 +1851,23 @@ void shoulderProbe(uint64_t iface, const SkSlots& sl, ShoulderProbe& pr, const c
     for (size_t c : rc)
         if (pr.r == 0xFFFFu && found[c] != 0xFFFFu) pr.r = found[c];
     pr.neck = found[kJointNameNeck];
+    pr.hl = found[11];
+    pr.hr = found[12];
+    pr.al = found[9];
+    pr.ar = found[10];
     if (pr.l == 0xFFFFu || pr.r == 0xFFFFu) shoulderWalkDump(iface, sl, pr.neck, label);
 }
 
+// F45: a joint matrix is usable when every element is finite and of ordinary size (the head's placement test rejected the joints).
+bool jointMatrixSane(const float m[16]) noexcept {
+    for (int i = 0; i < 16; ++i)
+        if (!std::isfinite(m[i]) || std::fabs(m[i]) > 100.0f) return false;
+    return true;
+}
 // F43: one joint's model-space translation (the +0x58 model call, as the head and the neck), or false.
 bool jointModelAt(uint64_t iface, const SkSlots& sl, uint32_t idx, float out[3]) noexcept {
     alignas(16) float m[16] = {};
-    if (!sehCallModel(sl.fn[3], static_cast<uintptr_t>(iface), idx, m) || !ecm::headMatrixPlausible(m)) return false;
+    if (!sehCallModel(sl.fn[3], static_cast<uintptr_t>(iface), idx, m) || !jointMatrixSane(m)) return false;
     out[0] = m[12];
     out[1] = m[13];
     out[2] = m[14];
@@ -1895,6 +1911,12 @@ void neckCensusStep() noexcept {
                     if (g_shProbe3P.l != 0xFFFFu && g_shProbe3P.r != 0xFFFFu && jointModelAt(iface, sl, g_shProbe3P.l, &s.sh3P[0]) &&
                         jointModelAt(iface, sl, g_shProbe3P.r, &s.sh3P[3]))
                         s.shState |= 1u;
+                    if (g_shProbe3P.hl != 0xFFFFu && g_shProbe3P.hr != 0xFFFFu && g_shProbe3P.al != 0xFFFFu && g_shProbe3P.ar != 0xFFFFu) {
+                        const uint32_t ids[4] = {g_shProbe3P.hl, g_shProbe3P.hr, g_shProbe3P.al, g_shProbe3P.ar};
+                        bool allRead = true;
+                        for (size_t k = 0; k < 4; ++k) allRead = jointModelAt(iface, sl, ids[k], &s.ext3P[3 * k]) && allRead;
+                        if (allRead) s.shState |= 4u;
+                    }
                 }
             }
         }
@@ -1908,6 +1930,12 @@ void neckCensusStep() noexcept {
             if (g_shProbeFP.l != 0xFFFFu && g_shProbeFP.r != 0xFFFFu && jointModelAt(fpIface, slf, g_shProbeFP.l, &s.shFp[0]) &&
                 jointModelAt(fpIface, slf, g_shProbeFP.r, &s.shFp[3]))
                 s.shState |= 2u;
+            if (g_shProbeFP.hl != 0xFFFFu && g_shProbeFP.hr != 0xFFFFu && g_shProbeFP.al != 0xFFFFu && g_shProbeFP.ar != 0xFFFFu) {
+                const uint32_t ids[4] = {g_shProbeFP.hl, g_shProbeFP.hr, g_shProbeFP.al, g_shProbeFP.ar};
+                bool allRead = true;
+                for (size_t k = 0; k < 4; ++k) allRead = jointModelAt(fpIface, slf, ids[k], &s.extFp[3 * k]) && allRead;
+                if (allRead) s.shState |= 8u;
+            }
         }
     }
     const uint64_t amc = g_amcLocal.load(std::memory_order_acquire);
@@ -1933,6 +1961,8 @@ bool neckCensusCopy(NeckCensusReading* out) {
     out->shState = g_neck.shState;
     std::memcpy(out->sh3P, g_neck.sh3P, sizeof(out->sh3P));
     std::memcpy(out->shFp, g_neck.shFp, sizeof(out->shFp));
+    std::memcpy(out->ext3P, g_neck.ext3P, sizeof(out->ext3P));
+    std::memcpy(out->extFp, g_neck.extFp, sizeof(out->extFp));
     return g_neck.stamp != 0;
 }
 

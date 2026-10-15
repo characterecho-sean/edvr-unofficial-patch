@@ -821,3 +821,15 @@ mode and its context); W3 step 1-2 (dump comparison, offline).
 - **Log, once a second.** `marker record found at index N` (key, tag age, map type, finds at the last index, index same or changed, X0 == t' bit-exact or not, scan times), or `sentinel NOT found`; per eye the angle v0 vs v_target (mean, max), the V_hud vs V_w rotation, head speed from the ring (mean, max), and the frame check |P - o_w| beside |t'| and |X0 - o_hud|; a draws line with each refusal counted (stride, stream, constants, no find, no world view, rows not a rotation, and so on). Each refusal reason is also named once.
 - **Deviations.** V_hud and V_w are GPU copies of what each draw binds (ranged binds included), not a binding shadow plus mapped contents: the copy is what the draw reads, and no CPU copy of every b0 write is made. A HUD draw with no scene depth bound takes the eye whose world rows are nearest (counted as "eye by nearest world rows").
 - **Not done.** No correction. The flight is the test: whether the sentinel survives into the pool at all, the record index's stability, and the angle at rest and while turning.
+
+### 2026-10-15: F43 flight (log 121531) and F45 part A
+
+- **Joint probe resolved** (3P and FP): clavicles 3P 35/36, FP 19/20; hands 3P 58/59, FP 37/44; handAttach 3P 67 (L) and 66 (R), FP 52 (L) and 51 (R); neck 3P 34; head 3P 44. Shoulder, upperArm, arm and spine03 do not exist on either skeleton.
+- **Why the anchor never ran.** The probe picked the clavicles, but the census read of their matrices failed the head's placement test (the test requires the head's own height and reach). The census shoulder bits stayed zero, so the log read "shoulders not resolved: neck anchor" every second. Now a joint matrix passes when every element is finite and of ordinary size.
+- **Clavicle anchor.** The pair is the clavicles on both skeletons: the FP clavicles through the FP root's yaw only, the 3P clavicles through the AMC matrix, the target in body axes through F41's filter and the trims. The neck anchor stays the fallback.
+- **Neck pov.** The baked (0, 0.15, -0.08) offset is gone (it pushed the body about 13 cm forward). The neck pov is F38's neck plus the captured pov-minus-neck offset again.
+- **Probe print.** "none" only for index 65535; otherwise the index.
+- **FP pitch.** Now the FP root's forward row dotted with the AMC's up row (row 1): the pitch against the body's horizontal, not the world y (which read 41.8 degrees at rest).
+- **Body log, once a second.** Both clavicle means in body axes, their distance before and after d, the head and neck in body axes beside d, the hand and attach-point world positions on both skeletons with their L and R distances.
+- **Per-part table.** It printed in F43's flight, but 96 seconds after body entry: the table was consumed only on a pass where d was nonzero, and d stayed zero until the anchor moved. Now the table is consumed at the first body pass, shifted or not (with d zero it lists the present parts and writes nothing).
+- **Not verified.** Whether the clavicle anchor joins the torso to the arms needs the flight.

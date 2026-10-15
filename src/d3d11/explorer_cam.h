@@ -140,6 +140,8 @@ struct NeckCensusReading {
     uint32_t shState = 0;             // F43: bit 0 the 3P shoulders (L, R) read, bit 1 the FP shoulders read
     float sh3P[6] = {};               // F43: the 3P shoulders, avatar-root model space (L, R)
     float shFp[6] = {};               // F43: the FP shoulders, FP avatar-root model space (L, R)
+    float ext3P[12] = {};             // F45: the 3P hands (L, R) and attach points (L, R), avatar-root model space
+    float extFp[12] = {};             // F45: the same on the FP skeleton
 };
 bool neckCensusRead(NeckCensusReading* out);
 bool explorerCamRestPovDelta(float out[3]);   // F33: the povCamera joint minus the head joint in model space, once Explorer Cam's walk derived it
