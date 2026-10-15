@@ -693,6 +693,107 @@ int wmain(int argc, wchar_t** argv) {
             edvr::nofoot::standingApply(src, st.value, out);
             check(out[0] == 0.11 && out[1] == st.value && out[2] == -0.07, "F48: the standing height replaces only the vertical; x and z stay live");
         }
+        // F49: the pose freeze's pure half. A skeleton root 0 -> hips 1 -> spine 2 -> neck 3 -> head 4; spine 2 -> clavicle 5 -> arm 6;
+        // hips 1 -> thigh 7 -> foot 8.
+        {
+            namespace nf = edvr::nofoot;
+            const uint16_t parents[9] = {0xFFFF, 0, 1, 2, 3, 2, 5, 1, 7};
+            const nf::PfzFrozenSet fs = nf::pfzFrozenSet(parents, 9, 3, 8);
+            bool order = fs.why == 0;
+            for (uint32_t k = 0; k < fs.count && order; ++k) {
+                const int ps = fs.parentSlot[k];
+                order = ps < static_cast<int>(k) && (ps < 0 ? parents[fs.member[k]] == fs.anchor : parents[fs.member[k]] == fs.member[ps]);
+            }
+            check(fs.why == 0 && fs.footResolved && fs.anchor == 1 && fs.child == 2 && fs.count == 5 && fs.slotOf(7) < 0 && fs.slotOf(8) < 0 &&
+                      fs.slotOf(0) < 0 && fs.slotOf(1) < 0 && fs.slotOf(5) >= 0 && fs.slotOf(6) >= 0 && fs.slotOf(4) >= 0 && order,
+                  "F49: the frozen set is the torso-side child subtree of the neck and foot's common ancestor, parent first");
+            const nf::PfzFrozenSet noFoot = nf::pfzFrozenSet(parents, 9, 3, 0xFFFF);
+            check(noFoot.why == 0 && !noFoot.footResolved && noFoot.anchor == 1 && noFoot.count == 5,
+                  "F49: an unresolved foot anchors at the root's child on the neck's path");
+            check(nf::pfzFrozenSet(parents, 9, 1, 8).why == 4, "F49: a neck that is the common ancestor itself is refused");
+            // The rest chain: rest locals composed parent first match the explorer cam walk (position and rotation).
+            float locals[9 * 8] = {};
+            for (int j = 0; j < 9; ++j) {
+                const float ang = 0.15f * static_cast<float>(j + 1), ax[3] = {0.3f, 0.8f, -0.5f};
+                const float an = std::sqrt(ax[0] * ax[0] + ax[1] * ax[1] + ax[2] * ax[2]);
+                float* r = locals + j * 8;
+                r[0] = 0.01f * j;
+                r[1] = 0.2f + 0.03f * j;
+                r[2] = -0.02f * j;
+                r[3] = 1.0f;
+                for (int i = 0; i < 3; ++i) r[4 + i] = std::sin(ang / 2) * ax[i] / an;
+                r[7] = std::cos(ang / 2);
+            }
+            float model[16] = {}, walk[3] = {}, rot[9] = {};
+            uint32_t depth = 0;
+            const bool okModel = nf::pfzRestModel(locals, parents, 9, 6, model);
+            const bool okWalk = edvr::ecm::walkJointToModel(locals, parents, 9, 6, walk, &depth) &&
+                                edvr::ecm::walkJointRotationToModel(locals, parents, 9, 6, rot);
+            double err = 0.0;
+            for (int i = 0; i < 3; ++i) err = std::max(err, std::fabs(static_cast<double>(model[12 + i]) - walk[i]));
+            for (int i = 0; i < 3; ++i)
+                for (int k = 0; k < 3; ++k) err = std::max(err, std::fabs(static_cast<double>(model[i * 4 + k]) - rot[i * 3 + k]));
+            check(okModel && okWalk && err < 1e-5, "F49: restLocal x parent, composed to the root, equals the explorer cam walk");
+            // M'_j = restLocal_j x M'_parent, anchored at an animated hips matrix: the child's model matrix is its local times the anchor's.
+            float anchorM[16] = {}, l2[16] = {}, chain2[16] = {}, inv[16] = {}, back[16] = {};
+            nf::pfzLocalMatrix(locals + 1 * 8, anchorM);
+            anchorM[12] += 0.4f;   // an animated hips: moved
+            nf::pfzLocalMatrix(locals + 2 * 8, l2);
+            nf::pfzMul(l2, anchorM, chain2);
+            const bool okInv = nf::pfzAffineInverse(anchorM, inv);
+            nf::pfzMul(chain2, inv, back);   // the local back out of the chain
+            double errL = 0.0;
+            for (int i = 0; i < 16; ++i) errL = std::max(errL, std::fabs(static_cast<double>(back[i]) - l2[i]));
+            check(okInv && errL < 1e-5, "F49: the local recovered from M'_child x inverse(M'_parent) is the rest local");
+            // The quaternion round trip (all four branches) and the blend's ends.
+            const float qs[4][4] = {{0.1f, 0.2f, 0.3f, 0.927f}, {0.95f, 0.1f, 0.2f, 0.2f}, {0.1f, 0.95f, 0.2f, 0.2f}, {0.1f, 0.2f, 0.95f, 0.2f}};
+            double errQ = 0.0;
+            for (const auto& q0 : qs) {
+                float rec[8] = {0, 0, 0, 1, q0[0], q0[1], q0[2], q0[3]};
+                const float n = std::sqrt(q0[0] * q0[0] + q0[1] * q0[1] + q0[2] * q0[2] + q0[3] * q0[3]);
+                for (int i = 0; i < 4; ++i) rec[4 + i] /= n;
+                float m[16], q[4];
+                nf::pfzLocalMatrix(rec, m);
+                nf::pfzQuatFromMatrix(m, q);
+                const float s = (q[0] * rec[4] + q[1] * rec[5] + q[2] * rec[6] + q[3] * rec[7]) < 0.0f ? -1.0f : 1.0f;
+                for (int i = 0; i < 4; ++i) errQ = std::max(errQ, std::fabs(static_cast<double>(s * q[i]) - rec[4 + i]));
+            }
+            check(errQ < 1e-5, "F49: the quaternion from the rotation rows round-trips (every branch)");
+            float animLocal[16], b0[8], b1[8], m0[16];
+            nf::pfzLocalMatrix(locals + 5 * 8, animLocal);
+            nf::pfzBlendRecord(animLocal, locals + 6 * 8, 0.0f, b0);
+            nf::pfzBlendRecord(animLocal, locals + 6 * 8, 1.0f, b1);
+            nf::pfzLocalMatrix(b0, m0);
+            double errB = 0.0;
+            for (int i = 0; i < 16; ++i) errB = std::max(errB, std::fabs(static_cast<double>(m0[i]) - animLocal[i]));
+            check(errB < 1e-5 && std::memcmp(b1, locals + 6 * 8, sizeof(b1)) == 0, "F49: the blend at 0 is the animated local and at 1 the rest local");
+            // The weight: 0.3 s to full, clamped, and back.
+            nf::PfzBlend bl;
+            bl.step(true, 0.15);
+            const float half = bl.w;
+            bl.step(true, 0.15);
+            const float full = bl.w;
+            bl.step(true, 1.0);
+            const float clamped = bl.w;
+            bl.step(false, 0.3);
+            check(std::fabs(half - 0.5f) < 1e-6f && std::fabs(full - 1.0f) < 1e-6f && clamped == 1.0f && bl.w == 0.0f,
+                  "F49: the blend weight reaches 1 in 0.3 s, clamps, and returns to 0 in 0.3 s");
+            // The rest gate: steady for 1 s rests; a 3 cm move or ADS ends it.
+            nf::PfzHeadRest hr;
+            bool rest = false;
+            for (uint64_t t = 0; t <= 990; t += 11) rest = hr.step(t, 1.60 + (t % 2 ? 0.005 : -0.005), false);
+            const bool early = rest;
+            rest = hr.step(1001, 1.60, false);
+            const bool moved = hr.step(1012, 1.63, false);
+            rest = hr.step(1023, 1.63, false) || rest;
+            hr.step(3000, 1.63, false);
+            const bool ads = hr.step(3011, 1.63, true);
+            check(!early && !moved && !ads, "F49: the rest gate needs the head steady for 1 s; a 3 cm move or ADS ends it");
+            nf::PfzHeadRest hr2;
+            bool rest2 = false;
+            for (uint64_t t = 0; t <= 1100; t += 11) rest2 = hr2.step(t, 1.60, false);
+            check(rest2, "F49: a head steady for 1 s is at rest");
+        }
     }
 
     // F36: weapon stability defers pacing on foot, and steps aside while native HMD stereo on foot is active (the key is untouched).

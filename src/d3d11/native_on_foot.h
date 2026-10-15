@@ -60,6 +60,35 @@ inline void nativeOnFootCountGate(NativeOnFootGate gate) {
     if (nativeOnFootActive()) g_nativeOnFootGates[size_t(gate)].fetch_add(1, std::memory_order_relaxed);
 }
 
+// F49 (TEMPORARY): the pose freeze's hand-off. The census (explorer_cam.cpp, the game's job thread, every 100 ms) finds the local avatar's
+// evaluator X from the local third-person skeleton interface and builds the plan (the frozen set and its rest locals) once per X; the Animate
+// post-hook (native_on_foot.cpp, frAnim worker threads) reads it under the sequence counter and touches only that X. Inline, as above: the
+// explorer cam rig compiles the census without native_on_foot.cpp.
+namespace pfz {
+struct Plan {
+    uint64_t x = 0;                                  // the evaluator the plan belongs to
+    uint32_t joints = 0;                             // the pose's joint count when the plan was built
+    uint32_t anchor = 0xFFFFu;                       // the hips (the lowest common ancestor of the neck and the left foot)
+    uint32_t count = 0;                              // members of F, parent first
+    int32_t slot34 = -1, slot44 = -1;                // the member slots of the neck (34) and the head (44); -1 = not in F
+    uint16_t member[nofoot::kPfzMaxF] = {};
+    int16_t parentSlot[nofoot::kPfzMaxF] = {};      // -1 = the anchor
+    float rest[nofoot::kPfzMaxF][8] = {};            // each member's rest record: pos vec4, quaternion
+};
+inline std::atomic<uint32_t> g_planSeq{0};           // odd while the census writes the plan
+inline Plan g_plan;
+inline std::atomic<uint64_t> g_localX{0};            // the local avatar's evaluator with a plan (0: none; the hook does nothing)
+inline std::atomic<int> g_mode{1};                   // fix.native_on_foot_pose_freeze: 0 off, 1 probe (the default), 2 on
+// The hook's newest span matrix of joint 34 for the local X (as the Animate handler left it, and as written when the freeze wrote it), sequence
+// counted (the hook writes, the census reads it beside GetModelMatrix(34) for the cross-check).
+inline std::atomic<uint32_t> g_spanSeq{0};
+inline float g_span34[16] = {};
+inline float g_span34Written[16] = {};
+inline bool g_span34WasWritten = false;
+inline uint64_t g_span34Ms = 0;
+inline uint32_t g_span34Buffer = 0;                  // 0 [job+0x28], 1 [[X+0x1F0]+0xA0]
+}  // namespace pfz
+
 // Render thread, once a frame at the Present boundary (device_hook.cpp's tick). Installs the hook the first time (VR only), re-reads the
 // key when the configuration changes, writes the queued setter lines and the 5 s gate line.
 void nativeOnFootFrameBoundary(uint32_t frameNo);

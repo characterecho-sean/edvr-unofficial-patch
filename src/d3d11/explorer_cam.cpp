@@ -1920,6 +1920,212 @@ bool jointModelAt(uint64_t iface, const SkSlots& sl, uint32_t idx, float out[3])
     return true;
 }
 
+// ---- F49 (TEMPORARY): the pose freeze's census side ----------------------------------------------------------------------------
+// Census thread only (neckCensusStep holds g_busyNeck). Once per evaluator X (from the local third-person skeleton interface: RR *(iface+0x2B8),
+// AO *(iface+0x120), the readers' own choice, notes 0x43FB740 / 0xFDDD10): P = [X+8], its joint count, rest locals and parents; FindJoint
+// ("def_l_foot_joint"); the frozen set (nofoot::pfzFrozenSet); the plan published under pfz::g_planSeq; the rest chain checked against the game's
+// own 0xFDE0D0 (a leaf: it reads P's locals and parents and writes 64 bytes to its second argument). Every 5 s: GetModelMatrix(34) for the frame
+// thread's cross-check against the hook's span. Reads and the game's own read-only calls only: nothing here writes game memory.
+constexpr uintptr_t kPfzRestModelRva = 0xFDE0D0;
+const uint8_t kPfzRestModelPrologue[11] = {0x48, 0x83, 0xEC, 0x48, 0x48, 0x8B, 0x41, 0x48, 0x4D, 0x8B, 0xC8};
+constexpr uint32_t kPfzNeck = 34, kPfzHead = 44, kPfzClavL = 35, kPfzClavR = 36;
+using PfzRestModelFn = void(__fastcall*)(void* pose, float* out, uint64_t idx);
+__declspec(noinline) bool sehCallRestModel(uintptr_t fn, uintptr_t pose, uint32_t idx, float* out) noexcept {
+    __try {
+        reinterpret_cast<PfzRestModelFn>(fn)(reinterpret_cast<void*>(pose), out, idx);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+__declspec(noinline) bool sehReadBytesAt(uintptr_t at, void* out, size_t n) noexcept {
+    __try {
+        std::memcpy(out, reinterpret_cast<const void*>(at), n);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+struct PfzCensus {
+    uint64_t iface = 0, x = 0;
+    bool xNoted = false;
+    uint64_t modelNextMs = 0;
+    bool modelNoted = false;
+    bool planOk = false;   // the plan for this X was built and published (a failed build is refused for this X, said once)
+};
+PfzCensus g_pfzCensus;
+float g_pfzLocals[nofoot::kPfzMaxJoints * ecm::kJointFloats];
+uint16_t g_pfzParents[nofoot::kPfzMaxJoints];
+
+// The largest element difference of two 4x4 matrices, and the position difference in mm.
+void pfzMatrixDiff(const float a[16], const float b[16], double* maxElem, double* posMm) noexcept {
+    double m = 0.0;
+    for (int i = 0; i < 16; ++i) m = std::max(m, std::fabs(static_cast<double>(a[i]) - b[i]));
+    const double dx = static_cast<double>(a[12]) - b[12], dy = static_cast<double>(a[13]) - b[13], dz = static_cast<double>(a[14]) - b[14];
+    *maxElem = m;
+    *posMm = std::sqrt(dx * dx + dy * dy + dz * dz) * 1000.0;
+}
+
+void pfzBuildPlan(uint64_t iface, uint64_t x, const SkSlots& sl) noexcept {
+    pfz::g_localX.store(0, std::memory_order_release);
+    uint64_t pose = 0;
+    if (!sehReadU64At(static_cast<uintptr_t>(x) + 8u, &pose) || !plausibleUserPointer(pose)) {
+        Log::get().note("native on foot pose freeze: X=%016llX: P = [X+8] is not readable; refused for this X (nothing is frozen or probed)",
+                        static_cast<unsigned long long>(x));
+        return;
+    }
+    uintptr_t gp = 0;
+    const bool gpOk = sehCallPose(sl.fn[0], static_cast<uintptr_t>(iface), &gp);
+    uint16_t joints = 0;
+    if (!sehReadU16At(static_cast<uintptr_t>(pose), &joints) || joints == 0 || joints > nofoot::kPfzMaxJoints ||
+        !sehReadPoseArrays(static_cast<uintptr_t>(pose), joints, g_pfzLocals, g_pfzParents)) {
+        Log::get().note("native on foot pose freeze: X=%016llX P=%016llX: %u joints (cap 0xC0) or the locals and parents unreadable; refused for this X",
+                        static_cast<unsigned long long>(x), static_cast<unsigned long long>(pose), static_cast<unsigned>(joints));
+        return;
+    }
+    uint32_t foot = ecm::kNoJoint;
+    const bool findOk = sehCallFind(sl.fn[1], static_cast<uintptr_t>(iface), ecm::kFootLName, &foot);
+    foot &= 0xFFFFu;
+    if (!findOk || foot >= joints) {
+        Log::get().note("native on foot pose freeze: FindJoint(\"%s\") on the 3P skeleton %s; the anchor is the root's child on the neck's path",
+                        ecm::kFootLName, findOk ? "found no joint (or an index past the joint count)" : "faulted");
+        foot = ecm::kNoJoint;
+    }
+    const nofoot::PfzFrozenSet fs = nofoot::pfzFrozenSet(g_pfzParents, joints, kPfzNeck, foot);
+    if (fs.why != 0) {
+        Log::get().note("native on foot pose freeze: X=%016llX: no frozen set (%s; %u joints, neck %u, foot %u); refused for this X",
+                        static_cast<unsigned long long>(x), nofoot::pfzWhyText(fs.why), static_cast<unsigned>(joints), kPfzNeck, foot);
+        return;
+    }
+    char list[1024] = {};
+    size_t at = 0;
+    for (uint32_t k = 0; k < fs.count; ++k) {
+        const int w = std::snprintf(list + at, sizeof(list) - at, "%s%u", k ? " " : "", static_cast<unsigned>(fs.member[k]));
+        if (w <= 0 || static_cast<size_t>(w) >= sizeof(list) - at) break;
+        at += static_cast<size_t>(w);
+    }
+    Log::get().note("native on foot pose freeze: plan for X=%016llX (iface %016llX, %s): P=[X+8]=%016llX (GetPoseData %s), %u joints; neck %u (the "
+                    "joint probe's neck: %u), foot %s %u; anchor a=%u (the lowest common ancestor%s), torso child %u; F has %u members; clavicle 35 %s F, "
+                    "clavicle 36 %s F, neck 34 %s F, head 44 %s F; members parent first: %s",
+                    static_cast<unsigned long long>(x), static_cast<unsigned long long>(iface), ecm::hkindText(static_cast<uint32_t>(sl.kind)),
+                    static_cast<unsigned long long>(pose),
+                    !gpOk ? "faulted" : gp == pose ? "the same" : "DIFFERS", static_cast<unsigned>(joints), kPfzNeck,
+                    static_cast<unsigned>(g_shProbe3P.neck), ecm::kFootLName, foot, fs.anchor,
+                    fs.footResolved ? "" : "; the foot did not resolve: the root's child on the neck's path", fs.child, fs.count,
+                    fs.slotOf(kPfzClavL) >= 0 ? "in" : "NOT in", fs.slotOf(kPfzClavR) >= 0 ? "in" : "NOT in", fs.slotOf(kPfzNeck) >= 0 ? "in" : "NOT in",
+                    fs.slotOf(kPfzHead) >= 0 ? "in" : "NOT in", list);
+    // The cross-check: the rest chain composed here against the game's own uncached path, for the neck and the head (read only).
+    {
+        const uintptr_t fn = g_followT.base ? g_followT.base + kPfzRestModelRva : 0;
+        uint8_t bytes[sizeof(kPfzRestModelPrologue)] = {};
+        if (!fn || !sehReadBytesAt(fn, bytes, sizeof(bytes)) || std::memcmp(bytes, kPfzRestModelPrologue, sizeof(bytes)) != 0) {
+            Log::get().note("native on foot pose freeze: rest chain cross-check: not available (0xFDE0D0's entry bytes are not build 332841's)");
+        } else {
+            const uint32_t ids[2] = {kPfzNeck, kPfzHead};
+            for (uint32_t id : ids) {
+                alignas(16) float game[16] = {}, ours[16] = {};
+                const bool okGame = id < joints && sehCallRestModel(fn, static_cast<uintptr_t>(pose), id, game);
+                const bool okOurs = nofoot::pfzRestModel(g_pfzLocals, g_pfzParents, joints, id, ours);
+                if (!okGame || !okOurs) {
+                    Log::get().note("native on foot pose freeze: rest chain cross-check joint %u: %s", id, !okGame ? "the game's call faulted or the index is out of range"
+                                                                                                                 : "our walk failed");
+                    continue;
+                }
+                double maxElem = 0.0, posMm = 0.0;
+                pfzMatrixDiff(game, ours, &maxElem, &posMm);
+                Log::get().note("native on foot pose freeze: rest chain cross-check joint %u: 0xFDE0D0 pos (%.4f,%.4f,%.4f), ours (%.4f,%.4f,%.4f); "
+                                "max element difference %.6f, position %.3f mm (%s)", id, static_cast<double>(game[12]), static_cast<double>(game[13]),
+                                static_cast<double>(game[14]), static_cast<double>(ours[12]), static_cast<double>(ours[13]), static_cast<double>(ours[14]),
+                                maxElem, posMm, maxElem < 1e-3 ? "agree" : "DIFFER");
+            }
+        }
+    }
+    pfz::g_planSeq.fetch_add(1, std::memory_order_acq_rel);   // odd: the plan is being written
+    pfz::g_plan.x = x;
+    pfz::g_plan.joints = joints;
+    pfz::g_plan.anchor = fs.anchor;
+    pfz::g_plan.count = fs.count;
+    pfz::g_plan.slot34 = fs.slotOf(kPfzNeck);
+    pfz::g_plan.slot44 = fs.slotOf(kPfzHead);
+    for (uint32_t k = 0; k < fs.count; ++k) {
+        pfz::g_plan.member[k] = fs.member[k];
+        pfz::g_plan.parentSlot[k] = fs.parentSlot[k];
+        std::memcpy(pfz::g_plan.rest[k], g_pfzLocals + fs.member[k] * ecm::kJointFloats, sizeof(pfz::g_plan.rest[k]));
+    }
+    pfz::g_planSeq.fetch_add(1, std::memory_order_release);   // even again
+    g_pfzCensus.planOk = true;
+    pfz::g_localX.store(x, std::memory_order_release);
+}
+
+void pfzCensusStep(uint64_t iface, const SkSlots& sl) noexcept {
+    if (pfz::g_mode.load(std::memory_order_relaxed) == 0) {
+        pfz::g_localX.store(0, std::memory_order_relaxed);
+        return;
+    }
+    const uint32_t off = sl.kind == ecm::HeadKind::Runtime ? 0x2B8u : 0x120u;
+    uint64_t x = 0;
+    if (!sehReadU64At(static_cast<uintptr_t>(iface) + off, &x) || !plausibleUserPointer(x)) {
+        if (!g_pfzCensus.xNoted) {
+            g_pfzCensus.xNoted = true;
+            Log::get().note("native on foot pose freeze: the evaluator X = *(iface+0x%X) on the local 3P skeleton %016llX is not readable (%016llX); waiting",
+                            off, static_cast<unsigned long long>(iface), static_cast<unsigned long long>(x));
+        }
+        pfz::g_localX.store(0, std::memory_order_relaxed);
+        return;
+    }
+    if (iface != g_pfzCensus.iface || x != g_pfzCensus.x) {
+        g_pfzCensus = PfzCensus{};
+        g_pfzCensus.iface = iface;
+        g_pfzCensus.x = x;
+        pfzBuildPlan(iface, x, sl);
+    }
+    pfz::g_localX.store(g_pfzCensus.planOk ? x : 0, std::memory_order_release);   // again after a key change from off
+
+    // Every 5 s: the iface's GetModelMatrix(34) beside the hook's newest span matrix of joint 34 (read back to back on this thread).
+    const uint64_t now = GetTickCount64();
+    if (now < g_pfzCensus.modelNextMs) return;
+    g_pfzCensus.modelNextMs = now + 5000;
+    alignas(16) float m[16] = {};
+    if (!sehCallModel(sl.fn[3], static_cast<uintptr_t>(iface), kPfzNeck, m)) {
+        if (!g_pfzCensus.modelNoted) {
+            g_pfzCensus.modelNoted = true;
+            Log::get().note("native on foot pose freeze: GetModelMatrix(34) on the local 3P skeleton faulted; the span cross-check has no iface side");
+        }
+        return;
+    }
+    float span[16] = {}, written[16] = {};
+    bool wasWritten = false, got = false;
+    uint64_t spanMs = 0;
+    uint32_t buffer = 0;
+    for (int tries = 0; tries < 4 && !got; ++tries) {
+        const uint32_t s1 = pfz::g_spanSeq.load(std::memory_order_acquire);
+        if (s1 & 1u) continue;
+        std::memcpy(span, pfz::g_span34, sizeof(span));
+        std::memcpy(written, pfz::g_span34Written, sizeof(written));
+        wasWritten = pfz::g_span34WasWritten;
+        spanMs = pfz::g_span34Ms;
+        buffer = pfz::g_span34Buffer;
+        std::atomic_thread_fence(std::memory_order_acquire);
+        got = pfz::g_spanSeq.load(std::memory_order_relaxed) == s1 && spanMs != 0;
+    }
+    if (!got) {
+        Log::get().note("native on foot pose freeze: span cross-check joint 34: GetModelMatrix pos (%.4f,%.4f,%.4f); the hook has no span sample for "
+                        "the local X yet", static_cast<double>(m[12]), static_cast<double>(m[13]), static_cast<double>(m[14]));
+        return;
+    }
+    double maxElem = 0.0, posMm = 0.0, maxW = 0.0, posW = 0.0;
+    pfzMatrixDiff(m, span, &maxElem, &posMm);
+    if (wasWritten) pfzMatrixDiff(m, written, &maxW, &posW);
+    char wtext[160] = "the freeze did not write it";
+    if (wasWritten)
+        std::snprintf(wtext, sizeof(wtext), "against the frozen (written) matrix: max element %.5f, position %.2f mm", maxW, posW);
+    Log::get().note("native on foot pose freeze: span cross-check joint 34: GetModelMatrix pos (%.4f,%.4f,%.4f), the span (%s) as animated pos "
+                    "(%.4f,%.4f,%.4f), %llu ms older; max element difference %.5f, position %.2f mm; %s",
+                    static_cast<double>(m[12]), static_cast<double>(m[13]), static_cast<double>(m[14]), buffer ? "[[X+0x1F0]+0xA0]" : "[job+0x28]",
+                    static_cast<double>(span[12]), static_cast<double>(span[13]), static_cast<double>(span[14]),
+                    static_cast<unsigned long long>(now >= spanMs ? now - spanMs : 0), maxElem, posMm, wtext);
+}
+
 void neckCensusStep() noexcept {
     if (!nativeOnFootActive()) return;
     const uint64_t now = GetTickCount64();
@@ -1968,6 +2174,7 @@ void neckCensusStep() noexcept {
                         s.shState |= 0x10u;
                         s.povIndex = g_shProbe3P.pov;
                     }
+                    pfzCensusStep(iface, sl);   // F49 (TEMPORARY): the pose freeze's evaluator, plan and iface cross-check
                 }
             }
         }

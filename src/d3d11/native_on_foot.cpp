@@ -590,6 +590,9 @@ void readKey() {
         // "shoulders" reads as clavicles). Anything else is pov.
         const std::string anchor = cfg.getString("fix.native_on_foot_body_align_anchor", "pov");
         g_alignAnchorMode.store(anchor == "neck" ? 0 : (anchor == "clavicles" || anchor == "shoulders") ? 1 : 2, std::memory_order_relaxed);
+        // F49 (TEMPORARY, live): the pose freeze: off, probe (the default: the Animate post-hook measures and writes nothing) or on.
+        const std::string freeze = cfg.getString("fix.native_on_foot_pose_freeze", "probe");
+        pfz::g_mode.store(freeze == "on" ? 2 : freeze == "off" ? 0 : 1, std::memory_order_relaxed);
         // F46 part A: the trims are numbers (the menu's sliders): right/left, height and forward/back, in cm, clamped to +-30. F48: default 0.
         const float trims[3] = {cfg.getFloat("fix.native_on_foot_body_align_trim_right_cm", 0.0f),
                                 cfg.getFloat("fix.native_on_foot_body_align_trim_up_cm", 0.0f),
@@ -6217,6 +6220,332 @@ void installBodyShiftOnce() {
                         why.c_str());
 }
 
+// ---- F49 (TEMPORARY): the pose freeze: the frAnim Animate post-hook ---------------------------------------------------------------
+// The Animate handler 0x741520 (vtable 0x510E370 slot +8; rcx unused, rdx = the job; job[0] = the evaluator X) runs on frAnim worker threads.
+// After the original returns, for the local avatar's X only (pfz::g_localX, the census's plan): the output span ([job+0x28] when [X+0x210] is 0,
+// else [[X+0x1F0]+0xA0] when count-1 < [[X+0x1F0]+0xE0]; 0x43FB740 is never called), the frozen set's rest chain anchored at the hips' animated
+// matrix, the probe's statistics and the span snapshot; with the key on and the frame thread's weight above 0, the frozen set's matrices are
+// written (blended toward the rest chain). Inside the hook: no allocation, no logging, no locks (one try-flag that skips, never waits), every read
+// and write under SEH. The frame thread names each failure once and prints the statistics every 5 s.
+constexpr uintptr_t kPfzAnimateRva = 0x741520;
+const uint8_t kPfzAnimatePrologue[15] = {0x48, 0x83, 0xEC, 0x38, 0x4C, 0x8B, 0xD2, 0x48, 0x83, 0xC2, 0x08, 0x49, 0x8B, 0x42, 0x38};
+constexpr size_t kPfzAnimateStolen = 7;   // sub rsp,0x38; mov r10,rdx (no RIP-relative operand)
+F9Probe g_pfzHook;
+bool g_pfzTried = false, g_pfzArmed = false;   // frame thread only
+std::atomic<float> g_pfzWeight{0.0f};           // the frame thread's blend weight (0 unless the key is on and the gate holds)
+std::atomic<bool> g_pfzWriteDown{false};        // a failed write stands the writes down for the session
+std::atomic<uint32_t> g_pfzFailBits{0};         // failures the hook met; the frame thread names each once
+std::atomic<uint64_t> g_pfzCalls{0}, g_pfzLocalCalls{0}, g_pfzBusySkips{0};
+std::atomic<bool> g_pfzBusy{false};             // the hook's scratch is in use (a second local call skips; never waits)
+std::atomic<float> g_pfzHeadUp{0.0f};           // the local avatar's animated head (joint 44) height, model space, before any write
+std::atomic<uint64_t> g_pfzHeadMs{0};
+enum PfzFail : uint32_t {
+    kPfzFailJob = 1u << 0, kPfzFailPlanTorn = 1u << 1, kPfzFailPlan = 1u << 2, kPfzFailFlags = 1u << 3, kPfzFailPose = 1u << 4,
+    kPfzFailCount = 1u << 5, kPfzFailCap = 1u << 6, kPfzFailBuffer = 1u << 7, kPfzFailRead = 1u << 8, kPfzFailInverse = 1u << 9,
+    kPfzFailWrite = 1u << 10, kPfzFailKinds = 11
+};
+const char* const kPfzFailText[kPfzFailKinds] = {
+    "job[0] was not readable",
+    "the plan was being rewritten (skipped this call)",
+    "the plan does not belong to this X or is empty",
+    "a flag of X (+0x210, +0x212, +0x12C, +0x128) was not readable",
+    "P = [X+8] or its joint count was not readable",
+    "the joint count differs from the plan's (the skeleton changed)",
+    "the joint count is past 0xC0",
+    "no output span: [job+0x28] or [X+0x1F0] is null, or count-1 is not below [Y+0xE0]",
+    "the output span was not readable",
+    "an animated parent matrix is singular (no blend this call)",
+    "a frozen matrix write faulted: the writes stand down for the session"};
+void pfzFail(uint32_t bit) noexcept { g_pfzFailBits.fetch_or(bit, std::memory_order_relaxed); }
+
+// The hook's statistics (one writer at a time: g_pfzBusy), read by the frame thread under the sequence counter; reset on request.
+struct PfzStats {
+    uint64_t calls = 0;
+    uint32_t tid = 0, tidChanges = 0;
+    uint8_t f210 = 0, f212 = 0, f12C = 0;
+    uint32_t f128 = 0, count = 0;
+    uint64_t perBuffer[2] = {};
+    uint32_t n[2] = {};                   // joints 34 and 44: samples
+    double sumMm[2] = {}, minMm[2] = {}, maxMm[2] = {}, sumV[2][3] = {};
+    uint64_t written = 0;
+    float wLast = 0.0f;
+};
+std::atomic<uint32_t> g_pfzStatSeq{0};
+PfzStats g_pfzStats;
+std::atomic<bool> g_pfzStatReset{false};
+// The hook's scratch (under g_pfzBusy).
+pfz::Plan g_pfzPlanCopy;
+alignas(16) float g_pfzAnim[nofoot::kPfzMaxJoints][16];
+alignas(16) float g_pfzChain[nofoot::kPfzMaxF][16];
+
+void pfzAfterAnimate(uint64_t x, uint64_t job) noexcept {
+    bool planOk = false;
+    for (int tries = 0; tries < 2 && !planOk; ++tries) {
+        const uint32_t s1 = pfz::g_planSeq.load(std::memory_order_acquire);
+        if (s1 & 1u) continue;
+        std::memcpy(&g_pfzPlanCopy, &pfz::g_plan, sizeof(g_pfzPlanCopy));
+        std::atomic_thread_fence(std::memory_order_acquire);
+        planOk = pfz::g_planSeq.load(std::memory_order_relaxed) == s1;
+    }
+    if (!planOk) return pfzFail(kPfzFailPlanTorn);
+    const pfz::Plan& pl = g_pfzPlanCopy;
+    if (pl.x != x || pl.count == 0 || pl.count > nofoot::kPfzMaxF) return pfzFail(kPfzFailPlan);
+    uint8_t f210 = 0, f212 = 0, f12C = 0;
+    uint32_t f128 = 0;
+    if (!guardedRead(x + 0x210, &f210, 1) || !guardedRead(x + 0x212, &f212, 1) || !guardedRead(x + 0x12C, &f12C, 1) ||
+        !guardedRead(x + 0x128, &f128, 4))
+        return pfzFail(kPfzFailFlags);
+    uint64_t pose = 0;
+    uint16_t count = 0;
+    if (!guardedRead(x + 8, &pose, 8) || !pose || !guardedRead(pose, &count, 2)) return pfzFail(kPfzFailPose);
+    if (count > nofoot::kPfzMaxJoints) return pfzFail(kPfzFailCap);
+    if (count != pl.joints || count == 0 || pl.anchor >= count) return pfzFail(kPfzFailCount);
+    uint64_t buf = 0;
+    uint32_t which = 0;
+    if (f210 == 0) {
+        if (!guardedRead(job + 0x28, &buf, 8)) buf = 0;
+    } else {
+        which = 1;
+        uint64_t y = 0;
+        uint32_t cap = 0;
+        if (guardedRead(x + 0x1F0, &y, 8) && y && guardedRead(y + 0xE0, &cap, 4) && static_cast<uint32_t>(count) - 1u < cap) {
+            if (!guardedRead(y + 0xA0, &buf, 8)) buf = 0;
+        }
+    }
+    if (!buf) return pfzFail(kPfzFailBuffer);
+    if (!guardedRead(buf, g_pfzAnim, static_cast<size_t>(count) * 64u)) return pfzFail(kPfzFailRead);
+    // The rest chain (w = 1), anchored at the hips' animated matrix.
+    const float* anchorM = g_pfzAnim[pl.anchor];
+    for (uint32_t k = 0; k < pl.count; ++k) {
+        float local[16];
+        nofoot::pfzLocalMatrix(pl.rest[k], local);
+        const float* parentM = pl.parentSlot[k] < 0 ? anchorM : g_pfzChain[pl.parentSlot[k]];
+        nofoot::pfzMul(local, parentM, g_pfzChain[k]);
+    }
+    const uint32_t tid = GetCurrentThreadId();
+    const uint64_t nowMs = GetTickCount64();
+    if (count > 44) {
+        g_pfzHeadUp.store(g_pfzAnim[44][13], std::memory_order_relaxed);
+        g_pfzHeadMs.store(nowMs, std::memory_order_relaxed);
+    }
+    // The span snapshot of joint 34 (as animated); the written copy follows below when the freeze writes.
+    pfz::g_spanSeq.fetch_add(1, std::memory_order_acq_rel);
+    if (count > 34) std::memcpy(pfz::g_span34, g_pfzAnim[34], sizeof(pfz::g_span34));
+    pfz::g_span34WasWritten = false;
+    pfz::g_span34Ms = count > 34 ? nowMs : 0;
+    pfz::g_span34Buffer = which;
+    pfz::g_spanSeq.fetch_add(1, std::memory_order_release);
+    // The probe: joints 34 and 44, animated minus the rest chain (both relative to the anchor's animated matrix, so the anchor cancels), in mm.
+    g_pfzStatSeq.fetch_add(1, std::memory_order_acq_rel);
+    if (g_pfzStatReset.exchange(false, std::memory_order_relaxed)) g_pfzStats = PfzStats{};
+    PfzStats& st = g_pfzStats;
+    ++st.calls;
+    if (st.tid != 0 && st.tid != tid) ++st.tidChanges;
+    st.tid = tid;
+    st.f210 = f210;
+    st.f212 = f212;
+    st.f12C = f12C;
+    st.f128 = f128;
+    st.count = count;
+    ++st.perBuffer[which];
+    const int32_t slots[2] = {pl.slot34, pl.slot44};
+    const uint32_t ids[2] = {34, 44};
+    for (int i = 0; i < 2; ++i) {
+        if (slots[i] < 0 || ids[i] >= count) continue;
+        const float* a = g_pfzAnim[ids[i]];
+        const float* r = g_pfzChain[slots[i]];
+        const double d[3] = {(static_cast<double>(a[12]) - r[12]) * 1000.0, (static_cast<double>(a[13]) - r[13]) * 1000.0,
+                             (static_cast<double>(a[14]) - r[14]) * 1000.0};
+        const double mm = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+        if (!std::isfinite(mm)) continue;
+        if (st.n[i] == 0 || mm < st.minMm[i]) st.minMm[i] = mm;
+        if (st.n[i] == 0 || mm > st.maxMm[i]) st.maxMm[i] = mm;
+        st.sumMm[i] += mm;
+        for (int c = 0; c < 3; ++c) st.sumV[i][c] += d[c];
+        ++st.n[i];
+    }
+    g_pfzStatSeq.fetch_add(1, std::memory_order_release);
+    // ON: the frozen set, blended toward the rest chain by the frame thread's weight. Every matrix is computed before the first write.
+    const float w = g_pfzWeight.load(std::memory_order_relaxed);
+    if (pfz::g_mode.load(std::memory_order_relaxed) != 2 || !(w > 0.0f) || g_pfzWriteDown.load(std::memory_order_relaxed)) return;
+    if (w < 1.0f) {
+        for (uint32_t k = 0; k < pl.count; ++k) {
+            const float* parentAnim = pl.parentSlot[k] < 0 ? anchorM : g_pfzAnim[pl.member[pl.parentSlot[k]]];
+            float inv[16], animLocal[16], rec[8], local[16];
+            if (!nofoot::pfzAffineInverse(parentAnim, inv)) return pfzFail(kPfzFailInverse);
+            nofoot::pfzMul(g_pfzAnim[pl.member[k]], inv, animLocal);
+            nofoot::pfzBlendRecord(animLocal, pl.rest[k], w, rec);
+            nofoot::pfzLocalMatrix(rec, local);
+            const float* parentNew = pl.parentSlot[k] < 0 ? anchorM : g_pfzChain[pl.parentSlot[k]];
+            nofoot::pfzMul(local, parentNew, g_pfzChain[k]);   // parent first: the parent's slot already holds its blended matrix
+        }
+    }
+    for (uint32_t k = 0; k < pl.count; ++k) {
+        if (!guardedWriteFloats16(buf + static_cast<uint64_t>(pl.member[k]) * 64u, g_pfzChain[k])) {
+            g_pfzWriteDown.store(true, std::memory_order_relaxed);
+            return pfzFail(kPfzFailWrite);
+        }
+    }
+    pfz::g_spanSeq.fetch_add(1, std::memory_order_acq_rel);
+    if (pl.slot34 >= 0) {
+        std::memcpy(pfz::g_span34Written, g_pfzChain[pl.slot34], sizeof(pfz::g_span34Written));
+        pfz::g_span34WasWritten = true;
+    }
+    pfz::g_spanSeq.fetch_add(1, std::memory_order_release);
+    g_pfzStatSeq.fetch_add(1, std::memory_order_acq_rel);
+    ++g_pfzStats.written;
+    g_pfzStats.wLast = w;
+    g_pfzStatSeq.fetch_add(1, std::memory_order_release);
+}
+
+uint64_t __fastcall pfzAnimateHooked(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t s5, uint64_t s6, uint64_t s7, uint64_t s8) {
+    const F35Fn original = reinterpret_cast<F35Fn>(g_pfzHook.original);
+    if (!original) return 0;
+    const uint64_t r = original(a1, a2, a3, a4, s5, s6, s7, s8);   // the original first, with its arguments
+    g_pfzCalls.fetch_add(1, std::memory_order_relaxed);
+    const uint64_t lx = pfz::g_localX.load(std::memory_order_acquire);
+    if (!lx || !a2 || pfz::g_mode.load(std::memory_order_relaxed) == 0) return r;
+    uint64_t x = 0;
+    if (!guardedRead(a2, &x, 8)) {
+        pfzFail(kPfzFailJob);
+        return r;
+    }
+    if (x != lx) return r;   // only the local avatar's evaluator
+    g_pfzLocalCalls.fetch_add(1, std::memory_order_relaxed);
+    if (g_pfzBusy.exchange(true, std::memory_order_acquire)) {
+        g_pfzBusySkips.fetch_add(1, std::memory_order_relaxed);
+        return r;
+    }
+    pfzAfterAnimate(x, a2);
+    g_pfzBusy.store(false, std::memory_order_release);
+    return r;
+}
+
+// Frame thread, once (VR): the prologue bytes verified against the loaded image; a mismatch refuses with a line and installs nothing.
+void pfzInstallOnce() {
+    if (g_pfzTried) return;
+    g_pfzTried = true;
+    if (!runtimeVrProfile()) return;
+    const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    const char* peWhy = nullptr;
+    if (!base || !checkIdentity(base, &peWhy)) {
+        Log::get().note("native on foot pose freeze: NOT installed -- identity mismatch (%s); the game was not touched.", peWhy ? peWhy : "no module");
+        return;
+    }
+    const F9ProbeSpec spec{"native-on-foot-pose-freeze", kPfzAnimateRva, kPfzAnimatePrologue, sizeof(kPfzAnimatePrologue), kPfzAnimateStolen,
+                           reinterpret_cast<void*>(&pfzAnimateHooked), "F49 pose freeze"};
+    size_t stolen = 0;
+    std::string why;
+    if (installF9ProbeInto(g_pfzHook, spec, base, &stolen, &why)) {
+        g_pfzArmed = true;
+        Log::get().note("native on foot pose freeze: Animate post-hook installed at EliteDangerous64.exe+0x741520, stolen=%zu bytes, prologue %zu bytes "
+                        "verified (the local avatar's X only; writes only with fix.native_on_foot_pose_freeze = on)", stolen, sizeof(kPfzAnimatePrologue));
+    } else {
+        Log::get().note("native on foot pose freeze: NOT installed at EliteDangerous64.exe+0x741520 -- %s. The game was not touched.", why.c_str());
+    }
+}
+
+nofoot::PfzHeadRest g_pfzRest;   // frame thread only
+nofoot::PfzBlend g_pfzBlend;
+uint64_t g_pfzLastMs = 0, g_pfzLineMs = 0;
+uint32_t g_pfzFailNamed = 0;
+const char* g_pfzWhyLast = "(none)";
+uint64_t g_pfzCallsLast = 0, g_pfzLocalLast = 0, g_pfzBusyLast = 0;
+
+void pfzTick(uint64_t now) {
+    const int mode = pfz::g_mode.load(std::memory_order_relaxed);
+    static int lastMode = -1;
+    static const char* const kModeNames[3] = {"off", "probe", "on"};
+    if (mode != lastMode) {
+        Log::get().note("native on foot pose freeze: fix.native_on_foot_pose_freeze = %s (was %s)%s", kModeNames[mode],
+                        lastMode < 0 ? "none" : kModeNames[lastMode],
+                        mode == 2 ? "; writes while standing idle (not ADS, the animated head steady for 1 s), blended over 0.3 s" : "; nothing is written");
+        lastMode = mode;
+    }
+    if (mode != 0) pfzInstallOnce();
+    if (g_pfzArmed) g_pfzHook.gate.store(mode != 0 ? 1u : 0u, std::memory_order_release);
+    if (!nativeOnFootActive()) pfz::g_localX.store(0, std::memory_order_release);   // the census sets it again (it runs only while active)
+    // The gate and the blend (the weight is 0 unless the key is on).
+    const double dt = g_pfzLastMs && now > g_pfzLastMs ? std::min(0.1, static_cast<double>(now - g_pfzLastMs) / 1000.0) : 0.0;
+    g_pfzLastMs = now;
+    const bool ads = journalAds();
+    const uint64_t headMs = g_pfzHeadMs.load(std::memory_order_relaxed);
+    const bool headFresh = headMs != 0 && now >= headMs && now - headMs < 500;
+    bool resting = false;
+    if (headFresh) resting = g_pfzRest.step(now, static_cast<double>(g_pfzHeadUp.load(std::memory_order_relaxed)), ads);
+    else g_pfzRest = nofoot::PfzHeadRest{};
+    const char* why = mode != 2 ? "the key is not on" : !nativeOnFootActive() ? "not native stereo on foot"
+                    : g_pfzWriteDown.load(std::memory_order_relaxed) ? "the writes stood down" : ads ? "aiming down sights"
+                    : !headFresh ? "no animated head from the hook in 500 ms" : !resting ? "the animated head is not steady for 1 s" : nullptr;
+    g_pfzBlend.step(why == nullptr, dt);
+    if (mode != 2) g_pfzBlend = nofoot::PfzBlend{};   // every write path is behind the key: off or probe writes nothing at once
+    g_pfzWeight.store(g_pfzBlend.w, std::memory_order_relaxed);
+    if (mode == 2) {
+        const char* whyNow = why ? why : "freezing";
+        if (std::strcmp(whyNow, g_pfzWhyLast) != 0) {
+            Log::get().note("native on foot pose freeze: %s%s (weight %.2f)", why ? "held: " : "freezing: standing idle", why ? why : "",
+                            static_cast<double>(g_pfzBlend.w));
+            g_pfzWhyLast = whyNow;
+        }
+    } else {
+        g_pfzWhyLast = "(none)";
+    }
+    // Each failure the hook met, named once.
+    const uint32_t bits = g_pfzFailBits.load(std::memory_order_relaxed) & ~g_pfzFailNamed;
+    for (uint32_t i = 0; i < kPfzFailKinds; ++i) {
+        if (!(bits & (1u << i))) continue;
+        g_pfzFailNamed |= 1u << i;
+        Log::get().note("native on foot pose freeze: the hook refused a call: %s (said once)", kPfzFailText[i]);
+    }
+    // Every 5 s while the hook is in and native stereo is on foot: the statistics.
+    if (!g_pfzArmed || mode == 0 || !nativeOnFootActive()) return;
+    if (g_pfzLineMs == 0) g_pfzLineMs = now;
+    if (now - g_pfzLineMs < 5000) return;
+    g_pfzLineMs = now;
+    PfzStats st;
+    bool got = false;
+    for (int tries = 0; tries < 8 && !got; ++tries) {
+        const uint32_t s1 = g_pfzStatSeq.load(std::memory_order_acquire);
+        if (s1 & 1u) continue;
+        st = g_pfzStats;
+        std::atomic_thread_fence(std::memory_order_acquire);
+        got = g_pfzStatSeq.load(std::memory_order_relaxed) == s1;
+    }
+    g_pfzStatReset.store(true, std::memory_order_relaxed);
+    const uint64_t calls = g_pfzCalls.load(std::memory_order_relaxed), local = g_pfzLocalCalls.load(std::memory_order_relaxed),
+                   busy = g_pfzBusySkips.load(std::memory_order_relaxed);
+    const uint64_t dCalls = calls - g_pfzCallsLast, dLocal = local - g_pfzLocalLast, dBusy = busy - g_pfzBusyLast;
+    g_pfzCallsLast = calls;
+    g_pfzLocalLast = local;
+    g_pfzBusyLast = busy;
+    if (!got || st.calls == 0) {
+        Log::get().note("native on foot pose freeze (F49, %s): %llu Animate calls in 5 s, %llu for the local X %016llX (%llu skipped busy); %s",
+                        kModeNames[mode], static_cast<unsigned long long>(dCalls), static_cast<unsigned long long>(dLocal),
+                        static_cast<unsigned long long>(pfz::g_localX.load(std::memory_order_relaxed)), static_cast<unsigned long long>(dBusy),
+                        !got ? "the statistics were being written (retried next time)" : "no measured call for the local X");
+        return;
+    }
+    char joint[2][200] = {};
+    for (int i = 0; i < 2; ++i) {
+        if (st.n[i] == 0) {
+            std::snprintf(joint[i], sizeof(joint[i]), "joint %d: not measured (not in F or past the count)", i ? 44 : 34);
+            continue;
+        }
+        const double n = static_cast<double>(st.n[i]);
+        std::snprintf(joint[i], sizeof(joint[i]), "joint %d minus the rest chain: mean %.1f mm (min %.1f, max %.1f; mean vector %.1f,%.1f,%.1f mm)",
+                      i ? 44 : 34, st.sumMm[i] / n, st.minMm[i], st.maxMm[i], st.sumV[i][0] / n, st.sumV[i][1] / n, st.sumV[i][2] / n);
+    }
+    Log::get().note("native on foot pose freeze (F49, %s): %llu Animate calls in 5 s, %llu for the local X %016llX (%llu measured, %llu skipped busy); "
+                    "thread %u (%u thread changes); [X+0x210]=%u [X+0x12C]=%u [X+0x128]=0x%08X [X+0x212]=%u; output [job+0x28] %llu calls, "
+                    "[[X+0x1F0]+0xA0] %llu; count %u; %s; %s; weight %.2f, frames written %llu (last weight %.2f)",
+                    kModeNames[mode], static_cast<unsigned long long>(dCalls), static_cast<unsigned long long>(dLocal),
+                    static_cast<unsigned long long>(pfz::g_localX.load(std::memory_order_relaxed)), static_cast<unsigned long long>(st.calls),
+                    static_cast<unsigned long long>(dBusy), st.tid, st.tidChanges, static_cast<unsigned>(st.f210), static_cast<unsigned>(st.f12C),
+                    st.f128, static_cast<unsigned>(st.f212), static_cast<unsigned long long>(st.perBuffer[0]),
+                    static_cast<unsigned long long>(st.perBuffer[1]), st.count, joint[0], joint[1], static_cast<double>(g_pfzBlend.w),
+                    static_cast<unsigned long long>(st.written), static_cast<double>(st.wLast));
+}
+
 void installEyeProbeOnce() {
     if (g_eyeTried) return;
     g_eyeTried = true;
@@ -8806,6 +9135,7 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
     installF14ProbesOnce();
     installEyeProbeOnce();   // F18 (TEMPORARY): probe P1, read only
     installBodyShiftOnce();  // F35 (TEMPORARY): the body shift's post-hook on the submit job (body mode only)
+    pfzTick(now);            // F49 (TEMPORARY): the pose freeze's Animate post-hook (installed unless the key is off), its gate, blend and lines
     f14FrameTick(now);
     {
         const float spreadNow = g_hudSpread.load(std::memory_order_relaxed);

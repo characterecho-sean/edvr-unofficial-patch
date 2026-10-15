@@ -23,6 +23,7 @@
 #include <cstring>
 
 #include "explorer_cam_core.h"   // ecm::kExpectedTimestamp and ecm::kExpectedImageSize: build 332841's PE identity, shared with the other build-keyed hooks
+#include "explorer_cam_follow_core.h"   // F49: ecm::quatRows, the pose's rotation rows (the pose freeze's rest locals)
 
 namespace edvr {
 namespace nofoot {
@@ -357,5 +358,288 @@ inline void standingApply(const double src[3], double standingUp, double out[3])
     out[1] = standingUp;
     out[2] = src[2];
 }
+
+// ---- F49 (TEMPORARY): the pose freeze, pure half -------------------------------------------------------------------------------
+// The frAnim Animate handler writes one 64-byte row-vector model matrix per joint: rows 0..2 the rotation (w 0), row 3 the position (w 1), and
+// out[j] = local[j] x out[parent(j)]. The rest local of a joint is the pose's 32-byte record (position vec4, then the quaternion) as R(q) with the
+// position in row 3, R(q) laid out as ecm::quatRows. The frozen set F is the torso-side child subtree of the lowest common ancestor of the neck and
+// the left foot (the hips); each member's matrix is its local (rest, or blended toward rest) times its parent's new matrix, anchored at the
+// animated matrix of the hips.
+constexpr uint32_t kPfzMaxF = 128;           // the frozen set's member cap
+constexpr uint32_t kPfzMaxJoints = 0xC0;     // the Animate output's joint cap (the span reader's min(count, 0xC0))
+constexpr double kPfzBlendSec = 0.3;         // the entry and exit blend
+
+// The rest local matrix of a pose record (pos vec4 at +0, quaternion at +0x10).
+inline void pfzLocalMatrix(const float rec[8], float out[16]) noexcept {
+    float r[9];
+    ecm::quatRows(rec + 4, r);
+    for (int i = 0; i < 3; ++i) {
+        out[i * 4 + 0] = r[i * 3 + 0];
+        out[i * 4 + 1] = r[i * 3 + 1];
+        out[i * 4 + 2] = r[i * 3 + 2];
+        out[i * 4 + 3] = 0.0f;
+    }
+    out[12] = rec[0];
+    out[13] = rec[1];
+    out[14] = rec[2];
+    out[15] = 1.0f;
+}
+// out = a x b (row-vector 4x4, row-major). out may not alias a or b.
+inline void pfzMul(const float a[16], const float b[16], float out[16]) noexcept {
+    for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 4; ++j) {
+            float s = 0.0f;
+            for (int k = 0; k < 4; ++k) s += a[i * 4 + k] * b[k * 4 + j];
+            out[i * 4 + j] = s;
+        }
+}
+// The inverse of an affine row-vector matrix (rotation and scale in the upper 3x3, position in row 3). False when the 3x3 is singular.
+inline bool pfzAffineInverse(const float m[16], float out[16]) noexcept {
+    const double a = m[0], b = m[1], c = m[2], d = m[4], e = m[5], f = m[6], g = m[8], h = m[9], i = m[10];
+    const double A = e * i - f * h, B = -(d * i - f * g), C = d * h - e * g;
+    const double det = a * A + b * B + c * C;
+    if (!(std::fabs(det) > 1e-12)) return false;
+    const double inv[9] = {A / det, -(b * i - c * h) / det, (b * f - c * e) / det,
+                           B / det, (a * i - c * g) / det, -(a * f - c * d) / det,
+                           C / det, -(a * h - b * g) / det, (a * e - b * d) / det};
+    for (int r = 0; r < 3; ++r) {
+        for (int k = 0; k < 3; ++k) out[r * 4 + k] = static_cast<float>(inv[r * 3 + k]);
+        out[r * 4 + 3] = 0.0f;
+    }
+    for (int k = 0; k < 3; ++k)   // pos' = -t x inv(A)
+        out[12 + k] = static_cast<float>(-(m[12] * inv[0 * 3 + k] + m[13] * inv[1 * 3 + k] + m[14] * inv[2 * 3 + k]));
+    out[15] = 1.0f;
+    return true;
+}
+// The quaternion (x, y, z, w) of a rotation in the upper 3x3 (the inverse of ecm::quatRows; each row is normalised first, so a uniform scale drops out).
+inline void pfzQuatFromMatrix(const float m[16], float q[4]) noexcept {
+    double R[3][3];
+    for (int i = 0; i < 3; ++i) {
+        const double len = std::sqrt(static_cast<double>(m[i * 4]) * m[i * 4] + static_cast<double>(m[i * 4 + 1]) * m[i * 4 + 1] +
+                                     static_cast<double>(m[i * 4 + 2]) * m[i * 4 + 2]);
+        const double k = len > 1e-9 ? 1.0 / len : 1.0;
+        for (int j = 0; j < 3; ++j) R[i][j] = m[i * 4 + j] * k;
+    }
+    double x, y, z, w;
+    const double tr = R[0][0] + R[1][1] + R[2][2];
+    if (tr > 0.0) {
+        const double s = std::sqrt(tr + 1.0) * 2.0;   // 4w
+        w = 0.25 * s;
+        x = (R[1][2] - R[2][1]) / s;
+        y = (R[2][0] - R[0][2]) / s;
+        z = (R[0][1] - R[1][0]) / s;
+    } else if (R[0][0] > R[1][1] && R[0][0] > R[2][2]) {
+        const double s = std::sqrt(1.0 + R[0][0] - R[1][1] - R[2][2]) * 2.0;   // 4x
+        x = 0.25 * s;
+        w = (R[1][2] - R[2][1]) / s;
+        y = (R[0][1] + R[1][0]) / s;
+        z = (R[0][2] + R[2][0]) / s;
+    } else if (R[1][1] > R[2][2]) {
+        const double s = std::sqrt(1.0 + R[1][1] - R[0][0] - R[2][2]) * 2.0;   // 4y
+        y = 0.25 * s;
+        w = (R[2][0] - R[0][2]) / s;
+        x = (R[0][1] + R[1][0]) / s;
+        z = (R[1][2] + R[2][1]) / s;
+    } else {
+        const double s = std::sqrt(1.0 + R[2][2] - R[0][0] - R[1][1]) * 2.0;   // 4z
+        z = 0.25 * s;
+        w = (R[0][1] - R[1][0]) / s;
+        x = (R[0][2] + R[2][0]) / s;
+        y = (R[1][2] + R[2][1]) / s;
+    }
+    const double n = std::sqrt(x * x + y * y + z * z + w * w);
+    const double k = n > 1e-12 ? 1.0 / n : 1.0;
+    q[0] = static_cast<float>(x * k);
+    q[1] = static_cast<float>(y * k);
+    q[2] = static_cast<float>(z * k);
+    q[3] = static_cast<float>(w * k);
+}
+// The local record (pos vec4, quaternion) between an animated local matrix and a rest record: w 0 the animated one, w 1 the rest one exactly
+// (the quaternion by the short-arc normalised lerp, the position by lerp).
+inline void pfzBlendRecord(const float animLocal[16], const float rest[8], float w, float out[8]) noexcept {
+    if (w >= 1.0f) {
+        for (int i = 0; i < 8; ++i) out[i] = rest[i];
+        return;
+    }
+    float qa[4];
+    pfzQuatFromMatrix(animLocal, qa);
+    const float* qr = rest + 4;
+    const float dot = qa[0] * qr[0] + qa[1] * qr[1] + qa[2] * qr[2] + qa[3] * qr[3];
+    const float sr = dot < 0.0f ? -1.0f : 1.0f;
+    float q[4], n = 0.0f;
+    for (int i = 0; i < 4; ++i) {
+        q[i] = (1.0f - w) * qa[i] + w * sr * qr[i];
+        n += q[i] * q[i];
+    }
+    n = n > 1e-12f ? 1.0f / std::sqrt(n) : 1.0f;
+    for (int i = 0; i < 3; ++i) out[i] = (1.0f - w) * animLocal[12 + i] + w * rest[i];
+    out[3] = 1.0f;
+    for (int i = 0; i < 4; ++i) out[4 + i] = q[i] * n;
+}
+// The rest model matrix of joint idx: its rest local times every ancestor's (the uncached path 0xFDE0D0 computes). False on a bad index or a cycle.
+inline bool pfzRestModel(const float* locals, const uint16_t* parents, uint32_t joints, uint32_t idx, float out[16]) noexcept {
+    if (idx >= joints) return false;
+    pfzLocalMatrix(locals + idx * ecm::kJointFloats, out);
+    uint32_t steps = 0;
+    for (uint32_t a = parents[idx]; a != 0xFFFFu; a = parents[a]) {
+        if (a >= joints || ++steps > joints) return false;
+        float pm[16], next[16];
+        pfzLocalMatrix(locals + a * ecm::kJointFloats, pm);
+        pfzMul(out, pm, next);
+        std::memcpy(out, next, sizeof(next));
+    }
+    return true;
+}
+
+// The frozen set. why: 0 ok, 1 bad input (no joints, neck out of range, too many joints), 2 a parent out of range or a cycle, 3 the foot shares no
+// ancestor with the neck, 4 the anchor is the neck itself, 5 F has more than kPfzMaxF members. footResolved false: the foot was not given and the
+// anchor is the root's child on the neck's path.
+struct PfzFrozenSet {
+    uint32_t why = 1;
+    uint32_t anchor = 0xFFFFu, child = 0xFFFFu, count = 0;
+    bool footResolved = false;
+    uint16_t member[kPfzMaxF] = {};      // parent first
+    int16_t parentSlot[kPfzMaxF] = {};   // the member slot of each member's parent; -1 = the anchor
+    int slotOf(uint32_t j) const noexcept {
+        for (uint32_t k = 0; k < count; ++k)
+            if (member[k] == j) return static_cast<int>(k);
+        return -1;
+    }
+};
+inline const char* pfzWhyText(uint32_t why) noexcept {
+    switch (why) {
+        case 0: return "ok";
+        case 1: return "no joints, the neck out of range or more than 0xC0 joints";
+        case 2: return "a parent out of range or a cycle";
+        case 3: return "the foot shares no ancestor with the neck";
+        case 4: return "the anchor is the neck itself";
+        case 5: return "the frozen set has more than 128 members";
+        default: return "?";
+    }
+}
+inline PfzFrozenSet pfzFrozenSet(const uint16_t* parents, uint32_t joints, uint32_t neck, uint32_t foot) noexcept {
+    PfzFrozenSet s;
+    if (joints == 0 || joints > kPfzMaxJoints || neck >= joints) return s;
+    // The neck's path to the root (neck first).
+    uint16_t path[kPfzMaxJoints];
+    uint32_t n = 0;
+    for (uint32_t j = neck; j != 0xFFFFu; j = parents[j]) {
+        if (j >= joints || n >= joints) {
+            s.why = 2;
+            return s;
+        }
+        path[n++] = static_cast<uint16_t>(j);
+    }
+    auto onPath = [&](uint32_t j) noexcept {
+        for (uint32_t k = 0; k < n; ++k)
+            if (path[k] == j) return static_cast<int>(k);
+        return -1;
+    };
+    int at = -1;
+    if (foot < joints) {
+        s.footResolved = true;
+        uint32_t steps = 0;
+        for (uint32_t j = foot; j != 0xFFFFu; j = parents[j]) {
+            if (j >= joints || ++steps > joints) {
+                s.why = 2;
+                return s;
+            }
+            at = onPath(j);
+            if (at >= 0) break;
+        }
+        if (at < 0) {
+            s.why = 3;
+            return s;
+        }
+    } else {
+        at = n >= 2 ? static_cast<int>(n - 2) : -1;   // the root's child on the neck's path
+        if (at < 0) {
+            s.why = 4;
+            return s;
+        }
+    }
+    if (at == 0) {
+        s.why = 4;
+        return s;
+    }
+    s.anchor = path[at];
+    s.child = path[at - 1];
+    // Members: every joint whose chain reaches the child; the depth below the child orders them parent first.
+    uint32_t depth[kPfzMaxJoints];
+    for (uint32_t j = 0; j < joints; ++j) {
+        depth[j] = 0xFFFFFFFFu;
+        uint32_t d = 0;
+        for (uint32_t a = j; a != 0xFFFFu; a = parents[a]) {
+            if (a >= joints || d > joints) break;
+            if (a == s.child) {
+                depth[j] = d;
+                break;
+            }
+            ++d;
+        }
+    }
+    uint32_t count = 0;
+    for (uint32_t d = 0; d <= joints; ++d)
+        for (uint32_t j = 0; j < joints; ++j) {
+            if (depth[j] != d) continue;
+            if (count >= kPfzMaxF) {
+                s.why = 5;
+                s.count = 0;
+                return s;
+            }
+            s.member[count++] = static_cast<uint16_t>(j);
+        }
+    s.count = count;
+    for (uint32_t k = 0; k < count; ++k) {
+        const uint32_t p = parents[s.member[k]];
+        s.parentSlot[k] = p == s.anchor ? static_cast<int16_t>(-1) : static_cast<int16_t>(s.slotOf(p));
+    }
+    s.why = 0;
+    return s;
+}
+
+// The entry and exit blend: the weight moves toward 1 while wanted and toward 0 otherwise, over kPfzBlendSec.
+struct PfzBlend {
+    float w = 0.0f;
+    void step(bool want, double dtSec) noexcept {
+        const double d = dtSec > 0.0 ? dtSec / kPfzBlendSec : 0.0;
+        double v = static_cast<double>(w) + (want ? d : -d);
+        if (v < 0.0) v = 0.0;
+        if (v > 1.0) v = 1.0;
+        w = static_cast<float>(v);
+    }
+};
+// The F48 rest test on the animated head: not ADS, and the head's height within kSteadyM for kRestMs. resting holds until a sample leaves the band
+// (or ADS); then the window starts again.
+struct PfzHeadRest {
+    static constexpr double kSteadyM = 0.02;
+    static constexpr uint64_t kRestMs = 1000;
+    bool resting = false;
+    bool have = false;
+    uint64_t winStart = 0;
+    double lo = 0.0, hi = 0.0;
+    bool step(uint64_t now, double headUp, bool ads) noexcept {
+        if (ads) {
+            resting = have = false;
+            return false;
+        }
+        if (!have) {
+            have = true;
+            winStart = now;
+            lo = hi = headUp;
+            return resting = false;
+        }
+        const double nlo = headUp < lo ? headUp : lo, nhi = headUp > hi ? headUp : hi;
+        if (nhi - nlo > kSteadyM) {
+            winStart = now;
+            lo = hi = headUp;
+            return resting = false;
+        }
+        lo = nlo;
+        hi = nhi;
+        resting = now - winStart >= kRestMs;
+        return resting;
+    }
+};
 }  // namespace nofoot
 }  // namespace edvr
