@@ -77,6 +77,8 @@ std::atomic<uint32_t> g_lookGameFrame{0};      // processor calls so far: the ga
 std::atomic<int> g_lookSmoothMs{150};          // fix.native_on_foot_look_to_aim_smoothing_ms, live (0..1000)
 std::atomic<int> g_lookSign{1};               // fix.native_on_foot_look_to_aim_yaw_sign (temporary, F24 default -1): 1 or -1, on the controller's input only
 std::atomic<int> g_lookDelay{0};
+std::atomic<bool> g_worldMarkersFixed{true};   // F25: fix.native_on_foot_world_markers = fixed (default) | game, live: key 10 is never touched
+uint64_t g_worldLineMs = 0;                    // frame thread and game thread: the 5 s line (the post hook writes it, once per 5 s)
 // F25 (TEMPORARY A/B): the visor param block's translation source floats (.bss, normally 0, no writer in the exe): the values the key sets.
 constexpr uintptr_t kVisorShiftRva = 0x5FCA8B0;   // x at +0, y at +4
 std::atomic<bool> g_visorShiftWant{false};
@@ -546,6 +548,8 @@ void readKey() {
         g_reticleHeadLast = reticleHead;
         g_reticleGameLast = reticleGame;
     }
+    // F25 (TEMPORARY): the world markers (the waypoint and the others, not key 10): fixed takes the head out of their placement, game leaves them as the game has them.
+    g_worldMarkersFixed.store(cfg.getString("fix.native_on_foot_world_markers", "fixed") != "game", std::memory_order_relaxed);
     // F25 (TEMPORARY A/B): fix.native_on_foot_visor_shift = off | x,y. Live.
     {
         const std::string vs = cfg.getString("fix.native_on_foot_visor_shift", "off");
@@ -2683,7 +2687,61 @@ void __fastcall reticleIndicatorProbe(void* instance, void* node) noexcept {
     if (okPos) std::memcpy(row->pos, pos, sizeof(pos));
 }
 
-// The stub: push rdx; sub rsp,0x20; mov rdx,rsi; mov rax,probe; call rax; add rsp,0x20; pop rdx; mov rcx,[rsi+0x60]; mov rax,real; jmp rax.
+// F25 (TEMPORARY): the post-call of the marker stub, for every marker except key 10 (the reticle, which keeps its own placement). The game's call
+// writes the instance's translation t (+0x40) from the marker's world position, which already includes the head (the probe-3 RE: its yaw is -C's).
+// The list-B pipeline then applies C again, so the marker is head-locked. Writing t' = (t - row3(C)) . R^T, the exact inverse of that forward map
+// (p . C for a row-vector C: the same map the reticle head mode writes, t' = d*row2 + row3), cancels the second application. Read the node's key
+// and its instance (node+0x60) after the real call; nothing else is written.
+void __fastcall reticleWorldPost(void* node) noexcept {
+    const uintptr_t na = reinterpret_cast<uintptr_t>(node);
+    uintptr_t ia = 0;
+    uint32_t key = 0;
+    if (!na || !guardedRead(na + 0x60, &ia, 8) || !ia || !guardedRead(na + 0x20, &key, 4)) return;
+    if (key == 10) return;
+    if (!g_worldMarkersFixed.load(std::memory_order_relaxed) || !nativeOnFootActive()) return;
+    float C[16] = {};
+    bool havePose = false;
+    {
+        F9Lock lock;
+        if (g_followHead.load(std::memory_order_relaxed) && g_f13Smooth.valid) {
+            std::memcpy(C, g_f13Smooth.C, sizeof(C));
+            havePose = true;
+        }
+    }
+    const uint64_t now = GetTickCount64();
+    if (!havePose) {
+        if (now - g_worldLineMs >= 5000 || g_worldLineMs == 0) {
+            g_worldLineMs = now;
+            Log::get().note("native on foot world markers: fixed, but no head pose (the HUD follow is body or the head is not read); markers are left as the game places them");
+        }
+        return;
+    }
+    float t[3] = {};
+    if (!guardedRead(ia + 0x40, t, sizeof(t))) return;
+    float tp[3] = {};
+    for (size_t j = 0; j < 3; ++j) {
+        float acc = 0.0f;
+        for (size_t i = 0; i < 3; ++i) acc += (t[i] - C[12 + i]) * C[4 * j + i];
+        tp[j] = acc;
+    }
+    if (!guardedWriteFloat(ia + 0x40, tp[0]) || !guardedWriteFloat(ia + 0x44, tp[1]) || !guardedWriteFloat(ia + 0x48, tp[2])) {
+        if (now - g_worldLineMs >= 5000 || g_worldLineMs == 0) {
+            g_worldLineMs = now;
+            Log::get().note("native on foot world markers: key %u: the instance could not be written; left as the game placed it", static_cast<unsigned>(key));
+        }
+        return;
+    }
+    if (now - g_worldLineMs >= 5000 || g_worldLineMs == 0) {
+        g_worldLineMs = now;
+        const float yawC = static_cast<float>(std::atan2(static_cast<double>(C[8]), static_cast<double>(C[10])) * 180.0 / 3.14159265358979323846);
+        Log::get().note("native on foot world markers: key %u: t (game) (%.3f, %.3f, %.3f) -> t' (written) (%.3f, %.3f, %.3f); C yaw %.2f deg (row 2 x, z)",
+                        static_cast<unsigned>(key), static_cast<double>(t[0]), static_cast<double>(t[1]), static_cast<double>(t[2]),
+                        static_cast<double>(tp[0]), static_cast<double>(tp[1]), static_cast<double>(tp[2]), static_cast<double>(yawC));
+    }
+}
+
+// The stub: push rdx; sub rsp,0x20; mov rdx,rsi; mov rax,probe; call rax; add rsp,0x20; pop rdx; mov rcx,[rsi+0x60]; call real; post; ret
+// (F25: the real call is now a call, so the post-call can write the instance; rax is kept across both.)
 // The probe gets rcx (the instance, as the game passed it) and rdx = rsi (the node); rdx is preserved for the real function.
 constexpr uintptr_t kReticleCallRva = 0x1A15644;      // the 5-byte call E8 rel32
 constexpr uintptr_t kReticleLoadRva = 0x1A15640;      // mov rcx,[rsi+0x60] (48 8B 4E 60), the 4 bytes before the call
@@ -2755,13 +2813,21 @@ void reticleTick(bool want, const char* reason) {
             const uint64_t probe = reinterpret_cast<uint64_t>(&reticleIndicatorProbe);
             std::memcpy(p + i, &probe, 8);
             i += 8;
-            const uint8_t mid[] = {0xFF, 0xD0, 0x48, 0x83, 0xC4, 0x20, 0x5A, 0x48, 0x8B, 0x4E, 0x60, 0x48, 0xB8};
+            // F25: call probe; add rsp,0x20; pop rdx; mov rcx,[rsi+0x60]; sub rsp,0x28; mov rax,real; call rax; add rsp,0x28;
+            // push rax; sub rsp,0x20; mov rcx,rsi; mov rax,post; call rax; add rsp,0x20; pop rax; ret.
+            const uint8_t mid[] = {0xFF, 0xD0, 0x48, 0x83, 0xC4, 0x20, 0x5A, 0x48, 0x8B, 0x4E, 0x60, 0x48, 0x83, 0xEC, 0x28, 0x48, 0xB8};
             std::memcpy(p + i, mid, sizeof(mid));
             i += sizeof(mid);
             const uint64_t real = g_base + kReticleFnRva;
             std::memcpy(p + i, &real, 8);
             i += 8;
-            const uint8_t tail[] = {0xFF, 0xE0};
+            const uint8_t afterReal[] = {0xFF, 0xD0, 0x48, 0x83, 0xC4, 0x28, 0x50, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x89, 0xF1, 0x48, 0xB8};
+            std::memcpy(p + i, afterReal, sizeof(afterReal));
+            i += sizeof(afterReal);
+            const uint64_t post = reinterpret_cast<uint64_t>(&reticleWorldPost);
+            std::memcpy(p + i, &post, 8);
+            i += 8;
+            const uint8_t tail[] = {0xFF, 0xD0, 0x48, 0x83, 0xC4, 0x20, 0x58, 0xC3};
             std::memcpy(p + i, tail, sizeof(tail));
             i += sizeof(tail);
             DWORD old = 0;
