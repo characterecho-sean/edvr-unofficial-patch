@@ -18,8 +18,10 @@ cbuffer Mono : register(b0) {
     uint4 debug; // x/y: refusal census/view, z: late overlay. w: flat HDR TAA has a conservative alternate-camera
                  // fragment union at t13 and output-domain history at t14/u7 (bit 0).
                  // Bit 1: qualified flat SDK foreground map at t15. Bit 2 (value 4): the VR on-foot source's target 7 is bound at t17 (F2; only
-                 // the VR world route sets it, never the flat profile). Zero leaves the old shader path unchanged.
+                 // the VR world route sets it, never the flat profile). Bit 3 (value 8): the flat profile's planet records are bound at
+                 // t18 and the celestial tangents below are set (celestialBefore; the VR world route never sets it). Zero leaves the old shader path unchanged.
     float4 foregroundDepth; // SDK common-near/world-near scale, only read with debug.w bit 1
+    float4 celestialTanNow; float4 celestialTanPrev; // the planet records' tangents (l, r, b, t) now and last frame: only read with debug.w bit 3
 };
 cbuffer EngineNow : register(b1) { float4 EN[277]; };   // EN[276].x: the frame stamp
 cbuffer EngineBefore : register(b2) { float4 EB[276]; };
@@ -42,6 +44,9 @@ Texture2D<float> HistoryOutputDomain : register(t14);    // TAA only: last outpu
 Texture2D<float4> FlatForegroundMotion : register(t15); // SDK prep only: exact final foreground motion and canonical depth
 Texture2D<float4> SkinE : register(t17);                // prep only, bound when debug.w bit 2: the VR on-foot source's target 7 (F2): xyz a skinned character's previous - current
                                                          // position in centimetres, w 1 valid / 0 none, at the slot target's size; read at the pixel's own texel
+// Planet patch motion, flat (celestial_motion.h): one record per body, the engine-motion core's CelestialRecord. Prep only, bound at t18 with
+// debug.w bit 3.
+StructuredBuffer<CelestialRecord> CelestialRecords : register(t18); // prep only, bound with debug.w bit 3
 Texture2D<float4> OverlayColor : register(t16);         // HDR finish only, bound in overlay frames: the raw H with the protected late overlays
                                                          // drawn (t0 is then the CLEAN H, the image the backend was handed)
 SamplerState LinearClamp : register(s0);
@@ -95,6 +100,30 @@ bool cameraBefore(float2 uv, float depth, out float4 before) {
     position+=(now[5].xyz-old[5].xyz)*iz;
     before=position.x*o0+position.y*o1+position.z*o2+iz*o3;
     return before.w>0 && all(isfinite(before));
+}
+)HLSL"
+R"HLSL(
+// Planet patch motion (celestial_motion.h; docs/terrain-motion-dispatch-cost-2026-09-17.md). 0: the pixel is in no body's
+// volume (the camera term stands); 1: before holds the body's own motion, cameraBefore's convention; 2: it is in a body
+// but last frame's point is not in front of the camera (no history). The lookup is the engine-motion core's celestialLookup, the one VR's
+// celestialPixel runs.
+uint celestialBefore(float2 rawUv, float depth, out float4 before) {
+    before=0;
+    if((debug.w&8)==0 || !(depth>0))return 0;
+    float4 tn=celestialTanNow, tp=celestialTanPrev;
+    float z=now[3].z/depth;                     // view depth in metres: cameraBefore's iz is 1/z (reversed-Z, depth = near/z)
+    float2 p=rawUv*float2(size.xy)-.5;          // the unjittered pixel, the records' box convention
+    float3 P=float3(tn.x+rawUv.x*(tn.y-tn.x), tn.w-rawUv.y*(tn.w-tn.z), -1)*z;
+    float slack=3.0*z*max((tn.y-tn.x)/float(size.x),(tn.w-tn.z)/float(size.y));
+    float3 dp; int held=celestialLookup(CelestialRecords,p,P,z,slack,dp);
+    if(held<0)return 0;
+    if(held==0)return 2;
+    if(dp.z>=-1e-6)return 2;
+    float w=-dp.z;
+    float2 t=dp.xy/w;
+    float2 prevUv=float2((t.x-tp.x)/(tp.y-tp.x),(tp.w-t.y)/(tp.w-tp.z));
+    before=float4((prevUv*float2(2,-2)+float2(-1,1))*w, old[3].z, w);
+    return all(isfinite(before))?1u:2u;
 }
 // THE HISTORY DEPTH CHECK (design doc section 82, the depth-validated steady detail; section 104 for taa()). One rule, two callers: the
 // prep asks it of a stale slot's pixel when flags.w==2, and taa(), below, asks it of every pixel before it trusts that pixel's history.
@@ -270,7 +299,11 @@ void prep(uint3 id:SV_DispatchThreadID) {
         // HLSL logical operators do not short-circuit: putting cameraBefore's
         // out parameter in || would overwrite the exact engine result.
         bool valid=kind==1;
-        if(kind==0||kind==3)valid=cameraBefore(rawUv,depth,before);
+        if(kind==0||kind==3) {
+            // A planet's pixel takes the body's own motion (celestialBefore); anywhere else, or with no records bound, the camera term stands.
+            uint celestial=celestialBefore(rawUv,depth,before);
+            if(celestial==0)valid=cameraBefore(rawUv,depth,before); else valid=celestial==1;
+        }
         if(valid) {
             float2 prev=before.xy/before.w*float2(.5,-.5)+.5;
             // SDK vectors exclude both raster phases; the backend receives

@@ -331,8 +331,7 @@ bool build(ID3D11DeviceContext* ctx, const Source& src, Slot& slot) {
 
     if (ok) {
         // Save every compute slot this touches and put all of it back. The
-        // game is mid-frame and owns this context; fss_heal learned the same
-        // discipline the same way.
+        // game is mid-frame and owns this context.
         ID3D11ComputeShader* savedCs = nullptr;
         ID3D11ShaderResourceView* savedSrv = nullptr;
         ID3D11UnorderedAccessView* savedUav = nullptr;

@@ -48,14 +48,14 @@ without the bug it finds nothing to repair. The log says `vertex resync: ...`
 ten minutes saying it is armed). *[scanner-body.md](scanner-body.md).*
 
 **The FSS showing each eye a different scan.** In the Full System Scanner the
-zoomed body's not-yet-resolved tiles can be hard black in one eye and already
-filled in the other, so the resolve animation splits (a stock bug, reproduced
-clean). EDVR fills the left eye's black pixels from the right at your headset's
-own optical-infinity disparity, inside the scanner screen's measured rectangle
-only, and freezes the composite's inputs so the second eye cannot diverge by
-construction. Needs `openvr_api.dll`. `fix.fss_eye_sync = on`.
-*[fss-scanner.md](fss-scanner.md), and the vendor report in
-[frontier-fss-bug-report.md](frontier-fss-bug-report.md).*
+zoomed body's not-yet-resolved cells could be hard black in the left eye and
+already filled in the right, so the resolve animation split (a stock bug,
+reproduced clean). The cause is one draw: the reveal's coarse input, a small
+downsample of the ring layer, is made in the left eye's pass before the ring is
+finished. EDVR runs that draw again from the finished layer just before the
+left eye's reveal composite, so both eyes show the right eye's look. Always on in
+VR, no setting; the log says `fss reveal fix: ...`. *[fss-scanner.md](fss-scanner.md),
+and the vendor report in [frontier-fss-bug-report.md](frontier-fss-bug-report.md).*
 
 **The RemLok helmet's edge lines hanging along your nose.** When the emergency
 helmet deploys, the game stamps the same both-edges overlay into each eye with

@@ -5068,9 +5068,11 @@ void temporalPassConfigure(Config& cfg) {
     const bool engineMotionOn = runtimeFlatProfile()
         ? temporalModeEnabled(cfg.requestedTemporalMode()) : detail::g_temporalPassWantedFssChrome;
     engineVelocityConfigure(engineMotionOn);
-    // Planet patch motion (celestial_motion.h) is part of fix.temporal_aa in the VR build, with no key of its own (a fix that always helps
-    // gets no toggle): its capture and its records run exactly while the pass does. The flat profile has its own planet, its own pass.
-    celestialMotionConfigure(detail::g_temporalPassWantedFssChrome && !runtimeFlatProfile());
+    // Planet patch motion (celestial_motion.h) is part of temporal AA in both profiles, with no key of its own (a fix that always helps
+    // gets no toggle): its capture and its records run exactly while the pass does. The VR profile consumes the records in the temporal
+    // pass (temporal_shader_source.h, decision path 12); the flat profile in flat_mono_resolve (eye 0, t18), fetched by the flat runtime.
+    // The VR world route never binds them.
+    celestialMotionConfigure(engineMotionOn);
     // The scheduler stack-capture probe (docs/engine-render-pipeline.md
     // stage 0): read-only return-address signatures at the four
     // scheduler-fed worker entries, naming the frame scheduler the vtable

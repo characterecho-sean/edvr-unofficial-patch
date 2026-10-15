@@ -52,6 +52,23 @@ struct Rig {
     return locate(view(),h.seated.space(),t,&loc)==XR_SUCCESS?double(loc.pose.position.x):1e9;
   }
 };
+// The state after the game's reset was answered "no press" with the stored seat (x=1) and the frame poll then saw the player's press: a late
+// press is pending, the head is at x=2 (what honouring it would make the seat). Published through the same shared words the graphics half
+// uses, so seatSync finds it the way it does in the game. Review of main 9fe5b257, finding 2 (late_press_repro.cpp).
+inline void armLatePress(Rig& r,uint32_t pressSeq=1) {
+  auto& h=r.h;
+  SeatContext c{};c.published=c.keep=c.gameplay=c.seatedKnown=c.seated=true;
+  publishSeatContext(encodeSeatContext(c));
+  publishHmdResetPress(0,0);     // a previous case's press must not be this host's "already seen" sequence
+  h.seatSync(GetTickCount64());
+  h.seat.applyDone();h.seat.noteOrigin(true);     // the start-of-game apply the Rig's first context queued is done: only the late press is outstanding
+  r.f.fake.head.position.x=2;
+  const uint64_t now=GetTickCount64();
+  h.seat.noteReplacedByNoPress(now-50);h.seatNoPressAt=now-50;
+  HmdResetPress press{};press.status=HmdPressStatus::Observable;press.seq=pressSeq;
+  publishHmdResetPress(encodeHmdPress(press),now);
+  h.seatSync(now);
+}
 inline void removeTree(const std::wstring& dir) {
   WIN32_FIND_DATAW fd{};
   HANDLE find=FindFirstFileW((dir+L"\\*").c_str(),&fd);
@@ -127,6 +144,57 @@ template<class Check> void runSeatOrderCases(Check&& check) {
     check(r.frame(200)==Step::Withheld,"seat order: an untracked head still gives the frame up");
     check(h.localHandled==1&&h.seat.seat().x==0.0&&h.seat.seat().y==0.0&&h.seat.applyPending(),"seat order: ...the seat is LOCAL's origin, applied when a frame allows");
   }
+
+  // A late recenter press stays pending until its correction is applied (review of main 9fe5b257, finding 2). The old seatPoll cleared the
+  // request before locating the head, so one transient failure lost the player's press for good.
+  {   // the first poll's locate fails, the second is healthy: the press is applied on the second
+    Rig r(true);auto& h=r.h;
+    armLatePress(r);
+    check(h.seatLatePressPending&&h.seat.seat().x==1.0,"late press: the press after the reset is pending, the stored seat still in force");
+    const unsigned creates=r.f.fake.creates;
+    r.f.fake.locateResult=XR_ERROR_TIME_INVALID;
+    const bool first=h.seatPoll();
+    check(!first&&h.seatLatePressPending,"late press: a failed locate keeps the request pending");
+    check(h.seat.seat().x==1.0&&h.currentOrigin.x==1.0&&r.f.fake.creates==creates,"late press: ...and changed nothing");
+    r.f.fake.locateResult=XR_SUCCESS;
+    const bool second=h.seatPoll();
+    check(second&&!h.seatLatePressPending,"late press: the retry applies the press and clears the request");
+    check(h.seat.seat().x==2.0&&h.currentOrigin.x==2.0&&r.f.fake.creates==creates+1,"late press: ...the head is the seat and the origin, one new seated space");
+    check(!h.seatPoll()&&r.f.fake.creates==creates+1&&h.seatLatePressDrops==0,"late press: once applied it is not applied again, and nothing was dropped");
+  }
+  {   // the reset itself is rejected (the head locates but is not tracked, so no origin can be made from it), then accepted
+    // (a failed seated-space create is not a retry case: SeatedSpace::replace then stays unusable on purpose)
+    Rig r(true);auto& h=r.h;
+    armLatePress(r);
+    r.f.fake.flags=0;
+    check(!h.seatPoll()&&h.seatLatePressPending,"late press: a rejected reset keeps the request pending");
+    r.f.fake.flags=launch_fixture::tracked;
+    check(h.seatPoll()&&!h.seatLatePressPending&&h.seat.seat().x==2.0,"late press: ...and the next poll applies it");
+  }
+  {   // never applicable: retried for kLatePressRetryMs, then dropped once, and a healthy poll afterwards does not resurrect it
+    Rig r(true);auto& h=r.h;
+    armLatePress(r);
+    r.f.fake.locateResult=XR_ERROR_TIME_INVALID;
+    check(!h.seatPoll()&&h.seatLatePressPending&&h.seatLatePressDrops==0,"late press expiry: inside the retry time it is kept");
+    h.seatLatePressAt=GetTickCount64()-kLatePressRetryMs-1;     // the request is now older than the retry time
+    check(!h.seatPoll()&&!h.seatLatePressPending&&h.seatLatePressDrops==1,"late press expiry: past the retry time it is dropped, once");
+    r.f.fake.locateResult=XR_SUCCESS;
+    const unsigned creates=r.f.fake.creates;
+    check(!h.seatPoll()&&h.seat.seat().x==1.0&&r.f.fake.creates==creates&&h.seatLatePressDrops==1,"late press expiry: a healthy poll afterwards leaves the seat alone");
+  }
+  {   // a transition window opens while it is pending: the transition's seat supersedes the press
+    Rig r(true);auto& h=r.h;
+    armLatePress(r);
+    r.f.fake.locateResult=XR_ERROR_TIME_INVALID;
+    check(!h.seatPoll()&&h.seatLatePressPending,"late press supersede: pending after a failed poll");
+    SeatContext c{};c.published=c.keep=c.gameplay=c.seatedKnown=c.seated=true;c.transitions=1;     // a journal event: a window opens
+    publishSeatContext(encodeSeatContext(c));
+    h.seatSync(GetTickCount64());
+    check(!h.seatLatePressPending&&h.seatLatePressDrops==1,"late press supersede: the transition window drops it, once");
+    r.f.fake.locateResult=XR_SUCCESS;
+    check(!h.seatPoll()&&h.seat.seat().x==1.0,"late press supersede: the dropped press is not applied afterwards");
+  }
+  publishSeatContext(0);publishHmdResetPress(0,0);     // leave the shared words as found
 
   SetEnvironmentVariableW(L"LOCALAPPDATA",hadPrevious&&hadPrevious<MAX_PATH?previous:nullptr);
   removeTree(scratch);

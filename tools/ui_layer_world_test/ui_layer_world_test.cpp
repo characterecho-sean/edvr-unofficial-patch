@@ -68,6 +68,7 @@
 #include "../../src/d3d11/vr_world_mips.h"
 #include "../../src/d3d11/vr_world_route.h"
 #include "../../src/d3d11/vscreen.h"
+#include "../../src/d3d11/flat_ui_layer_math.h"  // the back-off trail's enum, for the hooks' stubs below
 
 using Microsoft::WRL::ComPtr;
 
@@ -121,6 +122,9 @@ Stubs g_stubs;
 namespace edvr {
 thread_local bool g_flatComputeInternal = false;
 thread_local bool g_vrWorldInternal = false;
+// The back-off trail's two hooks that ui_layer.cpp calls: flat_ui_layer.cpp defines them in the product, and this rig does not link it.
+void flatUiTrailNoteReissue(uint64_t, FlatUiTrailReissue, uint8_t, uint64_t) {}
+void flatUiTrailReport() {}
 namespace detail {
 BindingSlot g_bindingSlots[static_cast<size_t>(BindSlot::Count)];
 }  // namespace detail

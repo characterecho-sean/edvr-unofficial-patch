@@ -123,7 +123,7 @@ void parsePe(const unsigned char* base, DWORD size, PeFacts* facts) {
         const char* providers[]={
             "D3D11CreateDevice","D3D11CreateDeviceAndSwapChain",
             "edvrAcquireNativeGraphics","edvrAcquireNativeMenu","edvrAcquireNativeTemporal",
-            "edvrAcquireNativeSharpen","edvrAcquireNativeFrame","edvrAcquireNativeFss",
+            "edvrAcquireNativeSharpen","edvrAcquireNativeFrame",
             "edvrAcquireNativeTiming","edvrAcquireGraphicsBridge","edvrAcquireRenderBoundary",
             "edvrQueryNativeRenderSettings","edvrPublishNativeRenderSizing","edvrQueryNativeRenderSizing"};
         const char* runtimeNames[]={

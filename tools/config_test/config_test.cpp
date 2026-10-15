@@ -477,15 +477,18 @@ static void raceCase(const std::wstring& scratch) {
     // Do not start reloading until the reader is demonstrably running: a thread
     // that has not been scheduled yet would make the loop below a test of nothing.
     const ULONGLONG t0 = GetTickCount64();
-    while (reader.reads.load() < 1000 && GetTickCount64() - t0 < 5000) Sleep(1);
+    // The ceiling is far past any scheduling stall (a loaded build machine starves a thread for seconds); it only keeps a reader that
+    // can never run from hanging the build.
+    while (reader.reads.load() < 1000 && GetTickCount64() - t0 < 60000) Sleep(1);
     const bool started = reader.reads.load() >= 1000;
 
     int  reloads = 0;
     int  unparsed = 0;
     bool writeFailed = false;
     if (started) {
-        const ULONGLONG t1 = GetTickCount64();
-        while (reloads < 300 && GetTickCount64() - t1 < 1500) {
+        // A fixed count, not a time budget: 300 reloads is the same amount of racing on a quiet machine and a starved one. A 1.5 s
+        // budget completed 1 reload in a copy of this rig on a machine running 72 busy processes, and "too few to say anything" fired.
+        while (reloads < 300) {
             if (!rewriteIni(scratch, (reloads & 1) ? a : b)) {
                 writeFailed = true;
                 break;
@@ -498,11 +501,11 @@ static void raceCase(const std::wstring& scratch) {
     thread.join();
 
     if (!started) {
-        fail("config race", "the reader thread did not get going within 5 s");
+        fail("config race", "the reader thread did not get going within 60 s");
     } else if (writeFailed) {
         fail("config race", "could not rewrite the scratch ini");
     } else if (reloads < 20) {
-        fail("config race", "only " + std::to_string(reloads) + " reloads ran in 1.5 s; "
+        fail("config race", "only " + std::to_string(reloads) + " reloads ran; "
                             "too few to say anything about a race");
     } else if (unparsed) {
         fail("config race", std::to_string(unparsed) + " of " + std::to_string(reloads) +
@@ -599,7 +602,7 @@ static void shareDeleteCase(const std::wstring& scratch) {
     const ULONGLONG t0 = GetTickCount64();
     for (int i = 0; i < 20000; ++i) {
         if (i >= 300 && st.inside.load() >= 300) break;
-        if (i >= 300 && GetTickCount64() - t0 > 8000) break;
+        if (i >= 300 && GetTickCount64() - t0 > 60000) break;
         if (!rewriteIni(scratch, (i & 1) ? one : two)) {
             writeFailed = true;
             break;
@@ -2291,9 +2294,34 @@ int main(int argc, char** argv) {
             if (write) {
                 const std::string filler(1000, 'y');
                 for (int i = 0; i < 1300; ++i) Log::get().note("capfill %d %s", i, filler.c_str());
-                Sleep(700);   // the flusher passes every 250 ms: one writes the burst, the next has to decide about the marker
+                // The marker must be written AFTER the pass that carried the burst over the cap, or it rides the same write and is
+                // not "after the cap". That used to be two Sleep(700)s against the flusher's 250 ms passes: a wall-clock assumption
+                // that failed in nearly every copy when the machine was loaded (a starved flusher had not yet passed when the marker
+                // went in). Now the test waits on the fact itself: the file on disk has reached the cap, which means a pass has
+                // written bytes and the next pass that has anything to write will see the cap. The wait has no schedule in it, only
+                // a ceiling far past any real stall so a logger that never flushes fails the case rather than hanging the build.
+                if (run.maxBytes && run.maxBytes < 1300ull * 1000ull) {
+                    const ULONGLONG started = GetTickCount64();
+                    for (;;) {
+                        WIN32_FILE_ATTRIBUTE_DATA info{};
+                        WIN32_FIND_DATAW ff{};
+                        HANDLE fh = FindFirstFileW((scratch + L"\\" + pattern).c_str(), &ff);
+                        uint64_t onDisk = 0;
+                        if (fh != INVALID_HANDLE_VALUE) {
+                            FindClose(fh);
+                            if (GetFileAttributesExW((scratch + L"\\" + ff.cFileName).c_str(), GetFileExInfoStandard, &info))
+                                onDisk = (static_cast<uint64_t>(info.nFileSizeHigh) << 32) | info.nFileSizeLow;
+                        }
+                        if (onDisk >= run.maxBytes) break;
+                        if (GetTickCount64() - started > 120000ull) {
+                            fail("log.max_mb wait", "the burst never reached the cap on disk in 120 s: " + std::to_string(onDisk) + " bytes");
+                            break;
+                        }
+                        Sleep(5);
+                    }
+                }
                 Log::get().note("capmarker after the first burst");
-                Sleep(700);
+                // No sleep: close() joins the flusher and runs the final passes, so everything noted is decided before the file is read.
             }
             Log::get().close();
             WIN32_FIND_DATAW fd{};

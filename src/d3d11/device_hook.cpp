@@ -36,7 +36,6 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "../common/format_query_log.h"     // formatHooksInstalledLine: the one line that says the hooks went on
 #include "../common/temporal_mode.h"
 #include "../common/runtime_profile.h"
-#include "../common/eye_sync.h"
 #include "../common/frame_flag.h"
 #include "hmd_reset_press.h"   // hmdResetPressFrame: the players HMD recentre key, watched for the seat memory
 #include "../common/seat_context.h"   // seatContextPublish: the seat memory's word for the runtime
@@ -286,13 +285,8 @@ struct State {
     // bindings; they give the FSS mode latch its frame-exact edges.
     Hotkey fssEnterKey;
     Hotkey fssQuitKey;
-    Hotkey fssZoomStepKey;
-    Hotkey fssZoomKey;
     XinputBinding fssEnterPad;
     XinputBinding fssQuitPad;
-    XinputBinding fssZoomStepPad;
-    XinputBinding fssZoomPad;
-    bool fssZoomPressPending = false;
     bool     fssModeLatchWanted = false;
     bool     fssModeLatch = false;
     bool     fssLatchByKey = false;
@@ -1436,17 +1430,6 @@ void tickFssModeLatch() {
             g_state->fssQuitMs = stampMs();
             byKey = true;
         }
-        // The zoom press: the earliest arrival marker there is --
-        // ahead of the camera jump, ahead of any render signal. The
-        // squares appear the frame the zoom begins (the field's own
-        // timing), so the reveal's window must open no later.
-        bool zoomPressed = g_state->fssZoomStepKey.pressed();
-        if (g_state->fssZoomKey.pressed()) zoomPressed = true;
-        if (xinputPressed(g_state->fssZoomStepPad)) zoomPressed = true;
-        if (xinputPressed(g_state->fssZoomPad)) zoomPressed = true;
-        if (zoomPressed && g_state->fssModeLatch) {
-            g_state->fssZoomPressPending = true;
-        }
         if (journalFssFocus()) {
             const bool quitRecent =
                 g_state->fssQuitMs != 0 &&
@@ -1692,8 +1675,7 @@ void presentFrameBoundary() {
             terrainCullCoverPoll(stampMs());
             // The three diagnostic keys follow the file too (the menu's Hotkeys page).
             configureDiagnosticHotkeys();
-            g_state->fssModeLatchWanted =
-                eyeSyncFromConfig(Config::get()).any();
+            g_state->fssModeLatchWanted = true;
             journalWatchSetEagerStatus(g_state->fssModeLatchWanted || runtimeFlatProfile());
         });
         tkFrameFlagPeer.run(tickFrameFlagPeer);
@@ -2152,17 +2134,6 @@ State& ensureState() {
                 Log::get().note("hotkey: the FSS quit key adopted from "
                                 "your Elite bindings: %s", b);
             }
-            if (eliteBindsLookup("ExplorationFSSMiniZoomIn", b,
-                                 sizeof(b))) {
-                g_state->fssZoomStepKey.setBinding(b);
-                Log::get().note("hotkey: the FSS stepped-zoom key adopted "
-                                "from your Elite bindings: %s", b);
-            }
-            if (eliteBindsLookup("ExplorationFSSZoomIn", b, sizeof(b))) {
-                g_state->fssZoomKey.setBinding(b);
-                Log::get().note("hotkey: the FSS zoom key adopted from "
-                                "your Elite bindings: %s", b);
-            }
             {
                 char pk[40];
                 g_state->fssEnterPad = XinputBinding{};
@@ -2179,20 +2150,6 @@ State& ensureState() {
                     Log::get().note("hotkey: the FSS quit key is also on "
                                     "your gamepad: %s.", pk);
                 }
-                g_state->fssZoomStepPad = XinputBinding{};
-                if (eliteBindsLookupPad("ExplorationFSSMiniZoomIn", pk,
-                                        sizeof(pk)) &&
-                    xinputTranslate(pk, &g_state->fssZoomStepPad)) {
-                    Log::get().note("hotkey: the FSS stepped zoom is also "
-                                    "on your gamepad: %s.", pk);
-                }
-                g_state->fssZoomPad = XinputBinding{};
-                if (eliteBindsLookupPad("ExplorationFSSZoomIn", pk,
-                                        sizeof(pk)) &&
-                    xinputTranslate(pk, &g_state->fssZoomPad)) {
-                    Log::get().note("hotkey: the FSS zoom is also on your "
-                                    "gamepad: %s.", pk);
-                }
             }
             g_state->bindsFingerprint = eliteBindsFingerprint();
         }
@@ -2203,8 +2160,7 @@ State& ensureState() {
         // key and the menu's own keys, which the rules check against.
         menuAdoptGameBindings(Config::get().getBool("hotkey.read_game_bindings", true), nullptr);
         journalWatchConfigure();
-        g_state->fssModeLatchWanted =
-            eyeSyncFromConfig(Config::get()).any();
+        g_state->fssModeLatchWanted = true;
         // Flat reads the GuiFocus of the open map (temporal AA off on the Galaxy Map, the System Map and the Orrery) from Status.json, at the same 100 ms the FSS latch wants.
         journalWatchSetEagerStatus(g_state->fssModeLatchWanted || runtimeFlatProfile());
     }
@@ -3183,12 +3139,6 @@ void hookFactoryForDevice(ID3D11Device* device) {
 
 bool deviceHookFssModeLatch() {
     return g_state != nullptr && g_state->fssModeLatch;
-}
-
-bool deviceHookTakeFssZoomPress() {
-    if (!g_state || !g_state->fssZoomPressPending) return false;
-    g_state->fssZoomPressPending = false;
-    return true;
 }
 
 void deviceHookRequestConfigRefresh() {

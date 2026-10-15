@@ -20,7 +20,6 @@
 #include <cstring>
 
 #include "../common/config.h"
-#include "../common/eye_sync.h"
 #include "../common/frame_flag.h"  // the eye-texture size, from the openvr half
 #include "../common/guard.h"
 #include "../common/log.h"
@@ -466,14 +465,6 @@ struct State {
     uint32_t fssBodyFrame = 0;
     // The chrome tracker's stamp and the arrival-mono frame count.
     uint32_t fssChromeFrame = 0;
-    int      fssHealOn = 0;
-    int      censusFssJump = 0;
-    uint32_t fssJumpFrame = 0;  // the zoom-start camera jump, for the
-                                 // reveal's arrival window
-    bool     fssArrivalOpen = false;
-    uint32_t fssArrivalRecogs = 0;
-    uint32_t fssArrivalWindows = 0;
-    uint32_t fssArrivalNotes = 0;
     uint32_t fssChromeSkipFrame = 0;
     uint32_t fssChromeSkipCount = 0;
     bool     fssChromeSkipNoted = false;
@@ -1511,10 +1502,6 @@ enum class DrawVerdict {
     // The FSS panel composite pair (fss_panel.h): forwarded through the
     // replacement vertex shaders, wrapped in fssPanelBegin/End.
     kFssPanel,
-    // The body composite pair evaluated at one dissolve moment
-    // (fss_reveal.h): eye B drawn with eye A's scene constants, wrapped
-    // in fssRevealBegin/End.
-    kFssReveal,
     // A batched draw re-issued without some of its quads (advanced.
     // census_skip_quad). Swallows the game's draw and makes up to two of its
     // own, so it must not be combined with anything that also draws.
@@ -1547,7 +1534,6 @@ const char* drawVerdictName(DrawVerdict v) {
         case DrawVerdict::kGlareSteady: return "glare-steady";
         case DrawVerdict::kParticle: return "particle";
         case DrawVerdict::kFssPanel: return "fss-panel";
-        case DrawVerdict::kFssReveal: return "fss-reveal";
         case DrawVerdict::kQuadSkip: return "quad-skip";
         case DrawVerdict::kLoaderPanel: return "loader-panel";
         case DrawVerdict::kScrim: return "scrim";
@@ -1695,7 +1681,7 @@ bool drawGateSubscribed(State* s) {
         s->censusSkipRangeCount != 0 || s->censusSkipOffCount != 0 ||
         s->quadSkipArmed ||
         s->censusAutoW != 0 || fssResActive() ||
-        fssPanelWantsDraws() || fssRevealWantsDraws() ||
+        fssPanelWantsDraws() ||
         remlokWantsDraws() || holoWantsDraws() || targetSharpWantsDraws() ||
         uiDepthWantsDraws() ||
         sunglareWantsDraws() ||
@@ -1845,9 +1831,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // free. The temporal pass asks too (temporalPassWantsFssChrome): the
     // scanner's interface takes the head's path while the screen is up,
     // and the stamp this tracker bumps is how the pass knows it is.
-    if ((s->fssHealOn || s->censusFssJump ||
-         temporalPassWantsFssChrome()) &&
-        kind == 'X' && count == 6) {
+    if (kind == 'X' && count == 6) {
         bool chromeMatched = false;
         guardedBudget(g_panelCbBudget, [&] {
             const uint64_t h = bindingShaderHash(BindSlot::Vs);   // the shadow's, set with the shader
@@ -1899,8 +1883,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         // scenery (the neon frame) and their ordinals land in a skip
         // mask. Until a derivation publishes, nothing is skipped and the
         // centred band crops -- both fail-safe.
-        if (chromeMatched && s->fssHealOn &&
-            deviceHookFssModeLatch()) {
+        if (chromeMatched && deviceHookFssModeLatch()) {
             if (s->fssChromeSkipFrame != s->frameNo) {
                 s->fssChromeSkipFrame = s->frameNo;
                 s->fssChromeSkipCount = 0;
@@ -2292,7 +2275,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         // eye/2-sized, or one of fss_res's inflated textures? Cached per
         // binding generation, so the resolve runs for a handful of scanner
         // draws and for nothing else in the game.
-        if (fssPanelWantsDraws() || fssRevealWantsDraws()) {
+        if (fssPanelWantsDraws()) {
             if (s->fssBodyLayerGen != rtvGen) {
                 s->fssBodyLayerGen = rtvGen;
                 s->fssBodyLayerBound = false;
@@ -2551,25 +2534,6 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
         s->frameNo - s->fssBodyFrame <= 2 &&
         fssPanelOnEyeDraw(self, kind, count, instances)) {
         return DrawVerdict::kFssPanel;
-    }
-
-    // The reveal sync. Same gate, same recognition shape.
-    // The reveal's gate covers the ARRIVAL as well as the void: the
-    // 2026-08-27 lockstep flight engaged byte-identical and the squares
-    // survived -- because the body gate opens at the arrival's END, and
-    // the squares live in the ~10 frames before it. The mode latch keeps
-    // the widened window inside the scanner (the loading screen draws
-    // none of this), and the zoom-start jump bounds it.
-    // The jump window before the mode latch: deviceHookFssModeLatch is a
-    // cross-TU call (device_hook.cpp) and a pure read, and it was being made
-    // for every eye draw outside the scanner. Same three terms, same answer.
-    if (fssRevealWantsDraws() &&
-        ((s->fssBodyFrame != 0 && s->frameNo - s->fssBodyFrame <= 2) ||
-         (s->fssJumpFrame != 0 && s->frameNo - s->fssJumpFrame <= 600 &&
-          deviceHookFssModeLatch())) &&
-        fssRevealOnEyeDraw(self, kind, count, instances)) {
-        if (s->fssArrivalOpen) ++s->fssArrivalRecogs;
-        return DrawVerdict::kFssReveal;
     }
 
     // The sun-glare element train: off skips it, first:K clamps it, and the
@@ -3304,10 +3268,6 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
     if (mapData && drawCensusArmed()) {
         drawCensusCbNoteMap(res, mapped->pData);
     }
-    // The reveal sync's shadow of the scene block, same tee, its own gate.
-    if (mapData && fssRevealWantsDraws()) {
-        fssRevealNoteMap(res, mapped->pData);
-    }
     // Planet-patch constants' CPU shadow: remember the mapped pointer so the Unmap tee can copy the game's write
     // without a GPU copy at the draw. celestialMotionAnyWatched() is the callee's own first test, inline: with no
     // buffer watched (the module off, or no planet patch drawn yet) no resource can match.
@@ -3443,7 +3403,6 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
         flatRuntimeUnmap(res);
     }
     if (flatTemporalCapturing()) flatTemporalUnmap(res);
-    if (fssRevealWantsDraws()) fssRevealNoteUnmap(res);
     // Read before forwarding: after the real Unmap the memory is no longer ours
     // to look at.
     if (res == s->mappedResource && s->mappedData) {
@@ -3621,7 +3580,6 @@ __declspec(noinline) void forwardVerdictBegin(ID3D11DeviceContext* self, DrawVer
     switch (v) {
     case DrawVerdict::kRemlok:       remlokScissorBegin(self); break;
     case DrawVerdict::kFssPanel:     fssPanelBegin(self); break;
-    case DrawVerdict::kFssReveal:    fssRevealBegin(self); break;
     case DrawVerdict::kHolo:         holoBegin(self); break;
     case DrawVerdict::kTargetSharp:  targetSharpBegin(self); break;
     case DrawVerdict::kNightVision:  nightVisionBegin(self); break;
@@ -3641,7 +3599,6 @@ __declspec(noinline) void forwardVerdictEnd(ID3D11DeviceContext* self, DrawVerdi
     case DrawVerdict::kTargetSharp:  targetSharpEnd(self); break;
     case DrawVerdict::kNightVision:  nightVisionEnd(self); break;
     case DrawVerdict::kHolo:         holoEnd(self); break;
-    case DrawVerdict::kFssReveal:    fssRevealEnd(self); break;
     case DrawVerdict::kFssPanel:     fssPanelEnd(self); break;
     case DrawVerdict::kRemlok:       remlokScissorEnd(self); break;
     default: break;   // kBackdrop: issued inline, before the splash re-issue
@@ -3668,7 +3625,6 @@ constexpr AlteredFix alteredFixOf(DrawVerdict v) noexcept {
     case DrawVerdict::kGlareSteady:  return AlteredFix::GlareSteady;
     case DrawVerdict::kParticle:     return AlteredFix::Particle;
     case DrawVerdict::kFssPanel:     return AlteredFix::FssPanel;
-    case DrawVerdict::kFssReveal:    return AlteredFix::FssReveal;
     case DrawVerdict::kScrim:        return AlteredFix::Scrim;
     case DrawVerdict::kBackdrop:     return AlteredFix::Backdrop;
     case DrawVerdict::kNone:
@@ -3684,7 +3640,7 @@ static_assert(alteredFixOf(DrawVerdict::kPanel) == AlteredFix::Panel && alteredF
                   alteredFixOf(DrawVerdict::kNightVision) == AlteredFix::NightVision &&
                   alteredFixOf(DrawVerdict::kIntroPanel) == AlteredFix::IntroPanel && alteredFixOf(DrawVerdict::kGlareClamp) == AlteredFix::GlareClamp &&
                   alteredFixOf(DrawVerdict::kGlareSteady) == AlteredFix::GlareSteady && alteredFixOf(DrawVerdict::kParticle) == AlteredFix::Particle &&
-                  alteredFixOf(DrawVerdict::kFssPanel) == AlteredFix::FssPanel && alteredFixOf(DrawVerdict::kFssReveal) == AlteredFix::FssReveal &&
+                  alteredFixOf(DrawVerdict::kFssPanel) == AlteredFix::FssPanel &&
                   alteredFixOf(DrawVerdict::kScrim) == AlteredFix::Scrim && alteredFixOf(DrawVerdict::kBackdrop) == AlteredFix::Backdrop,
               "each verdict that can reach the altered-draw site names its own census row");
 
@@ -4612,9 +4568,6 @@ void STDMETHODCALLTYPE hookedUpdateSubresource(ID3D11DeviceContext* self,
         // Owner-context only: the watch shadows the owner's buffers.
         if (!foreignContext(self)) drawCensusCbNoteUpdate(dst, data, 0);
     }
-    if (fssRevealWantsDraws() && !foreignContext(self)) {
-        fssRevealNoteUpdate(dst, data);
-    }
     if (!foreignContext(self) && flatRuntimeActive()) {
         flatRuntimeSubstitution(self, FlatSubstEvent::kCopy);
         auto detail=FlatMutationDetails::transfer(FlatOverlayMutationOp::UpdateSubresource,
@@ -4778,6 +4731,8 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
     if (gpuPassProfileCapturing()) gpuPassProfileNoteDraw(self, 'D', count, 1);
     if (runtimeFlatProfile()) {
         if (flatStationSkipsDraw(self)) return;
+        // Planet patch motion (celestial_motion.h): the flat profile's capture of a colour-pass patch draw, before the game's own issue.
+        if (self == g_state->ownerCtx && celestialMotionLive() && bindingShaderHash(BindSlot::Vs) == kCelestialPatchVs) celestialMotionNoteDraw(self);
         ++g_state->thunkHits[kHitDraw];
         // Capture original game bindings before the temporal scope substitutes
         // the engine-motion PS/MRT or the output-copy SRV.
@@ -4854,6 +4809,7 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
     if (gpuPassProfileCapturing()) gpuPassProfileNoteDraw(self, 'I', count, 1);
     if (runtimeFlatProfile()) {
         if (flatStationSkipsDraw(self)) return;
+        if (self == g_state->ownerCtx && celestialMotionLive() && bindingShaderHash(BindSlot::Vs) == kCelestialPatchVs) celestialMotionNoteDraw(self);
         ++g_state->thunkHits[kHitDrawIndexed];
         if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(self, count, 1);
         {
@@ -4908,9 +4864,26 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
 void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perInstance,
                                            UINT instances, UINT startVertex,
                                            UINT startInstance) {
+    // The FSS reveal fix (fss_reveal.h; VR profile only, one bool when the scanner is not on show): at the first reveal composite of a frame the frame's first downsample of the ring layer is
+    // replayed from the finished layer. First in the thunk and through the game's own un-hooked entry points, so nothing that tracks state sees the replay.
+    if (fssRevealWatching() && !foreignContext(self) && !runtimeFlatProfile()) {
+        FssRealCalls rc;
+        rc.vsSetCb = reinterpret_cast<void*>(g_state->realVSSetConstantBuffers);
+        rc.psSetCb = reinterpret_cast<void*>(g_state->realPSSetConstantBuffers);
+        rc.psSetSrv = reinterpret_cast<void*>(g_state->realPSSetShaderResources);
+        rc.vsSetSrv = reinterpret_cast<void*>(g_state->realVSSetShaderResources);
+        rc.vsSetShader = reinterpret_cast<void*>(g_state->realVSSetShader);
+        rc.psSetShader = reinterpret_cast<void*>(g_state->realPSSetShader);
+        rc.omSetRts = reinterpret_cast<void*>(g_state->realOMSetRenderTargets);
+        rc.omSetBlend = reinterpret_cast<void*>(g_state->realOMSetBlendState);
+        rc.rsSetViewports = reinterpret_cast<void*>(g_state->realRSSetViewports);
+        rc.drawInstanced = reinterpret_cast<void*>(g_state->realDrawInstanced);
+        fssRevealOnDrawSlow(self, rc, perInstance, instances, startVertex, startInstance);
+    }
     if (gpuPassProfileCapturing()) gpuPassProfileNoteDraw(self, 'N', perInstance, instances);
     if (runtimeFlatProfile()) {
         if (flatStationSkipsDraw(self)) return;
+        if (self == g_state->ownerCtx && celestialMotionLive() && bindingShaderHash(BindSlot::Vs) == kCelestialPatchVs) celestialMotionNoteDraw(self);
         if (self == g_state->ownerCtx && flatTemporalCapturing())
             flatTemporalDraw(self, perInstance, instances);
         {
@@ -4980,6 +4953,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     if (gpuPassProfileCapturing()) gpuPassProfileNoteDraw(self, 'X', perInstance, instances);
     if (runtimeFlatProfile()) {
         if (flatStationSkipsDraw(self)) return;
+        if (self == g_state->ownerCtx && celestialMotionLive() && bindingShaderHash(BindSlot::Vs) == kCelestialPatchVs) celestialMotionNoteDraw(self);
         if (self == g_state->ownerCtx && flatTemporalCapturing())
             flatTemporalDraw(self, perInstance, instances);
         {
@@ -5009,9 +4983,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     // The rect deriver's capture runs INSIDE beginPanelOverride (the
     // chrome tracker's matched branch), so its draw-args stash must land
     // before the call.
-    if (g_state->fssHealOn) {
-        fssPanelRectDrawArgs(baseVertex, startInstance);
-    }
+    fssPanelRectDrawArgs(baseVertex, startInstance);
     // The sub-draw probe re-issues this draw from the verdict path, which
     // never sees these arguments. Stashed only while armed.
     if (g_state->quadSkipArmed || quadProbeWants() || loaderPanelWants()) {
@@ -5736,7 +5708,7 @@ static void vScreenRefreshConfigBody(bool forced) {
     depthProbeConfigure(cfg);
     backdropConfigure(cfg);
     fssPanelConfigure(cfg);
-    fssRevealConfigure(cfg);
+    fssRevealConfigure(runtimeFlatProfile());
     // The transition-flash engine fix (transition_flash_eye_base.cpp), always on.
     // The first call in a VR profile installs its consumer hook and reports
     // Armed or Lost to the camera-buffer tap; later calls do nothing.
@@ -5745,23 +5717,6 @@ static void vScreenRefreshConfigBody(bool forced) {
     // value, the restart snapshot, and a toast for what changed from outside.
     menuConfigure(cfg);
     menuNoteConfigReloaded();
-    {
-        s->censusFssJump = cfg.getInt("advanced.census_fss_jump", 0) ? 1 : 0;
-        // Defaulted to 1 because the key moved to [experimental] and now ships
-        // commented out: this default is what everybody runs. Moving a setting out
-        // of [fix] is a decision about where it is configured, not a decision to
-        // turn the fix off.
-        const int n = eyeSyncFromConfig(cfg).healMode;
-        if (s->fssHealOn != n) {
-            s->fssHealOn = n;
-            Log::get().note(
-                n ? "fss eye heal: armed -- while the scanner is up, the "
-                    "left eye's hard-black pixels are filled from the "
-                    "right eye's image at the infinity shift, per pixel, "
-                    "stereo untouched."
-                  : "fss eye heal: off.");
-        }
-    }
     sunglareConfigure(cfg);
     exposureConfigure(cfg);
     panelCurveConfigure(cfg);
@@ -5932,7 +5887,6 @@ EDVR_BOUNDARY_TICK(tkIntroSkip, "intro_skip");
 EDVR_BOUNDARY_TICK(tkLoaderPanel, "loader_panel");
 EDVR_BOUNDARY_TICK(tkDrawCensusBoundary, "draw_census_boundary");
 EDVR_BOUNDARY_TICK(tkFssReveal, "fss_reveal");
-EDVR_BOUNDARY_TICK(tkFssPacing, "fss_pacing");
 EDVR_BOUNDARY_TICK(tkRemlok, "remlok");
 // (Explorer Cam's frame tick and its probe's are device_hook.cpp's: they must run whatever this file's options say, and when vScreen installs transport-only
 // there is no State here and no vScreenFrameBoundary to carry them. tools\gate_test pins that.)
@@ -6050,113 +6004,16 @@ void vScreenFrameBoundary() {
     State* s = g_state;
     if (!s) return;
 
-    // The ARRIVAL census (advanced.census_fss_jump): a world-camera jump
-    // while the scanner's chrome is up is a zoom's first frame, and the
-    // window where the left eye's reveal-gated blacks live -- the frames
-    // every body-target-triggered census starts too late to see. One
-    // census per latch, the standard auto-arm machinery.
-    if (takeWorldJump()) {
-        // The zoom-start marker, consumed once and shared -- and taken
-        // ONLY on the game's own word that the scanner is open (round
-        // 48d): world jumps fire on supercruise drops and hyperspace
-        // too, and a stale marker plus an ignored FSS keypress opened
-        // the window in the COCKPIT, where hard-black is everywhere --
-        // the field's flicker.
-        if (journalFssFocus()) s->fssJumpFrame = s->frameNo;
-        if (s->censusFssJump && s->fssChromeFrame != 0 &&
-            s->frameNo - s->fssChromeFrame <= 5) {
-            drawCensusAutoRequest();
-        }
-    }
-    if (deviceHookTakeFssZoomPress()) {
-        // Earlier than the jump: the player's own zoom button.
-        s->fssJumpFrame = s->frameNo;
-        if (s->fssArrivalNotes < 4) {
-            ++s->fssArrivalNotes;
-            Log::get().note(
-                "fss arrival: zoom press at frame %u -- the reveal's "
-                "window is open. Said at most 4 times.", s->frameNo);
-        }
-
-    }
-    // The arrival window's receipt: when it closes, say how many
-    // composite recognitions it carried. Zero while squares showed would
-    // prove the arriving content flows through a different draw.
-    {
-        // 600 frames, not 30 (round 48c): the zoom TRANSIT takes ~3
-        // seconds and the squares appear at its ARRIVAL -- a 30-frame
-        // window covered the departure and expired mid-flight, so every
-        // window-scoped intervention ran before the squares existed. A
-        // long window is free: the heal's hard-black fill is a no-op
-        // over the void it mostly sees.
-        const bool open =
-            s->fssJumpFrame != 0 && s->frameNo - s->fssJumpFrame <= 600 &&
-            journalFssFocus();
-        if (open) bumpFssArrivalStamp();
-        if (open && !s->fssArrivalOpen) {
-            s->fssArrivalRecogs = 0;
-        } else if (!open && s->fssArrivalOpen &&
-                   s->fssArrivalWindows < 4) {
-            ++s->fssArrivalWindows;
-            Log::get().note(
-                "fss arrival: window closed -- %u composite "
-                "recognition(s) inside it. Said at most 4 times.",
-                s->fssArrivalRecogs);
-        }
-        s->fssArrivalOpen = open;
-    }
-
     // Before this frame's counters are read or reset: a pending census starts
     // here, a running one advances, a spent one writes its tables.
     tkDrawCensusBoundary.run([&] { drawCensusFrameBoundary(s->frameNo); });
     gpuPassProfileFrameBoundary(g_state->ownerCtx, s->frameNo, s->eyeW, s->eyeH);
-    tkFssReveal.run([&] { fssRevealFrameBoundary(); });
-
-    // FSS frame pacing (round 31): the left-only squares are now measured
-    // to be runtime-side (both submitted images carry the flicker equally),
-    // and every vendor's frame-synthesis system -- ASW, motion
-    // reprojection, smart smoothing -- engages only when the app misses
-    // refresh. Whether the BUILD misses refresh is therefore the theory's
-    // premise, and this measures it from our own clock: frame-to-frame
-    // deltas while the body-frame gate is warm, one summary line when the
-    // scanner goes quiet. Log-only, no keys.
-    tkFssPacing.run([&] {
-        static LARGE_INTEGER lastQpc = {};
-        static uint32_t frames = 0, slow = 0;
-        static double sumMs = 0.0, maxMs = 0.0;
-        const bool inFss =
-            s->fssBodyFrame != 0 && s->frameNo - s->fssBodyFrame <= 2;
-        LARGE_INTEGER now, freq;
-        QueryPerformanceCounter(&now);
-        QueryPerformanceFrequency(&freq);
-        if (inFss) {
-            if (lastQpc.QuadPart) {
-                const double ms = (now.QuadPart - lastQpc.QuadPart) * 1000.0 /
-                                  static_cast<double>(freq.QuadPart);
-                if (ms < 500.0) {   // ignore pauses/loads
-                    ++frames;
-                    sumMs += ms;
-                    if (ms > maxMs) maxMs = ms;
-                    if (ms > 13.0) ++slow;   // ~90Hz budget with margin
-                }
-            }
-            lastQpc = now;
-        } else {
-            if (frames >= 30) {
-                Log::get().note(
-                    "fss pacing: %u frames, avg %.2f ms, max %.2f ms, %u "
-                    "frames over 13 ms (%.0f%%). A frame-synthesis system "
-                    "engages exactly when frames run long.",
-                    frames, sumMs / frames, maxMs, slow,
-                    100.0 * slow / frames);
-            }
-            frames = 0;
-            slow = 0;
-            sumMs = 0.0;
-            maxMs = 0.0;
-            lastQpc.QuadPart = 0;
-        }
+    tkFssReveal.run([&] {
+        // The scanner is on show while the FSS mode latch is open or its chrome matched within the last five frames. Flat never arms the reveal fix.
+        const bool onShow = deviceHookFssModeLatch() || (s->fssChromeFrame != 0 && s->frameNo - s->fssChromeFrame <= 5);
+        fssRevealFrameBoundary(onShow, runtimeFlatProfile(), s->frameNo);
     });
+
     tkRemlok.run([&] { remlokFrameBoundary(); });
 
     // The per-frame invalidation lives in binding_shadow now, and device_hook
@@ -6897,23 +6754,9 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     depthProbeConfigure(cfg);
     backdropConfigure(cfg);
     fssPanelConfigure(cfg);
-    fssRevealConfigure(cfg);
+    fssRevealConfigure(runtimeFlatProfile());
     // The engine fix. See the other call site's comment above.
     transitionFlashEyeBaseInstall();
-    {
-        g_state->censusFssJump =
-            cfg.getInt("advanced.census_fss_jump", 0) ? 1 : 0;
-        const int n = eyeSyncFromConfig(cfg).healMode;
-        if (g_state->fssHealOn != n) {
-            g_state->fssHealOn = n;
-            Log::get().note(
-                n ? "fss eye heal: armed -- while the scanner is up, the "
-                    "left eye's hard-black pixels are filled from the "
-                    "right eye's image at the infinity shift, per pixel, "
-                    "stereo untouched."
-                  : "fss eye heal: off.");
-        }
-    }
     sunglareConfigure(cfg);
     exposureConfigure(cfg);
     panelCurveConfigure(cfg);

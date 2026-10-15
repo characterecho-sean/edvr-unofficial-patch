@@ -20,6 +20,7 @@
 #include "../common/guard.h"
 #include "../common/hotkey.h"
 #include "explorer_cam.h"   // explorerCamSessionActive(): the Explorer Cam key row locks while a session is on
+#include "flat_notice_queue.h"
 #include "../common/iniedit.h"
 #include "../common/log.h"
 #include "../common/native_render_settings.h"
@@ -317,8 +318,8 @@ struct State {
     // menuShowNotice in the flat profile, which draws no toasts: the notice is the panel's raster at a toast's size, composited in the
     // upper left corner while it is up. `Shown` is set once that raster (not the menu's) is the live one; `RasterStale` holds the panel
     // back after a notice until the menu's own content has been rasterised, so a toast-sized card never flashes as the menu.
-    std::string flatNoticeText;
-    bool     flatNoticeDue = false;
+    // The queue keeps a notice raised while the menu is open until it closes (flat_notice_queue.h).
+    edvr::FlatNoticeQueue flatNotice;
     bool     flatNoticeUp = false;
     bool     flatNoticeShown = false;
     bool     flatRasterStale = false;
@@ -4171,8 +4172,7 @@ void menuShowNotice(const char* text) {
         return;
     }
     if (runtimeFlatProfile()) {
-        s.flatNoticeText = text;
-        s.flatNoticeDue = true;
+        s.flatNotice.show(text);
         Log::get().note("menu: notice \"%s\" queued for the flat screen (upper left, about %llu s).", text,
                         static_cast<unsigned long long>((kToastMs + 500) / 1000));
         return;
@@ -4353,17 +4353,15 @@ void menuTick(ID3D11Device* dev) {
                 menuPanelSubmit(c);
             }
             // A notice from outside the menu (menuShowNotice): rasterised at a toast's size, composited once that raster is the live one.
-            if (s.flatNoticeDue) {
-                s.flatNoticeDue = false;
-                if (!s.open) {
-                    s.flatNoticeUp = true;
-                    s.flatNoticeShown = false;
-                    s.flatNoticeUntilMs = now + kToastMs;
-                    s.flatNoticeSerial = menuPanelRasterSerial();
-                    MenuContent n;
-                    buildToastContent(n, s.flatNoticeText, kToastWidthDeg, 1.0f);
-                    menuPanelSubmit(n);
-                }
+            // With the menu open the notice stays queued and starts when it closes (it was cleared here and lost).
+            if (const std::string* notice = s.flatNotice.take(s.open)) {
+                s.flatNoticeUp = true;
+                s.flatNoticeShown = false;
+                s.flatNoticeUntilMs = now + kToastMs;
+                s.flatNoticeSerial = menuPanelRasterSerial();
+                MenuContent n;
+                buildToastContent(n, *notice, kToastWidthDeg, 1.0f);
+                menuPanelSubmit(n);
             }
             if (s.flatNoticeUp) {
                 int rasterH = 0;

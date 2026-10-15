@@ -4,6 +4,7 @@
 #include "../common/celestial_math.h"
 #include "../common/guard.h"
 #include "../common/log.h"
+#include "../common/runtime_profile.h"
 #include <wrl/client.h>
 #include <cstdio>
 #include <cstring>
@@ -149,6 +150,11 @@ struct EyeState {
 EyeState g_eye[2];
 cel::Scratch g_scratch;
 uint32_t g_stamp = 0;               // the boundary count; a frame's draws and its consumer share one
+// Flat (the flat profile's planet, read by flat_mono_resolve as eye 0): the frame's one scene target. The first patch draw of a frame
+// records the DSV it binds, with the stamp; see flatSceneEye. g_lastDrawFlat: the profile the last draw ran in.
+ID3D11DepthStencilView* g_flatDsv = nullptr;
+uint32_t g_flatDsvStamp = kNever;
+bool g_lastDrawFlat = false;
 uint64_t g_lastReport = 0;
 bool g_declineNoted[kDecCount] = {};
 bool g_fallbackNoted[cel::kFbCount] = {};
@@ -220,12 +226,30 @@ void noteDeclineOnce(Decline why, const void* b0, const void* b2) {
                     "the 5 s line counts these. Said once per reason.", kDeclineName[why], b0, b2);
 }
 
+// Flat: the frame's one scene target, which is eye 0. The VR eye test (depthProbeCurrentSceneEyeOf) needs two scene depth targets and
+// always declines in flat. In VR's flown approach (log edvr_gfx_20261007_045509) every patch draw landed on a scene eye (off-eye 0 in
+// every window), so flat takes the frame's one target and counts anything else as off-eye rather than mixing it into the bodies. The
+// first patch draw of a frame records the DSV it binds, with the stamp; a draw on that DSV is eye 0; no DSV, or a second one, is -1.
+int flatSceneEye(ID3D11DepthStencilView* dsv) {
+    if (!dsv) return -1;
+    if (g_flatDsvStamp != g_stamp) { g_flatDsv = dsv; g_flatDsvStamp = g_stamp; }
+    return dsv == g_flatDsv ? 0 : -1;
+}
+
 void noteDrawImpl(ID3D11DeviceContext* ctx) {
     const uint64_t t0 = qpc();
     ++g_win.draws;
+    // A live change between the profiles is a gap in the frames: a VR eye's capture never pairs with a flat draw, nor the reverse.
+    const bool flat = runtimeFlatProfile();
+    if (flat != g_lastDrawFlat) {
+        dropCaptured();
+        g_lastDrawFlat = flat;
+    }
     auto* dsv = static_cast<ID3D11DepthStencilView*>(bindingGet(BindSlot::Dsv0));
     int eye = -1, target = -1;
-    if (!dsv || !depthProbeCurrentSceneEyeOf(dsv, &eye, &target) || (eye != 0 && eye != 1)) {
+    if (flat) eye = flatSceneEye(dsv);
+    else if (dsv && !depthProbeCurrentSceneEyeOf(dsv, &eye, &target)) eye = -1;
+    if (eye != 0 && eye != 1) {
         ++g_win.declined[kDecOffEye];
         g_win.captureTicks += qpc() - t0;
         return;

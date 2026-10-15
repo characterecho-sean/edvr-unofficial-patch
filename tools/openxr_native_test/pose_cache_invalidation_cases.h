@@ -279,28 +279,54 @@ template<class Check> void runPoseCacheInvalidationCases(Check&& check) {
     };
     cache.publish(record(1),pose_cache_fixture::clockUs());
     cache.answer(1,1,0x4E3881,first,why);   // teaches the RVA
+    // A record is torn when its fields do not all carry one k: the target is not the display time, or the pose figure is not the display's k.
+    const auto tornAnswer=[](const PoseCacheAnswer& a){
+      const uint64_t k=uint64_t((a.display-5000000000)/1000000);
+      return a.target!=a.display||uint64_t(a.pose.mDeviceToAbsoluteTracking.m[0][3])!=k%100000;
+    };
+    {
+      // The detector itself: an answer built from one record passes, one that mixes two records' fields is flagged (so a zero count below means something).
+      PoseCacheAnswer whole,mixedPose,mixedTarget;
+      const PoseCacheRecord a=record(41),b=record(42);
+      whole.display=a.display;whole.target=a.now.target;whole.pose=a.now.pose;
+      mixedPose=whole;mixedPose.pose=b.now.pose;
+      mixedTarget=whole;mixedTarget.target=b.now.target;
+      check(!tornAnswer(whole)&&tornAnswer(mixedPose)&&tornAnswer(mixedTarget),"the half-written detector passes a whole record and flags one that mixes the fields of two");
+    }
+    // What the test needs is overlap, not a wall-clock window: under CPU load the reader thread can go the whole 300 ms unscheduled (measured 2026-10-15,
+    // 48 spinners beside 8 copies: 14 of 25 runs saw no hit at all, torn never above zero), and a check that waits for a duration then fails on "no hits"
+    // is a scheduling check. So the writer runs for the minimum window AND until the reader has taken a floor of answers while the writer was publishing,
+    // and the phase of the withdrawals varies so the reader cannot sit in lockstep behind one. A 30 s ceiling turns a reader that is never scheduled into a failure.
+    constexpr uint64_t kAnswersWanted=2000;
     std::thread reader([&]{
       while(!stop.load()) {
         PoseCacheAnswer a;PoseCacheMiss m;
         if(cache.answer(1,1,0x4E3881,a,m)) {
           ++answered;
-          const uint64_t k=uint64_t((a.display-5000000000)/1000000);
-          if(a.target!=a.display||uint64_t(a.pose.mDeviceToAbsoluteTracking.m[0][3])!=k%100000)++torn;
+          if(tornAnswer(a))++torn;
         } else ++misses;
       }
     });
     std::thread taker([&]{while(!stop.load()){PoseCacheReport r;cache.takeWindow(r);std::this_thread::yield();}});
     const auto began=std::chrono::steady_clock::now();
     uint64_t k=2;
-    while(std::chrono::steady_clock::now()-began<std::chrono::milliseconds(300)) {
-      if(k%7==0)cache.invalidate(PoseInvalidation::Other);
-      else if(k%5==0)cache.beginWait();
+    uint32_t phase=2463534242u;
+    for(;;) {
+      const auto elapsed=std::chrono::steady_clock::now()-began;
+      if(elapsed>=std::chrono::milliseconds(300)&&answered.load()>=kAnswersWanted)break;
+      if(elapsed>=std::chrono::seconds(30))break;
+      phase^=phase<<13;phase^=phase>>17;phase^=phase<<5;   // xorshift32: which publications are withdrawn or waited on is not a fixed cycle
+      if(phase%7==0)cache.invalidate(PoseInvalidation::Other);
+      else if(phase%5==0)cache.beginWait();
       cache.publish(record(k),pose_cache_fixture::clockUs());
+      if(phase%64==0)std::this_thread::yield();            // lets a reader that the lock's hand-off order is passing over take its turn
       ++k;
     }
     stop.store(true);
     reader.join();taker.join();
-    check(torn.load()==0&&answered.load()>0,"a reader on another thread never sees a record half-written while the owner publishes, waits and withdraws, and the window is taken");
+    if(torn.load()!=0||answered.load()<kAnswersWanted)std::printf("pose cache torn-record stress: torn=%llu answered=%llu misses=%llu published=%llu\n",
+        (unsigned long long)torn.load(),(unsigned long long)answered.load(),(unsigned long long)misses.load(),(unsigned long long)k);
+    check(torn.load()==0&&answered.load()>=kAnswersWanted,"a reader on another thread never sees a record half-written while the owner publishes, waits and withdraws, and the window is taken");
   }
 
   SetEnvironmentVariableW(L"LOCALAPPDATA",hadPrevious&&hadPrevious<MAX_PATH?previous:nullptr);

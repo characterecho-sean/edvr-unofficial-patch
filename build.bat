@@ -385,7 +385,6 @@ python "tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --extra-export edvrAcquireRenderBoundary ^
     --extra-export edvrAcquireNativeGraphics ^
     --extra-export edvr_selftest_graphics_bridge ^
-    --extra-export edvrFssHealLeft ^
     --extra-export edvrTemporalAa ^
     --extra-export edvrEyeCaptureUntreated ^
     --extra-export edvrTemporalAaNoteHead ^
@@ -395,7 +394,6 @@ python "tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --extra-export edvrAcquireNativeTemporal ^
     --extra-export edvrAcquireNativeSharpen ^
     --extra-export edvrAcquireNativeFrame ^
-    --extra-export edvrAcquireNativeFss ^
     --extra-export edvrAcquireNativeTiming ^
     --extra-export edvrReadNativePresentTrace ^
     --extra-export "edvrNativeStartupRouting DATA" ^
@@ -598,7 +596,6 @@ python tools\compile_cache.py --prune --keep thunks.obj cl.exe %CFLAGS% %NGXFLAG
     "src\d3d11\vr_world_route.cpp" "src\d3d11\vr_world_mips.cpp" "src\d3d11\vr_camera_census.cpp" ^
     "src\d3d11\native_sharpen.cpp" ^
     "src\d3d11\native_frame.cpp" ^
-    "src\d3d11\native_fss.cpp" ^
     "src\d3d11\native_timing.cpp" ^
     "src\d3d11\map_wait.cpp" ^
     "src\d3d11\native_render_settings.cpp" ^
@@ -629,7 +626,6 @@ python tools\compile_cache.py --prune --keep thunks.obj cl.exe %CFLAGS% %NGXFLAG
     "src\d3d11\fss_res.cpp" ^
     "src\d3d11\fss_panel.cpp" ^
     "src\d3d11\fss_reveal.cpp" ^
-    "src\d3d11\fss_heal.cpp" ^
     "src\d3d11\vertex_resync_hook.cpp" "src\d3d11\light_grid_cache_hook.cpp" ^
     "src\d3d11\xinput_watch.cpp" ^
     "src\d3d11\fss_panel_rect.cpp" ^
@@ -989,30 +985,19 @@ if errorlevel 1 ( echo [edvr] ERROR: native frame provider test build failed & e
 "%BUILD%\native_frame_test.exe" --self-test || exit /b 1
 exit /b 0
 
-:rig_native_fss_test
-echo [edvr] === native_fss_test.exe ===
-if not exist "%OBJ%\native_fss" mkdir "%OBJ%\native_fss"
+:rig_fss_reveal_test
+echo [edvr] === fss_reveal_test.exe ===
+REM The FSS reveal fix (src\d3d11\fss_reveal_core.h, fss_reveal_replay.h, fss_reveal.cpp): the pure decisions (a hash-only match on another target is declined, no replay without a recorded downsample,
+REM flat never replays, only the first composite of a frame decides), the real state capture and replay on a WARP device with the debug layer (the state after equals the state before, the constants are
+REM read from a private copy), and source pins on the hook. No DLL, no game, no window.
+if not exist "%OBJ%\fssreveal" mkdir "%OBJ%\fssreveal"
 %CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
-    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE ^
-    /Fo"%OBJ%\native_fss\\" /Fe"%BUILD%\native_fss_test.exe" ^
-    "tools\native_fss_test\native_fss_test.cpp" "src\d3d11\native_fss.cpp" ^
-    /link /INCREMENTAL:NO kernel32.lib user32.lib dxgi.lib
-if errorlevel 1 ( echo [edvr] ERROR: native FSS provider test build failed & exit /b 1 )
-"%BUILD%\native_fss_test.exe" --dry-run || exit /b 1
-"%BUILD%\native_fss_test.exe" --self-test || exit /b 1
-exit /b 0
-
-:rig_native_fss_gpu_test
-echo [edvr] === native_fss_gpu_test.exe ===
-if not exist "%OBJ%\native_fss_gpu" mkdir "%OBJ%\native_fss_gpu"
-%CC% /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
-    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\native_fss_gpu\\" /Fe"%BUILD%\native_fss_gpu_test.exe" ^
-    "tools\native_fss_test\native_fss_gpu_test.cpp" "src\d3d11\native_fss.cpp" "src\d3d11\fss_heal.cpp" ^
-    "src\common\config.cpp" "src\common\frame_flag.cpp" "src\common\log.cpp" "src\common\guard.cpp" ^
-    /link /INCREMENTAL:NO kernel32.lib user32.lib dxgi.lib d3dcompiler.lib
-if errorlevel 1 ( echo [edvr] ERROR: native FSS shader test build failed & exit /b 1 )
-"%BUILD%\native_fss_gpu_test.exe" --dry-run || exit /b 1
-"%BUILD%\native_fss_gpu_test.exe" --self-test || exit /b 1
+    /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\fssreveal\\" ^
+    /Fe"%BUILD%\fss_reveal_test.exe" "tools\fss_reveal_test\fss_reveal_test.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib d3dcompiler.lib
+if errorlevel 1 ( echo [edvr] ERROR: fss reveal test build failed & exit /b 1 )
+"%BUILD%\fss_reveal_test.exe" --dry-run || exit /b 1
+"%BUILD%\fss_reveal_test.exe" --self-test "%ROOT%" || exit /b 1
 exit /b 0
 
 :rig_native_trim_test

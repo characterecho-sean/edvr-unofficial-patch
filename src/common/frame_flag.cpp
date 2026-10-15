@@ -63,15 +63,14 @@ struct Shared {
     // fssChromeStamp  bumped by d3d11 on every frame that draws the
     //                 scanner's chrome: a counter, compared with !=,
     //                 staleness judged by the reader against its own
-    //                 frame count. The eye heal's gate.
+    //                 frame count.
     volatile LONG fssChromeStamp;
     // The scanner screen's rectangle in the (left) eye, derived by d3d11
     // once per theater engage from the composite's own constants; the
     // openvr half crops the cinema screen's content to it. seq bumps per
     // publish; 0 means never published.
     volatile LONG fssPanelRectSeq;
-    // The arrival stamp: bumped by d3d11 each frame the zoom-press
-    // window is open. The heal scopes itself to exactly these frames.
+    // Unused since 2026-10-15 (the arrival stamp the removed heal read). The slot stays: the layout is versioned by the mapping's name.
     volatile LONG fssArrivalStamp;
     // The head pose the runtime returned, row-major 3x4, published every
     // frame BEFORE any EDVR offset touches it. The intro panel builds a
@@ -418,23 +417,6 @@ void publishFssPanelRect(const float* corners16) {
     InterlockedIncrement(&s->fssPanelRectSeq);
 }
 
-void bumpFssArrivalStamp() {
-    Shared* s = map();
-    if (s) InterlockedIncrement(&s->fssArrivalStamp);
-}
-
-long fssArrivalStampValue() {
-    Shared* s = map();
-    return s ? s->fssArrivalStamp : 0;
-}
-
-bool readFssPanelRect(float* out16) {
-    Shared* s = map();
-    if (!s || !out16 || s->fssPanelRectSeq == 0) return false;
-    for (int i = 0; i < 16; ++i) out16[i] = s->fssPanelRect[i];
-    return true;
-}
-
 void bumpFssChromeStamp() {
     Shared* s = map();
     if (s) ++s->fssChromeStamp;
@@ -443,18 +425,6 @@ void bumpFssChromeStamp() {
 LONG fssChromeStampValue() {
     Shared* s = map();
     return s ? s->fssChromeStamp : 0;
-}
-
-void publishSubmitTexture(int eye, void* texture) {
-    Shared* s = map();
-    if (!s || eye < 0 || eye > 1) return;
-    s->submitTex[eye] = reinterpret_cast<LONG64>(texture);
-}
-
-void* submittedTexture(int eye) {
-    Shared* s = map();
-    if (!s || eye < 0 || eye > 1) return nullptr;
-    return reinterpret_cast<void*>(s->submitTex[eye]);
 }
 
 void publishGameDevice(void* device) {

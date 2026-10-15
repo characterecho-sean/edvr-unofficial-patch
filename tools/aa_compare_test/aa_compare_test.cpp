@@ -16,6 +16,7 @@
 #include "../../src/common/hotkey.h"
 #include "../../src/common/log.h"
 #include "../../src/common/runtime_profile.h"
+#include "../../src/d3d11/flat_notice_queue.h"
 
 using namespace edvr;
 using namespace edvr::aacmp;
@@ -209,6 +210,51 @@ static void configCells(const std::wstring& dir) {
     check(slurp(std::string(ini.begin(), ini.end())).find("temporal_aa = fsr") != std::string::npos, "the file still says what the player wrote");
 }
 
+// The flat F8 panel is the notice's surface, so a notice raised with the menu open (F7 pressed while F8 is up) waits for it to close
+// (review of main 9fe5b257, finding 4: menuTick cleared the due flag every tick and started the notice only with the menu closed).
+// FlatNoticeQueue is the production decision menuTick calls; the cells drive it with the real notice words.
+static void flatNoticeCells() {
+    // F7 with the menu open: AA goes off (the comparison), the notice is queued; menuTick runs a few times with the menu open.
+    {
+        FlatNoticeQueue q;
+        q.show(noticeText(Press::WentOff, "dlss", "F7").c_str());
+        check(q.due(), "the off notice is queued");
+        check(q.take(true) == nullptr && q.take(true) == nullptr && q.take(true) == nullptr,
+              "ticks with the menu open do not start the notice");
+        check(q.due(), "...and do not discard it");
+        const std::string* got = q.take(false);
+        check(got && *got == "AA off (comparison), press F7 to restore", "the menu closes: the off notice starts, word for word");
+        check(!q.due() && q.take(false) == nullptr, "...once");
+    }
+    // Restoring AA with the menu open: same.
+    {
+        FlatNoticeQueue q;
+        q.show(noticeText(Press::Restored, "dlss", "F7").c_str());
+        check(q.take(true) == nullptr && q.due(), "the restore notice is kept while the menu is open");
+        const std::string* got = q.take(false);
+        check(got && *got == "AA restored: DLSS", "...and starts when the menu closes");
+    }
+    // Off then restore while the menu stays open: the newer notice replaces the older, the player sees where AA stands now.
+    {
+        FlatNoticeQueue q;
+        q.show(noticeText(Press::WentOff, "dlss", "F7").c_str());
+        check(q.take(true) == nullptr, "off, menu open");
+        q.show(noticeText(Press::Restored, "dlss", "F7").c_str());
+        check(q.take(true) == nullptr, "restored, menu open");
+        const std::string* got = q.take(false);
+        check(got && *got == "AA restored: DLSS" && q.take(false) == nullptr, "only the newest starts when the menu closes");
+    }
+    // Menu closed when the notice is raised: it starts on the next tick, as before.
+    {
+        FlatNoticeQueue q;
+        q.show("AA off (comparison), press F7 to restore");
+        check(q.take(false) != nullptr && !q.due(), "with the menu closed the notice starts at once");
+        q.show("");
+        q.show(nullptr);
+        check(!q.due() && q.take(false) == nullptr, "an empty notice queues nothing");
+    }
+}
+
 static bool has(const std::string& text, const char* needle) { return text.find(needle) != std::string::npos; }
 
 static void sourcePins(const std::string& root) {
@@ -228,6 +274,8 @@ static void sourcePins(const std::string& root) {
           "the toggle asks for the config poll through the menu's own request, which the frame boundary already honours");
     check(has(menu, "aaCompareNoteMenuEdit();") && has(menu, "\"fix.temporal_aa\""), "an F8 write of fix.temporal_aa tells the comparison");
     check(has(menu, "void menuShowNotice(") && has(menu, "void menuNoteOwnChange("), "the menu has the notice and the own-change calls");
+    check(has(menu, "s.flatNotice.show(text);") && has(menu, "s.flatNotice.take(s.open)"),
+          "the flat menu raises and starts its notice through the queue, which holds it while the menu is open");
     check(has(ini, "compare_aa = F7"), "edvr.ini ships the key bound to F7");
     check(std::string(kDefaultKey) == "F7", "and the code's default is the same F7");
     check(has(ini, "# ui: AA comparison key (empty = off) | hotkey | live"), "the F8 Hotkeys page has the row");
@@ -253,6 +301,7 @@ int main(int argc, char** argv) {
     machineCells();
     wordsCells();
     clashCells();
+    flatNoticeCells();
     configCells(dir);
     sourcePins(argv[1]);
 

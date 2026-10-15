@@ -22,6 +22,7 @@
 #include "station_gather_core.h"
 #include "station_lockfree_core.h"
 #include "station_pass_core.h"
+#include "station_seal_trace.h"
 #include "pad_state_probe.h"
 #include "store_hook.h"
 #include "view_source.h"
@@ -130,6 +131,9 @@ uintptr_t g_passCtx = 0;                    // the context the last informative 
 bool g_engagePublished = false;             // built v14.31: the last published view had an engage pending (every pass gathers the near list, the candidate, the tally)
 uint32_t g_recordsLast = 0;                 // store callbacks the last drained passes held (the waiting line's evidence)
 bool g_stickyPadInPass = false;
+// Built 2026-10-15: the seal trace's pass fields, set by drainGather (the tick): the verdict the drained passes earned, and whether it was thin.
+sealed::TraceVerdict g_passVerdictLast = sealed::TraceVerdict::kEmpty;
+bool g_passThinLast = false;
 constexpr float kCamJumpM = 2.0f;
 sealed::OwnCell g_pickCell;                // the frame's pick before the seal (what the seal rule reads)
 sealed::OwnCell g_cellPrev;                // the cell the observer judges against this frame
@@ -737,24 +741,27 @@ void pickOwnRecord(uint32_t frame) {
 // poseOrientOf), and the pad's height along the shaft against the shell. Called at the frame's promote (before the drop decisions) and at the frame
 // tick (before the rig verdicts), so every judgement of a frame uses the cell as the frame's records are expressed. A pose that cannot be read
 // this frame keeps the cell as it was. A shell that cannot be read stands the motion check down until the next engage.
-void refreshHeldWorld() {
-    if (!g_heldValid || !g_heldLocalValid) return;
+// Built 2026-10-15: returns the call's result for the seal trace (station_seal_trace.h): not held, rebuilt and moved, rebuilt and unmoved, or kept as it was
+// when the pose could not be read. The tick's own call is the one recorded; the same result is not used for anything else.
+sealed::HeldRefresh refreshHeldWorld() {
+    if (!g_heldValid || !g_heldLocalValid) return sealed::HeldRefresh::kNotHeld;
     const WorldRead pw = worldOfRecord(g_heldCell.pad);
     float axes[3][3] = {};
     float ext[3] = {};
     bool extOk = false;
     uint8_t src = 4;
-    if (pw.source == 4 || !poseOrientOf(g_heldCell.pad, axes, ext, &extOk, &src)) return;
+    if (pw.source == 4 || !poseOrientOf(g_heldCell.pad, axes, ext, &extOk, &src)) return sealed::HeldRefresh::kKeptStale;
     sealed::OwnCell w = g_heldCell;
     sealed::worldizeCell(g_heldLocal, pw.world, axes, &w);
+    const sealed::HeldRefresh res = sealed::distance(w.centre, g_heldCell.centre) == 0.0f ? sealed::HeldRefresh::kNoChange : sealed::HeldRefresh::kRefreshed;
     g_heldCell = w;
     g_cellPrev = w;
     g_frameShiftM = sealed::distance(pw.world, g_engageCentre);
-    if (!g_shellValid) return;
+    if (!g_shellValid) return res;
     // One sample a frame: the tick and the observer both refresh the held cell.
     const uint32_t shellStamp = g_frameStamp.load(std::memory_order_relaxed);
-    if (g_shellSampleStamp == shellStamp) return;
-    if (!g_passInformative) return;   // built v14.27: the motion sample is taken on an informative pass only (an empty or unfinished pass is no reading)
+    if (g_shellSampleStamp == shellStamp) return res;
+    if (!g_passInformative) return res;   // built v14.27: the motion sample is taken on an informative pass only (an empty or unfinished pass is no reading)
     g_shellSampleStamp = shellStamp;
     char nm[48] = {};
     const WorldRead sw = worldOfRecord(g_shellAddr);
@@ -762,7 +769,7 @@ void refreshHeldWorld() {
         // Built v14 (fix 2): the reference is not switched to another part; the pad's motion check stands down for this seal.
         g_shellValid = false;
         Log::get().note("optimized station: the reference shell %s is no longer at its record; the pad's motion check stands down (no other shell is taken)", g_shellName);
-        return;
+        return res;
     }
     const float up[3] = {g_engageAxes[2][0], g_engageAxes[2][1], g_engageAxes[2][2]};
     const bool first = !g_shellMotion.captured;
@@ -774,6 +781,7 @@ void refreshHeldWorld() {
     }
     g_shellDeltaM = g_shellMotion.delta;
     if (release) g_releaseMotion = true;
+    return res;
 }
 
 // The record's view mask and admitted flag through the guarded reads and writes, for the fault-safe cull (sealed_trial_core.h).
@@ -1235,6 +1243,13 @@ bool g_mechanismMoved = false;             // built v14.14: a latched bay mechan
 sealed::MechArm g_mechArm;                 // built v14.33: the mechanism release arms after the latched records were still for 60 informative passes
 bool g_flagPadMoved = false;               // promote saw the held pad move along the shaft against the shell: the tick releases on it
 char g_releaseWhy[160] = {};               // the release text for the flags above (the pad move or the hangar change, with its names)
+// Built 2026-10-15: the transition hold. latchRead sets g_originShiftPending when the common frame shifted (this tick, before the seal step, which takes
+// the flag once); g_originShiftM is its distance, for the release text. g_holdCause names what set the hold, for the one line the hold writes.
+bool g_originShiftPending = false;
+float g_originShiftM = 0.0f;
+const char* g_holdCause = "origin shift";
+bool g_holdLineOpen = false;               // the hold's line is written for this hold (cleared when a request is no longer held back)
+sealed::SealTrace g_sealTrace;             // built 2026-10-15: the anomaly-armed seal trace (station_seal_trace.h); the tick feeds it one record a frame
 uint32_t g_settingPoll = 0;                // frames since the setting was last read
 uint64_t g_summaryStartMs = 0;             // the 30 s summary's window
 uint64_t g_winFrames = 0;                  // ticks in the window
@@ -1321,6 +1336,11 @@ const char* releaseText(sealed::ReleaseWhy w) noexcept {
             std::snprintf(g_onFootText, sizeof(g_onFootText), "on foot, not seated in the ship (%s); the seal is for the cockpit only", t);
             return g_onFootText;
         }
+        case sealed::ReleaseWhy::kOriginShift:   // built 2026-10-15: the transition hold; the text carries the shift and the hold's length
+            std::snprintf(g_releaseWhy, sizeof(g_releaseWhy), "the coordinate origin shifted by %.1f m: the commander is boarding or disembarking "
+                          "(a transition); no re-seal for %.1f s", static_cast<double>(g_originShiftM),
+                          static_cast<double>(sealed::kTransitionHoldMs) / 1000.0);
+            return g_releaseWhy;
         default: return "released";
     }
 }
@@ -1463,9 +1483,12 @@ void latchRead(uint64_t now) noexcept {
         shifted = sealed::commonFrameShift(deltas, g_latch.n, sd, 1.0f, 0.1f);
         if (shifted) {
             ++g_winOriginShifts;
+            const float shiftM = std::sqrt(sd[0] * sd[0] + sd[1] * sd[1] + sd[2] * sd[2]);
+            g_originShiftM = shiftM;             // built 2026-10-15: the transition hold (the seal step takes the flag this tick, after this read)
+            g_originShiftPending = true;
             Log::get().note("optimized station: the coordinate origin shifted by %.2f m (the shell and all %u latched records moved together); the bay's "
                             "motion references are re-based and this is not motion.",
-                            static_cast<double>(std::sqrt(sd[0] * sd[0] + sd[1] * sd[1] + sd[2] * sd[2])), static_cast<unsigned>(g_latch.n));
+                            static_cast<double>(shiftM), static_cast<unsigned>(g_latch.n));
         }
     }
     g_latchLastN = allOk ? g_latch.n : 0;
@@ -1951,8 +1974,14 @@ void drainGather() {
     g_winLost += d.lost;
     // Built v14.27: the verdict on the drained passes. Only a complete pass that held a store callback is evidence; an empty or unfinished one leaves the
     // pad, the camera, the latch samples and the rig publication as they were.
+    const uint64_t thinBefore = g_passGate.thin;
     const sealed::PassVerdict v = g_passGate.step(d.complete, d.passes, d.calls);
     g_passInformative = v == sealed::PassVerdict::kInformative;
+    // Built 2026-10-15: the seal trace's pass fields (the verdict, and whether the pass counted as thin: the same count the 30 s line keeps).
+    g_passThinLast = g_passGate.thin != thinBefore;
+    g_passVerdictLast = v == sealed::PassVerdict::kInformative ? sealed::TraceVerdict::kInformative
+                        : v == sealed::PassVerdict::kEmpty   ? sealed::TraceVerdict::kEmpty
+                                                             : sealed::TraceVerdict::kUnfinished;
     g_passCalls = d.calls;
     g_recordsLast = static_cast<uint32_t>(d.calls > 0xFFFFFFFFull ? 0xFFFFFFFFull : d.calls);
     // A loss keeps every record in the next publication; it ends with the first informative pass that lost nothing.
@@ -2474,6 +2503,11 @@ bool mechanismPoseTick(uint64_t now) noexcept {
 
 void optimizedStationFrameBody(uint32_t frame);
 
+// Built 2026-10-15: the seal trace's emitter. Each line goes out as one "%s" argument, so the trace's text is never a log format.
+void traceEmit(void* /*ctx*/, const char* line) noexcept {
+    Log::get().note("%s", line);
+}
+
 // The frame tick, timed every frame while the setting is on (built v14.24).
 void optimizedStationFrame(uint32_t frame) {
     const bool on = g_setting.load(std::memory_order_acquire);
@@ -2535,7 +2569,7 @@ void optimizedStationFrameBody(uint32_t frame) {
     g_dockedWasNow = g_dockedNow.load(std::memory_order_acquire);
     storeHookGate();   // built v14.20 (review 7b): the store observer gathers only while docked (an atomic gate: no hook is installed here)
     gameStateTick();   // built v14.23: the own pad from the game, before the sun and the trigger read it
-    refreshHeldWorld();
+    const sealed::HeldRefresh heldRefresh = refreshHeldWorld();   // built 2026-10-15: the call's result goes to the seal trace
     // The camera against the held box: outside it by more than kCameraLeaveM releases the seal.
     bool cameraOutside = false;
     if (g_heldValid && g_frameCamValid) {
@@ -2743,9 +2777,18 @@ void optimizedStationFrameBody(uint32_t frame) {
     }
     in.hangarChanged = g_flagHangarChanged;
     in.launched = false;   // the pad state object's reader is not in this build: the launch is the r1 edge and the mechanism
+    // Built 2026-10-15: the origin shift latchRead read this tick (before this point, on the same tick): the seal step takes it once.
+    in.originShifted = g_originShiftPending;
     in.nowMs = now;
     sealed::ReleaseWhy why = sealed::ReleaseWhy::kNone;
+    const uint64_t holdBefore = g_sealState.holdUntilMs;
     const sealed::SealAction act = sealed::sealStep(in, &g_sealState, &why);
+    g_originShiftPending = false;
+    // Built 2026-10-15: what set the hold, for its line: an origin-shift or Lift release, or an origin shift read while docked.
+    if (act == sealed::SealAction::kRelease && why == sealed::ReleaseWhy::kOriginShift) g_holdCause = "origin shift";
+    else if (act == sealed::SealAction::kRelease && why == sealed::ReleaseWhy::kMechanism) g_holdCause = "mechanism release";
+    else if (in.originShifted && !in.held) g_holdCause = "origin shift";
+    const bool holdStarted = g_sealState.holdUntilMs != holdBefore && g_sealState.holdUntilMs != 0;
     g_flagPadMoved = false;
     g_flagHangarChanged = false;
     {
@@ -2768,6 +2811,16 @@ void optimizedStationFrameBody(uint32_t frame) {
             g_engageShell = g_preShellValid ? g_preShellAddr : 0;   // the shell the request is bound to (built v14.20)
             g_engageTries = 0;
         }
+    }
+    // Built 2026-10-15: a request the transition hold kept back is written once, when it begins (not per tick); it ends with the request or the trigger.
+    if (g_sealState.holdBlocked) {
+        if (!g_holdLineOpen) {
+            g_holdLineOpen = true;
+            Log::get().note("optimized station: re-seal held until %.1f s after the %s (Status.json reports the seat about a second late).",
+                            static_cast<double>(sealed::kTransitionHoldMs) / 1000.0, g_holdCause);
+        }
+    } else {
+        g_holdLineOpen = false;
     }
     padStateTick(now, g_track.have ? g_track.own : 0);   // built v14.23: the own pad's change lines and the seal or release line (log only)
     // Built v14.23: the waiting line, while docked and unsealed: one line when a key changes, and at most every 10 s while docked.
@@ -2823,7 +2876,38 @@ void optimizedStationFrameBody(uint32_t frame) {
     // publication is emptied at once (the veto answers only while sealed).
     if (g_passInformative || !g_heldValid) refreshRigVerdicts();
     publishSnapshot();   // built v14.25: the tick's view for the per-record path (under the lock)
-    if (now - g_summaryStartMs >= kSummaryMs) summaryLine(now);
+    {
+        // Built 2026-10-15: the seal trace takes this tick's record. It runs before the 30 s line resets the window totals, which it reads as deltas.
+        sealed::TickRecord tr;
+        tr.frame = frame;
+        tr.nowMs = now;
+        tr.docked = g_dockedNow.load(std::memory_order_acquire);
+        tr.held = g_heldValid;
+        tr.verdict = g_passVerdictLast;
+        tr.thin = g_passThinLast;
+        tr.passCalls = g_passCalls;
+        tr.ownSet = g_ownSticky.pad != 0;
+        tr.ownInPass = g_stickyPadInPass;
+        tr.ownUnseen = static_cast<uint32_t>(g_ownSticky.unseen);
+        tr.refresh = heldRefresh;
+        if (g_heldValid) std::memcpy(tr.centre, g_heldCell.centre, sizeof(tr.centre));
+        tr.frameShiftM = g_frameShiftM;
+        tr.camValid = g_frameCamValid;
+        std::memcpy(tr.cam, g_frameCam, sizeof(tr.cam));
+        tr.cameraOutside = cameraOutside;
+        tr.rigVetoes = g_winRigVetoes.load(std::memory_order_relaxed);
+        tr.producerVetoes = g_winProducerVetoes.load(std::memory_order_relaxed);
+        tr.culled = g_winCulled.load(std::memory_order_relaxed);
+        tr.released = act == sealed::SealAction::kRelease;
+        tr.why = why;
+        tr.originShift = in.originShifted;
+        tr.holdStarted = holdStarted;
+        g_sealTrace.step(tr, traceEmit, nullptr);
+    }
+    if (now - g_summaryStartMs >= kSummaryMs) {
+        summaryLine(now);
+        g_sealTrace.windowReset();   // the window totals start again at zero
+    }
     (void)frame;
 }
 

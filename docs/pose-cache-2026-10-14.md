@@ -17,7 +17,10 @@
 - **Open.** (1) Flight on Pimax or SteamVR: hangar, `on` against `off`. (2) The original's in-wait `next` slot is early by k periods
   after a skipped frame (measured by `target_delta`, accepted in the 10-11 flight). (3) `edvr_log.py` does not parse the two cache
   lines; read them with `--grep native_pose_cache`.
-- **Ruled out.** Nothing new. The original's own journal (not on main) holds H7 (the job thread stalls behind xrWaitFrame, confirmed by
+- **Ruled out.** A torn record in `PoseCache` (2026-10-15): every field of the record is written and read under `mutex_`, there is no unlocked
+  read of `rec_`; the one `openxr_native_test` failure ("a reader on another thread never sees a record half-written") was the test's
+  `answered>0` floor, which a reader thread unscheduled for the 300 ms window fails (torn was 0 in every run, failing or not; about half of
+  the runs failed beside 48 CPU spinners). The case now runs until the reader has taken 2000 answers. The original's own journal (not on main) holds H7 (the job thread stalls behind xrWaitFrame, confirmed by
   flight 9033ff1b, queue p95 8.1-9.4 ms).
 - **Next flight.** Checklist at the end.
 

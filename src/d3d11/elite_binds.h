@@ -2,7 +2,7 @@
 //
 // Elite stores bindings as XML in Options\Bindings\*.binds under its local
 // appdata, with StartPreset.start naming the active preset. The bindings
-// EDVR watches for -- the FSS enter, quit and zoom keys -- are in there,
+// EDVR watches for -- the FSS enter and quit keys -- are in there,
 // already answered, for every player who has ever bound them in the game.
 // Reading them removes the last piece of manual setup: no ini editing at all
 // for keyboard players.

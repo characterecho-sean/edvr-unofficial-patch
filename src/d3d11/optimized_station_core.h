@@ -1017,6 +1017,11 @@ constexpr uint32_t kCameraFrames = 10;
 constexpr float kPoseTolM = 0.25f;
 constexpr float kPoseTolDeg = 1.0f;
 constexpr uint32_t kPoseBackFrames = 30;
+// Built 2026-10-15: the transition hold. A common-frame origin shift (the coordinate origin re-based: the commander boarding or disembarking) releases the
+// seal and keeps the re-seal waiting kTransitionHoldMs; so does a mechanism release, for its pose-back re-seal (the r1 edge re-seal is not held: sealStep).
+// The measured reason: Status.json reported on foot 0.64-1.1 s after the disembark began (flat log edvr_gfx_20261015_155732), so the seat still read as
+// aboard for about a second after the transition began. 2.5 s covers that with room.
+constexpr uint64_t kTransitionHoldMs = 2500;
 // The game's pad state is fresh when its last call on the own object is within this many milliseconds.
 constexpr uint64_t kPadStateFreshMs = 1000;
 // The reader codes (r0: 0 Ready for landing, 1 Inside_Hangar, 2 Outside_Hangar, 3 other; r1: 1 Inside_Hangar and settled).
@@ -1025,7 +1030,7 @@ constexpr uint8_t kReaderMoving = 1;    // r0 1: moving in or locked in
 constexpr uint8_t kReaderDescent = 3;   // r0 3: the descent has started
 
 enum class SealAction : uint8_t { kNone = 0, kRequestEngage = 1, kRelease = 2 };
-enum class ReleaseWhy : uint8_t { kNone = 0, kSettingOff, kUndocked, kCameraLeft, kPadMoved, kHangarChanged, kLaunch, kMechanism, kInHangarLeft, kOnFoot };
+enum class ReleaseWhy : uint8_t { kNone = 0, kSettingOff, kUndocked, kCameraLeft, kPadMoved, kHangarChanged, kLaunch, kMechanism, kInHangarLeft, kOnFoot, kOriginShift };
 
 // Release blocker for v0.20.0 (2026-10-14): the seal is for the commander sitting in the ship on the pad. The sealed box is tall (152 x 75 x 258 m for a small pad), so the lift
 // shaft and the concourse above it can lie inside it, and a camera that rode the lift up stayed "in the bay" while the culling hid the station's geometry. The game states the seat
@@ -1063,6 +1068,7 @@ struct SealInputs {
     bool padMoved = false;       // the pad moved more than kPadMoveReleaseM along the shaft relative to the hangar shell (ShellMotion)
     bool hangarChanged = false;  // the held pad is gone from the store, or another own pad is the nearest for kHeldLostFrames
     bool launched = false;       // not used (no reader for the launch): always false
+    bool originShifted = false;  // built 2026-10-15: a common-frame origin shift was detected this tick (the latch read, before the step): a transition
     uint64_t nowMs = 0;
 };
 
@@ -1079,6 +1085,11 @@ struct SealState {
     // Those frames re-seal without the r1 edge (kPoseBackFrames), when r1 is 1 and fresh and the camera rule holds.
     bool mechanism = false;
     uint32_t poseRun = 0;
+    // Built 2026-10-15: the transition hold. No request before nowMs reaches this (kTransitionHoldMs after an origin-shift or mechanism release, or an
+    // origin shift while docked). An undock clears it, and a setting toggle clears the whole state. The fresh r1 edge re-seal is not held.
+    uint64_t holdUntilMs = 0;
+    // This call's request was kept back by holdUntilMs (set per call; the tick logs the first such call of a hold once).
+    bool holdBlocked = false;
 };
 
 // A release, or the trigger lapsing: the request starts again.
@@ -1805,9 +1816,11 @@ inline bool fullGatherPass(uint32_t stamp, bool engagePending, bool sealed) noex
 // fresh), the setting is on, Status says docked, the pad pick and cell are valid, and the camera is in the bay for kCameraFrames. Seal at once: no
 // stillness clock, no load-in or arrival rule, no fallback. Releases: setting off, undocked, the camera left, the mechanism moved, the pad moved,
 // the hangar changed, and the own pad leaving the hangar (the r1 1 to 0 edge). A release by the mechanism, the pad moving or the pad leaving the
-// hangar needs a fresh in-hangar edge (0 then 1 of r1) before the next seal; a camera or setting release does not.
+// hangar needs a fresh in-hangar edge (0 then 1 of r1) before the next seal; a camera or setting release does not. Built 2026-10-15: an origin shift (a
+// boarding or disembark) releases the seal, or holds the next request, for kTransitionHoldMs; the hold gates the request, not the pose and camera runs.
 inline SealAction sealStep(const SealInputs& in, SealState* st, ReleaseWhy* why) noexcept {
     *why = ReleaseWhy::kNone;
+    st->holdBlocked = false;
     if (!in.setting) {
         *st = SealState{};
         if (in.held) {
@@ -1828,6 +1841,7 @@ inline SealAction sealStep(const SealInputs& in, SealState* st, ReleaseWhy* why)
         ReleaseWhy w = ReleaseWhy::kNone;
         if (!in.docked) w = ReleaseWhy::kUndocked;
         else if (!in.aboard) w = ReleaseWhy::kOnFoot;   // the seat left: on foot in the hangar, the lift, the concourse. No edge is needed to seal again when the seat comes back
+        else if (in.originShifted) w = ReleaseWhy::kOriginShift;   // built 2026-10-15: the commander is boarding or disembarking (the origin re-based): held kTransitionHoldMs
         else if (st->camOutRun >= kCameraFrames) w = ReleaseWhy::kCameraLeft;
         else if (in.mechanismMoved) w = ReleaseWhy::kMechanism;   // the hatch or the lift moved: the launch
         else if (in.padMoved) w = ReleaseWhy::kPadMoved;
@@ -1843,6 +1857,8 @@ inline SealAction sealStep(const SealInputs& in, SealState* st, ReleaseWhy* why)
             clearTrigger(st);
             st->camOutRun = 0;
             if (w == ReleaseWhy::kCameraLeft) st->camInRun = 0;   // the re-seal waits kCameraFrames inside the bay
+            // Built 2026-10-15: the transition hold. The origin shift and the Lift keep the re-seal waiting; their Status.json seat reads a second late.
+            if (w == ReleaseWhy::kOriginShift || w == ReleaseWhy::kMechanism) st->holdUntilMs = in.nowMs + kTransitionHoldMs;
             *why = w;
             return SealAction::kRelease;
         }
@@ -1853,7 +1869,14 @@ inline SealAction sealStep(const SealInputs& in, SealState* st, ReleaseWhy* why)
         st->reseal = 0;
         st->mechanism = false;
         st->poseRun = 0;
+        st->holdUntilMs = 0;   // built 2026-10-15: an undock ends any transition hold
         return SealAction::kNone;
+    }
+    // Built 2026-10-15: an origin shift while docked (a boarding, or the disembark before Status.json says on foot): no seal into the transition. A request
+    // in flight is withdrawn with it, so the hold cannot be walked past by an engage already asked for.
+    if (in.originShifted) {
+        st->holdUntilMs = in.nowMs + kTransitionHoldMs;
+        clearTrigger(st);
     }
     if (!in.aboard) {   // on foot (or the seat unknown): never seal; a request in flight is withdrawn
         clearTrigger(st);
@@ -1889,9 +1912,19 @@ inline SealAction sealStep(const SealInputs& in, SealState* st, ReleaseWhy* why)
         }
     }
     if (st->reseal == 1) return SealAction::kNone;   // in the bay but not yet out since the release: wait for the edge
-    if (st->reseal == 2) st->reseal = 0;             // out, then in: the fresh edge
+    // Built 2026-10-15: the r1 edge (out, then in) is not held: the rig's v14.24 edge check pins it at once after a Lift release. The hold covers the
+    // pose-back re-seal and the origin-shift re-seal, both of which reach here without the edge.
+    bool edge = false;
+    if (st->reseal == 2) {   // out, then in: the fresh edge
+        st->reseal = 0;
+        edge = true;
+    }
     if (st->camInRun < kCameraFrames) {
         clearTrigger(st);
+        return SealAction::kNone;
+    }
+    if (in.nowMs < st->holdUntilMs && !edge) {   // built 2026-10-15: the transition hold keeps the request back; the pose-back and camera runs above went on
+        st->holdBlocked = !st->requested;
         return SealAction::kNone;
     }
     if (st->requested) return SealAction::kNone;

@@ -27,7 +27,7 @@ namespace edvr {
 // subtracts that pair's own mean cost from the real one's, floored at zero.
 // How many fixes wrap Elite's draws and are named in the census (AlteredFix below: one for each
 // verdict that can reach the altered-draw site, and a last one for "unnamed").
-constexpr int kAlteredFixCount = 14;
+constexpr int kAlteredFixCount = 13;
 
 enum class GpuCensusSection : uint8_t {
     // Door: once or twice a frame, at Submit. K = 2 (both eyes) while active.
@@ -44,7 +44,6 @@ enum class GpuCensusSection : uint8_t {
     DoorSharpen,              // sharpen_pass.cpp's dispatch
     DoorMenu,                 // menu_panel.cpp's dispatch
     DoorUiLayerComposite,     // ui_layer.cpp's kComposite dispatch
-    DoorFssHeal,              // fss_heal.cpp's dispatch
     DoorSkyRing,              // sky_ring.cpp's dispatch (diag.sky_ring, TEMPORARY; docs/sky-flicker-2026-10-13.md) -- nested inside DoorTemporalWhole, so not a top-level door item
     // In-frame: per game draw. K = 8 while active.
     FrameHologramPasses,      // the two hologram/icon depth reissues
@@ -71,6 +70,11 @@ enum class GpuCensusSection : uint8_t {
     FrameWorldResolve,        // the route's resolve at the tone: the input copy, prep, upscaler and the finish into H
     FrameWorldMips,           // the screen texture's copy into the mipped texture and its GenerateMips
     FrameWorldLayer,          // the layer's re-issue of each eye's screen draw with the resolved, mipped screen
+    // The FSS reveal fix's own GPU work (fss_reveal_replay.h): the downsample replay draw (its state applied, the draw, the state put back) and the private
+    // copies of the constant buffers a recorded downsample read (captureState with a pool). EDVR's cost, in the in-frame total. Called only while the scanner
+    // is on show, from the slow path behind the hook's watch gate -- never from the no-op watcher calls -- and, like the world route's, with no turn in the
+    // rotation until called this window, so with no scanner on show the census samples as it did before this section existed.
+    FrameFssReveal,
     // The second skin's GPU work (F2: engine_velocity.cpp and skin_join_gpu.cpp), priced item by item (F16). Each is NESTED inside a FrameEngineVelocity span (the
     // work was already in the engine velocity figure and still is), so they are timed on turns of their own, are NEVER added to a total, and are reported on a line
     // of their own. Like the world route's they have no turn until called this window, so with no skinned character the census samples exactly as it did before.
@@ -131,7 +135,6 @@ enum class AlteredFix : uint8_t {
     GlareSteady,   // the sun glare train, world-locked (kGlareSteady)
     Particle,      // the particle billboards (kParticle)
     FssPanel,      // the FSS panel composite (kFssPanel)
-    FssReveal,     // the FSS body composite at one dissolve moment (kFssReveal)
     Scrim,         // the loader dialog's dimming wash (kScrim)
     Backdrop,      // the menu backdrop blit (kBackdrop)
     Unnamed,       // a verdict nobody gave a name (none reaches the altered-draw site today): visible, never silent
