@@ -3309,6 +3309,10 @@ const uint8_t kBucketPrologue[13] = {0x4C, 0x8B, 0xDC, 0x57, 0x41, 0x56, 0x48, 0
 constexpr uintptr_t kMarkerRva = 0x1A14D80;     // the marker render entry: rcx = this, rdx = list A, r8 = list B
 const uint8_t kMarkerPrologue[19] = {0x40, 0x55, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57,
                                      0x48, 0x81, 0xEC, 0xF0, 0x02, 0x00, 0x00};
+constexpr bool kBucketProbeInstalled = false;   // probe 2 stays off even with fix.native_on_foot_view_probes = on, until its fault is proved fixed
+bool f24ViewProbesOn() {
+    return Config::get().getString("fix.native_on_foot_view_probes", "off") == "on";
+}
 F9Probe g_f24Composer;   // probe 1
 F9Probe g_f24Bucket;     // probe 2
 F9Probe g_f24Marker;     // probe 3
@@ -3329,7 +3333,7 @@ std::string f24Floats(const float* v, size_t n) {
 }
 
 // Probe 1: the composer's entry. Every 5 s per mode (2 = main eye, 3 = PostGUI), the base matrix, near and far, the flag byte and mode, and the look basis.
-using F24ComposerFn = uint64_t(__fastcall*)(void*, void*, float, float, uint64_t, uint64_t);
+using F24ComposerFn = uint64_t(__fastcall*)(void*, void*, float, float, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 void composerProbeLine(void* self, void* base, float nearV, float farV, uint8_t flag, uint32_t mode, uint64_t now) {
     const unsigned slot = mode & 3u;
     if (g_cmpLastMs[slot] && now - g_cmpLastMs[slot] < 5000) return;
@@ -3346,13 +3350,15 @@ void composerProbeLine(void* self, void* base, float nearV, float farV, uint8_t 
                     okB ? f24Floats(b, 16).c_str() : "unread", static_cast<double>(nearV), static_cast<double>(farV), static_cast<unsigned>(flag),
                     okBasis ? f24Floats(basis, 12).c_str() : "unread");
 }
-uint64_t __fastcall composerHooked(void* self, void* base, float nearV, float farV, uint64_t flagSlot, uint64_t modeSlot) {
+// The composer takes its 5th to 9th arguments on the stack (entry+0x28 .. +0x48; its callers write +0x28 .. +0x40). A wrapper that forwards only four
+// lost them: the composer read garbage pointers and the copy at +0x59F1B0 faulted (F24 launch crash, 2026-10-14). All of them are forwarded.
+uint64_t __fastcall composerHooked(void* self, void* base, float nearV, float farV, uint64_t s5, uint64_t s6, uint64_t s7, uint64_t s8, uint64_t s9) {
     const F24ComposerFn original = reinterpret_cast<F24ComposerFn>(g_f24Composer.original);
     if (!original) return 0;
     const uint64_t n = g_cmpCalls.fetch_add(1, std::memory_order_relaxed) + 1;
     if (n == 1) Log::get().note("native on foot view probe 1: first call -- the composer ran (read only)");
-    composerProbeLine(self, base, nearV, farV, static_cast<uint8_t>(flagSlot), static_cast<uint32_t>(modeSlot), GetTickCount64());
-    return original(self, base, nearV, farV, flagSlot, modeSlot);
+    composerProbeLine(self, base, nearV, farV, static_cast<uint8_t>(s5), static_cast<uint32_t>(s6), GetTickCount64());
+    return original(self, base, nearV, farV, s5, s6, s7, s8, s9);
 }
 
 // Probe 2: the bucket draw prep. Per call only counts and a set of distinct cameras (8 per class per window); the matrices are read once per new
@@ -3498,18 +3504,23 @@ void markerProbeLine(void* self, void* listB, uint64_t now) {
                         static_cast<double>(rec[k].inst[2]), rec[k].instOk ? "read" : "unread", static_cast<unsigned long long>(rec[k].n));
     }
 }
-uint64_t __fastcall markerHooked(void* self, void* listA, void* listB) {
-    using F24MarkerFn = uint64_t(__fastcall*)(void*, void*, void*);
+uint64_t __fastcall markerHooked(void* self, void* listA, void* listB, uint64_t r9, uint64_t s5, uint64_t s6, uint64_t s7, uint64_t s8) {
+    using F24MarkerFn = uint64_t(__fastcall*)(void*, void*, void*, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
     const F24MarkerFn original = reinterpret_cast<F24MarkerFn>(g_f24Marker.original);
     if (!original) return 0;
     const uint64_t n = g_markerCalls.fetch_add(1, std::memory_order_relaxed) + 1;
     if (n == 1) Log::get().note("native on foot view probe 3: first call -- the marker entry ran (read only)");
     markerProbeLine(self, listB, GetTickCount64());
-    return original(self, listA, listB);
+    return original(self, listA, listB, r9, s5, s6, s7, s8);
 }
 
 // Installs probes 1 to 3 (VR, once, behind the identity check, from installF22ProbesOnce). Each refusal is its own line.
 void installF24ProbesOnce(uintptr_t base) {
+    if (!f24ViewProbesOn()) {
+        Log::get().note("native on foot view probes: off (fix.native_on_foot_view_probes = off, the default): probes 1 to 3 are not installed and probe A's "
+                        "sink is not set; the game is untouched by them");
+        return;
+    }
     const auto install = [&](F9Probe& pr, const char* name, uintptr_t rva, const uint8_t* prologue, size_t bytes, size_t stolen, void* cb,
                              const char* label) {
         const F9ProbeSpec s{name, rva, prologue, bytes, stolen, cb, label};
@@ -3524,8 +3535,11 @@ void installF24ProbesOnce(uintptr_t base) {
     };
     install(g_f24Composer, "native-on-foot-view-composer", kComposerRva, kComposerPrologue, sizeof(kComposerPrologue), 10,
             reinterpret_cast<void*>(&composerHooked), "native on foot view probe 1 (composer)");
-    install(g_f24Bucket, "native-on-foot-view-bucket", kBucketRva, kBucketPrologue, sizeof(kBucketPrologue), 13,
-            reinterpret_cast<void*>(&bucketHooked), "native on foot view probe 2 (bucket prep)");
+    if (kBucketProbeInstalled)
+        install(g_f24Bucket, "native-on-foot-view-bucket", kBucketRva, kBucketPrologue, sizeof(kBucketPrologue), 13,
+                reinterpret_cast<void*>(&bucketHooked), "native on foot view probe 2 (bucket prep)");
+    else
+        Log::get().note("native on foot view probe 2 (bucket prep): NOT installed -- disabled (F24 launch crash suspect; its fault is not proved clear)");
     install(g_f24Marker, "native-on-foot-view-marker", kMarkerRva, kMarkerPrologue, sizeof(kMarkerPrologue), 12,
             reinterpret_cast<void*>(&markerHooked), "native on foot view probe 3 (marker entry)");
 }
@@ -3647,7 +3661,7 @@ void installF22ProbesOnce() {
     if (g_f22ProbesTried) return;
     g_f22ProbesTried = true;
     if (!runtimeVrProfile()) return;
-    g_driverProbeSink.store(&nativeOnFootDriverProbe, std::memory_order_release);   // F24: probe A reads through the transition-flash consumer
+    if (f24ViewProbesOn()) g_driverProbeSink.store(&nativeOnFootDriverProbe, std::memory_order_release);   // F24: probe A, behind the same key
     const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     const char* peWhy = nullptr;
     if (!base || !checkIdentity(base, &peWhy)) {
