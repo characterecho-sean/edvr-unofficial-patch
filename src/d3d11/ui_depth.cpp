@@ -2249,7 +2249,7 @@ int eyeIndexFor(const void* rtvRes, uint32_t w, uint32_t h, uint32_t fmt) {
     t.h = h;
     t.fmt = fmt;
     // F27: the native eye order: in native on foot the game renders the right eye first, so the first target is the right eye.
-    t.eye = nativeEyeOrderFlipped() ? 1u - ofShape : ofShape;
+    t.eye = ofShape;   // F31: the cockpit's eye order everywhere (the native flip is gone)
     return static_cast<int>(t.eye);
 }
 

@@ -54,6 +54,12 @@ std::mutex g_mutex;
 float g_lookYaw = 0.0f;
 uint32_t g_lookYawFrame = 0;
 uint32_t g_lookReset = 0;   // F25: the reset serial
+// F31: the latest beginFrame's render head and the runtime's "now" head (version 2 input), for the world markers (guarded by g_mutex).
+float g_renderHead[12] = {};
+float g_nowHeadPose[12] = {};
+bool g_renderHeadValid = false, g_nowHeadValid = false, g_haveFrameInput = false;
+uint32_t g_nowHeadSequence = 0;
+uint64_t g_frameSequence = 0;
 
 State* identify(void* context) {
     for (unsigned i = 0; i < g_used; ++i) {
@@ -267,12 +273,18 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
     const bool legacy = output && !wantsFade && !wantsChannel && !wantsPacing && !wantsTrim && !wantsLook &&
         output->version == EDVR_NATIVE_FRAME_VERSION_1 &&
         output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_1;
+    // F31: input version 1 is the words through valid (its size is that prefix; the full size is accepted too, as the rigs send it). Version 2 is
+    // the full struct with the "now" head. Nothing past the version 1 words is read for a version 1 input.
+    const bool inputV1 = input && input->version == EDVR_NATIVE_FRAME_INPUT_VERSION_1 &&
+        (input->size == EDVR_NATIVE_FRAME_INPUT_SIZE_1 || input->size == sizeof(*input));
+    const bool inputV2 = input && input->version == EDVR_NATIVE_FRAME_INPUT_VERSION_2 && input->size == sizeof(*input);
     if (!state || state != g_current || !state->active || !input || !output ||
-        input->size != sizeof(*input) || input->version != EDVR_NATIVE_FRAME_VERSION_1 ||
+        (!inputV1 && !inputV2) ||
         (!wantsLook && !wantsFade && !wantsChannel && !wantsPacing && !wantsTrim && !legacy) ||
         input->generation != state->generation || input->referenceGeneration == 0 ||
         input->sequence == 0 || input->sequence <= state->sequenceFloor ||
-        input->valid > 1 || (input->valid && !rigidPose(input->physicalHead))) return E_INVALIDARG;
+        input->valid > 1 || (input->valid && !rigidPose(input->physicalHead)) ||
+        (inputV2 && (input->nowValid > 1 || (input->nowValid && !rigidPose(input->nowHead))))) return E_INVALIDARG;
 
     EdvrNativeFrameOutput result{};
     result.size = wantsLook ? sizeof(result)
@@ -301,6 +313,16 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
     // offsetEnabled, offsetGamePoses) is retired: those slots stay zero, so a
     // runtime built before 2026-10-07 reads "no offset" and applies none.
     const bool physicalValid = input->valid != 0;
+    // F31: the frame's heads, kept for the world markers (nativeFrameNowPose). The "now" head only from a version 2 input.
+    g_haveFrameInput = true;
+    g_frameSequence = input->sequence;
+    g_renderHeadValid = physicalValid;
+    if (physicalValid) std::memcpy(g_renderHead, input->physicalHead, sizeof(g_renderHead));
+    g_nowHeadValid = inputV2 && input->nowValid != 0;
+    if (g_nowHeadValid) {
+        std::memcpy(g_nowHeadPose, input->nowHead, sizeof(g_nowHeadPose));
+        g_nowHeadSequence = input->nowSequence;
+    }
 
     // The worn headset's entry in each of the three lists, resolved from the
     // last render-settings query's labels and cached between changes.
@@ -478,6 +500,19 @@ void nativeFrameSetLookYaw(float total, uint32_t gameFrame, uint32_t resetSerial
     g_lookYaw = total;
     g_lookYawFrame = gameFrame;
     g_lookReset = resetSerial;
+}
+
+// F31: the latest frame's render head and "now" head (the d3d11 half's world markers).
+bool nativeFrameNowPose(EdvrNativeNowPose& out) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (!g_haveFrameInput) return false;
+    std::memcpy(out.render, g_renderHead, sizeof(out.render));
+    std::memcpy(out.now, g_nowHeadPose, sizeof(out.now));
+    out.renderValid = g_renderHeadValid;
+    out.nowValid = g_nowHeadValid;
+    out.nowSequence = g_nowHeadSequence;
+    out.frameSequence = g_frameSequence;
+    return true;
 }
 
 }  // namespace edvr

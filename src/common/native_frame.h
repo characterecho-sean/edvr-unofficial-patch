@@ -30,6 +30,11 @@
 // the head so the world holds still). Same hand-copied-DLLs rule: a version 5 or older caller never learns of them, and a runtime that asks
 // version 6 of a d3d11.dll that refuses the shape steps down and reads a total of 0 (no compensation).
 #define EDVR_NATIVE_FRAME_VERSION_6 6u
+// Version 7 (F31) is a ladder step, not an output field: the runtime asks for EdvrNativeFrameInput version 2 (the "now" head below) with the
+// version 6 output shape. A provider that refuses it steps the runtime down to 6, which sends version 1 input. Same hand-copied-DLLs rule.
+#define EDVR_NATIVE_FRAME_VERSION_7 7u
+#define EDVR_NATIVE_FRAME_INPUT_VERSION_1 1u
+#define EDVR_NATIVE_FRAME_INPUT_VERSION_2 2u
 
 // The game producer owns the device and generation passed at acquire. The
 // methods in the table are CPU-only and are called by the XR owner after the
@@ -46,6 +51,26 @@ struct EdvrNativeFrameInput {
     // Runtime pose, row-major 3x4. valid is zero when no pose was provided.
     float physicalHead[12];
     uint32_t valid;
+    // Version 2 and later (F31). The head pose the runtime answered to Elite's "now" request most recently: the same 3x4 row-major rigid transform
+    // as physicalHead (rigid(head.pose), in the seated space the render head is located in), with its answer count. The d3d11 half takes the
+    // delta between this and physicalHead for the world markers. A version 1 input has none of these words (and must not be read for them).
+    float nowHead[12];
+    uint32_t nowValid;
+    uint32_t nowSequence;
+};
+
+// The size of the version 1 input: the words through valid, which is what a version 1 caller's struct is.
+#define EDVR_NATIVE_FRAME_INPUT_SIZE_1 \
+    ((uint32_t)offsetof(EdvrNativeFrameInput, nowHead))
+
+// F31: the render head and the "now" head the d3d11 half saw at its last beginFrame (nativeFrameNowPose). The frame sequence is the geometry
+// sequence of that frame; nowSequence counts the runtime's "now" answers.
+struct EdvrNativeNowPose {
+    float render[12];
+    float now[12];
+    bool renderValid, nowValid;
+    uint32_t nowSequence;
+    uint64_t frameSequence;
 };
 
 struct EdvrNativeFrameOutput {
@@ -172,5 +197,7 @@ uint64_t nativeFrameLatchedFrames();
 // F22: the look-to-aim compensation the next beginFrame hands the runtime (version 6): the cumulative total in radians and the game frame it was
 // taken at. Set by the frame thread once per frame (native_on_foot.cpp, lookPublishTick); read under the provider's lock by beginFrame.
 void nativeFrameSetLookYaw(float total, uint32_t gameFrame, uint32_t resetSerial);
+// F31: the latest frame's render head and "now" head (false until a beginFrame has been received). Read on the game thread.
+bool nativeFrameNowPose(EdvrNativeNowPose& out);
 
 }  // namespace edvr

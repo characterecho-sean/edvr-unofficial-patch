@@ -254,6 +254,8 @@ void OpenVRSystem::GetDeviceToAbsoluteTrackingPose(ETrackingUniverseOrigin origi
   if(!originValid(origin)||!std::isfinite(prediction)){source_.noteHeadCallFailed(call,prediction);trace.finishVoid(0);return;}
   TrackedDevicePose_t p=invalidPose(true);
   const bool located=source_.locateHeadFor(s.generation,origin,prediction,call,p);if(located)poses[0]=p;
+  // F31: Elite's "now" answer, published for the next frame's input (the world markers' head, the d3d11 half).
+  if(located&&call.display&&p.bPoseIsValid)publishNowHead(&p.mDeviceToAbsoluteTracking.m[0][0]);
   trace.finishVoid(located?1:0);
 }
 void OpenVRSystem::ResetSeatedZeroPose() {

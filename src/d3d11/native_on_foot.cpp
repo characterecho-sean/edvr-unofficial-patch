@@ -78,7 +78,7 @@ std::atomic<int> g_lookSmoothMs{150};          // fix.native_on_foot_look_to_aim
 std::atomic<int> g_lookSign{1};               // fix.native_on_foot_look_to_aim_yaw_sign (temporary, F24 default -1): 1 or -1, on the controller's input only
 std::atomic<int> g_lookDelay{0};
 bool g_nativeEdgeLast = false;                // F26: frame thread only
-std::atomic<int> g_worldMarkersMode{1};        // F27: fix.native_on_foot_world_markers: 0 fixed (inverse), 1 forward (default), 2 game; live; key 10 is never touched
+std::atomic<int> g_worldMarkersMode{3};        // F27/F31: fix.native_on_foot_world_markers: 0 fixed (inverse), 1 forward (C), 2 game, 3 forward_now (H_M, default); live; key 10 is never touched
 uint64_t g_worldLineMs = 0;                    // frame thread and game thread: the 5 s line (the post hook writes it, once per 5 s)
 // F25 (TEMPORARY A/B): the visor param block's translation source floats (.bss, normally 0, no writer in the exe): the values the key sets.
 constexpr uintptr_t kVisorShiftRva = 0x5FCA8B0;   // x at +0, y at +4
@@ -238,25 +238,10 @@ bool checkIdentity(uintptr_t base, const char** why) noexcept {
 
 // ---- the hook --------------------------------------------------------------------------------------------------------------
 // F27: the eye order and the render-mode edge, at the setter's mode switch (the game's render mode, not 'native on foot active', which comes later).
-void setNativeEyeOrder(bool on, const char* why) {
-    if (g_nativeEyeOrderFlip.load(std::memory_order_relaxed) == on) return;
-    g_nativeEyeOrderFlip.store(on, std::memory_order_relaxed);
-    g_nativeModeEdges.fetch_add(1, std::memory_order_relaxed);
-    Log::get().note("ui quality: eye rule %s (first = %s): %s", on ? "native" : "cockpit", on ? "right" : "left", why ? why : "");
-}
-// F29: the eye rule from the ACTUAL state: native HMD stereo on foot = the setter's last effective mode is HMD, the gate byte is written, and the
-// journal says on foot (gate method); or the setter's substitution (substitute method). Called by the setter at the mode switch and by the frame
-// thread when the gate byte changes, so the flip lands before the first frame in the new mode.
-void nativeEyeOrderEvaluate(const char* why) {
-    const bool gateMethod = g_methodGate.load(std::memory_order_relaxed);
-    const uint32_t mode = g_nativeLastEffective.load(std::memory_order_relaxed);
-    const bool want = gateMethod
-        ? (nofoot::isHmdMode(mode) && g_nativeGateWritten.load(std::memory_order_relaxed) && journalOnFootKnown() && journalOnFoot())
-        : g_nativeLastAdmitted.load(std::memory_order_relaxed);
-    char text[200];
-    std::snprintf(text, sizeof(text), "%s; mode %u, gate %s, method %s", why ? why : "", static_cast<unsigned>(mode),
-                  g_nativeGateWritten.load(std::memory_order_relaxed) ? "written" : "not written", gateMethod ? "gate" : "substitute");
-    setNativeEyeOrder(want, text);
+// F31: the eye order is the cockpit rule everywhere (first target of a frame = left). The native flip is removed: the game renders
+// the left eye first in native on foot too (the visor is correct with first = left; the F30 layer swap was persistent under first = right).
+void logEyeRule(const char* why) {
+    Log::get().note("ui quality: eye rule cockpit (first = left) in every mode: %s", why ? why : "");
 }
 
 // F22: the native session test. journalGameplay() (LoadGame seen), or Status.json says on foot now: a training scenario started from the main menu
@@ -314,10 +299,9 @@ void __fastcall setterHooked(void* selectorPtr, uint32_t incoming) {
     ev.incoming = incoming;
     ev.effective = nofoot::effectiveMode(ev.reason, incoming);
     // F30: every render-mode edge bumps the edge counter that the eye check re-arms on, not only the eye rule's flips.
-    const uint32_t prevEffective = g_nativeLastEffective.exchange(ev.effective, std::memory_order_relaxed);   // F29: the rule reads the actual mode
+    const uint32_t prevEffective = g_nativeLastEffective.exchange(ev.effective, std::memory_order_relaxed);
     if (prevEffective != ev.effective) g_nativeModeEdges.fetch_add(1, std::memory_order_relaxed);
-    g_nativeLastAdmitted.store(ev.admitted, std::memory_order_relaxed);
-    nativeEyeOrderEvaluate("the setter's mode");
+    if (prevEffective != ev.effective) logEyeRule("the setter's render mode edge");
     ev.onFoot = journalOnFootKnown() ? (journalOnFoot() ? 1 : 0) : 2;
     ev.seated = journalSeatedKnown() ? (journalSeated() ? 1 : 0) : 2;
     // The flag is set before the call, so a frame boundary that runs while the original is inside it sees the session.
@@ -578,8 +562,8 @@ void readKey() {
     }
     // F25 (TEMPORARY): the world markers (the waypoint and the others, not key 10): fixed takes the head out of their placement, game leaves them as the game has them.
     {
-        const std::string wm = cfg.getString("fix.native_on_foot_world_markers", "forward");
-        g_worldMarkersMode.store(wm == "game" ? 2 : wm == "fixed" ? 0 : 1, std::memory_order_relaxed);
+        const std::string wm = cfg.getString("fix.native_on_foot_world_markers", "forward_now");
+        g_worldMarkersMode.store(wm == "forward" ? 1 : wm == "fixed" ? 0 : wm == "game" ? 2 : 3, std::memory_order_relaxed);
     }
     // F26 (TEMPORARY, live): the sharp on-foot HUD. Off by default; read on each frame through g_sharpHudKeyOn.
     g_nativeOnFootSharpHudKey.store(cfg.getString("fix.native_on_foot_sharp_hud", "off") == "on" && runtimeVrProfile(), std::memory_order_relaxed);
@@ -1770,6 +1754,12 @@ thread_local F30SameCall t_f30SameCall;
 uint64_t g_f30PostSame = 0, g_f30PostFall = 0, g_f30PostNone = 0;
 int64_t g_f30LagMax = 0;
 uint64_t g_f30AgeMaxUs = 0, g_f30AgeSumUs = 0, g_f30AgeN = 0;
+// F31: the last post's same-call C and the runtime's "now" head as a transform of C (H_M), with the answer and frame numbers; the window's counts.
+float g_f31SameC[16] = {}, g_f31NowH[16] = {};
+bool g_f31HaveNow = false;
+double g_f31AngleDeg = 0.0;
+uint32_t g_f31NowSeq = 0;
+uint64_t g_f31FrameSeq = 0, g_f31NoNow = 0;
 F13Head g_f13Smooth;                                // guarded by g_f9Lock: the smoothed one (the frame thread)
 uint64_t g_f13LastQpc = 0;                          // frame thread only
 uint64_t g_f13LogMs = 0;                            // frame thread only
@@ -2761,6 +2751,68 @@ void __fastcall reticleIndicatorProbe(void* instance, void* node) noexcept {
     if (okPos) std::memcpy(row->pos, pos, sizeof(pos));
 }
 
+// F31: 4x4 helpers for the "now" head. The runtime's transforms are 3x4 row-major column-vector rigid matrices (HmdMatrix34_t: translation in
+// column 3). The list-B view C is row-vector (p' = p . C, translation in row 3), so H_M = C . (N^-1 . R)^T: the view under the "now" head from
+// the view under the render head. The body transform cancels in N^-1 . R, and with N = R, H_M = C exactly (the check the flight reads).
+void f31Rigid(const float m[12], double out[4][4]) {
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 4; ++j) out[i][j] = static_cast<double>(m[4 * i + j]);
+    out[3][0] = out[3][1] = out[3][2] = 0.0;
+    out[3][3] = 1.0;
+}
+void f31Mul(const double a[4][4], const double b[4][4], double out[4][4]) {
+    double r[4][4];
+    for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 4; ++j) {
+            double acc = 0.0;
+            for (int k = 0; k < 4; ++k) acc += a[i][k] * b[k][j];
+            r[i][j] = acc;
+        }
+    std::memcpy(out, r, sizeof(r));
+}
+void f31RigidInverse(const double m[4][4], double out[4][4]) {
+    for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 3; ++j) out[i][j] = m[j][i];
+        out[i][3] = -(m[0][i] * m[0][3] + m[1][i] * m[1][3] + m[2][i] * m[2][3]);
+    }
+    out[3][0] = out[3][1] = out[3][2] = 0.0;
+    out[3][3] = 1.0;
+}
+// H = C . (N^-1 . R)^T: C (the view under the render head R) carried to the "now" head N.
+void f31NowMatrix(const float C[16], const float render[12], const float now[12], float H[16]) {
+    double R[4][4], N[4][4], Ninv[4][4], Dinv[4][4], DinvT[4][4], Cd[4][4], Hd[4][4];
+    f31Rigid(render, R);
+    f31Rigid(now, N);
+    f31RigidInverse(N, Ninv);
+    f31Mul(Ninv, R, Dinv);
+    for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 4; ++j) {
+            DinvT[i][j] = Dinv[j][i];
+            Cd[i][j] = static_cast<double>(C[4 * i + j]);
+        }
+    f31Mul(Cd, DinvT, Hd);
+    for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 4; ++j) H[4 * i + j] = static_cast<float>(Hd[i][j]);
+}
+// The angle between two transforms' rotations, in degrees: arccos((trace(Ra^T Rb) - 1) / 2).
+double f31AngleDeg(const float a[16], const float b[16]) {
+    double tr = 0.0;
+    for (int i = 0; i < 3; ++i)
+        for (int k = 0; k < 3; ++k) tr += static_cast<double>(a[4 * k + i]) * static_cast<double>(b[4 * k + i]);
+    double c = (tr - 1.0) * 0.5;
+    if (c > 1.0) c = 1.0;
+    if (c < -1.0) c = -1.0;
+    return std::acos(c) * 180.0 / 3.14159265358979323846;
+}
+// The forward map of the world markers: t' = t . R + row3 (the reticle head mode's map), for a given C.
+void f31ForwardMap(const float t[3], const float C[16], float out[3]) {
+    for (int j = 0; j < 3; ++j) {
+        float acc = 0.0f;
+        for (int i = 0; i < 3; ++i) acc += t[i] * C[4 * i + j];
+        out[j] = acc + C[12 + j];
+    }
+}
+
 // F25 (TEMPORARY): the post-call of the marker stub, for every marker except key 10 (the reticle, which keeps its own placement). The game's call
 // writes the instance's translation t (+0x40) from the marker's world position, which already includes the head (the probe-3 RE: its yaw is -C's).
 // The list-B pipeline then applies C again, so the marker is head-locked. Writing t' = (t - row3(C)) . R^T, the exact inverse of that forward map
@@ -2811,6 +2863,22 @@ void __fastcall reticleWorldPost(void* node) noexcept {
     } else {
         ++g_f30PostNone;
     }
+    // F31: the same-call C is kept for the comparison; forward_now (mode 3) uses H_M in its place when the runtime's "now" head is there.
+    if (havePose) std::memcpy(g_f31SameC, C, sizeof(g_f31SameC));
+    g_f31HaveNow = false;
+    if (havePose && wmMode == 3) {
+        EdvrNativeNowPose np{};
+        if (nativeFrameNowPose(np) && np.renderValid && np.nowValid) {
+            f31NowMatrix(C, np.render, np.now, g_f31NowH);
+            g_f31HaveNow = true;
+            g_f31NowSeq = np.nowSequence;
+            g_f31FrameSeq = np.frameSequence;
+            g_f31AngleDeg = f31AngleDeg(g_f31SameC, g_f31NowH);
+            std::memcpy(C, g_f31NowH, sizeof(C));
+        } else {
+            ++g_f31NoNow;
+        }
+    }
     if (!havePose) {
         if (now - g_worldLineMs >= 5000 || g_worldLineMs == 0) {
             g_worldLineMs = now;
@@ -2840,35 +2908,44 @@ void __fastcall reticleWorldPost(void* node) noexcept {
         g_worldLineMs = now;
         const float yawC = static_cast<float>(std::atan2(static_cast<double>(C[8]), static_cast<double>(C[10])) * 180.0 / 3.14159265358979323846);
         Log::get().note("native on foot world markers: key %u: mode %s; t (game) (%.3f, %.3f, %.3f) -> t' (written) (%.3f, %.3f, %.3f); C yaw %.2f deg (row 2 x, z)",
-                        static_cast<unsigned>(key), wmMode == 0 ? "fixed" : "forward", static_cast<double>(t[0]), static_cast<double>(t[1]),
+                        static_cast<unsigned>(key), wmMode == 0 ? "fixed" : wmMode == 3 ? "forward_now" : "forward", static_cast<double>(t[0]), static_cast<double>(t[1]),
                         static_cast<double>(t[2]), static_cast<double>(tp[0]), static_cast<double>(tp[1]), static_cast<double>(tp[2]),
                         static_cast<double>(yawC));
-        // F30 part 2: where C came from since the last line (the marker's own list-B read, or the P2 fallback), its lag and its age in
-        // microseconds (QueryPerformanceCounter, not the tick count); P = the node's [+0x50] (read as three floats) and |t' - P| with the t' just written.
-        // At scale 1, forward should give t' near P when C equals the marker's head.
+        // F30/F31: where C came from since the last line, its lag and age (QPC); P = node+0x50 (three floats) and t' as written. F31: the
+        // forward map under C (the same-call head) and under H_M (the runtime's "now" head), side by side, and the angle between them.
         float P[3] = {};
         const bool okP = guardedRead(na + 0x50, P, sizeof(P));
-        const double dx = static_cast<double>(tp[0]) - static_cast<double>(P[0]);
-        const double dy = static_cast<double>(tp[1]) - static_cast<double>(P[1]);
-        const double dz = static_cast<double>(tp[2]) - static_cast<double>(P[2]);
-        const double dP = okP ? std::sqrt(dx * dx + dy * dy + dz * dz) : -1.0;
         float eyeDiff = 0.0f;
         {
             F9Lock lock;
             eyeDiff = g_worldC.eyeDiff;
         }
+        float tpC[3] = {}, tpH[3] = {};
+        f31ForwardMap(t, g_f31SameC, tpC);
+        if (g_f31HaveNow) f31ForwardMap(t, g_f31NowH, tpH);
         Log::get().note("native on foot world markers: C source since the last line: same-call list B %llu, P2 fallback %llu, none %llu; "
-                        "sample lag max %lld; C age max %llu us, mean %llu us; P (node+0x50) %s (%.3f, %.3f, %.3f), t' (%.3f, %.3f, %.3f), "
-                        "|t'-P| %.4f; P2 eye 0 vs eye 1 rotation difference %.5f",
+                        "sample lag max %lld; C age max %llu us, mean %llu us; P (node+0x50) %s (%.3f, %.3f, %.3f); t' (written) (%.3f, %.3f, %.3f)",
                         static_cast<unsigned long long>(g_f30PostSame), static_cast<unsigned long long>(g_f30PostFall),
                         static_cast<unsigned long long>(g_f30PostNone), static_cast<long long>(g_f30LagMax),
                         static_cast<unsigned long long>(g_f30AgeMaxUs),
                         static_cast<unsigned long long>(g_f30AgeN ? g_f30AgeSumUs / g_f30AgeN : 0), okP ? "read" : "unread",
                         static_cast<double>(P[0]), static_cast<double>(P[1]), static_cast<double>(P[2]), static_cast<double>(tp[0]),
-                        static_cast<double>(tp[1]), static_cast<double>(tp[2]), dP, static_cast<double>(eyeDiff));
+                        static_cast<double>(tp[1]), static_cast<double>(tp[2]));
+        if (g_f31HaveNow)
+            Log::get().note("native on foot world markers: H_M (now head) vs C: angle %.3f deg; now answer #%u, frame #%llu; forward under C t' "
+                            "(%.3f, %.3f, %.3f), under H_M t' (%.3f, %.3f, %.3f); %llu posts with no now pose; P2 eye 0 vs eye 1 %.5f",
+                            g_f31AngleDeg, static_cast<unsigned>(g_f31NowSeq), static_cast<unsigned long long>(g_f31FrameSeq),
+                            static_cast<double>(tpC[0]), static_cast<double>(tpC[1]), static_cast<double>(tpC[2]), static_cast<double>(tpH[0]),
+                            static_cast<double>(tpH[1]), static_cast<double>(tpH[2]), static_cast<unsigned long long>(g_f31NoNow),
+                            static_cast<double>(eyeDiff));
+        else
+            Log::get().note("native on foot world markers: no runtime now head yet (or the mode is not forward_now); forward under C t' (%.3f, %.3f, %.3f); "
+                            "P2 eye 0 vs eye 1 %.5f", static_cast<double>(tpC[0]), static_cast<double>(tpC[1]), static_cast<double>(tpC[2]),
+                            static_cast<double>(eyeDiff));
         g_f30PostSame = g_f30PostFall = g_f30PostNone = 0;
         g_f30LagMax = 0;
         g_f30AgeMaxUs = g_f30AgeSumUs = g_f30AgeN = 0;
+        g_f31NoNow = 0;
     }
 }
 
@@ -5878,8 +5955,6 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
     }
     const char* byteWhy = !keyOn ? "fix.native_on_foot is off" : !gate ? "fix.native_on_foot_method is swap" : "the game session ended";
     gateByteTick(keyOn && gate && session, byteWhy);
-    g_nativeGateWritten.store(g_gateWritten, std::memory_order_relaxed);   // F29: the frame thread's gate state, for the eye rule
-    nativeEyeOrderEvaluate("the gate byte");
     // F8 (TEMPORARY): the first-person HUD override, while native stereo is on foot and the key is on (hudOverrideTick restores otherwise).
     const bool hudKeyOn = g_hudKeyOn.load(std::memory_order_relaxed);
     const char* hudWhy = !hudKeyOn ? "fix.native_on_foot_hud is off" : !nativeOnFootActive() ? "native stereo on foot ended" : "the game session ended";

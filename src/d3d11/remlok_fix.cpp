@@ -48,7 +48,7 @@ static_assert(kKind == 'N' && kVertices == 3 && kInstances == 1,
 float g_keep = 0.55f;
 bool  g_swap = false;
 // F27: the eye parity's swap with the native eye order (in native on foot the game renders the right eye first).
-inline bool remlokSwapNow() { return g_swap != nativeEyeOrderFlipped(); }
+inline bool remlokSwapNow() { return g_swap; }   // F31: the control only (the native flip is gone; first = left everywhere)
 // Scale of the substituted viewport for the overlay draw, centred. Below 1
 // the whole helmet frame renders smaller, which pulls the edge lines INWARD
 // from the image border -- on a wide-FOV headset the border is the lens rim,
@@ -345,7 +345,7 @@ void visorSwapBegin(ID3D11DeviceContext* ctx) {
     } else if (now - g_visorWindowMs >= 30000) {
         Log::get().note("remlok lines (on foot): visor PS variants bound in the last 30 s: left eye %llu, right eye %llu (%llu refusals); eye rule %s",
                         static_cast<unsigned long long>(g_visorUses[0]), static_cast<unsigned long long>(g_visorUses[1]),
-                        static_cast<unsigned long long>(g_visorRefusals), nativeEyeOrderFlipped() ? "native (first = right)" : "cockpit (first = left)");
+                        static_cast<unsigned long long>(g_visorRefusals), "cockpit (first = left)");
         g_visorUses[0] = g_visorUses[1] = 0;
         g_visorWindowMs = now;
     }
@@ -423,12 +423,12 @@ RemlokAction remlokOnEyeDraw(char kind, uint32_t count, uint32_t instances) {
         if (footLastMs == 0) {
             footLastMs = nowMs;
             Log::get().note("remlok lines (on foot): first match of VS B553BB479B7C0B97 (non-indexed, 3 vertices, 1 instance): the %s eye; eye rule %s",
-                            rightEye ? "right" : "left", nativeEyeOrderFlipped() ? "native (first = right)" : "cockpit (first = left)");
+                            rightEye ? "right" : "left", "cockpit (first = left)");
         } else if (nowMs - footLastMs >= 30000) {
             Log::get().note("remlok lines (on foot): %llu matches in the last 30 s: left eye %llu, right eye %llu (%llu this session); eye rule %s",
                             static_cast<unsigned long long>(footLeft + footRight), static_cast<unsigned long long>(footLeft),
                             static_cast<unsigned long long>(footRight), static_cast<unsigned long long>(footCount),
-                            nativeEyeOrderFlipped() ? "native (first = right)" : "cockpit (first = left)");
+                            "cockpit (first = left)");
             footLastMs = nowMs;
             footLeft = footRight = 0;
         }

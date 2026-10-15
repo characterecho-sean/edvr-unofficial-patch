@@ -30,7 +30,7 @@ template<class Check> void runComfortFadeCases(Check&& check) {
   using namespace comfort_fixture;
   using Client=edvr::openxr::NativeFrameClient;
   auto ladder=[&](Provider& p,uint32_t& version,EdvrNativeFrameOutput& out){
-    return Client::beginLadder([&](EdvrNativeFrameOutput& o){return p.answer(o);},version,out);
+    return Client::beginLadder([&](EdvrNativeFrameOutput& o,uint32_t){return p.answer(o);},version,out);
   };
   {
     Provider p;uint32_t v=6;EdvrNativeFrameOutput out{};
