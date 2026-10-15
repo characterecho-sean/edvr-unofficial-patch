@@ -96,6 +96,15 @@ motion vectors and jitter cancellation.
   - While looking at the hazy panel, press `NumLock` to log the shaders in use
     there, for inclusion in the recipe dictionary.
 
+### Black menu text/tiles and default orange HUD with EDHM and ReShade
+
+- **Symptom:** Selected words or buttons in all menus render as solid black rectangles, and cockpit HUD elements revert to default stock orange instead of custom EDHM colors.
+- **Why it happens:** ReShade's global deadlock guard detours `kernel32!LoadLibrary`. Any dynamic library load initiated while inside a graphics render callback returns `NULL`. EDHM fails to load `ADVAPI32.DLL` to read registry/theme values, leaving constant buffer `t120` unpopulated (all zeros). Menu shader `35aac13bbb1540de-ps.txt` outputs pure black `(0,0,0,0)` when `t120` is unpopulated.
+- **Resolution:**
+  - EDVR automatically bypasses this via IAT hooks on `d3d11_edhm.dll` and the game executable to return preloaded module handles via `GetModuleHandleEx` without triggering ReShade's deadlock guard.
+  - Alternatively, uninstalling ReShade (`dxgi.dll`) removes the deadlock-guard hook entirely.
+  - For full technical details, see [ReShade LoadLibrary Deadlock Collision with EDHM](reshade-loadlibrary-deadlock-2026-10-15.md).
+
 ---
 
 ## VR Troubleshooting
