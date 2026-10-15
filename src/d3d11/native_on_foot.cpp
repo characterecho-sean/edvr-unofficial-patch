@@ -4987,9 +4987,10 @@ struct EyeSample {
     bool rootOk = false, amcPosOk = false;
     float root[3] = {}, amcPos[3] = {};
     float pov[3] = {};
-    // F38: the neck (the head joint's parent in Explorer Cam's walk) in world space, when the walk has derived it (on foot it usually has not).
+    // F39: the neck joint (found by name on the local third-person skeleton, census) in world space, and the name it was found under.
     bool neckOk = false;
     float neck[3] = {};
+    const char* neckName = nullptr;
 };
 std::mutex g_eyeMutex;                   // guards g_eyeSample (game thread writes, frame thread reads)
 EyeSample g_eyeSample;
@@ -5060,13 +5061,11 @@ void eyeSample(void* amcPtr, void* jobPtr, uint64_t now) noexcept {
         for (size_t j = 0; j < 3; ++j) s.pov[j] = pm[0] * M[j] + pm[1] * M[4 + j] + pm[2] * M[8 + j] + M[12 + j];
         s.povOk = true;
     }
-    // F38: the neck, through the same matrix as the head.
-    {
-        float nm[3] = {};
-        s.neckOk = s.headOk && explorerCamNeckModel(nm);
-        if (s.neckOk) {
-            for (size_t j = 0; j < 3; ++j) s.neck[j] = nm[0] * M[j] + nm[1] * M[4 + j] + nm[2] * M[8 + j] + M[12 + j];
-        }
+    // F39: the neck joint from the census, through the same matrix as the head.
+    s.neckOk = s.headOk && nk.neckState == 1;
+    if (s.neckOk) {
+        s.neckName = nk.neckName;
+        for (size_t j = 0; j < 3; ++j) s.neck[j] = nk.neck[0] * M[j] + nk.neck[1] * M[4 + j] + nk.neck[2] * M[8 + j] + M[12 + j];
     }
     {
         const uintptr_t amc = reinterpret_cast<uintptr_t>(amcPtr);
@@ -5411,6 +5410,8 @@ bool g_f38Valid = false, g_f38LpValid = false;
 uint64_t g_f38StartMs = 0, g_f38LineMs = 0;
 double g_f38R0[3] = {}, g_f38CamFp[3] = {}, g_f38Lp[3] = {};
 int g_f38R0N = 0, g_f38CamFpN = 0;
+double g_f38CamNeck[3] = {};   // F39: mean of (camera minus neck) in body axes over the first second (logged)
+int g_f38CamNeckN = 0;
 bool g_f37TS0Valid = false;
 double g_f37TS0[3] = {};
 uint32_t g_f37TS0Gen = 0;
@@ -5510,7 +5511,8 @@ void alignTick(uint64_t now) noexcept {
             g_f38StartMs = now;
             g_f38R0N = 0;
             g_f38CamFpN = 0;
-            for (size_t i = 0; i < 3; ++i) g_f38R0[i] = g_f38CamFp[i] = 0.0;
+            g_f38CamNeckN = 0;
+            for (size_t i = 0; i < 3; ++i) g_f38R0[i] = g_f38CamFp[i] = g_f38CamNeck[i] = 0.0;
         }
         const bool inWin = now - g_f38StartMs < 1000;
         if (!g_f38LpValid) {
@@ -5522,6 +5524,10 @@ void alignTick(uint64_t now) noexcept {
         if (inWin && s.neckOk) {
             ++g_f38R0N;
             for (size_t i = 0; i < 3; ++i) g_f38R0[i] += ((povB[i] - neckB[i]) - g_f38R0[i]) / static_cast<double>(g_f38R0N);
+        }
+        if (inWin && s.neckOk) {
+            ++g_f38CamNeckN;
+            for (size_t i = 0; i < 3; ++i) g_f38CamNeck[i] += ((jobB[i] - neckB[i]) - g_f38CamNeck[i]) / static_cast<double>(g_f38CamNeckN);
         }
         if (inWin && fpFresh) {
             ++g_f38CamFpN;
@@ -5538,10 +5544,10 @@ void alignTick(uint64_t now) noexcept {
             g_f38LineMs = now;
             double off = 0.0;
             for (size_t i = 0; i < 3; ++i) off += (povEqB[i] - povB[i]) * (povEqB[i] - povB[i]);
-            Log::get().note("native on foot body align: pov target from %s: pov minus neck (body) %.3f %.3f %.3f m, target minus pov %.3f m, "
-                            "neck %s; camera minus fp root (body) %.3f %.3f %.3f m%s",
-                            useNeck ? "the neck" : "the low-passed head", g_f38R0[0], g_f38R0[1], g_f38R0[2], std::sqrt(off),
-                            s.neckOk ? "known" : "unknown (walk not run)", g_f38CamFp[0], g_f38CamFp[1], g_f38CamFp[2],
+            Log::get().note("native on foot body align: pov target from %s: pov minus neck (body) %.3f %.3f %.3f m, target minus pov %.3f m; "
+                            "camera minus neck (body) %.3f %.3f %.3f m; camera minus fp root (body) %.3f %.3f %.3f m%s",
+                            useNeck ? (s.neckName ? s.neckName : "the neck") : "the low-passed head", g_f38R0[0], g_f38R0[1], g_f38R0[2],
+                            std::sqrt(off), g_f38CamNeck[0], g_f38CamNeck[1], g_f38CamNeck[2], g_f38CamFp[0], g_f38CamFp[1], g_f38CamFp[2],
                             fpFresh ? "" : " (fp root not fresh)");
         }
         double trimB[3] = {g_alignTrimCm[0] / 100.0, g_alignTrimCm[1] / 100.0, g_alignTrimCm[2] / 100.0};   // right, up, forward

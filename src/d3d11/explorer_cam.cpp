@@ -770,8 +770,6 @@ float g_walkLocals[ecm::kMaxWalkJoints * ecm::kJointFloats];
 std::mutex g_restPovMutex;     // F33
 float g_restPovDelta[3] = {};  // F33: the povCamera joint minus the head joint, model space (the rest offset Explorer Cam derives)
 bool g_restPovKnown = false;   // F33
-float g_neckModel[3] = {};     // F38: the head joint's parent (the neck) in model space, from the same walk
-bool g_neckKnown = false;      // F38
 uint16_t g_walkParents[ecm::kMaxWalkJoints];
 
 void followFault() noexcept {
@@ -876,12 +874,6 @@ ecm::FixedWhy followDerive(uint64_t iface, FollowCache& c) noexcept {
         std::lock_guard<std::mutex> lock(g_restPovMutex);   // F33: the latest derived rest offset, for the body align
         std::memcpy(g_restPovDelta, rest.delta, sizeof(g_restPovDelta));
         g_restPovKnown = true;
-        // F38: the neck is the head joint's parent in the walk (no joint name is needed); unknown when the parent is the root.
-        const uint16_t parent = headIdx < joints ? g_walkParents[headIdx] : uint16_t(0xFFFFu);
-        float neck[3] = {};
-        uint32_t neckDepth = 0;
-        g_neckKnown = parent != 0xFFFFu && parent < joints && ecm::walkJointToModel(g_walkLocals, g_walkParents, joints, parent, neck, &neckDepth);
-        if (g_neckKnown) std::memcpy(g_neckModel, neck, sizeof(g_neckModel));
     }
     note.kind = static_cast<uint32_t>(ecm::FollowNoteKind::Rest);
     note.headDepth = rest.headDepth;
@@ -1707,11 +1699,54 @@ struct NeckSnapshot {
     float head[3] = {};          // avatar-root model space (row vectors; translation in the fourth row)
     float amc[3] = {};           // world space: the AMC's origin
     int amcState = 0;            // sehAmcOrigin: 1 read, 0 not available, -1 faulted
+    uint32_t neckState = 0;      // F39: 1 read, 2 no candidate name answered, 3 matrix not plausible, 0 not tried (head not read)
+    float neck[3] = {};          // F39: the neck joint, avatar-root model space (as the head)
+    const char* neckName = nullptr;
 };
 std::mutex g_neckMutex;
 NeckSnapshot g_neck;                                  // guarded by g_neckMutex
 std::atomic<uint64_t> g_neckNextMs{0};
 std::atomic<bool> g_busyNeck{false};
+
+// F39: the neck joint by name on the local third-person skeleton, found the way the head is (FindJoint, then the +0x58 model matrix). The exe
+// holds no neck joint name, so these are our own strings. Each is asked once per skeleton: the first that answers with a plausible matrix is
+// kept; the upper spine is used only when no neck name answers. Census thread only (neckCensusStep holds g_busyNeck).
+struct NeckJointCache {
+    uint64_t iface = 0;
+    bool tried = false;
+    uint32_t index = 0xFFFFu;
+    const char* name = nullptr;
+};
+NeckJointCache g_neckJoint;
+constexpr const char* kNeckJointNames[] = {"def_c_neck_joint", "def_c_neck", "def_c_spine2_joint", "def_c_spine1_joint", "def_c_spine_joint"};
+// 1 read (out = the translation of the matrix, model space), 2 no candidate answered, 3 the matrix is not plausible.
+uint32_t neckJointRead(uintptr_t iface, const SkSlots& sl, float out[3]) noexcept {
+    if (!g_neckJoint.tried || g_neckJoint.iface != static_cast<uint64_t>(iface)) {
+        g_neckJoint = NeckJointCache{};
+        g_neckJoint.iface = static_cast<uint64_t>(iface);
+        g_neckJoint.tried = true;
+        for (const char* name : kNeckJointNames) {
+            uint32_t idx = ecm::kNoJoint;
+            if (!sehCallFind(sl.fn[1], iface, name, &idx)) continue;
+            idx &= 0xFFFFu;
+            if (idx == 0xFFFFu) continue;
+            alignas(16) float m[16] = {};
+            if (!sehCallModel(sl.fn[3], iface, idx, m) || !ecm::headMatrixPlausible(m)) continue;
+            g_neckJoint.index = idx;
+            g_neckJoint.name = name;
+            break;
+        }
+        Log::get().note("native on foot neck census: neck joint on the local third-person skeleton: %s",
+                        g_neckJoint.name ? g_neckJoint.name : "none of the candidate names answered (the pov falls back to the low-passed head)");
+    }
+    if (g_neckJoint.index == 0xFFFFu) return 2;
+    alignas(16) float m[16] = {};
+    if (!sehCallModel(sl.fn[3], iface, g_neckJoint.index, m) || !ecm::headMatrixPlausible(m)) return 3;
+    out[0] = m[12];
+    out[1] = m[13];
+    out[2] = m[14];
+    return 1;
+}
 
 void neckCensusStep() noexcept {
     if (!nativeOnFootActive()) return;
@@ -1742,6 +1777,9 @@ void neckCensusStep() noexcept {
                     s.head[0] = m[12];
                     s.head[1] = m[13];
                     s.head[2] = m[14];
+                    // F39: the neck joint, by name, on the same skeleton (cached per skeleton).
+                    s.neckState = neckJointRead(static_cast<uintptr_t>(iface), sl, s.neck);
+                    if (s.neckState == 1) s.neckName = g_neckJoint.name;
                 }
             }
         }
@@ -1763,6 +1801,9 @@ bool neckCensusCopy(NeckCensusReading* out) {
     std::memcpy(out->head, g_neck.head, sizeof(out->head));
     std::memcpy(out->amc, g_neck.amc, sizeof(out->amc));
     out->amcState = g_neck.amcState;
+    out->neckState = g_neck.neckState;
+    std::memcpy(out->neck, g_neck.neck, sizeof(out->neck));
+    out->neckName = g_neck.neckName;
     return g_neck.stamp != 0;
 }
 
@@ -3322,12 +3363,6 @@ FpBodyReadback explorerCamFpBodyReadback() {
 }
 bool neckCensusRead(NeckCensusReading* out) { return neckCensusCopy(out); }
 uint64_t localAmcPointer() { return g_amcLocal.load(); }   // F18
-bool explorerCamNeckModel(float out[3]) {   // F38: the neck (the head's parent) in model space, once the walk derived it
-    std::lock_guard<std::mutex> lock(g_restPovMutex);
-    if (!g_neckKnown) return false;
-    std::memcpy(out, g_neckModel, sizeof(g_neckModel));
-    return true;
-}
 bool explorerCamRestPovDelta(float out[3]) {   // F33
     std::lock_guard<std::mutex> lock(g_restPovMutex);
     if (!g_restPovKnown) return false;
