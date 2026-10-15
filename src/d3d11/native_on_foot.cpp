@@ -579,12 +579,13 @@ void readKey() {
         g_alignMode.store(mode, std::memory_order_relaxed);
         g_alignKeyOn.store(mode != 0, std::memory_order_relaxed);
         // F43 (live): the body anchor, shoulders (the default; neck while a shoulder does not resolve) or neck.
-        g_alignAnchorShoulders.store(cfg.getString("fix.native_on_foot_body_align_anchor", "shoulders") != "neck", std::memory_order_relaxed);
-        const std::string trims[3] = {cfg.getString("fix.native_on_foot_body_align_trim_right_cm", "0"),
-                                      cfg.getString("fix.native_on_foot_body_align_trim_up_cm", "0"),
-                                      cfg.getString("fix.native_on_foot_body_align_trim_forward_cm", "0")};
+        g_alignAnchorShoulders.store(cfg.getString("fix.native_on_foot_body_align_anchor", "neck") != "neck", std::memory_order_relaxed);
+        // F46 part A: the trims are numbers (the menu's sliders): right/left, height and forward/back, in cm, clamped to +-30.
+        const float trims[3] = {cfg.getFloat("fix.native_on_foot_body_align_trim_right_cm", 4.5f),
+                                cfg.getFloat("fix.native_on_foot_body_align_trim_up_cm", 9.0f),
+                                cfg.getFloat("fix.native_on_foot_body_align_trim_forward_cm", 4.0f)};
         for (size_t i = 0; i < 3; ++i) {
-            double v = std::atof(trims[i].c_str());
+            double v = static_cast<double>(trims[i]);
             if (!(v == v)) v = 0.0;
             g_alignTrimCm[i] = std::max(-30.0, std::min(30.0, v));
         }
