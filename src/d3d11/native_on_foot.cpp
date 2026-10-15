@@ -75,7 +75,22 @@ std::atomic<int> g_lookSmoothMs{150};          // fix.native_on_foot_look_to_aim
 std::atomic<int> g_lookSign{1};                // fix.native_on_foot_look_to_aim_yaw_sign (temporary): 1 or -1, on the controller's input only
 std::atomic<int> g_lookDelay{0};               // fix.native_on_foot_look_to_aim_comp_delay (temporary): 0 or 1 frames
 bool g_lookOnLast = true;                      // frame thread only: the look keys as last logged (readKey)
-int g_lookSignLast = 1, g_lookDelayLast = 0;   // frame thread only
+int g_lookSignLast = 1, g_lookDelayLast = 0, g_lookCompSignLast = 1;   // frame thread only
+// ---- F23 (after the F22 flight): the yaw convention, the rate cap, the runaway guard, the sign instrument, the runtime's sign ----
+std::atomic<int> g_lookCompSign{1};            // fix.native_on_foot_look_to_aim_comp_sign (temporary): the sign the runtime's compensation takes
+constexpr size_t kLookTurnRing = 1024;         // the processor's |our part| samples for the 3 s window (game thread writes, frame thread reads)
+struct LookTurnSample { uint64_t ms; float absPart; };
+LookTurnSample g_lookTurns[kLookTurnRing] = {};
+uint64_t g_lookTurnsN = 0;                     // under g_f9Lock
+std::atomic<uint32_t> g_lookSignMismatch{0};   // frames where sign(game yaw delta) != sign(old + ours) (game thread)
+bool g_lookTripped = false;                    // frame thread: the runaway guard stopped the look; cleared by a key toggle or native on foot re-entering
+bool g_lookKeyLast = false, g_lookFootLast = false, g_lookConvLogged = false, g_lookHavePrev = false;   // frame thread only
+double g_lookPrevTotal = 0.0, g_lookPrevErr = 0.0;   // frame thread only: the total and the forward yaw at the last engaged tick
+double g_lookCapErr = 0.0;                     // frame thread only: the error when the rate cap started
+uint64_t g_lookCapStartMs = 0;                 // frame thread only: 0 = not at the cap
+double g_lookResAbs = 0.0, g_lookResRatio = 0.0;   // frame thread only: the sign instrument's window sums (rad; ratio of residual to our part)
+uint32_t g_lookResN = 0, g_lookRatioN = 0;     // frame thread only
+uint32_t g_lookMismatchWinStart = 0;           // frame thread only: the mismatch count at the last 5 s line
 float g_hudElemLast = -1.0f;                                    // frame thread only: as last logged (F17)
 std::atomic<float> g_hudRoomSetting{1.0f};                      // fix.native_on_foot_hud_room, live, 1.00..2.50 (F18)
 std::atomic<float> g_hudRoomEff{1.0f};                          // the room the mesh is built with now: 1 unless the room is applied (F18; game thread reads)
@@ -533,12 +548,16 @@ void readKey() {
     if (lookDelay < 0) lookDelay = 0;
     if (lookDelay > 1) lookDelay = 1;
     g_lookDelay.store(lookDelay, std::memory_order_relaxed);
-    if (first || lookOn != g_lookOnLast || lookSign != g_lookSignLast || lookDelay != g_lookDelayLast) {
-        Log::get().note("native on foot look to aim: %s, smoothing %d ms, yaw sign %d (temporary), comp delay %d frame(s) (temporary)",
-                        lookOn ? "on" : "off", lookSmooth, lookSign, lookDelay);
+    // F23 (TEMPORARY): the sign the runtime's compensation takes. Read live; the published total carries it (lookPublishTick).
+    const int lookCompSign = cfg.getInt("fix.native_on_foot_look_to_aim_comp_sign", 1) < 0 ? -1 : 1;
+    g_lookCompSign.store(lookCompSign, std::memory_order_relaxed);
+    if (first || lookOn != g_lookOnLast || lookSign != g_lookSignLast || lookDelay != g_lookDelayLast || lookCompSign != g_lookCompSignLast) {
+        Log::get().note("native on foot look to aim: %s, smoothing %d ms, yaw sign %d (temporary), comp delay %d frame(s) (temporary), comp sign %d (temporary)",
+                        lookOn ? "on" : "off", lookSmooth, lookSign, lookDelay, lookCompSign);
         g_lookOnLast = lookOn;
         g_lookSignLast = lookSign;
         g_lookDelayLast = lookDelay;
+        g_lookCompSignLast = lookCompSign;
     }
     // F16: the per-group HUD offsets (user settings, live): x and y per group, a fraction of the HUD canvas, read under the layout hook's lock.
     {
@@ -2945,6 +2964,182 @@ std::atomic<float> g_lookLastInput{0.0f};
 std::atomic<uint32_t> g_lookUpdCalls{0}, g_lookWrites{0}, g_lookRefusals{0}, g_lookProcCalls{0};
 std::atomic<const char*> g_lookWhy{nullptr};   // the last refusal's reason (shown on the 5 s line)
 
+// ---- F23 (Part E, TEMPORARY, read only): the load pipeline's stage timers ("load stages:") ---------------------------------------------
+// The dispatcher (EliteDangerous64.exe+0x1CA6510, a virtual): rdx = pipeline node, obj = rdx - 0x20 (rdx 0 is skipped), rcx unused, xmm2 = dt,
+// returns al. Pre-hook only: the observation reads the state the previous call left, then the original runs and its result is returned unchanged.
+// The relay uses RAX only, so rdx and xmm2 reach the callback and the original intact (the same check as the processor hook).
+constexpr uintptr_t kStageDispatchRva = 0x1CA6510;
+const uint8_t kStageDispatchPrologue[16] = {0x40, 0x55, 0x41, 0x54, 0x48, 0x83, 0xEC, 0x38, 0x45, 0x33, 0xE4, 0x0F, 0x29, 0x74, 0x24, 0x20};
+constexpr uintptr_t kStageTableRva = 0x5E7B460;   // 21 entries, stride 0x30; entry+0 is a char* into .rdata (the stage name)
+constexpr size_t kStageCount = 21, kStageEntryStride = 0x30, kStageNameMax = 48;
+constexpr uintptr_t kStageRecOff = 0x2B0, kStageRecStride = 0x18, kStageClockOff = 0x4C4, kStageNetOff = 0x4B8, kStageNetGateOff = 0xC0;
+constexpr uint32_t kStageGateOpen = 5;
+F9Probe g_f23Stage;
+using F23StageFn = bool(__fastcall*)(void*, void*, float);
+struct StageSnap { int state = -1; float start = 0.0f, end = 0.0f; };   // state: 0 waiting, 1 running, 2 done, -1 unread
+std::mutex g_stMutex;                  // the dispatcher may run on more than one thread
+std::string g_stNames[kStageCount];    // read once at install
+bool g_stInstalled = false, g_stNoCallNoted = false;   // frame thread and game thread
+uint64_t g_stInstallMs = 0, g_stCalls = 0;   // g_stCalls under g_stMutex
+uintptr_t g_stObj = 0;                 // the pipeline obj observed last
+int g_stLast[kStageCount] = {};        // last seen state per stage, for g_stObj
+StageSnap g_stSnap[kStageCount];       // the snapshot of g_stObj's records
+bool g_stSummarised = false;           // the summary line for g_stObj is written
+int g_stGate = 0;                      // 0 unknown, 1 open, 2 closed (dword < 5), 3 unread
+uint64_t g_stGateSinceMs = 0;
+uint32_t g_stGateValue = 0;
+uint64_t g_stFirstCallMs = 0;
+
+const char* stageStateName(int s) {
+    switch (s) {
+        case 0: return "waiting";
+        case 1: return "running";
+        case 2: return "done";
+        default: return "unread";
+    }
+}
+
+// The stage names, read once: each entry's char* must lie inside the module, and the string is capped at kStageNameMax.
+void stageLoadNames(uintptr_t base) {
+    uint32_t lfanew = 0, sizeOfImage = 0;
+    if (!guardedRead(base + 0x3C, &lfanew, 4) || !guardedRead(base + lfanew + 0x50, &sizeOfImage, 4) || !sizeOfImage) return;
+    for (size_t i = 0; i < kStageCount; ++i) {
+        uintptr_t p = 0;
+        char buf[kStageNameMax + 1] = {};
+        std::string name = "?";
+        if (guardedRead(base + kStageTableRva + i * kStageEntryStride, &p, 8) && p >= base && p < base + sizeOfImage &&
+            guardedRead(p, buf, kStageNameMax)) {
+            buf[kStageNameMax] = '\0';
+            name = buf;
+        }
+        g_stNames[i] = name;
+    }
+}
+
+// The summary of g_stObj's load: each stage that ran, in table order, with its duration (or running). One line.
+void stageSummary(const char* why, float clock) {
+    char line[1000] = {};
+    size_t n = 0;
+    unsigned ran = 0;
+    for (size_t i = 0; i < kStageCount; ++i) {
+        const StageSnap& s = g_stSnap[i];
+        if (s.state < 1) continue;
+        ++ran;
+        char item[96];
+        if (s.state == 2) std::snprintf(item, sizeof(item), " %s=%.3fs", g_stNames[i].c_str(), static_cast<double>(s.end - s.start));
+        else std::snprintf(item, sizeof(item), " %s=running", g_stNames[i].c_str());
+        const size_t len = std::strlen(item);
+        if (n + len < sizeof(line) - 1) {
+            std::memcpy(line + n, item, len);
+            n += len;
+            line[n] = '\0';
+        }
+    }
+    Log::get().note("load stages: summary (%s) obj=0x%llX clock %.3f, %u stage(s) ran, dispatcher calls %llu:%s", why,
+                    static_cast<unsigned long long>(g_stObj), static_cast<double>(clock), ran, static_cast<unsigned long long>(g_stCalls),
+                    ran ? line : " none");
+}
+
+// Under g_stMutex: one observation of pipeline obj. Logs the changes against the last seen states, the gate's transitions, and the completion.
+void stageObserve(uintptr_t obj) {
+    if (obj != g_stObj) {
+        if (g_stObj != 0 && !g_stSummarised) {
+            float clock = 0.0f;
+            guardedRead(g_stObj + kStageClockOff, &clock, 4);
+            stageSummary("new pipeline obj", clock);
+        }
+        Log::get().note("load stages: new pipeline obj=0x%llX (previous 0x%llX); a new load starts here",
+                        static_cast<unsigned long long>(obj), static_cast<unsigned long long>(g_stObj));
+        g_stObj = obj;
+        for (size_t i = 0; i < kStageCount; ++i) {
+            g_stLast[i] = 0;
+            g_stSnap[i] = StageSnap{};
+        }
+        g_stSummarised = false;
+        g_stGate = 0;
+    }
+    float clock = 0.0f;
+    if (!guardedRead(obj + kStageClockOff, &clock, 4)) clock = 0.0f;
+    for (size_t i = 0; i < kStageCount; ++i) {
+        const uintptr_t rec = obj + kStageRecOff + i * kStageRecStride;
+        uint32_t st = 0;
+        float a = 0.0f, b = 0.0f;
+        StageSnap s;
+        if (guardedRead(rec, &st, 4) && guardedRead(rec + 4, &a, 4) && guardedRead(rec + 8, &b, 4) && st <= 2) {
+            s.state = static_cast<int>(st);
+            s.start = a;
+            s.end = b;
+        }
+        if (s.state != g_stLast[i]) {
+            if (s.state == 2)
+                Log::get().note("load stages: %s %s -> %s at clock %.3f (start %.3f, end %.3f, duration %.3f s)", g_stNames[i].c_str(),
+                                stageStateName(g_stLast[i]), stageStateName(s.state), static_cast<double>(clock), static_cast<double>(s.start),
+                                static_cast<double>(s.end), static_cast<double>(s.end - s.start));
+            else
+                Log::get().note("load stages: %s %s -> %s at clock %.3f (start %.3f, end %.3f)", g_stNames[i].c_str(), stageStateName(g_stLast[i]),
+                                stageStateName(s.state), static_cast<double>(clock), static_cast<double>(s.start), static_cast<double>(s.end));
+            g_stLast[i] = s.state;
+        }
+        g_stSnap[i] = s;
+    }
+    // The net gate: no stage starts until the net object's dword at +0xC0 reaches 5.
+    uintptr_t net = 0;
+    uint32_t gv = 0;
+    const bool okNet = guardedRead(obj + kStageNetOff, &net, 8) && net && guardedRead(net + kStageNetGateOff, &gv, 4);
+    const int gs = !okNet ? 3 : (gv >= kStageGateOpen ? 1 : 2);
+    if (gs != g_stGate) {
+        const uint64_t now = GetTickCount64();
+        if (gs == 2) {
+            Log::get().note("load stages: net gate closed: dword +0xC0 = %u < %u at clock %.3f; no stage starts until it reaches %u", static_cast<unsigned>(gv),
+                            static_cast<unsigned>(kStageGateOpen), static_cast<double>(clock), static_cast<unsigned>(kStageGateOpen));
+            g_stGateSinceMs = now;
+        } else if (gs == 1) {
+            Log::get().note("load stages: net gate open (dword +0xC0 = %u) at clock %.3f, after %.2f s held", static_cast<unsigned>(gv),
+                            static_cast<double>(clock), g_stGate == 2 ? static_cast<double>(now - g_stGateSinceMs) / 1000.0 : 0.0);
+        } else if (gs == 3) {
+            Log::get().note("load stages: net gate unread (the net object at +0x4B8 or its dword at +0xC0 is not readable) at clock %.3f",
+                            static_cast<double>(clock));
+        }
+        g_stGate = gs;
+        g_stGateValue = gv;
+    }
+    // The completion: EnterLocationFinalStep reaches done. Its index is found by name.
+    for (size_t i = 0; i < kStageCount; ++i) {
+        if (g_stNames[i] != "EnterLocationFinalStep") continue;
+        if (g_stSnap[i].state == 2 && !g_stSummarised) {
+            g_stSummarised = true;
+            stageSummary("load complete: EnterLocationFinalStep done", clock);
+        }
+    }
+}
+
+// Pre-hook. The original runs with the same three arguments and its result is returned unchanged.
+bool __fastcall stageDispatchHooked(void* rcx, void* rdx, float dt) {
+    const F23StageFn original = reinterpret_cast<F23StageFn>(g_f23Stage.original);
+    if (!original) return true;   // the trampoline is missing: let the game go on as it would without the hook
+    if (rdx) {
+        std::lock_guard<std::mutex> lock(g_stMutex);
+        if (g_stCalls == 0) {
+            g_stFirstCallMs = GetTickCount64();
+            Log::get().note("load stages: dispatcher reached (first call %.1f s after install)",
+                            static_cast<double>(g_stFirstCallMs - g_stInstallMs) / 1000.0);
+        }
+        ++g_stCalls;
+        stageObserve(reinterpret_cast<uintptr_t>(rdx) - 0x20);
+    }
+    return original(rcx, rdx, dt);
+}
+
+// Frame thread, every frame: the one line that tells "the hook never ran" from "it ran and nothing changed": no call 30 s after install.
+void loadStagesFrameTick(uint64_t nowMs) {
+    if (!g_stInstalled || g_stNoCallNoted) return;
+    std::lock_guard<std::mutex> lock(g_stMutex);
+    if (g_stCalls == 0 && nowMs - g_stInstallMs >= 30000) {
+        g_stNoCallNoted = true;
+        Log::get().note("load stages: the dispatcher has not run in 30 s since install (no load has run this process, or the hook is not reached)");
+    }
+}
+
 // The load wait (read only). The original is called first and its result is returned unchanged; the log says only what changed.
 using F22BoolFn = bool(__fastcall*)(void*, void*, void*, void*);
 bool g_lwInRun = false;          // the wait is in a false run (game thread, the load pipeline)
@@ -3157,6 +3352,9 @@ uint64_t __fastcall lookProcHooked(void* comp, float dt) {
             g_lookLastD = d;
             g_lookLastPart = part;
             g_lookTotal += static_cast<double>(part);
+            g_lookTurns[g_lookTurnsN % kLookTurnRing] = LookTurnSample{GetTickCount64(), std::fabs(part)};   // F23: the 3 s guard's window
+            ++g_lookTurnsN;
+            if (d != 0.0f && sum != 0.0f && ((d > 0.0f) != (sum > 0.0f))) g_lookSignMismatch.fetch_add(1, std::memory_order_relaxed);   // F23
         }
     }
     return 0;
@@ -3198,6 +3396,23 @@ void installF22ProbesOnce() {
             Log::get().note("native on foot rig probe A: NOT installed at EliteDangerous64.exe+0x%llX -- %s. The game was not touched by it.",
                             static_cast<unsigned long long>(kCamDriverRva), why.c_str());
     }
+    {
+        const F9ProbeSpec s{"native-on-foot-load-stages", kStageDispatchRva, kStageDispatchPrologue, sizeof(kStageDispatchPrologue), 8,
+                            reinterpret_cast<void*>(&stageDispatchHooked), "F23 load stages (read only)"};
+        size_t stolen = 0;
+        std::string why;
+        if (installF9ProbeInto(g_f23Stage, s, base, &stolen, &why)) {
+            stageLoadNames(base);
+            g_stInstalled = true;
+            g_stInstallMs = GetTickCount64();
+            Log::get().note("load stages: installed at EliteDangerous64.exe+0x%llX, stolen=%zu bytes, prologue %zu bytes verified (read only; temporary); "
+                            "stage names read: %s ... %s", static_cast<unsigned long long>(kStageDispatchRva), stolen, sizeof(kStageDispatchPrologue),
+                            g_stNames[0].c_str(), g_stNames[kStageCount - 1].c_str());
+        } else {
+            Log::get().note("load stages: NOT installed at EliteDangerous64.exe+0x%llX -- %s. The game was not touched by it.",
+                            static_cast<unsigned long long>(kStageDispatchRva), why.c_str());
+        }
+    }
 }
 
 // Installs the look's two hooks (VR only, once, when the key first reads on). Both must land: without the processor the body turn is not
@@ -3233,22 +3448,63 @@ void installLookHooksOnce() {
     else Log::get().note("native on foot look to aim: processor hook NOT installed -- %s. Look to aim stays off.", whyProc.c_str());
 }
 
+// F23: the head's forward yaw. Forward is minus row 2 of C (a centred head has C[8..10] = (0, 0, -1) in this convention). The F22 reading
+// atan2(C[8], C[10]) was the backward axis, so a centred head read +-180 deg (F22 flight, 2026-10-14).
+inline double lookForwardYawRad(const float* C) noexcept {
+    return std::atan2(static_cast<double>(-C[8]), static_cast<double>(-C[10]));
+}
+inline double lookWrapRad(double a) noexcept {
+    const double pi = 3.14159265358979323846;
+    while (a > pi) a -= 2.0 * pi;
+    while (a < -pi) a += 2.0 * pi;
+    return a;
+}
+constexpr double kLookPi = 3.14159265358979323846;
+constexpr double kLookTurnWindowMs = 3000.0;                       // the runaway guard's window
+constexpr double kLookTurnWindowMaxRad = 270.0 * kLookPi / 180.0;  // ...and the most body turn it allows in that window
+constexpr double kLookTurnRateRad = 180.0 * kLookPi / 180.0;       // the turn-rate cap: 180 deg/s, times dt
+constexpr uint64_t kLookCapStallMs = 1000;                         // at the cap this long with the error not falling: the guard trips
+
+// Stops the look until the key toggles or native on foot re-enters. Zeroes the input before the update hook can see it.
+void lookTrip(const char* reason) {
+    g_lookTripped = true;
+    g_lookEngaged.store(false, std::memory_order_relaxed);
+    g_lookInput.store(0.0f, std::memory_order_relaxed);
+    g_lookEngagedLast = false;
+    g_lookHavePrev = false;
+    g_lookCapStartMs = 0;
+    Log::get().note("native on foot look to aim: runaway guard tripped (%s)", reason);
+}
+
 // Frame thread, every frame: the controller. Writes g_lookInput (the update hook applies it on the next game update) and logs every 5 s while
-// engaged, with the pitch probe (log only). Engagement needs the key, reticle_follow = head, native stereo on foot, the session and both hooks.
+// engaged, with the compensation sign check and the pitch probe (log only). Engagement needs the key, reticle_follow = head, native stereo on
+// foot, the session and both hooks, and no runaway trip.
 void lookToAimTick(uint64_t nowMs, bool session) {
     const bool keyOn = g_lookKeyOn.load(std::memory_order_relaxed);
     const bool headMode = g_reticleHead.load(std::memory_order_relaxed);
     const bool onFoot = nativeOnFootActive();
-    const bool engagedWant = keyOn && headMode && onFoot && session && g_lookArmed;
+    // The guard clears only on a key toggle or on native on foot re-entering.
+    if (keyOn != g_lookKeyLast || (onFoot && !g_lookFootLast)) {
+        if (g_lookTripped) Log::get().note("native on foot look to aim: runaway guard cleared (the key was toggled or native on foot re-entered)");
+        g_lookTripped = false;
+    }
+    g_lookKeyLast = keyOn;
+    g_lookFootLast = onFoot;
+    const bool engagedBase = keyOn && headMode && onFoot && session && g_lookArmed;
+    const bool engagedWant = engagedBase && !g_lookTripped;
     g_lookWantRead.store(onFoot && session, std::memory_order_relaxed);
     const double dt = (g_lookLastMs != 0 && nowMs > g_lookLastMs) ? std::min(0.1, static_cast<double>(nowMs - g_lookLastMs) / 1000.0) : 0.0;
     g_lookLastMs = nowMs;
     if (engagedWant != g_lookEngagedLast) {
         if (engagedWant) {
             Log::get().note("native on foot look to aim: engaged (the body turns to the head; the world is held by the runtime's compensation)");
+            g_lookHavePrev = false;
+            g_lookCapStartMs = 0;
+            g_lookConvLogged = false;
         } else {
             const char* offWhy = !keyOn ? "fix.native_on_foot_look_to_aim is off" : !headMode ? "fix.native_on_foot_reticle_follow is not head"
-                                 : !onFoot ? "native stereo on foot ended" : !g_lookArmed ? "the hooks are not armed" : "the game session ended";
+                                 : !onFoot ? "native stereo on foot ended" : !g_lookArmed ? "the hooks are not armed" : g_lookTripped ? "the runaway guard"
+                                 : "the game session ended";
             Log::get().note("native on foot look to aim: stops (%s); input zero", offWhy);
         }
         g_lookEngagedLast = engagedWant;
@@ -3260,10 +3516,16 @@ void lookToAimTick(uint64_t nowMs, bool session) {
     }
     F13Head h;
     uint64_t headMs = 0;
+    double totalNow = 0.0, turn3s = 0.0;
     {
         F9Lock lock;
         h = g_lookHead;
         headMs = g_lookHeadMs;
+        totalNow = g_lookTotal;
+        const size_t n = static_cast<size_t>(std::min<uint64_t>(g_lookTurnsN, kLookTurnRing));
+        for (size_t i = 0; i < n; ++i) {
+            if (static_cast<double>(nowMs) - static_cast<double>(g_lookTurns[i].ms) <= kLookTurnWindowMs) turn3s += static_cast<double>(g_lookTurns[i].absPart);
+        }
     }
     const uintptr_t comp = g_lookComp.load(std::memory_order_relaxed);
     float aLo = 0.0f, aHi = 0.0f;
@@ -3274,20 +3536,67 @@ void lookToAimTick(uint64_t nowMs, bool session) {
     const float aEst = aMeas > 0.0f ? aMeas : 0.5f * (aLo + aHi);
     if (!refuse && !(aEst > 0.0f && std::isfinite(aEst))) refuse = "gain is not positive";
     if (!refuse && !(h.valid && nowMs - headMs < kLookHeadMaxAgeMs)) refuse = "no fresh head sample (list B)";
-    float input = 0.0f, turn = 0.0f;
-    double errDeg = 0.0;
+    const double maxTurn = kLookTurnRateRad * dt;   // F23: the rate cap, per frame
+    float input = 0.0f;
+    float turn = 0.0f;
+    double errRad = 0.0, errDeg = 0.0;
     if (!refuse) {
+        if (!g_lookConvLogged) {
+            g_lookConvLogged = true;
+            Log::get().note("native on foot look to aim: yaw convention at engagement: raw C row 2 = (%.4f, %.4f, %.4f); forward = -row 2, yaw %.2f deg "
+                            "(used); +row 2 yaw %.2f deg (the F22 reading). A centred head reads about 0 under the first.",
+                            static_cast<double>(h.C[8]), static_cast<double>(h.C[9]), static_cast<double>(h.C[10]),
+                            lookForwardYawRad(h.C) * 180.0 / kLookPi, std::atan2(static_cast<double>(h.C[8]), static_cast<double>(h.C[10])) * 180.0 / kLookPi);
+        }
         const float sign = g_lookSign.load(std::memory_order_relaxed) < 0 ? -1.0f : 1.0f;
         const double tauS = g_lookSmoothMs.load(std::memory_order_relaxed) / 1000.0;
         const double alpha = tauS <= 0.0 ? 1.0 : 1.0 - std::exp(-dt / tauS);
-        const float errRad = std::atan2(h.C[8], h.C[10]);
-        errDeg = static_cast<double>(errRad) * 180.0 / 3.14159265358979323846;
-        turn = std::max(-kLookMaxTurnRad, std::min(kLookMaxTurnRad, sign * errRad * static_cast<float>(alpha)));
+        errRad = lookForwardYawRad(h.C);
+        errDeg = errRad * 180.0 / kLookPi;
+        const double want = static_cast<double>(sign) * errRad * alpha;
+        const double clamped = std::max(-maxTurn, std::min(maxTurn, want));
+        turn = static_cast<float>(clamped);
         input = turn / aEst;
         if (!std::isfinite(input)) {
             refuse = "the input is not finite";
             input = 0.0f;
         }
+    }
+    if (refuse) {
+        g_lookHavePrev = false;
+    } else {
+        // F23 runaway guard. Both checks use this frame's numbers; a trip zeroes the input and stops the look until the key toggles or on foot re-enters.
+        if (turn3s > kLookTurnWindowMaxRad) {
+            lookTrip("the body turned more than 270 deg in 3 s");
+            return;
+        }
+        const bool atCap = maxTurn > 0.0 && std::fabs(static_cast<double>(turn)) >= 0.98 * maxTurn;
+        if (atCap) {
+            const double errAbs = std::fabs(errRad);
+            if (g_lookCapStartMs == 0 || errAbs < g_lookCapErr - 0.005) {
+                g_lookCapStartMs = nowMs;
+                g_lookCapErr = errAbs;
+            } else if (nowMs - g_lookCapStartMs >= kLookCapStallMs) {
+                lookTrip("the output sat at the 180 deg/s rate cap for 1 s while the error did not fall");
+                return;
+            }
+        } else {
+            g_lookCapStartMs = 0;
+        }
+        // The sign instrument: after the body turned by our part since the last tick, the error should have fallen by that part.
+        if (g_lookHavePrev) {
+            const double part = totalNow - g_lookPrevTotal;
+            const double res = lookWrapRad(errRad - (g_lookPrevErr - part));
+            g_lookResAbs += std::fabs(res);
+            ++g_lookResN;
+            if (std::fabs(part) > 0.0005) {
+                g_lookResRatio += res / part;
+                ++g_lookRatioN;
+            }
+        }
+        g_lookPrevTotal = totalNow;
+        g_lookPrevErr = errRad;
+        g_lookHavePrev = true;
     }
     g_lookInput.store(refuse ? 0.0f : input, std::memory_order_relaxed);
     g_lookWhy.store(refuse, std::memory_order_relaxed);
@@ -3296,9 +3605,9 @@ void lookToAimTick(uint64_t nowMs, bool session) {
     double totalDeg = 0.0, lastD = 0.0, lastPart = 0.0;
     {
         F9Lock lock;
-        totalDeg = g_lookTotal * 180.0 / 3.14159265358979323846;
-        lastD = static_cast<double>(g_lookLastD) * 180.0 / 3.14159265358979323846;
-        lastPart = static_cast<double>(g_lookLastPart) * 180.0 / 3.14159265358979323846;
+        totalDeg = g_lookTotal * 180.0 / kLookPi;
+        lastD = static_cast<double>(g_lookLastD) * 180.0 / kLookPi;
+        lastPart = static_cast<double>(g_lookLastPart) * 180.0 / kLookPi;
     }
     const double windowDeg = totalDeg - g_lookWinStartDeg;
     g_lookWinStartDeg = totalDeg;
@@ -3306,18 +3615,43 @@ void lookToAimTick(uint64_t nowMs, bool session) {
     const char* why = g_lookWhy.load(std::memory_order_relaxed);
     Log::get().note("native on foot look to aim: error yaw %.2f deg (sign %d), our input %.5f (turn %.3f deg, gain %.4f %s), old input %.5f, "
                     "game yaw delta %.3f deg, our part %.3f deg, compensation published %.3f deg this window (total %.3f deg, game frame %u), "
-                    "A lo %.4f hi %.4f measured %.4f, comp 0x%llX, update calls %u writes %u refusals %u, %s",
+                    "A lo %.4f hi %.4f measured %.4f, comp 0x%llX, update calls %u writes %u refusals %u, turn in 3 s %.1f deg, %s",
                     refuse ? 0.0 : errDeg, g_lookSign.load() < 0 ? -1 : 1, static_cast<double>(refuse ? 0.0f : input),
-                    static_cast<double>(turn) * 180.0 / 3.14159265358979323846, static_cast<double>(aEst), aMeas > 0.0f ? "measured" : "midpoint",
+                    static_cast<double>(turn) * 180.0 / kLookPi, static_cast<double>(aEst), aMeas > 0.0f ? "measured" : "midpoint",
                     static_cast<double>(g_lookLastOld.load()), lastD, lastPart, windowDeg, totalDeg,
                     static_cast<unsigned>(g_lookGameFrame.load()), static_cast<double>(aLoF), static_cast<double>(aHiF), static_cast<double>(aMeas),
                     static_cast<unsigned long long>(comp), static_cast<unsigned>(g_lookUpdCalls.load()), static_cast<unsigned>(g_lookWrites.load()),
-                    static_cast<unsigned>(g_lookRefusals.load()), refuse ? (std::string("refused: ") + refuse).c_str() : (why ? why : "no refusals"));
+                    static_cast<unsigned>(g_lookRefusals.load()), turn3s * 180.0 / kLookPi,
+                    refuse ? (std::string("refused: ") + refuse).c_str() : (why ? why : "no refusals"));
+    // F23: the sign instrument, one line per 5 s. About 0 mean residual: the compensation is right. About 2 x our part: its sign is wrong.
+    {
+        const uint32_t mismatchNow = g_lookSignMismatch.load(std::memory_order_relaxed);
+        const uint32_t mismatchWin = mismatchNow - g_lookMismatchWinStart;
+        g_lookMismatchWinStart = mismatchNow;
+        Log::get().note("native on foot look to aim: compensation sign check: mean |residual| %.3f deg over %u frames, mean residual/our part %.3f over %u "
+                        "frames (about 0 right, about 2 wrong), sign(game yaw delta) != sign(old+ours) %u frames this window (%u total), runtime sign key %d "
+                        "(temporary)",
+                        g_lookResN ? g_lookResAbs * 180.0 / kLookPi / static_cast<double>(g_lookResN) : 0.0, static_cast<unsigned>(g_lookResN),
+                        g_lookRatioN ? g_lookResRatio / static_cast<double>(g_lookRatioN) : 0.0, static_cast<unsigned>(g_lookRatioN),
+                        static_cast<unsigned>(mismatchWin), static_cast<unsigned>(mismatchNow), g_lookCompSign.load() < 0 ? -1 : 1);
+        g_lookResAbs = 0.0;
+        g_lookResRatio = 0.0;
+        g_lookResN = 0;
+        g_lookRatioN = 0;
+    }
+    // F23: the full look basis (comp+0x5B0, three rows of four floats), once per 5 s. Log only; nothing is written.
     float basisVals[12] = {};
     const bool okBasis = comp && guardedRead(comp + kCompBasisOff, basisVals, sizeof(basisVals));
-    char basisPitch[24], viewPitch[24], headPitch[24];
-    if (okBasis) std::snprintf(basisPitch, sizeof(basisPitch), "%.2f", static_cast<double>(std::asin(std::max(-1.0f, std::min(1.0f, basisVals[9]))) * 180.0f / 3.14159265f));
-    else std::snprintf(basisPitch, sizeof(basisPitch), "unread");
+    char basisText[200];
+    if (okBasis) {
+        std::snprintf(basisText, sizeof(basisText), "(%.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f)",
+                      static_cast<double>(basisVals[0]), static_cast<double>(basisVals[1]), static_cast<double>(basisVals[2]), static_cast<double>(basisVals[3]),
+                      static_cast<double>(basisVals[4]), static_cast<double>(basisVals[5]), static_cast<double>(basisVals[6]), static_cast<double>(basisVals[7]),
+                      static_cast<double>(basisVals[8]), static_cast<double>(basisVals[9]), static_cast<double>(basisVals[10]), static_cast<double>(basisVals[11]));
+    } else {
+        std::snprintf(basisText, sizeof(basisText), "unread");
+    }
+    char viewPitch[24], headPitch[24];
     if (h.valid) {
         std::snprintf(viewPitch, sizeof(viewPitch), "%.2f", static_cast<double>(std::asin(std::max(-1.0f, std::min(1.0f, h.viewY))) * 180.0f / 3.14159265f));
         std::snprintf(headPitch, sizeof(headPitch), "%.2f", f13PitchDeg(h.C));
@@ -3325,8 +3659,8 @@ void lookToAimTick(uint64_t nowMs, bool session) {
         std::snprintf(viewPitch, sizeof(viewPitch), "unread");
         std::snprintf(headPitch, sizeof(headPitch), "unread");
     }
-    Log::get().note("native on foot look to aim: pitch probe (log only, nothing written): look basis pitch %s deg (comp+0x5B0 row 2 column 1), "
-                    "view pitch %s deg (list-B eye 0), headset pitch %s deg (C)", basisPitch, viewPitch, headPitch);
+    Log::get().note("native on foot look to aim: pitch probe (log only, nothing written): look basis %s, view pitch %s deg (list-B eye 0), "
+                    "headset pitch %s deg (C)", basisText, viewPitch, headPitch);
 }
 
 // Frame thread, every frame: the total the runtime applies, published with the game frame it was taken at, delayed by fix.native_on_foot_
@@ -3347,7 +3681,9 @@ void lookPublishTick() {
     ++head;
     const unsigned delay = static_cast<unsigned>(g_lookDelay.load(std::memory_order_relaxed) > 0 ? 1 : 0);
     const unsigned slot = (head - 1u - delay) & 1u;
-    nativeFrameSetLookYaw(static_cast<float>(ring[slot]), ringFrame[slot]);
+    // F23: the runtime's sign (temporary): the compensation is published as the body turn times this sign.
+    const double sgn = g_lookCompSign.load(std::memory_order_relaxed) < 0 ? -1.0 : 1.0;
+    nativeFrameSetLookYaw(static_cast<float>(sgn * ring[slot]), ringFrame[slot]);
 }
 
 // The HRC line's values, without the window's calls (the change key).
@@ -4245,6 +4581,7 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
     // F22: the training load wait and probe A (read only, VR, once); the look's two hooks (once, when its key first reads on); the look controller;
     // and the total the runtime reads for its compensation (every frame).
     installF22ProbesOnce();
+    loadStagesFrameTick(now);   // F23 (Part E): the no-call check for the stage hook
     if (g_lookKeyOn.load(std::memory_order_relaxed)) installLookHooksOnce();
     lookToAimTick(now, session);
     lookPublishTick();
