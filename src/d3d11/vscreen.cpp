@@ -2499,6 +2499,7 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // The RemLok overlay fix, after the probes so a census taken while it
     // runs still records the draw the game submitted. The shape is asked
     // first, inline (remlok_fix.h): any other shape comes back kNone.
+    remlokOnFootDiagnose(kind, count, instances);   // F26: the on-foot visor diagnostic (read only; VS B553BB479B7C0B97 only)
     if (remlokWantsDraws() && remlokOverlayShape(kind, count, instances)) {
         const RemlokAction a = remlokOnEyeDraw(kind, count, instances);
         if (a == RemlokAction::kHide) return DrawVerdict::kSkip;
@@ -3857,10 +3858,14 @@ __declspec(noinline) UiLayerFamily uiLayerFamilyOf(State* s, char kind, UINT cou
     UiFamilyFacts f;
     f.targetKind = uiLayerTargetKind();
     f.vs = bindingShaderHash(BindSlot::Vs);
+    f.nativeOnFoot = nativeOnFootSharpHudWanted();   // F26: the on-foot HUD family is named only while the sharp on-foot HUD is on, on foot
     // The target sphere needs exact PS admission for its depth-address remap, and the three supercruise draws are named by their
     // shader PAIR (ui_layer_math.h: the bars' and the dust's vertex shaders are also seen with another pixel shader). Ordinary
     // HDR draws need no extra hash read.
     if (f.targetKind == 1 && (f.vs == kHoloTargetSphere || f.vs == kUiVsOrbitLines || f.vs == kUiVsSupercruiseBars || f.vs == kUiVsSpaceDust))
+        f.ps = bindingShaderHash(BindSlot::Ps);
+    // F26: the on-foot HUD's two vertex shaders are named by their pixel shader too (uiOnFootHudMatch), only while native stereo is on foot.
+    if (f.targetKind == 1 && f.nativeOnFoot && uiOnFootHudVs(f.vs))
         f.ps = bindingShaderHash(BindSlot::Ps);
     if (f.targetKind == 2) {
         // ui_depth's exclude list (the null-output mesh B018D143700AB803,

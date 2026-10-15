@@ -2955,6 +2955,13 @@ void logTotals(double seconds) {
             static_cast<double>(g_win.hdrCoveragePasses) / frames,
             static_cast<unsigned long long>(g_win.hdrLost),
             declines.empty() ? "none" : declines.c_str());
+        {
+            // F26: the on-foot HUD family's redirects this window (the sharp on-foot HUD; its key is fix.native_on_foot_sharp_hud).
+            const uint64_t onFootRedirects = g_win.decided[static_cast<size_t>(UiLayerFamily::kOnFootHud)][static_cast<size_t>(UiLayerDecision::kRedirect)];
+            Log::get().note("native on foot HUD (sharp): %.2f draws a frame redirected into the HDR layer (%llu this window); key %s, native stereo on foot %s",
+                            static_cast<double>(onFootRedirects) / frames, static_cast<unsigned long long>(onFootRedirects),
+                            nativeOnFootSharpHudWanted() ? "on" : "off", nativeOnFootActive() ? "now" : "not now");
+        }
     }
     Log::get().note("ui quality: left in the game's frame: %s.",
                     left.empty() ? "nothing classified" : left.c_str());
@@ -4803,6 +4810,12 @@ bool uiLayerDoorFromPass(uint32_t eye) {
     return eye <= 1 && g_eye[eye].doorFromPass;
 }
 
+// F26: the eye check's re-arm on a native on-foot mode change. The eye tables are reset on each change; a mismatch is tolerated for
+// kEyeSwapPersist composites after it (kEyeRearmWindow composites counts the window), and only a mismatch that persists stands down.
+uint32_t g_eyeEdgeSeen = 0;             // nativeOnFootEdges() at the last composite
+uint32_t g_eyeSinceRearm = 1u << 30;    // composites since the last re-arm (huge: none in force)
+uint32_t g_eyeSwapStreak = 0;           // consecutive swapped composites inside the window
+constexpr uint32_t kEyeRearmWindow = 2000, kEyeSwapPersist = 30;
 ID3D11Texture2D* uiLayerComposite(uint64_t sequence, uint32_t eye, ID3D11Texture2D* frame,
                                   const uint32_t region[4], const float layerUv[4], bool ownedFrame) {
     if (eye > 1 || !frame || !region || !layerUv) return nullptr;
@@ -4815,6 +4828,21 @@ ID3D11Texture2D* uiLayerComposite(uint64_t sequence, uint32_t eye, ID3D11Texture
     {
         // The eye check: did the UI this layer holds leave the target the
         // game submitted (or copied into what it submitted) for THIS eye?
+        // F26: a native on-foot enter or leave re-arms it: the submitted tables are reset, and a mismatch is tolerated for
+        // kEyeSwapPersist composites after the change. A mismatch that persists through that window stands down, and the log says which.
+        const uint32_t edges = nativeOnFootEdges();
+        if (edges != g_eyeEdgeSeen) {
+            g_eyeEdgeSeen = edges;
+            g_eyeSinceRearm = 0;
+            g_eyeSwapStreak = 0;
+            for (Eye& x : g_eye) {
+                x.submitted = nullptr;
+                x.copiedTo = nullptr;
+            }
+            Log::get().note("ui quality: layer: native on-foot mode change (edge %u): the eye check is re-armed; a mismatch is tolerated for %u "
+                            "composites after it, and one that persists still stands down", static_cast<unsigned>(edges), static_cast<unsigned>(kEyeSwapPersist));
+        }
+        ++g_eyeSinceRearm;
         const void* mine = e.submittedSeq == sequence ? e.submitted : nullptr;
         const void* theirs = g_eye[1 - eye].submitted;  // this frame's or last: stable textures
         const void* copied = e.copiedSeq == sequence ? e.copiedTo : nullptr;
@@ -4822,18 +4850,28 @@ ID3D11Texture2D* uiLayerComposite(uint64_t sequence, uint32_t eye, ID3D11Texture
             ++g_win.eyeUntold;
         } else if (e.target == mine || copied == mine) {
             ++g_win.eyeMatched;
+            g_eyeSwapStreak = 0;
         } else if (theirs && (e.target == theirs || copied == theirs)) {
-            // The game's Submit says this UI belongs to the other eye: every
-            // frame from here would invert the disparity of every menu. Stand
-            // down at once -- the UI goes back into the game's frame, in the
-            // right eyes.
+            // The game's Submit says this UI belongs to the other eye. Inside a re-arm window the mismatch is tolerated for
+            // kEyeSwapPersist composites (this eye's composite is skipped); a mismatch that persists stands down.
             ++g_win.eyeSwapped;
+            const bool rearmed = g_eyeSinceRearm <= kEyeRearmWindow;
+            if (rearmed && ++g_eyeSwapStreak < kEyeSwapPersist) {
+                if (g_eyeSwapStreak == 1) {
+                    Log::get().note("ui quality: layer: the %s eye's layer holds UI from the other eye's target after a native on-foot re-arm "
+                                    "(mine %p, theirs %p, target %p, copied %p): tolerated, streak 1 of %u",
+                                    eye == 0 ? "left" : "right", mine, theirs, e.target, copied, static_cast<unsigned>(kEyeSwapPersist));
+                }
+                return nullptr;
+            }
             Log::get().note(
-                "ui quality: layer: the %s eye's layer holds UI from the target the game "
-                "submitted for the %s eye -- the eye rule (first target of a frame = left) is "
-                "backwards on this rig.",
-                eye == 0 ? "left" : "right", eye == 0 ? "right" : "left");
-            standDown("the eye check found the layer's eyes swapped");
+                "ui quality: layer: the %s eye's layer holds UI from the target the game submitted for the %s eye (mine %p, theirs %p, target %p, "
+                "copied %p) -- %s. The eye rule (first target of a frame = left) is backwards on this rig.",
+                eye == 0 ? "left" : "right", eye == 0 ? "right" : "left", mine, theirs, e.target, copied,
+                rearmed ? "it persisted through the native on-foot re-arm window, so it is a real swap"
+                        : "no native on-foot re-arm was in force, so it is a real swap");
+            standDown(rearmed ? "the eye check found the layer's eyes swapped after a native on-foot re-arm (persistent)"
+                              : "the eye check found the layer's eyes swapped");
             return nullptr;
         } else {
             ++g_win.eyeUntold;

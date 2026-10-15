@@ -99,5 +99,11 @@ inline bool nativeOnFootBodyProbeWanted() {
 void nativeOnFootBodyProbeDraw(ID3D11DeviceContext* ctx, uint32_t indexCount, uint32_t instances);   // draw thread, owner context
 void bodyCbProbeLine();                                                                              // frame thread
 void nativeOnFootBodyProbeShutdown();                                                                // draw thread (from the cull's shutdown)
+// F26: the native on-foot mode-change counter (the frame thread bumps it on each enter or leave). The UI layer re-arms its eye check on a change.
+inline std::atomic<uint32_t> g_nativeOnFootEdges{0};
+inline uint32_t nativeOnFootEdges() { return g_nativeOnFootEdges.load(std::memory_order_relaxed); }
+// F26: fix.native_on_foot_sharp_hud is on (live, VR only; set by readKey). The sharp on-foot HUD is wanted while this and native stereo on foot hold.
+inline std::atomic<bool> g_nativeOnFootSharpHudKey{false};
+inline bool nativeOnFootSharpHudWanted() { return g_nativeOnFootSharpHudKey.load(std::memory_order_relaxed) && nativeOnFootActive(); }
 
 }  // namespace edvr

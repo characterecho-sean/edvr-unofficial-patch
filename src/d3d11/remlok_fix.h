@@ -65,6 +65,8 @@ enum class RemlokMode : uint32_t { kStock, kOuter, kHide };
 extern RemlokMode g_remlokMode;
 }  // namespace detail
 inline bool remlokWantsDraws() { return detail::g_remlokMode != detail::RemlokMode::kStock; }
+// F26: the one-shot diagnostic for the on-foot visor draw (VS B553BB479B7C0B97; read only).
+void remlokOnFootDiagnose(char kind, uint32_t count, uint32_t instances);
 
 // One draw that reached an eye texture, with its bindings still current.
 // Matches the overlay by shape (kind, count, instances, no depth bound,

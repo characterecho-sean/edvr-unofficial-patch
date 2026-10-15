@@ -77,6 +77,7 @@ std::atomic<uint32_t> g_lookGameFrame{0};      // processor calls so far: the ga
 std::atomic<int> g_lookSmoothMs{150};          // fix.native_on_foot_look_to_aim_smoothing_ms, live (0..1000)
 std::atomic<int> g_lookSign{1};               // fix.native_on_foot_look_to_aim_yaw_sign (temporary, F24 default -1): 1 or -1, on the controller's input only
 std::atomic<int> g_lookDelay{0};
+bool g_nativeEdgeLast = false;                // F26: frame thread only
 std::atomic<bool> g_worldMarkersFixed{true};   // F25: fix.native_on_foot_world_markers = fixed (default) | game, live: key 10 is never touched
 uint64_t g_worldLineMs = 0;                    // frame thread and game thread: the 5 s line (the post hook writes it, once per 5 s)
 // F25 (TEMPORARY A/B): the visor param block's translation source floats (.bss, normally 0, no writer in the exe): the values the key sets.
@@ -550,6 +551,8 @@ void readKey() {
     }
     // F25 (TEMPORARY): the world markers (the waypoint and the others, not key 10): fixed takes the head out of their placement, game leaves them as the game has them.
     g_worldMarkersFixed.store(cfg.getString("fix.native_on_foot_world_markers", "fixed") != "game", std::memory_order_relaxed);
+    // F26 (TEMPORARY, live): the sharp on-foot HUD. Off by default; read on each frame through g_sharpHudKeyOn.
+    g_nativeOnFootSharpHudKey.store(cfg.getString("fix.native_on_foot_sharp_hud", "off") == "on" && runtimeVrProfile(), std::memory_order_relaxed);
     // F25 (TEMPORARY A/B): fix.native_on_foot_visor_shift = off | x,y. Live.
     {
         const std::string vs = cfg.getString("fix.native_on_foot_visor_shift", "off");
@@ -5014,6 +5017,11 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
         g_nativeOnFootActive.store(false, std::memory_order_relaxed);
     }
     g_methodWasGate = gate;
+    // F26: a native on-foot enter or leave is an edge; the UI layer's eye check re-arms on it.
+    if (nativeOnFootActive() != g_nativeEdgeLast) {
+        g_nativeEdgeLast = nativeOnFootActive();
+        g_nativeOnFootEdges.fetch_add(1, std::memory_order_relaxed);
+    }
     const char* byteWhy = !keyOn ? "fix.native_on_foot is off" : !gate ? "fix.native_on_foot_method is swap" : "the game session ended";
     gateByteTick(keyOn && gate && session, byteWhy);
     // F8 (TEMPORARY): the first-person HUD override, while native stereo is on foot and the key is on (hudOverrideTick restores otherwise).

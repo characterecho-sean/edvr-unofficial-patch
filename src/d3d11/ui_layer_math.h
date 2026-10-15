@@ -631,6 +631,8 @@ enum class UiLayerFamily : uint8_t {
                  // names it: uiLayerFamilyFor's HDR branch never returns it.
     kMapSprite,  // flat only, the same gate: a map's icon sprite (vs C31238331D8AC3D4 with ps BD0FEB3276C8B2D7, or
                  // with ps 539A4858CE3A3477 on the System Map)
+    kOnFootHud,  // F26 (sharp on-foot HUD): the on-foot HUD's panels and flight HUD, VS 95D01BA609BF7500 and 46546443FD3C3F88 with their
+                 // pixel shaders (uiOnFootHudMatch), named only while the facts say native stereo is on foot (UiFamilyFacts.nativeOnFoot)
     kCount
 };
 
@@ -651,6 +653,7 @@ inline const char* uiLayerFamilyName(UiLayerFamily f) {
         case UiLayerFamily::kAfterUi: return "after the UI";
         case UiLayerFamily::kMapCanvas: return "map canvas";
         case UiLayerFamily::kMapSprite: return "map sprite";
+        case UiLayerFamily::kOnFootHud: return "on-foot HUD";
         default: return "none";
     }
 }
@@ -664,7 +667,7 @@ inline bool uiLayerFamilyTakesHdr(UiLayerFamily f) {
     return f == UiLayerFamily::kHolo || f == UiLayerFamily::kFlightHud || f == UiLayerFamily::kSprite ||
            f == UiLayerFamily::kHoloGeneric || f == UiLayerFamily::kOrbitLines ||
            f == UiLayerFamily::kSupercruiseBars || f == UiLayerFamily::kSpaceDust ||
-           f == UiLayerFamily::kMapCanvas || f == UiLayerFamily::kMapSprite;
+           f == UiLayerFamily::kMapCanvas || f == UiLayerFamily::kMapSprite || f == UiLayerFamily::kOnFootHud;
 }
 
 // The two families that are scene geometry rather than interface: the layer takes them for DENSITY alone (their lines
@@ -820,12 +823,24 @@ inline bool uiKnownPs(const uint64_t* list, size_t n, uint64_t ps) {
 // branches ask it, so a panel the HDR take names is named on the post-tonemap target too.
 constexpr bool uiVsIsHoloPanel(uint64_t vs) { return vs == kUiVsHolo || vs == kUiVsHoloGuiFxOff; }
 
+// F26 (sharp on-foot HUD): the on-foot HUD's draws, by their full 64-bit shader hashes as the flight logs print them (2026-10-14: VS 95D01BA609BF7500
+// with PS 067CBE05E7EF7F32, CF4ECC0397199145 or F10792B40AE3ED42; VS 46546443FD3C3F88 with PS AD050E528C0E8B17 or EFDF9BCB97E166A1). D005EBB14A22EA0E
+// (the text) is NOT taken yet. The family is named only with UiFamilyFacts.nativeOnFoot, so the same VS on a menu or in flat is never named.
+constexpr uint64_t kUiVsOnFootHudA = 0x95D01BA609BF7500ull, kUiVsOnFootHudB = 0x46546443FD3C3F88ull;
+inline bool uiOnFootHudVs(uint64_t vs) { return vs == kUiVsOnFootHudA || vs == kUiVsOnFootHudB; }
+inline bool uiOnFootHudMatch(uint64_t vs, uint64_t ps) {
+    if (vs == kUiVsOnFootHudA) return ps == 0x067CBE05E7EF7F32ull || ps == 0xCF4ECC0397199145ull || ps == 0xF10792B40AE3ED42ull;
+    if (vs == kUiVsOnFootHudB) return ps == 0xAD050E528C0E8B17ull || ps == 0xEFDF9BCB97E166A1ull;
+    return false;
+}
+
 struct UiFamilyFacts {
     int targetKind = 0;           // uiLayerTargetKind: 0 no eye target, 1 not 8-bit UNORM, 2 post-tonemap
     uint64_t vs = 0, ps = 0;      // the bound shaders' hashes (ps asked only where the rule needs it)
     bool excluded = false;        // ui_depth's exclude list
     bool panelSized = false;      // srv0IsPanelSized: the 2D screen's composite
     bool learnedSurface = false;  // a learned interface surface in PS slots 0..3
+    bool nativeOnFoot = false;    // F26: fix.native_on_foot_sharp_hud is on, VR, and native stereo on foot (only VR's on-foot path sets it)
 };
 
 // How the rule reached its answer, for the family census (ui_layer.cpp).
@@ -892,7 +907,9 @@ inline UiLayerFamily uiLayerFamilyFor(const UiFamilyFacts& f, UiFamilyWhy* why =
               : (uiHoloGenericHash(f.vs) ||
                  (f.vs == kHoloTargetSphere &&
                   (f.ps == 0xEA02FAC2BD6C643Cull || f.ps == 0xE95634B0F61D218Full)))
-                  ? UiLayerFamily::kHoloGeneric : UiLayerFamily::kNone;
+                  ? UiLayerFamily::kHoloGeneric
+              : (f.nativeOnFoot && uiOnFootHudMatch(f.vs, f.ps)) ? UiLayerFamily::kOnFootHud
+              : UiLayerFamily::kNone;
         if (out != UiLayerFamily::kNone) w = UiFamilyWhy::kDirect;
     } else if (f.excluded) {
         w = UiFamilyWhy::kExcluded;

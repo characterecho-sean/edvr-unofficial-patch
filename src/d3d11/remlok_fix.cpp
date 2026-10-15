@@ -229,13 +229,41 @@ constexpr uint64_t kOnFootVisorVs = 0xB553BB479B7C0B97ull;
 constexpr uint64_t kOnFootVisorPs = 0x68ABCB9FEF6CA66Cull;
 constexpr uint32_t kOnFootVisorRt = 2016, kOnFootVisorRtFormat = 26;   // DXGI_FORMAT_R11G11B10_FLOAT
 bool onFootVisorMatches() {
-    if (!nativeOnFootActive()) return false;
-    if (bindingShaderHash(BindSlot::Vs) != kOnFootVisorVs || bindingShaderHash(BindSlot::Ps) != kOnFootVisorPs) return false;
-    ResourceInfo rt, s2, s3;
-    if (!bindingResolve(bindingGet(BindSlot::Rtv0), &rt) || rt.a != kOnFootVisorRt || rt.b != kOnFootVisorRt || rt.fmt != kOnFootVisorRtFormat) return false;
-    if (!bindingResolve(bindingGet(BindSlot::PsSrv2), &s2) || !s2.isTexture2D || s2.a != 1024 || s2.b != 1024) return false;
-    if (!bindingResolve(bindingGet(BindSlot::PsSrv3), &s3) || !s3.isTexture2D || s3.a != 512 || s3.b != 512) return false;
-    return true;
+    // F26: the VS alone (census_skip proved it unique to the visor edge; the flight's attribute check did not reject it on foot).
+    return bindingShaderHash(BindSlot::Vs) == kOnFootVisorVs;
+}
+
+// F26: the one-shot diagnostic for the on-foot visor draw (the flight: the match never fired). The first time per session, and every 30 s while
+// the draw keeps coming, it logs every attribute the matcher can see and which test rejects the draw. Read only.
+void remlokOnFootDiagnose(char kind, uint32_t count, uint32_t instances) {
+    if (bindingShaderHash(BindSlot::Vs) != kOnFootVisorVs) return;
+    static uint64_t draws = 0, lastMs = 0;
+    ++draws;
+    const uint64_t nowMs = GetTickCount64();
+    if (lastMs && nowMs - lastMs < 30000) return;
+    lastMs = nowMs;
+    ResourceInfo rt{}, s2{}, s3{};
+    const bool rtOk = bindingResolve(bindingGet(BindSlot::Rtv0), &rt);
+    const bool s2Ok = bindingResolve(bindingGet(BindSlot::PsSrv2), &s2);
+    const bool s3Ok = bindingResolve(bindingGet(BindSlot::PsSrv3), &s3);
+    const bool dsv = bindingGet(BindSlot::Dsv0) != nullptr;
+    const bool onFoot = nativeOnFootActive();
+    const bool wanted = remlokWantsDraws();
+    const bool right = (((g_matchesThisFrame & 1u) != 0u) != g_swap);
+    const char* rejected = "none: the draw matches (VS and shape)";
+    if (!wanted) rejected = "fix.remlok_lines is stock (remlokWantsDraws)";
+    else if (kind != 'N') rejected = "indexed draw (the shape wants non-indexed)";
+    else if (count != 3 || instances != 1) rejected = "not 3 vertices and 1 instance";
+    Log::get().note("remlok lines (on foot): diagnostic (draw %llu with VS B553BB479B7C0B97): kind %c, %u vertices, %u instances; PS %016llX; "
+                    "RTV %s %ux%u format %u; DSV %s; PS SRV2 %s %ux%u format %u; PS SRV3 %s %ux%u format %u; the eye the parity assigns: %s; "
+                    "native on foot %s; fix.remlok_lines %s; rejected by: %s",
+                    static_cast<unsigned long long>(draws), kind, static_cast<unsigned>(count), static_cast<unsigned>(instances),
+                    static_cast<unsigned long long>(bindingShaderHash(BindSlot::Ps)),
+                    rtOk ? "resolved" : "NOT resolved", static_cast<unsigned>(rt.a), static_cast<unsigned>(rt.b), static_cast<unsigned>(rt.fmt),
+                    dsv ? "bound" : "not bound",
+                    s2Ok ? "resolved" : "NOT resolved", static_cast<unsigned>(s2.a), static_cast<unsigned>(s2.b), static_cast<unsigned>(s2.fmt),
+                    s3Ok ? "resolved" : "NOT resolved", static_cast<unsigned>(s3.a), static_cast<unsigned>(s3.b), static_cast<unsigned>(s3.fmt),
+                    right ? "right" : "left", onFoot ? "now" : "not now", wanted ? "outer or hide" : "stock", rejected);
 }
 
 RemlokAction remlokOnEyeDraw(char kind, uint32_t count, uint32_t instances) {
@@ -264,9 +292,9 @@ RemlokAction remlokOnEyeDraw(char kind, uint32_t count, uint32_t instances) {
         const uint64_t nowMs = GetTickCount64();
         if (footLastMs == 0 || nowMs - footLastMs >= 30000) {
             footLastMs = nowMs;
-            Log::get().note("remlok lines (on foot): the visor edge matched (VS B553BB479B7C0B97, PS 68ABCB9FEF6CA66C, RT %u R11G11B10, SRV2 1024x1024, "
-                            "SRV3 512x512): %llu matches this session, this match is for the %s eye",
-                            kOnFootVisorRt, static_cast<unsigned long long>(footCount), (((match & 1u) != 0u) != g_swap) ? "right" : "left");
+            Log::get().note("remlok lines (on foot): matched VS B553BB479B7C0B97 (non-indexed, 3 vertices, 1 instance): %llu matches this session, "
+                            "this match is for the %s eye",
+                            static_cast<unsigned long long>(footCount), (((match & 1u) != 0u) != g_swap) ? "right" : "left");
         }
     }
     if (detail::g_remlokMode == Mode::kHide) {
