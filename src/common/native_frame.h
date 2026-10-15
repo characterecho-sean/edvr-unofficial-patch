@@ -60,6 +60,13 @@ struct EdvrNativeFrameInput {
     float nowHead[12];
     uint32_t nowValid;
     uint32_t nowSequence;
+    // Version 2 and later (F37). The last eight render head poses the runtime handed the frame (rigid 3x4, as physicalHead), newest at ringNewest, with
+    // their geometry sequences and QueryPerformanceCounter times. ringCount is how many are filled (at most 8). The d3d11 half matches the marker to them.
+    float ringHead[8][12];
+    uint64_t ringSequence[8];
+    uint64_t ringQpc[8];
+    uint32_t ringNewest;
+    uint32_t ringCount;
 };
 
 // The size of the version 1 input: the words through valid, which is what a version 1 caller's struct is.
@@ -75,6 +82,11 @@ struct EdvrNativeNowPose {
     uint32_t nowSequence;
     uint64_t frameSequence;
     uint32_t inputVersion;   // the frame input version the provider last accepted (1 or 2)
+    uint32_t referenceGeneration;   // the reference space's generation the frame was given (moves on a recentre, F33's tS0 reset)
+    float ringHead[8][12];          // F37: the last eight render heads (version 2 input), newest at ringNewest
+    uint64_t ringSequence[8];
+    uint64_t ringQpc[8];
+    uint32_t ringNewest, ringCount;
 };
 
 struct EdvrNativeFrameOutput {

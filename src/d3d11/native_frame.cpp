@@ -65,6 +65,11 @@ bool g_renderHeadValid = false, g_nowHeadValid = false, g_haveFrameInput = false
 uint32_t g_nowHeadSequence = 0;
 uint64_t g_frameSequence = 0;
 uint32_t g_inputVersion = 0;
+// F37: the render head ring and the reference generation, from the last accepted input (guarded by g_mutex).
+float g_ringHead[8][12] = {};
+uint64_t g_ringSequence[8] = {};
+uint64_t g_ringQpc[8] = {};
+uint32_t g_ringNewest = 0, g_ringCount = 0, g_referenceGeneration = 0;
 
 State* identify(void* context) {
     for (unsigned i = 0; i < g_used; ++i) {
@@ -353,6 +358,15 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
     }
     g_nowHeadValid = nowUsable;
     g_inputVersion = input->version;
+    g_referenceGeneration = input->referenceGeneration;
+    g_ringCount = 0;
+    if (inputV2 && input->ringNewest < 8 && input->ringCount <= 8) {
+        std::memcpy(g_ringHead, input->ringHead, sizeof(g_ringHead));
+        std::memcpy(g_ringSequence, input->ringSequence, sizeof(g_ringSequence));
+        std::memcpy(g_ringQpc, input->ringQpc, sizeof(g_ringQpc));
+        g_ringNewest = input->ringNewest;
+        g_ringCount = input->ringCount;
+    }
     if (inputV2) {
         static bool accepted = false;
         if (!accepted) {
@@ -568,6 +582,12 @@ bool nativeFrameNowPose(EdvrNativeNowPose& out) {
     out.nowSequence = g_nowHeadSequence;
     out.frameSequence = g_frameSequence;
     out.inputVersion = g_inputVersion;
+    out.referenceGeneration = g_referenceGeneration;
+    std::memcpy(out.ringHead, g_ringHead, sizeof(out.ringHead));
+    std::memcpy(out.ringSequence, g_ringSequence, sizeof(out.ringSequence));
+    std::memcpy(out.ringQpc, g_ringQpc, sizeof(out.ringQpc));
+    out.ringNewest = g_ringNewest;
+    out.ringCount = g_ringCount;
     return true;
 }
 

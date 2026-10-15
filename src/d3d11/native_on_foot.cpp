@@ -78,7 +78,7 @@ bool g_nativeEdgeLast = false;                // F26: frame thread only
 std::atomic<bool> g_alignKeyOn{false};
 std::atomic<int> g_alignMode{0};   // F35: 0 off, 1 view (F33), 2 body (F35)
 double g_alignTrimCm[3] = {};   // [0] right, [1] up, [2] forward (body axes)
-std::atomic<int> g_worldMarkersMode{3};        // F27/F31: fix.native_on_foot_world_markers: 0 fixed (inverse), 1 forward (C), 2 game, 3 forward_now (H_M, default); live; key 10 is never touched
+std::atomic<int> g_worldMarkersMode{4};        // F27/F31/F37: fix.native_on_foot_world_markers: 0 fixed, 1 forward (C), 2 game, 3 forward_now (H_M), 4 forward_hist (the ring's matched pose, default), 5 forward_k2 (the ring's pose two frames back); live; key 10 is never touched
 uint64_t g_worldLineMs = 0;                    // frame thread and game thread: the 5 s line (the post hook writes it, once per 5 s)
                // fix.native_on_foot_look_to_aim_comp_delay (temporary): 0 or 1 frames
 bool g_lookOnLast = true;                      // frame thread only: the look keys as last logged (readKey)
@@ -537,8 +537,8 @@ void readKey() {
     }
     // F25 (TEMPORARY): the world markers (the waypoint and the others, not key 10): fixed takes the head out of their placement, game leaves them as the game has them.
     {
-        const std::string wm = cfg.getString("fix.native_on_foot_world_markers", "forward_now");
-        g_worldMarkersMode.store(wm == "forward" ? 1 : wm == "fixed" ? 0 : wm == "game" ? 2 : 3, std::memory_order_relaxed);
+        const std::string wm = cfg.getString("fix.native_on_foot_world_markers", "forward_hist");
+        g_worldMarkersMode.store(wm == "forward" ? 1 : wm == "fixed" ? 0 : wm == "game" ? 2 : wm == "forward_now" ? 3 : wm == "forward_k2" ? 5 : 4, std::memory_order_relaxed);
     }
     // F33 (TEMPORARY, live): the body align and its trims (cm, clamped to +-30).
     {
@@ -1712,6 +1712,8 @@ struct F30SameCall {
     uint64_t entrySeq = 0;   // g_listBSeq at the marker entry, before its own read
     uint64_t seq = 0;        // the marker's own list-B sample number
     uint64_t qpc = 0;        // QueryPerformanceCounter at its read
+    bool mOk = false;        // F37: M (the marker camera matrix) read at this entry, orthonormal
+    float mMat[16] = {};
 };
 thread_local F30SameCall t_f30SameCall;
 // The 5 s window's metrics (game thread: the post stub; reset on each 5 s line).
@@ -1724,6 +1726,11 @@ bool g_f31HaveNow = false;
 double g_f31AngleDeg = 0.0;
 uint32_t g_f31NowSeq = 0;
 uint64_t g_f31FrameSeq = 0, g_f31NoNow = 0;
+// F37: the ring match: the chosen k histogram, the residual (degrees, M against the chosen view), the fallbacks, and the QPC ages (us).
+int g_f37K = -1;
+uint64_t g_f37Hist[8] = {}, g_f37Fallback = 0, g_f37ResN = 0;
+double g_f37ResSum = 0.0;
+uint64_t g_f37AgePickMax = 0, g_f37AgeNewMax = 0;
 bool g_f31FirstRead = false, g_f31FirstValid = false, g_f31LastNowValid = false;
 uint32_t g_f31LastInputVersion = 0;
 F13Head g_f13Smooth;                                // guarded by g_f9Lock: the smoothed one (the frame thread)
@@ -2713,6 +2720,46 @@ void f31ForwardMap(const float t[3], const float C[16], float out[3]) {
     }
 }
 
+// ---- F37: the marker's camera M and the ring of render heads (waypoint lag, step 3). M is the game's own getter chain (the F24 probe 3's): P1 =
+// [marker+0x1B0], x = P1's getter at vtable +0x58, M = x's getter at vtable +0x28. Every getter is the game's, called with rcx only, under SEH.
+using F37GetterFn = float* (__fastcall*)(void*);
+__declspec(noinline) bool f37CallGetter(uintptr_t obj, uint32_t slot, uintptr_t* out) noexcept {
+    uintptr_t vt = 0, fn = 0;
+    if (!obj || !guardedRead(obj, &vt, 8) || !vt || !guardedRead(vt + slot, &fn, 8) || !fn) return false;
+    __try {
+        const F37GetterFn f = reinterpret_cast<F37GetterFn>(fn);
+        *out = reinterpret_cast<uintptr_t>(f(reinterpret_cast<void*>(obj)));
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+// Rows 0-2 of a 4x4 row-vector matrix: unit length and mutually orthogonal (within 0.02), else refused.
+bool f37RotOrthonormal(const float* m) noexcept {
+    for (int i = 0; i < 3; ++i) {
+        const float n = m[4 * i] * m[4 * i] + m[4 * i + 1] * m[4 * i + 1] + m[4 * i + 2] * m[4 * i + 2];
+        if (!(n > 0.98f && n < 1.02f)) return false;
+    }
+    for (int a = 0; a < 3; ++a)
+        for (int b = a + 1; b < 3; ++b) {
+            const float d = m[4 * a] * m[4 * b] + m[4 * a + 1] * m[4 * b + 1] + m[4 * a + 2] * m[4 * b + 2];
+            if (!(d > -0.02f && d < 0.02f)) return false;
+        }
+    return true;
+}
+bool f37ReadM(uintptr_t marker, float out[16]) noexcept {
+    uintptr_t p1 = 0, x = 0, mm = 0;
+    if (!guardedRead(marker + 0x1B0, &p1, 8) || !p1) return false;
+    if (!f37CallGetter(p1, 0x58, &x) || !x) return false;
+    if (!f37CallGetter(x, 0x28, &mm) || !mm) return false;
+    if (!guardedRead(mm, out, 16 * sizeof(float))) return false;
+    return f37RotOrthonormal(out);
+}
+// The view under the ring's pose k back from the newest (0 = the newest), by the same mapping as H_M: f31NowMatrix(C, render, ring[k]).
+void f37RingView(const float C[16], const EdvrNativeNowPose& rp, uint32_t k, float H[16]) noexcept {
+    const uint32_t idx = (rp.ringNewest + 8u - k) % 8u;
+    f31NowMatrix(C, rp.render, rp.ringHead[idx], H);
+}
 // F25 (TEMPORARY): the post-call of the marker stub, for every marker except key 10 (the reticle, which keeps its own placement). The game's call
 // writes the instance's translation t (+0x40) from the marker's world position, which already includes the head (the probe-3 RE: its yaw is -C's).
 // The list-B pipeline then applies C again, so the marker is head-locked. Writing t' = (t - row3(C)) . R^T, the exact inverse of that forward map
@@ -2794,7 +2841,45 @@ void __fastcall reticleWorldPost(void* node) noexcept {
             ++g_f31NoNow;
         }
     }
-    if (!havePose) {
+    // F37 (waypoint step 3): forward_hist (4) takes the ring pose whose view best matches M's rotation (the k back from the newest, 0..7); forward_k2
+    // (5), and forward_hist when M cannot be read, take the pose two frames back (k = 2). The view under the pose goes into C.
+    g_f37K = -1;
+    if (havePose && (wmMode == 4 || wmMode == 5)) {
+        EdvrNativeNowPose rp{};
+        if (nativeFrameNowPose(rp) && rp.renderValid && rp.ringCount > 0) {
+            const uint32_t n = rp.ringCount;
+            int pick = -1;
+            double best = 1e9;
+            if (wmMode == 4 && sc.valid && sc.mOk) {
+                for (uint32_t k = 0; k < n; ++k) {
+                    float H[16];
+                    f37RingView(C, rp, k, H);
+                    const double a = f31AngleDeg(sc.mMat, H);
+                    if (a < best) {
+                        best = a;
+                        pick = static_cast<int>(k);
+                    }
+                }
+                g_f37ResSum += best;
+                ++g_f37ResN;
+            }
+            if (pick < 0) {
+                pick = static_cast<int>(n > 2 ? 2 : n - 1);
+                ++g_f37Fallback;
+            }
+            g_f37K = pick;
+            ++g_f37Hist[pick & 7];
+            float H[16];
+            f37RingView(C, rp, static_cast<uint32_t>(pick), H);
+            std::memcpy(C, H, sizeof(C));
+            const uint64_t nowQ = f30Qpc();
+            const uint32_t idxPick = (rp.ringNewest + 8u - static_cast<uint32_t>(pick)) % 8u;
+            const uint64_t agePick = (rp.ringQpc[idxPick] && nowQ >= rp.ringQpc[idxPick]) ? f30QpcUs(nowQ - rp.ringQpc[idxPick]) : 0;
+            const uint64_t ageNew = (rp.ringQpc[rp.ringNewest] && nowQ >= rp.ringQpc[rp.ringNewest]) ? f30QpcUs(nowQ - rp.ringQpc[rp.ringNewest]) : 0;
+            g_f37AgePickMax = std::max(g_f37AgePickMax, agePick);
+            g_f37AgeNewMax = std::max(g_f37AgeNewMax, ageNew);
+        }
+    }    if (!havePose) {
         if (now - g_worldLineMs >= 5000 || g_worldLineMs == 0) {
             g_worldLineMs = now;
             Log::get().note("native on foot world markers: fixed, but no fresh head pose (no list-B sample in 0.5 s); markers are left as the game places them");
@@ -2859,6 +2944,16 @@ void __fastcall reticleWorldPost(void* node) noexcept {
                             static_cast<unsigned>(g_f31LastInputVersion), static_cast<int>(g_f31LastNowValid), static_cast<double>(tpC[0]),
                             static_cast<double>(tpC[1]), static_cast<double>(tpC[2]),
                             static_cast<double>(eyeDiff));
+        Log::get().note("native on foot world markers: F37 ring: k histogram [%llu %llu %llu %llu %llu %llu %llu %llu], fallback k=2 %llu, mean residual %.3f deg over %llu posts, chosen-pose age max %llu us, newest render age max %llu us; mode %d",
+                        static_cast<unsigned long long>(g_f37Hist[0]), static_cast<unsigned long long>(g_f37Hist[1]), static_cast<unsigned long long>(g_f37Hist[2]),
+                        static_cast<unsigned long long>(g_f37Hist[3]), static_cast<unsigned long long>(g_f37Hist[4]), static_cast<unsigned long long>(g_f37Hist[5]),
+                        static_cast<unsigned long long>(g_f37Hist[6]), static_cast<unsigned long long>(g_f37Hist[7]), static_cast<unsigned long long>(g_f37Fallback),
+                        g_f37ResN ? g_f37ResSum / static_cast<double>(g_f37ResN) : 0.0, static_cast<unsigned long long>(g_f37ResN),
+                        static_cast<unsigned long long>(g_f37AgePickMax), static_cast<unsigned long long>(g_f37AgeNewMax), wmMode);
+        for (uint64_t & h : g_f37Hist) h = 0;
+        g_f37Fallback = g_f37ResN = 0;
+        g_f37ResSum = 0.0;
+        g_f37AgePickMax = g_f37AgeNewMax = 0;
         g_f30PostSame = g_f30PostFall = g_f30PostNone = 0;
         g_f30LagMax = 0;
         g_f30AgeMaxUs = g_f30AgeSumUs = g_f30AgeN = 0;
@@ -4298,6 +4393,7 @@ uint64_t __fastcall markerHooked(void* self, void* listA, void* listB, uint64_t 
     sc.valid = false;
     sc.haveEntry = true;
     sc.entrySeq = g_listBSeq.load(std::memory_order_relaxed);
+    sc.mOk = nativeOnFootActive() && f37ReadM(reinterpret_cast<uintptr_t>(self), sc.mMat);   // F37: M at this entry
     if (listB && nativeOnFootActive()) {
         F13Head raw;
         const char* why = "";
@@ -4857,6 +4953,9 @@ struct EyeSample {
     // F33: the third-person pov in world space (the head joint plus the rest offset, through the AMC matrix), when the rest offset is known.
     bool povOk = false;
     bool povDerived = false;   // true: Explorer Cam's rest offset; false: the head joint itself (plus the trims)
+    // F37: the AMC's root matrix origin ([AMC+0x208] through the root getter) and its own position ([AMC+0x2E0]), for the verification line.
+    bool rootOk = false, amcPosOk = false;
+    float root[3] = {}, amcPos[3] = {};
     float pov[3] = {};
 };
 std::mutex g_eyeMutex;                   // guards g_eyeSample (game thread writes, frame thread reads)
@@ -4928,8 +5027,63 @@ void eyeSample(void* amcPtr, void* jobPtr, uint64_t now) noexcept {
         for (size_t j = 0; j < 3; ++j) s.pov[j] = pm[0] * M[j] + pm[1] * M[4 + j] + pm[2] * M[8 + j] + M[12 + j];
         s.povOk = true;
     }
+    {
+        const uintptr_t amc = reinterpret_cast<uintptr_t>(amcPtr);
+        uintptr_t obj = 0, vt = 0, fn = 0, mat = 0;
+        float rm[16] = {};
+        if (guardedRead(amc + 0x208, &obj, 8) && obj && guardedRead(obj, &vt, 8) && vt && guardedRead(vt + 0x20, &fn, 8) && fn &&
+            callRootGetter(fn, obj, &mat) && mat && guardedRead(mat, rm, sizeof(rm))) {
+            s.rootOk = true;
+            std::memcpy(s.root, rm + 12, sizeof(s.root));
+        }
+        s.amcPosOk = guardedRead(amc + 0x2E0, s.amcPos, sizeof(s.amcPos));
+    }
     std::lock_guard<std::mutex> lock(g_eyeMutex);
     g_eyeSample = s;
+}
+
+// F37: the FP root (the mode-2 AMC's root matrix, the anchor the arms are drawn at), read through the game's own root getter as rigProbeB calls it.
+// Read on each P1 call for a mode-2 AMC; under g_eyeMutex.
+struct FpRootSnap {
+    bool ok = false;
+    float origin[3] = {};
+    uint64_t stamp = 0;
+};
+FpRootSnap g_fpRoot;   // under g_eyeMutex
+void fpRootTrack(void* amcPtr, uint64_t now) noexcept {
+    const uintptr_t a = reinterpret_cast<uintptr_t>(amcPtr);
+    uintptr_t p = 0;
+    uint32_t mode = 0;
+    if (!guardedRead(a + 0x50, &p, 8) || !p || !guardedRead(p + 0x14, &mode, 4) || mode != 2) return;
+    uintptr_t obj = 0, vt = 0, fn = 0, mat = 0;
+    float m[16] = {};
+    if (!(guardedRead(a + 0x208, &obj, 8) && obj && guardedRead(obj, &vt, 8) && vt && guardedRead(vt + 0x20, &fn, 8) && fn &&
+          callRootGetter(fn, obj, &mat) && mat && guardedRead(mat, m, sizeof(m))))
+        return;
+    std::lock_guard<std::mutex> lock(g_eyeMutex);
+    g_fpRoot.ok = true;
+    std::memcpy(g_fpRoot.origin, m + 12, sizeof(g_fpRoot.origin));
+    g_fpRoot.stamp = now;
+}
+// F37 post-hook check: the next P1 call reads one shifted record and says whether the shift is still in place when the renderer reads it.
+std::atomic<bool> g_f37CheckArm{false}, g_f37CheckPending{false};
+uintptr_t g_f37CheckAddr = 0;
+float g_f37CheckExpect[3] = {};
+void f37CheckPoll() noexcept {
+    if (!g_f37CheckPending.load(std::memory_order_acquire)) return;
+    g_f37CheckPending.store(false, std::memory_order_relaxed);
+    float xyz[3] = {};
+    if (!guardedRead(g_f37CheckAddr, xyz, sizeof(xyz))) {
+        Log::get().note("native on foot body shift: post-hook check: the record could not be read");
+        return;
+    }
+    bool still = true;
+    for (size_t i = 0; i < 3; ++i)
+        if (std::fabs(xyz[i] - g_f37CheckExpect[i]) > 1e-3f) still = false;
+    Log::get().note("native on foot body shift: post-hook check (the next P1 call): record xyz (%.3f,%.3f,%.3f), the shift wrote (%.3f,%.3f,%.3f): %s",
+                    static_cast<double>(xyz[0]), static_cast<double>(xyz[1]), static_cast<double>(xyz[2]), static_cast<double>(g_f37CheckExpect[0]),
+                    static_cast<double>(g_f37CheckExpect[1]), static_cast<double>(g_f37CheckExpect[2]),
+                    still ? "still shifted when the next P1 call read it" : "already reset");
 }
 
 // The callback: the game jumps here with rcx, rdx intact (the relay's tail jump), so the original is called with the same two arguments.
@@ -4939,6 +5093,8 @@ uint64_t __fastcall eyeProbeHooked(void* amc, void* job) noexcept {
     const uint64_t now = GetTickCount64();
     // F22 (read only): probe B, the FP and 3P roots against the head and the look basis, every 5 s per mode while native stereo is on foot.
     if (amc && !g_eyeStop.load(std::memory_order_relaxed) && nativeOnFootActive()) rigProbeB(amc, now);
+    if (amc && nativeOnFootActive()) fpRootTrack(amc, now);   // F37
+    f37CheckPoll();   // F37: the post-hook check armed by the body shift
     if (!g_eyeStop.load(std::memory_order_relaxed) && amc && job && nativeOnFootActive() && (g_alignKeyOn.load(std::memory_order_relaxed) || now - g_eyeLastMs >= 1000) &&
         reinterpret_cast<uint64_t>(amc) == localAmcPointer()) {
         g_eyeLastMs = now;
@@ -5070,15 +5226,26 @@ F9Probe g_bodyShift;
 // The post-hook: the original runs first with the very arguments it was given (the wrapper forwards all eight, as the probes do), then the
 // records of the local third-person AMC are shifted by the published body offset. Nothing else is written.
 using F35Fn = uint64_t(__fastcall*)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+std::atomic<bool> g_f37TableWanted{false};   // set on each entry to body mode: the per-part table prints on the next shift pass
+struct F37First {
+    bool valid = false;
+    float pre[3] = {}, post[3] = {};
+    uintptr_t addr = 0;
+};
+F37First g_f37First;   // the first shifted record of the latest pass (the 1 s line prints it)
 void bodyShiftApply(uint64_t amc) noexcept {
     uint8_t flags = 0;
     if (!guardedRead(amc + bodyrec::kFlags, &flags, 1) || !(flags & 4)) return;
     float d[3] = {};
     bodyOffsetRead(d);
     if (d[0] == 0.0f && d[1] == 0.0f && d[2] == 0.0f) return;
+    const bool table = g_f37TableWanted.exchange(false, std::memory_order_relaxed);
     float origin[3] = {};
     if (!guardedRead(amc + bodyrec::kOrigin, origin, sizeof(origin))) return;
     uint64_t shifted = 0, skipped = 0;
+    bool present[bodyrec::kBlocks][bodyrec::kSlots] = {}, movedAt[bodyrec::kBlocks][bodyrec::kSlots] = {};
+    uint64_t maskAt[bodyrec::kBlocks][bodyrec::kSlots] = {};
+    bool firstThisPass = true;
     for (int idx = 0; idx < bodyrec::kBlocks; ++idx) {
         for (int k = 0; k < bodyrec::kSlots; ++k) {
             uint64_t inst = 0, mask = 0, instField = 0;
@@ -5086,6 +5253,8 @@ void bodyShiftApply(uint64_t amc) noexcept {
             if (!guardedRead(amc + bodyrec::kInstBase + slot, &inst, 8) || !inst) continue;
             if (!guardedRead(amc + bodyrec::kMaskBase + slot, &mask, 8) || !mask) continue;
             if (!guardedRead(static_cast<uintptr_t>(inst) + bodyrec::kInstOff, &instField, 8) || !instField) continue;
+            present[idx][k] = true;
+            maskAt[idx][k] = mask;
             const uintptr_t rec = amc + bodyrec::kRecBase + static_cast<uintptr_t>(idx) * bodyrec::kStride +
                                   static_cast<uintptr_t>(k) * bodyrec::kRecSize;
             float pos[3] = {};
@@ -5103,11 +5272,35 @@ void bodyShiftApply(uint64_t amc) noexcept {
                 guardedWriteFloat(rec + bodyrec::kRecPos + 4u * static_cast<uintptr_t>(i), pos[i] + d[i]);
                 if (okPrev) guardedWriteFloat(rec + bodyrec::kPrev + 4u * static_cast<uintptr_t>(i), prev[i] + d[i]);
             }
+            movedAt[idx][k] = true;
+            if (firstThisPass) {
+                firstThisPass = false;
+                g_f37First.valid = true;
+                g_f37First.addr = rec + bodyrec::kRecPos;
+                for (int i = 0; i < 3; ++i) {
+                    g_f37First.pre[i] = pos[i];
+                    g_f37First.post[i] = pos[i] + d[i];
+                }
+                if (g_f37CheckArm.exchange(false, std::memory_order_relaxed)) {
+                    g_f37CheckAddr = g_f37First.addr;
+                    for (int i = 0; i < 3; ++i) g_f37CheckExpect[i] = g_f37First.post[i];
+                    g_f37CheckPending.store(true, std::memory_order_release);
+                }
+            }
             ++shifted;
         }
     }
     g_bodyShifted.fetch_add(shifted, std::memory_order_relaxed);
     g_bodySkipped.fetch_add(skipped, std::memory_order_relaxed);
+    if (table) {
+        for (int idx = 0; idx < bodyrec::kBlocks; ++idx)
+            for (int k = 0; k < bodyrec::kSlots; ++k) {
+                if (!present[idx][k]) continue;
+                Log::get().note("native on foot body shift part: block %d slot %d name %s mask %016llX shifted %s", idx, k,
+                                idx < ecm::kPartCount ? ecm::kPartNames[idx] : "?", static_cast<unsigned long long>(maskAt[idx][k]),
+                                movedAt[idx][k] ? "yes" : "no");
+            }
+    }
 }
 uint64_t __fastcall bodyShiftHooked(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t s5, uint64_t s6, uint64_t s7, uint64_t s8) {
     const F35Fn original = reinterpret_cast<F35Fn>(g_bodyShift.original);
@@ -5120,7 +5313,7 @@ uint64_t __fastcall bodyShiftHooked(uint64_t a1, uint64_t a2, uint64_t a3, uint6
 
 // One filter step for a run: the integral of the error, the guard, the critically damped follow, the clamp, the per-frame cap. `driving` false
 // holds the integral and lets the filter settle onto it (a decay when `decay` is set, toward zero).
-void alignFilter(AlignRun& a, const double err[3], bool driving, bool decay, double dt, uint64_t now) noexcept {
+void alignFilter(AlignRun& a, const double err[3], bool driving, bool decay, double dt, uint64_t now, bool guardOn) noexcept {
     const double errMag = std::sqrt(err[0] * err[0] + err[1] * err[1] + err[2] * err[2]);
     if (driving) {
         double step[3] = {align::kGain * err[0], align::kGain * err[1], align::kGain * err[2]};
@@ -5130,7 +5323,8 @@ void alignFilter(AlignRun& a, const double err[3], bool driving, bool decay, dou
         const double im = std::sqrt(a.intg[0] * a.intg[0] + a.intg[1] * a.intg[1] + a.intg[2] * a.intg[2]);
         if (im > align::kClampM)
             for (size_t i = 0; i < 3; ++i) a.intg[i] *= align::kClampM / im;
-        if (!a.guardArmed) {
+        if (!guardOn) {
+        } else if (!a.guardArmed) {
             if (errMag > align::kErrOnM) {
                 a.guardArmed = true;
                 a.guardMs = now;
@@ -5169,6 +5363,18 @@ void alignFilter(AlignRun& a, const double err[3], bool driving, bool decay, dou
 
 // The frame thread's one call per frame. The view offset is seated metres (the runtime moves the seated origin by it); the body offset is world
 // metres (the submit job's hook moves the records by it). The other run's offset decays to zero.
+// F37: the view's head motion reference (tS0), the sign check's previous step, and the last values the 1 s lines print.
+bool g_f37TS0Valid = false;
+float g_f37TS0[3] = {};
+uint32_t g_f37TS0Gen = 0;
+double g_f37TSNow[3] = {};
+struct F37Prev {
+    bool valid = false;
+    double camB[3] = {}, applied[3] = {};
+};
+F37Prev g_f37Prev;
+double g_f37SignToward = 0.0, g_f37SignApplied = 0.0;   // metres: the cam's motion since the last step, toward the pov and along the applied step
+
 void alignTick(uint64_t now) noexcept {
     static int lastMode = -1;
     const int mode = g_alignMode.load(std::memory_order_relaxed);   // 0 off, 1 view, 2 body
@@ -5183,6 +5389,8 @@ void alignTick(uint64_t now) noexcept {
         a.tripped = false;
         a.guardArmed = false;
         lastMode = mode;
+        if (mode == 2) g_f37TableWanted.store(true, std::memory_order_relaxed);   // F37: the per-part table on entering body
+        if (mode == 1) g_f37TS0Valid = false;                                      // F37: a new head reference on entering view
     }
     const double dt = (a.lastMs && now > a.lastMs) ? std::min(0.05, static_cast<double>(now - a.lastMs) / 1000.0) : 0.0;
     a.lastMs = now;
@@ -5220,6 +5428,13 @@ void alignTick(uint64_t now) noexcept {
         Log::get().note("native on foot body align: %s: waiting (%s)", mode == 2 ? "body" : "view", wait);
     }
 
+    // F37: the FP root (body mode's anchor), if seen within 100 ms.
+    FpRootSnap fp{};
+    {
+        std::lock_guard<std::mutex> lock(g_eyeMutex);
+        fp = g_fpRoot;
+    }
+    const bool fpFresh = fp.ok && now - fp.stamp < 100;
     // The error, in the frame of the run: seated for view, world for body. Both start from the same measurement: the camera minus the pov.
     double err[3] = {}, deltaB[3] = {}, hmdB[3] = {}, camB[3] = {}, povB[3] = {};
     if (!wait) {
@@ -5230,7 +5445,8 @@ void alignTick(uint64_t now) noexcept {
                 out[i] = acc;
             }
         };
-        body(s.cam, camB);
+        const float* camUse = (mode == 2 && fpFresh) ? fp.origin : s.cam;   // F37: body mode anchors on the FP root
+        body(camUse, camB);
         body(s.pov, povB);
         double trimB[3] = {g_alignTrimCm[0] / 100.0, g_alignTrimCm[1] / 100.0, g_alignTrimCm[2] / 100.0};   // right, up, forward
         if (mode == 2) {
@@ -5240,18 +5456,32 @@ void alignTick(uint64_t now) noexcept {
             for (size_t j = 0; j < 3; ++j)
                 for (size_t i = 0; i < 3; ++i) tw[j] += trimB[i] * static_cast<double>(s.rows[3 * i + j]);
             for (size_t j = 0; j < 3; ++j)
-                err[j] = (static_cast<double>(s.cam[j]) - static_cast<double>(s.pov[j])) - tw[j] - a.pos[j];
+                err[j] = (static_cast<double>(camUse[j]) - static_cast<double>(s.pov[j])) - tw[j] - a.pos[j];
             for (size_t i = 0; i < 3; ++i) deltaB[i] = camB[i] - povB[i] - trimB[i];
         } else {
-            // view (F33): the eye in world space from the list-B view (p = -t . R^T), the body error with the HMD's place taken out, the body axes
-            // mapped to seated through the view and the render head.
-            float eyeW[3] = {};
-            for (size_t i = 0; i < 3; ++i) {
-                double acc = 0.0;
-                for (size_t k = 0; k < 3; ++k) acc -= static_cast<double>(C[12 + k]) * static_cast<double>(C[4 * i + k]);
-                eyeW[i] = static_cast<float>(acc);
+            // F37: the head's motion only. tS is the render head's translation in seated metres, less tS0 (the first head of this reference
+            // generation: captured when the view starts and at each recentre). Mapped to body axes: v = R^T tS, dw = C.rot v, hmd_i = row_i . dw
+            // (a vector, no origin subtraction). The sign is the sign check's to prove (the 1 s line).
+            if (!g_f37TS0Valid || np.referenceGeneration != g_f37TS0Gen) {
+                g_f37TS0[0] = np.render[3];
+                g_f37TS0[1] = np.render[7];
+                g_f37TS0[2] = np.render[11];
+                g_f37TS0Gen = np.referenceGeneration;
+                g_f37TS0Valid = true;
+                Log::get().note("native on foot body align: head reference tS0 captured at (%.3f, %.3f, %.3f) m seated (reference generation %u)",
+                                static_cast<double>(g_f37TS0[0]), static_cast<double>(g_f37TS0[1]), static_cast<double>(g_f37TS0[2]),
+                                static_cast<unsigned>(g_f37TS0Gen));
             }
-            body(eyeW, hmdB);
+            for (size_t i = 0; i < 3; ++i) g_f37TSNow[i] = static_cast<double>(np.render[4 * i + 3]) - static_cast<double>(g_f37TS0[i]);
+            double vH[3] = {}, dwH[3] = {};
+            for (size_t j = 0; j < 3; ++j)
+                for (size_t i = 0; i < 3; ++i) vH[j] += static_cast<double>(np.render[4 * i + j]) * g_f37TSNow[i];
+            for (size_t k = 0; k < 3; ++k)
+                for (size_t j = 0; j < 3; ++j) dwH[k] += static_cast<double>(C[4 * k + j]) * vH[j];
+            for (size_t i = 0; i < 3; ++i) {
+                hmdB[i] = 0.0;
+                for (size_t j = 0; j < 3; ++j) hmdB[i] += dwH[j] * static_cast<double>(s.rows[3 * i + j]);
+            }
             double errB[3] = {};
             for (size_t i = 0; i < 3; ++i) {
                 deltaB[i] = (camB[i] - hmdB[i]) - povB[i];
@@ -5269,11 +5499,45 @@ void alignTick(uint64_t now) noexcept {
     }
     const double errMag = std::sqrt(err[0] * err[0] + err[1] * err[1] + err[2] * err[2]);
 
+    // F37 sign check (view): the cam's motion since the last step, against the step the applied offset took (mapped to body axes the way the
+    // error is). "toward" is the component toward the pov; positive means the cam moved toward it. Along the applied step: positive means the cam
+    // moved with the offset.
+    if (mode == 1 && !wait) {
+        if (g_f37Prev.valid) {
+            double dCam[3] = {}, dS[3] = {}, tmpS[3] = {}, dwS[3] = {}, dB[3] = {}, toPov[3] = {};
+            for (size_t i = 0; i < 3; ++i) {
+                dCam[i] = camB[i] - g_f37Prev.camB[i];
+                dS[i] = a.applied[i] - g_f37Prev.applied[i];
+                toPov[i] = povB[i] - camB[i];
+            }
+            for (size_t j = 0; j < 3; ++j)
+                for (size_t i = 0; i < 3; ++i) tmpS[j] += static_cast<double>(np.render[4 * i + j]) * dS[i];
+            for (size_t k = 0; k < 3; ++k)
+                for (size_t j = 0; j < 3; ++j) dwS[k] += static_cast<double>(C[4 * k + j]) * tmpS[j];
+            for (size_t i = 0; i < 3; ++i)
+                for (size_t j = 0; j < 3; ++j) dB[i] += dwS[j] * static_cast<double>(s.rows[3 * i + j]);
+            const double nPov = std::sqrt(toPov[0] * toPov[0] + toPov[1] * toPov[1] + toPov[2] * toPov[2]);
+            const double nB = std::sqrt(dB[0] * dB[0] + dB[1] * dB[1] + dB[2] * dB[2]);
+            double tw2 = 0.0, aw2 = 0.0;
+            for (size_t i = 0; i < 3; ++i) {
+                if (nPov > 1e-9) tw2 += dCam[i] * toPov[i] / nPov;
+                if (nB > 1e-9) aw2 += dCam[i] * dB[i] / nB;
+            }
+            g_f37SignToward = tw2;
+            g_f37SignApplied = aw2;
+        }
+        g_f37Prev.valid = true;
+        for (size_t i = 0; i < 3; ++i) {
+            g_f37Prev.camB[i] = camB[i];
+            g_f37Prev.applied[i] = a.applied[i];
+        }
+    }
+
     // The active run takes the filter step; the other decays to zero and publishes zero.
-    alignFilter(a, err, on && !a.tripped && !wait, !on || a.tripped, dt, now);
+    alignFilter(a, err, on && !a.tripped && !wait, !on || a.tripped, dt, now, mode != 2);   // F37: the body run has no guard
     if (wait && on) ++a.holds;
     const double zero[3] = {0.0, 0.0, 0.0};
-    alignFilter(other, zero, false, true, dt, now);
+    alignFilter(other, zero, false, true, dt, now, mode == 2);
 
     double change = 0.0;
     for (size_t i = 0; i < 3; ++i) change = std::max(change, std::fabs(a.pos[i] - a.applied[i]));
@@ -5302,24 +5566,38 @@ void alignTick(uint64_t now) noexcept {
     // The once-a-second line while the offset is live.
     if (on && !wait && now - a.lineMs >= 1000) {
         a.lineMs = now;
+        g_f37CheckArm.store(true, std::memory_order_relaxed);   // F37: the post-hook check on the next shift
         if (mode == 2) {
             const uint64_t shifted = g_bodyShifted.exchange(0, std::memory_order_relaxed);
             const uint64_t skipped = g_bodySkipped.exchange(0, std::memory_order_relaxed);
-            Log::get().note("native on foot body align: mode body, d=(%.1f,%.1f,%.1f) cm (world), records shifted %llu, skipped %llu this second, "
-                            "guard %s, ads %s, error %.1f cm", a.applied[0] * 100.0, a.applied[1] * 100.0, a.applied[2] * 100.0,
-                            static_cast<unsigned long long>(shifted), static_cast<unsigned long long>(skipped), a.tripped ? "tripped" : "ok",
-                            ads ? "yes" : "no", errMag * 100.0);
+            const F37First first = g_f37First;
+            const double jf[3] = {fpFresh ? static_cast<double>(s.cam[0]) - fp.origin[0] : 0.0, fpFresh ? static_cast<double>(s.cam[1]) - fp.origin[1] : 0.0,
+                                  fpFresh ? static_cast<double>(s.cam[2]) - fp.origin[2] : 0.0};
+            const double am[3] = {s.amcPosOk && s.rootOk ? static_cast<double>(s.amcPos[0]) - s.root[0] : 0.0,
+                                  s.amcPosOk && s.rootOk ? static_cast<double>(s.amcPos[1]) - s.root[1] : 0.0,
+                                  s.amcPosOk && s.rootOk ? static_cast<double>(s.amcPos[2]) - s.root[2] : 0.0};
+            Log::get().note("native on foot body align: mode body (F37), d=(%.1f,%.1f,%.1f) cm (world), records shifted %llu, skipped %llu this second, "
+                            "guard off, ads %s, error %.1f cm; fp_root=(%.3f,%.3f,%.3f) %s; job_cam_minus_fp_root=(%.3f,%.3f,%.3f) m; "
+                            "amc_pos_minus_root=(%.4f,%.4f,%.4f) m (expect 0); first shifted record %s: pos before (%.3f,%.3f,%.3f) after (%.3f,%.3f,%.3f)",
+                            a.applied[0] * 100.0, a.applied[1] * 100.0, a.applied[2] * 100.0, static_cast<unsigned long long>(shifted),
+                            static_cast<unsigned long long>(skipped), ads ? "yes" : "no", errMag * 100.0, static_cast<double>(fp.origin[0]),
+                            static_cast<double>(fp.origin[1]), static_cast<double>(fp.origin[2]), fpFresh ? "fresh" : "stale", jf[0], jf[1], jf[2],
+                            am[0], am[1], am[2], first.valid ? "yes" : "none", first.pre[0], first.pre[1], first.pre[2], first.post[0], first.post[1],
+                            first.post[2]);
         } else {
             const double ap[3] = {a.applied[0] * 100.0, a.applied[1] * 100.0, a.applied[2] * 100.0};
-            Log::get().note("native on foot body align: mode view, fp_root=unread (the mode-2 root cross-check is not wired) job_cam=(%.3f,%.3f,%.3f) "
-                            "pov3P_world=(%.3f,%.3f,%.3f) head3p_world=(%.3f,%.3f,%.3f) hmd_body=(%.3f,%.3f,%.3f) delta_body_cm=(%.1f,%.1f,%.1f) "
-                            "applied_seated_cm=(%.1f,%.1f,%.1f) filt_ms=%.0f ads=%s guard=%s pov: %s",
-                            static_cast<double>(s.cam[0]), static_cast<double>(s.cam[1]), static_cast<double>(s.cam[2]),
-                            static_cast<double>(s.pov[0]), static_cast<double>(s.pov[1]), static_cast<double>(s.pov[2]),
-                            static_cast<double>(s.head[0]), static_cast<double>(s.head[1]), static_cast<double>(s.head[2]),
-                            hmdB[0], hmdB[1], hmdB[2], deltaB[0] * 100.0, deltaB[1] * 100.0, deltaB[2] * 100.0, ap[0], ap[1], ap[2],
-                            align::kTauSec * 1000.0, ads ? "yes" : "no", a.tripped ? "tripped" : "ok",
-                            s.povDerived ? "derived" : "head joint + trims");
+            Log::get().note("native on foot body align: mode view (F37 head motion): tS=(%.3f,%.3f,%.3f) tS0=(%.3f,%.3f,%.3f) m (seated x,y,z); "
+                            "cam_world=(%.3f,%.3f,%.3f) pov_world=(%.3f,%.3f,%.3f) m; cam_body=(%.3f,%.3f,%.3f) pov_body=(%.3f,%.3f,%.3f) hmd_body=(%.3f,%.3f,%.3f) m "
+                            "(body right,up,forward); fp_root=(%.3f,%.3f,%.3f) %s; delta_body_cm=(%.1f,%.1f,%.1f) applied_seated_cm=(%.1f,%.1f,%.1f) "
+                            "filt_ms=%.0f ads=%s guard=%s pov: %s; sign check: cam toward pov %+.3f cm, along the applied step %+.3f cm this step",
+                            g_f37TSNow[0], g_f37TSNow[1], g_f37TSNow[2], static_cast<double>(g_f37TS0[0]), static_cast<double>(g_f37TS0[1]),
+                            static_cast<double>(g_f37TS0[2]), static_cast<double>(s.cam[0]), static_cast<double>(s.cam[1]), static_cast<double>(s.cam[2]),
+                            static_cast<double>(s.pov[0]), static_cast<double>(s.pov[1]), static_cast<double>(s.pov[2]), camB[0], camB[1], camB[2],
+                            povB[0], povB[1], povB[2], hmdB[0], hmdB[1], hmdB[2], static_cast<double>(fp.origin[0]),
+                            static_cast<double>(fp.origin[1]), static_cast<double>(fp.origin[2]), fpFresh ? "fresh" : "stale", deltaB[0] * 100.0,
+                            deltaB[1] * 100.0, deltaB[2] * 100.0, ap[0], ap[1], ap[2], align::kTauSec * 1000.0, ads ? "yes" : "no",
+                            a.tripped ? "tripped" : "ok", s.povDerived ? "derived" : "head joint + trims", g_f37SignToward * 100.0,
+                            g_f37SignApplied * 100.0);
         }
     }
 }

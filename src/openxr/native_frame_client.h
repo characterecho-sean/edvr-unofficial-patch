@@ -34,6 +34,18 @@ class NativeFrameClient final {
     uint32_t nowSequence=0;
     in.nowValid=readNowHead(in.nowHead,nowSequence)?1u:0u;
     in.nowSequence=nowSequence;
+    // F37: the render head ring (the last eight frames' heads, this frame's newest), so the d3d11 half can match a marker to the pose the game drew with.
+    if(in.valid) {
+      ringNewest_=(ringNewest_+1)%8;
+      std::memcpy(ring_[ringNewest_],snapshot.headToLocal.m,sizeof(ring_[0]));
+      ringSeq_[ringNewest_]=geometry.sequence;
+      LARGE_INTEGER q{};QueryPerformanceCounter(&q);ringQpc_[ringNewest_]=uint64_t(q.QuadPart);
+      if(ringCount_<8)++ringCount_;
+    }
+    std::memcpy(in.ringHead,ring_,sizeof(in.ringHead));
+    std::memcpy(in.ringSequence,ringSeq_,sizeof(in.ringSequence));
+    std::memcpy(in.ringQpc,ringQpc_,sizeof(in.ringQpc));
+    in.ringNewest=ringNewest_;in.ringCount=ringCount_;
     const uint32_t askedBefore=providerVersion_;
     const HRESULT result=beginLadder([&](EdvrNativeFrameOutput& o,uint32_t version){
       // A provider that refuses version 2 is sent the version 1 words, exactly as before (size = the version 1 prefix).
@@ -109,5 +121,6 @@ class NativeFrameClient final {
   // first, so a provider once found to be older is not re-probed every frame.
   uint32_t providerVersion_=EDVR_NATIVE_FRAME_VERSION_8;   // F33: starts at 8 (the eye alignment; F31's input version 2 rides with it); a refusal steps down
   uint32_t loggedVersion_=0;   // F32: the version last logged as negotiated
+  float ring_[8][12]{};uint64_t ringSeq_[8]{},ringQpc_[8]{};uint32_t ringNewest_=0,ringCount_=0;   // F37: the render head ring
 };
 }
