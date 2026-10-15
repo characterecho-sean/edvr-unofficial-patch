@@ -488,6 +488,31 @@ int wmain(int argc, wchar_t** argv) {
         check(std::fabs(vp[0] - 1.0) < 1e-12 && std::fabs(vp[2] - 1.0) < 1e-12 && std::fabs(dt::angleDeg(vp, vq) - 60.0) < 1e-9 &&
                   dt::rowsRotation(rows, 0.02) && dt::rowsAngleDeg(rows, rows) < 1e-6,
               "F44: the view point is rows . (p - o, 1), and the angle between (1, 0, 1) and (0, 1, 1) is 60 degrees");
+        // F45: the whole-stream match (x names the record from FirstElement; y counted apart) and the view cache's nearest eye.
+        const uint32_t stream[8] = {5, 900, 7, 901, 2, 1000, 7, 902};   // four entries (x, y)
+        const uint32_t want[2] = {3400 + 7, 3400 + 1000};
+        dt::StreamMatch m;
+        check(dt::matchStream(reinterpret_cast<const uint8_t*>(stream), 4, 3400, want, 2, m) && m.xHits == 2 && m.yHits == 1 && m.entry == 1 &&
+                  m.record == 3407 && m.want == 0 && !m.viaY,
+              "F45: the stream match reads every entry, names the first x hit, and counts y hits apart");
+        const uint32_t onlyY[1] = {3400 + 900};
+        check(dt::matchStream(reinterpret_cast<const uint8_t*>(stream), 4, 3400, onlyY, 1, m) && m.xHits == 0 && m.yHits == 1 && m.viaY &&
+                  !dt::matchStream(reinterpret_cast<const uint8_t*>(stream), 4, 0, onlyY, 1, m),
+              "F45: a y-only hit is marked by y, and the record is counted from FirstElement");
+        dt::ViewCache<4> views;
+        dt::View w0, w1;
+        w0.frame = w1.frame = 9;
+        w0.eye = 0;
+        w1.eye = 1;
+        std::memcpy(w0.rows, rows, sizeof(rows));
+        std::memcpy(w1.rows, rows, sizeof(rows));
+        w1.rows[3] = 0.064f;   // the other eye: offset along x
+        views.put(w0);
+        views.put(w1);
+        double dn = 0.0, dother = 0.0;
+        check(views.nearestEye(9, w1.rows, &dn, &dother) == 1 && dn == 0.0 && dother > 0.06 && views.nearestEye(8, rows, &dn, &dother) == -1 &&
+                  views.latest() && views.latest()->eye == 1,
+              "F45: the view cache picks the eye whose rows are nearest, and has no eye for a frame it never saw");
     }
 
     // F40 (pure math): the view map. seated = D . Ry(psi) . body; the head in body axes is Ry(psi)^-1 . diag(1,1,-1) . tS; psi is the seated head

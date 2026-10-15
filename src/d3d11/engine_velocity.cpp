@@ -3424,6 +3424,18 @@ bool engineVelocitySourceCameraRows(float (&rows)[6][4]) {
     std::memcpy(rows, c.rows, sizeof(rows));
     return true;
 }
+bool engineVelocityShadowSceneRows(const ID3D11Buffer* scene, float (&rows)[6][4]) {
+    static_assert(sizeof(rows) == kRowsBytes, "the shadow's rows are the watch's rows 270..275");
+    if (!scene || !live.load(std::memory_order_acquire)) return false;
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    for (unsigned i = 1; i < kWatchSlots; i += 2) {   // the scene slots (odd)
+        const WatchInfo& w = g_watchInfo[i];
+        if (w.resource != static_cast<const ID3D11Resource*>(scene) || !w.rowsKnown || w.mapped) continue;
+        std::memcpy(rows, w.rows, kRowsBytes);
+        return true;
+    }
+    return false;
+}
 
 void engineVelocityNotePanelPixels(uint32_t joined, uint32_t masked, uint32_t camera, uint32_t stale, uint32_t corrupt,
                                    uint32_t stamped, uint32_t eyeDraws, uint32_t pixelStride, uint32_t skinned) {

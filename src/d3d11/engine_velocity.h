@@ -424,6 +424,10 @@ uint64_t engineVelocitySourceFreeFrames();
 // depth is another, or the rows were not seen. Pure reads under the module's own lock: no GPU work, no allocation.
 bool engineVelocitySourceIsNamed(const ID3D11Texture2D* depth);
 bool engineVelocitySourceCameraRows(float (&rows)[6][4]);
+// F45 (TEMPORARY, the native on-foot marker probe): rows 270..275 of `scene` (a scene constants buffer read from constant 0) as the watch last
+// saw them written at an Unmap, when a scene watch slot follows that buffer and its rows are known. False otherwise. A pure read under the
+// module's lock: no GPU work, nothing staged.
+bool engineVelocityShadowSceneRows(const ID3D11Buffer* scene, float (&rows)[6][4]);
 // The screen shader's panel counts without diagnostics: one present frame in
 // kPanelSampleFrames, one eye pixel in kPanelSampleStride squared (a grid on
 // the eye pixel), raw; pixelStride 1 = every pixel (diagnostics, motion_source).

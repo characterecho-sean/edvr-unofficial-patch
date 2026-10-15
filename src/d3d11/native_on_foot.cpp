@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdarg>   // F45: the marker probe's line builder
 #include <cstdio>
 #include <cstring>
 #include <cwchar>
@@ -21,6 +22,7 @@
 #include "binding_shadow.h"   // bindingShaderHash: the HUD issuer probe's pixel shader
 #include "depth_probe.h"   // F44: depthProbeCurrentSceneEyeOf, the eye of a draw by its depth view
 #include "draw_record_tag.h"   // F44: the marker probe's tag, find and match (after d3d11.h: its staging ring)
+#include "engine_velocity.h"   // F45: engineVelocityShadowSceneRows, the CB shadow's rows 270..275 (the world view's row 275)
 #include "engine_velocity_families.h"   // F44: the pool families' vertex shaders (the eye's world view)
 #include "explorer_cam.h"   // localAvatarParts, avatarFadeModeRead, avatarCensusTake: the avatar census (F1, F3)
 #include "journal_watch.h"
@@ -6744,40 +6746,53 @@ void bodyModeShutdown() {
 // NO_OVERWRITE map of it, the sentinels in flight (the tags of the last kF44TagAgeMax frames) are looked for at +16 of its records: first at the
 // index each key was last found at, then, when a key is still missing, over the whole mapped range (streaming loads; a scan over 2 ms backs off
 // for 30 frames). Each find keeps (pool, record index, X0 = the stored position).
-// THE MATCH. Each on-foot HUD draw (VS 95D01BA609BF7500 or 46546443FD3C3F88) whose pool has a find this frame or the last copies its b0 rows 9-11,
-// its b1 row 275 and its instance stream entries (v0.x, from StartInstanceLocation) into a staging slot; the first pool-family draw of each eye
-// a frame (the world pass) copies its b0 rows 9-11 and b1 row 275. Read back two or more frames later without a wait: the draw reads record
-// FirstElement + v0.x; when that is a find, v0 = V_hud (X0 - o_hud) and v_target = V_w (P - o_w), and the angle between them is logged.
+// THE MATCH (F45; draw_record_tag.h holds the stream match, the view cache and the frame staging). Every draw (any call, any vertex shader)
+// whose VS t33 is a watched pool, in a frame with a find in that pool (this frame or the last), copies its whole instance stream (the single
+// stride-8 vertex buffer from StartInstanceLocation, up to kEntriesMax entries) into the frame's staging buffer. The on-foot HUD draws (VS
+// 95D01BA609BF7500 or 46546443FD3C3F88; at most kHudRowsPerFrame a frame) copy their b0 rows 9-11 and b1 row 275; the world family's draws
+// (engine_velocity_family::familyOfVs) do the same until one per eye a frame has, with row 275 from engine motion's CB shadow when a watch
+// follows that b1 from constant 0. Read back two or more frames later without a wait: a draw reads a find when FirstElement + x of any entry is
+// its index (y counted apart). For a HUD draw that reads one, v0 = V_hud (X0 - o_hud) and v_target = V_w (P - o_w); every HUD draw's rows are
+// also compared with both eyes' world rows (the eye check).
 namespace f44 {
 constexpr uint32_t kPools = 4;
 constexpr uint32_t kHits = 16;              // finds kept for a frame (this frame's, and the one before's)
 constexpr uint32_t kHistory = 64;           // tags taken from the cells: P and t' for a find, by sentinel
-constexpr uint32_t kCapFinds = 4;           // a HUD capture's copy of its pool's finds
-constexpr uint32_t kEntries = 4;            // instance stream entries read per HUD draw
-constexpr uint32_t kHudSlots = 192, kHudBytes = 96;      // b0 rows 9-11 at 0, b1 row 275 at 48, the stream entries at 64
-constexpr uint32_t kWorldSlots = 16, kWorldBytes = 64;   // b0 rows 9-11 at 0, b1 row 275 at 48
-constexpr uint32_t kHudPerFrame = 48;
 constexpr uint32_t kTagAgeMax = 8;          // frames a sentinel stays in flight
 constexpr uint32_t kScansPerFrame = 4;
 constexpr uint64_t kScanBackoffUs = 2000;
 constexpr UINT kRowsOffset = 9 * 16, kRowsBytes = 48, kOriginOffset = 275 * 16, kOriginBytes = 16;
+// F45: the frame's staging buffer and its draw records.
+constexpr uint32_t kFrameSlots = 6, kFrameBytes = 1u << 20;   // 1 MB a frame: 131072 stream entries
+constexpr uint32_t kRecs = 4096;                              // draws recorded a frame
+constexpr uint32_t kEntriesMax = 16384;                       // stream entries read per draw (more are counted as cut)
+constexpr uint32_t kHudRowsPerFrame = 48;                     // HUD draws whose view rows are copied a frame
+constexpr uint32_t kSlotFinds = 16;                           // a frame's finds, kept for its read-back
+constexpr uint32_t kTuples = 12;                              // distinct readers of a find (VS, PS, eye, call) logged a second
+constexpr uint32_t kViews = 16;
+constexpr uint32_t kSrvCache = 8;
+constexpr uint32_t kWorldFails = 4;                           // distinct failing world draws (VS, reason) logged a second
 
-enum Refuse : uint32_t { kNoT33, kStride, kNoStream, kConstants, kNoFind, kRingFull, kPerFrame, kNoWorld, kRows, kNoTag, kZero, kPoolChanged,
+enum Refuse : uint32_t { kNoT33, kStride, kNoStream, kConstants, kNoSlot, kRecsFull, kBufferFull, kNoWorld, kRows, kNoTag, kZero, kPoolChanged,
                          kScanFault, kRefuseCount };
 const char* const kRefuseName[kRefuseCount] = {
-    "the HUD draw has no t33 view",
-    "t33 is not a structured buffer of stride 336 (the record layout the HUD VS reads)",
-    "no single instance stream of stride 8",
-    "a constant buffer is missing or too small for rows 9-11 / row 275",
-    "no tagged record found in the draw's pool this frame or the last",
-    "the staging ring is full",
-    "the per-frame capture cap",
+    "an on-foot HUD draw has no t33 view",
+    "an on-foot HUD draw's t33 is not a structured buffer of stride 336 (the record layout the HUD VS reads)",
+    "a draw bound to the pool has no single instance stream of stride 8, or its range is outside the buffer",
+    "an on-foot HUD draw's constant buffer is missing or too small for rows 9-11 / row 275",
+    "no free staging slot for the frame (read-backs late)",
+    "the frame's draw record cap",
+    "the frame's staging buffer is full",
     "no world view for the draw's eye that frame",
     "view rows are not a rotation",
     "a found record's tag has no P (node+0x50 unread)",
     "a view position is at the eye (zero length)",
     "a watched pool address is no longer a buffer of stride 336",
     "the pool scan faulted"};
+const char* const kRefuseShort[kRefuseCount] = {"no t33",      "stride",          "no stream", "constants", "no slot",      "record cap",
+                                                "buffer full", "no world view",   "rows",      "no tag",    "zero",         "pool changed",
+                                                "scan fault"};
+const char* const kWorldWhy[3] = {"cb0 not covered", "cb1 not covered", "ring/stage failed"};
 
 struct Pool {
     ID3D11Resource* res = nullptr;   // identity only, no reference held; verified at each Map (the game's live resource there)
@@ -6793,43 +6808,73 @@ struct Find {
     float x0[3] = {}, tp[3] = {}, p[3] = {};
     bool pOk = false, haveTag = false;
 };
-struct HudCap {
-    uint32_t frame = 0;
-    int eye = -1;                    // by the draw's depth view; -1: chosen at the match by the nearest world rows
-    uint32_t first = 0, entries = 0, nFinds = 0;
-    Find finds[kCapFinds];
-    bool prev[kCapFinds] = {};
-    double headDps = 0.0;
-    bool headOk = false;
+enum RecFlag : uint8_t { kRecWorld = 1, kRecHud = 2, kRecShadowO = 4, kRecCut = 8 };
+// One recorded draw: offsets into its frame's staging slot (-1: not copied).
+struct Rec {
+    uint64_t vs = 0, ps = 0;
+    const void* pool = nullptr;
+    uint32_t first = 0, instances = 0, entries = 0;
+    int32_t streamAt = -1, rowsAt = -1, originAt = -1;
+    float origin[4] = {};    // b1 row 275 from the CB shadow (kRecShadowO)
+    int8_t eye = -1;         // by the draw's depth view; -1 unknown
+    uint8_t flags = 0;
+    char kind = 0;           // the draw call (nativeOnFootMarkerProbeDraw)
 };
-struct WorldCap {
-    uint32_t frame = 0;
-    int eye = -1;
+struct SrvInfo {
+    const void* srv = nullptr;
+    ID3D11Resource* res = nullptr;   // identity only
+    uint32_t first = 0, bytes = 0;
+    bool pool = false;               // a structured buffer of stride 336 behind a buffer view
 };
-struct World {
-    bool valid = false;
-    uint32_t frame = 0;
+struct Tuple {
+    uint64_t vs = 0, ps = 0, draws = 0;
     int eye = -1;
-    float rows[12] = {};
-    float o[4] = {};
+    char kind = 0;
+    uint32_t instMin = 0, instMax = 0, entry = 0, record = 0, xHits = 0, yHits = 0;
+    bool viaY = false;
+};
+struct WorldFail {
+    uint64_t vs = 0, draws = 0;
+    int why = 0;
+    bool cb0 = false, cb1 = false;
+    UINT cb0Bytes = 0, f0 = 0, cb1Bytes = 0, f1 = 0;
 };
 struct Window {
     uint64_t mapDiscard = 0, mapNoOverwrite = 0, mapOther = 0;
     uint64_t unmapsTagged = 0, unmapsNoFind = 0, finds = 0, sameIndex = 0, changedIndex = 0, exact = 0, differs = 0, hintFinds = 0;
     uint64_t scans = 0, scanUsMax = 0, scanUsSum = 0, backoffs = 0;
-    uint64_t hudDraws = 0, staged = 0, read = 0, unmatched = 0, matched = 0, matchedPrev = 0, eyeByRows = 0, lost = 0;
-    uint64_t worldStaged = 0, worldRead = 0, worldFailed = 0;
+    // The draws bound to the pool and their streams.
+    uint64_t hudDraws = 0, hudRows = 0, poolDraws = 0, indirect = 0, streamDraws = 0, streamEntries = 0, streamCut = 0, framesRead = 0, lost = 0;
+    uint64_t streamRead = 0, readsX = 0, readsYOnly = 0, readsHud = 0;
+    Tuple tuples[kTuples];
+    uint32_t nTuples = 0;
+    uint64_t tuplesDropped = 0;
+    // The match.
+    uint64_t matched = 0, eyeByRows = 0;
     uint64_t refused[kRefuseCount] = {};
     bool haveFind = false;           // the window's last find
     uint32_t index = 0, key = 0, age = 0;
     int mapType = 0;
     const void* pool = nullptr;
     float x0[3] = {}, tp[3] = {};
-    uint32_t readRecord = 0, foundRecord = 0;
-    bool haveUnmatched = false;
-    uint64_t n[2] = {}, headN[2] = {};
-    double sum[2] = {}, max[2] = {}, rotSum[2] = {}, headSum[2] = {}, headMax[2] = {};
+    uint64_t n[2] = {};
+    double sum[2] = {}, max[2] = {}, rotSum[2] = {};
     double pw[2] = {}, tpLen[2] = {}, xo[2] = {}, v0[2][3] = {}, vt[2][3] = {};
+    bool haveAngle = false, angleGuessed = false;
+    double angle = 0.0;
+    int angleEye = -1;
+    // The world views: eye-frames, and the failed draw tries by reason.
+    uint64_t worldStaged = 0, worldRead = 0, worldFailed = 0, worldCb0 = 0, worldCb1 = 0, worldStage = 0, worldShadowO = 0, worldStagedO = 0;
+    uint64_t worldNoEye = 0;
+    WorldFail worldFail[kWorldFails];
+    uint32_t nWorldFail = 0;
+    // The eye check.
+    uint64_t eyeAgree = 0, eyeDisagree = 0, eyeNoDsv = 0, eyeNoDsvRows[2] = {}, eyeOneWorld = 0, eyeNoWorld = 0;
+    int disDsv = -1, disRows = -1;
+    double disNear = 0.0, disOther = 0.0;
+    // The head, from the runtime ring, once a frame.
+    uint64_t headN = 0;
+    double headSum = 0.0, headMax = 0.0;
 };
 
 Pool g_pools[kPools];
@@ -6841,18 +6886,26 @@ uint32_t g_histNext = 0;
 uint32_t g_lastIndex[256] = {};
 bool g_haveLast[256] = {};
 uint32_t g_backoffUntil = 0, g_scanFrame = ~0u, g_scansThisFrame = 0;
-HudCap g_hudCap[kHudSlots];
-drawtag::StagingRing<kHudSlots, kHudBytes> g_hudRing;
-WorldCap g_worldCap[kWorldSlots];
-drawtag::StagingRing<kWorldSlots, kWorldBytes> g_worldRing;
-World g_world[kWorldSlots];
-uint32_t g_worldFrame[2] = {~0u, ~0u};
-uint32_t g_polledFrame = ~0u, g_capFrame = ~0u, g_capThisFrame = 0;
-double g_headDps = 0.0;
-bool g_headOk = false;
+drawtag::FrameStaging<kFrameSlots, kFrameBytes> g_staging;
+Rec g_recs[kFrameSlots][kRecs];
+uint32_t g_recN[kFrameSlots] = {};
+uint32_t g_recFrame[kFrameSlots] = {};
+Find g_slotFinds[kFrameSlots][kSlotFinds];
+uint32_t g_slotFindN[kFrameSlots] = {};
+drawtag::ViewCache<kViews> g_views;
+SrvInfo g_srvCache[kSrvCache];
+uint32_t g_srvCacheN = 0, g_srvCacheFrame = ~0u;
+const void* g_eyeDsv = nullptr;
+uint32_t g_eyeDsvFrame = ~0u;
+int g_eyeDsvEye = -1;
+uint32_t g_worldTry[2] = {~0u, ~0u}, g_worldOk[2] = {~0u, ~0u};
+uint32_t g_polledFrame = ~0u, g_hudRowsFrame = ~0u, g_hudRowsThisFrame = 0;
+Find g_lastFind;                     // the newest find (any window), for the 1 s line's world check
+bool g_haveLastFind = false;
 Window g_win;
 uint64_t g_winMs = 0;
 bool g_refuseNoted[kRefuseCount] = {};
+bool g_worldFailNoted = false;
 uint64_t g_taggedSeen = 0, g_untaggableSeen = 0, g_busySeen = 0;
 uint32_t g_poolNotes = 0;
 
@@ -6937,6 +6990,8 @@ void addFind(const Pool& p, const drawtag::Hit& h, int mapType, uint32_t frame) 
     }
     g_haveLast[f.key] = true;
     g_lastIndex[f.key] = f.index;
+    g_lastFind = f;
+    g_haveLastFind = true;
     g_win.haveFind = true;
     g_win.index = f.index;
     g_win.key = f.key;
@@ -7071,185 +7126,309 @@ bool covers(ID3D11Buffer* b, UINT offset, UINT bytes) {
     return static_cast<uint64_t>(offset) + bytes <= d.ByteWidth;
 }
 
+// The head's angular speed between the runtime ring's two newest samples, once a frame (F45: counted unconditionally for the 1 s line).
 void headSample() {
-    g_headOk = false;
     EdvrNativeNowPose np{};
     if (!nativeFrameNowPose(np) || np.ringCount < 2) return;
     const uint32_t i0 = np.ringNewest % 8u, i1 = (np.ringNewest + 7u) % 8u;
     if (np.ringQpc[i0] <= np.ringQpc[i1]) return;
     const double dt = static_cast<double>(f30QpcUs(np.ringQpc[i0] - np.ringQpc[i1])) * 1e-6;
     if (!(dt > 0.0)) return;
-    g_headDps = nofoot::rotDeltaDeg(np.ringHead[i0], np.ringHead[i1]) / dt;
-    g_headOk = true;
+    const double dps = nofoot::rotDeltaDeg(np.ringHead[i0], np.ringHead[i1]) / dt;
+    ++g_win.headN;
+    g_win.headSum += dps;
+    if (dps > g_win.headMax) g_win.headMax = dps;
 }
 
-void stageWorld(ID3D11DeviceContext* ctx, int eye, uint32_t frame) {
-    g_worldFrame[eye] = frame;   // one try per eye per frame
-    ID3D11Buffer* cb0 = nullptr;
-    ID3D11Buffer* cb1 = nullptr;
-    UINT f0 = 0, f1 = 0;
-    vsConstants(ctx, 0, &cb0, &f0);
-    vsConstants(ctx, 1, &cb1, &f1);
-    if (covers(cb0, f0 * 16 + kRowsOffset, kRowsBytes) && covers(cb1, f1 * 16 + kOriginOffset, kOriginBytes)) {
-        const drawtag::CopyRegion r[2] = {{cb0, f0 * 16 + kRowsOffset, kRowsBytes, 0}, {cb1, f1 * 16 + kOriginOffset, kOriginBytes, 48}};
-        const int slot = g_worldRing.stage(ctx, r, 2, frame);
-        if (slot >= 0) {
-            g_worldCap[slot].frame = frame;
-            g_worldCap[slot].eye = eye;
-            ++g_win.worldStaged;
-        } else {
-            ++g_win.worldFailed;
-        }
-    } else {
-        ++g_win.worldFailed;
-    }
-    if (cb0) cb0->Release();
-    if (cb1) cb1->Release();
+bool poolWatched(const void* res) {
+    for (const Pool& p : g_pools)
+        if (p.res && p.res == res) return true;
+    return false;
+}
+// The pool has a find this frame or the last.
+bool poolHasFinds(const void* res, uint32_t frame) {
+    for (int s = 0; s < 2; ++s)
+        for (uint32_t i = 0; i < g_findN[s]; ++i)
+            if (g_finds[s][i].pool == res && frame - g_finds[s][i].frame <= 1u) return true;
+    return false;
 }
 
-void captureHud(ID3D11DeviceContext* ctx, int eye, uint32_t frame, uint32_t instances, uint32_t startInstance) {
-    ++g_win.hudDraws;
-    if (g_capFrame != frame) {
-        g_capFrame = frame;
-        g_capThisFrame = 0;
-        headSample();
-    }
-    // t33: the record pool the HUD VS reads (a structured buffer of stride 336), and the view's FirstElement.
+// The draw's VS t33 view: the resource (identity), FirstElement and whether it is a stride-336 pool. Asked of the context (the binding
+// shadow's t33 is not kept while the AA is off); a view seen before this frame is not described again.
+bool t33Of(ID3D11DeviceContext* ctx, uint32_t frame, SrvInfo& out) {
     ID3D11ShaderResourceView* srv = nullptr;
     ctx->VSGetShaderResources(33, 1, &srv);
-    if (!srv) {
-        refuse(kNoT33);
-        return;
+    if (!srv) return false;
+    if (g_srvCacheFrame != frame) {
+        g_srvCacheFrame = frame;
+        g_srvCacheN = 0;
     }
+    for (uint32_t i = 0; i < g_srvCacheN; ++i)
+        if (g_srvCache[i].srv == srv) {
+            out = g_srvCache[i];
+            srv->Release();
+            return true;
+        }
+    SrvInfo info;
+    info.srv = srv;
     D3D11_SHADER_RESOURCE_VIEW_DESC vd{};
     srv->GetDesc(&vd);
-    uint32_t first = 0;
     bool bufferView = true;
-    if (vd.ViewDimension == D3D11_SRV_DIMENSION_BUFFER) first = vd.Buffer.FirstElement;
-    else if (vd.ViewDimension == D3D11_SRV_DIMENSION_BUFFEREX) first = vd.BufferEx.FirstElement;
+    if (vd.ViewDimension == D3D11_SRV_DIMENSION_BUFFER) info.first = vd.Buffer.FirstElement;
+    else if (vd.ViewDimension == D3D11_SRV_DIMENSION_BUFFEREX) info.first = vd.BufferEx.FirstElement;
     else bufferView = false;
     ID3D11Resource* res = nullptr;
     srv->GetResource(&res);
     srv->Release();
-    ID3D11Buffer* poolBuf = nullptr;
-    if (res) res->QueryInterface(__uuidof(ID3D11Buffer), reinterpret_cast<void**>(&poolBuf));
+    ID3D11Buffer* buf = nullptr;
+    if (res) res->QueryInterface(__uuidof(ID3D11Buffer), reinterpret_cast<void**>(&buf));
     D3D11_BUFFER_DESC pd{};
-    if (poolBuf) {
-        poolBuf->GetDesc(&pd);
-        poolBuf->Release();
+    if (buf) {
+        buf->GetDesc(&pd);
+        buf->Release();
     }
     if (res) res->Release();   // the identity is kept, never a reference
-    if (!poolBuf || !bufferView || pd.StructureByteStride != drawtag::kRecordStride || !(pd.MiscFlags & D3D11_RESOURCE_MISC_BUFFER_STRUCTURED)) {
-        refuse(kStride);
-        return;
-    }
-    learnPool(res, pd.ByteWidth, frame);
-    // The pool's finds, this frame's first, then the frame before's.
-    HudCap cap{};
-    cap.frame = frame;
-    cap.eye = eye;
-    cap.first = first;
-    for (int which = 0; which < 2; ++which) {
-        const bool current = g_findFrame == frame;
-        const int set = current ? which : (which == 0 && g_findFrame + 1u == frame ? 0 : -1);
-        if (set < 0) continue;
-        for (uint32_t i = 0; i < g_findN[set] && cap.nFinds < kCapFinds; ++i) {
-            if (g_finds[set][i].pool != res) continue;
-            cap.prev[cap.nFinds] = !(current && set == 0);
-            cap.finds[cap.nFinds++] = g_finds[set][i];
-        }
-    }
-    if (!cap.nFinds) {
-        refuse(kNoFind);
-        return;
-    }
-    if (g_capThisFrame >= kHudPerFrame) {
-        refuse(kPerFrame);
-        return;
-    }
-    // The instance stream: the one vertex buffer of stride 8 (INSTANCEANDMODELDATAINDEX); its entries from StartInstanceLocation.
-    ID3D11Buffer* vbs[4] = {};
-    UINT strides[4] = {}, offs[4] = {};
-    ctx->IAGetVertexBuffers(0, 4, vbs, strides, offs);
-    int pick = -1;
-    unsigned eights = 0;
-    for (int i = 0; i < 4; ++i)
-        if (vbs[i] && strides[i] == drawtag::kStreamStride) {
-            ++eights;
-            if (pick < 0) pick = i;
-        }
-    ID3D11Buffer* cb0 = nullptr;
-    ID3D11Buffer* cb1 = nullptr;
-    UINT f0 = 0, f1 = 0;
-    vsConstants(ctx, 0, &cb0, &f0);
-    vsConstants(ctx, 1, &cb1, &f1);
-    cap.entries = instances < kEntries ? instances : kEntries;
-    const UINT streamAt = pick >= 0 ? offs[pick] + startInstance * drawtag::kStreamStride : 0;
-    if (eights != 1) {
-        refuse(kNoStream);
-    } else if (!covers(vbs[pick], streamAt, cap.entries * drawtag::kStreamStride)) {
-        refuse(kNoStream);
-    } else if (!covers(cb0, f0 * 16 + kRowsOffset, kRowsBytes) || !covers(cb1, f1 * 16 + kOriginOffset, kOriginBytes)) {
-        refuse(kConstants);
-    } else {
-        const drawtag::CopyRegion r[3] = {{cb0, f0 * 16 + kRowsOffset, kRowsBytes, 0},
-                                          {cb1, f1 * 16 + kOriginOffset, kOriginBytes, 48},
-                                          {vbs[pick], streamAt, cap.entries * drawtag::kStreamStride, 64}};
-        const int slot = g_hudRing.stage(ctx, r, 3, frame);
-        if (slot < 0) {
-            refuse(kRingFull);
-        } else {
-            cap.headDps = g_headDps;
-            cap.headOk = g_headOk;
-            g_hudCap[slot] = cap;
-            ++g_capThisFrame;
-            ++g_win.staged;
-        }
-    }
-    for (ID3D11Buffer* b : vbs)
-        if (b) b->Release();
-    if (cb0) cb0->Release();
-    if (cb1) cb1->Release();
+    info.res = res;
+    info.bytes = pd.ByteWidth;
+    info.pool = buf && bufferView && pd.StructureByteStride == drawtag::kRecordStride && (pd.MiscFlags & D3D11_RESOURCE_MISC_BUFFER_STRUCTURED);
+    if (g_srvCacheN < kSrvCache) g_srvCache[g_srvCacheN++] = info;
+    out = info;
+    return true;
 }
 
-const World* worldOf(uint32_t frame, int eye) {
-    for (const World& w : g_world)
-        if (w.valid && w.frame == frame && w.eye == eye) return &w;
-    return nullptr;
-}
-double rowsDistance(const float a[12], const float b[12]) {
-    double s = 0.0;
-    for (int i = 0; i < 12; ++i) s += std::fabs(static_cast<double>(a[i]) - b[i]);
-    return s;
+// The draw's eye by its depth view (0 or 1), -1 when the view is not a scene eye's; asked once per depth view a frame.
+int eyeOfDraw(uint32_t frame) {
+    auto* dsv = static_cast<ID3D11DepthStencilView*>(bindingGet(BindSlot::Dsv0));
+    if (!dsv) return -1;
+    if (dsv == g_eyeDsv && g_eyeDsvFrame == frame) return g_eyeDsvEye;
+    int eye = -1, target = -1;
+    if (!depthProbeCurrentSceneEyeOf(dsv, &eye, &target) || (eye != 0 && eye != 1)) eye = -1;
+    g_eyeDsv = dsv;
+    g_eyeDsvFrame = frame;
+    g_eyeDsvEye = eye;
+    return eye;
 }
 
-void matchHud(const HudCap& cap, const uint8_t* d) {
-    ++g_win.read;
-    float rowsH[12], oH[4];
-    uint32_t entry[kEntries * 2] = {};
-    std::memcpy(rowsH, d, sizeof(rowsH));
-    std::memcpy(oH, d + 48, sizeof(oH));
-    std::memcpy(entry, d + 64, cap.entries * drawtag::kStreamStride);
-    int fi = -1;
-    uint32_t readRec = 0;
-    for (uint32_t k = 0; k < cap.entries && fi < 0; ++k) {
-        const uint32_t rec = cap.first + entry[2 * k];
-        if (k == 0) readRec = rec;
-        for (uint32_t h = 0; h < cap.nFinds; ++h)
-            if (cap.finds[h].index == rec) {
-                fi = static_cast<int>(h);
-                break;
+// A world draw's copy failed: counted by reason, the failing draw's constant buffers kept (one entry per VS and reason a second), and the
+// first one described in full once.
+void noteWorldFail(int why, uint64_t vs, ID3D11Buffer* cb0, UINT f0, ID3D11Buffer* cb1, UINT f1) {
+    if (why == 0) ++g_win.worldCb0;
+    else if (why == 1) ++g_win.worldCb1;
+    else ++g_win.worldStage;
+    D3D11_BUFFER_DESC d0{}, d1{};
+    if (cb0) cb0->GetDesc(&d0);
+    if (cb1) cb1->GetDesc(&d1);
+    WorldFail* slot = nullptr;
+    for (uint32_t i = 0; i < g_win.nWorldFail && !slot; ++i)
+        if (g_win.worldFail[i].vs == vs && g_win.worldFail[i].why == why) slot = &g_win.worldFail[i];
+    if (!slot && g_win.nWorldFail < kWorldFails) slot = &g_win.worldFail[g_win.nWorldFail++];
+    if (slot) {
+        slot->vs = vs;
+        slot->why = why;
+        slot->cb0 = cb0 != nullptr;
+        slot->cb1 = cb1 != nullptr;
+        slot->cb0Bytes = d0.ByteWidth;
+        slot->cb1Bytes = d1.ByteWidth;
+        slot->f0 = f0;
+        slot->f1 = f1;
+        ++slot->draws;
+    }
+    if (!g_worldFailNoted) {
+        g_worldFailNoted = true;
+        Log::get().note("native on foot marker probe: a world view copy failed (%s) at vs %016llX: cb0 %s, ByteWidth %u, first constant %u; cb1 "
+                        "%s, ByteWidth %u, first constant %u. Rows 9-11 need cb0 bytes %u..%u and row 275 needs cb1 bytes %u..%u past the first "
+                        "constant. Said once; counted in the 1 s lines",
+                        kWorldWhy[why < 0 || why > 2 ? 2 : why], static_cast<unsigned long long>(vs), cb0 ? "bound" : "NOT bound", d0.ByteWidth,
+                        f0, cb1 ? "bound" : "NOT bound", d1.ByteWidth, f1, kRowsOffset, kRowsOffset + kRowsBytes, kOriginOffset,
+                        kOriginOffset + kOriginBytes);
+    }
+}
+
+// The draw tee's work (render thread, the game's bindings): what the draw binds is copied into the frame's staging slot, recorded for the
+// read-back. Nothing the game owns is written.
+void draw(ID3D11DeviceContext* ctx, uint32_t frame, uint32_t instances, uint32_t startInstance, char kind) {
+    const uint64_t vs = bindingShaderHash(BindSlot::Vs);
+    const bool hud = nofoot::hudIssuerIndex(vs) >= 0;
+    const bool world = !hud && engine_velocity_family::familyOfVs(vs) >= 0;
+    SrvInfo t33;
+    const bool bound = t33Of(ctx, frame, t33);
+    if (hud) {
+        ++g_win.hudDraws;
+        if (!bound) refuse(kNoT33);
+        else if (!t33.pool) refuse(kStride);
+        else learnPool(t33.res, t33.bytes, frame);
+    }
+    const bool watched = bound && t33.pool && poolWatched(t33.res);
+    if (watched) ++g_win.poolDraws;
+    if (kind == 'Y' || kind == 'Z') {   // indirect: the instance range is in a GPU argument buffer
+        if (watched) ++g_win.indirect;
+        return;
+    }
+    const bool wantStream = watched && poolHasFinds(t33.res, frame);
+    if (g_hudRowsFrame != frame) {
+        g_hudRowsFrame = frame;
+        g_hudRowsThisFrame = 0;
+    }
+    const bool wantHudRows = hud && g_hudRowsThisFrame < kHudRowsPerFrame;
+    const bool worldPending = world && (g_worldOk[0] != frame || g_worldOk[1] != frame);
+    if (!wantStream && !wantHudRows && !worldPending) return;
+    const int eye = eyeOfDraw(frame);
+    bool wantWorld = false;
+    if (worldPending) {
+        if (eye < 0) {
+            ++g_win.worldNoEye;
+        } else if (g_worldOk[eye] != frame) {
+            wantWorld = true;
+            g_worldTry[eye] = frame;
+        }
+    }
+    if (!wantStream && !wantHudRows && !wantWorld) return;
+    const int slot = g_staging.open(ctx, frame);
+    if (slot < 0) {
+        refuse(kNoSlot);
+        if (wantWorld) ++g_win.worldStage;
+        return;
+    }
+    if (g_recFrame[slot] != frame) {
+        g_recFrame[slot] = frame;
+        g_recN[slot] = 0;
+    }
+    if (g_recN[slot] >= kRecs) {
+        refuse(kRecsFull);
+        if (wantWorld) ++g_win.worldStage;
+        return;
+    }
+    Rec r;
+    r.vs = vs;
+    r.ps = bindingShaderHash(BindSlot::Ps);
+    r.pool = t33.res;
+    r.first = t33.first;
+    r.instances = instances;
+    r.eye = static_cast<int8_t>(eye);
+    r.kind = kind;
+    bool keep = false;
+    if (wantStream) {
+        // The instance stream: the one vertex buffer of stride 8 (INSTANCEANDMODELDATAINDEX); every entry the draw reads.
+        ID3D11Buffer* vbs[8] = {};
+        UINT strides[8] = {}, offs[8] = {};
+        ctx->IAGetVertexBuffers(0, 8, vbs, strides, offs);
+        int pick = -1;
+        unsigned eights = 0;
+        for (int i = 0; i < 8; ++i)
+            if (vbs[i] && strides[i] == drawtag::kStreamStride) {
+                ++eights;
+                if (pick < 0) pick = i;
             }
+        D3D11_BUFFER_DESC sd{};
+        if (pick >= 0) vbs[pick]->GetDesc(&sd);
+        const uint64_t at = pick >= 0 ? static_cast<uint64_t>(offs[pick]) + static_cast<uint64_t>(startInstance) * drawtag::kStreamStride : 0;
+        uint32_t entries = instances < kEntriesMax ? instances : kEntriesMax;
+        if (pick >= 0 && at < sd.ByteWidth && entries > (sd.ByteWidth - at) / drawtag::kStreamStride)
+            entries = static_cast<uint32_t>((sd.ByteWidth - at) / drawtag::kStreamStride);
+        if (eights != 1 || at >= sd.ByteWidth || !entries) {
+            refuse(kNoStream);
+        } else {
+            if (entries < instances) {
+                r.flags |= kRecCut;
+                ++g_win.streamCut;
+            }
+            const int64_t dst = g_staging.append(ctx, vbs[pick], static_cast<UINT>(at), entries * drawtag::kStreamStride);
+            if (dst < 0) {
+                refuse(kBufferFull);
+            } else {
+                r.streamAt = static_cast<int32_t>(dst);
+                r.entries = entries;
+                ++g_win.streamDraws;
+                g_win.streamEntries += entries;
+                keep = true;
+            }
+        }
+        for (ID3D11Buffer* b : vbs)
+            if (b) b->Release();
     }
-    if (fi < 0) {
-        // Most HUD draws read other records (panels, text): counted, not refused.
-        ++g_win.unmatched;
-        g_win.haveUnmatched = true;
-        g_win.readRecord = readRec;
-        g_win.foundRecord = cap.finds[0].index;
-        return;
+    if (wantHudRows || wantWorld) {
+        ID3D11Buffer* cb0 = nullptr;
+        ID3D11Buffer* cb1 = nullptr;
+        UINT f0 = 0, f1 = 0;
+        vsConstants(ctx, 0, &cb0, &f0);
+        vsConstants(ctx, 1, &cb1, &f1);
+        // Row 275 from engine motion's CB shadow first (the rows the last Unmap of that buffer left; read from constant 0 only).
+        float shadow[6][4] = {};
+        const bool shadowO = cb1 && f1 == 0 && engineVelocityShadowSceneRows(cb1, shadow);
+        const bool c0 = covers(cb0, f0 * 16 + kRowsOffset, kRowsBytes);
+        const bool c1 = shadowO || covers(cb1, f1 * 16 + kOriginOffset, kOriginBytes);
+        int why = -1;
+        if (!c0) {
+            why = 0;
+        } else if (!c1) {
+            why = 1;
+        } else {
+            const int64_t rowsAt = g_staging.append(ctx, cb0, f0 * 16 + kRowsOffset, kRowsBytes);
+            const int64_t oAt = shadowO || rowsAt < 0 ? -1 : g_staging.append(ctx, cb1, f1 * 16 + kOriginOffset, kOriginBytes);
+            if (rowsAt < 0 || (!shadowO && oAt < 0)) {
+                why = 2;
+            } else {
+                r.rowsAt = static_cast<int32_t>(rowsAt);
+                r.originAt = static_cast<int32_t>(oAt);
+                if (shadowO) {
+                    std::memcpy(r.origin, shadow[5], sizeof(r.origin));
+                    r.flags |= kRecShadowO;
+                }
+                keep = true;
+                if (wantWorld) {
+                    r.flags |= kRecWorld;
+                    g_worldOk[eye] = frame;
+                    ++g_win.worldStaged;
+                    if (shadowO) ++g_win.worldShadowO;
+                    else ++g_win.worldStagedO;
+                }
+                if (wantHudRows) {
+                    r.flags |= kRecHud;
+                    ++g_hudRowsThisFrame;
+                    ++g_win.hudRows;
+                }
+            }
+        }
+        if (why >= 0) {
+            if (wantWorld) noteWorldFail(why, vs, cb0, f0, cb1, f1);
+            if (wantHudRows) refuse(why == 2 ? kBufferFull : kConstants);
+        }
+        if (cb0) cb0->Release();
+        if (cb1) cb1->Release();
     }
-    const Find& f = cap.finds[fi];
+    if (keep) g_recs[slot][g_recN[slot]++] = r;
+}
+
+void addTuple(const Rec& r, const drawtag::StreamMatch& m) {
+    Window& w = g_win;
+    Tuple* t = nullptr;
+    for (uint32_t i = 0; i < w.nTuples && !t; ++i)
+        if (w.tuples[i].vs == r.vs && w.tuples[i].ps == r.ps && w.tuples[i].eye == r.eye && w.tuples[i].kind == r.kind) t = &w.tuples[i];
+    if (!t) {
+        if (w.nTuples >= kTuples) {
+            ++w.tuplesDropped;
+            return;
+        }
+        t = &w.tuples[w.nTuples++];
+        t->vs = r.vs;
+        t->ps = r.ps;
+        t->eye = r.eye;
+        t->kind = r.kind;
+        t->instMin = t->instMax = r.instances;
+    }
+    ++t->draws;
+    if (r.instances < t->instMin) t->instMin = r.instances;
+    if (r.instances > t->instMax) t->instMax = r.instances;
+    t->entry = m.entry;
+    t->record = m.record;
+    t->xHits = m.xHits;
+    t->yHits = m.yHits;
+    t->viaY = m.viaY;
+}
+
+// A HUD draw that reads a find: v0 = V_hud (X0 - o_hud) against v_target = V_w (P - o_w) for the draw's eye (by its depth view; else the eye
+// whose world rows are nearest, counted as guessed).
+void matchAngle(const Rec& r, const Find& f, const float rowsH[12], const float oH[4], int rowsEye, uint32_t frame) {
     if (!f.haveTag || !f.pOk) {
         refuse(kNoTag);
         return;
@@ -7258,70 +7437,155 @@ void matchHud(const HudCap& cap, const uint8_t* d) {
         refuse(kRows);
         return;
     }
-    const World* w = nullptr;
-    if (cap.eye >= 0) {
-        w = worldOf(cap.frame, cap.eye);
-    } else {
-        const World* w0 = worldOf(cap.frame, 0);
-        const World* w1 = worldOf(cap.frame, 1);
-        w = !w0 ? w1 : !w1 ? w0 : rowsDistance(rowsH, w0->rows) <= rowsDistance(rowsH, w1->rows) ? w0 : w1;
-        if (w) ++g_win.eyeByRows;
-    }
+    const bool guessed = r.eye < 0;
+    const drawtag::View* w = g_views.get(frame, guessed ? rowsEye : r.eye);
     if (!w) {
         refuse(kNoWorld);
         return;
     }
+    if (guessed) ++g_win.eyeByRows;
     if (!drawtag::rowsRotation(w->rows, 0.02)) {
         refuse(kRows);
         return;
     }
-    const double X0[3] = {f.x0[0], f.x0[1], f.x0[2]}, oh[3] = {oH[0], oH[1], oH[2]};
-    const double P[3] = {f.p[0], f.p[1], f.p[2]}, ow[3] = {w->o[0], w->o[1], w->o[2]};
     double v0[3], vt[3];
-    drawtag::viewPoint(rowsH, X0, oh, v0);
-    drawtag::viewPoint(w->rows, P, ow, vt);
-    const double a = drawtag::angleDeg(v0, vt);
+    const double a = drawtag::markerAngle(rowsH, oH, f.x0, w->rows, w->o, f.p, v0, vt);
     if (a < 0.0) {
         refuse(kZero);
         return;
     }
     const int e = w->eye & 1;
     ++g_win.matched;
-    if (cap.prev[fi]) ++g_win.matchedPrev;
     ++g_win.n[e];
     g_win.sum[e] += a;
     if (a > g_win.max[e]) g_win.max[e] = a;
     g_win.rotSum[e] += drawtag::rowsAngleDeg(rowsH, w->rows);
-    if (cap.headOk) {
-        ++g_win.headN[e];
-        g_win.headSum[e] += cap.headDps;
-        if (cap.headDps > g_win.headMax[e]) g_win.headMax[e] = cap.headDps;
-    }
-    const double pw[3] = {P[0] - ow[0], P[1] - ow[1], P[2] - ow[2]};
-    const double xo[3] = {X0[0] - oh[0], X0[1] - oh[1], X0[2] - oh[2]};
+    const double pw[3] = {double(f.p[0]) - w->o[0], double(f.p[1]) - w->o[1], double(f.p[2]) - w->o[2]};
+    const double xo[3] = {double(f.x0[0]) - oH[0], double(f.x0[1]) - oH[1], double(f.x0[2]) - oH[2]};
     const double tpv[3] = {f.tp[0], f.tp[1], f.tp[2]};
     g_win.pw[e] = drawtag::length3(pw);
     g_win.tpLen[e] = drawtag::length3(tpv);
     g_win.xo[e] = drawtag::length3(xo);
     std::memcpy(g_win.v0[e], v0, sizeof(v0));
     std::memcpy(g_win.vt[e], vt, sizeof(vt));
+    g_win.haveAngle = true;
+    g_win.angle = a;
+    g_win.angleEye = e;
+    g_win.angleGuessed = guessed;
 }
 
-void poll(ID3D11DeviceContext* ctx, uint32_t frame) {
-    g_worldRing.poll(ctx, frame, 2, 12, [](int slot, const uint8_t* d) {
-        World& w = g_world[slot];
-        w.valid = true;
-        w.frame = g_worldCap[slot].frame;
-        w.eye = g_worldCap[slot].eye;
-        std::memcpy(w.rows, d, sizeof(w.rows));
-        std::memcpy(w.o, d + 48, sizeof(w.o));
+// One frame's staging slot, read back: its world views into the cache, then every recorded draw's stream against the frame's finds, and
+// every HUD draw's rows against both eyes' world rows.
+void readFrame(int slot, uint32_t frame, const uint8_t* d, uint32_t used) {
+    ++g_win.framesRead;
+    const uint32_t n = g_recFrame[slot] == frame ? g_recN[slot] : 0;
+    const Rec* recs = g_recs[slot];
+    auto inside = [used](int32_t at, uint64_t bytes) { return at >= 0 && static_cast<uint64_t>(at) + bytes <= used; };
+    auto originOf = [&](const Rec& r, float o[4]) {
+        if (r.flags & kRecShadowO) {
+            std::memcpy(o, r.origin, 16);
+            return true;
+        }
+        if (!inside(r.originAt, kOriginBytes)) return false;
+        std::memcpy(o, d + r.originAt, 16);
+        return true;
+    };
+    // The world views first: a HUD draw may come before its eye's world draw in the frame.
+    for (uint32_t i = 0; i < n; ++i) {
+        const Rec& r = recs[i];
+        if (!(r.flags & kRecWorld) || !inside(r.rowsAt, kRowsBytes)) continue;
+        drawtag::View v;
+        v.frame = frame;
+        v.eye = r.eye;
+        std::memcpy(v.rows, d + r.rowsAt, sizeof(v.rows));
+        if (!originOf(r, v.o)) continue;
+        g_views.put(v);
         ++g_win.worldRead;
-    }, &g_win.lost);
-    g_hudRing.poll(ctx, frame, 2, 12, [](int slot, const uint8_t* d) { matchHud(g_hudCap[slot], d); }, &g_win.lost);
+    }
+    const Find* finds = g_slotFinds[slot];
+    const uint32_t nFinds = g_slotFindN[slot] <= kSlotFinds ? g_slotFindN[slot] : 0;
+    for (uint32_t i = 0; i < n; ++i) {
+        const Rec& r = recs[i];
+        drawtag::StreamMatch m;
+        int fi = -1;
+        if (r.streamAt >= 0 && inside(r.streamAt, static_cast<uint64_t>(r.entries) * drawtag::kStreamStride)) {
+            ++g_win.streamRead;
+            uint32_t wants[kSlotFinds];
+            uint32_t which[kSlotFinds];
+            uint32_t nw = 0;
+            for (uint32_t k = 0; k < nFinds; ++k)
+                if (finds[k].pool == r.pool) {
+                    wants[nw] = finds[k].index;
+                    which[nw] = k;
+                    ++nw;
+                }
+            if (nw && drawtag::matchStream(d + r.streamAt, r.entries, r.first, wants, nw, m)) {
+                fi = static_cast<int>(which[m.want]);
+                if (m.xHits) ++g_win.readsX;
+                else ++g_win.readsYOnly;
+                if (nofoot::hudIssuerIndex(r.vs) >= 0) ++g_win.readsHud;
+                addTuple(r, m);
+            }
+        }
+        if (!(r.flags & kRecHud) || !inside(r.rowsAt, kRowsBytes)) continue;
+        float rowsH[12], oH[4];
+        std::memcpy(rowsH, d + r.rowsAt, sizeof(rowsH));
+        if (!originOf(r, oH)) continue;
+        // The eye check: the HUD's view rows against both eyes' world rows of the frame, beside the depth view's eye.
+        double dNear = -1.0, dOther = -1.0;
+        const int rowsEye = g_views.nearestEye(frame, rowsH, &dNear, &dOther);
+        if (rowsEye < 0) {
+            ++g_win.eyeNoWorld;
+        } else if (dOther < 0.0) {
+            ++g_win.eyeOneWorld;
+        } else if (r.eye < 0) {
+            ++g_win.eyeNoDsv;
+            ++g_win.eyeNoDsvRows[rowsEye & 1];
+        } else if (rowsEye != r.eye) {
+            ++g_win.eyeDisagree;
+            g_win.disDsv = r.eye;
+            g_win.disRows = rowsEye;
+            g_win.disNear = dNear;
+            g_win.disOther = dOther;
+        } else {
+            ++g_win.eyeAgree;
+        }
+        if (fi >= 0 && m.xHits) matchAngle(r, finds[fi], rowsH, oH, rowsEye, frame);
+    }
+}
+
+// The first draw of a new frame: the eye-frames whose world view never copied are counted, the last frame's slot keeps its finds and waits for
+// its read-back, the head is sampled, and the slots two or more frames old are read.
+void frameTurn(ID3D11DeviceContext* ctx, uint32_t frame, uint32_t prev) {
+    if (prev != ~0u)
+        for (int e = 0; e < 2; ++e)
+            if (g_worldTry[e] == prev && g_worldOk[e] != prev) ++g_win.worldFailed;
+    const int open = g_staging.openSlot();
+    if (open >= 0) {
+        const uint32_t f = g_staging.slotFrame(open);
+        uint32_t n = 0;
+        for (int s = 0; s < 2; ++s)
+            for (uint32_t i = 0; i < g_findN[s] && n < kSlotFinds; ++i)
+                if (f - g_finds[s][i].frame <= 1u) g_slotFinds[open][n++] = g_finds[s][i];
+        g_slotFindN[open] = n;
+        g_staging.commit();
+    }
+    headSample();
+    g_staging.poll(ctx, frame, 2, 12, [](int slot, uint32_t f, const uint8_t* d, uint32_t used) { readFrame(slot, f, d, used); }, &g_win.lost);
 }
 
 const char* mapName(int t) {
     return t == D3D11_MAP_WRITE_DISCARD ? "DISCARD" : t == D3D11_MAP_WRITE_NO_OVERWRITE ? "NO_OVERWRITE" : "other";
+}
+
+// Appends printf output to a fixed buffer (truncates silently at its end).
+void appendf(char* buf, size_t cap, size_t& len, const char* fmt, ...) {
+    if (len + 1 >= cap) return;
+    va_list ap;
+    va_start(ap, fmt);
+    const int k = std::vsnprintf(buf + len, cap - len, fmt, ap);
+    va_end(ap);
+    if (k > 0) len = len + static_cast<size_t>(k) < cap ? len + static_cast<size_t>(k) : cap - 1;
 }
 
 void report(uint64_t nowMs) {
@@ -7332,6 +7596,7 @@ void report(uint64_t nowMs) {
     if (nowMs - g_winMs < 1000) return;
     g_winMs = nowMs;
     Window& w = g_win;
+    using ull = unsigned long long;
     const uint64_t taggedAll = g_f44Tagged.load(std::memory_order_relaxed);
     const uint64_t untaggableAll = g_f44Untaggable.load(std::memory_order_relaxed);
     const uint64_t busyAll = g_f44CellBusy.load(std::memory_order_relaxed);
@@ -7339,62 +7604,116 @@ void report(uint64_t nowMs) {
     g_taggedSeen = taggedAll;
     g_untaggableSeen = untaggableAll;
     g_busySeen = busyAll;
-    const unsigned long long scanMean = w.scans ? w.scanUsSum / w.scans : 0;
+    const ull scanMean = w.scans ? w.scanUsSum / w.scans : 0;
     if (w.haveFind) {
         Log::get().note("native on foot marker probe: marker record found at index %u (key %u, tag age %u frames, map %s, pool %p); this second: "
                         "%llu finds (%llu at the last index), index same %llu, changed %llu; X0 == t' bit-exact %llu, differs %llu (last X0 (%.4f, %.4f, "
                         "%.4f), t' (%.4f, %.4f, %.4f)); full scans %llu (max %llu us, mean %llu us), backoffs %llu; unmaps with tags in flight %llu, "
                         "with no find %llu; maps DISCARD %llu, NO_OVERWRITE %llu, other %llu; tagged %llu, untaggable %llu, cell busy %llu",
-                        w.index, w.key, w.age, mapName(w.mapType), w.pool, static_cast<unsigned long long>(w.finds),
-                        static_cast<unsigned long long>(w.hintFinds), static_cast<unsigned long long>(w.sameIndex),
-                        static_cast<unsigned long long>(w.changedIndex), static_cast<unsigned long long>(w.exact),
-                        static_cast<unsigned long long>(w.differs), static_cast<double>(w.x0[0]), static_cast<double>(w.x0[1]),
-                        static_cast<double>(w.x0[2]), static_cast<double>(w.tp[0]), static_cast<double>(w.tp[1]), static_cast<double>(w.tp[2]),
-                        static_cast<unsigned long long>(w.scans), static_cast<unsigned long long>(w.scanUsMax), scanMean,
-                        static_cast<unsigned long long>(w.backoffs), static_cast<unsigned long long>(w.unmapsTagged),
-                        static_cast<unsigned long long>(w.unmapsNoFind), static_cast<unsigned long long>(w.mapDiscard),
-                        static_cast<unsigned long long>(w.mapNoOverwrite), static_cast<unsigned long long>(w.mapOther),
-                        static_cast<unsigned long long>(tagged), static_cast<unsigned long long>(untaggable), static_cast<unsigned long long>(busy));
+                        w.index, w.key, w.age, mapName(w.mapType), w.pool, ull(w.finds), ull(w.hintFinds), ull(w.sameIndex), ull(w.changedIndex),
+                        ull(w.exact), ull(w.differs), double(w.x0[0]), double(w.x0[1]), double(w.x0[2]), double(w.tp[0]), double(w.tp[1]),
+                        double(w.tp[2]), ull(w.scans), ull(w.scanUsMax), scanMean, ull(w.backoffs), ull(w.unmapsTagged), ull(w.unmapsNoFind),
+                        ull(w.mapDiscard), ull(w.mapNoOverwrite), ull(w.mapOther), ull(tagged), ull(untaggable), ull(busy));
     } else if (tagged || w.unmapsTagged) {
         Log::get().note("native on foot marker probe: sentinel NOT found this second: tagged %llu, untaggable %llu, cell busy %llu; unmaps with "
                         "tags in flight %llu; full scans %llu (max %llu us, mean %llu us), backoffs %llu; maps DISCARD %llu, NO_OVERWRITE %llu, other "
                         "%llu; pools watched by a HUD draw: %s",
-                        static_cast<unsigned long long>(tagged), static_cast<unsigned long long>(untaggable), static_cast<unsigned long long>(busy),
-                        static_cast<unsigned long long>(w.unmapsTagged), static_cast<unsigned long long>(w.scans),
-                        static_cast<unsigned long long>(w.scanUsMax), scanMean, static_cast<unsigned long long>(w.backoffs),
-                        static_cast<unsigned long long>(w.mapDiscard), static_cast<unsigned long long>(w.mapNoOverwrite),
-                        static_cast<unsigned long long>(w.mapOther), g_pools[0].res ? "yes" : "none yet");
+                        ull(tagged), ull(untaggable), ull(busy), ull(w.unmapsTagged), ull(w.scans), ull(w.scanUsMax), scanMean, ull(w.backoffs),
+                        ull(w.mapDiscard), ull(w.mapNoOverwrite), ull(w.mapOther), g_pools[0].res ? "yes" : "none yet");
+    }
+    // F45 item 1: who reads the tagged record. The draws and streams counted beside it, so "no draw" is told apart from "nothing read".
+    if (w.haveFind || w.poolDraws || w.streamRead) {
+        char buf[3072];
+        size_t len = 0;
+        if (w.readsX || w.readsYOnly) {
+            appendf(buf, sizeof(buf), len, "native on foot marker probe: record %u is read by %llu draws this second (by x %llu, by y only %llu; on-foot "
+                    "HUD VS %llu):", w.index, ull(w.readsX + w.readsYOnly), ull(w.readsX), ull(w.readsYOnly), ull(w.readsHud));
+            for (uint32_t i = 0; i < w.nTuples; ++i) {
+                const Tuple& t = w.tuples[i];
+                appendf(buf, sizeof(buf), len, " [vs %016llX ps %016llX eye %d call %c: %llu draws, instances %u..%u, entry %u -> record %u%s, x hits "
+                        "%u, y hits %u]", ull(t.vs), ull(t.ps), t.eye, t.kind ? t.kind : '?', ull(t.draws), t.instMin, t.instMax, t.entry,
+                        t.record, t.viaY ? " (by y)" : "", t.xHits, t.yHits);
+            }
+            if (w.tuplesDropped) appendf(buf, sizeof(buf), len, " (+%llu draws of other shaders not listed)", ull(w.tuplesDropped));
+        } else if (w.haveFind) {
+            appendf(buf, sizeof(buf), len, "native on foot marker probe: record %u is read by no draw this second", w.index);
+        } else {
+            appendf(buf, sizeof(buf), len, "native on foot marker probe: no record found this second, nothing to match");
+        }
+        appendf(buf, sizeof(buf), len, "; draws bound to the pool %llu, streams copied %llu (%llu entries, %llu cut at %u or the buffer end), read "
+                "%llu; indirect draws bound to the pool (range unreadable) %llu; frames read %llu, lost %llu",
+                ull(w.poolDraws), ull(w.streamDraws), ull(w.streamEntries), ull(w.streamCut), kEntriesMax, ull(w.streamRead), ull(w.indirect),
+                ull(w.framesRead), ull(w.lost));
+        Log::get().note("%s", buf);
+    }
+    // F45 item 2: the world views, the failures split by reason with the failing draw's constant buffers.
+    if (w.worldStaged || w.worldFailed || w.worldCb0 || w.worldCb1 || w.worldStage || w.worldNoEye || w.worldRead) {
+        char buf[2048];
+        size_t len = 0;
+        appendf(buf, sizeof(buf), len, "native on foot marker probe: world views: eye-frames copied %llu, failed %llu, read %llu; world draws with no "
+                "depth eye %llu; failed draw tries: cb0 not covered %llu, cb1 not covered %llu, ring/stage failed %llu; row 275 from the CB shadow "
+                "%llu, copied %llu", ull(w.worldStaged), ull(w.worldFailed), ull(w.worldRead), ull(w.worldNoEye), ull(w.worldCb0),
+                ull(w.worldCb1), ull(w.worldStage), ull(w.worldShadowO), ull(w.worldStagedO));
+        for (uint32_t i = 0; i < w.nWorldFail; ++i) {
+            const WorldFail& f = w.worldFail[i];
+            appendf(buf, sizeof(buf), len, " [vs %016llX %s x%llu: cb0 %s ByteWidth %u first %u, cb1 %s ByteWidth %u first %u]", ull(f.vs),
+                    kWorldWhy[f.why < 0 || f.why > 2 ? 2 : f.why], ull(f.draws), f.cb0 ? "bound" : "unbound", f.cb0Bytes, f.f0,
+                    f.cb1 ? "bound" : "unbound", f.cb1Bytes, f.f1);
+        }
+        Log::get().note("%s", buf);
+    }
+    // F45 item 3, every second on foot: the head speed, the angle v0 vs v_target (which eye, and how its eye was known) and |P - o_w|.
+    if (nativeOnFootActive() || w.hudDraws || w.poolDraws) {
+        char head[96], ang[256], pw[128];
+        if (w.headN) std::snprintf(head, sizeof(head), "%.1f deg/s mean, %.1f max (%llu frames)", w.headSum / double(w.headN), w.headMax, ull(w.headN));
+        else std::snprintf(head, sizeof(head), "n/a (no runtime ring sample)");
+        const drawtag::View* v = g_views.latest();
+        const bool pOk = g_haveLastFind && g_lastFind.haveTag && g_lastFind.pOk;
+        if (w.haveAngle) {
+            std::snprintf(ang, sizeof(ang), "%.3f deg (eye %d, the last HUD draw reading the record; eye %s)", w.angle, w.angleEye,
+                          w.angleGuessed ? "GUESSED by the nearest world rows" : "from its depth view");
+        } else if (pOk && v) {
+            double v0[3], vt[3];
+            const double a = drawtag::markerAngle(v->rows, v->o, g_lastFind.x0, v->rows, v->o, g_lastFind.p, v0, vt);
+            std::snprintf(ang, sizeof(ang), "%.3f deg (eye %d, from the depth view; no HUD draw read the record this second, so v0 = V_w (X0 - "
+                          "o_w) with the last world view, frame %u)", a, v->eye, v->frame);
+        } else {
+            std::snprintf(ang, sizeof(ang), "n/a (%s)", !g_haveLastFind ? "no find yet" : !pOk ? "the last find has no P" : "no world view read yet");
+        }
+        if (pOk && v) {
+            const double d[3] = {double(g_lastFind.p[0]) - v->o[0], double(g_lastFind.p[1]) - v->o[1], double(g_lastFind.p[2]) - v->o[2]};
+            std::snprintf(pw, sizeof(pw), "%.3f m (eye %d, world view frame %u)", drawtag::length3(d), v->eye, v->frame);
+        } else {
+            std::snprintf(pw, sizeof(pw), "n/a");
+        }
+        Log::get().note("native on foot marker probe: head %s; v0 vs v_target %s; |P - o_w| %s", head, ang, pw);
+    }
+    // F45 item 4: the eye check, every HUD draw with rows against both eyes' world rows.
+    if (w.eyeAgree || w.eyeDisagree || w.eyeNoDsv || w.eyeOneWorld || w.eyeNoWorld) {
+        Log::get().note("native on foot marker probe: eye check (HUD view rows vs both eyes' world rows): agree with the depth eye %llu, DISAGREE "
+                        "%llu (last: depth eye %d, rows eye %d, row distance %.4f vs %.4f), no depth eye %llu (rows chose eye 0 %llu, eye 1 %llu), "
+                        "one eye's world view only %llu, no world view %llu",
+                        ull(w.eyeAgree), ull(w.eyeDisagree), w.disDsv, w.disRows, w.disNear, w.disOther, ull(w.eyeNoDsv), ull(w.eyeNoDsvRows[0]),
+                        ull(w.eyeNoDsvRows[1]), ull(w.eyeOneWorld), ull(w.eyeNoWorld));
     }
     for (int e = 0; e < 2; ++e) {
         if (!w.n[e]) continue;
         Log::get().note("native on foot marker probe: eye %d: v0 vs v_target %.3f deg mean, %.3f deg max over %llu matched draws; V_hud vs V_w "
-                        "rotation %.3f deg mean; head %.1f deg/s mean, %.1f max (%llu samples); frame check (last): |P - o_w| %.3f m, |t'| %.3f m, "
-                        "|X0 - o_hud| %.3f m; v0 (%.3f, %.3f, %.3f), v_target (%.3f, %.3f, %.3f)",
-                        e, w.sum[e] / static_cast<double>(w.n[e]), w.max[e], static_cast<unsigned long long>(w.n[e]),
-                        w.rotSum[e] / static_cast<double>(w.n[e]), w.headN[e] ? w.headSum[e] / static_cast<double>(w.headN[e]) : 0.0,
-                        w.headMax[e], static_cast<unsigned long long>(w.headN[e]), w.pw[e], w.tpLen[e], w.xo[e], w.v0[e][0], w.v0[e][1],
-                        w.v0[e][2], w.vt[e][0], w.vt[e][1], w.vt[e][2]);
+                        "rotation %.3f deg mean; frame check (last): |P - o_w| %.3f m, |t'| %.3f m, |X0 - o_hud| %.3f m; v0 (%.3f, %.3f, %.3f), "
+                        "v_target (%.3f, %.3f, %.3f)",
+                        e, w.sum[e] / double(w.n[e]), w.max[e], ull(w.n[e]), w.rotSum[e] / double(w.n[e]), w.pw[e], w.tpLen[e], w.xo[e],
+                        w.v0[e][0], w.v0[e][1], w.v0[e][2], w.vt[e][0], w.vt[e][1], w.vt[e][2]);
     }
-    if (w.hudDraws || w.worldStaged || w.worldFailed) {
+    if (w.hudDraws || w.poolDraws) {
         uint64_t refusedAll = 0;
         for (uint64_t r : w.refused) refusedAll += r;
-        Log::get().note("native on foot marker probe: HUD draws %llu, staged %llu, read %llu, matched %llu (to the frame before's find %llu; eye by "
-                        "nearest world rows %llu), reading other records %llu (last: read record %u, found %u); refused %llu: no t33 %llu, stride "
-                        "%llu, no stream %llu, constants %llu, no find %llu, ring full %llu, per-frame cap %llu, no world view %llu, rows %llu, no "
-                        "tag %llu, zero %llu, pool changed %llu, scan fault %llu; readbacks lost %llu; world views staged %llu, read %llu, failed %llu",
-                        static_cast<unsigned long long>(w.hudDraws), static_cast<unsigned long long>(w.staged),
-                        static_cast<unsigned long long>(w.read), static_cast<unsigned long long>(w.matched),
-                        static_cast<unsigned long long>(w.matchedPrev), static_cast<unsigned long long>(w.eyeByRows),
-                        static_cast<unsigned long long>(w.unmatched), w.haveUnmatched ? w.readRecord : 0u, w.haveUnmatched ? w.foundRecord : 0u,
-                        static_cast<unsigned long long>(refusedAll), static_cast<unsigned long long>(w.refused[kNoT33]),
-                        static_cast<unsigned long long>(w.refused[kStride]), static_cast<unsigned long long>(w.refused[kNoStream]),
-                        static_cast<unsigned long long>(w.refused[kConstants]), static_cast<unsigned long long>(w.refused[kNoFind]),
-                        static_cast<unsigned long long>(w.refused[kRingFull]), static_cast<unsigned long long>(w.refused[kPerFrame]),
-                        static_cast<unsigned long long>(w.refused[kNoWorld]), static_cast<unsigned long long>(w.refused[kRows]),
-                        static_cast<unsigned long long>(w.refused[kNoTag]), static_cast<unsigned long long>(w.refused[kZero]),
-                        static_cast<unsigned long long>(w.refused[kPoolChanged]), static_cast<unsigned long long>(w.refused[kScanFault]),
-                        static_cast<unsigned long long>(w.lost), static_cast<unsigned long long>(w.worldStaged),
-                        static_cast<unsigned long long>(w.worldRead), static_cast<unsigned long long>(w.worldFailed));
+        char buf[1024];
+        size_t len = 0;
+        appendf(buf, sizeof(buf), len, "native on foot marker probe: HUD draws %llu (rows copied %llu), matched %llu (eye guessed by the nearest world "
+                "rows %llu); refused %llu:", ull(w.hudDraws), ull(w.hudRows), ull(w.matched), ull(w.eyeByRows), ull(refusedAll));
+        for (uint32_t r = 0; r < kRefuseCount; ++r) appendf(buf, sizeof(buf), len, "%s %s %llu", r ? "," : "", kRefuseShort[r], ull(w.refused[r]));
+        appendf(buf, sizeof(buf), len, "; read-backs lost %llu", ull(w.lost));
+        Log::get().note("%s", buf);
     }
     w = Window{};
 }
@@ -7434,32 +7753,19 @@ void nativeOnFootMarkerProbeUnmap(const ID3D11Resource* res) {
         }
 }
 
-void nativeOnFootMarkerProbeDraw(ID3D11DeviceContext* ctx, uint32_t instances, uint32_t startInstance) {
+void nativeOnFootMarkerProbeDraw(ID3D11DeviceContext* ctx, uint32_t instances, uint32_t startInstance, char kind) {
     if (!ctx) return;
     const uint32_t frame = g_f44Frame.load(std::memory_order_relaxed);
     if (frame != f44::g_polledFrame) {
+        const uint32_t prev = f44::g_polledFrame;
         f44::g_polledFrame = frame;
-        f44::poll(ctx, frame);
+        f44::frameTurn(ctx, frame, prev);
     }
-    const uint64_t vs = bindingShaderHash(BindSlot::Vs);
-    const bool hud = nofoot::hudIssuerIndex(vs) >= 0;
-    if (!hud) {
-        if (f44::g_worldFrame[0] == frame && f44::g_worldFrame[1] == frame) return;
-        if (engine_velocity_family::familyOfVs(vs) < 0) return;
-    }
-    int eye = -1, target = -1;
-    auto* dsv = static_cast<ID3D11DepthStencilView*>(bindingGet(BindSlot::Dsv0));
-    const bool eyeKnown = dsv && depthProbeCurrentSceneEyeOf(dsv, &eye, &target) && (eye == 0 || eye == 1);
-    if (!hud) {
-        if (eyeKnown && f44::g_worldFrame[eye] != frame) f44::stageWorld(ctx, eye, frame);
-        return;
-    }
-    f44::captureHud(ctx, eyeKnown ? eye : -1, frame, instances ? instances : 1u, startInstance);
+    f44::draw(ctx, frame, instances, startInstance, kind);
 }
 
 void nativeOnFootMarkerProbeShutdown() {
-    f44::g_hudRing.release();
-    f44::g_worldRing.release();
+    f44::g_staging.release();
 }
 
 void nativeOnFootFrameBoundary(uint32_t frameNo) {

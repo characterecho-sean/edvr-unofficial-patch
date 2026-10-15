@@ -1,7 +1,8 @@
 #pragma once
 // F44 (TEMPORARY instrument, fix.native_on_foot_marker_probe; docs\design-native-onfoot-vr-2026-10-13.md): tag a value the game builds on its
 // own thread, find the GPU pool record it is copied into, and name the draw that reads that record. Written for the waypoint marker; meant to be
-// reused for the weapon ammo readout. Measure only: nothing here writes a constant buffer, a pool or a binding.
+// reused for the weapon ammo readout. Measure only: nothing here writes a constant buffer, a pool or a binding. F45 adds the whole-stream
+// match (matchStream), the per-eye view cache (ViewCache, markerAngle) and the per-frame append staging (FrameStaging) the draw side uses.
 //
 // THE TAG. A 24-bit sentinel (an 8-bit key and a 16-bit frame count, salted so key 0 at frame 0 is not all zero bits) in the lowest 8 mantissa
 // bits of three floats: x carries sentinel bits 0-7, y bits 8-15, z bits 16-23. Each component moves by at most 255 ulps, under 2^-15 of its
@@ -165,6 +166,99 @@ inline double rowsAngleDeg(const float a[12], const float b[12]) noexcept {
     return std::acos(c) * 180.0 / 3.14159265358979323846;
 }
 
+// F45: THE STREAM MATCH over a draw's whole instance stream (n entries of stride 8, x then y): record = first + x. The y component (the model
+// data index) is checked the same way and counted apart, so a wrong guess about which component names the record shows as y hits rather than
+// as "read by no draw".
+struct StreamMatch {
+    uint32_t xHits = 0, yHits = 0;   // entries whose x (y) names a wanted record
+    uint32_t entry = 0;              // the first x hit's entry (the first y hit's when no x hit)
+    uint32_t record = 0;             // the record it names
+    uint32_t want = 0;               // its position in wants
+    bool viaY = false;
+};
+inline bool matchStream(const uint8_t* entries, uint32_t n, uint32_t first, const uint32_t* wants, uint32_t nWants, StreamMatch& m) noexcept {
+    m = StreamMatch{};
+    bool any = false;
+    for (uint32_t k = 0; k < n; ++k) {
+        uint32_t e[2];
+        std::memcpy(e, entries + static_cast<size_t>(k) * kStreamStride, sizeof(e));
+        for (int c = 0; c < 2; ++c) {
+            const uint32_t rec = first + e[c];
+            for (uint32_t w = 0; w < nWants; ++w) {
+                if (wants[w] != rec) continue;
+                if (c == 0) ++m.xHits;
+                else ++m.yHits;
+                if (!any || (m.viaY && c == 0)) {
+                    m.entry = k;
+                    m.record = rec;
+                    m.want = w;
+                    m.viaY = c == 1;
+                    any = true;
+                }
+                break;
+            }
+        }
+    }
+    return any;
+}
+
+// F45: THE VIEW CACHE. An eye's view as a draw read it: b0 rows 9-11 and b1 row 275, by frame and eye; the last N kept.
+struct View {
+    bool valid = false;
+    uint32_t frame = 0;
+    int eye = -1;
+    float rows[12] = {};
+    float o[4] = {};
+};
+inline double rowsDistance(const float a[12], const float b[12]) noexcept {
+    double s = 0.0;
+    for (int i = 0; i < 12; ++i) s += std::fabs(static_cast<double>(a[i]) - b[i]);
+    return s;
+}
+template <uint32_t N>
+class ViewCache {
+public:
+    void put(const View& v) noexcept {
+        views_[next_] = v;
+        views_[next_].valid = true;
+        last_ = static_cast<int>(next_);
+        next_ = (next_ + 1) % N;
+    }
+    const View* get(uint32_t frame, int eye) const noexcept {
+        for (const View& v : views_)
+            if (v.valid && v.frame == frame && v.eye == eye) return &v;
+        return nullptr;
+    }
+    const View* latest() const noexcept { return last_ >= 0 ? &views_[last_] : nullptr; }
+    // The eye of `frame` whose rows are nearest to `rows`: 0 or 1, or -1 when the frame has neither eye's view. *dOther is negative when
+    // only one eye's view was there (nothing to tell apart).
+    int nearestEye(uint32_t frame, const float rows[12], double* dChosen, double* dOther) const noexcept {
+        const View* w0 = get(frame, 0);
+        const View* w1 = get(frame, 1);
+        *dChosen = *dOther = -1.0;
+        if (!w0 && !w1) return -1;
+        const double d0 = w0 ? rowsDistance(rows, w0->rows) : -1.0, d1 = w1 ? rowsDistance(rows, w1->rows) : -1.0;
+        const int eye = !w0 ? 1 : !w1 ? 0 : d0 <= d1 ? 0 : 1;
+        *dChosen = eye == 0 ? d0 : d1;
+        *dOther = eye == 0 ? d1 : d0;
+        return eye;
+    }
+
+private:
+    View views_[N];
+    uint32_t next_ = 0;
+    int last_ = -1;
+};
+
+// v0 = rowsA . (x0 - oA, 1) and vt = rowsB . (p - oB, 1); the angle between them in degrees, -1 when either is at the eye.
+inline double markerAngle(const float rowsA[12], const float oA[4], const float x0[3], const float rowsB[12], const float oB[4], const float p[3],
+                          double v0[3], double vt[3]) noexcept {
+    const double X[3] = {x0[0], x0[1], x0[2]}, a[3] = {oA[0], oA[1], oA[2]}, P[3] = {p[0], p[1], p[2]}, b[3] = {oB[0], oB[1], oB[2]};
+    viewPoint(rowsA, X, a, v0);
+    viewPoint(rowsB, P, b, vt);
+    return angleDeg(v0, vt);
+}
+
 }  // namespace drawtag
 }  // namespace edvr
 
@@ -269,6 +363,116 @@ private:
     };
     Slot slots_[N];
     uint32_t next_ = 0;
+};
+
+// F45: one staging buffer per frame, appended to draw by draw (each append one GPU copy, 16-byte aligned), read back whole two or more frames
+// later without a wait. The caller keeps its own per-slot records (offsets into the slot). The callback gets the mapped bytes in place: a
+// slot can be megabytes, so nothing is copied out.
+template <uint32_t N, uint32_t Bytes>
+class FrameStaging {
+public:
+    // The open slot for `frame`; a slot open for another frame is committed first. -1: no free slot, or the buffer could not be made.
+    int open(ID3D11DeviceContext* ctx, uint32_t frame) noexcept {
+        if (open_ >= 0 && slots_[open_].frame == frame) return open_;
+        commit();
+        if (!ctx) return -1;
+        int pick = -1;
+        for (uint32_t k = 0; k < N && pick < 0; ++k) {
+            const uint32_t i = (next_ + k) % N;
+            if (!slots_[i].pending) pick = static_cast<int>(i);
+        }
+        if (pick < 0) return -1;
+        Slot& s = slots_[pick];
+        if (!s.st) {
+            ID3D11Device* dev = nullptr;
+            ctx->GetDevice(&dev);
+            if (!dev) return -1;
+            D3D11_BUFFER_DESC d{};
+            d.ByteWidth = Bytes;
+            d.Usage = D3D11_USAGE_STAGING;
+            d.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+            const HRESULT hr = dev->CreateBuffer(&d, nullptr, &s.st);
+            dev->Release();
+            if (FAILED(hr) || !s.st) {
+                s.st = nullptr;
+                return -1;
+            }
+        }
+        s.frame = frame;
+        s.used = 0;
+        open_ = pick;
+        next_ = (static_cast<uint32_t>(pick) + 1) % N;
+        return pick;
+    }
+    // Copies [srcOffset, srcOffset + bytes) of src into the open slot: its byte offset there, or -1 (no open slot, full, out of range).
+    int64_t append(ID3D11DeviceContext* ctx, ID3D11Buffer* src, UINT srcOffset, UINT bytes) noexcept {
+        if (open_ < 0 || !ctx || !src || !bytes) return -1;
+        Slot& s = slots_[open_];
+        const uint32_t at = (s.used + 15u) & ~15u;
+        if (static_cast<uint64_t>(at) + bytes > Bytes) return -1;
+        D3D11_BUFFER_DESC sd{};
+        src->GetDesc(&sd);
+        if (static_cast<uint64_t>(srcOffset) + bytes > sd.ByteWidth) return -1;
+        const D3D11_BOX box{srcOffset, 0, 0, srcOffset + bytes, 1, 1};
+        ctx->CopySubresourceRegion(s.st, 0, at, 0, 0, src, 0, &box);
+        s.used = at + bytes;
+        return at;
+    }
+    // The open slot (if any) waits for its read-back.
+    void commit() noexcept {
+        if (open_ < 0) return;
+        slots_[open_].pending = true;
+        open_ = -1;
+    }
+    int openSlot() const noexcept { return open_; }
+    uint32_t slotFrame(int i) const noexcept { return slots_[i].frame; }
+    // Every pending slot at least minAge frames old whose copies have landed, oldest frame first: onData(slot, frame, bytes, used). A slot
+    // older than maxAge is dropped (*lost).
+    template <class F>
+    void poll(ID3D11DeviceContext* ctx, uint32_t frame, uint32_t minAge, uint32_t maxAge, F onData, uint64_t* lost) noexcept {
+        if (!ctx) return;
+        bool done[N] = {};
+        for (;;) {
+            int pick = -1;
+            for (uint32_t i = 0; i < N; ++i) {
+                const Slot& s = slots_[i];
+                if (done[i] || !s.pending || frame - s.frame < minAge) continue;
+                if (pick < 0 || frame - s.frame > frame - slots_[pick].frame) pick = static_cast<int>(i);
+            }
+            if (pick < 0) return;
+            done[pick] = true;
+            Slot& s = slots_[pick];
+            const uint32_t age = frame - s.frame;
+            D3D11_MAPPED_SUBRESOURCE m{};
+            const HRESULT hr = ctx->Map(s.st, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m);
+            if (SUCCEEDED(hr) && m.pData) {
+                s.pending = false;
+                onData(pick, s.frame, static_cast<const uint8_t*>(m.pData), s.used);
+                ctx->Unmap(s.st, 0);
+            } else if (age > maxAge) {
+                s.pending = false;
+                if (lost) ++*lost;
+            }
+        }
+    }
+    void release() noexcept {
+        for (Slot& s : slots_) {
+            if (s.st) s.st->Release();
+            s.st = nullptr;
+            s.pending = false;
+        }
+        open_ = -1;
+    }
+
+private:
+    struct Slot {
+        ID3D11Buffer* st = nullptr;
+        uint32_t frame = 0, used = 0;
+        bool pending = false;
+    };
+    Slot slots_[N];
+    uint32_t next_ = 0;
+    int open_ = -1;
 };
 
 }  // namespace drawtag

@@ -111,10 +111,11 @@ inline bool nativeOnFootMarkerProbeLive() {
     return g_nativeOnFootMarkerProbeKey.load(std::memory_order_relaxed) && nativeOnFootActive();
 }
 // Owner context only (vscreen.cpp): a buffer mapped for writing (after the real Map), a buffer about to be unmapped (before the real Unmap), and
-// an instanced draw before its verdict (the game's bindings).
+// a draw before its verdict (the game's bindings). F45: every draw call kind, named by `kind` ('N' DrawInstanced, 'X' DrawIndexedInstanced,
+// 'D' Draw and 'I' DrawIndexed with one instance from 0, 'Y' and 'Z' the indirect ones, whose instance range is not readable here).
 void nativeOnFootMarkerProbeMap(ID3D11Resource* resource, void* data, int mapType);
 void nativeOnFootMarkerProbeUnmap(const ID3D11Resource* resource);
-void nativeOnFootMarkerProbeDraw(ID3D11DeviceContext* ctx, uint32_t instances, uint32_t startInstance);
+void nativeOnFootMarkerProbeDraw(ID3D11DeviceContext* ctx, uint32_t instances, uint32_t startInstance, char kind);
 // vScreen's shutdown: the staging buffers.
 void nativeOnFootMarkerProbeShutdown();
 
