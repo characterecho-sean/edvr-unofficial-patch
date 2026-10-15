@@ -298,5 +298,64 @@ inline void cdStep(double& pos, double& vel, double target, double tau, double d
     if (move < -cap) move = -cap;
     pos += move;
 }
+// F48: the standing height. The body's vertical placement holds the 3P anchor's standing height (body axes, up) instead of the live one, so a
+// drawn weapon (the 3P head drops 22 to 29 cm) does not lift the body. Captured at key-on (the first step after reset not under ADS) and again whenever the
+// stance is at rest: not aiming down sights and the 3P head's height steady (within kSteadyM) for kRestMs; the capture is the anchor's mean
+// height over that window. x and z stay live (standingApply).
+struct StandingHeight {
+    static constexpr double kSteadyM = 0.02;     // the head's height range that counts as steady
+    static constexpr uint64_t kRestMs = 1000;    // how long it must stay steady
+    bool valid = false;
+    double value = 0.0;                          // the captured standing height (body axes, up, metres)
+    uint64_t winStart = 0;
+    double headMin = 0.0, headMax = 0.0, anchorSum = 0.0;
+    uint32_t n = 0;
+    uint32_t captures = 0;
+    void reset() noexcept { *this = StandingHeight{}; }
+    // One frame: the 3P head's height and the 3P anchor's height (body axes, up), and the ADS flag. True when this step captured.
+    bool step(uint64_t now, double headUp, double anchorUp, bool ads) noexcept {
+        if (ads) {   // ADS is never a rest (nor a key-on capture): the window starts again after it; the heights are not read
+            n = 0;
+            return false;
+        }
+        if (!valid) {
+            valid = true;
+            value = anchorUp;
+            ++captures;
+            restart(now, headUp, anchorUp);
+            return true;
+        }
+        if (n == 0) {
+            restart(now, headUp, anchorUp);
+            return false;
+        }
+        const double lo = headUp < headMin ? headUp : headMin, hi = headUp > headMax ? headUp : headMax;
+        if (hi - lo > kSteadyM) {
+            restart(now, headUp, anchorUp);
+            return false;
+        }
+        headMin = lo;
+        headMax = hi;
+        anchorSum += anchorUp;
+        ++n;
+        if (now - winStart < kRestMs) return false;
+        value = anchorSum / static_cast<double>(n);
+        ++captures;
+        restart(now, headUp, anchorUp);
+        return true;
+    }
+    void restart(uint64_t now, double headUp, double anchorUp) noexcept {
+        winStart = now;
+        headMin = headMax = headUp;
+        anchorSum = anchorUp;
+        n = 1;
+    }
+};
+// F48: the 3P side's point with its vertical (body axes, index 1) taken from the standing height; x and z live.
+inline void standingApply(const double src[3], double standingUp, double out[3]) noexcept {
+    out[0] = src[0];
+    out[1] = standingUp;
+    out[2] = src[2];
+}
 }  // namespace nofoot
 }  // namespace edvr

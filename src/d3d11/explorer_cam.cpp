@@ -1709,6 +1709,8 @@ struct NeckSnapshot {
     float shFp[6] = {};          // F43: the FP shoulders, FP avatar-root model space (L, R)
     float ext3P[12] = {};        // F45: the 3P hands (L, R) and attach points (L, R), model space
     float extFp[12] = {};        // F45: the same on the FP skeleton
+    float pov3P[3] = {};         // F48: the 3P def_c_povCamera_joint, model space (shState bit 0x10)
+    uint32_t povIndex = 0xFFFFu; // F48: its index (FindJoint)
 };
 std::mutex g_neckMutex;
 NeckSnapshot g_neck;                                  // guarded by g_neckMutex
@@ -1786,17 +1788,59 @@ uint32_t neckJointRead(uintptr_t iface, const SkSlots& sl, float out[3]) noexcep
 
 // F43: the body anchor's joints, by name, on each latched skeleton (the 3P one and the FP one). Probed once per skeleton on the census thread:
 // the probe logs every name's index (0xFFFF: none). The walk dump runs only when a side's shoulder does not answer.
-constexpr const char* kJointProbeNames[15] = {"def_l_shoulder_joint", "def_r_shoulder_joint", "def_l_clavicle_joint", "def_r_clavicle_joint",
+constexpr size_t kJointProbeCount = 16;
+constexpr const char* kJointProbeNames[kJointProbeCount] = {"def_l_shoulder_joint", "def_r_shoulder_joint", "def_l_clavicle_joint", "def_r_clavicle_joint",
     "def_l_upperArm_joint", "def_r_upperArm_joint", "def_l_arm_joint", "def_r_arm_joint", "def_c_spine03_joint", "def_l_handAttach_joint",
-    "def_r_handAttach_joint", "def_l_hand_joint", "def_r_hand_joint", "def_c_neck_joint", "def_c_head_joint"};
-constexpr size_t kJointNameNeck = 13;
+    "def_r_handAttach_joint", "def_l_hand_joint", "def_r_hand_joint", "def_c_neck_joint", "def_c_head_joint", "def_c_povCamera_joint"};
+constexpr size_t kJointNameNeck = 13, kJointNamePov = 15;
 struct ShoulderProbe {
     uint64_t iface = 0;
     bool done = false;
     uint32_t l = 0xFFFFu, r = 0xFFFFu;   // the first answered L and R shoulder: shoulder, then clavicle, then upper arm
     uint32_t neck = 0xFFFFu;
     uint32_t hl = 0xFFFFu, hr = 0xFFFFu, al = 0xFFFFu, ar = 0xFFFFu;   // F45: the hands (L, R) and the attach points (L, R)
+    uint32_t pov = 0xFFFFu;                                            // F48: def_c_povCamera_joint
 };
+
+// F48 (census, read only): the skeleton's parent array, once per skeleton (the probe's cache). The FP skeleton: the joint count (the u16 at
+// pose + kPoseJointCountOff) and every joint's parent (*(pose + 0x50), a u16 per joint), 24 joints a line. The 3P skeleton: the parents of
+// joints 15 (povCamera), 34, 35, 36 and 44 (the head).
+void skeletonParentsDump(uint64_t iface, const SkSlots& sl, bool fp, const char* label) noexcept {
+    uintptr_t pose = 0;
+    uint16_t joints = 0;
+    if (!sehCallPose(sl.fn[0], static_cast<uintptr_t>(iface), &pose) || pose == 0 || !sehReadU16At(pose + ecm::kPoseJointCountOff, &joints)) {
+        Log::get().note("native on foot skeleton parents (%s): the pose or its joint count could not be read", label);
+        return;
+    }
+    if (joints == 0 || joints > ecm::kMaxWalkJoints || !sehReadPoseArrays(pose, joints, g_neckWalkLocals, g_neckWalkParents)) {
+        Log::get().note("native on foot skeleton parents (%s): %u joints; the parent array could not be read", label, static_cast<unsigned>(joints));
+        return;
+    }
+    if (!fp) {
+        const uint32_t ids[5] = {15, 34, 35, 36, 44};
+        char buf[256] = {};
+        size_t at = 0;
+        for (uint32_t id : ids) {
+            const int w = id < joints ? std::snprintf(buf + at, sizeof(buf) - at, " %u<-%u", static_cast<unsigned>(id), static_cast<unsigned>(g_neckWalkParents[id]))
+                                      : std::snprintf(buf + at, sizeof(buf) - at, " %u<-(out of range)", static_cast<unsigned>(id));
+            if (w > 0 && static_cast<size_t>(w) < sizeof(buf) - at) at += static_cast<size_t>(w);
+        }
+        Log::get().note("native on foot skeleton parents (%s): %u joints; joint<-parent:%s", label, static_cast<unsigned>(joints), buf);
+        return;
+    }
+    Log::get().note("native on foot skeleton parents (%s): %u joints (pose + 0x%X); the parent array follows, joint<-parent, 0xFFFF the root",
+                    label, static_cast<unsigned>(joints), static_cast<unsigned>(ecm::kPoseJointCountOff));
+    for (uint32_t first = 0; first < joints; first += 24) {
+        char buf[512] = {};
+        size_t at = 0;
+        for (uint32_t i = first; i < joints && i < first + 24; ++i) {
+            const int w = std::snprintf(buf + at, sizeof(buf) - at, " %u<-%u", static_cast<unsigned>(i), static_cast<unsigned>(g_neckWalkParents[i]));
+            if (w > 0 && static_cast<size_t>(w) < sizeof(buf) - at) at += static_cast<size_t>(w);
+        }
+        Log::get().note("native on foot skeleton parents (%s): joints %u..%u:%s", label, static_cast<unsigned>(first),
+                        static_cast<unsigned>(std::min<uint32_t>(joints, first + 24) - 1), buf);
+    }
+}
 ShoulderProbe g_shProbe3P, g_shProbeFP;   // census thread only
 
 // The walk dump (no shoulder answered): the 30 joints nearest the neck by index, with name hash, depth and parent, once per skeleton.
@@ -1836,8 +1880,8 @@ void shoulderProbe(uint64_t iface, const SkSlots& sl, ShoulderProbe& pr, const c
     pr = ShoulderProbe{};
     pr.iface = iface;
     pr.done = true;
-    uint32_t found[15] = {};
-    for (size_t i = 0; i < 15; ++i) {
+    uint32_t found[kJointProbeCount] = {};
+    for (size_t i = 0; i < kJointProbeCount; ++i) {
         uint32_t idx = ecm::kNoJoint;
         found[i] = sehCallFind(sl.fn[1], static_cast<uintptr_t>(iface), kJointProbeNames[i], &idx) ? (idx & 0xFFFFu) : 0xFFFFu;
         if (found[i] == 0xFFFFu)
@@ -1855,7 +1899,9 @@ void shoulderProbe(uint64_t iface, const SkSlots& sl, ShoulderProbe& pr, const c
     pr.hr = found[12];
     pr.al = found[9];
     pr.ar = found[10];
+    pr.pov = found[kJointNamePov];
     if (pr.l == 0xFFFFu || pr.r == 0xFFFFu) shoulderWalkDump(iface, sl, pr.neck, label);
+    skeletonParentsDump(iface, sl, &pr == &g_shProbeFP, label);   // F48 (census): once per skeleton
 }
 
 // F45: a joint matrix is usable when every element is finite and of ordinary size (the head's placement test rejected the joints).
@@ -1917,6 +1963,11 @@ void neckCensusStep() noexcept {
                         for (size_t k = 0; k < 4; ++k) allRead = jointModelAt(iface, sl, ids[k], &s.ext3P[3 * k]) && allRead;
                         if (allRead) s.shState |= 4u;
                     }
+                    // F48: the 3P povCamera joint (the attach joint 0x19B1240 sets), the body anchor's 3P side.
+                    if (g_shProbe3P.pov != 0xFFFFu && jointModelAt(iface, sl, g_shProbe3P.pov, s.pov3P)) {
+                        s.shState |= 0x10u;
+                        s.povIndex = g_shProbe3P.pov;
+                    }
                 }
             }
         }
@@ -1963,6 +2014,8 @@ bool neckCensusCopy(NeckCensusReading* out) {
     std::memcpy(out->shFp, g_neck.shFp, sizeof(out->shFp));
     std::memcpy(out->ext3P, g_neck.ext3P, sizeof(out->ext3P));
     std::memcpy(out->extFp, g_neck.extFp, sizeof(out->extFp));
+    std::memcpy(out->pov3P, g_neck.pov3P, sizeof(out->pov3P));
+    out->povIndex = g_neck.povIndex;
     return g_neck.stamp != 0;
 }
 
