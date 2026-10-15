@@ -3909,6 +3909,13 @@ if not exist "%OBJ%\addon_manager_test" mkdir "%OBJ%\addon_manager_test"
     /I"include" /Fo"%OBJ%\addon_manager_test\\" /Fe"%BUILD%\test_addon_fixture.dll" ^
     "tools\addon_manager_test\fixture.cpp" /link /INCREMENTAL:NO
 if errorlevel 1 ( echo [edvr] ERROR: addon fixture build failed & exit /b 1 )
+REM The fixture's variants are the same source with one define each; every one is a DLL of its own.
+for %%V in (b regfault initfail initfault) do (
+    %CC% /nologo /O2 /MT /LD /std:c++17 /EHsc /W4 /D_CRT_SECURE_NO_WARNINGS /DFIXTURE_VARIANT_%%V ^
+        /I"include" /Fo"%OBJ%\addon_manager_test\fixture_%%V.obj" /Fe"%BUILD%\test_addon_fixture_%%V.dll" ^
+        "tools\addon_manager_test\fixture.cpp" /link /INCREMENTAL:NO
+    if errorlevel 1 ( echo [edvr] ERROR: addon fixture variant %%V build failed & exit /b 1 )
+)
 %CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
     /I"include" /I"%GEN%" /Fo"%OBJ%\addon_manager_test\\" /Fe"%BUILD%\addon_manager_test.exe" ^
     "tools\addon_manager_test\addon_manager_test.cpp" "src\plugins\plugin_manager.cpp" ^

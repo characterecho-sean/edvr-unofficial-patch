@@ -24,6 +24,14 @@ int callInitSafely(int (EDVR_API *fn)(const EdvrHostServices*), const EdvrHostSe
     }
 }
 
+int callRegisterSafely(EdvrPluginRegisterFunc fn, uint32_t apiVersion, EdvrPluginCallbacks* callbacks, DWORD* outFault) {
+    __try {
+        return fn(apiVersion, callbacks);
+    } __except (*outFault = GetExceptionCode(), EXCEPTION_EXECUTE_HANDLER) {
+        return -1;
+    }
+}
+
 void callShutdownSafely(void (EDVR_API *fn)(void), DWORD* outFault) {
     __try {
         fn();
@@ -217,7 +225,13 @@ bool PluginManager::loadPlugin(const CandidatePlugin& cand) {
     lp.callbacks.structSize = sizeof(EdvrPluginCallbacks);
 
     DWORD fault = 0;
-    int regResult = regFunc(EDVR_PLUGIN_API_VERSION, &lp.callbacks);
+    int regResult = callRegisterSafely(regFunc, EDVR_PLUGIN_API_VERSION, &lp.callbacks, &fault);
+    if (fault != 0) {
+        Log::get().note("plugin_manager: addon %s faulted in EdvrPluginRegister (0x%08X); rejected",
+                        cand.stem.c_str(), fault);
+        FreeLibrary(hMod);
+        return false;
+    }
     if (regResult != 0 || lp.callbacks.structSize < sizeof(EdvrPluginCallbacks)) {
         Log::get().note("plugin_manager: addon %s rejected API version %u or invalid structSize (res=%d)",
                         cand.stem.c_str(), EDVR_PLUGIN_API_VERSION, regResult);

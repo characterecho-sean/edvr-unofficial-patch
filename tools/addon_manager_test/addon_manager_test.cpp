@@ -37,11 +37,40 @@ void check(bool cond, const char* msg) {
     if (!cond) ++g_failures;
 }
 
-std::wstring getFixtureDllPath() {
+// "" is the healthy default fixture; "b", "regfault", "initfail", "initfault" are its variants.
+std::wstring getFixtureDllPath(const wchar_t* variant = L"") {
     wchar_t exePath[MAX_PATH]{};
     GetModuleFileNameW(nullptr, exePath, MAX_PATH);
     std::filesystem::path p(exePath);
-    return (p.parent_path() / L"test_addon_fixture.dll").wstring();
+    std::wstring name = L"test_addon_fixture";
+    if (variant && variant[0]) name += std::wstring(L"_") + variant;
+    return (p.parent_path() / (name + L".dll")).wstring();
+}
+
+// A fresh sandbox with an empty plugins directory and a bare edvr.ini.
+std::filesystem::path makeSandbox(const wchar_t* tag) {
+    wchar_t tempPath[MAX_PATH]{};
+    GetTempPathW(MAX_PATH, tempPath);
+    std::filesystem::path sb = std::filesystem::path(tempPath) /
+        (std::wstring(L"edvr_addon_test_") + tag + L"_" + std::to_wstring(GetCurrentProcessId()));
+    std::error_code ec;
+    std::filesystem::remove_all(sb, ec);
+    std::filesystem::create_directories(sb / L"plugins");
+    std::ofstream iniOut(sb / L"edvr.ini");
+    iniOut << "[general]\nmode = vr\n";
+    return sb;
+}
+
+void dropFixture(const std::filesystem::path& sandbox, const wchar_t* variant, const wchar_t* fileName) {
+    std::filesystem::copy_file(getFixtureDllPath(variant), sandbox / L"plugins" / fileName,
+                               std::filesystem::copy_options::overwrite_existing);
+}
+
+const edvr::plugins::CandidatePlugin* findCandidate(edvr::plugins::PluginManager& pm, const char* stem) {
+    for (const auto& c : pm.candidates()) {
+        if (c.stem == stem) return &c;
+    }
+    return nullptr;
 }
 
 } // namespace
@@ -150,6 +179,29 @@ int main(int argc, char** argv) {
     // Case 6: Shutdown
     pm.shutdown();
     check(!pm.hasActivePlugins(), "PluginManager::shutdown successfully unloads all plugins");
+
+    // Case 7 (PR #92 review): a fault inside EdvrPluginRegister is contained like any other lifecycle fault.
+    {
+        auto sb = makeSandbox(L"regfault");
+        dropFixture(sb, L"regfault", L"reg_fault.dll");
+        dropFixture(sb, L"", L"healthy.dll");
+        pm.initialize(sb.wstring());
+        auto* bad = findCandidate(pm, "reg_fault");
+        auto* good = findCandidate(pm, "healthy");
+        check(bad && good, "regfault: both candidates discovered");
+        if (bad && good) {
+            bool badLoaded = pm.approvePlugin("reg_fault", bad->sha256);
+            check(!badLoaded, "regfault: candidate whose registration faults is rejected");
+            check(GetModuleHandleW(L"reg_fault.dll") == nullptr, "regfault: faulting candidate is unloaded");
+            check(pm.activePluginCount() == 0, "regfault: nothing active after the rejected candidate");
+            bool goodLoaded = pm.approvePlugin("healthy", good->sha256);
+            check(goodLoaded, "regfault: a healthy candidate still loads afterwards");
+            check(pm.activePluginCount() == 1, "regfault: exactly the healthy candidate is active");
+        }
+        pm.shutdown();
+        std::error_code ec7;
+        std::filesystem::remove_all(sb, ec7);
+    }
 
     // Cleanup sandbox
     std::error_code ec;
