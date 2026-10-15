@@ -5,6 +5,7 @@
 #include "../../src/common/native_render_settings.h"
 #include "../../src/common/system_d3d11.h"
 #include "../../src/d3d11/journal_watch.h"
+#include "../../src/d3d11/native_on_foot.h"   // F36: weapon stability steps aside while native on foot is active
 
 #include <d3d11.h>
 #include <wrl/client.h>
@@ -419,6 +420,22 @@ int wmain(int argc, wchar_t** argv) {
         const float zero[3] = {};
         edvr::nativeFrameSetEyeAlign(zero, 0);
     }
+
+    // F36: weapon stability defers pacing on foot, and steps aside while native HMD stereo on foot is active (the key is untouched).
+    edvr::Config::get().set("fix.weapon_stability", "1");
+    g_journalActive = g_onFootKnown = g_onFoot = true;
+    edvr::g_nativeOnFootActive.store(false);
+    EdvrNativeFrameOutput onFootKeyOut{sizeof(onFootKeyOut), EDVR_NATIVE_FRAME_VERSION_8};
+    EdvrNativeFrameInput onFootKeyFrame = input(41, 7, 23);
+    check(table.beginFrame(table.context, &onFootKeyFrame, &onFootKeyOut) == S_OK && onFootKeyOut.deferredPacing == 1,
+          "weapon stability on foot, native off: pacing is deferred (F36 control)");
+    edvr::g_nativeOnFootActive.store(true);
+    EdvrNativeFrameOutput steppedOut{sizeof(steppedOut), EDVR_NATIVE_FRAME_VERSION_8};
+    EdvrNativeFrameInput steppedFrame = input(41, 7, 24);
+    check(table.beginFrame(table.context, &steppedFrame, &steppedOut) == S_OK && steppedOut.deferredPacing == 0,
+          "F36: weapon stability steps aside while native on foot is active (no deferred pacing)");
+    edvr::g_nativeOnFootActive.store(false);
+    g_journalActive = g_onFootKnown = g_onFoot = false;
 
     // ---- Explorer Cam's comfort fade (comfort_fade.h; EdvrNativeFrameOutput::fadeAlpha, version 5) --------------------------------------------------------------
     {

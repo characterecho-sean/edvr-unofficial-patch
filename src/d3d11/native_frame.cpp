@@ -43,6 +43,7 @@ struct State {
     bool pacingNoted = false;
     bool weaponStabilityNoted = false;
     bool lastWeaponStability = true;
+    bool lastStepAside = false;   // F36: weapon stability stepped aside (native on foot active), as last logged
     EdvrNativeFrameDecision cachedDecision{};
 };
 
@@ -387,8 +388,14 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
     // with the watcher off, the wait stays in WaitGetPoses.
     const bool weaponStability = edvr::Config::get().getBool(
         "fix.weapon_stability", true);
+    // F36: while native HMD stereo on foot is active, weapon stability steps aside (its pacing and its motion-vector gate); the key is untouched.
+    const bool stepAside = edvr::nativeOnFootActive();
+    if (weaponStability && stepAside != state->lastStepAside) {
+        state->lastStepAside = stepAside;
+        edvr::Log::get().note("weapon stability: %s", stepAside ? "stepped aside (native on foot active)" : "resumed");
+    }
     result.deferredPacing =
-        (weaponStability && edvr::journalOnFootKnown() && edvr::journalOnFoot())
+        (weaponStability && !stepAside && edvr::journalOnFootKnown() && edvr::journalOnFoot())
             ? 1u : 0u;
     if (result.deferredPacing) edvr::nativeOnFootCountGate(edvr::NativeOnFootGate::DeferredPacing);   // F0 gate counter (log only)
     if (!state->weaponStabilityNoted ||
