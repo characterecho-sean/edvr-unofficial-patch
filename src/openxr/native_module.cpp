@@ -365,7 +365,7 @@ extern "C" uint32_t __cdecl edvr_module_VR_InitInternal(vr::EVRInitError* error,
          readableRegularFile(local.graphics)&&(localConfigUsesSystemRuntime(local.runtime)||readableRegularFile(local.runtime))) {
         RuntimeOptions options;options.loader=std::move(local.loader);options.graphicsProxy=std::move(local.graphics);
         options.separateDevice=local.separateDevice;localManifest=std::move(local.runtime);
-        options.frameThreadPriorityHigh=local.frameThreadPriorityHigh;options.frameEndOverlap=local.frameEndOverlap;
+        options.frameThreadPriorityHigh=local.frameThreadPriorityHigh;options.frameEndOverlap=local.frameEndOverlap;options.poseCache=local.poseCache;
         const auto configured=configureModule(std::move(options),5000,localManifest);
         if(configured!=S_OK&&configured!=E_PENDING){if(error)*error=vr::VRInitError_Init_InstallationCorrupt;return 0;}
         if(configured==S_OK){nativeTracePuts("module_configuration,source=local");std::fflush(stdout);}

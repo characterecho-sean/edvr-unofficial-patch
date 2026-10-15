@@ -130,6 +130,12 @@ struct FlatMonoResolveFrame {
     // records, corrupt slots, the sky and the first-person pixels are untouched. staticScene (the menu's blanket form) wins when both are
     // set. False (the default) leaves every pixel, every resource and the prep's arithmetic exactly as before the field.
     bool steadyDetail = false;
+    // Planet patch motion (celestial_motion.h): the planet records (the SRV the flat runtime fetched for this frame, bound at t18 for the prep)
+    // and the tangents (l, r, b, t) of this frame's and last frame's camera rows they were built for. The pixels inside a body take its own
+    // motion in place of the camera term. Only the flat runtime fills them, from its own frames; the VR world route never does. Null leaves
+    // every pixel, and the prep's arithmetic, exactly as before.
+    ID3D11ShaderResourceView* celestialRecords = nullptr;
+    float celestialTanNow[4] = {}, celestialTanPrev[4] = {};
     // The VR world route's refusal census and view (design doc section 82, stage 2 experiment build; flat_mono_refusal.h).
     // Both default to off, the flat profile never sets either, and a frame that asks for neither runs the prep and the finish
     // exactly as before (no class texture is made, bound or written, no census pass is dispatched).

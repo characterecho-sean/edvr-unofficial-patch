@@ -31,6 +31,12 @@ experimental; their visual quality is not yet qualified.
 - [fix] temporal_aa also accepts off, on (TAA), dlaa, dlss, fsr or xess (default off).
 - XeSS-SR needs libxess.dll beside the game; the installer includes it when built with the SDK.
 - Game supersampling controls render scale; DLAA requires native SS.
+- [fix] intro_video = skip leaves out the launch movie (the F8 menu's Intro
+  movie row does the same; it applies at the next launch). The default,
+  screen, plays it as the game makes it.
+- Press F7 to turn EDVR's anti-aliasing off for a side-by-side look, and again
+  to put your setting back. It writes nothing; [hotkey] compare_aa changes the
+  key and empty turns it off. The same key works in VR.
 - Press NumLock while the issue is visible to collect a diagnostic capture.
 
 MANUAL INSTALL
@@ -47,7 +53,10 @@ MANUAL INSTALL
 
 If EDHM or another mod owns d3d11.dll, use the installer to preserve and chain
 it automatically. For manual chaining, rename that mod's DLL to d3d11_edhm.dll
-and set advanced.real_dll = d3d11_edhm.dll in edvr.ini before placing EDVR.
+and set advanced.real_dll = d3d11_edhm.dll in edvr.ini before placing EDVR. It
+is set once: edvr.ini applies to both the VR and the flat profile. The flat
+profile's edvr-flat.ini can override it with another name, or say none to run
+flat without the chain.
 
 DLSS
 ----

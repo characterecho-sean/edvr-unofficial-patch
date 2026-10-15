@@ -141,7 +141,7 @@ size_t hotkeyLockedText(const char* keyText, char* out, size_t cap);
 
 // Everything a decision needs to know about the row being captured.
 struct HotkeyRowContext {
-    const char*         rowKey = "";          // "menu", "explorer_cam", "toggle_exposure", ...
+    const char*         rowKey = "";          // "menu", "explorer_cam", "dump_camera", ...
     const char*         currentText = "";     // the row's value in the ini now
     const HotkeyOther*  others = nullptr;     // every other hotkey row, hidden ones too
     int                 nOthers = 0;

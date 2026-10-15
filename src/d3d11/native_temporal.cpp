@@ -10,6 +10,7 @@
 #include "vscreen.h"           // vScreenClearRenderTargetViewRaw: the black frame's one clear
 #include "vr_camera_census.h"   // nativeTemporalEyeGeometry's declaration, so its definition below is checked against it
 #include "terrain_cull_cover_hook.h"   // the terrain cull cover (docs/terrain-culling.md): begin() tells it the frusta the game is handed
+#include "light_grid_cache_hook.h"     // the light grid cache's jitter probe: begin() tells it this frame's jitter
 #include "../common/config.h"
 #include "../common/frame_flag.h"
 #include "../common/temporal_math.h"
@@ -407,6 +408,7 @@ HRESULT WINAPI begin(void* p,const EdvrNativeTemporalFrame* f,EdvrNativeTemporal
     s->shift[e][0]=out->tangentShift[e][0];s->shift[e][1]=out->tangentShift[e][1];
   }
   if(s->shift[0][0]||s->shift[0][1]||s->shift[1][0]||s->shift[1][1])++s->jitterFrames;
+  edvr::lightGridCacheNoteJitter(s->frameCounter,jx,jy,s->shift);   // the grid cache's jitter probe reads this (log only)
   return S_OK;
 }
 
@@ -530,7 +532,7 @@ HRESULT WINAPI invalidate(void* p){std::lock_guard<std::mutex> lock(mutex);State
 HRESULT WINAPI skipEye(void* p,uint64_t seq,uint32_t eye,uint32_t jumpOnly,uint32_t verdict) {
   std::lock_guard<std::mutex> lock(mutex);State* s=identify(p);
   if(!s||!s->active||s!=current||!s->begun||seq!=s->sequence||eye>1||s->treated[eye]||jumpOnly>1)return E_INVALIDARG;
-  // The transition detector withheld this eye's frame (a glitch frame, a jump, a hold): the VR world route (docs section 82)
+  // The transition-flash fix withheld this eye's frame (a glitch frame, a jump, a hold): the VR world route (docs section 82)
   // lets go of the world and resets its resolver's history with the eyes'. A no-op with the key off.
   edvr::vrWorldRouteNoteSceneReset();
   if(!jumpOnly||s->continuity[eye]+1!=seq) {

@@ -27,23 +27,29 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parent.parent
 CASES = (("shared", "off"), ("private", "off"), ("live", "off"),
          ("live", "swap"), ("live", "live"))
+# The DLL's test-only switch for the camera-buffer tap (src/d3d11/glitch_frame.cpp):
+# "1" installs vScreen transport-only. An environment variable, so no ini file a
+# user could edit or carry over holds it.
+TAP_OFF_VARIABLE = "EDVR_TEST_NO_CAMERA_TAP"
+
+
+def tap_off_environment() -> dict[str, str]:
+    return {**os.environ, TAP_OFF_VARIABLE: "1"}
 
 
 def configuration(mode: str, probe: str, directory: Path, *, log: bool = False, hotkey: str | None = None) -> str:
-    # transition_flash=0 still observes camera history. Zero buffer bytes
-    # explicitly disables that observer in this fixture as well.
-    # `log` turns the DLL's log on (the Explorer Cam cases read it); `hotkey` adds
+    # The camera-buffer tap asks vScreen for its hooks whenever it observes a
+    # buffer, so switching the tap off is what makes this fixture transport-only.
+    # That switch is the environment variable TAP_OFF_VARIABLE (see tap_off_environment),
+    # not an ini key: the tap has no setting. `log` turns the DLL's log on (the Explorer Cam cases read it); `hotkey` adds
     # a [hotkey] explorer_cam line ("" is the empty value, None leaves it unsaid).
     text = f"""[fix]
 black_void = 0
 panel_distance = 1
-transition_flash = 0
 temporal_aa = off
-share_exposure = 0
 [advanced]
 app_gpu_timing = 0
 panel_hooks_always = 0
-camera_buffer_bytes = 0
 context_hook_mode = {mode}
 context_hook_probe = {probe}
 texture_lod_bias = 0
@@ -97,7 +103,7 @@ def run_explorer(executable: Path, proxy: Path) -> int:
             try:
                 completed = subprocess.run(command, cwd=directory, creationflags=flags,
                                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                           timeout=45, check=False)
+                                           timeout=45, check=False, env=tap_off_environment())
             except subprocess.TimeoutExpired:
                 print("[edvr] explorer cam fixture timed out; its child was terminated")
                 return 1
@@ -140,7 +146,7 @@ def run_matrix(executable: Path, proxy: Path, *, dry_run: bool = False) -> int:
             try:
                 completed = subprocess.run(command, cwd=directory, creationflags=flags,
                                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                           timeout=45, check=False)
+                                           timeout=45, check=False, env=tap_off_environment())
             except subprocess.TimeoutExpired:
                 print("[edvr] transport fixture timed out; its child was terminated")
                 return 1
@@ -182,6 +188,9 @@ def self_test() -> int:
                     self.assertEqual(target.read_bytes(), b"dll")
                     self.assertTrue((target.parent / "edvr.ini").is_file())
                     self.assertEqual(command[-1], "--transport-only")
+                    # The tap's test switch is the environment, and the ini carries no tap key.
+                    self.assertEqual(kwargs["env"][TAP_OFF_VARIABLE], "1")
+                    self.assertNotIn("camera", (target.parent / "edvr.ini").read_text(encoding="utf-8"))
                     return subprocess.CompletedProcess(command, 7, b"failed\n")
                 with mock.patch.object(subprocess, "run", side_effect=fail) as child, \
                      contextlib.redirect_stdout(io.StringIO()):

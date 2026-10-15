@@ -82,7 +82,7 @@ struct VrWorldFrameEnd {
     bool gate = false;         // the on-foot world-screen gate held for the frame
     bool treated = false;      // the route resolved the frame (and its H write-back is in the frame)
     bool lateWrites = false;   // a treated frame whose H was written after the resolve (the latch's input)
-    bool sceneReset = false;   // boarding, disembarking or a jump: the transition detector reset the eyes' history
+    bool sceneReset = false;   // boarding, disembarking or a jump: the transition-flash fix reset the eyes' history
 };
 struct VrWorldStep {
     bool entered = false;                         // the route became owned at this boundary

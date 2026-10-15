@@ -33,6 +33,9 @@
 //   R5  source pins: the pass reads the split only through temporalShipSplitMetres, reads each of the journal's answers once, tells
 //       each change of mode once and the interval's totals with their zeros; journal_watch.cpp sets the seat from its pure function;
 //       the shader's reading of split.x (the gate and the comparison) is the one this relies on. Each pin carries a control;
+//   R7  the SRV (docs/per-object-motion.md, 2026-10-14): a seated SRV (seat kind bit 2) gets kTemporalSrvMetres (3.5 m) in place of the ship's
+//       10 m; a ship, a fighter, a taxi, multicrew, an unknown or stale journal and on foot do not; it never widens the configured split nor
+//       turns on a zero; the whole table of flag and seat-kind combinations; the tracker's SRV mode over time;
 //   R6  six mutated shaders (the gate, the comparison, the camera's translation, the head's, the decision path, the far plane): the
 //       same judge that passed the production shader must refuse every one.
 // tools/on_foot_split_test/mutants.py holds the rig to the headers: a rule flipped in them must fail the rig, by the label named.
@@ -311,6 +314,106 @@ void testSplit() {
           "a player's zero (the world path off) stays zero on foot: the mode never turns on what was turned off");
     check("R3f", temporalShipSplitMetres(10.0f, true) < 10.0f && temporalShipSplitMetres(10.0f, true) > 0.0f, "...and the on-foot value is below any configured one");
     std::printf("(R3) the split: configured bit for bit off foot, %g m on foot, zero stays zero\n", static_cast<double>(edvr::kTemporalOnFootSplitMetres));
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// R7 -- the SRV
+// ---------------------------------------------------------------------------------------------------------------------------------
+TemporalFoot footKind(bool onFoot, bool seated, unsigned seatKind, unsigned age = 0) {
+    TemporalFoot f = foot(true, true, true, true, onFoot, seated, age);
+    f.seatKind = seatKind;
+    return f;
+}
+float splitFor(const TemporalFoot& f, float configured = edvr::kTemporalShipMetres) {
+    return edvr::temporalSplitMetres(configured, edvr::temporalOnFoot(f), edvr::temporalSrv(f));
+}
+
+void testSrv() {
+    using edvr::kTemporalSrvMetres;
+    using edvr::temporalSrv;
+    using edvr::temporalSplitMetres;
+    // the radius: between the SRV's own body (2.1 to 2.85 m in the two 2026-10-14 captures) and the nearest terrain (5.46 m), inside the ship's
+    check("R7a", kTemporalSrvMetres == 3.5f && kTemporalSrvMetres > 2.85f && kTemporalSrvMetres < 5.46f && kTemporalSrvMetres < edvr::kTemporalShipMetres,
+          "the SRV radius is 3.5 m: past every measured SRV body pixel, short of the nearest measured terrain, under the ship's 10 m");
+    check("R7a", edvr::kTemporalSeatKindSrv == 0x4u, "the SRV is seat kind bit 2 (Flags bit 26 -> journalSeatKind bit 2)");
+    // the named scenarios
+    const TemporalFoot ship = footKind(false, true, 0x1), srv = footKind(false, true, 0x4), fighter = footKind(false, true, 0x2),
+                       taxi = footKind(false, true, 0x8), crew = footKind(false, true, 0x10), onFoot = footKind(true, false, 0);
+    check("R7b", !temporalSrv(ship) && sameBits(splitFor(ship), edvr::kTemporalShipMetres), "a main ship stays at the ship radius, bit for bit");
+    check("R7c", temporalSrv(srv) && !edvr::temporalOnFoot(srv) && sameBits(splitFor(srv), kTemporalSrvMetres), "a seated SRV takes the SRV radius");
+    check("R7d", !temporalSrv(fighter) && sameBits(splitFor(fighter), edvr::kTemporalShipMetres),
+          "a fighter (seat kind 2) stays at the ship radius: nothing measured says otherwise");
+    check("R7d", !temporalSrv(taxi) && !temporalSrv(crew) && sameBits(splitFor(taxi), edvr::kTemporalShipMetres) && sameBits(splitFor(crew), edvr::kTemporalShipMetres),
+          "a taxi and someone else's ship stay at the ship radius");
+    check("R7e", !temporalSrv(onFoot) && sameBits(splitFor(onFoot), edvr::kTemporalOnFootSplitMetres), "on foot is the millimetre and never the SRV mode");
+    // the journal that cannot say: the ship radius, even with a seat kind of 4 in the word
+    const TemporalFoot stale = footKind(false, true, 0x4, edvr::kTemporalFootStaleMs + 1);
+    check("R7f", !temporalSrv(stale) && sameBits(splitFor(stale), edvr::kTemporalShipMetres), "a stale Status.json says nothing: the ship radius");
+    TemporalFoot noFlags = srv;   noFlags.vehicleKnown = false;
+    TemporalFoot noFlags2 = srv;  noFlags2.known = false;
+    TemporalFoot noWatch = srv;   noWatch.watching = false;
+    TemporalFoot noGame = srv;    noGame.gameplay = false;
+    check("R7f", !temporalSrv(noFlags) && !temporalSrv(noFlags2) && !temporalSrv(noWatch) && !temporalSrv(noGame) &&
+                     sameBits(splitFor(noFlags), edvr::kTemporalShipMetres) && sameBits(splitFor(noFlags2), edvr::kTemporalShipMetres) &&
+                     sameBits(splitFor(noWatch), edvr::kTemporalShipMetres) && sameBits(splitFor(noGame), edvr::kTemporalShipMetres),
+          "flags unknown, no Flags2, the journal off or no LoadGame yet: the ship radius");
+    // a seat kind with nothing seated (a stale word of the last cockpit) is not the SRV
+    check("R7f", !temporalSrv(footKind(false, false, 0x4)) && !temporalSrv(footKind(true, false, 0x4)),
+          "a seat kind of 4 with Status.json saying nobody is seated is not the SRV");
+    // the configured split: never widened, a zero stays zero, bit for bit when not in an SRV
+    check("R7g", sameBits(temporalSplitMetres(2.0f, false, true), 2.0f) && sameBits(temporalSplitMetres(0.0f, false, true), 0.0f) &&
+                     sameBits(temporalSplitMetres(-1.0f, false, true), -1.0f) && sameBits(temporalSplitMetres(3.5f, false, true), 3.5f) &&
+                     sameBits(temporalSplitMetres(40.0f, false, true), kTemporalSrvMetres) && sameBits(temporalSplitMetres(1e9f, false, true), kTemporalSrvMetres),
+          "in an SRV a configured split below the radius or zero is kept, a larger one is cut to the radius");
+    const float nan = std::nanf("");
+    check("R7g", std::isnan(temporalSplitMetres(nan, false, true)) && std::isnan(temporalSplitMetres(nan, false, false)),
+          "a NaN is passed through, not turned into a radius");
+    bool plain = true;
+    for (float configured : {10.0f, 0.0f, 0.5f, 40.0f, 100000.0f, 1e-9f, -1.0f})
+        plain = plain && sameBits(temporalSplitMetres(configured, false, false), configured) &&
+                sameBits(temporalSplitMetres(configured, true, false), edvr::temporalShipSplitMetres(configured, true));
+    check("R7h", plain, "with the SRV mode off the split is the old function's, on foot or not");
+    // the whole table against the spec written out again: SRV mode iff watching, gameplay, both words known, seated, fresh, and bit 2 of the seat kind
+    unsigned yes = 0, rows = 0;
+    for (unsigned bits = 0; bits < 64; ++bits) {
+        for (unsigned age : {0u, edvr::kTemporalFootStaleMs, edvr::kTemporalFootStaleMs + 1}) {
+            for (unsigned kind : {0u, 1u, 2u, 4u, 5u, 6u, 8u, 16u, 0x1Fu}) {
+                const bool w = bits & 1, g = bits & 2, k = bits & 4, v = bits & 8, o = bits & 16, s = bits & 32;
+                const bool want = w && g && k && v && s && age <= 5000u && (kind & 4u) != 0;
+                TemporalFoot f = foot(w, g, k, v, o, s, age);
+                f.seatKind = kind;
+                const bool got = temporalSrv(f);
+                check("R7i", got == want, fmt("watching %d gameplay %d known %d vehicleKnown %d onFoot %d seated %d age %u kind 0x%X: spec %d, got %d", w, g, k, v, o, s, age, kind, want, got));
+                check("R7i", !(got && edvr::temporalOnFoot(f)), "the SRV mode and on foot are never both");
+                const float sp = splitFor(f);
+                check("R7i", sameBits(sp, got ? kTemporalSrvMetres : (edvr::temporalOnFoot(f) ? edvr::kTemporalOnFootSplitMetres : edvr::kTemporalShipMetres)),
+                      "the split is the SRV radius, the millimetre or the ship radius, by the mode");
+                ++rows;
+                yes += got;
+            }
+        }
+    }
+    // watching, gameplay, known, vehicleKnown and seated set (onFoot either way: 2) x the 2 fresh ages x the 4 seat kinds with bit 2 (4, 5, 6, 0x1F)
+    check("R7i", rows == 64u * 3u * 9u && yes == 2u * 2u * 4u, fmt("of %u rows exactly the fresh seated ones with seat kind bit 2 say SRV (%u)", rows, yes));
+    // the tracker over time: on, steady, off; the changes counted; never on foot meanwhile
+    {
+        edvr::TemporalFootTracker t;
+        const unsigned long long T = 1000000;
+        check("R7j", !t.step(T, ship, 0) && !t.srv && !t.srvChanged && t.srvChanges == 0, "a ship is not the SRV mode and no change");
+        t.step(T + 16, srv, 0);
+        check("R7j", t.srv && t.srvChanged && t.srvChanges == 1 && !t.on && t.why == TemporalFootWhy::Seated, "boarding an SRV turns the mode on, once");
+        t.step(T + 32, srv, 0);
+        check("R7j", t.srv && !t.srvChanged && t.srvChanges == 1, "the same answer is no change");
+        t.step(T + 48, ship, 0);
+        check("R7j", !t.srv && t.srvChanged && t.srvChanges == 2, "a change of cockpit to a ship turns it off");
+        t.step(T + 64, srv, 0);
+        t.step(T + 80, onFoot, 0);
+        check("R7j", !t.srv && t.on && t.srvChanges == 4, "stepping out of the SRV onto the ground is on foot, not the SRV mode");
+        for (unsigned long long now = T + 96; now <= T + 96 + edvr::kTemporalFootStaleMs; now += 500) t.step(now, srv, 0);   // a count that never moves
+        check("R7j", !t.srv && t.why == TemporalFootWhy::Stale, "a reader that stopped turns the SRV mode off with the rest");
+    }
+    std::printf("(R7) the SRV: %g m in a seated SRV, the ship radius in a ship, a fighter, a taxi, multicrew and with the journal unable to say; %u of %u combinations say SRV\n",
+                static_cast<double>(kTemporalSrvMetres), yes, rows);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------
@@ -977,7 +1080,11 @@ void testPins(const std::string& root) {
     const std::string journal = slurp(root + "/src/d3d11/journal_watch.cpp");
     const std::string shader = slurp(root + "/src/d3d11/temporal_shader_source.h");
     const std::vector<Pin> pins = {
-        {&pass, "p.split[0] = temporalShipSplitMetres(kTemporalShipMetres, footSplit);", 1, "R5a", "the shader's split is the pure function's, once"},
+        {&pass, "p.split[0] = temporalSplitMetres(kTemporalShipMetres, footSplit, srvSplit);", 1, "R5a", "the shader's split is the pure function's, once"},
+        {&pass, "const bool srvSplit = g_foot.srv;", 1, "R5a", "the SRV mode is the tracker's, read once where the constants are built"},
+        {&pass, "f.seatKind = journalSeatKind();", 1, "R7k", "the SRV mode's input: the seat kind of the same journal"},
+        {&pass, "split was srv (%.1f m) for %u of them", 1, "R7k", "the interval's totals say how many eye-frames the SRV mode held"},
+        {&pass, "\"temporal aa: in an SRV -- the ship split is %.1f m, not %.0f m: the ground beyond the SRV's body takes the world \"", 1, "R7k", "the change into the SRV mode is told"},
         {&pass, "p.split[0] = kTemporalShipMetres;", 0, "R5b", "nothing hands the shader the configured split raw"},
         {&pass, "const bool footSplit = footSplitNow();", 1, "R5c", "the mode is asked once, where the constants are built"},
         {&pass, "bool footSplitNow() {", 1, "R5d", "the mode has one definition"},
@@ -1024,6 +1131,7 @@ int main(int argc, char** argv) {
     testTracker();
     testSeat();
     testSplit();
+    testSrv();
     testPins(root);
     testShader(root);
     std::printf("PASS: on_foot_split_test, %u checks\n", g_checks);

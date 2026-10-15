@@ -88,6 +88,7 @@ const ShardUnit kUnits[]={
     {"upscalerSlotGpuTests",2},{"firstPersonGpuTests",1},{"firstPersonPhaseGpuTests",1},
     {"refusalGpuTests",2},{"skinGpuTests",5},{"copyRefusalViewGpuTests",2},{"copyForegroundGpuTests",2},
     {"steadyDepthGpuTests",4},{"taaHistoryDepthGpuTests",5},{"contextIsolationGpuTests",2},
+    {"flatCelestialGpuTests",5},
 };
 int shardIndex=0,shardCount=0;   // 0/0: no --shard, everything runs
 std::vector<std::string> shardRan;
@@ -272,6 +273,7 @@ bool fsr3Evaluate(ID3D11DeviceContext* c,unsigned slot,ID3D11Texture2D* colour,I
 #include "flat_sdk_foreground_gpu_tests.h"
 #include "flat_copy_refusal_view_gpu_tests.h"
 #include "flat_copy_foreground_gpu_tests.h"
+#include "flat_celestial_gpu_tests.h"   // planet patch motion in the prep: the tangents, and the shipped prep with a planet record bound and not (2026-10-15)
 int main(int argc,char** argv) {
     const bool printGoldens=argc==2 && !std::strcmp(argv[1],"--print-goldens"); // --self-test plus the recorded key-off hashes, for re-recording
     const char* usage="usage: flat_mono_resolve_test --self-test [--shard I/N|--only UNIT,UNIT]|--list-shards N|--dry-run|--print-goldens";
@@ -349,6 +351,9 @@ int main(int argc,char** argv) {
         if(shardRuns("taaHistoryDepthGpuTests"))timedSuite("taaHistoryDepthGpuTests",[&]{return taaHistoryDepthGpuTests(device.Get(),context.Get());});
         // The resolver's context isolation (the swap, and the explicit capture DXMT gets): also before the message check, so its calls are held to it.
         if(shardRuns("contextIsolationGpuTests"))timedSuite("contextIsolationGpuTests",[&]{return contextIsolationGpuTests(device.Get(),context.Get());});
+        // Planet patch motion in the flat prep (flat_celestial_gpu_tests.h): the tangents of the flat camera rows, and the shipped prep on WARP with a
+        // planet record bound at t18 (debug.w bit 3) against the same prep with the bit clear.
+        if(shardRuns("flatCelestialGpuTests"))timedSuite("flatCelestialGpuTests",[&]{flatCelestialGpuTests(device.Get(),context.Get());});
     };
     auto finalChecks=[&]{
         if(messages)for(UINT64 i=0;i<messages->GetNumStoredMessages();++i){SIZE_T n=0;messages->GetMessage(i,nullptr,&n);std::vector<unsigned char> bytes(n);

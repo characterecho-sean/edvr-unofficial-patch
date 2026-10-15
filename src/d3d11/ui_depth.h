@@ -192,6 +192,18 @@ void uiDepthEnd(ID3D11DeviceContext* ctx);
 // depth range converting the encoding. The caller issues the second draw
 // between Begin and End when WantsReissue says so AND Begin returns true.
 bool uiDepthWantsReissue();
+// The blend probe's read (blend_probe.h; TEMPORARY, docs/dlss-blur-elements-2026-10-14.md): this eye draw's classification as
+// uiDepthOnEyeDraw and uiDepthHologramOnEyeDraw left it. Valid only between those calls and uiDepthEnd, i.e. inside the draw's own
+// forwardWithVerdict; `coverage` and the mask fields are meaningful only when the caller's per-draw uiDepth flag was set, `holo*` only
+// when its hologram flag was. Reads module state, changes nothing.
+struct UiDepthDrawProbe {
+    bool coverage = false;         // a coverage shader was chosen: the draw is reissued into private depth (and the mask when wantMask)
+    bool wantMask = false;         // the reissue also marks the reactive mask
+    int maskSlot = 0;              // which floor buffer carries the mask value (0 interface, 1 holo material and sprite, 2 flight HUD, 3 smoke, 4 chrome)
+    int drawEye = -1;              // the eye the mask would be marked in, -1 when unknown
+    bool holoWorldMarker = false;  // the hologram pass matched its world-marker list, not the cockpit list
+};
+UiDepthDrawProbe uiDepthDrawProbe();
 // True when the depth-only draw is set up and the caller should issue it.
 // False means this call declined and left the game's own state untouched,
 // so issuing the draw anyway would be the game's composite a second time,

@@ -4,9 +4,12 @@
 #include "flat_runtime_model.h"
 #include "flat_hdr_route.h"
 #include "flat_copy_structure.h"
+#include "flat_scene_log.h"   // TEMPORARY: the scene picker's candidates (docs/sky-flicker-2026-10-13.md)
 #include "flat_hdr_crumbs.h"
 #include "flat_context_state.h"
 #include "flat_mono_resolve.h"
+#include "flat_celestial.h"    // planet patch motion: the rows' tangents for the records the resolve binds (fetchCelestialRecords)
+#include "celestial_motion.h"
 #include "xess_engine.h"
 #include "flat_projection_recipes.h"
 #include "flat_shader_classifier.h"
@@ -20,6 +23,7 @@
 #include "flat_weapon_footprint.h"
 #include "flat_overlay_layer.h"
 #include "flat_replay_query_tracker.h"
+#include "flat_replay_query_reject.h"
 #include "flat_untrusted_coverage.h"
 #include "flat_foreground_probe.h"
 #include "flat_foreground_motion.h"
@@ -308,6 +312,9 @@ struct State {
     // The prep's refusal census in flat: sampled for a bounded window after the census key (NumLock), so the per-class
     // line names what the finish shows raw instead of the backend's result.
     uint32_t refusalCensusFrames = 0;
+    // advanced.flat_refusal_view: paint the prep's classes into the resolved image. Read once a Present; refusalViewRead makes the first read
+    // say its value, so a refused key shows in the log as "off" rather than as silence.
+    bool refusalView = false, refusalViewRead = false;
     // The camera term's translation precision (design doc section 104): row 275 is the render origin the camera term subtracts
     // frame to frame (cameraBefore, flat_mono_shader_source.h). One 5 s window over the non-reset frames handed to the resolver.
     struct CameraOriginWindow { uint64_t frames = 0, moved = 0; float maxAbs = 0, maxStep = 0, minStep = 0; float last[3] = {}; };
@@ -319,6 +326,7 @@ struct State {
     // Draws whose near plane was the reference's and whose projection scale was not (aiming down sights: the weapon camera takes the
     // world's near): classified as first-person draws, not as the world. One 5 s window, on the `flat foreground SDK domain` line.
     uint64_t predictedScaleRejectedWindow=0;
+    FlatQueryRejectStats queryReject;   // the foreground replay-safety instrument (flat_replay_query_reject.h); owner thread
     FlatUntrustedCoverage untrusted;
     bool untrustedUnknown = false;
     bool untrustedSupportedAlternate = false;
@@ -590,6 +598,8 @@ struct State {
     // copy route is the whitelist alone, as before, and the admission only names what it sees (no scene, a render size
     // that does not fit). Nothing here touches a D3D object.
     FlatCopyWindow copyWindow{};     // the 5 s window of the census line
+    FlatSceneLog sceneLog{};         // TEMPORARY (flat_scene_log.h): the scene picker's candidates and the frames each size won
+    uint32_t sceneLogShownW = 0, sceneLogShownH = 0;   // the winner the last candidate line named
     // The copy route's weapon support (flat_copy_structure.h, flatWeaponRoute): cohort draws flagged, glow draws admitted as
     // alternate HDR writers, frames selected mixed-camera and the foreground contract's H qualification at the copy.
     FlatCopyWeaponWindow copyWeaponWindow{};
@@ -916,6 +926,11 @@ static void reportForegroundDomain(State& s) {
     // "none" here even while every frame was refused (section 104, supersampled 4K).
     s.foregroundHRefusalWindow=nullptr;
     s.predictedScaleRejectedWindow=0;
+    {   // The replay-safety instrument's window line: printed every window, so checked=0 and rejected=0 are visible and an absent line means it did not run.
+        char rejectLine[1000];
+        s.queryReject.formatWindow(rejectLine,sizeof(rejectLine),flatMonoResolveModeName(s.engine));
+        Log::get().note("%s",rejectLine);
+    }
     const auto& f=s.foregroundFirstFailure;
     Log::get().note("flat foreground first failure: configured=%s frame=%llu q=%u VS=%016llX PS=%016llX format=%u camera=%016llX depth=%p stage=%s reason=%s pending-world-null=%u selected-H-frame=%llu selected-depth=%p candidates=%u cap=%u overflow=%u candidate-present=%u; first failure on selected H depth in the most recent failed frame, not a shader allowlist",
         flatMonoResolveModeName(s.engine),(unsigned long long)f.frame,f.q,(unsigned long long)f.vs,(unsigned long long)f.ps,
@@ -1108,6 +1123,45 @@ FlatReplayQueryTracker::Kind replayQueryKind(ID3D11Asynchronous* async) {
         return FlatReplayQueryTracker::Kind::Count;
     default: return FlatReplayQueryTracker::Kind::Unknown;
     }
+}
+// The instrument (log only): why replayQueriesSafe said no. Read under the observer's lock, after the safety test already decided; the
+// decision itself is untouched. Returns the open count-bearing brackets' D3D11_QUERY codes (held objects read back with GetDesc) and the
+// tracker's own reasons (an uncertain bracket, a full table, a deferred context).
+FlatQueryReject replayQueryRejection(ID3D11DeviceContext* ctx) {
+    FlatQueryReject r;
+    auto add=[&](uint32_t code){ if(r.count<kFlatQueryRejectCodes)r.codes[r.count++]=code;else ++r.extra; };
+    if(!ctx || ctx->GetType()!=D3D11_DEVICE_CONTEXT_IMMEDIATE) { add(kFlatQueryNotImmediate);return r; }
+    auto& observer=replayQueryObserver();std::lock_guard<std::mutex> lock(observer.mutex);
+    auto* entry=observer.find(ctx);
+    if(observer.overflow || !entry)add(kFlatQueryTableFull);
+    if(!entry) return r;
+    if(entry->tracker.uncertain)add(kFlatQueryUncertain);
+    for(size_t i=0;i<64;++i) {
+        const auto& active=entry->tracker.active[i];
+        if(!active.identity)continue;
+        ++r.active;
+        if(active.kind==FlatReplayQueryTracker::Kind::Timing || active.kind==FlatReplayQueryTracker::Kind::EndOnly)continue;
+        uint32_t code=kFlatQueryUnheld;
+        Ptr<ID3D11Query> query;
+        if(entry->holds[i] && SUCCEEDED(entry->holds[i]->QueryInterface(IID_PPV_ARGS(&query)))) {
+            D3D11_QUERY_DESC desc{};query->GetDesc(&desc);code=static_cast<uint32_t>(desc.Query);
+        }
+        add(code);
+    }
+    if(!r.count)add(kFlatQueryUnheld);
+    return r;
+}
+// Counts one foreground draw that reached the safety test and, when it was refused, logs the first kFlatQueryRejectFirst of the session
+// (the 5 s window line is printed by reportForegroundDomain). Owner thread, inside the foreground draw's beginActualDraw.
+static void noteReplayQueryCheck(State& s,ID3D11DeviceContext* ctx,bool rejected,uint64_t vs,uint64_t ps,unsigned width,unsigned height) {
+    s.queryReject.noteChecked();
+    if(!rejected)return;
+    const FlatQueryReject why=replayQueryRejection(ctx);
+    const uint32_t ordinal=s.queryReject.noteRejected(why,vs,ps);
+    if(!ordinal)return;
+    char text[640];
+    flatQueryRejectFormatEvent(text,sizeof(text),ordinal,s.prefix.frame,flatMonoResolveModeName(s.engine),vs,ps,width,height,why);
+    Log::get().note("%s",text);
 }
 FlatMapBounce& mapBounce() {
     static FlatMapBounceD3DDriver* driver = new FlatMapBounceD3DDriver;
@@ -2799,7 +2853,7 @@ void applyWork(State& s, FlatWork next) {
     const FlatWork was = s.work;
     s.work = next;
     if (was != next) flatTemporalSetPaused(next == FlatWork::Paused);
-    if (next != FlatWork::Full || was != FlatWork::Full) flatCameraInjectPause(next != FlatWork::Full);
+    if (next != FlatWork::Full || was != FlatWork::Full) flatCameraInjectPauseFlat(next != FlatWork::Full);
     if ((was == FlatWork::Paused) != (next == FlatWork::Paused)) {
         // The UAV tracker stops with the pause and starts again from unknown, the
         // state ExecuteCommandList leaves it in, so a stale binding never reads as live.
@@ -2988,6 +3042,8 @@ void flatRuntimePhaseState(float* x, float* y, uint32_t* w, uint32_t* h, uint32_
     if (applied) *applied = s.phase.applied;
 }
 void flatRuntimeNoteCameraApplied() { auto& s = state(); s.phase.noteApplied(); ++s.jitterDraws; }
+// The work tier is Full: the relay gate is meant to be open (applyWork). Read by the camera injector's takeover after a live profile switch.
+bool flatRuntimeWorkFull() { return state().work==FlatWork::Full; }
 bool flatRuntimeLegacyPlanExists() { const auto& s=state(); return s.work==FlatWork::Full && s.projection!=nullptr; }
 void flatRuntimeArmProjectionAudit(bool full) { if(runtimeFlatProfile()) projectionAuditRequested.request(full); }
 void flatRuntimeCreateBuffer(ID3D11Buffer* buffer, const void* initialData) {
@@ -3592,6 +3648,28 @@ static FlatMonoFrame copyAdmit(State& s, const FlatRuntimeDraw& d, const FlatMon
             Log::get().note("%s", text);
         }
     }
+    // TEMPORARY (flat_scene_log.h): every candidate for the scene, with its size, format and draws, once per 5 s and whenever the winner changes, the
+    // frames each size has won, and what the flat counterpart of the VR eye-target rule WOULD drop (it is not applied: unflown). Reads the prefix model;
+    // changes nothing.
+    {
+        const FlatSceneFacts winner = flatSceneFacts(s.prefix, s.prefix.width, s.prefix.height);
+        const uint64_t nowMs = GetTickCount64();
+        const bool onShape = winner.onShape;
+        const uint32_t winW = (onShape || winner.offShape) ? winner.width : 0u;
+        const uint32_t winH = (onShape || winner.offShape) ? winner.height : 0u;
+        const bool due = s.sceneLog.note(nowMs, winW, winH, winW && flatTinySquare(winW, winH, s.prefix.width, s.prefix.height));
+        if (due) {
+            FlatSceneCandidate cands[kFlatSceneMaxCandidates];
+            const uint32_t candN = flatSceneCandidates(s.prefix, s.prefix.width, s.prefix.height, cands);
+            char line[1100];
+            const bool changed = s.sceneLogShownW != winW || s.sceneLogShownH != winH;
+            if (flatSceneFormatLine(line, sizeof(line), s.prefix.frame, s.prefix.width, s.prefix.height, winner, cands, candN,
+                                    s.sceneLog, changed ? "the winner changed or the first look" : "every 5 s") > 0)
+                Log::get().note("%s", line);
+            s.sceneLogShownW = winW; s.sceneLogShownH = winH;
+            s.sceneLog.resetWindow();
+        }
+    }
     return out;
 }
 
@@ -3665,6 +3743,11 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     const bool enabled = temporalModeEnabled(mode);
     const auto model = Config::get().getString("fix.temporal_aa_model", "k");
     const auto preset = temporalPresetFor(model);
+    const bool refusalViewWanted = Config::get().getBool("advanced.flat_refusal_view", false);
+    if (refusalViewWanted != s.refusalView || !s.refusalViewRead) {
+        s.refusalView = refusalViewWanted; s.refusalViewRead = true;
+        Log::get().note("flat runtime: refusal view %s (advanced.flat_refusal_view): %s", refusalViewWanted ? "on" : "off", flatMonoViewLegend());
+    }
     if (s.preset != preset.full) {
         s.preset = preset.full;
         dlaaSetPreset(preset.full);
@@ -5003,6 +5086,48 @@ static void foregroundContractAtH(State& s,ID3D11DeviceContext* ctx,const FlatMo
     }
 }
 
+// Planet patch motion for the flat profile (celestial_motion.h): this frame's planet records, fetched for the resolve (its
+// FlatMonoResolveFrame::celestialRecords, with the two tangents). The tangents come from the frame's own camera rows and raster phases the way
+// flatMonoResolve reads them (the NDC phase of each row set, then flatCelestialTangents on both), and the records are the module's for eye 0 at
+// the render size. Skipped on a reset. Left null unless both row sets are a symmetric perspective and the module has a record; the two one-shot
+// notes say which of those happened.
+namespace {
+bool g_celestialRowsNoted = false, g_celestialBoundNoted = false;
+void fetchCelestialRecords(ID3D11DeviceContext* ctx, FlatMonoResolveFrame& f) {
+    f.celestialRecords = nullptr;
+    if (f.reset) return;
+    FlatProjectionJitter rowsNow{}, rowsBefore{};
+    if (!flatProjectionJitter(f.rowsJitterX, f.rowsJitterY, f.renderWidth, f.renderHeight, rowsNow) ||
+        !flatProjectionJitter(f.previousRowsJitterX, f.previousRowsJitterY, f.renderWidth, f.renderHeight, rowsBefore))
+        return;
+    float tanNow[4]{}, tanPrev[4]{};
+    float wLength = 0, worstDot = 0;   // of the first row set that fails, or of the current one
+    const bool nowOk = flatCelestialTangents(f.camera, rowsNow.ndcX, rowsNow.ndcY, tanNow, &wLength, &worstDot);
+    const bool prevOk = nowOk && flatCelestialTangents(f.previousCamera, rowsBefore.ndcX, rowsBefore.ndcY, tanPrev, &wLength, &worstDot);
+    if (!(nowOk && prevOk)) {
+        if (!g_celestialRowsNoted) {
+            g_celestialRowsNoted = true;
+            Log::get().note("flat celestial: the camera rows are not a symmetric perspective; planets keep the camera term (|w row| %.6f, worst "
+                            "orthogonality ratio %.3g, the %s frame's rows).",wLength,worstDot,nowOk?"previous":"current");
+        }
+        return;
+    }
+    CelestialEyeRecords records{};
+    if (!celestialMotionRecords(ctx, 0, tanNow, static_cast<int>(f.renderWidth), static_cast<int>(f.renderHeight), &records) || !records.srv) return;
+    f.celestialRecords = records.srv;
+    std::memcpy(f.celestialTanNow, tanNow, sizeof(tanNow));
+    std::memcpy(f.celestialTanPrev, tanPrev, sizeof(tanPrev));
+    if (!g_celestialBoundNoted) {
+        g_celestialBoundNoted = true;
+        const double tx = records.translation[0], ty = records.translation[1], tz = records.translation[2];
+        Log::get().note("flat celestial: planet patch records bound to the flat resolve (t18): %u bod%s with a record, nearest patch %.0f km, "
+                        "translation |t| %.2f m/frame, tangents (l, r, b, t) %.6f %.6f %.6f %.6f; their pixels take the body's own motion in place of the "
+                        "camera term.",records.records,records.records==1?"y":"ies",records.distance/1000.0,std::sqrt(tx*tx+ty*ty+tz*tz),
+                        tanNow[0],tanNow[1],tanNow[2],tanNow[3]);
+    }
+}
+}  // namespace
+
 FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_t instances,
                                             char kind, uint32_t count, uint32_t start,
                                             int32_t base, uint32_t startInstance) {
@@ -5894,21 +6019,24 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
             if (k.camera) { ui.haveRows = true; std::memcpy(ui.rows, d.camera, sizeof(ui.rows)); }
             ui.phaseX = s.phase.currentX; ui.phaseY = s.phase.currentY;
             ask = flatUiLayerDecide(ctx, ui);   // a cockpit HUD family's draw, or kNotAsked
+            // The route so far, for the tone branches below: the HDR route once it treated this frame, else the resolve plan's
+            // (trained-native, trained-upscale, ...), or none yet. Computed only when a tone branch runs, as before.
+            const auto routeSoFar = [&]() -> const char* {
+                return s.hdrTreated ? "hdr"
+                    : s.haveResolvePlan ? flatResolveRoute(s.plannedResolve.mode, s.plannedResolve.renderWidth, s.plannedResolve.renderHeight,
+                                                           s.plannedResolve.outputWidth, s.plannedResolve.outputHeight).name
+                                        : "no-plan";
+            };
             if (ask == FlatUiLayerAsk::kDecided) { uiTake = true; uiVs = k.vs; uiPs = k.ps; }
             else if (ask == FlatUiLayerAsk::kRefused) {}   // a HUD draw left in H: never also a tone candidate
             // The game's tone pass by its known pair, whatever its vertex count (the 11:32 flight's HDR route read a copy of
             // H, which the structural rule below never matched): the next frame's proof, and this frame's admission.
-            // The registry's tone pass, map tonemap, or the two physically verified E894 LDR-source writers.
-            // The E894 pair remains UI-only: it does not enter the global tone registry or mono HDR selector.
+            // The registry's tone pass, map tonemap, or the physically verified E894 and EDHM 0D43 LDR-source writers.
+            // The E894 and 0D43 pairs remain UI-only: they do not enter the global tone registry or mono HDR selector.
             else if (tone || flatUiMapToneSlotOf(k.vs, k.ps) != ~0u || flatUiSourceTonePair(k.vs, k.ps)) {
-                // The route so far: the HDR route once it treated this frame, else the resolve plan's (trained-native,
-                // trained-upscale, ...), or none yet.
-                const char* route = s.hdrTreated ? "hdr"
-                    : s.haveResolvePlan ? flatResolveRoute(s.plannedResolve.mode, s.plannedResolve.renderWidth, s.plannedResolve.renderHeight,
-                                                           s.plannedResolve.outputWidth, s.plannedResolve.outputHeight).name
-                                        : "no-plan";
+                const char* route = routeSoFar();
                 if (flatUiSourceTonePair(k.vs, k.ps)) {
-                    // Both physical captures issued one fullscreen triangle. Keep a partial draw from bootstrapping proof.
+                    // Each physical capture (E894 and 0D43) issued one fullscreen triangle. Keep a partial draw from bootstrapping proof.
                     if ((kind == 'D' || kind == 'N') && count == 3 && instances == 1 && startInstance == 0)
                         uiTone = flatUiLayerSourceToneCandidate(ctx, s.prefix.frame, sceneRw, sceneRh, k.vs, k.ps,
                                                                 k.color, k.width, k.height, route);
@@ -5929,12 +6057,19 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
                 if (copySrv) copySrv->GetResource(&copySource);
                 flatUiLayerNoteCopy(s.prefix.frame, copySource.Get(), k.color);
             }
-            // Any other full-screen triangle may be the game's tonemap under a pair the flat list does not know: VR's
-            // structural admission, by the HUD source it reads.
+            // Any other full-screen triangle may be the game's tonemap under a pair the flat list does not know. An unknown pair
+            // that passes the full physical shape grants proof as a named pair does (Sean, 2026-10-15: a new EDHM version or settings
+            // tier must not need a named pair). Anything else is the probe's near miss and VR's structural admission, as before.
             else if (count == 3 && instances == 1 && (kind == 'D' || kind == 'N')) {
-                flatUiLayerProbeUnknownSourceTone(ctx, s.prefix.frame, sceneRw, sceneRh, k.vs, k.ps,
-                    k.color, k.width, k.height, kind, count, instances, startInstance);
-                uiTone = flatUiLayerToneAdmit(ctx, s.prefix.frame, k.width, k.height, kind, count, instances, startInstance);
+                bool shapeAdmitted = false;
+                if (flatUiLayerShapeToneCandidate(ctx, s.prefix.frame, sceneRw, sceneRh, k.vs, k.ps, k.color, k.width, k.height,
+                                                  startInstance, routeSoFar(), shapeAdmitted))
+                    uiTone = shapeAdmitted;
+                else {
+                    flatUiLayerProbeUnknownSourceTone(ctx, s.prefix.frame, sceneRw, sceneRh, k.vs, k.ps,
+                        k.color, k.width, k.height, kind, count, instances, startInstance);
+                    uiTone = flatUiLayerToneAdmit(ctx, s.prefix.frame, k.width, k.height, kind, count, instances, startInstance);
+                }
             }
         }
         // A draw the layer leaves, while it holds this frame's HUD: a write of the depth buffer a seed copied makes it stale.
@@ -6026,7 +6161,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     f.outputWidth = selected.outputWidth; f.outputHeight = selected.outputHeight; f.frame = s.prefix.frame; f.mode = s.engine;
     f.jitterCycle=s.phase.phaseCount;
     // The refusal census on the copy route too (render below the output: DLSS or FSR upscaling), as on the HDR route.
-    f.refusalView = 0u;
+    f.refusalView = s.refusalView ? 1u : 0u;
     f.refusalCensus = s.refusalCensusFrames > 0;
     if (s.refusalCensusFrames) --s.refusalCensusFrames;
     nativeScale.store(f.renderWidth >= f.outputWidth && f.renderHeight >= f.outputHeight,
@@ -6224,6 +6359,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         }
         return;
     }
+    fetchCelestialRecords(ctx, f);   // planet patch motion: this frame's records for the resolve's t18
     if (!flatMonoResolve(s.device.Get(), ctx, f, &outputView, &s.reason)) {
         const char* temporalReason=s.reason;
         const char* fallbackReason=nullptr;
@@ -6400,7 +6536,7 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
         return false;
     };
     FlatMonoResolveFrame f{}; f.color = hdrView.Get(); f.depth = s.depthView.Get(); f.hdr = true;
-    f.refusalView = 0u;
+    f.refusalView = s.refusalView ? 1u : 0u;
     f.refusalCensus = s.refusalCensusFrames > 0;
     if (s.refusalCensusFrames) --s.refusalCensusFrames;
     if(selected.mixedCamera) {
@@ -6515,6 +6651,7 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
         }
     }
     reach("resolve");   // the frame is the resolver's from here
+    fetchCelestialRecords(ctx, f);   // planet patch motion: this frame's records for the resolve's t18
     if (!flatMonoResolve(s.device.Get(), ctx, f, &outputView, &s.reason)) {
         const char* temporalReason = s.reason;
         // The backend (or the route's own guard) refused before H was written. Recover the jitter into H, or decline.
@@ -6685,7 +6822,9 @@ void FlatRuntimeDrawScope::beginActualDraw(ID3D11Buffer* indirectArgs,UINT indir
         const bool opaque=rasterRefusal==nullptr;
         const bool colorWrites=flatDomainWritesColor(projection,bd,boundColors);
         if(domainPs && colorWrites)candidate->colorWritten=true;
-        const bool queriesUnsafe=opaque && bytes && !replayQueriesSafe(ctx);
+        const bool queriesChecked=opaque && bytes;
+        const bool queriesUnsafe=queriesChecked && !replayQueriesSafe(ctx);
+        if(queriesChecked)noteReplayQueryCheck(s,ctx,queriesUnsafe,domainVs,domainPs,domainWidth,domainHeight);
         const bool unplannable=!opaque || !bytes || queriesUnsafe || indirectArgs;
         if(unplannable && flatDomainPreservesSurface(dd)) {
             // No depth write: the last depth writer's surface and owner mark

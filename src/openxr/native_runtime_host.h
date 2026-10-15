@@ -67,10 +67,14 @@
 #include "flat_clear_state.h"
 #include "openvr_compositor.h"
 #include "compositor_publication.h"
+#include "pose_cache.h"
+#include "poll_ring.h"
 #include "space_pose.h"
 #include "seated_origin.h"
 #include "launch_centre_policy.h"
 #include "seated_space.h"
+#include "seat_memory.h"
+#include "seat_store.h"
 #include "reference_changes.h"
 #include "reset_events.h"
 #include "runtime_exports.h"
@@ -98,6 +102,8 @@ struct RuntimeOptions {
   // p50 0.006 ms.
   bool frameThreadPriorityHigh=true;
   bool frameEndOverlap=true;
+  // edvr_openxr.ini pose_cache=on|off (temporary A/B key, pose_cache.h). Off is the owner-hop path exactly as before.
+  bool poseCache=true;
 };
 template<class T,class F> XrResult enumerate(F call,std::vector<T>& out,T initial=T{}) {
   out.clear(); uint32_t n=0; XrResult r=call(0,&n,nullptr);
@@ -145,6 +151,7 @@ struct Api {
   PFN_xrEnumerateReferenceSpaces spaces=nullptr; PFN_xrCreateReferenceSpace createSpace=nullptr;
   PFN_xrDestroySpace destroySpace=nullptr; PFN_xrLocateViews locateViews=nullptr;
   PFN_xrLocateSpace locateSpace=nullptr; PFN_xrRequestExitSession requestExit=nullptr;
+  PFN_xrGetReferenceSpaceBoundsRect spaceBounds=nullptr;   // optional: the seat memory's one-time reference-space report
   Dispatch frames{}; StereoDispatch stereo{};
 };
 inline bool result(const char* operation,XrResult r) {
@@ -158,6 +165,28 @@ template<class T> bool load(Api& a,XrInstance instance,const char* name,T& desti
   destination=reinterpret_cast<T>(fn); return true;
 }
 inline bool counterNow(LARGE_INTEGER* value) { return QueryPerformanceCounter(value)!=FALSE; }
+// The seat memory's pose type against OpenXR's. A seated origin is a position and a heading about +Y (seated_origin.h builds exactly that); a
+// pose that may carry a little pitch or roll (a runtime's poseInPreviousSpace) is reduced to its heading the way seatedOriginFromHead does.
+inline SeatPose seatPoseFromXr(const XrPosef& p) {
+  return SeatPose{double(p.position.x),double(p.position.y),double(p.position.z),2.0*std::atan2(double(p.orientation.y),double(p.orientation.w))};
+}
+inline SeatPose seatPoseYawOf(const XrPosef& p) {
+  const double x=p.orientation.x,y=p.orientation.y,z=p.orientation.z,w=p.orientation.w;
+  return SeatPose{double(p.position.x),double(p.position.y),double(p.position.z),std::atan2(2.0*(x*z+w*y),1.0-2.0*(x*x+y*y))};
+}
+inline XrPosef xrFromSeatPose(const SeatPose& s) {
+  XrPosef p{};
+  p.position={float(s.x),float(s.y),float(s.z)};
+  p.orientation={0.0f,float(std::sin(s.yaw*0.5)),0.0f,float(std::cos(s.yaw*0.5))};
+  return p;
+}
+inline std::string seatUtf8(const std::wstring& w) {
+  if(w.empty())return std::string();
+  const int n=WideCharToMultiByte(CP_UTF8,0,w.data(),int(w.size()),nullptr,0,nullptr,nullptr);
+  std::string s(n>0?size_t(n):0,'\0');
+  if(n>0)WideCharToMultiByte(CP_UTF8,0,w.data(),int(w.size()),&s[0],n,nullptr,nullptr);
+  return s;
+}
 inline uint64_t nextRenderSizingGeneration() {
   static std::atomic<uint64_t> generation{0};
   return generation.fetch_add(1,std::memory_order_relaxed)+1;
@@ -165,7 +194,11 @@ inline uint64_t nextRenderSizingGeneration() {
 class NativeRuntimeHost : public SystemSource, public FrameSink, public CompositorSource, public AuxiliarySource, public RuntimeBackend {
  public:
   NativeRuntimeHost(OwnerService& owner,RenderThreadDispatcher& dispatcher,RenderRoute& route,ID3D11Device* supplied=nullptr)
-      :service(owner),renderRoute(route),graphicsCalls(dispatcher),externalDevice(supplied){}
+      :service(owner),renderRoute(route),graphicsCalls(dispatcher),externalDevice(supplied){
+    // Set before the first invoke: the owner reads the pointer while it runs requests (owner_service.h setInvokeStats).
+    service.setInvokeStats(ownerInvoke,&NativeRuntimeHost::frameCycleUs);
+    poseCache.setClock(&NativeRuntimeHost::frameCycleUs);
+  }
   OwnerService& service;
   RenderRoute& renderRoute;
   CountedGraphics graphicsCalls;
@@ -190,10 +223,18 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   std::atomic<uint64_t> publishedPumps{0};
   bool serviceStopped=false,serviceFailed=false;
   // A terminal OpenXR event is surfaced through the OpenVR event queue.  The
-  // owner records it here; pollEvent is also marshalled to the owner, so no
-  // cross-thread event queue is needed.
+  // owner records it here. With the pose cache off pollEvent is marshalled to
+  // the owner; with it on, the owner fills pollRing and pollEvent drains it.
+  // quitEventPending and its generation are guarded by quitMutex_ (the owner queues, pollEvent takes): with the pose cache on, pollEvent
+  // runs on the caller's thread.
+  std::mutex quitMutex_;
   bool quitEventPending=false;
   uint64_t quitEventGeneration=0;
+  // native_pose_cache (pose_cache.h, poll_ring.h). poseCacheOn is set once at startup from pose_cache; with it off none of the
+  // publication, the ring or the caller-side answers run. pollRing is filled by the owner (fillPollRing) and drained by pollEvent.
+  std::atomic<bool> poseCacheOn{false};
+  PoseCache poseCache;
+  PollRing pollRing;
   Lifecycle tracedLifecycle=Lifecycle::Uninitialized;
   OpenVRExtendedDisplay displayInterface{*this};OpenVRChaperone chaperoneInterface{*this};
   Api api; XrInstance instance=XR_NULL_HANDLE; XrSession session=XR_NULL_HANDLE;
@@ -250,6 +291,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   SubmissionStats submitStats;
   SubmissionStats::Sample submitSample;
   FrameCycleStats frameCycles;
+  // Caller-side wait of each OwnerService::invoke, split into queue and run (native_owner_invoke, owner_invoke_stats.h).
+  std::shared_ptr<OwnerInvokeStats> ownerInvoke=std::make_shared<OwnerInvokeStats>();
   std::atomic<bool> frameCycleEnabledNoted{false},frameCycleFirstNoted{false},postSubmitFirstNoted{false};
   std::atomic<uint64_t> frameCycleWaitToken{0},frameCycleSubmitToken{0},frameCycleSequence{0};
   // Phase-0 timing (src/common/periodic_work.h) of the 30 s frame-cycle report: built by makeReport's sorts
@@ -317,10 +360,27 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   bool flatPanelAvailable() const {return separateGraphics()&&stereo.noticeFormatSupported();}
   SeatedSpace seated;ReferenceChanges changes;ResetEvents resetEvents;
   XrSpace frameSpace=XR_NULL_HANDLE;
-  uint64_t recenters=0,resetPolls=0,referenceChanges=0;
+  uint64_t recenters=0,referenceChanges=0;
+  // Written by pollEvent on any thread when the pose cache is on (the ring drain), so atomic.
+  std::atomic<uint64_t> resetPolls{0};
   XrResult lastResetResult=XR_SUCCESS;
   XrTime lastResetTime=0;
   float resetPositionError=0,resetYawError=0;
+  // Seat memory (seat_memory.h, docs/seat-memory-2026-10-14.md). Owner thread only, like the seated space it moves.
+  SeatMemory seat;SeatCapture seatCapture;
+  std::vector<SeatRecord> seatBook;std::wstring seatFile;std::string seatKeyText;
+  bool seatLoaded=false,seatRefsTraced=false,seatContextTraced=false;
+  SeatPose currentOrigin;                    // the seated origin in natural LOCAL: identity until the first reset
+  unsigned seatResetCount=0,seatContextLines=0;
+  SeatContext lastTracedContext{};
+  bool seatRetroPending=false;uint64_t seatRetroAgeMs=0;     // a deferred recentre was just taken back: the apply that follows says so (retro=1)
+  const char* seatWhy="";                    // the last transition's reason, for the apply it triggers and the meter it schedules
+  uint64_t seatMeterDueAt=0,seatMeterNextPeriodic=0;
+  const char* seatTraceDecision="head";HeadCall seatTraceCall{};bool seatTraceHasCall=false;
+  PressInfo seatTracePress{};bool seatTraceHasPress=false;      // the HMD key press that went with the reset being traced (seat_memory.h PressInfo)
+  bool seatPressLogged=false;HmdPressStatus seatPressLoggedStatus=HmdPressStatus::Unpublished;uint32_t seatPressSeq=0;
+  uint64_t seatNoPressAt=0;bool seatLatePressPending=false;uint64_t seatLateAfterMs=0;     // a reset answered "no press" and a press arrived just after
+  uint64_t localHandled=0;     // LOCAL reference-space changes (referenceChanges counts each as it takes effect) the seat memory has answered
   // Declared before boundary: boundary's constructor stores its address, and
   // it must already exist to be bound (native_frame's own reset() sequence
   // below binds it once the session that owns its xrWaitFrame exists).
@@ -413,7 +473,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     float orientation[4]{0,0,0,1};
     double speedDegPerSec=0;
   } latestPoseFrame;
-  void dropPoseFrame() {latestPoseFrame=PoseFrame{};}
+  // Every place that drops the frame the game holds also drops the pose publication made from it (pose_cache.h).
+  // `why` is only the log's category (pose_cache.h PoseInvalidation); every call withdraws the publication.
+  void dropPoseFrame(PoseInvalidation why=PoseInvalidation::Other) {latestPoseFrame=PoseFrame{};poseCache.invalidate(why);}
   // The clock Elite's "now" pose calls read (a rig substitutes its own so "now" is a number it chooses), and the explicit-time locates the runtime
   // refused with XR_ERROR_TIME_INVALID and that were located at now + prediction instead.
   CounterNow headClock=counterNow;
@@ -757,6 +819,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     nativeTracePrintf("native_frame_end_overlap,enabled=%u,reason=%s\n",
       unsigned(frameEndOverlapEnabled&&startupOptions.separateDevice),
       !frameEndOverlapEnabled?"config":!startupOptions.separateDevice?"borrowed_device":"config");
+    poseCacheOn.store(startupOptions.poseCache,std::memory_order_release);
+    nativeTracePrintf("native_pose_cache_config,enabled=%u,key=pose_cache\n",unsigned(startupOptions.poseCache));
     const auto openBegan=StepClock::now();
     if(!open(startupOptions))return vr::VRInitError_Init_Internal;
     const double openMs=stepMs(openBegan);
@@ -833,6 +897,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   }
   void pumpEvents() {
     if(GetCurrentThreadId()!=ownerThread||!runtimeGeneration||serviceFailed)return;
+    fillPollRing();
     // owner_service.h's idle callback: fires when the queue is empty, but
     // also on its own 5 ms cadence right after ANY request finishes, whether
     // or not another one is already queued behind it. A frame_end_overlap
@@ -913,6 +978,80 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     poseGap.noteWait();
     poseGap.flushIfDue(nowMs,sink);
   }
+  // Owner, after a waitPoses published its frame (publishPoseGap has set latestPoseFrame). Locates the two instants an Elite "now" call can
+  // be answered at (pose_cache.h) and publishes them under the keys they were made with. A failure to locate or to read the clock leaves no
+  // publication, so every display call takes the hop, which is the answer the cache must equal.
+  void publishPoseCache() {
+    if(GetCurrentThreadId()!=ownerThread)return;
+    // Every failure below invalidates. The previous publication is kept until publish replaces it: its `next` slot is what the in-wait
+    // error is measured against.
+    const auto fail=[&]{poseCache.invalidate();};
+    if(!latestPoseFrame.valid||latestPoseFrame.displayTime<=0||!seated.space()){fail();return;}
+    const LocatorDispatch dispatch{api.convertTime,api.locateSpace};
+    const XrTime display=latestPoseFrame.displayTime;const XrDuration period=latestPoseFrame.period;
+    XrTime t1=0,t2=0,nowAt=0;HeadLocatorStage stage=HeadLocatorStage::None;
+    // The same arithmetic as answerTime (head_pose_time.h): display + period, unless the cut lies between them.
+    if(!nextPredictionTime(display,period,t1)||changes.crosses(display,t1)){fail();return;}
+    if(HeadLocator{}.currentTime(dispatch,instance,headClock,&stage,boundary.estimateNow(),nowAt)!=XR_SUCCESS){fail();return;}
+    PoseCacheRecord fresh;
+    fresh.keys={geometryGeneration,poses.read().originGeneration};
+    fresh.display=display;fresh.period=period;fresh.nowAtPublish=nowAt;
+    fresh.frameOrientationKnown=latestPoseFrame.orientationKnown;
+    for(unsigned i=0;i<4;++i)fresh.frameOrientation[i]=latestPoseFrame.orientation[i];
+    fresh.speedKnown=latestPoseFrame.speedKnown;fresh.speedDegPerSec=latestPoseFrame.speedDegPerSec;
+    if(!locatePoseCacheSlot(dispatch,t1,fresh.now)){fail();return;}
+    // The next frame's answer, one period further on. Optional: without it a call made during the next wait takes the hop.
+    if(nextPredictionTime(t1,period,t2)&&!changes.crosses(t1,t2))locatePoseCacheSlot(dispatch,t2,fresh.next);
+    poseCache.publish(fresh,poseCache.clockUs());
+  }
+  bool locatePoseCacheSlot(const LocatorDispatch& dispatch,XrTime target,PoseCacheSlot& slot) {
+    XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
+    if(HeadLocator{}.locateAt(dispatch,view,seated.space(),target,head)!=XR_SUCCESS)return false;
+    vr::TrackedDevicePose_t pose{};
+    if(!headPoseFrom(head,pose))return false;
+    slot=PoseCacheSlot{};slot.valid=true;slot.target=target;slot.pose=pose;
+    slot.orientation[0]=head.pose.orientation.x;slot.orientation[1]=head.pose.orientation.y;
+    slot.orientation[2]=head.pose.orientation.z;slot.orientation[3]=head.pose.orientation.w;
+    return true;
+  }
+  // Owner (waitPoses, each idle pump). Moves queued seated resets of the current geometry generation into pollRing while it has room; the
+  // ring's drop policy is in poll_ring.h.
+  void fillPollRing() {
+    if(GetCurrentThreadId()!=ownerThread||!poseCacheOn.load(std::memory_order_acquire))return;
+    pollRing.retireExcept(geometryGeneration);
+    while(pollRing.room()) {
+      PollRing::Item item;item.generation=geometryGeneration;
+      if(!resetEvents.takeFor(geometryGeneration,item.reset))break;
+      pollRing.push(item);
+    }
+  }
+  // pollEvent with the pose cache on: any thread, no owner hop. A queued quit first (guarded by quitMutex_), then the ring's head reset.
+  bool pollEventLocal(uint64_t generation,vr::ETrackingUniverseOrigin origin,vr::VREvent_t& event,vr::TrackedDevicePose_t& pose) {
+    {
+      std::lock_guard<std::mutex> lock(quitMutex_);
+      if(quitEventPending&&quitEventGeneration==generation) {
+        event={};event.eventType=vr::VREvent_Quit;
+        event.trackedDeviceIndex=vr::k_unTrackedDeviceIndexInvalid;
+        event.eventAgeSeconds=0.0f;pose=invalidHeadPose(true);
+        quitEventPending=false;return true;
+      }
+    }
+    PollRing::Item item;
+    if(!pollRing.pop(generation,item))return false;
+    seatedResetEvent(item.reset,origin,poses.read().originGeneration,GetTickCount64(),event,pose);
+    ++resetPolls;
+    return true;
+  }
+  // Caller-side pose cache and poll ring: one native_pose_cache line per frame-cycle window, only while the key is on.
+  void emitPoseCache(uint64_t window) {
+    if(!poseCacheOn.load(std::memory_order_acquire))return;
+    uint64_t drained=0,dropped=0;pollRing.takeCounts(drained,dropped);
+    PoseCacheReport report{};poseCache.takeWindow(report);
+    char line[480]{};
+    if(formatPoseCacheLine(window,report,drained,dropped,line,sizeof line))nativeTracePrintf("%s",line);
+    char drops[240]{};
+    if(formatPoseInvalidationLine(window,report,drops,sizeof drops))nativeTracePrintf("%s",drops);
+  }
   // Whether the runtime's hidden-area mesh may be handed to the game this frame.
   // It is cut for the runtime's own frustum and Elite reads it once, so a trim,
   // which changes that frustum, withholds it -- keyed on what is
@@ -935,9 +1074,12 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       if(r==XR_SUCCESS){loading.emptyCompleted();++loadingClears;++loadingFrames;++loadingEmpty;}
       return r;
     }
-    uint64_t applied=0;
-    if(!changes.advance(frame.predictedDisplayTime,applied))return XR_ERROR_TIME_INVALID;
-    if(applied){referenceChanges+=applied;if(!invalidateOrigin())return XR_ERROR_LIMIT_REACHED;}
+    XrResult changeError=XR_SUCCESS;
+    switch(advanceReferenceChanges(frame,changeError,false)) {
+      case ChangeStep::Error: return changeError;
+      case ChangeStep::Withheld: return XR_SUCCESS;     // the frame was given up for a runtime recentre; the next one is in the new seated space
+      case ChangeStep::Ok: break;
+    }
     frameSpace=seated.space();
     GeometryInput located{};
     r=locateGeometry({api.locateViews,api.locateSpace},binding,frame,geometryGeneration,sizes,located,nullptr,frameSpace);
@@ -1027,9 +1169,12 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       return boundary.clear();
     }
     // The views, located as loadingStep locates its skybox frame.
-    uint64_t applied=0;
-    if(!changes.advance(frame.predictedDisplayTime,applied)){boundary.clear();return XR_ERROR_TIME_INVALID;}
-    if(applied){referenceChanges+=applied;if(!invalidateOrigin()){boundary.clear();return XR_ERROR_LIMIT_REACHED;}}
+    XrResult changeError=XR_SUCCESS;
+    switch(advanceReferenceChanges(frame,changeError,true)) {
+      case ChangeStep::Error: return changeError;
+      case ChangeStep::Withheld: return XR_SUCCESS;     // the frame was given up for a runtime recentre; the next one is in the new seated space
+      case ChangeStep::Ok: break;
+    }
     frameSpace=seated.space();
     GeometryInput located{};
     r=locateGeometry({api.locateViews,api.locateSpace},binding,frame,geometryGeneration,sizes,located,nullptr,frameSpace);
@@ -1074,6 +1219,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(buffer.type==XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING) {
       const auto& event=*reinterpret_cast<const XrEventDataReferenceSpaceChangePending*>(&buffer);
       if(!host.changes.note(event))nativeTracePuts("error,reference_change_policy");
+      // A cut is now pending: a publication made before it may hold a slot on the far side of it (publishPoseCache checks crosses() only when it
+      // publishes). Withdraw it; the next wait publishes under the new rule, and the calls in between take the hop, which checks crosses() itself.
+      host.poseCache.invalidate(PoseInvalidation::RuntimeRecentre);
     }
     if(buffer.type==XR_TYPE_EVENT_DATA_PERF_SETTINGS_EXT && host.perfSettingsExtension) {
       const auto& event=*reinterpret_cast<const XrEventDataPerfSettingsEXT*>(&buffer);
@@ -1119,7 +1267,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     features.invalidate();previousPairValid=false;
     timingInvalidate();
     geometry.invalidate(geometryGeneration);frameGeometryAvailable=false;
-    dropPoseFrame();
+    dropPoseFrame(poseInvalidationForReason(reason));
     if(originInvalidationNotes++<16)nativeTracePrintf("geometry_invalidated,reason=%s,generation=%llu,recenters=%llu,reference_changes=%llu\n",
       reason,(unsigned long long)geometryGeneration,(unsigned long long)recenters,(unsigned long long)referenceChanges);
     return poses.resetOrigin(compositorGeneration);
@@ -1150,7 +1298,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         cycleShape.sceneReady=featureFrameKnown&&featureFrame.sceneReady?1u:0u;
         for(unsigned i=0;i<2;++i){const auto submitted=fovTrim.lastSubmitted(i);cycleShape.width[i]=submitted.width;cycleShape.height[i]=submitted.height;cycleShape.outputWidth[i]=sizes[i].recommendedImageRectWidth;cycleShape.outputHeight[i]=sizes[i].recommendedImageRectHeight;}
         frameCycles.waitOwnerEnd(cycleToken,frameCycleUs());frameCycleWaitToken.store(0,std::memory_order_release);
-      });
+      },OwnerCallKind::WaitPoses);
       // Start after the route returns so the dispatch/rendezvous is outside
       // the application interval. Direct owner calls have no producer-side
       // route return and therefore do not claim this interval.
@@ -1217,9 +1365,16 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         }
       }
     }
+    if(seatPoll())return vr::VRCompositorError_InvalidTexture;     // the stored seat went back: this frame's pose update is given up, as an intro recentre's is
     if(introRecentreRequested()) {
-      if(applyIntroRecentre())clearIntroRecentreRequest();
-      return vr::VRCompositorError_InvalidTexture;
+      switch(seatIntro()) {
+        case SeatIntro::Todays:
+          if(applyIntroRecentre())clearIntroRecentreRequest();
+          return vr::VRCompositorError_InvalidTexture;
+        case SeatIntro::Applied: clearIntroRecentreRequest();return vr::VRCompositorError_InvalidTexture;
+        case SeatIntro::Skipped: clearIntroRecentreRequest();break;
+        case SeatIntro::Sampling: case SeatIntro::Retry: break;     // the ask stays; the next frame samples or applies again
+      }
     }
     timingRetire(); // Provider waitBegin rejects an unfinished previous pair.
     timingSequence=timing.waitBegin(); timingFrameActive=timingSequence!=0;
@@ -1242,6 +1397,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       nativeTracePrintf("native_pacing,mode=%s,sequence=%llu,changes=%llu\n",
         pacing==FramePacing::Deferred?"deferred":"runtime",
         (unsigned long long)(frameSequenceOffset+compositorWaits),(unsigned long long)pacingChanges);}
+    // A call made from here until the publish below is answered from the cache's `next` slot (pose_cache.h).
+    if(poseCacheOn.load(std::memory_order_acquire))poseCache.beginWait();
     lastCompositorResult=boundary.waitAndBegin(pacing);
     if(lastCompositorResult!=XR_SUCCESS&&lastCompositorResult!=XR_FRAME_DISCARDED&&lastCompositorResult!=XR_SESSION_LOSS_PENDING)
       return fail(lastCompositorResult);
@@ -1249,9 +1406,12 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     Frame frame=boundary.frame();
     if(!applyFrameSequence(frame)){boundary.clear();return fail(XR_ERROR_LIMIT_REACHED);}
     if(state.terminal()){boundary.clear();return fail(XR_SESSION_LOSS_PENDING);}
-    uint64_t applied=0;
-    if(!changes.advance(frame.predictedDisplayTime,applied)){boundary.clear();return fail(XR_ERROR_TIME_INVALID);}
-    if(applied){referenceChanges+=applied;if(!invalidateOrigin()){boundary.clear();return fail(XR_ERROR_LIMIT_REACHED);}}
+    XrResult changeError=XR_SUCCESS;
+    switch(advanceReferenceChanges(frame,changeError,true)) {
+      case ChangeStep::Error: return fail(changeError);
+      case ChangeStep::Withheld: return vr::VRCompositorError_InvalidTexture;     // a runtime recentre took effect on this frame: no pose from the old seated space
+      case ChangeStep::Ok: break;
+    }
     frameSpace=seated.space();
     GeometryInput located{};XrSpaceVelocity velocity{XR_TYPE_SPACE_VELOCITY};
     auto r=locateGeometry({api.locateViews,api.locateSpace},binding,frame,geometryGeneration,sizes,located,&velocity,frameSpace);
@@ -1398,6 +1558,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     out=snapshot;lastCompositorResult=XR_SUCCESS;
     publishPoseGap(frame.predictedDisplayTime,frame.predictedDisplayPeriod,located.headPose,render.pose.bPoseIsValid,
       velocity.velocityFlags,velocity.angularVelocity,GetTickCount64(),[](const char* gapLine){nativeTracePuts(gapLine);});
+    if(poseCacheOn.load(std::memory_order_acquire))publishPoseCache();
     if(timingFrameActive && FAILED(timing.waitEnd(timingSequence,true,static_cast<int64_t>(frame.predictedDisplayPeriod))))
       timingInvalidate();
     if(timingFrameActive) {
@@ -1409,6 +1570,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         timing.publishDeviceGpu(missing);
       }
     }
+    fillPollRing();
     return vr::VRCompositorError_None;
   }
   bool setTrackingSpace(uint64_t generation,vr::ETrackingUniverseOrigin origin) override {
@@ -1743,7 +1905,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         return accepted;
       }
       bool result=false;
-      const bool dispatched=service.invoke([&]{result=handoff(generation);});
+      const bool dispatched=service.invoke([&]{result=handoff(generation);},OwnerCallKind::Submit);
       frameCycles.noteHandoff(began,frameCycleUs(),sequence,caller,dispatched&&result);
       return dispatched&&result;
     }
@@ -2051,6 +2213,15 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   static uint64_t frameCycleUs() noexcept {
     return edvrNativeTraceNowUs();
   }
+  // Caller-side owner hops, one native_owner_invoke line per kind at each frame-cycle window. frames is the window's valid cycles.
+  void emitOwnerInvoke(uint64_t window,unsigned frames) {
+    OwnerInvokeStats::KindReport rows[OwnerInvokeStats::kinds]{};
+    ownerInvoke->takeWindow(rows);
+    for(unsigned k=0;k<OwnerInvokeStats::kinds;++k){
+      char line[320]{};
+      if(formatOwnerInvokeLine(window,OwnerCallKind(k),rows[k],frames,line,sizeof line))nativeTracePrintf("%s",line);
+    }
+  }
   // One line per completed cycle longer than twice the runtime's last real
   // predicted period: the outlier a 30-second window's mean/p95 hides. The
   // phases are this one cycle's, not a window's. sequence is the timing
@@ -2254,6 +2425,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     maybeLongCycleCounts();
     if(!frameCycleFirstNoted&&frameCycles.firstComplete()) {frameCycleFirstNoted=true;nativeTracePrintf("native_frame_cycle,first_complete=1\n");}
     FrameCycleStats::Report r{};if(!frameCycles.takeReport(r))return;
+    emitOwnerInvoke(r.window,r.valid);
+    emitPoseCache(r.window);
     const uint64_t writeBegan=frameCycleUs();
     const auto& c=r.cycle;const double validSum=c.mean*double(r.valid);
     nativeTracePrintf("native_frame_cycle_window,window=%llu,boundary=host_wait_return_to_next_host_wait_return,admitted=%llu,valid=%u,first=%llu,last=%llu,elapsed_ms=%llu,valid_cycle_sum_ms=%.3f,caller_wait_fps=%.3f,valid_sample_fps=%.3f,caller_thread=%u,wait_thread=%u,thread_consistent=%u,input=%ux%u/%ux%u,output=%ux%u/%ux%u,pacing=%u,should_render=%u,scene_ready=%u,generation=%llu,feature_epoch=%llu,missing_clock=%llu,missing_reentrant=%llu,missing_thread=%llu,missing_sequence=%llu,missing_partial=%llu,missing_duplicate_eye=%llu,missing_direct_owner=%llu,missing_scope=%llu,missing_overflow=%llu,late_frames=%llu,frame_end_overlap=%u\n",
@@ -2399,7 +2572,23 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     poseGap.note(sample);
   }
   bool locateHeadFor(uint64_t generation,vr::ETrackingUniverseOrigin origin,float prediction,const HeadCall& call,vr::TrackedDevicePose_t& out) override {
-    if(!service.isOwner()) {bool result=false;return service.invoke([&]{result=locateHeadFor(generation,origin,prediction,call,out);})&&result;}
+    // A display call under a live publication is answered from it, on this thread, with no owner hop (pose_cache.h). Any other call, and any
+    // this cannot answer, takes the hop below unchanged. Not on the owner: the hop re-enters here on the owner thread, and that second
+    // pass must locate, not answer from the publication it was sent to replace.
+    if(call.display&&origin==vr::TrackingUniverseSeated&&poseCacheOn.load(std::memory_order_acquire)&&!service.isOwner()) {
+      PoseCacheAnswer answer;PoseCacheMiss why=PoseCacheMiss::Unpublished;
+      if(poseCache.answer(generation,poses.read().originGeneration,call.rva,answer,why)) {
+        PoseGapStats::Sample sample{};sample.thread=call.thread;sample.rva=call.rva;sample.predictionSec=prediction;sample.located=true;
+        sample.gapKnown=true;sample.gapMs=double(answer.target-answer.display)/1e6;
+        if(answer.pose.bPoseIsValid&&answer.frameOrientationKnown){
+          sample.angleKnown=true;sample.angleDeg=quaternionAngleDegrees(answer.frameOrientation,answer.returnedOrientation);
+        }
+        if(answer.speedKnown){sample.speedKnown=true;sample.speedDegPerSec=answer.speedDegPerSec;}
+        poseGap.note(sample);
+        out=answer.pose;return true;
+      }
+    }
+    if(!service.isOwner()) {bool result=false;return service.invoke([&]{result=locateHeadFor(generation,origin,prediction,call,out);},OwnerCallKind::LocateHead)&&result;}
     PoseGapStats::Sample sample{};sample.thread=call.thread;sample.rva=call.rva;sample.predictionSec=prediction;
     const bool located=locateHeadOwned(generation,origin,prediction,call,out,sample);
     sample.located=located;
@@ -2490,8 +2679,12 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(pose.bPoseIsValid){double matrix[4][4];detail::rigid(head.pose,matrix);if(!detail::narrow(matrix,pose.mDeviceToAbsoluteTracking))return false;}
     out=pose;return true;
   }
-  bool resetSeated(uint64_t generation) override {
-    if(!service.isOwner()) {bool result=false;return service.invoke([&]{result=resetSeated(generation);})&&result;}
+  bool resetSeated(uint64_t generation) override {return resetSeatedFor(generation,HeadCall{});}
+  // The game's ResetSeatedZeroPose. What the seat memory does with it is seat_memory.h's decision table (SeatMemory::classifyReset): in
+  // in a menu or a load, or before the graphics half has spoken, it is honoured exactly as before; aboard or on foot (onFootIsSeated, seat_memory.h)
+  // inside a transition window the stored seat replaces the head pose; outside a window it is the player's own recentre, honoured and remembered.
+  bool resetSeatedFor(uint64_t generation,const HeadCall& call) override {
+    if(!service.isOwner()) {bool result=false;return service.invoke([&]{result=resetSeatedFor(generation,call);})&&result;}
     if(GetCurrentThreadId()!=ownerThread)return false;
     auto operation=gate.tryEnter(runtimeGeneration);
     if(!operation||generation!=geometryGeneration||!state.running()||state.terminal()||
@@ -2501,19 +2694,54 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
     lastResetResult=HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,view,local,0,head,&lastResetTime,counterNow,nullptr,boundary.estimateNow());
     if(lastResetResult!=XR_SUCCESS)return false;
-    return applySeatedReset(head,"seated_reset",true);
+    const uint64_t now=GetTickCount64();
+    seatEnsureLoaded();seatSync(now);
+    // The player's key, if the graphics half can see it: a press just before this call makes it the player's; none, with the key observable,
+    // makes it the game's own (the stored seat replaces it, window or not, and nothing is held). Not observable: the timing rules, as before.
+    const PressInfo press=pressInfoFrom(decodeHmdPress(hmdResetPressState()),hmdResetPressTick(),now);
+    const SeatResetDecision decision=seat.classifyReset(now,press);
+    seatTraceCall=call;seatTraceHasCall=true;seatTraceDecision=seatResetDecisionName(decision);
+    seatTracePress=press;seatTraceHasPress=true;
+    XrPosef replacement{};const XrPosef* over=nullptr;
+    if(decision==SeatResetDecision::ReplaceWithSeat){replacement=xrFromSeatPose(seat.seat());over=&replacement;}
+    const SeatPose previousSeat=seat.seat();const bool hadSeat=seat.has();
+    const bool ok=applySeatedReset(head,"seated_reset",true,over);
+    if(ok) {
+      // A player-looking recentre over a stored seat is held for SeatMemory::kRetroMs before the disk hears of it: a transition inside that time
+      // takes it back (the ramp's reset lands before the boarding flip is visible).
+      if(seat.noteReset(decision,currentOrigin,now))seatSave(decision==SeatResetDecision::HonourPress?"manual_reset_press":"manual_reset");
+      else if(decision==SeatResetDecision::HonourStore&&hadSeat)
+        nativeTracePrintf("seat_store,action=defer,why=manual_reset,prev=%.3f/%.3f/%.3f/%.1f,new=%.3f/%.3f/%.3f/%.1f,commit_after_ms=%llu\n",
+            previousSeat.x,previousSeat.y,previousSeat.z,seatRadToDeg(previousSeat.yaw),currentOrigin.x,currentOrigin.y,currentOrigin.z,
+            seatRadToDeg(currentOrigin.yaw),(unsigned long long)SeatMemory::kRetroMs);
+    }
+    if(ok&&decision==SeatResetDecision::ReplaceWithSeat&&press.state==PressState::None){seat.noteReplacedByNoPress(now);seatNoPressAt=now;}
+    return ok;
   }
   // Owner-only, with no open frame. Both startup and explicit game resets
   // use a pose in the natural LOCAL space, so resets never accumulate offsets.
-  bool applySeatedReset(const XrSpaceLocation& head,const char* reason,bool notifyGame) {
+  // `overrideOrigin` is the seat memory's: the origin to put there instead of the one the head would make (the head is then only the
+  // event-time sample the game's reset event carries). Every call is traced as `seat_reset` (traceSeatReset), win or lose.
+  bool applySeatedReset(const XrSpaceLocation& head,const char* reason,bool notifyGame,const XrPosef* overrideOrigin=nullptr) {
+    const SeatPose before=currentOrigin;
+    const bool ok=applySeatedResetCore(head,reason,notifyGame,overrideOrigin);
+    traceSeatReset(reason,head,before,ok);
+    return ok;
+  }
+  bool applySeatedResetCore(const XrSpaceLocation& head,const char* reason,bool notifyGame,const XrPosef* overrideOrigin) {
     if(GetCurrentThreadId()!=ownerThread||state.frameOpen()||!seated.space()||
        (notifyGame&&!resetEvents.room(geometryGeneration))) {
       lastResetResult=XR_ERROR_CALL_ORDER_INVALID;return false;
     }
     XrPosef origin{};
-    if(!seatedOriginFromHead(head.pose,head.locationFlags,origin)){lastResetResult=XR_ERROR_POSE_INVALID;return false;}
+    if(overrideOrigin)origin=*overrideOrigin;
+    else if(!seatedOriginFromHead(head.pose,head.locationFlags,origin)){lastResetResult=XR_ERROR_POSE_INVALID;return false;}
+    // The publication is withdrawn BEFORE the seated space is replaced (not only by invalidateOrigin below): no cached answer in the old space
+    // can be served from the first instant the space changes. Owner thread, so no publish can follow until this call is done.
+    poseCache.invalidate(poseInvalidationForReason(reason));
     lastResetResult=seated.replace(origin);
-    if(lastResetResult!=XR_SUCCESS){geometry.invalidate(geometryGeneration);poses.invalidate(compositorGeneration);dropPoseFrame();return false;}
+    if(lastResetResult!=XR_SUCCESS){geometry.invalidate(geometryGeneration);poses.invalidate(compositorGeneration);dropPoseFrame(poseInvalidationForReason(reason));return false;}
+    currentOrigin=seatPoseFromXr(origin);
     if(!invalidateOrigin(reason)){lastResetResult=XR_ERROR_LIMIT_REACHED;return false;}
     // Verify and attach an event-time sample, not a later cached render pose.
     TimedHeadPose atReset{};
@@ -2526,6 +2754,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(notifyGame&&!resetEvents.push(geometryGeneration,poses.read().originGeneration,GetTickCount64(),atReset.pose)){
       lastResetResult=XR_ERROR_LIMIT_REACHED;return false;
     }
+    fillPollRing();
     ++recenters;return true;
   }
   // intro_panel.cpp's one-shot ask (frame_flag.h, requestIntroRecentre):
@@ -2544,7 +2773,341 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
     lastResetResult=HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,view,local,0,head,&lastResetTime,counterNow,nullptr,boundary.estimateNow());
     if(lastResetResult!=XR_SUCCESS)return false;
-    return applySeatedReset(head,"intro_recentre",true);
+    seatTraceDecision="intro_head";
+    const bool ok=applySeatedReset(head,"intro_recentre",true);
+    if(ok)seat.noteOrigin(false);
+    return ok;
+  }
+  // ---- Seat memory. What the player's real seat is, kept in natural LOCAL; see seat_memory.h for the decisions and the review for why.
+  // Everything here is a log line first: a build whose seat code never ran writes no `seat_` line at all (seat_memory,init is the first).
+  static const char* seatModeName(const SeatContext& c) {return !c.published?"unpublished":c.keep?"keep":"game";}
+  void seatEnsureLoaded() {
+    if(seatLoaded)return;
+    seatLoaded=true;
+    seatKeyText=edvr::native_render::headsetKey(edvr::native_render::headsetToken(runtimeLabel,sizeof(runtimeLabel)),
+        edvr::native_render::headsetToken(systemLabel,sizeof(systemLabel)));
+    const std::wstring dir=seatMirrorDir(false);
+    if(!dir.empty())seatFile=dir+L"\\"+kSeatFileName;
+    unsigned skipped=0;bool existed=false,readOk=true;
+    if(!seatFile.empty())readOk=seatBookLoadFile(seatFile,seatBook,&skipped,&existed);
+    SeatPose stored{};
+    const bool found=readOk&&seatBookFind(seatBook,seatKeyText,stored)&&seatPoseFinite(stored);
+    if(found)seat.setSeat(stored);
+    const SeatContext c=decodeSeatContext(seatContextWord());
+    nativeTracePrintf("seat_memory,init=1,mode=%s,key=%s,stored=%u,seat=%.3f/%.3f/%.3f/%.1f,file=%s,file_exists=%u,read_ok=%u,records=%u,skipped_lines=%u\n",
+        seatModeName(c),seatKeyText.c_str(),unsigned(found),stored.x,stored.y,stored.z,seatRadToDeg(stored.yaw),
+        seatFile.empty()?"(no mirror folder yet)":seatUtf8(seatFile).c_str(),unsigned(existed),unsigned(readOk),unsigned(seatBook.size()),skipped);
+  }
+  void seatSave(const char* why,uint64_t deferredMs=0) {
+    if(!seat.has())return;
+    seatBookPut(seatBook,seatKeyText,seat.seat());
+    if(seatFile.empty()) {const std::wstring dir=seatMirrorDir(true);if(!dir.empty())seatFile=dir+L"\\"+kSeatFileName;}
+    const bool ok=!seatFile.empty()&&seatBookSaveFile(seatFile,seatBook);
+    const SeatPose& s=seat.seat();
+    nativeTracePrintf("seat_store,action=save,why=%s,deferred_ms=%llu,ok=%u,key=%s,seat=%.3f/%.3f/%.3f/%.1f,file=%s\n",why,(unsigned long long)deferredMs,
+        unsigned(ok),seatKeyText.c_str(),s.x,s.y,s.z,seatRadToDeg(s.yaw),seatFile.empty()?"(none)":seatUtf8(seatFile).c_str());
+  }
+  // The head in natural LOCAL, as the heading-and-position pose a seat is. Samples only; touches no reset state.
+  bool seatHeadLocal(SeatPose& out,bool requireTracked=true) {
+    XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};XrTime exact=0;
+    const XrResult r=HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,view,local,0,head,&exact,counterNow,nullptr,boundary.estimateNow());
+    if(r!=XR_SUCCESS)return false;
+    constexpr XrSpaceLocationFlags tracked=XR_SPACE_LOCATION_POSITION_TRACKED_BIT|XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT;
+    if(requireTracked&&(head.locationFlags&tracked)!=tracked)return false;
+    XrPosef origin{};
+    if(!seatedOriginFromHead(head.pose,head.locationFlags,origin))return false;
+    out=seatPoseFromXr(origin);return true;
+  }
+  void traceSeatReset(const char* reason,const XrSpaceLocation& head,const SeatPose& before,bool ok) {
+    SeatPose headLocal{};XrPosef o{};
+    if(seatedOriginFromHead(head.pose,head.locationFlags,o))headLocal=seatPoseFromXr(o);
+    const SeatContext& c=seat.context();const uint64_t now=GetTickCount64();
+    const SeatMeter after=seatMeter(headLocal,currentOrigin);
+    const bool retro=seatRetroPending&&std::strcmp(reason,"seat_transition")==0;
+    char bind[40]="-";
+    {char a[17],b[17];hmdResetLabel(0,a);hmdResetLabel(1,b);
+     if(a[0]&&b[0])snprintf(bind,sizeof bind,"%s|%s",a,b);else if(a[0]||b[0])snprintf(bind,sizeof bind,"%s",a[0]?a:b);}
+    nativeTracePrintf("seat_reset,n=%u,reason=%s,decision=%s,mode=%s,where=%s,window=%u,window_age_ms=%llu,stored=%u,origin_was_seat=%u,"
+        "caller_thread=%lu,caller_rva=0x%X,head_local=%.3f/%.3f/%.3f/%.1f,from=%.3f/%.3f/%.3f/%.1f,to=%.3f/%.3f/%.3f/%.1f,"
+        "moved_cm=%.1f,moved_deg=%.1f,after_offset_cm=%.1f,after_height_cm=%.1f,after_yaw_deg=%.1f,retro=%u,age_ms=%llu,press=%s,press_gap_ms=%lld,press_why=%s,bind=%s,result=%d,ok=%u\n",
+        ++seatResetCount,reason,seatTraceDecision,seatModeName(c),seatWhereName(seat.where()),unsigned(seat.inWindow(now)),
+        (unsigned long long)seat.windowAgeMs(now),unsigned(seat.has()),unsigned(seat.originIsSeat()),
+        seatTraceHasCall?(unsigned long)seatTraceCall.thread:0ul,seatTraceHasCall?seatTraceCall.rva:0u,
+        headLocal.x,headLocal.y,headLocal.z,seatRadToDeg(headLocal.yaw),before.x,before.y,before.z,seatRadToDeg(before.yaw),
+        currentOrigin.x,currentOrigin.y,currentOrigin.z,seatRadToDeg(currentOrigin.yaw),
+        seatDistance(before,currentOrigin)*100.0,std::fabs(seatRadToDeg(seatWrap(currentOrigin.yaw-before.yaw))),
+        after.offsetCm,after.heightCm,after.yawDeg,unsigned(retro),(unsigned long long)(retro?seatRetroAgeMs:0),
+        seatTraceHasPress?pressStateName(seatTracePress.state):"na",seatTraceHasPress?(long long)seatTracePress.gapMs:-1ll,seatTraceHasPress?seatTracePress.why:"-",bind,
+        int(lastResetResult),unsigned(ok));
+    if(retro&&ok)seatRetroPending=false;
+    seatTraceDecision="head";seatTraceHasCall=false;seatTraceCall=HeadCall{};seatTraceHasPress=false;seatTracePress=PressInfo{};
+  }
+  // Take the graphics half's word and let the memory decide. Called every WaitGetPoses and before a reset is classified, so a change this
+  // frame is seen first. A transition (a window opening, an apply due) is a line of its own.
+  void seatSync(uint64_t now) {
+    const SeatContext c=decodeSeatContext(seatContextWord());
+    const bool changed=!seatContextTraced||c.published!=lastTracedContext.published||c.keep!=lastTracedContext.keep||
+      c.gameplay!=lastTracedContext.gameplay||c.seatedKnown!=lastTracedContext.seatedKnown||c.seated!=lastTracedContext.seated||
+      c.onFootKnown!=lastTracedContext.onFootKnown||c.onFoot!=lastTracedContext.onFoot||c.cameraOpen!=lastTracedContext.cameraOpen||
+      c.seatKind!=lastTracedContext.seatKind||c.transitions!=lastTracedContext.transitions;
+    const SeatEvents ev=seat.onContext(c,now);
+    if(changed&&seatContextLines<300) {
+      ++seatContextLines;seatContextTraced=true;lastTracedContext=c;
+      nativeTracePrintf("seat_context,published=%u,mode=%s,gameplay=%u,seated=%u/%u,on_foot=%u/%u,camera=%u,seat_kind=0x%X,transitions=%u,where=%s\n",
+          unsigned(c.published),seatModeName(c),unsigned(c.gameplay),unsigned(c.seatedKnown),unsigned(c.seated),unsigned(c.onFootKnown),
+          unsigned(c.onFoot),unsigned(c.cameraOpen),c.seatKind,c.transitions,seatWhereName(seat.where()));
+    }
+    {
+      const HmdResetPress pr=decodeHmdPress(hmdResetPressState());
+      if(!seatPressLogged||pr.status!=seatPressLoggedStatus) {
+        seatPressLogged=true;seatPressLoggedStatus=pr.status;
+        char a[17],b[17];hmdResetLabel(0,a);hmdResetLabel(1,b);
+        nativeTracePrintf("seat_press,status=%s,observable=%u,bind0=%s,bind1=%s,seq=%u,rule=%s\n",hmdPressStatusName(pr.status),
+            unsigned(pr.status==HmdPressStatus::Observable),a[0]?a:"-",b[0]?b:"-",pr.seq,
+            pr.status==HmdPressStatus::Observable?"press_decides":"timing_window_and_hold");
+      }
+      if(pr.seq!=seatPressSeq) {
+        seatPressSeq=pr.seq;
+        // A press the frame poll saw just AFTER a reset it was not there for: the game's call beat the poll, and that reset was the player's.
+        if(seat.takeLatePress(now)){seatLatePressPending=true;seatLateAfterMs=now-seatNoPressAt;}
+      }
+    }
+    if(ev.discardedPending) {
+      seatRetroPending=true;seatRetroAgeMs=ev.discardAgeMs;
+      nativeTracePrintf("seat_store,action=discard_pending,why=transition_within_%llus,age_ms=%llu,transition=%s,discarded=%.3f/%.3f/%.3f/%.1f,restored=%.3f/%.3f/%.3f/%.1f\n",
+          (unsigned long long)(SeatMemory::kRetroMs/1000),(unsigned long long)ev.discardAgeMs,ev.why,ev.discardedSeat.x,ev.discardedSeat.y,ev.discardedSeat.z,seatRadToDeg(ev.discardedSeat.yaw),
+          ev.restoredSeat.x,ev.restoredSeat.y,ev.restoredSeat.z,seatRadToDeg(ev.restoredSeat.yaw));
+    }
+    if(ev.windowOpened||ev.applyWanted||ev.noSeat) {
+      seatWhy=ev.why;
+      nativeTracePrintf("seat_event,why=%s,window_opened=%u,apply_wanted=%u,no_seat=%u,where=%s,seat_kind=0x%X,transitions=%u,camera=%u,stored=%u,origin_is_seat=%u,mode=%s\n",
+          ev.why,unsigned(ev.windowOpened),unsigned(ev.applyWanted),unsigned(ev.noSeat),seatWhereName(seat.where()),c.seatKind,c.transitions,
+          unsigned(c.cameraOpen),unsigned(seat.has()),unsigned(seat.originIsSeat()),seatModeName(c));
+      if(ev.windowOpened&&seatHolds(seat.where())&&c.published){seatMeterDueAt=now+2000;seatMeterNextPeriodic=now+30000;}
+    }
+  }
+  // The misalignment meter: the head in the seated space, as a person reads it (offset, height, heading). Aligned and seated normally: about 0.
+  void seatMeterLine(const char* when) {
+    const SeatContext& c=seat.context();SeatPose h{};
+    if(!seatHeadLocal(h)) {
+      nativeTracePrintf("seat_meter,when=%s,why=%s,where=%s,mode=%s,head=untracked\n",when,seatWhy,seatWhereName(seat.where()),seatModeName(c));
+      return;
+    }
+    const SeatMeter m=seatMeter(h,currentOrigin);
+    nativeTracePrintf("seat_meter,when=%s,why=%s,where=%s,mode=%s,stored=%u,origin_is_seat=%u,offset_cm=%.1f,height_cm=%.1f,yaw_deg=%.1f,"
+        "head_local=%.3f/%.3f/%.3f/%.1f,origin=%.3f/%.3f/%.3f/%.1f\n",when,seatWhy,seatWhereName(seat.where()),seatModeName(c),
+        unsigned(seat.has()),unsigned(seat.originIsSeat()),m.offsetCm,m.heightCm,m.yawDeg,h.x,h.y,h.z,seatRadToDeg(h.yaw),
+        currentOrigin.x,currentOrigin.y,currentOrigin.z,seatRadToDeg(currentOrigin.yaw));
+  }
+  // Once, at the first poll: which reference spaces the runtime offers, STAGE's bounds, and where STAGE sits in LOCAL (the play-space centre
+  // against the origin the seat is measured in).
+  void seatTraceReferenceSpaces() {
+    if(seatRefsTraced)return;
+    seatRefsTraced=true;
+    uint32_t count=0;
+    if(!api.spaces||api.spaces(session,0,&count,nullptr)!=XR_SUCCESS) {nativeTracePuts("reference_spaces,enumerate=failed");return;}
+    std::vector<XrReferenceSpaceType> types(count);
+    if(count&&api.spaces(session,count,&count,types.data())!=XR_SUCCESS) {nativeTracePuts("reference_spaces,enumerate=failed");return;}
+    std::string names;bool stage=false;
+    for(uint32_t i=0;i<count&&i<types.size();++i) {
+      const char* n=types[i]==XR_REFERENCE_SPACE_TYPE_VIEW?"VIEW":types[i]==XR_REFERENCE_SPACE_TYPE_LOCAL?"LOCAL":types[i]==XR_REFERENCE_SPACE_TYPE_STAGE?"STAGE":"OTHER";
+      if(types[i]==XR_REFERENCE_SPACE_TYPE_STAGE)stage=true;
+      if(!names.empty())names+="|";
+      names+=n;
+    }
+    nativeTracePrintf("reference_spaces,count=%u,types=%s,stage=%u\n",count,names.c_str(),unsigned(stage));
+    if(!stage)return;
+    if(api.spaceBounds) {
+      XrExtent2Df bounds{};
+      const XrResult r=api.spaceBounds(session,XR_REFERENCE_SPACE_TYPE_STAGE,&bounds);
+      nativeTracePrintf("stage_bounds,result=%d,width_m=%.3f,height_m=%.3f\n",int(r),double(bounds.width),double(bounds.height));
+    } else nativeTracePuts("stage_bounds,result=entry_point_absent");
+    XrReferenceSpaceCreateInfo info{XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
+    info.referenceSpaceType=XR_REFERENCE_SPACE_TYPE_STAGE;info.poseInReferenceSpace.orientation.w=1;
+    XrSpace stageSpace=XR_NULL_HANDLE;
+    const XrResult made=api.createSpace(session,&info,&stageSpace);
+    if(made!=XR_SUCCESS||!stageSpace) {nativeTracePrintf("stage_in_local,create_result=%d\n",int(made));return;}
+    XrTime t=0;
+    XrSpaceLocation where{XR_TYPE_SPACE_LOCATION};
+    XrResult r=HeadLocator{}.currentTime({api.convertTime,api.locateSpace},instance,counterNow,nullptr,boundary.estimateNow(),t);
+    if(r==XR_SUCCESS)r=api.locateSpace(stageSpace,local,t,&where);
+    if(r==XR_SUCCESS) {
+      const SeatPose p=seatPoseYawOf(where.pose);
+      nativeTracePrintf("stage_in_local,result=0,flags=%llu,position=%.3f/%.3f/%.3f,heading_deg=%.1f\n",
+          (unsigned long long)where.locationFlags,p.x,p.y,p.z,seatRadToDeg(p.yaw));
+    } else nativeTracePrintf("stage_in_local,result=%d\n",int(r));
+    api.destroySpace(stageSpace);
+  }
+  // THE ORDER OF A RUNTIME RECENTRE. Every place that opens a frame and then locates in the seated space (WaitGetPoses, the loading skybox frame,
+  // the flat panel frame) advances the pending reference changes first, through here. The seated space is a LOCAL child with an offset and
+  // cannot be replaced while a frame is open, so when this advance makes a LOCAL change take effect and the seat memory has an answer to give
+  // it (the head in the new LOCAL becomes the seat, seatProcessRuntimeRecentre), the frame is GIVEN UP: closed, nothing located from the stale
+  // space and nothing published from it, the origin replaced with no frame open, and the caller returns without a pose (the game asks again
+  // and the next frame is in the new space). The alternative, answering from inside the open frame, is impossible; the earlier order (answer on
+  // the NEXT poll, locate this frame in the old space) published one pose with the old offset (review of 498e4b16, finding 3). Several events
+  // due at once are one frame given up and one answer; an event whose change time is still ahead waits for its own frame. With the seat memory
+  // inactive nothing is given up and the advance is what it always was. `clearOnError` keeps the loading path's old behaviour (it left the
+  // frame open on an error).
+  enum class ChangeStep {Ok,Withheld,Error};
+  ChangeStep advanceReferenceChanges(const Frame& frame,XrResult& error,bool clearOnError) {
+    uint64_t applied=0;
+    if(!changes.advance(frame.predictedDisplayTime,applied)){
+      if(clearOnError)boundary.clear();
+      error=XR_ERROR_TIME_INVALID;return ChangeStep::Error;
+    }
+    if(applied) {
+      referenceChanges+=applied;
+      if(!invalidateOrigin()){
+        if(clearOnError)boundary.clear();
+        error=XR_ERROR_LIMIT_REACHED;return ChangeStep::Error;
+      }
+      if(seat.keep()&&referenceChanges>localHandled&&changes.active()) {
+        boundary.clear();
+        timingInvalidate();
+        seatProcessRuntimeRecentre();     // no frame is open now; if it cannot land yet, seatPoll retries at the next WaitGetPoses
+        return ChangeStep::Withheld;
+      }
+    }
+    error=XR_SUCCESS;return ChangeStep::Ok;
+  }
+  // The runtime moved LOCAL (a recentre in SteamVR's dashboard or Pimax Play). That is always the player: the head as it is in the new LOCAL is
+  // honoured as the seated origin and stored as the seat, aboard or on foot, in a window or out of one. Acted on once the change has taken
+  // effect (the geometry refresh counted it), so the head is sampled in the new LOCAL. Head not tracked: LOCAL's own origin is the seat, applied
+  // when a frame allows. A frame in the way is a retry next poll. In game mode nothing changes (the origin keeps its offset as it always did).
+  void seatProcessRuntimeRecentre() {
+    if(referenceChanges<=localHandled)return;
+    if(!seat.keep()) {
+      nativeTracePrintf("seat_local_changed,events=%llu,action=ignored_game_mode\n",(unsigned long long)(referenceChanges-localHandled));
+      localHandled=referenceChanges;return;
+    }
+    if(state.frameOpen()||!changes.active())return;
+    XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
+    lastResetResult=HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,view,local,0,head,&lastResetTime,counterNow,nullptr,boundary.estimateNow());
+    constexpr XrSpaceLocationFlags tracked=XR_SPACE_LOCATION_POSITION_TRACKED_BIT|XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT;
+    XrPosef o{};
+    const bool headOk=lastResetResult==XR_SUCCESS&&(head.locationFlags&tracked)==tracked&&seatedOriginFromHead(head.pose,head.locationFlags,o);
+    const unsigned long long events=(unsigned long long)(referenceChanges-localHandled);
+    if(headOk) {
+      seatTraceDecision="honour_store";seatTraceHasCall=false;
+      if(!applySeatedReset(head,"runtime_recentre",true))return;     // retried next poll
+      seat.noteRuntimeRecentre(currentOrigin);     // always the player: stored at once, never held
+      seatSave("runtime_recentre");
+      const SeatPose& s=seat.seat();
+      nativeTracePrintf("seat_local_changed,events=%llu,head=tracked,action=store_as_manual,where=%s,window=%u,seat=%.3f/%.3f/%.3f/%.1f\n",
+          events,seatWhereName(seat.where()),unsigned(seat.inWindow(GetTickCount64())),s.x,s.y,s.z,seatRadToDeg(s.yaw));
+    } else {
+      seat.storeAndApplyLater(SeatPose{});
+      seatSave("runtime_recentre_untracked");
+      nativeTracePrintf("seat_local_changed,events=%llu,head=untracked,action=store_as_manual,fallback=local_identity,where=%s,seat=0.000/0.000/0.000/0.0\n",
+          events,seatWhereName(seat.where()));
+    }
+    localHandled=referenceChanges;
+  }
+  // The stored seat becomes the origin. A retry is the caller's: this answers false when a frame is open, the head is not tracked, or the
+  // reset-event queue is full, and the apply stays pending.
+  bool applyStoredSeat(const char* reason,const char* decision,bool notifyGame) {
+    if(!seat.has()||!seat.keep()||GetCurrentThreadId()!=ownerThread||state.frameOpen())return false;
+    XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
+    lastResetResult=HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,view,local,0,head,&lastResetTime,counterNow,nullptr,boundary.estimateNow());
+    if(lastResetResult!=XR_SUCCESS)return false;
+    const XrPosef origin=xrFromSeatPose(seat.seat());
+    seatTraceDecision=decision;
+    const bool ok=applySeatedReset(head,reason,notifyGame,&origin);
+    if(ok){seat.noteOrigin(true);seat.applyDone();}
+    return ok;
+  }
+  // WaitGetPoses, no frame open. True when the origin moved (the caller gives up this frame's pose update, as the intro recentre always did).
+  bool seatPoll() {
+    if(GetCurrentThreadId()!=ownerThread)return false;
+    seatEnsureLoaded();
+    const uint64_t now=GetTickCount64();
+    if(!seatRefsTraced)seatTraceReferenceSpaces();
+    seatSync(now);
+    seatProcessRuntimeRecentre();
+    uint64_t deferredMs=0;
+    if(seat.takeCommit(now,deferredMs))seatSave("manual_reset",deferredMs);     // kRetroMs and no transition: it was the player's
+    bool moved=false;
+    if(seat.keep()&&seat.applyPending()&&!state.frameOpen()&&changes.active()) {
+      moved=applyStoredSeat("seat_transition",seatRetroPending?"replace_with_seat":"transition_seat",true);
+      if(moved)seatMeterDueAt=now+2000;
+    }
+    if(seatLatePressPending&&!state.frameOpen()&&changes.active()) {
+      seatLatePressPending=false;
+      XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
+      lastResetResult=HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,view,local,0,head,&lastResetTime,counterNow,nullptr,boundary.estimateNow());
+      if(lastResetResult==XR_SUCCESS) {
+        seatTraceDecision="honour_press_late";
+        seatTracePress=PressInfo{PressState::Seen,-(long long)seatLateAfterMs,"press_after_reset"};seatTraceHasPress=true;
+        if(applySeatedReset(head,"seated_reset",true,nullptr)) {
+          seat.noteReset(SeatResetDecision::HonourPress,currentOrigin,now);
+          seatSave("manual_reset_press_late");
+          moved=true;
+        }
+      }
+    }
+    if(seatMeterDueAt&&now>=seatMeterDueAt){seatMeterDueAt=0;seatMeterLine("transition_2s");}
+    if(seat.context().published&&now>=seatMeterNextPeriodic) {
+      seatMeterNextPeriodic=now+30000;
+      seatMeterLine("periodic");
+    }
+    return moved;
+  }
+  enum class SeatIntro {Todays,Applied,Skipped,Sampling,Retry};
+  // The intro recentre's ask (requestIntroRecentre). With a stored seat the seat is already the origin and the ask is a no-op; with none, the
+  // splash is where it is captured, once the head is still, and if that fails the ask is today's recentre on the head as it is.
+  SeatIntro seatIntro() {
+    const uint64_t now=GetTickCount64();
+    seatEnsureLoaded();seatSync(now);
+    const SeatIntroPlan plan=seatIntroPlan(seat.keep(),seat.has(),seat.originIsSeat());
+    if(plan==SeatIntroPlan::TodaysRecentre) {
+      seatTraceDecision="intro_head";
+      return SeatIntro::Todays;
+    }
+    if(plan==SeatIntroPlan::SkipSeatInPlace) {
+      nativeTracePuts("seat_intro,plan=skip_seat_in_place,action=no_recentre");
+      return SeatIntro::Skipped;
+    }
+    if(plan==SeatIntroPlan::ApplySeat) {
+      nativeTracePuts("seat_intro,plan=apply_seat");
+      return applyStoredSeat("intro_recentre","intro_seat",true)?SeatIntro::Applied:SeatIntro::Retry;
+    }
+    // Capture
+    if(seatCapture.state()==SeatCapture::State::Idle) {
+      seatCapture.begin(now);
+      nativeTracePuts("seat_capture,state=begin");
+    }
+    SeatPose head{};
+    const bool located=seatHeadLocal(head);
+    const SeatCapture::State st=located?seatCapture.add(now,head):seatCapture.state();
+    const auto& stats=seatCapture.last();
+    if(st==SeatCapture::State::Sampling) {
+      if(seatCapture.elapsed(now)>=SeatCapture::kTimeoutMs) {
+        nativeTracePrintf("seat_capture,state=gave_up,reason=head_untracked,elapsed_ms=%llu,fallback=todays_recentre\n",(unsigned long long)seatCapture.elapsed(now));
+        seatTraceDecision="intro_head";return SeatIntro::Todays;
+      }
+      return SeatIntro::Sampling;
+    }
+    if(st==SeatCapture::State::GaveUp) {
+      nativeTracePrintf("seat_capture,state=gave_up,reason=not_still,n=%zu,span_ms=%llu,spread_cm=%.1f,yaw_spread_deg=%.1f,elapsed_ms=%llu,fallback=todays_recentre\n",
+          stats.n,(unsigned long long)stats.spanMs,stats.spreadCm,stats.yawSpreadDeg,(unsigned long long)seatCapture.elapsed(now));
+      seatTraceDecision="intro_head";return SeatIntro::Todays;
+    }
+    if(st!=SeatCapture::State::Done)return SeatIntro::Sampling;
+    const SeatPick pick=pickSeatFromHead(seatCapture.result());
+    nativeTracePrintf("seat_capture,state=done,n=%zu,span_ms=%llu,spread_cm=%.1f,yaw_spread_deg=%.1f,elapsed_ms=%llu,mean=%.3f/%.3f/%.3f/%.1f,"
+        "dist_from_local_cm=%.1f,heading_from_local_deg=%.1f,snapped=%u,seat=%.3f/%.3f/%.3f/%.1f\n",
+        stats.n,(unsigned long long)stats.spanMs,stats.spreadCm,stats.yawSpreadDeg,(unsigned long long)seatCapture.elapsed(now),
+        stats.mean.x,stats.mean.y,stats.mean.z,seatRadToDeg(stats.mean.yaw),pick.distanceM*100.0,pick.yawDeg,unsigned(pick.snapped),
+        pick.seat.x,pick.seat.y,pick.seat.z,seatRadToDeg(pick.seat.yaw));
+    seat.setSeat(pick.seat);
+    if(applyStoredSeat("intro_recentre",pick.snapped?"capture_snap_local":"capture_head",true)) {
+      seatSave("captured");
+      return SeatIntro::Applied;
+    }
+    // The seat is held but not applied (a frame was open, the reset-event queue full): the capture is Done, so the next ask is the stored-seat
+    // plan and applies it. Persisted now so a quit before that does not lose it.
+    seatSave("captured_unapplied");
+    return SeatIntro::Retry;
   }
   bool centreAtStartup(bool& refresh) {
     refresh=false;
@@ -2585,9 +3148,18 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         (unsigned long long)launchCentreSamples,double(head.pose.position.x),double(head.pose.position.y),double(head.pose.position.z),
         double(head.pose.orientation.x),double(head.pose.orientation.y),double(head.pose.orientation.z),double(head.pose.orientation.w),
         (unsigned long long)head.locationFlags);
-      if(!applySeatedReset(head,"launch_centre",false)) {
+      // The seat memory puts a stored seat here instead of the head as it happens to be near the first tracked pose; with none stored, or
+      // before the graphics half has spoken, it is the head as it always was.
+      seatEnsureLoaded();seatSync(now);
+      const SeatStartPlan startPlan=seatStartPlan(seat.keep(),seat.has());
+      nativeTracePrintf("seat_start,plan=%s,mode=%s,stored=%u\n",seatStartPlanName(startPlan),seatModeName(seat.context()),unsigned(seat.has()));
+      XrPosef startSeat{};const XrPosef* startOver=nullptr;
+      if(startPlan==SeatStartPlan::ApplySeat){startSeat=xrFromSeatPose(seat.seat());startOver=&startSeat;}
+      seatTraceDecision=startOver?"start_seat":"start_head";
+      if(!applySeatedReset(head,"launch_centre",false,startOver)) {
         result("launch_centre_reset",lastResetResult);return false;
       }
+      seat.noteOrigin(startOver!=nullptr);
       nativeTracePrintf("native_launch_centre,applied=1,position_error=%.6f,yaw_error_rad=%.6f,origin_generation=%llu\n",
         double(resetPositionError),double(resetYawError),(unsigned long long)poses.read().originGeneration);
       refresh=true;return true;
@@ -2597,7 +3169,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     return true;
   }
   bool pollEvent(uint64_t generation,vr::ETrackingUniverseOrigin origin,vr::VREvent_t& event,vr::TrackedDevicePose_t& pose) override {
-    if(!service.isOwner()) {bool result=false;return service.invoke([&]{result=pollEvent(generation,origin,event,pose);})&&result;}
+    if(poseCacheOn.load(std::memory_order_acquire))return pollEventLocal(generation,origin,event,pose);
+    if(!service.isOwner()) {bool result=false;return service.invoke([&]{result=pollEvent(generation,origin,event,pose);},OwnerCallKind::PollEvent)&&result;}
     if(generation!=geometryGeneration)return false;
     if(quitEventPending&&quitEventGeneration==generation) {
       event={};event.eventType=vr::VREvent_Quit;
@@ -2609,7 +3182,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(found)++resetPolls;return found;
   }
   void unsupported(unsigned slot) noexcept override {nativeTracePrintf("system_unavailable,slot=%u\n",slot);}
-  ~NativeRuntimeHost() {close();}
+  // The owner shares ownerInvoke (the constructor's setInvokeStats). Detach it once this host is gone, so the owner stops counting for a host
+  // that no longer exists; an invoke already in flight keeps its own reference.
+  ~NativeRuntimeHost() {close();service.setInvokeStats(std::shared_ptr<OwnerInvokeStats>{},nullptr);}
   void invalidateEyeTreatments() { temporal.invalidate(); sharpen.invalidate(); fss.invalidate(); deferredEye={}; }
   void publishFatalFailure(XrResult error,const char* operation) noexcept {
     clearOverlapHandoff();
@@ -2637,8 +3212,11 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     return true;
   }
   void queueQuitEvent(XrResult r) noexcept {
-    if(quitEventPending&&quitEventGeneration==geometryGeneration)return;
-    quitEventPending=true;quitEventGeneration=geometryGeneration;
+    {
+      std::lock_guard<std::mutex> lock(quitMutex_);
+      if(quitEventPending&&quitEventGeneration==geometryGeneration)return;
+      quitEventPending=true;quitEventGeneration=geometryGeneration;
+    }
     nativeTracePrintf("openvr_quit_event,generation=%llu,result=%d\n",
       (unsigned long long)geometryGeneration,int(r));
   }
@@ -2736,7 +3314,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     geometry.retire(geometryGeneration);
     poses.retire(compositorGeneration);
     resetEvents.retire(geometryGeneration);changes.clear();
-    quitEventPending=false;quitEventGeneration=0;
+    {std::lock_guard<std::mutex> lock(quitMutex_);quitEventPending=false;quitEventGeneration=0;}
+    pollRing.clear();
     loading={};
     if(separateGraphics()) {
       // Rendering may still reference capture outputs. Drain the XR context
@@ -2871,6 +3450,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     LOAD("xrDestroySpace",destroySpace); LOAD("xrCreateReferenceSpace",createSpace);
     LOAD("xrEnumerateReferenceSpaces",spaces); LOAD("xrLocateViews",locateViews);
     LOAD("xrLocateSpace",locateSpace); LOAD("xrRequestExitSession",requestExit);
+    if(!load(api,instance,"xrGetReferenceSpaceBoundsRect",api.spaceBounds))api.spaceBounds=nullptr;
     LOAD("xrPollEvent",frames.pollEvent); LOAD("xrBeginSession",frames.beginSession);
     LOAD("xrEndSession",frames.endSession); LOAD("xrWaitFrame",frames.waitFrame);
     LOAD("xrBeginFrame",frames.beginFrame); LOAD("xrEndFrame",frames.endFrame);

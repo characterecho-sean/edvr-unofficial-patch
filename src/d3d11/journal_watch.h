@@ -138,6 +138,18 @@ bool journalOnFoot();
 // Built v14 (optimized station): the commander is docked, from Status.json Flags bit 0. Known whenever Flags is in the file.
 bool journalDockedKnown();
 bool journalDocked();
+// Built v14.34 (the optimized station in the flat profile): the same Status.json docked flag under EITHER profile. The accessors above answer the
+// no-journal values in flat; the watcher runs there (d3d11.journal_watch is on the flat list) and reads this flag all the same.
+bool journalStatusDockedKnown();
+bool journalStatusDocked();
+// Built v14.35 (the optimized station's on-foot release, a v0.20.0 blocker): the seat flag and the two raw Status.json words under EITHER profile, from the same sample as the
+// docked flag. Seated is journalSeatedFromFlags (Flags bits 24-26, Flags2 bits 1-2): in the ship on the pad, or in a taxi or someone else's ship. Known whenever Flags is in
+// the file (false at a menu, with no file, with the watcher off, or after three failed reads: the station then treats the commander as not aboard). The words are the
+// last sample's, zero while unknown.
+bool journalStatusSeatedKnown();
+bool journalStatusSeated();
+uint32_t journalStatusFlags();
+uint32_t journalStatusFlags2();
 
 // The commander is SEATED in something, by the same Status.json read: Flags bit 24 (the main ship), 25 (a fighter) or 26 (an
 // SRV), or Flags2 bit 1 (a taxi) or 2 (someone else's ship). On foot is Flags2 bit 0 and none of these; the game writes both
@@ -154,6 +166,10 @@ bool journalSeated();
 // Built v14.21 (optimized station): Status.json Flags bits 24-26 alone (in a main ship, a fighter or an SRV). Flags 0 (menu, loading) is not in a vehicle.
 bool journalVehicleKnown();
 bool journalVehicle();
+// Which seat, from the same Status.json read: Flags bits 24-26 (main ship, fighter, SRV) in bits 0-2, Flags2 bits 1-2 (taxi, multicrew) in
+// bits 3-4. 0 when none, when Flags is not in the file, or in flat. The seat memory (src/openxr/seat_memory.h) treats a change of this
+// word, aboard before and after, as a change of cockpit.
+uint32_t journalSeatKind();
 
 // How many Status.json samples have been read: lets a caller require a sample
 // taken AFTER some event, since the previous one can be a second stale.

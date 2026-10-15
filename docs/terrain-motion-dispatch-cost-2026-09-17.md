@@ -2,6 +2,10 @@
 
 ## Status
 
+- 2026-10-15, FLAT PORT BUILT, NOT FLOWN: an RC1 flat user's planet smeared on
+  an orbital descent. Flat rows carry no supercruise translation either (journal
+  top entry) and this path was VR-only; flat now binds eye 0's records at t18
+  (`celestialBefore`). Flight: flat, supercruise to a planet, `flat celestial:`.
 - State: planet patch motion FLOWN OK 2026-10-07 (v0.18.2-62-gc136ba80 on
   Frontier, ON MAIN c947620c). Sean: "Planet looks great now". Each body's
   rigid motion, read from its patch constants on the CPU, replaces the camera
@@ -10,7 +14,7 @@
   (the CPU shadow of VS b0 and b2, the draw capture, the per-eye records),
   the `celestial` block of temporal_shader_source.h (mv and main), and
   tools\celestial_motion_test with tools\celestial_fixture.py (the rig, on the
-  real dump). No config key: it runs while fix.temporal_aa does, VR build only.
+  real dump). No config key: it runs while temporal AA does (VR only until the flat port).
 - Why: Sean's supercruise approach blur (dump eye_180540, eccfce7a). The camera
   rows lose the ship's translation, so every body took the camera's motion,
   under 1% of its real growth (2.3e-3 a frame). The retired hook is not back:
@@ -45,22 +49,64 @@
   build and 0.16 us a draw on the rig's core; a rotation read off an
   unnormalised quaternion's matrix: the 0.01-0.06 degree turn it shows on
   alternate frames is |q|^2 != 1 (1e-7) in the trace, not motion.
-- History: `advanced.terrain_motion` was retired 2026-10-01 (the hook cost GPU
-  p50 +0.27 ms, CPU p50 +0.51 ms) and fails in supercruise (journal 2026-10-06).
-  The 2026-09-17 arc that priced it (FLOWN 163420 on 91d5b75: gpu p50 9.0-9.6 ms
-  against 10.2-10.6; the CPU shadow served 256856 slots against 103 GPU copies)
-  found the doubled frame was the SUM of EDVR's per-draw GPU syncs (+306 copies,
-  +102 UpdateSubresource, +47 Dispatch(1,1,1), +38 query Ends; a copy ~2 us, a
-  Dispatch with CS churn 4.75 us). 0.3-0.45 ms a frame is left in the holo
-  dispatches and the stellar ring's (Sean's call); the door (`full` 2.8-3.1 +
-  `prep` 0.2-0.5 + `ui` 0.36-0.6 ms) is the rest. Sean's report: "DLSS
-  effectively doubles the gpu and cpu frametime numbers" (log 124139).
+- History: `advanced.terrain_motion` retired 2026-10-01 (GPU p50 +0.27 ms, CPU
+  +0.51 ms; fails in supercruise). The 2026-09-17 arc found DLSS's doubled frame
+  was the SUM of EDVR's per-draw GPU syncs (+306 copies, +102 UpdateSubresource,
+  +47 Dispatch, +38 query Ends); 0.3-0.45 ms is left in holo + stellar dispatches
+  and the rest is the door (`full` + `prep` + `ui`, 3.5-4.0 ms a pair).
 - ruled out (journal): the per-patch dispatch; the game's Map stalling on the
   GPU (0.003 ms/frame); the hook's CPU (0.03 ms/frame); EDVR's timestamp
   brackets; the texture LOD bias; the PS + 2 MRTs beyond ~0.15 ms;
   write-combined mapped memory.
 
 ## Journal
+
+### 2026-10-15 -- flat smears the planet on an orbital descent: the flat profile never had this path
+
+**The report.** A v0.20.0-rc.1 flat user, with a screenshot: descending from
+orbit in supercruise (32.8 km/s, 379 km up), the planet's surface smears in
+radial streaks under temporal AA. No log came with it.
+
+**The cause, from Sean's own flat log.** The flat camera term
+(`cameraBefore`, flat_mono_shader_source.h) takes its translation from row 275's
+frame-to-frame step, which `flat camera origin 5s:` logs. Steam flat flight
+edvr_gfx_20261014_170914 (v0.20.0-rc.1-29-g8459abf4, profile flat), matched to
+the game's journal Journal.2026-10-14T170918:
+- normal space (17:11:05-17:11:25 and after the drop at 17:17:20): steps of
+  5-13 m a frame, with origin rebases of 1.5-4 km;
+- supercruise (SupercruiseEntry 17:11:29 to SupercruiseExit 17:17:20): steps of
+  1e-5 to 3e-5 m a frame, at most 0.13 m (the eye swinging with the ship's turn).
+
+So in supercruise the flat rows carry no translation at all: the same fault the
+VR rows showed on 2026-10-06, and the reason this module exists. The module was
+VR-only (`celestialMotionConfigure(... && !runtimeFlatProfile())`, and the VR
+eye test needs two scene depth targets), so flat planets took the camera's
+rotation alone. The flat camera term has no other source of translation, so
+this is a gap since the module was built, not a v0.20 change. Unchecked: whether
+a v0.19.1 flat descent looked any better.
+
+**The port (branch claude/orbital-descent-smearing-bug-ed8ea3).**
+- The module runs whenever temporal AA does, in both profiles.
+- Flat capture: each flat draw branch in vscreen.cpp calls the draw hook. The
+  eye is 0, taken from the first depth target a patch draw uses in the frame;
+  a second target is declined as off-eye and counted. VR's flown approach
+  (edvr_gfx_20261007_045509) drew every patch on a scene eye, off-eye 0 in all
+  40 windows. A live profile switch drops what was captured.
+- Tangents: flat_celestial.h derives (l, r, b, t) from the unjittered rows and
+  refuses any frame whose rows are not a symmetric perspective.
+- Records: the flat runtime fetches eye 0's records (`fetchCelestialRecords`,
+  flat_runtime.cpp) and hands them to the resolver in
+  `FlatMonoResolveFrame::celestialRecords` with both tangent sets; the VR world
+  route never fills it. They bind at t18, with debug.w bit 3.
+- Rig: tools\flat_mono_resolve_test\flat_celestial_gpu_tests.h (16 checks:
+  the tangents, and on WARP a body pixel's motion against the analytic
+  projection to 1e-3 px, a pixel outside it, a point behind the camera refused,
+  bit clear unchanged). Removing the shader branch fails two of them.
+- Shader: `celestialBefore` replaces the camera term for kind 0 and kind 3
+  pixels. A body point that lands behind last frame's camera is refused
+  history, never handed the camera term. The record lookup (box, depth span,
+  radial shell, narrowest span wins) is `celestialLookup` in the engine-motion
+  core, the one copy VR's `celestialPixel` and the flat prep both run.
 
 ### 2026-10-08 -- the hangar fault: a straddling body claimed every world pixel; the path now runs in supercruise only
 

@@ -40,7 +40,15 @@ public:
     // the phase-3 review saw 60,895), so the 30 s price lines could not
     // report the feature's cost. Leases are five-word states; 128 x 8
     // records is still trivial memory.
-    static constexpr unsigned kRecords = 8, kLeases = 128;
+    // 2026-10-14: 128 -> 512. With the census owning one scope a frame (gpu_timing.h)
+    // every timer pair of the frame is a lease on ONE record, and the 2026-10-14
+    // flight's frames carried 130-160 of them (the moved HDR HUD draws' route
+    // timers, g_hdrDrawTimingOn, 90 a frame issued and 25-35 more refused; the
+    // seeds; the price timers; the census). The 129th lease of a frame found none:
+    // a third of the census spans failed, always the late ones, so the whole door
+    // (it runs at the end of the frame) read 0.000. 512 is three times the
+    // flight's peak.
+    static constexpr unsigned kRecords = 8, kLeases = 512;
     static constexpr uint64_t kMaxAgeMs = 2000;
     struct Lease {
         uint64_t clock = 0, generation = 0, serial = 0;
@@ -166,6 +174,8 @@ public:
     DisjointClock& operator=(const DisjointClock&) = delete;
     // No backend calls in destruction. Owner-thread shutdown invalidates all
     // tokens; a process-detach caller must not try to join or use its context.
+    // A scope is open right now: an acquire would only borrow it (the pass profiler's open checks this first).
+    bool scopeOpen() const noexcept { return active_ >= 0; }
     Lease startFrame(uint64_t now) noexcept {
         if (!ownerOk() || stopped_ || shut_ || active_ >= 0) return {};
         collect(now);

@@ -9,6 +9,8 @@
 #include <cstring>
 #include <stdexcept>
 #include <cmath>
+#include <algorithm>
+#include <functional>
 #include <vector>
 // The UI layer's depth-stencil seed (src/d3d11/ui_layer_seed.h) across the
 // three depth formats, every stencil value class, a scale and a jitter, and
@@ -35,6 +37,63 @@ static void runCase(ID3D11Device*d,ID3D11DeviceContext*imm,DXGI_FORMAT dsvf,DXGI
  const UINT vals[]={0,1,5,11,15,128,255};for(UINT wanted:vals){imm->ClearDepthStencilView(id.Get(),D3D11_CLEAR_DEPTH|(stencil?D3D11_CLEAR_STENCIL:0),1,static_cast<UINT8>(wanted));imm->Draw(3,0);check(s.record(def.Get(),ds.Get(),ss.Get(),iw,ih,0.25f,-0.25f),"record");ComPtr<ID3D11CommandList>list;check(SUCCEEDED(def->FinishCommandList(FALSE,&list)),"FinishCommandList");imm->ExecuteCommandList(list.Get(),TRUE);imm->CopyResource(stage.Get(),out.Get());D3D11_MAPPED_SUBRESOURCE m{};check(SUCCEEDED(imm->Map(stage.Get(),0,D3D11_MAP_READ,0,&m)),"Map");for(UINT y=0;y<oh;y++)for(UINT x=0;x<ow;x++){auto row=(const unsigned char*)m.pData+y*m.RowPitch;size_t off=x*(resourcef==DXGI_FORMAT_R24G8_TYPELESS?4:(resourcef==DXGI_FORMAT_R32G8X24_TYPELESS?8:4));if(stencil&&row[off+(resourcef==DXGI_FORMAT_R24G8_TYPELESS?3:4)]!=wanted){imm->Unmap(stage.Get(),0);throw std::runtime_error("stencil readback mismatch");}float f=0;if(resourcef==DXGI_FORMAT_R24G8_TYPELESS){UINT packed=row[off]|(row[off+1]<<8)|(row[off+2]<<16);f=packed/16777215.0f;}else memcpy(&f,row+off,4);int sx=(int)floor(((x+0.5f)*iw/ow)+0.25f),sy=(int)floor(((y+0.5f)*ih/oh)-0.25f);sx=(sx<0?0:sx>=int(iw)?int(iw)-1:sx);sy=(sy<0?0:sy>=int(ih)?int(ih)-1:sy);float expected=0.1f+0.8f*(0.6f*((sx+0.5f)/iw)+0.4f*((sy+0.5f)/ih));if(fabs(f-expected)>0.0002f){imm->Unmap(stage.Get(),0);throw std::runtime_error("depth address readback mismatch");}}imm->Unmap(stage.Get(),0);}
  imm->ClearDepthStencilView(id.Get(),D3D11_CLEAR_DEPTH|(stencil?D3D11_CLEAR_STENCIL:0),1,0);imm->Draw(3,0);check(s.record(def.Get(),ds.Get(),ss.Get(),iw,ih,0,0),"reuse record");ComPtr<ID3D11CommandList>reuse;check(SUCCEEDED(def->FinishCommandList(FALSE,&reuse)),"reuse Finish");imm->ExecuteCommandList(reuse.Get(),TRUE);imm->CopyResource(stage.Get(),out.Get());D3D11_MAPPED_SUBRESOURCE rm{};check(SUCCEEDED(imm->Map(stage.Get(),0,D3D11_MAP_READ,0,&rm)),"reuse Map");for(UINT y=0;y<oh;y++)for(UINT x=0;x<ow;x++){auto row=(const unsigned char*)rm.pData+y*rm.RowPitch;size_t off=x*(resourcef==DXGI_FORMAT_R24G8_TYPELESS?4:(resourcef==DXGI_FORMAT_R32G8X24_TYPELESS?8:4));if(stencil&&row[off+(resourcef==DXGI_FORMAT_R24G8_TYPELESS?3:4)]!=0){imm->Unmap(stage.Get(),0);throw std::runtime_error("reuse zero stencil mismatch");}}imm->Unmap(stage.Get(),0);
  std::printf("case dsv=%d stencil=%d specifiedStencil=%d PASS values=0,1,5,11,15,128,255 reuse-zero scale=%.3f/%.3f jitter=+0.25/-0.25\n",(int)dsvf,stencil?1:0,s.usesSpecifiedStencilRef()?1:0,(double)ow/iw,(double)oh/ih);
+}
+
+// Reading the game's depth-stencil where it lies (ui_layer.cpp seedLayerDepth) against reading a CopyResource copy of it
+// (what the seed did before 2026-10-14): the same pipeline, the same source bytes, so the seeded target must match byte for
+// byte -- depth planes and stencil bytes both -- for every stencil value class, a mask, depth-only and stencil-only seeds, and a
+// jitter. The game's depth view stays bound on the immediate context (written by a draw just before each seed, as the game's is
+// when the layer's first HUD draw arrives) while the command list that reads the same texture executes with the context state
+// saved and restored. Under the D3D11 debug layer, when it is installed, the in-place seed must add no ERROR or CORRUPTION
+// message (a read/write hazard on the game's texture would be one).
+static unsigned g_inPlaceCases=0;
+static bool g_debugLayer=false;
+// Messages of warning severity or worse stored by the debug layer so far (a hazard -- a texture bound as a shader resource and
+// a depth target at once -- is a warning there); 0 when there is no debug layer. The queue is cleared by the caller when it wants a delta.
+static UINT debugErrors(ID3D11Device*d){
+ ComPtr<ID3D11InfoQueue>q;if(FAILED(d->QueryInterface(IID_PPV_ARGS(&q))))return 0;
+ UINT n=0;const UINT64 count=q->GetNumStoredMessages();
+ for(UINT64 i=0;i<count;++i){SIZE_T len=0;if(FAILED(q->GetMessage(i,nullptr,&len))||!len)continue;std::vector<char>buf(len);auto*m=reinterpret_cast<D3D11_MESSAGE*>(buf.data());if(SUCCEEDED(q->GetMessage(i,m,&len))&&m->Severity<=D3D11_MESSAGE_SEVERITY_WARNING)++n;}
+ return n;
+}
+static void debugClear(ID3D11Device*d){ComPtr<ID3D11InfoQueue>q;if(SUCCEEDED(d->QueryInterface(IID_PPV_ARGS(&q))))q->ClearStoredMessages();}
+static void inPlaceCase(ID3D11Device*d,ID3D11DeviceContext*imm,DXGI_FORMAT dsvf,DXGI_FORMAT resourcef,DXGI_FORMAT depthSRVf,DXGI_FORMAT stencilSRVf,bool stencil,UINT ow,UINT oh){
+ const UINT iw=7,ih=5;const UINT bpp=resourcef==DXGI_FORMAT_R32G8X24_TYPELESS?8:4;
+ auto in=makeTex(d,iw,ih,resourcef,D3D11_BIND_DEPTH_STENCIL|D3D11_BIND_SHADER_RESOURCE);auto copy=makeTex(d,iw,ih,resourcef,D3D11_BIND_DEPTH_STENCIL|D3D11_BIND_SHADER_RESOURCE);
+ auto id=makeDSV(d,in.Get(),dsvf);
+ auto inD=makeSRV(d,in.Get(),depthSRVf),cpD=makeSRV(d,copy.Get(),depthSRVf);ComPtr<ID3D11ShaderResourceView>inS,cpS;if(stencil){inS=makeSRV(d,in.Get(),stencilSRVf);cpS=makeSRV(d,copy.Get(),stencilSRVf);}
+ auto vb=compile(kInitVS,"main","vs_5_0"),pb=compile(kInitPS,"main","ps_5_0");ComPtr<ID3D11VertexShader>vs;ComPtr<ID3D11PixelShader>ps;check(SUCCEEDED(d->CreateVertexShader(vb->GetBufferPointer(),vb->GetBufferSize(),nullptr,&vs)),"in-place init VS");check(SUCCEEDED(d->CreatePixelShader(pb->GetBufferPointer(),pb->GetBufferSize(),nullptr,&ps)),"in-place init PS");
+ D3D11_DEPTH_STENCIL_DESC z{};z.DepthEnable=TRUE;z.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ALL;z.DepthFunc=D3D11_COMPARISON_ALWAYS;ComPtr<ID3D11DepthStencilState>zs;check(SUCCEEDED(d->CreateDepthStencilState(&z,&zs)),"in-place init state");
+ edvr_layer_seed::Seeder s;s.init(d);check(s.ensure(d,ow,oh,dsvf),"in-place ensure");ComPtr<ID3D11DeviceContext>def;check(SUCCEEDED(d->CreateDeferredContext(0,&def)),"in-place deferred");
+ auto stage=makeTex(d,ow,oh,resourcef,0,D3D11_USAGE_STAGING,D3D11_CPU_ACCESS_READ);ID3D11Resource*raw=nullptr;s.view()->GetResource(&raw);ComPtr<ID3D11Resource>out;out.Attach(raw);
+ auto bytes=[&](){imm->CopyResource(stage.Get(),out.Get());D3D11_MAPPED_SUBRESOURCE m{};check(SUCCEEDED(imm->Map(stage.Get(),0,D3D11_MAP_READ,0,&m)),"in-place map");std::vector<unsigned char>v;for(UINT y=0;y<oh;++y){const unsigned char*row=static_cast<const unsigned char*>(m.pData)+y*m.RowPitch;v.insert(v.end(),row,row+ow*bpp);}imm->Unmap(stage.Get(),0);return v;};
+ auto seedFrom=[&](ID3D11ShaderResourceView*dv,ID3D11ShaderResourceView*sv,UINT mask,bool needDepth,float jx,float jy){imm->ClearDepthStencilView(s.view(),D3D11_CLEAR_DEPTH|D3D11_CLEAR_STENCIL,0.93f,0xa5);check(s.record(def.Get(),dv,sv,iw,ih,jx,jy,mask,needDepth),"in-place record");ComPtr<ID3D11CommandList>list;check(SUCCEEDED(def->FinishCommandList(FALSE,&list)),"in-place finish");imm->ExecuteCommandList(list.Get(),TRUE);return bytes();};
+ struct Mode{UINT mask;bool depth;};const Mode modes[]={{255,true},{0xC0,true},{0,true},{255,false},{0x04,false}};
+ const UINT vals[]={0,1,5,0xC0,128,255};
+ if(g_debugLayer){
+  // The instrument's control: a list that does bind the texture as a shader resource and as its depth target at once must be
+  // reported, or a silent debug layer would prove nothing about the in-place read.
+  debugClear(d);ComPtr<ID3D11DeviceContext>bad;check(SUCCEEDED(d->CreateDeferredContext(0,&bad)),"control deferred");
+  ID3D11ShaderResourceView*hv=inD.Get();bad->PSSetShaderResources(0,1,&hv);bad->OMSetRenderTargets(0,nullptr,id.Get());bad->OMSetRenderTargets(0,nullptr,id.Get());
+  ComPtr<ID3D11CommandList>junk;bad->FinishCommandList(FALSE,&junk);if(junk)imm->ExecuteCommandList(junk.Get(),TRUE);
+  check(debugErrors(d)>0,"the debug layer reports a texture bound as a shader resource and a depth target at once (the instrument sees hazards)");
+ }
+ UINT watched=0;
+ for(const Mode&m:modes)for(UINT value:vals){
+  D3D11_VIEWPORT iv{0,0,(float)iw,(float)ih,0,1};imm->RSSetState(nullptr);imm->RSSetViewports(1,&iv);imm->OMSetRenderTargets(0,nullptr,id.Get());imm->OMSetDepthStencilState(zs.Get(),0);imm->VSSetShader(vs.Get(),nullptr,0);imm->PSSetShader(ps.Get(),nullptr,0);imm->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+  imm->ClearDepthStencilView(id.Get(),D3D11_CLEAR_DEPTH|(stencil?D3D11_CLEAR_STENCIL:0),1,static_cast<UINT8>(value));imm->Draw(3,0);
+  const float jx=(value&1)?0.25f:-0.75f,jy=(value&2)?-0.25f:0.5f;
+  // In place: the immediate context still has the game's depth view bound, and the list reads the same texture.
+  debugClear(d);
+  auto inPlace=seedFrom(inD.Get(),inS.Get(),m.mask,m.depth,jx,jy);
+  watched+=debugErrors(d);
+  imm->CopyResource(copy.Get(),in.Get());
+  auto copied=seedFrom(cpD.Get(),cpS.Get(),m.mask,m.depth,jx,jy);
+  check(inPlace==copied,"the seed read in place equals the seed of a copy, byte for byte");
+  ++g_inPlaceCases;
+ }
+ check(watched==0,"no debug-layer warning, error or corruption from reading the game's texture in place");
+ std::printf("in-place dsv=%d stencil=%d size=%ux%u PASS read in place == read of a copy (%zu mode x value cases%s)\n",(int)dsvf,stencil?1:0,ow,oh,sizeof(modes)/sizeof(modes[0])*(sizeof(vals)/sizeof(vals[0])),g_debugLayer?", debug-layer messages watched":", no debug layer");
 }
 
 // Patch only the fixture object's vptr, forwarding every real D3D11 command.
@@ -184,29 +243,69 @@ static void observedCase(ID3D11Device*d,ID3D11DeviceContext*imm,bool wideDepth,U
     check(threw&&spy.clears==0&&spy.draws==0,"invalid depth rejected before clear or draw");
     std::printf("observed dsv=%d specified=%d forcedFallback=%d size=%ux%u cases=%u clears=%u draws=%u PASS poison/legacy/all256/partial/no-draw/map-failure\n",int(vf),specified?1:0,forceFallback?1:0,ow,oh,cases,totalClear,totalDraw);
 }
+// --bench-seed (a desk measurement on the default hardware adapter, never part of the build): the production Seeder at the layer's real size,
+// 2016^2 game depth-stencil -> 4032^2, mask 00 with depth (what the flight of 2026-10-14 ran), as a command list executed on the immediate context,
+// timed on the GPU with and without the CopyResource that seedLayerDepth made before 2026-10-14 (docs\edvr-gpu-trims-2026-10-14.md).
+static void benchSeed(ID3D11Device*d,ID3D11DeviceContext*imm) {
+ const UINT iw=2016,ih=2016,ow=4032,oh=4032;
+ auto game=makeTex(d,iw,ih,DXGI_FORMAT_R32G8X24_TYPELESS,D3D11_BIND_DEPTH_STENCIL|D3D11_BIND_SHADER_RESOURCE);auto copy=makeTex(d,iw,ih,DXGI_FORMAT_R32G8X24_TYPELESS,D3D11_BIND_DEPTH_STENCIL|D3D11_BIND_SHADER_RESOURCE);
+ auto gd=makeSRV(d,game.Get(),DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS),gs=makeSRV(d,game.Get(),DXGI_FORMAT_X32_TYPELESS_G8X24_UINT),cd=makeSRV(d,copy.Get(),DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS),cs=makeSRV(d,copy.Get(),DXGI_FORMAT_X32_TYPELESS_G8X24_UINT);
+ auto gdsv=makeDSV(d,game.Get(),DXGI_FORMAT_D32_FLOAT_S8X24_UINT);
+ auto vb=compile(kInitVS,"main","vs_5_0"),pb=compile(kInitPS,"main","ps_5_0");ComPtr<ID3D11VertexShader>vs;ComPtr<ID3D11PixelShader>ps;
+ check(SUCCEEDED(d->CreateVertexShader(vb->GetBufferPointer(),vb->GetBufferSize(),nullptr,&vs)),"bench VS");check(SUCCEEDED(d->CreatePixelShader(pb->GetBufferPointer(),pb->GetBufferSize(),nullptr,&ps)),"bench PS");
+ D3D11_DEPTH_STENCIL_DESC z{};z.DepthEnable=TRUE;z.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ALL;z.DepthFunc=D3D11_COMPARISON_ALWAYS;ComPtr<ID3D11DepthStencilState>zs;check(SUCCEEDED(d->CreateDepthStencilState(&z,&zs)),"bench state");
+ D3D11_VIEWPORT iv{0,0,(float)iw,(float)ih,0,1};imm->RSSetState(nullptr);imm->RSSetViewports(1,&iv);imm->OMSetRenderTargets(0,nullptr,gdsv.Get());imm->OMSetDepthStencilState(zs.Get(),0);imm->VSSetShader(vs.Get(),nullptr,0);imm->PSSetShader(ps.Get(),nullptr,0);imm->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+ imm->ClearDepthStencilView(gdsv.Get(),D3D11_CLEAR_DEPTH|D3D11_CLEAR_STENCIL,1,0);imm->Draw(3,0);imm->OMSetRenderTargets(0,nullptr,nullptr);
+ edvr_layer_seed::Seeder s;s.init(d);check(s.ensure(d,ow,oh,DXGI_FORMAT_D32_FLOAT_S8X24_UINT),"bench ensure");ComPtr<ID3D11DeviceContext>def;check(SUCCEEDED(d->CreateDeferredContext(0,&def)),"bench deferred");
+ D3D11_QUERY_DESC qd{D3D11_QUERY_TIMESTAMP_DISJOINT,0},qt{D3D11_QUERY_TIMESTAMP,0};ComPtr<ID3D11Query>dj,ta,tb;d->CreateQuery(&qd,&dj);d->CreateQuery(&qt,&ta);d->CreateQuery(&qt,&tb);
+ auto seed=[&](bool withCopy){if(withCopy)imm->CopyResource(copy.Get(),game.Get());check(s.record(def.Get(),withCopy?cd.Get():gd.Get(),withCopy?cs.Get():gs.Get(),iw,ih,0.25f,-0.4f,0,true),"bench record");ComPtr<ID3D11CommandList>l;check(SUCCEEDED(def->FinishCommandList(FALSE,&l)),"bench finish");imm->ExecuteCommandList(l.Get(),TRUE);};
+ auto timeIt=[&](const std::function<void()>&fn){imm->Begin(dj.Get());imm->End(ta.Get());for(int i=0;i<8;++i)fn();imm->End(tb.Get());imm->End(dj.Get());D3D11_QUERY_DATA_TIMESTAMP_DISJOINT dd{};UINT64 a=0,b=0;
+  while(imm->GetData(dj.Get(),&dd,sizeof(dd),0)==S_FALSE)Sleep(0);while(imm->GetData(ta.Get(),&a,8,0)==S_FALSE)Sleep(0);while(imm->GetData(tb.Get(),&b,8,0)==S_FALSE)Sleep(0);
+  return dd.Disjoint?-1.0:double(b-a)/double(dd.Frequency)*1000.0/8;};
+ struct Run{const char*name;std::function<void()>fn;std::vector<double>ms;};
+ std::vector<Run> runs;
+ runs.push_back({"CopyResource only (2016^2 D32S8)",[&]{imm->CopyResource(copy.Get(),game.Get());},{}});
+ runs.push_back({"seed from a copy (CopyResource + the Seeder)",[&]{seed(true);},{}});
+ runs.push_back({"seed in place (the Seeder alone)",[&]{seed(false);},{}});
+ for(int r=0;r<20;++r)for(auto&run:runs)timeIt(run.fn);
+ for(int r=0;r<301;++r)for(auto&run:runs){const double v=timeIt(run.fn);if(v>0)run.ms.push_back(v);}
+ for(auto&run:runs){std::sort(run.ms.begin(),run.ms.end());std::printf("  %-50s median %.4f ms  p10 %.4f  p90 %.4f  (n=%zu)\n",run.name,run.ms[run.ms.size()/2],run.ms[run.ms.size()/10],run.ms[run.ms.size()*9/10],run.ms.size());}
+}
 int main(int argc,char**argv) {
     try {
-        bool hardware=false;
+        bool hardware=false,benchSeedRun=false;
         for(int i=1;i<argc;++i) {
             if(!strcmp(argv[i],"--dry-run")){std::puts("seed_test dry-run: no files or device commands");return 0;}
+            if(!strcmp(argv[i],"--bench-seed")){benchSeedRun=true;hardware=true;continue;}
             if(!strcmp(argv[i],"--hardware"))hardware=true;
             else if(strcmp(argv[i],"--self-test"))throw std::runtime_error("unknown argument");
         }
         ComPtr<ID3D11Device>d;ComPtr<ID3D11DeviceContext>imm;D3D_FEATURE_LEVEL fl;
         // Match Frontier's current 12_0 device when hardware provides it; WARP stays portable.
         const D3D_FEATURE_LEVEL levels[]={D3D_FEATURE_LEVEL_12_0,D3D_FEATURE_LEVEL_11_1,D3D_FEATURE_LEVEL_11_0};
-        check(SUCCEEDED(D3D11CreateDevice(nullptr,hardware?D3D_DRIVER_TYPE_HARDWARE:D3D_DRIVER_TYPE_WARP,nullptr,0,hardware?levels:nullptr,hardware?3:0,D3D11_SDK_VERSION,&d,&fl,&imm)),"create test device");
+        // With the D3D11 debug layer when it is installed (the in-place read's hazard check watches its messages); without it otherwise.
+        bool debugLayer=!benchSeedRun;   // a timing run goes without it
+        HRESULT made=D3D11CreateDevice(nullptr,hardware?D3D_DRIVER_TYPE_HARDWARE:D3D_DRIVER_TYPE_WARP,nullptr,benchSeedRun?0u:static_cast<UINT>(D3D11_CREATE_DEVICE_DEBUG),hardware?levels:nullptr,hardware?3:0,D3D11_SDK_VERSION,&d,&fl,&imm);
+        if(FAILED(made)){debugLayer=false;made=D3D11CreateDevice(nullptr,hardware?D3D_DRIVER_TYPE_HARDWARE:D3D_DRIVER_TYPE_WARP,nullptr,0,hardware?levels:nullptr,hardware?3:0,D3D11_SDK_VERSION,&d,&fl,&imm);}
+        check(SUCCEEDED(made),"create test device");
+        g_debugLayer=debugLayer;
+        std::printf("debug layer %s\n",debugLayer?"on: the in-place read's messages are watched":"not installed: the in-place read's hazard check is not run");
         D3D11_FEATURE_DATA_D3D11_OPTIONS2 options{};
         HRESULT capability=d->CheckFeatureSupport(D3D11_FEATURE_D3D11_OPTIONS2,&options,sizeof(options));
         ComPtr<IDXGIDevice> dxgi;ComPtr<IDXGIAdapter> adapter;DXGI_ADAPTER_DESC description{};
         check(SUCCEEDED(d.As(&dxgi))&&SUCCEEDED(dxgi->GetAdapter(&adapter))&&SUCCEEDED(adapter->GetDesc(&description)),"adapter identity");
         char name[256]{};WideCharToMultiByte(CP_UTF8,0,description.Description,-1,name,sizeof(name),nullptr,nullptr);
         std::printf("device adapter=%s featureLevel=0x%x options2=0x%08lx specifiedStencil=%d\n",name,UINT(fl),static_cast<unsigned long>(capability),options.PSSpecifiedStencilRefSupported?1:0);
+        if(benchSeedRun){benchSeed(d.Get(),imm.Get());return 0;}
         if(FAILED(capability)||!options.PSSpecifiedStencilRefSupported)std::puts("specified-stencil full-write GPU path unavailable; testing actual fallback, never forcing unsupported capability");
         runCase(d.Get(),imm.Get(),DXGI_FORMAT_D24_UNORM_S8_UINT,DXGI_FORMAT_R24G8_TYPELESS,DXGI_FORMAT_R24_UNORM_X8_TYPELESS,DXGI_FORMAT_X24_TYPELESS_G8_UINT,true,13,9);
         runCase(d.Get(),imm.Get(),DXGI_FORMAT_D24_UNORM_S8_UINT,DXGI_FORMAT_R24G8_TYPELESS,DXGI_FORMAT_R24_UNORM_X8_TYPELESS,DXGI_FORMAT_X24_TYPELESS_G8_UINT,true,7,5);
         runCase(d.Get(),imm.Get(),DXGI_FORMAT_D32_FLOAT_S8X24_UINT,DXGI_FORMAT_R32G8X24_TYPELESS,DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS,DXGI_FORMAT_X32_TYPELESS_G8X24_UINT,true,13,9);
         runCase(d.Get(),imm.Get(),DXGI_FORMAT_D32_FLOAT,DXGI_FORMAT_R32_TYPELESS,DXGI_FORMAT_R32_FLOAT,DXGI_FORMAT_UNKNOWN,false,13,9);
+        inPlaceCase(d.Get(),imm.Get(),DXGI_FORMAT_D24_UNORM_S8_UINT,DXGI_FORMAT_R24G8_TYPELESS,DXGI_FORMAT_R24_UNORM_X8_TYPELESS,DXGI_FORMAT_X24_TYPELESS_G8_UINT,true,13,9);
+        inPlaceCase(d.Get(),imm.Get(),DXGI_FORMAT_D32_FLOAT_S8X24_UINT,DXGI_FORMAT_R32G8X24_TYPELESS,DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS,DXGI_FORMAT_X32_TYPELESS_G8X24_UINT,true,14,10);
+        inPlaceCase(d.Get(),imm.Get(),DXGI_FORMAT_D32_FLOAT_S8X24_UINT,DXGI_FORMAT_R32G8X24_TYPELESS,DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS,DXGI_FORMAT_X32_TYPELESS_G8X24_UINT,true,7,5);
+        inPlaceCase(d.Get(),imm.Get(),DXGI_FORMAT_D32_FLOAT,DXGI_FORMAT_R32_TYPELESS,DXGI_FORMAT_R32_FLOAT,DXGI_FORMAT_UNKNOWN,false,13,9);
         for(bool wide:{false,true})for(bool fallback:{false,true}) {
             observedCase(d.Get(),imm.Get(),wide,13,9,fallback);
             observedCase(d.Get(),imm.Get(),wide,7,5,fallback);

@@ -203,7 +203,13 @@ def write_receipt(path, root, context):
     return 0
 
 
-def verify_receipt(path, root, context, clean):
+def verify_receipt(path, root, context, clean, tree_only=False):
+    """Check a full-pass receipt against the tree.
+
+    tree_only is for packaging, which compiles nothing: it trusts the build's
+    outputs when the tree they were built from is unchanged, and does not ask
+    for the build context or the C++ toolchain the build ran with.
+    """
     path = Path(path).resolve()
     try:
         with path.open(encoding="utf-8") as stream:
@@ -212,17 +218,21 @@ def verify_receipt(path, root, context, clean):
         raise ValueError("cannot read full-build receipt %s: %s" % (path, error))
     if receipt.get("schema") != SCHEMA or receipt.get("status") != "full-pass":
         raise ValueError("receipt is not a full-pass receipt with schema %d" % SCHEMA)
-    if receipt.get("context") != context:
-        raise ValueError("build context differs from the last full build")
-    if receipt.get("toolchain") != toolchain_state():
-        raise ValueError("C++ toolchain differs from the last full build")
+    if not tree_only:
+        if receipt.get("context") != context:
+            raise ValueError("build context differs from the last full build")
+        if receipt.get("toolchain") != toolchain_state():
+            raise ValueError("C++ toolchain differs from the last full build")
     actual = input_fingerprint(root)
     if receipt.get("inputs_sha256") != actual:
         raise ValueError("compiled inputs differ from the last full build")
     if clean:
         require_clean(root)
     state = git_state(root)
-    print("[edvr] full-build receipt verified: %s" % path)
+    if tree_only:
+        print("[edvr] full-build receipt matches the tree: %s" % path)
+    else:
+        print("[edvr] full-build receipt verified: %s" % path)
     print("[edvr] validated inputs from %s; promotion version is %s" %
           (receipt.get("describe", "unknown"), state["describe"]))
     return 0
@@ -239,10 +249,55 @@ def _remove_tree(path):
         shutil.rmtree(path, onerror=clear_and_retry)
 
 
+def _self_test_tree_verify(root):
+    """--verify-tree: packaging checks the tree, not the build context, and refuses a changed tree."""
+    root.mkdir(parents=True)
+
+    def git(*args):
+        result = subprocess.run(["git", "-C", str(root), *args], stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, check=False)
+        if result.returncode:
+            raise AssertionError("git %s failed: %s" % (" ".join(args), result.stderr.decode("utf-8", "replace")))
+
+    git("init", "-q")
+    _write(root / ".gitignore", "build/\ndist/\n")
+    _write(root / "source.txt", "one")
+    git("add", ".gitignore", "source.txt")
+    git("-c", "user.email=edvr@example.invalid", "-c", "user.name=edvr", "commit", "-q", "-m", "fixture")
+    receipt = root / "build" / "full_build_receipt.json"
+    # Written directly: write_receipt would probe the C++ toolchain, which this test does not need.
+    receipt.parent.mkdir(parents=True, exist_ok=True)
+    with receipt.open("w", encoding="utf-8") as stream:
+        json.dump({"schema": SCHEMA, "status": "full-pass", "describe": "fixture",
+                   "toolchain": "not probed", "inputs_sha256": input_fingerprint(root),
+                   "context": {"cl": "compiler-a"}}, stream)
+    # Packaging compiles nothing, so it does not ask for the build context the build ran with.
+    if verify_receipt(receipt, root, {"cl": "compiler-b"}, False, tree_only=True) != 0:
+        raise AssertionError("a tree-only check refused an unchanged tree")
+    # The full check still asks for the context the build ran with.
+    try:
+        verify_receipt(receipt, root, {"cl": "compiler-b"}, False)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("the full check accepted a different build context")
+    # A changed input is refused; restoring it accepts the tree again.
+    _write(root / "source.txt", "two")
+    try:
+        verify_receipt(receipt, root, {}, False, tree_only=True)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("a tree-only check accepted a changed input")
+    _write(root / "source.txt", "one")
+    verify_receipt(receipt, root, {}, False, tree_only=True)
+
+
 def self_test():
     temporary = tempfile.mkdtemp(prefix="edvr-build-receipt-")
     try:
         _self_test_in_git_tree(Path(temporary) / "git")
+        _self_test_tree_verify(Path(temporary) / "tree")
         _self_test_without_git(Path(temporary) / "plain")
     finally:
         _remove_tree(temporary)
@@ -362,6 +417,8 @@ def main(argv=None):
     action = parser.add_mutually_exclusive_group()
     action.add_argument("--write", metavar="PATH", help="write a full-build receipt")
     action.add_argument("--verify", metavar="PATH", help="verify a full-build receipt")
+    action.add_argument("--verify-tree", metavar="PATH",
+                        help="check a full-build receipt against the tree for packaging, without the build context")
     parser.add_argument("--root", type=Path, default=Path("."))
     parser.add_argument("--context", action="append", default=[], metavar="KEY=VALUE")
     parser.add_argument("--require-clean", action="store_true")
@@ -369,13 +426,15 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.self_test:
         return self_test()
-    if not args.write and not args.verify:
-        parser.error("one of --write, --verify, or --self-test is required")
+    if not args.write and not args.verify and not args.verify_tree:
+        parser.error("one of --write, --verify, --verify-tree or --self-test is required")
     root = args.root.resolve()
     try:
         context = parse_context(args.context)
         if args.write:
             return write_receipt(args.write, root, context)
+        if args.verify_tree:
+            return verify_receipt(args.verify_tree, root, context, args.require_clean, tree_only=True)
         return verify_receipt(args.verify, root, context, args.require_clean)
     except (OSError, ValueError) as error:
         print("build_receipt: %s" % error)

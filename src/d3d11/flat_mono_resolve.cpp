@@ -164,9 +164,12 @@ bool g_steadyFailureLogged=false;
 // (FlatMonoResolveFrame::firstPersonMotion), w = the phase mode (firstPersonPhaseMode; 0 without z). All zero on the copy route without them, whose shader arithmetic is
 // unchanged.
 // debug: x = this frame samples the refusal census, y = this frame paints the refusal view (FlatMonoResolveFrame::refusalCensus and
-// refusalView; the prep writes its class texture for either). Zero for every frame that asks for neither.
-struct Constants { float camera[6][4], previous[6][4]; uint32_t size[4], flags[4]; float jitter[4], rowsJitter[4]; uint32_t route[4], debug[4]; float foregroundDepth[4]; };
-static_assert(sizeof(Constants)==304, "HLSL cbuffer layout");
+// refusalView; the prep writes its class texture for either). Zero for every frame that asks for neither. debug.w bit 3 (8): the
+// planet records are bound at t18 and celestialTanNow/celestialTanPrev carry their tangents (celestial_motion.h); zero otherwise.
+// celestialTanNow/celestialTanPrev: the flat tangents (l, r, b, t) of this frame's and last frame's camera rows, read only with that bit.
+struct Constants { float camera[6][4], previous[6][4]; uint32_t size[4], flags[4]; float jitter[4], rowsJitter[4]; uint32_t route[4], debug[4]; float foregroundDepth[4];
+    float celestialTanNow[4], celestialTanPrev[4]; };
+static_assert(sizeof(Constants)==336, "HLSL cbuffer layout");
 // The game's pipeline state out of the way for the resolver's own work and its backends', and back on every exit. Two ways
 // (flat_isolation_mode.h says which a device gets): the context state swap, which every device but DXMT's has always had and
 // which is unchanged, or the explicit capture (flat_context_state.h) for DXMT, whose SwapDeviceContextState aborts the process.
@@ -989,6 +992,9 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     }
     const bool depthCheck=steadyAvailable && !reset;
     if(steady && !reset) {if(depthCheck)++g_refusal.checked;else ++g_refusal.skipped;}
+    // Planet patch motion (celestial_motion.h): the planet records the flat runtime fetched for this frame, bound at t18 with their tangents.
+    // Not on a reset: there is no previous frame to move from.
+    const bool celestialBound=f.celestialRecords!=nullptr && !reset;
     Constants constants{};std::memcpy(constants.camera,f.camera,sizeof(f.camera));
     std::memcpy(constants.previous,reset?f.camera:f.previousCamera,sizeof(f.previousCamera));
     constants.size[0]=f.renderWidth;constants.size[1]=f.renderHeight;constants.size[2]=evalW;constants.size[3]=evalH;
@@ -998,6 +1004,7 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     constants.debug[0]=sampleNow?1u:0u;constants.debug[1]=paintNow?1u:0u;
     constants.debug[2]=overlay?1u:0u;
     constants.debug[3]=(foreground?2u:(untrusted?1u:0u))|(skin?4u:0u);
+    if(celestialBound){constants.debug[3]|=8u;std::memcpy(constants.celestialTanNow,f.celestialTanNow,sizeof(f.celestialTanNow));std::memcpy(constants.celestialTanPrev,f.celestialTanPrev,sizeof(f.celestialTanPrev));}
     constants.foregroundDepth[0]=sdkDepthScale;
     constants.jitter[0]=f.jitterX;constants.jitter[1]=f.jitterY;
     constants.jitter[2]=f.previousJitterX;constants.jitter[3]=f.previousJitterY;
@@ -1021,8 +1028,9 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     // stencil, null unless the pair was accepted above.
     ID3D11ShaderResourceView* prepViews[]={g.color.srv.Get(),f.depth,f.engine.slots,f.engine.pool,
         nullptr,nullptr,nullptr,nullptr,depthCheck?g.depth[prevDepthIndex].srv.Get():nullptr,firstPersonMap,firstPersonStencil,
-        nullptr,nullptr,f.untrustedCameraCoverage,nullptr,foreground?f.foregroundMotion:nullptr,nullptr,skin?f.engine.skin:nullptr};
-    const UINT prepViewCount=skin?18:(foreground?16:14);
+        nullptr,nullptr,f.untrustedCameraCoverage,nullptr,foreground?f.foregroundMotion:nullptr,nullptr,skin?f.engine.skin:nullptr,
+        celestialBound?f.celestialRecords:nullptr};
+    const UINT prepViewCount=celestialBound?19:(skin?18:(foreground?16:14));
     context->CSSetShaderResources(0,prepViewCount,prepViews);
     // u5 is the refusal census's class texture, bound only on a frame that samples or paints (u4 is the later kernels' OutColor).
     ID3D11UnorderedAccessView* prepOutputs[]={g.depth[depthIndex].uav.Get(),g.motion.uav.Get(),g.rejection.uav.Get(),g.expected.uav.Get(),
@@ -1030,7 +1038,7 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     context->CSSetUnorderedAccessViews(0,needClass?6:4,prepOutputs,nullptr);
     context->CSSetShader(g.prep.Get(),nullptr,0);
     context->Dispatch((f.renderWidth+7)/8,(f.renderHeight+7)/8,1);
-    ID3D11UnorderedAccessView* nullUavs[6]={};ID3D11ShaderResourceView* nullViews[18]={};
+    ID3D11UnorderedAccessView* nullUavs[6]={};ID3D11ShaderResourceView* nullViews[19]={};
     context->CSSetUnorderedAccessViews(0,6,nullUavs,nullptr);context->CSSetShaderResources(0,prepViewCount,nullViews);
     if(hdr)++stats.hdrPrepped;
     prepStep.close();

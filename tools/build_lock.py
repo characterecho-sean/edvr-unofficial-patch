@@ -45,9 +45,14 @@ How the lock works (architecture review 2026-09-29, I-6):
     "owner_created" (a Windows FILETIME), which older copies ignore.
 
   python tools\\build_lock.py --acquire [--note TEXT] [--dry-run]
+  python tools\\build_lock.py --acquire --wait [--timeout SECONDS] [--note TEXT]
   python tools\\build_lock.py --release [--dry-run]
   python tools\\build_lock.py --wait [--timeout SECONDS]
   python tools\\build_lock.py --self-test
+
+--acquire --wait is the one build.bat --wait-lock uses: it takes the lock in
+the same step that finds it free. A separate --wait and --acquire leave a gap
+between them in which another build can take the lock.
 
 --lock-file names another lock file (the default is %TEMP%\\edvr_build.lock).
 --dry-run reports what --acquire or --release would do and writes nothing.
@@ -469,19 +474,24 @@ def _refuse(path, lock, why):
         "[edvr] ERROR: another build is already running (%s, started %d min ago; %s). "
         "Wait for it to finish, then run build.bat again -- two builds at once "
         "contend for the same cores, which is how the vtable_test timing gate has "
-        "flaked before. Run \"python tools\\build_lock.py --wait\" to block until "
-        "it is free, then retry. The lock frees itself when that build's shell "
+        "flaked before. Run build.bat --wait-lock (by absolute path) to block until "
+        "it is free and then build. The lock frees itself when that build's shell "
         "exits, when a build starts in the shell that took it (an interrupted build "
         "there is over), and %d min after it was taken. (Lock file: %s)"
         % (note, _minutes(info), why, STALE_SECONDS // 60, path),
         file=sys.stderr)
 
 
-def acquire(path, note, owner=_AUTO, dry_run=False, alive=None):
-    """Take the lock, or refuse (return 1) when a build holds it. Takes over a
-    stale one, an interrupted build's in this very shell included. With
-    dry_run, says which of those would happen and writes nothing -- no lock,
-    no tombstone. `alive` is assess's (the self-test's seam)."""
+HELD_RC, UNSETTLED_RC = 1, 2
+
+
+def acquire(path, note, owner=_AUTO, dry_run=False, alive=None, quiet=False):
+    """Take the lock: 0. Refuse it while a build holds it: HELD_RC, and say so
+    unless `quiet` (acquire_when_free polls with it quiet). Takes over a stale
+    one, an interrupted build's in this very shell included. With dry_run, says
+    which of those would happen and writes nothing -- no lock, no tombstone.
+    `alive` is assess's (the self-test's seam). UNSETTLED_RC: the file kept
+    changing under us for MAX_ATTEMPTS tries."""
     owner = _resolve_owner(owner)
     record = _record(note, owner)
     took_over = None
@@ -501,8 +511,9 @@ def acquire(path, note, owner=_AUTO, dry_run=False, alive=None):
             continue              # released between our create and our read
         verdict, why = assess(lock, caller=owner, alive=alive)
         if verdict == HELD:
-            _refuse(path, lock, why)
-            return 1
+            if not quiet:
+                _refuse(path, lock, why)
+            return HELD_RC
         if dry_run:
             print("[edvr] dry run: the build lock is stale (%s); --acquire would take it over." % why)
             return 0
@@ -512,7 +523,34 @@ def acquire(path, note, owner=_AUTO, dry_run=False, alive=None):
             time.sleep(min(0.01 * (attempt + 1), 0.1))
     print("[edvr] ERROR: could not settle the build lock %s after %d tries; run again." %
           (path, MAX_ATTEMPTS), file=sys.stderr)
-    return 1
+    return UNSETTLED_RC
+
+
+def acquire_when_free(path, note, timeout, owner=_AUTO, alive=None, clock=time.time,
+                      sleep=time.sleep, poll=None):
+    """Take the lock the moment it is free, as one step. A wait followed by an
+    acquire leaves a gap in which another build can take the lock, so the
+    attempt itself is the wait: each try either creates the lock (exactly as
+    acquire does) or sleeps and tries again. Returns acquire's codes: 0 taken;
+    HELD_RC when it is still held after `timeout` seconds (0: no limit), with
+    acquire's own refusal naming the holder; UNSETTLED_RC. `clock` and `sleep`
+    are the self-test's seam."""
+    poll = POLL_SECONDS if poll is None else poll
+    owner = _resolve_owner(owner)
+    deadline = clock() + timeout if timeout else None
+    while True:
+        rc = acquire(path, note, owner=owner, alive=alive, quiet=True)
+        if rc != HELD_RC:
+            return rc
+        pause = poll
+        if deadline is not None:
+            remaining = deadline - clock()
+            if remaining <= 0:
+                print("[edvr] ERROR: still locked after %ds; giving up." % timeout,
+                      file=sys.stderr)
+                return acquire(path, note, owner=owner, alive=alive)
+            pause = min(poll, remaining)
+        sleep(pause)
 
 
 def release(path, owner=_AUTO, dry_run=False):
@@ -731,7 +769,7 @@ def self_test():
         before = path.read_bytes()
         rc, _, err = quiet(acquire, path, "second", owner=None)
         check(rc == 1 and "another build is already running" in err
-              and "build_lock.py --wait" in err and "first" in err,
+              and "build.bat --wait-lock" in err and "first" in err,
               "a held lock refuses a second acquire and says how to wait: %r" % err)
         check("frees itself when that build's shell exits" in err and "interrupted build" in err
               and "and %d min after it was taken" % (STALE_SECONDS // 60) in err,
@@ -741,6 +779,66 @@ def self_test():
               "release removes the lock")
         check(quiet(release, path, owner=None)[0] == 0, "releasing a clear lock is a no-op")
         check(waited(path, 60, owner=None) == (0, 0), "wait returns at once when nothing holds the lock")
+
+        # --- acquire --wait: taken in the step that finds the lock free -----------
+        def held_clock(path, release_after=None):
+            """(clock, sleep, naps) for acquire_when_free: the clock moves only
+            when it sleeps; after `release_after` naps the holder lets go."""
+            now, naps = [time.time()], []
+
+            def sleep(seconds):
+                naps.append(seconds)
+                now[0] += seconds
+                if release_after is not None and len(naps) == release_after:
+                    path.unlink()
+
+            return (lambda: now[0]), sleep, naps
+
+        path = new_lock()
+        put(path, {"started": tick(), "note": "holder", "pid": 1})
+        clock, sleep, naps = held_clock(path, release_after=2)
+        rc, out, err = quiet(acquire_when_free, path, "waiter", 600, owner=None,
+                             clock=clock, sleep=sleep, poll=5)
+        check(rc == 0 and naps == [5, 5] and out == "" and err == "",
+              "acquire --wait polls quietly until the holder lets go, then takes the lock: rc %r, naps %r, err %r"
+              % (rc, naps, err))
+        check(json.loads(path.read_text(encoding="utf-8"))["note"] == "waiter",
+              "the lock acquire --wait takes is its own, not the holder's")
+
+        path = new_lock()
+        put(path, {"started": tick(), "note": "holder", "pid": 1})
+        before = path.read_bytes()
+        clock, sleep, naps = held_clock(path)
+        rc, out, err = quiet(acquire_when_free, path, "waiter", 12, owner=None,
+                             clock=clock, sleep=sleep, poll=5)
+        check(rc == 1 and sum(naps) == 12 and path.read_bytes() == before,
+              "acquire --wait gives up after its timeout and leaves the holder's lock alone: rc %r, naps %r" % (rc, naps))
+        check(err.count("another build is already running") == 1 and "holder" in err
+              and "still locked after 12s" in err,
+              "acquire --wait says so once, when it gives up, and names the holder: %r" % err)
+
+        path = new_lock()
+        put(path, {"started": tick(STALE_SECONDS + 60), "note": "old", "pid": 1})
+        clock, sleep, naps = held_clock(path)
+        rc, out, _ = quiet(acquire_when_free, path, "waiter", 600, owner=None,
+                           clock=clock, sleep=sleep, poll=5)
+        check(rc == 0 and naps == [] and "took over" in out,
+              "acquire --wait takes a stale lock at once, without waiting: rc %r, naps %r" % (rc, naps))
+
+        path = new_lock()
+        rc, out, err = quiet(main, ["--acquire", "--wait", "--lock-file", str(path), "--timeout", "1"])
+        check(rc == 0 and path.is_file() and err == "",
+              "main: --acquire --wait on a free lock takes it, quietly")
+        try:
+            quiet(main, ["--release", "--wait", "--lock-file", str(path)])
+            check(False, "main: --release and --wait together must be refused")
+        except SystemExit as error:
+            check(error.code == 2, "main: --release and --wait together must be refused: exit %r" % (error.code,))
+        try:
+            quiet(main, ["--lock-file", str(path)])
+            check(False, "main: a bare --lock-file names no action and must be refused")
+        except SystemExit as error:
+            check(error.code == 2, "main: no action at all must be refused: exit %r" % (error.code,))
 
         # --- locks written by an older copy of this tool ---------------------
         old_fresh = {"started": tick(60), "note": "old build", "pid": 4242}
@@ -1152,15 +1250,17 @@ def self_test():
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    action = parser.add_mutually_exclusive_group(required=True)
+    action = parser.add_mutually_exclusive_group()
     action.add_argument("--acquire", action="store_true",
                         help="take the lock, or refuse if another build holds it "
-                             "(a stale lock is taken over)")
+                             "(a stale lock is taken over); with --wait, wait for it first")
     action.add_argument("--release", action="store_true",
                         help="drop the lock, if it is this build's")
-    action.add_argument("--wait", action="store_true",
-                        help="block until the lock is free or stale, then exit 0")
     action.add_argument("--self-test", action="store_true")
+    parser.add_argument("--wait", action="store_true",
+                        help="alone: block until the lock is free or stale, then exit 0. "
+                             "With --acquire: block until it is free, then take it in the "
+                             "same step, so no other build can take it in between")
     parser.add_argument("--note", default="",
                         help="shown to whoever hits the lock while --acquire holds it")
     parser.add_argument("--timeout", type=int, default=1800,
@@ -1172,8 +1272,14 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.self_test:
         return self_test()
+    if not (args.acquire or args.release or args.wait):
+        parser.error("one of --acquire, --release, --wait or --self-test is required")
+    if args.release and args.wait:
+        parser.error("--release cannot be combined with --wait")
     path = args.lock_file or lock_path()
     if args.acquire:
+        if args.wait and not args.dry_run:
+            return acquire_when_free(path, args.note, args.timeout)
         return acquire(path, args.note, dry_run=args.dry_run)
     if args.release:
         return release(path, dry_run=args.dry_run)

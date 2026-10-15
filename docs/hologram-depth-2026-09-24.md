@@ -618,3 +618,14 @@ first: near 0 with `listed draws` above 0 means the ui layer's crisp take
 owns the holograms and the pass did not run (fly with `fix.ui_quality` off).
 Then `python tools\edvr_log.py --target frontier --expect-build HEAD --grep
 "near-light"`.
+
+
+## 2026-10-13: the near-light compute takes a 16x16 group (four of its 8x8 blocks), built, not flown
+
+One 8x8 block a group launched 63,000 groups for three small elements: 0.0309 ms an eye (RTX 5090, 2016x1948,
+ui_holo_pass_test --bench-groups, median of 201). Four blocks in a 16x16 group, each with its own groupshared
+flag and its own map texel: 0.0096, the map byte for byte the old one on 8 sizes (odd block counts included)
+and three mutants caught. Saves 0.021 ms an eye, 0.043 a frame, when elements are listed (the pass declines
+free otherwise). Hash re-pinned (0xB1BF8BF2F8942B44 -> 0x8F6D7BD410192BF8); the old text is
+tools\ui_holo_pass_test\near_light_reference.h. The full table of the day is the last entry of
+docs\ui-layer-2026-09-23.md.

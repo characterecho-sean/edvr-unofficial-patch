@@ -53,6 +53,7 @@
   real cause in the messages, a VR Supersampling warning: BUILT 10-01
   (claude/flat-upscale), NOT FLOWN; its F8 text now waits 2 s before it
   changes cause (a loading screen's size flipped it five times in 9 s).
+- **10-14 BUILT, NOT FLOWN:** flat `fix.intro_video = skip` (intro-video.md); AA comparison key F7 (last entry).
 - **Jitter phases (section 84, 2026-10-01):** the phase-count switch flew with
   no visible change on the hills and is REMOVED (fixed eight phases, byte-
   identical). ROOT CAUSE of the VR hills shimmer, ruled in: Elite's terrain
@@ -14866,3 +14867,41 @@ Cost (not timed; WARP timing is not representative): three compute passes at ren
 RG8 about 0.5 MB, weights RGBA8 about 2 MB, blended RGBA16F about 4 MB), plus AreaTex and SearchTex (about 0.2 MB).
 
 Open: the circle's outer-edge max (1.44 px, from 0.99 px). Check on a flight before deciding whether it matters on the planet discs.
+
+
+## 2026-10-14: the AA comparison key, hotkey.compare_aa (BUILT, NOT FLOWN)
+
+Request (users): a key that turns EDVR's temporal AA off and back for a side-by-side
+look. Default F7, which is bound in none of Elite's 30 stock schemes (both ControlSchemes
+folders searched for `Key_F7`: 0 hits; `Key_F1` 24, as a control) nor in the 11 custom
+.binds of the dev rig. A clash with the player's own bindings is a `WARNING hotkey: AA
+comparison key ... CLASHES` log line at bind and on every rebind (elite_binds).
+
+- **Mechanism:** a runtime override of `fix.temporal_aa` in Config (`setRuntimeOverride`),
+  in memory beside the parsed file. No ini is written, so a crash mid-comparison leaves
+  the settings untouched. Setting it makes the next `reloadIfChanged()` report a change,
+  so the frame loop runs the same configure sweep a hand edit or an F8 pick does (the
+  toggle asks for it with `menuRequestConfigPoll`). Flat reads the mode around the
+  gate (`requestedTemporalMode`), which honours the override; VR reads `getString`.
+- **ui_quality:** it is live only with AA on (`uiLayerConfigure`, VR gate and flat gate),
+  so it follows the sweep exactly as it does for an F8 AA change, with its own
+  `ui quality: ... waits: anti-aliasing is off` line. Panels already enlarged keep their
+  size until the game next lays them out (the same as the F8 route).
+- **Semantics:** a press with AA on goes off and remembers the mode; a press while off
+  restores the settings' mode as it is NOW; a press with AA configured off says there is
+  nothing to compare. The player changing AA while it is off (F8, the ini, the
+  installer) ends the comparison and their choice applies (an F8 pick of the same mode
+  ends it after 3 s); a profile switch ends it (`switchProfile` drops every override).
+  State machine and words: src/common/aa_compare.h; module: src/d3d11/aa_compare.cpp.
+- **Notice:** VR queues a toast ("AA off (comparison), press F7 to restore" /
+  "AA restored: DLSS"), replacing an older AA toast. Flat has no toasts, so
+  `menuShowNotice` rasterises the toast through the panel and composites it in the upper
+  left for 2.5 s (`menu_panel` raster serial says when it is the live one).
+- **Log lines:** `hotkey: AA comparison key bound: F7 ...`, `... is free in your Elite
+  bindings` / `WARNING ... CLASHES`, `aa compare: AA OFF for comparison`, `aa compare: AA
+  RESTORED`, `aa compare: ended ...`, `menu: notice "..." queued`.
+- **Rig:** tools\aa_compare_test (state machine, words, clash rule, Config override incl.
+  reload, profile switch and the flat gate, source pins).
+
+Next flight: flat, DLSS on, F7 twice; read the lines above and look for the notice card.
+Then VR: the same, and the `ui quality:` line either side.

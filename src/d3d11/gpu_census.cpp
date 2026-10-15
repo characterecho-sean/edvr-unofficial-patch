@@ -2,6 +2,8 @@
 #include "gpu_interval.h"
 #include "gpu_frame_gap.h"
 #include "gpu_frame_timing.h"
+#include "frame_span_tile.h"   // kFrameSpanSlots: the overlay's frame GPU span (2026-10-14)
+#include "gpu_pass_profile.h"   // TEMPORARY pass profiler: an EDVR section's begin and end are pass boundaries
 #include "../common/log.h"
 #include <windows.h>
 #include <d3d11.h>
@@ -14,7 +16,7 @@ namespace edvr {
 namespace {
 
 constexpr size_t kSections = static_cast<size_t>(GpuCensusSection::Count);
-// DoorTemporalWhole .. DoorFssHeal are indices 0..8; the in-frame sections
+// DoorTemporalWhole .. DoorSkyRing are indices 0..9; the in-frame sections
 // start at FrameHologramPasses. Both ranges are contiguous by construction
 // (gpu_census.h), so a single index split is enough.
 constexpr size_t kDoorSections = static_cast<size_t>(GpuCensusSection::FrameHologramPasses);
@@ -28,13 +30,20 @@ unsigned occurrenceCapFor(GpuCensusSection section) noexcept {
     return isDoorSection(section) ? kDoorOccurrenceCap : kFrameOccurrenceCap;
 }
 
-// The door's parenthetical breakdown, DoorUpscaler..DoorFssHeal (indices
-// 1..8) -- DoorTemporalWhole (index 0) has no slot of its own; it is the
-// "whole" that four of these nest inside (see gpuCensusLogLine).
-constexpr const char* kDoorBreakdownNames[8] = {
-    "upscaler", "motion prep", "hologram resolve", "UI resolve",
-    "sharpen", "menu", "UI layer composite", "FSS heal"
+// The door's parenthetical breakdown, DoorUpscaler..DoorSkyRing (indices
+// 1..12) -- DoorTemporalWhole (index 0) has no slot of its own; it is the
+// "whole" that five of these nest inside (see gpuCensusLogLine). "sky ring -"
+// in a line means the diag.sky_ring dispatch never ran in the window (key off).
+constexpr const char* kDoorBreakdownNames[] = {
+    "upscaler", "motion prep", "hologram resolve", "hologram depth copy", "hologram near-light", "hologram resolve draw",
+    "UI resolve", "sharpen", "menu", "UI layer composite", "FSS heal", "sky ring"
 };
+constexpr size_t kDoorBreakdownCount = sizeof(kDoorBreakdownNames) / sizeof(kDoorBreakdownNames[0]);
+// The three hologram sub-sections sit right after the umbrella (index DoorHologramResolve); the umbrella's line item carries them in brackets.
+static_assert(static_cast<size_t>(GpuCensusSection::DoorHoloResolveDraw) + 1 == static_cast<size_t>(GpuCensusSection::DoorUiResolve) &&
+                  static_cast<size_t>(GpuCensusSection::DoorHoloDepthCopy) == static_cast<size_t>(GpuCensusSection::DoorHologramResolve) + 1,
+              "the hologram sub-sections follow the hologram resolve umbrella");
+static_assert(kDoorBreakdownCount == kDoorSections - 1, "one name for each door section after DoorTemporalWhole");
 // The in-frame breakdown, FrameHologramPasses..FrameUiLayerHdrSeed (indices 9..16): the item names, in the
 // sections' order. "HDR HUD depth-stencil seed" is the name the UI layer's own 30 s line gives the same stage.
 constexpr const char* kFrameBreakdownNames[] = {
@@ -53,8 +62,9 @@ constexpr size_t kAlteredFirst = static_cast<size_t>(GpuCensusSection::AlteredPo
 constexpr size_t kSeedSection = static_cast<size_t>(GpuCensusSection::FrameUiLayerHdrSeed);
 constexpr size_t kAlteredClassSections = static_cast<size_t>(GpuCensusSection::AlteredFixFirst) - kAlteredFirst;
 constexpr size_t kAlteredFixFirst = static_cast<size_t>(GpuCensusSection::AlteredFixFirst);
-constexpr const char* kAlteredNames[2] = {
-    "pool-family draws (EDVR's slot target and shaders)", "UI draws (redirected to EDVR's layer)"
+constexpr const char* kAlteredNames[3] = {
+    "pool-family draws (EDVR's slot target and shaders)", "UI draws (redirected to EDVR's layer)",
+    "HUD draws moved into the HDR HUD layer (the game's shading at the layer size)"
 };
 constexpr const char* kAlteredFixSumName = "other fix-wrapped draws";
 // The fix names, in AlteredFix's order: fixed strings, never built from a draw.
@@ -63,7 +73,7 @@ constexpr const char* kAlteredFixNames[kAlteredFixCount] = {
     "sun glare clamp", "sun glare steady", "particles", "FSS panel", "FSS reveal",
     "loading scrim", "menu backdrop", "unnamed fix"
 };
-static_assert(kAlteredClassSections == 2, "one name for each altered-draw class");
+static_assert(kAlteredClassSections == 3, "one name for each altered-draw class");
 // The VR world route's three sections (gpu_census.h) come right after the seed and are the last in-frame ones. The
 // rotation gives none of them a turn until it has been called this window, so a session with the key off samples as it did
 // before they existed.
@@ -98,6 +108,7 @@ struct SectionState {
     // never confused with a real one.
     GpuIntervals<8> nullSampler;
     uint64_t occurrences = 0;        // every call this window, timed or not
+    uint64_t issued = 0;             // of those, the calls that issued a real GPU pass (gpuCensusNoteIssued); the rest were empty scopes
     uint32_t skippedThisWindow = 0;  // timer begins that failed on the section's turn (not the K cap)
     // sampler.totals/nullSampler.totals never reset themselves; these are
     // their value at the start of the current window, so the window's
@@ -159,6 +170,7 @@ struct Snapshot {
     bool occurred = false;
     double msPerFrame = 0.0;
     double perFrame = 0.0;
+    double issuedPerFrame = 0.0;   // occurrences that issued a real pass, per frame (the rest were empty scopes)
     unsigned samples = 0;   // the timed occurrences that completed this window (what the figure is a mean of)
 };
 
@@ -186,6 +198,7 @@ Snapshot snapshotOf(const SectionState& st, const SectionState& nullSt, uint64_t
     const unsigned nullWindowSamples = nt.samples >= nullSt.nullBaseSamples ? nt.samples - nullSt.nullBaseSamples : 0;
     const double nullMsPerOccurrence = nullWindowSamples ? nullWindowMs / static_cast<double>(nullWindowSamples) : 0.0;
     s.perFrame = frames ? static_cast<double>(st.occurrences) / static_cast<double>(frames) : 0.0;
+    s.issuedPerFrame = frames ? static_cast<double>(st.issued) / static_cast<double>(frames) : 0.0;
     s.msPerFrame = correctedMsPerCall(msPerOccurrence, nullMsPerOccurrence) * s.perFrame;
     s.samples = windowSamples;
     return s;
@@ -281,8 +294,9 @@ void formatSeedDetail(char* out, size_t n, const Snapshot& s, uint64_t notes, bo
         std::snprintf(target, sizeof(target), "the target changed inside this window, so the figure mixes them: first %s; then %s", a, b);
     }
     std::snprintf(out, n,
-                  "EDVR GPU census, the HDR HUD depth-stencil seed above (the copy of the game's depth-stencil, then the passes "
-                  "that write it into the HUD layer's own): %.2f seeds a frame, %s; %s.",
+                  "EDVR GPU census, the HDR HUD depth-stencil seed above (the passes that write the game's depth-stencil, read "
+                  "where it lies, into the HUD layer's own; a copy of it first only when the game's texture refuses a shader view): "
+                  "%.2f seeds a frame, %s; %s.",
                   s.perFrame, cost, target);
 }
 
@@ -317,11 +331,17 @@ void logAndResetWindow(uint64_t now) {
     // their direct sum.
     const Snapshot doorWhole = snapshotOf(g_section[static_cast<size_t>(GpuCensusSection::DoorTemporalWhole)], frames);
     double doorTotal = doorWhole.msPerFrame;
+    // The hologram resolve's three parts (gpu_census.h): printed in brackets after the umbrella, never separate items, never a total.
+    Snapshot holo[3];   // depth copy, near-light, resolve draw
+    for (size_t k = 0; k < 3; ++k) holo[k] = snapshotOf(g_section[static_cast<size_t>(GpuCensusSection::DoorHoloDepthCopy) + k], frames);
     std::string doorItems;
-    for (int i = 0; i < 8; ++i) {
-        const Snapshot s = snapshotOf(g_section[1 + static_cast<size_t>(i)], frames);
-        appendItem(doorItems, kDoorBreakdownNames[i], s);
+    for (size_t i = 0; i < kDoorBreakdownCount; ++i) {
         const auto section = static_cast<GpuCensusSection>(1 + i);
+        if (section == GpuCensusSection::DoorHoloDepthCopy || section == GpuCensusSection::DoorHoloNearLight ||
+            section == GpuCensusSection::DoorHoloResolveDraw)
+            continue;
+        const Snapshot s = snapshotOf(g_section[1 + i], frames);
+        appendItem(doorItems, kDoorBreakdownNames[i], s);
         if (section == GpuCensusSection::DoorSharpen || section == GpuCensusSection::DoorMenu ||
             section == GpuCensusSection::DoorUiLayerComposite || section == GpuCensusSection::DoorFssHeal) {
             doorTotal += s.msPerFrame;
@@ -333,6 +353,14 @@ void logAndResetWindow(uint64_t now) {
     for (size_t i = 0; i < kFrameSections; ++i) {
         const Snapshot s = snapshotOf(g_section[kDoorSections + i], frames);
         appendItem(frameItems, kFrameBreakdownNames[i], s);
+        // The UI layer reissues: how many of the occurrences issued a real pass, and how many were empty scopes (gpu_census.h's
+        // issued count; a scope that returned before any draw or dispatch is empty). Its figure above is the whole section.
+        if (kDoorSections + i == static_cast<size_t>(GpuCensusSection::FrameUiLayerReissues) && s.occurred) {
+            char real[96];
+            std::snprintf(real, sizeof(real), " [%.2f real a frame, %.2f empty]", s.issuedPerFrame,
+                          s.perFrame > s.issuedPerFrame ? s.perFrame - s.issuedPerFrame : 0.0);
+            frameItems += real;
+        }
         frameTotal += s.msPerFrame;
         if (kDoorSections + i == kSeedSection) seedSnap = s;
     }
@@ -417,6 +445,14 @@ void logAndResetWindow(uint64_t now) {
     char gapBrief[96];
     formatGapBrief(gapBrief, sizeof(gapBrief), gap);
 
+    // The overlay's frame work span pair (frame_span_tile.h): "completed 0" with the application clock off means the pair never ran.
+    char workSpanField[160];
+    {
+        unsigned long long wsDone = 0, wsSkipped = 0, wsInvalid = 0;
+        double wsLast = 0.0;
+        gpuCensusFrameWorkStats(&wsDone, &wsSkipped, &wsInvalid, &wsLast);
+        formatFrameWorkSpanField(workSpanField, sizeof(workSpanField), wsDone, wsSkipped, wsInvalid, wsLast);
+    }
     Log::get().note(
         "EDVR GPU census: %.0f s, %llu frames; EDVR ~%.3f ms/frame = door %.3f "
         "(%s) + in-frame %.3f (%s); application render p50 %s; %s; "
@@ -431,6 +467,16 @@ void logAndResetWindow(uint64_t now) {
         char seedDetail[1024];
         formatSeedDetail(seedDetail, sizeof(seedDetail), seedSnap, g_seedNotes, g_seedMixed, g_seedFirst, g_seedOther);
         Log::get().note("%s", seedDetail);
+    }
+    // The hologram resolve's three parts (2026-10-13): their own line, because the main line's door items are at the log's length. They
+    // are inside the umbrella's figure, so they are a breakdown of it and never part of a total.
+    if (holo[0].occurred || holo[1].occurred || holo[2].occurred) {
+        std::string parts;
+        appendItem(parts, "depth copy", holo[0]);
+        appendItem(parts, "near-light", holo[1]);
+        appendItem(parts, "resolve draw", holo[2]);
+        Log::get().note("EDVR GPU census, the hologram resolve's parts (inside the door's \"hologram resolve\" figure above, not added to "
+                        "any total): %s; \"-\" means that part did not run this window.", parts.c_str());
     }
     // The second skin's own line, only when some of that work ran this window (a window with no skinned character prints nothing of it, as before F16).
     {
@@ -462,6 +508,9 @@ void logAndResetWindow(uint64_t now) {
     char gapDetail[1100];   // the stalls clause (gpu_frame_gap.h) made 900 too small by about a hundred characters
     formatGapDetail(gapDetail, sizeof(gapDetail), gap);
     Log::get().note("%s", gapDetail);
+    // The overlay's frame work span pair, on a line of its own (the main line is at the log's length; last, so the seed's line still follows the main line at once): frame_span_tile.h formats the field.
+    Log::get().note("EDVR GPU census, the overlay's GPU time: %s. All-time counts. With the application clock off, completed 0 means the pair never ran; "
+                    "skipped or invalid climbing with completed flat means it ran and was voided.", workSpanField);
 
     for (auto& st : g_section) {
         st.baseMs = st.sampler.totals.ms;
@@ -470,6 +519,7 @@ void logAndResetWindow(uint64_t now) {
         st.nullBaseMs = st.nullSampler.totals.ms;
         st.nullBaseSamples = st.nullSampler.totals.samples;
         st.occurrences = 0;
+        st.issued = 0;
         st.skippedThisWindow = 0;
     }
     resetSeedNotes();
@@ -481,8 +531,15 @@ void logAndResetWindow(uint64_t now) {
 
 } // namespace
 
+void gpuCensusNoteIssued(GpuCensusSection section) noexcept {
+    if (section >= GpuCensusSection::Count) return;
+    ++g_section[static_cast<size_t>(section)].issued;
+}
+
 bool gpuCensusBegin(ID3D11DeviceContext* ctx, GpuCensusSection section) noexcept {
     if (section >= GpuCensusSection::Count) return false;
+    // EDVR's own sections only: the Altered sections time Elite's draw and are not EDVR's work (gpu_census.h).
+    if (section < GpuCensusSection::AlteredPoolFamily && gpuPassProfileCapturing()) gpuPassProfileNoteEdvr(ctx, true);
     SectionState& st = g_section[static_cast<size_t>(section)];
     ++st.occurrences;   // Cheap and unconditional: the estimate needs every occurrence counted.
     const GpuCensusSection owner = turnOwnerOf(section);
@@ -491,6 +548,9 @@ bool gpuCensusBegin(ID3D11DeviceContext* ctx, GpuCensusSection section) noexcept
     if (call < g_activeOffset || (call - g_activeOffset) % g_activeStride != 0) return false;
     if (g_activeTimed >= occurrenceCapFor(section)) return false;   // K reached: counted, not timed
     ++g_activeTimed;
+    // With the application-frame clock off, nothing keeps a frequency scope open, and every span would open its own and hold one of the clock's eight
+    // records for four-plus frames (the 2026-10-13 flight: 85-90% of spans failed). One scope for the frame's spans; closed in gpuCensusFrame.
+    if (!gpuFrameClockLive()) gpuTimingCensusScopeEnsure(ctx, GetTickCount64());
     if (!g_activeNullDone) {
         // The turn's first timed call also times one empty pair, immediately
         // before the real one, nothing between: the timer's own overhead,
@@ -529,14 +589,68 @@ void gpuCensusNoteSeedTarget(const GpuCensusSeedTarget& target) noexcept {
 
 void gpuCensusEnd(ID3D11DeviceContext* ctx, GpuCensusSection section) noexcept {
     if (section >= GpuCensusSection::Count) return;
+    if (section < GpuCensusSection::AlteredPoolFamily && gpuPassProfileCapturing()) gpuPassProfileNoteEdvr(ctx, false);
     // Safe even when the matching Begin returned false: GpuIntervals::end()
     // is a no-op with nothing open (gpu_interval.h), so a plain Begin/End
     // pair at a call site never needs to branch on Begin's result.
     g_section[static_cast<size_t>(section)].sampler.end(ctx);
 }
 
+// The overlay's frame GPU WORK span (2026-10-14, reworked the same day). With the application-frame clock off, the overlay had no
+// GPU frame time. One timestamp pair a frame, inside the census's frame scope, from the frame's first GPU command to the end of
+// EDVR's door work:
+//   - the census opens its frame scope at gpuCensusFrame (presentFrameBoundary, device_hook.cpp, after the real Present) and arms
+//     g_frameWorkArmed there;
+//   - the first command the game issues on the owner context after that (gpuFrameCommandIfLive, every command thunk) begins the pair;
+//   - the door work ends in hookedPresent, just before the real Present (gpuCensusFrameWorkEnd), which is before the next
+//     gpuCensusFrame closes the scope.
+// So the pair lies in the one scope. Two queries a frame, read back four frames later (GpuIntervals). The span includes GPU idle
+// inside the frame, not the idle between frames: a boundary-to-boundary span reads the frame period on a GPU with slack.
+GpuIntervals<kFrameSpanSlots> g_frameSpan;
+std::atomic<bool> g_frameWorkOpenFlag{false};   // a pair is open (begun, not yet ended)
+uint64_t g_frameSpanCompleted = 0;   // pairs read back, all time
+double g_frameSpanLastMs = 0.0;      // the last pair read back
+
+namespace detail {
+std::atomic<bool> g_frameWorkArmed{false};
+}  // namespace detail
+
+void frameSpanEnd(ID3D11DeviceContext* ctx) {
+    // The fallback end, at the census's close: a pair the door end did not close (no Present through the hook) ends here, still in its scope.
+    if (!g_frameWorkOpenFlag.load(std::memory_order_relaxed)) return;
+    g_frameSpan.end(ctx);
+    g_frameWorkOpenFlag.store(false, std::memory_order_relaxed);
+}
+void frameWorkFirstCommand(ID3D11DeviceContext* ctx) noexcept {
+    // Only the owner's immediate context begins the pair; a command on another context leaves the arm for the owner's.
+    if (!ctx || !gpuTimingAccepts(ctx)) return;
+    detail::g_frameWorkArmed.store(false, std::memory_order_relaxed);
+    // Only inside the census's scope: without one open, GpuTimer::begin would open a scope of its own and hold a record of the clock's eight.
+    if (!gpuTimingCensusScopeOpen()) return;
+    if (g_frameSpan.begin(ctx)) g_frameWorkOpenFlag.store(true, std::memory_order_relaxed);
+}
+void gpuCensusFrameWorkEnd(ID3D11DeviceContext* ctx) noexcept {
+    if (!g_frameWorkOpenFlag.load(std::memory_order_relaxed)) return;
+    g_frameSpan.end(ctx);
+    g_frameWorkOpenFlag.store(false, std::memory_order_relaxed);
+}
+bool gpuCensusFrameWorkOpen() noexcept { return g_frameWorkOpenFlag.load(std::memory_order_relaxed); }
+void frameSpanPoll(ID3D11DeviceContext* ctx) {
+    const unsigned before = g_frameSpan.totals.samples;
+    const double beforeMs = g_frameSpan.totals.ms;
+    g_frameSpan.poll(ctx);
+    const unsigned got = g_frameSpan.totals.samples - before;
+    if (got == 0) return;
+    g_frameSpanLastMs = (g_frameSpan.totals.ms - beforeMs) / static_cast<double>(got);
+    g_frameSpanCompleted += got;
+}
+
 void gpuCensusFrame(ID3D11DeviceContext* ctx) noexcept {
+    const bool appClockOn = gpuFrameClockLive();
+    if (!appClockOn) frameSpanEnd(ctx);   // before the census closes its scope: the pair lies in that scope
+    gpuTimingCensusScopeEnd(ctx, GetTickCount64());   // the frame's spans are all issued; closing lets their result be read
     for (auto& st : g_section) { st.sampler.poll(ctx); st.nullSampler.poll(ctx); }
+    if (!appClockOn) frameSpanPoll(ctx);
 
     ++g_windowFrames;
 
@@ -553,6 +667,16 @@ void gpuCensusFrame(ID3D11DeviceContext* ctx) noexcept {
     g_activeNullDone = false;
     const uint64_t now = GetTickCount64();
     if (g_windowStartMs == 0) g_windowStartMs = now;
+    // The next frame's one frequency scope, opened here rather than at its first census span so that EVERY timer pair of the frame borrows it, the
+    // census's and the others' (the HUD route's per-draw spans, the seed's): a pair that finds none open opens its own and holds a record of the
+    // clock's eight for four-plus frames (gpu_timing.h, gpuTimingCensusScopeEnsure). The application-frame clock does this itself when it is on.
+    if (!gpuFrameClockLive()) {
+        gpuTimingCensusScopeEnsure(ctx, now);
+        // The next frame's work span: armed now, begun by the first command in its scope (frameWorkFirstCommand).
+        detail::g_frameWorkArmed.store(gpuTimingCensusScopeOpen(), std::memory_order_relaxed);
+    } else {
+        detail::g_frameWorkArmed.store(false, std::memory_order_relaxed);   // the application clock's own frames: no work span
+    }
 
     GpuFrameSnapshot completions[32]{};
     uint64_t dropped = 0;
@@ -571,7 +695,22 @@ void gpuCensusNoteEyeRun() noexcept { ++g_windowEyeRuns; }
 
 void gpuCensusShutdown() noexcept {
     for (auto& st : g_section) { st.sampler.reset(); st.nullSampler.reset(); }
+    g_frameSpan.reset();
     resetSeedNotes();
+}
+
+void gpuCensusFrameWorkStats(unsigned long long* completed, unsigned long long* skipped, unsigned long long* invalid, double* lastMs) noexcept {
+    if (completed) *completed = g_frameSpanCompleted;
+    if (skipped) *skipped = g_frameSpan.totals.skipped;
+    if (invalid) *invalid = g_frameSpan.totals.invalid;
+    if (lastMs) *lastMs = g_frameSpanLastMs;
+}
+
+bool gpuCensusFrameSpan(double* ms, unsigned* samples) noexcept {
+    if (g_frameSpanCompleted == 0) return false;
+    if (ms) *ms = g_frameSpanLastMs;
+    if (samples) *samples = static_cast<unsigned>(g_frameSpanCompleted > 0xFFFFFFFFull ? 0xFFFFFFFFull : g_frameSpanCompleted);
+    return true;
 }
 
 } // namespace edvr

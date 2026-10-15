@@ -127,3 +127,37 @@ terrain_motion sets the pool's wall (105 s against 96.5 s) it is 0 s on an idle
 machine, and it does show when another build shares the machine (X3-9). With
 the terrain_motion split as well, the warm pool would fall from 105 s to about
 (771.6 - 78) / 8 = 87 s, -18 s (11% of 166 s); with all 63 files, about 79 s.
+
+## 2026-10-14: LNK1104 on seed_test.exe was two rigs, one output
+
+Symptom: a full build failed with `LINK : fatal error LNK1104: cannot open
+file '...\build\obj\uilayerseed\seed_test.exe'`, then `ui_quality_test failed
+with exit code 1`. An immediate rerun passed; the file was unlocked afterwards.
+
+Cause, measured on the failing log (native-onfoot-vr-completion-219ffa,
+build_f16_full4.log): `:rig_ui_quality_test` had no `exit /b 0` after its last
+command, so cmd ran on into `:rig_aa_off_test`. The log shows the aa_off banner
+twice: once as its own job (5.9 s, seed PASS), and once inside the
+ui_quality_test job's output with no banner of its own. Both jobs ran in the
+pool at the same time, built `build\obj\aaofftest` and `build\aa_off_test.exe`,
+and linked the same `uilayerseed\seed_test.exe`. A running exe is locked
+against relinking, so the job that linked second got LNK1104 if the other job's
+seed test was still running (the log has no timestamps, so that timing is
+inferred, not read), and the ui_quality_test job exited 1.
+
+Ruled out: (c) was the right family (two rigs on one output path), not a
+single rig racing itself; (b) antivirus was not needed to explain the log.
+Real-time Defender was on, but a relink of a just-run exe was not locked in a
+quiet 60-iteration test (scratch experiment, 2026-10-14). (a) a leftover
+process from an earlier build: no evidence; the lock is explained by the
+same-build aa_off job's own run.
+
+Fix: landed on main as 4c3b33b3, which ends `:rig_ui_quality_test` in `exit /b 0`
+and gives the seed test its own `:rig_ui_layer_seed_test`, so no two rigs share
+its output. The guard is `run_jobs.py` `falls_through_line` /
+`check_no_fall_through`, which refuses at the plan a rig whose last command is
+not an exit or a goto. A parallel fix on this branch (`exit /b 0` plus a
+`runs_on_into` guard) duplicated it and was dropped.
+
+Environment: a fresh worktree needs the gitignored OpenXR loader copied in
+(`third_party\openxr\loader`, verified by `tools\fetch_openxr_loader.py --verify`).

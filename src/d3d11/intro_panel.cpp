@@ -402,7 +402,7 @@ void introPanelConfigure(Config& cfg) {
     const float wasSize = g_size;
     const bool  wasMatch = g_matchSplash;
     const std::string raw = cfg.getString("fix.intro_video", "screen");
-    const IntroVideoMode mode = introVideoParse(raw);
+    const IntroVideoMode mode = introVideoParseFor(raw, runtimeFlatProfile());
     if (!mode.recognised) {
         Log::get().note("intro_video \"%s\" is not screen, stock or skip; running "
                         "the default, screen.", raw.c_str());

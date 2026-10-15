@@ -33,12 +33,10 @@ struct State {
     bool latched = false;
     bool consumerAnnounced = false;
     bool held = false;
-    bool transitionEnabled = true;
     bool configNoted = false;
     uint32_t beginCount = 0;
     uint32_t latchCount = 0;
     uint32_t invalidationCount = 0;
-    uint32_t lastTransitionEnabled = 0;
     uint32_t lastResubmitEnabled = 0;
     uint32_t lastDeferredPacing = 0;
     bool pacingNoted = false;
@@ -296,11 +294,10 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
     result.trimNasalDeg = static_cast<float>(trim[2]);
     result.sceneReady = edvr::sceneArrived() &&
                         sameDevice(state->device, edvr::gameDevice()) ? 1u : 0u;
-    result.transitionEnabled = edvr::Config::get().getBool(
-        "fix.transition_flash", true) ? 1u : 0u;
-    // The key that switched the compositor's re-submit of a withheld frame
-    // (advanced.transition_flash_resubmit) is gone; the field stays in the ABI
-    // (native_frame.h) and is always on.
+    // The setting that switched the hold off (retired 2026-10-13) and the one that
+    // switched the compositor's re-submit of a withheld frame (retired 2026-10-09)
+    // are gone; both fields stay in the ABI (native_frame.h) and are always on.
+    result.transitionEnabled = 1u;
     result.resubmitEnabled = 1u;
 
     // fix.weapon_stability: while the journal watcher says Status.json
@@ -340,7 +337,6 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
     // is submitted. Consume an explicit hold only when the first valid latch
     // makes the pair visible to the compositor.
     state->held = false;
-    state->transitionEnabled = result.transitionEnabled != 0;
     state->sequenceFloor = input->sequence;
     state->invalidated = false;
     state->began = true;
@@ -348,18 +344,15 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
     state->cachedDecision = {};
     ++state->beginCount;
     if (!state->configNoted ||
-        state->lastTransitionEnabled != result.transitionEnabled ||
         state->lastResubmitEnabled != result.resubmitEnabled ||
         state->lastDeferredPacing != result.deferredPacing) {
         edvr::Log::get().note(
-            "native frame: begin #%u seq=%llu transition=%s, "
-            "resubmit=%s, pacing=%s.", state->beginCount,
+            "native frame: begin #%u seq=%llu resubmit=%s, "
+            "pacing=%s.", state->beginCount,
             static_cast<unsigned long long>(input->sequence),
-            result.transitionEnabled ? "on" : "off",
             result.resubmitEnabled ? "on" : "off",
             result.deferredPacing ? "turbo" : "runtime");
         state->configNoted = true;
-        state->lastTransitionEnabled = result.transitionEnabled;
         state->lastResubmitEnabled = result.resubmitEnabled;
         state->lastDeferredPacing = result.deferredPacing;
     }
@@ -394,7 +387,7 @@ HRESULT WINAPI latchSubmit(void* context, uint64_t sequence,
         state->cachedDecision.size = sizeof(state->cachedDecision);
         state->cachedDecision.version = EDVR_NATIVE_FRAME_VERSION_1;
         state->cachedDecision.withhold =
-            ((state->transitionEnabled && marked) || state->held) ? 1u : 0u;
+            (marked || state->held) ? 1u : 0u;
         state->cachedDecision.jumpOnly =
             (state->cachedDecision.withhold && marked && !state->held) ? 1u : 0u;
         state->cachedDecision.verdict = edvr::jumpVerdictPacked();

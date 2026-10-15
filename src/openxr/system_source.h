@@ -70,6 +70,8 @@ class SystemSource {
   // pose-gap instrument; may be called from any thread.
   virtual void noteHeadCallFailed(const HeadCall&,float) noexcept {}
   virtual bool resetSeated(uint64_t generation)=0;
+  // The same, for a caller that is known (the seat memory's instrument records who asked). The default is the plain call.
+  virtual bool resetSeatedFor(uint64_t generation,const HeadCall& call) {(void)call;return resetSeated(generation);}
   // Return an event-time pose in the requested origin, or initialized invalid
   // pose if unavailable. No synthesized focus/quit events are implied here.
   virtual bool pollEvent(uint64_t generation,vr::ETrackingUniverseOrigin origin,

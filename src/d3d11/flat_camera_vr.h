@@ -401,6 +401,34 @@ inline bool flatCameraVrQuietFor(uint32_t bits, bool injectedSetEmpty) {
     return (bits & (kFlatCameraVrBitInject | kFlatCameraVrBitObserve)) == 0u && injectedSetEmpty;
 }
 
+// What the flat profile's frame step does with the detour's mode when it takes the frame over. A process that started VR leaves the
+// detour in observe-only mode for its whole life (the census's switch is never cleared by the census) and may leave the route's
+// per-frame word at "driven, pass-through". After a live switch to flat both would keep the flat profile from injecting a single
+// camera. The flat step re-arms the hook for injection once the VR side is provably out of the way: no census observer registered,
+// and the route's word zero or quiet (nothing injecting or observing, no camera waiting for its flush). Until then it changes
+// nothing, and the frame is handed to Legacy (FlatCameraFrameCore::begin's observeOnly argument).
+struct FlatCameraFlatTakeover {
+    bool clearObserveOnly = false;  // the detour may inject again: observe-only is cleared
+    bool clearVrBits = false;       // the route's stale per-frame word is zeroed
+};
+inline FlatCameraFlatTakeover flatCameraFlatTakeover(bool observeOnly, bool observerRegistered, uint32_t vrBits, bool injectedSetEmpty) {
+    FlatCameraFlatTakeover t;
+    if (observerRegistered) return t;
+    if (vrBits != 0u && !flatCameraVrQuietFor(vrBits, injectedSetEmpty)) return t;
+    t.clearVrBits = vrBits != 0u;
+    t.clearObserveOnly = observeOnly;
+    return t;
+}
+
+// WHO OWNS THE RELAY GATE (g_gate; flatCameraInjectPause). While the flat profile is active the gate is the flat runtime's alone: its
+// work tier (applyWork) closes it when the flat work stands down and opens it again at Full. The VR side (the world route's frame step,
+// the census's key edges) writes it only while the profile is not flat. Without this a VR route that winds down AFTER a live switch to
+// flat closes the gate (quiet, nothing injected), flat's Full-to-Full tier never reopens it, and the detour sees zero calls for the rest
+// of the session (the 09:34:29 log of 2026-10-14: refresh-calls=14,616,390, then 0). At the takeover the flat step sets the gate from
+// its current tier: open at Full, closed otherwise.
+inline bool flatCameraGateWritableByVr(bool flatProfile) { return !flatProfile; }
+inline bool flatCameraGateOpenForWork(bool workFull) { return workFull; }
+
 // The route's frame step is the detour's Present edge: in an INJECTING frame a window the step armed is honoured for the frame
 // window's own expiry (FlatCameraGate::kExpiryMs) from the STEP, even when something else (the census's per-frame re-arm) keeps
 // the gate itself open, so a route that stopped stepping cannot leave the last frame's phase injecting. Every other mode keeps

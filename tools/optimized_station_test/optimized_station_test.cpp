@@ -4,9 +4,13 @@
 // prefix and sphere, the bay's volume, and the unreadable rule. No DLL and no game.
 #include "../../src/d3d11/optimized_station_core.h"
 #include "../../src/d3d11/explorer_cam_core.h"
+#include "../../src/d3d11/journal_watch.h"   // journalSeatedFromFlags (a constexpr; the rig does not link the watcher)
 #include "../../src/d3d11/station_gather_core.h"
 #include "../../src/d3d11/station_lockfree_core.h"
 #include "../../src/d3d11/station_pass_core.h"
+#include "../../src/common/flat_profile_keys.h"
+#include "../../src/d3d11/menu_flat_rows.h"
+#include "../../src/d3d11/view_source.h"
 
 #include <algorithm>
 #include <atomic>
@@ -41,6 +45,7 @@ se::SealInputs inHangar(uint64_t now) {
     se::SealInputs in;
     in.setting = true;
     in.docked = true;
+    in.aboard = true;   // seated in the ship on the pad (Status.json); the on-foot cases clear it
     in.ownKnown = true;
     in.r1Fresh = true;
     in.inHangar = true;
@@ -988,6 +993,75 @@ int main(int argc, char** argv) {
         check(firstEngage(&st, noPick, 0, 20000) == 0, "v14.1: no pad gathered (pickOk false): the seal is never requested");
     }
 
+    // ---- Release blocker for v0.20.0 (2026-10-14): the seal is for the commander seated in the ship; on foot it never holds -------------------------
+    {
+        // Aboard, docked, the pad in the hangar: seals; the seat leaving (Disembark: on foot in the hangar) releases at once, with its own reason.
+        se::SealState st;
+        se::SealInputs in = inHangar(0);
+        check(firstEngage(&st, in, 100, 1000) == 100, "on foot: aboard in the hangar seals");
+        in.held = true;
+        se::ReleaseWhy why = se::ReleaseWhy::kNone;
+        check(se::sealStep(in, &st, &why) == se::SealAction::kNone && why == se::ReleaseWhy::kNone, "on foot: aboard and held keeps the seal");
+        in.aboard = false;   // on foot in the hangar (Flags2 OnFoot | OnFootInHangar): the seat is gone
+        check(se::sealStep(in, &st, &why) == se::SealAction::kRelease && why == se::ReleaseWhy::kOnFoot, "on foot: the seat leaving releases the seal, reason kOnFoot");
+        // The release wins over the camera rule: the lift ride up (the camera still inside the tall box) keeps it released, and nothing re-seals on foot.
+        in.held = false;
+        st = se::SealState{};   // as after a release: no request in flight
+        for (int i = 0; i < 400; ++i) {
+            in.nowMs = 1000 + 100u * static_cast<uint64_t>(i);
+            check(se::sealStep(in, &st, &why) == se::SealAction::kNone, "on foot: the lift ride and the concourse, the camera in the tall box, never re-seal");
+        }
+        // Back aboard (boarding again on the pad, the hangar unchanged): the seal returns on the normal conditions.
+        in.aboard = true;
+        check(firstEngage(&st, in, 200000, 202000) != 0, "on foot: boarding again seals again");
+    }
+    {
+        // The lift door and the concourse: on foot at the concourse level the pad is no longer in the hangar for the game (r1 0) or the camera has left the box; neither matters,
+        // and the seat alone keeps the seal off. A held seal released by the seat is not re-armed by the r1 edge either way.
+        se::SealState st;
+        se::SealInputs in = inHangar(0);
+        in.held = true;
+        in.aboard = false;
+        in.cameraInBox = false;
+        in.cameraOutside = true;
+        se::ReleaseWhy why = se::ReleaseWhy::kNone;
+        check(se::sealStep(in, &st, &why) == se::SealAction::kRelease && why == se::ReleaseWhy::kOnFoot, "on foot in the concourse: released for the seat before the camera rule is consulted");
+        check(st.reseal == 0, "on foot: the release asks for no r1 edge, only the seat returning");
+        // Undocked still reads as undocked, ahead of the seat: the existing reason is kept.
+        se::SealState st2;
+        se::SealInputs und = inHangar(0);
+        und.held = true;
+        und.docked = false;
+        und.aboard = false;
+        check(se::sealStep(und, &st2, &why) == se::SealAction::kRelease && why == se::ReleaseWhy::kUndocked, "an undock keeps its own release reason ahead of the seat");
+    }
+    {
+        // Flags missing or stale: the commander is not known to be aboard, so nothing seals and a held seal drops. The station feeds aboard = seatedKnown && seated.
+        se::SealState st;
+        se::SealInputs in = inHangar(0);
+        in.aboard = false;   // Status.json unreadable, a menu (Flags 0), or the watcher off
+        check(firstEngage(&st, in, 0, 60000) == 0, "flags unknown: a docked station in the hangar never seals");
+        in.held = true;
+        se::ReleaseWhy why = se::ReleaseWhy::kNone;
+        check(se::sealStep(in, &st, &why) == se::SealAction::kRelease && why == se::ReleaseWhy::kOnFoot, "flags unknown: a held seal is released");
+        // the gate the station applies
+        auto aboardOf = [](bool known, bool seated) { return known && seated; };
+        check(!aboardOf(false, true) && !aboardOf(true, false) && aboardOf(true, true), "aboard needs the seat known AND seated (a stale 'seated' with the sample unknown is not aboard)");
+        check(edvr::journalSeatedFromFlags(1u << 24, 0) && edvr::journalSeatedFromFlags(0, 1u << 1) && !edvr::journalSeatedFromFlags(0, se::kFlags2OnFoot | se::kFlags2OnFootInHangar) &&
+                  !edvr::journalSeatedFromFlags(1u, se::kFlags2OnFoot | se::kFlags2OnFootSocialSpace),
+              "the seat from the words: the ship's bit or a taxi seat is aboard; on foot in the hangar or in social space, docked bit alone, is not");
+    }
+    {
+        char text[400];
+        se::describeStatusFlags(text, sizeof(text), true, 0x00000001u, 0x00002001u);
+        check(std::strstr(text, "Flags 0x00000001 Flags2 0x00002001") && std::strstr(text, "on foot 1, in hangar 1, social space 0") && std::strstr(text, "docked 1, in main ship 0"),
+              "the on-foot release line names both words and the bits (docked, ship, on foot, in hangar, social space)");
+        se::describeStatusFlags(text, sizeof(text), false, 0, 0);
+        check(std::strcmp(text, "Status Flags unknown") == 0, "an unknown sample says so");
+        se::describeStatusFlags(text, sizeof(text), true, 0x01000001u, 0x0u);
+        check(std::strstr(text, "in main ship 1") && std::strstr(text, "on foot 0"), "aboard in the main ship reads as such");
+    }
+
     // ---- Built v14.24 (2026-10-13, the review of the 013c6122 flight) -----------------------------------------------------------------------------
     {
         // Item 1: a change of rig A's association forgets A's bounds and verdict only; rig B keeps its bound and its verdict (no whole-epoch bump).
@@ -1000,6 +1074,59 @@ int main(int argc, char** argv) {
               "v14.24 rig: rig B keeps its bound and its outside verdict, and may still veto (no whole-epoch bump)");
         check(se::collAssociationIs(0x500, 0x500) && !se::collAssociationIs(0x600, 0x500) && !se::collAssociationIs(0, 0),
               "v14.24 rig: a table entry names its rig only while the rig still holds that collection");
+    }
+    {
+        // Release review 2026-10-14 finding 4: a rig's collection changed, so the rig's first record's name goes with its bounds (the own-ship prefix exemption reads the name).
+        struct RigModel {
+            bool cur = false, last = false, named = false;
+            uint8_t verdict = 0;
+            uint32_t run = 0;
+            char name[48] = {};
+            uintptr_t coll = 0;
+        };
+        auto note = [](RigModel& r, const char* recordName) {   // what applyRigNote does for one record: a bound, and the name while the slot has none
+            r.cur = true;
+            se::rigRecordName(&r.named, r.name, sizeof(r.name), recordName);
+        };
+        auto assoc = [](RigModel& r, uintptr_t coll) {   // what applyRigAssoc does
+            if (coll == r.coll) return;
+            se::rigReassociate(&r.cur, &r.last, &r.verdict, &r.run, &r.named, r.name, sizeof(r.name));
+            r.coll = coll;
+        };
+        auto exempt = [](const RigModel& r, const char* prefix) { return se::ownShipExempt(false, 0.0f, r.name, prefix); };
+        // the name is recorded once, while the slot has none
+        RigModel a;
+        note(a, "Cobra_Hull_01");
+        note(a, "Rock_02");
+        check(a.named && std::strcmp(a.name, "Cobra_Hull_01") == 0 && exempt(a, "Cobra_"), "release review 2026-10-14 rig name: the first record names the rig, a later record does not rename it");
+        assoc(a, 0x500);
+        a.verdict = 2;
+        a.last = true;
+        // own-ship prefix -> not: the old name must not exempt the new object
+        assoc(a, 0x600);
+        check(!a.named && a.name[0] == '\0' && !a.cur && !a.last && a.verdict == 0 && a.run == 0, "release review 2026-10-14 rig name: a change of collection forgets the name with the bounds and the verdict");
+        check(!exempt(a, "Cobra_"), "release review 2026-10-14 rig name: with no name yet the rig is not exempt by prefix");
+        note(a, "Rock_02");
+        check(a.named && std::strcmp(a.name, "Rock_02") == 0 && !exempt(a, "Cobra_"), "release review 2026-10-14 rig name: prefix to non-prefix, fresh bounds: the new object is classed by its own name (not exempt)");
+        // not -> own-ship prefix: the new object must be protected by its own name
+        RigModel b;
+        note(b, "Rock_02");
+        assoc(b, 0x500);
+        note(b, "Rock_02");
+        check(!exempt(b, "Cobra_"), "release review 2026-10-14 rig name: a non-prefix rig is not exempt");
+        assoc(b, 0x700);
+        note(b, "Cobra_Hull_01");
+        check(exempt(b, "Cobra_") && std::strcmp(b.name, "Cobra_Hull_01") == 0, "release review 2026-10-14 rig name: non-prefix to prefix, fresh bounds: the new object is exempt by its own name");
+        // the same collection again is not a change: the name stays
+        assoc(b, 0x700);
+        check(b.named && exempt(b, "Cobra_"), "release review 2026-10-14 rig name: the same collection again keeps the name");
+        // a record with no readable name, and a zero-size name buffer, are handled
+        RigModel c;
+        note(c, nullptr);
+        check(c.named && c.name[0] == '\0', "release review 2026-10-14 rig name: a null record name records an empty name");
+        bool named = false;
+        char tiny[1] = {'x'};
+        check(!se::rigRecordName(&named, tiny, 0, "abc") && !named && tiny[0] == 'x', "release review 2026-10-14 rig name: a zero-size buffer records nothing");
     }
     {
         // Item 3: the cost summary's percentiles, and the change-only gate.
@@ -2162,6 +2289,57 @@ int main(int argc, char** argv) {
         check(bad.load() == 0 && hits.load() > 0, "v14.31 node cache, threads: eight threads inserting and reading never see a torn or foreign name");
     }
     {
+        // Release review 2026-10-14 finding 2: two writers rewrite ONE node's entry in place (the same node, class, flags and generation, so the published word is identical
+        // every time) while readers copy its name. The name is a seqlock payload of atomic words; a hit must be exactly one of the two names, never a mix of both.
+        auto cacheHeap = std::make_unique<se::NodeCache<64>>();
+        se::NodeCache<64>& cache = *cacheHeap;
+        const uintptr_t node = 0x30008;
+        char nameA[64], nameB[64];
+        std::memset(nameA, 'A', 63);
+        std::memset(nameB, 'B', 63);
+        nameA[63] = nameB[63] = '\0';
+        check(cache.put(node, 3, se::NameClass::kOther, 0, nameA), "node cache seqlock: the entry is created");
+        std::atomic<bool> stop{false};
+        std::atomic<uint64_t> torn{0}, hits{0}, misses{0}, puts{0};
+        std::vector<std::thread> threads;
+        for (int t = 0; t < 2; ++t) {
+            threads.emplace_back([&, t] {
+                const char* mine = t == 0 ? nameA : nameB;
+                while (!stop.load(std::memory_order_relaxed)) {
+                    if (cache.put(node, 3, se::NameClass::kOther, 0, mine)) puts.fetch_add(1, std::memory_order_relaxed);
+                }
+            });
+        }
+        for (int t = 0; t < 4; ++t) {
+            threads.emplace_back([&] {
+                while (!stop.load(std::memory_order_relaxed)) {
+                    se::NameClass cls = se::NameClass::kNone;
+                    uint32_t flags = 0;
+                    char got[64];
+                    std::memset(got, 0, sizeof(got));
+                    if (cache.find(node, 3, &cls, &flags, got)) {
+                        hits.fetch_add(1, std::memory_order_relaxed);
+                        const char c = got[0];
+                        bool whole = (c == 'A' || c == 'B') && got[63] == '\0';
+                        for (int k = 0; whole && k < 63; ++k) whole = got[k] == c;
+                        if (!whole) torn.fetch_add(1, std::memory_order_relaxed);
+                    } else {
+                        misses.fetch_add(1, std::memory_order_relaxed);
+                    }
+                }
+            });
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(600));
+        stop.store(true);
+        for (auto& th : threads) th.join();
+        check(torn.load() == 0 && hits.load() > 0 && puts.load() > 0, "node cache seqlock, threads: two writers rewriting one node and four readers never see a name that mixes the two");
+        // after the writers stop the entry is whole and readable
+        se::NameClass cls = se::NameClass::kNone;
+        uint32_t flags = 0;
+        char got[64];
+        check(cache.find(node, 3, &cls, &flags, got) && (std::strcmp(got, nameA) == 0 || std::strcmp(got, nameB) == 0), "node cache seqlock: the entry is one whole name once the writers stop");
+    }
+    {
         // Built v14.32: a node freed and reallocated within a generation (a streamed asset) is caught by the name-text validator on the hit path.
         uint8_t padText[16] = {'L', 'a', 'n', 'd', 'i', 'n', 'g', 'P', 'a', 'd', 'S', 'm', 'a', 'l', 'l', 'A'};
         uint8_t liftText[16] = {'L', 'i', 'f', 't', '_', '0', '1', 0, 0, 0, 0, 0, 0, 0, 0, 0};
@@ -2296,6 +2474,55 @@ int main(int argc, char** argv) {
         check(a2.armed, "v14.33 arm: and sixty clean passes after it arm");
         a2.reset();
         check(!a2.armed && a2.run == 0, "v14.33 arm: a new seal resets the arm");
+    }
+
+    // ---- Built v14.34: the optimized station in the flat profile -----------------------------------------------------------------------------------------
+    {
+        check(edvr::flatProfileReadsKey("fix.optimized_stations"), "v14.34 flat: fix.optimized_stations is on the flat key list (unlisted, getString answers off and the station never starts)");
+        check(!edvr::flatProfileReadsKey("fix.optimized_station_x") && !edvr::flatProfileReadsKey("fix.supercruise_dust") && !edvr::flatProfileReadsKey("fix.fss_mode_latch"),
+              "v14.34 flat: only that key was added (a near name and other fixes stay off the list)");
+        check(edvr::flatPageHasRow("fix", "optimized_stations"), "v14.34 flat: the F8 flat page has the Optimized station row");
+        const edvr::FlatPageRow* refused = edvr::flatPageFirstRefused([](const char* k) { return edvr::flatProfileReadsKey(k); });
+        check(refused == nullptr, "v14.34 flat: every row of the flat page, the new one included, passes the flat key list");
+        // the flat camera source: no temporal-pass rows and no explorer cam, so the position is the render context's view 0 origin
+        edvr::view::Resolved flat;
+        flat.originOk = true;
+        flat.origin[0] = 120.0f;
+        flat.origin[1] = -40.0f;
+        flat.origin[2] = 7.5f;
+        flat.poseOk = false;
+        float c[3] = {};
+        bool fromRows = true;
+        check(edvr::view::sphereCentre(flat, c, &fromRows) && !fromRows && c[0] == 120.0f && c[1] == -40.0f && c[2] == 7.5f,
+              "v14.34 flat camera: with no pose rows the camera is the view 0 origin");
+        edvr::view::Resolved none;
+        check(!edvr::view::sphereCentre(none, c), "v14.34 flat camera: with neither rows nor origin there is no camera (the station keeps its camera unknown)");
+        edvr::view::Resolved both = flat;
+        both.poseOk = true;
+        both.pose.pos[0] = 1.0f;
+        both.pose.pos[1] = 2.0f;
+        both.pose.pos[2] = 3.0f;
+        check(edvr::view::sphereCentre(both, c, &fromRows) && !fromRows && c[0] == 120.0f, "v14.34 flat camera: rows present as well, the origin stays the source (as in VR)");
+        // the camera rule on that position: inside a small bay box, outside it
+        se::OwnCell cell;
+        cell.has = true;
+        cell.box = true;
+        cell.boxHalf[0] = 76.0f;
+        cell.boxHalf[1] = 37.5f;
+        cell.boxHalf[2] = 129.0f;
+        for (int k = 0; k < 3; ++k) {
+            cell.boxCentre[k] = flat.origin[k];
+        }
+        cell.boxU[0] = 1.0f;
+        cell.boxV[1] = 1.0f;
+        cell.boxW[2] = 1.0f;
+        float x[3] = {};
+        se::boxCoordsOf(cell, c, x);
+        check(std::fabs(x[0]) <= cell.boxHalf[0] && std::fabs(x[1]) <= cell.boxHalf[1] && std::fabs(x[2]) <= cell.boxHalf[2],
+              "v14.34 flat camera: the view 0 origin at the box centre is inside the box");
+        const float away[3] = {flat.origin[0] + 300.0f, flat.origin[1], flat.origin[2]};
+        se::boxCoordsOf(cell, away, x);
+        check(!(std::fabs(x[0]) <= cell.boxHalf[0] + se::kCameraLeaveM), "v14.34 flat camera: 300 m along the box is outside it (the camera rule releases)");
     }
 
     std::printf("optimized_station_test: %d checks, %d failures\n", g_checks, g_failures);

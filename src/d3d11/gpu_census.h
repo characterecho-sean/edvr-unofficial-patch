@@ -3,6 +3,8 @@
 
 struct ID3D11DeviceContext;
 
+struct ID3D11DeviceContext;
+
 namespace edvr {
 
 // How much of a frame's GPU time is EDVR's own work, feature by feature
@@ -33,11 +35,17 @@ enum class GpuCensusSection : uint8_t {
     DoorUpscaler,             // fsr/dlaa, and the fovea crops (periphery + centre) -- nested inside DoorTemporalWhole
     DoorMotionPrep,           // the motion-vector dispatch (mvCs) -- nested inside DoorTemporalWhole
     DoorHologramResolve,      // uiDepthHologramResolve + uiDepthTemporalDepth -- nested inside DoorTemporalWhole
+    // The three parts of the hologram resolve, each nested inside DoorHologramResolve (the umbrella keeps its own figure; these are its
+    // breakdown, never added to a total). Measurement-build sections (2026-10-13 UI pass costs, audit section 5).
+    DoorHoloDepthCopy,        // the private depth copy the resolve writes into (ui_depth_layer.h's acquire: one CopyResource on first use)
+    DoorHoloNearLight,        // the near-light compute dispatch (uiDepthHologramResolve)
+    DoorHoloResolveDraw,      // the resolve draw (uiDepthHologramResolve's vScreenDrawRaw)
     DoorUiResolve,            // applyUiResolve -- nested inside DoorTemporalWhole
     DoorSharpen,              // sharpen_pass.cpp's dispatch
     DoorMenu,                 // menu_panel.cpp's dispatch
     DoorUiLayerComposite,     // ui_layer.cpp's kComposite dispatch
     DoorFssHeal,              // fss_heal.cpp's dispatch
+    DoorSkyRing,              // sky_ring.cpp's dispatch (diag.sky_ring, TEMPORARY; docs/sky-flicker-2026-10-13.md) -- nested inside DoorTemporalWhole, so not a top-level door item
     // In-frame: per game draw. K = 8 while active.
     FrameHologramPasses,      // the two hologram/icon depth reissues
     FrameUiDepthCoverage,     // the UI-depth family reissue (UiContent::prepare, stellar coverage nest inside)
@@ -52,9 +60,10 @@ enum class GpuCensusSection : uint8_t {
                               // engineVelocityBeforeDraw's call sites, which mostly return
                               // without reaching the slow path at all
     FrameUiLayerReissues,     // the UI layer's multiply/write-back reissues
-    FrameUiLayerHdrSeed,      // the HDR HUD layer's depth-stencil seed: the copy of the game's depth-stencil and the
-                              // Seeder's passes into the layer's own target (ui_layer.cpp seedLayerDepth), counted
-                              // once for each seed and only for that layer (GpuCensusSeedScope below)
+    FrameUiLayerHdrSeed,      // the HDR HUD layer's depth-stencil seed: the Seeder's passes into the layer's own target, reading the
+                              // game's depth-stencil where it lies (a copy of it first only when the game's texture refuses a
+                              // shader view; ui_layer.cpp seedLayerDepth), counted once for each seed and only for that layer
+                              // (GpuCensusSeedScope below)
     // The VR on-foot world route's own GPU work (vr_world_route.cpp, design doc section 82), EDVR's cost like the
     // sections above. They run only while the on-foot world route works; the
     // rotation gives a turn to none of the three until one has been called (nextTurnOwner, gpu_census.cpp), so with
@@ -78,6 +87,9 @@ enum class GpuCensusSection : uint8_t {
     // same stride and rotation); they own the line after the main one.
     AlteredPoolFamily,        // a pool-family draw with EDVR's MRT6 slot target bound and its shaders substituted
     AlteredUiLayer,           // a UI draw redirected into EDVR's UI layer target (fix.ui_quality)
+    AlteredHdrHud,            // a HUD draw moved into the HDR HUD layer (fix.ui_quality's crisp HUD, the layer at 4032^2): the game's shading
+                              // at the layer's size, timed by the route's moved-draw timer (ui_layer.cpp routeBegin/routeEnd). Only while
+                              // g_hdrDrawTimingOn is on (off since 2026-10-14; it was on for the 2026-10-13 measurement build).
     // A draw wrapped in another fix's state change (RemLok, the loading hologram, scrim,
     // particles, the panel ...): ONE SECTION PER FIX, kAlteredFixCount of them, in AlteredFix's
     // order. They share ONE turn in the rotation (the first owns it, turnOwnerOf), one K and one
@@ -173,11 +185,17 @@ void gpuCensusEnd(ID3D11DeviceContext* ctx, GpuCensusSection section) noexcept;
 // RAII alternative for a call site that is a clean lexical block: construct
 // at the top, let it close at scope exit (including an early return) so a
 // span can never outlive the work it times.
+// gpuCensusNoteIssued: this occurrence issued at least one real GPU pass (a draw or a dispatch), as opposed to an empty scope that
+// returned before issuing anything. Counted per section per window ("issued" on the line); unconditional and cheap.
+void gpuCensusNoteIssued(GpuCensusSection section) noexcept;
+
 class GpuCensusScope {
 public:
     GpuCensusScope(ID3D11DeviceContext* ctx, GpuCensusSection section) noexcept
         : ctx_(ctx), section_(section) { gpuCensusBegin(ctx_, section_); }
     ~GpuCensusScope() { gpuCensusEnd(ctx_, section_); }
+    // Call where a real pass is issued inside the scope (see gpuCensusNoteIssued).
+    void markIssued() noexcept { gpuCensusNoteIssued(section_); }
     GpuCensusScope(const GpuCensusScope&) = delete;
     GpuCensusScope& operator=(const GpuCensusScope&) = delete;
 
@@ -256,5 +274,17 @@ void gpuCensusNoteEyeRun() noexcept;
 
 // Quiescent cleanup, alongside the other feature modules' Shutdown().
 void gpuCensusShutdown() noexcept;
+
+// The overlay's frame GPU work span (2026-10-14), with the application-frame clock off: the last completed frame's span from
+// its first GPU command to the end of EDVR's door work, in gpuCensusFrame's frame scope (one timestamp pair a frame). False until
+// one pair has completed. The span includes GPU idle inside the frame.
+bool gpuCensusFrameSpan(double* ms, unsigned* samples) noexcept;
+// The work span pair's all-time counts, for the census window line's "frame work span:" field (frame_span_tile.h):
+// completed = pairs read back, skipped = pairs not begun, invalid = pairs voided. The only way to tell a span that never ran
+// (all zero while the application clock is off) from one that ran and failed (skipped or invalid climbing).
+void gpuCensusFrameWorkStats(unsigned long long* completed, unsigned long long* skipped, unsigned long long* invalid, double* lastMs) noexcept;
+// The door end (device_hook.cpp, hookedPresent, before the real Present): closes an open work span. Owner context only.
+void gpuCensusFrameWorkEnd(ID3D11DeviceContext* ctx) noexcept;
+bool gpuCensusFrameWorkOpen() noexcept;
 
 } // namespace edvr

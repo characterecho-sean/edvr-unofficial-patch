@@ -1,0 +1,199 @@
+# Seat memory: the cockpit centre that nobody presses (2026-10-14)
+
+The investigation is `reviews\boarding-recentre-2026-10-14.md` (gitignored; the evidence tables and the log reading are there). This doc is
+the arc's status, the log lines the build writes, and the flight checklist.
+
+## Status
+
+- State: SHIPPED on `claude/flight-2026-10-14` (merged from `claude/seat-memory`), flown in part (the flight of 7116598f; see the dated
+  notes). Instruments and behaviour ship together.
+- **The flight key is RETIRED (2026-10-14, Sean: ship `keep`).** `advanced.cockpit_centre = keep | game` is deleted: no key, no ini entry, no
+  read. The seat memory is always on in the VR profile. The old behaviour no longer exists as a setting; in the log `mode=` is `keep`, or
+  `unpublished` while the graphics half has not written the word (the runtime then behaves as it always did). In the flat profile the word is
+  cleared and the runtime is inactive. The cross-DLL word keeps its "active" bit (always set), so its layout and the pure logic's inactive path
+  are unchanged; the `game_mode` decision survives only for that unpublished case and the rig.
+- Open hypotheses (reviews\boarding-recentre-2026-10-14.md section 1): **H1** the game's reset lands while the head is standing or turned
+  (seen 4.4 s before to 4.2 s after the journal Embark); **H2** most embarks (34 of 46) have no reset at all, so the origin left from the
+  on-foot spawn reset is used in the cockpit; **H3** an internal game recentre with no runtime call. Discriminator: `seat_meter` at
+  `transition_2s` after a boarding (offset_cm, height_cm, yaw_deg far from 0 with or without a `seat_reset` near the flip).
+- Ruled out (review): STAGE as a seated centre (floor origin at the play-area centre; Sean's chair is 1.1 m and 28 degrees from LOCAL's
+  origin on both runtimes); yaw-only or position-only handling as the primary fix; reading Elite's cockpit eye point as a prerequisite.
+- **Decisions, in force** (full text and dated notes in "Decisions and dated notes" below): the press of the HMD recentre key decides the player from the game
+  when it is observable (Sean's F12 is; `honour_press` stored at once, a reset with no press is replaced by the seat in or out of a window); when it is not,
+  the 10 s window and the 5 s deferred store stand (`kRetroMs`); on foot is a seat (one constant, `kOnFootIsSeated`); a runtime recentre is the player's;
+  the order of a runtime recentre is fixed (the frame is given up, review finding 3). BUILT on `claude/seat-press` (the press), NOT FLOWN.
+- Assumptions the first flight tests: the first tracked pose may be a headset on its stand (captured only after a still window); the 10 s window; seated zero
+  being the cockpit eye point; Status.json arriving about a second late; the frame poll beating the game's call to the press (`honour_press_late` counts the misses).
+- Next flight: the checklist at the end of this doc.
+
+## Decisions and dated notes
+
+- **On foot is a seat (Sean, 2026-10-14: "assume for now that on foot everyone is sitting").** Game resets on foot are decided exactly as
+  aboard, and disembarking is a seat transition like boarding. The rule is ONE named constant, `kOnFootIsSeated` / `onFootIsSeated()` in
+  `src\openxr\seat_memory.h`, read through `seatHolds(where)` by the decision table, every transition, and the host's meter schedule.
+  Native on-foot VR (standing, room scale) flips it in that one place: false makes on foot a pass-through again and applies no seat. Not a
+  config key, on purpose. The `where=` field still says `on_foot` in every log line, so the flight separates the two.
+- **Order of a runtime recentre (review of 498e4b16, finding 3, fixed on `claude/review-seat-order`).** The seat used to be polled before the
+  frame's pending reference changes were advanced, so the first frame at or after the change time located and published ONE pose in the old
+  seated space and the new origin landed a poll later. Now every frame opener (WaitGetPoses, the loading skybox frame, the flat panel frame)
+  advances through `advanceReferenceChanges`; when a LOCAL change takes effect on that frame and the seat memory answers, the frame is GIVEN
+  UP (closed, nothing located or published, the origin replaced with no frame open) and the game asks again: a pose update is withheld, not
+  published late. Several changes due at once are one withheld frame and one answer; a change whose time is still ahead waits for its own
+  frame; with the memory inactive nothing is withheld. Tests: `tools\openxr_native_test\seat_order_cases.h`.
+- **A runtime recentre is a manual recentre (Sean).** A LOCAL reference-space change (SteamVR's dashboard, Pimax Play) is always the player:
+  once it has taken effect the head as it is in the new LOCAL is honoured as the seated origin and stored as the seat, aboard, on foot, in a
+  window or out of one. Head untracked at that moment: LOCAL's own origin is the seat, applied when a frame allows. The compensate and
+  forget path (`poseInPreviousSpace`) is gone.
+- Assumptions the first flight tests: (a) the first tracked pose at launch may be a headset on its stand, not a worn head (position repeated
+  to 2 cm over 92 launches), so the seat is captured at the splash only after the head has been still for a window, and the capture's
+  statistics are logged either way; (b) the 10 s transition window; (c) that seated zero is the cockpit's eye point, so a normally seated
+  head reads about 0/0/0 after a good alignment; (d) Status.json flags arrive about a second late.
+- **The press tells the player from the game (Sean, 2026-10-14: "detect the user's press of the HMD recenter keybind ... then drop the 5 second
+  delay").** The game's automatic resets and the player's key arrive through the same caller (today's flights: thread 456, RVA 0x8D0268), so the
+  call cannot tell them apart; the press can. `src/d3d11/hmd_reset_press.cpp` reads Elite's `HMDReset` action from the active `.binds`
+  (`eliteBindsHmdReset`, elite_binds.cpp), watches each bound slot with the hotkey machinery (nothing is consumed or hooked) and publishes
+  the status, a press count and the last press tick (`frame_flag.h publishHmdResetPress`; the words are `seat_context.h HmdResetPress`).
+  **Sean's bind** (`Custom.4.2.binds`): Primary keyboard `Key_F12`, Secondary `{NoDevice}`; a plain key, observable. The decision when a
+  game reset arrives (`SeatMemory::classifyReset(now, PressInfo)`), aboard or on foot (a menu or load still passes through):
+  press seen up to 1 s before (`kPressWindowMs`) -> the player's: honoured and written AT ONCE (`decision=honour_press`), in or out of a
+  window, never held; observable and none seen -> the game's own: the stored seat replaces it in or out of a window (`replace_with_seat`; with
+  nothing stored it is honoured and not remembered, `honour_no_seat`), so there is no hold to wait out; not observable -> exactly the rules
+  below (the window and the 5 s hold), and the log says why. **Which input paths Elite uses on build 332841** (PE stamp 1788384820, image size 104894464, read from the installed exe's import table on
+  2026-10-14, agreeing with input_gate.h's measurement of 2026-09-07): `dinput8.dll!DirectInput8Create` (every DirectInput device the game binds:
+  keyboard, mouse, HOTAS, pedals, button boxes), the `user32` key-state trio `GetAsyncKeyState` / `GetKeyState` / `GetKeyboardState` plus
+  `PeekMessageA` (keyboard messages) and `GetCursorPos`, and `xinput9_1_0!XInputGetState`. It imports NO Raw Input function. Its VR
+  controllers cannot matter here: EDVR is Elite's OpenVR runtime and `OpenVRSystem::GetControllerState*` answers false with no controller
+  (openvr_system.cpp), so a binding on a VR controller device cannot fire in this setup. **What is watched, and how** (read-only; nothing is
+  consumed, no device of ours is opened, nothing allocates per frame beyond an edge record): a keyboard key with its modifiers, as the game's
+  own key-state door sees it (GetAsyncKeyState, focus-free like any mirrored binding; the DirectInput keyboard reads the same physical state);
+  a mouse button 1 to 5 (left, right, middle, X1, X2) the same way, as the virtual keys GetAsyncKeyState reports; the XInput pad through the
+  pad watcher; a HOTAS or joystick button or hat through the table that `joy_watch.h` fills from the game's OWN DirectInput `GetDeviceState` /
+  `GetDeviceData` reads (the hook route: read-only, forwarded untouched, keyed by the vendor-product id the .binds write as `Device=`, and the
+  button number of `Joy_N`, which `elite_binds` maps; it sees a device only while the game reads it). Everything but a keyboard key is trusted
+  only after its first press has been seen this session (`Unproven` until then), so a watcher that cannot see its device can never make every
+  recentre of yours look like the game's. A keyboard `<Modifier>` is required as the game requires it (held, extras allowed); a modifier on a pad,
+  mouse or joystick slot is not checked, which can only count a press the game ignored (a reset then taken for yours), never miss one. **Not
+  observable:** a joystick or mouse axis, a mouse button past the fifth, a key with no name here, a VR controller, no bind, no readable file,
+  `hotkey.read_game_bindings = off`, or a graphics half that has not spoken; the timing rules (window + hold) stand and the log says why. A pair
+  of slots is observable only if every bound slot is. The frame poll can lose a race with the game's call by a frame: a press seen up to
+  300 ms AFTER a reset answered "none" is read as that reset's, and the origin is put on the head and stored (`honour_press_late`, with
+  `press_gap_ms` negative); how often that happens is what the first flight measures. The 5 s hold below stays as the fallback for the
+  unobservable cases.
+- **The window reaches backward (5 s; one constant, `SeatMemory::kRetroMs`, was 8 s until Sean shortened it on 2026-10-14).** A reset
+  outside any window is honoured but not believed: the seat it would replace is kept as
+  `previous`, and the disk is not written for 5 s (`seat_store,action=defer`). A transition inside those 5 s (boarding, disembarking, a
+  journal boundary, Explorer Cam, a change of cockpit) takes the reset back: the old seat stands and is applied
+  (`seat_store,action=discard_pending,why=transition_within_5s,age_ms=` and the apply's `seat_reset ... decision=replace_with_seat,retro=1,age_ms=`).
+  Five quiet seconds commit it (`seat_store,action=save,why=manual_reset,deferred_ms=`). This is for the ramp's reset 2.6 to 4.4 s before the
+  boarding flip. A runtime recentre is never held. With no seat stored there is nothing to go back to and a first recentre is written at once.
+- Known limits of the hold: a recentre of yours followed within 5 s by a boarding, a disembark or any journal event (an undock) is taken
+  back as if it were the ramp's; quitting the game within 5 s of one loses it (nothing flushes at shutdown); and a reset outside a window
+  more than 5 s before a transition is still believed (the 2026-10-14 logs have one 25 s after an embark, docked). The flight should look for
+  `action=defer` lines no one earned and for a seat that moved at boarding.
+- 2026-10-14, flight 7116598f (8 s at the time): Sean's real recentre at 15:25:10 UTC was discarded by a `journal_event` transition 3.4 s
+  later. That transition was his disembark: the journal event runs about 2.4 s ahead of the on-foot flag in Status.json, so the hold saw it
+  first. 5 s would still discard that press (3.4 s is inside it). It is the documented limit above, not a bug; the shorter hold only
+  narrows how often it can happen.
+- 2026-10-14, the press (this entry): built on `claude/seat-press`. Why: flights of 7116598f and 498e4b16 showed Sean's real F12 recentre
+  discarded by a nearby journal transition under the 5 s hold, and the game's automatic resets and his press come through one caller, so only
+  the key can tell them apart. Not flown. The risk it adds: a press the poll never sees (a watcher fault) would turn a manual recentre into
+  "the game's own" and replace it with the stored seat; the keyboard cannot fail that way short of GetAsyncKeyState, the other devices are
+  trusted only after a first press, and a recentre from the runtime's own dashboard is unaffected.
+
+## What the build does
+
+State kept: the seat, a position and a heading in the runtime's natural LOCAL space, per headset key (`headset_key`, runtime plus system),
+in `%LOCALAPPDATA%\EDVR\<leaf>-<store>\seat.txt` (`src\openxr\seat_store.h`; format `src\openxr\seat_memory.h`).
+
+- Start (`centreAtStartup`): stored seat present: the seat is the origin (the same tracked-pose wait as before; no head sample
+  chooses the origin). Otherwise today's centre on the head.
+- Splash (`requestIntroRecentre`): seat stored and already the origin: no recentre. Seat stored but not applied: applied. None stored: sample
+  the head until it has been still for 0.4 s (30+ samples, 2 cm and 4 degrees), at most 4 s; then the seat is that mean, or LOCAL's own
+  origin when the head is within 25 cm and 20 degrees of it; saved. Not still in 4 s: today's recentre on the head as it is.
+- Boarding, disembarking, going on foot from a menu, a change of cockpit (Status.json seat kind: ship, fighter, SRV, taxi, multicrew),
+  Explorer Cam closing: the seat becomes the origin if it is not already (a 10 s window opens at each, and at a journal boundary).
+  Disembarking usually finds the origin still on the seat, so it opens the window and puts nothing back. Each of these also takes back a
+  recentre made in the 5 s before it (the Status block).
+- A game ResetSeatedZeroPose: before the graphics half has spoken, or in a menu or a load: as before, nothing remembered. Aboard or on foot, inside
+  a window: the stored seat replaces the head pose (nothing stored: as before). Outside a window: the player's own recentre, honoured and
+  stored, but held 5 s first (it commits then, or a transition takes it back).
+- The runtime recentres LOCAL (SteamVR dashboard, Pimax Play): see the Status block; the head in the new LOCAL becomes the seat.
+- The word that crosses from d3d11.dll to openvr_api.dll is one 32-bit value (`src\common\seat_context.h`, `publishSeatContext` in
+  frame_flag.h; the slot was padding, `reservedPoseReader0`, so the mapping version is unchanged). Status.json's seat kind is new in the
+  journal watcher (`journalSeatKind`).
+
+## Log lines (the runtime's `edvr_openxr_*.log`; none of them appear in a build without this code)
+
+- `seat_memory,init=1,mode=keep|unpublished,key=,stored=,seat=x/y/z/yawdeg,file=,file_exists=,read_ok=,records=,skipped_lines=`
+  once, at the first use. `mode=unpublished` means the graphics half has not written the word (the old behaviour).
+- `seat_context,published=,mode=,gameplay=,seated=known/val,on_foot=known/val,camera=,seat_kind=0x,transitions=,where=aboard|on_foot|unknown`
+  at every change of the word (at most 300).
+- `seat_event,why=boarded|disembarked|seated|on_foot|seated_at_start|on_foot_at_start|cockpit_changed|camera_opened|camera_closed|journal_event|left_seat|unknown_state,window_opened=,apply_wanted=,no_seat=,where=,...`
+- `seat_reset,n=,reason=seated_reset|launch_centre|intro_recentre|seat_transition|runtime_recentre,decision=,mode=,where=,window=,window_age_ms=,stored=,origin_was_seat=,caller_thread=,caller_rva=0x,head_local=x/y/z/yawdeg,from=,to=,moved_cm=,moved_deg=,after_offset_cm=,after_height_cm=,after_yaw_deg=,retro=,age_ms=,result=,ok=`
+  for EVERY seated-origin change, game or ours. `decision`: `game_mode`, `pass_through`, `replace_with_seat`, `honour_no_seat`,
+  `honour_store` (game calls, and the runtime's recentre); `start_seat`, `start_head`, `intro_head`, `intro_seat`, `capture_head`, `capture_snap_local`,
+  `transition_seat` (ours). `caller_rva` is the game's return address for a game call (0 for ours).
+- The press, in every `seat_reset` line: `press=seen|none|unobservable|na` (`na` for our own origin changes), `press_gap_ms=` (ms from the
+  press to the reset; negative for a late press; -1 when there is none), `press_why=` (`edge`, `held`, `no_press_in_window`, `no_press_yet`, or the
+  unobservable cause: `unpublished`, `no_bind`, `unobservable_device`, `unreadable`, `unproven_device`), `bind=` (the bound slots as Elite wrote
+  them, `Key_F12`, `231D0200:Joy_33`, joined by `|`; `-` for none). New decisions: `honour_press`, `honour_press_late`; new save reasons
+  `manual_reset_press`, `manual_reset_press_late`.
+- `seat_press,status=observable|unproven_device|no_bind|unobservable_device|unreadable|unpublished,observable=,bind0=,bind1=,seq=,rule=press_decides|timing_window_and_hold`
+  in the runtime log at the first look and at every change of status; in the graphics log one `hmd reset key: Elite's HMDReset in <file>: N
+  bound slot(s): [0] <label> (<kind>) ...  Seat memory press status: ...` line each time the bindings are read, and `slot N (...) saw its
+  first press` when a pad or joystick slot proves itself.
+- `seat_start,plan=todays_centre|apply_seat|capture_late,mode=,stored=` once, before the start's reset.
+- `seat_intro,plan=skip_seat_in_place|apply_seat`; `seat_capture,state=begin|done|gave_up,...` (done: `n,span_ms,spread_cm,yaw_spread_deg,mean,dist_from_local_cm,heading_from_local_deg,snapped,seat`).
+- `seat_meter,when=transition_2s|periodic,why=,where=,mode=,stored=,origin_was_seat=,offset_cm=,height_cm=,yaw_deg=,head_local=,origin=`
+  (`head=untracked` when the headset is not tracked). 2 s after each window opens aboard and after each transition apply; every 30 s.
+- `seat_store,action=load|save,why=...,deferred_ms=,ok=,key=,seat=,file=` (`deferred_ms` is 0 unless a held recentre committed);
+  `seat_store,action=defer,why=manual_reset,prev=,new=,commit_after_ms=5000`;
+  `seat_store,action=discard_pending,why=transition_within_5s,age_ms=,transition=,discarded=,restored=` (the number in `why` is `kRetroMs` in seconds).
+- `seat_local_changed,events=,head=tracked,action=store_as_manual,where=,window=,seat=x/y/z/yawdeg` (the runtime recentred; the `seat_reset`
+  line before it has `reason=runtime_recentre,decision=honour_store`); `seat_local_changed,events=,head=untracked,action=store_as_manual,fallback=local_identity,where=,seat=0.000/0.000/0.000/0.0`;
+  `seat_local_changed,events=,action=ignored_game_mode`.
+- `reference_spaces,count=,types=LOCAL|VIEW|STAGE...,stage=`, `stage_bounds,result=,width_m=,height_m=`,
+  `stage_in_local,result=0,position=x/y/z,heading_deg=` once at the first poll: answers whether STAGE exists and where the play-space
+  centre sits against LOCAL and the seat.
+
+## Flight checklist
+
+Read each log with `python tools\edvr_log.py --target <target> --expect-build HEAD --version` first (right build), then grep `seat_`.
+Pimax OpenXR first; SteamVR/OpenXR as a second launch if time allows (the key differs, so each has its own seat).
+
+0. Install, check the build line. The first `seat_` line must be `seat_memory,init=1`; if there is none the code did not run.
+1. Launch 1, no seat file: `mode=keep`, `stored=0` in `seat_memory`, `seat_start,plan=capture_late` (the start's centre is the head, as it was); the baseline comparison with the old behaviour is the earlier flights' logs.
+2. Same launch: `seat_intro`/`seat_capture,state=begin` then `done` at the splash. Pass: `done` with
+   `spread_cm` under 2 and the splash in front at eye height; `seat_store,action=save,ok=1`. Record `dist_from_local_cm` and `snapped`.
+   Fail: `gave_up` (the stats name why), or the splash is off.
+3. Next launch, seat stored: `seat_memory,init=1,...,stored=1`, `seat_start,plan=apply_seat`, `seat_reset ... decision=start_seat`,
+   no `intro_head` line, `seat_intro,plan=skip_seat_in_place`; first `seat_meter` within 5 cm / 5 degrees when seated.
+4. Board from foot by the ramp, looking sideways; then by the interface: `seat_event,why=boarded,apply_wanted=1`, `seat_reset ... decision=transition_seat`,
+   any game reset in the window `decision=replace_with_seat`; `seat_meter,when=transition_2s,where=aboard` within 5 cm and 5 degrees (offset_cm, yaw_deg),
+   height_cm within 5. Read H1 or H2 from whether a game reset sits near the flip. Watch for the ramp's early reset:
+   a `seat_reset ... where=on_foot,window=0,decision=honour_store` just before the flip is now held: `seat_store,action=defer`, then at the flip
+   `seat_store,action=discard_pending,why=transition_within_5s,age_ms=` (2000 to 5000) and the apply `seat_reset ... decision=replace_with_seat,retro=1`.
+   Pass: the seat in `seat_meter` after the boarding is the stored one, and no `action=save,why=manual_reset` for that reset.
+5. Disembark (docked, then out of the ship): `seat_event,why=disembarked,window_opened=1,where=on_foot` (`apply_wanted=1` if the origin had left the
+   seat), any game reset in the window `where=on_foot,window=1,decision=replace_with_seat`; `seat_meter,when=transition_2s,where=on_foot` within 5 cm and
+   5 degrees seated. Walk, turn, lean on foot for a minute: no `honour_store` without a recentre of yours. Board again and repeat step 4.
+6. Ship change in the hangar and back in: `seat_event,why=boarded` or `seated`; same meter.
+7. SRV launch and return if a planet fits (`why=cockpit_changed`; the `seat_kind` in `seat_context` goes 0x1 to 0x4 and back); if not flown, say so.
+8. Explorer Cam in and out, on foot and aboard: `camera_opened` then `camera_closed`, meter unchanged; no `seat_reset` that moves the origin off the seat.
+9. The press (Sean: F12 on the keyboard). Check first that the graphics log says `hmd reset key: Elite's HMDReset in Custom.4.2.binds: 1 bound
+   slot(s): [0] Keyboard:Key_F12 (keyboard) ... status: observable` and the runtime log `seat_press,status=observable,bind0=Key_F12,...,rule=press_decides`.
+   Press F12 aboard, then on foot: `seat_reset ... decision=honour_press,press=seen,press_gap_ms=` (a few ms to 100; record the gaps, they tune the 1 s
+   window) and `seat_store,action=save,why=manual_reset_press` at once, with no `action=defer`. Walk the ramp, board, disembark, change ship WITHOUT
+   pressing: every game reset is `decision=replace_with_seat,press=none` whatever the window (inside or outside one), no `honour_store`, no
+   `action=defer`, no `discard_pending`. Press F12 and board or disembark within 2 s: the press survives (no `discard_pending`). Watch for
+   `honour_press_late` (the poll lost the race): count them and read the negative `press_gap_ms`. A rebind to a HOTAS or pad button should log
+   `status=unproven_device` and keep the timing rules until its first press logs `saw its first press`.
+   Also, the older manual step: press the game's recentre aboard well after a window: `decision=honour_store`, `seat_store,action=defer`, then 5 s later
+   `seat_store,action=save,why=manual_reset,deferred_ms=5000` (a little over); the next boarding uses it. Press it again and board within 5 s:
+   `discard_pending` and the old seat back (that is the known limit, not a bug). A runtime recentre is not held.
+   Runtime recentre once (SteamVR dashboard or Pimax Play): `seat_reset ... reason=runtime_recentre,decision=honour_store,ok=1` then
+   `seat_local_changed,head=tracked,action=store_as_manual`, `seat_store,action=save,why=runtime_recentre`; the head reads about 0 in the next `seat_meter`,
+   and the next boarding uses that seat (`replace_with_seat` or `transition_seat` to the same numbers). A headset taken off at the moment gives `head=untracked,fallback=local_identity`.
+10. Chair moved 30 cm, relaunch: the meter reads the move; one manual recentre fixes it and is remembered.
+Pass overall: every boarding, ship change, SRV and Explorer Cam return inside 5 cm and 5 degrees at `transition_2s` without a press, and no
+`seat_reset` with `ok=0`. Also read `reference_spaces` and `stage_in_local` once and write the answer into this Status block.

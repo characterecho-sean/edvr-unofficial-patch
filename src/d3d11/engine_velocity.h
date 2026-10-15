@@ -151,6 +151,11 @@ inline bool watchesResource(const ID3D11Resource* resource) noexcept {
 }
 }  // namespace engine_velocity_detail
 
+// Is engine-record velocity live right now? The draw path's AA-off fast path reads it per draw (vscreen.cpp, 2026-10-13).
+inline bool engineVelocityLiveNow() {
+    return engine_velocity_detail::live.load(std::memory_order_relaxed);
+}
+
 inline void engineVelocityBeforeDraw(ID3D11DeviceContext* ctx, bool rtv0Eye) {
     using namespace engine_velocity_detail;
     if (!live.load(std::memory_order_relaxed)) return;

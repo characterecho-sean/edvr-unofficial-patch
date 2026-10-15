@@ -9,6 +9,7 @@
 #include <memory>
 #include <mutex>
 #include <thread>
+#include "owner_invoke_stats.h"
 
 namespace edvr::openxr {
 
@@ -44,7 +45,7 @@ class OwnerService final {
   // executing callback always completes before this method returns. Queued
   // requests can be cancelled. Constructing the by-value std::function argument
   // may throw before entry; allocations made inside invoke are contained.
-  bool invoke(std::function<void()> callback) {
+  bool invoke(std::function<void()> callback, OwnerCallKind kind = OwnerCallKind::Other) {
     if (!callback) return false;
     if (isOwner()) {
       { std::lock_guard<std::mutex> lock(mutex_); if (!running_ || stopping_) return false; }
@@ -54,15 +55,49 @@ class OwnerService final {
     std::shared_ptr<Request> request;
     try { request = std::make_shared<Request>(std::move(callback)); }
     catch (...) { return false; }
+    request->kind = kind;
+    // The stats pointer is read under the service mutex and kept for this call, so setInvokeStats (a host going away) cannot leave a
+    // stale pointer for the note below.
+    std::shared_ptr<OwnerInvokeStats> stats;
+    uint64_t (*clock)() = nullptr;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      stats = invokeStats_;
+      clock = invokeNow_;
+    }
+    const bool timed = stats && clock;
+    if (timed) request->enqueuedUs = clock();
     {
       std::lock_guard<std::mutex> lock(mutex_);
       if (!running_ || stopping_ || queue_.size() >= kQueueCapacity) return false;
       try { queue_.push_back(request); } catch (...) { return false; }
+      request->behindWait = currentKind_ == uint8_t(OwnerCallKind::WaitPoses);
     }
     cv_.notify_one();
     std::unique_lock<std::mutex> waitLock(request->mutex);
     request->cv.wait(waitLock, [&] { return request->done; });
+    if (timed && request->startedUs) {
+      // Written by the owner before it set done, read here under the same request mutex.
+      OwnerInvokeStats::Sample sample;
+      sample.kind = kind;
+      sample.behindWait = request->behindWait;
+      sample.queueUs = int64_t(request->startedUs) - int64_t(request->enqueuedUs);
+      sample.runUs = int64_t(request->finishedUs) - int64_t(request->startedUs);
+      stats->note(sample);
+    }
     return request->success;
+  }
+  // Optional per-kind accounting of invoke (owner_invoke_stats.h). Set before start(); now is the clock the instants use.
+  // Without it invoke does not read the clock.
+  // The service shares the stats object: an invoke in flight keeps it alive, so the host that made it may go first. The raw overload is
+  // for a caller that owns the object for the service's whole use (the owner rig).
+  void setInvokeStats(std::shared_ptr<OwnerInvokeStats> stats, uint64_t (*now)()) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    invokeStats_ = std::move(stats);
+    invokeNow_ = now;
+  }
+  void setInvokeStats(OwnerInvokeStats* stats, uint64_t (*now)()) {
+    setInvokeStats(std::shared_ptr<OwnerInvokeStats>(stats, [](OwnerInvokeStats*) {}), now);
   }
 
   // Only accepted requests call completion, exactly once, after callback
@@ -132,7 +167,13 @@ class OwnerService final {
     std::function<void()> callback; CompletionCallback completion;
     std::mutex mutex; std::condition_variable cv;
     bool done = false, success = false;
+    // Timing for invoke's stats: the kind and the caller's enqueue instant are set before the push; the owner sets
+    // startedUs and finishedUs before finish(). behindWait is the caller's, set under the service mutex at the push.
+    OwnerCallKind kind = OwnerCallKind::Other;
+    uint64_t enqueuedUs = 0, startedUs = 0, finishedUs = 0;
+    bool behindWait = false;
   };
+  static constexpr uint8_t kIdleKind = 0xFF;
 
   bool isOwnerLocked() const { return ownerId_ == std::this_thread::get_id(); }
   static void finish(const std::shared_ptr<Request>& request, bool success) {
@@ -149,6 +190,7 @@ class OwnerService final {
     for (;;) {
       std::shared_ptr<Request> request;
       bool idle=false;
+      uint64_t (*clock)() = nullptr;   // the stats clock, read under the mutex with the request (setInvokeStats may clear it)
       {
         std::unique_lock<std::mutex> lock(mutex_);
         cv_.wait_for(lock, std::chrono::milliseconds(5), [&] { return stopping_ || !queue_.empty(); });
@@ -162,12 +204,16 @@ class OwnerService final {
           idle_={};
           lock.lock();finalOutcome_=outcome&&!idleFailed_;ownerId_={};cv_.notify_all();break;
         }
-        if (!queue_.empty()) { request = queue_.front(); queue_.pop_front(); }
+        if (!queue_.empty()) { request = queue_.front(); queue_.pop_front(); currentKind_ = uint8_t(request->kind); clock = invokeNow_; }
         else idle=bool(idle_);
       }
       if (request) {
+        const bool timed = clock != nullptr;
+        if (timed) request->startedUs = clock();
         bool success = true; try { request->callback(); } catch (...) { success = false; }
         request->callback={};
+        if (timed) request->finishedUs = clock();
+        { std::lock_guard<std::mutex> lock(mutex_); currentKind_ = kIdleKind; }
         complete(request, success);
         finish(request, success);
         auto now = std::chrono::steady_clock::now();
@@ -193,6 +239,9 @@ class OwnerService final {
   bool cancellationReady_ = false, idleFailed_ = false, finalOutcome_ = true;
   std::function<void()> finalizer_;
   unsigned stopCallers_ = 0;
+  std::shared_ptr<OwnerInvokeStats> invokeStats_;
+  uint64_t (*invokeNow_)() = nullptr;
+  uint8_t currentKind_ = kIdleKind; // the kind of the job the owner is running, under mutex_
 };
 
 } // namespace edvr::openxr

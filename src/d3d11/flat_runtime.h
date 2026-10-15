@@ -67,6 +67,7 @@ void flatRuntimePhaseState(float* x, float* y, uint32_t* w, uint32_t* h, uint32_
 void flatRuntimeNoteCameraApplied();
 // Whether a legacy projection plan exists for the current frame (the
 // ownership policy's legacyEligible input).
+bool flatRuntimeWorkFull();           // the work tier is Full (the camera relay gate is open)
 bool flatRuntimeLegacyPlanExists();
 void flatRuntimePresent(IDXGISwapChain*, uint64_t frame, HRESULT, UINT flags);
 void flatRuntimeBeforePresent();

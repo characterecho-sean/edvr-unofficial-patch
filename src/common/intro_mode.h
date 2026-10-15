@@ -16,6 +16,8 @@
 //     skip    the movie is not played at all: the game's open of the ident
 //             file is refused (intro_skip.h). Parses as screen otherwise,
 //             so a movie that plays anyway plays properly.
+//     In the FLAT profile skip is the only value that does anything: screen
+//     and stock both leave the game's own movie alone (introVideoParseFor).
 //     dev values: head (screen without the world anchor), sharp (screen
 //     with the Catmull-Rom resample instead of FSR). Legacy spellings from
 //     the retired keys parse silently: splash/world/fsr and any numeric
@@ -48,6 +50,7 @@
 
 #include <cstdlib>
 #include <string>
+#include <utility>
 
 namespace edvr {
 
@@ -108,6 +111,35 @@ inline IntroVideoMode introVideoParse(std::string raw) {
     if (n > 1.0) return m;
     m.recognised = false;
     return m;
+}
+
+// The flat profile's reading of the same key (2026-10-14). Flat has no head-locked rectangle to grow, no world anchor and no
+// resample: the movie is the game's own whatever the value. So the one thing the key does there is `skip`; every other
+// spelling (screen, the default, and stock) leaves the movie alone, exactly as the flat profile did when the key was refused
+// and read "off". The panel and the resample, which are VR geometry, read through here so the key being allowed in flat
+// cannot switch them on there.
+inline IntroVideoMode introVideoParseFor(std::string raw, bool flatProfile) {
+    const IntroVideoMode m = introVideoParse(std::move(raw));
+    if (!flatProfile) return m;
+    IntroVideoMode flat;
+    flat.screen = false;
+    flat.worldLock = false;
+    flat.upscale = 0;
+    flat.skip = m.skip;
+    flat.recognised = m.recognised;
+    return flat;
+}
+
+// The flat profile has no eye draws, so the VR verdict's "the first rendered scene arrived" never comes. The flat verdict is
+// the refusal's own evidence: it is due once the game has gone `kIntroFlatSettleMs` without asking for another ident after
+// the last refusal (it took the missing file for an answer and moved on), or -- nothing was ever refused -- once
+// `kIntroFlatGiveUpMs` have passed since arming (the game never asked for an ident through these hooks).
+inline constexpr unsigned long long kIntroFlatSettleMs = 4000;
+inline constexpr unsigned long long kIntroFlatGiveUpMs = 90000;
+inline bool introFlatVerdictDue(unsigned refused, unsigned long long msSinceArmed,
+                                unsigned long long msSinceLastRefusal) {
+    if (refused) return msSinceLastRefusal >= kIntroFlatSettleMs;
+    return msSinceArmed >= kIntroFlatGiveUpMs;
 }
 
 struct IntroBackdropMode {

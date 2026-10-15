@@ -637,7 +637,7 @@ void all(const Fixture& fx) {
         check(vd.expected >= controlExpected + 300, fmt("the second volume claims the block at the moon's depth that the moon's rectangle left alone (%zu against %zu)", vd.expected, controlExpected));
     }
     const Mutant base[] = {
-        {"the probe bit's gate removed", "    if ((uint(probe.w + 0.5) & 8192u) == 0u) return false;\n    int hit = -1;", "    int hit = -1;"},
+        {"the probe bit's gate removed", "    if ((uint(probe.w + 0.5) & 8192u) == 0u) return false;\n    float3 P = d * z;", "    float3 P = d * z;"},
         {"the translation's sign flipped", "dp = float3(dot(r.m0.xyz, P) + r.m0.w,", "dp = float3(dot(r.m0.xyz, P) - r.m0.w,"},
         {"the depth interval dropped", "z >= r.span.x && z <= r.span.y && span < narrow", "span < narrow"},
         {"the decision path left at 2", "                        count39 = 1;\n", ""},

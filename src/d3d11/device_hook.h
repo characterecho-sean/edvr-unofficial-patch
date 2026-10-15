@@ -155,4 +155,7 @@ DeviceCreates deviceCreatesTake();
 
 void shutdownDeviceHooks();
 
+// Publishes the commander's seat to the runtime (src/common/seat_context.h). See device_hook.cpp.
+void seatContextPublish();
+
 }  // namespace edvr

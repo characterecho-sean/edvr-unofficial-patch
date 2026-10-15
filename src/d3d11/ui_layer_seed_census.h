@@ -18,6 +18,28 @@ struct UiSeedPlan {
     uint8_t mask = 0, passes = 0;
     bool depth = false, specified = false, stencil = false;
 };
+
+// The seed reasons as one counter each, in bit order (2026-10-13 instruments: the 30 s line's by-reason counts). Bit i of a UiSeedReason
+// mask is entry i; UiSeedOff (no bit) is not counted.
+constexpr size_t kUiSeedReasonCount = 9;
+inline const char* uiSeedReasonName(size_t i) {
+    static const char* const kNames[kUiSeedReasonCount] = {
+        "first observed", "new frame", "source changed", "size changed", "stale draw", "stale clear",
+        "missing depth", "missing stencil", "unknown stale"};
+    return i < kUiSeedReasonCount ? kNames[i] : "?";
+}
+// Adds one seed's reasons (a mask of UiSeedReason bits) to counts[]; returns how many reasons the seed carried (0 for UiSeedOff, and for
+// a mask with a bit outside the nine named ones, which is ignored rather than miscounted).
+inline uint32_t tallyUiSeedReasons(uint32_t reason, uint64_t (&counts)[kUiSeedReasonCount]) {
+    uint32_t n = 0;
+    for (size_t i = 0; i < kUiSeedReasonCount; ++i) {
+        if (reason & (1u << i)) {
+            ++counts[i];
+            ++n;
+        }
+    }
+    return n;
+}
 inline uint8_t uiSeedPlanes(const UiDsEffect& e) {
     return static_cast<uint8_t>((e.depthWrite ? 1 : 0) | (e.stencilWrite ? 2 : 0));
 }

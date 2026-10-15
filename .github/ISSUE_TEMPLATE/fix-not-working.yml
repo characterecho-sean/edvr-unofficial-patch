@@ -54,7 +54,7 @@ body:
       description: |
         If it is Explorer Cam, say which camera preset you were on and how you got into the camera — the preset the offset is for is a setting, and the wrong one is the most common reason nothing happens.
 
-        If it is the transition flash and you saw one get through: press **Pause** right after it and then quit. That writes the last ten seconds of viewpoint history into the log, which is the only thing that separates "the bad frame was spotted and let through" from "it was never spotted at all". Those are different problems with different fixes.
+        If it is the transition flash and you saw one get through: press **Pause** right after it and then quit. That writes the temporal pass's recent camera history into the log, and says whether the jump-flash hold was armed. A "transition flash: frame N held" line near the moment is what separates "EDVR held a frame and the flash got through" from "EDVR held nothing". Those are different problems with different fixes.
     validations:
       required: true
 

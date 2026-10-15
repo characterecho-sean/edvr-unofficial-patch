@@ -11,6 +11,7 @@ State, Open and Ruled-out bullets are verbatim in "Status detail".*
   - `fix.intro_video` defaults to `screen` (world-lock + FSR on the
     splash's screen), shipped since 2026-08-28 (f908be2); `skip` is the
     off-by-default alternative, SHIPPED v0.16.2, ~6 s saved not ~20 s.
+    Flat reads the key too (2026-10-14, BUILT, NOT FLOWN): only `skip` acts.
   - Native OpenXR builds its session once inside `VR_InitInternal`, so the
     removed `fix.vr_handover = early` has no analogue; the movie already
     plays on the splash's screen, world-locked (2026-09-15 18:30 flight).
@@ -55,10 +56,9 @@ State, Open and Ruled-out bullets are verbatim in "Status detail".*
   applies; the warm-up runs only on the native OpenXR path.
 - **Detail:** Placement is "Flight 3" through "Flight 6", "Stage one,
   built" and "What shipped"; "What the bugs were" is process lessons;
-  the skip is "Not playing it at all", "Flight 09:43" and "Flight
-  10:09"; the warm-up is the first 2026-09-15 entry; the native-runtime
-  correction is the second. Companion: docs/loading-panel-handoff.md,
-  docs/loading-scrim.md.
+  the skip is "Not playing it at all", "Flight 09:43", "Flight 10:09" and
+  2026-10-14 (flat); the warm-up is the first 2026-09-15 entry; the native-runtime
+  correction is the second. Companion: docs/loading-panel-handoff.md, loading-scrim.md.
 
 ## Status detail (moved out of Status 2026-09-29)
 
@@ -1583,3 +1583,35 @@ text is unmistakable. PASS adds: not mirrored and not upside down, in the
 movie and the splash; the SURFACE strip line says `u running against x`,
 the movie's line and the splash learn lines say that +x runs to the
 viewer's left.
+
+
+## 2026-10-14: the skip in the flat profile (BUILT, NOT FLOWN)
+
+Request: skip the launch movie in flat, as VR can. The skip is profile-independent
+(`intro_skip.cpp` patches the executable's and quartz's `CreateFileW` imports and
+answers an `Ident_*.webm` open "not found"), so flat reuses it unchanged. What
+changed:
+
+- **Key:** the same `fix.intro_video`, now on the flat allow-list
+  (`flat_profile_keys.h`) and a sixth row on the flat F8 page (`menu_flat_rows.h`;
+  `kMenuMaxLines` 16 -> 17 so the page, its blank line and the ten-line warning
+  still fit). In flat only `skip` acts: `introVideoParseFor` turns `screen`
+  (the default) and `stock` into the game's own movie, so the VR panel and the
+  FSR resample (`intro_panel.cpp`, `intro_upscale.cpp`) stay inert in flat.
+- **Default:** `screen`, i.e. the movie plays, which is VR's default too (skip is
+  opt-in there). No flat-specific reason to differ.
+- **Arming:** `device_hook.cpp` calls `introSkipConfigure` in flat at device
+  creation and on every config refresh, so it does not depend on vScreen having a
+  State. Idempotent beside vScreen's own call.
+- **Verdict:** flat has no eye draws, so no "first rendered scene". The flat tick
+  (`introSkipTickFlat`) says `intro skip: WORKED (flat)` once the game has gone four
+  seconds without asking for another ident after the last refusal, or `no ident was
+  asked for (flat)` 90 s after arming with none. Flat has no movie-fill witness; the
+  refusal is the evidence. Lines to read: `intro skip: ARMED (flat)`, the
+  `refused the game's ...` lines, `WORKED (flat)`.
+- **Rig:** `tools\intro_skip_test` now also drives the real DirectShow reader under
+  the flat profile (arm, refuse the ident, pass the loops, verdict clock, give-up
+  line, VR unchanged).
+
+Next flight: Steam or Epic flat, `intro_video = skip` in edvr-flat.ini (or the F8
+row, then relaunch); read the three lines above and time launch to menu.

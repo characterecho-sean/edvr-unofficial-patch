@@ -112,6 +112,14 @@ private:
     bool running_ = false;
 };
 
+// The caller's gate for a site of `owner`: true only when the profile whose frames the report divides that owner by is the active one (the
+// flat hooks' cost divides by VR frames, the VR hooks' by flat frames; framesOf). In Passthrough or an invalid profile neither is active,
+// the reporter counts no frame, so a sample taken there would be divided into the next window's frames of another profile. It is not taken.
+// A hook that must still run in those profiles (the mode watch's live query) keeps running; it just is not measured there.
+constexpr bool inactiveFor(Owner owner, bool flatActive, bool vrActive) noexcept {
+    return owner == Owner::Flat ? vrActive : flatActive;
+}
+
 // The probe for one call of a hot site. inactive is the caller's gate: true when the other profile is active, which is the only time
 // the site's own work is counted.
 inline Probe enterSite(Site s, bool inactive) noexcept {

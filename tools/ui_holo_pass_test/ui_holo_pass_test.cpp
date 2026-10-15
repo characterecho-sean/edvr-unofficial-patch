@@ -60,10 +60,21 @@
 #include <string>
 #include <vector>
 
-#include "../../src/d3d11/fixed_shader_source.h"   // kUiLayerCompositeHlsl, for --bench-composite
+#include "../../src/d3d11/fixed_shader_source.h"   // kUiLayerCompositeHlsl and its in-place twin: the equality test and --bench-composite
+#include "../../src/d3d11/ui_layer_shaders.h"      // kUiLayerCompositeGroupX/Y
 #include "../../src/d3d11/ui_resolve.h"
 #include "temporal_shader_bytecode.h"  // edvr::kUiResolveBytecode, from build\gen
 #include "ui_resolve_reference.h"      // edvr_reference::kUiResolveReference, the shader as it was
+#include "near_light_reference.h"      // edvr_reference::kNearLightReference, the near-light shader as it was
+
+// RCAS's host side (FsrRcasCon) and its shader text, for --bench-groups; sharpen_pass.cpp's arrangement.
+#define A_CPU 1
+#pragma warning(push)
+#pragma warning(disable : 4505)
+#include "../../src/d3d11/fsr/ffx_a.h"
+#include "../../src/d3d11/fsr/ffx_fsr1.h"
+#pragma warning(pop)
+#include "../../src/d3d11/fixed_extra_shader_source.h"
 
 using Microsoft::WRL::ComPtr;
 
@@ -396,7 +407,7 @@ struct Device {
     bool warp = true;
 };
 
-Device makeDevice(bool nvidia) {
+Device makeDevice(bool nvidia, bool debugLayer = true) {
     Device d;
     ComPtr<IDXGIAdapter> adapter;
     D3D_DRIVER_TYPE type = D3D_DRIVER_TYPE_WARP;
@@ -415,7 +426,7 @@ Device makeDevice(bool nvidia) {
         d.warp = false;
     }
     D3D_FEATURE_LEVEL level{};
-    HRESULT made = D3D11CreateDevice(adapter.Get(), type, nullptr, D3D11_CREATE_DEVICE_DEBUG, nullptr, 0,
+    HRESULT made = D3D11CreateDevice(adapter.Get(), type, nullptr, debugLayer ? D3D11_CREATE_DEVICE_DEBUG : 0, nullptr, 0,
                                      D3D11_SDK_VERSION, &d.dev, &level, &d.ctx);
     if (made == DXGI_ERROR_SDK_COMPONENT_MISSING)
         made = D3D11CreateDevice(adapter.Get(), type, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &d.dev, &level, &d.ctx);
@@ -915,30 +926,313 @@ double timeFn(Device& d, int batch, const std::function<void()>& fn) {
     return dd.Disjoint ? -1.0 : static_cast<double>(b - a) / static_cast<double>(dd.Frequency) * 1000.0 / batch;
 }
 
-// The layer composite (kUiLayerCompositeHlsl, as ui_layer.cpp runs it) over an
-// eye-sized frame with a UI-quality-125% RGBA16F layer that is empty (cleared to
-// the "nothing here" value), holds a HUD's worth of panels, or is covered; and,
-// beside it, what a bare full-eye read and write costs. Desk numbers for the
-// performance review: what would a composite that skipped the layer's empty
-// tiles save? Nothing here is production code.
-void runCompositeBench(Device& d) {
-    if (d.warp) std::puts("note: --bench-composite on WARP times a CPU; use --adapter nvidia.");
+// The layer composite (kUiLayerCompositeHlsl, as ui_layer.cpp runs it out of place) against
+// the same composite in place (kUiLayerCompositeInPlaceHlsl), over an eye-sized frame and the
+// production layer (RGBA8 UNORM, at ui_quality 100 and 125), empty (cleared to the "nothing
+// here" value), holding a HUD's worth of panels, or covered; and, beside them, what a bare
+// full-eye read and write costs. Nothing here is production code except the shaders it times.
+struct CompositeParams {
+    int32_t region[4];
+    float uv[4];
+    float layerSize[2];
+    uint32_t outSize[2];
+    uint32_t mode, useMult, pad[2];
+};
+static_assert(sizeof(CompositeParams) == 64, "the composite's cbuffer is 64 bytes");
+
+// The shader as production runs it (the build's bytecode) against the source it was compiled from.
+void checkCompositeBytecodeCurrent() {
+    ComPtr<ID3DBlob> a = compileBlob(edvr::kUiLayerCompositeHlsl, nullptr, "ui_layer_composite_cs");
+    check(a->GetBufferSize() == sizeof(edvr::kUiLayerCompositeBytecode) &&
+              !std::memcmp(a->GetBufferPointer(), edvr::kUiLayerCompositeBytecode, sizeof(edvr::kUiLayerCompositeBytecode)),
+          "the out-of-place composite's bytecode header is current: kUiLayerCompositeHlsl compiled, byte for byte");
+    ComPtr<ID3DBlob> b = compileBlob(edvr::kUiLayerCompositeInPlaceHlsl, nullptr, "ui_layer_composite_inplace_cs");
+    check(b->GetBufferSize() == sizeof(edvr::kUiLayerCompositeInPlaceBytecode) &&
+              !std::memcmp(b->GetBufferPointer(), edvr::kUiLayerCompositeInPlaceBytecode, sizeof(edvr::kUiLayerCompositeInPlaceBytecode)),
+          "the in-place composite's bytecode header is current: kUiLayerCompositeInPlaceHlsl compiled, byte for byte");
+}
+
+bool typedLoadOk(Device& d, DXGI_FORMAT f) {
+    D3D11_FEATURE_DATA_FORMAT_SUPPORT2 fs{f, 0};
+    return SUCCEEDED(d.dev->CheckFeatureSupport(D3D11_FEATURE_FORMAT_SUPPORT2, &fs, sizeof(fs))) &&
+           (fs.OutFormatSupport2 & D3D11_FORMAT_SUPPORT2_UAV_TYPED_LOAD) != 0;
+}
+
+// One composite, both ways, over the same inputs.
+struct CompCase {
+    const char* name;
+    int texW, texH;          // the frame texture
+    int region[4];           // x0, y0, x1, y1 in it
+    int lw, lh;              // the layer
+    float uv[4];
+    bool mult;
+    uint32_t mode;
+    int emptyPercent;        // how much of the layer is "nothing here"
+};
+
+// A layer pixel: mostly "nothing here" exactly (0,0,0,255), else opaque ink (a = 255, rgb > 0), a translucent
+// tint, a clear hole (a = 0) or a dark shade (rgb = 0, a < 255), so every branch of the arithmetic and of the skip runs.
+void fillLayer(Rng& rng, int emptyPercent, std::vector<uint8_t>& px, bool isMult) {
+    for (size_t i = 0; i + 3 < px.size(); i += 4) {
+        const uint32_t r = rng.next() >> 8;
+        const int pick = static_cast<int>(r % 100);
+        uint8_t* p = &px[i];
+        if (isMult) {   // the transmittance: mostly 1, sometimes a per-channel dim
+            const bool one = pick < 70;
+            for (int c = 0; c < 3; ++c) p[c] = one ? 255 : static_cast<uint8_t>(rng.next() >> 24);
+            p[3] = 255;
+            continue;
+        }
+        if (pick < emptyPercent) { p[0] = p[1] = p[2] = 0; p[3] = 255; continue; }
+        const int kind = static_cast<int>((r >> 7) % 5);
+        const uint8_t a = static_cast<uint8_t>(rng.next() >> 24), b = static_cast<uint8_t>(rng.next() >> 24),
+                      c = static_cast<uint8_t>(rng.next() >> 24), e = static_cast<uint8_t>(rng.next() >> 24);
+        switch (kind) {
+            case 0: p[0] = static_cast<uint8_t>(a | 1); p[1] = b; p[2] = c; p[3] = 255; break;   // ink
+            case 1: p[0] = a; p[1] = b; p[2] = c; p[3] = e; break;                              // tint
+            case 2: p[0] = a; p[1] = b; p[2] = c; p[3] = 0; break;                              // hole
+            case 3: p[0] = p[1] = p[2] = 0; p[3] = e; break;                                    // shade
+            default: p[0] = 0; p[1] = 0; p[2] = 1; p[3] = 255; break;                           // the faintest ink
+        }
+    }
+}
+
+struct CompResult { std::vector<uint8_t> outOfPlace, inPlace; };
+
+// shaderOut/shaderIn: the two compute shaders; the in-place one may be a mutant for a control.
+CompResult runComposite(Device& d, const CompCase& c, ID3D11ComputeShader* shaderOut, ID3D11ComputeShader* shaderIn, bool production,
+                        int outGx = static_cast<int>(edvr::kUiLayerCompositeGroupX), int outGy = static_cast<int>(edvr::kUiLayerCompositeGroupY)) {
     ID3D11Device* dev = d.dev.Get();
     ID3D11DeviceContext* ctx = d.ctx.Get();
-    const int fw = 4032, fh = 3896, lw = 5040, lh = 4870;
+    Rng rng(0xC0FFEEu + static_cast<uint32_t>(c.texW * 131 + c.texH * 7 + c.lw));
+    std::vector<uint8_t> frameData(static_cast<size_t>(c.texW) * c.texH * 4), layerData(static_cast<size_t>(c.lw) * c.lh * 4),
+        multData(static_cast<size_t>(c.lw) * c.lh * 4);
+    for (auto& b : frameData) b = static_cast<uint8_t>(rng.next() >> 24);
+    fillLayer(rng, c.emptyPercent, layerData, false);
+    fillLayer(rng, 0, multData, true);
+    auto frame = tex(dev, c.texW, c.texH, DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_BIND_SHADER_RESOURCE, frameData.data(), c.texW * 4);
+    auto frameV = srvOf(dev, frame.Get());
+    const int rw = c.region[2] - c.region[0], rh = c.region[3] - c.region[1];
+    auto out = tex(dev, rw, rh, DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS, nullptr, 0);
+    auto outU = uavOf(dev, out.Get());
+    auto work = tex(dev, c.texW, c.texH, DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS, frameData.data(), c.texW * 4);
+    auto workU = uavOf(dev, work.Get());
+    auto layer = tex(dev, c.lw, c.lh, DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_BIND_SHADER_RESOURCE, layerData.data(), c.lw * 4);
+    auto layerV = srvOf(dev, layer.Get());
+    auto mult = tex(dev, c.lw, c.lh, DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_BIND_SHADER_RESOURCE, multData.data(), c.lw * 4);
+    auto multV = srvOf(dev, mult.Get());
+
+    CompositeParams p{{c.region[0], c.region[1], c.region[2], c.region[3]}, {c.uv[0], c.uv[1], c.uv[2], c.uv[3]},
+                      {static_cast<float>(c.lw), static_cast<float>(c.lh)}, {static_cast<uint32_t>(rw), static_cast<uint32_t>(rh)},
+                      c.mode, c.mult ? 1u : 0u, {0, 0}};
+    D3D11_BUFFER_DESC bd{};
+    bd.ByteWidth = sizeof(p);
+    bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    D3D11_SUBRESOURCE_DATA pd{&p, 0, 0};
+    ComPtr<ID3D11Buffer> cb;
+    hr(dev->CreateBuffer(&bd, &pd, &cb), "composite cbuffer");
+    ID3D11Buffer* cbp = cb.Get();
+
+    // Out of place, as ui_layer.cpp does: SRV frame, SRV layer (and multiply), UAV out; 32x8 groups (outGx/outGy).
+    {
+        ID3D11ShaderResourceView* srvs[3] = {frameV.Get(), layerV.Get(), c.mult ? multV.Get() : nullptr};
+        ID3D11UnorderedAccessView* uav = outU.Get();
+        ctx->CSSetShader(shaderOut, nullptr, 0);
+        ctx->CSSetShaderResources(0, 3, srvs);
+        ctx->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
+        ctx->CSSetConstantBuffers(0, 1, &cbp);
+        ctx->Dispatch(static_cast<UINT>((rw + outGx - 1) / outGx), static_cast<UINT>((rh + outGy - 1) / outGy), 1);
+        ctx->ClearState();
+    }
+    // In place: no SRV of the frame at all, the frame as the UAV; 32x8 groups.
+    {
+        ID3D11ShaderResourceView* srvs[3] = {nullptr, layerV.Get(), c.mult ? multV.Get() : nullptr};
+        ID3D11UnorderedAccessView* uav = workU.Get();
+        ctx->CSSetShader(shaderIn, nullptr, 0);
+        ctx->CSSetShaderResources(0, 3, srvs);
+        ctx->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
+        ctx->CSSetConstantBuffers(0, 1, &cbp);
+        ctx->Dispatch(static_cast<UINT>((rw + static_cast<int>(edvr::kUiLayerCompositeGroupX) - 1) / static_cast<int>(edvr::kUiLayerCompositeGroupX)),
+                      static_cast<UINT>((rh + static_cast<int>(edvr::kUiLayerCompositeGroupY) - 1) / static_cast<int>(edvr::kUiLayerCompositeGroupY)), 1);
+        ctx->ClearState();
+    }
+    CompResult r;
+    r.outOfPlace = readBytes(d, out.Get(), 4);
+    const std::vector<uint8_t> whole = readBytes(d, work.Get(), 4);
+    // The in-place texture, cut to the region; and everything outside the region must still be the frame.
+    r.inPlace.resize(static_cast<size_t>(rw) * rh * 4);
+    bool outsideUntouched = true;
+    for (int y = 0; y < c.texH; ++y)
+        for (int x = 0; x < c.texW; ++x) {
+            const size_t at = (static_cast<size_t>(y) * c.texW + x) * 4;
+            const bool inside = x >= c.region[0] && x < c.region[2] && y >= c.region[1] && y < c.region[3];
+            if (inside) std::memcpy(&r.inPlace[(static_cast<size_t>(y - c.region[1]) * rw + (x - c.region[0])) * 4], &whole[at], 4);
+            else if (std::memcmp(&whole[at], &frameData[at], 4)) outsideUntouched = false;
+        }
+    if (production) {   // a control's mutant is allowed to drift; the build's shader is not
+        char what[200];
+        std::snprintf(what, sizeof(what), "%s: in place leaves every texel outside the region as it was", c.name);
+        check(outsideUntouched, what);
+    }
+    return r;
+}
+
+// The equality test: the in-place composite is the out-of-place composite, byte for byte, on test images.
+void testCompositeInPlace(Device& d) {
+    checkCompositeBytecodeCurrent();
+    if (!typedLoadOk(d, DXGI_FORMAT_R8G8B8A8_UNORM)) {
+        std::puts("note: this adapter has no typed UAV load of R8G8B8A8_UNORM; the in-place composite is not taken here (ui_layer.cpp falls back), so its equality is not tested.");
+        return;
+    }
+    ID3D11Device* dev = d.dev.Get();
+    ComPtr<ID3D11ComputeShader> outCs = shaderFromBytecode(dev, edvr::kUiLayerCompositeBytecode, sizeof(edvr::kUiLayerCompositeBytecode));
+    ComPtr<ID3D11ComputeShader> inCs = shaderFromBytecode(dev, edvr::kUiLayerCompositeInPlaceBytecode, sizeof(edvr::kUiLayerCompositeInPlaceBytecode));
+    ComPtr<ID3D11ComputeShader> oldOutCs;
+    {
+        std::string old = edvr::kUiLayerCompositeHlsl;
+        const size_t at = old.find("[numthreads(32, 8, 1)]");
+        if (at == std::string::npos) { std::puts("FAIL: the out-of-place composite's group anchor is missing"); std::exit(1); }
+        old.replace(at, std::strlen("[numthreads(32, 8, 1)]"), "[numthreads(8, 8, 1)]");
+        oldOutCs = shaderFromSource(dev, old.c_str(), nullptr, "UI layer composite at 8x8");
+    }
+    static const CompCase cases[] = {
+        // texW, texH, region, layer, uv, mult, mode, empty%
+        {"1:1 layer", 61, 47, {0, 0, 61, 47}, 61, 47, {0, 0, 1, 1}, false, 0, 60},
+        {"1:1, a layer nearly all ink", 61, 47, {0, 0, 61, 47}, 61, 47, {0, 0, 1, 1}, false, 0, 2},
+        {"1:1, a layer that is empty", 61, 47, {0, 0, 61, 47}, 61, 47, {0, 0, 1, 1}, false, 0, 100},
+        {"1.25x layer", 61, 47, {0, 0, 61, 47}, 76, 59, {0, 0, 1, 1}, false, 0, 50},
+        {"1.56x layer", 64, 48, {0, 0, 64, 48}, 100, 75, {0, 0, 1, 1}, false, 0, 50},
+        {"0.54x layer (the footprint under one texel)", 61, 47, {0, 0, 61, 47}, 33, 25, {0, 0, 1, 1}, false, 0, 40},
+        {"cropped uv", 61, 47, {0, 0, 61, 47}, 80, 60, {0.1f, 0.2f, 0.9f, 0.95f}, false, 0, 50},
+        {"a region inside a larger texture", 90, 70, {9, 7, 70, 54}, 76, 59, {0, 0, 1, 1}, false, 0, 50},
+        {"width and height off the group sizes", 131, 67, {0, 0, 131, 67}, 131, 67, {0, 0, 1, 1}, false, 0, 55},
+        {"multiply, 1:1", 61, 47, {0, 0, 61, 47}, 61, 47, {0, 0, 1, 1}, true, 0, 60},
+        {"multiply, 1.25x", 61, 47, {0, 0, 61, 47}, 76, 59, {0, 0, 1, 1}, true, 0, 50},
+        {"multiply over an empty layer", 61, 47, {0, 0, 61, 47}, 61, 47, {0, 0, 1, 1}, true, 0, 100},
+        {"debug view (mode 1)", 61, 47, {0, 0, 61, 47}, 76, 59, {0, 0, 1, 1}, false, 1, 50},
+        {"debug view with multiply", 61, 47, {0, 0, 61, 47}, 61, 47, {0, 0, 1, 1}, true, 1, 50},
+    };
+    // The controls: a shader that drifts from the composite must be caught by these same cases.
+    struct Mutant { const char* name; const char* from; const char* to; };
+    static const Mutant mutants[] = {
+        {"drops the multiply", "l.rgb + f.rgb * l.a * m;", "l.rgb + f.rgb * l.a;"},
+        {"skips when the layer is only mostly transparent", "l.a == 1.0 &&", "l.a > 0.5 &&"},
+        {"ignores the region's origin", "int2 p = region.xy + int2(id.xy);", "int2 p = int2(id.xy);"},
+        {"skips every texel", "if (mode == 0 && all(l.rgb == float3(0, 0, 0)) && l.a == 1.0 && all(m == float3(1, 1, 1))) return;", "return;"},
+        {"stores the frame's alpha as 1", "Frame[p] = float4(saturate(c), f.a);", "Frame[p] = float4(saturate(c), 1.0);"},
+    };
+    ComPtr<ID3D11ComputeShader> mutantCs[std::size(mutants)];
+    for (size_t i = 0; i < std::size(mutants); ++i) {
+        std::string src = edvr::kUiLayerCompositeInPlaceHlsl;
+        const size_t at = src.find(mutants[i].from);
+        if (at == std::string::npos) { std::printf("FAIL: mutant anchor missing: %s\n", mutants[i].name); std::exit(1); }
+        src.replace(at, std::strlen(mutants[i].from), mutants[i].to);
+        mutantCs[i] = shaderFromSource(dev, src.c_str(), nullptr, mutants[i].name);
+    }
+    size_t caught[std::size(mutants)] = {};
+    size_t texels = 0, differing = 0;
+    for (const CompCase& c : cases) {
+        const CompResult r = runComposite(d, c, outCs.Get(), inCs.Get(), true);
+        char what[200];
+        std::snprintf(what, sizeof(what), "%s: the in-place composite equals the out-of-place composite, byte for byte (%zu texels)", c.name, r.outOfPlace.size() / 4);
+        check(r.inPlace == r.outOfPlace, what);
+        {   // ...and the out-of-place shader at 32x8 is the one it was at 8x8 (before 2026-10-13)
+            const CompResult o = runComposite(d, c, oldOutCs.Get(), inCs.Get(), false, 8, 8);
+            std::snprintf(what, sizeof(what), "%s: the 32x8 out-of-place composite is the 8x8 one, byte for byte", c.name);
+            check(o.outOfPlace == r.outOfPlace, what);
+        }
+        texels += r.outOfPlace.size() / 4;
+        for (size_t i = 0; i < r.inPlace.size() && i < r.outOfPlace.size(); ++i) differing += r.inPlace[i] != r.outOfPlace[i];
+        for (size_t i = 0; i < std::size(mutants); ++i) {
+            const CompResult m = runComposite(d, c, outCs.Get(), mutantCs[i].Get(), false);
+            if (m.inPlace != m.outOfPlace) ++caught[i];
+        }
+    }
+    for (size_t i = 0; i < std::size(mutants); ++i) {
+        char what[200];
+        std::snprintf(what, sizeof(what), "CONTROL: an in-place shader that %s is caught (%zu of %zu cases differ)", mutants[i].name, caught[i], std::size(cases));
+        check(caught[i] >= 1, what);
+    }
+    // An empty layer returns the frame untouched: the claim the skip rests on.
+    {
+        const CompCase& c = cases[2];
+        Rng rng(0xC0FFEEu + static_cast<uint32_t>(c.texW * 131 + c.texH * 7 + c.lw));
+        std::vector<uint8_t> frameData(static_cast<size_t>(c.texW) * c.texH * 4);
+        for (auto& b : frameData) b = static_cast<uint8_t>(rng.next() >> 24);
+        const CompResult r = runComposite(d, c, outCs.Get(), inCs.Get(), true);
+        check(r.outOfPlace == frameData && r.inPlace == frameData, "a composite over an empty layer returns the frame byte for byte, in place and out of place");
+    }
+    std::printf("in place against out of place: %zu cases, %zu texels, %zu differing bytes\n", std::size(cases), texels, differing);
+}
+
+// A dual-source blend of the same composite onto the frame as a render target:
+// layer.rgb + frame.rgb * (layer.a * mult), the multiply done by the blend unit.
+// Only for the bench, as the one other way to avoid the copy: not exact (see its line).
+static const char kBlendVs[] =
+    "float4 main(uint id : SV_VertexID) : SV_POSITION { float2 p = id == 0 ? float2(-1,-1) : (id == 1 ? float2(-1,3) : float2(3,-1)); return float4(p,0,1); }";
+static const char kBlendPs[] = R"HLSL(
+Texture2D<float4> Layer : register(t1);
+cbuffer P : register(b0) {
+    int4   region; float4 uv; float2 layerSize; uint2 outSize; uint mode; uint useMult; uint2 pad;
+};
+struct O { float4 c0 : SV_Target0; float4 c1 : SV_Target1; };
+O main(float4 pos : SV_POSITION) {
+    uint2 id = uint2(pos.xy);
+    float2 span = (uv.zw - uv.xy) * layerSize / float2(outSize);
+    float2 x0 = uv.xy * layerSize + float2(id) * span;
+    float2 x1 = x0 + span;
+    int2 k0 = max(int2(floor(x0)), int2(0, 0));
+    int2 k1 = min(int2(ceil(x1)) - 1, int2(layerSize) - 1);
+    float4 acc = float4(0, 0, 0, 0);
+    float wsum = 0;
+    [loop] for (int j = k0.y; j <= min(k1.y, k0.y + 3); ++j) {
+        float wy = min(x1.y, (float)j + 1.0) - max(x0.y, (float)j);
+        if (wy <= 0) continue;
+        [loop] for (int i = k0.x; i <= min(k1.x, k0.x + 3); ++i) {
+            float wx = min(x1.x, (float)i + 1.0) - max(x0.x, (float)i);
+            if (wx <= 0) continue;
+            acc += Layer.Load(int3(i, j, 0)) * (wx * wy);
+            wsum += wx * wy;
+        }
+    }
+    float4 l = wsum > 0 ? acc / wsum : float4(0, 0, 0, 1);
+    if (all(l.rgb == float3(0, 0, 0)) && l.a == 1.0) discard;
+    O o; o.c0 = float4(l.rgb, 0); o.c1 = float4(l.a, l.a, l.a, 1); return o;
+}
+)HLSL";
+
+// The panels of a HUD, as fractions of the eye, in the layer's own pixels.
+static const float kHudBox[6][4] = {{0.06f, 0.62f, 0.22f, 0.90f}, {0.78f, 0.62f, 0.94f, 0.90f}, {0.42f, 0.78f, 0.58f, 0.96f},
+                                    {0.03f, 0.25f, 0.09f, 0.45f}, {0.91f, 0.25f, 0.97f, 0.45f}, {0.44f, 0.06f, 0.56f, 0.12f}};
+
+struct BenchSize {
+    int fw, fh, lw, lh;
+    const char* label;
+};
+
+void runCompositeBenchCase(Device& d, const BenchSize& cc) {
+    ID3D11Device* dev = d.dev.Get();
+    ID3D11DeviceContext* ctx = d.ctx.Get();
+    const int fw = cc.fw, fh = cc.fh, lw = cc.lw, lh = cc.lh;
 
     std::vector<uint8_t> frameData(static_cast<size_t>(fw) * fh * 4);
     Rng rng(4242);
     for (auto& b : frameData) b = static_cast<uint8_t>(rng.next() >> 24);
     auto frame = tex(dev, fw, fh, DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_BIND_SHADER_RESOURCE, frameData.data(), fw * 4);
     auto out = tex(dev, fw, fh, DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS, nullptr, 0);
+    // The in-place frame: what RCAS's output is (a UAV-capable texture EDVR owns), plus a render target for the blend variant.
+    auto work = tex(dev, fw, fh, DXGI_FORMAT_R8G8B8A8_UNORM,
+                    D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_RENDER_TARGET, frameData.data(), fw * 4);
     auto frameV = srvOf(dev, frame.Get());
     auto outU = uavOf(dev, out.Get());
+    auto workU = uavOf(dev, work.Get());
+    ComPtr<ID3D11RenderTargetView> workRtv;
+    hr(dev->CreateRenderTargetView(work.Get(), nullptr, &workRtv), "frame RTV");
 
     struct Layer { ComPtr<ID3D11Texture2D> t; ComPtr<ID3D11ShaderResourceView> srv; ComPtr<ID3D11RenderTargetView> rtv; };
     auto makeLayer = [&]() {
         Layer l;
-        l.t = tex(dev, lw, lh, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE, nullptr, 0);
+        l.t = tex(dev, lw, lh, DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE, nullptr, 0);
         l.srv = srvOf(dev, l.t.Get());
         hr(dev->CreateRenderTargetView(l.t.Get(), nullptr, &l.rtv), "layer RTV");
         return l;
@@ -947,8 +1241,9 @@ void runCompositeBench(Device& d) {
 
     static const char kVs[] =
         "float4 main(uint id : SV_VertexID) : SV_POSITION { float2 p = id == 0 ? float2(-1,-1) : (id == 1 ? float2(-1,3) : float2(3,-1)); return float4(p,0,1); }";
+    // Text-like content: a flat tinted panel with a sparse bright grid on it, alpha (transmittance) 0.35 on the panel.
     static const char kPs[] =
-        "float4 main(float4 p : SV_POSITION) : SV_Target { return float4(0.20, 0.35, 0.55, 0.35); }";
+        "float4 main(float4 p : SV_POSITION) : SV_Target { uint2 q = uint2(p.xy); bool ink = ((q.x >> 2) ^ (q.y >> 3)) % 5 == 0; return ink ? float4(0.9, 0.95, 1.0, 0.0) : float4(0.20, 0.35, 0.55, 0.35); }";
     ComPtr<ID3D11VertexShader> vs;
     ComPtr<ID3D11PixelShader> ps;
     {
@@ -979,45 +1274,135 @@ void runCompositeBench(Device& d) {
         for (const auto& r : panels) { ctx->RSSetScissorRects(1, &r); ctx->Draw(3, 0); }
         ctx->ClearState();
     };
-    static const float box[6][4] = {{0.06f, 0.62f, 0.22f, 0.90f}, {0.78f, 0.62f, 0.94f, 0.90f}, {0.42f, 0.78f, 0.58f, 0.96f},
-                                    {0.03f, 0.25f, 0.09f, 0.45f}, {0.91f, 0.25f, 0.97f, 0.45f}, {0.44f, 0.06f, 0.56f, 0.12f}};
     std::vector<D3D11_RECT> panels;
-    for (const auto& b : box)
+    for (const auto& b : kHudBox)
         panels.push_back({static_cast<LONG>(b[0] * lw), static_cast<LONG>(b[1] * lh), static_cast<LONG>(b[2] * lw), static_cast<LONG>(b[3] * lh)});
     paint(empty, {});
     paint(hud, panels);
     paint(full, {{0, 0, lw, lh}});
 
-    ComPtr<ID3D11ComputeShader> cs = shaderFromSource(dev, edvr::kUiLayerCompositeHlsl, nullptr, "UI layer composite");
+    ComPtr<ID3D11ComputeShader> cs = shaderFromBytecode(dev, edvr::kUiLayerCompositeBytecode, sizeof(edvr::kUiLayerCompositeBytecode));
+    ComPtr<ID3D11ComputeShader> inplace = shaderFromBytecode(dev, edvr::kUiLayerCompositeInPlaceBytecode, sizeof(edvr::kUiLayerCompositeInPlaceBytecode));
+    // The same two shaders at the other group shape (the bench's evidence that the launch, not the bytes, was the cost).
+    auto reshaped = [&](const char* source, const char* from, const char* to) {
+        std::string src = source;
+        const size_t at = src.find(from);
+        if (at == std::string::npos) { std::puts("FAIL: bench group anchor missing"); std::exit(1); }
+        src.replace(at, std::strlen(from), to);
+        return shaderFromSource(dev, src.c_str(), nullptr, "reshaped composite");
+    };
+    ComPtr<ID3D11ComputeShader> outNarrow = reshaped(edvr::kUiLayerCompositeHlsl, "[numthreads(32, 8, 1)]", "[numthreads(8, 8, 1)]");
+    ComPtr<ID3D11ComputeShader> inNarrow = reshaped(edvr::kUiLayerCompositeInPlaceHlsl, "[numthreads(32, 8, 1)]", "[numthreads(8, 8, 1)]");
+    // The upper bound for a tile-bounded dispatch: the same in-place shader over exactly the panels' rectangles
+    // (the code does not know them; this is what perfect knowledge of the layer's content bounds could buy).
+    ComPtr<ID3D11ComputeShader> oracle = reshaped(edvr::kUiLayerCompositeInPlaceHlsl, "void main(uint3 id : SV_DispatchThreadID) {",
+                                                  "void main(uint3 gid : SV_DispatchThreadID) { uint3 id = uint3(gid.xy + pad, 0);");
     static const char kCopyCs[] =
         "Texture2D<float4> F : register(t0); RWTexture2D<float4> O : register(u0);"
         "[numthreads(8,8,1)] void main(uint3 id : SV_DispatchThreadID) { O[id.xy] = F.Load(int3(id.xy, 0)); }";
     ComPtr<ID3D11ComputeShader> copyCs = shaderFromSource(dev, kCopyCs, nullptr, "bare copy");
 
-    struct Params {
-        int32_t region[4];
-        float uv[4];
-        float layerSize[2];
-        uint32_t outSize[2];
-        uint32_t mode, useMult, pad[2];
-    } p{{0, 0, fw, fh}, {0.f, 0.f, 1.f, 1.f}, {static_cast<float>(lw), static_cast<float>(lh)}, {static_cast<uint32_t>(fw), static_cast<uint32_t>(fh)}, 0, 0, {0, 0}};
-    static_assert(sizeof(Params) == 64, "the composite's cbuffer is 64 bytes");
+    ComPtr<ID3D11VertexShader> bvs;
+    ComPtr<ID3D11PixelShader> bps;
+    {
+        ComPtr<ID3DBlob> v = compileBlob(kBlendVs, nullptr, "blend vs", "vs_5_0");
+        hr(dev->CreateVertexShader(v->GetBufferPointer(), v->GetBufferSize(), nullptr, &bvs), "blend VS");
+        ComPtr<ID3DBlob> p = compileBlob(kBlendPs, nullptr, "blend ps", "ps_5_0");
+        hr(dev->CreatePixelShader(p->GetBufferPointer(), p->GetBufferSize(), nullptr, &bps), "blend PS");
+    }
+    D3D11_BLEND_DESC bld{};
+    bld.RenderTarget[0].BlendEnable = TRUE;
+    bld.RenderTarget[0].SrcBlend = D3D11_BLEND_ONE;
+    bld.RenderTarget[0].DestBlend = D3D11_BLEND_SRC1_COLOR;
+    bld.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+    bld.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ZERO;
+    bld.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ONE;
+    bld.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+    bld.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_RED | D3D11_COLOR_WRITE_ENABLE_GREEN | D3D11_COLOR_WRITE_ENABLE_BLUE;
+    ComPtr<ID3D11BlendState> blend;
+    hr(dev->CreateBlendState(&bld, &blend), "blend state");
+    D3D11_RASTERIZER_DESC rd2{};
+    rd2.FillMode = D3D11_FILL_SOLID;
+    rd2.CullMode = D3D11_CULL_NONE;
+    rd2.DepthClipEnable = TRUE;
+    ComPtr<ID3D11RasterizerState> rs2;
+    hr(dev->CreateRasterizerState(&rd2, &rs2), "rasterizer state 2");
+
+    CompositeParams p{{0, 0, fw, fh}, {0.f, 0.f, 1.f, 1.f}, {static_cast<float>(lw), static_cast<float>(lh)}, {static_cast<uint32_t>(fw), static_cast<uint32_t>(fh)}, 0, 0, {0, 0}};
     D3D11_BUFFER_DESC bd{};
-    bd.ByteWidth = sizeof(Params);
+    bd.ByteWidth = sizeof(CompositeParams);
     bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     D3D11_SUBRESOURCE_DATA pd{&p, 0, 0};
     ComPtr<ID3D11Buffer> cb;
     hr(dev->CreateBuffer(&bd, &pd, &cb), "composite cbuffer");
+    // One constant buffer per panel for the oracle: the pad carries the panel's origin in the frame; the full-eye mapping is kept.
+    std::vector<ComPtr<ID3D11Buffer>> panelCb;
+    for (const auto& r : panels) {
+        CompositeParams q = p;
+        q.pad[0] = static_cast<uint32_t>(r.left * fw / lw);
+        q.pad[1] = static_cast<uint32_t>(r.top * fh / lh);
+        ComPtr<ID3D11Buffer> b;
+        D3D11_SUBRESOURCE_DATA qd{&q, 0, 0};
+        hr(dev->CreateBuffer(&bd, &qd, &b), "panel cbuffer");
+        panelCb.push_back(b);
+    }
 
-    auto composite = [&](Layer& l) {
+    auto dispatchFull = [&](int gx, int gy) {
+        ctx->Dispatch(static_cast<UINT>((fw + gx - 1) / gx), static_cast<UINT>((fh + gy - 1) / gy), 1);
+    };
+    auto compositeOut = [&](Layer& l, ID3D11ComputeShader* shader, int gx, int gy) {
         ID3D11ShaderResourceView* srvs[3] = {frameV.Get(), l.srv.Get(), nullptr};
         ID3D11UnorderedAccessView* uav = outU.Get();
         ID3D11Buffer* cbp = cb.Get();
-        ctx->CSSetShader(cs.Get(), nullptr, 0);
+        ctx->CSSetShader(shader, nullptr, 0);
         ctx->CSSetShaderResources(0, 3, srvs);
         ctx->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
         ctx->CSSetConstantBuffers(0, 1, &cbp);
-        ctx->Dispatch(static_cast<UINT>((fw + 7) / 8), static_cast<UINT>((fh + 7) / 8), 1);
+        dispatchFull(gx, gy);
+        ctx->ClearState();
+    };
+    auto compositeIn = [&](Layer& l, ID3D11ComputeShader* shader, int gx, int gy) {
+        ID3D11ShaderResourceView* srvs[3] = {nullptr, l.srv.Get(), nullptr};
+        ID3D11UnorderedAccessView* uav = workU.Get();
+        ID3D11Buffer* cbp = cb.Get();
+        ctx->CSSetShader(shader, nullptr, 0);
+        ctx->CSSetShaderResources(0, 3, srvs);
+        ctx->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
+        ctx->CSSetConstantBuffers(0, 1, &cbp);
+        dispatchFull(gx, gy);
+        ctx->ClearState();
+    };
+    auto compositeBlend = [&](Layer& l) {
+        ID3D11RenderTargetView* rtv = workRtv.Get();
+        ctx->OMSetRenderTargets(1, &rtv, nullptr);
+        const FLOAT bf[4] = {0, 0, 0, 0};
+        ctx->OMSetBlendState(blend.Get(), bf, 0xFFFFFFFFu);
+        D3D11_VIEWPORT vp{0.f, 0.f, static_cast<float>(fw), static_cast<float>(fh), 0.f, 1.f};
+        ctx->RSSetViewports(1, &vp);
+        ctx->RSSetState(rs2.Get());
+        ctx->VSSetShader(bvs.Get(), nullptr, 0);
+        ctx->PSSetShader(bps.Get(), nullptr, 0);
+        ID3D11ShaderResourceView* srvs[2] = {nullptr, l.srv.Get()};
+        ctx->PSSetShaderResources(0, 2, srvs);
+        ID3D11Buffer* cbp = cb.Get();
+        ctx->PSSetConstantBuffers(0, 1, &cbp);
+        ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        ctx->Draw(3, 0);
+        ctx->ClearState();
+    };
+    auto compositePanels = [&](Layer& l) {
+        ID3D11ShaderResourceView* srvs[3] = {nullptr, l.srv.Get(), nullptr};
+        ID3D11UnorderedAccessView* uav = workU.Get();
+        ctx->CSSetShader(oracle.Get(), nullptr, 0);
+        ctx->CSSetShaderResources(0, 3, srvs);
+        ctx->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
+        for (size_t k = 0; k < panels.size(); ++k) {
+            ID3D11Buffer* pc = panelCb[k].Get();
+            ctx->CSSetConstantBuffers(0, 1, &pc);
+            const UINT gx = static_cast<UINT>(((panels[k].right - panels[k].left) * fw / lw + 32) / 32);
+            const UINT gy = static_cast<UINT>(((panels[k].bottom - panels[k].top) * fh / lh + 8) / 8);
+            ctx->Dispatch(gx, gy, 1);
+        }
         ctx->ClearState();
     };
     auto bareCopy = [&]() {
@@ -1026,42 +1411,664 @@ void runCompositeBench(Device& d) {
         ctx->CSSetShader(copyCs.Get(), nullptr, 0);
         ctx->CSSetShaderResources(0, 1, &srv);
         ctx->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
-        ctx->Dispatch(static_cast<UINT>((fw + 7) / 8), static_cast<UINT>((fh + 7) / 8), 1);
+        dispatchFull(8, 8);
         ctx->ClearState();
     };
-    const std::vector<std::pair<const char*, std::function<void()>>> runs = {
-        {"CopyResource frame -> out (the floor's floor)", [&]() { ctx->CopyResource(out.Get(), frame.Get()); }},
-        {"bare compute copy frame -> out", bareCopy},
-        {"composite, layer empty (cleared, never drawn)", [&]() { composite(empty); }},
-        {"composite, layer with a HUD's panels (15%)", [&]() { composite(hud); }},
-        {"composite, layer covered", [&]() { composite(full); }},
+    const int gix = static_cast<int>(edvr::kUiLayerCompositeGroupX), giy = static_cast<int>(edvr::kUiLayerCompositeGroupY);
+
+    // The equality half at the real size: the in-place shader over a fresh copy of the frame is the out-of-place output, byte for byte.
+    const std::vector<std::pair<const char*, Layer*>> layers = {{"empty", &empty}, {"HUD panels", &hud}, {"covered", &full}};
+    for (const auto& ly : layers) {
+        compositeOut(*ly.second, outNarrow.Get(), 8, 8);   // the shader as it was before 2026-10-13: the reference
+        const std::vector<uint8_t> want = readBytes(d, out.Get(), 4);
+        ctx->UpdateSubresource(work.Get(), 0, nullptr, frameData.data(), static_cast<UINT>(fw * 4), 0);
+        compositeIn(*ly.second, inplace.Get(), gix, giy);
+        const std::vector<uint8_t> got = readBytes(d, work.Get(), 4);
+        char what[160];
+        std::snprintf(what, sizeof(what), "in place == out of place, byte for byte (layer %s, %dx%d over %dx%d)", ly.first, lw, lh, fw, fh);
+        check(got == want, what);
+        ctx->UpdateSubresource(work.Get(), 0, nullptr, frameData.data(), static_cast<UINT>(fw * 4), 0);
+        compositeBlend(*ly.second);
+        const std::vector<uint8_t> gotB = readBytes(d, work.Get(), 4);
+        int maxDiff = 0;
+        size_t differing = 0;
+        for (size_t i = 0; i < want.size(); ++i) {
+            const int df = std::abs(static_cast<int>(gotB[i]) - static_cast<int>(want[i]));
+            if (df) ++differing;
+            maxDiff = std::max(maxDiff, df);
+        }
+        std::printf("  blend variant vs out of place (layer %s): %zu bytes differ, max abs diff %d (the blend unit rounds its own way: not taken)\n",
+                    ly.first, differing, maxDiff);
+    }
+    ctx->UpdateSubresource(work.Get(), 0, nullptr, frameData.data(), static_cast<UINT>(fw * 4), 0);
+
+    std::vector<std::pair<std::string, std::function<void()>>> runs = {
+        {"bare compute copy frame -> out (the floor)", bareCopy},
+        {"CopyResource frame -> out", [&]() { ctx->CopyResource(out.Get(), frame.Get()); }},
     };
+    for (const auto& ly : layers) {
+        Layer* L = ly.second;
+        const std::string nm = ly.first;
+        runs.push_back({"(a0) before: out of place, 8x8 groups, layer " + nm, [&, L]() { compositeOut(*L, outNarrow.Get(), 8, 8); }});
+        runs.push_back({"(a) out of place, 32x8 groups (the build), layer " + nm, [&, L]() { compositeOut(*L, cs.Get(), gix, giy); }});
+        runs.push_back({"(b') in place, 8x8 groups, layer " + nm, [&, L]() { compositeIn(*L, inNarrow.Get(), 8, 8); }});
+        runs.push_back({"(b) in place, 32x8 groups (the build), layer " + nm, [&, L]() { compositeIn(*L, inplace.Get(), gix, giy); }});
+        runs.push_back({"(b2) in place by blend, not exact, layer " + nm, [&, L]() { compositeBlend(*L); }});
+        if (L == &hud) runs.push_back({"(c) oracle: in place over the panels' rectangles only", [&, L]() { compositePanels(*L); }});
+    }
     for (int i = 0; i < 40; ++i)
         for (const auto& r : runs) timeFn(d, 4, r.second);
+    const int rounds = 201;
     std::vector<std::vector<double>> ms(runs.size());
-    for (int round = 0; round < 25; ++round)
+    for (int round = 0; round < rounds; ++round)
         for (size_t k = 0; k < runs.size(); ++k) {
             const double t = timeFn(d, 8, runs[k].second);
             if (t > 0) ms[k].push_back(t);
         }
-    std::printf("ms per call, one eye: frame %dx%d, layer %dx%d RGBA16F\n", fw, fh, lw, lh);
-    for (size_t k = 0; k < runs.size(); ++k) std::printf("  %-52s %8.4f\n", runs[k].first, median(ms[k]));
+    std::printf("== %s: frame %dx%d RGBA8, layer %dx%d RGBA8; ms per call, one eye; median of %d samples of 8 dispatches, p10/p90 in brackets\n",
+                cc.label, fw, fh, lw, lh, rounds);
+    for (size_t k = 0; k < runs.size(); ++k) {
+        std::vector<double> v = ms[k];
+        std::sort(v.begin(), v.end());
+        std::printf("  %-62s %8.4f  [%7.4f %7.4f]\n", runs[k].first.c_str(), median(ms[k]), v.empty() ? 0.0 : v[v.size() / 10], v.empty() ? 0.0 : v[v.size() * 9 / 10]);
+    }
+}
 
-    // What an empty layer does to the frame: nothing. (The composite of a layer
-    // that is all "nothing here" is the frame, bit for bit: l = (0,0,0,1) exactly,
-    // c = 0 + f * 1 * 1.) The bench is only worth reading if that holds.
-    composite(empty);
-    const std::vector<uint8_t> got = readBytes(d, out.Get(), 4);
-    check(got == frameData, "a composite over an empty layer returns the frame byte for byte");
+void runCompositeBench(Device& d) {
+    if (d.warp) std::puts("note: --bench-composite on WARP times a CPU; use --adapter nvidia.");
+    const bool loadOk = typedLoadOk(d, DXGI_FORMAT_R8G8B8A8_UNORM);
+    std::printf("typed UAV load of R8G8B8A8_UNORM: %s\n", loadOk ? "supported" : "NOT supported");
+    check(loadOk || d.warp, "the GPU loads typed R8G8B8A8_UNORM from a UAV");
+    static const BenchSize cases[] = {
+        {4032, 4032, 4032, 4032, "ui_quality 100 (layer = frame)"},
+        {4032, 4032, 5040, 5040, "ui_quality 125 (layer 1.25x)"},
+    };
+    for (const auto& c : cases) runCompositeBenchCase(d, c);
+}
+
+// ------------------------------------------------------------------ thread-group shapes, at the eye's size
+//
+// ui_holo_pass_test --bench-groups. The composite's out-of-place shader launched 254,000 groups of 64 at
+// 4032^2 and the launch, not the bytes, was its floor (0.120 ms against a 0.086 bare copy). The same
+// experiment for the other full-frame compute passes: each shader's source rewritten to another group
+// shape (or to 2x2 texels a thread), timed at the real size, and held byte for byte to the production
+// shape's output. A pass whose threads share nothing (no groupshared) takes any shape; the table says
+// which are worth taking.
+
+struct GroupShape { int gx, gy, tx, ty; const char* name; };
+static const GroupShape kGroupShapes[] = {
+    {8, 8, 1, 1, "8x8"},
+    {32, 8, 1, 1, "32x8"},
+    {16, 16, 1, 1, "16x16"},
+    {64, 4, 1, 1, "64x4"},
+    {8, 8, 2, 2, "8x8, 2x2 texels a thread"},
+    {16, 8, 2, 2, "16x8, 2x2 texels a thread"},
+};
+
+// `attr` is the shader's numthreads attribute as written and `sig` its entry's signature through the
+// opening brace; the shape replaces the attribute, or (tiles above 1) turns the entry into a function
+// that a new entry calls once for each texel it owns.
+std::string reshapeShader(std::string src, const char* attr, const char* sig, const GroupShape& s) {
+    const size_t sigAt = src.find(sig);
+    if (sigAt == std::string::npos) { std::printf("FAIL: reshape: entry signature missing: %s\n", sig); std::exit(1); }
+    const size_t attrAt = src.rfind(attr, sigAt);
+    if (attrAt == std::string::npos) { std::printf("FAIL: reshape: numthreads missing: %s\n", attr); std::exit(1); }
+    char nt[80];
+    std::snprintf(nt, sizeof(nt), "[numthreads(%d, %d, 1)]", s.gx, s.gy);
+    if (s.tx == 1 && s.ty == 1) {
+        src.replace(sigAt, std::strlen(sig), sig);   // unchanged
+        src.replace(attrAt, std::strlen(attr), nt);
+        return src;
+    }
+    src.replace(sigAt, std::strlen(sig), "void body(uint3 id) {");
+    src.replace(attrAt, std::strlen(attr), "");
+    char wrapper[400];
+    std::snprintf(wrapper, sizeof(wrapper),
+                  "\n%s void main(uint3 gid : SV_DispatchThreadID) {\n"
+                  "    [unroll] for (uint j = 0; j < %du; ++j) [unroll] for (uint i = 0; i < %du; ++i)\n"
+                  "        body(uint3(gid.xy * uint2(%du, %du) + uint2(i, j), 0));\n}\n",
+                  nt, s.ty, s.tx, s.tx, s.ty);
+    return src + wrapper;
+}
+UINT groupsFor(int extent, const GroupShape& s, bool xAxis) {
+    const int per = xAxis ? s.gx * s.tx : s.gy * s.ty;
+    return static_cast<UINT>((extent + per - 1) / per);
+}
+
+void printMedians(const char* title, const std::vector<std::pair<std::string, std::function<void()>>>& runs, Device& d) {
+    for (int i = 0; i < 40; ++i)
+        for (const auto& r : runs) timeFn(d, 4, r.second);
+    const int rounds = 201;
+    std::vector<std::vector<double>> ms(runs.size());
+    for (int round = 0; round < rounds; ++round)
+        for (size_t k = 0; k < runs.size(); ++k) {
+            const double t = timeFn(d, 8, runs[k].second);
+            if (t > 0) ms[k].push_back(t);
+        }
+    std::printf("== %s; ms per dispatch, one eye; median of %d samples of 8, p10/p90 in brackets\n", title, rounds);
+    const double base = median(ms[0]);
+    for (size_t k = 0; k < runs.size(); ++k) {
+        std::vector<double> v = ms[k];
+        std::sort(v.begin(), v.end());
+        std::printf("  %-58s %8.4f  [%7.4f %7.4f]  %+7.4f\n", runs[k].first.c_str(), median(ms[k]), v.empty() ? 0.0 : v[v.size() / 10],
+                    v.empty() ? 0.0 : v[v.size() * 9 / 10], median(ms[k]) - base);
+    }
+}
+
+// The out-of-place composite and its in-place twin, over the production layer (HUD panels), at both layer sizes.
+void benchGroupsComposite(Device& d) {
+    ID3D11Device* dev = d.dev.Get();
+    ID3D11DeviceContext* ctx = d.ctx.Get();
+    const int fw = 4032, fh = 4032;
+    struct LayerSize { int w, h; const char* name; };
+    static const LayerSize sizes[] = {{4032, 4032, "ui_quality 100"}, {5040, 5040, "ui_quality 125"}};
+    static const char kVs[] =
+        "float4 main(uint id : SV_VertexID) : SV_POSITION { float2 p = id == 0 ? float2(-1,-1) : (id == 1 ? float2(-1,3) : float2(3,-1)); return float4(p,0,1); }";
+    static const char kPs[] =
+        "float4 main(float4 p : SV_POSITION) : SV_Target { uint2 q = uint2(p.xy); bool ink = ((q.x >> 2) ^ (q.y >> 3)) % 5 == 0; return ink ? float4(0.9, 0.95, 1.0, 0.0) : float4(0.20, 0.35, 0.55, 0.35); }";
+    ComPtr<ID3D11VertexShader> vs;
+    ComPtr<ID3D11PixelShader> ps;
+    {
+        ComPtr<ID3DBlob> v = compileBlob(kVs, nullptr, "vs", "vs_5_0");
+        hr(dev->CreateVertexShader(v->GetBufferPointer(), v->GetBufferSize(), nullptr, &vs), "VS");
+        ComPtr<ID3DBlob> p = compileBlob(kPs, nullptr, "ps", "ps_5_0");
+        hr(dev->CreatePixelShader(p->GetBufferPointer(), p->GetBufferSize(), nullptr, &ps), "PS");
+    }
+    D3D11_RASTERIZER_DESC rd{};
+    rd.FillMode = D3D11_FILL_SOLID;
+    rd.CullMode = D3D11_CULL_NONE;
+    rd.DepthClipEnable = TRUE;
+    rd.ScissorEnable = TRUE;
+    ComPtr<ID3D11RasterizerState> rs;
+    hr(dev->CreateRasterizerState(&rd, &rs), "rasterizer state");
+    std::vector<uint8_t> frameData(static_cast<size_t>(fw) * fh * 4);
+    Rng rng(777);
+    for (auto& b : frameData) b = static_cast<uint8_t>(rng.next() >> 24);
+    auto frame = tex(dev, fw, fh, DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_BIND_SHADER_RESOURCE, frameData.data(), fw * 4);
+    auto frameV = srvOf(dev, frame.Get());
+    auto out = tex(dev, fw, fh, DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS, nullptr, 0);
+    auto outU = uavOf(dev, out.Get());
+    auto work = tex(dev, fw, fh, DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS, frameData.data(), fw * 4);
+    auto workU = uavOf(dev, work.Get());
+    for (const LayerSize& ls : sizes) {
+        auto layer = tex(dev, ls.w, ls.h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE, nullptr, 0);
+        auto layerV = srvOf(dev, layer.Get());
+        ComPtr<ID3D11RenderTargetView> rtv;
+        hr(dev->CreateRenderTargetView(layer.Get(), nullptr, &rtv), "layer RTV");
+        const FLOAT clear[4] = {0.f, 0.f, 0.f, 1.f};
+        ctx->ClearRenderTargetView(rtv.Get(), clear);
+        ID3D11RenderTargetView* r0 = rtv.Get();
+        ctx->OMSetRenderTargets(1, &r0, nullptr);
+        D3D11_VIEWPORT vp{0.f, 0.f, static_cast<float>(ls.w), static_cast<float>(ls.h), 0.f, 1.f};
+        ctx->RSSetViewports(1, &vp);
+        ctx->RSSetState(rs.Get());
+        ctx->VSSetShader(vs.Get(), nullptr, 0);
+        ctx->PSSetShader(ps.Get(), nullptr, 0);
+        ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        for (const auto& b : kHudBox) {
+            D3D11_RECT r{static_cast<LONG>(b[0] * ls.w), static_cast<LONG>(b[1] * ls.h), static_cast<LONG>(b[2] * ls.w), static_cast<LONG>(b[3] * ls.h)};
+            ctx->RSSetScissorRects(1, &r);
+            ctx->Draw(3, 0);
+        }
+        ctx->ClearState();
+        CompositeParams p{{0, 0, fw, fh}, {0.f, 0.f, 1.f, 1.f}, {static_cast<float>(ls.w), static_cast<float>(ls.h)},
+                          {static_cast<uint32_t>(fw), static_cast<uint32_t>(fh)}, 0, 0, {0, 0}};
+        D3D11_BUFFER_DESC bd{};
+        bd.ByteWidth = sizeof(p);
+        bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        D3D11_SUBRESOURCE_DATA pd{&p, 0, 0};
+        ComPtr<ID3D11Buffer> cb;
+        hr(dev->CreateBuffer(&bd, &pd, &cb), "cbuffer");
+
+        std::vector<std::pair<std::string, std::function<void()>>> runs;
+        std::vector<std::vector<uint8_t>> outOfPlaceBytes, inPlaceBytes;
+        std::vector<ComPtr<ID3D11ComputeShader>> keep;
+        for (int inPlace = 0; inPlace < 2; ++inPlace) {
+            for (const GroupShape& sh : kGroupShapes) {
+                // The in-place shader as built is 32x8; its baseline for the table is its own shape.
+                const char* attr = "[numthreads(32, 8, 1)]";   // both composites are 32x8 as built
+                const std::string src = reshapeShader(inPlace ? edvr::kUiLayerCompositeInPlaceHlsl : edvr::kUiLayerCompositeHlsl, attr,
+                                                      "void main(uint3 id : SV_DispatchThreadID) {", sh);
+                ComPtr<ID3D11ComputeShader> cs = shaderFromSource(dev, src.c_str(), nullptr, "reshaped composite");
+                keep.push_back(cs);
+                ID3D11ComputeShader* csp = cs.Get();
+                const GroupShape shc = sh;
+                auto run = [&, csp, shc, inPlace]() {
+                    ID3D11ShaderResourceView* srvs[3] = {inPlace ? nullptr : frameV.Get(), layerV.Get(), nullptr};
+                    ID3D11UnorderedAccessView* uav = inPlace ? workU.Get() : outU.Get();
+                    ID3D11Buffer* cbp = cb.Get();
+                    ctx->CSSetShader(csp, nullptr, 0);
+                    ctx->CSSetShaderResources(0, 3, srvs);
+                    ctx->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
+                    ctx->CSSetConstantBuffers(0, 1, &cbp);
+                    ctx->Dispatch(groupsFor(fw, shc, true), groupsFor(fh, shc, false), 1);
+                    ctx->ClearState();
+                };
+                // Exactness first: this shape's bytes against the first (8x8, out of place) shape's.
+                if (inPlace) ctx->UpdateSubresource(work.Get(), 0, nullptr, frameData.data(), static_cast<UINT>(fw * 4), 0);
+                run();
+                (inPlace ? inPlaceBytes : outOfPlaceBytes).push_back(readBytes(d, inPlace ? work.Get() : out.Get(), 4));
+                if (inPlace) ctx->UpdateSubresource(work.Get(), 0, nullptr, frameData.data(), static_cast<UINT>(fw * 4), 0);
+                char nm[160];
+                std::snprintf(nm, sizeof(nm), "%s, %s, layer %dx%d", inPlace ? "in place" : "out of place", sh.name, ls.w, ls.h);
+                const auto& ref = outOfPlaceBytes[0];
+                const auto& got = (inPlace ? inPlaceBytes : outOfPlaceBytes).back();
+                char what[220];
+                std::snprintf(what, sizeof(what), "composite %s: byte for byte the 8x8 out-of-place output", nm);
+                check(got == ref, what);
+                runs.push_back({nm, run});
+            }
+        }
+        char title[120];
+        std::snprintf(title, sizeof(title), "UI layer composite, frame %dx%d, %s (HUD panels)", fw, fh, ls.name);
+        printMedians(title, runs, d);
+    }
+}
+
+// RCAS, as sharpen_pass.cpp dispatches it: a clamped 3x3-cross read of the source, one thread a texel.
+void benchGroupsRcas(Device& d) {
+    ID3D11Device* dev = d.dev.Get();
+    ID3D11DeviceContext* ctx = d.ctx.Get();
+    struct RcasCb { uint32_t con[4]; int32_t region[4]; int32_t outSize[2]; int32_t pad0[2]; };
+    static_assert(sizeof(RcasCb) == 48, "the RCAS cbuffer is three rows");
+    struct Case { int w, h, rx, ry, rw, rh; const char* name; };
+    // The eye's size; and an odd region inside a larger texture, to hold the clamp at the region's edge for every shape.
+    static const Case cases[] = {{4032, 4032, 0, 0, 4032, 4032, "4032x4032 (the eye)"}, {4032, 3896, 0, 0, 4032, 3896, "4032x3896 (the carrier flight's eye)"},
+                                 {131, 67, 3, 2, 120, 60, "131x67 texture, region 120x60 at (3,2): the clamp at the region's edge"}};
+    for (const Case& c : cases) {
+        std::vector<uint8_t> data(static_cast<size_t>(c.w) * c.h * 4);
+        Rng rng(31337);
+        for (auto& b : data) b = static_cast<uint8_t>(rng.next() >> 24);
+        auto src = tex(dev, c.w, c.h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_BIND_SHADER_RESOURCE, data.data(), c.w * 4);
+        auto srcV = srvOf(dev, src.Get());
+        auto dst = tex(dev, c.rw, c.rh, DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS, nullptr, 0);
+        auto dstU = uavOf(dev, dst.Get());
+        RcasCb p{};
+        FsrRcasCon(reinterpret_cast<AU1*>(p.con), static_cast<AF1>(1.4f));   // fix.render_sharpness 0.3: 2 * (1 - 0.3) stops
+        p.region[0] = c.rx; p.region[1] = c.ry; p.region[2] = c.rx + c.rw; p.region[3] = c.ry + c.rh;
+        p.outSize[0] = c.rw; p.outSize[1] = c.rh;
+        D3D11_BUFFER_DESC bd{};
+        bd.ByteWidth = sizeof(p);
+        bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        D3D11_SUBRESOURCE_DATA pd{&p, 0, 0};
+        ComPtr<ID3D11Buffer> cb;
+        hr(dev->CreateBuffer(&bd, &pd, &cb), "cbuffer");
+        std::vector<std::pair<std::string, std::function<void()>>> runs;
+        std::vector<ComPtr<ID3D11ComputeShader>> keep;
+        std::vector<uint8_t> want;
+        for (const GroupShape& sh : kGroupShapes) {
+            const std::string text = reshapeShader(edvr::fixed_extra_source::sharpen_pass::kRcasSource, "[numthreads(16,16,1)]",
+                                                   "void main(uint3 id : SV_DispatchThreadID) {", sh);
+            ComPtr<ID3D11ComputeShader> cs = shaderFromSource(dev, text.c_str(), nullptr, "reshaped RCAS");
+            keep.push_back(cs);
+            ID3D11ComputeShader* csp = cs.Get();
+            const GroupShape shc = sh;
+            auto run = [&, csp, shc]() {
+                ID3D11ShaderResourceView* sv = srcV.Get();
+                ID3D11UnorderedAccessView* uav = dstU.Get();
+                ID3D11Buffer* cbp = cb.Get();
+                ctx->CSSetShader(csp, nullptr, 0);
+                ctx->CSSetShaderResources(0, 1, &sv);
+                ctx->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
+                ctx->CSSetConstantBuffers(0, 1, &cbp);
+                ctx->Dispatch(groupsFor(c.rw, shc, true), groupsFor(c.rh, shc, false), 1);
+                ctx->ClearState();
+            };
+            const FLOAT poison[4] = {1.f, 0.f, 1.f, 0.03f};
+            ctx->ClearUnorderedAccessViewFloat(dstU.Get(), poison);
+            run();
+            const std::vector<uint8_t> got = readBytes(d, dst.Get(), 4);
+            if (want.empty()) want = got;
+            char what[220];
+            std::snprintf(what, sizeof(what), "RCAS %s, %s: byte for byte the 8x8 output", c.name, sh.name);
+            check(got == want, what);
+            runs.push_back({sh.name, run});
+        }
+        char title[120];
+        std::snprintf(title, sizeof(title), "RCAS sharpen, %s", c.name);
+        printMedians(title, runs, d);
+    }
+}
+
+// The UI resolve, on the input grid (2016x1948 in, 4032x3896 out), with the carrier flight's bindings.
+void benchGroupsUiResolve(Device& d) {
+    ID3D11Device* dev = d.dev.Get();
+    ID3D11DeviceContext* ctx = d.ctx.Get();
+    const float tol = 12 / 255.f, hold = 64 / 255.f;
+    constexpr uint32_t kCover = 1u << 2, kHistory = 1u << 3, kEdits = 1u << 5;
+    (void)kCover; (void)kHistory;
+    struct Scene { Fix f; uint32_t unbind; const char* name; };
+    const std::vector<Scene> scenes = {
+        {{"idle, everything bound", 201, 2016, 1948, 4032, 3896, 0.25f, -0.4f, tol, hold, 3, 10, 3, 1, 0, 0, -1, 0}, 0, "idle, everything bound"},
+        {{"HUD (15% marked), edit mask unbound (a still HUD)", 202, 2016, 1948, 4032, 3896, 0.25f, -0.4f, tol, hold, 3, 9, 4, 1, 0, 0, -1, 0}, kEdits, "HUD, source-edit mask unbound"},
+    };
+    for (const Scene& scene : scenes) {
+        const Fix& f = scene.f;
+        const Inputs in = makeInputs(f);
+        Setup s;
+        makeSetup(d, f, in, Hist::RgbaA, s, scene.unbind);
+        std::vector<std::pair<std::string, std::function<void()>>> runs;
+        std::vector<ComPtr<ID3D11ComputeShader>> keep;
+        Result want;
+        bool haveWant = false;
+        for (const GroupShape& sh : kGroupShapes) {
+            const std::string text = reshapeShader(edvr::kUiResolve, "[numthreads(8,8,1)]", "void main(uint3 id:SV_DispatchThreadID){", sh);
+            ComPtr<ID3D11ComputeShader> cs = shaderFromSource(dev, text.c_str(), nullptr, "reshaped UI resolve");
+            keep.push_back(cs);
+            ID3D11ComputeShader* csp = cs.Get();
+            const GroupShape shc = sh;
+            auto run = [&, csp, shc]() {
+                bindAndClear(d, csp, s);
+                ctx->Dispatch(groupsFor(f.w, shc, true), groupsFor(f.h, shc, false), 1);
+                ctx->ClearState();
+            };
+            run();
+            const Result got = readback(d, s);
+            if (!haveWant) { want = got; haveWant = true; }
+            char what[220];
+            std::snprintf(what, sizeof(what), "UI resolve (%s), %s: byte for byte the 8x8 output and history", scene.name, sh.name);
+            check(compare(want, got).same(), what);
+            runs.push_back({sh.name, run});
+        }
+        char title[160];
+        std::snprintf(title, sizeof(title), "UI resolve, %dx%d in, %dx%d out, %s", f.w, f.h, f.ow, f.oh, scene.name);
+        printMedians(title, runs, d);
+    }
+}
+
+// The hologram resolve's near-light pass, as ui_depth.cpp dispatches it: one 8x8 block a group, one output texel a block
+// (the map is 1/8 resolution). A wider group keeps that: it holds several blocks, each with its own flag and its own texel.
+std::string nearLightShaped(int gx, int gy) {
+    std::string src = edvr_reference::kNearLightReference;   // one 8x8 block a group, as it ran before 2026-10-13
+    if (gx == 8 && gy == 8) return src;
+    const int bx = gx / 8, by = gy / 8, nb = bx * by;
+    auto swap = [&](const std::string& from, const std::string& to) {
+        const size_t at = src.find(from);
+        if (at == std::string::npos) { std::printf("FAIL: near-light anchor missing: %s\n", from.c_str()); std::exit(1); }
+        src.replace(at, from.size(), to);
+    };
+    char t[400];
+    std::snprintf(t, sizeof(t), "groupshared uint lightAny[%d];", nb);
+    swap("groupshared uint lightAny;", t);
+    std::snprintf(t, sizeof(t), "[numthreads(%d,%d,1)]", gx, gy);
+    swap("[numthreads(8,8,1)]", t);
+    std::snprintf(t, sizeof(t), "uint blk = (tid.y >> 3) * %du + (tid.x >> 3); uint2 loc = tid.xy & 7u; if (all(loc == uint2(0, 0))) lightAny[blk] = 0;", bx);
+    swap("if (all(tid.xy == uint2(0, 0))) lightAny = 0;", t);
+    swap("InterlockedOr(lightAny, 1u);", "InterlockedOr(lightAny[blk], 1u);");
+    std::snprintf(t, sizeof(t), "if (all(loc == uint2(0, 0))) NearLight[gid.xy * uint2(%du, %du) + uint2(blk %% %du, blk / %du)] = lightAny[blk] ? 1.0 : 0.0;", bx, by, bx, bx);
+    swap("if (all(tid.xy == uint2(0, 0))) NearLight[gid.xy] = lightAny ? 1.0 : 0.0;", t);
+    return src;
+}
+
+void benchGroupsNearLight(Device& d) {
+    ID3D11Device* dev = d.dev.Get();
+    ID3D11DeviceContext* ctx = d.ctx.Get();
+    const int w = 2016, h = 1948;
+    Rng rng(5150);
+    std::vector<uint16_t> contrib(static_cast<size_t>(w) * h * 4, 0);
+    std::vector<float> depth(static_cast<size_t>(w) * h, 0.f);
+    // Three elements an eye (the flight's count), straddling block edges.
+    static const int rects[3][4] = {{301, 205, 477, 351}, {1203, 899, 1259, 925}, {1660, 1500, 1789, 1545}};
+    static const uint16_t halves[3] = {0x0000, 0x34CD, 0x3800};
+    for (const auto& r : rects)
+        for (int y = r[1]; y < r[3]; ++y)
+            for (int x = r[0]; x < r[2]; ++x) {
+                depth[static_cast<size_t>(y) * w + x] = 0.9f;
+                for (int c = 0; c < 3; ++c) contrib[(static_cast<size_t>(y) * w + x) * 4 + c] = halves[(rng.next() >> 20) % 3];
+            }
+    std::vector<uint8_t> targetData(static_cast<size_t>(w) * h * 4), displayData(static_cast<size_t>(w) * h * 4);
+    for (auto& b : targetData) b = static_cast<uint8_t>(rng.next() >> 24);
+    for (auto& b : displayData) b = static_cast<uint8_t>(rng.next() >> 24);
+    auto tContrib = tex(dev, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D11_BIND_SHADER_RESOURCE, contrib.data(), w * 8);
+    auto tDepth = tex(dev, w, h, DXGI_FORMAT_R32_FLOAT, D3D11_BIND_SHADER_RESOURCE, depth.data(), w * 4);
+    auto tTarget = tex(dev, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_BIND_SHADER_RESOURCE, targetData.data(), w * 4);
+    auto tDisplay = tex(dev, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_BIND_SHADER_RESOURCE, displayData.data(), w * 4);
+    auto tOut = tex(dev, (w + 7) / 8, (h + 7) / 8, DXGI_FORMAT_R8_UNORM, D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE, nullptr, 0);
+    ComPtr<ID3D11ShaderResourceView> sv[4] = {srvOf(dev, tContrib.Get()), srvOf(dev, tDepth.Get()), srvOf(dev, tTarget.Get()), srvOf(dev, tDisplay.Get())};
+    auto outU = uavOf(dev, tOut.Get());
+    struct Cb { float floorValue, share; uint32_t flags; float radiusDepth, fillerDepth, p0, p1, p2; } cbData{0.5f, 0.5f, 2u | 4u, 0.f, 0.f, 0, 0, 0};
+    D3D11_BUFFER_DESC bd{};
+    bd.ByteWidth = sizeof(cbData);
+    bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    D3D11_SUBRESOURCE_DATA pd{&cbData, 0, 0};
+    ComPtr<ID3D11Buffer> cb;
+    hr(dev->CreateBuffer(&bd, &pd, &cb), "cbuffer");
+    struct Shape { int gx, gy; const char* name; };
+    static const Shape shapes[] = {{8, 8, "8x8 (the shader as it is), one block a group"}, {16, 8, "16x8, two blocks a group"}, {32, 8, "32x8, four blocks a group"},
+                                   {16, 16, "16x16, four blocks a group"}, {32, 16, "32x16, eight blocks a group"}};
+    std::vector<std::pair<std::string, std::function<void()>>> runs;
+    std::vector<ComPtr<ID3D11ComputeShader>> keep;
+    std::vector<uint8_t> want;
+    for (const Shape& sh : shapes) {
+        const std::string text = nearLightShaped(sh.gx, sh.gy);
+        ComPtr<ID3D11ComputeShader> cs = shaderFromSource(dev, text.c_str(), nullptr, "near-light");
+        keep.push_back(cs);
+        ID3D11ComputeShader* csp = cs.Get();
+        const Shape shc = sh;
+        auto run = [&, csp, shc]() {
+            ID3D11ShaderResourceView* in[4] = {sv[0].Get(), sv[1].Get(), sv[2].Get(), sv[3].Get()};
+            ID3D11UnorderedAccessView* uav = outU.Get();
+            ID3D11Buffer* cbp = cb.Get();
+            ctx->CSSetShader(csp, nullptr, 0);
+            ctx->CSSetShaderResources(0, 4, in);
+            ctx->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
+            ctx->CSSetConstantBuffers(0, 1, &cbp);
+            ctx->Dispatch(static_cast<UINT>((w + shc.gx - 1) / shc.gx), static_cast<UINT>((h + shc.gy - 1) / shc.gy), 1);
+            ctx->ClearState();
+        };
+        const FLOAT poison[4] = {0.5f, 0, 0, 0};
+        ctx->ClearUnorderedAccessViewFloat(outU.Get(), poison);
+        run();
+        const std::vector<uint8_t> got = readBytes(d, tOut.Get(), 1);
+        if (want.empty()) {
+            want = got;
+            size_t lit = 0;
+            for (uint8_t b : got) lit += b == 255;
+            check(lit > 0 && lit < got.size() / 4, "near-light bench: the map has lit blocks and dark ones (the equality below is not vacuous)");
+        }
+        char what[200];
+        std::snprintf(what, sizeof(what), "near-light %s: byte for byte the 8x8 map", sh.name);
+        check(got == want, what);
+        runs.push_back({sh.name, run});
+    }
+    printMedians("hologram resolve near-light compute, 2016x1948, 3 elements an eye", runs, d);
+}
+
+// The group-shape changes of 2026-10-13, held to the shaders as they were: the production bytecode (RCAS at 16x16, the near-light
+// pass at four blocks a group) against the old shape of the same text, byte for byte, on odd sizes and offset regions; and a
+// mutant of each that must fail, so a green run cannot be vacuous.
+void testGroupShapes(Device& d) {
+    ID3D11Device* dev = d.dev.Get();
+    ID3D11DeviceContext* ctx = d.ctx.Get();
+    const GroupShape oldShape{8, 8, 1, 1, "8x8"};
+
+    // ---- RCAS
+    {
+        const std::string& text = edvr::fixed_extra_source::sharpen_pass::kRcasSource;
+        ComPtr<ID3DBlob> code = compileBlob(text.c_str(), nullptr, "render_sharpen_cs");
+        check(code->GetBufferSize() == sizeof(edvr::kSharpenBytecode) &&
+                  !std::memcmp(code->GetBufferPointer(), edvr::kSharpenBytecode, sizeof(edvr::kSharpenBytecode)),
+              "the RCAS bytecode header is current: kRcasSource compiled, byte for byte");
+        ComPtr<ID3D11ComputeShader> prod = shaderFromBytecode(dev, edvr::kSharpenBytecode, sizeof(edvr::kSharpenBytecode));
+        const char* attr = "[numthreads(16,16,1)]";
+        const char* sig = "void main(uint3 id : SV_DispatchThreadID) {";
+        ComPtr<ID3D11ComputeShader> old = shaderFromSource(dev, reshapeShader(text, attr, sig, oldShape).c_str(), nullptr, "RCAS at 8x8");
+        struct Mut { const char* name; const char* from; const char* to; };
+        static const Mut muts[] = {
+            {"clamps to the texture, not the region", "clamp(int2(p), region.xy, region.zw - 1)", "clamp(int2(p), int2(0, 0), int2(100000, 100000))"},
+            {"drops the alpha the source carried", "Src.Load(int3(ip, 0)).a", "1.0"},
+            {"leaves the last row and column to nobody", "id.x >= (uint)outSize.x || id.y >= (uint)outSize.y", "id.x + 1 >= (uint)outSize.x || id.y + 1 >= (uint)outSize.y"},
+        };
+        ComPtr<ID3D11ComputeShader> mutCs[std::size(muts)];
+        for (size_t i = 0; i < std::size(muts); ++i) {
+            std::string m = text;
+            const size_t at = m.find(muts[i].from);
+            if (at == std::string::npos) { std::printf("FAIL: RCAS mutant anchor missing: %s\n", muts[i].name); std::exit(1); }
+            m.replace(at, std::strlen(muts[i].from), muts[i].to);
+            mutCs[i] = shaderFromSource(dev, m.c_str(), nullptr, muts[i].name);
+        }
+        struct RcasCb { uint32_t con[4]; int32_t region[4]; int32_t outSize[2]; int32_t pad0[2]; };
+        struct Case { int w, h, rx, ry, rw, rh; float stops; };
+        static const Case cases[] = {
+            {61, 47, 0, 0, 61, 47, 1.4f}, {131, 67, 3, 2, 120, 60, 1.4f}, {17, 9, 0, 0, 17, 9, 0.4f}, {256, 256, 0, 0, 256, 256, 1.4f},
+            {33, 31, 1, 1, 32, 30, 0.4f}, {16, 16, 0, 0, 16, 16, 1.4f}, {15, 17, 0, 0, 15, 17, 1.0f}, {300, 20, 40, 3, 200, 14, 1.4f},
+        };
+        size_t caught[std::size(muts)] = {}, texels = 0;
+        for (const Case& c : cases) {
+            Rng rng(0xBEEFu + static_cast<uint32_t>(c.w * 7 + c.h));
+            std::vector<uint8_t> data(static_cast<size_t>(c.w) * c.h * 4);
+            for (auto& b : data) b = static_cast<uint8_t>(rng.next() >> 24);
+            auto src = tex(dev, c.w, c.h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_BIND_SHADER_RESOURCE, data.data(), c.w * 4);
+            auto srcV = srvOf(dev, src.Get());
+            RcasCb p{};
+            FsrRcasCon(reinterpret_cast<AU1*>(p.con), static_cast<AF1>(c.stops));
+            p.region[0] = c.rx; p.region[1] = c.ry; p.region[2] = c.rx + c.rw; p.region[3] = c.ry + c.rh;
+            p.outSize[0] = c.rw; p.outSize[1] = c.rh;
+            D3D11_BUFFER_DESC bd{};
+            bd.ByteWidth = sizeof(p);
+            bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+            D3D11_SUBRESOURCE_DATA pd{&p, 0, 0};
+            ComPtr<ID3D11Buffer> cb;
+            hr(dev->CreateBuffer(&bd, &pd, &cb), "cbuffer");
+            auto runOne = [&](ID3D11ComputeShader* cs, int gx, int gy) {
+                auto dst = tex(dev, c.rw, c.rh, DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS, nullptr, 0);
+                auto dstU = uavOf(dev, dst.Get());
+                const FLOAT poison[4] = {1.f, 0.f, 1.f, 0.03f};
+                ctx->ClearUnorderedAccessViewFloat(dstU.Get(), poison);
+                ID3D11ShaderResourceView* sv = srcV.Get();
+                ID3D11UnorderedAccessView* uav = dstU.Get();
+                ID3D11Buffer* cbp = cb.Get();
+                ctx->CSSetShader(cs, nullptr, 0);
+                ctx->CSSetShaderResources(0, 1, &sv);
+                ctx->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
+                ctx->CSSetConstantBuffers(0, 1, &cbp);
+                ctx->Dispatch(static_cast<UINT>((c.rw + gx - 1) / gx), static_cast<UINT>((c.rh + gy - 1) / gy), 1);
+                ctx->ClearState();
+                return readBytes(d, dst.Get(), 4);
+            };
+            const std::vector<uint8_t> want = runOne(old.Get(), 8, 8);
+            const std::vector<uint8_t> got = runOne(prod.Get(), 16, 16);
+            char what[200];
+            std::snprintf(what, sizeof(what), "RCAS %dx%d, region %dx%d at (%d,%d), %.1f stops: the 16x16 shader is the 8x8 shader, byte for byte", c.w, c.h, c.rw, c.rh, c.rx, c.ry, static_cast<double>(c.stops));
+            check(got == want, what);
+            texels += got.size() / 4;
+            for (size_t i = 0; i < std::size(muts); ++i)
+                if (runOne(mutCs[i].Get(), 16, 16) != want) ++caught[i];
+        }
+        for (size_t i = 0; i < std::size(muts); ++i) {
+            char what[200];
+            std::snprintf(what, sizeof(what), "CONTROL: an RCAS shader that %s is caught (%zu of %zu cases differ)", muts[i].name, caught[i], std::size(cases));
+            check(caught[i] >= 1, what);
+        }
+        std::printf("RCAS 16x16 against 8x8: %zu cases, %zu texels\n", std::size(cases), texels);
+    }
+
+    // ---- the near-light pass
+    {
+        ComPtr<ID3DBlob> code = compileBlob(edvr::kHoloNearLightCsHlsl, nullptr, "ui_depth_holo_near_light_cs");
+        check(code->GetBufferSize() == sizeof(edvr::kUiHoloNearLightBytecode) &&
+                  !std::memcmp(code->GetBufferPointer(), edvr::kUiHoloNearLightBytecode, sizeof(edvr::kUiHoloNearLightBytecode)),
+              "the near-light bytecode header is current: kHoloNearLightCsHlsl compiled, byte for byte");
+        ComPtr<ID3D11ComputeShader> prod = shaderFromBytecode(dev, edvr::kUiHoloNearLightBytecode, sizeof(edvr::kUiHoloNearLightBytecode));
+        ComPtr<ID3D11ComputeShader> old = shaderFromSource(dev, edvr_reference::kNearLightReference, nullptr, "near-light, one block a group");
+        struct Mut { const char* name; const char* from; const char* to; };
+        static const Mut muts[] = {
+            {"gives every block in a group the one flag", "uint blk = (tid.y >> 3) * 2u + (tid.x >> 3);", "uint blk = 0u;"},
+            {"writes each group's texel unscaled", "NearLight[gid.xy * 2u + uint2(blk & 1u, blk >> 1u)]", "NearLight[gid.xy]"},
+            {"swaps the blocks' rows and columns", "NearLight[gid.xy * 2u + uint2(blk & 1u, blk >> 1u)]", "NearLight[gid.xy * 2u + uint2(blk >> 1u, blk & 1u)]"},
+        };
+        ComPtr<ID3D11ComputeShader> mutCs[std::size(muts)];
+        for (size_t i = 0; i < std::size(muts); ++i) {
+            std::string m = edvr::kHoloNearLightCsHlsl;
+            const size_t at = m.find(muts[i].from);
+            if (at == std::string::npos) { std::printf("FAIL: near-light mutant anchor missing: %s\n", muts[i].name); std::exit(1); }
+            m.replace(at, std::strlen(muts[i].from), muts[i].to);
+            mutCs[i] = shaderFromSource(dev, m.c_str(), nullptr, muts[i].name);
+        }
+        struct Case { int w, h; uint32_t flags; };
+        // Odd counts of 8x8 blocks (200 = 25 blocks, 136 = 17) leave the last group's far half past the map; flags run the
+        // linear blend, the target's share test, the display floor and its sRGB decode.
+        static const Case cases[] = {
+            {200, 136, 2u | 4u}, {197, 131, 4u}, {200, 136, 1u}, {128, 96, 2u | 4u | 8u}, {64, 64, 0u}, {9, 9, 2u | 4u}, {16, 16, 4u | 8u}, {2016, 1948, 2u | 4u},
+        };
+        size_t caught[std::size(muts)] = {}, blocks = 0, lit = 0;
+        for (const Case& c : cases) {
+            Rng rng(0x51CEu + static_cast<uint32_t>(c.w * 3 + c.h));
+            std::vector<uint16_t> contrib(static_cast<size_t>(c.w) * c.h * 4, 0);
+            std::vector<float> depth(static_cast<size_t>(c.w) * c.h, 0.f);
+            static const uint16_t halves[4] = {0x0000, 0x34CD, 0x3800, 0x3B33};
+            for (size_t i = 0; i < depth.size(); ++i)
+                if ((rng.next() >> 8) % 150u == 0u) {
+                    depth[i] = 0.9f;
+                    for (int ch = 0; ch < 3; ++ch) contrib[i * 4 + ch] = halves[(rng.next() >> 20) % 4];
+                }
+            std::vector<uint8_t> targetData(static_cast<size_t>(c.w) * c.h * 4), displayData(static_cast<size_t>(c.w) * c.h * 4);
+            for (auto& b : targetData) b = static_cast<uint8_t>(rng.next() >> 24);
+            for (auto& b : displayData) b = static_cast<uint8_t>(rng.next() >> 24);
+            auto tContrib = tex(dev, c.w, c.h, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D11_BIND_SHADER_RESOURCE, contrib.data(), c.w * 8);
+            auto tDepth = tex(dev, c.w, c.h, DXGI_FORMAT_R32_FLOAT, D3D11_BIND_SHADER_RESOURCE, depth.data(), c.w * 4);
+            auto tTarget = tex(dev, c.w, c.h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_BIND_SHADER_RESOURCE, targetData.data(), c.w * 4);
+            auto tDisplay = tex(dev, c.w, c.h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_BIND_SHADER_RESOURCE, displayData.data(), c.w * 4);
+            const int mw = (c.w + 7) / 8, mh = (c.h + 7) / 8;
+            ComPtr<ID3D11ShaderResourceView> sv[4] = {srvOf(dev, tContrib.Get()), srvOf(dev, tDepth.Get()), srvOf(dev, tTarget.Get()), srvOf(dev, tDisplay.Get())};
+            struct Cb { float floorValue, share; uint32_t flags; float radiusDepth, fillerDepth, p0, p1, p2; } cbData{0.5f, 0.5f, c.flags, 0.f, 0.f, 0, 0, 0};
+            D3D11_BUFFER_DESC bd{};
+            bd.ByteWidth = sizeof(cbData);
+            bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+            D3D11_SUBRESOURCE_DATA pd{&cbData, 0, 0};
+            ComPtr<ID3D11Buffer> cb;
+            hr(dev->CreateBuffer(&bd, &pd, &cb), "cbuffer");
+            auto runOne = [&](ID3D11ComputeShader* cs, int gx, int gy) {
+                auto out = tex(dev, mw, mh, DXGI_FORMAT_R8_UNORM, D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE, nullptr, 0);
+                auto outU = uavOf(dev, out.Get());
+                const FLOAT poison[4] = {0.5f, 0, 0, 0};
+                ctx->ClearUnorderedAccessViewFloat(outU.Get(), poison);
+                ID3D11ShaderResourceView* in[4] = {sv[0].Get(), sv[1].Get(), sv[2].Get(), sv[3].Get()};
+                ID3D11UnorderedAccessView* uav = outU.Get();
+                ID3D11Buffer* cbp = cb.Get();
+                ctx->CSSetShader(cs, nullptr, 0);
+                ctx->CSSetShaderResources(0, 4, in);
+                ctx->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
+                ctx->CSSetConstantBuffers(0, 1, &cbp);
+                ctx->Dispatch(static_cast<UINT>((c.w + gx - 1) / gx), static_cast<UINT>((c.h + gy - 1) / gy), 1);
+                ctx->ClearState();
+                return readBytes(d, out.Get(), 1);
+            };
+            const std::vector<uint8_t> want = runOne(old.Get(), 8, 8);
+            const std::vector<uint8_t> got = runOne(prod.Get(), 16, 16);
+            char what[200];
+            std::snprintf(what, sizeof(what), "near-light %dx%d, flags %u: four blocks a group is one block a group, byte for byte (%zu blocks)", c.w, c.h, c.flags, want.size());
+            check(got == want, what);
+            blocks += want.size();
+            for (uint8_t b : want) lit += b == 255;
+            for (size_t i = 0; i < std::size(muts); ++i)
+                if (runOne(mutCs[i].Get(), 16, 16) != want) ++caught[i];
+        }
+        check(lit > 0 && lit * 2 < blocks, "the near-light fixtures hold lit blocks and dark ones (the equality is not vacuous)");
+        for (size_t i = 0; i < std::size(muts); ++i) {
+            char what[200];
+            std::snprintf(what, sizeof(what), "CONTROL: a near-light shader that %s is caught (%zu of %zu cases differ)", muts[i].name, caught[i], std::size(cases));
+            check(caught[i] >= 1, what);
+        }
+        std::printf("near-light four blocks a group against one: %zu cases, %zu blocks, %zu lit\n", std::size(cases), blocks, lit);
+    }
+}
+
+void runGroupBench(Device& d) {
+    if (d.warp) std::puts("note: --bench-groups on WARP times a CPU; use --adapter nvidia.");
+    benchGroupsComposite(d);
+    benchGroupsRcas(d);
+    benchGroupsUiResolve(d);
+    benchGroupsNearLight(d);
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
-    bool selfTest = false, dry = false, print = false, nvidia = false, stats = false, bench = false, benchComposite = false;
+    bool selfTest = false, dry = false, print = false, nvidia = false, stats = false, bench = false, benchComposite = false, benchGroups = false;
     int fuzz = 240;
     const char* usage =
-        "usage: ui_holo_pass_test --self-test|--dry-run|--print-goldens|--stats|--bench|--bench-composite [--fuzz N] [--adapter nvidia]";
+        "usage: ui_holo_pass_test --self-test|--dry-run|--print-goldens|--stats|--bench|--bench-composite|--bench-groups [--fuzz N] [--adapter nvidia]";
     for (int i = 1; i < argc; ++i) {
         if (!std::strcmp(argv[i], "--self-test")) selfTest = true;
         else if (!std::strcmp(argv[i], "--dry-run")) dry = true;
@@ -1069,6 +2076,7 @@ int main(int argc, char** argv) {
         else if (!std::strcmp(argv[i], "--stats")) stats = true;
         else if (!std::strcmp(argv[i], "--bench")) bench = true;
         else if (!std::strcmp(argv[i], "--bench-composite")) benchComposite = true;
+        else if (!std::strcmp(argv[i], "--bench-groups")) benchGroups = true;
         else if (!std::strcmp(argv[i], "--fuzz") && i + 1 < argc) fuzz = std::max(0, std::atoi(argv[++i]));
         else if (!std::strcmp(argv[i], "--adapter") && i + 1 < argc && !std::strcmp(argv[i + 1], "nvidia")) { nvidia = true; ++i; }
         else { std::puts(usage); return 2; }
@@ -1077,10 +2085,15 @@ int main(int argc, char** argv) {
         std::puts("Would compare the production UI resolve against its frozen reference on WARP, byte for byte, over the fixtures and fuzz cases; writes no files.");
         return 0;
     }
-    if (!selfTest && !print && !stats && !bench && !benchComposite) { std::puts(usage); return 2; }
+    if (!selfTest && !print && !stats && !bench && !benchComposite && !benchGroups) { std::puts(usage); return 2; }
 
-    Device d = makeDevice(nvidia);
+    Device d = makeDevice(nvidia, !benchComposite && !benchGroups);   // the bench times the GPU; the debug layer would time the CPU
     ID3D11Device* dev = d.dev.Get();
+    if (benchGroups) {
+        runGroupBench(d);
+        if (g_failures) { std::printf("FAILED: %d of %d checks\n", g_failures, g_checks); return 1; }
+        return 0;
+    }
     if (benchComposite) {
         runCompositeBench(d);
         if (g_failures) { std::printf("FAILED: %d of %d checks\n", g_failures, g_checks); return 1; }
@@ -1233,6 +2246,8 @@ int main(int argc, char** argv) {
         check(failSafeRuns >= 20, "the fail-safe control ran 20 or more times");
         check(wrongFlagRuns > 0 && wrongFlagDiverged * 2 >= wrongFlagRuns, "CONTROL: claiming bound inputs unbound fails at least half the fixtures that have content");
         check(fuzz == 0 || fuzzChanged * 5 >= fuzzRuns * 3, "the fuzz cases change pixels (not vacuous)");
+        testCompositeInPlace(d);
+        testGroupShapes(d);
         if (d.info) {
             const UINT64 n = d.info->GetNumStoredMessagesAllowedByRetrievalFilter();
             UINT64 errors = 0;

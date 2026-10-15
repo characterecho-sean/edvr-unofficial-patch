@@ -27,6 +27,8 @@
 // in an ordinary VR flight this stays armed and the instrument costs what it
 // always did. What it buys is that the cost now has the same lifetime as the
 // only line that reports it.
+#include "map_wait_sample.h"  // one Map in kMapWaitSampleRate is timed (2026-10-13)
+
 #include <atomic>
 #include <cstdint>
 #include <d3d11.h>
@@ -81,13 +83,24 @@ inline uint64_t mapWaitFrequency() {
 }
 }  // namespace detail
 
-// mapWaitNote's whole body (map_wait.cpp originally): three relaxed
-// fetch_adds, the slow-call test and the CAS loop for the longest tick.
-// Called once per Map, behind mapWaitArmed(), so this is the cost past the
-// QPC pair -- inline atomics and one inline frequency read, no cross-TU call.
-inline void mapWaitNote(D3D11_MAP type, uint64_t ticks) {
+// Every armed Map is counted here, exactly: the call counts are never sampled (2026-10-13).
+inline void mapWaitCall(D3D11_MAP type) {
     const bool read = type == D3D11_MAP_READ || type == D3D11_MAP_READ_WRITE;
     (read ? detail::g_readCalls : detail::g_writeCalls).fetch_add(1, std::memory_order_relaxed);
+}
+
+// The per-thread sampler's counter (map_wait_sample.h): one Map in kMapWaitSampleRate is timed, and its ticks and
+// slow calls are scaled by the rate when mapWaitTake reports them.
+inline uint32_t& mapWaitSampleSeq() {
+    static thread_local uint32_t seq = 0;
+    return seq;
+}
+
+// mapWaitNote for a SAMPLED Map (originally map_wait.cpp): the ticks, the slow-call test and the CAS loop for the
+// longest tick. Called only for the sampled one in kMapWaitSampleRate, behind mapWaitArmed(); inline atomics and one
+// inline frequency read, no cross-TU call.
+inline void mapWaitNote(D3D11_MAP type, uint64_t ticks) {
+    const bool read = type == D3D11_MAP_READ || type == D3D11_MAP_READ_WRITE;
     (read ? detail::g_readTicks : detail::g_writeTicks).fetch_add(ticks, std::memory_order_relaxed);
     if (ticks * 10000u > detail::mapWaitFrequency()) detail::g_slowCalls.fetch_add(1, std::memory_order_relaxed);   // past 100 us
     uint64_t longest = detail::g_longestTicks.load(std::memory_order_relaxed);

@@ -2,6 +2,7 @@
 #include "ui_layer.h"
 #include "gpu_timing.h"
 #include "gpu_frame_timing.h"
+#include "gpu_census.h"   // gpuCensusFrameWorkOpen/End: the frame's GPU work span's door end (2026-10-14)
 #include "native_timing.h"
 #include "../common/native_present_trace.h"
 
@@ -37,11 +38,13 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "../common/runtime_profile.h"
 #include "../common/eye_sync.h"
 #include "../common/frame_flag.h"
+#include "hmd_reset_press.h"   // hmdResetPressFrame: the players HMD recentre key, watched for the seat memory
+#include "../common/seat_context.h"   // seatContextPublish: the seat memory's word for the runtime
 #include "../common/guard.h"
 #include "../common/hotkey.h"
 #include "fss_res.h"
 #include "journal_watch.h"
-#include "optimized_station.h"   // fix.optimized_station: the sealed-hangar station (install, the frame tick, the store and the sun skip)
+#include "optimized_station.h"   // fix.optimized_stations: the sealed-hangar station (install, the frame tick, the store and the sun skip)
 #include "explorer_cam.h"   // explorerCamFrameBoundary (the frame tick) and explorerCamShutdown (the avatar dither-fade global goes back at an unload)
 #include "ui_surfaces.h"   // the glyph atlas and sizing chain instruments
 #include "ui_panel_scale.h" // uiPanelScaleShutdown: the panel operands put back
@@ -77,11 +80,16 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "flat_hdr_crumbs.h"   // the flat HDR route's crash-safe breadcrumbs: the real Present's pair
 #include "format_support_log.h"   // the device capability log: the two hooks' reports and its closing tick
 #include "flat_temporal.h"   // flat profile discovery at owned Present
+#include "aa_compare.h"      // the AA comparison key's tick (hotkey.compare_aa)
+#include "intro_skip.h"      // the flat profile arms and closes the launch-movie skip from here (vScreen's State is not its owner there)
 #include "flat_shader_capture.h"
 #include "perf_monitor.h"
+#include "gpu_pass_profile.h"   // TEMPORARY hotkey.gpu_pass_profile: the GPU pass profiler's request
+#include "blend_probe.h"       // TEMPORARY hotkey.blend_probe: the blend probe's install and request
 #include "stall_watch.h"     // stallWatchBeat: the stall sampler's heartbeat, once per owned Present
 #include "vram_tick.h"       // vramWatchTick: the graphics memory watch, once per owned Present
 #include "vertex_resync_hook.h"   // vertexResyncInstall at startup, vertexResyncPoll once a second: the f3d vertex-buffer cache repair (both profiles)
+#include "light_grid_cache_hook.h"   // lightGridCacheInstall at startup, lightGridCachePoll once a second, lightGridCacheNoteFrame per Present: the fragment-culling grid cache (both profiles)
 #include "terrain_cull_cover_hook.h"   // terrainCullCoverInstall at startup, terrainCullCoverPoll once a second: the terrain cull frustum cover (VR)
 #include "cross_profile_cost.h"   // the flat hooks' and the creation captures' cost while VR is active (log only)
 #include "frame_ticks.h"     // g_frameTicks: what the Present hook's own work cost, by name
@@ -258,18 +266,19 @@ struct State {
     PFN_CreateSwapChain        realCreateSwapChain = nullptr;
     PFN_CreateSwapChainForHwnd realCreateSwapChainForHwnd = nullptr;
 
-    Hotkey toggleKey;
     Hotkey dumpKey;
     // The draw census key (issue 69074 instrumentation). Unbound by default;
     // the census costs nothing until this is both bound and pressed.
     Hotkey censusKey;
+    Hotkey gpuPassKey;   // TEMPORARY (GPU pass profile, 2026-10-12): hotkey.gpu_pass_profile, default unbound
+    Hotkey blendProbeKey;   // TEMPORARY (blend probe, 2026-10-14): hotkey.blend_probe, default unbound
     // The eye dump key: both eyes as the headset receives them, to
     // edvr_logs\eyes as BMP (temporalPassArmEyeDump). Unbound by default.
     Hotkey eyesKey;
-    // What each of those four was last bound from (the ini text), so a reload
+    // What each of those three was last bound from (the ini text), so a reload
     // that changes one re-resolves it and one that does not says nothing: the
     // settings menu's Hotkeys page writes them while the game runs.
-    std::string toggleKeyText, dumpKeyText, censusKeyText, eyesKeyText;
+    std::string dumpKeyText, censusKeyText, eyesKeyText, gpuPassKeyText, blendProbeKeyText;
     bool        diagnosticKeysBound = false;
     // The player's own FSS enter/quit keys, adopted from their Elite
     // bindings; they give the FSS mode latch its frame-exact edges.
@@ -1199,9 +1208,7 @@ HRESULT STDMETHODCALLTYPE hookedFlatResizeBuffers1(IDXGISwapChain3* self, UINT c
 // falls together.
 //   vtable_watch      the re-arm and the frame tick are one instrument; the tick
 //                     publishes the frame number the re-arm is judged against.
-//   toggle_key        the exposure fix's own key, apart from the diagnostic keys
-//                     below it: a probe's dump must not take the fix's switch along.
-//   hotkeys           the diagnostic keys (history, census, eye dump), their
+//   hotkeys          the diagnostic keys (history, census, eye dump), their
 //                     missed-press notes and the delayed dump: one instrument.
 //   config_refresh    the reload and the settings derived from what it re-read.
 //   hook_reclaim      three detection-only passes over the device, swapchain and
@@ -1224,8 +1231,10 @@ EDVR_BOUNDARY_TICK(tkSchedulerProbe, "scheduler_probe");
 EDVR_BOUNDARY_TICK(tkVtableWatch, "vtable_watch");
 EDVR_BOUNDARY_TICK(tkVrRuntime, "vr_runtime");
 EDVR_BOUNDARY_TICK(tkOptimizedStation, "optimized_station");
-EDVR_BOUNDARY_TICK(tkToggleKey, "toggle_key");
+EDVR_BOUNDARY_TICK(tkLightGridCache, "light_grid_cache");
 EDVR_BOUNDARY_TICK(tkHotkeys, "hotkeys");
+EDVR_BOUNDARY_TICK(tkAaCompare, "aa_compare");   // hotkey.compare_aa: the AA comparison toggle (aa_compare.h); one key poll when idle
+EDVR_BOUNDARY_TICK(tkIntroSkipFlat, "intro_skip_flat");   // the flat profile's verdict for fix.intro_video = skip (intro_skip.h); one load outside flat
 EDVR_BOUNDARY_TICK(tkEliteBinds, "elite_binds");
 EDVR_BOUNDARY_TICK(tkJournalWatch, "journal_watch");
 EDVR_BOUNDARY_TICK(tkCelestialStatus, "celestial_status");
@@ -1250,24 +1259,41 @@ EDVR_BOUNDARY_TICK(tkFormatSupport, "format_support");
 
 void configureDiagnosticHotkeys();   // defined beside ensureState
 
+// What the camera-history key writes: the temporal pass's history of the
+// camera rows it was handed (temporalPassDumpHistory prints the TEMP and TCAM
+// rows). The first line says what follows and how to tell whether the
+// transition-flash fix held a frame near the moment, because that is the
+// question the key is pressed to answer.
+void dumpCameraHistory(const char* trigger) {
+    Log::get().note(
+        "camera history dump (%s): the temporal pass's recent camera submissions follow, one TEMP "
+        "line per eye call and a TCAM line with the camera rows it saw. The transition flash fix is %s. "
+        "Every frame it holds is logged as 'transition flash: frame N held'; no such line near the "
+        "moment you reacted to means it did not hold one.",
+        trigger,
+        transitionFlashEyeBaseArmed()
+            ? "armed"
+            : "NOT armed (the log says why near its start), so it holds no frame");
+    temporalPassDumpHistory(trigger);
+}
+
 // The diagnostic keys (tkHotkeys). The exposure toggle is its own tick.
 void tickHotkeys() {
     // The history key dumps TWICE: now, and again two seconds from now.
     //
     // A flash you react to sits about 300 ms back, which is the last few
-    // rows of a ring that holds only what came BEFORE the press. And a bad
-    // frame is one that leaves the line and RETURNS -- a shape that needs
-    // frames on both sides of it, which an event at the ring's edge does
+    // rows of a history that holds only what came BEFORE the press. And a
+    // bad frame is one that leaves the line and RETURNS -- a shape that needs
+    // frames on both sides of it, which an event at the history's edge does
     // not have. So the one capture that is guaranteed to contain the thing
     // being chased is also the one least able to show it.
     //
-    // The second dump costs one more press of nothing: same ring, two
+    // The second dump costs one more press of nothing: same history, two
     // seconds later, by which time the event has moved to the middle with
     // its recovery behind it. The pair is the point -- the first is the
     // reaction-time capture, the second is the one you read.
     if (g_state->dumpKey.pressed()) {
-        dumpCameraRing("the history key");
-        temporalPassDumpHistory("the history key");
+        dumpCameraHistory("the history key");
         g_state->dumpDueMs = nowMs() + kDumpDelayMs;
     }
     // THE PRESS THAT WENT NOWHERE, said out loud.
@@ -1299,9 +1325,7 @@ void tickHotkeys() {
     // The delayed dump, armed by the history key.
     if (g_state->dumpDueMs != 0 && nowMs() >= g_state->dumpDueMs) {
         g_state->dumpDueMs = 0;
-        dumpCameraRing("a key you pressed two seconds ago",
-                       (uint32_t)(kDumpDelayMs / 1000));
-        temporalPassDumpHistory("a key you pressed two seconds ago");
+        dumpCameraHistory("a key you pressed two seconds ago");
     }
     // The draw census key (issue 69074). Same silent-failure shape as the
     // history key, same cure: a diagnostic keypress that another window
@@ -1321,6 +1345,8 @@ void tickHotkeys() {
             perfMonitorNoteEvent(kEvCensus);
         }
     }
+    if (g_state->gpuPassKey.pressed()) gpuPassProfileRequest();
+    if (g_state->blendProbeKey.pressed()) blendProbeRequest("hotkey.blend_probe");   // TEMPORARY (blend_probe.h)
     // The eye dump key: the next treated frame's two eyes to disk.
     if (g_state->eyesKey.pressed()) temporalPassArmEyeDump();
     if (g_state->missedCensusNotes < kMissedDumpNotes &&
@@ -1571,15 +1597,15 @@ void presentFrameBoundary() {
     tkVrRuntime.run([] { vrRuntimeTick(); });
     // The optimized station's tick: the setting, the seal and release rules, the held cell in the pad's frame, the 30 s summary.
     tkOptimizedStation.run([] { optimizedStationFrame(static_cast<uint32_t>(g_state->frameCounter)); });
-    tkToggleKey.run([] {
-        if (g_state->toggleKey.pressed()) toggleExposureFix();
-    });
+    tkLightGridCache.run([] { lightGridCacheNoteFrame(g_state->frameCounter); });   // the frame count for the grid cache's 30 s line
     tkHotkeys.run(tickHotkeys);
+    tkIntroSkipFlat.run([] { introSkipTickFlat(); });
+    tkAaCompare.run([] { aaCompareTick(); });
     tkEliteBinds.run(tickEliteBinds);
     // The game's own journal, polled about once a second: it states the
     // boundaries EDVR used to infer -- gameplay starting (LoadGame) and
     // on-foot sessions beginning (Disembark).
-    tkJournalWatch.run([] { journalWatchTick(); });
+    tkJournalWatch.run([] { journalWatchTick(); seatContextPublish(); hmdResetPressFrame(); });
     tkCelestialStatus.run(tickCelestialStatus);
     // Explorer Cam (Phase 1), after the journal's tick it reads (on foot, GuiFocus, gameplay). Unconditional: an EMPTY hotkey.explorer_cam is read here
     // every frame too, so binding it live arms the feature on the next one.
@@ -1650,11 +1676,15 @@ void presentFrameBoundary() {
             // stood-down tick leaves it set rather than losing the request.
             if (g_configRefreshRequested.exchange(false, std::memory_order_acq_rel)) vScreenForceRefreshConfig();
             else vScreenRefreshConfig();
+            // The flat profile's launch-movie skip follows the file here too: vScreen's sweep above does it only while vScreen has a State,
+            // and the skip needs no State. Idempotent beside that call (it acts on a change of the parsed mode only).
+            if (runtimeFlatProfile()) introSkipConfigure(Config::get());
             // The vertex-buffer resync's 60 s count and its ten-minute heartbeat: it needs no vScreen State, so it is asked here, after the reload, in both profiles.
             vertexResyncPoll(stampMs());
+            lightGridCachePoll(stampMs());
             // The terrain cull cover's ten-minute heartbeat (written while its hook is live, zero counts included).
             terrainCullCoverPoll(stampMs());
-            // The four diagnostic keys follow the file too (the menu's Hotkeys page).
+            // The three diagnostic keys follow the file too (the menu's Hotkeys page).
             configureDiagnosticHotkeys();
             g_state->fssModeLatchWanted =
                 eyeSyncFromConfig(Config::get()).any();
@@ -1750,6 +1780,16 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
     // reads below, which time the call alone. The gate is one relaxed load.
     const bool routeCrumbs = hdrCrumbPresentSide();
     if (routeCrumbs) hdrCrumbWrite("present", "begin");
+    // The frame's GPU work span ends here (2026-10-14, gpu_census.cpp): EDVR's door work is done and the real Present is next, on
+    // the game's own context. Before this call, so the pair is still inside the census scope that the boundary after the Present closes.
+    if (gpuCensusFrameWorkOpen()) {
+        ID3D11DeviceContext* workContext = nullptr;
+        g_state->device->GetImmediateContext(&workContext);
+        if (workContext) {
+            gpuCensusFrameWorkEnd(workContext);
+            workContext->Release();
+        }
+    }
     const int64_t presentT0 = qpcNow();
     const HRESULT hr = g_state->realPresent(self, syncInterval, flags);
     const int64_t presentT1 = qpcNow();
@@ -1929,8 +1969,7 @@ void readoptGameBindings() {
 // The Instruments page's rows: the same functions the diagnostic hotkeys
 // fire, reachable from a headset with no key bound.
 void menuActionDumpCamera(void*) {
-    dumpCameraRing("the settings menu");
-    temporalPassDumpHistory("the settings menu");
+    dumpCameraHistory("the settings menu");
 }
 void menuActionCensus(void*) {
     drawCensusRequest();
@@ -1977,7 +2016,7 @@ std::string hotkeyDescribe(const Hotkey& k) {
     return out;
 }
 
-// The four diagnostic keys, bound at launch and RE-bound whenever the ini says
+// The three diagnostic keys, bound at launch and RE-bound whenever the ini says
 // something else: the settings menu's Hotkeys page writes these while the game
 // runs, so (like hotkey.menu and hotkey.explorer_cam) they re-resolve live. A
 // reload that changed none of them says nothing.
@@ -2003,8 +2042,6 @@ void configureDiagnosticHotkeys() {
         const char*  detail;        // what a press does, said with the bind
     };
     Item items[] = {
-        {&s.toggleKey, &s.toggleKeyText, Config::get().getString("hotkey.toggle_exposure", "SCROLLLOCK"),
-         "hotkey.toggle_exposure", "brightness fix toggle", nullptr, ""},
         {&s.dumpKey, &s.dumpKeyText, Config::get().getString("hotkey.dump_camera", "PAUSE"),
          "hotkey.dump_camera", "camera history", nullptr, ""},
         // Empty default: the census is chased-bug instrumentation, and an unbound key is how
@@ -2016,6 +2053,19 @@ void configureDiagnosticHotkeys() {
          "hotkey: dump_draws is set but bound nothing (the line above says why), so the draw census "
          "cannot be armed this session.",
          " Costs nothing until pressed."},
+        // TEMPORARY (GPU pass profile, 2026-10-12): default unbound; a press measures the next whole frames' GPU passes (gpu_pass_profile.h):
+        // the value is "KEY" or "KEY COUNT" (COUNT 1..120, default 30). The count is split off here; the press reads it again. Remove with the arc.
+        {&s.gpuPassKey, &s.gpuPassKeyText, gpuPassProfileKeyPart(Config::get().getString("hotkey.gpu_pass_profile", "")),
+         "hotkey.gpu_pass_profile", "GPU pass profile",
+         "hotkey: gpu_pass_profile is set but bound nothing, so the GPU pass profile cannot be armed this session.",
+         " Measures the next 30 whole frames (or the COUNT after the key) to edvr_logs\\gpu_pass_profile_<stamp>.csv. Costs nothing until pressed."},
+        // TEMPORARY (blend probe, 2026-10-14; blend_probe.h, docs/dlss-blur-elements-2026-10-14.md): default unbound; a press captures 3 frames
+        // of the blend-enabled or no-depth-write eye draws that reach a window at the view centre, and a grid of the temporal pass's
+        // decisions over it, to the log. Remove with the arc.
+        {&s.blendProbeKey, &s.blendProbeKeyText, Config::get().getString("hotkey.blend_probe", ""),
+         "hotkey.blend_probe", "blend probe",
+         "hotkey: blend_probe is set but bound nothing, so the blend probe cannot be armed this session.",
+         " Captures 3 frames (the draws that blend or write no depth at the view centre, and the temporal pass's motion grid) to the log. Costs nothing until pressed."},
         // The eye dump key: both eyes as the headset receives them, to edvr_logs\eyes as BMP --
         // what the player sees, readable off the desk (asked for 2026-09-09, with a debug view
         // up). The census key's shape: empty is off, and a bind is said.
@@ -2061,7 +2111,7 @@ State& ensureState() {
         // path for live changes; its Instruments page gets the diagnostic
         // keys' functions as rows.
         menuRegisterAction("Dump the camera history now",
-                           "The PAUSE key's job: the last ten seconds of viewpoint history to the log.",
+                           "The PAUSE key's job: the temporal pass's recent camera history, to the log.",
                            &menuActionDumpCamera, nullptr);
         menuRegisterAction("Take a draw census and quad probe",
                            "The dump_draws key's job: every draw into the eyes for a few frames.",
@@ -2156,6 +2206,35 @@ State& ensureState() {
 }
 
 }  // namespace
+
+// The commander's seat, for the runtime's seat memory (src/openxr/seat_memory.h), which is always on in the VR profile (the setting
+// advanced.cockpit_centre was retired 2026-10-14: keep shipped). In the flat profile the word is cleared to "nobody has written", which the
+// runtime reads as inactive. Called at the first export call (so the runtime's start-up finds it before any frame) and from the journal's tick
+// every frame: a few atomic loads and one compare.
+void seatContextPublish() {
+    static uint32_t published = 0;
+    static bool wrote = false;
+    uint32_t word = 0;
+    if (!runtimeFlatProfile()) {
+        SeatContext c;
+        c.published = true;
+        c.keep = true;     // the word's "active" bit; always set by this build
+        c.gameplay = journalGameplay();
+        c.seatedKnown = journalSeatedKnown();
+        c.seated = c.seatedKnown && journalSeated();
+        c.onFootKnown = journalOnFootKnown();
+        c.onFoot = c.onFootKnown && journalOnFoot();
+        c.cameraOpen = explorerCamSessionActive();
+        c.seatKind = journalSeatKind();
+        c.transitions = (journalEmbarks() + journalDisembarks() + journalLoadGames() + journalUndocks()) & kSeatTransitionMask;
+        word = encodeSeatContext(c);
+    }
+    if (!wrote || word != published) {
+        wrote = true;
+        published = word;
+        publishSeatContext(word);
+    }
+}
 
 bool captureFlatProbeShader(char stage, uint64_t hash) {
     if (!g_state || !runtimeFlatProfile() || !hash ||
@@ -2538,7 +2617,7 @@ void hookDevice(ID3D11Device* device) {
                 "d3d11 fixes are OFF by request (advanced.d3d11_fixes = 0), so no "
                 "hooks are installed on the device or on its context, this session "
                 "or any other: the black void, the panel distance, the exposure "
-                "share, the transition flash detector, the anti-aliasing passes, "
+                "share, the transition flash fix, the anti-aliasing passes, "
                 "the shader replacements and Explorer Cam are "
                 "all inert, and the game renders as it would without this half "
                 "installed. What is still hooked is the swapchain's Present and "
@@ -2569,7 +2648,7 @@ void hookDevice(ID3D11Device* device) {
             "ended in the first few seconds looks the same from here. EVERY fix in "
             "d3d11.dll is off for THIS session only, on every device, and it will try again next "
             "launch: the black void, the panel distance, the exposure share, the "
-            "transition flash detector and Explorer Cam. The game "
+            "transition flash fix and Explorer Cam. The game "
             "renders without EDVR's graphics treatments; the EDVR menu is unavailable "
             "until the next launch. The OpenVR half has its own recovery guard.\n"
             "  If this keeps happening, the hooks really are crashing and the log is "
@@ -2869,21 +2948,29 @@ void hookDevice(ID3D11Device* device) {
                     Config::get().iniName(), probe.c_str());
             }
             installExposureFix(device, ctxMode);
-            // Before the vScreen fixes, which ask it whether it needs the
-            // eye-draw count. It installs no hooks of its own -- it is driven
+            // Before the vScreen fixes, which ask it whether it needs their Map
+            // and Unmap hooks. It installs no hooks of its own -- it is driven
             // from vScreen's Map and Unmap -- so nothing else depends on the
             // order.
             installGlitchFrameFix();
             installVScreenFixes(device, ctxMode);
+            // fix.intro_video = skip in the flat profile (2026-10-14): armed here, at device creation, before the game opens the ident. vScreen's
+            // own install does it too when it has a State; this call does not depend on that and is idempotent beside it.
+            if (runtimeFlatProfile()) introSkipConfigure(Config::get());
             flatTemporalStart(device);
             // The game's own vertex-buffer cache repair (vertex_resync_hook.cpp): a CodeHook on Frontier's input-assembler flush, once, in BOTH profiles -- the stale
             // cache is the game's, not VR's. A build that is not 332841 is one log line and nothing patched.
             vertexResyncInstall();
+            // The light grid cache (light_grid_cache_hook.cpp; docs/light-grid-cache-2026-10-13.md): a CodeHook on the game's fragment-culling cluster builder, once, in BOTH
+            // profiles -- the builder is the game's. No key: exact, and verified against the game's own rebuild while it runs. A build that is not 332841 is one log line.
+            lightGridCacheInstall();
             // The terrain cull cover (terrain_cull_cover_hook.cpp; docs/terrain-culling.md): a CodeHook on the game's cull-plane builder, always on for a scope with VR (the flat
             // profile passes through per call). A build that is not 332841 is scanned for the call site; anything short of one match is one log line and nothing patched.
             terrainCullCoverInstall(!runtimeScopeIncludesVr());
-            // The optimized station (optimized_station.cpp): reads fix.optimized_station; its hooks attach while it is on (VR by default; flat off).
+            // The optimized station (optimized_station.cpp): reads fix.optimized_stations; its hooks attach while it is on (VR by default; flat off).
             optimizedStationInstall(runtimeFlatProfile());
+            // The blend probe (TEMPORARY, blend_probe.cpp): armed by key only; nothing is observed until then. One line: whether the key is bound.
+            blendProbeInstall(runtimeFlatProfile(), g_state->blendProbeKey.bound(), g_state->blendProbeKeyText.c_str());
 
             // AFTER BOTH INSTALLERS, and the order is the whole point. EDVR's
             // own commit writes two dozen entries of this table in the shared

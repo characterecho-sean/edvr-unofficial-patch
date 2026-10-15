@@ -162,6 +162,41 @@ int main(int argc, char** argv) {
     check(contains(lines.text[2], "over 1 frames"), "the VR session says it covers the one flat frame");
     std::printf("sample: %s\n", lines.text[2]);
 
+    // The gate: a site is measured only while the profile its report divides by is active. Passthrough and an invalid profile have
+    // neither flag set, so neither owner's sites are measured there.
+    check(inactiveFor(Owner::Vr, true, false) && !inactiveFor(Owner::Vr, false, true), "VR sites are measured while flat runs, not while VR does");
+    check(inactiveFor(Owner::Flat, false, true) && !inactiveFor(Owner::Flat, true, false), "flat sites are measured while VR runs, not while flat does");
+    check(!inactiveFor(Owner::Vr, false, false) && !inactiveFor(Owner::Flat, false, false), "neither owner is measured in Passthrough");
+
+    // Review finding 8: the mode watch's query ran in Passthrough (neither flag set), was sampled as VR-site cost, and a window that then
+    // reached one Flat frame divided it by that frame (modeWatchFrame=2/640.00). Under the gate the Passthrough sample is not taken and
+    // the Flat frame reads zero; a sample taken in the Flat frame itself still counts.
+    resetCounters();
+    Reporter p;
+    p.frame(0, freq, false, false, lines);                                   // Passthrough frames: counted toward neither profile
+    for (int i = 0; i < 128; ++i) {
+        Probe q = enterSite(Site::VrModeWatchFrame, inactiveFor(Owner::Vr, false, false));
+        q.stop();
+    }
+    check(g_sites[static_cast<size_t>(Site::VrModeWatchFrame)].calls.load() == 0, "a mode-watch query in Passthrough is not counted");
+    p.frame(15000, freq, true, false, lines);                                // one Flat frame
+    {
+        Probe q = enterSite(Site::VrModeWatchFrame, inactiveFor(Owner::Vr, true, false));
+        q.stop();
+    }
+    check(g_sites[static_cast<size_t>(Site::VrModeWatchFrame)].calls.load() == 1, "one taken while Flat is active is counted");
+    g_sites[static_cast<size_t>(Site::VrModeWatchFrame)].calls.store(0);   // that one call is not the window under test
+    g_sites[static_cast<size_t>(Site::VrModeWatchFrame)].ticks.store(0);
+    p.frame(30000, freq, false, false, lines);
+    bool vrLine = false;
+    for (int i = 0; i < lines.count; ++i)
+        if (startsWith(lines.text[i], "cross-profile cost: vr hooks while flat:")) {
+            vrLine = true;
+            check(contains(lines.text[i], "modeWatchFrame=0/0.00") && contains(lines.text[i], "over 1 frames"),
+                  "the Flat frame carries no Passthrough cost");
+        }
+    check(vrLine, "the window prints the VR hooks' line for its one Flat frame");
+
     std::printf("cross_profile_test: %d checks, %d failed\n", g_checks, g_fails);
     return g_fails ? 1 : 0;
 }

@@ -39,7 +39,7 @@ struct Window {
     uint64_t declined[kDecisions] = {};   // the shared decision's refusals, by UiLayerDecision
     uint64_t jitterPhase = 0, jitterZero = 0;
     uint64_t writeBacks = 0;
-    uint64_t toneCandidates = 0, toneProven = 0, toneAdmitted = 0, toneReissued = 0, toneDeclined = 0;
+    uint64_t toneCandidates = 0, toneProven = 0, toneAdmitted = 0, toneReissued = 0, toneDeclined = 0, toneByShape = 0;
     uint64_t copies = 0, doorsArmed = 0, doorUntreated = 0, doorSize = 0;
     uint64_t composites = 0, compositeNone = 0, bindFailed = 0;
     uint32_t inW = 0, inH = 0, outW = 0, outH = 0;  // the last copy's picture and the display
@@ -67,7 +67,8 @@ uint64_t g_mapAskFrame = 0, g_mapAsksFrame = 0;           // the frame of the la
 FlatUiToneProof g_proof;
 bool g_sourceToneFirstNoted = false;
 FlatUiUnknownSourceToneLog g_unknownSourceToneLog;
-// First physical RTV for each distinct, HDR-qualified HUD target in the current frame. The E894 UI-only tone guard
+FlatUiShapeToneLog g_shapeToneLog;   // the unknown pairs admitted by their physical shape, once each (process-lifetime, like the above)
+// First physical RTV for each distinct, HDR-qualified HUD target in the current frame. The E894 and EDHM 0D43 UI-only tone guard
 // requires this independent binding check before it may establish proof; references release at Present/device/resize.
 struct HudPhysical {
     const void* shadow = nullptr;
@@ -94,7 +95,7 @@ void observeHudPhysical(ID3D11DeviceContext* ctx, const FlatUiLayerDraw& d) {
     Ptr<ID3D11RenderTargetView> rtv; rtv.Attach(rawRtv);
     if (rtv) rtv->GetResource(&h.actual);
 }
-// Shared physical test for the two admitted E894 pairs and diagnostic-only
+// Shared physical test for the admitted E894 and EDHM 0D43 pairs and diagnostic-only
 // unknown pairs. The caller must hold FlatComputeInternalScope.
 bool sourceTonePhysicalShape(ID3D11DeviceContext* ctx, uint64_t frame, uint32_t renderW, uint32_t renderH,
                              uint64_t vs, uint64_t ps, const void* cachedOutput,
@@ -121,6 +122,20 @@ bool sourceTonePhysicalShape(ID3D11DeviceContext* ctx, uint64_t frame, uint32_t 
         if (flatUiSourceToneDirectHud(g_hudPhysical[i].shadow, g_hudPhysical[i].actual.Get(), shape.hdrRes))
             return true;
     return false;
+}
+// The bloom input an unknown draw must bind at PS t2: a bound 2D view with a resource, or null. The probe's near-miss report and
+// the shape admission both read it here, so the two cannot disagree on what the binding is. A 2D resource proves the binding
+// shape, not what an unknown shader does with it.
+Ptr<ID3D11Resource> toneBloomInput(ID3D11DeviceContext* ctx) {
+    Ptr<ID3D11ShaderResourceView> bloom;
+    ctx->PSGetShaderResources(2, 1, &bloom);
+    if (!bloom) return {};
+    D3D11_SHADER_RESOURCE_VIEW_DESC bloomView{};
+    bloom->GetDesc(&bloomView);
+    if (bloomView.ViewDimension != D3D11_SRV_DIMENSION_TEXTURE2D) return {};
+    Ptr<ID3D11Resource> bloomResource;
+    bloom->GetResource(&bloomResource);
+    return bloomResource;
 }
 uint32_t g_candidateLines = 0;  // eight tone candidates logged, re-armed after a route, render-size or swap-chain change
 char g_candidateRoute[48] = "";
@@ -343,12 +358,41 @@ bool flatUiLayerSourceToneCandidate(ID3D11DeviceContext* ctx, uint64_t frame, ui
         return false;  // no proof from a cached shadow or an unverified alias
     if (!g_sourceToneFirstNoted) {
         g_sourceToneFirstNoted = true;
-        Log::get().note("flat ui layer: first E894 source tone qualified -- frame %llu VS %016llX PS %016llX, "
+        Log::get().note("flat ui layer: first E894/0D43 source tone qualified -- frame %llu VS %016llX PS %016llX, "
                         "physical HUD t1=%p, LDR RTV=%p R=%ux%u, full viewport; flat UI proof only.",
                         static_cast<unsigned long long>(frame), static_cast<unsigned long long>(vs),
                         static_cast<unsigned long long>(ps), shape.hdrRes, shape.rtvRes, renderW, renderH);
     }
     return flatUiLayerToneCandidate(ctx, frame, renderW, renderH, 1, vs, ps, shape.hdrRes, outW, outH, route);
+}
+
+// Sean's 2026-10-15 decision: an unknown pair that passes the full physical shape grants flat UI proof, as a named pair does. The
+// shape is the strict one (sourceTonePhysicalShape with LDR format 28: the HDR at t1 a physical HUD target, a 3D LUT at t0, the
+// full viewport, one RTV, no DSV or blend), and the bloom at PS t2 is a bound 2D view. The admission is the named pair's own proof.
+bool flatUiLayerShapeToneCandidate(ID3D11DeviceContext* ctx, uint64_t frame, uint32_t renderW, uint32_t renderH,
+                                   uint64_t vs, uint64_t ps, const void* cachedOutput, uint32_t outW, uint32_t outH,
+                                   uint32_t startInstance, const char* route, bool& admitted) {
+    admitted = false;
+    if (!ctx || !flatUiLayerOn() || g_hudPhysicalFrame != frame || !g_hudPhysicalCount || startInstance != 0 ||
+        !flatUiShapeToneVs(vs) || flatUiSourceTonePair(vs, ps)) return false;   // a named pair has its own path
+    FlatComputeInternalScope internal;
+    ToneAdmit shape{};
+    if (!sourceTonePhysicalShape(ctx, frame, renderW, renderH, vs, ps, cachedOutput, outW, outH, /*unknownDiagnostic=*/false, shape))
+        return false;  // no proof from a cached shadow, an unverified alias or a shape off the strict format
+    if (!toneBloomInput(ctx)) return false;
+    ++g_w.toneByShape;
+    const auto result = g_shapeToneLog.record(vs, ps);
+    if (result == FlatUiShapeToneLog::Result::NewPair)
+        Log::get().note("flat ui layer: tone pair admitted by its physical shape -- frame %llu VS %016llX PS %016llX: the physical HUD "
+                        "target at t1, LDR RTV %p fmt 28 R=%ux%u, a 2D at t2, full viewport. Flat UI proof only; the pair is not in "
+                        "any table (2026-10-15 rule).",
+                        static_cast<unsigned long long>(frame), static_cast<unsigned long long>(vs),
+                        static_cast<unsigned long long>(ps), shape.rtvRes, renderW, renderH);
+    else if (result == FlatUiShapeToneLog::Result::CapacityReached)
+        Log::get().note("flat ui layer: tone pairs admitted by shape capacity=%u exhausted; later new pairs are admitted without a line",
+                        FlatUiShapeToneLog::kCapacity);
+    admitted = flatUiLayerToneCandidate(ctx, frame, renderW, renderH, 1, vs, ps, shape.hdrRes, outW, outH, route);
+    return true;
 }
 
 void flatUiLayerProbeUnknownSourceTone(ID3D11DeviceContext* ctx, uint64_t frame, uint32_t renderW, uint32_t renderH,
@@ -366,20 +410,12 @@ void flatUiLayerProbeUnknownSourceTone(ID3D11DeviceContext* ctx, uint64_t frame,
                             FlatUiUnknownSourceToneLog::kCapacity);
     };
     if (!sourceTonePhysicalShape(ctx, frame, renderW, renderH, vs, ps, cachedOutput, outW, outH, true, shape)) { reject(); return; }
-    // The unknown draw must also bind the measured bloom input at PS t2.
-    // A 2D resource proves the binding shape, not what an unknown shader does with it.
-    Ptr<ID3D11ShaderResourceView> bloom;
-    ctx->PSGetShaderResources(2, 1, &bloom);
-    if (!bloom) { reject(); return; }
-    D3D11_SHADER_RESOURCE_VIEW_DESC bloomView{};
-    bloom->GetDesc(&bloomView);
-    if (bloomView.ViewDimension != D3D11_SRV_DIMENSION_TEXTURE2D) { reject(); return; }
-    Ptr<ID3D11Resource> bloomResource;
-    bloom->GetResource(&bloomResource);
+    // The unknown draw must also bind the measured bloom input at PS t2 (toneBloomInput, which the shape admission reads too).
+    const Ptr<ID3D11Resource> bloomResource = toneBloomInput(ctx);
     if (!bloomResource) { reject(); return; }
     const auto result = g_unknownSourceToneLog.record(vs, ps);
     if (result == FlatUiUnknownSourceToneLog::Result::NewPair)
-        Log::get().note("flat ui layer: unknown source-tone probe -- frame %llu VS %016llX PS %016llX, physical HUD t1=%p, LDR RTV=%p fmt=%u, bound 2D t2=%p R=%ux%u; candidate shape only, no source-tone proof or admission",
+        Log::get().note("flat ui layer: unknown source-tone probe -- frame %llu VS %016llX PS %016llX, physical HUD t1=%p, LDR RTV=%p fmt=%u, bound 2D t2=%p R=%ux%u; a near miss: it passed the diagnostic shape but not the admission's (LDR format 28, a tone VS, start instance 0); no proof",
                         static_cast<unsigned long long>(frame), static_cast<unsigned long long>(vs),
                         static_cast<unsigned long long>(ps), shape.hdrRes, shape.rtvRes,
                         static_cast<unsigned>(shape.rtvFmt),
@@ -619,7 +655,7 @@ void flatUiLayerReport(uint64_t windowSeconds) {
         "door-refused-size=%llu (last copy read %ux%u, display %ux%u) tone-candidates=%llu tone-proven=%llu "
         "tone-admitted=%llu tone-reissued=%llu "
         "tone-declined=%llu composites=%llu composite-none=%llu bind-failed=%llu write-backs=%llu jitter-phase=%llu "
-        "jitter-zero=%llu",
+        "jitter-zero=%llu tone-by-shape=%llu",
         static_cast<unsigned long long>(windowSeconds), flatUiLayerState(), static_cast<unsigned long long>(w.copies),
         static_cast<unsigned long long>(w.doorsArmed), static_cast<unsigned long long>(w.doorUntreated),
         static_cast<unsigned long long>(w.doorSize), w.inW, w.inH, w.outW, w.outH,
@@ -628,7 +664,7 @@ void flatUiLayerReport(uint64_t windowSeconds) {
         static_cast<unsigned long long>(w.toneDeclined), static_cast<unsigned long long>(w.composites),
         static_cast<unsigned long long>(w.compositeNone), static_cast<unsigned long long>(w.bindFailed),
         static_cast<unsigned long long>(w.writeBacks), static_cast<unsigned long long>(w.jitterPhase),
-        static_cast<unsigned long long>(w.jitterZero));
+        static_cast<unsigned long long>(w.jitterZero), static_cast<unsigned long long>(w.toneByShape));
     const UiLayerFamily families[4] = {UiLayerFamily::kHolo, UiLayerFamily::kFlightHud, UiLayerFamily::kSprite,
                                        UiLayerFamily::kHoloGeneric};
     const size_t f0 = static_cast<size_t>(families[0]), f1 = static_cast<size_t>(families[1]),

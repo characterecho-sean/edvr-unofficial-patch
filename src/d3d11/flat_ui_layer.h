@@ -74,13 +74,21 @@ void flatUiLayerWriteBackEnd(ID3D11DeviceContext* ctx);
 // `route` names the frame's route so far ("hdr" once the HDR route treated, else the resolve plan's route name).
 bool flatUiLayerToneCandidate(ID3D11DeviceContext* ctx, uint64_t frame, uint32_t renderW, uint32_t renderH, int hdrSlot,
                               uint64_t vs, uint64_t ps, const void* input, uint32_t outW, uint32_t outH, const char* route);
-// The two flight-verified E894 source writers: physically qualify their full-size LDR draw and direct HUD read at t1
-// before using the usual flat-only tone candidate/proof path. Unknown pairs do not bootstrap proof.
+// The E894 (flight-verified) and EDHM 0D43 source writers: physically qualify their full-size LDR draw and direct HUD read at t1
+// before using the usual flat-only tone candidate/proof path. An unknown pair bootstraps proof only through the full physical
+// shape of flatUiLayerShapeToneCandidate below.
 bool flatUiLayerSourceToneCandidate(ID3D11DeviceContext* ctx, uint64_t frame, uint32_t renderW, uint32_t renderH,
                                     uint64_t vs, uint64_t ps, const void* cachedOutput,
                                     uint32_t outW, uint32_t outH, const char* route);
-// Diagnostic only: log each unknown pair once (up to a process-lifetime cap)
-// if the physical HUD/tone shape, bloom binding and exact fullscreen draw match.
+// Sean's decision (2026-10-15): an unknown pair that passes the full physical shape grants flat UI proof as a named pair does, so
+// a new EDHM version or settings tier needs no named pair. The strict shape is sourceTonePhysicalShape with LDR format 28, a 2D
+// bloom bound at PS t2, and a tone VS (flatUiShapeToneVs) with no named pair. Returns whether the draw passed the full physical
+// shape; `admitted` is flatUiLayerToneCandidate's result when it did.
+bool flatUiLayerShapeToneCandidate(ID3D11DeviceContext* ctx, uint64_t frame, uint32_t renderW, uint32_t renderH,
+                                   uint64_t vs, uint64_t ps, const void* cachedOutput, uint32_t outW, uint32_t outH,
+                                   uint32_t startInstance, const char* route, bool& admitted);
+// Diagnostic only, the near-miss report: log each unknown pair once (up to a process-lifetime cap) that passes the diagnostic
+// shape, the bloom binding and the exact fullscreen draw, but not flatUiLayerShapeToneCandidate's strict admission. It never proves.
 void flatUiLayerProbeUnknownSourceTone(ID3D11DeviceContext* ctx, uint64_t frame, uint32_t renderW, uint32_t renderH,
                                        uint64_t vs, uint64_t ps, const void* cachedOutput,
                                        uint32_t outW, uint32_t outH, char kind, uint32_t count,

@@ -6,8 +6,9 @@
 // device the game gets back.
 //
 // Chaining: if another d3d11 proxy is already installed (EDHM, ReShade), rename
-// theirs and point advanced.real_dll at it in edvr.ini. Ours will load and forward
-// through it, and both mods keep working.
+// theirs and point advanced.real_dll at it in the shared settings file (real_dll_choice.h:
+// one value for both profiles). Ours will load and forward through it, and both mods
+// keep working.
 #include <windows.h>
 
 #include <d3d11.h>
@@ -22,7 +23,9 @@
 #include "../common/d3d11_device_identity.h"
 #include "../common/frame_flag.h"
 #include "../common/guard.h"
+#include "../common/iniedit.h"
 #include "../common/log.h"
+#include "../common/real_dll_choice.h"
 #include "../common/module_pin.h"
 #include "../common/native_startup.h"
 #include "../common/proxy.h"
@@ -307,6 +310,17 @@ void loaderPhase() {
                                         : "gfx: FAILED no D3D11CreateDevice");
 }
 
+// The text of the settings file named `leaf`, from the first of the module's directory and the
+// executable's that has it; empty when neither does.
+std::string iniTextBeside(const wchar_t* leaf) {
+    const std::wstring dirs[2] = {*g_moduleDir, edvr::executableDirectory()};
+    for (const std::wstring& dir : dirs) {
+        std::string bytes;
+        if (edvr::readFileBytes(dir + L"\\" + leaf, &bytes, 16u << 20)) return bytes;
+    }
+    return std::string();
+}
+
 // Loads another d3d11 proxy -- EDHM, ReShade -- and re-points every export at
 // it, so both mods end up in the chain.
 //
@@ -318,7 +332,23 @@ void loaderPhase() {
 // d3d11.dll in place, which is what was already resolved during the loader
 // phase, and says why in the log.
 void chainThroughOtherProxy(edvr::Config& cfg) {
-    const std::string configured = cfg.getString("advanced.real_dll", "");
+    // advanced.real_dll is one decision for the install, not one per profile (real_dll_choice.h).
+    // Config reads the launch profile's settings file whole, so it cannot say what the OTHER file
+    // holds, and its choice of file is left as it was. What Config read is the profile's own value;
+    // when that file is the flat one, the shared file is read for this one key alone, beside the
+    // module first and then the executable, as Config::chooseSettingsPath does. When Config fell
+    // back to the shared file (no flat file yet), its value already is the shared one.
+    const bool flatProfile = edvr::runtimeFlatProfile();
+    const std::string own = cfg.getString("advanced.real_dll", "");
+    const bool ownIsFlatFile = flatProfile && std::strcmp(cfg.iniName(), edvr::kIniNameFlat) == 0;
+    const std::string sharedValue =
+        ownIsFlatFile ? edvr::iniValue(iniTextBeside(edvr::kIniNameVrW), "advanced.real_dll") : own;
+    const std::string flatValue = ownIsFlatFile ? own : std::string();
+    const edvr::RealDllChoice choice = edvr::chooseRealDll(flatProfile, flatValue, sharedValue);
+    const std::string said =
+        edvr::realDllLogLine(choice, flatProfile, edvr::kIniNameVr, edvr::kIniNameFlat);
+    if (!said.empty()) edvr::Log::get().note("%s", said.c_str());
+    const std::string configured = choice.value;
     if (configured.empty()) return;
 
     std::wstring path = edvr::widenUtf8(configured);
@@ -430,6 +460,8 @@ BOOL CALLBACK initOnceCallback(PINIT_ONCE, PVOID, PVOID*) {
     edvr::Log::get().note("%s", edvr::runtimeProfileLogLine().c_str());
     // The launch's profile, for the runtime's headset-while-flat frames (frame_flag.h).
     edvr::setVrProfileActive(edvr::runtimeVrProfile());
+    // The seat memory's setting, before any frame: the runtime's start-up reads it to choose between the stored seat and its own centre.
+    edvr::seatContextPublish();
     edvr::Log::get().note("game command line: %s", edvr::runtimeGameCommandLine().c_str());
     edvr::modeWatchStart();  // after the profile lines: the watch's first line follows them (mode_watch.h)
     edvr::oculusRouteReport();

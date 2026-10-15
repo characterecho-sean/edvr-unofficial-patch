@@ -3,9 +3,8 @@
 // ENTRY/EXIT classifier (a low wake's 5,041-consume idle stretch must name its
 // edges once, not every consume), the event window and the two-frame act
 // window, and the head-only eye test. Also the Dr7 slot-0 composition
-// (debug_register_core.h) the flat camera probe arms its write watch with, and
-// glitch_scene.h's print text. No game, no Windows hook -- this drives the
-// headers directly, the kinematic_probe_test pattern (single-TU, production
+// (debug_register_core.h) the flat camera probe arms its write watch with. No
+// game, no Windows hook -- this drives the headers directly, the kinematic_probe_test pattern (single-TU, production
 // source compiled into the rig). The file keeps its old name: build.bat and
 // the self-test gate know it by it.
 //
@@ -20,7 +19,6 @@
 #include <cwchar>
 #include "../../src/d3d11/debug_register_core.h"
 #include "../../src/d3d11/transition_flash_eye_base_core.h"
-#include "../../src/d3d11/glitch_scene.h"
 
 namespace dr7 = edvr::dr7;
 namespace tfeb = edvr::tfeb;
@@ -186,19 +184,6 @@ void caseModeSwitchEdgeSingleFrameSkip() {
           "modeSwitchEdge: a single-frame skip's recovery fires no exit (run length 1 < 30)");
 }
 
-void caseSceneGeometryFreshAndDecisionText() {
-    check(std::strcmp(edvr::glitchSceneGeometryFreshText(true), "") == 0,
-          "sceneGeometryFreshText: a fresh record prints no prefix");
-    check(std::strcmp(edvr::glitchSceneGeometryFreshText(false), "STALE-") == 0,
-          "sceneGeometryFreshText: a stale-geometry record prints as not fresh");
-    check(std::strcmp(edvr::glitchSceneDecisionText(edvr::GlitchSceneDecision::Unknown), "unknown") == 0,
-          "sceneDecisionText: Unknown prints as unknown");
-    check(std::strcmp(edvr::glitchSceneDecisionText(edvr::GlitchSceneDecision::Coherent), "coherent") == 0,
-          "sceneDecisionText: Coherent prints as coherent");
-    check(std::strcmp(edvr::glitchSceneDecisionText(edvr::GlitchSceneDecision::CameraReset), "cameraReset") == 0,
-          "sceneDecisionText: CameraReset prints as cameraReset");
-}
-
 void caseEngineActFrame() {
     // A one-frame skip at S=100: the consume of 100 was the only gap consume.
     check(tfeb::engineActFrame(101, 100, 100), "engineActFrame: skip+1 acts");
@@ -260,7 +245,6 @@ int wmain(int argc, wchar_t** argv) {
     caseModeSwitchEdgeNoneInsideRun();
     caseModeSwitchEdgeExitAfterThirty();
     caseModeSwitchEdgeSingleFrameSkip();
-    caseSceneGeometryFreshAndDecisionText();
     caseEngineActFrame();
     caseEventWindow();
     caseHeadOnlyEye();

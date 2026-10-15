@@ -81,9 +81,41 @@ inline uint32_t flatUiMapToneSlotOf(uint64_t vs, uint64_t ps) {
 constexpr uint64_t kFlatUiSourceToneVsSteady = 0xF9CFC798F21E9AEAull;
 constexpr uint64_t kFlatUiSourceToneVsTransition = 0x43CA9F1C0AD2ACFEull;
 constexpr uint64_t kFlatUiSourceTonePs = 0xE8948389387DA083ull;
+// The 2026-10-15 RC1 flat report (log edvr_gfx_20261015_125511, EDHM chained, BloomQuality 1, DOFEnabled 2): the cockpit's tone draw
+// pairs both VS above with PS 0D4329BDF65DE8F7. The unknown source-tone probe measured the E894 shape on it -- the physical HUD
+// target read at t1, a format-28 LDR target, a 2D bloom at t2 -- while the UI layer, never proven, took no HUD all session
+// (tone-candidates 0, holo-panels taken 0) and the cockpit panels were resolved inside the scene and ghosted. Admission still
+// runs every physical check; like E894 it stays out of the global tone registry and the mono HDR selector.
+constexpr uint64_t kFlatUiSourceTonePsEdhm = 0x0D4329BDF65DE8F7ull;
 inline bool flatUiSourceTonePair(uint64_t vs, uint64_t ps) {
-    return ps == kFlatUiSourceTonePs && (vs == kFlatUiSourceToneVsSteady || vs == kFlatUiSourceToneVsTransition);
+    return (ps == kFlatUiSourceTonePs || ps == kFlatUiSourceTonePsEdhm) &&
+           (vs == kFlatUiSourceToneVsSteady || vs == kFlatUiSourceToneVsTransition);
 }
+// The vertex shaders the game's tone pass is drawn with (flat_mono_detail::knownToneVs in flat_mono_frame.h names the same three:
+// the stock one, the no-constant passthrough and the cb2[2].y variant; none consumes a camera). EDHM replaces the tone's PIXEL
+// shader; an unknown pair is admitted by its shape only on one of these (flatUiLayerShapeToneCandidate).
+inline bool flatUiShapeToneVs(uint64_t vs) {
+    return vs == kFlatUiSourceToneVsSteady || vs == kFlatUiSourceToneVsTransition || vs == kFlatUiMapToneVs;
+}
+// Process-lifetime once-per-pair book of the unknown pairs the shape admission granted proof to, so each new pair is on record
+// exactly once. Pure, so the rig can test it. Like the unknown probe's book it never evicts: at capacity the 17th distinct pair
+// reports once and every later new pair is Full, while a recorded pair stays Known.
+struct FlatUiShapeToneLog {
+    static constexpr uint32_t kCapacity = 16;
+    struct Pair { uint64_t vs = 0, ps = 0; };
+    Pair pairs[kCapacity]{};
+    uint32_t count = 0;
+    bool capped = false;
+    enum class Result { NewPair, Known, CapacityReached, Full };
+    Result record(uint64_t vs, uint64_t ps) {
+        for (uint32_t i = 0; i < count; ++i)
+            if (pairs[i].vs == vs && pairs[i].ps == ps) return Result::Known;
+        if (capped) return Result::Full;
+        if (count == kCapacity) { capped = true; return Result::CapacityReached; }
+        pairs[count++] = {vs, ps};
+        return Result::NewPair;
+    }
+};
 // Process-lifetime diagnostic budget for physically qualifying unknown pairs.
 // No frame, route or resize resets it; exhausted is reported once.
 struct FlatUiUnknownSourceToneLog {

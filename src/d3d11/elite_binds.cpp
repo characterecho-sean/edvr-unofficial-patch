@@ -324,6 +324,79 @@ int scanAllUsesIn(const std::string& text, EliteBindUse* out, int max) {
 
 }  // namespace
 
+bool eliteBindsHmdResetIn(const char* text, size_t len, EliteResetBind* out) {
+    if (!out) return false;
+    out->present = false;
+    out->count = 0;
+    memset(out->slot, 0, sizeof(out->slot));
+    if (!text) return false;
+    const std::string body(text, len);
+    out->present = body.find("<HMDReset>") != std::string::npos;
+    if (!out->present) return false;
+    walkSlots(body, [&](const std::string& element, const std::string& device, const std::string& key, const std::string& prefix) {
+        if (element != "HMDReset" || out->count >= 2) return;
+        EliteResetSlot& s = out->slot[out->count++];
+        snprintf(s.label, sizeof(s.label), "%s:%s%s", device.c_str(), prefix.c_str(), key.c_str());
+        s.observable = false;
+        s.needsProof = true;
+        HotkeyBinding b;
+        if (_stricmp(device.c_str(), "Keyboard") == 0) {
+            s.needsProof = false;
+            char keyName[32];
+            if (!eliteBindsTranslateKey(key.c_str(), keyName, sizeof(keyName))) return;
+            if (!hotkeyParseBinding((prefix + keyName).c_str(), &b, /*quiet=*/true)) return;
+        } else if (_stricmp(device.c_str(), "Mouse") == 0) {
+            // Elite numbers the mouse buttons the way DirectInput does, 1-based: 1 left, 2 right, 3 middle, 4 and 5 the side buttons.
+            static const int kMouseVk[] = {VK_LBUTTON, VK_RBUTTON, VK_MBUTTON, VK_XBUTTON1, VK_XBUTTON2};
+            int n = 0;
+            if (sscanf(key.c_str(), "Mouse_%d", &n) != 1 || n < 1 || n > 5 || key != "Mouse_" + std::to_string(n)) return;
+            b.kind = HotkeyKind::Key;
+            b.vk = kMouseVk[n - 1];
+            b.mods = 0;
+        } else if (_stricmp(device.c_str(), "GamePad") == 0) {
+            const PadName* p = padNameFind(key.c_str());
+            if (!p) return;
+            b.kind = HotkeyKind::Pad;
+            b.padButtons = p->buttons;
+            b.padTrigger = p->trigger;
+        } else {
+            uint32_t id = 0;
+            uint16_t input = 0;
+            if (device.size() != 8 || !hotkeyJoyDeviceFromText(device.c_str(), &id) || !hotkeyJoyInputFromEliteKey(key.c_str(), &input)) return;
+            b.kind = HotkeyKind::Joy;
+            b.joyDevice = id;
+            b.joyInput = input;
+        }
+        s.observable = true;
+        s.binding = b;
+    });
+    return true;
+}
+
+bool eliteBindsHmdResetDir(const wchar_t* dirC, EliteResetBind* out) {
+    if (!out) return false;
+    memset(out, 0, sizeof(*out));
+    if (!dirC || !dirC[0]) return false;
+    const std::wstring dir(dirC);
+    std::vector<Cand> cands;
+    if (!collectActiveBindsFiles(dir, &cands)) return false;
+    for (const Cand& c : cands) {
+        std::string text;
+        if (!readWholeFile(dir + L"\\" + c.name, &text)) continue;
+        ++out->filesSeen;
+        // The first file that CONTAINS the element answers alone (the camera lookup's rule).
+        if (eliteBindsHmdResetIn(text.data(), text.size(), out)) {
+            snprintf(out->file, sizeof(out->file), "%s", c.utf8);
+            return true;
+        }
+    }
+    return false;
+}
+
+bool eliteBindsHmdReset(EliteResetBind* out) {
+    return eliteBindsHmdResetDir(bindingsDir().c_str(), out);
+}
+
 bool eliteBindsTranslateKey(const char* eliteKey, char* out, size_t outLen) {
     if (!eliteKey || !out || outLen == 0) return false;
     const char* name = eliteKey;

@@ -2,8 +2,8 @@
 #include "transition_flash_eye_base_core.h"
 #include "glitch_frame.h"
 #include "../common/code_hook.h"
-#include "../common/config.h"
 #include "../common/log.h"
+#include "../common/runtime_profile.h"
 
 #include <windows.h>
 #include <atomic>
@@ -13,11 +13,13 @@
 #include <mutex>
 
 // The transition-flash ENGINE FIX (docs/design-transition-flash-engine-fix-
-// 2026-09-23.md). Armed by fix.transition_flash; the old detector
-// (glitch_frame.cpp) goes dormant while it is and is the fallback when
-// identity or the hook fails. The mechanism, the evidence and everything that
-// was tried and ruled out are in that document; the logic that needs no game
-// is in transition_flash_eye_base_core.h.
+// 2026-09-23.md). Always on, with no setting: it arms in the VR profile when
+// the game build matches, the consumer hook installs and the camera-buffer tap
+// (glitch_frame.cpp) can deliver, and otherwise says why in the log and holds
+// nothing. (Until 2026-10-13 a setting switched it, and an independent detector
+// was the fallback.) The mechanism, the evidence and
+// everything that was tried and ruled out are in that document; the logic that
+// needs no game is in transition_flash_eye_base_core.h.
 
 namespace edvr {
 namespace {
@@ -206,7 +208,7 @@ HookEntry g_consumerEntry{"transition-flash-eye-base-consumer", kConsumerRva,
 // --- Module state ------------------------------------------------------
 std::atomic<bool> g_engineOn{false};    // the consumer hook is installed and the fix is armed
 std::atomic<bool> g_armed{false};       // install has been attempted (once)
-std::atomic<bool> g_offLogged{false};
+std::atomic<bool> g_notVrLogged{false};
 std::atomic<uint32_t> g_frame{0};
 std::atomic<uint32_t> g_ebConsecutiveUnrefilled{0};
 
@@ -341,7 +343,7 @@ void summaryLine(const char* prefix) noexcept {
     Log::get().note(
         "%s engine fix %s: events=%llu frames held=%llu events with no head-only fill=%llu "
         "hold not honoured=%llu.",
-        prefix, g_engineOn.load(std::memory_order_relaxed) ? "ARMED" : "NOT armed (detector in charge)",
+        prefix, g_engineOn.load(std::memory_order_relaxed) ? "ARMED" : "NOT armed (no frame is held)",
         (unsigned long long)g_events.load(std::memory_order_relaxed),
         (unsigned long long)g_framesHeld.load(std::memory_order_relaxed),
         (unsigned long long)g_eventsNoHeadOnly.load(std::memory_order_relaxed),
@@ -402,24 +404,20 @@ void serviceEvent(uint32_t nowFrame) noexcept {
 
 // --- Install ------------------------------------------------------------
 
-// The handshake's one report, from install: Armed when identity matched and
-// the consumer hook installed; otherwise Lost, with the reason the line
-// quotes, and the detector keeps running exactly as before.
-// What protection runs when the engine fix does not: the old detector, if it
-// observes anything, otherwise none.
-const char* fallbackNote() noexcept {
-    return glitchFrameDetectorRuns()
-        ? "The fallback detector is in charge."
-        : "NO transition protection is active: the fallback detector needs the same camera buffer.";
-}
+// The handshake's one report, from install: Armed when identity matched, the
+// consumer hook installed and the camera-buffer tap can deliver; otherwise Lost,
+// with the reason the line quotes. There is no other protection to fall back to
+// (the old detector was removed 2026-10-13), so a build this fix does not
+// recognise holds no frame at all, and every Lost line says so.
+const char* kNoProtection = "No frame will be held: there is no other transition protection.";
 
 void doInstall() noexcept {
     const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     const char* why = nullptr;
     if (!base || !checkIdentity(base, &why)) {
         Log::get().note(
-            "transition flash: engine fix NOT armed -- fallback: detector (%s). Nothing installed, "
-            "nothing changed. %s", why ? why : "module base unavailable", fallbackNote());
+            "transition flash: engine fix NOT armed (%s). Nothing installed, nothing changed. %s",
+            why ? why : "module base unavailable", kNoProtection);
         g_armed.store(true, std::memory_order_release);
         glitchFrameNoteEngineFix(false);
         return;
@@ -429,28 +427,28 @@ void doInstall() noexcept {
     g_armed.store(true, std::memory_order_release);
     // Armed needs the whole chain: identity, the consumer hook AND a camera-
     // buffer tap that can deliver (glitchFrameObserve feeds it; a camera
-    // buffer the detector does not observe starves it silently).
+    // buffer it does not observe starves it silently).
     char tapWhy[256] = "";
     const bool tapOk = glitchFrameEngineTapAvailable(tapWhy, sizeof(tapWhy));
     if (consumerOk && !tapOk) {
         glitchFrameNoteEngineFix(false);
         Log::get().note(
             "transition flash: engine fix NOT armed -- the camera-buffer tap is unavailable (%s). %s",
-            tapWhy, fallbackNote());
+            tapWhy, kNoProtection);
         return;
     }
     if (consumerOk) {
         g_engineOn.store(true, std::memory_order_release);
         glitchFrameNoteEngineFix(true);
         Log::get().note(
-            "transition flash: engine fix armed (fix.transition_flash on; the detector is dormant). "
+            "transition flash: engine fix armed. "
             "identity: build match (timestamp %u, image %u bytes) -- OK. consumer 0x28431D0: installed.",
             kExpectedTimestamp, kExpectedImageSize);
     } else {
         glitchFrameNoteEngineFix(false);
         Log::get().note(
-            "transition flash: engine fix NOT armed -- fallback: detector (the consumer hook did not "
-            "install). consumer 0x28431D0: %s. %s", g_consumerEntry.failReason, fallbackNote());
+            "transition flash: engine fix NOT armed -- the consumer hook did not install. "
+            "consumer 0x28431D0: %s. %s", g_consumerEntry.failReason, kNoProtection);
     }
 }
 
@@ -474,18 +472,24 @@ void maybeReportPeriodic() noexcept {
 
 // --- Public API ------------------------------------------------------------
 
-// fix.transition_flash arms the engine fix. Read once, at the first call (the
-// detector reads the same key once at install, and a reload cannot swap one
-// fix for the other mid-session); later calls do nothing.
-void transitionFlashEyeBaseConfigure(Config& cfg) {
+// Installs the engine fix. There is no setting: it is always on in the VR
+// profile (the only profile that has a compositor to hold a frame; the flat
+// profile never read the old key either, it was refused there). Attempted once,
+// at the first call in a VR profile; later calls do nothing, and a flat launch
+// that switches to VR installs it then.
+void transitionFlashEyeBaseInstall() {
     if (g_armed.load(std::memory_order_acquire)) return;
-    if (!cfg.getBool("fix.transition_flash", true)) {
-        if (!g_offLogged.exchange(true, std::memory_order_relaxed)) {
-            Log::get().note("transition flash: engine fix off (fix.transition_flash = 0).");
+    if (!runtimeVrProfile()) {
+        if (!g_notVrLogged.exchange(true, std::memory_order_relaxed)) {
+            Log::get().note("transition flash: engine fix not installed: this is not the VR profile.");
         }
         return;
     }
     doInstall();
+}
+
+bool transitionFlashEyeBaseArmed() {
+    return g_engineOn.load(std::memory_order_relaxed);
 }
 
 void transitionFlashEyeBaseFrameBoundary(uint32_t frameNo) {
@@ -501,7 +505,7 @@ void transitionFlashEyeBaseFrameBoundary(uint32_t frameNo) {
 }
 
 // The camera-CB fill tap (glitch_frame.cpp's glitchFrameObserve, pre-Unmap).
-// Each fill carries the detector's frame attribution (s->frameNo at Unmap
+// Each fill carries the tap's frame attribution (s->frameNo at Unmap
 // time -- the PRE-advance counter, so a fill of the frame the boundary records
 // as F carries F-1; the window tests compensate).
 void transitionFlashEyeBaseNoteSceneCB(uint32_t frame, const void* mapped, size_t sizeBytes) {
@@ -525,7 +529,7 @@ void transitionFlashEyeBaseNoteSceneCB(uint32_t frame, const void* mapped, size_
     rec.skipFrame = skip;
     rec.tapFrame = frame;
     g_lastHeldTap.store(frame, std::memory_order_relaxed);
-    rec.consumerPresent = glitchFrameEngineFixEvent(true);
+    rec.consumerPresent = glitchFrameEngineFixHold();
     g_framesHeld.fetch_add(1, std::memory_order_relaxed);
     if (!rec.consumerPresent) g_notHonoured.fetch_add(1, std::memory_order_relaxed);
     // The temporal pass's verdict is owed once this frame's eyes have been
@@ -539,6 +543,18 @@ void transitionFlashEyeBaseArmForTest() {
     g_armed.store(true, std::memory_order_release);
     g_engineOn.store(true, std::memory_order_release);
     glitchFrameNoteEngineFix(true);
+}
+// FOR TESTS: has install run (armed or not)? Reset puts the module back to a
+// process that has never installed, so a rig can run the real install path twice
+// under different settings.
+bool transitionFlashEyeBaseInstallAttemptedForTest() {
+    return g_armed.load(std::memory_order_acquire);
+}
+void transitionFlashEyeBaseResetForTest() {
+    g_armed.store(false, std::memory_order_release);
+    g_engineOn.store(false, std::memory_order_release);
+    g_notVrLogged.store(false, std::memory_order_relaxed);
+    glitchFrameNoteEngineFix(false);
 }
 void transitionFlashEyeBaseDisarmForTest() {
     g_engineOn.store(false, std::memory_order_release);

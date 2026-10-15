@@ -33,6 +33,7 @@
 #include "flat_camera_table_tests.h"
 #include "flat_query_cut_tests.h"
 #include "flat_wrapper_note_tests.h"
+#include "flat_replay_query_reject_tests.h"
 #include "flat_hdr_route_tests.h"
 #include "flat_laser_scene_tone_tests.h"
 #include "flat_deferred_camera_tests.h"
@@ -2587,7 +2588,7 @@ void testStandDownWiring() {
         // Engine motion, the camera hook, the discovery observers.
         {&runtimeCpp, "engineVelocityConfigure(enabled && !enginePausedThen);", 1, "the Present hands the pause to engine motion"},
         {&runtimeCpp, "engineVelocityConfigure(enabled && !s.enginePaused);", 1, "and again when the stand-down changed it"},
-        {&runtimeCpp, "flatCameraInjectPause(next != FlatWork::Full);", 1, "the stand-down pauses the camera refresh hook"},
+        {&runtimeCpp, "flatCameraInjectPauseFlat(next != FlatWork::Full);", 1, "the stand-down pauses the camera refresh hook"},
         {&runtimeCpp, "flatTemporalSetPaused(next == FlatWork::Paused);", 1, "the stand-down pauses the discovery observers on Paused frames"},
         // The trace ring keeps the last watched frames.
         {&runtimeCpp, "if (s.work != FlatWork::Paused) s.prefix = FlatRuntimePrefix{};", 1, "a Paused frame does not clear the prefix"},
@@ -3977,6 +3978,7 @@ int main(int argc, char** argv) {
     testFlatForegroundOwnershipWiring();
     testFlatUntrustedCameraWiring();
     failures += flatWrapperNoteTests();
+    failures += flatReplayQueryRejectTests();
     testFlatWrapperNoteWiring();
     failures += flatQueryCutTests();
     testFlatQueryCutWiring();

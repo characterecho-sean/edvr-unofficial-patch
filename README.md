@@ -92,8 +92,10 @@ the game is not on its OpenVR path and half the patch never loaded: see
 [Headsets and VR runtimes](#headsets-and-vr-runtimes).
 
 If you still see a flash, press **Pause** straight after it and send the logs.
-Pause writes the last ten seconds of viewpoint history, which shows whether
-EDVR detected the flash and let it through or never detected it at all.
+Pause writes the temporal pass's recent camera history and says whether the
+jump-flash hold was armed. A `transition flash: frame N held` line near the
+moment means EDVR held a frame and the flash got through anyway; no such line
+means it held nothing.
 
 ### Reporting a problem
 
@@ -174,8 +176,10 @@ instead of standing in the world, or sized for a screen you are not looking at.
   prominences, which swim as you look past them; the loading ship's head-locked
   scan pattern; and the launch movie, moved off its 27-degree rectangle onto
   the splash screen's own surface.
-- The one-frame flash each time you jump or drop out of supercruise is detected
-  and not sent, so the runtime holds the previous frame.
+- The one-frame flash each time you jump or drop out of supercruise is caught
+  and not sent, so the runtime holds the previous frame. It is always on and
+  has no setting; a game build EDVR does not recognise gets no hold, and the
+  log says so.
 - For shimmer and frame time there is DLSS, FSR or XeSS, under [Upscaling:
   DLSS, FSR and XeSS](#upscaling-dlss-fsr-and-xess).
 - Over planets, Elite culled terrain with a head pose about 42 ms older than
@@ -234,8 +238,7 @@ mouse still do. Every change is written to `edvr.ini` and applies the way a
 hand edit would, and a row that only takes effect at the next launch says so.
 
 EDVR's own keys have a page of their own, **Hotkeys**: the menu key, Explorer
-Cam's key (clear it and Explorer Cam is off), the brightness-fix key and the
-camera-history key. Pick a row, press Enter, then press the key you want, with
+Cam's key (clear it and Explorer Cam is off) and the camera-history key. Pick a row, press Enter, then press the key you want, with
 Ctrl, Shift or Alt for a chord, a gamepad button, or a button or hat on your
 HOTAS. Escape cancels and Delete clears (the menu key can be changed but never
 cleared from the menu). A choice that Elite also binds is flagged "also in

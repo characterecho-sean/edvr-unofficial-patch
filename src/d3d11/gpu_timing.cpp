@@ -64,6 +64,23 @@ std::shared_ptr<Domain>& registry() {
     return *value;
 }
 std::shared_ptr<Domain> current() { return std::atomic_load(&registry()); }
+// The pass profiler's scopes, one per slot (gpu_timing.h).
+DisjointClock::Lease g_passLease[kPassScopeSlots]{};
+// The census's one frame-long scope (gpu_timing.h, gpuTimingCensusScopeEnsure).
+DisjointClock::Lease g_censusLease{};
+const char* disjointReasonText(DisjointReason r) {
+    switch (r) {
+    case DisjointReason::None: return "ok";
+    case DisjointReason::InvalidLease: return "invalid lease";
+    case DisjointReason::WrongOwner: return "wrong owner thread or context";
+    case DisjointReason::Incomplete: return "incomplete";
+    case DisjointReason::DriverFailure: return "driver failure";
+    case DisjointReason::Disjoint: return "the GPU clock changed inside the scope (disjoint)";
+    case DisjointReason::ZeroFrequency: return "zero frequency";
+    case DisjointReason::Stale: return "stale: not read within 2 s of its close";
+    }
+    return "unknown";
+}
 void stop(const std::shared_ptr<Domain>& d) noexcept {
     if (!d->unavailable.exchange(true, std::memory_order_acq_rel))
         Log::get().note("GPU timing: an unfinished sample was abandoned without its owner context; "
@@ -100,6 +117,7 @@ bool gpuTimingShutdown(ID3D11DeviceContext* ctx) noexcept {
     if (!d || !d->owns(ctx)) return false;
     d->unavailable.store(true, std::memory_order_release);
     const bool result = d->clock.shutdown(GetTickCount64());
+    g_censusLease = {};   // the clock's shutdown closed it
     auto expected = d;
     std::atomic_compare_exchange_strong(&registry(), &expected, std::shared_ptr<Domain>{});
     return result;
@@ -109,6 +127,87 @@ void gpuTimingAbandon() noexcept {
     if (d) d->unavailable.store(true, std::memory_order_release);
     // The clock's destructor issues nothing; native backend destruction only
     // Releases. Outstanding timer states retain this domain until reset.
+}
+
+// Built v13.6: the GPU pass profiler's yield (gpu_timing.h). The flag is read by every NEW lease the timers and the frame driver would take; a refusal
+// is counted and returns the same "not taken" a busy clock gives, so the caller's existing failure path runs. The profiler's own scopes are not
+// gated (gpuTimingPassScopeOpen is what the profiler uses).
+namespace {
+std::atomic<bool> g_yieldOn{false};
+std::atomic<uint64_t> g_yieldRefusals{0};
+void noteYieldRefusal() noexcept { g_yieldRefusals.fetch_add(1, std::memory_order_relaxed); }
+}  // namespace
+void gpuTimingSetYield(bool on) noexcept { g_yieldOn.store(on, std::memory_order_release); }
+bool gpuTimingYielding() noexcept { return g_yieldOn.load(std::memory_order_acquire); }
+uint64_t gpuTimingTakeYieldRefusals() noexcept { return g_yieldRefusals.exchange(0, std::memory_order_acq_rel); }
+
+bool gpuTimingCensusScopeOpen() noexcept { return static_cast<bool>(g_censusLease); }
+bool gpuTimingCensusScopeEnsure(ID3D11DeviceContext* ctx, uint64_t now) noexcept {
+    if (g_censusLease) return true;
+    auto d = current();
+    // Another scope open (the application frame's, the profiler's) is borrowed by the spans as it stands; the profiler's yield keeps this one closed.
+    if (!d || !d->owns(ctx) || d->unavailable.load(std::memory_order_acquire) || d->clock.scopeOpen() || gpuTimingYielding()) return false;
+    d->collectExpired(now);
+    g_censusLease = d->clock.startFrame(now);
+    return static_cast<bool>(g_censusLease);
+}
+void gpuTimingCensusScopeEnd(ID3D11DeviceContext* ctx, uint64_t now) noexcept {
+    if (!g_censusLease) return;
+    auto d = current();
+    if (d && d->owns(ctx) && !d->unavailable.load(std::memory_order_acquire)) {
+        d->clock.finishFrame(g_censusLease, now);   // closes the scope; spans that began inside it keep their own leases on the record
+        d->clock.release(g_censusLease, now);
+    }
+    g_censusLease = {};
+}
+
+bool gpuTimingPassScopeHeld() noexcept {
+    auto d = current();
+    return d && d->clock.scopeOpen();
+}
+bool gpuTimingPassScopeOpen(ID3D11DeviceContext* ctx, unsigned slot, uint64_t now) noexcept {
+    auto d = current();
+    if (!d || slot >= kPassScopeSlots || g_passLease[slot] || !d->owns(ctx) ||
+        d->unavailable.load(std::memory_order_acquire) || d->clock.scopeOpen())
+        return false;
+    d->collectExpired(now);
+    g_passLease[slot] = d->clock.acquireInterval(now);   // scopeOpen was false, so this opens a standalone scope
+    return static_cast<bool>(g_passLease[slot]);
+}
+bool gpuTimingPassScopeClose(ID3D11DeviceContext* ctx, unsigned slot, uint64_t now) noexcept {
+    auto d = current();
+    if (!d || slot >= kPassScopeSlots || !g_passLease[slot] || !d->owns(ctx)) return false;
+    return d->clock.endInterval(g_passLease[slot], now);
+}
+GpuPassScopeResult gpuTimingPassScopePoll(ID3D11DeviceContext* ctx, unsigned slot, uint64_t now) noexcept {
+    GpuPassScopeResult out{};
+    auto d = current();
+    if (!d || slot >= kPassScopeSlots || !g_passLease[slot]) {
+        out.status = GpuPassScopeStatus::Failed;
+        out.reason = "no scope was opened in this slot";
+        return out;
+    }
+    if (!d->owns(ctx)) {
+        out.status = GpuPassScopeStatus::Failed;
+        out.reason = "polled off the owner context";
+        return out;
+    }
+    const DisjointResult r = d->clock.poll(g_passLease[slot], now);
+    if (r.status == DisjointStatus::Pending) return out;
+    if (r.status == DisjointStatus::Ready) {
+        out.status = GpuPassScopeStatus::Ready;
+        out.frequency = r.frequency;
+        return out;
+    }
+    out.status = GpuPassScopeStatus::Failed;
+    out.reason = disjointReasonText(r.reason);
+    return out;
+}
+void gpuTimingPassScopeRelease(ID3D11DeviceContext* ctx, unsigned slot, uint64_t now) noexcept {
+    auto d = current();
+    if (!d || slot >= kPassScopeSlots || !g_passLease[slot]) return;
+    if (d->owns(ctx)) d->clock.release(g_passLease[slot], now);
+    g_passLease[slot] = {};
 }
 
 struct GpuTimer::State : TimerRegistration {
@@ -165,6 +264,10 @@ GpuTimer& GpuTimer::operator=(GpuTimer&& other) noexcept {
 bool GpuTimer::beginImpl(ID3D11Device* dev, ID3D11DeviceContext* ctx,
                          bool borrowedFrame) noexcept {
     if (state_ && !state_->domain->owns(ctx)) return false;
+    if (gpuTimingYielding()) {   // Built v13.6: the profiler's capture holds the clock; this timer's lease is refused (counted)
+        noteYieldRefusal();
+        return false;
+    }
     if (!gpuTimingBind(dev, ctx)) return false;
     const auto d = current();
     if (!d || !d->accepts(ctx) || d->device() != dev) return false;
@@ -334,6 +437,10 @@ bool GpuTimingFrameDriver::begin(unsigned i) noexcept {
     auto* s = state_;
     if (!s || !s->domain->accepts(s->context()) || i >= GpuSpanState::kSlots) return false;
     if (s->open >= 0 || s->stopped || s->slots[i].phase != State::Phase::Idle) return false;
+    if (gpuTimingYielding()) {   // Built v13.6: the profiler's capture holds the clock; this frame's lease is refused (counted), nothing is stopped
+        noteYieldRefusal();
+        return false;
+    }
     const auto now = GetTickCount64();
     s->domain->collectExpired(now);
     auto& q = s->slots[i];

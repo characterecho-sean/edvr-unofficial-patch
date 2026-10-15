@@ -92,6 +92,12 @@ void bindingSet(BindSlot slot, void* ptr) {
     ++s.gen;
 }
 
+void bindingInvalidate(BindSlot slot) {
+    Slot& s = slotOf(slot);
+    s.ptr = nullptr;
+    ++s.gen;
+}
+
 void bindingSetShader(BindSlot slot, void* ptr, uint64_t hash) {
     Slot& s = slotOf(slot);
     s.ptr = ptr;

@@ -85,8 +85,10 @@ constexpr float kTipRatio = 1.0f + kTipGapFrac + kTipWidthFrac;
 constexpr int kMenuMaxTabs = 8;
 // The Status page reaches 15 on the native path (the three headset lines
 // of docs/openxr-resolution-per-headset-2026-09-14.md); statusLine drops
-// silently past this, and the line it would drop is `Last write`.
-constexpr int kMenuMaxLines = 16;
+// silently past this, and the line it would drop is `Last write`. 17 since
+// 2026-10-14: the flat page gained its sixth row (Intro movie), and its rows, a
+// blank line and the ten-line warning (flat_elite_settings.h) are the whole card.
+constexpr int kMenuMaxLines = 17;
 constexpr int kMenuMaxTiles = 16;
 
 // A gauge: a big number with a small caption above and one small line
@@ -215,6 +217,9 @@ void menuPanelTick(ID3D11Device* dev);
 bool menuPanelCompositeFlat(IDXGISwapChain* swap);
 bool menuPanelCompositeFlatTexture(ID3D11Texture2D* back);
 bool menuPanelFlatRasterReady();
+// How many rasters the panel has taken so far (wraps). A caller that submitted content and wants to know its raster is the live one
+// compares this with the value it read before the submit.
+uint32_t menuPanelRasterSerial();
 void menuPanelFlatResize();
 
 void menuPanelSetGeometry(const MenuGeometry& g);

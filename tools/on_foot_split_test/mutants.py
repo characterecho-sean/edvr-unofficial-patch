@@ -85,6 +85,9 @@ TRACK_CHANGES = "        ++changes;\n"
 SEAT_FLAGS = "constexpr uint32_t kStatusFlagsSeated = (1u << 24) | (1u << 25) | (1u << 26);\n"
 SEAT_FLAGS2 = "constexpr uint32_t kStatusFlags2Seated = (1u << 1) | (1u << 2);\n"
 SEAT = "    return (flags & kStatusFlagsSeated) != 0 || (flags2 & kStatusFlags2Seated) != 0;\n"
+SRV_RADIUS = "inline constexpr float kTemporalSrvMetres = 3.5f;\n"
+SRV_SEAT = "    return why == TemporalFootWhy::Seated && (seatKind & kTemporalSeatKindSrv) != 0;\n"
+SRV_SPLIT = "    return srv && configured > kTemporalSrvMetres ? kTemporalSrvMetres : configured;\n"
 
 
 def drop(old):
@@ -132,6 +135,12 @@ MUTANTS = [
       "on foot turns the world path back on for a player who turned it off"),
     M("split-ignores-on-foot", "mode", "R3b", [(SPLIT, "    return configured > 0.0f ? kTemporalOnFootSplitMetres : configured;\n")], "the millimetre in a cockpit"),
     M("split-never-changes", "mode", "R3c", [(SPLIT, "    return configured;\n")], "the on-foot split is the configured one: no fix"),
+    # ---- R7: the SRV --------------------------------------------------------------------------------------------------------------
+    M("srv-radius-ten", "mode", "R7a", [(SRV_RADIUS, "inline constexpr float kTemporalSrvMetres = 10.0f;\n")], "the SRV radius is the ship's: the blur stays"),
+    M("srv-radius-two", "mode", "R7a", [(SRV_RADIUS, "inline constexpr float kTemporalSrvMetres = 2.0f;\n")], "inside the SRV's own bonnet (2.85 m measured): its body takes the world path"),
+    M("srv-includes-the-ship", "mode", "R7b", [(SRV_SEAT, "    return why == TemporalFootWhy::Seated && (seatKind & 0x7u) != 0;\n")], "a main ship or a fighter gets the SRV radius"),
+    M("srv-ignores-the-seat", "mode", "R7f", [(SRV_SEAT, "    return (seatKind & kTemporalSeatKindSrv) != 0;\n")], "a stale seat kind of 4 narrows the split with nobody seated"),
+    M("srv-widens-the-split", "mode", "R7g", [(SRV_SPLIT, "    return srv ? kTemporalSrvMetres : configured;\n")], "a configured split below the radius, or zero, is overridden in an SRV"),
     # ---- R2: the seat ------------------------------------------------------------------------------------------------------------
     M("seat-drops-the-main-ship", "journal", "R2a", [(SEAT_FLAGS, "constexpr uint32_t kStatusFlagsSeated = (1u << 25) | (1u << 26);\n")], "Flags bit 24 seats nobody"),
     M("seat-drops-the-fighter", "journal", "R2a", [(SEAT_FLAGS, "constexpr uint32_t kStatusFlagsSeated = (1u << 24) | (1u << 26);\n")], "Flags bit 25 seats nobody"),

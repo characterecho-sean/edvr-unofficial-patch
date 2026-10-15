@@ -4,9 +4,13 @@
 #include "engine_motion_cpu.h"
 #include "frame_ticks.h"
 #include "gpu_frame_timing.h"
+#include "vscreen.h"   // vScreenAaOffForDraws, vScreenEyeDrawsThisFrame: the draw hook CPU line
+#include "gpu_census.h"      // gpuCensusFrameSpan: the overlay's GPU time with the application clock off (2026-10-14)
+#include "frame_span_tile.h" // gpuTimeTileText: which GPU number the GPU TIME tile shows
 
 #include <windows.h>
 #include <algorithm>
+#include <vector>
 
 #include <d3d11.h>
 #include <dxgi1_4.h>
@@ -200,6 +204,7 @@ struct State {
     // The Present block noted by the swapchain hook, for the frame about
     // to be ringed.
     float    pendingPresentWaitMs = 0.0f;
+    unsigned frameWorkSeen = 0;   // the census's work-span sample count last fed to the history (2026-10-14)
 
     // The long-frame book (freeze_book.h): every Present gap over twice the period that reached the judge,
     // what it turned out to be, what was written, and the worst few. Written on the render thread, read at
@@ -1025,6 +1030,34 @@ void perfMonitorCrossProfileFrame() {
     for (int i = 0; i < lines.count; ++i) Log::get().note("%s", lines.text[i]);
 }
 
+// The Present hook's tick sum, p50 and p95 over each 30 s (2026-10-13). One float per frame at the edge, the frames whose
+// chain was measured (marks > 0); sorted once a window, on the render thread. The LONG FRAME lines report single frames only.
+struct HookTickWindow {
+    std::vector<float> samples;
+    uint64_t startMs = 0;
+};
+HookTickWindow g_hookTickWindow;
+
+void hookTickNote(const FrameTickSummary& t, uint64_t nowMs) {
+    if (g_hookTickWindow.startMs == 0) g_hookTickWindow.startMs = nowMs;
+    if (t.marks > 0 && std::isfinite(t.hookMs)) g_hookTickWindow.samples.push_back(t.hookMs);
+    if (nowMs - g_hookTickWindow.startMs < 30000) return;
+    std::vector<float>& v = g_hookTickWindow.samples;
+    if (v.empty()) {
+        Log::get().note("Present hook ticks: 30 s with no frame whose chain was measured.");
+    } else {
+        std::sort(v.begin(), v.end());
+        const size_t n = v.size();
+        const size_t i95 = std::min(n - 1, n * 95 / 100);
+        Log::get().note("Present hook ticks: 30 s, %u frame(s) with a measured chain; EDVR's tick sum per frame p50 %.3f ms, "
+                        "p95 %.3f ms, max %.3f ms (the real Present excluded; the draw hooks are the separate line).",
+                        static_cast<unsigned>(n), static_cast<double>(v[n / 2]), static_cast<double>(v[i95]),
+                        static_cast<double>(v.back()));
+    }
+    v.clear();
+    g_hookTickWindow.startMs = nowMs;
+}
+
 void perfMonitorFrame(ID3D11Device* dev) {
     State& s = g_s;
     ++s.frameNo;
@@ -1045,6 +1078,7 @@ void perfMonitorFrame(ID3D11Device* dev) {
     // the rest add up (frame_ticks.h). The stretch since the last mark is the
     // menu tick's own head; the remainder of this function is marked at its end.
     f.ticks = g_frameTicks.cut("menu_tick", q, qpcFrequency());
+    hookTickNote(f.ticks, nowMs());
     // Engine motion's hooks, cut at the same edge (engine_motion_cpu.h): this
     // thread is the render thread, the one that calls Present. The figures are
     // this frame's own, every call clocked -- what the LONG FRAME line reads.
@@ -1068,6 +1102,16 @@ void perfMonitorFrame(ID3D11Device* dev) {
         const NativeTimingSnapshot timing = nativeTimingSnapshot();
         const GpuFrameSnapshot gpu = gpuFrameSnapshot();
         s.nativeHistory.observe(true, timing, gpu, historyNow);
+        // With the application clock off (2026-10-14), the frame's GPU work span is the application-render series' source: one sample
+        // a completed pair, once. Its benchmark join is not made (the native benchmark joins by native frame sequence).
+        if (!gpu.enabled) {
+            double workMs = 0.0;
+            unsigned workSamples = 0;
+            if (gpuCensusFrameSpan(&workMs, &workSamples) && workSamples != s.frameWorkSeen) {
+                s.frameWorkSeen = workSamples;
+                s.nativeHistory.noteFrameWork(workSamples, historyNow, workMs);
+            }
+        }
         if (!updateBenchmarkMetadata(s, timing, historyNow)) {
             s.nativeBenchmark.reset();
             s.nativeBenchmarkScope = 0;
@@ -1164,10 +1208,13 @@ void perfMonitorFrame(ID3D11Device* dev) {
     // explain a settlement's many thousands of hook invocations. Average
     // only measured frames, never the held value copied into the ring.
     if (s.frameNo % 1800 == 0) {
-        Log::get().note("draw hook CPU: 1800-frame window ending %u; %.3f ms/sampled frame mean, %.3f ms max, %u sampled frames (one in %u); excludes forwarded game draw time, includes EDVR reissues; zero samples means unavailable. Each sampled frame's figure is estimated from every %uth draw, scaled by %u.",
+        // The AA mode (2026-10-13: the AA-off fast path's switch) and the eye draws counted at this edge. The eye count is
+        // taken after the subscriber gate (beginPanelOverride), so it is exact while a subscriber is on and reads 0 on the fast path.
+        Log::get().note("draw hook CPU: 1800-frame window ending %u; %.3f ms/sampled frame mean, %.3f ms max, %u sampled frames (one in %u); excludes forwarded game draw time, includes EDVR reissues; zero samples means unavailable. Each sampled frame's figure is estimated from every %uth draw, scaled by %u. Temporal AA %s; eye draws counted this frame %u (counted only while a draw subscriber is on).",
             s.frameNo, s.drawWindowSamples ? s.drawWindowMs / s.drawWindowSamples : 0.0,
             double(s.drawWindowMaxMs), s.drawWindowSamples, unsigned(kDrawSampleEvery),
-            unsigned(kPerfMonitorDrawTimeStride), unsigned(kPerfMonitorDrawTimeStride));
+            unsigned(kPerfMonitorDrawTimeStride), unsigned(kPerfMonitorDrawTimeStride),
+            vScreenAaOffForDraws() ? "off" : "on", vScreenEyeDrawsThisFrame());
         s.drawWindowMs = 0.0; s.drawWindowMaxMs = 0.0f; s.drawWindowSamples = 0;
         // Written every window, quiet or not, so a window with no refresh in it (all zeros) can be told from a build that does not have this line.
         const uint32_t reloads = s.cfgReloads.exchange(0, std::memory_order_relaxed);
@@ -1385,11 +1432,20 @@ int perfMonitorTiles(PerfTile* out, int max) {
         tile("FRAME RATE", "--", "measuring");
         tile("1% LOW", "--", "");
     }
-    if (native && nativeApplicationGpu.count) {
-        snprintf(v, sizeof(v), "%.1f", nativeApplicationGpu.meanMs);
-        tile("GPU TIME", v, "ms application render; elapsed");
-    } else if (native) {
-        tile("GPU TIME", "--", noTiming);
+    // GPU TIME (2026-10-14): the application-render mean when that clock is on; with it off, the census's frame GPU span
+    // (boundary to boundary, one pair a frame). "--" only before the first pair has completed.
+    if (native) {
+        // With the application clock off the series holds the frame GPU work span (noteFrameWork), so its mean is the span's, not the application's.
+        const bool clockOn = gpuFrameSnapshot().enabled;
+        double spanLast = 0.0;
+        const bool spanDone = gpuCensusFrameSpan(&spanLast, nullptr);
+        const bool historyHas = nativeApplicationGpu.count != 0;
+        // The same choice the fps overlay line makes (frame_span_tile.h chooseGpuTime): the tile's application test is the clock alone.
+        const GpuTimeChoice pick = chooseGpuTime(clockOn, clockOn, historyHas, nativeApplicationGpu.meanMs, spanDone, spanLast);
+        const char* reason = clockOn ? noTiming : "frame GPU work span: no sample yet";
+        gpuTimeTileText(pick.source == GpuTimeSource::ApplicationRender, pick.ms, pick.source == GpuTimeSource::WorkSpan, pick.ms,
+                        reason, v, sizeof(v), sub, sizeof(sub));
+        tile("GPU TIME", v, sub);
     }
     if (native && nativeApplicationCpu.count) {
         // The caller work per cycle: the game's thread from one pose wait's
@@ -1621,6 +1677,10 @@ void perfMonitorLocalGpuLine(char* buf, size_t bufLen) {
         const char* label = snap.haveResult && snap.result.source == GpuSpanSource::ApplicationRender
                                 ? "Application render" : "Render to submit";
         if (!timing.active || !timing.firstSequence) { snprintf(buf, bufLen, "%s: native timing unavailable", label); return; }
+        double spanMs = 0.0;
+        if (!snap.enabled && gpuCensusFrameSpan(&spanMs, nullptr)) {
+            snprintf(buf, bufLen, "Frame GPU work span: %.2f ms (D3D11; first command to last; includes GPU idle inside the frame)", spanMs); return;
+        }
         if (!snap.enabled) { snprintf(buf, bufLen, "%s: disabled", label); return; }
         if (!snap.haveResult) { snprintf(buf, bufLen, "%s: pending", label); return; }
         if (snap.result.reason == GpuSpanReason::Valid && snap.result.sequence < timing.firstSequence) {
@@ -1638,6 +1698,10 @@ void perfMonitorLocalGpuLine(char* buf, size_t bufLen) {
         return;
     }
     const GpuFrameSnapshot snap = gpuFrameSnapshot();
+    double spanMs = 0.0;
+    if (!snap.enabled && gpuCensusFrameSpan(&spanMs, nullptr)) {
+        snprintf(buf, bufLen, "Frame GPU work span: %.2f ms (D3D11; first command to last; includes GPU idle inside the frame)", spanMs); return;
+    }
     if (!snap.enabled) { snprintf(buf, bufLen, "Render to submit: disabled"); return; }
     if (!snap.haveResult) { snprintf(buf, bufLen, "Render to submit: pending"); return; }
     if (snap.result.reason != GpuSpanReason::Valid) {
@@ -1725,16 +1789,17 @@ void perfMonitorOverlayLine(char* buf, size_t bufLen) {
         const uint64_t now = GetTickCount64();
         const auto render = s.nativeHistory.applicationGpu(now, 200);
         const auto submit = s.nativeHistory.applicationCpu(now, 200);
-        const bool haveGpu = nativeApplicationGpuReady(timing, gpu) && render.count;
         const bool haveCpu = nativeApplicationCpuReady(timing) && submit.count;
-        char gpuValue[24] = "--", cpuValue[24] = "--";
-        if (haveGpu) snprintf(gpuValue, sizeof(gpuValue), "%.1f", render.meanMs);
-        if (haveCpu) snprintf(cpuValue, sizeof(cpuValue), "%.1f", submit.meanMs);
+        // The GPU figure is the tile's choice (frame_span_tile.h chooseGpuTime): with the application clock off it is the frame
+        // GPU work span, which this line did not read before 2026-10-14 and so showed "gpu -- ms" for any such flight.
+        double spanLast = 0.0;
+        const bool spanDone = gpuCensusFrameSpan(&spanLast, nullptr);
+        const GpuTimeChoice pick = chooseGpuTime(gpu.enabled, nativeApplicationGpuReady(timing, gpu), render.count != 0, render.meanMs,
+                                                 spanDone, spanLast);
         // "cpu" is the caller work per cycle, the line's width unchanged; an
         // older runtime's stand-in says what it is.
-        snprintf(buf, bufLen, "%.0f fps   gpu %s ms   %s %s ms",
-            perfFpsOf(ps.avgMs), gpuValue, nativeCpuPreSubmit(s.nativeHistory) ? "cpu (pre-submit)" : "cpu",
-            cpuValue);
+        overlayLineText(buf, bufLen, perfFpsOf(ps.avgMs), pick, nativeCpuPreSubmit(s.nativeHistory) ? "cpu (pre-submit)" : "cpu",
+                        haveCpu, submit.meanMs);
         return;
     }
     char times[120] = "";

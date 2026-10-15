@@ -146,6 +146,11 @@ uint32_t bindingGeneration(BindSlot slot);
 // object, which is the bug that shipped as 0.5.2.
 void bindingSet(BindSlot slot, void* ptr);
 
+// The slot's binding is unknown: the pointer becomes null and the generation moves, so no cached answer and no
+// pointer compare can take it for the old binding. For a slot whose recording was skipped for a while
+// (vscreen's AA-off fast path, 2026-10-13); the next bind is recorded as usual.
+void bindingInvalidate(BindSlot slot);
+
 // A shader binding with its content hash, looked up once at the set. The
 // draw path asked VSGetShader for it three times a draw -- the billboard
 // variant, the interface classifier, the scanner's chrome tracker -- and each

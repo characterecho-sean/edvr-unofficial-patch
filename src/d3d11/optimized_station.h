@@ -1,10 +1,10 @@
 #pragma once
-// The optimized station (fix.optimized_station = on | off). See optimized_station.cpp for the rules and docs\optimized-station-2026-10-12.md.
+// The optimized station (fix.optimized_stations = on | off). See optimized_station.cpp for the rules and docs\optimized-station-2026-10-12.md.
 #include <cstdint>
 
 namespace edvr {
 
-// Once, at install: reads fix.optimized_station (on in VR; off in the flat profile unless set) and attaches the hooks when it is on.
+// Once, at install: reads fix.optimized_stations (on in VR; off in the flat profile unless set) and attaches the hooks when it is on.
 void optimizedStationInstall(bool flatProfile);
 // The setting, as last read (one atomic load).
 bool optimizedStationOn() noexcept;

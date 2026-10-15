@@ -1279,6 +1279,137 @@ def _ini_selects_xess(target, half):
     return mode == "xess"
 
 
+# ---------------------------------------------------------------------------
+# advanced.real_dll: one value, in the shared edvr.ini (src/common/real_dll_choice.h)
+#
+# The chained mod (EDHM, ReShade) is one decision for the install. The game reads it
+# from edvr.ini for BOTH profiles; edvr-flat.ini holds it only to override it or to
+# say `none`. An install that predates the rule can hold it in edvr-flat.ini alone,
+# so the VR profile never chained it. A run that leaves the settings alone moves it:
+# both files are backed up, edvr.ini gets the value, edvr-flat.ini is emptied of it.
+# --ini replaces both files with their templates and so replaces this too.
+# ---------------------------------------------------------------------------
+def _ini_read(path):
+    """(text, bom) of a settings file; bytes that are not UTF-8 survive a round trip."""
+    raw = Path(path).read_bytes()
+    bom = raw.startswith(b"\xef\xbb\xbf")
+    return (raw[3:] if bom else raw).decode("utf-8", errors="surrogateescape"), bom
+
+
+def _ini_write(path, text, bom):
+    """Replace a settings file in one step: the old bytes or all of the new ones."""
+    data = text.encode("utf-8", errors="surrogateescape")
+    tmp = "%s.edvr-tmp-%d" % (path, os.getpid())
+    with open(tmp, "wb") as stream:
+        stream.write((b"\xef\xbb\xbf" if bom else b"") + data)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(tmp, path)
+
+
+def _ini_section_of(stripped):
+    if stripped[:1] == "[" and "]" in stripped:
+        return stripped[1:stripped.index("]")].strip().lower()
+    return None
+
+
+def ini_real_dll(text):
+    """advanced.real_dll as the game's reader sees it: the last live line wins, an
+    inline comment needs blank space before it, `#` and `;` start a comment line."""
+    section, value = "", ""
+    for raw in text.splitlines():
+        s = raw.strip()
+        if not s or s[0] in "#;":
+            continue
+        named = _ini_section_of(s)
+        if named is not None:
+            section = named
+        elif section == "advanced" and "=" in s:
+            key, rest = s.split("=", 1)
+            if key.strip().lower() == "real_dll":
+                cut = re.search(r"\s[;#]", rest)
+                value = (rest[:cut.start()] if cut else rest).strip()
+    return value
+
+
+def ini_set_real_dll(text, value):
+    """`text` with advanced.real_dll set to `value` (empty clears it), everything else
+    byte for byte: the last live line is rewritten, else the line goes at the end of
+    [advanced], else a new [advanced] closes the file."""
+    nl = "\r\n" if "\r\n" in text else "\n"
+    lines = text.splitlines(keepends=True)
+    section, live, adv_end = "", None, None
+    for i, raw in enumerate(lines):
+        s = raw.strip()
+        named = _ini_section_of(s)
+        if named is not None:
+            section = named
+            if named == "advanced":
+                adv_end = i
+            continue
+        if section != "advanced":
+            continue
+        if s:
+            adv_end = i
+        if s and s[0] not in "#;" and "=" in s and s.split("=", 1)[0].strip().lower() == "real_dll":
+            live = i
+    new = "real_dll = %s" % value if value else "real_dll ="
+    if live is not None:
+        eol = lines[live][len(lines[live].rstrip("\r\n")):] or nl
+        lines[live] = new + eol
+    elif adv_end is not None:
+        if not lines[adv_end].endswith("\n"):
+            lines[adv_end] += nl
+        lines.insert(adv_end + 1, new + nl)
+    else:
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] += nl
+        lines += ["[advanced]" + nl, new + nl]
+    return "".join(lines)
+
+
+def real_dll_migration(target):
+    """The move to plan, or None. Only when edvr-flat.ini names a mod and edvr.ini
+    (present or not) names none; `none` in either file is the user's and is left."""
+    shared = os.path.join(target, "edvr.ini")
+    flat = os.path.join(target, "edvr-flat.ini")
+    if not os.path.isfile(flat):
+        return None
+    flat_text, flat_bom = _ini_read(flat)
+    value = ini_real_dll(flat_text)
+    if not value or value.lower() == "none":
+        return None
+    shared_text, shared_bom = _ini_read(shared) if os.path.isfile(shared) else (None, False)
+    if shared_text is not None and ini_real_dll(shared_text):
+        return None
+    return {"value": value, "shared": shared, "flat": flat, "shared_text": shared_text,
+            "shared_bom": shared_bom, "flat_text": flat_text, "flat_bom": flat_bom}
+
+
+REAL_DLL_NEW_SHARED = ("# EDVR settings shared by the VR and flat profiles. advanced.real_dll names the mod EDVR chains through;\r\n"
+                       "# edvr-flat.ini can override it for the flat profile, or say real_dll = none to run flat without it.\r\n"
+                       "[advanced]\r\nreal_dll = %s\r\n")
+
+
+def apply_real_dll_migration(m, tag, stamp):
+    """Do the move: back up both files, write edvr.ini, then empty edvr-flat.ini of it."""
+    backups = []
+    for path in (m["shared"], m["flat"]):
+        if os.path.isfile(path):
+            backup = _native_backup_name(path, tag, stamp)
+            _reserve_backup(backup)
+            shutil.copy2(path, backup)
+            if sha256(backup) != sha256(path):
+                raise ValueError("backup verification failed: %s" % path)
+            backups.append(backup)
+    if m["shared_text"] is None:
+        _ini_write(m["shared"], REAL_DLL_NEW_SHARED % m["value"], False)
+    else:
+        _ini_write(m["shared"], ini_set_real_dll(m["shared_text"], m["value"]), m["shared_bom"])
+    _ini_write(m["flat"], ini_set_real_dll(m["flat_text"], ""), m["flat_bom"])
+    return backups
+
+
 def _flat_vr_leftovers(target):
     """Recognized EDVR VR state needs the GUI's original-file recovery."""
     xr = os.path.join(target, "Openvr", "win64")
@@ -1463,10 +1594,21 @@ def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
     seed_ini = (scope in ("both", "flat") and not include_ini and
                 not os.path.isfile(_ini_target(target, "flat")) and
                 os.path.isfile(os.path.join(target, "edvr.ini")))
+    # advanced.real_dll lives once, in edvr.ini. An edvr-flat.ini that holds it alone is moved, unless
+    # --ini is about to replace both files with their templates (which then replaces the value too).
+    migration = None if include_ini else real_dll_migration(target)
+    if include_ini:
+        for _, ini_target, _ in ini_pairs:
+            if os.path.isfile(ini_target) and ini_real_dll(_ini_read(ini_target)[0]):
+                print("[edvr] NOTE: --ini replaces %s, including its advanced.real_dll; set it again in edvr.ini "
+                      "(one value for both profiles)" % ini_target)
     print("[edvr] %s plan%s: %s" % (scope, " (DRY RUN -- nothing will be written)" if dry_run else "", target))
     for e in entries: print("       %-7s %s" % (e["key"], e["target"]))
     if seed_ini:
         print("       seed     %s (from edvr.ini; a new file, so no backup)" % _ini_target(target, "flat"))
+    if migration:
+        print("       migrate  advanced.real_dll = %s: edvr-flat.ini -> edvr.ini, so it is set once and applies to the "
+              "VR and flat profiles (both files are backed up first)" % migration["value"])
     print("       receipt  %s" % receipt)
     if dry_run:
         _prune_quietly(target, keep_backups, dry_run=True,
@@ -1522,10 +1664,23 @@ def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
     if seed_ini:
         try:
             shutil.copy2(os.path.join(target, "edvr.ini"), _ini_target(target, "flat"))
-            print("[edvr] flat settings seeded: %s (copied from edvr.ini; the flat profile no longer reads edvr.ini)" %
-                  _ini_target(target, "flat"))
+            seeded, seeded_bom = _ini_read(_ini_target(target, "flat"))
+            carried = ini_real_dll(seeded)
+            if carried and carried.lower() != "none":
+                # The chain lives in edvr.ini; the seeded copy keeps none, so it is set once.
+                _ini_write(_ini_target(target, "flat"), ini_set_real_dll(seeded, ""), seeded_bom)
+            print("[edvr] flat settings seeded: %s (copied from edvr.ini; the flat profile no longer reads edvr.ini, "
+                  "except for advanced.real_dll, which both profiles share)" % _ini_target(target, "flat"))
         except OSError as exc:
             print("[edvr] WARNING: flat settings seed failed (%s); copy edvr.ini to edvr-flat.ini by hand to keep your settings" % exc)
+    if migration:
+        try:
+            for backup in apply_real_dll_migration(migration, tag, stamp):
+                print("[edvr] backed up %s" % backup)
+            print("[edvr] advanced.real_dll = %s moved from edvr-flat.ini to edvr.ini: one value for both profiles" %
+                  migration["value"])
+        except (OSError, ValueError) as exc:
+            print("[edvr] WARNING: moving advanced.real_dll to edvr.ini failed (%s); set it in edvr.ini by hand" % exc)
     print("[edvr] %s package installed and verified; receipt: %s" % (scope, receipt))
     _prune_quietly(target, keep_backups, receipts=(receipt,))
     return 0
@@ -1807,6 +1962,73 @@ def _scope_self_test():
             code, _ = run(args_for(g, "--scope", "flat", tag="refuse"))
             check(code == "refused" and tree(g) == before,
                   "--scope flat accepted a %s descriptor" % name)
+
+        # advanced.real_dll is one value, in edvr.ini. A value only in edvr-flat.ini is moved by a run that
+        # leaves the settings alone; a dry run says so and writes nothing; both files are backed up; nothing
+        # else in either file changes.
+        shared_text = b"[fix]\r\nx = 1\r\n\r\n[advanced]\r\nreal_dll =\r\nexposure_shader =\r\n"
+        flat_text = b"[fix]\r\ntemporal_aa = fsr\r\n\r\n[advanced]\r\nreal_dll = d3d11_edhm.dll ; EDHM\r\n"
+        g = game("chain-move", user_ini=shared_text)
+        Path(g, "edvr-flat.ini").write_bytes(flat_text)
+        before = tree(g)
+        code, text = run(args_for(g, "--scope", "both", "--dry-run", tag="chain"))
+        check(code == 0 and tree(g) == before, "a dry run that would move advanced.real_dll wrote files")
+        check("migrate  advanced.real_dll = d3d11_edhm.dll: edvr-flat.ini -> edvr.ini" in text,
+              "the dry run did not name the advanced.real_dll move: %r" % text)
+        code, text = run(args_for(g, "--scope", "both", tag="chain"))
+        check(code == 0, "the install that moves advanced.real_dll failed: %r" % text)
+        check(Path(g, "edvr.ini").read_bytes() ==
+              b"[fix]\r\nx = 1\r\n\r\n[advanced]\r\nreal_dll = d3d11_edhm.dll\r\nexposure_shader =\r\n",
+              "edvr.ini did not receive advanced.real_dll alone")
+        check(Path(g, "edvr-flat.ini").read_bytes() ==
+              b"[fix]\r\ntemporal_aa = fsr\r\n\r\n[advanced]\r\nreal_dll =\r\n",
+              "edvr-flat.ini was not emptied of advanced.real_dll alone")
+        check([p.read_bytes() for p in Path(g).glob("edvr.ini.pre-chain-*.bak")] == [shared_text] and
+              [p.read_bytes() for p in Path(g).glob("edvr-flat.ini.pre-chain-*.bak")] == [flat_text],
+              "the move did not back up both settings files")
+        code, text = run(args_for(g, "--scope", "both", tag="chain2"))
+        check(code == 0 and "migrate" not in text, "a second run moved advanced.real_dll again")
+        # Where edvr.ini already names one, `none` is the user's, or edvr.ini is absent, nothing or a new file results.
+        g = game("chain-both-set", user_ini=b"[advanced]\nreal_dll = d3d11_reshade.dll\n")
+        Path(g, "edvr-flat.ini").write_bytes(flat_text)
+        code, _ = run(args_for(g, "--scope", "both", tag="chain3"))
+        check(code == 0 and Path(g, "edvr-flat.ini").read_bytes() == flat_text and
+              Path(g, "edvr.ini").read_bytes() == b"[advanced]\nreal_dll = d3d11_reshade.dll\n",
+              "an edvr.ini that already names a mod was changed, or the flat override was taken away")
+        g = game("chain-none", user_ini=shared_text)
+        Path(g, "edvr-flat.ini").write_bytes(b"[advanced]\nreal_dll = NONE\n")
+        code, _ = run(args_for(g, "--scope", "both", tag="chain4"))
+        check(code == 0 and Path(g, "edvr-flat.ini").read_bytes() == b"[advanced]\nreal_dll = NONE\n" and
+              Path(g, "edvr.ini").read_bytes() == shared_text, "a `none` in edvr-flat.ini was moved")
+        g = game("chain-no-shared")
+        Path(g, "edvr-flat.ini").write_bytes(flat_text)
+        code, _ = run(args_for(g, "--scope", "flat", tag="chain5"))
+        check(code == 0 and ini_real_dll(Path(g, "edvr.ini").read_text(encoding="utf-8")) == "d3d11_edhm.dll" and
+              ini_real_dll(Path(g, "edvr-flat.ini").read_text(encoding="utf-8")) == "",
+              "a flat install with no edvr.ini did not create one holding the chain")
+        # --ini replaces the files with their templates, so it moves nothing and says what it replaced.
+        g = game("chain-ini", user_ini=shared_text)
+        Path(g, "edvr-flat.ini").write_bytes(flat_text)
+        code, text = run(args_for(g, "--scope", "both", "--ini", tag="chain6"))
+        check(code == 0 and "migrate" not in text and "--ini replaces" in text,
+              "--ini planned a move, or said nothing of the chain it replaced")
+        # A seeded edvr-flat.ini keeps no copy of the shared value.
+        g = game("chain-seed", user_ini=b"[advanced]\nreal_dll = d3d11_edhm.dll\n")
+        code, _ = run(args_for(g, "--scope", "flat", tag="chain7"))
+        check(code == 0 and Path(g, "edvr-flat.ini").read_bytes() == b"[advanced]\nreal_dll =\n",
+              "the seeded edvr-flat.ini kept a second copy of the shared chain value")
+        # The two helpers on their own: the reader's rules, and an edit that changes one line.
+        for text, want in ((b"[advanced]\nreal_dll = a.dll ; x\n", "a.dll"),
+                           (b"[advanced]\n#real_dll = a.dll\n", ""),
+                           (b"[fix]\nreal_dll = a.dll\n", ""),
+                           (b"\xef\xbb\xbf[ADVANCED]\nreal_dll = a.dll\nREAL_DLL = b.dll\n", "b.dll"),
+                           (b"[advanced]\nreal_dll = a.dll#nospace\n", "a.dll#nospace")):
+            check(ini_real_dll(text.decode("utf-8-sig")) == want, "ini_real_dll misread %r" % text)
+        check(ini_set_real_dll("[fix]\na = 1\n", "x.dll") == "[fix]\na = 1\n[advanced]\nreal_dll = x.dll\n",
+              "ini_set_real_dll did not add an [advanced] section to a file without one")
+        check(ini_set_real_dll("[advanced]\r\nexposure_shader =\r\n[fix]\r\n", "x.dll") ==
+              "[advanced]\r\nexposure_shader =\r\nreal_dll = x.dll\r\n[fix]\r\n",
+              "ini_set_real_dll did not add the key at the end of [advanced]")
 
         # --profile is the old spelling: it still installs, says so once, and
         # cannot be combined with --scope.

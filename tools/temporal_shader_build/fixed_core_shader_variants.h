@@ -67,9 +67,28 @@ static std::vector<Variant> siblingVariants() {
     };
 }
 
+// The sky ring's compute shader (src/d3d11/sky_ring_shader.h; TEMPORARY, diag.sky_ring; docs/sky-flicker-2026-10-13.md): new, held to its own contract
+// -- the symbol, source name, entry, profile, the text it compiles, the one 1024-thread group it is dispatched with and the bindings the module sets.
+static std::vector<Variant> skyRingVariants() {
+    return {
+        {"kSkyRingBytecode", "sky ring", "main", nullptr, {}, false, edvr::kSkyRingCs, "cs_5_0"},
+    };
+}
+
+// The UI layer composite in place (src/d3d11/fixed_shader_source.h kUiLayerCompositeInPlaceHlsl, docs/ui-layer-2026-09-23.md, "2026-10-13"): a
+// sibling of kUiLayerCompositeBytecode that read-modify-writes the frame's own UAV. New, so held to its own contract (symbol, source name,
+// entry, profile, the text it compiles, the 32x8 group the dispatch uses and the bindings it reads) rather than a former call's.
+static std::vector<Variant> compositeInPlaceVariants() {
+    return {
+        {"kUiLayerCompositeInPlaceBytecode", "ui_layer_composite_inplace_cs", "main", nullptr, {}, false, edvr::kUiLayerCompositeInPlaceHlsl, "cs_5_0"},
+    };
+}
+
 static std::vector<LegacyContract> coreLegacyContracts() {
     return {
-        {"ui_layer_composite_cs", "main", "cs_5_0", nullptr, 0x237EEBB920BC9015ull},
+        // Re-pinned 2026-10-13 on purpose: the thread group is 32x8, not 8x8 (the launch of 254,000 groups was the cost of the pass at the eye's
+        // size: 0.120 ms an eye against 0.090; ui_holo_pass_test --bench-groups holds the two byte for byte). Was 0x237EEBB920BC9015.
+        {"ui_layer_composite_cs", "main", "cs_5_0", nullptr, 0x6488F4CEF2B7D55Cull},
         {"ui_layer_coverage_vs", "main", "vs_5_0", nullptr, 0xC0A9BDF65E71A8DCull},
         {"ui_layer_coverage_ps", "main", "ps_5_0", nullptr, 0xA12E6D166D50BDA1ull},
         {"ui_layer_seed", "main", "vs_5_0", nullptr, 0xCC059AB4FCFA26BCull},
@@ -87,7 +106,10 @@ static std::vector<LegacyContract> coreLegacyContracts() {
         {"ui_depth_holo_unlit_ps", "main", "ps_5_0", nullptr, 0xBF9BF9DF94D733DBull},
         {"ui_depth_holo_resolve_vs", "main", "vs_5_0", nullptr, 0x20645D8AD5F63813ull},
         {"ui_depth_holo_resolve_ps", "main", "ps_5_0", nullptr, 0xA0BA9F47CC37A5BAull},
-        {"ui_depth_holo_near_light_cs", "main", "cs_5_0", nullptr, 0xB1BF8BF2F8942B44ull},
+        // Re-pinned 2026-10-13 on purpose: a 16x16 group holds four of the map's 8x8 blocks, each with its own groupshared flag and its own
+        // texel (0.031 ms an eye with one block a group, 0.010 with four; the old text is tools/ui_holo_pass_test/near_light_reference.h,
+        // which the rig holds this one to byte for byte). Was 0xB1BF8BF2F8942B44.
+        {"ui_depth_holo_near_light_cs", "main", "cs_5_0", nullptr, 0x8F6D7BD410192BF8ull},
         {"ui_depth_holo_marker_reticle_ps", "main", "ps_5_0", nullptr, 0x6EE982850EC312BBull},
         {"orbital coverage", "main", "vs_5_0", nullptr, 0xE791DFD3733D1EBAull},
         {"ui_depth_corona_ps", "main", "ps_5_0", nullptr, 0x0372DA1389F36CE0ull},
@@ -99,7 +121,9 @@ static std::vector<LegacyContract> coreLegacyContracts() {
         // calls them; the pin moves because the text it is assembled from did. Was 0x8C2F828BE3751ABB.
         // Re-pinned 2026-10-09 on purpose (F2 on foot, F15): the on-foot eye-route fallback now takes a skinned character's exact motion from the source's
         // target 7 (SourceSkin at t15, engine.w, kind 7 counted as joined and in its own slot, painted as joined). Was 0xAA505601226395B7.
-        {"screen motion", "main", "ps_5_0", nullptr, 0x47B44C452FE3B59Bull},
+        // Re-pinned 2026-10-15 on purpose: the engine-motion core gained celestialLookup (the planet records' lookup, shared with the VR and flat
+        // shaders), and again for a comment in it; nothing in this shader calls it and its DXBC is byte-identical (21040 bytes). Was 0x47B44C452FE3B59B.
+        {"screen motion", "main", "ps_5_0", nullptr, 0x9224DE94476EDB91ull},
         {"weapon motion", "main", "vs_5_0", nullptr, 0x7232767DAC4ADBD4ull},
         {"weapon motion", "main", "ps_5_0", nullptr, 0xF948E51A2E036952ull},
         {"weapon identity", "main", "cs_5_0", nullptr, 0x10E05DE79500471Dull},

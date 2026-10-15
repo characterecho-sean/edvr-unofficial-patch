@@ -1,4 +1,4 @@
-// The optimized station (fix.optimized_station): inside a station, skip rendering what cannot be seen. While the ship sits in a sealed hangar
+// The optimized station (fix.optimized_stations): inside a station, skip rendering what cannot be seen. While the ship sits in a sealed hangar
 // (docked, the pad lowered and still, the hatch closed), everything outside the hangar is skipped, including the sun's light that leaks into it.
 // The rules and their geometry are in optimized_station_core.h. The seal, the release and the status lines are here. The engine hooks it uses:
 // store_hook.cpp (the store's record judgement, path A), kinematic_eval_hook.cpp (the producer-B and rig vetoes), vscreen.cpp (the sun pair).
@@ -216,7 +216,8 @@ uint64_t g_prodCalls = 0, g_prodVetoed = 0, g_prodKept = 0, g_prodStyle = 0, g_p
 
 // The class cache (lock-free): a slot per node, a word per slot (sealed_trial_core.h packs it). Written by any thread that runs the store.
 sealed::NodeCache<kNodeCacheSlots> g_nodeCache;   // built v14.31: one entry per node and lifecycle generation (a node's name does not change while it lives)
-std::atomic<uint64_t> g_nodeNameReads{0}, g_nodeCacheFull{0}, g_nodeReuseCaught{0};   // the window's name reads and uncached reads (the cost line)
+std::atomic<uint64_t> g_nodeNameReads{0}, g_nodeCacheFull{0}, g_nodeReuseCaught{0};
+std::atomic<uint64_t> g_winSunDrawsSkipped{0};   // built v14.34: sun-pair draws skipped in the window (the summary line)   // the window's name reads and uncached reads (the cost line)
 std::atomic<uint32_t> g_classGen{0};   // moves at every lifecycle point (bumpRigEpoch): every node's class and name are read afresh
 
 bool readMem(void* dst, uintptr_t src, size_t n) noexcept {
@@ -1148,13 +1149,21 @@ bool cullCounted(uintptr_t record, bool containing) noexcept {
     return false;
 }
 // ---- The product's state: the setting, the seal, the release, the window counts ----------------------------------------------------------------
-bool g_settingDefaultOn = true;                // the key's default: on in VR, off in the flat profile (set at install; the poll uses the same)
-std::atomic<bool> g_setting{false};        // fix.optimized_station is on (read at install and every kSettingPollFrames frames)
+std::atomic<bool> g_setting{false};        // fix.optimized_stations is on (read at install and every kSettingPollFrames frames)
 bool g_vetoesAttached = false;             // the producer and rig vetoes are attached (under g_installMutex-free single writer: the render tick)
 bool g_storeWanted = false;                // the store observer is wanted (the setting is on)
 std::atomic<bool> g_dockedNow{false};     // Status.json Flags bit 0 (Docked), read at each tick while known (the store thread reads it)
 bool g_dockedWasNow = false;               // built v14.20 (review 4): the docked flag at the last tick (an undock is a lifecycle point)
 std::atomic<bool> g_dockedKnownNow{false};// Status.json has a Flags sample (the waiting line says unknown until then)
+// Built v14.35 (a v0.20.0 blocker): the seat from the same sample (Flags bits 24-26, Flags2 bits 1-2), and the raw words for the release line and the change instrument.
+bool g_aboardNow = false;                 // seated, and known
+bool g_statusKnownNow = false;
+uint32_t g_statusFlagsNow = 0, g_statusFlags2Now = 0;
+bool g_flagLogSet = false;                // the change instrument: the last words logged
+uint32_t g_flagLogFlags = 0, g_flagLogFlags2 = 0;
+bool g_flagLogKnown = false;
+uint32_t g_flagLogN = 0;
+char g_onFootText[320] = "on foot";
 sealed::GameView g_waitLast;              // the waiting line last written (built v14.23: the game's pad state)
 bool g_waitLastSet = false;
 sealed::GameView g_waitCand;              // built v14.27: the key this tick had, and how long it has held (the line is written on a stable change)
@@ -1306,6 +1315,12 @@ const char* releaseText(sealed::ReleaseWhy w) noexcept {
         case sealed::ReleaseWhy::kLaunch: return "launch (the pad's state object flipped)";
         case sealed::ReleaseWhy::kMechanism: return g_releaseWhy;
         case sealed::ReleaseWhy::kInHangarLeft: return "the own pad left the hangar (the game's r1 went from 1 to 0)";
+        case sealed::ReleaseWhy::kOnFoot: {   // the words at the moment of the release, with the bits that matter
+            char t[300];
+            sealed::describeStatusFlags(t, sizeof(t), g_statusKnownNow, g_statusFlagsNow, g_statusFlags2Now);
+            std::snprintf(g_onFootText, sizeof(g_onFootText), "on foot, not seated in the ship (%s); the seal is for the cockpit only", t);
+            return g_onFootText;
+        }
         default: return "released";
     }
 }
@@ -1541,7 +1556,7 @@ void summaryLine(uint64_t now) noexcept {
     } while (0)
     SUMMARY_NOTE("optimized station: last %llu s: sealed for %llu of %llu frames; rigs vetoed early %llu, records vetoed early %llu, "
                     "records culled after the store %llu, records kept unread %llu, faults %llu (unreadable bucket %llu, cull read %llu, cull restored "
-                    "%llu, cull torn %llu, tick view %llu; callbacks before the first camera %llu, not faults).",
+                    "%llu, cull torn %llu, tick view %llu; callbacks before the first camera %llu, not faults); sun draws skipped %llu.",
                     static_cast<unsigned long long>((now - g_summaryStartMs) / 1000), static_cast<unsigned long long>(g_winSealedFrames),
                     static_cast<unsigned long long>(g_winFrames), static_cast<unsigned long long>(g_winRigVetoes),
                     static_cast<unsigned long long>(g_winProducerVetoes), static_cast<unsigned long long>(g_winCulled),
@@ -1549,7 +1564,8 @@ void summaryLine(uint64_t now) noexcept {
                     static_cast<unsigned long long>(g_winFaultBy[kFaultBucket].load()), static_cast<unsigned long long>(g_winFaultBy[kFaultCullRead].load()),
                     static_cast<unsigned long long>(g_winFaultBy[kFaultCullRestored].load()),
                     static_cast<unsigned long long>(g_winFaultBy[kFaultCullTorn].load()),
-                    static_cast<unsigned long long>(g_winFaultBy[kFaultTickView].load()), static_cast<unsigned long long>(g_winNoCamera.load()));
+                    static_cast<unsigned long long>(g_winFaultBy[kFaultTickView].load()), static_cast<unsigned long long>(g_winNoCamera.load()),
+                    static_cast<unsigned long long>(g_winSunDrawsSkipped.exchange(0, std::memory_order_relaxed)));
     // Built v14.27: the passes the tick read, and what it did with them; the rig veto's lookups. A dead veto or a flapping pad shows here.
     {
         const sealed::PassGate& g = g_passGate;
@@ -1832,19 +1848,19 @@ void applyRigNote(const GatherEntry& e) {
     }
     s->curValid = true;
     if (!s->named) {
-        s->named = true;
         char name[64] = {};
         if (!cachedName(e.record, name, sizeof(name))) std::snprintf(name, sizeof(name), "(none)");
-        std::snprintf(s->name, sizeof(s->name), "%s", name);   // Built v13: the own-ship prefix test reads it
+        sealed::rigRecordName(&s->named, s->name, sizeof(s->name), name);   // Built v13: the own-ship prefix test reads it
     }
 }
 
-// A rig's collection moved (its veto found the new one): its bounds are forgotten, the association is recorded, and its run of vetoes starts afresh.
+// A rig's collection moved (its veto found the new one): its bounds and its first record's name are forgotten (the name decides the own-ship exemption, so it goes with the
+// bounds it was read beside; release review 2026-10-14 finding 4), the association is recorded, and its run of vetoes starts afresh.
 void applyRigAssoc(uintptr_t rig, uintptr_t coll) {
     RigSlot* s = rigFind(rig, true);
     if (!s || coll == s->coll) return;
     uint32_t run = 0;
-    sealed::rigForgetBounds(&s->curValid, &s->lastValid, &s->verdict, &run);
+    sealed::rigReassociate(&s->curValid, &s->lastValid, &s->verdict, &run, &s->named, s->name, sizeof(s->name));
     s->coll = coll;
     collInsert(coll, rig);
     size_t idx = 0;
@@ -2313,16 +2329,15 @@ void afterStoreJudge(uintptr_t bucket, uintptr_t record, bool judge) noexcept {
 
 // ---- The engine's entry points (declared in optimized_station.h) -------------------------------------------------------------------------
 
-// Once, at install: reads fix.optimized_station (on in VR, off in flat; the flat profile does not read it).
+// Once, at install: reads fix.optimized_stations (on in VR, off in flat; the flat profile does not read it).
 void optimizedStationInstall(bool flatProfile) {
-    g_settingDefaultOn = !flatProfile;
-    const std::string text = Config::get().getString("fix.optimized_station", flatProfile ? "off" : "on");
+    const std::string text = Config::get().getString("fix.optimized_stations", "on");
     const bool on = text != "off";
     g_setting.store(on, std::memory_order_release);
     g_summaryStartMs = GetTickCount64();
     if (on) applySetting(true, 0);
-    Log::get().note("optimized station: fix.optimized_station = %s (%s).", on ? "on" : "off",
-                    flatProfile ? "the flat profile: off unless set" : "VR profile");
+    Log::get().note("optimized station: fix.optimized_stations = %s (%s).", on ? "on" : "off",
+                    flatProfile ? "flat profile" : "VR profile");
 }
 
 bool optimizedStationOn() noexcept { return g_setting.load(std::memory_order_acquire); }
@@ -2331,7 +2346,9 @@ bool optimizedStationSealed() noexcept { return g_sealedFlag.load(std::memory_or
 
 // The draw path asks: while sealed, the sun pair is not drawn.
 bool optimizedStationSkipsDraw(uint64_t vs, uint64_t ps) noexcept {
-    return g_sunOff.load(std::memory_order_acquire) && vs == kSunVs && ps == kSunPs;   // the sun skip follows the pad, not the seal (built v14.13)
+    if (!g_sunOff.load(std::memory_order_acquire) || vs != kSunVs || ps != kSunPs) return false;   // the sun skip follows the pad, not the seal (built v14.13)
+    g_winSunDrawsSkipped.fetch_add(1, std::memory_order_relaxed);   // built v14.34: the 30 s line says how many (a flat flight shows 0 if the flat hashes differ)
+    return true;
 }
 
 // The store calls this after it has written a record (bucket = the collection, record = its record). While sealed it judges the record; while
@@ -2468,7 +2485,7 @@ void optimizedStationFrame(uint32_t frame) {
 void optimizedStationFrameBody(uint32_t frame) {
     if (++g_settingPoll >= kSettingPollFrames) {
         g_settingPoll = 0;
-        const std::string text = Config::get().getString("fix.optimized_station", g_settingDefaultOn ? "on" : "off");   // the install's default (VR on, flat off)
+        const std::string text = Config::get().getString("fix.optimized_stations", "on");   // on in VR and in flat (built v14.34)
         const bool on = text != "off";
         if (on != g_setting.load(std::memory_order_acquire)) {
             g_setting.store(on, std::memory_order_release);
@@ -2490,8 +2507,26 @@ void optimizedStationFrameBody(uint32_t frame) {
     ++g_winFrames;
     if (g_dockedNow.load(std::memory_order_acquire)) ++g_winDockedFrames;
     if (g_heldValid) ++g_winSealedFrames;
-    g_dockedKnownNow.store(journalDockedKnown(), std::memory_order_release);
-    g_dockedNow.store(journalDockedKnown() && journalDocked(), std::memory_order_release);
+    // Built v14.34: the Status.json docked flag under either profile (the flat profile's journal accessors answer the no-journal values).
+    g_dockedKnownNow.store(journalStatusDockedKnown(), std::memory_order_release);
+    g_dockedNow.store(journalStatusDockedKnown() && journalStatusDocked(), std::memory_order_release);
+    g_statusKnownNow = journalStatusSeatedKnown();
+    g_aboardNow = g_statusKnownNow && journalStatusSeated();
+    g_statusFlagsNow = journalStatusFlags();
+    g_statusFlags2Now = journalStatusFlags2();
+    {   // The flag-change instrument: every change of the two words (known or not) is one line, so one flight shows when each bit moves against the lift's own events.
+        const bool changed = !g_flagLogSet || g_flagLogKnown != g_statusKnownNow || g_flagLogFlags != g_statusFlagsNow || g_flagLogFlags2 != g_statusFlags2Now;
+        if (changed && g_flagLogN < 400 && (g_dockedNow.load(std::memory_order_acquire) || g_heldValid || g_flagLogSet)) {
+            g_flagLogSet = true;
+            g_flagLogKnown = g_statusKnownNow;
+            g_flagLogFlags = g_statusFlagsNow;
+            g_flagLogFlags2 = g_statusFlags2Now;
+            ++g_flagLogN;
+            char text[300];
+            sealed::describeStatusFlags(text, sizeof(text), g_statusKnownNow, g_statusFlagsNow, g_statusFlags2Now);
+            Log::get().note("optimized station: status flags changed (frame %u): %s; aboard %s; seal %s.", frame, text, g_aboardNow ? "yes" : "no", g_heldValid ? "held" : "not held");
+        }
+    }
     // Built v14.20 (review 4): an undock is a lifecycle point: the rig and collection tables start afresh.
     if (g_dockedWasNow && !g_dockedNow.load(std::memory_order_acquire)) {
         bumpRigEpoch();
@@ -2685,6 +2720,7 @@ void optimizedStationFrameBody(uint32_t frame) {
     sealed::SealInputs in;
     in.setting = true;   // the tick returns above while the setting is off
     in.docked = g_dockedNow;
+    in.aboard = g_aboardNow;
     in.ownKnown = g_game.ownKnown;
     in.poseBack = mechanismPoseTick(now);   // built v14.24: the latched records back at their sealed poses (the mechanism re-seal)
     in.r1Fresh = g_game.r1Fresh;

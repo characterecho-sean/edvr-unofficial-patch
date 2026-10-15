@@ -667,7 +667,9 @@ void* sharpenInner(void* srcTex, int eye, const float* bounds, float strength) {
             ctx->CSSetShaderResources(0, 1, &inSrv);
             ctx->CSSetUnorderedAccessViews(0, 1, &e.outUav, nullptr);
             GpuCensusScope census(ctx, GpuCensusSection::DoorSharpen);
-            ctx->Dispatch((regionW + 7) / 8, (regionH + 7) / 8, 1);
+            // 16x16 (fixed_extra_shader_source.h kSharpenMain): the 8x8 group launched 254,000 groups at the
+            // eye's size and the launch was the cost (0.131 ms an eye against 0.089; ui_holo_pass_test --bench-groups).
+            ctx->Dispatch((regionW + 15) / 16, (regionH + 15) / 16, 1);
         }
 
         if (qs >= 0) g_qring[qs].timer.end(ctx); // Poll consumes failed End samples too.

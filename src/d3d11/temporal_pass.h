@@ -35,8 +35,9 @@
 // stands the pass down for the session with one line.
 #pragma once
 
-// Bounded CPU history of actual temporal submissions, written on Pause
-// alongside the camera history. Empty/stale history is reported explicitly.
+// Bounded CPU history of actual temporal submissions, written on Pause (the
+// camera-history key) and from the settings menu. Empty/stale history is
+// reported explicitly.
 namespace edvr { void temporalPassDumpHistory(const char* trigger); }
 
 #include <cstddef>
@@ -68,7 +69,7 @@ bool nativeTemporalOmissionCounters(uint64_t* skipped, uint64_t* historyKept, ui
 
 // The camera capture for the `camera` motion source. Every write of the
 // game's big scene-constants block passes through here (the Unmap tee
-// that already feeds the flash detector and the sun-glare fix); the rows
+// that already feeds the transition-flash tap and the sun-glare fix); the rows
 // at float 932 are the true view matrix (measured, sunglare_fix.cpp) and
 // are kept pending. The frame's FIRST eye-sized draw latches the pending
 // rows as this frame's camera -- the last scene write before the first
@@ -86,6 +87,19 @@ void temporalPassNoteFirstEyeDraw(ID3D11DeviceContext* ctx);
 // path do not read this state. `resource` is the VS b1 object used by the draw.
 bool temporalPassWantsRigidDraw(int eye);
 void temporalPassNoteRigidDraw(int eye, const void* resource, uint64_t vertexShaderHash);
+// The render target a camera-block write is drawn into (docs/sky-flicker-2026-10-13.md; camera_target_tag.h). The write precedes its draw, so the
+// chooser cannot know the target when the write is made; the FIRST DRAW AFTER the write tags it. vscreen.cpp's draw thunks (the owner context, the VR
+// path) call temporalPassNoteDraw while temporalPassWantsDraw() is true -- one bool load a draw -- and its OM set thunks call temporalPassNoteOmSet
+// with the number of render targets just bound, after the binding shadow has the new views. Both also serve P3 (mini_render.h): a bind of four or more
+// colour targets with a small square depth view starts a mini-render pass whose draws are counted.
+namespace detail {
+extern bool g_cameraDrawWatch;
+extern uint32_t g_cameraDrawCount;   // owner-context draws ever (wraps); a write's "draws after" is the difference to the next write's
+}  // namespace detail
+inline bool temporalPassWantsDraw() { return detail::g_cameraDrawWatch; }
+inline void temporalPassCountDraw() { ++detail::g_cameraDrawCount; }
+void temporalPassNoteDraw(ID3D11DeviceContext* ctx);
+void temporalPassNoteOmSet(unsigned colours);
 // This frame's rows become last frame's; called at the frame boundary.
 void temporalPassFrameBoundary();
 // The rows the pass CHOSE for the frame in progress (chooseCameraRows' pick: float 932 of the scene block, three 3x4 rows), for the VR camera census's episodes

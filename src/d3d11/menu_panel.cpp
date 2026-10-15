@@ -949,6 +949,7 @@ ID3D11ShaderResourceView* g_panelSrv = nullptr;
 ID3D11Device*             g_panelDevice = nullptr; // borrowed while g_panelTex holds its device
 int                       g_panelW = 0, g_panelH = 0;
 std::atomic<float>        g_panelAspect{0.0f};
+std::atomic<uint32_t>     g_rasterSerial{0};
 std::atomic<float>        g_panelWidthDeg{0.0f};
 
 ID3D11ComputeShader* g_cs = nullptr;
@@ -1552,6 +1553,7 @@ void menuPanelFlatResize() {
 }
 
 bool menuPanelFlatRasterReady() { return g_panelSrv != nullptr; }
+uint32_t menuPanelRasterSerial() { return g_rasterSerial.load(std::memory_order_acquire); }
 
 bool menuPanelHit(const float org[3], const float dir[3], float dist, float curve, float halfW,
                   float halfH, float shift, float* su, float* sv) {
@@ -1646,6 +1648,7 @@ void menuPanelTick(ID3D11Device* dev) {
         ctx->Release();
         perfMonitorNoteEvent(kEvRaster);
         g_panelAspect.store(static_cast<float>(r.h) / static_cast<float>(r.w));
+        g_rasterSerial.fetch_add(1, std::memory_order_release);
         g_panelWidthDeg.store(r.angularWidthDeg);
         std::lock_guard<std::mutex> lock(g_w.m);
         g_w.liveLines = r.lines;

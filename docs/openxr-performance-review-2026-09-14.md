@@ -32,9 +32,10 @@ changes.*
   its overcount fixed 2026-09-25, has since flown (the 09-29 entries). The
   overlap is unflown on the Quest runtimes; the depth layer is set aside
   (Sean, 2026-09-24); a controlled OpenVR comparison needs a v0.16.2 build.
-- **Closed:** sections 5 and 6 below (the private and producer copies): the
-  producer copy measured 0.039 ms p50 per eye at 4100x3962, under the
-  0.1 ms bar.
+- **AA-off cuts** (2026-10-13; BUILT, NOT FLOWN): per-draw fast path, Map timer
+  sampled 1 in 16, app_gpu_timing default off, VR panels follow AA. See
+  `docs/ui-layer-2026-09-23.md`, entry "2026-10-13".
+- **Closed:** sections 5 and 6 below (the private and producer copies; 0.039 ms p50 per eye, under the 0.1 ms bar).
 - **Ruled out:** at the end of each 2026-09-24 entry, and in the 2026-09-29
   ones (the periodic jobs; EDVR's Present hook; EDVR's AA work as the
   stalls' cause; engine motion's CPU as the carrier's limit; the six wrapped
@@ -1692,3 +1693,14 @@ realistic.
 - For any later attempt: a census with the sun in view and the radar up,
   and a rig that drives the real draw path (the glare verdict and the
   layer's decision over a recorded frame), not a scan of the wiring.
+
+
+## 2026-10-13: RCAS takes a 16x16 group, built, not flown
+
+The sharpen pass launched 254,000 groups of 8x8 at the eye's size, and the launch, not the 5 taps, was the cost:
+0.1295 ms an eye at 4032x4032 (0.1169 at 4032x3896) against 0.0887 (0.0837) at 16x16, byte for byte the same
+output (RTX 5090, ui_holo_pass_test --bench-groups, median of 201; 32x8 0.0904, 64x4 0.0905, 2x2 texels at 8x8
+0.0960). Saves 0.041 ms an eye, 0.082 a frame. sharpen_pass.cpp:670 dispatches (w+15)/16; `render_sharpen_cs`
+re-pinned 0x55C78550EA904C99 -> 0xB73534CE8AA56CDB. The UI resolve was benched the same way and keeps 8x8 (its
+grid is the 2016x1948 input; every other shape costs 0.013-0.022 more). The table of the day is the last entry of
+docs\ui-layer-2026-09-23.md.

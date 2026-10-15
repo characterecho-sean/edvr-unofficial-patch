@@ -213,6 +213,15 @@ struct State {
 State* g_state = nullptr;
 bool g_tried = false;
 bool g_available = false;
+// The device a failed availability probe ran on. A probe failure is the device's (no shared fences, no D3D12 on its adapter), so it is
+// kept only for that device: a different one is probed afresh. Held with its own reference so a replacement device that lands at a freed
+// device's address cannot pass for it; released by xessShutdown and by the next probe. A raw pointer, like g_state: no static destructor.
+ID3D11Device* g_failedProbeDevice = nullptr;
+
+void forgetFailedProbeDevice() {
+    if (g_failedProbeDevice) g_failedProbeDevice->Release();
+    g_failedProbeDevice = nullptr;
+}
 
 bool returnLatchedFailure(const XessFeatureFailureLatch& latch, const char** why) {
     // The caller may retain this pointer after a device change destroys State.
@@ -762,6 +771,11 @@ bool xessAvailable(ID3D11Device* device, const char** why) {
         Log::get().note("xess: D3D11 device changed; releasing old backend before rebind");
         xessShutdown();
     }
+    // An availability probe that failed belongs to the device it ran on. Offered a different one, probe again.
+    if (device && g_tried && !g_available && g_failedProbeDevice != device) {
+        Log::get().note("xess: D3D11 device changed after a failed availability probe; probing the new device");
+        xessShutdown();
+    }
     if (g_tried) {
         if (g_available && g_state && g_state->d11.Get() == device) {
             if (why) *why = nullptr;
@@ -773,6 +787,8 @@ bool xessAvailable(ID3D11Device* device, const char** why) {
     }
     g_tried = true;
     if (!device) return fail(why, "D3D11 device is null");
+    device->AddRef();
+    g_failedProbeDevice = device;   // dropped again below once the probe succeeds
     auto state = std::make_unique<State>();
     state->d11 = device;
     HRESULT hr = device->QueryInterface(IID_PPV_ARGS(state->d11v5.GetAddressOf()));
@@ -880,6 +896,7 @@ bool xessAvailable(ID3D11Device* device, const char** why) {
     Log::get().note("xess: D3D11/D3D12 shared queue and fence ready");
     g_state = state.release();
     g_available = true;
+    forgetFailedProbeDevice();   // the probe passed; g_state->d11 holds the device now
     if (why) *why = nullptr;
     return true;
 #endif
@@ -1186,6 +1203,7 @@ void xessShutdown() {
         }
         g_state = nullptr;
     }
+    forgetFailedProbeDevice();
     g_tried = false;
     g_available = false;
 #endif

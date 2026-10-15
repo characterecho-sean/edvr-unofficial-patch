@@ -38,6 +38,7 @@ std::atomic<uint32_t> g_refused{0};          // ident opens and attribute reads 
 std::atomic<uint32_t> g_otherMovieOpens{0};  // Movies\ paths that were not idents, forwarded
 std::atomic<uint32_t> g_refusalLines{0};     // the log lines spent on refusals
 std::atomic<uint32_t> g_movieDrew{0};        // frames the movie's fill drew
+std::atomic<uint64_t> g_lastRefusalMs{0};    // when the last ident open was refused (the flat verdict's quiet clock)
 uint64_t g_armedAtMs = 0;
 bool     g_drewSaid = false;
 bool     g_verdictSaid = false;
@@ -103,6 +104,7 @@ bool refuse(const C* path, const char* api) {
     }
     if (kind != MoviePath::ident) return false;
     g_refused.fetch_add(1, std::memory_order_relaxed);
+    g_lastRefusalMs.store(nowMs(), std::memory_order_relaxed);
     if (g_refusalLines.fetch_add(1, std::memory_order_relaxed) < 4) noteRefusal(api, path);
     return true;
 }
@@ -219,22 +221,27 @@ void sayArmed() {
     char mod[64] = "?";
     entryModule(mod, sizeof(mod));
     Log::get().note(
-        "intro skip: ARMED -- fix.intro_video = skip. The executable's imports: CreateFileW "
+        "intro skip: ARMED%s -- fix.intro_video = skip. The executable's imports: CreateFileW "
         "%s, CreateFileA %s, GetFileAttributesW %s, GetFileAttributesA %s, "
         "GetFileAttributesExW %s, GetFileAttributesExA %s; DirectShow reader CreateFileW %s "
         "(original entry in %s). An open of Movies\\Ident_*.webm or intro_temp.webm is "
         "answered 'file not found' -- the answer a renamed file gives it, so the game's own "
         "missing-movie path runs -- and nothing on disk is touched. Decided at launch. "
         "Only the executable and system reader import tables are patched. "
-        "The verdict prints when the first rendered scene arrives (docs\\intro-video.md).",
+        "%s (docs\\intro-video.md).",
+        runtimeFlatProfile() ? " (flat)" : "",
         state(g_createW), state(g_createA), state(g_attrW), state(g_attrA), state(g_attrExW),
-        state(g_attrExA), state(g_readerCreateW), mod);
+        state(g_attrExA), state(g_readerCreateW), mod,
+        runtimeFlatProfile()
+            ? "The verdict prints once the game has gone four seconds without asking for another ident"
+            : "The verdict prints when the first rendered scene arrives");
 }
 
 }  // namespace
 
 void introSkipConfigure(Config& cfg) {
-    const IntroVideoMode mode = introVideoParse(cfg.getString("fix.intro_video", "screen"));
+    const IntroVideoMode mode =
+        introVideoParseFor(cfg.getString("fix.intro_video", "screen"), runtimeFlatProfile());
     const bool was = g_armed.load(std::memory_order_relaxed);
     if (mode.skip != was) {
         if (mode.skip) {
@@ -283,8 +290,32 @@ void introSkipNoteMovieDrew() {
         refused);
 }
 
+// The flat profile's verdict (introSkipTickFlat). Flat has no movie-fill witness (the fill detection is VR eye geometry), so a
+// refusal that the game then lived with is the evidence, and the line says so rather than claiming a scene arrived.
+static void sayFlatVerdict() {
+    const uint32_t refused = g_refused.load(std::memory_order_relaxed);
+    const uint32_t other = g_otherMovieOpens.load(std::memory_order_relaxed);
+    const double since = static_cast<double>(nowMs() - g_armedAtMs) / 1000.0;
+    if (refused) {
+        const double lastAgo = static_cast<double>(nowMs() - g_lastRefusalMs.load(std::memory_order_relaxed)) / 1000.0;
+        Log::get().note(
+            "intro skip: WORKED (flat) -- %u refusal(s) of the ident open (the flat profile has no movie-fill witness, so "
+            "the refusal is the evidence); the game asked for no other ident for %.1f s after the last one, and the first "
+            "refusal came %.1f s after the skip armed.",
+            refused, lastAgo, since);
+        return;
+    }
+    Log::get().note(
+        "intro skip: no ident was asked for (flat) -- nothing was refused in %.0f s since the skip armed (%u other "
+        "Movies\\ open(s) reached the hooks). Either the game skipped the movie by itself this launch, or it opened it "
+        "by a route these hooks do not cover. Please report this log.",
+        since, other);
+}
+
 void introSkipTick(bool sceneFrame) {
     if (!sceneFrame) return;
+    // The flat profile closes its verdict from introSkipTickFlat; eye draws are not its signal.
+    if (runtimeFlatProfile()) return;
     if (g_verdictSaid || !g_armed.load(std::memory_order_relaxed)) return;
     g_verdictSaid = true;
     const uint32_t refused = g_refused.load(std::memory_order_relaxed);
@@ -311,6 +342,17 @@ void introSkipTick(bool sceneFrame) {
     Log::get().note("intro skip: did not take -- %u refusal(s), the movie drew %u frame(s), "
                     "the scene arrived at %.1f s.",
                     refused, drew, since);
+}
+
+void introSkipTickFlat() {
+    if (!runtimeFlatProfile()) return;
+    if (g_verdictSaid || !g_armed.load(std::memory_order_relaxed)) return;
+    const uint64_t now = nowMs();
+    const uint32_t refused = g_refused.load(std::memory_order_relaxed);
+    const uint64_t lastRefusal = g_lastRefusalMs.load(std::memory_order_relaxed);
+    if (!introFlatVerdictDue(refused, now - g_armedAtMs, refused && now >= lastRefusal ? now - lastRefusal : 0)) return;
+    g_verdictSaid = true;
+    sayFlatVerdict();
 }
 
 void introSkipShutdown() {

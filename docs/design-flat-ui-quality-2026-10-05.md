@@ -16,10 +16,13 @@
     every counter, Sean: "works great"). Copy route last flown on 75cd495c;
     eced5813's flat admission change not yet flown there.
   - Not flown: 100% at SS 1.0.
-- **Local flight:** correct 4b7bfec4, 120427.log, SS 0.5 then about 0.65/UI 125.
-  Cleanup keeps the flown guards; 88 CPU checks pass. The UI
-  rig's 206 Wine failures exactly match the clean baseline. Full build stops
-  at baseline run_jobs failures; native Windows validation remains.
+- **2026-10-15, RC1 flat report (EDHM chained): built, not flown.** The cockpit
+  tone PS 0D4329BDF65DE8F7 was in no table, so the layer never armed and the
+  panels ghosted. It joins E894 in `flatUiSourceTonePair`, and (Sean) any unknown
+  pair on a tone VS that passes the full physical shape now grants proof
+  (`flatUiLayerShapeToneCandidate`). Entries at the end.
+- **Local flight:** 4b7bfec4, 120427.log, SS 0.5 then about 0.65/UI 125; the
+  cleanup keeps the flown guards (88 CPU checks pass).
 - **The key:** `fix.ui_quality = off | 100 | 125`, default 100 in flat (the
   code's fallback and the flat ini template), the fourth flat F8 row. 100: the
   panels at display size and the cockpit HUD out of temporal history, whatever
@@ -42,8 +45,7 @@
     left in the frame;
   - the flat resize-loop fix (771bb99a): exercised OK by windowed resizes on
     13:23 and 13:51 (`result=ok refs=0`).
-- **Ruled-out pointer:** the 2026-10-09 entries below; VR's retired deferred
-  UI replay ([crisp-ui-handoff.md](crisp-ui-handoff.md)).
+- **Ruled-out pointer:** the 2026-10-09 entries; [crisp-ui-handoff.md](crisp-ui-handoff.md).
 - **0.19.0 review (10-09), finding 3:** the Supersampling setter's panel factor is
   held until the scene's size follows it, its epoch check and write one operation
   under the floats' lock (last entry; built, not flown).
@@ -739,3 +741,79 @@ full build is not green. Log:
 Windows validation remains the branch handoff gate. The installed and flown
 4b7bfec4 DLL is left in place; the cleanup removes capture overhead while
 retaining the reviewed rendering checks.
+
+## 2026-10-15: an EDHM tone variant kept the layer from arming (RC1 flat report)
+
+**The report.** A v0.20.0-rc.1 flat user (Steam, 1920x1080, EDHM chained
+through `real_dll = d3d11_edhm.dll`; BloomQuality 1, DOFEnabled 2): cockpit
+panel text ghosts under temporal AA. The right-hand Inventory panel's left
+half shows doubled lines; its right half is clean. Log
+edvr_gfx_20261015_125511 (build v0.20.0-rc.1, profile flat). The user cycled
+every AA mode and every `ui_quality` value during the session.
+
+**What the log shows.**
+- Every 30 s cockpit window: `flat ui layer: ... tone-candidates=0
+  tone-proven=0 composites=0`; families `holo-panels asked=27858 decided=0
+  taken=0`; refusals `tone-unproven=33718`. The layer was armed and never
+  took a draw, so the panels stayed in H and were resolved with whatever lay
+  behind them. Over the moving starfield that ghosts; over static cockpit
+  geometry it does not, which fits the half-ghosted panel.
+- The one window that composited (91, 12:58:44-12:59:14) was the Galaxy Map,
+  proven through the map tonemap pair.
+- The HDR route took VS F9CFC798F21E9AEA with PS 0D4329BDF65DE8F7 as its
+  trigger. Its test is structural and reads no hash.
+- `flat ui layer: unknown source-tone probe -- VS 43CA9F1C0AD2ACFE PS
+  0D4329BDF65DE8F7, physical HUD t1=..., LDR RTV fmt=28, bound 2D t2=...`:
+  the E894 shape. Unknown pairs never bootstrap proof (the October 11
+  decision), and 0D43 is neither in the tone registry nor in
+  `flatUiSourceTonePair`.
+
+So the cockpit tone never reached `flatUiLayerToneCandidate`. The registry
+records an earlier EDHM grade PS (EAA5F18F10533BD1, Epic 2026-09-26), so a
+different EDHM version or settings tier is the likely source of 0D43; the log
+cannot say which.
+
+Not chased: the motion the panels' pixels get inside H. Once the layer takes
+the panels they leave the resolve, and that motion no longer applies to them.
+
+**The fix (branch claude/flat-edhm-tone-panel-smear).** PS 0D4329BDF65DE8F7
+joins E894 in `flatUiSourceTonePair`, with the same two VS. Admission still
+runs every physical check (`sourceTonePhysicalShape`). Like E894, it stays
+out of the global tone registry and the mono HDR selector.
+
+**Flight check.** In the cockpit, the 30 s line shows `tone-candidates` and
+`composites` above 0 and `holo-panels ... taken` above 0.
+
+## 2026-10-15: an unknown tone pair proves the tone by its physical shape
+
+**The decision (Sean, 2026-10-15).** It supersedes the October 11 rule that
+unknown pairs never bootstrap proof: "let an unknown tone pair that passes the
+full physical shape check grant UI-layer proof, so new EDHM versions don't need
+a named pair." Each new EDHM version or settings tier can bring another tone
+PS, and until now each one switched the layer off for that user, silently,
+until a report named it.
+
+**The rule (`flatUiLayerShapeToneCandidate`, branch claude/flat-ui-tone-by-shape).**
+A full-screen triangle (count 3, one instance, start instance 0) whose pair is
+in no table grants proof exactly as a named pair does, only when all of these
+hold:
+- its VS is one of the three tone VS (F9CF, 43CA, CFA9; EDHM replaces the PS);
+- the named pairs' strict physical shape (`sourceTonePhysicalShape`, not the
+  diagnostic one): one RTV, no DSV, no blend, PS cb2 at least 256 bytes,
+  the LDR output the copy reads (view format 28) at render size and full
+  viewport, the HDR read at t1, which is a physical HUD target of this frame,
+  and a 3D LUT at t0;
+- a 2D texture at t2 (the bloom, as the probe measured on 0D43).
+
+Each admitted pair is named once in the log (`tone pair admitted by its physical
+shape`). The 30 s line ends with `tone-by-shape=`. A pair that fails stays the
+probe's near miss, as before.
+
+**Why the shape is enough.** The draw reads the very HUD target the layer
+recorded this frame, at render size, and writes the full-size output the
+game's copy reads. Bloom, depth of field and exposure read H at reduced size or
+write float targets, so none of them can pass.
+
+**Flight check.** An EDHM-chained cockpit: `tone-by-shape` above 0, then
+`composites` and `holo-panels ... taken` above 0, and the admitted pair named
+once.

@@ -155,6 +155,31 @@ struct EliteBindUse {
 int eliteBindsAllUses(EliteBindUse* out, int max, char* file, size_t fileLen);
 int eliteBindsAllUsesDir(const wchar_t* dir, EliteBindUse* out, int max, char* file, size_t fileLen);
 
+// The HMD recentre action (Elite's `HMDReset`, 2026-10-14: the seat memory tells the player's press from the game's own reset). Every slot the
+// element has with a device and a key, in file order (Primary, Secondary), each with what watching it takes: `observable` is true for a
+// keyboard key (with its modifiers), the XInput pad and a joystick button or hat (the three kinds hotkey.h can watch); false for the mouse, an
+// axis, a mouse button past the fifth and a key this build has no name for, which the seat memory then cannot see. A mouse button 1 to 5
+// is watched as the virtual key GetAsyncKeyState reports for it (left, right, middle, X1, X2; the physical buttons, as DirectInput's are). `label` is the slot as Elite wrote it, device and key
+// ("Keyboard:Key_F12", "231D0200:Joy_33"), for the logs. `present` is whether the element exists in the answering file (the first readable one,
+// as for every other lookup here); `filesSeen` is 0 when there is no preset or no readable .binds at all.
+struct EliteResetSlot {
+    bool          observable;
+    bool          needsProof;    // observable, but only trusted after it has seen one press (everything except a keyboard key): see hmd_reset_press.h
+    HotkeyBinding binding;       // meaningful when observable
+    char          label[48];
+};
+struct EliteResetBind {
+    bool          present;
+    int           count;         // slots with a device and a key: 0..2
+    EliteResetSlot slot[2];
+    int           filesSeen;
+    char          file[64];
+};
+bool eliteBindsHmdReset(EliteResetBind* out);
+bool eliteBindsHmdResetDir(const wchar_t* dir, EliteResetBind* out);
+// The pure half, over the text of one .binds file; exposed for the smoke test.
+bool eliteBindsHmdResetIn(const char* text, size_t len, EliteResetBind* out);
+
 // A cheap stamp over the bindings directory: names, sizes and write times of
 // its files, folded together. It changes when the player applies a rebind or
 // switches preset in-game, which is when Elite rewrites the files. 0 means

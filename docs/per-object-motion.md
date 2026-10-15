@@ -2,18 +2,17 @@
 
 ## Status
 
-*Rewritten 2026-09-23 at the retirement; the 2026-10-07 entry (the last
-section) adds the split's on-foot mode. The journal is history: the paths it
-builds were removed from the code that day.*
+*Rewritten 2026-09-23 at the retirement; the last two sections add the split's
+on-foot and SRV modes. The journal is history: its paths were removed that day.*
 
-- **State, 2026-10-07: the world/ship split has an on-foot mode (FLOWN OK,
-  8fa6d443, Frontier log 103323; Sean: "Looks good now").** In Explorer Cam
-  the ground within 10 m took the head path and smeared as the commander
-  walked (eye dump 090359). While Status.json says on foot and not seated, the
-  split the shader reads is a millimetre (`src/common/temporal_mode.h`,
-  `tools/on_foot_split_test`; the shader is untouched). In flight the split was
-  off for 100% of on-foot eye-frames. The key stays (Sean: "Let's leave it for
-  now"). Details: "The world/ship split on foot, 2026-10-07", the last section.
+- **State, 2026-10-14: SRV mode (BUILT, NOT FLOWN, `claude/srv-split`).**
+  Terrain 6 to 7.5 m from a driven SRV took the head path (10 m ship radius):
+  blur. A seated SRV (seat kind 0x4) now gets `kTemporalSrvMetres` 3.5 m.
+- **State, 2026-10-07: on-foot mode (FLOWN OK, 8fa6d443; Sean: "Looks good
+  now").** Explorer Cam's ground within 10 m took the head path and smeared
+  (eye dump 090359). On foot and not seated the split is a millimetre
+  (`src/common/temporal_mode.h`, `tools/on_foot_split_test`; shader untouched);
+  off for 100% of on-foot eye-frames. The key stays. Both: the last two sections.
 - **State:** RETIRED 2026-09-23 (Sean's teardown). Every path that
   ESTIMATED a per-object transform is gone from the code (tier 2's body path
   and occupancy grid, the second body, the stepped parts, the moving ships,
@@ -42,7 +41,7 @@ builds were removed from the code that day.*
   turns with the ring" (16:22 flight); the "stepped parts" per-record
   multiple (37th flight); distant shimmer as a pure sampling limit (8th
   flight, retired by the 9th).
-- **Next flight:** Explorer Cam on foot, walking (pass signs: last section).
+- **Next flight:** an SRV on a planet, inspector on (checks: last section).
 - **Detail:** "Retired, 2026-09-23" and "The two keys left over" (the last
   two sections) say what went and what stayed. The flight log (48 numbered flights) is inline under
   "Phasing" item 3; twelve later reviews (2026-09-10/11) sit beside this
@@ -3563,3 +3562,68 @@ the head path was right. The flight needs the body in view (a third-person
 preset). Also unchanged: `ui_depth.cpp` keeps the hologram filler 1% inside
 the cockpit radius so those pixels stay on the head path; on foot they take
 the world path wherever the holo path does not own them.
+
+## The split in an SRV, 2026-10-14
+
+**Report.** Sean, driving an SRV on a planet: everything near the SRV is blurred
+under DLSS preset K. Build v0.20.0-rc.1-4-g66dfe94f (Frontier, VR, the scene
+inspector on `claude/scene-inspector`), two captures: 14:01:39 and 14:01:44
+(`scene_inspect_20261014-1401*`). That build's inspector prints its path labels
+reversed: "path=1(camera-world)" and "world=" count the head path (really path
+1), "ship" the world term (path 2).
+
+**Evidence.** Both captures' 16 px box is rocky terrain, not hull or cockpit
+(the colour crops: ground with debris, the SRV only at the crop's bottom
+edge). Every box pixel (256 of 256, both captures) took decision path 1, the
+head delta, engine kind none:
+
+| capture | box depth | mv written | camera term | mismatch |
+|---|---|---|---|---|
+| 14:01:39 | 5.9 m (6.07 m on the box CSV) | (0.31, 0.10) | (20.4, -7.9) | 21.6 px |
+| 14:01:44 | 7.5 m | (0.03, -0.02) | (2.16, -0.66) | 2.2 px |
+
+The rule is distance alone: temporal_shader_source.h `(far || z > split.x)` in
+`mv` and the history fetch, with `split.x` = `kTemporalShipMetres` (10 m,
+temporal_pass.cpp). The journal said "in a ship, an SRV or another seat" for
+every 20 s totals line of the log (0 of ~3500 eye-frames with the split off):
+`temporalFootVerdict` returns Seated for an SRV, so the 2026-10-07 on-foot gate
+(which turns the radius to a millimetre) correctly stays shut. Same mechanism
+as Explorer Cam's, from the other side: a ship's cockpit radius applied to a
+vehicle whose cab is much smaller.
+
+**Measured SRV extent.** The depth crops, converted with the box CSV's
+depth-to-metres fit (metres = 0.025 / depth, the near plane over the reversed-Z
+value, residual 3e-7): SRV body pixels read 2.1 to 2.85 m (cap1 2.5 to 2.85 m,
+cap2 2.1 to 2.3 m on the grille), terrain 5.46 m and farther. The gap is empty.
+
+**Fix.** `kTemporalSrvMetres` = **3.5 m**, one named constant, no key
+(src/common/temporal_mode.h). `temporalSplitMetres(configured, onFoot, srv)`:
+on foot 0.001 m as before; in a seated SRV the smaller of the configured split
+and 3.5 m (never widened, a zero stays zero); anything else, and any journal
+that cannot say (not watched, no LoadGame, no Flags, stale), the configured
+split bit for bit. SRV is `Seated` and seat kind bit 2. A main ship, a fighter
+(seat kind 2), a taxi and multicrew keep 10 m: nothing measured says otherwise.
+**The 3.5 m is chosen between two measurements, not proven**: the crops show
+the bonnet and the near wheel arch only, so the far wheels and the cab's sides
+are unmeasured; Scarab dimensions were not sourced from the game files. The
+totals line gains `split was srv (3.5 m) for N of them`; the change into and out
+of the mode is told once (`temporal aa: in an SRV -- the ship split is 3.5 m`).
+Rig: `tools\on_foot_split_test` R7 (named scenarios, the whole table of 1728
+flag, age and seat-kind rows, the tracker), five mutants in `mutants.py`.
+
+**Flight check (Frontier, VR, an SRV on a planet, the inspector on).**
+1. Log: `temporal aa: in an SRV` once on boarding; the totals line's `split was
+   srv (3.5 m) for N of M eye-frames` with N near M while driving, 0 in the ship.
+2. Inspector capture on the terrain at 4 to 6 m: path 2 (the world term; in a
+   fixed-label build "world=256", in the reversed-label build "ship=256
+   world=0"), mv_dlss equal to expect_world, mismatch under about 0.5 px.
+3. Inspector capture on the SRV's bonnet, a wheel and the cab: path 1 (head) or
+   11 (engine record), never path 2. If a wheel or the far bonnet goes to path
+   2, 3.5 m is too small: measure the farthest SRV body pixel and raise it.
+4. Boarding and leaving: the mode follows Status.json by up to about 1.5 s.
+
+**Open, unmeasured, not changed.** The same question in a ship cockpit for near
+station geometry (a docking slot, a pad wall within 10 m takes the head path).
+The 10 m was chosen from cockpit dumps where the cockpit stencil covered only
+73 to 75% of the near pixels. No capture exists; a radius change there needs
+one first.

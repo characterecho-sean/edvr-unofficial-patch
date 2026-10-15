@@ -1,0 +1,263 @@
+// The AA comparison key (hotkey.compare_aa): the toggle's state machine, the notice words, the key-clash rule, the Config runtime
+// override it rides on, and the source pins that wire it. Nothing is opened: no device, no window, no game.
+//
+//   aa_compare_test <repo root>
+#include <windows.h>
+
+#include <cstdio>
+#include <cstdlib>
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <vector>
+
+#include "../../src/common/aa_compare.h"
+#include "../../src/common/config.h"
+#include "../../src/common/hotkey.h"
+#include "../../src/common/log.h"
+#include "../../src/common/runtime_profile.h"
+
+using namespace edvr;
+using namespace edvr::aacmp;
+
+static unsigned g_checks = 0;
+static void check(bool ok, const char* what) {
+    ++g_checks;
+    if (!ok) {
+        std::printf("FAIL: %s\n", what);
+        std::exit(1);
+    }
+}
+
+static std::string slurp(const std::string& path) {
+    std::ifstream in(path, std::ios::binary);
+    std::stringstream ss;
+    ss << in.rdbuf();
+    return ss.str();
+}
+
+static bool writeFile(const std::wstring& path, const std::string& text) {
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    DWORD n = 0;
+    const BOOL ok = WriteFile(h, text.data(), static_cast<DWORD>(text.size()), &n, nullptr);
+    CloseHandle(h);
+    return ok && n == text.size();
+}
+
+// A write time that is certainly different from the last one, whatever the file system's resolution.
+static void touchForward(const std::wstring& path, int seconds) {
+    HANDLE h = CreateFileW(path.c_str(), FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return;
+    FILETIME ft;
+    GetSystemTimeAsFileTime(&ft);
+    ULARGE_INTEGER u;
+    u.LowPart = ft.dwLowDateTime;
+    u.HighPart = ft.dwHighDateTime;
+    u.QuadPart += static_cast<unsigned long long>(seconds) * 10000000ull;
+    ft.dwLowDateTime = u.LowPart;
+    ft.dwHighDateTime = u.HighPart;
+    SetFileTime(h, nullptr, nullptr, &ft);
+    CloseHandle(h);
+}
+
+static void machineCells() {
+    // The ordinary run: off, then restored.
+    {
+        Machine m;
+        check(m.press("dlss") == Press::WentOff && m.off && m.saved == "dlss", "a press with AA on goes off and remembers the mode");
+        check(m.press("dlss") == Press::Restored && !m.off && m.saved.empty(), "the next press restores");
+        check(m.press("dlss") == Press::WentOff, "and the one after goes off again");
+    }
+    // Every mode EDVR has goes off; off itself has nothing to compare.
+    for (const char* mode : {"on", "dlaa", "dlss", "fsr", "xess", "DLSS", "Xess"}) {
+        Machine m;
+        check(m.press(mode) == Press::WentOff, "every temporal mode can be compared");
+    }
+    for (const char* mode : {"off", "", "banana", "0"}) {
+        Machine m;
+        check(m.press(mode) == Press::NothingToCompare && !m.off, "a configured mode that is not a temporal mode has nothing to compare");
+        check(m.press(mode) == Press::NothingToCompare, "and it stays that way press after press");
+    }
+    // Restoring returns whatever the settings say at that moment, not what was remembered.
+    {
+        Machine m;
+        m.press("dlss");
+        check(m.press("fsr") == Press::Restored && !m.off, "a press while off restores, whatever the file says now");
+    }
+    // The player changes AA while it is off: their choice wins.
+    {
+        Machine m;
+        m.press("dlss");
+        check(m.observe("dlss", true, 10) == Seen::Nothing && m.off, "nothing changed: the comparison stands");
+        check(m.observe("DLSS", true, 20) == Seen::Nothing && m.off, "the mode compares without case");
+        check(m.observe("fsr", true, 30) == Seen::EndedByChange && !m.off, "the file's AA changed: the comparison ends");
+        check(m.observe("fsr", true, 40) == Seen::Nothing, "and ends once");
+        check(m.press("fsr") == Press::WentOff && m.saved == "fsr", "the next press is a fresh off from the new mode");
+    }
+    {
+        Machine m;
+        m.press("dlss");
+        check(m.observe("off", true, 5) == Seen::EndedByChange && !m.off, "a hand edit to off ends it too (AA is off for real)");
+        check(m.press("off") == Press::NothingToCompare, "...and then there is nothing to compare");
+    }
+    // An F8 pick that lands on the remembered mode: ended once the write has had time to land.
+    {
+        Machine m;
+        m.press("dlss");
+        m.noteMenuEdit(1000);
+        check(m.observe("dlss", true, 1000 + kMenuEditSettleMs - 1) == Seen::Nothing && m.off, "a pick still being written does not end it early");
+        check(m.observe("dlss", true, 1000 + kMenuEditSettleMs) == Seen::EndedBySameValue && !m.off, "a pick that landed on the same mode ends it");
+    }
+    {
+        Machine m;
+        m.press("dlss");
+        m.noteMenuEdit(1000);
+        check(m.observe("xess", true, 1100) == Seen::EndedByChange, "a pick that changed the file ends it at once, before the settle time");
+    }
+    {
+        Machine m;
+        m.noteMenuEdit(1);   // a pick with no comparison running is nobody's business
+        check(!m.menuEdit && m.observe("dlss", true, 99999) == Seen::Nothing, "a menu edit with the comparison on ends nothing");
+        m.press("dlss");
+        check(!m.menuEdit && m.observe("dlss", true, 99999) == Seen::Nothing, "and does not leak into the next comparison");
+    }
+    // The override went away under it (a profile switch): the comparison is over, the machine is clean.
+    {
+        Machine m;
+        m.press("dlss");
+        check(m.observe("dlss", false, 1) == Seen::EndedByProfile && !m.off && m.saved.empty(), "a lost override ends the comparison");
+        check(m.press("on") == Press::WentOff, "and the key works at once in the new profile");
+    }
+    {
+        Machine m;
+        check(m.observe("dlss", false, 1) == Seen::Nothing, "a lost override with no comparison running is nothing");
+    }
+}
+
+static void wordsCells() {
+    check(noticeText(Press::WentOff, "dlss", "F7") == "AA off (comparison), press F7 to restore", "the off notice, word for word");
+    check(noticeText(Press::WentOff, "dlss", "CTRL+F7") == "AA off (comparison), press CTRL+F7 to restore", "the off notice names the key as bound");
+    check(noticeText(Press::Restored, "dlss", "F7") == "AA restored: DLSS", "the restore notice names the mode");
+    check(noticeText(Press::Restored, "on", "F7") == "AA restored: TAA" && noticeText(Press::Restored, "dlaa", "F7") == "AA restored: DLAA" &&
+          noticeText(Press::Restored, "fsr", "F7") == "AA restored: FSR" && noticeText(Press::Restored, "xess", "F7") == "AA restored: XeSS",
+          "every mode has its name");
+    check(!noticeText(Press::NothingToCompare, "off", "F7").empty(), "the nothing-to-compare notice exists");
+    check(modeLabel("") == "off" && modeLabel("mystery") == "mystery", "an unknown mode is shown as written");
+}
+
+static void clashCells() {
+    check(keysClash(0x76, 0, 0x76, 0), "the same bare key clashes");
+    check(!keysClash(0x76, 0, 0x77, 0), "another key does not");
+    check(keysClash(0x76, 0, 0x76, kHotkeyCtrl), "a bare key and the same key with Ctrl overlap (the bare one also fires with Ctrl held)");
+    check(keysClash(0x76, kHotkeyCtrl, 0x76, 0), "and the other way round");
+    check(!keysClash(0x76, kHotkeyCtrl, 0x76, kHotkeyShift), "Ctrl+F7 and Shift+F7 are different presses");
+    check(keysClash(0x76, kHotkeyCtrl, 0x76, kHotkeyCtrl), "the same chord clashes");
+    check(!keysClash(0, 0, 0, 0), "an unbound key clashes with nothing");
+}
+
+static void configCells(const std::wstring& dir) {
+    const std::wstring ini = dir + L"\\edvr.ini";
+    const std::string original = "[fix]\ntemporal_aa = dlss\nui_quality = 100\n";
+    check(writeFile(ini, original), "the fixture ini is written");
+    Config& cfg = Config::get();
+    cfg.init(dir);
+    check(cfg.getString("fix.temporal_aa", "off") == "dlss" && cfg.requestedTemporalMode() == "dlss", "the file's AA is read");
+    check(cfg.configuredTemporalMode() == "dlss" && !cfg.hasRuntimeOverride("fix.temporal_aa"), "no override to begin with");
+    check(!cfg.reloadIfChanged(), "an untouched file reports no change");
+
+    const uint32_t gen0 = cfg.generation();
+    cfg.setRuntimeOverride("fix.temporal_aa", "off");
+    check(cfg.generation() != gen0, "an override moves the generation (modules that keep parsed settings re-read)");
+    check(cfg.getString("fix.temporal_aa", "x") == "off" && cfg.requestedTemporalMode() == "off", "the override is what both readers answer");
+    check(cfg.configuredTemporalMode() == "dlss", "the configured mode ignores it");
+    check(cfg.hasRuntimeOverride("fix.temporal_aa") && cfg.hasRuntimeOverride("FIX.TEMPORAL_AA") == false, "the key is the dotted lowercase name");
+    check(cfg.getString("fix.ui_quality", "x") == "100", "other keys are untouched");
+    check(cfg.reloadIfChanged(), "the next reload poll reports a change, so the configure sweep runs");
+    check(!cfg.reloadIfChanged(), "and only once");
+
+    // The file is never written: byte for byte what it was, and a reload of it leaves the override in place.
+    check(slurp(std::string(ini.begin(), ini.end())) == original, "no ini was written");
+    check(writeFile(ini, "[fix]\ntemporal_aa = fsr\nui_quality = 125\n"), "the file is edited by hand");
+    touchForward(ini, 5);
+    check(cfg.reloadIfChanged(), "the edit is picked up");
+    check(cfg.getString("fix.temporal_aa", "x") == "off", "a reload leaves the override in force");
+    check(cfg.configuredTemporalMode() == "fsr" && cfg.getString("fix.ui_quality", "x") == "125", "while the file's new values are read");
+
+    cfg.clearRuntimeOverride("fix.temporal_aa");
+    check(cfg.getString("fix.temporal_aa", "x") == "fsr" && cfg.requestedTemporalMode() == "fsr", "clearing returns to the file's mode");
+    check(!cfg.hasRuntimeOverride("fix.temporal_aa") && cfg.reloadIfChanged() && !cfg.reloadIfChanged(), "a clear reports one change");
+    const uint32_t gen1 = cfg.generation();
+    cfg.clearRuntimeOverride("fix.temporal_aa");
+    check(cfg.generation() == gen1 && !cfg.reloadIfChanged(), "clearing what is not set changes nothing");
+
+    // The flat gate reads the mode around the allow-list; the override must follow it there.
+    const RuntimeProfile saved = g_runtimeProfile;
+    g_runtimeProfile = RuntimeProfile::Flat;
+    cfg.setRuntimeOverride("fix.temporal_aa", "off");
+    check(cfg.requestedTemporalMode() == "off" && cfg.configuredTemporalMode() == "fsr", "flat: requestedTemporalMode answers the override");
+    check(cfg.getString("hotkey.compare_aa", "F7") == "F7", "flat: the comparison key passes the gate (the fixture has none, so the default F7)");
+    check(cfg.getString("fix.black_void", "x") == "off", "flat: the gate still refuses what it refused");
+    g_runtimeProfile = saved;
+
+    // A profile switch drops it.
+    check(cfg.hasRuntimeOverride("fix.temporal_aa"), "the override is set going into the switch");
+    cfg.switchProfile();
+    check(!cfg.hasRuntimeOverride("fix.temporal_aa") && cfg.requestedTemporalMode() == "fsr", "a profile switch clears every override");
+    check(cfg.reloadIfChanged(), "and reports it");
+    check(slurp(std::string(ini.begin(), ini.end())).find("temporal_aa = fsr") != std::string::npos, "the file still says what the player wrote");
+}
+
+static bool has(const std::string& text, const char* needle) { return text.find(needle) != std::string::npos; }
+
+static void sourcePins(const std::string& root) {
+    const std::string hook = slurp(root + "\\src\\d3d11\\device_hook.cpp");
+    const std::string menu = slurp(root + "\\src\\d3d11\\menu.cpp");
+    const std::string ini = slurp(root + "\\edvr.ini");
+    const std::string flatKeys = slurp(root + "\\src\\common\\flat_profile_keys.h");
+    const std::string gen = slurp(root + "\\tools\\gen_installer_rc.py");
+    const std::string readme = slurp(root + "\\release\\README.txt");
+    const std::string mod = slurp(root + "\\src\\d3d11\\aa_compare.cpp");
+    if (hook.empty() || menu.empty() || ini.empty()) {
+        std::printf("FAIL: the repo root \"%s\" does not hold the sources\n", root.c_str());
+        std::exit(1);
+    }
+    check(has(hook, "tkAaCompare.run([] { aaCompareTick(); });"), "device_hook runs the comparison tick every owned Present");
+    check(has(menu, "void menuRequestConfigPoll() { g_s.pollRequest = true; }") && has(mod, "menuRequestConfigPoll();"),
+          "the toggle asks for the config poll through the menu's own request, which the frame boundary already honours");
+    check(has(menu, "aaCompareNoteMenuEdit();") && has(menu, "\"fix.temporal_aa\""), "an F8 write of fix.temporal_aa tells the comparison");
+    check(has(menu, "void menuShowNotice(") && has(menu, "void menuNoteOwnChange("), "the menu has the notice and the own-change calls");
+    check(has(ini, "compare_aa = F7"), "edvr.ini ships the key bound to F7");
+    check(std::string(kDefaultKey) == "F7", "and the code's default is the same F7");
+    check(has(ini, "# ui: AA comparison key (empty = off) | hotkey | live"), "the F8 Hotkeys page has the row");
+    check(has(flatKeys, "\"hotkey.compare_aa\""), "the flat profile reads the key");
+    check(has(gen, "compare_aa = F7"), "and the flat ini template carries it");
+    check(has(readme, "F7"), "release\\README.txt lists the key");
+    check(has(mod, "setRuntimeOverride(kKey, \"off\")") && !has(mod, "iniedit") && !has(mod, "writeFileAtomic"),
+          "the module overrides in memory and includes no ini writer");
+}
+
+int main(int argc, char** argv) {
+    if (argc < 2) {
+        std::puts("usage: aa_compare_test <repo root>");
+        return 2;
+    }
+    wchar_t temp[MAX_PATH]{}, name[MAX_PATH]{};
+    GetTempPathW(MAX_PATH, temp);
+    GetTempFileNameW(temp, L"aac", 0, name);
+    DeleteFileW(name);
+    CreateDirectoryW(name, nullptr);
+    const std::wstring dir = name;
+
+    machineCells();
+    wordsCells();
+    clashCells();
+    configCells(dir);
+    sourcePins(argv[1]);
+
+    DeleteFileW((dir + L"\\edvr.ini").c_str());
+    RemoveDirectoryW(dir.c_str());
+    std::printf("aa_compare_test: %u checks, 0 failures\n", g_checks);
+    return 0;
+}

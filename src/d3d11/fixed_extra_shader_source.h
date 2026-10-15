@@ -89,7 +89,7 @@ const char kSharpenMain[] =
     "    return Src.Load(int3(q, 0));\n"
     "}\n"
     "void FsrRcasInputF(inout AF1 r, inout AF1 g, inout AF1 b) {}\n"
-    "[numthreads(8,8,1)]\n"
+    "[numthreads(16,16,1)]\n"
     "void main(uint3 id : SV_DispatchThreadID) {\n"
     "    if (id.x >= (uint)outSize.x || id.y >= (uint)outSize.y) return;\n"
     "    int2 ip = int2(id.xy) + region.xy;\n"

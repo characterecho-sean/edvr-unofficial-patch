@@ -114,8 +114,12 @@ private:
 // Built v14.31: the node class cache. One 64-bit word per slot (the node, its class, its flags and the lifecycle generation: optimized_station_core.h
 // packSlot) and the node's name beside it. A lookup probes at most kTableProbeMax slots from the node's hash and stops at an empty one; an insert takes the
 // first empty slot or slot of an older generation within the same bound (a full window is a miss the caller reads uncached). A writer claims a slot with a
-// compare-and-swap to a busy word before it writes the name and publishes the word last, and a reader compares the word before and after it copies the name,
-// so a name is never returned torn or under another node's word. A node's name is read once per node per generation.
+// compare-and-swap to a busy word before it writes the name and publishes the word last. A node's name is read once per node per generation.
+// Release review 2026-10-14 finding 2: the name and the validator are a per-slot SEQLOCK payload. Comparing the slot word before and after a plain copy is not enough: a
+// reader that already holds a published word races the writer that replaces the same node's entry in place, the copy itself was a data race, and an identical word (the same
+// node, class, flags and generation) hid a rewritten name. Now each slot has a sequence count (odd while its owner writes); the name is eight atomic 64-bit words stored and
+// loaded relaxed, and a reader keeps a copy only when the count was even and unchanged on either side of the copy, so every access to the payload is atomic and a name is
+// never returned torn. The work per record is eight word stores or loads plus two count reads: bounded.
 // Built v14.32: each entry also holds a validator, a 64-bit hash of the node's name text pointer and the first 16 bytes of the text, taken by the caller with
 // one guarded read on every lookup. A node freed and reallocated within a generation (a streamed asset) shows another validator: the hit is refused as stale and
 // the caller classifies the node afresh, replacing the entry in place.
@@ -147,15 +151,22 @@ public:
             NameClass c = NameClass::kNone;
             uint32_t f = 0;
             if (!unpackSlot(w1, node, key, &c, &f)) continue;
-            if (name != nullptr) std::memcpy(name, names_[i], kNameBytes);
+            const uint32_t q1 = entries_[i].seq.load(std::memory_order_acquire);
+            if ((q1 & 1u) != 0) return false;   // a writer holds the payload right now: a miss, the caller reads the node itself
+            uint64_t words[kNameWords];
+            for (size_t k = 0; k < kNameWords; ++k) words[k] = entries_[i].word[k].load(std::memory_order_relaxed);
             const uint64_t sv = validators_[i].load(std::memory_order_relaxed);
             std::atomic_thread_fence(std::memory_order_acquire);
+            if (entries_[i].seq.load(std::memory_order_relaxed) != q1) return false;   // rewritten during the copy
             if (slots_[i].load(std::memory_order_relaxed) != w1) return false;
             if (sv != validator) {
                 if (stale != nullptr) *stale = true;
                 return false;
             }
-            if (name != nullptr) name[kNameBytes - 1] = '\0';
+            if (name != nullptr) {
+                std::memcpy(name, words, kNameBytes);
+                name[kNameBytes - 1] = '\0';
+            }
             *cls = c;
             *flags = f;
             return true;
@@ -184,8 +195,15 @@ public:
                 if (!slots_[i].compare_exchange_strong(w, kBusy, std::memory_order_acq_rel, std::memory_order_acquire)) continue;
                 char tmp[kNameBytes] = {};
                 if (name != nullptr) std::strncpy(tmp, name, kNameBytes - 1);
-                std::memcpy(names_[i], tmp, kNameBytes);
+                uint64_t words[kNameWords];
+                std::memcpy(words, tmp, kNameBytes);
+                // This writer owns the slot (its word is busy), so the count is its alone to move: odd while the payload changes, even and different after.
+                const uint32_t q = entries_[i].seq.load(std::memory_order_relaxed);
+                entries_[i].seq.store(q + 1, std::memory_order_relaxed);
+                std::atomic_thread_fence(std::memory_order_release);
+                for (size_t k = 0; k < kNameWords; ++k) entries_[i].word[k].store(words[k], std::memory_order_relaxed);
                 validators_[i].store(validator, std::memory_order_relaxed);
+                entries_[i].seq.store(q + 2, std::memory_order_release);
                 slots_[i].store(packSlot(node, cls, flags, key), std::memory_order_release);
                 return true;
             }
@@ -208,9 +226,17 @@ private:
     static size_t homeOf(uintptr_t node) noexcept {
         return static_cast<size_t>(((uint64_t(node) >> 3) * 0x9E3779B97F4A7C15ull) >> 32) & (N - 1);
     }
+    static constexpr size_t kNameWords = kNameBytes / 8;
+    // The name payload of one slot: its sequence count and the name as atomic words. No initialiser list on the word array (an empty one over this many elements has cost
+    // a compiler its memory before); the object is zero-initialised as a global or by make_unique, and a word is read only after a published slot's writer stored it.
+    struct Entry {
+        std::atomic<uint32_t> seq{0};
+        std::atomic<uint64_t> word[kNameWords];
+    };
+    static_assert(kNameBytes % 8 == 0, "the name is whole 64-bit words");
     std::atomic<uint64_t> slots_[N] = {};
     std::atomic<uint64_t> validators_[N] = {};
-    char names_[N][kNameBytes] = {};
+    Entry entries_[N];
 };
 
 // One cached record: the record's address, the frame generation it belongs to, and four floats (centre x, y, z and radius).

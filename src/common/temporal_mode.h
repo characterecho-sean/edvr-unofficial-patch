@@ -72,6 +72,7 @@ struct TemporalFoot {
     bool onFoot = false;         // Flags2 bit 0
     bool vehicleKnown = false;   // ...and Flags
     bool seated = false;         // Flags bit 24 (main ship), 25 (fighter) or 26 (SRV); Flags2 bit 1 (taxi) or 2 (multicrew)
+    unsigned seatKind = 0;       // journalSeatKind(): Flags bits 24-26 in bits 0-2 (1 ship, 2 fighter, 4 SRV), Flags2 bits 1-2 in bits 3-4
     unsigned sampleAgeMs = 0;    // since the watcher's read count last moved
 };
 
@@ -118,6 +119,33 @@ inline float temporalShipSplitMetres(float configured, bool onFoot) {
     return onFoot && configured > 0.0f ? kTemporalOnFootSplitMetres : configured;
 }
 
+// ---- The ship split in an SRV --------------------------------------------------------------------------------------------
+// The same mechanism as on foot, from the other side. The split is a radius round the head inside which a pixel is "the
+// ship's" and takes the head's delta alone; 10 m is a main ship's cockpit radius. An SRV's own body is close round the driver
+// (2.1 to 2.85 m in the captures below), and the ground beyond it that streams past while driving is the world: left at 10 m
+// it took the head path (flight 2026-10-14, Frontier, v0.20.0-rc.1-4-g66dfe94f, scene inspector: terrain at 5.9 m and 7.5 m on
+// the head path, 21.6 px and 2.2 px from the camera's term, blur while driving; docs/per-object-motion.md, 2026-10-14).
+//
+// kTemporalSrvMetres is 3.5 m. MEASURED from the two captures' depth crops: every SRV body pixel read 2.1 to 2.85 m, every
+// terrain pixel 5.46 m and farther, so 3.5 sits in the empty gap. NOT PROVEN beyond that: the crops show the bonnet and the near
+// front wheel arch only, so the far wheels and the cab's sides are unmeasured. The flight check is in the doc.
+// Only a seated SRV (seat kind bit 2, Flags bit 26) gets it: a main ship and a fighter keep the configured split, nothing
+// measured says otherwise. It never widens the configured split and never turns on what the player turned off (zero).
+inline constexpr float kTemporalSrvMetres = 3.5f;
+inline constexpr unsigned kTemporalSeatKindSrv = 0x4u;
+
+inline bool temporalSrvSeat(TemporalFootWhy why, unsigned seatKind) {
+    return why == TemporalFootWhy::Seated && (seatKind & kTemporalSeatKindSrv) != 0;
+}
+inline bool temporalSrv(const TemporalFoot& f) { return temporalSrvSeat(temporalFootVerdict(f), f.seatKind); }
+
+// The split the shader is given, all three modes: on foot a millimetre, in an SRV the smaller of the SRV radius and the
+// configured split, anywhere else (or with the journal unable to say) the configured split, bit for bit.
+inline float temporalSplitMetres(float configured, bool onFoot, bool srv) {
+    if (onFoot) return temporalShipSplitMetres(configured, true);
+    return srv && configured > kTemporalSrvMetres ? kTemporalSrvMetres : configured;
+}
+
 // A gap between two questions longer than this is the asker's own stall -- a load, a hitch of seconds -- and not the watcher's
 // silence: the watcher's count moves at the frame boundary's tick, so the first answer after a stall can still hold the count
 // from before it.
@@ -132,6 +160,9 @@ struct TemporalFootTracker {
     unsigned changes = 0;               // changes of mode so far
     bool started = false;               // asked at least once: the clock's start is the first question's
     bool on = false;                    // the mode now
+    bool srv = false;                   // the SRV mode now (seated, seat kind SRV): a mode beside on-foot, never both
+    bool srvChanged = false;            // ...and it changed on the last step
+    unsigned srvChanges = 0;            // changes of the SRV mode so far
     TemporalFootWhy why = TemporalFootWhy::NotWatching;   // ...and the verdict's reason
 
     // `f.sampleAgeMs` is ignored: the age is this tracker's own. True when the mode changed on this step.
@@ -145,6 +176,10 @@ struct TemporalFootTracker {
         const unsigned long long age = nowMs - samplesMs;
         f.sampleAgeMs = age > 0x7FFFFFFFull ? 0x7FFFFFFFu : static_cast<unsigned>(age);
         why = temporalFootVerdict(f);
+        const bool srvNow = temporalSrvSeat(why, f.seatKind);
+        srvChanged = srvNow != srv;
+        srv = srvNow;
+        if (srvChanged) ++srvChanges;
         const bool now = why == TemporalFootWhy::OnFoot;
         if (now == on) return false;
         on = now;

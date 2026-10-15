@@ -53,6 +53,12 @@ void introSkipNoteMovieDrew();
 // closes the verdict, said once.
 void introSkipTick(bool sceneFrame);
 
+// The flat profile's frame edge (2026-10-14): flat has no eye draws, so it has no "first rendered scene". The verdict is due
+// when the game has gone four seconds without asking for another ident after the last refusal, or 90 s after arming with
+// none (intro_mode.h: introFlatVerdictDue). `intro skip: WORKED (flat)` is the line that proves the skip fired in flat;
+// the ARMED line says "(flat)" and the refusal lines name the API that was answered. Does nothing outside the flat profile.
+void introSkipTickFlat();
+
 // Put the import slots back where they still hold ours, then release the
 // explicit system-reader module reference.
 void introSkipShutdown();

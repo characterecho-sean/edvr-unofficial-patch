@@ -13,6 +13,7 @@
 #include "../../src/d3d11/xess_engine.h"
 #include "../../src/d3d11/xess_feature_latch.h"
 #include "../../src/d3d11/xess_runtime_version.h"
+#include "unsupported_device.h"
 
 using Microsoft::WRL::ComPtr;
 
@@ -309,6 +310,37 @@ bool rebindAfterFailedFeature(ID3D11Device* device, ID3D11DeviceContext* context
     return flight(replacement.Get(), replacementContext.Get(), 640, 360, 640, 360, false);
 }
 
+// A failed availability probe belongs to the device it ran on (review finding 6). The first probe step, the shared-fence interface, fails
+// on UnsupportedD3D11Device, which counts the QueryInterface calls it receives. The same device offered again is a cached failure and
+// asks nothing of it; a different device is probed afresh, with no xessShutdown between. GPU-free.
+bool failedProbeSelfTest() {
+    edvr::xessShutdown();
+    UnsupportedD3D11Device a, b;
+    const char* why = nullptr;
+    if (!check(!edvr::xessAvailable(&a, &why) && why && std::strstr(why, "shared fences"),
+               "a device without shared fences fails the first probe")) return false;
+    if (!check(a.queries == 1 && a.refs == 2, "the failed probe asked the device once and holds a reference to it")) return false;
+    if (!check(!edvr::xessAvailable(&a, &why) && a.queries == 1,
+               "the same device offered again is a cached failure, not a second probe")) return false;
+    if (!check(!edvr::xessAvailable(&b, &why) && b.queries == 1,
+               "a different device is probed afresh after a failed probe")) return false;
+    if (!check(a.refs == 1 && b.refs == 2, "the retry released the first failed device and holds the second")) return false;
+    edvr::xessShutdown();
+    return check(b.refs == 1, "shutdown released the failed device");
+}
+
+// The same, ending on a supported device: initial availability fails on A, B is offered with no xessShutdown, and B must come up and run.
+bool rebindAfterFailedProbe(ID3D11Device* device, ID3D11DeviceContext* context) {
+    edvr::xessShutdown();
+    UnsupportedD3D11Device unsupported;
+    const char* why = nullptr;
+    if (!check(!edvr::xessAvailable(&unsupported, &why), "initial availability fails on the first device")) return false;
+    why = nullptr;
+    if (!check(edvr::xessAvailable(device, &why),
+               "a supported device is probed after a failed probe, with no xessShutdown between")) return false;
+    return flight(device, context, 640, 360, 640, 360, false);
+}
+
 // Upscaler slots keep separate features. Slot 1 changing size builds slot 1
 // alone and leaves slot 0 unbuilt; slot 0 keeps its feature while slot 1 runs;
 // slot 3 is refused; the profile switch's release frees every slot, and a freed
@@ -448,7 +480,7 @@ int main(int argc, char** argv) {
     }
     if (std::strcmp(argv[1], "--self-test") == 0)
         return check(edvr::xessBuiltIn(), "backend compiled into rig") &&
-               latchSelfTest() && gateSelfTest() && slotRangeSelfTest() ? 0 : 1;
+               latchSelfTest() && gateSelfTest() && slotRangeSelfTest() && failedProbeSelfTest() ? 0 : 1;
     const bool optional = std::strcmp(argv[1], "--gpu-test-if-available") == 0;
     if (!optional && std::strcmp(argv[1], "--gpu-test") != 0) return 2;
     if (optional) {
@@ -496,6 +528,7 @@ int main(int argc, char** argv) {
     const bool eyes = slots && eyeAlternation(device.Get(), context.Get());
     const bool bridge = eyes && bridgeTiming(device.Get(), context.Get());
     const bool rebound = bridge && rebindAfterFailedFeature(device.Get(), context.Get());
+    const bool reboundAfterProbe = rebound && rebindAfterFailedProbe(device.Get(), context.Get());
     edvr::xessShutdown();
-    return rebound ? 0 : 1;
+    return rebound && reboundAfterProbe ? 0 : 1;
 }

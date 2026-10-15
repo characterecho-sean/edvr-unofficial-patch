@@ -31,7 +31,7 @@ brightness separately per eye, so near a star or a floodlight one eye stops down
 and the other does not. EDVR copies one eye's exposure into both. Measured at a
 held view of a star: about **1.5 stops** apart without it, **0.4** with — and
 what remains is the glow in the eye that can actually see the star, which is
-correct. `fix.share_exposure = 1` (on). *[eye-brightness.md](eye-brightness.md).*
+correct. Always on in VR, with no setting. *[eye-brightness.md](eye-brightness.md).*
 
 **The planet you are scanning going black in one eye.** In the surface and
 system scanners the body renders as a featureless black disc in the right eye
@@ -74,10 +74,12 @@ derived per headset from its real projection; `hide` removes them entirely and
 
 **The one-frame flash when you jump or drop out of supercruise.** Once per
 transition Elite draws a single frame from the wrong viewpoint. On a monitor it
-is a blink; in a headset it reads as the world lurching. EDVR spots that frame
-and does not send it, so the runtime holds the previous frame for a moment
-instead. Needs `openvr_api.dll` — without it the flash is detected and logged
-but not withheld. `fix.transition_flash = 1` (on).
+is a blink; in a headset it reads as the world lurching. EDVR knows from the
+game's own camera driver which frame will be drawn from the reset camera and
+does not send it, so the runtime holds the previous frame for a moment instead.
+Always on, with no setting (`fix.transition_flash` was removed 2026-10-13). It
+needs `openvr_api.dll`, and it is keyed to the game build it was made for
+(332841): on any other build the log says it is not armed and nothing is held.
 *[transition-flash.md](transition-flash.md).*
 
 **The sun's glare riding your head.** A star's whole glare — corona, veiling
@@ -284,31 +286,23 @@ was developed against), and both degrade instead of guessing. The 4.4.1.0
 update (build 332753) moved the second of them and left the first alone;
 [build-332753.md](build-332753.md) has the full re-check:
 
-- The transition flash fix watches a viewpoint in a constant buffer. There is
-  no instruction pattern to recognise, only a size and an offset, so it checks
-  the *data*: a viewpoint moves smoothly, and EDVR requires the first 300
-  rendered frames to behave that way before acting. If an update moves the
-  block, whatever is at the old offset will not move like a viewpoint, and the
-  fix disables itself and says so. It also switches off for the session if it
-  ever withholds continuously, because permanent judder would be worse than the
-  flash.
+- The transition flash fix hooks the game's camera driver, so it is keyed to
+  the build (the executable's timestamp and size) and to the first bytes of
+  the function it hooks. On any other build it installs nothing and the log
+  says why; there is no other protection to fall back on. It reads the
+  viewpoint from the same constant buffer the game fills every frame, which
+  must be the 5376-byte scene buffer, and checks the settings that describe it
+  before it arms.
 - Explorer Cam is built for one game build (332841). On any other build it
   leaves the game untouched and the log says so;
   [explorer-cam.md](explorer-cam.md) has the detail.
 
-The transition flash fix also recognises recurring false jumps and leaves them
-alone. Flying low over terrain, the game alternates between shadow cameras
-whose fixed separation looks like an enormous jump (measured at ~568,000 units,
-recurring for eight minutes, each withhold felt as judder). A jump that keeps
-recurring at the same size is a distance between render passes, not a
-transition, because real transitions vary as real motion does. So the first
-jump of a size is withheld and matching ones are left alone.
-Raising the jump threshold cannot help, because the false jumps are *larger*
-than real ones. (This detector is now only the fallback when the engine fix
-cannot arm; the tuning keys are gone and it runs on fixed values.) Both eyes of a frame follow one verdict, decided at whichever eye
-submits first. When something changes, a `transition flash so far:` line counts
-withheld and recognised jumps separately; if there is no such line, the fix
-never fired.
+The transition flash fix holds exactly the frame the camera driver reads a
+reset camera for: one held frame per transition, logged as
+`transition flash: frame N held`, and the temporal pass keeps its history
+across it. (Until 2026-10-13 a second detector, which judged the camera's jumps
+from outside, ran when the engine fix could not arm; it is gone, with its
+recurring-false-jump memory.)
 
 ---
 
@@ -320,7 +314,8 @@ runtime, which implements the OpenVR interfaces Elite calls and speaks OpenXR
 itself.
 
 Most of the fixes never touch the game. They change how frames are drawn from
-outside it: four small copies per frame so both eyes share an exposure value,
+outside it: five small copies per frame (and the second eye's exposure shaders
+not sent to the GPU) so both eyes share an exposure value,
 one substituted argument to a screen-clearing call, and one substituted copy of
 the panel's position if you change the distance. For the transition flash, EDVR
 reads a constant buffer the game has already filled and, on the rare frame

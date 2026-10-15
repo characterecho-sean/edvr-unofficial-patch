@@ -125,6 +125,12 @@ minutes after a flight finally reproduced the effect being chased.
 
 - **Every C++ edit compiles before you report it as done.** Run the full
   `build.bat` by absolute path and read the tail of its output.
+- **One build at a time on this machine.** Run `build.bat --wait-lock` by
+  absolute path: it waits for any other build to finish and then takes the
+  lock and builds in one step. A bare `build.bat` that finds another build
+  running prints "another build is already running" and exits 1. Do not run
+  `build_lock.py --wait` and then `build.bat` as two commands; another build
+  can take the lock between them.
 - The normal `build.bat` path is the validation build: it runs the Python
   self-tests, compiles the production DLLs, runs the test rigs, builds and
   checks the self-contained installer, and writes
@@ -230,4 +236,4 @@ minutes after a flight finally reproduced the effect being chased.
 | `tools\` | Python tools, each with `--self-test`; C++ test rigs in subdirs |
 | `docs\` | one investigation doc per arc — read its `## Status` block first |
 | `build.bat` | full build, all gates; `--dll-only` is the receipt-guarded promotion path |
-| `package.bat <version>` | builds, tests, then packages a release |
+| `package.bat <version>` | packages a release from the last full build; it does not build, and refuses unless the build's receipt matches the tree (run `build.bat --wait-lock` first) |

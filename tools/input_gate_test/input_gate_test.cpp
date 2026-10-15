@@ -308,7 +308,12 @@ HRESULT readStickRows(Stick& s, DIDEVICEOBJECTDATA (&out)[6], DWORD& count, DWOR
 }
 }
 
+// The executable's own import of XInputGetState from xinput9_1_0.dll, which the controller door patches in the real game. Taking the
+// address keeps the linker from dropping the import.
+DWORD (WINAPI* volatile keepPadImport)(DWORD, XINPUT_STATE*) = &XInputGetState;
+
 int main() {
+    (void)keepPadImport;
     padHookCases();
     auto dummyTable = deviceTable(), table1 = deviceTable(), table2 = deviceTable();
     auto ftable1 = factoryTable(), ftable2 = factoryTable();
@@ -808,6 +813,35 @@ int main() {
         }
         check(differs == 0 && stick.refs == 1 && ansi.refs == 1 && bad.refs == 1 && kb3.refs == 1,
               "shutdown restores the joystick tables and gives back the references it held");
+    }
+    // Review finding 7, through the real setup order: the loader attach, the VR menu's first inputGateInstall, then the flat menu's. The
+    // controller door is the executable's real XINPUT9_1_0 import (the rig links it for this), so "installed" is observable.
+    {
+        const RuntimeProfile before = g_runtimeProfile;
+        check(!g_installTried && !g_padTried && !g_padInstalled.load(), "(nothing has run the menu's gate setup yet)");
+        inputGateInstallEarly();
+        g_runtimeProfile = RuntimeProfile::Vr;
+        inputGateInstall();
+        check(g_installTried && g_gateEnabled && !g_padTried && !g_padInstalled.load() && !g_padImport.applied,
+              "a VR menu opening installs the keyboard doors and leaves the controller door alone");
+        const bool diW = g_diW.installed, diA = g_diA.installed;
+        void* const asyncKey = g_user.asyncKey.original;
+        void* const peek = g_user.peek.original;
+        void* const create = g_createImport.original;
+        g_runtimeProfile = RuntimeProfile::Flat;
+        inputGateInstall();
+        check(g_padTried && g_padInstalled.load() && g_padImport.applied,
+              "the flat menu opened after a VR one still installs the controller door");
+        check(g_diW.installed == diW && g_diA.installed == diA && g_user.asyncKey.original == asyncKey &&
+              g_user.peek.original == peek && g_createImport.original == create,
+              "and does not install the keyboard doors a second time");
+        const void* const padOriginal = g_padImport.original;
+        inputGateInstall();
+        check(g_padImport.original == padOriginal && g_padInstalled.load(),
+              "a second flat opening does not install the controller door again");
+        inputGateShutdown();
+        check(!g_padImport.applied && !g_padInstalled.load(), "shutdown takes the controller door out");
+        g_runtimeProfile = before;
     }
     printf("\nINPUT GATE TEST %s\n", failures ? "FAILED" : "PASSED");
     return failures ? 1 : 0;

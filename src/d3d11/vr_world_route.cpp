@@ -60,7 +60,7 @@ const char* g_notLiveNoted = nullptr;        // the reason the route last said i
 uint64_t g_frameNo = 0;                      // present frames seen by the route, consecutive; the resolver's gap test reads it
 uint64_t g_windowStartMs = 0;
 uint64_t g_ownedFramesEpisode = 0;           // frames this ownership episode (for the release line)
-bool g_sceneResetEvent = false;              // the transition detector reset the eyes' history: the machine lets go at the boundary
+bool g_sceneResetEvent = false;              // the transition-flash fix reset the eyes' history: the machine lets go at the boundary
 bool g_sceneResetPending = false;            // ... and the resolver's history resets at the next treat
 bool g_tookNoted = false;                    // the first layer take of this ownership episode was logged
 bool g_firstTriggerLogged = false, g_latchLogged = false, g_lateWriteLogged = false;

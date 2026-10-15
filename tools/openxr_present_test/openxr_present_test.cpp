@@ -659,7 +659,7 @@ int selfTest(const std::wstring& supplied, HookExpectation expectation=HookExpec
 }
 
 // Explorer Cam's frame tick through the real proxy in the MINIMAL configuration (review 2026-10-08, finding 3). With fix.black_void off, fix.panel_distance 1,
-// transition_flash 0, app_gpu_timing off and panel_hooks_always off vScreen installs transport-only: it has no State and vScreenFrameBoundary never runs, so a tick
+// the camera-buffer tap off (the test-only variable EDVR_TEST_NO_CAMERA_TAP=1, set by tools\test_openxr_transport.py), app_gpu_timing off and panel_hooks_always off vScreen installs transport-only: it has no State and vScreenFrameBoundary never runs, so a tick
 // carried by it never ran and F5 did nothing, whatever hotkey.explorer_cam held. This presents ordinary frames and leaves the DLL's own log to the driver
 // (tools\test_openxr_transport.py), which asks for the tick's lines. With a replacement ini, edvr.ini beside the proxy is rewritten with a fresh timestamp
 // after the first phase: hotkey.explorer_cam starting EMPTY and bound while the game runs.

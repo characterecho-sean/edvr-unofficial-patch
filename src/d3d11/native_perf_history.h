@@ -33,6 +33,8 @@ public:
     // GPU time.
     NativePerfAverage applicationCpu(uint64_t nowMs, uint64_t windowMs) const noexcept;
     NativePerfAverage applicationGpu(uint64_t nowMs, uint64_t windowMs) const noexcept;
+    // The frame's GPU work span, with the application clock off (2026-10-14): one sample a frame into the applicationGpu series.
+    void noteFrameWork(uint64_t sequence, uint64_t nowMs, double ms) noexcept;
     static NativeCpuFigure cpuFigure(const NativeTimingSnapshot&) noexcept;
     // Which figure applicationCpu and the CPU graph hold, for the label:
     // CallerWork, PreSubmit (an older runtime), or None before the first.
