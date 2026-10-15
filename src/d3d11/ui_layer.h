@@ -401,6 +401,9 @@ int uiLayerLastDecision();
 // routing to tell "decided: left, with this reason" from "no decision ran for this draw", which uiLayerLastDecision alone cannot (it
 // keeps the previous draw's value, and 0 is a take).
 uint32_t uiLayerDecisionCount();
+// F46 (TEMPORARY, the native on-foot marker probe): the eye whose layer the game's target `res` was redirected from -- the 8-bit layer's
+// target or the HDR HUD layer's, as each eye's last redirected frame left them -- or -1 when neither eye's layer names it. Read only.
+int uiLayerEyeOfGameTarget(const void* res);
 // A game draw the layer did not take, while watching: a write of the depth-stencil buffer a seed copied makes the seed
 // stale (uiLayerNoteOther's first step, alone -- the flat profile has no after-the-UI take).
 void uiLayerNoteSceneDraw(ID3D11DeviceContext* ctx, uint32_t count, uint32_t instances, char drawKind);

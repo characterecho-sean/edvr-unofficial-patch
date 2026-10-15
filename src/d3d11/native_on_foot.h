@@ -103,9 +103,10 @@ inline std::atomic<uint32_t> g_nativeModeEdges{0};
 inline std::atomic<uint32_t> g_nativeLastEffective{0};
 
 // F44 (TEMPORARY instrument, fix.native_on_foot_marker_probe, default off; draw_record_tag.h): measure only. The marker post tags each world
-// marker's t' (low mantissa bits); the Map/Unmap tees find the tagged record in the HUD's t33 pool; the draw tee names the on-foot HUD draw that
-// reads it and the eye's world view, read back from GPU copies. Nothing drawn changes. The frame thread publishes the key (readKey); every tee
-// asks nativeOnFootMarkerProbeLive() first: two relaxed loads.
+// marker's t' (low mantissa bits); the Map/Unmap tees find the tagged record in the HUD's t33 pool; the draw tee (F46: the on-foot HUD draws,
+// the marker composite B10B032BDFD46700 and the world pool draws only) names the marker composite draw that reads it and each eye's world view,
+// read back from GPU copies, and sets the marker's NDC against P's per eye. Nothing drawn changes. The frame thread publishes the key
+// (readKey); every tee asks nativeOnFootMarkerProbeLive() first: two relaxed loads.
 inline std::atomic<bool> g_nativeOnFootMarkerProbeKey{false};
 inline bool nativeOnFootMarkerProbeLive() {
     return g_nativeOnFootMarkerProbeKey.load(std::memory_order_relaxed) && nativeOnFootActive();

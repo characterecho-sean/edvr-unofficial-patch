@@ -5045,6 +5045,12 @@ void uiLayerFlatSetDraw(uint64_t frame, float jx, float jy, uint32_t renderW, ui
 
 int uiLayerLastDecision() { return g_lastDecision; }
 uint32_t uiLayerDecisionCount() { return g_decisionCount; }
+int uiLayerEyeOfGameTarget(const void* res) {
+    if (!res) return -1;
+    for (int e = 0; e < 2; ++e)
+        if ((g_eye[e].draws && g_eye[e].target == res) || (g_eye[e].hdrDraws && g_eye[e].hdrTarget == res)) return e;
+    return -1;
+}
 
 bool uiLayerFlatRelease() {
     const bool any = releaseLayers();

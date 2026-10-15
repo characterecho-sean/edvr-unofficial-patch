@@ -259,6 +259,62 @@ inline double markerAngle(const float rowsA[12], const float oA[4], const float 
     return angleDeg(v0, vt);
 }
 
+// F46: THE NDC PAIR. The world pool draws' view-projection is b1 rows 270..273 in row-vector form, clip = x r270 + y r271 + z r272 + r273,
+// applied to (P - o, 1) with o = b1 row 275 (rows[16]: rows 270..273, row after row). The marker composite (VS B10B032BDFD46700) reads b0
+// rows 4, 5 and 7 only: clip.x = r4 . p, clip.y = r5 . p and w = |r7 . p|, with p = (X0 - o_hud, 1).
+inline void worldClip(const float rows[16], const double p[3], const double o[3], double clip[4]) noexcept {
+    const double v[3] = {p[0] - o[0], p[1] - o[1], p[2] - o[2]};
+    for (int j = 0; j < 4; ++j) clip[j] = v[0] * rows[j] + v[1] * rows[4 + j] + v[2] * rows[8 + j] + rows[12 + j];
+}
+// clip[0] = r4 . p, clip[1] = r5 . p, clip[2] = r7 . p (signed: the shader takes its absolute value).
+inline void markerClip(const float r4[4], const float r5[4], const float r7[4], const double x0[3], const double o[3], double clip[3]) noexcept {
+    const double v[4] = {x0[0] - o[0], x0[1] - o[1], x0[2] - o[2], 1.0};
+    clip[0] = clip[1] = clip[2] = 0.0;
+    for (int i = 0; i < 4; ++i) {
+        clip[0] += r4[i] * v[i];
+        clip[1] += r5[i] * v[i];
+        clip[2] += r7[i] * v[i];
+    }
+}
+// The angle in degrees between the view rays through two NDC points of the world projection `rows`; -1 when the rows have no forward axis.
+// The eye is where clip x, y and w all vanish, so a ray d from it lands at ndc = (c_x . d, c_y . d) / (c_w . d) for the columns c of the
+// rows' 3x3 part. Forward is c_w; each of c_x and c_y splits into an offset along forward and a scale along an axis normal to it, so the ray
+// through (nx, ny) is forward + right (nx - ox) / sx + up (ny - oy) / sy.
+inline double ndcAngleDeg(const float rows[16], const double a[2], const double b[2]) noexcept {
+    const int which[3] = {0, 1, 3};
+    double col[3][3];
+    for (int c = 0; c < 3; ++c)
+        for (int i = 0; i < 3; ++i) col[c][i] = rows[4 * i + which[c]];
+    const double len = length3(col[2]);
+    if (!(len > 1e-12)) return -1.0;
+    const double fwd[3] = {col[2][0] / len, col[2][1] / len, col[2][2] / len};
+    double axis[2][3], off[2], scale[2];
+    for (int k = 0; k < 2; ++k) {
+        const double u[3] = {col[k][0] / len, col[k][1] / len, col[k][2] / len};
+        off[k] = u[0] * fwd[0] + u[1] * fwd[1] + u[2] * fwd[2];
+        for (int i = 0; i < 3; ++i) axis[k][i] = u[i] - off[k] * fwd[i];
+        scale[k] = length3(axis[k]);
+        if (!(scale[k] > 1e-12)) return -1.0;
+        for (int i = 0; i < 3; ++i) axis[k][i] /= scale[k];
+    }
+    double ra[3], rb[3];
+    const double tax = (a[0] - off[0]) / scale[0], tay = (a[1] - off[1]) / scale[1];
+    const double tbx = (b[0] - off[0]) / scale[0], tby = (b[1] - off[1]) / scale[1];
+    for (int i = 0; i < 3; ++i) {
+        ra[i] = fwd[i] + axis[0][i] * tax + axis[1][i] * tay;
+        rb[i] = fwd[i] + axis[0][i] * tbx + axis[1][i] * tby;
+    }
+    return angleDeg(ra, rb);
+}
+// F47 (kept ready, NOT used by F46): the per-eye NDC offset on a private copy of the marker composite's b0. row4' = row4 + dx row7 and
+// row5' = row5 + dy row7 move the marker's NDC by (dx, dy) wherever r7 . p > 0 (the shader divides by |w|: behind the eye the move flips).
+inline void ndcOffsetRows(float r4[4], float r5[4], const float r7[4], double dx, double dy) noexcept {
+    for (int i = 0; i < 4; ++i) {
+        r4[i] = static_cast<float>(r4[i] + dx * r7[i]);
+        r5[i] = static_cast<float>(r5[i] + dy * r7[i]);
+    }
+}
+
 }  // namespace drawtag
 }  // namespace edvr
 
