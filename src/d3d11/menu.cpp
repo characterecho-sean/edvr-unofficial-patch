@@ -62,6 +62,9 @@
 // reaches AMD's price and its name through temporal_pass.h's
 // temporalPassTrainedTotals, which answers for the engine in force (F6).
 
+#ifdef EDVR_HAVE_VERSION_HEADER
+#include "edvr_version.h"
+#endif
 #ifndef EDVR_VERSION_STRING
 #define EDVR_VERSION_STRING "unknown"
 #endif

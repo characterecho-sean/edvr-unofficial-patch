@@ -703,7 +703,7 @@ def self_test():
         check(block is not None, "build.bat has %s" % spec["label"])
         if not block:
             continue
-        cl = next((l for l in block if l.strip().lower().startswith("cl.exe")), "")
+        cl = next((l for l in block if l.strip().lower().startswith(("cl.exe", "%cc%"))), "")
         for flag in CL_FLAGS + spec.get("flags", []):
             check(flag in cl, "build.bat's %s compile line lacks %s" % (spec["label"], flag))
         for src in spec["sources"]:

@@ -136,6 +136,13 @@ minutes after a flight finally reproduced the effect being chased.
   checks the self-contained installer, and writes
   `build\full_build_receipt.json` only after all gates pass. Green means
   green; do not report success off a build you did not read.
+- Compiles go through `tools\compile_cache.py`, which skips a compile whose
+  sources, project headers, flags, toolchain and `INCLUDE` are unchanged. Each
+  invocation prints a `compile_cache:` summary line (compiled / reused, and why
+  for the first misses); a hit does not replay the compiler's warnings.
+  `build.bat --clean` or `EDVR_NO_COMPILE_CACHE=1` forces full recompiles.
+  System and SDK headers are covered only by the `INCLUDE` path and the
+  compiler's identity, not by content.
 - After that full build, commit the same source tree. For the install-only
   rebuild that gives the DLLs the clean commit's version, use
   `build.bat --dll-only` by absolute path. It requires a clean working tree

@@ -165,7 +165,9 @@ BUILD_GUARD = 'if "%EDVR_RIG_STEP%"=="build" exit /b 0'
 # What d3d11_in_build looks for in a rig's compiler commands: a cl command that
 # links (no /c) d3d11.lib -- after /link, or as a plain input, which cl hands to
 # the linker as well -- into a /Fe output that sits directly in %BUILD%.
-CL_COMMAND = re.compile(r"^\s*cl(?:\.exe)?\s", re.IGNORECASE)
+# build.bat spells the compiler %CC% (the compile cache prefix); a plain cl or
+# cl.exe still counts. A line this misses would turn the guard silently inert.
+CL_COMMAND = re.compile(r"^\s*(?:cl(?:\.exe)?|%CC%)\s", re.IGNORECASE)
 COMPILE_ONLY = re.compile(r"\s/c(?:\s|$)", re.IGNORECASE)
 EXE_OUTPUT = re.compile(r'/Fe:?\s*"?([^"\s]+)"?', re.IGNORECASE)
 BUILD_ROOT_OUTPUT = re.compile(r"^%BUILD%\\[^\\/]+$", re.IGNORECASE)
@@ -1217,6 +1219,15 @@ def self_test():
           is not None
           and refusal(":rig_five", 'cl.exe /Fe"%BUILD%\\five.exe" "t.cpp" d3d11.lib', "exit /b 0") is not None,
           "a plain d3d11.lib input, which cl hands to the linker too, is read as well")
+    cc_one = one.replace("cl.exe", "%CC%", 1)
+    text = refusal(":rig_cc", cc_one, "exit /b 0")
+    check(text is not None and ":rig_cc," in text and "%BUILD%\\one.exe" in text
+          and refusal(":rig_cc", "    " + cc_one, "exit /b 0") is not None
+          and refusal(":rig_cc", "%cc% " + one[len("cl.exe "):], "exit /b 0") is not None,
+          "a %%CC%% (compile cache) line is read like cl.exe, indented or in any case: %r" % text)
+    check(refusal(":rig_cc", '%CC% /c /Fe"%BUILD%\\x.exe" "t.cpp" d3d11.lib', "exit /b 0") is None
+          and refusal(":rig_cc", '%CC% /Fe"%OBJ%\\x\\x.exe" "t.cpp" /link d3d11.lib', "exit /b 0") is None,
+          "%CC% lines keep the /c and %OBJ% exemptions")
     text = refusal(":rig_a", one, ":rig_b", one.replace("one.exe", "b.exe"), "exit /b 0")
     check(text is not None and ":rig_a," in text and ":rig_b," in text and text.startswith("2 rig link(s)"),
           "every offending rig is named: %r" % text)
@@ -1762,6 +1773,7 @@ def self_test():
         check(sweep_exe_dir(build_dir, False, io.BytesIO()) == 0, "a second sweep finds nothing left to remove")
 
     self_test_timeouts(check)
+    self_test_gates(check)
 
     if failures:
         for why in failures:
@@ -2172,6 +2184,145 @@ def self_test_timeouts(check):
             runner.stdout.close()
 
 
+def gate_argv(command):
+    """A gate's argv: the running Python plus the command split on whitespace,
+    quotes honoured and backslashes left alone (a Windows path survives);
+    the quotes themselves are stripped from each token."""
+    import shlex
+    tokens = []
+    for token in shlex.split(command, posix=False):
+        if len(token) >= 2 and token[0] == token[-1] and token[0] in "\"'":
+            token = token[1:-1]
+        tokens.append(token)
+    if not tokens:
+        raise ValueError("empty --gate")
+    return [sys.executable] + tokens
+
+
+def run_gate(command):
+    """(exit code, output bytes) of one gate: its stdout and stderr together.
+    A gate that cannot start is a failure, with the reason as its output."""
+    try:
+        done = subprocess.run(gate_argv(command), stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+    except (OSError, ValueError) as error:
+        return 1, ("[edvr] ERROR: could not run %s: %s: %s\n"
+                   % (command, type(error).__name__, error)).encode("utf-8", "replace")
+    return done.returncode, done.stdout
+
+
+def gate_exit_text(code):
+    """A gate's exit code for its banner; a negative or NTSTATUS-sized one
+    (a crash) is also given in hex."""
+    if code < 0 or code >= 0x80000000:
+        return "exit code %d (0x%08X), crashed" % (code, code & 0xFFFFFFFF)
+    return "exit code %d" % code
+
+
+def run_gates(commands, jobs, out, dry_run=False, runner=run_gate, clock=time.monotonic):
+    """Run the independent gate commands, at most `jobs` at a time. Each gate's
+    whole output is printed under a header naming it and its seconds as it
+    finishes; failures are held and printed last, so the tail of the log names
+    them. Ends with one summary line. Returns 0, or 1 if any gate failed or
+    crashed. --dry-run prints the plan and starts nothing."""
+    if dry_run:
+        emit(out, "[edvr] gates (dry run, would run up to %d at once):\n" % jobs)
+        for command in commands:
+            emit(out, "[edvr]   %s\n" % command)
+        out.flush()
+        return 0
+    started = clock()
+    outcomes = queue.Queue()
+    pending = list(commands)
+    lock = threading.Lock()
+
+    def worker():
+        while True:
+            with lock:
+                if not pending:
+                    return
+                command = pending.pop(0)
+            begun = clock()
+            try:
+                code, output = runner(command)
+            except Exception as error:
+                code = 1
+                output = ("[edvr] ERROR: could not run %s: %s: %s\n"
+                          % (command, type(error).__name__, error)).encode("utf-8", "replace")
+            outcomes.put((command, code, clock() - begun, output))
+
+    for _ in range(max(1, min(jobs, len(commands)))):
+        threading.Thread(target=worker, daemon=True).start()
+    failures, serial_sum = [], 0.0
+
+    def show(command, code, seconds, output):
+        extra = "" if code == 0 else ", " + gate_exit_text(code)
+        emit(out, "[edvr] --- gate %s: %.1f s%s ---\n" % (command, seconds, extra))
+        out.write(output)
+        if output and not output.endswith(b"\n"):
+            out.write(b"\n")
+        out.flush()
+
+    for _ in commands:
+        entry = outcomes.get()
+        serial_sum += entry[2]
+        if entry[1] == 0:
+            show(*entry)
+        else:
+            failures.append(entry)
+    for entry in failures:
+        show(*entry)
+    emit(out, "[edvr] gates: %d passed in %.1f s (serial sum %.1f s)\n"
+         % (len(commands) - len(failures), clock() - started, serial_sum))
+    if failures:
+        emit(out, "[edvr] gates FAILED: %d of %d: %s\n"
+             % (len(failures), len(commands), "; ".join(entry[0] for entry in failures)))
+    out.flush()
+    return 1 if failures else 0
+
+
+def self_test_gates(check):
+    """The gate mode: all pass, one fails (printed after the passing ones), a
+    crash is a failure, and --dry-run starts nothing. Real child Pythons, but
+    each does nothing."""
+    # The printed words are built at run time so a command's header never contains them.
+    ok = '-c "print(\'ok-\' + \'gate\')"'
+    bad = '-c "import sys; print(\'bad-\' + \'gate\'); sys.exit(3)"'
+    crash = '-c "import sys; sys.exit(-1073741819)"'
+
+    out = io.BytesIO()
+    code = run_gates([ok, ok], 2, out)
+    text = out.getvalue()
+    check(code == 0 and b"gates: 2 passed in" in text and text.count(b"ok-gate") == 2
+          and b"serial sum" in text, "all gates pass: rc 0 and the summary line: %r" % text)
+
+    out = io.BytesIO()
+    code = run_gates([bad, ok], 1, out)
+    text = out.getvalue()
+    check(code == 1 and b"gates: 1 passed in" in text and b"exit code 3" in text
+          and text.rfind(b"bad-gate") > text.rfind(b"ok-gate")
+          and text.rfind(b"gates FAILED") > text.rfind(b"bad-gate"),
+          "a failing gate: rc 1, its output after the passing gate's: %r" % text)
+
+    out = io.BytesIO()
+    code = run_gates([crash, ok], 2, out)
+    check(code == 1 and b"crashed" in out.getvalue(),
+          "a crashing gate is a failure: %r" % out.getvalue())
+
+    spawned = []
+    out = io.BytesIO()
+    code = run_gates([ok, bad], 2, out, dry_run=True, runner=lambda c: spawned.append(c) or (0, b""))
+    check(code == 0 and not spawned and out.getvalue().count(b"[edvr]   ") == 2,
+          "--dry-run lists the gates and spawns none: %r" % out.getvalue())
+
+    argv = gate_argv('tools\\x.py --flag "a b"')
+    check(argv == [sys.executable, "tools\\x.py", "--flag", "a b"],
+          "gate_argv keeps backslashes and honours quotes: %r" % argv)
+    out = io.BytesIO()
+    code = run_gates(["tools\\no_such_gate_tool.py"], 1, out)
+    check(code == 1, "a gate that cannot run is a failure")
+
+
 def env_number(name, default=None):
     """The non-negative number in environment variable `name`, `default` when
     it is unset or empty; ValueError, naming it, when it is anything else."""
@@ -2223,10 +2374,24 @@ def main(argv=None):
                         help="remove stale per-instance exe directories left under DIR by any "
                              "earlier build (see stale_exe_dirs), then exit; independent of "
                              "--script. --dry-run lists them and removes nothing")
+    parser.add_argument("--gate", action="append", default=[], metavar="CMD",
+                        help="gate mode (repeatable): run CMD, a Python invocation such as "
+                             "'tools\\fetch_xess.py --self-test', up to --jobs at once, print each "
+                             "output whole and the failures last, exit 1 if any failed. Touches no "
+                             "rig machinery; --dry-run lists the gates and runs none")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args(argv)
     if args.self_test:
         return self_test()
+    if args.gate:
+        if args.jobs < 1:
+            parser.error("--jobs must be at least 1")
+        for command in args.gate:
+            try:
+                gate_argv(command)
+            except ValueError as error:
+                parser.error("--gate %r: %s" % (command, error))
+        return run_gates(args.gate, args.jobs, sys.stdout.buffer, dry_run=args.dry_run)
     if args.sweep_exe_dir is not None:
         if not args.sweep_exe_dir.is_dir():
             parser.error("--sweep-exe-dir must name an existing directory")

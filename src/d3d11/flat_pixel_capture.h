@@ -10,6 +10,9 @@
 #include <deque>
 #include <string>
 #include <vector>
+#ifdef EDVR_HAVE_VERSION_HEADER
+#include "edvr_version.h"
+#endif
 #ifndef EDVR_VERSION_STRING
 #define EDVR_VERSION_STRING "unversioned test build"
 #endif

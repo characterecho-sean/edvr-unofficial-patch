@@ -860,6 +860,9 @@ float budgetNow() {
     return 11.1f;
 }
 
+#ifdef EDVR_HAVE_VERSION_HEADER
+#include "edvr_version.h"
+#endif
 #ifndef EDVR_VERSION_STRING
 #define EDVR_VERSION_STRING "unknown"
 #endif

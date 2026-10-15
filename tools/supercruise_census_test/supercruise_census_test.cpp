@@ -575,7 +575,7 @@ int main(int argc, char** argv) {
             check(bat.size() > 100000, "build.bat is readable from the repo root");
             bat.erase(std::remove(bat.begin(), bat.end(), '\r'), bat.end());   // CRLF on disk
             const char* wanted[] = {"\n:rig_supercruise_census_test\n", "\n:rig_orbit_layer_test\n", "\n:rig_supercruise_bars_test\n",
-                                    "\npython tools\\layer_fixtures.py --self-test || exit /b 1\n"};
+                                    "\n    --gate \"tools\\layer_fixtures.py --self-test\" ^\n"};   // one line of the run_jobs.py --gate group
             for (const char* w : wanted) {
                 check(bat.find(w) != std::string::npos, "build.bat holds the rig label or the fixtures tool's gate");
                 std::string without = bat;

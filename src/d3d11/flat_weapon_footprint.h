@@ -23,6 +23,9 @@
 #include "temporal_shader_bytecode.h"
 #include "../common/config.h"
 #include "../common/log.h"
+#ifdef EDVR_HAVE_VERSION_HEADER
+#include "edvr_version.h"
+#endif
 #ifndef EDVR_VERSION_STRING
 #define EDVR_VERSION_STRING "unversioned test build"
 #endif

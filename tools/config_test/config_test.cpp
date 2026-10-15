@@ -38,6 +38,7 @@
 //        config_test.exe --ininame-cases <scratch dir>   (its own child; see iniNameFixturesIsolated)
 #include <windows.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cctype>
 #include <cstdio>
@@ -1066,7 +1067,9 @@ static void realDllChoiceCases(const std::wstring& root) {
     if (!bad) ok("advanced.real_dll resolves from the flat file's own value, else the shared file's, and logs the file that supplied it");
 
     // The shipped edvr.ini says what the rule is, in the comment above the key: both profiles, and the flat override.
-    const std::string ini = readRepoFile(root, L"edvr.ini");
+    // Without \r: edvr.ini is text=auto, so a Windows clone (core.autocrlf=true) has it CRLF on disk and "\n\n" never matches.
+    std::string ini = readRepoFile(root, L"edvr.ini");
+    ini.erase(std::remove(ini.begin(), ini.end(), '\r'), ini.end());
     const size_t key = ini.find("\nreal_dll =");
     const size_t above = key == std::string::npos ? std::string::npos : ini.rfind("\n\n", key - 1);
     const std::string comment = above == std::string::npos ? std::string() : ini.substr(above, key - above);
