@@ -313,7 +313,9 @@ void __fastcall setterHooked(void* selectorPtr, uint32_t incoming) {
     ev.keyOn = in.keyOn;
     ev.incoming = incoming;
     ev.effective = nofoot::effectiveMode(ev.reason, incoming);
-    g_nativeLastEffective.store(ev.effective, std::memory_order_relaxed);   // F29: the eye rule is evaluated from the actual mode
+    // F30: every render-mode edge bumps the edge counter that the eye check re-arms on, not only the eye rule's flips.
+    const uint32_t prevEffective = g_nativeLastEffective.exchange(ev.effective, std::memory_order_relaxed);   // F29: the rule reads the actual mode
+    if (prevEffective != ev.effective) g_nativeModeEdges.fetch_add(1, std::memory_order_relaxed);
     g_nativeLastAdmitted.store(ev.admitted, std::memory_order_relaxed);
     nativeEyeOrderEvaluate("the setter's mode");
     ev.onFoot = journalOnFootKnown() ? (journalOnFoot() ? 1 : 0) : 2;
@@ -1736,7 +1738,38 @@ struct F13Head {
 F13Head g_f13Raw;
 F13Head g_worldC;                                  // F27: the list-B head sample from the P2 hook, for the world markers (any HUD follow); under g_f9Lock
 uint64_t g_worldCMs = 0;                            // F27: GetTickCount64 of g_worldC's sample   // guarded by g_f9Lock: the head transform read by the P2 hook
-uint64_t g_worldCSeq = 0;                           // F29: list-B samples taken (P2 calls that read a head), for the age line
+uint64_t g_worldCSeq = 0;                           // F29: list-B sample number of g_worldC (the P2 hook's read)
+// F30 part 2: one counter for every list-B head read (the P2 hook and the marker entry), so the two sources' sample numbers compare.
+std::atomic<uint64_t> g_listBSeq{0};
+uint64_t g_worldCQpc = 0;                           // F30: QueryPerformanceCounter of g_worldC's sample   // under g_f9Lock
+uint64_t f30Qpc() noexcept {
+    LARGE_INTEGER q{};
+    QueryPerformanceCounter(&q);
+    return static_cast<uint64_t>(q.QuadPart);
+}
+uint64_t f30QpcUs(uint64_t ticks) noexcept {
+    static const uint64_t freq = [] {
+        LARGE_INTEGER f{};
+        QueryPerformanceFrequency(&f);
+        return f.QuadPart > 0 ? static_cast<uint64_t>(f.QuadPart) : uint64_t{1};
+    }();
+    return ticks * 1000000ull / freq;
+}
+// F30 part 2: the head C of THIS marker call. The marker pre-hook reads list B (r8) on the game thread; the post stub runs later in the same call
+// on the same thread. Valid only for that call: the pre-hook clears it on entry.
+struct F30SameCall {
+    bool valid = false;
+    bool haveEntry = false;
+    F13Head head{};
+    uint64_t entrySeq = 0;   // g_listBSeq at the marker entry, before its own read
+    uint64_t seq = 0;        // the marker's own list-B sample number
+    uint64_t qpc = 0;        // QueryPerformanceCounter at its read
+};
+thread_local F30SameCall t_f30SameCall;
+// The 5 s window's metrics (game thread: the post stub; reset on each 5 s line).
+uint64_t g_f30PostSame = 0, g_f30PostFall = 0, g_f30PostNone = 0;
+int64_t g_f30LagMax = 0;
+uint64_t g_f30AgeMaxUs = 0, g_f30AgeSumUs = 0, g_f30AgeN = 0;
 F13Head g_f13Smooth;                                // guarded by g_f9Lock: the smoothed one (the frame thread)
 uint64_t g_f13LastQpc = 0;                          // frame thread only
 uint64_t g_f13LogMs = 0;                            // frame thread only
@@ -2744,16 +2777,39 @@ void __fastcall reticleWorldPost(void* node) noexcept {
     float C[16] = {};
     bool havePose = false;
     const uint64_t now = GetTickCount64();
-    {
-        // F27: the head transform whatever the HUD follow is: the smoothed one when the HUD follows the head, else the list-B sample the look reads.
+    const F30SameCall& sc = t_f30SameCall;
+    bool sameCall = false;
+    uint64_t usedSeq = 0, usedQpc = 0;
+    if (sc.valid) {
+        // F30 part 2: this marker call's own list-B head (the pre-hook read it on this thread, in this call): the same-frame pose.
+        std::memcpy(C, sc.head.C, sizeof(C));
+        havePose = true;
+        sameCall = true;
+        usedSeq = sc.seq;
+        usedQpc = sc.qpc;
+    } else {
+        // Only when the call had no head read: the P2 sample (g_worldC) while it is fresh. (F30: the smoothed head is no longer used here.)
         F9Lock lock;
-        if (g_followHead.load(std::memory_order_relaxed) && g_f13Smooth.valid) {
-            std::memcpy(C, g_f13Smooth.C, sizeof(C));
-            havePose = true;
-        } else if (g_worldC.valid && now - g_worldCMs < 500) {
+        if (g_worldC.valid && now - g_worldCMs < 500) {
             std::memcpy(C, g_worldC.C, sizeof(C));
             havePose = true;
+            usedSeq = g_worldCSeq;
+            usedQpc = g_worldCQpc;
         }
+    }
+    if (havePose) {
+        // F30: the sample used against the marker entry's (zero for the same-call read), and the sample's age in microseconds.
+        const uint64_t nowQ = f30Qpc();
+        const uint64_t age = (usedQpc && nowQ >= usedQpc) ? f30QpcUs(nowQ - usedQpc) : 0;
+        const int64_t lag = sameCall ? 0 : static_cast<int64_t>(usedSeq) - static_cast<int64_t>(sc.entrySeq);
+        if (sameCall) ++g_f30PostSame; else ++g_f30PostFall;
+        const int64_t absLag = lag < 0 ? -lag : lag;
+        if (absLag > g_f30LagMax) g_f30LagMax = absLag;
+        if (age > g_f30AgeMaxUs) g_f30AgeMaxUs = age;
+        g_f30AgeSumUs += age;
+        ++g_f30AgeN;
+    } else {
+        ++g_f30PostNone;
     }
     if (!havePose) {
         if (now - g_worldLineMs >= 5000 || g_worldLineMs == 0) {
@@ -2787,17 +2843,32 @@ void __fastcall reticleWorldPost(void* node) noexcept {
                         static_cast<unsigned>(key), wmMode == 0 ? "fixed" : "forward", static_cast<double>(t[0]), static_cast<double>(t[1]),
                         static_cast<double>(t[2]), static_cast<double>(tp[0]), static_cast<double>(tp[1]), static_cast<double>(tp[2]),
                         static_cast<double>(yawC));
-        // F29: the marker's C is the newest list-B sample: its age, its sequence number, and the two eyes' rotation difference.
+        // F30 part 2: where C came from since the last line (the marker's own list-B read, or the P2 fallback), its lag and its age in
+        // microseconds (QueryPerformanceCounter, not the tick count); P = the node's [+0x50] (read as three floats) and |t' - P| with the t' just written.
+        // At scale 1, forward should give t' near P when C equals the marker's head.
+        float P[3] = {};
+        const bool okP = guardedRead(na + 0x50, P, sizeof(P));
+        const double dx = static_cast<double>(tp[0]) - static_cast<double>(P[0]);
+        const double dy = static_cast<double>(tp[1]) - static_cast<double>(P[1]);
+        const double dz = static_cast<double>(tp[2]) - static_cast<double>(P[2]);
+        const double dP = okP ? std::sqrt(dx * dx + dy * dy + dz * dz) : -1.0;
         float eyeDiff = 0.0f;
-        uint64_t seq = 0;
         {
             F9Lock lock;
             eyeDiff = g_worldC.eyeDiff;
-            seq = g_worldCSeq;
         }
-        Log::get().note("native on foot world markers: C age %llu ms, list-B sample #%llu, eye 0 vs eye 1 rotation difference %.5f (the marker uses "
-                        "eye 0's rotation with both eyes' translation: the centre head)",
-                        static_cast<unsigned long long>(now - g_worldCMs), static_cast<unsigned long long>(seq), static_cast<double>(eyeDiff));
+        Log::get().note("native on foot world markers: C source since the last line: same-call list B %llu, P2 fallback %llu, none %llu; "
+                        "sample lag max %lld; C age max %llu us, mean %llu us; P (node+0x50) %s (%.3f, %.3f, %.3f), t' (%.3f, %.3f, %.3f), "
+                        "|t'-P| %.4f; P2 eye 0 vs eye 1 rotation difference %.5f",
+                        static_cast<unsigned long long>(g_f30PostSame), static_cast<unsigned long long>(g_f30PostFall),
+                        static_cast<unsigned long long>(g_f30PostNone), static_cast<long long>(g_f30LagMax),
+                        static_cast<unsigned long long>(g_f30AgeMaxUs),
+                        static_cast<unsigned long long>(g_f30AgeN ? g_f30AgeSumUs / g_f30AgeN : 0), okP ? "read" : "unread",
+                        static_cast<double>(P[0]), static_cast<double>(P[1]), static_cast<double>(P[2]), static_cast<double>(tp[0]),
+                        static_cast<double>(tp[1]), static_cast<double>(tp[2]), dP, static_cast<double>(eyeDiff));
+        g_f30PostSame = g_f30PostFall = g_f30PostNone = 0;
+        g_f30LagMax = 0;
+        g_f30AgeMaxUs = g_f30AgeSumUs = g_f30AgeN = 0;
     }
 }
 
@@ -3490,6 +3561,106 @@ void f28Untrack(uint64_t act) {
     }
 }
 
+// ---- F30 part 1 (TEMPORARY): the Training connection stall. fix.training_connect_fix = on | off (read at launch, default on).
+// A (prevent, f30HoldSgmm): SGMM in state 2 (the pending StartTutorial) with a CTSA alive in states 1-9 has its body skipped for up to 10 s.
+//   The skipped body is the game's own not-ready exit (+0x1D1D1E2): for state 2 it returns al = (state == 0) = 0, which the hook returns.
+// B (recover, f30RecoverTick, from the owner AM's Update after the original returns): after a CTSA is destroyed and a load is pending (a Deactivate
+//   after the destroy), with the IDProvider link down, the owner AM gets a new CTSA the game's way (+0x4C8E500, +0x4C907A0, +0x4C8F960, +0x4C8EA60),
+//   and StartPending (+0x4C90B90) once if no Start follows within 1 s. Two attempts per pending load. The AM owns the objects: nothing here frees one.
+namespace f30 {
+constexpr uint64_t kHoldMaxMs = 10000, kRecoverQuietMs = 10000, kStartWaitMs = 1000;
+constexpr uint32_t kAttempts = 2;
+constexpr uintptr_t kUpdateRva = 0x4C8EEA0, kSetInitRva = 0x4C8E500, kSetInsertRva = 0x4C907A0, kInstantiateRva = 0x4C8F960,
+                    kSetFreeRva = 0x4C8EA60, kStartPendingRva = 0x4C90B90, kTypeKeyRva = 0x5F7D7F8;
+const uint8_t kUpdateB[11] = {0x41, 0x56, 0x48, 0x83, 0xEC, 0x60, 0x48, 0x89, 0x5C, 0x24, 0x70};
+const uint8_t kSetInitB[6] = {0x40, 0x53, 0x48, 0x83, 0xEC, 0x20};
+const uint8_t kSetInsertB[8] = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x74};
+const uint8_t kInstantiateB[8] = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x74};
+const uint8_t kSetFreeB[8] = {0x48, 0x8B, 0xC1, 0x48, 0x8B, 0x49, 0x20, 0x48};
+const uint8_t kStartPendingB[8] = {0x48, 0x89, 0x5C, 0x24, 0x18, 0x48, 0x89, 0x6C};
+using SetInitFn = void(__fastcall*)(void*, uint32_t);
+using SetInsertFn = void(__fastcall*)(void*, uint64_t);
+using InstantiateFn = void(__fastcall*)(void*, void*);
+using SetFreeFn = void(__fastcall*)(void*);
+using StartPendingFn = void(__fastcall*)(void*);
+}  // namespace f30
+
+bool g_f30FixOn = false;            // fix.training_connect_fix, read at install
+uintptr_t g_f30Base = 0;            // EliteDangerous64.exe's base (install)
+bool g_f30CalleesOk = false;        // the Update and the callees' entry bytes matched at install; recovery refuses otherwise
+F9Probe g_f30Update;
+uint8_t* g_f30UpdateShim = nullptr;
+std::atomic<uint64_t> g_f28SgmmSecCalls{0};   // SGMM calls this second (the frame tick takes and resets it)
+// Part A
+bool g_f30Holding = false, g_f30HoldDone = false;
+uint64_t g_f30HoldStartMs = 0;
+uint32_t g_f30Holds = 0;
+// Part B. Game thread only: the Ctor, Dtor, Remove, Start, Deactivate, SGMM and Update hooks all run there.
+uint64_t g_f30Owner = 0;            // the owner AM of the last CTSA built ([act+8] after its ctor)
+uint64_t g_f30NewAct = 0;           // the last CTSA built
+bool g_f30Dead = false;             // a CTSA was destroyed (its dtor, or the owner's Remove) and none was built since
+bool g_f30Pending = false;          // a Deactivate came after that destroy: a load is pending
+bool g_f30GaveUp = false, g_f30RefuseLogged = false, g_f30StartPendingDone = false;
+uint32_t g_f30Attempts = 0;
+uint64_t g_f30AttemptMs = 0, g_f30AttemptCtor = 0, g_f30AttemptStart = 0, g_f30PendingCtor = 0;
+uint32_t g_f30NewState0 = 0xFFFFFFFFu;
+std::atomic<uint64_t> g_f30CtorSeq{0}, g_f30StartSeq{0};
+
+// The tracked CTSA objects (f28Track/f28Untrack) include this one.
+bool f28Tracked(uint64_t act) {
+    if (!act) return false;
+    std::lock_guard<std::mutex> lock(g_f28Mutex);
+    for (uint64_t slot : g_f28Ctsa) {
+        if (slot == act) return true;
+    }
+    return false;
+}
+
+void f30EndHold(uint64_t ms, const char* why) {
+    Log::get().note("training connect fix: hold end after %llu ms: %s; SGMM runs its body again", static_cast<unsigned long long>(ms - g_f30HoldStartMs), why);
+    g_f30Holding = false;
+}
+
+// Part A: true when SGMM's body is skipped on this call. The skip returns al = 0, which is what the game's own not-ready exit returns at state 2.
+bool f30HoldSgmm(void* self, uint64_t ms) {
+    if (!g_f30FixOn || !self) return false;
+    uint32_t st = 0;
+    if (!guardedRead(reinterpret_cast<uintptr_t>(self) + 0x138, &st, 4)) return false;
+    if (st != 2) {
+        if (g_f30Holding) f30EndHold(ms, "SGMM left state 2");
+        g_f30HoldDone = false;
+        return false;
+    }
+    uint64_t acts[4] = {};
+    {
+        std::lock_guard<std::mutex> lock(g_f28Mutex);
+        for (int i = 0; i < 4; ++i) acts[i] = g_f28Ctsa[i];
+    }
+    uint64_t alive = 0;
+    uint32_t aliveState = 0;
+    bool released = false;
+    for (uint64_t a : acts) {
+        if (!a) continue;
+        uint32_t s = 0;
+        if (!guardedRead(static_cast<uintptr_t>(a) + 0x30, &s, 4)) continue;
+        if (s >= 1 && s <= 9) { alive = a; aliveState = s; }
+        if (s == 10 || s == 11) released = true;
+    }
+    if (g_f30Holding) {
+        if (released) { f30EndHold(ms, "the CTSA reached state 10 or 11"); g_f30HoldDone = true; return false; }
+        if (!alive) { f30EndHold(ms, "no CTSA in states 1-9 any more"); g_f30HoldDone = true; return false; }
+        if (ms - g_f30HoldStartMs >= f30::kHoldMaxMs) { f30EndHold(ms, "10 s elapsed"); g_f30HoldDone = true; return false; }
+        return true;
+    }
+    if (g_f30HoldDone || !alive) return false;
+    g_f30Holding = true;
+    g_f30HoldStartMs = ms;
+    ++g_f30Holds;
+    Log::get().note("training connect fix: hold start (%u): SGMM is in state 2 with CTSA %s in state %u; its body is skipped (the not-ready exit, al = 0) for up to 10 s",
+                    g_f30Holds, f28Hex(alive).c_str(), static_cast<unsigned>(aliveState));
+    return true;
+}
+
 // Forwards the eight argument slots to the trampoline. Integer arguments only: the callee reads them as they came.
 using F28Fn = uint64_t(__fastcall*)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 uint64_t f28Forward(int k, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t s5, uint64_t s6, uint64_t s7, uint64_t s8) {
@@ -3502,6 +3673,7 @@ uint64_t __fastcall f28StartHooked(uint64_t a1, uint64_t a2, uint64_t a3, uint64
     g_f28Calls[f28::kStart].fetch_add(1);
     f28Entry(f28::kStart, a1, reinterpret_cast<uint64_t>(_ReturnAddress()));
     f28LogServices(a1);   // v2: once per object: would a retry instance have its services?
+    g_f30StartSeq.fetch_add(1);
     return f28Forward(f28::kStart, a1, a2, a3, a4, s5, s6, s7, s8);
 }
 uint64_t __fastcall f28StopHooked(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t s5, uint64_t s6, uint64_t s7, uint64_t s8) {
@@ -3514,6 +3686,7 @@ uint64_t __fastcall f28DtorHooked(uint64_t a1, uint64_t a2, uint64_t a3, uint64_
     f28Entry(f28::kDtor, a1, reinterpret_cast<uint64_t>(_ReturnAddress()));
     f28Untrack(a1);   // the object is freed by the dtor: stop reading it
     g_f28DtorMs.store(GetTickCount64());   // v2: the SGMM lines follow for 120 s after a destruction
+    g_f30Dead = true;                      // F30 part B: destroyed, and no CTSA built since (until a ctor)
     return f28Forward(f28::kDtor, a1, a2, a3, a4, s5, s6, s7, s8);
 }
 uint64_t __fastcall f28CtorHooked(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t s5, uint64_t s6, uint64_t s7, uint64_t s8) {
@@ -3525,6 +3698,10 @@ uint64_t __fastcall f28CtorHooked(uint64_t a1, uint64_t a2, uint64_t a3, uint64_
     const bool okO = guardedRead(static_cast<uintptr_t>(a1) + 8, &owner, 8);
     Log::get().note("training connect: CTSA ctor returned: act %s, owner AM [+8] %s (passed %s), key %s", f28Hex(a1).c_str(),
                     okO ? f28Hex(owner).c_str() : "unread", f28Hex(a2).c_str(), f28Hex(a3).c_str());
+    g_f30Owner = okO ? owner : 0;   // F30 part B: the owner AM for the recovery's Update gate
+    g_f30NewAct = a1;
+    g_f30Dead = false;
+    g_f30CtorSeq.fetch_add(1);
     return r;
 }
 uint64_t __fastcall f28DeactHooked(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t s5, uint64_t s6, uint64_t s7, uint64_t s8) {
@@ -3532,6 +3709,16 @@ uint64_t __fastcall f28DeactHooked(uint64_t a1, uint64_t a2, uint64_t a3, uint64
     f28Entry(f28::kDeact, a1, reinterpret_cast<uint64_t>(_ReturnAddress()));   // IrcGameClient::Deactivate: the menu closes here
     g_f28DeactMs.store(GetTickCount64());   // v2: the IDProvider link line runs while an SGMM wait follows
     g_f28AfterDeact.store(true);            // v2: the next SGMM call logs as the first after this Deactivate
+    if (g_f30Dead) {                        // F30 part B: the menu closed after a CTSA was destroyed: a load is pending
+        g_f30Pending = true;
+        g_f30GaveUp = false;
+        g_f30RefuseLogged = false;
+        g_f30Attempts = 0;
+        g_f30AttemptMs = 0;
+        g_f30PendingCtor = g_f30CtorSeq.load();
+        Log::get().note("training connect fix: Deactivate after a CTSA was destroyed (%llu s before): a load is pending; the recovery waits for the link to be down and 10 s",
+                        static_cast<unsigned long long>((GetTickCount64() - g_f28DtorMs.load()) / 1000));
+    }
     return f28Forward(f28::kDeact, a1, a2, a3, a4, s5, s6, s7, s8);
 }
 // State setter: (act, new state, RA, tid) on every call.
@@ -3583,8 +3770,10 @@ uint64_t __fastcall f28RunHooked(void* act, float dt) {
 // SGMM (dt in xmm1, via the shim): logs the changes of [this+0x138], with a timestamp. State 2 = the pending StartTutorial.
 uint64_t __fastcall f28SgmmHooked(void* self, float dt) {
     g_f28Calls[f28::kSgmm].fetch_add(1);
+    g_f28SgmmSecCalls.fetch_add(1);
     const uint64_t ms = GetTickCount64();
-    const uint64_t r = reinterpret_cast<F28ShimFn>(g_f28SgmmShim)(self, nullptr, dt);
+    // F30 part A: a hold skips the body (its not-ready exit returns 0); otherwise the original runs as before.
+    const uint64_t r = f30HoldSgmm(self, ms) ? 0 : reinterpret_cast<F28ShimFn>(g_f28SgmmShim)(self, nullptr, dt);
     g_f28SgmmThis.store(reinterpret_cast<uint64_t>(self));
     uint32_t now = 0;
     const bool okNow = self && guardedRead(reinterpret_cast<uintptr_t>(self) + 0x138, &now, 4);
@@ -3618,6 +3807,13 @@ uint64_t __fastcall f28ClearHooked(uint64_t a1, uint64_t a2, uint64_t a3, uint64
 }
 uint64_t __fastcall f28RemoveHooked(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t s5, uint64_t s6, uint64_t s7, uint64_t s8) {
     g_f28Calls[f28::kRemove].fetch_add(1);
+    if (g_f30FixOn && f28Tracked(a2)) {   // F30 part B: the owner removed a tracked CTSA (the reconcile): dead for the recovery
+        f28Untrack(a2);
+        g_f28DtorMs.store(GetTickCount64());
+        g_f30Dead = true;
+        Log::get().note("training connect fix: the owner AM removed the tracked CTSA %s (AM %s): it is dead for the recovery", f28Hex(a2).c_str(),
+                        f28Hex(a1).c_str());
+    }
     uint32_t st = 0;
     const bool okSt = a2 && guardedRead(static_cast<uintptr_t>(a2) + 0x30, &st, 4);
     Log::get().note("training connect: ActivitySet Remove: AM %s, act %s, [act+0x30] %s, RA 0x%llX, tid %lu, at %llu ms", f28Hex(a1).c_str(),
@@ -3627,12 +3823,188 @@ uint64_t __fastcall f28RemoveHooked(uint64_t a1, uint64_t a2, uint64_t a3, uint6
     return f28Forward(f28::kRemove, a1, a2, a3, a4, s5, s6, s7, s8);
 }
 
+// ---- F30 part 1, part B: the recovery. Runs from the owner AM's Update after the original has returned.
+// The link is IsConnected as the RE gives it: down when the pointer at idp+0x28 is null or [ptr+0x60] < 3, idp being ReadyToAllocIDs' rcx.
+bool f30LinkDown(const char** why) {
+    uint64_t idp = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_f28Mutex);
+        idp = g_f28RirRcx;
+    }
+    if (!idp) { *why = "no ReadyToAllocIDs call seen, so no IDProvider"; return false; }
+    uint64_t p = 0;
+    uint32_t v = 0;
+    if (!guardedRead(static_cast<uintptr_t>(idp) + 0x28, &p, 8)) { *why = "the IDProvider could not be read: refused"; return false; }
+    if (!p) { *why = "link down: the pointer at idp+0x28 is null"; return true; }
+    if (!guardedRead(static_cast<uintptr_t>(p) + 0x60, &v, 4)) { *why = "the link object could not be read: refused"; return false; }
+    if (v < 3) { *why = "link down: [link+0x60] is below 3"; return true; }
+    *why = "link up";
+    return false;
+}
+
+// The game's own sequence, in SEH: the set's init (count 1), the key insert, Instantiate(AM, set), the set's free. No C++ objects in this frame.
+bool f30InstantiateSafe(uintptr_t base, void* am, uint8_t* actSet) {
+    __try {
+        reinterpret_cast<f30::SetInitFn>(base + f30::kSetInitRva)(actSet, 1u);
+        reinterpret_cast<f30::SetInsertFn>(base + f30::kSetInsertRva)(actSet, static_cast<uint64_t>(base + f30::kTypeKeyRva));
+        reinterpret_cast<f30::InstantiateFn>(base + f30::kInstantiateRva)(am, actSet);
+        reinterpret_cast<f30::SetFreeFn>(base + f30::kSetFreeRva)(actSet);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool f30StartPendingSafe(uintptr_t base, void* am) {
+    __try {
+        reinterpret_cast<f30::StartPendingFn>(base + f30::kStartPendingRva)(am);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+void f30Attempt(void* am, uint64_t ms) {
+    ++g_f30Attempts;
+    g_f30AttemptMs = ms;
+    g_f30AttemptCtor = g_f30CtorSeq.load();
+    g_f30AttemptStart = g_f30StartSeq.load();
+    g_f30StartPendingDone = false;
+    g_f30NewState0 = 0xFFFFFFFFu;
+    alignas(16) uint8_t actSet[0x100];
+    std::memset(actSet, 0, sizeof(actSet));
+    const bool ok = f30InstantiateSafe(g_f30Base, am, actSet);
+    Log::get().note("training connect fix: recovery attempt %u of %u: owner AM %s, set built (count 1, the CTSA type key), Instantiate %s",
+                    static_cast<unsigned>(g_f30Attempts), static_cast<unsigned>(f30::kAttempts), f28Hex(reinterpret_cast<uint64_t>(am)).c_str(),
+                    ok ? "returned" : "FAULTED (SEH): nothing further is called");
+}
+
+void f30RecoverTick(void* am, uint64_t ms) {
+    if (!g_f30Pending || g_f30GaveUp || !g_f30Owner) return;
+    if (reinterpret_cast<uint64_t>(am) != g_f30Owner) return;
+    const uint64_t ctorNow = g_f30CtorSeq.load();
+    const uint64_t dtorMs = g_f28DtorMs.load();
+    if (g_f30AttemptMs == 0) {
+        if (ctorNow != g_f30PendingCtor) {
+            Log::get().note("training connect fix: the game built a CTSA on its own after the menu exit; no recovery is needed");
+            g_f30Pending = false;
+            return;
+        }
+        if (!g_f30Dead || ms < dtorMs || ms - dtorMs < f30::kRecoverQuietMs) return;
+        const char* why = "";
+        if (!f30LinkDown(&why)) {
+            if (!g_f30RefuseLogged) {
+                g_f30RefuseLogged = true;
+                Log::get().note("training connect fix: no recovery yet: %s (the CTSA was destroyed %llu s ago)", why,
+                                static_cast<unsigned long long>((ms - dtorMs) / 1000));
+            }
+            return;
+        }
+        Log::get().note("training connect fix: %s, the CTSA was destroyed %llu s ago and a load is pending: recovery starts", why,
+                        static_cast<unsigned long long>((ms - dtorMs) / 1000));
+        f30Attempt(am, ms);
+        return;
+    }
+    // After an attempt. Progress: a CTSA built since the attempt whose state moves.
+    if (ctorNow != g_f30AttemptCtor && g_f30NewAct) {
+        uint32_t st = 0;
+        if (guardedRead(static_cast<uintptr_t>(g_f30NewAct) + 0x30, &st, 4)) {
+            if (g_f30NewState0 == 0xFFFFFFFFu) {
+                g_f30NewState0 = st;
+                Log::get().note("training connect fix: the new CTSA %s is in state %u", f28Hex(g_f30NewAct).c_str(), static_cast<unsigned>(st));
+            } else if (st != g_f30NewState0) {
+                Log::get().note("training connect fix: progress: the new CTSA %s moved from state %u to %u after attempt %u; recovery done",
+                                f28Hex(g_f30NewAct).c_str(), static_cast<unsigned>(g_f30NewState0), static_cast<unsigned>(st),
+                                static_cast<unsigned>(g_f30Attempts));
+                g_f30Pending = false;
+                return;
+            }
+        }
+    }
+    if (!g_f30StartPendingDone && ms - g_f30AttemptMs >= f30::kStartWaitMs && g_f30StartSeq.load() == g_f30AttemptStart) {
+        g_f30StartPendingDone = true;
+        const bool ok = f30StartPendingSafe(g_f30Base, am);
+        Log::get().note("training connect fix: no Start within 1 s of attempt %u: StartPending (+0x4C90B90) on the owner AM %s",
+                        static_cast<unsigned>(g_f30Attempts), ok ? "returned" : "FAULTED (SEH)");
+    }
+    if (ms - g_f30AttemptMs >= f30::kRecoverQuietMs) {
+        if (g_f30Attempts < f30::kAttempts) {
+            Log::get().note("training connect fix: no progress in 10 s after attempt %u: retry", static_cast<unsigned>(g_f30Attempts));
+            f30Attempt(am, ms);
+        } else {
+            Log::get().note("training connect fix: gave up after %u attempts with no progress in 10 s each; the load needs a restart",
+                            static_cast<unsigned>(g_f30Attempts));
+            g_f30GaveUp = true;
+            g_f30Pending = false;
+        }
+    }
+}
+
+// The owner AM's Update: the original runs first with the same arguments (the shim moves dt to xmm1, as the SGMM shim does).
+uint64_t __fastcall f30UpdateHooked(void* am, float dt) {
+    const uint64_t r = reinterpret_cast<F28ShimFn>(g_f30UpdateShim)(am, nullptr, dt);
+    if (g_f30CalleesOk && g_f30Pending) f30RecoverTick(am, GetTickCount64());
+    return r;
+}
+
+// Install (part B): the Update and the callees' entry bytes must match the RE's (recovery refuses otherwise). Part A needs no install of its own.
+void f30InstallRecovery(uintptr_t base) {
+    g_f30Base = base;
+    if (!g_f30FixOn) {
+        Log::get().note("training connect fix: off (fix.training_connect_fix = off): no hold and no recovery");
+        return;
+    }
+    struct Chk {
+        const char* name;
+        uintptr_t rva;
+        const uint8_t* b;
+        size_t n;
+    };
+    const Chk chks[] = {
+        {"SetInit", f30::kSetInitRva, f30::kSetInitB, sizeof(f30::kSetInitB)},
+        {"SetInsert", f30::kSetInsertRva, f30::kSetInsertB, sizeof(f30::kSetInsertB)},
+        {"Instantiate", f30::kInstantiateRva, f30::kInstantiateB, sizeof(f30::kInstantiateB)},
+        {"SetFree", f30::kSetFreeRva, f30::kSetFreeB, sizeof(f30::kSetFreeB)},
+        {"StartPending", f30::kStartPendingRva, f30::kStartPendingB, sizeof(f30::kStartPendingB)},
+    };
+    bool ok = true;
+    for (const Chk& c : chks) {
+        uint8_t got[8] = {};
+        const bool read = guardedRead(base + c.rva, got, c.n);
+        if (!read || std::memcmp(got, c.b, c.n) != 0) {
+            ok = false;
+            Log::get().note("training connect fix: %s at EliteDangerous64.exe+0x%llX does not match the RE's entry bytes: recovery refused (the hold is unaffected)",
+                            c.name, static_cast<unsigned long long>(c.rva));
+        }
+    }
+    g_f30CalleesOk = ok;
+    if (!ok) return;
+    g_f30UpdateShim = f28MakeShim();
+    const F9ProbeSpec s{"AM Update", f30::kUpdateRva, f30::kUpdateB, sizeof(f30::kUpdateB), 11, reinterpret_cast<void*>(&f30UpdateHooked),
+                        "training connect fix"};
+    size_t got = 0;
+    std::string why;
+    if (g_f30UpdateShim && installF9ProbeInto(g_f30Update, s, base, &got, &why)) {
+        std::memcpy(g_f30UpdateShim + 9, &g_f30Update.original, 8);
+        Log::get().note("training connect fix: AM Update installed at EliteDangerous64.exe+0x%llX, stolen=%zu bytes; recovery runs after the original returns",
+                        static_cast<unsigned long long>(f30::kUpdateRva), got);
+    } else {
+        g_f30CalleesOk = false;
+        Log::get().note("training connect fix: AM Update NOT installed (%s): recovery is off; the hold is unaffected", why.c_str());
+    }
+}
+
 // Install: VR only (the probes are read at launch with the key; a refusal is one line each). The shims are built before their hooks, so the
 // gate can open with the jump slot set.
 void installF28ProbesOnce(uintptr_t base) {
-    if (Config::get().getString("fix.training_connect_probe", "on") == "off") {
-        Log::get().note("training connect: probes off (fix.training_connect_probe = off)");
+    const bool probeOn = Config::get().getString("fix.training_connect_probe", "on") != "off";
+    g_f30FixOn = Config::get().getString("fix.training_connect_fix", "on") != "off";
+    if (!probeOn && !g_f30FixOn) {
+        Log::get().note("training connect: probes off (fix.training_connect_probe = off) and the fix off (fix.training_connect_fix = off)");
         return;
+    }
+    if (!probeOn) {
+        Log::get().note("training connect: fix.training_connect_probe = off, but the fix needs the tracking hooks (CTSA ctor, dtor, Remove, Start, Deactivate, SGMM): installing them");
     }
     g_f28RunShim = f28MakeShim();
     g_f28SgmmShim = f28MakeShim();
@@ -3663,6 +4035,7 @@ void installF28ProbesOnce(uintptr_t base) {
     // The shims' jump slots: the trampolines (installed above), written before the probes can run through them.
     if (g_f28RunShim && g_f28[f28::kRun].original) std::memcpy(g_f28RunShim + 9, &g_f28[f28::kRun].original, 8);
     if (g_f28SgmmShim && g_f28[f28::kSgmm].original) std::memcpy(g_f28SgmmShim + 9, &g_f28[f28::kSgmm].original, 8);
+    f30InstallRecovery(base);   // F30 part B: the AM Update pre-hook and its callee checks (after the tracking hooks above)
     g_f28InstallMs = GetTickCount64();
 }
 
@@ -3695,11 +4068,13 @@ void f28FrameTick(uint64_t nowMs) {
         if (okRir18) std::snprintf(rirA, sizeof(rirA), "0x%llX", static_cast<unsigned long long>(rir18)); else std::snprintf(rirA, sizeof(rirA), "unread");
         if (okRir20) std::snprintf(rirB, sizeof(rirB), "0x%llX", static_cast<unsigned long long>(rir20)); else std::snprintf(rirB, sizeof(rirB), "unread");
         if (okRunSt) std::snprintf(runStText, sizeof(runStText), "%u", static_cast<unsigned>(runSt)); else std::snprintf(runStText, sizeof(runStText), "unread");
+        // ReadyToAllocIDs is ready when [idp+0x18] < 0x1000 or [idp+0x20] != 0 (the RE's rule, checked again in F30).
+        const char* rdy = (okRir18 && okRir20) ? ((rir18 < 0x1000 || rir20 != 0) ? "yes" : "no") : "unknown";
         Log::get().note("training connect: per second: Run %llu calls (rcx 0x%llX, [rcx+0x30] %s, dt %.4f, RA 0x%llX, tid %lu); RIR %llu calls (rcx 0x%llX, "
-                        "[rcx+0x18] %s, [rcx+0x20] %s)",
+                        "[rcx+0x18] %s, [rcx+0x20] %s, ready %s)",
                         static_cast<unsigned long long>(runN), static_cast<unsigned long long>(runRcx), runStText,
                         static_cast<double>(runDt), static_cast<unsigned long long>(runRa), static_cast<unsigned long>(runTid),
-                        static_cast<unsigned long long>(rirN), static_cast<unsigned long long>(rirRcx), rirA, rirB);
+                        static_cast<unsigned long long>(rirN), static_cast<unsigned long long>(rirRcx), rirA, rirB, rdy);
         std::string top;
         for (int i = 0; i < 4; ++i) {
             if (!raN[i]) continue;
@@ -3725,15 +4100,16 @@ void f28FrameTick(uint64_t nowMs) {
     // v2: SGMM, every second while [this+0x138] changed this second or a CTSA was destroyed in the last 120 s: the count, the state, [this+8] (its AM).
     const uint64_t sgThis = g_f28SgmmThis.load();
     const bool sgChanged = g_f28SgmmChangedSec.exchange(false);
+    const uint64_t sgSec = g_f28SgmmSecCalls.exchange(0);
     const uint64_t dtorMs = g_f28DtorMs.load();
-    if (sgThis && (sgChanged || (dtorMs && nowMs - dtorMs <= 120000))) {
+    if (sgThis) {   // v3: every second once SGMM has run: its calls this second, [this+0x138], [this+8], and the last destroy
         uint32_t st = 0;
         uint64_t am = 0;
         const bool okS = guardedRead(static_cast<uintptr_t>(sgThis) + 0x138, &st, 4);
         const bool okA = guardedRead(static_cast<uintptr_t>(sgThis) + 8, &am, 8);
-        Log::get().note("training connect: SGMM per second: %llu calls (this %s), [this+0x138] %s, [this+8] AM %s, last CTSA destroyed %s",
-                        static_cast<unsigned long long>(g_f28Calls[f28::kSgmm].load()), f28Hex(sgThis).c_str(),
-                        okS ? f28State(st).c_str() : "unread", okA ? f28Hex(am).c_str() : "unread",
+        Log::get().note("training connect: SGMM per second: %llu calls this second (%llu in all), state changed %s, this %s, [this+0x138] %s, [this+8] AM %s, last CTSA destroyed %s",
+                        static_cast<unsigned long long>(sgSec), static_cast<unsigned long long>(g_f28Calls[f28::kSgmm].load()), sgChanged ? "yes" : "no",
+                        f28Hex(sgThis).c_str(), okS ? f28State(st).c_str() : "unread", okA ? f28Hex(am).c_str() : "unread",
                         dtorMs ? (std::to_string((nowMs - dtorMs) / 1000) + " s ago").c_str() : "never");
     }
     // v2: the IDProvider link, every second while the SGMM wait polls ReadyToAllocIDs (this second's RIR calls) after a Deactivate. The RE rule:
@@ -3887,6 +4263,7 @@ F9Probe g_f24Composer;   // probe 1
 F9Probe g_f24Bucket;     // probe 2
 F9Probe g_f24Marker;     // probe 3
 std::atomic<uint64_t> g_cmpCalls{0}, g_bucketCalls{0}, g_markerCalls{0};
+bool g_markerProbeKey = false;   // F30: set at the marker install (fix.native_on_foot_view_probes): the probe-3 lines print
 uint64_t g_cmpLastMs[4] = {};      // probe 1: the last line per mode (slot = mode & 3)
 uint64_t g_markerLastMs = 0;       // probe 3: the last line
 uint64_t g_bucketWinMs = 0;        // probe 2: the window's start (under g_f9Lock)
@@ -4079,8 +4456,28 @@ uint64_t __fastcall markerHooked(void* self, void* listA, void* listB, uint64_t 
     const F24MarkerFn original = reinterpret_cast<F24MarkerFn>(g_f24Marker.original);
     if (!original) return 0;
     const uint64_t n = g_markerCalls.fetch_add(1, std::memory_order_relaxed) + 1;
-    if (n == 1) Log::get().note("native on foot view probe 3: first call -- the marker entry ran (read only)");
-    markerProbeLine(self, listB, GetTickCount64());
+    if (n == 1) Log::get().note("native on foot marker entry: first call -- it ran (read only)");
+    if (g_markerProbeKey) markerProbeLine(self, listB, GetTickCount64());
+    // F30 part 2: this call's head from list B (r8), for the post stub later in this call. Read only; under the same lock as the P2 read.
+    F30SameCall& sc = t_f30SameCall;
+    sc.valid = false;
+    sc.haveEntry = true;
+    sc.entrySeq = g_listBSeq.load(std::memory_order_relaxed);
+    if (listB && nativeOnFootActive()) {
+        F13Head raw;
+        const char* why = "";
+        bool ok = false;
+        {
+            F9Lock lock;
+            ok = f13ReadHeadInto(reinterpret_cast<uintptr_t>(listB), raw, &why);
+        }
+        if (ok) {
+            sc.head = raw;
+            sc.seq = g_listBSeq.fetch_add(1, std::memory_order_relaxed) + 1;
+            sc.qpc = f30Qpc();
+            sc.valid = true;
+        }
+    }
     return original(self, listA, listB, r9, s5, s6, s7, s8);
 }
 
@@ -4110,8 +4507,23 @@ void installF24ProbesOnce(uintptr_t base) {
                 reinterpret_cast<void*>(&bucketHooked), "native on foot view probe 2 (bucket prep)");
     else
         Log::get().note("native on foot view probe 2 (bucket prep): NOT installed -- disabled (F24 launch crash suspect; its fault is not proved clear)");
-    install(g_f24Marker, "native-on-foot-view-marker", kMarkerRva, kMarkerPrologue, sizeof(kMarkerPrologue), 12,
-            reinterpret_cast<void*>(&markerHooked), "native on foot view probe 3 (marker entry)");
+}
+
+// F30 part 2: the marker entry, installed in every VR session (not only with the view probes): its pre-hook reads this call's head from list B for
+// the post stub. Prologue-verified (the refuse is one line); the game is not written by it.
+void installMarkerHookOnce(uintptr_t base) {
+    g_markerProbeKey = f24ViewProbesOn();
+    const F9ProbeSpec s{"native-on-foot-marker-entry", kMarkerRva, kMarkerPrologue, sizeof(kMarkerPrologue), 12, reinterpret_cast<void*>(&markerHooked),
+                        "native on foot marker entry"};
+    size_t stolen = 0;
+    std::string why;
+    if (installF9ProbeInto(g_f24Marker, s, base, &stolen, &why))
+        Log::get().note("native on foot marker entry: installed at EliteDangerous64.exe+0x%llX, stolen=%zu bytes, prologue %zu bytes verified (read only; "
+                        "it reads the head in native on foot; probe lines %s)", static_cast<unsigned long long>(kMarkerRva), stolen, sizeof(kMarkerPrologue),
+                        g_markerProbeKey ? "on" : "off");
+    else
+        Log::get().note("native on foot marker entry: NOT installed at EliteDangerous64.exe+0x%llX -- %s. The waypoints keep the P2 sample (fallback).",
+                        static_cast<unsigned long long>(kMarkerRva), why.c_str());
 }
 
 // The list-B head sample for the look (P2 hook, game thread). Never stands the HUD writes down: a failed read only clears the sample.
@@ -4127,7 +4539,8 @@ void lookReadHeadP2(uintptr_t listB) noexcept {
     g_lookHeadMs = GetTickCount64();
     g_worldC = raw;   // F27: the same sample, for the world markers
     g_worldCMs = g_lookHeadMs;
-    ++g_worldCSeq;
+    g_worldCSeq = ++g_listBSeq;   // F30: the same counter as the marker reads
+    g_worldCQpc = f30Qpc();
 }
 
 // The update hook (game thread): while engaged with a non-zero input, writes rotate-abs = old + ours for this call only and restores old after it.
@@ -4256,6 +4669,7 @@ void installF22ProbesOnce() {
                             static_cast<unsigned long long>(kLoadWaitRva), why.c_str());
     }
     installF24ProbesOnce(base);   // F24 (Part F): probes 1 to 3; probe A reads through the transition-flash consumer instead
+    installMarkerHookOnce(base);  // F30 part 2: the marker entry, always (the same-call head for the waypoints)
     {
         const F9ProbeSpec s{"native-on-foot-load-stages", kStageDispatchRva, kStageDispatchPrologue, sizeof(kStageDispatchPrologue), 8,
                             reinterpret_cast<void*>(&stageDispatchHooked), "F23 load stages (read only)"};

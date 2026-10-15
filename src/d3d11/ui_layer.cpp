@@ -2958,9 +2958,10 @@ void logTotals(double seconds) {
         {
             // F26: the on-foot HUD family's redirects this window (the sharp on-foot HUD; its key is fix.native_on_foot_sharp_hud).
             const uint64_t onFootRedirects = g_win.decided[static_cast<size_t>(UiLayerFamily::kOnFootHud)][static_cast<size_t>(UiLayerDecision::kRedirect)];
+            // F30: the key and the active state separately (the wanted test ANDs them; the line used to print that AND as the key).
             Log::get().note("native on foot HUD (sharp): %.2f draws a frame redirected into the HDR layer (%llu this window); key %s, native stereo on foot %s",
                             static_cast<double>(onFootRedirects) / frames, static_cast<unsigned long long>(onFootRedirects),
-                            nativeOnFootSharpHudWanted() ? "on" : "off", nativeOnFootActive() ? "now" : "not now");
+                            g_nativeOnFootSharpHudKey.load(std::memory_order_relaxed) ? "on" : "off", nativeOnFootActive() ? "active" : "not active");
         }
     }
     Log::get().note("ui quality: left in the game's frame: %s.",
@@ -4814,7 +4815,9 @@ bool uiLayerDoorFromPass(uint32_t eye) {
 // kEyeSwapPersist composites after it (kEyeRearmWindow composites counts the window), and only a mismatch that persists stands down.
 uint32_t g_eyeEdgeSeen = 0;             // nativeOnFootEdges() at the last composite
 uint32_t g_eyeSinceRearm = 1u << 30;    // composites since the last re-arm (huge: none in force)
-uint32_t g_eyeSwapStreak = 0;           // consecutive swapped composites inside the window
+uint32_t g_eyeSwapStreak = 0;           // consecutive swapped composites (F30: at every composite, re-arm or not)
+bool g_eyeStoodDown = false;            // F30: the eye check stood the layer down (the frame boundary re-arms it on the next native mode edge)
+uint32_t g_eyeRearmSeen = 0;            // F30: g_nativeModeEdges at the last frame boundary
 constexpr uint32_t kEyeRearmWindow = 2000, kEyeSwapPersist = 30;
 ID3D11Texture2D* uiLayerComposite(uint64_t sequence, uint32_t eye, ID3D11Texture2D* frame,
                                   const uint32_t region[4], const float layerUv[4], bool ownedFrame) {
@@ -4854,22 +4857,24 @@ ID3D11Texture2D* uiLayerComposite(uint64_t sequence, uint32_t eye, ID3D11Texture
         } else if (theirs && (e.target == theirs || copied == theirs)) {
             // The game's Submit says this UI belongs to the other eye. Inside a re-arm window the mismatch is tolerated for
             // kEyeSwapPersist composites (this eye's composite is skipped); a mismatch that persists stands down.
+            // F30: the swap is skipped and counted at every composite, re-arm or not. The layer stands down only after kEyeSwapPersist
+            // consecutive swapped composites; a matched composite resets the streak (above).
             ++g_win.eyeSwapped;
             const bool rearmed = g_eyeSinceRearm <= kEyeRearmWindow;
-            if (rearmed && ++g_eyeSwapStreak < kEyeSwapPersist) {
+            if (++g_eyeSwapStreak < kEyeSwapPersist) {
                 if (g_eyeSwapStreak == 1) {
-                    Log::get().note("ui quality: layer: the %s eye's layer holds UI from the other eye's target after a native on-foot re-arm "
-                                    "(mine %p, theirs %p, target %p, copied %p): tolerated, streak 1 of %u",
-                                    eye == 0 ? "left" : "right", mine, theirs, e.target, copied, static_cast<unsigned>(kEyeSwapPersist));
+                    Log::get().note("ui quality: layer: the %s eye's layer holds UI from the other eye's target (mine %p, theirs %p, target %p, "
+                                    "copied %p): skipped, streak 1 of %u (a native on-foot re-arm %s in force)",
+                                    eye == 0 ? "left" : "right", mine, theirs, e.target, copied, static_cast<unsigned>(kEyeSwapPersist),
+                                    rearmed ? "is" : "is not");
                 }
                 return nullptr;
             }
             Log::get().note(
                 "ui quality: layer: the %s eye's layer holds UI from the target the game submitted for the %s eye (mine %p, theirs %p, target %p, "
-                "copied %p) -- %s. The eye rule (first target of a frame = left) is backwards on this rig.",
-                eye == 0 ? "left" : "right", eye == 0 ? "right" : "left", mine, theirs, e.target, copied,
-                rearmed ? "it persisted through the native on-foot re-arm window, so it is a real swap"
-                        : "no native on-foot re-arm was in force, so it is a real swap");
+                "copied %p) -- %u composites in a row. The eye rule (first target of a frame = left) is backwards on this rig.",
+                eye == 0 ? "left" : "right", eye == 0 ? "right" : "left", mine, theirs, e.target, copied, static_cast<unsigned>(g_eyeSwapStreak));
+            g_eyeStoodDown = true;   // F30: the frame boundary re-arms it on the next native render-mode edge
             standDown(rearmed ? "the eye check found the layer's eyes swapped after a native on-foot re-arm (persistent)"
                               : "the eye check found the layer's eyes swapped");
             return nullptr;
@@ -4941,6 +4946,22 @@ void uiLayerFrameBoundary(ID3D11DeviceContext* ctx) {
         Log::get().note("ui quality: flat layer: re-armed after its back-off (%u this session); the cockpit HUD is taken "
                         "again from the next frame behind a proven tonemap.",
                         g_flatBackOffs);
+    }
+    // F30: the eye check's stand-down is re-armed on the next native render-mode edge (the setter's count), logged. A stand-down by
+    // anything else is left alone, and a re-arm by fix.ui_quality (g_stoodDown cleared) clears the flag.
+    {
+        const uint32_t edges = g_nativeModeEdges.load(std::memory_order_relaxed);
+        if (edges != g_eyeRearmSeen) {
+            g_eyeRearmSeen = edges;
+            if (g_eyeStoodDown && g_stoodDown && !detail::g_uiLayerIssueBlocked) {
+                g_eyeStoodDown = false;
+                g_stoodDown = false;
+                refreshLive();
+                Log::get().note("ui quality: layer: re-armed at native render-mode edge %u: the eye check had stood it down; the eye tables are reset "
+                                "and a swap is skipped again (30 in a row stand it down)", static_cast<unsigned>(edges));
+            }
+        }
+        if (!g_stoodDown) g_eyeStoodDown = false;
     }
     detail::g_uiLayerWatching = false;
     g_watchBudget = kWatchPerFrame;
