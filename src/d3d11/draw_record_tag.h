@@ -330,6 +330,79 @@ inline int ndcDelta(const float world[16], const double ow[3], const float r4[4]
     if (!(std::fabs(*dx) < gate) || !(std::fabs(*dy) < gate)) return kDeltaGate;
     return kDeltaOk;
 }
+// F50: THE LAG DELTA. F47's delta put the WORLD point P through the marker's b0, which lives in the tracking (seat) frame, so it was never
+// small. Here each projection gets its own point: ndc_marker = the record's X0 through the draw's b0 rows 4, 5, 7 at o_hud (what the marker
+// draw itself shows), ndc_P = P through this eye's world rows at o_w; m = ndc_marker - ndc_P. c is the eye's static calibration (the
+// frustum-centre difference between the HUD's and the world's projections: m with the head still); (dx, dy) = -(m - c) moves the marker to
+// ndc_P + c. The gate: both w > 0 and |dx|, |dy| < gate (NDC). m is filled whenever both w > 0 (also past the gate).
+inline int ndcLagDelta(const float world[16], const double ow[3], const float r4[4], const float r5[4], const float r7[4], const double oh[3],
+                       const double X0[3], const double P[3], const double c[2], double gate, double m[2], double* dx, double* dy) noexcept {
+    *dx = *dy = 0.0;
+    m[0] = m[1] = 0.0;
+    double wc[4], mc[3];
+    worldClip(world, P, ow, wc);
+    if (!(wc[3] > 1e-9)) return kDeltaWorldBehind;
+    markerClip(r4, r5, r7, X0, oh, mc);
+    if (!(mc[2] > 1e-9)) return kDeltaMarkerBehind;
+    m[0] = mc[0] / mc[2] - wc[0] / wc[3];
+    m[1] = mc[1] / mc[2] - wc[1] / wc[3];
+    *dx = -(m[0] - c[0]);
+    *dy = -(m[1] - c[1]);
+    if (!(std::fabs(*dx) < gate) || !(std::fabs(*dy) < gate)) return kDeltaGate;
+    return kDeltaOk;
+}
+// F50: an eye's baseline c. A frame qualifies when the head is under 3 deg/s and |m - c| < 0.01 NDC (any m while the seed is empty). The
+// first 30 qualifying frames seed it (their mean, their variance); after that an EMA (alpha 0.05) of m, its variance an EMA beside it. 90
+// slow-head frames in a row refused for distance start the seed again (a first sample taken in motion, or a frustum change not caught).
+struct LagBaseline {
+    static constexpr uint32_t kSeedN = 30, kMissReset = 90;
+    static constexpr double kAlpha = 0.05, kHeadDps = 3.0, kNear = 0.01;
+    bool seeded = false;
+    uint32_t n = 0, misses = 0;
+    double c[2] = {}, var[2] = {}, sum[2] = {}, sumSq[2] = {};
+    void reset() noexcept { *this = LagBaseline{}; }
+    // True when the frame was taken; *restarted when the misses started the seed again.
+    bool update(const double m[2], double headDps, bool* restarted = nullptr) noexcept {
+        if (restarted) *restarted = false;
+        if (!(headDps >= 0.0) || !(headDps < kHeadDps)) return false;
+        if (n > 0) {
+            const double ex = m[0] - c[0], ey = m[1] - c[1];
+            if (!(std::sqrt(ex * ex + ey * ey) < kNear)) {
+                if (++misses >= kMissReset) {
+                    reset();
+                    if (restarted) *restarted = true;
+                }
+                return false;
+            }
+        }
+        misses = 0;
+        if (!seeded) {
+            ++n;
+            for (int k = 0; k < 2; ++k) {
+                sum[k] += m[k];
+                sumSq[k] += m[k] * m[k];
+                c[k] = sum[k] / n;
+                const double v = sumSq[k] / n - c[k] * c[k];
+                var[k] = v > 0.0 ? v : 0.0;
+            }
+            if (n >= kSeedN) seeded = true;
+            return true;
+        }
+        ++n;
+        for (int k = 0; k < 2; ++k) {
+            const double d = m[k] - c[k];
+            c[k] += kAlpha * d;
+            var[k] = (1.0 - kAlpha) * (var[k] + kAlpha * d * d);
+        }
+        return true;
+    }
+    // The standard deviation in pixels of a W x H target (NDC spans 2).
+    double stdPx(double W, double H) const noexcept {
+        const double sx = std::sqrt(var[0]) * W * 0.5, sy = std::sqrt(var[1]) * H * 0.5;
+        return sx > sy ? sx : sy;
+    }
+    bool ready(double W, double H, double maxStdPx) const noexcept { return seeded && stdPx(W, H) < maxStdPx; }
+};
 
 }  // namespace drawtag
 }  // namespace edvr

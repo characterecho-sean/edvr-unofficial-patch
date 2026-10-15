@@ -358,6 +358,16 @@ inline void standingApply(const double src[3], double standingUp, double out[3])
     out[1] = standingUp;
     out[2] = src[2];
 }
+// F50: removes v's component along axis (normalised here) and returns it (signed, in v's units); nothing is removed when the axis is degenerate.
+// The body's vertical lock: the body run's position and velocity lose their component along the body's up axis (AMC row 1, in world).
+inline double dropAlong(double v[3], const double axis[3]) noexcept {
+    const double n = std::sqrt(axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]);
+    if (!(n > 1e-6)) return 0.0;
+    const double u[3] = {axis[0] / n, axis[1] / n, axis[2] / n};
+    const double k = v[0] * u[0] + v[1] * u[1] + v[2] * u[2];
+    for (size_t i = 0; i < 3; ++i) v[i] -= k * u[i];
+    return k;
+}
 
 // ---- F49 (TEMPORARY): the pose freeze, pure half -------------------------------------------------------------------------------
 // The frAnim Animate handler writes one 64-byte row-vector model matrix per joint: rows 0..2 the rotation (w 0), row 3 the position (w 1), and

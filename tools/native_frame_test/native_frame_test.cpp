@@ -557,6 +557,48 @@ int wmain(int argc, wchar_t** argv) {
                       whyMarker == dt::kDeltaMarkerBehind,
                   "F47: the delta of the same P through the world and marker rows, zero after the offset rows, and its gate");
         }
+        // F50: the lag delta. The marker rows are the world's own projection; the record's X0 lags P (o + (1.02, 0.01, 1)), and c is (0,
+        // +0.036). (dx, dy) = -(m - c) moves the marker to ndc_P + c; a delta past the gate is refused; the baseline seeds over 30 slow-head
+        // frames, refuses a fast head and a far m, and starts again after 90 far frames; the vertical lock drops the up component.
+        {
+            float m4[4] = {1.2f, 0, 0.1f, 0}, m5[4] = {0, 1.1f, -0.05f, 0};
+            const double x0[3] = {11.02, 2.01, 3.0}, c[2] = {0.0, 0.036};
+            double lm[2] = {}, ldx = 0.0, ldy = 0.0, wc[4];
+            const int why = dt::ndcLagDelta(wr, wo, m4, m5, r7, wo, x0, wp, c, 0.05, lm, &ldx, &ldy);
+            dt::worldClip(wr, wp, wo, wc);
+            dt::ndcOffsetRows(m4, m5, r7, ldx, ldy);
+            double lmc[3];
+            dt::markerClip(m4, m5, r7, x0, wo, lmc);
+            const bool lands = std::fabs(lmc[0] / lmc[2] - (wc[0] / wc[3] + c[0])) < 1e-5 && std::fabs(lmc[1] / lmc[2] - (wc[1] / wc[3] + c[1])) < 1e-5;
+            double gx = 0.0, gy = 0.0, gm[2] = {};
+            const float g4[4] = {1.2f, 0, 0.1f, 0}, g5[4] = {0, 1.1f, -0.05f, 0};
+            const int whyGate = dt::ndcLagDelta(wr, wo, g4, g5, r7, wo, x0, wp, c, 0.01, gm, &gx, &gy);
+            check(why == dt::kDeltaOk && std::fabs(lm[0] - 0.024) < 1e-5 && std::fabs(lm[1] - 0.011) < 1e-5 && lands && whyGate == dt::kDeltaGate &&
+                      std::fabs(gm[0] - lm[0]) < 1e-12,
+                  "F50: the lag delta (X0 through the marker rows against P through the world rows) moves the marker to ndc_P + c, and its gate");
+            dt::LagBaseline b;
+            const double s0[2] = {0.0, 0.036}, s1[2] = {0.0002, 0.0362}, away[2] = {0.05, 0.036};
+            bool fastTaken = b.update(s0, 10.0), unknownTaken = b.update(s0, -1.0);
+            for (int i = 0; i < 29; ++i) b.update(i % 2 ? s1 : s0, 1.0);
+            const bool notYet = !b.seeded;
+            b.update(s0, 1.0);
+            const bool seeded = b.seeded && b.n == 30 && std::fabs(b.c[1] - 0.0360933) < 1e-6 && b.ready(2016.0, 2016.0, 0.5);
+            const bool farRefused = !b.update(away, 1.0);
+            for (int i = 0; i < 88; ++i) b.update(away, 1.0);
+            const bool stillSeeded = b.seeded;
+            bool restarted = false;
+            b.update(away, 1.0, &restarted);
+            check(!fastTaken && !unknownTaken && notYet && seeded && farRefused && stillSeeded && restarted && !b.seeded && b.n == 0,
+                  "F50: the baseline seeds over 30 slow-head frames, refuses a fast head and a far m, and starts again after 90 far frames");
+            double vv[3] = {0.1, 0.2, -0.3};
+            const double up[3] = {0.0, 2.0, 0.0}, flat[3] = {0.0, 0.0, 0.0};
+            const double k = edvr::nofoot::dropAlong(vv, up);
+            double v2[3] = {0.1, 0.2, -0.3};
+            const double k2 = edvr::nofoot::dropAlong(v2, flat);
+            check(std::fabs(k - 0.2) < 1e-12 && std::fabs(vv[0] - 0.1) < 1e-12 && std::fabs(vv[1]) < 1e-12 && std::fabs(vv[2] + 0.3) < 1e-12 && k2 == 0.0 &&
+                      v2[1] == 0.2,
+                  "F50: the vertical lock drops the component along the body's up axis (normalised) and leaves a degenerate axis alone");
+        }
     }
 
     // F40 (pure math): the view map. seated = D . Ry(psi) . body; the head in body axes is Ry(psi)^-1 . diag(1,1,-1) . tS; psi is the seated head

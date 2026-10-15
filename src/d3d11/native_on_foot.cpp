@@ -89,6 +89,7 @@ std::atomic<bool> g_alignKeyOn{false};
 std::atomic<int> g_alignMode{0};   // F35: 0 off, 1 view (F33), 2 body (F35)
 double g_alignTrimCm[3] = {};   // [0] right, [1] up, [2] forward (body axes)
 std::atomic<int> g_alignAnchorMode{2};   // F48: fix.native_on_foot_body_align_anchor: 0 neck (F46), 1 clavicles (F43/F45), 2 pov (the default)
+std::atomic<bool> g_alignVertical{false};   // F50 (TEMPORARY): fix.native_on_foot_body_align_vertical: off (the default) locks the body's height
 uint64_t g_f40MarkerLogMs = 0;   // F40: the marker angle line's last time
 std::atomic<double> g_worldLeadFrames{2.5};   // F38: fix.native_on_foot_world_markers_lead, 0 to 5 frames (forward_lead); live
 std::atomic<int> g_worldMarkersMode{6};        // F27/F31/F37: fix.native_on_foot_world_markers: 0 fixed, 1 forward (C), 2 game, 3 forward_now (H_M), 4 forward_hist (the ring's matched pose), 5 forward_k2 (the ring's pose two frames back), 6 forward_lead (the newest ring pose carried ahead, default); live; key 10 is never touched
@@ -575,8 +576,10 @@ void readKey() {
                             "layer's), its NDC against P through the eye's world rows (b1 270..273); 1 s lines while on foot; measure only" : "off",
                             probe && fix ? " (on because fix.native_on_foot_marker_fix is on)" : "");
         if (first || fix != g_nativeOnFootMarkerFixKey.load(std::memory_order_relaxed))
-            Log::get().note("native on foot marker fix (F47, TEMPORARY): %s", fix ? "on -- the marker composite's b0 rows 4 and 5 are moved by "
-                            "(dx, dy) . row 7 on a private copy, per eye, when both eyes' marker draws are matched; 1 s lines while on foot" : "off");
+            Log::get().note("native on foot marker fix (F47/F50, TEMPORARY): %s", fix ? "on -- the marker composite's b0 rows 4 and 5 are moved by "
+                            "(dx, dy) . row 7 on a private copy, per eye, when both eyes' marker draws are matched; F50: (dx, dy) = -(m - c), m = X0 "
+                            "through the marker's b0 minus P through the eye's world rows, c the eye's baseline (seeded over 30 slow-head frames, "
+                            "std under 0.5 px); 1 s lines while on foot" : "off");
         g_nativeOnFootMarkerFixKey.store(fix, std::memory_order_relaxed);
         g_nativeOnFootMarkerProbeKey.store(probe, std::memory_order_relaxed);
     }
@@ -590,6 +593,14 @@ void readKey() {
         // "shoulders" reads as clavicles). Anything else is pov.
         const std::string anchor = cfg.getString("fix.native_on_foot_body_align_anchor", "pov");
         g_alignAnchorMode.store(anchor == "neck" ? 0 : (anchor == "clavicles" || anchor == "shoulders") ? 1 : 2, std::memory_order_relaxed);
+        // F50 (TEMPORARY, live): the body's vertical. off (the default): in body mode d moves the body only in its horizontal plane (the feet
+        // stay on the ground); on: F48's behaviour, d in all three axes.
+        const bool vertical = cfg.getString("fix.native_on_foot_body_align_vertical", "off") == "on";
+        if (first || vertical != g_alignVertical.load(std::memory_order_relaxed))
+            Log::get().note("native on foot body align (F50, TEMPORARY): fix.native_on_foot_body_align_vertical is %s", vertical ? "on -- d moves "
+                            "the body in all three axes (F48)" : "off -- in body mode d moves the body only along its right and forward axes; its "
+                            "up component (and the up trim) is dropped and logged");
+        g_alignVertical.store(vertical, std::memory_order_relaxed);
         // F49 (TEMPORARY, live): the pose freeze: off, probe (the default: the Animate post-hook measures and writes nothing) or on.
         const std::string freeze = cfg.getString("fix.native_on_foot_pose_freeze", "probe");
         pfz::g_mode.store(freeze == "on" ? 2 : freeze == "off" ? 0 : 1, std::memory_order_relaxed);
@@ -5795,6 +5806,16 @@ void alignTick(uint64_t now) noexcept {
     }
     if (mode == 2 && ads) g_f48Stand.step(now, 0.0, 0.0, true);   // F48: ADS is never a rest; the standing window starts again after it
     const int anchorMode = g_alignAnchorMode.load(std::memory_order_relaxed);   // F48: 0 neck, 1 clavicles, 2 pov
+    const bool vertical = g_alignVertical.load(std::memory_order_relaxed);      // F50: off locks the body's height in body mode
+    static int lastVerticalNote = -1;   // F50: the vertical-off note, once per entry to body (and on a key change while in body)
+    if (mode != 2) lastVerticalNote = -1;
+    else if (lastVerticalNote != (vertical ? 1 : 0)) {
+        lastVerticalNote = vertical ? 1 : 0;
+        if (!vertical)
+            Log::get().note("native on foot body align (F50): body mode with vertical off: d moves the body along its right and forward axes only; "
+                            "the up trim (%.1f cm) is ignored; the standing height is logged, not applied; the up component d would have had is "
+                            "logged once a second", g_alignTrimCm[1]);
+    }
     static int lastAnchorMode = -1;
     if (anchorMode != lastAnchorMode) {   // F48: a live anchor change measures a different point: capture its standing height afresh
         if (lastAnchorMode >= 0) {
@@ -5949,7 +5970,7 @@ void alignTick(uint64_t now) noexcept {
             // value in place of it (neck and clavicles keep F46's and F45's behaviour). x and z stay live.
             g_f48LiveUp = srcB[1];
             g_f48Stand.step(now, static_cast<double>(s.headBody[1]), srcB[1], false);
-            if (anchorMode == 2 && !shoulderAnchor && g_f48Stand.valid) {
+            if (anchorMode == 2 && !shoulderAnchor && g_f48Stand.valid && vertical) {   // F50: vertical off: logged only
                 const double live[3] = {srcB[0], srcB[1], srcB[2]};
                 nofoot::standingApply(live, g_f48Stand.value, srcB);
             }
@@ -5967,6 +5988,7 @@ void alignTick(uint64_t now) noexcept {
             }
             const double aCam = 1.0 - std::exp(-dt / align::kBodyCamTauSec);
             const double aPov = 1.0 - std::exp(-dt / align::kBodyPovTauSec);
+            if (!vertical) trimB[1] = 0.0;   // F50: the up trim is ignored with the body's height locked
             for (size_t i = 0; i < 3; ++i) {
                 g_f41CamLp[i] += aCam * (anchorB[i] - g_f41CamLp[i]);
                 g_f41PovLp[i] += aPov * (srcB[i] - g_f41PovLp[i]);
@@ -6051,6 +6073,38 @@ void alignTick(uint64_t now) noexcept {
         calibrateStep(now, camB, g_f37TSNow, !wait, a);   // F40: scheduled, no loop, no guard
     } else if (mode == 2) {
         bodyFilter(a, err, dt);
+        // F50: with vertical off, d keeps only its horizontal part: the body run's position and velocity lose their component along the body's
+        // up axis (AMC row 1, world). What d's up component would have been is logged once a second: the target's up (body axes, the up trim
+        // excluded), which d converges to with vertical on, and this frame's filter step along up that was dropped.
+        static uint64_t vertN = 0, vertLineMs = 0;
+        static double vertSum = 0.0, vertMin = 0.0, vertMax = 0.0, dropMax = 0.0;
+        if (!vertical) {
+            const double up[3] = {static_cast<double>(s.rows[3]), static_cast<double>(s.rows[4]), static_cast<double>(s.rows[5])};
+            const double dropped = nofoot::dropAlong(a.pos, up);
+            nofoot::dropAlong(a.vel, up);
+            if (!wait) {
+                const double wouldUp = g_f41TgtB[1];
+                if (!vertN) vertMin = vertMax = wouldUp;
+                ++vertN;
+                vertSum += wouldUp;
+                vertMin = std::min(vertMin, wouldUp);
+                vertMax = std::max(vertMax, wouldUp);
+                dropMax = std::max(dropMax, std::fabs(dropped));
+            }
+            if (now - vertLineMs >= 1000 && vertN) {
+                vertLineMs = now;
+                Log::get().note("native on foot body align (F50): vertical off: the up component d would have had (target, body axes, up trim "
+                                "excluded) %.3f m mean, %.3f..%.3f m over %llu frames; dropped per frame up to %.4f m (the filter's step along up); "
+                                "standing height %.3f m (%s), live 3P height %.3f m",
+                                vertSum / static_cast<double>(vertN), vertMin, vertMax, static_cast<unsigned long long>(vertN), dropMax,
+                                g_f48Stand.value, g_f48Stand.valid ? "captured, logged only" : "not captured", g_f48LiveUp);
+                vertN = 0;
+                vertSum = dropMax = 0.0;
+            }
+        } else {
+            vertN = 0;
+            vertSum = dropMax = 0.0;
+        }
         if (now - g_f41BodyLogMs >= 1000 || g_f41BodyLogMs == 0) {
             g_f41BodyLogMs = now;
             double dB[3] = {};
@@ -6091,7 +6145,9 @@ void alignTick(uint64_t now) noexcept {
                                 anchorMode == 2 && !shoulderAnchor ? (g_f48PovSrc == 0 ? "povCamera joint" : "head + (0, 0.038, 0.112)")
                                                                    : (shoulderAnchor ? "3P clavicles" : "neck + captured offset"),
                                 g_f48CamB[0], g_f48CamB[1], g_f48CamB[2], g_f48Stand.value,
-                                !g_f48Stand.valid ? "not captured" : (anchorMode == 2 && !shoulderAnchor) ? "applied" : "logged, not applied",
+                                !g_f48Stand.valid ? "not captured"
+                                : (anchorMode == 2 && !shoulderAnchor) ? (vertical ? "applied" : "logged, not applied: vertical off")
+                                                                       : "logged, not applied",
                                 static_cast<unsigned>(g_f48Stand.captures), g_f48LiveUp, neckAfter[0], neckAfter[1], neckAfter[2],
                                 s.neckOk ? "" : " (no neck: the neck figure is not meaningful)");
             }
@@ -7256,7 +7312,10 @@ constexpr uint32_t kSrvCache = 8;
 constexpr double kDefaultTargetSize = 2016.0;                 // the marker target's size when its view did not resolve
 // F47: the correction and its instruments.
 constexpr uint32_t kMatchFresh = 8;      // frames a read-back's match stays an eye's prediction (read-backs land 2..3 frames late)
-constexpr double kGateNdc = 0.1;         // |dx|, |dy| must be under this (NDC)
+constexpr double kGateNdc = 0.05;        // F50: |dx|, |dy| must be under this (NDC) after the baseline (F47: 0.1 on P's own delta)
+constexpr double kLagStdMaxPx = 0.5;     // F50: no patch until the eye's baseline is seeded and its standard deviation is under this
+constexpr double kLagPitchSpreadPx = 2.0;   // F50: the honesty check: c by head pitch / roll differing by more than this is "not constant"
+constexpr uint32_t kLagBinMinN = 30;     // F50: a pitch or roll bin counts toward the honesty check from this many slow-head frames
 constexpr uint32_t kCbShadows = 4;       // marker composite b0 buffers shadowed on the CPU
 constexpr UINT kCb0ShadowBytes = 128;    // b0 rows 0..7
 constexpr uint32_t kBurstFrames = 8;     // per-frame marker composite lines: the first 8 read-back frames of each second
@@ -7313,6 +7372,8 @@ struct Rec {
     float cpu[16] = {};
     bool fixApplied = false, fixHeld = false;
     float fixDx = 0.0f, fixDy = 0.0f;    // the applied delta (NDC)
+    float fixCx = 0.0f, fixCy = 0.0f;    // F50: the baseline c the delta was taken against (NDC)
+    float fixHead = -1.0f;               // F50: the head's speed at the decision (deg/s; -1 unknown)
     int32_t patchedAt = -1;              // the private b0's rows 4..7 after the patch (staged)
 };
 // F46: an eye's world view as a world draw read it: b1 rows 270..273 and row 275, by frame and eye.
@@ -7355,6 +7416,10 @@ struct EyeStats {
     // F47 at read-back: the patched draw read the record (the prediction held) or not; the CPU b0 rows against the GPU copy.
     uint64_t predHit = 0, predMiss = 0, cpuAgree = 0, cpuDiffer = 0;
     double cpuDiffMax = 0.0;
+    // F50 at the draw: |m - c| (px) by the head's speed (bins < 3, 3..20, 20..60, >= 60 deg/s), the frames the baseline took, its resets,
+    // the decisions refused while it was not ready. At read-back: |marker - (P + c)| through the patched rows (px) by the same bins.
+    uint64_t lagN[4] = {}, lagTaken = 0, lagResets = 0, fUnseeded = 0, resN[4] = {};
+    double lagSum[4] = {}, lagMax[4] = {}, resSum[4] = {}, resMax[4] = {};
 };
 struct SrvInfo {
     const void* srv = nullptr;
@@ -7488,10 +7553,34 @@ struct Fix {
     int slot = -1;
     size_t rec = 0;
     double dx = 0.0, dy = 0.0;
+    double cx = 0.0, cy = 0.0, head = -1.0;   // F50: the baseline the delta was taken against, the head's speed at the decision
     float rows45[8] = {};                 // rows 4 and 5, moved
     ID3D11Buffer* saved = nullptr;        // the game's b0 while ours is bound (a reference held)
 };
 Fix g_fix;
+// F50: the head this frame (headSample): its angular speed (deg/s, -1 unknown), pitch and roll (deg, from the newest render head).
+double g_headDps = -1.0, g_headPitch = 0.0, g_headRoll = 0.0;
+bool g_headPoseOk = false;
+// F50: an eye's lag baseline (drawtag::LagBaseline), the frustum it was taken under (b0 row 5 and row 7 scales, the marker target's size),
+// the eye's matched draw place (the eye assignment), and the honesty check's bins since the last reset: m on slow-head frames by head pitch
+// (< -15, -15..15, > 15 deg) and roll (|roll| < 10, >= 10 deg).
+struct LagEye {
+    drawtag::LagBaseline b;
+    bool keyed = false;
+    double r5n = 0.0, r7n = 0.0;
+    uint32_t tw = 0, th = 0;
+    uint16_t ord = 0;
+    uint32_t lastFrame = ~0u;
+    uint32_t resetNotes = 0;
+    const char* lastReset = "none";
+    uint64_t pitchN[3] = {}, rollN[2] = {};
+    double pitchSum[3][2] = {}, rollSum[2][2] = {};
+    void clearBins() {
+        for (int i = 0; i < 3; ++i) pitchN[i] = 0, pitchSum[i][0] = pitchSum[i][1] = 0.0;
+        for (int i = 0; i < 2; ++i) rollN[i] = 0, rollSum[i][0] = rollSum[i][1] = 0.0;
+    }
+};
+LagEye g_lag[2];
 uint64_t g_drawSerial = 0;
 ID3D11Buffer* g_privCb = nullptr;         // the private b0 (DEFAULT, constant buffer), made once
 ID3D11Buffer* g_workBuf = nullptr;        // the private b0 built here first (DEFAULT, not a constant buffer): the game's b0 copied in,
@@ -7739,6 +7828,8 @@ bool covers(ID3D11Buffer* b, UINT offset, UINT bytes) {
 
 // The head's angular speed between the runtime ring's two newest samples, once a frame (F45: counted unconditionally for the 1 s line).
 void headSample() {
+    g_headDps = -1.0;   // F50: unknown until this frame's sample lands
+    g_headPoseOk = false;
     EdvrNativeNowPose np{};
     if (!nativeFrameNowPose(np) || np.ringCount < 2) return;
     const uint32_t i0 = np.ringNewest % 8u, i1 = (np.ringNewest + 7u) % 8u;
@@ -7746,6 +7837,13 @@ void headSample() {
     const double dt = static_cast<double>(f30QpcUs(np.ringQpc[i0] - np.ringQpc[i1])) * 1e-6;
     if (!(dt > 0.0)) return;
     const double dps = nofoot::rotDeltaDeg(np.ringHead[i0], np.ringHead[i1]) / dt;
+    // F50: the head's pitch and roll (seated space, y up, -z forward, rotation row-major in [4i+j]): forward's y is -R[1][2], right's y R[1][0].
+    const float* R = np.ringHead[i0];
+    const double kDeg = 180.0 / 3.14159265358979323846;
+    g_headPitch = std::asin(std::max(-1.0, std::min(1.0, -static_cast<double>(R[6])))) * kDeg;
+    g_headRoll = std::asin(std::max(-1.0, std::min(1.0, static_cast<double>(R[4])))) * kDeg;
+    g_headPoseOk = true;
+    g_headDps = dps;
     ++g_win.headN;
     g_win.headSum += dps;
     if (dps > g_win.headMax) g_win.headMax = dps;
@@ -8117,13 +8215,82 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
     const CpuWorld& w = g_cpuWorld[e];
     const Find* f = findForKey(g_match[e].key, frame);
     int why = -1;
+    // F50: the eye's baseline, reset when the frustum it was taken under changes (b0 row 5 or row 7 scale, the target's size) or the eye's
+    // matched draw moves to another place (the eye assignment).
+    LagEye& L = g_lag[e];
+    const double W = r.tw ? static_cast<double>(r.tw) : kDefaultTargetSize, H = r.th ? static_cast<double>(r.th) : kDefaultTargetSize;
+    {
+        const auto norm3 = [](const float* v) {
+            return std::sqrt(static_cast<double>(v[0]) * v[0] + static_cast<double>(v[1]) * v[1] + static_cast<double>(v[2]) * v[2]);
+        };
+        const double r5n = norm3(sh->rows[5]), r7n = norm3(sh->rows[7]);
+        const auto moved = [](double a, double b) { return std::fabs(a - b) > 1e-3 * std::max(std::fabs(a), std::fabs(b)); };
+        const char* why0 = nullptr;
+        if (L.keyed) {
+            if (moved(r5n, L.r5n) || moved(r7n, L.r7n)) why0 = "the marker's b0 row 5 or row 7 scale changed (a frustum change)";
+            else if (r.tw != L.tw || r.th != L.th) why0 = "the marker target's size changed (a render-size change)";
+            else if (g_match[e].ord != L.ord) why0 = "the eye's matched marker composite draw moved (an eye-assignment change)";
+        }
+        if (why0) {
+            L.b.reset();
+            L.clearBins();
+            L.lastReset = why0;
+            ++s.lagResets;
+            if (L.resetNotes < 8) {
+                ++L.resetNotes;
+                Log::get().note("native on foot marker fix (F50): eye %d baseline reset: %s (b0 row 5 %.5f -> %.5f, row 7 %.5f -> %.5f, target %ux%u "
+                                "-> %ux%u, draw place %u -> %u)", e, why0, L.r5n, r5n, L.r7n, r7n, L.tw, L.th, r.tw, r.th,
+                                static_cast<unsigned>(L.ord), static_cast<unsigned>(g_match[e].ord));
+            }
+        }
+        L.keyed = true;
+        L.r5n = r5n;
+        L.r7n = r7n;
+        L.tw = r.tw;
+        L.th = r.th;
+        L.ord = g_match[e].ord;
+    }
     if (w.frame != frame) {
         ++s.fNoWorld;
     } else if (!f) {
         ++s.fNoP;
     } else {
         const double ow[3] = {w.o[0], w.o[1], w.o[2]}, oh[3] = {oHud[0], oHud[1], oHud[2]}, P[3] = {f->p[0], f->p[1], f->p[2]};
-        why = drawtag::ndcDelta(w.rows, ow, sh->rows[4], sh->rows[5], sh->rows[7], oh, P, kGateNdc, &dx, &dy);
+        const double X0[3] = {f->x0[0], f->x0[1], f->x0[2]};
+        const double c[2] = {L.b.c[0], L.b.c[1]};
+        double lag[2] = {};
+        why = drawtag::ndcLagDelta(w.rows, ow, sh->rows[4], sh->rows[5], sh->rows[7], oh, X0, P, c, kGateNdc, lag, &dx, &dy);
+        if ((why == drawtag::kDeltaOk || why == drawtag::kDeltaGate) && L.lastFrame != frame) {
+            L.lastFrame = frame;
+            // |m - c| by the head's speed (against the c the delta used), the baseline's update, the honesty bins (every slow-head frame).
+            const int bin = g_headDps < 0.0 ? -1 : g_headDps < 3.0 ? 0 : g_headDps < 20.0 ? 1 : g_headDps < 60.0 ? 2 : 3;
+            if (bin >= 0 && L.b.n > 0) {
+                const double ex = (lag[0] - c[0]) * W * 0.5, ey = (lag[1] - c[1]) * H * 0.5, px = std::sqrt(ex * ex + ey * ey);
+                ++s.lagN[bin];
+                s.lagSum[bin] += px;
+                if (px > s.lagMax[bin]) s.lagMax[bin] = px;
+            }
+            bool restarted = false;
+            if (L.b.update(lag, g_headDps, &restarted)) ++s.lagTaken;
+            if (restarted) {
+                L.clearBins();
+                L.lastReset = "90 slow-head frames in a row were over 0.01 NDC from c (the seed starts again)";
+                ++s.lagResets;
+            }
+            if (bin == 0 && g_headPoseOk) {
+                const int pb = g_headPitch < -15.0 ? 0 : g_headPitch <= 15.0 ? 1 : 2, rb = std::fabs(g_headRoll) < 10.0 ? 0 : 1;
+                ++L.pitchN[pb];
+                ++L.rollN[rb];
+                for (int k = 0; k < 2; ++k) {
+                    L.pitchSum[pb][k] += lag[k];
+                    L.rollSum[rb][k] += lag[k];
+                }
+            }
+        }
+        if (!L.b.ready(W, H, kLagStdMaxPx)) {
+            ++s.fUnseeded;
+            return;   // no patch and no hold until the baseline is seeded and steady
+        }
         if (why == drawtag::kDeltaOk) have = true;
         else if (why == drawtag::kDeltaGate) ++s.fGate;
         else ++s.fBehind;
@@ -8132,8 +8299,8 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
         g_good[e].frame = frame;
         g_good[e].dx = dx;
         g_good[e].dy = dy;
-    } else if (g_good[e].frame != ~0u && g_good[e].frame + 1u == frame) {
-        dx = g_good[e].dx;   // the last good delta, held for one frame
+    } else if (g_good[e].frame != ~0u && g_good[e].frame + 1u == frame && L.b.ready(W, H, kLagStdMaxPx)) {
+        dx = g_good[e].dx;   // the last good delta, held for one frame (F50: only while the baseline is ready)
         dy = g_good[e].dy;
         have = held = true;
     }
@@ -8142,6 +8309,9 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
     std::memcpy(r4, sh->rows[4], sizeof(r4));
     std::memcpy(r5, sh->rows[5], sizeof(r5));
     drawtag::ndcOffsetRows(r4, r5, sh->rows[7], dx, dy);
+    g_fix.cx = L.b.c[0];
+    g_fix.cy = L.b.c[1];
+    g_fix.head = g_headDps;
     g_fix.pending = true;
     g_fix.held = held;
     g_fix.serial = g_drawSerial;
@@ -8375,16 +8545,27 @@ void f47Measure(EyeStats& s, const WorldView& w, const float rows[16], const dou
         if (deg > s.dDegMax) s.dDegMax = deg;
     }
 }
-void f47Residual(EyeStats& s, const WorldView& w, const float patched[16], const double oh[3], const double P[3], double W, double H) {
-    const double ow[3] = {w.o[0], w.o[1], w.o[2]};
-    double dx = 0.0, dy = 0.0;
-    if (drawtag::ndcDelta(w.rows, ow, patched, patched + 4, patched + 12, oh, P, 1e30, &dx, &dy) != drawtag::kDeltaOk) return;
-    const double px = dx * W * 0.5, py = dy * H * 0.5;
+// F50: the residual after the patch: X0 through the patched rows (read back) minus (P through the world rows + the c the patch used), in
+// pixels; about zero at every head speed when the patch took (a held frame carries the frame before's delta, so it is not zero).
+void f50Residual(EyeStats& s, const WorldView& w, const float patched[16], const double oh[3], const double X0[3], const double P[3], const Rec& r,
+                 double W, double H) {
+    const double ow[3] = {w.o[0], w.o[1], w.o[2]}, c[2] = {r.fixCx, r.fixCy};
+    double dx = 0.0, dy = 0.0, m[2] = {};
+    if (drawtag::ndcLagDelta(w.rows, ow, patched, patched + 4, patched + 12, oh, X0, P, c, 1e30, m, &dx, &dy) != drawtag::kDeltaOk) return;
+    const double px = -dx * W * 0.5, py = -dy * H * 0.5;   // (m - c): where the marker landed against P + c
     ++s.rN;
     s.rxSum += px;
     s.rySum += py;
     if (std::fabs(px) > s.rxMax) s.rxMax = std::fabs(px);
     if (std::fabs(py) > s.ryMax) s.ryMax = std::fabs(py);
+    const double hd = r.fixHead;
+    const int bin = hd < 0.0 ? -1 : hd < 3.0 ? 0 : hd < 20.0 ? 1 : hd < 60.0 ? 2 : 3;
+    if (bin >= 0) {
+        const double d = std::sqrt(px * px + py * py);
+        ++s.resN[bin];
+        s.resSum[bin] += d;
+        if (d > s.resMax[bin]) s.resMax[bin] = d;
+    }
 }
 
 void pairMarker(const Rec& r, const Find& f, const float rows[16], const float oH[4], uint32_t frame, const float* patched) {
@@ -8451,7 +8632,7 @@ void pairMarker(const Rec& r, const Find& f, const float rows[16], const float o
     s.tw = W;
     s.th = H;
     f47Measure(s, *w, rows, oh, P, W, H);
-    if (patched) f47Residual(s, *w, patched, oh, P, W, H);
+    if (patched) f50Residual(s, *w, patched, oh, x0, P, r, W, H);
     if (const WorldView* o = worldGet(frame, 1 - e)) {
         const double oo[3] = {o->o[0], o->o[1], o->o[2]};
         double oc[4];
@@ -8782,13 +8963,80 @@ void report(uint64_t nowMs) {
                               s.rxSum / double(s.rN), s.rxMax, s.rySum / double(s.rN), s.ryMax, ull(s.rN));
             else std::snprintf(res, sizeof(res), "no patched pair this second");
             Log::get().note("native on foot marker fix (F47, key %s): eye %d: P through the world rows minus P through the marker rows (unpatched): "
-                            "%s; head %s; patched %llu draws (held %llu); after the patch: %s; not applied: eye 0 unmatched %llu, eye 1 unmatched %llu, "
-                            "another draw of the eye %llu, ranged b0 %llu, no CPU b0 rows %llu, no CPU o_hud %llu, no CPU world view %llu, no P %llu, "
-                            "w <= 0 %llu, gate (|d| >= %.2f NDC) %llu, bind refused %llu; the patched draw read the record at read-back %llu, did not "
-                            "%llu; CPU b0 rows 4..7 against the GPU copy: agree %llu, differ %llu (max %.3g)",
+                            "%s; head %s; patched %llu draws (held %llu); after the patch (F50: X0 through the patched rows minus (P + c)): %s; not "
+                            "applied: eye 0 unmatched %llu, eye 1 unmatched %llu, another draw of the eye %llu, ranged b0 %llu, no CPU b0 rows %llu, no "
+                            "CPU o_hud %llu, no CPU world view %llu, no P %llu, baseline not ready %llu, w <= 0 %llu, gate (|d| >= %.2f NDC) %llu, bind "
+                            "refused %llu; the patched draw read the record at read-back %llu, did not %llu; CPU b0 rows 4..7 against the GPU copy: "
+                            "agree %llu, differ %llu (max %.3g)",
                             fixOn ? "on" : "off", e, meas, head, ull(s.fPatched), ull(s.fHeld), res, ull(s.fUnmatched[0]), ull(s.fUnmatched[1]),
-                            ull(s.fOtherDraw), ull(s.fRanged), ull(s.fNoRows), ull(s.fNoOrigin), ull(s.fNoWorld), ull(s.fNoP), ull(s.fBehind),
-                            kGateNdc, ull(s.fGate), ull(s.fBind), ull(s.predHit), ull(s.predMiss), ull(s.cpuAgree), ull(s.cpuDiffer), s.cpuDiffMax);
+                            ull(s.fOtherDraw), ull(s.fRanged), ull(s.fNoRows), ull(s.fNoOrigin), ull(s.fNoWorld), ull(s.fNoP), ull(s.fUnseeded),
+                            ull(s.fBehind), kGateNdc, ull(s.fGate), ull(s.fBind), ull(s.predHit), ull(s.predMiss), ull(s.cpuAgree), ull(s.cpuDiffer),
+                            s.cpuDiffMax);
+        }
+        // F50, per eye: the baseline c and its spread, |m - c| against the head's speed, the patched draws, the residual after the patch by
+        // the head's speed, and the honesty check (c by head pitch and roll on slow-head frames, since the last reset).
+        for (int e = 0; e < 2; ++e) {
+            const EyeStats& s = w.eye[e];
+            const LagEye& L = g_lag[e];
+            const double W = L.tw ? static_cast<double>(L.tw) : kDefaultTargetSize, H = L.th ? static_cast<double>(L.th) : kDefaultTargetSize;
+            static const char* const kBins[4] = {"< 3", "3..20", "20..60", ">= 60"};
+            char lag[512], resid[512], bins[512];
+            size_t ll = 0, rl = 0, bl = 0;
+            lag[0] = resid[0] = bins[0] = 0;
+            for (int b = 0; b < 4; ++b) {
+                if (s.lagN[b])
+                    appendf(lag, sizeof(lag), ll, "%s%s deg/s %.2f px mean, %.2f max (%llu)", ll ? "; " : "", kBins[b], s.lagSum[b] / double(s.lagN[b]),
+                            s.lagMax[b], ull(s.lagN[b]));
+                if (s.resN[b])
+                    appendf(resid, sizeof(resid), rl, "%s%s deg/s %.2f px mean, %.2f max (%llu)", rl ? "; " : "", kBins[b],
+                            s.resSum[b] / double(s.resN[b]), s.resMax[b], ull(s.resN[b]));
+            }
+            if (!ll) appendf(lag, sizeof(lag), ll, "none this second");
+            if (!rl) appendf(resid, sizeof(resid), rl, "none this second");
+            // The honesty check: the bins' means (px) and the largest difference between two bins that have kLagBinMinN frames.
+            double binMean[5][2] = {};
+            bool binOk[5] = {};
+            static const char* const kBinNames[5] = {"pitch < -15", "pitch -15..15", "pitch > 15", "|roll| < 10", "|roll| >= 10"};
+            for (int b = 0; b < 5; ++b) {
+                const uint64_t n = b < 3 ? L.pitchN[b] : L.rollN[b - 3];
+                const double* sum = b < 3 ? L.pitchSum[b] : L.rollSum[b - 3];
+                if (!n) continue;
+                binMean[b][0] = sum[0] / double(n);
+                binMean[b][1] = sum[1] / double(n);
+                binOk[b] = n >= kLagBinMinN;
+                appendf(bins, sizeof(bins), bl, "%s%s (%+.2f, %+.2f) px (%llu)", bl ? ", " : "", kBinNames[b], binMean[b][0] * W * 0.5,
+                        binMean[b][1] * H * 0.5, ull(n));
+            }
+            if (!bl) appendf(bins, sizeof(bins), bl, "no slow-head frames yet");
+            double spread = 0.0;
+            int compared = 0;
+            for (int g = 0; g < 2; ++g) {   // pitch bins against each other, roll bins against each other
+                const int lo = g == 0 ? 0 : 3, hi = g == 0 ? 3 : 5;
+                int inGroup = 0;
+                for (int a = lo; a < hi; ++a) {
+                    if (!binOk[a]) continue;
+                    ++inGroup;
+                    for (int b = a + 1; b < hi; ++b) {
+                        if (!binOk[b]) continue;
+                        spread = std::max(spread, std::fabs(binMean[a][0] - binMean[b][0]) * W * 0.5);
+                        spread = std::max(spread, std::fabs(binMean[a][1] - binMean[b][1]) * H * 0.5);
+                    }
+                }
+                if (inGroup >= 2) ++compared;
+            }
+            const bool masking = compared > 0 && spread > kLagPitchSpreadPx;
+            const char* verdict = masking ? "NOT CONSTANT" : compared ? "constant so far" : "not yet testable (fewer than two bins with enough frames)";
+            Log::get().note("native on foot marker fix (F50, key %s): eye %d: baseline c (%+.5f, %+.5f) NDC = (%+.2f, %+.2f) px at %.0fx%.0f, std %.2f px "
+                            "(%s, %u frames taken, %llu this second; resets this second %llu, last: %s); |m - c| by head speed: %s; patched %llu draws "
+                            "(held %llu), baseline not ready %llu, gate (|d| >= %.2f NDC) %llu; after the patch |marker - (P + c)| by head speed: %s; "
+                            "honesty check (c by head pitch / roll, slow head, since the last reset): %s; spread %.2f px (limit %.1f): %s",
+                            fixOn ? "on" : "off", e, L.b.c[0], L.b.c[1], L.b.c[0] * W * 0.5, L.b.c[1] * H * 0.5, W, H, L.b.stdPx(W, H),
+                            L.b.ready(W, H, kLagStdMaxPx) ? "ready" : L.b.seeded ? "seeded, std too high" : "seeding", L.b.n, ull(s.lagTaken),
+                            ull(s.lagResets), L.lastReset, lag, ull(s.fPatched), ull(s.fHeld), ull(s.fUnseeded), kGateNdc, ull(s.fGate), resid, bins,
+                            spread, kLagPitchSpreadPx, verdict);
+            if (masking)
+                Log::get().note("native on foot marker fix (F50): eye %d: the baseline is not constant: masking (c moves %.2f px with head pitch or "
+                                "roll: %s). Do not claim the fix", e, spread, bins);
         }
         const uint64_t secondAll = g_f47SecondPosts.load(std::memory_order_relaxed);
         const uint64_t second = secondAll - g_secondPostsSeen;
@@ -9024,6 +9272,9 @@ bool nativeOnFootMarkerFixBegin(ID3D11DeviceContext* ctx) {
         r.fixHeld = g_fix.held;
         r.fixDx = static_cast<float>(g_fix.dx);
         r.fixDy = static_cast<float>(g_fix.dy);
+        r.fixCx = static_cast<float>(g_fix.cx);
+        r.fixCy = static_cast<float>(g_fix.cy);
+        r.fixHead = static_cast<float>(g_fix.head);
         r.patchedAt = static_cast<int32_t>(at);
     }
     if (!g_fixAppliedNoted) {
@@ -9047,6 +9298,7 @@ void nativeOnFootMarkerProbeShutdown() {
     f44::g_staging.release();
     if (f44::g_fix.saved) f44::g_fix.saved->Release();
     f44::g_fix = f44::Fix{};
+    for (f44::LagEye& L : f44::g_lag) L = f44::LagEye{};   // F50
     if (f44::g_privCb) f44::g_privCb->Release();
     if (f44::g_workBuf) f44::g_workBuf->Release();
     f44::g_privCb = f44::g_workBuf = nullptr;
