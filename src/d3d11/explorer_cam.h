@@ -137,6 +137,9 @@ struct NeckCensusReading {
     uint32_t neckState = 0;      // F39: 1 read (neck, avatar-root model space), 2 no candidate name answered, 3 not plausible
     float neck[3] = {};
     const char* neckName = nullptr;   // F39: the candidate name the neck was found under
+    uint32_t shState = 0;             // F43: bit 0 the 3P shoulders (L, R) read, bit 1 the FP shoulders read
+    float sh3P[6] = {};               // F43: the 3P shoulders, avatar-root model space (L, R)
+    float shFp[6] = {};               // F43: the FP shoulders, FP avatar-root model space (L, R)
 };
 bool neckCensusRead(NeckCensusReading* out);
 bool explorerCamRestPovDelta(float out[3]);   // F33: the povCamera joint minus the head joint in model space, once Explorer Cam's walk derived it

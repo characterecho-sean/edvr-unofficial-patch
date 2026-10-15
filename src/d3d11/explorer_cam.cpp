@@ -1,3 +1,5 @@
+#include <algorithm>
+#include <vector>
 #include <mutex>   // F33: the rest pov offset's lock
 // Explorer Cam: the glue (explorer_cam.h says what it is; explorer_cam_core.h holds every decision, every byte of the relays and the
 // text of every line, driven by tools\explorer_cam_test).
@@ -1702,6 +1704,9 @@ struct NeckSnapshot {
     uint32_t neckState = 0;      // F39: 1 read, 2 no candidate name answered, 3 matrix not plausible, 0 not tried (head not read)
     float neck[3] = {};          // F39: the neck joint, avatar-root model space (as the head)
     const char* neckName = nullptr;
+    uint32_t shState = 0;        // F43: bit 0 the 3P shoulders (L then R) read, bit 1 the FP shoulders read
+    float sh3P[6] = {};          // F43: the 3P shoulders, avatar-root model space (L, R)
+    float shFp[6] = {};          // F43: the FP shoulders, FP avatar-root model space (L, R)
 };
 std::mutex g_neckMutex;
 NeckSnapshot g_neck;                                  // guarded by g_neckMutex
@@ -1777,6 +1782,82 @@ uint32_t neckJointRead(uintptr_t iface, const SkSlots& sl, float out[3]) noexcep
     return 1;
 }
 
+// F43: the body anchor's joints, by name, on each latched skeleton (the 3P one and the FP one). Probed once per skeleton on the census thread:
+// the probe logs every name's index (0xFFFF: none). The walk dump runs only when a side's shoulder does not answer.
+constexpr const char* kJointProbeNames[15] = {"def_l_shoulder_joint", "def_r_shoulder_joint", "def_l_clavicle_joint", "def_r_clavicle_joint",
+    "def_l_upperArm_joint", "def_r_upperArm_joint", "def_l_arm_joint", "def_r_arm_joint", "def_c_spine03_joint", "def_l_handAttach_joint",
+    "def_r_handAttach_joint", "def_l_hand_joint", "def_r_hand_joint", "def_c_neck_joint", "def_c_head_joint"};
+constexpr size_t kJointNameNeck = 13;
+struct ShoulderProbe {
+    uint64_t iface = 0;
+    bool done = false;
+    uint32_t l = 0xFFFFu, r = 0xFFFFu;   // the first answered L and R shoulder: shoulder, then clavicle, then upper arm
+    uint32_t neck = 0xFFFFu;
+};
+ShoulderProbe g_shProbe3P, g_shProbeFP;   // census thread only
+
+// The walk dump (no shoulder answered): the 30 joints nearest the neck by index, with name hash, depth and parent, once per skeleton.
+void shoulderWalkDump(uint64_t iface, const SkSlots& sl, uint32_t neck, const char* label) noexcept {
+    uintptr_t pose = 0;
+    if (!sehCallPose(sl.fn[0], static_cast<uintptr_t>(iface), &pose) || pose == 0) return;
+    uint16_t joints = 0;
+    if (!sehReadU16At(pose, &joints) || joints == 0 || joints > ecm::kMaxWalkJoints) return;
+    if (!sehReadPoseArrays(pose, joints, g_neckWalkLocals, g_neckWalkParents)) return;
+    const uint32_t centre = neck < joints ? neck : static_cast<uint32_t>(joints / 2);
+    std::vector<uint32_t> order;
+    for (uint32_t i = 0; i < joints; ++i) order.push_back(i);
+    std::stable_sort(order.begin(), order.end(), [centre](uint32_t a, uint32_t b) {
+        const uint32_t da = a > centre ? a - centre : centre - a, db = b > centre ? b - centre : centre - b;
+        return da < db;
+    });
+    const size_t shown = std::min<size_t>(30, order.size());
+    for (size_t k = 0; k < shown; ++k) {
+        const uint32_t i = order[k];
+        uint16_t hash = 0;
+        sehReadU16At(pose + 0x18 + 2u * i, &hash);
+        uint32_t depth = 0;
+        uint16_t p = g_neckWalkParents[i];
+        while (p != 0xFFFFu && p < joints && depth < joints) {
+            ++depth;
+            p = g_neckWalkParents[p];
+        }
+        Log::get().note("native on foot joint walk (%s): joint %u name hash 0x%04X depth %u parent %u%s", label, static_cast<unsigned>(i),
+                        static_cast<unsigned>(hash), static_cast<unsigned>(depth), static_cast<unsigned>(g_neckWalkParents[i]),
+                        i == centre ? " (the neck's index)" : "");
+    }
+}
+
+// F43: the probe for one skeleton, once per skeleton (the iface is the cache key).
+void shoulderProbe(uint64_t iface, const SkSlots& sl, ShoulderProbe& pr, const char* label) noexcept {
+    if (pr.done && pr.iface == iface) return;
+    pr = ShoulderProbe{};
+    pr.iface = iface;
+    pr.done = true;
+    uint32_t found[15] = {};
+    for (size_t i = 0; i < 15; ++i) {
+        uint32_t idx = ecm::kNoJoint;
+        found[i] = sehCallFind(sl.fn[1], static_cast<uintptr_t>(iface), kJointProbeNames[i], &idx) ? (idx & 0xFFFFu) : 0xFFFFu;
+        Log::get().note("native on foot joint probe (%s): %s -> %u (0xFFFF: none)", label, kJointProbeNames[i], static_cast<unsigned>(found[i]));
+    }
+    const size_t lc[3] = {0, 2, 4}, rc[3] = {1, 3, 5};
+    for (size_t c : lc)
+        if (pr.l == 0xFFFFu && found[c] != 0xFFFFu) pr.l = found[c];
+    for (size_t c : rc)
+        if (pr.r == 0xFFFFu && found[c] != 0xFFFFu) pr.r = found[c];
+    pr.neck = found[kJointNameNeck];
+    if (pr.l == 0xFFFFu || pr.r == 0xFFFFu) shoulderWalkDump(iface, sl, pr.neck, label);
+}
+
+// F43: one joint's model-space translation (the +0x58 model call, as the head and the neck), or false.
+bool jointModelAt(uint64_t iface, const SkSlots& sl, uint32_t idx, float out[3]) noexcept {
+    alignas(16) float m[16] = {};
+    if (!sehCallModel(sl.fn[3], static_cast<uintptr_t>(iface), idx, m) || !ecm::headMatrixPlausible(m)) return false;
+    out[0] = m[12];
+    out[1] = m[13];
+    out[2] = m[14];
+    return true;
+}
+
 void neckCensusStep() noexcept {
     if (!nativeOnFootActive()) return;
     const uint64_t now = GetTickCount64();
@@ -1809,8 +1890,24 @@ void neckCensusStep() noexcept {
                     // F39: the neck joint, by name, on the same skeleton (cached per skeleton).
                     s.neckState = neckJointRead(static_cast<uintptr_t>(iface), sl, s.neck);
                     if (s.neckState == 1) s.neckName = g_neckJoint.name;
+                    // F43: the 3P shoulders, by name, on this skeleton.
+                    shoulderProbe(iface, sl, g_shProbe3P, "3P");
+                    if (g_shProbe3P.l != 0xFFFFu && g_shProbe3P.r != 0xFFFFu && jointModelAt(iface, sl, g_shProbe3P.l, &s.sh3P[0]) &&
+                        jointModelAt(iface, sl, g_shProbe3P.r, &s.sh3P[3]))
+                        s.shState |= 1u;
                 }
             }
+        }
+    }
+    // F43: the FP shoulders, by name, on the second latched skeleton (once per skeleton).
+    const uint64_t fpIface = g_skelIface[1].load(std::memory_order_acquire);
+    if (fpIface) {
+        SkSlots slf;
+        if (skVerify(static_cast<uintptr_t>(fpIface), ecm::HeadKind::None, &slf) == SkVerify::Ok) {
+            shoulderProbe(fpIface, slf, g_shProbeFP, "FP");
+            if (g_shProbeFP.l != 0xFFFFu && g_shProbeFP.r != 0xFFFFu && jointModelAt(fpIface, slf, g_shProbeFP.l, &s.shFp[0]) &&
+                jointModelAt(fpIface, slf, g_shProbeFP.r, &s.shFp[3]))
+                s.shState |= 2u;
         }
     }
     const uint64_t amc = g_amcLocal.load(std::memory_order_acquire);
@@ -1833,6 +1930,9 @@ bool neckCensusCopy(NeckCensusReading* out) {
     out->neckState = g_neck.neckState;
     std::memcpy(out->neck, g_neck.neck, sizeof(out->neck));
     out->neckName = g_neck.neckName;
+    out->shState = g_neck.shState;
+    std::memcpy(out->sh3P, g_neck.sh3P, sizeof(out->sh3P));
+    std::memcpy(out->shFp, g_neck.shFp, sizeof(out->shFp));
     return g_neck.stamp != 0;
 }
 

@@ -77,7 +77,8 @@ bool g_nativeEdgeLast = false;                // F26: frame thread only
 // F33 (TEMPORARY, live): the body align's key and its trims (right, up, forward, in cm; clamped to +-30 at read).
 std::atomic<bool> g_alignKeyOn{false};
 std::atomic<int> g_alignMode{0};   // F35: 0 off, 1 view (F33), 2 body (F35)
-double g_alignTrimCm[3] = {};   // [0] right, [1] up, [2] forward (body axes)
+double g_alignTrimCm[3] = {};
+std::atomic<bool> g_alignAnchorShoulders{true};   // F43: fix.native_on_foot_body_align_anchor, shoulders (true) or neck   // [0] right, [1] up, [2] forward (body axes)
 uint64_t g_f40MarkerLogMs = 0;   // F40: the marker angle line's last time
 std::atomic<double> g_worldLeadFrames{2.5};   // F38: fix.native_on_foot_world_markers_lead, 0 to 5 frames (forward_lead); live
 std::atomic<int> g_worldMarkersMode{6};        // F27/F31/F37: fix.native_on_foot_world_markers: 0 fixed, 1 forward (C), 2 game, 3 forward_now (H_M), 4 forward_hist (the ring's matched pose), 5 forward_k2 (the ring's pose two frames back), 6 forward_lead (the newest ring pose carried ahead, default); live; key 10 is never touched
@@ -558,6 +559,8 @@ void readKey() {
         const int mode = alignMode == "body" ? 2 : alignMode == "calibrate" ? 3 : (alignMode == "view" || alignMode == "on") ? 1 : 0;   // the old "on" is view
         g_alignMode.store(mode, std::memory_order_relaxed);
         g_alignKeyOn.store(mode != 0, std::memory_order_relaxed);
+        // F43 (live): the body anchor, shoulders (the default; neck while a shoulder does not resolve) or neck.
+        g_alignAnchorShoulders.store(cfg.getString("fix.native_on_foot_body_align_anchor", "shoulders") != "neck", std::memory_order_relaxed);
         const std::string trims[3] = {cfg.getString("fix.native_on_foot_body_align_trim_right_cm", "0"),
                                       cfg.getString("fix.native_on_foot_body_align_trim_up_cm", "0"),
                                       cfg.getString("fix.native_on_foot_body_align_trim_forward_cm", "0")};
@@ -5011,6 +5014,9 @@ struct EyeSample {
     bool neckOk = false;
     float neck[3] = {};
     const char* neckName = nullptr;
+    // F43: the 3P shoulders in world (L then R), the FP shoulders in FP model space, and the neck plus the rest pov offset in world.
+    bool shOk3P = false, shOkFp = false, neckPovOk = false;
+    float sh3PW[6] = {}, shFpM[6] = {}, neckPov[3] = {};
 };
 std::mutex g_eyeMutex;                   // guards g_eyeSample (game thread writes, frame thread reads)
 EyeSample g_eyeSample;
@@ -5087,6 +5093,19 @@ void eyeSample(void* amcPtr, void* jobPtr, uint64_t now) noexcept {
         s.neckName = nk.neckName;
         for (size_t j = 0; j < 3; ++j) s.neck[j] = nk.neck[0] * M[j] + nk.neck[1] * M[4 + j] + nk.neck[2] * M[8 + j] + M[12 + j];
     }
+    // F43: the 3P shoulders through this AMC matrix (the head's transform), the FP shoulders as the census read them (model space).
+    s.shOk3P = s.headOk && (nk.shState & 1u) != 0;
+    if (s.shOk3P)
+        for (size_t k = 0; k < 2; ++k)
+            for (size_t j = 0; j < 3; ++j)
+                s.sh3PW[3 * k + j] = nk.sh3P[3 * k + 0] * M[j] + nk.sh3P[3 * k + 1] * M[4 + j] + nk.sh3P[3 * k + 2] * M[8 + j] + M[12 + j];
+    s.shOkFp = (nk.shState & 2u) != 0;
+    if (s.shOkFp) std::memcpy(s.shFpM, nk.shFp, sizeof(s.shFpM));
+    // F43: the neck plus Explorer Cam's rest pov offset (model space) through the AMC matrix, when the rest is derived.
+    s.neckPovOk = s.neckOk && s.povDerived;
+    if (s.neckPovOk)
+        for (size_t j = 0; j < 3; ++j)
+            s.neckPov[j] = (nk.neck[0] + rest[0]) * M[j] + (nk.neck[1] + rest[1]) * M[4 + j] + (nk.neck[2] + rest[2]) * M[8 + j] + M[12 + j];
     {
         const uintptr_t amc = reinterpret_cast<uintptr_t>(amcPtr);
         uintptr_t obj = 0, vt = 0, fn = 0, mat = 0;
@@ -5107,6 +5126,7 @@ void eyeSample(void* amcPtr, void* jobPtr, uint64_t now) noexcept {
 struct FpRootSnap {
     bool ok = false;
     float origin[3] = {};
+    float rows[9] = {};   // F43: the root matrix's rotation rows (rows[3r + c])
     uint64_t stamp = 0;
 };
 FpRootSnap g_fpRoot;   // under g_eyeMutex
@@ -5123,6 +5143,8 @@ void fpRootTrack(void* amcPtr, uint64_t now) noexcept {
     std::lock_guard<std::mutex> lock(g_eyeMutex);
     g_fpRoot.ok = true;
     std::memcpy(g_fpRoot.origin, m + 12, sizeof(g_fpRoot.origin));
+    for (size_t r = 0; r < 3; ++r)
+        for (size_t c = 0; c < 3; ++c) g_fpRoot.rows[3 * r + c] = m[4 * r + c];
     g_fpRoot.stamp = now;
 }
 // F37 post-hook check: the next P1 call reads one shifted record and says whether the shift is still in place when the renderer reads it.
@@ -5605,6 +5627,9 @@ void alignTick(uint64_t now) noexcept {
     const bool fpFresh = fp.ok && now - fp.stamp < 100;
     // The error, in the frame of the run: seated for view, world for body. Both start from the same measurement: the camera minus the pov.
     double err[3] = {}, deltaB[3] = {}, hmdB[3] = {}, camB[3] = {}, povB[3] = {};
+    // F43: the shoulder anchor's state for this frame (set in the !wait block; zero when the anchor is not the shoulders).
+    bool shoulderAnchor = false;
+    double fpShW[3] = {}, tpShW[3] = {};
     if (!wait) {
         const auto body = [&](const float p[3], double out[3]) {
             for (size_t i = 0; i < 3; ++i) {
@@ -5639,10 +5664,6 @@ void alignTick(uint64_t now) noexcept {
         const double alpha = dt > 0.0 ? 1.0 - std::exp(-dt / 1.0) : 0.0;   // tau 1 s
         for (size_t i = 0; i < 3; ++i) g_f38Lp[i] += alpha * (povB[i] - g_f38Lp[i]);
         if (inWin && s.neckOk) {
-            ++g_f38R0N;
-            for (size_t i = 0; i < 3; ++i) g_f38R0[i] += ((povB[i] - neckB[i]) - g_f38R0[i]) / static_cast<double>(g_f38R0N);
-        }
-        if (inWin && s.neckOk) {
             ++g_f38CamNeckN;
             for (size_t i = 0; i < 3; ++i) g_f38CamNeck[i] += ((jobB[i] - neckB[i]) - g_f38CamNeck[i]) / static_cast<double>(g_f38CamNeckN);
         }
@@ -5650,20 +5671,51 @@ void alignTick(uint64_t now) noexcept {
             ++g_f38CamFpN;
             for (size_t i = 0; i < 3; ++i) g_f38CamFp[i] += ((jobB[i] - fpB[i]) - g_f38CamFp[i]) / static_cast<double>(g_f38CamFpN);
         }
-        const bool useNeck = s.neckOk && g_f38R0N > 0;
+        const bool useNeck = s.neckOk;
         double povEqB[3] = {}, povEqW[3] = {};
-        for (size_t i = 0; i < 3; ++i) povEqB[i] = useNeck ? neckB[i] + g_f38R0[i] : g_f38Lp[i];
+        // F43: the neck anchor is the neck joint plus Explorer Cam's rest pov offset when derived, else the neck plus the flown trims
+        // (0, 0.15, -0.08) m in body axes; without a neck, the low-passed head (F38).
+        if (useNeck && s.neckPovOk) body(s.neckPov, povEqB);
+        else if (useNeck) {
+            const double restB[3] = {0.0, 0.15, -0.08};
+            for (size_t i = 0; i < 3; ++i) povEqB[i] = neckB[i] + restB[i];
+        } else {
+            for (size_t i = 0; i < 3; ++i) povEqB[i] = g_f38Lp[i];
+        }
         for (size_t j = 0; j < 3; ++j) {
             povEqW[j] = static_cast<double>(s.origin[j]);
             for (size_t i = 0; i < 3; ++i) povEqW[j] += povEqB[i] * static_cast<double>(s.rows[3 * i + j]);
         }
+        // F43: the shoulder means in world. The 3P shoulders through the AMC matrix; the FP shoulders through the FP root's yaw only (the
+        // torso does not slide with the aim pitch), and the FP root's origin. Both need a fresh FP root and both skeletons' shoulders.
+        shoulderAnchor = mode == 2 && g_alignAnchorShoulders.load(std::memory_order_relaxed) && s.shOk3P && s.shOkFp && fpFresh;
+        if (s.shOk3P && s.shOkFp && fpFresh) {
+            const double rn = std::sqrt(static_cast<double>(fp.rows[6]) * fp.rows[6] + static_cast<double>(fp.rows[8]) * fp.rows[8]);
+            const double cy = rn > 1e-6 ? fp.rows[8] / rn : 1.0, sy = rn > 1e-6 ? fp.rows[6] / rn : 0.0;
+            const double Y[3][3] = {{cy, 0.0, -sy}, {0.0, 1.0, 0.0}, {sy, 0.0, cy}};   // the yaw-only basis, row 2 forward
+            for (size_t k = 0; k < 2; ++k)
+                for (size_t j = 0; j < 3; ++j) {
+                    double w = static_cast<double>(fp.origin[j]);
+                    for (size_t mI = 0; mI < 3; ++mI) w += static_cast<double>(s.shFpM[3 * k + mI]) * Y[mI][j];
+                    fpShW[j] += 0.5 * w;
+                    tpShW[j] += 0.5 * static_cast<double>(s.sh3PW[3 * k + j]);
+                }
+        }
+        const auto bodyD = [&](const double q[3], double out[3]) {
+            for (size_t i = 0; i < 3; ++i) {
+                double acc = 0.0;
+                for (size_t j = 0; j < 3; ++j) acc += (q[j] - static_cast<double>(s.origin[j])) * static_cast<double>(s.rows[3 * i + j]);
+                out[i] = acc;
+            }
+        };
         if (now - g_f38LineMs >= 5000 || g_f38LineMs == 0) {
             g_f38LineMs = now;
             double off = 0.0;
             for (size_t i = 0; i < 3; ++i) off += (povEqB[i] - povB[i]) * (povEqB[i] - povB[i]);
-            Log::get().note("native on foot body align: pov target from %s: pov minus neck (body) %.3f %.3f %.3f m, target minus pov %.3f m; "
+            Log::get().note("native on foot body align: pov target from %s: rest (body) %.3f %.3f %.3f m, target minus pov %.3f m; "
                             "camera minus neck (body) %.3f %.3f %.3f m; camera minus fp root (body) %.3f %.3f %.3f m%s",
-                            useNeck ? (s.neckName ? s.neckName : "the neck") : "the low-passed head", g_f38R0[0], g_f38R0[1], g_f38R0[2],
+                            useNeck ? (s.neckPovOk ? "the neck (rest derived)" : "the neck (flown trims)") : "the low-passed head",
+                            useNeck ? povEqB[0] - neckB[0] : 0.0, useNeck ? povEqB[1] - neckB[1] : 0.0, useNeck ? povEqB[2] - neckB[2] : 0.0,
                             std::sqrt(off), g_f38CamNeck[0], g_f38CamNeck[1], g_f38CamNeck[2], g_f38CamFp[0], g_f38CamFp[1], g_f38CamFp[2],
                             fpFresh ? "" : " (fp root not fresh)");
         }
@@ -5672,18 +5724,30 @@ void alignTick(uint64_t now) noexcept {
             // F41: body is open loop (the render records move; the camera, the neck and the pov do not), so no integral. The camera and the pov
             // are low-passed in body axes (0.1 s and 0.4 s: the sway and the camera's jitter out). The target is (camera - pov) - trims, in body
             // axes; bodyFilter takes it to the offset through one critically damped filter. The target goes to the filter in world axes.
+            // F43: the anchor's two sides in body axes: the FP shoulders (the anchor, the camera's place) and the 3P shoulders (the pov's place) when
+            // the shoulder anchor holds; otherwise the camera against the neck anchor (F41).
+            double anchorB[3] = {}, srcB[3] = {};
+            if (shoulderAnchor) {
+                bodyD(fpShW, anchorB);
+                bodyD(tpShW, srcB);
+            } else {
+                for (size_t i = 0; i < 3; ++i) {
+                    anchorB[i] = camB[i];
+                    srcB[i] = povEqB[i];
+                }
+            }
             if (!g_f41LpValid) {
                 for (size_t i = 0; i < 3; ++i) {
-                    g_f41CamLp[i] = camB[i];
-                    g_f41PovLp[i] = povEqB[i];
+                    g_f41CamLp[i] = anchorB[i];
+                    g_f41PovLp[i] = srcB[i];
                 }
                 g_f41LpValid = true;
             }
             const double aCam = 1.0 - std::exp(-dt / align::kBodyCamTauSec);
             const double aPov = 1.0 - std::exp(-dt / align::kBodyPovTauSec);
             for (size_t i = 0; i < 3; ++i) {
-                g_f41CamLp[i] += aCam * (camB[i] - g_f41CamLp[i]);
-                g_f41PovLp[i] += aPov * (povEqB[i] - g_f41PovLp[i]);
+                g_f41CamLp[i] += aCam * (anchorB[i] - g_f41CamLp[i]);
+                g_f41PovLp[i] += aPov * (srcB[i] - g_f41PovLp[i]);
                 g_f41TgtB[i] = (g_f41CamLp[i] - g_f41PovLp[i]) - trimB[i];
             }
             for (size_t j = 0; j < 3; ++j) {
@@ -5770,9 +5834,18 @@ void alignTick(uint64_t now) noexcept {
             double dB[3] = {};
             for (size_t i = 0; i < 3; ++i)
                 for (size_t j = 0; j < 3; ++j) dB[i] += a.pos[j] * static_cast<double>(s.rows[3 * i + j]);
-            Log::get().note("native on foot body align: body axes (right, up, forward): target %.3f %.3f %.3f m (camera minus pov, trims in, "
-                            "low-passed); d %.3f %.3f %.3f m; critically damped, tau 100 ms, no integral", g_f41TgtB[0], g_f41TgtB[1], g_f41TgtB[2],
-                            dB[0], dB[1], dB[2]);
+            double before = 0.0, after = 0.0;
+            for (size_t j = 0; j < 3; ++j) {
+                const double dd = fpShW[j] - tpShW[j], da = fpShW[j] - (tpShW[j] + a.pos[j]);
+                before += dd * dd;
+                after += da * da;
+            }
+            const double pitchDeg = std::asin(std::max(-1.0, std::min(1.0, static_cast<double>(fp.rows[7])))) * 180.0 / 3.14159265358979323846;
+            Log::get().note("native on foot body align: anchor %s; FP shoulders %.3f %.3f %.3f m, 3P shoulders %.3f %.3f %.3f m; distance %.3f m before d, "
+                            "%.3f m after; d body axes (right, up, forward) %.3f %.3f %.3f m; target body %.3f %.3f %.3f m; FP root pitch %.1f deg%s",
+                            shoulderAnchor ? "shoulders" : "neck", fpShW[0], fpShW[1], fpShW[2], tpShW[0], tpShW[1], tpShW[2], std::sqrt(before),
+                            std::sqrt(after), dB[0], dB[1], dB[2], g_f41TgtB[0], g_f41TgtB[1], g_f41TgtB[2], pitchDeg,
+                            g_alignAnchorShoulders.load(std::memory_order_relaxed) && !shoulderAnchor ? " (shoulders not resolved: neck anchor)" : "");
         }
     } else {
         alignFilter(a, err, on && !a.tripped && !wait, !on || a.tripped, dt, now, mode != 2);   // F37: the view run
