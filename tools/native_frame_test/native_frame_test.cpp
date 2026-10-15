@@ -9,6 +9,7 @@
 
 #include <d3d11.h>
 #include <wrl/client.h>
+#include "../../src/d3d11/draw_record_tag.h"   // F44: the marker probe's tag, find and match (pure parts)
 
 #include <array>
 #include <cmath>
@@ -451,6 +452,42 @@ int wmain(int argc, wchar_t** argv) {
         edvr::nofoot::leadPose(r0, r1, 0.0, same);
         check(std::fabs(edvr::nofoot::rotDeltaDeg(same, r0)) < 1e-3 && std::fabs(same[3] - 0.01) < 1e-6,
               "F38: a lead of zero frames returns the newest pose");
+    }
+
+    // F44 (pure): the marker probe's tag. The sentinel round-trips through the low mantissa bits, moves each component by under 2^-15 of its
+    // size, refuses a zero component, and is found at +16 of the right 336-byte record (and not in an all-zero record).
+    {
+        namespace dt = edvr::drawtag;
+        const uint32_t s = dt::sentinel(37, 0x1234);
+        check(dt::sentinelKey(s) == 37 && dt::sentinelFrame(s) == 0x1234 && (s & ~dt::kSentinelMask) == 0, "F44: the sentinel carries its key and frame");
+        float v[3] = {1.2345f, -987.654f, 0.0123f};
+        const float orig[3] = {v[0], v[1], v[2]};
+        check(dt::encode(v, s) && dt::decode(v) == s, "F44: the sentinel round-trips through t'");
+        bool withinBound = true;   // (not "small": rpcndr.h defines it as char)
+        for (int i = 0; i < 3; ++i)
+            withinBound = withinBound && std::fabs(v[i] - orig[i]) <= std::fabs(orig[i]) * (1.0f / 32768.0f) && std::signbit(v[i]) == std::signbit(orig[i]);
+        check(withinBound, "F44: the tag moves each component by under 2^-15 of its size");
+        float z[3] = {1.0f, 0.0f, 2.0f};
+        check(!dt::encode(z, s) && z[1] == 0.0f && z[0] == 1.0f, "F44: a zero component is not tagged (t' unchanged)");
+        alignas(16) uint8_t pool[dt::kRecordStride * 4] = {};
+        std::memcpy(pool + 2 * dt::kRecordStride + dt::kPositionOffset, v, sizeof(v));
+        const uint32_t wants[2] = {dt::sentinel(9, 1), s};
+        dt::Hit hits[4];
+        const uint32_t n = dt::scanRecords(pool, sizeof(pool), wants, 2, hits, 4, dt::plainLoad16);
+        check(n == 1 && hits[0].index == 2 && hits[0].sentinel == s && hits[0].pos[1] == v[1], "F44: the scan finds the tagged record at index 2 only");
+        dt::Hit one;
+        check(dt::checkRecord(pool, sizeof(pool), 2, wants, 2, one, dt::streamLoad16) && one.index == 2 &&
+                  !dt::checkRecord(pool, sizeof(pool), 3, wants, 2, one, dt::streamLoad16),
+              "F44: the hint check (streaming load) reads the same record, and an empty record never matches");
+        const float rows[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
+        const double p[3] = {11.0, 2.0, 3.0}, o[3] = {10.0, 2.0, 2.0};
+        double vp[3] = {}, vq[3] = {};
+        dt::viewPoint(rows, p, o, vp);
+        const double q[3] = {10.0, 3.0, 3.0};
+        dt::viewPoint(rows, q, o, vq);
+        check(std::fabs(vp[0] - 1.0) < 1e-12 && std::fabs(vp[2] - 1.0) < 1e-12 && std::fabs(dt::angleDeg(vp, vq) - 60.0) < 1e-9 &&
+                  dt::rowsRotation(rows, 0.02) && dt::rowsAngleDeg(rows, rows) < 1e-6,
+              "F44: the view point is rows . (p - o, 1), and the angle between (1, 0, 1) and (0, 1, 1) is 60 degrees");
     }
 
     // F40 (pure math): the view map. seated = D . Ry(psi) . body; the head in body axes is Ry(psi)^-1 . diag(1,1,-1) . tS; psi is the seated head

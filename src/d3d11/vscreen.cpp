@@ -3377,6 +3377,8 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
     // append) from a write that changes what the snapshot holds. Four
     // pointer compares while live, one relaxed load while not.
     if (mapData0 && type != D3D11_MAP_READ) engineVelocityResourceMapped(res, mapped->pData, static_cast<int>(type));
+    // F44 (TEMPORARY instrument, fix.native_on_foot_marker_probe): a watched t33 pool's mapped pointer and map type (two loads while off).
+    if (mapData0 && type != D3D11_MAP_READ && nativeOnFootMarkerProbeLive()) nativeOnFootMarkerProbeMap(res, mapped->pData, static_cast<int>(type));
     // The billboard loan's target, independent of the chain above on
     // purpose: the buffer the glare train reads may BE the composite's or
     // the camera's, and must not steal either shadow's slot. Pointer compare
@@ -3432,6 +3434,8 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
     // the tees below do and for the same reason: after it, the memory is no
     // longer ours to look at.
     if (drawCensusArmed()) drawCensusCbNoteUnmap(res);
+    // F44 (TEMPORARY instrument): a watched t33 pool's records are searched for the marker sentinel, before the real Unmap (read only).
+    if (nativeOnFootMarkerProbeLive()) nativeOnFootMarkerProbeUnmap(res);
     if (flatRuntimeActive()) {
         auto detail=FlatMutationDetails::named(FlatOverlayMutationOp::Unmap,"Unmap");detail.dstSub=sub;
         detail.known=FlatMutationDetails::DstSub;
@@ -4909,6 +4913,8 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
     }
     if (g_vrWorldInternal) { g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance); return; }
     gpuFrameCommandIfLive(self);
+    // F44 (TEMPORARY instrument): before the verdict, so the bindings read are the game's; copies into EDVR's staging only.
+    if (nativeOnFootMarkerProbeLive() && self == g_state->ownerCtx) nativeOnFootMarkerProbeDraw(self, instances, startInstance);
     if (self == g_state->ownerCtx) { temporalPassCountDraw(); if (temporalPassWantsDraw()) temporalPassNoteDraw(self); }
     noteStaleForward(kSlotDrawInstanced, reinterpret_cast<const void*>(g_state->realDrawInstanced),
                      "DrawInstanced");
@@ -4978,6 +4984,8 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     }
     if (g_vrWorldInternal) { g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex, baseVertex, startInstance); return; }
     gpuFrameCommandIfLive(self);
+    // F44 (TEMPORARY instrument): before the verdict, so the bindings read are the game's; copies into EDVR's staging only.
+    if (nativeOnFootMarkerProbeLive() && self == g_state->ownerCtx) nativeOnFootMarkerProbeDraw(self, instances, startInstance);
     if (self == g_state->ownerCtx) { temporalPassCountDraw(); if (temporalPassWantsDraw()) temporalPassNoteDraw(self); }
     noteStaleForward(kSlotDrawIndexedInstanced, reinterpret_cast<const void*>(g_state->realDrawIndexedInstanced),
                      "DrawIndexedInstanced");
@@ -7198,6 +7206,7 @@ void shutdownVScreenFixes() {
     }
     remlokShutdown();
     nativeOnFootBodyCullShutdown();   // F18 (TEMPORARY): the torso cull's cached rasterizer-state clones
+    nativeOnFootMarkerProbeShutdown();   // F44 (TEMPORARY): the marker probe's staging buffers
     holoShutdown();
     uiDepthShutdown();
     uiLayerShutdown();

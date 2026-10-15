@@ -2,6 +2,7 @@
 
 #include <windows.h>
 #include <d3d11.h>   // F18: the body cull's rasterizer-state clones
+#include <d3d11_1.h>   // F44: VSGetConstantBuffers1 (a ranged constant buffer's first constant)
 #include <intrin.h>
 
 #include <algorithm>
@@ -18,6 +19,9 @@
 #include "../common/log.h"
 #include "../common/runtime_profile.h"
 #include "binding_shadow.h"   // bindingShaderHash: the HUD issuer probe's pixel shader
+#include "depth_probe.h"   // F44: depthProbeCurrentSceneEyeOf, the eye of a draw by its depth view
+#include "draw_record_tag.h"   // F44: the marker probe's tag, find and match (after d3d11.h: its staging ring)
+#include "engine_velocity_families.h"   // F44: the pool families' vertex shaders (the eye's world view)
 #include "explorer_cam.h"   // localAvatarParts, avatarFadeModeRead, avatarCensusTake: the avatar census (F1, F3)
 #include "journal_watch.h"
 #include "load_sampler.h"   // F24: the load sampler's tick (read only, temporary)
@@ -552,6 +556,14 @@ void readKey() {
         double lead = std::atof(cfg.getString("fix.native_on_foot_world_markers_lead", "2.5").c_str());
         if (!(lead == lead)) lead = 2.5;
         g_worldLeadFrames.store(std::max(0.0, std::min(5.0, lead)), std::memory_order_relaxed);
+    }
+    // F44 (TEMPORARY instrument, live): the marker probe, off by default. Measure only (native_on_foot.h; draw_record_tag.h).
+    {
+        const bool probe = runtimeVrProfile() && cfg.getString("fix.native_on_foot_marker_probe", "off") == "on";
+        if (first || probe != g_nativeOnFootMarkerProbeKey.load(std::memory_order_relaxed))
+            Log::get().note("native on foot marker probe (F44, TEMPORARY): %s", probe ? "on -- world markers are tagged in t' (low mantissa bits), "
+                            "found in the HUD's t33 pool and matched to the HUD draw; a 1 s line while on foot" : "off");
+        g_nativeOnFootMarkerProbeKey.store(probe, std::memory_order_relaxed);
     }
     // F33 (TEMPORARY, live): the body align and its trims (cm, clamped to +-30).
     {
@@ -2776,6 +2788,57 @@ void f37RingView(const float C[16], const EdvrNativeNowPose& rp, uint32_t k, flo
     const uint32_t idx = (rp.ringNewest + 8u - k) % 8u;
     f31NowMatrix(C, rp.render, rp.ringHead[idx], H);
 }
+// ---- F44 (TEMPORARY instrument, fix.native_on_foot_marker_probe): the tag side, on the game's thread. Each tagged marker's sentinel, t' as
+// written (the tag included), P (node+0x50) and tag frame go into the cell of its key under a sequence count: the render thread takes a cell only
+// between two equal even counts. g_f44Frame is the render frame (the boundary's frameNo), whose low 16 bits the sentinel carries.
+struct F44TagCell {
+    std::atomic<uint32_t> seq;
+    std::atomic<uint32_t> sentinel, key, frame, pOk;
+    std::atomic<uint32_t> tp[3], p[3];   // float bits
+};
+constexpr size_t kF44Cells = 16;
+F44TagCell g_f44Cells[kF44Cells];        // zero-initialised (static storage)
+std::atomic<uint32_t> g_f44Frame{0};
+std::atomic<uint64_t> g_f44Tagged{0}, g_f44Untaggable{0}, g_f44CellBusy{0};
+struct F44Tag {
+    uint32_t sentinel = 0, key = 0, frame = 0;
+    float tp[3] = {}, p[3] = {};
+    bool pOk = false;
+};
+void f44Publish(const F44Tag& t) noexcept {
+    F44TagCell& c = g_f44Cells[t.key % kF44Cells];
+    uint32_t s = c.seq.load(std::memory_order_relaxed);
+    if ((s & 1u) || !c.seq.compare_exchange_strong(s, s + 1, std::memory_order_acq_rel)) {
+        g_f44CellBusy.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    std::atomic_thread_fence(std::memory_order_release);
+    c.sentinel.store(t.sentinel, std::memory_order_relaxed);
+    c.key.store(t.key, std::memory_order_relaxed);
+    c.frame.store(t.frame, std::memory_order_relaxed);
+    c.pOk.store(t.pOk ? 1u : 0u, std::memory_order_relaxed);
+    for (int i = 0; i < 3; ++i) {
+        c.tp[i].store(drawtag::bitsOf(t.tp[i]), std::memory_order_relaxed);
+        c.p[i].store(drawtag::bitsOf(t.p[i]), std::memory_order_relaxed);
+    }
+    c.seq.store(s + 2, std::memory_order_release);
+}
+bool f44ReadCell(size_t i, F44Tag& out) noexcept {
+    const F44TagCell& c = g_f44Cells[i];
+    const uint32_t s1 = c.seq.load(std::memory_order_acquire);
+    if (s1 == 0 || (s1 & 1u)) return false;
+    out.sentinel = c.sentinel.load(std::memory_order_relaxed);
+    out.key = c.key.load(std::memory_order_relaxed);
+    out.frame = c.frame.load(std::memory_order_relaxed);
+    out.pOk = c.pOk.load(std::memory_order_relaxed) != 0;
+    for (int k = 0; k < 3; ++k) {
+        out.tp[k] = drawtag::floatOf(c.tp[k].load(std::memory_order_relaxed));
+        out.p[k] = drawtag::floatOf(c.p[k].load(std::memory_order_relaxed));
+    }
+    std::atomic_thread_fence(std::memory_order_acquire);
+    return c.seq.load(std::memory_order_relaxed) == s1;
+}
+
 // F25 (TEMPORARY): the post-call of the marker stub, for every marker except key 10 (the reticle, which keeps its own placement). The game's call
 // writes the instance's translation t (+0x40) from the marker's world position, which already includes the head (the probe-3 RE: its yaw is -C's).
 // The list-B pipeline then applies C again, so the marker is head-locked. Writing t' = (t - row3(C)) . R^T, the exact inverse of that forward map
@@ -2950,12 +3013,30 @@ void __fastcall reticleWorldPost(void* node) noexcept {
             acc += wmMode == 0 ? (t[i] - C[12 + i]) * C[4 * j + i] : t[i] * C[4 * i + j];
         tp[j] = acc + (wmMode == 0 ? 0.0f : C[12 + j]);
     }
-    if (!guardedWriteFloat(ia + 0x40, tp[0]) || !guardedWriteFloat(ia + 0x44, tp[1]) || !guardedWriteFloat(ia + 0x48, tp[2])) {
+    // F44 (TEMPORARY instrument, fix.native_on_foot_marker_probe): t' is written with the sentinel in its low mantissa bits (at most 255 ulps a
+    // component, under 3e-5 relative; draw_record_tag.h). A component the tag cannot take leaves t' as computed (counted).
+    F44Tag f44{};
+    float tw[3] = {tp[0], tp[1], tp[2]};
+    bool f44Tagged = false;
+    if (g_nativeOnFootMarkerProbeKey.load(std::memory_order_relaxed)) {
+        f44.key = key;
+        f44.frame = g_f44Frame.load(std::memory_order_relaxed) & 0xFFFFu;
+        f44.sentinel = drawtag::sentinel(key, f44.frame);
+        f44Tagged = drawtag::encode(tw, f44.sentinel);
+        if (!f44Tagged) g_f44Untaggable.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (!guardedWriteFloat(ia + 0x40, tw[0]) || !guardedWriteFloat(ia + 0x44, tw[1]) || !guardedWriteFloat(ia + 0x48, tw[2])) {
         if (now - g_worldLineMs >= 5000 || g_worldLineMs == 0) {
             g_worldLineMs = now;
             Log::get().note("native on foot world markers: key %u: the instance could not be written; left as the game placed it", static_cast<unsigned>(key));
         }
         return;
+    }
+    if (f44Tagged) {
+        std::memcpy(f44.tp, tw, sizeof(tw));
+        f44.pOk = guardedRead(na + 0x50, f44.p, sizeof(f44.p));
+        f44Publish(f44);
+        g_f44Tagged.fetch_add(1, std::memory_order_relaxed);
     }
     if (now - g_worldLineMs >= 5000 || g_worldLineMs == 0) {
         g_worldLineMs = now;
@@ -6606,13 +6687,740 @@ void bodyModeShutdown() {
     g_modeWhy.store(4, std::memory_order_relaxed);
     g_modeWant.store(false, std::memory_order_release);
 }
+
+// ---- F44 (TEMPORARY instrument, fix.native_on_foot_marker_probe): the find, the draw-time match and the 1 s log. Render thread only (the owner
+// context's Map, Unmap and draw tees, and the frame boundary): nothing below is shared but the tag cells. Measure only: the Unmap tee reads the
+// game's mapped pool before the real Unmap, the draw tee copies what the draw binds into EDVR's own staging buffers, and no binding, constant
+// buffer or game resource is written.
+//
+// THE FIND. A pool is watched once an on-foot HUD draw binds it at t33 (a structured buffer of stride 336). At each Unmap of a DISCARD or
+// NO_OVERWRITE map of it, the sentinels in flight (the tags of the last kF44TagAgeMax frames) are looked for at +16 of its records: first at the
+// index each key was last found at, then, when a key is still missing, over the whole mapped range (streaming loads; a scan over 2 ms backs off
+// for 30 frames). Each find keeps (pool, record index, X0 = the stored position).
+// THE MATCH. Each on-foot HUD draw (VS 95D01BA609BF7500 or 46546443FD3C3F88) whose pool has a find this frame or the last copies its b0 rows 9-11,
+// its b1 row 275 and its instance stream entries (v0.x, from StartInstanceLocation) into a staging slot; the first pool-family draw of each eye
+// a frame (the world pass) copies its b0 rows 9-11 and b1 row 275. Read back two or more frames later without a wait: the draw reads record
+// FirstElement + v0.x; when that is a find, v0 = V_hud (X0 - o_hud) and v_target = V_w (P - o_w), and the angle between them is logged.
+namespace f44 {
+constexpr uint32_t kPools = 4;
+constexpr uint32_t kHits = 16;              // finds kept for a frame (this frame's, and the one before's)
+constexpr uint32_t kHistory = 64;           // tags taken from the cells: P and t' for a find, by sentinel
+constexpr uint32_t kCapFinds = 4;           // a HUD capture's copy of its pool's finds
+constexpr uint32_t kEntries = 4;            // instance stream entries read per HUD draw
+constexpr uint32_t kHudSlots = 192, kHudBytes = 96;      // b0 rows 9-11 at 0, b1 row 275 at 48, the stream entries at 64
+constexpr uint32_t kWorldSlots = 16, kWorldBytes = 64;   // b0 rows 9-11 at 0, b1 row 275 at 48
+constexpr uint32_t kHudPerFrame = 48;
+constexpr uint32_t kTagAgeMax = 8;          // frames a sentinel stays in flight
+constexpr uint32_t kScansPerFrame = 4;
+constexpr uint64_t kScanBackoffUs = 2000;
+constexpr UINT kRowsOffset = 9 * 16, kRowsBytes = 48, kOriginOffset = 275 * 16, kOriginBytes = 16;
+
+enum Refuse : uint32_t { kNoT33, kStride, kNoStream, kConstants, kNoFind, kRingFull, kPerFrame, kNoWorld, kRows, kNoTag, kZero, kPoolChanged,
+                         kScanFault, kRefuseCount };
+const char* const kRefuseName[kRefuseCount] = {
+    "the HUD draw has no t33 view",
+    "t33 is not a structured buffer of stride 336 (the record layout the HUD VS reads)",
+    "no single instance stream of stride 8",
+    "a constant buffer is missing or too small for rows 9-11 / row 275",
+    "no tagged record found in the draw's pool this frame or the last",
+    "the staging ring is full",
+    "the per-frame capture cap",
+    "no world view for the draw's eye that frame",
+    "view rows are not a rotation",
+    "a found record's tag has no P (node+0x50 unread)",
+    "a view position is at the eye (zero length)",
+    "a watched pool address is no longer a buffer of stride 336",
+    "the pool scan faulted"};
+
+struct Pool {
+    ID3D11Resource* res = nullptr;   // identity only, no reference held; verified at each Map (the game's live resource there)
+    uint32_t bytes = 0;
+    void* mapped = nullptr;
+    int mapType = 0;
+    uint32_t lastFrame = 0;
+};
+struct Find {
+    const void* pool = nullptr;
+    uint32_t index = 0, sentinel = 0, key = 0, tagFrame = 0, frame = 0;
+    int mapType = 0;
+    float x0[3] = {}, tp[3] = {}, p[3] = {};
+    bool pOk = false, haveTag = false;
+};
+struct HudCap {
+    uint32_t frame = 0;
+    int eye = -1;                    // by the draw's depth view; -1: chosen at the match by the nearest world rows
+    uint32_t first = 0, entries = 0, nFinds = 0;
+    Find finds[kCapFinds];
+    bool prev[kCapFinds] = {};
+    double headDps = 0.0;
+    bool headOk = false;
+};
+struct WorldCap {
+    uint32_t frame = 0;
+    int eye = -1;
+};
+struct World {
+    bool valid = false;
+    uint32_t frame = 0;
+    int eye = -1;
+    float rows[12] = {};
+    float o[4] = {};
+};
+struct Window {
+    uint64_t mapDiscard = 0, mapNoOverwrite = 0, mapOther = 0;
+    uint64_t unmapsTagged = 0, unmapsNoFind = 0, finds = 0, sameIndex = 0, changedIndex = 0, exact = 0, differs = 0, hintFinds = 0;
+    uint64_t scans = 0, scanUsMax = 0, scanUsSum = 0, backoffs = 0;
+    uint64_t hudDraws = 0, staged = 0, read = 0, unmatched = 0, matched = 0, matchedPrev = 0, eyeByRows = 0, lost = 0;
+    uint64_t worldStaged = 0, worldRead = 0, worldFailed = 0;
+    uint64_t refused[kRefuseCount] = {};
+    bool haveFind = false;           // the window's last find
+    uint32_t index = 0, key = 0, age = 0;
+    int mapType = 0;
+    const void* pool = nullptr;
+    float x0[3] = {}, tp[3] = {};
+    uint32_t readRecord = 0, foundRecord = 0;
+    bool haveUnmatched = false;
+    uint64_t n[2] = {}, headN[2] = {};
+    double sum[2] = {}, max[2] = {}, rotSum[2] = {}, headSum[2] = {}, headMax[2] = {};
+    double pw[2] = {}, tpLen[2] = {}, xo[2] = {}, v0[2][3] = {}, vt[2][3] = {};
+};
+
+Pool g_pools[kPools];
+Find g_finds[2][kHits];              // [0] the frame g_findFrame, [1] the frame before it
+uint32_t g_findN[2] = {};
+uint32_t g_findFrame = ~0u;
+F44Tag g_hist[kHistory];
+uint32_t g_histNext = 0;
+uint32_t g_lastIndex[256] = {};
+bool g_haveLast[256] = {};
+uint32_t g_backoffUntil = 0, g_scanFrame = ~0u, g_scansThisFrame = 0;
+HudCap g_hudCap[kHudSlots];
+drawtag::StagingRing<kHudSlots, kHudBytes> g_hudRing;
+WorldCap g_worldCap[kWorldSlots];
+drawtag::StagingRing<kWorldSlots, kWorldBytes> g_worldRing;
+World g_world[kWorldSlots];
+uint32_t g_worldFrame[2] = {~0u, ~0u};
+uint32_t g_polledFrame = ~0u, g_capFrame = ~0u, g_capThisFrame = 0;
+double g_headDps = 0.0;
+bool g_headOk = false;
+Window g_win;
+uint64_t g_winMs = 0;
+bool g_refuseNoted[kRefuseCount] = {};
+uint64_t g_taggedSeen = 0, g_untaggableSeen = 0, g_busySeen = 0;
+uint32_t g_poolNotes = 0;
+
+void refuse(Refuse r) {
+    ++g_win.refused[r];
+    if (!g_refuseNoted[r]) {
+        g_refuseNoted[r] = true;
+        Log::get().note("native on foot marker probe: refused (%s); counted in the 1 s lines, said once", kRefuseName[r]);
+    }
+}
+
+void rollFrame(uint32_t frame) {
+    if (g_findFrame == frame) return;
+    if (g_findFrame + 1u == frame) {
+        for (uint32_t i = 0; i < g_findN[0]; ++i) g_finds[1][i] = g_finds[0][i];
+        g_findN[1] = g_findN[0];
+    } else {
+        g_findN[1] = 0;
+    }
+    g_findN[0] = 0;
+    g_findFrame = frame;
+}
+
+void remember(const F44Tag& t) {
+    for (F44Tag& h : g_hist)
+        if (h.sentinel == t.sentinel && h.key == t.key && h.frame == t.frame) {
+            h = t;
+            return;
+        }
+    g_hist[g_histNext] = t;
+    g_histNext = (g_histNext + 1) % kHistory;
+}
+const F44Tag* tagOf(uint32_t s) {
+    for (const F44Tag& h : g_hist)
+        if (h.sentinel == s && (h.key & 0xFFu) == drawtag::sentinelKey(s) && h.frame == drawtag::sentinelFrame(s)) return &h;
+    return nullptr;
+}
+
+// The hint records, then (full) every record; under SEH: a mapping that is not what the pool's size says faults here, not in the game.
+__declspec(noinline) uint32_t scanGuarded(const uint8_t* base, uint32_t bytes, const uint32_t* wants, uint32_t nWants, const uint32_t* hints,
+                                          uint32_t nHints, bool full, drawtag::Hit* hits, uint32_t maxHits, bool* fault) noexcept {
+    uint32_t n = 0;
+    __try {
+        if (full) {
+            n = drawtag::scanRecords(base, bytes, wants, nWants, hits, maxHits, drawtag::streamLoad16);
+        } else {
+            for (uint32_t i = 0; i < nHints && n < maxHits; ++i)
+                if (drawtag::checkRecord(base, bytes, hints[i], wants, nWants, hits[n], drawtag::streamLoad16)) ++n;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        *fault = true;
+        return 0;
+    }
+    return n;
+}
+
+void addFind(const Pool& p, const drawtag::Hit& h, int mapType, uint32_t frame) {
+    for (uint32_t i = 0; i < g_findN[0]; ++i)
+        if (g_finds[0][i].pool == p.res && g_finds[0][i].index == h.index && g_finds[0][i].sentinel == h.sentinel) return;   // found again
+    if (g_findN[0] >= kHits) return;
+    Find& f = g_finds[0][g_findN[0]++];
+    f = Find{};
+    f.pool = p.res;
+    f.index = h.index;
+    f.sentinel = h.sentinel;
+    f.key = drawtag::sentinelKey(h.sentinel);
+    f.tagFrame = drawtag::sentinelFrame(h.sentinel);
+    f.frame = frame;
+    f.mapType = mapType;
+    std::memcpy(f.x0, h.pos, sizeof(f.x0));
+    if (const F44Tag* t = tagOf(h.sentinel)) {
+        f.haveTag = true;
+        f.pOk = t->pOk;
+        std::memcpy(f.tp, t->tp, sizeof(f.tp));
+        std::memcpy(f.p, t->p, sizeof(f.p));
+        const bool exact = std::memcmp(f.tp, f.x0, sizeof(f.x0)) == 0;
+        if (exact) ++g_win.exact; else ++g_win.differs;
+    }
+    ++g_win.finds;
+    if (g_haveLast[f.key]) {
+        if (g_lastIndex[f.key] == f.index) ++g_win.sameIndex; else ++g_win.changedIndex;
+    }
+    g_haveLast[f.key] = true;
+    g_lastIndex[f.key] = f.index;
+    g_win.haveFind = true;
+    g_win.index = f.index;
+    g_win.key = f.key;
+    g_win.age = (frame - f.tagFrame) & 0xFFFFu;
+    g_win.mapType = mapType;
+    g_win.pool = p.res;
+    std::memcpy(g_win.x0, f.x0, sizeof(g_win.x0));
+    std::memcpy(g_win.tp, f.tp, sizeof(g_win.tp));
+}
+
+void unmapPool(Pool& p) {
+    const uint8_t* base = static_cast<const uint8_t*>(p.mapped);
+    const int mapType = p.mapType;
+    p.mapped = nullptr;
+    if (!base || (mapType != D3D11_MAP_WRITE_DISCARD && mapType != D3D11_MAP_WRITE_NO_OVERWRITE)) return;
+    const uint32_t frame = g_f44Frame.load(std::memory_order_relaxed);
+    for (size_t i = 0; i < kF44Cells; ++i) {
+        F44Tag t;
+        if (f44ReadCell(i, t)) remember(t);
+    }
+    uint32_t wants[kHistory];
+    uint32_t keys[kHistory];
+    uint32_t nWants = 0;
+    for (const F44Tag& h : g_hist) {
+        if (!h.sentinel || ((frame - h.frame) & 0xFFFFu) > kTagAgeMax) continue;
+        wants[nWants] = h.sentinel;
+        keys[nWants] = h.key & 0xFFu;
+        ++nWants;
+    }
+    if (!nWants) return;
+    rollFrame(frame);
+    ++g_win.unmapsTagged;
+    uint32_t hints[kHistory];
+    uint32_t nHints = 0;
+    for (uint32_t k = 0; k < nWants; ++k) {
+        if (!g_haveLast[keys[k]]) continue;
+        bool dup = false;
+        for (uint32_t j = 0; j < nHints && !dup; ++j) dup = hints[j] == g_lastIndex[keys[k]];
+        if (!dup) hints[nHints++] = g_lastIndex[keys[k]];
+    }
+    drawtag::Hit hits[kHits];
+    bool fault = false;
+    uint32_t n = nHints ? scanGuarded(base, p.bytes, wants, nWants, hints, nHints, false, hits, kHits, &fault) : 0;
+    g_win.hintFinds += n;
+    // A key whose newest tag in flight has no hit (an older tag at the last index is a stale record): the whole mapped range, within the
+    // per-frame cap and outside a backoff.
+    auto ageOf = [frame](uint32_t s) { return (frame - drawtag::sentinelFrame(s)) & 0xFFFFu; };
+    bool missing = false;
+    for (uint32_t k = 0; k < nWants && !missing; ++k) {
+        bool newest = true;
+        for (uint32_t j = 0; j < nWants && newest; ++j) newest = keys[j] != keys[k] || ageOf(wants[j]) >= ageOf(wants[k]);
+        if (!newest) continue;
+        bool got = false;
+        for (uint32_t i = 0; i < n && !got; ++i) got = hits[i].sentinel == wants[k];
+        missing = !got;
+    }
+    if (g_scanFrame != frame) {
+        g_scanFrame = frame;
+        g_scansThisFrame = 0;
+    }
+    if (!fault && missing && g_scansThisFrame < kScansPerFrame && static_cast<int32_t>(frame - g_backoffUntil) >= 0) {
+        ++g_scansThisFrame;
+        const uint64_t t0 = f30Qpc();
+        n = scanGuarded(base, p.bytes, wants, nWants, nullptr, 0, true, hits, kHits, &fault);
+        const uint64_t us = f30QpcUs(f30Qpc() - t0);
+        ++g_win.scans;
+        g_win.scanUsSum += us;
+        if (us > g_win.scanUsMax) g_win.scanUsMax = us;
+        if (us > kScanBackoffUs) {
+            g_backoffUntil = frame + 30;
+            ++g_win.backoffs;
+        }
+    }
+    if (fault) {
+        refuse(kScanFault);
+        return;
+    }
+    if (!n) ++g_win.unmapsNoFind;
+    // Per key, only the newest tag found (a DISCARD map's renamed memory can still hold an older frame's record).
+    for (uint32_t i = 0; i < n; ++i) {
+        bool newest = true;
+        for (uint32_t j = 0; j < n && newest; ++j)
+            newest = j == i || drawtag::sentinelKey(hits[j].sentinel) != drawtag::sentinelKey(hits[i].sentinel) ||
+                     ageOf(hits[j].sentinel) > ageOf(hits[i].sentinel) || (ageOf(hits[j].sentinel) == ageOf(hits[i].sentinel) && j > i);
+        if (newest) addFind(p, hits[i], mapType, frame);
+    }
+}
+
+void learnPool(ID3D11Resource* res, uint32_t bytes, uint32_t frame) {
+    Pool* empty = nullptr;
+    Pool* oldest = &g_pools[0];
+    for (Pool& p : g_pools) {
+        if (p.res == res) {
+            p.lastFrame = frame;
+            if (!p.mapped) p.bytes = bytes;
+            return;
+        }
+        if (!p.res && !empty) empty = &p;
+        if (p.lastFrame < oldest->lastFrame) oldest = &p;
+    }
+    Pool* slot = empty ? empty : oldest;
+    *slot = Pool{};
+    slot->res = res;
+    slot->bytes = bytes;
+    slot->lastFrame = frame;
+    if (g_poolNotes < 8) {
+        ++g_poolNotes;
+        Log::get().note("native on foot marker probe: watching the on-foot HUD's t33 pool %p (%u bytes, %u records of 336)", static_cast<void*>(res),
+                        bytes, bytes / drawtag::kRecordStride);
+    }
+}
+
+// A bound VS constant buffer and its first constant (a ranged bind's offset, in 16-byte constants; 0 otherwise).
+bool vsConstants(ID3D11DeviceContext* ctx, UINT slot, ID3D11Buffer** buf, UINT* first) {
+    *buf = nullptr;
+    *first = 0;
+    ID3D11DeviceContext1* c1 = nullptr;
+    if (SUCCEEDED(ctx->QueryInterface(__uuidof(ID3D11DeviceContext1), reinterpret_cast<void**>(&c1))) && c1) {
+        UINT f = 0, num = 0;
+        c1->VSGetConstantBuffers1(slot, 1, buf, &f, &num);
+        c1->Release();
+        *first = f;
+    } else {
+        ctx->VSGetConstantBuffers(slot, 1, buf);
+    }
+    return *buf != nullptr;
+}
+bool covers(ID3D11Buffer* b, UINT offset, UINT bytes) {
+    if (!b) return false;
+    D3D11_BUFFER_DESC d{};
+    b->GetDesc(&d);
+    return static_cast<uint64_t>(offset) + bytes <= d.ByteWidth;
+}
+
+void headSample() {
+    g_headOk = false;
+    EdvrNativeNowPose np{};
+    if (!nativeFrameNowPose(np) || np.ringCount < 2) return;
+    const uint32_t i0 = np.ringNewest % 8u, i1 = (np.ringNewest + 7u) % 8u;
+    if (np.ringQpc[i0] <= np.ringQpc[i1]) return;
+    const double dt = static_cast<double>(f30QpcUs(np.ringQpc[i0] - np.ringQpc[i1])) * 1e-6;
+    if (!(dt > 0.0)) return;
+    g_headDps = nofoot::rotDeltaDeg(np.ringHead[i0], np.ringHead[i1]) / dt;
+    g_headOk = true;
+}
+
+void stageWorld(ID3D11DeviceContext* ctx, int eye, uint32_t frame) {
+    g_worldFrame[eye] = frame;   // one try per eye per frame
+    ID3D11Buffer* cb0 = nullptr;
+    ID3D11Buffer* cb1 = nullptr;
+    UINT f0 = 0, f1 = 0;
+    vsConstants(ctx, 0, &cb0, &f0);
+    vsConstants(ctx, 1, &cb1, &f1);
+    if (covers(cb0, f0 * 16 + kRowsOffset, kRowsBytes) && covers(cb1, f1 * 16 + kOriginOffset, kOriginBytes)) {
+        const drawtag::CopyRegion r[2] = {{cb0, f0 * 16 + kRowsOffset, kRowsBytes, 0}, {cb1, f1 * 16 + kOriginOffset, kOriginBytes, 48}};
+        const int slot = g_worldRing.stage(ctx, r, 2, frame);
+        if (slot >= 0) {
+            g_worldCap[slot].frame = frame;
+            g_worldCap[slot].eye = eye;
+            ++g_win.worldStaged;
+        } else {
+            ++g_win.worldFailed;
+        }
+    } else {
+        ++g_win.worldFailed;
+    }
+    if (cb0) cb0->Release();
+    if (cb1) cb1->Release();
+}
+
+void captureHud(ID3D11DeviceContext* ctx, int eye, uint32_t frame, uint32_t instances, uint32_t startInstance) {
+    ++g_win.hudDraws;
+    if (g_capFrame != frame) {
+        g_capFrame = frame;
+        g_capThisFrame = 0;
+        headSample();
+    }
+    // t33: the record pool the HUD VS reads (a structured buffer of stride 336), and the view's FirstElement.
+    ID3D11ShaderResourceView* srv = nullptr;
+    ctx->VSGetShaderResources(33, 1, &srv);
+    if (!srv) {
+        refuse(kNoT33);
+        return;
+    }
+    D3D11_SHADER_RESOURCE_VIEW_DESC vd{};
+    srv->GetDesc(&vd);
+    uint32_t first = 0;
+    bool bufferView = true;
+    if (vd.ViewDimension == D3D11_SRV_DIMENSION_BUFFER) first = vd.Buffer.FirstElement;
+    else if (vd.ViewDimension == D3D11_SRV_DIMENSION_BUFFEREX) first = vd.BufferEx.FirstElement;
+    else bufferView = false;
+    ID3D11Resource* res = nullptr;
+    srv->GetResource(&res);
+    srv->Release();
+    ID3D11Buffer* poolBuf = nullptr;
+    if (res) res->QueryInterface(__uuidof(ID3D11Buffer), reinterpret_cast<void**>(&poolBuf));
+    D3D11_BUFFER_DESC pd{};
+    if (poolBuf) {
+        poolBuf->GetDesc(&pd);
+        poolBuf->Release();
+    }
+    if (res) res->Release();   // the identity is kept, never a reference
+    if (!poolBuf || !bufferView || pd.StructureByteStride != drawtag::kRecordStride || !(pd.MiscFlags & D3D11_RESOURCE_MISC_BUFFER_STRUCTURED)) {
+        refuse(kStride);
+        return;
+    }
+    learnPool(res, pd.ByteWidth, frame);
+    // The pool's finds, this frame's first, then the frame before's.
+    HudCap cap{};
+    cap.frame = frame;
+    cap.eye = eye;
+    cap.first = first;
+    for (int which = 0; which < 2; ++which) {
+        const bool current = g_findFrame == frame;
+        const int set = current ? which : (which == 0 && g_findFrame + 1u == frame ? 0 : -1);
+        if (set < 0) continue;
+        for (uint32_t i = 0; i < g_findN[set] && cap.nFinds < kCapFinds; ++i) {
+            if (g_finds[set][i].pool != res) continue;
+            cap.prev[cap.nFinds] = !(current && set == 0);
+            cap.finds[cap.nFinds++] = g_finds[set][i];
+        }
+    }
+    if (!cap.nFinds) {
+        refuse(kNoFind);
+        return;
+    }
+    if (g_capThisFrame >= kHudPerFrame) {
+        refuse(kPerFrame);
+        return;
+    }
+    // The instance stream: the one vertex buffer of stride 8 (INSTANCEANDMODELDATAINDEX); its entries from StartInstanceLocation.
+    ID3D11Buffer* vbs[4] = {};
+    UINT strides[4] = {}, offs[4] = {};
+    ctx->IAGetVertexBuffers(0, 4, vbs, strides, offs);
+    int pick = -1;
+    unsigned eights = 0;
+    for (int i = 0; i < 4; ++i)
+        if (vbs[i] && strides[i] == drawtag::kStreamStride) {
+            ++eights;
+            if (pick < 0) pick = i;
+        }
+    ID3D11Buffer* cb0 = nullptr;
+    ID3D11Buffer* cb1 = nullptr;
+    UINT f0 = 0, f1 = 0;
+    vsConstants(ctx, 0, &cb0, &f0);
+    vsConstants(ctx, 1, &cb1, &f1);
+    cap.entries = instances < kEntries ? instances : kEntries;
+    const UINT streamAt = pick >= 0 ? offs[pick] + startInstance * drawtag::kStreamStride : 0;
+    if (eights != 1) {
+        refuse(kNoStream);
+    } else if (!covers(vbs[pick], streamAt, cap.entries * drawtag::kStreamStride)) {
+        refuse(kNoStream);
+    } else if (!covers(cb0, f0 * 16 + kRowsOffset, kRowsBytes) || !covers(cb1, f1 * 16 + kOriginOffset, kOriginBytes)) {
+        refuse(kConstants);
+    } else {
+        const drawtag::CopyRegion r[3] = {{cb0, f0 * 16 + kRowsOffset, kRowsBytes, 0},
+                                          {cb1, f1 * 16 + kOriginOffset, kOriginBytes, 48},
+                                          {vbs[pick], streamAt, cap.entries * drawtag::kStreamStride, 64}};
+        const int slot = g_hudRing.stage(ctx, r, 3, frame);
+        if (slot < 0) {
+            refuse(kRingFull);
+        } else {
+            cap.headDps = g_headDps;
+            cap.headOk = g_headOk;
+            g_hudCap[slot] = cap;
+            ++g_capThisFrame;
+            ++g_win.staged;
+        }
+    }
+    for (ID3D11Buffer* b : vbs)
+        if (b) b->Release();
+    if (cb0) cb0->Release();
+    if (cb1) cb1->Release();
+}
+
+const World* worldOf(uint32_t frame, int eye) {
+    for (const World& w : g_world)
+        if (w.valid && w.frame == frame && w.eye == eye) return &w;
+    return nullptr;
+}
+double rowsDistance(const float a[12], const float b[12]) {
+    double s = 0.0;
+    for (int i = 0; i < 12; ++i) s += std::fabs(static_cast<double>(a[i]) - b[i]);
+    return s;
+}
+
+void matchHud(const HudCap& cap, const uint8_t* d) {
+    ++g_win.read;
+    float rowsH[12], oH[4];
+    uint32_t entry[kEntries * 2] = {};
+    std::memcpy(rowsH, d, sizeof(rowsH));
+    std::memcpy(oH, d + 48, sizeof(oH));
+    std::memcpy(entry, d + 64, cap.entries * drawtag::kStreamStride);
+    int fi = -1;
+    uint32_t readRec = 0;
+    for (uint32_t k = 0; k < cap.entries && fi < 0; ++k) {
+        const uint32_t rec = cap.first + entry[2 * k];
+        if (k == 0) readRec = rec;
+        for (uint32_t h = 0; h < cap.nFinds; ++h)
+            if (cap.finds[h].index == rec) {
+                fi = static_cast<int>(h);
+                break;
+            }
+    }
+    if (fi < 0) {
+        // Most HUD draws read other records (panels, text): counted, not refused.
+        ++g_win.unmatched;
+        g_win.haveUnmatched = true;
+        g_win.readRecord = readRec;
+        g_win.foundRecord = cap.finds[0].index;
+        return;
+    }
+    const Find& f = cap.finds[fi];
+    if (!f.haveTag || !f.pOk) {
+        refuse(kNoTag);
+        return;
+    }
+    if (!drawtag::rowsRotation(rowsH, 0.02)) {
+        refuse(kRows);
+        return;
+    }
+    const World* w = nullptr;
+    if (cap.eye >= 0) {
+        w = worldOf(cap.frame, cap.eye);
+    } else {
+        const World* w0 = worldOf(cap.frame, 0);
+        const World* w1 = worldOf(cap.frame, 1);
+        w = !w0 ? w1 : !w1 ? w0 : rowsDistance(rowsH, w0->rows) <= rowsDistance(rowsH, w1->rows) ? w0 : w1;
+        if (w) ++g_win.eyeByRows;
+    }
+    if (!w) {
+        refuse(kNoWorld);
+        return;
+    }
+    if (!drawtag::rowsRotation(w->rows, 0.02)) {
+        refuse(kRows);
+        return;
+    }
+    const double X0[3] = {f.x0[0], f.x0[1], f.x0[2]}, oh[3] = {oH[0], oH[1], oH[2]};
+    const double P[3] = {f.p[0], f.p[1], f.p[2]}, ow[3] = {w->o[0], w->o[1], w->o[2]};
+    double v0[3], vt[3];
+    drawtag::viewPoint(rowsH, X0, oh, v0);
+    drawtag::viewPoint(w->rows, P, ow, vt);
+    const double a = drawtag::angleDeg(v0, vt);
+    if (a < 0.0) {
+        refuse(kZero);
+        return;
+    }
+    const int e = w->eye & 1;
+    ++g_win.matched;
+    if (cap.prev[fi]) ++g_win.matchedPrev;
+    ++g_win.n[e];
+    g_win.sum[e] += a;
+    if (a > g_win.max[e]) g_win.max[e] = a;
+    g_win.rotSum[e] += drawtag::rowsAngleDeg(rowsH, w->rows);
+    if (cap.headOk) {
+        ++g_win.headN[e];
+        g_win.headSum[e] += cap.headDps;
+        if (cap.headDps > g_win.headMax[e]) g_win.headMax[e] = cap.headDps;
+    }
+    const double pw[3] = {P[0] - ow[0], P[1] - ow[1], P[2] - ow[2]};
+    const double xo[3] = {X0[0] - oh[0], X0[1] - oh[1], X0[2] - oh[2]};
+    const double tpv[3] = {f.tp[0], f.tp[1], f.tp[2]};
+    g_win.pw[e] = drawtag::length3(pw);
+    g_win.tpLen[e] = drawtag::length3(tpv);
+    g_win.xo[e] = drawtag::length3(xo);
+    std::memcpy(g_win.v0[e], v0, sizeof(v0));
+    std::memcpy(g_win.vt[e], vt, sizeof(vt));
+}
+
+void poll(ID3D11DeviceContext* ctx, uint32_t frame) {
+    g_worldRing.poll(ctx, frame, 2, 12, [](int slot, const uint8_t* d) {
+        World& w = g_world[slot];
+        w.valid = true;
+        w.frame = g_worldCap[slot].frame;
+        w.eye = g_worldCap[slot].eye;
+        std::memcpy(w.rows, d, sizeof(w.rows));
+        std::memcpy(w.o, d + 48, sizeof(w.o));
+        ++g_win.worldRead;
+    }, &g_win.lost);
+    g_hudRing.poll(ctx, frame, 2, 12, [](int slot, const uint8_t* d) { matchHud(g_hudCap[slot], d); }, &g_win.lost);
+}
+
+const char* mapName(int t) {
+    return t == D3D11_MAP_WRITE_DISCARD ? "DISCARD" : t == D3D11_MAP_WRITE_NO_OVERWRITE ? "NO_OVERWRITE" : "other";
+}
+
+void report(uint64_t nowMs) {
+    if (g_winMs == 0) {
+        g_winMs = nowMs;
+        return;
+    }
+    if (nowMs - g_winMs < 1000) return;
+    g_winMs = nowMs;
+    Window& w = g_win;
+    const uint64_t taggedAll = g_f44Tagged.load(std::memory_order_relaxed);
+    const uint64_t untaggableAll = g_f44Untaggable.load(std::memory_order_relaxed);
+    const uint64_t busyAll = g_f44CellBusy.load(std::memory_order_relaxed);
+    const uint64_t tagged = taggedAll - g_taggedSeen, untaggable = untaggableAll - g_untaggableSeen, busy = busyAll - g_busySeen;
+    g_taggedSeen = taggedAll;
+    g_untaggableSeen = untaggableAll;
+    g_busySeen = busyAll;
+    const unsigned long long scanMean = w.scans ? w.scanUsSum / w.scans : 0;
+    if (w.haveFind) {
+        Log::get().note("native on foot marker probe: marker record found at index %u (key %u, tag age %u frames, map %s, pool %p); this second: "
+                        "%llu finds (%llu at the last index), index same %llu, changed %llu; X0 == t' bit-exact %llu, differs %llu (last X0 (%.4f, %.4f, "
+                        "%.4f), t' (%.4f, %.4f, %.4f)); full scans %llu (max %llu us, mean %llu us), backoffs %llu; unmaps with tags in flight %llu, "
+                        "with no find %llu; maps DISCARD %llu, NO_OVERWRITE %llu, other %llu; tagged %llu, untaggable %llu, cell busy %llu",
+                        w.index, w.key, w.age, mapName(w.mapType), w.pool, static_cast<unsigned long long>(w.finds),
+                        static_cast<unsigned long long>(w.hintFinds), static_cast<unsigned long long>(w.sameIndex),
+                        static_cast<unsigned long long>(w.changedIndex), static_cast<unsigned long long>(w.exact),
+                        static_cast<unsigned long long>(w.differs), static_cast<double>(w.x0[0]), static_cast<double>(w.x0[1]),
+                        static_cast<double>(w.x0[2]), static_cast<double>(w.tp[0]), static_cast<double>(w.tp[1]), static_cast<double>(w.tp[2]),
+                        static_cast<unsigned long long>(w.scans), static_cast<unsigned long long>(w.scanUsMax), scanMean,
+                        static_cast<unsigned long long>(w.backoffs), static_cast<unsigned long long>(w.unmapsTagged),
+                        static_cast<unsigned long long>(w.unmapsNoFind), static_cast<unsigned long long>(w.mapDiscard),
+                        static_cast<unsigned long long>(w.mapNoOverwrite), static_cast<unsigned long long>(w.mapOther),
+                        static_cast<unsigned long long>(tagged), static_cast<unsigned long long>(untaggable), static_cast<unsigned long long>(busy));
+    } else if (tagged || w.unmapsTagged) {
+        Log::get().note("native on foot marker probe: sentinel NOT found this second: tagged %llu, untaggable %llu, cell busy %llu; unmaps with "
+                        "tags in flight %llu; full scans %llu (max %llu us, mean %llu us), backoffs %llu; maps DISCARD %llu, NO_OVERWRITE %llu, other "
+                        "%llu; pools watched by a HUD draw: %s",
+                        static_cast<unsigned long long>(tagged), static_cast<unsigned long long>(untaggable), static_cast<unsigned long long>(busy),
+                        static_cast<unsigned long long>(w.unmapsTagged), static_cast<unsigned long long>(w.scans),
+                        static_cast<unsigned long long>(w.scanUsMax), scanMean, static_cast<unsigned long long>(w.backoffs),
+                        static_cast<unsigned long long>(w.mapDiscard), static_cast<unsigned long long>(w.mapNoOverwrite),
+                        static_cast<unsigned long long>(w.mapOther), g_pools[0].res ? "yes" : "none yet");
+    }
+    for (int e = 0; e < 2; ++e) {
+        if (!w.n[e]) continue;
+        Log::get().note("native on foot marker probe: eye %d: v0 vs v_target %.3f deg mean, %.3f deg max over %llu matched draws; V_hud vs V_w "
+                        "rotation %.3f deg mean; head %.1f deg/s mean, %.1f max (%llu samples); frame check (last): |P - o_w| %.3f m, |t'| %.3f m, "
+                        "|X0 - o_hud| %.3f m; v0 (%.3f, %.3f, %.3f), v_target (%.3f, %.3f, %.3f)",
+                        e, w.sum[e] / static_cast<double>(w.n[e]), w.max[e], static_cast<unsigned long long>(w.n[e]),
+                        w.rotSum[e] / static_cast<double>(w.n[e]), w.headN[e] ? w.headSum[e] / static_cast<double>(w.headN[e]) : 0.0,
+                        w.headMax[e], static_cast<unsigned long long>(w.headN[e]), w.pw[e], w.tpLen[e], w.xo[e], w.v0[e][0], w.v0[e][1],
+                        w.v0[e][2], w.vt[e][0], w.vt[e][1], w.vt[e][2]);
+    }
+    if (w.hudDraws || w.worldStaged || w.worldFailed) {
+        uint64_t refusedAll = 0;
+        for (uint64_t r : w.refused) refusedAll += r;
+        Log::get().note("native on foot marker probe: HUD draws %llu, staged %llu, read %llu, matched %llu (to the frame before's find %llu; eye by "
+                        "nearest world rows %llu), reading other records %llu (last: read record %u, found %u); refused %llu: no t33 %llu, stride "
+                        "%llu, no stream %llu, constants %llu, no find %llu, ring full %llu, per-frame cap %llu, no world view %llu, rows %llu, no "
+                        "tag %llu, zero %llu, pool changed %llu, scan fault %llu; readbacks lost %llu; world views staged %llu, read %llu, failed %llu",
+                        static_cast<unsigned long long>(w.hudDraws), static_cast<unsigned long long>(w.staged),
+                        static_cast<unsigned long long>(w.read), static_cast<unsigned long long>(w.matched),
+                        static_cast<unsigned long long>(w.matchedPrev), static_cast<unsigned long long>(w.eyeByRows),
+                        static_cast<unsigned long long>(w.unmatched), w.haveUnmatched ? w.readRecord : 0u, w.haveUnmatched ? w.foundRecord : 0u,
+                        static_cast<unsigned long long>(refusedAll), static_cast<unsigned long long>(w.refused[kNoT33]),
+                        static_cast<unsigned long long>(w.refused[kStride]), static_cast<unsigned long long>(w.refused[kNoStream]),
+                        static_cast<unsigned long long>(w.refused[kConstants]), static_cast<unsigned long long>(w.refused[kNoFind]),
+                        static_cast<unsigned long long>(w.refused[kRingFull]), static_cast<unsigned long long>(w.refused[kPerFrame]),
+                        static_cast<unsigned long long>(w.refused[kNoWorld]), static_cast<unsigned long long>(w.refused[kRows]),
+                        static_cast<unsigned long long>(w.refused[kNoTag]), static_cast<unsigned long long>(w.refused[kZero]),
+                        static_cast<unsigned long long>(w.refused[kPoolChanged]), static_cast<unsigned long long>(w.refused[kScanFault]),
+                        static_cast<unsigned long long>(w.lost), static_cast<unsigned long long>(w.worldStaged),
+                        static_cast<unsigned long long>(w.worldRead), static_cast<unsigned long long>(w.worldFailed));
+    }
+    w = Window{};
+}
+}  // namespace f44
 }  // namespace
 
+void nativeOnFootMarkerProbeMap(ID3D11Resource* res, void* data, int mapType) {
+    if (!res || !data) return;
+    for (f44::Pool& p : f44::g_pools) {
+        if (p.res != res) continue;
+        // The game's live resource here: still a structured buffer of stride 336? (The address may have been re-used since it was learned.)
+        D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN;
+        res->GetType(&dim);
+        D3D11_BUFFER_DESC d{};
+        if (dim == D3D11_RESOURCE_DIMENSION_BUFFER) static_cast<ID3D11Buffer*>(res)->GetDesc(&d);
+        if (dim != D3D11_RESOURCE_DIMENSION_BUFFER || d.StructureByteStride != drawtag::kRecordStride || !d.ByteWidth) {
+            p = f44::Pool{};
+            f44::refuse(f44::kPoolChanged);
+            return;
+        }
+        p.bytes = d.ByteWidth;
+        p.mapped = data;
+        p.mapType = mapType;
+        if (mapType == D3D11_MAP_WRITE_DISCARD) ++f44::g_win.mapDiscard;
+        else if (mapType == D3D11_MAP_WRITE_NO_OVERWRITE) ++f44::g_win.mapNoOverwrite;
+        else ++f44::g_win.mapOther;
+        return;
+    }
+}
+
+void nativeOnFootMarkerProbeUnmap(const ID3D11Resource* res) {
+    if (!res) return;
+    for (f44::Pool& p : f44::g_pools)
+        if (p.res == res) {
+            if (p.mapped) f44::unmapPool(p);
+            return;
+        }
+}
+
+void nativeOnFootMarkerProbeDraw(ID3D11DeviceContext* ctx, uint32_t instances, uint32_t startInstance) {
+    if (!ctx) return;
+    const uint32_t frame = g_f44Frame.load(std::memory_order_relaxed);
+    if (frame != f44::g_polledFrame) {
+        f44::g_polledFrame = frame;
+        f44::poll(ctx, frame);
+    }
+    const uint64_t vs = bindingShaderHash(BindSlot::Vs);
+    const bool hud = nofoot::hudIssuerIndex(vs) >= 0;
+    if (!hud) {
+        if (f44::g_worldFrame[0] == frame && f44::g_worldFrame[1] == frame) return;
+        if (engine_velocity_family::familyOfVs(vs) < 0) return;
+    }
+    int eye = -1, target = -1;
+    auto* dsv = static_cast<ID3D11DepthStencilView*>(bindingGet(BindSlot::Dsv0));
+    const bool eyeKnown = dsv && depthProbeCurrentSceneEyeOf(dsv, &eye, &target) && (eye == 0 || eye == 1);
+    if (!hud) {
+        if (eyeKnown && f44::g_worldFrame[eye] != frame) f44::stageWorld(ctx, eye, frame);
+        return;
+    }
+    f44::captureHud(ctx, eyeKnown ? eye : -1, frame, instances ? instances : 1u, startInstance);
+}
+
+void nativeOnFootMarkerProbeShutdown() {
+    f44::g_hudRing.release();
+    f44::g_worldRing.release();
+}
+
 void nativeOnFootFrameBoundary(uint32_t frameNo) {
-    (void)frameNo;
+    g_f44Frame.store(frameNo, std::memory_order_relaxed);   // F44: the marker probe's frame (the tag's frame bits, the captures' frame)
     if (g_install == InstallState::NotTried) installOnce();
     if (g_install == InstallState::Armed) readKey();
     drainEvents();
+    if (g_nativeOnFootMarkerProbeKey.load(std::memory_order_relaxed)) f44::report(GetTickCount64());
     if (!g_hudArmedNoted) {
         g_hudArmedNoted = true;
         Log::get().note("native on foot hud stack: probe armed on the VR draw path for vs=0x%016llX and vs=0x%016llX (one capture per shader per "

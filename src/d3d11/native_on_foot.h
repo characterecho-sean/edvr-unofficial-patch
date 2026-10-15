@@ -32,6 +32,7 @@
 #include "native_on_foot_core.h"   // nofoot::hudIssuerIndex: the on-foot HUD issuers' vertex shaders
 
 struct ID3D11DeviceContext;   // the F18 body cull's Begin/End (d3d11.h is not needed by the rigs that include this header)
+struct ID3D11Resource;        // F44: the marker probe's Map/Unmap tees
 
 namespace edvr {
 
@@ -100,5 +101,21 @@ inline bool nativeOnFootSharpHudWanted() { return g_nativeOnFootSharpHudKey.load
 // F27: the game's render-mode changes as the setter sees them (the UI layer's eye check re-arms on a change, not on 'native on foot active').
 inline std::atomic<uint32_t> g_nativeModeEdges{0};
 inline std::atomic<uint32_t> g_nativeLastEffective{0};
+
+// F44 (TEMPORARY instrument, fix.native_on_foot_marker_probe, default off; draw_record_tag.h): measure only. The marker post tags each world
+// marker's t' (low mantissa bits); the Map/Unmap tees find the tagged record in the HUD's t33 pool; the draw tee names the on-foot HUD draw that
+// reads it and the eye's world view, read back from GPU copies. Nothing drawn changes. The frame thread publishes the key (readKey); every tee
+// asks nativeOnFootMarkerProbeLive() first: two relaxed loads.
+inline std::atomic<bool> g_nativeOnFootMarkerProbeKey{false};
+inline bool nativeOnFootMarkerProbeLive() {
+    return g_nativeOnFootMarkerProbeKey.load(std::memory_order_relaxed) && nativeOnFootActive();
+}
+// Owner context only (vscreen.cpp): a buffer mapped for writing (after the real Map), a buffer about to be unmapped (before the real Unmap), and
+// an instanced draw before its verdict (the game's bindings).
+void nativeOnFootMarkerProbeMap(ID3D11Resource* resource, void* data, int mapType);
+void nativeOnFootMarkerProbeUnmap(const ID3D11Resource* resource);
+void nativeOnFootMarkerProbeDraw(ID3D11DeviceContext* ctx, uint32_t instances, uint32_t startInstance);
+// vScreen's shutdown: the staging buffers.
+void nativeOnFootMarkerProbeShutdown();
 
 }  // namespace edvr
