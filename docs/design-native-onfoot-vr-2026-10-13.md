@@ -2,7 +2,12 @@
 
 ## Status
 
-- **State:** F0-F18 FLOWN (Epic). **F19 BUILT and installed to Epic** (commit eab40235), **F20 BUILT** (commit 816c1d80), **both NOT FLOWN**. F19 and F20 fly together. Branch `claude/native-onfoot-vr-completion-219ffa`; not pushed.
+- **State:** F0-F18 FLOWN. **F19 and F20 FLOWN 10-14** (log edvr_gfx_20261014_172807.log; see the journal). **F21 BUILT and installed to Epic** (`--scope vr`), **NOT FLOWN**. Branch `claude/native-onfoot-vr-completion-219ffa`; not pushed.
+- **F19/F20 FLOWN (10-14):** third mode gives the full body and the weapon in the hands, correct, but the HUD is lost and there is no ADS pose (the Flags2 ADS bit is never set in third). The game itself toggles the torso and arm vertex clip with the model mode, which confirms F19's unclip mechanism. The pilot prefers first-person mode with a hybrid body. The ammo display and the waypoint follow the head: the first-person rig is anchored to the head camera, and the HUD canvas icons are world-projected. Research running.
+- **F21 (BUILT, NOT FLOWN):**
+  1. Reticle: `fix.native_on_foot_reticle_follow = game` (EDVR writes nothing to any indicator; the aim centring and head placement are not run). Default stays aim.
+  2. TEMPORARY `fix.native_on_foot_body_hybrid` (on | off, off). While native stereo is on foot and it is on: the first-person skeleton's view masks are zeroed on the local first-person AMC (mode 2; its arms and hands stay); on the local third-person AMC (mode 3) the EVASuit torso is unclipped (enable 0, dirty 1) and the view masks of the arms, hands and both shoulders are zeroed. It overrides `_hide_fp_body` and `_body_unclip` while on. Census line every 5 s: `native on foot body hybrid:`.
+  3. Eye probe P1: no code bug found by reading. Candidates, each tested by the new `native on foot eye inputs:` line (raw camera, AMC origin, basis rows with their lengths, head joint in model space and in world space, and the distances |cam - origin| and |head world - origin|): (a) the job's camera floats may not be in the AMC origin's space; Explorer Cam's commander frame (explorer_cam_core.h commanderFrame) uses its own root point, not the AMC origin; (b) the avatar-root frame may not equal the AMC frame (the head is then not where P1 puts it); (c) the head sample is up to 100 ms old (minor for 0.7 m).
 - **Origin:** a user's handoff. A Cinema-to-HMD swap on disembark gave native stereo on foot; the HUD, radar, left panel and inventory were missing.
 - **Build:** Sean's installs hash to the handoff's exe (332841). Epic is the install target.
 - **Verified offline:** the setter is vtable 0x52E9608 slot 5 = 0x28723C0. The selector is embedded in its owner at +0x60. No direct callers.
@@ -21,12 +26,12 @@
   - H-eye: P1's cam_minus_head sizes an eye offset; the head-in-body assumption is unverified (F18 values looked implausible, not used).
   - H-room: whether the game's own S at [HRC+0x4C4] matches the element scale it lays out (not re-checked).
 - **Ruled out:** the cinema request is always 5 (see the end of this doc). Back-face culling hides the native torso (F18).
-- **Temporary keys (all go when the arc picks one):** `fix.native_on_foot`, `_method`, `_hud`, `_panels`, `_hud_mesh`, `_hud_mesh_world`, `_hud_follow_order`, `_reticle_probe`, `_hide_fp_body`, `_body_cull` (F18), `_body_unclip` and `_body_cb_probe` (F19), `_body_mode` (F20). All default off or game, and live.
+- **Temporary keys (all go when the arc picks one):** `fix.native_on_foot`, `_method`, `_hud`, `_panels`, `_hud_mesh`, `_hud_mesh_world`, `_hud_follow_order`, `_reticle_probe`, `_hide_fp_body`, `_body_cull` (F18), `_body_unclip` and `_body_cb_probe` (F19), `_body_mode` (F20), `_body_hybrid` (F21). All default off or game, and live.
 - **User settings:** `_breathable_visor` (up | game, up), `_reticle_follow` (aim | head, aim), the eight `_hud_<left|top|right|centre>_<x|y>` offsets (F19: left 0.18, 0.02; top y -0.07), `_hud_element_scale` (F19: 1.35; 0 = game, else 0.30..2.00), `_hud_room` (1.00..2.50), and the tuned defaults: distance 0.01 (min 0.01), size 1.60 (max 3.00), spread 0.04, smoothing 40 ms.
 - **OPEN, RemLok on foot:** the on-foot visor overlay is not yet identified. It needs a skip-probe or a diff census that excludes the tonemap PS 0x99C21CEB7A699821 (tonemap_admit.h:39).
 - **F2 (c884e218):** the gate holds the byte at 0 while the key is on; the native body zeroes the local head parts. Log lines and details are in the journal.
 - **Install:** Epic only (Sean: Frontier carries another feature test). `edvr.ini` is not touched unless `--ini` says so. `--target` takes the game directory path.
-- **Next:** flight F19 and F20 on Epic with `--scope vr`, keys `body_unclip = on`, `body_cb_probe = on` and `body_mode = third` for one run. Check: the torso on the native body (unclip on vs off); `body clip` enable and dirty values; `body cb2` row 5 w against the clip amounts; the P1 line on foot.
+- **Next:** flight F21 on Epic with `--scope vr`, keys `reticle_follow = game` and `body_hybrid = on` for one run. Check: the hybrid census lines (torso enable 0 and dirty 1; arms, hands and shoulder masks 0 on third; FirstPersonSkeleton mask 0 on first-person; arms and hands kept); the `eye inputs` line on foot, against the derived `eye vs body` line.
 
 ## What "finished" means
 
@@ -598,3 +603,20 @@ mode and its context); W3 step 1-2 (dump comparison, offline).
   Note: the first run of this build will not show the body's model change in the logs, only the calls; the visible result is the flight's.
   F19 keys are unchanged. F19 and F20 fly together: the body clip (F19) and the model mode (F20) are separate hooks.
   Build: source commit 816c1d80. The first full build failed on two duplicate `flags2` declarations in journal_watch.cpp, left by merging main into HEAD (65cdfc7b); the commit removes the duplicates (identical copies). The second full build passed (`all gates passed`, receipt written). The shared build lock was held by other worktrees for about an hour before it started.
+
+### 2026-10-14: F19/F20 FLOWN, F21 BUILT
+
+- **F19/F20 flight (log edvr_gfx_20261014_172807.log).** Third mode (F20) gave the full third-person body and the weapon in the hands, correct. The HUD was lost and there was no ADS pose: the Flags2 ADS bit (0x20) was never set in third. The game itself set the torso and arm vertex-clip enable to 0 on the third-person Torso, Arms, Hands and Shoulders in third mode and back to 1 in first-person mode. That confirms F19's unclip mechanism. The pilot prefers first-person mode with a hybrid body (F21).
+- **Ammo display and waypoint.** Both follow the head. The first-person rig is anchored to the head camera, and the HUD canvas icons are world-projected. Research running.
+- **Indicators on a planet.** Key 10 (about 5 m, the aim reticle and weapon display) and key 43 (waypoint, about 380 m). The reticle writer touches only key 10.
+- **STEP 0 (merge check).** The full build on the merged HEAD 2cf59dbb passed unchanged; no merge fix was needed. The `FAIL:` lines printed by the screen-motion mutation run sit inside the gate's own output and the gate passed.
+- **F21 (commit a68ba714, NOT FLOWN).**
+  - Reticle `game`: EDVR writes nothing to key 10. The stub stays installed so a head placement made before a switch is handed back once.
+  - Hybrid body `fix.native_on_foot_body_hybrid` (TEMPORARY, default off): the first-person skeleton's masks on the mode-2 AMC; the third-person torso unclip and the arms, hands and shoulders' masks on the mode-3 AMC. It overrides the two body keys while on.
+  - Eye probe P1: raw-inputs line added (`native on foot eye inputs:`).
+- **P1 eye-vs-body: bug not found.** Read against Explorer Cam's convention (explorer_cam_core.h: +0x3B0 rows right, up, forward; origin in row 3; dot with rows), the probe's arithmetic is right: the AMC matrix is row-vector with its origin at +0x30, and the head translation is read from row 3 of the +0x58 matrix. The open candidates, each tested by the new line:
+  - (a) Frame of the job's camera floats. Explorer Cam's commander frame has its own `root` (commanderFrame: root = W.origin - L.origin x F), not the AMC origin. If the camera floats are commander-local or rebased, `|cam - origin|` will not be about eye height.
+  - (b) Frame of the head joint. The +0x58 matrix is avatar-root space, and the AMC frame equals that root only if the root sits at the AMC origin. The line's `|head_model|` (the standing head is about 1.66 m in root space) must match `|head world - origin|` if the basis is orthonormal.
+  - (c) The head sample is up to 100 ms old, which is too small to explain 0.7 m.
+  - Scale: the row lengths in the line show whether the basis is unit length.
+- **Next.** Flight F21 on Epic with `reticle_follow = game` and `body_hybrid = on`. Check the census lines and the `eye inputs` line on foot.
