@@ -18,7 +18,7 @@ class NativeFrameClient final {
     if(candidate.size!=sizeof(candidate)||candidate.version!=EDVR_NATIVE_FRAME_VERSION_1||!candidate.context||
        !owned(provider,candidate.beginFrame)||!owned(provider,candidate.latchSubmit)||
        !owned(provider,candidate.invalidate)||!owned(provider,candidate.close))return E_NOINTERFACE;
-    table_=candidate;generation_=generation;providerVersion_=EDVR_NATIVE_FRAME_VERSION_5;return S_OK;
+    table_=candidate;generation_=generation;providerVersion_=EDVR_NATIVE_FRAME_VERSION_6;return S_OK;
   }
   bool acquired()const{return table_.context!=nullptr;}
   HRESULT begin(const GeometryInput& geometry,uint64_t reference,EdvrNativeFrameOutput& out) {
@@ -49,6 +49,10 @@ class NativeFrameClient final {
       out.deferredPacing=0;
     if(r!=S_OK||out.version<EDVR_NATIVE_FRAME_VERSION_5||!(out.fadeAlpha==out.fadeAlpha))
       out.fadeAlpha=0;
+    // F22: the look's total is zero unless a version 6 answer carried it (no compensation, never a stale one).
+    if(r!=S_OK||out.version<EDVR_NATIVE_FRAME_VERSION_6||!(out.lookYawTotal==out.lookYawTotal)) {
+      out.lookYawTotal=0;out.lookYawGameFrame=0;
+    }
     return r;
   }
   HRESULT latch(uint64_t sequence,EdvrNativeFrameDecision& out) {
@@ -56,10 +60,12 @@ class NativeFrameClient final {
     return acquired()?table_.latchSubmit(table_.context,sequence,&out):S_FALSE;
   }
   HRESULT invalidate(){return acquired()?table_.invalidate(table_.context):S_FALSE;}
-  HRESULT close(){if(!acquired())return S_FALSE;const auto r=table_.close(table_.context);if(SUCCEEDED(r)){table_={};providerVersion_=EDVR_NATIVE_FRAME_VERSION_5;}return r;}
+  HRESULT close(){if(!acquired())return S_FALSE;const auto r=table_.close(table_.context);if(SUCCEEDED(r)){table_={};providerVersion_=EDVR_NATIVE_FRAME_VERSION_6;}return r;}
   static EdvrNativeFrameOutput ask(uint32_t version) {
-    if(version>=EDVR_NATIVE_FRAME_VERSION_5)
-      return EdvrNativeFrameOutput{sizeof(EdvrNativeFrameOutput),EDVR_NATIVE_FRAME_VERSION_5};
+    if(version>=EDVR_NATIVE_FRAME_VERSION_6)
+      return EdvrNativeFrameOutput{sizeof(EdvrNativeFrameOutput),EDVR_NATIVE_FRAME_VERSION_6};
+    if(version==EDVR_NATIVE_FRAME_VERSION_5)
+      return EdvrNativeFrameOutput{EDVR_NATIVE_FRAME_OUTPUT_SIZE_5,EDVR_NATIVE_FRAME_VERSION_5};
     if(version==EDVR_NATIVE_FRAME_VERSION_4)
       return EdvrNativeFrameOutput{EDVR_NATIVE_FRAME_OUTPUT_SIZE_4,EDVR_NATIVE_FRAME_VERSION_4};
     if(version==EDVR_NATIVE_FRAME_VERSION_3)
@@ -77,6 +83,6 @@ class NativeFrameClient final {
   EdvrNativeFrameTable table_{};uint64_t generation_=0;
   // The shape (5/4/3/2/1) the provider last accepted; begin() asks this one
   // first, so a provider once found to be older is not re-probed every frame.
-  uint32_t providerVersion_=EDVR_NATIVE_FRAME_VERSION_5;
+  uint32_t providerVersion_=EDVR_NATIVE_FRAME_VERSION_6;
 };
 }

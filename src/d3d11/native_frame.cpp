@@ -50,6 +50,9 @@ State g_pool[kPoolSize];
 unsigned g_used = 0;
 State* g_current = nullptr;
 std::mutex g_mutex;
+// F22: the look-to-aim total and the game frame it was taken at, for version 6 (set by nativeFrameSetLookYaw; guarded by g_mutex).
+float g_lookYaw = 0.0f;
+uint32_t g_lookYawFrame = 0;
 
 State* identify(void* context) {
     for (unsigned i = 0; i < g_used; ++i) {
@@ -244,35 +247,41 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
     // comfort fade (or, earlier, the channel probe, turbo pacing or the
     // field-of-view trim) existed. Each gets exactly the fields it knows
     // about, and whatever it cannot carry stays out of its struct entirely.
-    const bool wantsFade = output &&
-        output->version == EDVR_NATIVE_FRAME_VERSION_5 &&
+    // F22: version 6 is the whole struct (the look's two words after the fade); version 5 is the struct through the fade, which a version 5 caller has.
+    const bool wantsLook = output &&
+        output->version == EDVR_NATIVE_FRAME_VERSION_6 &&
         output->size == sizeof(*output);
-    const bool wantsChannel = output && !wantsFade &&
+    const bool wantsFade = output && !wantsLook &&
+        output->version == EDVR_NATIVE_FRAME_VERSION_5 &&
+        output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_5;
+    const bool wantsChannel = output && !wantsFade && !wantsLook &&
         output->version == EDVR_NATIVE_FRAME_VERSION_4 &&
         output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_4;
-    const bool wantsPacing = output && !wantsFade && !wantsChannel &&
+    const bool wantsPacing = output && !wantsFade && !wantsChannel && !wantsLook &&
         output->version == EDVR_NATIVE_FRAME_VERSION_3 &&
         output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_3;
-    const bool wantsTrim = output && !wantsFade && !wantsChannel && !wantsPacing &&
+    const bool wantsTrim = output && !wantsFade && !wantsChannel && !wantsPacing && !wantsLook &&
         output->version == EDVR_NATIVE_FRAME_VERSION_2 &&
         output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_2;
-    const bool legacy = output && !wantsFade && !wantsChannel && !wantsPacing && !wantsTrim &&
+    const bool legacy = output && !wantsFade && !wantsChannel && !wantsPacing && !wantsTrim && !wantsLook &&
         output->version == EDVR_NATIVE_FRAME_VERSION_1 &&
         output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_1;
     if (!state || state != g_current || !state->active || !input || !output ||
         input->size != sizeof(*input) || input->version != EDVR_NATIVE_FRAME_VERSION_1 ||
-        (!wantsFade && !wantsChannel && !wantsPacing && !wantsTrim && !legacy) ||
+        (!wantsLook && !wantsFade && !wantsChannel && !wantsPacing && !wantsTrim && !legacy) ||
         input->generation != state->generation || input->referenceGeneration == 0 ||
         input->sequence == 0 || input->sequence <= state->sequenceFloor ||
         input->valid > 1 || (input->valid && !rigidPose(input->physicalHead))) return E_INVALIDARG;
 
     EdvrNativeFrameOutput result{};
-    result.size = wantsFade ? sizeof(result)
+    result.size = wantsLook ? sizeof(result)
+                 : wantsFade ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_5
                  : wantsChannel ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_4
                  : wantsPacing ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_3
                  : wantsTrim  ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_2
                               : EDVR_NATIVE_FRAME_OUTPUT_SIZE_1;
-    result.version = wantsFade ? EDVR_NATIVE_FRAME_VERSION_5
+    result.version = wantsLook ? EDVR_NATIVE_FRAME_VERSION_6
+                    : wantsFade ? EDVR_NATIVE_FRAME_VERSION_5
                     : wantsChannel ? EDVR_NATIVE_FRAME_VERSION_4
                     : wantsPacing ? EDVR_NATIVE_FRAME_VERSION_3
                     : wantsTrim  ? EDVR_NATIVE_FRAME_VERSION_2
@@ -281,6 +290,11 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
     // this frame, 0 unless the frame thread published a fresh level. Only a
     // version 5 caller has the slot; every older shape never learns of it.
     result.fadeAlpha = edvr::comfort::read(GetTickCount64());
+    // F22: the look-to-aim total (version 6 only; every other shape never learns of it). The frame thread sets it once a frame.
+    if (wantsLook) {
+        result.lookYawTotal = g_lookYaw;
+        result.lookYawGameFrame = g_lookYawFrame;
+    }
     // The old Explorer Cam's headset offset (headOffset, yawRadians,
     // offsetEnabled, offsetGamePoses) is retired: those slots stay zero, so a
     // runtime built before 2026-10-07 reads "no offset" and applies none.
@@ -455,6 +469,13 @@ void nativeFrameFovTrimDegrees(uint32_t out[3]) {
 }
 
 uint64_t nativeFrameLatchedFrames() { return g_latchedFrames.load(std::memory_order_relaxed); }
+
+// F22: the look-to-aim total the next version 6 beginFrame hands the runtime.
+void nativeFrameSetLookYaw(float total, uint32_t gameFrame) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_lookYaw = total;
+    g_lookYawFrame = gameFrame;
+}
 
 }  // namespace edvr
 

@@ -26,6 +26,10 @@
 // d3d11.dll that refuses the shape steps down and reads "no fade" (0), never
 // black.
 #define EDVR_NATIVE_FRAME_VERSION_5 5u
+// Version 6 adds lookYawTotal and lookYawGameFrame to the END and nothing else (F22, look to aim: the body turn the runtime must hand back about
+// the head so the world holds still). Same hand-copied-DLLs rule: a version 5 or older caller never learns of them, and a runtime that asks
+// version 6 of a d3d11.dll that refuses the shape steps down and reads a total of 0 (no compensation).
+#define EDVR_NATIVE_FRAME_VERSION_6 6u
 
 // The game producer owns the device and generation passed at acquire. The
 // methods in the table are CPU-only and are called by the XR owner after the
@@ -83,6 +87,12 @@ struct EdvrNativeFrameOutput {
     // freshness-checked by the provider (comfort_fade.h): a signal that went
     // stale reads 0.
     float fadeAlpha;
+    // Version 6 and later (F22). The look-to-aim compensation total, in radians and the game's yaw sign: the body turn the game has made for our look
+    // input so far. The runtime turns its seated origin about the head by the change since it last applied, so the reported head yaw drops by the
+    // same amount and the world holds still. Cumulative (it never resets while the process runs); zero when the feature is off or not engaged.
+    // lookYawGameFrame is the game frame index the total was taken at (the timing line compares it with the runtime's frame).
+    float lookYawTotal;
+    uint32_t lookYawGameFrame;
 };
 
 // The size the fields through resubmitEnabled occupy, which is what a
@@ -104,6 +114,9 @@ struct EdvrNativeFrameOutput {
 // caller's struct is, with no tail padding before fadeAlpha.
 #define EDVR_NATIVE_FRAME_OUTPUT_SIZE_4 \
     ((uint32_t)offsetof(EdvrNativeFrameOutput, fadeAlpha))
+// The size the fields through fadeAlpha occupy, which is what a version 5 caller's struct is (F22: the look's two words follow it).
+#define EDVR_NATIVE_FRAME_OUTPUT_SIZE_5 \
+    ((uint32_t)offsetof(EdvrNativeFrameOutput, lookYawTotal))
 
 struct EdvrNativeFrameDecision {
     uint32_t size, version;
@@ -152,5 +165,9 @@ void nativeFrameFovTrimDegrees(uint32_t out[3]);
 // The frame pairs the runtime has latched through latchSubmit, since the DLL loaded. Counted whatever the fixes; the mode watch
 // samples it once a second (mode_watch.cpp).
 uint64_t nativeFrameLatchedFrames();
+
+// F22: the look-to-aim compensation the next beginFrame hands the runtime (version 6): the cumulative total in radians and the game frame it was
+// taken at. Set by the frame thread once per frame (native_on_foot.cpp, lookPublishTick); read under the provider's lock by beginFrame.
+void nativeFrameSetLookYaw(float total, uint32_t gameFrame);
 
 }  // namespace edvr

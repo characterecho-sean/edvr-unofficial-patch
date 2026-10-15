@@ -251,7 +251,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   NativeFrameClient features;
   NativeFssClient fss;
   NativeFovTrim fovTrim;
-  EdvrNativeFrameOutput featureFrame{sizeof(featureFrame),EDVR_NATIVE_FRAME_VERSION_5};
+  EdvrNativeFrameOutput featureFrame{sizeof(featureFrame),EDVR_NATIVE_FRAME_VERSION_6};
   EdvrNativeFrameDecision featureDecision{sizeof(featureDecision),EDVR_NATIVE_FRAME_VERSION_1};
   bool featureFrameKnown=false;
   uint64_t fssHealedEyes[2]{},featureChanges=0;
@@ -372,6 +372,13 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   std::vector<SeatRecord> seatBook;std::wstring seatFile;std::string seatKeyText;
   bool seatLoaded=false,seatRefsTraced=false,seatContextTraced=false;
   SeatPose currentOrigin;                    // the seated origin in natural LOCAL: identity until the first reset
+  // F22 (look to aim): the seated space the game reads is currentOrigin turned about the head by lookComp (radians). currentOrigin itself, the
+  // seat memory's origin, never carries it. lookWanted is the provider's cumulative total; the compensation the origin should carry is
+  // lookWanted - lookBase, where lookBase is the total when the origin was last replaced (the origin is fresh then, so it carries none).
+  SeatPose lookSeated{};bool lookSeatedKnown=false;
+  double lookBase=0,lookComp=0,lookWanted=0,lookWindowDeg=0;
+  uint64_t lookRuntimeFrames=0,lookApplies=0,lookRefusals=0,lookLineMs=0;uint32_t lookGameFrame=0,lookAppliedGameFrame=0;
+  uint64_t lookAppliedFrame=0;const char* lookWhy="";
   unsigned seatResetCount=0,seatContextLines=0;
   SeatContext lastTracedContext{};
   bool seatRetroPending=false;uint64_t seatRetroAgeMs=0;     // a deferred recentre was just taken back: the apply that follows says so (retro=1)
@@ -1443,12 +1450,13 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       gameGeometry.width[eye]=dims.width;gameGeometry.height[eye]=dims.height;
     }
     if(features.acquired()) {
-      EdvrNativeFrameOutput next{sizeof(next),EDVR_NATIVE_FRAME_VERSION_5};
+      EdvrNativeFrameOutput next{sizeof(next),EDVR_NATIVE_FRAME_VERSION_6};
       if(features.begin(located,poses.read().originGeneration,next)!=S_OK) {
         boundary.clear();return fail(XR_ERROR_VALIDATION_FAILURE);
       }
       if(featureFrameKnown&&next.resubmitEnabled!=featureFrame.resubmitEnabled)previousPairValid=false;
       featureFrame=next;featureFrameKnown=true;
+      ++lookRuntimeFrames;lookWanted=double(featureFrame.lookYawTotal);lookGameFrame=featureFrame.lookYawGameFrame;   // F22
       if(locatedValid) {
         NativeTrimSettings settings{};
         settings.trimOuterDeg=featureFrame.trimOuterDeg;settings.trimNasalDeg=featureFrame.trimNasalDeg;
@@ -2746,6 +2754,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     lastResetResult=seated.replace(origin);
     if(lastResetResult!=XR_SUCCESS){geometry.invalidate(geometryGeneration);poses.invalidate(compositorGeneration);dropPoseFrame(poseInvalidationForReason(reason));return false;}
     currentOrigin=seatPoseFromXr(origin);
+    lookRebase();   // F22: the new origin carries no look compensation
     if(!invalidateOrigin(reason)){lastResetResult=XR_ERROR_LIMIT_REACHED;return false;}
     // Verify and attach an event-time sample, not a later cached render pose.
     TimedHeadPose atReset{};
@@ -3020,6 +3029,51 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(ok){seat.noteOrigin(true);seat.applyDone();}
     return ok;
   }
+  // F22: a new seated origin (applySeatedResetCore) carries no look compensation: the base is the provider's total now.
+  void lookRebase() {
+    lookSeated=currentOrigin;lookSeatedKnown=true;
+    lookBase=featureFrameKnown&&features.acquired()?double(featureFrame.lookYawTotal):0.0;
+    lookWanted=lookBase;lookComp=0;
+  }
+  // F22: WaitGetPoses, no frame open. Turns the seated space about the HEAD by the change in the compensation the origin should carry. The head keeps
+  // its place in the seated space and its reported yaw falls by the body turn the game made for our look input, so the world holds still. Never
+  // gives up the frame. A refusal is traced and the origin is left as it was.
+  void lookPoll() {
+    if(!features.acquired()||!seated.space()||!changes.active()) return;
+    if(!lookSeatedKnown) lookRebase();
+    const double target=lookWanted-lookBase;
+    const double delta=target-lookComp;
+    const uint64_t now=GetTickCount64();
+    if(std::fabs(delta)>1e-6&&!state.frameOpen()) {
+      XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};XrTime lookTime=0;
+      const XrResult located=HeadLocator{}.locate({api.convertTime,api.locateSpace},instance,view,local,0,head,&lookTime,counterNow,nullptr,boundary.estimateNow());
+      if(located!=XR_SUCCESS||!(head.locationFlags&XR_SPACE_LOCATION_POSITION_VALID_BIT)) {
+        ++lookRefusals;lookWhy="head position not located";
+      } else {
+        const double hx=head.pose.position.x,hz=head.pose.position.z;
+        const double dx=lookSeated.x-hx,dz=lookSeated.z-hz;
+        const double c=std::cos(delta),s=std::sin(delta);
+        const SeatPose next{hx+c*dx+s*dz,lookSeated.y,hz-s*dx+c*dz,lookSeated.yaw+delta};
+        const XrResult r=seated.replace(xrFromSeatPose(next));
+        if(r!=XR_SUCCESS) {
+          ++lookRefusals;lookWhy="seated space replace refused";
+        } else {
+          lookSeated=next;lookComp=target;
+          dropPoseFrame(PoseInvalidation::Other);
+          fillPollRing();
+          ++lookApplies;lookWindowDeg+=seatRadToDeg(delta);
+          lookAppliedFrame=lookRuntimeFrames;lookAppliedGameFrame=lookGameFrame;lookWhy="";
+        }
+      }
+    }
+    if(now-lookLineMs>=5000||lookLineMs==0) {
+      lookLineMs=now;
+      nativeTracePrintf("look_to_aim_runtime,frame=%llu,game_frame=%u,applies=%llu,window_deg=%.3f,comp_deg=%.3f,wanted_deg=%.3f,base_deg=%.3f,refusals=%llu,why=%s\n",
+          (unsigned long long)lookRuntimeFrames,unsigned(lookAppliedGameFrame),(unsigned long long)lookApplies,lookWindowDeg,seatRadToDeg(lookComp),
+          seatRadToDeg(lookWanted),seatRadToDeg(lookBase),(unsigned long long)lookRefusals,lookWhy);
+      lookWindowDeg=0;
+    }
+  }
   // WaitGetPoses, no frame open. True when the origin moved (the caller gives up this frame's pose update, as the intro recentre always did).
   bool seatPoll() {
     if(GetCurrentThreadId()!=ownerThread)return false;
@@ -3054,6 +3108,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       seatMeterNextPeriodic=now+30000;
       seatMeterLine("periodic");
     }
+    lookPoll();   // F22: the look's compensation, applied with no frame open (never gives up the frame)
     return moved;
   }
   enum class SeatIntro {Todays,Applied,Skipped,Sampling,Retry};

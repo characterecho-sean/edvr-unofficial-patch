@@ -135,6 +135,10 @@ uint32_t journalUndocks();
 // heuristics.
 bool journalOnFootKnown();
 bool journalOnFoot();
+// F22: the game-session test for the on-foot features. True when journalGameplay() (LoadGame seen this process), or else when Status.json says on
+// foot right now. A training scenario started from the main menu writes no LoadGame, so the fallback is what admits it. viaOnFoot (optional) is set
+// true only when the fallback is what admitted. Flat profile: both clauses are false, as before.
+bool journalSessionOrOnFoot(bool* viaOnFoot = nullptr);
 // Built v14 (optimized station): the commander is docked, from Status.json Flags bit 0. Known whenever Flags is in the file.
 bool journalDockedKnown();
 bool journalDocked();

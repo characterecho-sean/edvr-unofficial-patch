@@ -60,6 +60,14 @@ bool journalWatchActive() { return g_journalActive; }
 bool journalGameplay() { return g_journalGameplay; }
 bool journalOnFootKnown() { return g_journalOnFootKnown; }
 bool journalOnFoot() { return g_journalOnFoot; }
+// F22: the production rule (journal_watch.cpp): LoadGame seen, or Status.json on foot now.
+bool journalSessionOrOnFoot(bool* viaOnFoot) {
+    if (viaOnFoot) *viaOnFoot = false;
+    if (g_journalGameplay) return true;
+    if (!g_journalOnFootKnown || !g_journalOnFoot) return false;
+    if (viaOnFoot) *viaOnFoot = true;
+    return true;
+}
 bool journalGuiFocus(uint32_t* focus) {
     if (focus) *focus = 0;
     return false;   // the rig's boundary gets its focus from ExplorerCamTestFrame, not from here

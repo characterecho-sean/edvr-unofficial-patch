@@ -1073,6 +1073,14 @@ bool journalInJumpTunnel() {
 }
 bool journalOnFootKnown() { return journalWatchActive() && peek(g_v.onFootKnown); }
 bool journalOnFoot() { return !runtimeFlatProfile() && peek(g_v.onFoot); }
+// F22: LoadGame seen, or Status.json says on foot now (a training scenario writes no LoadGame). See journal_watch.h.
+bool journalSessionOrOnFoot(bool* viaOnFoot) {
+    if (viaOnFoot) *viaOnFoot = false;
+    if (journalGameplay()) return true;
+    if (!journalOnFootKnown() || !journalOnFoot()) return false;
+    if (viaOnFoot) *viaOnFoot = true;
+    return true;
+}
 bool journalBreathableKnown() { return journalWatchActive() && peek(g_v.breathableKnown); }
 bool journalBreathable() { return !runtimeFlatProfile() && peek(g_v.breathable); }
 bool journalAdsKnown() { return journalWatchActive() && peek(g_v.adsKnown); }

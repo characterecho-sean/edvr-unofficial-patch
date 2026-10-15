@@ -14,6 +14,7 @@
 
 #include "../common/code_hook.h"
 #include "../common/config.h"
+#include "../common/native_frame.h"   // F22: nativeFrameSetLookYaw, the look-to-aim compensation total the runtime asks for each frame
 #include "../common/log.h"
 #include "../common/runtime_profile.h"
 #include "binding_shadow.h"   // bindingShaderHash: the HUD issuer probe's pixel shader
@@ -63,6 +64,18 @@ std::atomic<bool> g_hybridKeyOn{false};                          // fix.native_o
 bool g_hybridKeyLast = false;                                    // frame thread only: as last logged (F21)
 std::atomic<bool> g_reticleLogWanted{false};                    // set by the frame thread on a switch to head; the probe consumes it once and queues the line (F17)
 std::atomic<float> g_hudElemScale{0.0f};                        // fix.native_on_foot_hud_element_scale, live: 0 = the game's own (F17)
+// ---- F22: look to aim (fix.native_on_foot_look_to_aim) and the read-only probes; the block is below the F9 probes ----
+std::atomic<bool> g_lookWantRead{false};       // the P2 hook reads list B now (native stereo on foot, session): the look head and probe B
+std::atomic<bool> g_lookKeyOn{false};          // fix.native_on_foot_look_to_aim is on, as the frame thread last read it
+std::atomic<bool> g_lookEngaged{false};        // the controller may write its input now (frame thread; the update hook reads it)
+std::atomic<float> g_lookInput{0.0f};          // our rotate-abs input for the next update (frame thread writes; zero = none)
+std::atomic<uintptr_t> g_lookComp{0};          // the processor's comp, as the processor hook last saw it
+std::atomic<uint32_t> g_lookGameFrame{0};      // processor calls so far: the game frame index the body turn is stamped with
+std::atomic<int> g_lookSmoothMs{150};          // fix.native_on_foot_look_to_aim_smoothing_ms, live (0..1000)
+std::atomic<int> g_lookSign{1};                // fix.native_on_foot_look_to_aim_yaw_sign (temporary): 1 or -1, on the controller's input only
+std::atomic<int> g_lookDelay{0};               // fix.native_on_foot_look_to_aim_comp_delay (temporary): 0 or 1 frames
+bool g_lookOnLast = true;                      // frame thread only: the look keys as last logged (readKey)
+int g_lookSignLast = 1, g_lookDelayLast = 0;   // frame thread only
 float g_hudElemLast = -1.0f;                                    // frame thread only: as last logged (F17)
 std::atomic<float> g_hudRoomSetting{1.0f};                      // fix.native_on_foot_hud_room, live, 1.00..2.50 (F18)
 std::atomic<float> g_hudRoomEff{1.0f};                          // the room the mesh is built with now: 1 unless the room is applied (F18; game thread reads)
@@ -194,6 +207,19 @@ bool checkIdentity(uintptr_t base, const char** why) noexcept {
 }
 
 // ---- the hook --------------------------------------------------------------------------------------------------------------
+// F22: the native session test. journalGameplay() (LoadGame seen), or Status.json says on foot now: a training scenario started from the main menu
+// writes no LoadGame. Logs once, when the fallback is what admits (journal_watch.h journalSessionOrOnFoot).
+bool nativeGameSession() {
+    bool viaFoot = false;
+    const bool session = journalSessionOrOnFoot(&viaFoot);
+    if (viaFoot) {
+        static std::atomic<bool> noted{false};
+        if (!noted.exchange(true, std::memory_order_relaxed))
+            Log::get().note("native on foot: game session from Status.json on foot (no LoadGame: a training scenario)");
+    }
+    return session;
+}
+
 void pushEvent(const SetterEvent& ev) {
     std::lock_guard<std::mutex> lock(g_eventMutex);
     g_events[g_eventsWritten % kEventRing] = ev;
@@ -229,7 +255,7 @@ void __fastcall setterHooked(void* selectorPtr, uint32_t incoming) {
     in.incoming = incoming;
     in.selectorValid = valid;
     in.selectorFrozen = valid && frozen == selector;
-    in.gameSession = journalGameplay();
+    in.gameSession = nativeGameSession();
     ev.reason = nofoot::admit(in);
     ev.admitted = ev.reason == nofoot::Reason::Admitted;
     ev.keyOn = in.keyOn;
@@ -492,6 +518,27 @@ void readKey() {
         Log::get().note("native on foot reticle follows: %s", reticleGame ? "game (EDVR writes nothing to the reticle)" : reticleHead ? "head" : "aim");
         g_reticleHeadLast = reticleHead;
         g_reticleGameLast = reticleGame;
+    }
+    // F22: look to aim (user settings, live). The body turns to where the head looks while the reticle follows head; the runtime holds the world still.
+    // The sign and the delay are TEMPORARY (the flight A/B); the smoothing is the setting. Each key is spelled out in its own call (the generator scans).
+    const bool lookOn = cfg.getString("fix.native_on_foot_look_to_aim", "on") == "on";
+    g_lookKeyOn.store(lookOn, std::memory_order_relaxed);
+    int lookSmooth = cfg.getInt("fix.native_on_foot_look_to_aim_smoothing_ms", 150);
+    if (lookSmooth < 0) lookSmooth = 0;
+    if (lookSmooth > 1000) lookSmooth = 1000;
+    g_lookSmoothMs.store(lookSmooth, std::memory_order_relaxed);
+    const int lookSign = cfg.getInt("fix.native_on_foot_look_to_aim_yaw_sign", 1) < 0 ? -1 : 1;
+    g_lookSign.store(lookSign, std::memory_order_relaxed);
+    int lookDelay = cfg.getInt("fix.native_on_foot_look_to_aim_comp_delay", 0);
+    if (lookDelay < 0) lookDelay = 0;
+    if (lookDelay > 1) lookDelay = 1;
+    g_lookDelay.store(lookDelay, std::memory_order_relaxed);
+    if (first || lookOn != g_lookOnLast || lookSign != g_lookSignLast || lookDelay != g_lookDelayLast) {
+        Log::get().note("native on foot look to aim: %s, smoothing %d ms, yaw sign %d (temporary), comp delay %d frame(s) (temporary)",
+                        lookOn ? "on" : "off", lookSmooth, lookSign, lookDelay);
+        g_lookOnLast = lookOn;
+        g_lookSignLast = lookSign;
+        g_lookDelayLast = lookDelay;
     }
     // F16: the per-group HUD offsets (user settings, live): x and y per group, a fraction of the HUD canvas, read under the layout hook's lock.
     {
@@ -1603,6 +1650,7 @@ bool g_f12StopNoted = false;                        // frame thread only
 struct F13Head {
     bool valid = false;
     float C[16] = {};
+    float viewY = 0.0f;   // F22: the list-B eye 0 view's row 2, column 1 (asin = its pitch); set by f13ReadHeadInto only
 };
 F13Head g_f13Raw;                                   // guarded by g_f9Lock: the head transform read by the P2 hook
 F13Head g_f13Smooth;                                // guarded by g_f9Lock: the smoothed one (the frame thread)
@@ -1695,33 +1743,34 @@ void f13Slerp(const float* a, const float* b, float t, float* out) noexcept {
 
 // The head transform from the list-B views (P2, game thread): a3 is list B's {begin, end}; its entries are view pointers. A read or a
 // shape that is not as expected stands the writes down.
-void f13ReadHead(uintptr_t listB) noexcept {
+// F22: the pure reader. Returns false with `why` set on a read or shape failure, and writes nothing; the caller decides what a failure means.
+bool f13ReadHeadInto(uintptr_t listB, F13Head& raw, const char** why) noexcept {
     uint64_t begin = 0, end = 0;
     if (!guardedRead(listB, &begin, 8) || !guardedRead(listB + 8, &end, 8)) {
-        f12Stand("list B could not be read");
-        return;
+        *why = "list B could not be read";
+        return false;
     }
     if (begin < 0x10000 || end < begin || end - begin < 16) {
-        f12Stand("list B does not hold two views");
-        return;
+        *why = "list B does not hold two views";
+        return false;
     }
     uint64_t v0 = 0, v1 = 0;
     if (!guardedRead(static_cast<uintptr_t>(begin), &v0, 8) || !guardedRead(static_cast<uintptr_t>(begin) + 8, &v1, 8)) {
-        f12Stand("list B could not be read");
-        return;
+        *why = "list B could not be read";
+        return false;
     }
     auto plausible = [](uint64_t p) { return p >= 0x10000 && p < 0x00007FFF00000000ull; };
     if (!plausible(v0) || !plausible(v1)) {
-        f12Stand("list B entries are not view pointers");
-        return;
+        *why = "list B entries are not view pointers";
+        return false;
     }
     float a[16] = {}, b[16] = {};
     if (!guardedRead(static_cast<uintptr_t>(v0) + nofoot::kF9ViewRotOff, a, sizeof(a)) ||
         !guardedRead(static_cast<uintptr_t>(v1) + nofoot::kF9ViewRotOff, b, sizeof(b))) {
-        f12Stand("a list-B view could not be read");
-        return;
+        *why = "a list-B view could not be read";
+        return false;
     }
-    F13Head raw;
+    raw = F13Head{};
     raw.valid = true;
     for (size_t r = 0; r < 3; ++r) {
         for (size_t c = 0; c < 3; ++c) raw.C[r * 4 + c] = a[r * 4 + c];
@@ -1732,6 +1781,17 @@ void f13ReadHead(uintptr_t listB) noexcept {
     raw.C[14] = 0.5f * (a[14] + b[14]);
     raw.C[15] = 1.0f;
     raw.C[3] = raw.C[7] = raw.C[11] = 0.0f;
+    raw.viewY = a[9];   // F22: eye 0's own row 2, column 1 (its pitch is asin of this; the probe reads it)
+    return true;
+}
+
+void f13ReadHead(uintptr_t listB) noexcept {
+    F13Head raw;
+    const char* why = "";
+    if (!f13ReadHeadInto(listB, raw, &why)) {
+        f12Stand(why);
+        return;
+    }
     F9Lock lock;
     g_f13Raw = raw;
 }
@@ -2713,11 +2773,15 @@ void f14FrameTick(uint64_t nowMs) {
     }
 }
 
+// F22: defined with the look-to-aim block below. Reads list B into the look head when the frame thread wants it (never stands anything down).
+void lookReadHeadP2(uintptr_t listB) noexcept;
+
 // P2: rcx = HRC, and five more arguments, all forwarded (the later chunks were not scanned for stack arguments).
 uint64_t __fastcall f9HrcSubmitHooked(void* hrc, void* a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
     const F9Fn6 original = reinterpret_cast<F9Fn6>(g_f9Probe[1].original);
     if (!original) return 0;
     if (!g_f9Stop[1].load(std::memory_order_relaxed)) f9RecordHrc(f9State(), hrc);   // reads before the call
+    if (g_lookWantRead.load(std::memory_order_relaxed)) lookReadHeadP2(static_cast<uintptr_t>(a3));   // F22: the look and probe B's head (read only)
     f13PlaceHud(hrc, static_cast<uintptr_t>(a3));   // F12/F13: the HUD placement (distance, size, head), before the original runs
     return original(hrc, a2, a3, a4, a5, a6);
 }
@@ -2840,6 +2904,452 @@ void installF9ProbesOnce() {
     }
 }
 
+// ---- F22: the training load wait (read only), camera rig probes A and B (read only), and look to aim -----------------------------------
+// Every hook here follows the F9 probe pattern: the prologue bytes are verified before any write, a near relay carries the callback, and an
+// install refusal is logged with its reason and leaves the game as it was. Addresses are build 332841's (Epic exe checked offline, 2026-10-14).
+constexpr uintptr_t kLoadWaitRva = 0x260D6B0;   // the load pipeline's wait condition: vtable slot 3 of +0x5298390; false = waiting on ReadyToAllocIDs
+const uint8_t kLoadWaitPrologue[10] = {0x48, 0x89, 0x5C, 0x24, 0x20, 0x57, 0x48, 0x83, 0xEC, 0x20};
+constexpr uintptr_t kCamDriverRva = 0x28431D0;  // the camera driver (probe A): rcx = driver, edx = mode, r8 = null
+const uint8_t kCamDriverPrologue[18] = {0x40, 0x55, 0x53, 0x56, 0x48, 0x8D, 0xAC, 0x24, 0x50, 0xE8, 0xFF, 0xFF,
+                                        0xB8, 0xB0, 0x18, 0x00, 0x00, 0xE8};
+constexpr uintptr_t kLookUpdateRva = 0x19973D0; // PlayerHumanoidControlActivity update: act in rcx; reads rotate-abs at [[act+0x190]+0x18]
+const uint8_t kLookUpdatePrologue[32] = {0x48, 0x8B, 0xC4, 0x48, 0x89, 0x58, 0x10, 0x48, 0x89, 0x70, 0x18, 0x48, 0x89, 0x78, 0x20, 0x55,
+                                         0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48, 0x8D, 0xA8, 0x08, 0xFF, 0xFF, 0xFF, 0x48};
+constexpr uintptr_t kLookProcRva = 0x1A9C370;  // the processor: comp in rcx, dt in xmm1; its yaw delta is stored at comp+0x5F4
+const uint8_t kLookProcPrologue[5] = {0x48, 0x8B, 0xC4, 0x55, 0x56};
+constexpr uintptr_t kLookUpdPitchOff = 0x198, kLookUpdRotOff = 0x190, kLookActValueOff = 0x18;   // act+0x190 and +0x198 are the action pointers
+constexpr uintptr_t kCompYawDeltaOff = 0x5F4, kCompBasisOff = 0x5B0, kCompGainLoOff = 0x7D8, kCompGainHiOff = 0x7DC;
+constexpr float kLookMaxTurnRad = 0.1745f;     // the most the controller asks the body to turn in one frame (10 degrees)
+constexpr uint64_t kLookHeadMaxAgeMs = 500;    // a head sample older than this does not steer
+
+F9Probe g_f22LoadWait;   // read only
+F9Probe g_f22Driver;     // read only (probe A)
+F9Probe g_f22Update;     // look to aim: writes rotate-abs for one update call while engaged, restores it after the original
+F9Probe g_f22Proc;       // look to aim: read only (the comp pointer, the body turn after the processor)
+bool g_f22ProbesTried = false;   // frame thread only
+bool g_f22LookTried = false;     // frame thread only
+bool g_lookArmed = false;        // frame thread only: both look hooks are in; the controller never writes without both
+bool g_lookEngagedLast = false;  // frame thread only
+uint64_t g_lookLastMs = 0;       // frame thread only: the controller's dt
+uint64_t g_lookLineMs = 0;       // frame thread only: the 5 s line
+double g_lookWinStartDeg = 0.0;  // frame thread only: the published total at the last line
+F13Head g_lookHead;              // under g_f9Lock: the list-B head sample from the P2 hook (C and the eye 0 view row 2, column 1)
+uint64_t g_lookHeadMs = 0;       // under g_f9Lock: when g_lookHead was read
+bool g_lookPendingValid = false; // game thread only: the update hook wrote our input for the processor to account
+float g_lookPendOurs = 0.0f, g_lookPendSum = 0.0f;   // game thread only
+double g_lookTotal = 0.0;        // under g_f9Lock: the body turn we caused so far, game yaw radians (the runtime's compensation total)
+float g_lookLastD = 0.0f, g_lookLastPart = 0.0f;     // under g_f9Lock: the processor's yaw delta and our part of it, last call
+std::atomic<float> g_lookAMeas{0.0f};   // the gain measured from the last write: D / (old + ours); 0 = none yet
+std::atomic<float> g_lookLastOld{0.0f}; // the mouse's rotate-abs from the last write (the instrument's "old input")
+std::atomic<float> g_lookLastInput{0.0f};
+std::atomic<uint32_t> g_lookUpdCalls{0}, g_lookWrites{0}, g_lookRefusals{0}, g_lookProcCalls{0};
+std::atomic<const char*> g_lookWhy{nullptr};   // the last refusal's reason (shown on the 5 s line)
+
+// The load wait (read only). The original is called first and its result is returned unchanged; the log says only what changed.
+using F22BoolFn = bool(__fastcall*)(void*, void*, void*, void*);
+bool g_lwInRun = false;          // the wait is in a false run (game thread, the load pipeline)
+uint64_t g_lwStartMs = 0, g_lwLastMs = 0, g_lwCount = 0;
+bool __fastcall loadWaitHooked(void* self, void* a2, void* a3, void* a4) {
+    const F22BoolFn original = reinterpret_cast<F22BoolFn>(g_f22LoadWait.original);
+    if (!original) return true;   // the trampoline is missing: let the game go on as it would without the hook
+    const bool r = original(self, a2, a3, a4);
+    const uint64_t now = GetTickCount64();
+    if (!r) {
+        if (!g_lwInRun) {
+            g_lwInRun = true;
+            g_lwStartMs = now;
+            g_lwLastMs = now;
+            g_lwCount = 0;
+            Log::get().note("training load wait: returned false (waiting for ReadyToAllocIDs) first at %llu ms, this=0x%llX",
+                            static_cast<unsigned long long>(now), static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(self)));
+        }
+        ++g_lwCount;
+        if (now - g_lwLastMs >= 5000) {
+            g_lwLastMs = now;
+            Log::get().note("training load wait: still false: %llu calls, %.1f s blocked, this=0x%llX", static_cast<unsigned long long>(g_lwCount),
+                            static_cast<double>(now - g_lwStartMs) / 1000.0, static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(self)));
+        }
+    } else if (g_lwInRun) {
+        g_lwInRun = false;
+        Log::get().note("training load wait: true after %.1f s blocked (%llu false calls), this=0x%llX",
+                        static_cast<double>(now - g_lwStartMs) / 1000.0, static_cast<unsigned long long>(g_lwCount),
+                        static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(self)));
+    }
+    return r;
+}
+
+// Probe A (read only): the camera driver's entry. Rate limited to one line per 5 s per mode value.
+using F22DriverFn = uint64_t(__fastcall*)(void*, uint32_t, void*);
+std::atomic<uint64_t> g_driverLastMs[64]{};
+void driverProbeLine(void* driver, uint32_t mode, uint64_t now) {
+    const size_t slot = mode & 63u;
+    const uint64_t last = g_driverLastMs[slot].load(std::memory_order_relaxed);
+    if (last != 0 && now - last < 5000) return;
+    g_driverLastMs[slot].store(now, std::memory_order_relaxed);
+    uintptr_t ship = 0;
+    float m1[16] = {}, m2[16] = {};
+    const bool okShip = driver && guardedRead(reinterpret_cast<uintptr_t>(driver) + 0x50, &ship, 8) && ship != 0;
+    const bool ok1 = okShip && guardedRead(ship + 0x3330, m1, sizeof(m1));
+    const bool ok2 = okShip && guardedRead(ship + 0x130, m2, sizeof(m2));
+    char y1[24], p1[24], y2[24], p2[24];
+    if (ok1) {
+        std::snprintf(y1, sizeof(y1), "%.2f", f13YawDeg(m1));
+        std::snprintf(p1, sizeof(p1), "%.2f", f13PitchDeg(m1));
+    } else {
+        std::snprintf(y1, sizeof(y1), "unread");
+        std::snprintf(p1, sizeof(p1), "unread");
+    }
+    if (ok2) {
+        std::snprintf(y2, sizeof(y2), "%.2f", f13YawDeg(m2));
+        std::snprintf(p2, sizeof(p2), "%.2f", f13PitchDeg(m2));
+    } else {
+        std::snprintf(y2, sizeof(y2), "unread");
+        std::snprintf(p2, sizeof(p2), "unread");
+    }
+    Log::get().note("native on foot rig probe A: mode %u driver=0x%llX ship=%s row2 at +0x3330 yaw %s pitch %s deg; row2 at +0x130 yaw %s pitch %s deg "
+                    "(read only)",
+                    static_cast<unsigned>(mode), static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(driver)), okShip ? "read" : "unread",
+                    y1, p1, y2, p2);
+}
+uint64_t __fastcall camDriverHooked(void* driver, uint32_t mode, void* r8) {
+    const F22DriverFn original = reinterpret_cast<F22DriverFn>(g_f22Driver.original);
+    if (!original) return 0;
+    driverProbeLine(driver, mode, GetTickCount64());
+    return original(driver, mode, r8);
+}
+
+// Probe B (read only), called from the P1 callback for each AMC. The root getter is the game's own call at 0x3DD61AF (rcx = [AMC+0x208], vt+0x20).
+using F22RootFn = float* (__fastcall*)(void*);
+__declspec(noinline) bool callRootGetter(uintptr_t fn, uintptr_t obj, uintptr_t* outMatrix) noexcept {
+    __try {
+        const F22RootFn f = reinterpret_cast<F22RootFn>(fn);
+        *outMatrix = reinterpret_cast<uintptr_t>(f(reinterpret_cast<void*>(obj)));
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+uint64_t g_rigBLastMs[4] = {};   // frame thread and game thread both reach it: the P1 callback only (game thread)
+void rigProbeB(void* amc, uint64_t now) {
+    const uintptr_t a = reinterpret_cast<uintptr_t>(amc);
+    uintptr_t p = 0;
+    uint32_t mode = 0;
+    if (!guardedRead(a + 0x50, &p, 8) || !p || !guardedRead(p + 0x14, &mode, 4)) return;
+    if (mode != 2 && mode != 3) return;
+    const size_t slot = mode - 2;
+    if (g_rigBLastMs[slot] != 0 && now - g_rigBLastMs[slot] < 5000) return;
+    g_rigBLastMs[slot] = now;
+    uintptr_t obj = 0, vt = 0, fn = 0, mat = 0;
+    const bool okObj = guardedRead(a + 0x208, &obj, 8) && obj && guardedRead(obj, &vt, 8) && vt && guardedRead(vt + 0x20, &fn, 8) && fn;
+    float m[16] = {};
+    const bool okRoot = okObj && callRootGetter(fn, obj, &mat) && mat && guardedRead(mat, m, sizeof(m));
+    F13Head h;
+    uint64_t headMs = 0;
+    {
+        F9Lock lock;
+        h = g_lookHead;
+        headMs = g_lookHeadMs;
+    }
+    const uintptr_t comp = g_lookComp.load(std::memory_order_relaxed);
+    float basis[12] = {};
+    const bool okBasis = comp && guardedRead(comp + kCompBasisOff, basis, sizeof(basis));
+    char hy[24], by[24];
+    if (h.valid && now - headMs < kLookHeadMaxAgeMs) std::snprintf(hy, sizeof(hy), "%.2f", f13YawDeg(h.C));
+    else std::snprintf(hy, sizeof(hy), "unread");
+    if (okBasis) std::snprintf(by, sizeof(by), "%.2f", static_cast<double>(std::atan2(basis[8], basis[10]) * 180.0f / 3.14159265f));
+    else std::snprintf(by, sizeof(by), "unread");
+    if (okRoot) {
+        Log::get().note("native on foot rig probe B: AMC mode %u root row2 yaw %.2f pitch %.2f deg, origin (%.3f, %.3f, %.3f); headset (C) yaw %s deg; "
+                        "look basis (comp+0x5B0) row2 yaw %s deg (read only)",
+                        static_cast<unsigned>(mode), f13YawDeg(m), f13PitchDeg(m), static_cast<double>(m[12]), static_cast<double>(m[13]),
+                        static_cast<double>(m[14]), hy, by);
+    } else {
+        Log::get().note("native on foot rig probe B: AMC mode %u root not read (getter %s); headset (C) yaw %s deg; look basis row2 yaw %s deg (read only)",
+                        static_cast<unsigned>(mode), okObj ? "failed" : "pointers unread", hy, by);
+    }
+}
+
+// The list-B head sample for the look (P2 hook, game thread). Never stands the HUD writes down: a failed read only clears the sample.
+void lookReadHeadP2(uintptr_t listB) noexcept {
+    F13Head raw;
+    const char* why = "";
+    F9Lock lock;
+    if (!f13ReadHeadInto(listB, raw, &why)) {
+        g_lookHead.valid = false;
+        return;
+    }
+    g_lookHead = raw;
+    g_lookHeadMs = GetTickCount64();
+}
+
+// The update hook (game thread): while engaged with a non-zero input, writes rotate-abs = old + ours for this call only and restores old after it.
+using F22UpdateFn = void(__fastcall*)(void*);
+void __fastcall lookUpdateHooked(void* act) {
+    const F22UpdateFn original = reinterpret_cast<F22UpdateFn>(g_f22Update.original);
+    if (!original) return;
+    g_lookUpdCalls.fetch_add(1, std::memory_order_relaxed);
+    const float ours = g_lookEngaged.load(std::memory_order_relaxed) ? g_lookInput.load(std::memory_order_relaxed) : 0.0f;
+    if (ours == 0.0f || !act) {
+        g_lookPendingValid = false;
+        original(act);
+        return;
+    }
+    const uintptr_t a = reinterpret_cast<uintptr_t>(act);
+    uintptr_t rotAct = 0, pitchAct = 0;
+    float old = 0.0f, scratch = 0.0f;
+    const char* why = nullptr;
+    if (!guardedRead(a + kLookUpdRotOff, &rotAct, 8) || !guardedRead(a + kLookUpdPitchOff, &pitchAct, 8)) why = "action pointers unreadable";
+    else if (!rotAct || !pitchAct || rotAct == pitchAct) why = "action pointers null or equal";
+    else if (!guardedRead(rotAct + kLookActValueOff, &old, 4) || !guardedRead(pitchAct + kLookActValueOff, &scratch, 4)) why = "rotate-abs or pitch-abs unreadable";
+    else if (!std::isfinite(old)) why = "rotate-abs is not finite";
+    if (why) {
+        g_lookRefusals.fetch_add(1, std::memory_order_relaxed);
+        g_lookWhy.store(why, std::memory_order_relaxed);
+        g_lookPendingValid = false;
+        original(act);
+        return;
+    }
+    const float sum = old + ours;
+    if (!guardedWriteFloat(rotAct + kLookActValueOff, sum)) {
+        g_lookRefusals.fetch_add(1, std::memory_order_relaxed);
+        g_lookWhy.store("rotate-abs write refused", std::memory_order_relaxed);
+        g_lookPendingValid = false;
+        original(act);
+        return;
+    }
+    original(act);
+    if (!guardedWriteFloat(rotAct + kLookActValueOff, old)) {
+        // The sum is still in the field: stop engaging until the controller is told, and say so.
+        g_lookEngaged.store(false, std::memory_order_relaxed);
+        g_lookWhy.store("rotate-abs restore refused: look to aim stopped", std::memory_order_relaxed);
+        g_lookRefusals.fetch_add(1, std::memory_order_relaxed);
+    }
+    g_lookWrites.fetch_add(1, std::memory_order_relaxed);
+    g_lookLastOld.store(old, std::memory_order_relaxed);
+    g_lookLastInput.store(ours, std::memory_order_relaxed);
+    g_lookPendingValid = true;
+    g_lookPendOurs = ours;
+    g_lookPendSum = sum;
+}
+
+// The processor hook (game thread). Read only: it records comp and, after the original, the yaw delta it stored; our part of that delta is
+// D * ours / (old + ours), which is linear, so it needs no value of the gain.
+using F22ProcFn = uint64_t(__fastcall*)(void*, float);
+uint64_t __fastcall lookProcHooked(void* comp, float dt) {
+    const F22ProcFn original = reinterpret_cast<F22ProcFn>(g_f22Proc.original);
+    if (!original) return 0;
+    g_lookComp.store(reinterpret_cast<uintptr_t>(comp), std::memory_order_relaxed);
+    g_lookProcCalls.fetch_add(1, std::memory_order_relaxed);
+    g_lookGameFrame.fetch_add(1, std::memory_order_relaxed);
+    original(comp, dt);
+    if (g_lookPendingValid) {
+        g_lookPendingValid = false;
+        float d = 0.0f;
+        if (comp && guardedRead(reinterpret_cast<uintptr_t>(comp) + kCompYawDeltaOff, &d, 4) && std::isfinite(d)) {
+            const float sum = g_lookPendSum;
+            F9Lock lock;
+            float part = 0.0f;
+            if (std::fabs(sum) > 1e-9f) {
+                part = d * g_lookPendOurs / sum;
+                const float gain = d / sum;
+                if (std::isfinite(gain) && gain > 0.0f) g_lookAMeas.store(gain, std::memory_order_relaxed);
+            }
+            g_lookLastD = d;
+            g_lookLastPart = part;
+            g_lookTotal += static_cast<double>(part);
+        }
+    }
+    return 0;
+}
+
+// Installs the load wait and probe A (VR only, identity checked, once). Each refusal is one line; the game is untouched by a refused hook.
+void installF22ProbesOnce() {
+    if (g_f22ProbesTried) return;
+    g_f22ProbesTried = true;
+    if (!runtimeVrProfile()) return;
+    const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    const char* peWhy = nullptr;
+    if (!base || !checkIdentity(base, &peWhy)) {
+        Log::get().note("native on foot rig probes: NOT installed -- identity mismatch (%s); the game was not touched.", peWhy ? peWhy : "no module");
+        return;
+    }
+    if (!g_base) g_base = base;
+    {
+        const F9ProbeSpec s{"native-on-foot-load-wait", kLoadWaitRva, kLoadWaitPrologue, sizeof(kLoadWaitPrologue), 5,
+                            reinterpret_cast<void*>(&loadWaitHooked), "F22 training load wait (read only)"};
+        size_t stolen = 0;
+        std::string why;
+        if (installF9ProbeInto(g_f22LoadWait, s, base, &stolen, &why))
+            Log::get().note("training load wait: installed at EliteDangerous64.exe+0x%llX, stolen=%zu bytes, prologue %zu bytes verified (read only; "
+                            "temporary).", static_cast<unsigned long long>(kLoadWaitRva), stolen, sizeof(kLoadWaitPrologue));
+        else
+            Log::get().note("training load wait: NOT installed at EliteDangerous64.exe+0x%llX -- %s. The game was not touched by it.",
+                            static_cast<unsigned long long>(kLoadWaitRva), why.c_str());
+    }
+    {
+        const F9ProbeSpec s{"native-on-foot-rig-driver", kCamDriverRva, kCamDriverPrologue, sizeof(kCamDriverPrologue), 12,
+                            reinterpret_cast<void*>(&camDriverHooked), "F22 probe A (camera driver, read only)"};
+        size_t stolen = 0;
+        std::string why;
+        if (installF9ProbeInto(g_f22Driver, s, base, &stolen, &why))
+            Log::get().note("native on foot rig probe A: installed at EliteDangerous64.exe+0x%llX, stolen=%zu bytes (read only; temporary).",
+                            static_cast<unsigned long long>(kCamDriverRva), stolen);
+        else
+            Log::get().note("native on foot rig probe A: NOT installed at EliteDangerous64.exe+0x%llX -- %s. The game was not touched by it.",
+                            static_cast<unsigned long long>(kCamDriverRva), why.c_str());
+    }
+}
+
+// Installs the look's two hooks (VR only, once, when the key first reads on). Both must land: without the processor the body turn is not
+// measured, so the controller would write input it could not compensate. The update hook alone writes nothing while not engaged.
+void installLookHooksOnce() {
+    if (g_f22LookTried) return;
+    g_f22LookTried = true;
+    if (!runtimeVrProfile()) {
+        Log::get().note("native on foot look to aim: not installed (the flat profile)");
+        return;
+    }
+    const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    const char* peWhy = nullptr;
+    if (!base || !checkIdentity(base, &peWhy)) {
+        Log::get().note("native on foot look to aim: NOT installed -- identity mismatch (%s); the game was not touched.", peWhy ? peWhy : "no module");
+        return;
+    }
+    if (!g_base) g_base = base;
+    size_t stolenUpd = 0, stolenProc = 0;
+    std::string whyUpd, whyProc;
+    const F9ProbeSpec su{"native-on-foot-look-update", kLookUpdateRva, kLookUpdatePrologue, sizeof(kLookUpdatePrologue), 7,
+                         reinterpret_cast<void*>(&lookUpdateHooked), "F22 look update"};
+    const F9ProbeSpec sp{"native-on-foot-look-proc", kLookProcRva, kLookProcPrologue, sizeof(kLookProcPrologue), 5,
+                         reinterpret_cast<void*>(&lookProcHooked), "F22 look processor"};
+    const bool okUpd = installF9ProbeInto(g_f22Update, su, base, &stolenUpd, &whyUpd);
+    const bool okProc = installF9ProbeInto(g_f22Proc, sp, base, &stolenProc, &whyProc);
+    g_lookArmed = okUpd && okProc;
+    if (okUpd) Log::get().note("native on foot look to aim: update hook installed at EliteDangerous64.exe+0x%llX, stolen=%zu bytes, prologue %zu verified",
+                               static_cast<unsigned long long>(kLookUpdateRva), stolenUpd, sizeof(kLookUpdatePrologue));
+    else Log::get().note("native on foot look to aim: update hook NOT installed -- %s. Look to aim stays off.", whyUpd.c_str());
+    if (okProc) Log::get().note("native on foot look to aim: processor hook installed at EliteDangerous64.exe+0x%llX, stolen=%zu bytes, prologue %zu verified "
+                                "(read only)", static_cast<unsigned long long>(kLookProcRva), stolenProc, sizeof(kLookProcPrologue));
+    else Log::get().note("native on foot look to aim: processor hook NOT installed -- %s. Look to aim stays off.", whyProc.c_str());
+}
+
+// Frame thread, every frame: the controller. Writes g_lookInput (the update hook applies it on the next game update) and logs every 5 s while
+// engaged, with the pitch probe (log only). Engagement needs the key, reticle_follow = head, native stereo on foot, the session and both hooks.
+void lookToAimTick(uint64_t nowMs, bool session) {
+    const bool keyOn = g_lookKeyOn.load(std::memory_order_relaxed);
+    const bool headMode = g_reticleHead.load(std::memory_order_relaxed);
+    const bool onFoot = nativeOnFootActive();
+    const bool engagedWant = keyOn && headMode && onFoot && session && g_lookArmed;
+    g_lookWantRead.store(onFoot && session, std::memory_order_relaxed);
+    const double dt = (g_lookLastMs != 0 && nowMs > g_lookLastMs) ? std::min(0.1, static_cast<double>(nowMs - g_lookLastMs) / 1000.0) : 0.0;
+    g_lookLastMs = nowMs;
+    if (engagedWant != g_lookEngagedLast) {
+        if (engagedWant) {
+            Log::get().note("native on foot look to aim: engaged (the body turns to the head; the world is held by the runtime's compensation)");
+        } else {
+            const char* offWhy = !keyOn ? "fix.native_on_foot_look_to_aim is off" : !headMode ? "fix.native_on_foot_reticle_follow is not head"
+                                 : !onFoot ? "native stereo on foot ended" : !g_lookArmed ? "the hooks are not armed" : "the game session ended";
+            Log::get().note("native on foot look to aim: stops (%s); input zero", offWhy);
+        }
+        g_lookEngagedLast = engagedWant;
+    }
+    g_lookEngaged.store(engagedWant, std::memory_order_relaxed);
+    if (!engagedWant) {
+        g_lookInput.store(0.0f, std::memory_order_relaxed);
+        return;
+    }
+    F13Head h;
+    uint64_t headMs = 0;
+    {
+        F9Lock lock;
+        h = g_lookHead;
+        headMs = g_lookHeadMs;
+    }
+    const uintptr_t comp = g_lookComp.load(std::memory_order_relaxed);
+    float aLo = 0.0f, aHi = 0.0f;
+    const char* refuse = nullptr;
+    if (!comp) refuse = "no processor call yet (comp unknown)";
+    else if (!guardedRead(comp + kCompGainLoOff, &aLo, 4) || !guardedRead(comp + kCompGainHiOff, &aHi, 4)) refuse = "gain floats unreadable";
+    const float aMeas = g_lookAMeas.load(std::memory_order_relaxed);
+    const float aEst = aMeas > 0.0f ? aMeas : 0.5f * (aLo + aHi);
+    if (!refuse && !(aEst > 0.0f && std::isfinite(aEst))) refuse = "gain is not positive";
+    if (!refuse && !(h.valid && nowMs - headMs < kLookHeadMaxAgeMs)) refuse = "no fresh head sample (list B)";
+    float input = 0.0f, turn = 0.0f;
+    double errDeg = 0.0;
+    if (!refuse) {
+        const float sign = g_lookSign.load(std::memory_order_relaxed) < 0 ? -1.0f : 1.0f;
+        const double tauS = g_lookSmoothMs.load(std::memory_order_relaxed) / 1000.0;
+        const double alpha = tauS <= 0.0 ? 1.0 : 1.0 - std::exp(-dt / tauS);
+        const float errRad = std::atan2(h.C[8], h.C[10]);
+        errDeg = static_cast<double>(errRad) * 180.0 / 3.14159265358979323846;
+        turn = std::max(-kLookMaxTurnRad, std::min(kLookMaxTurnRad, sign * errRad * static_cast<float>(alpha)));
+        input = turn / aEst;
+        if (!std::isfinite(input)) {
+            refuse = "the input is not finite";
+            input = 0.0f;
+        }
+    }
+    g_lookInput.store(refuse ? 0.0f : input, std::memory_order_relaxed);
+    g_lookWhy.store(refuse, std::memory_order_relaxed);
+    if (nowMs - g_lookLineMs < 5000 && g_lookLineMs != 0) return;
+    g_lookLineMs = nowMs;
+    double totalDeg = 0.0, lastD = 0.0, lastPart = 0.0;
+    {
+        F9Lock lock;
+        totalDeg = g_lookTotal * 180.0 / 3.14159265358979323846;
+        lastD = static_cast<double>(g_lookLastD) * 180.0 / 3.14159265358979323846;
+        lastPart = static_cast<double>(g_lookLastPart) * 180.0 / 3.14159265358979323846;
+    }
+    const double windowDeg = totalDeg - g_lookWinStartDeg;
+    g_lookWinStartDeg = totalDeg;
+    const float aLoF = aLo, aHiF = aHi;
+    const char* why = g_lookWhy.load(std::memory_order_relaxed);
+    Log::get().note("native on foot look to aim: error yaw %.2f deg (sign %d), our input %.5f (turn %.3f deg, gain %.4f %s), old input %.5f, "
+                    "game yaw delta %.3f deg, our part %.3f deg, compensation published %.3f deg this window (total %.3f deg, game frame %u), "
+                    "A lo %.4f hi %.4f measured %.4f, comp 0x%llX, update calls %u writes %u refusals %u, %s",
+                    refuse ? 0.0 : errDeg, g_lookSign.load() < 0 ? -1 : 1, static_cast<double>(refuse ? 0.0f : input),
+                    static_cast<double>(turn) * 180.0 / 3.14159265358979323846, static_cast<double>(aEst), aMeas > 0.0f ? "measured" : "midpoint",
+                    static_cast<double>(g_lookLastOld.load()), lastD, lastPart, windowDeg, totalDeg,
+                    static_cast<unsigned>(g_lookGameFrame.load()), static_cast<double>(aLoF), static_cast<double>(aHiF), static_cast<double>(aMeas),
+                    static_cast<unsigned long long>(comp), static_cast<unsigned>(g_lookUpdCalls.load()), static_cast<unsigned>(g_lookWrites.load()),
+                    static_cast<unsigned>(g_lookRefusals.load()), refuse ? (std::string("refused: ") + refuse).c_str() : (why ? why : "no refusals"));
+    float basisVals[12] = {};
+    const bool okBasis = comp && guardedRead(comp + kCompBasisOff, basisVals, sizeof(basisVals));
+    char basisPitch[24], viewPitch[24], headPitch[24];
+    if (okBasis) std::snprintf(basisPitch, sizeof(basisPitch), "%.2f", static_cast<double>(std::asin(std::max(-1.0f, std::min(1.0f, basisVals[9]))) * 180.0f / 3.14159265f));
+    else std::snprintf(basisPitch, sizeof(basisPitch), "unread");
+    if (h.valid) {
+        std::snprintf(viewPitch, sizeof(viewPitch), "%.2f", static_cast<double>(std::asin(std::max(-1.0f, std::min(1.0f, h.viewY))) * 180.0f / 3.14159265f));
+        std::snprintf(headPitch, sizeof(headPitch), "%.2f", f13PitchDeg(h.C));
+    } else {
+        std::snprintf(viewPitch, sizeof(viewPitch), "unread");
+        std::snprintf(headPitch, sizeof(headPitch), "unread");
+    }
+    Log::get().note("native on foot look to aim: pitch probe (log only, nothing written): look basis pitch %s deg (comp+0x5B0 row 2 column 1), "
+                    "view pitch %s deg (list-B eye 0), headset pitch %s deg (C)", basisPitch, viewPitch, headPitch);
+}
+
+// Frame thread, every frame: the total the runtime applies, published with the game frame it was taken at, delayed by fix.native_on_foot_
+// look_to_aim_comp_delay frames (0 or 1). A two-slot ring: the delay picks the slot.
+void lookPublishTick() {
+    static double ring[2] = {};
+    static uint32_t ringFrame[2] = {};
+    static unsigned head = 0;
+    double total = 0.0;
+    uint32_t gameFrame = 0;
+    {
+        F9Lock lock;
+        total = g_lookTotal;
+        gameFrame = g_lookGameFrame.load(std::memory_order_relaxed);
+    }
+    ring[head & 1u] = total;
+    ringFrame[head & 1u] = gameFrame;
+    ++head;
+    const unsigned delay = static_cast<unsigned>(g_lookDelay.load(std::memory_order_relaxed) > 0 ? 1 : 0);
+    const unsigned slot = (head - 1u - delay) & 1u;
+    nativeFrameSetLookYaw(static_cast<float>(ring[slot]), ringFrame[slot]);
+}
+
 // The HRC line's values, without the window's calls (the change key).
 std::string f9HrcValues(const F9HrcState& s) {
     char g[3][8];
@@ -2956,6 +3466,8 @@ uint64_t __fastcall eyeProbeHooked(void* amc, void* job) noexcept {
     const F9Fn2 original = reinterpret_cast<F9Fn2>(g_eyeProbe.original);
     if (!original) return 0;
     const uint64_t now = GetTickCount64();
+    // F22 (read only): probe B, the FP and 3P roots against the head and the look basis, every 5 s per mode while native stereo is on foot.
+    if (amc && !g_eyeStop.load(std::memory_order_relaxed) && nativeOnFootActive()) rigProbeB(amc, now);
     if (!g_eyeStop.load(std::memory_order_relaxed) && amc && job && nativeOnFootActive() && now - g_eyeLastMs >= 1000 &&
         reinterpret_cast<uint64_t>(amc) == localAmcPointer()) {
         g_eyeLastMs = now;
@@ -3694,7 +4206,7 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
     const uint64_t now = GetTickCount64();
     const bool keyOn = g_keyOn.load(std::memory_order_relaxed);
     const bool gate = g_methodGate.load(std::memory_order_relaxed);
-    const bool session = journalGameplay();
+    const bool session = nativeGameSession();
     // The native flag. Under the gate method it is computed here (native_on_foot.h, THE FLAG): the byte is ours, the game's last forwarded
     // mode was HMD, and the journal says on foot. Under swap the setter sets and clears it, as F0 did.
     if (gate) {
@@ -3730,6 +4242,12 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
                  g_meshWorldKeyOn.load(std::memory_order_relaxed) ? f9Why : "fix.native_on_foot_hud_mesh_world is off");
     f9ProbeTick(now);
     f13FrameTick(now);
+    // F22: the training load wait and probe A (read only, VR, once); the look's two hooks (once, when its key first reads on); the look controller;
+    // and the total the runtime reads for its compensation (every frame).
+    installF22ProbesOnce();
+    if (g_lookKeyOn.load(std::memory_order_relaxed)) installLookHooksOnce();
+    lookToAimTick(now, session);
+    lookPublishTick();
     // F14: the layout probe, its lines, the HUD spread, and the reticle probe (temporary).
     installF14ProbesOnce();
     installEyeProbeOnce();   // F18 (TEMPORARY): probe P1, read only
@@ -3847,6 +4365,9 @@ void nativeOnFootShutdown() {
     explorerCamBodyClipTick(GetTickCount64(), false, false, "the game is shutting down");   // F19
     g_nativeOnFootBodyProbe.store(false, std::memory_order_relaxed);                       // F19
     bodyModeShutdown();                                                                    // F20
+    g_lookEngaged.store(false, std::memory_order_relaxed);                                 // F22: no more input; the hooks pass through
+    g_lookInput.store(0.0f, std::memory_order_relaxed);
+    g_lookWantRead.store(false, std::memory_order_relaxed);
 }
 
 // ---- F19 (TEMPORARY): the body's pixel constant buffer 2 (fix.native_on_foot_body_cb_probe) ---------------------------------------------

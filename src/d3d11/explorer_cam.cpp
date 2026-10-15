@@ -2829,7 +2829,7 @@ void applyHotkey(const std::string& name, const ecm::Sink& sink) {
             ecm::prefix(), name.c_str());
     else
         say(sink, "%s hotkey bound: %s (vk 0x%02X, mods 0x%X); watched, never captured, and only while the game has the focus and the journal "
-                  "says you are playing",
+                  "says you are playing (LoadGame, or Status.json on foot in a training scenario)",
             ecm::prefix(), name.c_str(), g_f5.key(), g_f5.mods());
 }
 
@@ -2869,7 +2869,9 @@ void explorerCamFrameBoundary(uint32_t frameNo) {
             ecm::prefix());
     }
     // The journal states what the key means: before LoadGame every press is menu navigation. With no journal to ask, every press counts.
-    in.gameplay = !journalWatchActive() || journalGameplay();
+    // F22: a training scenario has no LoadGame, so the hotkey's session is also Status.json on foot (journalSessionOrOnFoot). Only this hotkey
+    // reads it; device_hook.cpp's keysMeanGame (the other hotkeys) is unchanged.
+    in.gameplay = !journalWatchActive() || journalSessionOrOnFoot();
     in.onFootKnown = journalOnFootKnown();
     in.onFoot = journalOnFoot();
     {
