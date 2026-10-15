@@ -1792,7 +1792,7 @@ void writeEyeInputs(ID3D11DeviceContext* ctx,const std::wstring& dir) {
 bool stageEyeCrop(ID3D11DeviceContext* ctx, ID3D11Texture2D* tex, ID3D11Texture2D** slot, uint32_t* cwOut,
                   uint32_t* chOut, const uint32_t* region = nullptr,
                   uint32_t wantW = kEyeCrop, uint32_t wantH = kEyeCrop,
-                  uint32_t* xOut = nullptr, uint32_t* yOut = nullptr) {
+                  uint32_t* xOut = nullptr, uint32_t* yOut = nullptr, const double* centre = nullptr) {
     D3D11_TEXTURE2D_DESC d{};
     tex->GetDesc(&d);
     const uint32_t width = region ? region[2] - region[0] : d.Width;
@@ -1832,6 +1832,18 @@ bool stageEyeCrop(ID3D11DeviceContext* ctx, ID3D11Texture2D* tex, ID3D11Texture2
     D3D11_BOX box{};
     box.left = (region ? region[0] : 0) + (width - cw) / 2;
     box.top = (region ? region[1] : 0) + (height - ch) / 2;
+    if (centre) {
+        // F53: about a given point (texture pixels), kept inside the region.
+        const double lo[2] = {static_cast<double>(region ? region[0] : 0), static_cast<double>(region ? region[1] : 0)};
+        const double hi[2] = {lo[0] + static_cast<double>(width - cw), lo[1] + static_cast<double>(height - ch)};
+        double l = centre[0] - 0.5 * cw, t = centre[1] - 0.5 * ch;
+        if (!(l == l)) l = lo[0];
+        if (!(t == t)) t = lo[1];
+        l = l < lo[0] ? lo[0] : l > hi[0] ? hi[0] : l;
+        t = t < lo[1] ? lo[1] : t > hi[1] ? hi[1] : t;
+        box.left = static_cast<UINT>(l + 0.5);
+        box.top = static_cast<UINT>(t + 0.5);
+    }
     box.right = box.left + cw;
     box.bottom = box.top + ch;
     box.front = 0;
@@ -1842,6 +1854,67 @@ bool stageEyeCrop(ID3D11DeviceContext* ctx, ID3D11Texture2D* tex, ID3D11Texture2
     if (xOut) *xOut = box.left;
     if (yOut) *yOut = box.top;
     return true;
+}
+
+// F53 (TEMPORARY, with fix.native_on_foot_marker_probe): the eye dump's marker crop. When the probe is on and gave the eye a projected
+// marker position in the last 500 ms (native_on_foot.h, g_markerCropNdc: P through the eye's scene rows), the run's overview of that eye is
+// joined by a second file, eye_<stamp>_L0_marker.bmp / _R0_marker.bmp: kEyeMarkerCrop square about that point, so a fast turn's marker can be
+// measured against its ground point. The overview is not replaced. Staged with the overview (same frame), written with it.
+constexpr uint32_t kEyeMarkerCrop = 512;
+ID3D11Texture2D* g_eyeMarkerStaging[2] = {};
+bool g_eyeMarkerTaken[2] = {};
+float g_eyeMarkerNdc[2][4] = {};     // P's ndc, the drawn marker's ndc (read back 2..3 frames late; NaN when none fresh)
+uint32_t g_eyeMarkerBox[2][4] = {};  // the crop's left, top, width, height in the texture
+uint32_t g_eyeMarkerTex[2][2] = {};  // the eye's region size the ndc maps onto
+void stageMarkerCrop(ID3D11DeviceContext* ctx, ID3D11Texture2D* tex, int eye, const uint32_t* region) {
+    if (!ctx || !tex || eye < 0 || eye > 1 || g_eyeMarkerTaken[eye] || !nativeOnFootMarkerProbeLive()) return;
+    const MarkerCropNdc& m = g_markerCropNdc[eye];
+    const uint64_t now = GetTickCount64(), pMs = m.pMs.load(std::memory_order_relaxed), dMs = m.drawnMs.load(std::memory_order_relaxed);
+    if (!pMs || now - pMs > 500) return;
+    const float nx = m.p[0].load(std::memory_order_relaxed), ny = m.p[1].load(std::memory_order_relaxed);
+    D3D11_TEXTURE2D_DESC d{};
+    tex->GetDesc(&d);
+    const uint32_t x0 = region ? region[0] : 0, y0 = region ? region[1] : 0;
+    const uint32_t w = region ? region[2] - region[0] : d.Width, h = region ? region[3] - region[1] : d.Height;
+    const double centre[2] = {x0 + (static_cast<double>(nx) + 1.0) * 0.5 * w, y0 + (1.0 - static_cast<double>(ny)) * 0.5 * h};
+    uint32_t cw = 0, ch = 0, bx = 0, by = 0;
+    if (!stageEyeCrop(ctx, tex, &g_eyeMarkerStaging[eye], &cw, &ch, region, kEyeMarkerCrop, kEyeMarkerCrop, &bx, &by, centre)) return;
+    g_eyeMarkerTaken[eye] = true;
+    const bool drawnFresh = dMs && now - dMs <= 500;
+    g_eyeMarkerNdc[eye][0] = nx;
+    g_eyeMarkerNdc[eye][1] = ny;
+    g_eyeMarkerNdc[eye][2] = drawnFresh ? m.drawn[0].load(std::memory_order_relaxed) : NAN;
+    g_eyeMarkerNdc[eye][3] = drawnFresh ? m.drawn[1].load(std::memory_order_relaxed) : NAN;
+    g_eyeMarkerBox[eye][0] = bx;
+    g_eyeMarkerBox[eye][1] = by;
+    g_eyeMarkerBox[eye][2] = cw;
+    g_eyeMarkerBox[eye][3] = ch;
+    g_eyeMarkerTex[eye][0] = w;
+    g_eyeMarkerTex[eye][1] = h;
+}
+void writeMarkerCrops(ID3D11DeviceContext* ctx, const std::wstring& dir) {
+    for (int eye = 0; eye < 2; ++eye) {
+        if (!g_eyeMarkerTaken[eye] || !g_eyeMarkerStaging[eye]) continue;
+        g_eyeMarkerTaken[eye] = false;
+        wchar_t path[MAX_PATH];
+        _snwprintf_s(path, MAX_PATH, _TRUNCATE, L"%s\\eye_%s_%c0_marker.bmp", dir.c_str(), g_eyeRunStamp, eye ? L'R' : L'L');
+        D3D11_TEXTURE2D_DESC sd{};
+        g_eyeMarkerStaging[eye]->GetDesc(&sd);
+        const bool ok = writeEyeBmp(ctx, g_eyeMarkerStaging[eye], sd, eye, path);
+        const float* n = g_eyeMarkerNdc[eye];
+        const uint32_t* b = g_eyeMarkerBox[eye];
+        const double px = (static_cast<double>(n[0]) + 1.0) * 0.5 * g_eyeMarkerTex[eye][0], py = (1.0 - static_cast<double>(n[1])) * 0.5 * g_eyeMarkerTex[eye][1];
+        char drawn[128];
+        if (n[2] == n[2])
+            std::snprintf(drawn, sizeof(drawn), "(%.5f, %.5f), at (%.1f, %.1f) px in the eye", static_cast<double>(n[2]), static_cast<double>(n[3]),
+                          (static_cast<double>(n[2]) + 1.0) * 0.5 * g_eyeMarkerTex[eye][0], (1.0 - static_cast<double>(n[3])) * 0.5 * g_eyeMarkerTex[eye][1]);
+        else
+            std::snprintf(drawn, sizeof(drawn), "none in the last 500 ms");
+        Log::get().note("eye capture (F53): marker crop eye %d %ls: %ux%u at (%u, %u) in the texture; P through the eye's scene rows ndc (%.5f, %.5f), "
+                        "at (%.1f, %.1f) px in the eye's %ux%u (the crop's centre unless clamped at an edge); the drawn marker (read back, 2..3 "
+                        "frames older) %s; %s", eye, path, b[2], b[3], b[0], b[1], static_cast<double>(n[0]), static_cast<double>(n[1]), px, py,
+                        g_eyeMarkerTex[eye][0], g_eyeMarkerTex[eye][1], drawn, ok ? "written" : "the write FAILED");
+    }
 }
 
 void eyeOutputCropSize(int k, ID3D11Texture2D* output, uint32_t* wantW, uint32_t* wantH) {
@@ -2048,6 +2121,7 @@ void writeEyeRun(ID3D11DeviceContext* ctx, uint32_t cw, uint32_t ch) {
         g_eyeRunStaging[0]->GetDesc(&sd);
         if (writeEyeBmp(ctx, g_eyeRunStaging[0], sd, 0, path)) ++wroteTreated;
     }
+    writeMarkerCrops(ctx, dir);   // F53: the marker crops staged with the overviews (none unless the marker probe was on)
     if (g_eyeRunUntreated) {
         if (g_eyeOverviewTaken[1] && g_eyeRunStaging[1]) {
             wchar_t path[MAX_PATH];D3D11_TEXTURE2D_DESC sd{};
@@ -2090,7 +2164,10 @@ void captureUntreatedEye(ID3D11Texture2D* tex,int eye,const float* bounds) {
     if(eye==1&&g_eyeRunLeft>0&&g_eyeFinalRun.find(g_eyeFinalClock.epoch)<0)
         g_eyeFinalRun.schedule(unsigned(g_eyeRunTaken),g_eyeFinalClock.epoch,g_rowsFrame);
     const uint32_t w=region[2]-region[0],h=region[3]-region[1];uint32_t cw=0,ch=0;
-    if(!g_eyeOverviewTaken[eye])g_eyeOverviewTaken[eye]=stageEyeCrop(ctx,tex,&g_eyeRunStaging[eye],&cw,&ch,region,w,h);
+    if(!g_eyeOverviewTaken[eye]){
+        g_eyeOverviewTaken[eye]=stageEyeCrop(ctx,tex,&g_eyeRunStaging[eye],&cw,&ch,region,w,h);
+        if(g_eyeOverviewTaken[eye])stageMarkerCrop(ctx,tex,eye,region);   // F53: the marker crop beside the overview (probe on only)
+    }
     if(eye==0 && g_eyeRunLeft>0 && g_eyeRunTaken<kEyeRun) {
         const int k=g_eyeRunTaken;
         if(stageEyeCrop(ctx,tex,&g_eyeRawStaging[k],&cw,&ch,region)) {
@@ -2114,7 +2191,10 @@ void captureEyeRun(ID3D11DeviceContext* ctx, ID3D11Texture2D* tex) {
         if (k >= 0 && k < kEyeRun) ++g_eyeRunTaken;
         g_eyeRunLeft = 0; g_eyeRunReady = g_eyeRunTaken > 0; return;
     }
-    if (k == 0) stageEyeRun(ctx, tex, g_eyeRunStaging, 0);
+    if (k == 0) {
+        stageEyeRun(ctx, tex, g_eyeRunStaging, 0);
+        stageMarkerCrop(ctx, tex, 0, nullptr);   // F53: the treated left eye's marker crop beside its overview (probe on only)
+    }
     uint32_t cw = 0, ch = 0;
     uint32_t wantW=0, wantH=0, cropX=0, cropY=0;
     eyeOutputCropSize(k, tex, &wantW, &wantH);
@@ -6008,6 +6088,7 @@ static void beginEyeRun() {
     g_eyeInputCaptureAttempted=false;
     g_eyeRunUntreated=false;
     memset(g_eyeOverviewTaken,0,sizeof(g_eyeOverviewTaken));
+    memset(g_eyeMarkerTaken,0,sizeof(g_eyeMarkerTaken));   // F53: the marker crops
     memset(g_eyeTreatedWritten,0,sizeof(g_eyeTreatedWritten));
     memset(g_eyeTreatedTaken,0,sizeof(g_eyeTreatedTaken));
     memset(g_eyeRawWritten,0,sizeof(g_eyeRawWritten));
@@ -6067,6 +6148,8 @@ void temporalPassShutdown() {
     for (EyeState& e : g_eye) releaseEye(e);
     for (Slot& q : g_slots) releaseSlot(q);
     for(auto& overview:g_eyeRunStaging)if(overview){overview->Release();overview=nullptr;}
+    for(auto& crop:g_eyeMarkerStaging)if(crop){crop->Release();crop=nullptr;}   // F53
+    memset(g_eyeMarkerTaken,0,sizeof(g_eyeMarkerTaken));
     for (int k = 0; k < kEyeRun; ++k) {
         if (g_eyeRawStaging[k]) { g_eyeRawStaging[k]->Release(); g_eyeRawStaging[k] = nullptr; }
         if (g_eyeTreatedStaging[k]) { g_eyeTreatedStaging[k]->Release(); g_eyeTreatedStaging[k] = nullptr; }

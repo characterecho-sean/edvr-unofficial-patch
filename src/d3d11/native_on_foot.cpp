@@ -89,9 +89,10 @@ bool g_nativeEdgeLast = false;                // F26: frame thread only
 std::atomic<bool> g_alignKeyOn{false};
 std::atomic<int> g_alignMode{0};   // F35: 0 off, 1 view (F33), 2 body (F35)
 double g_alignTrimCm[3] = {};   // [0] right, [1] up, [2] forward (body axes)
-std::atomic<int> g_alignAnchorMode{2};   // F48: fix.native_on_foot_body_align_anchor: 0 neck (F46), 1 clavicles (F43/F45), 2 pov (the default)
+std::atomic<int> g_alignAnchorMode{0};   // F48: fix.native_on_foot_body_align_anchor: 0 neck (F53: the default, rest geometry), 1 clavicles (F43/F45), 2 pov
 std::atomic<bool> g_alignVertical{false};   // F50 (TEMPORARY): fix.native_on_foot_body_align_vertical: off (the default) locks the body's height
-std::atomic<bool> g_raiseFpKey{true};       // F51 (TEMPORARY): fix.native_on_foot_body_raise_fp: on (the default) raises the FP rig and the view in body mode
+std::atomic<bool> g_raiseFpKey{false};      // F51 (TEMPORARY): fix.native_on_foot_body_raise_fp: F53 default off; on raises the FP rig and the view in body mode
+std::atomic<double> g_raiseCm{nofoot::kRaiseDefaultCm};   // F53 (TEMPORARY): fix.native_on_foot_body_raise_cm, the constant raise while raise_fp is on
 uint64_t g_f40MarkerLogMs = 0;   // F40: the marker angle line's last time
 std::atomic<double> g_worldLeadFrames{2.5};   // F38: fix.native_on_foot_world_markers_lead, 0 to 5 frames (forward_lead); live
 std::atomic<int> g_worldMarkersMode{6};        // F27/F31/F37: fix.native_on_foot_world_markers: 0 fixed, 1 forward (C), 2 game, 3 forward_now (H_M), 4 forward_hist (the ring's matched pose), 5 forward_k2 (the ring's pose two frames back), 6 forward_lead (the newest ring pose carried ahead, default); live; key 10 is never touched
@@ -578,10 +579,10 @@ void readKey() {
                             "layer's), its NDC against P through the eye's world rows (b1 270..273); 1 s lines while on foot; measure only" : "off",
                             probe && fix ? " (on because fix.native_on_foot_marker_fix is on)" : "");
         if (first || fix != g_nativeOnFootMarkerFixKey.load(std::memory_order_relaxed))
-            Log::get().note("native on foot marker fix (F47/F50, TEMPORARY): %s", fix ? "on -- the marker composite's b0 rows 4 and 5 are moved by "
-                            "(dx, dy) . row 7 on a private copy, per eye, when both eyes' marker draws are matched; F50: (dx, dy) = -(m - c), m = X0 "
-                            "through the marker's b0 minus P through the eye's world rows, c the eye's baseline (seeded over 30 slow-head frames, "
-                            "std under 0.5 px); 1 s lines while on foot" : "off");
+            Log::get().note("native on foot marker fix (F47/F53, TEMPORARY): %s", fix ? "on -- the marker composite's b0 rows 4 and 5 are moved by "
+                            "(dx, dy) . row 7 on a private copy, per eye, when both eyes' marker draws are matched; F53: (dx, dy) = -(m - e), m = X0 "
+                            "through the marker's b0 minus P through the eye's main-scene rows, e the fixed icon offset (36.3 px up); only on frames "
+                            "whose scene rows agree with the temporal pass under 1 px; 1 s lines while on foot" : "off");
         g_nativeOnFootMarkerFixKey.store(fix, std::memory_order_relaxed);
         g_nativeOnFootMarkerProbeKey.store(probe, std::memory_order_relaxed);
         // F52 (TEMPORARY, live): the reference the correction measures against: temporal (the default) or world_first.
@@ -598,10 +599,11 @@ void readKey() {
         const int mode = alignMode == "body" ? 2 : alignMode == "calibrate" ? 3 : (alignMode == "view" || alignMode == "on") ? 1 : 0;   // the old "on" is view
         g_alignMode.store(mode, std::memory_order_relaxed);
         g_alignKeyOn.store(mode != 0, std::memory_order_relaxed);
-        // F48 (live): the body anchor: pov (the default: the 3P povCamera joint at the FP root), neck (F46) or clavicles (F45; the old value
-        // "shoulders" reads as clavicles). Anything else is pov.
-        const std::string anchor = cfg.getString("fix.native_on_foot_body_align_anchor", "pov");
-        g_alignAnchorMode.store(anchor == "neck" ? 0 : (anchor == "clavicles" || anchor == "shoulders") ? 1 : 2, std::memory_order_relaxed);
+        // F48 (live): the body anchor: neck (F53: the default, with the rest geometry: the 3P neck at the FP side plus (0, -0.155, -0.161) m in
+        // body axes), pov (F48: the 3P povCamera joint at the FP root) or clavicles (F45; the old value "shoulders" reads as clavicles).
+        // Anything else is neck.
+        const std::string anchor = cfg.getString("fix.native_on_foot_body_align_anchor", "neck");
+        g_alignAnchorMode.store(anchor == "pov" ? 2 : (anchor == "clavicles" || anchor == "shoulders") ? 1 : 0, std::memory_order_relaxed);
         // F50 (TEMPORARY, live): the body's vertical. off (the default): in body mode d moves the body only in its horizontal plane (the feet
         // stay on the ground); on: F48's behaviour, d in all three axes.
         const bool vertical = cfg.getString("fix.native_on_foot_body_align_vertical", "off") == "on";
@@ -610,14 +612,20 @@ void readKey() {
                             "the body in all three axes (F48)" : "off -- in body mode d moves the body only along its right and forward axes; its "
                             "up component (and the up trim) is dropped and logged");
         g_alignVertical.store(vertical, std::memory_order_relaxed);
-        // F51 (TEMPORARY, live): the FP rig and view raise in body mode. on (the default): the view rises by dh (a seated y offset) and the FP
-        // AMC's records by dh along the body's up axis, dh = (3P pov height - FP side height), low-passed, 0..0.5 m. off: neither. Body mode only.
-        const bool raiseFp = cfg.getString("fix.native_on_foot_body_raise_fp", "on") != "off";
-        if (first || raiseFp != g_raiseFpKey.load(std::memory_order_relaxed))
-            Log::get().note("native on foot body raise (F51, TEMPORARY): fix.native_on_foot_body_raise_fp is %s", raiseFp ? "on -- in body mode the "
-                            "view and the first-person AMC's records rise by dh = (3P pov height - FP side height), low-passed 1 s, 0..0.5 m" : "off -- "
-                            "nothing is raised");
+        // F51 (TEMPORARY, live): the FP rig and view raise in body mode. F53: off by default; on: the view rises by a constant (a seated y
+        // offset) and the FP AMC's records by the same along the body's up axis. The constant is fix.native_on_foot_body_raise_cm (default 10,
+        // clamped 0..50): F51's live dh = (3P pov height - FP side height) bobbed 0 to 12 cm with the pov joint's animation, so it is now logged
+        // only. Body mode only.
+        const bool raiseFp = cfg.getString("fix.native_on_foot_body_raise_fp", "off") == "on";
+        double raiseCm = static_cast<double>(cfg.getFloat("fix.native_on_foot_body_raise_cm", static_cast<float>(nofoot::kRaiseDefaultCm)));
+        if (!(raiseCm == raiseCm)) raiseCm = nofoot::kRaiseDefaultCm;
+        raiseCm = std::max(0.0, std::min(nofoot::RaiseDh::kMaxM * 100.0, raiseCm));
+        if (first || raiseFp != g_raiseFpKey.load(std::memory_order_relaxed) || raiseCm != g_raiseCm.load(std::memory_order_relaxed))
+            Log::get().note("native on foot body raise (F51/F53, TEMPORARY): fix.native_on_foot_body_raise_fp is %s; fix.native_on_foot_body_raise_cm "
+                            "%.1f", raiseFp ? "on -- in body mode the view and the first-person AMC's records rise by the constant raise_cm (F53; "
+                            "the live dh is logged, not applied)" : "off -- nothing is raised (the F53 default)", raiseCm);
         g_raiseFpKey.store(raiseFp, std::memory_order_relaxed);
+        g_raiseCm.store(raiseCm, std::memory_order_relaxed);
         // F49 (TEMPORARY, live): the pose freeze: off, probe (the default: the Animate post-hook measures and writes nothing) or on.
         const std::string freeze = cfg.getString("fix.native_on_foot_pose_freeze", "probe");
         pfz::g_mode.store(freeze == "on" ? 2 : freeze == "off" ? 0 : 1, std::memory_order_relaxed);
@@ -2905,6 +2913,34 @@ void f44Assign(uint32_t key, F44Tag& t) noexcept {
     t.key = second ? ((key & 0x7Fu) | kF47SecondPostBit) : key;
     t.sentinel = drawtag::sentinel(t.key, t.frame);
 }
+// F53: the post stub's key census (game thread; cumulative since launch, while the probe is on and native stereo is on foot): each distinct key
+// (full 32-bit value) and its posts and tagged posts, so the 1 s line can say whether every key is tagged and whether every key's sentinel is
+// distinct (drawtag::keysDistinct). No lock, no allocation: a slot is claimed by a CAS of key + 1; keys past the table are counted.
+constexpr uint32_t kF53KeyCensus = 32;
+struct F53KeySlot {
+    std::atomic<uint32_t> keyPlus1{0};
+    std::atomic<uint64_t> posts{0}, tagged{0};
+};
+F53KeySlot g_f53Keys[kF53KeyCensus];
+std::atomic<uint64_t> g_f53KeyOverflow{0};
+F53KeySlot* f53KeySlot(uint32_t key) noexcept {
+    const uint32_t want = key + 1u;
+    if (want == 0) return nullptr;
+    for (uint32_t i = 0; i < kF53KeyCensus; ++i) {
+        F53KeySlot& s = g_f53Keys[(key + i) % kF53KeyCensus];
+        uint32_t cur = s.keyPlus1.load(std::memory_order_relaxed);
+        if (cur == 0 && s.keyPlus1.compare_exchange_strong(cur, want, std::memory_order_relaxed)) cur = want;
+        if (cur == want) return &s;
+    }
+    g_f53KeyOverflow.fetch_add(1, std::memory_order_relaxed);
+    return nullptr;
+}
+void f53KeyPost(uint32_t key) noexcept {
+    if (F53KeySlot* s = f53KeySlot(key)) s->posts.fetch_add(1, std::memory_order_relaxed);
+}
+void f53KeyTagged(uint32_t key) noexcept {
+    if (F53KeySlot* s = f53KeySlot(key)) s->tagged.fetch_add(1, std::memory_order_relaxed);
+}
 // F52: the marker posts the placement leaves alone (key 10, the reticle; world markers mode "game"; no fresh head pose) are tagged in place
 // while the probe is on: the game's own t at +0x40 with the sentinel in its low mantissa bits (at most 255 ulps a component), so every post-stub
 // marker node is findable. No lock, no log; the reads and writes are guarded.
@@ -2925,6 +2961,7 @@ void f52TagInPlace(uintptr_t na, uintptr_t ia, uint32_t key) noexcept {
     f44Publish(f44);
     g_f44Tagged.fetch_add(1, std::memory_order_relaxed);
     g_f52TagOnly.fetch_add(1, std::memory_order_relaxed);
+    f53KeyTagged(key);
 }
 
 // F25 (TEMPORARY): the post-call of the marker stub, for every marker except key 10 (the reticle, which keeps its own placement). The game's call
@@ -2937,6 +2974,7 @@ void __fastcall reticleWorldPost(void* node) noexcept {
     uintptr_t ia = 0;
     uint32_t key = 0;
     if (!na || !guardedRead(na + 0x60, &ia, 8) || !ia || !guardedRead(na + 0x20, &key, 4)) return;
+    if (g_nativeOnFootMarkerProbeKey.load(std::memory_order_relaxed) && nativeOnFootActive()) f53KeyPost(key);   // F53: the key census
     if (key == 10) {
         f52TagInPlace(na, ia, key);   // F52: tagged (the probe on), placement left alone
         return;
@@ -3133,6 +3171,7 @@ void __fastcall reticleWorldPost(void* node) noexcept {
         f44.pOk = guardedRead(na + 0x50, f44.p, sizeof(f44.p));
         f44Publish(f44);
         g_f44Tagged.fetch_add(1, std::memory_order_relaxed);
+        f53KeyTagged(key);
     }
     if (now - g_worldLineMs >= 5000 || g_worldLineMs == 0) {
         g_worldLineMs = now;
@@ -5921,12 +5960,13 @@ void f51Line(const EyeSample& s, const FpRootSnap& fp, bool fpFresh, bool raiseO
     }
     double raiseS[3] = {};
     nofoot::raiseSeated(g_f51Applied, raiseS);
-    Log::get().note("native on foot body raise (F51, key %s): dh measured %.3f m (3P pov up %.3f m from %s, FP side up %.3f m, body axes), low-passed "
-                    "%.3f m (tau 1 s, 0..0.5 m), applied %.3f m; view: seated offset (0, %.3f, 0) m, eye align published (%.3f, %.3f, %.3f) m; FP "
+    Log::get().note("native on foot body raise (F51/F53, key %s): dh measured %.3f m (3P pov up %.3f m from %s, FP side up %.3f m, body axes), low-passed "
+                    "%.3f m (tau 1 s, 0..0.5 m; F53: logged only, the target is the constant %.2f m), applied %.3f m; view: seated offset (0, %.3f, 0) m, eye align published (%.3f, %.3f, %.3f) m; FP "
                     "records (AMC %016llX): %llu shifted, %llu skipped over %llu passes this second%s, along the up row (%.3f, %.3f, %.3f); parts: %s; "
                     "first shifted %s: block %u %s, before (%.3f, %.3f, %.3f) after (%.3f, %.3f, %.3f)",
                     raiseOn ? "on" : g_raiseFpKey.load(std::memory_order_relaxed) ? "on, not active" : "off", g_f51Dh.raw, g_f51PovUp,
-                    g_f51Src == 0 ? "the povCamera joint" : g_f51Src == 1 ? "the head + 0.038 m" : "nothing yet", g_f51FpUp, g_f51Dh.lp, g_f51Applied,
+                    g_f51Src == 0 ? "the povCamera joint" : g_f51Src == 1 ? "the head + 0.038 m" : "nothing yet", g_f51FpUp, g_f51Dh.lp,
+                    nofoot::raiseConstM(true, g_raiseCm.load(std::memory_order_relaxed)), g_f51Applied,
                     raiseS[1], g_f51EyePub[0], g_f51EyePub[1], g_f51EyePub[2], static_cast<unsigned long long>(g_fpAmcLocal.load(std::memory_order_relaxed)),
                     static_cast<unsigned long long>(shifted), static_cast<unsigned long long>(skipped), static_cast<unsigned long long>(passes),
                     notMode2 ? " (the latched FP AMC was not mode 2 on some calls)" : "", g_f51Up[0], g_f51Up[1], g_f51Up[2], at ? names : "none",
@@ -6180,10 +6220,13 @@ void alignTick(uint64_t now) noexcept {
                                         "did not resolve), placed at the FP root%s", fpFresh ? "" : " (fp root not fresh: the job camera)");
                 }
             } else {
-                for (size_t i = 0; i < 3; ++i) {
-                    anchorB[i] = camB[i];
-                    srcB[i] = povEqB[i];
-                }
+                // F53: the neck with the rest geometry (nofoot::neckRestSource): the neck placed where the pov is at rest, so d converges on
+                // the neck at the FP side plus (0, -0.155, -0.161) m. F42/F46's offset captured over the entry's first second carried the
+                // stance and the twist; it is logged, not applied. Without the neck: the low-passed head (as before).
+                for (size_t i = 0; i < 3; ++i) anchorB[i] = camB[i];
+                if (s.neckOk) nofoot::neckRestSource(neckB, srcB);
+                else
+                    for (size_t i = 0; i < 3; ++i) srcB[i] = povEqB[i];
             }
             // F48: the standing height. The 3P side's live height is tracked on every anchor (logged); the pov anchor alone uses the captured
             // value in place of it (neck and clavicles keep F46's and F45's behaviour). x and z stay live.
@@ -6378,7 +6421,8 @@ void alignTick(uint64_t now) noexcept {
                                 "standing height %.3f m (%s, %u captures), live %.3f m; neck after d minus the FP side (body) %.3f %.3f %.3f m%s",
                                 shoulderAnchor ? "clavicles" : anchorMode == 2 ? "pov" : "neck", g_f48SrcB[0], g_f48SrcB[1], g_f48SrcB[2],
                                 anchorMode == 2 && !shoulderAnchor ? (g_f48PovSrc == 0 ? "povCamera joint" : "head + (0, 0.038, 0.112)")
-                                                                   : (shoulderAnchor ? "3P clavicles" : "neck + captured offset"),
+                                                                   : (shoulderAnchor ? "3P clavicles" : s.neckOk ? "neck + rest (0, 0.155, 0.161) (F53)"
+                                                                                                                  : "the low-passed head (no neck)"),
                                 g_f48CamB[0], g_f48CamB[1], g_f48CamB[2], g_f48Stand.value,
                                 !g_f48Stand.valid ? "not captured"
                                 : (anchorMode == 2 && !shoulderAnchor) ? (vertical ? "applied" : "logged, not applied: vertical off")
@@ -6442,10 +6486,11 @@ void alignTick(uint64_t now) noexcept {
     // applied raise follows it at 5 cm a frame at most. Anywhere else the filter resets and the applied raise returns to zero at the same cap (the
     // undo of body mode's raise; nothing is raised outside body mode). The view's seated y is minus the applied raise; the FP records move by it
     // along the body's up row (AMC row 1, world), the axis dh is measured on.
+    // F53: the target is the constant raise (fix.native_on_foot_body_raise_cm); dh still runs through its filter for the 1 s line (logged only).
     const bool raiseOn = mode == 2 && g_raiseFpKey.load(std::memory_order_relaxed) && nativeOnFootActive();
-    if (raiseOn) g_f51Dh.step(f51Raw, f51Have, dt);
+    if (mode == 2) g_f51Dh.step(f51Raw, f51Have, dt);
     else g_f51Dh.reset();
-    g_f51Applied = nofoot::capToward(g_f51Applied, raiseOn ? g_f51Dh.lp : 0.0, align::kCapPerFrameM);
+    g_f51Applied = nofoot::capToward(g_f51Applied, nofoot::raiseConstM(raiseOn, g_raiseCm.load(std::memory_order_relaxed)), align::kCapPerFrameM);
     if (!raiseOn && std::fabs(g_f51Applied) < 1e-9) g_f51Applied = 0.0;
     g_f51FpOn.store(raiseOn, std::memory_order_relaxed);
     if (s.valid) {
@@ -7706,6 +7751,12 @@ constexpr UINT kPrivateMax = 65536;      // the private b0's size limit (the gam
 constexpr uint32_t kKeySlots = 12;       // tag keys tracked (six marker composite draws an eye were seen; second posts take their own)
 constexpr uint32_t kRefFreshFrames = 90; // the temporal rows count as available while the eye had them within this many frames
 constexpr uint32_t kRefNotes = 8;        // reference switches said in the log (counted after)
+// F53: the scene reference's census of cb1 rows 270..273, the trust check, the untagged marker composite draws' records.
+constexpr uint32_t kRowSets = 8;              // distinct (vs, ps, rows) kept per eye in a census frame
+constexpr uint32_t kRowCensusFrames = 2;      // census frames a second (each logged per eye)
+constexpr uint32_t kRowCensusDraws = 4096;    // world draws a census frame looks at (more are counted as capped)
+constexpr uint32_t kUntags = 16;              // untagged marker composite draws (eye, place, record) kept a second
+constexpr uint32_t kAxisNotes = 6;            // axis mismatches of the temporal rows described in the log (counted after)
 
 enum Refuse : uint32_t { kNoT33, kStride, kNoStream, kConstants, kNoSlot, kBufferFull, kNoTag, kPoolChanged, kScanFault, kRefuseCount };
 const char* const kRefuseName[kRefuseCount] = {
@@ -7803,8 +7854,9 @@ struct EyeStats {
     uint64_t predHit = 0, predMiss = 0, cpuAgree = 0, cpuDiffer = 0;
     double cpuDiffMax = 0.0;
     // F50 at the draw: |m - c| (px) by the head's speed (bins < 3, 3..20, 20..60, >= 60 deg/s), the frames the baseline took, its resets,
-    // the decisions refused while it was not ready. At read-back: |marker - (P + c)| through the patched rows (px) by the same bins.
-    uint64_t lagN[4] = {}, lagTaken = 0, lagResets = 0, fUnseeded = 0, resN[4] = {};
+    // F53: c is the fixed icon offset e; the decisions refused because the eye's scene rows were not trusted this frame. At read-back:
+    // |marker - (P + e)| through the patched rows (px) by the same bins.
+    uint64_t lagN[4] = {}, lagTaken = 0, lagResets = 0, fUntrusted = 0, resN[4] = {};
     double lagSum[4] = {}, lagMax[4] = {}, resSum[4] = {}, resMax[4] = {};
 };
 struct SrvInfo {
@@ -7832,7 +7884,35 @@ struct KeyWin {
     uint32_t ordMask[2] = {};
     uint64_t lagN[2][4] = {}, resN[2][4] = {};
     double lagSum[2][4] = {}, lagMax[2][4] = {}, resSum[2][4] = {}, resMax[2][4] = {};
-    uint64_t decided[2] = {}, patched[2] = {}, held[2] = {}, unseeded[2] = {}, gate[2] = {}, resets[2] = {}, otherUnmatched[2] = {};
+    uint64_t decided[2] = {}, patched[2] = {}, held[2] = {}, untrusted[2] = {}, gate[2] = {}, resets[2] = {}, otherUnmatched[2] = {};
+};
+// F53: one distinct cb1 rows 270..273 content a census eye-frame saw, by the vertex and pixel shader that read it, and whether that draw
+// passed the scene reference's test (drawtag::sceneRefWhy).
+struct RowSet {
+    uint64_t vs = 0, ps = 0, n = 0;
+    bool scene = false;
+    float rows[16] = {};
+};
+struct RowCensus {
+    uint32_t frame = ~0u;
+    bool active = false;
+    uint64_t draws = 0, noRows = 0, capped = 0, full[2] = {};
+    RowSet sets[2][kRowSets];
+    uint32_t n[2] = {};
+};
+// F53: an untagged marker composite draw (its stream read back, no found record read by x): the record its first entry names, and that
+// record's position (+16) and low bits as the next Unmap of its pool shows them.
+struct Untag {
+    const void* pool = nullptr;
+    uint32_t record = 0, instances = 0;
+    int eye = -1;
+    uint16_t ord = 0;
+    uint64_t n = 0, ps = 0;
+    bool havePos = false, taggable = false;
+    float pos[3] = {};
+    uint32_t bits = 0;   // the 24 low bits as a sentinel would carry them
+    int tagKey = -1;     // a tag in flight they match (the key), -1 none
+    uint32_t tagAge = 0;
 };
 // F52: an eye's world rows' source this second: the first world pool draw that gave the eye's view (its shaders, target, depth view, viewport,
 // b1), the last one and how often the vertex shader changed between eye-frames.
@@ -7847,6 +7927,7 @@ struct WorldSrc {
 // F52: an eye's world rows against the temporal pass's camera rows for the eye, this second.
 struct RefCmp {
     uint64_t ticks = 0, n = 0, noTemporal = 0, noWorld = 0, degenerate = 0, convention = 0, sameBuf = 0, otherBuf = 0, switches = 0, pxN = 0;
+    uint64_t trusted = 0, overPx = 0, noP = 0;   // F53: frames trusted (agree under 1 px), compared but over 1 px, compared with no P
     double degSum = 0.0, degMax = 0.0, pxSum = 0.0, pxMax = 0.0;
     drawtag::BasisDiff last;
     int sign = 0;
@@ -7892,6 +7973,13 @@ struct Window {
     uint64_t tallyNoEye = 0, keyReclaims = 0;
     WorldSrc wsrc[2];
     RefCmp ref[2];
+    // F53: the scene reference's refusals (by drawtag::SceneRefWhy), the cb1 census (frames, the most distinct contents in an eye-frame, the
+    // widest forward angle between two of them), the untagged marker composite draws and their records.
+    uint64_t sceneRefused[4] = {}, rowCensusFrames = 0, rowDistinctMax[2] = {};
+    double rowFwdMax[2] = {};
+    Untag untag[kUntags];
+    uint32_t nUntag = 0;
+    uint64_t untagDropped = 0, untagPosRead = 0, untagPosFault = 0;
 };
 
 Pool g_pools[kPools];
@@ -8029,6 +8117,11 @@ uint64_t g_lastWorldVs[2] = {};
 WorldView g_refViews[kWorldViews];   // the temporal reference by (frame, eye), for the residual at read-back
 uint32_t g_refViewNext = 0;
 uint64_t g_tagOnlySeen = 0;
+// F53: the cb1 census (render thread), the census frames left this second, the frame each eye's scene rows were last trusted, the axis notes.
+RowCensus g_rowCensus;
+uint32_t g_rowCensusLeft = kRowCensusFrames;
+uint32_t g_sceneTrusted[2] = {~0u, ~0u};
+uint32_t g_axisNotes = 0;
 uint64_t g_drawSerial = 0;
 ID3D11Buffer* g_privCb = nullptr;         // the private b0 (DEFAULT, constant buffer), made once
 ID3D11Buffer* g_workBuf = nullptr;        // the private b0 built here first (DEFAULT, not a constant buffer): the game's b0 copied in,
@@ -8092,6 +8185,18 @@ __declspec(noinline) uint32_t scanGuarded(const uint8_t* base, uint32_t bytes, c
     return n;
 }
 
+// F53: one record's 16 bytes at +16 (streaming load), under SEH; false when the record is past the mapped range or the read faults.
+__declspec(noinline) bool readRecordGuarded(const uint8_t* base, uint32_t bytes, uint32_t index, uint32_t out[4]) noexcept {
+    const uint64_t at = static_cast<uint64_t>(index) * drawtag::kRecordStride + drawtag::kPositionOffset;
+    if (!base || at + 16 > bytes) return false;
+    __try {
+        drawtag::streamLoad16(base + at, out);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    return true;
+}
+
 void addFind(const Pool& p, const drawtag::Hit& h, int mapType, uint32_t frame) {
     for (uint32_t i = 0; i < g_findN[0]; ++i)
         if (g_finds[0][i].pool == p.res && g_finds[0][i].index == h.index && g_finds[0][i].sentinel == h.sentinel) return;   // found again
@@ -8141,6 +8246,29 @@ void unmapPool(Pool& p) {
     for (size_t i = 0; i < kF44Cells; ++i) {
         F44Tag t;
         if (f44ReadCell(i, t)) remember(t);
+    }
+    // F53: the untagged marker composite draws' records in this pool (read back this second): each one's position and low bits as the game
+    // wrote them for this frame, and the tag in flight they carry if any (a marker piece the match missed carries one).
+    for (uint32_t i = 0; i < g_win.nUntag; ++i) {
+        Untag& u = g_win.untag[i];
+        if (u.pool != p.res) continue;
+        uint32_t wv[4] = {};
+        if (!readRecordGuarded(base, p.bytes, u.record, wv)) {
+            ++g_win.untagPosFault;
+            continue;
+        }
+        ++g_win.untagPosRead;
+        u.havePos = true;
+        for (int k = 0; k < 3; ++k) u.pos[k] = drawtag::floatOf(wv[k]);
+        u.taggable = drawtag::taggableBits(wv[0]) && drawtag::taggableBits(wv[1]) && drawtag::taggableBits(wv[2]);
+        u.bits = drawtag::decodeWords(wv);
+        u.tagKey = -1;
+        u.tagAge = 0;
+        if (u.taggable)
+            if (const F44Tag* t = tagOf(u.bits)) {
+                u.tagKey = static_cast<int>(t->key);
+                u.tagAge = (frame - t->frame) & 0xFFFFu;
+            }
     }
     uint32_t wants[kHistory];
     uint32_t keys[kHistory];
@@ -8430,9 +8558,113 @@ void hudDraw(ID3D11DeviceContext* ctx, uint32_t frame) {
     else learnPool(t33.res, t33.bytes, frame);
 }
 
+// F53: a census frame's world draw: its cb1 rows 270..273 from engine motion's CB shadow (a whole-buffer bind only), kept per eye by (vs, ps,
+// rows) with a draw count. No GPU copy, no allocation.
+void appendf(char* buf, size_t cap, size_t& len, const char* fmt, ...);   // below
+void rowCensusNote(ID3D11DeviceContext* ctx, int e, uint64_t vs, uint64_t ps, bool scene) {
+    RowCensus& c = g_rowCensus;
+    if (++c.draws > kRowCensusDraws) {
+        ++c.capped;
+        return;
+    }
+    ID3D11Buffer* cb1 = nullptr;
+    UINT f1 = 0;
+    vsConstants(ctx, 1, &cb1, &f1);
+    float shadow[6][4] = {};
+    const bool ok = cb1 && f1 == 0 && engineVelocityShadowSceneRows(cb1, shadow);
+    if (cb1) cb1->Release();
+    if (!ok) {
+        ++c.noRows;
+        return;
+    }
+    for (uint32_t i = 0; i < c.n[e]; ++i) {
+        RowSet& s = c.sets[e][i];
+        if (s.vs == vs && s.ps == ps && std::memcmp(s.rows, shadow, sizeof(s.rows)) == 0) {
+            ++s.n;
+            return;
+        }
+    }
+    if (c.n[e] >= kRowSets) {
+        ++c.full[e];
+        return;
+    }
+    RowSet& s = c.sets[e][c.n[e]++];
+    s.vs = vs;
+    s.ps = ps;
+    s.n = 1;
+    s.scene = scene;
+    std::memcpy(s.rows, shadow, sizeof(s.rows));
+}
+// F53: a census frame's lines, one per eye that saw a world draw: each distinct (vs, ps, rows) with its draws, the content it carries (sets
+// with the same rows share one), and its forward and rotation angles against the rows the eye's scene reference chose that frame.
+void rowCensusFlush() {
+    RowCensus& c = g_rowCensus;
+    using ull = unsigned long long;
+    ++g_win.rowCensusFrames;
+    for (int e = 0; e < 2; ++e) {
+        if (!c.n[e]) continue;
+        const CpuWorld& ref = g_cpuWorld[e];
+        const bool haveRef = ref.frame == c.frame;
+        int contentOf[kRowSets];
+        uint32_t distinct = 0;
+        for (uint32_t i = 0; i < c.n[e]; ++i) {
+            contentOf[i] = -1;
+            for (uint32_t j = 0; j < i && contentOf[i] < 0; ++j)
+                if (std::memcmp(c.sets[e][i].rows, c.sets[e][j].rows, sizeof(c.sets[e][i].rows)) == 0) contentOf[i] = contentOf[j];
+            if (contentOf[i] < 0) contentOf[i] = static_cast<int>(distinct++);
+        }
+        double fwdMax = 0.0;
+        for (uint32_t i = 0; i < c.n[e]; ++i)
+            for (uint32_t j = i + 1; j < c.n[e]; ++j) {
+                if (contentOf[i] == contentOf[j]) continue;
+                double fwd = -1.0, rot = -1.0;
+                drawtag::rowsBasisAngles(c.sets[e][i].rows, c.sets[e][j].rows, &fwd, &rot);
+                if (fwd > fwdMax) fwdMax = fwd;
+            }
+        if (distinct > g_win.rowDistinctMax[e]) g_win.rowDistinctMax[e] = distinct;
+        if (fwdMax > g_win.rowFwdMax[e]) g_win.rowFwdMax[e] = fwdMax;
+        char buf[3072];
+        size_t len = 0;
+        appendf(buf, sizeof(buf), len, "native on foot marker probe (F53): frame %u eye %d cb1 rows 270..273 census: %u distinct contents over %u (vs, ps) "
+                "sets, widest forward angle between two contents %.3f deg; the eye's chosen scene rows: %s:", c.frame, e, distinct, c.n[e], fwdMax,
+                haveRef ? "this frame's" : "none this frame (no main-scene draw gave them from the CB shadow)");
+        for (uint32_t i = 0; i < c.n[e]; ++i) {
+            const RowSet& s = c.sets[e][i];
+            appendf(buf, sizeof(buf), len, " [content %d: vs %016llX ps %016llX%s, %llu draws", contentOf[i], ull(s.vs), ull(s.ps),
+                    s.scene ? " (scene reference eligible)" : "", ull(s.n));
+            if (haveRef) {
+                double fwd = -1.0, rot = -1.0;
+                drawtag::rowsBasisAngles(s.rows, ref.rows, &fwd, &rot);
+                const bool chosen = std::memcmp(s.rows, ref.rows, sizeof(s.rows)) == 0;
+                appendf(buf, sizeof(buf), len, "; %sagainst the chosen rows: forward %.3f deg, rotation %.3f deg", chosen ? "CHOSEN; " : "", fwd, rot);
+            }
+            appendf(buf, sizeof(buf), len, "]");
+        }
+        appendf(buf, sizeof(buf), len, "; world draws looked at %llu (capped at %u: %llu), no CPU rows (a ranged b1 or no CB shadow) %llu, sets past "
+                "the table %llu", ull(c.draws), kRowCensusDraws, ull(c.capped), ull(c.noRows), ull(c.full[e]));
+        Log::get().note("%s", buf);
+    }
+}
+// F53: at each frame's turn: the census frame that ended is logged; a new census frame starts while this second has census frames left.
+void rowCensusTurn(uint32_t frame) {
+    RowCensus& c = g_rowCensus;
+    if (c.frame == frame) return;
+    if (c.active) rowCensusFlush();
+    if (g_rowCensusLeft > 0) {
+        --g_rowCensusLeft;
+        c = RowCensus{};
+        c.active = true;
+    } else {
+        c.active = false;
+    }
+    c.frame = frame;
+}
+
 // F46: a world pool draw (render thread, the game's bindings): its target's eye (the UI layer's; else ui depth's rule over the frame's
 // eye-sized world targets), then b1 rows 270..275 once per eye a frame -- the CB shadow's when it holds them, else one 96-byte GPU copy.
-void worldDraw(ID3D11DeviceContext* ctx, uint32_t frame, uint64_t vs) {
+// F53: only a main-scene pass gives the eye's rows (drawtag::sceneRefWhy: not the first-person body's PS, the scene depth view, a scene
+// geometry VS); a census frame also notes every world draw's cb1 rows (rowCensusNote).
+void worldDraw(ID3D11DeviceContext* ctx, uint32_t frame, uint64_t vs, bool census) {
     ++g_win.scanWorld;
     ++g_win.worldDraws;
     void* view = bindingGet(BindSlot::Rtv0);
@@ -8496,7 +8728,14 @@ void worldDraw(ID3D11DeviceContext* ctx, uint32_t frame, uint64_t vs) {
         return;
     }
     const int e = t->eye;
+    const uint64_t ps = bindingShaderHash(BindSlot::Ps);
+    const int sceneWhy = drawtag::sceneRefWhy(vs, ps, eyeOfDraw(frame) >= 0);
+    if (census) rowCensusNote(ctx, e, vs, ps, sceneWhy == drawtag::kSceneOk);
     if (g_worldOk[e] == frame) return;
+    if (sceneWhy != drawtag::kSceneOk) {
+        ++g_win.sceneRefused[sceneWhy];
+        return;
+    }
     if (t->tries >= kWorldTriesPerEye) {
         ++g_win.worldTriesCapped;
         return;
@@ -8700,7 +8939,17 @@ void refTick(int e, uint32_t frame, double W, double H) {
             rc.last = d;
             rc.sign = sign;
             if (!d.sameHand || !(d.right < 90.0) || !(d.up < 90.0)) {
-                ++rc.convention;   // the axes do not correspond (a mirrored or swapped convention): not usable as a reference
+                ++rc.convention;   // the axes do not correspond (a mirrored or swapped convention): not usable as a reference; F53: untrusted
+                if (g_axisNotes < kAxisNotes) {
+                    ++g_axisNotes;
+                    Log::get().note("native on foot marker probe (F53): eye %d frame %u: the temporal rows' axes do not correspond to the scene rows' "
+                                    "(this frame is untrusted): scene right (%.3f, %.3f, %.3f) up (%.3f, %.3f, %.3f) forward (%.3f, %.3f, %.3f); "
+                                    "temporal right (%.3f, %.3f, %.3f) up (%.3f, %.3f, %.3f) forward (%.3f, %.3f, %.3f), forward sign %d; angles right "
+                                    "%.1f, up %.1f, forward %.1f deg, same handedness %s; temporal vs %016llX, its b1 %s the scene draw's",
+                                    e, frame, rW[0], rW[1], rW[2], uW[0], uW[1], uW[2], fW[0], fW[1], fW[2], rT[0], rT[1], rT[2], uT[0], uT[1], uT[2],
+                                    fT[0], fT[1], fT[2], sign, d.right, d.up, d.fwd, d.sameHand ? "yes" : "no", static_cast<unsigned long long>(tvs),
+                                    res && res == g_worldCb1[e] ? "is" : "is NOT");
+                }
             } else {
                 usable = true;
                 ++rc.n;
@@ -8710,6 +8959,9 @@ void refTick(int e, uint32_t frame, double W, double H) {
                 std::memcpy(g_tempRef[e].rows, swapped, sizeof(swapped));
                 std::memcpy(g_tempRef[e].o, w.o, sizeof(w.o));
                 refPut(frame, e, swapped, w.o);
+                // F53: the trust check: P through the scene rows and through the temporal reference must agree under 1 px.
+                bool compared = false;
+                double px = -1.0;
                 if (g_haveLastFind && g_lastFind.haveTag && g_lastFind.pOk) {
                     const double P[3] = {g_lastFind.p[0], g_lastFind.p[1], g_lastFind.p[2]}, ow[3] = {w.o[0], w.o[1], w.o[2]};
                     double a[4], b[4];
@@ -8717,13 +8969,33 @@ void refTick(int e, uint32_t frame, double W, double H) {
                     drawtag::worldClip(swapped, P, ow, b);
                     if (a[3] > 1e-9 && b[3] > 1e-9) {
                         const double dx = (b[0] / b[3] - a[0] / a[3]) * W * 0.5, dy = (b[1] / b[3] - a[1] / a[3]) * H * 0.5;
-                        const double px = std::sqrt(dx * dx + dy * dy);
+                        px = std::sqrt(dx * dx + dy * dy);
+                        compared = true;
                         ++rc.pxN;
                         rc.pxSum += px;
                         if (px > rc.pxMax) rc.pxMax = px;
                     }
+                } else {
+                    ++rc.noP;
+                }
+                if (drawtag::sceneRowsTrusted(compared, px)) {
+                    ++rc.trusted;
+                    g_sceneTrusted[e] = frame;
+                } else if (compared) {
+                    ++rc.overPx;
                 }
             }
+        }
+    }
+    // F53: the eye dump's marker crop centre: P through the eye's scene rows this frame (relaxed atomics; the temporal pass reads them).
+    if (w.frame == frame && g_haveLastFind && g_lastFind.haveTag && g_lastFind.pOk) {
+        const double P[3] = {g_lastFind.p[0], g_lastFind.p[1], g_lastFind.p[2]}, ow[3] = {w.o[0], w.o[1], w.o[2]};
+        double a[4];
+        drawtag::worldClip(w.rows, P, ow, a);
+        if (a[3] > 1e-9) {
+            g_markerCropNdc[e].p[0].store(static_cast<float>(a[0] / a[3]), std::memory_order_relaxed);
+            g_markerCropNdc[e].p[1].store(static_cast<float>(a[1] / a[3]), std::memory_order_relaxed);
+            g_markerCropNdc[e].pMs.store(GetTickCount64(), std::memory_order_relaxed);
         }
     }
     if (usable) g_tempSeen[e] = frame;
@@ -8850,14 +9122,18 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
     } else {
         const double ow[3] = {w.o[0], w.o[1], w.o[2]}, oh[3] = {oHud[0], oHud[1], oHud[2]}, P[3] = {f->p[0], f->p[1], f->p[2]};
         const double X0[3] = {f->x0[0], f->x0[1], f->x0[2]};
-        const double c[2] = {L.b.c[0], L.b.c[1]};
+        // F53: the target is ndc(P through the eye's scene rows) + e, e the fixed icon offset (drawtag::iconOffsetNdc); the learned baseline
+        // (F50) is dropped from the decision and kept, updated below, for the log only.
+        double c[2];
+        drawtag::iconOffsetNdc(H, c);
         double lag[2] = {};
         why = drawtag::ndcLagDelta(w.rows, ow, sh->rows[4], sh->rows[5], sh->rows[7], oh, X0, P, c, kGateNdc, lag, &dx, &dy);
         if ((why == drawtag::kDeltaOk || why == drawtag::kDeltaGate) && L.lastFrame != frame) {
             L.lastFrame = frame;
-            // |m - c| by the head's speed (against the c the delta used), the baseline's update, the honesty bins (every slow-head frame).
+            // |m - c| by the head's speed (against the c the delta used: F53 e), the baseline's update (logged only), the honesty bins (every
+            // slow-head frame; reported against e).
             const int bin = g_headDps < 0.0 ? -1 : g_headDps < 3.0 ? 0 : g_headDps < 20.0 ? 1 : g_headDps < 60.0 ? 2 : 3;
-            if (bin >= 0 && L.b.n > 0) {
+            if (bin >= 0) {
                 const double ex = (lag[0] - c[0]) * W * 0.5, ey = (lag[1] - c[1]) * H * 0.5, px = std::sqrt(ex * ex + ey * ey);
                 ++s.lagN[bin];
                 s.lagSum[bin] += px;
@@ -8884,10 +9160,10 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
                 }
             }
         }
-        if (!L.b.ready(W, H, kLagStdMaxPx)) {
-            ++s.fUnseeded;
-            ++kw.unseeded[e];
-            return;   // no patch and no hold until the baseline is seeded and steady
+        if (g_sceneTrusted[e] != frame) {
+            ++s.fUntrusted;
+            ++kw.untrusted[e];
+            return;   // F53: no patch and no hold unless the eye's scene rows agree with the temporal pass under 1 px this frame
         }
         if (why == drawtag::kDeltaOk) have = true;
         else if (why == drawtag::kDeltaGate) {
@@ -8901,8 +9177,8 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
         good.frame = frame;
         good.dx = dx;
         good.dy = dy;
-    } else if (good.frame != ~0u && good.frame + 1u == frame && L.b.ready(W, H, kLagStdMaxPx)) {
-        dx = good.dx;   // the last good delta, held for one frame (F50: only while the baseline is ready)
+    } else if (good.frame != ~0u && good.frame + 1u == frame && g_sceneTrusted[e] == frame) {
+        dx = good.dx;   // the last good delta, held for one frame (F53: only while the eye's scene rows are trusted)
         dy = good.dy;
         have = held = true;
     }
@@ -8911,8 +9187,10 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
     std::memcpy(r4, sh->rows[4], sizeof(r4));
     std::memcpy(r5, sh->rows[5], sizeof(r5));
     drawtag::ndcOffsetRows(r4, r5, sh->rows[7], dx, dy);
-    g_fix.cx = L.b.c[0];
-    g_fix.cy = L.b.c[1];
+    double eOff[2];
+    drawtag::iconOffsetNdc(H, eOff);   // F53: the c the delta was taken against is e
+    g_fix.cx = eOff[0];
+    g_fix.cy = eOff[1];
     g_fix.head = g_headDps;
     g_fix.keySlot = ks;
     g_fix.ref = ref;
@@ -9086,15 +9364,16 @@ void draw(ID3D11DeviceContext* ctx, uint32_t frame, uint32_t instances, uint32_t
     const uint64_t vs = bindingShaderHash(BindSlot::Vs);
     const bool hud = nofoot::hudIssuerIndex(vs) >= 0;
     const bool marker = vs == nofoot::kMarkerCompositeVs;
+    const bool census = g_rowCensus.active && g_rowCensus.frame == frame;   // F53: a census frame looks at every world draw
     if (!hud && !marker) {
-        if (g_worldOk[0] == frame && g_worldOk[1] == frame) return;
+        if (!census && g_worldOk[0] == frame && g_worldOk[1] == frame) return;
         if (engine_velocity_family::familyOfVs(vs) < 0) return;
     }
     ++g_win.scanned;
     const uint64_t t0 = f30Qpc();
     if (hud) hudDraw(ctx, frame);
     else if (marker) markerDraw(ctx, frame, vs, instances, startInstance, kind);
-    else worldDraw(ctx, frame, vs);
+    else worldDraw(ctx, frame, vs, census);
     g_win.drawTicks += f30Qpc() - t0;
 }
 
@@ -9208,6 +9487,9 @@ void pairMarker(const Rec& r, const Find& f, const float rows[16], const float o
     const double xo[3] = {x0[0] - oh[0], x0[1] - oh[1], x0[2] - oh[2]};
     s.ndcM[0] = ndcM[0];
     s.ndcM[1] = ndcM[1];
+    g_markerCropNdc[e].drawn[0].store(static_cast<float>(ndcM[0]), std::memory_order_relaxed);   // F53: the eye dump's marker crop
+    g_markerCropNdc[e].drawn[1].store(static_cast<float>(ndcM[1]), std::memory_order_relaxed);
+    g_markerCropNdc[e].drawnMs.store(GetTickCount64(), std::memory_order_relaxed);
     s.xo = drawtag::length3(xo);
     const WorldView* w = worldGet(frame, e);
     if (!w) {
@@ -9358,9 +9640,36 @@ void readFrame(int slot, uint32_t frame, const uint8_t* d, uint32_t used) {
             }
         }
         // F52 item C: the bookkeeping: each marker composite draw per eye, tagged (read a found record by x), untagged or not copied.
-        if (r.eye == 0 || r.eye == 1) g_win.tally[r.eye].note(r.streamAt >= 0 && inside(r.streamAt, static_cast<uint64_t>(r.entries) * drawtag::kStreamStride),
-                                                              matched && m.xHits);
+        const bool streamIn = r.streamAt >= 0 && inside(r.streamAt, static_cast<uint64_t>(r.entries) * drawtag::kStreamStride);
+        if (r.eye == 0 || r.eye == 1) g_win.tally[r.eye].note(streamIn, matched && m.xHits);
         else ++g_win.tallyNoEye;
+        // F53: an untagged draw (its stream read, no found record read by x): the record its first entry names, kept with its place in the eye
+        // (its position is read at the pool's next Unmap, unmapPool).
+        if ((r.eye == 0 || r.eye == 1) && streamIn && r.entries > 0 && r.pool && !(matched && m.xHits)) {
+            uint32_t e0[2];
+            std::memcpy(e0, d + r.streamAt, sizeof(e0));
+            const uint32_t rec = r.first + e0[0];
+            Untag* u = nullptr;
+            for (uint32_t i = 0; i < g_win.nUntag && !u; ++i) {
+                Untag& c = g_win.untag[i];
+                if (c.eye == r.eye && c.ord == r.ordEye && c.record == rec && c.pool == r.pool) u = &c;
+            }
+            if (!u && g_win.nUntag < kUntags) {
+                u = &g_win.untag[g_win.nUntag++];
+                *u = Untag{};
+                u->pool = r.pool;
+                u->record = rec;
+                u->eye = r.eye;
+                u->ord = r.ordEye;
+                u->ps = r.ps;
+            }
+            if (u) {
+                ++u->n;
+                u->instances = r.instances;
+            } else {
+                ++g_win.untagDropped;
+            }
+        }
         // F47: did the patched draw read the record (the read-back's verdict on the draw-time prediction)?
         if (r.fixApplied && (r.eye == 0 || r.eye == 1)) {
             if (matched && m.xHits) ++g_win.eye[r.eye].predHit;
@@ -9401,6 +9710,7 @@ void frameTurn(ID3D11DeviceContext* ctx, uint32_t frame) {
         g_staging.commit();
     }
     headSample();
+    rowCensusTurn(frame);   // F53: the census frame that ended is logged; a new one may start
     g_staging.poll(ctx, frame, 2, 12, [](int slot, uint32_t f, const uint8_t* d, uint32_t used) { readFrame(slot, f, d, used); }, &g_win.lost);
 }
 
@@ -9595,13 +9905,13 @@ void report(uint64_t nowMs) {
                               s.rxSum / double(s.rN), s.rxMax, s.rySum / double(s.rN), s.ryMax, ull(s.rN));
             else std::snprintf(res, sizeof(res), "no patched pair this second");
             Log::get().note("native on foot marker fix (F47, key %s): eye %d: P through the world rows minus P through the marker rows (unpatched): "
-                            "%s; head %s; patched %llu draws (held %llu); after the patch (F50: X0 through the patched rows minus (P + c)): %s; not "
+                            "%s; head %s; patched %llu draws (held %llu); after the patch (F53: X0 through the patched rows minus (P + e)): %s; not "
                             "applied: eye 0 unmatched %llu, eye 1 unmatched %llu, another draw of the eye %llu, ranged b0 %llu, no CPU b0 rows %llu, no "
-                            "CPU o_hud %llu, no CPU world view %llu, no P %llu, baseline not ready %llu, w <= 0 %llu, gate (|d| >= %.2f NDC) %llu, bind "
+                            "CPU o_hud %llu, no CPU world view %llu, no P %llu, scene rows untrusted %llu, w <= 0 %llu, gate (|d| >= %.2f NDC) %llu, bind "
                             "refused %llu; the patched draw read the record at read-back %llu, did not %llu; CPU b0 rows 4..7 against the GPU copy: "
                             "agree %llu, differ %llu (max %.3g)",
                             fixOn ? "on" : "off", e, meas, head, ull(s.fPatched), ull(s.fHeld), res, ull(s.fUnmatched[0]), ull(s.fUnmatched[1]),
-                            ull(s.fOtherDraw), ull(s.fRanged), ull(s.fNoRows), ull(s.fNoOrigin), ull(s.fNoWorld), ull(s.fNoP), ull(s.fUnseeded),
+                            ull(s.fOtherDraw), ull(s.fRanged), ull(s.fNoRows), ull(s.fNoOrigin), ull(s.fNoWorld), ull(s.fNoP), ull(s.fUntrusted),
                             ull(s.fBehind), kGateNdc, ull(s.fGate), ull(s.fBind), ull(s.predHit), ull(s.predMiss), ull(s.cpuAgree), ull(s.cpuDiffer),
                             s.cpuDiffMax);
         }
@@ -9629,7 +9939,10 @@ void report(uint64_t nowMs) {
                 }
                 if (!ll) appendf(lag, sizeof(lag), ll, "none this second");
                 if (!rl) appendf(resid, sizeof(resid), rl, "none this second");
-                // The honesty check: the bins' means (px) and the largest difference between two bins that have kLagBinMinN frames.
+                // The honesty check: the bins' means (px) and the largest difference between two bins that have kLagBinMinN frames. F53: each
+                // bin is m - e (the fixed icon offset), so a constant e shows as bins near zero.
+                double eOff[2];
+                drawtag::iconOffsetNdc(H, eOff);
                 double binMean[5][2] = {};
                 bool binOk[5] = {};
                 static const char* const kBinNames[5] = {"pitch < -15", "pitch -15..15", "pitch > 15", "|roll| < 10", "|roll| >= 10"};
@@ -9637,8 +9950,8 @@ void report(uint64_t nowMs) {
                     const uint64_t n = b < 3 ? L.pitchN[b] : L.rollN[b - 3];
                     const double* sum = b < 3 ? L.pitchSum[b] : L.rollSum[b - 3];
                     if (!n) continue;
-                    binMean[b][0] = sum[0] / double(n);
-                    binMean[b][1] = sum[1] / double(n);
+                    binMean[b][0] = sum[0] / double(n) - eOff[0];
+                    binMean[b][1] = sum[1] / double(n) - eOff[1];
                     binOk[b] = n >= kLagBinMinN;
                     appendf(bins, sizeof(bins), bl, "%s%s (%+.2f, %+.2f) px (%llu)", bl ? ", " : "", kBinNames[b], binMean[b][0] * W * 0.5,
                             binMean[b][1] * H * 0.5, ull(n));
@@ -9662,20 +9975,22 @@ void report(uint64_t nowMs) {
                 }
                 const bool masking = compared > 0 && spread > kLagPitchSpreadPx;
                 const char* verdict = masking ? "NOT CONSTANT" : compared ? "constant so far" : "not yet testable (fewer than two bins with enough frames)";
-                Log::get().note("native on foot marker fix (F50/F52, key %s): tag key %u eye %d (record %u, read by %llu draws, places mask 0x%X; "
-                                "reference %s): baseline c (%+.5f, %+.5f) NDC = (%+.2f, %+.2f) px at %.0fx%.0f, std %.2f px (%s, %u frames taken; "
-                                "resets this second %llu, last: %s); |m - c| by head speed: %s; decided %llu, patched %llu draws (held %llu), baseline "
-                                "not ready %llu, gate (|d| >= %.2f NDC) %llu, other eye unmatched %llu; after the patch |marker - (P + c)| by head "
-                                "speed: %s; honesty check (c by head pitch / roll, slow head, since the last reset): %s; spread %.2f px (limit %.1f): %s",
+                Log::get().note("native on foot marker fix (F53, key %s): tag key %u eye %d (record %u, read by %llu draws, places mask 0x%X; "
+                                "reference %s): target = P through the scene rows + e, e (fixed icon offset, %.1f px up) (%+.5f, %+.5f) NDC = (%+.2f, "
+                                "%+.2f) px at %.0fx%.0f; the learned baseline (F50, logged only, not applied) c (%+.5f, %+.5f) NDC = (%+.2f, %+.2f) px, "
+                                "std %.2f px (%s, %u frames taken; resets this second %llu, last: %s); |m - e| by head speed: %s; decided %llu, patched "
+                                "%llu draws (held %llu), scene rows untrusted %llu, gate (|d| >= %.2f NDC) %llu, other eye unmatched %llu; after the "
+                                "patch |marker - (P + e)| by head speed: %s; honesty check (m - e by head pitch / roll, slow head, since the last "
+                                "reset): %s; spread %.2f px (limit %.1f): %s",
                                 fixOn ? "on" : "off", g_keyIdx.key[ki], e, kw.record, ull(kw.reads[e]), kw.ordMask[e],
-                                g_refEff[e] == drawtag::kRefTemporal ? "temporal" : "world_first", L.b.c[0], L.b.c[1], L.b.c[0] * W * 0.5,
-                                L.b.c[1] * H * 0.5, W, H, L.b.stdPx(W, H),
-                                L.b.ready(W, H, kLagStdMaxPx) ? "ready" : L.b.seeded ? "seeded, std too high" : "seeding", L.b.n, ull(kw.resets[e]),
-                                L.lastReset, lag, ull(kw.decided[e]), ull(kw.patched[e]), ull(kw.held[e]), ull(kw.unseeded[e]), kGateNdc,
-                                ull(kw.gate[e]), ull(kw.otherUnmatched[e]), resid, bins, spread, kLagPitchSpreadPx, verdict);
+                                g_refEff[e] == drawtag::kRefTemporal ? "temporal" : "world_first", drawtag::kIconPx, eOff[0], eOff[1],
+                                eOff[0] * W * 0.5, eOff[1] * H * 0.5, W, H, L.b.c[0], L.b.c[1], L.b.c[0] * W * 0.5, L.b.c[1] * H * 0.5,
+                                L.b.stdPx(W, H), L.b.ready(W, H, kLagStdMaxPx) ? "steady" : L.b.seeded ? "seeded, std too high" : "seeding", L.b.n,
+                                ull(kw.resets[e]), L.lastReset, lag, ull(kw.decided[e]), ull(kw.patched[e]), ull(kw.held[e]), ull(kw.untrusted[e]),
+                                kGateNdc, ull(kw.gate[e]), ull(kw.otherUnmatched[e]), resid, bins, spread, kLagPitchSpreadPx, verdict);
                 if (masking)
-                    Log::get().note("native on foot marker fix (F50/F52): tag key %u eye %d: the baseline is not constant: masking (c moves %.2f px "
-                                    "with head pitch or roll: %s). Do not claim the fix", g_keyIdx.key[ki], e, spread, bins);
+                    Log::get().note("native on foot marker fix (F53): tag key %u eye %d: m - e is not constant: e masks a moving error (the bins "
+                                    "differ by %.2f px with head pitch or roll: %s). Do not claim the fix", g_keyIdx.key[ki], e, spread, bins);
             }
         }
         // F52 item B: key -> record, and which marker composite draws (their places in each eye) read it, every key seen this second.
@@ -9708,7 +10023,7 @@ void report(uint64_t nowMs) {
             const RefCmp& rc = w.ref[e];
             char src[384], cmp[640];
             if (ws.n)
-                std::snprintf(src, sizeof(src), "first world pool draw vs %016llX ps %016llX, target %ux%u, dsv %p, viewport %s (%.0f, %.0f, %.0f x %.0f, "
+                std::snprintf(src, sizeof(src), "first main-scene pass (F53) vs %016llX ps %016llX, target %ux%u, dsv %p, viewport %s (%.0f, %.0f, %.0f x %.0f, "
                               "depth %.2f..%.2f), b1 %p; %llu eye-frames, vs changed %llu times", ull(ws.vs), ull(ws.ps), ws.w, ws.h, ws.dsv,
                               ws.vpOk ? "" : "NONE", double(ws.vp[0]), double(ws.vp[1]), double(ws.vp[2]), double(ws.vp[3]), double(ws.vp[4]),
                               double(ws.vp[5]), ws.cb1, ull(ws.n), ull(ws.vsChanges));
@@ -9722,12 +10037,78 @@ void report(uint64_t nowMs) {
             else std::snprintf(cmp, sizeof(cmp), "no comparison this second");
             Log::get().note("native on foot marker probe (F52): eye %d world rows: %s; against the temporal pass's camera rows: %s; frames %llu: no "
                             "temporal rows %llu, no world rows %llu, degenerate %llu, axes do not correspond %llu (last: right %.1f, up %.1f deg, same "
-                            "handedness %s); reference asked %s, in use %s (switches %llu; decisions world_first %llu, temporal %llu)",
+                            "handedness %s); reference asked %s, in use %s (switches %llu; decisions world_first %llu, temporal %llu); F53 trust "
+                            "(P through the scene rows and the temporal reference under %.1f px): trusted %llu frames, UNTRUSTED %llu (over %.1f px "
+                            "%llu, axes do not correspond %llu, no temporal rows %llu, no scene rows %llu, degenerate %llu, no P %llu)",
                             e, src, cmp, ull(rc.ticks), ull(rc.noTemporal), ull(rc.noWorld), ull(rc.degenerate), ull(rc.convention), rc.last.right,
                             rc.last.up, rc.last.sameHand ? "yes" : "no",
                             g_nativeOnFootMarkerRefKey.load(std::memory_order_relaxed) == drawtag::kRefWorldFirst ? "world_first" : "temporal",
                             g_refEff[e] == drawtag::kRefTemporal ? "temporal" : g_refEff[e] == drawtag::kRefWorldFirst ? "world_first" : "none yet",
-                            ull(rc.switches), ull(rc.decided[0]), ull(rc.decided[1]));
+                            ull(rc.switches), ull(rc.decided[0]), ull(rc.decided[1]), drawtag::kSceneTrustPx, ull(rc.trusted),
+                            ull(rc.ticks - rc.trusted), drawtag::kSceneTrustPx, ull(rc.overPx), ull(rc.convention), ull(rc.noTemporal),
+                            ull(rc.noWorld), ull(rc.degenerate), ull(rc.noP));
+        }
+        // F53 item 4: the scene reference's refusals and the cb1 census's summary.
+        Log::get().note("native on foot marker probe (F53): scene reference: world draws refused as the eye's rows: the first-person body's PS "
+                        "%016llX %llu, not the scene depth view %llu, not a scene geometry VS (%016llX, %016llX, %016llX) %llu; cb1 census frames "
+                        "%llu: most distinct rows 270..273 contents in an eye-frame eye 0 %llu, eye 1 %llu; widest forward angle between two "
+                        "contents eye 0 %.3f deg, eye 1 %.3f deg",
+                        ull(drawtag::kFpBodyPs), ull(w.sceneRefused[drawtag::kSceneFpBodyPs]), ull(w.sceneRefused[drawtag::kSceneNotSceneDepth]),
+                        ull(drawtag::kSceneVs[0]), ull(drawtag::kSceneVs[1]), ull(drawtag::kSceneVs[2]), ull(w.sceneRefused[drawtag::kSceneNotSceneVs]),
+                        ull(w.rowCensusFrames), ull(w.rowDistinctMax[0]), ull(w.rowDistinctMax[1]), w.rowFwdMax[0], w.rowFwdMax[1]);
+        // F53 item 6: the untagged marker composite draws per eye, with the record each one's first entry names and that record's position.
+        for (int e = 0; e < 2; ++e) {
+            char buf[3072];
+            size_t len = 0;
+            uint32_t listed = 0;
+            appendf(buf, sizeof(buf), len, "native on foot marker probe (F53): eye %d untagged marker composite draws (place in the eye: record, "
+                    "draws, instances, position at +16, |pos - X0| of the newest find, the tag it carries):", e);
+            for (uint32_t i = 0; i < w.nUntag; ++i) {
+                const Untag& u = w.untag[i];
+                if (u.eye != e) continue;
+                ++listed;
+                appendf(buf, sizeof(buf), len, " [place %u: record %u (pool %p), %llu draws, %u instances, ps %016llX", static_cast<unsigned>(u.ord),
+                        u.record, u.pool, ull(u.n), u.instances, ull(u.ps));
+                if (u.havePos) {
+                    const double dx = double(u.pos[0]) - g_lastFind.x0[0], dy = double(u.pos[1]) - g_lastFind.x0[1],
+                                 dz = double(u.pos[2]) - g_lastFind.x0[2];
+                    appendf(buf, sizeof(buf), len, ", pos (%.3f, %.3f, %.3f)", double(u.pos[0]), double(u.pos[1]), double(u.pos[2]));
+                    if (g_haveLastFind) appendf(buf, sizeof(buf), len, ", |pos - X0| %.3f m", std::sqrt(dx * dx + dy * dy + dz * dz));
+                    if (u.tagKey >= 0) appendf(buf, sizeof(buf), len, ", CARRIES tag key %d (age %u frames): a marker piece the match missed",
+                                               u.tagKey, u.tagAge);
+                    else appendf(buf, sizeof(buf), len, ", no tag in flight (low bits %06X%s)", u.bits, u.taggable ? "" : ", a component not taggable");
+                } else {
+                    appendf(buf, sizeof(buf), len, ", position not read (no Unmap of its pool after the read-back this second)");
+                }
+                appendf(buf, sizeof(buf), len, "]");
+            }
+            if (!listed) appendf(buf, sizeof(buf), len, " none");
+            appendf(buf, sizeof(buf), len, "; positions read %llu, faulted or past the range %llu; untagged draws past the table %llu",
+                    ull(w.untagPosRead), ull(w.untagPosFault), ull(w.untagDropped));
+            if (listed || w.tally[e].draws) Log::get().note("%s", buf);
+        }
+        // F53 item 6: the post stub's key census (cumulative since launch): every key posted while the probe was on, its posts and tagged posts,
+        // and whether every key (first and second posts) has its own sentinel.
+        {
+            char buf[2048];
+            size_t len = 0;
+            uint32_t keys[kF53KeyCensus];
+            uint32_t nk = 0;
+            appendf(buf, sizeof(buf), len, "native on foot marker probe (F53): post stub keys (since launch; posts, tagged):");
+            for (const F53KeySlot& s : g_f53Keys) {
+                const uint32_t kp = s.keyPlus1.load(std::memory_order_relaxed);
+                if (!kp) continue;
+                const uint64_t posts = s.posts.load(std::memory_order_relaxed), tg = s.tagged.load(std::memory_order_relaxed);
+                keys[nk++] = kp - 1u;
+                appendf(buf, sizeof(buf), len, " [key %u: %llu, %llu%s]", kp - 1u, ull(posts), ull(tg), tg < posts ? " -- NOT ALL TAGGED" : "");
+            }
+            if (!nk) appendf(buf, sizeof(buf), len, " none yet");
+            uint32_t ka = 0, kb = 0;
+            const bool distinct = drawtag::keysDistinct(keys, nk, &ka, &kb);
+            if (distinct) appendf(buf, sizeof(buf), len, "; every key's sentinel is distinct (first and second posts)");
+            else appendf(buf, sizeof(buf), len, "; SENTINELS COLLIDE: key %u and key %u share a tag byte", ka, kb);
+            appendf(buf, sizeof(buf), len, "; keys past the census table %llu", ull(g_f53KeyOverflow.load(std::memory_order_relaxed)));
+            if (nk) Log::get().note("%s", buf);
         }
         const uint64_t secondAll = g_f47SecondPosts.load(std::memory_order_relaxed);
         const uint64_t second = secondAll - g_secondPostsSeen;
@@ -9742,6 +10123,7 @@ void report(uint64_t nowMs) {
                         ull(w.tally[0].untagged()), ull(w.tally[1].untagged()), ull(w.tally[0].notCopied), ull(w.tally[1].notCopied));
     }
     g_burstLeft = kBurstFrames;
+    g_rowCensusLeft = kRowCensusFrames;   // F53: the next second's census frames
     // F46 item 4: the cost, every second the draw tee ran: its calls, the draws looked at past the VS hash, the time in them, what was staged.
     if (w.hookCalls || w.hudDraws) {
         uint64_t refusedAll = 0;

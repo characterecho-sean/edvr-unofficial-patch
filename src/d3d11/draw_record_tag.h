@@ -564,6 +564,59 @@ struct B10bTally {
     uint64_t untagged() const noexcept { return draws - tagged - notCopied; }
 };
 
+// F53: THE SCENE REFERENCE. The F52 audit's world rows came from the first-person body pass (VS 7B0DC42D383F694C, PS 0DF03E64DF9DBEF1), whose
+// camera is head-locked. A world draw gives the eye's reference rows only when it is a main-scene pass: not the first-person body's pixel
+// shader, the depth view one of the scene pair (depth probe), and one of the scene geometry vertex shaders. The first refusal that holds.
+constexpr uint64_t kFpBodyPs = 0x0DF03E64DF9DBEF1ull;
+constexpr uint64_t kSceneVs[3] = {0xEB5234DB6ADB491Dull, 0xDE545DC8EE4FBB87ull, 0x5B4D8E894EEDA8B4ull};
+enum SceneRefWhy : int { kSceneOk = 0, kSceneFpBodyPs = 1, kSceneNotSceneDepth = 2, kSceneNotSceneVs = 3 };
+inline int sceneRefWhy(uint64_t vs, uint64_t ps, bool sceneDepth) noexcept {
+    if (ps == kFpBodyPs) return kSceneFpBodyPs;
+    if (!sceneDepth) return kSceneNotSceneDepth;
+    for (uint64_t s : kSceneVs)
+        if (vs == s) return kSceneOk;
+    return kSceneNotSceneVs;
+}
+// The scene rows are trusted on a frame when P through them and through the temporal pass's camera (the temporal reference) agree under
+// kSceneTrustPx pixels of the marker's target. A frame without the comparison (no temporal rows, its axes do not correspond, no P) is untrusted.
+constexpr double kSceneTrustPx = 1.0;
+inline bool sceneRowsTrusted(bool compared, double px) noexcept { return compared && px >= 0.0 && px < kSceneTrustPx; }
+// Two world projections' rotations: the angle between their forward axes and (same handedness) the whole rotation, in degrees; -1 when a
+// basis is degenerate (or the handedness differs, for the rotation).
+inline void rowsBasisAngles(const float a[16], const float b[16], double* fwdDeg, double* rotDeg) noexcept {
+    *fwdDeg = *rotDeg = -1.0;
+    double rA[3], uA[3], fA[3], rB[3], uB[3], fB[3];
+    if (!worldBasis(a, rA, uA, fA) || !worldBasis(b, rB, uB, fB)) return;
+    const BasisDiff d = basisDiff(rA, uA, fA, rB, uB, fB);
+    *fwdDeg = d.fwd;
+    *rotDeg = d.total;
+}
+
+// F53: THE ICON OFFSET. The correction's target is ndc(P through the eye's scene rows) + e, e a fixed screen-space offset: the marker's icon
+// drawn kIconPx above its ground point (the F46/F47 flights measured |ndc_marker - ndc_P| = 36.3 px with the head still, at the marker
+// target's size; the marker geometry in this build does not give it). NDC y is up, so e = (0, 2 kIconPx / H) for a target H pixels high.
+constexpr double kIconPx = 36.3;
+inline void iconOffsetNdc(double H, double e[2]) noexcept {
+    e[0] = 0.0;
+    e[1] = H > 0.0 ? 2.0 * kIconPx / H : 0.0;
+}
+
+// F53: THE KEY CENSUS. The post stub's keys as seen (full 32-bit values): two keys share a sentinel when their 8-bit tag bytes match, and a
+// first post shares one with another key's second post when its byte equals that key's low 7 bits with bit 7 set. True when every pair of
+// the n keys gets distinct sentinels (first posts and second posts alike).
+inline uint32_t tagByte(uint32_t key, bool second) noexcept { return second ? ((key & 0x7Fu) | 0x80u) : (key & 0xFFu); }
+inline bool keysDistinct(const uint32_t* keys, uint32_t n, uint32_t* aOut = nullptr, uint32_t* bOut = nullptr) noexcept {
+    // Every (key, post) pair against every later one: a key's first post against its own second post too (a key with bit 7 set).
+    for (uint32_t a = 0; a < 2 * n; ++a)
+        for (uint32_t b = a + 1; b < 2 * n; ++b)
+            if (tagByte(keys[a / 2], (a & 1u) != 0) == tagByte(keys[b / 2], (b & 1u) != 0)) {
+                if (aOut) *aOut = keys[a / 2];
+                if (bOut) *bOut = keys[b / 2];
+                return false;
+            }
+    return true;
+}
+
 }  // namespace drawtag
 }  // namespace edvr
 

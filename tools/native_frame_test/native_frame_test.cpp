@@ -696,6 +696,54 @@ int wmain(int argc, wchar_t** argv) {
                       std::fabs(ce[2] - 1.025) < 1e-5,
                   "F52: the world rows with the camera's rotation: unchanged under their own basis, the camera's forward at the rows' offset, the eye kept");
         }
+        // F53: the scene reference's test (the first-person body's PS refused first, then a depth view outside the scene pair, then a VS that
+        // is not a scene geometry one), the trust threshold (compared and under 1 px), the icon offset e, the correction landing the marker at
+        // ndc_P + e, the census's angles, and the key census's sentinel check.
+        {
+            const uint64_t eb = 0xEB5234DB6ADB491Dull, de = 0xDE545DC8EE4FBB87ull, b4 = 0x5B4D8E894EEDA8B4ull, fp = 0x7B0DC42D383F694Cull;
+            check(dt::sceneRefWhy(eb, 0x1234, true) == dt::kSceneOk && dt::sceneRefWhy(de, 0x1234, true) == dt::kSceneOk &&
+                      dt::sceneRefWhy(b4, 0x1234, true) == dt::kSceneOk && dt::sceneRefWhy(fp, dt::kFpBodyPs, true) == dt::kSceneFpBodyPs &&
+                      dt::sceneRefWhy(eb, dt::kFpBodyPs, true) == dt::kSceneFpBodyPs && dt::sceneRefWhy(eb, 0x1234, false) == dt::kSceneNotSceneDepth &&
+                      dt::sceneRefWhy(fp, 0x1234, true) == dt::kSceneNotSceneVs,
+                  "F53: only a main-scene pass (a scene geometry VS on the scene depth view, not the first-person body's PS) gives the eye's rows");
+            check(dt::sceneRowsTrusted(true, 0.0) && dt::sceneRowsTrusted(true, 0.99) && !dt::sceneRowsTrusted(true, 1.0) &&
+                      !dt::sceneRowsTrusted(true, 3.5) && !dt::sceneRowsTrusted(false, 0.1) && !dt::sceneRowsTrusted(true, -1.0) &&
+                      !dt::sceneRowsTrusted(true, std::numeric_limits<double>::quiet_NaN()),
+                  "F53: the scene rows are trusted only on a compared frame that agrees with the temporal pass under 1 px");
+            double e[2] = {};
+            dt::iconOffsetNdc(2016.0, e);
+            double e0[2] = {1.0, 1.0};
+            dt::iconOffsetNdc(0.0, e0);
+            check(e[0] == 0.0 && std::fabs(e[1] * 2016.0 * 0.5 - 36.3) < 1e-9 && e[1] > 0.0 && e0[0] == 0.0 && e0[1] == 0.0,
+                  "F53: e is 36.3 px up (NDC y up) at the target's height");
+            // The correction with c = e: X0 lags P (as F50's case); the patched marker lands at ndc_P + e.
+            float m4[4] = {1.2f, 0, 0.1f, 0}, m5[4] = {0, 1.1f, -0.05f, 0};
+            const double x0[3] = {11.02, 2.01, 3.0};
+            double lm[2] = {}, ldx = 0.0, ldy = 0.0, wc[4], lmc[3];
+            const int why = dt::ndcLagDelta(wr, wo, m4, m5, r7, wo, x0, wp, e, 0.05, lm, &ldx, &ldy);
+            dt::worldClip(wr, wp, wo, wc);
+            dt::ndcOffsetRows(m4, m5, r7, ldx, ldy);
+            dt::markerClip(m4, m5, r7, x0, wo, lmc);
+            check(why == dt::kDeltaOk && std::fabs(lmc[0] / lmc[2] - (wc[0] / wc[3] + e[0])) < 1e-5 &&
+                      std::fabs(lmc[1] / lmc[2] - (wc[1] / wc[3] + e[1])) < 1e-5,
+                  "F53: the correction moves the marker to ndc(P through the scene rows) + e");
+            // The census's angles: a content against itself is 0; against the same rows turned 2 degrees about up, 2 (forward and rotation).
+            double rA[3], uA[3], fA[3];
+            const double th = 2.0 * 3.14159265358979323846 / 180.0;
+            const double rB[3] = {std::cos(th), 0.0, -std::sin(th)}, uB[3] = {0.0, 1.0, 0.0}, fB[3] = {std::sin(th), 0.0, std::cos(th)};
+            float turned[16];
+            const bool okT = dt::worldBasis(wr, rA, uA, fA) && dt::swapRotation(wr, rA, uA, fA, rB, uB, fB, turned);
+            double f0 = -1.0, r0 = -1.0, f2 = -1.0, r2 = -1.0;
+            dt::rowsBasisAngles(wr, wr, &f0, &r0);
+            dt::rowsBasisAngles(wr, turned, &f2, &r2);
+            check(okT && std::fabs(f0) < 1e-6 && std::fabs(r0) < 1e-3 && std::fabs(f2 - 2.0) < 1e-3 && std::fabs(r2 - 2.0) < 1e-3,
+                  "F53: the census's forward and rotation angles between two rows contents");
+            const uint32_t ok3[3] = {1, 10, 43}, wrap[2] = {5, 133}, big[2] = {10, 266}, self[1] = {200};
+            uint32_t ka = 0, kb = 0;
+            const bool dOk = dt::keysDistinct(ok3, 3), dWrap = dt::keysDistinct(wrap, 2, &ka, &kb);
+            check(dOk && !dWrap && ka == 5 && kb == 133 && !dt::keysDistinct(big, 2) && !dt::keysDistinct(self, 1) && dt::keysDistinct(ok3, 0),
+                  "F53: the key census finds two keys (or a key's first and second posts) that would share a sentinel");
+        }
     }
 
     // F40 (pure math): the view map. seated = D . Ry(psi) . body; the head in body axes is Ry(psi)^-1 . diag(1,1,-1) . tS; psi is the seated head
@@ -962,6 +1010,48 @@ int wmain(int argc, wchar_t** argv) {
             const double a1 = nf::capToward(0.0, 0.23, 0.05), a2 = nf::capToward(0.2, 0.23, 0.05), a3 = nf::capToward(0.23, 0.0, 0.05);
             check(std::fabs(a1 - 0.05) < 1e-12 && std::fabs(a2 - 0.23) < 1e-12 && std::fabs(a3 - 0.18) < 1e-12,
                   "F51: the applied raise moves 5 cm a frame at most");
+            // F53: the raise is the constant raise_cm while on (clamped 0..0.5 m), nothing while off; the live dh does not enter it.
+            check(nf::raiseConstM(false, 10.0) == 0.0 && std::fabs(nf::raiseConstM(true, 10.0) - 0.10) < 1e-12 &&
+                      std::fabs(nf::raiseConstM(true, nf::kRaiseDefaultCm) - 0.10) < 1e-12 && nf::raiseConstM(true, 80.0) == 0.5 &&
+                      nf::raiseConstM(true, -5.0) == 0.0 && nf::raiseConstM(true, std::numeric_limits<double>::quiet_NaN()) == 0.0,
+                  "F53: the raise is a constant 0.10 m by default while on, clamped to 0..0.5 m, and zero while off");
+            // F53: the frozen set's cap holds every joint the Animate output has (0xC0), the plan's arrays are that size, and the flight's
+            // 185-member set (F51/F52 refused it at 128) builds: 188 joints, root 0 -> hips 1 -> spine 2 -> neck 3, foot 4 under the hips,
+            // joints 5..187 under the spine.
+            check(nf::kPfzMaxF == 192u && nf::kPfzMaxF >= nf::kPfzMaxJoints &&
+                      sizeof(edvr::pfz::Plan::member) / sizeof(uint16_t) == nf::kPfzMaxF &&
+                      sizeof(edvr::pfz::Plan::parentSlot) / sizeof(int16_t) == nf::kPfzMaxF &&
+                      sizeof(edvr::pfz::Plan::rest) / (8 * sizeof(float)) == nf::kPfzMaxF && sizeof(nf::PfzFrozenSet::member) / sizeof(uint16_t) == nf::kPfzMaxF,
+                  "F53: the frozen set's member cap is 192 (the joint cap) and the plan's member, parent-slot and rest arrays match it");
+            {
+                uint16_t big[188];
+                big[0] = 0xFFFF;
+                big[1] = 0;
+                big[2] = 1;
+                big[3] = 2;
+                big[4] = 1;
+                for (int j = 5; j < 188; ++j) big[j] = 2;
+                const nf::PfzFrozenSet fsBig = nf::pfzFrozenSet(big, 188, 3, 4);
+                bool parentsOk = fsBig.why == 0;
+                for (uint32_t k = 0; k < fsBig.count && parentsOk; ++k)
+                    parentsOk = fsBig.parentSlot[k] < static_cast<int>(k) &&
+                                (fsBig.parentSlot[k] < 0 ? big[fsBig.member[k]] == fsBig.anchor : big[fsBig.member[k]] == fsBig.member[fsBig.parentSlot[k]]);
+                check(fsBig.why == 0 && fsBig.count == 185 && fsBig.anchor == 1 && fsBig.slotOf(3) >= 0 && fsBig.slotOf(187) >= 0 && fsBig.slotOf(4) < 0 &&
+                          parentsOk && std::strcmp(nf::pfzWhyText(5), "the frozen set has more than 192 members") == 0,
+                      "F53: a 185-member frozen set builds (F51/F52's 128 cap refused it), parent first");
+            }
+            // F53: the neck anchor's rest geometry. The target neck is the FP side plus (0, -0.155, -0.161) m (body axes); the align's d =
+            // anchor - source with source = neckRestSource(neck) puts the neck exactly there.
+            {
+                const double fpB[3] = {0.02, 1.50, 0.10}, neckB[3] = {0.23, 1.30, -0.05};
+                double tgt[3], src[3], after[3];
+                nf::neckRestTarget(fpB, tgt);
+                nf::neckRestSource(neckB, src);
+                for (int i = 0; i < 3; ++i) after[i] = neckB[i] + (fpB[i] - src[i]);
+                check(std::fabs(tgt[0] - 0.02) < 1e-12 && std::fabs(tgt[1] - 1.345) < 1e-12 && std::fabs(tgt[2] + 0.061) < 1e-12 &&
+                          std::fabs(after[0] - tgt[0]) < 1e-12 && std::fabs(after[1] - tgt[1]) < 1e-12 && std::fabs(after[2] - tgt[2]) < 1e-12,
+                      "F53: the neck anchor puts the 3P neck at the FP side plus (0, -0.155, -0.161) m in body axes");
+            }
             // The shift rule: a record at the AMC origin moves by d once; a second pass over it leaves it alone; a record elsewhere never moves.
             const float origin[3] = {10.0f, 2.0f, -3.0f}, d[3] = {0.0f, 0.231f, 0.0f};
             float rec[3] = {10.0f, 2.0f, -3.0f}, other[3] = {10.5f, 2.0f, -3.0f};

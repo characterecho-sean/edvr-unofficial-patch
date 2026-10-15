@@ -214,4 +214,14 @@ inline std::atomic<int> g_nativeOnFootMarkerRefKey{1};
 bool nativeOnFootMarkerFixBegin(ID3D11DeviceContext* ctx);
 void nativeOnFootMarkerFixEnd(ID3D11DeviceContext* ctx);
 
+// F53: the marker probe's newest projection per eye, for the eye dump's marker crop (temporal_pass.cpp): P through the eye's scene rows (ndc,
+// set once per eye a frame at its first marker composite draw) and the marker as drawn (ndc, from the read-back, 2..3 frames late), each with
+// its GetTickCount64 stamp (0: never). Relaxed: a reader may mix two frames' values, which only moves a crop's centre.
+struct MarkerCropNdc {
+    std::atomic<float> p[2];
+    std::atomic<float> drawn[2];
+    std::atomic<uint64_t> pMs, drawnMs;
+};
+inline MarkerCropNdc g_markerCropNdc[2];   // zero-initialised (static storage)
+
 }  // namespace edvr

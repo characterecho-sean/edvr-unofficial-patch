@@ -393,6 +393,26 @@ inline void raiseSeated(double dh, double out[3]) noexcept {
     out[1] = -dh;
     out[2] = 0.0;
 }
+// F53: the raise is a constant, not the live dh (the pov joint's animation bobbed it 0 to 12 cm): `cm` (fix.native_on_foot_body_raise_cm,
+// default 10) clamped to 0..RaiseDh::kMaxM, while the raise is on; 0 otherwise.
+constexpr double kRaiseDefaultCm = 10.0;
+inline double raiseConstM(bool on, double cm) noexcept {
+    if (!on || !(cm == cm)) return 0.0;
+    return RaiseDh::clamp(cm / 100.0);
+}
+// F53: the neck anchor (the body align's default) with the rest geometry. The 3P neck's target is the FP side plus kNeckRestOffset in body axes
+// (right, up, forward): the pov minus the neck at rest, negated. The F42/F46 path captured that offset live over the first second, so it
+// carried the stance and the upper-body twist (the pov joint is a root child; the neck follows the stance). As a source for the align's
+// (anchor - source) the neck is placed where the pov would be at rest: source = neck - kNeckRestOffset. With the body's height locked
+// (vertical off, the default) only x and z of the target take effect.
+constexpr double kNeckRestOffset[3] = {0.0, -0.155, -0.161};
+inline void neckRestSource(const double neckB[3], double out[3]) noexcept {
+    for (int i = 0; i < 3; ++i) out[i] = neckB[i] - kNeckRestOffset[i];
+}
+// The neck's target for an FP side (body axes): where the align puts the neck once d has converged.
+inline void neckRestTarget(const double fpB[3], double out[3]) noexcept {
+    for (int i = 0; i < 3; ++i) out[i] = fpB[i] + kNeckRestOffset[i];
+}
 // One frame's move of `applied` toward `target`, at most `cap` (the 5 cm a frame every published offset keeps).
 inline double capToward(double applied, double target, double cap) noexcept {
     const double d = target - applied;
@@ -445,8 +465,9 @@ struct PfzLocoRest {
 // position in row 3, R(q) laid out as ecm::quatRows. The frozen set F is the torso-side child subtree of the lowest common ancestor of the neck and
 // the left foot (the hips); each member's matrix is its local (rest, or blended toward rest) times its parent's new matrix, anchored at the
 // animated matrix of the hips.
-constexpr uint32_t kPfzMaxF = 128;           // the frozen set's member cap
+constexpr uint32_t kPfzMaxF = 0xC0;          // the frozen set's member cap (F53: 192, the joint cap; F51/F52's 128 refused the 185-member set)
 constexpr uint32_t kPfzMaxJoints = 0xC0;     // the Animate output's joint cap (the span reader's min(count, 0xC0))
+static_assert(kPfzMaxF >= kPfzMaxJoints, "F53: F can hold every joint the Animate output has (the member cap is never the refusal)");
 constexpr double kPfzBlendSec = 0.3;         // the entry and exit blend
 
 // The rest local matrix of a pose record (pos vec4 at +0, quaternion at +0x10).
@@ -593,7 +614,7 @@ inline const char* pfzWhyText(uint32_t why) noexcept {
         case 2: return "a parent out of range or a cycle";
         case 3: return "the foot shares no ancestor with the neck";
         case 4: return "the anchor is the neck itself";
-        case 5: return "the frozen set has more than 128 members";
+        case 5: return "the frozen set has more than 192 members";
         default: return "?";
     }
 }
