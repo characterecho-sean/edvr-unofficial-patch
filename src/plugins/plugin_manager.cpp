@@ -330,8 +330,9 @@ void PluginManager::discoverAndLoad() {
 }
 
 bool PluginManager::loadPlugin(CandidatePlugin& cand, const std::string& approvedSha) {
-    if (vrOnlyBlocked("load")) return false;   // approval must never load an addon that nothing would run
-    if (m_dormant) return false;
+    cand.loadNote.clear();
+    if (vrOnlyBlocked("load")) { cand.loadNote = "load failed: addons run only in VR"; return false; }   // approval must never load an addon that nothing would run
+    if (m_dormant) { cand.loadNote = "load failed: addons run only in VR"; return false; }
     // Approval names a hash, so the bytes that run must be the bytes that hash. Hold the file with
     // write and delete sharing denied, hash it through that handle, and load it while the handle is
     // still open: nothing can swap the file between the check and the load.
@@ -339,6 +340,7 @@ bool PluginManager::loadPlugin(CandidatePlugin& cand, const std::string& approve
                               nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (hold == INVALID_HANDLE_VALUE) {
         Log::get().note("plugin_manager: cannot hold %ls for verification (err=%lu)", cand.path.c_str(), GetLastError());
+        cand.loadNote = "load failed: file locked or unreadable";
         return false;
     }
     std::string actualSha = sha256OfHandle(hold);
@@ -350,6 +352,9 @@ bool PluginManager::loadPlugin(CandidatePlugin& cand, const std::string& approve
         if (!actualSha.empty()) {
             cand.sha256 = actualSha;
             cand.approved = false;
+            cand.loadNote = "file changed: review and approve the new version";
+        } else {
+            cand.loadNote = "load failed: file could not be read";
         }
         return false;
     }
@@ -358,6 +363,7 @@ bool PluginManager::loadPlugin(CandidatePlugin& cand, const std::string& approve
     CloseHandle(hold);
     if (!hMod) {
         Log::get().note("plugin_manager: failed to load %ls (err=%lu)", cand.path.c_str(), GetLastError());
+        cand.loadNote = "load failed: not a loadable DLL";
         return false;
     }
 
@@ -365,6 +371,7 @@ bool PluginManager::loadPlugin(CandidatePlugin& cand, const std::string& approve
     if (!regFunc) {
         Log::get().note("plugin_manager: %ls missing EdvrPluginRegister export", cand.path.c_str());
         FreeLibrary(hMod);
+        cand.loadNote = "load failed: addon refused";
         return false;
     }
 
@@ -381,12 +388,14 @@ bool PluginManager::loadPlugin(CandidatePlugin& cand, const std::string& approve
         Log::get().note("plugin_manager: addon %s faulted in EdvrPluginRegister (0x%08X); rejected",
                         cand.stem.c_str(), fault);
         FreeLibrary(hMod);
+        cand.loadNote = "load failed: addon refused";
         return false;
     }
     if (regResult != 0 || lp.callbacks.structSize < sizeof(EdvrPluginCallbacks)) {
         Log::get().note("plugin_manager: addon %s rejected API version %u or invalid structSize (res=%d)",
                         cand.stem.c_str(), EDVR_PLUGIN_API_VERSION, regResult);
         FreeLibrary(hMod);
+        cand.loadNote = "load failed: addon refused";
         return false;
     }
 
@@ -405,6 +414,7 @@ bool PluginManager::loadPlugin(CandidatePlugin& cand, const std::string& approve
                             cand.stem.c_str(), initResult, fault);
             edvr::menuRemovePluginSettings(cand.stem.c_str());   // its getters and setters point into the DLL about to go
             FreeLibrary(hMod);
+            cand.loadNote = "load failed: addon could not start";
             return false;
         }
     }
@@ -506,11 +516,23 @@ ApprovalResult PluginManager::approveCandidate(uint32_t id) {
         if (cand.id != id) continue;
         if (cand.approved) return r;   // already approved: a second activation of a stale row
         if (cand.conflicted) return r; // another file has this addon's identity: nothing can be approved until all but one is gone
+        r.stem = cand.stem;
+        if (cand.sha256.empty()) {     // the file could not be hashed at discovery: there is no hash to approve
+            cand.loadNote = "cannot approve: file could not be read";
+            r.reason = cand.loadNote;
+            return r;
+        }
         const std::string approvedSha = cand.sha256;
         cand.approved = true;
         r.loaded = loadPlugin(cand, approvedSha);
-        r.applied = cand.approved;     // loadPlugin clears it when the file no longer matches the approved hash
-        r.stem = cand.stem;
+        // The approval stands only if the addon is running. A changed file already resurfaced itself under its new hash; any other
+        // failure leaves the same candidate unapproved so it can be tried again, and the caller saves nothing.
+        if (!r.loaded) {
+            cand.approved = false;
+            r.reason = cand.loadNote;
+            return r;
+        }
+        r.applied = true;
         r.sha256 = approvedSha;
         return r;
     }

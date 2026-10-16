@@ -18,6 +18,8 @@ struct CandidatePlugin {
     // Another file in plugins\ has the same canonical identity (the sanitized stem, so plugins\foo.dll, plugins\foo\plugin.dll and
     // foo-bar.dll / foo_bar.dll all collide). Every file of such a group is refused: none loads and none can be approved.
     bool conflicted = false;
+    // Why the last attempt to load this candidate failed, short enough for a menu hint; empty when none failed. Cleared by a load that succeeds.
+    std::string loadNote;
 };
 
 struct LoadedPlugin {
@@ -32,10 +34,14 @@ struct LoadedPlugin {
 };
 
 struct ApprovalResult {
-    bool applied = false;   // the candidate existed, was not yet approved, and is now (false: stale id, already approved, or the file changed)
+    // The approval took effect: the candidate existed, was not yet approved, and the addon loaded and initialised. Only then does the
+    // caller record the approval in [addons]. False for a stale id, an already approved candidate, a changed file (it resurfaces under
+    // its new hash) and any failed load (the candidate stays unapproved so the approval can be retried).
+    bool applied = false;
     bool loaded = false;    // ...and the addon is running
     std::string stem;
     std::string sha256;     // the hash that was approved; what belongs in [addons]
+    std::string reason;     // short, for the menu: why an approval did not take effect; empty when it did or the id named nothing
 };
 
 class PluginManager {

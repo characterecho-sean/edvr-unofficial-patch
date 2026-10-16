@@ -989,6 +989,91 @@ int main(int argc, char** argv) {
         }
     }
 
+    // Case 26 (PR #92 review, ticket 19): an approval counts, and is saved by the menu, only when the addon loads. A failed load leaves the
+    // candidate unapproved with a reason, so the row stays and the approval can be retried in the same session.
+    {
+        // (1) The file is locked at approval; releasing it and approving again loads and applies.
+        {
+            auto sb = makeSandbox(L"retry_locked");
+            dropFixture(sb, L"", L"locked.dll");
+            pm.initialize(sb.wstring());
+            auto cand = findCandidate(pm, "locked");
+            check(cand.has_value() && !cand->sha256.empty(), "retry locked: candidate discovered with a hash");
+            const uint32_t id = cand ? cand->id : 0;
+            const std::wstring path = (sb / L"plugins" / L"locked.dll").wstring();
+            HANDLE lockH = CreateFileW(path.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+            check(lockH != INVALID_HANDLE_VALUE, "retry locked: the test holds the file exclusively");
+            edvr::plugins::ApprovalResult r = pm.approveCandidate(id);
+            check(!r.applied && !r.loaded, "retry locked: a locked file is not applied (nothing for the menu to save)");
+            check(!r.reason.empty(), "retry locked: the result carries a reason");
+            edvr::plugins::CandidatePlugin after;
+            check(pm.candidateById(id, &after) && !after.approved && !after.loadNote.empty(),
+                  "retry locked: the candidate stays listed unapproved, with a reason on it");
+            check(pm.activePluginCount() == 0, "retry locked: nothing loaded");
+            if (lockH != INVALID_HANDLE_VALUE) CloseHandle(lockH);
+            edvr::plugins::ApprovalResult retry = pm.approveCandidate(id);
+            check(retry.applied && retry.loaded && retry.stem == "locked" && retry.sha256 == (cand ? cand->sha256 : ""),
+                  "retry locked: approving again once the file is free loads it and reports the hash to save");
+            check(pm.candidateById(id, &after) && after.approved && after.loadNote.empty(), "retry locked: the loaded candidate is approved with no failure note");
+            pm.shutdown();
+            std::error_code ec; std::filesystem::remove_all(sb, ec);
+        }
+        // (2) An addon whose onInitialize fails (or whose registration faults) is not applied and can be tried again.
+        for (const wchar_t* variant : { L"initfail", L"initfault", L"regfault" }) {
+            const std::wstring tag = std::wstring(L"retry_") + variant;
+            auto sb = makeSandbox(tag.c_str());
+            dropFixture(sb, variant, L"broken.dll");
+            pm.initialize(sb.wstring());
+            auto cand = findCandidate(pm, "broken");
+            const uint32_t id = cand ? cand->id : 0;
+            edvr::plugins::ApprovalResult r = pm.approveCandidate(id);
+            const std::string label = "retry " + std::string(variant, variant + wcslen(variant));
+            check(cand && !r.applied && !r.loaded && !r.reason.empty(), (label + ": not applied, with a reason").c_str());
+            edvr::plugins::CandidatePlugin after;
+            check(pm.candidateById(id, &after) && !after.approved && !after.loadNote.empty() && after.sha256 == cand->sha256,
+                  (label + ": the candidate stays listed unapproved with a reason").c_str());
+            pm.shutdown();
+            std::error_code ec; std::filesystem::remove_all(sb, ec);
+        }
+        // (3) A candidate whose file could not be hashed at discovery has no hash to approve: refused, with a reason.
+        {
+            auto sb = makeSandbox(L"retry_nohash");
+            dropFixture(sb, L"", L"nohash.dll");
+            const std::wstring path = (sb / L"plugins" / L"nohash.dll").wstring();
+            HANDLE lockH = CreateFileW(path.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+            pm.initialize(sb.wstring());
+            if (lockH != INVALID_HANDLE_VALUE) CloseHandle(lockH);
+            auto cand = findCandidate(pm, "nohash");
+            check(cand && cand->sha256.empty(), "nohash: a file locked at discovery has an empty hash");
+            edvr::plugins::ApprovalResult r = pm.approveCandidate(cand ? cand->id : 0);
+            check(!r.applied && !r.loaded && !r.reason.empty(), "nohash: approval is refused with a reason");
+            edvr::plugins::CandidatePlugin after;
+            check(cand && pm.candidateById(cand->id, &after) && !after.approved && !after.loadNote.empty() && pm.activePluginCount() == 0,
+                  "nohash: the candidate stays listed unapproved with a reason, nothing loaded");
+            pm.shutdown();
+            std::error_code ec; std::filesystem::remove_all(sb, ec);
+        }
+        // (4) A file swapped after discovery is still not applied; it resurfaces under its new hash and that hash can be approved.
+        {
+            auto sb = makeSandbox(L"retry_swap");
+            dropFixture(sb, L"", L"swapped.dll");
+            pm.initialize(sb.wstring());
+            auto cand = findCandidate(pm, "swapped");
+            const uint32_t id = cand ? cand->id : 0;
+            dropFixture(sb, L"b", L"swapped.dll");
+            const std::string shaB = edvr::plugins::PluginManager::calculateSha256((sb / L"plugins" / L"swapped.dll").wstring());
+            edvr::plugins::ApprovalResult r = pm.approveCandidate(id);
+            check(cand && !r.applied && !r.loaded, "retry swap: the old hash is not applied to the replaced file");
+            edvr::plugins::CandidatePlugin after;
+            check(pm.candidateById(id, &after) && !after.approved && after.sha256 == shaB && shaB != cand->sha256,
+                  "retry swap: the candidate resurfaces unapproved under the new hash");
+            edvr::plugins::ApprovalResult again = pm.approveCandidate(id);
+            check(again.applied && again.loaded && again.sha256 == shaB, "retry swap: the new hash approves and loads");
+            pm.shutdown();
+            std::error_code ec; std::filesystem::remove_all(sb, ec);
+        }
+    }
+
     // Case 21 (PR #92 review): the singleton is leaked on purpose. Leave a healthy addon loaded and initialised, with no shutdown(),
     // and let checkNoShutdownAtExit look for its onShutdown after the CRT has run its exit-time destructors.
     {

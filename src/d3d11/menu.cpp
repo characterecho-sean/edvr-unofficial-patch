@@ -1537,8 +1537,9 @@ void stepPluginSetting(int psIdx, int dir) {
 void buildPages();
 
 // What activating an approval row does. The row holds a candidate id; a stale or already approved id
-// does nothing, and the pages rebuild either way so no approval row outlives its candidate.
-bool approveAddonCandidate(uint32_t id) {
+// does nothing, and the pages rebuild either way so no approval row outlives its candidate. The approval is saved to the ini only when the
+// addon loaded; a failed load leaves the row in place (with its reason) for a retry. *reason, when given, receives why nothing was approved.
+bool approveAddonCandidate(uint32_t id, std::string* reason = nullptr) {
     plugins::ApprovalResult r = plugins::PluginManager::instance().approveCandidate(id);
     if (r.applied) {
         WriteJob job;
@@ -1549,6 +1550,7 @@ bool approveAddonCandidate(uint32_t id) {
         Log::get().note("menu: approved addon '%s' (hash %s) to %s",
                         r.stem.c_str(), r.sha256.c_str(), Config::get().iniName());
     }
+    if (reason) *reason = r.reason;
     buildPages();
     return r.applied;
 }
@@ -2285,9 +2287,13 @@ void buildContent(MenuContent& c) {
                     strncpy(l.left, label.c_str(), sizeof(l.left) - 1);
                     strncpy(l.right, "approve", sizeof(l.right) - 1);
                     l.style = hi ? kMenuRowHi : kMenuRow;
+                    if (!cand.loadNote.empty()) {
+                        strncpy(l.right, cand.loadNote.c_str(), sizeof(l.right) - 1);   // why the last try failed; selecting retries
+                    }
                     if (hi) {
-                        snprintf(c.hint, sizeof(c.hint), "SHA-256: %s. Select to approve it, save the approval to %s and load it now.",
-                                 cand.sha256.c_str(), Config::get().iniName());
+                        snprintf(c.hint, sizeof(c.hint), "SHA-256: %s. Select to approve it, save the approval to %s and load it now.%s%s",
+                                 cand.sha256.c_str(), Config::get().iniName(),
+                                 cand.loadNote.empty() ? "" : " Last try: ", cand.loadNote.c_str());
                     }
                 } else {
                     strncpy(l.left, "(already handled)", sizeof(l.left) - 1);   // a frame between the approval and the rebuild
@@ -2959,8 +2965,9 @@ void activateEntry() {
     const Entry& e = p.entries[p.highlight];
     if (e.kind == EntryKind::Approval) {
         const uint32_t id = e.candidateId;   // copied: the rebuild below frees the entry
-        const bool applied = approveAddonCandidate(id);
-        s.lastWrite = applied ? "approved an addon" : "addon not approved";
+        std::string why;
+        const bool applied = approveAddonCandidate(id, &why);
+        s.lastWrite = applied ? "approved an addon" : why.empty() ? "addon not approved" : "addon not approved: " + why;
         s.contentDirty = true;
         return;
     }
