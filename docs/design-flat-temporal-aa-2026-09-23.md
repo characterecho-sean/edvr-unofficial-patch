@@ -54,7 +54,8 @@
 - **10-14 BUILT, NOT FLOWN:** flat `fix.intro_video = skip` (intro-video.md); AA comparison key F7 (last entry).
 - **10-16 Operations FSR report:** unfamiliar shaders suspected, not established; route succeeds through the capped log, later behavior unknown (entry below).
 - **10-16 BUILT, NOT FLOWN:** flat origin re-anchors (~5 km) and fast travel no longer reset TAA/DLSS; a re-anchor drops its camera
-  translation, travel keeps it (review F1). Open: engine-record scenePrev in the old anchor frame; VR drops all 50 m+ translation.
+  translation, outward travel keeps it (review F1). OPEN: inward travel can be mistaken for a re-anchor; see the F1 review entry.
+  Also open: engine-record scenePrev in the old anchor frame; VR drops all 50 m+ translation.
 - **10-16 flat Debug tab, BUILT, NOT FLOWN:** the flat F8 panel has two tabs, Performance and Debug. Debug holds the MOTION SOURCE VIEW,
   `advanced.flat_refusal_view` (this is the flat view that survived the 2026-10-09 cull of VR's `temporal_aa_debug`; green exact engine record,
   blue camera term, the refusals in the eye path's colours; section below) and `advanced.flat_cpu_timing`. Both live, off by default.
@@ -3091,6 +3092,18 @@ Whether the records' previous-pose block is in the old anchor frame is the
 open question above and is NOT answered; the arithmetic cannot be made
 consistent from the resolver side without it. Travel frames are consistent: both
 routes carry the real step.
+
+**2026-10-16, pre-RC3 review F1 disposition: still open.** The concrete inward
+case `(80, 0, 0)` to `(20, 0, 0)` satisfies the current re-anchor rule and
+loses 60 m of camera translation: 74.88 pixels at 2496 wide, a 90-degree
+horizontal projection and 1000 m depth. A coordinate re-anchor can present
+the same camera rows, step, lengths, orientation and frame time. Those inputs
+cannot distinguish the two events. A size or ratio cutoff has no independent
+evidence and is not a correction. The game's scene snapshots repeat the same
+camera rows; the engine-record pose blocks remain an unverified candidate
+for an independent motion witness. Next: verify those blocks across a real
+re-anchor, or identify the game's origin-reset event, before changing the
+classifier. The F3/F4 review fixes do not change this behavior.
 
 VR: `temporalCameraGateStep` drops the translation of ANY jump of 50 m or more
 (`temporalOriginJump`), so VR has the same fast-travel problem (80 m/frame

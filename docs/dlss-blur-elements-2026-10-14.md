@@ -12,8 +12,8 @@
 - **Shield refraction after the upscale (2026-10-16): BUILT, NOT FLOWN** (`claude/shield-ripple`, VR only; entry "Built, 2026-10-16: the shield
   refraction"). 820E is skipped in the scene and its displacement applied after RCAS via a per-eye layer D. Sean approved shipping it under
   `fix.sharp_weapons`; `advanced.shield_ripple` and the coverage instrument are REMOVED. R1 (gain, filter) runs live and stands down to stock with a log line.
-- **Flat port (2026-10-16): BUILT, NOT FLOWN** (`claude/flat-sharp-weapons`; entry "Flat port"). `fix.sharp_weapons` covers the flat edition too (weapons fire and shield
-  ripple through flat's adapter, panel row under UI quality). No flat combat capture exists; open: do flat's weapons draws carry camera rows (`flat ui layer weapons`).
+- **Flat port (2026-10-16): BUILT, NOT FLOWN.** Weapons and ripple use flat's adapter; pre-RC3 F3/F4 full gate passed (222.4 s); entry below.
+  No flat combat capture exists; open: do flat's weapons draws carry camera rows (`flat ui layer weapons`)? See "Flat port".
 - **Weapons fire (2026-10-16): MERGED** (`claude/billboards-sharp-weapons`; flown OK in combat as `claude/combat-flight-1`; entries "Built" and
   "Combat flights"). 1F17, 939D and 5C1D go into the eye's own additive HDR layer, composited after the upscale by tonemap difference; 820E stays.
   Sean: weapons and shields look much better, beams and tracers are sharp. **ONE key, `fix.sharp_weapons = on | plain | off`** (default on, independent of
@@ -544,3 +544,20 @@ the existing flat gates.
 about two minutes of firing and taking fire, ideally once with fix.ui_quality on and once off, and the same strike with the row on, plain and off from the panel (live).
 Send the log. Read: `flat ui layer weapons` taken against asked, the refusal counts, `sharp weapons: the left eye's weapons light was composited` first-seen lines,
 the `shield ripple` first-draw lines (R1 gain and filter) and the 30 s line; and look at a shield strike and a beam over a planet with the row on and off.
+
+**Pre-RC3 review fixes, 2026-10-16 (full gate passed).** F3: the flat tone
+consumer required a fresh HUD even when it had taken weapons into W. It now
+accepts fresh HUD or weapon content, matching that content's HDR target or
+its proven copy. A copy also names its source so an unrelated target cannot
+pass admission. F4: an actual D3D11 device replacement now releases the
+sharp-source shaders, all four weapon blend states, and the shield ripple's
+device objects, then clears creation attempts and first-draw validation.
+The device regression warms both paths on A, resets, warms B, and checks
+every retained child's owner. Same-device resize keeps its existing path.
+The production flat adapter/layer regression passes 73 WARP checks (on/plain,
+HUD quality off or HUD-free quality on, copy routing, refusal controls and
+rendered composite); the two-device regression passes 53. Both are in the
+full build gate. The absolute-path `build.bat --wait-lock` passed in 222.4 s:
+165 pooled jobs, six quiet jobs, production DLLs, installer and final receipt.
+These changes do not depend on a headset or VR runtime. Flat combat remains
+unflown; the flight above is still required.

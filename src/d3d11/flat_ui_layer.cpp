@@ -150,8 +150,7 @@ Ptr<ID3D11Resource> toneBloomInput(ID3D11DeviceContext* ctx) {
 uint32_t g_candidateLines = 0;  // eight tone candidates logged, re-armed after a route, render-size or swap-chain change
 char g_candidateRoute[48] = "";
 uint32_t g_candidateW = 0, g_candidateH = 0;
-uint64_t g_takenFrame = 0;          // the frame the shared decision last took a HUD draw in...
-const void* g_takenTarget = nullptr;  // ...and its target (the admission's copy is that target's)
+uint64_t g_takenFrame = 0;  // the frame of the first decided draw, for the map-family note
 
 // The view the copy samples in place of its own: over the composite's output, in the copy's own view format.
 Ptr<ID3D11ShaderResourceView> g_view;
@@ -296,10 +295,7 @@ FlatUiLayerAsk flatUiLayerDecide(ID3D11DeviceContext* ctx, const FlatUiLayerDraw
     }
     ++g_w.decided[fi];
     g_decidedFamily = family;  // flatUiLayerNoteIssue counts this draw under it
-    if (g_takenFrame != d.frame) {
-        g_takenFrame = d.frame;
-        g_takenTarget = d.color;
-    }
+    if (g_takenFrame != d.frame) g_takenFrame = d.frame;
     flatUiTrailNoteTake(d.frame);
     g_lastAsk = FlatUiLayerAsk::kDecided;
     return g_lastAsk;
@@ -503,10 +499,18 @@ bool flatUiLayerToneCandidate(ID3D11DeviceContext* ctx, uint64_t frame, uint32_t
         if (n < 0) break;
         used += static_cast<size_t>(n);
     }
-    // The alias the admission may accept: the copy of the target this frame's HUD was taken from.
+    // The alias the admission may accept: the bound tone input's copy and
+    // its own source target. Admission checks that this source holds fresh
+    // HUD or weapon content; the first draw of another family cannot select
+    // an unrelated alias for the tone.
     const void* takenAlias = nullptr;
+    const void* aliasSource = nullptr;
     for (uint32_t i = 0; i < g_proof.count; ++i)
-        if (g_takenFrame == frame && g_proof.hud[i] == g_takenTarget) takenAlias = g_proof.alias[i];
+        if (input && input == g_proof.alias[i]) {
+            takenAlias = input;
+            aliasSource = g_proof.hud[i];
+            break;
+        }
     const bool proven = flatUiToneProofTone(g_proof, frame, input) != nullptr;
     flatUiTrailNoteProven(frame, proven);
     if (proven) ++g_w.toneProven;
@@ -534,21 +538,21 @@ bool flatUiLayerToneCandidate(ID3D11DeviceContext* ctx, uint64_t frame, uint32_t
                         static_cast<unsigned long long>(frame), static_cast<unsigned long long>(frame + 1));
     }
     bool admitted = false;
-    char why[96] = "not asked: no HUD was taken this frame";
+    char why[96] = "not asked: no HUD or weapons were taken this frame";
     {
         FlatComputeInternalScope internal;
         uiLayerFlatSetDraw(frame, 0.0f, 0.0f, renderW, renderH);  // the sequence only
-        admitted = uiLayerCrispAdmitFlat(ctx, hdrSlot, takenAlias, vs, ps, why, sizeof(why)) == 1;
+        admitted = uiLayerCrispAdmitFlat(ctx, hdrSlot, takenAlias, aliasSource, vs, ps, why, sizeof(why)) == 1;
     }
     if (admitted) ++g_w.toneAdmitted;
     flatUiTrailNoteAdmission(frame, why);
     if (g_candidateLines < 8) {
         ++g_candidateLines;
         Log::get().note("flat ui layer: tone candidate %u: frame %llu vs %016llX ps %016llX, HDR slot t%d reads %p, output %ux%u, "
-                        "render %ux%u, route %s; this frame's HUD targets: %s; proof for the next frame: %s; re-issue: %s.",
+                        "render %ux%u, route %s; this frame's HDR content targets: %s; proof for the next frame: %s; re-issue: %s.",
                         g_candidateLines, static_cast<unsigned long long>(frame), static_cast<unsigned long long>(vs),
                         static_cast<unsigned long long>(ps), hdrSlot, input, outW, outH, renderW, renderH, route,
-                        used ? targets : "none asked yet", proven ? "yes" : used ? "no (reads none of them)" : "no (no HUD ask yet)",
+                        used ? targets : "none asked yet", proven ? "yes" : used ? "no (reads none of them)" : "no (no HDR content ask yet)",
                         why);
     }
     return admitted;
@@ -684,7 +688,6 @@ void flatUiLayerRelease() {
     g_sourceToneFirstNoted = false;
     g_candidateLines = 0;         // and its first tone candidates are logged
     g_takenFrame = 0;
-    g_takenTarget = nullptr;
     g_view.Reset();
     g_viewTex = nullptr;
     g_viewFmt = DXGI_FORMAT_UNKNOWN;

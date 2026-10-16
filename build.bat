@@ -3966,6 +3966,25 @@ if errorlevel 1 ( echo [edvr] ERROR: sharp weapons test build failed & exit /b 1
 "%OBJ%\sharpweapons\sharp_weapons_test.exe" --self-test || exit /b 1
 exit /b 0
 
+:rig_flat_weapon_admission_test
+echo [edvr] === flat_weapon_admission_test.exe ===
+REM The complete flat adapter and UI layer on WARP: frame N proves the tone target, frame N+1 takes an actual weapon draw,
+REM the named tone route re-issues its on/plain plan, and the flat output copy binds a nonempty published composite.
+REM Includes HUD-quality-off and HUD-free quality-on cases plus stale/alien target refusals. Its System32 D3D11 device
+REM lives beside its own objects, never beside build\d3d11.dll.
+if not exist "%OBJ%\flatweaponadmit" mkdir "%OBJ%\flatweaponadmit"
+%CC% /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /utf-8 ^
+    /Fo"%OBJ%\flatweaponadmit\\" /Fe"%OBJ%\flatweaponadmit\flat_weapon_admission_test.exe" ^
+    "tools\sharp_weapons_test\flat_weapon_admission_test.cpp" "tools\sharp_weapons_test\flat_weapon_bridge.cpp" ^
+    "src\d3d11\flat_ui_layer.cpp" "src\common\config.cpp" "src\common\log.cpp" "src\common\guard.cpp" ^
+    "third_party\dxbc_hash\DxilHash.cpp" ^
+    /link /INCREMENTAL:NO d3dcompiler.lib user32.lib
+if errorlevel 1 ( echo [edvr] ERROR: flat weapon admission test build failed & exit /b 1 )
+"%OBJ%\flatweaponadmit\flat_weapon_admission_test.exe" --dry-run || exit /b 1
+"%OBJ%\flatweaponadmit\flat_weapon_admission_test.exe" --self-test || exit /b 1
+exit /b 0
+
 :rig_shield_ripple_test
 echo [edvr] === shield_ripple_test.exe ===
 REM advanced.shield_ripple (docs\dlss-blur-elements-2026-10-14.md, "Built, 2026-10-16: the shield refraction after the upscale"): the pair's family rule, the modes, the

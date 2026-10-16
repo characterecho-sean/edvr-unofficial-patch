@@ -21,6 +21,32 @@ namespace devtest {
 ID3D11BlendState* rgbOnlyBlend(ID3D11DeviceContext* ctx);
 bool takeReady(ID3D11DeviceContext* ctx);
 bool seederReady(ID3D11Device* dev);
+bool sharpReady(ID3D11DeviceContext* ctx);
+bool rippleReady(ID3D11DeviceContext* ctx);
+bool rippleFirstDrawPending(ID3D11DeviceContext* ctx);
+bool newCachesCleared();
+ID3D11VertexShader* sharpVs();
+ID3D11PixelShader* sharpPs();
+ID3D11BlendState* sharpSourceBlend();
+ID3D11BlendState* sharpReplaceBlend();
+ID3D11BlendState* sharpAddBlend();
+ID3D11BlendState* sharpSubtractBlend();
+ID3D11Texture2D* sharpScratch();
+ID3D11RenderTargetView* sharpScratchTarget();
+ID3D11ShaderResourceView* sharpScratchView();
+ID3D11Texture2D* weaponsLayer();
+ID3D11RenderTargetView* weaponsTarget();
+ID3D11ShaderResourceView* weaponsView();
+ID3D11Texture2D* rippleLayer();
+ID3D11RenderTargetView* rippleTarget();
+ID3D11ShaderResourceView* rippleView();
+ID3D11Texture2D* rippleRamp();
+ID3D11ShaderResourceView* rippleRampView();
+ID3D11BlendState* rippleBlend();
+ID3D11SamplerState* rippleSampler();
+ID3D11Buffer* rippleCb();
+ID3D11ComputeShader* rippleCs();
+ID3D11Buffer* rippleStage();
 ID3D11DeviceContext* coverageContext();
 ID3D11DeviceContext* seederContext();
 ID3D11VertexShader* coverageVs();
@@ -82,6 +108,21 @@ bool allOwnedBy(ID3D11DeviceContext* ctx, ID3D11Device* dev) {
     ok = ownedBy(devtest::layerTexture(), dev) && ok;
     ok = ownedBy(devtest::hdrLayerTexture(), dev) && ok;
     return ok;
+}
+
+bool sharpRippleOwnedBy(ID3D11Device* dev) {
+    return ownedBy(devtest::sharpVs(), dev) && ownedBy(devtest::sharpPs(), dev) &&
+           ownedBy(devtest::sharpSourceBlend(), dev) && ownedBy(devtest::sharpReplaceBlend(), dev) &&
+           ownedBy(devtest::sharpAddBlend(), dev) && ownedBy(devtest::sharpSubtractBlend(), dev) &&
+           ownedBy(devtest::sharpScratch(), dev) && ownedBy(devtest::sharpScratchTarget(), dev) &&
+           ownedBy(devtest::sharpScratchView(), dev) && ownedBy(devtest::weaponsLayer(), dev) &&
+           ownedBy(devtest::weaponsTarget(), dev) && ownedBy(devtest::weaponsView(), dev) &&
+           ownedBy(devtest::rippleLayer(), dev) && ownedBy(devtest::rippleTarget(), dev) &&
+           ownedBy(devtest::rippleView(), dev) &&
+           ownedBy(devtest::rippleRamp(), dev) && ownedBy(devtest::rippleRampView(), dev) &&
+           ownedBy(devtest::rippleBlend(), dev) && ownedBy(devtest::rippleSampler(), dev) &&
+           ownedBy(devtest::rippleCb(), dev) && ownedBy(devtest::rippleCs(), dev) &&
+           ownedBy(devtest::rippleStage(), dev);
 }
 
 ComPtr<ID3D11Texture2D> frameTexture(ID3D11Device* dev, uint32_t w, uint32_t h, const uint8_t rgba[4], bool uav = false) {
@@ -241,15 +282,24 @@ int main(int argc, char** argv) {
     detail::g_uiLayerCrispOn = true;
 
     frameRound(devA.Get(), ctxA.Get(), 10, 64, 64, "device A");
+    check(devtest::sharpReady(ctxA.Get()) && devtest::rippleReady(ctxA.Get()) &&
+              devtest::rippleFirstDrawPending(ctxA.Get()),
+          "device A: sharp source, all four blend states, ripple door and first-draw staging initialize");
+    check(sharpRippleOwnedBy(devA.Get()), "device A: every sharp and ripple child belongs to A");
     check(allOwnedBy(ctxA.Get(), devA.Get()), "device A: every retained device child is A's");
     check(!allOwnedBy(ctxB.Get(), devB.Get()),
           "control: before the reset the retained children are not B's (the ownership check can fail)");
 
     uiLayerDeviceReset();  // the production device-change reset (flat_ui_layer.cpp flatUiLayerNoteDevice)
+    check(devtest::newCachesCleared(), "device reset releases sharp and ripple children and clears creation and validation state");
     detail::g_uiLayerLive = true;
     detail::g_uiQualityLive = true;
     detail::g_uiLayerCrispOn = true;
     frameRound(devB.Get(), ctxB.Get(), 20, 64, 64, "device B");
+    check(devtest::sharpReady(ctxB.Get()) && devtest::rippleReady(ctxB.Get()) &&
+              devtest::rippleFirstDrawPending(ctxB.Get()),
+          "device B: sharp and ripple creation and first-draw validation run again");
+    check(sharpRippleOwnedBy(devB.Get()), "device B: every sharp and ripple child belongs to B");
     check(allOwnedBy(ctxB.Get(), devB.Get()), "device B: every retained device child (blend, coverage shaders and context, seeder "
                                               "context, composite shader and buffer, both layers) is B's");
 

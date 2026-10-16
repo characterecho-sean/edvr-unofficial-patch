@@ -4971,8 +4971,8 @@ bool uiLayerCrispNoteEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count
     return true;
 }
 
-int uiLayerCrispAdmitFlat(ID3D11DeviceContext* ctx, int hdrSlot, const void* alias, uint64_t vs, uint64_t ps, char* why,
-                          size_t whyN) {
+int uiLayerCrispAdmitFlat(ID3D11DeviceContext* ctx, int hdrSlot, const void* alias, const void* aliasSource,
+                          uint64_t vs, uint64_t ps, char* why, size_t whyN) {
     g_crispPending = CrispTonePending{};
     detail::g_uiLayerCrispPending = false;
     const auto say = [&](const char* text) {
@@ -4985,14 +4985,23 @@ int uiLayerCrispAdmitFlat(ID3D11DeviceContext* ctx, int hdrSlot, const void* ali
     uint64_t seq = 0;
     if (!layerDrawJitter(0, &seq, nullptr, nullptr, nullptr, nullptr)) return say("no flat frame");
     Eye& e = g_eye[0];
-    if (!(e.hdrSeq == seq && e.hdrDraws && e.hdrSrv)) return say("no HUD was taken this frame");
+    const bool hudFresh = e.hdrSeq == seq && e.hdrDraws && e.hdrSrv;
+    const bool wFresh = e.wSeq == seq && e.wDraws && e.wSrv;
+    if (!hudFresh && !wFresh) return say("no HUD or weapons were taken this frame");
     Ptr<ID3D11ShaderResourceView> srv;
     ctx->PSGetShaderResources(static_cast<UINT>(hdrSlot), 1, &srv);
     Ptr<ID3D11Resource> r;
     if (srv) srv->GetResource(&r);
     if (!r) return say("nothing is bound at the tone's HDR slot");
-    if (r.Get() != e.hdrTarget && (!alias || r.Get() != alias))
-        return say("the tone reads neither the HUD's HDR target nor its copy");
+    const bool hudTarget = hudFresh && r.Get() == e.hdrTarget;
+    const bool wTarget = wFresh && r.Get() == e.wTarget;
+    // The flat adapter identifies the source of the bound input's proven
+    // copy. A copy cannot rescue stale content or another target.
+    const bool takenCopy = alias && r.Get() == alias && aliasSource &&
+                           ((hudFresh && e.hdrTarget == aliasSource) ||
+                            (wFresh && e.wTarget == aliasSource));
+    if (!hudTarget && !wTarget && !takenCopy)
+        return say("the tone reads neither a fresh HUD/weapon HDR target nor its copy");
     Ptr<ID3D11RenderTargetView> rtv;
     ctx->OMGetRenderTargets(1, &rtv, nullptr);
     Ptr<ID3D11Resource> out;
@@ -5001,7 +5010,9 @@ int uiLayerCrispAdmitFlat(ID3D11DeviceContext* ctx, int hdrSlot, const void* ali
     if (e.seq == seq && e.draws) return say("the 8-bit layer is already busy this frame");
     if (e.hdrToneSeq == seq) return say("a second tonemap this frame");
     crispArm(0, seq, hdrSlot, out.Get(), r.Get(), vs, ps);  // the pair the draw scope read before the resolve ran
-    return say(r.Get() == e.hdrTarget ? "admitted: reads the HUD's HDR target" : "admitted: reads the HUD target's copy"), 1;
+    return say(hudTarget ? "admitted: reads the HUD's HDR target"
+                         : wTarget ? "admitted: reads the weapons' HDR target"
+                                   : "admitted: reads the taken HDR target's copy"), 1;
 }
 
 // The step the re-issue is on: its HDR source at the admitted slot, its blend over the 8-bit layer (weapons_fire.h's plan; the mapping is
@@ -6097,7 +6108,8 @@ void uiLayerProfileSwitch() {
 namespace {
 // Every child of the device the shared layer holds -- the layers and their depth targets, the composite's output and
 // frame views, the route's timers, the blend cache, the depth seeder and its deferred context, the coverage pass's
-// shaders and deferred context, the composite shader and its parameter buffer, the hologram remap's prepared shaders
+// shaders and deferred context, the composite shader and its parameter buffer, the sharp-weapons and shield-ripple
+// passes, the hologram remap's prepared shaders
 // -- released, and every creation attempt and format-support answer forgotten, so the next use builds them on the
 // device it is handed. uiLayerShutdown's, and uiLayerDeviceReset's (the flat profile's actual device change).
 void releaseDeviceObjects() {
@@ -6114,6 +6126,29 @@ void releaseDeviceObjects() {
     g_routeHead = g_routeTail = 0;
     for (uint32_t i = 0; i < g_blendCount; ++i) g_blends[i] = BlendEntry{};
     g_blendCount = 0;
+    if (g_srcVs) {
+        g_srcVs->Release();
+        g_srcVs = nullptr;
+    }
+    if (g_srcPs) {
+        g_srcPs->Release();
+        g_srcPs = nullptr;
+    }
+    g_srcTried = false;
+    g_sharpStates.reset();
+    // releaseLayers already released the size-bound ripple ramp and scratch.
+    g_rip.blend.Reset();
+    g_rip.lin.Reset();
+    g_rip.cb.Reset();
+    if (g_rip.cs) {
+        g_rip.cs->Release();
+        g_rip.cs = nullptr;
+    }
+    g_rip.csTried = false;
+    g_rip.stage.Reset();
+    g_rip.check = 0;
+    g_rip.filter = 0;
+    g_rip.gainZ = g_rip.gainY = 0.0f;
     g_seeder.reset();
     g_deferred.Reset();
     g_seederTried = false;

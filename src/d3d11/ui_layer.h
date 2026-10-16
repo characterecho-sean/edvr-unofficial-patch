@@ -408,11 +408,11 @@ bool uiLayerDoorFromPass(uint32_t eye);
 // down), and the scene's render size R. Read only in the flat profile; cleared at the frame boundary.
 void uiLayerFlatSetDraw(uint64_t frame, float jx, float jy, uint32_t renderW, uint32_t renderH);
 // The flat profile's tonemap admission (2026-10-09): the game's tone pass recognised by its known pair (flat_mono_frame.h
-// toneHdrSlot), whatever its vertex count, reading eye 0's HUD target -- or `alias`, a plain copy of it this frame (the
-// HDR route's post chain copies H before the tone) -- at `hdrSlot`. 1: armed, re-issue between uiLayerCrispToneBegin/End;
+// toneHdrSlot), whatever its vertex count, reading eye 0's fresh HUD or weapons target -- or `alias`, a plain copy of
+// `aliasSource` this frame (the HDR route's post chain copies H before the tone) -- at `hdrSlot`. 1: armed, re-issue between uiLayerCrispToneBegin/End;
 // 0: not, `why` says which test refused. The ordering guards are VR's.
-int uiLayerCrispAdmitFlat(ID3D11DeviceContext* ctx, int hdrSlot, const void* alias, uint64_t vs, uint64_t ps, char* why,
-                          size_t whyN);
+int uiLayerCrispAdmitFlat(ID3D11DeviceContext* ctx, int hdrSlot, const void* alias, const void* aliasSource,
+                          uint64_t vs, uint64_t ps, char* why, size_t whyN);
 // The UiLayerDecision (as an int) the last uiLayerDecide came to: the adapter names its refusals by it.
 int uiLayerLastDecision();
 // How many decisions uiLayerDecide has come to since the DLL loaded: the blend probe (TEMPORARY) compares it before and after a draw's

@@ -33,6 +33,17 @@ jobs:
           python -m pip install -r tools\requirements.txt
           if ($LASTEXITCODE -ne 0) { throw "Python requirements failed" }
 
+      - name: Check Python source gates before compilation
+        run: |
+          $sourceGates = @()
+          foreach ($line in (Select-String -Path build.bat -Pattern '^\s*--gate "(tools\\[^"]+\.py --self-test)"')) {
+            $sourceGates += '--gate'
+            $sourceGates += $line.Matches[0].Groups[1].Value
+          }
+          if ($sourceGates.Count -eq 0) { throw "No Python source gates found in build.bat" }
+          python tools\run_jobs.py --jobs 4 @sourceGates
+          if ($LASTEXITCODE -ne 0) { throw "Python source gates failed" }
+
       - name: Fetch pinned build dependencies
         run: |
           python tools\fetch_openxr_loader.py
