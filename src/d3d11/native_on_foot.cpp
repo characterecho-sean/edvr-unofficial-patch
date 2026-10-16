@@ -93,6 +93,7 @@ std::atomic<int> g_alignAnchorMode{0};   // F48: fix.native_on_foot_body_align_a
 std::atomic<bool> g_alignVertical{false};   // F50 (TEMPORARY): fix.native_on_foot_body_align_vertical: off (the default) locks the body's height
 std::atomic<bool> g_raiseFpKey{false};      // F51 (TEMPORARY): fix.native_on_foot_body_raise_fp: F53 default off; on raises the FP rig and the view in body mode
 std::atomic<double> g_raiseCm{nofoot::kRaiseDefaultCm};   // F53 (TEMPORARY): fix.native_on_foot_body_raise_cm, the constant raise while raise_fp is on
+std::atomic<double> g_dropCm{0.0};   // F55 (TEMPORARY): fix.native_on_foot_fp_shoulder_drop_cm, 0..20 (0, the default, drops nothing); body mode only
 uint64_t g_f40MarkerLogMs = 0;   // F40: the marker angle line's last time
 std::atomic<double> g_worldLeadFrames{2.5};   // F38: fix.native_on_foot_world_markers_lead, 0 to 5 frames (forward_lead); live
 std::atomic<int> g_worldMarkersMode{6};        // F27/F31/F37: fix.native_on_foot_world_markers: 0 fixed, 1 forward (C), 2 game, 3 forward_now (H_M), 4 forward_hist (the ring's matched pose), 5 forward_k2 (the ring's pose two frames back), 6 forward_lead (the newest ring pose carried ahead, default); live; key 10 is never touched
@@ -626,6 +627,15 @@ void readKey() {
                             "the live dh is logged, not applied)" : "off -- nothing is raised (the F53 default)", raiseCm);
         g_raiseFpKey.store(raiseFp, std::memory_order_relaxed);
         g_raiseCm.store(raiseCm, std::memory_order_relaxed);
+        // F55 (TEMPORARY, live): experiment (c), the FP shoulder drop: the FP clavicles 19 and 20 and their subtree lower by this many cm in the
+        // Animate output, body mode only, blended out over 0.2 s while ADS. 0 (the default) drops nothing; clamped to 0..20.
+        const double dropCm = nofoot::dropClampCm(static_cast<double>(cfg.getFloat("fix.native_on_foot_fp_shoulder_drop_cm", 0.0f)));
+        if (first || dropCm != g_dropCm.load(std::memory_order_relaxed))
+            Log::get().note("native on foot shoulder drop (F55, TEMPORARY): fix.native_on_foot_fp_shoulder_drop_cm %.1f -- %s", dropCm,
+                            dropCm > 0.0 ? "in body mode the FP clavicles 19 and 20 and the arm chain below them drop by this much (not while ADS)"
+                                         : "nothing is dropped (the default)");
+        g_dropCm.store(dropCm, std::memory_order_relaxed);
+        pfz::g_dropWanted.store(dropCm > 0.0, std::memory_order_relaxed);
         // F49 (TEMPORARY, live): the pose freeze: off, probe (the default: the Animate post-hook measures and writes nothing) or on.
         const std::string freeze = cfg.getString("fix.native_on_foot_pose_freeze", "probe");
         pfz::g_mode.store(freeze == "on" ? 2 : freeze == "off" ? 0 : 1, std::memory_order_relaxed);
@@ -5933,6 +5943,57 @@ double g_f51PovUp = 0.0, g_f51FpUp = 0.0;
 int g_f51Src = -1;   // 0 the 3P povCamera joint, 1 the head plus 0.038 m
 uint64_t g_f51LogMs = 0;
 
+// F55 (TEMPORARY): the walking shift's frame-thread state. The locomotion gate (the F49 gate's rule, fed from the body sample), the rest point's
+// kind this frame and the kind the capture holds (1 the neck, 2 the low-passed head, 3 the 3P clavicles, 4 the povCamera joint, 5 the head plus
+// the pov offset), this frame's live source, its offset from the rest point, and whether the captured rest was used (all body axes).
+nofoot::PfzLocoRest g_f55Loco;
+uint64_t g_f55LocoStamp = 0;
+int g_f55KindNow = 0, g_f55KindPrev = 0, g_f55RestKind = 0;
+double g_f55Live[3] = {}, g_f55Raw[3] = {}, g_f55Off[3] = {};
+bool g_f55Used = false;
+const char* const kF55KindNames[6] = {"none", "the neck", "the low-passed head (no neck)", "the 3P clavicles", "the povCamera joint",
+                                      "the head + (0, 0.038, 0.112)"};
+// F55: the FP shoulder drop: the blend (0.2 s), the applied drop (metres, FP model -y), published to the Animate hook.
+nofoot::DropBlend g_f55DropBlend;
+double g_f55DropApplied = 0.0;
+std::atomic<float> g_f55DropM{0.0f};
+// F55: the hook's snapshot of the FP X's joints 19, 20, 37 and 44 (model space, before and after the drop) under a sequence counter (one
+// writer: the hook under g_fdBusy), and its counters and failure bits (the frame thread names each failure once).
+struct F55Snap {
+    std::atomic<uint32_t> seq{0};
+    float before[4][3] = {};
+    float after[4][3] = {};
+    float drop = 0.0f;
+    uint64_t ms = 0;
+};
+F55Snap g_f55Snap;
+std::atomic<uint64_t> g_fdCalls{0}, g_fdWrites{0}, g_fdBusySkips{0};
+std::atomic<uint32_t> g_fdFailBits{0};
+std::atomic<bool> g_fdWriteDown{false};
+uint64_t g_f55CallsLast = 0, g_f55WritesLast = 0;
+uint32_t g_f55FailNamed = 0;
+constexpr uint32_t kFdFailKinds = 7;
+const char* const kFdFailText[kFdFailKinds] = {
+    "the plan was being rewritten (skipped this call)", "the plan does not belong to this X or is empty",
+    "a flag of X (+0x210) or P = [X+8] or its joint count was not readable", "the joint count differs from the plan's (the skeleton changed)",
+    "no output span: [job+0x28] or [X+0x1F0] is null, or count-1 is not below [Y+0xE0]", "a joint position in the output span was not readable",
+    "a drop write faulted: the drop stands down for the session"};
+float pfzWeightNow() noexcept;   // the pose freeze's blend weight (defined with the Animate hook below)
+// F55: the hook's snapshot, read under its sequence counter (false: torn or never written).
+bool f55SnapRead(float before[4][3], float after[4][3], float* drop, uint64_t* ms) noexcept {
+    for (int tries = 0; tries < 4; ++tries) {
+        const uint32_t s1 = g_f55Snap.seq.load(std::memory_order_acquire);
+        if (s1 & 1u || s1 == 0) continue;
+        std::memcpy(before, g_f55Snap.before, sizeof(g_f55Snap.before));
+        std::memcpy(after, g_f55Snap.after, sizeof(g_f55Snap.after));
+        *drop = g_f55Snap.drop;
+        *ms = g_f55Snap.ms;
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if (g_f55Snap.seq.load(std::memory_order_relaxed) == s1) return true;
+    }
+    return false;
+}
+
 // F51: the once-a-second line in body mode: dh, the view offset, the FP records shifted (count and part names), the weapon's status.
 void f51Line(const EyeSample& s, const FpRootSnap& fp, bool fpFresh, bool raiseOn) noexcept {
     const uint64_t shifted = g_fpShifted.exchange(0, std::memory_order_relaxed), skipped = g_fpSkipped.exchange(0, std::memory_order_relaxed),
@@ -6022,6 +6083,8 @@ void alignTick(uint64_t now) noexcept {
         g_f48Stand.reset();   // F48: the standing height is captured again at key-on
         g_f48PovSrc = -1;
         g_f48Have = false;
+        g_f55KindPrev = g_f55RestKind = 0;   // F55: the walking shift's rest is captured again at idle
+        g_f55Used = false;
         if (mode == 3) calibrateReset();
         if (mode == 1) g_f37TS0Valid = false;                                      // F37: a new head reference on entering view
     }
@@ -6047,6 +6110,14 @@ void alignTick(uint64_t now) noexcept {
     EdvrNativeNowPose np{};
     const bool haveFrame = nativeFrameNowPose(np) && np.renderValid;
     const bool ads = journalAds();
+    // F55: the walking shift's locomotion gate: the body's horizontal speed under 0.35 m/s for 0.3 s (the F49 rule), fed each new body sample.
+    if (s.valid && s.stamp != g_f55LocoStamp) {
+        g_f55LocoStamp = s.stamp;
+        const double lpos[3] = {s.origin[0], s.origin[1], s.origin[2]}, lup[3] = {s.rows[3], s.rows[4], s.rows[5]};
+        g_f55Loco.step(s.stamp, lpos, lup, false);
+    }
+    if (!s.valid || (now >= s.stamp && now - s.stamp > 1500)) g_f55Loco = nofoot::PfzLocoRest{};
+    const bool f55Moving = !g_f55Loco.resting;
     const char* wait = nullptr;
     if (!on) wait = "key off";
     else if (!nativeOnFootActive()) wait = "not native stereo on foot";
@@ -6067,6 +6138,9 @@ void alignTick(uint64_t now) noexcept {
     if (mode != 2) lastVerticalNote = -1;
     else if (lastVerticalNote != (vertical ? 1 : 0)) {
         lastVerticalNote = vertical ? 1 : 0;
+        // F55: at each body entry (and on a live change): the active value, prominently.
+        Log::get().note("native on foot body (F55): ===== body vertical: %s (fix.native_on_foot_body_align_vertical; the code default is off) =====",
+                        vertical ? "ON (d moves the body in all three axes)" : "OFF (feet on the ground)");
         if (!vertical)
             Log::get().note("native on foot body align (F50): body mode with vertical off: d moves the body along its right and forward axes only; "
                             "the up trim (%.1f cm) is ignored; the standing height is logged, not applied; the up component d would have had is "
@@ -6230,10 +6304,41 @@ void alignTick(uint64_t now) noexcept {
             // F48: the standing height. The 3P side's live height is tracked on every anchor (logged); the pov anchor alone uses the captured
             // value in place of it (neck and clavicles keep F46's and F45's behaviour). x and z stay live.
             g_f48LiveUp = srcB[1];
-            g_f48Stand.step(now, static_cast<double>(s.headBody[1]), srcB[1], false);
+            // F55: the rest point for the walking shift: the neck itself on the neck anchor (srcB = neck - kNeckRestOffset, so the offset is
+            // srcB - neck), else the anchor's own source (offset 0). A kind change restarts the window, so a capture never mixes two points.
+            {
+                const int kind = shoulderAnchor ? 3 : anchorMode == 2 ? (g_f48PovSrc == 0 ? 4 : 5) : (s.neckOk ? 1 : 2);
+                for (size_t i = 0; i < 3; ++i) {
+                    g_f55Raw[i] = kind == 1 ? neckB[i] : srcB[i];
+                    g_f55Off[i] = srcB[i] - g_f55Raw[i];
+                }
+                if (kind != g_f55KindPrev) {
+                    g_f55KindPrev = kind;
+                    g_f48Stand.n = 0;
+                }
+                g_f55KindNow = kind;
+            }
+            const uint32_t f55CapBefore = g_f48Stand.hCaptures;
+            g_f48Stand.step(now, static_cast<double>(s.headBody[1]), srcB[1], false, f55Moving, g_f55Raw[0], g_f55Raw[2]);
             if (anchorMode == 2 && !shoulderAnchor && g_f48Stand.valid && vertical) {   // F50: vertical off: logged only
                 const double live[3] = {srcB[0], srcB[1], srcB[2]};
                 nofoot::standingApply(live, g_f48Stand.value, srcB);
+            }
+            // F55: the walking shift. The source's horizontal is the rest captured at idle plus the offset, so d_h = FP side_h - (rest_h +
+            // offset_h) stays constant in the body frame while the neck moves with locomotion and aim. Live until the first idle capture.
+            for (size_t i = 0; i < 3; ++i) g_f55Live[i] = srcB[i];
+            if (g_f48Stand.hCaptures != f55CapBefore) {
+                g_f55RestKind = g_f55KindNow;
+                Log::get().note("native on foot walking shift (F55): rest captured (#%u, 1 s idle: speed %.2f m/s, no ADS, head steady): %s x %.3f "
+                                "z %.3f m (body axes); source rest (plus the offset %.3f, %.3f) x %.3f z %.3f m; live source x %.3f z %.3f m; standing "
+                                "height %.3f m", static_cast<unsigned>(g_f48Stand.hCaptures), g_f55Loco.speed, kF55KindNames[g_f55RestKind],
+                                g_f48Stand.hx, g_f48Stand.hz, g_f55Off[0], g_f55Off[2], g_f48Stand.hx + g_f55Off[0], g_f48Stand.hz + g_f55Off[2],
+                                g_f55Live[0], g_f55Live[2], g_f48Stand.value);
+            }
+            g_f55Used = g_f48Stand.hValid && g_f55RestKind == g_f55KindNow;
+            if (g_f55Used) {
+                const double live[3] = {srcB[0], srcB[1], srcB[2]};
+                nofoot::walkRestSource(live, g_f55Off, g_f48Stand.hx, g_f48Stand.hz, srcB);
             }
             g_f48Have = true;
             for (size_t i = 0; i < 3; ++i) {
@@ -6429,6 +6534,92 @@ void alignTick(uint64_t now) noexcept {
                                 static_cast<unsigned>(g_f48Stand.captures), g_f48LiveUp, neckAfter[0], neckAfter[1], neckAfter[2],
                                 s.neckOk ? "" : " (no neck: the neck figure is not meaningful)");
             }
+            // F55: the walking shift: the rest it holds, whether it is used, the live source, d's horizontal target.
+            Log::get().note("native on foot walking shift (F55): %s; rest %s x %.3f z %.3f m (%u idle captures), offset %.3f %.3f, source x %.3f z %.3f m; "
+                            "live %s x %.3f z %.3f m (live source x %.3f z %.3f m); target d_h (right, forward) %.3f %.3f m; speed %.2f m/s (%s)",
+                            g_f55Used ? "the captured rest is used" : !g_f48Stand.hValid ? "live (no idle capture yet)" : "live (the rest point's kind changed)",
+                            kF55KindNames[g_f55RestKind], g_f48Stand.hx, g_f48Stand.hz, static_cast<unsigned>(g_f48Stand.hCaptures), g_f55Off[0],
+                            g_f55Off[2], g_f48SrcB[0], g_f48SrcB[2], kF55KindNames[g_f55KindNow], g_f55Raw[0], g_f55Raw[2], g_f55Live[0], g_f55Live[2],
+                            g_f41TgtB[0], g_f41TgtB[2], g_f55Loco.speed, f55Moving ? "moving: no capture" : "idle");
+            // F55: per side, body axes after d: the FP clavicles and hands (the hook's span snapshot of joints 19/20 and 37/44 after any drop when
+            // fresh, else the census by name; FP model to world through the FP root's yaw, as F45), the 3P clavicles and hands moved by d; the
+            // freeze weight; d's up component (zero with vertical off).
+            {
+                float sb[4][3] = {}, sa[4][3] = {}, sDrop = 0.0f;
+                uint64_t sMs = 0;
+                const bool snapFresh = f55SnapRead(sb, sa, &sDrop, &sMs) && sMs != 0 && now >= sMs && now - sMs < 500;
+                const double rnY = std::sqrt(static_cast<double>(fp.rows[6]) * fp.rows[6] + static_cast<double>(fp.rows[8]) * fp.rows[8]);
+                const double cyY = rnY > 1e-6 ? fp.rows[8] / rnY : 1.0, syY = rnY > 1e-6 ? fp.rows[6] / rnY : 0.0;
+                const auto fpBody = [&](const float* m, double out[3]) {
+                    const double w[3] = {static_cast<double>(fp.origin[0]) + m[0] * cyY + m[2] * syY, static_cast<double>(fp.origin[1]) + m[1],
+                                         static_cast<double>(fp.origin[2]) - m[0] * syY + m[2] * cyY};
+                    bodyD(w, out);
+                };
+                const auto tpBody = [&](const float* w, double out[3]) {
+                    const double q[3] = {w[0] + a.pos[0], w[1] + a.pos[1], w[2] + a.pos[2]};
+                    bodyD(q, out);
+                };
+                double fC[2][3] = {}, fH[2][3] = {}, tC[2][3] = {}, tH[2][3] = {};
+                const bool fpOk = fpFresh && (snapFresh || (s.shOkFp && s.extOkFp));
+                const bool tpOk = s.shOk3P && s.extOk3P;
+                for (size_t side = 0; side < 2; ++side) {
+                    if (fpOk) {
+                        fpBody(snapFresh ? sa[side] : &s.shFpM[3 * side], fC[side]);
+                        fpBody(snapFresh ? sa[2 + side] : &s.extFpM[3 * side], fH[side]);
+                    }
+                    if (tpOk) {
+                        tpBody(&s.sh3PW[3 * side], tC[side]);
+                        tpBody(&s.ext3PW[3 * side], tH[side]);
+                    }
+                }
+                Log::get().note("native on foot body (F55): body axes after d (right, up, forward), L: FP clavicle %.3f %.3f %.3f hand %.3f %.3f %.3f, 3P "
+                                "clavicle %.3f %.3f %.3f hand %.3f %.3f %.3f; R: FP clavicle %.3f %.3f %.3f hand %.3f %.3f %.3f, 3P clavicle %.3f %.3f %.3f "
+                                "hand %.3f %.3f %.3f; FP from %s, 3P from %s; freeze weight %.2f; d up applied %.3f m (vertical %s); d (body) %.3f %.3f "
+                                "%.3f m; FP raise %.3f m; shoulder drop %.3f m",
+                                fC[0][0], fC[0][1], fC[0][2], fH[0][0], fH[0][1], fH[0][2], tC[0][0], tC[0][1], tC[0][2], tH[0][0], tH[0][1], tH[0][2],
+                                fC[1][0], fC[1][1], fC[1][2], fH[1][0], fH[1][1], fH[1][2], tC[1][0], tC[1][1], tC[1][2], tH[1][0], tH[1][1], tH[1][2],
+                                !fpOk ? "NOTHING (zeros: no fresh FP root or joints)" : snapFresh ? "the Animate span (19/37 L, 20/44 R, after the drop)"
+                                                                                                  : "the census by name (L, R)",
+                                tpOk ? "the census by name (L, R) + d" : "NOTHING (zeros)", static_cast<double>(pfzWeightNow()), dB[1],
+                                vertical ? "ON" : "OFF", dB[0], dB[1], dB[2], g_f51Applied, g_f55DropApplied);
+                // F55: the shoulder drop, before and after, world (FP root yaw), joints 19, 20, 37, 44; the hook's counters and failures.
+                const uint64_t calls = g_fdCalls.load(std::memory_order_relaxed), writes = g_fdWrites.load(std::memory_order_relaxed);
+                const uint64_t dCalls = calls - g_f55CallsLast, dWrites = writes - g_f55WritesLast;
+                g_f55CallsLast = calls;
+                g_f55WritesLast = writes;
+                const uint32_t bits = g_fdFailBits.load(std::memory_order_relaxed) & ~g_f55FailNamed;
+                for (uint32_t i = 0; i < kFdFailKinds; ++i) {
+                    if (!(bits & (1u << i))) continue;
+                    g_f55FailNamed |= 1u << i;
+                    Log::get().note("native on foot shoulder drop (F55): the hook refused a call: %s (said once)", kFdFailText[i]);
+                }
+                if (snapFresh && fpFresh) {
+                    double wb[4][3] = {}, wa[4][3] = {};
+                    for (size_t k = 0; k < 4; ++k) {
+                        const float* m0 = sb[k];
+                        const float* m1 = sa[k];
+                        wb[k][0] = static_cast<double>(fp.origin[0]) + m0[0] * cyY + m0[2] * syY;
+                        wb[k][1] = static_cast<double>(fp.origin[1]) + m0[1];
+                        wb[k][2] = static_cast<double>(fp.origin[2]) - m0[0] * syY + m0[2] * cyY;
+                        wa[k][0] = static_cast<double>(fp.origin[0]) + m1[0] * cyY + m1[2] * syY;
+                        wa[k][1] = static_cast<double>(fp.origin[1]) + m1[1];
+                        wa[k][2] = static_cast<double>(fp.origin[2]) - m1[0] * syY + m1[2] * cyY;
+                    }
+                    Log::get().note("native on foot shoulder drop (F55): key %.1f cm, weight %.2f, applied %.3f m (hook's last %.3f m); FP X calls %llu, "
+                                    "dropped %llu this second; world before -> after: clavicle 19 (%.3f,%.3f,%.3f) -> (%.3f,%.3f,%.3f), 20 (%.3f,%.3f,%.3f) -> "
+                                    "(%.3f,%.3f,%.3f); hand 37 (%.3f,%.3f,%.3f) -> (%.3f,%.3f,%.3f), 44 (%.3f,%.3f,%.3f) -> (%.3f,%.3f,%.3f)%s",
+                                    g_dropCm.load(std::memory_order_relaxed), g_f55DropBlend.w, g_f55DropApplied, static_cast<double>(sDrop),
+                                    static_cast<unsigned long long>(dCalls), static_cast<unsigned long long>(dWrites), wb[0][0], wb[0][1], wb[0][2],
+                                    wa[0][0], wa[0][1], wa[0][2], wb[1][0], wb[1][1], wb[1][2], wa[1][0], wa[1][1], wa[1][2], wb[2][0], wb[2][1], wb[2][2],
+                                    wa[2][0], wa[2][1], wa[2][2], wb[3][0], wb[3][1], wb[3][2], wa[3][0], wa[3][1], wa[3][2],
+                                    ads ? " (ADS: blending out)" : "");
+                } else if (g_dropCm.load(std::memory_order_relaxed) > 0.0) {
+                    Log::get().note("native on foot shoulder drop (F55): key %.1f cm, weight %.2f, applied %.3f m; no fresh FP snapshot (%s; FP X calls %llu "
+                                    "this second, FP X %016llX)", g_dropCm.load(std::memory_order_relaxed), g_f55DropBlend.w, g_f55DropApplied,
+                                    !fpFresh ? "the FP root is not fresh" : "the hook has not seen the FP X in 500 ms", static_cast<unsigned long long>(dCalls),
+                                    static_cast<unsigned long long>(pfz::g_fdX.load(std::memory_order_relaxed)));
+                }
+            }
             // F45: the hands and the attach points, world, on both skeletons: FP through the FP root's yaw, 3P through the AMC matrix.
             if (s.extOk3P && s.extOkFp && fpFresh) {
                 const double rnY = std::sqrt(static_cast<double>(fp.rows[6]) * fp.rows[6] + static_cast<double>(fp.rows[8]) * fp.rows[8]);
@@ -6492,6 +6683,16 @@ void alignTick(uint64_t now) noexcept {
     g_f51Applied = nofoot::capToward(g_f51Applied, nofoot::raiseConstM(raiseOn, g_raiseCm.load(std::memory_order_relaxed)), align::kCapPerFrameM);
     if (!raiseOn && std::fabs(g_f51Applied) < 1e-9) g_f51Applied = 0.0;
     g_f51FpOn.store(raiseOn, std::memory_order_relaxed);
+    // F55: the FP shoulder drop. Body mode, native stereo on foot, the key above zero, not ADS: the weight ramps to 1 over 0.2 s; otherwise
+    // (ADS starting, body mode ending, the key at 0) to 0 over 0.2 s. The applied drop follows at 5 cm a frame at most; the hook reads it.
+    {
+        const double dropCm = g_dropCm.load(std::memory_order_relaxed);
+        const bool dropOn = mode == 2 && dropCm > 0.0 && !ads && nativeOnFootActive();
+        g_f55DropBlend.step(dropOn, dt);
+        g_f55DropApplied = nofoot::capToward(g_f55DropApplied, nofoot::dropM(g_f55DropBlend.w, dropCm), align::kCapPerFrameM);
+        if (std::fabs(g_f55DropApplied) < 1e-9) g_f55DropApplied = 0.0;
+        g_f55DropM.store(static_cast<float>(g_f55DropApplied), std::memory_order_relaxed);
+    }
     if (s.valid) {
         const double un = std::sqrt(static_cast<double>(s.rows[3]) * s.rows[3] + static_cast<double>(s.rows[4]) * s.rows[4] +
                                     static_cast<double>(s.rows[5]) * s.rows[5]);
@@ -7207,18 +7408,100 @@ void pfzAfterAnimate(uint64_t x, uint64_t job) noexcept {
     g_pfzStatSeq.fetch_add(1, std::memory_order_release);
 }
 
+float pfzWeightNow() noexcept { return g_pfzWeight.load(std::memory_order_relaxed); }
+
+// F55 (TEMPORARY): the FP shoulder drop, after the original Animate returns, for the FP X of the census's plan only (frAnim worker threads). The
+// output span is chosen as the 3P path chooses it. Joints 19, 20, 37 and 44 are snapshotted (model space) before and after; with the frame
+// thread's drop above zero, every member of the subtree of 19 and 20 has its model matrix's position row moved down by the drop (row 3's y, the
+// FP model's up), so the arm chain follows. Not cumulative: Animate rewrites the span each call. No allocation, logging or locks (one try-flag
+// that skips, never waits); every read and write under SEH.
+std::atomic<bool> g_fdBusy{false};
+pfz::FpDropPlan g_fdPlanCopy;   // the hook's scratch (under g_fdBusy)
+void fdFail(uint32_t bit) noexcept { g_fdFailBits.fetch_or(bit, std::memory_order_relaxed); }
+void fdAfterAnimate(uint64_t x, uint64_t job) noexcept {
+    bool planOk = false;
+    for (int tries = 0; tries < 2 && !planOk; ++tries) {
+        const uint32_t s1 = pfz::g_fdSeq.load(std::memory_order_acquire);
+        if (s1 & 1u) continue;
+        std::memcpy(&g_fdPlanCopy, &pfz::g_fdPlan, sizeof(g_fdPlanCopy));
+        std::atomic_thread_fence(std::memory_order_acquire);
+        planOk = pfz::g_fdSeq.load(std::memory_order_relaxed) == s1;
+    }
+    if (!planOk) return fdFail(1u << 0);
+    const pfz::FpDropPlan& pl = g_fdPlanCopy;
+    if (pl.x != x || pl.count == 0 || pl.count > nofoot::kPfzMaxF) return fdFail(1u << 1);
+    uint8_t f210 = 0;
+    uint64_t pose = 0;
+    uint16_t count = 0;
+    if (!guardedRead(x + 0x210, &f210, 1) || !guardedRead(x + 8, &pose, 8) || !pose || !guardedRead(pose, &count, 2)) return fdFail(1u << 2);
+    if (count != pl.joints || count == 0 || count > nofoot::kPfzMaxJoints || count <= nofoot::kDropHandR) return fdFail(1u << 3);
+    uint64_t buf = 0;
+    if (f210 == 0) {
+        if (!guardedRead(job + 0x28, &buf, 8)) buf = 0;
+    } else {
+        uint64_t y = 0;
+        uint32_t cap = 0;
+        if (guardedRead(x + 0x1F0, &y, 8) && y && guardedRead(y + 0xE0, &cap, 4) && static_cast<uint32_t>(count) - 1u < cap) {
+            if (!guardedRead(y + 0xA0, &buf, 8)) buf = 0;
+        }
+    }
+    if (!buf) return fdFail(1u << 4);
+    constexpr uint32_t kIds[4] = {nofoot::kDropClavL, nofoot::kDropClavR, nofoot::kDropHandL, nofoot::kDropHandR};
+    float before[4][3] = {}, after[4][3] = {};
+    for (int k = 0; k < 4; ++k)
+        if (!guardedRead(buf + static_cast<uint64_t>(kIds[k]) * 64u + 48u, before[k], sizeof(before[k]))) return fdFail(1u << 5);
+    const float drop = g_f55DropM.load(std::memory_order_relaxed);
+    bool wrote = false;
+    if (drop > 0.0f && !g_fdWriteDown.load(std::memory_order_relaxed)) {
+        for (uint32_t k = 0; k < pl.count; ++k) {
+            const uint32_t j = pl.member[k];
+            if (j >= count) continue;
+            const uintptr_t ya = static_cast<uintptr_t>(buf + static_cast<uint64_t>(j) * 64u + 52u);
+            float yv = 0.0f;
+            if (!guardedRead(ya, &yv, 4)) return fdFail(1u << 5);
+            if (!guardedWriteFloat(ya, yv - drop)) {
+                g_fdWriteDown.store(true, std::memory_order_relaxed);
+                return fdFail(1u << 6);
+            }
+        }
+        wrote = true;
+    }
+    for (int k = 0; k < 4; ++k)
+        if (!guardedRead(buf + static_cast<uint64_t>(kIds[k]) * 64u + 48u, after[k], sizeof(after[k]))) return fdFail(1u << 5);
+    g_f55Snap.seq.fetch_add(1, std::memory_order_acq_rel);
+    std::memcpy(g_f55Snap.before, before, sizeof(before));
+    std::memcpy(g_f55Snap.after, after, sizeof(after));
+    g_f55Snap.drop = wrote ? drop : 0.0f;
+    g_f55Snap.ms = GetTickCount64();
+    g_f55Snap.seq.fetch_add(1, std::memory_order_release);
+    if (wrote) g_fdWrites.fetch_add(1, std::memory_order_relaxed);
+}
+
 uint64_t __fastcall pfzAnimateHooked(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t s5, uint64_t s6, uint64_t s7, uint64_t s8) {
     const F35Fn original = reinterpret_cast<F35Fn>(g_pfzHook.original);
     if (!original) return 0;
     const uint64_t r = original(a1, a2, a3, a4, s5, s6, s7, s8);   // the original first, with its arguments
     g_pfzCalls.fetch_add(1, std::memory_order_relaxed);
-    if (!a2 || pfz::g_mode.load(std::memory_order_relaxed) == 0) return r;
+    if (!a2 || (pfz::g_mode.load(std::memory_order_relaxed) == 0 && !pfz::g_dropWanted.load(std::memory_order_relaxed))) return r;
     uint64_t x = 0;
     if (!guardedRead(a2, &x, 8)) {
         pfzFail(kPfzFailJob);
         return r;
     }
     pfz::xNote(x);   // F51: every evaluator Animate sees, by call count (the census matches the local one against it)
+    // F55: the FP X (the census's shoulder drop plan): snapshot, and the drop when the frame thread's value is above zero.
+    const uint64_t fx = pfz::g_fdX.load(std::memory_order_acquire);
+    if (fx && x == fx) {
+        g_fdCalls.fetch_add(1, std::memory_order_relaxed);
+        if (g_fdBusy.exchange(true, std::memory_order_acquire)) {
+            g_fdBusySkips.fetch_add(1, std::memory_order_relaxed);
+            return r;
+        }
+        fdAfterAnimate(x, a2);
+        g_fdBusy.store(false, std::memory_order_release);
+        return r;
+    }
+    if (pfz::g_mode.load(std::memory_order_relaxed) == 0) return r;
     const uint64_t lx = pfz::g_localX.load(std::memory_order_acquire);
     if (!lx || x != lx) return r;   // only the local avatar's evaluator
     g_pfzLocalCalls.fetch_add(1, std::memory_order_relaxed);
@@ -7249,7 +7532,8 @@ void pfzInstallOnce() {
     if (installF9ProbeInto(g_pfzHook, spec, base, &stolen, &why)) {
         g_pfzArmed = true;
         Log::get().note("native on foot pose freeze: Animate post-hook installed at EliteDangerous64.exe+0x741520, stolen=%zu bytes, prologue %zu bytes "
-                        "verified (the local avatar's X only; writes only with fix.native_on_foot_pose_freeze = on)", stolen, sizeof(kPfzAnimatePrologue));
+                        "verified (the local avatar's X only; writes only with fix.native_on_foot_pose_freeze = on; F55: the FP X's clavicle subtree only "
+                        "with fix.native_on_foot_fp_shoulder_drop_cm above 0, in body mode)", stolen, sizeof(kPfzAnimatePrologue));
     } else {
         Log::get().note("native on foot pose freeze: NOT installed at EliteDangerous64.exe+0x741520 -- %s. The game was not touched.", why.c_str());
     }
@@ -7362,8 +7646,9 @@ void pfzTick(uint64_t now) {
                                   : "; nothing is written");
         lastMode = mode;
     }
-    if (mode != 0) pfzInstallOnce();
-    if (g_pfzArmed) g_pfzHook.gate.store(mode != 0 ? 1u : 0u, std::memory_order_release);
+    const bool hookWanted = mode != 0 || pfz::g_dropWanted.load(std::memory_order_relaxed);   // F55: the shoulder drop needs the hook too
+    if (hookWanted) pfzInstallOnce();
+    if (g_pfzArmed) g_pfzHook.gate.store(hookWanted ? 1u : 0u, std::memory_order_release);
     if (!nativeOnFootActive()) pfz::g_localX.store(0, std::memory_order_release);   // the census sets it again (it runs only while active)
     // The gate and the blend (the weight is 0 unless the key is on).
     const double dt = g_pfzLastMs && now > g_pfzLastMs ? std::min(0.1, static_cast<double>(now - g_pfzLastMs) / 1000.0) : 0.0;

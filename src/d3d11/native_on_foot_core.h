@@ -303,18 +303,25 @@ inline void cdStep(double& pos, double& vel, double target, double tau, double d
 // drawn weapon (the 3P head drops 22 to 29 cm) does not lift the body. Captured at key-on (the first step after reset not under ADS) and again whenever the
 // stance is at rest: not aiming down sights and the 3P head's height steady (within kSteadyM) for kRestMs; the capture is the anchor's mean
 // height over that window. x and z stay live (standingApply).
+// F55: the same window also captures the 3P side's horizontal rest (body axes x and z: the neck, or the anchor's own point), but only at idle:
+// the window restarts while the body moves (`moving`, the F49 locomotion gate) as well as on ADS and an unsteady head, and the key-on capture
+// sets the height alone. hValid stays false until the first idle window completes (the align keeps the live x and z until then).
 struct StandingHeight {
     static constexpr double kSteadyM = 0.02;     // the head's height range that counts as steady
     static constexpr uint64_t kRestMs = 1000;    // how long it must stay steady
     bool valid = false;
     double value = 0.0;                          // the captured standing height (body axes, up, metres)
+    bool hValid = false;                         // F55: the horizontal rest was captured at idle
+    double hx = 0.0, hz = 0.0;                   // F55: the captured rest, body axes right and forward (metres)
+    uint32_t hCaptures = 0;
     uint64_t winStart = 0;
-    double headMin = 0.0, headMax = 0.0, anchorSum = 0.0;
+    double headMin = 0.0, headMax = 0.0, anchorSum = 0.0, sumX = 0.0, sumZ = 0.0;
     uint32_t n = 0;
     uint32_t captures = 0;
     void reset() noexcept { *this = StandingHeight{}; }
-    // One frame: the 3P head's height and the 3P anchor's height (body axes, up), and the ADS flag. True when this step captured.
-    bool step(uint64_t now, double headUp, double anchorUp, bool ads) noexcept {
+    // One frame: the 3P head's height and the 3P anchor's height (body axes, up), and the ADS flag. True when this step captured. F55: `moving`
+    // (the body's horizontal speed gate) restarts the window like ADS; ax and az are the rest point's body x and z, averaged over the window.
+    bool step(uint64_t now, double headUp, double anchorUp, bool ads, bool moving = false, double ax = 0.0, double az = 0.0) noexcept {
         if (ads) {   // ADS is never a rest (nor a key-on capture): the window starts again after it; the heights are not read
             n = 0;
             return false;
@@ -323,35 +330,56 @@ struct StandingHeight {
             valid = true;
             value = anchorUp;
             ++captures;
-            restart(now, headUp, anchorUp);
+            restart(now, headUp, anchorUp, ax, az);
+            if (moving) n = 0;
             return true;
         }
+        if (moving) {   // F55: walking or running is never a rest
+            n = 0;
+            return false;
+        }
         if (n == 0) {
-            restart(now, headUp, anchorUp);
+            restart(now, headUp, anchorUp, ax, az);
             return false;
         }
         const double lo = headUp < headMin ? headUp : headMin, hi = headUp > headMax ? headUp : headMax;
         if (hi - lo > kSteadyM) {
-            restart(now, headUp, anchorUp);
+            restart(now, headUp, anchorUp, ax, az);
             return false;
         }
         headMin = lo;
         headMax = hi;
         anchorSum += anchorUp;
+        sumX += ax;
+        sumZ += az;
         ++n;
         if (now - winStart < kRestMs) return false;
         value = anchorSum / static_cast<double>(n);
+        hx = sumX / static_cast<double>(n);
+        hz = sumZ / static_cast<double>(n);
+        hValid = true;
+        ++hCaptures;
         ++captures;
-        restart(now, headUp, anchorUp);
+        restart(now, headUp, anchorUp, ax, az);
         return true;
     }
-    void restart(uint64_t now, double headUp, double anchorUp) noexcept {
+    void restart(uint64_t now, double headUp, double anchorUp, double ax = 0.0, double az = 0.0) noexcept {
         winStart = now;
         headMin = headMax = headUp;
         anchorSum = anchorUp;
+        sumX = ax;
+        sumZ = az;
         n = 1;
     }
 };
+// F55: the walking shift. The 3P side's source point with its horizontal taken from the captured rest plus the source's offset from the rest
+// point (body axes; for the neck anchor the offset is -kNeckRestOffset), its vertical live. So d_h = FP side_h - (rest_h + offset_h) is constant
+// in the body frame while the neck leans with locomotion and aim, and the torso leans with the legs.
+inline void walkRestSource(const double live[3], const double offset[3], double restX, double restZ, double out[3]) noexcept {
+    out[0] = restX + offset[0];
+    out[1] = live[1];
+    out[2] = restZ + offset[2];
+}
 // F48: the 3P side's point with its vertical (body axes, index 1) taken from the standing height; x and z live.
 inline void standingApply(const double src[3], double standingUp, double out[3]) noexcept {
     out[0] = src[0];
@@ -447,6 +475,49 @@ inline void weaponShift(float pos[3], float copy[3], const float d[3]) noexcept 
         copy[i] += d[i];
     }
 }
+// ---- F55 (TEMPORARY): the FP shoulder drop, pure half ---------------------------------------------------------------------------
+// fix.native_on_foot_fp_shoulder_drop_cm (0..20, default 0): in body mode the FP clavicles (joints 19 and 20) and their subtree (the arm chain)
+// move down by the drop in the FP model space (its -y) in the Animate output. The weight ramps linearly over kDropBlendSec: to 0 when ADS
+// starts (the sights stay aligned) or body mode ends, back to 1 after. The applied drop also moves at most the 5 cm a frame cap.
+constexpr double kDropMaxCm = 20.0;
+constexpr double kDropBlendSec = 0.2;
+constexpr uint32_t kDropClavL = 19, kDropClavR = 20, kDropHandL = 37, kDropHandR = 44;
+inline double dropClampCm(double cm) noexcept {
+    if (!(cm == cm) || !(cm > 0.0)) return 0.0;
+    return cm > kDropMaxCm ? kDropMaxCm : cm;
+}
+struct DropBlend {
+    double w = 0.0;
+    void step(bool on, double dtSec) noexcept {
+        if (!(dtSec > 0.0)) return;
+        const double k = dtSec / kDropBlendSec;
+        w = on ? (w + k > 1.0 ? 1.0 : w + k) : (w - k < 0.0 ? 0.0 : w - k);
+    }
+};
+// The drop in metres for a weight and the key's cm (clamped).
+inline double dropM(double w, double cm) noexcept { return (w > 0.0 ? (w > 1.0 ? 1.0 : w) : 0.0) * dropClampCm(cm) / 100.0; }
+// The subtree of joints a and b (both included) over a parent array, in index order; joints whose parent chain is broken (out of range, or
+// longer than the joint count) are left out. Returns the member count (at most cap).
+inline uint32_t dropSubtree(const uint16_t* parents, uint32_t joints, uint32_t a, uint32_t b, uint16_t* out, uint32_t cap) noexcept {
+    uint32_t count = 0;
+    for (uint32_t j = 0; j < joints && count < cap; ++j) {
+        uint32_t p = j;
+        bool in = false;
+        for (uint32_t depth = 0; depth <= joints; ++depth) {
+            if (p == a || p == b) {
+                in = true;
+                break;
+            }
+            if (p >= joints) break;
+            const uint16_t up = parents[p];
+            if (up == 0xFFFFu || up >= joints) break;
+            p = up;
+        }
+        if (in) out[count++] = static_cast<uint16_t>(j);
+    }
+    return count;
+}
+
 // F51: the pose freeze's gate: no locomotion. The body's horizontal speed (its world position less the part along its up axis), low-passed
 // (tau kTauSec), under kMoveMps for kStillMs; ADS ends it (ADS stays excluded). A weapon out does not end it. Fed only new samples.
 struct PfzLocoRest {

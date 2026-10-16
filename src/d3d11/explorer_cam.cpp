@@ -2119,6 +2119,72 @@ uint64_t pfzCandidates(uint32_t slot, uint64_t iface, const SkSlots& sl) noexcep
     return chosen;
 }
 
+// F55 (TEMPORARY): the FP shoulder drop's plan, once per (FP iface, FP X): P = [X+8], its joint count and parents, the subtree of the clavicles
+// 19 and 20 (nofoot::dropSubtree), published under pfz::g_fdSeq. Refused (the plan's X stays 0) when X is not plausible, is the 3P local X, or
+// the pose cannot be read. Census thread only; reads only.
+struct FdCensus {
+    uint64_t iface = 0, x = 0;
+};
+FdCensus g_fdCensus;
+uint16_t g_fdMembers[nofoot::kPfzMaxF];
+void fdPublish(uint64_t x, uint32_t joints, uint32_t count) noexcept {
+    pfz::g_fdX.store(0, std::memory_order_release);
+    pfz::g_fdSeq.fetch_add(1, std::memory_order_acq_rel);
+    pfz::g_fdPlan.x = x;
+    pfz::g_fdPlan.joints = joints;
+    pfz::g_fdPlan.count = count;
+    for (uint32_t k = 0; k < count && k < nofoot::kPfzMaxF; ++k) pfz::g_fdPlan.member[k] = g_fdMembers[k];
+    pfz::g_fdSeq.fetch_add(1, std::memory_order_release);
+    pfz::g_fdX.store(count > 0 ? x : 0, std::memory_order_release);
+}
+void fdCensusStep(uint64_t iface, uint64_t x) noexcept {
+    if (iface == g_fdCensus.iface && x == g_fdCensus.x) return;
+    g_fdCensus.iface = iface;
+    g_fdCensus.x = x;
+    fdPublish(0, 0, 0);
+    static uint32_t notes = 0;   // the plan lines, at most 24 a session (a flapping candidate must not flood the log)
+    if (++notes > 24) {
+        if (notes == 25) Log::get().note("native on foot shoulder drop (F55): the FP X changed again; further plan lines are not printed");
+        if (notes > 25) notes = 25;
+    }
+    const bool say = notes <= 24;
+    if (!plausibleUserPointer(x) || x == pfz::g_localX.load(std::memory_order_relaxed)) {
+        if (say)
+            Log::get().note("native on foot shoulder drop (F55): FP X %016llX (iface %016llX) is %s; no plan (nothing is dropped or snapshotted)",
+                        static_cast<unsigned long long>(x), static_cast<unsigned long long>(iface),
+                        plausibleUserPointer(x) ? "the 3P local X" : "not a plausible pointer");
+        return;
+    }
+    uint64_t pose = 0;
+    uint16_t joints = 0;
+    if (!sehReadU64At(static_cast<uintptr_t>(x) + 8u, &pose) || !plausibleUserPointer(pose) || !sehReadU16At(static_cast<uintptr_t>(pose), &joints) ||
+        joints <= nofoot::kDropHandR || joints > nofoot::kPfzMaxJoints ||
+        !sehReadPoseArrays(static_cast<uintptr_t>(pose), joints, g_pfzLocals, g_pfzParents)) {
+        if (say)
+            Log::get().note("native on foot shoulder drop (F55): FP X %016llX: P = [X+8] %016llX, %u joints (need 45..192) or the parents unreadable; no plan",
+                        static_cast<unsigned long long>(x), static_cast<unsigned long long>(pose), static_cast<unsigned>(joints));
+        return;
+    }
+    const uint32_t count = nofoot::dropSubtree(g_pfzParents, joints, nofoot::kDropClavL, nofoot::kDropClavR, g_fdMembers, nofoot::kPfzMaxF);
+    bool has37 = false, has44 = false;
+    char list[1024] = {};
+    size_t at = 0;
+    for (uint32_t k = 0; k < count; ++k) {
+        has37 = has37 || g_fdMembers[k] == nofoot::kDropHandL;
+        has44 = has44 || g_fdMembers[k] == nofoot::kDropHandR;
+        const int w = std::snprintf(list + at, sizeof(list) - at, "%s%u", k ? " " : "", static_cast<unsigned>(g_fdMembers[k]));
+        if (w > 0 && static_cast<size_t>(w) < sizeof(list) - at) at += static_cast<size_t>(w);
+    }
+    if (say)
+        Log::get().note("native on foot shoulder drop (F55): plan for the FP X %016llX (iface %016llX): P=[X+8]=%016llX, %u joints; 19<-%u, 20<-%u; "
+                    "the subtree of 19 and 20 has %u joints (hand 37 %s, hand 44 %s); the FP joint probe's L/R shoulder: %u/%u; members: %s",
+                    static_cast<unsigned long long>(x), static_cast<unsigned long long>(iface), static_cast<unsigned long long>(pose),
+                    static_cast<unsigned>(joints), static_cast<unsigned>(g_pfzParents[nofoot::kDropClavL]),
+                    static_cast<unsigned>(g_pfzParents[nofoot::kDropClavR]), count, has37 ? "in" : "NOT in", has44 ? "in" : "NOT in",
+                    static_cast<unsigned>(g_shProbeFP.l), static_cast<unsigned>(g_shProbeFP.r), at ? list : "none");
+    if (count > 0) fdPublish(x, joints, count);
+}
+
 void pfzCensusStep(uint64_t iface, const SkSlots& sl) noexcept {
     if (pfz::g_mode.load(std::memory_order_relaxed) == 0) {
         pfz::g_localX.store(0, std::memory_order_relaxed);
@@ -2246,7 +2312,9 @@ void neckCensusStep() noexcept {
     if (fpIface) {
         SkSlots slf;
         if (skVerify(static_cast<uintptr_t>(fpIface), ecm::HeadKind::None, &slf) == SkVerify::Ok) {
-            if (pfz::g_mode.load(std::memory_order_relaxed) != 0) pfzCandidates(1, fpIface, slf);   // F51: the FP skeleton's X, for the line only
+            // F51: the FP skeleton's X, for the line; F55: and the shoulder drop's plan (the FP X, with the 3P one's fallbacks)
+            if (pfz::g_mode.load(std::memory_order_relaxed) != 0 || pfz::g_dropWanted.load(std::memory_order_relaxed))
+                fdCensusStep(fpIface, pfzCandidates(1, fpIface, slf));
             shoulderProbe(fpIface, slf, g_shProbeFP, "FP");
             if (g_shProbeFP.l != 0xFFFFu && g_shProbeFP.r != 0xFFFFu && jointModelAt(fpIface, slf, g_shProbeFP.l, &s.shFp[0]) &&
                 jointModelAt(fpIface, slf, g_shProbeFP.r, &s.shFp[3]))

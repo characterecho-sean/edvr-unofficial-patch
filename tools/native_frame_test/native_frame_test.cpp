@@ -1052,6 +1052,76 @@ int wmain(int argc, wchar_t** argv) {
                           std::fabs(after[0] - tgt[0]) < 1e-12 && std::fabs(after[1] - tgt[1]) < 1e-12 && std::fabs(after[2] - tgt[2]) < 1e-12,
                       "F53: the neck anchor puts the 3P neck at the FP side plus (0, -0.155, -0.161) m in body axes");
             }
+            // F55: the walking shift. With the rest captured, d_h = FP side_h - (rest_h + offset_h), whatever the live neck does (a walk leans
+            // it 12 cm forward and 3 cm right); the vertical stays live.
+            {
+                const double fpB[3] = {0.02, 1.50, 0.10}, restNeck[2] = {0.21, -0.04};
+                double off[3] = {}, src[3] = {};
+                const double neckIdle[3] = {0.21, 1.30, -0.04}, neckWalk[3] = {0.24, 1.28, 0.08};
+                nf::neckRestSource(neckIdle, src);
+                for (int i = 0; i < 3; ++i) off[i] = src[i] - neckIdle[i];
+                double sIdle[3], sWalk[3], liveWalk[3];
+                nf::neckRestSource(neckWalk, liveWalk);
+                const double liveIdle[3] = {src[0], src[1], src[2]};
+                nf::walkRestSource(liveIdle, off, restNeck[0], restNeck[1], sIdle);
+                nf::walkRestSource(liveWalk, off, restNeck[0], restNeck[1], sWalk);
+                const double dIdle[2] = {fpB[0] - sIdle[0], fpB[2] - sIdle[2]}, dWalk[2] = {fpB[0] - sWalk[0], fpB[2] - sWalk[2]};
+                const double expect[2] = {fpB[0] - (restNeck[0] - nf::kNeckRestOffset[0]), fpB[2] - (restNeck[1] - nf::kNeckRestOffset[2])};
+                check(std::fabs(dIdle[0] - expect[0]) < 1e-12 && std::fabs(dIdle[1] - expect[1]) < 1e-12 && std::fabs(dWalk[0] - dIdle[0]) < 1e-12 &&
+                          std::fabs(dWalk[1] - dIdle[1]) < 1e-12 && sWalk[1] == liveWalk[1] && std::fabs((fpB[2] - liveWalk[2]) - dIdle[1]) > 0.1,
+                      "F55: d_h = FP side_h - (rest_h + offset_h) stays constant while the live neck leans with a walk; the vertical stays live");
+            }
+            // F55: the horizontal rest is captured only at idle: not at key-on, not while moving or ADS; a steady head for 1 s while not moving
+            // captures the window's mean x and z.
+            {
+                nf::StandingHeight st;
+                const bool keyOn = st.step(0, 1.60, 1.70, false, true, 0.30, 0.20);
+                bool walkCap = false;
+                for (uint64_t t = 11; t <= 2000; t += 11) walkCap = st.step(t, 1.60, 1.70, false, true, 0.30, 0.20) || walkCap;
+                bool adsCap = false;
+                for (uint64_t t = 2011; t <= 3500; t += 11) adsCap = st.step(t, 1.60, 1.70, true, false, 0.30, 0.20) || adsCap;
+                check(keyOn && st.valid && !st.hValid && !walkCap && !adsCap && st.hCaptures == 0,
+                      "F55: the key-on step captures the height only; 2 s of walking and 1.5 s of ADS capture no horizontal rest");
+                bool idleCap = false;
+                uint64_t t = 3511;
+                for (; t <= 5000 && !idleCap; t += 11) idleCap = st.step(t, 1.60, 1.70, false, false, (t % 2) ? 0.21 : 0.19, -0.05);
+                check(idleCap && st.hValid && st.hCaptures == 1 && std::fabs(st.hx - 0.20) < 0.002 && std::fabs(st.hz + 0.05) < 1e-9 && t - 3511 >= 1000,
+                      "F55: 1 s idle (not moving, no ADS, the head steady) captures the mean x and z of the rest point");
+                const double hx = st.hx;
+                bool walkAgain = false;
+                for (uint64_t u = t; u <= t + 3000; u += 11) walkAgain = st.step(u, 1.60, 1.70, false, true, 0.40, 0.30) || walkAgain;
+                check(!walkAgain && st.hx == hx && st.hCaptures == 1, "F55: walking after a capture never re-captures the rest");
+            }
+            // F55: the FP shoulder drop: the key clamps to 0..20 cm; the weight ramps linearly over 0.2 s in and out (ADS); the subtree of 19, 20.
+            {
+                check(nf::dropClampCm(-5.0) == 0.0 && nf::dropClampCm(0.0) == 0.0 && nf::dropClampCm(7.5) == 7.5 && nf::dropClampCm(25.0) == 20.0 &&
+                          nf::dropClampCm(std::numeric_limits<double>::quiet_NaN()) == 0.0 && std::fabs(nf::dropM(1.0, 30.0) - 0.20) < 1e-12 &&
+                          nf::dropM(0.0, 10.0) == 0.0 && std::fabs(nf::dropM(0.5, 10.0) - 0.05) < 1e-12,
+                      "F55: the shoulder drop clamps to 0..20 cm (NaN and negatives are 0) and scales by the weight");
+                nf::DropBlend b;
+                const double dt = 1.0 / 90.0;
+                int framesIn = 0;
+                while (b.w < 1.0 && framesIn < 100) {
+                    b.step(true, dt);
+                    ++framesIn;
+                }
+                nf::DropBlend b2;
+                for (int f = 0; f < 9; ++f) b2.step(true, dt);
+                const double wHalf = b2.w;
+                int framesOut = 0;
+                while (b.w > 0.0 && framesOut < 100) {
+                    b.step(false, dt);   // ADS starts
+                    ++framesOut;
+                }
+                check(framesIn >= 18 && framesIn <= 19 && framesOut >= 18 && framesOut <= 19 && std::fabs(wHalf - 0.5) < 1e-9 && b.w == 0.0,
+                      "F55: the drop's weight ramps to 1 in 0.2 s (18 frames at 90 Hz), is half at 0.1 s, and back to 0 in 0.2 s when ADS starts");
+                // root 0 -> spine 1 -> clavicle 2 (as 19) -> arm 3 -> hand 4; spine 1 -> clavicle 5 (as 20) -> hand 6; spine 1 -> head 7; a broken 8.
+                const uint16_t dropParents[9] = {0xFFFF, 0, 1, 2, 3, 1, 5, 1, 99};
+                uint16_t mem[9] = {};
+                const uint32_t n = nf::dropSubtree(dropParents, 9, 2, 5, mem, 9);
+                check(n == 5 && mem[0] == 2 && mem[1] == 3 && mem[2] == 4 && mem[3] == 5 && mem[4] == 6,
+                      "F55: the drop's subtree is the two clavicles and every joint below them; the spine, the head and a broken chain are left out");
+            }
             // The shift rule: a record at the AMC origin moves by d once; a second pass over it leaves it alone; a record elsewhere never moves.
             const float origin[3] = {10.0f, 2.0f, -3.0f}, d[3] = {0.0f, 0.231f, 0.0f};
             float rec[3] = {10.0f, 2.0f, -3.0f}, other[3] = {10.5f, 2.0f, -3.0f};
