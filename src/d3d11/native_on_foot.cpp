@@ -99,6 +99,37 @@ std::atomic<double> g_dropCm{0.0};   // F55 (TEMPORARY): fix.native_on_foot_fp_s
 std::atomic<float> g_ikSwivelTrimRad{0.0f}, g_ikSquareAmount{static_cast<float>(nofoot::kIkSquareAmountDefault)},
     g_ikElbowOutM{static_cast<float>(nofoot::kIkElbowOutCmDefault / 100.0)};
 double g_ikTrimDeg = 0.0, g_ikSqAmountKey = nofoot::kIkSquareAmountDefault, g_ikOutCm = nofoot::kIkElbowOutCmDefault;
+// F58 (TEMPORARY): the spine bend. The key (fix.native_on_foot_spine_bend, on by default; it acts only in full-3P body mode) and the amount
+// slider, the frame thread's 0.2 s ramp and run flag (the key on in full-3P body mode, or the ramp or its hold still running), read by the
+// Animate hook. The eye target (the job camera less d, body axes = the 3P model space) and the pov joint's index, through a seqlock.
+std::atomic<bool> g_bendKeyOn{true}, g_bendRun{false};
+std::atomic<float> g_bendAmount{static_cast<float>(nofoot::kBendAmountDefault)}, g_bendWeight{0.0f};
+double g_bendAmountKey = nofoot::kBendAmountDefault;   // the key reader's last values (frame thread only)
+int g_bendKeyLast = -1;
+struct BendTarget {
+    float t[3] = {};
+    uint32_t pov = 0xFFFFu;
+    uint64_t ms = 0;
+};
+std::atomic<uint32_t> g_bendTgtSeq{0};
+BendTarget g_bendTgt;
+void bendTargetPublish(const double t[3], uint32_t pov, uint64_t ms) noexcept {
+    g_bendTgtSeq.fetch_add(1, std::memory_order_acq_rel);   // odd: a write is in progress
+    for (int i = 0; i < 3; ++i) g_bendTgt.t[i] = static_cast<float>(t[i]);
+    g_bendTgt.pov = pov;
+    g_bendTgt.ms = ms;
+    g_bendTgtSeq.fetch_add(1, std::memory_order_release);
+}
+bool bendTargetRead(BendTarget* out) noexcept {
+    for (int tries = 0; tries < 2; ++tries) {
+        const uint32_t s1 = g_bendTgtSeq.load(std::memory_order_acquire);
+        if (s1 & 1u || s1 == 0) continue;
+        std::memcpy(out, &g_bendTgt, sizeof(*out));
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if (g_bendTgtSeq.load(std::memory_order_relaxed) == s1) return true;
+    }
+    return false;
+}
 uint64_t g_f40MarkerLogMs = 0;   // F40: the marker angle line's last time
 std::atomic<double> g_worldLeadFrames{2.5};   // F38: fix.native_on_foot_world_markers_lead, 0 to 5 frames (forward_lead); live
 std::atomic<int> g_worldMarkersMode{6};        // F27/F31/F37: fix.native_on_foot_world_markers: 0 fixed, 1 forward (C), 2 game, 3 forward_now (H_M), 4 forward_hist (the ring's matched pose), 5 forward_k2 (the ring's pose two frames back), 6 forward_lead (the newest ring pose carried ahead, default); live; key 10 is never touched
@@ -679,6 +710,22 @@ void readKey() {
             g_ikSquareAmount.store(static_cast<float>(sqAmount), std::memory_order_relaxed);
             g_ikElbowOutM.store(static_cast<float>(outCm / 100.0), std::memory_order_relaxed);
         }
+        // F58 (TEMPORARY, live): the spine bend toward the head: on (the default) or off. It acts only in full-3P body mode (body align = body
+        // with fix.native_on_foot_hide_fp_body and fix.native_on_foot_body_unclip on); the amount slider (0..1, default 1) scales it.
+        {
+            const bool bendOn = cfg.getString("fix.native_on_foot_spine_bend", "on") == "on";
+            const double bendAmt = nofoot::bendAmountClamp(
+                static_cast<double>(cfg.getFloat("fix.native_on_foot_spine_bend_amount", static_cast<float>(nofoot::kBendAmountDefault))));
+            if (first || (bendOn ? 1 : 0) != g_bendKeyLast || bendAmt != g_bendAmountKey)
+                Log::get().note("native on foot spine bend (F58, TEMPORARY): fix.native_on_foot_spine_bend = %s, amount %.2f -- %s", bendOn ? "on" : "off",
+                                bendAmt, bendOn ? "in full-3P body mode (hide_fp_body and body_unclip on) the 3P spine 16, 21, 24 bends toward the "
+                                                  "eye (forward 0..45, back 0..15, roll +-20 deg; 1/3, 2/3, 1), blended over 0.2 s"
+                                                : "nothing is bent");
+            g_bendKeyLast = bendOn ? 1 : 0;
+            g_bendAmountKey = bendAmt;
+            g_bendKeyOn.store(bendOn, std::memory_order_relaxed);
+            g_bendAmount.store(static_cast<float>(bendAmt), std::memory_order_relaxed);
+        }
         // F46 part A: the trims are numbers (the menu's sliders): right/left, height and forward/back, in cm, clamped to +-30. F48: default 0.
         const float trims[3] = {cfg.getFloat("fix.native_on_foot_body_align_trim_right_cm", 0.0f),
                                 cfg.getFloat("fix.native_on_foot_body_align_trim_up_cm", 0.0f),
@@ -810,6 +857,10 @@ void readKey() {
         Log::get().note("native on foot: fix.native_on_foot_body_hybrid is %s (temporary)", hybridOn ? "on" : "off");
         g_hybridKeyLast = hybridOn;
     }
+    // F58: the spine bend rides the arm IK's hook path (its plan, census and the Animate post-hook): wanted with the arm IK not off, or with the
+    // bend key on in full-3P (both body keys on). Outside full-3P with the arm IK off, nothing changes.
+    pfz::g_ikWanted.store(pfz::g_ikMode.load(std::memory_order_relaxed) != 0 || (g_bendKeyOn.load(std::memory_order_relaxed) && fpOn && unclipOn),
+                          std::memory_order_relaxed);
 }
 
 // The caller's address, image-relative; "+0x?" when it is not inside the game image.
@@ -6203,6 +6254,13 @@ void f51Line(const EyeSample& s, const FpRootSnap& fp, bool fpFresh, bool raiseO
     }
 }
 
+// F58 (frame thread only): the body target's horizontal source this frame: 0 the FP root, 1 the job camera (full 3P), 2 the job camera (the
+// FP root not fresh), 3 the FP clavicles (the clavicle anchor), -1 none (no body frame); the bend's ramp, its run hold and its 1 s line.
+int g_f58FollowSrc = -1;
+nofoot::IkBlend g_f58BendBlend{0.0f, nofoot::kBendRampSec};
+uint64_t g_f58RunUntilMs = 0, g_f58LineMs = 0;
+void f58BendFrame(uint64_t now, double dt, int mode, bool full3P, bool ads, const EyeSample& s) noexcept;
+
 void alignTick(uint64_t now) noexcept {
     static int lastMode = -1;
     const int mode = g_alignMode.load(std::memory_order_relaxed);   // 0 off, 1 view, 2 body
@@ -6279,7 +6337,10 @@ void alignTick(uint64_t now) noexcept {
     if (mode == 2 && ads) g_f48Stand.step(now, 0.0, 0.0, true);   // F48: ADS is never a rest; the standing window starts again after it
     const int anchorMode = g_alignAnchorMode.load(std::memory_order_relaxed);   // F48: 0 neck, 1 clavicles, 2 pov
     const bool vertical = g_alignVertical.load(std::memory_order_relaxed);      // F50: off locks the body's height in body mode
-    static int lastVerticalNote = -1;   // F50: the vertical-off note, once per entry to body (and on a key change while in body)
+    // F58: full-3P body mode: the FP body hidden and the body unclipped (the arm IK's gate keys).
+    const bool f58Full3P = mode == 2 && g_fpKeyOn.load(std::memory_order_relaxed) && g_unclipKeyOn.load(std::memory_order_relaxed);
+    g_f58FollowSrc = -1;
+    static int lastVerticalNote = -1;  // F50: the vertical-off note, once per entry to body (and on a key change while in body)
     if (mode != 2) lastVerticalNote = -1;
     else if (lastVerticalNote != (vertical ? 1 : 0)) {
         lastVerticalNote = vertical ? 1 : 0;
@@ -6445,6 +6506,17 @@ void alignTick(uint64_t now) noexcept {
                 if (s.neckOk) nofoot::neckRestSource(neckB, srcB);
                 else
                     for (size_t i = 0; i < 3; ++i) srcB[i] = povEqB[i];
+            }
+            // F58: full-3P head follow. With the FP body hidden and the body unclipped, the anchor's horizontal (right, forward) is the job
+            // camera (it carries the HMD's translation), not the FP root; the same body axes, filter and trims. The up stays the FP root's (the
+            // vertical lock drops it anyway). The clavicle anchor is left as it is.
+            if (shoulderAnchor) g_f58FollowSrc = 3;
+            else if (f58Full3P) {
+                anchorB[0] = jobB[0];
+                anchorB[2] = jobB[2];
+                g_f58FollowSrc = 1;
+            } else {
+                g_f58FollowSrc = fpFresh ? 0 : 2;
             }
             // F48: the standing height. The 3P side's live height is tracked on every anchor (logged); the pov anchor alone uses the captured
             // value in place of it (neck and clavicles keep F46's and F45's behaviour). x and z stay live.
@@ -6912,6 +6984,7 @@ void alignTick(uint64_t now) noexcept {
                             g_f37SignApplied * 100.0);
         }
     }
+    f58BendFrame(now, dt, mode, f58Full3P, ads, s);   // F58: the spine bend's target, ramp and 1 s line (with the head follow's source)
 }
 
 // The body hook's install (once, VR): refused with a line on any byte mismatch, the game untouched then.
@@ -7738,6 +7811,24 @@ uint16_t g_ikFzSlot[nofoot::kPfzMaxJoints];  // F57: the freeze plan's slot of e
 std::atomic<float> g_ikSquareWeight{0.0f};   // F57: the frame thread's square-up ramp (0.3 s; 0 unless the key is on and the gate holds)
 float g_ikApplied[2][3];       // the applied hand offset per side (model space, from the animated hand)
 uint64_t g_ikAppliedMs[2];     // when it was last applied (older than 200 ms: start again from the animated hand)
+// F58 (TEMPORARY): the spine bend's hook state (under g_pfzBusy) and its statistics (one writer, the hook; read once a second by the frame
+// thread under the sequence counter, reset on request), and its refusals.
+double g_bendApplied[2] = {};   // the applied (pitch, roll), radians, capped at 5 cm of pov motion a call
+uint64_t g_bendAppliedMs = 0;
+enum BendRefusal : uint32_t { kBendRefPlan = 0, kBendRefTarget, kBendRefStale, kBendRefPov, kBendRefDegenerate, kBendRefSingular, kBendRefKinds };
+std::atomic<uint64_t> g_bendRefused[kBendRefKinds];
+struct BendStats {
+    uint64_t calls = 0, n = 0, wrote = 0;
+    uint32_t clampFwd = 0, clampBack = 0, clampRoll = 0, povLevel = 0xFFu, pov = 0xFFFFu;
+    double res0Sum = 0.0, res0Max = 0.0, res1Sum = 0.0, res1Max = 0.0;   // |T - N| before and after the bend, cm
+    double res0B[3] = {}, res1B[3] = {};                                 // their (forward, up, right) sums, cm
+    double pitchSum = 0.0, pitchMin = 0.0, pitchMax = 0.0, rollSum = 0.0, rollMin = 0.0, rollMax = 0.0;   // applied, degrees
+    double solvedPitchSum = 0.0, solvedRollSum = 0.0;                    // the solve before the clamps, degrees
+    double wSum = 0.0;                                                   // the weight times the amount
+};
+std::atomic<uint32_t> g_bendStatSeq{0};
+BendStats g_bendStats;
+std::atomic<bool> g_bendStatReset{false};
 
 bool ikMatrixSane(const float m[16]) noexcept {
     for (int i = 0; i < 16; ++i)
@@ -7771,8 +7862,12 @@ inline void ikPos(const float m[16], double p[3]) noexcept {
 
 void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
     const int mode = pfz::g_ikMode.load(std::memory_order_relaxed);
-    if (mode == 0) return;
-    g_ikCalls.fetch_add(1, std::memory_order_relaxed);
+    const bool bendRun = g_bendRun.load(std::memory_order_relaxed);   // F58: the spine bend rides this path (its plan and its writes)
+    if (mode == 0 && !bendRun) return;
+    if (mode != 0) g_ikCalls.fetch_add(1, std::memory_order_relaxed);
+    const auto bendRefuse = [&](uint32_t k) noexcept {
+        if (bendRun) g_bendRefused[k].fetch_add(1, std::memory_order_relaxed);
+    };
     bool planOk = false;
     for (int tries = 0; tries < 2 && !planOk; ++tries) {
         const uint32_t s1 = pfz::g_armSeq.load(std::memory_order_acquire);
@@ -7781,21 +7876,46 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         std::atomic_thread_fence(std::memory_order_acquire);
         planOk = pfz::g_armSeq.load(std::memory_order_relaxed) == s1;
     }
-    if (!planOk) return ikRefuse(kIkRefPlanTorn);
+    if (!planOk) {
+        bendRefuse(kBendRefPlan);
+        if (mode != 0) ikRefuse(kIkRefPlanTorn);
+        return;
+    }
     const pfz::ArmPlan& pl = g_ikPlanCopy;
-    if (pl.x != x || pl.joints != sp.count) return ikRefuse(kIkRefPlan);
-    float fpm[nofoot::kIkFpSlots][16];
-    uint64_t fpMs = 0;
-    if (!ikFpRead(fpm, &fpMs)) return ikRefuse(kIkRefFpTorn);
+    if (pl.x != x || pl.joints != sp.count) {
+        bendRefuse(kBendRefPlan);
+        if (mode != 0) ikRefuse(kIkRefPlan);
+        return;
+    }
     const uint64_t now = GetTickCount64();
-    const uint64_t fpAge = now > fpMs ? now - fpMs : 0;
-    if (fpAge > nofoot::kIkFreshMs) return ikRefuse(kIkRefFpStale);
+    // The arm IK's inputs (the FP snapshot and G, under 100 ms). F58: a refusal here skips the arms and the square-up but not the bend.
+    float fpm[nofoot::kIkFpSlots][16] = {};
+    uint64_t fpMs = 0, fpAge = 0, gAge = 0;
     IkGData G;
-    if (!ikGRead(&G)) return ikRefuse(kIkRefGTorn);
-    const uint64_t gAge = now > G.ms ? now - G.ms : 0;
-    if (gAge > nofoot::kIkFreshMs) return ikRefuse(kIkRefGStale);
+    bool armsOk = mode != 0;
+    if (armsOk) {
+        uint32_t ref = kIkRefKinds;
+        if (!ikFpRead(fpm, &fpMs)) {
+            ref = kIkRefFpTorn;
+        } else {
+            fpAge = now > fpMs ? now - fpMs : 0;
+            if (fpAge > nofoot::kIkFreshMs) {
+                ref = kIkRefFpStale;
+            } else if (!ikGRead(&G)) {
+                ref = kIkRefGTorn;
+            } else {
+                gAge = now > G.ms ? now - G.ms : 0;
+                if (gAge > nofoot::kIkFreshMs) ref = kIkRefGStale;
+            }
+        }
+        if (ref != kIkRefKinds) {
+            ikRefuse(ref);
+            if (!bendRun) return;
+            armsOk = false;
+        }
+    }
     const float wBase = g_ikWeight.load(std::memory_order_relaxed);
-    const bool writeOk = (mode == 2 || mode == 3) && wBase > 0.0f && !g_ikWriteDown.load(std::memory_order_relaxed);
+    const bool writeOk = armsOk && (mode == 2 || mode == 3) && wBase > 0.0f && !g_ikWriteDown.load(std::memory_order_relaxed);
     struct SideOut {
         bool solved = false, clamped = false, wrote = false, poleFp = false, limited = false;
         double dist = 0.0, ang = 0.0, reach = 0.0, shortfall = 0.0, bend = 0.0, err = -1.0, wArm = 0.0, gate = 0.0, elbowDeg = 0.0, sx = 0.0;
@@ -7853,12 +7973,77 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             g_ikMark[j] |= 2u;
         }
     }
+    // F58 stage 1b: the spine bend toward the head (full-3P body mode, the bend key on), after the freeze and before the square-up and the arm
+    // solve. The pov joint N and the spine root P (joint 16) from M0; the target T (the job camera less d, the 3P model space) from the frame
+    // thread. The pitch and roll that turn N toward T about P (nofoot::bendSolve), clamped (forward 45, back 15, roll 20 deg), times the frame
+    // thread's ramp and the amount; the applied angles move at most 5 cm of pov motion a call. Split 1/3, 2/3, 1 over the spine levels about P,
+    // on M0, so the square-up and the arm solve run on the bent pose. Written with the spine list below.
+    bool bendHave = false, bendWrite = false;
+    nofoot::BendClamp bendCl;
+    double bendRes0[3] = {}, bendRes1[3] = {}, bendSolved[2] = {}, bendW = 0.0;
+    uint32_t bendLevel = 0xFFu, bendPov = 0xFFFFu;
+    if (bendRun) {
+        BendTarget bt;
+        if (!pl.sqOk) {
+            bendRefuse(kBendRefPlan);
+        } else if (!bendTargetRead(&bt)) {
+            bendRefuse(kBendRefTarget);
+        } else if ((now > bt.ms ? now - bt.ms : 0) > nofoot::kBendStaleMs) {
+            bendRefuse(kBendRefStale);
+        } else if (bt.pov >= count || nofoot::kIkSpine[0] >= count) {
+            bendRefuse(kBendRefPov);
+        } else {
+            for (uint32_t k = 0; k < pl.sq.n; ++k)
+                if (pl.sq.j[k] == bt.pov) bendLevel = pl.sq.level[k] < 3 ? pl.sq.level[k] : 2u;
+            bendPov = bt.pov;
+            double P[3], N[3], pitch = 0.0, roll = 0.0;
+            const double T[3] = {bt.t[0], bt.t[1], bt.t[2]};
+            ikPos(g_ikM0[nofoot::kIkSpine[0]], P);
+            if (bendLevel <= 2u) ikPos(g_ikM0[bt.pov], N);
+            if (bendLevel > 2u) {
+                bendRefuse(kBendRefPov);   // the pov joint is not under the spine root
+            } else if (!nofoot::bendSolve(P, N, T, &pitch, &roll)) {
+                bendRefuse(kBendRefDegenerate);
+            } else {
+                bendSolved[0] = pitch;
+                bendSolved[1] = roll;
+                pitch = nofoot::bendClampPitch(pitch, &bendCl);
+                roll = nofoot::bendClampRoll(roll, &bendCl);
+                bendW = static_cast<double>(g_bendWeight.load(std::memory_order_relaxed)) *
+                        static_cast<double>(g_bendAmount.load(std::memory_order_relaxed));
+                const double want[2] = {pitch * bendW, roll * bendW};
+                if (now - g_bendAppliedMs > 200) g_bendApplied[0] = g_bendApplied[1] = 0.0;
+                const double v[3] = {N[0] - P[0], N[1] - P[1], N[2] - P[2]};
+                nofoot::bendCapToward(g_bendApplied, want, nofoot::ikLen(v));
+                g_bendAppliedMs = now;
+                double Rp[9], v1[3];
+                nofoot::bendRot(g_bendApplied[0], g_bendApplied[1], nofoot::kIkSpineWeight[bendLevel], Rp);
+                nofoot::bendApply(v, Rp, v1);
+                const double N1[3] = {P[0] + v1[0], P[1] + v1[1], P[2] + v1[2]};
+                nofoot::bendResidualSplit(T, N, bendRes0);
+                nofoot::bendResidualSplit(T, N1, bendRes1);
+                bendHave = true;
+                if (g_bendApplied[0] != 0.0 || g_bendApplied[1] != 0.0) {
+                    double Rl[3][9];
+                    for (int l = 0; l < 3; ++l) nofoot::bendRot(g_bendApplied[0], g_bendApplied[1], nofoot::kIkSpineWeight[l], Rl[l]);
+                    for (uint32_t k = 0; k < pl.sq.n; ++k) {
+                        const uint32_t j = pl.sq.j[k];
+                        if (j >= count) continue;
+                        float tmp[16];
+                        std::memcpy(tmp, g_ikM0[j], sizeof(tmp));
+                        nofoot::ikPivot(tmp, Rl[pl.sq.level[k] < 3 ? pl.sq.level[k] : 2], P, g_ikM0[j]);
+                    }
+                    bendWrite = !g_ikWriteDown.load(std::memory_order_relaxed);
+                }
+            }
+        }
+    }
     // F57 stage 2: the torso square-up, before the arm solve: the 3P shoulder line (clavicle 36 - 35, xz) turned onto the FP's (20 - 19 mapped
     // by G) about the vertical through joint 34, clamped to +-50 deg, split over the spine 16, 21, 24 (1/3, 2/3, 1). Never in nudge; probe (and
     // an on that is not writing) at the full ramp for the statistics; on and writing at the frame thread's ramp. Times the slider's amount.
     bool sqHave = false, sqClamped = false;
     double sqTheta = 0.0, sqApplied = 0.0;
-    if (pl.sqOk && mode != 2 && nofoot::kIkClavR < count && nofoot::kIkSquarePivot < count) {
+    if (armsOk && pl.sqOk && mode != 2 && nofoot::kIkClavR < count && nofoot::kIkSquarePivot < count) {
         const float* mL = g_ikM0[nofoot::kIkClavL];
         const float* mR = g_ikM0[nofoot::kIkClavR];
         double fL[3], fR[3];
@@ -7889,7 +8074,7 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         }
     }
     const bool sqWrite = mode == 3 && writeOk && sqHave && sqApplied != 0.0;
-    for (int side = 0; side < 2; ++side) {
+    for (int side = 0; side < 2 && armsOk; ++side) {   // F58: no arms without the FP snapshot and G (the bend alone runs)
         if (!pl.ok[side]) {
             ikRefuse(kIkRefSide);
             continue;
@@ -8150,16 +8335,18 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         o.wrote = true;
     }
     // F57: the squared torso: every spine-list joint not written from the solve takes its squared M0 (an arm whose solve did not write rides
-    // its clavicle).
-    if (sqWrite) {
+    // its clavicle). F58: the same for the bent spine (the arms solved on it, or riding it when the arm IK does not write).
+    if (sqWrite || bendWrite) {
         bool sane = true;
         for (uint32_t k = 0; k < pl.sq.n && sane; ++k) {
             const uint32_t j = pl.sq.j[k];
             if (j < count && !(g_ikMark[j] & 4u)) sane = ikMatrixSane(g_ikM0[j]);
         }
         if (!sane) {
-            ikRefuse(kIkRefSingular);
-            nList = 0;   // the arms were solved on the squared torso: write neither
+            if (mode != 0) ikRefuse(kIkRefSingular);
+            if (bendWrite) bendRefuse(kBendRefSingular);
+            bendWrite = false;
+            nList = 0;   // the arms were solved on the squared (or bent) torso: write neither
         } else {
             for (uint32_t k = 0; k < pl.sq.n && nList < nofoot::kPfzMaxJoints; ++k) {
                 const uint32_t j = pl.sq.j[k];
@@ -8167,6 +8354,44 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
                 g_ikList[nList++] = static_cast<uint16_t>(j);   // written from g_ikM0 (mark 4 unset)
             }
         }
+    }
+    // F58: the bend's statistics (the hook's own, read once a second).
+    if (bendRun) {
+        g_bendStatSeq.fetch_add(1, std::memory_order_acq_rel);
+        if (g_bendStatReset.exchange(false, std::memory_order_relaxed)) g_bendStats = BendStats{};
+        BendStats& b = g_bendStats;
+        ++b.calls;
+        if (bendHave) {
+            const double r0 = std::sqrt(bendRes0[0] * bendRes0[0] + bendRes0[1] * bendRes0[1] + bendRes0[2] * bendRes0[2]) * 100.0;
+            const double r1 = std::sqrt(bendRes1[0] * bendRes1[0] + bendRes1[1] * bendRes1[1] + bendRes1[2] * bendRes1[2]) * 100.0;
+            const double pd = g_bendApplied[0] * 180.0 / nofoot::kIkPi, rd = g_bendApplied[1] * 180.0 / nofoot::kIkPi;
+            const bool first = b.n == 0;
+            b.res0Sum += r0;
+            b.res1Sum += r1;
+            b.res0Max = std::max(b.res0Max, r0);
+            b.res1Max = std::max(b.res1Max, r1);
+            for (int i = 0; i < 3; ++i) {
+                b.res0B[i] += bendRes0[i] * 100.0;
+                b.res1B[i] += bendRes1[i] * 100.0;
+            }
+            b.pitchSum += pd;
+            b.rollSum += rd;
+            b.pitchMin = first || pd < b.pitchMin ? pd : b.pitchMin;
+            b.pitchMax = first || pd > b.pitchMax ? pd : b.pitchMax;
+            b.rollMin = first || rd < b.rollMin ? rd : b.rollMin;
+            b.rollMax = first || rd > b.rollMax ? rd : b.rollMax;
+            b.solvedPitchSum += bendSolved[0] * 180.0 / nofoot::kIkPi;
+            b.solvedRollSum += bendSolved[1] * 180.0 / nofoot::kIkPi;
+            b.wSum += bendW;
+            if (bendCl.fwd) ++b.clampFwd;
+            if (bendCl.back) ++b.clampBack;
+            if (bendCl.roll) ++b.clampRoll;
+            b.povLevel = bendLevel;
+            b.pov = bendPov;
+            if (bendWrite) ++b.wrote;
+            ++b.n;
+        }
+        g_bendStatSeq.fetch_add(1, std::memory_order_release);
     }
     // The statistics (before the writes, so a write fault still leaves the measurement).
     g_ikStatSeq.fetch_add(1, std::memory_order_acq_rel);
@@ -8768,6 +8993,70 @@ void armIkTick(uint64_t now) noexcept {
         Log::get().note("native on foot arm IK (F57): square-up: no measurement in 5 s (%s; no shoulder line %u)",
                         mode == 2 ? "nudge never squares" : "no square-up plan, or no solve call", st.sqNoLine);
     }
+}
+
+// F58 (TEMPORARY): the spine bend's frame-thread half, at the end of alignTick. The ramp (0.2 s) wants the key on, full-3P body mode, native
+// stereo on foot, a fresh AMC sample with the pov joint, and no ADS; the hook runs while it wants or the ramp is above 0, and 0.5 s after (so
+// the applied angles reach 0 at their cap). The target: the job camera less the body run's applied d, in body axes (the 3P model space, AMC
+// rows), with the pov joint's index. Once a second in body mode (or while the bend runs): the head follow's source and the bend's statistics.
+uint64_t g_bendRefusedLast[kBendRefKinds] = {};
+void f58BendFrame(uint64_t now, double dt, int mode, bool full3P, bool ads, const EyeSample& s) noexcept {
+    const bool key = g_bendKeyOn.load(std::memory_order_relaxed);
+    const bool active = nativeOnFootActive();
+    const bool sFresh = s.valid && (now > s.stamp ? now - s.stamp : 0) <= static_cast<uint64_t>(align::kStaleMs);
+    const bool want = key && full3P && active && sFresh && s.povJOk && !ads;
+    g_f58BendBlend.step(want, dt);
+    if (want || g_f58BendBlend.w > 0.0f) g_f58RunUntilMs = now + 500;
+    const bool run = now < g_f58RunUntilMs;
+    if (run && sFresh && s.povJOk) {
+        double t[3] = {};
+        for (size_t i = 0; i < 3; ++i)
+            for (size_t j = 0; j < 3; ++j)
+                t[i] += (static_cast<double>(s.cam[j]) - s.origin[j] - g_alignBody.applied[j]) * static_cast<double>(s.rows[3 * i + j]);
+        bendTargetPublish(t, s.povJIdx, now);
+    }
+    g_bendWeight.store(g_f58BendBlend.w, std::memory_order_relaxed);
+    g_bendRun.store(run, std::memory_order_relaxed);
+    if (!(mode == 2 || run) || !active) return;
+    if (g_f58LineMs != 0 && now - g_f58LineMs < 1000) return;
+    g_f58LineMs = now;
+    BendStats b;
+    bool got = false;
+    for (int tries = 0; tries < 8 && !got; ++tries) {
+        const uint32_t s1 = g_bendStatSeq.load(std::memory_order_acquire);
+        if (s1 & 1u) continue;
+        b = g_bendStats;
+        std::atomic_thread_fence(std::memory_order_acquire);
+        got = g_bendStatSeq.load(std::memory_order_relaxed) == s1;
+    }
+    if (!got) b = BendStats{};
+    g_bendStatReset.store(true, std::memory_order_relaxed);
+    uint64_t ref[kBendRefKinds] = {};
+    for (uint32_t i = 0; i < kBendRefKinds; ++i) {
+        const uint64_t n = g_bendRefused[i].load(std::memory_order_relaxed);
+        ref[i] = n - g_bendRefusedLast[i];
+        g_bendRefusedLast[i] = n;
+    }
+    static const char* const kSrc[5] = {"none (no body frame this tick: waiting or not body mode)", "the FP root", "the job camera (full 3P)",
+                                         "the job camera (the FP root is not fresh)", "the FP clavicles (the clavicle anchor)"};
+    const char* state = !key ? "off (the key)" : !full3P ? "idle: not full 3P (body mode with hide_fp_body and body_unclip on)"
+                      : !sFresh ? "held: no fresh AMC sample" : !s.povJOk ? "held: no pov joint" : ads ? "ramping out: ADS" : "on";
+    const double n = b.n ? static_cast<double>(b.n) : 1.0;
+    Log::get().note("native on foot spine bend (F58): head follow (the body target's horizontal) from %s; bend %s, amount %.2f, ramp %.2f, weight x "
+                    "amount mean %.2f; %llu hook calls, %llu bent, %llu written this second; residual eye target - pov (cm): before mean %.1f max %.1f "
+                    "(forward %.1f up %.1f right %.1f), after mean %.1f max %.1f (forward %.1f up %.1f right %.1f; the after is left unresolved: the "
+                    "height, the clamps, the ramp); pitch applied mean %.1f (%.1f..%.1f) deg, roll mean %.1f (%.1f..%.1f) deg; solved before the clamps "
+                    "pitch mean %.1f roll mean %.1f deg; clamp hits forward 45 %u, back 15 %u, roll 20 %u; pov joint %u (spine level %u); refusals: "
+                    "plan %llu, target torn %llu, target stale %llu, pov %llu, degenerate %llu, singular %llu",
+                    kSrc[g_f58FollowSrc + 1 >= 0 && g_f58FollowSrc + 1 < 5 ? g_f58FollowSrc + 1 : 0], state, g_bendAmountKey,
+                    static_cast<double>(g_f58BendBlend.w), b.wSum / n, static_cast<unsigned long long>(b.calls),
+                    static_cast<unsigned long long>(b.n), static_cast<unsigned long long>(b.wrote), b.res0Sum / n, b.res0Max, b.res0B[0] / n,
+                    b.res0B[1] / n, b.res0B[2] / n, b.res1Sum / n, b.res1Max, b.res1B[0] / n, b.res1B[1] / n, b.res1B[2] / n, b.pitchSum / n,
+                    b.pitchMin, b.pitchMax, b.rollSum / n, b.rollMin, b.rollMax, b.solvedPitchSum / n, b.solvedRollSum / n, b.clampFwd,
+                    b.clampBack, b.clampRoll, b.pov, b.povLevel, static_cast<unsigned long long>(ref[kBendRefPlan]),
+                    static_cast<unsigned long long>(ref[kBendRefTarget]), static_cast<unsigned long long>(ref[kBendRefStale]),
+                    static_cast<unsigned long long>(ref[kBendRefPov]), static_cast<unsigned long long>(ref[kBendRefDegenerate]),
+                    static_cast<unsigned long long>(ref[kBendRefSingular]));
 }
 
 void installEyeProbeOnce() {

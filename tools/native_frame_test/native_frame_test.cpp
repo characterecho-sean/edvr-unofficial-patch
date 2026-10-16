@@ -1345,6 +1345,97 @@ int wmain(int argc, wchar_t** argv) {
                           nf::ikSwivelTrimClampDeg(120.0) == 90.0 && nf::ikSquareAmountClamp(std::numeric_limits<double>::quiet_NaN()) == 1.0,
                       "F57: the clamp keeps the elbow out by the slider's distance (25 cm); the sliders clamp to their ranges");
             }
+            // F58: the spine bend's pure half: the residual split, the solve, the clamps, the 1/3, 2/3, 1 split, the 0.2 s ramp and the cap.
+            {
+                const double kDeg = nf::kIkPi / 180.0;
+                // The residual split: (forward, up, right) = (z, y, x) of T - N.
+                const double Tr[3] = {0.1, 1.5, 0.3}, Nr[3] = {0.0, 1.7, 0.2};
+                double split[3];
+                nf::bendResidualSplit(Tr, Nr, split);
+                check(std::fabs(split[0] - 0.1) < 1e-12 && std::fabs(split[1] + 0.2) < 1e-12 && std::fabs(split[2] - 0.1) < 1e-12,
+                      "F58: the residual splits into (forward, up, right) = (z, y, x) of the eye target less the pov");
+                // The solve: a target 20 deg forward of the pov about the pivot gives pitch +20 deg, roll 0, and the pov lands on it; 10 deg to
+                // the right gives roll +10 deg; a target straight below the pov on the pivot's line (a height mismatch) gives no bend.
+                const double P[3] = {0.0, 1.0, 0.0}, N[3] = {0.0, 1.7, 0.0};
+                const double Tf[3] = {0.0, 1.0 + 0.7 * std::cos(20.0 * kDeg), 0.7 * std::sin(20.0 * kDeg)};
+                const double Tside[3] = {0.7 * std::sin(10.0 * kDeg), 1.0 + 0.7 * std::cos(10.0 * kDeg), 0.0};
+                const double Tlow[3] = {0.0, 1.45, 0.0};
+                double pf = 0.0, rf = 0.0, ps = 0.0, rs = 0.0, pLow = 7.0, rLow = 7.0;
+                const bool okF = nf::bendSolve(P, N, Tf, &pf, &rf), okS = nf::bendSolve(P, N, Tside, &ps, &rs), okL = nf::bendSolve(P, N, Tlow, &pLow, &rLow);
+                double Rf[9], Rs[9], vf[3], vs[3];
+                const double v[3] = {N[0] - P[0], N[1] - P[1], N[2] - P[2]};
+                nf::bendRot(pf, rf, 1.0, Rf);
+                nf::bendRot(ps, rs, 1.0, Rs);
+                nf::bendApply(v, Rf, vf);
+                nf::bendApply(v, Rs, vs);
+                double pDeg = 7.0, rDeg = 7.0;
+                const bool degen = nf::bendSolve(P, P, Tf, &pDeg, &rDeg);
+                check(okF && std::fabs(pf - 20.0 * kDeg) < 1e-9 && std::fabs(rf) < 1e-9 && std::fabs(P[1] + vf[1] - Tf[1]) < 1e-9 &&
+                          std::fabs(P[2] + vf[2] - Tf[2]) < 1e-9 && vf[2] > 0.0 && okS && std::fabs(ps) < 1e-9 && std::fabs(rs - 10.0 * kDeg) < 1e-9 &&
+                          std::fabs(P[0] + vs[0] - Tside[0]) < 1e-9 && vs[0] > 0.0 && okL && pLow == 0.0 && rLow == 0.0 && !degen && pDeg == 0.0 && rDeg == 0.0,
+                      "F58: the bend solve turns the pov onto a target forward (pitch +20) or right (roll +10); a height mismatch and a degenerate pov "
+                      "give no bend");
+                // The clamps: forward 45, back 15, roll +-20 deg; each flags its hit; NaN is 0.
+                nf::BendClamp c1, c2, c3, c4, c5;
+                const double p60 = nf::bendClampPitch(60.0 * kDeg, &c1), pBack = nf::bendClampPitch(-30.0 * kDeg, &c2),
+                             p30 = nf::bendClampPitch(30.0 * kDeg, &c3), r25 = nf::bendClampRoll(25.0 * kDeg, &c4), rM25 = nf::bendClampRoll(-25.0 * kDeg, &c5);
+                nf::BendClamp c6;
+                const double r10 = nf::bendClampRoll(-10.0 * kDeg, &c6), pNan = nf::bendClampPitch(std::numeric_limits<double>::quiet_NaN(), &c6);
+                check(std::fabs(p60 - 45.0 * kDeg) < 1e-12 && c1.fwd && !c1.back && std::fabs(pBack + 15.0 * kDeg) < 1e-12 && c2.back && !c2.fwd &&
+                          std::fabs(p30 - 30.0 * kDeg) < 1e-12 && !c3.fwd && !c3.back && std::fabs(r25 - 20.0 * kDeg) < 1e-12 && c4.roll &&
+                          std::fabs(rM25 + 20.0 * kDeg) < 1e-12 && c5.roll && std::fabs(r10 + 10.0 * kDeg) < 1e-12 && !c6.roll && !c6.fwd && pNan == 0.0 &&
+                          nf::bendAmountClamp(1.5) == 1.0 && nf::bendAmountClamp(-0.5) == 0.0 &&
+                          nf::bendAmountClamp(std::numeric_limits<double>::quiet_NaN()) == 1.0,
+                      "F58: the bend clamps hold forward 45, back 15 and roll +-20 deg (30 forward and 10 roll pass, NaN is 0); the amount clamps to 0..1");
+                // The split: pitch 30 and roll 12 deg, each level turned by its share (1/3, 2/3, 1) about the pivot.
+                bool shareOk = true;
+                const double up[3] = {0.0, 1.0, 0.0};
+                for (int l = 0; l < 3; ++l) {
+                    double Rp[9], Rr[9], a[3], b[3];
+                    nf::bendRot(30.0 * kDeg, 0.0, nf::kIkSpineWeight[l], Rp);
+                    nf::bendRot(0.0, 12.0 * kDeg, nf::kIkSpineWeight[l], Rr);
+                    nf::bendApply(up, Rp, a);
+                    nf::bendApply(up, Rr, b);
+                    if (std::fabs(std::atan2(a[2], a[1]) - 30.0 * kDeg * nf::kIkSpineWeight[l]) > 1e-9 ||
+                        std::fabs(std::atan2(b[0], b[1]) - 12.0 * kDeg * nf::kIkSpineWeight[l]) > 1e-9)
+                        shareOk = false;
+                }
+                const float M[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0.0f, 1.7f, 0.0f, 1};
+                float Mo[16];
+                double Rfull[9];
+                nf::bendRot(20.0 * kDeg, 0.0, nf::kIkSpineWeight[2], Rfull);
+                nf::ikPivot(M, Rfull, P, Mo);
+                check(shareOk && std::fabs(Mo[13] - static_cast<float>(Tf[1])) < 1e-5f && std::fabs(Mo[14] - static_cast<float>(Tf[2])) < 1e-5f &&
+                          std::fabs(Mo[12]) < 1e-6f,
+                      "F58: the bend splits 1/3, 2/3, 1 over the spine levels (pitch and roll each); the chest level's joint turns about the pivot "
+                      "onto the target");
+                // The ramp: 0.2 s in (18 frames at 90 Hz, half at 0.1 s) and out; the cap: 5 cm of pov motion a call on a 0.5 m lever.
+                nf::IkBlend bl{0.0f, nf::kBendRampSec};
+                const double dt = 1.0 / 90.0;
+                int framesIn = 0, framesOut = 0;
+                while (bl.w < 1.0f && framesIn < 100) {
+                    bl.step(true, dt);
+                    ++framesIn;
+                }
+                while (bl.w > 0.0f && framesOut < 100) {
+                    bl.step(false, dt);
+                    ++framesOut;
+                }
+                nf::IkBlend halfBend{0.0f, nf::kBendRampSec};
+                halfBend.step(true, 0.05);
+                halfBend.step(true, 0.05);
+                double applied[2] = {0.0, 0.0};
+                const double want[2] = {0.6, 0.8};
+                nf::bendCapToward(applied, want, 0.5);
+                const double stepLen = std::sqrt(applied[0] * applied[0] + applied[1] * applied[1]);
+                double applied2[2] = {0.0, 0.0};
+                const double wantSmall[2] = {0.01, -0.02};
+                nf::bendCapToward(applied2, wantSmall, 0.5);
+                check(framesIn >= 18 && framesIn <= 19 && framesOut >= 18 && framesOut <= 19 && std::fabs(halfBend.w - 0.5f) < 1e-5f &&
+                          std::fabs(stepLen - 0.1) < 1e-6 && std::fabs(applied[0] / applied[1] - 0.75) < 1e-9 && applied2[0] == 0.01 &&
+                          applied2[1] == -0.02,
+                      "F58: the bend ramps in 0.2 s (half at 0.1 s) and out in 0.2 s; the applied angles move 5 cm of pov a call (0.1 rad on 0.5 m)");
+            }
             // The shift rule: a record at the AMC origin moves by d once; a second pass over it leaves it alone; a record elsewhere never moves.
             const float origin[3] = {10.0f, 2.0f, -3.0f}, d[3] = {0.0f, 0.231f, 0.0f};
             float rec[3] = {10.0f, 2.0f, -3.0f}, other[3] = {10.5f, 2.0f, -3.0f};

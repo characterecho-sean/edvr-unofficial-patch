@@ -1371,5 +1371,91 @@ inline const char* ikSquareWhyText(uint32_t why) noexcept {
         default: return "?";
     }
 }
+
+// ---- F58 (TEMPORARY): the spine bend toward the head (full-3P mode: hide_fp_body and body_unclip on) ------------------------------------
+// In the Animate post-hook, after the freeze and before the square-up and the arm IK. The 3P pov (the eye point) N is turned toward the eye
+// target T (the job camera less d, in the 3P model space: x right, y up, z forward) about the spine chain's root P (joint kIkSpine[0]). The
+// pitch (about the body's right axis +x; positive leans forward, +y toward +z) matches the sagittal angle of N - P to that of T - P; the roll
+// (about the forward axis; positive leans right, +y toward +x) then matches the frontal angle. A rotation keeps |N - P|, so this is the
+// closest N comes to T about P; the rest (the height) is left and logged. Clamped: forward 0..45 deg, back 0..15 deg, roll +-20 deg. Split
+// over the spine levels 1/3, 2/3, 1 (kIkSpineWeight) about the one pivot, as the square-up. Ramped over 0.2 s; scaled by the amount slider.
+constexpr double kBendFwdMaxDeg = 45.0, kBendBackMaxDeg = 15.0, kBendRollMaxDeg = 20.0;
+constexpr double kBendRampSec = 0.2, kBendAmountDefault = 1.0;
+constexpr uint64_t kBendStaleMs = 500;   // the hook's target older than this refuses the bend
+inline double bendAmountClamp(double v) noexcept {
+    if (!(v == v)) return kBendAmountDefault;
+    return v < 0.0 ? 0.0 : v > 1.0 ? 1.0 : v;
+}
+// The residual T - N in body axes, ordered (forward, up, right) = (z, y, x) of the 3P model space.
+inline void bendResidualSplit(const double T[3], const double N[3], double out[3]) noexcept {
+    out[0] = T[2] - N[2];
+    out[1] = T[1] - N[1];
+    out[2] = T[0] - N[0];
+}
+struct BendClamp {
+    bool fwd = false, back = false, roll = false;
+};
+// The clamps (radians in and out; NaN is 0). The flags are set when a clamp bites (never cleared here).
+inline double bendClampPitch(double pitch, BendClamp* c) noexcept {
+    if (!(pitch == pitch)) return 0.0;
+    const double fwd = kBendFwdMaxDeg * kIkPi / 180.0, back = kBendBackMaxDeg * kIkPi / 180.0;
+    if (pitch > fwd) {
+        if (c) c->fwd = true;
+        return fwd;
+    }
+    if (pitch < -back) {
+        if (c) c->back = true;
+        return -back;
+    }
+    return pitch;
+}
+inline double bendClampRoll(double roll, BendClamp* c) noexcept {
+    if (!(roll == roll)) return 0.0;
+    const double lim = kBendRollMaxDeg * kIkPi / 180.0;
+    if (roll > lim || roll < -lim) {
+        if (c) c->roll = true;
+        return roll > 0.0 ? lim : -lim;
+    }
+    return roll;
+}
+// The row-vector rotation of a level with share w: the pitch first (about +x by w pitch), then the roll (about +z by -w roll): R = Rx x Rz.
+inline void bendRot(double pitch, double roll, double w, double R[9]) noexcept {
+    const double ex[3] = {1.0, 0.0, 0.0}, ez[3] = {0.0, 0.0, 1.0};
+    double Rx[9], Rz[9];
+    ikRotAxis(ex, w * pitch, Rx);
+    ikRotAxis(ez, -w * roll, Rz);
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c) R[r * 3 + c] = Rx[r * 3 + 0] * Rz[0 * 3 + c] + Rx[r * 3 + 1] * Rz[1 * 3 + c] + Rx[r * 3 + 2] * Rz[2 * 3 + c];
+}
+inline void bendApply(const double v[3], const double R[9], double out[3]) noexcept {
+    for (int c = 0; c < 3; ++c) out[c] = v[0] * R[c] + v[1] * R[3 + c] + v[2] * R[6 + c];
+}
+// The solve (unclamped, radians): the pitch that matches N - P's sagittal angle atan2(z, y) to T - P's, then the roll that matches the frontal
+// angle atan2(x, y) of the pitched N - P to T - P's. False (both 0) when either vector is under 1 cm.
+inline bool bendSolve(const double P[3], const double N[3], const double T[3], double* pitch, double* roll) noexcept {
+    *pitch = *roll = 0.0;
+    const double v[3] = {N[0] - P[0], N[1] - P[1], N[2] - P[2]}, t[3] = {T[0] - P[0], T[1] - P[1], T[2] - P[2]};
+    if (!(ikLen(v) >= 0.01) || !(ikLen(t) >= 0.01)) return false;
+    const double p = ikWrapPi(std::atan2(t[2], t[1]) - std::atan2(v[2], v[1]));
+    double Rx[9], v1[3];
+    bendRot(p, 0.0, 1.0, Rx);
+    bendApply(v, Rx, v1);
+    const double r = ikWrapPi(std::atan2(t[0], t[1]) - std::atan2(v1[0], v1[1]));
+    if (!std::isfinite(p) || !std::isfinite(r)) return false;
+    *pitch = p;
+    *roll = r;
+    return true;
+}
+// One call's move of the applied (pitch, roll) toward the wanted, capped so the pov moves at most kIkCapPerCallM a call (the lever |N - P|,
+// at least 0.1 m).
+inline void bendCapToward(double applied[2], const double want[2], double leverM) noexcept {
+    const double lever = leverM > 0.1 ? leverM : 0.1;
+    const double cap = static_cast<double>(kIkCapPerCallM) / lever;
+    const double d[2] = {want[0] - applied[0], want[1] - applied[1]};
+    const double len = std::sqrt(d[0] * d[0] + d[1] * d[1]);
+    const double k = len > cap && len > 0.0 ? cap / len : 1.0;
+    applied[0] += d[0] * k;
+    applied[1] += d[1] * k;
+}
 }  // namespace nofoot
 }  // namespace edvr
