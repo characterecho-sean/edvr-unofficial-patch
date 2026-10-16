@@ -555,13 +555,16 @@ struct KeyIndex {
 // F52: THE BOOKKEEPING. An eye's marker composite draws at read-back: tagged (read a found record by x), read but untagged (its stream read,
 // no record of a find), and not copied (its stream was not staged: unknown).
 struct B10bTally {
-    uint64_t draws = 0, tagged = 0, notCopied = 0;
-    void note(bool streamRead, bool matchedByX) noexcept {
+    uint64_t draws = 0, tagged = 0, notCopied = 0, skipped = 0;
+    // F63: skipped: not copied on purpose (the CPU identification named a record that is neither a find nor a held match's record: an
+    // untagged composite), so "not copied" stays a loss.
+    void note(bool streamRead, bool matchedByX, bool skippedByCpu = false) noexcept {
         ++draws;
-        if (!streamRead) ++notCopied;
+        if (skippedByCpu) ++skipped;
+        else if (!streamRead) ++notCopied;
         else if (matchedByX) ++tagged;
     }
-    uint64_t untagged() const noexcept { return draws - tagged - notCopied; }
+    uint64_t untagged() const noexcept { return draws - tagged - notCopied - skipped; }
 };
 
 // F53: THE SCENE REFERENCE. The F52 audit's world rows came from the first-person body pass (VS 7B0DC42D383F694C, PS 0DF03E64DF9DBEF1), whose
@@ -661,6 +664,77 @@ inline PatchVerdict patchDecide(bool matched, bool bothEyes, bool sceneFresh, bo
         v.dy = hold.dy;
     }
     return v;
+}
+
+// F63: THE HELD MATCH (fix.native_on_foot_marker_fix). F62's flight (log 054928): the patch was accurate when applied, but a read-back's match
+// went stale after 8 frames whenever the record was not copied, so the marker flicked. The match is now an identity held for kMatchHoldFrames:
+// the eye's marker composite draw at a place (its order among the eye's B10B draws) reading a record. Evidence about the draw at a place in
+// frame f is a read-back of frame f or the CPU identification at the draw (the instance stream's CPU shadow): it read record `rec`;
+// `recIsKeyFind` rec carried the key's tag in frame f; `keyHadFind` the key had a find in frame f (any record). Evidence older than the hold's
+// newest confirmation says nothing. Reading the key's record confirms (or moves) the hold. At the held place, another record contradicts it
+// (dropped): another record while the key's own was tagged elsewhere, or a record other than the held one with no find at all. The held
+// record read untagged (no find in frame f) is consistent and leaves the hold as it was. Evidence about another place says nothing.
+constexpr uint32_t kMatchHoldFrames = 90;
+enum HoldEvent : int { kHoldNone = 0, kHoldConfirm = 1, kHoldContradict = 2 };
+struct HeldMatch {
+    uint32_t frame = ~0u;   // the newest frame whose evidence confirmed it (~0u: none)
+    uint16_t ord = 0;       // the draw's place among the eye's marker composite draws
+    uint32_t record = 0;    // the record it read
+    uint32_t key = 0;
+    bool held(uint32_t now) const noexcept {
+        return frame != ~0u && static_cast<int32_t>(now - frame) >= 0 && now - frame <= kMatchHoldFrames;
+    }
+    void drop() noexcept { frame = ~0u; }
+};
+inline int holdEvidence(HeldMatch& h, uint32_t f, uint16_t ord, uint32_t rec, uint32_t key, bool recIsKeyFind, bool keyHadFind) noexcept {
+    if (h.frame != ~0u && static_cast<int32_t>(f - h.frame) < 0) return kHoldNone;
+    if (recIsKeyFind) {
+        h.frame = f;
+        h.ord = ord;
+        h.record = rec;
+        h.key = key;
+        return kHoldConfirm;
+    }
+    if (!h.held(f) || ord != h.ord) return kHoldNone;
+    if (!keyHadFind && rec == h.record) return kHoldNone;
+    h.drop();
+    return kHoldContradict;
+}
+
+// F63: THE ICON OFFSET'S BIAS. The patch aims at ndc_P + e_used; the read-back of a fresh patched frame gives where the patched rows drew the
+// record, r = drawn - (ndc_P + e_used) (NDC). An EMA (kBiasAlpha) of r over fresh patched frames only (a held or unpatched frame never feeds
+// it) is the pipeline's bias b, and the next patch aims at e - b, so the drawn marker settles on ndc_P + e. Clamped to kBiasMaxNdc a component.
+constexpr double kBiasAlpha = 0.02, kBiasMaxNdc = 0.02;
+struct BiasEma {
+    double b[2] = {0.0, 0.0};
+    uint64_t n = 0;
+    bool update(const double r[2], bool patchedFresh) noexcept {
+        if (!patchedFresh || !(std::fabs(r[0]) < 1.0) || !(std::fabs(r[1]) < 1.0)) return false;
+        for (int k = 0; k < 2; ++k) {
+            b[k] += kBiasAlpha * (r[k] - b[k]);
+            b[k] = b[k] < -kBiasMaxNdc ? -kBiasMaxNdc : b[k] > kBiasMaxNdc ? kBiasMaxNdc : b[k];
+        }
+        ++n;
+        return true;
+    }
+    void target(const double e[2], double out[2]) const noexcept {
+        out[0] = e[0] - b[0];
+        out[1] = e[1] - b[1];
+    }
+};
+
+// F63: THE CPU IDENTIFICATION's window. The instance stream (one DYNAMIC vertex buffer of stride 8, about 192k entries, WRITE_DISCARD once a
+// frame) is copied at its Unmap, before the real one, only about each eye's newest marker composite entry: `want` entries centred there,
+// starting on an even entry (16-byte loads), inside the buffer's `total` entries. Its first entry and count go to *lo, *n.
+inline void streamWindow(uint32_t centre, uint32_t total, uint32_t want, uint32_t* lo, uint32_t* n) noexcept {
+    want &= ~1u;
+    uint32_t a = centre > want / 2 ? centre - want / 2 : 0u;
+    a &= ~1u;
+    if (total < want) a = 0;
+    else if (a > total - want) a = (total - want) & ~1u;
+    const uint32_t left = total > a ? total - a : 0u;
+    *lo = a;
+    *n = (left < want ? left : want) & ~1u;
 }
 
 // F62c: THE MARKER DUMP'S CROP (the waypoint series, temporal_pass.cpp). Each crop is kMarkerDumpCrop square (the marker moves about 55 px

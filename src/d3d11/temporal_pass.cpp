@@ -7,6 +7,7 @@
 #include "eye_final_capture.h"
 
 #include <algorithm>  // std::sort, the price report's median/p95
+#include <atomic>     // F63: the eye offsets for the native on-foot sight lock
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -2029,7 +2030,7 @@ void mkWrite(ID3D11DeviceContext* ctx, const char* why) {
         // at the eye's size).
         fprintf(f, "frame,sequence,eye,image,written,centre_src,skip,ndc_x,ndc_y,head_dps,ndcP_x,ndcP_y,P_w,P_key,P_age_frames,ageP_ms,"
                    "ndc_marker_x,ndc_marker_y,ndc_marker_age_ms,ndc_marker_age_frames,fix,patch,patch_key,patch_draws,dx_ndc,dy_ndc,dx_px,dy_px,"
-                   "box_left,box_top,box_w,box_h,eye_w,eye_h,late_ms\n");
+                   "box_left,box_top,box_w,box_h,eye_w,eye_h,late_ms,resid_x_px,resid_y_px,e_used_x_px,e_used_y_px\n");
         for (int k = 0; k < g_mkCount; ++k)
             for (int e = 0; e < 2; ++e)
                 for (int pre = 0; pre < 2; ++pre) {
@@ -2040,8 +2041,13 @@ void mkWrite(ID3D11DeviceContext* ctx, const char* why) {
                     static const char* const kPatch[3] = {"none", "fresh", "held"};
                     const char* skip = m.pick[e] > 0 && m.pick[e] < 4 ? kPick[m.pick[e]] : m.pick[e] < 0 ? "not reached" : "";
                     const double ew = static_cast<double>(s.eyeWH[0]), eh = static_cast<double>(s.eyeWH[1]);   // set at every tried capture
+                    // F63: the fix's per-frame residual against P + e (the fixed e) and the e it aimed at, from the read-back of a fresh
+                    // patched frame (nan: that frame was not one, or its read-back had not landed when the series was written).
+                    float res[4] = {std::nanf(""), std::nanf(""), std::nanf(""), std::nanf("")};
+                    if (!nativeOnFootMarkerResidual(m.frameNow[e], e, res))
+                        for (float& v : res) v = std::nanf("");
                     fprintf(f, "%d,%llu,%d,%s,%d,%s,%s,%.5f,%.5f,%.1f,%.5f,%.5f,%.5f,%u,%lld,%lld,%.5f,%.5f,%lld,%lld,%s,%s,%u,%u,%.5f,%.5f,%.1f,%.1f,"
-                               "%u,%u,%u,%u,%u,%u,%llu\n",
+                               "%u,%u,%u,%u,%u,%u,%llu,%.2f,%.2f,%.2f,%.2f\n",
                             k, static_cast<unsigned long long>(m.seq), e, pre ? "pre" : "post", s.taken ? 1 : 0,
                             kSrc[m.src[e] >= 0 && m.src[e] < 3 ? m.src[e] : 0], skip, static_cast<double>(m.ndc[e][0]),
                             static_cast<double>(m.ndc[e][1]), static_cast<double>(m.head[e]), static_cast<double>(m.ndcP[e][0]),
@@ -2051,7 +2057,8 @@ void mkWrite(ID3D11DeviceContext* ctx, const char* why) {
                             kPatch[m.patch[e] >= 0 && m.patch[e] < 3 ? m.patch[e] : 0], m.patchKey[e], m.patchDraws[e],
                             static_cast<double>(m.patchDx[e]), static_cast<double>(m.patchDy[e]), static_cast<double>(m.patchDx[e]) * ew * 0.5,
                             static_cast<double>(m.patchDy[e]) * eh * 0.5, s.box[0], s.box[1], s.box[2], s.box[3], s.eyeWH[0], s.eyeWH[1],
-                            static_cast<unsigned long long>(s.lateMs));
+                            static_cast<unsigned long long>(s.lateMs), static_cast<double>(res[0]), static_cast<double>(res[1]),
+                            static_cast<double>(res[2]), static_cast<double>(res[3]));
                 }
         fclose(f);
     }
@@ -5875,11 +5882,23 @@ void temporalPassNoteOmSet(unsigned colours) {
     detail::g_cameraDrawWatch = mini || g_pendingTagIdx >= 0;
 }
 
+// F63: the eye offsets' x for the native on-foot ADS sight lock (temporalPassEyeOffsetX), kept apart from g_eye (render thread only).
+static std::atomic<float> g_eyeOffX[2];
+static std::atomic<bool> g_eyeOffHave[2];
+bool temporalPassEyeOffsetX(int eye, float* x) {
+    if (eye < 0 || eye > 1 || !x || !g_eyeOffHave[eye].load(std::memory_order_relaxed)) return false;
+    *x = g_eyeOffX[eye].load(std::memory_order_relaxed);
+    return true;
+}
 void temporalPassNoteHead(int eye, const float* prevPose, const float* nowPose,
                           const float* eyeOffset) {
     if (eye < 0 || eye > 1) return;
     EyeState& e = g_eye[eye];
     e.headNoted = false;
+    if (eyeOffset) {
+        g_eyeOffX[eye].store(eyeOffset[0], std::memory_order_relaxed);
+        g_eyeOffHave[eye].store(true, std::memory_order_relaxed);
+    }
     if (!prevPose || !nowPose || !eyeOffset) return;
     memcpy(e.headPrev, prevPose, sizeof(e.headPrev));
     memcpy(e.headNow, nowPose, sizeof(e.headNow));

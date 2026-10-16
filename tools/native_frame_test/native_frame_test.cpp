@@ -840,6 +840,73 @@ int wmain(int argc, wchar_t** argv) {
                   "F62c: the series' 1024 crop is centred on this frame's P (age 0), kept in the eye, skipped when P is off the eye or not this "
                   "frame's");
         }
+        // F63: the held match (90 frames; a contradicting read-back drops it), the bias EMA (alpha 0.02, only while patched), the instance
+        // stream's CPU-shadow window.
+        {
+            // (1) Confirmed at frame 1000 (place 3, record 8): held through 1090, not 1091. Evidence about another place, or the held record
+            // read untagged, leaves it; evidence older than the newest confirmation says nothing; a frame-by-frame decision through patchDecide
+            // patches 90 of 90 frames after it with no read-back at all.
+            dt::HeldMatch h;
+            const int c0 = dt::holdEvidence(h, 1000, 3, 8, 43, true, true);
+            const bool held89 = h.held(1089), held90 = h.held(1090), held91 = h.held(1091), heldBefore = h.held(999);
+            const int other = dt::holdEvidence(h, 1010, 4, 2, 43, false, true);
+            const int same = dt::holdEvidence(h, 1011, 3, 8, 43, false, false);
+            const bool stillHeld = h.held(1011) && h.frame == 1000u && h.ord == 3 && h.record == 8u;
+            dt::HeldMatch hs = h;
+            hs.frame = 1020;
+            const int stale = dt::holdEvidence(hs, 1015, 3, 12, 43, false, true);
+            uint32_t patched = 0;
+            dt::PatchHold ph;
+            for (uint32_t f = 1001; f <= 1090; ++f)
+                if (dt::patchDecide(h.held(f), true, true, true, dt::kDeltaOk, 0.01, 0.0, f, ph).patch) ++patched;
+            // (2) A contradicting read-back drops it: the held place read record 12 while the key was tagged elsewhere; or (no find at all)
+            // a record other than the held one. A read of the key's record at another place moves the hold there.
+            const int contra = dt::holdEvidence(h, 1030, 3, 12, 43, false, true);
+            const bool dropped = !h.held(1030) && !h.held(1031);
+            dt::HeldMatch h3, h4;
+            dt::holdEvidence(h3, 50, 2, 9, 43, true, true);
+            const int contra2 = dt::holdEvidence(h3, 60, 2, 10, 43, false, false);
+            dt::holdEvidence(h4, 70, 3, 8, 43, true, true);
+            const int moved = dt::holdEvidence(h4, 72, 5, 8, 43, true, true);
+            const dt::PatchVerdict afterDrop = dt::patchDecide(h.held(1032), true, true, true, dt::kDeltaOk, 0.01, 0.0, 1032, ph);
+            check(dt::kMatchHoldFrames == 90u && c0 == dt::kHoldConfirm && held89 && held90 && !held91 && !heldBefore && other == dt::kHoldNone &&
+                      same == dt::kHoldNone && stillHeld && stale == dt::kHoldNone && hs.held(1020) && patched == 90u &&
+                      contra == dt::kHoldContradict && dropped && contra2 == dt::kHoldContradict && !h3.held(60) && moved == dt::kHoldConfirm &&
+                      h4.ord == 5 && h4.frame == 72u && !afterDrop.patch && afterDrop.why == dt::kPatchUnmatched,
+                  "F63: a match is held 90 frames from its newest confirmation and patches every frame of them; a contradicting read-back drops "
+                  "it; older evidence and evidence about another place say nothing; the key's record at another place moves it");
+            // (3) The bias EMA: alpha 0.02 on fresh patched frames only; in the closed loop (drawn = ndc_P + e_used + beta, the residual
+            // against the target used is beta) the drawn marker settles on ndc_P + e; each component clamped to 0.02 NDC; |r| >= 1 refused.
+            dt::BiasEma be, idle, loop, big;
+            const double r0[2] = {0.004, -0.002};
+            be.update(r0, true);
+            const bool firstStep = std::fabs(be.b[0] - 0.02 * 0.004) < 1e-15 && std::fabs(be.b[1] + 0.02 * 0.002) < 1e-15 && be.n == 1u;
+            for (int i = 0; i < 100; ++i) idle.update(r0, false);
+            const double beta[2] = {0.003, -0.001}, eFix[2] = {0.0, 0.036};
+            double eUsed[2] = {};
+            for (int i = 0; i < 400; ++i) loop.update(beta, true);
+            loop.target(eFix, eUsed);
+            const double drawn[2] = {eUsed[0] + beta[0], eUsed[1] + beta[1]};   // ndc_P = 0
+            const double rBig[2] = {0.5, 0.0}, rHuge[2] = {2.0, 0.0};
+            for (int i = 0; i < 2000; ++i) big.update(rBig, true);
+            const uint64_t bigN = big.n;
+            const bool huge = big.update(rHuge, true);
+            check(dt::kBiasAlpha == 0.02 && firstStep && idle.b[0] == 0.0 && idle.b[1] == 0.0 && idle.n == 0u &&
+                      std::fabs(drawn[0] - eFix[0]) < 1e-5 && std::fabs(drawn[1] - eFix[1]) < 1e-5 && std::fabs(big.b[0] - dt::kBiasMaxNdc) < 1e-12 &&
+                      !huge && big.n == bigN,
+                  "F63: the icon offset's bias: an EMA (alpha 0.02) of fresh patched frames' residuals, never of unpatched ones; the drawn marker "
+                  "settles on ndc_P + e; clamped to 0.02 NDC");
+            // (4) The stream window: 8192 entries about the eye's newest marker composite entry (F62: eye 0 at 18205..18211), even, inside the
+            // buffer (192512 entries, F62's 1540096 bytes); a small buffer whole.
+            uint32_t lo = 0, n = 0, loA = 0, nA = 0, loB = 0, nB = 0, loC = 0, nC = 0;
+            dt::streamWindow(18210, 192512, 8192, &lo, &n);
+            dt::streamWindow(100, 192512, 8192, &loA, &nA);
+            dt::streamWindow(192500, 192512, 8192, &loB, &nB);
+            dt::streamWindow(10, 1001, 8192, &loC, &nC);
+            check(lo == 14114u && n == 8192u && 18205u >= lo && 18211u < lo + n && loA == 0u && nA == 8192u && loB == 184320u && nB == 8192u &&
+                      loB + nB == 192512u && loC == 0u && nC == 1000u,
+                  "F63: the stream's CPU-shadow window: 8192 even-aligned entries about the eye's marker composite entry, kept in the buffer");
+        }
     }
 
     // F40 (pure math): the view map. seated = D . Ry(psi) . body; the head in body axes is Ry(psi)^-1 . diag(1,1,-1) . tS; psi is the seated head
@@ -2079,6 +2146,85 @@ int wmain(int argc, wchar_t** argv) {
                 check(std::fabs(det[0] - 0.29) < 1e-12 && std::fabs(det[2] + 0.42) < 1e-12 && det[1] == 0.01 && std::fabs(detHalf[0] - 0.155) < 1e-12 &&
                           det0[0] == 0.02 && det0[1] == 0.01 && det0[2] == -0.05,
                       "F62b: in ADS the body's target goes to d_w less the trims by the weight (half way at 0.5), the up kept with the vertical off");
+            }
+            // F63: the ADS sight lock. The body's axes are the world's (AMC rows right +x, up +y, forward +z), the camera at (0, 1.7, 0).
+            {
+                const double rows[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1}, cam[3] = {0.0, 1.7, 0.0}, bodyRight[3] = {1, 0, 0};
+                // (1) Level sight along +z, P14w 5 cm right, 2 cm low, 30 cm ahead; half IPD 3.2 cm: E_R = (0.032, 1.7, 0), e = (0.018, -0.02,
+                // 0.30); the forward part (0.30) removed: right 1.8 cm, up -2 cm; seated = diag(-1, -1, +1) . body = (-0.018, +0.02, 0).
+                const double f[3] = {0, 0, 1}, row0[3] = {1, 0, 0}, p14[3] = {0.05, 1.68, 0.30};
+                double rHat[3] = {};
+                bool flipped = true;
+                nf::AdsSightErr E;
+                const bool okR = nf::adsSightRight(row0, f, bodyRight, rHat, &flipped);
+                const bool okE = okR && nf::adsSightError(p14, cam, rHat, 0.032, f, rows, E);
+                check(okE && !flipped && std::fabs(E.along - 0.30) < 1e-12 && std::fabs(E.eBody[0] - 0.018) < 1e-12 &&
+                          std::fabs(E.eBody[1] + 0.02) < 1e-12 && std::fabs(E.eBody[2]) < 1e-12 && std::fabs(E.seated[0] + 0.018) < 1e-12 &&
+                          std::fabs(E.seated[1] - 0.02) < 1e-12 && std::fabs(E.seated[2]) < 1e-12 &&
+                          std::fabs(E.perpNorm - std::sqrt(0.018 * 0.018 + 0.02 * 0.02)) < 1e-12,
+                      "F63: the sight lock's e: P14w - E_R (E_R = cam + half IPD x right) with the forward part removed, in body axes (right 1.8, up "
+                      "-2 cm) and seated (-1.8, +2, 0 cm)");
+                // (2) The sight pitched 30 deg down: P14w = E_R + 0.3 f + 0.02 u (u the sight's up): only 0.02 u is left, perpendicular to f;
+                // in body axes (0, 0.01732, 0.01), seated (0, -0.01732, 0.01).
+                const double kPi63 = 3.14159265358979323846, s30 = std::sin(30.0 * kPi63 / 180.0), c30 = std::cos(30.0 * kPi63 / 180.0);
+                const double fp[3] = {0.0, -s30, c30}, sUp[3] = {0.0, c30, s30};
+                double pp[3];
+                for (int i = 0; i < 3; ++i) pp[i] = cam[i] + 0.032 * row0[i] + 0.3 * fp[i] + 0.02 * sUp[i];
+                double rP[3] = {};
+                nf::AdsSightErr Ep;
+                const bool okP = nf::adsSightRight(row0, fp, bodyRight, rP, nullptr) && nf::adsSightError(pp, cam, rP, 0.032, fp, rows, Ep);
+                const double dotF = Ep.ePerpW[0] * fp[0] + Ep.ePerpW[1] * fp[1] + Ep.ePerpW[2] * fp[2];
+                check(okP && std::fabs(Ep.along - 0.3) < 1e-12 && std::fabs(dotF) < 1e-12 && std::fabs(Ep.eBody[0]) < 1e-12 &&
+                          std::fabs(Ep.eBody[1] - 0.02 * c30) < 1e-12 && std::fabs(Ep.eBody[2] - 0.02 * s30) < 1e-12 &&
+                          std::fabs(Ep.seated[1] + 0.02 * c30) < 1e-12 && std::fabs(Ep.seated[2] - 0.02 * s30) < 1e-12 &&
+                          std::fabs(Ep.perpNorm - 0.02) < 1e-12,
+                      "F63: the perpendicular projection removes the component along the FP forward (pitched 30 deg): 2 cm of the sight's up is "
+                      "left, in body and seated axes");
+                // (3) The right axis: the FP root's row 0 against the body's right (a mirrored row is flipped and counted); a degenerate f is
+                // refused. The half IPD: the right eye's offset in 2..4.5 cm, else 3.15 cm.
+                double rF[3] = {};
+                bool fl = false;
+                const double leftRow[3] = {-1, 0, 0}, zero[3] = {0, 0, 0};
+                const bool okFlip = nf::adsSightRight(leftRow, f, bodyRight, rF, &fl);
+                double rZ[3] = {};
+                const bool degenerate = !nf::adsSightRight(row0, zero, bodyRight, rZ, nullptr);
+                check(okFlip && fl && std::fabs(rF[0] - 1.0) < 1e-12 && degenerate && nf::adsSightHalfIpd(false, 0.0) == 0.0315 &&
+                          nf::adsSightHalfIpd(true, 0.0325) == 0.0325 && nf::adsSightHalfIpd(true, -0.031) == 0.031 &&
+                          nf::adsSightHalfIpd(true, 0.06) == 0.0315 && nf::adsSightHalfIpd(true, 0.001) == 0.0315,
+                      "F63: the eye's right axis follows the body's right (a mirrored FP row is flipped); the half IPD from the right eye's offset, "
+                      "3.15 cm when unknown or out of range");
+                // (4) The 12 cm clamp (the filter's clamp, nofoot::clampNorm3): 20 cm along x to 12; 5 cm untouched; (12, 16) to (7.2, 9.6);
+                // the integral driven 200 frames by a 30 cm error at gain 0.02 (5 cm a frame cap) stops at 12 cm.
+                double a[3] = {0.2, 0.0, 0.0}, b[3] = {0.03, 0.04, 0.0}, c[3] = {0.12, 0.16, 0.0}, intg[3] = {};
+                nf::clampNorm3(a, nf::kAdsSightClampM);
+                nf::clampNorm3(b, nf::kAdsSightClampM);
+                nf::clampNorm3(c, nf::kAdsSightClampM);
+                for (int k = 0; k < 200; ++k) {
+                    const double e30[3] = {0.3, 0.0, 0.0};
+                    double st[3] = {0.02 * e30[0], 0.02 * e30[1], 0.02 * e30[2]};
+                    const double sm = std::sqrt(st[0] * st[0] + st[1] * st[1] + st[2] * st[2]);
+                    for (int i = 0; i < 3; ++i) intg[i] += st[i] * (sm > 0.05 ? 0.05 / sm : 1.0);
+                    nf::clampNorm3(intg, nf::kAdsSightClampM);
+                }
+                check(nf::kAdsSightClampM == 0.12 && std::fabs(a[0] - 0.12) < 1e-12 && b[0] == 0.03 && b[1] == 0.04 && std::fabs(c[0] - 0.072) < 1e-12 &&
+                          std::fabs(c[1] - 0.096) < 1e-12 && std::fabs(intg[0] - 0.12) < 1e-12,
+                      "F63: the sight lock is clamped to 12 cm, the direction kept; the integral stops there");
+                // (5) The guard: |e perpendicular| growing 0.5 cm every 100 ms from 3 cm trips at 0.5 s; a falling one, a steady one and one
+                // under the 2 cm floor never do.
+                nf::AdsSightGrowth grow, fall, steady, under;
+                bool trippedAt = false, fallTrip = false, steadyTrip = false, smallTrip = false;
+                uint64_t when = 0;
+                for (uint64_t t = 0; t <= 1000 && !trippedAt; t += 100) {
+                    trippedAt = grow.step(t, 0.03 + 0.005 * static_cast<double>(t / 100));
+                    when = t;
+                }
+                for (uint64_t t = 0; t <= 1000; t += 100) {
+                    fallTrip = fall.step(t, 0.08 - 0.006 * static_cast<double>(t / 100)) || fallTrip;
+                    steadyTrip = steady.step(t, 0.05) || steadyTrip;
+                    smallTrip = under.step(t, 0.015 + 0.0004 * static_cast<double>(t / 100)) || smallTrip;
+                }
+                check(trippedAt && when == 500u && !fallTrip && !steadyTrip && !smallTrip,
+                      "F63: the sight lock's guard trips when |e perpendicular| grows for 0.5 s, not when it falls, holds or stays under 2 cm");
             }
             // The shift rule: a record at the AMC origin moves by d once; a second pass over it leaves it alone; a record elsewhere never moves.
             const float origin[3] = {10.0f, 2.0f, -3.0f}, d[3] = {0.0f, 0.231f, 0.0f};

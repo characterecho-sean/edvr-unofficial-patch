@@ -236,6 +236,8 @@ void nativeOnFootMarkerProbeShutdown();
 // matched, the CPU shadows of its b0 and o_hud and the eye's world view present, |dx|, |dy| < 0.1 NDC and w > 0; the last good delta held one
 // frame on a miss); Begin, inside the UI layer's bracket around the game's own issue, binds a private copy of b0 with rows 4 and 5 moved by
 // (dx, dy) . row 7; End, after the layer's second issues, puts the game's b0 back. Begin returns false (and binds nothing) on every refusal.
+// F63: the match is identified on the CPU at the draw (the instance stream shadowed at its Unmap) and held 90 frames (drawtag::HeldMatch);
+// the patch aims at e less a bias learned from the read-back of fresh patched frames (drawtag::BiasEma).
 inline std::atomic<bool> g_nativeOnFootMarkerFixKey{false};
 inline bool nativeOnFootMarkerFixLive() {
     return g_nativeOnFootMarkerFixKey.load(std::memory_order_relaxed) && nativeOnFootMarkerProbeLive();
@@ -269,5 +271,9 @@ struct MarkerCropNdc {
 inline MarkerCropNdc g_markerCropNdc[2];   // zero-initialised (static storage)
 // F62c: the marker probe's frame now (the frame the draws and the submits between two Presents share; the series' age-0 test).
 uint32_t nativeOnFootMarkerFrameNow();
+// F63: the marker fix's per-frame residual for an eye, from the read-back of a fresh patched frame (2..3 frames after it): out[0..1] the drawn
+// marker against P + e (the fixed e), out[2..3] the e the patch aimed at (e less the bias), px of the eye's target. False when that frame
+// was not a fresh patched frame read back (or the ring has moved on).
+bool nativeOnFootMarkerResidual(uint32_t frame, int eye, float out[4]);
 
 }  // namespace edvr

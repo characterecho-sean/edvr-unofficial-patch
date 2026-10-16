@@ -5495,6 +5495,8 @@ nofoot::RotFrameSum g_adsCamBase, g_adsHeadBase, g_adsCamLast;
 double g_adsUserSinceBase[2] = {};    // the player's own aim turn since the base (seat convention, radians)
 double g_adsRes[2] = {}, g_adsResHead[2] = {};
 bool g_adsResHave = false;
+// F63: the ADS sight lock's trip (adsSightTick, alignTick): set by its guard, cleared at the next ADS engage.
+bool g_adsSightTripped = false;
 // The 1 s line's sums.
 uint64_t g_adsLineMs = 0;
 uint32_t g_adsSteps = 0, g_adsSkips = 0, g_adsClampHits = 0, g_adsRebases = 0, g_adsWritesSeen = 0, g_adsProcSeen = 0, g_adsRefSeen = 0;
@@ -5555,6 +5557,19 @@ void adsStop(const char* why, bool tripped) noexcept {
                     tripped ? "; off until the key is toggled, a sign key changes or native on foot re-enters" : "");
 }
 
+// F63: why native on foot is not the full-3P body (body align body, the FP body hidden, the body unclipped), naming the key that is not set;
+// nullptr in full 3P. The ADS, weapon fit and spine bend why-lines use it, so a switched-off body mode announces itself.
+const char* full3PWhy() noexcept {
+    const int m = g_alignMode.load(std::memory_order_relaxed);
+    if (m != 2)
+        return m == 0 ? "body align is off (fix.native_on_foot_body_align = off; the full-3P body needs body)"
+             : m == 1 ? "body align is view, not body (fix.native_on_foot_body_align = view; the full-3P body needs body)"
+                      : "body align is calibrate, not body (fix.native_on_foot_body_align = calibrate; the full-3P body needs body)";
+    if (!g_fpKeyOn.load(std::memory_order_relaxed)) return "the first-person body is not hidden (fix.native_on_foot_hide_fp_body = off)";
+    if (!g_unclipKeyOn.load(std::memory_order_relaxed)) return "the body is not unclipped (fix.native_on_foot_body_unclip = off)";
+    return nullptr;
+}
+
 // Frame thread, every frame, before lookPublishTick (which publishes the yaw) and alignTick (the eye alignment and the body).
 void adsAimTick(uint64_t now, bool session) noexcept {
     const bool key = g_adsAimKey.load(std::memory_order_relaxed);
@@ -5586,10 +5601,11 @@ void adsAimTick(uint64_t now, bool session) noexcept {
     const bool full3P = g_alignMode.load(std::memory_order_relaxed) == 2 && g_fpKeyOn.load(std::memory_order_relaxed) &&
                         g_unclipKeyOn.load(std::memory_order_relaxed);
     const bool ads = journalAdsKnown() && journalAds();
+    const char* full3PNot = full3P ? nullptr : full3PWhy();
     const char* off = !key ? "fix.native_on_foot_ads_head_aim is off"
                     : !onFoot ? "native stereo on foot is not active"
                     : !session ? "the game session ended"
-                    : !full3P ? "not full-3P body mode (body align body, the FP body hidden, the body unclipped)"
+                    : !full3P ? (full3PNot ? full3PNot : "not full-3P body mode (body align body, the FP body hidden, the body unclipped)")
                     : !g_lookArmed ? "the look hooks are not armed"
                     : g_lookEngaged.load(std::memory_order_relaxed) ? "look to aim is engaged"
                     : g_rotCalKey.load(std::memory_order_relaxed) ? "the rotation calibration is on"
@@ -5606,10 +5622,10 @@ void adsAimTick(uint64_t now, bool session) noexcept {
     if (off || g_adsState == kAdsTripped) {
         // The feature does not apply (or the guard holds it off): the seated rotation goes back to zero, the yaw kept from earlier aims too.
         if (off && (g_adsState == kAdsActive || g_adsState == kAdsReleasing || std::fabs(g_adsYawCarried) > 1e-9)) adsStop(off, false);
-        // Aiming down sights in full-3P native on foot with the key on, but not engaged: say why, every 5 s (no line at all would read like
-        // success). Outside full 3P the feature is not meant to run, so it says nothing there.
+        // Aiming down sights in native on foot with the key on, but not engaged: say why, every 5 s (no line at all would read like success).
+        // F63: outside full 3P too (F62's flight ran with body align off and nothing said so): the reason names the body key that is off.
         static uint64_t waitLineMs = 0;
-        if (key && onFoot && ads && full3P && now - waitLineMs >= 5000) {
+        if (key && onFoot && ads && now - waitLineMs >= 5000) {
             waitLineMs = now;
             Log::get().note("native on foot ADS head aim (F62b): aiming down sights but not engaged: %s", off ? off : "the runaway guard tripped earlier");
         }
@@ -5623,6 +5639,8 @@ void adsAimTick(uint64_t now, bool session) noexcept {
         g_adsState = kAdsActive;
         g_adsHavePrev = false;
         g_adsEntryValid = false;
+        if (g_adsSightTripped) Log::get().note("native on foot ADS sight lock (F63): guard cleared (a new ADS engage)");
+        g_adsSightTripped = false;   // F63: the sight lock's guard holds it off until the next engage
         g_adsPitchOut = 0.0;
         g_adsTurns = nofoot::AdsTurnWindow{};
         adsResidualReset();
@@ -6176,7 +6194,7 @@ void f37CheckPoll() noexcept {
 // F57: plus the clavicles 19, 20, the upper arms 25, 26 and the forearms 31, 34 (the FP elbow pole and the square-up's FP shoulder line).
 struct IkFpSnap {
     std::atomic<uint32_t> seq{0};
-    float m[nofoot::kIkFpSlots][16] = {};   // nofoot::kIkFpJoints: [0] 51 R attach, [1] 52 L attach, [2] 37, [3] 44 hands, [4] 19, [5] 20, ... [9] 34
+    float m[nofoot::kIkFpSlots][16] = {};   // nofoot::kIkFpJoints: [0] 51 R attach, [1] 52 L attach, [2] 37, [3] 44 hands, [4] 19, [5] 20, ... [9] 34, [10] 14 (F63 pov)
     uint64_t ms = 0;
 };
 IkFpSnap g_ikFp;
@@ -6339,6 +6357,7 @@ struct AlignRun {
 };
 AlignRun g_align;       // view (F33): the seated offset, frame thread only
 AlignRun g_alignBody;   // body (F35): the world offset of the body's render records, frame thread only
+AlignRun g_adsSight;    // F63: the ADS sight lock's seated offset (frame thread only), added to the eye alignment; zero outside ADS
 
 // F35 hand-off: the body offset (world metres) as a seqlock: the frame thread writes, the submit job's hook reads (it runs on the game's thread
 // for each AMC, not the frame thread, so the reads must not block or tear).
@@ -6632,17 +6651,17 @@ uint64_t __fastcall bodyShiftHooked(uint64_t a1, uint64_t a2, uint64_t a3, uint6
 }
 
 // One filter step for a run: the integral of the error, the guard, the critically damped follow, the clamp, the per-frame cap. `driving` false
-// holds the integral and lets the filter settle onto it (a decay when `decay` is set, toward zero).
-void alignFilter(AlignRun& a, const double err[3], bool driving, bool decay, double dt, uint64_t now, bool guardOn) noexcept {
+// holds the integral and lets the filter settle onto it (a decay when `decay` is set, toward zero). F63: the clamp is a parameter (the view
+// run's 0.6 m by default; the ADS sight lock's 12 cm), applied through nofoot::clampNorm3 (the rig checks it).
+void alignFilter(AlignRun& a, const double err[3], bool driving, bool decay, double dt, uint64_t now, bool guardOn,
+                 double clampM = align::kClampM) noexcept {
     const double errMag = std::sqrt(err[0] * err[0] + err[1] * err[1] + err[2] * err[2]);
     if (driving) {
         double step[3] = {align::kViewGain * err[0], align::kViewGain * err[1], align::kViewGain * err[2]};
         const double sm = std::sqrt(step[0] * step[0] + step[1] * step[1] + step[2] * step[2]);
         const double capScale = sm > align::kCapPerFrameM ? align::kCapPerFrameM / sm : 1.0;
         for (size_t i = 0; i < 3; ++i) a.intg[i] += step[i] * capScale;
-        const double im = std::sqrt(a.intg[0] * a.intg[0] + a.intg[1] * a.intg[1] + a.intg[2] * a.intg[2]);
-        if (im > align::kClampM)
-            for (size_t i = 0; i < 3; ++i) a.intg[i] *= align::kClampM / im;
+        nofoot::clampNorm3(a.intg, clampM);
         if (!guardOn) {
         } else if (!a.guardArmed) {
             if (errMag > align::kErrOnM) {
@@ -6670,9 +6689,7 @@ void alignFilter(AlignRun& a, const double err[3], bool driving, bool decay, dou
     for (size_t i = 0; i < 3; ++i) {
         nofoot::cdStep(a.pos[i], a.vel[i], target[i], align::kViewTauSec, dt, align::kCapPerFrameM);
     }
-    const double pm = std::sqrt(a.pos[0] * a.pos[0] + a.pos[1] * a.pos[1] + a.pos[2] * a.pos[2]);
-    if (pm > align::kClampM)
-        for (size_t i = 0; i < 3; ++i) a.pos[i] *= align::kClampM / pm;
+    nofoot::clampNorm3(a.pos, clampM);
 }
 
 // F41: the body's one filter: the target (world metres) through one critically damped filter, tau 0.1 s, at most 5 cm a frame, clamped to 0.6 m.
@@ -6682,6 +6699,120 @@ void bodyFilter(AlignRun& a, const double target[3], double dt) noexcept {
     const double pm = std::sqrt(a.pos[0] * a.pos[0] + a.pos[1] * a.pos[1] + a.pos[2] * a.pos[2]);
     if (pm > align::kClampM)
         for (size_t i = 0; i < 3; ++i) a.pos[i] *= align::kClampM / pm;
+}
+
+// ---- F63 (no key): the ADS sight lock, the frame thread's half (alignTick, before the eye alignment is published) ----------------------
+// While the F62b head-aim's weight is above 0 with a fresh FP snapshot (joint 14, the FP povCamera), F_root and AMC sample (100 ms), the right
+// eye is driven onto the sight line through P14w along the FP root's forward (nofoot::adsSightError) by the view run's filter (gain 0.02 a
+// frame, 5 cm a frame) clamped to 12 cm; otherwise the lock decays to zero (the filter's decay, about 0.3 s). The guard trips it off when
+// |e perpendicular| grows for 0.5 s, until the next ADS engage. Outside ADS (weight 0) the lock is zero: nothing drawn changes.
+struct AdsSightWin {
+    uint32_t driving = 0, idle = 0, noFp = 0, noRoot = 0, noSample = 0, degenerate = 0, flipped = 0, trippedFrames = 0;
+    double perpSum = 0.0, perpMax = 0.0, beforeSum = 0.0, wSum = 0.0;
+    double relSum[3] = {};   // P14w - cam, body axes (right, up, forward)
+};
+AdsSightWin g_adsSightWin;
+uint64_t g_adsSightLineMs = 0;
+nofoot::AdsSightGrowth g_adsSightGrowth;
+double g_adsSightHalfIpd = nofoot::kAdsSightHalfIpdFallback;
+bool g_adsSightIpdMeasured = false;
+
+void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
+    const bool engaged = g_adsW > 0.0 && (g_adsState == kAdsActive || g_adsState == kAdsReleasing);
+    AdsSightWin& w = g_adsSightWin;
+    double err[3] = {0.0, 0.0, 0.0}, rel[3] = {}, before[3] = {};
+    nofoot::AdsSightErr E;
+    bool have = false;
+    if (engaged && g_adsSightTripped) {
+        ++w.trippedFrames;
+    } else if (engaged) {
+        float m[nofoot::kIkFpSlots][16];
+        uint64_t fpMs = 0;
+        IkGData G;
+        const bool fpOk = ikFpRead(m, &fpMs) && (now > fpMs ? now - fpMs : 0) <= nofoot::kIkFreshMs;
+        const bool gOk = fpOk && ikGRead(&G) && (now > G.frootMs ? now - G.frootMs : 0) <= nofoot::kIkFreshMs;
+        const bool sOk = s.valid && (now > s.stamp ? now - s.stamp : 0) <= static_cast<uint64_t>(align::kStaleMs);
+        if (!fpOk) ++w.noFp;
+        else if (!gOk) ++w.noRoot;
+        else if (!sOk) ++w.noSample;
+        else {
+            // P14w = P14_model x F_root (the whole F_root, no minus d); the sight runs along the FP root's forward (row 2).
+            const float* pm = m[nofoot::kIkFpSlotPov];
+            const float p14m[3] = {pm[12], pm[13], pm[14]};
+            double p14w[3];
+            nofoot::ikXform(p14m, G.froot, p14w);
+            const double f[3] = {G.froot[8], G.froot[9], G.froot[10]}, row0[3] = {G.froot[0], G.froot[1], G.froot[2]};
+            const double bodyRight[3] = {s.rows[0], s.rows[1], s.rows[2]}, cam[3] = {s.cam[0], s.cam[1], s.cam[2]};
+            double rows[9];
+            for (size_t k = 0; k < 9; ++k) rows[k] = static_cast<double>(s.rows[k]);
+            float ex = 0.0f;
+            g_adsSightIpdMeasured = temporalPassEyeOffsetX(1, &ex);
+            g_adsSightHalfIpd = nofoot::adsSightHalfIpd(g_adsSightIpdMeasured, static_cast<double>(ex));
+            double rHat[3] = {};
+            bool flipped = false;
+            if (nofoot::adsSightRight(row0, f, bodyRight, rHat, &flipped) &&
+                nofoot::adsSightError(p14w, cam, rHat, g_adsSightHalfIpd, f, rows, E)) {
+                have = true;
+                if (flipped) ++w.flipped;
+                for (size_t i = 0; i < 3; ++i) {
+                    err[i] = E.seated[i];
+                    rel[i] = (p14w[0] - cam[0]) * rows[3 * i] + (p14w[1] - cam[1]) * rows[3 * i + 1] + (p14w[2] - cam[2]) * rows[3 * i + 2];
+                }
+            } else {
+                ++w.degenerate;
+            }
+        }
+    }
+    // Drive while engaged with the inputs; decay otherwise. No guard inside the filter (the growth guard below is the sight lock's own).
+    alignFilter(g_adsSight, err, have, !have, dt, now, false, nofoot::kAdsSightClampM);
+    for (size_t i = 0; i < 3; ++i) g_adsSight.applied[i] = g_adsSight.pos[i];
+    if (have) {
+        // The camera moved by the lock (F40's plant at psi 0: body = diag(-1, -1, +1) . seated), so e before the lock is about e + that.
+        const double lockBody[3] = {-g_adsSight.applied[0], -g_adsSight.applied[1], g_adsSight.applied[2]};
+        for (size_t i = 0; i < 3; ++i) before[i] = E.eBody[i] + lockBody[i];
+        ++w.driving;
+        w.perpSum += E.perpNorm;
+        if (E.perpNorm > w.perpMax) w.perpMax = E.perpNorm;
+        w.beforeSum += std::sqrt(before[0] * before[0] + before[1] * before[1] + before[2] * before[2]);
+        w.wSum += g_adsW;
+        for (size_t i = 0; i < 3; ++i) w.relSum[i] += rel[i];
+        if (g_adsSightGrowth.step(now, E.perpNorm)) {
+            g_adsSightTripped = true;
+            const double fromM = g_adsSightGrowth.startAbs;
+            const uint64_t runMs = g_adsSightGrowth.runMs(now);
+            g_adsSightGrowth = nofoot::AdsSightGrowth{};
+            Log::get().note("native on foot ADS sight lock (F63): GUARD TRIPPED: |e perpendicular| grew for %.2f s to %.1f cm (from %.1f cm): the "
+                            "lock decays to zero until the next ADS engage (a sign or axis error is the likely cause)",
+                            static_cast<double>(runMs) / 1000.0, 100.0 * E.perpNorm, 100.0 * fromM);
+        }
+    } else {
+        g_adsSightGrowth = nofoot::AdsSightGrowth{};
+        if (!engaged) ++w.idle;
+    }
+    // Once a second while the head-aim is engaged or the lock has not decayed: the probe line.
+    const double appliedNorm = std::sqrt(g_adsSight.applied[0] * g_adsSight.applied[0] + g_adsSight.applied[1] * g_adsSight.applied[1] +
+                                         g_adsSight.applied[2] * g_adsSight.applied[2]);
+    if (!engaged && appliedNorm < 1e-5 && !w.driving) {
+        g_adsSightLineMs = 0;
+        w = AdsSightWin{};
+        return;
+    }
+    if (g_adsSightLineMs == 0) g_adsSightLineMs = now;
+    if (now - g_adsSightLineMs < 1000) return;
+    g_adsSightLineMs = now;
+    const double n = w.driving ? static_cast<double>(w.driving) : 1.0;
+    Log::get().note("native on foot ADS sight lock (F63): P14w - cam (body right, up, forward) %.1f %.1f %.1f cm (mean); half IPD %.4f m (%s); "
+                    "e perpendicular (the right eye to the sight line) after the lock mean %.1f cm, max %.1f cm; before the lock (estimate: e + the "
+                    "camera's move by the lock) mean %.1f cm; applied lock (seated) %.1f %.1f %.1f cm (|%.1f| cm, clamp %.0f cm); weight mean %.2f "
+                    "(now %.2f); frames driving %u, idle %u, no FP snapshot (joint 14) %u, no F_root %u, no AMC sample %u, degenerate %u, right axis "
+                    "flipped to the body's right %u, held off by the guard %u%s",
+                    100.0 * w.relSum[0] / n, 100.0 * w.relSum[1] / n, 100.0 * w.relSum[2] / n, g_adsSightHalfIpd,
+                    g_adsSightIpdMeasured ? "the right eye's offset" : "the fallback: no per-eye offset noted", 100.0 * w.perpSum / n,
+                    100.0 * w.perpMax, 100.0 * w.beforeSum / n, 100.0 * g_adsSight.applied[0], 100.0 * g_adsSight.applied[1],
+                    100.0 * g_adsSight.applied[2], 100.0 * appliedNorm, 100.0 * nofoot::kAdsSightClampM, w.wSum / n, g_adsW, w.driving, w.idle,
+                    w.noFp, w.noRoot, w.noSample, w.degenerate, w.flipped, w.trippedFrames,
+                    w.driving ? "" : " (no frame drove the lock this second)");
+    w = AdsSightWin{};
 }
 // The frame thread's one call per frame. The view offset is seated metres (the runtime moves the seated origin by it); the body offset is world
 // metres (the submit job's hook moves the records by it). The other run's offset decays to zero.
@@ -7910,6 +8041,7 @@ void alignTick(uint64_t now) noexcept {
             fpRaisePublish(fpD);
         }
     }
+    adsSightTick(now, dt, sIn);   // F63: the ADS sight lock (the right eye onto the sight line; zero outside ADS)
     // The eye align: the view run (g_align: the active run in view and calibrate, decaying to zero in body) plus the raise's seated term (zero
     // outside body mode once the raise has returned). One serial, g_align's, as before.
     {
@@ -7917,7 +8049,8 @@ void alignTick(uint64_t now) noexcept {
         nofoot::raiseSeated(g_f51Applied, raiseS);
         double eye[3] = {}, eyeChange = 0.0;
         for (size_t i = 0; i < 3; ++i) {
-            eye[i] = g_align.applied[i] + raiseS[i] + g_adsLock[i];   // F62b: the ADS head-aim's position lock (zero outside it)
+            // F62b: the ADS head-aim's position lock; F63: the ADS sight lock (both zero outside ADS)
+            eye[i] = g_align.applied[i] + raiseS[i] + g_adsLock[i] + g_adsSight.applied[i];
             eyeChange = std::max(eyeChange, std::fabs(eye[i] - g_f51EyePub[i]));
         }
         if (eyeChange > 1e-6) {
@@ -9719,7 +9852,8 @@ void fdAfterAnimate(uint64_t x, uint64_t job) noexcept {
     for (int k = 0; k < 4; ++k)
         if (!guardedRead(buf + static_cast<uint64_t>(kIds[k]) * 64u + 48u, before[k], sizeof(before[k]))) return fdFail(1u << 5);
     // F56: the arm IK's FP targets: joints 51, 52 (the handAttach joints) and 37, 44 (the hands), whole matrices, BEFORE any drop write.
-    // F57: and 19, 20 (clavicles), 25, 26 (upper arms), 31, 34 (forearms): the FP elbow pole and the FP shoulder line.
+    // F57: and 19, 20 (clavicles), 25, 26 (upper arms), 31, 34 (forearms): the FP elbow pole and the FP shoulder line. F63: and 14, the FP
+    // povCamera (the ADS sight lock's sight point), in the same snapshot.
     if (pfz::g_ikWanted.load(std::memory_order_relaxed) && count > 52) {
         float m[nofoot::kIkFpSlots][16];
         bool ok = true;
@@ -10239,6 +10373,17 @@ void f58BendFrame(uint64_t now, double dt, int mode, bool full3P, bool ads, cons
     // offset, T = (job camera - d) in body axes + the rest offset; F62a: the full-3P offset kNeckRestOffsetFull3P (0, -0.155, -0.09; it was
     // -0.161 forward), the same the head follow's neck source uses in full 3P.
     const bool want = key && full3P && active && sFresh && s.headOk;
+    // F63: aiming down sights with the bend key on but the bend not wanted: say why every 5 s (a switched-off body mode announces itself).
+    {
+        static uint64_t adsWhyMs = 0;
+        if (key && active && ads && !want && now - adsWhyMs >= 5000) {
+            adsWhyMs = now;
+            const char* f3 = full3P ? nullptr : full3PWhy();
+            Log::get().note("native on foot spine bend (F58): aiming down sights but not engaged: %s",
+                            !full3P ? (f3 ? f3 : "not full 3P") : !sFresh ? "no fresh AMC sample (over 100 ms old)"
+                                                                         : "no head sample (the neck census)");
+        }
+    }
     g_f58BendBlend.step(want, dt);
     if (want || g_f58BendBlend.w > 0.0f) g_f58RunUntilMs = now + 500;
     const bool run = now < g_f58RunUntilMs;
@@ -10411,6 +10556,18 @@ void f60FitStep(uint64_t now, double dt, int mode, bool full3P) noexcept {
              : !g_f60Have ? "no weapon-fit measurement yet"
              : !fresh ? "no weapon: the grips are stale (over 100 ms) or an arm is not measured"
              : nullptr;
+    // F63: aiming down sights with a fit slider above 0 but the fit not engaged: say why every 5 s (a switched-off body mode announces itself:
+    // outside full 3P the reason names the body key that is not set).
+    {
+        static uint64_t adsWhyMs = 0;
+        if (g_f60Why && nativeOnFootActive() && (key > 0.0 || keyLat > 0.0) && journalAds() && now - adsWhyMs >= 5000) {
+            adsWhyMs = now;
+            const char* why = g_f60Why;
+            if (mode != 2 || !full3P)
+                if (const char* f3 = full3PWhy()) why = f3;
+            Log::get().note("native on foot weapon fit (F60): aiming down sights but not engaged: %s", why);
+        }
+    }
     g_f60Blend.step(g_f60Why == nullptr, dt);
     if (mode != 2 || !full3P || ikMode != 3) g_f60Blend = nofoot::IkBlend{0.0f, nofoot::kFitRampSec};
     g_f60Fit = key * static_cast<double>(g_f60Blend.w) * g_f60Raised;
@@ -11259,7 +11416,8 @@ constexpr uint64_t kScanBackoffUs = 2000;
 constexpr UINT kMarkerRowsOffset = 4 * 16, kMarkerRowsBytes = 64, kOriginOffset = 275 * 16, kOriginBytes = 16;
 constexpr UINT kWorldOffset = 270 * 16, kWorldBytes = 6 * 16;
 // F45: the frame's staging buffer and its draw records (F46: no record cap; a frame's records grow as needed).
-constexpr uint32_t kFrameSlots = 6, kFrameBytes = 1u << 20;   // 1 MB a frame: 131072 stream entries
+// F63: 8 slots of 2 MB (were 6 of 1 MB; the F62 flight logged no slot or buffer-full refusal, so this is headroom, not the cure).
+constexpr uint32_t kFrameSlots = 8, kFrameBytes = 2u << 20;   // 2 MB a frame: 262144 stream entries
 constexpr uint32_t kEntriesMax = 16384;                       // stream entries read per draw (more are counted as cut)
 constexpr uint32_t kSlotFinds = 32;                           // a frame's finds, kept for its read-back (F52: 32)
 constexpr uint32_t kTuples = 12;                              // distinct readers of a find (VS, PS, eye, call) logged a second
@@ -11269,7 +11427,10 @@ constexpr uint32_t kWorldTriesPerEye = 8;                     // world draws a f
 constexpr uint32_t kSrvCache = 8;
 constexpr double kDefaultTargetSize = 2016.0;                 // the marker target's size when its view did not resolve
 // F47: the correction and its instruments.
-constexpr uint32_t kMatchFresh = 8;      // frames a read-back's match stays an eye's prediction (read-backs land 2..3 frames late)
+// F63: a match is an identity held kMatchHold frames (was kMatchFresh = 8), dropped early only by contradicting evidence (drawtag::HeldMatch).
+constexpr uint32_t kMatchHold = drawtag::kMatchHoldFrames;
+constexpr uint32_t kStreamWinEntries = 8192;   // F63: the instance stream's CPU shadow: entries copied per eye window at each Unmap (64 KB)
+constexpr uint32_t kResRing = 128;             // F63: the per-frame residual ring per eye (the waypoint series' CSV reads it)
 constexpr double kGateNdc = drawtag::kPatchGateNdc;   // F62c: |dx|, |dy| under 0.1 NDC (F50..F53: 0.05; F47: 0.1 on P's own delta)
 constexpr double kLagStdMaxPx = 0.5;     // F50: no patch until the eye's baseline is seeded and its standard deviation is under this
 constexpr double kLagPitchSpreadPx = 2.0;   // F50: the honesty check: c by head pitch / roll differing by more than this is "not constant"
@@ -11310,6 +11471,7 @@ struct Pool {
     void* mapped = nullptr;
     int mapType = 0;
     uint32_t lastFrame = 0;
+    uint32_t unmapFrame = ~0u;       // F63: the frame of its newest write Unmap (the finds the draws of that frame read)
 };
 struct Find {
     const void* pool = nullptr;
@@ -11318,7 +11480,7 @@ struct Find {
     float x0[3] = {}, tp[3] = {}, p[3] = {};
     bool pOk = false, haveTag = false;
 };
-enum RecFlag : uint8_t { kRecWorld = 1, kRecMarker = 2, kRecShadowO = 4, kRecCut = 8 };
+enum RecFlag : uint8_t { kRecWorld = 1, kRecMarker = 2, kRecShadowO = 4, kRecCut = 8, kRecCpuSkip = 16 };   // F63: not copied on purpose
 // One recorded draw: offsets into its frame's staging slot (-1: not copied).
 struct Rec {
     uint64_t vs = 0, ps = 0;
@@ -11344,6 +11506,12 @@ struct Rec {
     float fixHead = -1.0f;               // F50: the head's speed at the decision (deg/s; -1 unknown)
     int32_t patchedAt = -1;              // the private b0's rows 4..7 after the patch (staged)
     uint8_t fixRef = 0;                  // F52: the reference the patch measured against (drawtag::RefMode)
+    // F63: the CPU identification at the draw: the record its instance stream entry names (the stream's CPU shadow), and what it was: 1 a
+    // find, 2 a held match's record (untagged), 3 another record (an untagged composite); 0 none (no shadow of the entry this frame).
+    bool cpuHave = false;
+    uint8_t cpuKind = 0;
+    uint32_t cpuRec = 0;
+    bool fixFresh = false;               // F63: the patch's P and X0 were this frame's find (not the hold's fallback) and its delta fresh
 };
 // F46: an eye's world view as a world draw read it: b1 rows 270..273 and row 275, by frame and eye.
 struct WorldView {
@@ -11393,6 +11561,12 @@ struct EyeStats {
     // one-frame hold patched anyway, and the refusals before the verdict (ranged b0, no CPU b0 rows, no CPU o_hud).
     uint64_t pWhy[drawtag::kPatchWhyCount] = {}, pHeld = 0, pOther = 0;
     uint32_t pUnmatchedFrame = ~0u;
+    // F63 at the draw: decisions whose match came from the CPU identification (same frame) or from a held match; held decisions whose P and
+    // X0 came from the hold's fallback (the key's last P, the held record read at this frame's Unmap); contradictions by the CPU identification.
+    // At read-back: holds confirmed and contradicted. The residual of fresh patched frames against P + e (the fixed e): its mean and max.
+    uint64_t viaCpu = 0, viaHold = 0, heldPX0 = 0, cpuContradict = 0, rbConfirm = 0, rbContradict = 0;
+    uint64_t eN = 0;
+    double exSum = 0.0, eySum = 0.0, eMax = 0.0;
 };
 struct SrvInfo {
     const void* srv = nullptr;
@@ -11515,6 +11689,11 @@ struct Window {
     Untag untag[kUntags];
     uint32_t nUntag = 0;
     uint64_t untagDropped = 0, untagPosRead = 0, untagPosFault = 0;
+    // F63: the CPU identification: marker composite draws it named (a find, a held record, another record), draws with no shadow of their
+    // entry this frame (none copied this frame, or outside the windows), copies skipped as untagged composites, the read-back's verdict on it
+    // (the read-back's entry 0 record equal or not), the stream shadow's Unmap copies (time, faults), writes it could not shadow.
+    uint64_t cpuFind = 0, cpuHeldRec = 0, cpuOther = 0, cpuNoShadow = 0, cpuOutside = 0, cpuSkipped = 0, cpuAgree = 0, cpuDiffer = 0;
+    uint64_t streamCopies = 0, streamCopyTicks = 0, streamFaults = 0, streamUpdates = 0, streamOtherMaps = 0, streamLearned = 0;
 };
 
 Pool g_pools[kPools];
@@ -11575,13 +11754,9 @@ CpuWorld g_cpuWorld[2];
 // F52: an eye's temporal reference this frame: the world rows with the temporal pass's camera rotation for the eye (drawtag::swapRotation),
 // at the world rows' o.
 CpuWorld g_tempRef[2];
-// An eye's latest read-back match: the frame, the matching draw's place among the eye's marker composite draws, and the find's key.
-// F52: one per key per eye (KeyState).
-struct EyeMatch {
-    uint32_t frame = ~0u;
-    uint16_t ord = 0;
-    uint32_t key = 0;
-};
+// An eye's match: the matching draw's place among the eye's marker composite draws and the record it read. F52: one per key per eye
+// (KeyState). F63: drawtag::HeldMatch, held 90 frames from its newest confirmation (a read-back or the CPU identification at the draw),
+// dropped early only by contradicting evidence.
 // An eye's last good delta (held one frame on a miss). F52: one per key per eye. F62c: drawtag::patchDecide's hold.
 using Good = drawtag::PatchHold;
 uint32_t g_ordFrame = ~0u;
@@ -11600,6 +11775,7 @@ struct Fix {
     double cx = 0.0, cy = 0.0, head = -1.0;   // F50: the baseline the delta was taken against, the head's speed at the decision
     int keySlot = -1;                     // F52: the key slot the decision was made for
     int ref = 0;                          // F52: the reference it measured against (drawtag::RefMode)
+    bool fresh = false;                   // F63: this frame's find gave P and X0 and the delta is fresh (not the one-frame hold)
     float rows45[8] = {};                 // rows 4 and 5, moved
     ID3D11Buffer* saved = nullptr;        // the game's b0 while ours is bound (a reference held)
 };
@@ -11628,8 +11804,13 @@ struct LagEye {
     }
 };
 // F52: a tag key's state per eye: its read-back match, its baseline, its last good delta; and the record it was last found at.
+// F63: the match is held (drawtag::HeldMatch) with the pool its record lives in, and the held record's position as this frame's pool Unmap
+// wrote it (the hold's X0 when the key has no find this frame).
 struct KeyEye {
-    EyeMatch match;
+    drawtag::HeldMatch hold;
+    const void* pool = nullptr;   // identity only
+    float x0Now[3] = {};
+    uint32_t x0Frame = ~0u;
     LagEye lag;
     Good good;
 };
@@ -11639,6 +11820,36 @@ struct KeyState {
 };
 drawtag::KeyIndex<kKeySlots> g_keyIdx;
 KeyState g_keys[kKeySlots];
+// F63: each tag key's newest P (node+0x50 at its newest find with P), for a held match's patch in a frame without a find.
+struct KeyP {
+    float p[3] = {};
+    uint32_t frame = ~0u;
+};
+KeyP g_keyP[256];
+// F63: the icon offset's bias per eye (drawtag::BiasEma: fresh patched frames' read-back residuals against the target they used).
+drawtag::BiasEma g_bias[2];
+// F63: the per-frame residual per eye (read-back of a fresh patched frame): the marker against P + e (the fixed e) and the e the patch used,
+// in px of the eye's target. The waypoint series' CSV reads it by frame (nativeOnFootMarkerResidual).
+struct ResCell {
+    std::atomic<uint32_t> frame{~0u};
+    std::atomic<float> v[4];
+};
+ResCell g_resRing[2][kResRing];
+// F63: THE CPU IDENTIFICATION. The marker composite draws' instance stream (the single stride-8 vertex buffer they read; one DYNAMIC buffer the
+// game maps WRITE_DISCARD once a frame) is shadowed at its Unmap, before the real one, as the t33 pool is: per eye a window of
+// kStreamWinEntries entries about the eye's newest marker composite entry (drawtag::streamWindow). At a draw, its entry (offset / 8 +
+// StartInstanceLocation) read from the window names the record (FirstElement + x) without a GPU read-back. Fix key only; render thread.
+struct StreamShadow {
+    const void* res = nullptr;          // identity only
+    uint32_t bytes = 0;
+    void* mapped = nullptr;
+    int mapType = 0;
+    uint32_t frame = ~0u;               // the frame of the newest window copy
+    uint32_t centre[2] = {~0u, ~0u};    // per eye: the newest marker composite entry seen
+    uint32_t lo[2] = {}, n[2] = {};     // per eye: the window's first entry and its entries copied
+};
+StreamShadow g_stream;
+alignas(16) uint32_t g_streamWin[2][kStreamWinEntries * 2];   // per eye window: (x, y) per entry
 // F52: the reference: the frame each eye's comparison ran, the last frame the temporal rows were usable for the eye, the reference in use
 // per eye (-1 not yet) and its epoch (a change resets every baseline of the eye), the eye's world b1 (identity) for the same-buffer check,
 // the switches said.
@@ -11750,6 +11961,11 @@ void addFind(const Pool& p, const drawtag::Hit& h, int mapType, uint32_t frame) 
         std::memcpy(f.p, t->p, sizeof(f.p));
         const bool exact = std::memcmp(f.tp, f.x0, sizeof(f.x0)) == 0;
         if (exact) ++g_win.exact; else ++g_win.differs;
+        if (f.pOk) {   // F63: the key's newest P (a held match's patch in a frame without a find)
+            KeyP& kp = g_keyP[f.key & 0xFFu];
+            std::memcpy(kp.p, f.p, sizeof(kp.p));
+            kp.frame = frame;
+        }
     }
     ++g_win.finds;
     if (g_haveLast[f.key]) {
@@ -11775,6 +11991,20 @@ void unmapPool(Pool& p) {
     p.mapped = nullptr;
     if (!base || (mapType != D3D11_MAP_WRITE_DISCARD && mapType != D3D11_MAP_WRITE_NO_OVERWRITE)) return;
     const uint32_t frame = g_f44Frame.load(std::memory_order_relaxed);
+    p.unmapFrame = frame;   // F63: the CPU identification takes only finds of this Unmap
+    // F63: each held match's record in this pool, as this Unmap wrote it (the hold's X0 when its key has no find this frame); under SEH.
+    if (g_nativeOnFootMarkerFixKey.load(std::memory_order_relaxed))
+        for (uint32_t i = 0; i < kKeySlots; ++i) {
+            if (!g_keyIdx.used[i]) continue;
+            for (int e = 0; e < 2; ++e) {
+                KeyEye& ke = g_keys[i].eye[e];
+                if (ke.pool != p.res || !ke.hold.held(frame)) continue;
+                uint32_t wv[4] = {};
+                if (!readRecordGuarded(base, p.bytes, ke.hold.record, wv)) continue;
+                for (int k = 0; k < 3; ++k) ke.x0Now[k] = drawtag::floatOf(wv[k]);
+                ke.x0Frame = frame;
+            }
+        }
     for (size_t i = 0; i < kF44Cells; ++i) {
         F44Tag t;
         if (f44ReadCell(i, t)) remember(t);
@@ -12707,8 +12937,126 @@ const Find* findForKey(uint32_t key, uint32_t frame) {
         }
     return best;
 }
-bool matchFresh(const EyeMatch& m, uint32_t frame) {
-    return m.frame != ~0u && frame - m.frame <= kMatchFresh;
+// F63: the find at `index` in `pool` from that pool's newest write Unmap (the record carries a tag in flight there), or null.
+const Find* findAt(const void* pool, uint32_t index) {
+    uint32_t uf = ~0u;
+    for (const Pool& p : g_pools)
+        if (p.res && p.res == pool) {
+            uf = p.unmapFrame;
+            break;
+        }
+    if (uf == ~0u) return nullptr;
+    for (int s = 0; s < 2; ++s)
+        for (uint32_t i = 0; i < g_findN[s]; ++i) {
+            const Find& f = g_finds[s][i];
+            if (f.pool == pool && f.index == index && f.frame == uf) return &f;
+        }
+    return nullptr;
+}
+// F63: `key` had a find in `pool` at that pool's newest write Unmap (any record).
+bool keyFoundAt(const void* pool, uint32_t key) {
+    uint32_t uf = ~0u;
+    for (const Pool& p : g_pools)
+        if (p.res && p.res == pool) {
+            uf = p.unmapFrame;
+            break;
+        }
+    if (uf == ~0u) return false;
+    for (int s = 0; s < 2; ++s)
+        for (uint32_t i = 0; i < g_findN[s]; ++i) {
+            const Find& f = g_finds[s][i];
+            if (f.pool == pool && f.key == key && f.frame == uf) return true;
+        }
+    return false;
+}
+// F63: some key's held match names the eye's draw at place `ord`; `rec` is a held match's record in the eye.
+bool heldAtPlace(int e, uint16_t ord, uint32_t frame) {
+    for (uint32_t i = 0; i < kKeySlots; ++i)
+        if (g_keyIdx.used[i] && g_keys[i].eye[e].hold.held(frame) && g_keys[i].eye[e].hold.ord == ord) return true;
+    return false;
+}
+bool heldRecord(int e, uint32_t rec, uint32_t frame) {
+    for (uint32_t i = 0; i < kKeySlots; ++i)
+        if (g_keyIdx.used[i] && g_keys[i].eye[e].hold.held(frame) && g_keys[i].eye[e].hold.record == rec) return true;
+    return false;
+}
+
+// F63: the instance stream's CPU shadow. The window copy, before the real Unmap: streaming loads (write-combined memory), under SEH.
+__declspec(noinline) bool streamCopyGuarded(uint32_t* dst, const uint8_t* src, uint32_t bytes) noexcept {
+    __try {
+        uint32_t at = 0;
+        for (; at + 16 <= bytes; at += 16) drawtag::streamLoad16(src + at, dst + at / 4);
+        if (at < bytes) std::memcpy(reinterpret_cast<uint8_t*>(dst) + at, src + at, bytes - at);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    return true;
+}
+// The Unmap tee's half: each eye's window about its newest marker composite entry (a WRITE_DISCARD or NO_OVERWRITE map only).
+void streamUnmapCopy(uint32_t frame) {
+    const uint8_t* base = static_cast<const uint8_t*>(g_stream.mapped);
+    const int type = g_stream.mapType;
+    g_stream.mapped = nullptr;
+    if (!base) return;
+    if (type != D3D11_MAP_WRITE_DISCARD && type != D3D11_MAP_WRITE_NO_OVERWRITE) {
+        ++g_win.streamOtherMaps;
+        return;
+    }
+    const uint64_t t0 = f30Qpc();
+    const uint32_t total = g_stream.bytes / drawtag::kStreamStride;
+    bool any = false;
+    for (int e = 0; e < 2; ++e) {
+        g_stream.n[e] = 0;
+        if (g_stream.centre[e] == ~0u) continue;
+        uint32_t lo = 0, n = 0;
+        drawtag::streamWindow(g_stream.centre[e], total, kStreamWinEntries, &lo, &n);
+        if (!n) continue;
+        if (!streamCopyGuarded(g_streamWin[e], base + static_cast<size_t>(lo) * drawtag::kStreamStride, n * drawtag::kStreamStride)) {
+            ++g_win.streamFaults;
+            continue;
+        }
+        g_stream.lo[e] = lo;
+        g_stream.n[e] = n;
+        any = true;
+    }
+    if (any) {
+        g_stream.frame = frame;
+        ++g_win.streamCopies;
+    }
+    g_win.streamCopyTicks += f30Qpc() - t0;
+}
+// A marker composite draw's stream: learned (a new buffer starts a fresh shadow) and the eye's window centred on its entry from now on.
+uint32_t g_streamNotes = 0;
+void streamLearn(ID3D11Buffer* vb, int eye, uint32_t entry) {
+    if (static_cast<const void*>(vb) != g_stream.res) {
+        D3D11_BUFFER_DESC d{};
+        vb->GetDesc(&d);
+        g_stream = StreamShadow{};
+        g_stream.res = vb;
+        g_stream.bytes = d.ByteWidth;
+        ++g_win.streamLearned;
+        if (g_streamNotes < 4) {
+            ++g_streamNotes;
+            Log::get().note("native on foot marker fix (F63): the marker composite draws' instance stream %p (%u bytes, %u entries, usage %u, CPU "
+                            "access 0x%X) is shadowed at its Unmap: per eye %u entries about the eye's newest marker composite entry",
+                            static_cast<void*>(vb), d.ByteWidth, d.ByteWidth / drawtag::kStreamStride, static_cast<unsigned>(d.Usage),
+                            static_cast<unsigned>(d.CPUAccessFlags), kStreamWinEntries);
+        }
+    }
+    if (eye == 0 || eye == 1) g_stream.centre[eye] = entry;
+}
+// The x of stream entry `entry` from this frame's windows. False when the stream was not copied this frame or no window holds the entry
+// (*outside then says which).
+bool streamEntryX(const void* res, uint32_t entry, uint32_t frame, uint32_t* x, bool* outside) {
+    *outside = false;
+    if (!res || res != g_stream.res || g_stream.frame != frame) return false;
+    for (int e = 0; e < 2; ++e)
+        if (g_stream.n[e] && entry >= g_stream.lo[e] && entry - g_stream.lo[e] < g_stream.n[e]) {
+            *x = g_streamWin[e][2 * (entry - g_stream.lo[e])];
+            return true;
+        }
+    *outside = true;
+    return false;
 }
 
 // F52: the temporal reference by (frame, eye) for the read-back's residual; an eye-frame's first stands.
@@ -12866,7 +13214,7 @@ void refTick(int e, uint32_t frame, double W, double H) {
 // not. Nothing is bound here; Begin binds. F52: per key: the draw is the one whose place in the eye a key's fresh read-back match names; that
 // key must be matched in both eyes; its own baseline, last good delta and find are used; the eye's reference is world_first or temporal.
 void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot, size_t recIndex, ID3D11Buffer* b0Plain, const float* oHud,
-               const CbShadow* sh) {
+               const CbShadow* sh, const Find* cpuFind) {
     if (r.eye != 0 && r.eye != 1) {
         ++g_win.fixNoEye;
         return;
@@ -12874,15 +13222,37 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
     const int e = r.eye;
     EyeStats& s = g_win.eye[e];
     int ks = -1;
-    bool anyFresh = false;
-    for (uint32_t i = 0; i < kKeySlots && ks < 0; ++i) {
-        if (!g_keyIdx.used[i] || !matchFresh(g_keys[i].eye[e].match, frame)) continue;
-        anyFresh = true;
-        if (g_keys[i].eye[e].match.ord == r.ordEye) ks = static_cast<int>(i);
+    bool anyHeld = false;
+    // F63 (3): the CPU identification: this draw reads a record that carries key K's tag at this frame's pool Unmap (its instance stream entry
+    // read from the stream's CPU shadow), so K's hold for the eye is confirmed at this place in this frame, with no read-back.
+    if (cpuFind) {
+        ks = keySlotAcquire(cpuFind->key, frame);
+        KeyEye& ke = g_keys[ks].eye[e];
+        drawtag::holdEvidence(ke.hold, frame, r.ordEye, cpuFind->index, cpuFind->key, true, true);
+        ke.pool = cpuFind->pool;
+        g_keys[ks].record = cpuFind->index;
+        ++s.viaCpu;
     }
-    if (ks < 0 || !matchFresh(g_keys[ks].eye[1 - e].match, frame)) {
+    // F63 (1): otherwise a key whose held match (90 frames) names this draw's place, unless the CPU identification contradicts it (this place
+    // reads another record: the hold is dropped and the draw is not patched).
+    for (uint32_t i = 0; i < kKeySlots && ks < 0; ++i) {
+        if (!g_keyIdx.used[i]) continue;
+        KeyEye& ke = g_keys[i].eye[e];
+        if (!ke.hold.held(frame)) continue;
+        anyHeld = true;
+        if (ke.hold.ord != r.ordEye) continue;
+        if (r.cpuHave && drawtag::holdEvidence(ke.hold, frame, r.ordEye, r.cpuRec, g_keyIdx.key[i], false,
+                                               keyFoundAt(ke.pool, g_keyIdx.key[i])) == drawtag::kHoldContradict) {
+            ++s.cpuContradict;
+            continue;
+        }
+        ks = static_cast<int>(i);
+        ++s.viaHold;
+    }
+    // F63: the both-eyes rule accepts a held match for the other eye.
+    if (ks < 0 || !g_keys[ks].eye[1 - e].hold.held(frame)) {
         const int u = ks < 0 ? e : 1 - e;
-        if (ks < 0 && anyFresh) {
+        if (ks < 0 && anyHeld) {
             ++s.fOtherDraw;   // no key's match names this draw (an untagged marker composite draw)
             return;
         }
@@ -12897,14 +13267,14 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
         if (!g_unmatchedNoted[u]) {
             g_unmatchedNoted[u] = true;
             Log::get().note("native on foot marker fix: eye %d unmatched: not applied (no marker composite draw of eye %d read the marker "
-                            "record in the last %u frames' read-backs; both eyes must match, per key). Said once; counted in the 1 s lines", u, u,
-                            kMatchFresh);
+                            "record in the CPU identification or a read-back of the last %u frames; both eyes must match, per key). Said once; "
+                            "counted in the 1 s lines", u, u, kMatchHold);
         }
         return;
     }
     KeyState& K = g_keys[ks];
     KeyWin& kw = g_win.keys[ks];
-    const EyeMatch& match = K.eye[e].match;
+    const drawtag::HeldMatch& match = K.eye[e].hold;
     ++kw.decided[e];
     if (!b0Plain) {
         ++s.fRanged;
@@ -12927,13 +13297,44 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
     const int ref = drawtag::kRefWorldFirst;
     const CpuWorld& w = g_cpuWorld[e];
     ++g_win.ref[e].decided[ref];
-    const Find* f = findForKey(match.key, frame);
+    // F63: P and X0: the CPU identification's find (this draw's own record), else the held record's find at this frame's pool Unmap, else the
+    // key's newest find (this frame or the last, as F47); else the hold's fallback: the key's newest P within the hold (a world point) with the
+    // held record as this frame's pool Unmap wrote it (what the draw reads). Neither: no P.
+    const uint32_t keyNow = g_keyIdx.key[ks];
+    const Find* f = cpuFind ? cpuFind : findAt(K.eye[e].pool, match.record);
+    if (!f || !f->haveTag || !f->pOk) f = findForKey(keyNow, frame);
+    if (f && (!f->haveTag || !f->pOk)) f = nullptr;
+    double fX0[3] = {}, fP[3] = {};
+    bool haveP = false;
+    if (f) {
+        for (int k = 0; k < 3; ++k) {
+            fX0[k] = f->x0[k];
+            fP[k] = f->p[k];
+        }
+        haveP = true;
+    } else {
+        const KeyP& kp = g_keyP[keyNow & 0xFFu];
+        const KeyEye& ke = K.eye[e];
+        if (kp.frame != ~0u && frame - kp.frame <= kMatchHold && ke.x0Frame != ~0u && frame - ke.x0Frame <= 1u) {
+            for (int k = 0; k < 3; ++k) {
+                fX0[k] = ke.x0Now[k];
+                fP[k] = kp.p[k];
+            }
+            haveP = true;
+            ++s.heldPX0;
+        }
+    }
     int why = -1;
     // F50: the eye's baseline, reset when the frustum it was taken under changes (b0 row 5 or row 7 scale, the target's size) or the eye's
     // matched draw moves to another place (the eye assignment). F52: one per key per eye; also reset when the eye's reference changes.
     LagEye& L = K.eye[e].lag;
     Good& good = K.eye[e].good;
     const double W = r.tw ? static_cast<double>(r.tw) : kDefaultTargetSize, H = r.th ? static_cast<double>(r.th) : kDefaultTargetSize;
+    // F53: e, the fixed icon offset; F63: the patch aims at e less the eye's measured bias (drawtag::BiasEma; zero until fresh patched frames
+    // have been read back).
+    double eFix[2], cUsed[2];
+    drawtag::iconOffsetNdc(H, eFix);
+    g_bias[e].target(eFix, cUsed);
     {
         const auto norm3 = [](const float* v) {
             return std::sqrt(static_cast<double>(v[0]) * v[0] + static_cast<double>(v[1]) * v[1] + static_cast<double>(v[2]) * v[2]);
@@ -12972,17 +13373,17 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
     if (!sceneFresh) {
         ++s.fNoWorld;
         ++kw.stale[e];
-    } else if (!f) {
+    } else if (!haveP) {
         ++s.fNoP;
     } else {
-        const double ow[3] = {w.o[0], w.o[1], w.o[2]}, oh[3] = {oHud[0], oHud[1], oHud[2]}, P[3] = {f->p[0], f->p[1], f->p[2]};
-        const double X0[3] = {f->x0[0], f->x0[1], f->x0[2]};
+        const double ow[3] = {w.o[0], w.o[1], w.o[2]}, oh[3] = {oHud[0], oHud[1], oHud[2]}, P[3] = {fP[0], fP[1], fP[2]};
+        const double X0[3] = {fX0[0], fX0[1], fX0[2]};
         // F53: the target is ndc(P through the eye's scene rows) + e, e the fixed icon offset (drawtag::iconOffsetNdc); the learned baseline
-        // (F50) is dropped from the decision and kept, updated below, for the log only.
-        double c[2];
-        drawtag::iconOffsetNdc(H, c);
+        // (F50) is dropped from the decision and kept, updated below, for the log only. F63: the delta aims at e less the bias (cUsed); the
+        // |m - e| bins below stay against the fixed e.
+        const double* c = eFix;
         double lag[2] = {};
-        why = drawtag::ndcLagDelta(w.rows, ow, sh->rows[4], sh->rows[5], sh->rows[7], oh, X0, P, c, kGateNdc, lag, &dx, &dy);
+        why = drawtag::ndcLagDelta(w.rows, ow, sh->rows[4], sh->rows[5], sh->rows[7], oh, X0, P, cUsed, kGateNdc, lag, &dx, &dy);
         if ((why == drawtag::kDeltaOk || why == drawtag::kDeltaGate) && L.lastFrame != frame) {
             L.lastFrame = frame;
             // |m - c| by the head's speed (against the c the delta used: F53 e), the baseline's update (logged only), the honesty bins (every
@@ -13024,7 +13425,7 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
         }
     }
     // F62c: patch when the rows are fresh, P is found, both w > 0 and |d| < 0.1 NDC; else the last good delta for one frame; else refuse.
-    const drawtag::PatchVerdict v = drawtag::patchDecide(true, true, sceneFresh, f != nullptr, why, dx, dy, frame, good);
+    const drawtag::PatchVerdict v = drawtag::patchDecide(true, true, sceneFresh, haveP, why, dx, dy, frame, good);
     if (v.why >= 0 && v.why < drawtag::kPatchWhyCount) ++s.pWhy[v.why];
     if (v.held) ++s.pHeld;
     if (!v.patch) return;
@@ -13035,10 +13436,10 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
     std::memcpy(r4, sh->rows[4], sizeof(r4));
     std::memcpy(r5, sh->rows[5], sizeof(r5));
     drawtag::ndcOffsetRows(r4, r5, sh->rows[7], dx, dy);
-    double eOff[2];
-    drawtag::iconOffsetNdc(H, eOff);   // F53: the c the delta was taken against is e
-    g_fix.cx = eOff[0];
-    g_fix.cy = eOff[1];
+    // F53: the c the delta was taken against is e; F63: e less the eye's bias (the read-back's residual is taken against this, the EMA's input).
+    g_fix.cx = cUsed[0];
+    g_fix.cy = cUsed[1];
+    g_fix.fresh = !held && f != nullptr;   // F63: this frame's find gave P and X0 and the delta is this frame's: the bias may learn from it
     g_fix.head = g_headDps;
     g_fix.keySlot = ks;
     g_fix.ref = ref;
@@ -13104,12 +13505,57 @@ void markerDraw(ID3D11DeviceContext* ctx, uint32_t frame, uint64_t vs, uint32_t 
         r.pool = t33.res;
         ++g_win.markerPool;
     }
+    // F63 (3): the CPU identification (the fix key on): the draw's instance stream (the one vertex buffer of stride 8) is learned for its CPU
+    // shadow, and the draw's entry read from this frame's window names the record (FirstElement + x); a find of that record at the pool's
+    // newest Unmap names the key, in this frame, with no read-back.
+    const bool fixKey = g_nativeOnFootMarkerFixKey.load(std::memory_order_relaxed);
+    const bool direct = kind != 'Y' && kind != 'Z';
+    ID3D11Buffer* vbs[8] = {};
+    UINT strides[8] = {}, offs[8] = {};
+    int pick = -1;
+    unsigned eights = 0;
+    if (direct && (r.watched || fixKey)) {
+        ctx->IAGetVertexBuffers(0, 8, vbs, strides, offs);
+        for (int i = 0; i < 8; ++i)
+            if (vbs[i] && strides[i] == drawtag::kStreamStride) {
+                ++eights;
+                if (pick < 0) pick = i;
+            }
+    }
+    const Find* cpuFind = nullptr;
+    if (fixKey && r.watched && direct && eights == 1 && pick >= 0 && (r.eye == 0 || r.eye == 1) && offs[pick] % drawtag::kStreamStride == 0) {
+        const uint32_t entry = offs[pick] / drawtag::kStreamStride + startInstance;
+        streamLearn(vbs[pick], r.eye, entry);
+        uint32_t x = 0;
+        bool outside = false;
+        if (streamEntryX(vbs[pick], entry, frame, &x, &outside)) {
+            r.cpuHave = true;
+            r.cpuRec = t33.first + x;
+            cpuFind = findAt(t33.res, r.cpuRec);
+            r.cpuKind = cpuFind ? 1 : heldRecord(r.eye, r.cpuRec, frame) ? 2 : 3;
+            if (r.cpuKind == 1) ++g_win.cpuFind;
+            else if (r.cpuKind == 2) ++g_win.cpuHeldRec;
+            else ++g_win.cpuOther;
+        } else if (outside) {
+            ++g_win.cpuOutside;
+        } else {
+            ++g_win.cpuNoShadow;
+        }
+    }
     bool copy = r.watched;
-    if (copy && (kind == 'Y' || kind == 'Z')) {   // indirect: the instance range is in a GPU argument buffer
+    if (copy && !direct) {   // indirect: the instance range is in a GPU argument buffer
         ++g_win.indirect;
         copy = false;
     }
-    if (copy && !poolHasFinds(t33.res, frame)) copy = false;
+    // F63: a held place's draw is copied even without a find this frame (its read-back confirms or contradicts the hold).
+    if (copy && !poolHasFinds(t33.res, frame) && !(fixKey && (r.eye == 0 || r.eye == 1) && heldAtPlace(r.eye, r.ordEye, frame))) copy = false;
+    // F63 (2): the untagged near-camera composites are not copied: the CPU identification named a record that is neither a find nor a held
+    // match's record (in the F62 flight, five of the six marker composite draws per eye, at places that move with the marker's own place).
+    if (copy && r.cpuHave && r.cpuKind == 3) {
+        copy = false;
+        r.flags |= kRecCpuSkip;
+        ++g_win.cpuSkipped;
+    }
     if (copy) ++g_win.markerFinds;
     r.findsNow = copy;
     ID3D11Buffer* cb0 = nullptr;
@@ -13131,8 +13577,6 @@ void markerDraw(ID3D11DeviceContext* ctx, uint32_t frame, uint64_t vs, uint32_t 
         r.cpuRows = true;
         std::memcpy(r.cpu, sh->rows[4], sizeof(r.cpu));
     }
-    ID3D11Buffer* vbs[8] = {};
-    UINT strides[8] = {}, offs[8] = {};
     const int slot = g_staging.open(ctx, frame);
     if (slot < 0) refuse(kNoSlot);
     bool fine = copy && slot >= 0;
@@ -13140,18 +13584,10 @@ void markerDraw(ID3D11DeviceContext* ctx, uint32_t frame, uint64_t vs, uint32_t 
         refuse(kConstants);
         fine = false;
     }
-    int pick = -1;
     uint64_t at = 0;
     uint32_t entries = 0;
     if (fine) {
-        // The instance stream: the one vertex buffer of stride 8 (INSTANCEANDMODELDATAINDEX); every entry the draw reads.
-        ctx->IAGetVertexBuffers(0, 8, vbs, strides, offs);
-        unsigned eights = 0;
-        for (int i = 0; i < 8; ++i)
-            if (vbs[i] && strides[i] == drawtag::kStreamStride) {
-                ++eights;
-                if (pick < 0) pick = i;
-            }
+        // The instance stream: the one vertex buffer of stride 8 (INSTANCEANDMODELDATAINDEX; queried above, F63); every entry the draw reads.
         D3D11_BUFFER_DESC sd{};
         if (pick >= 0) vbs[pick]->GetDesc(&sd);
         at = pick >= 0 ? static_cast<uint64_t>(offs[pick]) + static_cast<uint64_t>(startInstance) * drawtag::kStreamStride : 0;
@@ -13195,8 +13631,7 @@ void markerDraw(ID3D11DeviceContext* ctx, uint32_t frame, uint64_t vs, uint32_t 
         list.push_back(r);
         ++g_win.recs;
         // F47: the correction's decision for this draw (the key on only).
-        if (g_nativeOnFootMarkerFixKey.load(std::memory_order_relaxed))
-            fixDecide(ctx, frame, list.back(), slot, list.size() - 1, b0Plain, shadowO ? shadow[5] : nullptr, sh);
+        if (fixKey) fixDecide(ctx, frame, list.back(), slot, list.size() - 1, b0Plain, shadowO ? shadow[5] : nullptr, sh, cpuFind);
     }
     for (ID3D11Buffer* b : vbs)
         if (b) b->Release();
@@ -13283,11 +13718,33 @@ void f47Measure(EyeStats& s, const WorldView& w, const float rows[16], const dou
 // pixels; about zero at every head speed when the patch took (a held frame carries the frame before's delta, so it is not zero).
 // F52: also per key (kw, eye e), against the reference the patch measured against (the caller's w).
 void f50Residual(EyeStats& s, const WorldView& w, const float patched[16], const double oh[3], const double X0[3], const double P[3], const Rec& r,
-                 double W, double H, KeyWin* kw, int e) {
+                 double W, double H, KeyWin* kw, int e, uint32_t frame) {
     const double ow[3] = {w.o[0], w.o[1], w.o[2]}, c[2] = {r.fixCx, r.fixCy};
     double dx = 0.0, dy = 0.0, m[2] = {};
     if (drawtag::ndcLagDelta(w.rows, ow, patched, patched + 4, patched + 12, oh, X0, P, c, 1e30, m, &dx, &dy) != drawtag::kDeltaOk) return;
     const double px = -dx * W * 0.5, py = -dy * H * 0.5;   // (m - c): where the marker landed against P + c
+    // F63: the icon offset's bias learns from fresh patched frames only (this frame's find, a fresh delta): the residual against the target
+    // the patch used (c = e less the bias then). The per-frame residual against P + e (the fixed e) goes to the second's sums and the ring
+    // the waypoint series' CSV reads, with the e the patch used (px).
+    if (e == 0 || e == 1) {
+        const double rt[2] = {-dx, -dy};
+        g_bias[e].update(rt, r.fixFresh);
+        double eF[2];
+        drawtag::iconOffsetNdc(H, eF);
+        const double rex = (-dx + c[0] - eF[0]) * W * 0.5, rey = (-dy + c[1] - eF[1]) * H * 0.5;
+        ++s.eN;
+        s.exSum += rex;
+        s.eySum += rey;
+        const double rn = std::sqrt(rex * rex + rey * rey);
+        if (rn > s.eMax) s.eMax = rn;
+        ResCell& cell = g_resRing[e][frame % kResRing];
+        cell.frame.store(~0u, std::memory_order_relaxed);
+        cell.v[0].store(static_cast<float>(rex), std::memory_order_relaxed);
+        cell.v[1].store(static_cast<float>(rey), std::memory_order_relaxed);
+        cell.v[2].store(static_cast<float>(c[0] * W * 0.5), std::memory_order_relaxed);
+        cell.v[3].store(static_cast<float>(c[1] * H * 0.5), std::memory_order_relaxed);
+        cell.frame.store(frame, std::memory_order_release);
+    }
     ++s.rN;
     s.rxSum += px;
     s.rySum += py;
@@ -13379,7 +13836,7 @@ void pairMarker(const Rec& r, const Find& f, const float rows[16], const float o
     if (patched) {
         // F52: the residual against the reference the patch measured against (the temporal one, kept by frame and eye, or the world rows).
         const WorldView* rv = r.fixRef == drawtag::kRefTemporal ? refGet(frame, e) : w;
-        if (rv) f50Residual(s, *rv, patched, oh, x0, P, r, W, H, kw, e);
+        if (rv) f50Residual(s, *rv, patched, oh, x0, P, r, W, H, kw, e, frame);
     }
     if (const WorldView* o = worldGet(frame, 1 - e)) {
         const double oo[3] = {o->o[0], o->o[1], o->o[2]};
@@ -13462,11 +13919,11 @@ void readFrame(int slot, uint32_t frame, const uint8_t* d, uint32_t used) {
                 if (m.xHits && (r.eye == 0 || r.eye == 1)) {
                     ks = keySlotAcquire(key, frame);
                     KeyState& K = g_keys[ks];
-                    EyeMatch& em = K.eye[r.eye].match;
-                    if (em.frame == ~0u || static_cast<int32_t>(frame - em.frame) >= 0) {
-                        em.frame = frame;
-                        em.ord = r.ordEye;
-                        em.key = key;
+                    // F63: the read-back confirms (or moves) the eye's held match: this place read the key's record in this frame.
+                    KeyEye& ke = K.eye[r.eye];
+                    if (drawtag::holdEvidence(ke.hold, frame, r.ordEye, m.record, key, true, true) == drawtag::kHoldConfirm) {
+                        ke.pool = r.pool;
+                        ++g_win.eye[r.eye].rbConfirm;
                     }
                     K.record = m.record;
                     KeyWin& kw = g_win.keys[ks];
@@ -13490,8 +13947,30 @@ void readFrame(int slot, uint32_t frame, const uint8_t* d, uint32_t used) {
         }
         // F52 item C: the bookkeeping: each marker composite draw per eye, tagged (read a found record by x), untagged or not copied.
         const bool streamIn = r.streamAt >= 0 && inside(r.streamAt, static_cast<uint64_t>(r.entries) * drawtag::kStreamStride);
-        if (r.eye == 0 || r.eye == 1) g_win.tally[r.eye].note(streamIn, matched && m.xHits);
+        if (r.eye == 0 || r.eye == 1) g_win.tally[r.eye].note(streamIn, matched && m.xHits, (r.flags & kRecCpuSkip) != 0);
         else ++g_win.tallyNoEye;
+        // F63: the read-back's evidence on the held matches at this place (a draw that read no find by x contradicts a hold there when the key
+        // was tagged elsewhere, or when it read another record than the held one), and its verdict on the CPU identification (the record the
+        // entry named at the draw against the read-back's entry 0).
+        if ((r.eye == 0 || r.eye == 1) && streamIn && r.entries > 0) {
+            uint32_t e0[2];
+            std::memcpy(e0, d + r.streamAt, sizeof(e0));
+            const uint32_t rec0 = r.first + e0[0];
+            if (r.cpuHave) {
+                if (rec0 == r.cpuRec) ++g_win.cpuAgree;
+                else ++g_win.cpuDiffer;
+            }
+            if (!(matched && m.xHits) && r.pool)
+                for (uint32_t i = 0; i < kKeySlots; ++i) {
+                    if (!g_keyIdx.used[i]) continue;
+                    KeyEye& ke = g_keys[i].eye[r.eye];
+                    if (!ke.hold.held(frame) || ke.hold.ord != r.ordEye || ke.pool != r.pool) continue;
+                    bool keyHad = false;
+                    for (uint32_t k = 0; k < nFinds && !keyHad; ++k) keyHad = finds[k].pool == r.pool && finds[k].key == g_keyIdx.key[i];
+                    if (drawtag::holdEvidence(ke.hold, frame, r.ordEye, rec0, g_keyIdx.key[i], false, keyHad) == drawtag::kHoldContradict)
+                        ++g_win.eye[r.eye].rbContradict;
+                }
+        }
         // F53: an untagged draw (its stream read, no found record read by x): the record its first entry names, kept with its place in the eye
         // (its position is read at the pool's next Unmap, unmapPool).
         if ((r.eye == 0 || r.eye == 1) && streamIn && r.entries > 0 && r.pool && !(matched && m.xHits)) {
@@ -13532,7 +14011,11 @@ void readFrame(int slot, uint32_t frame, const uint8_t* d, uint32_t used) {
             if (matched) appendf(line, sizeof(line), len, "record %u key %u%s %s, entry %u, x %u y %u", m.record, key,
                                  (key & kF47SecondPostBit) ? " (second post)" : "", m.viaY ? "by y" : "by x", m.entry, m.xHits, m.yHits);
             else if (r.streamAt >= 0) appendf(line, sizeof(line), len, "- (stream read, no record of a find)");
+            else if (r.flags & kRecCpuSkip) appendf(line, sizeof(line), len, "- (not copied: the CPU identification named an untagged record)");
             else appendf(line, sizeof(line), len, "- (stream not copied)");
+            if (r.cpuHave)   // F63: the record the CPU identification named at the draw
+                appendf(line, sizeof(line), len, "; CPU record %u (%s)", r.cpuRec,
+                        r.cpuKind == 1 ? "a find" : r.cpuKind == 2 ? "the held record, untagged" : "untagged");
             if (r.fixApplied) appendf(line, sizeof(line), len, "; PATCHED dx %+.5f dy %+.5f NDC%s", double(r.fixDx), double(r.fixDy),
                                       r.fixHeld ? " (held)" : "");
             appendf(line, sizeof(line), len, "]");
@@ -13782,8 +14265,31 @@ void report(uint64_t nowMs) {
                 else
                     Log::get().note("native on foot marker fix (F62c): eye %d: no decision this second (no marker composite draw of the eye reached "
                                     "the fix)", e);
+                // F63, per eye: where the decisions' matches came from (the CPU identification in this frame, a held match), the hold's P
+                // and X0 fallback, the contradictions (at the draw by the CPU identification, at read-back), the read-back's confirmations;
+                // the per-frame residual of fresh patched frames against P + e (the fixed e) and the bias now subtracted from e.
+                const double rn = s.eN ? double(s.eN) : 1.0;
+                const double bw = s.tw > 0.0 ? s.tw : kDefaultTargetSize, bh = s.th > 0.0 ? s.th : kDefaultTargetSize;
+                Log::get().note("native on foot marker fix (F63): eye %d: matched by the CPU identification %llu, by a held match (%u frames) %llu "
+                                "(P and X0 from the hold's fallback %llu); holds contradicted at the draw %llu, at read-back %llu; read-back "
+                                "confirmations %llu; residual against P + e (fresh patched frames, read back): %llu frames, dx mean %+.2f px, dy "
+                                "mean %+.2f px, max %.2f px; bias subtracted from e %+.2f, %+.2f px (EMA alpha %.2f over %llu frames)",
+                                e, ull(s.viaCpu), kMatchHold, ull(s.viaHold), ull(s.heldPX0), ull(s.cpuContradict), ull(s.rbContradict),
+                                ull(s.rbConfirm), ull(s.eN), s.exSum / rn, s.eySum / rn, s.eMax, g_bias[e].b[0] * bw * 0.5, g_bias[e].b[1] * bh * 0.5,
+                                drawtag::kBiasAlpha, ull(g_bias[e].n));
             }
         }
+        // F63: the CPU identification's second (the fix key on): the stream shadow and what it named, and the read-back's verdict on it.
+        if (fixOn)
+            Log::get().note("native on foot marker fix (F63): CPU identification: instance stream %p (%u bytes) learned %llu; Unmap copies %llu "
+                            "(%.0f us in them), faults %llu, other map types %llu, UpdateSubresource writes (not shadowed) %llu; marker composite "
+                            "draws named: a find %llu, a held record %llu, another record %llu (copies skipped as untagged %llu: eye 0 %llu, eye 1 "
+                            "%llu at read-back), no shadow of the stream this frame %llu, outside the windows %llu; the read-back's entry 0 agrees "
+                            "%llu, differs %llu",
+                            g_stream.res, g_stream.bytes, ull(w.streamLearned), ull(w.streamCopies), double(f30QpcUs(w.streamCopyTicks)),
+                            ull(w.streamFaults), ull(w.streamOtherMaps), ull(w.streamUpdates), ull(w.cpuFind), ull(w.cpuHeldRec), ull(w.cpuOther),
+                            ull(w.cpuSkipped), ull(w.tally[0].skipped), ull(w.tally[1].skipped), ull(w.cpuNoShadow), ull(w.cpuOutside),
+                            ull(w.cpuAgree), ull(w.cpuDiffer));
         // F50, per key and eye (F52: each key has its own baseline): the baseline c and its spread, |m - c| against the head's speed, the
         // patched draws, the residual after the patch by the head's speed, and the honesty check (c by head pitch and roll on slow-head frames,
         // since the last reset). A key-eye with no read and no decision this second is not printed.
@@ -14030,6 +14536,21 @@ __declspec(noinline) bool shadowCopyGuarded(void* dst, const void* src, size_t b
 void nativeOnFootMarkerProbeMap(ID3D11Resource* res, void* data, int mapType) {
     if (!res || !data) return;
     f44::v2Map(res, data, g_f44Frame.load(std::memory_order_relaxed));   // F57 part 2: a tracked b1's Map version
+    // F63: the marker composite draws' instance stream (learned with the fix key on): the mapped pointer and type; the window copy is taken
+    // before the real Unmap. Still a buffer? (The address may have been re-used since it was learned.)
+    if (static_cast<const void*>(res) == f44::g_stream.res) {
+        D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN;
+        res->GetType(&dim);
+        D3D11_BUFFER_DESC d{};
+        if (dim == D3D11_RESOURCE_DIMENSION_BUFFER) static_cast<ID3D11Buffer*>(res)->GetDesc(&d);
+        if (dim != D3D11_RESOURCE_DIMENSION_BUFFER || d.ByteWidth < drawtag::kStreamStride) {
+            f44::g_stream = f44::StreamShadow{};
+        } else {
+            f44::g_stream.bytes = d.ByteWidth;
+            f44::g_stream.mapped = data;
+            f44::g_stream.mapType = mapType;
+        }
+    }
     // F47: a shadowed marker composite b0: the mapped pointer (the copy is taken before the real Unmap). Still a buffer of its size?
     for (f44::CbShadow& s : f44::g_cbShadow) {
         if (s.res != res) continue;
@@ -14078,6 +14599,8 @@ void nativeOnFootMarkerProbeUnmap(const ID3D11Resource* res) {
         if (s.valid) ++f44::g_win.cbMapped;
         break;
     }
+    // F63: the instance stream's windows, before the real Unmap (streaming loads, under SEH).
+    if (f44::g_stream.mapped && static_cast<const void*>(res) == f44::g_stream.res) f44::streamUnmapCopy(g_f44Frame.load(std::memory_order_relaxed));
     for (f44::Pool& p : f44::g_pools)
         if (p.res == res) {
             if (p.mapped) f44::unmapPool(p);
@@ -14087,6 +14610,14 @@ void nativeOnFootMarkerProbeUnmap(const ID3D11Resource* res) {
 
 uint32_t nativeOnFootMarkerFrameNow() {
     return g_f44Frame.load(std::memory_order_relaxed);
+}
+
+bool nativeOnFootMarkerResidual(uint32_t frame, int eye, float out[4]) {
+    if ((eye != 0 && eye != 1) || frame == ~0u) return false;
+    const f44::ResCell& c = f44::g_resRing[eye][frame % f44::kResRing];
+    if (c.frame.load(std::memory_order_acquire) != frame) return false;
+    for (int k = 0; k < 4; ++k) out[k] = c.v[k].load(std::memory_order_relaxed);
+    return c.frame.load(std::memory_order_acquire) == frame;
 }
 
 void nativeOnFootMarkerProbeDraw(ID3D11DeviceContext* ctx, uint32_t instances, uint32_t startInstance, char kind) {
@@ -14118,6 +14649,7 @@ void nativeOnFootMarkerProbeDraw(ID3D11DeviceContext* ctx, uint32_t instances, u
 void nativeOnFootMarkerProbeUpdate(const ID3D11Resource* res, const void* data, bool boxed, uint32_t left, uint32_t right) {
     if (!res || !data) return;
     f44::v2Update(res, g_f44Frame.load(std::memory_order_relaxed));   // F57 part 2: a tracked b1 written by UpdateSubresource
+    if (static_cast<const void*>(res) == f44::g_stream.res) ++f44::g_win.streamUpdates;   // F63: not shadowed (counted: the CPU identification misses)
     for (f44::CbShadow& s : f44::g_cbShadow) {
         if (s.res != res) continue;
         if (!boxed) {
@@ -14247,6 +14779,7 @@ bool nativeOnFootMarkerFixBegin(ID3D11DeviceContext* ctx) {
         r.fixHead = static_cast<float>(g_fix.head);
         r.patchedAt = static_cast<int32_t>(at);
         r.fixRef = static_cast<uint8_t>(g_fix.ref);
+        r.fixFresh = g_fix.fresh;   // F63: only these feed the bias EMA at read-back
     }
     if (!g_fixAppliedNoted) {
         g_fixAppliedNoted = true;
@@ -14273,6 +14806,9 @@ void nativeOnFootMarkerProbeShutdown() {
     f44::g_fix = f44::Fix{};
     for (f44::KeyState& k : f44::g_keys) k = f44::KeyState{};   // F50/F52: every key's baselines
     f44::g_keyIdx = drawtag::KeyIndex<f44::kKeySlots>{};
+    f44::g_stream = f44::StreamShadow{};                          // F63: the stream shadow, the biases, the keys' P
+    for (drawtag::BiasEma& b : f44::g_bias) b = drawtag::BiasEma{};
+    for (f44::KeyP& kp : f44::g_keyP) kp = f44::KeyP{};
     if (f44::g_privCb) f44::g_privCb->Release();
     if (f44::g_workBuf) f44::g_workBuf->Release();
     f44::g_privCb = f44::g_workBuf = nullptr;

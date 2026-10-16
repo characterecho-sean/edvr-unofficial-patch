@@ -1268,9 +1268,11 @@ constexpr double kIkSpineWeight[3] = {1.0 / 3.0, 2.0 / 3.0, 1.0};
 constexpr uint32_t kIkSquarePivot = 34;              // the vertical axis runs through this joint's xz
 constexpr uint32_t kIkClavL = 35, kIkClavR = 36;     // the 3P clavicles (their parent is the chest root, kIkSpine[2])
 constexpr double kIkSwivelTrimMaxDeg = 90.0, kIkSquareAmountDefault = 1.0, kIkElbowOutCmDefault = 6.0, kIkElbowOutCmMax = 30.0;   // F59: 6 cm
-// The FP snapshot's slots (fdAfterAnimate): the attach joints, the hands, the clavicles, the upper arms, the forearms.
-constexpr uint32_t kIkFpJoints[10] = {51, 52, 37, 44, 19, 20, 25, 26, 31, 34};
-constexpr uint32_t kIkFpSlots = 10;
+// The FP snapshot's slots (fdAfterAnimate): the attach joints, the hands, the clavicles, the upper arms, the forearms. F63: and joint 14, the FP
+// def_c_povCamera_joint (the joint probe of log 054928: FP index 14), the ADS sight lock's sight point.
+constexpr uint32_t kIkFpJoints[11] = {51, 52, 37, 44, 19, 20, 25, 26, 31, 34, 14};
+constexpr uint32_t kIkFpSlots = 11;
+constexpr uint32_t kIkFpSlotPov = 10;
 // Per side (0 L, 1 R): the slots of the FP attach, hand, clavicle, upper arm (S'), forearm (E').
 constexpr uint32_t kIkFpSlotAttach[2] = {1, 0}, kIkFpSlotHand[2] = {2, 3}, kIkFpSlotClav[2] = {4, 5}, kIkFpSlotUpper[2] = {6, 7},
                    kIkFpSlotFore[2] = {8, 9};
@@ -2058,5 +2060,81 @@ struct AdsResidualGrowth {
 // The residual's reading per axis: about 0 the view follows the head; about -2 that axis's sign is inverted (the aim turned against the head
 // and the cancel doubled it); about -1 the camera does not take the aim on that axis (the cancel alone turned the view).
 inline double adsResidualRatio(double residual, double head) noexcept { return std::fabs(head) > 1e-9 ? residual / head : 0.0; }
+
+// ---- F63: the ADS sight lock (no key; the F62b head-aim's weight drives it) ------------------------------------------------------------
+// The sight line runs through P14w (the FP povCamera joint 14, model space through the full F_root, no minus d) along the FP root's forward f.
+// The right eye is E_R = cam + halfIpd R^ (R^ the FP root's right made perpendicular to f, signed to agree with the body's right row). The
+// error e = P14w - E_R with its component along f removed (right and up of the sight only), in body axes through the AMC rows (right, up,
+// forward), then seated = seatedFromBody(e_body, 0) (diag(-1, -1, +1) . body): the eye alignment's target-minus-camera convention, so the
+// view run's filter (gain 0.02 a frame, 5 cm a frame) moves the right eye onto the sight line. The applied lock is clamped to 12 cm.
+constexpr double kAdsSightHalfIpdFallback = 0.0315;   // metres, when the per-eye offsets are not known
+constexpr double kAdsSightHalfIpdMin = 0.02, kAdsSightHalfIpdMax = 0.045;
+constexpr double kAdsSightClampM = 0.12;
+// The half IPD from the right eye's head-space x offset (native_temporal's s->eyes[1][3]); the fallback outside 2..4.5 cm or unknown.
+inline double adsSightHalfIpd(bool have, double rightEyeX) noexcept {
+    const double a = std::fabs(rightEyeX);
+    return have && a >= kAdsSightHalfIpdMin && a <= kAdsSightHalfIpdMax ? a : kAdsSightHalfIpdFallback;
+}
+// R^: row0 less its part along the unit f, unit; flipped (and *flipped set) when it points against bodyRight. False on a degenerate input.
+inline bool adsSightRight(const double row0[3], const double f[3], const double bodyRight[3], double out[3], bool* flipped) noexcept {
+    double fu[3];
+    if (!ikUnit(f, fu)) return false;
+    const double d = row0[0] * fu[0] + row0[1] * fu[1] + row0[2] * fu[2];
+    const double p[3] = {row0[0] - d * fu[0], row0[1] - d * fu[1], row0[2] - d * fu[2]};
+    if (!ikUnit(p, out)) return false;
+    const bool flip = out[0] * bodyRight[0] + out[1] * bodyRight[1] + out[2] * bodyRight[2] < 0.0;
+    if (flip)
+        for (int i = 0; i < 3; ++i) out[i] = -out[i];
+    if (flipped) *flipped = flip;
+    return true;
+}
+struct AdsSightErr {
+    double eW[3] = {}, ePerpW[3] = {}, eBody[3] = {}, seated[3] = {};
+    double along = 0.0, perpNorm = 0.0;   // e . f (metres), |e perpendicular|
+};
+// rows: the AMC's 3x3 (row-major: right, up, forward, world). False on a degenerate f.
+inline bool adsSightError(const double p14w[3], const double cam[3], const double rHat[3], double halfIpd, const double f[3], const double rows[9],
+                          AdsSightErr& out) noexcept {
+    double fu[3];
+    if (!ikUnit(f, fu)) return false;
+    for (int i = 0; i < 3; ++i) out.eW[i] = p14w[i] - (cam[i] + halfIpd * rHat[i]);
+    out.along = out.eW[0] * fu[0] + out.eW[1] * fu[1] + out.eW[2] * fu[2];
+    for (int i = 0; i < 3; ++i) out.ePerpW[i] = out.eW[i] - out.along * fu[i];
+    out.perpNorm = std::sqrt(out.ePerpW[0] * out.ePerpW[0] + out.ePerpW[1] * out.ePerpW[1] + out.ePerpW[2] * out.ePerpW[2]);
+    for (int i = 0; i < 3; ++i)
+        out.eBody[i] = out.ePerpW[0] * rows[3 * i] + out.ePerpW[1] * rows[3 * i + 1] + out.ePerpW[2] * rows[3 * i + 2];
+    seatedFromBody(out.eBody, 0.0, out.seated);
+    return true;
+}
+// |v| at most maxM, the direction kept (the eye alignment's clamps: 0.6 m for the view run, kAdsSightClampM for the sight lock).
+inline void clampNorm3(double v[3], double maxM) noexcept {
+    const double n = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+    if (n > maxM)
+        for (int i = 0; i < 3; ++i) v[i] *= maxM / n;
+}
+// The guard, AdsResidualGrowth's pattern in metres: true once |e perpendicular| has stayed at or above the floor and grown by kAdsSightGrowM
+// from where the run started over kAdsSightGrowMs, never falling kAdsSightFallM below its peak (a fall restarts the run).
+constexpr double kAdsSightFloorM = 0.02, kAdsSightGrowM = 0.01, kAdsSightFallM = 0.005;
+constexpr uint64_t kAdsSightGrowMs = 500;
+struct AdsSightGrowth {
+    bool growing = false;
+    uint64_t startMs = 0;
+    double startAbs = 0.0, peak = 0.0;
+    bool step(uint64_t ms, double absM) noexcept {
+        if (!(absM == absM) || absM < kAdsSightFloorM) {
+            growing = false;
+            return false;
+        }
+        if (!growing || absM < peak - kAdsSightFallM) {
+            growing = true;
+            startMs = ms;
+            startAbs = peak = absM;
+            return false;
+        }
+        if (absM > peak) peak = absM;
+        return ms >= startMs + kAdsSightGrowMs && absM - startAbs >= kAdsSightGrowM;
+    }
+    uint64_t runMs(uint64_t ms) const noexcept { return growing && ms > startMs ? ms - startMs : 0; }
+};
 }  // namespace nofoot
 }  // namespace edvr

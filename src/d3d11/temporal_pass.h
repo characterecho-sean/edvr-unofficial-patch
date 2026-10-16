@@ -112,6 +112,9 @@ bool temporalPassChosenRows(float rows[12], bool* bound);
 // in the VS b1 of the eye's first recognised scene draw). False when the pass is not wanted, or the eye has no such draw with valid rows this
 // frame; `resource` (identity only) is that b1, `vsHash` that draw's vertex shader. Side-effect free; render thread.
 bool temporalPassEyeRows(int eye, float rows[12], const void** resource, uint64_t* vsHash);
+// F63 (the native on-foot ADS sight lock): the eye's head-space x offset as native_temporal last noted it before a treat (s->eyes[eye][3];
+// eye 1 is the right eye). False when none was noted (the pass off, or no history yet). Relaxed atomics: any thread.
+bool temporalPassEyeOffsetX(int eye, float* x);
 
 // hotkey.dump_eyes, and the settings menu's "Dump both eyes as seen": the
 // sixteen paired raw/treated left-eye crops, a whole treated overview,
