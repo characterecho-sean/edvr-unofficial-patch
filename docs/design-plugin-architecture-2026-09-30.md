@@ -421,9 +421,13 @@ when ReShade was removed). The rules:
 
 Branch `feat/third-party-plugins` implements 3rd-party plugin support (`include/edvr_plugin_api.h` synchronized with `edvr-mfd`):
 - **Scope: VR only** (PR #92 review, 2026-10-15). The native OpenXR scene pass is the only caller of the add-on update and render bridge, so a flat session
-  discovers, initialises and dispatches no add-on and registers no add-on settings (log: `plugin_manager: initialize skipped, plugins are VR-only and this
-  is a flat session`). Flat support is a follow-up PR: an update and composite hook on the final image before Present, with a flat-session fixture
-  counter in `addon_manager_test`. The profile is fixed at launch (the game is launched in either flat or VR), so no mid-session switch exists.
+  calls no add-on in a flat session. The profile can switch live (`mode_watch.cpp` `commitPosted()`), so the manager follows it with a dormant state and
+  no change to the add-on ABI: a switch to flat suspends (no update, render or input callback; input ownership released through the normal release path;
+  the add-ons' F8 rows hidden, not deleted, through the menu-thread queue; log `plugin_manager: profile switched to flat, N addon(s) suspended ...`), a
+  switch back to VR resumes (callbacks again, rows shown; log `plugin_manager: profile switched to VR, N addon(s) active`). Nothing is unloaded at a
+  switch. A session launched in flat defers discovery, approval and loading to the first switch into VR (logs `plugin_manager: flat session, addon
+  discovery deferred until the profile switches to VR`, then `plugin_manager: profile switched to VR, running the deferred addon discovery`). Flat
+  support proper is a follow-up PR: an update and composite hook on the final image before Present, with a flat-session fixture counter in `addon_manager_test`.
 - **Consolidated core:** First-party features remain inside the monolithic core (per Sean: users want all features anyway; splitting them into separate internal plugins dropped in priority).
 - **Extension Manager (`src/plugins/plugin_manager.{h,cpp}`):**
   - **Trust-On-First-Use (TOFU):** Pre-execution SHA-256 hash calculation via Windows BCrypt before loading candidate DLLs. Candidates in `plugins\` are cross-referenced with `[addons] <stem> = <sha256>` in `edvr.ini`.

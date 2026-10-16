@@ -106,6 +106,9 @@ typedef struct EdvrHostServices {
     // The host removes every setting the addon registered when the addon fails initialisation (onInitialize
     // returns non-zero or faults), when it faults in a later callback and is disabled, and when it shuts down.
     // Getters and setters therefore never outlive the addon's code.
+    // Addons run only while the game is in VR. In a flat session the host is dormant: it makes no callback, hides the
+    // addon's rows and releases its input ownership, and calls everything again when VR resumes. Nothing is unloaded at
+    // a switch, so an addon needs no handling for it.
     int (EDVR_API *registerSetting)(const EdvrPluginSettingDef* setting);
     void (EDVR_API *logNote)(const char* message);
 } EdvrHostServices;

@@ -25,6 +25,7 @@
 #include "../common/runtime_profile.h"
 #include "cross_profile_cost.h"   // the live-session query's cost while flat runs, once a frame (log only)
 #include "../common/temporal_mode.h"          // temporalModeEnabled: the LOD bias default follows fix.temporal_aa
+#include "../plugins/plugin_manager.h"      // PluginManager::onProfileSwitched: the add-ons suspend in a flat profile and resume in VR
 
 #include <windows.h>
 
@@ -450,6 +451,9 @@ void commitPosted(uint64_t packed) {
     runtimeProfileSet(target);
     setVrProfileActive(target == RuntimeProfile::Vr || target == RuntimeProfile::LegacyVr);
     Config::get().switchProfile();
+    // After the settings file is re-picked (the VR approvals in [addons] are read from it) and the profile is in effect: a switch to flat
+    // suspends the addons, a switch to VR resumes them, and a session that began flat runs its deferred discovery now.
+    plugins::PluginManager::instance().onProfileSwitched();
     vrSsaaHoldProfileChanged();
     deviceHookRequestConfigRefresh();  // the forced configure sweep runs later in this presentFrameBoundary
     perfMonitorProfileSwitch();        // the monitor's frame interval restarts; the other profile's stretch is no long frame

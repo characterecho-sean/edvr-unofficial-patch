@@ -31,6 +31,7 @@ static int g_fakeRegisteredEver = 0;
 static bool g_gateBlocked = false;
 static int g_gateClears = 0;
 static int g_gateInstalls = 0;   // times a loading addon asked for the user32 doors
+static bool g_fakeRowsHidden = false;   // what the menu was last told about the addons' rows
 
 namespace edvr {
 int menuRegisterPluginSetting(const char* ownerId, const EdvrPluginSettingDef* setting) {
@@ -45,6 +46,10 @@ void menuRemovePluginSettings(const char* ownerId) {
     for (size_t i = g_fakeSettings.size(); i-- > 0;) {
         if (g_fakeSettings[i].owner == o) g_fakeSettings.erase(g_fakeSettings.begin() + static_cast<ptrdiff_t>(i));
     }
+}
+
+void menuSetPluginRowsHidden(bool hidden) {
+    g_fakeRowsHidden = hidden;
 }
 
 void inputGateInstallForPlugin() {
@@ -511,6 +516,78 @@ int main(int argc, char** argv) {
         edvr::runtimeProfileSet(savedProfile);
         std::error_code ec16;
         std::filesystem::remove_all(sb, ec16);
+    }
+
+    // Case 18 (PR #92 review): the profile switches live. A session that launches flat defers everything to the first switch into VR; a switch
+    // to flat suspends the loaded addon (no callback, input released, rows hidden, nothing unloaded) and a switch back resumes it.
+    {
+        auto sb = makeSandbox(L"dormant");
+        dropFixture(sb, L"settings", L"dormant.dll");
+        const std::string dsha = edvr::plugins::PluginManager::calculateSha256((sb / L"plugins" / L"dormant.dll").wstring());
+        {
+            std::ofstream iniOut(sb / L"edvr.ini");
+            iniOut << "[general]\nmode = vr\n[addons]\ndormant = " << dsha << "\n";
+        }
+        edvr::Config::get().init(sb.wstring());
+        const edvr::RuntimeProfile savedProfile = edvr::runtimeProfileValue();
+        g_fakeSettings.clear();
+        g_fakeRegisteredEver = 0;
+        g_fakeRowsHidden = false;
+
+        edvr::runtimeProfileSet(edvr::RuntimeProfile::Flat);
+        pm.initialize(sb.wstring());
+        check(pm.candidatesSnapshot().empty() && !pm.hasActivePlugins() && g_fakeRegisteredEver == 0 &&
+              GetModuleHandleW(L"dormant.dll") == nullptr,
+              "dormant: launched in flat, initialize discovers and loads nothing");
+        pm.onProfileSwitched();
+        check(g_fakeRegisteredEver == 0 && GetModuleHandleW(L"dormant.dll") == nullptr,
+              "dormant: a profile notification that changes nothing (still flat) loads nothing");
+
+        edvr::runtimeProfileSet(edvr::RuntimeProfile::Vr);
+        pm.onProfileSwitched();
+        check(findCandidate(pm, "dormant").has_value(), "dormant: the first switch into VR discovers the addon");
+        check(pm.hasActivePlugins() && pm.activePluginCount() == 1, "dormant: ...loads the approved addon (lazy load)");
+        check(fakeSettingsOwnedBy("dormant") == 2 && g_fakeRegisteredEver == 2, "dormant: ...and registers its two settings");
+        check(!g_fakeRowsHidden, "dormant: the rows are shown in VR");
+
+        HMODULE hd = GetModuleHandleW(L"dormant.dll");
+        auto updates = hd ? reinterpret_cast<PFN_GetCount>(GetProcAddress(hd, "fixtureGetUpdateCount")) : nullptr;
+        auto renders = hd ? reinterpret_cast<PFN_GetCount>(GetProcAddress(hd, "fixtureGetRenderCount")) : nullptr;
+        check(updates && renders, "dormant: fixture counters resolved");
+        EdvrPosef dhead{};
+        EdvrEyeRenderContext dctx{};
+        dctx.structSize = sizeof(dctx);
+        pm.onUpdate(dhead, 0.016f);
+        pm.onRenderEye(dctx);
+        const int u1 = updates ? updates() : -1;
+        const int r1 = renders ? renders() : -1;
+        check(pm.onFilterInput(1, nullptr) && g_gateBlocked, "dormant: in VR the addon takes input");
+
+        edvr::runtimeProfileSet(edvr::RuntimeProfile::Flat);
+        pm.onProfileSwitched();
+        check(!g_gateBlocked, "dormant: the switch to flat releases the addon's input ownership");
+        check(g_fakeRowsHidden, "dormant: the switch to flat hides the addon's rows");
+        check(fakeSettingsOwnedBy("dormant") == 2, "dormant: ...but does not delete them (they must reappear on resume)");
+        check(GetModuleHandleW(L"dormant.dll") == hd && pm.activePluginCount() == 1, "dormant: the addon stays loaded");
+        check(!pm.hasActivePlugins(), "dormant: the scene pass is told nothing is active");
+        pm.onUpdate(dhead, 0.016f);
+        pm.onRenderEye(dctx);
+        check(!pm.onFilterInput(1, nullptr) && !g_gateBlocked, "dormant: no input filter is called while suspended");
+        check((updates ? updates() : -2) == u1 && (renders ? renders() : -2) == r1, "dormant: no update or render callback is made while suspended");
+
+        edvr::runtimeProfileSet(edvr::RuntimeProfile::Vr);
+        pm.onProfileSwitched();
+        check(!g_fakeRowsHidden, "dormant: the switch back to VR shows the rows again");
+        check(pm.hasActivePlugins(), "dormant: ...and the addon is active again");
+        pm.onUpdate(dhead, 0.016f);
+        pm.onRenderEye(dctx);
+        check((updates ? updates() : -2) == u1 + 1 && (renders ? renders() : -2) == r1 + 1, "dormant: callbacks run again after resume");
+        check(g_fakeRegisteredEver == 2, "dormant: resume does not register the settings a second time");
+        check(pm.onFilterInput(1, nullptr) && g_gateBlocked, "dormant: the resumed addon can take input");
+        pm.shutdown();
+        edvr::runtimeProfileSet(savedProfile);
+        std::error_code ec18;
+        std::filesystem::remove_all(sb, ec18);
     }
 
     // Case 17 (PR #92 review): a fault retires an addon's rows from a thread that is not the menu's. The rows go inert at

@@ -81,7 +81,7 @@ std::string sanitizeStem(const std::wstring& ws) {
     return s;
 }
 
-// True in a flat session, where plugins are not supported (VR-only: docs/design-plugin-architecture-2026-09-30.md). The line is the log's proof
+// True in a flat session, where plugins are dormant (VR-only: docs/design-plugin-architecture-2026-09-30.md). The line is the log's proof
 // that the gate, not a missing plugins directory, is why nothing loaded.
 bool vrOnlyBlocked(const char* what) {
     if (!runtimeFlatProfile()) return false;
@@ -165,23 +165,66 @@ std::string PluginManager::calculateSha256(const std::wstring& path) {
     return hex;
 }
 
+bool PluginManager::dormantLocked() const {
+    return m_dormant || runtimeFlatProfile();
+}
+
 bool PluginManager::initialize(const std::wstring& rootDir) {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
     if (m_initialized) return true;
-    // Plugins are VR-only: the only code that updates and draws them is the native OpenXR scene pass, which a flat session does not run. A flat session
-    // discovers nothing, initialises nothing and so registers no settings. m_initialized stays false, so a later initialize can still run.
-    if (vrOnlyBlocked("initialize")) return true;
     m_initialized = true;
+    m_discovered = false;
     m_rootDir = rootDir;
+    // Plugins are VR-only: the only code that updates and draws them is the native OpenXR scene pass, which a flat session does not run. A session that
+    // begins flat therefore discovers nothing, initialises nothing and registers no settings yet; onProfileSwitched does all of that on the first
+    // switch into VR.
+    if (runtimeFlatProfile()) {
+        m_dormant = true;
+        Log::get().note("plugin_manager: flat session, addon discovery deferred until the profile switches to VR");
+        return true;
+    }
+    m_dormant = false;
+    discoverAndLoad();
+    return true;
+}
 
-    std::wstring pluginsDir = rootDir + L"\\plugins";
+void PluginManager::onProfileSwitched() {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    if (!m_initialized) return;
+    const bool flat = runtimeFlatProfile();
+    if (flat == m_dormant) return;
+    if (flat) {
+        m_dormant = true;
+        // The normal release path, so the release tail applies: a key the addon was holding stays up until it is let go.
+        inputGateSetPluginBlock(false);
+        edvr::menuSetPluginRowsHidden(true);
+        Log::get().note("plugin_manager: profile switched to flat, %zu addon(s) suspended (rows hidden, no callbacks, input released)",
+                        m_plugins.size());
+        return;
+    }
+    m_dormant = false;
+    if (!m_discovered) {
+        Log::get().note("plugin_manager: profile switched to VR, running the deferred addon discovery");
+        discoverAndLoad();
+    }
+    edvr::menuSetPluginRowsHidden(false);
+    size_t active = 0;
+    for (const auto& p : m_plugins) {
+        if (!p.disabled) ++active;
+    }
+    Log::get().note("plugin_manager: profile switched to VR, %zu addon(s) active", active);
+}
+
+void PluginManager::discoverAndLoad() {
+    m_discovered = true;
+    std::wstring pluginsDir = m_rootDir + L"\\plugins";
     std::wstring searchPattern = pluginsDir + L"\\*";
 
     WIN32_FIND_DATAW findData{};
     HANDLE hFind = FindFirstFileW(searchPattern.c_str(), &findData);
     if (hFind == INVALID_HANDLE_VALUE) {
         Log::get().note("plugin_manager: no plugins directory at %ls", pluginsDir.c_str());
-        return true;
+        return;
     }
 
     do {
@@ -234,11 +277,11 @@ bool PluginManager::initialize(const std::wstring& rootDir) {
 
     Log::get().note("plugin_manager: initialized (%zu candidates, %zu active)",
                     m_candidates.size(), m_plugins.size());
-    return true;
 }
 
 bool PluginManager::loadPlugin(CandidatePlugin& cand, const std::string& approvedSha) {
-    if (vrOnlyBlocked("load")) return false;   // defensive: the profile is decided before initialize, but approval must never load an addon that nothing would run
+    if (vrOnlyBlocked("load")) return false;   // approval must never load an addon that nothing would run
+    if (m_dormant) return false;
     // Approval names a hash, so the bytes that run must be the bytes that hash. Hold the file with
     // write and delete sharing denied, hash it through that handle, and load it while the handle is
     // still open: nothing can swap the file between the check and the load.
@@ -332,7 +375,10 @@ void PluginManager::shutdown() {
 
     unloadAll();
     m_candidates.clear();
+    if (m_dormant) edvr::menuSetPluginRowsHidden(false);
     m_initialized = false;
+    m_discovered = false;
+    m_dormant = false;
 }
 
 void PluginManager::unloadAll() {
@@ -357,6 +403,7 @@ void PluginManager::unloadAll() {
 
 bool PluginManager::hasActivePlugins() {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    if (dormantLocked()) return false;   // suspended: nothing will be called, so the scene pass need not try
     for (const auto& p : m_plugins) {
         if (!p.disabled) return true;
     }
@@ -390,6 +437,7 @@ bool PluginManager::approvePlugin(const std::string& stem, const std::string& sh
 ApprovalResult PluginManager::approveCandidate(uint32_t id) {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
     ApprovalResult r;
+    if (dormantLocked()) return r;   // a flat session: there is nothing to run an approved addon, and its row is hidden
     for (auto& cand : m_candidates) {
         if (cand.id != id) continue;
         if (cand.approved) return r;   // already approved: a second activation of a stale row
@@ -417,7 +465,7 @@ bool PluginManager::candidateById(uint32_t id, CandidatePlugin* out) {
 
 void PluginManager::onUpdate(const EdvrPosef& headPose, float dtSeconds) {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
-    if (runtimeFlatProfile()) return;
+    if (dormantLocked()) return;
 
     // Compute accurate real delta time if dtSeconds is defaulted or unmeasured
     LARGE_INTEGER now{};
@@ -447,7 +495,7 @@ void PluginManager::onUpdate(const EdvrPosef& headPose, float dtSeconds) {
 
 void PluginManager::onRenderEye(const EdvrEyeRenderContext& eyeCtx) {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
-    if (runtimeFlatProfile()) return;
+    if (dormantLocked()) return;
     for (auto& p : m_plugins) {
         if (p.disabled || !p.callbacks.onRenderEye) continue;
         DWORD fault = 0;
@@ -465,7 +513,7 @@ void PluginManager::onRenderEye(const EdvrEyeRenderContext& eyeCtx) {
 
 bool PluginManager::onFilterInput(uint32_t deviceType, const void* rawInputData) {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
-    if (runtimeFlatProfile()) {   // defensive: the profile is fixed at launch, but a flat session must never leave a plugin holding input
+    if (dormantLocked()) {   // suspended (or the profile has just turned flat): a dormant addon never holds input
         inputGateSetPluginBlock(false);
         return false;
     }
