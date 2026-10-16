@@ -100,6 +100,12 @@ typedef struct EdvrPluginSettingDef {
 // Host services provided to plugins during initialization
 typedef struct EdvrHostServices {
     uint32_t structSize;
+    // Adds a row to the F8 menu's Plugins page. Returns 0 on success.
+    // Call it only from within onInitialize: anywhere else (after it returns, from onUpdate, onRenderEye,
+    // onFilterInput or another thread) it returns -1 and registers nothing.
+    // The host removes every setting the addon registered when the addon fails initialisation (onInitialize
+    // returns non-zero or faults), when it faults in a later callback and is disabled, and when it shuts down.
+    // Getters and setters therefore never outlive the addon's code.
     int (EDVR_API *registerSetting)(const EdvrPluginSettingDef* setting);
     void (EDVR_API *logNote)(const char* message);
 } EdvrHostServices;

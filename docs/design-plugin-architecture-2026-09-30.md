@@ -423,7 +423,7 @@ Branch `feat/third-party-plugins` implements 3rd-party plugin support (`include/
 - **Scope: VR only** (PR #92 review, 2026-10-15). The native OpenXR scene pass is the only caller of the add-on update and render bridge, so a flat session
   discovers, initialises and dispatches no add-on and registers no add-on settings (log: `plugin_manager: initialize skipped, plugins are VR-only and this
   is a flat session`). Flat support is a follow-up PR: an update and composite hook on the final image before Present, with a flat-session fixture
-  counter in `addon_manager_test`. A profile switch is not wired: VR to flat stops dispatch and refuses new loads, flat to VR loads nothing until restart.
+  counter in `addon_manager_test`. The profile is fixed at launch (the game is launched in either flat or VR), so no mid-session switch exists.
 - **Consolidated core:** First-party features remain inside the monolithic core (per Sean: users want all features anyway; splitting them into separate internal plugins dropped in priority).
 - **Extension Manager (`src/plugins/plugin_manager.{h,cpp}`):**
   - **Trust-On-First-Use (TOFU):** Pre-execution SHA-256 hash calculation via Windows BCrypt before loading candidate DLLs. Candidates in `plugins\` are cross-referenced with `[addons] <stem> = <sha256>` in `edvr.ini`.
