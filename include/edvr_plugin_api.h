@@ -112,6 +112,10 @@ typedef struct EdvrPluginCallbacks {
 
     int (EDVR_API *onInitialize)(const EdvrHostServices* host);
     void (EDVR_API *onShutdown)(void);
+    // headPose is the located head, not either eye: the OpenXR VIEW reference space located in the session's seated origin (the same local
+    // reference space the eyes' eyePose values are expressed in), at the frame's predicted display time. Metres, right-handed, +Y up, -Z forward.
+    // Its position lies between the eyes, so an eye is about half the interpupillary distance to either side of it and may be
+    // canted. Aim a gaze ray from this pose. Called once per frame, only when the head was located with valid position and orientation.
     void (EDVR_API *onUpdate)(const EdvrPosef* headPose, float dtSeconds);
     void (EDVR_API *onRenderEye)(const EdvrEyeRenderContext* eyeCtx);
     void (EDVR_API *onFilterInput)(EdvrInputContext* inputCtx);

@@ -10,6 +10,8 @@
 #include "flat_notice_placement.h"
 #include "flat_notice_raster.h"
 #include "../../include/edvr_plugin_api.h"
+#include "plugin_frame_args.h"
+#include "native_trace.h"
 
 namespace edvr::openxr {
 namespace {
@@ -274,7 +276,8 @@ XrResult D3D11Stereo::initialize(const StereoDispatch& d,XrSession session,ID3D1
 }
 XrResult D3D11Stereo::renderCaptured(const XrView (&views)[2],XrSpace space,const EyeCapture& capture,
                                    XrCompositionLayerProjection& layer, GpuWorkObserver* observer,
-                                   StereoWallTimes* times, const StereoPlacement* placement, float fade) {
+                                   StereoWallTimes* times, const StereoPlacement* placement, float fade,
+                                   const XrPosef* headPose) {
   layer={XR_TYPE_COMPOSITION_LAYER_PROJECTION};
   fade=comfort::sanitize(fade);
   if(ownedImmediateScene_&&GetCurrentThreadId()!=sceneOwnerThread_)return XR_ERROR_CALL_ORDER_INVALID;
@@ -383,18 +386,26 @@ XrResult D3D11Stereo::renderCaptured(const XrView (&views)[2],XrSpace space,cons
       // EDVR 3rd-party extension overlay pass
       g_pluginBridge.ensure();
       if (g_pluginBridge.hasActive && g_pluginBridge.hasActive()) {
+        // One builder for the head and both eyes (plugin_frame_args.h): onUpdate gets the located head, each eye context its own view.
+        const bool headKnown = headPose && poseValid(*headPose);
+        const PluginFrameArgs frameArgs = makePluginFrameArgs(headKnown ? *headPose : views[0].pose, views);
         if (i == 0) {
-          const auto& hPose = views[0].pose;
-          EdvrPosef headPose{};
-          headPose.position.x = hPose.position.x;
-          headPose.position.y = hPose.position.y;
-          headPose.position.z = hPose.position.z;
-          headPose.orientation.x = hPose.orientation.x;
-          headPose.orientation.y = hPose.orientation.y;
-          headPose.orientation.z = hPose.orientation.z;
-          headPose.orientation.w = hPose.orientation.w;
-          if (g_pluginBridge.update) {
-            g_pluginBridge.update(&headPose, 0.016f);
+          // Once, at the first frame a plugin is active: the pose the plugins' update will get beside the left eye's, so a log shows they differ by
+          // about half the IPD and that the head is not an eye.
+          static bool loggedFrameArgs = false;
+          if (!loggedFrameArgs) {
+            loggedFrameArgs = true;
+            if (headKnown)
+              nativeTracePrintf("plugin_frame_args,head=%.4f/%.4f/%.4f q=%.4f/%.4f/%.4f/%.4f,left_eye=%.4f/%.4f/%.4f q=%.4f/%.4f/%.4f/%.4f\n",
+                frameArgs.head.position.x, frameArgs.head.position.y, frameArgs.head.position.z,
+                frameArgs.head.orientation.x, frameArgs.head.orientation.y, frameArgs.head.orientation.z, frameArgs.head.orientation.w,
+                frameArgs.eyePose[0].position.x, frameArgs.eyePose[0].position.y, frameArgs.eyePose[0].position.z,
+                frameArgs.eyePose[0].orientation.x, frameArgs.eyePose[0].orientation.y, frameArgs.eyePose[0].orientation.z, frameArgs.eyePose[0].orientation.w);
+            else
+              nativeTracePrintf("plugin_frame_args,head=unavailable,update=skipped\n");
+          }
+          if (headKnown && g_pluginBridge.update) {
+            g_pluginBridge.update(&frameArgs.head, 0.016f);
           }
           if (g_pluginBridge.filterInput) {
             g_pluginBridge.filterInput(0, nullptr);
@@ -408,17 +419,8 @@ XrResult D3D11Stereo::renderCaptured(const XrView (&views)[2],XrSpace space,cons
           eyeCtx.device = device_.Get();
           eyeCtx.context = drawContext;
           eyeCtx.rtv = rtv;
-          eyeCtx.eyePose.position.x = views[i].pose.position.x;
-          eyeCtx.eyePose.position.y = views[i].pose.position.y;
-          eyeCtx.eyePose.position.z = views[i].pose.position.z;
-          eyeCtx.eyePose.orientation.x = views[i].pose.orientation.x;
-          eyeCtx.eyePose.orientation.y = views[i].pose.orientation.y;
-          eyeCtx.eyePose.orientation.z = views[i].pose.orientation.z;
-          eyeCtx.eyePose.orientation.w = views[i].pose.orientation.w;
-          eyeCtx.eyeFov.angleLeft = views[i].fov.angleLeft;
-          eyeCtx.eyeFov.angleRight = views[i].fov.angleRight;
-          eyeCtx.eyeFov.angleUp = views[i].fov.angleUp;
-          eyeCtx.eyeFov.angleDown = views[i].fov.angleDown;
+          eyeCtx.eyePose = frameArgs.eyePose[i];
+          eyeCtx.eyeFov = frameArgs.eyeFov[i];
           eyeCtx.viewportWidth = eyes_[i].width;
           eyeCtx.viewportHeight = eyes_[i].height;
           g_pluginBridge.renderEye(&eyeCtx);

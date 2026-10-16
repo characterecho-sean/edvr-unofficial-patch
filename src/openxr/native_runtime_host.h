@@ -246,6 +246,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   XrView previousViews[2]{};
   StereoPlacement previousPlacement[2]{};
   XrSpace previousSpace=XR_NULL_HANDLE;
+  XrPosef previousHeadPose{};bool previousHeadValid=false; // the located head of previousViews' frame, for the plugin API's headPose
   uint64_t previousReference=0,withheldPairs=0,replayedPairs=0,emptyWithholds=0;
   NativeFrameClient features;
   NativeFssClient fss;
@@ -2527,14 +2528,21 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     // Explorer Cam's comfort fade, on a replayed pair as much as a fresh one: the level is told to each draw, so a hitch cannot flash the scene. Only a provider
     // that is here and answered version 5 has one to give (native_frame_client.h zeroes the rest); the menu quad is another layer and is not touched.
     const float fade=comfortFade();
-    const auto r=frameWithheld?stereo.renderCaptured(previousViews,previousSpace,previousPair,layer,observer,nullptr,previousPlacement,fade):
-      stereo.renderCaptured(frameViews,frameSpace,captured,layer,observer,&wall,framePlacement,fade);
+    const auto r=frameWithheld?stereo.renderCaptured(previousViews,previousSpace,previousPair,layer,observer,nullptr,previousPlacement,fade,
+                                                     previousHeadValid?&previousHeadPose:nullptr):
+      stereo.renderCaptured(frameViews,frameSpace,captured,layer,observer,&wall,framePlacement,fade,locatedHeadPose());
     submitSample.xrAcquireMs=wall.acquire;submitSample.xrWaitMs=wall.wait;
     submitSample.xrDrawMs=wall.draw;submitSample.xrReleaseMs=wall.release;
     const auto composeClockEnd=QueryPerformanceCounter(&composeEnded);
     if(composeClock&&composeClockEnd) timingFrame.composeMs=elapsedMs(composeBegan,composeEnded);
     if(r==XR_SUCCESS)++composedPairs;
     return r;
+  }
+  // This frame's located head (frameGeometry.headPose, the pose geometry_locator.h located beside the views), or null when it was not located with both
+  // position and orientation valid. The plugin API's headPose; never an eye's pose.
+  const XrPosef* locatedHeadPose() const {
+    constexpr XrSpaceLocationFlags both=XR_SPACE_LOCATION_POSITION_VALID_BIT|XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
+    return frameGeometryAvailable&&(frameGeometry.headFlags&both)==both?&frameGeometry.headPose:nullptr;
   }
   bool sceneLayerAvailable() const override {
     return !frameWithheld || (featureFrame.resubmitEnabled && previousPairValid && previousSpace==frameSpace &&
@@ -2546,6 +2554,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(!pixels||!featureFrame.resubmitEnabled)return;
     if(captured.exchangeBuffers(previousPair)) {
       previousViews[0]=frameViews[0];previousViews[1]=frameViews[1];previousSpace=frameSpace;
+      if(const XrPosef* head=locatedHeadPose()){previousHeadPose=*head;previousHeadValid=true;} else previousHeadValid=false;
       // The kept pair carries the placement it was drawn with; a replay of it
       // under a changed trim would otherwise stretch those pixels.
       previousPlacement[0]=framePlacement[0];previousPlacement[1]=framePlacement[1];

@@ -1,4 +1,7 @@
 #include "../../src/openxr/system_geometry.h"
+#include "../../src/openxr/plugin_frame_args.h"
+#undef near  // windows.h, pulled in by the plugin API's d3d11.h, defines it; this file names a helper near()
+#undef far
 #include <cstdio>
 #include <cstring>
 #include <cmath>
@@ -80,6 +83,23 @@ int selfTest(){
   }}};
   std::thread one(reader),two(reader);writer.join();one.join();two.join();
   check(reads==20000&&!torn,"concurrent readers never see mixed snapshots");
+  { // The plugin API's head pose is the located head, never an eye. Eyes at +-32 mm, each canted 10 degrees, the head turned and raised.
+    GeometryInput f=input();f.headPose={yaw(35),{1,1.6f,-2}};
+    f.views[0].pose={yaw(35+10),{.968f,1.6f,-2.f}};f.views[1].pose={yaw(35-10),{1.032f,1.6f,-2.f}};
+    f.views[0].fov={-.7f,.6f,.5f,-.4f};f.views[1].fov={-.6f,.7f,.5f,-.4f};
+    const PluginFrameArgs a=makePluginFrameArgs(f.headPose,f.views);
+    check(a.head.position.x==f.headPose.position.x&&a.head.position.y==f.headPose.position.y&&a.head.position.z==f.headPose.position.z,"plugin headPose position is the located head");
+    check(a.head.orientation.x==f.headPose.orientation.x&&a.head.orientation.y==f.headPose.orientation.y&&a.head.orientation.z==f.headPose.orientation.z&&a.head.orientation.w==f.headPose.orientation.w,"plugin headPose orientation is the located head");
+    check(a.head.position.x!=f.views[0].pose.position.x&&a.head.orientation.y!=f.views[0].pose.orientation.y,"plugin headPose is not the left eye");
+    for(unsigned e=0;e<2;++e){
+      const auto& p=f.views[e].pose;
+      check(a.eyePose[e].position.x==p.position.x&&a.eyePose[e].position.y==p.position.y&&a.eyePose[e].position.z==p.position.z&&
+            a.eyePose[e].orientation.x==p.orientation.x&&a.eyePose[e].orientation.y==p.orientation.y&&a.eyePose[e].orientation.z==p.orientation.z&&a.eyePose[e].orientation.w==p.orientation.w,
+            "plugin eyePose is that eye's view pose");
+      check(a.eyeFov[e].angleLeft==f.views[e].fov.angleLeft&&a.eyeFov[e].angleRight==f.views[e].fov.angleRight&&
+            a.eyeFov[e].angleUp==f.views[e].fov.angleUp&&a.eyeFov[e].angleDown==f.views[e].fov.angleDown,"plugin eyeFov is that eye's view fov");
+    }
+  }
   std::printf("openxr_geometry_test: %u checks, %u failures\n",checks,failures);return failures?1:0;
 }
 }
