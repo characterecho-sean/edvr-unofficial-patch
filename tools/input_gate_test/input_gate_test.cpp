@@ -584,9 +584,35 @@ static void pluginReleaseScanCases(Device& keyboard) {
             g_tailReader = saved;
         }
 
-        // PR #92 review: a refresh that passed its "is there a tail" check must not resurrect a tail a cancel retired
-        // meanwhile. The refresh is parked on the tail lock (held here) after any check made before the lock; the cancel's
-        // effect (a new generation, no tail) lands under that same hold; the refresh then resumes.
+        // PR #92 review: a refresh must not resurrect a tail a cancel retired. Both drive the production cancelReleaseTail, so
+        // this cannot drift from what the menu's cancel does. First the scan-paused ordering: the refresh has taken its
+        // snapshot (tail {A}, A sampled held) and is parked in its scan with no lock held; the cancel lands; the refresh then
+        // resumes and tries to publish its stale "A still held" result.
+        {
+            const PFN_GetAsyncKeyState saved = g_tailReader;
+            g_tailReader = &physicalKey;
+            physical['A'] = true;
+            captureReleaseTail(&physicalKey);   // tail = {A}
+            g_scanEntered = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+            g_scanMayContinue = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+            g_pauseArmed = true;
+            std::thread refresher([&] { refreshReleaseTail(&sampleThenPauseKey); });
+            const bool entered = WaitForSingleObject(g_scanEntered, 5000) == WAIT_OBJECT_0;
+            check(entered, "refresh racing cancel: the refresh reached its scan of A");
+            cancelReleaseTail();                // the real cancel, while the refresh is parked mid-scan
+            SetEvent(g_scanMayContinue);
+            refresher.join();
+            check(!g_releaseTail.load(), "refresh racing cancel: the cancelled tail is not resurrected by a paused scan");
+            check(!releaseTailVk('A'), "refresh racing cancel: A is not covered after the cancel");
+            CloseHandle(g_scanEntered);
+            CloseHandle(g_scanMayContinue);
+            g_scanEntered = g_scanMayContinue = nullptr;
+            physical['A'] = false;
+            g_tailReader = saved;
+        }
+        // Then the lock-parked ordering: the refresh waits on the tail lock (held here) and the real cancel queues on it too, so
+        // whichever the lock admits first, the tail must end retired: the refresh either sees no tail under the lock or loses the
+        // generation check.
         {
             const PFN_GetAsyncKeyState saved = g_tailReader;
             g_tailReader = &physicalKey;
@@ -595,12 +621,13 @@ static void pluginReleaseScanCases(Device& keyboard) {
             AcquireSRWLockExclusive(&g_tailLock);
             std::thread refresher([&] { refreshReleaseTail(&physicalKey); });
             Sleep(300);                         // bounded: the refresh is now waiting on the lock
-            g_tailGeneration.fetch_add(1);      // what cancelReleaseTail does, under the lock
-            g_releaseTail.store(false);
+            std::thread canceller([&] { cancelReleaseTail(); });
+            Sleep(300);                         // ...and so is the cancel
             ReleaseSRWLockExclusive(&g_tailLock);
             refresher.join();
-            check(!g_releaseTail.load(), "refresh racing cancel: the cancelled tail is not resurrected");
-            check(!releaseTailVk('A'), "refresh racing cancel: A is not covered after the cancel");
+            canceller.join();
+            check(!g_releaseTail.load(), "refresh and cancel both waiting on the lock: the tail ends retired");
+            check(!releaseTailVk('A'), "refresh and cancel both waiting on the lock: A is not covered");
             physical['A'] = false;
             g_tailReader = saved;
         }
