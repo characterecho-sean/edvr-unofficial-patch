@@ -83,6 +83,7 @@ PFN_D3D11CreateDeviceAndSwapChain g_systemCreateDeviceAndSwapChain = nullptr;
 
 edvr::IatPatch g_patchChainedLoadLibraryA;
 edvr::IatPatch g_patchChainedLoadLibraryW;
+edvr::IatPatch g_patchChainedLoadLibraryExA;
 edvr::IatPatch g_patchChainedLoadLibraryExW;
 
 edvr::IatPatch g_patchExeLoadLibraryA;
@@ -397,13 +398,16 @@ void chainThroughOtherProxy(edvr::Config& cfg) {
                           reinterpret_cast<void*>(&hookedLoadLibraryA), &g_patchChainedLoadLibraryA);
     edvr::iatHookInstallIn(chained, "kernel32.dll", "LoadLibraryW",
                           reinterpret_cast<void*>(&hookedLoadLibraryW), &g_patchChainedLoadLibraryW);
+    edvr::iatHookInstallIn(chained, "kernel32.dll", "LoadLibraryExA",
+                          reinterpret_cast<void*>(&hookedLoadLibraryExA), &g_patchChainedLoadLibraryExA);
     edvr::iatHookInstallIn(chained, "kernel32.dll", "LoadLibraryExW",
                           reinterpret_cast<void*>(&hookedLoadLibraryExW), &g_patchChainedLoadLibraryExW);
 
     edvr::Log::get().note(
-        "LoadLibrary deadlock bypass installed in chained proxy: (A=%d, W=%d, ExW=%d)",
+        "LoadLibrary deadlock bypass installed in chained proxy: (A=%d, W=%d, ExA=%d, ExW=%d)",
         g_patchChainedLoadLibraryA.applied ? 1 : 0,
         g_patchChainedLoadLibraryW.applied ? 1 : 0,
+        g_patchChainedLoadLibraryExA.applied ? 1 : 0,
         g_patchChainedLoadLibraryExW.applied ? 1 : 0);
 
     edvr::Log::get().note(
@@ -526,6 +530,7 @@ void shutdown() {
 
     edvr::iatHookUninstall(&g_patchChainedLoadLibraryA);
     edvr::iatHookUninstall(&g_patchChainedLoadLibraryW);
+    edvr::iatHookUninstall(&g_patchChainedLoadLibraryExA);
     edvr::iatHookUninstall(&g_patchChainedLoadLibraryExW);
     edvr::iatHookUninstall(&g_patchExeLoadLibraryA);
     edvr::iatHookUninstall(&g_patchExeLoadLibraryW);
