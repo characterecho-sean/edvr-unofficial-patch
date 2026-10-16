@@ -63,9 +63,12 @@ static void check(bool ok, const char* why) {
 }
 static void hr(HRESULT r, const char* what) { check(SUCCEEDED(r), what); }
 
+// CR dropped: a checkout with core.autocrlf has CRLF sources and edvr.ini, and the pins search for "\n...\n".
 static std::string readFile(const char* path) {
     std::ifstream f(path, std::ios::binary);
-    return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    std::string s((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    s.erase(std::remove(s.begin(), s.end(), '\r'), s.end());
+    return s;
 }
 
 // ============================================================================================ the rule
