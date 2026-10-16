@@ -1818,7 +1818,7 @@ int wmain(int argc, wchar_t** argv) {
             }
             // F62b (TEMPORARY): the ADS head-aim's conventions. The seat convention is yaw + = LEFT, pitch + = UP; the game's yaw delta is + RIGHT and
             // its pitch delta + UP for signs +1. A head yaw of +theta (left) asks the game for -theta (its sign); the game applies gain x input, so the
-            // input is the wanted turn divided by the measured gain (fallback 1.0). F67a deleted the cancel and the guards (tests below).
+            // input is the wanted turn divided by the measured gain (fallback 1.0). F67a deleted the cancel and the guards; F68a restores them (tests below).
             {
                 const double kR = nf::kAdsDeg;
                 check(nf::adsGain(0.0) == 1.0 && nf::adsGain(std::numeric_limits<double>::quiet_NaN()) == 1.0 && nf::adsGain(5e3) == 1.0 &&
@@ -1877,159 +1877,351 @@ int wmain(int argc, wchar_t** argv) {
                       "F62b: the lock is w (h - h_entry) in LOCAL, and through F40's map (diag(1, 1, -1) dH + D s, D = diag(-1, -1, +1)) the camera "
                       "does not move");
             }
-            // F67a: ADS aim without a seated cancel. The weapon is steered onto the view by look input; nothing is published to the seated space.
-            // Conventions: the seat's (yaw + = LEFT, pitch + = UP); the error is view minus weapon, the turn the weapon still needs.
+            // F68a: the ADS head-aim, F62b's map measured properly (nofoot::AdsAimMap, AdsResidual, AdsPressGate). The plant is the game: the look input
+            // the map asks for lands `delay` frames later scaled by the game's gain (0.85), the camera takes the applied turn at once, the map sees what the
+            // processor applied one frame later (the frame thread reads it on the next tick) and cancels exactly that in the seated space.
+            // Conventions: the seat's (yaw + = LEFT, pitch + = UP); the game's yaw delta + is RIGHT, pitch + UP (signs +1).
             {
                 const double kR = nf::kAdsDeg;
-                // (1) The error from the view's axes (the right eye's rows: right +x, up +y, forward +z here) and the weapon's forward. A weapon 10 deg
-                // to the view's LEFT and 4 deg above it must turn right 10 deg and down 4: yaw -10, pitch -4. A degenerate forward is refused.
-                nf::RotFrameSum view;
-                {
-                    const double vr[3] = {1, 0, 0}, vu[3] = {0, 1, 0}, vfw[3] = {0, 0, 1};
-                    view.add(vr, vu, vfw);
-                }
-                const double wY = 10.0 * kR, wP = 4.0 * kR;
-                const double wf[3] = {-std::sin(wY) * std::cos(wP), std::sin(wP), std::cos(wY) * std::cos(wP)};
-                double eY = 0.0, eP = 0.0;
-                const bool okE = nf::adsAimError(view, wf, &eY, &eP);
-                const double none3[3] = {};
-                double dy0 = 9.0, dp0 = 9.0;
-                check(okE && std::fabs(eY + wY) < 1e-9 && std::fabs(eP + wP) < 1e-9 && !nf::adsAimError(view, none3, &dy0, &dp0) && dy0 == 0.0 && dp0 == 0.0,
-                      "F67a: view minus weapon is what the weapon still needs (a weapon 10 deg left of and 4 deg above the view: yaw -10, pitch -4 deg); a "
-                      "degenerate forward is refused");
-                // (2) The cone: inside the bound the offset is clamped to it; past it only a move toward the body passes; NaN asks nothing.
-                const double bound = 20.0 * kR;
-                check(std::fabs(nf::adsConeLimit(18.0 * kR, 5.0 * kR, bound) - 2.0 * kR) < 1e-12 && nf::adsConeLimit(5.0 * kR, 5.0 * kR, bound) == 5.0 * kR &&
-                          nf::adsConeLimit(25.0 * kR, 3.0 * kR, bound) == 0.0 && std::fabs(nf::adsConeLimit(25.0 * kR, -3.0 * kR, bound) + 3.0 * kR) < 1e-12 &&
-                          nf::adsConeLimit(-25.0 * kR, -3.0 * kR, bound) == 0.0 && std::fabs(nf::adsConeLimit(-18.0 * kR, -5.0 * kR, bound) + 2.0 * kR) < 1e-12 &&
-                          nf::adsConeLimit(std::numeric_limits<double>::quiet_NaN(), 1.0, bound) == 0.0 && nf::adsConeLimit(0.0, std::numeric_limits<double>::quiet_NaN(), bound) == 0.0,
-                      "F67a: the cone holds the weapon's yaw offset from the body to 20 deg (18 + 5 passes 2); past it nothing goes further out (25 + 3 asks 0) "
-                      "and a move toward the body passes whole (25 - 3); NaN asks nothing");
-                // (3) A plant. The weapon (yaw, radians) is turned only by look input: what is asked in one frame is applied the next, the game applying
-                // gain x input (its sign, +right, the keys' sign +1) and the hook measuring the gain from the first application; the frame thread sees the
-                // weapon `obsLag` frames late. The loop does not read the applied turn (the in-flight account is the window of recent asks). The camera is the head's: no cancel exists, so the view is whatever the test says.
-                struct Plant {
-                    double weapon = 0.0, hist[8] = {}, input = 0.0, measured = 0.0, asked = 0.0;
-                    void start(double w0) {
-                        weapon = w0;
-                        for (double& h : hist) h = w0;
-                        input = measured = asked = 0.0;
-                    }
-                    nf::AdsAimRun::Out frame(nf::AdsAimRun& run, double viewYaw, double bodyYaw, int obsLag, double realGain, double w, bool yawOn) {
-                        if (input != 0.0) {
-                            const double d = realGain * input;
-                            measured = d / input;
-                            weapon += nf::adsSeatFromGameYaw(d, 1);
-                        }
-                        for (int i = 7; i > 0; --i) hist[i] = hist[i - 1];
-                        hist[0] = weapon;
-                        const double obs = hist[obsLag];
-                        const nf::AdsAimRun::Out o = run.ask(viewYaw - obs, 0.0, w, obs - bodyYaw, nf::kAdsConeBoundDeg * nf::kAdsDeg, yawOn, true);
-                        input = nf::adsInput(nf::adsGameFromSeatYaw(o.yaw, 1), measured);
-                        asked += o.yaw;
+                struct AimPlant {
+                    int delay = 1;
+                    double realGain = 0.85, measY = 0.0, measP = 0.0;          // the hook's measured gains (0 = none yet: 1.0 is used)
+                    double qY[8] = {}, qP[8] = {};                              // input queued by frame (the game's units), read `delay` frames later
+                    double aimY = 0.0, aimP = 0.0, headY = 0.0, headP = 0.0;    // seat radians, cumulative
+                    double seatY = 0.0, seatP = 0.0;                            // the cancel published, cumulative
+                    double prevAppY = 0.0, prevAppP = 0.0;                      // applied last frame, seen by the map this frame
+                    double weapon = 0.0;                                        // sum of the weight x the head's yaw step (what the aim should have taken)
+                    double viewErrMax = 0.0, viewErrMaxY = 0.0, viewErrMaxP = 0.0;
+                    uint64_t k = 0;
+                    bool cameraTakesAim = true;
+                    nf::AdsAimMap map;
+                    nf::AdsRamp ramp;
+                    // One frame (1/90 s): the head's step, whether ADS is held, the sign keys.
+                    nf::AdsAimMap::Out frame(double dHY, double dHP, bool engaged, bool releasing) {
+                        const double dt = 1.0 / 90.0;
+                        // The game's processor: the input asked `delay` frames ago lands now.
+                        const double inY = delay == 0 ? 0.0 : qY[(k + 8 - static_cast<uint64_t>(delay)) % 8], inP = delay == 0 ? 0.0 : qP[(k + 8 - static_cast<uint64_t>(delay)) % 8];
+                        const double gY = realGain * inY, gP = realGain * inP;
+                        if (inY != 0.0) measY = gY / inY;
+                        if (inP != 0.0) measP = gP / inP;
+                        const double appY = nf::adsSeatFromGameYaw(gY, 1), appP = nf::adsSeatFromGamePitch(gP, 1);
+                        aimY += appY;
+                        aimP += appP;
+                        headY += dHY;
+                        headP += dHP;
+                        // The map's tick: it sees last frame's applied turn.
+                        ramp.step(engaged, dt);
+                        const nf::AdsAimMap::Out o = map.step(engaged, releasing, dt, ramp.w, true, dHY, dHP, prevAppY, prevAppP, true, true);
+                        prevAppY = appY;
+                        prevAppP = appP;
+                        seatY += o.cancelYaw;
+                        seatP += o.cancelPitch;
+                        if (engaged) weapon += ramp.w * dHY;
+                        qY[k % 8] = nf::adsInput(nf::adsGameFromSeatYaw(o.injYaw, 1), measY);
+                        qP[k % 8] = nf::adsInput(nf::adsGameFromSeatPitch(o.injPitch, 1), measP);
+                        ++k;
+                        // The view: the head + the aim the camera took - the seated cancel (F61: a seated +a moves the camera by -a).
+                        const double vY = headY + (cameraTakesAim ? aimY : 0.0) - seatY, vP = headP + (cameraTakesAim ? aimP : 0.0) - seatP;
+                        const double eY = std::fabs(vY - headY), eP = std::fabs(vP - headP);
+                        viewErrMaxY = std::max(viewErrMaxY, eY);
+                        viewErrMaxP = std::max(viewErrMaxP, eP);
+                        viewErrMax = std::max(viewErrMax, std::max(eY, eP));
                         return o;
                     }
+                    double viewY() const { return headY + (cameraTakesAim ? aimY : 0.0) - seatY; }
+                    double viewP() const { return headP + (cameraTakesAim ? aimP : 0.0) - seatP; }
                 };
-                int settleFrames[3] = {-1, -1, -1};
-                double finalErr[3] = {9.0, 9.0, 9.0};
-                for (int lag = 0; lag < 3; ++lag) {
-                    Plant pl;
-                    nf::AdsAimRun run;
-                    pl.start(0.0);
-                    for (int t = 0; t < 120; ++t) {
-                        pl.frame(run, 10.0 * kR, 0.0, lag, 0.85, 1.0, true);   // a 10 deg step in the view; the game's gain is 0.85, the first frame reads 1.0
-                        if (settleFrames[lag] < 0 && std::fabs(10.0 * kR - pl.weapon) < 0.1 * kR) settleFrames[lag] = t;
+                // A smooth random head: velocity pulled by noise, damped, capped at maxDps (deterministic).
+                struct Head {
+                    uint32_t s = 12345u;
+                    double vY = 0.0, vP = 0.0, maxDps;
+                    explicit Head(double cap, uint32_t seed = 12345u) : s(seed), maxDps(cap) {}
+                    double rnd() { s = s * 1664525u + 1013904223u; return static_cast<double>((s >> 8) & 0xFFFF) / 32768.0 - 1.0; }
+                    void next(double* dY, double* dP) {
+                        const double cap = maxDps * nf::kAdsDeg;
+                        vY = vY * 0.97 + 0.012 * cap * rnd();
+                        vP = vP * 0.97 + 0.008 * cap * rnd();
+                        vY = std::max(-cap, std::min(cap, vY));
+                        vP = std::max(-0.6 * cap, std::min(0.6 * cap, vP));
+                        *dY = vY / 90.0;
+                        *dP = vP / 90.0;
                     }
-                    finalErr[lag] = std::fabs(10.0 * kR - pl.weapon) / kR;
+                };
+                // (1) The plant whose camera takes the aim (gain 0.85) at 1 and at 2 frames of delay, a head turning at up to 30 deg/s for 60 s: the view equals
+                // the head within 0.5 deg all the time, nothing accumulates (the last 10 s no worse than the first 10), and the weapon (the aim) follows the head.
+                double worst = 0.0, firstMax = 0.0, lastMax = 0.0, aimLag = 0.0, outMax = 0.0;
+                for (int delay = 1; delay <= 2; ++delay) {
+                    AimPlant p;
+                    p.delay = delay;
+                    Head h(30.0, 777u + static_cast<uint32_t>(delay));
+                    double maxFirst = 0.0, maxLast = 0.0;
+                    for (int i = 0; i < 90 * 60; ++i) {
+                        double dY, dP;
+                        h.next(&dY, &dP);
+                        const double before = p.viewErrMax;
+                        p.frame(dY, dP, true, false);
+                        (void)before;
+                        const double e = std::max(std::fabs(p.viewY() - p.headY), std::fabs(p.viewP() - p.headP));
+                        if (i < 90 * 10) maxFirst = std::max(maxFirst, e);
+                        if (i >= 90 * 50) maxLast = std::max(maxLast, e);
+                        outMax = std::max(outMax, std::max(std::fabs(p.map.yawInFlight()), std::fabs(p.map.pitchInFlight())));
+                    }
+                    // The head stops: the aim catches up to w x the head's yaw (the weapon follows the head).
+                    for (int i = 0; i < 20; ++i) p.frame(0.0, 0.0, true, false);
+                    worst = std::max(worst, p.viewErrMax);
+                    firstMax = std::max(firstMax, maxFirst);
+                    lastMax = std::max(lastMax, maxLast);
+                    aimLag = std::max(aimLag, std::fabs(p.aimY - p.weapon));
                 }
-                check(settleFrames[0] >= 0 && settleFrames[0] <= 40 && settleFrames[1] >= 0 && settleFrames[1] <= 40 && settleFrames[2] >= 0 &&
-                          settleFrames[2] <= 40 && finalErr[0] < 0.01 && finalErr[1] < 0.01 && finalErr[2] < 0.01,
-                      "F67a: a camera that does not take the aim: the weapon converges on a 10 deg view step within 0.1 deg inside 40 frames and ends within "
-                      "0.01 deg, at game gain 0.85 and 0, 1 or 2 frames of lag in seeing the weapon (k 0.3, the in-flight turn subtracted)");
-                // A view turning at 20 deg/s (90 Hz) inside the cone is followed within 2 deg, and the weapon lands on it within 0.1 deg 40 frames after it
-                // stops.
+                check(worst < 0.5 * kR && lastMax <= firstMax + 0.05 * kR && aimLag < 0.05 * kR && outMax < 2.0 * kR,
+                      "F68a: a plant whose camera takes the aim (gain 0.85, 1 and 2 frames of delay) with the head turning up to 30 deg/s for 60 s: the view "
+                      "equals the head within 0.5 deg, the last 10 s are no worse than the first (no accumulation), the in-flight account stays under 2 deg "
+                      "and the aim ends within 0.05 deg of the head's weighted turn");
+                // (2) The structural bound: a fast sweep (120 deg/s) still keeps the view within one frame of the applied turn (the map cancels a frame late);
+                // the first frame uses the fallback gain 1.0 and the aim takes 0.85 of it, the cancel is exact anyway.
                 {
-                    Plant pl;
-                    nf::AdsAimRun run;
-                    pl.start(0.0);
-                    double view2 = 0.0, worst = 0.0;
-                    for (int t = 0; t < 120; ++t) {
-                        view2 = std::min(18.0 * kR, view2 + (20.0 / 90.0) * kR);
-                        pl.frame(run, view2, 0.0, 1, 0.85, 1.0, true);
-                        if (t > 30 && t < 80) worst = std::max(worst, std::fabs(view2 - pl.weapon) / kR);
-                    }
-                    for (int t = 0; t < 40; ++t) pl.frame(run, view2, 0.0, 1, 0.85, 1.0, true);
-                    check(worst < 2.0 && std::fabs(view2 - pl.weapon) < 0.1 * kR,
-                          "F67a: a view turning at 20 deg/s inside the cone is followed within 2 deg and the weapon is on it within 0.1 deg 40 frames after it "
-                          "stops");
+                    AimPlant p;
+                    p.delay = 2;
+                    for (int i = 0; i < 90; ++i) p.frame(120.0 * kR / 90.0, 0.0, true, false);
+                    for (int i = 0; i < 10; ++i) p.frame(0.0, 0.0, true, false);
+                    check(p.viewErrMaxY < 1.4 * kR && std::fabs(p.viewY() - p.headY) < 1e-9 && p.measY > 0.8 && p.measY < 0.9,
+                          "F68a: a 120 deg/s sweep keeps the view within 1.4 deg of the head (one frame of the applied turn) and the view equals the head once "
+                          "it stops; the hook's gain reads 0.85");
                 }
-                // (4) The bound holds: a view 45 deg left of the body takes the weapon to 20 deg and no further; the injection then stops; a view back
-                // inside (10 deg) is followed again; a weapon already past the bound (30 deg, the body turned) is not pushed further out.
+                // (3) The first frames use the fallback gain 1.0 and the plant takes 0.85 of the ask: the cancel is the applied turn, so the view still holds.
                 {
-                    Plant pl;
-                    nf::AdsAimRun run;
-                    pl.start(0.0);
-                    double lastAsk = 0.0;
-                    bool cutSeen = false;
-                    for (int t = 0; t < 200; ++t) {
-                        const nf::AdsAimRun::Out o = pl.frame(run, 45.0 * kR, 0.0, 1, 0.85, 1.0, true);
-                        cutSeen = cutSeen || o.limited;
-                        if (t >= 170) lastAsk += std::fabs(o.yaw);
-                    }
-                    const double atBound = pl.weapon / kR;
-                    for (int t = 0; t < 120; ++t) pl.frame(run, 10.0 * kR, 0.0, 1, 0.85, 1.0, true);
-                    const double backDeg = pl.weapon / kR;
-                    Plant past;
-                    nf::AdsAimRun run2;
-                    past.start(30.0 * kR);
-                    double pushed = 0.0;
-                    for (int t = 0; t < 60; ++t) {
-                        const nf::AdsAimRun::Out o = past.frame(run2, 45.0 * kR, 0.0, 1, 0.85, 1.0, true);
-                        pushed += std::max(0.0, o.yaw);
-                    }
-                    check(cutSeen && atBound <= 20.5 && atBound > 19.0 && lastAsk < 0.01 * kR && std::fabs(backDeg - 10.0) < 0.1 && pushed == 0.0 &&
-                              std::fabs(past.weapon - 30.0 * kR) < 1e-9,
-                          "F67a: the bound holds the weapon at 20 deg from the body for a view at 45 deg (it ends between 19 and 20.5), the injection stops there, "
-                          "a view back at 10 deg is followed to within 0.1 deg, and a weapon already at 30 deg is not pushed further out");
+                    AimPlant p;
+                    p.delay = 1;
+                    for (int i = 0; i < 12; ++i) p.frame(0.4 * kR, -0.2 * kR, true, false);
+                    for (int i = 0; i < 6; ++i) p.frame(0.0, 0.0, true, false);
+                    check(std::fabs(p.viewY() - p.headY) < 1e-9 && std::fabs(p.viewP() - p.headP) < 1e-9 && p.viewErrMax < 0.5 * kR,
+                          "F68a: with the fallback gain (none measured yet) the first asks land at 0.85 and are cancelled exactly: the view equals the head");
                 }
-                // (5) Every press starts clean: a press that ran to the bound leaves an in-flight account; reset() clears it, and the next press converges
-                // exactly as a fresh one does.
+                // (4) The map itself: the cancel is exactly the applied turn (the pitch clamp aside), the ask is the weight x the head's step, off axes ask 0.
                 {
-                    Plant a;
-                    nf::AdsAimRun runA;
-                    a.start(0.0);
-                    for (int t = 0; t < 100; ++t) a.frame(runA, 45.0 * kR, 0.0, 1, 0.85, 1.0, true);
-                    runA.push(0.3, 0.0);   // asks still in the window when the press ended, which the next press must not carry
-                    const bool carried = runA.pending(0) != 0.0;
-                    runA.reset();
-                    int fresh = -1, again = -1;
-                    Plant f0;
-                    nf::AdsAimRun runF;
-                    f0.start(0.0);
-                    Plant aAgain;
-                    aAgain.start(0.0);
-                    for (int t = 0; t < 80; ++t) {
-                        f0.frame(runF, 8.0 * kR, 0.0, 1, 0.85, 1.0, true);
-                        aAgain.frame(runA, 8.0 * kR, 0.0, 1, 0.85, 1.0, true);
-                        if (fresh < 0 && std::fabs(8.0 * kR - f0.weapon) < 0.1 * kR) fresh = t;
-                        if (again < 0 && std::fabs(8.0 * kR - aAgain.weapon) < 0.1 * kR) again = t;
+                    nf::AdsAimMap m;
+                    const nf::AdsAimMap::Out o = m.step(true, false, 1.0 / 90.0, 1.0, true, 0.01, -0.02, 0.003, -0.004, true, true);
+                    check(o.cancelYaw == 0.003 && o.cancelPitch == -0.004 && std::fabs(o.injYaw - 0.01) < 1e-15 && std::fabs(o.injPitch + 0.02) < 1e-15 &&
+                              m.yawSeat == 0.003 && m.yawCarried == 0.003 && m.pitchSeat == -0.004,
+                          "F68a: the cancel is exactly what the game applied (seat convention) and the ask is the weight x the head's step");
+                    nf::AdsAimMap halfW, offAxis, noStep;
+                    const nf::AdsAimMap::Out oh = halfW.step(true, false, 1.0 / 90.0, 0.5, true, 0.01, 0.02, 0.0, 0.0, true, true);
+                    const nf::AdsAimMap::Out oa = offAxis.step(true, false, 1.0 / 90.0, 1.0, true, 0.01, 0.02, 0.0, 0.0, false, true);
+                    const nf::AdsAimMap::Out on = noStep.step(true, false, 1.0 / 90.0, 1.0, false, 0.01, 0.02, 0.0, 0.0, true, true);
+                    check(std::fabs(oh.injYaw - 0.005) < 1e-15 && std::fabs(oh.injPitch - 0.01) < 1e-15 && oa.injYaw == 0.0 && std::fabs(oa.injPitch - 0.02) < 1e-15 &&
+                              on.injYaw == 0.0 && on.injPitch == 0.0,
+                          "F68a: the ask scales with the ADS weight, an axis whose sign key is 0 asks nothing, a tick without a head step asks nothing");
+                    // The pitch is held inside +-60 deg with what is in flight: a head pitching up at 45 deg/s for 3 s (135 deg) never takes the seated pitch past
+                    // 60 deg, the view still equals the head (the cancel is exactly what was applied), the aim ends at 60, and a head coming back down 30 deg brings
+                    // the aim back down with it.
+                    AimPlant c;
+                    c.delay = 2;
+                    double pitchMax = 0.0;
+                    for (int i = 0; i < 270; ++i) {
+                        c.frame(0.0, 0.5 * kR, true, false);
+                        pitchMax = std::max(pitchMax, c.map.pitchSeat);
                     }
-                    check(carried && fresh >= 0 && again == fresh && std::fabs(runF.pending(0) - runA.pending(0)) < 1e-12,
-                          "F67a: after reset() a press that had run to the bound (and still held asks in its window) converges in exactly the frames a fresh "
-                          "press does: every ADS press engages and starts clean");
+                    for (int i = 0; i < 10; ++i) c.frame(0.0, 0.0, true, false);
+                    const double aimTop = c.aimP;
+                    for (int i = 0; i < 60; ++i) c.frame(0.0, -0.5 * kR, true, false);
+                    for (int i = 0; i < 10; ++i) c.frame(0.0, 0.0, true, false);
+                    check(pitchMax <= nf::kAdsPitchClampRad + 1e-9 && std::fabs(aimTop - nf::kAdsPitchClampRad) < 0.6 * kR && c.viewErrMax < 0.8 * kR &&
+                              std::fabs(c.aimP - (aimTop - 30.0 * kR)) < 0.1 * kR,
+                          "F68a: the seated pitch is held to +-60 deg with what is in flight (a head pitching up 135 deg stops the aim at 60, the view still equals "
+                          "the head) and a head coming back down 30 deg brings the aim back down 30");
                 }
-                // (6) An axis whose sign key is 0 asks nothing; the weight scales the ask (0 asks nothing, the ramp's half asks half); a NaN error asks 0.
+                // (5) Release: after 20 s of head motion the carried yaw and pitch unwind to zero over 0.3 s (+0.2 s of chase) with the head still, the view
+                // never moves (within one frame of the applied turn), the aim returns to where it started and the map reports the release done.
                 {
-                    nf::AdsAimRun r0, r1, r2, r3;
-                    const nf::AdsAimRun::Out off = r0.ask(0.1, 0.1, 1.0, 0.0, bound, false, true);
-                    const nf::AdsAimRun::Out zero = r1.ask(0.1, 0.1, 0.0, 0.0, bound, true, true);
-                    const nf::AdsAimRun::Out halfW = r2.ask(0.1, 0.1, 0.5, 0.0, bound, true, true);
-                    const nf::AdsAimRun::Out nan = r3.ask(std::numeric_limits<double>::quiet_NaN(), 0.1, 1.0, 0.0, bound, true, true);
-                    check(off.yaw == 0.0 && std::fabs(off.pitch - nf::kAdsAimK * 0.1) < 1e-12 && zero.yaw == 0.0 && zero.pitch == 0.0 &&
-                              std::fabs(halfW.yaw - 0.5 * nf::kAdsAimK * 0.1) < 1e-12 && nan.yaw == 0.0 && std::fabs(nan.pitch - nf::kAdsAimK * 0.1) < 1e-12 &&
-                              nf::kAdsAimK == 0.3 && nf::kAdsConeBoundDeg == 20.0,
-                          "F67a: k is 0.3 and the bound 20 deg; a yaw sign of 0 asks no yaw, the weight scales the ask, a NaN error asks 0");
+                    AimPlant p;
+                    p.delay = 2;
+                    Head h(30.0, 4242u);
+                    for (int i = 0; i < 90 * 20; ++i) {
+                        double dY, dP;
+                        h.next(&dY, &dP);
+                        p.frame(dY, dP, true, false);
+                    }
+                    for (int i = 0; i < 12; ++i) p.frame(0.0, 0.0, true, false);   // settle
+                    const double yaw0 = p.map.yawCarried, pitch0 = p.map.pitchSeat;
+                    p.map.beginRelease();
+                    p.viewErrMax = 0.0;
+                    int frames = 0;
+                    bool done = false;
+                    for (; frames < 90 * 3 && !done; ++frames) {
+                        p.frame(0.0, 0.0, false, true);
+                        done = p.map.releaseDone();
+                    }
+                    for (int i = 0; i < 6; ++i) p.frame(0.0, 0.0, false, true);   // the last asks land
+                    const int limit = static_cast<int>((p.map.relDur + nf::kAdsCatchUpSec) * 90.0) + 3;
+                    check(std::fabs(yaw0) > 0.5 * kR && done && frames <= limit && std::fabs(p.map.yawCarried) < 0.1 * kR && std::fabs(p.map.pitchSeat) < 0.1 * kR &&
+                              p.viewErrMax < 0.8 * kR && std::fabs(p.aimY) < 0.2 * kR && std::fabs(p.aimP) < 0.2 * kR,
+                          "F68a: the release unwinds the carried yaw and the pitch to zero (0.3 s, longer for a big turn: at most 60 deg/s) while the view stays "
+                          "the head's within 0.8 deg and the aim returns to the pre-press direction; the runtime's look base then returns to zero");
+                    check(std::fabs(nf::adsUnwindDuration(10.0 * kR) - 0.3) < 1e-12 && std::fabs(nf::adsUnwindDuration(-60.0 * kR) - 1.0) < 1e-12 &&
+                              nf::adsUnwindDuration(500.0 * kR) == 1.5 && nf::adsUnwindDuration(std::numeric_limits<double>::quiet_NaN()) == 0.3,
+                          "F68a: the unwind takes 0.3 s up to 18 deg, 60 deg per second beyond that, never more than 1.5 s");
+                    (void)pitch0;
+                    // dropSeated clears the seated rotation (a trip or a switch-off: the caller bumps the reset serial for the yaw).
+                    p.map.dropSeated();
+                    check(p.map.yawCarried == 0.0 && p.map.pitchSeat == 0.0 && p.map.yawInFlight() == 0.0 && p.map.pitchInFlight() == 0.0,
+                          "F68a: dropSeated returns the carried yaw, the seated pitch and the in-flight account to zero");
                 }
+                // (6) The guard reads the right eye's rows through AdsResidual. A plant whose camera takes the aim never trips it over 60 s; a camera that does
+                // NOT take the aim (the cancel alone turns the view: the F66 reading) trips it 0.5 s after the residual passes the floor; stale rows never trip it.
+                {
+                    const auto axesAt = [](double yaw, double pitch, double r[3], double u[3], double f[3]) {
+                        const double cy = std::cos(yaw), sy = std::sin(yaw), cp = std::cos(pitch), sp = std::sin(pitch);
+                        // forward = (-sy cp, sp, cy cp) (yaw + = left of +z), right and up from it
+                        f[0] = -sy * cp; f[1] = sp; f[2] = cy * cp;
+                        r[0] = cy; r[1] = 0.0; r[2] = sy;
+                        u[0] = sy * sp; u[1] = cp; u[2] = cy * sp;
+                    };
+                    // normal plant, 60 s
+                    {
+                        AimPlant p;
+                        p.delay = 2;
+                        Head h(30.0, 99u);
+                        nf::AdsResidual res;
+                        bool tripped = false, havePrev = false;
+                        double viewPrevY = 0.0, viewPrevP = 0.0, maxRes = 0.0;
+                        uint64_t ms = 10000;
+                        for (int i = 0; i < 90 * 60; ++i, ms += 11) {
+                            double dY, dP;
+                            h.next(&dY, &dP);
+                            p.frame(dY, dP, true, false);
+                            // the guard sees the rows of the previous frame (the render thread is a frame behind) and this frame's head
+                            double vr[3], vu[3], vf[3], hr[3], hu[3], hf[3];
+                            axesAt(viewPrevY, viewPrevP, vr, vu, vf);
+                            axesAt(p.headY, p.headP, hr, hu, hf);
+                            if (havePrev) {
+                                const nf::AdsResidual::Result r = res.step(ms, true, vr, vu, vf, true, hr, hu, hf, true, true);
+                                tripped = tripped || r == nf::AdsResidual::kTrip;
+                                maxRes = std::max(maxRes, res.maxAbs);
+                            }
+                            viewPrevY = p.viewY();
+                            viewPrevP = p.viewP();
+                            havePrev = true;
+                        }
+                        check(!tripped && maxRes < 3.0 && res.have,
+                              "F68a: the guard (the right eye's rows against the head) never trips on a camera that takes the aim over 60 s of head motion; the "
+                              "residual stays under 3 deg (the render thread's frame of lag)");
+                    }
+                    // a camera that does not take the aim: the residual is minus the cancel, growing with the aim
+                    {
+                        AimPlant p;
+                        p.delay = 1;
+                        p.cameraTakesAim = false;
+                        nf::AdsResidual res;
+                        bool tripped = false;
+                        uint64_t tripMs = 0, floorMs = 0, ms = 10000;
+                        for (int i = 0; i < 90 * 8; ++i, ms += 11) {
+                            p.frame(0.35 * kR, 0.0, true, false);   // 31.5 deg/s to the left for 8 s
+                            double vr[3], vu[3], vf[3], hr[3], hu[3], hf[3];
+                            axesAt(p.viewY(), p.viewP(), vr, vu, vf);
+                            axesAt(p.headY, p.headP, hr, hu, hf);
+                            const nf::AdsResidual::Result r = res.step(ms, true, vr, vu, vf, true, hr, hu, hf, true, true);
+                            if (floorMs == 0 && res.have && std::sqrt(res.res[0] * res.res[0] + res.res[1] * res.res[1]) >= nf::kAdsResFloorDeg) floorMs = ms;
+                            if (!tripped && r == nf::AdsResidual::kTrip) {
+                                tripped = true;
+                                tripMs = ms;
+                            }
+                        }
+                        check(tripped && floorMs != 0 && tripMs >= floorMs + 500 && tripMs <= floorMs + 800 &&
+                                  std::fabs(nf::adsResidualRatio(res.res[0], res.head[0]) + 1.0) < 0.15,
+                              "F68a: a camera that does not take the aim trips the guard 0.5 s after the residual passes 8 deg, and the ratio reads -1");
+                    }
+                    // stale rows (a frozen source, or none) while the head turns 90 deg: nothing changes, nothing trips, the base survives
+                    {
+                        nf::AdsResidual res;
+                        double vr[3], vu[3], vf[3], hr[3], hu[3], hf[3];
+                        axesAt(0.0, 0.0, vr, vu, vf);
+                        axesAt(0.0, 0.0, hr, hu, hf);
+                        const nf::AdsResidual::Result base = res.step(1000, true, vr, vu, vf, true, hr, hu, hf, true, true);
+                        bool trip = false;
+                        nf::AdsResidual::Result stale = nf::AdsResidual::kMeasured;
+                        for (int i = 1; i <= 300; ++i) {
+                            axesAt(i * 0.3 * kR, 0.0, hr, hu, hf);   // the head turns 90 deg in 3.3 s; no fresh view rows at all
+                            stale = res.step(1000 + 11 * static_cast<uint64_t>(i), false, vr, vu, vf, true, hr, hu, hf, true, true);
+                            trip = trip || stale == nf::AdsResidual::kTrip;
+                        }
+                        // the head sample missing is the same
+                        const nf::AdsResidual::Result noHead = res.step(5000, true, vr, vu, vf, false, hr, hu, hf, true, true);
+                        check(base == nf::AdsResidual::kBase && !trip && stale == nf::AdsResidual::kNone && noHead == nf::AdsResidual::kNone && res.haveBase,
+                              "F68a: frames without fresh right-eye rows (or without a head sample) change nothing and never trip the guard");
+                    }
+                    // a view step over 15 deg in one tick (a cut) is a new base, not a residual
+                    {
+                        nf::AdsResidual res;
+                        double vr[3], vu[3], vf[3], hr[3], hu[3], hf[3];
+                        axesAt(0.0, 0.0, vr, vu, vf);
+                        axesAt(0.0, 0.0, hr, hu, hf);
+                        res.step(1000, true, vr, vu, vf, true, hr, hu, hf, true, true);
+                        axesAt(40.0 * kR, 0.0, vr, vu, vf);
+                        const nf::AdsResidual::Result r = res.step(1011, true, vr, vu, vf, true, hr, hu, hf, true, true);
+                        axesAt(41.0 * kR, 0.0, vr, vu, vf);
+                        const nf::AdsResidual::Result r2 = res.step(1022, true, vr, vu, vf, true, hr, hu, hf, true, true);
+                        check(r == nf::AdsResidual::kRebased && res.rebases == 1 && r2 == nf::AdsResidual::kMeasured && std::fabs(res.view[0] - 1.0) < 1e-6 &&
+                                  std::fabs(res.res[0] - 1.0) < 1e-6,
+                              "F68a: a 40 deg view step in one tick takes a new base (rebased 1), then measures from it (the next 1 deg step reads 1 deg)");
+                    }
+                    // the player's own aim and an off axis are not residual
+                    {
+                        nf::AdsResidual res;
+                        double vr[3], vu[3], vf[3], hr[3], hu[3], hf[3];
+                        axesAt(0.0, 0.0, vr, vu, vf);
+                        axesAt(0.0, 0.0, hr, hu, hf);
+                        res.step(1000, true, vr, vu, vf, true, hr, hu, hf, true, true);
+                        axesAt(10.0 * kR, 5.0 * kR, vr, vu, vf);
+                        res.addUser(10.0 * kR, 5.0 * kR);
+                        res.step(1011, true, vr, vu, vf, true, hr, hu, hf, true, true);
+                        const double own0 = res.res[0], own1 = res.res[1];
+                        nf::AdsResidual off;
+                        axesAt(0.0, 0.0, vr, vu, vf);
+                        off.step(1000, true, vr, vu, vf, true, hr, hu, hf, true, true);
+                        axesAt(10.0 * kR, 5.0 * kR, vr, vu, vf);
+                        off.step(1011, true, vr, vu, vf, true, hr, hu, hf, false, true);
+                        check(std::fabs(own0) < 1e-6 && std::fabs(own1) < 1e-6 && off.res[0] == 0.0 && std::fabs(off.res[1] - 5.0) < 1e-6,
+                              "F68a: the player's own aim turn is subtracted from the residual, and an axis whose sign key is 0 reads 0");
+                    }
+                }
+                // (7) The growth rule itself, and the press gate.
+                {
+                    nf::AdsResidualGrowth grow, steady, tiny;
+                    bool growTrip = false, steadyTrip = false, smallTrip = false;
+                    uint64_t tripAt = 0;
+                    for (int i = 0; i <= 100; ++i) {
+                        const uint64_t ms = 1000 + 10 * static_cast<uint64_t>(i);
+                        const double head = 0.1 * i;
+                        if (!growTrip && grow.step(ms, 2.0 * head, head)) {
+                            growTrip = true;
+                            tripAt = ms;
+                        }
+                        steadyTrip = steadyTrip || steady.step(ms, 9.0, 40.0);   // a 9 deg lag against a 40 deg turn: under half of it
+                        smallTrip = smallTrip || tiny.step(ms, 0.06 * i, 0.0);   // under the 8 deg floor all along
+                    }
+                    check(growTrip && tripAt >= 1000 + 400 + 500 && tripAt <= 1000 + 400 + 510 && !steadyTrip && !smallTrip && nf::kAdsResFloorDeg == 8.0 &&
+                              nf::kAdsResGrowMs == 500u,
+                          "F68a: the growth rule trips 0.5 s after the residual (twice the head's turn) passes the 8 deg floor, never on a steady residual under "
+                          "half the head's turn or on one under the floor");
+                    nf::AdsPressGate gate;
+                    const bool first = gate.allow(true);       // press 1 engages
+                    gate.holdOff();                            // the guard trips
+                    const bool held = !gate.allow(true);       // still pressed: held off
+                    const bool heldAgain = !gate.allow(true);
+                    gate.allow(false);                         // released
+                    const bool again = gate.allow(true);       // press 2 engages: no latch
+                    check(first && held && heldAgain && again && !gate.heldOff,
+                          "F68a: a trip holds the feature off until the ADS flag falls, and the next press engages (re-armed on every press, no latch)");
+                }
+                // (8) The seat/pitch helpers.
+                check(std::fabs(nf::adsPitchLimit(55.0 * kR, 10.0 * kR) - 5.0 * kR) < 1e-12 && nf::adsPitchLimit(60.0 * kR, 1.0 * kR) == 0.0 &&
+                          std::fabs(nf::adsPitchLimit(60.0 * kR, -5.0 * kR) + 5.0 * kR) < 1e-12 &&
+                          std::fabs(nf::adsPitchLimit(-58.0 * kR, -5.0 * kR) + 2.0 * kR) < 1e-12 &&
+                          std::fabs(nf::adsClampPitch(70.0 * kR) - 60.0 * kR) < 1e-12 && std::fabs(nf::adsClampPitch(-61.0 * kR) + 60.0 * kR) < 1e-12 &&
+                          nf::adsClampPitch(std::numeric_limits<double>::quiet_NaN()) == 0.0 && std::fabs(nf::adsUnwindTarget(20.0, 0.15) - 10.0) < 1e-12 &&
+                          nf::adsUnwindTarget(20.0, 0.3) == 0.0 && nf::adsUnwindTarget(20.0, 0.0) == 20.0,
+                      "F68a: the seated pitch is clamped to +-60 deg (55 + 10 passes 5; at 60 nothing more; back toward zero whole; NaN 0) and the unwind falls "
+                      "linearly to 0 over 0.3 s");
             }
             // F67b: the ADS instruments.
             {
@@ -2052,6 +2244,29 @@ int wmain(int argc, wchar_t** argv) {
                           std::fabs(m05[0] - 0.03 / 0.405) < 1e-6 && std::fabs(m10[0] - 0.03 / 9.905) < 1e-6 && std::fabs(m05[0] - m10[0]) > 0.07,
                       "F67b: the sight at 0.5 m and at 10 m from P14: an eye on the line sees both at the same NDC (0, 0); an eye 3 cm beside it sees them "
                       "apart (0.0741 and 0.0030); P14 itself, behind the eye, is refused");
+            }
+            // F68b: the sight against the fire line: the ray through an NDC point of an eye's scene rows, and the angle between two NDC points.
+            {
+                // A symmetric eye (tangents +-1) at the origin looking along +z, as the F67b check builds it.
+                float rows[16] = {};
+                const double c[4][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 0.01}, {0, 0, 1}};
+                for (int j = 0; j < 4; ++j)
+                    for (int i = 0; i < 3; ++i) rows[4 * i + j] = static_cast<float>(c[j][i]);
+                const double centre[2] = {0.0, 0.0}, p[2] = {0.1, -0.05}, q[2] = {-0.2, 0.0};
+                double ray[3], right = 0.0, up = 0.0, total = 0.0, right2 = 0.0, up2 = 0.0, total2 = 0.0, right3 = 0.0, up3 = 0.0, total3 = 0.0;
+                const bool okRay = nf::ndcRay(rows, centre, ray) && std::fabs(ray[0]) < 1e-12 && std::fabs(ray[1]) < 1e-12 && std::fabs(ray[2] - 1.0) < 1e-12;
+                const bool okA = nf::ndcAngles(rows, centre, p, &right, &up, &total);
+                const bool okB = nf::ndcAngles(rows, p, q, &right2, &up2, &total2);
+                const bool same = nf::ndcAngles(rows, p, p, &right3, &up3, &total3);
+                const double kDeg = 180.0 / 3.14159265358979323846;
+                check(okRay && okA && okB && same && std::fabs(right - std::atan(0.1) * kDeg) < 1e-9 && std::fabs(up - std::atan(-0.05) * kDeg) < 1e-9 &&
+                          std::fabs(total - std::acos(1.0 / std::sqrt(1.0 + 0.1 * 0.1 + 0.05 * 0.05)) * kDeg) < 1e-9 && std::fabs(right2 - (std::atan(-0.2) - std::atan(0.1)) * kDeg) < 1e-9 &&
+                          std::fabs(up2 - std::atan(0.05) * kDeg) < 1e-9 && total2 > std::fabs(right2) - 1e-9 && std::fabs(total3) < 1e-6 && std::fabs(right3) < 1e-12,
+                      "F68b: the angle between two NDC points of an eye's rows: the point (0.1, -0.05) is 5.71 deg right and 2.86 deg below the centre on a 45 deg "
+                      "half-FOV eye (6.38 deg between the rays), the sign is to-minus-from, and a point against itself is 0");
+                float degenerate[16] = {};
+                double d1 = 0.0, d2 = 0.0, d3 = 0.0;
+                check(!nf::ndcAngles(degenerate, centre, p, &d1, &d2, &d3) && d1 == 0.0 && d2 == 0.0 && d3 == 0.0, "F68b: degenerate rows give no angle (zeros)");
             }
             // F63: the ADS sight lock. The body's axes are the world's (AMC rows right +x, up +y, forward +z), the camera at (0, 1.7, 0).
             {
@@ -2131,44 +2346,6 @@ int wmain(int argc, wchar_t** argv) {
                 }
                 check(trippedAt && when == 500u && !fallTrip && !steadyTrip && !smallTrip,
                       "F63: the sight lock's guard trips when |e perpendicular| grows for 0.5 s, not when it falls, holds or stays under 2 cm");
-            }
-            // F64: the eye height (full-3P body mode only; the frame thread zeroes it outside).
-            {
-                // (1) The seated sign: raiseSeated(h) gives seated y = -h, and through the calibration (body = -seated in y) the body (the
-                // camera) rises by +h; the same as seatedFromBody({0, h, 0}, 0). The default 4 cm is 0.04 m.
-                const double h = nf::eyeHeightM(nf::kEyeHeightDefaultCm, 1.0, 0.0);
-                double sy[3] = {}, viaBody[3] = {};
-                nf::raiseSeated(h, sy);
-                const double upB[3] = {0.0, h, 0.0};
-                nf::seatedFromBody(upB, 0.0, viaBody);
-                const double bodyY = -sy[1];
-                check(std::fabs(h - 0.04) < 1e-12 && sy[0] == 0.0 && sy[2] == 0.0 && std::fabs(sy[1] + 0.04) < 1e-12 &&
-                          std::fabs(bodyY - 0.04) < 1e-12 && std::fabs(viaBody[1] - sy[1]) < 1e-12 && viaBody[0] == 0.0 && viaBody[2] == 0.0,
-                      "F64: the eye height's seated y is minus the raise and the body (camera) rises by plus the raise (4 cm by default)");
-                // (2) The 0.3 s ramp (IkBlend at kEyeHeightRampSec): half at 0.15 s, full at 0.3 s, held at 1; down over 0.3 s the same way.
-                nf::IkBlend ramp{0.0f, nf::kEyeHeightRampSec};
-                for (int i = 0; i < 15; ++i) ramp.step(true, 0.01);
-                const double ehHalf = nf::eyeHeightM(4.0, static_cast<double>(ramp.w), 0.0);
-                for (int i = 0; i < 15; ++i) ramp.step(true, 0.01);
-                const double ehFull = nf::eyeHeightM(4.0, static_cast<double>(ramp.w), 0.0);
-                for (int i = 0; i < 10; ++i) ramp.step(true, 0.01);
-                const float ehHeld = ramp.w;
-                for (int i = 0; i < 15; ++i) ramp.step(false, 0.01);
-                const float ehDown = ramp.w;
-                check(nf::kEyeHeightRampSec == 0.3 && std::fabs(ehHalf - 0.02) < 1e-6 && std::fabs(ehFull - 0.04) < 1e-6 && ehHeld == 1.0f &&
-                          std::fabs(ehDown - 0.5f) < 1e-5f,
-                      "F64: the eye height ramps in over 0.3 s (2 cm of 4 at 0.15 s) and out the same way");
-                // (3) The ADS fade: times (1 - the ADS head-aim weight): 4 cm at 0, 2 cm at 0.5, none at 1; a weight past 1 or NaN clamps.
-                const double ehA0 = nf::eyeHeightM(4.0, 1.0, 0.0), ehA5 = nf::eyeHeightM(4.0, 1.0, 0.5), ehA1 = nf::eyeHeightM(4.0, 1.0, 1.0),
-                             ehOver = nf::eyeHeightM(4.0, 1.0, 1.5), ehNan = nf::eyeHeightM(4.0, 1.0, std::numeric_limits<double>::quiet_NaN());
-                check(std::fabs(ehA0 - 0.04) < 1e-12 && std::fabs(ehA5 - 0.02) < 1e-12 && ehA1 == 0.0 && ehOver == 0.0 &&
-                          std::fabs(ehNan - 0.04) < 1e-12,
-                      "F64: the eye height fades with the ADS head-aim weight (1 - w): 4, 2, 0 cm at w 0, 0.5, 1");
-                // (4) The slider's clamp: 0..15 cm, NaN takes the default 4; a ramp of 0 (outside full 3P) gives nothing.
-                check(nf::eyeHeightClampCm(-2.0) == 0.0 && nf::eyeHeightClampCm(20.0) == 15.0 && nf::eyeHeightClampCm(7.5) == 7.5 &&
-                          nf::eyeHeightClampCm(std::numeric_limits<double>::quiet_NaN()) == 4.0 && nf::eyeHeightM(15.0, 0.0, 0.0) == 0.0 &&
-                          std::fabs(nf::eyeHeightM(15.0, 1.0, 0.0) - 0.15) < 1e-12,
-                      "F64: the eye height slider is clamped to 0..15 cm (NaN: 4); a zero ramp applies nothing");
             }
             // F65a: the connection retry's gate, the armed hand weight, the reach limit's projection.
             {
@@ -2349,6 +2526,262 @@ int wmain(int argc, wchar_t** argv) {
                           nf::pinState(0.0, 0.0, true) == 3 && nf::pinState(4.0, -1.0, false) == 3,
                       "F67c: the state bins: standing (under 0.35 m/s), walking, running (3 m/s), jumping (vertical speed over 0.8 m/s or both feet high)");
             }
+            // F68g: the armed-move trace's gate: armed and over 1 m/s starts a 40-call event; at most 5 events a minute, at least a second apart.
+            {
+                const uint64_t freq = 1000000ull;   // 1 tick = 1 us in the model
+                nf::ArmMoveGate g;
+                uint32_t ev = 0, idx = 0;
+                uint64_t q = 5000000ull;
+                bool slowOrUnarmed = false;
+                for (int i = 0; i < 90; ++i, q += 11111) slowOrUnarmed = g.step(true, 0.9, q, freq, &ev, &idx) || g.step(false, 5.0, q, freq, &ev, &idx) || slowOrUnarmed;
+                uint32_t posted = 0, maxIdx = 0, firstEv = 0;
+                for (int i = 0; i < 100; ++i, q += 11111)   // 1.1 s of 3 m/s armed
+                    if (g.step(true, 3.0, q, freq, &ev, &idx)) {
+                        if (!posted) firstEv = ev;
+                        ++posted;
+                        maxIdx = std::max(maxIdx, idx);
+                    }
+                // Over a minute of continuous armed running at 90 Hz: 5 events started in the first 60 s, 40 calls each, and the sixth only after the first aged out.
+                uint32_t calls = 0, events = 1;
+                uint32_t lastEv = firstEv;
+                nf::ArmMoveGate g2;
+                uint64_t q2 = 7000000ull;   // a QPC that is not 0
+                for (int i = 0; i < 90 * 60; ++i, q2 += 11111)
+                    if (g2.step(true, 3.0, q2, freq, &ev, &idx)) {
+                        ++calls;
+                        if (ev != lastEv && lastEv != 0 && idx == 0) ++events;
+                        lastEv = ev;
+                    }
+                const uint32_t startsInMinute = g2.nStarts;
+                uint32_t lateCalls = 0;
+                for (int i = 0; i < 80; ++i, q2 += 11111) lateCalls += g2.step(true, 3.0, q2, freq, &ev, &idx) ? 1u : 0u;   // the first start ages out at 60 s
+                check(!slowOrUnarmed && firstEv == 1 && posted >= 40 && maxIdx == 39 && startsInMinute == 5 && calls == 5 * 40 && events == 5 && lateCalls == 40,
+                      "F68g: the trace starts only when armed and over 1 m/s, runs exactly 40 calls (0..39), starts at most 5 events in a minute (200 calls) and the "
+                      "sixth once the first has aged out");
+            }
+            // F68d: the arms follow the FP hands. The detector on recorded rest and raised poses (the FP right attach in the FP model space), no ramp at the
+            // onset, and Status.json as the authority with the 1.5 s veto.
+            {
+                const double dtF = 1.0 / 90.0;
+                const double rest[3] = {0.25, -0.10, 0.30}, raised[3] = {0.25 + 0.15, -0.10 + 0.20, 0.30 + 0.25};   // 35.4 cm apart
+                // (1) The rest pose is captured after 0.4 s of fists with the hand still; nothing is up.
+                nf::FpHandsUp a;
+                int capturedAt = -1;
+                nf::FpHandsUp::Out o;
+                for (int i = 0; i < 45; ++i) {
+                    o = a.step(dtF, true, rest, true);
+                    if (o.restCaptured && capturedAt < 0) capturedAt = i;
+                }
+                check(capturedAt >= 36 && capturedAt <= 38 && a.haveRest && std::fabs(a.rest[0] - rest[0]) < 1e-12 && !o.up && !o.signal && o.w == 0.0 && o.dist == 0.0,
+                      "F68d: the unarmed rest pose is captured once Status.json says fists and the hand has been still for 0.4 s (frame 37)");
+                // (2) The hand rises 35 cm with Status.json still saying fists: the very first frame is up and the weight is 1 (no ramp).
+                o = a.step(dtF, true, raised, true);
+                check(o.up && o.signal && !o.vetoed && o.w == 1.0 && std::fabs(o.dist - std::sqrt(0.125)) < 1e-9,
+                      "F68d: the FP hand 35 cm from its rest pose is up on its first frame and takes the arms' full weight at once (no ramp), Status.json still on fists");
+                // (3) The hysteresis (up past 12 cm, down under 9 cm) and the weight's 0.3 s fall.
+                nf::FpHandsUp h;
+                for (int i = 0; i < 45; ++i) h.step(dtF, true, rest, true);
+                const auto hAt = [&](double dist) {
+                    double p[3] = {rest[0] + dist, rest[1], rest[2]};
+                    return h.step(dtF, true, p, true);
+                };
+                const nf::FpHandsUp::Out under = hAt(0.11), over = hAt(0.13), inBand = hAt(0.10), inBand2 = hAt(0.095), down = hAt(0.085);
+                check(!under.up && over.up && inBand.up && inBand2.up && !down.up && !down.signal && down.w < 1.0 && down.w > 0.9,
+                      "F68d: up past 12 cm, still up at 10 and 9.5 cm, down under 9 cm; the weight starts falling when the signal ends");
+                nf::FpHandsUp::Out fall = down;
+                int fallFrames = 0;
+                while (fall.w > 0.0 && fallFrames < 100) {
+                    fall = hAt(0.0);
+                    ++fallFrames;
+                }
+                check(fallFrames >= 25 && fallFrames <= 28, "F68d: the weight falls to 0 over 0.3 s once the signal ends (no snap of the arms)");
+                // (4) The veto: hands up with the fists, counted from the hands going up. Held still 2 s: armed for 1.5 s, then not armed, the weight falling over 0.3 s.
+                nf::FpHandsUp v;
+                for (int i = 0; i < 45; ++i) v.step(dtF, true, rest, true);
+                int firstVeto = -1;
+                nf::FpHandsUp::Out ov;
+                for (int i = 0; i < 180; ++i) {
+                    ov = v.step(dtF, true, raised, true);
+                    if (ov.vetoed && firstVeto < 0) firstVeto = i;
+                    if (i == 100) check(ov.signal && !ov.vetoed && ov.w == 1.0, "F68d: hands up with the fists for 1.1 s are still armed");
+                }
+                check(firstVeto >= 134 && firstVeto <= 137 && !ov.signal && ov.vetoed && ov.w < 1.0,
+                      "F68d: hands up with Status.json on fists for more than 1.5 s are not armed (an emote or a tool pose): vetoed at frame 136");
+                // (5) Status.json flips to armed 0.8 s after the hands went up: no veto, ever, and the weapon holds.
+                nf::FpHandsUp w;
+                for (int i = 0; i < 45; ++i) w.step(dtF, true, rest, true);
+                bool everVetoed = false, allSignal = true;
+                for (int i = 0; i < 450; ++i) {
+                    const bool fists = i < 72;   // 0.8 s
+                    const nf::FpHandsUp::Out ow = w.step(dtF, fists, raised, true);
+                    everVetoed = everVetoed || ow.vetoed;
+                    allSignal = allSignal && ow.signal;
+                }
+                check(!everVetoed && allSignal, "F68d: Status.json flipping to armed 0.8 s after the hands rise keeps the signal and never vetoes (5 s checked)");
+                // (6) A long unarmed spell does not veto the next draw: the 1.5 s counts from the hands going up, not from the fists.
+                nf::FpHandsUp l;
+                for (int i = 0; i < 90 * 60; ++i) l.step(dtF, true, rest, true);   // a minute of fists
+                const nf::FpHandsUp::Out first = l.step(dtF, true, raised, true);
+                check(first.signal && !first.vetoed && first.w == 1.0, "F68d: after a minute of fists the first frame of a draw is armed at once (the veto counts from the hands going up)");
+                // (7) The unarmed pose swaying by 5 cm while walking is never up; a hand moving too fast to be still never captures a rest.
+                nf::FpHandsUp s;
+                for (int i = 0; i < 45; ++i) s.step(dtF, true, rest, true);
+                bool anyUp = false;
+                double maxDist = 0.0;
+                for (int i = 0; i < 900; ++i) {
+                    double p[3] = {rest[0] + 0.05 * std::sin(i * 0.2), rest[1] + 0.03 * std::sin(i * 0.13), rest[2] + 0.04 * std::cos(i * 0.17)};
+                    const nf::FpHandsUp::Out os = s.step(dtF, true, p, true);
+                    anyUp = anyUp || os.up;
+                    maxDist = std::max(maxDist, os.dist);
+                }
+                nf::FpHandsUp swing;
+                bool captured = false;
+                for (int i = 0; i < 400; ++i) {
+                    double p[3] = {rest[0] + 0.3 * std::sin(i * 0.3), rest[1], rest[2]};
+                    captured = captured || swing.step(dtF, true, p, true).restCaptured;
+                }
+                check(!anyUp && maxDist < 0.1 && !captured, "F68d: a walking sway of 5 cm is never up (largest distance under 10 cm), and a hand that keeps moving never captures a rest pose");
+                // (8) After a veto the same pose held still for 3 s is the new unarmed rest (an emote pose is not a weapon).
+                nf::FpHandsUp r2;
+                for (int i = 0; i < 45; ++i) r2.step(dtF, true, rest, true);
+                bool recaptured = false;
+                nf::FpHandsUp::Out o2;
+                for (int i = 0; i < 90 * 8; ++i) {
+                    o2 = r2.step(dtF, true, raised, true);
+                    recaptured = recaptured || o2.restCaptured;
+                }
+                check(recaptured && !o2.up && !o2.signal && std::fabs(r2.rest[0] - raised[0]) < 1e-9,
+                      "F68d: after the veto, the same pose held still for 3 s becomes the new unarmed rest and the hands read down");
+                // (9) A frame without the snapshot changes nothing but the weight's fall.
+                nf::FpHandsUp g;
+                for (int i = 0; i < 45; ++i) g.step(dtF, true, rest, true);
+                g.step(dtF, true, raised, true);
+                const nf::FpHandsUp::Out miss = g.step(dtF, true, rest, false);
+                check(miss.up && miss.signal && miss.w == 1.0 && g.havePrev, "F68d: a frame whose snapshot could not be read keeps the last state");
+            }
+            // F68e: the neck target from the animated head, and the crouch in the pin's state split.
+            {
+                const double kR = nf::kIkPi / 180.0;
+                // The standing animation: the neck 34 at (0, 1.45, 0), the head joint 13 cm above and 3 cm ahead of it, its frame aligned with the model's
+                // (the rest offset (0, 0.155, 0.09) from the neck to the eye is then 2.5 cm above and 6 cm ahead of the head joint). pivot: the hips.
+                const double pivot[3] = {0.0, 0.95, 0.0};
+                const double n0s[3] = {0.0, 1.45, 0.0}, p44s[3] = {0.0, 1.58, 0.03};
+                double rowsId[3][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+                // The pose after the torso leans forward by `deg` about the hips: every point and every axis rotates (y' = c y - s z, z' = s y + c z).
+                const auto lean = [&](double deg, const double rowsIn[3][3], double n0[3], double p44[3], double rowsOut[3][3]) {
+                    const double c = std::cos(deg * kR), s = std::sin(deg * kR);
+                    const auto rot = [&](const double v[3], double o[3]) {
+                        o[0] = v[0];
+                        o[1] = c * v[1] - s * v[2];
+                        o[2] = s * v[1] + c * v[2];
+                    };
+                    double a[3], bb[3];
+                    for (int i = 0; i < 3; ++i) {
+                        a[i] = n0s[i] - pivot[i];
+                        bb[i] = p44s[i] - pivot[i];
+                    }
+                    double ra[3], rb[3];
+                    rot(a, ra);
+                    rot(bb, rb);
+                    for (int i = 0; i < 3; ++i) {
+                        n0[i] = pivot[i] + ra[i];
+                        p44[i] = pivot[i] + rb[i];
+                        rot(rowsIn[i], rowsOut[i]);
+                    }
+                };
+                nf::PinEyeCal cal;
+                bool done = false;
+                for (int i = 0; i < 45; ++i) {
+                    double p[3] = {p44s[0] + 0.001 * ((i % 3) - 1), p44s[1], p44s[2]};   // a millimetre of sway
+                    done = cal.add(true, p, rowsId, n0s);
+                }
+                check(done && cal.have && cal.n == 45 && cal.axes.fAxis == 2 && cal.axes.uAxis == 1 && cal.axes.fSign > 0.0 && std::fabs(cal.e[1] - 0.025) < 2e-3 &&
+                          std::fabs(cal.e[2] - 0.06) < 2e-3 && std::fabs(cal.headY - 1.58) < 1e-9,
+                      "F68e: 45 consecutive standing frames capture the eye point in the head joint's frame (2.5 cm up, 6 cm ahead of the head joint here) and "
+                      "find the head's forward and up rows");
+                // (1) Standing reproduces the rest offset: the eye 1.6 m up, its heading 0 and 30 deg to the head's.
+                const double eyeP[3] = {0.1, 1.60, 0.2};
+                double fwd0[3] = {0.0, 0.0, 1.0}, fwd30[3] = {std::sin(30.0 * kR), 0.0, std::cos(30.0 * kR)};
+                double T0[3], T30[3], R0[3], R30[3];
+                nf::PinAnimTarget pa0, pa30;
+                nf::pinNeckTargetAnim(eyeP, fwd0, p44s, rowsId, n0s, cal, T0, &pa0);
+                nf::pinNeckTargetAnim(eyeP, fwd30, p44s, rowsId, n0s, cal, T30, &pa30);
+                nf::pinNeckTarget(eyeP, fwd0, R0);
+                nf::pinNeckTarget(eyeP, fwd30, R30);
+                const auto dist = [](const double a[3], const double c[3]) { return std::sqrt((a[0] - c[0]) * (a[0] - c[0]) + (a[1] - c[1]) * (a[1] - c[1]) + (a[2] - c[2]) * (a[2] - c[2])); };
+                check(pa0.anim && pa30.anim && !pa0.clamped && dist(T0, R0) < 0.01 && dist(T30, R30) < 0.01 && dist(T0, R0) < 0.002,
+                      "F68e: standing, the target from the animated head equals the F67c rest offset (0, -0.155, -0.09) along the eye's heading within 1 cm, "
+                      "with the eye's heading 0 or 30 deg off the head's (the yaw comes from the eye)");
+                // (2) A 40 deg lean of the chest and head (a crouch's torso): the neck-to-eye vector rotates with the pose; the neck target moves back.
+                double n40[3], p40[3], r40[3][3];
+                lean(40.0, rowsId, n40, p40, r40);
+                double T40[3];
+                nf::PinAnimTarget pa40;
+                nf::pinNeckTargetAnim(eyeP, fwd0, p40, r40, n40, cal, T40, &pa40);
+                const double fwdExp = 0.155 * std::sin(40.0 * kR) + 0.09 * std::cos(40.0 * kR), upExp = 0.155 * std::cos(40.0 * kR) - 0.09 * std::sin(40.0 * kR);
+                const double backShift = (R0[2] - T40[2]);   // how much further behind the standing target the crouch target sits (along +z)
+                check(pa40.anim && std::fabs(pa40.vUsed[2] - fwdExp) < 1e-3 && std::fabs(pa40.vUsed[1] - upExp) < 1e-3 && std::fabs(backShift - (fwdExp - 0.09)) < 1e-3 &&
+                          backShift > 0.07,
+                      "F68e: a 40 deg chest pitch moves the neck target back by 7.9 cm (the neck-to-eye vector is 16.9 cm ahead and 6.1 cm up, against 9.0 and 15.5 "
+                      "standing) and the eye's heading carries it: a 90 deg yaw puts the same 16.9 cm along the new heading");
+                double T40y[3], eyeFwd90[3] = {1.0, 0.0, 0.0};
+                nf::PinAnimTarget pa40y;
+                nf::pinNeckTargetAnim(eyeP, eyeFwd90, p40, r40, n40, cal, T40y, &pa40y);
+                check(std::fabs((eyeP[0] - T40y[0]) - fwdExp) < 1e-3 && std::fabs(eyeP[2] - T40y[2]) < 1e-3, "F68e: with the eye turned 90 deg the animated 16.9 cm forward offset lies along the eye's heading (x)");
+                // (3) The head pitched past 70 deg (looking down): the heading comes from the up vector, no NaN, still 15.5 cm ahead of the neck's vertical.
+                double n90[3], p90[3], r90[3][3];
+                lean(90.0, rowsId, n90, p90, r90);
+                double T90[3];
+                nf::PinAnimTarget pa90;
+                nf::pinNeckTargetAnim(eyeP, fwd0, p90, r90, n90, cal, T90, &pa90);
+                check(pa90.anim && std::isfinite(T90[0]) && std::isfinite(T90[1]) && std::isfinite(T90[2]) && std::fabs(pa90.vUsed[2] - 0.155) < 2e-3 &&
+                          std::fabs(pa90.vUsed[1] + 0.09) < 2e-3 && std::fabs(pa90.hHead[2] - 1.0) < 1e-9,
+                      "F68e: looking straight down (the head pitched 90 deg) the head's heading is read from its up vector and the neck sits 15.5 cm behind and 9 cm "
+                      "above the eye");
+                // (4) Another frame convention (a bone-aligned head joint: local x forward, y up, z right) finds its axes and gives the same targets.
+                double rowsB[3][3] = {{0, 0, 1}, {0, 1, 0}, {1, 0, 0}};
+                nf::PinEyeCal calB;
+                for (int i = 0; i < 45; ++i) calB.add(true, p44s, rowsB, n0s);
+                double nB[3], pB[3], rB[3][3], TB[3];
+                lean(40.0, rowsB, nB, pB, rB);
+                nf::PinAnimTarget paB;
+                nf::pinNeckTargetAnim(eyeP, fwd0, pB, rB, nB, calB, TB, &paB);
+                check(calB.have && calB.axes.fAxis == 0 && calB.axes.uAxis == 1 && paB.anim && dist(TB, T40) < 1e-6,
+                      "F68e: a head joint whose local x is the forward (and y the up) is found by the calibration and gives the same 40 deg target");
+                // (5) The calibration needs 45 CONSECUTIVE standing frames: an armed, moving, high-or-low or pitched frame starts the run again; no calibration, no
+                // animated target (the F67c rest offset).
+                nf::PinEyeCal broken;
+                bool any = false;
+                for (int i = 0; i < 44; ++i) any = broken.add(true, p44s, rowsId, n0s) || any;
+                broken.add(false, p44s, rowsId, n0s);   // a frame that is not standing
+                for (int i = 0; i < 44; ++i) any = broken.add(true, p44s, rowsId, n0s) || any;
+                double pLean[3], nLean[3], rLean[3][3];
+                lean(50.0, rowsId, nLean, pLean, rLean);
+                broken.add(true, pLean, rLean, nLean);   // a pitched head (a crouch before the calibration) is no standing frame
+                for (int i = 0; i < 44; ++i) any = broken.add(true, p44s, rowsId, n0s) || any;
+                const bool still = !broken.have && !any;
+                double Tn[3];
+                nf::PinAnimTarget paN;
+                nf::pinNeckTargetAnim(eyeP, fwd0, p44s, rowsId, n0s, broken, Tn, &paN);
+                check(still && !paN.anim && dist(Tn, R0) < 1e-12 && !nf::pinCalStanding(0.1, true, false, 1.66) && !nf::pinCalStanding(0.5, false, false, 1.66) &&
+                          !nf::pinCalStanding(0.1, false, true, 1.66) && !nf::pinCalStanding(0.1, false, false, 1.3) && nf::pinCalStanding(0.1, false, false, 1.66),
+                      "F68e: the calibration needs 45 consecutive standing frames (unarmed, not ADS, under 0.35 m/s, the head 1.5..1.9 m up, level); without it the "
+                      "target is the F67c rest offset");
+                // (6) A glitched pose (the animated vector 1 m away) is clamped to 35 cm from the rest offset.
+                double pFar[3] = {p44s[0], p44s[1] + 1.0, p44s[2]}, Tc[3];
+                nf::PinAnimTarget paC;
+                nf::pinNeckTargetAnim(eyeP, fwd0, pFar, rowsId, n0s, cal, Tc, &paC);
+                const double devC = std::sqrt((paC.vUsed[0] - 0.0) * (paC.vUsed[0] - 0.0) + (paC.vUsed[1] - 0.155) * (paC.vUsed[1] - 0.155) +
+                                              (paC.vUsed[2] - 0.09) * (paC.vUsed[2] - 0.09));
+                check(paC.anim && paC.clamped && std::fabs(devC - nf::kPinAnimOffsetClampM) < 1e-9, "F68e: a neck-to-eye vector 1 m from the rest offset is clamped to 35 cm from it (a 90 deg lean moves it 25 cm)");
+                // (7) The state split: a crouch is the animated legs bent (reach under 0.80), after jumping and before running.
+                check(nf::pinCrouched(0.62) && !nf::pinCrouched(0.9) && !nf::pinCrouched(0.97) && !nf::pinCrouched(0.0) &&
+                          !nf::pinCrouched(std::numeric_limits<double>::quiet_NaN()) && nf::pinState(0.1, 0.0, false, true) == 4 &&
+                          nf::pinState(4.0, 0.0, false, true) == 4 && nf::pinState(0.1, 1.2, false, true) == 3 && nf::pinState(0.1, 0.0, true, true) == 3 &&
+                          nf::pinState(0.1, 0.0, false, false) == 0 && nf::pinState(4.0, 0.0, false, false) == 2,
+                      "F68e: the pin's state split names a crouch (animated legs' reach under 0.80, standing 0.94-1.0, the armed stance about 0.9) as its own state "
+                      "(4), after jumping and before running");
+            }
             // F67e: the aim-jump trigger: the FP root's yaw rate over 30 deg/s while armed (the yaw step wrapped across the +-180 seam).
             {
                 check(std::fabs(nf::yawRateDps(10.0, 13.0, 0.1) - 30.0) < 1e-9 && std::fabs(nf::yawRateDps(179.0, -179.0, 0.1) - 20.0) < 1e-9 &&
@@ -2425,6 +2858,112 @@ int wmain(int argc, wchar_t** argv) {
                           nf::ikArmedSolveWeight(false, 0.0, 1.0) == 0.0 && !nf::handCapApplies(true) && nf::handCapApplies(false),
                       "F67f: no armed path leaves w below 1 (the armed ramp complete: 1 for every base weight); the ramp (0.4) and the unarmed weight are base x ramp; the "
                       "per-call cap on the hand and the assist applies only unarmed");
+            }
+            // F68c: G from one game frame. A body running at 4 m/s, the game at 90 Hz, the FP AMC's and the 3P AMC's P1 calls in alternating order.
+            {
+                const uint64_t freq = 10000000ull;   // QPC ticks per second in the model
+                const double v = 4.0, dtF = 1.0 / 90.0;
+                const float grip[3] = {0.20f, 1.30f, 0.45f};   // the grip in the FP model space
+                const auto trans = [](double x, float out[16]) {
+                    for (int i = 0; i < 16; ++i) out[i] = (i % 5 == 0) ? 1.0f : 0.0f;
+                    out[12] = static_cast<float>(x);
+                    out[13] = 0.0f;
+                    out[14] = 1.0f;
+                };
+                // The grip's 3P-world position at the drawn frame N from G = F_root x inv(M3P): grip x G x M3P(N). Its true position is grip x F_root(N).
+                const auto drawn = [&](const float G[16], const float m3pN[16]) {
+                    double inModel[3], world[3];
+                    nf::ikXform(grip, G, inModel);
+                    const float im[3] = {static_cast<float>(inModel[0]), static_cast<float>(inModel[1]), static_cast<float>(inModel[2])};
+                    nf::ikXform(im, m3pN, world);
+                    return world[0];
+                };
+                nf::P1FramePairing pr;
+                bool storedFp = false, storedTp = false, singleFrame = true;
+                uint32_t fpFrame = 0, tpFrame = 0;
+                uint64_t fpQ = 0, tpQ = 0;
+                float fpRoot[16], m3p[16], lastRoot[16];
+                trans(0.0, lastRoot);
+                double pairedErrMax = 0.0, naiveErrMax = 0.0, naiveErrSum = 0.0;
+                int naiveBad = 0, published = 0, doubled = 0;
+                const int frames = 300;
+                for (int n = 0; n < frames; ++n) {
+                    const double x = v * dtF * n;
+                    const bool fpFirst = (n % 2) == 0;
+                    float F[16], M[16];
+                    trans(x + 0.0, F);      // the FP root at frame n
+                    trans(x + 0.02, M);     // the 3P AMC at frame n (offset by the model's own mounting, a constant)
+                    uint64_t q = static_cast<uint64_t>(n) * 111111ull;   // 11.1 ms a frame
+                    bool pubThisFrame = false;
+                    for (int call = 0; call < 2; ++call) {
+                        const bool isFp = (call == 0) == fpFirst;
+                        q += 200;   // 0.02 ms between the two calls
+                        if (isFp) {
+                            fpFrame = pr.on(0);
+                            fpQ = q;
+                            storedFp = true;
+                            std::memcpy(fpRoot, F, sizeof(fpRoot));
+                            if (pr.take(storedFp, fpFrame, fpQ, storedTp, tpFrame, tpQ, freq)) {
+                                float inv[16], G[16];
+                                nf::pfzAffineInverse(m3p, inv);
+                                nf::pfzMul(fpRoot, inv, G);
+                                const double err = std::fabs(drawn(G, M) - (grip[0] + F[12]));
+                                pairedErrMax = std::max(pairedErrMax, err);
+                                ++published;
+                                if (pubThisFrame) ++doubled;
+                                pubThisFrame = true;
+                            }
+                        } else {
+                            tpFrame = pr.on(1);
+                            tpQ = q;
+                            storedTp = true;
+                            std::memcpy(m3p, M, sizeof(m3p));
+                            if (pr.take(storedFp, fpFrame, fpQ, storedTp, tpFrame, tpQ, freq)) {
+                                float inv[16], G[16];
+                                nf::pfzAffineInverse(m3p, inv);
+                                nf::pfzMul(fpRoot, inv, G);
+                                const double err = std::fabs(drawn(G, M) - (grip[0] + F[12]));
+                                pairedErrMax = std::max(pairedErrMax, err);
+                                ++published;
+                                if (pubThisFrame) ++doubled;
+                                pubThisFrame = true;
+                            }
+                            // The F67 rule: G built at the 3P call from the FP root of the LAST call (this frame's when the FP call came first).
+                            float inv[16], G[16];
+                            nf::pfzAffineInverse(M, inv);
+                            nf::pfzMul(fpFirst ? F : lastRoot, inv, G);
+                            const double err = std::fabs(drawn(G, M) - (grip[0] + F[12]));
+                            naiveErrMax = std::max(naiveErrMax, err);
+                            naiveErrSum += err;
+                            if (err > 1e-4) ++naiveBad;
+                        }
+                    }
+                    if (!pubThisFrame) singleFrame = false;
+                    std::memcpy(lastRoot, F, sizeof(lastRoot));
+                }
+                check(published == frames && doubled == 0 && singleFrame && pairedErrMax < 1e-4 && pr.noPair == 0 && pr.tpFirst + pr.fpFirst == static_cast<uint64_t>(frames),
+                      "F68c: with the FP and 3P P1 calls in alternating order at 90 Hz and a body at 4 m/s, G is built once on every frame from that frame's pair "
+                      "and the grip lands where the weapon is (error under 0.1 mm)");
+                check(naiveBad == frames / 2 && std::fabs(naiveErrMax - 4.0 * dtF) < 1e-4 && pr.tpFirst == static_cast<uint64_t>(frames / 2),
+                      "F68c: built at the 3P call from the last FP root (the F67 rule), the same frames put the grip 4.4 cm off on every frame the 3P call came "
+                      "first (half of them here)");
+                // A frame with only one call (the FP call missing) is counted, never paired with the neighbouring frame's half; an index shifted by a missing call
+                // is caught by the gap veto.
+                nf::P1FramePairing gap;
+                gap.on(0);
+                const uint32_t tf = gap.on(1);   // frame 1: both seen
+                const bool one = gap.take(true, 1, 1000, true, tf, 1010, freq);
+                const uint32_t tf2 = gap.on(1);  // frame 2: only a 3P call
+                const bool none = gap.take(true, 1, 1000, true, tf2, 111111, freq);
+                const uint32_t ff3 = gap.on(0);  // the FP call arrives: opens frame 3?  (it has not been seen in frame 2, so it joins frame 2)
+                const bool joined = ff3 == tf2;
+                nf::P1FramePairing farPr;
+                farPr.on(0);
+                const uint32_t farTf = farPr.on(1);
+                const bool vetoed = !farPr.take(true, farTf, 0, true, farTf, 300000ull, freq) && farPr.farApart == 1;   // 30 ms apart
+                check(one && !none && joined && vetoed && gap.pairs == 1,
+                      "F68c: a pair needs one index, and two calls of one index more than 10 ms apart are refused (counted), so a missing call cannot pair a frame "
+                      "with its neighbour");
             }
             // F65c: the align's neck source. The F64 case: the pre-bend neck 11.4 cm left of its target (the eye at (0, 1.60, 0) in body
             // axes, the full-3P rest offset (0, -0.155, -0.09), so the target is (0, 1.445, -0.09)).

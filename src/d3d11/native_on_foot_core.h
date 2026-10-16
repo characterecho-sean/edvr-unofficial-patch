@@ -2171,20 +2171,6 @@ struct AdsSightGrowth {
     uint64_t runMs(uint64_t ms) const noexcept { return growing && ms > startMs ? ms - startMs : 0; }
 };
 
-// ---- F64 (TEMPORARY slider): the eye height, pure half ---------------------------------------------------------------------------------
-// The F63 flight: standing, the eye sat 4.2 cm below the 3P pov point and the spine bend hid it by leaning. fix.native_on_foot_eye_height_cm
-// (0..15 cm in 0.5 steps, default 4) raises the eye in full-3P body mode only (body align body, the FP body hidden, the body unclipped): the
-// eye alignment carries raiseSeated(h) (seated y = -h; body = -seated in y, so the camera rises by h), h = the slider x the ramp (in over
-// kEyeHeightRampSec in full 3P, out over it otherwise) x (1 - the ADS head-aim weight), so it fades as ADS engages (the sight lock owns ADS).
-constexpr double kEyeHeightDefaultCm = 4.0, kEyeHeightMaxCm = 15.0, kEyeHeightRampSec = 0.3;
-inline double eyeHeightClampCm(double cm) noexcept { return ikClampOr(cm, 0.0, kEyeHeightMaxCm, kEyeHeightDefaultCm); }
-// The applied raise in metres: the slider (cm, clamped) x the ramp (0..1) x (1 - the ADS weight (0..1; NaN is 0)).
-inline double eyeHeightM(double cm, double ramp, double adsW) noexcept {
-    const double r = !(ramp == ramp) ? 0.0 : ramp < 0.0 ? 0.0 : ramp > 1.0 ? 1.0 : ramp;
-    const double a = !(adsW == adsW) ? 0.0 : adsW < 0.0 ? 0.0 : adsW > 1.0 ? 1.0 : adsW;
-    return eyeHeightClampCm(cm) / 100.0 * r * (1.0 - a);
-}
-
 // ---- F65a: the connection retry's gate (fix.connection_retry, was fix.training_connect_fix) -----------------------------------------------
 // A Deactivate arms the recovery only when the destroyed ConnectToServerActivity had not reached sessions (its state at the destroy,
 // [act+0x30], is not 10) and the Deactivate came within 10 s of the destroy. The logs: the 3 real stalls were destroyed in states 5, 3 and 5;
@@ -2405,85 +2391,276 @@ inline void frameOrder3(uint64_t tP, uint64_t tA, uint64_t tS, char out[4]) noex
         }
     for (int i = 0; i < 3; ++i) out[i] = name[idx[i]];
 }
-// ---- F67a: ADS aim without a seated cancel ---------------------------------------------------------------------------------------------------
-// (reviews\native-onfoot-body-review-2026-10-16.md sections 5 and 6; the F66 flight edvr_gfx_20261016_113909.) F62b sent the headset's turn to the game
-// as look input and took the turn the game applied back out of the view in the seated space. The camera never takes the injected aim, so the cancel
-// was the only thing turning the view: it held the view still while the head turned (the residual ratio -1), the residual grew and the guard that
-// read the growth latched until the key was toggled. F67a deletes the cancel and the guard. The view is the headset's; the weapon is steered onto it.
-// Each frame, with the ADS weight w, the look input asked for is k * w * (the view's direction less the weapon's, less what is already in flight),
-// k 0.3: the view is the right eye's solved rows (its forward is the clip w column), the weapon is the FP root's forward. "In flight" is the sum of the
-// last kAdsAimFlightFrames asks (not the game's applied turn: that lands a frame before the animation shows it, and a loop that subtracted it on landing
-// overshot the cone by 11 deg in the model; a window of asks is stable for the game's gain 0.85 and up to two frames of lag in seeing the weapon).
-// Seat convention throughout
-// (yaw + left, pitch + up). The weapon's yaw offset from the body's facing is held inside the cone (20 deg until F67b has measured the game's);
-// injection that would take it further out stops. Every ADS press starts from AdsAimRun::reset().
-constexpr double kAdsAimK = 0.3;                    // the share of the remaining error asked for each frame
-constexpr double kAdsConeBoundDeg = 20.0;           // the weapon's yaw offset from the body, at most, until F67b's measurement replaces it
-constexpr int kAdsAimFlightFrames = 3;              // an ask counts as in flight for this many frames: queued, applied by the game's next look update, seen
+// ---- F68a: the ADS head-aim, F62b's map measured properly ---------------------------------------------------------------------------------------
+// (reviews\native-onfoot-body-review-2026-10-16.md section 4; the F67 flight edvr_gfx_20261016_132256.) F67a steered the weapon onto the view with a
+// closed loop. It wound up: the actuator (look input) turns both sides of its error, and the camera the F66 guard read, C, is the left eye, not the render
+// camera. The rendered view (the right eye's rows) does take the injected aim, so the map is F62b's: the headset's turn since the last frame, times the ADS
+// weight and divided by the measured gain, goes to the game as look input; the turn the processor applied for it is cancelled in the seated space, so the
+// view stays the headset's whatever the game took, and the weapon follows the head. Seat convention throughout (yaw + left, pitch + up); F61 measured a
+// seated +a moving the camera by -a. On release the injected yaw and pitch unwind over kAdsUnwindSec (longer for a large turn: at most 60 deg/s, so the
+// frame the cancel runs behind shows as under 1 deg) by injecting the opposite (the cancel follows what the game applies, the view stays the headset's),
+// so the runtime's look base returns to zero without a view jump; F62b kept the yaw.
+constexpr double kAdsUnwindSec = 0.3;                 // the release's unwind: at least this long ...
+constexpr double kAdsUnwindMaxRate = 60.0 * kAdsDeg;  // ... and no faster than this (rad/s): the cancel runs a frame behind the game, so a faster swing
+                                                      // would show as a view offset of one frame of the swing (0.67 deg at 60 deg/s) ...
+constexpr double kAdsUnwindMaxSec = 1.5;              // ... but never longer than this (a very large carried turn swings back faster)
+constexpr double kAdsCatchUpSec = 0.2;                // after the unwind, the most time a remainder is chased before it is dropped
+constexpr double kAdsPitchClampRad = 60.0 * kAdsDeg;  // the seated pitch is held to +-60 deg
+constexpr int kAdsFlightFrames = 8;                   // an ask counts as in flight for this many ticks (queued, applied by the game's next look update, seen)
+constexpr double kAdsUnwindDoneRad = 0.05 * kAdsDeg;  // an unwind this close to zero is done
+constexpr double kAdsResFloorDeg = 8.0;               // the guard: |view turn - head turn - the player's own| at least this, ...
+constexpr double kAdsResRatio = 0.5;                  // ... at least this share of the head's own turn since the base, ...
+constexpr double kAdsResGrowDeg = 4.0;                // ... grown by at least this ...
+constexpr uint64_t kAdsResGrowMs = 500;               // ... over this long without falling 1 deg below its peak
+constexpr double kAdsViewJumpDeg = 15.0;              // a view step this big in one tick (a cut, a recentre) is not a turn: the base is taken again
 
-// The turn the weapon still needs to reach the view (view minus weapon, radians, seat convention: yaw + = the weapon must turn LEFT), from the view's
-// axes (the right eye's rows: RotFrameSum::add(right, up, forward)) and the weapon's forward. False when an axis is degenerate.
-inline bool adsAimError(const RotFrameSum& view, const double weaponForward[3], double* errYaw, double* errPitch) noexcept {
-    *errYaw = *errPitch = 0.0;
-    RotFrameSum weapon;
-    const double none[3] = {0.0, 0.0, 0.0};
-    weapon.add(none, none, weaponForward);
-    double dy = 0.0, dp = 0.0;
-    if (!rotFrameDelta(view, weapon, &dy, &dp)) return false;
-    // rotFrameDelta(view, weapon) is the weapon's turn away from the view (+ = left of it); the weapon must turn back by that.
-    *errYaw = -dy * kAdsDeg;
-    *errPitch = -dp * kAdsDeg;
-    return true;
+// The share of a seated pitch step that keeps the pitch inside +-60 deg (a step back toward zero always passes whole).
+inline double adsPitchLimit(double accum, double delta) noexcept {
+    const double next = accum + delta;
+    if (next > kAdsPitchClampRad) return delta > 0.0 ? (accum < kAdsPitchClampRad ? kAdsPitchClampRad - accum : 0.0) : delta;
+    if (next < -kAdsPitchClampRad) return delta < 0.0 ? (accum > -kAdsPitchClampRad ? -kAdsPitchClampRad - accum : 0.0) : delta;
+    return delta;
 }
-// The cone: the injection allowed when the weapon's yaw offset from the body is off (radians, + left) and `want` more is asked for. Inside the bound
-// the offset is clamped to it; past it nothing that goes further out is allowed (a move toward the body passes whole).
-inline double adsConeLimit(double off, double want, double bound) noexcept {
-    if (!(want == want) || !(off == off) || !(bound >= 0.0)) return 0.0;
-    const double lim = std::fabs(off) > bound ? std::fabs(off) : bound;
-    double t = off + want;
-    t = t > lim ? lim : t < -lim ? -lim : t;
-    return t - off;
+inline double adsClampPitch(double p) noexcept {
+    return !(p == p) ? 0.0 : p > kAdsPitchClampRad ? kAdsPitchClampRad : p < -kAdsPitchClampRad ? -kAdsPitchClampRad : p;
 }
-struct AdsAimRun {
-    double ring[kAdsAimFlightFrames][2] = {};   // the last asks (seat radians: yaw, pitch), newest first
-    void reset() noexcept {
-        for (auto& r : ring) r[0] = r[1] = 0.0;
-    }
-    double pending(int axis) const noexcept {
-        double t = 0.0;
-        for (const auto& r : ring) t += r[axis ? 1 : 0];
-        return t;
-    }
-    void push(double yaw, double pitch) noexcept {
-        for (int i = kAdsAimFlightFrames - 1; i > 0; --i) {
-            ring[i][0] = ring[i - 1][0];
-            ring[i][1] = ring[i - 1][1];
+// How long the release takes to unwind p0 (radians): kAdsUnwindSec, longer for a large turn so the swing stays under kAdsUnwindMaxRate, at most
+// kAdsUnwindMaxSec.
+inline double adsUnwindDuration(double p0) noexcept {
+    const double d = std::fabs(p0 == p0 ? p0 : 0.0) / kAdsUnwindMaxRate;
+    return d < kAdsUnwindSec ? kAdsUnwindSec : d > kAdsUnwindMaxSec ? kAdsUnwindMaxSec : d;
+}
+// The release's target: p0 at the release, falling linearly to 0 over durSec (default kAdsUnwindSec).
+inline double adsUnwindTarget(double p0, double elapsedSec, double durSec = kAdsUnwindSec) noexcept {
+    double u = (elapsedSec > 0.0 ? elapsedSec : 0.0) / (durSec > 1e-9 ? durSec : kAdsUnwindSec);
+    u = u > 1.0 ? 1.0 : u;
+    return p0 * (1.0 - u);
+}
+// The guard: true once |residual| (deg) has stayed at or above the floor and kAdsResRatio x the head's own turn since the base (deg), grown by
+// kAdsResGrowDeg from where the run started, for kAdsResGrowMs, never falling 1 deg below its peak (a fall restarts the run).
+struct AdsResidualGrowth {
+    bool growing = false;
+    uint64_t startMs = 0;
+    double startAbs = 0.0, peak = 0.0;
+    bool step(uint64_t ms, double absResDeg, double absHeadDeg) noexcept {
+        const bool over = absResDeg == absResDeg && absResDeg >= kAdsResFloorDeg && absResDeg >= kAdsResRatio * absHeadDeg;
+        if (!over) {
+            growing = false;
+            return false;
         }
-        ring[0][0] = yaw;
-        ring[0][1] = pitch;
+        if (!growing || absResDeg < peak - 1.0) {
+            growing = true;
+            startMs = ms;
+            startAbs = peak = absResDeg;
+            return false;
+        }
+        if (absResDeg > peak) peak = absResDeg;
+        return ms >= startMs + kAdsResGrowMs && absResDeg - startAbs >= kAdsResGrowDeg;
     }
-    void age() noexcept { push(0.0, 0.0); }   // a frame that asked for nothing (no data) still ages the window
+    uint64_t runMs(uint64_t ms) const noexcept { return growing && ms > startMs ? ms - startMs : 0; }
+};
+// The residual's reading per axis: about 0 the view follows the head; about -2 that axis's sign is inverted (the aim turned against the head and the
+// cancel doubled it); about -1 the view does not take the aim there (the cancel alone turned it).
+inline double adsResidualRatio(double residual, double head) noexcept { return std::fabs(head) > 1e-9 ? residual / head : 0.0; }
+
+// The asks the game has not answered yet, per axis: one slot per tick for the last kAdsFlightFrames ticks. The turn the game applies is taken off the
+// oldest asks first (the game answers in order), so what is in flight stays exact while the answers come within the window; an ask the game never
+// answers (a cone, a refusal, a gain error) is forgotten when its slot is that old.
+struct AdsInFlight {
+    double amt[kAdsFlightFrames] = {};
+    int pos = 0;
+    void clear() noexcept {
+        for (double& a : amt) a = 0.0;
+    }
+    void tick() noexcept {   // a new tick: the oldest slot leaves the account and becomes this tick's
+        pos = (pos + 1) % kAdsFlightFrames;
+        amt[pos] = 0.0;
+    }
+    void apply(double applied) noexcept {   // the game applied this much (same sign as an ask it answers)
+        double a = applied;
+        for (int i = 1; i <= kAdsFlightFrames && a != 0.0; ++i) {
+            double& e = amt[(pos + i) % kAdsFlightFrames];
+            if (e == 0.0 || (e > 0.0) != (a > 0.0)) continue;
+            const double take = std::fabs(a) < std::fabs(e) ? a : e;
+            e -= take;
+            a -= take;
+        }
+    }
+    void add(double ask) noexcept { amt[pos] += ask; }
+    double sum() const noexcept {
+        double s = 0.0;
+        for (double a : amt) s += a;
+        return s;
+    }
+};
+// The map's state (radians, seat convention). step() is one frame-thread tick: the cancel first (what the game applied since the last tick, exactly), then
+// what to ask the game for next. The caller queues the injection as look input through the measured gain and the sign keys, publishes yawSeat through
+// the look's total and pitchSeat through the ADS pitch overlay, and applies the cancel by that publication.
+struct AdsAimMap {
+    double yawSeat = 0.0;      // the seated yaw published, cumulative (never reset: the runtime re-bases at a reset serial)
+    double yawCarried = 0.0;   // its part since the last reset serial
+    double pitchSeat = 0.0;    // the seated pitch published (+-60 deg)
+    AdsInFlight flightYaw, flightPitch;   // asked and not yet seen applied
+    double yawInFlight() const noexcept { return flightYaw.sum(); }
+    double pitchInFlight() const noexcept { return flightPitch.sum(); }
+    double relT = 0.0, relY0 = 0.0, relP0 = 0.0, relYDur = kAdsUnwindSec, relPDur = kAdsUnwindSec, relDur = kAdsUnwindSec;
+    uint32_t clampHits = 0;
     struct Out {
-        double yaw = 0.0, pitch = 0.0;   // the turn asked for this frame (radians, seat convention)
-        bool limited = false;            // the cone cut the yaw
-        bool pastBound = false;          // the weapon (with what is in flight) is already past the cone
+        double injYaw = 0.0, injPitch = 0.0;         // asked of the game this tick (seat radians; the caller converts to input)
+        double cancelYaw = 0.0, cancelPitch = 0.0;   // cancelled in the seated space this tick (the clamp can cut the pitch)
     };
-    // errYaw, errPitch: adsAimError; w the ADS weight; offYaw the weapon's yaw offset from the body; bound the cone (radians); an axis that is off asks 0.
-    Out ask(double errYaw, double errPitch, double w, double offYaw, double bound, bool yawOn, bool pitchOn) noexcept {
+    // A new press starts clean: nothing in flight, the release clock off. The seated yaw and pitch are the cancel of what the game really applied and
+    // stay (a press that begins in the middle of a release continues from them).
+    void clearInFlight() noexcept {
+        flightYaw.clear();
+        flightPitch.clear();
+    }
+    void beginPress() noexcept { clearInFlight(); }
+    void beginRelease() noexcept {
+        relT = 0.0;
+        relY0 = yawCarried + yawInFlight();
+        relP0 = pitchSeat + pitchInFlight();
+        relYDur = adsUnwindDuration(relY0);
+        relPDur = adsUnwindDuration(relP0);
+        relDur = relYDur > relPDur ? relYDur : relPDur;
+    }
+    // The feature stops (a trip, a switch-off): the seated rotation returns to zero (the caller bumps the reset serial for the yaw and publishes the pitch).
+    void dropSeated() noexcept {
+        yawCarried = pitchSeat = 0.0;
+        clearInFlight();
+    }
+    Out step(bool engaged, bool releasing, double dt, double w, bool headStep, double dYaw, double dPitch, double appliedYaw, double appliedPitch,
+             bool yawOn, bool pitchOn) noexcept {
         Out o;
-        const double wt = unit01(w);
-        const double p0 = pending(0), p1 = pending(1);
-        double wantY = kAdsAimK * wt * (errYaw - p0);
-        double wantP = kAdsAimK * wt * (errPitch - p1);
-        if (!(wantY == wantY) || !yawOn) wantY = 0.0;
-        if (!(wantP == wantP) || !pitchOn) wantP = 0.0;
-        const double offEff = offYaw + p0;
-        o.yaw = adsConeLimit(offEff, wantY, bound);
-        o.limited = o.yaw != wantY;
-        o.pastBound = std::fabs(offEff) > bound;
-        o.pitch = wantP;
-        push(o.yaw, o.pitch);
+        const double t = dt > 0.0 ? dt : 0.0;
+        // The cancel: exactly the turn the game applied for our input.
+        const double aY = appliedYaw == appliedYaw ? appliedYaw : 0.0, aP = appliedPitch == appliedPitch ? appliedPitch : 0.0;
+        yawSeat += aY;
+        yawCarried += aY;
+        o.cancelYaw = aY;
+        const double want = pitchSeat + aP;
+        if (std::fabs(want) > kAdsPitchClampRad) ++clampHits;
+        const double before = pitchSeat;
+        pitchSeat = adsClampPitch(want);
+        o.cancelPitch = pitchSeat - before;
+        flightYaw.tick();   // the oldest slot leaves the account; this tick's applied turn is taken off the oldest asks
+        flightPitch.tick();
+        flightYaw.apply(aY);
+        flightPitch.apply(aP);
+        const double yOut = yawInFlight(), pOut = pitchInFlight();
+        // The ask: engaged, the head's step times the weight (the pitch held inside +-60 deg with what is in flight); releasing, the unwind's schedule,
+        // then the remainder chased until the caller drops it.
+        double inY = 0.0, inP = 0.0;
+        if (engaged && headStep) {
+            const double wt = unit01(w);
+            inY = wt * dYaw;
+            inP = adsPitchLimit(pitchSeat + pOut, wt * dPitch);
+        } else if (releasing) {
+            const double tPrev = relT;
+            relT += t;
+            if (tPrev < relDur) {
+                inY = adsUnwindTarget(relY0, relT, relYDur) - adsUnwindTarget(relY0, tPrev, relYDur);
+                inP = adsUnwindTarget(relP0, relT, relPDur) - adsUnwindTarget(relP0, tPrev, relPDur);
+            } else {
+                if (std::fabs(yawCarried + yOut) > kAdsUnwindDoneRad) inY = -(yawCarried + yOut);
+                if (std::fabs(pitchSeat + pOut) > kAdsUnwindDoneRad) inP = -(pitchSeat + pOut);
+            }
+        }
+        if (!yawOn || !(inY == inY)) inY = 0.0;
+        if (!pitchOn || !(inP == inP)) inP = 0.0;
+        flightYaw.add(inY);
+        flightPitch.add(inP);
+        o.injYaw = inY;
+        o.injPitch = inP;
         return o;
+    }
+    // The unwind is done: its schedule has run and either nothing is left (the seated rotation is back to zero and the last asks have landed) or the
+    // chase has had kAdsCatchUpSec.
+    bool releaseDone() const noexcept {
+        return relT >= relDur &&
+               ((std::fabs(yawCarried) <= kAdsUnwindDoneRad && std::fabs(pitchSeat) <= kAdsUnwindDoneRad &&
+                 std::fabs(yawInFlight()) <= kAdsUnwindDoneRad && std::fabs(pitchInFlight()) <= kAdsUnwindDoneRad) ||
+                relT >= relDur + kAdsCatchUpSec);
+    }
+};
+// The guard's measurement: the rendered view's turn since the base (the right eye's rows: three axes, right / up / forward, as RotFrameSum reads them)
+// less the head's turn since the base and less the player's own aim turn. About 0: the view follows the head. A frame without fresh rows or a head sample
+// changes nothing (a stale source never trips it). Camera C is not a source: it is the left eye.
+struct AdsResidual {
+    bool haveBase = false;
+    RotFrameSum viewBase, headBase, viewLast;
+    double userYaw = 0.0, userPitch = 0.0;                         // the player's own aim turn since the base (seat radians)
+    AdsResidualGrowth growth;
+    double res[2] = {}, head[2] = {}, view[2] = {};                // degrees since the base: the residual, the head's turn, the view's turn
+    bool have = false;
+    double maxAbs = 0.0;                                           // the largest |residual| since the last clearWindow()
+    uint32_t rebases = 0;
+    enum Result { kNone = 0, kBase = 1, kMeasured = 2, kRebased = 3, kTrip = 4 };
+    void reset() noexcept {
+        haveBase = false;
+        viewBase = viewLast = headBase = RotFrameSum{};
+        userYaw = userPitch = 0.0;
+        growth = AdsResidualGrowth{};
+        res[0] = res[1] = head[0] = head[1] = view[0] = view[1] = 0.0;
+        have = false;
+    }
+    void clearWindow() noexcept { maxAbs = 0.0; }
+    void addUser(double yaw, double pitch) noexcept {
+        userYaw += yaw == yaw ? yaw : 0.0;
+        userPitch += pitch == pitch ? pitch : 0.0;
+    }
+    Result step(uint64_t ms, bool viewOk, const double vr[3], const double vu[3], const double vf[3], bool headOk, const double hr[3], const double hu[3],
+                const double hf[3], bool yawOn, bool pitchOn) noexcept {
+        if (!viewOk || !headOk) return kNone;
+        RotFrameSum cn, hn;
+        cn.add(vr, vu, vf);
+        hn.add(hr, hu, hf);
+        if (!haveBase) {
+            haveBase = true;
+            viewBase = viewLast = cn;
+            headBase = hn;
+            userYaw = userPitch = 0.0;
+            return kBase;
+        }
+        double sy = 0.0, sp = 0.0;
+        if (rotFrameDelta(viewLast, cn, &sy, &sp) && std::sqrt(sy * sy + sp * sp) > kAdsViewJumpDeg) {
+            ++rebases;
+            haveBase = true;
+            viewBase = viewLast = cn;
+            headBase = hn;
+            userYaw = userPitch = 0.0;
+            growth = AdsResidualGrowth{};
+            have = false;
+            return kRebased;
+        }
+        double cy = 0.0, cp = 0.0, hy = 0.0, hp = 0.0;
+        if (!rotFrameDelta(viewBase, cn, &cy, &cp) || !rotFrameDelta(headBase, hn, &hy, &hp)) return kNone;
+        viewLast = cn;
+        double ry = cy - hy - userYaw / kAdsDeg, rp = cp - hp - userPitch / kAdsDeg;
+        while (ry > 180.0) ry -= 360.0;
+        while (ry < -180.0) ry += 360.0;
+        if (!yawOn) ry = 0.0;
+        if (!pitchOn) rp = 0.0;
+        res[0] = ry;
+        res[1] = rp;
+        head[0] = hy;
+        head[1] = hp;
+        view[0] = cy;
+        view[1] = cp;
+        have = true;
+        const double absRes = std::sqrt(ry * ry + rp * rp), absHead = std::sqrt(hy * hy + hp * hp);
+        if (absRes > maxAbs) maxAbs = absRes;
+        return growth.step(ms, absRes, absHead) ? kTrip : kMeasured;
+    }
+};
+// A guard trip or a failed restore holds the feature off for the rest of that press only: the flag falling clears it, so every press re-arms.
+struct AdsPressGate {
+    bool heldOff = false;
+    void holdOff() noexcept { heldOff = true; }
+    // The game's ADS flag this tick; false while this press is held off.
+    bool allow(bool adsFlag) noexcept {
+        if (!adsFlag) heldOff = false;
+        return !heldOff;
     }
 };
 
@@ -2509,6 +2686,34 @@ inline bool sightPointNdc(const float rows[16], const double o[3], const double 
     ndc[0] = c[0] / c[3];
     ndc[1] = c[1] / c[3];
     return std::isfinite(ndc[0]) && std::isfinite(ndc[1]);
+}
+// ---- F68b: the sight against the fire line ----------------------------------------------------------------------------------------------------
+// The unit direction (world) of the ray through the NDC point (nx, ny) of an eye's scene rows (row-vector form, clip_j = p . column_j + rows[12 + j]; the
+// eye at the origin of p): the clip x and y planes through the point cut along (c_x - nx c_w) x (c_y - ny c_w), signed to look forward. False when degenerate.
+inline bool ndcRay(const float rows[16], const double ndc[2], double out[3]) noexcept {
+    const double cx[3] = {rows[0], rows[4], rows[8]}, cy[3] = {rows[1], rows[5], rows[9]}, cw[3] = {rows[3], rows[7], rows[11]};
+    const double a[3] = {cx[0] - ndc[0] * cw[0], cx[1] - ndc[0] * cw[1], cx[2] - ndc[0] * cw[2]};
+    const double b[3] = {cy[0] - ndc[1] * cw[0], cy[1] - ndc[1] * cw[1], cy[2] - ndc[1] * cw[2]};
+    double v[3] = {a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]};
+    if (v[0] * cw[0] + v[1] * cw[1] + v[2] * cw[2] < 0.0)
+        for (double& c : v) c = -c;
+    return ikUnit(v, out);
+}
+// The angle from the ray through `from` to the ray through `to`, in the eye's own axes (right, up, forward from rotAxesFromClip): the horizontal and
+// vertical plane angles (degrees; + = to is to the right of / above from) and the total angle between the rays. False when the rows or a ray degenerate.
+inline bool ndcAngles(const float rows[16], const double from[2], const double to[2], double* dRightDeg, double* dUpDeg, double* totalDeg) noexcept {
+    double r[3], u[3], f[3], a[3], b[3];
+    *dRightDeg = *dUpDeg = *totalDeg = 0.0;
+    if (!rotAxesFromClip(rows, r, u, f) || !ndcRay(rows, from, a) || !ndcRay(rows, to, b)) return false;
+    const double kDeg = 180.0 / 3.14159265358979323846;
+    const double ah = std::atan2(ikDot(a, r), ikDot(a, f)), av = std::atan2(ikDot(a, u), ikDot(a, f));
+    const double bh = std::atan2(ikDot(b, r), ikDot(b, f)), bv = std::atan2(ikDot(b, u), ikDot(b, f));
+    *dRightDeg = (bh - ah) * kDeg;
+    *dUpDeg = (bv - av) * kDeg;
+    double c = ikDot(a, b);
+    c = c > 1.0 ? 1.0 : c < -1.0 ? -1.0 : c;
+    *totalDeg = std::acos(c) * kDeg;
+    return true;
 }
 // ---- F67c: the body pinned to the camera (option B of the F66 review: the view never moves; the body follows it in 3D) ---------------------------
 // Replaces F65b's stand height. P1 publishes the job camera and the AMC matrix every frame; the Animate post-hook (stage 0) takes the cyclopean eye
@@ -2649,14 +2854,328 @@ inline LegPlant legPlant(const double hip1[3], const double foot0[3], double l1,
     }
     return o;
 }
-// The state bin of a pin sample: 0 standing, 1 walking, 2 running, 3 jumping (airborne). speed: the AMC's horizontal speed (m/s), vy its vertical
-// speed, feetHigh whether the animated feet are both well above the ground. (Armed is counted beside, not instead.)
+// The state bin of a pin sample: 0 standing, 1 walking, 2 running, 3 jumping (airborne), 4 crouching (F68e). speed: the AMC's horizontal speed (m/s),
+// vy its vertical speed, feetHigh whether the animated feet are both well above the ground, crouched whether the animated legs are bent (below).
+// Priority: jumping, crouching, running, walking, standing. (Armed is counted beside, not instead.)
 constexpr double kPinWalkMps = 0.35, kPinRunMps = 3.0, kPinAirMps = 0.8, kPinFeetHighM = 0.12;
-inline int pinState(double speed, double vy, bool feetHigh) noexcept {
+inline int pinState(double speed, double vy, bool feetHigh, bool crouched = false) noexcept {
     if (std::fabs(vy) > kPinAirMps || feetHigh) return 3;
+    if (crouched) return 4;
     if (speed >= kPinRunMps) return 2;
     if (speed >= kPinWalkMps) return 1;
     return 0;
+}
+// F68e: a crouch is the animated legs bent: hip to foot over (thigh + calf) averaged over both legs, below this. Standing is 0.94-1.0, the armed stance
+// (head 21 cm lower, F66) about 0.9; a crouch that drops the head 40 cm is 0.6-0.7. The 1 s line prints the mean per state, so the next flight can move it.
+constexpr double kPinCrouchReach = 0.80;
+inline bool pinCrouched(double meanLegReach) noexcept { return meanLegReach == meanLegReach && meanLegReach > 0.0 && meanLegReach < kPinCrouchReach; }
+
+// ---- F68d: the arms follow the FP hands ---------------------------------------------------------------------------------------------------------
+// The F67 flight (log 132256): Status.json's SelectedWeapon arrives after the game has drawn the weapon (polled every 100 ms, then the 0.3 s armed ramp),
+// so the 3P arms lagged the drawn weapon. The FP hands rise before the flag: the old distance gate moved 0.29 -> 0.80 m in the second before one
+// flip. The signal is read per frame from the FP Animate snapshot: the FP right hand attach (joint 51, in the FP model space) more than 12 cm from its
+// unarmed rest pose, which is captured while Status.json says fists and the hand is still. Up takes the arm IK's full armed weight from that frame
+// (no ramp at the onset; the weight falls over 0.3 s when it ends). Status.json stays the authority: its armed flag arms as before, and hands up with
+// Status.json still saying fists for over 1.5 s (counted from the hands going up) are not armed (an emote or a tool pose).
+constexpr double kHandsUpM = 0.12, kHandsDownM = 0.09;   // the hysteresis: up past 12 cm, down again under 9 cm from the rest pose
+constexpr double kHandsStillMps = 0.10, kHandsStillSec = 0.4;   // "still": under 10 cm/s for 0.4 s
+constexpr double kHandsVetoSec = 1.5;                    // hands up with the fists this long (counted from the hands going up): not armed
+constexpr double kHandsRecaptureSec = 3.0;               // a vetoed pose held this still this long is the new unarmed rest
+constexpr double kHandsRestTauSec = 1.0;                 // the rest follows a slow drift of the unarmed pose while it is near (time constant)
+constexpr double kHandsDropSec = 0.3;                    // the weight's fall when the signal ends
+struct FpHandsUp {
+    bool haveRest = false;
+    double rest[3] = {};
+    bool havePrev = false;
+    double prev[3] = {};
+    double stillSec = 0.0, upFistsSec = 0.0, dist = 0.0, w = 0.0;
+    bool up = false, vetoed = false;
+    struct Out {
+        bool up = false, signal = false, vetoed = false, restCaptured = false;
+        double dist = 0.0, w = 0.0;
+    };
+    // One frame: dt seconds since the last (capped at 0.1), fists = Status.json is NOT showing an item (unknown counts as fists), pos = the FP right attach
+    // in the FP model space (metres), posOk = it was readable this frame (a frame without it changes nothing but the weight's fall).
+    Out step(double dt, bool fists, const double pos[3], bool posOk) noexcept {
+        Out o;
+        const double d = !(dt > 0.0) ? 0.0 : dt > 0.1 ? 0.1 : dt;
+        if (posOk) {
+            double speed = 0.0;
+            if (havePrev && d > 1e-4) {
+                const double dx = pos[0] - prev[0], dy = pos[1] - prev[1], dz = pos[2] - prev[2];
+                speed = std::sqrt(dx * dx + dy * dy + dz * dz) / d;
+            }
+            stillSec = havePrev && speed < kHandsStillMps ? stillSec + d : 0.0;
+            prev[0] = pos[0];
+            prev[1] = pos[1];
+            prev[2] = pos[2];
+            havePrev = true;
+            if (haveRest) {
+                const double dx = pos[0] - rest[0], dy = pos[1] - rest[1], dz = pos[2] - rest[2];
+                dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+            } else {
+                dist = 0.0;
+            }
+            up = haveRest && (up ? dist > kHandsDownM : dist > kHandsUpM);
+            upFistsSec = up && fists ? upFistsSec + d : 0.0;
+            vetoed = upFistsSec > kHandsVetoSec;
+            if (fists && stillSec >= kHandsStillSec) {
+                if (!haveRest) {
+                    for (int i = 0; i < 3; ++i) rest[i] = pos[i];
+                    haveRest = true;
+                    o.restCaptured = true;
+                } else if (!up) {
+                    const double a = d / kHandsRestTauSec > 1.0 ? 1.0 : d / kHandsRestTauSec;
+                    for (int i = 0; i < 3; ++i) rest[i] += a * (pos[i] - rest[i]);
+                } else if (vetoed && stillSec >= kHandsRecaptureSec) {
+                    for (int i = 0; i < 3; ++i) rest[i] = pos[i];
+                    dist = 0.0;
+                    up = false;
+                    vetoed = false;
+                    upFistsSec = 0.0;
+                    o.restCaptured = true;
+                }
+            }
+        }
+        const bool signal = up && !vetoed;
+        if (signal) w = 1.0;
+        else w = w - d / kHandsDropSec > 0.0 ? w - d / kHandsDropSec : 0.0;
+        o.up = up;
+        o.signal = signal;
+        o.vetoed = vetoed;
+        o.dist = dist;
+        o.w = w;
+        return o;
+    }
+};
+
+// ---- F68g: the armed-move trace's gate -------------------------------------------------------------------------------------------------------
+// An event starts when the AMC is armed and over 1 m/s, runs 40 calls, and at most 5 start in any minute, at least a second apart.
+constexpr double kArmMoveMps = 1.0;
+constexpr uint32_t kArmMoveFrames = 40, kArmMoveMaxPerMin = 5;
+struct ArmMoveGate {
+    uint32_t evNo = 0, left = 0, within = 0, nStarts = 0;
+    uint64_t starts[kArmMoveMaxPerMin] = {}, lastStart = 0;
+    // One hook call at QPC q (freq ticks a second): true when it belongs to an event, with the event number and the call's index within it.
+    bool step(bool armed, double speedMps, uint64_t q, uint64_t freq, uint32_t* ev, uint32_t* idx) noexcept {
+        if (left == 0) {
+            if (!(armed && speedMps > kArmMoveMps) || (lastStart && q - lastStart < freq)) return false;
+            uint32_t recent = 0;
+            for (uint64_t s : starts)
+                if (s && q - s < 60 * freq) ++recent;
+            if (recent >= kArmMoveMaxPerMin) return false;
+            starts[nStarts++ % kArmMoveMaxPerMin] = q;
+            lastStart = q;
+            ++evNo;
+            left = kArmMoveFrames;
+            within = 0;
+        }
+        --left;
+        *ev = evNo;
+        *idx = within++;
+        return true;
+    }
+};
+
+// ---- F68e: the neck target from the animated head ----------------------------------------------------------------------------------------------
+// F67c puts the neck at a CONSTANT offset below and behind the eye, (0, -0.155, -0.09) along the eye's heading, whatever the body's pose. The F67 dump
+// (133113, a crouch): the pin said "standing", eye - neck exactly (+0.8, +15.5, +9.0), target error 0, the hidden head's neck opening 16 cm ahead of the
+// eye and 8 cm below, filling 8.7% of the left eye; to clear the view the neck has to sit about 9 cm further back (18 cm behind the eye looking straight
+// down, against 9 standing). A crouch pitches the 3P chest and neck forward, so the animation's own eye point is further forward of the neck than 9 cm.
+// The target now follows it: T = E - Ry(heading(eye) - heading(head 44)) . (P44 + R44 e_h - N0), N0 the animated neck 34, P44 and R44 the animated head
+// joint's position and rotation, e_h the eye point in the head joint's frame. e_h is captured once, standing (a run of kPinEyeCalFrames consecutive
+// frames: unarmed, still, the head 1.5..1.9 m up and level), so that the standing result is EXACTLY the rest offset: with the animated neck-to-eye
+// vector in the head's heading axes equal to (0, 0.155, 0.09) there, the target is the F67c target. Which of the head joint's local axes is its forward
+// and its up is found at the same time (the one most aligned with the body's forward and up while standing). Until e_h exists, and whenever the head's
+// heading cannot be read, the F67c target is used.
+constexpr double kPinStandHeadMinM = 1.50, kPinStandHeadMaxM = 1.90, kPinStandPitchSin = 0.57;   // 35 deg of head pitch at most while calibrating
+constexpr uint32_t kPinEyeCalFrames = 45;
+constexpr double kPinAnimOffsetClampM = 0.35;   // |v - rest| beyond this is not a pose of this body (a glitch, a ragdoll): clamped. A rigid lean of 90 deg moves the vector 25 cm, 120 deg 31 cm.
+// The head's horizontal heading (unit, model axes x right, z forward) from its forward and up vectors: the forward's when it is more than ~20 deg off
+// vertical, else the up vector's projection (it points forward when the head looks down, backward when it looks up). False when neither is usable.
+inline bool pinHeadHeading(const double fwd[3], const double up[3], double h[3]) noexcept {
+    const double fn = std::sqrt(fwd[0] * fwd[0] + fwd[1] * fwd[1] + fwd[2] * fwd[2]);
+    const double fh = std::sqrt(fwd[0] * fwd[0] + fwd[2] * fwd[2]);
+    if (fn > 1e-9 && fh / fn > 0.35) {
+        h[0] = fwd[0] / fh;
+        h[1] = 0.0;
+        h[2] = fwd[2] / fh;
+        return true;
+    }
+    const double un = std::sqrt(up[0] * up[0] + up[1] * up[1] + up[2] * up[2]);
+    const double uh = std::sqrt(up[0] * up[0] + up[2] * up[2]);
+    if (un > 1e-9 && uh / un > 0.35) {
+        const double s = fwd[1] < 0.0 ? 1.0 : -1.0;
+        h[0] = s * up[0] / uh;
+        h[1] = 0.0;
+        h[2] = s * up[2] / uh;
+        return true;
+    }
+    return false;
+}
+// v turned about the vertical by the angle from the horizontal heading `from` to the heading `to` (both unit, y = 0).
+inline void pinTurnHeading(const double v[3], const double from[3], const double to[3], double out[3]) noexcept {
+    const double c = from[0] * to[0] + from[2] * to[2], s = from[0] * to[2] - from[2] * to[0];
+    out[0] = c * v[0] - s * v[2];
+    out[1] = v[1];
+    out[2] = s * v[0] + c * v[2];
+}
+// The head joint's frame as the pin reads it: rows = the matrix's three axis rows in model space (rigid, near unit length); fAxis/fSign and uAxis/uSign
+// say which row (and which way) is the head's forward and up. Found while standing: the signed row most aligned with the body's forward (0, 0, 1), then,
+// among the other two, the one most aligned with up (0, 1, 0).
+struct PinHeadAxes {
+    int fAxis = -1, uAxis = -1;
+    double fSign = 1.0, uSign = 1.0;
+    bool have() const noexcept { return fAxis >= 0 && uAxis >= 0; }
+    void fwd(const double rows[3][3], double out[3]) const noexcept {
+        for (int i = 0; i < 3; ++i) out[i] = fSign * rows[fAxis][i];
+    }
+    void up(const double rows[3][3], double out[3]) const noexcept {
+        for (int i = 0; i < 3; ++i) out[i] = uSign * rows[uAxis][i];
+    }
+};
+inline bool pinFindHeadAxes(const double rows[3][3], PinHeadAxes* ax) noexcept {
+    int f = -1;
+    double fs = 1.0, best = 0.0;
+    for (int i = 0; i < 3; ++i) {
+        const double z = rows[i][2];
+        if (std::fabs(z) > best) {
+            best = std::fabs(z);
+            f = i;
+            fs = z < 0.0 ? -1.0 : 1.0;
+        }
+    }
+    if (f < 0 || best < 0.7) return false;   // the head is not facing about where the body does
+    int u = -1;
+    double us = 1.0, bu = 0.0;
+    for (int i = 0; i < 3; ++i) {
+        if (i == f) continue;
+        const double y = rows[i][1];
+        if (std::fabs(y) > bu) {
+            bu = std::fabs(y);
+            u = i;
+            us = y < 0.0 ? -1.0 : 1.0;
+        }
+    }
+    if (u < 0 || bu < 0.5) return false;
+    ax->fAxis = f;
+    ax->fSign = fs;
+    ax->uAxis = u;
+    ax->uSign = us;
+    return true;
+}
+// The rows are a rigid frame: each of unit length within 20% and mutually near perpendicular.
+inline bool pinRowsRigid(const double rows[3][3]) noexcept {
+    for (int i = 0; i < 3; ++i) {
+        const double l2 = rows[i][0] * rows[i][0] + rows[i][1] * rows[i][1] + rows[i][2] * rows[i][2];
+        if (!(l2 > 0.64 && l2 < 1.44)) return false;
+        for (int j = i + 1; j < 3; ++j) {
+            const double d = rows[i][0] * rows[j][0] + rows[i][1] * rows[j][1] + rows[i][2] * rows[j][2];
+            if (!(std::fabs(d) < 0.2)) return false;
+        }
+    }
+    return true;
+}
+// The eye point in the head joint's frame from one standing frame: the animated neck-to-head vector p44 - n0 plus R44 e_h must equal, in the head's
+// heading axes, (right 0, up 0.155, forward 0.09). False when the head's frame is not readable.
+inline bool pinEyeInHead(const double p44[3], const double rows[3][3], const PinHeadAxes& ax, const double n0[3], double eh[3]) noexcept {
+    if (!ax.have() || !pinRowsRigid(rows)) return false;
+    double f[3], u[3], h[3];
+    ax.fwd(rows, f);
+    ax.up(rows, u);
+    if (!pinHeadHeading(f, u, h)) return false;
+    const double vt[3] = {kPinRestBackM * h[0], kPinRestUpM, kPinRestBackM * h[2]};
+    const double d[3] = {vt[0] + n0[0] - p44[0], vt[1] + n0[1] - p44[1], vt[2] + n0[2] - p44[2]};
+    for (int i = 0; i < 3; ++i) eh[i] = d[0] * rows[i][0] + d[1] * rows[i][1] + d[2] * rows[i][2];   // unit rows: the coordinate along each
+    return true;
+}
+// The calibration: kPinEyeCalFrames consecutive standing frames agreeing on the head's axes, averaged. A frame that is not standing (or reads another
+// axis assignment) starts the run again. Once done it is kept (the caller resets it for another skeleton).
+struct PinEyeCal {
+    bool have = false;
+    uint32_t n = 0;
+    double sum[3] = {}, e[3] = {}, headYSum = 0.0, headY = 0.0;
+    PinHeadAxes axes, runAxes;
+    void reset() noexcept { *this = PinEyeCal{}; }
+    void restart() noexcept {
+        n = 0;
+        sum[0] = sum[1] = sum[2] = 0.0;
+        headYSum = 0.0;
+        runAxes = PinHeadAxes{};
+    }
+    // One frame: standing says whether this frame may calibrate (the caller's gate); returns true on the frame the calibration completes.
+    bool add(bool standing, const double p44[3], const double rows[3][3], const double n0[3]) noexcept {
+        if (have) return false;
+        PinHeadAxes ax;
+        double eh[3];
+        bool ok = standing && pinRowsRigid(rows) && pinFindHeadAxes(rows, &ax);
+        if (ok) {
+            double f[3];
+            ax.fwd(rows, f);
+            ok = std::fabs(f[1]) <= kPinStandPitchSin;   // the head level (35 deg of pitch at most)
+        }
+        if (ok && runAxes.have())
+            ok = ax.fAxis == runAxes.fAxis && ax.uAxis == runAxes.uAxis && ax.fSign == runAxes.fSign && ax.uSign == runAxes.uSign;
+        if (!ok || !pinEyeInHead(p44, rows, ax, n0, eh)) {
+            restart();
+            return false;
+        }
+        runAxes = ax;
+        for (int i = 0; i < 3; ++i) sum[i] += eh[i];
+        headYSum += p44[1];
+        if (++n < kPinEyeCalFrames) return false;
+        for (int i = 0; i < 3; ++i) e[i] = sum[i] / static_cast<double>(n);
+        headY = headYSum / static_cast<double>(n);
+        axes = runAxes;
+        have = true;
+        return true;
+    }
+};
+// The standing gate of the calibration: unarmed and not in ADS, the AMC still, the head joint's height in range (its pitch is gated in add()).
+inline bool pinCalStanding(double speed, bool armed, bool ads, double headY) noexcept {
+    return !armed && !ads && speed < kPinWalkMps && headY >= kPinStandHeadMinM && headY <= kPinStandHeadMaxM;
+}
+struct PinAnimTarget {
+    bool anim = false;        // the animated vector was used (else the F67c rest offset)
+    bool clamped = false;
+    double vUsed[3] = {};     // neck -> eye as used (model axes)
+    double hEye[3] = {}, hHead[3] = {};
+};
+// The neck target: E - v, v the animated neck-to-eye vector turned from the head's heading to the eye's. eyeFwd: the eye's forward in model axes (its
+// heading is pinHeading's, with the same fallback to the body's forward). Without a calibration or a readable head, the F67c target.
+inline void pinNeckTargetAnim(const double eye[3], const double eyeFwd[3], const double p44[3], const double rows[3][3], const double n0[3],
+                              const PinEyeCal& cal, double out[3], PinAnimTarget* info) noexcept {
+    PinAnimTarget local;
+    PinAnimTarget& pa = info ? *info : local;
+    pa = PinAnimTarget{};
+    pinHeading(eyeFwd, pa.hEye);
+    const double rest[3] = {kPinRestBackM * pa.hEye[0], kPinRestUpM, kPinRestBackM * pa.hEye[2]};
+    for (int i = 0; i < 3; ++i) pa.vUsed[i] = rest[i];
+    if (cal.have && pinRowsRigid(rows)) {
+        double f[3], u[3];
+        cal.axes.fwd(rows, f);
+        cal.axes.up(rows, u);
+        if (!pinHeadHeading(f, u, pa.hHead)) {   // the head's heading unreadable: no turn (the animation's own heading stands for the eye's)
+            pa.hHead[0] = pa.hEye[0];
+            pa.hHead[1] = 0.0;
+            pa.hHead[2] = pa.hEye[2];
+        }
+        double v[3];
+        for (int i = 0; i < 3; ++i) v[i] = p44[i] + cal.e[0] * rows[0][i] + cal.e[1] * rows[1][i] + cal.e[2] * rows[2][i] - n0[i];
+        double vt[3];
+        pinTurnHeading(v, pa.hHead, pa.hEye, vt);
+        double dev[3] = {vt[0] - rest[0], vt[1] - rest[1], vt[2] - rest[2]};
+        const double dn = std::sqrt(dev[0] * dev[0] + dev[1] * dev[1] + dev[2] * dev[2]);
+        if (dn == dn && dn <= kPinAnimOffsetClampM) {
+            for (int i = 0; i < 3; ++i) pa.vUsed[i] = vt[i];
+            pa.anim = true;
+        } else if (dn == dn) {
+            for (int i = 0; i < 3; ++i) pa.vUsed[i] = rest[i] + dev[i] * kPinAnimOffsetClampM / dn;
+            pa.anim = true;
+            pa.clamped = true;
+        }
+    }
+    for (int i = 0; i < 3; ++i) out[i] = eye[i] - pa.vUsed[i];
 }
 
 // ---- F67f: while armed, both hands stay on the grips on every frame ----------------------------------------------------------------------------
@@ -2701,5 +3220,56 @@ inline double yawRateDps(double prevDeg, double curDeg, double dtSec) noexcept {
     return d / dtSec;
 }
 inline bool aimTrigger(double rateDps, bool armed) noexcept { return armed && std::fabs(rateDps) > kAimTriggerDps; }
+
+// ---- F68c: G from one game frame ---------------------------------------------------------------------------------------------------------------
+// G = F_root x inv(M3P) takes the FP root from the FP AMC's P1 call and the 3P AMC matrix from the local 3P AMC's. The F67 flight (log 132256): the
+// two calls come in either order within a frame, and G was built by the 3P call from the FP root of the last call, which on about 40% of the frames
+// was the previous frame's: the hands solved exactly onto a grip off the drawn weapon by body speed x one frame (4.4 cm at 4 m/s, 90 Hz), switching
+// frame to frame between 0 and 1 frame: the arm stutter. The fix: each call takes the game-frame index (a call of a kind already seen this frame
+// opens the next frame) and G is built by whichever of the two comes second in a frame, from the two halves of the SAME index, once.
+constexpr double kP1PairMaxGapMs = 10.0;   // a pair whose two calls are further apart than this is not one frame's (an index shifted by a missing call)
+struct P1FramePairing {
+    uint32_t frame = 1;                       // the current game frame's index
+    bool seen[2] = {false, false};            // [0] the FP AMC's call, [1] the local 3P AMC's call, seen in this frame
+    int firstKind = -1;                       // which of the two came first in this frame
+    bool published = false;                   // G was built from this frame's pair
+    uint32_t pairedFrame = 0;                 // the last frame G was built for
+    // Counters for the second's line (the caller reads and clears them).
+    uint64_t frames = 0, pairs = 0, noPair = 0, tpFirst = 0, fpFirst = 0, farApart = 0;
+    // A call of `kind` (0 FP, 1 3P): its game-frame index. A kind already seen this frame opens the next frame.
+    uint32_t on(int kind) noexcept {
+        const int k = kind ? 1 : 0;
+        if (seen[k]) {
+            if (!published && (seen[0] || seen[1])) ++noPair;
+            ++frame;
+            ++frames;
+            seen[0] = seen[1] = false;
+            firstKind = -1;
+            published = false;
+        }
+        if (seen[1 - k]) {   // the second call of the frame
+            if (firstKind == 1) ++tpFirst;
+            else ++fpFirst;
+        } else {
+            firstKind = k;
+        }
+        seen[k] = true;
+        return frame;
+    }
+    // The second caller: may G be built from the FP half (frame fpFrame, QPC fpQpc) and the 3P half (frame tpFrame, QPC tpQpc)? Once per frame, same
+    // index, and the two calls near each other (ticks: QPC ticks, freq: per second).
+    bool take(bool fpHave, uint32_t fpFrame, uint64_t fpQpc, bool tpHave, uint32_t tpFrame, uint64_t tpQpc, uint64_t freq) noexcept {
+        if (!fpHave || !tpHave || fpFrame != tpFrame || fpFrame == pairedFrame) return false;
+        const uint64_t gap = fpQpc > tpQpc ? fpQpc - tpQpc : tpQpc - fpQpc;
+        if (freq > 0 && static_cast<double>(gap) * 1000.0 / static_cast<double>(freq) > kP1PairMaxGapMs) {
+            ++farApart;
+            return false;
+        }
+        pairedFrame = fpFrame;
+        published = true;
+        ++pairs;
+        return true;
+    }
+};
 }  // namespace nofoot
 }  // namespace edvr
