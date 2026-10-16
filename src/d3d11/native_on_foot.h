@@ -147,6 +147,21 @@ inline std::atomic<uint32_t> g_fdSeq{0};
 inline FpDropPlan g_fdPlan;
 inline std::atomic<uint64_t> g_fdX{0};               // the plan's X (0: none), set after the plan is published; the hook's quick filter
 inline std::atomic<bool> g_dropWanted{false};
+// F56 (TEMPORARY): the 3P arm IK's plan. The census (the local 3P skeleton, the pose freeze's X) derives each arm's chain and groups once per X
+// (nofoot::ikArmChain: [0] L, clavicle 35, hand 58, attach 67; [1] R, 36, 59, 66, from the joint probe) and publishes them under g_armSeq;
+// g_armX (set after the plan is published) is the hook's quick filter. g_ikMode is fix.native_on_foot_arm_ik: 0 off, 1 probe (the default),
+// 2 nudge, 3 on; g_ikWanted (the key not off) keeps the Animate hook and the FP census running when the pose freeze key is off.
+struct ArmPlan {
+    uint64_t x = 0;
+    uint32_t joints = 0;
+    bool ok[2] = {false, false};
+    nofoot::IkArm side[2];
+};
+inline std::atomic<uint32_t> g_armSeq{0};
+inline ArmPlan g_armPlan;
+inline std::atomic<uint64_t> g_armX{0};
+inline std::atomic<int> g_ikMode{1};
+inline std::atomic<bool> g_ikWanted{true};
 }  // namespace pfz
 
 // Render thread, once a frame at the Present boundary (device_hook.cpp's tick). Installs the hook the first time (VR only), re-reads the

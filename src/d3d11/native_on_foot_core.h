@@ -835,5 +835,385 @@ struct PfzHeadRest {
         return resting;
     }
 };
+
+// ---- F56 (TEMPORARY): the third-person arm IK, pure half ----------------------------------------------------------------------
+// fix.native_on_foot_arm_ik = off | probe (the default) | nudge | on. In body mode the 3P hands are put on the FP handAttach joints (51 R, 52 L,
+// mapped into the 3P model space) by a two-bone solve per arm in the Animate post-hook. Row-vector 4x4 throughout (v' = v x M; rows 0..2 the
+// rotation, row 3 the position). A 3x3 rotation R here is row-vector too: v' = v x R.
+constexpr double kIkRampSec = 0.2;                            // the base weight's ramp in and out
+constexpr float kIkGateFullM = 0.35f, kIkGateZeroM = 0.8f;    // per arm: full weight under 0.35 m from the animated hand, none from 0.8 m
+constexpr float kIkCapPerCallM = 0.05f;                       // the applied hand offset moves at most 5 cm an Animate call (a frame)
+constexpr float kIkNudgeM = 0.25f;                            // nudge: the left hand group rises this much (model +y)
+constexpr uint64_t kIkFreshMs = 100;                          // the FP snapshot and G older than this refuse the call
+constexpr uint32_t kIkGroupMax = 64;                          // the member cap of each group (gU, gF, gH)
+constexpr double kIkElbowOutM = 0.10;                         // the swivel clamp: the elbow at least this far out (model x, the arm's side)
+constexpr double kIkPi = 3.14159265358979323846;
+
+// The per-arm distance gate: 1 under kIkGateFullM, linear to 0 at kIkGateZeroM, 0 beyond (and for NaN).
+inline float ikDistanceGate(float dist) noexcept {
+    if (!(dist == dist)) return 0.0f;
+    if (dist <= kIkGateFullM) return 1.0f;
+    if (dist >= kIkGateZeroM) return 0.0f;
+    return (kIkGateZeroM - dist) / (kIkGateZeroM - kIkGateFullM);
+}
+// The base weight's ramp: toward 1 while wanted and toward 0 otherwise, linearly over kIkRampSec.
+struct IkBlend {
+    float w = 0.0f;
+    void step(bool want, double dtSec) noexcept {
+        const double d = dtSec > 0.0 ? dtSec / kIkRampSec : 0.0;
+        double v = static_cast<double>(w) + (want ? d : -d);
+        if (v < 0.0) v = 0.0;
+        if (v > 1.0) v = 1.0;
+        w = static_cast<float>(v);
+    }
+};
+// One call's move of the applied offset toward the wanted one: the change is at most `cap` long (a vector cap).
+inline void ikCapToward(float applied[3], const float want[3], float cap) noexcept {
+    const float d[3] = {want[0] - applied[0], want[1] - applied[1], want[2] - applied[2]};
+    const float len = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+    const float k = len > cap && len > 0.0f ? cap / len : 1.0f;
+    for (int i = 0; i < 3; ++i) applied[i] += d[i] * k;
+}
+
+// The arm chain on a parent array: C the clavicle, H the hand, A the hand attach (from the joint probe). F = parents[H], U = parents[F] when
+// parents[U] == C (direct); else U is the ancestor of H (up to 4 levels) whose parent is C. Groups, parent first: gU = subtree(U) less
+// subtree(F) (U and any joint between U and F are the chain, chainU), gF = subtree(F) less subtree(H), gH = subtree(H) (A in it).
+// why: 0 ok, 1 bad input, 2 no ancestor of H within 4 levels has the parent C (or U would be F), 3 A is not under H, 4 a group past kIkGroupMax,
+// 5 a parent out of range or a cycle.
+struct IkArm {
+    uint32_t why = 1;
+    uint16_t C = 0xFFFFu, U = 0xFFFFu, F = 0xFFFFu, H = 0xFFFFu, A = 0xFFFFu;
+    bool direct = false, attachDirect = false;
+    uint32_t depthC = 0, depthH = 0;
+    uint16_t nU = 0, nF = 0, nH = 0;
+    uint16_t gU[kIkGroupMax] = {}, gF[kIkGroupMax] = {}, gH[kIkGroupMax] = {};
+    uint8_t chainU[kIkGroupMax] = {};
+};
+// The depth of j (the root 0); 0xFFFFFFFF on a broken chain.
+inline uint32_t ikDepth(const uint16_t* parents, uint32_t joints, uint32_t j) noexcept {
+    uint32_t d = 0;
+    for (uint32_t a = j;; ++d) {
+        if (a >= joints || d > joints) return 0xFFFFFFFFu;
+        const uint16_t p = parents[a];
+        if (p == 0xFFFFu) return d;
+        a = p;
+    }
+}
+// True when j is root or below it.
+inline bool ikUnder(const uint16_t* parents, uint32_t joints, uint32_t j, uint32_t root) noexcept {
+    uint32_t steps = 0;
+    for (uint32_t a = j; a != 0xFFFFu; a = parents[a]) {
+        if (a >= joints || ++steps > joints + 1) return false;
+        if (a == root) return true;
+    }
+    return false;
+}
+inline IkArm ikArmChain(const uint16_t* parents, uint32_t joints, uint32_t C, uint32_t H, uint32_t A) noexcept {
+    IkArm s;
+    if (joints == 0 || joints > kPfzMaxJoints || C >= joints || H >= joints || A >= joints) return s;
+    s.C = static_cast<uint16_t>(C);
+    s.H = static_cast<uint16_t>(H);
+    s.A = static_cast<uint16_t>(A);
+    s.depthC = ikDepth(parents, joints, C);
+    s.depthH = ikDepth(parents, joints, H);
+    if (s.depthC == 0xFFFFFFFFu || s.depthH == 0xFFFFFFFFu) {
+        s.why = 5;
+        return s;
+    }
+    const uint32_t F = parents[H];
+    if (F >= joints) {
+        s.why = 2;
+        return s;
+    }
+    uint32_t U = parents[F];
+    s.direct = U < joints && parents[U] == C;
+    if (!s.direct) {
+        U = 0xFFFFu;
+        uint32_t a = H;
+        for (int level = 0; level < 4; ++level) {
+            const uint32_t p = parents[a];
+            if (p >= joints) break;
+            if (parents[p] == C) {
+                U = p;
+                break;
+            }
+            a = p;
+        }
+    }
+    if (U >= joints || U == F || U == H) {
+        s.why = 2;
+        return s;
+    }
+    s.U = static_cast<uint16_t>(U);
+    s.F = static_cast<uint16_t>(F);
+    if (!ikUnder(parents, joints, A, H)) {
+        s.why = 3;
+        return s;
+    }
+    s.attachDirect = parents[A] == H;
+    // Parent first: by depth, then index.
+    const uint32_t dU = ikDepth(parents, joints, U);
+    for (uint32_t d = dU; d <= joints; ++d) {
+        bool any = false;
+        for (uint32_t j = 0; j < joints; ++j) {
+            if (!ikUnder(parents, joints, j, U)) continue;
+            const uint32_t dj = ikDepth(parents, joints, j);
+            if (dj > d) any = true;
+            if (dj != d) continue;
+            const bool inH = ikUnder(parents, joints, j, H), inF = !inH && ikUnder(parents, joints, j, F);
+            uint16_t& n = inH ? s.nH : inF ? s.nF : s.nU;
+            if (n >= kIkGroupMax) {
+                s.why = 4;
+                return s;
+            }
+            if (inH) {
+                s.gH[n++] = static_cast<uint16_t>(j);
+            } else if (inF) {
+                s.gF[n++] = static_cast<uint16_t>(j);
+            } else {
+                s.chainU[n] = ikUnder(parents, joints, F, j) ? 1 : 0;
+                s.gU[n++] = static_cast<uint16_t>(j);
+            }
+        }
+        if (!any) break;
+    }
+    s.why = 0;
+    return s;
+}
+inline const char* ikArmWhyText(uint32_t why) noexcept {
+    switch (why) {
+        case 0: return "ok";
+        case 1: return "a joint index out of range or no joints";
+        case 2: return "no ancestor of the hand within 4 levels has the clavicle as its parent";
+        case 3: return "the attach joint is not under the hand";
+        case 4: return "a group has more than 64 members";
+        case 5: return "a parent out of range or a cycle";
+        default: return "?";
+    }
+}
+
+// Small double vector helpers.
+inline double ikDot(const double a[3], const double b[3]) noexcept { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
+inline double ikLen(const double a[3]) noexcept { return std::sqrt(ikDot(a, a)); }
+inline void ikCross(const double a[3], const double b[3], double out[3]) noexcept {
+    out[0] = a[1] * b[2] - a[2] * b[1];
+    out[1] = a[2] * b[0] - a[0] * b[2];
+    out[2] = a[0] * b[1] - a[1] * b[0];
+}
+inline bool ikUnit(const double a[3], double out[3]) noexcept {
+    const double l = ikLen(a);
+    if (!(l > 1e-9)) return false;
+    for (int i = 0; i < 3; ++i) out[i] = a[i] / l;
+    return true;
+}
+inline double ikWrapPi(double a) noexcept {
+    if (!(a == a)) return 0.0;
+    while (a > kIkPi) a -= 2.0 * kIkPi;
+    while (a < -kIkPi) a += 2.0 * kIkPi;
+    return a;
+}
+
+// The two-bone frame: S the shoulder (the upper arm's root), T the target hand position, l1 the upper arm, l2 the forearm. D = |T - S| clamped
+// into [|l1 - l2| + 1 mm, 0.999 (l1 + l2)]; dir = unit(T - S); the elbow circle has its centre at S + dir a and radius h; u is the unit
+// perpendicular of `ref` to dir (any perpendicular when ref is parallel), v = dir x u. The elbow at swivel theta is S + dir a + h (cos u + sin v);
+// the hand the solve reaches is S + dir D (T itself while reach < 1). reach = |T - S| / (l1 + l2); shortfall = |T - S| - D when positive (m).
+struct IkTwoBone {
+    bool ok = false;
+    double S[3] = {}, dir[3] = {}, u[3] = {}, v[3] = {}, hand[3] = {};
+    double D = 0.0, a = 0.0, h = 0.0, reach = 0.0, shortfall = 0.0;
+    void elbowAt(double theta, double E[3]) const noexcept {
+        const double c = std::cos(theta), s = std::sin(theta);
+        for (int i = 0; i < 3; ++i) E[i] = S[i] + dir[i] * a + h * (c * u[i] + s * v[i]);
+    }
+    // The swivel angle (about dir, from u) of a direction p.
+    double angleOf(const double p[3]) const noexcept { return std::atan2(ikDot(p, v), ikDot(p, u)); }
+};
+inline IkTwoBone ikTwoBoneFrame(const double S[3], const double T[3], double l1, double l2, const double ref[3]) noexcept {
+    IkTwoBone t;
+    if (!(l1 > 1e-4) || !(l2 > 1e-4)) return t;
+    const double dv[3] = {T[0] - S[0], T[1] - S[1], T[2] - S[2]};
+    const double len = ikLen(dv);
+    if (!(len > 1e-6)) return t;
+    for (int i = 0; i < 3; ++i) {
+        t.S[i] = S[i];
+        t.dir[i] = dv[i] / len;
+    }
+    const double lo = std::fabs(l1 - l2) + 1e-3, hi = 0.999 * (l1 + l2);
+    t.D = len < lo ? lo : len > hi ? hi : len;
+    t.reach = len / (l1 + l2);
+    t.shortfall = len > t.D ? len - t.D : 0.0;
+    t.a = (l1 * l1 - l2 * l2 + t.D * t.D) / (2.0 * t.D);
+    t.h = std::sqrt(std::max(0.0, l1 * l1 - t.a * t.a));
+    double perp[3];
+    const double rd = ikDot(ref, t.dir);
+    for (int i = 0; i < 3; ++i) perp[i] = ref[i] - t.dir[i] * rd;
+    if (!ikUnit(perp, t.u)) {   // ref along dir: any perpendicular
+        const double axis[3] = {std::fabs(t.dir[0]) < 0.9 ? 1.0 : 0.0, std::fabs(t.dir[0]) < 0.9 ? 0.0 : 1.0, 0.0};
+        double c[3];
+        ikCross(t.dir, axis, c);
+        if (!ikUnit(c, t.u)) return t;
+    }
+    ikCross(t.dir, t.u, t.v);
+    for (int i = 0; i < 3; ++i) t.hand[i] = S[i] + t.dir[i] * t.D;
+    t.ok = true;
+    return t;
+}
+// The classic two-bone solve: the elbow on the pole's side of S->T (swivel 0 of the frame built on the pole).
+inline IkTwoBone ikTwoBone(const double S[3], const double T[3], double l1, double l2, const double pole[3], double E[3]) noexcept {
+    const IkTwoBone t = ikTwoBoneFrame(S, T, l1, l2, pole);
+    if (t.ok) t.elbowAt(0.0, E);
+    return t;
+}
+// The swivel clamp: the elbow at least kIkElbowOutM out on the arm's side (out = +1 or -1: the sign of the clavicle's model x) and not above
+// the shoulder (E.y <= S.y). theta when it holds; else the nearest angle (5 degree steps) that holds; else the one with the least violation.
+inline double ikSwivelClamp(const IkTwoBone& t, double theta, double out, bool* clamped) noexcept {
+    if (clamped) *clamped = false;
+    if (!t.ok || !(t.h > 1e-6)) return theta;
+    const auto violation = [&](double th) noexcept {
+        double E[3];
+        t.elbowAt(th, E);
+        const double vo = kIkElbowOutM - out * E[0], vy = E[1] - t.S[1];
+        return (vo > 0.0 ? vo : 0.0) + (vy > 0.0 ? vy : 0.0);
+    };
+    if (violation(theta) <= 0.0) return theta;
+    if (clamped) *clamped = true;
+    const double step = 5.0 * kIkPi / 180.0;
+    double best = theta, bestV = violation(theta);
+    for (int k = 1; k <= 36; ++k) {
+        for (int sgn = -1; sgn <= 1; sgn += 2) {
+            const double th = theta + sgn * k * step;
+            const double vv = violation(th);
+            if (vv <= 0.0) return ikWrapPi(th);
+            if (vv < bestV) {
+                bestV = vv;
+                best = th;
+            }
+        }
+    }
+    return ikWrapPi(best);
+}
+
+// Row-vector rotations: R about the unit axis n by ang (right-handed in the column sense: v x R = Rc v). The shortest arc from unit a to unit b.
+inline void ikRotAxis(const double n[3], double ang, double R[9]) noexcept {
+    const double c = std::cos(ang), s = std::sin(ang), k = 1.0 - c;
+    // R = c I - s [n]x + k n n^T (the transpose of the column-convention Rodrigues matrix)
+    R[0] = c + k * n[0] * n[0];
+    R[1] = s * n[2] + k * n[0] * n[1];
+    R[2] = -s * n[1] + k * n[0] * n[2];
+    R[3] = -s * n[2] + k * n[1] * n[0];
+    R[4] = c + k * n[1] * n[1];
+    R[5] = s * n[0] + k * n[1] * n[2];
+    R[6] = s * n[1] + k * n[2] * n[0];
+    R[7] = -s * n[0] + k * n[2] * n[1];
+    R[8] = c + k * n[2] * n[2];
+}
+inline void ikRotFromTo(const double a[3], const double b[3], double R[9]) noexcept {
+    double k[3];
+    ikCross(a, b, k);
+    const double s = ikLen(k), c = ikDot(a, b);
+    if (s < 1e-9) {
+        if (c > 0.0) {
+            for (int i = 0; i < 9; ++i) R[i] = (i % 4 == 0) ? 1.0 : 0.0;
+            return;
+        }
+        const double axis[3] = {std::fabs(a[0]) < 0.9 ? 1.0 : 0.0, std::fabs(a[0]) < 0.9 ? 0.0 : 1.0, 0.0};
+        double p[3], n[3];
+        ikCross(a, axis, p);
+        if (!ikUnit(p, n)) n[0] = 0.0, n[1] = 0.0, n[2] = 1.0;
+        ikRotAxis(n, kIkPi, R);
+        return;
+    }
+    const double n[3] = {k[0] / s, k[1] / s, k[2] / s};
+    ikRotAxis(n, std::atan2(s, c), R);
+}
+// out = M x T(-P) x R x T(P): the joint matrix M rotated by R about the model-space point P. out may not alias M.
+inline void ikPivot(const float M[16], const double R[9], const double P[3], float out[16]) noexcept {
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c)
+            out[r * 4 + c] = static_cast<float>(M[r * 4 + 0] * R[0 * 3 + c] + M[r * 4 + 1] * R[1 * 3 + c] + M[r * 4 + 2] * R[2 * 3 + c]);
+    for (int r = 0; r < 3; ++r) out[r * 4 + 3] = M[r * 4 + 3];
+    const double q[3] = {M[12] - P[0], M[13] - P[1], M[14] - P[2]};
+    for (int c = 0; c < 3; ++c) out[12 + c] = static_cast<float>(q[0] * R[0 * 3 + c] + q[1] * R[1 * 3 + c] + q[2] * R[2 * 3 + c] + P[c]);
+    out[15] = M[15];
+}
+// The rotation's quaternion (column sense; w >= 0) and the twist angle about a unit axis (swing-twist): 2 atan2(q.xyz . axis, q.w), in (-pi, pi].
+inline void ikQuat(const double R[9], double q[4]) noexcept {
+    // Column-convention Rc = R^T: Rc[i][j] = R[j * 3 + i].
+    const auto rc = [&](int i, int j) noexcept { return R[j * 3 + i]; };
+    const double tr = rc(0, 0) + rc(1, 1) + rc(2, 2);
+    double x, y, z, w;
+    if (tr > 0.0) {
+        const double s = std::sqrt(tr + 1.0) * 2.0;
+        w = 0.25 * s;
+        x = (rc(2, 1) - rc(1, 2)) / s;
+        y = (rc(0, 2) - rc(2, 0)) / s;
+        z = (rc(1, 0) - rc(0, 1)) / s;
+    } else if (rc(0, 0) > rc(1, 1) && rc(0, 0) > rc(2, 2)) {
+        const double s = std::sqrt(1.0 + rc(0, 0) - rc(1, 1) - rc(2, 2)) * 2.0;
+        w = (rc(2, 1) - rc(1, 2)) / s;
+        x = 0.25 * s;
+        y = (rc(0, 1) + rc(1, 0)) / s;
+        z = (rc(0, 2) + rc(2, 0)) / s;
+    } else if (rc(1, 1) > rc(2, 2)) {
+        const double s = std::sqrt(1.0 + rc(1, 1) - rc(0, 0) - rc(2, 2)) * 2.0;
+        w = (rc(0, 2) - rc(2, 0)) / s;
+        x = (rc(0, 1) + rc(1, 0)) / s;
+        y = 0.25 * s;
+        z = (rc(1, 2) + rc(2, 1)) / s;
+    } else {
+        const double s = std::sqrt(1.0 + rc(2, 2) - rc(0, 0) - rc(1, 1)) * 2.0;
+        w = (rc(1, 0) - rc(0, 1)) / s;
+        x = (rc(0, 2) + rc(2, 0)) / s;
+        y = (rc(1, 2) + rc(2, 1)) / s;
+        z = 0.25 * s;
+    }
+    const double sg = w < 0.0 ? -1.0 : 1.0;
+    q[0] = x * sg;
+    q[1] = y * sg;
+    q[2] = z * sg;
+    q[3] = w * sg;
+}
+inline double ikTwistAbout(const double R[9], const double axis[3]) noexcept {
+    double q[4];
+    ikQuat(R, q);
+    return ikWrapPi(2.0 * std::atan2(q[0] * axis[0] + q[1] * axis[1] + q[2] * axis[2], q[3]));
+}
+// The angle (degrees) between two rotations given as row-vector matrices' upper 3x3 (rows normalised first).
+inline double ikRotAngleDeg(const float a[16], const float b[16]) noexcept {
+    double A[9], B[9];
+    for (int r = 0; r < 3; ++r) {
+        const double la = std::sqrt(static_cast<double>(a[r * 4]) * a[r * 4] + static_cast<double>(a[r * 4 + 1]) * a[r * 4 + 1] +
+                                    static_cast<double>(a[r * 4 + 2]) * a[r * 4 + 2]);
+        const double lb = std::sqrt(static_cast<double>(b[r * 4]) * b[r * 4] + static_cast<double>(b[r * 4 + 1]) * b[r * 4 + 1] +
+                                    static_cast<double>(b[r * 4 + 2]) * b[r * 4 + 2]);
+        for (int c = 0; c < 3; ++c) {
+            A[r * 3 + c] = la > 1e-9 ? a[r * 4 + c] / la : 0.0;
+            B[r * 3 + c] = lb > 1e-9 ? b[r * 4 + c] / lb : 0.0;
+        }
+    }
+    double tr = 0.0;   // trace(A^T B) = sum of the row dot products
+    for (int r = 0; r < 3; ++r) tr += A[r * 3] * B[r * 3] + A[r * 3 + 1] * B[r * 3 + 1] + A[r * 3 + 2] * B[r * 3 + 2];
+    double c = (tr - 1.0) / 2.0;
+    c = c > 1.0 ? 1.0 : c < -1.0 ? -1.0 : c;
+    return std::acos(c) * 180.0 / kIkPi;
+}
+// Orthonormalise a row-vector matrix's rotation rows in place (Gram-Schmidt on rows 0 and 1; row 2 = row 0 x row 1). False when degenerate.
+inline bool ikOrthonormalise(float m[16]) noexcept {
+    double r0[3] = {m[0], m[1], m[2]}, r1[3] = {m[4], m[5], m[6]}, n0[3], n1[3], n2[3], t[3];
+    if (!ikUnit(r0, n0)) return false;
+    const double d = ikDot(r1, n0);
+    for (int i = 0; i < 3; ++i) t[i] = r1[i] - n0[i] * d;
+    if (!ikUnit(t, n1)) return false;
+    ikCross(n0, n1, n2);
+    // Keep the handedness of the input's row 2.
+    const double r2[3] = {m[8], m[9], m[10]};
+    const double sg = ikDot(r2, n2) < 0.0 ? -1.0 : 1.0;
+    for (int i = 0; i < 3; ++i) {
+        m[i] = static_cast<float>(n0[i]);
+        m[4 + i] = static_cast<float>(n1[i]);
+        m[8 + i] = static_cast<float>(n2[i] * sg);
+    }
+    return true;
+}
 }  // namespace nofoot
 }  // namespace edvr

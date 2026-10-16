@@ -639,6 +639,22 @@ void readKey() {
         // F49 (TEMPORARY, live): the pose freeze: off, probe (the default: the Animate post-hook measures and writes nothing) or on.
         const std::string freeze = cfg.getString("fix.native_on_foot_pose_freeze", "probe");
         pfz::g_mode.store(freeze == "on" ? 2 : freeze == "off" ? 0 : 1, std::memory_order_relaxed);
+        // F56 (TEMPORARY, live): the 3P arm IK: off, probe (the default: the hook measures and writes nothing), nudge (the left hand group up
+        // 25 cm: does the skin read the hook's writes?) or on (the two-bone solve onto the FP handAttach joints). Body mode only.
+        const std::string ik = cfg.getString("fix.native_on_foot_arm_ik", "probe");
+        const int ikMode = ik == "on" ? 3 : ik == "nudge" ? 2 : ik == "off" ? 0 : 1;
+        if (first || ikMode != pfz::g_ikMode.load(std::memory_order_relaxed)) {
+            static const char* const kIkModeText[4] = {"off -- nothing is hooked or measured for it",
+                                                       "probe -- the Animate hook measures the arm chains against the FP handAttach targets every 5 s; "
+                                                       "nothing is written (the default)",
+                                                       "nudge -- in body mode the 3P left hand group rises 25 cm (model y), blended over 0.2 s: proves "
+                                                       "whether the skin reads the hook's writes",
+                                                       "on -- in body mode the 3P arms are solved onto the FP handAttach joints (two bones, pole hint, "
+                                                       "swivel clamp), blended over 0.2 s, faded per arm between 0.35 and 0.8 m"};
+            Log::get().note("native on foot arm IK (F56, TEMPORARY): fix.native_on_foot_arm_ik = %s", kIkModeText[ikMode]);
+        }
+        pfz::g_ikMode.store(ikMode, std::memory_order_relaxed);
+        pfz::g_ikWanted.store(ikMode != 0, std::memory_order_relaxed);
         // F46 part A: the trims are numbers (the menu's sliders): right/left, height and forward/back, in cm, clamped to +-30. F48: default 0.
         const float trims[3] = {cfg.getFloat("fix.native_on_foot_body_align_trim_right_cm", 0.0f),
                                 cfg.getFloat("fix.native_on_foot_body_align_trim_up_cm", 0.0f),
@@ -5443,6 +5459,50 @@ void f37CheckPoll() noexcept {
                     still ? "still shifted when the next P1 call read it" : "already reset");
 }
 
+// ---- F56 (TEMPORARY): the 3P arm IK's hand-offs ----------------------------------------------------------------------------------
+// The FP side: the FP X's model matrices of joints 51 (R handAttach), 52 (L handAttach), 37 and 44 (the hands), copied by the FP Animate post-hook
+// (fdAfterAnimate) BEFORE any shoulder-drop write, under a sequence counter (one writer: g_fdBusy). G: the FP-model to 3P-model transform
+// G = F_root x Tr(r - d) x inv(M3P), published by the game thread's P1 callback for the local 3P AMC (every call while the IK key is not off),
+// with its inputs' sanity. The 3P Animate post-hook reads both (two tries, never waits) and refuses either older than 100 ms.
+struct IkFpSnap {
+    std::atomic<uint32_t> seq{0};
+    float m[4][16] = {};   // [0] 51 R attach, [1] 52 L attach, [2] 37 hand, [3] 44 hand
+    uint64_t ms = 0;
+};
+IkFpSnap g_ikFp;
+struct IkGData {
+    float g[16] = {};
+    float m3p[16] = {}, froot[16] = {};
+    float r[3] = {}, d[3] = {};
+    float m3pRowErr = 0.0f, m3pDet = 0.0f, fRowErr = 0.0f, fDet = 0.0f;   // max |row length - 1| and the 3x3 determinant
+    uint64_t ms = 0, frootMs = 0;
+};
+std::atomic<uint32_t> g_ikGSeq{0};
+IkGData g_ikG;
+std::atomic<uint64_t> g_ikGPublishes{0}, g_ikGRefusals{0};
+bool ikFpRead(float m[4][16], uint64_t* ms) noexcept {
+    for (int tries = 0; tries < 2; ++tries) {
+        const uint32_t s1 = g_ikFp.seq.load(std::memory_order_acquire);
+        if (s1 & 1u || s1 == 0) continue;
+        std::memcpy(m, g_ikFp.m, sizeof(g_ikFp.m));
+        *ms = g_ikFp.ms;
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if (g_ikFp.seq.load(std::memory_order_relaxed) == s1) return true;
+    }
+    return false;
+}
+bool ikGRead(IkGData* out) noexcept {
+    for (int tries = 0; tries < 2; ++tries) {
+        const uint32_t s1 = g_ikGSeq.load(std::memory_order_acquire);
+        if (s1 & 1u || s1 == 0) continue;
+        std::memcpy(out, &g_ikG, sizeof(*out));
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if (g_ikGSeq.load(std::memory_order_relaxed) == s1) return true;
+    }
+    return false;
+}
+void ikPublishG(void* amcPtr, uint64_t now) noexcept;   // defined with the FP raise's hand-off below (it reads d and r)
+
 // The callback: the game jumps here with rcx, rdx intact (the relay's tail jump), so the original is called with the same two arguments.
 uint64_t __fastcall eyeProbeHooked(void* amc, void* job) noexcept {
     const F9Fn2 original = reinterpret_cast<F9Fn2>(g_eyeProbe.original);
@@ -5457,6 +5517,10 @@ uint64_t __fastcall eyeProbeHooked(void* amc, void* job) noexcept {
         g_eyeLastMs = now;
         eyeSample(amc, job, now);
     }
+    // F56: G for the arm IK, every call for the local 3P AMC while the key is not off (the FP root was tracked above, for the FP AMC's call).
+    if (!g_eyeStop.load(std::memory_order_relaxed) && amc && nativeOnFootActive() && pfz::g_ikWanted.load(std::memory_order_relaxed) &&
+        reinterpret_cast<uint64_t>(amc) == localAmcPointer())
+        ikPublishG(amc, now);
     return original(amc, job);
 }
 
@@ -5691,6 +5755,62 @@ bool fpRaiseRead(float d[3]) noexcept {
         if (g_fpRaiseSeq.load(std::memory_order_relaxed) == s1) return true;
     }
     return false;   // being written: this pass skips (the next one moves the records)
+}
+// F56: G = F_root x Tr(r - d) x inv(M3P), the FP model space to the 3P model space (row vectors: FP world = model_fp x F_root, raised by r; 3P
+// world = model_3p x M3P, shifted by d). Game thread (the P1 callback, the local 3P AMC). Refused (not published) when the AMC matrix cannot be
+// read, the FP root is older than 100 ms, or M3P is singular. The FP root is the whole matrix (rows and origin); probe 5 compares it with the
+// yaw-only map the F45/F55 code uses.
+void ikPublishG(void* amcPtr, uint64_t now) noexcept {
+    IkGData s;
+    FpRootSnap fp{};
+    {
+        std::lock_guard<std::mutex> lock(g_eyeMutex);
+        fp = g_fpRoot;
+    }
+    float inv[16] = {};
+    if (!sehAmcMatrix(static_cast<const uint8_t*>(amcPtr), s.m3p) || !fp.ok || (now > fp.stamp ? now - fp.stamp : 0) > nofoot::kIkFreshMs ||
+        !nofoot::pfzAffineInverse(s.m3p, inv)) {
+        g_ikGRefusals.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) s.froot[r * 4 + c] = fp.rows[r * 3 + c];
+        s.froot[r * 4 + 3] = 0.0f;
+    }
+    if (g_f51FpOn.load(std::memory_order_relaxed)) {
+        if (!fpRaiseRead(s.r)) s.r[0] = s.r[1] = s.r[2] = 0.0f;
+    }
+    bodyOffsetRead(s.d);
+    for (int c = 0; c < 3; ++c) s.froot[12 + c] = fp.origin[c];
+    s.froot[15] = 1.0f;
+    float shifted[16];
+    std::memcpy(shifted, s.froot, sizeof(shifted));
+    for (int c = 0; c < 3; ++c) shifted[12 + c] += s.r[c] - s.d[c];
+    nofoot::pfzMul(shifted, inv, s.g);
+    const auto rowErr = [](const float* m) noexcept {
+        float e = 0.0f;
+        for (int r = 0; r < 3; ++r) {
+            const float l = std::sqrt(m[r * 4] * m[r * 4] + m[r * 4 + 1] * m[r * 4 + 1] + m[r * 4 + 2] * m[r * 4 + 2]);
+            e = std::max(e, std::fabs(l - 1.0f));
+        }
+        return e;
+    };
+    const auto det3 = [](const float* m) noexcept {
+        return m[0] * (m[5] * m[10] - m[6] * m[9]) - m[1] * (m[4] * m[10] - m[6] * m[8]) + m[2] * (m[4] * m[9] - m[5] * m[8]);
+    };
+    s.m3pRowErr = rowErr(s.m3p);
+    s.m3pDet = det3(s.m3p);
+    s.fRowErr = rowErr(s.froot);
+    s.fDet = det3(s.froot);
+    s.ms = now;
+    s.frootMs = fp.stamp;
+    static std::atomic<bool> busy{false};   // one writer at a time (a second caller skips; never waits)
+    if (busy.exchange(true, std::memory_order_acquire)) return;
+    g_ikGSeq.fetch_add(1, std::memory_order_acq_rel);
+    std::memcpy(&g_ikG, &s, sizeof(s));
+    g_ikGSeq.fetch_add(1, std::memory_order_release);
+    busy.store(false, std::memory_order_release);
+    g_ikGPublishes.fetch_add(1, std::memory_order_relaxed);
 }
 std::atomic<uint64_t> g_fpShifted{0}, g_fpSkipped{0}, g_fpPasses{0}, g_fpPartsMask{0}, g_fpNotMode2{0};
 struct F51First {
@@ -7089,6 +7209,61 @@ struct MgmcRow {
 };
 uint64_t g_lineMs = 0;   // frame thread only
 
+// F56 probe 5 (frame thread, once a second with the F54 lines while the arm IK key is not off): the FP R handAttach (joint 51, the arm IK's
+// snapshot) in world through the FP root's yaw only (as F45/F55) and through the whole root matrix (as G), their difference, and the nearest MGMC
+// record to each; then that record's instance matrix ([obj+0x1C0] + 0x10, four rows) against the FP attach's world rotation. Neither within about
+// 3 cm of the weapon: the target is wrong. Reads under SEH only.
+void ikMappingLine(const MgmcRow* rows, uint32_t nRows, const FpRootSnap& fp, bool fpFresh) noexcept {
+    static uint64_t lastMs = 0;   // every 5 s, with the arm IK's other probe lines (frame thread only)
+    const uint64_t nowMs = GetTickCount64();
+    if (lastMs && nowMs - lastMs < 5000) return;
+    lastMs = nowMs;
+    float m[4][16];
+    uint64_t ms = 0;
+    if (!ikFpRead(m, &ms) || !fpFresh) {
+        Log::get().note("native on foot arm IK (F56, probe 5): no mapping check: %s", !fpFresh ? "the FP root is not fresh" : "no FP snapshot");
+        return;
+    }
+    const float* a = m[0];   // 51, R handAttach, FP model space
+    float full[3], yaw[3];
+    for (int c = 0; c < 3; ++c) full[c] = a[12] * fp.rows[c] + a[13] * fp.rows[3 + c] + a[14] * fp.rows[6 + c] + fp.origin[c];
+    const double rn = std::sqrt(static_cast<double>(fp.rows[6]) * fp.rows[6] + static_cast<double>(fp.rows[8]) * fp.rows[8]);
+    const double cy = rn > 1e-6 ? fp.rows[8] / rn : 1.0, sy = rn > 1e-6 ? fp.rows[6] / rn : 0.0;
+    yaw[0] = static_cast<float>(fp.origin[0] + a[12] * cy + a[14] * sy);
+    yaw[1] = static_cast<float>(fp.origin[1] + a[13]);
+    yaw[2] = static_cast<float>(fp.origin[2] - a[12] * sy + a[14] * cy);
+    const float diffCm = nofoot::dist3f(full, yaw) * 100.0f;
+    int bestFull = -1, bestYaw = -1;
+    float dFull = 1e30f, dYaw = 1e30f;
+    for (uint32_t i = 0; i < nRows; ++i) {
+        const float df = nofoot::dist3f(rows[i].pos, full), dy = nofoot::dist3f(rows[i].pos, yaw);
+        if (df < dFull) dFull = df, bestFull = static_cast<int>(i);
+        if (dy < dYaw) dYaw = dy, bestYaw = static_cast<int>(i);
+    }
+    if (bestFull < 0) {
+        Log::get().note("native on foot arm IK (F56, probe 5): R51 world full (%.3f, %.3f, %.3f), yaw-only (%.3f, %.3f, %.3f), %.1f cm apart; no MGMC "
+                        "record with a mask this second", full[0], full[1], full[2], yaw[0], yaw[1], yaw[2], diffCm);
+        return;
+    }
+    const MgmcRow& r = rows[bestFull];
+    // The FP attach's world rotation (A's rows x the root's rows), and the record's instance matrix.
+    float aw[16] = {};
+    for (int i = 0; i < 3; ++i)
+        for (int c = 0; c < 3; ++c) aw[i * 4 + c] = a[i * 4] * fp.rows[c] + a[i * 4 + 1] * fp.rows[3 + c] + a[i * 4 + 2] * fp.rows[6 + c];
+    uint64_t inst = 0;
+    float wm[16] = {};
+    const bool instOk = guardedRead(static_cast<uintptr_t>(r.obj) + 0x1C0u, &inst, 8) && inst && guardedRead(static_cast<uintptr_t>(inst) + 0x10u, wm, sizeof(wm));
+    char tail[400] = "the instance matrix was not readable";
+    if (instOk)
+        std::snprintf(tail, sizeof(tail), "instance %016llX rows (%.3f %.3f %.3f) (%.3f %.3f %.3f) (%.3f %.3f %.3f) pos (%.3f, %.3f, %.3f); its rotation vs "
+                      "the FP attach in world %.1f deg", static_cast<unsigned long long>(inst), wm[0], wm[1], wm[2], wm[4], wm[5], wm[6], wm[8], wm[9],
+                      wm[10], wm[12], wm[13], wm[14], nofoot::ikRotAngleDeg(wm, aw));
+    Log::get().note("native on foot arm IK (F56, probe 5): R51 world full root (%.3f, %.3f, %.3f), yaw-only (%.3f, %.3f, %.3f), %.1f cm apart; nearest "
+                    "MGMC to full: %016llX at %.1f cm (byte 0x%02X); nearest to yaw-only: %016llX at %.1f cm; %s",
+                    full[0], full[1], full[2], yaw[0], yaw[1], yaw[2], diffCm, static_cast<unsigned long long>(r.obj), dFull * 100.0f,
+                    static_cast<unsigned>(r.flag), static_cast<unsigned long long>(rows[bestYaw].obj), dYaw * 100.0f, tail);
+}
+
 // Frame thread, every frame: the install, the joints, and once a second the lines (while native stereo is on foot).
 void tick(uint64_t now) noexcept {
     installOnce();
@@ -7198,6 +7373,7 @@ void tick(uint64_t now) noexcept {
                     j.fp[1][0], j.fp[1][1], j.fp[1][2], j.fp[0][0], j.fp[0][1], j.fp[0][2], j.fpOk ? "fresh" : "not known",
                     j.tp[1][0], j.tp[1][1], j.tp[1][2], j.tp[0][0], j.tp[0][1], j.tp[0][2], j.tpOk ? "fresh" : "not known");
     std::sort(rows, rows + nRows, [](const MgmcRow& x, const MgmcRow& y) { return x.key < y.key; });
+    if (pfz::g_ikWanted.load(std::memory_order_relaxed)) ikMappingLine(rows, nRows, fp, fpFresh);   // F56 probe 5
     constexpr uint32_t kRowLines = 8;
     for (uint32_t i = 0; i < nRows && i < kRowLines; ++i) {
         const MgmcRow& r = rows[i];
@@ -7288,7 +7464,57 @@ pfz::Plan g_pfzPlanCopy;
 alignas(16) float g_pfzAnim[nofoot::kPfzMaxJoints][16];
 alignas(16) float g_pfzChain[nofoot::kPfzMaxF][16];
 
-void pfzAfterAnimate(uint64_t x, uint64_t job) noexcept {
+// F56: the shared part of the local X's post-hook (the pose freeze and the arm IK use one path): X's flags, the joint count, the output span
+// ([job+0x28] when [X+0x210] is 0, else [[X+0x1F0]+0xA0] when count-1 < [[X+0x1F0]+0xE0]) and its PRE-write animated copy in g_pfzAnim.
+struct PfzSpan {
+    uint64_t buf = 0;
+    uint32_t which = 0, count = 0;
+    uint8_t f210 = 0, f212 = 0, f12C = 0;
+    uint32_t f128 = 0;
+};
+bool pfzSpanRead(uint64_t x, uint64_t job, PfzSpan* sp) noexcept {
+    if (!guardedRead(x + 0x210, &sp->f210, 1) || !guardedRead(x + 0x212, &sp->f212, 1) || !guardedRead(x + 0x12C, &sp->f12C, 1) ||
+        !guardedRead(x + 0x128, &sp->f128, 4)) {
+        pfzFail(kPfzFailFlags);
+        return false;
+    }
+    uint64_t pose = 0;
+    uint16_t count = 0;
+    if (!guardedRead(x + 8, &pose, 8) || !pose || !guardedRead(pose, &count, 2) || count == 0) {
+        pfzFail(kPfzFailPose);
+        return false;
+    }
+    if (count > nofoot::kPfzMaxJoints) {
+        pfzFail(kPfzFailCap);
+        return false;
+    }
+    sp->count = count;
+    uint64_t buf = 0;
+    if (sp->f210 == 0) {
+        if (!guardedRead(job + 0x28, &buf, 8)) buf = 0;
+    } else {
+        sp->which = 1;
+        uint64_t y = 0;
+        uint32_t cap = 0;
+        if (guardedRead(x + 0x1F0, &y, 8) && y && guardedRead(y + 0xE0, &cap, 4) && static_cast<uint32_t>(count) - 1u < cap) {
+            if (!guardedRead(y + 0xA0, &buf, 8)) buf = 0;
+        }
+    }
+    if (!buf) {
+        pfzFail(kPfzFailBuffer);
+        return false;
+    }
+    if (!guardedRead(buf, g_pfzAnim, static_cast<size_t>(count) * 64u)) {
+        pfzFail(kPfzFailRead);
+        return false;
+    }
+    sp->buf = buf;
+    return true;
+}
+
+// The pose freeze on the shared span. True when it wrote (g_pfzChain then holds the written matrices, g_pfzPlanCopy the plan); its refusals
+// return false and never skip the arm IK that follows.
+bool pfzFreezeStep(uint64_t x, const PfzSpan& sp) noexcept {
     bool planOk = false;
     for (int tries = 0; tries < 2 && !planOk; ++tries) {
         const uint32_t s1 = pfz::g_planSeq.load(std::memory_order_acquire);
@@ -7297,33 +7523,13 @@ void pfzAfterAnimate(uint64_t x, uint64_t job) noexcept {
         std::atomic_thread_fence(std::memory_order_acquire);
         planOk = pfz::g_planSeq.load(std::memory_order_relaxed) == s1;
     }
-    if (!planOk) return pfzFail(kPfzFailPlanTorn);
+    if (!planOk) return pfzFail(kPfzFailPlanTorn), false;
     const pfz::Plan& pl = g_pfzPlanCopy;
-    if (pl.x != x || pl.count == 0 || pl.count > nofoot::kPfzMaxF) return pfzFail(kPfzFailPlan);
-    uint8_t f210 = 0, f212 = 0, f12C = 0;
-    uint32_t f128 = 0;
-    if (!guardedRead(x + 0x210, &f210, 1) || !guardedRead(x + 0x212, &f212, 1) || !guardedRead(x + 0x12C, &f12C, 1) ||
-        !guardedRead(x + 0x128, &f128, 4))
-        return pfzFail(kPfzFailFlags);
-    uint64_t pose = 0;
-    uint16_t count = 0;
-    if (!guardedRead(x + 8, &pose, 8) || !pose || !guardedRead(pose, &count, 2)) return pfzFail(kPfzFailPose);
-    if (count > nofoot::kPfzMaxJoints) return pfzFail(kPfzFailCap);
-    if (count != pl.joints || count == 0 || pl.anchor >= count) return pfzFail(kPfzFailCount);
-    uint64_t buf = 0;
-    uint32_t which = 0;
-    if (f210 == 0) {
-        if (!guardedRead(job + 0x28, &buf, 8)) buf = 0;
-    } else {
-        which = 1;
-        uint64_t y = 0;
-        uint32_t cap = 0;
-        if (guardedRead(x + 0x1F0, &y, 8) && y && guardedRead(y + 0xE0, &cap, 4) && static_cast<uint32_t>(count) - 1u < cap) {
-            if (!guardedRead(y + 0xA0, &buf, 8)) buf = 0;
-        }
-    }
-    if (!buf) return pfzFail(kPfzFailBuffer);
-    if (!guardedRead(buf, g_pfzAnim, static_cast<size_t>(count) * 64u)) return pfzFail(kPfzFailRead);
+    if (pl.x != x || pl.count == 0 || pl.count > nofoot::kPfzMaxF) return pfzFail(kPfzFailPlan), false;
+    const uint8_t f210 = sp.f210, f212 = sp.f212, f12C = sp.f12C;
+    const uint32_t f128 = sp.f128, count = sp.count, which = sp.which;
+    const uint64_t buf = sp.buf;
+    if (count != pl.joints || pl.anchor >= count) return pfzFail(kPfzFailCount), false;
     // The rest chain (w = 1), anchored at the hips' animated matrix.
     const float* anchorM = g_pfzAnim[pl.anchor];
     for (uint32_t k = 0; k < pl.count; ++k) {
@@ -7377,12 +7583,12 @@ void pfzAfterAnimate(uint64_t x, uint64_t job) noexcept {
     g_pfzStatSeq.fetch_add(1, std::memory_order_release);
     // ON: the frozen set, blended toward the rest chain by the frame thread's weight. Every matrix is computed before the first write.
     const float w = g_pfzWeight.load(std::memory_order_relaxed);
-    if (pfz::g_mode.load(std::memory_order_relaxed) != 2 || !(w > 0.0f) || g_pfzWriteDown.load(std::memory_order_relaxed)) return;
+    if (pfz::g_mode.load(std::memory_order_relaxed) != 2 || !(w > 0.0f) || g_pfzWriteDown.load(std::memory_order_relaxed)) return false;
     if (w < 1.0f) {
         for (uint32_t k = 0; k < pl.count; ++k) {
             const float* parentAnim = pl.parentSlot[k] < 0 ? anchorM : g_pfzAnim[pl.member[pl.parentSlot[k]]];
             float inv[16], animLocal[16], rec[8], local[16];
-            if (!nofoot::pfzAffineInverse(parentAnim, inv)) return pfzFail(kPfzFailInverse);
+            if (!nofoot::pfzAffineInverse(parentAnim, inv)) return pfzFail(kPfzFailInverse), false;
             nofoot::pfzMul(g_pfzAnim[pl.member[k]], inv, animLocal);
             nofoot::pfzBlendRecord(animLocal, pl.rest[k], w, rec);
             nofoot::pfzLocalMatrix(rec, local);
@@ -7393,7 +7599,7 @@ void pfzAfterAnimate(uint64_t x, uint64_t job) noexcept {
     for (uint32_t k = 0; k < pl.count; ++k) {
         if (!guardedWriteFloats16(buf + static_cast<uint64_t>(pl.member[k]) * 64u, g_pfzChain[k])) {
             g_pfzWriteDown.store(true, std::memory_order_relaxed);
-            return pfzFail(kPfzFailWrite);
+            return pfzFail(kPfzFailWrite), false;
         }
     }
     pfz::g_spanSeq.fetch_add(1, std::memory_order_acq_rel);
@@ -7406,6 +7612,439 @@ void pfzAfterAnimate(uint64_t x, uint64_t job) noexcept {
     ++g_pfzStats.written;
     g_pfzStats.wLast = w;
     g_pfzStatSeq.fetch_add(1, std::memory_order_release);
+    return true;
+}
+
+// ---- F56 (TEMPORARY): the 3P arm IK, the hook's half -----------------------------------------------------------------------------
+// After the pose freeze on the same span (frAnim worker, under g_pfzBusy), for the arm plan's X only. Per arm: M0 = the animated matrices carried
+// by the clavicle's freeze delta D_C (identity when the freeze did not write); the target T_A = A_fp x G (the FP handAttach in the 3P model space),
+// the hand target T_H = inv(L_A) x T_A with L_A = A x inv(H) from this span; the elbow on the circle of the two-bone solve, its swivel from the
+// animated elbow toward 0.5 (animated elbow) + 0.5 (hint), clamped (elbow out 10 cm, not above the shoulder) and scaled by the weight; swing-only
+// rotations of U about S and F about E; the hand rotation nlerp'd toward the target's; the forearm and upper-arm helpers rolled by t x the twist.
+// probe solves at weight 1 and writes nothing; nudge writes the left hand group 25 cm up (model y) with gU and gF as animated; on writes the
+// solve at the per-arm weight (the base weight times the distance gate). Every matrix is computed before the first write; the applied hand
+// offset moves at most 5 cm a call. No allocation, logging or locks (the scratch is under g_pfzBusy); every read and write under SEH.
+std::atomic<float> g_ikWeight{0.0f};        // the frame thread's base weight (0 unless the key is nudge or on and the gate holds)
+std::atomic<bool> g_ikWriteDown{false};     // a failed write stands the IK's writes down for the session
+std::atomic<uint32_t> g_ikFailBits{0};      // refusals the hook met; the frame thread names each once
+enum IkRefusal : uint32_t {
+    kIkRefBuffer = 0, kIkRefPlanTorn, kIkRefPlan, kIkRefFpTorn, kIkRefFpStale, kIkRefGTorn, kIkRefGStale, kIkRefSide, kIkRefSingular, kIkRefWrite,
+    kIkRefKinds
+};
+const char* const kIkRefText[kIkRefKinds] = {
+    "no output span (the shared span read failed: flags, pose, count or buffer)",
+    "the arm plan was being rewritten (skipped this call)",
+    "the arm plan does not belong to this X or its joint count differs (the skeleton changed)",
+    "the FP snapshot was being written or never was (no FP X, or its Animate call has not run)",
+    "the FP snapshot is older than 100 ms",
+    "G was being written or never was (no local 3P AMC call, or the FP root is older than 100 ms there)",
+    "G is older than 100 ms",
+    "an arm's plan was refused by the census (its side is not solved)",
+    "a singular or non-finite matrix (the side is skipped this call)",
+    "an arm write faulted: the IK's writes stand down for the session"};
+std::atomic<uint64_t> g_ikRefused[kIkRefKinds];
+std::atomic<uint64_t> g_ikCalls{0};
+void ikRefuse(uint32_t k) noexcept {
+    g_ikRefused[k].fetch_add(1, std::memory_order_relaxed);
+    g_ikFailBits.fetch_or(1u << k, std::memory_order_relaxed);
+}
+// The hook's statistics (one writer: g_pfzBusy), read by the frame thread under the sequence counter; reset on request.
+struct IkSideStats {
+    uint32_t n = 0, clamped = 0, errN = 0;
+    double distSum = 0.0, distMin = 0.0, distMax = 0.0;      // |T_A - the animated 3P attach|, cm
+    double angSum = 0.0, angMin = 0.0, angMax = 0.0;         // the rotation between them, degrees
+    double reachSum = 0.0, reachMin = 0.0, reachMax = 0.0;   // |p_T - S| / (l1 + l2)
+    double shortMax = 0.0;                                   // cm past reach
+    double bendSum = 0.0;                                    // the animated elbow's interior angle, degrees
+    double errMax = 0.0;                                     // the solved chain's hand position against its target, cm (reach < 1 only)
+    double wSum = 0.0;                                       // the per-arm weight (on only)
+    double gateSum = 0.0;                                    // the distance gate (every mode)
+    float l1 = 0.0f, l2 = 0.0f, E[3] = {}, S[3] = {};
+    uint64_t written = 0;
+};
+struct IkStats {
+    uint64_t calls = 0, solved = 0;
+    double fpAgeLast = 0.0, fpAgeMax = 0.0, gAgeLast = 0.0, gAgeMax = 0.0;
+    IkSideStats side[2];
+};
+std::atomic<uint32_t> g_ikStatSeq{0};
+IkStats g_ikStats;
+std::atomic<bool> g_ikStatReset{false};
+// The hook's scratch (under g_pfzBusy).
+pfz::ArmPlan g_ikPlanCopy;
+alignas(16) float g_ikM0[nofoot::kPfzMaxJoints][16];
+alignas(16) float g_ikOut[nofoot::kPfzMaxJoints][16];
+uint16_t g_ikList[nofoot::kPfzMaxJoints];
+float g_ikApplied[2][3];       // the applied hand offset per side (model space, from the animated hand)
+uint64_t g_ikAppliedMs[2];     // when it was last applied (older than 200 ms: start again from the animated hand)
+
+bool ikMatrixSane(const float m[16]) noexcept {
+    for (int i = 0; i < 16; ++i)
+        if (!std::isfinite(m[i]) || std::fabs(m[i]) > 1000.0f) return false;
+    return true;
+}
+// The elbow's swivel for a frame built on the animated elbow (its swivel 0): the desired pole 0.5 unit(animated elbow - S) + 0.5 hint, hint =
+// 0.8 down + 0.6 out + 0.1 back (model space: y up, z forward), the hint alone when the pole's part across dir is under 0.2; then clamped.
+double ikSwivel(const nofoot::IkTwoBone& tb, const double elbowDir[3], double out, bool* clamped) noexcept {
+    const double hint[3] = {0.6 * out, -0.8, -0.1};
+    double pole[3], pp[3];
+    for (int i = 0; i < 3; ++i) pole[i] = 0.5 * elbowDir[i] + 0.5 * hint[i];
+    double pd = nofoot::ikDot(pole, tb.dir);
+    for (int i = 0; i < 3; ++i) pp[i] = pole[i] - tb.dir[i] * pd;
+    if (nofoot::ikLen(pp) < 0.2) {
+        pd = nofoot::ikDot(hint, tb.dir);
+        for (int i = 0; i < 3; ++i) pp[i] = hint[i] - tb.dir[i] * pd;
+    }
+    return nofoot::ikSwivelClamp(tb, tb.angleOf(pp), out, clamped);
+}
+inline void ikPos(const float m[16], double p[3]) noexcept {
+    p[0] = m[12];
+    p[1] = m[13];
+    p[2] = m[14];
+}
+
+void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
+    const int mode = pfz::g_ikMode.load(std::memory_order_relaxed);
+    if (mode == 0) return;
+    g_ikCalls.fetch_add(1, std::memory_order_relaxed);
+    bool planOk = false;
+    for (int tries = 0; tries < 2 && !planOk; ++tries) {
+        const uint32_t s1 = pfz::g_armSeq.load(std::memory_order_acquire);
+        if (s1 & 1u) continue;
+        std::memcpy(&g_ikPlanCopy, &pfz::g_armPlan, sizeof(g_ikPlanCopy));
+        std::atomic_thread_fence(std::memory_order_acquire);
+        planOk = pfz::g_armSeq.load(std::memory_order_relaxed) == s1;
+    }
+    if (!planOk) return ikRefuse(kIkRefPlanTorn);
+    const pfz::ArmPlan& pl = g_ikPlanCopy;
+    if (pl.x != x || pl.joints != sp.count) return ikRefuse(kIkRefPlan);
+    float fpm[4][16];
+    uint64_t fpMs = 0;
+    if (!ikFpRead(fpm, &fpMs)) return ikRefuse(kIkRefFpTorn);
+    const uint64_t now = GetTickCount64();
+    const uint64_t fpAge = now > fpMs ? now - fpMs : 0;
+    if (fpAge > nofoot::kIkFreshMs) return ikRefuse(kIkRefFpStale);
+    IkGData G;
+    if (!ikGRead(&G)) return ikRefuse(kIkRefGTorn);
+    const uint64_t gAge = now > G.ms ? now - G.ms : 0;
+    if (gAge > nofoot::kIkFreshMs) return ikRefuse(kIkRefGStale);
+    const float wBase = g_ikWeight.load(std::memory_order_relaxed);
+    const bool writeOk = (mode == 2 || mode == 3) && wBase > 0.0f && !g_ikWriteDown.load(std::memory_order_relaxed);
+    struct SideOut {
+        bool solved = false, clamped = false, wrote = false;
+        double dist = 0.0, ang = 0.0, reach = 0.0, shortfall = 0.0, bend = 0.0, err = -1.0, wArm = 0.0, gate = 0.0;
+        float l1 = 0.0f, l2 = 0.0f, E[3] = {}, S[3] = {};
+    } so[2];
+    uint32_t nList = 0;
+    for (int side = 0; side < 2; ++side) {
+        if (!pl.ok[side]) {
+            ikRefuse(kIkRefSide);
+            continue;
+        }
+        const nofoot::IkArm& arm = pl.side[side];
+        const uint32_t C = arm.C, U = arm.U, F = arm.F, H = arm.H, A = arm.A;
+        // D_C: the freeze's move of the clavicle (identity when it did not write it).
+        float DC[16];
+        bool dcIdentity = true;
+        if (froze) {
+            const pfz::Plan& fpl = g_pfzPlanCopy;
+            for (uint32_t k = 0; k < fpl.count; ++k) {
+                if (fpl.member[k] != C) continue;
+                float inv[16];
+                if (!nofoot::pfzAffineInverse(g_pfzAnim[C], inv)) break;
+                nofoot::pfzMul(inv, g_pfzChain[k], DC);
+                dcIdentity = false;
+                break;
+            }
+        }
+        const uint16_t* lists[3] = {arm.gU, arm.gF, arm.gH};
+        const uint16_t counts[3] = {arm.nU, arm.nF, arm.nH};
+        for (int g = 0; g < 3; ++g)
+            for (uint32_t k = 0; k < counts[g]; ++k) {
+                const uint32_t j = lists[g][k];
+                if (dcIdentity) std::memcpy(g_ikM0[j], g_pfzAnim[j], 64);
+                else nofoot::pfzMul(g_pfzAnim[j], DC, g_ikM0[j]);
+            }
+        // The targets: T_A = A_fp x G; T_H = inv(L_A) x T_A, L_A = M0[A] x inv(M0[H]).
+        const float* fpA = side == 0 ? fpm[1] : fpm[0];   // L: 52, R: 51
+        float TA[16], invH[16], LA[16], invLA[16], TH[16];
+        nofoot::pfzMul(fpA, G.g, TA);
+        if (!nofoot::pfzAffineInverse(g_ikM0[H], invH)) {
+            ikRefuse(kIkRefSingular);
+            continue;
+        }
+        nofoot::pfzMul(g_ikM0[A], invH, LA);
+        if (!nofoot::pfzAffineInverse(LA, invLA)) {
+            ikRefuse(kIkRefSingular);
+            continue;
+        }
+        nofoot::pfzMul(invLA, TA, TH);
+        if (!ikMatrixSane(TA) || !ikMatrixSane(TH) || !nofoot::ikOrthonormalise(TH)) {
+            ikRefuse(kIkRefSingular);
+            continue;
+        }
+        double S[3], F0[3], H0[3], pT[3], aA[3], tA[3];
+        ikPos(g_ikM0[U], S);
+        ikPos(g_ikM0[F], F0);
+        ikPos(g_ikM0[H], H0);
+        ikPos(TH, pT);
+        ikPos(g_ikM0[A], aA);
+        ikPos(TA, tA);
+        const double uf[3] = {F0[0] - S[0], F0[1] - S[1], F0[2] - S[2]}, fh[3] = {H0[0] - F0[0], H0[1] - F0[1], H0[2] - F0[2]};
+        const double l1 = nofoot::ikLen(uf), l2 = nofoot::ikLen(fh);
+        const double outSign = g_pfzAnim[C][12] >= 0.0f ? 1.0 : -1.0;
+        SideOut& o = so[side];
+        const double dA[3] = {tA[0] - aA[0], tA[1] - aA[1], tA[2] - aA[2]};
+        o.dist = nofoot::ikLen(dA) * 100.0;
+        o.ang = nofoot::ikRotAngleDeg(TA, g_ikM0[A]);
+        o.l1 = static_cast<float>(l1 * 100.0);
+        o.l2 = static_cast<float>(l2 * 100.0);
+        {
+            const double fs[3] = {-uf[0], -uf[1], -uf[2]};
+            const double c = l1 > 1e-9 && l2 > 1e-9 ? nofoot::ikDot(fs, fh) / (l1 * l2) : 1.0;
+            o.bend = std::acos(c > 1.0 ? 1.0 : c < -1.0 ? -1.0 : c) * 180.0 / nofoot::kIkPi;   // 180: straight
+        }
+        const double dH[3] = {pT[0] - H0[0], pT[1] - H0[1], pT[2] - H0[2]};
+        const float gate = nofoot::ikDistanceGate(static_cast<float>(nofoot::ikLen(dH)));
+        // The weight this side solves at: on and writing, the per-arm weight; otherwise 1 (probe: the full solve, for the statistics only).
+        const double wArm = static_cast<double>(wBase) * gate;
+        const bool doSolveWrite = mode == 3 && writeOk && wArm > 0.0;
+        o.wArm = mode == 3 ? wArm : 0.0;
+        o.gate = gate;
+        const double wSolve = doSolveWrite ? wArm : 1.0;
+        // The hand target: the offset from the animated hand, capped at 5 cm a call while writing (from zero after 200 ms without a write).
+        double target[3];
+        if (doSolveWrite) {
+            if (now - g_ikAppliedMs[side] > 200) g_ikApplied[side][0] = g_ikApplied[side][1] = g_ikApplied[side][2] = 0.0f;
+            const float want[3] = {static_cast<float>(dH[0] * wSolve), static_cast<float>(dH[1] * wSolve), static_cast<float>(dH[2] * wSolve)};
+            nofoot::ikCapToward(g_ikApplied[side], want, nofoot::kIkCapPerCallM);
+            g_ikAppliedMs[side] = now;
+            for (int i = 0; i < 3; ++i) target[i] = H0[i] + g_ikApplied[side][i];
+        } else {
+            for (int i = 0; i < 3; ++i) target[i] = pT[i];
+            if (!(mode == 2 && side == 0)) g_ikApplied[side][0] = g_ikApplied[side][1] = g_ikApplied[side][2] = 0.0f;
+        }
+        nofoot::IkTwoBone tb = nofoot::ikTwoBoneFrame(S, target, l1, l2, uf);
+        {
+            const nofoot::IkTwoBone full = nofoot::ikTwoBoneFrame(S, pT, l1, l2, uf);   // the reach of the target itself
+            o.reach = full.ok ? full.reach : 0.0;
+            o.shortfall = full.ok ? full.shortfall * 100.0 : 0.0;
+        }
+        double elbowDir[3];
+        if (!tb.ok || !nofoot::ikUnit(uf, elbowDir)) {
+            ikRefuse(kIkRefSingular);
+            continue;
+        }
+        const double theta = wSolve * nofoot::ikWrapPi(ikSwivel(tb, elbowDir, outSign, &o.clamped));
+        double E[3];
+        tb.elbowAt(theta, E);
+        // Swing 1: U's subtree about S, from the animated elbow's direction to the solved one.
+        double R1[9], R2[9], ue[3];
+        const double se[3] = {E[0] - S[0], E[1] - S[1], E[2] - S[2]};
+        if (!nofoot::ikUnit(se, ue)) {
+            ikRefuse(kIkRefSingular);
+            continue;
+        }
+        nofoot::ikRotFromTo(elbowDir, ue, R1);
+        for (int g = 0; g < 3; ++g)
+            for (uint32_t k = 0; k < counts[g]; ++k) nofoot::ikPivot(g_ikM0[lists[g][k]], R1, S, g_ikOut[lists[g][k]]);
+        // Swing 2: F's subtree about E, from the hand's direction after swing 1 to the solved hand.
+        double H1[3], eh[3], eT[3];
+        ikPos(g_ikOut[H], H1);
+        const double h1[3] = {H1[0] - E[0], H1[1] - E[1], H1[2] - E[2]}, ht[3] = {tb.hand[0] - E[0], tb.hand[1] - E[1], tb.hand[2] - E[2]};
+        if (!nofoot::ikUnit(h1, eh) || !nofoot::ikUnit(ht, eT)) {
+            ikRefuse(kIkRefSingular);
+            continue;
+        }
+        nofoot::ikRotFromTo(eh, eT, R2);
+        for (int g = 1; g < 3; ++g)
+            for (uint32_t k = 0; k < counts[g]; ++k) {
+                float tmp[16];
+                std::memcpy(tmp, g_ikOut[lists[g][k]], sizeof(tmp));
+                nofoot::ikPivot(tmp, R2, E, g_ikOut[lists[g][k]]);
+            }
+        // The hand: the rotation nlerp'd from the animated one toward the target's, at the chain's position; gH follows by D_H.
+        float MH[16];
+        {
+            float q0[4], qt[4], q[4], rows[9];
+            nofoot::pfzQuatFromMatrix(g_ikM0[H], q0);
+            nofoot::pfzQuatFromMatrix(TH, qt);
+            const float dq = q0[0] * qt[0] + q0[1] * qt[1] + q0[2] * qt[2] + q0[3] * qt[3];
+            const float sg = dq < 0.0f ? -1.0f : 1.0f, wf = static_cast<float>(wSolve);
+            float n = 0.0f;
+            for (int i = 0; i < 4; ++i) {
+                q[i] = (1.0f - wf) * q0[i] + wf * sg * qt[i];
+                n += q[i] * q[i];
+            }
+            n = n > 1e-12f ? 1.0f / std::sqrt(n) : 1.0f;
+            for (int i = 0; i < 4; ++i) q[i] *= n;
+            ecm::quatRows(q, rows);
+            for (int r = 0; r < 3; ++r) {
+                for (int c = 0; c < 3; ++c) MH[r * 4 + c] = rows[r * 3 + c];
+                MH[r * 4 + 3] = 0.0f;
+            }
+            for (int c = 0; c < 3; ++c) MH[12 + c] = g_ikOut[H][12 + c];
+            MH[15] = 1.0f;
+        }
+        float invH2[16], DH[16];
+        if (!nofoot::pfzAffineInverse(g_ikOut[H], invH2)) {
+            ikRefuse(kIkRefSingular);
+            continue;
+        }
+        // The hand's roll beyond the forearm (model space: M' = M2 x X), its twist about the forearm axis, before H is overridden.
+        double X[9];
+        {
+            double RH2[9], RHt[9];
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c) {
+                    RH2[r * 3 + c] = invH2[r * 4 + c];
+                    RHt[r * 3 + c] = MH[r * 4 + c];
+                }
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c) X[r * 3 + c] = RH2[r * 3] * RHt[c] + RH2[r * 3 + 1] * RHt[3 + c] + RH2[r * 3 + 2] * RHt[6 + c];
+        }
+        nofoot::pfzMul(invH2, MH, DH);
+        for (uint32_t k = 0; k < arm.nH; ++k) {
+            float tmp[16];
+            std::memcpy(tmp, g_ikOut[arm.gH[k]], sizeof(tmp));
+            nofoot::pfzMul(tmp, DH, g_ikOut[arm.gH[k]]);
+        }
+        std::memcpy(g_ikOut[H], MH, sizeof(MH));
+        // The forearm helpers (gF less F) roll about the forearm axis by t x the hand's twist; the upper-arm helpers (gU off the U->F path) about
+        // the upper-arm axis by t x the forearm's twist (swing 2's), t their projection along the bone.
+        {
+            const double thetaF = nofoot::ikTwistAbout(X, eT), thetaU = nofoot::ikTwistAbout(R2, ue);
+            const double lF2 = nofoot::ikDot(ht, ht), lU2 = nofoot::ikDot(se, se);
+            for (uint32_t k = 0; k < arm.nF; ++k) {
+                const uint32_t j = arm.gF[k];
+                if (j == F || !(lF2 > 1e-12)) continue;
+                double pj[3];
+                ikPos(g_ikOut[j], pj);
+                const double rel[3] = {pj[0] - E[0], pj[1] - E[1], pj[2] - E[2]};
+                double t = nofoot::ikDot(rel, ht) / lF2;
+                t = t < 0.0 ? 0.0 : t > 1.0 ? 1.0 : t;
+                double R[9];
+                float tmp[16];
+                nofoot::ikRotAxis(eT, t * thetaF, R);
+                std::memcpy(tmp, g_ikOut[j], sizeof(tmp));
+                nofoot::ikPivot(tmp, R, E, g_ikOut[j]);
+            }
+            for (uint32_t k = 0; k < arm.nU; ++k) {
+                const uint32_t j = arm.gU[k];
+                if (arm.chainU[k] || !(lU2 > 1e-12)) continue;
+                double pj[3];
+                ikPos(g_ikOut[j], pj);
+                const double rel[3] = {pj[0] - S[0], pj[1] - S[1], pj[2] - S[2]};
+                double t = nofoot::ikDot(rel, se) / lU2;
+                t = t < 0.0 ? 0.0 : t > 1.0 ? 1.0 : t;
+                double R[9];
+                float tmp[16];
+                nofoot::ikRotAxis(ue, t * thetaU, R);
+                std::memcpy(tmp, g_ikOut[j], sizeof(tmp));
+                nofoot::ikPivot(tmp, R, S, g_ikOut[j]);
+            }
+        }
+        // The math check: the chain's hand against its target (about 0 while the target is in reach).
+        {
+            double hp[3];
+            ikPos(g_ikOut[H], hp);
+            const double e[3] = {hp[0] - target[0], hp[1] - target[1], hp[2] - target[2]};
+            if (tb.reach < 1.0) o.err = nofoot::ikLen(e) * 100.0;
+        }
+        for (int i = 0; i < 3; ++i) {
+            o.E[i] = static_cast<float>(E[i]);
+            o.S[i] = static_cast<float>(S[i]);
+        }
+        o.solved = true;
+        // NUDGE (the left arm only): gU and gF as animated (D_C), gH up by the applied offset (kIkNudgeM x the base weight, 5 cm a call).
+        bool listIt = doSolveWrite;
+        if (mode == 2 && side == 0 && writeOk) {
+            if (now - g_ikAppliedMs[side] > 200) g_ikApplied[side][0] = g_ikApplied[side][1] = g_ikApplied[side][2] = 0.0f;
+            const float want[3] = {0.0f, nofoot::kIkNudgeM * wBase, 0.0f};
+            nofoot::ikCapToward(g_ikApplied[side], want, nofoot::kIkCapPerCallM);
+            g_ikAppliedMs[side] = now;
+            for (int g = 0; g < 3; ++g)
+                for (uint32_t k = 0; k < counts[g]; ++k) {
+                    const uint32_t j = lists[g][k];
+                    std::memcpy(g_ikOut[j], g_ikM0[j], 64);
+                    if (g == 2)
+                        for (int i = 0; i < 3; ++i) g_ikOut[j][12 + i] += g_ikApplied[side][i];
+                }
+            listIt = true;
+        } else if (mode == 2 && side == 0) {
+            g_ikApplied[side][0] = g_ikApplied[side][1] = g_ikApplied[side][2] = 0.0f;
+        }
+        if (!listIt) continue;
+        bool sane = true;
+        for (int g = 0; g < 3 && sane; ++g)
+            for (uint32_t k = 0; k < counts[g] && sane; ++k) sane = ikMatrixSane(g_ikOut[lists[g][k]]);
+        if (!sane) {
+            ikRefuse(kIkRefSingular);
+            continue;
+        }
+        for (int g = 0; g < 3; ++g)
+            for (uint32_t k = 0; k < counts[g] && nList < nofoot::kPfzMaxJoints; ++k) g_ikList[nList++] = lists[g][k];
+        o.wrote = true;
+    }
+    // The statistics (before the writes, so a write fault still leaves the measurement).
+    g_ikStatSeq.fetch_add(1, std::memory_order_acq_rel);
+    if (g_ikStatReset.exchange(false, std::memory_order_relaxed)) g_ikStats = IkStats{};
+    IkStats& st = g_ikStats;
+    ++st.calls;
+    st.fpAgeLast = static_cast<double>(fpAge);
+    st.gAgeLast = static_cast<double>(gAge);
+    st.fpAgeMax = std::max(st.fpAgeMax, st.fpAgeLast);
+    st.gAgeMax = std::max(st.gAgeMax, st.gAgeLast);
+    for (int side = 0; side < 2; ++side) {
+        const SideOut& o = so[side];
+        if (!o.solved) continue;
+        ++st.solved;
+        IkSideStats& s = st.side[side];
+        const bool first = s.n == 0;
+        s.distMin = first || o.dist < s.distMin ? o.dist : s.distMin;
+        s.distMax = first || o.dist > s.distMax ? o.dist : s.distMax;
+        s.angMin = first || o.ang < s.angMin ? o.ang : s.angMin;
+        s.angMax = first || o.ang > s.angMax ? o.ang : s.angMax;
+        s.reachMin = first || o.reach < s.reachMin ? o.reach : s.reachMin;
+        s.reachMax = first || o.reach > s.reachMax ? o.reach : s.reachMax;
+        s.distSum += o.dist;
+        s.angSum += o.ang;
+        s.reachSum += o.reach;
+        s.shortMax = std::max(s.shortMax, o.shortfall);
+        s.bendSum += o.bend;
+        if (o.err >= 0.0) {
+            s.errMax = std::max(s.errMax, o.err);
+            ++s.errN;
+        }
+        s.wSum += o.wArm;
+        s.gateSum += o.gate;
+        if (o.clamped) ++s.clamped;
+        s.l1 = o.l1;
+        s.l2 = o.l2;
+        std::memcpy(s.E, o.E, sizeof(s.E));
+        std::memcpy(s.S, o.S, sizeof(s.S));
+        if (o.wrote) ++s.written;
+        ++s.n;
+    }
+    g_ikStatSeq.fetch_add(1, std::memory_order_release);
+    // The writes, all matrices computed above.
+    for (uint32_t k = 0; k < nList; ++k) {
+        if (!guardedWriteFloats16(sp.buf + static_cast<uint64_t>(g_ikList[k]) * 64u, g_ikOut[g_ikList[k]])) {
+            g_ikWriteDown.store(true, std::memory_order_relaxed);
+            return ikRefuse(kIkRefWrite);
+        }
+    }
+}
+
+// The local X's post-hook: the shared span, then the pose freeze (its X and key), then the arm IK (its X and key) on the same span.
+void pfzAfterAnimate(uint64_t x, uint64_t job, bool freeze, bool ik) noexcept {
+    PfzSpan sp;
+    if (!pfzSpanRead(x, job, &sp)) {
+        if (ik) ikRefuse(kIkRefBuffer);
+        return;
+    }
+    const bool froze = freeze && pfzFreezeStep(x, sp);
+    if (ik) armIkAfterAnimate(x, sp, froze);
 }
 
 float pfzWeightNow() noexcept { return g_pfzWeight.load(std::memory_order_relaxed); }
@@ -7450,6 +8089,19 @@ void fdAfterAnimate(uint64_t x, uint64_t job) noexcept {
     float before[4][3] = {}, after[4][3] = {};
     for (int k = 0; k < 4; ++k)
         if (!guardedRead(buf + static_cast<uint64_t>(kIds[k]) * 64u + 48u, before[k], sizeof(before[k]))) return fdFail(1u << 5);
+    // F56: the arm IK's FP targets: joints 51, 52 (the handAttach joints) and 37, 44 (the hands), whole matrices, BEFORE any drop write.
+    if (pfz::g_ikWanted.load(std::memory_order_relaxed) && count > 52) {
+        constexpr uint32_t kIkIds[4] = {51, 52, nofoot::kDropHandL, nofoot::kDropHandR};
+        float m[4][16];
+        bool ok = true;
+        for (int k = 0; k < 4 && ok; ++k) ok = guardedRead(buf + static_cast<uint64_t>(kIkIds[k]) * 64u, m[k], sizeof(m[k]));
+        if (ok) {
+            g_ikFp.seq.fetch_add(1, std::memory_order_acq_rel);
+            std::memcpy(g_ikFp.m, m, sizeof(m));
+            g_ikFp.ms = GetTickCount64();
+            g_ikFp.seq.fetch_add(1, std::memory_order_release);
+        }
+    }
     const float drop = g_f55DropM.load(std::memory_order_relaxed);
     bool wrote = false;
     if (drop > 0.0f && !g_fdWriteDown.load(std::memory_order_relaxed)) {
@@ -7482,7 +8134,9 @@ uint64_t __fastcall pfzAnimateHooked(uint64_t a1, uint64_t a2, uint64_t a3, uint
     if (!original) return 0;
     const uint64_t r = original(a1, a2, a3, a4, s5, s6, s7, s8);   // the original first, with its arguments
     g_pfzCalls.fetch_add(1, std::memory_order_relaxed);
-    if (!a2 || (pfz::g_mode.load(std::memory_order_relaxed) == 0 && !pfz::g_dropWanted.load(std::memory_order_relaxed))) return r;
+    const int freezeMode = pfz::g_mode.load(std::memory_order_relaxed);
+    const bool ikWanted = pfz::g_ikWanted.load(std::memory_order_relaxed);   // F56: the arm IK needs the hook (and the FP snapshot) too
+    if (!a2 || (freezeMode == 0 && !ikWanted && !pfz::g_dropWanted.load(std::memory_order_relaxed))) return r;
     uint64_t x = 0;
     if (!guardedRead(a2, &x, 8)) {
         pfzFail(kPfzFailJob);
@@ -7501,15 +8155,16 @@ uint64_t __fastcall pfzAnimateHooked(uint64_t a1, uint64_t a2, uint64_t a3, uint
         g_fdBusy.store(false, std::memory_order_release);
         return r;
     }
-    if (pfz::g_mode.load(std::memory_order_relaxed) == 0) return r;
-    const uint64_t lx = pfz::g_localX.load(std::memory_order_acquire);
-    if (!lx || x != lx) return r;   // only the local avatar's evaluator
+    if (freezeMode == 0 && !ikWanted) return r;
+    const uint64_t lx = pfz::g_localX.load(std::memory_order_acquire), ax = pfz::g_armX.load(std::memory_order_acquire);
+    const bool freeze = freezeMode != 0 && lx && x == lx, ik = ikWanted && ax && x == ax;
+    if (!freeze && !ik) return r;   // only the local avatar's evaluator
     g_pfzLocalCalls.fetch_add(1, std::memory_order_relaxed);
     if (g_pfzBusy.exchange(true, std::memory_order_acquire)) {
         g_pfzBusySkips.fetch_add(1, std::memory_order_relaxed);
         return r;
     }
-    pfzAfterAnimate(x, a2);
+    pfzAfterAnimate(x, a2, freeze, ik);
     g_pfzBusy.store(false, std::memory_order_release);
     return r;
 }
@@ -7646,10 +8301,14 @@ void pfzTick(uint64_t now) {
                                   : "; nothing is written");
         lastMode = mode;
     }
-    const bool hookWanted = mode != 0 || pfz::g_dropWanted.load(std::memory_order_relaxed);   // F55: the shoulder drop needs the hook too
+    // F55: the shoulder drop needs the hook too; F56: and the arm IK
+    const bool hookWanted = mode != 0 || pfz::g_dropWanted.load(std::memory_order_relaxed) || pfz::g_ikWanted.load(std::memory_order_relaxed);
     if (hookWanted) pfzInstallOnce();
     if (g_pfzArmed) g_pfzHook.gate.store(hookWanted ? 1u : 0u, std::memory_order_release);
-    if (!nativeOnFootActive()) pfz::g_localX.store(0, std::memory_order_release);   // the census sets it again (it runs only while active)
+    if (!nativeOnFootActive()) {   // the census sets them again (it runs only while active)
+        pfz::g_localX.store(0, std::memory_order_release);
+        pfz::g_armX.store(0, std::memory_order_release);
+    }
     // The gate and the blend (the weight is 0 unless the key is on).
     const double dt = g_pfzLastMs && now > g_pfzLastMs ? std::min(0.1, static_cast<double>(now - g_pfzLastMs) / 1000.0) : 0.0;
     g_pfzLastMs = now;
@@ -7747,6 +8406,137 @@ void pfzTick(uint64_t now) {
                     st.f128, static_cast<unsigned>(st.f212), static_cast<unsigned long long>(st.perBuffer[0]),
                     static_cast<unsigned long long>(st.perBuffer[1]), st.count, joint[0], joint[1], static_cast<double>(g_pfzBlend.w),
                     static_cast<unsigned long long>(st.written), static_cast<double>(st.wLast));
+}
+
+// F56 (TEMPORARY): the arm IK's frame-thread half. The base weight ramps to 1 over 0.2 s while the key is nudge or on and every input holds
+// (native stereo on foot, body mode, hide_fp_body on, body_unclip on, an arm plan for the local X, the FP snapshot and G under 100 ms, no
+// write stand-down), and to 0 over 0.2 s otherwise; off and probe hold it at 0 (nothing is written). Each refusal the hook met is named once;
+// every 5 s while native stereo is on foot and the key is not off: the gate, the data ages, G's inputs and the refusals, then a line per arm.
+nofoot::IkBlend g_ikBlend;               // frame thread only
+uint64_t g_ikLastMs = 0, g_ikLineMs = 0;
+const char* g_ikWhyLast = "(none)";
+uint32_t g_ikFailNamed = 0;
+uint64_t g_ikCallsLast = 0, g_ikGPubLast = 0, g_ikGRefLast = 0;
+uint64_t g_ikRefusedLast[kIkRefKinds] = {};
+void armIkTick(uint64_t now) noexcept {
+    const int mode = pfz::g_ikMode.load(std::memory_order_relaxed);
+    const double dt = g_ikLastMs && now > g_ikLastMs ? std::min(0.1, static_cast<double>(now - g_ikLastMs) / 1000.0) : 0.0;
+    g_ikLastMs = now;
+    // The newest FP snapshot and G stamps (a read that meets a write keeps the last stamp, so a torn read never drops the weight).
+    static uint64_t fpMsLast = 0;
+    static IkGData gLast;
+    static bool gHave = false;
+    float fpm[4][16];
+    uint64_t fpRead = 0;
+    if (ikFpRead(fpm, &fpRead)) fpMsLast = fpRead;
+    const uint64_t fpMs = fpMsLast;
+    const bool fpFresh = fpMs != 0 && (now > fpMs ? now - fpMs : 0) <= nofoot::kIkFreshMs;
+    IkGData gNow;
+    if (ikGRead(&gNow)) {
+        gLast = gNow;
+        gHave = true;
+    }
+    const IkGData& G = gLast;
+    const bool gOk = gHave;
+    const bool gFresh = gOk && (now > G.ms ? now - G.ms : 0) <= nofoot::kIkFreshMs;
+    const bool active = nativeOnFootActive();
+    const char* gate = !active ? "not native stereo on foot" : g_alignMode.load(std::memory_order_relaxed) != 2 ? "not body mode (body align = body)"
+                     : !g_fpKeyOn.load(std::memory_order_relaxed) ? "fix.native_on_foot_hide_fp_body is off"
+                     : !g_unclipKeyOn.load(std::memory_order_relaxed) ? "fix.native_on_foot_body_unclip is off"
+                     : !pfz::g_armX.load(std::memory_order_relaxed) ? "no arm plan for the local X"
+                     : !fpFresh ? "the FP snapshot is older than 100 ms (or none)" : !gFresh ? "G is older than 100 ms (or none)"
+                     : g_ikWriteDown.load(std::memory_order_relaxed) ? "the writes stood down" : nullptr;
+    const bool writes = mode == 2 || mode == 3;
+    const char* why = mode == 0 ? "the key is off" : mode == 1 ? "probe: nothing is written" : gate;
+    g_ikBlend.step(why == nullptr, dt);
+    if (!writes) g_ikBlend = nofoot::IkBlend{};   // every write path is behind nudge or on: off and probe write nothing at once
+    g_ikWeight.store(g_ikBlend.w, std::memory_order_relaxed);
+    if (writes) {
+        const char* whyNow = why ? why : "writing";
+        if (std::strcmp(whyNow, g_ikWhyLast) != 0) {
+            Log::get().note("native on foot arm IK (F56, %s): %s%s (base weight %.2f)", mode == 3 ? "on" : "nudge", why ? "held: " : "writing: every gate holds",
+                            why ? why : "", static_cast<double>(g_ikBlend.w));
+            g_ikWhyLast = whyNow;
+        }
+    } else {
+        g_ikWhyLast = "(none)";
+    }
+    const uint32_t bits = g_ikFailBits.load(std::memory_order_relaxed) & ~g_ikFailNamed;
+    for (uint32_t i = 0; i < kIkRefKinds; ++i) {
+        if (!(bits & (1u << i))) continue;
+        g_ikFailNamed |= 1u << i;
+        Log::get().note("native on foot arm IK (F56): the hook refused a call: %s (said once)", kIkRefText[i]);
+    }
+    if (mode == 0 || !active || !g_pfzArmed) return;
+    if (g_ikLineMs == 0) g_ikLineMs = now;
+    if (now - g_ikLineMs < 5000) return;
+    g_ikLineMs = now;
+    IkStats st;
+    bool got = false;
+    for (int tries = 0; tries < 8 && !got; ++tries) {
+        const uint32_t s1 = g_ikStatSeq.load(std::memory_order_acquire);
+        if (s1 & 1u) continue;
+        st = g_ikStats;
+        std::atomic_thread_fence(std::memory_order_acquire);
+        got = g_ikStatSeq.load(std::memory_order_relaxed) == s1;
+    }
+    g_ikStatReset.store(true, std::memory_order_relaxed);
+    static const char* const kModeNames[4] = {"off", "probe", "nudge", "on"};
+    const uint64_t calls = g_ikCalls.load(std::memory_order_relaxed), gPub = g_ikGPublishes.load(std::memory_order_relaxed),
+                   gRef = g_ikGRefusals.load(std::memory_order_relaxed);
+    char refusals[700] = {};
+    size_t at = 0;
+    for (uint32_t i = 0; i < kIkRefKinds; ++i) {
+        const uint64_t n = g_ikRefused[i].load(std::memory_order_relaxed);
+        const uint64_t dn = n - g_ikRefusedLast[i];
+        g_ikRefusedLast[i] = n;
+        static const char* const kShort[kIkRefKinds] = {"buffer", "plan torn", "plan", "FP torn", "FP stale", "G torn", "G stale", "side", "singular",
+                                                        "write"};
+        const int w = std::snprintf(refusals + at, sizeof(refusals) - at, "%s%s %llu", i ? ", " : "", kShort[i], static_cast<unsigned long long>(dn));
+        if (w > 0 && static_cast<size_t>(w) < sizeof(refusals) - at) at += static_cast<size_t>(w);
+    }
+    const uint64_t fpAgeNow = fpMs && now > fpMs ? now - fpMs : 0, gAgeNow = gOk && now > G.ms ? now - G.ms : 0;
+    Log::get().note("native on foot arm IK (F56, %s): %llu IK calls in 5 s (%llu measured, %llu arm solves); base weight %.2f; gate: %s; refusals in "
+                    "5 s: %s; ages now: FP snapshot %s%llu ms, G %s%llu ms; in the hook: FP last %.0f max %.0f ms, G last %.0f max %.0f ms; G published "
+                    "%llu, refused %llu in 5 s",
+                    kModeNames[mode], static_cast<unsigned long long>(calls - g_ikCallsLast), static_cast<unsigned long long>(got ? st.calls : 0),
+                    static_cast<unsigned long long>(got ? st.solved : 0), static_cast<double>(g_ikBlend.w), gate ? gate : "holds", refusals,
+                    fpMs ? "" : "(none) ", static_cast<unsigned long long>(fpAgeNow), gOk ? "" : "(none) ", static_cast<unsigned long long>(gAgeNow),
+                    got ? st.fpAgeLast : -1.0, got ? st.fpAgeMax : -1.0, got ? st.gAgeLast : -1.0, got ? st.gAgeMax : -1.0,
+                    static_cast<unsigned long long>(gPub - g_ikGPubLast), static_cast<unsigned long long>(gRef - g_ikGRefLast));
+    g_ikCallsLast = calls;
+    g_ikGPubLast = gPub;
+    g_ikGRefLast = gRef;
+    if (gOk)
+        Log::get().note("native on foot arm IK (F56): G inputs: M3P |row length - 1| max %.4f det %.4f; F_root |row length - 1| max %.4f det %.4f "
+                        "(root %llu ms older than G); r (%.3f, %.3f, %.3f) m (raise %s); d (%.3f, %.3f, %.3f) m; G rows (%.3f %.3f %.3f) (%.3f %.3f %.3f) "
+                        "(%.3f %.3f %.3f) pos (%.3f, %.3f, %.3f)",
+                        static_cast<double>(G.m3pRowErr), static_cast<double>(G.m3pDet), static_cast<double>(G.fRowErr), static_cast<double>(G.fDet),
+                        static_cast<unsigned long long>(G.ms >= G.frootMs ? G.ms - G.frootMs : 0), static_cast<double>(G.r[0]),
+                        static_cast<double>(G.r[1]), static_cast<double>(G.r[2]), g_f51FpOn.load(std::memory_order_relaxed) ? "on" : "off",
+                        static_cast<double>(G.d[0]), static_cast<double>(G.d[1]), static_cast<double>(G.d[2]), static_cast<double>(G.g[0]),
+                        static_cast<double>(G.g[1]), static_cast<double>(G.g[2]), static_cast<double>(G.g[4]), static_cast<double>(G.g[5]),
+                        static_cast<double>(G.g[6]), static_cast<double>(G.g[8]), static_cast<double>(G.g[9]), static_cast<double>(G.g[10]),
+                        static_cast<double>(G.g[12]), static_cast<double>(G.g[13]), static_cast<double>(G.g[14]));
+    if (!got) return;
+    for (int side = 0; side < 2; ++side) {
+        const IkSideStats& s = st.side[side];
+        if (s.n == 0) {
+            Log::get().note("native on foot arm IK (F56): arm %s: no solve in 5 s (see the refusals)", side ? "R" : "L");
+            continue;
+        }
+        const double n = static_cast<double>(s.n);
+        char err[96] = "no sample in reach";
+        if (s.errN) std::snprintf(err, sizeof(err), "max %.3f cm over %u samples in reach", s.errMax, s.errN);
+        Log::get().note("native on foot arm IK (F56): arm %s: %u solves; T_A vs the animated 3P attach: distance min %.1f mean %.1f max %.1f cm, "
+                        "rotation min %.1f mean %.1f max %.1f deg; reach min %.2f mean %.2f max %.2f (shortfall max %.1f cm); l1 %.1f cm l2 %.1f cm; "
+                        "animated elbow angle mean %.1f deg (180 straight); last solved elbow (%.3f, %.3f, %.3f) shoulder (%.3f, %.3f, %.3f) model; swivel "
+                        "clamped %u of %u; chain hand error %s; distance gate mean %.2f; per-arm weight mean %.2f (on only); frames written %llu",
+                        side ? "R" : "L", s.n, s.distMin, s.distSum / n, s.distMax, s.angMin, s.angSum / n, s.angMax, s.reachMin, s.reachSum / n,
+                        s.reachMax, s.shortMax, static_cast<double>(s.l1), static_cast<double>(s.l2), s.bendSum / n, static_cast<double>(s.E[0]),
+                        static_cast<double>(s.E[1]), static_cast<double>(s.E[2]), static_cast<double>(s.S[0]), static_cast<double>(s.S[1]),
+                        static_cast<double>(s.S[2]), s.clamped, s.n, err, s.gateSum / n, s.wSum / n, static_cast<unsigned long long>(s.written));
+    }
 }
 
 void installEyeProbeOnce() {
@@ -11193,6 +11983,7 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
     installBodyShiftOnce();  // F35 (TEMPORARY): the body shift's post-hook on the submit job (body mode only)
     f54::tick(now);          // F54 (TEMPORARY): the held weapon's MGMC and record-submit hooks (measure always; shift with the FP raise), its lines
     pfzTick(now);            // F49 (TEMPORARY): the pose freeze's Animate post-hook (installed unless the key is off), its gate, blend and lines
+    armIkTick(now);          // F56 (TEMPORARY): the arm IK's base weight (nudge and on only), its refusals and its 5 s lines
     f14FrameTick(now);
     {
         const float spreadNow = g_hudSpread.load(std::memory_order_relaxed);

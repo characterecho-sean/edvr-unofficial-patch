@@ -1122,6 +1122,114 @@ int wmain(int argc, wchar_t** argv) {
                 check(n == 5 && mem[0] == 2 && mem[1] == 3 && mem[2] == 4 && mem[3] == 5 && mem[4] == 6,
                       "F55: the drop's subtree is the two clavicles and every joint below them; the spine, the head and a broken chain are left out");
             }
+            // F56: the arm IK's pure half: the two-bone solve, the pole, the clamp, the rotations, the ramp, the distance gate, the chain.
+            {
+                const double lU = 0.30, lF = 0.25, S[3] = {0.0, 0.0, 0.0}, down[3] = {0.0, -1.0, 0.0}, poleUp[3] = {0.0, 1.0, 0.0},
+                             fwd[3] = {0.0, 0.0, 1.0};
+                const auto d3 = [](const double* a, const double* b) {
+                    return std::sqrt((a[0] - b[0]) * (a[0] - b[0]) + (a[1] - b[1]) * (a[1] - b[1]) + (a[2] - b[2]) * (a[2] - b[2]));
+                };
+                const double T[3] = {0.40, 0.0, 0.0};
+                double E[3] = {};
+                const nf::IkTwoBone tb = nf::ikTwoBone(S, T, lU, lF, down, E);
+                const double ue[3] = {S[0] - E[0], S[1] - E[1], S[2] - E[2]}, he[3] = {T[0] - E[0], T[1] - E[1], T[2] - E[2]};
+                const double elbowDeg = std::acos(nf::ikDot(ue, he) / (lU * lF)) * 180.0 / nf::kIkPi;
+                const double wantDeg = std::acos((lU * lU + lF * lF - 0.40 * 0.40) / (2.0 * lU * lF)) * 180.0 / nf::kIkPi;
+                check(tb.ok && std::fabs(d3(S, E) - lU) < 1e-9 && std::fabs(d3(E, T) - lF) < 1e-9 && std::fabs(elbowDeg - wantDeg) < 1e-6 &&
+                          std::fabs(wantDeg - 92.87) < 0.01 && d3(tb.hand, T) < 1e-12 && tb.reach < 1.0 && tb.shortfall == 0.0,
+                      "F56: a reachable target: the bones keep their lengths, the hand lands on it, the elbow angle is the law of cosines' (92.87 deg)");
+                double Eu[3] = {}, Ef[3] = {};
+                nf::ikTwoBone(S, T, lU, lF, poleUp, Eu);
+                nf::ikTwoBone(S, T, lU, lF, fwd, Ef);
+                check(E[1] < -0.1 && std::fabs(E[2]) < 1e-9 && Eu[1] > 0.1 && Ef[2] > 0.1 && std::fabs(Ef[1]) < 1e-9,
+                      "F56: the pole hint selects the elbow's side (down, up, forward)");
+                const double farT[3] = {1.0, 0.0, 0.0};
+                double Ex[3] = {};
+                const nf::IkTwoBone tf = nf::ikTwoBone(S, farT, lU, lF, down, Ex);
+                check(tf.ok && std::fabs(tf.D - 0.999 * (lU + lF)) < 1e-12 && std::fabs(tf.reach - 1.0 / 0.55) < 1e-9 &&
+                          std::fabs(tf.shortfall - (1.0 - 0.999 * 0.55)) < 1e-12 && std::fabs(tf.hand[0] - 0.999 * 0.55) < 1e-12 &&
+                          std::fabs(d3(S, Ex) - lU) < 1e-9 && std::fabs(d3(Ex, tf.hand) - lF) < 1e-9,
+                      "F56: an unreachable target clamps: the arm reaches 0.999 of its length toward it, short by the excess, never stretched");
+                const double nearT[3] = {0.01, 0.0, 0.0};
+                double En[3] = {};
+                const nf::IkTwoBone tn = nf::ikTwoBone(S, nearT, lU, lF, down, En);
+                check(tn.ok && std::fabs(tn.D - (0.05 + 1e-3)) < 1e-12 && std::fabs(d3(S, En) - lU) < 1e-9,
+                      "F56: a target inside the folded reach clamps to |l1 - l2| + 1 mm");
+                // The swivel clamp: an arm reaching forward with the pole poleUp puts the elbow above the shoulder; the clamp turns it below and out.
+                const double S2[3] = {0.2, 1.4, 0.0}, T2[3] = {0.2, 1.4, 0.4};
+                const nf::IkTwoBone t2 = nf::ikTwoBoneFrame(S2, T2, lU, lF, poleUp);
+                bool swClamped = false;
+                const double th = nf::ikSwivelClamp(t2, 0.0, 1.0, &swClamped);
+                double E2[3] = {}, E0[3] = {};
+                t2.elbowAt(th, E2);
+                t2.elbowAt(0.0, E0);
+                bool okAgain = true;
+                const double th2 = nf::ikSwivelClamp(t2, th, 1.0, &okAgain);
+                check(E0[1] > S2[1] && swClamped && E2[1] <= S2[1] + 1e-9 && E2[0] >= 0.10 - 1e-9 && !okAgain && th2 == th,
+                      "F56: the swivel clamp turns an elbow above the shoulder to below it, out on its side; a clamped angle holds as is");
+                // The rotations: from-to, the axis-angle's twist, the pivot keeps its point.
+                const double a[3] = {1.0, 0.0, 0.0}, b[3] = {0.0, 0.6, 0.8};
+                double R[9];
+                nf::ikRotFromTo(a, b, R);
+                const double ar[3] = {a[0] * R[0] + a[1] * R[3] + a[2] * R[6], a[0] * R[1] + a[1] * R[4] + a[2] * R[7], a[0] * R[2] + a[1] * R[5] + a[2] * R[8]};
+                double Rt[9];
+                const double nAx[3] = {0.0, 0.6, 0.8};
+                nf::ikRotAxis(nAx, 0.7, Rt);
+                const double twist = nf::ikTwistAbout(Rt, nAx);
+                double Ry[9];
+                nf::ikRotAxis(poleUp, nf::kIkPi / 2.0, Ry);
+                const double xr[3] = {Ry[0], Ry[1], Ry[2]};   // (1, 0, 0) x Ry: right-handed about +y turns +x to -z
+                const float M[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0.5f, 0.0f, 0.0f, 1};
+                float Mo[16];
+                const double P[3] = {0.5, 0.0, 0.0};
+                nf::ikPivot(M, Ry, P, Mo);
+                check(d3(ar, b) < 1e-12 && std::fabs(twist - 0.7) < 1e-9 && std::fabs(xr[2] + 1.0) < 1e-12 && Mo[12] == 0.5f && Mo[13] == 0.0f &&
+                          std::fabs(Mo[2] + 1.0f) < 1e-6f,
+                      "F56: the shortest arc maps a onto b; the twist of an axis-angle about its axis is the angle; a pivot keeps its point");
+                // The base weight's ramp: 0.2 s in (18 frames at 90 Hz, half at 0.1 s), 0.2 s out.
+                nf::IkBlend ikRamp;
+                const double dt = 1.0 / 90.0;
+                int framesIn = 0;
+                while (ikRamp.w < 1.0f && framesIn < 100) {
+                    ikRamp.step(true, dt);
+                    ++framesIn;
+                }
+                nf::IkBlend b2;
+                for (int f = 0; f < 9; ++f) b2.step(true, dt);
+                int framesOut = 0;
+                while (ikRamp.w > 0.0f && framesOut < 100) {
+                    ikRamp.step(false, dt);
+                    ++framesOut;
+                }
+                check(framesIn >= 18 && framesIn <= 19 && framesOut >= 18 && framesOut <= 19 && std::fabs(b2.w - 0.5f) < 1e-5f && ikRamp.w == 0.0f,
+                      "F56: the arm IK's base weight ramps to 1 in 0.2 s (half at 0.1 s) and back to 0 in 0.2 s");
+                // The distance gate and the 5 cm cap.
+                check(nf::ikDistanceGate(0.2f) == 1.0f && nf::ikDistanceGate(0.35f) == 1.0f && std::fabs(nf::ikDistanceGate(0.575f) - 0.5f) < 1e-5f &&
+                          nf::ikDistanceGate(0.8f) == 0.0f && nf::ikDistanceGate(1.5f) == 0.0f &&
+                          nf::ikDistanceGate(std::numeric_limits<float>::quiet_NaN()) == 0.0f,
+                      "F56: the per-arm distance gate: full under 0.35 m, half at 0.575 m, none from 0.8 m (and for NaN)");
+                float applied[3] = {0.0f, 0.0f, 0.0f};
+                const float want[3] = {0.0f, 0.25f, 0.0f};
+                for (int c = 0; c < 4; ++c) nf::ikCapToward(applied, want, nf::kIkCapPerCallM);
+                const float after4 = applied[1];
+                for (int c = 0; c < 2; ++c) nf::ikCapToward(applied, want, nf::kIkCapPerCallM);
+                check(std::fabs(after4 - 0.20f) < 1e-6f && std::fabs(applied[1] - 0.25f) < 1e-6f && applied[0] == 0.0f && applied[2] == 0.0f,
+                      "F56: the applied hand offset moves at most 5 cm a call (the nudge's 25 cm after 5 or 6) and stops at the wanted offset");
+                // The chain: clavicle 1 -> upper arm 2 -> forearm 3 -> hand 4 -> attach 5; finger 6 under 4; helpers 7 (under 3) and 8 (under 2).
+                const uint16_t par[9] = {0xFFFF, 0, 1, 2, 3, 4, 4, 3, 2};
+                const nf::IkArm arm = nf::ikArmChain(par, 9, 1, 4, 5);
+                check(arm.why == 0 && arm.direct && arm.attachDirect && arm.U == 2 && arm.F == 3 && arm.nU == 2 && arm.gU[0] == 2 && arm.chainU[0] == 1 &&
+                          arm.gU[1] == 8 && arm.chainU[1] == 0 && arm.nF == 2 && arm.gF[0] == 3 && arm.gF[1] == 7 && arm.nH == 3 && arm.gH[0] == 4 &&
+                          arm.depthH - arm.depthC == 3,
+                      "F56: the arm chain: U and F from the hand's parents; gU, gF, gH parent first with the helpers in their bone's group");
+                const uint16_t par2[10] = {0xFFFF, 0, 1, 9, 3, 4, 4, 3, 2, 2};   // a twist joint 9 between U 2 and F 3
+                const nf::IkArm arm2 = nf::ikArmChain(par2, 10, 1, 4, 5);
+                check(arm2.why == 0 && !arm2.direct && arm2.U == 2 && arm2.F == 3 && arm2.nU == 3 && arm2.chainU[0] == 1 &&
+                          ((arm2.gU[1] == 9 && arm2.chainU[1] == 1) || (arm2.gU[2] == 9 && arm2.chainU[2] == 1)),
+                      "F56: a joint between U and F is found by the upward search and is on the chain");
+                check(nf::ikArmChain(par, 9, 1, 4, 7).why == 3 && nf::ikArmChain(par, 9, 7, 4, 5).why == 2 && nf::ikArmChain(par, 9, 1, 4, 40).why == 1,
+                      "F56: an attach not under the hand, a clavicle off the chain and an index out of range are refused");
+            }
             // The shift rule: a record at the AMC origin moves by d once; a second pass over it leaves it alone; a record elsewhere never moves.
             const float origin[3] = {10.0f, 2.0f, -3.0f}, d[3] = {0.0f, 0.231f, 0.0f};
             float rec[3] = {10.0f, 2.0f, -3.0f}, other[3] = {10.5f, 2.0f, -3.0f};

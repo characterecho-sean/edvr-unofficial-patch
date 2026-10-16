@@ -1804,7 +1804,7 @@ struct ShoulderProbe {
 
 // F48 (census, read only): the skeleton's parent array, once per skeleton (the probe's cache). The FP skeleton: the joint count (the u16 at
 // pose + kPoseJointCountOff) and every joint's parent (*(pose + 0x50), a u16 per joint), 24 joints a line. The 3P skeleton: the parents of
-// joints 15 (povCamera), 34, 35, 36 and 44 (the head).
+// joints 15 (povCamera), 34, 35, 36 and 44 (the head), then (F56) the whole array as the FP one.
 void skeletonParentsDump(uint64_t iface, const SkSlots& sl, bool fp, const char* label) noexcept {
     uintptr_t pose = 0;
     uint16_t joints = 0;
@@ -1826,7 +1826,7 @@ void skeletonParentsDump(uint64_t iface, const SkSlots& sl, bool fp, const char*
             if (w > 0 && static_cast<size_t>(w) < sizeof(buf) - at) at += static_cast<size_t>(w);
         }
         Log::get().note("native on foot skeleton parents (%s): %u joints; joint<-parent:%s", label, static_cast<unsigned>(joints), buf);
-        return;
+        // F56: the 3P skeleton's whole parent array follows too (the arm IK's chains are derived from it; the indices are known offline).
     }
     Log::get().note("native on foot skeleton parents (%s): %u joints (pose + 0x%X); the parent array follows, joint<-parent, 0xFFFF the root",
                     label, static_cast<unsigned>(joints), static_cast<unsigned>(ecm::kPoseJointCountOff));
@@ -1952,6 +1952,7 @@ struct PfzCensus {
     uint64_t modelNextMs = 0;
     bool modelNoted = false;
     bool planOk = false;   // the plan for this X was built and published (a failed build is refused for this X, said once)
+    bool armOk = false;    // F56: the arm IK's plan for this X has at least one side
 };
 PfzCensus g_pfzCensus;
 float g_pfzLocals[nofoot::kPfzMaxJoints * ecm::kJointFloats];
@@ -2185,9 +2186,101 @@ void fdCensusStep(uint64_t iface, uint64_t x) noexcept {
     if (count > 0) fdPublish(x, joints, count);
 }
 
+// F56 (TEMPORARY): the arm IK's plan, once per local 3P X: P = [X+8], its parents; per side the chain C (the joint probe's clavicle), U, F, H
+// (the hand), A (the hand attach) and the groups gU, gF, gH (nofoot::ikArmChain), published under pfz::g_armSeq. The plan line prints, per side,
+// the chain, its depths, the group sizes and members, and the children of U and F with their projected t along U->F and F->H at the rest pose.
+// Census thread only; reads only.
+void armAppend(char* buf, size_t cap, size_t* at, const char* fmt, ...) noexcept {
+    if (*at >= cap) return;
+    va_list ap;
+    va_start(ap, fmt);
+    const int w = std::vsnprintf(buf + *at, cap - *at, fmt, ap);
+    va_end(ap);
+    if (w > 0) *at = std::min(cap - 1, *at + static_cast<size_t>(w));
+}
+bool armBuildPlan(uint64_t x) noexcept {
+    pfz::g_armX.store(0, std::memory_order_release);
+    uint64_t pose = 0;
+    uint16_t joints = 0;
+    if (!sehReadU64At(static_cast<uintptr_t>(x) + 8u, &pose) || !plausibleUserPointer(pose) || !sehReadU16At(static_cast<uintptr_t>(pose), &joints) ||
+        joints == 0 || joints > nofoot::kPfzMaxJoints || !sehReadPoseArrays(static_cast<uintptr_t>(pose), joints, g_pfzLocals, g_pfzParents)) {
+        Log::get().note("native on foot arm IK (F56): X=%016llX: P = [X+8] %016llX, %u joints (cap 0xC0) or the parents unreadable; no arm plan",
+                        static_cast<unsigned long long>(x), static_cast<unsigned long long>(pose), static_cast<unsigned>(joints));
+        return false;
+    }
+    pfz::ArmPlan plan;
+    plan.x = x;
+    plan.joints = joints;
+    const uint32_t cs[2] = {g_shProbe3P.l, g_shProbe3P.r}, hs[2] = {g_shProbe3P.hl, g_shProbe3P.hr}, as[2] = {g_shProbe3P.al, g_shProbe3P.ar};
+    for (int side = 0; side < 2; ++side) {
+        const char* name = side ? "R" : "L";
+        const nofoot::IkArm arm = nofoot::ikArmChain(g_pfzParents, joints, cs[side], hs[side], as[side]);
+        plan.side[side] = arm;
+        plan.ok[side] = arm.why == 0;
+        if (arm.why != 0) {
+            Log::get().note("native on foot arm IK (F56): X=%016llX side %s: clavicle %u hand %u attach %u: REFUSED (%s); this arm is not solved",
+                            static_cast<unsigned long long>(x), name, cs[side], hs[side], as[side], nofoot::ikArmWhyText(arm.why));
+            continue;
+        }
+        char groups[1400] = {};
+        size_t at = 0;
+        const uint16_t* lists[3] = {arm.gU, arm.gF, arm.gH};
+        const uint16_t counts[3] = {arm.nU, arm.nF, arm.nH};
+        const char* gname[3] = {"gU", "gF", "gH"};
+        for (int g = 0; g < 3; ++g) {
+            armAppend(groups, sizeof(groups), &at, "%s%s(%u):", g ? "; " : "", gname[g], static_cast<unsigned>(counts[g]));
+            for (uint32_t k = 0; k < counts[g]; ++k)
+                armAppend(groups, sizeof(groups), &at, " %u%s", static_cast<unsigned>(lists[g][k]), g == 0 && arm.chainU[k] ? "*" : "");
+        }
+        // The children of U and F with their projected t at the rest pose (U->F for U's, F->H for F's).
+        char kids[700] = {};
+        size_t kat = 0;
+        alignas(16) float mU[16] = {}, mF[16] = {}, mH[16] = {};
+        const bool restOk = nofoot::pfzRestModel(g_pfzLocals, g_pfzParents, joints, arm.U, mU) &&
+                            nofoot::pfzRestModel(g_pfzLocals, g_pfzParents, joints, arm.F, mF) &&
+                            nofoot::pfzRestModel(g_pfzLocals, g_pfzParents, joints, arm.H, mH);
+        const uint32_t heads[2] = {arm.U, arm.F};
+        for (int q = 0; q < 2; ++q) {
+            const float* a = q ? mF : mU;
+            const float* b = q ? mH : mF;
+            armAppend(kids, sizeof(kids), &kat, "%schildren of %s %u:", q ? "; " : "", q ? "F" : "U", heads[q]);
+            for (uint32_t j = 0; j < joints; ++j) {
+                if (g_pfzParents[j] != heads[q]) continue;
+                alignas(16) float mj[16] = {};
+                double t = -1.0;
+                if (restOk && nofoot::pfzRestModel(g_pfzLocals, g_pfzParents, joints, j, mj)) {
+                    const double ax[3] = {static_cast<double>(b[12]) - a[12], static_cast<double>(b[13]) - a[13], static_cast<double>(b[14]) - a[14]};
+                    const double pj[3] = {static_cast<double>(mj[12]) - a[12], static_cast<double>(mj[13]) - a[13], static_cast<double>(mj[14]) - a[14]};
+                    const double l2 = nofoot::ikDot(ax, ax);
+                    if (l2 > 1e-12) t = nofoot::ikDot(pj, ax) / l2;
+                }
+                armAppend(kids, sizeof(kids), &kat, " %u(t %.2f)", j, t);
+            }
+        }
+        double l1 = -1.0, l2 = -1.0;
+        if (restOk) {
+            const float u2f[3] = {mF[12] - mU[12], mF[13] - mU[13], mF[14] - mU[14]}, f2h[3] = {mH[12] - mF[12], mH[13] - mF[13], mH[14] - mF[14]};
+            l1 = std::sqrt(static_cast<double>(u2f[0]) * u2f[0] + static_cast<double>(u2f[1]) * u2f[1] + static_cast<double>(u2f[2]) * u2f[2]);
+            l2 = std::sqrt(static_cast<double>(f2h[0]) * f2h[0] + static_cast<double>(f2h[1]) * f2h[1] + static_cast<double>(f2h[2]) * f2h[2]);
+        }
+        Log::get().note("native on foot arm IK (F56): X=%016llX side %s: C %u U %u F %u H %u A %u (%s; the attach's parent is %s); depth C %u, H %u "
+                        "(H - C = %u, FP has 3); rest l1 %.1f cm l2 %.1f cm (-100 not known); %s; %s",
+                        static_cast<unsigned long long>(x), name, static_cast<unsigned>(arm.C), static_cast<unsigned>(arm.U),
+                        static_cast<unsigned>(arm.F), static_cast<unsigned>(arm.H), static_cast<unsigned>(arm.A),
+                        arm.direct ? "U = parents[F], parents[U] = C" : "U found by the upward search", arm.attachDirect ? "H" : "NOT H (under H)",
+                        arm.depthC, arm.depthH, arm.depthH - arm.depthC, l1 * 100.0, l2 * 100.0, groups, kids);
+    }
+    if (!plan.ok[0] && !plan.ok[1]) return false;
+    pfz::g_armSeq.fetch_add(1, std::memory_order_acq_rel);   // odd: the plan is being written
+    pfz::g_armPlan = plan;
+    pfz::g_armSeq.fetch_add(1, std::memory_order_release);   // even again
+    return true;
+}
+
 void pfzCensusStep(uint64_t iface, const SkSlots& sl) noexcept {
-    if (pfz::g_mode.load(std::memory_order_relaxed) == 0) {
+    if (pfz::g_mode.load(std::memory_order_relaxed) == 0 && !pfz::g_ikWanted.load(std::memory_order_relaxed)) {
         pfz::g_localX.store(0, std::memory_order_relaxed);
+        pfz::g_armX.store(0, std::memory_order_relaxed);
         return;
     }
     const uint32_t off = sl.kind == ecm::HeadKind::Runtime ? 0x2B8u : 0x120u;
@@ -2199,6 +2292,7 @@ void pfzCensusStep(uint64_t iface, const SkSlots& sl) noexcept {
                             off, static_cast<unsigned long long>(iface), static_cast<unsigned long long>(x));
         }
         pfz::g_localX.store(0, std::memory_order_relaxed);
+        pfz::g_armX.store(0, std::memory_order_relaxed);
         return;
     }
     if (iface != g_pfzCensus.iface || x != g_pfzCensus.x) {
@@ -2206,8 +2300,10 @@ void pfzCensusStep(uint64_t iface, const SkSlots& sl) noexcept {
         g_pfzCensus.iface = iface;
         g_pfzCensus.x = x;
         pfzBuildPlan(iface, x, sl);
+        g_pfzCensus.armOk = armBuildPlan(x);   // F56: the arm IK's chains and groups, once per X
     }
     pfz::g_localX.store(g_pfzCensus.planOk ? x : 0, std::memory_order_release);   // again after a key change from off
+    pfz::g_armX.store(g_pfzCensus.armOk ? x : 0, std::memory_order_release);     // F56: the same, for the arm IK's plan
 
     // Every 5 s: the iface's GetModelMatrix(34) beside the hook's newest span matrix of joint 34 (read back to back on this thread).
     const uint64_t now = GetTickCount64();
@@ -2313,7 +2409,9 @@ void neckCensusStep() noexcept {
         SkSlots slf;
         if (skVerify(static_cast<uintptr_t>(fpIface), ecm::HeadKind::None, &slf) == SkVerify::Ok) {
             // F51: the FP skeleton's X, for the line; F55: and the shoulder drop's plan (the FP X, with the 3P one's fallbacks)
-            if (pfz::g_mode.load(std::memory_order_relaxed) != 0 || pfz::g_dropWanted.load(std::memory_order_relaxed))
+            // F56: and the arm IK's FP snapshot (joints 51, 52, 37, 44), so the IK key keeps the FP plan too
+            if (pfz::g_mode.load(std::memory_order_relaxed) != 0 || pfz::g_dropWanted.load(std::memory_order_relaxed) ||
+                pfz::g_ikWanted.load(std::memory_order_relaxed))
                 fdCensusStep(fpIface, pfzCandidates(1, fpIface, slf));
             shoulderProbe(fpIface, slf, g_shProbeFP, "FP");
             if (g_shProbeFP.l != 0xFFFFu && g_shProbeFP.r != 0xFFFFu && jointModelAt(fpIface, slf, g_shProbeFP.l, &s.shFp[0]) &&
