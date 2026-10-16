@@ -438,6 +438,42 @@ int main() {
     g_summon.store(0);
     check(g_gameKeyboardCalls.load() != 0, "status evidence counts actual game keyboard reads");
 
+    // PR #92 review: a key held across a plugin's release stays up until it is physically released and pressed
+    // again, exactly as after the menu closes. A key pressed after the release is reported normally.
+    {
+        const PFN_GetAsyncKeyState savedReader = g_tailReader;
+        g_tailReader = &physicalKey;
+        physical[VK_ESCAPE] = false;
+        keyboard.keys[DIK_ESCAPE] = 0;
+        refreshReleaseTail(&physicalKey);
+        physical['A'] = true;
+        keyboard.keys[DIK_A] = 0x80;
+        inputGateSetPluginBlock(true);
+        check(readState(keyboard, keys) == DI_OK && keys[DIK_A] == 0, "(a plugin owns input: the held key reads up)");
+        inputGateSetPluginBlock(false);
+        check(readState(keyboard, keys) == DI_OK && keys[DIK_A] == 0,
+              "a key held across the plugin's release is still up in DirectInput state");
+        check(hookGetAsyncKeyState('A') == 0 && hookGetKeyState('A') == 0,
+              "...and in the user32 polls");
+        hookGetKeyboardState(keys);
+        check(keys['A'] == 0, "...and in the full user32 keyboard state");
+        physical['B'] = true;
+        keyboard.keys[DIK_B] = 0x80;
+        check(readState(keyboard, keys) == DI_OK && keys[DIK_B] == 0x80 && hookGetAsyncKeyState('B') != 0,
+              "a key pressed after the release is reported normally");
+        physical['A'] = false;
+        keyboard.keys[DIK_A] = 0;
+        refreshReleaseTail(&physicalKey);
+        physical['A'] = true;
+        keyboard.keys[DIK_A] = 0x80;
+        check(readState(keyboard, keys) == DI_OK && keys[DIK_A] == 0x80 && hookGetAsyncKeyState('A') != 0,
+              "the held key reads down again once it has been released and pressed again");
+        physical['A'] = physical['B'] = false;
+        keyboard.keys[DIK_A] = keyboard.keys[DIK_B] = 0;
+        refreshReleaseTail(&physicalKey);
+        g_tailReader = savedReader;
+    }
+
     // ---- HOTAS / joystick buttons, watched and never captured -------------------------
     //
     // Three paths to a joystick's reads: its own table (the overlay's private table, a door

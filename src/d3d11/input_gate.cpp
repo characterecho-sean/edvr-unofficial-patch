@@ -173,6 +173,9 @@ std::atomic<bool> g_releaseTail{false};
 std::atomic<bool> g_heldVk[256]{};
 std::atomic<bool> g_heldDik[256]{};
 
+// Where the tail reads physical keys. The real GetAsyncKeyState; the rig points it at a fake.
+PFN_GetAsyncKeyState g_tailReader = &GetAsyncKeyState;
+
 void captureReleaseTail(PFN_GetAsyncKeyState readKey) {
     for (int k = 0; k < 256; ++k) g_heldDik[k].store(false);
     bool any = false;
@@ -1645,7 +1648,7 @@ void inputGateSetPrivate(bool priv) {
     if (g_private.load() != want) {
         if (!want) {
             guarded("inputGate/captureReleaseTail",
-                    [&] { captureReleaseTail(&GetAsyncKeyState); });
+                    [&] { captureReleaseTail(g_tailReader); });
         } else {
             g_releaseTail.store(false);
         }
@@ -1654,7 +1657,7 @@ void inputGateSetPrivate(bool priv) {
         // The menu's fault path still calls SetPrivate(false) each frame,
         // even when its normal tick has retired. Never strand held keys there.
         guarded("inputGate/refreshReleaseTail-setPrivate",
-                [&] { refreshReleaseTail(&GetAsyncKeyState); });
+                [&] { refreshReleaseTail(g_tailReader); });
     }
 }
 
@@ -1665,6 +1668,9 @@ bool inputGatePrivate() { return g_private.load() != 0; }
 static void releasePluginBlock(const char* why) {
     g_pluginLease.store(0, std::memory_order_relaxed);
     if (!g_pluginBlock.exchange(false, std::memory_order_relaxed)) return;
+    // Keys still held now were the plugin's, not the game's: they wait for release like the menu's
+    // closing keys do (captureReleaseTail), so clearing the block does not turn them into game input.
+    guarded("inputGate/captureReleaseTail-plugin", [&] { captureReleaseTail(g_tailReader); });
     Log::get().note("keyboard gate: plugin input ownership released (%s).", why);
 }
 
@@ -1678,6 +1684,8 @@ void inputGateSetPluginBlock(bool block) {
 }
 
 void inputGatePluginLeaseTick() {
+    // The tail a plugin release leaves is retired here too: with no menu configured, no one else ticks it.
+    guarded("inputGate/refreshReleaseTail-plugin", [&] { refreshReleaseTail(g_tailReader); });
     if (!g_pluginBlock.load(std::memory_order_relaxed)) return;
     if (g_pluginLease.fetch_sub(1, std::memory_order_relaxed) <= 1) releasePluginBlock("lease expired");
 }
@@ -1732,7 +1740,7 @@ bool inputGateGameKeyboardSeen() {
 
 void inputGateTick() {
     if (!g_installTried) return;
-    guarded("inputGate/refreshReleaseTail-tick", [&] { refreshReleaseTail(&GetAsyncKeyState); });
+    guarded("inputGate/refreshReleaseTail-tick", [&] { refreshReleaseTail(g_tailReader); });
     static bool gameReachedNoted = false;
     if (!gameReachedNoted && g_gameKeyboardCalls.load() != 0) {
         gameReachedNoted = true;
