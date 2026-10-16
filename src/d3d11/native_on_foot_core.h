@@ -1394,6 +1394,75 @@ inline void bendResidualSplit(const double T[3], const double N[3], double out[3
     out[1] = T[1] - N[1];
     out[2] = T[0] - N[0];
 }
+
+// F59b: the full-3P head follow's body frame. Live: a fresh AMC sample (kStaleMs) with the head census. Without the census but with a fresh
+// AMC sample: the AMC matrix (this sample's matrix and job camera, the joints carried over from the last good frame in body axes). Without a
+// fresh sample: the last good frame itself. Neither fallback uses a last good frame older than kFollowHoldMs; past it, none.
+constexpr uint64_t kFollowHoldMs = 500;
+constexpr double kFollowBlendSec = 0.25;   // a change between sources ramps from the last output to the new source's over this
+enum FollowSrc : int { kFollowNone = 0, kFollowLive = 1, kFollowMatrix = 2, kFollowLast = 3 };
+inline int followPick(bool liveOk, bool matrixFresh, bool haveLast, uint64_t lastStamp, uint64_t now, uint64_t* ageOut) noexcept {
+    const uint64_t age = haveLast ? (now > lastStamp ? now - lastStamp : 0) : 0;
+    if (ageOut) *ageOut = age;
+    if (liveOk) return kFollowLive;
+    if (!haveLast || age > kFollowHoldMs) return kFollowNone;
+    return matrixFresh ? kFollowMatrix : kFollowLast;
+}
+// The ramp between sources (world metres, the body run's target). A change between two sources starts from the last output, so the change
+// frame outputs exactly the last output, then moves to the new source's target over kFollowBlendSec. From or to none: no ramp (none feeds the
+// body filter zero, as a wait always has).
+struct FollowBlend {
+    int src = kFollowNone;
+    double w = 1.0, from[3] = {}, last[3] = {};
+    void step(int s, const double target[3], double dt, double out[3]) noexcept {
+        if (s != src) {
+            if (src != kFollowNone && s != kFollowNone) {
+                for (int i = 0; i < 3; ++i) from[i] = last[i];
+                w = 0.0;
+            } else {
+                w = 1.0;
+            }
+            src = s;
+        }
+        for (int i = 0; i < 3; ++i) {
+            out[i] = w >= 1.0 ? target[i] : from[i] + w * (target[i] - from[i]);
+            last[i] = out[i];
+        }
+        const double d = dt > 0.0 ? dt / kFollowBlendSec : 0.0;
+        w = w + d > 1.0 ? 1.0 : w + d;
+    }
+};
+// A world point carried from one AMC frame to another through its body coordinates: b = rowsA . (p - originA), q = originB + rowsB^T b.
+inline void carryBody(const float p[3], const float originA[3], const float rowsA[9], const float originB[3], const float rowsB[9],
+                      float q[3]) noexcept {
+    double b[3] = {};
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j) b[i] += (static_cast<double>(p[j]) - originA[j]) * static_cast<double>(rowsA[3 * i + j]);
+    for (int j = 0; j < 3; ++j) {
+        double w = originB[j];
+        for (int i = 0; i < 3; ++i) w += b[i] * static_cast<double>(rowsB[3 * i + j]);
+        q[j] = static_cast<float>(w);
+    }
+}
+// F59b: the eye-versus-neck residual in body axes (right, up, forward): rows . (eye - neck), metres; the norm is returned.
+inline double eyeNeckBody(const double eye[3], const double neck[3], const double rows[9], double out[3]) noexcept {
+    double n2 = 0.0;
+    for (int i = 0; i < 3; ++i) {
+        out[i] = 0.0;
+        for (int j = 0; j < 3; ++j) out[i] += (eye[j] - neck[j]) * rows[3 * i + j];
+        n2 += out[i] * out[i];
+    }
+    return std::sqrt(n2);
+}
+// F59b: the hook's post-bend residual T - N1 (bendResidualSplit's order: forward, up, right) to eye - neck (right, up, forward). The bend's
+// target is T = (eye - d) + kNeckRestOffset in body axes, so eye - (N1 + d) = (T - N1) - kNeckRestOffset. Same units in and out (scale: 1
+// for metres, 100 for centimetres, applied to the rest offset).
+inline double eyeNeckFromBend(const double split[3], double scale, double out[3]) noexcept {
+    out[0] = split[2] - scale * kNeckRestOffset[0];
+    out[1] = split[1] - scale * kNeckRestOffset[1];
+    out[2] = split[0] - scale * kNeckRestOffset[2];
+    return std::sqrt(out[0] * out[0] + out[1] * out[1] + out[2] * out[2]);
+}
 struct BendClamp {
     bool fwd = false, back = false, roll = false;
 };

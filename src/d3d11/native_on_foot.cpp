@@ -6302,6 +6302,53 @@ nofoot::IkBlend g_f58BendBlend{0.0f, nofoot::kBendRampSec};
 uint64_t g_f58RunUntilMs = 0, g_f58LineMs = 0;
 void f58BendFrame(uint64_t now, double dt, int mode, bool full3P, bool ads, const EyeSample& s) noexcept;
 
+// F59b (frame thread only): the full-3P head follow's body frame. The last good sample (fresh, with the head census and the pov), the
+// source this tick (nofoot::FollowSrc), the ramp between sources, and the 1 s line's counts (frames per source, the oldest frame used).
+EyeSample g_f59bLast;
+bool g_f59bHave = false;
+int g_f59bSrc = nofoot::kFollowNone;
+uint64_t g_f59bAge = 0;
+nofoot::FollowBlend g_f59bBlend;
+uint32_t g_f59bN[4] = {};
+uint64_t g_f59bAgeMax = 0;
+// F59b: the eye - neck residual from the census neck (plus d) in body axes, summed per frame for the 1 s line.
+double g_f59bCenSum[3] = {}, g_f59bCenNorm = 0.0;
+uint32_t g_f59bCenN = 0;
+// F59b: the AMC matrix source: this fresh sample's matrix, job camera and root, with the 3P joints of the last good frame carried into this
+// frame through their body coordinates (the head's body coordinates are unchanged by that), and the FP joints (model space) from this
+// sample when it has them. Frame-thread copies only; no game memory is read.
+void f59bFromMatrix(const EyeSample& last, EyeSample& s) noexcept {
+    EyeSample o = last;
+    o.valid = true;
+    o.stamp = s.stamp;
+    std::memcpy(o.cam, s.cam, sizeof(o.cam));
+    std::memcpy(o.camBody, s.camBody, sizeof(o.camBody));
+    std::memcpy(o.origin, s.origin, sizeof(o.origin));
+    std::memcpy(o.rows, s.rows, sizeof(o.rows));
+    o.rootOk = s.rootOk;
+    std::memcpy(o.root, s.root, sizeof(o.root));
+    o.amcPosOk = s.amcPosOk;
+    std::memcpy(o.amcPos, s.amcPos, sizeof(o.amcPos));
+    const auto carry = [&](const float* p, float* q) { nofoot::carryBody(p, last.origin, last.rows, s.origin, s.rows, q); };
+    if (o.headOk) carry(last.head, o.head);
+    if (o.povOk) carry(last.pov, o.pov);
+    if (o.neckOk) carry(last.neck, o.neck);
+    if (o.povJOk) carry(last.povJ, o.povJ);
+    if (o.shOk3P)
+        for (size_t k = 0; k < 2; ++k) carry(&last.sh3PW[3 * k], &o.sh3PW[3 * k]);
+    if (o.extOk3P)
+        for (size_t k = 0; k < 4; ++k) carry(&last.ext3PW[3 * k], &o.ext3PW[3 * k]);
+    if (s.shOkFp) {
+        o.shOkFp = true;
+        std::memcpy(o.shFpM, s.shFpM, sizeof(o.shFpM));
+    }
+    if (s.extOkFp) {
+        o.extOkFp = true;
+        std::memcpy(o.extFpM, s.extFpM, sizeof(o.extFpM));
+    }
+    s = o;
+}
+
 void alignTick(uint64_t now) noexcept {
     static int lastMode = -1;
     const int mode = g_alignMode.load(std::memory_order_relaxed);   // 0 off, 1 view, 2 body
@@ -6354,6 +6401,31 @@ void alignTick(uint64_t now) noexcept {
     EdvrNativeNowPose np{};
     const bool haveFrame = nativeFrameNowPose(np) && np.renderValid;
     const bool ads = journalAds();
+    // F58: full-3P body mode: the FP body hidden and the body unclipped (the arm IK's gate keys).
+    const bool f58Full3P = mode == 2 && g_fpKeyOn.load(std::memory_order_relaxed) && g_unclipKeyOn.load(std::memory_order_relaxed);
+    // F59b: full 3P only: the head follow's body frame (nofoot::followPick). Live: this sample, fresh with the head census and the pov (it
+    // becomes the last good frame). Otherwise the AMC matrix (a fresh sample without the census: the last good joints carried into its frame)
+    // or the last good frame itself, never one older than 0.5 s; past that, none (the waits below, as before). The bend gets the sample as read.
+    const EyeSample sIn = s;
+    g_f59bSrc = nofoot::kFollowNone;
+    g_f59bAge = 0;
+    if (f58Full3P) {
+        const bool sFresh = s.valid && now - s.stamp <= static_cast<uint64_t>(align::kStaleMs);   // the wait's own staleness test
+        const bool liveOk = sFresh && s.headOk && s.povOk;
+        g_f59bSrc = nofoot::followPick(liveOk, sFresh, g_f59bHave, g_f59bLast.stamp, now, &g_f59bAge);
+        if (liveOk) {
+            g_f59bLast = s;
+            g_f59bHave = true;
+            g_f59bAge = 0;
+        } else if (g_f59bSrc == nofoot::kFollowMatrix) {
+            f59bFromMatrix(g_f59bLast, s);
+        } else if (g_f59bSrc == nofoot::kFollowLast) {
+            s = g_f59bLast;
+        }
+    } else {
+        g_f59bHave = false;
+    }
+    const bool f59bHeld = g_f59bSrc == nofoot::kFollowLast;   // the held frame is up to 0.5 s old by design: the 100 ms test is not applied
     // F55: the walking shift's locomotion gate: the body's horizontal speed under 0.35 m/s for 0.3 s (the F49 rule), fed each new body sample.
     if (s.valid && s.stamp != g_f55LocoStamp) {
         g_f55LocoStamp = s.stamp;
@@ -6365,12 +6437,13 @@ void alignTick(uint64_t now) noexcept {
     const char* wait = nullptr;
     if (!on) wait = "key off";
     else if (!nativeOnFootActive()) wait = "not native stereo on foot";
-    else if (!s.valid || now - s.stamp > static_cast<uint64_t>(align::kStaleMs)) wait = "the local third-person AMC sample is missing or over 100 ms old";
+    else if (!s.valid || (!f59bHeld && now - s.stamp > static_cast<uint64_t>(align::kStaleMs)))
+        wait = "the local third-person AMC sample is missing or over 100 ms old";
     else if (!s.headOk) wait = "no head joint (the neck census has no sample)";
     else if (!s.povOk) wait = "no pov (the neck census has no head sample)";
     else if ((mode == 1 || mode == 3) && !haveView) wait = "no list-B view (the P2 sample is missing or over 500 ms old)";
     else if ((mode == 1 || mode == 3) && !haveFrame) wait = "no render head from the runtime";
-    else if (ads) wait = "held: aiming down sights";
+    else if (ads && !f58Full3P) wait = "held: aiming down sights";   // F59b: full 3P keeps the head follow through ADS
     if (wait && on && now - a.waitLineMs >= 5000) {
         a.waitLineMs = now;
         Log::get().note("native on foot body align: %s: waiting (%s)", mode == 2 ? "body" : "view", wait);
@@ -6378,8 +6451,6 @@ void alignTick(uint64_t now) noexcept {
     if (mode == 2 && ads) g_f48Stand.step(now, 0.0, 0.0, true);   // F48: ADS is never a rest; the standing window starts again after it
     const int anchorMode = g_alignAnchorMode.load(std::memory_order_relaxed);   // F48: 0 neck, 1 clavicles, 2 pov
     const bool vertical = g_alignVertical.load(std::memory_order_relaxed);      // F50: off locks the body's height in body mode
-    // F58: full-3P body mode: the FP body hidden and the body unclipped (the arm IK's gate keys).
-    const bool f58Full3P = mode == 2 && g_fpKeyOn.load(std::memory_order_relaxed) && g_unclipKeyOn.load(std::memory_order_relaxed);
     g_f58FollowSrc = -1;
     static int lastVerticalNote = -1;  // F50: the vertical-off note, once per entry to body (and on a key change while in body)
     if (mode != 2) lastVerticalNote = -1;
@@ -6577,7 +6648,8 @@ void alignTick(uint64_t now) noexcept {
                 g_f55KindNow = kind;
             }
             const uint32_t f55CapBefore = g_f48Stand.hCaptures;
-            g_f48Stand.step(now, static_cast<double>(s.headBody[1]), srcB[1], false, f55Moving, g_f55Raw[0], g_f55Raw[2]);
+            // F59b: ads (only ever true here in full 3P, which no longer waits on it): ADS is never a rest.
+            g_f48Stand.step(now, static_cast<double>(s.headBody[1]), srcB[1], ads, f55Moving, g_f55Raw[0], g_f55Raw[2]);
             if (anchorMode == 2 && !shoulderAnchor && g_f48Stand.valid && vertical) {   // F50: vertical off: logged only
                 const double live[3] = {srcB[0], srcB[1], srcB[2]};
                 nofoot::standingApply(live, g_f48Stand.value, srcB);
@@ -6671,6 +6743,17 @@ void alignTick(uint64_t now) noexcept {
                                 psi * 180.0 / 3.14159265358979323846, errBody[0], errBody[1], errBody[2], err[0], err[1], err[2]);
             }
         }
+    }
+    // F59b: full 3P: a change between body-frame sources ramps the target from the last output over 0.25 s (none: zero, as every wait).
+    if (f58Full3P) {
+        const int src = wait ? nofoot::kFollowNone : g_f59bSrc;
+        double blended[3] = {};
+        g_f59bBlend.step(src, err, dt, blended);
+        for (size_t i = 0; i < 3; ++i) err[i] = blended[i];
+        if (src >= 0 && src < 4) ++g_f59bN[src];
+        if (src == nofoot::kFollowMatrix || src == nofoot::kFollowLast) g_f59bAgeMax = std::max(g_f59bAgeMax, g_f59bAge);
+    } else {
+        g_f59bBlend = nofoot::FollowBlend{};
     }
     const double errMag = std::sqrt(err[0] * err[0] + err[1] * err[1] + err[2] * err[2]);
 
@@ -7025,7 +7108,7 @@ void alignTick(uint64_t now) noexcept {
                             g_f37SignApplied * 100.0);
         }
     }
-    f58BendFrame(now, dt, mode, f58Full3P, ads, s);   // F58: the spine bend's target, ramp and 1 s line (with the head follow's source)
+    f58BendFrame(now, dt, mode, f58Full3P, ads, sIn);   // F58: the spine bend's target, ramp and 1 s line (with the head follow's source)
 }
 
 // The body hook's install (once, VR): refused with a line on any byte mismatch, the game untouched then.
@@ -9244,6 +9327,28 @@ void f58BendFrame(uint64_t now, double dt, int mode, bool full3P, bool ads, cons
     }
     g_bendWeight.store(g_f58BendBlend.w, std::memory_order_relaxed);
     g_bendRun.store(run, std::memory_order_relaxed);
+    // F59b: full 3P: the eye (the job camera, as the head follow and the bend's target) less the census neck moved by the published d, body
+    // axes of this sample, summed per frame. Whether the census's GetModelMatrix sees the hook's bent pose is not verified (the 1 s line says so).
+    if (full3P && active && sFresh && s.neckOk) {
+        double eye[3], neck[3], rows[9], r[3];
+        for (size_t j = 0; j < 3; ++j) {
+            eye[j] = static_cast<double>(s.cam[j]);
+            neck[j] = static_cast<double>(s.neck[j]) + g_alignBody.applied[j];
+        }
+        for (size_t k = 0; k < 9; ++k) rows[k] = static_cast<double>(s.rows[k]);
+        const double nrm = nofoot::eyeNeckBody(eye, neck, rows, r);
+        if (std::isfinite(nrm)) {
+            for (size_t i = 0; i < 3; ++i) g_f59bCenSum[i] += r[i];
+            g_f59bCenNorm += nrm;
+            ++g_f59bCenN;
+        }
+    } else if (!full3P && (g_f59bCenN || g_f59bAgeMax || g_f59bN[0] || g_f59bN[1] || g_f59bN[2] || g_f59bN[3])) {
+        for (size_t i = 0; i < 4; ++i) g_f59bN[i] = 0;   // outside full 3P nothing is counted; the next entry's first line starts clean
+        g_f59bAgeMax = 0;
+        for (size_t i = 0; i < 3; ++i) g_f59bCenSum[i] = 0.0;
+        g_f59bCenNorm = 0.0;
+        g_f59bCenN = 0;
+    }
     if (!(mode == 2 || run) || !active) return;
     if (g_f58LineMs != 0 && now - g_f58LineMs < 1000) return;
     g_f58LineMs = now;
@@ -9286,6 +9391,56 @@ void f58BendFrame(uint64_t now, double dt, int mode, bool full3P, bool ads, cons
                     static_cast<unsigned long long>(ref[kBendRefTarget]), static_cast<unsigned long long>(ref[kBendRefStale]),
                     static_cast<unsigned long long>(ref[kBendRefPov]), static_cast<unsigned long long>(ref[kBendRefDegenerate]),
                     static_cast<unsigned long long>(ref[kBendRefSingular]));
+    // F59b: full 3P: the head follow's source and the eye - neck residual after the corrections, once a second.
+    if (full3P) {
+        static const char* const kF59bSrc[4] = {"none", "job camera", "amc matrix", "last good frame"};
+        char cur[48];
+        if (g_f59bSrc == nofoot::kFollowLast)
+            std::snprintf(cur, sizeof(cur), "last good frame (%llu ms)", static_cast<unsigned long long>(g_f59bAge));
+        else
+            std::snprintf(cur, sizeof(cur), "%s", kF59bSrc[g_f59bSrc >= 0 && g_f59bSrc < 4 ? g_f59bSrc : 0]);
+        Log::get().note("native on foot head follow (F59b): head follow source: %s; this second (frames): job camera %u, amc matrix %u, last good "
+                        "frame %u (oldest %llu ms; never past %llu ms), none %u; source ramp %.2f (%.2f s); ADS %s (full 3P: ADS no longer holds "
+                        "the body target)",
+                        cur, g_f59bN[nofoot::kFollowLive], g_f59bN[nofoot::kFollowMatrix], g_f59bN[nofoot::kFollowLast],
+                        static_cast<unsigned long long>(g_f59bAgeMax), static_cast<unsigned long long>(nofoot::kFollowHoldMs),
+                        g_f59bN[nofoot::kFollowNone], g_f59bBlend.w, nofoot::kFollowBlendSec, ads ? "yes" : "no");
+        for (size_t i = 0; i < 4; ++i) g_f59bN[i] = 0;
+        g_f59bAgeMax = 0;
+        // The hook's post-correction neck: the bend's N1 (joint 34 at the applied angles; the square-up turns about 34's vertical, so it leaves
+        // 34 where the bend put it) plus d, against the eye, from the published (T - N1) means: eye - neck = (T - N1) - the rest offset.
+        if (b.n) {
+            const double split[3] = {b.res1B[0] / n, b.res1B[1] / n, b.res1B[2] / n};
+            double hk[3] = {}, rr[3] = {};
+            const double hn = nofoot::eyeNeckFromBend(split, 100.0, hk);
+            const double rn = std::sqrt(split[0] * split[0] + split[1] * split[1] + split[2] * split[2]);
+            rr[0] = split[2];
+            rr[1] = split[1];
+            rr[2] = split[0];
+            Log::get().note("native on foot head follow (F59b): eye - neck residual after the shift, the bend and the square-up (body axes right, up, "
+                            "forward; eye = the job camera): from the hook's post-bend neck 34 plus d: %.1f %.1f %.1f cm, norm %.1f cm (of the means; "
+                            "%llu bend calls, %llu written); less the rest offset (0, 15.5, 16.1): %.1f %.1f %.1f cm, norm %.1f cm",
+                            hk[0], hk[1], hk[2], hn, static_cast<unsigned long long>(b.n), static_cast<unsigned long long>(b.wrote), rr[0], rr[1],
+                            rr[2], rn);
+        } else {
+            Log::get().note("native on foot head follow (F59b): eye - neck residual after the corrections: the hook's post-correction neck is "
+                            "not available this second (no bend call measured it: the bend key off, refused, or not running); not inferred");
+        }
+        if (g_f59bCenN) {
+            const double cn = static_cast<double>(g_f59bCenN);
+            Log::get().note("native on foot head follow (F59b): eye - neck residual from the census neck (%s, through the AMC matrix) plus d, body "
+                            "axes right, up, forward: %.1f %.1f %.1f cm, norm mean %.1f cm over %u frames (GetModelMatrix, 10 Hz: whether it reads "
+                            "the hook's bent pose is not verified; equal to the hook's figure above means it does)",
+                            s.neckName ? s.neckName : "by name", 100.0 * g_f59bCenSum[0] / cn, 100.0 * g_f59bCenSum[1] / cn,
+                            100.0 * g_f59bCenSum[2] / cn, 100.0 * g_f59bCenNorm / cn, g_f59bCenN);
+        } else {
+            Log::get().note("native on foot head follow (F59b): eye - neck residual from the census neck: no frame this second (no fresh AMC "
+                            "sample with the neck)");
+        }
+        for (size_t i = 0; i < 3; ++i) g_f59bCenSum[i] = 0.0;
+        g_f59bCenNorm = 0.0;
+        g_f59bCenN = 0;
+    }
 }
 
 void installEyeProbeOnce() {

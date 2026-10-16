@@ -1527,6 +1527,67 @@ int wmain(int argc, wchar_t** argv) {
                       "F59: the ADS weight ramps in 0.15 s (half at 0.075 s) and out; the gate relaxes to 0.6..1.2 m with it; the sliders lerp and "
                       "clamp (NaN takes the default)");
             }
+            // F59b: the full-3P head follow's fallback (live; the AMC matrix or the last good frame up to 0.5 s; none past it), the ramp between
+            // sources (the change frame outputs the last output), the body-axes residual and the hook's (T - N1) to eye - neck.
+            {
+                uint64_t age = 7;
+                const int pLive = nf::followPick(true, true, true, 1000, 1400, &age);
+                const int pMat = nf::followPick(false, true, true, 1000, 1300, &age);
+                const int pLast = nf::followPick(false, false, true, 1000, 1300, &age);
+                const uint64_t age300 = age;
+                const int pEdge = nf::followPick(false, false, true, 1000, 1500, &age);
+                const int pPast = nf::followPick(false, true, true, 1000, 1501, &age);
+                const int pNone = nf::followPick(false, true, false, 0, 1300, &age);
+                const int pAhead = nf::followPick(false, false, true, 2000, 1500, &age);
+                check(pLive == nf::kFollowLive && pMat == nf::kFollowMatrix && pLast == nf::kFollowLast && age300 == 300 &&
+                          pEdge == nf::kFollowLast && pPast == nf::kFollowNone && pNone == nf::kFollowNone && pAhead == nf::kFollowLast &&
+                          age == 0 && nf::kFollowHoldMs == 500,
+                      "F59b: the head follow falls back to the AMC matrix (a fresh sample) or the last good frame (none fresh) up to 0.5 s old, "
+                      "never past it; live wins; no last frame is none");
+                nf::FollowBlend fb;
+                const double t1[3] = {0.1, 0.0, -0.04}, t2[3] = {0.3, 0.0, 0.04}, zero3[3] = {0.0, 0.0, 0.0};
+                double o0[3], o1[3], o2[3], o3[3], o4[3], o5[3];
+                fb.step(nf::kFollowLive, t1, 0.125, o0);    // from none: no ramp
+                fb.step(nf::kFollowLast, t2, 0.125, o1);    // the change frame: the last output
+                fb.step(nf::kFollowLast, t2, 0.125, o2);    // half way
+                fb.step(nf::kFollowLast, t2, 0.125, o3);    // there
+                fb.step(nf::kFollowNone, t2, 0.125, o4);    // to none: no ramp (the caller passes zero then)
+                fb.step(nf::kFollowLive, zero3, 0.125, o5);
+                check(o0[0] == 0.1 && o0[2] == -0.04 && o1[0] == 0.1 && o1[2] == -0.04 && std::fabs(o2[0] - 0.2) < 1e-12 && std::fabs(o2[2]) < 1e-12 &&
+                          o3[0] == 0.3 && o3[2] == 0.04 && o4[0] == 0.3 && o5[0] == 0.0 && nf::kFollowBlendSec == 0.25,
+                      "F59b: a source change ramps from the last output (no jump on the change frame) to the new source over 0.25 s; from or to "
+                      "none is immediate");
+                // A yaw of 90 deg: right (0,0,-1), up (0,1,0), forward (1,0,0).
+                const double rowsY[9] = {0.0, 0.0, -1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0};
+                const double eyeW[3] = {5.161, 1.855, 2.98}, neckW[3] = {5.0, 1.7, 3.0};
+                double rb[3];
+                const double rnorm = nf::eyeNeckBody(eyeW, neckW, rowsY, rb);
+                const float pA[3] = {1.0f, 2.0f, 3.0f}, oA[3] = {0.0f, 0.0f, 0.0f}, oB[3] = {10.0f, 0.0f, 5.0f};
+                const float rA[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1}, rB[9] = {0, 0, -1, 0, 1, 0, 1, 0, 0};
+                float q[3];
+                nf::carryBody(pA, oA, rA, oB, rB, q);
+                // The hook's figure: T = (eye - d) + rest (body = world here), N1 the bent neck; eye - (N1 + d) from (T - N1) equals the direct one.
+                const double I9[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+                const double eye[3] = {0.05, 1.70, 0.30}, dd[3] = {0.01, 0.0, -0.02}, N1[3] = {0.03, 1.52, 0.10};
+                double T[3], split[3], viaHook[3], direct[3], neckD[3];
+                for (int i = 0; i < 3; ++i) {
+                    T[i] = eye[i] - dd[i] + nf::kNeckRestOffset[i];
+                    neckD[i] = N1[i] + dd[i];
+                }
+                nf::bendResidualSplit(T, N1, split);
+                const double hn = nf::eyeNeckFromBend(split, 1.0, viaHook);
+                const double dn = nf::eyeNeckBody(eye, neckD, I9, direct);
+                const double zs[3] = {0.0, 0.0, 0.0};
+                double atRest[3];
+                nf::eyeNeckFromBend(zs, 100.0, atRest);
+                check(std::fabs(rb[0] - 0.02) < 1e-9 && std::fabs(rb[1] - 0.155) < 1e-9 && std::fabs(rb[2] - 0.161) < 1e-9 &&
+                          std::fabs(rnorm - std::sqrt(0.02 * 0.02 + 0.155 * 0.155 + 0.161 * 0.161)) < 1e-9 && std::fabs(q[0] - 13.0f) < 1e-5f &&
+                          std::fabs(q[1] - 2.0f) < 1e-5f && std::fabs(q[2] - 4.0f) < 1e-5f && std::fabs(viaHook[0] - direct[0]) < 1e-12 &&
+                          std::fabs(viaHook[1] - direct[1]) < 1e-12 && std::fabs(viaHook[2] - direct[2]) < 1e-12 && std::fabs(hn - dn) < 1e-12 &&
+                          atRest[0] == 0.0 && std::fabs(atRest[1] - 15.5) < 1e-9 && std::fabs(atRest[2] - 16.1) < 1e-9,
+                      "F59b: the residual is rows . (eye - neck) in body axes (right, up, forward); a joint carried between AMC frames keeps its body "
+                      "coordinates; the hook's (T - N1) less the rest offset equals eye - (N1 + d)");
+            }
             // The shift rule: a record at the AMC origin moves by d once; a second pass over it leaves it alone; a record elsewhere never moves.
             const float origin[3] = {10.0f, 2.0f, -3.0f}, d[3] = {0.0f, 0.231f, 0.0f};
             float rec[3] = {10.0f, 2.0f, -3.0f}, other[3] = {10.5f, 2.0f, -3.0f};
