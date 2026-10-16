@@ -15,8 +15,7 @@ namespace edvr::plugins {
 
 // The ini key for a setting, as the edit path (stepPluginSetting) writes it. The addon's identity (its DLL file stem, the same
 // one that tags its rows and keys its approval in [addons]) is part of the key, so two addons that both register
-// Tools / enabled keep separate saved values. A setting registered with no owner (the bare edvrRegisterPluginSetting export)
-// is saved under "unowned".
+// Tools / enabled keep separate saved values. A setting registered with no owner is saved under "unowned".
 //
 // The whole key is lowercased, as Config::parse lowercases every stored name (section + "." + key) and Config::set does: a key the
 // SDK lets an addon spell "Enabled" is saved, found and restored as "enabled". Config's getters look a name up exactly, so write and

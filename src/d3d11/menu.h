@@ -110,5 +110,3 @@ void menuSetPluginRowsHidden(bool hidden);
 
 }  // namespace edvr
 
-extern "C" __declspec(dllexport) int WINAPI edvrRegisterPluginSetting(const EdvrPluginSettingDef* setting);
-

@@ -5054,10 +5054,6 @@ void menuTick(ID3D11Device* dev) {
     }
 }
 
-extern "C" __declspec(dllexport) int WINAPI edvrRegisterPluginSetting(const EdvrPluginSettingDef* setting) {
-    return menuRegisterPluginSetting("", setting);
-}
-
 void menuRemovePluginSettings(const char* ownerId) {
     // Any thread, usually the plugin manager's (a fault on the OpenXR owner thread, a failed initialise). The rows go
     // inert here, under the settings mutex, so nothing calls into the addon's DLL again; the erase and the page rebuild

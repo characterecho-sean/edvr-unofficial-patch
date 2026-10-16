@@ -402,8 +402,6 @@ python "tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --extra-export edvrPublishNativeRenderSizing ^
     --extra-export edvrQueryNativeRenderSizing ^
     --extra-export edvrGpuFrameEvent ^
-    --extra-export edvrRegisterPluginSetting ^
-    --extra-export edvrSetPluginInputBlock ^
     --extra-export edvrPluginDispatchUpdate ^
     --extra-export edvrPluginDispatchRenderEye ^
     --extra-export edvrPluginDispatchFilterInput ^

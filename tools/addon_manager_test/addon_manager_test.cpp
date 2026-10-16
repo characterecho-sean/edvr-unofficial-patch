@@ -18,11 +18,6 @@
 #include "../rig_graphics_mode.h"
 
 // Stubs for d3d11 and input gate functions required by plugin_manager
-extern "C" __declspec(dllexport) int WINAPI edvrRegisterPluginSetting(const EdvrPluginSettingDef* setting) {
-    (void)setting;
-    return 0;
-}
-
 // The F8 menu's settings registry, reduced to what the manager's ownership contract needs.
 struct FakeSetting { std::string owner; std::string key; };
 static std::vector<FakeSetting> g_fakeSettings;

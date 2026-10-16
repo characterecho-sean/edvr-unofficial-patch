@@ -1792,10 +1792,6 @@ void inputGatePluginLeaseTick() {
     if (g_pluginLease.fetch_sub(1, std::memory_order_relaxed) <= 1) releasePluginBlock("lease expired", true);
 }
 
-extern "C" __declspec(dllexport) void WINAPI edvrSetPluginInputBlock(int block) {
-    inputGateSetPluginBlock(block != 0);
-}
-
 void inputGateSetPadPrivate(bool priv, int index) {
     AcquireSRWLockExclusive(&g_padLock);
     g_padRequested = priv && index >= 0 && index < 4 &&
