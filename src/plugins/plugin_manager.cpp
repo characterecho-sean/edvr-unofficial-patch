@@ -180,6 +180,7 @@ bool PluginManager::initialize(const std::wstring& rootDir) {
             DWORD attrs = GetFileAttributesW(subDll.c_str());
             if (attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_DIRECTORY)) {
                 CandidatePlugin cand;
+                cand.id = m_nextCandidateId++;
                 cand.path = subDll;
                 cand.stem = sanitizeStem(findData.cFileName);
                 cand.sha256 = calculateSha256(subDll);
@@ -191,6 +192,7 @@ bool PluginManager::initialize(const std::wstring& rootDir) {
                 std::wstring flatDll = pluginsDir + L"\\" + filename;
                 std::wstring baseStem = filename.substr(0, filename.size() - 4);
                 CandidatePlugin cand;
+                cand.id = m_nextCandidateId++;
                 cand.path = flatDll;
                 cand.stem = sanitizeStem(baseStem);
                 cand.sha256 = calculateSha256(flatDll);
@@ -362,8 +364,35 @@ bool PluginManager::approvePlugin(const std::string& stem, const std::string& sh
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
     for (auto& cand : m_candidates) {
         if (cand.stem == stem && cand.sha256 == sha256) {
-            cand.approved = true;
-            return loadPlugin(cand, sha256);
+            return approveCandidate(cand.id).loaded;
+        }
+    }
+    return false;
+}
+
+ApprovalResult PluginManager::approveCandidate(uint32_t id) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    ApprovalResult r;
+    for (auto& cand : m_candidates) {
+        if (cand.id != id) continue;
+        if (cand.approved) return r;   // already approved: a second activation of a stale row
+        const std::string approvedSha = cand.sha256;
+        cand.approved = true;
+        r.loaded = loadPlugin(cand, approvedSha);
+        r.applied = cand.approved;     // loadPlugin clears it when the file no longer matches the approved hash
+        r.stem = cand.stem;
+        r.sha256 = approvedSha;
+        return r;
+    }
+    return r;
+}
+
+bool PluginManager::candidateById(uint32_t id, CandidatePlugin* out) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    for (const auto& cand : m_candidates) {
+        if (cand.id == id) {
+            if (out) *out = cand;
+            return true;
         }
     }
     return false;

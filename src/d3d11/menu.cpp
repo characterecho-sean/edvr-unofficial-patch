@@ -107,13 +107,14 @@ constexpr uint64_t kMonitorRefreshMs = 250;
 // R twice within this long resets a row to its shipped value.
 constexpr uint64_t kResetArmMs = 3000;
 
-enum class EntryKind { Setting, Action, Heading, PluginSetting };
+enum class EntryKind { Setting, Action, Heading, PluginSetting, Approval };
 
 struct Entry {
     EntryKind   kind = EntryKind::Setting;
     int         def = -1;        // index into kMenuRows for Setting
     int         action = -1;     // index into g_actions for Action
     int         pluginSetting = -1; // index into g_pluginSettings for PluginSetting
+    uint32_t    candidateId = 0;    // plugin manager candidate id for Approval; looked up when drawn and when activated
     const char* text = "";       // for Heading
 };
 
@@ -1538,6 +1539,24 @@ void stepPluginSetting(int psIdx, int dir) {
     g_s.contentDirty = true;
 }
 
+void buildPages();
+
+// What activating an approval row does. The row holds a candidate id; a stale or already approved id
+// does nothing, and the pages rebuild either way so no approval row outlives its candidate.
+void approveAddonCandidate(uint32_t id) {
+    plugins::ApprovalResult r = plugins::PluginManager::instance().approveCandidate(id);
+    if (r.applied) {
+        WriteJob job;
+        job.def = -1;
+        job.dotted = "addons." + r.stem;
+        job.value = r.sha256;
+        enqueueWrite(job);
+        Log::get().note("menu: approved addon '%s' (hash %s) to %s",
+                        r.stem.c_str(), r.sha256.c_str(), Config::get().iniName());
+    }
+    buildPages();
+}
+
 void buildPluginsPage(Page& p) {
     std::lock_guard<std::recursive_mutex> lock(g_pluginSettingsMutex);
     std::map<std::string, std::vector<int>> groups;
@@ -1573,30 +1592,9 @@ void buildPluginsPage(Page& p) {
         p.entries.push_back(h);
 
         for (const auto& c : unapproved) {
-            Action a;
-            a.label = "[Approve] " + c.stem;
-            a.hint = "SHA-256: " + c.sha256 + ". Select to approve and save to " + Config::get().iniName() + " (requires restart).";
-            std::string stemCopy = c.stem;
-            std::string shaCopy = c.sha256;
-            a.fn = [](void* ctx) {
-                auto* pair = static_cast<std::pair<std::string, std::string>*>(ctx);
-                plugins::PluginManager::instance().approvePlugin(pair->first, pair->second);
-                WriteJob job;
-                job.def = -1;
-                job.dotted = "addons." + pair->first;
-                job.value = pair->second;
-                enqueueWrite(job);
-                Log::get().note("menu: approved addon '%s' (hash %s) to %s",
-                                pair->first.c_str(), pair->second.c_str(), Config::get().iniName());
-                delete pair;
-            };
-            a.user = new std::pair<std::string, std::string>(stemCopy, shaCopy);
-            int actionIdx = static_cast<int>(g_actions.size());
-            g_actions.push_back(a);
-
             Entry e;
-            e.kind = EntryKind::Action;
-            e.action = actionIdx;
+            e.kind = EntryKind::Approval;
+            e.candidateId = c.id;
             p.entries.push_back(e);
         }
     }
@@ -2248,6 +2246,23 @@ void buildContent(MenuContent& c) {
                 strncpy(l.right, "run", sizeof(l.right) - 1);
                 l.style = hi ? kMenuRowHi : kMenuRow;
                 if (hi) snprintf(c.hint, sizeof(c.hint), "%s", a.hint.c_str());
+                continue;
+            }
+            if (e.kind == EntryKind::Approval) {
+                plugins::CandidatePlugin cand;
+                if (plugins::PluginManager::instance().candidateById(e.candidateId, &cand) && !cand.approved) {
+                    std::string label = "[Approve] " + cand.stem;
+                    strncpy(l.left, label.c_str(), sizeof(l.left) - 1);
+                    strncpy(l.right, "approve", sizeof(l.right) - 1);
+                    l.style = hi ? kMenuRowHi : kMenuRow;
+                    if (hi) {
+                        snprintf(c.hint, sizeof(c.hint), "SHA-256: %s. Select to approve and save to %s (requires restart).",
+                                 cand.sha256.c_str(), Config::get().iniName());
+                    }
+                } else {
+                    strncpy(l.left, "(already handled)", sizeof(l.left) - 1);   // a frame between the approval and the rebuild
+                    l.style = kMenuRow;
+                }
                 continue;
             }
             if (e.kind == EntryKind::PluginSetting) {
@@ -2903,6 +2918,13 @@ void activateEntry() {
     Page& p = s.pages[s.page];
     if (p.status || p.entries.empty()) return;
     const Entry& e = p.entries[p.highlight];
+    if (e.kind == EntryKind::Approval) {
+        const uint32_t id = e.candidateId;   // copied: the rebuild below frees the entry
+        approveAddonCandidate(id);
+        s.lastWrite = "approved an addon";
+        s.contentDirty = true;
+        return;
+    }
     if (e.kind == EntryKind::Action) {
         const Action& a = g_actions[e.action];
         Log::get().note("menu: running \"%s\".", a.label.c_str());

@@ -292,6 +292,50 @@ int main(int argc, char** argv) {
         std::filesystem::remove_all(sb, ec9);
     }
 
+    // Case 10 (PR #92 review): approving the same candidate twice is a no-op the second time.
+    {
+        auto sb = makeSandbox(L"twice");
+        dropFixture(sb, L"", L"plain.dll");
+        pm.initialize(sb.wstring());
+        auto* cand = findCandidate(pm, "plain");
+        check(cand != nullptr, "twice: candidate discovered");
+        std::string sha = cand ? cand->sha256 : "";
+        check(pm.approvePlugin("plain", sha), "twice: first approval loads the addon");
+        pm.approvePlugin("plain", sha);
+        check(pm.activePluginCount() == 1, "twice: a second approval of the same candidate loads nothing more");
+        // The menu row holds a candidate id and nothing else.
+        uint32_t id = cand ? cand->id : 0;
+        check(id != 0, "twice: the candidate has a stable id");
+        edvr::plugins::ApprovalResult again = pm.approveCandidate(id);
+        check(!again.applied && !again.loaded, "twice: activating the approved candidate's row again is a no-op");
+        edvr::plugins::ApprovalResult stale = pm.approveCandidate(987654u);
+        check(!stale.applied, "twice: an id that names no candidate is a no-op");
+        check(pm.activePluginCount() == 1, "twice: still exactly one active addon after the repeated activations");
+        pm.shutdown();
+        std::error_code ec10;
+        std::filesystem::remove_all(sb, ec10);
+    }
+
+    // Case 11: by-id approval, the entry point the menu row calls.
+    {
+        auto sb = makeSandbox(L"byid");
+        dropFixture(sb, L"", L"plain.dll");
+        pm.initialize(sb.wstring());
+        auto* cand = findCandidate(pm, "plain");
+        uint32_t id = cand ? cand->id : 0;
+        std::string sha = cand ? cand->sha256 : "";
+        edvr::plugins::ApprovalResult first = pm.approveCandidate(id);
+        check(first.applied && first.loaded && first.stem == "plain" && first.sha256 == sha,
+              "byid: the first activation approves and loads, and reports the stem and hash to record");
+        edvr::plugins::CandidatePlugin copy;
+        check(pm.candidateById(id, &copy) && copy.approved, "byid: the candidate now reads approved (its row is gone on rebuild)");
+        check(!pm.candidateById(987654u, &copy), "byid: an unknown id is not found");
+        check(pm.activePluginCount() == 1, "byid: the addon is active exactly once");
+        pm.shutdown();
+        std::error_code ec11;
+        std::filesystem::remove_all(sb, ec11);
+    }
+
     // Cleanup sandbox
     std::error_code ec;
     std::filesystem::remove_all(sandbox, ec);
