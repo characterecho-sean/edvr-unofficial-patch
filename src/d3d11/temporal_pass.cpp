@@ -1917,6 +1917,168 @@ void writeMarkerCrops(ID3D11DeviceContext* ctx, const std::wstring& dir) {
     }
 }
 
+// F59 (TEMPORARY, with fix.native_on_foot_marker_probe): the waypoint dump, measure only. The eye dump key, while the marker probe is on,
+// also takes kMkFrames consecutive frames of BOTH eyes: per frame and eye a kEyeMarkerCrop square about the marker's projected position
+// (the probe's ndc_marker, the drawn marker read back 2..3 frames late, when it is under 500 ms old; else P through the eye's scene rows),
+// of the final eye after the interface layer (temporalPassCaptureFinalEye) and of the same frame before the layer's composite
+// (temporalPassMarkerPre, native_sharpen.cpp), both crops about the same ndc. F53's single crop missed the marker. Files:
+// eye_<stamp>_mk_eye<e>_f<kk>.bmp, eye_<stamp>_mk_pre_eye<e>_f<kk>.bmp and eye_<stamp>_mk.csv (the centre's source and both ndc values per
+// crop). Copies only: nothing drawn, bound or submitted changes. Render thread only.
+constexpr int kMkFrames = 16;
+struct MkShot {
+    ID3D11Texture2D* st = nullptr;
+    bool tried = false, taken = false;
+    uint32_t box[4] = {};     // the crop's left, top, width, height in the texture
+    uint32_t eyeWH[2] = {};   // the eye's region size the ndc maps onto
+};
+struct MkFrame {
+    uint64_t seq = 0;
+    bool centred[2] = {};
+    int src[2] = {};                                  // 0 none (no fresh marker), 1 the drawn marker (ndc_marker), 2 P through the scene rows
+    float ndc[2][2] = {}, ndcP[2][2] = {}, ndcDrawn[2][2] = {};
+    int64_t ageP[2] = {-1, -1}, ageDrawn[2] = {-1, -1};   // ms; -1 none
+    MkShot post[2], pre[2];
+};
+MkFrame g_mk[kMkFrames];
+int g_mkCount = 0;
+bool g_mkArmed = false;
+uint64_t g_mkArmMs = 0;
+uint32_t g_mkNoMarker = 0, g_mkStageFail = 0;
+wchar_t g_mkStamp[16] = L"";
+void mkRelease() {
+    for (MkFrame& f : g_mk) {
+        for (int e = 0; e < 2; ++e) {
+            if (f.post[e].st) f.post[e].st->Release();
+            if (f.pre[e].st) f.pre[e].st->Release();
+        }
+        f = MkFrame{};
+    }
+    g_mkCount = 0;
+}
+void mkArm(const wchar_t* stamp) {
+    if (g_mkArmed || !nativeOnFootMarkerProbeLive()) return;
+    mkRelease();
+    g_mkArmed = true;
+    g_mkArmMs = GetTickCount64();
+    g_mkNoMarker = g_mkStageFail = 0;
+    wcscpy_s(g_mkStamp, stamp);
+    Log::get().note("eye capture (F59): waypoint dump armed (run %ls): the next %d frames of both eyes, a %ux%u crop about the marker per frame "
+                    "and eye, after the interface layer and before its composite (pre_)", g_mkStamp, kMkFrames, kEyeMarkerCrop, kEyeMarkerCrop);
+}
+void mkWrite(ID3D11DeviceContext* ctx, const char* why) {
+    g_mkArmed = false;
+    const std::wstring dir = Log::get().dir() + L"\\eyes";
+    if (!g_eyeDumpDirMade) {
+        g_eyeDumpDirMade = true;
+        CreateDirectoryW(dir.c_str(), nullptr);
+    }
+    int wrote = 0, failed = 0, prePosts = 0;
+    for (int k = 0; k < g_mkCount; ++k)
+        for (int e = 0; e < 2; ++e)
+            for (int pre = 0; pre < 2; ++pre) {
+                MkShot& s = pre ? g_mk[k].pre[e] : g_mk[k].post[e];
+                if (!s.taken || !s.st || !ctx) continue;
+                wchar_t path[MAX_PATH];
+                _snwprintf_s(path, MAX_PATH, _TRUNCATE, L"%s\\eye_%s_mk_%seye%d_f%02d.bmp", dir.c_str(), g_mkStamp, pre ? L"pre_" : L"", e, k);
+                D3D11_TEXTURE2D_DESC sd{};
+                s.st->GetDesc(&sd);
+                if (writeEyeBmp(ctx, s.st, sd, e, path)) {
+                    ++wrote;
+                    if (pre) ++prePosts;
+                } else {
+                    s.taken = false;
+                    ++failed;
+                }
+            }
+    wchar_t csv[MAX_PATH];
+    _snwprintf_s(csv, MAX_PATH, _TRUNCATE, L"%s\\eye_%s_mk.csv", dir.c_str(), g_mkStamp);
+    FILE* f = nullptr;
+    _wfopen_s(&f, csv, L"wb");
+    if (f) {
+        fprintf(f, "frame,sequence,eye,image,written,centre_src,ndc_x,ndc_y,ndcP_x,ndcP_y,ageP_ms,ndc_marker_x,ndc_marker_y,ndc_marker_age_ms,"
+                   "box_left,box_top,box_w,box_h,eye_w,eye_h\n");
+        for (int k = 0; k < g_mkCount; ++k)
+            for (int e = 0; e < 2; ++e)
+                for (int pre = 0; pre < 2; ++pre) {
+                    const MkFrame& m = g_mk[k];
+                    const MkShot& s = pre ? m.pre[e] : m.post[e];
+                    static const char* const kSrc[3] = {"none", "ndc_marker", "P"};
+                    fprintf(f, "%d,%llu,%d,%s,%d,%s,%.5f,%.5f,%.5f,%.5f,%lld,%.5f,%.5f,%lld,%u,%u,%u,%u,%u,%u\n", k,
+                            static_cast<unsigned long long>(m.seq), e, pre ? "pre" : "post", s.taken ? 1 : 0, kSrc[m.src[e] >= 0 && m.src[e] < 3 ? m.src[e] : 0],
+                            static_cast<double>(m.ndc[e][0]), static_cast<double>(m.ndc[e][1]), static_cast<double>(m.ndcP[e][0]),
+                            static_cast<double>(m.ndcP[e][1]), static_cast<long long>(m.ageP[e]), static_cast<double>(m.ndcDrawn[e][0]),
+                            static_cast<double>(m.ndcDrawn[e][1]), static_cast<long long>(m.ageDrawn[e]), s.box[0], s.box[1], s.box[2], s.box[3],
+                            s.eyeWH[0], s.eyeWH[1]);
+                }
+        fclose(f);
+    }
+    Log::get().note("eye capture (F59): waypoint dump %ls (%s): %d frames, %d crops written (%d before the interface layer, pre_), %d failed; "
+                    "%u crops skipped with no fresh marker projection, %u staging failures; eye_%ls_mk.csv %s",
+                    g_mkStamp, why, g_mkCount, wrote, prePosts, failed, g_mkNoMarker, g_mkStageFail, g_mkStamp, f ? "written" : "NOT written");
+    mkRelease();
+}
+// One capture (pre: before the interface layer's composite; else the final eye). The frame's slot by its sequence; the eye's centre chosen
+// at its first capture this frame and kept for the other. Writes the run when the last frame's final right eye was tried, when a 17th
+// sequence arrives, or 3 s after arming.
+void mkCapture(ID3D11DeviceContext* ctx, uint64_t seq, uint32_t eye, ID3D11Texture2D* tex, const uint32_t region[4], bool flipU, bool flipV,
+               bool pre) {
+    if (!g_mkArmed || !ctx || !tex || !region || eye > 1) return;
+    const uint64_t now = GetTickCount64();
+    if (now - g_mkArmMs > 3000) return mkWrite(ctx, "3 s after arming");
+    int k = -1;
+    for (int i = 0; i < g_mkCount; ++i)
+        if (g_mk[i].seq == seq) k = i;
+    if (k < 0) {
+        if (g_mkCount >= kMkFrames) return mkWrite(ctx, "the frames are taken");
+        k = g_mkCount++;
+        g_mk[k].seq = seq;
+    }
+    MkFrame& m = g_mk[k];
+    MkShot& s = pre ? m.pre[eye] : m.post[eye];
+    if (s.tried) return;
+    s.tried = true;
+    if (!m.centred[eye]) {
+        m.centred[eye] = true;
+        const MarkerCropNdc& c = g_markerCropNdc[eye];
+        const uint64_t pMs = c.pMs.load(std::memory_order_relaxed), dMs = c.drawnMs.load(std::memory_order_relaxed);
+        m.ageP[eye] = pMs && now >= pMs ? static_cast<int64_t>(now - pMs) : -1;
+        m.ageDrawn[eye] = dMs && now >= dMs ? static_cast<int64_t>(now - dMs) : -1;
+        m.ndcP[eye][0] = c.p[0].load(std::memory_order_relaxed);
+        m.ndcP[eye][1] = c.p[1].load(std::memory_order_relaxed);
+        m.ndcDrawn[eye][0] = c.drawn[0].load(std::memory_order_relaxed);
+        m.ndcDrawn[eye][1] = c.drawn[1].load(std::memory_order_relaxed);
+        if (m.ageDrawn[eye] >= 0 && m.ageDrawn[eye] <= 500) {
+            m.src[eye] = 1;
+            m.ndc[eye][0] = m.ndcDrawn[eye][0];
+            m.ndc[eye][1] = m.ndcDrawn[eye][1];
+        } else if (m.ageP[eye] >= 0 && m.ageP[eye] <= 500) {
+            m.src[eye] = 2;
+            m.ndc[eye][0] = m.ndcP[eye][0];
+            m.ndc[eye][1] = m.ndcP[eye][1];
+        }
+    }
+    if (m.src[eye] == 0) {
+        ++g_mkNoMarker;
+    } else {
+        const uint32_t w = region[2] - region[0], h = region[3] - region[1];
+        const double nx = static_cast<double>(m.ndc[eye][0]), ny = static_cast<double>(m.ndc[eye][1]);
+        const double centre[2] = {region[0] + (flipU ? (1.0 - nx) : (nx + 1.0)) * 0.5 * w, region[1] + (flipV ? (1.0 + ny) : (1.0 - ny)) * 0.5 * h};
+        uint32_t cw = 0, ch = 0, bx = 0, by = 0;
+        if (stageEyeCrop(ctx, tex, &s.st, &cw, &ch, region, kEyeMarkerCrop, kEyeMarkerCrop, &bx, &by, centre)) {
+            s.taken = true;
+            s.box[0] = bx;
+            s.box[1] = by;
+            s.box[2] = cw;
+            s.box[3] = ch;
+            s.eyeWH[0] = w;
+            s.eyeWH[1] = h;
+        } else {
+            ++g_mkStageFail;
+        }
+    }
+    if (!pre && eye == 1 && k == kMkFrames - 1) mkWrite(ctx, "complete");
+}
+
 void eyeOutputCropSize(int k, ID3D11Texture2D* output, uint32_t* wantW, uint32_t* wantH) {
     *wantW = kEyeCrop;
     *wantH = kEyeCrop;
@@ -4806,8 +4968,33 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
 
 }  // namespace
 
+// F59: the waypoint dump's pre-composite crop (native_sharpen.cpp, before the interface layer's composite). Copies only.
+void temporalPassMarkerPre(uint64_t sequence, uint32_t eye, ID3D11Texture2D* texture, const uint32_t region[4], bool flipU, bool flipV) {
+    if (!g_mkArmed || !texture || eye > 1) return;
+    ID3D11Device* device = nullptr;
+    ID3D11DeviceContext* ctx = nullptr;
+    guarded("eye capture/waypoint dump pre", [&] {
+        texture->GetDevice(&device);
+        if (device) device->GetImmediateContext(&ctx);
+        if (ctx) mkCapture(ctx, sequence, eye, texture, region, flipU, flipV, true);
+    });
+    if (ctx) ctx->Release();
+    if (device) device->Release();
+}
+
 void temporalPassCaptureFinalEye(uint64_t sequence,uint32_t eye,ID3D11Texture2D* texture,
                                  const uint32_t region[4],bool composite,bool flipU,bool flipV) {
+    if (g_mkArmed && texture && eye <= 1) {   // F59: the waypoint dump's final-eye crop (marker probe on, armed by the eye dump key)
+        ID3D11Device* device = nullptr;
+        ID3D11DeviceContext* ctx = nullptr;
+        guarded("eye capture/waypoint dump", [&] {
+            texture->GetDevice(&device);
+            if (device) device->GetImmediateContext(&ctx);
+            if (ctx) mkCapture(ctx, sequence, eye, texture, region, flipU, flipV, false);
+        });
+        if (ctx) ctx->Release();
+        if (device) device->Release();
+    }
     if(!g_eyeFinalRun.armed||eye>1)return;
     const uint32_t epoch=g_eyeFinalClock.epoch;
     const int index=g_eyeFinalRun.find(epoch);
@@ -6112,6 +6299,7 @@ static void beginEyeRun() {
     // The pixel probe rides the same eye run, for the same reason: no
     // second keypress, and its one frame is this run's first.
     pixelProbeArm();
+    mkArm(g_eyeRunStamp);   // F59: the waypoint dump (marker probe on only)
 }
 
 void temporalPassShutdown() {

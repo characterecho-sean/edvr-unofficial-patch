@@ -123,6 +123,10 @@ void temporalPassArmEyeDump();
 // the runtime's menu. region is the actual returned texture's unflipped bounds.
 void temporalPassCaptureFinalEye(uint64_t sequence, uint32_t eye, ID3D11Texture2D* texture,
                                  const uint32_t region[4], bool composite, bool flipU, bool flipV);
+// F59 (TEMPORARY, the native on-foot marker arc): the waypoint dump. With fix.native_on_foot_marker_probe on, the eye dump key also takes 16
+// consecutive frames of BOTH eyes, a 512x512 crop about the marker's projected position for that frame and eye, of the final eye (above)
+// and of the same frame before the interface layer's composite (this call, from native_sharpen.cpp). Copies only; render thread.
+void temporalPassMarkerPre(uint64_t sequence, uint32_t eye, ID3D11Texture2D* texture, const uint32_t region[4], bool flipU, bool flipV);
 
 // The pass wants the scanner-chrome tracker (vscreen.cpp, beginPanelOverride)
 // running whenever it is on: the FSS's interface takes the head's path

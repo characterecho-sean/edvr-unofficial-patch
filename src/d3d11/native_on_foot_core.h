@@ -846,7 +846,7 @@ constexpr float kIkCapPerCallM = 0.05f;                       // the applied han
 constexpr float kIkNudgeM = 0.25f;                            // nudge: the left hand group rises this much (model +y)
 constexpr uint64_t kIkFreshMs = 100;                          // the FP snapshot and G older than this refuse the call
 constexpr uint32_t kIkGroupMax = 64;                          // the member cap of each group (gU, gF, gH)
-constexpr double kIkElbowOutM = 0.10;                         // the swivel clamp: the elbow at least this far out (model x, the arm's side)
+constexpr double kIkElbowOutM = 0.06;                         // the swivel clamp: the elbow at least this far out of its OWN shoulder (F59; model x)
 constexpr double kIkPi = 3.14159265358979323846;
 
 // The per-arm distance gate: 1 under kIkGateFullM, linear to 0 at kIkGateZeroM, 0 beyond (and for NaN).
@@ -1093,14 +1093,16 @@ inline IkTwoBone ikTwoBone(const double S[3], const double T[3], double l1, doub
 }
 // The swivel clamp: the elbow at least kIkElbowOutM out on the arm's side (out = +1 or -1: the sign of the clavicle's model x) and not above
 // the shoulder (E.y <= S.y). theta when it holds; else the nearest angle (5 degree steps) that holds; else the one with the least violation.
-// F57: the elbow-out distance is the "Elbow out" slider's (fix.native_on_foot_arm_elbow_out_cm, default 10 cm = kIkElbowOutM).
+// F57: the elbow-out distance is the "Elbow out" slider's (fix.native_on_foot_arm_elbow_out_cm). F59: measured from the arm's OWN shoulder,
+// out x (E.x - S.x) >= elbowOutM (default 6 cm), not from the midline (F58's flight: the left clamp fired 54 to 100% against the midline).
+inline double ikElbowOutOf(const double E[3], const double S[3], double out) noexcept { return out * (E[0] - S[0]); }
 inline double ikSwivelClamp(const IkTwoBone& t, double theta, double out, bool* clamped, double elbowOutM = kIkElbowOutM) noexcept {
     if (clamped) *clamped = false;
     if (!t.ok || !(t.h > 1e-6)) return theta;
     const auto violation = [&](double th) noexcept {
         double E[3];
         t.elbowAt(th, E);
-        const double vo = elbowOutM - out * E[0], vy = E[1] - t.S[1];
+        const double vo = elbowOutM - ikElbowOutOf(E, t.S, out), vy = E[1] - t.S[1];
         return (vo > 0.0 ? vo : 0.0) + (vy > 0.0 ? vy : 0.0);
     };
     if (violation(theta) <= 0.0) return theta;
@@ -1258,7 +1260,7 @@ constexpr uint32_t kIkSpine[3] = {16, 21, 24};       // the spine chain the squa
 constexpr double kIkSpineWeight[3] = {1.0 / 3.0, 2.0 / 3.0, 1.0};
 constexpr uint32_t kIkSquarePivot = 34;              // the vertical axis runs through this joint's xz
 constexpr uint32_t kIkClavL = 35, kIkClavR = 36;     // the 3P clavicles (their parent is the chest root, kIkSpine[2])
-constexpr double kIkSwivelTrimMaxDeg = 90.0, kIkSquareAmountDefault = 1.0, kIkElbowOutCmDefault = 10.0, kIkElbowOutCmMax = 30.0;
+constexpr double kIkSwivelTrimMaxDeg = 90.0, kIkSquareAmountDefault = 1.0, kIkElbowOutCmDefault = 6.0, kIkElbowOutCmMax = 30.0;   // F59: 6 cm
 // The FP snapshot's slots (fdAfterAnimate): the attach joints, the hands, the clavicles, the upper arms, the forearms.
 constexpr uint32_t kIkFpJoints[10] = {51, 52, 37, 44, 19, 20, 25, 26, 31, 34};
 constexpr uint32_t kIkFpSlots = 10;
@@ -1456,6 +1458,81 @@ inline void bendCapToward(double applied[2], const double want[2], double leverM
     const double k = len > cap && len > 0.0 ? cap / len : 1.0;
     applied[0] += d[0] * k;
     applied[1] += d[1] * k;
+}
+
+// ---- F59 (TEMPORARY): the bend on the neck, the square-up to the FP forward, the clavicle reach assist, ADS -------------------------------
+// (1) The bend turns the NECK joint (34, under the chest 24) toward the eye target less the neck's rest offset (kNeckRestOffset): F58's pov
+// joint (15) is a child of the root 7, not under the spine root 16, so every F58 call was refused ("pov, spine level 255"). (2) The square-up
+// turns the 3P upper-arm line (U40 -> U41, xz) square to the FP forward (G's z row on xz): theta = yaw(U line) - 90 deg relative to the
+// forward; the FP clavicles (7.5 cm apart) were a noisy reference. (3) The clavicle reach assist: before swing 1, when |T - S| > 0.97 (l1 + l2),
+// the arm groups gU, gF, gH turn rigidly about the clavicle C so S moves toward T by min(excess + 3 cm, 10 cm), the turn capped at 25 deg;
+// in ADS the shoulder's raise and forward push ride the same turn. (4) ADS, blended over 0.15 s: the arm parameters lerp to their ADS values,
+// the distance gate relaxes from 0.35..0.8 m to 0.6..1.2 m, and the bend adds a forward lean.
+constexpr uint32_t kBendNeckJoint = 34;
+constexpr double kIkAssistReach = 0.97, kIkAssistMarginM = 0.03, kIkAssistMaxM = 0.10, kIkAssistMaxDeg = 25.0;
+constexpr double kIkAdsRampSec = 0.15;
+constexpr float kIkGateFullAdsM = 0.6f, kIkGateZeroAdsM = 1.2f;
+constexpr double kIkAdsSquareDefault = 1.0, kIkAdsElbowOutCmDefault = 6.0, kIkAdsTrimDegDefault = 0.0, kIkAdsRaiseCmDefault = 3.0,
+                 kIkAdsForwardCmDefault = 5.0, kIkAdsLeanDegDefault = 6.0;
+constexpr double kIkAdsElbowOutCmMax = 20.0, kIkAdsTrimDegMax = 60.0, kIkAdsShoulderCmMax = 10.0, kIkAdsLeanDegMax = 15.0;
+
+inline double ikLerp(double a, double b, double w) noexcept { return a + (b - a) * w; }
+// A slider's value clamped to [lo, hi]; NaN takes the default.
+inline double ikClampOr(double v, double lo, double hi, double dflt) noexcept {
+    if (!(v == v)) return dflt;
+    return v < lo ? lo : v > hi ? hi : v;
+}
+// The per-arm distance gate with the ADS weight: full under lerp(0.35, 0.6, w), none from lerp(0.8, 1.2, w), linear between (NaN: 0).
+inline float ikDistanceGateAds(float dist, float adsW) noexcept {
+    if (!(dist == dist)) return 0.0f;
+    const float w = adsW < 0.0f ? 0.0f : adsW > 1.0f ? 1.0f : adsW;
+    const float full = kIkGateFullM + (kIkGateFullAdsM - kIkGateFullM) * w, zero = kIkGateZeroM + (kIkGateZeroAdsM - kIkGateZeroM) * w;
+    if (dist <= full) return 1.0f;
+    if (dist >= zero) return 0.0f;
+    return (zero - dist) / (zero - full);
+}
+// (2) The yaw (radians, ikYawFromTo's sense) that turns the upper-arm line uR - uL (xz) square to the forward fwd (xz): onto the forward's
+// right (f.z, 0, -f.x) in the 3P model (x right, y up, z forward). theta (the log's) = -phi = yaw(U line) - 90 deg relative to the forward.
+// False (phi 0) when the line is under 1 cm or the forward's xz under 0.1.
+inline bool ikSquareToForward(const double uL[3], const double uR[3], const double fwd[3], double* phi) noexcept {
+    *phi = 0.0;
+    const double a[3] = {uR[0] - uL[0], 0.0, uR[2] - uL[2]}, right[3] = {fwd[2], 0.0, -fwd[0]};
+    if (!(ikLen(a) > 0.01) || !(ikLen(right) > 0.1)) return false;
+    *phi = ikYawFromTo(a, right);
+    return std::isfinite(*phi);
+}
+// (3) The reach part of the assist (metres): min(excess + 3 cm, 10 cm) when dist = |T - S| is past 0.97 (l1 + l2), excess the part past that;
+// 0 otherwise. *excess the excess (0 when in reach).
+inline double ikAssistReachMove(double dist, double l1, double l2, double* excess) noexcept {
+    const double over = dist - kIkAssistReach * (l1 + l2);
+    if (excess) *excess = over > 0.0 ? over : 0.0;
+    if (!(over > 0.0)) return 0.0;
+    const double m = over + kIkAssistMarginM;
+    return m < kIkAssistMaxM ? m : kIkAssistMaxM;
+}
+// The assist's rotation (row-vector, about the clavicle C) that turns S toward S + disp, at most kIkAssistMaxDeg. False (R identity, angle 0)
+// when disp is under 1 mm or the turn is degenerate (S on C, or disp along C -> S).
+inline bool ikAssistRot(const double C[3], const double S[3], const double disp[3], double R[9], double* angRad, bool* capped) noexcept {
+    for (int i = 0; i < 9; ++i) R[i] = (i % 4 == 0) ? 1.0 : 0.0;
+    *angRad = 0.0;
+    if (capped) *capped = false;
+    if (!(ikLen(disp) > 1e-3)) return false;
+    const double cs[3] = {S[0] - C[0], S[1] - C[1], S[2] - C[2]}, cs1[3] = {cs[0] + disp[0], cs[1] + disp[1], cs[2] + disp[2]};
+    double a[3], b[3], k[3];
+    if (!ikUnit(cs, a) || !ikUnit(cs1, b)) return false;
+    ikCross(a, b, k);
+    const double s = ikLen(k), c = ikDot(a, b);
+    if (!(s > 1e-9)) return false;
+    double ang = std::atan2(s, c);
+    const double lim = kIkAssistMaxDeg * kIkPi / 180.0;
+    if (ang > lim) {
+        ang = lim;
+        if (capped) *capped = true;
+    }
+    const double n[3] = {k[0] / s, k[1] / s, k[2] / s};
+    ikRotAxis(n, ang, R);
+    *angRad = ang;
+    return true;
 }
 }  // namespace nofoot
 }  // namespace edvr

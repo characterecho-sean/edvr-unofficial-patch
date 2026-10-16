@@ -99,6 +99,14 @@ std::atomic<double> g_dropCm{0.0};   // F55 (TEMPORARY): fix.native_on_foot_fp_s
 std::atomic<float> g_ikSwivelTrimRad{0.0f}, g_ikSquareAmount{static_cast<float>(nofoot::kIkSquareAmountDefault)},
     g_ikElbowOutM{static_cast<float>(nofoot::kIkElbowOutCmDefault / 100.0)};
 double g_ikTrimDeg = 0.0, g_ikSqAmountKey = nofoot::kIkSquareAmountDefault, g_ikOutCm = nofoot::kIkElbowOutCmDefault;
+// F59 (TEMPORARY sliders): the arm IK's ADS values (square-up amount, elbow out (m), swivel trim (rad), shoulder raise and forward push (m),
+// the bend's forward lean (rad)), read by the Animate hook and lerped by the frame thread's ADS weight (0.15 s on journalAds, g_ikAdsW).
+std::atomic<float> g_ikAdsSquare{static_cast<float>(nofoot::kIkAdsSquareDefault)},
+    g_ikAdsElbowOutM{static_cast<float>(nofoot::kIkAdsElbowOutCmDefault / 100.0)}, g_ikAdsTrimRad{0.0f},
+    g_ikAdsRaiseM{static_cast<float>(nofoot::kIkAdsRaiseCmDefault / 100.0)}, g_ikAdsForwardM{static_cast<float>(nofoot::kIkAdsForwardCmDefault / 100.0)},
+    g_ikAdsLeanRad{static_cast<float>(nofoot::kIkAdsLeanDegDefault * nofoot::kIkPi / 180.0)}, g_ikAdsW{0.0f};
+double g_ikAdsKeys[6] = {nofoot::kIkAdsSquareDefault, nofoot::kIkAdsElbowOutCmDefault, nofoot::kIkAdsTrimDegDefault,
+                         nofoot::kIkAdsRaiseCmDefault, nofoot::kIkAdsForwardCmDefault, nofoot::kIkAdsLeanDegDefault};   // the key reader's last
 // F58 (TEMPORARY): the spine bend. The key (fix.native_on_foot_spine_bend, on by default; it acts only in full-3P body mode) and the amount
 // slider, the frame thread's 0.2 s ramp and run flag (the key on in full-3P body mode, or the ramp or its hold still running), read by the
 // Animate hook. The eye target (the job camera less d, body axes = the 3P model space) and the pov joint's index, through a seqlock.
@@ -692,7 +700,8 @@ void readKey() {
         pfz::g_ikMode.store(ikMode, std::memory_order_relaxed);
         pfz::g_ikWanted.store(ikMode != 0, std::memory_order_relaxed);
         // F57 (TEMPORARY, live, the Native on foot page's sliders): the arm IK's elbow swivel trim (deg, -90..90, default 0), the torso
-        // square-up's amount (0..1, default 1) and the elbow-out clamp distance (cm, 0..30, default 10). Body mode with the arm IK on only.
+        // square-up's amount (0..1, default 1) and the elbow-out clamp distance (cm, 0..30, default 6 since F59: from the arm's own shoulder).
+        // Body mode with the arm IK on only.
         {
             const double trimDeg = nofoot::ikSwivelTrimClampDeg(static_cast<double>(cfg.getFloat("fix.native_on_foot_arm_elbow_swivel_trim_deg", 0.0f)));
             const double sqAmount = nofoot::ikSquareAmountClamp(
@@ -701,7 +710,7 @@ void readKey() {
                 static_cast<double>(cfg.getFloat("fix.native_on_foot_arm_elbow_out_cm", static_cast<float>(nofoot::kIkElbowOutCmDefault))));
             if (first || trimDeg != g_ikTrimDeg || sqAmount != g_ikSqAmountKey || outCm != g_ikOutCm)
                 Log::get().note("native on foot arm IK (F57, TEMPORARY sliders): elbow swivel trim %.1f deg (positive swings the elbow out), torso "
-                                "square-up amount %.2f, elbow out %.1f cm (the swivel clamp's distance); applied with fix.native_on_foot_arm_ik = on "
+                                "square-up amount %.2f, elbow out %.1f cm (the swivel clamp's distance from the arm's own shoulder, F59); applied with fix.native_on_foot_arm_ik = on "
                                 "in body mode only", trimDeg, sqAmount, outCm);
             g_ikTrimDeg = trimDeg;
             g_ikSqAmountKey = sqAmount;
@@ -709,6 +718,38 @@ void readKey() {
             g_ikSwivelTrimRad.store(static_cast<float>(trimDeg * nofoot::kIkPi / 180.0), std::memory_order_relaxed);
             g_ikSquareAmount.store(static_cast<float>(sqAmount), std::memory_order_relaxed);
             g_ikElbowOutM.store(static_cast<float>(outCm / 100.0), std::memory_order_relaxed);
+        }
+        // F59 (TEMPORARY, live, the Native on foot page's ADS sliders): the arm IK's values while aiming down sights (blended over 0.15 s):
+        // square-up amount (0..1, 1), elbow out (cm, 0..20, 6), swivel trim (deg, -60..60, 0), shoulder raise and forward push (cm, 0..10, 3
+        // and 5; through the clavicle assist) and the bend's forward lean (deg, 0..15, 6). Body mode with the arm IK on (the lean: the bend).
+        {
+            const double v[6] = {
+                nofoot::ikClampOr(static_cast<double>(cfg.getFloat("fix.native_on_foot_arm_ads_square_amount", static_cast<float>(nofoot::kIkAdsSquareDefault))),
+                                  0.0, 1.0, nofoot::kIkAdsSquareDefault),
+                nofoot::ikClampOr(static_cast<double>(cfg.getFloat("fix.native_on_foot_arm_ads_elbow_out_cm", static_cast<float>(nofoot::kIkAdsElbowOutCmDefault))),
+                                  0.0, nofoot::kIkAdsElbowOutCmMax, nofoot::kIkAdsElbowOutCmDefault),
+                nofoot::ikClampOr(static_cast<double>(cfg.getFloat("fix.native_on_foot_arm_ads_swivel_trim_deg", static_cast<float>(nofoot::kIkAdsTrimDegDefault))),
+                                  -nofoot::kIkAdsTrimDegMax, nofoot::kIkAdsTrimDegMax, nofoot::kIkAdsTrimDegDefault),
+                nofoot::ikClampOr(static_cast<double>(cfg.getFloat("fix.native_on_foot_arm_ads_shoulder_raise_cm", static_cast<float>(nofoot::kIkAdsRaiseCmDefault))),
+                                  0.0, nofoot::kIkAdsShoulderCmMax, nofoot::kIkAdsRaiseCmDefault),
+                nofoot::ikClampOr(static_cast<double>(cfg.getFloat("fix.native_on_foot_arm_ads_shoulder_forward_cm", static_cast<float>(nofoot::kIkAdsForwardCmDefault))),
+                                  0.0, nofoot::kIkAdsShoulderCmMax, nofoot::kIkAdsForwardCmDefault),
+                nofoot::ikClampOr(static_cast<double>(cfg.getFloat("fix.native_on_foot_arm_ads_lean_deg", static_cast<float>(nofoot::kIkAdsLeanDegDefault))),
+                                  0.0, nofoot::kIkAdsLeanDegMax, nofoot::kIkAdsLeanDegDefault)};
+            bool changed = first;
+            for (int i = 0; i < 6; ++i) changed = changed || v[i] != g_ikAdsKeys[i];
+            if (changed)
+                Log::get().note("native on foot arm IK (F59, TEMPORARY ADS sliders): while aiming down sights (blended over 0.15 s): torso square-up "
+                                "amount %.2f, elbow out %.1f cm, elbow swivel trim %.1f deg, shoulder raise %.1f cm, shoulder forward %.1f cm "
+                                "(through the clavicle assist), bend forward lean %.1f deg; the distance gate relaxes to 0.6..1.2 m",
+                                v[0], v[1], v[2], v[3], v[4], v[5]);
+            for (int i = 0; i < 6; ++i) g_ikAdsKeys[i] = v[i];
+            g_ikAdsSquare.store(static_cast<float>(v[0]), std::memory_order_relaxed);
+            g_ikAdsElbowOutM.store(static_cast<float>(v[1] / 100.0), std::memory_order_relaxed);
+            g_ikAdsTrimRad.store(static_cast<float>(v[2] * nofoot::kIkPi / 180.0), std::memory_order_relaxed);
+            g_ikAdsRaiseM.store(static_cast<float>(v[3] / 100.0), std::memory_order_relaxed);
+            g_ikAdsForwardM.store(static_cast<float>(v[4] / 100.0), std::memory_order_relaxed);
+            g_ikAdsLeanRad.store(static_cast<float>(v[5] * nofoot::kIkPi / 180.0), std::memory_order_relaxed);
         }
         // F58 (TEMPORARY, live): the spine bend toward the head: on (the default) or off. It acts only in full-3P body mode (body align = body
         // with fix.native_on_foot_hide_fp_body and fix.native_on_foot_body_unclip on); the amount slider (0..1, default 1) scales it.
@@ -7788,6 +7829,11 @@ struct IkSideStats {
     double elbowMin = 0.0, elbowMax = 0.0, elbowSum = 0.0;   // the solved elbow's interior angle (degrees, 180 straight)
     double sxSum = 0.0;                                      // the shoulder S's |x| (model) after the square-up, cm
     float Efp[3] = {};                                       // the last FP elbow (forearm joint) mapped into the 3P model by G
+    // F59: the clavicle assist (calls it turned, its move asked (cm) and turn (deg) means, 25 deg caps); ADS solves (the ADS weight over 0.5):
+    // reach, shortfall, the per-arm weight, the interior angle, the clamp.
+    uint32_t assistN = 0, assistCapped = 0, adsN = 0, adsClamped = 0;
+    double assistMoveSum = 0.0, assistAngSum = 0.0, assistExcessSum = 0.0;
+    double adsReachSum = 0.0, adsReachMax = 0.0, adsShortMax = 0.0, adsWSum = 0.0, adsElbowSum = 0.0, adsGateSum = 0.0;
 };
 struct IkStats {
     uint64_t calls = 0, solved = 0;
@@ -7797,6 +7843,10 @@ struct IkStats {
     // (probe and an unwritten on: what would be at the full ramp); clamps at +-50 deg; calls that wrote it.
     uint32_t sqN = 0, sqClamped = 0, sqWrites = 0, sqNoLine = 0;
     double sqThetaSum = 0.0, sqThetaMin = 0.0, sqThetaMax = 0.0, sqAppliedSum = 0.0;
+    // F59: theta is now yaw(3P upper arms 41 - 40) - 90 deg relative to the FP forward (G's z row, xz); the yaw left after the square-up;
+    // the upper arms' |x| (L, R) and their spacing after it; the F57 clavicle reference's theta beside it; the ADS weight.
+    uint32_t uaN = 0, sqOldN = 0;
+    double sqAfterSum = 0.0, sqAfterAbsMax = 0.0, uaXSum[2] = {}, uaSpacingSum = 0.0, sqOldSum = 0.0, adsWSum = 0.0;
 };
 std::atomic<uint32_t> g_ikStatSeq{0};
 IkStats g_ikStats;
@@ -7811,6 +7861,11 @@ uint16_t g_ikFzSlot[nofoot::kPfzMaxJoints];  // F57: the freeze plan's slot of e
 std::atomic<float> g_ikSquareWeight{0.0f};   // F57: the frame thread's square-up ramp (0.3 s; 0 unless the key is on and the gate holds)
 float g_ikApplied[2][3];       // the applied hand offset per side (model space, from the animated hand)
 uint64_t g_ikAppliedMs[2];     // when it was last applied (older than 200 ms: start again from the animated hand)
+// F59: the clavicle assist's applied shoulder displacement per side (model space; 5 cm a call while writing, from zero after 200 ms without a
+// write), and the arm groups' M0 before the assist turned them (restored when the side is not written, so the spine write never carries it).
+float g_ikAssistApplied[2][3];
+uint64_t g_ikAssistMs[2];
+alignas(16) float g_ikM0Save[nofoot::kPfzMaxJoints][16];
 // F58 (TEMPORARY): the spine bend's hook state (under g_pfzBusy) and its statistics (one writer, the hook; read once a second by the frame
 // thread under the sequence counter, reset on request), and its refusals.
 double g_bendApplied[2] = {};   // the applied (pitch, roll), radians, capped at 5 cm of pov motion a call
@@ -7825,6 +7880,7 @@ struct BendStats {
     double pitchSum = 0.0, pitchMin = 0.0, pitchMax = 0.0, rollSum = 0.0, rollMin = 0.0, rollMax = 0.0;   // applied, degrees
     double solvedPitchSum = 0.0, solvedRollSum = 0.0;                    // the solve before the clamps, degrees
     double wSum = 0.0;                                                   // the weight times the amount
+    double leanSum = 0.0, adsWSum = 0.0;                                 // F59: the ADS lean added to the pitch (deg) and the ADS weight
 };
 std::atomic<uint32_t> g_bendStatSeq{0};
 BendStats g_bendStats;
@@ -7918,15 +7974,25 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
     const bool writeOk = armsOk && (mode == 2 || mode == 3) && wBase > 0.0f && !g_ikWriteDown.load(std::memory_order_relaxed);
     struct SideOut {
         bool solved = false, clamped = false, wrote = false, poleFp = false, limited = false;
+        bool assisted = false, assistCapped = false, saved = false;   // F59: the clavicle assist turned the groups (saved: M0 kept in g_ikM0Save)
+        double assistMove = 0.0, assistAng = 0.0, assistExcess = 0.0, reachA = 0.0, shortA = 0.0;
         double dist = 0.0, ang = 0.0, reach = 0.0, shortfall = 0.0, bend = 0.0, err = -1.0, wArm = 0.0, gate = 0.0, elbowDeg = 0.0, sx = 0.0;
         float l1 = 0.0f, l2 = 0.0f, E[3] = {}, S[3] = {}, Efp[3] = {};
     } so[2];
     uint32_t nList = 0;
     const uint32_t count = sp.count;
     if (count == 0 || count > nofoot::kPfzMaxJoints) return ikRefuse(kIkRefPlan);
-    const double elbowOutM = static_cast<double>(g_ikElbowOutM.load(std::memory_order_relaxed));
-    const double trimRad = static_cast<double>(g_ikSwivelTrimRad.load(std::memory_order_relaxed));
-    const double sqAmount = static_cast<double>(g_ikSquareAmount.load(std::memory_order_relaxed));
+    // F59: the ADS weight (0.15 s on journalAds, frame thread) lerps the sliders to their ADS values.
+    double adsW = static_cast<double>(g_ikAdsW.load(std::memory_order_relaxed));
+    adsW = adsW < 0.0 ? 0.0 : adsW > 1.0 ? 1.0 : adsW;
+    const double elbowOutM = nofoot::ikLerp(static_cast<double>(g_ikElbowOutM.load(std::memory_order_relaxed)),
+                                            static_cast<double>(g_ikAdsElbowOutM.load(std::memory_order_relaxed)), adsW);
+    const double trimRad = nofoot::ikLerp(static_cast<double>(g_ikSwivelTrimRad.load(std::memory_order_relaxed)),
+                                          static_cast<double>(g_ikAdsTrimRad.load(std::memory_order_relaxed)), adsW);
+    const double sqAmount = nofoot::ikLerp(static_cast<double>(g_ikSquareAmount.load(std::memory_order_relaxed)),
+                                           static_cast<double>(g_ikAdsSquare.load(std::memory_order_relaxed)), adsW);
+    const double adsPush[3] = {0.0, adsW * static_cast<double>(g_ikAdsRaiseM.load(std::memory_order_relaxed)),
+                               adsW * static_cast<double>(g_ikAdsForwardM.load(std::memory_order_relaxed))};   // model: y up, z forward
     const double wSqRamp = static_cast<double>(g_ikSquareWeight.load(std::memory_order_relaxed));
     // F57 stage 1: the base pose M0 of every joint the IK may move. The arm groups: animated, carried by their clavicle's freeze delta D_C
     // (identity when the freeze did not write it); the square-up's spine list (the rest of it): as the freeze left it (its write when it wrote
@@ -7978,9 +8044,11 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
     // thread. The pitch and roll that turn N toward T about P (nofoot::bendSolve), clamped (forward 45, back 15, roll 20 deg), times the frame
     // thread's ramp and the amount; the applied angles move at most 5 cm of pov motion a call. Split 1/3, 2/3, 1 over the spine levels about P,
     // on M0, so the square-up and the arm solve run on the bent pose. Written with the spine list below.
+    // F59: N is the neck joint (34, under the chest 24) and T its target (the eye target less the neck's rest offset); the frame thread
+    // publishes both. In ADS a forward lean (the slider, times the ADS weight) is added to the solved pitch before the clamps.
     bool bendHave = false, bendWrite = false;
     nofoot::BendClamp bendCl;
-    double bendRes0[3] = {}, bendRes1[3] = {}, bendSolved[2] = {}, bendW = 0.0;
+    double bendRes0[3] = {}, bendRes1[3] = {}, bendSolved[2] = {}, bendW = 0.0, bendLean = 0.0;
     uint32_t bendLevel = 0xFFu, bendPov = 0xFFFFu;
     if (bendRun) {
         BendTarget bt;
@@ -8001,12 +8069,14 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             ikPos(g_ikM0[nofoot::kIkSpine[0]], P);
             if (bendLevel <= 2u) ikPos(g_ikM0[bt.pov], N);
             if (bendLevel > 2u) {
-                bendRefuse(kBendRefPov);   // the pov joint is not under the spine root
+                bendRefuse(kBendRefPov);   // the bent joint (F59: the neck) is not under the spine root
             } else if (!nofoot::bendSolve(P, N, T, &pitch, &roll)) {
                 bendRefuse(kBendRefDegenerate);
             } else {
                 bendSolved[0] = pitch;
                 bendSolved[1] = roll;
+                bendLean = adsW * static_cast<double>(g_ikAdsLeanRad.load(std::memory_order_relaxed));
+                pitch += bendLean;
                 pitch = nofoot::bendClampPitch(pitch, &bendCl);
                 roll = nofoot::bendClampRoll(roll, &bendCl);
                 bendW = static_cast<double>(g_bendWeight.load(std::memory_order_relaxed)) *
@@ -8041,19 +8111,31 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
     // F57 stage 2: the torso square-up, before the arm solve: the 3P shoulder line (clavicle 36 - 35, xz) turned onto the FP's (20 - 19 mapped
     // by G) about the vertical through joint 34, clamped to +-50 deg, split over the spine 16, 21, 24 (1/3, 2/3, 1). Never in nudge; probe (and
     // an on that is not writing) at the full ramp for the statistics; on and writing at the frame thread's ramp. Times the slider's amount.
-    bool sqHave = false, sqClamped = false;
-    double sqTheta = 0.0, sqApplied = 0.0;
-    if (armsOk && pl.sqOk && mode != 2 && nofoot::kIkClavR < count && nofoot::kIkSquarePivot < count) {
-        const float* mL = g_ikM0[nofoot::kIkClavL];
-        const float* mR = g_ikM0[nofoot::kIkClavR];
-        double fL[3], fR[3];
-        nofoot::ikXform(&fpm[nofoot::kIkFpSlotClav[0]][12], G.g, fL);
-        nofoot::ikXform(&fpm[nofoot::kIkFpSlotClav[1]][12], G.g, fR);
-        const double a3[3] = {static_cast<double>(mR[12]) - mL[12], 0.0, static_cast<double>(mR[14]) - mL[14]};
-        const double b3[3] = {fR[0] - fL[0], 0.0, fR[2] - fL[2]};
-        if (nofoot::ikLen(a3) > 0.01 && nofoot::ikLen(b3) > 0.01) {
-            const double phi = nofoot::ikYawFromTo(a3, b3);   // turns the 3P line onto the FP's
-            sqTheta = -phi;                                     // the spec's theta: yaw(3P) - yaw(FP)
+    // F59: the reference is the FP FORWARD (G's z row on xz) and the 3P line is the upper arms' (U of the left and right plans, 40 -> 41):
+    // turned square to the forward (nofoot::ikSquareToForward). The F57 clavicle reference's theta is still computed for the log only.
+    bool sqHave = false, sqClamped = false, sqOldHave = false, uaHave = false;
+    double sqTheta = 0.0, sqApplied = 0.0, sqOld = 0.0, sqAfter = 0.0, uaX[2] = {}, uaSpacing = 0.0;
+    const bool uaPlan = pl.ok[0] && pl.ok[1] && pl.side[0].U < count && pl.side[1].U < count;
+    if (armsOk && pl.sqOk && mode != 2 && uaPlan && nofoot::kIkClavR < count && nofoot::kIkSquarePivot < count) {
+        {
+            const float* mL = g_ikM0[nofoot::kIkClavL];
+            const float* mR = g_ikM0[nofoot::kIkClavR];
+            double fL[3], fR[3];
+            nofoot::ikXform(&fpm[nofoot::kIkFpSlotClav[0]][12], G.g, fL);
+            nofoot::ikXform(&fpm[nofoot::kIkFpSlotClav[1]][12], G.g, fR);
+            const double a3[3] = {static_cast<double>(mR[12]) - mL[12], 0.0, static_cast<double>(mR[14]) - mL[14]};
+            const double b3[3] = {fR[0] - fL[0], 0.0, fR[2] - fL[2]};
+            if (nofoot::ikLen(a3) > 0.01 && nofoot::ikLen(b3) > 0.01) {
+                sqOld = -nofoot::ikYawFromTo(a3, b3);
+                sqOldHave = true;
+            }
+        }
+        double uL[3], uR[3], phi = 0.0;
+        ikPos(g_ikM0[pl.side[0].U], uL);
+        ikPos(g_ikM0[pl.side[1].U], uR);
+        const double fwd[3] = {G.g[8], G.g[9], G.g[10]};
+        if (nofoot::ikSquareToForward(uL, uR, fwd, &phi)) {
+            sqTheta = -phi;                                     // theta = yaw(U line) - 90 deg relative to the FP forward
             const double target = nofoot::ikSquareClampRad(phi, &sqClamped);
             const double sqW = (mode == 3 && writeOk) ? wSqRamp : 1.0;
             sqApplied = sqAmount * sqW * target;
@@ -8072,6 +8154,16 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
                 }
             }
         }
+        // F59: after the square-up (probe: the full ramp's): the yaw left, the upper arms' |x| and their spacing.
+        ikPos(g_ikM0[pl.side[0].U], uL);
+        ikPos(g_ikM0[pl.side[1].U], uR);
+        double phiAfter = 0.0;
+        if (sqHave && nofoot::ikSquareToForward(uL, uR, fwd, &phiAfter)) sqAfter = -phiAfter;
+        const double sp[3] = {uR[0] - uL[0], uR[1] - uL[1], uR[2] - uL[2]};
+        uaX[0] = std::fabs(uL[0]) * 100.0;
+        uaX[1] = std::fabs(uR[0]) * 100.0;
+        uaSpacing = nofoot::ikLen(sp) * 100.0;
+        uaHave = true;
     }
     const bool sqWrite = mode == 3 && writeOk && sqHave && sqApplied != 0.0;
     for (int side = 0; side < 2 && armsOk; ++side) {   // F58: no arms without the FP snapshot and G (the bend alone runs)
@@ -8108,7 +8200,7 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         ikPos(TH, pT);
         ikPos(g_ikM0[A], aA);
         ikPos(TA, tA);
-        const double uf[3] = {F0[0] - S[0], F0[1] - S[1], F0[2] - S[2]}, fh[3] = {H0[0] - F0[0], H0[1] - F0[1], H0[2] - F0[2]};
+        double uf[3] = {F0[0] - S[0], F0[1] - S[1], F0[2] - S[2]}, fh[3] = {H0[0] - F0[0], H0[1] - F0[1], H0[2] - F0[2]};
         const double l1 = nofoot::ikLen(uf), l2 = nofoot::ikLen(fh);
         const double outSign = g_pfzAnim[C][12] >= 0.0f ? 1.0 : -1.0;
         SideOut& o = so[side];
@@ -8123,7 +8215,8 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             o.bend = std::acos(c > 1.0 ? 1.0 : c < -1.0 ? -1.0 : c) * 180.0 / nofoot::kIkPi;   // 180: straight
         }
         const double dH[3] = {pT[0] - H0[0], pT[1] - H0[1], pT[2] - H0[2]};
-        const float gate = nofoot::ikDistanceGate(static_cast<float>(nofoot::ikLen(dH)));
+        // F59: the gate relaxes from 0.35..0.8 m to 0.6..1.2 m with the ADS weight.
+        const float gate = nofoot::ikDistanceGateAds(static_cast<float>(nofoot::ikLen(dH)), static_cast<float>(adsW));
         // The weight this side solves at: on and writing, the per-arm weight; otherwise 1 (probe: the full solve, for the statistics only).
         const double wArm = static_cast<double>(wBase) * gate;
         const bool doSolveWrite = mode == 3 && writeOk && wArm > 0.0;
@@ -8142,6 +8235,65 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             for (int i = 0; i < 3; ++i) target[i] = pT[i];
             if (!(mode == 2 && side == 0)) g_ikApplied[side][0] = g_ikApplied[side][1] = g_ikApplied[side][2] = 0.0f;
         }
+        o.sx = std::fabs(S[0]) * 100.0;   // after the square-up, before the assist
+        {
+            const nofoot::IkTwoBone full = nofoot::ikTwoBoneFrame(S, pT, l1, l2, uf);   // the reach of the target itself (before the assist)
+            o.reach = full.ok ? full.reach : 0.0;
+            o.shortfall = full.ok ? full.shortfall * 100.0 : 0.0;
+        }
+        // F59: the clavicle reach assist (every mode but nudge), before swing 1. When |target - S| is past 0.97 (l1 + l2), the shoulder is
+        // asked to move toward the target by min(excess + 3 cm, 10 cm); in ADS the shoulder raise and forward push are added; times the
+        // per-arm weight, capped at 5 cm a call while writing. The groups gU, gF, gH turn rigidly about the clavicle C (25 deg at most); S,
+        // F0, H0 and the bones are read again. M0 is saved first and put back when the side is not written (the spine write never carries it).
+        if (mode != 2 && C < count) {
+            double Cp[3], excess = 0.0;
+            ikPos(g_ikM0[C], Cp);
+            const double ts[3] = {target[0] - S[0], target[1] - S[1], target[2] - S[2]};
+            const double distTS = nofoot::ikLen(ts);
+            const double move = nofoot::ikAssistReachMove(distTS, l1, l2, &excess);
+            double want[3];
+            for (int i = 0; i < 3; ++i) want[i] = ((distTS > 1e-6 ? move * ts[i] / distTS : 0.0) + adsPush[i]) * wSolve;
+            double disp[3];
+            if (doSolveWrite) {
+                if (now - g_ikAssistMs[side] > 200) g_ikAssistApplied[side][0] = g_ikAssistApplied[side][1] = g_ikAssistApplied[side][2] = 0.0f;
+                const float wf[3] = {static_cast<float>(want[0]), static_cast<float>(want[1]), static_cast<float>(want[2])};
+                nofoot::ikCapToward(g_ikAssistApplied[side], wf, nofoot::kIkCapPerCallM);
+                g_ikAssistMs[side] = now;
+                for (int i = 0; i < 3; ++i) disp[i] = static_cast<double>(g_ikAssistApplied[side][i]);
+            } else {
+                for (int i = 0; i < 3; ++i) disp[i] = want[i];
+                g_ikAssistApplied[side][0] = g_ikAssistApplied[side][1] = g_ikAssistApplied[side][2] = 0.0f;
+            }
+            double Rc[9], angC = 0.0;
+            bool capC = false;
+            if (nofoot::ikAssistRot(Cp, S, disp, Rc, &angC, &capC)) {
+                for (int g = 0; g < 3; ++g)
+                    for (uint32_t k = 0; k < counts[g]; ++k) {
+                        const uint32_t j = lists[g][k];
+                        if (j >= count) continue;
+                        std::memcpy(g_ikM0Save[j], g_ikM0[j], 64);
+                        nofoot::ikPivot(g_ikM0Save[j], Rc, Cp, g_ikM0[j]);
+                    }
+                o.saved = true;
+                ikPos(g_ikM0[U], S);
+                ikPos(g_ikM0[F], F0);
+                ikPos(g_ikM0[H], H0);
+                for (int i = 0; i < 3; ++i) {
+                    uf[i] = F0[i] - S[i];
+                    fh[i] = H0[i] - F0[i];
+                }
+                o.assisted = true;
+                o.assistCapped = capC;
+                o.assistAng = angC * 180.0 / nofoot::kIkPi;
+                o.assistMove = nofoot::ikLen(disp) * 100.0;
+                o.assistExcess = excess * 100.0;
+            }
+        }
+        {
+            const nofoot::IkTwoBone fullA = nofoot::ikTwoBoneFrame(S, pT, l1, l2, uf);   // F59: the reach after the assist
+            o.reachA = fullA.ok ? fullA.reach : 0.0;
+            o.shortA = fullA.ok ? fullA.shortfall * 100.0 : 0.0;
+        }
         // F57: the elbow's interior angle held in [40, 170] deg; the range widened toward the animated arm's own D by (1 - weight), so the
         // hand does not jump when the weight leaves 0. The fold and reach limits (F56) stay hard.
         double dLo = 0.0, dHi = 0.0, fLo = 0.0, fHi = 0.0;
@@ -8157,11 +8309,6 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             if (dHi < dLo) dHi = dLo;
         }
         nofoot::IkTwoBone tb = nofoot::ikTwoBoneFrameD(S, target, l1, l2, uf, dLo, dHi);
-        {
-            const nofoot::IkTwoBone full = nofoot::ikTwoBoneFrame(S, pT, l1, l2, uf);   // the reach of the target itself
-            o.reach = full.ok ? full.reach : 0.0;
-            o.shortfall = full.ok ? full.shortfall * 100.0 : 0.0;
-        }
         double elbowDir[3];
         if (!tb.ok || !nofoot::ikUnit(uf, elbowDir)) {
             ikRefuse(kIkRefSingular);
@@ -8180,7 +8327,6 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         tb.elbowAt(theta, E);
         o.elbowDeg = nofoot::ikElbowInteriorDeg(l1, l2, tb.D);
         o.limited = tb.limited;
-        o.sx = std::fabs(S[0]) * 100.0;
         // Swing 1: U's subtree about S, from the animated elbow's direction to the solved one.
         double R1[9], R2[9], ue[3];
         const double se[3] = {E[0] - S[0], E[1] - S[1], E[2] - S[2]};
@@ -8334,6 +8480,18 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             }
         o.wrote = true;
     }
+    // F59: an arm the clavicle assist turned but that is not written gets its M0 back (the spine write below must not carry the assist).
+    for (int side = 0; side < 2; ++side) {
+        if (!so[side].saved || so[side].wrote || !pl.ok[side]) continue;
+        const nofoot::IkArm& arm = pl.side[side];
+        const uint16_t* lists[3] = {arm.gU, arm.gF, arm.gH};
+        const uint16_t counts[3] = {arm.nU, arm.nF, arm.nH};
+        for (int g = 0; g < 3; ++g)
+            for (uint32_t k = 0; k < counts[g]; ++k) {
+                const uint32_t j = lists[g][k];
+                if (j < count) std::memcpy(g_ikM0[j], g_ikM0Save[j], 64);
+            }
+    }
     // F57: the squared torso: every spine-list joint not written from the solve takes its squared M0 (an arm whose solve did not write rides
     // its clavicle). F58: the same for the bent spine (the arms solved on it, or riding it when the arm IK does not write).
     if (sqWrite || bendWrite) {
@@ -8383,6 +8541,8 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             b.solvedPitchSum += bendSolved[0] * 180.0 / nofoot::kIkPi;
             b.solvedRollSum += bendSolved[1] * 180.0 / nofoot::kIkPi;
             b.wSum += bendW;
+            b.leanSum += bendLean * 180.0 / nofoot::kIkPi;
+            b.adsWSum += adsW;
             if (bendCl.fwd) ++b.clampFwd;
             if (bendCl.back) ++b.clampBack;
             if (bendCl.roll) ++b.clampRoll;
@@ -8440,7 +8600,39 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         s.elbowSum += o.elbowDeg;
         s.sxSum += o.sx;
         std::memcpy(s.Efp, o.Efp, sizeof(s.Efp));
+        // F59
+        if (o.assisted) {
+            ++s.assistN;
+            if (o.assistCapped) ++s.assistCapped;
+            s.assistMoveSum += o.assistMove;
+            s.assistAngSum += o.assistAng;
+            s.assistExcessSum += o.assistExcess;
+        }
+        if (adsW > 0.5) {
+            s.adsReachMax = s.adsN == 0 || o.reachA > s.adsReachMax ? o.reachA : s.adsReachMax;
+            s.adsReachSum += o.reachA;
+            s.adsShortMax = std::max(s.adsShortMax, o.shortA);
+            s.adsWSum += o.wArm;
+            s.adsGateSum += o.gate;
+            s.adsElbowSum += o.elbowDeg;
+            if (o.clamped) ++s.adsClamped;
+            ++s.adsN;
+        }
         ++s.n;
+    }
+    st.adsWSum += adsW;
+    if (uaHave) {
+        ++st.uaN;
+        st.uaXSum[0] += uaX[0];
+        st.uaXSum[1] += uaX[1];
+        st.uaSpacingSum += uaSpacing;
+        const double af = sqAfter * 180.0 / nofoot::kIkPi;
+        st.sqAfterSum += af;
+        st.sqAfterAbsMax = std::max(st.sqAfterAbsMax, std::fabs(af));
+    }
+    if (sqOldHave) {
+        ++st.sqOldN;
+        st.sqOldSum += sqOld * 180.0 / nofoot::kIkPi;
     }
     if (sqHave) {
         const double thDeg = sqTheta * 180.0 / nofoot::kIkPi;
@@ -8844,6 +9036,7 @@ void pfzTick(uint64_t now) {
 // every 5 s while native stereo is on foot and the key is not off: the gate, the data ages, G's inputs and the refusals, then a line per arm.
 nofoot::IkBlend g_ikBlend;               // frame thread only
 nofoot::IkBlend g_ikSqBlend{0.0f, nofoot::kIkSquareRampSec};   // F57: the square-up's ramp (frame thread only)
+nofoot::IkBlend g_ikAdsBlend{0.0f, nofoot::kIkAdsRampSec};     // F59: the ADS weight's ramp (frame thread only)
 uint64_t g_ikLastMs = 0, g_ikLineMs = 0;
 const char* g_ikWhyLast = "(none)";
 uint32_t g_ikFailNamed = 0;
@@ -8886,6 +9079,10 @@ void armIkTick(uint64_t now) noexcept {
     g_ikSqBlend.step(mode == 3 && why == nullptr && g_ikSquareAmount.load(std::memory_order_relaxed) > 0.0f, dt);
     if (mode != 3) g_ikSqBlend = nofoot::IkBlend{0.0f, nofoot::kIkSquareRampSec};
     g_ikSquareWeight.store(g_ikSqBlend.w, std::memory_order_relaxed);
+    // F59: the ADS weight (0.15 s on journalAds while native stereo is on foot), read by the Animate hook: the sliders' ADS values, the gate,
+    // the shoulder push and the bend's lean.
+    g_ikAdsBlend.step(active && journalAds(), dt);
+    g_ikAdsW.store(g_ikAdsBlend.w, std::memory_order_relaxed);
     if (writes) {
         const char* whyNow = why ? why : "writing";
         if (std::strcmp(whyNow, g_ikWhyLast) != 0) {
@@ -8983,37 +9180,67 @@ void armIkTick(uint64_t now) noexcept {
     // F57: the torso square-up.
     if (st.sqN) {
         const double n = static_cast<double>(st.sqN);
-        Log::get().note("native on foot arm IK (F57): square-up: %u calls; theta = yaw(3P clavicles 36 - 35) - yaw(FP 20 - 19 by G) min %.1f mean "
-                        "%.1f max %.1f deg; past +-50 deg (clamped) %u; rotation applied mean %.1f deg (%s), amount %.2f, ramp %.2f; spine split "
-                        "1/3, 2/3, 1 over 16, 21, 24 about joint 34's vertical; calls that wrote it %u; no shoulder line %u",
+        Log::get().note("native on foot arm IK (F59): square-up: %u calls; theta = yaw(3P upper arms U 40 -> 41) - 90 deg relative to the FP "
+                        "forward (G's z row, xz) min %.1f mean %.1f max %.1f deg; past +-50 deg (clamped) %u; rotation applied mean %.1f deg (%s), "
+                        "amount %.2f (ADS %.2f), ramp %.2f; spine split 1/3, 2/3, 1 over 16, 21, 24 about joint 34's vertical; calls that wrote it "
+                        "%u; no upper-arm line %u",
                         st.sqN, st.sqThetaMin, st.sqThetaSum / n, st.sqThetaMax, st.sqClamped, st.sqAppliedSum / n,
                         mode == 3 ? "on: as written (0 while not writing is shown as the full ramp)" : "probe: what the full ramp would apply",
-                        g_ikSqAmountKey, static_cast<double>(g_ikSqBlend.w), st.sqWrites, st.sqNoLine);
+                        g_ikSqAmountKey, g_ikAdsKeys[0], static_cast<double>(g_ikSqBlend.w), st.sqWrites, st.sqNoLine);
     } else {
-        Log::get().note("native on foot arm IK (F57): square-up: no measurement in 5 s (%s; no shoulder line %u)",
-                        mode == 2 ? "nudge never squares" : "no square-up plan, or no solve call", st.sqNoLine);
+        Log::get().note("native on foot arm IK (F59): square-up: no measurement in 5 s (%s; no upper-arm line %u)",
+                        mode == 2 ? "nudge never squares" : "no square-up plan, no arm plan for both sides, or no solve call", st.sqNoLine);
+    }
+    // F59: after the square-up: the yaw left, the upper arms' |x| and spacing, the F57 clavicle reference beside it; the ADS weight.
+    {
+        const double un = st.uaN ? static_cast<double>(st.uaN) : 1.0, on = st.sqOldN ? static_cast<double>(st.sqOldN) : 1.0,
+                     cn = st.calls ? static_cast<double>(st.calls) : 1.0;
+        Log::get().note("native on foot arm IK (F59): after the square-up (%u calls): yaw left mean %.1f deg (|max| %.1f); upper arm |x| L %.1f cm, "
+                        "R %.1f cm, spacing %.1f cm (means); the F57 clavicle reference's theta mean %.1f deg (%u calls, log only); ADS weight "
+                        "mean %.2f over %llu hook calls",
+                        st.uaN, st.sqAfterSum / un, st.sqAfterAbsMax, st.uaXSum[0] / un, st.uaXSum[1] / un, st.uaSpacingSum / un, st.sqOldSum / on,
+                        st.sqOldN, st.adsWSum / cn, static_cast<unsigned long long>(st.calls));
+    }
+    for (int side = 0; side < 2; ++side) {
+        const IkSideStats& s = st.side[side];
+        if (s.n == 0) continue;
+        const double n = static_cast<double>(s.n), an = s.assistN ? static_cast<double>(s.assistN) : 1.0,
+                     dn = s.adsN ? static_cast<double>(s.adsN) : 1.0;
+        Log::get().note("native on foot arm IK (F59): arm %s: elbow-out clamp (from its own shoulder) fired %u of %u (%.0f%%); clavicle assist "
+                        "turned %u of %u (excess mean %.1f cm, shoulder move asked mean %.1f cm, turn mean %.1f deg, capped at 25 deg %u); ADS "
+                        "(weight over 0.5) %u solves: reach after the assist mean %.2f max %.2f, shortfall max %.1f cm, per-arm weight mean %.2f "
+                        "(on only), distance gate mean %.2f, interior angle mean %.1f deg, clamp fired %u",
+                        side ? "R" : "L", s.clamped, s.n, 100.0 * s.clamped / n, s.assistN, s.n, s.assistExcessSum / an, s.assistMoveSum / an,
+                        s.assistAngSum / an, s.assistCapped, s.adsN, s.adsReachSum / dn, s.adsReachMax, s.adsShortMax, s.adsWSum / dn,
+                        s.adsGateSum / dn, s.adsElbowSum / dn, s.adsClamped);
     }
 }
 
 // F58 (TEMPORARY): the spine bend's frame-thread half, at the end of alignTick. The ramp (0.2 s) wants the key on, full-3P body mode, native
-// stereo on foot, a fresh AMC sample with the pov joint, and no ADS; the hook runs while it wants or the ramp is above 0, and 0.5 s after (so
-// the applied angles reach 0 at their cap). The target: the job camera less the body run's applied d, in body axes (the 3P model space, AMC
-// rows), with the pov joint's index. Once a second in body mode (or while the bend runs): the head follow's source and the bend's statistics.
+// stereo on foot, a fresh AMC sample with the head (F59: ADS no longer ramps it out; the hook adds the ADS lean); the hook runs while it
+// wants or the ramp is above 0, and 0.5 s after (so the applied angles reach 0 at their cap). The target: the job camera less the body run's
+// applied d, in body axes (the 3P model space, AMC rows), plus the neck's rest offset, with the neck joint's index (F59). Once a second in body
+// mode (or while the bend runs): the head follow's source and the bend's statistics.
 uint64_t g_bendRefusedLast[kBendRefKinds] = {};
 void f58BendFrame(uint64_t now, double dt, int mode, bool full3P, bool ads, const EyeSample& s) noexcept {
     const bool key = g_bendKeyOn.load(std::memory_order_relaxed);
     const bool active = nativeOnFootActive();
     const bool sFresh = s.valid && (now > s.stamp ? now - s.stamp : 0) <= static_cast<uint64_t>(align::kStaleMs);
-    const bool want = key && full3P && active && sFresh && s.povJOk && !ads;
+    // F59: the bend turns the NECK joint (34, under the chest 24; F58's pov joint 15 hangs off the root 7, so every call was refused), gated
+    // on the neck census's head sample, and stays on in ADS (the hook adds the ADS lean). Its target: the eye target less the neck's rest
+    // offset, T = (job camera - d) in body axes + kNeckRestOffset (0, -0.155, -0.161).
+    const bool want = key && full3P && active && sFresh && s.headOk;
     g_f58BendBlend.step(want, dt);
     if (want || g_f58BendBlend.w > 0.0f) g_f58RunUntilMs = now + 500;
     const bool run = now < g_f58RunUntilMs;
-    if (run && sFresh && s.povJOk) {
+    if (run && sFresh && s.headOk) {
         double t[3] = {};
-        for (size_t i = 0; i < 3; ++i)
+        for (size_t i = 0; i < 3; ++i) {
             for (size_t j = 0; j < 3; ++j)
                 t[i] += (static_cast<double>(s.cam[j]) - s.origin[j] - g_alignBody.applied[j]) * static_cast<double>(s.rows[3 * i + j]);
-        bendTargetPublish(t, s.povJIdx, now);
+            t[i] += nofoot::kNeckRestOffset[i];
+        }
+        bendTargetPublish(t, nofoot::kBendNeckJoint, now);
     }
     g_bendWeight.store(g_f58BendBlend.w, std::memory_order_relaxed);
     g_bendRun.store(run, std::memory_order_relaxed);
@@ -9040,13 +9267,15 @@ void f58BendFrame(uint64_t now, double dt, int mode, bool full3P, bool ads, cons
     static const char* const kSrc[5] = {"none (no body frame this tick: waiting or not body mode)", "the FP root", "the job camera (full 3P)",
                                          "the job camera (the FP root is not fresh)", "the FP clavicles (the clavicle anchor)"};
     const char* state = !key ? "off (the key)" : !full3P ? "idle: not full 3P (body mode with hide_fp_body and body_unclip on)"
-                      : !sFresh ? "held: no fresh AMC sample" : !s.povJOk ? "held: no pov joint" : ads ? "ramping out: ADS" : "on";
+                      : !sFresh ? "held: no fresh AMC sample" : !s.headOk ? "held: no head sample (neck census)" : ads ? "on (ADS: with the lean)" : "on";
     const double n = b.n ? static_cast<double>(b.n) : 1.0;
+    Log::get().note("native on foot spine bend (F59): ADS lean added mean %.1f deg (slider %.1f), ADS weight mean %.2f; the bent joint is the neck "
+                    "(34) toward the eye target less the rest offset (0, -0.155, -0.161)", b.leanSum / n, g_ikAdsKeys[5], b.adsWSum / n);
     Log::get().note("native on foot spine bend (F58): head follow (the body target's horizontal) from %s; bend %s, amount %.2f, ramp %.2f, weight x "
                     "amount mean %.2f; %llu hook calls, %llu bent, %llu written this second; residual eye target - pov (cm): before mean %.1f max %.1f "
                     "(forward %.1f up %.1f right %.1f), after mean %.1f max %.1f (forward %.1f up %.1f right %.1f; the after is left unresolved: the "
                     "height, the clamps, the ramp); pitch applied mean %.1f (%.1f..%.1f) deg, roll mean %.1f (%.1f..%.1f) deg; solved before the clamps "
-                    "pitch mean %.1f roll mean %.1f deg; clamp hits forward 45 %u, back 15 %u, roll 20 %u; pov joint %u (spine level %u); refusals: "
+                    "pitch mean %.1f roll mean %.1f deg; clamp hits forward 45 %u, back 15 %u, roll 20 %u; bent joint %u (spine level %u); refusals: "
                     "plan %llu, target torn %llu, target stale %llu, pov %llu, degenerate %llu, singular %llu",
                     kSrc[g_f58FollowSrc + 1 >= 0 && g_f58FollowSrc + 1 < 5 ? g_f58FollowSrc + 1 : 0], state, g_bendAmountKey,
                     static_cast<double>(g_f58BendBlend.w), b.wSum / n, static_cast<unsigned long long>(b.calls),

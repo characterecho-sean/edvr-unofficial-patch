@@ -1436,6 +1436,97 @@ int wmain(int argc, wchar_t** argv) {
                           applied2[1] == -0.02,
                       "F58: the bend ramps in 0.2 s (half at 0.1 s) and out in 0.2 s; the applied angles move 5 cm of pov a call (0.1 rad on 0.5 m)");
             }
+            // F59: the square-up to the FP forward, the clavicle reach assist and its caps, the elbow-out from the arm's own shoulder, the ADS
+            // blend (0.15 s) and the ADS gate.
+            {
+                const double kDeg = nf::kIkPi / 180.0;
+                // The square-up: an upper-arm line along +x against a forward turned 30 deg right (sin 30, -0.2, cos 30): phi +30 deg (theta
+                // -30), and the line turned by phi lies on the forward's right (cos 30, 0, -sin 30); a forward straight ahead gives 0; a bladed
+                // line (40 deg) against it gives 40; a forward with no horizontal part refuses.
+                const double uL[3] = {-0.15, 1.4, 0.0}, uR[3] = {0.15, 1.4, 0.0};
+                const double f30[3] = {std::sin(30.0 * kDeg), -0.2, std::cos(30.0 * kDeg)}, f0[3] = {0.0, 0.1, 1.0}, fUp[3] = {0.0, 1.0, 0.05};
+                const double bR[3] = {0.15 * std::cos(40.0 * kDeg), 1.4, 0.15 * std::sin(40.0 * kDeg)},
+                             bL[3] = {-0.15 * std::cos(40.0 * kDeg), 1.4, -0.15 * std::sin(40.0 * kDeg)};
+                double phi30 = 0.0, phi0 = 7.0, phiUp = 7.0, phiB = 0.0;
+                const bool ok30 = nf::ikSquareToForward(uL, uR, f30, &phi30), ok0 = nf::ikSquareToForward(uL, uR, f0, &phi0),
+                           okUp = nf::ikSquareToForward(uL, uR, fUp, &phiUp), okB = nf::ikSquareToForward(bL, bR, f0, &phiB);
+                double Rsq[9], lr[3];
+                const double upAx[3] = {0.0, 1.0, 0.0}, line[3] = {0.3, 0.0, 0.0};
+                nf::ikRotAxis(upAx, phi30, Rsq);
+                nf::bendApply(line, Rsq, lr);
+                check(ok30 && std::fabs(phi30 - 30.0 * kDeg) < 1e-9 && std::fabs(lr[0] / 0.3 - std::cos(30.0 * kDeg)) < 1e-9 &&
+                          std::fabs(lr[2] / 0.3 + std::sin(30.0 * kDeg)) < 1e-9 && ok0 && std::fabs(phi0) < 1e-12 && okB &&
+                          std::fabs(std::fabs(phiB) - 40.0 * kDeg) < 1e-9 && !okUp && phiUp == 0.0,
+                      "F59: the square-up turns the upper-arm line square to the FP forward (30 deg right: phi +30, onto its right; bladed 40: "
+                      "40); a forward with no horizontal part refuses");
+                // The reach assist: l1 + l2 = 0.55 m, the threshold 0.97 of it (0.5335 m): in reach 0; 0.55 m asks excess + 3 cm (4.65 cm);
+                // 0.70 m asks the 10 cm cap.
+                double ex0 = 7.0, ex1 = 0.0, ex2 = 0.0;
+                const double m0 = nf::ikAssistReachMove(0.50, 0.30, 0.25, &ex0), m1 = nf::ikAssistReachMove(0.55, 0.30, 0.25, &ex1),
+                             m2 = nf::ikAssistReachMove(0.70, 0.30, 0.25, &ex2);
+                check(m0 == 0.0 && ex0 == 0.0 && std::fabs(ex1 - 0.0165) < 1e-12 && std::fabs(m1 - 0.0465) < 1e-12 && std::fabs(ex2 - 0.1665) < 1e-12 &&
+                          std::fabs(m2 - 0.10) < 1e-12,
+                      "F59: the clavicle assist asks min(excess + 3 cm, 10 cm) past 0.97 of the arm's reach (0 in reach, 4.65 cm, the 10 cm cap)");
+                // Its turn about the clavicle: 10 cm forward on a 15 cm clavicle is 33.7 deg, capped at 25; 3 cm is 11.3 deg and lands S on
+                // the asked direction; 0.5 mm and a push along the clavicle turn nothing.
+                const double C[3] = {0.0, 1.4, 0.0}, S[3] = {0.15, 1.4, 0.0};
+                const double dBig[3] = {0.0, 0.0, 0.10}, dSmall[3] = {0.0, 0.0, 0.03}, dTiny[3] = {0.0, 0.0, 0.0005}, dRad[3] = {0.05, 0.0, 0.0};
+                double Rb[9], Rs[9], Rt[9], Rr[9], angB = 0.0, angS = 0.0, angT = 7.0, angR = 7.0;
+                bool capB = false, capS = true, capT = true, capR = true;
+                const bool okBig = nf::ikAssistRot(C, S, dBig, Rb, &angB, &capB), okSmall = nf::ikAssistRot(C, S, dSmall, Rs, &angS, &capS),
+                           okTiny = nf::ikAssistRot(C, S, dTiny, Rt, &angT, &capT), okRad = nf::ikAssistRot(C, S, dRad, Rr, &angR, &capR);
+                const double cs[3] = {S[0] - C[0], S[1] - C[1], S[2] - C[2]};
+                double sb[3], ss[3];
+                nf::bendApply(cs, Rb, sb);
+                nf::bendApply(cs, Rs, ss);
+                check(okBig && capB && std::fabs(angB - 25.0 * kDeg) < 1e-9 && std::fabs(nf::ikLen(sb) - 0.15) < 1e-9 &&
+                          std::fabs(std::atan2(sb[2], sb[0]) - 25.0 * kDeg) < 1e-9 && okSmall && !capS &&
+                          std::fabs(angS - std::atan2(0.03, 0.15)) < 1e-9 && std::fabs(std::atan2(ss[2], ss[0]) - std::atan2(0.03, 0.15)) < 1e-9 &&
+                          !okTiny && angT == 0.0 && Rt[0] == 1.0 && !okRad && angR == 0.0 && nf::kIkAssistMaxDeg == 25.0,
+                      "F59: the assist turns the arm about the clavicle toward the asked shoulder move, capped at 25 deg (10 cm on 15 cm: 33.7 -> "
+                      "25); a 0.5 mm or a radial push turns nothing");
+                // The elbow-out clamp from the arm's own shoulder: a right arm (S.x 0.3) whose pole puts the elbow inboard (x about 0.12: the
+                // midline rule passed it) is clamped out to S.x + 6 cm; the left arm mirrored likewise; the default is 6 cm.
+                const double lU = 0.30, lF = 0.25;
+                const double SRt[3] = {0.3, 1.4, 0.0}, TRt[3] = {0.3, 1.4, 0.4}, poleIn[3] = {-1.0, -0.2, 0.0};
+                const double SLt[3] = {-0.3, 1.4, 0.0}, TLt[3] = {-0.3, 1.4, 0.4}, poleInL[3] = {1.0, -0.2, 0.0};
+                const nf::IkTwoBone tR = nf::ikTwoBoneFrame(SRt, TRt, lU, lF, poleIn), tL = nf::ikTwoBoneFrame(SLt, TLt, lU, lF, poleInL);
+                double E0r[3], Er[3], El[3];
+                tR.elbowAt(0.0, E0r);
+                bool clR = false, clL = false;
+                tR.elbowAt(nf::ikSwivelClamp(tR, 0.0, 1.0, &clR), Er);
+                tL.elbowAt(nf::ikSwivelClamp(tL, 0.0, -1.0, &clL), El);
+                check(E0r[0] > 0.06 && nf::ikElbowOutOf(E0r, SRt, 1.0) < 0.0 && clR && nf::ikElbowOutOf(Er, SRt, 1.0) >= 0.06 - 1e-9 &&
+                          Er[1] <= SRt[1] + 1e-9 && clL && nf::ikElbowOutOf(El, SLt, -1.0) >= 0.06 - 1e-9 && El[1] <= SLt[1] + 1e-9 &&
+                          nf::kIkElbowOutM == 0.06 && nf::kIkElbowOutCmDefault == 6.0,
+                      "F59: the elbow-out clamp measures from the arm's own shoulder (an inboard elbow the midline passed is clamped to S.x + 6 cm, "
+                      "both sides); the default is 6 cm");
+                // The ADS blend: 0.15 s in (14 frames at 90 Hz, half at 0.075 s) and out; the gate relaxes from 0.35..0.8 m to 0.6..1.2 m;
+                // the sliders lerp; a NaN slider takes its default.
+                nf::IkBlend ab{0.0f, nf::kIkAdsRampSec};
+                const double dt = 1.0 / 90.0;
+                int framesIn = 0, framesOut = 0;
+                while (ab.w < 1.0f && framesIn < 100) {
+                    ab.step(true, dt);
+                    ++framesIn;
+                }
+                while (ab.w > 0.0f && framesOut < 100) {
+                    ab.step(false, dt);
+                    ++framesOut;
+                }
+                nf::IkBlend half{0.0f, nf::kIkAdsRampSec};
+                half.step(true, 0.0375);
+                half.step(true, 0.0375);
+                check(framesIn >= 13 && framesIn <= 14 && framesOut >= 13 && framesOut <= 14 && std::fabs(half.w - 0.5f) < 1e-5f &&
+                          std::fabs(nf::ikDistanceGateAds(0.5f, 0.0f) - 0.3f / 0.45f) < 1e-6f && nf::ikDistanceGateAds(0.5f, 1.0f) == 1.0f &&
+                          std::fabs(nf::ikDistanceGateAds(1.0f, 1.0f) - 0.2f / 0.6f) < 1e-6f && nf::ikDistanceGateAds(1.0f, 0.0f) == 0.0f &&
+                          std::fabs(nf::ikDistanceGateAds(0.9f, 0.5f) - 0.1f / 0.525f) < 1e-5f &&
+                          nf::ikDistanceGateAds(std::numeric_limits<float>::quiet_NaN(), 1.0f) == 0.0f &&
+                          std::fabs(nf::ikLerp(0.10, 0.06, 0.5) - 0.08) < 1e-12 &&
+                          nf::ikClampOr(std::numeric_limits<double>::quiet_NaN(), 0.0, 10.0, 3.0) == 3.0 && nf::ikClampOr(12.0, 0.0, 10.0, 3.0) == 10.0,
+                      "F59: the ADS weight ramps in 0.15 s (half at 0.075 s) and out; the gate relaxes to 0.6..1.2 m with it; the sliders lerp and "
+                      "clamp (NaN takes the default)");
+            }
             // The shift rule: a record at the AMC origin moves by d once; a second pass over it leaves it alone; a record elsewhere never moves.
             const float origin[3] = {10.0f, 2.0f, -3.0f}, d[3] = {0.0f, 0.231f, 0.0f};
             float rec[3] = {10.0f, 2.0f, -3.0f}, other[3] = {10.5f, 2.0f, -3.0f};
