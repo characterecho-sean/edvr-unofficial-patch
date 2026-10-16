@@ -1689,6 +1689,9 @@ void inputGateSetPrivate(bool priv) {
 
 bool inputGatePrivate() { return g_private.load() != 0; }
 
+static std::atomic<unsigned> g_pluginReleases{0};   // true->false transitions this session; reset when the gate shuts down
+static constexpr unsigned kPluginReleaseLogCap = 5;
+
 // The one place plugin ownership ends: an explicit clear, a fault or shutdown that
 // clears it for the plugin, and the lease running out all arrive here.
 static void releasePluginBlock(const char* why) {
@@ -1697,7 +1700,10 @@ static void releasePluginBlock(const char* why) {
     // Keys still held now were the plugin's, not the game's: they wait for release like the menu's
     // closing keys do (captureReleaseTail), so clearing the block does not turn them into game input.
     guarded("inputGate/captureReleaseTail-plugin", [&] { captureReleaseTail(g_tailReader); });
-    Log::get().note("keyboard gate: plugin input ownership released (%s).", why);
+    // An addon that takes and drops input every few frames would write a line per release for the whole session:
+    // the first few say why, the rest are counted and summarised at shutdown.
+    const unsigned n = g_pluginReleases.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (n <= kPluginReleaseLogCap) Log::get().note("keyboard gate: plugin input ownership released (%s).", why);
 }
 
 void inputGateSetPluginBlock(bool block) {
@@ -1858,6 +1864,9 @@ void inputGateShutdown() {
     g_private.store(0);
     g_pluginBlock.store(false);
     g_pluginLease.store(0);
+    if (const unsigned released = g_pluginReleases.exchange(0, std::memory_order_relaxed)) {
+        Log::get().note("keyboard gate: plugin input ownership released %u times this session.", released);
+    }
     g_userDoorsInstalled = false;
     g_summon.store(0);
     g_releaseTail.store(false);

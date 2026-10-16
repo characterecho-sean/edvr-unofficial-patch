@@ -8,6 +8,8 @@ static HWND WINAPI testGetForegroundWindow() { return testPadForeground; }
 #undef GetForegroundWindow
 
 #include <array>
+#include <filesystem>
+#include <fstream>
 #include <string>
 
 #include "../../src/d3d11/loaded_module_match.h"
@@ -355,6 +357,8 @@ void loadedModuleMatchCases() {
 // The executable's own import of XInputGetState from xinput9_1_0.dll, which the controller door patches in the real game. Taking the
 // address keeps the linker from dropping the import.
 DWORD (WINAPI* volatile keepPadImport)(DWORD, XINPUT_STATE*) = &XInputGetState;
+
+static void releaseLogCases();
 
 int main() {
     (void)keepPadImport;
@@ -994,6 +998,42 @@ int main() {
         inputGateShutdown();
         check(!g_pluginBlock.load(), "shutdown clears a block still held");
     }
+    releaseLogCases();
     printf("\nINPUT GATE TEST %s\n", failures ? "FAILED" : "PASSED");
     return failures ? 1 : 0;
+}
+
+// PR #92 review follow-up: the release line is logged for the first five releases only, and the shutdown says the total.
+// (Its own function: main holds __try frames, which cannot share a function with objects that unwind.)
+static void releaseLogCases() {
+    {
+        inputGateShutdown();   // earlier cases' releases are summarised (and the count reset) before this log opens
+        wchar_t tmp[MAX_PATH]{};
+        GetTempPathW(MAX_PATH, tmp);
+        const std::filesystem::path dir = std::filesystem::path(tmp) / (L"edvr_igt_log_" + std::to_wstring(GetCurrentProcessId()));
+        std::error_code ec;
+        std::filesystem::remove_all(dir, ec);
+        check(Log::get().open(dir.wstring(), L"igt"), "(the rig's log opens to capture the release lines)");
+        for (int i = 0; i < 7; ++i) {
+            inputGateSetPluginBlock(true);
+            inputGateSetPluginBlock(false);
+        }
+        inputGateSetPluginBlock(false);   // not a transition: no line, no count
+        inputGateShutdown();
+        Log::get().close();
+        int releaseLines = 0, summaryLines = 0;
+        bool summaryIsSeven = false;
+        for (const auto& f : std::filesystem::directory_iterator(dir)) {
+            std::ifstream in(f.path());
+            std::string line;
+            while (std::getline(in, line)) {
+                if (line.find("keyboard gate: plugin input ownership released (") != std::string::npos) ++releaseLines;
+                if (line.find("keyboard gate: plugin input ownership released 7 times this session.") != std::string::npos) summaryIsSeven = true;
+                if (line.find("times this session") != std::string::npos) ++summaryLines;
+            }
+        }
+        check(releaseLines == 5, "seven releases log five lines, then stay silent");
+        check(summaryLines == 1 && summaryIsSeven, "shutdown logs one summary line with the total of seven");
+        std::filesystem::remove_all(dir, ec);
+    }
 }
