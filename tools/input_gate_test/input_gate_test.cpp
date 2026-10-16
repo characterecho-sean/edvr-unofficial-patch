@@ -8,6 +8,9 @@ static HWND WINAPI testGetForegroundWindow() { return testPadForeground; }
 #undef GetForegroundWindow
 
 #include <array>
+#include <string>
+
+#include "../../src/d3d11/loaded_module_match.h"
 
 using namespace edvr;
 
@@ -308,6 +311,47 @@ HRESULT readStickRows(Stick& s, DIDEVICEOBJECTDATA (&out)[6], DWORD& count, DWOR
 }
 }
 
+// The LoadLibrary shortcut's matching decision (loaded_module_match.h) against a fake module list that answers like
+// GetModuleHandleEx(0): a bare name matches any loaded file of that name, a path matches only that exact file.
+struct FakeModule {
+    const wchar_t* path;
+    HMODULE handle;
+};
+const FakeModule kFakeModules[] = {
+    {L"c:\\a\\same_name.dll", reinterpret_cast<HMODULE>(0x1000)},
+    {L"c:\\windows\\system32\\advapi32.dll", reinterpret_cast<HMODULE>(0x2000)},
+};
+HMODULE fakeLookupW(const wchar_t* name) {
+    std::wstring want(name);
+    const bool bare = want.find_first_of(L"\\/") == std::wstring::npos;
+    for (const FakeModule& m : kFakeModules) {
+        std::wstring have(m.path);
+        if (bare) have = have.substr(have.find_last_of(L'\\') + 1);
+        if (_wcsicmp(have.c_str(), want.c_str()) == 0) return m.handle;
+    }
+    return nullptr;
+}
+HMODULE fakeLookupA(const char* name) {
+    return fakeLookupW(std::wstring(name, name + strlen(name)).c_str());
+}
+void loadedModuleMatchCases() {
+    const HMODULE a = kFakeModules[0].handle, adv = kFakeModules[1].handle;
+    check(matchLoadedModule(L"advapi32.dll", fakeLookupW) == adv, "wide: a bare basename returns the preloaded module");
+    check(matchLoadedModule(L"advapi32", fakeLookupW) == adv, "wide: a bare name without an extension still matches");
+    check(matchLoadedModule(L"c:\\a\\same_name.dll", fakeLookupW) == a, "wide: a qualified path that is loaded matches");
+    check(matchLoadedModule(L"c:\\b\\same_name.dll", fakeLookupW) == nullptr,
+          "wide: a qualified miss with a basename collision does not match the other module");
+    check(matchLoadedModule(L"c:/b/same_name.dll", fakeLookupW) == nullptr,
+          "wide: a forward-slash qualified miss does not match either");
+    check(matchLoadedModule(L"b\\same_name", fakeLookupW) == nullptr,
+          "wide: a relative qualified miss without an extension does not match");
+    check(matchLoadedModule("advapi32.dll", fakeLookupA) == adv, "ansi: a bare basename returns the preloaded module");
+    check(matchLoadedModule("c:\\a\\same_name.dll", fakeLookupA) == a, "ansi: a qualified path that is loaded matches");
+    check(matchLoadedModule("c:\\b\\same_name.dll", fakeLookupA) == nullptr,
+          "ansi: a qualified miss with a basename collision does not match the other module");
+    check(matchLoadedModule("", fakeLookupA) == nullptr, "ansi: an empty request matches nothing");
+}
+
 // The executable's own import of XInputGetState from xinput9_1_0.dll, which the controller door patches in the real game. Taking the
 // address keeps the linker from dropping the import.
 DWORD (WINAPI* volatile keepPadImport)(DWORD, XINPUT_STATE*) = &XInputGetState;
@@ -315,6 +359,7 @@ DWORD (WINAPI* volatile keepPadImport)(DWORD, XINPUT_STATE*) = &XInputGetState;
 int main() {
     (void)keepPadImport;
     padHookCases();
+    loadedModuleMatchCases();
     auto dummyTable = deviceTable(), table1 = deviceTable(), table2 = deviceTable();
     auto ftable1 = factoryTable(), ftable2 = factoryTable();
     Device dummy{dummyTable.data()}, keyboard{table1.data()}, second{table2.data()};

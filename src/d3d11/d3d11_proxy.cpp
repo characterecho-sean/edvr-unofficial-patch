@@ -33,6 +33,7 @@
 #include "flat_wrapper_note.h"
 #include "format_support_log.h"
 #include "input_gate.h"
+#include "loaded_module_match.h"
 #include "vr_ssaa_hold.h"  // vrSsaaHoldEarlyInstall: the Supersampling hold's hooks at DLL load
 #include "mode_watch.h"    // modeWatchStart: the 3D mode watch, started after the profile lines
 #include "oculus_route.h"
@@ -89,46 +90,20 @@ edvr::IatPatch g_patchExeLoadLibraryW;
 edvr::IatPatch g_patchExeLoadLibraryExA;
 edvr::IatPatch g_patchExeLoadLibraryExW;
 
+// The matching decision lives in loaded_module_match.h (tested in input_gate_test): a qualified path that
+// misses goes to the real loader instead of matching another module by basename.
 HMODULE findLoadedModuleW(LPCWSTR name) {
-    if (!name || !*name) return nullptr;
-    HMODULE mod = nullptr;
-    if (GetModuleHandleExW(0, name, &mod) && mod) return mod;
-
-    const wchar_t* leaf = wcsrchr(name, L'\\');
-    if (!leaf) leaf = wcsrchr(name, L'/');
-    if (leaf && *(leaf + 1)) {
-        if (GetModuleHandleExW(0, leaf + 1, &mod) && mod) return mod;
-        name = leaf + 1;
-    }
-
-    if (!wcschr(name, L'.')) {
-        wchar_t buf[MAX_PATH];
-        if (swprintf_s(buf, L"%s.dll", name) > 0) {
-            if (GetModuleHandleExW(0, buf, &mod) && mod) return mod;
-        }
-    }
-    return nullptr;
+    return edvr::matchLoadedModule(name, [](LPCWSTR n) -> HMODULE {
+        HMODULE mod = nullptr;
+        return (GetModuleHandleExW(0, n, &mod) && mod) ? mod : nullptr;
+    });
 }
 
 HMODULE findLoadedModuleA(LPCSTR name) {
-    if (!name || !*name) return nullptr;
-    HMODULE mod = nullptr;
-    if (GetModuleHandleExA(0, name, &mod) && mod) return mod;
-
-    const char* leaf = strrchr(name, '\\');
-    if (!leaf) leaf = strrchr(name, '/');
-    if (leaf && *(leaf + 1)) {
-        if (GetModuleHandleExA(0, leaf + 1, &mod) && mod) return mod;
-        name = leaf + 1;
-    }
-
-    if (!strchr(name, '.')) {
-        char buf[MAX_PATH];
-        if (sprintf_s(buf, "%s.dll", name) > 0) {
-            if (GetModuleHandleExA(0, buf, &mod) && mod) return mod;
-        }
-    }
-    return nullptr;
+    return edvr::matchLoadedModule(name, [](LPCSTR n) -> HMODULE {
+        HMODULE mod = nullptr;
+        return (GetModuleHandleExA(0, n, &mod) && mod) ? mod : nullptr;
+    });
 }
 
 HMODULE WINAPI hookedLoadLibraryW(LPCWSTR lpLibFileName) {
