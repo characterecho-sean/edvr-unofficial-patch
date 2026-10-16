@@ -2136,5 +2136,19 @@ struct AdsSightGrowth {
     }
     uint64_t runMs(uint64_t ms) const noexcept { return growing && ms > startMs ? ms - startMs : 0; }
 };
+
+// ---- F64 (TEMPORARY slider): the eye height, pure half ---------------------------------------------------------------------------------
+// The F63 flight: standing, the eye sat 4.2 cm below the 3P pov point and the spine bend hid it by leaning. fix.native_on_foot_eye_height_cm
+// (0..15 cm in 0.5 steps, default 4) raises the eye in full-3P body mode only (body align body, the FP body hidden, the body unclipped): the
+// eye alignment carries raiseSeated(h) (seated y = -h; body = -seated in y, so the camera rises by h), h = the slider x the ramp (in over
+// kEyeHeightRampSec in full 3P, out over it otherwise) x (1 - the ADS head-aim weight), so it fades as ADS engages (the sight lock owns ADS).
+constexpr double kEyeHeightDefaultCm = 4.0, kEyeHeightMaxCm = 15.0, kEyeHeightRampSec = 0.3;
+inline double eyeHeightClampCm(double cm) noexcept { return ikClampOr(cm, 0.0, kEyeHeightMaxCm, kEyeHeightDefaultCm); }
+// The applied raise in metres: the slider (cm, clamped) x the ramp (0..1) x (1 - the ADS weight (0..1; NaN is 0)).
+inline double eyeHeightM(double cm, double ramp, double adsW) noexcept {
+    const double r = !(ramp == ramp) ? 0.0 : ramp < 0.0 ? 0.0 : ramp > 1.0 ? 1.0 : ramp;
+    const double a = !(adsW == adsW) ? 0.0 : adsW < 0.0 ? 0.0 : adsW > 1.0 ? 1.0 : adsW;
+    return eyeHeightClampCm(cm) / 100.0 * r * (1.0 - a);
+}
 }  // namespace nofoot
 }  // namespace edvr

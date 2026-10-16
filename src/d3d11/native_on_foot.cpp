@@ -132,6 +132,10 @@ double g_fitWeaponKeyLast = nofoot::kFitWeaponDefault;
 // limits (forward and back 8, roll 6 deg while it is above 0).
 std::atomic<float> g_fitLateralKey{static_cast<float>(nofoot::kFitLateralDefault)};
 double g_fitLateralKeyLast = nofoot::kFitLateralDefault;
+// F64 (TEMPORARY slider): fix.native_on_foot_eye_height_cm (0..15 cm, default 4), the eye raise in full-3P body mode (alignTick); the key
+// reader's last value.
+std::atomic<float> g_eyeHeightCm{static_cast<float>(nofoot::kEyeHeightDefaultCm)};
+double g_eyeHeightCmLast = nofoot::kEyeHeightDefaultCm;
 std::atomic<float> g_fitBendW{0.0f};
 // F58 (TEMPORARY): the spine bend. The key (fix.native_on_foot_spine_bend, on by default; it acts only in full-3P body mode) and the amount
 // slider, the frame thread's 0.2 s ramp and run flag (the key on in full-3P body mode, or the ramp or its hold still running), read by the
@@ -830,6 +834,19 @@ void readKey() {
                                 "to 0.35 m); the horizontal pull at most 12 cm", lat, fit);
             g_fitLateralKeyLast = lat;
             g_fitLateralKey.store(static_cast<float>(lat), std::memory_order_relaxed);
+        }
+        // F64 (TEMPORARY, live, the Native on foot page's slider): Eye height (0..15 cm, default 4): the eye raised in full-3P body mode only
+        // (the F63 flight put it 4.2 cm below the 3P pov standing), ramped over 0.3 s, fading as the ADS head-aim engages.
+        {
+            const double cm = nofoot::eyeHeightClampCm(
+                static_cast<double>(cfg.getFloat("fix.native_on_foot_eye_height_cm", static_cast<float>(nofoot::kEyeHeightDefaultCm))));
+            if (first || cm != g_eyeHeightCmLast)
+                Log::get().note("native on foot eye height (F64, TEMPORARY slider): fix.native_on_foot_eye_height_cm = %.1f -- in full-3P body mode "
+                                "only (body align body, the FP body hidden, the body unclipped) the eye alignment raises the view by %.1f cm (seated "
+                                "y -%.3f m), ramped over %.1f s, times (1 - the ADS head-aim weight); zero outside full 3P",
+                                cm, cm, cm / 100.0, nofoot::kEyeHeightRampSec);
+            g_eyeHeightCmLast = cm;
+            g_eyeHeightCm.store(static_cast<float>(cm), std::memory_order_relaxed);
         }
         // F58 (TEMPORARY, live): the spine bend toward the head: on (the default) or off. It acts only in full-3P body mode (body align = body
         // with fix.native_on_foot_hide_fp_body and fix.native_on_foot_body_unclip on); the amount slider (0..1, default 1) scales it.
@@ -7069,6 +7086,15 @@ uint64_t g_f59bAgeMax = 0;
 // F59b: the eye - neck residual from the census neck (plus d) in body axes, summed per frame for the 1 s line.
 double g_f59bCenSum[3] = {}, g_f59bCenNorm = 0.0;
 uint32_t g_f59bCenN = 0;
+// F64 (TEMPORARY slider, frame thread only): the eye height's ramp (0.3 s; zeroed outside full 3P), this tick's applied raise (metres, the
+// eye alignment's seated y is minus it), whether full 3P held last tick, and the 1 s line's sums: the raise per tick, and per census frame
+// (f58BendFrame, the F59b residual) the eye - neck up with the raise applied at that frame.
+nofoot::IkBlend g_f64Ramp{0.0f, nofoot::kEyeHeightRampSec};
+double g_f64EyeM = 0.0;
+int g_f64OnLast = -1;
+uint64_t g_f64LineMs = 0;
+uint32_t g_f64N = 0, g_f64UpN = 0;
+double g_f64RaiseSum = 0.0, g_f64UpSum = 0.0, g_f64UpRaiseSum = 0.0;
 // F60 (TEMPORARY slider, frame thread only but the key): the body fitted to the weapon. The slider fix.native_on_foot_body_fit_weapon (0..1),
 // the 0.3 s ramp (in while a weapon or tool is held and every gate holds, out otherwise), this tick's fit (slider x ramp), the hook's last
 // publication (held while the ramp runs out), the head's and the fitted target of this tick (body axes) and the 1 s line's sums.
@@ -8042,21 +8068,69 @@ void alignTick(uint64_t now) noexcept {
         }
     }
     adsSightTick(now, dt, sIn);   // F63: the ADS sight lock (the right eye onto the sight line; zero outside ADS)
+    // F64: the eye height: full-3P body mode with native stereo on foot only; ramped in over 0.3 s, times (1 - the ADS head-aim weight) so it
+    // fades as ADS engages (the sight lock owns ADS); zero at once outside full 3P (nothing changes there).
+    const bool f64On = f58Full3P && nativeOnFootActive();
+    if (f64On) {
+        g_f64Ramp.step(true, dt);
+        g_f64EyeM = nofoot::eyeHeightM(static_cast<double>(g_eyeHeightCm.load(std::memory_order_relaxed)), static_cast<double>(g_f64Ramp.w), g_adsW);
+    } else {
+        g_f64Ramp.w = 0.0f;
+        g_f64EyeM = 0.0;
+    }
     // The eye align: the view run (g_align: the active run in view and calibrate, decaying to zero in body) plus the raise's seated term (zero
     // outside body mode once the raise has returned). One serial, g_align's, as before.
+    double eyeHS[3] = {};
     {
         double raiseS[3] = {};
         nofoot::raiseSeated(g_f51Applied, raiseS);
+        nofoot::raiseSeated(g_f64EyeM, eyeHS);   // F64: the eye height (seated y = -h raises the camera by h)
         double eye[3] = {}, eyeChange = 0.0;
         for (size_t i = 0; i < 3; ++i) {
-            // F62b: the ADS head-aim's position lock; F63: the ADS sight lock (both zero outside ADS)
-            eye[i] = g_align.applied[i] + raiseS[i] + g_adsLock[i] + g_adsSight.applied[i];
+            // F62b: the ADS head-aim's position lock; F63: the ADS sight lock (both zero outside ADS); F64: the eye height (zero outside full 3P)
+            eye[i] = g_align.applied[i] + raiseS[i] + g_adsLock[i] + g_adsSight.applied[i] + eyeHS[i];
             eyeChange = std::max(eyeChange, std::fabs(eye[i] - g_f51EyePub[i]));
         }
         if (eyeChange > 1e-6) {
             for (size_t i = 0; i < 3; ++i) g_f51EyePub[i] = eye[i];
             const float f[3] = {static_cast<float>(eye[0]), static_cast<float>(eye[1]), static_cast<float>(eye[2])};
             nativeFrameSetEyeAlign(f, ++g_align.serial);
+        }
+    }
+    // F64: the eye height's lines: a change of full 3P (on, or off and why), and once a second while on: the slider, the ramp, the ADS weight,
+    // the raise applied (this tick and the mean), the seated y, and the eye - neck up (the F59b census residual: the job camera less the census
+    // neck plus d, body axes) after the raise and before it (after less the raise at that frame).
+    if ((f64On ? 1 : 0) != g_f64OnLast) {
+        if (g_f64OnLast >= 0 || f64On) {
+            const char* why = f64On ? nullptr : !f58Full3P ? full3PWhy() : "native stereo on foot is not active";
+            Log::get().note("native on foot eye height (F64): %s%s", f64On ? "on (full-3P body mode): ramping in over 0.3 s" : "off, zero: ",
+                            f64On ? "" : (why ? why : "not full-3P body mode"));
+        }
+        g_f64OnLast = f64On ? 1 : 0;
+        g_f64LineMs = now;
+        g_f64N = g_f64UpN = 0;
+        g_f64RaiseSum = g_f64UpSum = g_f64UpRaiseSum = 0.0;
+    }
+    if (f64On) {
+        g_f64RaiseSum += g_f64EyeM;
+        ++g_f64N;
+        if (now - g_f64LineMs >= 1000) {
+            g_f64LineMs = now;
+            const double n = g_f64N ? static_cast<double>(g_f64N) : 1.0;
+            char up[200];
+            if (g_f64UpN) {
+                const double un = static_cast<double>(g_f64UpN);
+                std::snprintf(up, sizeof(up), "after %+.1f cm, before %+.1f cm (after less the raise at each frame; %u census frames)",
+                              100.0 * g_f64UpSum / un, 100.0 * (g_f64UpSum - g_f64UpRaiseSum) / un, g_f64UpN);
+            } else {
+                std::snprintf(up, sizeof(up), "no census frame this second (no fresh AMC sample with the neck)");
+            }
+            Log::get().note("native on foot eye height (F64, key %.1f cm): ramp %.2f, ADS head-aim weight %.2f; raise applied %.1f cm now, %.1f cm mean "
+                            "over %u ticks; seated y %+.1f cm; eye - neck up (body axes; the job camera less the census neck plus d): %s",
+                            static_cast<double>(g_eyeHeightCm.load(std::memory_order_relaxed)), static_cast<double>(g_f64Ramp.w), g_adsW,
+                            100.0 * g_f64EyeM, 100.0 * g_f64RaiseSum / n, g_f64N, 100.0 * eyeHS[1], up);
+            g_f64N = g_f64UpN = 0;
+            g_f64RaiseSum = g_f64UpSum = g_f64UpRaiseSum = 0.0;
         }
     }
     if (mode == 2 && (now - g_f51LogMs >= 1000 || g_f51LogMs == 0)) {
@@ -10412,6 +10486,9 @@ void f58BendFrame(uint64_t now, double dt, int mode, bool full3P, bool ads, cons
             for (size_t i = 0; i < 3; ++i) g_f59bCenSum[i] += r[i];
             g_f59bCenNorm += nrm;
             ++g_f59bCenN;
+            g_f64UpSum += r[1];   // F64: the eye - neck up with the eye height applied (after), and the raise at this frame
+            g_f64UpRaiseSum += g_f64EyeM;
+            ++g_f64UpN;
         }
     } else if (!full3P && (g_f59bCenN || g_f59bAgeMax || g_f59bN[0] || g_f59bN[1] || g_f59bN[2] || g_f59bN[3])) {
         for (size_t i = 0; i < 4; ++i) g_f59bN[i] = 0;   // outside full 3P nothing is counted; the next entry's first line starts clean
@@ -11431,7 +11508,7 @@ constexpr double kDefaultTargetSize = 2016.0;                 // the marker targ
 constexpr uint32_t kMatchHold = drawtag::kMatchHoldFrames;
 constexpr uint32_t kStreamWinEntries = 8192;   // F63: the instance stream's CPU shadow: entries copied per eye window at each Unmap (64 KB)
 constexpr uint32_t kResRing = 128;             // F63: the per-frame residual ring per eye (the waypoint series' CSV reads it)
-constexpr double kGateNdc = drawtag::kPatchGateNdc;   // F62c: |dx|, |dy| under 0.1 NDC (F50..F53: 0.05; F47: 0.1 on P's own delta)
+constexpr double kGateNdc = drawtag::kPatchGateNdc;   // F64: |dx|, |dy| under 0.4 NDC (F62c: 0.1; F50..F53: 0.05; F47: 0.1 on P's own delta)
 constexpr double kLagStdMaxPx = 0.5;     // F50: no patch until the eye's baseline is seeded and its standard deviation is under this
 constexpr double kLagPitchSpreadPx = 2.0;   // F50: the honesty check: c by head pitch / roll differing by more than this is "not constant"
 constexpr uint32_t kLagBinMinN = 30;     // F50: a pitch or roll bin counts toward the honesty check from this many slow-head frames
@@ -11500,7 +11577,7 @@ struct Rec {
     bool watched = false, findsNow = false;   // bound to a watched pool; that pool had a find this frame or the last
     bool cpuRows = false;                // the CPU shadow of b0 rows 4..7 at the draw
     float cpu[16] = {};
-    bool fixApplied = false, fixHeld = false;
+    bool fixApplied = false, fixNewest = false;   // F64: fixNewest: patched through the eye's newest scene rows (one frame older)
     float fixDx = 0.0f, fixDy = 0.0f;    // the applied delta (NDC)
     float fixCx = 0.0f, fixCy = 0.0f;    // F50: the baseline c the delta was taken against (NDC)
     float fixHead = -1.0f;               // F50: the head's speed at the decision (deg/s; -1 unknown)
@@ -11547,8 +11624,9 @@ struct EyeStats {
     // F47 item 4: the same through the patched rows (the private b0, staged after its write).
     uint64_t rN = 0;
     double rxSum = 0.0, rySum = 0.0, rxMax = 0.0, ryMax = 0.0;
-    // F47 at the draw: applied, held, and why not.
-    uint64_t fPatched = 0, fHeld = 0, fUnmatched[2] = {}, fOtherDraw = 0, fRanged = 0, fNoRows = 0, fNoOrigin = 0, fNoWorld = 0, fNoP = 0,
+    // F47 at the draw: applied, and why not. F64: fNewest, the patches bound through the eye's newest scene rows (one frame older; F62c's
+    // one-frame hold of the last delta is gone).
+    uint64_t fPatched = 0, fNewest = 0, fUnmatched[2] = {}, fOtherDraw = 0, fRanged = 0, fNoRows = 0, fNoOrigin = 0, fNoWorld = 0, fNoP = 0,
              fBehind = 0, fGate = 0, fBind = 0;
     // F47 at read-back: the patched draw read the record (the prediction held) or not; the CPU b0 rows against the GPU copy.
     uint64_t predHit = 0, predMiss = 0, cpuAgree = 0, cpuDiffer = 0;
@@ -11557,10 +11635,19 @@ struct EyeStats {
     // F53: c is the fixed icon offset e. At read-back: |marker - (P + e)| through the patched rows (px) by the same bins.
     uint64_t lagN[4] = {}, lagTaken = 0, lagResets = 0, resN[4] = {};
     double lagSum[4] = {}, lagMax[4] = {}, resSum[4] = {}, resMax[4] = {};
-    // F62c at the draw (drawtag::patchDecide): decisions by the fresh delta's verdict (kPatchUnmatched once per eye-frame), the ones the
-    // one-frame hold patched anyway, and the refusals before the verdict (ranged b0, no CPU b0 rows, no CPU o_hud).
-    uint64_t pWhy[drawtag::kPatchWhyCount] = {}, pHeld = 0, pOther = 0;
+    // F62c at the draw (drawtag::patchDecide): decisions by the verdict (kPatchUnmatched once per eye-frame), F64: the applied ones that went
+    // through the eye's newest rows, and the refusals before the verdict (ranged b0, no CPU b0 rows, no CPU o_hud).
+    uint64_t pWhy[drawtag::kPatchWhyCount] = {}, pNewest = 0, pOther = 0;
     uint32_t pUnmatchedFrame = ~0u;
+    // F64: the success tally (drawtag::EyeFrameTally: marker-visible eye-frames by head speed band, applied or not, fresh / newest / none).
+    // The eye-frames whose scene rows were not this frame's at a decision (once per eye-frame): the rows' age (1 accepted as newest, 2,
+    // 3..10, over 10, never), the cause in this frame's world draws of the eye (StaleWhy), the scene refusals in those eye-frames (by
+    // drawtag::SceneRefWhy), and the b1 Unmap stamp of the rows' b1 against the draw's frame (this frame, the frame before, older, unknown);
+    // the last such eye-frame's three stamps.
+    drawtag::EyeFrameTally f64;
+    uint32_t staleFrame = ~0u;
+    uint64_t notNow = 0, rowsAge[5] = {}, staleWhy[5] = {}, staleRefused[4] = {}, unmapAge[4] = {};
+    uint32_t lastDraw = ~0u, lastRows = ~0u, lastUnmap = ~0u;
     // F63 at the draw: decisions whose match came from the CPU identification (same frame) or from a held match; held decisions whose P and
     // X0 came from the hold's fallback (the key's last P, the held record read at this frame's Unmap); contradictions by the CPU identification.
     // At read-back: holds confirmed and contradicted. The residual of fresh patched frames against P + e (the fixed e): its mean and max.
@@ -11593,7 +11680,7 @@ struct KeyWin {
     uint32_t ordMask[2] = {};
     uint64_t lagN[2][4] = {}, resN[2][4] = {};
     double lagSum[2][4] = {}, lagMax[2][4] = {}, resSum[2][4] = {}, resMax[2][4] = {};
-    uint64_t decided[2] = {}, patched[2] = {}, held[2] = {}, stale[2] = {}, gate[2] = {}, resets[2] = {}, otherUnmatched[2] = {};
+    uint64_t decided[2] = {}, patched[2] = {}, newest[2] = {}, stale[2] = {}, gate[2] = {}, resets[2] = {}, otherUnmatched[2] = {};
 };
 // F53: one distinct cb1 rows 270..273 content a census eye-frame saw, by the vertex and pixel shader that read it, and whether that draw
 // passed the scene reference's test (drawtag::sceneRefWhy).
@@ -11744,26 +11831,40 @@ struct CbShadow {
 };
 CbShadow g_cbShadow[kCbShadows];
 uint32_t g_cbShadowNext = 0;
-// An eye's world view this frame from engine motion's CB shadow (the CPU's: a staged one is not known until its read-back).
+// An eye's world view this frame from engine motion's CB shadow (the CPU's: a staged one is not known until its read-back). F64: the eye's
+// newest; the b1 it came from (identity only), for the b1 Unmap stamp of the stale-rows line.
 struct CpuWorld {
     uint32_t frame = ~0u;
     float rows[16] = {};
     float o[4] = {};
+    const void* cb1 = nullptr;
 };
 CpuWorld g_cpuWorld[2];
 // F52: an eye's temporal reference this frame: the world rows with the temporal pass's camera rotation for the eye (drawtag::swapRotation),
 // at the world rows' o.
 CpuWorld g_tempRef[2];
+// F64: why an eye's scene rows are not this frame's at a marker draw. Each eye-frame's world draws (worldDraw) leave a note: the eye-sized
+// world draws given the eye, the ones refused as scene rows (by drawtag::SceneRefWhy), the tries cap, the scene draws tried, and the ones
+// staged for the GPU copy because their b1 had no CPU rows (known at read-back only; a staged copy also ends the eye's tries for the frame).
+// The cause at a marker draw is the first that holds: no world draw of the eye yet this frame; a scene draw staged without CPU rows; the tries
+// cap; every one refused as scene rows; other (a scene draw tried and neither the CPU rows nor a staged copy came of it).
+struct RowsNote {
+    uint32_t frame = ~0u;
+    uint32_t draws = 0, scene = 0, refused[4] = {}, capped = 0, staged = 0;
+};
+RowsNote g_rowsNote[2];
+enum StaleWhy : int { kStaleNoEyeDraw = 0, kStaleStaged, kStaleCapped, kStaleNotScene, kStaleOther, kStaleWhyCount };
+const char* const kStaleWhyName[kStaleWhyCount] = {"no world draw of the eye yet this frame", "a scene draw staged without CPU rows",
+                                                   "the eye's tries cap", "every world draw of the eye refused as scene rows", "other"};
+static_assert(kStaleWhyCount == 5, "EyeStats::staleWhy holds one count per StaleWhy");
 // An eye's match: the matching draw's place among the eye's marker composite draws and the record it read. F52: one per key per eye
 // (KeyState). F63: drawtag::HeldMatch, held 90 frames from its newest confirmation (a read-back or the CPU identification at the draw),
-// dropped early only by contradicting evidence.
-// An eye's last good delta (held one frame on a miss). F52: one per key per eye. F62c: drawtag::patchDecide's hold.
-using Good = drawtag::PatchHold;
+// dropped early only by contradicting evidence. F64: no delta is held (F62c's one-frame hold is gone).
 uint32_t g_ordFrame = ~0u;
 uint16_t g_ordEye[2] = {}, g_ordAll = 0;
 // The decision the draw tee made for this draw, and the binding Begin made for it.
 struct Fix {
-    bool pending = false, bound = false, held = false;
+    bool pending = false, bound = false, newest = false;   // F64: newest: the delta went through the eye's newest rows (one frame older)
     uint64_t serial = 0;
     ID3D11DeviceContext* ctx = nullptr;   // identity only
     const void* cb0 = nullptr;            // identity only: the b0 the tee saw
@@ -11775,7 +11876,7 @@ struct Fix {
     double cx = 0.0, cy = 0.0, head = -1.0;   // F50: the baseline the delta was taken against, the head's speed at the decision
     int keySlot = -1;                     // F52: the key slot the decision was made for
     int ref = 0;                          // F52: the reference it measured against (drawtag::RefMode)
-    bool fresh = false;                   // F63: this frame's find gave P and X0 and the delta is fresh (not the one-frame hold)
+    bool fresh = false;                   // F63: this frame's find gave P and X0; F64: and the rows are this frame's (not the newest rows)
     float rows45[8] = {};                 // rows 4 and 5, moved
     ID3D11Buffer* saved = nullptr;        // the game's b0 while ours is bound (a reference held)
 };
@@ -11803,7 +11904,7 @@ struct LagEye {
         for (int i = 0; i < 2; ++i) rollN[i] = 0, rollSum[i][0] = rollSum[i][1] = 0.0;
     }
 };
-// F52: a tag key's state per eye: its read-back match, its baseline, its last good delta; and the record it was last found at.
+// F52: a tag key's state per eye: its read-back match, its baseline; and the record it was last found at (F64: no last good delta).
 // F63: the match is held (drawtag::HeldMatch) with the pool its record lives in, and the held record's position as this frame's pool Unmap
 // wrote it (the hold's X0 when the key has no find this frame).
 struct KeyEye {
@@ -11812,7 +11913,6 @@ struct KeyEye {
     float x0Now[3] = {};
     uint32_t x0Frame = ~0u;
     LagEye lag;
-    Good good;
 };
 struct KeyState {
     KeyEye eye[2];
@@ -12792,19 +12892,29 @@ void worldDraw(ID3D11DeviceContext* ctx, uint32_t frame, uint64_t vs, bool censu
         return;
     }
     const int e = t->eye;
+    // F64: this eye-frame's note for the stale-rows line (fixed-size, no allocation).
+    RowsNote& rn = g_rowsNote[e];
+    if (rn.frame != frame) {
+        rn = RowsNote{};
+        rn.frame = frame;
+    }
+    ++rn.draws;
     const uint64_t ps = bindingShaderHash(BindSlot::Ps);
     const int sceneWhy = drawtag::sceneRefWhy(vs, ps, eyeOfDraw(frame) >= 0);
     if (census) rowCensusNote(ctx, e, vs, ps, sceneWhy == drawtag::kSceneOk);
     if (g_worldOk[e] == frame) return;
     if (sceneWhy != drawtag::kSceneOk) {
         ++g_win.sceneRefused[sceneWhy];
+        if (sceneWhy > 0 && sceneWhy < 4) ++rn.refused[sceneWhy];
         return;
     }
     if (t->tries >= kWorldTriesPerEye) {
         ++g_win.worldTriesCapped;
+        ++rn.capped;
         return;
     }
     ++t->tries;
+    ++rn.scene;
     ID3D11Buffer* cb1 = nullptr;
     UINT f1 = 0;
     vsConstants(ctx, 1, &cb1, &f1);
@@ -12821,6 +12931,7 @@ void worldDraw(ID3D11DeviceContext* ctx, uint32_t frame, uint64_t vs, bool censu
         g_cpuWorld[e].frame = frame;
         std::memcpy(g_cpuWorld[e].rows, v.rows, sizeof(v.rows));
         std::memcpy(g_cpuWorld[e].o, v.o, sizeof(v.o));
+        g_cpuWorld[e].cb1 = cb1;   // F64: identity only (the b1 Unmap stamp)
         ++g_win.worldShadow;
         ok = true;
     } else if (!covers(cb1, f1 * 16 + kWorldOffset, kWorldBytes)) {
@@ -12856,6 +12967,7 @@ void worldDraw(ID3D11DeviceContext* ctx, uint32_t frame, uint64_t vs, bool censu
             ++g_win.recs;
             g_win.stagedBytes += kWorldBytes;
             ++g_win.worldStaged;
+            ++rn.staged;   // F64: no CPU rows from this b1 this frame, and the eye's tries end here
             ok = true;
         }
     }
@@ -13212,7 +13324,8 @@ void refTick(int e, uint32_t frame, double W, double H) {
 
 // F47: the correction's decision at a marker composite draw (the tee, the game's bindings): sets g_fix.pending for this draw, or counts why
 // not. Nothing is bound here; Begin binds. F52: per key: the draw is the one whose place in the eye a key's fresh read-back match names; that
-// key must be matched in both eyes; its own baseline, last good delta and find are used; the eye's reference is world_first or temporal.
+// key must be matched in both eyes; its own baseline and find are used; the eye's reference is world_first or temporal (F64: no last good
+// delta; the eye's newest scene rows within one frame instead).
 void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot, size_t recIndex, ID3D11Buffer* b0Plain, const float* oHud,
                const CbShadow* sh, const Find* cpuFind) {
     if (r.eye != 0 && r.eye != 1) {
@@ -13249,6 +13362,8 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
         ks = static_cast<int>(i);
         ++s.viaHold;
     }
+    // F64: a key's match names this draw: the marker is visible in this eye-frame (counted once, as none until a bound patch upgrades it).
+    if (ks >= 0) s.f64.visible(frame, g_headDps);
     // F63: the both-eyes rule accepts a held match for the other eye.
     if (ks < 0 || !g_keys[ks].eye[1 - e].hold.held(frame)) {
         const int u = ks < 0 ? e : 1 - e;
@@ -13328,7 +13443,6 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
     // F50: the eye's baseline, reset when the frustum it was taken under changes (b0 row 5 or row 7 scale, the target's size) or the eye's
     // matched draw moves to another place (the eye assignment). F52: one per key per eye; also reset when the eye's reference changes.
     LagEye& L = K.eye[e].lag;
-    Good& good = K.eye[e].good;
     const double W = r.tw ? static_cast<double>(r.tw) : kDefaultTargetSize, H = r.th ? static_cast<double>(r.th) : kDefaultTargetSize;
     // F53: e, the fixed icon offset; F63: the patch aims at e less the eye's measured bias (drawtag::BiasEma; zero until fresh patched frames
     // have been read back).
@@ -13369,8 +13483,32 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
         L.ord = match.ord;
         L.refEpoch = g_refEpoch[e];
     }
-    const bool sceneFresh = w.frame == frame;
-    if (!sceneFresh) {
+    // F64: the eye's newest scene rows stand in for this frame's when they are at most one frame older than the draw (the delta is computed
+    // through them; nothing is carried over from an earlier decision); older or none: stale.
+    const int rowsState = drawtag::sceneRowsState(w.frame, frame);
+    if (rowsState != drawtag::kRowsFresh && s.staleFrame != frame) {
+        // F64: why the stamps differ (once per eye-frame): the rows' age, the cause in this frame's world draws of the eye, and the b1 Unmap
+        // stamp (the cb1 census's newest Unmap of the b1 the eye's newest rows came from) against this draw's frame.
+        s.staleFrame = frame;
+        ++s.notNow;
+        const int32_t age = w.frame == ~0u ? -1 : static_cast<int32_t>(frame - w.frame);
+        ++s.rowsAge[age == 1 ? 0 : age == 2 ? 1 : (age >= 3 && age <= 10) ? 2 : age > 10 ? 3 : 4];
+        const RowsNote& rn = g_rowsNote[e];
+        const bool noteNow = rn.frame == frame && rn.draws > 0;
+        const int cause = !noteNow ? kStaleNoEyeDraw : rn.staged ? kStaleStaged : (rn.scene == 0 && rn.capped) ? kStaleCapped
+                                                                               : rn.scene == 0 ? kStaleNotScene : kStaleOther;
+        ++s.staleWhy[cause];
+        if (noteNow)
+            for (int k = 1; k < 4; ++k) s.staleRefused[k] += rn.refused[k];
+        const V2Buf* b1 = w.cb1 ? v2Find(w.cb1) : nullptr;
+        const uint32_t unmapAt = b1 ? b1->contentFrame : ~0u;
+        const int32_t uAge = unmapAt == ~0u ? -1 : static_cast<int32_t>(frame - unmapAt);
+        ++s.unmapAge[uAge == 0 ? 0 : uAge == 1 ? 1 : uAge > 1 ? 2 : 3];
+        s.lastDraw = frame;
+        s.lastRows = w.frame;
+        s.lastUnmap = unmapAt;
+    }
+    if (rowsState == drawtag::kRowsNone) {
         ++s.fNoWorld;
         ++kw.stale[e];
     } else if (!haveP) {
@@ -13380,11 +13518,11 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
         const double X0[3] = {fX0[0], fX0[1], fX0[2]};
         // F53: the target is ndc(P through the eye's scene rows) + e, e the fixed icon offset (drawtag::iconOffsetNdc); the learned baseline
         // (F50) is dropped from the decision and kept, updated below, for the log only. F63: the delta aims at e less the bias (cUsed); the
-        // |m - e| bins below stay against the fixed e.
+        // |m - e| bins below stay against the fixed e. F64: the measures below take this frame's rows only (newest rows carry a frame's lag).
         const double* c = eFix;
         double lag[2] = {};
         why = drawtag::ndcLagDelta(w.rows, ow, sh->rows[4], sh->rows[5], sh->rows[7], oh, X0, P, cUsed, kGateNdc, lag, &dx, &dy);
-        if ((why == drawtag::kDeltaOk || why == drawtag::kDeltaGate) && L.lastFrame != frame) {
+        if ((why == drawtag::kDeltaOk || why == drawtag::kDeltaGate) && rowsState == drawtag::kRowsFresh && L.lastFrame != frame) {
             L.lastFrame = frame;
             // |m - c| by the head's speed (against the c the delta used: F53 e), the baseline's update (logged only), the honesty bins (every
             // slow-head frame; reported against e).
@@ -13424,14 +13562,14 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
             ++s.fBehind;
         }
     }
-    // F62c: patch when the rows are fresh, P is found, both w > 0 and |d| < 0.1 NDC; else the last good delta for one frame; else refuse.
-    const drawtag::PatchVerdict v = drawtag::patchDecide(true, true, sceneFresh, haveP, why, dx, dy, frame, good);
+    // F64: patch when the rows are this frame's or the eye's newest at most one frame older, P is found, both w > 0 and |d| < 0.4 NDC; else
+    // refuse (no delta is held over from an earlier frame).
+    const drawtag::PatchVerdict v = drawtag::patchDecide(true, true, rowsState, haveP, why, dx, dy);
     if (v.why >= 0 && v.why < drawtag::kPatchWhyCount) ++s.pWhy[v.why];
-    if (v.held) ++s.pHeld;
+    if (v.newest) ++s.pNewest;
     if (!v.patch) return;
     dx = v.dx;
     dy = v.dy;
-    const bool held = v.held;
     float r4[4], r5[4];
     std::memcpy(r4, sh->rows[4], sizeof(r4));
     std::memcpy(r5, sh->rows[5], sizeof(r5));
@@ -13439,12 +13577,12 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
     // F53: the c the delta was taken against is e; F63: e less the eye's bias (the read-back's residual is taken against this, the EMA's input).
     g_fix.cx = cUsed[0];
     g_fix.cy = cUsed[1];
-    g_fix.fresh = !held && f != nullptr;   // F63: this frame's find gave P and X0 and the delta is this frame's: the bias may learn from it
+    g_fix.fresh = !v.newest && f != nullptr;   // F63: this frame's find gave P and X0 (F64: through this frame's rows): the bias may learn from it
     g_fix.head = g_headDps;
     g_fix.keySlot = ks;
     g_fix.ref = ref;
     g_fix.pending = true;
-    g_fix.held = held;
+    g_fix.newest = v.newest;
     g_fix.serial = g_drawSerial;
     g_fix.ctx = ctx;
     g_fix.cb0 = b0Plain;
@@ -14017,7 +14155,7 @@ void readFrame(int slot, uint32_t frame, const uint8_t* d, uint32_t used) {
                 appendf(line, sizeof(line), len, "; CPU record %u (%s)", r.cpuRec,
                         r.cpuKind == 1 ? "a find" : r.cpuKind == 2 ? "the held record, untagged" : "untagged");
             if (r.fixApplied) appendf(line, sizeof(line), len, "; PATCHED dx %+.5f dy %+.5f NDC%s", double(r.fixDx), double(r.fixDy),
-                                      r.fixHeld ? " (held)" : "");
+                                      r.fixNewest ? " (newest rows)" : "");
             appendf(line, sizeof(line), len, "]");
         }
     }
@@ -14238,30 +14376,31 @@ void report(uint64_t nowMs) {
                               s.rxSum / double(s.rN), s.rxMax, s.rySum / double(s.rN), s.ryMax, ull(s.rN));
             else std::snprintf(res, sizeof(res), "no patched pair this second");
             Log::get().note("native on foot marker fix (F47, key %s): eye %d: P through the world rows minus P through the marker rows (unpatched): "
-                            "%s; head %s; patched %llu draws (held %llu); after the patch (F53: X0 through the patched rows minus (P + e)): %s; not "
-                            "applied: eye 0 unmatched %llu, eye 1 unmatched %llu, another draw of the eye %llu, ranged b0 %llu, no CPU b0 rows %llu, no "
-                            "CPU o_hud %llu, no CPU scene rows this frame %llu, no P %llu, w <= 0 %llu, gate (|d| >= %.2f NDC) %llu, bind "
-                            "refused %llu; the patched draw read the record at read-back %llu, did not %llu; CPU b0 rows 4..7 against the GPU copy: "
-                            "agree %llu, differ %llu (max %.3g)",
-                            fixOn ? "on" : "off", e, meas, head, ull(s.fPatched), ull(s.fHeld), res, ull(s.fUnmatched[0]), ull(s.fUnmatched[1]),
+                            "%s; head %s; patched %llu draws (through the newest rows %llu); after the patch (F53: X0 through the patched rows "
+                            "minus (P + e)): %s; not applied: eye 0 unmatched %llu, eye 1 unmatched %llu, another draw of the eye %llu, ranged b0 "
+                            "%llu, no CPU b0 rows %llu, no CPU o_hud %llu, no CPU scene rows within a frame %llu, no P %llu, w <= 0 %llu, gate (|d| "
+                            ">= %.2f NDC) %llu, bind refused %llu; the patched draw read the record at read-back %llu, did not %llu; CPU b0 rows "
+                            "4..7 against the GPU copy: agree %llu, differ %llu (max %.3g)",
+                            fixOn ? "on" : "off", e, meas, head, ull(s.fPatched), ull(s.fNewest), res, ull(s.fUnmatched[0]), ull(s.fUnmatched[1]),
                             ull(s.fOtherDraw), ull(s.fRanged), ull(s.fNoRows), ull(s.fNoOrigin), ull(s.fNoWorld), ull(s.fNoP),
                             ull(s.fBehind), kGateNdc, ull(s.fGate), ull(s.fBind), ull(s.predHit), ull(s.predMiss), ull(s.cpuAgree), ull(s.cpuDiffer),
                             s.cpuDiffMax);
             // F62c, with the fix key on: the patch-applied fraction (draws bound at the issue over decisions) and every decision's verdict.
-            // A decision is one key's matched draw in the eye, or one eye-frame with no key matched. The refusals sum with the fresh patches
-            // to the decisions; the one-frame hold patched some of the stale, no-P, w and |d| refusals anyway.
+            // A decision is one key's matched draw in the eye, or one eye-frame with no key matched. The refusals sum with the applied ones
+            // to the decisions. F64: no delta is held; the applied ones include those through the eye's newest rows (one frame older).
             if (fixOn) {
                 uint64_t decisions = s.pOther;
                 for (int k = 0; k < drawtag::kPatchWhyCount; ++k) decisions += s.pWhy[k];
                 if (decisions)
-                    Log::get().note("native on foot marker fix (F62c): eye %d: patch applied %.1f%% (%llu of %llu decisions bound at the issue, "
-                                    "%llu held); decided: fresh %llu; refused: scene rows stale %llu, record not matched %llu (eye-frames), both-eyes "
-                                    "rule not met %llu, w not positive %llu, |d| over %.2f NDC %llu, no P %llu, other (ranged b0, no CPU b0 rows, no "
-                                    "CPU o_hud) %llu; one-frame hold used %llu; bind refused %llu",
-                                    e, 100.0 * double(s.fPatched) / double(decisions), ull(s.fPatched), ull(decisions), ull(s.fHeld),
-                                    ull(s.pWhy[drawtag::kPatchApplied]), ull(s.pWhy[drawtag::kPatchStale]), ull(s.pWhy[drawtag::kPatchUnmatched]),
-                                    ull(s.pWhy[drawtag::kPatchBothEyes]), ull(s.pWhy[drawtag::kPatchW]), drawtag::kPatchGateNdc,
-                                    ull(s.pWhy[drawtag::kPatchGate]), ull(s.pWhy[drawtag::kPatchNoP]), ull(s.pOther), ull(s.pHeld), ull(s.fBind));
+                    Log::get().note("native on foot marker fix (F62c/F64): eye %d: patch applied %.1f%% (%llu of %llu decisions bound at the issue, "
+                                    "%llu through the newest rows); decided: applied %llu (newest rows %llu); refused: scene rows stale (none within "
+                                    "%u frame) %llu, record not matched %llu (eye-frames), both-eyes rule not met %llu, w not positive %llu, |d| over "
+                                    "%.2f NDC %llu, no P %llu, other (ranged b0, no CPU b0 rows, no CPU o_hud) %llu; bind refused %llu",
+                                    e, 100.0 * double(s.fPatched) / double(decisions), ull(s.fPatched), ull(decisions), ull(s.fNewest),
+                                    ull(s.pWhy[drawtag::kPatchApplied]), ull(s.pNewest), drawtag::kSceneRowsMaxAge, ull(s.pWhy[drawtag::kPatchStale]),
+                                    ull(s.pWhy[drawtag::kPatchUnmatched]), ull(s.pWhy[drawtag::kPatchBothEyes]), ull(s.pWhy[drawtag::kPatchW]),
+                                    drawtag::kPatchGateNdc, ull(s.pWhy[drawtag::kPatchGate]), ull(s.pWhy[drawtag::kPatchNoP]), ull(s.pOther),
+                                    ull(s.fBind));
                 else
                     Log::get().note("native on foot marker fix (F62c): eye %d: no decision this second (no marker composite draw of the eye reached "
                                     "the fix)", e);
@@ -14277,6 +14416,44 @@ void report(uint64_t nowMs) {
                                 e, ull(s.viaCpu), kMatchHold, ull(s.viaHold), ull(s.heldPX0), ull(s.cpuContradict), ull(s.rbContradict),
                                 ull(s.rbConfirm), ull(s.eN), s.exSum / rn, s.eySum / rn, s.eMax, g_bias[e].b[0] * bw * 0.5, g_bias[e].b[1] * bh * 0.5,
                                 drawtag::kBiasAlpha, ull(g_bias[e].n));
+                // F64, the success line (marker-visible seconds only): the applied fraction of the eye-frames in which a key's match named a
+                // marker composite draw of the eye, by the head's speed band, and those eye-frames by state (a patch bound at the issue through
+                // this frame's rows, through the eye's newest rows one frame older, or none).
+                const drawtag::EyeFrameTally& t = s.f64;
+                if (t.total()) {
+                    static const char* const kBand[drawtag::kSpeedBands] = {"0..30", "30..90", ">= 90", "unknown"};
+                    char bands[400];
+                    size_t bl = 0;
+                    bands[0] = 0;
+                    for (int b = 0; b < drawtag::kSpeedBands; ++b) {
+                        const int n = t.frames[b]
+                                          ? std::snprintf(bands + bl, sizeof(bands) - bl, "%s%s deg/s %llu of %llu (%.1f%%)", b ? ", " : "", kBand[b],
+                                                          ull(t.applied[b]), ull(t.frames[b]), 100.0 * double(t.applied[b]) / double(t.frames[b]))
+                                          : std::snprintf(bands + bl, sizeof(bands) - bl, "%s%s deg/s none", b ? ", " : "", kBand[b]);
+                        if (n > 0) bl = std::min(sizeof(bands) - 1, bl + static_cast<size_t>(n));
+                    }
+                    Log::get().note("native on foot marker fix (F64): eye %d: applied by head speed (marker-visible eye-frames, a patch bound at the "
+                                    "issue): %s; eye-frames: fresh %llu, newest rows (one frame older) %llu, none %llu; eye-frames with no key "
+                                    "matched (not counted above) %llu",
+                                    e, bands, ull(t.inState[drawtag::kRowsFresh]), ull(t.inState[drawtag::kRowsNewest]),
+                                    ull(t.inState[drawtag::kRowsNone]), ull(s.pWhy[drawtag::kPatchUnmatched]));
+                }
+                // F64, why the stamps differ: the eye-frames whose scene rows were not this frame's at a decision (accepted within a frame or
+                // refused), the rows' age, the cause in this frame's world draws of the eye, the scene refusals in those eye-frames, and the b1
+                // Unmap stamp (the cb1 census's newest Unmap of the b1 the eye's newest rows came from) against the marker draw's frame.
+                if (s.notNow)
+                    Log::get().note("native on foot marker fix (F64): eye %d: scene rows not this frame's in %llu eye-frames: rows age 1 frame "
+                                    "(accepted) %llu, 2 %llu, 3..10 %llu, over 10 %llu, never %llu; cause in this frame's world draws of the eye: %s "
+                                    "%llu, %s %llu, %s %llu, %s %llu, %s %llu; refused as scene rows in those eye-frames: the first-person body's PS "
+                                    "%llu, not the scene depth view %llu, not a scene geometry VS %llu; the b1 Unmap stamp against the marker draw's "
+                                    "frame: this frame %llu, the frame before %llu, older %llu, unknown (the b1 not in the cb1 census) %llu; last: "
+                                    "marker draw frame %u, rows frame %d, b1 Unmap frame %d",
+                                    e, ull(s.notNow), ull(s.rowsAge[0]), ull(s.rowsAge[1]), ull(s.rowsAge[2]), ull(s.rowsAge[3]), ull(s.rowsAge[4]),
+                                    kStaleWhyName[0], ull(s.staleWhy[0]), kStaleWhyName[1], ull(s.staleWhy[1]), kStaleWhyName[2],
+                                    ull(s.staleWhy[2]), kStaleWhyName[3], ull(s.staleWhy[3]), kStaleWhyName[4], ull(s.staleWhy[4]),
+                                    ull(s.staleRefused[1]), ull(s.staleRefused[2]), ull(s.staleRefused[3]), ull(s.unmapAge[0]), ull(s.unmapAge[1]),
+                                    ull(s.unmapAge[2]), ull(s.unmapAge[3]), s.lastDraw, s.lastRows == ~0u ? -1 : static_cast<int>(s.lastRows),
+                                    s.lastUnmap == ~0u ? -1 : static_cast<int>(s.lastUnmap));
             }
         }
         // F63: the CPU identification's second (the fix key on): the stream shadow and what it named, and the read-back's verdict on it.
@@ -14355,14 +14532,14 @@ void report(uint64_t nowMs) {
                                 "e, e (fixed icon offset, %.1f px up) (%+.5f, %+.5f) NDC = (%+.2f, "
                                 "%+.2f) px at %.0fx%.0f; the learned baseline (F50, logged only, not applied) c (%+.5f, %+.5f) NDC = (%+.2f, %+.2f) px, "
                                 "std %.2f px (%s, %u frames taken; resets this second %llu, last: %s); |m - e| by head speed: %s; decided %llu, patched "
-                                "%llu draws (held %llu), scene rows stale %llu, gate (|d| >= %.2f NDC) %llu, other eye unmatched %llu; after the "
+                                "%llu draws (through the newest rows %llu), scene rows stale %llu, gate (|d| >= %.2f NDC) %llu, other eye unmatched %llu; after the "
                                 "patch |marker - (P + e)| by head speed: %s; honesty check (m - e by head pitch / roll, slow head, since the last "
                                 "reset): %s; spread %.2f px (limit %.1f): %s",
                                 fixOn ? "on" : "off", g_keyIdx.key[ki], e, kw.record, ull(kw.reads[e]), kw.ordMask[e],
                                 g_refEff[e] == drawtag::kRefTemporal ? "temporal" : "world_first", drawtag::kIconPx, eOff[0], eOff[1],
                                 eOff[0] * W * 0.5, eOff[1] * H * 0.5, W, H, L.b.c[0], L.b.c[1], L.b.c[0] * W * 0.5, L.b.c[1] * H * 0.5,
                                 L.b.stdPx(W, H), L.b.ready(W, H, kLagStdMaxPx) ? "steady" : L.b.seeded ? "seeded, std too high" : "seeding", L.b.n,
-                                ull(kw.resets[e]), L.lastReset, lag, ull(kw.decided[e]), ull(kw.patched[e]), ull(kw.held[e]), ull(kw.stale[e]),
+                                ull(kw.resets[e]), L.lastReset, lag, ull(kw.decided[e]), ull(kw.patched[e]), ull(kw.newest[e]), ull(kw.stale[e]),
                                 kGateNdc, ull(kw.gate[e]), ull(kw.otherUnmatched[e]), resid, bins, spread, kLagPitchSpreadPx, verdict);
                 if (masking)
                     Log::get().note("native on foot marker fix (F53): tag key %u eye %d: m - e is not constant: e masks a moving error (the bins "
@@ -14748,14 +14925,16 @@ bool nativeOnFootMarkerFixBegin(ID3D11DeviceContext* ctx) {
     g_fix.saved = cb0;   // the reference vsB0Plain took, held until End
     g_fix.bound = true;
     ++s.fPatched;
-    if (g_fix.held) ++s.fHeld;
+    if (g_fix.newest) ++s.fNewest;
+    s.f64.bound(g_fix.frame, g_fix.newest ? drawtag::kRowsNewest : drawtag::kRowsFresh, g_fix.head);   // F64: the eye-frame is applied
     if (g_fix.keySlot >= 0 && g_fix.keySlot < static_cast<int>(kKeySlots)) {   // F52: per key
         KeyWin& kw = g_win.keys[g_fix.keySlot];
         ++kw.patched[g_fix.eye];
-        if (g_fix.held) ++kw.held[g_fix.eye];
+        if (g_fix.newest) ++kw.newest[g_fix.eye];
     }
     {
-        // F62c: the waypoint series' patch columns: the eye's last bound patch (its probe frame, key, delta, held) and the draws bound in it.
+        // F62c: the waypoint series' patch columns: the eye's last bound patch (its probe frame, key, delta; F64: fresh or newest rows) and the
+        // draws bound in it.
         MarkerCropNdc& mc = g_markerCropNdc[g_fix.eye];
         const bool same = mc.patchFrame.load(std::memory_order_relaxed) == g_fix.frame && mc.patchDraws.load(std::memory_order_relaxed) > 0;
         mc.patchDraws.store(same ? mc.patchDraws.load(std::memory_order_relaxed) + 1u : 1u, std::memory_order_relaxed);
@@ -14764,14 +14943,14 @@ bool nativeOnFootMarkerFixBegin(ID3D11DeviceContext* ctx) {
                           std::memory_order_relaxed);
         mc.patchDx.store(static_cast<float>(g_fix.dx), std::memory_order_relaxed);
         mc.patchDy.store(static_cast<float>(g_fix.dy), std::memory_order_relaxed);
-        mc.patchHeld.store(g_fix.held, std::memory_order_relaxed);
+        mc.patchNewest.store(g_fix.newest, std::memory_order_relaxed);
     }
     // Item 4: the private b0's rows 4..7 as written, staged for the re-measure; the record notes what was applied.
     if (g_fix.slot >= 0 && g_fix.slot == g_staging.openSlot() && g_recFrame[g_fix.slot] == g_fix.frame && g_fix.rec < g_recs[g_fix.slot].size()) {
         Rec& r = g_recs[g_fix.slot][g_fix.rec];
         const int64_t at = g_staging.append(ctx, g_privCb, kMarkerRowsOffset, kMarkerRowsBytes);
         r.fixApplied = true;
-        r.fixHeld = g_fix.held;
+        r.fixNewest = g_fix.newest;
         r.fixDx = static_cast<float>(g_fix.dx);
         r.fixDy = static_cast<float>(g_fix.dy);
         r.fixCx = static_cast<float>(g_fix.cx);
@@ -14786,7 +14965,7 @@ bool nativeOnFootMarkerFixBegin(ID3D11DeviceContext* ctx) {
         Log::get().note("native on foot marker fix: first patched marker composite draw (eye %d, frame %u, key slot %d, reference %s): dx %+.5f, "
                         "dy %+.5f NDC%s", g_fix.eye, g_fix.frame, g_fix.keySlot,
                         g_fix.ref == drawtag::kRefTemporal ? "temporal" : "the eye's scene rows (F62c)", g_fix.dx, g_fix.dy,
-                        g_fix.held ? " (held)" : "");
+                        g_fix.newest ? " (the eye's newest rows, one frame older)" : "");
     }
     return true;
 }

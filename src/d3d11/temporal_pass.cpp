@@ -1933,7 +1933,7 @@ void writeMarkerCrops(ID3D11DeviceContext* ctx, const std::wstring& dir) {
 // the eye's scene rows (published in the same probe frame as the capture: age 0), never on the drawn marker (read back 31..156 ms late). A
 // frame whose P is off the eye (w <= 0 or the NDC outside -1..1), or that has no P this frame, is skipped and counted (the end line, the
 // self-check). The CSV carries per frame and eye: the head's speed, ndc_P with its w, key and age, ndc_marker as drawn (the game's rows,
-// read back) with its age in ms and frames, whether the fix patched the eye this frame (fresh or held), its key, draws and dx, dy.
+// read back) with its age in ms and frames, whether the fix patched the eye this frame (fresh or, F64, newest rows), its key, draws and dx, dy.
 constexpr int kMkFrames = 16;
 constexpr uint32_t kMkCrop = drawtag::kMarkerDumpCrop;
 constexpr uint64_t kMkFreshMs = 500, kMkDeadlineMs = 10000;
@@ -1958,7 +1958,7 @@ struct MkFrame {
     uint32_t frameNow[2] = {}, pKey[2] = {}, patchKey[2] = {}, patchDraws[2] = {};
     float pW[2] = {}, head[2] = {-1.0f, -1.0f}, patchDx[2] = {}, patchDy[2] = {};
     int64_t pAgeFrames[2] = {-1, -1}, drawnAgeFrames[2] = {-1, -1};
-    int patch[2] = {};                                // 0 not patched this frame, 1 patched (fresh delta), 2 patched (held)
+    int patch[2] = {};                                // 0 not patched this frame, 1 patched (fresh rows), 2 patched (F64: newest rows)
     bool fixLive[2] = {};
     MkShot post[2], pre[2];
 };
@@ -2038,7 +2038,7 @@ void mkWrite(ID3D11DeviceContext* ctx, const char* why) {
                     const MkShot& s = pre ? m.pre[e] : m.post[e];
                     static const char* const kSrc[3] = {"none", "ndc_marker", "P"};
                     static const char* const kPick[4] = {"", "no P yet", "no P this frame", "off-screen"};
-                    static const char* const kPatch[3] = {"none", "fresh", "held"};
+                    static const char* const kPatch[3] = {"none", "fresh", "newest-rows"};   // F64: 2 = the eye's newest rows (was held)
                     const char* skip = m.pick[e] > 0 && m.pick[e] < 4 ? kPick[m.pick[e]] : m.pick[e] < 0 ? "not reached" : "";
                     const double ew = static_cast<double>(s.eyeWH[0]), eh = static_cast<double>(s.eyeWH[1]);   // set at every tried capture
                     // F63: the fix's per-frame residual against P + e (the fixed e) and the e it aimed at, from the read-back of a fresh
@@ -2069,7 +2069,7 @@ void mkWrite(ID3D11DeviceContext* ctx, const char* why) {
     const unsigned long long seq0 = g_mkCount ? static_cast<unsigned long long>(g_mk[0].seq) : 0ull,
                              seq1 = g_mkCount ? static_cast<unsigned long long>(g_mk[g_mkCount - 1].seq) : 0ull;
     // F62c: the skipped eye-frames (P off the eye, no P this frame, no P yet) and the patched ones, logged with the run.
-    int offScreen = 0, notThisFrame = 0, noP = 0, patchedFresh = 0, patchedHeld = 0;
+    int offScreen = 0, notThisFrame = 0, noP = 0, patchedFresh = 0, patchedNewest = 0;
     for (int k = 0; k < g_mkCount; ++k)
         for (int e = 0; e < 2; ++e) {
             const MkFrame& m = g_mk[k];
@@ -2077,14 +2077,14 @@ void mkWrite(ID3D11DeviceContext* ctx, const char* why) {
             else if (m.pick[e] == drawtag::kCropNotThisFrame) ++notThisFrame;
             else if (m.pick[e] == drawtag::kCropNoP) ++noP;
             if (m.patch[e] == 1) ++patchedFresh;
-            else if (m.patch[e] == 2) ++patchedHeld;
+            else if (m.patch[e] == 2) ++patchedNewest;
         }
     Log::get().note("eye capture (F62c): marker dump series %ls (%s): %d frames (sequences %llu..%llu, %s), %d of %d final crops and %d of %d "
                     "pre-composite crops written (%ux%u about this frame's P), %d write failures; eye-frames skipped: %d off-screen (P with w <= 0 "
-                    "or outside the eye's NDC), %d with no P this frame, %d with no P yet; eye-frames the fix patched: %d fresh, %d held; files "
+                    "or outside the eye's NDC), %d with no P this frame, %d with no P yet; eye-frames the fix patched: %d fresh, %d newest rows; files "
                     "%ls\\eye_%ls_marker_eye{0,1}_fNN.bmp, eye_%ls_marker_pre_eye{0,1}_fNN.bmp; eye_%ls_marker.csv %s", g_mkStamp, why,
                     g_mkCount, seq0, seq1, gaps ? "NOT consecutive" : "consecutive", finals, 2 * kMkFrames, prePosts, 2 * kMkFrames, kMkCrop,
-                    kMkCrop, failed, offScreen, notThisFrame, noP, patchedFresh, patchedHeld, dir.c_str(), g_mkStamp, g_mkStamp, g_mkStamp,
+                    kMkCrop, failed, offScreen, notThisFrame, noP, patchedFresh, patchedNewest, dir.c_str(), g_mkStamp, g_mkStamp, g_mkStamp,
                     f ? "written" : "NOT written");
     // The self-check: fewer than 32 final crops says why, per reason, and names the first missing ones.
     if (finals < 2 * kMkFrames) {
@@ -2173,7 +2173,7 @@ void mkCapture(ID3D11DeviceContext* ctx, uint64_t seq, uint32_t eye, ID3D11Textu
         m.ndcDrawn[eye][1] = c.drawn[1].load(std::memory_order_relaxed);
         m.fixLive[eye] = nativeOnFootMarkerFixLive();
         if (c.patchDraws.load(std::memory_order_relaxed) > 0 && c.patchFrame.load(std::memory_order_relaxed) == frameNow) {
-            m.patch[eye] = c.patchHeld.load(std::memory_order_relaxed) ? 2 : 1;
+            m.patch[eye] = c.patchNewest.load(std::memory_order_relaxed) ? 2 : 1;
             m.patchKey[eye] = c.patchKey.load(std::memory_order_relaxed);
             m.patchDraws[eye] = c.patchDraws.load(std::memory_order_relaxed);
             m.patchDx[eye] = c.patchDx.load(std::memory_order_relaxed);

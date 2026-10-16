@@ -744,8 +744,8 @@ int wmain(int argc, wchar_t** argv) {
             check(dOk && !dWrap && ka == 5 && kb == 133 && !dt::keysDistinct(big, 2) && !dt::keysDistinct(self, 1) && dt::keysDistinct(ok3, 0),
                   "F53: the key census finds two keys (or a key's first and second posts) that would share a sentinel");
         }
-        // F62c: the patch decision without F53's trust gate, the 0.1 NDC limit, the one-frame hold, and the waypoint series' crop about this
-        // frame's P.
+        // F62c: the patch decision without F53's trust gate and the waypoint series' crop about this frame's P. F64: the 0.4 NDC limit (was
+        // 0.1), no one-frame hold, the eye's newest rows within one frame.
         {
             // (1) The scene rows and the temporal reference 5 px apart at P (the camera turned 0.1184 deg; P 45 deg off axis, so 2.4 x the
             // turn in NDC, 5.0 px at 2016): F53's gate refused the frame; F62c patches it onto ndc(P through the scene rows) + e.
@@ -766,53 +766,81 @@ int wmain(int argc, wchar_t** argv) {
             const double x0[3] = {11.02, 2.01, 3.0};
             double lm[2] = {}, ldx = 0.0, ldy = 0.0, lmc[3];
             const int dwhy = dt::ndcLagDelta(wr, wo, m4, m5, r7, wo, x0, wp, e, dt::kPatchGateNdc, lm, &ldx, &ldy);
-            dt::PatchHold ph;
-            const dt::PatchVerdict pv = dt::patchDecide(true, true, true, true, dwhy, ldx, ldy, 100, ph);
+            const dt::PatchVerdict pv = dt::patchDecide(true, true, dt::kRowsFresh, true, dwhy, ldx, ldy);
             dt::ndcOffsetRows(m4, m5, r7, pv.dx, pv.dy);
             dt::markerClip(m4, m5, r7, x0, wo, lmc);
-            check(okT && apart > 4.5 && apart < 5.5 && !dt::sceneRowsTrusted(true, apart) && pv.patch && !pv.held && pv.why == dt::kPatchApplied &&
-                      std::fabs(lmc[0] / lmc[2] - (cs[0] / cs[3] + e[0])) < 1e-5 && std::fabs(lmc[1] / lmc[2] - (cs[1] / cs[3] + e[1])) < 1e-5 &&
-                      ph.frame == 100u,
+            check(okT && apart > 4.5 && apart < 5.5 && !dt::sceneRowsTrusted(true, apart) && pv.patch && !pv.newest && pv.why == dt::kPatchApplied &&
+                      std::fabs(lmc[0] / lmc[2] - (cs[0] / cs[3] + e[0])) < 1e-5 && std::fabs(lmc[1] / lmc[2] - (cs[1] / cs[3] + e[1])) < 1e-5,
                   "F62c: scene and temporal rows 5 px apart at P: F53's trust gate refused the frame; F62c patches it onto ndc(P through the scene "
                   "rows) + e");
-            // (2) The 0.1 NDC limit: just under it patches; at it or over it (either axis) is refused as |d| with nothing to hold; through
-            // ndcLagDelta at the patch gate, c moved so the delta is 0.0999 then 0.1001 in x.
-            dt::PatchHold h1, h2;
-            const dt::PatchVerdict under = dt::patchDecide(true, true, true, true, dt::kDeltaOk, 0.0999, -0.0999, 10, h1);
-            const dt::PatchVerdict at = dt::patchDecide(true, true, true, true, dt::kDeltaOk, 0.1, 0.0, 10, h2);
-            const dt::PatchVerdict overY = dt::patchDecide(true, true, true, true, dt::kDeltaOk, 0.0, -0.15, 11, h2);
+            // (2) F64: the 0.4 NDC limit (the F63 flight's worst real lag, about 0.15 NDC at 90 deg/s, was refused at 0.1): 0.39 patches; 0.4,
+            // 0.41 and over (either axis) are refused as |d|; through ndcLagDelta at the patch gate, c moved so the delta is 0.39 then 0.41 in
+            // x. The w > 0 and P-found tests are unchanged.
+            const dt::PatchVerdict under = dt::patchDecide(true, true, dt::kRowsFresh, true, dt::kDeltaOk, 0.39, -0.39);
+            const dt::PatchVerdict at = dt::patchDecide(true, true, dt::kRowsFresh, true, dt::kDeltaOk, 0.4, 0.0);
+            const dt::PatchVerdict over = dt::patchDecide(true, true, dt::kRowsFresh, true, dt::kDeltaOk, 0.41, 0.0);
+            const dt::PatchVerdict overY = dt::patchDecide(true, true, dt::kRowsFresh, true, dt::kDeltaOk, 0.0, -0.41);
+            const dt::PatchVerdict real = dt::patchDecide(true, true, dt::kRowsFresh, true, dt::kDeltaOk, 0.15, 0.02);
             float q4[4] = {1.2f, 0, 0.1f, 0}, q5[4] = {0, 1.1f, -0.05f, 0};
             double qm[2] = {}, qdx = 0.0, qdy = 0.0;
-            const double cA[2] = {lm[0] + 0.0999, lm[1]}, cB[2] = {lm[0] + 0.1001, lm[1]};
+            const double cA[2] = {lm[0] + 0.39, lm[1]}, cB[2] = {lm[0] + 0.41, lm[1]};
             const int wA = dt::ndcLagDelta(wr, wo, q4, q5, r7, wo, x0, wp, cA, dt::kPatchGateNdc, qm, &qdx, &qdy);
-            dt::PatchHold h3, h4;
-            const dt::PatchVerdict vA = dt::patchDecide(true, true, true, true, wA, qdx, qdy, 20, h3);
+            const dt::PatchVerdict vA = dt::patchDecide(true, true, dt::kRowsFresh, true, wA, qdx, qdy);
             const int wB = dt::ndcLagDelta(wr, wo, q4, q5, r7, wo, x0, wp, cB, dt::kPatchGateNdc, qm, &qdx, &qdy);
-            const dt::PatchVerdict vB = dt::patchDecide(true, true, true, true, wB, qdx, qdy, 20, h4);
-            check(dt::kPatchGateNdc == 0.1 && under.patch && under.why == dt::kPatchApplied && !at.patch && at.why == dt::kPatchGate &&
-                      !overY.patch && overY.why == dt::kPatchGate && wA == dt::kDeltaOk && vA.patch && std::fabs(vA.dx - 0.0999) < 1e-9 &&
-                      wB == dt::kDeltaGate && !vB.patch && vB.why == dt::kPatchGate && h4.frame == ~0u,
-                  "F62c: |dx|, |dy| under 0.1 NDC patch; 0.1 and over (either axis) are refused as |d|, with nothing to hold");
-            // (3) The one-frame hold: frame 200 patches (0.01, -0.02); 201, refused as |d|, patches with 200's delta (held); 202, refused as
-            // stale, is not patched (one frame only). Unmatched and both-eyes refusals never hold; a stale frame right after a good one does;
-            // no P and w <= 0 are their own refusals.
-            dt::PatchHold hh, hu;
-            const dt::PatchVerdict f200 = dt::patchDecide(true, true, true, true, dt::kDeltaOk, 0.01, -0.02, 200, hh);
-            const dt::PatchVerdict f201 = dt::patchDecide(true, true, true, true, dt::kDeltaGate, 0.3, 0.0, 201, hh);
-            const dt::PatchVerdict f202 = dt::patchDecide(true, true, false, true, -1, 0.0, 0.0, 202, hh);
-            const dt::PatchVerdict g300 = dt::patchDecide(true, true, true, true, dt::kDeltaOk, 0.01, 0.01, 300, hu);
-            const dt::PatchVerdict unm = dt::patchDecide(false, true, true, true, dt::kDeltaOk, 0.0, 0.0, 301, hu);
-            const dt::PatchVerdict both = dt::patchDecide(true, false, true, true, dt::kDeltaOk, 0.0, 0.0, 301, hu);
-            const dt::PatchVerdict stale = dt::patchDecide(true, true, false, true, -1, 0.0, 0.0, 301, hu);
-            const dt::PatchVerdict noP = dt::patchDecide(true, true, true, false, -1, 0.0, 0.0, 305, hu);
-            const dt::PatchVerdict wNeg = dt::patchDecide(true, true, true, true, dt::kDeltaWorldBehind, 0.0, 0.0, 306, hu);
-            const dt::PatchVerdict mNeg = dt::patchDecide(true, true, true, true, dt::kDeltaMarkerBehind, 0.0, 0.0, 307, hu);
-            check(f200.patch && !f200.held && f201.patch && f201.held && f201.why == dt::kPatchGate && f201.dx == 0.01 && f201.dy == -0.02 &&
-                      !f202.patch && f202.why == dt::kPatchStale && g300.patch && !unm.patch && unm.why == dt::kPatchUnmatched && !both.patch &&
-                      both.why == dt::kPatchBothEyes && stale.patch && stale.held && stale.why == dt::kPatchStale && stale.dx == 0.01 &&
-                      !noP.patch && noP.why == dt::kPatchNoP && !wNeg.patch && wNeg.why == dt::kPatchW && !mNeg.patch && mNeg.why == dt::kPatchW,
-                  "F62c: the last good delta is held for the one frame after it, not two; unmatched and both-eyes refusals never hold; no P "
-                  "and w <= 0 are refused");
+            const dt::PatchVerdict vB = dt::patchDecide(true, true, dt::kRowsFresh, true, wB, qdx, qdy);
+            check(dt::kPatchGateNdc == 0.4 && under.patch && under.why == dt::kPatchApplied && !at.patch && at.why == dt::kPatchGate &&
+                      !over.patch && over.why == dt::kPatchGate && !overY.patch && overY.why == dt::kPatchGate && real.patch &&
+                      wA == dt::kDeltaOk && vA.patch && std::fabs(vA.dx - 0.39) < 1e-9 && wB == dt::kDeltaGate && !vB.patch &&
+                      vB.why == dt::kPatchGate,
+                  "F64: |dx|, |dy| under 0.4 NDC patch (0.39 and the flight's 0.15 apply); 0.4, 0.41 and over (either axis) are refused as |d|");
+            // (3) F64: no one-frame hold: frame 200 patches (0.01, -0.02); 201, refused as |d|, is NOT patched with 200's delta; nor is a stale
+            // frame right after a good one. Unmatched, both-eyes, no P and w <= 0 are their own refusals, never patched.
+            const dt::PatchVerdict f200 = dt::patchDecide(true, true, dt::kRowsFresh, true, dt::kDeltaOk, 0.01, -0.02);
+            const dt::PatchVerdict f201 = dt::patchDecide(true, true, dt::kRowsFresh, true, dt::kDeltaGate, 0.5, 0.0);
+            const dt::PatchVerdict f202 = dt::patchDecide(true, true, dt::kRowsNone, true, -1, 0.0, 0.0);
+            const dt::PatchVerdict unm = dt::patchDecide(false, true, dt::kRowsFresh, true, dt::kDeltaOk, 0.0, 0.0);
+            const dt::PatchVerdict both = dt::patchDecide(true, false, dt::kRowsFresh, true, dt::kDeltaOk, 0.0, 0.0);
+            const dt::PatchVerdict noP = dt::patchDecide(true, true, dt::kRowsFresh, false, -1, 0.0, 0.0);
+            const dt::PatchVerdict wNeg = dt::patchDecide(true, true, dt::kRowsFresh, true, dt::kDeltaWorldBehind, 0.0, 0.0);
+            const dt::PatchVerdict mNeg = dt::patchDecide(true, true, dt::kRowsFresh, true, dt::kDeltaMarkerBehind, 0.0, 0.0);
+            check(f200.patch && !f200.newest && !f201.patch && f201.why == dt::kPatchGate && f201.dx == 0.0 && !f202.patch &&
+                      f202.why == dt::kPatchStale && f202.dx == 0.0 && !unm.patch && unm.why == dt::kPatchUnmatched && !both.patch &&
+                      both.why == dt::kPatchBothEyes && !noP.patch && noP.why == dt::kPatchNoP && !wNeg.patch && wNeg.why == dt::kPatchW &&
+                      !mNeg.patch && mNeg.why == dt::kPatchW,
+                  "F64: no delta is held: a |d| or stale refusal right after a good frame is not patched; unmatched, both-eyes, no P and w <= 0 "
+                  "are refused");
+            // (3b) F64: the eye's newest scene rows: this frame's are fresh; one frame older are accepted (the delta computed through them,
+            // marked newest); two frames older, none at all, or a rows frame after the draw's are refused as stale.
+            const int sFresh = dt::sceneRowsState(500, 500), sOne = dt::sceneRowsState(499, 500), sTwo = dt::sceneRowsState(498, 500),
+                      sNever = dt::sceneRowsState(~0u, 500), sAhead = dt::sceneRowsState(501, 500), sWrap = dt::sceneRowsState(0xFFFFFFFEu, 0);
+            const dt::PatchVerdict nOne = dt::patchDecide(true, true, sOne, true, dt::kDeltaOk, 0.02, -0.01);
+            const dt::PatchVerdict nTwo = dt::patchDecide(true, true, sTwo, true, dt::kDeltaOk, 0.02, -0.01);
+            const dt::PatchVerdict nOneGate = dt::patchDecide(true, true, sOne, true, dt::kDeltaOk, 0.45, 0.0);
+            check(dt::kSceneRowsMaxAge == 1u && sFresh == dt::kRowsFresh && sOne == dt::kRowsNewest && sTwo == dt::kRowsNone &&
+                      sNever == dt::kRowsNone && sAhead == dt::kRowsNone && sWrap == dt::kRowsNone && nOne.patch && nOne.newest &&
+                      nOne.why == dt::kPatchApplied && nOne.dx == 0.02 && nOne.dy == -0.01 && !nTwo.patch && nTwo.why == dt::kPatchStale &&
+                      !nOneGate.patch && nOneGate.why == dt::kPatchGate,
+                  "F64: the eye's newest scene rows one frame older than the draw are accepted (patched through them, marked newest); two "
+                  "frames older, none, or ahead of the draw are refused as stale; the gate still applies");
+            // (3c) F64: the success tally: an eye-frame is counted once by its first decision's speed band, as none until a bound patch
+            // upgrades it (fresh over newest); a second bind in the frame does not count it again; bands 0..30, 30..90, >= 90, unknown.
+            dt::EyeFrameTally tl;
+            tl.visible(10, 12.0);
+            tl.visible(10, 95.0);                  // the same eye-frame: no recount, its band stays 0..30
+            tl.bound(10, dt::kRowsNewest, 12.0);   // newest
+            tl.bound(10, dt::kRowsFresh, 12.0);    // upgraded to fresh, still one applied frame
+            tl.bound(10, dt::kRowsNewest, 12.0);   // no downgrade
+            tl.visible(11, 45.0);                  // none at 30..90
+            tl.bound(12, dt::kRowsNewest, 120.0);  // a bind with no decision first: counted at >= 90, newest
+            tl.visible(13, -1.0);                  // the head unknown
+            tl.bound(13, dt::kRowsNone, -1.0);     // not a patch: stays none
+            check(dt::speedBand(29.9) == 0 && dt::speedBand(30.0) == 1 && dt::speedBand(89.9) == 1 && dt::speedBand(90.0) == 2 &&
+                      dt::speedBand(-1.0) == 3 && dt::speedBand(std::numeric_limits<double>::quiet_NaN()) == 3 && tl.total() == 4u &&
+                      tl.frames[0] == 1u && tl.applied[0] == 1u && tl.frames[1] == 1u && tl.applied[1] == 0u && tl.frames[2] == 1u &&
+                      tl.applied[2] == 1u && tl.frames[3] == 1u && tl.applied[3] == 0u && tl.inState[dt::kRowsFresh] == 1u &&
+                      tl.inState[dt::kRowsNewest] == 1u && tl.inState[dt::kRowsNone] == 2u,
+                  "F64: the success tally counts each marker-visible eye-frame once by speed band, applied when a patch bound (fresh over "
+                  "newest), none otherwise");
             // (4) The series' crop: 1024 square about THIS frame's P (age 0). P at ndc (0.25, 0.1) in a 4032 eye: centre (2520, 1814.4),
             // box at (2008, 1302). One frame old, no P, behind (w <= 0), outside the NDC or NaN: skipped. Near the edge the box stays in the
             // eye; flipV mirrors y; the right eye of a side-by-side texture keeps its own region.
@@ -856,9 +884,8 @@ int wmain(int argc, wchar_t** argv) {
             hs.frame = 1020;
             const int stale = dt::holdEvidence(hs, 1015, 3, 12, 43, false, true);
             uint32_t patched = 0;
-            dt::PatchHold ph;
             for (uint32_t f = 1001; f <= 1090; ++f)
-                if (dt::patchDecide(h.held(f), true, true, true, dt::kDeltaOk, 0.01, 0.0, f, ph).patch) ++patched;
+                if (dt::patchDecide(h.held(f), true, dt::kRowsFresh, true, dt::kDeltaOk, 0.01, 0.0).patch) ++patched;
             // (2) A contradicting read-back drops it: the held place read record 12 while the key was tagged elsewhere; or (no find at all)
             // a record other than the held one. A read of the key's record at another place moves the hold there.
             const int contra = dt::holdEvidence(h, 1030, 3, 12, 43, false, true);
@@ -868,7 +895,7 @@ int wmain(int argc, wchar_t** argv) {
             const int contra2 = dt::holdEvidence(h3, 60, 2, 10, 43, false, false);
             dt::holdEvidence(h4, 70, 3, 8, 43, true, true);
             const int moved = dt::holdEvidence(h4, 72, 5, 8, 43, true, true);
-            const dt::PatchVerdict afterDrop = dt::patchDecide(h.held(1032), true, true, true, dt::kDeltaOk, 0.01, 0.0, 1032, ph);
+            const dt::PatchVerdict afterDrop = dt::patchDecide(h.held(1032), true, dt::kRowsFresh, true, dt::kDeltaOk, 0.01, 0.0);
             check(dt::kMatchHoldFrames == 90u && c0 == dt::kHoldConfirm && held89 && held90 && !held91 && !heldBefore && other == dt::kHoldNone &&
                       same == dt::kHoldNone && stillHeld && stale == dt::kHoldNone && hs.held(1020) && patched == 90u &&
                       contra == dt::kHoldContradict && dropped && contra2 == dt::kHoldContradict && !h3.held(60) && moved == dt::kHoldConfirm &&
@@ -2225,6 +2252,44 @@ int wmain(int argc, wchar_t** argv) {
                 }
                 check(trippedAt && when == 500u && !fallTrip && !steadyTrip && !smallTrip,
                       "F63: the sight lock's guard trips when |e perpendicular| grows for 0.5 s, not when it falls, holds or stays under 2 cm");
+            }
+            // F64: the eye height (full-3P body mode only; the frame thread zeroes it outside).
+            {
+                // (1) The seated sign: raiseSeated(h) gives seated y = -h, and through the calibration (body = -seated in y) the body (the
+                // camera) rises by +h; the same as seatedFromBody({0, h, 0}, 0). The default 4 cm is 0.04 m.
+                const double h = nf::eyeHeightM(nf::kEyeHeightDefaultCm, 1.0, 0.0);
+                double sy[3] = {}, viaBody[3] = {};
+                nf::raiseSeated(h, sy);
+                const double upB[3] = {0.0, h, 0.0};
+                nf::seatedFromBody(upB, 0.0, viaBody);
+                const double bodyY = -sy[1];
+                check(std::fabs(h - 0.04) < 1e-12 && sy[0] == 0.0 && sy[2] == 0.0 && std::fabs(sy[1] + 0.04) < 1e-12 &&
+                          std::fabs(bodyY - 0.04) < 1e-12 && std::fabs(viaBody[1] - sy[1]) < 1e-12 && viaBody[0] == 0.0 && viaBody[2] == 0.0,
+                      "F64: the eye height's seated y is minus the raise and the body (camera) rises by plus the raise (4 cm by default)");
+                // (2) The 0.3 s ramp (IkBlend at kEyeHeightRampSec): half at 0.15 s, full at 0.3 s, held at 1; down over 0.3 s the same way.
+                nf::IkBlend ramp{0.0f, nf::kEyeHeightRampSec};
+                for (int i = 0; i < 15; ++i) ramp.step(true, 0.01);
+                const double ehHalf = nf::eyeHeightM(4.0, static_cast<double>(ramp.w), 0.0);
+                for (int i = 0; i < 15; ++i) ramp.step(true, 0.01);
+                const double ehFull = nf::eyeHeightM(4.0, static_cast<double>(ramp.w), 0.0);
+                for (int i = 0; i < 10; ++i) ramp.step(true, 0.01);
+                const float ehHeld = ramp.w;
+                for (int i = 0; i < 15; ++i) ramp.step(false, 0.01);
+                const float ehDown = ramp.w;
+                check(nf::kEyeHeightRampSec == 0.3 && std::fabs(ehHalf - 0.02) < 1e-6 && std::fabs(ehFull - 0.04) < 1e-6 && ehHeld == 1.0f &&
+                          std::fabs(ehDown - 0.5f) < 1e-5f,
+                      "F64: the eye height ramps in over 0.3 s (2 cm of 4 at 0.15 s) and out the same way");
+                // (3) The ADS fade: times (1 - the ADS head-aim weight): 4 cm at 0, 2 cm at 0.5, none at 1; a weight past 1 or NaN clamps.
+                const double ehA0 = nf::eyeHeightM(4.0, 1.0, 0.0), ehA5 = nf::eyeHeightM(4.0, 1.0, 0.5), ehA1 = nf::eyeHeightM(4.0, 1.0, 1.0),
+                             ehOver = nf::eyeHeightM(4.0, 1.0, 1.5), ehNan = nf::eyeHeightM(4.0, 1.0, std::numeric_limits<double>::quiet_NaN());
+                check(std::fabs(ehA0 - 0.04) < 1e-12 && std::fabs(ehA5 - 0.02) < 1e-12 && ehA1 == 0.0 && ehOver == 0.0 &&
+                          std::fabs(ehNan - 0.04) < 1e-12,
+                      "F64: the eye height fades with the ADS head-aim weight (1 - w): 4, 2, 0 cm at w 0, 0.5, 1");
+                // (4) The slider's clamp: 0..15 cm, NaN takes the default 4; a ramp of 0 (outside full 3P) gives nothing.
+                check(nf::eyeHeightClampCm(-2.0) == 0.0 && nf::eyeHeightClampCm(20.0) == 15.0 && nf::eyeHeightClampCm(7.5) == 7.5 &&
+                          nf::eyeHeightClampCm(std::numeric_limits<double>::quiet_NaN()) == 4.0 && nf::eyeHeightM(15.0, 0.0, 0.0) == 0.0 &&
+                          std::fabs(nf::eyeHeightM(15.0, 1.0, 0.0) - 0.15) < 1e-12,
+                      "F64: the eye height slider is clamped to 0..15 cm (NaN: 4); a zero ramp applies nothing");
             }
             // The shift rule: a record at the AMC origin moves by d once; a second pass over it leaves it alone; a record elsewhere never moves.
             const float origin[3] = {10.0f, 2.0f, -3.0f}, d[3] = {0.0f, 0.231f, 0.0f};

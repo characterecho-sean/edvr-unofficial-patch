@@ -609,32 +609,40 @@ inline void iconOffsetNdc(double H, double e[2]) noexcept {
 // agreeing under 1 px) is gone: the two are not meant to agree, and it refused about 45% of frames. The target stays ndc(P through the eye's
 // scene rows) + e: the 16-frame image dump of log 034818 shows P through cb1 270..273 following the displayed world within 5..10%, and the
 // drawn marker lagging it about 1.75 frames. A draw whose key is matched in this eye and in the other is patched when the eye's scene rows
-// are this frame's, P has a find, both w > 0 and |dx|, |dy| < kPatchGateNdc; otherwise the last good delta is held for the one frame right
-// after it (past the match and both-eyes tests only, as F47); otherwise the draw is refused for the first reason that holds. `why` is the
-// fresh delta's verdict (kPatchApplied or a refusal) whether or not the hold patched the draw.
-constexpr double kPatchGateNdc = 0.1;
+// are usable (sceneRowsState), P has a find, both w > 0 and |dx|, |dy| < kPatchGateNdc; otherwise the draw is refused for the first reason
+// that holds.
+// F64: the gate is 0.4 NDC (was 0.1): the F63 flight's worst real lag, about 0.15 NDC at 90 deg/s, was refused, and the fastest frames
+// flicked 100 to 305 px. F62c's one-frame hold of the last good delta is gone: a held delta is wrong by the head's acceleration. The eye's
+// newest scene rows stand in for this frame's when they are at most kSceneRowsMaxAge frames older than the draw (the delta is computed
+// through them, never carried over); older rows, or none, refuse the draw as stale.
+constexpr double kPatchGateNdc = 0.4;
 enum PatchWhy : int {
     kPatchApplied = 0,
     kPatchUnmatched = 1,   // no key's read-back match is fresh in this eye
     kPatchBothEyes = 2,    // the key is matched in this eye but not in the other
-    kPatchStale = 3,       // the eye's scene rows are not this frame's
+    kPatchStale = 3,       // the eye's newest scene rows are more than kSceneRowsMaxAge frames older than the draw (or there are none)
     kPatchNoP = 4,         // no find of the key's P
     kPatchW = 5,           // w not positive (P behind the world view or the marker behind its own)
     kPatchGate = 6,        // |dx| or |dy| not under kPatchGateNdc
     kPatchWhyCount = 7
 };
-struct PatchHold {
-    uint32_t frame = ~0u;
-    double dx = 0.0, dy = 0.0;
-};
+// F64: the eye's scene rows at a marker draw: this frame's (fresh), the eye's newest at most kSceneRowsMaxAge frames older (newest), or none
+// usable. rowsFrame is the probe frame the rows were taken in (~0u: never); a rows frame after the draw's (a counter that went back) is none.
+constexpr uint32_t kSceneRowsMaxAge = 1;
+enum SceneRows : int { kRowsFresh = 0, kRowsNewest = 1, kRowsNone = 2, kRowsStates = 3 };
+inline int sceneRowsState(uint32_t rowsFrame, uint32_t frame) noexcept {
+    if (rowsFrame == ~0u) return kRowsNone;
+    const int32_t age = static_cast<int32_t>(frame - rowsFrame);
+    return age == 0 ? kRowsFresh : age > 0 && static_cast<uint32_t>(age) <= kSceneRowsMaxAge ? kRowsNewest : kRowsNone;
+}
 struct PatchVerdict {
     int why = kPatchUnmatched;
-    bool patch = false, held = false;
+    bool patch = false, newest = false;   // newest: patched through the eye's newest rows (one frame older), not this frame's
     double dx = 0.0, dy = 0.0;
 };
-// deltaWhy: ndcLagDelta's verdict at kPatchGateNdc (read only when the rows are fresh and P is found); dx, dy its delta.
-inline PatchVerdict patchDecide(bool matched, bool bothEyes, bool sceneFresh, bool haveP, int deltaWhy, double dx, double dy, uint32_t frame,
-                                PatchHold& hold) noexcept {
+// rows: sceneRowsState at the draw; deltaWhy: ndcLagDelta's verdict at kPatchGateNdc (read only when the rows are usable and P is found);
+// dx, dy its delta.
+inline PatchVerdict patchDecide(bool matched, bool bothEyes, int rows, bool haveP, int deltaWhy, double dx, double dy) noexcept {
     PatchVerdict v;
     if (!matched) {
         v.why = kPatchUnmatched;
@@ -644,27 +652,47 @@ inline PatchVerdict patchDecide(bool matched, bool bothEyes, bool sceneFresh, bo
         v.why = kPatchBothEyes;
         return v;
     }
-    if (!sceneFresh) v.why = kPatchStale;
+    if (rows != kRowsFresh && rows != kRowsNewest) v.why = kPatchStale;
     else if (!haveP) v.why = kPatchNoP;
     else if (deltaWhy == kDeltaWorldBehind || deltaWhy == kDeltaMarkerBehind) v.why = kPatchW;
     else if (deltaWhy != kDeltaOk || !(std::fabs(dx) < kPatchGateNdc) || !(std::fabs(dy) < kPatchGateNdc)) v.why = kPatchGate;
     else {
         v.why = kPatchApplied;
         v.patch = true;
+        v.newest = rows == kRowsNewest;
         v.dx = dx;
         v.dy = dy;
-        hold.frame = frame;
-        hold.dx = dx;
-        hold.dy = dy;
-        return v;
-    }
-    if (hold.frame != ~0u && hold.frame + 1u == frame) {
-        v.patch = v.held = true;
-        v.dx = hold.dx;
-        v.dy = hold.dy;
     }
     return v;
 }
+// F64: the success tally per eye: each eye-frame in which a key's match named one of the eye's marker composite draws (the marker visible) is
+// counted once, by the head's speed band at its first decision, as none until a patch bound at the issue upgrades it (fresh over newest).
+// The applied fraction of a band is applied / frames.
+constexpr int kSpeedBands = 4;   // 0..30, 30..90, >= 90 deg/s, the head's speed unknown
+inline int speedBand(double dps) noexcept { return !(dps >= 0.0) ? 3 : dps < 30.0 ? 0 : dps < 90.0 ? 1 : 2; }
+struct EyeFrameTally {
+    uint32_t frame = ~0u;
+    int state = kRowsNone, band = 3;
+    uint64_t frames[kSpeedBands] = {}, applied[kSpeedBands] = {}, inState[kRowsStates] = {};
+    void visible(uint32_t f, double dps) noexcept {
+        if (frame == f) return;
+        frame = f;
+        state = kRowsNone;
+        band = speedBand(dps);
+        ++frames[band];
+        ++inState[kRowsNone];
+    }
+    void bound(uint32_t f, int rows, double dps) noexcept {
+        if (rows != kRowsFresh && rows != kRowsNewest) return;
+        visible(f, dps);
+        if (rows >= state) return;
+        if (state == kRowsNone) ++applied[band];
+        --inState[state];
+        ++inState[rows];
+        state = rows;
+    }
+    uint64_t total() const noexcept { return frames[0] + frames[1] + frames[2] + frames[3]; }
+};
 
 // F63: THE HELD MATCH (fix.native_on_foot_marker_fix). F62's flight (log 054928): the patch was accurate when applied, but a read-back's match
 // went stale after 8 frames whenever the record was not copied, so the marker flicked. The match is now an identity held for kMatchHoldFrames:

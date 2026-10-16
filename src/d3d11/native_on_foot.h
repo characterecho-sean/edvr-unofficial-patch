@@ -256,7 +256,7 @@ void nativeOnFootMarkerFixEnd(ID3D11DeviceContext* ctx);
 // F62c: the waypoint series' fields. s*: this eye-frame's P through the scene rows (ndc NaN when w <= 0; w; the find's key; the head's speed
 // in deg/s, -1 unknown; the probe frame it was projected in), published at every eye-frame with scene rows and a find, in front or not.
 // drawnFrame: the probe frame of the read-back that gave `drawn`. patch*: the last marker composite draw of the eye the fix bound (its probe
-// frame, key, delta in NDC, held or fresh, and draws bound in that frame).
+// frame, key, delta in NDC, fresh or (F64) through the eye's newest scene rows one frame older, and draws bound in that frame).
 struct MarkerCropNdc {
     std::atomic<float> p[2];
     std::atomic<float> drawn[2];
@@ -266,7 +266,7 @@ struct MarkerCropNdc {
     std::atomic<uint32_t> sFrame, sKey, drawnFrame;
     std::atomic<uint32_t> patchFrame, patchKey, patchDraws;
     std::atomic<float> patchDx, patchDy;
-    std::atomic<bool> patchHeld;
+    std::atomic<bool> patchNewest;
 };
 inline MarkerCropNdc g_markerCropNdc[2];   // zero-initialised (static storage)
 // F62c: the marker probe's frame now (the frame the draws and the submits between two Presents share; the series' age-0 test).
