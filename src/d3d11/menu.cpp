@@ -2234,7 +2234,8 @@ void buildContent(MenuContent& c) {
             }
             if (e.kind == EntryKind::Approval) {
                 plugins::CandidatePlugin cand;
-                if (plugins::PluginManager::instance().candidateById(e.candidateId, &cand) && cand.conflicted) {
+                const bool found = plugins::PluginManager::instance().candidateById(e.candidateId, &cand);
+                if (found && cand.conflicted) {
                     // Several files claim this name: shown so the player can find them, with no approval to give.
                     std::string label = "[Conflict] " + cand.stem;
                     strncpy(l.left, label.c_str(), sizeof(l.left) - 1);
@@ -2244,7 +2245,7 @@ void buildContent(MenuContent& c) {
                         snprintf(c.hint, sizeof(c.hint), "More than one file in plugins\\ is named '%s'; none can load. Rename or remove all but one.",
                                  cand.stem.c_str());
                     }
-                } else if (plugins::PluginManager::instance().candidateById(e.candidateId, &cand) && !cand.approved) {
+                } else if (found && !cand.approved) {
                     std::string label = "[Approve] " + cand.stem;
                     strncpy(l.left, label.c_str(), sizeof(l.left) - 1);
                     strncpy(l.right, "approve", sizeof(l.right) - 1);

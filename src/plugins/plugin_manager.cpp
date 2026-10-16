@@ -311,10 +311,8 @@ void PluginManager::discoverAndLoad() {
             continue;
         }
         std::string approvedSha = Config::get().getString(("addons." + cand.stem).c_str(), "");
-        std::string candShaLower = cand.sha256;
-        for (char& c : candShaLower) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
-        std::string approvedShaLower = approvedSha;
-        for (char& c : approvedShaLower) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+        const std::string candShaLower = lowered(cand.sha256);
+        const std::string approvedShaLower = lowered(approvedSha);
 
         if (!approvedShaLower.empty() && approvedShaLower == candShaLower) {
             cand.approved = true;
