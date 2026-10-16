@@ -1035,6 +1035,46 @@ int main() {
             inputGateSetPrivate(false);
             check(g_trapCalls == 0, "still no call on any device beyond caps and info");
             povUnderPluginBlock(js3, "a stick on a table the keyboard door holds");
+
+            // PR #92 review: on the shared table the watch sees only the rows the game sees. Two presses are swallowed
+            // and compacted away, a release passes; the stale tail slots left behind by the compaction must not be
+            // watched as a press.
+            joyWatchReset();
+            readStick(js3, kJoyState2Size, buf);   // an ordinary read first, so the next one is not the device's first sight
+            DIDEVICEOBJECTDATA sr[6]{};
+            DWORD sn = 0;
+            js3.rows[0] = {kJoyOfsButtons + 5, 0x80, 1, 1, 0};
+            js3.rows[1] = {kJoyOfsButtons + 7, 0x80, 2, 2, 0};
+            js3.rows[2] = {kJoyOfsButtons + 3, 0, 3, 3, 0};
+            js3.rowCount = 3;
+            g_pluginBlock.store(true);
+            const HRESULT shr = readStickRows(js3, sr, sn);
+            g_pluginBlock.store(false);
+            check(shr == DI_OK && sn == 1 && sr[0].dwOfs == kJoyOfsButtons + 3,
+                  "shared table: a plugin block drops the two presses and passes the release");
+            check(!joyWatchHeld(0x231D0200, 5, stampMs()) && !joyWatchHeld(0x231D0200, 7, stampMs()),
+                  "shared table: the watch sees only the rows the game sees, not the swallowed presses");
+
+            // A short-format state read under a plugin block keeps its axes; only buttons are zeroed and hats centred.
+            uint8_t shortBuf[64];
+            memset(shortBuf, 0xCC, sizeof(shortBuf));
+            const int32_t axis = 1234;
+            memcpy(js3.state, &axis, 4);
+            js3.button(2, true);
+            js3.hat(0, 9000);
+            g_pluginBlock.store(true);
+            const HRESULT sthr = readStick(js3, 64, shortBuf);
+            g_pluginBlock.store(false);
+            int32_t gotAxis = 0;
+            memcpy(&gotAxis, shortBuf, 4);
+            uint32_t gotPov = 0;
+            memcpy(&gotPov, shortBuf + kJoyOfsPov, 4);
+            check(sthr == DI_OK && gotAxis == 1234, "shared table: a short-format state read keeps its axes under a plugin block");
+            check(shortBuf[kJoyOfsButtons + 2] == 0 && gotPov == 0xFFFFFFFFu,
+                  "shared table: ...with the buttons zeroed and the hat centred");
+            js3.button(2, false);
+            js3.hat(0, 0xFFFFFFFFu);
+            memset(js3.state, 0, 4);
         }
 
         // The shared-vtable ghost (the review of 0.19.1): a controller the game never enumerated,

@@ -796,12 +796,16 @@ HRESULT filterDeviceState(DiDoor& d, void* self, DWORD cb, LPVOID data) {
                         memset(js2->rgbButtons + 32, 0, 96);
                     }
                 } else {
-                    memset(data, 0, cb);
+                    // A short format keeps its axes, like joyDeviceState: hats centred, buttons zeroed.
                     constexpr DWORD kPov0 = static_cast<DWORD>(offsetof(DIJOYSTATE, rgdwPOV[0]));
                     constexpr DWORD kPovEnd = kPov0 + 4 * sizeof(DWORD);
                     if (cb >= kPovEnd) {
                         auto* povPtr = reinterpret_cast<DWORD*>(static_cast<uint8_t*>(data) + kPov0);
                         for (int p = 0; p < 4; ++p) povPtr[p] = 0xFFFFFFFFu;
+                    }
+                    constexpr DWORD kBtn0 = static_cast<DWORD>(offsetof(DIJOYSTATE, rgbButtons[0]));
+                    if (cb > kBtn0) {
+                        memset(static_cast<uint8_t*>(data) + kBtn0, 0, cb - kBtn0);
                     }
                 }
                 d.zeroed.fetch_add(1, std::memory_order_relaxed);
@@ -859,7 +863,6 @@ HRESULT filterDeviceData(DiDoor& d, void* self, DWORD cbObj, LPDIDEVICEOBJECTDAT
     if (d.retired || FAILED(hr) || !rgdod || !inOut) return hr;
     if (cbObj != sizeof(DIDEVICEOBJECTDATA)) return hr;   // a layout this was not written for
     bool other = false;   // a game controller: observed below, never gated; an unknown device is neither
-    const DWORD returned = *inOut;
     guardedBudget(g_budgetDi, [&] {
         const DeviceClass cls = classifyDevice(self);
         const bool pluginBlock = g_pluginBlock.load(std::memory_order_relaxed);
@@ -928,7 +931,7 @@ HRESULT filterDeviceData(DiDoor& d, void* self, DWORD cbObj, LPDIDEVICEOBJECTDAT
     // A joystick or HOTAS: the rows the game's read just returned, copied and
     // untouched (an empty read too: it shows the game is polling the device).
     if (other) {
-        guardedBudget(g_budgetJoy, [&] { observeControllerData(self, rgdod, returned); });
+        guardedBudget(g_budgetJoy, [&] { observeControllerData(self, rgdod, *inOut); });
     }
     return hr;
 }
