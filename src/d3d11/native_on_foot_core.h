@@ -1603,5 +1603,49 @@ inline bool ikAssistRot(const double C[3], const double S[3], const double disp[
     *angRad = ang;
     return true;
 }
+
+// ---- F60 (TEMPORARY slider): the body fitted to the weapon; the view is never moved ----------------------------------------------------
+// While a weapon or tool is held (the FP grips fresh, both arms planned, both distance gates open), the body target d is blended from the
+// head's (F41/F58/F59b) toward the weapon's: the 3P upper-arm midpoint (40, 41, after the square-up) placed at the desired shoulder midpoint
+// Sd = g - f (k_reach (l1 + l2)) - up 0.10 m, g the grip midpoint (T_A left and right in the 3P model), f the FP forward (G's z row on xz,
+// unit). In ADS the shoulder raise (up) and forward push (along f) are added to Sd. 3P model axes = body axes: x right, y up, z forward.
+constexpr double kFitReach = 0.82;            // k_reach: Sd sits this fraction of the arm length behind the grips
+constexpr double kFitDropM = 0.10;            // and this far below them
+constexpr double kFitArmLenDefaultM = 0.59;   // l1 + l2 when the measured length is not usable (outside 0.2..1.5 m)
+constexpr double kFitRampSec = 0.3;           // the fit's ramp in and out (no weapon: to 0 over 0.3 s)
+constexpr double kFitWeaponDefault = 0.7;     // fix.native_on_foot_body_fit_weapon's default
+inline double fitWeaponClamp(double v) noexcept { return ikClampOr(v, 0.0, 1.0, kFitWeaponDefault); }
+inline double fitArmLen(double measured) noexcept {
+    return (measured == measured && measured >= 0.2 && measured <= 1.5) ? measured : kFitArmLenDefaultM;
+}
+// Sd from the two grips, the FP forward row and the arm length (fitArmLen'd), plus the ADS raise (up) and forward push (along f), metres.
+// False (Sd zero) when the forward's xz is under 0.1 or an input is not finite.
+inline bool fitShoulderTarget(const double gL[3], const double gR[3], const double fwdRow[3], double armLen, double raiseM, double forwardM,
+                              double sd[3]) noexcept {
+    sd[0] = sd[1] = sd[2] = 0.0;
+    const double fxz[3] = {fwdRow[0], 0.0, fwdRow[2]};
+    double f[3];
+    if (!(ikLen(fxz) > 0.1) || !ikUnit(fxz, f)) return false;
+    const double back = kFitReach * fitArmLen(armLen) - forwardM;
+    double out[3];
+    for (int i = 0; i < 3; ++i) out[i] = 0.5 * (gL[i] + gR[i]) - f[i] * back;
+    out[1] += raiseM - kFitDropM;
+    for (int i = 0; i < 3; ++i)
+        if (!std::isfinite(out[i])) return false;
+    for (int i = 0; i < 3; ++i) sd[i] = out[i];
+    return true;
+}
+// d_w (body axes): the d that G was built with (dB, body axes) plus what still separates Sd from the upper-arm midpoint. Open loop: Sd moves by
+// -dB with d (G subtracts it) and Umid does not, so d_w does not depend on the d it was measured at.
+inline void fitBodyTarget(const double dB[3], const double sd[3], const double umid[3], double dw[3]) noexcept {
+    for (int i = 0; i < 3; ++i) dw[i] = dB[i] + (sd[i] - umid[i]);
+}
+// d = lerp(d_head, d_w, fit) per body axis; horizontalOnly (the body's vertical off) keeps the head's up (the vertical lock drops it anyway).
+inline void fitBlend(const double dHead[3], const double dW[3], double fit, bool horizontalOnly, double out[3]) noexcept {
+    const double w = fit < 0.0 ? 0.0 : fit > 1.0 ? 1.0 : fit;
+    const double h1 = dHead[1];
+    for (int i = 0; i < 3; ++i) out[i] = dHead[i] + (dW[i] - dHead[i]) * w;
+    if (horizontalOnly) out[1] = h1;
+}
 }  // namespace nofoot
 }  // namespace edvr

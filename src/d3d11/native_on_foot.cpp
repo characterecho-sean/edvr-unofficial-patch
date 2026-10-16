@@ -107,6 +107,9 @@ std::atomic<float> g_ikAdsSquare{static_cast<float>(nofoot::kIkAdsSquareDefault)
     g_ikAdsLeanRad{static_cast<float>(nofoot::kIkAdsLeanDegDefault * nofoot::kIkPi / 180.0)}, g_ikAdsW{0.0f};
 double g_ikAdsKeys[6] = {nofoot::kIkAdsSquareDefault, nofoot::kIkAdsElbowOutCmDefault, nofoot::kIkAdsTrimDegDefault,
                          nofoot::kIkAdsRaiseCmDefault, nofoot::kIkAdsForwardCmDefault, nofoot::kIkAdsLeanDegDefault};   // the key reader's last
+// F60 (TEMPORARY slider): fix.native_on_foot_body_fit_weapon (0..1), read by the frame thread's weapon fit; the key reader's last value.
+std::atomic<float> g_fitWeaponKey{static_cast<float>(nofoot::kFitWeaponDefault)};
+double g_fitWeaponKeyLast = nofoot::kFitWeaponDefault;
 // F58 (TEMPORARY): the spine bend. The key (fix.native_on_foot_spine_bend, on by default; it acts only in full-3P body mode) and the amount
 // slider, the frame thread's 0.2 s ramp and run flag (the key on in full-3P body mode, or the ramp or its hold still running), read by the
 // Animate hook. The eye target (the job camera less d, body axes = the 3P model space) and the pov joint's index, through a seqlock.
@@ -750,6 +753,19 @@ void readKey() {
             g_ikAdsRaiseM.store(static_cast<float>(v[3] / 100.0), std::memory_order_relaxed);
             g_ikAdsForwardM.store(static_cast<float>(v[4] / 100.0), std::memory_order_relaxed);
             g_ikAdsLeanRad.store(static_cast<float>(v[5] * nofoot::kIkPi / 180.0), std::memory_order_relaxed);
+        }
+        // F60 (TEMPORARY, live, the Native on foot page's slider): Body fit to weapon (0..1, default 0.7): while a weapon or tool is held, the
+        // body target moves from the head's toward the one that puts the 3P shoulders behind the grips (the view is never moved). Full-3P body
+        // mode with the arm IK on only.
+        {
+            const double fit = nofoot::fitWeaponClamp(
+                static_cast<double>(cfg.getFloat("fix.native_on_foot_body_fit_weapon", static_cast<float>(nofoot::kFitWeaponDefault))));
+            if (first || fit != g_fitWeaponKeyLast)
+                Log::get().note("native on foot weapon fit (F60, TEMPORARY slider): fix.native_on_foot_body_fit_weapon = %.2f -- while a weapon or "
+                                "tool is held the body target is lerp(head, weapon, %.2f) (horizontal only with the vertical off), ramped over 0.3 s; "
+                                "full-3P body mode with fix.native_on_foot_arm_ik = on only; the view is never moved", fit, fit);
+            g_fitWeaponKeyLast = fit;
+            g_fitWeaponKey.store(static_cast<float>(fit), std::memory_order_relaxed);
         }
         // F58 (TEMPORARY, live): the spine bend toward the head: on (the default) or off. It acts only in full-3P body mode (body align = body
         // with fix.native_on_foot_hide_fp_body and fix.native_on_foot_body_unclip on); the amount slider (0..1, default 1) scales it.
@@ -5619,6 +5635,33 @@ bool ikGRead(IkGData* out) noexcept {
     return false;
 }
 void ikPublishG(void* amcPtr, uint64_t now) noexcept;   // defined with the FP raise's hand-off below (it reads d and r)
+// F60 (TEMPORARY): the weapon fit's measurement, published by the 3P Animate post-hook (one writer, under g_pfzBusy) for the frame thread's
+// body target: d_w, Sd, the upper-arm midpoint after the square-up, G's d (all body axes = the 3P model axes, metres), the smaller of the two
+// arms' distance gates, the arm length used and the ADS weight. Read with two tries; never waits.
+struct FitPub {
+    double dw[3] = {}, sd[3] = {}, umid[3] = {}, dB[3] = {};
+    double gateMin = 0.0, armLen = 0.0, adsW = 0.0;
+    uint64_t ms = 0;
+};
+std::atomic<uint32_t> g_fitSeq{0};
+FitPub g_fitPub;
+std::atomic<uint64_t> g_fitPublishes{0};
+void fitPublish(const FitPub& p) noexcept {
+    g_fitSeq.fetch_add(1, std::memory_order_acq_rel);   // odd: a write is in progress
+    std::memcpy(&g_fitPub, &p, sizeof(p));
+    g_fitSeq.fetch_add(1, std::memory_order_release);
+    g_fitPublishes.fetch_add(1, std::memory_order_relaxed);
+}
+bool fitRead(FitPub* out) noexcept {
+    for (int tries = 0; tries < 2; ++tries) {
+        const uint32_t s1 = g_fitSeq.load(std::memory_order_acquire);
+        if (s1 & 1u || s1 == 0) continue;
+        std::memcpy(out, &g_fitPub, sizeof(*out));
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if (g_fitSeq.load(std::memory_order_relaxed) == s1) return true;
+    }
+    return false;
+}
 
 // The callback: the game jumps here with rcx, rdx intact (the relay's tail jump), so the original is called with the same two arguments.
 uint64_t __fastcall eyeProbeHooked(void* amc, void* job) noexcept {
@@ -6314,6 +6357,21 @@ uint64_t g_f59bAgeMax = 0;
 // F59b: the eye - neck residual from the census neck (plus d) in body axes, summed per frame for the 1 s line.
 double g_f59bCenSum[3] = {}, g_f59bCenNorm = 0.0;
 uint32_t g_f59bCenN = 0;
+// F60 (TEMPORARY slider, frame thread only but the key): the body fitted to the weapon. The slider fix.native_on_foot_body_fit_weapon (0..1),
+// the 0.3 s ramp (in while a weapon or tool is held and every gate holds, out otherwise), this tick's fit (slider x ramp), the hook's last
+// publication (held while the ramp runs out), the head's and the fitted target of this tick (body axes) and the 1 s line's sums.
+nofoot::IkBlend g_f60Blend{0.0f, nofoot::kFitRampSec};
+double g_f60Fit = 0.0;
+FitPub g_f60Pub;
+bool g_f60Have = false, g_f60Weapon = false, g_f60Applied = false;
+const char* g_f60Why = "(none)";
+double g_f60Head[3] = {}, g_f60Out[3] = {};
+uint64_t g_f60LineMs = 0, g_f60PubLast = 0;
+uint32_t g_f60N = 0, g_f60ErrN = 0, g_f60WeaponN = 0, g_f60HaveN = 0;
+double g_f60FitSum = 0.0, g_f60HeadSum[3] = {}, g_f60DwSum[3] = {}, g_f60OutSum[3] = {}, g_f60DSum[3] = {};
+double g_f60ErrSum = 0.0, g_f60ErrMax = 0.0, g_f60ErrHSum = 0.0, g_f60ErrUpSum = 0.0;
+void f60FitStep(uint64_t now, double dt, int mode, bool full3P) noexcept;
+void f60FitLine(uint64_t now, int mode, bool full3P, bool vertical, const double dApplied[3], const EyeSample& s) noexcept;
 // F59b: the AMC matrix source: this fresh sample's matrix, job camera and root, with the 3P joints of the last good frame carried into this
 // frame through their body coordinates (the head's body coordinates are unchanged by that), and the FP joints (model space) from this
 // sample when it has them. Frame-thread copies only; no game memory is read.
@@ -6426,6 +6484,7 @@ void alignTick(uint64_t now) noexcept {
         g_f59bHave = false;
     }
     const bool f59bHeld = g_f59bSrc == nofoot::kFollowLast;   // the held frame is up to 0.5 s old by design: the 100 ms test is not applied
+    f60FitStep(now, dt, mode, f58Full3P);   // F60: the weapon fit's weight this tick (0 outside full-3P body mode with the arm IK on)
     // F55: the walking shift's locomotion gate: the body's horizontal speed under 0.35 m/s for 0.3 s (the F49 rule), fed each new body sample.
     if (s.valid && s.stamp != g_f55LocoStamp) {
         g_f55LocoStamp = s.stamp;
@@ -6706,6 +6765,16 @@ void alignTick(uint64_t now) noexcept {
                 g_f41PovLp[i] += aPov * (srcB[i] - g_f41PovLp[i]);
                 g_f41TgtB[i] = (g_f41CamLp[i] - g_f41PovLp[i]) - trimB[i];
             }
+            // F60: the body fitted to the weapon: d = lerp(d_head, d_w, fit) in body axes (d_w from the hook's last publication, no trims);
+            // horizontal only with the vertical off (the feet stay on the ground; the up is the bend's). fit is 0 outside full-3P body mode
+            // with the arm IK on, so nothing changes there.
+            for (size_t i = 0; i < 3; ++i) g_f60Head[i] = g_f60Out[i] = g_f41TgtB[i];
+            g_f60Applied = false;
+            if (g_f60Fit > 0.0 && g_f60Have) {
+                nofoot::fitBlend(g_f60Head, g_f60Pub.dw, g_f60Fit, !vertical, g_f60Out);
+                for (size_t i = 0; i < 3; ++i) g_f41TgtB[i] = g_f60Out[i];
+                g_f60Applied = true;
+            }
             for (size_t j = 0; j < 3; ++j) {
                 err[j] = 0.0;
                 for (size_t i = 0; i < 3; ++i) err[j] += g_f41TgtB[i] * static_cast<double>(s.rows[3 * i + j]);
@@ -6828,6 +6897,7 @@ void alignTick(uint64_t now) noexcept {
             vertN = 0;
             vertSum = dropMax = 0.0;
         }
+        f60FitLine(now, mode, f58Full3P, vertical, a.pos, s);   // F60: the weapon fit's 1 s line (full 3P with the arm IK not off)
         if (now - g_f41BodyLogMs >= 1000 || g_f41BodyLogMs == 0) {
             g_f41BodyLogMs = now;
             double dB[3] = {};
@@ -8061,6 +8131,8 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         double assistMove = 0.0, assistAng = 0.0, assistExcess = 0.0, reachA = 0.0, shortA = 0.0;
         double dist = 0.0, ang = 0.0, reach = 0.0, shortfall = 0.0, bend = 0.0, err = -1.0, wArm = 0.0, gate = 0.0, elbowDeg = 0.0, sx = 0.0;
         float l1 = 0.0f, l2 = 0.0f, E[3] = {}, S[3] = {}, Efp[3] = {};
+        bool fitOk = false;                      // F60: this side's grip (T_A) and arm length were measured
+        double tA[3] = {}, armLen = 0.0;
     } so[2];
     uint32_t nList = 0;
     const uint32_t count = sp.count;
@@ -8248,6 +8320,17 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         uaSpacing = nofoot::ikLen(sp) * 100.0;
         uaHave = true;
     }
+    // F60: the upper-arm midpoint (U left and right) after the bend and the square-up, before the clavicle assist: the point the weapon fit
+    // places at Sd.
+    bool fitUmidOk = false;
+    double fitUmid[3] = {};
+    if (armsOk && mode != 2 && uaPlan) {
+        double a[3], b[3];
+        ikPos(g_ikM0[pl.side[0].U], a);
+        ikPos(g_ikM0[pl.side[1].U], b);
+        for (int i = 0; i < 3; ++i) fitUmid[i] = 0.5 * (a[i] + b[i]);
+        fitUmidOk = true;
+    }
     const bool sqWrite = mode == 3 && writeOk && sqHave && sqApplied != 0.0;
     for (int side = 0; side < 2 && armsOk; ++side) {   // F58: no arms without the FP snapshot and G (the bend alone runs)
         if (!pl.ok[side]) {
@@ -8305,6 +8388,9 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         const bool doSolveWrite = mode == 3 && writeOk && wArm > 0.0;
         o.wArm = mode == 3 ? wArm : 0.0;
         o.gate = gate;
+        o.fitOk = true;   // F60: the grip and the arm's length, before the assist (a rigid turn keeps l1 and l2)
+        for (int i = 0; i < 3; ++i) o.tA[i] = tA[i];
+        o.armLen = l1 + l2;
         const double wSolve = doSolveWrite ? wArm : 1.0;
         // The hand target: the offset from the animated hand, capped at 5 cm a call while writing (from zero after 200 ms without a write).
         double target[3];
@@ -8574,6 +8660,31 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
                 const uint32_t j = lists[g][k];
                 if (j < count) std::memcpy(g_ikM0[j], g_ikM0Save[j], 64);
             }
+    }
+    // F60: the weapon fit's measurement (every mode but nudge; both arms with their grips): Sd from the grips, the FP forward (G's z row on xz)
+    // and the arm length, plus the ADS raise and forward push; d_w = G's d (body axes) + (Sd - Umid). Published for the frame thread, which
+    // decides whether it is used (arm IK on, full 3P, the gates open). Nothing is written here.
+    if (armsOk && fitUmidOk && so[0].fitOk && so[1].fitOk) {
+        const double fwd[3] = {G.g[8], G.g[9], G.g[10]};
+        FitPub fp;
+        fp.armLen = nofoot::fitArmLen(0.5 * (so[0].armLen + so[1].armLen));
+        if (nofoot::fitShoulderTarget(so[0].tA, so[1].tA, fwd, fp.armLen, adsPush[1], adsPush[2], fp.sd)) {
+            bool okD = true;
+            for (int i = 0; i < 3; ++i) {
+                const double r[3] = {G.m3p[4 * i], G.m3p[4 * i + 1], G.m3p[4 * i + 2]};
+                const double rr = nofoot::ikDot(r, r);
+                if (!(rr > 1e-6)) okD = false;
+                fp.dB[i] = okD ? (G.d[0] * r[0] + G.d[1] * r[1] + G.d[2] * r[2]) / rr : 0.0;
+            }
+            if (okD) {
+                nofoot::fitBodyTarget(fp.dB, fp.sd, fitUmid, fp.dw);
+                for (int i = 0; i < 3; ++i) fp.umid[i] = fitUmid[i];
+                fp.gateMin = std::min(so[0].gate, so[1].gate);
+                fp.adsW = adsW;
+                fp.ms = now;
+                fitPublish(fp);
+            }
+        }
     }
     // F57: the squared torso: every spine-list joint not written from the solve takes its squared M0 (an arm whose solve did not write rides
     // its clavicle). F58: the same for the bent spine (the arms solved on it, or riding it when the arm IK does not write).
@@ -9441,6 +9552,100 @@ void f58BendFrame(uint64_t now, double dt, int mode, bool full3P, bool ads, cons
         g_f59bCenNorm = 0.0;
         g_f59bCenN = 0;
     }
+}
+
+// F60 (TEMPORARY slider): the weapon fit's frame-thread half, called by alignTick each tick before the body target. The hook's last
+// publication (a torn read keeps the last); a weapon or tool is held when it is under 100 ms old (the FP grips and G fresh, both arms planned
+// and measured) and both arms' distance gates are open. The ramp (0.3 s) rises while that holds in full-3P body mode with the arm IK on and
+// writing (its base weight above 0) and the slider above 0, and falls otherwise (no weapon: to 0 over 0.3 s, the head's target takes over);
+// it is zeroed at once outside full-3P body mode or with the arm IK not on. fit = the slider x the ramp.
+void f60FitStep(uint64_t now, double dt, int mode, bool full3P) noexcept {
+    FitPub p;
+    if (fitRead(&p)) {
+        g_f60Pub = p;
+        g_f60Have = true;
+    }
+    const bool fresh = g_f60Have && (now > g_f60Pub.ms ? now - g_f60Pub.ms : 0) <= nofoot::kIkFreshMs;
+    g_f60Weapon = fresh && g_f60Pub.gateMin > 0.0;
+    const int ikMode = pfz::g_ikMode.load(std::memory_order_relaxed);
+    const double key = static_cast<double>(g_fitWeaponKey.load(std::memory_order_relaxed));
+    g_f60Why = !nativeOnFootActive() ? "not native stereo on foot"
+             : mode != 2 ? "not body mode"
+             : !full3P ? "not full 3P (hide_fp_body and body_unclip)"
+             : ikMode != 3 ? "fix.native_on_foot_arm_ik is not on"
+             : !(g_ikWeight.load(std::memory_order_relaxed) > 0.0f) ? "the arm IK's base weight is 0 (its gate)"
+             : !(key > 0.0) ? "the slider is 0"
+             : !g_f60Have ? "no weapon-fit measurement yet"
+             : !fresh ? "no weapon: the grips are stale (over 100 ms) or an arm is not measured"
+             : !(g_f60Pub.gateMin > 0.0) ? "no weapon: a grip is gated out (its hand too far from the FP grip)"
+             : nullptr;
+    g_f60Blend.step(g_f60Why == nullptr, dt);
+    if (mode != 2 || !full3P || ikMode != 3) g_f60Blend = nofoot::IkBlend{0.0f, nofoot::kFitRampSec};
+    g_f60Fit = key * static_cast<double>(g_f60Blend.w);
+}
+// F60: the 1 s line (body mode, full 3P, the arm IK not off; called after the body filter): the fit weight, d_head, d_w, the fitted target
+// and the applied d (body axes right, up, forward), the shoulder-mid error |Sd - Umid| after the fit (cm; its up part is the vertical
+// remainder, left to the bend), the last Sd and Umid, the arm length, the gate, ADS and the hook's publications.
+void f60FitLine(uint64_t now, int mode, bool full3P, bool vertical, const double dApplied[3], const EyeSample& s) noexcept {
+    const int ikMode = pfz::g_ikMode.load(std::memory_order_relaxed);
+    const auto reset = []() noexcept {
+        g_f60N = g_f60ErrN = g_f60WeaponN = g_f60HaveN = 0;
+        g_f60FitSum = g_f60ErrSum = g_f60ErrMax = g_f60ErrHSum = g_f60ErrUpSum = 0.0;
+        for (size_t i = 0; i < 3; ++i) g_f60HeadSum[i] = g_f60DwSum[i] = g_f60OutSum[i] = g_f60DSum[i] = 0.0;
+    };
+    if (mode != 2 || !full3P || ikMode == 0) {
+        reset();
+        g_f60LineMs = 0;
+        return;
+    }
+    ++g_f60N;
+    g_f60FitSum += g_f60Fit;
+    double dB[3] = {};
+    for (size_t i = 0; i < 3; ++i)
+        for (size_t j = 0; j < 3; ++j) dB[i] += dApplied[j] * static_cast<double>(s.rows[3 * i + j]);
+    for (size_t i = 0; i < 3; ++i) {
+        g_f60HeadSum[i] += g_f60Head[i];
+        g_f60OutSum[i] += g_f60Out[i];
+        g_f60DSum[i] += dB[i];
+    }
+    if (g_f60Have) {
+        ++g_f60HaveN;
+        for (size_t i = 0; i < 3; ++i) g_f60DwSum[i] += g_f60Pub.dw[i];
+    }
+    if (g_f60Weapon) ++g_f60WeaponN;
+    if (g_f60Have && (now > g_f60Pub.ms ? now - g_f60Pub.ms : 0) <= nofoot::kIkFreshMs) {
+        const double e[3] = {g_f60Pub.sd[0] - g_f60Pub.umid[0], g_f60Pub.sd[1] - g_f60Pub.umid[1], g_f60Pub.sd[2] - g_f60Pub.umid[2]};
+        const double en = nofoot::ikLen(e) * 100.0;
+        g_f60ErrSum += en;
+        g_f60ErrMax = std::max(g_f60ErrMax, en);
+        g_f60ErrHSum += std::sqrt(e[0] * e[0] + e[2] * e[2]) * 100.0;
+        g_f60ErrUpSum += e[1] * 100.0;
+        ++g_f60ErrN;
+    }
+    if (g_f60LineMs == 0) g_f60LineMs = now;
+    if (now - g_f60LineMs < 1000) return;
+    g_f60LineMs = now;
+    const double n = g_f60N ? static_cast<double>(g_f60N) : 1.0, hn = g_f60HaveN ? static_cast<double>(g_f60HaveN) : 1.0,
+                 en = g_f60ErrN ? static_cast<double>(g_f60ErrN) : 1.0;
+    const uint64_t pubs = g_fitPublishes.load(std::memory_order_relaxed);
+    const FitPub& p = g_f60Pub;
+    Log::get().note("native on foot weapon fit (F60): fit weight mean %.2f (now %.2f = slider %.2f x ramp %.2f; %s%s); weapon held %u of %u "
+                    "frames; body axes right, up, forward (means, cm): d_head %.1f %.1f %.1f, d_w %.1f %.1f %.1f (%u frames), the fitted target "
+                    "%.1f %.1f %.1f, d applied %.1f %.1f %.1f (vertical %s); shoulder-mid error |Sd - Umid| after the fit mean %.1f max %.1f cm "
+                    "(horizontal %.1f, up %.1f: the vertical remainder, left to the bend) over %u frames; last Sd %.3f %.3f %.3f, Umid %.3f %.3f "
+                    "%.3f m (3P model), G's d %.1f %.1f %.1f cm, arm length %.1f cm x k_reach %.2f, grip gate min %.2f, ADS %.2f; hook "
+                    "publications %llu",
+                    g_f60FitSum / n, g_f60Fit, static_cast<double>(g_fitWeaponKey.load(std::memory_order_relaxed)), static_cast<double>(g_f60Blend.w),
+                    g_f60Why ? "held: " : "fitting", g_f60Why ? g_f60Why : "", g_f60WeaponN, g_f60N, 100.0 * g_f60HeadSum[0] / n,
+                    100.0 * g_f60HeadSum[1] / n, 100.0 * g_f60HeadSum[2] / n, 100.0 * g_f60DwSum[0] / hn, 100.0 * g_f60DwSum[1] / hn,
+                    100.0 * g_f60DwSum[2] / hn, g_f60HaveN, 100.0 * g_f60OutSum[0] / n, 100.0 * g_f60OutSum[1] / n, 100.0 * g_f60OutSum[2] / n,
+                    100.0 * g_f60DSum[0] / n, 100.0 * g_f60DSum[1] / n, 100.0 * g_f60DSum[2] / n,
+                    vertical ? "on: d_w's up is blended" : "off: the horizontal only", g_f60ErrSum / en, g_f60ErrMax, g_f60ErrHSum / en,
+                    g_f60ErrUpSum / en, g_f60ErrN, p.sd[0], p.sd[1], p.sd[2], p.umid[0], p.umid[1], p.umid[2], 100.0 * p.dB[0], 100.0 * p.dB[1],
+                    100.0 * p.dB[2], 100.0 * p.armLen, nofoot::kFitReach, p.gateMin, p.adsW,
+                    static_cast<unsigned long long>(pubs - g_f60PubLast));
+    g_f60PubLast = pubs;
+    reset();
 }
 
 void installEyeProbeOnce() {

@@ -1588,6 +1588,64 @@ int wmain(int argc, wchar_t** argv) {
                       "F59b: the residual is rows . (eye - neck) in body axes (right, up, forward); a joint carried between AMC frames keeps its body "
                       "coordinates; the hook's (T - N1) less the rest offset equals eye - (N1 + d)");
             }
+            // F60: the body fitted to the weapon: Sd from the grips and the FP forward (k_reach 0.82 of the arm behind, 0.10 m below; ADS raise
+            // and forward push), d_w = dB + (Sd - Umid) and its independence of the d it was measured at, the blend, the 0.3 s ramp.
+            {
+                const auto near3 = [](const double* a, double x, double y, double z) {
+                    return std::fabs(a[0] - x) < 1e-9 && std::fabs(a[1] - y) < 1e-9 && std::fabs(a[2] - z) < 1e-9;
+                };
+                const double gL[3] = {-0.10, 1.30, 0.50}, gR[3] = {0.10, 1.30, 0.50}, fwdPitched[3] = {0.0, -0.3, 2.0}, fwdYaw[3] = {1.0, 0.0, 0.0},
+                             fwdUp[3] = {0.0, 1.0, 0.05};
+                const double back = 0.82 * 0.59;
+                double sd[3], sdYaw[3], sdAds[3], sdBad[3];
+                const bool okSd = nf::fitShoulderTarget(gL, gR, fwdPitched, 0.59, 0.0, 0.0, sd);
+                const bool okYaw = nf::fitShoulderTarget(gL, gR, fwdYaw, 0.59, 0.0, 0.0, sdYaw);
+                const bool okAds = nf::fitShoulderTarget(gL, gR, fwdPitched, 0.59, 0.03, 0.05, sdAds);
+                const bool okBad = nf::fitShoulderTarget(gL, gR, fwdUp, 0.59, 0.0, 0.0, sdBad);
+                check(okSd && near3(sd, 0.0, 1.20, 0.50 - back) && okYaw && near3(sdYaw, -back, 1.20, 0.50) && okAds &&
+                          near3(sdAds, 0.0, 1.23, 0.50 - back + 0.05) && !okBad && near3(sdBad, 0.0, 0.0, 0.0),
+                      "F60: Sd = the grip midpoint less the FP forward (xz, unit) x 0.82 (l1 + l2) and 0.10 m down; ADS adds the raise and the "
+                      "forward push; a vertical forward refuses");
+                const double umid[3] = {0.0, 1.35, -0.05}, dB[3] = {0.02, 0.0, 0.01};
+                double dw[3];
+                nf::fitBodyTarget(dB, sd, umid, dw);
+                // G subtracts d: the same body measured at d + delta sees the grips (so Sd) moved by -delta; d_w does not move.
+                const double delta[3] = {0.10, 0.0, 0.05}, gL2[3] = {gL[0] - 0.10, gL[1], gL[2] - 0.05}, gR2[3] = {gR[0] - 0.10, gR[1], gR[2] - 0.05};
+                const double dB2[3] = {dB[0] + delta[0], dB[1] + delta[1], dB[2] + delta[2]};
+                double sd2[3], dw2[3];
+                nf::fitShoulderTarget(gL2, gR2, fwdPitched, 0.59, 0.0, 0.0, sd2);
+                nf::fitBodyTarget(dB2, sd2, umid, dw2);
+                check(near3(dw, 0.02, -0.15, 0.01 + (0.50 - back) + 0.05) && near3(dw2, dw[0], dw[1], dw[2]),
+                      "F60: d_w = G's d + (Sd - Umid) in body axes, and it does not depend on the d it was measured at (open loop, no integral)");
+                const double dHead[3] = {0.04, 0.02, -0.03};
+                double b0[3], b1[3], bh[3], bHalf[3], bOver[3];
+                nf::fitBlend(dHead, dw, 0.0, false, b0);
+                nf::fitBlend(dHead, dw, 1.0, false, b1);
+                nf::fitBlend(dHead, dw, 1.0, true, bh);
+                nf::fitBlend(dHead, dw, 0.5, false, bHalf);
+                nf::fitBlend(dHead, dw, 2.0, false, bOver);
+                check(near3(b0, dHead[0], dHead[1], dHead[2]) && near3(b1, dw[0], dw[1], dw[2]) && near3(bh, dw[0], dHead[1], dw[2]) &&
+                          near3(bHalf, 0.5 * (dHead[0] + dw[0]), 0.5 * (dHead[1] + dw[1]), 0.5 * (dHead[2] + dw[2])) && near3(bOver, dw[0], dw[1], dw[2]),
+                      "F60: the blend returns d_head at fit 0 and d_w at fit 1 (the head's up kept with the vertical off; fit clamped to 0..1)");
+                nf::IkBlend ramp{0.0f, nf::kFitRampSec};
+                ramp.step(true, 0.15);
+                const float rHalf = ramp.w;
+                ramp.step(true, 0.15);
+                const float rFull = ramp.w;
+                ramp.step(false, 0.15);
+                const float rOutHalf = ramp.w;
+                ramp.step(false, 0.15);
+                const float rOut = ramp.w;
+                ramp.step(false, 0.15);
+                check(nf::kFitRampSec == 0.3 && std::fabs(rHalf - 0.5f) < 1e-6f && rFull == 1.0f && std::fabs(rOutHalf - 0.5f) < 1e-6f && rOut == 0.0f &&
+                          ramp.w == 0.0f,
+                      "F60: the fit ramps in over 0.3 s and, with no weapon, out to 0 over 0.3 s (half at 0.15 s)");
+                check(nf::kFitReach == 0.82 && nf::kFitDropM == 0.10 && nf::kFitArmLenDefaultM == 0.59 && nf::kFitWeaponDefault == 0.7 &&
+                          nf::fitArmLen(std::numeric_limits<double>::quiet_NaN()) == 0.59 && nf::fitArmLen(0.1) == 0.59 && nf::fitArmLen(0.61) == 0.61 &&
+                          nf::fitWeaponClamp(std::numeric_limits<double>::quiet_NaN()) == 0.7 && nf::fitWeaponClamp(1.5) == 1.0 &&
+                          nf::fitWeaponClamp(-1.0) == 0.0,
+                      "F60: k_reach 0.82, the 0.10 m drop, the 0.59 m arm fallback (outside 0.2..1.5 m), the slider's 0.7 default and its 0..1 clamp");
+            }
             // The shift rule: a record at the AMC origin moves by d once; a second pass over it leaves it alone; a record elsewhere never moves.
             const float origin[3] = {10.0f, 2.0f, -3.0f}, d[3] = {0.0f, 0.231f, 0.0f};
             float rec[3] = {10.0f, 2.0f, -3.0f}, other[3] = {10.5f, 2.0f, -3.0f};
