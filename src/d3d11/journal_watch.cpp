@@ -115,6 +115,9 @@ struct Published {
     // Built F20: Flags2 bit 5 (AimDownSight, journal_watch.h), from the same sample; known whenever Flags2 is in the file.
     bool     adsKnown = false;
     bool     ads = false;
+    // Built F66a: Status.json SelectedWeapon (journal_watch.h: JournalHeldItem) and its value, from the same sample.
+    uint8_t  heldKind = 0;
+    char     heldName[64] = {};
     // Built v14 (optimized station): Status.json Flags bit 0 is Docked (the same field whose bit 4 is supercruise, read above).
     bool     dockedKnown = false;
     bool     docked = false;
@@ -160,6 +163,10 @@ struct Visible {
     std::atomic<bool>     breathable{false};
     std::atomic<bool>     adsKnown{false};
     std::atomic<bool>     ads{false};
+    // Built F66a: the held item's kind, and its name behind a sequence counter (one writer: the worker).
+    std::atomic<uint8_t>  heldKind{0};
+    std::atomic<uint32_t> heldSeq{0};
+    char                  heldName[64] = {};
     std::atomic<uint32_t> flags2{0};
     std::atomic<bool>     dockedKnown{false};
     std::atomic<bool>     docked{false};
@@ -199,6 +206,10 @@ void applyPublished(const Published& p) {
     g_v.breathable.store(p.breathable, kRelaxed);
     g_v.adsKnown.store(p.adsKnown, kRelaxed);
     g_v.ads.store(p.ads, kRelaxed);
+    g_v.heldSeq.fetch_add(1, std::memory_order_acq_rel);   // odd: a write is in progress
+    std::memcpy(g_v.heldName, p.heldName, sizeof(g_v.heldName));
+    g_v.heldSeq.fetch_add(1, std::memory_order_release);
+    g_v.heldKind.store(p.heldKind, kRelaxed);
     g_v.flags2.store(p.flags2, kRelaxed);
     g_v.dockedKnown.store(p.dockedKnown, kRelaxed);
     g_v.docked.store(p.docked, kRelaxed);
@@ -229,6 +240,8 @@ void resetVisible() {
 // worker on every pass. Not part of a session: the game sets it right after
 // configuring, and it means the same thing to whichever worker is running.
 std::atomic<bool> g_eager{false};
+// Built F66a: the native on-foot tick's own request for the 100 ms cadence (journalWatchSetEagerStatusOnFoot); the worker reads on the faster.
+std::atomic<bool> g_eagerOnFoot{false};
 
 // The rig's hook (journal_watch.h). Null in the product.
 std::atomic<JournalWorkHook> g_workHook{nullptr};
@@ -446,13 +459,16 @@ void pollStatus(Session& s) {
     uint32_t flags = 0;
     uint32_t gui = 0;
     DWORD bytesRead = 0;
+    JournalHeldItem heldKind = kHeldUnknown;   // F66a
+    char heldName[64] = {};
     if (f != INVALID_HANDLE_VALUE) {
-        char buf[2048];
+        char buf[8192];   // F66a: was 2048; SelectedWeapon sits near the end of the file, after the destination and the pips
         DWORD got = 0;
         if (ReadFile(f, buf, sizeof(buf) - 1, &got, nullptr) && got > 0) {
             buf[got] = '\0';
             bytesRead = got;
             parsed = true;
+            heldKind = journalParseSelectedWeapon(buf, got, heldName, sizeof(heldName));
             const char* p = strstr(buf, "\"Flags2\":");
             if (p) {
                 sawFlags2 = true;
@@ -482,6 +498,10 @@ void pollStatus(Session& s) {
         s.pub.breathable = sawFlags2 && journalBreathableFromFlags2(flags2);
         s.pub.adsKnown = sawFlags2;
         s.pub.ads = sawFlags2 && journalAdsFromFlags2(flags2);
+        // F66a: the held item, only with Flags2 in the file (on foot or in a vehicle; the menus write neither).
+        s.pub.heldKind = sawFlags2 ? static_cast<uint8_t>(heldKind) : static_cast<uint8_t>(kHeldUnknown);
+        std::memset(s.pub.heldName, 0, sizeof(s.pub.heldName));
+        if (sawFlags2 && heldKind != kHeldUnknown) std::memcpy(s.pub.heldName, heldName, sizeof(s.pub.heldName));
         s.pub.flags2 = sawFlags2 ? flags2 : 0u;
         s.pub.dockedKnown = sawFlags;
         s.pub.docked = sawFlags && (flags & 0x01u) != 0;
@@ -531,6 +551,8 @@ void pollStatus(Session& s) {
         s.pub.breathable = false;
         s.pub.adsKnown = false;
         s.pub.ads = false;
+        s.pub.heldKind = static_cast<uint8_t>(kHeldUnknown);
+        std::memset(s.pub.heldName, 0, sizeof(s.pub.heldName));
         s.pub.flags2 = 0;
         s.pub.dockedKnown = false;
         s.pub.seatedKnown = false;
@@ -581,7 +603,7 @@ bool pass(Session& s, char* buf) {
     // Status.json rides its own clock: ~1 KB reread, normally on the
     // journal's cadence, but at 100 ms when a consumer asked for low
     // latency.
-    const bool eager = g_eager.load(std::memory_order_relaxed);
+    const bool eager = g_eager.load(std::memory_order_relaxed) || g_eagerOnFoot.load(std::memory_order_relaxed);
     if (dueMs(s.statusMs, cadence(eager ? kStatusEagerMs : kPollMs))) {
         s.statusMs = stampMs();
         PeriodicWorkScope timing(s.workStatus);
@@ -1041,6 +1063,34 @@ bool journalFlatGuiFocus(uint32_t* focus) {
     if (!runtimeFlatProfile() || !g_v.active.load(std::memory_order_acquire) || !peek(g_v.fssFocusKnown)) return false;
     if (focus) *focus = peek(g_v.guiFocus);
     return true;
+}
+JournalHeldItem journalHeldItem() {
+    if (runtimeFlatProfile()) return kHeldUnknown;
+    const uint8_t k = peek(g_v.heldKind);
+    return k == kHeldNone ? kHeldNone : k == kHeldItem ? kHeldItem : kHeldUnknown;
+}
+bool journalHeldItemName(char* out, size_t cap) {
+    if (out && cap) out[0] = '\0';
+    if (!out || !cap || runtimeFlatProfile() || peek(g_v.heldKind) == kHeldUnknown) return false;
+    for (int tries = 0; tries < 4; ++tries) {
+        const uint32_t s1 = g_v.heldSeq.load(std::memory_order_acquire);
+        if (s1 & 1u) continue;
+        char tmp[sizeof(g_v.heldName)];
+        std::memcpy(tmp, g_v.heldName, sizeof(tmp));
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if (g_v.heldSeq.load(std::memory_order_relaxed) != s1) continue;
+        tmp[sizeof(tmp) - 1] = '\0';
+        const size_t len = std::strlen(tmp);
+        const size_t n = len < cap - 1 ? len : cap - 1;
+        std::memcpy(out, tmp, n);
+        out[n] = '\0';
+        return true;
+    }
+    return false;
+}
+void journalWatchSetEagerStatusOnFoot(bool eager) {
+    if (g_eagerOnFoot.exchange(eager, std::memory_order_relaxed) == eager) return;
+    if (Session* s = g_session.load(std::memory_order_acquire)) SetEvent(s->wake);
 }
 bool journalSupercruiseKnown() {
     return journalWatchActive() && peek(g_v.supercruiseKnown);

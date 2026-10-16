@@ -596,13 +596,155 @@ inline void rowsBasisAngles(const float a[16], const float b[16], double* fwdDeg
     *rotDeg = d.total;
 }
 
-// F53: THE ICON OFFSET. The correction's target is ndc(P through the eye's scene rows) + e, e a fixed screen-space offset: the marker's icon
-// drawn kIconPx above its ground point (the F46/F47 flights measured |ndc_marker - ndc_P| = 36.3 px with the head still, at the marker
-// target's size; the marker geometry in this build does not give it). NDC y is up, so e = (0, 2 kIconPx / H) for a target H pixels high.
-constexpr double kIconPx = 36.3;
-inline void iconOffsetNdc(double H, double e[2]) noexcept {
-    e[0] = 0.0;
-    e[1] = H > 0.0 ? 2.0 * kIconPx / H : 0.0;
+// ---- F66f: THE MARKER'S OFFSET FROM ITS OWN GEOMETRY, AND THE AFFINE ROW PATCH ------------------------------------------------------------
+// The F65 measurement (4 series, both eyes, 124 samples): the drawn dot sits at P, not 36.3 px above it, and its static error is a scale of about
+// 0.94% about EACH EYE'S OPTICAL AXIS (kx 0.011, ky 0.0081; both eyes agree; a scale about NDC 0 is excluded): 12 px at 30 deg off axis. The marker's
+// projection (b0 rows 4, 5, 7) does not have the focal scale of the texture it is composited into, so a translation of the anchor to ndc_P + e
+// leaves the dot short of its place by (sigma - 1) times its offset from the axis. Two projections are compared through their decomposition: the
+// NDC of the optical axis (off) and the NDC per unit tangent (scale) per axis, read from the rows alone (ndcAngleDeg's decomposition).
+//   sigma = scale_M / scale_W per axis; the display of a UI NDC n is axis + (n - off_M) / sigma, so for the anchor to be SHOWN at the target T
+//   (texture NDC; P through the scene rows less the TAA jitter, plus the icon offset) and every other vertex at the offset the game designed, the
+//   rows become   n_final = sigma n_M + u,  u = off_M + sigma (T - axis) - sigma n_M(X0),   i.e.  r4' = sigma_x r4 + u_x r7,  r5' = sigma_y r5 + u_y r7.
+// sigma = 1 with off_M = axis gives u = T - n_M(X0): today's translation. The axis is the texture's (the runtime's per-eye tangents, unjittered); the
+// scene rows' own principal point less the axis is the jitter they carry, which P must not (the dot does not).
+struct ProjDecomp {
+    bool ok = false;
+    double off[2] = {}, scale[2] = {};
+};
+inline bool projDecompose(const double cx[3], const double cy[3], const double cw[3], ProjDecomp& o) noexcept {
+    o = ProjDecomp{};
+    const double len = length3(cw);
+    if (!(len > 1e-12)) return false;
+    const double fwd[3] = {cw[0] / len, cw[1] / len, cw[2] / len};
+    const double* c[2] = {cx, cy};
+    for (int k = 0; k < 2; ++k) {
+        const double u[3] = {c[k][0] / len, c[k][1] / len, c[k][2] / len};
+        const double off = u[0] * fwd[0] + u[1] * fwd[1] + u[2] * fwd[2];
+        const double ax[3] = {u[0] - off * fwd[0], u[1] - off * fwd[1], u[2] - off * fwd[2]};
+        const double sc = length3(ax);
+        if (!(sc > 1e-12) || !std::isfinite(off) || !std::isfinite(sc)) return false;
+        o.off[k] = off;
+        o.scale[k] = sc;
+    }
+    o.ok = true;
+    return true;
+}
+// The world rows (b1 270..273, row-vector form: column j of the clip is rows[j], rows[4 + j], rows[8 + j]): x, y and w are the columns 0, 1, 3.
+inline bool projDecomposeWorld(const float rows[16], ProjDecomp& o) noexcept {
+    double c[3][3];
+    static const int kWhich[3] = {0, 1, 3};
+    for (int k = 0; k < 3; ++k)
+        for (int i = 0; i < 3; ++i) c[k][i] = rows[4 * i + kWhich[k]];
+    return projDecompose(c[0], c[1], c[2], o);
+}
+// The marker composite's b0 rows 4, 5 and 7: x, y and w are r4 . p, r5 . p, r7 . p.
+inline bool projDecomposeMarker(const float r4[4], const float r5[4], const float r7[4], ProjDecomp& o) noexcept {
+    const double cx[3] = {r4[0], r4[1], r4[2]}, cy[3] = {r5[0], r5[1], r5[2]}, cw[3] = {r7[0], r7[1], r7[2]};
+    return projDecompose(cx, cy, cw, o);
+}
+constexpr double kSigmaMin = 0.9, kSigmaMax = 1.1;   // a scale ratio outside this is another camera, not a projection mismatch: the plain translation
+struct MarkerAffine {
+    bool ok = false;              // both decompositions were usable and sigma is within kSigmaMin..kSigmaMax on both axes
+    bool haveAxis = false;        // the texture's tangents were known (else the axis is the scene rows' own centre and the jitter is not removed)
+    double sigma[2] = {1.0, 1.0}; // scale_M / scale_W
+    double axis[2] = {}, offM[2] = {}, offW[2] = {}, jitter[2] = {};
+};
+// axisOrNull: the texture's optical axis in NDC ({-(R + L) / (R - L), -(U + D) / (U - D)} from the tangents), or null.
+inline MarkerAffine markerAffine(const ProjDecomp& M, const ProjDecomp& W, const double* axisOrNull) noexcept {
+    MarkerAffine a;
+    if (!M.ok || !W.ok) return a;
+    for (int k = 0; k < 2; ++k) {
+        a.sigma[k] = M.scale[k] / W.scale[k];
+        a.offM[k] = M.off[k];
+        a.offW[k] = W.off[k];
+        a.axis[k] = axisOrNull ? axisOrNull[k] : W.off[k];
+        a.jitter[k] = axisOrNull ? W.off[k] - axisOrNull[k] : 0.0;
+    }
+    a.haveAxis = axisOrNull != nullptr;
+    const bool fine = std::isfinite(a.sigma[0]) && std::isfinite(a.sigma[1]) && std::isfinite(a.axis[0]) && std::isfinite(a.axis[1]) &&
+                      a.sigma[0] >= kSigmaMin && a.sigma[0] <= kSigmaMax && a.sigma[1] >= kSigmaMin && a.sigma[1] <= kSigmaMax;
+    if (!fine) {
+        a = MarkerAffine{};
+        return a;
+    }
+    a.ok = true;
+    return a;
+}
+// u of the row patch for the anchor's target T (texture NDC) given the anchor's own projection nM0 through the unpatched rows. A MarkerAffine that
+// is not ok (sigma 1, axis and off 0) gives u = T - nM0: the plain translation.
+inline void markerAffineU(const MarkerAffine& a, const double T[2], const double nM0[2], double u[2]) noexcept {
+    for (int k = 0; k < 2; ++k) u[k] = a.offM[k] + a.sigma[k] * (T[k] - a.axis[k]) - a.sigma[k] * nM0[k];
+}
+// r4' = sigma_x r4 + u_x r7 and r5' = sigma_y r5 + u_y r7 (NDC' = sigma NDC + u wherever r7 . p > 0).
+inline void affineOffsetRows(float r4[4], float r5[4], const float r7[4], const double sigma[2], const double u[2]) noexcept {
+    for (int i = 0; i < 4; ++i) {
+        r4[i] = static_cast<float>(sigma[0] * r4[i] + u[0] * r7[i]);
+        r5[i] = static_cast<float>(sigma[1] * r5[i] + u[1] * r7[i]);
+    }
+}
+// The texture NDC where a UI NDC n is shown, and the unjittered NDC of a point the scene rows put at n (the TAA jitter is a translation of the
+// whole projection, so the point's place without it is n less the rows' principal point's offset from the axis).
+inline void displayOfUi(const MarkerAffine& a, const double n[2], double out[2]) noexcept {
+    for (int k = 0; k < 2; ++k) out[k] = a.axis[k] + (n[k] - a.offM[k]) / a.sigma[k];
+}
+inline void unjitter(const MarkerAffine& a, const double n[2], double out[2]) noexcept {
+    for (int k = 0; k < 2; ++k) out[k] = n[k] - a.jitter[k];
+}
+// The optical axis of a texture from its tangents {L, R, D, U} (L and D negative): where the forward direction lands in NDC.
+inline bool axisFromTangents(const float tan[4], double axis[2]) noexcept {
+    const double L = tan[0], R = tan[1], D = tan[2], U = tan[3];
+    if (!(R - L > 1e-6) || !(U - D > 1e-6)) return false;
+    axis[0] = -(R + L) / (R - L);
+    axis[1] = -(U + D) / (U - D);
+    return std::isfinite(axis[0]) && std::isfinite(axis[1]);
+}
+
+// The icon's offset from its anchor, from the draw's own geometry as the vertex shader forms it (B10B032BDFD46700, disassembled): a vertex position
+// is decoded from PACKEDVERTEXDATAA.xyz (two forms, selected by bits 24..30 of z), turned by the instance record's quaternion (words 2 and 3 of the
+// record: four unorm16 as u / 32768 - 1; q = (w2 lo, w2 hi, w3 lo, w3 hi); v' = (2 w^2 - 1) v + 2 (q . v) q + 2 w (q x v)), scaled by the record's
+// word 1 (a float) and added to the anchor (record +16 less b1 row 275). e = ndc(anchor) - ndc(the centre vertex): the anchor sits e above the disc.
+inline bool decodePackedPosition(uint32_t a0, uint32_t a1, uint32_t a2, double out[3]) noexcept {
+    const uint32_t mode = (a2 >> 24) & 0x7Fu;
+    if (mode == 64u) {
+        const double xlo = static_cast<double>(a0 & 0xFFFFu), xhi = static_cast<double>(a0 >> 16), ylo = static_cast<double>(a1 & 0xFFFFu),
+                     yhi = static_cast<double>(a1 >> 16);
+        const double s = std::exp2(yhi * (1.0 / 4096.0)) - 1.0;
+        out[0] = s * (xlo / 32768.0 - 1.0);
+        out[1] = s * (xhi / 32768.0 - 1.0);
+        out[2] = s * (ylo / 32768.0 - 1.0);
+    } else {
+        const uint32_t shift = (20u - mode) & 31u;
+        const double inv = 1.0 / (static_cast<double>(1u << shift) - 1.0);
+        const double sub = static_cast<double>(1u << ((a2 >> 24) & 31u));
+        const uint32_t qx = a0 & 0x1FFFFFu, qy = (a0 >> 21) + ((a1 & 0x3FFu) << 11), qz = (a1 >> 10) & 0x1FFFFFu;
+        out[0] = static_cast<double>(qx) * inv - sub;
+        out[1] = static_cast<double>(qy) * inv - sub;
+        out[2] = static_cast<double>(qz) * inv - sub;
+    }
+    return std::isfinite(out[0]) && std::isfinite(out[1]) && std::isfinite(out[2]);
+}
+inline void rotateByPackedQuat(uint32_t w2, uint32_t w3, const double v[3], double out[3]) noexcept {
+    const double q[4] = {static_cast<double>(w2 & 0xFFFFu) / 32768.0 - 1.0, static_cast<double>(w2 >> 16) / 32768.0 - 1.0,
+                         static_cast<double>(w3 & 0xFFFFu) / 32768.0 - 1.0, static_cast<double>(w3 >> 16) / 32768.0 - 1.0};
+    const double qv = q[0] * v[0] + q[1] * v[1] + q[2] * v[2];
+    const double c[3] = {q[1] * v[2] - v[1] * q[2], q[2] * v[0] - v[2] * q[0], q[0] * v[1] - v[0] * q[1]};
+    const double k = 2.0 * q[3] * q[3] - 1.0;
+    for (int i = 0; i < 3; ++i) out[i] = k * v[i] + 2.0 * qv * q[i] + 2.0 * q[3] * c[i];
+}
+// e (NDC) through the draw's rows; false when the anchor or the centre is not in front of the marker's projection.
+inline bool iconEdrawNdc(const float r4[4], const float r5[4], const float r7[4], const double x0rel[3], double scale, uint32_t w2, uint32_t w3,
+                         const double vc[3], double e[2]) noexcept {
+    double rv[3];
+    rotateByPackedQuat(w2, w3, vc, rv);
+    const double zero[3] = {0.0, 0.0, 0.0};
+    const double c[3] = {x0rel[0] + scale * rv[0], x0rel[1] + scale * rv[1], x0rel[2] + scale * rv[2]};
+    double a[3], b[3];
+    markerClip(r4, r5, r7, x0rel, zero, a);
+    markerClip(r4, r5, r7, c, zero, b);
+    if (!(a[2] > 1e-9) || !(b[2] > 1e-9)) return false;
+    e[0] = a[0] / a[2] - b[0] / b[2];
+    e[1] = a[1] / a[2] - b[1] / b[2];
+    return std::isfinite(e[0]) && std::isfinite(e[1]);
 }
 
 // F62c: THE PATCH DECISION (fix.native_on_foot_marker_fix). F53's trust gate (P through the scene rows and through the temporal pass's camera
@@ -624,7 +766,8 @@ enum PatchWhy : int {
     kPatchNoP = 4,         // no find of the key's P
     kPatchW = 5,           // w not positive (P behind the world view or the marker behind its own)
     kPatchGate = 6,        // |dx| or |dy| not under kPatchGateNdc
-    kPatchWhyCount = 7
+    kPatchNoIcon = 7,      // F66f: no icon offset yet (the geometry not read, the head-still baseline not seeded)
+    kPatchWhyCount = 8
 };
 // F64: the eye's scene rows at a marker draw: this frame's (fresh), the eye's newest at most kSceneRowsMaxAge frames older (newest), or none
 // usable. rowsFrame is the probe frame the rows were taken in (~0u: never); a rows frame after the draw's (a counter that went back) is none.
@@ -728,28 +871,6 @@ inline int holdEvidence(HeldMatch& h, uint32_t f, uint16_t ord, uint32_t rec, ui
     h.drop();
     return kHoldContradict;
 }
-
-// F63: THE ICON OFFSET'S BIAS. The patch aims at ndc_P + e_used; the read-back of a fresh patched frame gives where the patched rows drew the
-// record, r = drawn - (ndc_P + e_used) (NDC). An EMA (kBiasAlpha) of r over fresh patched frames only (a held or unpatched frame never feeds
-// it) is the pipeline's bias b, and the next patch aims at e - b, so the drawn marker settles on ndc_P + e. Clamped to kBiasMaxNdc a component.
-constexpr double kBiasAlpha = 0.02, kBiasMaxNdc = 0.02;
-struct BiasEma {
-    double b[2] = {0.0, 0.0};
-    uint64_t n = 0;
-    bool update(const double r[2], bool patchedFresh) noexcept {
-        if (!patchedFresh || !(std::fabs(r[0]) < 1.0) || !(std::fabs(r[1]) < 1.0)) return false;
-        for (int k = 0; k < 2; ++k) {
-            b[k] += kBiasAlpha * (r[k] - b[k]);
-            b[k] = b[k] < -kBiasMaxNdc ? -kBiasMaxNdc : b[k] > kBiasMaxNdc ? kBiasMaxNdc : b[k];
-        }
-        ++n;
-        return true;
-    }
-    void target(const double e[2], double out[2]) const noexcept {
-        out[0] = e[0] - b[0];
-        out[1] = e[1] - b[1];
-    }
-};
 
 // F63: THE CPU IDENTIFICATION's window. The instance stream (one DYNAMIC vertex buffer of stride 8, about 192k entries, WRITE_DISCARD once a
 // frame) is copied at its Unmap, before the real one, only about each eye's newest marker composite entry: `want` entries centred there,

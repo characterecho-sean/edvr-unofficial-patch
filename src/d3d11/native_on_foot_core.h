@@ -397,36 +397,13 @@ inline double dropAlong(double v[3], const double axis[3]) noexcept {
     return k;
 }
 
-// ---- F51 (TEMPORARY): the first-person rig and view raise, pure half --------------------------------------------------------------
-// dh = (3P pov height - FP side height), both body axes up, clamped to 0..kMaxM, then low-passed (tau kTauSec). Starts at 0 on reset, so the
-// raise eases in. A frame without a measurement (`have` false: ADS, a stale input) holds the value.
-struct RaiseDh {
-    static constexpr double kTauSec = 1.0;
-    static constexpr double kMaxM = 0.5;
-    double lp = 0.0;
-    double raw = 0.0;   // the last measurement, unclamped (logged)
-    void reset() noexcept { *this = RaiseDh{}; }
-    static double clamp(double v) noexcept { return !(v > 0.0) ? 0.0 : v > kMaxM ? kMaxM : v; }
-    double step(double measured, bool have, double dtSec) noexcept {
-        if (!have || !(dtSec > 0.0) || !(measured == measured)) return lp;
-        raw = measured;
-        lp += (1.0 - std::exp(-dtSec / kTauSec)) * (clamp(measured) - lp);
-        return lp;
-    }
-};
+// ---- The view's raise (F51's seated y term; F66: the FP rig raise it served is gone, the eye height F64 keeps it) ---------------------------
 // The view's share of the raise: a vertical-only seated offset. The calibration (body = diag(-1, -1, +1) . seated at psi 0) makes seated y = -dh
 // raise the camera by dh; this is seatedFromBody({0, dh, 0}, 0).
 inline void raiseSeated(double dh, double out[3]) noexcept {
     out[0] = 0.0;
     out[1] = -dh;
     out[2] = 0.0;
-}
-// F53: the raise is a constant, not the live dh (the pov joint's animation bobbed it 0 to 12 cm): `cm` (fix.native_on_foot_body_raise_cm,
-// default 10) clamped to 0..RaiseDh::kMaxM, while the raise is on; 0 otherwise.
-constexpr double kRaiseDefaultCm = 10.0;
-inline double raiseConstM(bool on, double cm) noexcept {
-    if (!on || !(cm == cm)) return 0.0;
-    return RaiseDh::clamp(cm / 100.0);
 }
 // F53: the neck anchor (the body align's default) with the rest geometry. The 3P neck's target is the FP side plus kNeckRestOffset in body axes
 // (right, up, forward): the pov minus the neck at rest, negated. The F42/F46 path captured that offset live over the first second, so it
@@ -475,34 +452,8 @@ inline bool weaponIsLocalFp(uint64_t mask, uint8_t viewFlag, const float pos[3],
         if (dist3f(pos, attach[s]) <= kWeaponMatchM) return true;   // a NaN distance never matches
     return false;
 }
-// The shift: both copies of the record's position move by d (the FP raise, world).
-inline void weaponShift(float pos[3], float copy[3], const float d[3]) noexcept {
-    for (size_t i = 0; i < 3; ++i) {
-        pos[i] += d[i];
-        copy[i] += d[i];
-    }
-}
-// ---- F55 (TEMPORARY): the FP shoulder drop, pure half ---------------------------------------------------------------------------
-// fix.native_on_foot_fp_shoulder_drop_cm (0..20, default 0): in body mode the FP clavicles (joints 19 and 20) and their subtree (the arm chain)
-// move down by the drop in the FP model space (its -y) in the Animate output. The weight ramps linearly over kDropBlendSec: to 0 when ADS
-// starts (the sights stay aligned) or body mode ends, back to 1 after. The applied drop also moves at most the 5 cm a frame cap.
-constexpr double kDropMaxCm = 20.0;
-constexpr double kDropBlendSec = 0.2;
+// ---- F55: the FP X's clavicle subtree (the plan the Animate post-hook snapshots; F66: the shoulder drop that lowered it is gone) ----------
 constexpr uint32_t kDropClavL = 19, kDropClavR = 20, kDropHandL = 37, kDropHandR = 44;
-inline double dropClampCm(double cm) noexcept {
-    if (!(cm == cm) || !(cm > 0.0)) return 0.0;
-    return cm > kDropMaxCm ? kDropMaxCm : cm;
-}
-struct DropBlend {
-    double w = 0.0;
-    void step(bool on, double dtSec) noexcept {
-        if (!(dtSec > 0.0)) return;
-        const double k = dtSec / kDropBlendSec;
-        w = on ? (w + k > 1.0 ? 1.0 : w + k) : (w - k < 0.0 ? 0.0 : w - k);
-    }
-};
-// The drop in metres for a weight and the key's cm (clamped).
-inline double dropM(double w, double cm) noexcept { return (w > 0.0 ? (w > 1.0 ? 1.0 : w) : 0.0) * dropClampCm(cm) / 100.0; }
 // The subtree of joints a and b (both included) over a parent array, in index order; joints whose parent chain is broken (out of range, or
 // longer than the joint count) are left out. Returns the member count (at most cap).
 inline uint32_t dropSubtree(const uint16_t* parents, uint32_t joints, uint32_t a, uint32_t b, uint16_t* out, uint32_t cap) noexcept {
@@ -1755,172 +1706,211 @@ inline bool ikAssistRot(const double C[3], const double S[3], const double disp[
     return true;
 }
 
-// ---- F60 (TEMPORARY slider): the body fitted to the weapon; the view is never moved ----------------------------------------------------
-// While a weapon or tool is held (the FP grips fresh, both arms planned, both distance gates open), the body target d is blended from the
-// head's (F41/F58/F59b) toward the weapon's: the 3P upper-arm midpoint (40, 41, after the square-up) placed at the desired shoulder midpoint
-// Sd = g - f (k_reach (l1 + l2)) - up 0.10 m, g the grip midpoint (T_A left and right in the 3P model), f the FP forward (G's z row on xz,
-// unit). In ADS the shoulder raise (up) and forward push (along f) are added to Sd. 3P model axes = body axes: x right, y up, z forward.
-constexpr double kFitReach = 0.82;            // k_reach: Sd sits this fraction of the arm length behind the grips
-constexpr double kFitDropM = 0.10;            // and this far below them
-constexpr double kFitArmLenDefaultM = 0.59;   // l1 + l2 when the measured length is not usable (outside 0.2..1.5 m)
-constexpr double kFitRampSec = 0.3;           // the fit's ramp in and out (no weapon: to 0 over 0.3 s)
-constexpr double kFitWeaponDefault = 0.7;     // fix.native_on_foot_body_fit_weapon's default
-inline double fitWeaponClamp(double v) noexcept { return ikClampOr(v, 0.0, 1.0, kFitWeaponDefault); }
-inline double fitArmLen(double measured) noexcept {
-    return (measured == measured && measured >= 0.2 && measured <= 1.5) ? measured : kFitArmLenDefaultM;
-}
-// Sd from the two grips, the FP forward row and the arm length (fitArmLen'd), plus the ADS raise (up), metres; reachK the k_reach in use
-// (F62a: kFitReach, lerped to 1.0 in ADS by fitReachK; the ADS forward push no longer enters Sd). False (Sd zero) when the forward's xz is
-// under 0.1 or an input is not finite.
-inline bool fitShoulderTarget(const double gL[3], const double gR[3], const double fwdRow[3], double armLen, double raiseM, double reachK,
-                              double sd[3]) noexcept {
-    sd[0] = sd[1] = sd[2] = 0.0;
-    const double fxz[3] = {fwdRow[0], 0.0, fwdRow[2]};
-    double f[3];
-    if (!(ikLen(fxz) > 0.1) || !ikUnit(fxz, f)) return false;
-    const double back = reachK * fitArmLen(armLen);
-    double out[3];
-    for (int i = 0; i < 3; ++i) out[i] = 0.5 * (gL[i] + gR[i]) - f[i] * back;
-    out[1] += raiseM - kFitDropM;
-    for (int i = 0; i < 3; ++i)
-        if (!std::isfinite(out[i])) return false;
-    for (int i = 0; i < 3; ++i) sd[i] = out[i];
-    return true;
-}
-// d_w (body axes): the d that G was built with (dB, body axes) plus what still separates Sd from the upper-arm midpoint. Open loop: Sd moves by
-// -dB with d (G subtracts it) and Umid does not, so d_w does not depend on the d it was measured at.
-inline void fitBodyTarget(const double dB[3], const double sd[3], const double umid[3], double dw[3]) noexcept {
-    for (int i = 0; i < 3; ++i) dw[i] = dB[i] + (sd[i] - umid[i]);
-}
-// d = lerp(d_head, d_w, fit) per body axis; horizontalOnly (the body's vertical off) keeps the head's up (the vertical lock drops it anyway).
-inline void fitBlend(const double dHead[3], const double dW[3], double fit, bool horizontalOnly, double out[3]) noexcept {
-    const double w = fit < 0.0 ? 0.0 : fit > 1.0 ? 1.0 : fit;
-    const double h1 = dHead[1];
-    for (int i = 0; i < 3; ++i) out[i] = dHead[i] + (dW[i] - dHead[i]) * w;
-    if (horizontalOnly) out[1] = h1;
-}
+// ---- F66: native on foot, one solve with exogenous inputs only ---------------------------------------------------------------------------
+// (reviews\native-onfoot-body-review-2026-10-16.md sections 2 and 3; docs\design-native-onfoot-vr-2026-10-13.md, F66.) The F60 weapon fit
+// (fix.native_on_foot_body_fit_weapon and _fit_lateral: fitApply, FitAdsLat, adsFitDetach) is gone, and with it the bend's limits switching on
+// the fit's weight and the bend's suspension: they closed a loop (the bend moved the shoulders, the reach limit read the moved shoulders, the
+// published d fed the bend's target) with a discrete switch in it, and the F65 flight measured the 2-frame limit cycle that makes. The rule that
+// replaces them: every stage reads only samples the game made (its animation, the FP rig, the eye, its armed and ADS state) or the output of an
+// earlier stage in the same pass. Body axes: right, up, forward.
 
-// ---- F62a (TEMPORARY): the weapon fit gated by raised-ness, its own lateral weight and a pull clamp, the trims on the final d, the bend's
-// limits while the fit is engaged, k_reach 1.0 in ADS and the lateral target's ADS blend ------------------------------------------------------
-// The F60 flight (log 034818): unarmed, the grip gate sat at 0.0..0.2 with the hands hanging and the fit still ran at 0.7 (it needed only
-// gateMin > 0), pulling the body 18..25 cm back; the FP rifle sits about 30 cm right of the eye, so the midpoint rule moved the body right and
-// the bend rolled it about -20 deg; the trims reached the body only 35%; a -173 deg roll was solved in a degenerate case; in ADS the right arm
-// folded to the 40 deg limit. Body axes: right, up, forward.
-constexpr double kFitRaisedLo = 0.5, kFitRaisedHi = 1.0;              // the fit's raised factor: smoothstep of the smaller grip gate
-constexpr double kFitDisengageLoM = 0.15, kFitDisengageHiM = 0.35;    // horizontal |d_w - d_head|: full fit under 0.15 m, none from 0.35 m
-constexpr double kFitPullMaxM = 0.12;                                 // the fit's horizontal pull |w (d_w - d_head)| at most
-constexpr double kFitLateralDefault = 0.25;                           // fix.native_on_foot_body_fit_lateral's default
-constexpr double kFitReachAds = 1.0;                                  // k_reach in ADS (0.82 outside), lerped by the ADS weight
-constexpr double kFitAdsLatSec = 0.3;                                 // the lateral target's blend at each change of the ADS flag
-constexpr double kBendFitFwdMaxDeg = 8.0, kBendFitBackMaxDeg = 8.0, kBendFitRollMaxDeg = 6.0;   // the bend's limits while the fit is engaged
-constexpr double kBendSuspendResM = 0.35;                             // |T - N| before the bend above this suspends it (its want goes to 0)
-
+inline double unit01(double v) noexcept { return !(v == v) ? 0.0 : v < 0.0 ? 0.0 : v > 1.0 ? 1.0 : v; }
 // 0 at or below e0, 1 at or above e1, 3t^2 - 2t^3 between (NaN: 0).
-inline double fitSmoothstep(double e0, double e1, double x) noexcept {
+inline double smoothstep3(double e0, double e1, double x) noexcept {
     if (!(x == x)) return 0.0;
     double t = (x - e0) / (e1 - e0);
     t = t < 0.0 ? 0.0 : t > 1.0 ? 1.0 : t;
     return t * t * (3.0 - 2.0 * t);
 }
-// The raised factor: 0 at gateMin 0.5 and below, 1 at 1.0 (the arms at the grips).
-inline double fitRaised(double gateMin) noexcept { return fitSmoothstep(kFitRaisedLo, kFitRaisedHi, gateMin); }
-// The disengage factor: 1 at a horizontal |d_w - d_head| of 0.15 m and below, 0 at 0.35 m and above (a head excursion drags the body).
-inline double fitDisengage(double horizM) noexcept { return 1.0 - fitSmoothstep(kFitDisengageLoM, kFitDisengageHiM, horizM); }
-inline double fitLateralClamp(double v) noexcept { return ikClampOr(v, 0.0, 1.0, kFitLateralDefault); }
-// k_reach for the ADS weight (0..1): 0.82 out of ADS, 1.0 in it.
-inline double fitReachK(double adsW) noexcept {
-    const double w = !(adsW == adsW) ? 0.0 : adsW < 0.0 ? 0.0 : adsW > 1.0 ? 1.0 : adsW;
-    return kFitReach + (kFitReachAds - kFitReach) * w;
+
+// ---- F66a: armed from the game, not from hand distance -----------------------------------------------------------------------------------
+// Status.json SelectedWeapon (journal_watch.h: kHeldItem for anything but the fists) is the armed flag; the ramp is 0.3 s in and out. The arm
+// IK's weight per arm is the ramp itself (0 unarmed whatever the distance gate says, 1 armed): the F65 flight's distance gate read "held" 62 to
+// 91 of 90 frames unarmed (the 3P animated hand within about 0.58 m of the FP hand), armed the reach limit and blocked the stand capture.
+constexpr double kArmedRampSec = 0.3;
+inline float ikArmWeight(float armedRamp) noexcept { return static_cast<float>(unit01(static_cast<double>(armedRamp))); }
+// The old reading of "held" (smoothstep(0.5, 1.0, the smaller grip gate) above 0), kept as a logged measure of how often it was wrong.
+inline bool distanceGateHeld(double gateMin) noexcept { return gateMin == gateMin && gateMin > 0.5; }
+
+// ---- F66c: the bend without a loop -------------------------------------------------------------------------------------------------------
+// The limits are interpolated by the armed ramp (unarmed F58's forward 45, back 15, roll 20 deg; armed F62a's 8, 8, 6), never switched by
+// anything the bend moves. The suspension (a discrete switch at |T - N| = 0.35 m) is a continuous weight, 1 - smoothstep(0.30, 0.45, |T - N0|),
+// N0 the neck before the bend.
+constexpr double kBendArmedFwdMaxDeg = 8.0, kBendArmedBackMaxDeg = 8.0, kBendArmedRollMaxDeg = 6.0;
+inline void bendLimitsArmed(double armedRamp, double* fwdDeg, double* backDeg, double* rollDeg) noexcept {
+    const double w = unit01(armedRamp);
+    *fwdDeg = kBendFwdMaxDeg + (kBendArmedFwdMaxDeg - kBendFwdMaxDeg) * w;
+    *backDeg = kBendBackMaxDeg + (kBendArmedBackMaxDeg - kBendBackMaxDeg) * w;
+    *rollDeg = kBendRollMaxDeg + (kBendArmedRollMaxDeg - kBendRollMaxDeg) * w;
 }
-struct FitApplied {
-    double e[3] = {};          // d_w - d_head (body axes), m
-    double horiz = 0.0;        // its horizontal length, m
-    double disengage = 1.0;    // fitDisengage(horiz)
-    double wFwd = 0.0, wLat = 0.0;   // the weights after the disengage factor
-    double pull[3] = {};       // the pull added to d_head (after the clamp)
-    bool clamped = false;      // the horizontal pull was clamped to kFitPullMaxM
-};
-// The final d: d_head (UNTRIMMED) + the pull, less the trims once (the trims on the final d). The pull: right wLat e.x, forward wFwd e.z (w =
-// the base weight x the disengage factor), its horizontal length clamped to kFitPullMaxM; up wFwd e.y with the vertical on, 0 with it off (the
-// head's up kept). With both bases 0 the result is d_head - trim, the target with no fit. A non-finite e pulls nothing.
-inline void fitApply(const double dHead[3], const double dW[3], const double trim[3], double baseFwd, double baseLat, bool horizontalOnly,
-                     double out[3], FitApplied* a) noexcept {
-    FitApplied r;
-    bool finite = true;
-    for (int i = 0; i < 3; ++i) {
-        r.e[i] = dW[i] - dHead[i];
-        if (!std::isfinite(r.e[i])) finite = false;
-    }
-    const double bF = !(baseFwd == baseFwd) ? 0.0 : baseFwd < 0.0 ? 0.0 : baseFwd > 1.0 ? 1.0 : baseFwd;
-    const double bL = !(baseLat == baseLat) ? 0.0 : baseLat < 0.0 ? 0.0 : baseLat > 1.0 ? 1.0 : baseLat;
-    if (finite) {
-        r.horiz = std::sqrt(r.e[0] * r.e[0] + r.e[2] * r.e[2]);
-        r.disengage = fitDisengage(r.horiz);
-        r.wFwd = bF * r.disengage;
-        r.wLat = bL * r.disengage;
-        r.pull[0] = r.wLat * r.e[0];
-        r.pull[1] = horizontalOnly ? 0.0 : r.wFwd * r.e[1];
-        r.pull[2] = r.wFwd * r.e[2];
-        const double ph = std::sqrt(r.pull[0] * r.pull[0] + r.pull[2] * r.pull[2]);
-        if (ph > kFitPullMaxM) {
-            const double k = kFitPullMaxM / ph;
-            r.pull[0] *= k;
-            r.pull[2] *= k;
-            r.clamped = true;
-        }
-    } else {
-        for (int i = 0; i < 3; ++i) r.e[i] = 0.0;
-        r.disengage = 0.0;
-    }
-    for (int i = 0; i < 3; ++i) out[i] = dHead[i] + r.pull[i] - trim[i];
-    if (a) *a = r;
+constexpr double kBendWeightLoM = 0.30, kBendWeightHiM = 0.45;
+inline double bendResidualWeight(double residualM) noexcept {
+    if (!std::isfinite(residualM)) return 0.0;
+    return 1.0 - smoothstep3(kBendWeightLoM, kBendWeightHiM, residualM);
 }
-// The lateral target's blend on the ADS flag: at each change of the flag the lateral (right) component of d_w goes from the last output to the
-// live value over kFitAdsLatSec (linear; the change call outputs the last output exactly), so the FP weapon's move toward the eye in ADS does
-// not snap the body sideways. The first call (and the first after a reset) outputs the live value.
-struct FitAdsLat {
-    bool have = false, ads = false, blending = false;
-    double from = 0.0, out = 0.0, t = 1.0;
-    double step(bool adsNow, double live, double dt) noexcept {
-        if (!have) {
-            have = true;
-            ads = adsNow;
-            blending = false;
-            t = 1.0;
-            out = live;
-            return out;
-        }
-        if (adsNow != ads) {
-            ads = adsNow;
-            from = out;
-            t = 0.0;
-            blending = true;
-            return out;
-        }
-        if (blending) {
-            t += (dt > 0.0 ? dt : 0.0) / kFitAdsLatSec;
-            if (t >= 1.0) {
-                t = 1.0;
-                blending = false;
-            }
-        }
-        out = blending ? from + (live - from) * t : live;
-        return out;
-    }
-};
-// The bend's limits (degrees): F58's forward 45, back 15, roll 20; while the fit is engaged forward 8, back 8, roll 6.
-inline void bendLimits(bool fitEngaged, double* fwdDeg, double* backDeg, double* rollDeg) noexcept {
-    *fwdDeg = fitEngaged ? kBendFitFwdMaxDeg : kBendFwdMaxDeg;
-    *backDeg = fitEngaged ? kBendFitBackMaxDeg : kBendBackMaxDeg;
-    *rollDeg = fitEngaged ? kBendFitRollMaxDeg : kBendRollMaxDeg;
-}
-// The bend is suspended (its want goes to 0; the applied angles return at their cap) while |T - N| before it is above kBendSuspendResM, or
-// not finite.
-inline bool bendSuspend(const double T[3], const double N[3]) noexcept {
+inline double bendResidualWeight(const double T[3], const double N[3]) noexcept {
     const double v[3] = {T[0] - N[0], T[1] - N[1], T[2] - N[2]};
-    const double r = ikLen(v);
-    return !(r <= kBendSuspendResM);
+    return bendResidualWeight(ikLen(v));
 }
+// The reach constraint reads U*, never the bent shoulder: a point of the unbent pose turned about the vertical through `pivot` by the
+// square-up's angle (what the square-up does to everything under the chest 24: it turns the stage-0 pose about joint 34's vertical).
+inline void turnAboutVertical(const double p[3], const double pivot[3], double angleRad, double out[3]) noexcept {
+    const double up[3] = {0.0, 1.0, 0.0};
+    double R[9];
+    ikRotAxis(up, angleRad, R);
+    const double q[3] = {p[0] - pivot[0], p[1] - pivot[1], p[2] - pivot[2]};
+    for (int c = 0; c < 3; ++c) out[c] = q[0] * R[c] + q[1] * R[3 + c] + q[2] * R[6 + c] + pivot[c];
+}
+
+// ---- F66b: the frame clock ----------------------------------------------------------------------------------------------------------------
+// dt from QueryPerformanceCounter ticks, never GetTickCount64: the ms clock ticks at 15.6 ms (64 Hz) and about 29% of 90 Hz ticks read dt = 0,
+// so cdStep took no step on 2 ticks of 3 while the view moved every frame. 0 for the first tick (no previous) or a clock that did not advance;
+// capped at capSec (a stall is not a long step).
+inline double qpcDtSec(uint64_t prevTicks, uint64_t nowTicks, uint64_t freq, double capSec) noexcept {
+    if (!prevTicks || !freq || nowTicks <= prevTicks) return 0.0;
+    const double dt = static_cast<double>(nowTicks - prevTicks) / static_cast<double>(freq);
+    return dt > capSec ? capSec : dt;
+}
+
+// ---- F66d: the elbow keeps its hinge --------------------------------------------------------------------------------------------------------
+// The F56..F65 solve turned the upper arm by the shortest arc from the animated elbow direction to the solved one (swing 1) and the forearm by
+// the shortest arc about E (swing 2), so the forearm bent about eh x eT, which is generally not the elbow's hinge. Here: the animated hinge is
+// n0 = unit((E0 - S) x (H0 - E0)) and the solved hinge n1 = unit((E - S) x (T - E)), both the positive flexion normal. Swing 1 turns the upper
+// arm's subtree about S by the rotation taking the frame (u0, n0, u0 x n0) to (u1, n1, u1 x n1) (u = the unit upper-arm direction); after it the
+// forearm direction h1 and the target direction eT both lie in the plane perpendicular to n1, so swing 2 is a rotation about n1 alone, by the
+// signed flexion difference. A nearly straight animated arm (the cross under kHingeMinSin of |u||h|) has no hinge: the learned hinge row, else the
+// last solved hinge, else the shortest arc (n0 taken so that the swing is the shortest one) stands in. Row-vector rotations throughout.
+constexpr double kHingeMinSin = 0.05;
+constexpr double kHingeRowTolDeg = 10.0;
+constexpr double kHingeHintPerp = 0.2;   // a hint's part perpendicular to the upper arm must be at least this to be used
+inline void ikRowRot(const double v[3], const double R[9], double out[3]) noexcept {
+    for (int c = 0; c < 3; ++c) out[c] = v[0] * R[c] + v[1] * R[3 + c] + v[2] * R[6 + c];
+}
+// The animated hinge from the joints alone; false when the arm is nearly straight.
+inline bool ikHingeAnimated(const double S[3], const double F0[3], const double H0[3], double n0[3]) noexcept {
+    const double a[3] = {F0[0] - S[0], F0[1] - S[1], F0[2] - S[2]}, b[3] = {H0[0] - F0[0], H0[1] - F0[1], H0[2] - F0[2]};
+    double c[3];
+    ikCross(a, b, c);
+    const double la = ikLen(a), lb = ikLen(b), lc = ikLen(c);
+    if (!(la > 1e-6) || !(lb > 1e-6) || !(lc > kHingeMinSin * la * lb)) return false;
+    for (int i = 0; i < 3; ++i) n0[i] = c[i] / lc;
+    return true;
+}
+// The angle between two unit axes, modulo sign (0..90 degrees).
+inline double ikAxisAngleDeg(const double a[3], const double b[3]) noexcept {
+    double c = std::fabs(ikDot(a, b));
+    c = c > 1.0 ? 1.0 : c;
+    return std::acos(c) * 180.0 / kIkPi;
+}
+// The rotation taking the frame (a0, b0, a0 x b0) to (a1, b1, a1 x b1), all unit and a perpendicular to b: R = sum_k f0_k^T f1_k (v x R).
+inline void ikFrameMap(const double a0[3], const double b0[3], const double a1[3], const double b1[3], double R[9]) noexcept {
+    double c0[3], c1[3];
+    ikCross(a0, b0, c0);
+    ikCross(a1, b1, c1);
+    const double* f0[3] = {a0, b0, c0};
+    const double* f1[3] = {a1, b1, c1};
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c) R[r * 3 + c] = f0[0][r] * f1[0][c] + f0[1][r] * f1[1][c] + f0[2][r] * f1[2][c];
+}
+struct HingeSwings {
+    bool ok = false;
+    int source = 0;                    // n0 from: 0 the animated joints' cross, 1 the last solved hinge, 2 the shortest arc, 3 the given row
+    double n0[3] = {}, n1[3] = {};
+    double R1[9] = {}, R2[9] = {};     // swing 1 about S (the whole arm), swing 2 about E (the forearm and hand), about n1 only
+    double flexAnimDeg = 0.0, flexSolvedDeg = 0.0;
+    double planeDeg = 0.0;             // the twist about the upper arm the shortest-arc swing would have missed: angle(n0 turned by it, n1)
+    double oldHingeErrDeg = 0.0;       // the old two swings' forearm axis against the hinge their swing 1 dragged along (computed, not applied)
+};
+// S the shoulder, F0 and H0 the animated elbow and hand, E the solved elbow, T the solved hand (|T - E| = l2). n0Given (unit; optional) is a
+// learned hinge row signed to agree with the animated cross; lastHinge (unit; optional) is the last call's n1. Neither is used while the animated
+// cross is defined and n0Given is null.
+inline HingeSwings ikHingeSwings(const double S[3], const double F0[3], const double H0[3], const double E[3], const double T[3], const double* n0Given,
+                                 const double* lastHinge) noexcept {
+    HingeSwings o;
+    const double a[3] = {F0[0] - S[0], F0[1] - S[1], F0[2] - S[2]}, h0[3] = {H0[0] - F0[0], H0[1] - F0[1], H0[2] - F0[2]};
+    const double e1[3] = {E[0] - S[0], E[1] - S[1], E[2] - S[2]}, t[3] = {T[0] - E[0], T[1] - E[1], T[2] - E[2]};
+    double u0[3], u1[3], eT[3], c1[3];
+    if (!ikUnit(a, u0) || !ikUnit(e1, u1) || !ikUnit(t, eT)) return o;
+    ikCross(u1, eT, c1);
+    if (!ikUnit(c1, o.n1)) return o;
+    double R1s[9];
+    ikRotFromTo(u0, u1, R1s);
+    const auto perp = [&](const double* hint, double out[3]) noexcept {
+        const double d = ikDot(hint, u0);
+        const double p[3] = {hint[0] - d * u0[0], hint[1] - d * u0[1], hint[2] - d * u0[2]};
+        return ikLen(p) >= kHingeHintPerp && ikUnit(p, out);
+    };
+    double n0g[3];
+    const bool geo = ikHingeAnimated(S, F0, H0, n0g);
+    if (n0Given && perp(n0Given, o.n0)) {
+        o.source = 3;
+    } else if (geo) {
+        for (int i = 0; i < 3; ++i) o.n0[i] = n0g[i];
+        o.source = 0;
+    } else if (lastHinge && perp(lastHinge, o.n0)) {
+        o.source = 1;
+    } else {
+        for (int j = 0; j < 3; ++j) o.n0[j] = R1s[j * 3] * o.n1[0] + R1s[j * 3 + 1] * o.n1[1] + R1s[j * 3 + 2] * o.n1[2];   // n1 turned back by the shortest arc
+        o.source = 2;
+    }
+    ikFrameMap(u0, o.n0, u1, o.n1, o.R1);
+    double h1[3], h1u[3];
+    ikRowRot(h0, o.R1, h1);
+    if (!ikUnit(h1, h1u)) return o;
+    double cx[3];
+    ikCross(h1u, eT, cx);
+    ikRotAxis(o.n1, std::atan2(ikDot(o.n1, cx), ikDot(h1u, eT)), o.R2);
+    const auto flexDeg = [](const double u[3], const double h[3]) noexcept {
+        double hu[3];
+        if (!ikUnit(h, hu)) return 0.0;
+        double c = ikDot(u, hu);
+        c = c > 1.0 ? 1.0 : c < -1.0 ? -1.0 : c;
+        return std::acos(c) * 180.0 / kIkPi;
+    };
+    o.flexAnimDeg = flexDeg(u0, h0);
+    o.flexSolvedDeg = flexDeg(u1, t);
+    // The old method's error: its swing 1 is the shortest arc R1s, the hinge it drags is n0 R1s, and its swing 2 bends about eh x eT.
+    double n0s[3], eh0[3], eh[3], a2[3], a2u[3];
+    ikRowRot(o.n0, R1s, n0s);
+    o.planeDeg = std::acos(std::fmax(-1.0, std::fmin(1.0, ikDot(n0s, o.n1)))) * 180.0 / kIkPi;
+    ikRowRot(h0, R1s, eh0);
+    if (ikUnit(eh0, eh)) {
+        ikCross(eh, eT, a2);
+        o.oldHingeErrDeg = ikUnit(a2, a2u) ? ikAxisAngleDeg(a2u, n0s) : 0.0;
+    }
+    o.ok = true;
+    return o;
+}
+// The hand's twist about the forearm folded into +-90 degrees, continuous around the whole circle: the twist itself up to 90, then back to 0 at
+// 180 (the wrist carries the rest). The old wrap to (-180, 180] jumped the helpers' roll by up to 360 t at the wrap.
+inline double ikTwistFold(double theta) noexcept {
+    theta = ikWrapPi(theta);
+    const double a = std::fabs(theta);
+    const double f = a <= 0.5 * kIkPi ? a : kIkPi - a;
+    return theta < 0.0 ? -f : f;
+}
+inline bool ikTwistLimited(double theta) noexcept { return std::fabs(ikWrapPi(theta)) > 0.5 * kIkPi; }
+// Which of a joint matrix's three rotation rows (row-vector 4x4: rows 0..2) is parallel to the unit axis n (modulo sign): the row, the angle in
+// degrees and the sign that makes the row agree with n. -1 when a row is degenerate.
+inline int ikHingeRow(const float M[16], const double n[3], double* angleDeg, double* sign) noexcept {
+    int best = -1;
+    double bestC = -1.0, bestSign = 1.0;
+    for (int r = 0; r < 3; ++r) {
+        const double v[3] = {M[4 * r], M[4 * r + 1], M[4 * r + 2]};
+        double u[3];
+        if (!ikUnit(v, u)) return -1;
+        const double d = ikDot(u, n);
+        if (std::fabs(d) > bestC) {
+            bestC = std::fabs(d);
+            best = r;
+            bestSign = d < 0.0 ? -1.0 : 1.0;
+        }
+    }
+    if (angleDeg) *angleDeg = std::acos(bestC > 1.0 ? 1.0 : bestC) * 180.0 / kIkPi;
+    if (sign) *sign = bestSign;
+    return best;
+}
+
 
 // ---- F61 (TEMPORARY instrument, fix.native_on_foot_rot_calibrate): does a seated rotation reach the game camera's orientation? -----------
 // The schedule: four 1 s steps, repeating: a seated yaw of +5 deg about the head, rest, a pitch of +5 deg about the head's right axis, rest.
@@ -2130,18 +2120,6 @@ inline void adsLockOffset(const double h[3], const double hEntry[3], double w, d
     const double k = !(w == w) ? 0.0 : w < 0.0 ? 0.0 : w > 1.0 ? 1.0 : w;
     for (int i = 0; i < 3; ++i) out[i] = k * (h[i] - hEntry[i]);
 }
-// The body in the ADS head-aim: the head's target ignored with weight w. The target goes from the fit's output (F62a's fitApply) toward d_w less
-// the trims (past the disengage and the 12 cm clamp); with horizontalOnly (the body's vertical off) the up stays the fit output's. out may be
-// fitOut.
-inline void adsFitDetach(const double fitOut[3], const double dW[3], const double trim[3], bool horizontalOnly, double w, double out[3]) noexcept {
-    const double k = !(w == w) ? 0.0 : w < 0.0 ? 0.0 : w > 1.0 ? 1.0 : w;
-    const double up = fitOut[1];
-    for (int i = 0; i < 3; ++i) {
-        const double target = dW[i] - trim[i];
-        out[i] = std::isfinite(target) ? fitOut[i] + (target - fitOut[i]) * k : fitOut[i];
-    }
-    if (horizontalOnly) out[1] = up;
-}
 // F40's map: the camera's body-axes motion for the head's seated motion dH and a seated offset s: diag(1, 1, -1) dH + D s.
 inline void adsCamBodyMotion(const double dH[3], const double s[3], double out[3]) noexcept {
     out[0] = dH[0] - s[0];
@@ -2231,11 +2209,10 @@ struct AdsSightErr {
     double along = 0.0, perpNorm = 0.0;   // e . f (metres), |e perpendicular|
 };
 // rows: the AMC's 3x3 (row-major: right, up, forward, world). False on a degenerate f.
-inline bool adsSightError(const double p14w[3], const double cam[3], const double rHat[3], double halfIpd, const double f[3], const double rows[9],
-                          AdsSightErr& out) noexcept {
+inline bool adsSightErrorEye(const double p14w[3], const double eye[3], const double f[3], const double rows[9], AdsSightErr& out) noexcept {
     double fu[3];
     if (!ikUnit(f, fu)) return false;
-    for (int i = 0; i < 3; ++i) out.eW[i] = p14w[i] - (cam[i] + halfIpd * rHat[i]);
+    for (int i = 0; i < 3; ++i) out.eW[i] = p14w[i] - eye[i];
     out.along = out.eW[0] * fu[0] + out.eW[1] * fu[1] + out.eW[2] * fu[2];
     for (int i = 0; i < 3; ++i) out.ePerpW[i] = out.eW[i] - out.along * fu[i];
     out.perpNorm = std::sqrt(out.ePerpW[0] * out.ePerpW[0] + out.ePerpW[1] * out.ePerpW[1] + out.ePerpW[2] * out.ePerpW[2]);
@@ -2243,6 +2220,13 @@ inline bool adsSightError(const double p14w[3], const double cam[3], const doubl
         out.eBody[i] = out.ePerpW[0] * rows[3 * i] + out.ePerpW[1] * rows[3 * i + 1] + out.ePerpW[2] * rows[3 * i + 2];
     seatedFromBody(out.eBody, 0.0, out.seated);
     return true;
+}
+// F63's model of the right eye: the job camera + half the IPD along the FP root's right.
+inline bool adsSightError(const double p14w[3], const double cam[3], const double rHat[3], double halfIpd, const double f[3], const double rows[9],
+                          AdsSightErr& out) noexcept {
+    double eye[3];
+    for (int i = 0; i < 3; ++i) eye[i] = cam[i] + halfIpd * rHat[i];
+    return adsSightErrorEye(p14w, eye, f, rows, out);
 }
 // |v| at most maxM, the direction kept (the eye alignment's clamps: 0.6 m for the view run, kAdsSightClampM for the sight lock).
 inline void clampNorm3(double v[3], double maxM) noexcept {
@@ -2304,10 +2288,8 @@ inline int retryDecision(bool stateRead, uint32_t state, uint64_t delayMs) noexc
 }
 
 // ---- F65a: the left hand locked to the weapon ---------------------------------------------------------------------------------------------
-// The arm's solve weight: while a weapon is held (the grip gate raised, T_A valid) a hand on its grip target solves at 1; unarmed, the
-// distance gate (the F64 flight: the left hand's animated hand sat 45..54 cm from the grip, so the gate gave 0.64..0.89 and the hand stopped
-// about 11 cm short, sliding with the head).
-inline float ikArmGate(bool armed, float distanceGate) noexcept { return armed ? 1.0f : distanceGate; }
+// F66a: the arm's solve weight is the armed ramp (ikArmWeight, above): 1 while the game says a weapon or tool is in hand, 0 unarmed whatever the
+// distance gate says (the F65 flight: the gate read "held" 62..91 of 90 frames unarmed). The distance gate stays a logged measure.
 // The reach limit: per arm k (0 L, 1 R) v_k = the 3P shoulder (the upper-arm joint) minus its grip target T_A, body axes (right, up, forward)
 // at the body shift in effect; R_k = l1 + l2 - kReachMarginM. A body shift by delta moves the shoulder with the body, so the vector becomes
 // v_k + delta. reachLimitDelta gives the smallest horizontal delta (its up part 0) with |v_k + delta| <= R_k for every arm it has: 0 when that
@@ -2403,6 +2385,113 @@ inline bool reachLimitDelta(const double v[2][3], const double R[2], const bool 
     delta[0] = best[0];
     delta[2] = best[1];
     return delta[0] != 0.0 || delta[2] != 0.0;
+}
+
+// ---- F66e: ADS, the rendered eyes --------------------------------------------------------------------------------------------------------
+// The F65 flight (log 092626): the lock's model of the right eye, E_R = the job camera + 0.0303 m along the FP root's right, closes on itself:
+// the engage ended with e perpendicular at 0.0-0.5 cm and the gun still between the eyes. The rendered eye is where its scene rows (cb1 270..273,
+// row-vector form, clip = (p - o) . rows[0..11] + rows[12..15], o = cb1[275]) have clip x, y and w all zero: a 3 x 3 solve. False when the
+// system is singular or the result is not finite.
+inline bool eyeFromRows(const float rows[16], const double o[3], double eye[3]) noexcept {
+    static const int kWhich[3] = {0, 1, 3};
+    double M[3][3], b[3];
+    for (int j = 0; j < 3; ++j) {
+        for (int i = 0; i < 3; ++i) M[j][i] = rows[4 * i + kWhich[j]];
+        b[j] = -static_cast<double>(rows[12 + kWhich[j]]);
+    }
+    const auto det3 = [](const double a[3], const double b2[3], const double c[3]) noexcept {
+        return a[0] * (b2[1] * c[2] - b2[2] * c[1]) - a[1] * (b2[0] * c[2] - b2[2] * c[0]) + a[2] * (b2[0] * c[1] - b2[1] * c[0]);
+    };
+    const double d = det3(M[0], M[1], M[2]);
+    double scale = 0.0;
+    for (int j = 0; j < 3; ++j)
+        for (int i = 0; i < 3; ++i) scale = std::fmax(scale, std::fabs(M[j][i]));
+    if (!(std::fabs(d) > 1e-12 * scale * scale * scale) || !std::isfinite(d)) return false;
+    double v[3];
+    for (int k = 0; k < 3; ++k) {
+        double Mk[3][3];
+        for (int j = 0; j < 3; ++j)
+            for (int i = 0; i < 3; ++i) Mk[j][i] = (i == k) ? b[j] : M[j][i];
+        v[k] = det3(Mk[0], Mk[1], Mk[2]) / d;
+    }
+    for (int i = 0; i < 3; ++i) {
+        eye[i] = o[i] + v[i];
+        if (!std::isfinite(eye[i])) return false;
+    }
+    return true;
+}
+// An eye's place against the sight line (through p14w along the unit f): its perpendicular distance and its distance along f to p14w (positive
+// when the sight is in front of the eye).
+inline void sightLineOfEye(const double eye[3], const double p14w[3], const double f[3], double* perp, double* along) noexcept {
+    double fu[3];
+    if (!ikUnit(f, fu)) {
+        if (perp) *perp = 0.0;
+        if (along) *along = 0.0;
+        return;
+    }
+    const double e[3] = {p14w[0] - eye[0], p14w[1] - eye[1], p14w[2] - eye[2]};
+    const double al = ikDot(e, fu);
+    const double q[3] = {e[0] - al * fu[0], e[1] - al * fu[1], e[2] - al * fu[2]};
+    if (perp) *perp = ikLen(q);
+    if (along) *along = al;
+}
+// The rows are this frame's when their frame counter is at most one behind the boundary that is reading them (the draws of frame N run before
+// the boundary that stamps N + 1).
+inline bool sceneRowsFreshForLock(uint32_t rowsFrame, uint32_t boundaryFrame) noexcept {
+    if (rowsFrame == ~0u) return false;
+    const int32_t age = static_cast<int32_t>(boundaryFrame - rowsFrame);
+    return age >= 0 && age <= 1;
+}
+
+// ---- F66g: frame order and parity ------------------------------------------------------------------------------------------------------
+// Counters over a sequence of samples. AltCount: how many times the step from one sample to the next (when it exceeds eps) has the opposite sign of
+// the step before it: a signal that flips every frame counts every step, a steady drift counts none. ParityMean: a mean per frame parity.
+struct AltCount {
+    bool haveLast = false, haveDelta = false;
+    double last = 0.0, lastDelta = 0.0;
+    uint32_t flips = 0, steps = 0;
+    void step(double v, double eps) noexcept {
+        if (haveLast) {
+            const double d = v - last;
+            if (std::fabs(d) > eps) {
+                ++steps;
+                if (haveDelta && ((d > 0.0) != (lastDelta > 0.0))) ++flips;
+                lastDelta = d;
+                haveDelta = true;
+            }
+        }
+        last = v;
+        haveLast = true;
+    }
+};
+struct ParityMean {
+    uint32_t n[2] = {};
+    double sum[2] = {};
+    void add(uint32_t parity, double v) noexcept {
+        const uint32_t p = parity & 1u;
+        ++n[p];
+        sum[p] += v;
+    }
+    double mean(int p) const noexcept { return n[p & 1] ? sum[p & 1] / static_cast<double>(n[p & 1]) : 0.0; }
+    // even minus odd; 0 when either parity has no sample
+    double diff() const noexcept { return n[0] && n[1] ? mean(0) - mean(1) : 0.0; }
+};
+// The order of three events by their QPC ticks: a 3-letter string over {'P' (the eye probe), 'A' (Animate), 'S' (the submit post-hook)} from first
+// to last, ties kept in P, A, S order; "???" when a tick is 0 (the event did not run).
+inline void frameOrder3(uint64_t tP, uint64_t tA, uint64_t tS, char out[4]) noexcept {
+    out[0] = out[1] = out[2] = '?';
+    out[3] = '\0';
+    if (!tP || !tA || !tS) return;
+    const uint64_t t[3] = {tP, tA, tS};
+    const char name[3] = {'P', 'A', 'S'};
+    int idx[3] = {0, 1, 2};
+    for (int i = 1; i < 3; ++i)
+        for (int j = i; j > 0 && t[idx[j]] < t[idx[j - 1]]; --j) {
+            const int x = idx[j];
+            idx[j] = idx[j - 1];
+            idx[j - 1] = x;
+        }
+    for (int i = 0; i < 3; ++i) out[i] = name[idx[i]];
 }
 }  // namespace nofoot
 }  // namespace edvr

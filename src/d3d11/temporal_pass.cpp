@@ -5890,6 +5890,19 @@ bool temporalPassEyeOffsetX(int eye, float* x) {
     *x = g_eyeOffX[eye].load(std::memory_order_relaxed);
     return true;
 }
+// F66f: the eye's tangents {L, R, D, U} as the runtime last passed them to edvrTemporalAa (the texture's own frustum, unjittered).
+static std::atomic<float> g_eyeTan[2][4];
+static std::atomic<bool> g_eyeTanHave[2];
+bool temporalPassEyeTan(int eye, float tan[4]) {
+    if (eye < 0 || eye > 1 || !tan || !g_eyeTanHave[eye].load(std::memory_order_acquire)) return false;
+    for (int i = 0; i < 4; ++i) tan[i] = g_eyeTan[eye][i].load(std::memory_order_relaxed);
+    return true;
+}
+void temporalPassNoteEyeTan(int eye, const float* tan) {
+    if (eye < 0 || eye > 1 || !tan) return;
+    for (int i = 0; i < 4; ++i) g_eyeTan[eye][i].store(tan[i], std::memory_order_relaxed);
+    g_eyeTanHave[eye].store(true, std::memory_order_release);
+}
 void temporalPassNoteHead(int eye, const float* prevPose, const float* nowPose,
                           const float* eyeOffset) {
     if (eye < 0 || eye > 1) return;
@@ -6553,6 +6566,7 @@ extern "C" __declspec(dllexport) void* edvrTemporalAa(
     float farZ, float headDeg, int motion, float blend, float clampSigma,
     unsigned outW, unsigned outH, unsigned flags) {
     if (!srcTex || eye < 0 || eye > 1 || !tanNow || edvr::deviceHookRecoveryDisabled()) return nullptr;
+    edvr::temporalPassNoteEyeTan(eye, tanNow);   // F66f: the texture's frustum, for the native on-foot marker's affine patch
     void* out = nullptr;
     // The door census's whole-pass span (gpu_census.h): timed at this outer
     // boundary, not inside temporalInner -- that function has many early

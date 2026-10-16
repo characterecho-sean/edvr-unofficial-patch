@@ -115,6 +115,10 @@ bool temporalPassEyeRows(int eye, float rows[12], const void** resource, uint64_
 // F63 (the native on-foot ADS sight lock): the eye's head-space x offset as native_temporal last noted it before a treat (s->eyes[eye][3];
 // eye 1 is the right eye). False when none was noted (the pass off, or no history yet). Relaxed atomics: any thread.
 bool temporalPassEyeOffsetX(int eye, float* x);
+// F66f (the native on-foot marker's affine patch): the eye's tangents {L, R, D, U} as the runtime last passed them to edvrTemporalAa: the texture's
+// own frustum, unjittered (its optical axis is -(R + L) / (R - L), -(U + D) / (U - D)). False before the first treat. Relaxed atomics: any thread.
+bool temporalPassEyeTan(int eye, float tan[4]);
+void temporalPassNoteEyeTan(int eye, const float* tan);
 
 // hotkey.dump_eyes, and the settings menu's "Dump both eyes as seen": the
 // sixteen paired raw/treated left-eye crops, a whole treated overview,

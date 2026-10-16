@@ -133,10 +133,10 @@ struct Candidates {
     std::atomic<uint64_t> iface{0}, kind{0}, x2B8{0}, x120{0}, f2C0{0}, fF8{0}, gp{0}, p2B8{0}, p120{0}, chosen{0}, pMatches{0}, how{0}, stamp{0};
 };
 inline Candidates g_cand[2];
-// F55 (TEMPORARY): the FP shoulder drop's plan. The census (FP skeleton, g_cand[1]'s chosen X: the kind's X seen in Animate, else the unique P
-// match, else the kind's X) publishes the FP X, its joint count and the subtree of the clavicles 19 and 20 under g_fdSeq; the Animate post-hook
-// snapshots joints 19, 20, 37 and 44 for that X and, with a drop above zero, lowers the subtree. g_dropWanted (the key above zero) keeps the hook
-// and the FP candidates running when the pose freeze key is off.
+// F55 (TEMPORARY): the FP X's plan. The census (FP skeleton, g_cand[1]'s chosen X: the kind's X seen in Animate, else the unique P match, else the
+// kind's X) publishes the FP X, its joint count and the subtree of the clavicles 19 and 20 under g_fdSeq; the Animate post-hook snapshots joints 19,
+// 20, 37 and 44 for that X (and the arm IK's FP joints). F66: the shoulder drop that lowered the subtree (fix.native_on_foot_fp_shoulder_drop_cm) is
+// gone; the arm IK key keeps the hook and the FP candidates running when the pose freeze key is off.
 struct FpDropPlan {
     uint64_t x = 0;
     uint32_t joints = 0;
@@ -146,7 +146,6 @@ struct FpDropPlan {
 inline std::atomic<uint32_t> g_fdSeq{0};
 inline FpDropPlan g_fdPlan;
 inline std::atomic<uint64_t> g_fdX{0};               // the plan's X (0: none), set after the plan is published; the hook's quick filter
-inline std::atomic<bool> g_dropWanted{false};
 // F56 (TEMPORARY): the 3P arm IK's plan. The census (the local 3P skeleton, the pose freeze's X) derives each arm's chain and groups once per X
 // (nofoot::ikArmChain: [0] L, clavicle 35, hand 58, attach 67; [1] R, 36, 59, 66, from the joint probe) and publishes them under g_armSeq;
 // g_armX (set after the plan is published) is the hook's quick filter. g_ikMode is fix.native_on_foot_arm_ik: 0 off, 1 probe (the default),

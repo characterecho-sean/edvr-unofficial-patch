@@ -193,6 +193,73 @@ bool journalAdsKnown();
 bool journalAds();
 uint32_t journalFlags2();   // the last Flags2 read (0 when not in the file); for the logs
 
+// F66a (native on foot, the armed flag): Status.json's "SelectedWeapon" while on foot. The game writes the item the commander has in hand;
+// "$humanoid_fists_name;" means nothing (fists). ASSUMPTION, verified by the flight's `armed (F66a)` lines: holstering writes fists.
+//   kHeldUnknown  the field is not in the sample (a menu, a loading screen, the watcher off), or its value was cut off by the read
+//   kHeldNone     the value is the fists (or empty)
+//   kHeldItem     any other value: a weapon or a tool
+enum JournalHeldItem : uint8_t { kHeldUnknown = 0, kHeldNone = 1, kHeldItem = 2 };
+// The pure parse over one Status.json read (buf, len bytes; not necessarily NUL-terminated). The key is matched with its closing quote and the
+// colon (`"SelectedWeapon":`), so `"SelectedWeapon_Localised":` is a different key. The value must end with its closing quote inside len: a
+// value split across a read is kHeldUnknown, never a guess from the half that arrived. name receives the value (cut to nameCap - 1; a NUL
+// is always written when nameCap is above 0; empty when unknown).
+inline JournalHeldItem journalParseSelectedWeapon(const char* buf, size_t len, char* name, size_t nameCap) {
+    if (name && nameCap) name[0] = '\0';
+    if (!buf || !len) return kHeldUnknown;
+    static const char kKey[] = "\"SelectedWeapon\":";
+    const size_t keyLen = sizeof(kKey) - 1;
+    size_t at = 0;
+    bool found = false;
+    for (; at + keyLen <= len; ++at) {
+        size_t k = 0;
+        while (k < keyLen && buf[at + k] == kKey[k]) ++k;
+        if (k == keyLen) {
+            found = true;
+            break;
+        }
+    }
+    if (!found) return kHeldUnknown;
+    size_t i = at + keyLen;
+    while (i < len && (buf[i] == ' ' || buf[i] == '\t' || buf[i] == '\r' || buf[i] == '\n')) ++i;
+    if (i >= len || buf[i] != '"') return kHeldUnknown;
+    ++i;
+    char tmp[96];
+    size_t n = 0;
+    bool closed = false;
+    for (; i < len; ++i) {
+        char c = buf[i];
+        if (c == '\\' && i + 1 < len) {   // an escaped character: keep it as written
+            c = buf[++i];
+        } else if (c == '"') {
+            closed = true;
+            break;
+        }
+        if (n < sizeof(tmp) - 1) tmp[n++] = c;
+    }
+    if (!closed) return kHeldUnknown;
+    tmp[n] = '\0';
+    if (name && nameCap) {
+        size_t m = n < nameCap - 1 ? n : nameCap - 1;
+        for (size_t j = 0; j < m; ++j) name[j] = tmp[j];
+        name[m] = '\0';
+    }
+    static const char kFists[] = "$humanoid_fists_name;";
+    bool fists = n == sizeof(kFists) - 1;
+    for (size_t j = 0; fists && j < n; ++j) {
+        char a = tmp[j], b = kFists[j];
+        if (a >= 'A' && a <= 'Z') a = static_cast<char>(a - 'A' + 'a');
+        if (a != b) fists = false;
+    }
+    return (n == 0 || fists) ? kHeldNone : kHeldItem;
+}
+// The last sample's kind (kHeldUnknown while Flags2 is not in the file, after three failed reads, or with the watcher off) and its name (empty
+// when unknown); false when no name. Any thread.
+JournalHeldItem journalHeldItem();
+bool journalHeldItemName(char* out, size_t cap);
+// F66a: the native on-foot tick asks for the 100 ms Status.json cadence while it is active (journalWatchSetEagerStatus is the FSS latch's and
+// the flat profile's; the worker reads on the faster of the two). Any thread.
+void journalWatchSetEagerStatusOnFoot(bool eager);
+
 // How many Status.json samples have been read: lets a caller require a sample
 // taken AFTER some event, since the previous one can be a second stale.
 uint32_t journalStatusSamples();

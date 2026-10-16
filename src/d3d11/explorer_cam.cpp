@@ -2457,8 +2457,7 @@ void neckCensusStep() noexcept {
         if (skVerify(static_cast<uintptr_t>(fpIface), ecm::HeadKind::None, &slf) == SkVerify::Ok) {
             // F51: the FP skeleton's X, for the line; F55: and the shoulder drop's plan (the FP X, with the 3P one's fallbacks)
             // F56: and the arm IK's FP snapshot (joints 51, 52, 37, 44), so the IK key keeps the FP plan too
-            if (pfz::g_mode.load(std::memory_order_relaxed) != 0 || pfz::g_dropWanted.load(std::memory_order_relaxed) ||
-                pfz::g_ikWanted.load(std::memory_order_relaxed))
+            if (pfz::g_mode.load(std::memory_order_relaxed) != 0 || pfz::g_ikWanted.load(std::memory_order_relaxed))
                 fdCensusStep(fpIface, pfzCandidates(1, fpIface, slf));
             shoulderProbe(fpIface, slf, g_shProbeFP, "FP");
             if (g_shProbeFP.l != 0xFFFFu && g_shProbeFP.r != 0xFFFFu && jointModelAt(fpIface, slf, g_shProbeFP.l, &s.shFp[0]) &&

@@ -91,9 +91,6 @@ std::atomic<int> g_alignMode{0};   // F35: 0 off, 1 view (F33), 2 body (F35)
 double g_alignTrimCm[3] = {};   // [0] right, [1] up, [2] forward (body axes)
 std::atomic<int> g_alignAnchorMode{0};   // F48: fix.native_on_foot_body_align_anchor: 0 neck (F53: the default, rest geometry), 1 clavicles (F43/F45), 2 pov
 std::atomic<bool> g_alignVertical{false};   // F50 (TEMPORARY): fix.native_on_foot_body_align_vertical: off (the default) locks the body's height
-std::atomic<bool> g_raiseFpKey{false};      // F51 (TEMPORARY): fix.native_on_foot_body_raise_fp: F53 default off; on raises the FP rig and the view in body mode
-std::atomic<double> g_raiseCm{nofoot::kRaiseDefaultCm};   // F53 (TEMPORARY): fix.native_on_foot_body_raise_cm, the constant raise while raise_fp is on
-std::atomic<double> g_dropCm{0.0};   // F55 (TEMPORARY): fix.native_on_foot_fp_shoulder_drop_cm, 0..20 (0, the default, drops nothing); body mode only
 std::atomic<bool> g_rotCalKey{false};   // F61 (TEMPORARY): fix.native_on_foot_rot_calibrate: off (the default) rotates nothing; on runs rotCalTick's schedule
 // F62b (TEMPORARY): the ADS head-aim (fix.native_on_foot_ads_head_aim; the block is above lookPublishTick). The hooks' half: the frame thread
 // queues the look input (game input units) and the update hook takes it; the processor hook publishes the game's applied deltas (cumulative,
@@ -123,15 +120,6 @@ std::atomic<float> g_ikAdsSquare{static_cast<float>(nofoot::kIkAdsSquareDefault)
     g_ikAdsLeanRad{static_cast<float>(nofoot::kIkAdsLeanDegDefault * nofoot::kIkPi / 180.0)}, g_ikAdsW{0.0f};
 double g_ikAdsKeys[6] = {nofoot::kIkAdsSquareDefault, nofoot::kIkAdsElbowOutCmDefault, nofoot::kIkAdsTrimDegDefault,
                          nofoot::kIkAdsRaiseCmDefault, nofoot::kIkAdsForwardCmDefault, nofoot::kIkAdsLeanDegDefault};   // the key reader's last
-// F60 (TEMPORARY slider): fix.native_on_foot_body_fit_weapon (0..1), read by the frame thread's weapon fit; the key reader's last value.
-std::atomic<float> g_fitWeaponKey{static_cast<float>(nofoot::kFitWeaponDefault)};
-double g_fitWeaponKeyLast = nofoot::kFitWeaponDefault;
-// F62a (TEMPORARY slider): fix.native_on_foot_body_fit_lateral (0..1), the fit's own weight along the body's right axis (the forward keeps
-// fix.native_on_foot_body_fit_weapon); the key reader's last value. g_fitBendW: the fit's applied weight this tick (the larger of the forward
-// and lateral weights after the disengage factor; 0 when the fit is not applied), published by the frame thread for the Animate hook's bend
-// limits (forward and back 8, roll 6 deg while it is above 0).
-std::atomic<float> g_fitLateralKey{static_cast<float>(nofoot::kFitLateralDefault)};
-double g_fitLateralKeyLast = nofoot::kFitLateralDefault;
 // F64 (TEMPORARY slider): fix.native_on_foot_eye_height_cm (0..15 cm, default 4), the eye raise in full-3P body mode (alignTick); the key
 // reader's last value.
 std::atomic<float> g_eyeHeightCm{static_cast<float>(nofoot::kEyeHeightDefaultCm)};
@@ -143,7 +131,9 @@ std::atomic<bool> g_standKeyOn{true};
 int g_standKeyLast = -1;
 std::atomic<float> g_standArmedW{0.0f};
 std::atomic<bool> g_standArmedFlag{false}, g_standIdle{false};
-std::atomic<float> g_fitBendW{0.0f};
+// F66a: the armed ramp (0.3 s; the game's armed flag, journalHeldItem), published by the frame thread for the Animate hook: the bend's limits
+// (nofoot::bendLimitsArmed) and the arm IK's per-arm weight (nofoot::ikArmWeight) follow it. 0 when native stereo on foot is not active.
+std::atomic<float> g_armedW{0.0f};
 // F58 (TEMPORARY): the spine bend. The key (fix.native_on_foot_spine_bend, on by default; it acts only in full-3P body mode) and the amount
 // slider, the frame thread's 0.2 s ramp and run flag (the key on in full-3P body mode, or the ramp or its hold still running), read by the
 // Animate hook. The eye target (the job camera less d, body axes = the 3P model space) and the pov joint's index, through a seqlock.
@@ -541,6 +531,16 @@ void retiredKeysNote(const Config& cfg, bool first) {
     if (cfg.getString("fix.native_on_foot_view_probes", "off") != "off") Log::get().note("native on foot: fix.native_on_foot_view_probes is retired (F34): ignored");
     if (cfg.getString("fix.native_on_foot_visor_shift", "off") != "off") Log::get().note("native on foot: fix.native_on_foot_visor_shift is retired (F34): ignored");
     if (cfg.getString("fix.native_on_foot_sharp_hud", "off") != "off") Log::get().note("native on foot: fix.native_on_foot_sharp_hud is retired (F34): ignored (it is always on)");
+    // F66: the weapon fit and the FP raise and shoulder drop experiments. The shipping file carries them at their last values.
+    if (std::fabs(cfg.getFloat("fix.native_on_foot_body_fit_weapon", 0.7f) - 0.7f) > 1e-6f)
+        Log::get().note("native on foot: fix.native_on_foot_body_fit_weapon is retired (F66): ignored (the weapon fit is gone; the reach constraint is the only armed pull)");
+    if (std::fabs(cfg.getFloat("fix.native_on_foot_body_fit_lateral", 0.25f) - 0.25f) > 1e-6f)
+        Log::get().note("native on foot: fix.native_on_foot_body_fit_lateral is retired (F66): ignored (the weapon fit is gone)");
+    if (cfg.getString("fix.native_on_foot_body_raise_fp", "off") != "off") Log::get().note("native on foot: fix.native_on_foot_body_raise_fp is retired (F66): ignored");
+    if (std::fabs(cfg.getFloat("fix.native_on_foot_body_raise_cm", 10.0f) - 10.0f) > 1e-6f)
+        Log::get().note("native on foot: fix.native_on_foot_body_raise_cm is retired (F66): ignored");
+    if (std::fabs(cfg.getFloat("fix.native_on_foot_fp_shoulder_drop_cm", 0.0f)) > 1e-6f)
+        Log::get().note("native on foot: fix.native_on_foot_fp_shoulder_drop_cm is retired (F66): ignored");
 }
 // The key, re-read when the configuration changes (Config::generation()). Read by its literal name (tools/gen_settings_schema.py).
 void readKey() {
@@ -692,8 +692,8 @@ void readKey() {
         if (first || on != g_adsAimKey.load(std::memory_order_relaxed))
             Log::get().note("native on foot ADS head aim (F62b, TEMPORARY): fix.native_on_foot_ads_head_aim is %s", on ? "on -- in native on foot "
                             "with the full third-person body (body align body, the FP body hidden, the body unclipped), while aiming down sights "
-                            "the headset's turn is sent as look input, the turn the game makes is cancelled in the seated space, the eye is held "
-                            "where it was at entry and the body fits the weapon; nothing changes outside that" : "off -- nothing changes");
+                            "the headset's turn is sent as look input, the turn the game makes is cancelled in the seated space and the eye is "
+                            "held where it was at entry; nothing changes outside that" : "off -- nothing changes");
         g_adsAimKey.store(on, std::memory_order_relaxed);
         const auto sign = [](int v) { return v > 0 ? 1 : v < 0 ? -1 : 0; };
         const int ys = sign(cfg.getInt("fix.native_on_foot_ads_head_aim_yaw_sign", 1));
@@ -724,29 +724,6 @@ void readKey() {
                             "the body in all three axes (F48)" : "off -- in body mode d moves the body only along its right and forward axes; its "
                             "up component (and the up trim) is dropped and logged");
         g_alignVertical.store(vertical, std::memory_order_relaxed);
-        // F51 (TEMPORARY, live): the FP rig and view raise in body mode. F53: off by default; on: the view rises by a constant (a seated y
-        // offset) and the FP AMC's records by the same along the body's up axis. The constant is fix.native_on_foot_body_raise_cm (default 10,
-        // clamped 0..50): F51's live dh = (3P pov height - FP side height) bobbed 0 to 12 cm with the pov joint's animation, so it is now logged
-        // only. Body mode only.
-        const bool raiseFp = cfg.getString("fix.native_on_foot_body_raise_fp", "off") == "on";
-        double raiseCm = static_cast<double>(cfg.getFloat("fix.native_on_foot_body_raise_cm", static_cast<float>(nofoot::kRaiseDefaultCm)));
-        if (!(raiseCm == raiseCm)) raiseCm = nofoot::kRaiseDefaultCm;
-        raiseCm = std::max(0.0, std::min(nofoot::RaiseDh::kMaxM * 100.0, raiseCm));
-        if (first || raiseFp != g_raiseFpKey.load(std::memory_order_relaxed) || raiseCm != g_raiseCm.load(std::memory_order_relaxed))
-            Log::get().note("native on foot body raise (F51/F53, TEMPORARY): fix.native_on_foot_body_raise_fp is %s; fix.native_on_foot_body_raise_cm "
-                            "%.1f", raiseFp ? "on -- in body mode the view and the first-person AMC's records rise by the constant raise_cm (F53; "
-                            "the live dh is logged, not applied)" : "off -- nothing is raised (the F53 default)", raiseCm);
-        g_raiseFpKey.store(raiseFp, std::memory_order_relaxed);
-        g_raiseCm.store(raiseCm, std::memory_order_relaxed);
-        // F55 (TEMPORARY, live): experiment (c), the FP shoulder drop: the FP clavicles 19 and 20 and their subtree lower by this many cm in the
-        // Animate output, body mode only, blended out over 0.2 s while ADS. 0 (the default) drops nothing; clamped to 0..20.
-        const double dropCm = nofoot::dropClampCm(static_cast<double>(cfg.getFloat("fix.native_on_foot_fp_shoulder_drop_cm", 0.0f)));
-        if (first || dropCm != g_dropCm.load(std::memory_order_relaxed))
-            Log::get().note("native on foot shoulder drop (F55, TEMPORARY): fix.native_on_foot_fp_shoulder_drop_cm %.1f -- %s", dropCm,
-                            dropCm > 0.0 ? "in body mode the FP clavicles 19 and 20 and the arm chain below them drop by this much (not while ADS)"
-                                         : "nothing is dropped (the default)");
-        g_dropCm.store(dropCm, std::memory_order_relaxed);
-        pfz::g_dropWanted.store(dropCm > 0.0, std::memory_order_relaxed);
         // F49 (TEMPORARY, live): the pose freeze: off, probe (the default: the Animate post-hook measures and writes nothing) or on.
         const std::string freeze = cfg.getString("fix.native_on_foot_pose_freeze", "probe");
         pfz::g_mode.store(freeze == "on" ? 2 : freeze == "off" ? 0 : 1, std::memory_order_relaxed);
@@ -817,30 +794,6 @@ void readKey() {
             g_ikAdsRaiseM.store(static_cast<float>(v[3] / 100.0), std::memory_order_relaxed);
             g_ikAdsForwardM.store(static_cast<float>(v[4] / 100.0), std::memory_order_relaxed);
             g_ikAdsLeanRad.store(static_cast<float>(v[5] * nofoot::kIkPi / 180.0), std::memory_order_relaxed);
-        }
-        // F60 (TEMPORARY, live, the Native on foot page's slider): Body fit to weapon (0..1, default 0.7): while a weapon or tool is held, the
-        // body target moves from the head's toward the one that puts the 3P shoulders behind the grips (the view is never moved). Full-3P body
-        // mode with the arm IK on only.
-        {
-            const double fit = nofoot::fitWeaponClamp(
-                static_cast<double>(cfg.getFloat("fix.native_on_foot_body_fit_weapon", static_cast<float>(nofoot::kFitWeaponDefault))));
-            if (first || fit != g_fitWeaponKeyLast)
-                Log::get().note("native on foot weapon fit (F60, TEMPORARY slider): fix.native_on_foot_body_fit_weapon = %.2f -- while a weapon or "
-                                "tool is held the body target is lerp(head, weapon, %.2f) (horizontal only with the vertical off), ramped over 0.3 s; "
-                                "full-3P body mode with fix.native_on_foot_arm_ik = on only; the view is never moved", fit, fit);
-            g_fitWeaponKeyLast = fit;
-            g_fitWeaponKey.store(static_cast<float>(fit), std::memory_order_relaxed);
-            // F62a (TEMPORARY, live, the Native on foot page's slider): Body fit sideways (0..1, default 0.25): the fit's weight along the
-            // body's right axis; the forward keeps Body fit to weapon. The pull is clamped to 12 cm.
-            const double lat = nofoot::fitLateralClamp(
-                static_cast<double>(cfg.getFloat("fix.native_on_foot_body_fit_lateral", static_cast<float>(nofoot::kFitLateralDefault))));
-            if (first || lat != g_fitLateralKeyLast)
-                Log::get().note("native on foot weapon fit (F62a, TEMPORARY slider): fix.native_on_foot_body_fit_lateral = %.2f -- the fit's weight "
-                                "along the body's right axis (the forward weight is fix.native_on_foot_body_fit_weapon, %.2f); both times the "
-                                "ramp, the raised factor smoothstep(0.5, 1.0, grip gate) and the disengage factor (|d_w - d_head| horizontal 0.15 "
-                                "to 0.35 m); the horizontal pull at most 12 cm", lat, fit);
-            g_fitLateralKeyLast = lat;
-            g_fitLateralKey.store(static_cast<float>(lat), std::memory_order_relaxed);
         }
         // F64 (TEMPORARY, live, the Native on foot page's slider): Eye height (0..15 cm, default 4): the eye raised in full-3P body mode only
         // (the F63 flight put it 4.2 cm below the 3P pov standing), ramped over 0.3 s, fading as the ADS head-aim engages.
@@ -2044,6 +1997,26 @@ uint64_t f30QpcUs(uint64_t ticks) noexcept {
     }();
     return ticks * 1000000ull / freq;
 }
+// F66b: the frame clock. dt for the frame thread's filters and ramps (and the hook's low-passes) comes from QueryPerformanceCounter, never from
+// GetTickCount64: the ms clock ticks at 15.6 ms, so about 29% of 90 Hz ticks read dt = 0 and a filter took no step on 2 ticks of 3 while the
+// view moved every frame. The ms stamps stay for staleness tests only. One QpcDt per call site (the first call gives 0).
+uint64_t f66QpcFreq() noexcept {
+    static const uint64_t freq = [] {
+        LARGE_INTEGER f{};
+        QueryPerformanceFrequency(&f);
+        return f.QuadPart > 0 ? static_cast<uint64_t>(f.QuadPart) : uint64_t{1};
+    }();
+    return freq;
+}
+struct QpcDt {
+    uint64_t last = 0;
+    double step(double capSec) noexcept {
+        const uint64_t t = f30Qpc();
+        const double dt = nofoot::qpcDtSec(last, t, f66QpcFreq(), capSec);
+        last = t;
+        return dt;
+    }
+};
 // F30 part 2: the head C of THIS marker call. The marker pre-hook reads list B (r8) on the game thread; the post stub runs later in the same call
 // on the same thread. Valid only for that call: the pre-hook clears it on entry.
 struct F30SameCall {
@@ -5340,7 +5313,8 @@ void lookToAimTick(uint64_t nowMs, bool session) {
     const bool engagedBase = keyOn && headMode && onFoot && session && g_lookArmed;
     const bool engagedWant = engagedBase && !g_lookTripped;
     g_lookWantRead.store(onFoot && session, std::memory_order_relaxed);
-    const double dt = (g_lookLastMs != 0 && nowMs > g_lookLastMs) ? std::min(0.1, static_cast<double>(nowMs - g_lookLastMs) / 1000.0) : 0.0;
+    static QpcDt lookClock;   // F66b
+    const double dt = lookClock.step(0.1);
     g_lookLastMs = nowMs;
     if (engagedWant != g_lookEngagedLast) {
         if (engagedWant) {
@@ -5563,7 +5537,7 @@ void lookPassiveTick(uint64_t nowMs) {
 //     convention: the yaw through the look's total (the runtime's lookPoll turns the seat about the head), the pitch through version 10's
 //     pitch overlay (adsPoll). F61 measured a seated +a moving the camera by -a, so the view follows the headset whatever share the aim took;
 //  3. the position lock: the seated offset wA (h - h_entry) (natural LOCAL) rides the eye alignment, so the eye stays where it was at entry;
-//  4. the body: the weapon fit at 1 and the head's target ignored, times wA (f60FitStep, alignTick).
+//  4. (F66: the weapon fit that pulled the body toward the grips in ADS is gone; the body follows the head's target as outside ADS.)
 // Release: the yaw is kept (a rebase, like a recentre); the pitch unwinds over 0.3 s by injecting the opposite (the cancel follows what the
 // game applies), any remainder is chased for 0.2 s and then dropped (logged); the lock and the body go with wA. Guards: more than 270 deg of
 // seated yaw in 3 s, or |camera - head| growing for 0.5 s, trip it off until the key toggles, a sign key changes or on foot re-enters. A trip,
@@ -5573,8 +5547,6 @@ const char* const kAdsStateNames[4] = {"idle", "engaged", "releasing", "tripped"
 int g_adsState = kAdsIdle;            // frame thread only, as is everything in this block
 nofoot::AdsRamp g_adsRamp;
 double g_adsW = 0.0;                  // the weight this tick
-double g_adsBodyW = 0.0;              // the body's weight this tick (f60FitStep reads it)
-double g_adsBodyApplied = 0.0;        // the weight the body took this tick (f60FitStep: 0 without a fresh weapon-fit measurement; alignTick reads it)
 double g_adsYawSeat = 0.0;            // the seated yaw published, cumulative (seat convention); lookPublishTick adds it to the look's total
 double g_adsYawCarried = 0.0;         // its part since the last reset serial (the kept yaw included)
 double g_adsPitchSeat = 0.0;          // the seated pitch published (seat convention, +-60 deg)
@@ -5651,7 +5623,7 @@ void adsStop(const char* why, bool tripped) noexcept {
     g_adsLock[0] = g_adsLock[1] = g_adsLock[2] = 0.0;
     g_adsEntryValid = false;
     g_adsRamp = nofoot::AdsRamp{};
-    g_adsW = g_adsBodyW = 0.0;
+    g_adsW = 0.0;
     g_adsTurns = nofoot::AdsTurnWindow{};
     adsResidualReset();
     g_adsState = tripped ? kAdsTripped : kAdsIdle;
@@ -5696,7 +5668,8 @@ void adsAimTick(uint64_t now, bool session) noexcept {
     g_adsYSignLast = ySign;
     g_adsPSignLast = pSign;
     g_adsFootLast = onFoot;
-    const double dt = (g_adsLastMs != 0 && now > g_adsLastMs) ? std::min(0.1, static_cast<double>(now - g_adsLastMs) / 1000.0) : 0.0;
+    static QpcDt adsClock;   // F66b
+    const double dt = adsClock.step(0.1);
     g_adsLastMs = now;
     const bool engagedNow = g_adsState == kAdsActive || g_adsState == kAdsReleasing;
     if (g_adsRestoreFailed.exchange(false, std::memory_order_relaxed) && engagedNow)
@@ -5734,7 +5707,7 @@ void adsAimTick(uint64_t now, bool session) noexcept {
             Log::get().note("native on foot ADS head aim (F62b): aiming down sights but not engaged: %s", off ? off : "the runaway guard tripped earlier");
         }
         g_adsHookOn.store(false, std::memory_order_relaxed);
-        g_adsW = g_adsBodyW = 0.0;
+        g_adsW = 0.0;
         g_adsHavePrev = false;
         return;
     }
@@ -5773,7 +5746,7 @@ void adsAimTick(uint64_t now, bool session) noexcept {
     }
     if (g_adsState == kAdsIdle) {
         g_adsHookOn.store(false, std::memory_order_relaxed);
-        g_adsW = g_adsBodyW = 0.0;
+        g_adsW = 0.0;
         g_adsLock[0] = g_adsLock[1] = g_adsLock[2] = 0.0;
         g_adsHavePrev = false;
         return;
@@ -5781,7 +5754,6 @@ void adsAimTick(uint64_t now, bool session) noexcept {
     g_adsHookOn.store(true, std::memory_order_relaxed);
     g_adsRamp.step(g_adsState == kAdsActive, dt);
     g_adsW = g_adsRamp.w;
-    g_adsBodyW = g_adsW;
     // 2. The cancel: what the game applied for our input goes into the seated rotation (yaw: the look's total; pitch: version 10, +-60 deg).
     g_adsYawSeat += aY;
     g_adsYawCarried += aY;
@@ -5956,7 +5928,6 @@ void adsAimTick(uint64_t now, bool session) noexcept {
         g_adsInPitch.store(0.0f, std::memory_order_relaxed);
         g_adsLock[0] = g_adsLock[1] = g_adsLock[2] = 0.0;
         g_adsEntryValid = false;
-        g_adsBodyW = 0.0;
         adsResidualReset();
         Log::get().note("native on foot ADS head aim (F62b): release complete after %.2f s: the seated yaw is kept (%.2f deg carried); the pitch %s "
                         "(%.3f deg left)", g_adsRelT, g_adsYawCarried / nofoot::kAdsDeg,
@@ -6216,7 +6187,6 @@ struct FpRootSnap {
     uint64_t stamp = 0;
 };
 FpRootSnap g_fpRoot;   // under g_eyeMutex
-std::atomic<uint64_t> g_fpAmcLocal{0};   // F51: the mode-2 (FP) AMC fpRootTrack last saw (the body-shift post-hook's FP match; it re-reads the mode)
 // F48 (census, read only): every populated part entry of a mode-2 (FP) AMC, once per AMC: each entry whose four instance pointers, four view
 // masks or flag byte are not all zero, with all four of each, the flag byte, state, pending and current. The F1/F3 census lines keep skipping
 // parts without an instance; this dump does not. Game thread (the P1 callback); every read guarded.
@@ -6255,7 +6225,6 @@ void fpRootTrack(void* amcPtr, uint64_t now) noexcept {
     uintptr_t p = 0;
     uint32_t mode = 0;
     if (!guardedRead(a + 0x50, &p, 8) || !p || !guardedRead(p + 0x14, &mode, 4) || mode != 2) return;
-    g_fpAmcLocal.store(static_cast<uint64_t>(a), std::memory_order_relaxed);   // F51
     fpPartTableDump(a);   // F48 (census): once per FP AMC
     uintptr_t obj = 0, vt = 0, fn = 0, mat = 0;
     float m[16] = {};
@@ -6305,7 +6274,7 @@ IkFpSnap g_ikFp;
 struct IkGData {
     float g[16] = {};
     float m3p[16] = {}, froot[16] = {};
-    float r[3] = {}, d[3] = {};
+    float d[3] = {};   // F66: the body offset G carried (the FP raise's r is gone)
     float m3pRowErr = 0.0f, m3pDet = 0.0f, fRowErr = 0.0f, fDet = 0.0f;   // max |row length - 1| and the 3x3 determinant
     uint64_t ms = 0, frootMs = 0;
 };
@@ -6334,40 +6303,72 @@ bool ikGRead(IkGData* out) noexcept {
     return false;
 }
 void ikPublishG(void* amcPtr, uint64_t now) noexcept;   // defined with the FP raise's hand-off below (it reads d and r)
-// F60 (TEMPORARY): the weapon fit's measurement, published by the 3P Animate post-hook (one writer, under g_pfzBusy) for the frame thread's
-// body target: d_w, Sd, the upper-arm midpoint after the square-up, G's d (all body axes = the 3P model axes, metres), the smaller of the two
-// arms' distance gates, the arm length used and the ADS weight. Read with two tries; never waits.
-struct FitPub {
-    double dw[3] = {}, sd[3] = {}, umid[3] = {}, dB[3] = {};
-    double gateMin = 0.0, armLen = 0.0, adsW = 0.0;
+// ---- F66g (TEMPORARY instrument, measure only): the frame order -----------------------------------------------------------------------------
+// J5 of the F65 review: the body offset d is read three times a frame, by G at the eye probe (P1, the local 3P AMC's callback: ikPublishG), by the
+// Animate post-hook (the G it reads, and so the d that G carried) and by the submit job's post-hook (the records' shift), and the order of the three
+// is not known. A mismatch shows as the hands sliding on the grips by d's per-frame change; F67 moves d into the hook once this has measured the
+// order. Each of the three posts one event for the local avatar (QPC ticks, the d it used, the thread, and for Animate the span buffer it
+// wrote) into a ring; the frame thread drains it once a second: the order of the events between one P1 and the next (a histogram of strings over
+// P, A, S), the d mismatches, the thread ids, how many Animate calls a P1 frame has. The same hook also counts its outputs per game-frame parity
+// (the P1 frame index's low bit): see F66gPar. Nothing here is read by anything that acts.
+void bodyOffsetRead(float d[3]) noexcept;   // defined below, with the body offset's hand-off
+struct F66gEvent {
+    std::atomic<uint64_t> t{0};   // QPC ticks; stored last (release); 0: the slot is being written
+    std::atomic<uint32_t> d[3];
+    std::atomic<uint32_t> tid{0};
+    std::atomic<uint64_t> ptr{0};
+    std::atomic<uint32_t> frame{0}, kind{0};
+};
+constexpr uint32_t kF66gRing = 1024;
+F66gEvent g_f66gRing[kF66gRing];
+std::atomic<uint32_t> g_f66gHead{0};
+std::atomic<uint32_t> g_f66gP1Seq{0};   // local P1 callbacks so far: the game-frame index the parity split uses
+void f66gPost(char kind, const float d[3], uint64_t ptr) noexcept {
+    const uint32_t i = g_f66gHead.fetch_add(1, std::memory_order_relaxed);
+    F66gEvent& e = g_f66gRing[i % kF66gRing];
+    e.t.store(0, std::memory_order_relaxed);
+    for (int k = 0; k < 3; ++k) {
+        uint32_t u = 0;
+        std::memcpy(&u, &d[k], sizeof(u));
+        e.d[k].store(u, std::memory_order_relaxed);
+    }
+    e.tid.store(static_cast<uint32_t>(GetCurrentThreadId()), std::memory_order_relaxed);
+    e.ptr.store(ptr, std::memory_order_relaxed);
+    e.frame.store(g_f66gP1Seq.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    e.kind.store(static_cast<uint32_t>(static_cast<unsigned char>(kind)), std::memory_order_relaxed);
+    e.t.store(f30Qpc(), std::memory_order_release);
+}
+// F65a/F66c: the reach constraint's input and the armed flag's distance-gate measure, published by the 3P Animate post-hook (one writer, under
+// g_pfzBusy) for the frame thread. Per arm (L, R): c = (U* - T_A) - d (3P model = body axes, metres; the d this call's G carried, so that at any
+// body shift d' the vector is c + d'), where U* is the shoulder of the UNBENT pose turned by the square-up (F66c: never the bent shoulder),
+// T_A the grip (the FP handAttach through G); the limit R = l1 + l2 - 2 cm and l1 + l2; the drawn attach against T_A (cm, -1 unmeasured) and
+// whether it was the written solve; the per-arm weight, its gate (the armed ramp) and the distance gate; the upper-arm joint's index; and the
+// post-bend shoulder minus U* (cm; what the bend moved after the constraint was fixed, absorbed by the arm IK and the clavicle assist). dB is
+// G's d, gateMin the smaller of the two arms' distance gates, adsW the ADS weight. Read with two tries; never waits.
+struct ReachPub {
+    double dB[3] = {};
+    double gateMin = 0.0, adsW = 0.0;
     uint64_t ms = 0;
-    // F62a: the k_reach used (fitReachK of the ADS weight), and per arm (L, R) this call's reach after the clavicle assist and the elbow's
-    // interior angle (deg), with whether the arm was solved.
-    double reachK = 0.0, reachA[2] = {}, elbowDeg[2] = {};
-    bool solved[2] = {};
-    // F65a, per arm (L, R): the reach limit's input c = (shoulder U - T_A) - d (model = body axes, the d this call's G carried, so that
-    // at any body shift d' the vector is c + d'), the limit R = l1 + l2 - 2 cm and l1 + l2; the drawn attach against T_A (cm, -1 unmeasured)
-    // and whether it was the written solve; the per-arm weight, its gate (1 armed) and the distance gate; the upper-arm joint's index.
-    double reachC[2][3] = {}, reachR[2] = {}, armL[2] = {}, gripErr[2] = {-1.0, -1.0}, wArm[2] = {}, gateW[2] = {}, gateDist[2] = {};
+    double reachC[2][3] = {}, reachR[2] = {}, armL[2] = {}, gripErr[2] = {-1.0, -1.0}, wArm[2] = {}, gateW[2] = {}, gateDist[2] = {}, shoulderGap[2] = {};
     bool reachOk[2] = {}, gripWritten[2] = {};
     uint32_t uJ[2] = {0xFFFFu, 0xFFFFu};
 };
-std::atomic<uint32_t> g_fitSeq{0};
-FitPub g_fitPub;
-std::atomic<uint64_t> g_fitPublishes{0};
-void fitPublish(const FitPub& p) noexcept {
-    g_fitSeq.fetch_add(1, std::memory_order_acq_rel);   // odd: a write is in progress
-    std::memcpy(&g_fitPub, &p, sizeof(p));
-    g_fitSeq.fetch_add(1, std::memory_order_release);
-    g_fitPublishes.fetch_add(1, std::memory_order_relaxed);
+std::atomic<uint32_t> g_reachSeq{0};
+ReachPub g_reachPub;
+std::atomic<uint64_t> g_reachPublishes{0};
+void reachPublish(const ReachPub& p) noexcept {
+    g_reachSeq.fetch_add(1, std::memory_order_acq_rel);   // odd: a write is in progress
+    std::memcpy(&g_reachPub, &p, sizeof(p));
+    g_reachSeq.fetch_add(1, std::memory_order_release);
+    g_reachPublishes.fetch_add(1, std::memory_order_relaxed);
 }
-bool fitRead(FitPub* out) noexcept {
+bool reachRead(ReachPub* out) noexcept {
     for (int tries = 0; tries < 2; ++tries) {
-        const uint32_t s1 = g_fitSeq.load(std::memory_order_acquire);
+        const uint32_t s1 = g_reachSeq.load(std::memory_order_acquire);
         if (s1 & 1u || s1 == 0) continue;
-        std::memcpy(out, &g_fitPub, sizeof(*out));
+        std::memcpy(out, &g_reachPub, sizeof(*out));
         std::atomic_thread_fence(std::memory_order_acquire);
-        if (g_fitSeq.load(std::memory_order_relaxed) == s1) return true;
+        if (g_reachSeq.load(std::memory_order_relaxed) == s1) return true;
     }
     return false;
 }
@@ -6388,8 +6389,13 @@ uint64_t __fastcall eyeProbeHooked(void* amc, void* job) noexcept {
     }
     // F56: G for the arm IK, every call for the local 3P AMC while the key is not off (the FP root was tracked above, for the FP AMC's call).
     if (!g_eyeStop.load(std::memory_order_relaxed) && amc && nativeOnFootActive() && pfz::g_ikWanted.load(std::memory_order_relaxed) &&
-        reinterpret_cast<uint64_t>(amc) == localAmcPointer())
+        reinterpret_cast<uint64_t>(amc) == localAmcPointer()) {
+        float d1[3];
+        bodyOffsetRead(d1);
+        g_f66gP1Seq.fetch_add(1, std::memory_order_relaxed);   // F66g: the game-frame index, then the P1 event with the d G is about to carry
+        f66gPost('P', d1, 0);
         ikPublishG(amc, now);
+    }
     return original(amc, job);
 }
 
@@ -6532,6 +6538,7 @@ void bodyShiftApply(uint64_t amc) noexcept {
     if (!guardedRead(amc + bodyrec::kFlags, &flags, 1) || !(flags & 4)) return;
     float d[3] = {};
     bodyOffsetRead(d);
+    f66gPost('S', d, 0);   // F66g: the submit post-hook's event, with the d it shifts the records by
     const bool dz = d[0] == 0.0f && d[1] == 0.0f && d[2] == 0.0f;
     // F45: the table prints at the first body pass after entry: shifted parts when d is not zero, else the present parts (nothing is written).
     if (dz && !g_f37TableWanted.load(std::memory_order_relaxed)) return;
@@ -6604,30 +6611,8 @@ void bodyShiftApply(uint64_t amc) noexcept {
                         partsShifted, static_cast<unsigned long long>(shifted), static_cast<unsigned long long>(skipped), dz ? "zero" : "not zero");
     }
 }
-// ---- F51 (TEMPORARY): the FP rig raise, the hook's half ------------------------------------------------------------------------------
-// The frame thread publishes the FP offset (world metres: dh along the body's up row) through a seqlock, and g_f51FpOn (body mode and the key on).
-// The post-hook moves the FP (mode 2) AMC's records by it under the 3P rule (a record moves only while it equals the AMC origin, so a second pass
-// leaves it alone). Inside the hook: no allocation, logging or locks; every read and write under SEH; counters go to the frame thread.
-std::atomic<bool> g_f51FpOn{false};
-std::atomic<uint32_t> g_fpRaiseSeq{0};
-std::atomic<float> g_fpRaiseD[3]{};
-void fpRaisePublish(const double d[3]) noexcept {
-    g_fpRaiseSeq.fetch_add(1, std::memory_order_acq_rel);
-    for (size_t i = 0; i < 3; ++i) g_fpRaiseD[i].store(static_cast<float>(d[i]), std::memory_order_relaxed);
-    g_fpRaiseSeq.fetch_add(1, std::memory_order_release);
-}
-bool fpRaiseRead(float d[3]) noexcept {
-    for (int tries = 0; tries < 4; ++tries) {
-        const uint32_t s1 = g_fpRaiseSeq.load(std::memory_order_acquire);
-        if (s1 & 1u) continue;
-        for (size_t i = 0; i < 3; ++i) d[i] = g_fpRaiseD[i].load(std::memory_order_relaxed);
-        std::atomic_thread_fence(std::memory_order_acquire);
-        if (g_fpRaiseSeq.load(std::memory_order_relaxed) == s1) return true;
-    }
-    return false;   // being written: this pass skips (the next one moves the records)
-}
-// F56: G = F_root x Tr(r - d) x inv(M3P), the FP model space to the 3P model space (row vectors: FP world = model_fp x F_root, raised by r; 3P
-// world = model_3p x M3P, shifted by d). Game thread (the P1 callback, the local 3P AMC). Refused (not published) when the AMC matrix cannot be
+// F56: G = F_root x Tr(-d) x inv(M3P), the FP model space to the 3P model space (row vectors: FP world = model_fp x F_root; 3P
+// world = model_3p x M3P, shifted by d; F66: the FP raise that put an r into it is gone). Game thread (the P1 callback, the local 3P AMC). Refused (not published) when the AMC matrix cannot be
 // read, the FP root is older than 100 ms, or M3P is singular. The FP root is the whole matrix (rows and origin); probe 5 compares it with the
 // yaw-only map the F45/F55 code uses.
 void ikPublishG(void* amcPtr, uint64_t now) noexcept {
@@ -6647,15 +6632,12 @@ void ikPublishG(void* amcPtr, uint64_t now) noexcept {
         for (int c = 0; c < 3; ++c) s.froot[r * 4 + c] = fp.rows[r * 3 + c];
         s.froot[r * 4 + 3] = 0.0f;
     }
-    if (g_f51FpOn.load(std::memory_order_relaxed)) {
-        if (!fpRaiseRead(s.r)) s.r[0] = s.r[1] = s.r[2] = 0.0f;
-    }
     bodyOffsetRead(s.d);
     for (int c = 0; c < 3; ++c) s.froot[12 + c] = fp.origin[c];
     s.froot[15] = 1.0f;
     float shifted[16];
     std::memcpy(shifted, s.froot, sizeof(shifted));
-    for (int c = 0; c < 3; ++c) shifted[12 + c] += s.r[c] - s.d[c];
+    for (int c = 0; c < 3; ++c) shifted[12 + c] -= s.d[c];
     nofoot::pfzMul(shifted, inv, s.g);
     const auto rowErr = [](const float* m) noexcept {
         float e = 0.0f;
@@ -6682,71 +6664,6 @@ void ikPublishG(void* amcPtr, uint64_t now) noexcept {
     busy.store(false, std::memory_order_release);
     g_ikGPublishes.fetch_add(1, std::memory_order_relaxed);
 }
-std::atomic<uint64_t> g_fpShifted{0}, g_fpSkipped{0}, g_fpPasses{0}, g_fpPartsMask{0}, g_fpNotMode2{0};
-struct F51First {
-    std::atomic<uint32_t> seq{0};
-    float pre[3] = {}, post[3] = {};
-    uint32_t block = 0;
-};
-F51First g_f51First;   // the first FP record shifted in the latest pass (the 1 s line)
-void fpRaiseApply(uint64_t amc) noexcept {
-    uint64_t params = 0;
-    uint32_t mode = 0;
-    if (!guardedRead(amc + 0x50, &params, 8) || !params || !guardedRead(params + 0x14, &mode, 4) || mode != 2) {
-        g_fpNotMode2.fetch_add(1, std::memory_order_relaxed);
-        return;
-    }
-    uint8_t flags = 0;
-    if (!guardedRead(amc + bodyrec::kFlags, &flags, 1) || !(flags & 4)) return;
-    float d[3] = {};
-    if (!fpRaiseRead(d) || (d[0] == 0.0f && d[1] == 0.0f && d[2] == 0.0f)) return;
-    float origin[3] = {};
-    if (!guardedRead(amc + bodyrec::kOrigin, origin, sizeof(origin))) return;
-    g_fpPasses.fetch_add(1, std::memory_order_relaxed);
-    uint64_t shifted = 0, skipped = 0, parts = 0;
-    bool first = true;
-    for (int idx = 0; idx < bodyrec::kBlocks; ++idx) {
-        for (int k = 0; k < bodyrec::kSlots; ++k) {
-            uint64_t inst = 0, mask = 0, instField = 0;
-            const uintptr_t slot = static_cast<uintptr_t>(idx) * bodyrec::kStride + static_cast<uintptr_t>(k) * 8u;
-            if (!guardedRead(amc + bodyrec::kInstBase + slot, &inst, 8) || !inst) continue;
-            if (!guardedRead(amc + bodyrec::kMaskBase + slot, &mask, 8) || !mask) continue;
-            if (!guardedRead(static_cast<uintptr_t>(inst) + bodyrec::kInstOff, &instField, 8) || !instField) continue;
-            const uintptr_t rec = amc + bodyrec::kRecBase + static_cast<uintptr_t>(idx) * bodyrec::kStride +
-                                  static_cast<uintptr_t>(k) * bodyrec::kRecSize;
-            float pos[3] = {}, pre[3] = {};
-            if (!guardedRead(rec + bodyrec::kRecPos, pos, sizeof(pos))) {
-                ++skipped;
-                continue;
-            }
-            std::memcpy(pre, pos, sizeof(pre));
-            if (!nofoot::shiftIfAtOrigin(pos, origin, d)) {   // already placed (or moved by an earlier pass): not ours to move
-                ++skipped;
-                continue;
-            }
-            float prev[3] = {};
-            const bool okPrev = guardedRead(rec + bodyrec::kPrev, prev, sizeof(prev));
-            for (int i = 0; i < 3; ++i) {
-                guardedWriteFloat(rec + bodyrec::kRecPos + 4u * static_cast<uintptr_t>(i), pos[i]);
-                if (okPrev) guardedWriteFloat(rec + bodyrec::kPrev + 4u * static_cast<uintptr_t>(i), prev[i] + d[i]);
-            }
-            parts |= 1ull << idx;
-            if (first) {
-                first = false;
-                g_f51First.seq.fetch_add(1, std::memory_order_acq_rel);
-                std::memcpy(g_f51First.pre, pre, sizeof(pre));
-                std::memcpy(g_f51First.post, pos, sizeof(pos));
-                g_f51First.block = static_cast<uint32_t>(idx);
-                g_f51First.seq.fetch_add(1, std::memory_order_release);
-            }
-            ++shifted;
-        }
-    }
-    g_fpShifted.fetch_add(shifted, std::memory_order_relaxed);
-    g_fpSkipped.fetch_add(skipped, std::memory_order_relaxed);
-    if (parts) g_fpPartsMask.fetch_or(parts, std::memory_order_relaxed);
-}
-static_assert(bodyrec::kBlocks <= 64, "the FP parts mask holds one bit per block");
 
 uint64_t __fastcall bodyShiftHooked(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t s5, uint64_t s6, uint64_t s7, uint64_t s8) {
     const F35Fn original = reinterpret_cast<F35Fn>(g_bodyShift.original);
@@ -6755,7 +6672,6 @@ uint64_t __fastcall bodyShiftHooked(uint64_t a1, uint64_t a2, uint64_t a3, uint6
     g_bodyCalls.fetch_add(1, std::memory_order_relaxed);
     if (g_alignMode.load(std::memory_order_relaxed) == 2 && a1) {
         if (a1 == localAmcPointer()) bodyShiftApply(a1);
-        else if (g_f51FpOn.load(std::memory_order_relaxed) && a1 == g_fpAmcLocal.load(std::memory_order_relaxed)) fpRaiseApply(a1);   // F51
     }
     return r;
 }
@@ -6820,7 +6736,47 @@ struct AdsSightWin {
     uint32_t driving = 0, idle = 0, noFp = 0, noRoot = 0, noSample = 0, degenerate = 0, flipped = 0, trippedFrames = 0;
     double perpSum = 0.0, perpMax = 0.0, beforeSum = 0.0, wSum = 0.0;
     double relSum[3] = {};   // P14w - cam, body axes (right, up, forward)
+    // F66e: the rendered eyes solved from their scene rows: frames with both eyes' rows, one eye's, none (or implausible); frames the lock used the
+    // solved right eye and the F63 model; per eye the eye minus the job camera (body axes, metres), the distance to the sight line (perpendicular
+    // and along, metres), the IPD, and the last NDC of P14w and of P14w + 1 m along the sight in each eye's scene rows.
+    uint32_t rowsBoth = 0, rowsOne = 0, rowsNone = 0, implausible = 0, usedSolved = 0, usedModel = 0;
+    double eyeRel[2][3] = {}, perpEye[2] = {}, alongEye[2] = {}, ipdSum = 0.0, perpEyeMax[2] = {};
+    uint32_t eyeN[2] = {}, ipdN = 0;
+    double ndcP[2][2] = {}, ndcFar[2][2] = {};
+    bool ndcHave[2] = {};
 };
+// F66e: each eye's scene rows (cb1 270..273 and row 275 of the first main-scene pass) as the render thread took them (worldDraw, g_cpuWorld),
+// published for the frame thread's sight check. A seqlock per eye; the reader never waits.
+struct EyeRowsPub {
+    std::atomic<uint32_t> seq{0};
+    uint32_t frame = ~0u;
+    float rows[16] = {};
+    float o[4] = {};
+};
+EyeRowsPub g_eyeRowsPub[2];
+void eyeRowsPublish(int e, uint32_t frame, const float rows[16], const float o[4]) noexcept {
+    if (e < 0 || e > 1) return;
+    EyeRowsPub& q = g_eyeRowsPub[e];
+    q.seq.fetch_add(1, std::memory_order_acq_rel);
+    q.frame = frame;
+    std::memcpy(q.rows, rows, sizeof(q.rows));
+    std::memcpy(q.o, o, sizeof(q.o));
+    q.seq.fetch_add(1, std::memory_order_release);
+}
+bool eyeRowsRead(int e, uint32_t* frame, float rows[16], float o[4]) noexcept {
+    if (e < 0 || e > 1) return false;
+    EyeRowsPub& q = g_eyeRowsPub[e];
+    for (int tries = 0; tries < 2; ++tries) {
+        const uint32_t s1 = q.seq.load(std::memory_order_acquire);
+        if (s1 & 1u || s1 == 0) continue;
+        *frame = q.frame;
+        std::memcpy(rows, q.rows, sizeof(q.rows));
+        std::memcpy(o, q.o, sizeof(q.o));
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if (q.seq.load(std::memory_order_relaxed) == s1) return true;
+    }
+    return false;
+}
 AdsSightWin g_adsSightWin;
 uint64_t g_adsSightLineMs = 0;
 nofoot::AdsSightGrowth g_adsSightGrowth;
@@ -6860,8 +6816,75 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
             g_adsSightHalfIpd = nofoot::adsSightHalfIpd(g_adsSightIpdMeasured, static_cast<double>(ex));
             double rHat[3] = {};
             bool flipped = false;
-            if (nofoot::adsSightRight(row0, f, bodyRight, rHat, &flipped) &&
-                nofoot::adsSightError(p14w, cam, rHat, g_adsSightHalfIpd, f, rows, E)) {
+            // F66e: the rendered eyes. Each eye's position is solved from its scene rows (clip x, y, w vanish there); when the right eye's rows are
+            // this frame's (at most one frame behind the boundary) and it lies within 0.5 m of the job camera, the lock's E_R is that eye, else the
+            // F63 model (the job camera + half the IPD along the FP root's right). The sight line's distance from each eye is logged either way.
+            double eyeW[2][3] = {};
+            float eyeRows[2][16] = {}, eyeO[2][4] = {};
+            bool eyeOk[2] = {false, false};
+            int rowsFresh = 0;
+            for (int e = 0; e < 2; ++e) {
+                uint32_t rf = ~0u;
+                if (!eyeRowsRead(e, &rf, eyeRows[e], eyeO[e]) || !nofoot::sceneRowsFreshForLock(rf, g_f44Frame.load(std::memory_order_relaxed))) continue;
+                ++rowsFresh;
+                const double od[3] = {eyeO[e][0], eyeO[e][1], eyeO[e][2]};
+                if (!nofoot::eyeFromRows(eyeRows[e], od, eyeW[e])) continue;
+                const double d[3] = {eyeW[e][0] - cam[0], eyeW[e][1] - cam[1], eyeW[e][2] - cam[2]};
+                if (!(nofoot::ikLen(d) < 0.5)) {
+                    ++w.implausible;
+                    continue;
+                }
+                eyeOk[e] = true;
+            }
+            if (eyeOk[0] && eyeOk[1]) ++w.rowsBoth;
+            else if (eyeOk[0] || eyeOk[1]) ++w.rowsOne;
+            else ++w.rowsNone;
+            (void)rowsFresh;
+            for (int e = 0; e < 2; ++e) {
+                if (!eyeOk[e]) continue;
+                for (size_t i = 0; i < 3; ++i)
+                    w.eyeRel[e][i] += (eyeW[e][0] - cam[0]) * rows[3 * i] + (eyeW[e][1] - cam[1]) * rows[3 * i + 1] + (eyeW[e][2] - cam[2]) * rows[3 * i + 2];
+                double perp = 0.0, along = 0.0;
+                nofoot::sightLineOfEye(eyeW[e], p14w, f, &perp, &along);
+                w.perpEye[e] += perp;
+                w.perpEyeMax[e] = std::max(w.perpEyeMax[e], perp);
+                w.alongEye[e] += along;
+                ++w.eyeN[e];
+                double fu[3];
+                const double od[3] = {eyeO[e][0], eyeO[e][1], eyeO[e][2]};
+                if (nofoot::ikUnit(f, fu)) {
+                    const double farPt[3] = {p14w[0] + fu[0], p14w[1] + fu[1], p14w[2] + fu[2]};
+                    double c0[4], c1[4];
+                    drawtag::worldClip(eyeRows[e], p14w, od, c0);
+                    drawtag::worldClip(eyeRows[e], farPt, od, c1);
+                    if (c0[3] > 1e-9 && c1[3] > 1e-9) {
+                        w.ndcP[e][0] = c0[0] / c0[3];
+                        w.ndcP[e][1] = c0[1] / c0[3];
+                        w.ndcFar[e][0] = c1[0] / c1[3];
+                        w.ndcFar[e][1] = c1[1] / c1[3];
+                        w.ndcHave[e] = true;
+                    }
+                }
+            }
+            if (eyeOk[0] && eyeOk[1]) {
+                const double d[3] = {eyeW[1][0] - eyeW[0][0], eyeW[1][1] - eyeW[0][1], eyeW[1][2] - eyeW[0][2]};
+                w.ipdSum += nofoot::ikLen(d);
+                ++w.ipdN;
+            }
+            const bool modelOk = nofoot::adsSightRight(row0, f, bodyRight, rHat, &flipped);
+            bool lockOk = false;
+            bool usedSolved = false;
+            if (eyeOk[1] && nofoot::adsSightErrorEye(p14w, eyeW[1], f, rows, E)) {
+                lockOk = true;
+                usedSolved = true;
+            } else if (modelOk && nofoot::adsSightError(p14w, cam, rHat, g_adsSightHalfIpd, f, rows, E)) {
+                lockOk = true;
+            }
+            if (lockOk) {
+                if (usedSolved) ++w.usedSolved;
+                else ++w.usedModel;
+            }
+            if (lockOk) {
                 have = true;
                 if (flipped) ++w.flipped;
                 for (size_t i = 0; i < 3; ++i) {
@@ -6922,6 +6945,24 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
                     100.0 * g_adsSight.applied[2], 100.0 * appliedNorm, 100.0 * nofoot::kAdsSightClampM, w.wSum / n, g_adsW, w.driving, w.idle,
                     w.noFp, w.noRoot, w.noSample, w.degenerate, w.flipped, w.trippedFrames,
                     w.driving ? "" : " (no frame drove the lock this second)");
+    // F66e: the two rendered eyes against the job camera and the sight line. The eye positions are solved from each eye's scene rows (clip x, y, w
+    // zero). If the job camera sat at one eye (A1) the first ADS second shows it here, before the lock moves: eye minus camera not symmetric.
+    // Flight proof: IPD 6.0-6.1 cm; the right eye's distance to the sight line under 0.5 cm and the left's about 6 cm; used = solved right eye.
+    {
+        const double l0 = w.eyeN[0] ? static_cast<double>(w.eyeN[0]) : 1.0, l1 = w.eyeN[1] ? static_cast<double>(w.eyeN[1]) : 1.0;
+        const double ni = w.ipdN ? static_cast<double>(w.ipdN) : 1.0;
+        Log::get().note("native on foot ADS sight check (F66e): eye rows this second: both eyes %u, one eye %u, none/implausible %u (%u implausible: over 0.5 m "
+                        "from the job camera); the lock's right eye: the solved rendered eye in %u frames, the F63 model (camera + half IPD along the FP "
+                        "right) in %u; eye minus job camera (body right, up, forward, cm, mean) L %.1f %.1f %.1f R %.1f %.1f %.1f; IPD %.2f cm (%u "
+                        "frames); eye to the sight line (perpendicular cm mean/max, distance along to P14 cm mean) L %.1f/%.1f %.1f, R %.1f/%.1f %.1f; NDC "
+                        "of P14 and of P14 + 1 m along the sight (L: %.4f %.4f and %.4f %.4f; R: %.4f %.4f and %.4f %.4f)%s",
+                        w.rowsBoth, w.rowsOne, w.rowsNone, w.implausible, w.usedSolved, w.usedModel, 100.0 * w.eyeRel[0][0] / l0, 100.0 * w.eyeRel[0][1] / l0,
+                        100.0 * w.eyeRel[0][2] / l0, 100.0 * w.eyeRel[1][0] / l1, 100.0 * w.eyeRel[1][1] / l1, 100.0 * w.eyeRel[1][2] / l1,
+                        100.0 * w.ipdSum / ni, w.ipdN, 100.0 * w.perpEye[0] / l0, 100.0 * w.perpEyeMax[0], 100.0 * w.alongEye[0] / l0,
+                        100.0 * w.perpEye[1] / l1, 100.0 * w.perpEyeMax[1], 100.0 * w.alongEye[1] / l1, w.ndcP[0][0], w.ndcP[0][1], w.ndcFar[0][0],
+                        w.ndcFar[0][1], w.ndcP[1][0], w.ndcP[1][1], w.ndcFar[1][0], w.ndcFar[1][1],
+                        (w.ndcHave[0] && w.ndcHave[1]) ? "" : " (an eye had no NDC: its figures are zero)");
+    }
     w = AdsSightWin{};
 }
 // The frame thread's one call per frame. The view offset is seated metres (the runtime moves the seated origin by it); the body offset is world
@@ -7035,15 +7076,8 @@ void calibrateStep(uint64_t now, const double cam[3], const double ts[3], bool h
     for (size_t i = 0; i < 3; ++i) a.pos[i] = haveSample ? kCalOffsets[step][i] : 0.0;
 }
 
-// F51: the raise's frame-thread state: dh's filter, the applied raise (metres; the view's seated y is minus it, the FP records move by it along
-// the body's up row), the last published eye align (the view run plus the raise) and FP offset, the body's last up row, and the 1 s line's time.
-nofoot::RaiseDh g_f51Dh;
-double g_f51Applied = 0.0;
-double g_f51EyePub[3] = {}, g_f51FpPub[3] = {};
-double g_f51Up[3] = {0.0, 1.0, 0.0};
-double g_f51PovUp = 0.0, g_f51FpUp = 0.0;
-int g_f51Src = -1;   // 0 the 3P povCamera joint, 1 the head plus 0.038 m
-uint64_t g_f51LogMs = 0;
+// The last eye alignment published to the runtime (the view run, the ADS locks and the eye height), to publish only on a change.
+double g_eyeAlignPub[3] = {};
 
 // F55 (TEMPORARY): the walking shift's frame-thread state. The locomotion gate (the F49 gate's rule, fed from the body sample), the rest point's
 // kind this frame and the kind the capture holds (1 the neck, 2 the low-passed head, 3 the 3P clavicles, 4 the povCamera joint, 5 the head plus
@@ -7055,109 +7089,38 @@ double g_f55Live[3] = {}, g_f55Raw[3] = {}, g_f55Off[3] = {};
 bool g_f55Used = false;
 const char* const kF55KindNames[6] = {"none", "the neck", "the low-passed head (no neck)", "the 3P clavicles", "the povCamera joint",
                                       "the head + (0, 0.038, 0.112)"};
-// F55: the FP shoulder drop: the blend (0.2 s), the applied drop (metres, FP model -y), published to the Animate hook.
-nofoot::DropBlend g_f55DropBlend;
-double g_f55DropApplied = 0.0;
-std::atomic<float> g_f55DropM{0.0f};
-// F55: the hook's snapshot of the FP X's joints 19, 20, 37 and 44 (model space, before and after the drop) under a sequence counter (one
-// writer: the hook under g_fdBusy), and its counters and failure bits (the frame thread names each failure once).
+// F55: the hook's snapshot of the FP X's joints 19, 20, 37 and 44 (model space, as the Animate output stands; F66: the shoulder drop that
+// lowered them between the two copies is gone, so before and after are equal) under a sequence counter (one writer: the hook under g_fdBusy), and
+// its counters and failure bits (the frame thread names each failure once).
 struct F55Snap {
     std::atomic<uint32_t> seq{0};
     float before[4][3] = {};
     float after[4][3] = {};
-    float drop = 0.0f;
     uint64_t ms = 0;
 };
 F55Snap g_f55Snap;
-std::atomic<uint64_t> g_fdCalls{0}, g_fdWrites{0}, g_fdBusySkips{0};
+std::atomic<uint64_t> g_fdCalls{0}, g_fdBusySkips{0};
 std::atomic<uint32_t> g_fdFailBits{0};
-std::atomic<bool> g_fdWriteDown{false};
-uint64_t g_f55CallsLast = 0, g_f55WritesLast = 0;
+uint64_t g_f55CallsLast = 0;
 uint32_t g_f55FailNamed = 0;
-constexpr uint32_t kFdFailKinds = 7;
+constexpr uint32_t kFdFailKinds = 6;
 const char* const kFdFailText[kFdFailKinds] = {
     "the plan was being rewritten (skipped this call)", "the plan does not belong to this X or is empty",
     "a flag of X (+0x210) or P = [X+8] or its joint count was not readable", "the joint count differs from the plan's (the skeleton changed)",
-    "no output span: [job+0x28] or [X+0x1F0] is null, or count-1 is not below [Y+0xE0]", "a joint position in the output span was not readable",
-    "a drop write faulted: the drop stands down for the session"};
+    "no output span: [job+0x28] or [X+0x1F0] is null, or count-1 is not below [Y+0xE0]", "a joint position in the output span was not readable"};
 float pfzWeightNow() noexcept;   // the pose freeze's blend weight (defined with the Animate hook below)
 // F55: the hook's snapshot, read under its sequence counter (false: torn or never written).
-bool f55SnapRead(float before[4][3], float after[4][3], float* drop, uint64_t* ms) noexcept {
+bool f55SnapRead(float before[4][3], float after[4][3], uint64_t* ms) noexcept {
     for (int tries = 0; tries < 4; ++tries) {
         const uint32_t s1 = g_f55Snap.seq.load(std::memory_order_acquire);
         if (s1 & 1u || s1 == 0) continue;
         std::memcpy(before, g_f55Snap.before, sizeof(g_f55Snap.before));
         std::memcpy(after, g_f55Snap.after, sizeof(g_f55Snap.after));
-        *drop = g_f55Snap.drop;
         *ms = g_f55Snap.ms;
         std::atomic_thread_fence(std::memory_order_acquire);
         if (g_f55Snap.seq.load(std::memory_order_relaxed) == s1) return true;
     }
     return false;
-}
-
-// F51: the once-a-second line in body mode: dh, the view offset, the FP records shifted (count and part names), the weapon's status.
-void f51Line(const EyeSample& s, const FpRootSnap& fp, bool fpFresh, bool raiseOn) noexcept {
-    const uint64_t shifted = g_fpShifted.exchange(0, std::memory_order_relaxed), skipped = g_fpSkipped.exchange(0, std::memory_order_relaxed),
-                   passes = g_fpPasses.exchange(0, std::memory_order_relaxed), parts = g_fpPartsMask.exchange(0, std::memory_order_relaxed),
-                   notMode2 = g_fpNotMode2.exchange(0, std::memory_order_relaxed);
-    char names[700] = {};
-    size_t at = 0;
-    for (uint32_t idx = 0; idx < ecm::kPartCount && idx < 64; ++idx) {
-        if (!(parts & (1ull << idx))) continue;
-        const int w = std::snprintf(names + at, sizeof(names) - at, "%s%s", at ? " " : "", ecm::kPartNames[idx]);
-        if (w <= 0 || static_cast<size_t>(w) >= sizeof(names) - at) break;
-        at += static_cast<size_t>(w);
-    }
-    float pre[3] = {}, post[3] = {};
-    uint32_t block = 0;
-    bool firstOk = false;
-    for (int tries = 0; tries < 4 && !firstOk; ++tries) {
-        const uint32_t s1 = g_f51First.seq.load(std::memory_order_acquire);
-        if (s1 & 1u || s1 == 0) break;
-        std::memcpy(pre, g_f51First.pre, sizeof(pre));
-        std::memcpy(post, g_f51First.post, sizeof(post));
-        block = g_f51First.block;
-        std::atomic_thread_fence(std::memory_order_acquire);
-        firstOk = g_f51First.seq.load(std::memory_order_relaxed) == s1;
-    }
-    double raiseS[3] = {};
-    nofoot::raiseSeated(g_f51Applied, raiseS);
-    Log::get().note("native on foot body raise (F51/F53, key %s): dh measured %.3f m (3P pov up %.3f m from %s, FP side up %.3f m, body axes), low-passed "
-                    "%.3f m (tau 1 s, 0..0.5 m; F53: logged only, the target is the constant %.2f m), applied %.3f m; view: seated offset (0, %.3f, 0) m, eye align published (%.3f, %.3f, %.3f) m; FP "
-                    "records (AMC %016llX): %llu shifted, %llu skipped over %llu passes this second%s, along the up row (%.3f, %.3f, %.3f); parts: %s; "
-                    "first shifted %s: block %u %s, before (%.3f, %.3f, %.3f) after (%.3f, %.3f, %.3f)",
-                    raiseOn ? "on" : g_raiseFpKey.load(std::memory_order_relaxed) ? "on, not active" : "off", g_f51Dh.raw, g_f51PovUp,
-                    g_f51Src == 0 ? "the povCamera joint" : g_f51Src == 1 ? "the head + 0.038 m" : "nothing yet", g_f51FpUp, g_f51Dh.lp,
-                    nofoot::raiseConstM(true, g_raiseCm.load(std::memory_order_relaxed)), g_f51Applied,
-                    raiseS[1], g_f51EyePub[0], g_f51EyePub[1], g_f51EyePub[2], static_cast<unsigned long long>(g_fpAmcLocal.load(std::memory_order_relaxed)),
-                    static_cast<unsigned long long>(shifted), static_cast<unsigned long long>(skipped), static_cast<unsigned long long>(passes),
-                    notMode2 ? " (the latched FP AMC was not mode 2 on some calls)" : "", g_f51Up[0], g_f51Up[1], g_f51Up[2], at ? names : "none",
-                    firstOk ? "record" : "(none yet)", block, block < ecm::kPartCount ? ecm::kPartNames[block] : "?", static_cast<double>(pre[0]),
-                    static_cast<double>(pre[1]), static_cast<double>(pre[2]), static_cast<double>(post[0]), static_cast<double>(post[1]),
-                    static_cast<double>(post[2]));
-    // The weapon: the FP handAttach joints (FP 52 L, 51 R) in world through the FP root's yaw (as F45), as the skeleton places them (where a weapon
-    // attached to the joint draws) and where the shifted arms put them (+ the applied raise along up).
-    if (s.extOkFp && fpFresh) {
-        const double rn = std::sqrt(static_cast<double>(fp.rows[6]) * fp.rows[6] + static_cast<double>(fp.rows[8]) * fp.rows[8]);
-        const double cy = rn > 1e-6 ? fp.rows[8] / rn : 1.0, sy = rn > 1e-6 ? fp.rows[6] / rn : 0.0;
-        double w[2][3] = {};
-        for (size_t side = 0; side < 2; ++side) {
-            const float* m = &s.extFpM[3 * (2 + side)];
-            w[side][0] = static_cast<double>(fp.origin[0]) + m[0] * cy + m[2] * sy;
-            w[side][1] = static_cast<double>(fp.origin[1]) + m[1];
-            w[side][2] = static_cast<double>(fp.origin[2]) - m[0] * sy + m[2] * cy;
-        }
-        const double r = g_f51Applied;
-        Log::get().note("native on foot body raise (F51): hand attach (world) L: skeleton (%.3f, %.3f, %.3f), with the arms' shift (%.3f, %.3f, %.3f); R: "
-                        "skeleton (%.3f, %.3f, %.3f), with the arms' shift (%.3f, %.3f, %.3f); weapon: not an AMC part -- F54 shifts it as an MGMC "
-                        "record when it matches (see the F54 lines); unshifted it would draw %.3f m below the hands while the raise is applied",
-                        w[0][0], w[0][1], w[0][2], w[0][0] + r * g_f51Up[0], w[0][1] + r * g_f51Up[1], w[0][2] + r * g_f51Up[2], w[1][0], w[1][1],
-                        w[1][2], w[1][0] + r * g_f51Up[0], w[1][1] + r * g_f51Up[1], w[1][2] + r * g_f51Up[2], r);
-    } else {
-        Log::get().note("native on foot body raise (F51): hand attach: not read (%s); weapon: not an AMC part (F54: "
-                        "the MGMC shift needs these joints)",!s.extOkFp ? "the FP attach joints are not in the census" : "the FP root is not fresh");
-    }
 }
 
 // F58 (frame thread only): the body target's horizontal source this frame: 0 the FP root, 1 the job camera (full 3P), 2 the job camera (the
@@ -7188,36 +7151,34 @@ int g_f64OnLast = -1;
 uint64_t g_f64LineMs = 0;
 uint32_t g_f64N = 0, g_f64UpN = 0;
 double g_f64RaiseSum = 0.0, g_f64UpSum = 0.0, g_f64UpRaiseSum = 0.0;
-// F60 (TEMPORARY slider, frame thread only but the key): the body fitted to the weapon. The slider fix.native_on_foot_body_fit_weapon (0..1),
-// the 0.3 s ramp (in while a weapon or tool is held and every gate holds, out otherwise), this tick's fit (slider x ramp), the hook's last
-// publication (held while the ramp runs out), the head's and the fitted target of this tick (body axes) and the 1 s line's sums.
-nofoot::IkBlend g_f60Blend{0.0f, nofoot::kFitRampSec};
-double g_f60Fit = 0.0;
-FitPub g_f60Pub;
-bool g_f60Have = false, g_f60Weapon = false, g_f60Applied = false;
-const char* g_f60Why = "(none)";
-double g_f60Head[3] = {}, g_f60Out[3] = {};
-uint64_t g_f60LineMs = 0, g_f60PubLast = 0;
-uint32_t g_f60N = 0, g_f60ErrN = 0, g_f60WeaponN = 0, g_f60HaveN = 0;
-double g_f60FitSum = 0.0, g_f60HeadSum[3] = {}, g_f60DwSum[3] = {}, g_f60OutSum[3] = {}, g_f60DSum[3] = {};
-double g_f60ErrSum = 0.0, g_f60ErrMax = 0.0, g_f60ErrHSum = 0.0, g_f60ErrUpSum = 0.0;
-// F62a (frame thread): this tick's raised factor and lateral weight (slider x ramp x raised), the last application (the disengage factor, the
-// weights after it, the pull and its clamp), the lateral target's ADS blend, and the 1 s line's sums: the weights and factors, d_w - d_head
-// and the pull (right, forward), the shoulder-mid residual Sd - Umid (right, forward), per arm in ADS the reach after the assist and the
-// elbow's interior angle; the bend counters of the last F58 second.
-double g_f60Raised = 0.0, g_f60FitLat = 0.0;
-float g_f62BendWNext = 0.0f;   // the weight applied this tick, stored to g_fitBendW at the next tick's f60FitStep
-nofoot::FitApplied g_f62Apply;
-nofoot::FitAdsLat g_f62AdsLat;
-uint32_t g_f62N = 0, g_f62ApplyN = 0, g_f62ClampN = 0, g_f62LatBlendN = 0, g_f62ResN = 0, g_f62AdsN[2] = {};
-double g_f62WFwdSum = 0.0, g_f62WLatSum = 0.0, g_f62RaisedSum = 0.0, g_f62DisSum = 0.0, g_f62GateSum = 0.0;
-double g_f62ESum[2] = {}, g_f62PullSum[2] = {}, g_f62PullMax = 0.0, g_f62ResSum[2] = {};
-double g_f62AdsReachSum[2] = {}, g_f62AdsReachMax[2] = {}, g_f62AdsElbowSum[2] = {}, g_f62AdsElbowMin[2] = {};
-uint64_t g_f62BendCalls = 0, g_f62BendN = 0, g_f62BendFitLim = 0, g_f62BendSusp = 0;
-uint32_t g_f62BendClamp[3] = {}, g_f62BendFitClamp[3] = {};
-double g_f62BendRes0Max = 0.0;
-void f60FitStep(uint64_t now, double dt, int mode, bool full3P) noexcept;
-void f60FitLine(uint64_t now, int mode, bool full3P, bool vertical, const double dApplied[3], const EyeSample& s) noexcept;
+// F66a (frame thread): the armed flag from the game (journalHeldItem: Status.json SelectedWeapon, not the fists) and its 0.3 s ramp (g_armedW,
+// for the Animate hook). The hook's last reach publication (a torn read keeps the last). The distance gate's old reading of "held"
+// (nofoot::distanceGateHeld of the smaller grip gate) is kept as a measure only: how often it said held while the game said unarmed.
+bool g_armed = false;
+nofoot::IkBlend g_armedBlend{0.0f, nofoot::kArmedRampSec};
+ReachPub g_reachLast;
+bool g_reachHave = false;
+int g_f66aKindLast = -1;
+char g_f66aNameLast[64] = {};
+uint64_t g_f66aLineMs = 0, g_f66aPubLast = 0;
+uint32_t g_f66aN = 0, g_f66aArmedN = 0, g_f66aUnknownN = 0, g_f66aGateFreshN = 0, g_f66aGateHeldN = 0, g_f66aGateHeldUnarmedN = 0;
+uint32_t g_f66aArmedNoGripN = 0, g_f66aSamples = 0;
+double g_f66aGateSum = 0.0;
+// F66b (frame thread): the frame clock. The previous tick's QPC ticks and ms stamp, and the second's sums: ticks, ticks whose dt was 0 on the
+// QPC clock (the new one) and on the ms clock (the old one, counted beside it so the defect is measured, not assumed), ticks capped at 50 ms,
+// and dt's sum, minimum and maximum (s).
+uint64_t g_f66bLastTicks = 0, g_f66bLastMs = 0, g_f66bLineMs = 0;
+uint32_t g_f66bTicks = 0, g_f66bQpcZero = 0, g_f66bMsZero = 0, g_f66bCapped = 0;
+double g_f66bDtSum = 0.0, g_f66bDtMin = 0.0, g_f66bDtMax = 0.0;
+// F66c (frame thread): the second's window for the body solve line (printed with the bend's statistics): align ticks in body mode, d before
+// and after the reach correction (right, forward, metres), the correction's largest horizontal size, the reach constraint's frames (constrained
+// and infeasible), the reach publications read, and per arm the post-bend shoulder minus U* (cm).
+struct F66cWin {
+    uint32_t ticks = 0, constrained = 0, infeasible = 0, pubs = 0, gapN[2] = {};
+    double dHeadSum[2] = {}, dAfterSum[2] = {}, corrMax = 0.0, gapSum[2] = {}, gapMax[2] = {};
+};
+F66cWin g_f66c;
+void f66ArmedStep(uint64_t now, double dt) noexcept;
 // F59b: the AMC matrix source: this fresh sample's matrix, job camera and root, with the 3P joints of the last good frame carried into this
 // frame through their body coordinates (the head's body coordinates are unchanged by that), and the FP joints (model space) from this
 // sample when it has them. Frame-thread copies only; no game memory is read.
@@ -7429,12 +7390,14 @@ void rotCalTick(uint64_t now) noexcept {
 
 // ---- F65a: the reach limit (frame thread) -------------------------------------------------------------------------------------------
 // The F64 flight: the FP weapon is world-fixed while the body follows the head (d ranged 18 cm right and 18 cm forward), so the left
-// shoulder ran out of reach of its grip (ratio 0.95..1.10, shortfall up to 17 cm). After the body align and the weapon fit (a hard limit,
-// after F60/F62a), in full-3P body mode with the arm IK on and a weapon held, the horizontal body shift d is moved by the smallest amount
-// that keeps each 3P shoulder (the upper-arm joint) within l1 + l2 - 2 cm of its grip T_A (nofoot::reachLimitDelta over the hook's
-// published c + d), ramped over 0.2 s on arm and disarm; zero at once outside full 3P or with the arm IK not on. The filter's state is not
-// touched: the published d is the filtered d plus the correction. The 1 s line: per arm the drawn attach against the real T_A, the
-// shoulder-to-grip reach ratio before and after the correction, the weights; the frames constrained and the correction's size.
+// shoulder ran out of reach of its grip (ratio 0.95..1.10, shortfall up to 17 cm). After the body align, in full-3P body mode with the arm IK
+// on and the game saying a weapon is in hand (F66a), the horizontal body shift d is moved by the smallest amount that keeps each 3P shoulder
+// within l1 + l2 - 2 cm of its grip T_A (nofoot::reachLimitDelta over the hook's published c + d), ramped over 0.2 s on arm and disarm; zero
+// at once outside full 3P or with the arm IK not on. F66c: c is built from U*, the shoulder of the UNBENT pose turned by the square-up
+// (the hook, ReachPub), never the bent shoulder, so the bend cannot feed this constraint (the F65 flight's 2-frame limit cycle). It is a
+// post-filter: the published d is the filtered d plus the correction; the full move of d into the hook is F67. The 1 s line: per arm the drawn
+// attach against the real T_A, the shoulder-to-grip reach ratio before and after the correction, the weights; the frames constrained and the
+// correction's size.
 nofoot::IkBlend g_f65Ramp{0.0f, nofoot::kReachRampSec};
 double g_f65LastB[3] = {};   // the last full correction (body axes), held while the ramp runs out without a fresh measurement
 uint64_t g_f65LineMs = 0, g_f65PubMs = 0;
@@ -7450,9 +7413,9 @@ void f65ReachLimit(uint64_t now, double dt, bool full3P, const AlignRun& a, cons
     corrW[0] = corrW[1] = corrW[2] = 0.0;
     const int ikMode = pfz::g_ikMode.load(std::memory_order_relaxed);
     const bool scope = full3P && ikMode == 3 && nativeOnFootActive();
-    const FitPub& p = g_f60Pub;
-    const bool fresh = g_f60Have && (now > p.ms ? now - p.ms : 0) <= nofoot::kIkFreshMs;
-    const bool want = scope && g_f60Weapon && fresh && p.reachOk[0] && p.reachOk[1] && s.valid;
+    const ReachPub& p = g_reachLast;
+    const bool fresh = g_reachHave && (now > p.ms ? now - p.ms : 0) <= nofoot::kIkFreshMs;
+    const bool want = scope && g_armed && fresh && p.reachOk[0] && p.reachOk[1] && s.valid;
     if (!scope) {
         g_f65Ramp.w = 0.0f;
     } else {
@@ -7474,8 +7437,14 @@ void f65ReachLimit(uint64_t now, double dt, bool full3P, const AlignRun& a, cons
         const bool active = nofoot::reachLimitDelta(v, p.reachR, have, full, &feasible);
         for (int i = 0; i < 3; ++i) g_f65LastB[i] = full[i];
         ++g_f65Want;
-        if (active) ++g_f65Constrained;
-        if (!feasible) ++g_f65Infeasible;
+        if (active) {
+            ++g_f65Constrained;
+            ++g_f66c.constrained;
+        }
+        if (!feasible) {
+            ++g_f65Infeasible;
+            ++g_f66c.infeasible;
+        }
     }
     double corrB[3] = {};
     if (w > 0.0 && s.valid) {
@@ -7544,7 +7513,7 @@ void f65ReachLimit(uint64_t now, double dt, bool full3P, const AlignRun& a, cons
     g_f65Arm[0] = g_f65Arm[1] = F65Arm{};
 }
 
-// ---- F65b: stand armed, the frame thread's half: the armed ramp (0.3 s; the key on, a weapon held (g_f60Weapon), full-3P body mode with
+// ---- F65b: stand armed, the frame thread's half: the armed ramp (0.3 s; the key on, the game's armed flag (g_armed, F66a), full-3P body mode with
 // the arm IK on; zero at once otherwise), the armed flag (the hook captures the stand height only unarmed) and idle (no locomotion, no ADS),
 // published for the Animate post-hook; the 1 s line (f65bStandLine, with the hook's statistics, defined after them).
 nofoot::IkBlend g_f65bRamp{0.0f, nofoot::kStandRampSec};
@@ -7590,14 +7559,111 @@ void f65bStandTick(uint64_t now, double dt, int mode, bool full3P, bool ads, boo
     const bool key = g_standKeyOn.load(std::memory_order_relaxed);
     const bool scope = key && mode == 2 && full3P && pfz::g_ikMode.load(std::memory_order_relaxed) == 3 && nativeOnFootActive();
     if (!scope) g_f65bRamp.w = 0.0f;
-    else g_f65bRamp.step(g_f60Weapon, dt);
+    else g_f65bRamp.step(g_armed, dt);
     g_standArmedW.store(g_f65bRamp.w, std::memory_order_relaxed);
-    g_standArmedFlag.store(g_f60Weapon, std::memory_order_relaxed);
+    g_standArmedFlag.store(g_armed, std::memory_order_relaxed);
     g_standIdle.store(!moving && !ads, std::memory_order_relaxed);
     f65bStandLine(now, scope);
 }
 
-void alignTick(uint64_t now) noexcept {
+// F66b: the second's frame clock line. Called once per align tick with the ms stamp and the QPC dt (0 for the very first tick only).
+void f66bNote(uint64_t nowMs, double dtQpc) noexcept {
+    static bool haveLast = false;
+    if (haveLast) {
+        ++g_f66bTicks;
+        if (!(dtQpc > 0.0)) ++g_f66bQpcZero;
+        if (nowMs <= g_f66bLastMs) ++g_f66bMsZero;
+        if (dtQpc >= 0.05) ++g_f66bCapped;
+        g_f66bDtMin = g_f66bTicks == 1 || dtQpc < g_f66bDtMin ? dtQpc : g_f66bDtMin;
+        g_f66bDtMax = std::max(g_f66bDtMax, dtQpc);
+        g_f66bDtSum += dtQpc;
+    }
+    haveLast = true;
+    g_f66bLastMs = nowMs;
+    if (g_f66bLineMs == 0) g_f66bLineMs = nowMs;
+    if (nowMs - g_f66bLineMs < 1000) return;
+    g_f66bLineMs = nowMs;
+    if (g_f66bTicks && nativeOnFootActive()) {
+        const double n = static_cast<double>(g_f66bTicks);
+        Log::get().note("native on foot frame clock (F66b): ticks with dt 0: %u of %u on the QPC clock (the dt in use; expect 0; F65 read about 26 of 90 on "
+                        "the ms clock), %u of %u on the ms clock (GetTickCount64, counted beside it, not used); dt mean %.2f ms (min %.2f, max %.2f); ticks "
+                        "capped at 50 ms: %u",
+                        g_f66bQpcZero, g_f66bTicks, g_f66bMsZero, g_f66bTicks, 1000.0 * g_f66bDtSum / n, 1000.0 * g_f66bDtMin, 1000.0 * g_f66bDtMax,
+                        g_f66bCapped);
+    }
+    g_f66bTicks = g_f66bQpcZero = g_f66bMsZero = g_f66bCapped = 0;
+    g_f66bDtSum = g_f66bDtMin = g_f66bDtMax = 0.0;
+}
+
+// F66a: the frame thread's armed step, once per align tick before anything reads the flag: the hook's last reach publication (a torn read keeps
+// the last), the armed flag from the game (journalHeldItem) and its 0.3 s ramp, published for the Animate hook (g_armedW); the 100 ms
+// Status.json cadence while native stereo is on foot. A change of the held item is logged with the raw name (this is what verifies the
+// assumption that holstering writes the fists); the second's line counts the old distance gate's false "held" readings against the game's flag.
+void f66ArmedStep(uint64_t now, double dt) noexcept {
+    ReachPub rp;
+    if (reachRead(&rp)) {
+        if (rp.ms != g_reachLast.ms || !g_reachHave) {
+            ++g_f66c.pubs;
+            for (int k = 0; k < 2; ++k) {
+                if (!rp.reachOk[k]) continue;
+                g_f66c.gapSum[k] += rp.shoulderGap[k];
+                g_f66c.gapMax[k] = std::max(g_f66c.gapMax[k], rp.shoulderGap[k]);
+                ++g_f66c.gapN[k];
+            }
+        }
+        g_reachLast = rp;
+        g_reachHave = true;
+    }
+    const bool fresh = g_reachHave && (now > g_reachLast.ms ? now - g_reachLast.ms : 0) <= nofoot::kIkFreshMs;
+    const bool active = nativeOnFootActive();
+    journalWatchSetEagerStatusOnFoot(active);
+    const JournalHeldItem kind = active ? journalHeldItem() : kHeldUnknown;
+    g_armed = active && kind == kHeldItem;
+    if (!active) g_armedBlend.w = 0.0f;
+    else g_armedBlend.step(g_armed, dt);
+    g_armedW.store(g_armedBlend.w, std::memory_order_relaxed);
+    char name[64] = {};
+    journalHeldItemName(name, sizeof(name));
+    if (!active) {
+        g_f66aKindLast = -1;
+        g_f66aNameLast[0] = '\0';
+        g_f66aLineMs = 0;
+    } else if (static_cast<int>(kind) != g_f66aKindLast || std::strcmp(name, g_f66aNameLast) != 0) {
+        Log::get().note("native on foot armed (F66a): SelectedWeapon \"%s\" -> %s%s (Status.json samples read %u; the armed ramp is 0.3 s)",
+                        kind == kHeldUnknown ? "(not in Status.json)" : name, g_armed ? "armed" : "unarmed",
+                        kind == kHeldUnknown ? " [unknown: treated as unarmed, the game's arms]" : kind == kHeldNone ? " [fists]" : "", journalStatusSamples());
+        g_f66aKindLast = static_cast<int>(kind);
+        std::memcpy(g_f66aNameLast, name, sizeof(g_f66aNameLast));
+    }
+    if (!active) return;
+    ++g_f66aN;
+    if (g_armed) ++g_f66aArmedN;
+    if (kind == kHeldUnknown) ++g_f66aUnknownN;
+    if (fresh) {
+        ++g_f66aGateFreshN;
+        g_f66aGateSum += g_reachLast.gateMin;
+        const bool gateHeld = nofoot::distanceGateHeld(g_reachLast.gateMin);
+        if (gateHeld) ++g_f66aGateHeldN;
+        if (gateHeld && !g_armed) ++g_f66aGateHeldUnarmedN;
+        if (g_armed && g_armedBlend.w >= 1.0f && !gateHeld) ++g_f66aArmedNoGripN;   // armed for 0.3 s and the hands not at the grips: holstering that does not write the fists reads like this
+    }
+    if (g_f66aLineMs == 0) g_f66aLineMs = now;
+    if (now - g_f66aLineMs < 1000) return;
+    g_f66aLineMs = now;
+    const uint32_t samples = journalStatusSamples();
+    const double gn = g_f66aGateFreshN ? static_cast<double>(g_f66aGateFreshN) : 1.0;
+    Log::get().note("native on foot armed (F66a): %s (SelectedWeapon \"%s\"); armed ramp %.2f; frames armed %u of %u (kind unknown %u); the distance gate "
+                    "said held N of M frames while unarmed: %u of %u (it said held %u of %u in all; mean grip gate %.2f); armed with the hands not at "
+                    "the grips (a holster that wrote no fists reads like this): %u frames; Status.json samples this second %u",
+                    g_armed ? "armed" : kind == kHeldUnknown ? "unarmed (unknown)" : "unarmed", kind == kHeldUnknown ? "-" : name,
+                    static_cast<double>(g_armedBlend.w), g_f66aArmedN, g_f66aN, g_f66aUnknownN, g_f66aGateHeldUnarmedN, g_f66aGateFreshN,
+                    g_f66aGateHeldN, g_f66aGateFreshN, g_f66aGateSum / gn, g_f66aArmedNoGripN, samples - g_f66aSamples);
+    g_f66aSamples = samples;
+    g_f66aN = g_f66aArmedN = g_f66aUnknownN = g_f66aGateFreshN = g_f66aGateHeldN = g_f66aGateHeldUnarmedN = g_f66aArmedNoGripN = 0;
+    g_f66aGateSum = 0.0;
+}
+
+void alignTick(uint64_t now) noexcept {   // F66b: dt from QPC inside (g_alignClock); now (ms) is for staleness and the 1 s lines
     static int lastMode = -1;
     const int mode = g_alignMode.load(std::memory_order_relaxed);   // 0 off, 1 view, 2 body
     AlignRun& a = mode == 2 ? g_alignBody : g_align;
@@ -7627,7 +7693,11 @@ void alignTick(uint64_t now) noexcept {
         if (mode == 3) calibrateReset();
         if (mode == 1) g_f37TS0Valid = false;                                      // F37: a new head reference on entering view
     }
-    const double dt = (a.lastMs && now > a.lastMs) ? std::min(0.05, static_cast<double>(now - a.lastMs) / 1000.0) : 0.0;
+    // F66b: the frame clock. dt is the QPC step (capped at 50 ms); the line counts the ticks whose dt was 0 on the QPC clock and, beside it, on the
+    // ms clock (what F65's GetTickCount64 would have read), so a run in which the new clock never ran reads differently from success.
+    static QpcDt g_alignClock;
+    const double dt = g_alignClock.step(0.05);
+    f66bNote(now, dt);
     a.lastMs = now;
     other.lastMs = now;
 
@@ -7674,7 +7744,7 @@ void alignTick(uint64_t now) noexcept {
         g_f59bHave = false;
     }
     const bool f59bHeld = g_f59bSrc == nofoot::kFollowLast;   // the held frame is up to 0.5 s old by design: the 100 ms test is not applied
-    f60FitStep(now, dt, mode, f58Full3P);   // F60: the weapon fit's weight this tick (0 outside full-3P body mode with the arm IK on)
+    f66ArmedStep(now, dt);   // F66a: the armed flag from the game (Status.json SelectedWeapon) and its 0.3 s ramp, for this tick's consumers below
     // F55: the walking shift's locomotion gate: the body's horizontal speed under 0.35 m/s for 0.3 s (the F49 rule), fed each new body sample.
     if (s.valid && s.stamp != g_f55LocoStamp) {
         g_f55LocoStamp = s.stamp;
@@ -7698,7 +7768,7 @@ void alignTick(uint64_t now) noexcept {
         a.waitLineMs = now;
         Log::get().note("native on foot body align: %s: waiting (%s)", mode == 2 ? "body" : "view", wait);
     }
-    if (mode == 2 && (ads || g_f60Weapon)) g_f48Stand.step(now, 0.0, 0.0, true);   // F48: ADS (F65b: or a held weapon) is never a rest
+    if (mode == 2 && (ads || g_armed)) g_f48Stand.step(now, 0.0, 0.0, true);   // F48: ADS (F65b: or an armed flag, F66a) is never a rest
     const int anchorMode = g_alignAnchorMode.load(std::memory_order_relaxed);   // F48: 0 neck, 1 clavicles, 2 pov
     const bool vertical = g_alignVertical.load(std::memory_order_relaxed);      // F50: off locks the body's height in body mode
     g_f58FollowSrc = -1;
@@ -7746,8 +7816,6 @@ void alignTick(uint64_t now) noexcept {
     // F43: the shoulder anchor's state for this frame (set in the !wait block; zero when the anchor is not the shoulders).
     bool shoulderAnchor = false;
     double fpShW[3] = {}, tpShW[3] = {};
-    bool f51Have = false;   // F51: this frame measured dh (body mode, inputs fresh, the FP root fresh)
-    double f51Raw = 0.0;
     if (!wait) {
         const auto body = [&](const float p[3], double out[3]) {
             for (size_t i = 0; i < 3; ++i) {
@@ -7944,7 +8012,7 @@ void alignTick(uint64_t now) noexcept {
             const uint32_t f55CapBefore = g_f48Stand.hCaptures;
             // F59b: ads (only ever true here in full 3P, which no longer waits on it): ADS is never a rest. F65b: nor is a held weapon (F64
             // re-captured the armed stance's crouched 1.489 m as the standing height).
-            g_f48Stand.step(now, static_cast<double>(s.headBody[1]), srcB[1], ads || g_f60Weapon, f55Moving, g_f55Raw[0], g_f55Raw[2]);
+            g_f48Stand.step(now, static_cast<double>(s.headBody[1]), srcB[1], ads || g_armed, f55Moving, g_f55Raw[0], g_f55Raw[2]);
             if (anchorMode == 2 && !shoulderAnchor && g_f48Stand.valid && vertical) {   // F50: vertical off: logged only
                 const double live[3] = {srcB[0], srcB[1], srcB[2]};
                 nofoot::standingApply(live, g_f48Stand.value, srcB);
@@ -7970,22 +8038,6 @@ void alignTick(uint64_t now) noexcept {
                 g_f48SrcB[i] = srcB[i];
                 g_f48CamB[i] = anchorB[i];
             }
-            // F51: dh's measurement, whatever the anchor: the 3P povCamera joint's height (the head plus 0.038 m without it) less the FP side's
-            // (the FP root), body axes up, both live (the vertical lock and the standing height do not enter it).
-            if (fpFresh) {
-                double pj[3] = {};
-                if (s.povJOk) {
-                    body(s.povJ, pj);
-                } else {
-                    body(s.head, pj);
-                    pj[1] += 0.038;
-                }
-                g_f51PovUp = pj[1];
-                g_f51FpUp = camB[1];
-                g_f51Src = s.povJOk ? 0 : 1;
-                f51Raw = g_f51PovUp - g_f51FpUp;
-                f51Have = true;
-            }
             if (!g_f41LpValid) {
                 for (size_t i = 0; i < 3; ++i) {
                     g_f41CamLp[i] = anchorB[i];
@@ -8001,34 +8053,8 @@ void alignTick(uint64_t now) noexcept {
                 g_f41PovLp[i] += aPov * (srcB[i] - g_f41PovLp[i]);
                 g_f41TgtB[i] = (g_f41CamLp[i] - g_f41PovLp[i]) - trimB[i];
             }
-            // F60: the body fitted to the weapon, in body axes (d_w from the hook's last publication, no trims); horizontal only with the
-            // vertical off (the feet stay on the ground; the up is the bend's). The fit is 0 outside full-3P body mode with the arm IK on, so
-            // nothing changes there. F62a: the trims on the FINAL d: the head's target is kept UNTRIMMED (g_f60Head), the fit's pull is added
-            // and the trims are subtracted once after it (F60 blended the trimmed head toward the untrimmed d_w, so the trims reached the body
-            // only 1 - fit of the way). The pull (nofoot::fitApply): the forward weight Body fit to weapon x ramp x raised, the lateral weight
-            // Body fit sideways x ramp x raised, both times the disengage factor (|d_w - d_head| horizontal 0.15..0.35 m: a head excursion
-            // drags the body), the horizontal pull clamped to 12 cm; d_w's lateral is blended over 0.3 s at each change of the ADS flag. With
-            // no fit the target is the trimmed head's, exactly as before. The applied weight goes to the hook for the bend's limits.
-            for (size_t i = 0; i < 3; ++i) {
-                g_f60Head[i] = g_f41CamLp[i] - g_f41PovLp[i];
-                g_f60Out[i] = g_f41TgtB[i];
-            }
-            g_f60Applied = false;
-            g_f62Apply = nofoot::FitApplied{};
-            if ((g_f60Fit > 0.0 || g_f60FitLat > 0.0) && g_f60Have) {
-                double dw[3] = {g_f60Pub.dw[0], g_f60Pub.dw[1], g_f60Pub.dw[2]};
-                dw[0] = g_f62AdsLat.step(ads, dw[0], dt);
-                if (g_f62AdsLat.blending) ++g_f62LatBlendN;
-                nofoot::fitApply(g_f60Head, dw, trimB, g_f60Fit, g_f60FitLat, !vertical, g_f60Out, &g_f62Apply);
-                // F62b (TEMPORARY): in the ADS head-aim the head's target is ignored by the body's weight: the target goes to d_w less the
-                // trims, past F62a's disengage and 12 cm clamp (the head may leave the body while aiming).
-                if (g_adsBodyApplied > 0.0) nofoot::adsFitDetach(g_f60Out, dw, trimB, !vertical, g_adsBodyApplied, g_f60Out);
-                for (size_t i = 0; i < 3; ++i) g_f41TgtB[i] = g_f60Out[i];
-                g_f60Applied = true;
-                g_f62BendWNext = static_cast<float>(std::max(g_f62Apply.wFwd, g_f62Apply.wLat));   // published at the next tick's f60FitStep
-            } else {
-                g_f62AdsLat = nofoot::FitAdsLat{};
-            }
+            // F66c: the body's horizontal is the head's target alone (trims included); the weapon fit that pulled it toward the grips (F60, F62a) is
+            // gone. The reach constraint (f65ReachLimit, below) is the only armed pull, a post-filter on U*.
             for (size_t j = 0; j < 3; ++j) {
                 err[j] = 0.0;
                 for (size_t i = 0; i < 3; ++i) err[j] += g_f41TgtB[i] * static_cast<double>(s.rows[3 * i + j]);
@@ -8151,7 +8177,6 @@ void alignTick(uint64_t now) noexcept {
             vertN = 0;
             vertSum = dropMax = 0.0;
         }
-        f60FitLine(now, mode, f58Full3P, vertical, a.pos, s);   // F60: the weapon fit's 1 s line (full 3P with the arm IK not off)
         if (now - g_f41BodyLogMs >= 1000 || g_f41BodyLogMs == 0) {
             g_f41BodyLogMs = now;
             double dB[3] = {};
@@ -8206,13 +8231,13 @@ void alignTick(uint64_t now) noexcept {
                             kF55KindNames[g_f55RestKind], g_f48Stand.hx, g_f48Stand.hz, static_cast<unsigned>(g_f48Stand.hCaptures), g_f55Off[0],
                             g_f55Off[2], g_f48SrcB[0], g_f48SrcB[2], kF55KindNames[g_f55KindNow], g_f55Raw[0], g_f55Raw[2], g_f55Live[0], g_f55Live[2],
                             g_f41TgtB[0], g_f41TgtB[2], g_f55Loco.speed, f55Moving ? "moving: no capture" : "idle");
-            // F55: per side, body axes after d: the FP clavicles and hands (the hook's span snapshot of joints 19/20 and 37/44 after any drop when
+            // F55: per side, body axes after d: the FP clavicles and hands (the hook's span snapshot of joints 19/20 and 37/44 when
             // fresh, else the census by name; FP model to world through the FP root's yaw, as F45), the 3P clavicles and hands moved by d; the
             // freeze weight; d's up component (zero with vertical off).
             {
-                float sb[4][3] = {}, sa[4][3] = {}, sDrop = 0.0f;
+                float sb[4][3] = {}, sa[4][3] = {};
                 uint64_t sMs = 0;
-                const bool snapFresh = f55SnapRead(sb, sa, &sDrop, &sMs) && sMs != 0 && now >= sMs && now - sMs < 500;
+                const bool snapFresh = f55SnapRead(sb, sa, &sMs) && sMs != 0 && now >= sMs && now - sMs < 500;
                 const double rnY = std::sqrt(static_cast<double>(fp.rows[6]) * fp.rows[6] + static_cast<double>(fp.rows[8]) * fp.rows[8]);
                 const double cyY = rnY > 1e-6 ? fp.rows[8] / rnY : 1.0, syY = rnY > 1e-6 ? fp.rows[6] / rnY : 0.0;
                 const auto fpBody = [&](const float* m, double out[3]) {
@@ -8240,49 +8265,21 @@ void alignTick(uint64_t now) noexcept {
                 Log::get().note("native on foot body (F55): body axes after d (right, up, forward), L: FP clavicle %.3f %.3f %.3f hand %.3f %.3f %.3f, 3P "
                                 "clavicle %.3f %.3f %.3f hand %.3f %.3f %.3f; R: FP clavicle %.3f %.3f %.3f hand %.3f %.3f %.3f, 3P clavicle %.3f %.3f %.3f "
                                 "hand %.3f %.3f %.3f; FP from %s, 3P from %s; freeze weight %.2f; d up applied %.3f m (vertical %s); d (body) %.3f %.3f "
-                                "%.3f m; FP raise %.3f m; shoulder drop %.3f m",
+                                "%.3f m",
                                 fC[0][0], fC[0][1], fC[0][2], fH[0][0], fH[0][1], fH[0][2], tC[0][0], tC[0][1], tC[0][2], tH[0][0], tH[0][1], tH[0][2],
                                 fC[1][0], fC[1][1], fC[1][2], fH[1][0], fH[1][1], fH[1][2], tC[1][0], tC[1][1], tC[1][2], tH[1][0], tH[1][1], tH[1][2],
-                                !fpOk ? "NOTHING (zeros: no fresh FP root or joints)" : snapFresh ? "the Animate span (19/37 L, 20/44 R, after the drop)"
+                                !fpOk ? "NOTHING (zeros: no fresh FP root or joints)" : snapFresh ? "the Animate span (19/37 L, 20/44 R)"
                                                                                                   : "the census by name (L, R)",
                                 tpOk ? "the census by name (L, R) + d" : "NOTHING (zeros)", static_cast<double>(pfzWeightNow()), dB[1],
-                                vertical ? "ON" : "OFF", dB[0], dB[1], dB[2], g_f51Applied, g_f55DropApplied);
-                // F55: the shoulder drop, before and after, world (FP root yaw), joints 19, 20, 37, 44; the hook's counters and failures.
-                const uint64_t calls = g_fdCalls.load(std::memory_order_relaxed), writes = g_fdWrites.load(std::memory_order_relaxed);
-                const uint64_t dCalls = calls - g_f55CallsLast, dWrites = writes - g_f55WritesLast;
+                                vertical ? "ON" : "OFF", dB[0], dB[1], dB[2]);
+                // F55: the hook's refusals on the FP X (the arm IK's FP snapshot), each named once.
+                const uint64_t calls = g_fdCalls.load(std::memory_order_relaxed);
                 g_f55CallsLast = calls;
-                g_f55WritesLast = writes;
                 const uint32_t bits = g_fdFailBits.load(std::memory_order_relaxed) & ~g_f55FailNamed;
                 for (uint32_t i = 0; i < kFdFailKinds; ++i) {
                     if (!(bits & (1u << i))) continue;
                     g_f55FailNamed |= 1u << i;
-                    Log::get().note("native on foot shoulder drop (F55): the hook refused a call: %s (said once)", kFdFailText[i]);
-                }
-                if (snapFresh && fpFresh) {
-                    double wb[4][3] = {}, wa[4][3] = {};
-                    for (size_t k = 0; k < 4; ++k) {
-                        const float* m0 = sb[k];
-                        const float* m1 = sa[k];
-                        wb[k][0] = static_cast<double>(fp.origin[0]) + m0[0] * cyY + m0[2] * syY;
-                        wb[k][1] = static_cast<double>(fp.origin[1]) + m0[1];
-                        wb[k][2] = static_cast<double>(fp.origin[2]) - m0[0] * syY + m0[2] * cyY;
-                        wa[k][0] = static_cast<double>(fp.origin[0]) + m1[0] * cyY + m1[2] * syY;
-                        wa[k][1] = static_cast<double>(fp.origin[1]) + m1[1];
-                        wa[k][2] = static_cast<double>(fp.origin[2]) - m1[0] * syY + m1[2] * cyY;
-                    }
-                    Log::get().note("native on foot shoulder drop (F55): key %.1f cm, weight %.2f, applied %.3f m (hook's last %.3f m); FP X calls %llu, "
-                                    "dropped %llu this second; world before -> after: clavicle 19 (%.3f,%.3f,%.3f) -> (%.3f,%.3f,%.3f), 20 (%.3f,%.3f,%.3f) -> "
-                                    "(%.3f,%.3f,%.3f); hand 37 (%.3f,%.3f,%.3f) -> (%.3f,%.3f,%.3f), 44 (%.3f,%.3f,%.3f) -> (%.3f,%.3f,%.3f)%s",
-                                    g_dropCm.load(std::memory_order_relaxed), g_f55DropBlend.w, g_f55DropApplied, static_cast<double>(sDrop),
-                                    static_cast<unsigned long long>(dCalls), static_cast<unsigned long long>(dWrites), wb[0][0], wb[0][1], wb[0][2],
-                                    wa[0][0], wa[0][1], wa[0][2], wb[1][0], wb[1][1], wb[1][2], wa[1][0], wa[1][1], wa[1][2], wb[2][0], wb[2][1], wb[2][2],
-                                    wa[2][0], wa[2][1], wa[2][2], wb[3][0], wb[3][1], wb[3][2], wa[3][0], wa[3][1], wa[3][2],
-                                    ads ? " (ADS: blending out)" : "");
-                } else if (g_dropCm.load(std::memory_order_relaxed) > 0.0) {
-                    Log::get().note("native on foot shoulder drop (F55): key %.1f cm, weight %.2f, applied %.3f m; no fresh FP snapshot (%s; FP X calls %llu "
-                                    "this second, FP X %016llX)", g_dropCm.load(std::memory_order_relaxed), g_f55DropBlend.w, g_f55DropApplied,
-                                    !fpFresh ? "the FP root is not fresh" : "the hook has not seen the FP X in 500 ms", static_cast<unsigned long long>(dCalls),
-                                    static_cast<unsigned long long>(pfz::g_fdX.load(std::memory_order_relaxed)));
+                    Log::get().note("native on foot FP snapshot (F55): the hook refused a call: %s (said once)", kFdFailText[i]);
                 }
             }
             // F45: the hands and the attach points, world, on both skeletons: FP through the FP root's yaw, 3P through the AMC matrix.
@@ -8327,11 +8324,26 @@ void alignTick(uint64_t now) noexcept {
     double reachCorr[3] = {};
     if (mode == 2) f65ReachLimit(now, dt, f58Full3P, a, s, reachCorr);
     else g_f65Ramp.w = 0.0f;
+    // F66c: the second's window for the body solve line: d before (the filter's) and after (the reach-corrected) in body axes, right and forward.
+    if (mode == 2 && f58Full3P && s.valid) {
+        double dHead[3] = {}, dAfter[3] = {};
+        for (size_t i = 0; i < 3; ++i)
+            for (size_t j = 0; j < 3; ++j) {
+                dHead[i] += a.pos[j] * static_cast<double>(s.rows[3 * i + j]);
+                dAfter[i] += (a.pos[j] + reachCorr[j]) * static_cast<double>(s.rows[3 * i + j]);
+            }
+        ++g_f66c.ticks;
+        g_f66c.dHeadSum[0] += dHead[0];
+        g_f66c.dHeadSum[1] += dHead[2];
+        g_f66c.dAfterSum[0] += dAfter[0];
+        g_f66c.dAfterSum[1] += dAfter[2];
+        g_f66c.corrMax = std::max(g_f66c.corrMax, std::sqrt(reachCorr[0] * reachCorr[0] + reachCorr[1] * reachCorr[1] + reachCorr[2] * reachCorr[2]));
+    }
     double change = 0.0;
     for (size_t i = 0; i < 3; ++i) change = std::max(change, std::fabs(a.pos[i] + reachCorr[i] - a.applied[i]));
     if (change > 1e-6) {
         for (size_t i = 0; i < 3; ++i) a.applied[i] = a.pos[i] + reachCorr[i];
-        if (mode == 2) bodyOffsetPublish(a.applied);   // the view run's value goes out below, with the F51 raise
+        if (mode == 2) bodyOffsetPublish(a.applied);   // the view run's value goes out below, with the eye alignment
     }
     // The other run's published value goes to zero (the view's eye offset when body is on, the body's offset when view is on).
     double otherChange = 0.0;
@@ -8341,43 +8353,6 @@ void alignTick(uint64_t now) noexcept {
         if (mode != 2) bodyOffsetPublish(other.applied);
     }
 
-    // F51: the raise. Body mode with the key on and native stereo on foot: dh through its filter (held on a frame without a measurement); the
-    // applied raise follows it at 5 cm a frame at most. Anywhere else the filter resets and the applied raise returns to zero at the same cap (the
-    // undo of body mode's raise; nothing is raised outside body mode). The view's seated y is minus the applied raise; the FP records move by it
-    // along the body's up row (AMC row 1, world), the axis dh is measured on.
-    // F53: the target is the constant raise (fix.native_on_foot_body_raise_cm); dh still runs through its filter for the 1 s line (logged only).
-    const bool raiseOn = mode == 2 && g_raiseFpKey.load(std::memory_order_relaxed) && nativeOnFootActive();
-    if (mode == 2) g_f51Dh.step(f51Raw, f51Have, dt);
-    else g_f51Dh.reset();
-    g_f51Applied = nofoot::capToward(g_f51Applied, nofoot::raiseConstM(raiseOn, g_raiseCm.load(std::memory_order_relaxed)), align::kCapPerFrameM);
-    if (!raiseOn && std::fabs(g_f51Applied) < 1e-9) g_f51Applied = 0.0;
-    g_f51FpOn.store(raiseOn, std::memory_order_relaxed);
-    // F55: the FP shoulder drop. Body mode, native stereo on foot, the key above zero, not ADS: the weight ramps to 1 over 0.2 s; otherwise
-    // (ADS starting, body mode ending, the key at 0) to 0 over 0.2 s. The applied drop follows at 5 cm a frame at most; the hook reads it.
-    {
-        const double dropCm = g_dropCm.load(std::memory_order_relaxed);
-        const bool dropOn = mode == 2 && dropCm > 0.0 && !ads && nativeOnFootActive();
-        g_f55DropBlend.step(dropOn, dt);
-        g_f55DropApplied = nofoot::capToward(g_f55DropApplied, nofoot::dropM(g_f55DropBlend.w, dropCm), align::kCapPerFrameM);
-        if (std::fabs(g_f55DropApplied) < 1e-9) g_f55DropApplied = 0.0;
-        g_f55DropM.store(static_cast<float>(g_f55DropApplied), std::memory_order_relaxed);
-    }
-    if (s.valid) {
-        const double un = std::sqrt(static_cast<double>(s.rows[3]) * s.rows[3] + static_cast<double>(s.rows[4]) * s.rows[4] +
-                                    static_cast<double>(s.rows[5]) * s.rows[5]);
-        if (un > 1e-6)
-            for (size_t i = 0; i < 3; ++i) g_f51Up[i] = static_cast<double>(s.rows[3 + i]) / un;
-    }
-    {
-        double fpD[3] = {};
-        for (size_t i = 0; i < 3; ++i) fpD[i] = raiseOn ? g_f51Applied * g_f51Up[i] : 0.0;
-        double fpChange = 0.0;
-        for (size_t i = 0; i < 3; ++i) fpChange = std::max(fpChange, std::fabs(fpD[i] - g_f51FpPub[i]));
-        if (fpChange > 1e-6) {
-            for (size_t i = 0; i < 3; ++i) g_f51FpPub[i] = fpD[i];
-            fpRaisePublish(fpD);
-        }
-    }
     adsSightTick(now, dt, sIn);   // F63: the ADS sight lock (the right eye onto the sight line; zero outside ADS)
     // F64: the eye height: full-3P body mode with native stereo on foot only; ramped in over 0.3 s, times (1 - the ADS head-aim weight) so it
     // fades as ADS engages (the sight lock owns ADS); zero at once outside full 3P (nothing changes there).
@@ -8389,21 +8364,19 @@ void alignTick(uint64_t now) noexcept {
         g_f64Ramp.w = 0.0f;
         g_f64EyeM = 0.0;
     }
-    // The eye align: the view run (g_align: the active run in view and calibrate, decaying to zero in body) plus the raise's seated term (zero
-    // outside body mode once the raise has returned). One serial, g_align's, as before.
+    // The eye align: the view run (g_align: the active run in view and calibrate, decaying to zero in body) plus the ADS locks and the eye height's
+    // seated term. One serial, g_align's, as before.
     double eyeHS[3] = {};
     {
-        double raiseS[3] = {};
-        nofoot::raiseSeated(g_f51Applied, raiseS);
         nofoot::raiseSeated(g_f64EyeM, eyeHS);   // F64: the eye height (seated y = -h raises the camera by h)
         double eye[3] = {}, eyeChange = 0.0;
         for (size_t i = 0; i < 3; ++i) {
             // F62b: the ADS head-aim's position lock; F63: the ADS sight lock (both zero outside ADS); F64: the eye height (zero outside full 3P)
-            eye[i] = g_align.applied[i] + raiseS[i] + g_adsLock[i] + g_adsSight.applied[i] + eyeHS[i];
-            eyeChange = std::max(eyeChange, std::fabs(eye[i] - g_f51EyePub[i]));
+            eye[i] = g_align.applied[i] + g_adsLock[i] + g_adsSight.applied[i] + eyeHS[i];
+            eyeChange = std::max(eyeChange, std::fabs(eye[i] - g_eyeAlignPub[i]));
         }
         if (eyeChange > 1e-6) {
-            for (size_t i = 0; i < 3; ++i) g_f51EyePub[i] = eye[i];
+            for (size_t i = 0; i < 3; ++i) g_eyeAlignPub[i] = eye[i];
             const float f[3] = {static_cast<float>(eye[0]), static_cast<float>(eye[1]), static_cast<float>(eye[2])};
             nativeFrameSetEyeAlign(f, ++g_align.serial);
         }
@@ -8443,10 +8416,6 @@ void alignTick(uint64_t now) noexcept {
             g_f64N = g_f64UpN = 0;
             g_f64RaiseSum = g_f64UpSum = g_f64UpRaiseSum = 0.0;
         }
-    }
-    if (mode == 2 && (now - g_f51LogMs >= 1000 || g_f51LogMs == 0)) {
-        g_f51LogMs = now;
-        f51Line(s, fp, fpFresh, raiseOn);
     }
 
     // The once-a-second line while the offset is live.
@@ -8521,8 +8490,7 @@ void installBodyShiftOnce() {
 // The viewmodel byte is obj+0x1C8. MEASURE (always on in VR, read only; lines once a second while native stereo is on foot): a post-hook on
 // the job tables each MGMC with a non-zero mask (pointer, the byte, the mask, the record position, its distance to the FP and 3P handAttach
 // joints); a pre-hook on 0x4C837B0 tallies its callers by return address (the AMC's excluded) with the record nearest an FP handAttach joint.
-// SHIFT (fix.native_on_foot_body_raise_fp on, body mode, exactly when the FP arms rise): an MGMC that is the local FP weapon (mask non-zero,
-// the byte set, the record within 0.3 m of FP handAttach 51 or 52 before the shift) moves by the FP raise (both copies) after the job returns.
+// (F66: the shift of the local FP weapon with the FP raise, fix.native_on_foot_body_raise_fp, is gone: the hooks only measure.)
 // Inside both hooks: no allocation, logging or locks (one try-flag that skips, never waits); every read and write under SEH. The frame thread
 // publishes the joints (seqlock) and drains the counters and tables once a second.
 namespace f54 {
@@ -8588,14 +8556,14 @@ constexpr uint32_t kSlots = 128, kProbe = 16;
 struct MgmcSlot {
     std::atomic<uint64_t> tag{0};
     std::atomic<uint32_t> seq{0};
-    std::atomic<uint32_t> calls{0}, shifted{0};
+    std::atomic<uint32_t> calls{0};
     uint8_t flag = 0;
     uint64_t mask = 0;
     float pos[3] = {};   // the record position before any shift
 };
 MgmcSlot g_slots[kSlots];
 std::atomic<uint32_t> g_gen{1};
-std::atomic<uint64_t> g_mgmcCalls{0}, g_mgmcMask0{0}, g_mgmcUnread{0}, g_mgmcFull{0}, g_mgmcShifted{0}, g_mgmcMatched{0};
+std::atomic<uint64_t> g_mgmcCalls{0}, g_mgmcMask0{0}, g_mgmcUnread{0}, g_mgmcFull{0}, g_mgmcMatched{0};
 MgmcSlot* slotFor(uint64_t obj, uint32_t gen) noexcept {
     const uint64_t want = (static_cast<uint64_t>(gen & 0xFFFFu) << 48) | (obj & 0x0000FFFFFFFFFFFFull);
     const uint32_t h = static_cast<uint32_t>(((obj >> 4) * 0x9E3779B97F4A7C15ull) >> 57);
@@ -8606,7 +8574,6 @@ MgmcSlot* slotFor(uint64_t obj, uint32_t gen) noexcept {
         if ((t >> 48) == (want >> 48)) continue;   // this second's slot of another object
         if (s.tag.compare_exchange_strong(t, want, std::memory_order_acq_rel)) {
             s.calls.store(0, std::memory_order_relaxed);
-            s.shifted.store(0, std::memory_order_relaxed);
             return &s;
         }
         if (t == want) return &s;   // another thread claimed it for this object
@@ -8622,37 +8589,20 @@ void mgmcAfterSubmit(uint64_t obj) noexcept {
         g_mgmcUnread.fetch_add(1, std::memory_order_relaxed);
         return;
     }
-    if (!mask) {   // the job skipped it: never tabled, never shifted
+    if (!mask) {   // the job skipped it: never tabled
         g_mgmcMask0.fetch_add(1, std::memory_order_relaxed);
         return;
     }
     const bool live = g_live.load(std::memory_order_relaxed);
-    const bool shiftOn = g_f51FpOn.load(std::memory_order_relaxed);
-    if (!live && !shiftOn) return;
+    if (!live) return;   // F66: read only; the shift of the weapon with the FP raise is gone
     uint8_t flag = 0;
     float pos[3] = {};
     if (!guardedRead(obj + kOffViewFlag, &flag, 1) || !guardedRead(obj + kOffPos, pos, sizeof(pos))) {
         g_mgmcUnread.fetch_add(1, std::memory_order_relaxed);
         return;
     }
-    bool shifted = false;
     Joints j;
-    if (shiftOn && jointsRead(j) && nofoot::weaponIsLocalFp(mask, flag, pos, j.fp, j.fpOk)) {
-        g_mgmcMatched.fetch_add(1, std::memory_order_relaxed);
-        float d[3] = {}, copy[3] = {};
-        if (fpRaiseRead(d) && !(d[0] == 0.0f && d[1] == 0.0f && d[2] == 0.0f) && guardedRead(obj + kOffPosCopy, copy, sizeof(copy))) {
-            float np[3] = {pos[0], pos[1], pos[2]};
-            nofoot::weaponShift(np, copy, d);
-            bool ok = true;
-            for (uintptr_t i = 0; i < 3; ++i) {
-                ok = guardedWriteFloat(obj + kOffPos + 4u * i, np[i]) && ok;
-                ok = guardedWriteFloat(obj + kOffPosCopy + 4u * i, copy[i]) && ok;
-            }
-            shifted = ok;
-        }
-    }
-    if (shifted) g_mgmcShifted.fetch_add(1, std::memory_order_relaxed);
-    if (!live) return;
+    if (jointsRead(j) && nofoot::weaponIsLocalFp(mask, flag, pos, j.fp, j.fpOk)) g_mgmcMatched.fetch_add(1, std::memory_order_relaxed);
     MgmcSlot* s = slotFor(obj, g_gen.load(std::memory_order_relaxed));
     if (!s) {
         g_mgmcFull.fetch_add(1, std::memory_order_relaxed);
@@ -8664,7 +8614,6 @@ void mgmcAfterSubmit(uint64_t obj) noexcept {
     std::memcpy(s->pos, pos, sizeof(pos));
     s->seq.fetch_add(1, std::memory_order_release);
     s->calls.fetch_add(1, std::memory_order_relaxed);
-    if (shifted) s->shifted.fetch_add(1, std::memory_order_relaxed);
 }
 
 // The 0x4C837B0 callers, by return address (image RVA; 0xFFFFFFFF outside the image). The nearest record's details are written under a try-flag.
@@ -8780,11 +8729,10 @@ void installOnce() noexcept {
     if (installF9ProbeInto(g_mgmcHook, mspec, base, &stolen, &why)) {
         g_armedMgmc = true;
         Log::get().note("native on foot weapon (F54): MGMC submit post-hook installed at EliteDangerous64.exe+0x43ED820, stolen=%zu bytes, prologue %zu "
-                        "bytes verified (measures every MGMC with a non-zero mask; shifts the local FP weapon only with "
-                        "fix.native_on_foot_body_raise_fp on, in body mode)", stolen, sizeof(kMgmcPrologue));
+                        "bytes verified (measures every MGMC with a non-zero mask; read only)", stolen, sizeof(kMgmcPrologue));
     } else {
         Log::get().note("native on foot weapon (F54): MGMC submit post-hook NOT installed at EliteDangerous64.exe+0x43ED820 -- %s. The weapon is "
-                        "neither measured nor shifted; the game was not touched.", why.c_str());
+                        "not measured; the game was not touched.", why.c_str());
     }
     why.clear();
     stolen = 0;
@@ -8804,7 +8752,7 @@ struct MgmcRow {
     uint64_t obj = 0, mask = 0;
     uint8_t flag = 0;
     float pos[3] = {};
-    uint32_t calls = 0, shifted = 0;
+    uint32_t calls = 0;
     float key = 0.0f;   // the nearest joint distance (sort key)
 };
 uint64_t g_lineMs = 0;   // frame thread only
@@ -8929,7 +8877,7 @@ void tick(uint64_t now) noexcept {
     g_gen.store(nextGen, std::memory_order_relaxed);
     const uint64_t calls = g_mgmcCalls.exchange(0, std::memory_order_relaxed), mask0 = g_mgmcMask0.exchange(0, std::memory_order_relaxed),
                    unread = g_mgmcUnread.exchange(0, std::memory_order_relaxed), full = g_mgmcFull.exchange(0, std::memory_order_relaxed),
-                   shifted = g_mgmcShifted.exchange(0, std::memory_order_relaxed), matched = g_mgmcMatched.exchange(0, std::memory_order_relaxed);
+                   matched = g_mgmcMatched.exchange(0, std::memory_order_relaxed);
     const uint64_t recCalls = g_recCalls.exchange(0, std::memory_order_relaxed), amcCalls = g_amcCalls.exchange(0, std::memory_order_relaxed),
                    callerFull = g_callerFull.exchange(0, std::memory_order_relaxed);
     MgmcRow rows[kSlots];
@@ -8946,7 +8894,6 @@ void tick(uint64_t now) noexcept {
         r.mask = sl.mask;
         std::memcpy(r.pos, sl.pos, sizeof(r.pos));
         r.calls = sl.calls.load(std::memory_order_relaxed);
-        r.shifted = sl.shifted.load(std::memory_order_relaxed);
         std::atomic_thread_fence(std::memory_order_acquire);
         if (sl.seq.load(std::memory_order_relaxed) != q1 || sl.tag.load(std::memory_order_relaxed) != t1) continue;
         float key = 1e30f;
@@ -8986,14 +8933,11 @@ void tick(uint64_t now) noexcept {
         if (cr.calls) crow[nCallers++] = cr;
     }
     if (!live) return;
-    float d[3] = {};
-    const bool dOk = fpRaiseRead(d);
     Log::get().note("native on foot weapon (F54): MGMC submits %llu this second (%llu mask 0, %llu unreadable), %u tabled with mask != 0 (%llu "
-                    "calls lost: table full); local FP weapon: %llu calls matched, %llu shifted (raise %s, d (%.3f, %.3f, %.3f) m); handAttach (world) "
+                    "calls lost: table full); local FP weapon: %llu calls matched (read only; F66: nothing is shifted); handAttach (world) "
                     "FP R51 (%.3f, %.3f, %.3f) L52 (%.3f, %.3f, %.3f) %s; 3P R66 (%.3f, %.3f, %.3f) L67 (%.3f, %.3f, %.3f) %s",
                     static_cast<unsigned long long>(calls), static_cast<unsigned long long>(mask0), static_cast<unsigned long long>(unread), nRows,
-                    static_cast<unsigned long long>(full), static_cast<unsigned long long>(matched), static_cast<unsigned long long>(shifted),
-                    g_f51FpOn.load(std::memory_order_relaxed) ? "on" : "off", dOk ? d[0] : 0.0f, dOk ? d[1] : 0.0f, dOk ? d[2] : 0.0f,
+                    static_cast<unsigned long long>(full), static_cast<unsigned long long>(matched),
                     j.fp[1][0], j.fp[1][1], j.fp[1][2], j.fp[0][0], j.fp[0][1], j.fp[0][2], j.fpOk ? "fresh" : "not known",
                     j.tp[1][0], j.tp[1][1], j.tp[1][2], j.tp[0][0], j.tp[0][1], j.tp[0][2], j.tpOk ? "fresh" : "not known");
     std::sort(rows, rows + nRows, [](const MgmcRow& x, const MgmcRow& y) { return x.key < y.key; });
@@ -9003,10 +8947,10 @@ void tick(uint64_t now) noexcept {
         const MgmcRow& r = rows[i];
         const auto dj = [&](const float jp[3], bool ok) { return ok ? static_cast<double>(nofoot::dist3f(r.pos, jp)) : -1.0; };
         Log::get().note("native on foot weapon (F54): MGMC %016llX byte+0x1C8 0x%02X mask %016llX pos (%.3f, %.3f, %.3f); distance FP R51 %.3f L52 "
-                        "%.3f, 3P R66 %.3f L67 %.3f m (-1 not known); %u calls, %u shifted%s",
+                        "%.3f, 3P R66 %.3f L67 %.3f m (-1 not known); %u calls%s",
                         static_cast<unsigned long long>(r.obj), static_cast<unsigned>(r.flag), static_cast<unsigned long long>(r.mask),
                         static_cast<double>(r.pos[0]), static_cast<double>(r.pos[1]), static_cast<double>(r.pos[2]), dj(j.fp[1], j.fpOk),
-                        dj(j.fp[0], j.fpOk), dj(j.tp[1], j.tpOk), dj(j.tp[0], j.tpOk), r.calls, r.shifted,
+                        dj(j.fp[0], j.fpOk), dj(j.tp[1], j.tpOk), dj(j.tp[0], j.tpOk), r.calls,
                         r.flag && j.fpOk && r.key <= nofoot::kWeaponMatchM ? " <- within 0.3 m of a hand joint with the byte set" : "");
     }
     if (nRows > kRowLines)
@@ -9249,7 +9193,6 @@ bool pfzFreezeStep(uint64_t x, const PfzSpan& sp) noexcept {
 // solve at the per-arm weight (the base weight times the distance gate). Every matrix is computed before the first write; the applied hand
 // offset moves at most 5 cm a call. No allocation, logging or locks (the scratch is under g_pfzBusy); every read and write under SEH.
 std::atomic<float> g_ikWeight{0.0f};        // the frame thread's base weight (0 unless the key is nudge or on and the gate holds)
-std::atomic<bool> g_ikArmed{false};         // F65a: a weapon is held (the frame thread's g_f60Weapon: the grips fresh, the grip gate raised)
 std::atomic<bool> g_ikWriteDown{false};     // a failed write stands the IK's writes down for the session
 std::atomic<uint32_t> g_ikFailBits{0};      // refusals the hook met; the frame thread names each once
 enum IkRefusal : uint32_t {
@@ -9343,15 +9286,63 @@ struct BendStats {
     double solvedPitchSum = 0.0, solvedRollSum = 0.0;                    // the solve before the clamps, degrees
     double wSum = 0.0;                                                   // the weight times the amount
     double leanSum = 0.0, adsWSum = 0.0;                                 // F59: the ADS lean added to the pitch (deg) and the ADS weight
-    // F62a: calls at the fit's limits (forward and back 8, roll 6 deg: the weapon fit engaged) and the clamp hits among them; calls suspended
-    // (|T - N| before the bend above 0.35 m: the want is 0, the applied angles return at their cap).
-    uint64_t fitLimited = 0, suspended = 0;
-    uint32_t fitClampFwd = 0, fitClampBack = 0, fitClampRoll = 0;
+    // F66c: calls whose continuous weight (1 - smoothstep(0.30, 0.45, |T - N0|)) was below 1; the weight's sum; the applied angles' per-call change
+    // (degrees): the largest |delta| and the calls whose change flipped sign from the call before (the judder count: F65 alternated every call).
+    uint64_t weightedDown = 0;
+    double bendWeightSum = 0.0, dRollMax = 0.0, dPitchMax = 0.0, armedRampSum = 0.0;
+    uint32_t flipRoll = 0, flipPitch = 0, flipEither = 0;
     double pitchAbsSum = 0.0, rollAbsSum = 0.0;   // F65c: |pitch| and |roll| applied, degrees (the success test: mean |roll| under 3 deg)
 };
 std::atomic<uint32_t> g_bendStatSeq{0};
 BendStats g_bendStats;
+// F66c (the hook's own, under g_pfzBusy): the previous call's applied angles and the sign-flip counters.
+nofoot::AltCount g_bendAltRoll, g_bendAltPitch;
 std::atomic<bool> g_bendStatReset{false};
+
+// F66d (hook state under g_pfzBusy): the forearm joint's hinge row, learned per side. The row of F's matrix most parallel to the animated hinge
+// (the joints' cross) on bent samples is counted; once 30 samples agree it becomes the hinge for a nearly straight arm and for a cross that
+// disagrees with it by more than 10 deg. last: the previous call's solved hinge n1 (the straight-arm fallback inside 200 ms).
+struct HingeLearn {
+    uint32_t hits[3] = {}, samples = 0;
+    double angSum[3] = {}, signSum[3] = {};
+    int row = -1;
+    double rowSign = 0.0;
+    double last[3] = {};
+    bool lastValid = false;
+    uint64_t lastMs = 0;
+};
+HingeLearn g_hingeLearn[2];
+// F66d: the second's figures per arm (the hook writes under the sequence counter, the frame thread reads and asks for a reset once a second).
+struct HingeSide {
+    uint32_t n = 0, src[4] = {}, twistN = 0, twistLimited = 0;
+    double oldErrSum = 0.0, oldErrMax = 0.0, planeSum = 0.0, planeMax = 0.0, flexAnimSum = 0.0, flexSolvedSum = 0.0, twistRawAbsSum = 0.0, twistAppliedAbsSum = 0.0;
+    uint32_t rowHits[3] = {}, rowSamples = 0;
+    double rowAngSum[3] = {};
+    int row = -1;
+};
+struct HingeStats {
+    uint64_t calls = 0;
+    HingeSide side[2];
+};
+std::atomic<uint32_t> g_hingeSeq{0};
+HingeStats g_hingeStats;
+std::atomic<bool> g_hingeReset{false};
+
+// F66g, the parity split (the overseer's second candidate for the F65 judder: a two-slot pose source, where our writes reach the drawn pose only on
+// alternate frames). The hook counts its own outputs by game-frame parity (the local P1 frame index's low bit): calls, the distinct span buffers it
+// wrote, and per output (the bend's applied pitch and roll in degrees, d right and forward in metres as G carried it, the neck 34 position it
+// writes in metres) the mean per parity and the sign-flip count of its successive changes. If our outputs are steady and equal across the parities
+// while the drawn body still flips, the source is double-buffered; if they alternate, the loop is ours (F66c's judder count decides the rest).
+struct F66gPar {
+    uint64_t calls = 0;
+    uint32_t callsPar[2] = {}, nBufs[2] = {}, bufOver[2] = {};
+    uint64_t bufs[2][4] = {};
+    nofoot::ParityMean pitch, roll, dR, dF, nx, ny, nz;
+    nofoot::AltCount altPitch, altRoll, altR, altF, altNx, altNy, altNz;
+};
+std::atomic<uint32_t> g_f66gSeq{0};
+F66gPar g_f66gPar;
+std::atomic<bool> g_f66gReset{false};
 
 bool ikMatrixSane(const float m[16]) noexcept {
     for (int i = 0; i < 16; ++i)
@@ -9424,7 +9415,8 @@ bool standStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t
     const double armedW = static_cast<double>(g_standArmedW.load(std::memory_order_relaxed));
     const bool armed = g_standArmedFlag.load(std::memory_order_relaxed), idle = g_standIdle.load(std::memory_order_relaxed);
     const double y15 = static_cast<double>(g_pfzAnim[nofoot::kStandPov][13]), y7 = static_cast<double>(g_pfzAnim[nofoot::kStandHips][13]);
-    const double dt = g_standLpMs && now > g_standLpMs ? std::min(0.1, static_cast<double>(now - g_standLpMs) / 1000.0) : 0.0;
+    static QpcDt standClock;   // F66b (the hook thread: one writer under g_pfzBusy)
+    const double dt = standClock.step(0.1);
     g_standLpMs = now;
     if (!g_standLpHave || !std::isfinite(g_standLp)) {
         g_standLp = y15;
@@ -9688,6 +9680,10 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             armsOk = false;
         }
     }
+    {   // F66g: the Animate event: the d the G it read carried (zero when there was none), and the span buffer this call writes
+        const float zero3[3] = {};
+        f66gPost('A', armsOk ? G.d : zero3, sp.buf);
+    }
     const float wBase = g_ikWeight.load(std::memory_order_relaxed);
     const bool writeOk = armsOk && (mode == 2 || mode == 3) && wBase > 0.0f && !g_ikWriteDown.load(std::memory_order_relaxed);
     struct SideOut {
@@ -9700,11 +9696,16 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         double tA[3] = {}, armLen = 0.0;
         // F65a: the shoulder (U, after the square-up, before the assist) minus T_A (model = body axes), the drawn attach against T_A (cm: the
         // solved attach when written, else the animated one; -1 unmeasured), whether it was written, the weight's gate (1 when armed).
-        double reachV[3] = {}, gripErr = -1.0, gateW = 0.0;
+        double reachV[3] = {}, gripErr = -1.0, gateW = 0.0, shoulderGap = 0.0;   // F66c: shoulderGap: |S - U*| in cm
+        // F66d: this solve's hinge figures: where n0 came from (HingeSwings::source), the old two-swing method's hinge error and the plane change
+        // (deg; computed, not applied), the flexion before and after (deg), the hand's twist raw and as applied to the helpers (folded to +-90).
+        bool hOk = false, hTwistLimited = false;
+        int hSource = 0;
+        double hOldErr = 0.0, hPlane = 0.0, hFlexAnim = 0.0, hFlexSolved = 0.0, hTwistRaw = 0.0, hTwistApplied = 0.0;
         bool gripWritten = false;
         uint32_t uJ = 0xFFFFu;
     } so[2];
-    const bool armedNow = g_ikArmed.load(std::memory_order_relaxed);   // F65a
+    const float armedW = g_armedW.load(std::memory_order_relaxed);   // F66a: the game's armed flag, ramped over 0.3 s (the frame thread)
     uint32_t nList = 0;
     const uint32_t count = sp.count;
     if (count == 0 || count > nofoot::kPfzMaxJoints) return ikRefuse(kIkRefPlan);
@@ -9778,6 +9779,22 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             g_ikMark[j] |= 2u;
         }
     }
+    // F66c stage 1 (before the bend): the upper-arm joints U (L, R) as stage 0 left them, and the square-up's angle from them and the FP forward
+    // (G's z row on xz): both exogenous (the game's animation, the stand's raise, the FP rig). The bend then moves the shoulders, the square-up
+    // turns them; the reach constraint reads U*, these points turned by the square-up's rotation, and never the bent shoulders.
+    const bool uaPlan = pl.ok[0] && pl.ok[1] && pl.side[0].U < count && pl.side[1].U < count;
+    bool uPreOk = false, sqPre = false;
+    double uPre[2][3] = {}, sqPivotPre[3] = {}, sqPhi0 = 0.0;
+    if (armsOk && uaPlan && nofoot::kIkSquarePivot < count) {
+        ikPos(g_ikM0[pl.side[0].U], uPre[0]);
+        ikPos(g_ikM0[pl.side[1].U], uPre[1]);
+        ikPos(g_ikM0[nofoot::kIkSquarePivot], sqPivotPre);
+        uPreOk = true;
+        if (pl.sqOk && mode != 2 && nofoot::kIkClavR < count) {
+            const double fwdPre[3] = {G.g[8], G.g[9], G.g[10]};
+            sqPre = nofoot::ikSquareToForward(uPre[0], uPre[1], fwdPre, &sqPhi0);
+        }
+    }
     // F58 stage 1b: the spine bend toward the head (full-3P body mode, the bend key on), after the freeze and before the square-up and the arm
     // solve. The pov joint N and the spine root P (joint 16) from M0; the target T (the job camera less d, the 3P model space) from the frame
     // thread. The pitch and roll that turn N toward T about P (nofoot::bendSolve), clamped (forward 45, back 15, roll 20 deg), times the frame
@@ -9785,9 +9802,11 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
     // on M0, so the square-up and the arm solve run on the bent pose. Written with the spine list below.
     // F59: N is the neck joint (34, under the chest 24) and T its target (the eye target less the neck's rest offset); the frame thread
     // publishes both. In ADS a forward lean (the slider, times the ADS weight) is added to the solved pitch before the clamps.
-    // F62a: while the weapon fit is engaged (the frame thread's g_fitBendW above 0) the limits are forward and back 8, roll 6 deg; with |T - N|
-    // before the bend above 0.35 m the bend is suspended: its want is 0 and the applied angles return at their 5 cm cap (no snap).
-    bool bendHave = false, bendWrite = false, bendFitLim = false, bendSusp = false;
+    // F66c: the limits are interpolated by the armed ramp (unarmed forward 45, back 15, roll 20 deg; armed 8, 8, 6), never switched by anything the
+    // bend moves; the want is scaled by the continuous weight 1 - smoothstep(0.30, 0.45, |T - N0|), N0 the neck before the bend (there is no
+    // suspension). The bend then moves the shoulders; nothing reads them back (the reach constraint reads U*, below).
+    bool bendHave = false, bendWrite = false;
+    double bendResW = 1.0;
     nofoot::BendClamp bendCl;
     double bendRes0[3] = {}, bendRes1[3] = {}, bendSolved[2] = {}, bendW = 0.0, bendLean = 0.0;
     uint32_t bendLevel = 0xFFu, bendPov = 0xFFFFu;
@@ -9819,14 +9838,13 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
                 bendLean = adsW * static_cast<double>(g_ikAdsLeanRad.load(std::memory_order_relaxed));
                 pitch += bendLean;
                 double limFwd = 0.0, limBack = 0.0, limRoll = 0.0;
-                bendFitLim = g_fitBendW.load(std::memory_order_relaxed) > 0.0f;
-                nofoot::bendLimits(bendFitLim, &limFwd, &limBack, &limRoll);
+                nofoot::bendLimitsArmed(static_cast<double>(armedW), &limFwd, &limBack, &limRoll);
                 pitch = nofoot::bendClampPitchLim(pitch, limFwd, limBack, &bendCl);
                 roll = nofoot::bendClampRollLim(roll, limRoll, &bendCl);
-                bendSusp = nofoot::bendSuspend(T, N);
+                bendResW = nofoot::bendResidualWeight(T, N);
                 bendW = static_cast<double>(g_bendWeight.load(std::memory_order_relaxed)) *
                         static_cast<double>(g_bendAmount.load(std::memory_order_relaxed));
-                const double want[2] = {bendSusp ? 0.0 : pitch * bendW, bendSusp ? 0.0 : roll * bendW};
+                const double want[2] = {pitch * bendW * bendResW, roll * bendW * bendResW};
                 if (now - g_bendAppliedMs > 200) g_bendApplied[0] = g_bendApplied[1] = 0.0;
                 const double v[3] = {N[0] - P[0], N[1] - P[1], N[2] - P[2]};
                 nofoot::bendCapToward(g_bendApplied, want, nofoot::ikLen(v));
@@ -9860,7 +9878,6 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
     // turned square to the forward (nofoot::ikSquareToForward). The F57 clavicle reference's theta is still computed for the log only.
     bool sqHave = false, sqClamped = false, sqOldHave = false, uaHave = false;
     double sqTheta = 0.0, sqApplied = 0.0, sqOld = 0.0, sqAfter = 0.0, uaX[2] = {}, uaSpacing = 0.0;
-    const bool uaPlan = pl.ok[0] && pl.ok[1] && pl.side[0].U < count && pl.side[1].U < count;
     if (armsOk && pl.sqOk && mode != 2 && uaPlan && nofoot::kIkClavR < count && nofoot::kIkSquarePivot < count) {
         {
             const float* mL = g_ikM0[nofoot::kIkClavL];
@@ -9875,11 +9892,11 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
                 sqOldHave = true;
             }
         }
-        double uL[3], uR[3], phi = 0.0;
-        ikPos(g_ikM0[pl.side[0].U], uL);
-        ikPos(g_ikM0[pl.side[1].U], uR);
+        // F66c: the angle is the stage-0 pose's (sqPre, above), not the bent pose's; the application below is still after the bend.
+        double uL[3], uR[3];
+        const double phi = sqPhi0;
         const double fwd[3] = {G.g[8], G.g[9], G.g[10]};
-        if (nofoot::ikSquareToForward(uL, uR, fwd, &phi)) {
+        if (sqPre) {
             sqTheta = -phi;                                     // theta = yaw(U line) - 90 deg relative to the FP forward
             const double target = nofoot::ikSquareClampRad(phi, &sqClamped);
             const double sqW = (mode == 3 && writeOk) ? wSqRamp : 1.0;
@@ -9910,18 +9927,18 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         uaSpacing = nofoot::ikLen(sp) * 100.0;
         uaHave = true;
     }
-    // F60: the upper-arm midpoint (U left and right) after the bend and the square-up, before the clavicle assist: the point the weapon fit
-    // places at Sd.
-    bool fitUmidOk = false;
-    double fitUmid[3] = {};
-    if (armsOk && mode != 2 && uaPlan) {
-        double a[3], b[3];
-        ikPos(g_ikM0[pl.side[0].U], a);
-        ikPos(g_ikM0[pl.side[1].U], b);
-        for (int i = 0; i < 3; ++i) fitUmid[i] = 0.5 * (a[i] + b[i]);
-        fitUmidOk = true;
-    }
     const bool sqWrite = mode == 3 && writeOk && sqHave && sqApplied != 0.0;
+    // F66c: U*: the stage-0 upper-arm joints turned about the vertical through the stage-0 joint 34 by the square-up's rotation as it is written
+    // (the arm joints sit under the chest 24: the full share; no rotation when the square-up is not written this call).
+    double uStar[2][3] = {};
+    if (uPreOk) {
+        double share = 0.0;
+        for (int side = 0; side < 2; ++side) {
+            for (uint32_t k = 0; k < pl.sq.n; ++k)
+                if (pl.sq.j[k] == pl.side[side].U) share = nofoot::kIkSpineWeight[pl.sq.level[k] < 3 ? pl.sq.level[k] : 2];
+            nofoot::turnAboutVertical(uPre[side], sqPivotPre, sqWrite ? sqApplied * share : 0.0, uStar[side]);
+        }
+    }
     for (int side = 0; side < 2 && armsOk; ++side) {   // F58: no arms without the FP snapshot and G (the bend alone runs)
         if (!pl.ok[side]) {
             ikRefuse(kIkRefSide);
@@ -9973,9 +9990,9 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         const double dH[3] = {pT[0] - H0[0], pT[1] - H0[1], pT[2] - H0[2]};
         // F59: the gate relaxes from 0.35..0.8 m to 0.6..1.2 m with the ADS weight.
         const float gate = nofoot::ikDistanceGateAds(static_cast<float>(nofoot::ikLen(dH)), static_cast<float>(adsW));
-        // F65a: while a weapon is held (the grip gate raised; T_A sane above) the hand solves onto its grip at 1; unarmed, the distance gate.
-        // o.gate stays the distance gate: the fit's raised factor reads it (a 1 there would hold "armed" up by itself).
-        const float gateW = nofoot::ikArmGate(armedNow, gate);
+        // F66a: the game says a weapon or tool is in hand: the hand solves onto its grip at the armed ramp's weight (1 armed, 0 unarmed: the game's
+        // arms, whatever the distance gate says). o.gate stays the distance gate, a logged measure.
+        const float gateW = nofoot::ikArmWeight(armedW);
         // The weight this side solves at: on and writing, the per-arm weight; otherwise 1 (probe: the full solve, for the statistics only).
         const double wArm = static_cast<double>(wBase) * gateW;
         const bool doSolveWrite = mode == 3 && writeOk && wArm > 0.0;
@@ -9986,7 +10003,12 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         o.fitOk = true;   // F60: the grip and the arm's length, before the assist (a rigid turn keeps l1 and l2)
         for (int i = 0; i < 3; ++i) o.tA[i] = tA[i];
         o.armLen = l1 + l2;
-        for (int i = 0; i < 3; ++i) o.reachV[i] = S[i] - tA[i];   // F65a: the shoulder after the square-up, before the assist
+        // F66c: the reach constraint's shoulder is U* (the unbent pose turned by the square-up), not S (bent, squared, before the assist).
+        for (int i = 0; i < 3; ++i) o.reachV[i] = (uPreOk ? uStar[side][i] : S[i]) - tA[i];
+        if (uPreOk) {
+            const double gap[3] = {S[0] - uStar[side][0], S[1] - uStar[side][1], S[2] - uStar[side][2]};
+            o.shoulderGap = nofoot::ikLen(gap) * 100.0;
+        }
         o.gripErr = o.dist;   // F65a: the animated attach against T_A until a written solve replaces it below
         const double wSolve = doSolveWrite ? wArm : 1.0;
         // The hand target: the offset from the animated hand, capped at 5 cm a call while writing (from zero after 200 ms without a write).
@@ -10093,30 +10115,73 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         tb.elbowAt(theta, E);
         o.elbowDeg = nofoot::ikElbowInteriorDeg(l1, l2, tb.D);
         o.limited = tb.limited;
-        // Swing 1: U's subtree about S, from the animated elbow's direction to the solved one.
-        double R1[9], R2[9], ue[3];
+        // F66d: the swings keep the elbow's hinge. Swing 1 turns U's subtree about S by the rotation taking the animated frame (u0, n0, u0 x n0) to the
+        // solved one (u1, n1, u1 x n1), n the unit flexion normal (the cross of the upper arm and the forearm); swing 2 turns F's subtree about E by
+        // the flexion difference about n1 alone (nofoot::ikHingeSwings). The animated hinge is the joints' own cross; a nearly straight animated
+        // arm uses the forearm joint's hinge row once it has been learned (below), else the last solved hinge, else the shortest arc. The old two
+        // shortest-arc swings' hinge error is computed (hs.oldHingeErrDeg), not applied.
+        double ue[3], eT[3];
         const double se[3] = {E[0] - S[0], E[1] - S[1], E[2] - S[2]};
-        if (!nofoot::ikUnit(se, ue)) {
+        const double ht[3] = {tb.hand[0] - E[0], tb.hand[1] - E[1], tb.hand[2] - E[2]};
+        if (!nofoot::ikUnit(se, ue) || !nofoot::ikUnit(ht, eT)) {
             ikRefuse(kIkRefSingular);
             continue;
         }
-        nofoot::ikRotFromTo(elbowDir, ue, R1);
+        HingeLearn& hl = g_hingeLearn[side];
+        double rowN0[3] = {};
+        const bool haveRow = hl.row >= 0 && hl.rowSign != 0.0;
+        if (haveRow) {
+            for (int i = 0; i < 3; ++i) rowN0[i] = hl.rowSign * static_cast<double>(g_ikM0[F][4 * hl.row + i]);
+            double un[3];
+            if (nofoot::ikUnit(rowN0, un))
+                for (int i = 0; i < 3; ++i) rowN0[i] = un[i];
+        }
+        double n0geo[3] = {};
+        const bool geo = nofoot::ikHingeAnimated(S, F0, H0, n0geo);
+        // The row replaces the geometric cross when they differ by more than 10 deg, and stands in for it when the arm is straight.
+        const bool useRow = haveRow && (!geo || nofoot::ikAxisAngleDeg(rowN0, n0geo) > nofoot::kHingeRowTolDeg);
+        const nofoot::HingeSwings hs = nofoot::ikHingeSwings(S, F0, H0, E, tb.hand, useRow ? rowN0 : nullptr, hl.lastValid && now - hl.lastMs < 200 ? hl.last : nullptr);
+        if (!hs.ok) {
+            ikRefuse(kIkRefSingular);
+            continue;
+        }
+        // The verification of the hinge row: which of the forearm joint matrix's three rotation rows is parallel to the animated hinge, counted on
+        // bent samples (animated flexion over 25 deg); learned once 30 samples agree (80% on one row, mean angle under 10 deg).
+        if (geo && hs.flexAnimDeg > 25.0) {
+            double ang = 0.0, sg = 1.0;
+            const int r = nofoot::ikHingeRow(g_ikM0[F], n0geo, &ang, &sg);
+            if (r >= 0) {
+                ++hl.hits[r];
+                hl.angSum[r] += ang;
+                ++hl.samples;
+                hl.signSum[r] += sg;
+                if (hl.samples >= 30 && hl.row < 0) {
+                    int best = 0;
+                    for (int q = 1; q < 3; ++q)
+                        if (hl.hits[q] > hl.hits[best]) best = q;
+                    if (hl.hits[best] * 5 >= hl.samples * 4 && hl.angSum[best] / hl.hits[best] < nofoot::kHingeRowTolDeg) {
+                        hl.row = best;
+                        hl.rowSign = hl.signSum[best] >= 0.0 ? 1.0 : -1.0;
+                    }
+                }
+            }
+        }
+        for (int i = 0; i < 3; ++i) hl.last[i] = hs.n1[i];
+        hl.lastValid = true;
+        hl.lastMs = now;
+        o.hOk = true;
+        o.hSource = hs.source;
+        o.hOldErr = hs.oldHingeErrDeg;
+        o.hPlane = hs.planeDeg;
+        o.hFlexAnim = hs.flexAnimDeg;
+        o.hFlexSolved = hs.flexSolvedDeg;
         for (int g = 0; g < 3; ++g)
-            for (uint32_t k = 0; k < counts[g]; ++k) nofoot::ikPivot(g_ikM0[lists[g][k]], R1, S, g_ikOut[lists[g][k]]);
-        // Swing 2: F's subtree about E, from the hand's direction after swing 1 to the solved hand.
-        double H1[3], eh[3], eT[3];
-        ikPos(g_ikOut[H], H1);
-        const double h1[3] = {H1[0] - E[0], H1[1] - E[1], H1[2] - E[2]}, ht[3] = {tb.hand[0] - E[0], tb.hand[1] - E[1], tb.hand[2] - E[2]};
-        if (!nofoot::ikUnit(h1, eh) || !nofoot::ikUnit(ht, eT)) {
-            ikRefuse(kIkRefSingular);
-            continue;
-        }
-        nofoot::ikRotFromTo(eh, eT, R2);
+            for (uint32_t k = 0; k < counts[g]; ++k) nofoot::ikPivot(g_ikM0[lists[g][k]], hs.R1, S, g_ikOut[lists[g][k]]);
         for (int g = 1; g < 3; ++g)
             for (uint32_t k = 0; k < counts[g]; ++k) {
                 float tmp[16];
                 std::memcpy(tmp, g_ikOut[lists[g][k]], sizeof(tmp));
-                nofoot::ikPivot(tmp, R2, E, g_ikOut[lists[g][k]]);
+                nofoot::ikPivot(tmp, hs.R2, E, g_ikOut[lists[g][k]]);
             }
         // The hand: the rotation nlerp'd from the animated one toward the target's, at the chain's position; gH follows by D_H.
         float MH[16];
@@ -10165,11 +10230,15 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             nofoot::pfzMul(tmp, DH, g_ikOut[arm.gH[k]]);
         }
         std::memcpy(g_ikOut[H], MH, sizeof(MH));
-        // The forearm helpers (gF less F) roll about the forearm axis by t x the hand's twist; the upper-arm helpers (gU off the U->F path) about
-        // the upper-arm axis by t x the forearm's twist (swing 2's), t their projection along the bone.
+        // F66d: the forearm helpers (gF less F) roll about the forearm axis by t x the hand's twist, the twist taken wrap-safe and folded into
+        // +-90 deg (nofoot::ikTwistFold: continuous around the circle; the wrist carries the rest); t is their projection along the bone. The
+        // upper-arm helpers' roll by swing 2's twist is gone: with the hinge kept there is no off-hinge twist to hide.
         {
-            const double thetaF = nofoot::ikTwistAbout(X, eT), thetaU = nofoot::ikTwistAbout(R2, ue);
-            const double lF2 = nofoot::ikDot(ht, ht), lU2 = nofoot::ikDot(se, se);
+            const double thetaRaw = nofoot::ikTwistAbout(X, eT), thetaF = nofoot::ikTwistFold(thetaRaw);
+            o.hTwistRaw = thetaRaw * 180.0 / nofoot::kIkPi;
+            o.hTwistApplied = thetaF * 180.0 / nofoot::kIkPi;
+            o.hTwistLimited = nofoot::ikTwistLimited(thetaRaw);
+            const double lF2 = nofoot::ikDot(ht, ht);
             for (uint32_t k = 0; k < arm.nF; ++k) {
                 const uint32_t j = arm.gF[k];
                 if (j == F || !(lF2 > 1e-12)) continue;
@@ -10183,20 +10252,6 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
                 nofoot::ikRotAxis(eT, t * thetaF, R);
                 std::memcpy(tmp, g_ikOut[j], sizeof(tmp));
                 nofoot::ikPivot(tmp, R, E, g_ikOut[j]);
-            }
-            for (uint32_t k = 0; k < arm.nU; ++k) {
-                const uint32_t j = arm.gU[k];
-                if (arm.chainU[k] || !(lU2 > 1e-12)) continue;
-                double pj[3];
-                ikPos(g_ikOut[j], pj);
-                const double rel[3] = {pj[0] - S[0], pj[1] - S[1], pj[2] - S[2]};
-                double t = nofoot::ikDot(rel, se) / lU2;
-                t = t < 0.0 ? 0.0 : t > 1.0 ? 1.0 : t;
-                double R[9];
-                float tmp[16];
-                nofoot::ikRotAxis(ue, t * thetaU, R);
-                std::memcpy(tmp, g_ikOut[j], sizeof(tmp));
-                nofoot::ikPivot(tmp, R, S, g_ikOut[j]);
             }
         }
         // The math check: the chain's hand against its target (about 0 while the target is in reach).
@@ -10269,49 +10324,37 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
                 if (j < count) std::memcpy(g_ikM0[j], g_ikM0Save[j], 64);
             }
     }
-    // F60: the weapon fit's measurement (every mode but nudge; both arms with their grips): Sd from the grips, the FP forward (G's z row on xz)
-    // and the arm length, plus the ADS raise; d_w = G's d (body axes) + (Sd - Umid). Published for the frame thread, which decides whether it
-    // is used (arm IK on, full 3P, the gates open). Nothing is written here. F62a: the ADS forward push no longer enters Sd, and k_reach goes
-    // from 0.82 to 1.0 with the ADS weight; the per-arm reach after the assist and the elbow's interior angle ride along for the 1 s line.
-    if (armsOk && fitUmidOk && so[0].fitOk && so[1].fitOk) {
-        const double fwd[3] = {G.g[8], G.g[9], G.g[10]};
-        FitPub fp;
-        fp.armLen = nofoot::fitArmLen(0.5 * (so[0].armLen + so[1].armLen));
-        fp.reachK = nofoot::fitReachK(adsW);
-        for (int side = 0; side < 2; ++side) {
-            fp.solved[side] = so[side].solved;
-            fp.reachA[side] = so[side].reachA;
-            fp.elbowDeg[side] = so[side].elbowDeg;
+    // F66c/F65a: the reach constraint's inputs and the distance gate's measure, for the frame thread (ReachPub): c = (U* - T_A) - d per arm (U*:
+    // the unbent shoulder turned by the square-up, above), G's d in the 3P model axes, the arm lengths, the weights, the post-bend shoulder
+    // minus U*. Nothing is written here; the frame thread decides whether the constraint applies (armed, full 3P, the arm IK on).
+    if (armsOk && mode != 2 && uaPlan && so[0].fitOk && so[1].fitOk && uPreOk) {
+        ReachPub rp;
+        bool okD = true;
+        for (int i = 0; i < 3; ++i) {
+            const double r[3] = {G.m3p[4 * i], G.m3p[4 * i + 1], G.m3p[4 * i + 2]};
+            const double rr = nofoot::ikDot(r, r);
+            if (!(rr > 1e-6)) okD = false;
+            rp.dB[i] = okD ? (G.d[0] * r[0] + G.d[1] * r[1] + G.d[2] * r[2]) / rr : 0.0;
         }
-        if (nofoot::fitShoulderTarget(so[0].tA, so[1].tA, fwd, fp.armLen, adsPush[1], fp.reachK, fp.sd)) {
-            bool okD = true;
-            for (int i = 0; i < 3; ++i) {
-                const double r[3] = {G.m3p[4 * i], G.m3p[4 * i + 1], G.m3p[4 * i + 2]};
-                const double rr = nofoot::ikDot(r, r);
-                if (!(rr > 1e-6)) okD = false;
-                fp.dB[i] = okD ? (G.d[0] * r[0] + G.d[1] * r[1] + G.d[2] * r[2]) / rr : 0.0;
+        if (okD) {
+            rp.gateMin = std::min(so[0].gate, so[1].gate);
+            for (int side = 0; side < 2; ++side) {
+                const SideOut& o = so[side];
+                for (int i = 0; i < 3; ++i) rp.reachC[side][i] = o.reachV[i] - rp.dB[i];
+                rp.armL[side] = o.armLen;
+                rp.reachR[side] = o.armLen - nofoot::kReachMarginM;
+                rp.reachOk[side] = o.fitOk && o.armLen > nofoot::kReachMarginM && o.uJ != 0xFFFFu;
+                rp.gripErr[side] = o.gripErr;
+                rp.gripWritten[side] = o.gripWritten;
+                rp.wArm[side] = o.wArm;
+                rp.gateW[side] = o.gateW;
+                rp.gateDist[side] = o.gate;
+                rp.uJ[side] = o.uJ;
+                rp.shoulderGap[side] = o.shoulderGap;
             }
-            if (okD) {
-                nofoot::fitBodyTarget(fp.dB, fp.sd, fitUmid, fp.dw);
-                for (int i = 0; i < 3; ++i) fp.umid[i] = fitUmid[i];
-                fp.gateMin = std::min(so[0].gate, so[1].gate);
-                for (int side = 0; side < 2; ++side) {   // F65a: the reach limit's inputs and the grip error
-                    const SideOut& o = so[side];
-                    for (int i = 0; i < 3; ++i) fp.reachC[side][i] = o.reachV[i] - fp.dB[i];
-                    fp.armL[side] = o.armLen;
-                    fp.reachR[side] = o.armLen - nofoot::kReachMarginM;
-                    fp.reachOk[side] = o.fitOk && o.armLen > nofoot::kReachMarginM && o.uJ != 0xFFFFu;
-                    fp.gripErr[side] = o.gripErr;
-                    fp.gripWritten[side] = o.gripWritten;
-                    fp.wArm[side] = o.wArm;
-                    fp.gateW[side] = o.gateW;
-                    fp.gateDist[side] = o.gate;
-                    fp.uJ[side] = o.uJ;
-                }
-                fp.adsW = adsW;
-                fp.ms = now;
-                fitPublish(fp);
-            }
+            rp.adsW = adsW;
+            rp.ms = now;
+            reachPublish(rp);
         }
     }
     // F57: the squared torso: every spine-list joint not written from the solve takes its squared M0 (an arm whose solve did not write rides
@@ -10370,13 +10413,21 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             if (bendCl.fwd) ++b.clampFwd;
             if (bendCl.back) ++b.clampBack;
             if (bendCl.roll) ++b.clampRoll;
-            if (bendFitLim) {   // F62a: the fit's limits (8, 8, 6 deg)
-                ++b.fitLimited;
-                if (bendCl.fwd) ++b.fitClampFwd;
-                if (bendCl.back) ++b.fitClampBack;
-                if (bendCl.roll) ++b.fitClampRoll;
+            // F66c: the weight, the armed ramp, the per-call change of the applied angles and the sign flips (the judder count).
+            if (bendResW < 1.0) ++b.weightedDown;
+            b.bendWeightSum += bendResW;
+            b.armedRampSum += static_cast<double>(armedW);
+            {
+                const double prevP = g_bendAltPitch.haveLast ? g_bendAltPitch.last : pd, prevR = g_bendAltRoll.haveLast ? g_bendAltRoll.last : rd;
+                b.dPitchMax = std::max(b.dPitchMax, std::fabs(pd - prevP));
+                b.dRollMax = std::max(b.dRollMax, std::fabs(rd - prevR));
+                const uint32_t fp0 = g_bendAltPitch.flips, fr0 = g_bendAltRoll.flips;
+                g_bendAltPitch.step(pd, 0.05);
+                g_bendAltRoll.step(rd, 0.05);
+                if (g_bendAltPitch.flips != fp0) ++b.flipPitch;
+                if (g_bendAltRoll.flips != fr0) ++b.flipRoll;
+                if (g_bendAltPitch.flips != fp0 || g_bendAltRoll.flips != fr0) ++b.flipEither;
             }
-            if (bendSusp) ++b.suspended;
             b.povLevel = bendLevel;
             b.pov = bendPov;
             if (bendWrite) ++b.wrote;
@@ -10478,6 +10529,85 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         ++st.sqNoLine;   // a shoulder line under 1 cm (3P or FP): nothing squared this call
     }
     g_ikStatSeq.fetch_add(1, std::memory_order_release);
+    // F66d: the hinge figures of this call.
+    g_hingeSeq.fetch_add(1, std::memory_order_acq_rel);
+    if (g_hingeReset.exchange(false, std::memory_order_relaxed)) g_hingeStats = HingeStats{};
+    ++g_hingeStats.calls;
+    for (int side = 0; side < 2; ++side) {
+        const SideOut& o = so[side];
+        HingeSide& h = g_hingeStats.side[side];
+        const HingeLearn& hl = g_hingeLearn[side];
+        h.rowSamples = hl.samples;
+        h.row = hl.row;
+        for (int q = 0; q < 3; ++q) {
+            h.rowHits[q] = hl.hits[q];
+            h.rowAngSum[q] = hl.angSum[q];
+        }
+        if (!o.hOk) continue;
+        ++h.n;
+        ++h.src[o.hSource >= 0 && o.hSource < 4 ? o.hSource : 0];
+        h.oldErrSum += o.hOldErr;
+        h.oldErrMax = std::max(h.oldErrMax, o.hOldErr);
+        h.planeSum += o.hPlane;
+        h.planeMax = std::max(h.planeMax, o.hPlane);
+        h.flexAnimSum += o.hFlexAnim;
+        h.flexSolvedSum += o.hFlexSolved;
+        ++h.twistN;
+        h.twistRawAbsSum += std::fabs(o.hTwistRaw);
+        h.twistAppliedAbsSum += std::fabs(o.hTwistApplied);
+        if (o.hTwistLimited) ++h.twistLimited;
+    }
+    g_hingeSeq.fetch_add(1, std::memory_order_release);
+    // F66g: the parity split of this call's outputs.
+    {
+        const uint32_t par = g_f66gP1Seq.load(std::memory_order_relaxed) & 1u;
+        g_f66gSeq.fetch_add(1, std::memory_order_acq_rel);
+        if (g_f66gReset.exchange(false, std::memory_order_relaxed)) g_f66gPar = F66gPar{};
+        F66gPar& q = g_f66gPar;
+        ++q.calls;
+        ++q.callsPar[par];
+        bool known = false;
+        for (uint32_t i = 0; i < q.nBufs[par]; ++i) known = known || q.bufs[par][i] == sp.buf;
+        if (!known) {
+            if (q.nBufs[par] < 4) q.bufs[par][q.nBufs[par]++] = sp.buf;
+            else ++q.bufOver[par];
+        }
+        if (bendHave) {
+            const double pd = g_bendApplied[0] * 180.0 / nofoot::kIkPi, rd = g_bendApplied[1] * 180.0 / nofoot::kIkPi;
+            q.pitch.add(par, pd);
+            q.roll.add(par, rd);
+            q.altPitch.step(pd, 0.05);
+            q.altRoll.step(rd, 0.05);
+        }
+        if (armsOk) {
+            double dRight = 0.0, dFwd = 0.0;
+            bool dOk = true;
+            for (int i = 0; i < 3 && dOk; i += 2) {
+                const double r[3] = {G.m3p[4 * i], G.m3p[4 * i + 1], G.m3p[4 * i + 2]};
+                const double rr = nofoot::ikDot(r, r);
+                if (!(rr > 1e-6)) dOk = false;
+                else (i == 0 ? dRight : dFwd) = (G.d[0] * r[0] + G.d[1] * r[1] + G.d[2] * r[2]) / rr;
+            }
+            if (dOk) {
+                q.dR.add(par, dRight);
+                q.dF.add(par, dFwd);
+                q.altR.step(dRight, 0.0005);
+                q.altF.step(dFwd, 0.0005);
+            }
+        }
+        if (count > 34) {
+            const float* nk = (g_ikMark[34] & 2u) ? g_ikM0[34] : g_pfzAnim[34];
+            if (std::isfinite(nk[12]) && std::isfinite(nk[13]) && std::isfinite(nk[14])) {
+                q.nx.add(par, nk[12]);
+                q.ny.add(par, nk[13]);
+                q.nz.add(par, nk[14]);
+                q.altNx.step(nk[12], 0.0005);
+                q.altNy.step(nk[13], 0.0005);
+                q.altNz.step(nk[14], 0.0005);
+            }
+        }
+        g_f66gSeq.fetch_add(1, std::memory_order_release);
+    }
     // The writes, all matrices computed above: the solve's from g_ikOut (mark 4), the squared torso's from g_ikM0.
     for (uint32_t k = 0; k < nList; ++k) {
         const uint32_t j = g_ikList[k];
@@ -10556,31 +10686,13 @@ void fdAfterAnimate(uint64_t x, uint64_t job) noexcept {
             g_ikFp.seq.fetch_add(1, std::memory_order_release);
         }
     }
-    const float drop = g_f55DropM.load(std::memory_order_relaxed);
-    bool wrote = false;
-    if (drop > 0.0f && !g_fdWriteDown.load(std::memory_order_relaxed)) {
-        for (uint32_t k = 0; k < pl.count; ++k) {
-            const uint32_t j = pl.member[k];
-            if (j >= count) continue;
-            const uintptr_t ya = static_cast<uintptr_t>(buf + static_cast<uint64_t>(j) * 64u + 52u);
-            float yv = 0.0f;
-            if (!guardedRead(ya, &yv, 4)) return fdFail(1u << 5);
-            if (!guardedWriteFloat(ya, yv - drop)) {
-                g_fdWriteDown.store(true, std::memory_order_relaxed);
-                return fdFail(1u << 6);
-            }
-        }
-        wrote = true;
-    }
     for (int k = 0; k < 4; ++k)
         if (!guardedRead(buf + static_cast<uint64_t>(kIds[k]) * 64u + 48u, after[k], sizeof(after[k]))) return fdFail(1u << 5);
     g_f55Snap.seq.fetch_add(1, std::memory_order_acq_rel);
     std::memcpy(g_f55Snap.before, before, sizeof(before));
     std::memcpy(g_f55Snap.after, after, sizeof(after));
-    g_f55Snap.drop = wrote ? drop : 0.0f;
     g_f55Snap.ms = GetTickCount64();
     g_f55Snap.seq.fetch_add(1, std::memory_order_release);
-    if (wrote) g_fdWrites.fetch_add(1, std::memory_order_relaxed);
 }
 
 uint64_t __fastcall pfzAnimateHooked(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t s5, uint64_t s6, uint64_t s7, uint64_t s8) {
@@ -10590,7 +10702,7 @@ uint64_t __fastcall pfzAnimateHooked(uint64_t a1, uint64_t a2, uint64_t a3, uint
     g_pfzCalls.fetch_add(1, std::memory_order_relaxed);
     const int freezeMode = pfz::g_mode.load(std::memory_order_relaxed);
     const bool ikWanted = pfz::g_ikWanted.load(std::memory_order_relaxed);   // F56: the arm IK needs the hook (and the FP snapshot) too
-    if (!a2 || (freezeMode == 0 && !ikWanted && !pfz::g_dropWanted.load(std::memory_order_relaxed))) return r;
+    if (!a2 || (freezeMode == 0 && !ikWanted)) return r;
     uint64_t x = 0;
     if (!guardedRead(a2, &x, 8)) {
         pfzFail(kPfzFailJob);
@@ -10641,8 +10753,8 @@ void pfzInstallOnce() {
     if (installF9ProbeInto(g_pfzHook, spec, base, &stolen, &why)) {
         g_pfzArmed = true;
         Log::get().note("native on foot pose freeze: Animate post-hook installed at EliteDangerous64.exe+0x741520, stolen=%zu bytes, prologue %zu bytes "
-                        "verified (the local avatar's X only; writes only with fix.native_on_foot_pose_freeze = on; F55: the FP X's clavicle subtree only "
-                        "with fix.native_on_foot_fp_shoulder_drop_cm above 0, in body mode)", stolen, sizeof(kPfzAnimatePrologue));
+                        "verified (the local avatar's X only; writes only with fix.native_on_foot_pose_freeze = on or the arm IK; F55: the FP X's snapshot "
+                        "for the arm IK)", stolen, sizeof(kPfzAnimatePrologue));
     } else {
         Log::get().note("native on foot pose freeze: NOT installed at EliteDangerous64.exe+0x741520 -- %s. The game was not touched.", why.c_str());
     }
@@ -10756,7 +10868,7 @@ void pfzTick(uint64_t now) {
         lastMode = mode;
     }
     // F55: the shoulder drop needs the hook too; F56: and the arm IK
-    const bool hookWanted = mode != 0 || pfz::g_dropWanted.load(std::memory_order_relaxed) || pfz::g_ikWanted.load(std::memory_order_relaxed);
+    const bool hookWanted = mode != 0 || pfz::g_ikWanted.load(std::memory_order_relaxed);
     if (hookWanted) pfzInstallOnce();
     if (g_pfzArmed) g_pfzHook.gate.store(hookWanted ? 1u : 0u, std::memory_order_release);
     if (!nativeOnFootActive()) {   // the census sets them again (it runs only while active)
@@ -10764,7 +10876,8 @@ void pfzTick(uint64_t now) {
         pfz::g_armX.store(0, std::memory_order_release);
     }
     // The gate and the blend (the weight is 0 unless the key is on).
-    const double dt = g_pfzLastMs && now > g_pfzLastMs ? std::min(0.1, static_cast<double>(now - g_pfzLastMs) / 1000.0) : 0.0;
+    static QpcDt pfzClock;   // F66b
+    const double dt = pfzClock.step(0.1);
     g_pfzLastMs = now;
     const bool ads = journalAds();
     const uint64_t headMs = g_pfzHeadMs.load(std::memory_order_relaxed);
@@ -10866,6 +10979,245 @@ void pfzTick(uint64_t now) {
 // (native stereo on foot, body mode, hide_fp_body on, body_unclip on, an arm plan for the local X, the FP snapshot and G under 100 ms, no
 // write stand-down), and to 0 over 0.2 s otherwise; off and probe hold it at 0 (nothing is written). Each refusal the hook met is named once;
 // every 5 s while native stereo is on foot and the key is not off: the gate, the data ages, G's inputs and the refusals, then a line per arm.
+// F66d: the hinge line, once a second per arm while the arm IK runs (any mode but off) with native stereo on foot: how the solve's n0 was found
+// (the joints' cross, the last solved hinge, the shortest arc, the learned row), the OLD two-swing method's hinge error and the plane change (deg,
+// mean/max; computed in the hook, not applied: the old-method error is the size of the defect the new swings remove), the flexion before and
+// after, the hand's twist raw and as applied to the forearm helpers (folded to +-90 deg) with the limit hits, and the verification of the
+// forearm joint's hinge row (the row of F's matrix most parallel to the animated hinge: hits per row, mean angle per row, the learned row).
+// A line with no solves says so: the hook did not run, which reads differently from a hinge of zero error.
+uint64_t g_f66dLineMs = 0;
+void f66dLine(uint64_t now, int mode) noexcept {
+    if (mode == 0 || !nativeOnFootActive() || !g_pfzArmed) {
+        g_f66dLineMs = 0;
+        return;
+    }
+    if (g_f66dLineMs == 0) g_f66dLineMs = now;
+    if (now - g_f66dLineMs < 1000) return;
+    g_f66dLineMs = now;
+    HingeStats st;
+    bool got = false;
+    for (int tries = 0; tries < 8 && !got; ++tries) {
+        const uint32_t s1 = g_hingeSeq.load(std::memory_order_acquire);
+        if (s1 & 1u) continue;
+        st = g_hingeStats;
+        std::atomic_thread_fence(std::memory_order_acquire);
+        got = g_hingeSeq.load(std::memory_order_relaxed) == s1;
+    }
+    g_hingeReset.store(true, std::memory_order_relaxed);
+    if (!got) {
+        Log::get().note("native on foot arm IK (F66d): the hinge statistics were being written (retried next second)");
+        return;
+    }
+    for (int side = 0; side < 2; ++side) {
+        const HingeSide& h = st.side[side];
+        if (h.n == 0) {
+            Log::get().note("native on foot arm IK (F66d): arm %s: no hinge solve this second (%llu Animate calls with the arm IK; see the F56 refusals)",
+                            side ? "R" : "L", static_cast<unsigned long long>(st.calls));
+            continue;
+        }
+        const double n = static_cast<double>(h.n);
+        char rows[200];
+        std::snprintf(rows, sizeof(rows), "row hits %u/%u/%u of %u bent samples (mean angle %.1f/%.1f/%.1f deg), learned row %d%s", h.rowHits[0], h.rowHits[1],
+                      h.rowHits[2], h.rowSamples, h.rowHits[0] ? h.rowAngSum[0] / h.rowHits[0] : 0.0, h.rowHits[1] ? h.rowAngSum[1] / h.rowHits[1] : 0.0,
+                      h.rowHits[2] ? h.rowAngSum[2] / h.rowHits[2] : 0.0, h.row, h.row < 0 ? " (none yet: 30 bent samples agreeing to 10 deg)" : "");
+        Log::get().note("native on foot arm IK (F66d): arm %s: %u hinge solves; n0 from the joints' cross %u, last hinge %u, shortest arc %u, learned row "
+                        "%u; the OLD method's hinge error mean %.1f max %.1f deg (computed, not applied: the defect removed); plane change mean %.1f max %.1f "
+                        "deg; flexion animated %.1f -> solved %.1f deg (mean); hand twist |raw| mean %.1f deg, applied to the forearm helpers |folded to "
+                        "+-90| mean %.1f deg, limit hits %u of %u; %s",
+                        side ? "R" : "L", h.n, h.src[0], h.src[1], h.src[2], h.src[3], h.oldErrSum / n, h.oldErrMax, h.planeSum / n, h.planeMax,
+                        h.flexAnimSum / n, h.flexSolvedSum / n, h.twistN ? h.twistRawAbsSum / h.twistN : 0.0,
+                        h.twistN ? h.twistAppliedAbsSum / h.twistN : 0.0, h.twistLimited, h.twistN, rows);
+    }
+}
+// F66g: the frame order line, once a second while native stereo is on foot and the hooks run: drain the ring; between one local P1 and the next, the
+// order of the events (a string over P (the eye probe, ikPublishG), A (the Animate post-hook), S (the submit post-hook)) as a histogram; how many
+// Animate calls a P1 frame has; the d mismatches (submit against the G the Animate read, against P1's; the Animate's G against P1's; over 1 mm);
+// the threads. Then the parity line (F66gPar, above). Measure only; "no events" says the hooks did not run, which is not a zero order.
+struct F66gRow {
+    uint64_t t = 0, ptr = 0;
+    float d[3] = {};
+    uint32_t tid = 0, frame = 0;
+    char kind = 0;
+};
+uint32_t g_f66gTail = 0;
+uint64_t g_f66gLineMs = 0, g_f66gLost = 0;
+std::vector<F66gRow> g_f66gRows;
+void f66gLine(uint64_t now) noexcept {
+    if (!nativeOnFootActive()) {
+        g_f66gLineMs = 0;
+        g_f66gTail = g_f66gHead.load(std::memory_order_acquire);
+        g_f66gRows.clear();
+        return;
+    }
+    const uint32_t head = g_f66gHead.load(std::memory_order_acquire);
+    if (head - g_f66gTail > kF66gRing) {
+        g_f66gLost += head - g_f66gTail - kF66gRing;
+        g_f66gTail = head - kF66gRing;
+    }
+    for (; g_f66gTail != head; ++g_f66gTail) {
+        const F66gEvent& e = g_f66gRing[g_f66gTail % kF66gRing];
+        const uint64_t t = e.t.load(std::memory_order_acquire);
+        if (t == 0) break;   // the writer is mid-event: the rest next tick
+        F66gRow r;
+        r.t = t;
+        for (int k = 0; k < 3; ++k) {
+            const uint32_t u = e.d[k].load(std::memory_order_relaxed);
+            std::memcpy(&r.d[k], &u, sizeof(u));
+        }
+        r.tid = e.tid.load(std::memory_order_relaxed);
+        r.ptr = e.ptr.load(std::memory_order_relaxed);
+        r.frame = e.frame.load(std::memory_order_relaxed);
+        r.kind = static_cast<char>(e.kind.load(std::memory_order_relaxed));
+        if (g_f66gRows.size() < 8192) g_f66gRows.push_back(r);
+    }
+    if (g_f66gLineMs == 0) g_f66gLineMs = now;
+    if (now - g_f66gLineMs < 1000) return;
+    g_f66gLineMs = now;
+    std::sort(g_f66gRows.begin(), g_f66gRows.end(), [](const F66gRow& a, const F66gRow& b) { return a.t < b.t; });
+    struct Hist {
+        char s[8] = {};
+        uint32_t n = 0;
+    } hist[10];
+    uint32_t histN = 0, histOther = 0;
+    uint32_t nKind[3] = {}, aPerFrame[4] = {}, groups = 0;
+    uint32_t sa = 0, saBad = 0, sp = 0, spBad = 0, ap = 0, apBad = 0;
+    uint32_t tids[3][3] = {}, tidN[3] = {}, tidOver[3] = {};
+    const auto idx = [](char k) { return k == 'P' ? 0 : k == 'A' ? 1 : 2; };
+    const auto differs = [](const float* a, const float* b) {
+        return std::fabs(a[0] - b[0]) > 0.001f || std::fabs(a[1] - b[1]) > 0.001f || std::fabs(a[2] - b[2]) > 0.001f;
+    };
+    // Groups: from each P to the next P. The events before the first P and the last (open) group are not counted.
+    char cur[8] = {};
+    size_t curLen = 0;
+    const F66gRow* gP = nullptr;
+    const F66gRow* gA = nullptr;
+    const F66gRow* gS = nullptr;
+    uint32_t gAn = 0;
+    bool open = false;
+    const auto closeGroup = [&]() {
+        if (!open) return;
+        ++groups;
+        ++aPerFrame[gAn > 3 ? 3 : gAn];
+        bool found = false;
+        for (uint32_t i = 0; i < histN && !found; ++i)
+            if (std::strcmp(hist[i].s, cur) == 0) {
+                ++hist[i].n;
+                found = true;
+            }
+        if (!found) {
+            if (histN < 10) {
+                std::memcpy(hist[histN].s, cur, sizeof(hist[histN].s));
+                hist[histN].n = 1;
+                ++histN;
+            } else {
+                ++histOther;
+            }
+        }
+        if (gS && gA) {
+            ++sa;
+            if (differs(gS->d, gA->d)) ++saBad;
+        }
+        if (gS && gP) {
+            ++sp;
+            if (differs(gS->d, gP->d)) ++spBad;
+        }
+        if (gA && gP) {
+            ++ap;
+            if (differs(gA->d, gP->d)) ++apBad;
+        }
+    };
+    for (const F66gRow& r : g_f66gRows) {
+        const int k = idx(r.kind);
+        ++nKind[k];
+        bool seen = false;
+        for (uint32_t i = 0; i < tidN[k]; ++i) seen = seen || tids[k][i] == r.tid;
+        if (!seen) {
+            if (tidN[k] < 3) tids[k][tidN[k]++] = r.tid;
+            else ++tidOver[k];
+        }
+        if (r.kind == 'P') {
+            closeGroup();
+            open = true;
+            cur[0] = 'P';
+            cur[1] = '\0';
+            curLen = 1;
+            gP = &r;
+            gA = gS = nullptr;
+            gAn = 0;
+        } else if (open) {
+            if (curLen < 7) {
+                cur[curLen++] = r.kind;
+                cur[curLen] = '\0';
+            }
+            if (r.kind == 'A') {
+                ++gAn;
+                if (!gA) gA = &r;
+            } else if (!gS) {
+                gS = &r;
+            }
+        }
+    }
+    const size_t total = g_f66gRows.size();
+    char h[256] = {};
+    size_t at = 0;
+    for (uint32_t i = 0; i < histN; ++i) {
+        const int w = std::snprintf(h + at, sizeof(h) - at, "%s%s x%u", i ? ", " : "", hist[i].s, hist[i].n);
+        if (w > 0 && static_cast<size_t>(w) < sizeof(h) - at) at += static_cast<size_t>(w);
+    }
+    if (histOther && at < sizeof(h) - 20) std::snprintf(h + at, sizeof(h) - at, ", other x%u", histOther);
+    if (total == 0) {
+        Log::get().note("native on foot frame order (F66g): no events this second (the eye probe's local callback, the Animate post-hook and the submit "
+                        "post-hook posted none: the hooks did not run for the local avatar, which is not an order)");
+    } else {
+        Log::get().note("native on foot frame order (F66g): %zu events this second (P %u, Animate %u, submit %u; %llu lost to the ring); %u frames from one "
+                        "local P1 to the next; order between P1 and the next P1 (P = the eye probe / G's d, A = Animate, S = submit): %s; Animate calls per "
+                        "P1 frame: 0 x%u, 1 x%u, 2 x%u, 3+ x%u; submit d != G's d (over 1 mm): %u of %u frames with both (against P1's d: %u of %u; the "
+                        "Animate's G against P1's d: %u of %u); threads: P1 %u (%u), Animate %u (%u, %u over), submit %u (%u)",
+                        total, nKind[0], nKind[1], nKind[2], static_cast<unsigned long long>(g_f66gLost), groups, at ? h : "none", aPerFrame[0], aPerFrame[1],
+                        aPerFrame[2], aPerFrame[3], saBad, sa, spBad, sp, apBad, ap, tidN[0] ? tids[0][0] : 0u, tidN[0], tidN[1] ? tids[1][0] : 0u, tidN[1],
+                        tidOver[1], tidN[2] ? tids[2][0] : 0u, tidN[2]);
+    }
+    g_f66gRows.clear();
+    // The parity split of the hook's outputs.
+    F66gPar q;
+    bool got = false;
+    for (int tries = 0; tries < 8 && !got; ++tries) {
+        const uint32_t s1 = g_f66gSeq.load(std::memory_order_acquire);
+        if (s1 & 1u) continue;
+        q = g_f66gPar;
+        std::atomic_thread_fence(std::memory_order_acquire);
+        got = g_f66gSeq.load(std::memory_order_relaxed) == s1;
+    }
+    g_f66gReset.store(true, std::memory_order_relaxed);
+    if (!got || q.calls == 0) {
+        Log::get().note("native on foot frame order (F66g): parity split: %s", !got ? "the statistics were being written (retried next second)"
+                                                                                   : "no Animate post-hook call for the local avatar this second");
+        return;
+    }
+    const auto var = [](const nofoot::ParityMean& m, const nofoot::AltCount& a, double scale, char* out, size_t cap) {
+        std::snprintf(out, cap, "even %.3f odd %.3f diff %+.3f flips %u of %u", scale * m.mean(0), scale * m.mean(1), scale * m.diff(), a.flips, a.steps);
+    };
+    char vPitch[96], vRoll[96], vR[96], vF[96], vNx[96], vNy[96], vNz[96];
+    var(q.pitch, q.altPitch, 1.0, vPitch, sizeof(vPitch));
+    var(q.roll, q.altRoll, 1.0, vRoll, sizeof(vRoll));
+    var(q.dR, q.altR, 100.0, vR, sizeof(vR));
+    var(q.dF, q.altF, 100.0, vF, sizeof(vF));
+    var(q.nx, q.altNx, 100.0, vNx, sizeof(vNx));
+    var(q.ny, q.altNy, 100.0, vNy, sizeof(vNy));
+    var(q.nz, q.altNz, 100.0, vNz, sizeof(vNz));
+    char bufs[2][160];
+    for (int par = 0; par < 2; ++par) {
+        int w = std::snprintf(bufs[par], sizeof(bufs[par]), "%u [", q.nBufs[par] + (q.bufOver[par] ? 1u : 0u));
+        for (uint32_t i = 0; i < q.nBufs[par] && w > 0 && static_cast<size_t>(w) < sizeof(bufs[par]) - 24; ++i)
+            w += std::snprintf(bufs[par] + w, sizeof(bufs[par]) - static_cast<size_t>(w), "%s%llX", i ? " " : "", static_cast<unsigned long long>(q.bufs[par][i]));
+        if (w > 0 && static_cast<size_t>(w) < sizeof(bufs[par]) - 2) std::snprintf(bufs[par] + w, sizeof(bufs[par]) - static_cast<size_t>(w), "]");
+    }
+    Log::get().note("native on foot frame order (F66g): parity split (the local P1 frame index's low bit; means over the second's Animate calls): Animate "
+                    "calls even %u odd %u; distinct span buffers written even %s odd %s; bend pitch (deg) %s; bend roll (deg) %s; d right (cm) %s; d "
+                    "forward (cm) %s; neck 34 written x (cm) %s; y %s; z %s. Our outputs steady and equal across the parities while the drawn body "
+                    "still flips: a double-buffered pose source; alternating: ours",
+                    q.callsPar[0], q.callsPar[1], bufs[0], bufs[1], vPitch, vRoll, vR, vF, vNx, vNy, vNz);
+}
 nofoot::IkBlend g_ikBlend;               // frame thread only
 nofoot::IkBlend g_ikSqBlend{0.0f, nofoot::kIkSquareRampSec};   // F57: the square-up's ramp (frame thread only)
 nofoot::IkBlend g_ikAdsBlend{0.0f, nofoot::kIkAdsRampSec};     // F59: the ADS weight's ramp (frame thread only)
@@ -10876,7 +11228,8 @@ uint64_t g_ikCallsLast = 0, g_ikGPubLast = 0, g_ikGRefLast = 0;
 uint64_t g_ikRefusedLast[kIkRefKinds] = {};
 void armIkTick(uint64_t now) noexcept {
     const int mode = pfz::g_ikMode.load(std::memory_order_relaxed);
-    const double dt = g_ikLastMs && now > g_ikLastMs ? std::min(0.1, static_cast<double>(now - g_ikLastMs) / 1000.0) : 0.0;
+    static QpcDt ikClock;   // F66b
+    const double dt = ikClock.step(0.1);
     g_ikLastMs = now;
     // The newest FP snapshot and G stamps (a read that meets a write keeps the last stamp, so a torn read never drops the weight).
     static uint64_t fpMsLast = 0;
@@ -10931,6 +11284,8 @@ void armIkTick(uint64_t now) noexcept {
         g_ikFailNamed |= 1u << i;
         Log::get().note("native on foot arm IK (F56): the hook refused a call: %s (said once)", kIkRefText[i]);
     }
+    f66dLine(now, mode);   // F66d: the hinge line, once a second
+    f66gLine(now);         // F66g: the frame order and the parity split, once a second
     if (mode == 0 || !active || !g_pfzArmed) return;
     if (g_ikLineMs == 0) g_ikLineMs = now;
     if (now - g_ikLineMs < 5000) return;
@@ -10973,11 +11328,10 @@ void armIkTick(uint64_t now) noexcept {
     g_ikGRefLast = gRef;
     if (gOk)
         Log::get().note("native on foot arm IK (F56): G inputs: M3P |row length - 1| max %.4f det %.4f; F_root |row length - 1| max %.4f det %.4f "
-                        "(root %llu ms older than G); r (%.3f, %.3f, %.3f) m (raise %s); d (%.3f, %.3f, %.3f) m; G rows (%.3f %.3f %.3f) (%.3f %.3f %.3f) "
+                        "(root %llu ms older than G); d (%.3f, %.3f, %.3f) m; G rows (%.3f %.3f %.3f) (%.3f %.3f %.3f) "
                         "(%.3f %.3f %.3f) pos (%.3f, %.3f, %.3f)",
                         static_cast<double>(G.m3pRowErr), static_cast<double>(G.m3pDet), static_cast<double>(G.fRowErr), static_cast<double>(G.fDet),
-                        static_cast<unsigned long long>(G.ms >= G.frootMs ? G.ms - G.frootMs : 0), static_cast<double>(G.r[0]),
-                        static_cast<double>(G.r[1]), static_cast<double>(G.r[2]), g_f51FpOn.load(std::memory_order_relaxed) ? "on" : "off",
+                        static_cast<unsigned long long>(G.ms >= G.frootMs ? G.ms - G.frootMs : 0),
                         static_cast<double>(G.d[0]), static_cast<double>(G.d[1]), static_cast<double>(G.d[2]), static_cast<double>(G.g[0]),
                         static_cast<double>(G.g[1]), static_cast<double>(G.g[2]), static_cast<double>(G.g[4]), static_cast<double>(G.g[5]),
                         static_cast<double>(G.g[6]), static_cast<double>(G.g[8]), static_cast<double>(G.g[9]), static_cast<double>(G.g[10]),
@@ -11140,31 +11494,20 @@ void f58BendFrame(uint64_t now, double dt, int mode, bool full3P, bool ads, cons
     const double n = b.n ? static_cast<double>(b.n) : 1.0;
     Log::get().note("native on foot spine bend (F59): ADS lean added mean %.1f deg (slider %.1f), ADS weight mean %.2f; the bent joint is the neck "
                     "(34) toward the eye target less the rest offset (0, -0.155, -0.09; F62a)", b.leanSum / n, g_ikAdsKeys[5], b.adsWSum / n);
-    // F62a: the bend's counters for the weapon fit's 1 s line (frame thread).
-    g_f62BendCalls = b.calls;
-    g_f62BendN = b.n;
-    g_f62BendFitLim = b.fitLimited;
-    g_f62BendSusp = b.suspended;
-    g_f62BendClamp[0] = b.clampFwd;
-    g_f62BendClamp[1] = b.clampBack;
-    g_f62BendClamp[2] = b.clampRoll;
-    g_f62BendFitClamp[0] = b.fitClampFwd;
-    g_f62BendFitClamp[1] = b.fitClampBack;
-    g_f62BendFitClamp[2] = b.fitClampRoll;
-    g_f62BendRes0Max = b.res0Max;
     Log::get().note("native on foot spine bend (F58): head follow (the body target's horizontal) from %s; bend %s, amount %.2f, ramp %.2f, weight x "
                     "amount mean %.2f; %llu hook calls, %llu bent, %llu written this second; residual eye target - pov (cm): before mean %.1f max %.1f "
                     "(forward %.1f up %.1f right %.1f), after mean %.1f max %.1f (forward %.1f up %.1f right %.1f; the after is left unresolved: the "
                     "height, the clamps, the ramp); pitch applied mean %.1f (%.1f..%.1f) deg, roll mean %.1f (%.1f..%.1f) deg; solved before the clamps "
-                    "pitch mean %.1f roll mean %.1f deg; clamp hits forward 45 %u, back 15 %u, roll 20 %u (F62a: forward and back 8, roll 6 "
-                    "while the weapon fit is engaged: %llu calls; suspended, |T - N| before above 35 cm: %llu); bent joint %u (spine level %u); "
+                    "pitch mean %.1f roll mean %.1f deg; clamp hits at the ramp's limits (F66c: forward 45 to 8, back 15 to 8, roll 20 to 6 by the armed "
+                    "ramp, mean %.2f) forward %u, back %u, roll %u; calls with the continuous weight below 1: %llu (mean weight %.2f; the F62a "
+                    "suspension is gone); bent joint %u (spine level %u); "
                     "refusals: plan %llu, target torn %llu, target stale %llu, pov %llu, degenerate %llu, singular %llu",
                     kSrc[g_f58FollowSrc + 1 >= 0 && g_f58FollowSrc + 1 < 5 ? g_f58FollowSrc + 1 : 0], state, g_bendAmountKey,
                     static_cast<double>(g_f58BendBlend.w), b.wSum / n, static_cast<unsigned long long>(b.calls),
                     static_cast<unsigned long long>(b.n), static_cast<unsigned long long>(b.wrote), b.res0Sum / n, b.res0Max, b.res0B[0] / n,
                     b.res0B[1] / n, b.res0B[2] / n, b.res1Sum / n, b.res1Max, b.res1B[0] / n, b.res1B[1] / n, b.res1B[2] / n, b.pitchSum / n,
-                    b.pitchMin, b.pitchMax, b.rollSum / n, b.rollMin, b.rollMax, b.solvedPitchSum / n, b.solvedRollSum / n, b.clampFwd,
-                    b.clampBack, b.clampRoll, static_cast<unsigned long long>(b.fitLimited), static_cast<unsigned long long>(b.suspended), b.pov,
+                    b.pitchMin, b.pitchMax, b.rollSum / n, b.rollMin, b.rollMax, b.solvedPitchSum / n, b.solvedRollSum / n, b.armedRampSum / n, b.clampFwd,
+                    b.clampBack, b.clampRoll, static_cast<unsigned long long>(b.weightedDown), b.bendWeightSum / n, b.pov,
                     b.povLevel, static_cast<unsigned long long>(ref[kBendRefPlan]),
                     static_cast<unsigned long long>(ref[kBendRefTarget]), static_cast<unsigned long long>(ref[kBendRefStale]),
                     static_cast<unsigned long long>(ref[kBendRefPov]), static_cast<unsigned long long>(ref[kBendRefDegenerate]),
@@ -11188,6 +11531,24 @@ void f58BendFrame(uint64_t now, double dt, int mode, bool full3P, bool ads, cons
     g_f65cDiffN = g_f65cDN = 0;
     g_f65cDiffSum[0] = g_f65cDiffSum[1] = g_f65cDiffSum[2] = 0.0;
     g_f65cDSum[0] = g_f65cDSum[1] = g_f65cDAbsMax[0] = g_f65cDAbsMax[1] = 0.0;
+    // F66c: the body solve this second (full 3P): d before and after the reach correction (right, forward; cm means) and the correction's largest
+    // size; the reach constraint's frames; the bend's largest per-call |delta roll| and |delta pitch| and the calls whose change flipped sign from
+    // the call before (the judder count: F65 alternated roll -20.0 / -14.3 deg on 45 of 90 calls); the post-bend shoulder minus U* per arm.
+    // Flight proof standing: judder count under 2 a second, |delta roll| max under 1 deg.
+    if (full3P) {
+        const F66cWin& w = g_f66c;
+        const double tn = w.ticks ? static_cast<double>(w.ticks) : 1.0;
+        const double gl = w.gapN[0] ? static_cast<double>(w.gapN[0]) : 1.0, gr = w.gapN[1] ? static_cast<double>(w.gapN[1]) : 1.0;
+        Log::get().note("native on foot body solve (F66c): d before the reach (right, forward) %.1f %.1f cm, after %.1f %.1f cm (means over %u align ticks; "
+                        "the reach correction's largest horizontal size %.1f cm); reach constraint frames: constrained %u, infeasible %u (armed ramp %.2f); "
+                        "bend: %llu calls, judder count %u (roll flips %u, pitch flips %u; F65 alternated on 45 of 90), per-call |delta roll| max %.2f deg, "
+                        "|delta pitch| max %.2f deg; post-bend shoulder minus U* (cm, mean/max) L %.1f/%.1f R %.1f/%.1f over %u reach publications",
+                        100.0 * w.dHeadSum[0] / tn, 100.0 * w.dHeadSum[1] / tn, 100.0 * w.dAfterSum[0] / tn, 100.0 * w.dAfterSum[1] / tn, w.ticks,
+                        100.0 * w.corrMax, w.constrained, w.infeasible, static_cast<double>(g_armedBlend.w), static_cast<unsigned long long>(b.n),
+                        b.flipEither, b.flipRoll, b.flipPitch, b.dRollMax, b.dPitchMax, w.gapSum[0] / gl, w.gapMax[0], w.gapSum[1] / gr, w.gapMax[1],
+                        w.pubs);
+    }
+    g_f66c = F66cWin{};
     // F59b: full 3P: the head follow's source and the eye - neck residual after the corrections, once a second.
     if (full3P) {
         static const char* const kF59bSrc[4] = {"none", "job camera", "amc matrix", "last good frame"};
@@ -11240,68 +11601,6 @@ void f58BendFrame(uint64_t now, double dt, int mode, bool full3P, bool ads, cons
     }
 }
 
-// F60 (TEMPORARY slider): the weapon fit's frame-thread half, called by alignTick each tick before the body target. The hook's last
-// publication (a torn read keeps the last); a weapon or tool is held when it is under 100 ms old (the FP grips and G fresh, both arms planned
-// and measured) and both arms' distance gates are open. The ramp (0.3 s) rises while that holds in full-3P body mode with the arm IK on and
-// writing (its base weight above 0) and the slider above 0, and falls otherwise (no weapon: to 0 over 0.3 s, the head's target takes over);
-// it is zeroed at once outside full-3P body mode or with the arm IK not on. fit = the slider x the ramp.
-void f60FitStep(uint64_t now, double dt, int mode, bool full3P) noexcept {
-    FitPub p;
-    if (fitRead(&p)) {
-        g_f60Pub = p;
-        g_f60Have = true;
-    }
-    const bool fresh = g_f60Have && (now > g_f60Pub.ms ? now - g_f60Pub.ms : 0) <= nofoot::kIkFreshMs;
-    // F62a: the raised factor smoothstep(0.5, 1.0, the smaller grip gate) replaces F60's gateMin > 0 test, so the fit is full only with both
-    // arms at the grips (unarmed, the gate sat at 0.0..0.2 with the hands hanging and F60's fit still ran at 0.7). It multiplies the ramp.
-    g_f60Raised = fresh ? nofoot::fitRaised(g_f60Pub.gateMin) : 0.0;
-    g_f60Weapon = fresh && g_f60Raised > 0.0;
-    g_ikArmed.store(g_f60Weapon, std::memory_order_relaxed);   // F65a: the hook solves a hand on its grip at 1 while a weapon is held
-    const int ikMode = pfz::g_ikMode.load(std::memory_order_relaxed);
-    const double key = static_cast<double>(g_fitWeaponKey.load(std::memory_order_relaxed));
-    const double keyLat = static_cast<double>(g_fitLateralKey.load(std::memory_order_relaxed));
-    g_f60Why = !nativeOnFootActive() ? "not native stereo on foot"
-             : mode != 2 ? "not body mode"
-             : !full3P ? "not full 3P (hide_fp_body and body_unclip)"
-             : ikMode != 3 ? "fix.native_on_foot_arm_ik is not on"
-             : !(g_ikWeight.load(std::memory_order_relaxed) > 0.0f) ? "the arm IK's base weight is 0 (its gate)"
-             : !(key > 0.0) && !(keyLat > 0.0) ? "both fit sliders are 0"
-             : !g_f60Have ? "no weapon-fit measurement yet"
-             : !fresh ? "no weapon: the grips are stale (over 100 ms) or an arm is not measured"
-             : nullptr;
-    // F63: aiming down sights with a fit slider above 0 but the fit not engaged: say why every 5 s (a switched-off body mode announces itself:
-    // outside full 3P the reason names the body key that is not set).
-    {
-        static uint64_t adsWhyMs = 0;
-        if (g_f60Why && nativeOnFootActive() && (key > 0.0 || keyLat > 0.0) && journalAds() && now - adsWhyMs >= 5000) {
-            adsWhyMs = now;
-            const char* why = g_f60Why;
-            if (mode != 2 || !full3P)
-                if (const char* f3 = full3PWhy()) why = f3;
-            Log::get().note("native on foot weapon fit (F60): aiming down sights but not engaged: %s", why);
-        }
-    }
-    g_f60Blend.step(g_f60Why == nullptr, dt);
-    if (mode != 2 || !full3P || ikMode != 3) g_f60Blend = nofoot::IkBlend{0.0f, nofoot::kFitRampSec};
-    g_f60Fit = key * static_cast<double>(g_f60Blend.w) * g_f60Raised;
-    g_f60FitLat = keyLat * static_cast<double>(g_f60Blend.w) * g_f60Raised;
-    // F62b (TEMPORARY): in the ADS head-aim the weapon fit goes to 1, forward and sideways, with its weight wA; only with a fresh weapon-fit
-    // measurement (without one the head's target stays, as before). alignTick ignores the head's target by the weight the body took here.
-    g_adsBodyApplied = 0.0;
-    if (g_adsBodyW > 0.0 && fresh && mode == 2 && full3P && nativeOnFootActive()) {
-        const double w = std::min(1.0, g_adsBodyW);
-        g_f60Fit += w * (1.0 - g_f60Fit);
-        g_f60FitLat += w * (1.0 - g_f60FitLat);
-        g_adsBodyApplied = w;
-    }
-    // F62a: the bend's limits follow the weight the body target applied last tick (0 when the target's block did not run or did not apply
-    // the fit), so a tick that waits never leaves the hook at the fit's limits.
-    g_fitBendW.store(g_f62BendWNext, std::memory_order_relaxed);
-    g_f62BendWNext = 0.0f;
-}
-// F60: the 1 s line (body mode, full 3P, the arm IK not off; called after the body filter): the fit weight, d_head, d_w, the fitted target
-// and the applied d (body axes right, up, forward), the shoulder-mid error |Sd - Umid| after the fit (cm; its up part is the vertical
-// remainder, left to the bend), the last Sd and Umid, the arm length, the gate, ADS and the hook's publications.
 // F65b: stand armed's 1 s line (frame thread; in scope, or while the hook still counts calls): the hook's statistics read under their
 // sequence counter (two tries), then a reset requested. y15 and y7 as animated, the low-pass, the stand height, delta wanted and applied, the
 // cap and how often it bound; per leg v, h, l1, l2, the reach before and after, the knee's animated and solved interior angles, the carried
@@ -11357,134 +11656,6 @@ void f65bStandLine(uint64_t now, bool scope) noexcept {
                     static_cast<unsigned long long>(st.refused[kStandRefNoStand]), static_cast<unsigned long long>(st.refused[kStandRefLeg]),
                     static_cast<unsigned long long>(st.refused[kStandRefWrite]), !planOk ? "unread" : legOk ? "ok" : "REFUSED",
                     nofoot::ikLegWhyText(legWhy), footR);
-}
-
-void f60FitLine(uint64_t now, int mode, bool full3P, bool vertical, const double dApplied[3], const EyeSample& s) noexcept {
-    const int ikMode = pfz::g_ikMode.load(std::memory_order_relaxed);
-    const auto reset = []() noexcept {
-        g_f60N = g_f60ErrN = g_f60WeaponN = g_f60HaveN = 0;
-        g_f60FitSum = g_f60ErrSum = g_f60ErrMax = g_f60ErrHSum = g_f60ErrUpSum = 0.0;
-        for (size_t i = 0; i < 3; ++i) g_f60HeadSum[i] = g_f60DwSum[i] = g_f60OutSum[i] = g_f60DSum[i] = 0.0;
-        // F62a
-        g_f62N = g_f62ApplyN = g_f62ClampN = g_f62LatBlendN = g_f62ResN = 0;
-        g_f62WFwdSum = g_f62WLatSum = g_f62RaisedSum = g_f62DisSum = g_f62GateSum = g_f62PullMax = 0.0;
-        for (size_t i = 0; i < 2; ++i) {
-            g_f62ESum[i] = g_f62PullSum[i] = g_f62ResSum[i] = 0.0;
-            g_f62AdsN[i] = 0;
-            g_f62AdsReachSum[i] = g_f62AdsReachMax[i] = g_f62AdsElbowSum[i] = g_f62AdsElbowMin[i] = 0.0;
-        }
-        g_f62BendCalls = g_f62BendN = g_f62BendFitLim = g_f62BendSusp = 0;
-        for (size_t i = 0; i < 3; ++i) g_f62BendClamp[i] = g_f62BendFitClamp[i] = 0;
-        g_f62BendRes0Max = 0.0;
-    };
-    if (mode != 2 || !full3P || ikMode == 0) {
-        reset();
-        g_f60LineMs = 0;
-        return;
-    }
-    ++g_f60N;
-    g_f60FitSum += g_f60Fit;
-    double dB[3] = {};
-    for (size_t i = 0; i < 3; ++i)
-        for (size_t j = 0; j < 3; ++j) dB[i] += dApplied[j] * static_cast<double>(s.rows[3 * i + j]);
-    for (size_t i = 0; i < 3; ++i) {
-        g_f60HeadSum[i] += g_f60Head[i];
-        g_f60OutSum[i] += g_f60Out[i];
-        g_f60DSum[i] += dB[i];
-    }
-    if (g_f60Have) {
-        ++g_f60HaveN;
-        for (size_t i = 0; i < 3; ++i) g_f60DwSum[i] += g_f60Pub.dw[i];
-    }
-    if (g_f60Weapon) ++g_f60WeaponN;
-    // F62a: the weights and factors, the application (d_w - d_head and the pull, right and forward), per arm in ADS the reach and the angle.
-    ++g_f62N;
-    g_f62WFwdSum += g_f62Apply.wFwd;
-    g_f62WLatSum += g_f62Apply.wLat;
-    g_f62RaisedSum += g_f60Raised;
-    if (g_f60Applied) {
-        ++g_f62ApplyN;
-        g_f62DisSum += g_f62Apply.disengage;
-        g_f62ESum[0] += g_f62Apply.e[0];
-        g_f62ESum[1] += g_f62Apply.e[2];
-        g_f62PullSum[0] += g_f62Apply.pull[0];
-        g_f62PullSum[1] += g_f62Apply.pull[2];
-        g_f62PullMax = std::max(g_f62PullMax, std::sqrt(g_f62Apply.pull[0] * g_f62Apply.pull[0] + g_f62Apply.pull[2] * g_f62Apply.pull[2]));
-        if (g_f62Apply.clamped) ++g_f62ClampN;
-    }
-    if (g_f60Have && (now > g_f60Pub.ms ? now - g_f60Pub.ms : 0) <= nofoot::kIkFreshMs) {
-        const double e[3] = {g_f60Pub.sd[0] - g_f60Pub.umid[0], g_f60Pub.sd[1] - g_f60Pub.umid[1], g_f60Pub.sd[2] - g_f60Pub.umid[2]};
-        const double en = nofoot::ikLen(e) * 100.0;
-        g_f60ErrSum += en;
-        g_f60ErrMax = std::max(g_f60ErrMax, en);
-        g_f60ErrHSum += std::sqrt(e[0] * e[0] + e[2] * e[2]) * 100.0;
-        g_f60ErrUpSum += e[1] * 100.0;
-        ++g_f60ErrN;
-        ++g_f62ResN;   // F62a
-        g_f62ResSum[0] += e[0];
-        g_f62ResSum[1] += e[2];
-        g_f62GateSum += g_f60Pub.gateMin;
-        if (g_f60Pub.adsW > 0.5)
-            for (int side = 0; side < 2; ++side) {
-                if (!g_f60Pub.solved[side]) continue;
-                const bool first = g_f62AdsN[side] == 0;
-                g_f62AdsReachSum[side] += g_f60Pub.reachA[side];
-                g_f62AdsReachMax[side] = first || g_f60Pub.reachA[side] > g_f62AdsReachMax[side] ? g_f60Pub.reachA[side] : g_f62AdsReachMax[side];
-                g_f62AdsElbowSum[side] += g_f60Pub.elbowDeg[side];
-                g_f62AdsElbowMin[side] = first || g_f60Pub.elbowDeg[side] < g_f62AdsElbowMin[side] ? g_f60Pub.elbowDeg[side] : g_f62AdsElbowMin[side];
-                ++g_f62AdsN[side];
-            }
-    }
-    if (g_f60LineMs == 0) g_f60LineMs = now;
-    if (now - g_f60LineMs < 1000) return;
-    g_f60LineMs = now;
-    const double n = g_f60N ? static_cast<double>(g_f60N) : 1.0, hn = g_f60HaveN ? static_cast<double>(g_f60HaveN) : 1.0,
-                 en = g_f60ErrN ? static_cast<double>(g_f60ErrN) : 1.0;
-    const uint64_t pubs = g_fitPublishes.load(std::memory_order_relaxed);
-    const FitPub& p = g_f60Pub;
-    {
-        const double fn = g_f62N ? static_cast<double>(g_f62N) : 1.0, an = g_f62ApplyN ? static_cast<double>(g_f62ApplyN) : 1.0,
-                     rn = g_f62ResN ? static_cast<double>(g_f62ResN) : 1.0;
-        const double aL = g_f62AdsN[0] ? static_cast<double>(g_f62AdsN[0]) : 1.0, aR = g_f62AdsN[1] ? static_cast<double>(g_f62AdsN[1]) : 1.0;
-        Log::get().note("native on foot weapon fit (F62a): weights (means) forward %.2f lateral %.2f (now: sliders %.2f, %.2f x ramp %.2f x raised "
-                        "%.2f, then x the disengage factor); raised factor smoothstep(0.5, 1.0, grip gate) mean %.2f (grip gate mean %.2f); "
-                        "applied %u of %u frames, disengage factor mean %.2f (|d_w - d_head| horizontal 0.15..0.35 m); residuals (body axes, "
-                        "means, cm): d_w - d_head (the head's untrimmed target) right %.1f forward %.1f, the pull right %.1f forward %.1f (max "
-                        "%.1f, clamped to 12 cm in %u frames), shoulder-mid Sd - Umid right %.1f forward %.1f (%u frames); the ADS lateral "
-                        "blend (0.3 s) ran %u frames",
-                        g_f62WFwdSum / fn, g_f62WLatSum / fn, static_cast<double>(g_fitWeaponKey.load(std::memory_order_relaxed)),
-                        static_cast<double>(g_fitLateralKey.load(std::memory_order_relaxed)), static_cast<double>(g_f60Blend.w), g_f60Raised,
-                        g_f62RaisedSum / fn, g_f62GateSum / rn, g_f62ApplyN, g_f62N, g_f62DisSum / an, 100.0 * g_f62ESum[0] / an,
-                        100.0 * g_f62ESum[1] / an, 100.0 * g_f62PullSum[0] / an, 100.0 * g_f62PullSum[1] / an, 100.0 * g_f62PullMax, g_f62ClampN,
-                        100.0 * g_f62ResSum[0] / rn, 100.0 * g_f62ResSum[1] / rn, g_f62ResN, g_f62LatBlendN);
-        Log::get().note("native on foot weapon fit (F62a): bend (its last 1 s line): %llu calls, %llu bent, at the fit's limits %llu (hits forward 8 "
-                        "%u, back 8 %u, roll 6 %u), all hits forward %u back %u roll %u, suspended %llu (before residual max %.1f cm); ADS "
-                        "(weight over 0.5): arm L %u frames, reach after the assist mean %.2f max %.2f, interior angle mean %.1f min %.1f deg; "
-                        "arm R %u frames, reach mean %.2f max %.2f, interior angle mean %.1f min %.1f deg; k_reach %.2f",
-                        static_cast<unsigned long long>(g_f62BendCalls), static_cast<unsigned long long>(g_f62BendN),
-                        static_cast<unsigned long long>(g_f62BendFitLim), g_f62BendFitClamp[0], g_f62BendFitClamp[1], g_f62BendFitClamp[2],
-                        g_f62BendClamp[0], g_f62BendClamp[1], g_f62BendClamp[2], static_cast<unsigned long long>(g_f62BendSusp), g_f62BendRes0Max,
-                        g_f62AdsN[0], g_f62AdsReachSum[0] / aL, g_f62AdsReachMax[0], g_f62AdsElbowSum[0] / aL, g_f62AdsElbowMin[0], g_f62AdsN[1],
-                        g_f62AdsReachSum[1] / aR, g_f62AdsReachMax[1], g_f62AdsElbowSum[1] / aR, g_f62AdsElbowMin[1], p.reachK);
-    }
-    Log::get().note("native on foot weapon fit (F60): fit weight mean %.2f (now %.2f = slider %.2f x ramp %.2f x raised %.2f; %s%s); weapon held "
-                    "%u of %u frames; body axes right, up, forward (means, cm): d_head (untrimmed, F62a) %.1f %.1f %.1f, d_w %.1f %.1f %.1f (%u "
-                    "frames), the fitted target (trims on it, F62a) "
-                    "%.1f %.1f %.1f, d applied %.1f %.1f %.1f (vertical %s); shoulder-mid error |Sd - Umid| after the fit mean %.1f max %.1f cm "
-                    "(horizontal %.1f, up %.1f: the vertical remainder, left to the bend) over %u frames; last Sd %.3f %.3f %.3f, Umid %.3f %.3f "
-                    "%.3f m (3P model), G's d %.1f %.1f %.1f cm, arm length %.1f cm x k_reach %.2f, grip gate min %.2f, ADS %.2f; hook "
-                    "publications %llu",
-                    g_f60FitSum / n, g_f60Fit, static_cast<double>(g_fitWeaponKey.load(std::memory_order_relaxed)), static_cast<double>(g_f60Blend.w),
-                    g_f60Raised, g_f60Why ? "held: " : "fitting", g_f60Why ? g_f60Why : "", g_f60WeaponN, g_f60N, 100.0 * g_f60HeadSum[0] / n,
-                    100.0 * g_f60HeadSum[1] / n, 100.0 * g_f60HeadSum[2] / n, 100.0 * g_f60DwSum[0] / hn, 100.0 * g_f60DwSum[1] / hn,
-                    100.0 * g_f60DwSum[2] / hn, g_f60HaveN, 100.0 * g_f60OutSum[0] / n, 100.0 * g_f60OutSum[1] / n, 100.0 * g_f60OutSum[2] / n,
-                    100.0 * g_f60DSum[0] / n, 100.0 * g_f60DSum[1] / n, 100.0 * g_f60DSum[2] / n,
-                    vertical ? "on: d_w's up is blended" : "off: the horizontal only", g_f60ErrSum / en, g_f60ErrMax, g_f60ErrHSum / en,
-                    g_f60ErrUpSum / en, g_f60ErrN, p.sd[0], p.sd[1], p.sd[2], p.umid[0], p.umid[1], p.umid[2], 100.0 * p.dB[0], 100.0 * p.dB[1],
-                    100.0 * p.dB[2], 100.0 * p.armLen, p.reachK, p.gateMin, p.adsW,
-                    static_cast<unsigned long long>(pubs - g_f60PubLast));
-    g_f60PubLast = pubs;
-    reset();
 }
 
 void installEyeProbeOnce() {
@@ -12249,6 +12420,11 @@ struct Find {
     int mapType = 0;
     float x0[3] = {}, tp[3] = {}, p[3] = {};
     bool pOk = false, haveTag = false;
+    // F66f: the record's first 16 bytes as this Unmap wrote it: word 0 (a skin index; zero for a rigid icon), the scale (a float), and the two
+    // words of the packed quaternion (the vertex shader's t33 +0..+15). headOk false: the read faulted.
+    bool headOk = false;
+    float scale = 0.0f;
+    uint32_t w0 = 0, q2 = 0, q3 = 0;
 };
 enum RecFlag : uint8_t { kRecWorld = 1, kRecMarker = 2, kRecShadowO = 4, kRecCut = 8, kRecCpuSkip = 16 };   // F63: not copied on purpose
 // One recorded draw: offsets into its frame's staging slot (-1: not copied).
@@ -12272,7 +12448,10 @@ struct Rec {
     float cpu[16] = {};
     bool fixApplied = false, fixNewest = false;   // F64: fixNewest: patched through the eye's newest scene rows (one frame older)
     float fixDx = 0.0f, fixDy = 0.0f;    // the applied delta (NDC)
-    float fixCx = 0.0f, fixCy = 0.0f;    // F50: the baseline c the delta was taken against (NDC)
+    float fixCx = 0.0f, fixCy = 0.0f;    // F66f: the icon offset e the patch used (NDC)
+    double fixTx = 0.0, fixTy = 0.0;     // F66f: the anchor's target in the texture (NDC)
+    drawtag::MarkerAffine fixAff;        // F66f: the affine the rows were patched with
+    uint8_t fixESrc = 0;                 // F66f: where e came from (1 the mesh, 2 the baseline)
     float fixHead = -1.0f;               // F50: the head's speed at the decision (deg/s; -1 unknown)
     int32_t patchedAt = -1;              // the private b0's rows 4..7 after the patch (staged)
     uint8_t fixRef = 0;                  // F52: the reference the patch measured against (drawtag::RefMode)
@@ -12347,6 +12526,11 @@ struct EyeStats {
     uint64_t viaCpu = 0, viaHold = 0, heldPX0 = 0, cpuContradict = 0, rbConfirm = 0, rbContradict = 0;
     uint64_t eN = 0;
     double exSum = 0.0, eySum = 0.0, eMax = 0.0;
+    // F66f at the draw (patched draws): the affine (sigma, u, the jitter removed), the icon offset used and its source (the mesh / the head-still
+    // baseline), the draws refused for no icon offset, and the affine fallbacks (the decomposition unusable or sigma outside 0.9..1.1).
+    uint64_t fNoIcon = 0, aN = 0, aOk = 0, aAxis = 0, eGeo = 0, eBase = 0;
+    double sxSum = 0.0, sySum = 0.0, uxSum = 0.0, uySum = 0.0, jxSum = 0.0, jySum = 0.0, exPxSum = 0.0, eyPxSum = 0.0, eyPxMin = 1e30, eyPxMax = -1e30,
+           sigmaDevMax = 0.0;
 };
 struct SrvInfo {
     const void* srv = nullptr;
@@ -12566,7 +12750,10 @@ struct Fix {
     int slot = -1;
     size_t rec = 0;
     double dx = 0.0, dy = 0.0;
-    double cx = 0.0, cy = 0.0, head = -1.0;   // F50: the baseline the delta was taken against, the head's speed at the decision
+    double cx = 0.0, cy = 0.0, head = -1.0;   // F66f: the icon offset e used (NDC), F50: the head's speed at the decision
+    double tx = 0.0, ty = 0.0;                // F66f: the anchor's target in the texture (NDC) and the affine the rows were patched with
+    drawtag::MarkerAffine aff;
+    int eSrc = 0;
     int keySlot = -1;                     // F52: the key slot the decision was made for
     int ref = 0;                          // F52: the reference it measured against (drawtag::RefMode)
     bool fresh = false;                   // F63: this frame's find gave P and X0; F64: and the rows are this frame's (not the newest rows)
@@ -12588,6 +12775,8 @@ struct LagEye {
     uint16_t ord = 0;
     uint32_t refEpoch = 0;   // F52: the eye's reference epoch the baseline was taken under (a reference change resets it)
     uint32_t lastFrame = ~0u;
+    double eLast[2] = {};   // F66f: the icon offset the patch last used (NDC) and where it came from (0 none, 1 the mesh, 2 the baseline)
+    int eSrc = 0;
     uint32_t resetNotes = 0;
     const char* lastReset = "none";
     uint64_t pitchN[3] = {}, rollN[2] = {};
@@ -12617,10 +12806,11 @@ KeyState g_keys[kKeySlots];
 struct KeyP {
     float p[3] = {};
     uint32_t frame = ~0u;
+    bool headOk = false;   // F66f: the key's newest find's record head (scale and quaternion words), for a held match's patch
+    float scale = 0.0f;
+    uint32_t w0 = 0, q2 = 0, q3 = 0;
 };
 KeyP g_keyP[256];
-// F63: the icon offset's bias per eye (drawtag::BiasEma: fresh patched frames' read-back residuals against the target they used).
-drawtag::BiasEma g_bias[2];
 // F63: the per-frame residual per eye (read-back of a fresh patched frame): the marker against P + e (the fixed e) and the e the patch used,
 // in px of the eye's target. The waypoint series' CSV reads it by frame (nativeOnFootMarkerResidual).
 struct ResCell {
@@ -12733,7 +12923,19 @@ __declspec(noinline) bool readRecordGuarded(const uint8_t* base, uint32_t bytes,
     return true;
 }
 
-void addFind(const Pool& p, const drawtag::Hit& h, int mapType, uint32_t frame) {
+// F66f: one record's first 16 bytes (word 0, the scale, the quaternion's two words), under SEH.
+__declspec(noinline) bool readRecordHeadGuarded(const uint8_t* base, uint32_t bytes, uint32_t index, uint32_t out[4]) noexcept {
+    const uint64_t at = static_cast<uint64_t>(index) * drawtag::kRecordStride;
+    if (!base || at + 16 > bytes) return false;
+    __try {
+        drawtag::streamLoad16(base + at, out);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    return true;
+}
+
+void addFind(const Pool& p, const uint8_t* base, const drawtag::Hit& h, int mapType, uint32_t frame) {
     for (uint32_t i = 0; i < g_findN[0]; ++i)
         if (g_finds[0][i].pool == p.res && g_finds[0][i].index == h.index && g_finds[0][i].sentinel == h.sentinel) return;   // found again
     if (g_findN[0] >= kHits) return;
@@ -12747,6 +12949,16 @@ void addFind(const Pool& p, const drawtag::Hit& h, int mapType, uint32_t frame) 
     f.frame = frame;
     f.mapType = mapType;
     std::memcpy(f.x0, h.pos, sizeof(f.x0));
+    {   // F66f: the record's head, for the icon's offset from its own geometry
+        uint32_t hw[4] = {};
+        f.headOk = readRecordHeadGuarded(base, p.bytes, h.index, hw);
+        if (f.headOk) {
+            f.w0 = hw[0];
+            std::memcpy(&f.scale, &hw[1], sizeof(f.scale));
+            f.q2 = hw[2];
+            f.q3 = hw[3];
+        }
+    }
     if (const F44Tag* t = tagOf(h.sentinel)) {
         f.haveTag = true;
         f.pOk = t->pOk;
@@ -12758,6 +12970,11 @@ void addFind(const Pool& p, const drawtag::Hit& h, int mapType, uint32_t frame) 
             KeyP& kp = g_keyP[f.key & 0xFFu];
             std::memcpy(kp.p, f.p, sizeof(kp.p));
             kp.frame = frame;
+            kp.headOk = f.headOk;
+            kp.scale = f.scale;
+            kp.w0 = f.w0;
+            kp.q2 = f.q2;
+            kp.q3 = f.q3;
         }
     }
     ++g_win.finds;
@@ -12907,7 +13124,7 @@ void unmapPool(Pool& p) {
                 ++g_win.dupFinds;
                 break;
             }
-        addFind(p, hits[i], mapType, frame);
+        addFind(p, base, hits[i], mapType, frame);
     }
 }
 
@@ -13625,6 +13842,7 @@ void worldDraw(ID3D11DeviceContext* ctx, uint32_t frame, uint64_t vs, bool censu
         std::memcpy(g_cpuWorld[e].rows, v.rows, sizeof(v.rows));
         std::memcpy(g_cpuWorld[e].o, v.o, sizeof(v.o));
         g_cpuWorld[e].cb1 = cb1;   // F64: identity only (the b1 Unmap stamp)
+        eyeRowsPublish(e, frame, g_cpuWorld[e].rows, g_cpuWorld[e].o);   // F66e: for the frame thread's ADS sight check
         ++g_win.worldShadow;
         ok = true;
     } else if (!covers(cb1, f1 * 16 + kWorldOffset, kWorldBytes)) {
@@ -14015,6 +14233,104 @@ void refTick(int e, uint32_t frame, double W, double H) {
     }
 }
 
+// F66f: THE ICON'S MESH. The marker composite's vertices are decoded in its vertex shader from PACKEDVERTEXDATAA.xyz and placed at the record's
+// anchor by its quaternion and scale (draw_record_tag.h: iconEdrawNdc), so the icon's offset from its anchor is geometry, not a screen constant.
+// The mesh is read once from the marker composite draw's vertex buffer (the one that is not the stride-8 instance stream): a GPU copy of its first
+// 4 KB into a staging buffer, mapped two or more frames later without a wait (drawtag::StagingRing). The layout of the vertices (the input layout
+// is not visible from here) is assumed to start with PACKEDVERTEXDATAA at an offset of 0, 16, 32 or 48 bytes into a vertex of the buffer's own
+// stride, and is accepted only when every vertex decodes to a finite point within 64 units, the mesh has 3 to 64 vertices and fits the 4 KB. The
+// icon's centre is the mean of its vertices. A mesh that is not accepted is logged with its raw words and the reason, once per buffer (six tries a
+// session): the offset then comes from the head-still baseline (affine-corrected, seeded over 30 slow-head frames) or the patch is refused as
+// "no icon offset". Render thread only.
+constexpr uint32_t kIconBytes = 4096, kIconTries = 6;
+struct IconGeo {
+    const void* vb = nullptr;   // identity only: the buffer the copy was taken from
+    uint32_t stride = 0, offset = 0, byteWidth = 0, copied = 0, tries = 0, count = 0, posOffset = 0, frame = 0;
+    int state = 0;              // 0 never tried, 1 a copy in flight, 2 decoded (centre valid), 3 refused (why)
+    const char* why = "not tried";
+    double centre[3] = {}, lo[3] = {}, hi[3] = {};
+};
+IconGeo g_icon;
+drawtag::StagingRing<2, kIconBytes> g_iconRing;
+uint64_t g_iconLost = 0;
+
+void iconCapture(ID3D11DeviceContext* ctx, uint32_t frame, ID3D11Buffer* const vbs[8], const UINT strides[8], const UINT offs[8]) {
+    IconGeo& g = g_icon;
+    if (g.state == 1 || g.tries >= kIconTries) return;
+    int pick = -1;
+    for (int i = 0; i < 8 && pick < 0; ++i)
+        if (vbs[i] && strides[i] != drawtag::kStreamStride && strides[i] >= 12 && strides[i] <= 128) pick = i;
+    if (pick < 0) return;
+    if ((g.state == 2 || g.state == 3) && g.vb == vbs[pick]) return;   // this buffer was decoded or refused
+    D3D11_BUFFER_DESC d{};
+    vbs[pick]->GetDesc(&d);
+    const UINT bytes = std::min<UINT>(d.ByteWidth, kIconBytes) & ~3u;
+    if (!bytes) return;
+    const drawtag::CopyRegion rg{vbs[pick], 0, bytes, 0};
+    if (g_iconRing.stage(ctx, &rg, 1, frame) < 0) return;   // no free slot: the next draw tries again
+    g.vb = vbs[pick];
+    g.stride = strides[pick];
+    g.offset = offs[pick];
+    g.byteWidth = d.ByteWidth;
+    g.copied = bytes;
+    g.frame = frame;
+    g.state = 1;
+    ++g.tries;
+}
+
+void iconOnData(int /*slot*/, const uint8_t* data) {
+    IconGeo& g = g_icon;
+    g.state = 3;
+    g.count = g.stride ? g.copied / g.stride : 0;
+    uint32_t w[12] = {};
+    std::memcpy(w, data, std::min<size_t>(sizeof(w), g.copied));
+    const auto refuse = [&](const char* why) {
+        g.why = why;
+        Log::get().note("native on foot marker fix (F66f): icon geometry NOT read (%s): buffer %p, stride %u, %u bytes (%u copied, %u vertices, "
+                        "stream offset %u); first words %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X; the icon offset comes from "
+                        "the head-still baseline or the patch is refused as 'no icon offset'",
+                        why, g.vb, g.stride, g.byteWidth, g.copied, g.count, g.offset, w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7], w[8], w[9], w[10],
+                        w[11]);
+    };
+    if (g.byteWidth > kIconBytes) return refuse("the buffer is larger than the 4 KB copied: a shared mesh pool, its range needs the draw's arguments");
+    if (g.count < 3 || g.count > 64) return refuse("the vertex count is not that of an icon quad or fan");
+    for (uint32_t off = 0; off + 12 <= g.stride && off <= 48; off += 16) {
+        double sum[3] = {}, lo[3] = {1e30, 1e30, 1e30}, hi[3] = {-1e30, -1e30, -1e30};
+        bool good = true;
+        for (uint32_t v = 0; v < g.count && good; ++v) {
+            uint32_t a[3];
+            std::memcpy(a, data + static_cast<size_t>(v) * g.stride + off, sizeof(a));
+            double p[3];
+            if (!drawtag::decodePackedPosition(a[0], a[1], a[2], p)) {
+                good = false;
+                break;
+            }
+            for (int i = 0; i < 3; ++i) {
+                if (!(std::fabs(p[i]) <= 64.0)) good = false;
+                sum[i] += p[i];
+                lo[i] = std::min(lo[i], p[i]);
+                hi[i] = std::max(hi[i], p[i]);
+            }
+        }
+        if (!good || !(hi[0] - lo[0] > 1e-6 || hi[1] - lo[1] > 1e-6 || hi[2] - lo[2] > 1e-6)) continue;
+        for (int i = 0; i < 3; ++i) {
+            g.centre[i] = sum[i] / static_cast<double>(g.count);
+            g.lo[i] = lo[i];
+            g.hi[i] = hi[i];
+        }
+        g.posOffset = off;
+        g.state = 2;
+        g.why = "decoded";
+        Log::get().note("native on foot marker fix (F66f): icon geometry read: buffer %p, stride %u, %u vertices; PACKEDVERTEXDATAA at +%u; decoded "
+                        "bounding box (%.4f, %.4f, %.4f) .. (%.4f, %.4f, %.4f), centre (the mean of the vertices) (%.4f, %.4f, %.4f); first words %08X "
+                        "%08X %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X",
+                        g.vb, g.stride, g.count, off, g.lo[0], g.lo[1], g.lo[2], g.hi[0], g.hi[1], g.hi[2], g.centre[0], g.centre[1], g.centre[2], w[0],
+                        w[1], w[2], w[3], w[4], w[5], w[6], w[7], w[8], w[9], w[10], w[11]);
+        return;
+    }
+    refuse("no offset of 0, 16, 32 or 48 decodes to a finite mesh within 64 units");
+}
+
 // F47: the correction's decision at a marker composite draw (the tee, the game's bindings): sets g_fix.pending for this draw, or counts why
 // not. Nothing is bound here; Begin binds. F52: per key: the draw is the one whose place in the eye a key's fresh read-back match names; that
 // key must be matched in both eyes; its own baseline and find are used; the eye's reference is world_first or temporal (F64: no last good
@@ -14114,12 +14430,20 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
     if (f && (!f->haveTag || !f->pOk)) f = nullptr;
     double fX0[3] = {}, fP[3] = {};
     bool haveP = false;
+    bool headOk = false;   // F66f: the record's head (skin word, scale, quaternion words) of this find, else of the key's newest find
+    float hScale = 0.0f;
+    uint32_t hW0 = 0, hQ2 = 0, hQ3 = 0;
     if (f) {
         for (int k = 0; k < 3; ++k) {
             fX0[k] = f->x0[k];
             fP[k] = f->p[k];
         }
         haveP = true;
+        headOk = f->headOk;
+        hScale = f->scale;
+        hW0 = f->w0;
+        hQ2 = f->q2;
+        hQ3 = f->q3;
     } else {
         const KeyP& kp = g_keyP[keyNow & 0xFFu];
         const KeyEye& ke = K.eye[e];
@@ -14130,6 +14454,11 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
             }
             haveP = true;
             ++s.heldPX0;
+            headOk = kp.headOk;
+            hScale = kp.scale;
+            hW0 = kp.w0;
+            hQ2 = kp.q2;
+            hQ3 = kp.q3;
         }
     }
     int why = -1;
@@ -14137,11 +14466,11 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
     // matched draw moves to another place (the eye assignment). F52: one per key per eye; also reset when the eye's reference changes.
     LagEye& L = K.eye[e].lag;
     const double W = r.tw ? static_cast<double>(r.tw) : kDefaultTargetSize, H = r.th ? static_cast<double>(r.th) : kDefaultTargetSize;
-    // F53: e, the fixed icon offset; F63: the patch aims at e less the eye's measured bias (drawtag::BiasEma; zero until fresh patched frames
-    // have been read back).
-    double eFix[2], cUsed[2];
-    drawtag::iconOffsetNdc(H, eFix);
-    g_bias[e].target(eFix, cUsed);
+    // F66f: this decision's affine (the marker's projection against the eye's scene rows and the texture's tangents), the anchor's own NDC
+    // through the unpatched rows, the target in the texture, and the icon offset with where it came from (0 none yet, 1 the mesh, 2 the baseline).
+    drawtag::MarkerAffine aff;
+    double eIcon[2] = {}, T[2] = {}, nM0[2] = {};
+    int eSrc = 0;
     {
         const auto norm3 = [](const float* v) {
             return std::sqrt(static_cast<double>(v[0]) * v[0] + static_cast<double>(v[1]) * v[1] + static_cast<double>(v[2]) * v[2]);
@@ -14209,43 +14538,91 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
     } else {
         const double ow[3] = {w.o[0], w.o[1], w.o[2]}, oh[3] = {oHud[0], oHud[1], oHud[2]}, P[3] = {fP[0], fP[1], fP[2]};
         const double X0[3] = {fX0[0], fX0[1], fX0[2]};
-        // F53: the target is ndc(P through the eye's scene rows) + e, e the fixed icon offset (drawtag::iconOffsetNdc); the learned baseline
-        // (F50) is dropped from the decision and kept, updated below, for the log only. F63: the delta aims at e less the bias (cUsed); the
-        // |m - e| bins below stay against the fixed e. F64: the measures below take this frame's rows only (newest rows carry a frame's lag).
-        const double* c = eFix;
-        double lag[2] = {};
-        why = drawtag::ndcLagDelta(w.rows, ow, sh->rows[4], sh->rows[5], sh->rows[7], oh, X0, P, cUsed, kGateNdc, lag, &dx, &dy);
-        if ((why == drawtag::kDeltaOk || why == drawtag::kDeltaGate) && rowsState == drawtag::kRowsFresh && L.lastFrame != frame) {
-            L.lastFrame = frame;
-            // |m - c| by the head's speed (against the c the delta used: F53 e), the baseline's update (logged only), the honesty bins (every
-            // slow-head frame; reported against e).
-            const int bin = g_headDps < 0.0 ? -1 : g_headDps < 3.0 ? 0 : g_headDps < 20.0 ? 1 : g_headDps < 60.0 ? 2 : 3;
-            if (bin >= 0) {
-                const double ex = (lag[0] - c[0]) * W * 0.5, ey = (lag[1] - c[1]) * H * 0.5, px = std::sqrt(ex * ex + ey * ey);
-                ++s.lagN[bin];
-                s.lagSum[bin] += px;
-                if (px > s.lagMax[bin]) s.lagMax[bin] = px;
-                ++kw.lagN[e][bin];
-                kw.lagSum[e][bin] += px;
-                if (px > kw.lagMax[e][bin]) kw.lagMax[e][bin] = px;
-            }
+        // F66f: the target is the UNJITTERED P through the eye's scene rows (the dot does not carry the TAA jitter that the rows do: their centre
+        // less the texture's axis) plus the icon offset e; the marker's rows become n_final = sigma n_M + u so that the anchor is SHOWN at the
+        // target and the rest of the icon at the offsets the game designed (drawtag::markerAffineU). F64: the measures below take this frame's
+        // rows only (newest rows carry a frame's lag).
+        drawtag::ProjDecomp dM, dWorld;
+        const bool decOk = drawtag::projDecomposeMarker(sh->rows[4], sh->rows[5], sh->rows[7], dM) && drawtag::projDecomposeWorld(w.rows, dWorld);
+        float tanE[4] = {};
+        double axisE[2] = {};
+        const bool axisOk = temporalPassEyeTan(e, tanE) && drawtag::axisFromTangents(tanE, axisE);
+        if (decOk) aff = drawtag::markerAffine(dM, dWorld, axisOk ? axisE : nullptr);
+        double wc[4], mc[3];
+        drawtag::worldClip(w.rows, P, ow, wc);
+        drawtag::markerClip(sh->rows[4], sh->rows[5], sh->rows[7], X0, oh, mc);
+        if (!(wc[3] > 1e-9)) {
+            why = drawtag::kDeltaWorldBehind;
+        } else if (!(mc[2] > 1e-9)) {
+            why = drawtag::kDeltaMarkerBehind;
+        } else {
+            const double nW[2] = {wc[0] / wc[3], wc[1] / wc[3]};
+            nM0[0] = mc[0] / mc[2];
+            nM0[1] = mc[1] / mc[2];
+            double nWu[2], nD[2];
+            drawtag::unjitter(aff, nW, nWu);
+            drawtag::displayOfUi(aff, nM0, nD);
+            const double lag[2] = {nD[0] - nWu[0], nD[1] - nWu[1]};   // where the anchor is SHOWN, unpatched, against the unjittered P (the lag + e)
+            const bool fresh = rowsState == drawtag::kRowsFresh && L.lastFrame != frame;
+            // The head-still baseline (the F50 machinery, fed the affine-corrected measure): 30 slow-head frames, its standard deviation under 0.5 px.
             bool restarted = false;
-            if (L.b.update(lag, g_headDps, &restarted)) ++s.lagTaken;
-            if (restarted) {
-                L.clearBins();
-                L.lastReset = "90 slow-head frames in a row were over 0.01 NDC from c (the seed starts again)";
-                ++s.lagResets;
-                ++kw.resets[e];
-            }
-            if (bin == 0 && g_headPoseOk) {
-                const int pb = g_headPitch < -15.0 ? 0 : g_headPitch <= 15.0 ? 1 : 2, rb = std::fabs(g_headRoll) < 10.0 ? 0 : 1;
-                ++L.pitchN[pb];
-                ++L.rollN[rb];
-                for (int k = 0; k < 2; ++k) {
-                    L.pitchSum[pb][k] += lag[k];
-                    L.rollSum[rb][k] += lag[k];
+            if (fresh) {
+                L.lastFrame = frame;
+                if (L.b.update(lag, g_headDps, &restarted)) ++s.lagTaken;
+                if (restarted) {
+                    L.clearBins();
+                    L.lastReset = "90 slow-head frames in a row were over 0.01 NDC from c (the seed starts again)";
+                    ++s.lagResets;
+                    ++kw.resets[e];
                 }
             }
+            // The icon offset: from the mesh (the anchor and the icon's centre through the draw's own rows) when it was read and the record is
+            // rigid; else the baseline once seeded and steady; else none, and the patch is refused as "no icon offset".
+            if (g_icon.state == 2 && headOk && hW0 == 0u && hScale > 0.0f && hScale < 1.0e6f) {
+                const double x0rel[3] = {X0[0] - oh[0], X0[1] - oh[1], X0[2] - oh[2]};
+                if (drawtag::iconEdrawNdc(sh->rows[4], sh->rows[5], sh->rows[7], x0rel, static_cast<double>(hScale), hQ2, hQ3, g_icon.centre, eIcon))
+                    eSrc = 1;
+            }
+            if (!eSrc && L.b.ready(W, H, kLagStdMaxPx)) {
+                eIcon[0] = L.b.c[0];
+                eIcon[1] = L.b.c[1];
+                eSrc = 2;
+            }
+            if (fresh) {
+                // |m - e| by the head's speed (the lag the patch removes), and the honesty bins (every slow-head frame; reported against e).
+                const int bin = g_headDps < 0.0 ? -1 : g_headDps < 3.0 ? 0 : g_headDps < 20.0 ? 1 : g_headDps < 60.0 ? 2 : 3;
+                if (bin >= 0 && eSrc) {
+                    const double ex = (lag[0] - eIcon[0]) * W * 0.5, ey = (lag[1] - eIcon[1]) * H * 0.5, px = std::sqrt(ex * ex + ey * ey);
+                    ++s.lagN[bin];
+                    s.lagSum[bin] += px;
+                    if (px > s.lagMax[bin]) s.lagMax[bin] = px;
+                    ++kw.lagN[e][bin];
+                    kw.lagSum[e][bin] += px;
+                    if (px > kw.lagMax[e][bin]) kw.lagMax[e][bin] = px;
+                }
+                if (bin == 0 && g_headPoseOk) {
+                    const int pb = g_headPitch < -15.0 ? 0 : g_headPitch <= 15.0 ? 1 : 2, rb = std::fabs(g_headRoll) < 10.0 ? 0 : 1;
+                    ++L.pitchN[pb];
+                    ++L.rollN[rb];
+                    for (int k = 0; k < 2; ++k) {
+                        L.pitchSum[pb][k] += lag[k];
+                        L.rollSum[rb][k] += lag[k];
+                    }
+                }
+            }
+            if (!eSrc) {
+                ++s.pWhy[drawtag::kPatchNoIcon];
+                ++s.fNoIcon;
+                return;
+            }
+            L.eLast[0] = eIcon[0];
+            L.eLast[1] = eIcon[1];
+            L.eSrc = eSrc;
+            T[0] = nWu[0] + eIcon[0];
+            T[1] = nWu[1] + eIcon[1];
+            dx = T[0] - nM0[0];
+            dy = T[1] - nM0[1];
+            why = (std::fabs(dx) < kGateNdc && std::fabs(dy) < kGateNdc) ? drawtag::kDeltaOk : drawtag::kDeltaGate;
         }
         // F62c: F53's trust gate (the scene rows against the temporal pass under 1 px) is gone; it refused about 45% of frames.
         if (why == drawtag::kDeltaGate) {
@@ -14266,11 +14643,34 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
     float r4[4], r5[4];
     std::memcpy(r4, sh->rows[4], sizeof(r4));
     std::memcpy(r5, sh->rows[5], sizeof(r5));
-    drawtag::ndcOffsetRows(r4, r5, sh->rows[7], dx, dy);
-    // F53: the c the delta was taken against is e; F63: e less the eye's bias (the read-back's residual is taken against this, the EMA's input).
-    g_fix.cx = cUsed[0];
-    g_fix.cy = cUsed[1];
-    g_fix.fresh = !v.newest && f != nullptr;   // F63: this frame's find gave P and X0 (F64: through this frame's rows): the bias may learn from it
+    // F66f: the affine rows (sigma = 1 and u = T - n_M(X0) when the decomposition is unusable: today's translation).
+    double uRows[2];
+    drawtag::markerAffineU(aff, T, nM0, uRows);
+    drawtag::affineOffsetRows(r4, r5, sh->rows[7], aff.sigma, uRows);
+    ++s.aN;
+    if (aff.ok) ++s.aOk;
+    if (aff.haveAxis) ++s.aAxis;
+    s.sxSum += aff.sigma[0];
+    s.sySum += aff.sigma[1];
+    s.uxSum += uRows[0];
+    s.uySum += uRows[1];
+    s.jxSum += aff.jitter[0] * W * 0.5;
+    s.jySum += aff.jitter[1] * H * 0.5;
+    s.sigmaDevMax = std::max(s.sigmaDevMax, std::max(std::fabs(aff.sigma[0] - 1.0), std::fabs(aff.sigma[1] - 1.0)));
+    if (eSrc == 1) ++s.eGeo;
+    else ++s.eBase;
+    s.exPxSum += eIcon[0] * W * 0.5;
+    s.eyPxSum += eIcon[1] * H * 0.5;
+    s.eyPxMin = std::min(s.eyPxMin, eIcon[1] * H * 0.5);
+    s.eyPxMax = std::max(s.eyPxMax, eIcon[1] * H * 0.5);
+    // The e used, the target and the affine, for the read-back's residual (the anchor shown against its target).
+    g_fix.cx = eIcon[0];
+    g_fix.cy = eIcon[1];
+    g_fix.tx = T[0];
+    g_fix.ty = T[1];
+    g_fix.aff = aff;
+    g_fix.eSrc = eSrc;
+    g_fix.fresh = !v.newest && f != nullptr;   // F63: this frame's find gave P and X0 (F64: through this frame's rows)
     g_fix.head = g_headDps;
     g_fix.keySlot = ks;
     g_fix.ref = ref;
@@ -14352,6 +14752,7 @@ void markerDraw(ID3D11DeviceContext* ctx, uint32_t frame, uint64_t vs, uint32_t 
                 ++eights;
                 if (pick < 0) pick = i;
             }
+        if (fixKey) iconCapture(ctx, frame, vbs, strides, offs);   // F66f: the icon's mesh, once per buffer
     }
     const Find* cpuFind = nullptr;
     if (fixKey && r.watched && direct && eights == 1 && pick >= 0 && (r.eye == 0 || r.eye == 1) && offs[pick] % drawtag::kStreamStride == 0) {
@@ -14550,19 +14951,20 @@ void f47Measure(EyeStats& s, const WorldView& w, const float rows[16], const dou
 // F52: also per key (kw, eye e), against the reference the patch measured against (the caller's w).
 void f50Residual(EyeStats& s, const WorldView& w, const float patched[16], const double oh[3], const double X0[3], const double P[3], const Rec& r,
                  double W, double H, KeyWin* kw, int e, uint32_t frame) {
-    const double ow[3] = {w.o[0], w.o[1], w.o[2]}, c[2] = {r.fixCx, r.fixCy};
-    double dx = 0.0, dy = 0.0, m[2] = {};
-    if (drawtag::ndcLagDelta(w.rows, ow, patched, patched + 4, patched + 12, oh, X0, P, c, 1e30, m, &dx, &dy) != drawtag::kDeltaOk) return;
-    const double px = -dx * W * 0.5, py = -dy * H * 0.5;   // (m - c): where the marker landed against P + c
-    // F63: the icon offset's bias learns from fresh patched frames only (this frame's find, a fresh delta): the residual against the target
-    // the patch used (c = e less the bias then). The per-frame residual against P + e (the fixed e) goes to the second's sums and the ring
-    // the waypoint series' CSV reads, with the e the patch used (px).
+    // F66f: X0 through the patched rows (read back), SHOWN through the affine's display map, against the target the patch aimed at (the
+    // unjittered P plus e, stored with the patch); the world rows are not read again. About zero when the patch took.
+    (void)w;
+    (void)P;
+    double mc[3];
+    drawtag::markerClip(patched, patched + 4, patched + 12, X0, oh, mc);
+    if (!(mc[2] > 1e-9)) return;
+    const double nF[2] = {mc[0] / mc[2], mc[1] / mc[2]}, c[2] = {r.fixCx, r.fixCy};
+    double disp[2];
+    drawtag::displayOfUi(r.fixAff, nF, disp);
+    const double px = (disp[0] - r.fixTx) * W * 0.5, py = (disp[1] - r.fixTy) * H * 0.5;
+    // The per-frame residual against the target goes to the second's sums and the ring the waypoint series' CSV reads, with the e the patch used (px).
     if (e == 0 || e == 1) {
-        const double rt[2] = {-dx, -dy};
-        g_bias[e].update(rt, r.fixFresh);
-        double eF[2];
-        drawtag::iconOffsetNdc(H, eF);
-        const double rex = (-dx + c[0] - eF[0]) * W * 0.5, rey = (-dy + c[1] - eF[1]) * H * 0.5;
+        const double rex = px, rey = py;
         ++s.eN;
         s.exSum += rex;
         s.eySum += rey;
@@ -14875,6 +15277,7 @@ void frameTurn(ID3D11DeviceContext* ctx, uint32_t frame) {
     headSample();
     rowCensusTurn(frame);   // F53: the census frame that ended is logged; a new one may start
     g_staging.poll(ctx, frame, 2, 12, [](int slot, uint32_t f, const uint8_t* d, uint32_t used) { readFrame(slot, f, d, used); }, &g_win.lost);
+    g_iconRing.poll(ctx, frame, 2, 60, [](int slot, const uint8_t* d) { iconOnData(slot, d); }, &g_iconLost);   // F66f
 }
 
 const char* mapName(int t) {
@@ -15097,18 +15500,34 @@ void report(uint64_t nowMs) {
                 else
                     Log::get().note("native on foot marker fix (F62c): eye %d: no decision this second (no marker composite draw of the eye reached "
                                     "the fix)", e);
+                // F66f, per eye: the affine rows and the icon offset of this second's patched draws. A run in which the new code never ran reads
+                // "0 patched draws" (and the F62c line says why); a run with sigma exactly 1 says the decomposition was unusable.
+                {
+                    const double an = s.aN ? double(s.aN) : 1.0, rn2 = s.eN ? double(s.eN) : 1.0;
+                    static const char* const kIconState[4] = {"never tried", "a copy in flight", "decoded", "refused"};
+                    Log::get().note("native on foot marker fix (F66f): eye %d: %llu patched draws; affine rows sigma x %.5f y %.5f (means; sigma - 1 = %+.5f, "
+                                    "%+.5f; |sigma - 1| max %.5f; expect about +0.0094 and +0.0081: the dot sat about 1%% too close to the axis), t (the rows' "
+                                    "translation) x %+.5f y %+.5f NDC; affine usable in %llu draws (else the plain translation), the texture's axis known in "
+                                    "%llu (else the TAA jitter is not removed from P); jitter removed from P %+.2f, %+.2f px (mean); icon offset e from the "
+                                    "mesh in %llu draws, from the head-still baseline in %llu, patches refused for no icon offset %llu; e y %.2f px mean "
+                                    "(min %.2f, max %.2f), x %.2f px mean (F65: 36.3 px up); icon mesh %s (%s); anchor shown against its target after the patch "
+                                    "(read back): %+.2f, %+.2f px mean, max %.2f over %llu frames",
+                                    e, ull(s.aN), s.sxSum / an, s.sySum / an, s.sxSum / an - 1.0, s.sySum / an - 1.0, s.sigmaDevMax, s.uxSum / an,
+                                    s.uySum / an, ull(s.aOk), ull(s.aAxis), s.jxSum / an, s.jySum / an, ull(s.eGeo), ull(s.eBase), ull(s.fNoIcon),
+                                    s.aN ? s.eyPxSum / an : 0.0, s.aN ? s.eyPxMin : 0.0, s.aN ? s.eyPxMax : 0.0, s.aN ? s.exPxSum / an : 0.0,
+                                    kIconState[g_icon.state >= 0 && g_icon.state < 4 ? g_icon.state : 0], g_icon.why, s.exSum / rn2, s.eySum / rn2, s.eMax,
+                                    ull(s.eN));
+                }
                 // F63, per eye: where the decisions' matches came from (the CPU identification in this frame, a held match), the hold's P
                 // and X0 fallback, the contradictions (at the draw by the CPU identification, at read-back), the read-back's confirmations;
                 // the per-frame residual of fresh patched frames against P + e (the fixed e) and the bias now subtracted from e.
                 const double rn = s.eN ? double(s.eN) : 1.0;
-                const double bw = s.tw > 0.0 ? s.tw : kDefaultTargetSize, bh = s.th > 0.0 ? s.th : kDefaultTargetSize;
                 Log::get().note("native on foot marker fix (F63): eye %d: matched by the CPU identification %llu, by a held match (%u frames) %llu "
                                 "(P and X0 from the hold's fallback %llu); holds contradicted at the draw %llu, at read-back %llu; read-back "
-                                "confirmations %llu; residual against P + e (fresh patched frames, read back): %llu frames, dx mean %+.2f px, dy "
-                                "mean %+.2f px, max %.2f px; bias subtracted from e %+.2f, %+.2f px (EMA alpha %.2f over %llu frames)",
+                                "confirmations %llu; residual of the anchor shown against its target (read back, F66f): %llu frames, dx mean %+.2f px, dy "
+                                "mean %+.2f px, max %.2f px",
                                 e, ull(s.viaCpu), kMatchHold, ull(s.viaHold), ull(s.heldPX0), ull(s.cpuContradict), ull(s.rbContradict),
-                                ull(s.rbConfirm), ull(s.eN), s.exSum / rn, s.eySum / rn, s.eMax, g_bias[e].b[0] * bw * 0.5, g_bias[e].b[1] * bh * 0.5,
-                                drawtag::kBiasAlpha, ull(g_bias[e].n));
+                                ull(s.rbConfirm), ull(s.eN), s.exSum / rn, s.eySum / rn, s.eMax);
                 // F64, the success line (marker-visible seconds only): the applied fraction of the eye-frames in which a key's match named a
                 // marker composite draw of the eye, by the head's speed band, and those eye-frames by state (a patch bound at the issue through
                 // this frame's rows, through the eye's newest rows one frame older, or none).
@@ -15186,8 +15605,7 @@ void report(uint64_t nowMs) {
                 if (!rl) appendf(resid, sizeof(resid), rl, "none this second");
                 // The honesty check: the bins' means (px) and the largest difference between two bins that have kLagBinMinN frames. F53: each
                 // bin is m - e (the fixed icon offset), so a constant e shows as bins near zero.
-                double eOff[2];
-                drawtag::iconOffsetNdc(H, eOff);
+                const double eOff[2] = {L.eLast[0], L.eLast[1]};   // F66f: the icon offset the patch last used for this key and eye
                 double binMean[5][2] = {};
                 bool binOk[5] = {};
                 static const char* const kBinNames[5] = {"pitch < -15", "pitch -15..15", "pitch > 15", "|roll| < 10", "|roll| >= 10"};
@@ -15221,15 +15639,16 @@ void report(uint64_t nowMs) {
                 const bool masking = compared > 0 && spread > kLagPitchSpreadPx;
                 const char* verdict = masking ? "NOT CONSTANT" : compared ? "constant so far" : "not yet testable (fewer than two bins with enough frames)";
                 Log::get().note("native on foot marker fix (F53, key %s): tag key %u eye %d (record %u, read by %llu draws, places mask 0x%X; "
-                                "patch rows: the scene rows (F62c); temporal reference for the measure lines %s): target = P through the scene rows + "
-                                "e, e (fixed icon offset, %.1f px up) (%+.5f, %+.5f) NDC = (%+.2f, "
-                                "%+.2f) px at %.0fx%.0f; the learned baseline (F50, logged only, not applied) c (%+.5f, %+.5f) NDC = (%+.2f, %+.2f) px, "
+                                "patch rows: the scene rows (F62c); temporal reference for the measure lines %s): target = the unjittered P through the scene "
+                                "rows + e, e (the icon offset, from %s) (%+.5f, %+.5f) NDC = (%+.2f, "
+                                "%+.2f) px at %.0fx%.0f; the head-still baseline (F50, fed the affine-corrected measure) c (%+.5f, %+.5f) NDC = (%+.2f, %+.2f) px, "
                                 "std %.2f px (%s, %u frames taken; resets this second %llu, last: %s); |m - e| by head speed: %s; decided %llu, patched "
                                 "%llu draws (through the newest rows %llu), scene rows stale %llu, gate (|d| >= %.2f NDC) %llu, other eye unmatched %llu; after the "
                                 "patch |marker - (P + e)| by head speed: %s; honesty check (m - e by head pitch / roll, slow head, since the last "
                                 "reset): %s; spread %.2f px (limit %.1f): %s",
                                 fixOn ? "on" : "off", g_keyIdx.key[ki], e, kw.record, ull(kw.reads[e]), kw.ordMask[e],
-                                g_refEff[e] == drawtag::kRefTemporal ? "temporal" : "world_first", drawtag::kIconPx, eOff[0], eOff[1],
+                                g_refEff[e] == drawtag::kRefTemporal ? "temporal" : "world_first",
+                                L.eSrc == 1 ? "the icon's mesh" : L.eSrc == 2 ? "the head-still baseline" : "nothing yet", eOff[0], eOff[1],
                                 eOff[0] * W * 0.5, eOff[1] * H * 0.5, W, H, L.b.c[0], L.b.c[1], L.b.c[0] * W * 0.5, L.b.c[1] * H * 0.5,
                                 L.b.stdPx(W, H), L.b.ready(W, H, kLagStdMaxPx) ? "steady" : L.b.seeded ? "seeded, std too high" : "seeding", L.b.n,
                                 ull(kw.resets[e]), L.lastReset, lag, ull(kw.decided[e]), ull(kw.patched[e]), ull(kw.newest[e]), ull(kw.stale[e]),
@@ -15648,6 +16067,10 @@ bool nativeOnFootMarkerFixBegin(ID3D11DeviceContext* ctx) {
         r.fixDy = static_cast<float>(g_fix.dy);
         r.fixCx = static_cast<float>(g_fix.cx);
         r.fixCy = static_cast<float>(g_fix.cy);
+        r.fixTx = g_fix.tx;
+        r.fixTy = g_fix.ty;
+        r.fixAff = g_fix.aff;
+        r.fixESrc = static_cast<uint8_t>(g_fix.eSrc);
         r.fixHead = static_cast<float>(g_fix.head);
         r.patchedAt = static_cast<int32_t>(at);
         r.fixRef = static_cast<uint8_t>(g_fix.ref);
@@ -15679,7 +16102,8 @@ void nativeOnFootMarkerProbeShutdown() {
     for (f44::KeyState& k : f44::g_keys) k = f44::KeyState{};   // F50/F52: every key's baselines
     f44::g_keyIdx = drawtag::KeyIndex<f44::kKeySlots>{};
     f44::g_stream = f44::StreamShadow{};                          // F63: the stream shadow, the biases, the keys' P
-    for (drawtag::BiasEma& b : f44::g_bias) b = drawtag::BiasEma{};
+    f44::g_iconRing.release();   // F66f
+    f44::g_icon = f44::IconGeo{};
     for (f44::KeyP& kp : f44::g_keyP) kp = f44::KeyP{};
     if (f44::g_privCb) f44::g_privCb->Release();
     if (f44::g_workBuf) f44::g_workBuf->Release();

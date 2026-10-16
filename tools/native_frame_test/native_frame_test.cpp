@@ -15,9 +15,11 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <limits>
 #include <string>
 #include <thread>
+#include <vector>
 
 // The journal watcher is stubbed so the on-foot signal is the rig's to set.
 static bool g_journalActive = false, g_onFootKnown = false, g_onFoot = false;
@@ -39,6 +41,12 @@ static EdvrNativeFrameInput input(uint64_t generation, uint64_t reference,
     const float identity[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
     std::memcpy(result.physicalHead, identity, sizeof(identity));
     return result;
+}
+
+// The F53 and F62c cases test ndcLagDelta's mechanics against an arbitrary c; F66f removed the constant icon offset, so they keep their old c here.
+static void testIconE(double H, double e[2]) {
+    e[0] = 0.0;
+    e[1] = H > 0.0 ? 2.0 * 36.3 / H : 0.0;
 }
 
 int wmain(int argc, wchar_t** argv) {
@@ -711,11 +719,7 @@ int wmain(int argc, wchar_t** argv) {
                       !dt::sceneRowsTrusted(true, std::numeric_limits<double>::quiet_NaN()),
                   "F53: the scene rows are trusted only on a compared frame that agrees with the temporal pass under 1 px");
             double e[2] = {};
-            dt::iconOffsetNdc(2016.0, e);
-            double e0[2] = {1.0, 1.0};
-            dt::iconOffsetNdc(0.0, e0);
-            check(e[0] == 0.0 && std::fabs(e[1] * 2016.0 * 0.5 - 36.3) < 1e-9 && e[1] > 0.0 && e0[0] == 0.0 && e0[1] == 0.0,
-                  "F53: e is 36.3 px up (NDC y up) at the target's height");
+            testIconE(2016.0, e);
             // The correction with c = e: X0 lags P (as F50's case); the patched marker lands at ndc_P + e.
             float m4[4] = {1.2f, 0, 0.1f, 0}, m5[4] = {0, 1.1f, -0.05f, 0};
             const double x0[3] = {11.02, 2.01, 3.0};
@@ -761,7 +765,7 @@ int wmain(int argc, wchar_t** argv) {
             const double gx = (ct[0] / ct[3] - cs[0] / cs[3]) * W * 0.5, gy = (ct[1] / ct[3] - cs[1] / cs[3]) * H * 0.5;
             const double apart = std::sqrt(gx * gx + gy * gy);
             double e[2] = {};
-            dt::iconOffsetNdc(H, e);
+            testIconE(H, e);
             float m4[4] = {1.2f, 0, 0.1f, 0}, m5[4] = {0, 1.1f, -0.05f, 0};
             const double x0[3] = {11.02, 2.01, 3.0};
             double lm[2] = {}, ldx = 0.0, ldy = 0.0, lmc[3];
@@ -902,27 +906,6 @@ int wmain(int argc, wchar_t** argv) {
                       h4.ord == 5 && h4.frame == 72u && !afterDrop.patch && afterDrop.why == dt::kPatchUnmatched,
                   "F63: a match is held 90 frames from its newest confirmation and patches every frame of them; a contradicting read-back drops "
                   "it; older evidence and evidence about another place say nothing; the key's record at another place moves it");
-            // (3) The bias EMA: alpha 0.02 on fresh patched frames only; in the closed loop (drawn = ndc_P + e_used + beta, the residual
-            // against the target used is beta) the drawn marker settles on ndc_P + e; each component clamped to 0.02 NDC; |r| >= 1 refused.
-            dt::BiasEma be, idle, loop, big;
-            const double r0[2] = {0.004, -0.002};
-            be.update(r0, true);
-            const bool firstStep = std::fabs(be.b[0] - 0.02 * 0.004) < 1e-15 && std::fabs(be.b[1] + 0.02 * 0.002) < 1e-15 && be.n == 1u;
-            for (int i = 0; i < 100; ++i) idle.update(r0, false);
-            const double beta[2] = {0.003, -0.001}, eFix[2] = {0.0, 0.036};
-            double eUsed[2] = {};
-            for (int i = 0; i < 400; ++i) loop.update(beta, true);
-            loop.target(eFix, eUsed);
-            const double drawn[2] = {eUsed[0] + beta[0], eUsed[1] + beta[1]};   // ndc_P = 0
-            const double rBig[2] = {0.5, 0.0}, rHuge[2] = {2.0, 0.0};
-            for (int i = 0; i < 2000; ++i) big.update(rBig, true);
-            const uint64_t bigN = big.n;
-            const bool huge = big.update(rHuge, true);
-            check(dt::kBiasAlpha == 0.02 && firstStep && idle.b[0] == 0.0 && idle.b[1] == 0.0 && idle.n == 0u &&
-                      std::fabs(drawn[0] - eFix[0]) < 1e-5 && std::fabs(drawn[1] - eFix[1]) < 1e-5 && std::fabs(big.b[0] - dt::kBiasMaxNdc) < 1e-12 &&
-                      !huge && big.n == bigN,
-                  "F63: the icon offset's bias: an EMA (alpha 0.02) of fresh patched frames' residuals, never of unpatched ones; the drawn marker "
-                  "settles on ndc_P + e; clamped to 0.02 NDC");
             // (4) The stream window: 8192 entries about the eye's newest marker composite entry (F62: eye 0 at 18205..18211), even, inside the
             // buffer (192512 entries, F62's 1540096 bytes); a small buffer whole.
             uint32_t lo = 0, n = 0, loA = 0, nA = 0, loB = 0, nB = 0, loC = 0, nC = 0;
@@ -1171,22 +1154,6 @@ int wmain(int argc, wchar_t** argv) {
             for (uint64_t t = 0; t <= 1100; t += 11) rest2 = hr2.step(t, 1.60, false);
             check(rest2, "F49: a head steady for 1 s is at rest");
 
-            // F51: dh is clamped to 0..0.5 m and low-passed (tau 1 s) from 0; a frame without a measurement holds it.
-            nf::RaiseDh dh;
-            for (int i = 0; i < 90; ++i) dh.step(0.231, true, 1.0 / 90.0);   // 1 s at 90 Hz: 1 - 1/e of the way
-            const bool oneTau = std::fabs(dh.lp - 0.231 * (1.0 - std::exp(-1.0))) < 1e-6;
-            for (int i = 0; i < 900; ++i) dh.step(0.231, true, 1.0 / 90.0);
-            const bool settled = std::fabs(dh.lp - 0.231) < 1e-4;
-            const double before = dh.lp;
-            dh.step(0.9, false, 1.0 / 90.0);
-            const bool held = dh.lp == before;
-            nf::RaiseDh hi, lo;
-            for (int i = 0; i < 2000; ++i) {
-                hi.step(0.9, true, 1.0 / 90.0);
-                lo.step(-0.2, true, 1.0 / 90.0);
-            }
-            check(oneTau && settled && held && std::fabs(hi.lp - 0.5) < 1e-6 && lo.lp == 0.0 && std::fabs(lo.raw + 0.2) < 1e-12,
-                  "F51: dh low-passes from 0 (tau 1 s), holds without a measurement, and is clamped to 0..0.5 m");
             // The view's sign: seated y = -dh, the same as seatedFromBody({0, dh, 0}, 0); through the calibration (body = diag(-1,-1,+1) . seated)
             // that raises the camera by dh.
             double rs[3] = {}, viaMap[3] = {};
@@ -1200,11 +1167,6 @@ int wmain(int argc, wchar_t** argv) {
             const double a1 = nf::capToward(0.0, 0.23, 0.05), a2 = nf::capToward(0.2, 0.23, 0.05), a3 = nf::capToward(0.23, 0.0, 0.05);
             check(std::fabs(a1 - 0.05) < 1e-12 && std::fabs(a2 - 0.23) < 1e-12 && std::fabs(a3 - 0.18) < 1e-12,
                   "F51: the applied raise moves 5 cm a frame at most");
-            // F53: the raise is the constant raise_cm while on (clamped 0..0.5 m), nothing while off; the live dh does not enter it.
-            check(nf::raiseConstM(false, 10.0) == 0.0 && std::fabs(nf::raiseConstM(true, 10.0) - 0.10) < 1e-12 &&
-                      std::fabs(nf::raiseConstM(true, nf::kRaiseDefaultCm) - 0.10) < 1e-12 && nf::raiseConstM(true, 80.0) == 0.5 &&
-                      nf::raiseConstM(true, -5.0) == 0.0 && nf::raiseConstM(true, std::numeric_limits<double>::quiet_NaN()) == 0.0,
-                  "F53: the raise is a constant 0.10 m by default while on, clamped to 0..0.5 m, and zero while off");
             // F53: the frozen set's cap holds every joint the Animate output has (0xC0), the plan's arrays are that size, and the flight's
             // 185-member set (F51/F52 refused it at 128) builds: 188 joints, root 0 -> hips 1 -> spine 2 -> neck 3, foot 4 under the hips,
             // joints 5..187 under the spine.
@@ -1282,29 +1244,8 @@ int wmain(int argc, wchar_t** argv) {
                 for (uint64_t u = t; u <= t + 3000; u += 11) walkAgain = st.step(u, 1.60, 1.70, false, true, 0.40, 0.30) || walkAgain;
                 check(!walkAgain && st.hx == hx && st.hCaptures == 1, "F55: walking after a capture never re-captures the rest");
             }
-            // F55: the FP shoulder drop: the key clamps to 0..20 cm; the weight ramps linearly over 0.2 s in and out (ADS); the subtree of 19, 20.
+            // F55: the FP X's plan: the subtree of the clavicles 19 and 20 (F66: the shoulder drop it served is gone).
             {
-                check(nf::dropClampCm(-5.0) == 0.0 && nf::dropClampCm(0.0) == 0.0 && nf::dropClampCm(7.5) == 7.5 && nf::dropClampCm(25.0) == 20.0 &&
-                          nf::dropClampCm(std::numeric_limits<double>::quiet_NaN()) == 0.0 && std::fabs(nf::dropM(1.0, 30.0) - 0.20) < 1e-12 &&
-                          nf::dropM(0.0, 10.0) == 0.0 && std::fabs(nf::dropM(0.5, 10.0) - 0.05) < 1e-12,
-                      "F55: the shoulder drop clamps to 0..20 cm (NaN and negatives are 0) and scales by the weight");
-                nf::DropBlend b;
-                const double dt = 1.0 / 90.0;
-                int framesIn = 0;
-                while (b.w < 1.0 && framesIn < 100) {
-                    b.step(true, dt);
-                    ++framesIn;
-                }
-                nf::DropBlend b2;
-                for (int f = 0; f < 9; ++f) b2.step(true, dt);
-                const double wHalf = b2.w;
-                int framesOut = 0;
-                while (b.w > 0.0 && framesOut < 100) {
-                    b.step(false, dt);   // ADS starts
-                    ++framesOut;
-                }
-                check(framesIn >= 18 && framesIn <= 19 && framesOut >= 18 && framesOut <= 19 && std::fabs(wHalf - 0.5) < 1e-9 && b.w == 0.0,
-                      "F55: the drop's weight ramps to 1 in 0.2 s (18 frames at 90 Hz), is half at 0.1 s, and back to 0 in 0.2 s when ADS starts");
                 // root 0 -> spine 1 -> clavicle 2 (as 19) -> arm 3 -> hand 4; spine 1 -> clavicle 5 (as 20) -> hand 6; spine 1 -> head 7; a broken 8.
                 const uint16_t dropParents[9] = {0xFFFF, 0, 1, 2, 3, 1, 5, 1, 99};
                 uint16_t mem[9] = {};
@@ -1778,145 +1719,11 @@ int wmain(int argc, wchar_t** argv) {
                       "F59b: the residual is rows . (eye - neck) in body axes (right, up, forward); a joint carried between AMC frames keeps its body "
                       "coordinates; the hook's (T - N1) less the rest offset (F62a: full 3P, 0.155 up, 0.09 forward) equals eye - (N1 + d)");
             }
-            // F60: the body fitted to the weapon: Sd from the grips and the FP forward (k_reach 0.82 of the arm behind, 0.10 m below; ADS raise
-            // and forward push), d_w = dB + (Sd - Umid) and its independence of the d it was measured at, the blend, the 0.3 s ramp.
+            // F62a (kept): the full-3P eye-to-neck rest and the ADS shoulder-forward default. (F66: the weapon fit's checks went with the fit.)
             {
-                const auto near3 = [](const double* a, double x, double y, double z) {
-                    return std::fabs(a[0] - x) < 1e-9 && std::fabs(a[1] - y) < 1e-9 && std::fabs(a[2] - z) < 1e-9;
-                };
-                const double gL[3] = {-0.10, 1.30, 0.50}, gR[3] = {0.10, 1.30, 0.50}, fwdPitched[3] = {0.0, -0.3, 2.0}, fwdYaw[3] = {1.0, 0.0, 0.0},
-                             fwdUp[3] = {0.0, 1.0, 0.05};
-                const double back = 0.82 * 0.59;
-                double sd[3], sdYaw[3], sdAds[3], sdBad[3];
-                const bool okSd = nf::fitShoulderTarget(gL, gR, fwdPitched, 0.59, 0.0, nf::kFitReach, sd);
-                const bool okYaw = nf::fitShoulderTarget(gL, gR, fwdYaw, 0.59, 0.0, nf::kFitReach, sdYaw);
-                // F62a: in ADS k_reach is 1.0 (fitReachK at weight 1) and the forward push no longer enters Sd.
-                const bool okAds = nf::fitShoulderTarget(gL, gR, fwdPitched, 0.59, 0.03, nf::fitReachK(1.0), sdAds);
-                const bool okBad = nf::fitShoulderTarget(gL, gR, fwdUp, 0.59, 0.0, nf::kFitReach, sdBad);
-                check(okSd && near3(sd, 0.0, 1.20, 0.50 - back) && okYaw && near3(sdYaw, -back, 1.20, 0.50) && okAds &&
-                          near3(sdAds, 0.0, 1.23, 0.50 - 0.59) && !okBad && near3(sdBad, 0.0, 0.0, 0.0),
-                      "F60: Sd = the grip midpoint less the FP forward (xz, unit) x k_reach (l1 + l2) and 0.10 m down; ADS adds the raise, with "
-                      "k_reach 1.0 and no forward push (F62a); a vertical forward refuses");
-                const double umid[3] = {0.0, 1.35, -0.05}, dB[3] = {0.02, 0.0, 0.01};
-                double dw[3];
-                nf::fitBodyTarget(dB, sd, umid, dw);
-                // G subtracts d: the same body measured at d + delta sees the grips (so Sd) moved by -delta; d_w does not move.
-                const double delta[3] = {0.10, 0.0, 0.05}, gL2[3] = {gL[0] - 0.10, gL[1], gL[2] - 0.05}, gR2[3] = {gR[0] - 0.10, gR[1], gR[2] - 0.05};
-                const double dB2[3] = {dB[0] + delta[0], dB[1] + delta[1], dB[2] + delta[2]};
-                double sd2[3], dw2[3];
-                nf::fitShoulderTarget(gL2, gR2, fwdPitched, 0.59, 0.0, nf::kFitReach, sd2);
-                nf::fitBodyTarget(dB2, sd2, umid, dw2);
-                check(near3(dw, 0.02, -0.15, 0.01 + (0.50 - back) + 0.05) && near3(dw2, dw[0], dw[1], dw[2]),
-                      "F60: d_w = G's d + (Sd - Umid) in body axes, and it does not depend on the d it was measured at (open loop, no integral)");
-                const double dHead[3] = {0.04, 0.02, -0.03};
-                double b0[3], b1[3], bh[3], bHalf[3], bOver[3];
-                nf::fitBlend(dHead, dw, 0.0, false, b0);
-                nf::fitBlend(dHead, dw, 1.0, false, b1);
-                nf::fitBlend(dHead, dw, 1.0, true, bh);
-                nf::fitBlend(dHead, dw, 0.5, false, bHalf);
-                nf::fitBlend(dHead, dw, 2.0, false, bOver);
-                check(near3(b0, dHead[0], dHead[1], dHead[2]) && near3(b1, dw[0], dw[1], dw[2]) && near3(bh, dw[0], dHead[1], dw[2]) &&
-                          near3(bHalf, 0.5 * (dHead[0] + dw[0]), 0.5 * (dHead[1] + dw[1]), 0.5 * (dHead[2] + dw[2])) && near3(bOver, dw[0], dw[1], dw[2]),
-                      "F60: the blend returns d_head at fit 0 and d_w at fit 1 (the head's up kept with the vertical off; fit clamped to 0..1)");
-                nf::IkBlend ramp{0.0f, nf::kFitRampSec};
-                ramp.step(true, 0.15);
-                const float rHalf = ramp.w;
-                ramp.step(true, 0.15);
-                const float rFull = ramp.w;
-                ramp.step(false, 0.15);
-                const float rOutHalf = ramp.w;
-                ramp.step(false, 0.15);
-                const float rOut = ramp.w;
-                ramp.step(false, 0.15);
-                check(nf::kFitRampSec == 0.3 && std::fabs(rHalf - 0.5f) < 1e-6f && rFull == 1.0f && std::fabs(rOutHalf - 0.5f) < 1e-6f && rOut == 0.0f &&
-                          ramp.w == 0.0f,
-                      "F60: the fit ramps in over 0.3 s and, with no weapon, out to 0 over 0.3 s (half at 0.15 s)");
-                check(nf::kFitReach == 0.82 && nf::kFitDropM == 0.10 && nf::kFitArmLenDefaultM == 0.59 && nf::kFitWeaponDefault == 0.7 &&
-                          nf::fitArmLen(std::numeric_limits<double>::quiet_NaN()) == 0.59 && nf::fitArmLen(0.1) == 0.59 && nf::fitArmLen(0.61) == 0.61 &&
-                          nf::fitWeaponClamp(std::numeric_limits<double>::quiet_NaN()) == 0.7 && nf::fitWeaponClamp(1.5) == 1.0 &&
-                          nf::fitWeaponClamp(-1.0) == 0.0,
-                      "F60: k_reach 0.82, the 0.10 m drop, the 0.59 m arm fallback (outside 0.2..1.5 m), the slider's 0.7 default and its 0..1 clamp");
-            }
-            // F62a (TEMPORARY): the fit gated by raised-ness and disengaged by a head excursion, the lateral weight and the 12 cm pull clamp,
-            // the trims on the final d (once), the ADS lateral blend, the bend's limits while the fit is engaged and its suspension, the
-            // full-3P eye-to-neck rest and the ADS defaults.
-            {
-                const auto near3 = [](const double* a, double x, double y, double z) {
-                    return std::fabs(a[0] - x) < 1e-9 && std::fabs(a[1] - y) < 1e-9 && std::fabs(a[2] - z) < 1e-9;
-                };
-                const double qNan = std::numeric_limits<double>::quiet_NaN();
-                const double kDeg = nf::kIkPi / 180.0;
-                check(nf::fitRaised(0.5) == 0.0 && nf::fitRaised(1.0) == 1.0 && std::fabs(nf::fitRaised(0.75) - 0.5) < 1e-12 && nf::fitRaised(0.2) == 0.0 &&
-                          nf::fitRaised(0.0) == 0.0 && nf::fitRaised(qNan) == 0.0 && nf::fitRaised(0.6) > 0.0 && nf::fitRaised(0.9) < 1.0,
-                      "F62a: the raised factor is smoothstep(0.5, 1.0, grip gate): 0 at 0.5 and below (the hands hanging, gate 0.0..0.2), 1 at 1.0");
-                check(nf::fitDisengage(0.15) == 1.0 && nf::fitDisengage(0.35) == 0.0 && std::fabs(nf::fitDisengage(0.25) - 0.5) < 1e-12 &&
-                          nf::fitDisengage(0.05) == 1.0 && nf::fitDisengage(0.6) == 0.0,
-                      "F62a: the fit disengages as the horizontal |d_w - d_head| goes from 0.15 m (full) to 0.35 m (none), half at 0.25 m");
-                const double zero3[3] = {0.0, 0.0, 0.0};
-                // The lateral weight: forward 1.0, lateral 0.25, e (0.08, 0, -0.08) is inside 0.15 m: the pull is (0.02, 0, -0.08).
-                const double dWl[3] = {0.08, 0.0, -0.08};
-                double oL[3];
-                nf::FitApplied aL;
-                nf::fitApply(zero3, dWl, zero3, 1.0, 0.25, true, oL, &aL);
-                // The clamp: both weights 1, e (0.09, 0, -0.12) (0.15 m, disengage 1): the pull 0.15 m is clamped to 0.12 m along it.
-                const double dWc[3] = {0.09, 0.0, -0.12};
-                double oC[3];
-                nf::FitApplied aC;
-                nf::fitApply(zero3, dWc, zero3, 1.0, 1.0, true, oC, &aC);
-                // Disengaged: e 0.4 m horizontal pulls nothing.
-                const double dWd[3] = {0.0, 0.0, -0.40};
-                double oD[3];
-                nf::FitApplied aD;
-                nf::fitApply(zero3, dWd, zero3, 1.0, 1.0, true, oD, &aD);
-                check(near3(oL, 0.02, 0.0, -0.08) && std::fabs(aL.wFwd - 1.0) < 1e-12 && std::fabs(aL.wLat - 0.25) < 1e-12 && !aL.clamped &&
-                          near3(oC, 0.072, 0.0, -0.096) && aC.clamped &&
-                          std::fabs(std::sqrt(aC.pull[0] * aC.pull[0] + aC.pull[2] * aC.pull[2]) - nf::kFitPullMaxM) < 1e-12 &&
-                          near3(oD, 0.0, 0.0, 0.0) && aD.disengage == 0.0 && nf::kFitPullMaxM == 0.12,
-                      "F62a: the lateral pull has its own weight (0.25 of the right offset, the forward 1.0), the horizontal pull is clamped to "
-                      "0.12 m along its direction, and a 0.4 m excursion pulls nothing");
-                // The trims on the final d: with no fit the target is d_head - trim; at full fit it is d_head + pull - trim, the trim once.
-                const double dHead[3] = {0.04, 0.02, -0.03}, dW[3] = {0.10, -0.50, 0.05}, trim[3] = {0.03, 0.0, 0.05};
-                double t0[3], t1[3], tV[3];
-                nf::FitApplied a1, aV;
-                nf::fitApply(dHead, dW, trim, 0.0, 0.0, true, t0, nullptr);
-                nf::fitApply(dHead, dW, trim, 1.0, 1.0, true, t1, &a1);
-                nf::fitApply(dHead, dW, trim, 1.0, 1.0, false, tV, &aV);
-                check(near3(t0, 0.01, 0.02, -0.08) && near3(t1, 0.07, 0.02, 0.0) &&
-                          near3(t1, t0[0] + a1.pull[0], t0[1] + a1.pull[1], t0[2] + a1.pull[2]) && near3(tV, 0.07, -0.50, 0.0),
-                      "F62a: the trims are subtracted once from the final d (no fit: d_head - trim; full fit: d_head + pull - trim, so the trim "
-                      "reaches the body in full); the up is pulled only with the vertical on");
-                // The ADS lateral blend: the first call is live; the flag's change outputs the last output; half at 0.15 s; live at 0.3 s.
-                nf::FitAdsLat lb;
-                const double l0 = lb.step(false, 0.30, 0.011);
-                const double lEdge = lb.step(true, 0.00, 0.011);
-                const double lHalf = lb.step(true, 0.00, 0.15);
-                const double lFull = lb.step(true, 0.00, 0.15);
-                const double lAfter = lb.step(true, 0.05, 0.011);
-                check(l0 == 0.30 && lEdge == 0.30 && std::fabs(lHalf - 0.15) < 1e-12 && lFull == 0.0 && lAfter == 0.05 && !lb.blending &&
-                          nf::kFitAdsLatSec == 0.3,
-                      "F62a: d_w's lateral is blended over 0.3 s at a change of the ADS flag (no jump on the change, half at 0.15 s)");
-                // The bend: the fit's limits (forward and back 8, roll 6) against F58's (45, 15, 20); the suspension above 0.35 m.
-                double fF = 0.0, fB = 0.0, fR = 0.0, nF = 0.0, nB = 0.0, nR = 0.0;
-                nf::bendLimits(true, &fF, &fB, &fR);
-                nf::bendLimits(false, &nF, &nB, &nR);
-                nf::BendClamp c1, c2, c3, c4, c5;
-                const double p20 = nf::bendClampPitchLim(20.0 * kDeg, fF, fB, &c1), pM20 = nf::bendClampPitchLim(-20.0 * kDeg, fF, fB, &c2),
-                             r10 = nf::bendClampRollLim(10.0 * kDeg, fR, &c3), rM173 = nf::bendClampRollLim(-173.0 * kDeg, fR, &c4),
-                             r5 = nf::bendClampRollLim(5.0 * kDeg, fR, &c5);
-                const double Nb[3] = {0.0, 1.5, 0.1}, Tin[3] = {0.0, 1.5, 0.1 + 0.34}, Tout[3] = {0.0, 1.5, 0.1 + 0.36}, Tnan[3] = {qNan, 1.5, 0.1};
-                check(fF == 8.0 && fB == 8.0 && fR == 6.0 && nF == 45.0 && nB == 15.0 && nR == 20.0 && std::fabs(p20 - 8.0 * kDeg) < 1e-12 &&
-                          c1.fwd && std::fabs(pM20 + 8.0 * kDeg) < 1e-12 && c2.back && std::fabs(r10 - 6.0 * kDeg) < 1e-12 && c3.roll &&
-                          std::fabs(rM173 + 6.0 * kDeg) < 1e-12 && c4.roll && std::fabs(r5 - 5.0 * kDeg) < 1e-12 && !c5.roll &&
-                          !nf::bendSuspend(Tin, Nb) && nf::bendSuspend(Tout, Nb) && nf::bendSuspend(Tnan, Nb) && nf::kBendSuspendResM == 0.35,
-                      "F62a: while the fit is engaged the bend is held to pitch +-8 and roll +-6 deg (F58's 45, 15, 20 otherwise; a -173 deg roll "
-                      "clamps to -6); it is suspended above a 0.35 m residual before it");
                 check(nf::kNeckRestOffsetFull3P[0] == 0.0 && nf::kNeckRestOffsetFull3P[1] == -0.155 && nf::kNeckRestOffsetFull3P[2] == -0.09 &&
-                          nf::kNeckRestOffset[2] == -0.161 && nf::kIkAdsForwardCmDefault == 0.0 && nf::fitReachK(0.0) == 0.82 &&
-                          nf::fitReachK(1.0) == 1.0 && std::fabs(nf::fitReachK(0.5) - 0.91) < 1e-12 && nf::fitReachK(qNan) == 0.82 &&
-                          nf::kFitLateralDefault == 0.25 && nf::fitLateralClamp(qNan) == 0.25 && nf::fitLateralClamp(2.0) == 1.0 &&
-                          nf::fitLateralClamp(-1.0) == 0.0,
-                      "F62a: the full-3P neck rests 0.155 m below and 0.09 m behind the eye (0.161 kept outside full 3P); the ADS shoulder forward "
-                      "defaults to 0; k_reach goes 0.82 to 1.0 with the ADS weight; Body fit sideways defaults to 0.25, clamped to 0..1");
+                          nf::kNeckRestOffset[2] == -0.161 && nf::kIkAdsForwardCmDefault == 0.0,
+                      "F62a: the full-3P neck rests 0.155 m below and 0.09 m behind the eye (0.161 kept outside full 3P); the ADS shoulder forward defaults to 0");
             }
             // F61 (TEMPORARY): the rotation calibration. The schedule (yaw, rest, pitch, rest at 1 s each, repeating), the three sources'
             // deltas (yaw + = turned left, pitch + = up, each in its own axes), the head subtraction and the verdict rule.
@@ -2164,15 +1971,6 @@ int wmain(int argc, wchar_t** argv) {
                           std::fabs(cam[0]) < 1e-12 && std::fabs(cam[1]) < 1e-12 && std::fabs(cam[2]) < 1e-12,
                       "F62b: the lock is w (h - h_entry) in LOCAL, and through F40's map (diag(1, 1, -1) dH + D s, D = diag(-1, -1, +1)) the camera "
                       "does not move");
-                // The body: the head's target ignored (d_w less the trims) by the weight; the up kept with the vertical off.
-                const double fitOut[3] = {0.02, 0.01, -0.05}, dW[3] = {0.30, 0.2, -0.40}, trim[3] = {0.01, 0.0, 0.02};
-                double det[3], detHalf[3], det0[3];
-                nf::adsFitDetach(fitOut, dW, trim, true, 1.0, det);
-                nf::adsFitDetach(fitOut, dW, trim, true, 0.5, detHalf);
-                nf::adsFitDetach(fitOut, dW, trim, false, 0.0, det0);
-                check(std::fabs(det[0] - 0.29) < 1e-12 && std::fabs(det[2] + 0.42) < 1e-12 && det[1] == 0.01 && std::fabs(detHalf[0] - 0.155) < 1e-12 &&
-                          det0[0] == 0.02 && det0[1] == 0.01 && det0[2] == -0.05,
-                      "F62b: in ADS the body's target goes to d_w less the trims by the weight (half way at 0.5), the up kept with the vertical off");
             }
             // F63: the ADS sight lock. The body's axes are the world's (AMC rows right +x, up +y, forward +z), the camera at (0, 1.7, 0).
             {
@@ -2299,10 +2097,6 @@ int wmain(int argc, wchar_t** argv) {
                           nf::retryDecision(true, 5, 10001) == nf::kRetryLate && nf::retryDecision(true, 5, 53000) == nf::kRetryLate &&
                           nf::retryDecision(false, 0, 400) == nf::kRetryUnread,
                       "F65a: a Deactivate arms the retry only for a CTSA destroyed before sessions (state not 10) and within 10 s of it");
-                // (2) The hand's weight: 1 while armed whatever the distance gate (the flight's 0.64..0.89); the distance gate unarmed.
-                check(nf::ikArmGate(true, 0.64f) == 1.0f && nf::ikArmGate(true, 0.0f) == 1.0f && nf::ikArmGate(false, 0.64f) == 0.64f &&
-                          nf::ikArmGate(false, 0.0f) == 0.0f,
-                      "F65a: a hand on its grip solves at weight 1 while a weapon is held; the distance gate keeps it unarmed");
                 // (3) Within reach: no correction. Shoulders 30 cm behind and 20 cm beside their grips, 10 cm above, arms 55 cm (limit 53).
                 const double R[2] = {0.55 - nf::kReachMarginM, 0.55 - nf::kReachMarginM};
                 const bool both[2] = {true, true};
@@ -2438,6 +2232,632 @@ int wmain(int argc, wchar_t** argv) {
                       "F65c: with the pre-bend neck the align moves d 11.4 cm right and the bend's input error goes to 0; with the census's "
                       "post-bend neck d stays 0 and the 11.4 cm stays for the bend's roll");
             }
+            // ---- F66: native on foot, one solve with exogenous inputs only (a, b, c, d, e, g; f is in its own block below) ----------------------
+            // A small deterministic generator for the property checks.
+            uint64_t f66Seed = 0x9E3779B97F4A7C15ull;
+            const auto f66Rand = [&f66Seed]() {
+                f66Seed = f66Seed * 6364136223846793005ull + 1442695040888963407ull;
+                return static_cast<double>((f66Seed >> 11) & ((1ull << 53) - 1)) / static_cast<double>(1ull << 53);   // [0, 1)
+            };
+            const auto f66Unit = [&f66Rand](double out[3]) {
+                double l = 0.0;
+                do {
+                    for (int i = 0; i < 3; ++i) out[i] = 2.0 * f66Rand() - 1.0;
+                    l = nf::ikLen(out);
+                } while (l < 0.2 || l > 1.0);
+                for (int i = 0; i < 3; ++i) out[i] /= l;
+            };
+            // F66a: the armed flag from Status.json SelectedWeapon.
+            {
+                char nm[64];
+                const auto parse = [&nm](const char* text) {
+                    return edvr::journalParseSelectedWeapon(text, std::strlen(text), nm, sizeof(nm));
+                };
+                const edvr::JournalHeldItem kFists = parse("{ \"timestamp\":\"2026-10-16T09:29:13Z\", \"event\":\"Status\", \"Flags\":16842765, \"Flags2\":8, "
+                                                           "\"Pips\":[4,8,0], \"SelectedWeapon\":\"$humanoid_fists_name;\", \"SelectedWeapon_Localised\":\"Fists\", \"Oxygen\":1.0 }");
+                const bool fistsName = std::strcmp(nm, "$humanoid_fists_name;") == 0;
+                const edvr::JournalHeldItem kWeapon = parse("{ \"event\":\"Status\", \"Flags2\":8, \"SelectedWeapon\":\"$humanoid_assaultrifle_plasma_name;\", "
+                                                            "\"SelectedWeapon_Localised\":\"Karma AR-50\", \"Gravity\":0.2 }");
+                const bool weaponName = std::strcmp(nm, "$humanoid_assaultrifle_plasma_name;") == 0;
+                const edvr::JournalHeldItem kTool = parse("{ \"Flags2\":8, \"SelectedWeapon\": \"$humanoid_companalyser_name;\" }");
+                const bool toolName = std::strcmp(nm, "$humanoid_companalyser_name;") == 0;
+                const edvr::JournalHeldItem kNone = parse("{ \"Flags\":0, \"GuiFocus\":0 }");
+                const bool noneName = nm[0] == '\0';
+                const edvr::JournalHeldItem kLocalOnly = parse("{ \"Flags2\":8, \"SelectedWeapon_Localised\":\"Fists\" }");
+                const edvr::JournalHeldItem kSplit = parse("{ \"Flags2\":8, \"SelectedWeapon\":\"$humanoid_assaultrifle_pl");
+                const bool splitName = nm[0] == '\0';
+                const edvr::JournalHeldItem kSplitKey = parse("{ \"Flags2\":8, \"SelectedWeap");
+                const edvr::JournalHeldItem kUpper = parse("{ \"SelectedWeapon\":\"$HUMANOID_FISTS_NAME;\" }");
+                const edvr::JournalHeldItem kEmpty = parse("{ \"SelectedWeapon\":\"\" }");
+                check(kFists == edvr::kHeldNone && fistsName && kWeapon == edvr::kHeldItem && weaponName && kTool == edvr::kHeldItem && toolName &&
+                          kNone == edvr::kHeldUnknown && noneName && kLocalOnly == edvr::kHeldUnknown && kUpper == edvr::kHeldNone && kEmpty == edvr::kHeldNone,
+                      "F66a: SelectedWeapon parses: the fists (any case, or empty) are none, a weapon or a tool is an item with its name, no field and "
+                      "_Localised alone are unknown");
+                check(kSplit == edvr::kHeldUnknown && splitName && kSplitKey == edvr::kHeldUnknown &&
+                          edvr::journalParseSelectedWeapon(nullptr, 10, nm, sizeof(nm)) == edvr::kHeldUnknown &&
+                          edvr::journalParseSelectedWeapon("x", 0, nm, sizeof(nm)) == edvr::kHeldUnknown,
+                      "F66a: a value or key split across a read, a null or empty buffer are unknown, never a guess from the half that arrived");
+                char tiny[8];
+                const char* longName = "{ \"SelectedWeapon\":\"$humanoid_assaultrifle_plasma_name;\" }";
+                const edvr::JournalHeldItem kTiny = edvr::journalParseSelectedWeapon(longName, std::strlen(longName), tiny, sizeof(tiny));
+                check(kTiny == edvr::kHeldItem && std::strlen(tiny) == 7 && std::strncmp(tiny, "$humano", 7) == 0,
+                      "F66a: the name is cut to the buffer and always terminated");
+                // The ramp (0.3 s in and out) and the arm weight: 0 unarmed whatever the distance gate, 1 armed; the old gate is a measure.
+                nf::IkBlend ramp{0.0f, nf::kArmedRampSec};
+                ramp.step(true, 0.15);
+                const float half = ramp.w;
+                ramp.step(true, 0.15);
+                const float full = ramp.w;
+                ramp.step(false, 0.15);
+                const float outHalf = ramp.w;
+                ramp.step(false, 0.15);
+                check(nf::kArmedRampSec == 0.3 && std::fabs(half - 0.5f) < 1e-6f && full == 1.0f && std::fabs(outHalf - 0.5f) < 1e-6f && ramp.w == 0.0f,
+                      "F66a: the armed ramp is 0.3 s in and 0.3 s out (half at 0.15 s)");
+                check(nf::ikArmWeight(0.0f) == 0.0f && nf::ikArmWeight(1.0f) == 1.0f && nf::ikArmWeight(0.5f) == 0.5f &&
+                          nf::ikArmWeight(std::numeric_limits<float>::quiet_NaN()) == 0.0f && nf::ikArmWeight(2.0f) == 1.0f && nf::ikArmWeight(-1.0f) == 0.0f,
+                      "F66a: unarmed gives the arm IK weight 0 whatever the distance gate says (the weight is the armed ramp alone)");
+                check(nf::distanceGateHeld(0.64) && nf::distanceGateHeld(1.0) && !nf::distanceGateHeld(0.5) && !nf::distanceGateHeld(0.2) &&
+                          !nf::distanceGateHeld(std::numeric_limits<double>::quiet_NaN()),
+                      "F66a: the old distance-gate reading of held (the smaller grip gate above 0.5) is kept as a measure only");
+            }
+            // F66b: the frame clock. A 90 Hz tick run against a 64 Hz ms clock (GetTickCount64's 15.6 ms steps): the ms clock reads dt = 0 on about
+            // 29% of the ticks and a critically damped follower of a target at constant speed advances unevenly; QPC ticks advance on every tick
+            // and the per-tick steps agree within 5%.
+            {
+                const uint64_t freq = 10000000ull;   // a 10 MHz QPC
+                int msZero = 0, qpcZero = 0;
+                uint64_t lastQ = 0, lastMs = 0;
+                double posQ = 0.0, velQ = 0.0, posM = 0.0, velM = 0.0;
+                double stepQ[90], stepM[90];
+                int nStep = 0;
+                const double speed = 0.30;   // m/s of the target
+                for (int k = 1; k <= 360; ++k) {
+                    const double t = static_cast<double>(k) / 90.0;
+                    const uint64_t q = static_cast<uint64_t>(std::llround(t * 1e7)), ms = static_cast<uint64_t>(std::floor(t * 1000.0 / 15.625) * 15.625);
+                    const double dtQ = nf::qpcDtSec(lastQ, q, freq, 0.05);
+                    const double dtM = lastMs && ms > lastMs ? std::min(0.05, static_cast<double>(ms - lastMs) / 1000.0) : 0.0;   // F65's clock
+                    if (lastQ && !(dtQ > 0.0)) ++qpcZero;
+                    if (lastMs && !(dtM > 0.0)) ++msZero;
+                    const double beforeQ = posQ, beforeM = posM;
+                    nf::cdStep(posQ, velQ, speed * t, 0.1, dtQ, 0.05);
+                    nf::cdStep(posM, velM, speed * t, 0.1, dtM, 0.05);
+                    if (k > 270) {
+                        stepQ[nStep] = posQ - beforeQ;
+                        stepM[nStep] = posM - beforeM;
+                        ++nStep;
+                    }
+                    lastQ = q ? q : 1;
+                    lastMs = ms ? ms : 1;
+                }
+                double meanQ = 0.0, meanM = 0.0, devQ = 0.0, devM = 0.0;
+                for (int i = 0; i < nStep; ++i) {
+                    meanQ += stepQ[i] / nStep;
+                    meanM += stepM[i] / nStep;
+                }
+                for (int i = 0; i < nStep; ++i) {
+                    devQ = std::max(devQ, std::fabs(stepQ[i] - meanQ) / meanQ);
+                    devM = std::max(devM, std::fabs(stepM[i] - meanM) / std::fabs(meanM));
+                }
+                check(qpcZero == 0 && msZero > 60 && msZero < 150 && nStep == 90 && devQ < 0.05 && devM > 0.5,
+                      "F66b: against a 64 Hz ms clock a 90 Hz run reads dt = 0 on about 29% of ticks and steps unevenly; on QPC every tick steps and the "
+                      "per-tick steps at constant target speed agree within 5%");
+                check(nf::qpcDtSec(0, 100, freq, 0.05) == 0.0 && nf::qpcDtSec(100, 100, freq, 0.05) == 0.0 && nf::qpcDtSec(200, 100, freq, 0.05) == 0.0 &&
+                          nf::qpcDtSec(100, 100 + 111111, freq, 0.05) > 0.0111 && nf::qpcDtSec(100, 100 + 111111, freq, 0.05) < 0.0112 &&
+                          nf::qpcDtSec(100, 100 + 100000000, freq, 0.05) == 0.05 && nf::qpcDtSec(100, 200, 0, 0.05) == 0.0,
+                      "F66b: dt is 0 for the first tick, a clock that did not advance or one that went back, 11.1 ms for a 90 Hz step, and capped at 50 ms");
+            }
+            // F66c: the bend without a loop.
+            {
+                double fw = 0.0, bk = 0.0, rl = 0.0;
+                nf::bendLimitsArmed(0.0, &fw, &bk, &rl);
+                const bool unarmed = fw == 45.0 && bk == 15.0 && rl == 20.0;
+                nf::bendLimitsArmed(1.0, &fw, &bk, &rl);
+                const bool armed = fw == 8.0 && bk == 8.0 && rl == 6.0;
+                nf::bendLimitsArmed(0.5, &fw, &bk, &rl);
+                const bool mid = std::fabs(fw - 26.5) < 1e-12 && std::fabs(bk - 11.5) < 1e-12 && std::fabs(rl - 13.0) < 1e-12;
+                nf::bendLimitsArmed(std::numeric_limits<double>::quiet_NaN(), &fw, &bk, &rl);
+                check(unarmed && armed && mid && fw == 45.0,
+                      "F66c: the bend's limits are interpolated by the armed ramp (unarmed 45, 15, 20 deg; armed 8, 8, 6), never switched");
+                check(nf::bendResidualWeight(0.20) == 1.0 && nf::bendResidualWeight(0.30) == 1.0 && std::fabs(nf::bendResidualWeight(0.375) - 0.5) < 1e-12 &&
+                          nf::bendResidualWeight(0.45) == 0.0 && nf::bendResidualWeight(0.60) == 0.0 &&
+                          nf::bendResidualWeight(std::numeric_limits<double>::quiet_NaN()) == 0.0,
+                      "F66c: the suspension is the weight 1 - smoothstep(0.30, 0.45, |T - N0|): 1 to 0.30 m, half at 0.375, 0 from 0.45");
+                // A target swept through the old suspension edge: the weighted want never steps more than 1 deg a frame (20 deg roll limit, the
+                // largest), at 3.3 mm a frame (0.3 m/s at 90 Hz); the old switch stepped the whole limit at once.
+                double maxStep = 0.0, lastWant = 20.0;
+                for (int f = 0; f <= 120; ++f) {
+                    const double r = 0.15 + 0.40 * static_cast<double>(f) / 120.0;
+                    const double want = 20.0 * nf::bendResidualWeight(r);
+                    if (f) maxStep = std::max(maxStep, std::fabs(want - lastWant));
+                    lastWant = want;
+                }
+                check(maxStep < 1.0 && maxStep > 0.3, "F66c: the continuous weight never steps the bend's want more than 1 deg a frame for a target swept through 0.35 m");
+                // The square-up's turn of the unbent shoulder: about the vertical through the pivot, the height and the radius kept.
+                const double p[3] = {0.20, 1.30, 0.10}, pivot[3] = {0.0, 1.50, 0.0};
+                double q90[3], q45a[3], q45b[3], q0[3];
+                nf::turnAboutVertical(p, pivot, nf::kIkPi * 0.5, q90);
+                nf::turnAboutVertical(p, pivot, nf::kIkPi * 0.25, q45a);
+                nf::turnAboutVertical(q45a, pivot, nf::kIkPi * 0.25, q45b);
+                nf::turnAboutVertical(p, pivot, 0.0, q0);
+                check(std::fabs(q90[0] - 0.10) < 1e-12 && std::fabs(q90[1] - 1.30) < 1e-12 && std::fabs(q90[2] + 0.20) < 1e-12 &&
+                          std::fabs(q45b[0] - q90[0]) < 1e-12 && std::fabs(q45b[2] - q90[2]) < 1e-12 && q0[0] == p[0] && q0[1] == p[1] && q0[2] == p[2],
+                      "F66c: U* is the unbent shoulder turned about the vertical through the pivot by the square-up's angle (height kept, angles add)");
+                // The closed-loop model: lateral axis, 90 Hz, one frame of delay each way. A head 0.79 m off the shoulder's reach (R = 0.45): the
+                // reach limit asks d to move back by the excess e; the bend's target is the eye less the published d, so its residual |T - N0| is
+                // |e| (the F65 flight: d corrections 34.6 cm mean, 37.1 max, on the 0.35 m suspension edge). The shoulder moves with the bend by k
+                // of its displacement. F65: the reach limit reads the bent shoulder (c = k b), the bend is suspended above 0.35 m. F66: it reads U*
+                // (c = 0, nothing the bend does), the bend's want is scaled by the continuous weight.
+                struct Model {
+                    std::vector<double> d, b;
+                    int suspended = 0;
+                };
+                const auto runModel = [](bool f66, double k, const std::function<double(int)>& head, double bendAmount) {
+                    Model m;
+                    double b = 0.0, bPrev = 0.0, ePrev = 0.0;
+                    const double R = 0.45, lim = 0.12, cap = 0.05;
+                    for (int t = 0; t < 270; ++t) {
+                        const double dh = head(t);
+                        const double c = f66 ? 0.0 : k * bPrev;
+                        const double u = c + dh, over = std::fabs(u) - R;
+                        const double e = over > 0.0 ? -std::copysign(over, u) : 0.0;
+                        const double r = -ePrev;
+                        double want = 0.0;
+                        if (f66) {
+                            want = std::max(-lim, std::min(lim, r)) * nf::bendResidualWeight(std::fabs(r)) * bendAmount;
+                        } else {
+                            const bool susp = !(std::fabs(r) <= 0.35);
+                            if (susp && t >= 180) ++m.suspended;
+                            want = susp ? 0.0 : std::max(-lim, std::min(lim, r)) * bendAmount;
+                        }
+                        const double step = std::max(-cap, std::min(cap, want - b));
+                        bPrev = b;
+                        b += step;
+                        ePrev = e;
+                        m.d.push_back(dh + e);
+                        m.b.push_back(b);
+                    }
+                    return m;
+                };
+                const auto flips = [](const std::vector<double>& x, double eps) {
+                    int n = 0;
+                    double last = 0.0, lastD = 0.0;
+                    bool haveLast = false, haveD = false;
+                    for (size_t i = 180; i < x.size(); ++i) {
+                        if (haveLast) {
+                            const double dd = x[i] - last;
+                            if (std::fabs(dd) > eps) {
+                                if (haveD && ((dd > 0.0) != (lastD > 0.0))) ++n;
+                                lastD = dd;
+                                haveD = true;
+                            }
+                        }
+                        last = x[i];
+                        haveLast = true;
+                    }
+                    return n;
+                };
+                const std::function<double(int)> still = [](int) { return 0.79; };
+                bool f65Cycles = true, f66Quiet = true;
+                int f65Susp = 0;
+                for (const double k : {0.25, 0.5, 0.75, 1.0}) {
+                    const Model a = runModel(false, k, still, 1.0), c = runModel(true, k, still, 1.0);
+                    f65Cycles = f65Cycles && flips(a.d, 0.0005) >= 15 && flips(a.b, 0.0005) >= 15;
+                    f66Quiet = f66Quiet && flips(c.d, 0.0005) == 0 && flips(c.b, 0.0005) == 0;
+                    if (k == 0.5) f65Susp = a.suspended;
+                }
+                const Model noLoop = runModel(false, 0.0, still, 1.0);   // k = 0: the bend cannot move the shoulder, so there is no loop to cycle
+                check(f65Cycles && f66Quiet && flips(noLoop.d, 0.0005) == 0 && f65Susp >= 20 && f65Susp <= 80,
+                      "F66c: closed-loop model: with the F65 rules (reach reads the bent shoulder, discrete suspension) d and the bend alternate in a limit cycle "
+                      "for every k from 0.25 to 1 (the flight's was 2 frames, the model's differs in cap and delay; no cycle at k = 0); with the F66 rules the "
+                      "alternating-sign count in d and the bend is 0 for every k");
+                const std::function<double(int)> sway = [](int t) { return 0.79 + 0.15 * std::sin(2.0 * 3.14159265358979323846 * 0.4 * static_cast<double>(t) / 90.0); };
+                const Model s0 = runModel(true, 0.5, sway, 0.0), s1 = runModel(true, 0.5, sway, 1.0);
+                double dDiff = 0.0;
+                for (size_t i = 0; i < s0.d.size(); ++i) dDiff = std::max(dDiff, std::fabs(s0.d[i] - s1.d[i]));
+                check(dDiff == 0.0 && flips(s1.d, 0.0005) <= 2 && flips(s1.b, 0.0005) <= 2,
+                      "F66c: with the F66 rules d does not change when the bend amount changes (the bend cannot reach d), and a swaying head gives no alternation");
+            }
+            // F66d: the elbow keeps its hinge.
+            {
+                const double l1 = 0.30, l2 = 0.27, S[3] = {0.0, 0.0, 0.0};
+                const auto mul3 = [](const double A[9], const double B[9], double C[9]) {
+                    for (int r = 0; r < 3; ++r)
+                        for (int c = 0; c < 3; ++c) C[r * 3 + c] = A[r * 3] * B[c] + A[r * 3 + 1] * B[3 + c] + A[r * 3 + 2] * B[6 + c];
+                };
+                const auto tr3 = [](const double A[9], double T[9]) {
+                    for (int r = 0; r < 3; ++r)
+                        for (int c = 0; c < 3; ++c) T[c * 3 + r] = A[r * 3 + c];
+                };
+                const auto axisAngle = [](const double R[9], double axis[3]) {
+                    double q[4];
+                    nf::ikQuat(R, q);
+                    const double s = std::sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2]);
+                    if (s > 1e-12)
+                        for (int i = 0; i < 3; ++i) axis[i] = q[i] / s;
+                    else
+                        axis[0] = axis[1] = axis[2] = 0.0;
+                    return 2.0 * std::atan2(s, q[3]);
+                };
+                double worstHinge = 0.0, worstHand = 0.0, worstLen = 0.0, worstMapPos = 0.0, worstMapDeg = 0.0, worstAngle = 0.0;
+                int cases = 0, oldBig = 0;
+                for (int n = 0; n < 200; ++n) {
+                    // The animated arm: a unit upper-arm direction u0, a hinge normal n0 (perpendicular), a flexion of 30..120 deg about n0.
+                    double u0[3], tmp[3], n0[3];
+                    f66Unit(u0);
+                    f66Unit(tmp);
+                    const double d0 = nf::ikDot(tmp, u0);
+                    const double pr[3] = {tmp[0] - d0 * u0[0], tmp[1] - d0 * u0[1], tmp[2] - d0 * u0[2]};
+                    if (!nf::ikUnit(pr, n0)) continue;
+                    const double flex0 = (30.0 + 90.0 * f66Rand()) * nf::kIkPi / 180.0;
+                    double Rf0[9], h0[3];
+                    nf::ikRotAxis(n0, flex0, Rf0);
+                    nf::ikRowRot(u0, Rf0, h0);
+                    double E0[3], H0[3];
+                    for (int i = 0; i < 3; ++i) {
+                        E0[i] = S[i] + l1 * u0[i];
+                        H0[i] = E0[i] + l2 * h0[i];
+                    }
+                    // The target: along the animated shoulder-hand axis, 5% shorter, the elbow turned 160 deg about it from the animated side (a plane
+                    // change of 160 deg), plus a random 15 cm offset for half of the cases.
+                    double hs0[3] = {H0[0] - S[0], H0[1] - S[1], H0[2] - S[2]}, T[3];
+                    for (int i = 0; i < 3; ++i) T[i] = S[i] + 0.95 * hs0[i];
+                    if (n % 2) {
+                        double off[3];
+                        f66Unit(off);
+                        for (int i = 0; i < 3; ++i) T[i] += 0.10 * off[i];
+                    }
+                    double ref[3] = {E0[0] - S[0], E0[1] - S[1], E0[2] - S[2]};
+                    const nf::IkTwoBone tb = nf::ikTwoBoneFrame(S, T, l1, l2, ref);
+                    if (!tb.ok || tb.limited) continue;
+                    const double th0 = tb.angleOf(ref);
+                    double E[3];
+                    tb.elbowAt(th0 + 160.0 * nf::kIkPi / 180.0, E);
+                    const nf::HingeSwings hs = nf::ikHingeSwings(S, E0, H0, E, tb.hand, nullptr, nullptr);
+                    if (!hs.ok) continue;
+                    ++cases;
+                    // swing 1 carries the elbow onto E and the animated hinge onto n1
+                    double E0r[3], d01[3], n0r[3];
+                    d01[0] = E0[0] - S[0];
+                    d01[1] = E0[1] - S[1];
+                    d01[2] = E0[2] - S[2];
+                    nf::ikRowRot(d01, hs.R1, E0r);
+                    nf::ikRowRot(hs.n0, hs.R1, n0r);
+                    worstMapPos = std::max(worstMapPos, std::fabs(E0r[0] + S[0] - E[0]) + std::fabs(E0r[1] + S[1] - E[1]) + std::fabs(E0r[2] + S[2] - E[2]));
+                    worstMapDeg = std::max(worstMapDeg, std::acos(std::min(1.0, nf::ikDot(n0r, hs.n1))) * 180.0 / nf::kIkPi);
+                    // swing 2 about E: the hand lands on T; bone lengths kept
+                    double hv[3] = {H0[0] - S[0], H0[1] - S[1], H0[2] - S[2]}, hr[3], hrel[3], hr2[3];
+                    nf::ikRowRot(hv, hs.R1, hr);
+                    for (int i = 0; i < 3; ++i) hrel[i] = hr[i] + S[i] - E[i];
+                    nf::ikRowRot(hrel, hs.R2, hr2);
+                    double hand[3], toT[3];
+                    for (int i = 0; i < 3; ++i) {
+                        hand[i] = E[i] + hr2[i];
+                        toT[i] = hand[i] - T[i];
+                    }
+                    worstHand = std::max(worstHand, nf::ikLen(toT) * 1000.0);   // mm
+                    worstLen = std::max(worstLen, std::max(std::fabs(nf::ikLen(hr2) - l2), std::fabs(nf::ikLen(E0r) - l1)));
+                    // the forearm's rotation relative to the upper arm: R1^T (R_f0) R1 R2, about n1 by the solved flexion
+                    double R1t[9], a1[9], a2[9], rel[9], axis[3];
+                    tr3(hs.R1, R1t);
+                    mul3(R1t, Rf0, a1);
+                    mul3(a1, hs.R1, a2);
+                    mul3(a2, hs.R2, rel);
+                    const double ang = axisAngle(rel, axis);
+                    double an = ang < 0.0 ? -ang : ang;
+                    const double hingeErr = nf::ikAxisAngleDeg(axis, hs.n1);
+                    worstHinge = std::max(worstHinge, hingeErr);
+                    worstAngle = std::max(worstAngle, std::fabs(an * 180.0 / nf::kIkPi - hs.flexSolvedDeg));
+                    if (hs.oldHingeErrDeg > 5.0) ++oldBig;
+                }
+                check(cases > 120 && worstMapPos < 1e-9 && worstMapDeg < 1e-4 && worstHand < 0.001 && worstLen < 1e-9,
+                      "F66d: swing 1 carries the elbow to the solved one and the animated hinge to the solved hinge, swing 2 puts the hand on the target "
+                      "within 0.001 mm, and the bone lengths are kept (200 random arms, a 160 deg plane change)");
+                check(worstHinge < 0.01 && worstAngle < 0.01 && oldBig > cases / 2,
+                      "F66d: the forearm's rotation relative to the upper arm is about the solved hinge within 0.01 deg at the solved flexion, where the "
+                      "old two shortest-arc swings were over 5 deg off the hinge in most of these cases");
+                // A nearly straight animated arm has no hinge: the shortest arc stands in, a given row or the last hinge is used when given.
+                {
+                    const double u0[3] = {0.0, -1.0, 0.0}, E0[3] = {0.0, -l1, 0.0}, H0s[3] = {0.0, -l1 - l2, 0.0};
+                    const double T[3] = {0.20, -0.35, 0.10};
+                    const nf::IkTwoBone tb = nf::ikTwoBoneFrame(S, T, l1, l2, u0);
+                    double E[3];
+                    tb.elbowAt(0.7, E);
+                    const nf::HingeSwings straight = nf::ikHingeSwings(S, E0, H0s, E, tb.hand, nullptr, nullptr);
+                    const double row[3] = {0.0, 0.0, 1.0}, last[3] = {1.0, 0.0, 0.0};
+                    const nf::HingeSwings byRow = nf::ikHingeSwings(S, E0, H0s, E, tb.hand, row, nullptr);
+                    const nf::HingeSwings byLast = nf::ikHingeSwings(S, E0, H0s, E, tb.hand, nullptr, last);
+                    double handS[3], rel[3], out[3], tt[3];
+                    bool lands = true;
+                    for (const nf::HingeSwings* h : {&straight, &byRow, &byLast}) {
+                        const double hv[3] = {H0s[0] - S[0], H0s[1] - S[1], H0s[2] - S[2]};
+                        nf::ikRowRot(hv, h->R1, handS);
+                        for (int i = 0; i < 3; ++i) rel[i] = handS[i] + S[i] - E[i];
+                        nf::ikRowRot(rel, h->R2, out);
+                        for (int i = 0; i < 3; ++i) tt[i] = E[i] + out[i] - tb.hand[i];
+                        lands = lands && h->ok && nf::ikLen(tt) < 1e-9;
+                    }
+                    check(lands && straight.source == 2 && byRow.source == 3 && byLast.source == 1 && straight.flexAnimDeg < 1e-6,
+                          "F66d: a nearly straight animated arm falls back to the shortest arc (source 2), the learned hinge row (3) or the last hinge (1), and "
+                          "the hand still lands on the target");
+                }
+                // The hand's twist folded into +-90 deg, continuous around the circle, through the real twist extraction.
+                {
+                    bool bounded = true, continuous = true;
+                    double last = 0.0;
+                    const double axisE[3] = {0.0, 0.6, 0.8};
+                    for (int i = -360; i <= 360; ++i) {
+                        const double th = static_cast<double>(i) * 0.5 * nf::kIkPi / 180.0;
+                        double X[9];
+                        nf::ikRotAxis(axisE, th, X);
+                        const double f = nf::ikTwistFold(nf::ikTwistAbout(X, axisE));
+                        if (std::fabs(f) > 0.5 * nf::kIkPi + 1e-12) bounded = false;
+                        if (i > -360 && std::fabs(f - last) > 0.5 * nf::kIkPi / 180.0 + 1e-9) continuous = false;
+                        last = f;
+                    }
+                    check(bounded && continuous && std::fabs(nf::ikTwistFold(30.0 * nf::kIkPi / 180.0) - 30.0 * nf::kIkPi / 180.0) < 1e-12 &&
+                              std::fabs(nf::ikTwistFold(120.0 * nf::kIkPi / 180.0) - 60.0 * nf::kIkPi / 180.0) < 1e-12 &&
+                              std::fabs(nf::ikTwistFold(-120.0 * nf::kIkPi / 180.0) + 60.0 * nf::kIkPi / 180.0) < 1e-12 &&
+                              std::fabs(nf::ikTwistFold(nf::kIkPi)) < 1e-12 && nf::ikTwistLimited(100.0 * nf::kIkPi / 180.0) &&
+                              !nf::ikTwistLimited(80.0 * nf::kIkPi / 180.0),
+                          "F66d: a hand target turned through +-180 deg about the forearm gives a continuous helper roll within +-90 deg (the wrist carries "
+                          "the rest); the wrapped twist jumped by up to 360 deg at the wrap");
+                }
+                // Which row of the forearm joint matrix is parallel to the hinge.
+                {
+                    float M[16] = {};
+                    M[0] = 0.0f; M[1] = 1.0f; M[2] = 0.0f;     // row 0: +y
+                    M[4] = 0.0f; M[5] = 0.0f; M[6] = -1.0f;    // row 1: -z
+                    M[8] = 1.0f; M[9] = 0.0f; M[10] = 0.0f;    // row 2: +x
+                    M[15] = 1.0f;
+                    const double nz[3] = {0.0, 0.0, 1.0}, nyTilt[3] = {0.0, std::cos(0.1), std::sin(0.1)};
+                    double ang = 0.0, sg = 0.0, ang2 = 0.0, sg2 = 0.0;
+                    const int r1 = nf::ikHingeRow(M, nz, &ang, &sg), r2 = nf::ikHingeRow(M, nyTilt, &ang2, &sg2);
+                    check(r1 == 1 && ang < 1e-6 && sg == -1.0 && r2 == 0 && std::fabs(ang2 - 0.1 * 180.0 / nf::kIkPi) < 1e-6 && sg2 == 1.0,
+                          "F66d: the hinge row is the forearm matrix row most parallel to the hinge (modulo sign), with its angle and the sign that agrees");
+                }
+            }
+            // F66e: ADS, the rendered eyes.
+            {
+                // A view-projection for an eye at pe with camera-relative origin o, asymmetric tangents (L, R, B, T), a yaw of 30 deg and a pitch of 10:
+                // clip x = (2/(R-L)) x_v - ((R+L)/(R-L)) z_v, clip y likewise, clip w = z_v, clip z any; row-vector form (clip_j = v . c_j + k_j).
+                const double yaw = 30.0 * nf::kIkPi / 180.0, pit = 10.0 * nf::kIkPi / 180.0;
+                const double fwd[3] = {std::sin(yaw) * std::cos(pit), -std::sin(pit), std::cos(yaw) * std::cos(pit)};
+                double right[3] = {std::cos(yaw), 0.0, -std::sin(yaw)}, up[3];
+                nf::ikCross(fwd, right, up);
+                const double tL = -1.35, tR = 1.10, tB = -1.15, tT = 1.30;
+                const double pe[3] = {3.2, 1.6, -5.4}, o[3] = {3.0, 1.5, -5.0};
+                const auto build = [&](const double peye[3], const double orig[3], float rows[16]) {
+                    double c[4][3];
+                    for (int i = 0; i < 3; ++i) {
+                        c[0][i] = 2.0 / (tR - tL) * right[i] - (tR + tL) / (tR - tL) * fwd[i];
+                        c[1][i] = 2.0 / (tT - tB) * up[i] - (tT + tB) / (tT - tB) * fwd[i];
+                        c[2][i] = 0.01 * fwd[i];
+                        c[3][i] = fwd[i];
+                    }
+                    const double rel[3] = {peye[0] - orig[0], peye[1] - orig[1], peye[2] - orig[2]};
+                    for (int j = 0; j < 4; ++j) {
+                        for (int i = 0; i < 3; ++i) rows[4 * i + j] = static_cast<float>(c[j][i]);
+                        rows[12 + j] = static_cast<float>(-nf::ikDot(c[j], rel));
+                    }
+                };
+                float rows[16];
+                build(pe, o, rows);
+                double eye[3] = {};
+                const bool ok = nf::eyeFromRows(rows, o, eye);
+                const double err[3] = {eye[0] - pe[0], eye[1] - pe[1], eye[2] - pe[2]};
+                // a second eye, 6.1 cm to the right with another origin: the rows carry the offset; the solve stays within 0.1 mm
+                const double pe2[3] = {pe[0] + 0.061 * right[0], pe[1] + 0.061 * right[1], pe[2] + 0.061 * right[2]}, o2[3] = {pe2[0] + 0.4, pe2[1] - 0.2, pe2[2] + 0.7};
+                float rows2[16];
+                build(pe2, o2, rows2);
+                double eye2[3] = {};
+                const bool ok2 = nf::eyeFromRows(rows2, o2, eye2);
+                const double err2[3] = {eye2[0] - pe2[0], eye2[1] - pe2[1], eye2[2] - pe2[2]};
+                float singular[16] = {};
+                double eyeS[3];
+                check(ok && ok2 && nf::ikLen(err) < 1e-4 && nf::ikLen(err2) < 1e-4 && !nf::eyeFromRows(singular, o, eyeS),
+                      "F66e: the rendered eye is solved from its scene rows (clip x, y, w vanish; asymmetric frusta, a camera-relative origin) within 0.1 mm; "
+                      "a singular system is refused");
+                double d01[3] = {eye2[0] - eye[0], eye2[1] - eye[1], eye2[2] - eye[2]};
+                check(std::fabs(nf::ikLen(d01) - 0.061) < 1e-3, "F66e: the IPD from the two solved eyes is the 6.1 cm they were built 6.1 cm apart");
+                // the sight line: through p14 along f; an eye on it has no perpendicular distance, one 3.2 cm beside it has 3.2 cm; f need not be unit
+                double perp = 9.0, along = 9.0, perp2 = 9.0, along2 = 9.0, perp3 = 9.0, along3 = 9.0;
+                const double p14[3] = {0.0, 1.7, 0.5}, fz[3] = {0.0, 0.0, 2.0}, eOn[3] = {0.0, 1.7, 0.0}, eSide[3] = {0.032, 1.7, 0.0};
+                nf::sightLineOfEye(eOn, p14, fz, &perp, &along);
+                nf::sightLineOfEye(eSide, p14, fz, &perp2, &along2);
+                const double zero3[3] = {};
+                nf::sightLineOfEye(eSide, p14, zero3, &perp3, &along3);
+                check(std::fabs(perp) < 1e-12 && std::fabs(along - 0.5) < 1e-12 && std::fabs(perp2 - 0.032) < 1e-12 && std::fabs(along2 - 0.5) < 1e-12 &&
+                          perp3 == 0.0 && along3 == 0.0,
+                      "F66e: an eye's distance to the sight line is its perpendicular part (0 on the line, 3.2 cm beside it) and its distance along to P14");
+                check(nf::sceneRowsFreshForLock(10, 10) && nf::sceneRowsFreshForLock(9, 10) && !nf::sceneRowsFreshForLock(8, 10) &&
+                          !nf::sceneRowsFreshForLock(11, 10) && !nf::sceneRowsFreshForLock(~0u, 10),
+                      "F66e: an eye's scene rows are this frame's when at most one frame behind the boundary that reads them");
+                // The lock on a model plant. The job camera sits at the LEFT eye (A1); the right eye is 6.1 cm to its right; the sight line passes 9 cm
+                // right of the camera. F63's model puts E_R at the camera + 3.05 cm; the lock closes on that model and leaves the real right eye
+                // 3.05 cm off the line (the flight's "between the eyes"); with E_R from the rows it converges onto the line.
+                const double rowsB[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1}, sight[3] = {0.09, 1.70, 0.5}, fSight[3] = {0.0, 0.0, 1.0}, rHat[3] = {1.0, 0.0, 0.0};
+                double camModel[3] = {0.0, 1.70, 0.0}, camRows[3] = {0.0, 1.70, 0.0};
+                for (int it = 0; it < 400; ++it) {
+                    nf::AdsSightErr em, er;
+                    nf::adsSightError(sight, camModel, rHat, 0.0305, fSight, rowsB, em);
+                    for (int i = 0; i < 3; ++i) camModel[i] += 0.1 * em.ePerpW[i];
+                    const double eyeR[3] = {camRows[0] + 0.061, camRows[1], camRows[2]};
+                    nf::adsSightErrorEye(sight, eyeR, fSight, rowsB, er);
+                    for (int i = 0; i < 3; ++i) camRows[i] += 0.1 * er.ePerpW[i];
+                }
+                double perpM = 0.0, perpR = 0.0, alongTmp = 0.0;
+                const double realM[3] = {camModel[0] + 0.061, camModel[1], camModel[2]}, realR[3] = {camRows[0] + 0.061, camRows[1], camRows[2]};
+                nf::sightLineOfEye(realM, sight, fSight, &perpM, &alongTmp);
+                nf::sightLineOfEye(realR, sight, fSight, &perpR, &alongTmp);
+                check(std::fabs(perpM - 0.0305) < 1e-6 && perpR < 1e-9,
+                      "F66e: the lock with the F63 model closes on the model and leaves the real right eye 3.05 cm off the sight line when the camera is at "
+                      "the left eye; with the right eye solved from its rows it converges onto the line");
+            }
+            // F66g: frame order and parity.
+            {
+                nf::AltCount flip, ramp, noise;
+                for (int i = 0; i < 20; ++i) {
+                    flip.step(i % 2 ? 1.0 : -1.0, 0.05);
+                    ramp.step(0.1 * i, 0.05);
+                    noise.step(0.01 * (i % 2), 0.05);
+                }
+                check(flip.flips == 18 && flip.steps == 19 && ramp.flips == 0 && ramp.steps == 19 && noise.flips == 0 && noise.steps == 0,
+                      "F66g: the alternating-sign count is every step of a flip-flop, none of a ramp, none of changes under the threshold");
+                nf::ParityMean pm;
+                pm.add(0, 1.0);
+                pm.add(0, 3.0);
+                pm.add(1, 5.0);
+                pm.add(3, 7.0);
+                nf::ParityMean empty;
+                empty.add(1, 4.0);
+                check(std::fabs(pm.mean(0) - 2.0) < 1e-12 && std::fabs(pm.mean(1) - 6.0) < 1e-12 && std::fabs(pm.diff() + 4.0) < 1e-12 && pm.n[0] == 2 &&
+                          pm.n[1] == 2 && empty.diff() == 0.0,
+                      "F66g: the parity mean is per low bit of the game-frame index; the even-minus-odd difference is 0 when either parity has no sample");
+                char o1[4], o2[4], o3[4], o4[4], o5[4];
+                nf::frameOrder3(10, 20, 30, o1);
+                nf::frameOrder3(30, 10, 20, o2);
+                nf::frameOrder3(20, 30, 10, o3);
+                nf::frameOrder3(5, 5, 5, o4);
+                nf::frameOrder3(10, 0, 30, o5);
+                check(std::strcmp(o1, "PAS") == 0 && std::strcmp(o2, "ASP") == 0 && std::strcmp(o3, "SPA") == 0 && std::strcmp(o4, "PAS") == 0 &&
+                          std::strcmp(o5, "???") == 0,
+                      "F66g: the order of the eye probe, the Animate and the submit post-hook is by QPC ticks (ties in P, A, S order); an event that did not "
+                      "run reads ???");
+            }
+            // F66f: the marker's offset from its own geometry and the affine row patch (draw_record_tag.h).
+            {
+                namespace dtf = edvr::drawtag;
+                // The eye's texture frustum (asymmetric: the left eye's axis sits about 0.10 NDC off centre) and the TAA jitter the scene rows carry.
+                const double tL = -1.35, tR = 1.10, tB = -1.15, tT = 1.30;
+                const float tan4[4] = {static_cast<float>(tL), static_cast<float>(tR), static_cast<float>(tB), static_cast<float>(tT)};
+                double axis[2] = {};
+                const bool axisOk = dtf::axisFromTangents(tan4, axis);
+                const float badTan[4] = {1.0f, 1.0f, -1.0f, 1.0f};
+                double axisBad[2] = {};
+                const double jit[2] = {0.0009, -0.0007};   // NDC (about 0.9 px at 2016)
+                // The world rows: x, y, w columns, row vectors: clip_j = v . c_j (the eye at the origin; the translation row is zero).
+                const double yaw = 20.0 * 3.14159265358979323846 / 180.0;
+                const double fwd[3] = {std::sin(yaw), 0.0, std::cos(yaw)}, right[3] = {std::cos(yaw), 0.0, -std::sin(yaw)}, up[3] = {0.0, 1.0, 0.0};
+                float wrows[16] = {};
+                const double scW[2] = {2.0 / (tR - tL), 2.0 / (tT - tB)};
+                for (int i = 0; i < 3; ++i) {
+                    wrows[4 * i + 0] = static_cast<float>(scW[0] * right[i] + (axis[0] + jit[0]) * fwd[i]);
+                    wrows[4 * i + 1] = static_cast<float>(scW[1] * up[i] + (axis[1] + jit[1]) * fwd[i]);
+                    wrows[4 * i + 2] = static_cast<float>(0.01 * fwd[i]);
+                    wrows[4 * i + 3] = static_cast<float>(fwd[i]);
+                }
+                // The marker's rows: another frame (turned 33 deg), its own centre 0.03 NDC off the axis and scales 0.94% and 0.81% larger.
+                const double yawM = 33.0 * 3.14159265358979323846 / 180.0;
+                const double fM[3] = {std::sin(yawM), 0.0, std::cos(yawM)}, rM[3] = {std::cos(yawM), 0.0, -std::sin(yawM)};
+                const double scM[2] = {scW[0] * 1.0094, scW[1] * 1.0081}, offM[2] = {axis[0] + 0.03, axis[1] - 0.02};
+                float m4[4], m5[4], m7[4];
+                for (int i = 0; i < 3; ++i) {
+                    m4[i] = static_cast<float>(scM[0] * rM[i] + offM[0] * fM[i]);
+                    m5[i] = static_cast<float>(scM[1] * up[i] + offM[1] * fM[i]);
+                    m7[i] = static_cast<float>(fM[i]);
+                }
+                m4[3] = 0.0f;
+                m5[3] = 0.0f;
+                m7[3] = 0.0f;
+                dtf::ProjDecomp dw, dm;
+                const bool okW = dtf::projDecomposeWorld(wrows, dw), okM = dtf::projDecomposeMarker(m4, m5, m7, dm);
+                const dtf::MarkerAffine aff = dtf::markerAffine(dm, dw, axis);
+                const dtf::MarkerAffine noAxis = dtf::markerAffine(dm, dw, nullptr);
+                check(axisOk && std::fabs(axis[0] - 0.10204081632653061) < 1e-6 && std::fabs(axis[1] + 0.061224489795918366) < 1e-6 &&
+                          !dtf::axisFromTangents(badTan, axisBad),
+                      "F66f: the texture's optical axis is -(R + L) / (R - L) and -(U + D) / (U - D) of its tangents (the left eye's sits off centre)");
+                check(okW && okM && std::fabs(dw.off[0] - (axis[0] + jit[0])) < 1e-6 && std::fabs(dw.off[1] - (axis[1] + jit[1])) < 1e-6 &&
+                          std::fabs(dw.scale[0] - scW[0]) < 1e-6 && std::fabs(dw.scale[1] - scW[1]) < 1e-6 && std::fabs(dm.off[0] - offM[0]) < 1e-6 &&
+                          std::fabs(dm.off[1] - offM[1]) < 1e-6 && std::fabs(dm.scale[0] - scM[0]) < 1e-6 && std::fabs(dm.scale[1] - scM[1]) < 1e-6,
+                      "F66f: a projection's optical axis and focal scale per axis are read from its rows alone (world rows and the marker's b0 rows 4, 5, 7), "
+                      "whatever frame they are in");
+                check(aff.ok && aff.haveAxis && std::fabs(aff.sigma[0] - 1.0094) < 1e-5 && std::fabs(aff.sigma[1] - 1.0081) < 1e-5 &&
+                          std::fabs(aff.jitter[0] - jit[0]) < 1e-6 && std::fabs(aff.jitter[1] - jit[1]) < 1e-6 && noAxis.ok && !noAxis.haveAxis &&
+                          noAxis.jitter[0] == 0.0 && noAxis.jitter[1] == 0.0 && std::fabs(noAxis.axis[0] - dw.off[0]) < 1e-12,
+                      "F66f: sigma = scale_M / scale_W per axis (1.0094 and 1.0081 here: x and y unequal); the jitter the scene rows carry is their centre "
+                      "less the texture's axis, zero when the tangents are not known");
+                // The patch: the anchor's target T (the unjittered P plus e); n_final = sigma n_M + u shows the anchor at T and every other vertex at
+                // the offset the game designed (n_M(q) - n_M(X0)), through the display map.
+                const double x0[3] = {12.0, 3.0, 40.0}, q[3] = {12.4, 3.9, 40.0}, zero3[3] = {0.0, 0.0, 0.0};
+                double cm0[3], cmq[3];
+                dtf::markerClip(m4, m5, m7, x0, zero3, cm0);
+                dtf::markerClip(m4, m5, m7, q, zero3, cmq);
+                const double nM0[2] = {cm0[0] / cm0[2], cm0[1] / cm0[2]}, nMq[2] = {cmq[0] / cmq[2], cmq[1] / cmq[2]};
+                const double T[2] = {0.52, -0.31};
+                double u[2];
+                dtf::markerAffineU(aff, T, nM0, u);
+                float p4[4], p5[4];
+                std::memcpy(p4, m4, sizeof(p4));
+                std::memcpy(p5, m5, sizeof(p5));
+                dtf::affineOffsetRows(p4, p5, m7, aff.sigma, u);
+                double pc0[3], pcq[3], d0[2], dq[2];
+                dtf::markerClip(p4, p5, m7, x0, zero3, pc0);
+                dtf::markerClip(p4, p5, m7, q, zero3, pcq);
+                const double nf0[2] = {pc0[0] / pc0[2], pc0[1] / pc0[2]}, nfq[2] = {pcq[0] / pcq[2], pcq[1] / pcq[2]};
+                dtf::displayOfUi(aff, nf0, d0);
+                dtf::displayOfUi(aff, nfq, dq);
+                check(std::fabs(d0[0] - T[0]) < 1e-5 && std::fabs(d0[1] - T[1]) < 1e-5 && std::fabs((dq[0] - d0[0]) - (nMq[0] - nM0[0])) < 1e-5 &&
+                          std::fabs((dq[1] - d0[1]) - (nMq[1] - nM0[1])) < 1e-5,
+                      "F66f: the affine rows show the anchor exactly at its target in the texture and every other vertex at the offset the game designed "
+                      "(the whole icon lands, not only its anchor)");
+                // Without the affine (the old translation) the anchor lands short of T by (1 - 1/sigma) of its distance from the axis.
+                float t4[4], t5[4];
+                std::memcpy(t4, m4, sizeof(t4));
+                std::memcpy(t5, m5, sizeof(t5));
+                dtf::MarkerAffine plain;
+                double ut[2];
+                dtf::markerAffineU(plain, T, nM0, ut);
+                dtf::affineOffsetRows(t4, t5, m7, plain.sigma, ut);
+                double tc[3], dT[2];
+                dtf::markerClip(t4, t5, m7, x0, zero3, tc);
+                const double ntr[2] = {tc[0] / tc[2], tc[1] / tc[2]};
+                dtf::displayOfUi(aff, ntr, dT);
+                check(std::fabs(ntr[0] - T[0]) < 1e-5 && std::fabs(ntr[1] - T[1]) < 1e-5 && std::fabs(plain.sigma[0] - 1.0) == 0.0 && !plain.ok &&
+                          std::fabs(ut[0] - (T[0] - nM0[0])) < 1e-12 && std::fabs(ut[1] - (T[1] - nM0[1])) < 1e-12 && std::fabs(dT[0] - T[0]) > 1e-3,
+                      "F66f: with sigma 1 the patch is today's translation (u = T - n_M(X0)); shown through the real display map it misses T by the "
+                      "scale error (a few thousandths of NDC at this offset from the axis, about 10 px at 2016)");
+                // The unjittered place of a point, a ratio outside 0.9..1.1 refused, and the other axis of the same tangents.
+                double nj[2];
+                const double nPj[2] = {0.30 + jit[0], -0.20 + jit[1]};
+                dtf::unjitter(aff, nPj, nj);
+                dtf::ProjDecomp wide = dw;
+                wide.scale[0] *= 1.3;
+                const dtf::MarkerAffine refused = dtf::markerAffine(dm, wide, axis);
+                check(std::fabs(nj[0] - 0.30) < 1e-6 && std::fabs(nj[1] + 0.20) < 1e-6 && !refused.ok && refused.sigma[0] == 1.0 && refused.sigma[1] == 1.0 &&
+                          !dtf::markerAffine(dtf::ProjDecomp{}, dw, axis).ok,
+                      "F66f: P is taken unjittered (the scene rows' centre less the axis is the jitter); a scale ratio over 10% or an undecomposed "
+                      "projection falls back to the translation");
+                // The icon offset from the geometry: the packed positions (both forms), the record's quaternion and scale, and e through the rows.
+                double pa[3] = {}, pb[3] = {}, pc[3] = {}, pd[3] = {};
+                const bool d64 = dtf::decodePackedPosition((16384u << 16) | 49152u, (4096u << 16) | 32768u, 64u << 24, pa);
+                const bool dE0 = dtf::decodePackedPosition(0x17FFFFu & 0x1FFFFFu, 0u, 0u, pb);
+                const bool dE0z = dtf::decodePackedPosition(0u, 0u, 0u, pc);
+                const bool dBad = dtf::decodePackedPosition(0u, 0u, 20u << 24, pd);
+                check(d64 && std::fabs(pa[0] - 0.5) < 1e-12 && std::fabs(pa[1] + 0.5) < 1e-12 && std::fabs(pa[2]) < 1e-12 && dE0 &&
+                          std::fabs(pb[0] - (1572863.0 / 1048575.0 - 1.0)) < 1e-9 && dE0z && std::fabs(pc[0] + 1.0) < 1e-12 && std::fabs(pc[1] + 1.0) < 1e-12 &&
+                          std::fabs(pc[2] + 1.0) < 1e-12 && !dBad,
+                      "F66f: PACKEDVERTEXDATAA.xyz decodes as the vertex shader does (the 16-bit form with its exponent, the 21-bit form with its range); "
+                      "an exponent of 20 divides by zero and is refused");
+                const double vx[3] = {1.0, 0.0, 0.0}, vv[3] = {0.0, 1.0, 0.0};
+                double r0v[3], r1v[3];
+                dtf::rotateByPackedQuat(32768u | (32768u << 16), 32768u | (65535u << 16), vx, r0v);        // (0, 0, 0, ~1): the identity
+                dtf::rotateByPackedQuat(32768u | (65535u << 16), 32768u | (32768u << 16), vx, r1v);        // (0, ~1, 0, 0): half a turn about y
+                double r2v[3];
+                dtf::rotateByPackedQuat(32768u | (32768u << 16), 32768u | (65535u << 16), vv, r2v);
+                check(std::fabs(r0v[0] - 1.0) < 5e-4 && std::fabs(r0v[1]) < 5e-4 && std::fabs(r1v[0] + 1.0) < 5e-4 && std::fabs(r1v[2]) < 5e-4 &&
+                          std::fabs(r2v[1] - 1.0) < 5e-4,
+                      "F66f: the instance record's packed quaternion (four unorm16 as u / 32768 - 1) turns a vertex as the vertex shader does");
+                const float i4[4] = {1, 0, 0, 0}, i5[4] = {0, 1, 0, 0}, i7[4] = {0, 0, 1, 0};
+                const double xr[3] = {0.0, 0.0, 10.0}, vc[3] = {0.0, -0.5, 0.0};
+                double eIcon[2] = {};
+                const bool eOk = dtf::iconEdrawNdc(i4, i5, i7, xr, 2.0, 32768u | (32768u << 16), 32768u | (65535u << 16), vc, eIcon);
+                double eBehind[2] = {};
+                const double xb[3] = {0.0, 0.0, -10.0};
+                check(eOk && std::fabs(eIcon[0]) < 1e-4 && std::fabs(eIcon[1] - 0.1) < 1e-4 &&
+                          !dtf::iconEdrawNdc(i4, i5, i7, xb, 2.0, 32768u | (32768u << 16), 32768u | (65535u << 16), vc, eBehind),
+                      "F66f: e is the NDC difference between the anchor and the icon's centre vertex through the draw's rows (a centre 1 m below an anchor "
+                      "10 m away is 0.1 NDC above it); behind the projection it is refused");
+            }
             // The shift rule: a record at the AMC origin moves by d once; a second pass over it leaves it alone; a record elsewhere never moves.
             const float origin[3] = {10.0f, 2.0f, -3.0f}, d[3] = {0.0f, 0.231f, 0.0f};
             float rec[3] = {10.0f, 2.0f, -3.0f}, other[3] = {10.5f, 2.0f, -3.0f};
@@ -2458,11 +2878,6 @@ int wmain(int argc, wchar_t** argv) {
                 check(!nf::weaponIsLocalFp(0, 1, nearP, attach, true) && !nf::weaponIsLocalFp(1, 0, nearP, attach, true) &&
                           !nf::weaponIsLocalFp(1, 1, nearP, attach, false),
                       "F54: a zero mask, a clear viewmodel byte or unknown attach joints never match");
-                float pos[3] = {2.0f, 3.0f, 4.0f}, copy[3] = {2.0f, 3.0f, 4.0f};
-                const float dw[3] = {0.0f, 0.1f, 0.02f};
-                nf::weaponShift(pos, copy, dw);
-                check(pos[0] == 2.0f && pos[1] == 3.0f + 0.1f && pos[2] == 4.0f + 0.02f && std::memcmp(pos, copy, sizeof(pos)) == 0,
-                      "F54: the weapon shift moves the record position and its copy by the same d");
             }
             // The freeze gate: no locomotion. Standing (a weapon out does not enter it) rests after 0.3 s; walking at 1.4 m/s does not; a fall
             // (vertical motion only) is not locomotion; ADS ends the rest.
