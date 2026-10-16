@@ -23,8 +23,8 @@
   interface, a build gate against one plugin including another's internals,
   and an unselected plugin never registers. The interface stays C-compatible
   so a split into DLLs stays mechanical (section 10 has the reasons).
-  PR #46's C ABI stays the add-on tier, moved into the core so flat mode
-  gets it too.
+  PR #46's C ABI stays the add-on tier, moved into the core (VR-only as
+  built, see Scope). **Scope (PR #92 review): the 3rd-party tier is VR-only; flat is a follow-up (section 11).**
 - **Decided, Q2-Q6 (Sean, 2026-09-30):** the nine plugins of section 4
   (regrouped: intro and on-foot-panel split out, UI quality inside
   temporal-aa); defaults that reproduce today's shipped behaviour; the
@@ -262,9 +262,9 @@ installs as graphics + profile + ini (+ NGX) with no runtime (plan.cpp:314,
 Keep: the structSize-versioned C ABI, `EdvrPluginRegister`, `registerSetting`
 and `logNote`, `onRenderEye` for overlays, `onFilterInput`. Change:
 
-1. The manager moves into the core. It becomes one instance serving both
-   profiles, so flat mode gets add-ons too. The flat overlay point is the
-   final image before Present.
+1. The manager moves into the core. One instance; as built it serves VR
+   only (Status, scope line). The intended flat overlay point, a follow-up,
+   is the final image before Present.
 2. Load only add-ons named in the install manifest with matching SHA-256.
 3. Wrap every callback in fault containment. A faulting add-on is disabled
    for the session and named in the log.
@@ -420,6 +420,10 @@ when ReShade was removed). The rules:
 ## 11. Third-party add-on tier implementation (2026-10-13)
 
 Branch `feat/third-party-plugins` implements 3rd-party plugin support (`include/edvr_plugin_api.h` synchronized with `edvr-mfd`):
+- **Scope: VR only** (PR #92 review, 2026-10-15). The native OpenXR scene pass is the only caller of the add-on update and render bridge, so a flat session
+  discovers, initialises and dispatches no add-on and registers no add-on settings (log: `plugin_manager: initialize skipped, plugins are VR-only and this
+  is a flat session`). Flat support is a follow-up PR: an update and composite hook on the final image before Present, with a flat-session fixture
+  counter in `addon_manager_test`. A profile switch is not wired: VR to flat stops dispatch and refuses new loads, flat to VR loads nothing until restart.
 - **Consolidated core:** First-party features remain inside the monolithic core (per Sean: users want all features anyway; splitting them into separate internal plugins dropped in priority).
 - **Extension Manager (`src/plugins/plugin_manager.{h,cpp}`):**
   - **Trust-On-First-Use (TOFU):** Pre-execution SHA-256 hash calculation via Windows BCrypt before loading candidate DLLs. Candidates in `plugins\` are cross-referenced with `[addons] <stem> = <sha256>` in `edvr.ini`.

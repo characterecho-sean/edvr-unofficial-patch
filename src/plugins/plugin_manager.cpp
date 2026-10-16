@@ -1,6 +1,7 @@
 #include "plugin_manager.h"
 #include "../common/log.h"
 #include "../common/config.h"
+#include "../common/runtime_profile.h"
 #include "../d3d11/input_gate.h"
 #include "../d3d11/menu.h"
 
@@ -78,6 +79,14 @@ std::string sanitizeStem(const std::wstring& ws) {
         else s.push_back('_');
     }
     return s;
+}
+
+// True in a flat session, where plugins are not supported (VR-only: docs/design-plugin-architecture-2026-09-30.md). The line is the log's proof
+// that the gate, not a missing plugins directory, is why nothing loaded.
+bool vrOnlyBlocked(const char* what) {
+    if (!runtimeFlatProfile()) return false;
+    Log::get().note("plugin_manager: %s skipped, plugins are VR-only and this is a flat session", what);
+    return true;
 }
 
 } // namespace
@@ -159,6 +168,9 @@ std::string PluginManager::calculateSha256(const std::wstring& path) {
 bool PluginManager::initialize(const std::wstring& rootDir) {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
     if (m_initialized) return true;
+    // Plugins are VR-only: the only code that updates and draws them is the native OpenXR scene pass, which a flat session does not run. A flat session
+    // discovers nothing, initialises nothing and so registers no settings. m_initialized stays false, so a later initialize can still run.
+    if (vrOnlyBlocked("initialize")) return true;
     m_initialized = true;
     m_rootDir = rootDir;
 
@@ -226,6 +238,7 @@ bool PluginManager::initialize(const std::wstring& rootDir) {
 }
 
 bool PluginManager::loadPlugin(CandidatePlugin& cand, const std::string& approvedSha) {
+    if (vrOnlyBlocked("load")) return false;   // a profile switch to flat after discovery: approval must not load an addon that nothing would run
     // Approval names a hash, so the bytes that run must be the bytes that hash. Hold the file with
     // write and delete sharing denied, hash it through that handle, and load it while the handle is
     // still open: nothing can swap the file between the check and the load.
@@ -404,6 +417,7 @@ bool PluginManager::candidateById(uint32_t id, CandidatePlugin* out) {
 
 void PluginManager::onUpdate(const EdvrPosef& headPose, float dtSeconds) {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    if (runtimeFlatProfile()) return;
 
     // Compute accurate real delta time if dtSeconds is defaulted or unmeasured
     LARGE_INTEGER now{};
@@ -432,6 +446,7 @@ void PluginManager::onUpdate(const EdvrPosef& headPose, float dtSeconds) {
 
 void PluginManager::onRenderEye(const EdvrEyeRenderContext& eyeCtx) {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    if (runtimeFlatProfile()) return;
     for (auto& p : m_plugins) {
         if (p.disabled || !p.callbacks.onRenderEye) continue;
         DWORD fault = 0;
@@ -448,6 +463,10 @@ void PluginManager::onRenderEye(const EdvrEyeRenderContext& eyeCtx) {
 
 bool PluginManager::onFilterInput(uint32_t deviceType, const void* rawInputData) {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    if (runtimeFlatProfile()) {   // an addon loaded in VR must not keep holding input after a switch to flat
+        inputGateSetPluginBlock(false);
+        return false;
+    }
     bool swallowed = false;
     for (auto& p : m_plugins) {
         if (p.disabled || !p.callbacks.onFilterInput) continue;

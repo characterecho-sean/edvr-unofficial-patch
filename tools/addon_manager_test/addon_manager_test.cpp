@@ -11,6 +11,7 @@
 #include "../../src/plugins/plugin_setting_restore.h"
 #include "../../src/common/config.h"
 #include "../../src/common/log.h"
+#include "../../src/common/runtime_profile.h"
 
 // Stubs for d3d11 and input gate functions required by plugin_manager
 extern "C" __declspec(dllexport) int WINAPI edvrRegisterPluginSetting(const EdvrPluginSettingDef* setting) {
@@ -431,6 +432,38 @@ int main(int argc, char** argv) {
         pm.shutdown();
         std::error_code ec15;
         std::filesystem::remove_all(sb, ec15);
+    }
+
+    // Case 16 (PR #92 review): plugins are VR-only. A flat session discovers, initialises and dispatches nothing and registers no settings;
+    // the same install in a VR session behaves as before.
+    {
+        auto sb = makeSandbox(L"flatscope");
+        dropFixture(sb, L"settings", L"flatkeeper.dll");
+        const std::string sha = edvr::plugins::PluginManager::calculateSha256((sb / L"plugins" / L"flatkeeper.dll").wstring());
+        const edvr::RuntimeProfile savedProfile = edvr::runtimeProfileValue();
+        g_fakeSettings.clear();
+        g_fakeRegisteredEver = 0;
+        edvr::runtimeProfileSet(edvr::RuntimeProfile::Flat);
+        pm.initialize(sb.wstring());
+        check(pm.candidates().empty(), "flatscope: a flat session discovers no candidates");
+        check(!pm.approvePlugin("flatkeeper", sha), "flatscope: nothing can be approved into a flat session");
+        check(GetModuleHandleW(L"flatkeeper.dll") == nullptr, "flatscope: no addon DLL is loaded in a flat session");
+        check(!pm.hasActivePlugins(), "flatscope: no addon is active in a flat session");
+        check(g_fakeRegisteredEver == 0 && g_fakeSettings.empty(), "flatscope: a flat session registers no plugin settings");
+        EdvrPosef head{};
+        pm.onUpdate(head, 0.016f);
+        check(!pm.onFilterInput(1, nullptr), "flatscope: a flat session dispatches no input filter");
+        pm.shutdown();
+
+        edvr::runtimeProfileSet(edvr::RuntimeProfile::Vr);
+        pm.initialize(sb.wstring());
+        check(findCandidate(pm, "flatkeeper") != nullptr, "flatscope: the same install discovers its addon in a VR session");
+        check(pm.approvePlugin("flatkeeper", sha) && pm.hasActivePlugins(), "flatscope: a VR session loads the approved addon");
+        check(fakeSettingsOwnedBy("flatkeeper") == 2, "flatscope: a VR session registers the addon's settings");
+        pm.shutdown();
+        edvr::runtimeProfileSet(savedProfile);
+        std::error_code ec16;
+        std::filesystem::remove_all(sb, ec16);
     }
 
     // Cleanup sandbox
