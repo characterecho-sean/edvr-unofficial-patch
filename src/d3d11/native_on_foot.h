@@ -242,7 +242,8 @@ inline bool nativeOnFootMarkerFixLive() {
 }
 // F52 (TEMPORARY, fix.native_on_foot_marker_ref = world_first | temporal, default temporal, live): the view the correction measures each eye
 // against (drawtag::RefMode). temporal is used while the temporal pass has the eye's camera rows, world_first otherwise; a change of the
-// reference in use resets the eye's baselines. Set by readKey; read by the render thread.
+// reference in use resets the eye's baselines. Set by readKey; read by the render thread. F62c: the patch measures against the eye's scene
+// rows whatever this key says (drawtag::patchDecide; no trust gate); the key now steers only the F52 measure lines.
 inline std::atomic<int> g_nativeOnFootMarkerRefKey{1};
 bool nativeOnFootMarkerFixBegin(ID3D11DeviceContext* ctx);
 void nativeOnFootMarkerFixEnd(ID3D11DeviceContext* ctx);
@@ -250,11 +251,23 @@ void nativeOnFootMarkerFixEnd(ID3D11DeviceContext* ctx);
 // F53: the marker probe's newest projection per eye, for the eye dump's marker crop (temporal_pass.cpp): P through the eye's scene rows (ndc,
 // set once per eye a frame at its first marker composite draw) and the marker as drawn (ndc, from the read-back, 2..3 frames late), each with
 // its GetTickCount64 stamp (0: never). Relaxed: a reader may mix two frames' values, which only moves a crop's centre.
+// F62c: the waypoint series' fields. s*: this eye-frame's P through the scene rows (ndc NaN when w <= 0; w; the find's key; the head's speed
+// in deg/s, -1 unknown; the probe frame it was projected in), published at every eye-frame with scene rows and a find, in front or not.
+// drawnFrame: the probe frame of the read-back that gave `drawn`. patch*: the last marker composite draw of the eye the fix bound (its probe
+// frame, key, delta in NDC, held or fresh, and draws bound in that frame).
 struct MarkerCropNdc {
     std::atomic<float> p[2];
     std::atomic<float> drawn[2];
     std::atomic<uint64_t> pMs, drawnMs;
+    std::atomic<bool> sHave;
+    std::atomic<float> sNdc[2], sW, sHead;
+    std::atomic<uint32_t> sFrame, sKey, drawnFrame;
+    std::atomic<uint32_t> patchFrame, patchKey, patchDraws;
+    std::atomic<float> patchDx, patchDy;
+    std::atomic<bool> patchHeld;
 };
 inline MarkerCropNdc g_markerCropNdc[2];   // zero-initialised (static storage)
+// F62c: the marker probe's frame now (the frame the draws and the submits between two Presents share; the series' age-0 test).
+uint32_t nativeOnFootMarkerFrameNow();
 
 }  // namespace edvr

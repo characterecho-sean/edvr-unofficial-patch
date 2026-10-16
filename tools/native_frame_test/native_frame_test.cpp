@@ -744,6 +744,102 @@ int wmain(int argc, wchar_t** argv) {
             check(dOk && !dWrap && ka == 5 && kb == 133 && !dt::keysDistinct(big, 2) && !dt::keysDistinct(self, 1) && dt::keysDistinct(ok3, 0),
                   "F53: the key census finds two keys (or a key's first and second posts) that would share a sentinel");
         }
+        // F62c: the patch decision without F53's trust gate, the 0.1 NDC limit, the one-frame hold, and the waypoint series' crop about this
+        // frame's P.
+        {
+            // (1) The scene rows and the temporal reference 5 px apart at P (the camera turned 0.1184 deg; P 45 deg off axis, so 2.4 x the
+            // turn in NDC, 5.0 px at 2016): F53's gate refused the frame; F62c patches it onto ndc(P through the scene rows) + e.
+            const double th = 0.1184 * 3.14159265358979323846 / 180.0;
+            double rA[3], uA[3], fA[3];
+            const double rB[3] = {std::cos(th), 0.0, -std::sin(th)}, uB[3] = {0.0, 1.0, 0.0}, fB[3] = {std::sin(th), 0.0, std::cos(th)};
+            float temporal[16];
+            const bool okT = dt::worldBasis(wr, rA, uA, fA) && dt::swapRotation(wr, rA, uA, fA, rB, uB, fB, temporal);
+            const double W = 2016.0, H = 2016.0;
+            double cs[4], ct[4];
+            dt::worldClip(wr, wp, wo, cs);
+            dt::worldClip(temporal, wp, wo, ct);
+            const double gx = (ct[0] / ct[3] - cs[0] / cs[3]) * W * 0.5, gy = (ct[1] / ct[3] - cs[1] / cs[3]) * H * 0.5;
+            const double apart = std::sqrt(gx * gx + gy * gy);
+            double e[2] = {};
+            dt::iconOffsetNdc(H, e);
+            float m4[4] = {1.2f, 0, 0.1f, 0}, m5[4] = {0, 1.1f, -0.05f, 0};
+            const double x0[3] = {11.02, 2.01, 3.0};
+            double lm[2] = {}, ldx = 0.0, ldy = 0.0, lmc[3];
+            const int dwhy = dt::ndcLagDelta(wr, wo, m4, m5, r7, wo, x0, wp, e, dt::kPatchGateNdc, lm, &ldx, &ldy);
+            dt::PatchHold ph;
+            const dt::PatchVerdict pv = dt::patchDecide(true, true, true, true, dwhy, ldx, ldy, 100, ph);
+            dt::ndcOffsetRows(m4, m5, r7, pv.dx, pv.dy);
+            dt::markerClip(m4, m5, r7, x0, wo, lmc);
+            check(okT && apart > 4.5 && apart < 5.5 && !dt::sceneRowsTrusted(true, apart) && pv.patch && !pv.held && pv.why == dt::kPatchApplied &&
+                      std::fabs(lmc[0] / lmc[2] - (cs[0] / cs[3] + e[0])) < 1e-5 && std::fabs(lmc[1] / lmc[2] - (cs[1] / cs[3] + e[1])) < 1e-5 &&
+                      ph.frame == 100u,
+                  "F62c: scene and temporal rows 5 px apart at P: F53's trust gate refused the frame; F62c patches it onto ndc(P through the scene "
+                  "rows) + e");
+            // (2) The 0.1 NDC limit: just under it patches; at it or over it (either axis) is refused as |d| with nothing to hold; through
+            // ndcLagDelta at the patch gate, c moved so the delta is 0.0999 then 0.1001 in x.
+            dt::PatchHold h1, h2;
+            const dt::PatchVerdict under = dt::patchDecide(true, true, true, true, dt::kDeltaOk, 0.0999, -0.0999, 10, h1);
+            const dt::PatchVerdict at = dt::patchDecide(true, true, true, true, dt::kDeltaOk, 0.1, 0.0, 10, h2);
+            const dt::PatchVerdict overY = dt::patchDecide(true, true, true, true, dt::kDeltaOk, 0.0, -0.15, 11, h2);
+            float q4[4] = {1.2f, 0, 0.1f, 0}, q5[4] = {0, 1.1f, -0.05f, 0};
+            double qm[2] = {}, qdx = 0.0, qdy = 0.0;
+            const double cA[2] = {lm[0] + 0.0999, lm[1]}, cB[2] = {lm[0] + 0.1001, lm[1]};
+            const int wA = dt::ndcLagDelta(wr, wo, q4, q5, r7, wo, x0, wp, cA, dt::kPatchGateNdc, qm, &qdx, &qdy);
+            dt::PatchHold h3, h4;
+            const dt::PatchVerdict vA = dt::patchDecide(true, true, true, true, wA, qdx, qdy, 20, h3);
+            const int wB = dt::ndcLagDelta(wr, wo, q4, q5, r7, wo, x0, wp, cB, dt::kPatchGateNdc, qm, &qdx, &qdy);
+            const dt::PatchVerdict vB = dt::patchDecide(true, true, true, true, wB, qdx, qdy, 20, h4);
+            check(dt::kPatchGateNdc == 0.1 && under.patch && under.why == dt::kPatchApplied && !at.patch && at.why == dt::kPatchGate &&
+                      !overY.patch && overY.why == dt::kPatchGate && wA == dt::kDeltaOk && vA.patch && std::fabs(vA.dx - 0.0999) < 1e-9 &&
+                      wB == dt::kDeltaGate && !vB.patch && vB.why == dt::kPatchGate && h4.frame == ~0u,
+                  "F62c: |dx|, |dy| under 0.1 NDC patch; 0.1 and over (either axis) are refused as |d|, with nothing to hold");
+            // (3) The one-frame hold: frame 200 patches (0.01, -0.02); 201, refused as |d|, patches with 200's delta (held); 202, refused as
+            // stale, is not patched (one frame only). Unmatched and both-eyes refusals never hold; a stale frame right after a good one does;
+            // no P and w <= 0 are their own refusals.
+            dt::PatchHold hh, hu;
+            const dt::PatchVerdict f200 = dt::patchDecide(true, true, true, true, dt::kDeltaOk, 0.01, -0.02, 200, hh);
+            const dt::PatchVerdict f201 = dt::patchDecide(true, true, true, true, dt::kDeltaGate, 0.3, 0.0, 201, hh);
+            const dt::PatchVerdict f202 = dt::patchDecide(true, true, false, true, -1, 0.0, 0.0, 202, hh);
+            const dt::PatchVerdict g300 = dt::patchDecide(true, true, true, true, dt::kDeltaOk, 0.01, 0.01, 300, hu);
+            const dt::PatchVerdict unm = dt::patchDecide(false, true, true, true, dt::kDeltaOk, 0.0, 0.0, 301, hu);
+            const dt::PatchVerdict both = dt::patchDecide(true, false, true, true, dt::kDeltaOk, 0.0, 0.0, 301, hu);
+            const dt::PatchVerdict stale = dt::patchDecide(true, true, false, true, -1, 0.0, 0.0, 301, hu);
+            const dt::PatchVerdict noP = dt::patchDecide(true, true, true, false, -1, 0.0, 0.0, 305, hu);
+            const dt::PatchVerdict wNeg = dt::patchDecide(true, true, true, true, dt::kDeltaWorldBehind, 0.0, 0.0, 306, hu);
+            const dt::PatchVerdict mNeg = dt::patchDecide(true, true, true, true, dt::kDeltaMarkerBehind, 0.0, 0.0, 307, hu);
+            check(f200.patch && !f200.held && f201.patch && f201.held && f201.why == dt::kPatchGate && f201.dx == 0.01 && f201.dy == -0.02 &&
+                      !f202.patch && f202.why == dt::kPatchStale && g300.patch && !unm.patch && unm.why == dt::kPatchUnmatched && !both.patch &&
+                      both.why == dt::kPatchBothEyes && stale.patch && stale.held && stale.why == dt::kPatchStale && stale.dx == 0.01 &&
+                      !noP.patch && noP.why == dt::kPatchNoP && !wNeg.patch && wNeg.why == dt::kPatchW && !mNeg.patch && mNeg.why == dt::kPatchW,
+                  "F62c: the last good delta is held for the one frame after it, not two; unmatched and both-eyes refusals never hold; no P "
+                  "and w <= 0 are refused");
+            // (4) The series' crop: 1024 square about THIS frame's P (age 0). P at ndc (0.25, 0.1) in a 4032 eye: centre (2520, 1814.4),
+            // box at (2008, 1302). One frame old, no P, behind (w <= 0), outside the NDC or NaN: skipped. Near the edge the box stays in the
+            // eye; flipV mirrors y; the right eye of a side-by-side texture keeps its own region.
+            const uint32_t region[4] = {0, 0, 4032, 4032}, right[4] = {4032, 0, 8064, 4032}, lo[2] = {0, 0}, loR[2] = {4032, 0},
+                           span[2] = {4032, 4032};
+            const double nP[2] = {0.25, 0.1}, nEdge[2] = {0.95, -0.99}, nOut[2] = {1.2, 0.0},
+                         nNan[2] = {std::numeric_limits<double>::quiet_NaN(), 0.0};
+            double c0[2], c1[2], c2[2], c3[2];
+            uint32_t b0[2], b1[2], b3[2];
+            dt::markerCropCentre(nP, region, false, false, c0);
+            dt::cropOrigin(c0, lo, span, dt::kMarkerDumpCrop, dt::kMarkerDumpCrop, b0);
+            dt::markerCropCentre(nEdge, region, false, false, c1);
+            dt::cropOrigin(c1, lo, span, dt::kMarkerDumpCrop, dt::kMarkerDumpCrop, b1);
+            dt::markerCropCentre(nP, region, false, true, c2);
+            dt::markerCropCentre(nP, right, false, false, c3);
+            dt::cropOrigin(c3, loR, span, dt::kMarkerDumpCrop, dt::kMarkerDumpCrop, b3);
+            check(dt::kMarkerDumpCrop == 1024u && dt::markerCropPick(true, 500, 500, 1.0, nP) == dt::kCropOk &&
+                      dt::markerCropPick(true, 499, 500, 1.0, nP) == dt::kCropNotThisFrame && dt::markerCropPick(false, 500, 500, 1.0, nP) == dt::kCropNoP &&
+                      dt::markerCropPick(true, 500, 500, 0.0, nP) == dt::kCropOffScreen &&
+                      dt::markerCropPick(true, 500, 500, -2.0, nP) == dt::kCropOffScreen &&
+                      dt::markerCropPick(true, 500, 500, 1.0, nOut) == dt::kCropOffScreen &&
+                      dt::markerCropPick(true, 500, 500, 1.0, nNan) == dt::kCropOffScreen && std::fabs(c0[0] - 2520.0) < 1e-9 &&
+                      std::fabs(c0[1] - 1814.4) < 1e-9 && b0[0] == 2008u && b0[1] == 1302u && b1[0] == 3008u && b1[1] == 3008u &&
+                      std::fabs(c2[1] - 2217.6) < 1e-9 && std::fabs(c3[0] - 6552.0) < 1e-9 && b3[0] == 6040u && b3[1] == 1302u,
+                  "F62c: the series' 1024 crop is centred on this frame's P (age 0), kept in the eye, skipped when P is off the eye or not this "
+                  "frame's");
+        }
     }
 
     // F40 (pure math): the view map. seated = D . Ry(psi) . body; the head in body axes is Ry(psi)^-1 . diag(1,1,-1) . tS; psi is the seated head

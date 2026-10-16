@@ -127,6 +127,7 @@ void temporalPassCaptureFinalEye(uint64_t sequence, uint32_t eye, ID3D11Texture2
 // consecutive frames of BOTH eyes, a 512x512 crop about the marker's projected position for that frame and eye, of the final eye (above)
 // and of the same frame before the interface layer's composite (this call, from native_sharpen.cpp). Copies only; render thread. F62a: the
 // marker dump series, files eyes\eye_<stamp>_marker_eye<e>_f<kk>.bmp, eye_<stamp>_marker_pre_eye<e>_f<kk>.bmp, eye_<stamp>_marker.csv.
+// F62c: 1024x1024 crops centred on THIS frame's P through the eye's scene rows (age 0); off-screen frames skipped and counted.
 void temporalPassMarkerPre(uint64_t sequence, uint32_t eye, ID3D11Texture2D* texture, const uint32_t region[4], bool flipU, bool flipV);
 
 // The pass wants the scanner-chrome tracker (vscreen.cpp, beginPanelOverride)

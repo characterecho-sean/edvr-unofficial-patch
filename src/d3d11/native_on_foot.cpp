@@ -11270,7 +11270,7 @@ constexpr uint32_t kSrvCache = 8;
 constexpr double kDefaultTargetSize = 2016.0;                 // the marker target's size when its view did not resolve
 // F47: the correction and its instruments.
 constexpr uint32_t kMatchFresh = 8;      // frames a read-back's match stays an eye's prediction (read-backs land 2..3 frames late)
-constexpr double kGateNdc = 0.05;        // F50: |dx|, |dy| must be under this (NDC) after the baseline (F47: 0.1 on P's own delta)
+constexpr double kGateNdc = drawtag::kPatchGateNdc;   // F62c: |dx|, |dy| under 0.1 NDC (F50..F53: 0.05; F47: 0.1 on P's own delta)
 constexpr double kLagStdMaxPx = 0.5;     // F50: no patch until the eye's baseline is seeded and its standard deviation is under this
 constexpr double kLagPitchSpreadPx = 2.0;   // F50: the honesty check: c by head pitch / roll differing by more than this is "not constant"
 constexpr uint32_t kLagBinMinN = 30;     // F50: a pitch or roll bin counts toward the honesty check from this many slow-head frames
@@ -11386,10 +11386,13 @@ struct EyeStats {
     uint64_t predHit = 0, predMiss = 0, cpuAgree = 0, cpuDiffer = 0;
     double cpuDiffMax = 0.0;
     // F50 at the draw: |m - c| (px) by the head's speed (bins < 3, 3..20, 20..60, >= 60 deg/s), the frames the baseline took, its resets,
-    // F53: c is the fixed icon offset e; the decisions refused because the eye's scene rows were not trusted this frame. At read-back:
-    // |marker - (P + e)| through the patched rows (px) by the same bins.
-    uint64_t lagN[4] = {}, lagTaken = 0, lagResets = 0, fUntrusted = 0, resN[4] = {};
+    // F53: c is the fixed icon offset e. At read-back: |marker - (P + e)| through the patched rows (px) by the same bins.
+    uint64_t lagN[4] = {}, lagTaken = 0, lagResets = 0, resN[4] = {};
     double lagSum[4] = {}, lagMax[4] = {}, resSum[4] = {}, resMax[4] = {};
+    // F62c at the draw (drawtag::patchDecide): decisions by the fresh delta's verdict (kPatchUnmatched once per eye-frame), the ones the
+    // one-frame hold patched anyway, and the refusals before the verdict (ranged b0, no CPU b0 rows, no CPU o_hud).
+    uint64_t pWhy[drawtag::kPatchWhyCount] = {}, pHeld = 0, pOther = 0;
+    uint32_t pUnmatchedFrame = ~0u;
 };
 struct SrvInfo {
     const void* srv = nullptr;
@@ -11416,7 +11419,7 @@ struct KeyWin {
     uint32_t ordMask[2] = {};
     uint64_t lagN[2][4] = {}, resN[2][4] = {};
     double lagSum[2][4] = {}, lagMax[2][4] = {}, resSum[2][4] = {}, resMax[2][4] = {};
-    uint64_t decided[2] = {}, patched[2] = {}, held[2] = {}, untrusted[2] = {}, gate[2] = {}, resets[2] = {}, otherUnmatched[2] = {};
+    uint64_t decided[2] = {}, patched[2] = {}, held[2] = {}, stale[2] = {}, gate[2] = {}, resets[2] = {}, otherUnmatched[2] = {};
 };
 // F53: one distinct cb1 rows 270..273 content a census eye-frame saw, by the vertex and pixel shader that read it, and whether that draw
 // passed the scene reference's test (drawtag::sceneRefWhy).
@@ -11579,11 +11582,8 @@ struct EyeMatch {
     uint16_t ord = 0;
     uint32_t key = 0;
 };
-// An eye's last good delta (held one frame on a miss). F52: one per key per eye.
-struct Good {
-    uint32_t frame = ~0u;
-    double dx = 0.0, dy = 0.0;
-};
+// An eye's last good delta (held one frame on a miss). F52: one per key per eye. F62c: drawtag::patchDecide's hold.
+using Good = drawtag::PatchHold;
 uint32_t g_ordFrame = ~0u;
 uint16_t g_ordEye[2] = {}, g_ordAll = 0;
 // The decision the draw tee made for this draw, and the binding Begin made for it.
@@ -11649,10 +11649,10 @@ uint64_t g_lastWorldVs[2] = {};
 WorldView g_refViews[kWorldViews];   // the temporal reference by (frame, eye), for the residual at read-back
 uint32_t g_refViewNext = 0;
 uint64_t g_tagOnlySeen = 0;
-// F53: the cb1 census (render thread), the census frames left this second, the frame each eye's scene rows were last trusted, the axis notes.
+// F53: the cb1 census (render thread), the census frames left this second, the axis notes. F62c: the trust check is measure only (the
+// F52 per-eye line), so the frame each eye's scene rows were last trusted is no longer kept.
 RowCensus g_rowCensus;
 uint32_t g_rowCensusLeft = kRowCensusFrames;
-uint32_t g_sceneTrusted[2] = {~0u, ~0u};
 uint32_t g_axisNotes = 0;
 uint64_t g_drawSerial = 0;
 ID3D11Buffer* g_privCb = nullptr;         // the private b0 (DEFAULT, constant buffer), made once
@@ -12793,7 +12793,8 @@ void refTick(int e, uint32_t frame, double W, double H) {
                 std::memcpy(g_tempRef[e].rows, swapped, sizeof(swapped));
                 std::memcpy(g_tempRef[e].o, w.o, sizeof(w.o));
                 refPut(frame, e, swapped, w.o);
-                // F53: the trust check: P through the scene rows and through the temporal reference must agree under 1 px.
+                // F53: the trust check: P through the scene rows and through the temporal reference must agree under 1 px. F62c: measure
+                // only; the patch does not read it.
                 bool compared = false;
                 double px = -1.0;
                 if (g_haveLastFind && g_lastFind.haveTag && g_lastFind.pOk) {
@@ -12814,7 +12815,6 @@ void refTick(int e, uint32_t frame, double W, double H) {
                 }
                 if (drawtag::sceneRowsTrusted(compared, px)) {
                     ++rc.trusted;
-                    g_sceneTrusted[e] = frame;
                 } else if (compared) {
                     ++rc.overPx;
                 }
@@ -12822,15 +12822,25 @@ void refTick(int e, uint32_t frame, double W, double H) {
         }
     }
     // F53: the eye dump's marker crop centre: P through the eye's scene rows this frame (relaxed atomics; the temporal pass reads them).
+    // F62c: the waypoint series' copy, published in front or not (the series skips w <= 0), with its probe frame, key and the head's speed.
     if (w.frame == frame && g_haveLastFind && g_lastFind.haveTag && g_lastFind.pOk) {
         const double P[3] = {g_lastFind.p[0], g_lastFind.p[1], g_lastFind.p[2]}, ow[3] = {w.o[0], w.o[1], w.o[2]};
         double a[4];
         drawtag::worldClip(w.rows, P, ow, a);
-        if (a[3] > 1e-9) {
-            g_markerCropNdc[e].p[0].store(static_cast<float>(a[0] / a[3]), std::memory_order_relaxed);
-            g_markerCropNdc[e].p[1].store(static_cast<float>(a[1] / a[3]), std::memory_order_relaxed);
-            g_markerCropNdc[e].pMs.store(GetTickCount64(), std::memory_order_relaxed);
+        MarkerCropNdc& mc = g_markerCropNdc[e];
+        const bool front = a[3] > 1e-9;
+        if (front) {
+            mc.p[0].store(static_cast<float>(a[0] / a[3]), std::memory_order_relaxed);
+            mc.p[1].store(static_cast<float>(a[1] / a[3]), std::memory_order_relaxed);
+            mc.pMs.store(GetTickCount64(), std::memory_order_relaxed);
         }
+        mc.sNdc[0].store(front ? static_cast<float>(a[0] / a[3]) : NAN, std::memory_order_relaxed);
+        mc.sNdc[1].store(front ? static_cast<float>(a[1] / a[3]) : NAN, std::memory_order_relaxed);
+        mc.sW.store(static_cast<float>(a[3]), std::memory_order_relaxed);
+        mc.sHead.store(static_cast<float>(g_headDps), std::memory_order_relaxed);
+        mc.sKey.store(g_lastFind.key, std::memory_order_relaxed);
+        mc.sFrame.store(frame, std::memory_order_relaxed);
+        mc.sHave.store(true, std::memory_order_relaxed);
     }
     if (usable) g_tempSeen[e] = frame;
     const bool recent = g_tempSeen[e] != ~0u && frame - g_tempSeen[e] <= kRefFreshFrames;
@@ -12876,7 +12886,13 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
             ++s.fOtherDraw;   // no key's match names this draw (an untagged marker composite draw)
             return;
         }
-        if (ks >= 0) ++g_win.keys[ks].otherUnmatched[e];
+        if (ks >= 0) {
+            ++g_win.keys[ks].otherUnmatched[e];
+            ++s.pWhy[drawtag::kPatchBothEyes];   // F62c: the key is matched in this eye, not in the other
+        } else if (s.pUnmatchedFrame != frame) {
+            s.pUnmatchedFrame = frame;
+            ++s.pWhy[drawtag::kPatchUnmatched];   // F62c: once per eye-frame (every marker composite draw of the eye lands here)
+        }
         ++s.fUnmatched[u];
         if (!g_unmatchedNoted[u]) {
             g_unmatchedNoted[u] = true;
@@ -12892,21 +12908,24 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
     ++kw.decided[e];
     if (!b0Plain) {
         ++s.fRanged;
+        ++s.pOther;
         return;
     }
     if (!sh || !sh->valid) {
         ++s.fNoRows;
+        ++s.pOther;
         return;
     }
     if (!oHud) {
         ++s.fNoOrigin;
+        ++s.pOther;
         return;
     }
     double dx = 0.0, dy = 0.0;
-    bool have = false, held = false;
-    // F52: the eye's reference (refTick ran at this eye's first marker composite draw of the frame): world_first or temporal.
-    const int ref = g_refEff[e] == drawtag::kRefTemporal ? drawtag::kRefTemporal : drawtag::kRefWorldFirst;
-    const CpuWorld& w = ref == drawtag::kRefTemporal ? g_tempRef[e] : g_cpuWorld[e];
+    // F62c: the patch measures against the eye's scene rows (cb1 270..273 of the first main-scene pass, g_cpuWorld) whatever
+    // fix.native_on_foot_marker_ref asks: the image dump shows the displayed world follows them (F52's temporal reference is measure only).
+    const int ref = drawtag::kRefWorldFirst;
+    const CpuWorld& w = g_cpuWorld[e];
     ++g_win.ref[e].decided[ref];
     const Find* f = findForKey(match.key, frame);
     int why = -1;
@@ -12949,8 +12968,10 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
         L.ord = match.ord;
         L.refEpoch = g_refEpoch[e];
     }
-    if (w.frame != frame) {
+    const bool sceneFresh = w.frame == frame;
+    if (!sceneFresh) {
         ++s.fNoWorld;
+        ++kw.stale[e];
     } else if (!f) {
         ++s.fNoP;
     } else {
@@ -12994,29 +13015,22 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
                 }
             }
         }
-        if (g_sceneTrusted[e] != frame) {
-            ++s.fUntrusted;
-            ++kw.untrusted[e];
-            return;   // F53: no patch and no hold unless the eye's scene rows agree with the temporal pass under 1 px this frame
-        }
-        if (why == drawtag::kDeltaOk) have = true;
-        else if (why == drawtag::kDeltaGate) {
+        // F62c: F53's trust gate (the scene rows against the temporal pass under 1 px) is gone; it refused about 45% of frames.
+        if (why == drawtag::kDeltaGate) {
             ++s.fGate;
             ++kw.gate[e];
-        } else {
+        } else if (why != drawtag::kDeltaOk) {
             ++s.fBehind;
         }
     }
-    if (have) {
-        good.frame = frame;
-        good.dx = dx;
-        good.dy = dy;
-    } else if (good.frame != ~0u && good.frame + 1u == frame && g_sceneTrusted[e] == frame) {
-        dx = good.dx;   // the last good delta, held for one frame (F53: only while the eye's scene rows are trusted)
-        dy = good.dy;
-        have = held = true;
-    }
-    if (!have) return;
+    // F62c: patch when the rows are fresh, P is found, both w > 0 and |d| < 0.1 NDC; else the last good delta for one frame; else refuse.
+    const drawtag::PatchVerdict v = drawtag::patchDecide(true, true, sceneFresh, f != nullptr, why, dx, dy, frame, good);
+    if (v.why >= 0 && v.why < drawtag::kPatchWhyCount) ++s.pWhy[v.why];
+    if (v.held) ++s.pHeld;
+    if (!v.patch) return;
+    dx = v.dx;
+    dy = v.dy;
+    const bool held = v.held;
     float r4[4], r5[4];
     std::memcpy(r4, sh->rows[4], sizeof(r4));
     std::memcpy(r5, sh->rows[5], sizeof(r5));
@@ -13324,6 +13338,7 @@ void pairMarker(const Rec& r, const Find& f, const float rows[16], const float o
     g_markerCropNdc[e].drawn[0].store(static_cast<float>(ndcM[0]), std::memory_order_relaxed);   // F53: the eye dump's marker crop
     g_markerCropNdc[e].drawn[1].store(static_cast<float>(ndcM[1]), std::memory_order_relaxed);
     g_markerCropNdc[e].drawnMs.store(GetTickCount64(), std::memory_order_relaxed);
+    g_markerCropNdc[e].drawnFrame.store(frame, std::memory_order_relaxed);   // F62c: the probe frame it was drawn in (the series' age)
     s.xo = drawtag::length3(xo);
     const WorldView* w = worldGet(frame, e);
     if (!w) {
@@ -13742,13 +13757,32 @@ void report(uint64_t nowMs) {
             Log::get().note("native on foot marker fix (F47, key %s): eye %d: P through the world rows minus P through the marker rows (unpatched): "
                             "%s; head %s; patched %llu draws (held %llu); after the patch (F53: X0 through the patched rows minus (P + e)): %s; not "
                             "applied: eye 0 unmatched %llu, eye 1 unmatched %llu, another draw of the eye %llu, ranged b0 %llu, no CPU b0 rows %llu, no "
-                            "CPU o_hud %llu, no CPU world view %llu, no P %llu, scene rows untrusted %llu, w <= 0 %llu, gate (|d| >= %.2f NDC) %llu, bind "
+                            "CPU o_hud %llu, no CPU scene rows this frame %llu, no P %llu, w <= 0 %llu, gate (|d| >= %.2f NDC) %llu, bind "
                             "refused %llu; the patched draw read the record at read-back %llu, did not %llu; CPU b0 rows 4..7 against the GPU copy: "
                             "agree %llu, differ %llu (max %.3g)",
                             fixOn ? "on" : "off", e, meas, head, ull(s.fPatched), ull(s.fHeld), res, ull(s.fUnmatched[0]), ull(s.fUnmatched[1]),
-                            ull(s.fOtherDraw), ull(s.fRanged), ull(s.fNoRows), ull(s.fNoOrigin), ull(s.fNoWorld), ull(s.fNoP), ull(s.fUntrusted),
+                            ull(s.fOtherDraw), ull(s.fRanged), ull(s.fNoRows), ull(s.fNoOrigin), ull(s.fNoWorld), ull(s.fNoP),
                             ull(s.fBehind), kGateNdc, ull(s.fGate), ull(s.fBind), ull(s.predHit), ull(s.predMiss), ull(s.cpuAgree), ull(s.cpuDiffer),
                             s.cpuDiffMax);
+            // F62c, with the fix key on: the patch-applied fraction (draws bound at the issue over decisions) and every decision's verdict.
+            // A decision is one key's matched draw in the eye, or one eye-frame with no key matched. The refusals sum with the fresh patches
+            // to the decisions; the one-frame hold patched some of the stale, no-P, w and |d| refusals anyway.
+            if (fixOn) {
+                uint64_t decisions = s.pOther;
+                for (int k = 0; k < drawtag::kPatchWhyCount; ++k) decisions += s.pWhy[k];
+                if (decisions)
+                    Log::get().note("native on foot marker fix (F62c): eye %d: patch applied %.1f%% (%llu of %llu decisions bound at the issue, "
+                                    "%llu held); decided: fresh %llu; refused: scene rows stale %llu, record not matched %llu (eye-frames), both-eyes "
+                                    "rule not met %llu, w not positive %llu, |d| over %.2f NDC %llu, no P %llu, other (ranged b0, no CPU b0 rows, no "
+                                    "CPU o_hud) %llu; one-frame hold used %llu; bind refused %llu",
+                                    e, 100.0 * double(s.fPatched) / double(decisions), ull(s.fPatched), ull(decisions), ull(s.fHeld),
+                                    ull(s.pWhy[drawtag::kPatchApplied]), ull(s.pWhy[drawtag::kPatchStale]), ull(s.pWhy[drawtag::kPatchUnmatched]),
+                                    ull(s.pWhy[drawtag::kPatchBothEyes]), ull(s.pWhy[drawtag::kPatchW]), drawtag::kPatchGateNdc,
+                                    ull(s.pWhy[drawtag::kPatchGate]), ull(s.pWhy[drawtag::kPatchNoP]), ull(s.pOther), ull(s.pHeld), ull(s.fBind));
+                else
+                    Log::get().note("native on foot marker fix (F62c): eye %d: no decision this second (no marker composite draw of the eye reached "
+                                    "the fix)", e);
+            }
         }
         // F50, per key and eye (F52: each key has its own baseline): the baseline c and its spread, |m - c| against the head's speed, the
         // patched draws, the residual after the patch by the head's speed, and the honesty check (c by head pitch and roll on slow-head frames,
@@ -13811,17 +13845,18 @@ void report(uint64_t nowMs) {
                 const bool masking = compared > 0 && spread > kLagPitchSpreadPx;
                 const char* verdict = masking ? "NOT CONSTANT" : compared ? "constant so far" : "not yet testable (fewer than two bins with enough frames)";
                 Log::get().note("native on foot marker fix (F53, key %s): tag key %u eye %d (record %u, read by %llu draws, places mask 0x%X; "
-                                "reference %s): target = P through the scene rows + e, e (fixed icon offset, %.1f px up) (%+.5f, %+.5f) NDC = (%+.2f, "
+                                "patch rows: the scene rows (F62c); temporal reference for the measure lines %s): target = P through the scene rows + "
+                                "e, e (fixed icon offset, %.1f px up) (%+.5f, %+.5f) NDC = (%+.2f, "
                                 "%+.2f) px at %.0fx%.0f; the learned baseline (F50, logged only, not applied) c (%+.5f, %+.5f) NDC = (%+.2f, %+.2f) px, "
                                 "std %.2f px (%s, %u frames taken; resets this second %llu, last: %s); |m - e| by head speed: %s; decided %llu, patched "
-                                "%llu draws (held %llu), scene rows untrusted %llu, gate (|d| >= %.2f NDC) %llu, other eye unmatched %llu; after the "
+                                "%llu draws (held %llu), scene rows stale %llu, gate (|d| >= %.2f NDC) %llu, other eye unmatched %llu; after the "
                                 "patch |marker - (P + e)| by head speed: %s; honesty check (m - e by head pitch / roll, slow head, since the last "
                                 "reset): %s; spread %.2f px (limit %.1f): %s",
                                 fixOn ? "on" : "off", g_keyIdx.key[ki], e, kw.record, ull(kw.reads[e]), kw.ordMask[e],
                                 g_refEff[e] == drawtag::kRefTemporal ? "temporal" : "world_first", drawtag::kIconPx, eOff[0], eOff[1],
                                 eOff[0] * W * 0.5, eOff[1] * H * 0.5, W, H, L.b.c[0], L.b.c[1], L.b.c[0] * W * 0.5, L.b.c[1] * H * 0.5,
                                 L.b.stdPx(W, H), L.b.ready(W, H, kLagStdMaxPx) ? "steady" : L.b.seeded ? "seeded, std too high" : "seeding", L.b.n,
-                                ull(kw.resets[e]), L.lastReset, lag, ull(kw.decided[e]), ull(kw.patched[e]), ull(kw.held[e]), ull(kw.untrusted[e]),
+                                ull(kw.resets[e]), L.lastReset, lag, ull(kw.decided[e]), ull(kw.patched[e]), ull(kw.held[e]), ull(kw.stale[e]),
                                 kGateNdc, ull(kw.gate[e]), ull(kw.otherUnmatched[e]), resid, bins, spread, kLagPitchSpreadPx, verdict);
                 if (masking)
                     Log::get().note("native on foot marker fix (F53): tag key %u eye %d: m - e is not constant: e masks a moving error (the bins "
@@ -13872,7 +13907,7 @@ void report(uint64_t nowMs) {
             else std::snprintf(cmp, sizeof(cmp), "no comparison this second");
             Log::get().note("native on foot marker probe (F52): eye %d world rows: %s; against the temporal pass's camera rows: %s; frames %llu: no "
                             "temporal rows %llu, no world rows %llu, degenerate %llu, axes do not correspond %llu (last: right %.1f, up %.1f deg, same "
-                            "handedness %s); reference asked %s, in use %s (switches %llu; decisions world_first %llu, temporal %llu); F53 trust "
+                            "handedness %s); reference asked %s, in use %s (switches %llu; decisions world_first %llu, temporal %llu); F53 trust, measure only since F62c "
                             "(P through the scene rows and the temporal reference under %.1f px): trusted %llu frames, UNTRUSTED %llu (over %.1f px "
                             "%llu, axes do not correspond %llu, no temporal rows %llu, no scene rows %llu, degenerate %llu, no P %llu)",
                             e, src, cmp, ull(rc.ticks), ull(rc.noTemporal), ull(rc.noWorld), ull(rc.degenerate), ull(rc.convention), rc.last.right,
@@ -14050,6 +14085,10 @@ void nativeOnFootMarkerProbeUnmap(const ID3D11Resource* res) {
         }
 }
 
+uint32_t nativeOnFootMarkerFrameNow() {
+    return g_f44Frame.load(std::memory_order_relaxed);
+}
+
 void nativeOnFootMarkerProbeDraw(ID3D11DeviceContext* ctx, uint32_t instances, uint32_t startInstance, char kind) {
     if (!ctx) return;
     ++f44::g_drawSerial;   // F47: a decision is for the draw that made it (Begin checks the serial)
@@ -14183,6 +14222,18 @@ bool nativeOnFootMarkerFixBegin(ID3D11DeviceContext* ctx) {
         ++kw.patched[g_fix.eye];
         if (g_fix.held) ++kw.held[g_fix.eye];
     }
+    {
+        // F62c: the waypoint series' patch columns: the eye's last bound patch (its probe frame, key, delta, held) and the draws bound in it.
+        MarkerCropNdc& mc = g_markerCropNdc[g_fix.eye];
+        const bool same = mc.patchFrame.load(std::memory_order_relaxed) == g_fix.frame && mc.patchDraws.load(std::memory_order_relaxed) > 0;
+        mc.patchDraws.store(same ? mc.patchDraws.load(std::memory_order_relaxed) + 1u : 1u, std::memory_order_relaxed);
+        mc.patchFrame.store(g_fix.frame, std::memory_order_relaxed);
+        mc.patchKey.store(g_fix.keySlot >= 0 && g_fix.keySlot < static_cast<int>(kKeySlots) ? g_keyIdx.key[g_fix.keySlot] : ~0u,
+                          std::memory_order_relaxed);
+        mc.patchDx.store(static_cast<float>(g_fix.dx), std::memory_order_relaxed);
+        mc.patchDy.store(static_cast<float>(g_fix.dy), std::memory_order_relaxed);
+        mc.patchHeld.store(g_fix.held, std::memory_order_relaxed);
+    }
     // Item 4: the private b0's rows 4..7 as written, staged for the re-measure; the record notes what was applied.
     if (g_fix.slot >= 0 && g_fix.slot == g_staging.openSlot() && g_recFrame[g_fix.slot] == g_fix.frame && g_fix.rec < g_recs[g_fix.slot].size()) {
         Rec& r = g_recs[g_fix.slot][g_fix.rec];
@@ -14200,8 +14251,9 @@ bool nativeOnFootMarkerFixBegin(ID3D11DeviceContext* ctx) {
     if (!g_fixAppliedNoted) {
         g_fixAppliedNoted = true;
         Log::get().note("native on foot marker fix: first patched marker composite draw (eye %d, frame %u, key slot %d, reference %s): dx %+.5f, "
-                        "dy %+.5f NDC%s", g_fix.eye, g_fix.frame, g_fix.keySlot, g_fix.ref == drawtag::kRefTemporal ? "temporal" : "world_first",
-                        g_fix.dx, g_fix.dy, g_fix.held ? " (held)" : "");
+                        "dy %+.5f NDC%s", g_fix.eye, g_fix.frame, g_fix.keySlot,
+                        g_fix.ref == drawtag::kRefTemporal ? "temporal" : "the eye's scene rows (F62c)", g_fix.dx, g_fix.dy,
+                        g_fix.held ? " (held)" : "");
     }
     return true;
 }

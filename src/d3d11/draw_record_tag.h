@@ -579,6 +579,7 @@ inline int sceneRefWhy(uint64_t vs, uint64_t ps, bool sceneDepth) noexcept {
 }
 // The scene rows are trusted on a frame when P through them and through the temporal pass's camera (the temporal reference) agree under
 // kSceneTrustPx pixels of the marker's target. A frame without the comparison (no temporal rows, its axes do not correspond, no P) is untrusted.
+// F62c: measure only (the F52 per-eye line); the patch no longer reads it (patchDecide).
 constexpr double kSceneTrustPx = 1.0;
 inline bool sceneRowsTrusted(bool compared, double px) noexcept { return compared && px >= 0.0 && px < kSceneTrustPx; }
 // Two world projections' rotations: the angle between their forward axes and (same handedness) the whole rotation, in degrees; -1 when a
@@ -599,6 +600,99 @@ constexpr double kIconPx = 36.3;
 inline void iconOffsetNdc(double H, double e[2]) noexcept {
     e[0] = 0.0;
     e[1] = H > 0.0 ? 2.0 * kIconPx / H : 0.0;
+}
+
+// F62c: THE PATCH DECISION (fix.native_on_foot_marker_fix). F53's trust gate (P through the scene rows and through the temporal pass's camera
+// agreeing under 1 px) is gone: the two are not meant to agree, and it refused about 45% of frames. The target stays ndc(P through the eye's
+// scene rows) + e: the 16-frame image dump of log 034818 shows P through cb1 270..273 following the displayed world within 5..10%, and the
+// drawn marker lagging it about 1.75 frames. A draw whose key is matched in this eye and in the other is patched when the eye's scene rows
+// are this frame's, P has a find, both w > 0 and |dx|, |dy| < kPatchGateNdc; otherwise the last good delta is held for the one frame right
+// after it (past the match and both-eyes tests only, as F47); otherwise the draw is refused for the first reason that holds. `why` is the
+// fresh delta's verdict (kPatchApplied or a refusal) whether or not the hold patched the draw.
+constexpr double kPatchGateNdc = 0.1;
+enum PatchWhy : int {
+    kPatchApplied = 0,
+    kPatchUnmatched = 1,   // no key's read-back match is fresh in this eye
+    kPatchBothEyes = 2,    // the key is matched in this eye but not in the other
+    kPatchStale = 3,       // the eye's scene rows are not this frame's
+    kPatchNoP = 4,         // no find of the key's P
+    kPatchW = 5,           // w not positive (P behind the world view or the marker behind its own)
+    kPatchGate = 6,        // |dx| or |dy| not under kPatchGateNdc
+    kPatchWhyCount = 7
+};
+struct PatchHold {
+    uint32_t frame = ~0u;
+    double dx = 0.0, dy = 0.0;
+};
+struct PatchVerdict {
+    int why = kPatchUnmatched;
+    bool patch = false, held = false;
+    double dx = 0.0, dy = 0.0;
+};
+// deltaWhy: ndcLagDelta's verdict at kPatchGateNdc (read only when the rows are fresh and P is found); dx, dy its delta.
+inline PatchVerdict patchDecide(bool matched, bool bothEyes, bool sceneFresh, bool haveP, int deltaWhy, double dx, double dy, uint32_t frame,
+                                PatchHold& hold) noexcept {
+    PatchVerdict v;
+    if (!matched) {
+        v.why = kPatchUnmatched;
+        return v;
+    }
+    if (!bothEyes) {
+        v.why = kPatchBothEyes;
+        return v;
+    }
+    if (!sceneFresh) v.why = kPatchStale;
+    else if (!haveP) v.why = kPatchNoP;
+    else if (deltaWhy == kDeltaWorldBehind || deltaWhy == kDeltaMarkerBehind) v.why = kPatchW;
+    else if (deltaWhy != kDeltaOk || !(std::fabs(dx) < kPatchGateNdc) || !(std::fabs(dy) < kPatchGateNdc)) v.why = kPatchGate;
+    else {
+        v.why = kPatchApplied;
+        v.patch = true;
+        v.dx = dx;
+        v.dy = dy;
+        hold.frame = frame;
+        hold.dx = dx;
+        hold.dy = dy;
+        return v;
+    }
+    if (hold.frame != ~0u && hold.frame + 1u == frame) {
+        v.patch = v.held = true;
+        v.dx = hold.dx;
+        v.dy = hold.dy;
+    }
+    return v;
+}
+
+// F62c: THE MARKER DUMP'S CROP (the waypoint series, temporal_pass.cpp). Each crop is kMarkerDumpCrop square (the marker moves about 55 px
+// a frame at 4032 in a fast turn), centred on THIS frame's P through the eye's scene rows (its frame equal to the capture's: age 0), never on
+// the drawn marker (read back 2..3 frames late, 31..156 ms old in the F60 dump). A frame whose P is off the eye (w <= 0, or the NDC outside
+// -1..1) is skipped, as is one with no P this frame.
+constexpr uint32_t kMarkerDumpCrop = 1024;
+enum CropPick : int { kCropOk = 0, kCropNoP = 1, kCropNotThisFrame = 2, kCropOffScreen = 3 };
+inline int markerCropPick(bool haveP, uint32_t pFrame, uint32_t nowFrame, double w, const double ndc[2]) noexcept {
+    if (!haveP) return kCropNoP;
+    if (pFrame != nowFrame) return kCropNotThisFrame;
+    if (!(w > 1e-9)) return kCropOffScreen;
+    if (!(std::fabs(ndc[0]) <= 1.0) || !(std::fabs(ndc[1]) <= 1.0)) return kCropOffScreen;
+    return kCropOk;
+}
+// An NDC point (y up) in the eye's region (left, top, right, bottom of the texture), with the region's flips, in texture pixels.
+inline void markerCropCentre(const double ndc[2], const uint32_t region[4], bool flipU, bool flipV, double centre[2]) noexcept {
+    const double w = static_cast<double>(region[2] - region[0]), h = static_cast<double>(region[3] - region[1]);
+    centre[0] = region[0] + (flipU ? (1.0 - ndc[0]) : (ndc[0] + 1.0)) * 0.5 * w;
+    centre[1] = region[1] + (flipV ? (1.0 + ndc[1]) : (1.0 - ndc[1])) * 0.5 * h;
+}
+// A crop of cw x ch about `centre`, kept inside the region that starts at lo and spans span (cw <= span[0], ch <= span[1]): its left and
+// top (a NaN centre takes the region's start). The eye run's stageEyeCrop places every centred crop through this.
+inline void cropOrigin(const double centre[2], const uint32_t lo[2], const uint32_t span[2], uint32_t cw, uint32_t ch, uint32_t out[2]) noexcept {
+    const uint32_t size[2] = {cw, ch};
+    for (int k = 0; k < 2; ++k) {
+        const double a = static_cast<double>(lo[k]), b = a + static_cast<double>(span[k] - size[k]);
+        double v = centre[k] - 0.5 * size[k];
+        if (!(v == v)) v = a;
+        v = v < a ? a : v > b ? b : v;
+        out[k] = static_cast<uint32_t>(v + 0.5);
+    }
 }
 
 // F53: THE KEY CENSUS. The post stub's keys as seen (full 32-bit values): two keys share a sentinel when their 8-bit tag bytes match, and a
