@@ -26,6 +26,7 @@ extern "C" __declspec(dllexport) int WINAPI fixtureGetRenderCount() {
 //   FIXTURE_VARIANT_initfault registers two settings, then onInitialize access-violates
 //   FIXTURE_VARIANT_settings registers two settings and initialises cleanly
 //   FIXTURE_VARIANT_renderfault registers two settings, initialises cleanly, then access-violates in onRenderEye
+//   FIXTURE_VARIANT_markshutdown onShutdown creates the file named by EDVR_FIXTURE_SHUTDOWN_MARK (shows whether the host ran it)
 //   FIXTURE_VARIANT_threadreg   keeps the host's registerSetting and calls it from a worker thread during onInitialize
 //                               (fixtureGetThreadRegResult), and again on request later (fixtureCallRegister)
 #if defined(FIXTURE_VARIANT_b)
@@ -119,6 +120,13 @@ static int EDVR_API pluginOnInitialize(const EdvrHostServices* host) {
 }
 
 static void EDVR_API pluginOnShutdown(void) {
+#if defined(FIXTURE_VARIANT_markshutdown)
+    char path[MAX_PATH]{};
+    if (GetEnvironmentVariableA("EDVR_FIXTURE_SHUTDOWN_MARK", path, MAX_PATH) > 0) {
+        HANDLE f = CreateFileA(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (f != INVALID_HANDLE_VALUE) CloseHandle(f);
+    }
+#endif
 }
 
 static void EDVR_API pluginOnUpdate(const EdvrPosef* headPose, float dtSeconds) {

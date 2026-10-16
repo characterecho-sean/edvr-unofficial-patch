@@ -123,6 +123,22 @@ std::optional<edvr::plugins::CandidatePlugin> findCandidate(edvr::plugins::Plugi
 
 } // namespace
 
+// PR #92 review: the manager is never destroyed by the CRT. Its destructor ran shutdown() (a lock and addon callbacks) during DLL process
+// detach, under the loader lock, bypassing the proxy's reserved check. This runs at exit after main (atexit handlers run in reverse
+// order of registration, and main registers this before first touching the singleton): the addon left loaded must not have been shut
+// down by anything at all.
+static std::string g_shutdownMark;
+static void checkNoShutdownAtExit() {
+    const bool ran = GetFileAttributesA(g_shutdownMark.c_str()) != INVALID_FILE_ATTRIBUTES;
+    printf("  %s  singleton: nothing shut the manager's addons down at process exit\n", ran ? "FAIL" : "ok  ");
+    DeleteFileA(g_shutdownMark.c_str());
+    if (ran) {
+        printf("ADDON MANAGER TEST FAILED (static destruction ran the manager's shutdown)\n");
+        fflush(stdout);
+        _exit(1);
+    }
+}
+
 int main(int argc, char** argv) {
     bool dryRun = false;
     for (int i = 1; i < argc; ++i) {
@@ -163,6 +179,16 @@ int main(int argc, char** argv) {
         iniOut << "[general]\nmode = vr\n";
     }
 
+    // Registered before the singleton is first touched: atexit handlers and function-static destructors run in reverse order of
+    // registration, so this one runs after a static singleton would already have been destroyed.
+    {
+        char tmp[MAX_PATH]{};
+        GetTempPathA(MAX_PATH, tmp);
+        g_shutdownMark = std::string(tmp) + "edvr_addon_shutdown_mark_" + std::to_string(GetCurrentProcessId()) + ".txt";
+        DeleteFileA(g_shutdownMark.c_str());
+        SetEnvironmentVariableA("EDVR_FIXTURE_SHUTDOWN_MARK", g_shutdownMark.c_str());
+        atexit(&checkNoShutdownAtExit);
+    }
     auto& pm = edvr::plugins::PluginManager::instance();
     bool initOk = pm.initialize(sandbox.wstring());
     check(initOk, "PluginManager::initialize succeeds on sandbox");
@@ -735,6 +761,18 @@ int main(int argc, char** argv) {
         pm.shutdown();
         std::error_code ec20;
         std::filesystem::remove_all(sb, ec20);
+    }
+
+    // Case 21 (PR #92 review): the singleton is leaked on purpose. Leave a healthy addon loaded and initialised, with no shutdown(),
+    // and let checkNoShutdownAtExit look for its onShutdown after the CRT has run its exit-time destructors.
+    {
+        auto sb = makeSandbox(L"leaked");
+        dropFixture(sb, L"markshutdown", L"leaky.dll");
+        pm.initialize(sb.wstring());
+        auto cand = findCandidate(pm, "leaky");
+        check(cand && pm.approvePlugin("leaky", cand->sha256) && pm.hasActivePlugins(), "singleton: an addon is left loaded without shutdown()");
+        check(GetFileAttributesA(g_shutdownMark.c_str()) == INVALID_FILE_ATTRIBUTES, "singleton: its onShutdown has not run yet");
+        // The sandbox is left for the OS temp cleaner: the addon DLL is still loaded from it.
     }
 
     // Cleanup sandbox

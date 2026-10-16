@@ -99,9 +99,12 @@ bool vrOnlyBlocked(const char* what) {
 
 } // namespace
 
+// Leaked on purpose. A function-static would be destroyed by the CRT while the DLL detaches, after the proxy's DllMain has run and
+// so past its reserved != nullptr guard; the destructor's shutdown() locks m_mutex and calls addon code under the loader lock,
+// which can hang an exiting process. The proxy calls shutdown() itself, in the one case where that is safe (a real FreeLibrary).
 PluginManager& PluginManager::instance() {
-    static PluginManager s_instance;
-    return s_instance;
+    static PluginManager* const s_instance = new PluginManager();
+    return *s_instance;
 }
 
 PluginManager::PluginManager() {
@@ -109,9 +112,8 @@ PluginManager::PluginManager() {
     QueryPerformanceCounter(&m_qpcPrev);
 }
 
-PluginManager::~PluginManager() {
-    shutdown();
-}
+// No shutdown work here: the instance is never destroyed (see instance()), and an owner that wants one calls shutdown().
+PluginManager::~PluginManager() = default;
 
 namespace {
 

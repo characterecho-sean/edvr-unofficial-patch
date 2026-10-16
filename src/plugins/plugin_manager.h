@@ -36,6 +36,8 @@ struct ApprovalResult {
 
 class PluginManager {
 public:
+    // Never destroyed: the object is leaked, so nothing runs at process exit or DLL detach. Call shutdown() for a clean teardown
+    // (the proxy does, only from a real FreeLibrary).
     static PluginManager& instance();
 
     PluginManager();
