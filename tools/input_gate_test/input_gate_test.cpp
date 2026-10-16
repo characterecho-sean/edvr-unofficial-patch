@@ -474,6 +474,29 @@ int main() {
         g_tailReader = savedReader;
     }
 
+    // PR #92 review: while a plugin owns input a buffered hat event is dropped unless it re-centres the hat, in
+    // both representations of centred (0xFFFFFFFF, or a low word of 0xFFFF). Buttons: presses dropped, releases pass.
+    auto povUnderPluginBlock = [&](Stick& js, const char* where) {
+        DIDEVICEOBJECTDATA r[6]{};
+        DWORD n = 0;
+        g_pluginBlock.store(true);
+        js.rows[0] = {kJoyOfsPov, 9000, 1, 1, 0};
+        js.rows[1] = {kJoyOfsPov, 0xFFFFFFFFu, 2, 2, 0};
+        js.rows[2] = {kJoyOfsPov + 4, 18000, 3, 3, 0};
+        js.rows[3] = {kJoyOfsPov + 4, 0x0000FFFFu, 4, 4, 0};
+        js.rows[4] = {kJoyOfsButtons + 3, 0x80, 5, 5, 0};
+        js.rows[5] = {kJoyOfsButtons + 3, 0, 6, 6, 0};
+        js.rowCount = 6;
+        const HRESULT hr = readStickRows(js, r, n);
+        g_pluginBlock.store(false);
+        char name[160];
+        snprintf(name, sizeof(name), "%s: only the two centred hat events and the button release survive a plugin block", where);
+        check(hr == DI_OK && n == 3 && r[0].dwOfs == kJoyOfsPov && r[0].dwData == 0xFFFFFFFFu &&
+                  r[1].dwOfs == kJoyOfsPov + 4 && r[1].dwData == 0x0000FFFFu &&
+                  r[2].dwOfs == kJoyOfsButtons + 3 && r[2].dwData == 0,
+              name);
+    };
+
     // ---- HOTAS / joystick buttons, watched and never captured -------------------------
     //
     // Three paths to a joystick's reads: its own table (the overlay's private table, a door
@@ -629,6 +652,7 @@ int main() {
         check(buf[kJoyOfsButtons + 2] == 0x80 && joyWatchHeld(0x231D0200, 2, stampMs()),
               "with the keyboard private the stick's state is untouched and still watched");
         inputGateSetPrivate(false);
+        povUnderPluginBlock(stick, "a stick on its own table");
 
         // The interface encoding: an A factory, so the game's enumeration is the ANSI record and
         // the A thunk is the one that records it.
@@ -711,6 +735,7 @@ int main() {
             check(kbuf[DIK_A] == 0 && g_trapCalls == 0, "...while the keyboard on the same table is still released");
             inputGateSetPrivate(false);
             check(g_trapCalls == 0, "still no call on any device beyond caps and info");
+            povUnderPluginBlock(js3, "a stick on a table the keyboard door holds");
         }
 
         // The shared-vtable ghost (the review of 0.19.1): a controller the game never enumerated,

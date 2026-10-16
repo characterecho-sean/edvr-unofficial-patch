@@ -95,6 +95,11 @@ typedef SHORT(WINAPI* PFN_GetKeyState)(int);
 typedef BOOL(WINAPI* PFN_GetKeyboardState)(PBYTE);
 typedef BOOL(WINAPI* PFN_PeekMessageA)(LPMSG, HWND, UINT, UINT, UINT);
 
+// A hat event that returns the hat to neutral: DirectInput reports centred as 0xFFFFFFFF, and some
+// drivers as any value whose low word is 0xFFFF. It must reach the game while a plugin owns input --
+// like a button release -- or a direction the game saw before the plugin took focus never ends.
+inline bool povCentred(DWORD v) { return v == 0xFFFFFFFFu || (v & 0xFFFFu) == 0xFFFFu; }
+
 // The flag every door consults. Relaxed loads are enough: a door that
 // reads the old value for one call more is one more call of the state the
 // player was already in.
@@ -825,8 +830,8 @@ HRESULT filterDeviceData(DiDoor& d, void* self, DWORD cbObj, LPDIDEVICEOBJECTDAT
                     const bool isPov = (ev.dwOfs >= kPov0 && ev.dwOfs < kPov3 + sizeof(DWORD));
                     if (isButton) {
                         if (ev.dwData & 0x80) continue; // swallow press, allow release
-                    } else if (isPov) {
-                        continue; // swallow POV hat events
+                    } else if (isPov && !povCentred(ev.dwData)) {
+                        continue; // swallow hat directions; the re-centre passes, like a button release
                     }
                     rgdod[kept++] = ev;
                 }
@@ -1156,8 +1161,8 @@ HRESULT STDMETHODCALLTYPE joyDeviceData(void* self, DWORD cb, LPDIDEVICEOBJECTDA
                 const bool isPov = (ev.dwOfs >= kPov0 && ev.dwOfs < kPov3 + sizeof(DWORD));
                 if (isButton) {
                     if (ev.dwData & 0x80) continue; // swallow press, allow release
-                } else if (isPov) {
-                    continue; // swallow POV hat events
+                } else if (isPov && !povCentred(ev.dwData)) {
+                    continue; // swallow hat directions; the re-centre passes, like a button release
                 }
                 data[kept++] = ev;
             }
