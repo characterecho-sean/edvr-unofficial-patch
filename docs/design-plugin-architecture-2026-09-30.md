@@ -140,7 +140,8 @@ of flat mode (no XR renderer, so no manager). Defects found in the diff:
 - the runtime never opens EDVR's log, so plugin lines are dropped;
 - no fault containment around callbacks;
 - unsigned DLLs loaded from a folder;
-- `dt` fixed at 16 ms.
+- `dt` fixed at 16 ms (now fixed: the host measures it with QPC, clamped; the 0.016 the runtime passes is
+  only the fallback for a first frame or an out-of-range measurement).
 
 The OM-unbind fix in the same PR is unrelated and should land on its own.
 

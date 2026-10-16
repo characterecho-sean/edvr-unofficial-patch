@@ -50,9 +50,14 @@ typedef struct EdvrEyeRenderContext {
 // Context passed to plugins for input routing and filtering
 typedef struct EdvrInputContext {
     uint32_t structSize;
+    // The host currently calls onFilterInput once per frame with deviceType 0 and rawInputData null. The values below are
+    // reserved, not yet delivered: do not branch on them.
     uint32_t deviceType;          // 0 = Keyboard/Mouse, 1 = DirectInput Joystick
     const void* rawInputData;
-    uint8_t swallowInput;         // Plugin sets to 1 if input should be blocked from game
+    // Set to 1 to block input from the game. The host clears it to 0 before every call, and a frame in which no addon sets it
+    // releases the hold at once: it is a per-frame request, not a latch, so set it on every onFilterInput call for as long as you want
+    // input held.
+    uint8_t swallowInput;
 } EdvrInputContext;
 
 // Plugin setting types for F8 Menu under the "Plugins" tab
@@ -72,6 +77,16 @@ typedef enum EdvrPluginSettingType {
 #endif
 #endif
 
+// Values (min/max/step/default, what a getter returns, what a setter receives, and what is saved) are an int64_t whose meaning
+// depends on the setting type:
+//   BOOL    0 or 1; saved as on/off.
+//   CHOICE  an index into choiceOptions; saved as the option's text (matched case-insensitively on restore).
+//   INT     the number; saved as a decimal integer.
+//   FLOAT   IEEE-754 float bits in the low 4 bytes of the int64_t (memcpy a float into a zeroed int64_t; do not cast); saved
+//           with 2 decimals, so finer steps do not survive a restart.
+//   ACTION  the setter is called with 1 each time the row is run. A FLOAT row needs an explicit stepValue (float bits).
+// Registration also calls setter once (see registerSetting below), with the restored value: the value saved in the ini
+// for this addon, header and key if there is one, else defaultValue.
 // Callback to read the current setting value from the plugin
 typedef int64_t (EDVR_API *EdvrPluginSettingGetter)(const char* settingKey, void* userData);
 
@@ -102,6 +117,8 @@ typedef struct EdvrPluginSettingDef {
 typedef struct EdvrHostServices {
     uint32_t structSize;
     // Adds a row to the F8 menu's Plugins page. Returns 0 on success.
+    // While registering, the host calls setting->setter once with the restored value (saved value, else defaultValue), inside
+    // your onInitialize and under the host's settings lock: apply it to your state and return.
     // Call it only from within onInitialize: anywhere else (after it returns, from onUpdate, onRenderEye,
     // onFilterInput or another thread) it returns -1 and registers nothing.
     // The host removes every setting the addon registered when the addon fails initialisation (onInitialize
@@ -126,6 +143,9 @@ typedef struct EdvrPluginCallbacks {
     // reference space the eyes' eyePose values are expressed in), at the frame's predicted display time. Metres, right-handed, +Y up, -Z forward.
     // Its position lies between the eyes, so an eye is about half the interpupillary distance to either side of it and may be
     // canted. Aim a gaze ray from this pose. Called once per frame, only when the head was located with valid position and orientation.
+    // dtSeconds is the host's own QPC measurement of the time since the previous onUpdate call, used when it is between 0.0001 and
+    // 0.5 seconds. On the first call, or when the measurement is outside that range (a stall, a pause), the host's fallback of
+    // 0.016 is passed instead, so treat it as a frame time, never as a fixed 16 ms.
     void (EDVR_API *onUpdate)(const EdvrPosef* headPose, float dtSeconds);
     void (EDVR_API *onRenderEye)(const EdvrEyeRenderContext* eyeCtx);
     void (EDVR_API *onFilterInput)(EdvrInputContext* inputCtx);
