@@ -236,6 +236,16 @@ SHORT WINAPI refreshProbeKey(int vk) {
     if (g_refreshEntered) SetEvent(g_refreshEntered);
     return physicalKey(vk);
 }
+// Like pausingKey, but the reading is taken before the pause, so the resumed scan reports what was true when it began.
+SHORT WINAPI sampleThenPauseKey(int vk) {
+    const SHORT sample = physicalKey(vk);
+    if (g_pauseArmed) {
+        g_pauseArmed = false;
+        SetEvent(g_scanEntered);
+        WaitForSingleObject(g_scanMayContinue, 10000);
+    }
+    return sample;
+}
 BOOL WINAPI physicalState(PBYTE out) {
     for (int vk = 0; vk < 256; ++vk) out[vk] = physical[vk] ? 0x80 : 0;
     return TRUE;
@@ -500,6 +510,36 @@ static void pluginReleaseScanCases(Device& keyboard) {
             CloseHandle(g_scanMayContinue);
             CloseHandle(g_refreshEntered);
             g_scanEntered = g_scanMayContinue = g_refreshEntered = nullptr;
+            physical['A'] = false;
+            refreshReleaseTail(&physicalKey);
+            g_tailReader = saved;
+        }
+
+        // PR #92 review: two refreshes from the same generation must not publish in reverse order. The tail covers A.
+        // Refresh 1 samples A held and pauses before it publishes; refresh 2 sees A released and retires the tail; A is
+        // pressed afresh; refresh 1 resumes. It must not restore the held-key bit refresh 2 removed.
+        {
+            const PFN_GetAsyncKeyState saved = g_tailReader;
+            g_tailReader = &physicalKey;
+            physical['A'] = true;
+            captureReleaseTail(&physicalKey);   // tail = {A}
+            g_scanEntered = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+            g_scanMayContinue = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+            g_pauseArmed = true;
+            std::thread first([&] { refreshReleaseTail(&sampleThenPauseKey); });
+            const bool entered = WaitForSingleObject(g_scanEntered, 5000) == WAIT_OBJECT_0;
+            check(entered, "two refreshes: the first reached its scan of A");
+            physical['A'] = false;
+            refreshReleaseTail(&physicalKey);   // the second refresh: A is up, the tail retires
+            check(!releaseTailVk('A'), "two refreshes: the second refresh retired the tail");
+            physical['A'] = true;               // a fresh press
+            SetEvent(g_scanMayContinue);        // the first refresh resumes with its stale sample of A held
+            first.join();
+            check(!releaseTailVk('A'), "two refreshes: the older refresh did not resurrect the retired tail");
+            check(hookGetAsyncKeyState('A') != 0, "two refreshes: the game reads the fresh A press");
+            CloseHandle(g_scanEntered);
+            CloseHandle(g_scanMayContinue);
+            g_scanEntered = g_scanMayContinue = nullptr;
             physical['A'] = false;
             refreshReleaseTail(&physicalKey);
             g_tailReader = saved;

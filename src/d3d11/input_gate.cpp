@@ -187,10 +187,11 @@ PFN_GetAsyncKeyState g_tailReader = &GetAsyncKeyState;
 // Every writer of the tail (a capture, a refresh's publish, the menu re-arming) holds g_tailLock, and every write that
 // supersedes the tail bumps g_tailGeneration. A refresh takes its snapshot (generation N and a copy of the held keys)
 // under the SHARED lock, scans the physical keys from that copy with no lock held, and publishes only if the generation
-// is still N. Both orderings are covered (PR #92 review): a refresh paused mid-scan can never overwrite a capture that
-// landed meanwhile with its stale result, and a refresh that starts while a capture is mid-write waits on the shared
-// lock, so it never pairs the new generation with the old held keys. The Present thread holds the lock only for the
-// short snapshot and the short publish.
+// is still N. A successful publish bumps the generation too. Three orderings are covered (PR #92 review): a refresh
+// paused mid-scan can never overwrite a capture that landed meanwhile with its stale result; a refresh that starts
+// while a capture is mid-write waits on the shared lock, so it never pairs the new generation with the old held keys;
+// and of two refreshes from the same generation only the first to publish lands, so the older one cannot restore a key
+// the newer one retired. The Present thread holds the lock only for the short snapshot and the short publish.
 SRWLOCK g_tailLock = SRWLOCK_INIT;
 std::atomic<uint32_t> g_tailGeneration{0};
 
@@ -244,7 +245,8 @@ void refreshReleaseTail(PFN_GetAsyncKeyState readKey) {
         for (int vk = 0; vk < 256; ++vk) g_heldVk[vk].store(heldVk[vk]);
         for (int k = 0; k < 256; ++k) g_heldDik[k].store(held[k]);
         g_releaseTail.store(any);
-    }   // else a capture or a cancel superseded this scan; the next refresh starts from the new tail
+        g_tailGeneration.fetch_add(1);   // any other refresh that snapshotted generation N is now stale
+    }   // else a capture, a cancel or another refresh superseded this scan; the next refresh starts from the new tail
     ReleaseSRWLockExclusive(&g_tailLock);
 }
 
