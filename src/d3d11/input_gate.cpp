@@ -184,14 +184,19 @@ std::atomic<bool> g_heldDik[256]{};
 // Where the tail reads physical keys. The real GetAsyncKeyState; the rig points it at a fake.
 PFN_GetAsyncKeyState g_tailReader = &GetAsyncKeyState;
 
-// Every writer of the tail (a capture, a refresh's publish, the menu re-arming) holds g_tailLock, and every write that
-// supersedes the tail bumps g_tailGeneration. A refresh takes its snapshot (generation N and a copy of the held keys)
-// under the SHARED lock, scans the physical keys from that copy with no lock held, and publishes only if the generation
-// is still N. A successful publish bumps the generation too. Three orderings are covered (PR #92 review): a refresh
-// paused mid-scan can never overwrite a capture that landed meanwhile with its stale result; a refresh that starts
-// while a capture is mid-write waits on the shared lock, so it never pairs the new generation with the old held keys;
-// and of two refreshes from the same generation only the first to publish lands, so the older one cannot restore a key
-// the newer one retired. The Present thread holds the lock only for the short snapshot and the short publish.
+// Every writer of the tail (a capture, a cancel, a refresh's publish) holds g_tailLock. Only a capture and a cancel
+// replace the tail, and each bumps g_tailGeneration; a refresh never does. A refresh takes its snapshot under the
+// SHARED lock (it re-checks g_releaseTail there, then reads generation N and a copy of the held keys), scans the
+// physical keys from that copy with no lock held, and publishes under the EXCLUSIVE lock only if the generation is
+// still N. The publish intersects: a key stays in the tail only if both the live tail and this scan still have it held,
+// and g_heldDik and g_releaseTail are rebuilt from the survivors, so a refresh can only remove keys. Orderings covered
+// (PR #92 review): a refresh paused mid-scan cannot overwrite a capture or a cancel that landed meanwhile (the
+// generation differs, the publish is dropped); a refresh that starts while a capture is mid-write waits on the shared
+// lock, so it never pairs the new generation with the old held keys; a refresh racing a cancel sees g_releaseTail false
+// under the lock, or fails the generation check, so it cannot resurrect the tail; and of two refreshes from the same
+// generation both publish in either order, because intersecting is commutative, so neither a stale sample of a key
+// held nor an observed release is lost. The Present thread holds the lock only for the short snapshot and the short
+// publish.
 SRWLOCK g_tailLock = SRWLOCK_INIT;
 std::atomic<uint32_t> g_tailGeneration{0};
 
@@ -222,31 +227,38 @@ void cancelReleaseTail() {
 }
 
 void refreshReleaseTail(PFN_GetAsyncKeyState readKey) {
-    if (!g_releaseTail.load()) return;
     bool tail[256];
     AcquireSRWLockShared(&g_tailLock);
+    if (!g_releaseTail.load()) {   // checked under the lock, so a cancel that just landed is seen
+        ReleaseSRWLockShared(&g_tailLock);
+        return;
+    }
     const uint32_t startGeneration = g_tailGeneration.load();
     for (int vk = 0; vk < 256; ++vk) tail[vk] = g_heldVk[vk].load();
     ReleaseSRWLockShared(&g_tailLock);
     bool heldVk[256]{};
-    bool any = false;
     for (int vk = 0; vk < 256; ++vk) {
         if (!tail[vk]) continue;
-        if (readKey(vk) & 0x8000) { heldVk[vk] = true; any = true; }
-    }
-    // Rebuild after releases: generic/left/right modifier VKs can share a DIK.
-    bool held[256]{};
-    for (int vk = 0; vk < 256; ++vk) if (heldVk[vk]) {
-        const uint8_t dik = inputGateDikOf(vk);
-        if (dik) held[dik] = true;
+        if (readKey(vk) & 0x8000) heldVk[vk] = true;
     }
     AcquireSRWLockExclusive(&g_tailLock);
     if (g_tailGeneration.load() == startGeneration) {
-        for (int vk = 0; vk < 256; ++vk) g_heldVk[vk].store(heldVk[vk]);
+        // Intersect with the live tail: a refresh only ever removes keys, so a stale scan that still saw a key held
+        // cannot restore one a newer refresh already retired. Rebuild the DIK bits from the survivors, because
+        // generic/left/right modifier VKs can share a DIK.
+        bool any = false;
+        bool held[256]{};
+        for (int vk = 0; vk < 256; ++vk) {
+            const bool stillHeld = g_heldVk[vk].load() && heldVk[vk];
+            g_heldVk[vk].store(stillHeld);
+            if (!stillHeld) continue;
+            any = true;
+            const uint8_t dik = inputGateDikOf(vk);
+            if (dik) held[dik] = true;
+        }
         for (int k = 0; k < 256; ++k) g_heldDik[k].store(held[k]);
         g_releaseTail.store(any);
-        g_tailGeneration.fetch_add(1);   // any other refresh that snapshotted generation N is now stale
-    }   // else a capture, a cancel or another refresh superseded this scan; the next refresh starts from the new tail
+    }   // else a capture or a cancel superseded this scan; the next refresh starts from the new tail
     ReleaseSRWLockExclusive(&g_tailLock);
 }
 

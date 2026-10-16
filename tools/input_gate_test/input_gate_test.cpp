@@ -544,6 +544,66 @@ static void pluginReleaseScanCases(Device& keyboard) {
             refreshReleaseTail(&physicalKey);
             g_tailReader = saved;
         }
+
+        // PR #92 review, the other order: the stale refresh publishes FIRST. Both refreshes snapshot the same generation
+        // with the tail {A}. Refresh 1 samples A held and pauses; A is released; refresh 2 samples A up and pauses;
+        // refresh 1 publishes (a no-op), then refresh 2 publishes. The observed release must not be discarded.
+        {
+            const PFN_GetAsyncKeyState saved = g_tailReader;
+            g_tailReader = &physicalKey;
+            physical['A'] = true;
+            captureReleaseTail(&physicalKey);   // tail = {A}
+            HANDLE entered1 = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+            HANDLE go1 = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+            HANDLE entered2 = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+            HANDLE go2 = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+            g_scanEntered = entered1;
+            g_scanMayContinue = go1;
+            g_pauseArmed = true;
+            std::thread first([&] { refreshReleaseTail(&sampleThenPauseKey); });
+            const bool in1 = WaitForSingleObject(entered1, 5000) == WAIT_OBJECT_0;
+            check(in1, "stale publishes first: refresh 1 reached its scan of A");
+            physical['A'] = false;
+            g_scanEntered = entered2;
+            g_scanMayContinue = go2;
+            g_pauseArmed = true;
+            std::thread second([&] { refreshReleaseTail(&sampleThenPauseKey); });
+            const bool in2 = WaitForSingleObject(entered2, 5000) == WAIT_OBJECT_0;
+            check(in2, "stale publishes first: refresh 2 reached its scan of A");
+            SetEvent(go1);
+            first.join();                        // publishes its stale sample of A held
+            SetEvent(go2);
+            second.join();                       // publishes the observed release
+            check(!releaseTailVk('A'), "stale publishes first: the observed release retired the tail");
+            physical['A'] = true;                // a fresh press
+            check(hookGetAsyncKeyState('A') != 0, "stale publishes first: a fresh A press reaches the game");
+            CloseHandle(entered1); CloseHandle(go1); CloseHandle(entered2); CloseHandle(go2);
+            g_scanEntered = g_scanMayContinue = nullptr;
+            physical['A'] = false;
+            refreshReleaseTail(&physicalKey);
+            g_tailReader = saved;
+        }
+
+        // PR #92 review: a refresh that passed its "is there a tail" check must not resurrect a tail a cancel retired
+        // meanwhile. The refresh is parked on the tail lock (held here) after any check made before the lock; the cancel's
+        // effect (a new generation, no tail) lands under that same hold; the refresh then resumes.
+        {
+            const PFN_GetAsyncKeyState saved = g_tailReader;
+            g_tailReader = &physicalKey;
+            physical['A'] = true;
+            captureReleaseTail(&physicalKey);   // tail = {A}
+            AcquireSRWLockExclusive(&g_tailLock);
+            std::thread refresher([&] { refreshReleaseTail(&physicalKey); });
+            Sleep(300);                         // bounded: the refresh is now waiting on the lock
+            g_tailGeneration.fetch_add(1);      // what cancelReleaseTail does, under the lock
+            g_releaseTail.store(false);
+            ReleaseSRWLockExclusive(&g_tailLock);
+            refresher.join();
+            check(!g_releaseTail.load(), "refresh racing cancel: the cancelled tail is not resurrected");
+            check(!releaseTailVk('A'), "refresh racing cancel: A is not covered after the cancel");
+            physical['A'] = false;
+            g_tailReader = saved;
+        }
 }
 
 static void releaseLogCases();
