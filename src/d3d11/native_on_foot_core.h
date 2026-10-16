@@ -856,11 +856,12 @@ inline float ikDistanceGate(float dist) noexcept {
     if (dist >= kIkGateZeroM) return 0.0f;
     return (kIkGateZeroM - dist) / (kIkGateZeroM - kIkGateFullM);
 }
-// The base weight's ramp: toward 1 while wanted and toward 0 otherwise, linearly over kIkRampSec.
+// The base weight's ramp: toward 1 while wanted and toward 0 otherwise, linearly over `ramp` seconds (kIkRampSec; F57's square-up 0.3 s).
 struct IkBlend {
     float w = 0.0f;
+    double ramp = kIkRampSec;
     void step(bool want, double dtSec) noexcept {
-        const double d = dtSec > 0.0 ? dtSec / kIkRampSec : 0.0;
+        const double d = dtSec > 0.0 && ramp > 0.0 ? dtSec / ramp : 0.0;
         double v = static_cast<double>(w) + (want ? d : -d);
         if (v < 0.0) v = 0.0;
         if (v > 1.0) v = 1.0;
@@ -1019,6 +1020,7 @@ inline double ikWrapPi(double a) noexcept {
 // the hand the solve reaches is S + dir D (T itself while reach < 1). reach = |T - S| / (l1 + l2); shortfall = |T - S| - D when positive (m).
 struct IkTwoBone {
     bool ok = false;
+    bool limited = false;   // F57: D differs from |T - S| (a reach or an elbow-angle limit moved the hand off T)
     double S[3] = {}, dir[3] = {}, u[3] = {}, v[3] = {}, hand[3] = {};
     double D = 0.0, a = 0.0, h = 0.0, reach = 0.0, shortfall = 0.0;
     void elbowAt(double theta, double E[3]) const noexcept {
@@ -1028,9 +1030,27 @@ struct IkTwoBone {
     // The swivel angle (about dir, from u) of a direction p.
     double angleOf(const double p[3]) const noexcept { return std::atan2(ikDot(p, v), ikDot(p, u)); }
 };
-inline IkTwoBone ikTwoBoneFrame(const double S[3], const double T[3], double l1, double l2, const double ref[3]) noexcept {
+// F57: the D range of the elbow's interior angle limits (law of cosines: D^2 = l1^2 + l2^2 - 2 l1 l2 cos(angle)), inside the fold and reach
+// limits [|l1 - l2| + 1 mm, 0.999 (l1 + l2)]. minDeg 0 and maxDeg 180 give the fold and reach limits alone.
+inline void ikElbowDRange(double l1, double l2, double minDeg, double maxDeg, double* lo, double* hi) noexcept {
+    const double c1 = std::cos(minDeg * kIkPi / 180.0), c2 = std::cos(maxDeg * kIkPi / 180.0);
+    const double dMin = std::sqrt(std::max(0.0, l1 * l1 + l2 * l2 - 2.0 * l1 * l2 * c1));
+    const double dMax = std::sqrt(std::max(0.0, l1 * l1 + l2 * l2 - 2.0 * l1 * l2 * c2));
+    *lo = std::max(std::fabs(l1 - l2) + 1e-3, dMin);
+    *hi = std::min(0.999 * (l1 + l2), dMax);
+    if (*hi < *lo) *hi = *lo;
+}
+// F57: the elbow's interior angle (degrees, 180 straight) for a shoulder-to-hand distance D.
+inline double ikElbowInteriorDeg(double l1, double l2, double D) noexcept {
+    if (!(l1 > 1e-9) || !(l2 > 1e-9)) return 0.0;
+    double c = (l1 * l1 + l2 * l2 - D * D) / (2.0 * l1 * l2);
+    c = c > 1.0 ? 1.0 : c < -1.0 ? -1.0 : c;
+    return std::acos(c) * 180.0 / kIkPi;
+}
+// The frame with D clamped into [lo, hi] (F57: the elbow angle limits through ikElbowDRange).
+inline IkTwoBone ikTwoBoneFrameD(const double S[3], const double T[3], double l1, double l2, const double ref[3], double lo, double hi) noexcept {
     IkTwoBone t;
-    if (!(l1 > 1e-4) || !(l2 > 1e-4)) return t;
+    if (!(l1 > 1e-4) || !(l2 > 1e-4) || !(hi >= lo)) return t;
     const double dv[3] = {T[0] - S[0], T[1] - S[1], T[2] - S[2]};
     const double len = ikLen(dv);
     if (!(len > 1e-6)) return t;
@@ -1038,8 +1058,8 @@ inline IkTwoBone ikTwoBoneFrame(const double S[3], const double T[3], double l1,
         t.S[i] = S[i];
         t.dir[i] = dv[i] / len;
     }
-    const double lo = std::fabs(l1 - l2) + 1e-3, hi = 0.999 * (l1 + l2);
     t.D = len < lo ? lo : len > hi ? hi : len;
+    t.limited = t.D != len;
     t.reach = len / (l1 + l2);
     t.shortfall = len > t.D ? len - t.D : 0.0;
     t.a = (l1 * l1 - l2 * l2 + t.D * t.D) / (2.0 * t.D);
@@ -1058,6 +1078,13 @@ inline IkTwoBone ikTwoBoneFrame(const double S[3], const double T[3], double l1,
     t.ok = true;
     return t;
 }
+// The frame under the elbow's interior angle limits [minDeg, maxDeg] (0 and 180, the defaults: the fold and reach limits alone, as F56).
+inline IkTwoBone ikTwoBoneFrame(const double S[3], const double T[3], double l1, double l2, const double ref[3], double minDeg = 0.0,
+                                double maxDeg = 180.0) noexcept {
+    double lo = 0.0, hi = 0.0;
+    ikElbowDRange(l1, l2, minDeg, maxDeg, &lo, &hi);
+    return ikTwoBoneFrameD(S, T, l1, l2, ref, lo, hi);
+}
 // The classic two-bone solve: the elbow on the pole's side of S->T (swivel 0 of the frame built on the pole).
 inline IkTwoBone ikTwoBone(const double S[3], const double T[3], double l1, double l2, const double pole[3], double E[3]) noexcept {
     const IkTwoBone t = ikTwoBoneFrame(S, T, l1, l2, pole);
@@ -1066,13 +1093,14 @@ inline IkTwoBone ikTwoBone(const double S[3], const double T[3], double l1, doub
 }
 // The swivel clamp: the elbow at least kIkElbowOutM out on the arm's side (out = +1 or -1: the sign of the clavicle's model x) and not above
 // the shoulder (E.y <= S.y). theta when it holds; else the nearest angle (5 degree steps) that holds; else the one with the least violation.
-inline double ikSwivelClamp(const IkTwoBone& t, double theta, double out, bool* clamped) noexcept {
+// F57: the elbow-out distance is the "Elbow out" slider's (fix.native_on_foot_arm_elbow_out_cm, default 10 cm = kIkElbowOutM).
+inline double ikSwivelClamp(const IkTwoBone& t, double theta, double out, bool* clamped, double elbowOutM = kIkElbowOutM) noexcept {
     if (clamped) *clamped = false;
     if (!t.ok || !(t.h > 1e-6)) return theta;
     const auto violation = [&](double th) noexcept {
         double E[3];
         t.elbowAt(th, E);
-        const double vo = kIkElbowOutM - out * E[0], vy = E[1] - t.S[1];
+        const double vo = elbowOutM - out * E[0], vy = E[1] - t.S[1];
         return (vo > 0.0 ? vo : 0.0) + (vy > 0.0 ? vy : 0.0);
     };
     if (violation(theta) <= 0.0) return theta;
@@ -1214,6 +1242,134 @@ inline bool ikOrthonormalise(float m[16]) noexcept {
         m[8 + i] = static_cast<float>(n2[i] * sg);
     }
     return true;
+}
+
+// ---- F57 (TEMPORARY): the arm IK refinements, pure half ---------------------------------------------------------------------------
+// (1) The pole from the FP elbow: S', E', T' the FP upper arm, forearm and hand mapped into the 3P model by G; pole = unit(perp(unit(E' - S'),
+// axis T' - S')); a part across the axis under kIkPoleMinPerp (a nearly straight FP arm) keeps the current pole. (2) The torso square-up: the
+// 3P shoulder line (clavicle 36 - 35, xz) turned onto the FP's (20 - 19 mapped by G), clamped to +-50 deg, ramped over 0.3 s, split over the
+// spine 16, 21, 24 (1/3, 2/3, 1; rigid on each one's exclusive subtree) about the vertical through joint 34. (3) The elbow's interior angle held
+// in [40, 170] deg (ikTwoBoneFrame's limits). (4) The sliders: swivel trim (deg), square-up amount (0..1), elbow out (cm).
+constexpr double kIkPoleMinPerp = 0.2;
+constexpr double kIkElbowMinDeg = 40.0, kIkElbowMaxDeg = 170.0;
+constexpr double kIkSquareMaxDeg = 50.0;
+constexpr double kIkSquareRampSec = 0.3;
+constexpr uint32_t kIkSpine[3] = {16, 21, 24};       // the spine chain the square-up is split over, hips side first
+constexpr double kIkSpineWeight[3] = {1.0 / 3.0, 2.0 / 3.0, 1.0};
+constexpr uint32_t kIkSquarePivot = 34;              // the vertical axis runs through this joint's xz
+constexpr uint32_t kIkClavL = 35, kIkClavR = 36;     // the 3P clavicles (their parent is the chest root, kIkSpine[2])
+constexpr double kIkSwivelTrimMaxDeg = 90.0, kIkSquareAmountDefault = 1.0, kIkElbowOutCmDefault = 10.0, kIkElbowOutCmMax = 30.0;
+// The FP snapshot's slots (fdAfterAnimate): the attach joints, the hands, the clavicles, the upper arms, the forearms.
+constexpr uint32_t kIkFpJoints[10] = {51, 52, 37, 44, 19, 20, 25, 26, 31, 34};
+constexpr uint32_t kIkFpSlots = 10;
+// Per side (0 L, 1 R): the slots of the FP attach, hand, clavicle, upper arm (S'), forearm (E').
+constexpr uint32_t kIkFpSlotAttach[2] = {1, 0}, kIkFpSlotHand[2] = {2, 3}, kIkFpSlotClav[2] = {4, 5}, kIkFpSlotUpper[2] = {6, 7},
+                   kIkFpSlotFore[2] = {8, 9};
+
+// The slider values, clamped (NaN takes the default).
+inline double ikSwivelTrimClampDeg(double v) noexcept {
+    if (!(v == v)) return 0.0;
+    return v < -kIkSwivelTrimMaxDeg ? -kIkSwivelTrimMaxDeg : v > kIkSwivelTrimMaxDeg ? kIkSwivelTrimMaxDeg : v;
+}
+inline double ikSquareAmountClamp(double v) noexcept {
+    if (!(v == v)) return kIkSquareAmountDefault;
+    return v < 0.0 ? 0.0 : v > 1.0 ? 1.0 : v;
+}
+inline double ikElbowOutClampCm(double v) noexcept {
+    if (!(v == v)) return kIkElbowOutCmDefault;
+    return v < 0.0 ? 0.0 : v > kIkElbowOutCmMax ? kIkElbowOutCmMax : v;
+}
+// A point through a row-vector 4x4 (v x M).
+inline void ikXform(const float p[3], const float M[16], double out[3]) noexcept {
+    for (int c = 0; c < 3; ++c)
+        out[c] = static_cast<double>(p[0]) * M[c] + static_cast<double>(p[1]) * M[4 + c] + static_cast<double>(p[2]) * M[8 + c] + M[12 + c];
+}
+// (1) The FP pole: true and `pole` the unit part of unit(E - S) across the axis T - S when that part is at least kIkPoleMinPerp; false (pole
+// untouched) for a nearly straight arm or a degenerate input.
+inline bool ikPoleFromFp(const double S[3], const double E[3], const double T[3], double pole[3]) noexcept {
+    const double se[3] = {E[0] - S[0], E[1] - S[1], E[2] - S[2]}, st[3] = {T[0] - S[0], T[1] - S[1], T[2] - S[2]};
+    double ue[3], ax[3];
+    if (!ikUnit(se, ue) || !ikUnit(st, ax)) return false;
+    const double d = ikDot(ue, ax);
+    const double pp[3] = {ue[0] - ax[0] * d, ue[1] - ax[1] * d, ue[2] - ax[2] * d};
+    if (!(ikLen(pp) >= kIkPoleMinPerp)) return false;
+    return ikUnit(pp, pole);
+}
+// The swivel trim's sign at theta: +1 when a positive change of theta moves the elbow out on the arm's side (out * dE.x/dtheta >= 0), so a
+// positive trim swings the elbow outward on both arms.
+inline double ikTrimSign(const IkTwoBone& t, double theta, double out) noexcept {
+    const double dEx = t.h * (-std::sin(theta) * t.u[0] + std::cos(theta) * t.v[0]);
+    return out * dEx >= 0.0 ? 1.0 : -1.0;
+}
+// (2) The signed yaw (radians, about +y, right-handed: + turns +x toward -z) that turns a's xz direction onto b's. 0 when either is degenerate.
+inline double ikYawFromTo(const double a[3], const double b[3]) noexcept {
+    const double cr = a[2] * b[0] - a[0] * b[2], dt = a[0] * b[0] + a[2] * b[2];
+    if (!(std::fabs(cr) + std::fabs(dt) > 1e-12)) return 0.0;
+    return std::atan2(cr, dt);
+}
+// The square-up's clamp: +-kIkSquareMaxDeg (radians in and out); NaN is 0. *clamped when it bit.
+inline double ikSquareClampRad(double phi, bool* clamped) noexcept {
+    const double lim = kIkSquareMaxDeg * kIkPi / 180.0;
+    if (clamped) *clamped = false;
+    if (!(phi == phi)) return 0.0;
+    if (phi > lim || phi < -lim) {
+        if (clamped) *clamped = true;
+        return phi > 0.0 ? lim : -lim;
+    }
+    return phi;
+}
+// The spine level of joint j: 2 under kIkSpine[2] (the chest), 1 under kIkSpine[1] only, 0 under kIkSpine[0] only, -1 otherwise.
+inline int ikSpineLevel(const uint16_t* parents, uint32_t joints, uint32_t j) noexcept {
+    for (int l = 2; l >= 0; --l)
+        if (ikUnder(parents, joints, j, kIkSpine[l])) return l;
+    return -1;
+}
+// The square-up's plan: the subtree of kIkSpine[0] with each member's level (any order: the rotations share one axis, so each member takes its
+// level's absolute angle). why: 0 ok, 1 bad input, 2 the spine is not a chain (21 under 16, 24 under 21), 3 the clavicles' parent is not
+// kIkSpine[2] (the chest root), 4 the pivot is not under the chest root.
+struct IkSquarePlan {
+    uint32_t why = 1;
+    uint16_t chestRoot = 0xFFFFu;
+    uint16_t n = 0;
+    uint16_t j[kPfzMaxJoints] = {};
+    uint8_t level[kPfzMaxJoints] = {};
+};
+inline IkSquarePlan ikSquarePlan(const uint16_t* parents, uint32_t joints) noexcept {
+    IkSquarePlan p;
+    if (joints == 0 || joints > kPfzMaxJoints || kIkClavR >= joints || kIkSquarePivot >= joints || kIkSpine[2] >= joints) return p;
+    if (!ikUnder(parents, joints, kIkSpine[1], kIkSpine[0]) || !ikUnder(parents, joints, kIkSpine[2], kIkSpine[1]) ||
+        kIkSpine[1] == kIkSpine[0] || kIkSpine[2] == kIkSpine[1]) {
+        p.why = 2;
+        return p;
+    }
+    p.chestRoot = parents[kIkClavL];
+    if (parents[kIkClavL] != parents[kIkClavR] || parents[kIkClavL] != kIkSpine[2]) {
+        p.why = 3;
+        return p;
+    }
+    if (!ikUnder(parents, joints, kIkSquarePivot, kIkSpine[2])) {
+        p.why = 4;
+        return p;
+    }
+    for (uint32_t j = 0; j < joints; ++j) {
+        const int l = ikSpineLevel(parents, joints, j);
+        if (l < 0) continue;
+        p.j[p.n] = static_cast<uint16_t>(j);
+        p.level[p.n] = static_cast<uint8_t>(l);
+        ++p.n;
+    }
+    p.why = 0;
+    return p;
+}
+inline const char* ikSquareWhyText(uint32_t why) noexcept {
+    switch (why) {
+        case 0: return "ok";
+        case 1: return "a joint index out of range or no joints";
+        case 2: return "the spine 16, 21, 24 is not a parent chain";
+        case 3: return "the clavicles 35 and 36 do not share the parent 24 (the chest root)";
+        case 4: return "the pivot joint 34 is not under the chest root";
+        default: return "?";
+    }
 }
 }  // namespace nofoot
 }  // namespace edvr

@@ -1230,6 +1230,121 @@ int wmain(int argc, wchar_t** argv) {
                 check(nf::ikArmChain(par, 9, 1, 4, 7).why == 3 && nf::ikArmChain(par, 9, 7, 4, 5).why == 2 && nf::ikArmChain(par, 9, 1, 4, 40).why == 1,
                       "F56: an attach not under the hand, a clavicle off the chain and an index out of range are refused");
             }
+            // F57: the arm IK refinements' pure half: the FP pole's fallback, the square-up's clamp, ramp and spine split, the elbow limits.
+            {
+                const double kDeg = nf::kIkPi / 180.0;
+                // The FP pole: a nearly straight FP arm (the elbow's part across the shoulder-hand axis under 0.2) keeps the old pole.
+                const double S[3] = {0.0, 0.0, 0.0}, T[3] = {0.5, 0.0, 0.0}, Estraight[3] = {0.25, -0.01, 0.0}, Ebent[3] = {0.2, -0.2, 0.0};
+                double pole[3] = {7.0, 7.0, 7.0};
+                const bool straight = nf::ikPoleFromFp(S, Estraight, T, pole);
+                const bool kept = pole[0] == 7.0 && pole[1] == 7.0 && pole[2] == 7.0;
+                const bool bent = nf::ikPoleFromFp(S, Ebent, T, pole);
+                check(!straight && kept && bent && std::fabs(pole[0]) < 1e-12 && std::fabs(pole[1] + 1.0) < 1e-12 && std::fabs(pole[2]) < 1e-12,
+                      "F57: the FP elbow's pole: a perpendicular part under 0.2 keeps the old pole; a bent arm gives the unit perpendicular (down)");
+                // The square-up's angle: the yaw from the 3P line onto the FP's turns one onto the other; the clamp holds +-50 deg; NaN is 0.
+                const double a[3] = {1.0, 0.0, 0.0}, b[3] = {0.0, 0.0, -1.0}, upY[3] = {0.0, 1.0, 0.0};
+                const double phi = nf::ikYawFromTo(a, b);
+                double Ry[9];
+                nf::ikRotAxis(upY, phi, Ry);
+                const double ar[3] = {a[0] * Ry[0] + a[1] * Ry[3] + a[2] * Ry[6], a[0] * Ry[1] + a[1] * Ry[4] + a[2] * Ry[7],
+                                      a[0] * Ry[2] + a[1] * Ry[5] + a[2] * Ry[8]};
+                bool c60 = false, c70 = false, c30 = true, cNan = true;
+                const double r60 = nf::ikSquareClampRad(60.0 * kDeg, &c60), r70 = nf::ikSquareClampRad(-70.0 * kDeg, &c70),
+                             r30 = nf::ikSquareClampRad(30.0 * kDeg, &c30), rNan = nf::ikSquareClampRad(std::numeric_limits<double>::quiet_NaN(), &cNan);
+                check(std::fabs(phi - 90.0 * kDeg) < 1e-12 && std::fabs(ar[0] - b[0]) < 1e-12 && std::fabs(ar[2] - b[2]) < 1e-12 && c60 && c70 &&
+                          !c30 && !cNan && std::fabs(r60 - 50.0 * kDeg) < 1e-12 && std::fabs(r70 + 50.0 * kDeg) < 1e-12 &&
+                          std::fabs(r30 - 30.0 * kDeg) < 1e-12 && rNan == 0.0,
+                      "F57: the square-up's yaw turns the 3P shoulder line onto the FP's; the clamp holds +-50 deg (30 passes, NaN is 0)");
+                // Its ramp: 0.3 s in (27 frames at 90 Hz, half at 0.15 s), 0.3 s out.
+                nf::IkBlend sq{0.0f, nf::kIkSquareRampSec};
+                const double dt = 1.0 / 90.0;
+                int framesIn = 0;
+                while (sq.w < 1.0f && framesIn < 100) {
+                    sq.step(true, dt);
+                    ++framesIn;
+                }
+                nf::IkBlend halfRamp{0.0f, nf::kIkSquareRampSec};
+                for (int f = 0; f < 3; ++f) halfRamp.step(true, 0.05);
+                int framesOut = 0;
+                while (sq.w > 0.0f && framesOut < 100) {
+                    sq.step(false, dt);
+                    ++framesOut;
+                }
+                check(framesIn >= 27 && framesIn <= 28 && framesOut >= 27 && framesOut <= 28 && std::fabs(halfRamp.w - 0.5f) < 1e-5f && sq.w == 0.0f,
+                      "F57: the square-up ramps to 1 in 0.3 s (half at 0.15 s) and back to 0 in 0.3 s");
+                // The spine split: a skeleton with the spine 16 -> 21 -> 24, the clavicles 35, 36 and the pivot 34 under 24, a helper on each spine
+                // joint (17 on 16, 22 on 21, 37 on 35) and joints off the spine (1, 2 on the root). Levels 0, 1, 2 take 1/3, 2/3 and all of the angle.
+                uint16_t sp[40];
+                for (uint32_t j = 0; j < 40; ++j) sp[j] = 0;
+                sp[0] = 0xFFFF;
+                sp[16] = 0;
+                sp[17] = 16;
+                sp[21] = 16;
+                sp[22] = 21;
+                sp[24] = 21;
+                sp[34] = 24;
+                sp[35] = 24;
+                sp[36] = 24;
+                sp[37] = 35;
+                const nf::IkSquarePlan plan = nf::ikSquarePlan(sp, 40);
+                int lv[40];
+                for (int j = 0; j < 40; ++j) lv[j] = -1;
+                for (uint32_t k = 0; k < plan.n; ++k) lv[plan.j[k]] = plan.level[k];
+                check(plan.why == 0 && plan.chestRoot == 24 && plan.n == 9 && lv[16] == 0 && lv[17] == 0 && lv[21] == 1 && lv[22] == 1 && lv[24] == 2 &&
+                          lv[34] == 2 && lv[35] == 2 && lv[36] == 2 && lv[37] == 2 && lv[1] == -1 && lv[0] == -1 &&
+                          std::fabs(nf::kIkSpineWeight[0] - 1.0 / 3.0) < 1e-15 && std::fabs(nf::kIkSpineWeight[1] - 2.0 / 3.0) < 1e-15 &&
+                          nf::kIkSpineWeight[2] == 1.0,
+                      "F57: the square-up's plan: the spine 16 subtree by level (16 exclusive 1/3, 21 exclusive 2/3, 24 all), nothing off the spine");
+                // Turned by 45 deg about the pivot's vertical: each level's joint turns by its share, about the pivot.
+                const double P[3] = {0.1, 1.5, 0.0}, total = 45.0 * kDeg;
+                bool sharesOk = true;
+                for (int l = 0; l < 3; ++l) {
+                    double R[9];
+                    nf::ikRotAxis(upY, total * nf::kIkSpineWeight[l], R);
+                    const float M[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0.6f, 1.2f, 0.0f, 1};
+                    float Mo[16];
+                    nf::ikPivot(M, R, P, Mo);
+                    const double v0[3] = {0.6 - P[0], 0.0, 0.0 - P[2]}, v1[3] = {Mo[12] - P[0], 0.0, Mo[14] - P[2]};
+                    const double got = nf::ikYawFromTo(v0, v1);
+                    if (std::fabs(got - total * nf::kIkSpineWeight[l]) > 1e-6 || std::fabs(Mo[13] - 1.2f) > 1e-6f) sharesOk = false;
+                }
+                uint16_t sp2[40];
+                std::memcpy(sp2, sp, sizeof(sp2));
+                sp2[36] = 21;   // a clavicle off the chest root
+                uint16_t sp3[40];
+                std::memcpy(sp3, sp, sizeof(sp3));
+                sp3[24] = 0;   // the spine broken
+                check(sharesOk && nf::ikSquarePlan(sp2, 40).why == 3 && nf::ikSquarePlan(sp3, 40).why == 2 && nf::ikSquarePlan(sp, 30).why == 1,
+                      "F57: each spine level turns by its share about the pivot's vertical (height kept); a clavicle off the chest root, a broken spine "
+                      "and a short skeleton are refused");
+                // The elbow's interior angle limits: 40 to 170 deg.
+                const double lU = 0.30, lF = 0.25, down[3] = {0.0, -1.0, 0.0};
+                const double Tfar[3] = {0.549, 0.0, 0.0}, Tnear[3] = {0.06, 0.0, 0.0}, Tmid[3] = {0.40, 0.0, 0.0};
+                const nf::IkTwoBone tFar = nf::ikTwoBoneFrame(S, Tfar, lU, lF, down, nf::kIkElbowMinDeg, nf::kIkElbowMaxDeg);
+                const nf::IkTwoBone tNear = nf::ikTwoBoneFrame(S, Tnear, lU, lF, down, nf::kIkElbowMinDeg, nf::kIkElbowMaxDeg);
+                const nf::IkTwoBone tMid = nf::ikTwoBoneFrame(S, Tmid, lU, lF, down, nf::kIkElbowMinDeg, nf::kIkElbowMaxDeg);
+                double Ef[3], En[3];
+                tFar.elbowAt(0.0, Ef);
+                tNear.elbowAt(0.0, En);
+                const auto ang = [&](const double* E, const double* H) {
+                    const double es[3] = {S[0] - E[0], S[1] - E[1], S[2] - E[2]}, eh[3] = {H[0] - E[0], H[1] - E[1], H[2] - E[2]};
+                    return std::acos(nf::ikDot(es, eh) / (nf::ikLen(es) * nf::ikLen(eh))) * 180.0 / nf::kIkPi;
+                };
+                check(tFar.ok && tFar.limited && std::fabs(nf::ikElbowInteriorDeg(lU, lF, tFar.D) - 170.0) < 1e-6 && std::fabs(ang(Ef, tFar.hand) - 170.0) < 1e-6 &&
+                          tNear.ok && tNear.limited && std::fabs(nf::ikElbowInteriorDeg(lU, lF, tNear.D) - 40.0) < 1e-6 &&
+                          std::fabs(ang(En, tNear.hand) - 40.0) < 1e-6 && tMid.ok && !tMid.limited &&
+                          std::fabs(nf::ikElbowInteriorDeg(lU, lF, tMid.D) - 92.87) < 0.01,
+                      "F57: the elbow's interior angle is held in 40..170 deg (a near-straight and a folded target are limited; 92.87 deg passes)");
+                // The elbow-out slider's distance reaches the clamp.
+                const double S2[3] = {0.2, 1.4, 0.0}, T2[3] = {0.2, 1.4, 0.4}, poleUp[3] = {0.0, 1.0, 0.0};
+                const nf::IkTwoBone t2 = nf::ikTwoBoneFrame(S2, T2, lU, lF, poleUp);
+                bool cl = false;
+                double E2[3];
+                t2.elbowAt(nf::ikSwivelClamp(t2, 0.0, 1.0, &cl, 0.25), E2);
+                check(cl && E2[0] >= 0.25 - 1e-9 && E2[1] <= S2[1] + 1e-9 && nf::ikElbowOutClampCm(45.0) == 30.0 && nf::ikElbowOutClampCm(-1.0) == 0.0 &&
+                          nf::ikSwivelTrimClampDeg(120.0) == 90.0 && nf::ikSquareAmountClamp(std::numeric_limits<double>::quiet_NaN()) == 1.0,
+                      "F57: the clamp keeps the elbow out by the slider's distance (25 cm); the sliders clamp to their ranges");
+            }
             // The shift rule: a record at the AMC origin moves by d once; a second pass over it leaves it alone; a record elsewhere never moves.
             const float origin[3] = {10.0f, 2.0f, -3.0f}, d[3] = {0.0f, 0.231f, 0.0f};
             float rec[3] = {10.0f, 2.0f, -3.0f}, other[3] = {10.5f, 2.0f, -3.0f};

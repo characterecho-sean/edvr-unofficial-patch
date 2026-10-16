@@ -2271,6 +2271,19 @@ bool armBuildPlan(uint64_t x) noexcept {
                         arm.depthC, arm.depthH, arm.depthH - arm.depthC, l1 * 100.0, l2 * 100.0, groups, kids);
     }
     if (!plan.ok[0] && !plan.ok[1]) return false;
+    // F57: the torso square-up's plan: the chest root (the clavicles' parent) and the spine 16 subtree by level (16, 21, 24 exclusive).
+    plan.sq = nofoot::ikSquarePlan(g_pfzParents, joints);
+    plan.sqOk = plan.sq.why == 0;
+    {
+        uint32_t byLevel[3] = {};
+        for (uint32_t k = 0; k < plan.sq.n; ++k) ++byLevel[plan.sq.level[k] < 3 ? plan.sq.level[k] : 2];
+        Log::get().note("native on foot arm IK (F57): X=%016llX square-up plan: %s; chest root %u (parent of 35 %u, of 36 %u); spine 16/21/24 "
+                        "exclusive subtrees %u/%u/%u joints (%u in all), weights 1/3, 2/3, 1; pivot joint 34",
+                        static_cast<unsigned long long>(x), plan.sqOk ? "ok" : nofoot::ikSquareWhyText(plan.sq.why),
+                        static_cast<unsigned>(plan.sq.chestRoot), joints > nofoot::kIkClavL ? static_cast<unsigned>(g_pfzParents[nofoot::kIkClavL]) : 0xFFFFu,
+                        joints > nofoot::kIkClavR ? static_cast<unsigned>(g_pfzParents[nofoot::kIkClavR]) : 0xFFFFu, byLevel[0], byLevel[1], byLevel[2],
+                        static_cast<unsigned>(plan.sq.n));
+    }
     pfz::g_armSeq.fetch_add(1, std::memory_order_acq_rel);   // odd: the plan is being written
     pfz::g_armPlan = plan;
     pfz::g_armSeq.fetch_add(1, std::memory_order_release);   // even again

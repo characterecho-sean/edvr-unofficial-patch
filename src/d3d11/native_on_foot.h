@@ -151,11 +151,15 @@ inline std::atomic<bool> g_dropWanted{false};
 // (nofoot::ikArmChain: [0] L, clavicle 35, hand 58, attach 67; [1] R, 36, 59, 66, from the joint probe) and publishes them under g_armSeq;
 // g_armX (set after the plan is published) is the hook's quick filter. g_ikMode is fix.native_on_foot_arm_ik: 0 off, 1 probe (the default),
 // 2 nudge, 3 on; g_ikWanted (the key not off) keeps the Animate hook and the FP census running when the pose freeze key is off.
+// F57: plus the torso square-up's plan (nofoot::ikSquarePlan: the chest root, the parent of the clavicles 35 and 36, and the spine 16 subtree
+// with each member's level); sqOk false refuses the square-up alone.
 struct ArmPlan {
     uint64_t x = 0;
     uint32_t joints = 0;
     bool ok[2] = {false, false};
     nofoot::IkArm side[2];
+    bool sqOk = false;
+    nofoot::IkSquarePlan sq;
 };
 inline std::atomic<uint32_t> g_armSeq{0};
 inline ArmPlan g_armPlan;
