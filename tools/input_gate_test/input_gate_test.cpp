@@ -230,6 +230,12 @@ SHORT WINAPI pausingKey(int vk) {
     }
     return physicalKey(vk);
 }
+// A refresh's reader that reports when the refresh first reaches its physical scan.
+HANDLE g_refreshEntered = nullptr;
+SHORT WINAPI refreshProbeKey(int vk) {
+    if (g_refreshEntered) SetEvent(g_refreshEntered);
+    return physicalKey(vk);
+}
 BOOL WINAPI physicalState(PBYTE out) {
     for (int vk = 0; vk < 256; ++vk) out[vk] = physical[vk] ? 0x80 : 0;
     return TRUE;
@@ -456,6 +462,44 @@ static void pluginReleaseScanCases(Device& keyboard) {
             CloseHandle(g_scanEntered);
             CloseHandle(g_scanMayContinue);
             g_scanEntered = g_scanMayContinue = nullptr;
+            physical['A'] = false;
+            refreshReleaseTail(&physicalKey);
+            g_tailReader = saved;
+        }
+
+        // PR #92 review, the reverse ordering: a refresh that starts while a capture is mid-write must not read the new
+        // generation with the old held keys. The tail holds B (now released); A is physically held; a plugin release
+        // captures on the owner thread and pauses before reading A; the refresh starts meanwhile. With the snapshot
+        // under the shared lock the refresh waits for the capture; every wait here is bounded.
+        {
+            const PFN_GetAsyncKeyState saved = g_tailReader;
+            g_tailReader = &physicalKey;
+            physical['B'] = true;
+            physical['A'] = false;
+            captureReleaseTail(&physicalKey);   // tail = {B}
+            physical['B'] = false;
+            physical['A'] = true;
+            inputGateSetPluginBlock(true);
+            g_scanEntered = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+            g_scanMayContinue = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+            g_refreshEntered = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+            g_tailReader = &pausingKey;
+            g_pauseArmed = true;
+            std::thread owner([&] { inputGateSetPluginBlock(false); });   // captures A, clears the block
+            const bool paused = WaitForSingleObject(g_scanEntered, 5000) == WAIT_OBJECT_0;
+            check(paused, "refresh during capture: the capture paused inside its key scan");
+            std::thread refresher([&] { refreshReleaseTail(&refreshProbeKey); });
+            WaitForSingleObject(g_refreshEntered, 300);   // fixed: times out, the refresh waits for the capture
+            SetEvent(g_scanMayContinue);
+            owner.join();
+            refresher.join();
+            check(releaseTailVk('A'), "refresh during capture: the tail covers A after both finish");
+            check(hookGetAsyncKeyState('A') == 0, "refresh during capture: the game reads the held A as up");
+            check(!g_pluginBlock.load(), "refresh during capture: the plugin block is cleared");
+            CloseHandle(g_scanEntered);
+            CloseHandle(g_scanMayContinue);
+            CloseHandle(g_refreshEntered);
+            g_scanEntered = g_scanMayContinue = g_refreshEntered = nullptr;
             physical['A'] = false;
             refreshReleaseTail(&physicalKey);
             g_tailReader = saved;

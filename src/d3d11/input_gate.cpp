@@ -185,9 +185,12 @@ std::atomic<bool> g_heldDik[256]{};
 PFN_GetAsyncKeyState g_tailReader = &GetAsyncKeyState;
 
 // Every writer of the tail (a capture, a refresh's publish, the menu re-arming) holds g_tailLock, and every write that
-// supersedes the tail bumps g_tailGeneration. A refresh scans with no lock held, from a snapshot taken at generation N,
-// and publishes only if the generation is still N: a refresh paused mid-scan can never overwrite a capture that landed
-// meanwhile with its stale result (PR #92 review). The Present thread takes the lock only for the short publish.
+// supersedes the tail bumps g_tailGeneration. A refresh takes its snapshot (generation N and a copy of the held keys)
+// under the SHARED lock, scans the physical keys from that copy with no lock held, and publishes only if the generation
+// is still N. Both orderings are covered (PR #92 review): a refresh paused mid-scan can never overwrite a capture that
+// landed meanwhile with its stale result, and a refresh that starts while a capture is mid-write waits on the shared
+// lock, so it never pairs the new generation with the old held keys. The Present thread holds the lock only for the
+// short snapshot and the short publish.
 SRWLOCK g_tailLock = SRWLOCK_INIT;
 std::atomic<uint32_t> g_tailGeneration{0};
 
@@ -219,11 +222,15 @@ void cancelReleaseTail() {
 
 void refreshReleaseTail(PFN_GetAsyncKeyState readKey) {
     if (!g_releaseTail.load()) return;
+    bool tail[256];
+    AcquireSRWLockShared(&g_tailLock);
     const uint32_t startGeneration = g_tailGeneration.load();
+    for (int vk = 0; vk < 256; ++vk) tail[vk] = g_heldVk[vk].load();
+    ReleaseSRWLockShared(&g_tailLock);
     bool heldVk[256]{};
     bool any = false;
     for (int vk = 0; vk < 256; ++vk) {
-        if (!g_heldVk[vk].load()) continue;
+        if (!tail[vk]) continue;
         if (readKey(vk) & 0x8000) { heldVk[vk] = true; any = true; }
     }
     // Rebuild after releases: generic/left/right modifier VKs can share a DIK.
