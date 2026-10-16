@@ -2,7 +2,7 @@
 
 ## Status
 
-*Updated 2026-10-16 (after the Frontier flight). Update this block whenever the doc changes.*
+*Updated 2026-10-16 (facing transcriptions merged). Update this block whenever the doc changes.*
 
 - **State:** the steady fix is shipped and flown (the sections below). Two arcs rode `claude/billboard-roll-free`,
   flown 2026-10-16 and approved for main: the shadow's CPU cost (entry "2026-10-16", cut from a whole-block read
@@ -15,12 +15,19 @@
   the old whole-block copy was worth about 0.9-1.7 ms a frame there before the 160-byte cut.
 - **Hypothesis "native AMD reads are slow":** now generalised; mapped dynamic constant buffers are write-combined
   on NVIDIA as well. Still unmeasured on AMD; the `unmap readers` and `mapped read probe` lines stay, they are cheap.
-- **Open:** Sean still sees explosions FLEX when he pitches his head. That is the expected limit of the roll-free
-  basis, which keeps the camera's forward, so the quad plane follows pitch. Per-particle viewer facing (a
-  transcription, as the plume and flare have) is the fix: branch `claude/billboard-facing`.
+- **MERGED (2026-10-16, `claude/billboards-sharp-weapons`; `claude/billboard-facing`, flown):** explosions still flexed after the first facing build
+  (`695ce3b1`, flown). The eye dump (`edvr_gfx_20261016_063230.log`, `eyes\eye_063553_*`) showed the FIREBALL PUFFS are drawn by
+  `AFBCD3ADB9092F78` (PS `2BAE3742FEB916D9`), the no-near-fade twin of `9F4B`, and `4BDE4DBF88C2BA27` (PS `E54F2A902E5631F6`),
+  `BBAD`'s no-fade twin; both had only the roll-free rebind. All five explosion-family shaders (`9F4B`, `BBAD`, `9AEC`, `AFBC`, `4BDE`)
+  now have their OWN facing transcription, each granted to its exact hash and proven against the game's own bytecode by
+  `tools\billboard_facing_test`; 11 shaders stay roll-free. `9AEC` stays gated by `fix.witchspace_stars`. Flown (builds of 2026-10-16, eye runs 100331,
+  100415, 100454): every billboard draw went through a facing transcription (100 percent swapped), no untranscribed billboard drew, explosions are drawn by
+  the five transcriptions only. Not on main with it: the shield producer probe and the parked join (`claude/producer-434d120-probe`).
 - **Temporary keys:** none added. `fix.particle_billboard` is hot-reloadable (edvr.ini, polled once a second).
 - **Ruled out:** nothing yet.
-- **Next flight:** the facing transcriptions (see the entry at the end).
+- **Next flight:** Frontier VR, `steady`: fly an explosion with the head pitched and rolled. The `billboard roll-free` line now
+  counts "Transcribed (facing), swapped/seen" apart from "Rebound (roll-free), rebound/seen". A swapped count of 0 with a
+  seen count above 0 means the viewer feed was not solved (the log says so at the first use of each hash).
 
 *Written to accompany a Frontier issue report; no tracker number yet.
 Companion write-ups in this folder cover the sun's glare (sun-glare.md),
@@ -346,3 +353,117 @@ answered both questions it was built for:
 
 The `unmap readers` line and the `mapped read probe` lines stay. Each probe line now names its buffer (resource
 pointer, ByteWidth, usage) so the up to three lines of a session can be told apart.
+
+## 2026-10-16: the explosions face the viewer (branch `claude/billboard-facing`)
+
+### Why
+
+The roll-free basis (`billboard-root-cause-2026-10-16.md`) stopped the explosions rolling, but Sean still saw them flex
+when he pitched his head. The basis keeps the camera's forward, so the quad plane follows the head's pitch; facing is per
+particle and only a vertex shader reads the particle (E3). The explosion is three shaders that rose and decayed together in
+the flight and later drew identical counts per window; `AFBCD3ADB9092F78`, `4BDE4DBF88C2BA27` and `78F5F08D02EE38CC` drew
+around it and keep the roll-free basis.
+
+### The rule, and how it is held
+
+The 0.12.3 regression (a replacement granted on a body that looked like the flare's, outputs that did not, the starfield
+gone) is the reason each text in `src\d3d11\billboard_facing_vs.h` was written from the disassembly of ITS OWN shader, and
+is granted to ONE exact 64-bit content hash. `tools\billboard_facing_test` holds it, on WARP with the debug layer, against
+the original bytecode (`tools\billboard_facing_test\fixtures\vs_<hash>.dxbc`, each held to its hash name):
+
+- F1 the input and output signature blocks (every column, the Used column included) and every `dcl_` line equal the
+  original's; the one added declaration is `CB3[2]` (ours: the viewer position and world up); and each transcription is NOT
+  equal to either of the other two originals, so the comparator can tell them apart.
+- F2 with the viewer feed absent (`pCam.w = 0`) every output register of every vertex equals the original's, on every
+  alignment mode and random constants.
+- F3 with the feed present, the aligned modes (1, 2, 3, 5, 6, 7) are identical to the original, position included.
+- F4 on the particle's axis with zero roll, every mode equals the original.
+- F5 off axis with a rolled camera, only the basis-dependent outputs differ (the position and the corner depth; BBAD's clip-w
+  terms); each quad faces the viewer (offsets perpendicular to the face axis, to 1e-3) with the original's size and no roll.
+  The FAIL-BEFORE: the original's quad is not perpendicular to the face axis (at least 2% of its offset along it).
+- F6 a particle directly above or below the viewer and one at the viewer stay finite (the guarded cross).
+- Mutants killed by hand while building it: the direction decode constant 2.007874 changed to 2.0, mode 3's up sign, 9F4B's
+  fade on alpha, and facing away from the viewer; each fails F2 or F4 on a named output.
+
+What it found on the way: the original `BBAD1CA808E1E292`'s `0 * infinity` for a vertex behind the camera is 0 or NaN depending
+on operand order in WARP's multiply, so the random constants keep clip w positive (comment in the rig).
+
+### What the three are
+
+| hash | in / out | extras beyond the sprite family's basis | gate |
+|---|---|---|---|
+| `9F4BBCFCD3B68BC9` | 12 / 6, b0 b1 b2 | the near fade (cb2) and the corner collapse | none |
+| `BBAD1CA808E1E292` | 10 / 3, b0 b1 b2 | the near fade, the collapse and the soft-depth term (cb2[0].y) | none |
+| `9AEC596A2B036EA6` | 10 / 5, b0 b1 | none (it also draws the witchspace starfield) | `fix.witchspace_stars = off` withholds it before any swap |
+
+The body from the basis through the spin quaternion is one HLSL function, because it is the same instruction sequence in the
+three originals (the rig proves each; the 9F4B disassembly has the alignment cascade the old memory note said it lacked).
+The facing replaces only the camera-facing mode (alignment byte 0) and mode 4, which keeps that basis: face = normalize(
+particle position - viewer), right = normalize(cross(world up, face)), up = cross(face, right), and the spin axis of mode 0
+becomes the face axis. The near fade keeps cb1[279] as its depth axis.
+
+### How it runs
+
+They are NOT given the plume's verdict: the draw stays in the ladder as the game made it (counted as an eye draw, routed as
+before), and `forwardWithVerdict` makes the swap around it (the same vertex shader and b3 feed the plume gets) and restores on
+every exit, as it does for the roll-free rebind. The bytecode is generated at build time (`kFacing9F4BWorldBytecode`,
+`kFacingBBADWorldBytecode`, `kFacing9AECWorldBytecode`; `tools\temporal_shader_build\fixed_facing_shader_variants.h`, with its own
+contract checks: symbol, source, vertex stage, the constant buffers b0[12], b1[280], b2[3], b3[2]).
+
+### The 10 s line
+
+`billboard roll-free (N frame(s)). Transcribed (facing), swapped/seen: HASH a/b; ... Rebound (roll-free), rebound/seen: HASH b/s; ...`
+Each half reads "not exercised" when none of its shaders drew. A swapped count below the seen count means the viewer feed was not
+solved for those draws (they kept the game's basis); the first use of each hash is also logged with the feed's state.
+
+### Flight plan
+
+Frontier VR, `steady`: an explosion with the head pitched down and up, then rolled. Pass: the quad no longer flexes with pitch,
+the size, colour and fade are as before, nothing mirrored. Fail signals: a swapped count of 0, a sprite that pops at the poles,
+the starfield changed in the tunnel (set `fix.witchspace_stars` to compare).
+
+## 2026-10-16 (later): the fireball puffs are the no-fade twins
+
+### The eye-dump evidence
+
+Sean flew `695ce3b1` and explosions still flexed. An eye dump (Frontier, `edvr_gfx_20261016_063230.log`, `eyes\eye_063553_*`) and
+a second reverse-engineering pass found the fireball puffs are NOT drawn by the three shaders transcribed first:
+
+- `AFBCD3ADB9092F78` + PS `2BAE3742FEB916D9` draws them. It is `9F4BBCFCD3B68BC9`'s NO-NEAR-FADE twin: the same 12-input signature
+  and the same six output registers (five `TEXCOORD`s and `SV_POSITION`), the same pixel shader, 143 instructions against 157. The
+  difference is exactly: no `CB2` declaration at all, no `dp3 cb1[279], pos` fade ramp on `cb2[1].w * cb2[2].x`, no `lt fade, 0.001`
+  corner collapse, and `o3.w = v11.w` where `9F4B` writes `fade * v11.w`.
+- `4BDE4DBF88C2BA27` + PS `E54F2A902E5631F6` is `BBAD1CA808E1E292`'s no-fade twin: the same 10-input signature, outputs `TEXCOORD3`
+  (xyz) and `TEXCOORD5` plus the position, `CB2[1]` against `BBAD`'s `CB2[3]`, the soft-depth term on `cb2[0].y` kept, no fade
+  multiplied into `o0.z` or `o1.z`, and its registers and mode branches reshuffled. It drew only in explosion windows and in none of
+  the three dumped census frames.
+
+### The likeness trap, and how it is closed
+
+By body similarity `AFBC` is closer to `9AEC596A2B036EA6` (0.864) than to its true twin `9F4B` (0.727). That is the 0.12.3 shape of error,
+so the rule stands: each hash gets a transcription written from its OWN disassembly, matched by the exact 64-bit hash, and the rig runs
+the original bytes against it. The fixtures are in `tools\billboard_facing_test\fixtures` (each held to its hash name by the project's
+`fnv1a64`).
+
+### The rig, per shader (WARP, debug layer ON, "PASS F1-F8 (138 checks)")
+
+For each of `9F4B`, `BBAD`, `9AEC`, `AFBC`, `4BDE`: F1 signature blocks (every column) and every `dcl_` line equal the original's apart
+from the one added `CB3[2]`, and the transcription is NOT equal to any of the other four originals; F2 feed absent: every output of every
+vertex equals the original's on every mode and random constants; F3 feed present, aligned modes identical; F4 on axis with zero roll,
+every mode identical; F5 off axis with a rolled camera, only the basis-dependent outputs differ, the quad faces the viewer, with the
+original's size and no roll, and the ORIGINAL's quad does not face the viewer (the fail-before); F6 the degenerate cross finite.
+
+New in F8 for the no-fade twins: `AFBC` (and `9AEC`) never read `b2`: a `b2` bound with garbage (1e30, negative, zero, 77) changes
+nothing, bit for bit, on the transcription or on the original; where the original does read `b2` (`9F4B`, `BBAD`, `4BDE`) the same
+garbage does change the outputs, so the test can fail (the fail-before). Mutants killed by hand for the new pair: `AFBC`'s alpha scaled
+by 0.9 fails F2, F3, F4 and F5 on `TEXCOORD11.w`; `4BDE`'s soft term replaced fails the `dcl` equality and F2.
+
+### What moved
+
+`AFBC` and `4BDE` left the roll-free list (11 remain: `1B28`, `78F5`, `1FBA`, `2BF5`, `DB11`, `68DD`, `F7A6`, `1238`, `94EA`, `C312`,
+`F150`). The 10 s line counts them as "Transcribed (facing), swapped/seen" now.
+
+### Flight plan
+
+As the first facing flight, on the fireball: the puffs should hold their plane to the viewer through a head pitch. Read the 10 s line:
+`AFBCD3ADB9092F78` and `4BDE4DBF88C2BA27` under "Transcribed (facing)" with swapped equal to seen.

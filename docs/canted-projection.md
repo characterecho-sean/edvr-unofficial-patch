@@ -22,63 +22,49 @@ code is touched at any point.
 
 ## Status
 
-**State (2026-10-10): the handedness fix is SHIPPED and FLOWN on a real canted
-headset; the parallel-projection notice is BUILT on `claude/canted-pp-notice`,
-NOT FLOWN.** Offline disassembly of Elite build 332841
-(`analysis\decomp\verify_20261009_cant_*`) found the eye rotation is **not**
-dropped: the wrapper (slots 16 and 26) multiplies the eye matrix, taken raw, with
-a head pose first converted into the game's z-negated space (`S*H*S`,
-S = diag(1,1,-1)). The correct eye matrix is `S*E*S`; raw E inverts the cant's
-yaw and pitch (2 theta per eye), which is invisible on parallel panels, where
-the rotation is identity and tz = 0. The 2026-09-12 closure assumed a dropped
-rotation and the field symptoms fit an inverted one equally well; the fold
-experiment and the remap arithmetic below still stand.
+**State (2026-10-16):** handedness fix SHIPPED and FLOWN; parallel-projection
+notice BUILT on `claude/canted-pp-notice`, NOT FLOWN. Elite 332841 composes raw
+eye matrix `E` with head pose `S*H*S`, `S=diag(1,1,-1)`; `S*E*S` is the correct
+handedness. The synthetic-cant flight confirmed the fix; the real Pimax 8KX
+flight also passed with PP off. H-drop was ruled out by the synthetic-cant
+flight. `GetEyeToHeadTransform` now always returns `S*E*S`, with no key. PP is
+applied by the runtime; EDVR cannot undo it without the native cant and FOV.
+The PP notice still needs a PP-on/PP-off flight; Pimax Play support is open.
+The 2026-10-09 and 2026-10-10 entries retain the flight numbers and PP limits.
 
-**H-inv CONFIRMED 2026-10-09** by the synthetic-cant flight (Pimax Crystal Super
-via Pimax OpenXR, v0.18.3-90-gbbca39a6, simulated 10° outward cant): with
-`canted_eye_fix` on the canted pair fused, off it split (runtime log
-`edvr_openxr_20261009_115451_577_19872.log`; numbers in the last entry below).
-- **Ruled out:** H-drop (the rotation lost somewhere the disassembly missed),
-  because handing Elite `S*E*S` fused the canted pair and the raw matrix split
-  it. The fix needs no engine patch.
+**Star dimming, 2026-10-16:** screenshots and matching show faint left-eye stars
+dim on pitch with PP off: 267 still and 198 pitch pairs, median residuals
+1.29/1.58 px; right/left flux moves from 0.945 still (95% CI 0.885–1.005) to
+3.996 pitching (3.30–4.77). Capture 224449 is PimaxXR / Pimax Vision 8K X, PP
+off, 20° between eyes, 90 Hz, 1869x1579 input, DLSS K; version unknown. All 16
+frames (20376–20391) have DLSS success/history and no reset. Exact raw crops
+C00/C02/C15 establish shared-world-basis error for LEFT; opposite-eye provenance
+is inferred, not traced to an owner. The source fix is BUILT, NOT FLOWN. Full
+build passed 26 Python gates, 164 pooled and 6 quiet rigs, production DLLs, and
+installer resource validation. Receipt verifies; actual capture fixture test
+passed.
+That first validation build had the DLSS and FSR SDKs; XeSS SDK was absent.
+The test DLL package requires a clean build with all three SDKs present.
 
-**SHIPPED as behaviour (2026-10-09).** `GetEyeToHeadTransform` always answers
-`S*E*S` (`canted_display.h`, `gameHandedness`); on parallel panels that is the
-identity to the bit, so there is no key. The temporary keys and the synthetic-cant
-instrument never left the branch, nor did frame ABI version 6.
-
-**REAL CANTED FLIGHT PASSED 2026-10-09 (issue 24, Houndmux):** Pimax 8KX via
-PimaxXR, FOV Wide, default panel resolution, HMD Quality 0.5, test build
-v0.18.3-90-gbbca39a6 (the fix on, as now shipped). Parallel projection (PP) OFF:
-"It works! No projection issues." His log locates the eyes at ±10.00° and hands
-them to Elite in its handedness; recommended size 5016x3160 (8268x3948 with PP
-on). FSR, PP on -> off: station 55.5 -> 81.4 fps (GPU 15.9 -> 11.0 ms, -31%),
-space near a star 77.0 -> 89.1 fps (GPU 10.8 -> 9.6 ms), planet 62.5 -> 84.9 fps
-(GPU 13.7 -> 10.0 ms, -27%). Side finding, not this fix: with PP ON at FOV Wide
-the 8268-wide eye is refused by DLSS (0xBAD00005, all-zero mode ranges) and EDVR
-falls back to its own history at half size, a blurry image; PP off (5016 wide)
-runs DLSS normally. A DLSS output ceiling is a separate task. Open side
-question: EDVR's temporal AA and FSS under a real cant (FSS guards itself off).
-
-**PP left on (2026-10-10, logs + source read).** The runtime applies PP, not EDVR:
-the PP-on log locates eye 0 at 0° with L/R/up 80.1/41.6/57.8° (70.1/51.6/51.8° at
--10° with PP off). PimaxXR latches PP at `xrGetSystem` from the machine-global pvr
-`steamvr_use_native_fov`, overridable only by the equally global
-`HKLM\SOFTWARE\PimaxXR\force_parallel_projection_state` (system.cpp:326-331); no
-per-app path, no extension. Pimax Play's own runtime reads neither (disassembly of
-PiOpenXR_64.dll, unverified) and looks to apply PP to every canted headset.
-- **Ruled out:** EDVR undoing PP itself, because under PP the native cant and
-  vertical FOV are not exposed, and both overrides change every other game.
-- **Notice BUILT, NOT FLOWN** (`parallel_projection_notice.h`; behaviour, no key):
-  a canted Pimax model (system name: 8K X, 8K Plus, 8K, 5K Super, 5K Plus, 5K XR,
-  Artisan) whose located eyes are under 0.5° apart. The openxr log says so once a
-  session (`canted eyes: parallel projection is on: ...`; `... is off: ...` is the
-  good state, so a silent log means the feature never ran). On PimaxXR, which
-  honours the toggle, a toast and the Status page's hint say it too; on any other
-  runtime the log line says the toggle is unverified and the user is told nothing.
-  The README says it in the headset setup. To fly: one PP-on and one PP-off session.
-- **Next:** ask Houndmux which runtime his other canted games run on; find out
-  whether Pimax Play's runtime honours the toggle (if so, it gets the notice too).
+**Capture findings:** both eyes have valid bound camera rows, but their paired
+`cameraR` is identical; runtime `headR` differs slightly. The raw stars prove
+that this shared world basis is wrong for LEFT. Opposite-eye provenance is
+inferred from field geometry; no owner for the selected scene rows is traced.
+Elite 332841 disassembly traces eye transforms to its camera setter, but not
+that setter to the float-932 scene block. `headR` motion remains only 0.0037°
+RMS against the large ship motion.
+- **Ruled out:** TCAM D matrices as per-eye camera ground truth in run 224449,
+  because they are identical across eyes and jump 90–180° between adjacent
+  frames while selected S stays smooth; some D is previous-frame S. `df=9F`
+  marks the same resource, not the same write or rows.
+- SKY ring retained 2048 eye-frames per dump, but had 0 camera-row events and
+  0 per-eye SKY lines; SKYSEC combines both eyes and cannot measure asymmetry.
+  Exposure sharing added 0 fallbacks near the capture. FinalCrisp shows the
+  left streak/dimming while the right image is sharp. Raw pixels now establish
+  a shared-world-basis error for LEFT; implementation is built and awaits flight.
+- **Next:** one PP-off DLSS K pitch flight on the same 8KX/PimaxXR setup. Confirm
+  first-draw source-eye mapping and corrected left stars; inspect the basis log
+  counts. FSR/XeSS flights can follow if useful. No new key or eye-folder upload.
 
 ## What OpenVR says about a canted headset
 
@@ -507,3 +493,109 @@ checkerboard hints, each of the three taking its turn). Rig:
 0/0.4/0.49/0.51/0.6/20 degrees, invalid input, the verdict table, the words, the hint
 slot, the host on a fixture, the wiring as source pins) and `native_menu_test` (the
 eye-pose accessor).
+
+## 2026-10-16 — reported left-eye faint-star dimming on pitch
+
+Screenshots show left faint-star dimming during pitch; the report says
+DLSS/FSR/XeSS reproduce it while AA-off/TAA is fine. Log time is close, but no
+frame-to-image link exists. Its clean `v0.20.0-rc.2` tag resolves to
+`f2b99bdf27d5227f2fb43df765575e1a76016f65`; `6AD165AB` is the PE link
+timestamp. Rig: Pimax 8K X/PimaxXR, PP off, 20° between eyes, RTX 4090, 90 Hz,
+1869x1580 input and 3738x3160 output. DLSS K active; DLSS runtime version unknown.
+
+Projection matching (measured asymmetric intrinsics, 20° cant) found 267 still
+stars, median residual 1.29 px, and 198 pitching pairs, 1.58 px. Background-
+subtracted aperture flux ratio (right/left): 0.945 still (95% CI 0.885–1.005),
+3.996 pitching (3.30–4.77); 99 bright both-eye pairs give 3.46. This confirms
+asymmetry, not its cause.
+
+**H-basis hypothesis:** rc.2 builds shared world-camera `worldDelta`; reusing
+right-eye basis for left could explain pitch/roll; yaw is weaker because it may
+commute with cant. Native per-eye `eyeDelta` is correct, but selected basis and
+star rows are unknown. Alternatives: raw star/depth asymmetry or temporal
+history rejection. At 20:58:44.875 camera `changed_picks=0`; at 20:58:05.552
+there were 10,620 history gaps, 9,739 in burst frames, and motion-pixel counts
+were unavailable. Sky ring did not run. Exposure sharing had zero 30-second
+fallbacks at 20:58:22 and :52; this does not rule out every exposure effect.
+
+First seek screenshot-session `edvr_logs\eyes\eye_*_motion.csv` and its capture
+folder; the normal zip omits them. If absent, request one PP-off, DLSS K capture:
+hold a space scene still, then pitch. Set `diag.sky_ring=on`; Pause
+(`hotkey.dump_camera`) records TCAM history/sky buckets. During pitch, “Dump both
+eyes as seen” (`hotkey.dump_eyes` if configured) saves `motion.csv` and
+raw/treated frames. Collect both logs and the emitted eye folder/pool. Compare
+same-eye TCAM D deltas with `cameraR` and per-eye `headR`, then raw/treated stars.
+SKY is sparse; per-frame rows follow detected events only. Support H-basis only
+if mismatch tracks the dark left eye; reject if `cameraR` agrees in both eyes
+during pitch and raw left stars are dim. No new key or build is needed.
+
+### 2026-10-16 capture 224449
+
+The gfx and OpenXR logs report clean `v0.20.0-rc.2` (gfx PE build `6AD165AB`).
+`--expect-build HEAD` accepts the longer descendant version at version level;
+this is not an exact HEAD build. OpenXR confirms PimaxXR,
+Pimax Vision 8K X, PP off, 20° between eyes, 90 Hz; input is 1869x1579 and output
+3738x3158. All 16 eye-metadata frames 20376–20391 report DLSS success/history,
+no reset.
+
+Pause dumps at 22:44:50.051 and 22:44:58.627 each cover 4096 eye calls and
+report 0 camera-row events in 2048 frames. TCAM is available for both eyes in
+the latest 16 frames; `df=9F` means same resource, not same write or rows. The
+TCAM D matrices are identical across eyes and jump 90–180° between adjacent
+frames while selected S stays smooth; some D equals the previous-frame S.
+- **Ruled out:** TCAM D matrices as per-eye camera ground truth in run 224449,
+  because they are identical across eyes and jump 90–180° between adjacent
+  frames while selected S stays smooth; some D is previous-frame S.
+
+`cameraR` reconstructed from S agrees within 1e-7, proving the field is shared.
+The raw-star fits below prove this shared world basis is wrong for LEFT.
+Runtime `headR` has the correct 20° conjugation, but head turn is only 0.0037°
+RMS against large ship motion. SKY rings retain 2048 eye-frames each, with 0
+events and 0 per-eye SKY lines; SKYSEC combines eyes. Its final-bin motion rises
+to 73–79, while raw/out remains about 0.92. Exposure sharing adds 0 fallbacks
+near capture (2 cumulative, both earlier). FinalCrisp shows visible left
+streak/dimming against a sharp right image.
+
+The provenance audit found no eye assignment for the selected scene rows.
+Elite 332841 disassembly traces the eye transform to the camera setter, but
+does not trace the setter to the float-932 scene block. Draw-time per-eye
+constants are separate evidence. Opposite-eye provenance remains an inference
+from field geometry, not a traced owner.
+
+The exact raw left crops `eye_224449_C00.bmp`, `eye_224449_C02.bmp`, and
+`eye_224449_C15.bmp` were supplied and verified as 1400px crops from the
+1869x1579 input, origin 23489. Their motion fit is recorded next.
+
+### 2026-10-16 — raw-pixel star motion fit
+
+On Pimax Vision 8K X / PimaxXR, PP off, 20° eye cant, 90 Hz, DLSS K (runtime
+version unknown; tiny head motion), C00↔C02 gives 137 free-homography inliers.
+With shared world `cameraR`, residual is median 5.045 / RMS 5.123 input pixels;
+applying Y(-20) to the world and Y(+20) to the view gives 0.326 / 0.359. Free H
+gives 0.312px median; free Kabsch polar-rotation gap is 0.487° for shared vs
+0.0043° corrected. Fixed-yaw bootstrap 95% CI is -20.20° to -19.87° for the
+Y(-20) world / Y(+20) view definition.
+
+C15 was matched image-only: a two-star similarity seed, 34 central-tile
+projective RANSAC seeds, then 123 full-sky inliers. C15↔C02 all-candidate 1px
+counts are 120 for selected -20° and 0 for shared or +20°; on 123 matched
+stars, shared residual is 28.211 / 30.233px median/RMS vs 0.318 / 0.416px
+corrected. Head-center ±10 candidates are worse. Frustum XY-shift optimization
+remains 2.48 / 14.64px RMS vs 0.36 / 0.42px corrected; ≤1px jitter cannot
+explain the measured displacement. **Ruled out:** unchanged frustum-center or
+jitter-offset error as explanation of measured star displacement, because its
+optimized residuals remain far above the corrected shared-world fit.
+
+The result establishes a shared-world-basis error for LEFT from field
+geometry; opposite-eye provenance is inferred, not traced to an owner. The
+fix tags only the exact DSV source eye and converts the full selected pose from
+known source E to each E with handedness, preserving original motion,
+unknown/carry behavior, and the parallel-projection bit. It is built, not flown.
+The temporary basis instrument logs `temporal canted world 30s:` with
+`left_examined`, `right_examined`, `left_converted`, `right_converted`,
+`right_to_left`, `left_to_right`, `geometry`, `mapped`, `unknown_eye`, and
+`source_switch`. First-draw DSV mapping still needs in-headset confirmation.
+Next flight: same 8KX/PimaxXR, PP-off DLSS K pitch. Pass requires
+`left_converted` and `right_to_left` above zero with no left dimming/streaking.
+Collect logs only initially; no large eye-folder upload. The basis instrument
+is temporary while this arc remains open; no new config key.

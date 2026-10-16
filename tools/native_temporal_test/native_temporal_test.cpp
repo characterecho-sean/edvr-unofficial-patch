@@ -30,7 +30,8 @@ bool closeFloat(float a,float b,float epsilon=1e-5f){return std::fabs(a-b)<=epsi
 struct Call {
   unsigned eye=0,flags=0,outW=0,outH=0;float jx=0,jy=0,nearZ=0,farZ=0,headDeg=0;
   float delta[9]{},translation[3]{},swapped[3]{},tanPrev[4]{},tanNow[4]{};
-  bool motion=false,head=false;float previousHead[12]{},currentHead[12]{},offset[3]{};
+  bool motion=false,head=false,eyes=false;float previousHead[12]{},currentHead[12]{},offset[3]{};
+  float previousEyes[2][12]{},currentEyes[2][12]{};
 };
 Call note;std::vector<Call> calls;bool passSucceeds=true;
 // P1-1 (review 2026-09-23): the pass runs INSIDE treat(), which holds the
@@ -52,6 +53,13 @@ void askFromInsideTreat(){
 extern "C" void edvrTemporalAaNoteHead(int eye,const float* previous,const float* current,const float* offset) {
   note={};note.eye=unsigned(eye);note.head=previous&&current&&offset;
   if(note.head){std::memcpy(note.previousHead,previous,48);std::memcpy(note.currentHead,current,48);std::memcpy(note.offset,offset,12);}
+}
+namespace edvr {
+void temporalPassNoteEyes(int, const float (*previous)[12], const float (*current)[12]) {
+  note.eyes=previous&&current;
+  if(note.eyes){std::memcpy(note.previousEyes,previous,sizeof(note.previousEyes));
+                std::memcpy(note.currentEyes,current,sizeof(note.currentEyes));}
+}
 }
 extern "C" void* edvrTemporalAa(void* source,int eye,const float*,const float* now,const float* previous,
     float jx,float jy,const float* delta,const float* translation,const float* swapped,float nearZ,float farZ,
@@ -308,7 +316,7 @@ void run(){
   check(!reentryJitter&&!reentryWarm&&!reentryGeometry,"...and the readers that take the lock (the eye geometry the VR camera census reads included) answer no there instead of throwing");
   {uint32_t rw=0,rh=0;check(edvr::nativeTemporalRecommended(&rw,&rh)&&rw==480&&rh==360,"the recommendation outside treat");}
   {uint32_t aw=1,ah=1;check(!edvr::nativeTemporalAsked(&aw,&ah),"no ask when the host does not say (the recommendation is the answer)");}
-  check(calls.back().flags&1,"first history reset");check(!calls.back().head,"first frame has no invented head pair");
+  check(calls.back().flags&1,"first history reset");check(!calls.back().head&&!calls.back().eyes,"first frame has no invented head or eye pair");
   {float tu=1,td=1;check(!edvr::nativeTemporalTrueVerticalTangents(&tu,&td),"no true frustum when the host does not say");}
   f=frame(11,2);f.head[3]=.1f;f.askedWidth=384;f.askedHeight=441;f.trueUp=1.2648f;f.trueDown=-1.2648f;p=begin(t,f);t.noteProjection(t.context,2,0,.1f,1000);
   {uint32_t aw=0,ah=0,rw=0,rh=0;
@@ -342,6 +350,9 @@ void run(){
   check(uiLayerSubmits>=3&&uiLayerSubmitted[0]==source.Get()&&uiLayerSubmitted[1]==source.Get(),"the game's submitted texture is noted per eye for the UI layer's eye check");
   check(std::fabs(c.jx)>.01f||std::fabs(c.jy)>.01f,"known-size jitter engaged");
   check(c.head&&closeFloat(c.offset[0],-.032f)&&closeFloat(c.currentHead[3],.1f)&&closeFloat(c.previousHead[3],0),"world path receives exact head pair and eye offset");
+  check(c.eyes&&closeFloat(c.previousEyes[0][3],-.032f)&&closeFloat(c.previousEyes[1][3],.032f)&&
+        closeFloat(c.currentEyes[0][3],-.032f)&&closeFloat(c.currentEyes[1][3],.032f),
+        "world path receives both previous and current raw eye matrices in eye order");
   check(c.motion&&closeFloat(c.translation[0],.1f)&&closeFloat(c.swapped[0],.1f)&&closeFloat(c.delta[0],1),"pure translation expected reprojection");
   check(closeFloat(c.nearZ,.025f)&&closeFloat(c.farZ,50000),"smallest near retains its paired far");check(!(c.flags&1),"continuous history");
   check(treat(t,2,1,source.Get())==S_OK,"second right");check(closeFloat(calls.back().jx,c.jx)&&closeFloat(calls.back().jy,c.jy),"asymmetric eyes share pixel phase");
@@ -352,7 +363,7 @@ void run(){
   {uint32_t rw=0,rh=0;float u=0,dn=0;check(!edvr::nativeTemporalRecommended(&rw,&rh)&&!edvr::nativeTemporalVerticalTangents(&u,&dn)&&!edvr::nativeTemporalAsked(&rw,&rh)&&!edvr::nativeTemporalTrueVerticalTangents(&u,&dn),"no recommendation, frustum, ask or true frustum once the channel is invalidated");}
   {uint64_t es=0;float fr[4]{},sh[2]{};check(!edvr::nativeTemporalEyeGeometry(0,&es,fr,sh),"no eye geometry once the channel is invalidated");}
   f=frame(11,6);p=begin(t,f);auto larger=d.texture(640,480);check(treat(t,6,0,larger.Get())==S_OK,"resize treatment");c=calls.back();
-  check(c.flags&1,"resize reset");check(closeFloat(c.jx,-p.tangentShift[0][0]*640/1.9f),"resize converts jitter to actual pixels");
+  check((c.flags&1)&&!c.eyes,"resize reset clears the previous eye geometry");check(closeFloat(c.jx,-p.tangentShift[0][0]*640/1.9f),"resize converts jitter to actual pixels");
   Device other;auto foreign=other.texture();check(treat(t,6,1,foreign.Get())==E_INVALIDARG,"wrong device rejected");
   const float invalid[]={-.1f,0,1,1};check(treat(t,6,1,source.Get(),invalid)==E_INVALIDARG,"invalid bounds rejected");
   HRESULT wrong=E_FAIL;std::thread worker([&]{ID3D11Texture2D* out=nullptr;float box[4]{};wrong=t.treatEye(t.context,6,1,source.Get(),nullptr,&out,box);});worker.join();check(wrong==E_INVALIDARG,"wrong GPU thread rejected");
@@ -373,6 +384,9 @@ void run(){
   f=frame(12,3);f.head[3]=1;begin(fresh,f);check(treat(fresh,3,0,source.Get())==S_OK,"changed eye transform");c=calls.back();
   check(closeFloat(c.delta[0],0)&&closeFloat(c.delta[2],-1)&&closeFloat(c.delta[6],1)&&closeFloat(c.delta[8],0),"changing cant composes both eye rotations");
   check(closeFloat(c.translation[0],0)&&closeFloat(c.translation[2],1)&&closeFloat(c.headDeg,0),"translation in previous canted eye frame");
+  check(c.eyes&&closeFloat(c.previousEyes[0][2],1)&&closeFloat(c.previousEyes[0][8],-1)&&
+        closeFloat(c.currentEyes[0][0],1)&&closeFloat(c.previousEyes[1][3],.032f),
+        "the canted eye matrix comes from prior history while the other eye keeps its own index");
   edvr::Config::get().set("fix.temporal_aa","off");check(treat(fresh,3,1,source.Get())==S_OK,"current pair freezes AA setting");
   f=frame(12,4);p=begin(fresh,f);const auto before=dumps;check(treat(fresh,4,0,source.Get())==S_FALSE&&dumps==before+1,"next frame AA off captures untreated eyes");check(p.tangentShift[0][0]==0,"AA off zeros jitter");check(fresh.close(fresh.context)==S_OK,"fresh close");
   auto dlss=acquire(d,13,"dlss");f=frame(13,1);begin(dlss,f);check(treat(dlss,1,0,source.Get())==S_OK,"DLSS call");c=calls.back();check(c.outW==480&&c.outH==360&&(c.flags&2),"DLSS requests recommended size");

@@ -653,7 +653,7 @@ bool mixedScene(const Harness& h, std::string* why) {
             e.gameSetPs(e.overlayPs.Get(), overlayPsHash);
             g.ctx->OMSetDepthStencilState(e.overlayDepth.Get(), 5);
             e.producer(what, true);
-            e.expectGame((std::string("after ") + what + ": the game's t3 is back").c_str());
+            // (the lazy guard keeps the group's private t3 bound after the draw: the game's comes back at the next draw that is not one of the group, or the first hooked call, which this scene checks)
         };
         e.startFrame();
         underlay("an underlay producer");
@@ -799,19 +799,26 @@ inline OverlayCounts overlaySequence(const Harness& h, bool lazy, bool trustOff 
         g.ctx->OMSetDepthStencilState(g.depthState.Get(), 0);
         e.producer("overlay sequence: an underlay draw");
     };
-    auto overlay = [&] {
-        g.ctx->VSSetShader(e.overlayVs.Get(), nullptr, 0);
-        g.shadow(BindSlot::Vs, e.overlayVs.Get(), overlayVsHash);
-        e.exp.vs = e.overlayVs.Get();
-        e.gameSetPs(e.overlayPs.Get(), overlayPsHash);
-        g.ctx->OMSetDepthStencilState(e.overlayDepth.Get(), 5);
+    // setState false: a guarded draw of the same pair issued with nothing rebound, so the draw takes the cache's fast path (what a run of guarded
+    // draws is when the game does not set its shaders between them).
+    auto overlay = [&](bool setState = true) {
+        if (setState) {
+            g.ctx->VSSetShader(e.overlayVs.Get(), nullptr, 0);
+            g.shadow(BindSlot::Vs, e.overlayVs.Get(), overlayVsHash);
+            e.exp.vs = e.overlayVs.Get();
+            e.gameSetPs(e.overlayPs.Get(), overlayPsHash);
+            g.ctx->OMSetDepthStencilState(e.overlayDepth.Get(), 5);
+        }
         const unsigned long long before = g_rec.total();
         e.producer("overlay sequence: an overlay draw", true);
         c.guardedCalls += g_rec.total() - before;
         c.perRun.push_back(g_rec.total() - before);
         ++c.guardedRuns;
-        e.expectGame("overlay sequence: after a guarded draw every piece of the game's state is back, t3 included");
+        // Eager (the lazy form off): every draw restores after itself. Lazy: the group's private t3 stays bound; the next draw that is not one of the
+        // group, or the first hooked call, gives the game's back (the sequence below ends every group with one, and the Present).
+        if (!lazy) e.expectGame("overlay sequence: after a guarded draw every piece of the game's state is back, t3 included");
     };
+    auto groupEnd = [&](const char* what) { if (lazy) e.action(FlatSubstEvent::kOtherDraw, what); };
     e.warmUp();
     const size_t mark = lifecycle_fake::g_log.size();
     e.startFrame();
@@ -852,12 +859,24 @@ inline OverlayCounts overlaySequence(const Harness& h, bool lazy, bool trustOff 
     underlay(); overlay();
     e.gameSetT3(secondT3.Get());
     overlay();
+    groupEnd("overlay sequence: after a t3 rebind between two guarded draws the game's NEW t3 is what comes back");
     e.gameBindTargets();
     overlay();
     g.shadow(BindSlot::Rtv0, g.sourceRtv[0].Get());   // only RTV0 moves (the shadow's once-a-frame bump, a set that kept the targets)
     overlay();
     g.shadow(BindSlot::Dsv0, g.sourceDsv.Get());      // only DSV0 moves
     overlay();
+    groupEnd("overlay sequence: a group ends with the game's t3 back");
+    // The cache's fast path: guarded draws with nothing rebound (the lazy form keeps the private t3 bound across them), and the game setting t3
+    // between two of them must still reach the slow half, or the next draw would run with the game's t3 under the guarded shader.
+    e.startFrame();
+    underlay(); overlay();
+    overlay(false);
+    overlay(false);
+    e.gameSetT3(secondT3.Get());
+    overlay(false);
+    overlay(false);
+    groupEnd("overlay sequence: the fast path's group ends with the game's newest t3 back");
     e.present();
     g.endFrame(true);
     const std::string line = lifecycle_tests::lastLine("engine motion: flat overlay guard:", mark);
@@ -1276,12 +1295,46 @@ inline void run(const Harness& h) {
     {
         const OverlayCounts eager = overlaySequence(h, false);
         const OverlayCounts lazy = overlaySequence(h, true);
-        // The overlay guard's verification, remembered (engine_velocity.cpp, GuardVerified): the same sequence with the guard reading the context on
-        // every draw, as it did, and with the verification remembered while nothing it depends on has moved. Identical pixels, fewer D3D calls.
+        std::printf("  flat lazy: overlay guard counters: eager guarded %llu of %llu runs, declined %llu; lazy guarded %llu of %llu, declined %llu, copies %llu/%llu\n",
+                    eager.guarded, eager.guardedRuns, eager.declined, lazy.guarded, lazy.guardedRuns, lazy.declined, eager.copies, lazy.copies);
+        h.check(eager.guarded == lazy.guarded && eager.guarded == eager.guardedRuns && eager.declined == 0,
+                "flat lazy: the overlay sequence guards every one of its guarded draws in both forms and declines none");
+        h.check(lazy.copies == eager.copies && lazy.declined == eager.declined,
+                "flat lazy: and with the lazy form the snapshot copies and declines are the same: no group was declined for a state left bound");
+        // THE LAZY GUARD (engine_velocity.cpp, round 4): the group's private t3 stays bound across its draws, and goes back with the rest of the run's
+        // state. Byte-identical game targets and slot target to the form that restores after every draw; fewer D3D calls on the guarded draws.
+        std::printf("  flat lazy: lazy overlay guard, %llu guarded draws: %llu D3D calls (%.2f a draw) restoring after every draw, %llu (%.2f a draw) kept bound\n",
+                    lazy.guardedRuns, eager.guardedCalls, double(eager.guardedCalls) / double(eager.guardedRuns), lazy.guardedCalls,
+                    double(lazy.guardedCalls) / double(lazy.guardedRuns));
+        for (int pass = 0; pass < 2; ++pass) {
+            const OverlayCounts& o = pass ? lazy : eager;
+            std::printf("    %s, calls a guarded draw:", pass ? "lazy" : "eager");
+            for (unsigned long long n : o.perRun) std::printf(" %llu", n);
+            std::printf("\n");
+        }
+        h.check(eager.pixelsHash != 0 && eager.pixelsHash == lazy.pixelsHash,
+                "guard G4: the lazy overlay guard draws byte-identical game targets and slot target to the form that restores after every draw");
+        h.check(lazy.guardedCalls < eager.guardedCalls && lazy.perRun.size() == eager.perRun.size(),
+                "guard G5: and a group's guarded draws cost fewer D3D calls kept bound than restoring after each");
+        // The cache's fast path draws (nothing rebound between them) cost the wrapper nothing. The sequence's last frame is: a first guarded draw, two
+        // issued with nothing rebound, the game sets t3, a guarded draw that must re-bind the private one (the cache's t3 generation sends it to
+        // the slow half), and one more with nothing rebound. The last five entries.
         {
-            const OverlayCounts viaGets = overlaySequence(h, true, true);
-            const OverlayCounts viaMemo = overlaySequence(h, true, false);
-            std::printf("  flat lazy: overlay guard, %llu guarded draws: %llu D3D calls reading the context every draw (%.2f a run), %llu with the verification remembered (%.2f a run)\n",
+            const size_t n = lazy.perRun.size();
+            h.check(n >= 6 && lazy.perRun[n - 4] == 0 && lazy.perRun[n - 3] == 0 && lazy.perRun[n - 2] > 0 && lazy.perRun[n - 1] == 0,
+                    "guard G5: a guarded draw with nothing rebound since the last costs no D3D call; the first after the game set t3 re-binds the private one");
+            // The second guarded draw of a group (index 1: both set their shaders, so both take the slow half) binds nothing, flushes nothing and copies
+            // nothing: the depth-state read and little else. Restoring after each draw, or flushing at every overlay draw, would cost ten.
+            h.check(lazy.perRun.size() > 1 && lazy.perRun[1] <= 4 && eager.perRun[1] >= 10,
+                    "guard G5: the second guarded draw of a group costs at most 4 D3D calls kept bound, against ten restoring after each draw");
+        }
+        // The overlay guard's verification, remembered (engine_velocity.cpp, GuardVerified): the form that restores after every draw uses it on each
+        // draw. The same sequence with the guard reading the context on every draw, as it did, and with the verification remembered while nothing it
+        // depends on has moved. Identical pixels, fewer D3D calls.
+        {
+            const OverlayCounts viaGets = overlaySequence(h, false, true);
+            const OverlayCounts viaMemo = overlaySequence(h, false, false);
+            std::printf("  flat lazy: overlay guard verification, %llu guarded draws restoring after each: %llu D3D calls reading the context every draw (%.2f a run), %llu with the verification remembered (%.2f a run)\n",
                         viaMemo.guardedRuns, viaGets.guardedCalls, double(viaGets.guardedCalls) / double(viaGets.guardedRuns),
                         viaMemo.guardedCalls, double(viaMemo.guardedCalls) / double(viaMemo.guardedRuns));
             for (int pass = 0; pass < 2; ++pass) {
@@ -1290,22 +1343,19 @@ inline void run(const Harness& h) {
                 for (unsigned long long n : o.perRun) std::printf(" %llu", n);
                 std::printf("\n");
             }
-            h.check(viaGets.guardedRuns == 9 && viaMemo.guardedRuns == 9 && viaGets.pixelsHash != 0 && viaGets.pixelsHash == viaMemo.pixelsHash,
+            h.check(viaGets.guardedRuns == viaMemo.guardedRuns && viaGets.pixelsHash != 0 && viaGets.pixelsHash == viaMemo.pixelsHash,
                     "guard G3: the guarded overlay sequence draws byte-identical game targets and slot target with the verification remembered");
-            // Draws 2 and 3 of the sequence follow a verified one with t3, RTV0 and DSV0 unmoved: they skip all three reads. The others read the
-            // context once (the game's t3 and the bound read, which prove it) and skip the restore's.
-            bool shape = viaGets.perRun.size() == 9 && viaMemo.perRun.size() == 9;
-            for (size_t i = 0; shape && i < 9; ++i) shape = viaGets.perRun[i] - viaMemo.perRun[i] == (i == 1 || i == 2 ? 3u : 1u);
-            h.check(shape && viaGets.guardedCalls - viaMemo.guardedCalls == 13,
-                    "guard G2: and costs 3 D3D calls fewer on a guarded draw that follows an unmoved verified one (the game's t3 read, the bound read, the restore's), 1 fewer on the rest");
-            // A fail-before for the memo's inputs: a game t3 rebind and a target rebind between guarded draws are in the sequence above, and each
-            // guarded draw is followed by expectGame, which holds t3 to what the game last set. The mutants (mutants.py) remove one input each.
+            // The draws that follow a verified one with t3, RTV0 and DSV0 unmoved are indexes 1, 2 (frame 1), 10, 11 and 13 (the last frame: the
+            // second of the group, the one after the underlay, and so on; 12 follows the game's t3 set): they skip all three reads. The rest read
+            // the context once to prove the set and skip the restore's read.
+            bool shape = viaGets.perRun.size() == 14 && viaMemo.perRun.size() == 14;
+            for (size_t i = 0; shape && i < 14; ++i)
+                shape = viaGets.perRun[i] - viaMemo.perRun[i] == (i == 1 || i == 2 || i == 10 || i == 11 || i == 13 ? 3u : 1u);
+            h.check(shape && viaMemo.guardedCalls < viaGets.guardedCalls,
+                    "guard G2: a guarded draw that follows an unmoved verified one costs 3 D3D calls fewer (the game's t3 read, the bound read, the restore's), the rest 1 fewer");
             h.check(viaMemo.copies == viaGets.copies && viaMemo.guarded == viaGets.guarded && viaMemo.declined == viaGets.declined,
                     "flat lazy: and the overlay counters do not move");
         }
-        h.check(eager.guarded == 9 && eager.declined == 0, "flat lazy: the overlay sequence, every draw restoring after itself, guards nine draws and declines none");
-        h.check(lazy.copies == eager.copies && lazy.guarded == eager.guarded && lazy.declined == eager.declined,
-                "flat lazy: and with the lazy form the overlay counters are the same: no group was declined for a state left bound");
     }
 
     // The lazy form off (a diagnostic capture armed): every producer draw restores after itself.
@@ -1369,6 +1419,56 @@ inline void run(const Harness& h) {
                 "flat lazy: and that the game's state went back three times: another draw, a targets-keeping set, the present");
         edvr::engineVelocityShutdown();
         g.ctx->ClearState();
+    }
+    // The census's pool-family section is timed per RUN of kept-bound substituted draws, not per draw (gpu_census.h, RUN sections): a span around
+    // every draw, summed per frame, read 14.9, 17.1 and 25.9 ms of a 14.2 ms frame at a constant 8.6k draws a frame. Here every Begin the stub
+    // is asked is "timed", so the Ends count the spans: one per run, the draws counted as issued calls, an abandon leaves its span to the poll.
+    {
+        namespace lf = lifecycle_fake;
+        const unsigned sec = static_cast<unsigned>(edvr::GpuCensusSection::AlteredPoolFamily);
+        auto scene = [&](bool lazy, const std::function<void(Emu<>&)>& body, unsigned* begins, unsigned* ends, unsigned* issued) {
+            Game g(h);
+            g.setup();
+            SceneCleanup cleanup(g.ctx);
+            for (auto& s : lifecycle_fake::g_slots) { s.ptr = nullptr; s.hash = 0; ++s.gen; }
+            edvr::engineVelocityConfigure(true);
+            edvr::engineVelocityFlatLazy(lazy);
+            g.makeSource(40, 24);
+            Emu<> e(h, g);
+            e.warmUp();
+            e.startFrame();
+            lf::g_censusTimeEveryCall = true;
+            const unsigned b0 = lf::g_censusBegins[sec], e0 = lf::g_censusEnds[sec], i0 = lf::g_censusIssued[sec];
+            body(e);
+            *begins = lf::g_censusBegins[sec] - b0;
+            *ends = lf::g_censusEnds[sec] - e0;
+            *issued = lf::g_censusIssued[sec] - i0;
+            lf::g_censusTimeEveryCall = false;
+            edvr::engineVelocityShutdown();
+            g.ctx->ClearState();
+        };
+        unsigned b = 0, en = 0, is = 0;
+        scene(true, [](Emu<>& e) {
+            for (int i = 0; i < 5; ++i) e.producer("run span: a draw of a run");
+            e.otherDraw("run span: a draw that is not a producer ends the run");
+            for (int i = 0; i < 3; ++i) e.producer("run span: a draw of the next run");
+            e.present();
+        }, &b, &en, &is);
+        h.check(b == 2 && en == 2 && is == 8, "flat lazy: two runs of kept-bound draws (5 and 3) are two GPU spans, not eight, and the eight draws are counted as issued calls");
+        scene(false, [](Emu<>& e) {
+            for (int i = 0; i < 4; ++i) e.producer("run span: an eager draw");
+            e.present();
+        }, &b, &en, &is);
+        h.check(b == 4 && en == 4 && is == 4, "flat lazy: without the lazy form every draw is its own run: four spans for four draws");
+        scene(true, [](Emu<>& e) {
+            e.producer("run span: a draw before ClearState");
+            e.producer("run span: its second");
+            e.clearState();
+            e.restartPass();
+            e.producer("run span: a draw after ClearState starts a new run");
+            e.present();
+        }, &b, &en, &is);
+        h.check(b == 2 && en == 1 && is == 3, "flat lazy: a ClearState forgets the open run (its span is left to the poll, no End on a context that lost its state) and the next draw starts a new one");
     }
     recRemove();
     edvr::g_runtimeProfile = edvr::RuntimeProfile::LegacyVr;

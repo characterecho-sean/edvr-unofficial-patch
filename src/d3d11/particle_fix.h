@@ -50,13 +50,14 @@ extern bool g_normalSpaceDustHidden;
 // (particle_fix.cpp static_asserts the two lists agree).
 inline constexpr uint64_t kParticleVariantVs[2] = {0xEB787F983BC1F5A3ull,
                                                    0x6041FD2D3D0164E1ull};
-// Every camera-facing billboard vertex shader the fix acts on: the two transcriptions first, then the sixteen whose
-// rows [277]/[278] are rolled out at vertex slot 1 (billboard_rollfree.h; the list and why each is safe are in
+// Every camera-facing billboard vertex shader the fix acts on: the seven with a transcription first (the plume, the
+// flare and the five explosion shaders, which face the viewer), then the eleven whose rows [277]/[278] are rolled
+// out at vertex slot 1 (billboard_rollfree.h; the list and why each is safe are in
 // docs/billboard-root-cause-2026-10-16.md). particle_fix.cpp static_asserts its own tables against this one.
 inline constexpr uint64_t kBillboardVs[18] = {
-    0xEB787F983BC1F5A3ull, 0x6041FD2D3D0164E1ull,
-    0x9AEC596A2B036EA6ull, 0xAFBCD3ADB9092F78ull, 0xBBAD1CA808E1E292ull, 0x1B285CBC9F185D4Dull,
-    0x4BDE4DBF88C2BA27ull, 0x78F5F08D02EE38CCull, 0x9F4BBCFCD3B68BC9ull, 0x1FBA99C4911D7ACFull,
+    0xEB787F983BC1F5A3ull, 0x6041FD2D3D0164E1ull, 0x9F4BBCFCD3B68BC9ull, 0xBBAD1CA808E1E292ull, 0x9AEC596A2B036EA6ull,
+    0xAFBCD3ADB9092F78ull, 0x4BDE4DBF88C2BA27ull,
+    0x1B285CBC9F185D4Dull, 0x78F5F08D02EE38CCull, 0x1FBA99C4911D7ACFull,
     0x2BF557356A28AA0Dull, 0xDB113566B6A59C5Bull, 0x68DDDEF04D9894AFull, 0xF7A6E916F14A3B1Aull,
     0x12382D2EA45E9632ull, 0x94EA991C3A03DBD9ull, 0xC31238331D8AC3D4ull, 0xF1502353BE051A2Dull};
 // A 64-bit filter over bits 8..13 of the hash, so the per-draw test is one shift and one compare for nearly every draw.

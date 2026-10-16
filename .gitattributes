@@ -12,6 +12,7 @@
 *.cpp text eol=lf
 *.h text eol=lf
 *.py text eol=lf
+*.sh text eol=lf
 
 # Test fixtures are split on "\n" and merged line by line by the self-tests, so
 # a CRLF checkout leaves stray \r mid-line (issue 64).

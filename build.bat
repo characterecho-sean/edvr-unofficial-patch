@@ -203,6 +203,7 @@ python tools\run_jobs.py ^
     --gate "tools\fetch_xess.py --self-test" ^
     --gate "tools\gen_installer_rc.py --self-test" ^
     --gate "tools\package_native.py --self-test" ^
+    --gate "tools\install_proton.py --self-test" ^
     --gate "tools\build_diff.py --self-test" ^
     --gate "tools\build_receipt.py --self-test" ^
     --gate "tools\build_lock.py --self-test" ^
@@ -1496,6 +1497,9 @@ REM and --dry-run writes nothing at all.
 "%BUILD%\flat_temporal_test.exe" --write-fixture "%OBJ%\flattemporaltest\never_written.log" --dry-run || exit /b 1
 if exist "%OBJ%\flattemporaltest\never_written.log" ( echo [edvr] ERROR: flat_temporal_test --write-fixture --dry-run wrote a file & exit /b 1 )
 "%BUILD%\flat_temporal_test.exe" --self-test || exit /b 1
+REM The offscreen fast path's mutation list (src\d3d11\flat_offscreen_fast.h, flat_offscreen_counts.h) is held to the headers as they are; --run builds the standalone
+REM driver (tools\flat_temporal_test\flat_offscreen_test.cpp) against each edit and requires the case that owns the rule to fail.
+python "tools\flat_temporal_test\offscreen_mutants.py" --self-test || exit /b 1
 exit /b 0
 
 :rig_vr_world_route_test
@@ -3607,6 +3611,23 @@ if errorlevel 1 ( echo [edvr] ERROR: billboard rollfree test build failed & exit
 "%OBJ%\billboardrollfree\billboard_rollfree_test.exe" --self-test "%ROOT%" || exit /b 1
 exit /b 0
 
+:rig_billboard_facing_test
+echo [edvr] === billboard_facing_test.exe ===
+REM The explosion billboards' facing transcriptions (src\d3d11\billboard_facing_vs.h; docs\particle-billboards.md, 2026-10-16 "facing") against the game's own
+REM bytecode (tools\billboard_facing_test\fixtures, held to their hash names) on a WARP device with the D3D debug layer: signature blocks and every dcl line
+REM equal column for column (ours the one added b3), then the original and the transcription run on the same vertices through stream output and every
+REM output register is compared -- identical with the viewer feed absent, identical in the aligned modes, identical on axis with zero roll, and off axis
+REM only the basis-dependent outputs differ while each quad faces the viewer and the original's does not. Output under obj\ and System32's d3d11.
+if not exist "%OBJ%\billboardfacing" mkdir "%OBJ%\billboardfacing"
+%CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /I"src\d3d11" ^
+    /Fo"%OBJ%\billboardfacing\\" /Fe"%OBJ%\billboardfacing\billboard_facing_test.exe" ^
+    "tools\billboard_facing_test\billboard_facing_test.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib dxguid.lib
+if errorlevel 1 ( echo [edvr] ERROR: billboard facing test build failed & exit /b 1 )
+"%OBJ%\billboardfacing\billboard_facing_test.exe" --dry-run || exit /b 1
+"%OBJ%\billboardfacing\billboard_facing_test.exe" --self-test "%ROOT%" || exit /b 1
+exit /b 0
+
 :rig_panel_curve_test
 echo [edvr] === panel_curve_test.exe ===
 REM The curved screen's strip (src\d3d11\panel_curve.cpp; fix.panel_curvature) compiled for real with the real Config, Log and fault
@@ -3924,6 +3945,43 @@ if not exist "%OBJ%\supercruisecensus" mkdir "%OBJ%\supercruisecensus"
 if errorlevel 1 ( echo [edvr] ERROR: supercruise census test build failed & exit /b 1 )
 "%OBJ%\supercruisecensus\supercruise_census_test.exe" --dry-run || exit /b 1
 "%OBJ%\supercruisecensus\supercruise_census_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_sharp_weapons_test
+echo [edvr] === sharp_weapons_test.exe ===
+REM fix.sharp_weapons (docs\dlss-blur-elements-2026-10-14.md, "Built, 2026-10-16"): the weapons-fire family rule and its one-token mutants, the jitter-cancel table,
+REM the two keys' independence over the four combinations (the family gate, the decisions, the layer's two halves), the tonemap re-issue plan with its mutants,
+REM three recorded census frames of the 2026-10-16 flight (tools\sharp_weapons_test\fixtures: exactly the weapon rows change decision), the source scans of the
+REM wiring with a control for each, and -- on WARP, with the debug layer -- the production source pass, blend states and step bindings driven through a synthetic
+REM game tonemap: the tonemap-difference composite equals T(F + L) over a lit background where the plain add is far off, and over black the two agree, with
+REM mutants of the sequence caught. Built outside build\ and without d3d11.lib's build dir: its device is System32's. Runs at the repo root (the scans read sources).
+if not exist "%OBJ%\sharpweapons" mkdir "%OBJ%\sharpweapons"
+%CC% /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /utf-8 ^
+    /Fo"%OBJ%\sharpweapons\\" /Fe"%OBJ%\sharpweapons\sharp_weapons_test.exe" ^
+    "tools\sharp_weapons_test\sharp_weapons_test.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib
+if errorlevel 1 ( echo [edvr] ERROR: sharp weapons test build failed & exit /b 1 )
+"%OBJ%\sharpweapons\sharp_weapons_test.exe" --dry-run || exit /b 1
+"%OBJ%\sharpweapons\sharp_weapons_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_shield_ripple_test
+echo [edvr] === shield_ripple_test.exe ===
+REM advanced.shield_ripple (docs\dlss-blur-elements-2026-10-14.md, "Built, 2026-10-16: the shield refraction after the upscale"): the pair's family rule, the modes, the
+REM first-draw checks' arithmetic; on WARP with the debug layer, the game's own ps_6EAA (tools\shield_ripple_test\fixtures, from edvr_logs\shaders) drawn on the UV ramp
+REM against the analytic uv + d within 1e-6; the whole route with the production remap, jitter cancel and door pass (the build's bytecode) against the stock path
+REM within 2/255, with seven mutants caught; the coverage instrument's method with the production marking pass; and the source scans of the wiring, each with a control.
+REM Built outside build\ so its device is System32's; runs at the repo root (the scans read sources).
+if not exist "%OBJ%\shieldripple" mkdir "%OBJ%\shieldripple"
+%CC% /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /utf-8 ^
+    /Fo"%OBJ%\shieldripple\\" /Fe"%OBJ%\shieldripple\shield_ripple_test.exe" ^
+    "tools\shield_ripple_test\shield_ripple_test.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib
+if errorlevel 1 ( echo [edvr] ERROR: shield ripple test build failed & exit /b 1 )
+"%OBJ%\shieldripple\shield_ripple_test.exe" --dry-run || exit /b 1
+"%OBJ%\shieldripple\shield_ripple_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_menu_pad_test

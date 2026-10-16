@@ -459,6 +459,19 @@ bool sharpenRowDisabled() {
                              temporalModeEnabled(Config::get().requestedTemporalMode()));
 }
 
+// fix.sharp_weapons (the Sharp weapons row: On, On (plain blend), Off (stock)). The weapons fire and the shield-strike ripple are laid over the
+// temporal pass's output, so with anti-aliasing off the row stays on the page, dimmed, and stops responding. The same in VR and flat; the profile's own reading
+// of fix.temporal_aa decides, live, every time the page is drawn or a row is touched.
+bool isWeaponsRow(const MenuRowDef& d) {
+    return strcmp(d.section, "fix") == 0 && strcmp(d.key, "sharp_weapons") == 0;
+}
+
+bool weaponsRowDisabled() {
+    const bool flat = runtimeFlatProfile();
+    const Config& cfg = Config::get();
+    return weaponsRowDim(temporalModeEnabledFor(flat ? cfg.requestedTemporalMode() : cfg.getString("fix.temporal_aa", "off"), flat));
+}
+
 // The on-foot panel's width: "auto", or a width in pixels -- never a list, so
 // this is not a headset row despite living beside one in the ini. The height
 // is not a setting any more; it is derived from whichever width applies.
@@ -1609,24 +1622,46 @@ void buildPages() {
     const size_t keepCount = s.pages.empty() ? 0 : s.pages[s.page].entries.size();
     s.pages.clear();
     if (runtimeFlatProfile()) {
-        Page p;
-        p.name = "Flat graphics";
-        for (int i = 0; i < kRowDefCount; ++i) {
-            const MenuRowDef& d = kMenuRows[i];
-            // The rows are the table in menu_flat_rows.h, which a rig checks
-            // against the flat profile's key gate: a row listed there whose key
-            // is refused fails the build instead of reading a silent 0.
-            if (!flatPageHasRow(d.section, d.key)) continue;
-            Entry e;
-            e.kind = EntryKind::Setting;
-            e.def = i;
-            p.entries.push_back(e);
+        // Two tabs (2026-10-16): Performance, the flat settings the panel always had, then Debug, last.
+        {
+            Page p;
+            p.name = kFlatTabNames[0];
+            for (int i = 0; i < kRowDefCount; ++i) {
+                const MenuRowDef& d = kMenuRows[i];
+                // The rows are the table in menu_flat_rows.h, which a rig checks
+                // against the flat profile's key gate: a row listed there whose key
+                // is refused fails the build instead of reading a silent 0.
+                if (!flatPageHasRow(d.section, d.key)) continue;
+                Entry e;
+                e.kind = EntryKind::Setting;
+                e.def = i;
+                p.entries.push_back(e);
+            }
+            firstSelectable(p);
+            s.pages.push_back(p);
         }
-        firstSelectable(p);
-        s.pages.push_back(p);
-        // No Plugins page: add-ons are VR-only, so in flat it could only be empty, and the flat menu has no tab buttons to reach it. The flat add-on
-        // follow-up brings it back with the flat render path.
-        s.page = 0;
+        // No Plugins tab: add-ons are VR-only, so in flat it could only be empty. The flat add-on follow-up adds it to kFlatTabNames with the
+        // flat render path.
+        {
+            // Debug: for bug reports, both off by default. A heading says so; the rows are the `menu debug` rows named in kFlatDebugRows.
+            Page p;
+            p.name = kFlatTabNames[1];
+            Entry h;
+            h.kind = EntryKind::Heading;
+            h.text = "For bug reports. Both are off unless you turn them on.";
+            p.entries.push_back(h);
+            for (int i = 0; i < kRowDefCount; ++i) {
+                const MenuRowDef& d = kMenuRows[i];
+                if (d.tier != MenuTier::Fix || _stricmp(d.page, kFlatDebugPage) != 0 || !flatDebugHasRow(d.section, d.key)) continue;
+                Entry e;
+                e.kind = EntryKind::Setting;
+                e.def = i;
+                p.entries.push_back(e);
+            }
+            firstSelectable(p);
+            s.pages.push_back(p);
+        }
+        s.page = keepPage < static_cast<int>(s.pages.size()) ? keepPage : 0;
         s.developerBuilt = s.developer;
         s.contentDirty = true;
         return;
@@ -2301,8 +2336,10 @@ void buildContent(MenuContent& c) {
             const bool noteOnThis = hotkeyRow && s.noteDef == e.def && s.noteUntilMs > s.tickMs;
             const bool dlssRow = isDlssPresetRow(d);
             const bool sharpenRow = isSharpenRow(d);
+            const bool weaponsRow = isWeaponsRow(d);
             const bool dim = (dlssRow && dlssPresetDisabled()) ||
-                             (sharpenRow && sharpenRowDisabled());
+                             (sharpenRow && sharpenRowDisabled()) ||
+                             (weaponsRow && weaponsRowDisabled());
             l.dim = dim;
             strncpy(l.left, d.label, sizeof(l.left) - 1);
             if (dlssRow) {
@@ -2377,7 +2414,9 @@ void buildContent(MenuContent& c) {
                       : hi        ? kMenuRowHi
                       : dim       ? kMenuDim
                                   : kMenuRow;
-            if (hi && dim && runtimeFlatProfile())
+            if (hi && dim && weaponsRow)
+                snprintf(c.hint, sizeof(c.hint), "%s", "Needs temporal AA: turn anti-aliasing on to use it.");
+            else if (hi && dim && runtimeFlatProfile())
                 snprintf(c.hint, sizeof(c.hint), "%s",
                          sharpenRow ? "Turn anti-aliasing on to sharpen."
                                     : "Choose DLSS to change its model preset.");
@@ -2575,7 +2614,7 @@ void buildContent(MenuContent& c) {
             snprintf(c.footer, sizeof(c.footer), "D-pad move/change  A select  B back\nLB/RB pages  %s close%s",
                      s.summonName.c_str(), status);
         else
-            snprintf(c.footer, sizeof(c.footer), "Up/Down row  Left/Right change\n%s/Esc close%s",
+            snprintf(c.footer, sizeof(c.footer), "Up/Down row  Left/Right change  Tab page\n%s/Esc close%s",
                      s.summonName.c_str(), status);
         // The installed version, on every page, drawn at the right end of this same
         // footer line (menu_panel.cpp). Flat only: VR's footer does not carry it.
@@ -2853,6 +2892,11 @@ void stepRow(int defIndex, int dir, int mult) {
     }
     if (isSharpenRow(d) && sharpenRowDisabled()) {
         g_s.lastWrite = "Sharpening is inactive: turn anti-aliasing on above first.";
+        g_s.contentDirty = true;
+        return;
+    }
+    if (isWeaponsRow(d) && weaponsRowDisabled()) {
+        g_s.lastWrite = "Needs temporal AA: turn anti-aliasing on above first.";
         g_s.contentDirty = true;
         return;
     }
@@ -3205,6 +3249,11 @@ void beginEdit(int entryIndex, int defIndex) {
     // neither (stepRow says why).
     if (isSharpenRow(kMenuRows[defIndex]) && sharpenRowDisabled()) {
         s.lastWrite = "Sharpening is inactive: turn anti-aliasing on above first.";
+        s.contentDirty = true;
+        return;
+    }
+    if (isWeaponsRow(kMenuRows[defIndex]) && weaponsRowDisabled()) {
+        s.lastWrite = "Needs temporal AA: turn anti-aliasing on above first.";
         s.contentDirty = true;
         return;
     }

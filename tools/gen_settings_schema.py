@@ -76,6 +76,9 @@ row the code does not read as a number, fails the build. The older absolute
 fallback eye (`explorer_cam_eye_up/_forward/_right`) stays `ui: hidden`: neither
 schema gets a row for it.
 
+THE FLAT PANEL'S DEBUG TAB (2026-10-16) is `menu debug`: the flat profile's F8 panel has two tabs, Performance (its settings) and Debug, and the
+Debug rows are the `menu debug` rows. A `menu debug` row may sit on an [advanced] key, but only one named in MENU_ADVANCED_EXCEPTIONS; any other [advanced] key with a menu token is still refused. VR's menu has no such page.
+
 The menu's restart flagging is derived here too, from the same prose the
 window reads: a menu row on the Fixes or Performance page that does not say
 when it takes effect is a build error (as for the window); a developer-tier
@@ -163,6 +166,10 @@ HOTKEY_PAGE = 'hotkeys'
 # would reach for while wearing the headset. Both are Fix tier: neither is a
 # developer instrument, and neither is hidden behind menu.developer.
 MENU_ROW_SECTIONS = ('fix', 'menu')
+# Exceptions: [advanced] keys that carry a `menu <page>` token on their ui: line and are rows of the in-headset menu for everyone (Fix tier), not
+# developer-tier rows. The flat profile's Debug tab (2026-10-16): two toggles every flat user may reach, labelled debug. Flat-only keys, so VR's
+# developer tier loses nothing by their having no row of their own there. Their page is `debug`, which only the flat panel builds.
+MENU_ADVANCED_EXCEPTIONS = ('advanced.flat_cpu_timing', 'advanced.flat_refusal_view')
 # Settings that were taken off every menu on purpose, and must stay off.
 #
 # The three field-of-view trims were [fix] rows on the Performance page until
@@ -185,7 +192,7 @@ DEV_RE = re.compile(r'^dev\s*:\s*(.*)$', re.I)
 # The sections the menu's developer tier lists in full.
 DEV_SECTIONS = ('advanced', 'experimental')
 # Pages a `menu <page>` token can name. 'explorer_cam' is the Explorer Cam page (2026-10-08): the eye trims and the follow smoothing, for everyone.
-MENU_PAGES = ('fixes', 'performance', 'explorer_cam')
+MENU_PAGES = ('fixes', 'performance', 'explorer_cam', 'debug')
 # A heading in edvr.ini: a rule, the title, a rule. The heading a person
 # reads in the file is the heading the window shows, so there is no second
 # list of group names to keep in step with this one.
@@ -949,12 +956,14 @@ def run(root, out, check):
     # shown as a badge, never silently read as live.
     menuRows = []
     menuFix = [s for s in settings
-               if s.menuPage and not s.hidden and s.section in MENU_ROW_SECTIONS
+               if s.menuPage and not s.hidden
+               and (s.section in MENU_ROW_SECTIONS or '%s.%s' % (s.section, s.key) in MENU_ADVANCED_EXCEPTIONS)
                and '%s.%s' % (s.section, s.key) in code]
     for s in menuFix:
         menuRows.append((s, s.menuPage, 'Fix'))
     strayToken = [s for s in settings
-                  if s.menuPage and s.section not in MENU_ROW_SECTIONS]
+                  if s.menuPage and s.section not in MENU_ROW_SECTIONS
+                  and '%s.%s' % (s.section, s.key) not in MENU_ADVANCED_EXCEPTIONS]
     if strayToken:
         print('gen_settings_schema: ERROR: a `| menu` token belongs to a [%s] setting; '
               'elsewhere the section decides the page.' % ']/['.join(MENU_ROW_SECTIONS))
@@ -968,6 +977,8 @@ def run(root, out, check):
         dotted = '%s.%s' % (s.section, s.key)
         if dotted not in code:
             continue
+        if dotted in MENU_ADVANCED_EXCEPTIONS:
+            continue   # a Fix-tier row above, not a second one in the developer tier
         if when_it_applies(s) is None:
             devSilent.append(s)
         menuRows.append((s, s.section, 'Advanced' if s.section == 'advanced' else 'Experimental'))
@@ -1711,6 +1722,29 @@ def self_test():
     wrote = case(name, hotkey_ini.replace('# dev: label Census key | hotkey', '# dev: hidden'),
                  hotkey_reads, 0)
     expect_not_in(name, wrote, 'census')
+
+    # The flat panel's Debug tab (2026-10-16): `menu debug` on the two [advanced] flat toggles is a Fix-tier row on the page `debug`, each exactly once
+    # (no second row in the developer tier), and the same token on any other [advanced] key is refused.
+    debug_ini = ('[fix]\n# A switch. Live.\n# ui: Alpha | choices on, off | live | menu performance\nalpha = on\n\n'
+                 '[advanced]\n# Times the work. Live.\n# ui: CPU timing in the log | live | menu debug\n#flat_cpu_timing = off\n\n'
+                 '# Paints the motion source. Live.\n# ui: Motion source view | live | menu debug\n#flat_refusal_view = off\n')
+    debug_reads = {'a.cpp': ('bool a = cfg.getBool("fix.alpha", true);\n'
+                             'bool t = cfg.getBool("advanced.flat_cpu_timing", false);\n'
+                             'bool v = cfg.getBool("advanced.flat_refusal_view", false);\n')}
+    name = 'debug-page-rows'
+    wrote = case(name, debug_ini, debug_reads, 0)
+    expect_in(name, wrote, 'MenuTier::Fix, "debug"')
+    for key in ('flat_cpu_timing', 'flat_refusal_view'):
+        if wrote.count('"%s"' % key) != 1:
+            failures.append('%s: expected one row for %s, found %d' % (name, key, wrote.count('"%s"' % key)))
+    if wrote.count('"debug"') != 2 or wrote.count('MenuTier::Advanced') != 0:
+        failures.append('%s: two Fix-tier debug rows and no developer-tier copy expected' % name)
+    if not (0 <= wrote.find('"flat_cpu_timing"') < wrote.find('"flat_refusal_view"')):
+        failures.append('%s: the rows keep the ini order (CPU timing, then motion source)' % name)
+    name = 'debug-token-refused-elsewhere'
+    said = case(name, debug_ini.replace('flat_cpu_timing', 'other_timing'),
+                {'a.cpp': debug_reads['a.cpp'].replace('flat_cpu_timing', 'other_timing')}, 1)
+    expect_in(name, said, 'advanced.other_timing')
 
     # The Explorer Cam page (2026-10-08): `menu explorer_cam` puts a [fix] number row on its own page for everyone (Fix tier), and
     # step / unit / zero / signed shape the row (0.01 m, "+0.15 m", "0 ms (exact)"). The two fallback keys the head joint replaced

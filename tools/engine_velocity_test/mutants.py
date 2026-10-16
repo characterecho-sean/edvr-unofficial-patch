@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Mutation proof for the remember-cap line (src\\d3d11\\engine_velocity.cpp, tools\\engine_velocity_test\\remember_cap_tests.h)
-and for the overlay guard's remembered verification (GuardVerified, cases G1-G3 in flat_lazy_tests.h: every such check's text starts
-"guard G<n>").
+for the overlay guard's remembered verification (GuardVerified, cases G1-G3 in flat_lazy_tests.h: every such check's text starts
+"guard G<n>") and for the claim check of the primary-copy clear, merge and pool copier (src\\d3d11\\engine_velocity_primary_copy.h, cases C1-C12 in
+claim_check_tests.h: every such check's text starts "claim check C<n>"). The claim-check mutations edit that header, so the rig and
+engine_velocity.cpp are compiled from a throwaway copy of the trees they include (still outside the repo), and the rig runs with
+--claim-check, which runs only claim_check_tests, so the first failing check is the one that names the case.
 
 A full remember table used to drop a keyed shader object without a word. It now writes one line per kind (vertex, pixel)
 on the first drop. remember_cap_tests.h holds the rules (cases R1-R5; every check's text starts "cap R<n>"). A rig that
@@ -21,6 +24,7 @@ import argparse
 import concurrent.futures
 import importlib.util
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -32,6 +36,10 @@ SOURCE = ROOT / "src" / "d3d11" / "engine_velocity.cpp"
 RIG = HERE / "engine_velocity_test.cpp"
 CASES = HERE / "remember_cap_tests.h"
 GUARD_CASES = HERE / "flat_lazy_tests.h"
+HEADER = ROOT / "src" / "d3d11" / "engine_velocity_primary_copy.h"
+CLAIM_CASES = HERE / "claim_check_tests.h"
+# Directories the rig includes by relative path; the claim-check mutations compile from a copy of these.
+MIRROR = ["src", "third_party/dxbc_hash", "tools/engine_velocity_test", "tools/skin_clone_test", "tools/skin_join_test"]
 GEN = ROOT / "build" / "gen"
 # (name, anchor, replacement, case): the rig must fail on a check whose text starts with the case.
 MUTATIONS = [
@@ -56,6 +64,67 @@ MUTATIONS = [
     ("guard-ignores-rtv-generation", "g_guardVerified.rtvGen == bindingGeneration(BindSlot::Rtv0) &&", "true &&", "guard G2"),
     ("guard-ignores-dsv-generation", "g_guardVerified.dsvGen == bindingGeneration(BindSlot::Dsv0);", "true;", "guard G2"),
     ("guard-never-trusts", "return !g_guardTrustOff && g_guardVerified.valid", "return false && g_guardVerified.valid", "guard G2"),
+    # The lazy guard (round 4): the private t3 stays bound across the group's draws. G1: a kept t3 must be the game's after a game set of t3 or a
+    # non-guarded draw; G5: and it must cost what it saves (the second draw of a group binds nothing).
+    ("lazy-guard-kept-ignores-t3-generation",
+     "const bool keptBound = g_bound.guardSrv3.Get() == privateSrv && bindingGeneration(BindSlot::PsSrv3) == g_bound.srv3Gen;",
+     "const bool keptBound = g_bound.guardSrv3.Get() == privateSrv;", "guard G1"),
+    ("lazy-guard-nonguard-draw-keeps-t3", "if (!guardOverlay && g_bound.guardSrv3) guardRestoreT3(ctx);", "", "flat lazy"),
+    ("lazy-guard-flushes-at-every-overlay-draw", " && !(e.overlayGroup && e.overlayBaseSrv)) {\n        ++g_draw.flatFlushBy",
+     ") {\n        ++g_draw.flatFlushBy", "guard G5"),
+    ("lazy-guard-ends-eager", "    if (!g_flatLazy) {\n        std::lock_guard<std::recursive_mutex> lock(g_mutex);",
+     "    if (!g_flatLazy || g_bound.guardSrv3) {\n        std::lock_guard<std::recursive_mutex> lock(g_mutex);", "guard G5"),
+]
+CLEAR_CHECK = "inline bool clearClaimCheck(uintptr_t dictionary) noexcept {\n    if(!g_claimPrecheck)return false;\n    ClaimViewState view;\n    "
+MERGE_CHECK = "inline bool mergeClaimCheck(uintptr_t destination,uintptr_t source) noexcept {\n    if(!g_claimPrecheck)return false;\n    ClaimViewState view;\n    "
+GATE = "if(!readClaimView(view) || view.plans || view.count>kClaimViewMax)"
+# The claim check (header mutations): each removes one early exit's reason to fall back, or one input of its decision.
+HEADER_MUTATIONS = [
+    ("claim-clear-ignores-plans", CLEAR_CHECK + GATE, CLEAR_CHECK + "if(!readClaimView(view) || view.count>kClaimViewMax)", "claim check C5"),
+    ("claim-merge-ignores-plans", MERGE_CHECK + GATE, MERGE_CHECK + "if(!readClaimView(view) || view.count>kClaimViewMax)", "claim check C5"),
+    ("claim-clear-ignores-the-limit", CLEAR_CHECK + GATE, CLEAR_CHECK + "if(!readClaimView(view) || view.plans)", "claim check C4"),
+    ("claim-merge-ignores-the-limit", MERGE_CHECK + GATE, MERGE_CHECK + "if(!readClaimView(view) || view.plans)", "claim check C4"),
+    ("claim-clear-ignores-hits", "hit=view.holds(node);return !hit;", "hit=false;return true;", "claim check C2"),
+    ("claim-clear-accepts-a-refused-walk", "return false;   // a hit, or a refusal the locked walk acts on (clear)", "return !hit;", "claim check C2"),
+    ("claim-merge-accepts-a-refused-list", "return false;   // a hit, or a refusal the locked walk acts on (merge)", "return !hit;", "claim check C3"),
+    ("claim-merge-ignores-source-slots", "hit=view.holds(node) || (fill && view.holds(tail,tailCount,tailCount+fill));",
+     "hit=(fill && view.holds(tail,tailCount,tailCount+fill));", "claim check C3"),
+    ("claim-merge-ignores-tail-fill", "hit=view.holds(node) || (fill && view.holds(tail,tailCount,tailCount+fill));", "hit=view.holds(node);", "claim check C3"),
+    ("claim-merge-tail-fill-off-by-one", "hit=view.holds(node) || (fill && view.holds(tail,tailCount,tailCount+fill));",
+     "hit=view.holds(node) || (fill && view.holds(tail,tailCount+1,tailCount+fill));", "claim check C3"),
+    ("claim-slot-window-misses-the-last-slot", "offset/kBytes>=first && offset/kBytes<last && offset/kBytes<8",
+     "offset/kBytes>=first && offset/kBytes+1<last && offset/kBytes<8", "claim check C2"),
+    ("claim-view-never-rewritten", "if(next==g_claimViewMirror)return;", "if(true)return;", "claim check C1"),
+    ("claim-view-unsorted", "while(at && next.address[at-1]>e.first)", "while(at && next.address[at-1]<e.first)", "claim check C1"),
+    ("claim-view-omits-plans", "ClaimViewState next;next.plans=!g_mergePlans.empty();", "ClaimViewState next;next.plans=false;", "claim check C6"),
+    ("claim-view-read-not-rechecked", "return g_claimView.seq.load(std::memory_order_relaxed)==before;", "return true;", "claim check C7"),
+    # The pool copier's claim check (round 6; cases C8-C12): each removes one reason to fall back, one input of the decision or one counter.
+    # The rig runs C8, C10, C11, C9, C12 and stops at the first failing check, so a mutant is labelled with the first case that fails it; the four
+    # labelled C8 (hits ignored, range one short, bound never raised, bound lost) are also killed by C9 alone (checked with C9 moved first).
+    ("copier-claim-ignores-plans", "if(plans || claims>kClaimViewMax || leases>kMaxPools)return declined();",
+     "if(claims>kClaimViewMax || leases>kMaxPools)return declined();", "claim check C10"),
+    ("copier-claim-ignores-the-limit", "if(plans || claims>kClaimViewMax || leases>kMaxPools)return declined();",
+     "if(plans || leases>kMaxPools)return declined();", "claim check C10"),
+    ("copier-claim-ignores-hits", "if(claimed[i]>=source && offset%kBytes==0 && offset/kBytes<count)return false;", "if(false)return false;", "claim check C8"),
+    ("copier-claim-range-one-short", "offset/kBytes<count)return false;", "offset/kBytes+1<count)return false;", "claim check C8"),
+    ("copier-claim-ignores-ambiguity", "if(matches>1)return false;   // (a) ambiguous", "", "claim check C9"),
+    ("copier-claim-ignores-fit", "if(stride!=kBytes || firstSlot>slots || count>slots-firstSlot)return false;   // (b) does not fit",
+     "if(stride!=kBytes)return false;", "claim check C9"),
+    ("copier-claim-ignores-stride", "if(stride!=kBytes || firstSlot>slots || count>slots-firstSlot)return false;   // (b) does not fit",
+     "if(firstSlot>slots || count>slots-firstSlot)return false;", "claim check C9"),
+    ("copier-claim-ignores-patches",
+     "if(patchLo<=patchHi && uint64_t(patchLo)<uint64_t(firstSlot)+count && patchHi>=firstSlot)return false;   // (c) a patch to erase", "", "claim check C9"),
+    ("copier-claim-patch-bound-high-one-short", "patchHi>=firstSlot)return false;   // (c)", "patchHi>firstSlot)return false;   // (c)", "claim check C9"),
+    ("copier-claim-patch-bound-low-one-short", "uint64_t(patchLo)<uint64_t(firstSlot)+count", "uint64_t(patchLo)+1<uint64_t(firstSlot)+count", "claim check C9"),
+    ("copier-claim-window-not-rechecked", "if(g_publishSeq.load(std::memory_order_relaxed)!=before)return declined();", "", "claim check C11"),
+    ("publish-window-never-opens", "if(open)return;\n        open=true;", "return;\n        open=true;", "claim check C11"),
+    ("copier-claim-counts-nothing", "g_copierPrechecked.fetch_add(1,std::memory_order_relaxed);\n    if(!matches)", "if(!matches)", "claim check C8"),
+    ("copier-claim-no-lease-uncounted", "if(!matches)g_copierPrecheckedNoLease.fetch_add(1,std::memory_order_relaxed);", "", "claim check C8"),
+    ("copier-claim-declines-uncounted", "g_copierPrecheckDeclined.fetch_add(1,std::memory_order_relaxed);return false;", "return false;", "claim check C10"),
+    ("pool-patch-bound-never-raised", "notePatch(*pool,patch.slot);", "", "claim check C8"),
+    ("pool-view-bound-lost", "lo[count]=held?(entry.second.patchLo<=entry.second.patchHi?entry.second.patchLo:0u):~0u;", "lo[count]=~0u;", "claim check C8"),
+    ("pool-view-compare-ignores-bounds",
+     "lo[i]==g_poolView.patchLo[i].load(std::memory_order_relaxed) && hi[i]==g_poolView.patchHi[i].load(std::memory_order_relaxed);", "true;", "claim check C9"),
 ]
 CL_FLAGS = ["/nologo", "/O2", "/MT", "/std:c++17", "/EHsc", "/W4", "/DWIN32_LEAN_AND_MEAN", "/DNOMINMAX",
             "/D_CRT_SECURE_NO_WARNINGS", "/DUNICODE", "/D_UNICODE", "/utf-8", "/DEDVR_ENGINE_VELOCITY_RIG",
@@ -69,12 +138,18 @@ def read(path):
 
 def self_test():
     source, rig, cases, build = read(SOURCE), read(RIG), read(CASES), read(ROOT / "build.bat")
-    names = [m[0] for m in MUTATIONS]
+    header, claim_cases = read(HEADER), read(CLAIM_CASES)
+    names = [m[0] for m in MUTATIONS + HEADER_MUTATIONS]
     assert len(set(names)) == len(names), "duplicate mutation name"
     for name, anchor, replacement, case in MUTATIONS:
         assert source.count(anchor) == 1, name + ": anchor found " + str(source.count(anchor)) + " times, want 1"
         assert anchor != replacement, name + ": no edit"
         assert case + ":" in cases + read(GUARD_CASES), name + ": the rig has no check '" + case + ":'"
+    for name, anchor, replacement, case in HEADER_MUTATIONS:
+        assert header.count(anchor) == 1, name + ": anchor found " + str(header.count(anchor)) + " times in the header, want 1"
+        assert anchor != replacement, name + ": no edit"
+        assert case + ":" in claim_cases, name + ": the rig has no check '" + case + ":'"
+    assert '#include "claim_check_tests.h"' in rig and "claim_check_tests::run(" in rig and 'L"--claim-check"' in rig, "the rig does not run the claim check"
     # The two log fragments the rig looks for are the ones the source writes.
     for kind in ("vertex", "pixel"):
         fragment = kind + " shader remember cap reached"
@@ -90,7 +165,7 @@ def self_test():
     assert '"src\\d3d11\\gpu_timing.cpp" "src\\d3d11\\gpu_span_d3d11.cpp"' in build
     assert "/DEDVR_ENGINE_VELOCITY_RIG /DEDVR_BINDING_SHADOW_EXTERNAL" in build
     assert 'python "tools\\engine_velocity_test\\mutants.py" --self-test' in build, "build.bat does not gate on this file"
-    print("engine_velocity mutants: PASS " + str(len(MUTATIONS)) + " anchors, cases, order, build gate")
+    print("engine_velocity mutants: PASS " + str(len(MUTATIONS) + len(HEADER_MUTATIONS)) + " anchors, cases, order, build gate")
 
 
 def toolchain():
@@ -105,9 +180,9 @@ def toolchain():
     return module.Toolchain()
 
 
-def compile_obj(tc, source, temp, name, extra=()):
+def compile_obj(tc, source, temp, name, extra=(), include=None):
     obj = temp / (name + ".obj")
-    cmd = [tc.cl] + CL_FLAGS + ["/c", "/I" + str(GEN), "/I" + str(ROOT / "src" / "d3d11")] + list(extra) + \
+    cmd = [tc.cl] + CL_FLAGS + ["/c", "/I" + str(GEN), "/I" + str(include or ROOT / "src" / "d3d11")] + list(extra) + \
           ["/Fo" + str(obj), str(source)]
     done = subprocess.run(cmd, capture_output=True, text=True, env=tc.env, errors="replace", cwd=str(temp))
     if done.returncode:
@@ -115,23 +190,24 @@ def compile_obj(tc, source, temp, name, extra=()):
     return obj
 
 
-def link_and_run(tc, objs, temp, name):
+def link_and_run(tc, objs, temp, name, mode="--self-test"):
     exe = temp / (name + ".exe")
     done = subprocess.run([tc.cl, "/nologo"] + [str(o) for o in objs] + ["/Fe" + str(exe), "/link", "/INCREMENTAL:NO"] + LIBS,
                           capture_output=True, text=True, env=tc.env, errors="replace", cwd=str(temp))
     if done.returncode:
         raise RuntimeError(name + ": link failed\n" + done.stdout + done.stderr)
     # From the repository root: the rig reads some sources by relative path (build.bat runs it there too).
-    return subprocess.run([str(exe), "--self-test"], capture_output=True, text=True, errors="replace", cwd=str(ROOT))
+    return subprocess.run([str(exe), mode], capture_output=True, text=True, errors="replace", cwd=str(ROOT))
 
 
 def run(only, jobs):
     if not GEN.is_dir():
         raise RuntimeError("build\\gen is missing: run build.bat once so the generated shader headers exist")
-    known = {m[0] for m in MUTATIONS}
+    known = {m[0] for m in MUTATIONS + HEADER_MUTATIONS}
     if only - known:
         raise ValueError("unknown mutation: " + ", ".join(sorted(only - known)))
     selected = [m for m in MUTATIONS if not only or m[0] in only]
+    selected_header = [m for m in HEADER_MUTATIONS if not only or m[0] in only]
     tc = toolchain()
     source = read(SOURCE)
     with tempfile.TemporaryDirectory(prefix="edvr-engine-velocity-mutants-") as directory:
@@ -155,10 +231,33 @@ def run(only, jobs):
             if result.returncode:
                 raise RuntimeError("baseline failed\n" + result.stdout + result.stderr)
             print("baseline: PASS")
+        header_text = read(HEADER)
+
+        def one_header(mutation):
+            name, anchor, replacement, case = mutation
+            mirror = temp / name
+            for relative in MIRROR:
+                shutil.copytree(ROOT / relative, mirror / relative, dirs_exist_ok=True,
+                                ignore=shutil.ignore_patterns("*.obj", "*.exe", "*.pdb"))
+            (mirror / "src" / "d3d11" / HEADER.name).write_text(header_text.replace(anchor, replacement, 1), encoding="utf-8")
+            include = mirror / "src" / "d3d11"
+            rig = compile_obj(tc, mirror / "tools" / "engine_velocity_test" / RIG.name, mirror, "rig", include=include)
+            core = compile_obj(tc, include / SOURCE.name, mirror, "engine_velocity", include=include)
+            return name, case, link_and_run(tc, [rig, core] + shared[1:], mirror, name, "--claim-check")
+
         failures = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
+            pending = [pool.submit(one_header, m) for m in selected_header]
             for name, case, result in pool.map(one, selected):
-                labels = re.findall(r"^FAIL: ((?:cap R|guard G)\d+):", result.stderr, re.M)
+                labels = re.findall(r"^FAIL: ((?:cap R|guard G|claim check C)\d+|flat lazy):", result.stderr, re.M)
+                if result.returncode != 1 or case not in labels:
+                    failures.append(name + ": survived or failed the wrong check (exit " + str(result.returncode) + ", wanted " + case
+                                    + ")\n" + result.stdout + result.stderr)
+                else:
+                    print(name + ": killed by " + case)
+            for future in pending:
+                name, case, result = future.result()
+                labels = re.findall(r"^FAIL: ((?:cap R|guard G|claim check C)\d+|flat lazy):", result.stderr, re.M)
                 if result.returncode != 1 or case not in labels:
                     failures.append(name + ": survived or failed the wrong check (exit " + str(result.returncode) + ", wanted " + case
                                     + ")\n" + result.stdout + result.stderr)
@@ -166,7 +265,7 @@ def run(only, jobs):
                     print(name + ": killed by " + case)
         if failures:
             raise RuntimeError("\n".join(failures))
-    print("engine_velocity mutants: PASS " + str(len(selected)) + " killed")
+    print("engine_velocity mutants: PASS " + str(len(selected) + len(selected_header)) + " killed")
 
 
 def main():
@@ -179,7 +278,7 @@ def main():
     parser.add_argument("--jobs", type=int, default=4)
     args = parser.parse_args()
     if args.dry_run or args.list:
-        for name, _, _, case in MUTATIONS:
+        for name, _, _, case in MUTATIONS + HEADER_MUTATIONS:
             print(name + ": " + case)
         return 0
     if args.self_test:

@@ -707,6 +707,21 @@ void alteredLineCases() {
     check(g_section[static_cast<size_t>(GpuCensusSection::AlteredPoolFamily)].occurrences == 0,
           "altered line: the window resets the altered sections' occurrences");
 
+    // A RUN section (the flat profile's pool-family draws: gpu_census.h): occurrences are runs, issued calls the draws they held, the figure the
+    // mean span of a timed run times the runs a frame. 600 runs in 200 frames (3 a frame) holding 2000 draws (10 a frame), four runs timed at 0.2
+    // ms: 0.600 ms/frame. The per-draw form it replaces (a span around each draw, the mean times the 10 draws a frame) summed intervals that
+    // each held the pipeline's depth in flight, and read 14.9, 17.1 and 25.9 ms of a 14.2 ms frame at a constant 8.6k draws a frame.
+    freshWindow(start);
+    pool.occurrences = 600;
+    pool.issued = 2000;
+    pool.sampler.totals.ms = 0.8;
+    pool.sampler.totals.samples = 4;
+    logAndResetWindow(start + 30000);
+    line = lineWith("EDVR GPU census, Elite's own draws that EDVR alters");
+    check(line && line->find("pool-family draws (EDVR's slot target and shaders) 0.600 (10.00 draws in 3.00 runs/frame)") != std::string::npos,
+          "altered line: a run section prints its figure as the mean run span times the runs a frame, with the draws and the runs a frame");
+    check(pool.occurrences == 0 && pool.issued == 0, "altered line: and the window resets its runs and its draws");
+
     // Nothing ran: all three '-', together 0.000 (a sum, not a measurement), and the wording still says what '-' means.
     freshWindow(start);
     logAndResetWindow(start + 30000);

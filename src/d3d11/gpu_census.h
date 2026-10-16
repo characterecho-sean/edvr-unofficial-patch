@@ -184,6 +184,13 @@ inline GpuCensusSection turnOwnerOf(GpuCensusSection section) noexcept {
 // it completes before the wrapping End() runs.
 bool gpuCensusBegin(ID3D11DeviceContext* ctx, GpuCensusSection section) noexcept;
 void gpuCensusEnd(ID3D11DeviceContext* ctx, GpuCensusSection section) noexcept;
+// RUN sections (the flat profile's substituted pool-family draws, 2026-10-16 round 4). A section whose unit is a RUN of consecutive calls rather
+// than one call: gpuCensusBegin at the run's first call and gpuCensusEnd after its last time the whole run as ONE span, and
+// gpuCensusNoteIssued is called once per draw the run held (timed run or not). Occurrences are then runs, the K cap and the stride
+// count runs, issued is the draws, and the figure is the mean span of a timed run times the runs a frame, printed with the draws a frame. A span per DRAW summed
+// per frame overstated the section on a busy GPU: a timestamp pair around one draw includes the pipeline depth in flight, and the sum of
+// those serialised intervals exceeded the frame's own GPU time (the 07:09-07:13 flat windows of 2026-10-16: 4.2 ms, then 14.9, 17.1, 25.9 of a
+// 14.2 ms frame, per-draw means 0.49 us rising to 3.0 us at a constant 8.6k draws a frame).
 
 // RAII alternative for a call site that is a clean lexical block: construct
 // at the top, let it close at scope exit (including an early return) so a

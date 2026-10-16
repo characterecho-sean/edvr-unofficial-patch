@@ -4,7 +4,9 @@
 
 - **State (2026-10-16, after the flight):** the narrow E1 is FLOWN and approved for main (branch
   `claude/billboard-roll-free`): explosions no longer roll. Remaining: they FLEX when the head pitches (see
-  "Flight", below). The analysis further down is unchanged. Companion to `docs/particle-billboards.md`.
+  "Flight", below). The three explosion shaders therefore moved to per-particle facing TRANSCRIPTIONS on branch
+  `claude/billboard-facing` (not flown): first the three, then, after the eye dump found the fireball puffs, `AFBC` and `4BDE` too; 11 stay roll-free. The analysis further down is unchanged.
+  Companion to `docs/particle-billboards.md`, whose 2026-10-16 "facing" entry holds the proof.
 - **Global E1 is REFUTED** (below, "2026-10-16: E1 narrowed"): about 190 G-buffer pixel shaders
   encode normals with `cb1[277..279]`, so rows written into the game's block would change lighting.
   What is built is vertex-slot-1-only, per draw, for 16 billboard vertex shaders, as part of
@@ -231,3 +233,17 @@ to lighting. Fail signals: mirrored or flipped sprites (handedness), pop at the 
   `4BDE4DBF88C2BA27` and `78F5F08D02EE38CC` drew around it.
 - The cb1 rows burst (instrument removed): `[277..279]` identical per eye; 63-122 writes of the scene block a frame.
 - The mapped read probe: write-combined mappings on NVIDIA too (13.6 us per full 5376-byte read).
+
+### Follow-up: the explosion left the roll-free list
+
+The flex is the roll-free basis keeping the camera forward, so `9F4BBCFCD3B68BC9`, `BBAD1CA808E1E292` and `9AEC596A2B036EA6` now have
+their own facing transcriptions (`src/d3d11/billboard_facing_vs.h`) and are no longer rebound; `AFBCD3ADB9092F78`, `4BDE4DBF88C2BA27` and
+`78F5F08D02EE38CC` (which drew around the explosion) and the other ten remain roll-free. The table above lists the sixteen as built for the
+flight; the live split is now 5 transcribed, 11 rebound (see Follow-up 2).
+
+### Follow-up 2: the fireball puffs
+
+The first facing flight still showed a flex. The eye dump found the puffs are drawn by `AFBCD3ADB9092F78` (the no-near-fade twin of `9F4B`)
+and `4BDE4DBF88C2BA27` (the no-fade twin of `BBAD`); both had only the roll-free rebind, which keeps the camera forward. They now have their
+own facing transcriptions too (five in all; 11 shaders remain roll-free). Evidence and rig: `particle-billboards.md`, "the fireball puffs are
+the no-fade twins".

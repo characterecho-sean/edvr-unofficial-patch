@@ -49,7 +49,7 @@ bool uiLayerDoorLayerOnly(uint32_t eye,uint64_t seq){return eye<2&&layerOnlyEye[
 // The door's answer to "is the frame that arrived the temporal pass's own output" (src/d3d11/ui_layer.h uiLayerDoorFromPass) and the `ownedFrame` the
 // composite was handed: the door may let the layer composite IN PLACE only on a frame EDVR owns.
 bool uiLayerDoorFromPass(uint32_t){return doorFromPassAnswer;}
-ID3D11Texture2D* uiLayerComposite(uint64_t,uint32_t,ID3D11Texture2D* frame,const uint32_t region[4],const float layerUv[4],bool owned) {
+ID3D11Texture2D* uiLayerComposite(uint64_t,uint32_t,ID3D11Texture2D* frame,const uint32_t region[4],const float layerUv[4],bool owned,bool /*resolved*/) {
   ++composites; order+='C'; lastOwned=owned; lastFrame=frame; std::memcpy(lastRegion,region,sizeof(lastRegion)); std::memcpy(lastUv,layerUv,sizeof(lastUv));
   if(layeredOut){layeredOut->AddRef();return layeredOut;} return nullptr;
 }

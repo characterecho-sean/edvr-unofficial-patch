@@ -429,8 +429,8 @@ Branch `feat/third-party-plugins` implements 3rd-party plugin support (`include/
   switch back to VR resumes (callbacks again, rows shown; log `plugin_manager: profile switched to VR, N addon(s) active`). Nothing is unloaded at a
   switch. A session launched in flat defers discovery, approval and loading to the first switch into VR (logs `plugin_manager: flat session, no
   addon loaded (plugins are VR-only); discovery waits for a switch into VR`, then `plugin_manager: profile switched to VR, running the deferred addon
-  discovery`). The flat F8 menu has no Plugins page. Flat support proper is a follow-up PR: an update and composite hook on the final image before
-  Present, the flat Plugins page back, and a flat-session fixture counter in `addon_manager_test`.
+  discovery`). The flat F8 menu has no Plugins tab (its tabs are `kFlatTabNames`: Performance, Debug). Flat support proper is a follow-up PR: an update and
+  composite hook on the final image before Present, a Plugins entry in `kFlatTabNames`, and a flat-session fixture counter in `addon_manager_test`.
 - **Flown 2026-10-16 (build `2fd5f50e`, Steam, OpenXR, edvr-mfd):** VR to flat to VR twice, live, with the add-on loaded (suspended, rows hidden,
   resumed with settings intact); focus release; clean exit; settings saved under `addon.edvr_mfd.*`; a flat launch logs the deferral and loads nothing.
 - **Flat to VR (future work, low priority).** Elite offers no way to select the HMD after a flat launch, so this transition cannot happen today; Sean

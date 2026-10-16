@@ -86,9 +86,10 @@ constexpr int kMenuMaxTabs = 8;
 // The Status page reaches 15 on the native path (the three headset lines
 // of docs/openxr-resolution-per-headset-2026-09-14.md); statusLine drops
 // silently past this, and the line it would drop is `Last write`. 17 since
-// 2026-10-14: the flat page gained its sixth row (Intro movie), and its rows, a
-// blank line and the ten-line warning (flat_elite_settings.h) are the whole card.
-constexpr int kMenuMaxLines = 17;
+// 2026-10-14: the flat page gained its sixth row (Intro movie), and 18 since
+// 2026-10-16 for its seventh (Sharp weapons): its rows, a blank line and the
+// ten-line warning (flat_elite_settings.h) are the whole card.
+constexpr int kMenuMaxLines = 18;
 constexpr int kMenuMaxTiles = 16;
 
 // A gauge: a big number with a small caption above and one small line

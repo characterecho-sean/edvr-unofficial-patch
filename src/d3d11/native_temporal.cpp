@@ -510,7 +510,13 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
   if(s->currentSettings.lag){px=s->previousJitter[eye][0];py=s->previousJitter[eye][1];}
   px*=s->currentSettings.signX;py*=s->currentSettings.signY;
   const float eyeOffset[3]={s->eyes[eye][3],s->eyes[eye][7],s->eyes[eye][11]};
+  float previousEyes[2][12] = {};
+  if(pd) {
+    std::memcpy(previousEyes[eye],s->history[eye].eye,sizeof(previousEyes[eye]));
+    std::memcpy(previousEyes[1-eye],s->history[eye].otherEye,sizeof(previousEyes[1-eye]));
+  }
   edvrTemporalAaNoteHead(int(eye),pd?s->history[eye].head:nullptr,pd?s->head:nullptr,pd?eyeOffset:nullptr);
+  edvr::temporalPassNoteEyes(int(eye),pd?previousEyes:nullptr,pd?s->eyes:nullptr);
   void* raw=edvrTemporalAa(source,int(eye),b,s->frusta[eye],prev,px,py,pd,pt,pto,s->nearZ[eye],s->farZ[eye],headDegrees,s->currentSettings.motion,s->currentSettings.blend,s->currentSettings.clamp,outW,outH,flags);
   s->treated[eye]=true;
   if(!raw){s->standDown=true;edvr::Log::get().note("native temporal: pass refused eye %u; future jitter disabled, current raw image retains its rendered FOV.",eye);return S_FALSE;}

@@ -15,9 +15,12 @@ inline bool flatProfileReadsKey(const char* key) {
     return std::strcmp(key, "advanced.d3d11_fixes") == 0 ||
         std::strcmp(key, "advanced.input_gate") == 0 ||
         std::strcmp(key, "advanced.flat_camera_producer_probe") == 0 ||
-        // The refusal view (flat_runtime.cpp): paints the prep's per-pixel class over the resolved image. Developer tier, no panel row.
+        // The refusal view (flat_runtime.cpp): paints the prep's per-pixel class over the resolved image. A flat panel row on the Debug tab.
         // Unlisted, getBool answers false here whatever the file says.
         std::strcmp(key, "advanced.flat_refusal_view") == 0 ||
+        // The CPU timing in the log (flat_runtime.cpp, flat_cpu.h Census::setClocks): the census's clocks, off unless this is on. A flat panel row
+        // on the Debug tab. Unlisted, getBool answers false here whatever the file says, and the timing could never be turned on from the panel.
+        std::strcmp(key, "advanced.flat_cpu_timing") == 0 ||
         std::strcmp(key, "hotkey.menu") == 0 ||
         std::strcmp(key, "fix.temporal_aa_model") == 0 ||
         std::strcmp(key, "hotkey.dump_draws") == 0 ||
@@ -34,6 +37,9 @@ inline bool flatProfileReadsKey(const char* key) {
         // The interface quality (flat panel row; ui_panel_scale.cpp's flat factor and the flat UI layer). The VR layer reads it
         // too, but stays inert in flat: it is live only with fix.temporal_aa on through this gate, which refuses that key.
         std::strcmp(key, "fix.ui_quality") == 0 ||
+        // The weapons fire and the shield ripple after the upscale (ui_layer.cpp's weapons and ripple halves, flat_ui_layer.cpp's adapter), on in flat as in VR:
+        // on | plain | off. Unlisted, getString answers "off" here and neither is ever taken.
+        std::strcmp(key, "fix.sharp_weapons") == 0 ||
         // The optimized station (optimized_station.cpp), on in flat as in VR (built v14.34). Unlisted, getString answers "off" here and the station never starts.
         std::strcmp(key, "fix.optimized_stations") == 0 ||
         // The flat jitter cycle's length (flat_runtime.cpp, FlatLivePhase::phaseCount; temporal_math.h). Developer tier, no flat panel

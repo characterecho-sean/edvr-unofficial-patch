@@ -53,6 +53,7 @@
 #include "capture_tests.h"
 #include "primary_copy_tests.h"
 #include "primary_copy_observer_tests.h"
+#include "claim_check_tests.h"
 #include "panel_tests.h"
 #include "corpus_identity.h"
 #include "actual_vs_link_test.h"
@@ -290,12 +291,14 @@ void corpus(ID3D11Device* device, ID3D11DeviceContext* context, const std::wstri
 int wmain(int argc, wchar_t** argv) {
     bool selfTest = false;
     bool bench = false;
+    bool claimOnly = false;   // --claim-check: only claim_check_tests, for mutants.py (the first failing check names the case)
     std::wstring corpusRoot;
     std::wstring realLinkRoot;
     for (int i = 1; i < argc; ++i) {
         const std::wstring a = argv[i];
         if (a == L"--self-test" || a == L"--dry-run") selfTest = true;
         else if (a == L"--bench") bench = true;
+        else if (a == L"--claim-check") claimOnly = true;
         else if (a == L"--verbose") lifecycle_tests::g_verbose = true;
         else if (a == L"--corpus" && i + 1 < argc) corpusRoot = argv[++i];
         else if (a == L"--partial") g_partial = true;
@@ -305,7 +308,7 @@ int wmain(int argc, wchar_t** argv) {
             return 2;
         }
     }
-    if (!bench && !selfTest && corpusRoot.empty() && realLinkRoot.empty()) {
+    if (!bench && !claimOnly && !selfTest && corpusRoot.empty() && realLinkRoot.empty()) {
         std::fprintf(stderr, "usage: engine_velocity_test --self-test | --dry-run [--corpus <edvr_logs dir> [--partial]] [--real-link <edvr_logs dir>]\n");
         return 2;
     }
@@ -316,6 +319,12 @@ int wmain(int argc, wchar_t** argv) {
         // Opt-in micro-benchmark of the job-thread observers (primary_copy_observer_tests.h); never part of the gate.
         D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &device, &level, &context);
         primary_copy_observer_tests::bench::run(device.Get());
+        return 0;
+    }
+    if (claimOnly) {
+        D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &device, &level, &context);
+        claim_check_tests::run(device.Get(), &check);
+        std::printf("engine_velocity_test: claim check: %u checks passed.\n", g_checks);
         return 0;
     }
     check(SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &device,
@@ -424,6 +433,7 @@ int wmain(int argc, wchar_t** argv) {
     capture_tests::run(device.Get(),context.Get(),&check);
     primary_copy_tests::run(device.Get(),context.Get(),&check);
     primary_copy_observer_tests::run(device.Get(),&check);
+    claim_check_tests::run(device.Get(),&check);
     panel_tests::run({device.Get(), context.Get(), &check});
     lifecycle_tests::run({device.Get(), context.Get(), &check});
     flat_lazy_tests::run({device.Get(), context.Get(), &check});

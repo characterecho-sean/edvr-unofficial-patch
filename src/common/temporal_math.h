@@ -208,6 +208,47 @@ inline void temporalRot3Of34(const float m34[12], float out[9]) {
     }
 }
 
+// Elite's camera rows are view -> world in its +z-forward coordinates. OpenXR's
+// raw eye-to-head matrices are in -z-forward coordinates; Elite receives
+// F*E*F, F = diag(1,1,-1). If the chosen rows belong to sourceEye, move the
+// entire rigid pose to targetEye before taking a frame delta. This includes
+// the eye translation, which a rotation-only conjugation would miss.
+inline void temporalRowsForEye(const float selected[12], int sourceEye, int targetEye,
+                               const float rawEyes[2][12], float out[12]) {
+    if (sourceEye == targetEye) {
+        memcpy(out, selected, sizeof(float) * 12);
+        return;
+    }
+    float sourceR[9], targetR[9], sourceRT[9], relativeR[9], selectedR[9], resultR[9];
+    for (int eye = 0; eye < 2; ++eye) {
+        float* r = eye == sourceEye ? sourceR : targetR;
+        temporalRot3Of34(rawEyes[eye], r);
+        r[2] = -r[2]; r[5] = -r[5]; r[6] = -r[6]; r[7] = -r[7]; // F*E*F
+    }
+    temporalTranspose3(sourceR, sourceRT);
+    temporalMul3(sourceRT, targetR, relativeR);
+    temporalRot3Of34(selected, selectedR);
+    temporalMul3(selectedR, relativeR, resultR);
+    const float sourceT[3] = {rawEyes[sourceEye][3], rawEyes[sourceEye][7], -rawEyes[sourceEye][11]};
+    const float targetT[3] = {rawEyes[targetEye][3], rawEyes[targetEye][7], -rawEyes[targetEye][11]};
+    const float dt[3] = {targetT[0] - sourceT[0], targetT[1] - sourceT[1], targetT[2] - sourceT[2]};
+    float local[3], world[3];
+    temporalApply3(sourceRT, dt, local);
+    temporalApply3(selectedR, local, world);
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) out[r * 4 + c] = resultR[r * 3 + c];
+        out[r * 4 + 3] = selected[r * 4 + 3] + world[r];
+    }
+}
+
+inline bool temporalEyesCanted(const float prevEyes[2][12], const float nowEyes[2][12]) {
+    for (int r = 0; r < 3; ++r) for (int c = 0; c < 3; ++c) {
+        const int k = r * 4 + c;
+        if (prevEyes[0][k] != prevEyes[1][k] || nowEyes[0][k] != nowEyes[1][k]) return true;
+    }
+    return false;
+}
+
 // The head's rotation delta from two of the runtime's poses (device ->
 // world, row-major 3x4): a fixed world direction seen in head space now
 // was seen at R_prev^T R_now of itself the frame before. Head space and
@@ -338,6 +379,30 @@ inline void temporalWorldFromRows(const float prev[12], const float now[12],
     W[6] = -W[6];
     W[7] = -W[7];
     tv[2] = -tv[2];
+}
+
+// The VR camera gate has already judged the unmodified chosen rows. On an
+// accepted canted frame, convert each source-eye pose to the target eye before
+// taking the world delta. False leaves W/tv untouched: parallel geometry,
+// unknown source eye, and a carried/refused gate retain the existing path.
+inline bool temporalCantedWorldFromSelected(const float prev[12], const float now[12],
+                                             int prevSourceEye, int nowSourceEye, int targetEye,
+                                             const float prevRawEyes[2][12],
+                                             const float nowRawEyes[2][12],
+                                             bool own, bool jump, float W[9], float tv[3]) {
+    // A source-eye switch would make the chosen rows jump by the cant angle.
+    // If the unmodified-row gate nevertheless called them continuous, the
+    // DSV labels cannot establish their basis. Keep its legacy result.
+    if (!own || prevSourceEye < 0 || prevSourceEye > 1 ||
+        nowSourceEye < 0 || nowSourceEye > 1 || targetEye < 0 || targetEye > 1 ||
+        prevSourceEye != nowSourceEye ||
+        !temporalEyesCanted(prevRawEyes, nowRawEyes)) return false;
+    float eyePrev[12], eyeNow[12], ignoredMove[3];
+    temporalRowsForEye(prev, prevSourceEye, targetEye, prevRawEyes, eyePrev);
+    temporalRowsForEye(now, nowSourceEye, targetEye, nowRawEyes, eyeNow);
+    temporalWorldFromRows(eyePrev, eyeNow, W, tv, ignoredMove);
+    if (jump) tv[0] = tv[1] = tv[2] = 0.0f;
+    return true;
 }
 
 // A camera translation of at least this many metres in one frame is the

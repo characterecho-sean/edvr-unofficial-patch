@@ -120,22 +120,53 @@ struct BillboardVariant {
     const char* name;      // names the compile in the log
 };
 
-constexpr int kVariantCount = 2;
+// The three explosion shaders (docs/particle-billboards.md, 2026-10-16 "facing"), each granted ITS OWN transcription by its
+// exact 64-bit content hash and by nothing else; billboard_facing_vs.h says why that is the rule and what holds it
+// (tools/billboard_facing_test runs the original bytes against each). They rose and decayed together in the 2026-10-16
+// flight: one effect. 9AEC596A2B036EA6 also draws the witchspace starfield and stays gated by fix.witchspace_stars.
+constexpr uint64_t kExplosionAVs = 0x9F4BBCFCD3B68BC9ull;
+constexpr uint64_t kExplosionBVs = 0xBBAD1CA808E1E292ull;
+
+// The fireball puffs (eye dump 2026-10-16): AFBCD3ADB9092F78 is 9F4B's no-near-fade twin (PS 2BAE3742FEB916D9) and
+// 4BDE4DBF88C2BA27 is BBAD's no-fade twin (PS E54F2A902E5631F6). Each has its OWN transcription, written from its own
+// bytecode; AFBC resembles 9AEC more (0.864) than its true twin 9F4B (0.727), so hashes are matched exactly and nothing
+// else.
+constexpr uint64_t kFireballAVs = 0xAFBCD3ADB9092F78ull;
+constexpr uint64_t kFireballBVs = 0x4BDE4DBF88C2BA27ull;
+
+constexpr int kVariantCount = 7;
+constexpr int kFirstFacingVariant = 2;   // 0 plume and 1 flare claim the draw (kParticle); 2.. stay in the ladder
 const BillboardVariant kVariants[kVariantCount] = {
     {kPlumeVs, kParticleWorldBytecode, sizeof(kParticleWorldBytecode),
      "particle_vs"},
     {kFlareVs, kFlareWorldBytecode, sizeof(kFlareWorldBytecode),
      "flare_vs"},
+    {kExplosionAVs, kFacing9F4BWorldBytecode, sizeof(kFacing9F4BWorldBytecode), "facing_9F4B_vs"},
+    {kExplosionBVs, kFacingBBADWorldBytecode, sizeof(kFacingBBADWorldBytecode), "facing_BBAD_vs"},
+    {kWitchspaceStarsVs, kFacing9AECWorldBytecode, sizeof(kFacing9AECWorldBytecode), "facing_9AEC_vs"},
+    {kFireballAVs, kFacingAFBCWorldBytecode, sizeof(kFacingAFBCWorldBytecode), "facing_AFBC_vs"},
+    {kFireballBVs, kFacing4BDEWorldBytecode, sizeof(kFacing4BDEWorldBytecode), "facing_4BDE_vs"},
 };
 // The draw path's inline prefilter (particleOnDrawMayMatch, particle_fix.h)
 // compares against its own copy of these hashes; a variant added here and
 // not there would be silently never offered, so the two lists must agree.
-static_assert(kVariantCount == 2 && detail::kParticleVariantVs[0] == kPlumeVs &&
-                  detail::kParticleVariantVs[1] == kFlareVs,
-              "particle_fix.h's kParticleVariantVs must list kVariants' hashes in order");
+constexpr bool variantTableAgrees() {
+    for (int i = 0; i < kVariantCount; ++i)
+        if (kVariants[i].hash != detail::kBillboardVs[i]) return false;
+    return true;
+}
+static_assert(variantTableAgrees(), "particle_fix.h's kBillboardVs must list kVariants' hashes in order, then kRollFreeVs'");
 
 const char* variantLabel(int v) {
-    return (v == 1) ? "solar flare" : "smoke plume";
+    switch (v) {
+    case 1: return "solar flare";
+    case 2: return "explosion (9F4B)";
+    case 3: return "explosion (BBAD)";
+    case 4: return "explosion sprite / starfield (9AEC)";
+    case 5: return "fireball puff (AFBC)";
+    case 6: return "fireball puff (4BDE)";
+    default: return "smoke plume";
+    }
 }
 
 // cb1 is 280 registers. The basis vectors live at 278 and 279 -- floats
@@ -189,22 +220,25 @@ uint64_t boundVsHashFast(ID3D11DeviceContext* ctx) {
 // the direct form (position += cb1[277] * x + cb1[278] * y), or the fallback up of a shader that takes a supplied
 // axis when it has one (1FBA99C4911D7ACF, DB113566B6A59C5B: movc axis, cb3[1], cb1[278]). None uses either row
 // for a lighting or view-space vector. cb1[279] and everything else are left as the game wrote them.
-constexpr int kRollFreeCount = 16;
+//
+// Five of the original sixteen moved to kVariants on 2026-10-16: 9F4BBCFCD3B68BC9, BBAD1CA808E1E292 and 9AEC596A2B036EA6
+// (the explosion), then AFBCD3ADB9092F78 and 4BDE4DBF88C2BA27 (the fireball puffs, found by the eye dump): a roll-free
+// basis kept the camera's forward, so the explosion flexed with head pitch.
+constexpr int kRollFreeCount = 11;
 constexpr uint64_t kRollFreeVs[kRollFreeCount] = {
-    0x9AEC596A2B036EA6ull,   // the witchspace starfield (skipped while fix.witchspace_stars = off)
-    0xAFBCD3ADB9092F78ull, 0xBBAD1CA808E1E292ull, 0x1B285CBC9F185D4Dull, 0x4BDE4DBF88C2BA27ull,
-    0x78F5F08D02EE38CCull,   // explosion suspect
-    0x9F4BBCFCD3B68BC9ull,   // explosion suspect (no alignment cascade at all)
+    0x1B285CBC9F185D4Dull,
+    0x78F5F08D02EE38CCull,   // drew around the explosion
     0x1FBA99C4911D7ACFull, 0x2BF557356A28AA0Dull, 0xDB113566B6A59C5Bull,
     0x68DDDEF04D9894AFull,   // the stretched sky billboard (direct span)
     0xF7A6E916F14A3B1Aull,   // direct span
     0x12382D2EA45E9632ull, 0x94EA991C3A03DBD9ull, 0xC31238331D8AC3D4ull, 0xF1502353BE051A2Dull};   // pool-record sprites (direct span)
 constexpr bool rollFreeTableAgrees() {
     for (int i = 0; i < kRollFreeCount; ++i)
-        if (kRollFreeVs[i] != detail::kBillboardVs[2 + i]) return false;
+        if (kRollFreeVs[i] != detail::kBillboardVs[kVariantCount + i]) return false;
     return true;
 }
-static_assert(rollFreeTableAgrees(), "particle_fix.h's kBillboardVs must list the two transcriptions and then kRollFreeVs in order");
+static_assert(rollFreeTableAgrees() && kVariantCount + kRollFreeCount == 18,
+              "particle_fix.h's kBillboardVs must list the transcriptions and then kRollFreeVs in order");
 
 int rollFreeIndexOf(uint64_t h) {
     for (int i = 0; i < kRollFreeCount; ++i)
@@ -235,6 +269,12 @@ int      g_rfIndex = -1;
 uint64_t g_rfSeen[kRollFreeCount] = {};
 uint64_t g_rfBound[kRollFreeCount] = {};
 bool     g_rfNoted[kRollFreeCount] = {};
+// The transcribed explosion shaders (kVariants[kFirstFacingVariant..]) are counted apart from the rebound ones: drawn,
+// and swapped for the facing transcription. The pending draw's kind: 0 none, 1 roll-free rebind, 2 facing swap.
+uint64_t g_fcSeen[kVariantCount] = {};
+uint64_t g_fcDone[kVariantCount] = {};
+bool     g_fcNoted[kVariantCount] = {};
+int      g_rfKind = 0;
 uint64_t g_rfFrames = 0;
 uint64_t g_rfNoteMs = 0;
 rollfree::Counters g_rfAtNote;
@@ -471,16 +511,38 @@ void rollFreeReport(uint64_t now) {
     const uint64_t noBasis = c.noBasis - g_rfAtNote.noBasis, fails = c.failures - g_rfAtNote.failures;
     bool any = false;
     for (int i = 0; i < kRollFreeCount; ++i) any |= g_rfSeen[i] != 0;
+    for (int i = kFirstFacingVariant; i < kVariantCount; ++i) any |= g_fcSeen[i] != 0;
     if (!any) {
         put("billboard roll-free (%llu frame(s)): not exercised, none of the %d vertex shaders drew; %s",
-            static_cast<unsigned long long>(g_rfFrames), kRollFreeCount,
+            static_cast<unsigned long long>(g_rfFrames), kRollFreeCount + kVariantCount - kFirstFacingVariant,
             anyBlockWatched() ? "a scene block is watched" : "no scene block is watched");
     } else {
-        put("billboard roll-free (%llu frame(s)), rebound/seen by vertex shader:", static_cast<unsigned long long>(g_rfFrames));
-        for (int i = 0; i < kRollFreeCount; ++i) {
-            if (!g_rfSeen[i]) continue;
-            put(" %016llX %llu/%llu;", static_cast<unsigned long long>(kRollFreeVs[i]),
-                static_cast<unsigned long long>(g_rfBound[i]), static_cast<unsigned long long>(g_rfSeen[i]));
+        // Two kinds, counted apart: TRANSCRIBED (facing: the explosion shaders swapped for their own transcription) and
+        // REBOUND (roll-free: a copy of the scene block with rows 277/278 levelled, at vertex slot 1).
+        put("billboard roll-free (%llu frame(s)).", static_cast<unsigned long long>(g_rfFrames));
+        bool anyFc = false;
+        for (int i = kFirstFacingVariant; i < kVariantCount; ++i) anyFc |= g_fcSeen[i] != 0;
+        if (anyFc) {
+            put(" Transcribed (facing), swapped/seen:");
+            for (int i = kFirstFacingVariant; i < kVariantCount; ++i) {
+                if (!g_fcSeen[i]) continue;
+                put(" %016llX %llu/%llu;", static_cast<unsigned long long>(kVariants[i].hash),
+                    static_cast<unsigned long long>(g_fcDone[i]), static_cast<unsigned long long>(g_fcSeen[i]));
+            }
+        } else {
+            put(" Transcribed (facing): not exercised.");
+        }
+        bool anyRf = false;
+        for (int i = 0; i < kRollFreeCount; ++i) anyRf |= g_rfSeen[i] != 0;
+        if (anyRf) {
+            put(" Rebound (roll-free), rebound/seen:");
+            for (int i = 0; i < kRollFreeCount; ++i) {
+                if (!g_rfSeen[i]) continue;
+                put(" %016llX %llu/%llu;", static_cast<unsigned long long>(kRollFreeVs[i]),
+                    static_cast<unsigned long long>(g_rfBound[i]), static_cast<unsigned long long>(g_rfSeen[i]));
+            }
+        } else {
+            put(" Rebound (roll-free): not exercised.");
         }
         put(" block copies %.2f/frame for %llu rebound draw(s)", g_rfFrames ? static_cast<double>(copies) / static_cast<double>(g_rfFrames) : 0.0,
             static_cast<unsigned long long>(binds));
@@ -499,6 +561,7 @@ void rollFreeReport(uint64_t now) {
     }
     Log::get().note("%s", line);
     for (int i = 0; i < kRollFreeCount; ++i) { g_rfSeen[i] = 0; g_rfBound[i] = 0; }
+    for (int i = 0; i < kVariantCount; ++i) { g_fcSeen[i] = 0; g_fcDone[i] = 0; }
     g_rfFrames = 0;
     g_rfAtNote = c;
     g_cpuSampled = 0;
@@ -546,19 +609,21 @@ bool particleOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
     const uint64_t h = boundVsHashFast(ctx);
     int variant = -1;
     int rf = -1;
-    if (h == kVariants[0].hash) variant = 0;
-    else if (h == kVariants[1].hash) variant = 1;
-    else rf = rollFreeIndexOf(h);
-    if (variant >= 0) {
-        // The two transcriptions keep their rule: instanced geometry of at least a quad.
+    for (int i = 0; i < kVariantCount; ++i)
+        if (h == kVariants[i].hash) { variant = i; break; }
+    if (variant < 0) rf = rollFreeIndexOf(h);
+    if (variant >= 0 && variant < kFirstFacingVariant) {
+        // The plume and the flare keep their rule: instanced geometry of at least a quad. They CLAIM the draw (kParticle).
         if (kind != 'X' && kind != 'N') return false;
         if (instances == 0 || count < 6) return false;
         g_activeVariant = variant;
-    } else if (rf >= 0) {
+    } else if (variant >= 0 || rf >= 0) {
+        // The explosion transcriptions and the roll-free families stay in the ladder: the draw is told by its exact hash.
         if (count < 3) return false;
-        // fix.witchspace_stars = off withholds this draw further down the ladder; do not rebind a draw that is not made.
+        // fix.witchspace_stars = off withholds this draw further down the ladder; do not rebind or swap a draw that is not made.
         if (h == kWitchspaceStarsVs && g_hideWitchspaceStars) return false;
-        ++g_rfSeen[rf];
+        if (variant >= 0) ++g_fcSeen[variant];
+        else ++g_rfSeen[rf];
     } else {
         return false;
     }
@@ -597,12 +662,22 @@ bool particleOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
     particlecap::Shadow* sh = &g_blocks.at(slot)->shadow;
     g_cur = sh;
     if (!sh->valid) return false;
-    if (variant >= 0) return shapeOk(reinterpret_cast<const float*>(sh->bytes), sh->size / 4);
+    if (variant >= 0 && variant < kFirstFacingVariant) return shapeOk(reinterpret_cast<const float*>(sh->bytes), sh->size / 4);
+    if (variant >= 0) {
+        // An explosion transcription: the swap is armed for forwardWithVerdict, which makes it around the draw; the draw
+        // keeps its place in the ladder. The same readiness test the plume has (a solved camera needs a unit forward).
+        if (!shapeOk(reinterpret_cast<const float*>(sh->bytes), sh->size / 4)) return false;
+        g_activeVariant = variant;
+        g_rfKind = 2;
+        detail::g_rollFreePending = true;
+        return false;
+    }
 
     // A roll-free family: arm the rebind for forwardWithVerdict and leave the draw in the ladder as the game made it.
     if (sh->size < particlecap::kRangeEnd) return false;
     g_rfSlot = slot;
     g_rfIndex = rf;
+    g_rfKind = 1;
     detail::g_rollFreePending = true;
     g_copyGpuCtx = ctx;
     return false;
@@ -610,7 +685,30 @@ bool particleOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
 
 void particleRollFreeBegin(ID3D11DeviceContext* ctx) {
     detail::g_rollFreePending = false;
-    if (!ctx || detail::g_particleMode != Mode::kSteady || g_rfSlot < 0 || g_rfIndex < 0) return;
+    const int kind = g_rfKind;
+    g_rfKind = 0;
+    if (!ctx || detail::g_particleMode != Mode::kSteady) return;
+    if (kind == 2) {
+        // The facing transcription: the same swap the plume gets (the vertex shader and the viewer feed at b3), around a draw
+        // that otherwise goes through the ladder as the game made it.
+        const int variant = g_activeVariant;
+        particleBegin(ctx);
+        if (g_engaged) {
+            detail::g_rollFreeEngaged = true;
+            if (variant >= 0 && variant < kVariantCount) {
+                ++g_fcDone[variant];
+                if (!g_fcNoted[variant]) {
+                    g_fcNoted[variant] = true;
+                    Log::get().note(
+                        "particle billboard: facing transcription first used for vs %016llX (%s); the viewer feed is %s.",
+                        static_cast<unsigned long long>(kVariants[variant].hash), variantLabel(variant),
+                        g_camOk ? "solved" : "NOT solved, so this draw keeps the game's basis");
+                }
+            }
+        }
+        return;
+    }
+    if (kind != 1 || g_rfSlot < 0 || g_rfIndex < 0) return;
     guardedBudget(g_rfBudget, [&] {
         const bool timed = ((++g_rfBindCalls) & 7u) == 0;
         const int64_t t0 = timed ? qpcNow() : 0;
@@ -640,7 +738,8 @@ void particleRollFreeBegin(ID3D11DeviceContext* ctx) {
 void particleRollFreeEnd(ID3D11DeviceContext* ctx) {
     if (!detail::g_rollFreeEngaged) return;
     detail::g_rollFreeEngaged = false;
-    g_blocks.restore(ctx);
+    if (g_engaged) particleEnd(ctx);   // a facing swap: the game's vertex shader and its b3 back
+    g_blocks.restore(ctx);             // a roll-free rebind: vertex slot 1 back (a no-op when nothing is bound)
 }
 
 void particleBegin(ID3D11DeviceContext* ctx) {

@@ -1,6 +1,7 @@
-// The rows of the flat profile's F8 panel ("Flat graphics"), in one table.
+// The rows of the flat profile's F8 panel, in two tables: the Performance tab (kFlatPageRows, the panel's settings) and the Debug tab
+// (kFlatDebugRows, two toggles every flat user may reach, labelled debug).
 //
-// menu.cpp builds the page from it, and tools\flat_sharpen_test reads it to
+// menu.cpp builds the pages from them, and tools\flat_sharpen_test reads them to
 // fail the build for any row whose key the flat profile's gate refuses
 // (runtime_profile.h: runtimeProfileAllowsKey). A refused key raises no error:
 // its getter answers 0 or "off", so the row shows a value that does nothing and
@@ -36,10 +37,33 @@ inline constexpr FlatPageRow kFlatPageRows[] = {
     {"fix", "temporal_aa_model", FlatRowRead::Allowlist},
     {"fix", "render_sharpness",  FlatRowRead::Allowlist},
     {"fix", "ui_quality",        FlatRowRead::Allowlist},
+    {"fix", "sharp_weapons",     FlatRowRead::Allowlist},   // directly under UI quality, as in VR (2026-10-16)
     {"fix", "optimized_stations", FlatRowRead::Allowlist},
 };
 inline constexpr size_t kFlatPageRowCount = sizeof(kFlatPageRows) / sizeof(kFlatPageRows[0]);
 
+// The Debug tab (2026-10-16). Both are [advanced] keys with `menu debug` on their ui: line in edvr.ini (a per-key exception of
+// tools\gen_settings_schema.py, MENU_ADVANCED_EXCEPTIONS), both toggles, both live, both off by default:
+//   flat_cpu_timing   CPU timing in the log   the census's clocks (flat_cpu.h Census::setClocks, flat_runtime.cpp)
+//   flat_refusal_view Motion source view      the prep's per-pixel class painted over the resolved image
+// Order is the tab's: menu.cpp walks the generated schema (edvr.ini order) and keeps the `debug` rows named here.
+inline constexpr FlatPageRow kFlatDebugRows[] = {
+    {"advanced", "flat_cpu_timing",   FlatRowRead::Allowlist},
+    {"advanced", "flat_refusal_view", FlatRowRead::Allowlist},
+};
+inline constexpr size_t kFlatDebugRowCount = sizeof(kFlatDebugRows) / sizeof(kFlatDebugRows[0]);
+// The generated page name the Debug rows carry (the `menu debug` token).
+inline constexpr const char* kFlatDebugPage = "debug";
+// The tabs, in order: the existing page renamed Performance, then Debug. Debug is always last.
+inline constexpr const char* kFlatTabNames[] = {"Performance", "Debug"};
+inline constexpr size_t kFlatTabCount = sizeof(kFlatTabNames) / sizeof(kFlatTabNames[0]);
+
+inline bool flatDebugHasRow(const char* section, const char* key) {
+    for (const FlatPageRow& r : kFlatDebugRows) {
+        if (std::strcmp(r.section, section) == 0 && std::strcmp(r.key, key) == 0) return true;
+    }
+    return false;
+}
 inline bool flatPageHasRow(const char* section, const char* key) {
     for (const FlatPageRow& r : kFlatPageRows) {
         if (std::strcmp(r.section, section) == 0 && std::strcmp(r.key, key) == 0) return true;
@@ -57,12 +81,25 @@ inline bool flatSharpenRowDim(bool flatProfile, bool antiAliasingOn) {
     return flatProfile && !antiAliasingOn;
 }
 
+// Whether the Sharp weapons row is dimmed (and ignores steps and typing): it lays its layer over the temporal pass's
+// output, so with anti-aliasing off there is nothing for them to act on. The same in both profiles (the caller passes the profile's own reading of
+// fix.temporal_aa). One function so a rig can read the whole truth table; menu.cpp asks it and nothing else.
+inline bool weaponsRowDim(bool antiAliasingOn) {
+    return !antiAliasingOn;
+}
+
 // The first Allowlist row whose dotted key `allows` refuses, or null. `allows` is
 // runtimeProfileAllowsKey in the product and a deliberately broken copy in the rig
 // that proves this check can fail.
 template <class Allows>
 const FlatPageRow* flatPageFirstRefused(Allows allows) {
     for (const FlatPageRow& r : kFlatPageRows) {
+        if (r.read != FlatRowRead::Allowlist) continue;
+        char dotted[96];
+        std::snprintf(dotted, sizeof(dotted), "%s.%s", r.section, r.key);
+        if (!allows(static_cast<const char*>(dotted))) return &r;
+    }
+    for (const FlatPageRow& r : kFlatDebugRows) {
         if (r.read != FlatRowRead::Allowlist) continue;
         char dotted[96];
         std::snprintf(dotted, sizeof(dotted), "%s.%s", r.section, r.key);

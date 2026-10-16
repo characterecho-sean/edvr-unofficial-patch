@@ -237,6 +237,10 @@ float temporalPassDepthAt(float metres);
 
 void temporalPassShutdown();
 
+// Both raw eye-to-head matrices from the native temporal channel. Internal to
+// d3d11.dll; the established exported head-pose ABI stays unchanged.
+void temporalPassNoteEyes(int eye, const float (*prevEyes)[12],
+                          const float (*nowEyes)[12]);
 }  // namespace edvr
 
 extern "C" {
@@ -298,11 +302,8 @@ __declspec(dllexport) void* edvrTemporalAa(void* srcTex, int eye,
                                            unsigned outW, unsigned outH,
                                            unsigned flags);
 
-// The headset's pose for the frame the history holds and for this one
-// (the runtime's 3x4 rows, head -> tracking, the poses the game rendered
-// from) and this eye's offset in head space, noted before each
-// edvrTemporalAa: the world path composes the ship's camera rows with
-// them, since the rows carry no headset. Null pointers clear the note.
+// The runtime's previous/current head poses and this eye's offset, noted
+// immediately before this eye's treat. Null clears the note.
 __declspec(dllexport) void edvrTemporalAaNoteHead(int eye, const float* prevPose,
                                                   const float* nowPose,
                                                   const float* eyeOffset);

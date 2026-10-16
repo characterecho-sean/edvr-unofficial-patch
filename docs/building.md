@@ -22,6 +22,13 @@ Then build:
 build.bat
 ```
 
+For a native Windows test build without a local Windows machine, run the manual
+**Windows installer test build** workflow from GitHub Actions. It runs the full
+`build.bat --wait-lock --jobs 4` validation on Windows Server 2022 and uploads
+`edvr-installer.exe` with `full_build_receipt.json` only after all gates pass.
+Download them into `build/` to try `./edvr_installer.sh` locally on Linux. The
+workflow uploads build diagnostics separately and does not publish a release.
+
 That produces the native graphics/runtime pair, `build\openxr_loader.dll`, and
 `build\smoke.exe`; the last of these checks the build without the game or a
 headset:

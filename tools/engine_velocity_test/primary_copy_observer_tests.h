@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstring>
 #include <memory>
+#include <tuple>
 #include <string>
 #include <thread>
 #include <vector>
@@ -72,20 +73,40 @@ using Check=void (*)(bool,const char*);
 constexpr uint32_t kFrame=42;
 // The published pool view (any patch, the active leases as (base, slots)) equals what g_pools holds, and no write is mid-flight.
 inline bool viewExact() {
-    std::vector<std::pair<uintptr_t,uint32_t>> truth,seen;bool patches=false;
+    // Each lease also publishes a bound on its pool's patch slots: sound (every patch inside it) and "none" (lo>hi) exactly when the pool holds none.
+    struct Lease { uintptr_t base;uint32_t slots,lo,hi;bool operator<(const Lease& o) const {return std::tie(base,slots,lo,hi)<std::tie(o.base,o.slots,o.lo,o.hi);} };
+    std::vector<Lease> truth,seen;bool patches=false;
     for(const auto& entry:copy::g_pools) {
         patches=patches || !entry.second.patches.empty();
-        if(entry.second.active)truth.push_back({entry.second.base,entry.second.bytes/copy::kBytes});
+        if(!entry.second.active)continue;
+        uint32_t lo=~0u,hi=0;for(const auto& p:entry.second.patches){lo=std::min(lo,p.first);hi=std::max(hi,p.first);}
+        truth.push_back({entry.second.base,entry.second.bytes/copy::kBytes,lo,hi});
     }
     const uint32_t n=copy::g_poolView.count.load();
-    if((copy::g_poolView.seq.load()&1u) || copy::g_poolView.patches.load()!=patches || n!=truth.size())return false;
-    for(uint32_t i=0;i<n;++i)seen.push_back({copy::g_poolView.base[i].load(),copy::g_poolView.slots[i].load()});
-    std::sort(truth.begin(),truth.end());std::sort(seen.begin(),seen.end());return truth==seen;
+    if((copy::g_poolView.seq.load()&1u) || (copy::g_publishSeq.load()&1u) || copy::g_poolView.patches.load()!=patches || n!=truth.size())return false;
+    for(uint32_t i=0;i<n;++i)seen.push_back({copy::g_poolView.base[i].load(),copy::g_poolView.slots[i].load(),copy::g_poolView.patchLo[i].load(),copy::g_poolView.patchHi[i].load()});
+    std::sort(truth.begin(),truth.end());std::sort(seen.begin(),seen.end());
+    for(size_t i=0;i<truth.size();++i) {
+        if(truth[i].base!=seen[i].base || truth[i].slots!=seen[i].slots)return false;
+        const bool noneTruth=truth[i].lo>truth[i].hi,noneSeen=seen[i].lo>seen[i].hi;
+        if(noneTruth!=noneSeen || (!noneTruth && (seen[i].lo>truth[i].lo || seen[i].hi<truth[i].hi)))return false;
+    }
+    return true;
+}
+// The published claim snapshot (the live claim addresses, sorted, or "more than it holds"; whether a plan is in flight) equals the containers.
+inline bool claimViewExact() {
+    copy::ClaimViewState truth,seen;truth.plans=!copy::g_mergePlans.empty();
+    std::vector<uintptr_t> keys;for(const auto& e:copy::g_emissions)keys.push_back(e.first);std::sort(keys.begin(),keys.end());
+    if(keys.size()>copy::kClaimViewMax)truth.count=copy::kClaimViewMax+1;
+    else {truth.count=uint32_t(keys.size());for(size_t i=0;i<keys.size();++i)truth.address[i]=keys[i];}
+    seen.count=copy::g_claimView.count.load();seen.plans=copy::g_claimView.plans.load();
+    for(uint32_t i=0;i<copy::kClaimViewMax;++i)seen.address[i]=copy::g_claimView.address[i].load();
+    return !(copy::g_claimView.seq.load()&1u) && truth==seen;
 }
 // Everything the lock-free exits read equals the state they stand for.
 inline bool published() {
     return copy::g_claimsLive.load()==(!copy::g_emissions.empty() || !copy::g_mergePlans.empty()) &&
-           copy::g_emissionsLive.load()==!copy::g_emissions.empty() && viewExact();
+           copy::g_emissionsLive.load()==!copy::g_emissions.empty() && viewExact() && claimViewExact();
 }
 inline uintptr_t addressOf(const Record& r){return reinterpret_cast<uintptr_t>(&r);}
 inline bool held(uintptr_t address){return copy::g_emissions.count(address)==1;}
@@ -154,7 +175,7 @@ inline void referenceCopier(uintptr_t base,uint32_t stride,uintptr_t source,uint
            src!=emission.patch.native || dst!=emission.patch.native) {++copy::g_stats.declined;continue;}
         try {
             if(pool->patches.size()>=copy::kMaxPatches){copy::overflow(frame);return;}
-            copy::Patch patch=emission.patch;patch.slot=firstSlot+i;pool->patches[patch.slot]=patch;++copy::g_stats.joined;
+            copy::Patch patch=emission.patch;patch.slot=firstSlot+i;copy::notePatch(*pool,patch.slot);pool->patches[patch.slot]=patch;++copy::g_stats.joined;
         } catch(...) {copy::overflow(frame);return;}
     }
 }
@@ -249,11 +270,38 @@ inline void runCopier(ID3D11Device* device,Check check) {
     equivalent("another base",[&]{mapA();},[&](bool r){copyOf(r,baseB,336,source,0,1);},true);
     equivalent("two leases at one base",[&]{mapA();mapB(baseA);},[&](bool r){copyOf(r,baseA,336,source,0,1);},false);
     equivalent("a patch in the range",[&]{mapA();join(1);},[&](bool r){copyOf(r,baseA,336,source,0,2);},false);
-    equivalent("a patch outside the range",[&]{mapA();join(1);},[&](bool r){copyOf(r,baseA,336,source,2,2);},false);
-    equivalent("a patch in a lease that ended",[&]{mapA();join(1);copy::endMap(poolA.Get(),1);},[&](bool r){copyOf(r,baseB,336,source,0,1);},false);
+    equivalent("a patch outside the range",[&]{mapA();join(1);},[&](bool r){copyOf(r,baseA,336,source,2,2);},true);   // the claim check (round 6) hands it back
+    equivalent("a patch in a lease that ended",[&]{mapA();join(1);copy::endMap(poolA.Get(),1);},[&](bool r){copyOf(r,baseB,336,source,0,1);},true);
     equivalent("a claim that joins",[&]{mapA();mappedA[2]=src[2];claim(src[2],kFrame);},[&](bool r){copyOf(r,baseA,336,addressOf(src[2]),2,1);},false);
     equivalent("a claim with no lease",[&]{claim(src[2],kFrame);},[&](bool r){copyOf(r,baseA,336,addressOf(src[2]),2,1);},false);
-    equivalent("a claim elsewhere",[&]{mapA();claim(src[0],kFrame);},[&](bool r){copyOf(r,baseA,336,source,0,1);},false);
+    equivalent("a claim elsewhere",[&]{mapA();claim(src[0],kFrame);},[&](bool r){copyOf(r,baseA,336,source,0,1);},true);   // the claim check (round 6) hands it back
+    // Round 6: the copier's claim check, against the frozen locked copier, on every shape of claim, patch and lease around the range.
+    static Record extra[3]={record(50),record(51),record(52)};
+    equivalent("a claim elsewhere, no lease",[&]{claim(src[0],kFrame);},[&](bool r){copyOf(r,baseB,336,source,0,1);},true);
+    equivalent("a claim just below the range",[&]{mapA();claim(src[2],kFrame);},[&](bool r){copyOf(r,baseA,336,source,3,1);},true);
+    equivalent("a claim just past the range",[&]{mapA();claim(src[3],kFrame);},[&](bool r){copyOf(r,baseA,336,addressOf(src[2]),2,1);},true);
+    equivalent("a claim in the range's second record",[&]{mapA();mappedA[3]=src[3];claim(src[3],kFrame);},[&](bool r){copyOf(r,baseA,336,addressOf(src[2]),2,2);},false);
+    equivalent("a claim in the range's first record",[&]{mapA();mappedA[2]=src[2];claim(src[2],kFrame);},[&](bool r){copyOf(r,baseA,336,addressOf(src[2]),2,2);},false);
+    equivalent("a claim between two records of the range",[&]{mapA();claim(extra[0],kFrame);},[&](bool r){copyOf(r,baseA,336,addressOf(extra[0])-8,0,1);},true);
+    equivalent("four claims elsewhere",[&]{mapA();claim(src[0],kFrame);claim(src[1],kFrame);claim(extra[0],kFrame);claim(extra[1],kFrame);},
+               [&](bool r){copyOf(r,baseA,336,source,0,1);},true);
+    equivalent("five claims elsewhere",[&]{mapA();claim(src[0],kFrame);claim(src[1],kFrame);claim(extra[0],kFrame);claim(extra[1],kFrame);claim(extra[2],kFrame);},
+               [&](bool r){copyOf(r,baseA,336,source,0,1);},false);
+    equivalent("four claims, the fourth in the range",[&]{mapA();mappedA[3]=src[3];claim(src[0],kFrame);claim(src[1],kFrame);claim(extra[0],kFrame);claim(src[3],kFrame);},
+               [&](bool r){copyOf(r,baseA,336,source,3,1);},false);
+    equivalent("a patch below the range, a claim elsewhere",[&]{mapA();join(0);claim(src[1],kFrame);},[&](bool r){copyOf(r,baseA,336,source,3,1);},true);
+    equivalent("a patch at the range's last slot, a claim elsewhere",[&]{mapA();join(2);claim(src[0],kFrame);},[&](bool r){copyOf(r,baseA,336,source,1,2);},false);
+    equivalent("a patch at the range's first slot, a claim elsewhere",[&]{mapA();join(1);claim(src[0],kFrame);},[&](bool r){copyOf(r,baseA,336,source,1,2);},false);
+    equivalent("a patch just past the range, a claim elsewhere",[&]{mapA();join(2);claim(src[0],kFrame);},[&](bool r){copyOf(r,baseA,336,source,0,2);},true);
+    equivalent("a patch, a claim elsewhere, a range past the lease",[&]{mapA();join(0);claim(src[1],kFrame);},[&](bool r){copyOf(r,baseA,336,source,3,2);},false);
+    equivalent("a patch, a claim elsewhere, two leases at the base",[&]{mapA();mapB(baseA);join(0);claim(src[1],kFrame);},[&](bool r){copyOf(r,baseA,336,source,3,1);},false);
+    equivalent("a patch in another pool, a claim elsewhere",[&]{mapA();mapB(baseB);mappedB[1]=src[1];claim(src[1],kFrame);
+                   copy::copier(baseB,336,addressOf(src[1]),1,1,kFrame);claim(src[0],kFrame);},[&](bool r){copyOf(r,baseA,336,source,0,2);},true);
+    equivalent("a plan in flight and a claim elsewhere",[&]{
+        static Tree detached(1,1);static Destination dst;
+        mapA();detached.item(0,0,0)=record(5);claim(detached.item(0,0,0),kFrame);claim(src[0],kFrame);
+        copy::beginMergeOpaque(dst.ptr(),detached.anchor(0),kFrame);   // the detached claim is staged into the plan; src[0] stays a claim
+    },[&](bool r){copyOf(r,baseA,336,source,0,1);},false);
     equivalent("a detached merge plan in flight, no emission",[&]{
         static Tree detached(1,1);static Destination dst;
         mapA();detached.item(0,0,0)=record(5);claim(detached.item(0,0,0),kFrame);
@@ -276,7 +324,9 @@ inline void runCopier(ID3D11Device* device,Check check) {
         copy::reset();mapA();
         static ID3D11Buffer* hookPool;hookPool=poolA.Get();
         copy::g_copierMidRead=+[]() noexcept {copy::endMap(hookPool,1);};
+        copy::g_claimPrecheck=false;   // this case is the quiet exit's own re-check; the claim check, which would then hand the call back, is C11
         copy::copier(baseA,336,source,0,4,kFrame);
+        copy::g_claimPrecheck=true;
         copy::g_copierMidRead=nullptr;
         check(copy::g_stats.copies==1 && copy::g_stats.copierNoLease==1 && copy::g_copierSkipped.load()==0 && published(),
               "copier: a view that moved between the reads and the re-check sends the copy to the mutex, which then finds no lease");
@@ -315,9 +365,11 @@ inline void runCopier(ID3D11Device* device,Check check) {
         check(finishesWhileHeld([&]{copy::copier(baseA,336,source,0,0,kFrame);},5000),"mutex: a copy of nothing returns while another thread holds g_mutex");
         check(!finishesWhileHeld([&]{copy::copier(baseA,336,source,3,2,kFrame);},150),"mutex: a copy past the lease blocks until g_mutex is released");
         copy::reset();mapA();join(1);
-        check(!finishesWhileHeld([&]{copy::copier(baseA,336,source,2,1,kFrame);},150),"mutex: a copy while a pool holds a patch blocks until g_mutex is released");
+        check(finishesWhileHeld([&]{copy::copier(baseA,336,source,2,1,kFrame);},5000),"mutex: a copy beside a patch it does not meet returns while another thread holds g_mutex");
+        check(!finishesWhileHeld([&]{copy::copier(baseA,336,source,1,1,kFrame);},150),"mutex: a copy over a pool's patch blocks until g_mutex is released");
         copy::reset();mapA();claim(src[0],kFrame);
-        check(!finishesWhileHeld([&]{copy::copier(baseA,336,source,2,1,kFrame);},150),"mutex: a copy while a claim is live blocks until g_mutex is released");
+        check(finishesWhileHeld([&]{copy::copier(baseA,336,source,2,1,kFrame);},5000),"mutex: a copy beside a live claim it does not hold returns while another thread holds g_mutex");
+        check(!finishesWhileHeld([&]{copy::copier(baseA,336,addressOf(src[0]),0,1,kFrame);},150),"mutex: a copy of a live claim blocks until g_mutex is released");
         check(published(),"mutex: the blocked copies completed afterwards and left the state exact");
         copy::reset();
     }
@@ -375,8 +427,12 @@ inline void runPlansHoldingNothing(ID3D11Device* device,Check check) {
     copy::beginMap(pool.Get(),mapped,sizeof(mapped),336,D3D11_MAP_WRITE_DISCARD,1,kFrame);
     claim(e,kFrame);
     check(copy::g_emissionsLive.load() && copy::g_claimsLive.load() && published(),"plans: one emission sets both flags");
-    void* plan=copy::beginMergeOpaque(dstU.ptr(),unrelated.anchor(0),kFrame);
-    check(plan!=copy::mergeNoClaimsToken() && copy::g_mergePlans.size()==1,"plans: with an emission live, an unrelated merge registers a plan that stages nothing");
+    // A claim sits in the merged list, but of another frame than the merge's: the merge touches it (so the claim check cannot hand
+    // out the token) and stages nothing from it. That is the plan that holds nothing.
+    claim(unrelated.item(0,0,0),kFrame);
+    void* plan=copy::beginMergeOpaque(dstU.ptr(),unrelated.anchor(0),kFrame+1);
+    check(plan!=copy::mergeNoClaimsToken() && copy::g_mergePlans.size()==1 && static_cast<copy::MergePlan*>(plan)->transfers.empty(),
+          "plans: with an emission live, a merge that touches a claim of another frame registers a plan that stages nothing");
     copy::copier(base,336,addressOf(e),0,1,kFrame);   // consumes the emission, under the lock (an emission is live)
     check(!copy::g_emissionsLive.load() && copy::g_claimsLive.load() && copy::g_mergePlans.size()==1 && published(),
           "plans: the emission consumed, the plan alone keeps the clear flag and the emissions flag is false");
@@ -437,8 +493,13 @@ inline void runExitLine(ID3D11Device* device,Check check) {
     copy::Stats s;s.clearLockFree=7;s.clearCalls=10;s.mergeLockFree=3;s.mergeCalls=4;s.copiesLockFree=100;s.copies=120;s.copierNoLeaseLockFree=5;
     char line[copy::kExitLineBytes];copy::formatExitLine(s,line);
     check(std::string(line)=="engine motion: primary copy lock-free exits cumulative (already counted in the figures above; these calls never took the mutex): "
-                             "clear 7 of 10 calls, merge 3 of 4 calls, copier 100 of 120 calls (5 of those found no active map).","exit line: the text, exactly");
-    copy::Stats big;big.clearLockFree=big.clearCalls=big.mergeLockFree=big.mergeCalls=big.copiesLockFree=big.copies=big.copierNoLeaseLockFree=~0ull;
+                             "clear 7 of 10 calls, merge 3 of 4 calls, copier 100 of 120 calls (5 of those found no active map). "
+                             "Claim check (live claims, none touched): 0 clears and 0 merges of those, 0 calls declined it. "
+                             "Copier claim check (claims live or patches held, none in the range): 0 copies of those, 0 copies declined it.","exit line: the text, exactly");
+    s.clearPrechecked=4;s.mergePrechecked=2;s.precheckDeclined=9;s.copierPrechecked=11;s.copierPrecheckDeclined=3;copy::formatExitLine(s,line);
+    check(std::string(line).find("Claim check (live claims, none touched): 4 clears and 2 merges of those, 9 calls declined it.")!=std::string::npos,"exit line: the claim check figures");
+    check(std::string(line).find("Copier claim check (claims live or patches held, none in the range): 11 copies of those, 3 copies declined it.")!=std::string::npos,"exit line: the copier claim check figures");
+    copy::Stats big;big.clearLockFree=big.clearCalls=big.mergeLockFree=big.mergeCalls=big.copiesLockFree=big.copies=big.copierNoLeaseLockFree=big.clearPrechecked=big.mergePrechecked=big.precheckDeclined=big.copierPrechecked=big.copierPrecheckDeclined=~0ull;
     copy::formatExitLine(big,line);
     check(std::strlen(line)<copy::kExitLineBytes-1,"exit line: at 20-digit counters it fits its buffer whole");
     D3D11_BUFFER_DESC d{};d.ByteWidth=336;d.BindFlags=D3D11_BIND_SHADER_RESOURCE;d.StructureByteStride=336;d.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
@@ -450,9 +511,10 @@ inline void runExitLine(ID3D11Device* device,Check check) {
     for(unsigned i=0;i<4;++i)copy::endMergeOpaque(copy::beginMergeOpaque(dst.ptr(),tree.anchor(0),kFrame),true);
     for(unsigned i=0;i<6;++i)copy::copier(reinterpret_cast<uintptr_t>(mapped),336,addressOf(source),0,1,kFrame);
     for(unsigned i=0;i<3;++i)copy::copier(reinterpret_cast<uintptr_t>(mapped)+4096,336,addressOf(source),0,1,kFrame);   // no lease at that base
-    claim(source,kFrame);copy::invalidateDictionary(tree.ptr());   // one locked clear
+    claim(source,kFrame);copy::invalidateDictionary(tree.ptr());   // a live claim the tree does not hold: the claim check handles it
+    tree.item(0,0,0)=record(3);claim(tree.item(0,0,0),kFrame);copy::invalidateDictionary(tree.ptr());   // one locked clear: it holds a claim
     const auto st=copy::stats();
-    check(st.clearLockFree==10 && st.clearCalls==11 && st.mergeLockFree==4 && st.mergeCalls==4 && st.copiesLockFree==9 && st.copies==9 &&
+    check(st.clearLockFree==11 && st.clearPrechecked==1 && st.clearCalls==12 && st.mergeLockFree==4 && st.mergeCalls==4 && st.copiesLockFree==9 && st.copies==9 &&
           st.copierNoLeaseLockFree==3 && st.copierNoLease==3,"exit line: the lock-free counts come from the real exits and sit inside the totals the other lines print");
     {   // Review 49f28838 F2: the lock-free counters advance outside the mutex, so each must be read ONCE per snapshot. With no locked copy in
         // the state (nothing but lock-free exits), every snapshot taken while a thread keeps counting must still have the lock-free figure
@@ -688,8 +750,10 @@ inline void run(ID3D11Device* device,Check check) {
         // The walk that erases claims allocates nothing either (erase frees, it does not request memory).
         claim(eight.item(0,3,1),kFrame);rig_allocations::start();copy::invalidateDictionary(eight.ptr());const auto erasing=rig_allocations::stop();
         check(erasing==0 && !held(addressOf(eight.item(0,3,1))) && held(addressOf(live)),"allocation: an erasing 8-node walk allocates nothing and still revokes the claim");
-        rig_allocations::start();copy::invalidateDictionary(nine.ptr());const auto spilled=rig_allocations::stop();
-        check(spilled>0,"allocation: the counter sees the 9-node walk spill (the instrument is live)");
+        rig_allocations::start();copy::invalidateDictionary(nine.ptr());const auto checked=rig_allocations::stop();
+        check(checked==0,"allocation: the claim check walking 9 nodes (past the 64-address inline limit of the locked walk) allocates nothing");
+        rig_allocations::start();copy::invalidateDictionaryImpl<false>(nine.ptr());const auto spilled=rig_allocations::stop();
+        check(spilled>0,"allocation: the counter sees the 9-node full walk spill (the instrument is live)");
         copy::reset();
     }
 
@@ -810,9 +874,17 @@ inline void run(ID3D11Device* device,Check check) {
         check(finishesWhileHeld([&]{copy::endMergeOpaque(copy::beginMergeOpaque(dst.ptr(),tree.anchor(0),kFrame),true);},5000),"mutex: a no-claim merge begin and completed end return while another thread holds g_mutex");
         check(!finishesWhileHeld([&]{copy::endMergeOpaque(copy::mergeNoClaimsToken(),false);},150),"mutex: a token's unwind end does take g_mutex");
         copy::reset();claim(live,kFrame);
-        check(!finishesWhileHeld([&]{copy::invalidateDictionary(tree.ptr());},150),"mutex: a clear with a live claim blocks until g_mutex is released");
-        check(!finishesWhileHeld([&]{void* p=copy::beginMergeOpaque(dst.ptr(),tree.anchor(0),kFrame);copy::endMergeOpaque(p,true);},150),"mutex: a merge with a live claim blocks until g_mutex is released");
-        check(held(addressOf(live)) && published(),"mutex: the blocked calls completed afterwards and left the state exact");
+        // A claim is live but none of it is in these lists: the claim check hands both calls back without the mutex.
+        check(finishesWhileHeld([&]{copy::invalidateDictionary(tree.ptr());},5000),"mutex: a clear with a live claim it does not touch returns while another thread holds g_mutex");
+        check(finishesWhileHeld([&]{void* p=copy::beginMergeOpaque(dst.ptr(),tree.anchor(0),kFrame);copy::endMergeOpaque(p,true);},5000),"mutex: a merge with a live claim it does not touch returns while another thread holds g_mutex");
+        check(held(addressOf(live)) && published(),"mutex: those calls left the live claim and the published state exact");
+        // The claim is in the list: the call revokes or stages it, which needs the mutex.
+        Tree hitTree(1,1);Destination hitDst;hitTree.item(0,0,0)=record(12);claim(hitTree.item(0,0,0),kFrame);
+        check(!finishesWhileHeld([&]{copy::invalidateDictionary(hitTree.ptr());},150),"mutex: a clear whose nodes hold a live claim blocks until g_mutex is released");
+        check(!held(addressOf(hitTree.item(0,0,0))) && held(addressOf(live)) && published(),"mutex: the blocked clear completed afterwards, revoked that claim only and left the state exact");
+        claim(hitTree.item(0,0,0),kFrame);
+        check(!finishesWhileHeld([&]{void* p=copy::beginMergeOpaque(hitDst.ptr(),hitTree.anchor(0),kFrame);copy::endMergeOpaque(p,true);},150),"mutex: a merge whose list holds a live claim blocks until g_mutex is released");
+        check(held(addressOf(live)) && published(),"mutex: the blocked merge completed afterwards and left the state exact");
         copy::reset();
     }
 
@@ -916,6 +988,10 @@ inline void run(ID3D11Device* device) {
     }
     mergeBench(one,true,"merge begin+end, claims present, 1 node source");
     mergeBench(eight,true,"merge begin+end, claims present, 8 node source");
+    copy::g_claimPrecheck=false;   // the code as it was before the claim check
+    clearBench(one,true,"clear, claims present, walks 1 node (check off)");
+    mergeBench(one,true,"merge begin+end, claims present, 1 node source (check off)");
+    copy::g_claimPrecheck=true;
     // Four job threads contending, each on its own fake memory so only the observers' shared state is shared.
     constexpr unsigned kThreads=4,kContended=50000;
     {
@@ -936,8 +1012,13 @@ inline void run(ID3D11Device* device) {
         lineThreads("merge begin+end then clear, no claims",kThreads,contended(kThreads,kContended,both));
         copy::reset();
         Record live=record(7);claim(live,kFrame);
-        lineThreads("merge begin+end then clear, claims present",kThreads,contended(kThreads,kContended/4,both));
+        lineThreads("merge begin+end then clear, claims present (the claim check)",kThreads,contended(kThreads,kContended,both));
         copy::reset();
+        {   // The same claim one claim live and untouched, with the claim check off: the code as it was before it.
+            Record held=record(7);claim(held,kFrame);copy::g_claimPrecheck=false;
+            lineThreads("merge begin+end then clear, claims present (check off)",kThreads,contended(kThreads,kContended/4,both));
+            copy::g_claimPrecheck=true;copy::reset();
+        }
     }
     // The pool copier, for comparison (not changed by this work): one copy-list entry per call against an active pool.
     D3D11_BUFFER_DESC d{};d.ByteWidth=336*8;d.BindFlags=D3D11_BIND_SHADER_RESOURCE;d.StructureByteStride=336;d.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;

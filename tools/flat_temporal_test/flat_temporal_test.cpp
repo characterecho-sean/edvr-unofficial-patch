@@ -36,6 +36,7 @@
 #include "flat_wrapper_note_tests.h"
 #include "flat_replay_query_reject_tests.h"
 #include "flat_hdr_route_tests.h"
+#include "flat_offscreen_tests.h"
 #include "flat_laser_scene_tone_tests.h"
 #include "flat_deferred_camera_tests.h"
 #include "flat_deferred_failure_capture_tests.h"
@@ -2824,10 +2825,11 @@ void testFlatCpuWiring() {
     const Pin pins[] = {
         // Every family the census names has its scope at the entry points that family stands for.
         {&runtimeCpp, "flatcpu::Scope shell(flatcpu::kOther);", 3, "the draw scope (both halves) and the dispatch scope time their own shells"},
-        {&runtimeCpp, "flatcpu::kReduce", 2, "contract reduction times the reducer and the final copy's admission by structure"},
+        {&runtimeCpp, "flatcpu::Scope fast(flatcpu::kOffscreenFast);", 1, "the offscreen fast path times itself as its own family"},
+        {&runtimeCpp, "flatcpu::kReduce", 3, "contract reduction times the reducer (the fast path's too) and the final copy's admission by structure"},
         {&runtimeCpp, "flatcpu::kCopyChecks", 2, "the exact-shader verifications and the F10 captures are timed"},
         {&runtimeCpp, "flatcpu::kCameraRows", 2, "the camera lookup and hash, and capture()"},
-        {&runtimeCpp, "flatcpu::kTrace", 5, "every trace-ring copy is timed: capture, dispatch, write, record and the HDR route's resolve marker"},
+        {&runtimeCpp, "flatcpu::kTrace", 6, "every trace-ring copy is timed: capture, dispatch, write, record (both paths) and the HDR route's resolve marker"},
         {&runtimeCpp, "flatcpu::kResource", 5, "Written, WrittenExtent, Map, Unmap and Update time their lookups"},
         {&runtimeCpp, "flatcpu::kCoverage", 1, "coverage classification"},
         {&runtimeCpp, "flatcpu::kProjection", 3, "qualifyProjection, the private binding and its restore"},
@@ -2835,7 +2837,7 @@ void testFlatCpuWiring() {
         {&runtimeCpp, "flatcpu::kWitness", 1, "the camera witness"},
         {&runtimeCpp, "flatcpu::kEngineDraw", 4, "engine motion's draw wrapper: naming, its begin (BeforeDraw), its end, and the flush of what it kept bound"},
         {&runtimeCpp, "flatcpu::kResolve", 2, "the treatment at the copy draw and at the HDR route's trigger"},
-        {&runtimeCpp, "flatcpu::kHdrRoute", 2, "the HDR route's trigger detector on every draw, and its selection at the trigger"},
+        {&runtimeCpp, "flatcpu::kHdrRoute", 3, "the HDR route's trigger detector on every draw (the fast path's too), and its selection at the trigger"},
         {&runtimeCpp, "flatcpu::kTrackers", 5, "the state trackers"},
         {&resolveCpp, "flatcpu::Scope backendScope(flatcpu::kBackend);", 1, "the backend evaluation inside the resolver"},
         {&injectCpp, "flatcpu::Scope timed(flatcpu::kInject);", 2, "the camera inject callback, both halves"},
@@ -2928,10 +2930,11 @@ void testFlatCpuWiring() {
     if (first != std::string::npos && last != std::string::npos && first < last)
         check(runtimeCpp.substr(first, last - first).find("census") == std::string::npos,
               "the stand-down never reads the census: it measures, it does not decide");
-    // The same for the numbers: the runtime touches the census in eleven places and no other -- the four
-    // GPU notes and the skipped one, idle, and the block at the Present (running, onFrame, noteWrapper,
-    // noteQueries, take) -- and none of them reads a figure back into the runtime's state.
-    check(count(runtimeCpp, "s.census.") == 11,
+    // The same for the numbers: the runtime touches the census in thirteen places and no other -- the four
+    // GPU notes and the skipped one, idle, and the block at the Present (setClocks, the timing switch that follows
+    // advanced.flat_cpu_timing; running, onFrame, noteWrapper, noteOffscreen, noteQueries, take) -- and none of them
+    // reads a figure back into the runtime's state.
+    check(count(runtimeCpp, "s.census.") == 13,
           "the runtime touches the census in exactly its known places (the GPU notes, idle, and the Present block)");
 }
 
@@ -3969,6 +3972,7 @@ int main(int argc, char** argv) {
     testFlatWarningWiring();
     failures += flatCpuTests();
     failures += flatPairFactsTests();
+    failures += flatOffscreenTests();
     testFlatCpuWiring();
     failures += flatOwnerGateTests();
     failures += flatOwnerGateWiringTests();

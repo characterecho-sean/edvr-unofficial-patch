@@ -235,7 +235,11 @@ struct EyeState {
     float                      headPrev[12] = {};
     float                      headNow[12] = {};
     float                      eyeOff[3] = {};
+    float                      eyesPrev[2][12] = {};
+    float                      eyesNow[2][12] = {};
     bool                       headNoted = false;
+    uint32_t                   headNotedFrame = UINT32_MAX;
+    uint32_t                   eyesNotedFrame = UINT32_MAX;
     float                      rasterJitter[2] = {};
     uint32_t                   jitterFrame = UINT32_MAX;
 
@@ -2171,6 +2175,7 @@ struct RowsWrite {
     // The render target the first draw after this write went into (camera_target_tag.h): unknown until such a draw, and for a write overwritten before
     // one. Set by temporalPassNoteDraw, read by chooseCameraRows (the eye-target rule) and the dump.
     camtag::Target tag;
+    int         eye = -1;              // exact scene-pair DSV at the first draw, or unknown
     // The owner-context draws made between this write and the next (saturating): a write with none or a few is an orphan, one the scene was drawn with has
     // hundreds. drawBase is the draw count at the write; drawsAfter is set when the next write (or the frame boundary) closes it.
     uint32_t    drawBase = 0;
@@ -2214,6 +2219,7 @@ struct RowsChoiceCapture {
     uint32_t candidates = 0, boundCandidates = 0;
     uint32_t continuousCandidates = 0, twinCandidates = 0;
     camtag::Target selectedTarget;      // the render target the selected write was drawn into (unknown when no draw followed it)
+    int selectedEye = -1;               // exact scene-pair DSV at that write's first draw
     uint32_t selectedDraws = 0;         // the draws made between the selected write and the next one
     uint32_t rejectedWrites = 0;        // writes the eye-target rule rejected: drawn into a non-eye-sized target or into the submitted eye texture
 };
@@ -2276,11 +2282,20 @@ bool     g_curRowsBound = false;
 bool     g_curLatched = false;
 float    g_prevRows[12] = {};
 bool     g_prevValid = false;
+int      g_prevRowsEye = -1;
 uint32_t g_camPairs = 0;
 bool     g_camNoted = false;
 RowsChoiceCapture g_rowsChoice;
 RigidDrawRows g_rigidDraw[2];
 RigidDrawRows g_prevRigidDraw[2];
+struct CantedWorldStats {
+    uint32_t examined = 0, geometry = 0, cameraPairs = 0, parallel = 0, canted = 0, mapped = 0;
+    uint32_t converted = 0, unknownEye = 0, missingPose = 0, gateOther = 0;
+    uint32_t sourceSame = 0, sourceSwitch = 0, jumpZeroed = 0;
+    uint32_t examinedEye[2] = {}, convertedEye[2] = {};
+    uint32_t rightToLeft = 0, leftToRight = 0;
+};
+CantedWorldStats g_cantedWorldStats;
 
 // ---- the sky-flicker diagnostic build (docs/sky-flicker-2026-10-13.md) ---------------------------------------------------------------------------------
 // The eye-target rule (a filter on the chooser's candidates) is behaviour in VR, with no key (it was a temporary A/B key until 2026-10-14; proven in the
@@ -2661,6 +2676,7 @@ void chooseCameraRows() {
         g_rowsChoice.selectedResource = g_rowsRing[applyIdx].buf;
         g_rowsChoice.selectedSeq = g_rowsRing[applyIdx].observedSeq;
         g_rowsChoice.selectedTarget = g_rowsRing[applyIdx].tag;
+        g_rowsChoice.selectedEye = g_rowsRing[applyIdx].eye;
         g_rowsChoice.selectedDraws = drawsAfterOf(applyIdx);
         memcpy(g_rowsChoice.selectedRows, g_rowsRing[applyIdx].rows, sizeof(g_rowsChoice.selectedRows));
         memcpy(g_rowsChoice.selectedProj, g_rowsRing[applyIdx].proj, sizeof(g_rowsChoice.selectedProj));
@@ -3407,10 +3423,52 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 candValid[2] = false;
                 worldValid = false;
             }
+            // The chooser and its jump/continuity gate judge the original
+            // rows. Once accepted, express that rigid camera in THIS eye's
+            // frame. Unknown provenance keeps the existing motion exactly.
+            ++g_cantedWorldStats.cameraPairs;
+            if (e.headNoted && e.headNotedFrame == g_rowsFrame &&
+                e.eyesNotedFrame == g_rowsFrame) {
+                if (temporalEyesCanted(e.eyesPrev, e.eyesNow)) {
+                    ++g_cantedWorldStats.canted;
+                    if (g_prevRowsEye >= 0 && g_rowsChoice.selectedEye >= 0) {
+                        ++g_cantedWorldStats.mapped;
+                        if (g_prevRowsEye != g_rowsChoice.selectedEye)
+                            ++g_cantedWorldStats.sourceSwitch;
+                        if (step.valid && temporalCantedWorldFromSelected(
+                                g_prevRows, g_curRows, g_prevRowsEye,
+                                g_rowsChoice.selectedEye, eye, e.eyesPrev, e.eyesNow,
+                                step.verdict == TemporalCameraVerdict::Own,
+                                step.jump, worldDelta, tvCam)) {
+                            if (step.jump) ++g_cantedWorldStats.jumpZeroed;
+                            memcpy(cand[2], worldDelta, sizeof(worldDelta));
+                            ++g_cantedWorldStats.converted;
+                            ++g_cantedWorldStats.convertedEye[eye];
+                            if (g_rowsChoice.selectedEye == eye)
+                                ++g_cantedWorldStats.sourceSame;
+                            else if (eye == 0)
+                                ++g_cantedWorldStats.rightToLeft;
+                            else
+                                ++g_cantedWorldStats.leftToRight;
+                        } else if (g_prevRowsEye == g_rowsChoice.selectedEye) {
+                            ++g_cantedWorldStats.gateOther;
+                        }
+                    } else {
+                        ++g_cantedWorldStats.unknownEye;
+                    }
+                } else {
+                    ++g_cantedWorldStats.parallel;
+                }
+            } else {
+                ++g_cantedWorldStats.missingPose;
+            }
             // Whether this frame's rows are the view's own: the world path
             // did not carry last frame's delta in their place.
             g_rowsDeltaOwn = step.verdict == TemporalCameraVerdict::Own;
         }
+        ++g_cantedWorldStats.examined;
+        ++g_cantedWorldStats.examinedEye[eye];
+        if (e.eyesNotedFrame == g_rowsFrame) ++g_cantedWorldStats.geometry;
 
         PassParams p{};
         if (viaCopy) {
@@ -4912,6 +4970,7 @@ void temporalPassConfigure(Config& cfg) {
         g_rowsObservedWrites = 0;
         g_rowsObservedEvictions = 0;
         g_rowsChoice = RowsChoiceCapture{};
+        g_prevRowsEye = -1;
         for (int eye = 0; eye < 2; ++eye) {
             g_rigidDraw[eye] = RigidDrawRows{};
             g_prevRigidDraw[eye] = RigidDrawRows{};
@@ -5300,6 +5359,7 @@ void temporalPassNoteSceneWrite(const void* res, const void* data, uint32_t byte
     // The next draw tags this write with its render target (temporalPassNoteDraw). A write already waiting loses its chance: a write no draw
     // followed stays unknown, and an unknown write is never rejected.
     w.tag = camtag::Target{};
+    w.eye = -1;
     closeWriteDraws();
     w.drawBase = detail::g_cameraDrawCount;
     w.drawsAfter = 0;
@@ -5440,6 +5500,10 @@ void temporalPassNoteDraw(ID3D11DeviceContext* ctx) {
         g_pendingTagIdx = -1;
         if (w.valid && w.frame == g_rowsFrame) {
             w.tag = currentTargetTag();
+            int sceneEye = -1;
+            if (depthProbeCurrentSceneEyeOf(
+                    static_cast<ID3D11DepthStencilView*>(bindingGet(BindSlot::Dsv0)),
+                    &sceneEye, nullptr)) w.eye = sceneEye;
             if (g_miniBound && w.tag.known()) g_mini.noteWrite(g_rowsFrame, w.rows);   // P3: this camera write was drawn into a mini view
         }
     }
@@ -5477,11 +5541,24 @@ void temporalPassNoteHead(int eye, const float* prevPose, const float* nowPose,
     if (eye < 0 || eye > 1) return;
     EyeState& e = g_eye[eye];
     e.headNoted = false;
+    e.headNotedFrame = UINT32_MAX;
     if (!prevPose || !nowPose || !eyeOffset) return;
     memcpy(e.headPrev, prevPose, sizeof(e.headPrev));
     memcpy(e.headNow, nowPose, sizeof(e.headNow));
     memcpy(e.eyeOff, eyeOffset, sizeof(e.eyeOff));
     e.headNoted = true;
+    e.headNotedFrame = g_rowsFrame;
+}
+
+void temporalPassNoteEyes(int eye, const float (*prevEyes)[12],
+                         const float (*nowEyes)[12]) {
+    if (eye < 0 || eye > 1) return;
+    EyeState& e = g_eye[eye];
+    e.eyesNotedFrame = UINT32_MAX;
+    if (!prevEyes || !nowEyes) return;
+    memcpy(e.eyesPrev, prevEyes, sizeof(e.eyesPrev));
+    memcpy(e.eyesNow, nowEyes, sizeof(e.eyesNow));
+    e.eyesNotedFrame = g_rowsFrame;
 }
 
 // The sky-flicker build's 30 s lines (docs/sky-flicker-2026-10-13.md), on one clock read at the frame boundary: the three A/B arms and P3. The A/B lines
@@ -5498,6 +5575,24 @@ static void temporalPassSkyDiagTick() {
     if (freq <= 0 || now - g_diagWindowTicks < 30 * freq) return;
     g_diagWindowTicks = now;
     char line[512];
+    Log::get().note(
+        "temporal canted world 30s: examined=%u geometry=%u camera_pairs=%u parallel=%u canted=%u mapped=%u "
+        "converted=%u unknown_eye=%u missing_pose=%u gate_other=%u "
+        "source_same=%u source_switch=%u jump_zeroed=%u "
+        "left_examined=%u right_examined=%u left_converted=%u right_converted=%u "
+        "right_to_left=%u left_to_right=%u%s",
+        g_cantedWorldStats.examined, g_cantedWorldStats.geometry,
+        g_cantedWorldStats.cameraPairs, g_cantedWorldStats.parallel,
+        g_cantedWorldStats.canted, g_cantedWorldStats.mapped,
+        g_cantedWorldStats.converted, g_cantedWorldStats.unknownEye,
+        g_cantedWorldStats.missingPose, g_cantedWorldStats.gateOther,
+        g_cantedWorldStats.sourceSame, g_cantedWorldStats.sourceSwitch,
+        g_cantedWorldStats.jumpZeroed,
+        g_cantedWorldStats.examinedEye[0], g_cantedWorldStats.examinedEye[1],
+        g_cantedWorldStats.convertedEye[0], g_cantedWorldStats.convertedEye[1],
+        g_cantedWorldStats.rightToLeft, g_cantedWorldStats.leftToRight,
+        g_cantedWorldStats.examined ? "" : " (no temporal eye treat in window)");
+    g_cantedWorldStats = CantedWorldStats{};
     if (g_eyeTargetStats.frames && camtag::formatReport(line, sizeof(line), g_eyeTargetStats) > 0) Log::get().note("%s", line);
     camtag::resetWindow(g_eyeTargetStats);
     if (g_nearStats.frames && camnearest::formatReport(line, sizeof(line), g_nearStats, g_nearKeyOn) > 0) Log::get().note("%s", line);
@@ -5552,6 +5647,7 @@ void temporalPassFrameBoundary() {
     if (g_curValid) {
         if (g_prevValid) ++g_camPairs;
         memcpy(g_prevRows, g_curRows, sizeof(g_prevRows));
+        g_prevRowsEye = g_rowsChoice.selectedEye;
         g_prevValid = true;
         if (!g_camNoted && g_camPairs >= 2) {
             g_camNoted = true;
@@ -5565,6 +5661,7 @@ void temporalPassFrameBoundary() {
         }
     } else {
         g_prevValid = false;
+        g_prevRowsEye = -1;
     }
     g_curLatched = false;
     g_curValid = false;

@@ -1141,7 +1141,7 @@ void testAccessors(Rig& r) {
     auto& cfg = Config::get();
     cfg.set("fix.ui_quality", "off");
     uiLayerConfigure(cfg);
-    check(!uiLayerLiveForWorldRoute() && uiLayerNotLiveReason() && std::strcmp(uiLayerNotLiveReason(), "fix.ui_quality is off") == 0 && !uiLayerLive(),
+    check(!uiLayerLiveForWorldRoute() && uiLayerNotLiveReason() && std::strcmp(uiLayerNotLiveReason(), "fix.ui_quality is off") == 0 && !uiLayerQualityLive(),
           "fix.ui_quality off: not live, with its reason, and the draw path's own gate agrees");
     cfg.set("fix.ui_quality", "100");
     cfg.set("fix.temporal_aa", "off");
@@ -1149,7 +1149,7 @@ void testAccessors(Rig& r) {
     check(!uiLayerLiveForWorldRoute() && uiLayerNotLiveReason() && std::strstr(uiLayerNotLiveReason(), "fix.temporal_aa"), "no temporal mode: not live, with its reason");
     cfg.set("fix.temporal_aa", "dlss");
     uiLayerConfigure(cfg);
-    check(uiLayerLiveForWorldRoute() && uiLayerNotLiveReason() == nullptr && uiLayerLive(), "back with a temporal mode: live again");
+    check(uiLayerLiveForWorldRoute() && uiLayerNotLiveReason() == nullptr && uiLayerQualityLive(), "back with a temporal mode: live again");
     (void)r;
 }
 
@@ -1379,12 +1379,12 @@ void testMapsGate(Rig& r) {
     // The layer not live (fix.ui_quality off): the naming stops deciding, and says why.
     cfg.set("fix.ui_quality", "off");
     uiLayerConfigure(cfg);
-    check(!uiLayerLive(), "maps: (setup) fix.ui_quality off: the layer is not live");
+    check(!uiLayerQualityLive(), "maps: (setup) fix.ui_quality off: the layer is not live");
     boundaryFrame(r, false);
     check(!uiLayerMapsOn(), "maps, layer not live: the maps gate is off (a layer that does not run decides nothing)");
     cfg.set("fix.ui_quality", "100");
     uiLayerConfigure(cfg);
-    check(uiLayerLive(), "maps: (setup) fix.ui_quality back: the layer is live");
+    check(uiLayerQualityLive(), "maps: (setup) fix.ui_quality back: the layer is live");
     check(boundaryFrame(r, false) && uiLayerMapsOn(), "maps: the naming decides again, carried from today's gate (on foot: the world)");
 
     // Screen motion not live (fix.temporal_aa off): the gate is today's, with a line.
@@ -1707,7 +1707,7 @@ int main(int argc, char** argv) {
     // must not leak in and make the first maps case start from a gate that is already on.
     uiLayerSetMapsGateForTest(false);
     uiLayerConfigure(cfg);
-    check(uiLayerLive(), "the layer is live for the rig (fix.ui_quality 100, dlss, jitter as shipped)");
+    check(uiLayerQualityLive(), "the layer is live for the rig (fix.ui_quality 100, dlss, jitter as shipped)");
     // The first boundary computes the world-screen gate (the journal: on foot) and warms the layer's shaders.
     uiLayerFrameBoundary(r.ctx.Get());
     check(uiLayerWorldScreenHeld(), "the gate holds the screen after the first boundary");

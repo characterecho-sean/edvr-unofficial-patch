@@ -25,8 +25,6 @@
 - **10-10 map arcs (section below):** temporal AA OFF, no jitter, while any map is open (GuiFocus 6, 7, 8; built, not flown). The
   plane-motion and per-pixel star-choice work is REMOVED (the stars' parallax, section below). Kept: the map UI families and their zero cancel.
   Map frames below native run SMAA 1x, then AMD's FSR1 EASU, in place of the bilinear tap (shipped for an A/B flight 2026-10-10; section below).
-- **106 (10-09):** fixed exposure 1.0 SHIPS on the flat HDR route (flown by eye:
-  brighter, stars back); temporary key and luma probe REMOVED. VR keeps auto.
 - **Open:** station/on-foot projection coverage and mixed-camera HDR ownership,
   corona-smear regression and mod effect ordering. Scene/depth identity, camera
   encoding and handoff have flight evidence; correct motion for every rendered
@@ -54,13 +52,21 @@
   (claude/flat-upscale), NOT FLOWN; its F8 text now waits 2 s before it
   changes cause (a loading screen's size flipped it five times in 9 s).
 - **10-14 BUILT, NOT FLOWN:** flat `fix.intro_video = skip` (intro-video.md); AA comparison key F7 (last entry).
+- **10-16 Operations FSR report:** unfamiliar shaders suspected, not established; route succeeds through the capped log, later behavior unknown (entry below).
 - **10-16 BUILT, NOT FLOWN:** flat origin re-anchors (~5 km) and fast travel no longer reset TAA/DLSS; a re-anchor drops its camera
   translation, travel keeps it (review F1). Open: engine-record scenePrev in the old anchor frame; VR drops all 50 m+ translation.
-- **Jitter phases (section 84, 2026-10-01):** the phase-count switch is REMOVED (fixed eight phases, byte-identical; no
-  visible change on the hills). ROOT CAUSE of the VR hills shimmer: Elite's terrain checkerboard rendering (halves distant
-  terrain's horizontal samples; turning it off fixed it). EDVR now says so in VR (BUILT, NOT FLOWN).
+- **10-16 flat Debug tab, BUILT, NOT FLOWN:** the flat F8 panel has two tabs, Performance and Debug. Debug holds the MOTION SOURCE VIEW,
+  `advanced.flat_refusal_view` (this is the flat view that survived the 2026-10-09 cull of VR's `temporal_aa_debug`; green exact engine record,
+  blue camera term, the refusals in the eye path's colours; section below) and `advanced.flat_cpu_timing`. Both live, off by default.
 
 ## Status detail (moved out of Status 2026-09-29)
+
+- **Moved out of Status 2026-10-16:**
+  - **106 (10-09):** fixed exposure 1.0 SHIPS on the flat HDR route (flown by eye:
+    brighter, stars back); temporary key and luma probe REMOVED. VR keeps auto.
+  - **Jitter phases (section 84, 2026-10-01):** the phase-count switch is REMOVED (fixed eight phases, byte-identical; no
+    visible change on the hills). ROOT CAUSE of the VR hills shimmer: Elite's terrain checkerboard rendering (halves distant
+    terrain's horizontal samples; turning it off fixed it). EDVR now says so in VR (BUILT, NOT FLOWN).
 
 - **Test target (Sean), moved 2026-10-10:** in-game tests on the Epic install; keep its INI.
 - **Compatibility (moved 2026-10-10):** detail below. **PR72 A/B switches:** retired with `on`
@@ -15016,3 +15022,51 @@ comparison key ... CLASHES` log line at bind and on every rebind (elite_binds).
 
 Next flight: flat, DLSS on, F7 twice; read the lines above and look for the notice card.
 Then VR: the same, and the `ui quality:` line either side.
+
+
+## Flat Debug tab: the motion source view (2026-10-16)
+
+The 2026-10-09 cull (53e6f047) took out VR's eye-path `advanced.temporal_aa_debug` views, `motion_source` among them. The flat profile's own view was
+not part of it and is live on main: `advanced.flat_refusal_view` (flat_runtime.cpp reads it once a Present; the resolver prep writes a per-pixel class
+byte; the HDR route's finish and the copy route's finish paint it over the resolved image, `FlatMonoResolveFrame::refusalView`). Its classes 1..6 are the
+eye path's source kinds in the same colours, so it IS the flat motion source view: green an exact engine record (a rig record Elite's records followed
+from last frame), red a masked record, blue a pool surface that is not a rig record (the camera term), yellow a stale slot kept, pink a stale slot
+refused (shown raw), magenta a corrupt slot, orange a stale stamp, cyan first-person, white any other refusal, dimmed no engine slot. The log names the
+legend when the state changes ("flat runtime: refusal view on/off (advanced.flat_refusal_view)"). Nothing was restored: the key was developer tier
+with no panel row, and the work of this entry is the row. The F8 panel's Debug tab (flat only, the last tab) shows it as **Motion source view**, a
+switch, live, off by default, beside **CPU timing in the log** (`advanced.flat_cpu_timing`, docs\flat-cz-fps-2026-10-11.md). The key was not renamed.
+Both keys sit in [advanced] with `# ui: ... | live | menu debug`; the generator (tools\gen_settings_schema.py) takes that token only on the keys named in
+MENU_ADVANCED_EXCEPTIONS, so any other [advanced] key with a menu token is still refused, and VR's menu has no `debug` page.
+
+## 2026-10-16 — Operations FSR report, log stopped before report
+
+Archive `edvr_logs\reports\20261016-230503`; flat /novr `v0.20.0-rc.2`, build `6AD165AB`.
+The configured mode was experimental mono temporal FSR; game SS controlled render size.
+The HDR route target and HDR extent were both 5120x1440 (R=D). FSR3 used AMD's
+port version 3.1.2 on an AMD Radeon RX 9070 XT; EDHM was in the mod chain.
+
+FSR treated frames early and late. At 21:17:02, 142/146 HDR triggers were treated;
+backend=142. Intermittent blank-scene windows at 21:46:34–21:46:39 and 21:48:44
+had zero treatment and backend work, then treatment resumed. At 21:51:54 the route
+treated 300/300 frames; admitted, reached, captured, copied, prepped, backend,
+finished and restored were each 300, with no backend failures reported.
+
+The runtime logged FSR/XeSS/off mode changes from 21:17 through 21:30. The 3D-mode
+watch found no profile switch. No manual diagnostic capture was included. The graphics log
+hit its 16 MB cap at 21:52:18; breadcrumbs continued to uptime 6744 s, frame 388600,
+and the bundle was created at 23:05. Breadcrumbs prove liveness only, so post-cap
+AA mode and treatment are unknown. **Ruled out:** permanent flat SDK/backend failure
+within the captured interval; the later interval remains unknown.
+
+Sean clarified that Operations are a new instanced game feature he has not tried.
+Open hypothesis: unfamiliar shaders or a different scene route refuse treatment;
+this bundle does not establish that cause or capture the affected shader bytecode.
+Discriminate with `no-supported-motion-source-pair`, `no-known-tone-pass` or
+`no-known-output-copy`: these normally recover in a recognized scene (structural
+stand-down probes every 1.5 s). A persistent late-write latch instead logs
+`flat hdr route: turned off`. The affected interval is missing, so none is confirmed.
+
+Next: ask the reporter to set `edvr-flat.ini` `[log] max_mb=128`, restart, and reproduce.
+Press NumLock while FSR has no visible effect inside the Operation, then again after
+leaving if it remains ineffective; note both times and bundle promptly. A normal-scene
+capture with FSR working would provide the comparison. Keep FSR selected for captures.

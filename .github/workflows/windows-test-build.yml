@@ -1,0 +1,77 @@
+name: Windows installer test build
+
+"on":
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-test-build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  full-build:
+    runs-on: windows-2022
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out source and tags
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python build requirements
+        run: |
+          python -m pip install -r tools\requirements.txt
+          if ($LASTEXITCODE -ne 0) { throw "Python requirements failed" }
+
+      - name: Fetch pinned build dependencies
+        run: |
+          python tools\fetch_openxr_loader.py
+          if ($LASTEXITCODE -ne 0) { throw "OpenXR loader fetch failed" }
+          python tools\fetch_ffx_dx11.py
+          if ($LASTEXITCODE -ne 0) { throw "FidelityFX DX11 fetch failed" }
+          python tools\fetch_ngx.py
+          if ($LASTEXITCODE -ne 0) { throw "NVIDIA NGX fetch failed" }
+          python tools\fetch_xess.py
+          if ($LASTEXITCODE -ne 0) { throw "Intel XeSS fetch failed" }
+
+      - name: Run the full build and all gates
+        run: |
+          New-Item -ItemType Directory -Force -Path build | Out-Null
+          & "$env:GITHUB_WORKSPACE\build.bat" --wait-lock --jobs 4 | Tee-Object -FilePath build\ci-full-build.log
+          $buildExit = $LASTEXITCODE
+          if ($buildExit -ne 0) { throw "Full build failed with exit code $buildExit" }
+          foreach ($path in 'build\edvr-installer.exe', 'build\full_build_receipt.json') {
+            if (-not (Test-Path -Path $path -PathType Leaf)) { throw "Missing full-build output: $path" }
+          }
+
+      - name: Upload validated installer and receipt
+        uses: actions/upload-artifact@v4
+        with:
+          name: edvr-windows-installer-${{ github.sha }}
+          path: |
+            build/edvr-installer.exe
+            build/full_build_receipt.json
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: edvr-windows-build-diagnostics-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            build/ci-full-build.log
+            build/rig_times.json
+            build/phase_times.json
+          if-no-files-found: warn
+          retention-days: 14
