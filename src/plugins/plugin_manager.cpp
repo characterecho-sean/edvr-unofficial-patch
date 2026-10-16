@@ -238,7 +238,7 @@ bool PluginManager::initialize(const std::wstring& rootDir) {
 }
 
 bool PluginManager::loadPlugin(CandidatePlugin& cand, const std::string& approvedSha) {
-    if (vrOnlyBlocked("load")) return false;   // a profile switch to flat after discovery: approval must not load an addon that nothing would run
+    if (vrOnlyBlocked("load")) return false;   // defensive: the profile is decided before initialize, but approval must never load an addon that nothing would run
     // Approval names a hash, so the bytes that run must be the bytes that hash. Hold the file with
     // write and delete sharing denied, hash it through that handle, and load it while the handle is
     // still open: nothing can swap the file between the check and the load.
@@ -470,7 +470,7 @@ void PluginManager::onRenderEye(const EdvrEyeRenderContext& eyeCtx) {
 
 bool PluginManager::onFilterInput(uint32_t deviceType, const void* rawInputData) {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
-    if (runtimeFlatProfile()) {   // an addon loaded in VR must not keep holding input after a switch to flat
+    if (runtimeFlatProfile()) {   // defensive: the profile is fixed at launch, but a flat session must never leave a plugin holding input
         inputGateSetPluginBlock(false);
         return false;
     }
