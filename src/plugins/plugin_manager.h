@@ -27,6 +27,7 @@ struct LoadedPlugin {
     HMODULE module = nullptr;
     EdvrPluginCallbacks callbacks{};
     bool disabled = false;
+    bool holdingInput = false;   // this addon's swallowInput from its last onFilterInput call; cleared when it faults, is disabled or the profile suspends it
     DWORD faultCode = 0;
 };
 
@@ -89,6 +90,9 @@ private:
     void discoverAndLoad();
     // True when no callback may be made and nothing may load: suspended, or the profile has just left VR.
     bool dormantLocked() const;
+    // After an addon faults: drops its hold, and releases the input block only when no remaining enabled addon holds input.
+    void releaseInputAfterFault(LoadedPlugin& faulted);
+    void clearAllInputHolds();
 
     // Lock order, global: this mutex is taken BEFORE the menu's plugin-settings mutex, never after it.
     // loadPlugin (registration during onInitialize) and the fault paths (menuRemovePluginSettings) take the

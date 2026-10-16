@@ -216,6 +216,7 @@ void PluginManager::onProfileSwitched() {
     if (dormant) {
         m_dormant = true;
         // The normal release path, so the release tail applies: a key the addon was holding stays up until it is let go.
+        clearAllInputHolds();
         inputGateSetPluginBlock(false);
         edvr::menuSetPluginRowsHidden(true);
         Log::get().note("plugin_manager: profile switched to %s, %zu addon(s) suspended (rows hidden, no callbacks, input released)",
@@ -431,7 +432,20 @@ void PluginManager::shutdown() {
     m_dormant = false;
 }
 
+void PluginManager::clearAllInputHolds() {
+    for (auto& p : m_plugins) p.holdingInput = false;
+}
+
+void PluginManager::releaseInputAfterFault(LoadedPlugin& faulted) {
+    faulted.holdingInput = false;
+    for (const auto& p : m_plugins) {
+        if (!p.disabled && p.holdingInput) return;   // another addon still owns input: its hold stands
+    }
+    inputGateSetPluginBlock(false);   // the faulted addon was the last holder: the normal release path, tail included
+}
+
 void PluginManager::unloadAll() {
+    clearAllInputHolds();
     inputGateSetPluginBlock(false);   // no addon outlives its input ownership
     for (auto& p : m_plugins) {
         if (p.callbacks.onShutdown && !p.disabled) {
@@ -539,7 +553,7 @@ void PluginManager::onUpdate(const EdvrPosef& headPose, float dtSeconds) {
             Log::get().note("plugin_manager: addon '%s' faulted onUpdate (0x%08X); disabled for session",
                             p.callbacks.pluginName ? p.callbacks.pluginName : p.stem.c_str(), fault);
             edvr::menuRemovePluginSettings(p.stem.c_str());   // a disabled addon's rows would still call into its DLL
-            inputGateSetPluginBlock(false);   // the faulted addon may have held input; the healthy ones re-assert next frame
+            releaseInputAfterFault(p);
         }
     }
 }
@@ -557,7 +571,7 @@ void PluginManager::onRenderEye(const EdvrEyeRenderContext& eyeCtx) {
             Log::get().note("plugin_manager: addon '%s' faulted onRenderEye (0x%08X); disabled for session",
                             p.callbacks.pluginName ? p.callbacks.pluginName : p.stem.c_str(), fault);
             edvr::menuRemovePluginSettings(p.stem.c_str());   // a disabled addon's rows would still call into its DLL
-            inputGateSetPluginBlock(false);   // the faulted addon may have held input; the healthy ones re-assert next frame
+            releaseInputAfterFault(p);
         }
     }
 }
@@ -565,6 +579,7 @@ void PluginManager::onRenderEye(const EdvrEyeRenderContext& eyeCtx) {
 bool PluginManager::onFilterInput(uint32_t deviceType, const void* rawInputData) {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
     if (dormantLocked()) {   // suspended (or the profile has just turned flat): a dormant addon never holds input
+        clearAllInputHolds();
         inputGateSetPluginBlock(false);
         return false;
     }
@@ -585,9 +600,10 @@ bool PluginManager::onFilterInput(uint32_t deviceType, const void* rawInputData)
             Log::get().note("plugin_manager: addon '%s' faulted onFilterInput (0x%08X); disabled for session",
                             p.callbacks.pluginName ? p.callbacks.pluginName : p.stem.c_str(), fault);
             edvr::menuRemovePluginSettings(p.stem.c_str());   // a disabled addon's rows would still call into its DLL
-            inputGateSetPluginBlock(false);   // the faulted addon may have held input; the healthy ones re-assert next frame
-        } else if (ctx.swallowInput) {
-            swallowed = true;
+            p.holdingInput = false;   // no release here: the aggregate below is applied once, so another addon's hold is never dropped mid-loop
+        } else {
+            p.holdingInput = ctx.swallowInput != 0;
+            if (p.holdingInput) swallowed = true;
         }
     }
     inputGateSetPluginBlock(swallowed);

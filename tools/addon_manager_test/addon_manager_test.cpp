@@ -909,6 +909,86 @@ int main(int argc, char** argv) {
         std::filesystem::remove_all(sb3, ecd);
     }
 
+    // Case 25 (PR #92 review, Argon): a faulting addon releases input only when no other addon holds it. Two addons: "a_holder" (default
+    // fixture, swallows input) loads first, "b_other" (variant b, a separate DLL with its own crash mode) is the one that faults. The
+    // host runs onFilterInput before onRenderEye each frame, so a fault in B must not drop A's hold for the rest of the frame.
+    {
+        typedef void (WINAPI *PFN_SetCrashMode)(int);
+        auto loadPair = [&](const wchar_t* tag, PFN_SetCrashMode* crashB, PFN_SetCrashMode* crashA) {
+            auto sb = makeSandbox(tag);
+            dropFixture(sb, L"", L"a_holder.dll");
+            dropFixture(sb, L"b", L"b_other.dll");
+            pm.initialize(sb.wstring());
+            auto ca = findCandidate(pm, "a_holder");
+            auto cb = findCandidate(pm, "b_other");
+            check(ca && cb && pm.approvePlugin("a_holder", ca->sha256) && pm.approvePlugin("b_other", cb->sha256) &&
+                  pm.activePluginCount() == 2, "multihold: both addons load");
+            HMODULE ha = GetModuleHandleW(L"a_holder.dll");
+            HMODULE hb = GetModuleHandleW(L"b_other.dll");
+            *crashA = ha ? reinterpret_cast<PFN_SetCrashMode>(GetProcAddress(ha, "fixtureSetCrashMode")) : nullptr;
+            *crashB = hb ? reinterpret_cast<PFN_SetCrashMode>(GetProcAddress(hb, "fixtureSetCrashMode")) : nullptr;
+            check(*crashA && *crashB, "multihold: fixture helpers resolved");
+            return sb;
+        };
+        EdvrEyeRenderContext eye{};
+        eye.structSize = sizeof(eye);
+        EdvrPosef pose{};
+        PFN_SetCrashMode crashA = nullptr, crashB = nullptr;
+
+        // (1) B faults in onRenderEye while A holds input.
+        {
+            auto sb = loadPair(L"multihold_render", &crashB, &crashA);
+            g_gateBlocked = false;
+            check(pm.onFilterInput(1, nullptr) && g_gateBlocked, "multihold render: the addons take input");
+            const int clears = g_gateClears;
+            if (crashB) crashB(2);
+            pm.onRenderEye(eye);
+            check(pm.activePluginCount() == 1, "multihold render: B is disabled by its render fault");
+            check(g_gateBlocked && g_gateClears == clears, "multihold render: A's hold survives B's onRenderEye fault");
+            pm.shutdown();
+            std::error_code ec; std::filesystem::remove_all(sb, ec);
+        }
+        // (2) B faults in onUpdate while A holds input.
+        {
+            auto sb = loadPair(L"multihold_update", &crashB, &crashA);
+            g_gateBlocked = false;
+            check(pm.onFilterInput(1, nullptr) && g_gateBlocked, "multihold update: the addons take input");
+            const int clears = g_gateClears;
+            if (crashB) crashB(1);
+            pm.onUpdate(pose, 0.011f);
+            check(pm.activePluginCount() == 1, "multihold update: B is disabled by its update fault");
+            check(g_gateBlocked && g_gateClears == clears, "multihold update: A's hold survives B's onUpdate fault");
+            pm.shutdown();
+            std::error_code ec; std::filesystem::remove_all(sb, ec);
+        }
+        // (3) B faults in onFilterInput after A swallowed earlier in the same loop: no intermediate release.
+        {
+            auto sb = loadPair(L"multihold_filter", &crashB, &crashA);
+            g_gateBlocked = false;
+            check(pm.onFilterInput(1, nullptr) && g_gateBlocked, "multihold filter: the addons take input");
+            const int clears = g_gateClears;
+            if (crashB) crashB(3);
+            check(pm.onFilterInput(1, nullptr), "multihold filter: A still swallows after B faults");
+            check(pm.activePluginCount() == 1, "multihold filter: B is disabled by its filter fault");
+            check(g_gateBlocked && g_gateClears == clears, "multihold filter: no release, even momentarily, while A holds");
+            pm.shutdown();
+            std::error_code ec; std::filesystem::remove_all(sb, ec);
+        }
+        // (4) The only holder faults: the block is released. A filters input but never swallows; B is the sole holder.
+        {
+            auto sb = loadPair(L"multihold_sole", &crashB, &crashA);
+            if (crashA) crashA(4);
+            g_gateBlocked = false;
+            check(pm.onFilterInput(1, nullptr) && g_gateBlocked, "multihold sole: B takes input");
+            if (crashB) crashB(2);
+            pm.onRenderEye(eye);
+            check(pm.activePluginCount() == 1, "multihold sole: B is disabled by its render fault");
+            check(!g_gateBlocked, "multihold sole: the gate is released when the only holder faults");
+            pm.shutdown();
+            std::error_code ec; std::filesystem::remove_all(sb, ec);
+        }
+    }
+
     // Case 21 (PR #92 review): the singleton is leaked on purpose. Leave a healthy addon loaded and initialised, with no shutdown(),
     // and let checkNoShutdownAtExit look for its onShutdown after the CRT has run its exit-time destructors.
     {

@@ -4,7 +4,7 @@
 
 static std::atomic<int> g_updateCount{0};
 static std::atomic<int> g_renderCount{0};
-static std::atomic<int> g_crashMode{0}; // 0 = normal, 1 = crash onUpdate, 2 = crash onRenderEye
+static std::atomic<int> g_crashMode{0}; // 0 = normal, 1 = crash onUpdate, 2 = crash onRenderEye, 3 = crash onFilterInput, 4 = filter input without ever swallowing
 
 extern "C" __declspec(dllexport) void WINAPI fixtureSetCrashMode(int mode) {
     g_crashMode.store(mode);
@@ -150,6 +150,10 @@ static void EDVR_API pluginOnRenderEye(const EdvrEyeRenderContext* eyeCtx) {
 }
 
 static void EDVR_API pluginOnFilterInput(EdvrInputContext* inputCtx) {
+    if (g_crashMode.load() == 3) {
+        *reinterpret_cast<volatile int*>(nullptr) = 42; // deliberate fault
+    }
+    if (g_crashMode.load() == 4) return;   // healthy, but never holds input
     if (inputCtx && inputCtx->deviceType == 1) {
         inputCtx->swallowInput = 1;
     }
