@@ -6,10 +6,12 @@
 #include <filesystem>
 #include <fstream>
 #include <optional>
+#include <thread>
 
 #include "../../include/edvr_plugin_api.h"
 #include "../../src/plugins/plugin_manager.h"
 #include "../../src/plugins/plugin_setting_restore.h"
+#include "../../src/plugins/plugin_row_registry.h"
 #include "../../src/common/config.h"
 #include "../../src/common/log.h"
 #include "../../src/common/runtime_profile.h"
@@ -509,6 +511,67 @@ int main(int argc, char** argv) {
         edvr::runtimeProfileSet(savedProfile);
         std::error_code ec16;
         std::filesystem::remove_all(sb, ec16);
+    }
+
+    // Case 17 (PR #92 review): a fault retires an addon's rows from a thread that is not the menu's. The rows go inert at
+    // once but are not erased, and no page is rebuilt, until the menu thread drains the request: it may be mid-tick,
+    // holding Page and Entry values that index into the rows and heading text that borrows from them.
+    {
+        edvr::plugins::PluginRowRegistry reg;
+        auto addRow = [&](const char* owner, const char* header, const char* key) {
+            std::lock_guard<std::recursive_mutex> lock(reg.mutex());
+            auto& r = reg.upsertLocked(owner, header, key);
+            r.getter = reinterpret_cast<EdvrPluginSettingGetter>(&GetCurrentThreadId);   // any non-null pointer: only its nullness matters
+            r.setter = reinterpret_cast<EdvrPluginSettingSetter>(&GetCurrentThreadId);
+            r.userData = &reg;
+        };
+        addRow("alpha", "Alpha", "one");
+        addRow("alpha", "Alpha", "two");
+        addRow("beta", "Beta", "one");
+        check(!reg.drain(), "retire: adding rows to the registry alone posts nothing");
+        reg.postChanged();
+        check(reg.drain(), "retire: a posted change makes the menu thread rebuild");
+        check(!reg.drain(), "retire: a drained queue asks for nothing the second time");
+
+        const edvr::plugins::PluginSettingRow* held = nullptr;
+        const void* heldHeading = nullptr;
+        {
+            std::lock_guard<std::recursive_mutex> lock(reg.mutex());
+            held = &reg.rows()[0];                              // what a Page entry's index resolves to
+            heldHeading = reg.internHeading(reg.rows()[0].header);   // what a Heading entry borrows
+        }
+        std::thread faulter([&] { reg.retire("alpha"); });       // the OpenXR owner thread's fault path
+        faulter.join();
+        {
+            std::lock_guard<std::recursive_mutex> lock(reg.mutex());
+            check(reg.rows().size() == 3 && &reg.rows()[0] == held, "retire: no row is erased by the faulting thread (storage stays put)");
+            check(reg.rows()[0].retired && reg.rows()[1].retired && !reg.rows()[2].retired, "retire: only the faulting owner's rows are marked");
+            check(!held->getter && !held->setter && !held->userData, "retire: the marked row's callbacks are inert at once");
+            check(reg.rows()[2].getter && reg.rows()[2].setter, "retire: another addon's callbacks are untouched");
+            check(std::string(static_cast<const char*>(heldHeading)) == "Alpha", "retire: a heading taken before the fault still reads");
+        }
+        for (int i = 0; i < 64; ++i) addRow("gamma", "Gamma", ("k" + std::to_string(i)).c_str());   // the vector reallocates
+        check(std::string(static_cast<const char*>(heldHeading)) == "Alpha", "retire: heading text survives the row vector growing");
+        check(reg.drain(), "retire: the menu thread is told to rebuild");
+        {
+            std::lock_guard<std::recursive_mutex> lock(reg.mutex());
+            size_t alpha = 0, beta = 0;
+            for (const auto& r : reg.rows()) { if (r.owner == "alpha") ++alpha; if (r.owner == "beta") ++beta; }
+            check(alpha == 0 && beta == 1, "retire: the drain erases the retired rows and nothing else");
+        }
+        check(!reg.retire("alpha"), "retire: retiring an owner with no rows is a no-op");
+        check(!reg.drain(), "retire: ...and posts nothing");
+        check(!reg.hidden(), "hide: rows start shown");
+        reg.postHidden(true);
+        check(reg.drain() && reg.hidden(), "hide: the menu thread hides on request and rebuilds");
+        reg.postHidden(true);
+        check(!reg.drain() && reg.hidden(), "hide: hiding again changes nothing");
+        {
+            std::lock_guard<std::recursive_mutex> lock(reg.mutex());
+            check(reg.rows().size() == 65, "hide: hidden rows are kept, not deleted");
+        }
+        reg.postHidden(false);
+        check(reg.drain() && !reg.hidden(), "hide: the menu thread shows them again");
     }
 
     // Cleanup sandbox

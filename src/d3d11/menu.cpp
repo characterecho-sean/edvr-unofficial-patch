@@ -62,6 +62,7 @@
 #include "../../include/edvr_plugin_api.h"
 #include "../plugins/plugin_manager.h"
 #include "../plugins/plugin_setting_restore.h"
+#include "../plugins/plugin_row_registry.h"
 #include <map>
 // fsr3_engine.h is deliberately NOT included: the Temporal AA status line
 // reaches AMD's price and its name through temporal_pass.h's
@@ -115,7 +116,7 @@ struct Entry {
     EntryKind   kind = EntryKind::Setting;
     int         def = -1;        // index into kMenuRows for Setting
     int         action = -1;     // index into g_actions for Action
-    int         pluginSetting = -1; // index into g_pluginSettings for PluginSetting
+    int         pluginSetting = -1; // index into g_pluginRows.rows() for PluginSetting
     uint32_t    candidateId = 0;    // plugin manager candidate id for Approval; looked up when drawn and when activated
     const char* text = "";       // for Heading
 };
@@ -136,25 +137,7 @@ struct Action {
     void*        user = nullptr;
 };
 
-struct PluginSettingRow {
-    std::string owner;   // the addon (its stem) whose DLL holds getter, setter and userData; "" for none
-    std::string header;
-    std::string key;
-    std::string label;
-    std::string hint;
-    EdvrPluginSettingType type = EDVR_PLUGIN_SETTING_BOOL;
-    int64_t minValue = 0;
-    int64_t maxValue = 1;
-    int64_t stepValue = 1;
-    int64_t defaultValue = 0;
-    std::vector<std::string> choiceOptions;
-    EdvrPluginSettingGetter getter = nullptr;
-    EdvrPluginSettingSetter setter = nullptr;
-    void* userData = nullptr;
-    int64_t cachedValue = 0;
-};
-static std::vector<PluginSettingRow> g_pluginSettings;
-static std::recursive_mutex g_pluginSettingsMutex;
+static plugins::PluginRowRegistry g_pluginRows;   // the addons' rows and the queue that carries every change to them to this thread (plugin_row_registry.h)
 
 struct RowState {
     std::string value;     // the effective value, as Config reads it
@@ -1471,9 +1454,10 @@ static void callSettingSetterSafely(EdvrPluginSettingSetter setter, const char* 
 }
 
 void stepPluginSetting(int psIdx, int dir) {
-    std::lock_guard<std::recursive_mutex> lock(g_pluginSettingsMutex);
-    if (psIdx < 0 || psIdx >= static_cast<int>(g_pluginSettings.size())) return;
-    auto& ps = g_pluginSettings[psIdx];
+    std::lock_guard<std::recursive_mutex> lock(g_pluginRows.mutex());
+    if (psIdx < 0 || psIdx >= static_cast<int>(g_pluginRows.rows().size())) return;
+    auto& ps = g_pluginRows.rows()[psIdx];
+    if (ps.retired) return;   // its addon is gone or faulted; the row goes at the next tick
     int64_t val = ps.cachedValue;
     if (ps.getter) {
         val = callSettingGetterSafely(ps.getter, ps.key.c_str(), ps.userData, ps.cachedValue);
@@ -1560,25 +1544,28 @@ void approveAddonCandidate(uint32_t id) {
 }
 
 void buildPluginsPage(Page& p) {
-    // Lock order: the manager's mutex comes before g_pluginSettingsMutex (approving an addon registers its
+    // Lock order: the manager's mutex comes before g_pluginRows.mutex() (approving an addon registers its
     // settings while the manager holds its lock). So the candidates are copied here, before the settings
     // lock is taken; nothing below calls into the manager with the settings lock held.
-    std::vector<plugins::CandidatePlugin> unapproved = plugins::PluginManager::instance().candidatesSnapshot();
+    // While the addons are dormant (a flat session) their rows and the approval list are hidden, not deleted.
+    const bool hidden = g_pluginRows.hidden();
+    std::vector<plugins::CandidatePlugin> unapproved;
+    if (!hidden) unapproved = plugins::PluginManager::instance().candidatesSnapshot();
     unapproved.erase(std::remove_if(unapproved.begin(), unapproved.end(),
                                     [](const plugins::CandidatePlugin& c) { return c.approved; }),
                      unapproved.end());
 
-    std::lock_guard<std::recursive_mutex> lock(g_pluginSettingsMutex);
+    std::lock_guard<std::recursive_mutex> lock(g_pluginRows.mutex());
     std::map<std::string, std::vector<int>> groups;
-    for (size_t i = 0; i < g_pluginSettings.size(); ++i) {
-        groups[g_pluginSettings[i].header].push_back(static_cast<int>(i));
+    for (size_t i = 0; i < g_pluginRows.rows().size() && !hidden; ++i) {
+        groups[g_pluginRows.rows()[i].header].push_back(static_cast<int>(i));
     }
 
     for (const auto& kv : groups) {
         if (kv.second.empty()) continue;
         Entry h;
         h.kind = EntryKind::Heading;
-        h.text = g_pluginSettings[kv.second[0]].header.c_str();
+        h.text = g_pluginRows.internHeading(g_pluginRows.rows()[kv.second[0]].header);   // rows move when the vector grows
         p.entries.push_back(h);
 
         for (int idx : kv.second) {
@@ -2270,9 +2257,9 @@ void buildContent(MenuContent& c) {
                 continue;
             }
             if (e.kind == EntryKind::PluginSetting) {
-                std::lock_guard<std::recursive_mutex> lock(g_pluginSettingsMutex);
-                if (e.pluginSetting >= 0 && e.pluginSetting < static_cast<int>(g_pluginSettings.size())) {
-                    const auto& ps = g_pluginSettings[e.pluginSetting];
+                std::lock_guard<std::recursive_mutex> lock(g_pluginRows.mutex());
+                if (e.pluginSetting >= 0 && e.pluginSetting < static_cast<int>(g_pluginRows.rows().size())) {
+                    const auto& ps = g_pluginRows.rows()[e.pluginSetting];
                     strncpy(l.left, ps.label.c_str(), sizeof(l.left) - 1);
                     l.style = hi ? kMenuRowHi : kMenuRow;
                     if (hi && !ps.hint.empty()) snprintf(c.hint, sizeof(c.hint), "%s", ps.hint.c_str());
@@ -4533,8 +4520,11 @@ void menuFlatResize() {
     g_s.padReady = false;
 }
 
+static void menuDrainPluginRows();
+
 void menuTick(ID3D11Device* dev) {
     State& s = g_s;
+    menuDrainPluginRows();
     if (!s.configured) return;
     if (runtimeFlatProfile()) {
         guardedBudget(g_budget, [&] {
@@ -5062,20 +5052,22 @@ extern "C" __declspec(dllexport) int WINAPI edvrRegisterPluginSetting(const Edvr
 }
 
 void menuRemovePluginSettings(const char* ownerId) {
-    std::string owner = ownerId ? ownerId : "";
-    bool removed = false;
-    {
-        std::lock_guard<std::recursive_mutex> lock(g_pluginSettingsMutex);
-        for (size_t i = g_pluginSettings.size(); i-- > 0;) {
-            if (g_pluginSettings[i].owner == owner) {
-                g_pluginSettings.erase(g_pluginSettings.begin() + static_cast<ptrdiff_t>(i));
-                removed = true;
-            }
-        }
-    }
-    // After the settings lock is released: the rebuild reads the manager's candidates, and the manager's
-    // lock comes first in the global order (see PluginManager::m_mutex).
-    if (removed && g_s.configured) buildPages();
+    // Any thread, usually the plugin manager's (a fault on the OpenXR owner thread, a failed initialise). The rows go
+    // inert here, under the settings mutex, so nothing calls into the addon's DLL again; the erase and the page rebuild
+    // are the menu thread's, at the top of its next tick (menuDrainPluginRows), because the menu thread may be inside
+    // menuTick holding Page and Entry values that index into those rows.
+    g_pluginRows.retire(ownerId ? ownerId : "");
+}
+
+void menuSetPluginRowsHidden(bool hidden) {
+    g_pluginRows.postHidden(hidden);
+}
+
+// Menu thread, top of menuTick, whether or not the menu is configured (an unconfigured menu builds its pages from the
+// rows when it does configure, so only the registry changes then).
+static void menuDrainPluginRows() {
+    // The settings mutex is not held here: the rebuild takes the plugin manager's lock first (see PluginManager::m_mutex).
+    if (g_pluginRows.drain() && g_s.configured) buildPages();
 }
 
 static int registerPluginSettingLocked(const char* ownerId, const EdvrPluginSettingDef* setting);
@@ -5084,15 +5076,15 @@ int menuRegisterPluginSetting(const char* ownerId, const EdvrPluginSettingDef* s
     if (!setting || setting->structSize < sizeof(EdvrPluginSettingDef)) return -1;
     int rc;
     {
-        std::lock_guard<std::recursive_mutex> lock(g_pluginSettingsMutex);
+        std::lock_guard<std::recursive_mutex> lock(g_pluginRows.mutex());
         rc = registerPluginSettingLocked(ownerId, setting);
     }
-    // Rebuild once the settings lock is released, for the same lock-order reason as menuRemovePluginSettings.
-    if (rc == 0 && g_s.configured) buildPages();
+    // The pages are the menu thread's to rebuild: this may be any thread.
+    if (rc == 0) g_pluginRows.postChanged();
     return rc;
 }
 
-// Caller holds g_pluginSettingsMutex and rebuilds the pages afterwards.
+// Caller holds g_pluginRows.mutex().
 static int registerPluginSettingLocked(const char* ownerId, const EdvrPluginSettingDef* setting) {
     std::string headerStr = (setting->header && setting->header[0]) ? setting->header : "Plugins";
     std::string keyStr = setting->key ? setting->key : "";
@@ -5100,37 +5092,7 @@ static int registerPluginSettingLocked(const char* ownerId, const EdvrPluginSett
     std::string iniKey = plugins::pluginSettingIniKey(headerStr, keyStr);
     int64_t initialVal = plugins::restoredPluginSettingValue(*setting, iniKey);
 
-    for (auto& existing : g_pluginSettings) {
-        if (existing.header == headerStr && existing.key == keyStr) {
-            existing.owner = ownerId ? ownerId : "";
-            existing.label = setting->label ? setting->label : keyStr;
-            existing.hint = setting->hint ? setting->hint : "";
-            existing.type = setting->type;
-            existing.minValue = setting->minValue;
-            existing.maxValue = setting->maxValue;
-            existing.stepValue = setting->stepValue != 0 ? setting->stepValue : 1;
-            existing.defaultValue = setting->defaultValue;
-            existing.getter = setting->getter;
-            existing.setter = setting->setter;
-            existing.userData = setting->userData;
-            existing.cachedValue = initialVal;
-            existing.choiceOptions.clear();
-            if (setting->choiceOptions && setting->choiceCount > 0) {
-                for (uint32_t i = 0; i < setting->choiceCount; ++i) {
-                    if (setting->choiceOptions[i]) existing.choiceOptions.push_back(setting->choiceOptions[i]);
-                }
-            }
-            if (setting->setter) {
-                callSettingSetterSafely(setting->setter, keyStr.c_str(), initialVal, setting->userData);
-            }
-            return 0;
-        }
-    }
-
-    PluginSettingRow row;
-    row.owner = ownerId ? ownerId : "";
-    row.header = headerStr;
-    row.key = keyStr;
+    plugins::PluginSettingRow& row = g_pluginRows.upsertLocked(ownerId ? ownerId : "", headerStr, keyStr);
     row.label = setting->label ? setting->label : keyStr;
     row.hint = setting->hint ? setting->hint : "";
     row.type = setting->type;
@@ -5142,6 +5104,7 @@ static int registerPluginSettingLocked(const char* ownerId, const EdvrPluginSett
     row.setter = setting->setter;
     row.userData = setting->userData;
     row.cachedValue = initialVal;
+    row.choiceOptions.clear();
     if (setting->choiceOptions && setting->choiceCount > 0) {
         for (uint32_t i = 0; i < setting->choiceCount; ++i) {
             if (setting->choiceOptions[i]) row.choiceOptions.push_back(setting->choiceOptions[i]);
@@ -5150,7 +5113,6 @@ static int registerPluginSettingLocked(const char* ownerId, const EdvrPluginSett
     if (setting->setter) {
         callSettingSetterSafely(setting->setter, keyStr.c_str(), initialVal, setting->userData);
     }
-    g_pluginSettings.push_back(std::move(row));
     return 0;
 }
 
