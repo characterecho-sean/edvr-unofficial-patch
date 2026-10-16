@@ -82,7 +82,8 @@ typedef void (EDVR_API *EdvrPluginSettingSetter)(const char* settingKey, int64_t
 typedef struct EdvrPluginSettingDef {
     uint32_t structSize;
     const char* header;               // Header under Plugins tab (e.g. "Cockpit MFD")
-    const char* key;                  // Unique setting key (e.g. "show_all_windows")
+    const char* key;                  // Unique setting key (e.g. "show_all_windows"). Saved keys are lowercased, so keys
+                                      // differing only in case share one saved value; callbacks and F8 keep your spelling.
     const char* label;                // Label shown in menu (e.g. "Show all windows")
     const char* hint;                 // Hint / tooltip shown when highlighted
     EdvrPluginSettingType type;       // Type of setting control
