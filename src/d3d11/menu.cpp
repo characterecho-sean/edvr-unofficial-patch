@@ -1621,13 +1621,8 @@ void buildPages() {
         }
         firstSelectable(p);
         s.pages.push_back(p);
-        {
-            Page pp;
-            pp.name = "Plugins";
-            buildPluginsPage(pp);
-            firstSelectable(pp);
-            s.pages.push_back(pp);
-        }
+        // No Plugins page: add-ons are VR-only, so in flat it could only be empty, and the flat menu has no tab buttons to reach it. The flat add-on
+        // follow-up brings it back with the flat render path.
         s.page = 0;
         s.developerBuilt = s.developer;
         s.contentDirty = true;

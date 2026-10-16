@@ -187,10 +187,11 @@ bool PluginManager::initialize(const std::wstring& rootDir) {
     m_rootDir = rootDir;
     // Plugins are VR-only: the only code that updates and draws them is the native OpenXR scene pass, which a flat session does not run. A session that
     // begins flat therefore discovers nothing, initialises nothing and registers no settings yet; onProfileSwitched does all of that on the first
-    // switch into VR.
+    // switch into VR. Elite offers no flat-to-VR switch after a flat launch today, so in practice a flat launch loads no add-on at all; the deferral
+    // keeps the path correct if that switch ever arrives (design doc section 11, "Flat to VR").
     if (runtimeFlatProfile()) {
         m_dormant = true;
-        Log::get().note("plugin_manager: flat session, addon discovery deferred until the profile switches to VR");
+        Log::get().note("plugin_manager: flat session, no addon loaded (plugins are VR-only); discovery waits for a switch into VR");
         return true;
     }
     m_dormant = false;

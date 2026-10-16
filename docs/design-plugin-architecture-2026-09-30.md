@@ -25,6 +25,7 @@
   so a split into DLLs stays mechanical (section 10 has the reasons).
   PR #46's C ABI stays the add-on tier, moved into the core (VR-only as
   built, see Scope). **Scope (PR #92 review): the 3rd-party tier is VR-only; flat is a follow-up (section 11).**
+  Live VR to flat to VR flown 2026-10-16; flat to VR after a flat launch is not possible in Elite today and is open future work (section 11).
 - **Decided, Q2-Q6 (Sean, 2026-09-30):** the nine plugins of section 4
   (regrouped: intro and on-foot-panel split out, UI quality inside
   temporal-aa); defaults that reproduce today's shipped behaviour; the
@@ -425,9 +426,23 @@ Branch `feat/third-party-plugins` implements 3rd-party plugin support (`include/
   no change to the add-on ABI: a switch to flat suspends (no update, render or input callback; input ownership released through the normal release path;
   the add-ons' F8 rows hidden, not deleted, through the menu-thread queue; log `plugin_manager: profile switched to flat, N addon(s) suspended ...`), a
   switch back to VR resumes (callbacks again, rows shown; log `plugin_manager: profile switched to VR, N addon(s) active`). Nothing is unloaded at a
-  switch. A session launched in flat defers discovery, approval and loading to the first switch into VR (logs `plugin_manager: flat session, addon
-  discovery deferred until the profile switches to VR`, then `plugin_manager: profile switched to VR, running the deferred addon discovery`). Flat
-  support proper is a follow-up PR: an update and composite hook on the final image before Present, with a flat-session fixture counter in `addon_manager_test`.
+  switch. A session launched in flat defers discovery, approval and loading to the first switch into VR (logs `plugin_manager: flat session, no
+  addon loaded (plugins are VR-only); discovery waits for a switch into VR`, then `plugin_manager: profile switched to VR, running the deferred addon
+  discovery`). The flat F8 menu has no Plugins page. Flat support proper is a follow-up PR: an update and composite hook on the final image before
+  Present, the flat Plugins page back, and a flat-session fixture counter in `addon_manager_test`.
+- **Flown 2026-10-16 (build `2fd5f50e`, Steam, OpenXR, edvr-mfd):** VR to flat to VR twice, live, with the add-on loaded (suspended, rows hidden,
+  resumed with settings intact); focus release; clean exit; settings saved under `addon.edvr_mfd.*`; a flat launch logs the deferral and loads nothing.
+- **Flat to VR (future work, low priority).** Elite offers no way to select the HMD after a flat launch, so this transition cannot happen today; Sean
+  is investigating it, and it is unlikely to land without demand. The deferred path is covered only by `addon_manager_test` case 18 and has never
+  flown. If the switch arrives, check before relying on it:
+  - Discovery and each add-on's `onInitialize` run on the Present thread inside `commitPosted()`: watch for a hitch at the first switch, and for
+    contention on the manager mutex with the OpenXR thread's dispatch.
+  - The OpenXR runtime and the scene pass start mid-session: confirm `openvr_api.dll` acquires the bridge exports from `d3d11.dll` late and that the
+    add-on update and render callbacks begin.
+  - Approval: an unapproved add-on first appears in F8 at that switch, and approving it loads it on the menu thread mid-session.
+  - Settings: rows registered at the switch read their saved values from the VR profile's file, which depends on `onProfileSwitched()` running after
+    `Config::switchProfile()`; keep that order.
+  - Passthrough and LegacyVr count as VR (`runtimeFlatProfile()` is false), so add-ons run in both; decide whether Passthrough should suspend them.
 - **Consolidated core:** First-party features remain inside the monolithic core (per Sean: users want all features anyway; splitting them into separate internal plugins dropped in priority).
 - **Extension Manager (`src/plugins/plugin_manager.{h,cpp}`):**
   - **Trust-On-First-Use (TOFU):** Pre-execution SHA-256 hash calculation via Windows BCrypt before loading candidate DLLs. Candidates in `plugins\` are cross-referenced with `[addons] <stem> = <sha256>` in `edvr.ini`.
