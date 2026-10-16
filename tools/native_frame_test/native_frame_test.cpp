@@ -2291,6 +2291,63 @@ int wmain(int argc, wchar_t** argv) {
                           std::fabs(nf::eyeHeightM(15.0, 1.0, 0.0) - 0.15) < 1e-12,
                       "F64: the eye height slider is clamped to 0..15 cm (NaN: 4); a zero ramp applies nothing");
             }
+            // F65a: the connection retry's gate, the armed hand weight, the reach limit's projection.
+            {
+                // (1) The gate: state 5 or 3 within 10 s arms; state 10 never; a Deactivate after 10 s never; an unread state never.
+                check(nf::retryDecision(true, 5, 400) == nf::kRetryArm && nf::retryDecision(true, 3, 10000) == nf::kRetryArm &&
+                          nf::retryDecision(true, 10, 400) == nf::kRetrySessions && nf::retryDecision(true, 10, 60000) == nf::kRetrySessions &&
+                          nf::retryDecision(true, 5, 10001) == nf::kRetryLate && nf::retryDecision(true, 5, 53000) == nf::kRetryLate &&
+                          nf::retryDecision(false, 0, 400) == nf::kRetryUnread,
+                      "F65a: a Deactivate arms the retry only for a CTSA destroyed before sessions (state not 10) and within 10 s of it");
+                // (2) The hand's weight: 1 while armed whatever the distance gate (the flight's 0.64..0.89); the distance gate unarmed.
+                check(nf::ikArmGate(true, 0.64f) == 1.0f && nf::ikArmGate(true, 0.0f) == 1.0f && nf::ikArmGate(false, 0.64f) == 0.64f &&
+                          nf::ikArmGate(false, 0.0f) == 0.0f,
+                      "F65a: a hand on its grip solves at weight 1 while a weapon is held; the distance gate keeps it unarmed");
+                // (3) Within reach: no correction. Shoulders 30 cm behind and 20 cm beside their grips, 10 cm above, arms 55 cm (limit 53).
+                const double R[2] = {0.55 - nf::kReachMarginM, 0.55 - nf::kReachMarginM};
+                const bool both[2] = {true, true};
+                const double vIn[2][3] = {{-0.20, 0.10, -0.30}, {0.20, 0.10, -0.30}};
+                double dIn[3] = {9.0, 9.0, 9.0};
+                bool feasIn = false;
+                const bool actIn = nf::reachLimitDelta(vIn, R, both, dIn, &feasIn);
+                check(!actIn && feasIn && dIn[0] == 0.0 && dIn[1] == 0.0 && dIn[2] == 0.0,
+                      "F65a: the reach limit's projection is zero when both shoulders are within reach of their grips");
+                // (4) The left shoulder 17 cm past its reach (the flight's worst): the correction brings both under the limit, horizontal
+                // only, and no further than needed (the left at the limit).
+                const auto len3 = [](const double x[3]) { return std::sqrt(x[0] * x[0] + x[1] * x[1] + x[2] * x[2]); };
+                const double vOut[2][3] = {{-0.30, 0.10, -0.60}, {0.15, 0.10, -0.40}};
+                double dOut[3] = {};
+                bool feasOut = false;
+                const bool actOut = nf::reachLimitDelta(vOut, R, both, dOut, &feasOut);
+                double aL[3], aR[3];
+                for (int i = 0; i < 3; ++i) {
+                    aL[i] = vOut[0][i] + dOut[i];
+                    aR[i] = vOut[1][i] + dOut[i];
+                }
+                check(actOut && feasOut && dOut[1] == 0.0 && len3(aL) <= R[0] + 1e-9 && len3(aR) <= R[1] + 1e-9 &&
+                          std::fabs(len3(aL) - R[0]) < 1e-6 && len3(vOut[0]) > R[0] + 0.1,
+                      "F65a: the projection keeps each shoulder within l1 + l2 - 2 cm of its grip, horizontal only, the shortfall closed exactly");
+                // (5) Both shoulders a little past reach, pulling different ways: neither arm's own projection satisfies the other, so the
+                // nearer crossing of the two circles is taken and satisfies both; one arm only (the other unmeasured) is its own disk.
+                const double vBoth[2][3] = {{-0.45, 0.05, -0.30}, {0.30, 0.05, -0.50}};
+                double dBoth[3] = {};
+                bool feasBoth = false;
+                const bool actBoth = nf::reachLimitDelta(vBoth, R, both, dBoth, &feasBoth);
+                double bL[3], bR[3];
+                for (int i = 0; i < 3; ++i) {
+                    bL[i] = vBoth[0][i] + dBoth[i];
+                    bR[i] = vBoth[1][i] + dBoth[i];
+                }
+                const bool leftOnly[2] = {true, false};
+                double dOne[3] = {};
+                bool feasOne = false;
+                nf::reachLimitDelta(vBoth, R, leftOnly, dOne, &feasOne);
+                double oL[3];
+                for (int i = 0; i < 3; ++i) oL[i] = vBoth[0][i] + dOne[i];
+                check(actBoth && feasBoth && len3(bL) <= R[0] + 1e-9 && len3(bR) <= R[1] + 1e-9 && dBoth[1] == 0.0 && feasOne &&
+                          std::fabs(len3(oL) - R[0]) < 1e-6,
+                      "F65a: with both shoulders out of reach the correction satisfies both; with one arm measured, its own disk");
+            }
             // The shift rule: a record at the AMC origin moves by d once; a second pass over it leaves it alone; a record elsewhere never moves.
             const float origin[3] = {10.0f, 2.0f, -3.0f}, d[3] = {0.0f, 0.231f, 0.0f};
             float rec[3] = {10.0f, 2.0f, -3.0f}, other[3] = {10.5f, 2.0f, -3.0f};

@@ -4154,7 +4154,10 @@ void f28Untrack(uint64_t act) {
     }
 }
 
-// ---- F30 part 1 (TEMPORARY): the Training connection stall. fix.training_connect_fix = on | off (read at launch, default on).
+// ---- F30 part 1 (TEMPORARY): the Training connection stall. F65a: the key is fix.connection_retry = on | off (read at launch, default on;
+// edvr.ini's moved-from annotation reads the old name, fix.training_connect_fix, when the new one is absent). F65a gate: a Deactivate arms B
+// only when the destroyed CTSA had not reached sessions (state at the destroy not 10) and it came within 10 s of the destroy (f30DestroyNote,
+// the Deactivate hook); a cycle ends (g_f30Dead cleared) when it is recovered, declined, gives up, or 10 s pass with no Deactivate.
 // A (prevent, f30HoldSgmm): SGMM in state 2 (the pending StartTutorial) with a CTSA alive in states 1-9 has its body skipped for up to 10 s.
 //   The skipped body is the game's own not-ready exit (+0x1D1D1E2): for state 2 it returns al = (state == 0) = 0, which the hook returns.
 // B (recover, f30RecoverTick, from the owner AM's Update after the original returns): after a CTSA is destroyed and a load is pending (a Deactivate
@@ -4178,7 +4181,7 @@ using SetFreeFn = void(__fastcall*)(void*);
 using StartPendingFn = void(__fastcall*)(void*);
 }  // namespace f30
 
-bool g_f30FixOn = false;            // fix.training_connect_fix, read at install
+bool g_f30FixOn = false;            // fix.connection_retry (F65a; was fix.training_connect_fix), read at install
 uintptr_t g_f30Base = 0;            // EliteDangerous64.exe's base (install)
 bool g_f30CalleesOk = false;        // the Update and the callees' entry bytes matched at install; recovery refuses otherwise
 F9Probe g_f30Update;
@@ -4186,8 +4189,14 @@ uint8_t* g_f30UpdateShim = nullptr;
 // Part B. Game thread only: the Ctor, Dtor, Remove, Start, Deactivate, SGMM and Update hooks all run there.
 uint64_t g_f30Owner = 0;            // the owner AM of the last CTSA built ([act+8] after its ctor)
 uint64_t g_f30NewAct = 0;           // the last CTSA built
-bool g_f30Dead = false;             // a CTSA was destroyed (its dtor, or the owner's Remove) and none was built since
-bool g_f30Pending = false;          // a Deactivate came after that destroy: a load is pending
+bool g_f30Dead = false;             // a CTSA was destroyed (its dtor, or the owner's Remove) and none was built since; F65a: until its cycle ends
+bool g_f30Pending = false;          // a Deactivate came after that destroy: a load is pending (F65a: only when its gate armed it)
+// F65a: the open destroy cycle (game thread): the destroyed CTSA, its state at the destroy ([act+0x30]; 0xFFFFFFFF unread), when, and whether
+// it still waits for a Deactivate (closed by the Deactivate's decision, by 10 s without one, or by the next destroy).
+uint64_t g_f30DeadAct = 0, g_f30DeadMs = 0;
+uint32_t g_f30DeadState = 0xFFFFFFFFu;
+bool g_f30DeadOpen = false;
+const char* g_f30DeadVia = "";
 bool g_f30GaveUp = false, g_f30RefuseLogged = false, g_f30StartPendingDone = false;
 uint32_t g_f30Attempts = 0;
 uint64_t g_f30AttemptMs = 0, g_f30AttemptCtor = 0, g_f30AttemptStart = 0, g_f30PendingCtor = 0;
@@ -4204,6 +4213,42 @@ bool f28Tracked(uint64_t act) {
         if (slot == act) return true;
     }
     return false;
+}
+
+// F65a: the destroy cycle's one line: the state at the destroy, the Deactivate's delay (or none), the decision. Game thread.
+void f30CycleLog(const char* decision, bool deact, uint64_t delayMs) {
+    char st[24], dl[48];
+    if (g_f30DeadState == 0xFFFFFFFFu) std::snprintf(st, sizeof(st), "unread");
+    else std::snprintf(st, sizeof(st), "%u", static_cast<unsigned>(g_f30DeadState));
+    if (deact) std::snprintf(dl, sizeof(dl), "%.1f s after the destroy", static_cast<double>(delayMs) / 1000.0);
+    else std::snprintf(dl, sizeof(dl), "none within %.0f s", static_cast<double>(nofoot::kRetryDeactWindowMs) / 1000.0);
+    Log::get().note("connection retry: CTSA %s destroyed (%s) in state %s; Deactivate %s; %s (fix.connection_retry %s)", f28Hex(g_f30DeadAct).c_str(),
+                    g_f30DeadVia, st, dl, decision, g_f30FixOn ? "on" : "off");
+}
+// F65a: an open cycle with no Deactivate in 10 s ends: declined, g_f30Dead cleared (a later Deactivate, an exit to the menu, cannot arm it).
+void f30CycleExpire(uint64_t ms) {
+    if (!g_f30DeadOpen || ms < g_f30DeadMs || ms - g_f30DeadMs <= nofoot::kRetryDeactWindowMs) return;
+    g_f30DeadOpen = false;
+    g_f30Dead = false;
+    f30CycleLog("not armed: no Deactivate within 10 s", false, 0);
+}
+// F65a: a destroy (the dtor, or the owner's Remove of a tracked CTSA) opens a cycle: the state at [act+0x30] (SEH read, before the dtor runs).
+// The same CTSA's second destroy within 10 s of its first (its dtor after its Remove) is the same cycle, decided or not; an older open
+// cycle is closed first.
+void f30DestroyNote(uint64_t act, const char* via) {
+    const uint64_t ms = GetTickCount64();
+    g_f28DtorMs.store(ms);   // v2: the SGMM lines follow for 120 s after a destruction
+    f30CycleExpire(ms);
+    if (act && act == g_f30DeadAct && ms >= g_f30DeadMs && ms - g_f30DeadMs <= nofoot::kRetryDeactWindowMs) return;
+    if (g_f30DeadOpen) f30CycleLog("not armed: another CTSA was destroyed before a Deactivate", false, 0);
+    uint32_t st = 0;
+    const bool ok = act && guardedRead(static_cast<uintptr_t>(act) + 0x30, &st, 4);
+    g_f30DeadAct = act;
+    g_f30DeadMs = ms;
+    g_f30DeadState = ok ? st : 0xFFFFFFFFu;
+    g_f30DeadVia = via;
+    g_f30DeadOpen = true;
+    g_f30Dead = true;
 }
 
 // Forwards the eight argument slots to the trampoline. Integer arguments only: the callee reads them as they came.
@@ -4230,8 +4275,7 @@ uint64_t __fastcall f28DtorHooked(uint64_t a1, uint64_t a2, uint64_t a3, uint64_
     g_f28Calls[f28::kDtor].fetch_add(1);
     f28Entry(f28::kDtor, a1, reinterpret_cast<uint64_t>(_ReturnAddress()));
     f28Untrack(a1);   // the object is freed by the dtor: stop reading it
-    g_f28DtorMs.store(GetTickCount64());   // v2: the SGMM lines follow for 120 s after a destruction
-    g_f30Dead = true;                      // F30 part B: destroyed, and no CTSA built since (until a ctor)
+    f30DestroyNote(a1, "dtor");   // F30 part B: destroyed, and no CTSA built since (until a ctor); F65a: the cycle with its state at the destroy
     return f28Forward(f28::kDtor, a1, a2, a3, a4, s5, s6, s7, s8);
 }
 uint64_t __fastcall f28CtorHooked(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t s5, uint64_t s6, uint64_t s7, uint64_t s8) {
@@ -4245,6 +4289,10 @@ uint64_t __fastcall f28CtorHooked(uint64_t a1, uint64_t a2, uint64_t a3, uint64_
                     okO ? f28Hex(owner).c_str() : "unread", f28Hex(a2).c_str(), f28Hex(a3).c_str());
     g_f30Owner = okO ? owner : 0;   // F30 part B: the owner AM for the recovery's Update gate
     g_f30NewAct = a1;
+    if (g_f30DeadOpen) {            // F65a: a CTSA built before any Deactivate ends the open cycle
+        g_f30DeadOpen = false;
+        f30CycleLog("not armed: the game built a new CTSA before a Deactivate", false, 0);
+    }
     g_f30Dead = false;
     g_f30CtorSeq.fetch_add(1);
     return r;
@@ -4252,16 +4300,31 @@ uint64_t __fastcall f28CtorHooked(uint64_t a1, uint64_t a2, uint64_t a3, uint64_
 uint64_t __fastcall f28DeactHooked(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t s5, uint64_t s6, uint64_t s7, uint64_t s8) {
     g_f28Calls[f28::kDeact].fetch_add(1);
     f28Entry(f28::kDeact, a1, reinterpret_cast<uint64_t>(_ReturnAddress()));   // IrcGameClient::Deactivate: the menu closes here
-    g_f28DeactMs.store(GetTickCount64());   // v2: the IDProvider link line runs while an SGMM wait follows
-    if (g_f30Dead) {                        // F30 part B: the menu closed after a CTSA was destroyed: a load is pending
-        g_f30Pending = true;
-        g_f30GaveUp = false;
-        g_f30RefuseLogged = false;
-        g_f30Attempts = 0;
-        g_f30AttemptMs = 0;
-        g_f30PendingCtor = g_f30CtorSeq.load();
-        Log::get().note("training connect fix: Deactivate after a CTSA was destroyed (%llu s before): a load is pending; the recovery waits for the link to be down and 10 s",
-                        static_cast<unsigned long long>((GetTickCount64() - g_f28DtorMs.load()) / 1000));
+    const uint64_t deactMs = GetTickCount64();
+    g_f28DeactMs.store(deactMs);   // v2: the IDProvider link line runs while an SGMM wait follows
+    // F30 part B: the menu closed after a CTSA was destroyed: a load is pending. F65a: only for an open destroy cycle (a Deactivate with no
+    // open cycle, such as an exit to the menu long after a destroy, arms nothing), and only when the destroyed CTSA had not reached sessions
+    // (its state at the destroy not 10) and this Deactivate came within 10 s of the destroy; any other outcome ends the cycle.
+    if (g_f30DeadOpen) {
+        g_f30DeadOpen = false;
+        const uint64_t delay = deactMs >= g_f30DeadMs ? deactMs - g_f30DeadMs : 0;
+        const int d = nofoot::retryDecision(g_f30DeadState != 0xFFFFFFFFu, g_f30DeadState, delay);
+        if (d == nofoot::kRetryArm && g_f30FixOn) {
+            g_f30Pending = true;
+            g_f30GaveUp = false;
+            g_f30RefuseLogged = false;
+            g_f30Attempts = 0;
+            g_f30AttemptMs = 0;
+            g_f30PendingCtor = g_f30CtorSeq.load();
+            f30CycleLog("armed: a load is pending (attempt 1 at 8 s after the destroy; attempt 2 needs the link down)", true, delay);
+        } else {
+            g_f30Dead = false;
+            f30CycleLog(d == nofoot::kRetrySessions ? "not armed: reached sessions (state 10)"
+                        : d == nofoot::kRetryLate   ? "not armed: no Deactivate within 10 s"
+                        : d == nofoot::kRetryUnread ? "not armed: the state at the destroy was not read"
+                                                    : "not armed: fix.connection_retry is off",
+                        true, delay);
+        }
     }
     return f28Forward(f28::kDeact, a1, a2, a3, a4, s5, s6, s7, s8);
 }
@@ -4491,9 +4554,8 @@ uint64_t __fastcall f28RemoveHooked(uint64_t a1, uint64_t a2, uint64_t a3, uint6
     g_f28Calls[f28::kRemove].fetch_add(1);
     if (g_f30FixOn && f28Tracked(a2)) {   // F30 part B: the owner removed a tracked CTSA (the reconcile): dead for the recovery
         f28Untrack(a2);
-        g_f28DtorMs.store(GetTickCount64());
-        g_f30Dead = true;
-        Log::get().note("training connect fix: the owner AM removed the tracked CTSA %s (AM %s): it is dead for the recovery", f28Hex(a2).c_str(),
+        f30DestroyNote(a2, "the owner's Remove");   // F65a: the cycle, with the state at [act+0x30] read before the Remove runs
+        Log::get().note("connection retry: the owner AM removed the tracked CTSA %s (AM %s): it is dead for the recovery", f28Hex(a2).c_str(),
                         f28Hex(a1).c_str());
     }
     uint32_t st = 0;
@@ -4559,7 +4621,7 @@ void f30Attempt(void* am, uint64_t ms) {
     alignas(16) uint8_t actSet[0x100];
     std::memset(actSet, 0, sizeof(actSet));
     const bool ok = f30InstantiateSafe(g_f30Base, am, actSet);
-    Log::get().note("training connect fix: recovery attempt %u of %u: owner AM %s, set built (count 1, the CTSA type key), Instantiate %s",
+    Log::get().note("connection retry: recovery attempt %u of %u: owner AM %s, set built (count 1, the CTSA type key), Instantiate %s",
                     static_cast<unsigned>(g_f30Attempts), static_cast<unsigned>(f30::kAttempts), f28Hex(reinterpret_cast<uint64_t>(am)).c_str(),
                     ok ? "returned" : "FAULTED (SEH): nothing further is called");
 }
@@ -4571,44 +4633,47 @@ void f30RecoverTick(void* am, uint64_t ms) {
     const uint64_t dtorMs = g_f28DtorMs.load();
     if (g_f30AttemptMs == 0) {
         if (ctorNow != g_f30PendingCtor) {
-            Log::get().note("training connect fix: the game built a CTSA on its own after the menu exit; no recovery is needed");
+            Log::get().note("connection retry: the game built a CTSA on its own after the menu exit; no recovery is needed");
             g_f30Pending = false;
+            g_f30Dead = false;   // F65a: the cycle ends (recovered)
             return;
         }
         // F32: attempt 1 eight seconds after the destruction with a load pending, whatever the link: the link rule is attempt 2's only.
         if (!g_f30Dead || ms < dtorMs || ms - dtorMs < f30::kFirstAttemptMs) return;
-        Log::get().note("training connect fix: the CTSA was destroyed %llu s ago with a load pending: attempt 1 (the link is not checked for it)",
+        Log::get().note("connection retry: the CTSA was destroyed %llu s ago with a load pending: attempt 1 (the link is not checked for it)",
                         static_cast<unsigned long long>((ms - dtorMs) / 1000));
         f30Attempt(am, ms);
         return;
     }
     // Progress is a session: states 7 or 8 on the new CTSA since the attempt (the F31 recovery reached them).
     if (g_f32NewStates & ((1u << 7) | (1u << 8))) {
-        Log::get().note("training connect fix: progress: the new CTSA %s reached states 7-8 (sessions) after attempt %u; recovery done",
+        Log::get().note("connection retry: progress: the new CTSA %s reached states 7-8 (sessions) after attempt %u; recovery done",
                         f28Hex(g_f30NewAct).c_str(), static_cast<unsigned>(g_f30Attempts));
         g_f30Pending = false;
+        g_f30Dead = false;   // F65a: the cycle ends (recovered)
         return;
     }
     // F32: the shortcut. Init went 1 -> 10 with none of states 2..8 between: the "already connected" path, so no sessions were made.
     if (!g_f32Shortcut && (g_f32NewStates & (1u << 10)) && !(g_f32NewStates & 0x1FCu)) {
         g_f32Shortcut = true;
-        Log::get().note("training connect fix: shortcut: the new CTSA %s went 1 -> 10 with no states 2-8 between: no sessions were made (attempt %u)",
+        Log::get().note("connection retry: shortcut: the new CTSA %s went 1 -> 10 with no states 2-8 between: no sessions were made (attempt %u)",
                         f28Hex(g_f30NewAct).c_str(), static_cast<unsigned>(g_f30Attempts));
     }
     if (!g_f30StartPendingDone && ms - g_f30AttemptMs >= f30::kStartWaitMs && g_f30StartSeq.load() == g_f30AttemptStart) {
         g_f30StartPendingDone = true;
         const bool ok = f30StartPendingSafe(g_f30Base, am);
-        Log::get().note("training connect fix: no Start within 1 s of attempt %u: StartPending (+0x4C90B90) on the owner AM %s",
+        Log::get().note("connection retry: no Start within 1 s of attempt %u: StartPending (+0x4C90B90) on the owner AM %s",
                         static_cast<unsigned>(g_f30Attempts), ok ? "returned" : "FAULTED (SEH)");
     }
     const bool timedOut = ms - g_f30AttemptMs >= f30::kRecoverQuietMs;
     if (!g_f32Shortcut && !timedOut) return;
     if (g_f30Attempts >= f30::kAttempts) {
         if (timedOut) {
-            Log::get().note("training connect fix: gave up after %u attempts with no session in 10 s each; the load needs a restart",
+            Log::get().note("connection retry: gave up after %u attempts with no session in 10 s each; the load needs a restart",
                             static_cast<unsigned>(g_f30Attempts));
             g_f30GaveUp = true;
             g_f30Pending = false;
+            g_f30Dead = false;   // F65a: the cycle ends (gave up)
         }
         return;
     }
@@ -4617,11 +4682,11 @@ void f30RecoverTick(void* am, uint64_t ms) {
     if (!f30LinkDown(&why)) {
         if (!g_f30RefuseLogged) {
             g_f30RefuseLogged = true;
-            Log::get().note("training connect fix: attempt 2 held (%s after attempt %u): it needs the link down", why, static_cast<unsigned>(g_f30Attempts));
+            Log::get().note("connection retry: attempt 2 held (%s after attempt %u): it needs the link down", why, static_cast<unsigned>(g_f30Attempts));
         }
         return;
     }
-    Log::get().note("training connect fix: attempt 2 (%s): %s", g_f32Shortcut ? "the shortcut" : "no session in 10 s", why);
+    Log::get().note("connection retry: attempt 2 (%s): %s", g_f32Shortcut ? "the shortcut" : "no session in 10 s", why);
     f30Attempt(am, ms);
 }
 
@@ -4630,6 +4695,7 @@ void f30RecoverTick(void* am, uint64_t ms) {
 uint64_t __fastcall f30UpdateHooked(void* am, float dt) {
     const uint64_t r = reinterpret_cast<F28ShimFn>(g_f30UpdateShim)(am, nullptr, dt);
     f32CountUpdate(am);
+    if (g_f30DeadOpen) f30CycleExpire(GetTickCount64());   // F65a: 10 s with no Deactivate ends the cycle
     if (g_f30FixOn && g_f30CalleesOk && g_f30Pending) f30RecoverTick(am, GetTickCount64());
     return r;
 }
@@ -4639,7 +4705,7 @@ uint64_t __fastcall f30UpdateHooked(void* am, float dt) {
 void f30InstallRecovery(uintptr_t base, bool probeOn) {
     g_f30Base = base;
     if (!g_f30FixOn && !probeOn) {
-        Log::get().note("training connect fix: off (fix.training_connect_fix = off) and the probe off: no hold, no recovery, no counts");
+        Log::get().note("connection retry: off (fix.connection_retry = off) and the probe off: no hold, no recovery, no counts");
         return;
     }
     struct Chk {
@@ -4662,7 +4728,7 @@ void f30InstallRecovery(uintptr_t base, bool probeOn) {
         if (!read || std::memcmp(got, c.b, c.n) != 0) {
             ok = false;
             if (g_f30FixOn)
-                Log::get().note("training connect fix: %s at EliteDangerous64.exe+0x%llX does not match the RE's entry bytes: recovery refused (the hold is gone; the counts are unaffected)",
+                Log::get().note("connection retry: %s at EliteDangerous64.exe+0x%llX does not match the RE's entry bytes: recovery refused (the hold is gone; the counts are unaffected)",
                                 c.name, static_cast<unsigned long long>(c.rva));
         }
     }
@@ -4670,7 +4736,7 @@ void f30InstallRecovery(uintptr_t base, bool probeOn) {
     if (!probeOn && !(g_f30FixOn && ok)) return;
     g_f30UpdateShim = f28MakeShim();
     const F9ProbeSpec s{"AM Update", f30::kUpdateRva, f30::kUpdateB, sizeof(f30::kUpdateB), 11, reinterpret_cast<void*>(&f30UpdateHooked),
-                        g_f30FixOn ? "training connect fix" : "training connect"};
+                        g_f30FixOn ? "connection retry" : "training connect"};
     size_t got = 0;
     std::string why;
     if (g_f30UpdateShim && installF9ProbeInto(g_f30Update, s, base, &got, &why)) {
@@ -4687,9 +4753,12 @@ void f30InstallRecovery(uintptr_t base, bool probeOn) {
 // gate can open with the jump slot set.
 void installF28ProbesOnce(uintptr_t base) {
     const bool probeOn = Config::get().getString("fix.training_connect_probe", "on") != "off";
-    g_f30FixOn = Config::get().getString("fix.training_connect_fix", "on") != "off";
+    g_f30FixOn = Config::get().getString("fix.connection_retry", "on") != "off";   // F65a: renamed (edvr.ini's moved-from reads the old name)
+    Log::get().note("connection retry (F65a): fix.connection_retry = %s (read at launch) -- %s", g_f30FixOn ? "on" : "off",
+                    g_f30FixOn ? "a Deactivate within 10 s of a CTSA destroyed before it reached sessions (state not 10) arms the recovery"
+                               : "no recovery is armed");
     if (!probeOn && !g_f30FixOn) {
-        Log::get().note("training connect: probes off (fix.training_connect_probe = off) and the fix off (fix.training_connect_fix = off)");
+        Log::get().note("training connect: probes off (fix.training_connect_probe = off) and the retry off (fix.connection_retry = off)");
         return;
     }
     if (!probeOn) {
@@ -6258,6 +6327,12 @@ struct FitPub {
     // interior angle (deg), with whether the arm was solved.
     double reachK = 0.0, reachA[2] = {}, elbowDeg[2] = {};
     bool solved[2] = {};
+    // F65a, per arm (L, R): the reach limit's input c = (shoulder U - T_A) - d (model = body axes, the d this call's G carried, so that
+    // at any body shift d' the vector is c + d'), the limit R = l1 + l2 - 2 cm and l1 + l2; the drawn attach against T_A (cm, -1 unmeasured)
+    // and whether it was the written solve; the per-arm weight, its gate (1 armed) and the distance gate; the upper-arm joint's index.
+    double reachC[2][3] = {}, reachR[2] = {}, armL[2] = {}, gripErr[2] = {-1.0, -1.0}, wArm[2] = {}, gateW[2] = {}, gateDist[2] = {};
+    bool reachOk[2] = {}, gripWritten[2] = {};
+    uint32_t uJ[2] = {0xFFFFu, 0xFFFFu};
 };
 std::atomic<uint32_t> g_fitSeq{0};
 FitPub g_fitPub;
@@ -7334,6 +7409,123 @@ void rotCalTick(uint64_t now) noexcept {
     g_rcPublished = true;
 }
 
+// ---- F65a: the reach limit (frame thread) -------------------------------------------------------------------------------------------
+// The F64 flight: the FP weapon is world-fixed while the body follows the head (d ranged 18 cm right and 18 cm forward), so the left
+// shoulder ran out of reach of its grip (ratio 0.95..1.10, shortfall up to 17 cm). After the body align and the weapon fit (a hard limit,
+// after F60/F62a), in full-3P body mode with the arm IK on and a weapon held, the horizontal body shift d is moved by the smallest amount
+// that keeps each 3P shoulder (the upper-arm joint) within l1 + l2 - 2 cm of its grip T_A (nofoot::reachLimitDelta over the hook's
+// published c + d), ramped over 0.2 s on arm and disarm; zero at once outside full 3P or with the arm IK not on. The filter's state is not
+// touched: the published d is the filtered d plus the correction. The 1 s line: per arm the drawn attach against the real T_A, the
+// shoulder-to-grip reach ratio before and after the correction, the weights; the frames constrained and the correction's size.
+nofoot::IkBlend g_f65Ramp{0.0f, nofoot::kReachRampSec};
+double g_f65LastB[3] = {};   // the last full correction (body axes), held while the ramp runs out without a fresh measurement
+uint64_t g_f65LineMs = 0, g_f65PubMs = 0;
+struct F65Arm {
+    uint32_t gripN = 0, gripWritten = 0, rN = 0, uJ = 0xFFFFu;
+    double gripSum = 0.0, gripMax = 0.0, wSum = 0.0, gateWSum = 0.0, gateDistSum = 0.0, armL = 0.0;
+    double beforeSum = 0.0, beforeMax = 0.0, afterSum = 0.0, afterMax = 0.0;
+};
+F65Arm g_f65Arm[2];
+uint32_t g_f65N = 0, g_f65Want = 0, g_f65Constrained = 0, g_f65Infeasible = 0;
+double g_f65CorrSum = 0.0, g_f65CorrMax = 0.0, g_f65WSum = 0.0;
+void f65ReachLimit(uint64_t now, double dt, bool full3P, const AlignRun& a, const EyeSample& s, double corrW[3]) noexcept {
+    corrW[0] = corrW[1] = corrW[2] = 0.0;
+    const int ikMode = pfz::g_ikMode.load(std::memory_order_relaxed);
+    const bool scope = full3P && ikMode == 3 && nativeOnFootActive();
+    const FitPub& p = g_f60Pub;
+    const bool fresh = g_f60Have && (now > p.ms ? now - p.ms : 0) <= nofoot::kIkFreshMs;
+    const bool want = scope && g_f60Weapon && fresh && p.reachOk[0] && p.reachOk[1] && s.valid;
+    if (!scope) {
+        g_f65Ramp.w = 0.0f;
+    } else {
+        g_f65Ramp.step(want, dt);
+    }
+    const double w = static_cast<double>(g_f65Ramp.w);
+    if (!(w > 0.0)) g_f65LastB[0] = g_f65LastB[1] = g_f65LastB[2] = 0.0;
+    double dB[3] = {};
+    if (s.valid)
+        for (int i = 0; i < 3; ++i)
+            for (int j = 0; j < 3; ++j) dB[i] += a.pos[j] * static_cast<double>(s.rows[3 * i + j]);
+    double v[2][3] = {};
+    if (want) {
+        const bool have[2] = {p.reachOk[0], p.reachOk[1]};
+        for (int k = 0; k < 2; ++k)
+            for (int i = 0; i < 3; ++i) v[k][i] = p.reachC[k][i] + dB[i];
+        bool feasible = true;
+        double full[3] = {};
+        const bool active = nofoot::reachLimitDelta(v, p.reachR, have, full, &feasible);
+        for (int i = 0; i < 3; ++i) g_f65LastB[i] = full[i];
+        ++g_f65Want;
+        if (active) ++g_f65Constrained;
+        if (!feasible) ++g_f65Infeasible;
+    }
+    double corrB[3] = {};
+    if (w > 0.0 && s.valid) {
+        for (int i = 0; i < 3; ++i) corrB[i] = w * g_f65LastB[i];
+        for (int j = 0; j < 3; ++j)
+            for (int i = 0; i < 3; ++i) corrW[j] += corrB[i] * static_cast<double>(s.rows[3 * i + j]);
+    }
+    // The 1 s line's sums: every tick in scope; the reach before and after the correction when measured; the grip error once per publication.
+    if (scope) {
+        ++g_f65N;
+        g_f65WSum += w;
+        const double cm = 100.0 * std::sqrt(corrB[0] * corrB[0] + corrB[2] * corrB[2]);
+        g_f65CorrSum += cm;
+        g_f65CorrMax = std::max(g_f65CorrMax, cm);
+        for (int k = 0; k < 2 && want; ++k) {
+            F65Arm& m = g_f65Arm[k];
+            const double L = p.armL[k] > 1e-6 ? p.armL[k] : 1.0;
+            const double after[3] = {v[k][0] + corrB[0], v[k][1] + corrB[1], v[k][2] + corrB[2]};
+            const double rb = nofoot::ikLen(v[k]) / L, ra = nofoot::ikLen(after) / L;
+            m.beforeSum += rb;
+            m.afterSum += ra;
+            m.beforeMax = std::max(m.beforeMax, rb);
+            m.afterMax = std::max(m.afterMax, ra);
+            ++m.rN;
+        }
+        if (fresh && p.ms != g_f65PubMs) {
+            g_f65PubMs = p.ms;
+            for (int k = 0; k < 2; ++k) {
+                F65Arm& m = g_f65Arm[k];
+                m.uJ = p.uJ[k];
+                m.armL = p.armL[k];
+                if (!(p.gripErr[k] >= 0.0)) continue;
+                ++m.gripN;
+                if (p.gripWritten[k]) ++m.gripWritten;
+                m.gripSum += p.gripErr[k];
+                m.gripMax = std::max(m.gripMax, p.gripErr[k]);
+                m.wSum += p.wArm[k];
+                m.gateWSum += p.gateW[k];
+                m.gateDistSum += p.gateDist[k];
+            }
+        }
+    }
+    if (g_f65LineMs == 0) g_f65LineMs = now;
+    if (now - g_f65LineMs < 1000) return;
+    g_f65LineMs = now;
+    if (g_f65N) {
+        char arm[2][400];
+        for (int k = 0; k < 2; ++k) {
+            const F65Arm& m = g_f65Arm[k];
+            const double gn = m.gripN ? static_cast<double>(m.gripN) : 1.0, rn = m.rN ? static_cast<double>(m.rN) : 1.0;
+            std::snprintf(arm[k], sizeof(arm[k]),
+                          "%s (upper arm %u, l1 + l2 %.1f cm, limit %.1f cm): hand (attach) to the grip T_A mean %.1f max %.1f cm over %u "
+                          "publications (%u written; weight mean %.2f, its gate %.2f, the distance gate %.2f); shoulder to grip / (l1 + l2) before "
+                          "the correction mean %.3f max %.3f, after mean %.3f max %.3f (%u ticks)",
+                          k ? "R" : "L", m.uJ, 100.0 * m.armL, 100.0 * (m.armL - nofoot::kReachMarginM), m.gripSum / gn, m.gripMax, m.gripN,
+                          m.gripWritten, m.wSum / gn, m.gateWSum / gn, m.gateDistSum / gn, m.beforeSum / rn, m.beforeMax, m.afterSum / rn,
+                          m.afterMax, m.rN);
+        }
+        const double n = static_cast<double>(g_f65N);
+        Log::get().note("native on foot reach limit (F65a): weight %.2f now, %.2f mean; ticks %u, armed and measured %u, constrained %u, infeasible "
+                        "%u; d correction (horizontal) mean %.1f max %.1f cm; %s; %s",
+                        w, g_f65WSum / n, g_f65N, g_f65Want, g_f65Constrained, g_f65Infeasible, g_f65CorrSum / n, g_f65CorrMax, arm[0], arm[1]);
+    }
+    g_f65N = g_f65Want = g_f65Constrained = g_f65Infeasible = 0;
+    g_f65CorrSum = g_f65CorrMax = g_f65WSum = 0.0;
+    g_f65Arm[0] = g_f65Arm[1] = F65Arm{};
+}
+
 void alignTick(uint64_t now) noexcept {
     static int lastMode = -1;
     const int mode = g_alignMode.load(std::memory_order_relaxed);   // 0 off, 1 view, 2 body
@@ -8016,10 +8208,14 @@ void alignTick(uint64_t now) noexcept {
     const double zero[3] = {0.0, 0.0, 0.0};
     alignFilter(other, zero, false, true, dt, now, mode == 2);
 
+    // F65a: the reach limit's correction (body mode only; zero elsewhere): the published d is the filtered d plus it.
+    double reachCorr[3] = {};
+    if (mode == 2) f65ReachLimit(now, dt, f58Full3P, a, s, reachCorr);
+    else g_f65Ramp.w = 0.0f;
     double change = 0.0;
-    for (size_t i = 0; i < 3; ++i) change = std::max(change, std::fabs(a.pos[i] - a.applied[i]));
+    for (size_t i = 0; i < 3; ++i) change = std::max(change, std::fabs(a.pos[i] + reachCorr[i] - a.applied[i]));
     if (change > 1e-6) {
-        for (size_t i = 0; i < 3; ++i) a.applied[i] = a.pos[i];
+        for (size_t i = 0; i < 3; ++i) a.applied[i] = a.pos[i] + reachCorr[i];
         if (mode == 2) bodyOffsetPublish(a.applied);   // the view run's value goes out below, with the F51 raise
     }
     // The other run's published value goes to zero (the view's eye offset when body is on, the body's offset when view is on).
@@ -8938,6 +9134,7 @@ bool pfzFreezeStep(uint64_t x, const PfzSpan& sp) noexcept {
 // solve at the per-arm weight (the base weight times the distance gate). Every matrix is computed before the first write; the applied hand
 // offset moves at most 5 cm a call. No allocation, logging or locks (the scratch is under g_pfzBusy); every read and write under SEH.
 std::atomic<float> g_ikWeight{0.0f};        // the frame thread's base weight (0 unless the key is nudge or on and the gate holds)
+std::atomic<bool> g_ikArmed{false};         // F65a: a weapon is held (the frame thread's g_f60Weapon: the grips fresh, the grip gate raised)
 std::atomic<bool> g_ikWriteDown{false};     // a failed write stands the IK's writes down for the session
 std::atomic<uint32_t> g_ikFailBits{0};      // refusals the hook met; the frame thread names each once
 enum IkRefusal : uint32_t {
@@ -9134,7 +9331,13 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         float l1 = 0.0f, l2 = 0.0f, E[3] = {}, S[3] = {}, Efp[3] = {};
         bool fitOk = false;                      // F60: this side's grip (T_A) and arm length were measured
         double tA[3] = {}, armLen = 0.0;
+        // F65a: the shoulder (U, after the square-up, before the assist) minus T_A (model = body axes), the drawn attach against T_A (cm: the
+        // solved attach when written, else the animated one; -1 unmeasured), whether it was written, the weight's gate (1 when armed).
+        double reachV[3] = {}, gripErr = -1.0, gateW = 0.0;
+        bool gripWritten = false;
+        uint32_t uJ = 0xFFFFu;
     } so[2];
+    const bool armedNow = g_ikArmed.load(std::memory_order_relaxed);   // F65a
     uint32_t nList = 0;
     const uint32_t count = sp.count;
     if (count == 0 || count > nofoot::kPfzMaxJoints) return ikRefuse(kIkRefPlan);
@@ -9390,14 +9593,21 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         const double dH[3] = {pT[0] - H0[0], pT[1] - H0[1], pT[2] - H0[2]};
         // F59: the gate relaxes from 0.35..0.8 m to 0.6..1.2 m with the ADS weight.
         const float gate = nofoot::ikDistanceGateAds(static_cast<float>(nofoot::ikLen(dH)), static_cast<float>(adsW));
+        // F65a: while a weapon is held (the grip gate raised; T_A sane above) the hand solves onto its grip at 1; unarmed, the distance gate.
+        // o.gate stays the distance gate: the fit's raised factor reads it (a 1 there would hold "armed" up by itself).
+        const float gateW = nofoot::ikArmGate(armedNow, gate);
         // The weight this side solves at: on and writing, the per-arm weight; otherwise 1 (probe: the full solve, for the statistics only).
-        const double wArm = static_cast<double>(wBase) * gate;
+        const double wArm = static_cast<double>(wBase) * gateW;
         const bool doSolveWrite = mode == 3 && writeOk && wArm > 0.0;
         o.wArm = mode == 3 ? wArm : 0.0;
         o.gate = gate;
+        o.gateW = gateW;
+        o.uJ = U;
         o.fitOk = true;   // F60: the grip and the arm's length, before the assist (a rigid turn keeps l1 and l2)
         for (int i = 0; i < 3; ++i) o.tA[i] = tA[i];
         o.armLen = l1 + l2;
+        for (int i = 0; i < 3; ++i) o.reachV[i] = S[i] - tA[i];   // F65a: the shoulder after the square-up, before the assist
+        o.gripErr = o.dist;   // F65a: the animated attach against T_A until a written solve replaces it below
         const double wSolve = doSolveWrite ? wArm : 1.0;
         // The hand target: the offset from the animated hand, capped at 5 cm a call while writing (from zero after 200 ms without a write).
         double target[3];
@@ -9616,6 +9826,17 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             const double e[3] = {hp[0] - target[0], hp[1] - target[1], hp[2] - target[2]};
             if (!tb.limited) o.err = nofoot::ikLen(e) * 100.0;   // F57: only when no limit moved the hand off its target
         }
+        // F65a: the drawn attach against the REAL grip T_A (not the weighted target): A' = L_A x the solved hand (the attach rides the hand
+        // rigidly; a rigid assist turn keeps L_A), when this side is written.
+        if (doSolveWrite) {
+            float Aw[16];
+            double ap[3];
+            nofoot::pfzMul(LA, g_ikOut[H], Aw);
+            ikPos(Aw, ap);
+            const double ea[3] = {ap[0] - tA[0], ap[1] - tA[1], ap[2] - tA[2]};
+            o.gripErr = nofoot::ikLen(ea) * 100.0;
+            o.gripWritten = true;
+        }
         for (int i = 0; i < 3; ++i) {
             o.E[i] = static_cast<float>(E[i]);
             o.S[i] = static_cast<float>(S[i]);
@@ -9694,6 +9915,19 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
                 nofoot::fitBodyTarget(fp.dB, fp.sd, fitUmid, fp.dw);
                 for (int i = 0; i < 3; ++i) fp.umid[i] = fitUmid[i];
                 fp.gateMin = std::min(so[0].gate, so[1].gate);
+                for (int side = 0; side < 2; ++side) {   // F65a: the reach limit's inputs and the grip error
+                    const SideOut& o = so[side];
+                    for (int i = 0; i < 3; ++i) fp.reachC[side][i] = o.reachV[i] - fp.dB[i];
+                    fp.armL[side] = o.armLen;
+                    fp.reachR[side] = o.armLen - nofoot::kReachMarginM;
+                    fp.reachOk[side] = o.fitOk && o.armLen > nofoot::kReachMarginM && o.uJ != 0xFFFFu;
+                    fp.gripErr[side] = o.gripErr;
+                    fp.gripWritten[side] = o.gripWritten;
+                    fp.wArm[side] = o.wArm;
+                    fp.gateW[side] = o.gateW;
+                    fp.gateDist[side] = o.gate;
+                    fp.uJ[side] = o.uJ;
+                }
                 fp.adsW = adsW;
                 fp.ms = now;
                 fitPublish(fp);
@@ -10621,6 +10855,7 @@ void f60FitStep(uint64_t now, double dt, int mode, bool full3P) noexcept {
     // arms at the grips (unarmed, the gate sat at 0.0..0.2 with the hands hanging and F60's fit still ran at 0.7). It multiplies the ramp.
     g_f60Raised = fresh ? nofoot::fitRaised(g_f60Pub.gateMin) : 0.0;
     g_f60Weapon = fresh && g_f60Raised > 0.0;
+    g_ikArmed.store(g_f60Weapon, std::memory_order_relaxed);   // F65a: the hook solves a hand on its grip at 1 while a weapon is held
     const int ikMode = pfz::g_ikMode.load(std::memory_order_relaxed);
     const double key = static_cast<double>(g_fitWeaponKey.load(std::memory_order_relaxed));
     const double keyLat = static_cast<double>(g_fitLateralKey.load(std::memory_order_relaxed));

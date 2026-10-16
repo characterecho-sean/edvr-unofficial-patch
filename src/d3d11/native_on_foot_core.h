@@ -2150,5 +2150,121 @@ inline double eyeHeightM(double cm, double ramp, double adsW) noexcept {
     const double a = !(adsW == adsW) ? 0.0 : adsW < 0.0 ? 0.0 : adsW > 1.0 ? 1.0 : adsW;
     return eyeHeightClampCm(cm) / 100.0 * r * (1.0 - a);
 }
+
+// ---- F65a: the connection retry's gate (fix.connection_retry, was fix.training_connect_fix) -----------------------------------------------
+// A Deactivate arms the recovery only when the destroyed ConnectToServerActivity had not reached sessions (its state at the destroy,
+// [act+0x30], is not 10) and the Deactivate came within 10 s of the destroy. The logs: the 3 real stalls were destroyed in states 5, 3 and 5;
+// all 24 normal loads in state 10 (and arming one of those crashed a Solo load: StartPending forced LoadGameActivity during the entry movie).
+enum RetryDecision : int { kRetryArm = 0, kRetrySessions = 1, kRetryLate = 2, kRetryUnread = 3 };
+constexpr uint32_t kRetrySessionsState = 10;
+constexpr uint64_t kRetryDeactWindowMs = 10000;
+inline int retryDecision(bool stateRead, uint32_t state, uint64_t delayMs) noexcept {
+    if (stateRead && state == kRetrySessionsState) return kRetrySessions;
+    if (delayMs > kRetryDeactWindowMs) return kRetryLate;
+    if (!stateRead) return kRetryUnread;
+    return kRetryArm;
+}
+
+// ---- F65a: the left hand locked to the weapon ---------------------------------------------------------------------------------------------
+// The arm's solve weight: while a weapon is held (the grip gate raised, T_A valid) a hand on its grip target solves at 1; unarmed, the
+// distance gate (the F64 flight: the left hand's animated hand sat 45..54 cm from the grip, so the gate gave 0.64..0.89 and the hand stopped
+// about 11 cm short, sliding with the head).
+inline float ikArmGate(bool armed, float distanceGate) noexcept { return armed ? 1.0f : distanceGate; }
+// The reach limit: per arm k (0 L, 1 R) v_k = the 3P shoulder (the upper-arm joint) minus its grip target T_A, body axes (right, up, forward)
+// at the body shift in effect; R_k = l1 + l2 - kReachMarginM. A body shift by delta moves the shoulder with the body, so the vector becomes
+// v_k + delta. reachLimitDelta gives the smallest horizontal delta (its up part 0) with |v_k + delta| <= R_k for every arm it has: 0 when that
+// already holds; else the nearer projection onto one arm's disk (centre -v_k horizontal, radius sqrt(R_k^2 - v_k,up^2)) that lies in the
+// other's; else the nearer crossing of the two circles. When the disks do not meet (or an arm's vertical gap alone exceeds its reach),
+// *feasible is false and delta is the point midway between the disks' nearest boundary points. Returns true when delta is not zero.
+constexpr double kReachMarginM = 0.02;
+constexpr double kReachRampSec = 0.2;
+inline bool reachDisk(const double v[3], double R, double c[2], double* r) noexcept {
+    c[0] = -v[0];
+    c[1] = -v[2];
+    const double r2 = R * R - v[1] * v[1];
+    *r = R > 0.0 && r2 > 0.0 ? std::sqrt(r2) : 0.0;
+    return R > 0.0 && r2 > 0.0;
+}
+inline bool reachInDisk(const double p[2], const double c[2], double r) noexcept {
+    const double dx = p[0] - c[0], dz = p[1] - c[1];
+    return dx * dx + dz * dz <= r * r + 1e-12;
+}
+inline void reachProjDisk(const double p[2], const double c[2], double r, double out[2]) noexcept {
+    const double dx = p[0] - c[0], dz = p[1] - c[1], n = std::sqrt(dx * dx + dz * dz);
+    if (n <= r || n < 1e-12) {
+        out[0] = n < 1e-12 ? c[0] : p[0];
+        out[1] = n < 1e-12 ? c[1] : p[1];
+        return;
+    }
+    out[0] = c[0] + dx * r / n;
+    out[1] = c[1] + dz * r / n;
+}
+inline bool reachLimitDelta(const double v[2][3], const double R[2], const bool have[2], double delta[3], bool* feasible) noexcept {
+    delta[0] = delta[1] = delta[2] = 0.0;
+    *feasible = true;
+    double c[2][2] = {}, r[2] = {};
+    bool use[2] = {false, false};
+    int n = 0;
+    for (int k = 0; k < 2; ++k) {
+        use[k] = have[k] && std::isfinite(v[k][0]) && std::isfinite(v[k][1]) && std::isfinite(v[k][2]) && std::isfinite(R[k]);
+        if (!use[k]) continue;
+        if (!reachDisk(v[k], R[k], c[k], &r[k])) *feasible = false;
+        ++n;
+    }
+    if (!n) return false;
+    const double o[2] = {0.0, 0.0};
+    bool inAll = true;
+    for (int k = 0; k < 2; ++k)
+        if (use[k] && !reachInDisk(o, c[k], r[k])) inAll = false;
+    if (inAll && *feasible) return false;
+    double best[2] = {0.0, 0.0}, bestN = -1.0;
+    const auto offer = [&](const double p[2]) noexcept {
+        const double nn = p[0] * p[0] + p[1] * p[1];
+        if (bestN < 0.0 || nn < bestN) {
+            bestN = nn;
+            best[0] = p[0];
+            best[1] = p[1];
+        }
+    };
+    if (*feasible) {
+        for (int k = 0; k < 2; ++k) {
+            if (!use[k]) continue;
+            double p[2];
+            reachProjDisk(o, c[k], r[k], p);
+            const int j = 1 - k;
+            if (!use[j] || reachInDisk(p, c[j], r[j] * (1.0 + 1e-9))) offer(p);
+        }
+        if (bestN < 0.0 && use[0] && use[1]) {
+            const double ux = c[1][0] - c[0][0], uz = c[1][1] - c[0][1], d = std::sqrt(ux * ux + uz * uz);
+            if (d > 1e-12 && d <= r[0] + r[1] && d >= std::fabs(r[0] - r[1])) {
+                const double a = (r[0] * r[0] - r[1] * r[1] + d * d) / (2.0 * d);
+                const double h2 = r[0] * r[0] - a * a, h = h2 > 0.0 ? std::sqrt(h2) : 0.0;
+                const double px = c[0][0] + a * ux / d, pz = c[0][1] + a * uz / d;
+                const double p1[2] = {px - h * uz / d, pz + h * ux / d}, p2[2] = {px + h * uz / d, pz - h * ux / d};
+                offer(p1);
+                offer(p2);
+            }
+        }
+        if (bestN < 0.0) *feasible = false;
+    }
+    if (!*feasible) {
+        if (use[0] && use[1]) {
+            const double ux = c[1][0] - c[0][0], uz = c[1][1] - c[0][1], d = std::sqrt(ux * ux + uz * uz);
+            const double e[2] = {d > 1e-12 ? ux / d : 0.0, d > 1e-12 ? uz / d : 0.0};
+            const double p0[2] = {c[0][0] + e[0] * r[0], c[0][1] + e[1] * r[0]}, p1[2] = {c[1][0] - e[0] * r[1], c[1][1] - e[1] * r[1]};
+            best[0] = 0.5 * (p0[0] + p1[0]);
+            best[1] = 0.5 * (p0[1] + p1[1]);
+        } else {
+            for (int k = 0; k < 2; ++k)
+                if (use[k]) {
+                    best[0] = c[k][0];
+                    best[1] = c[k][1];
+                }
+        }
+    }
+    delta[0] = best[0];
+    delta[2] = best[1];
+    return delta[0] != 0.0 || delta[2] != 0.0;
+}
 }  // namespace nofoot
 }  // namespace edvr
