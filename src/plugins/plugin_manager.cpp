@@ -277,8 +277,39 @@ void PluginManager::discoverAndLoad() {
     } while (FindNextFileW(hFind, &findData));
     FindClose(hFind);
 
+    // An addon's identity is its sanitized stem: it keys the approval in [addons], tags the addon's settings and names its saved keys. Two files
+    // with one identity cannot be told apart by any of those, so before anything loads every file of such a group is refused, approved hash or not.
+    for (auto& cand : m_candidates) {
+        size_t sameIdentity = 0;
+        for (const auto& other : m_candidates) {
+            if (other.stem == cand.stem) ++sameIdentity;
+        }
+        cand.conflicted = sameIdentity > 1;
+    }
+    for (const auto& cand : m_candidates) {
+        if (!cand.conflicted) continue;
+        bool firstOfGroup = true;
+        std::wstring paths;
+        size_t count = 0;
+        for (const auto& other : m_candidates) {
+            if (other.stem != cand.stem) continue;
+            if (other.id < cand.id) firstOfGroup = false;
+            if (!paths.empty()) paths += L", ";
+            paths += other.path;
+            ++count;
+        }
+        if (firstOfGroup) {   // once per identity
+            Log::get().note("plugin_manager: addon identity '%s' is claimed by %zu files (%ls); none loaded. Rename or remove all but one.",
+                            cand.stem.c_str(), count, paths.c_str());
+        }
+    }
+
     // Evaluate approval against config [addons]
     for (auto& cand : m_candidates) {
+        if (cand.conflicted) {
+            cand.approved = false;
+            continue;
+        }
         std::string approvedSha = Config::get().getString(("addons." + cand.stem).c_str(), "");
         std::string candShaLower = cand.sha256;
         for (char& c : candShaLower) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
@@ -462,6 +493,7 @@ ApprovalResult PluginManager::approveCandidate(uint32_t id) {
     for (auto& cand : m_candidates) {
         if (cand.id != id) continue;
         if (cand.approved) return r;   // already approved: a second activation of a stale row
+        if (cand.conflicted) return r; // another file has this addon's identity: nothing can be approved until all but one is gone
         const std::string approvedSha = cand.sha256;
         cand.approved = true;
         r.loaded = loadPlugin(cand, approvedSha);

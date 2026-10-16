@@ -1525,7 +1525,7 @@ void buildPages();
 
 // What activating an approval row does. The row holds a candidate id; a stale or already approved id
 // does nothing, and the pages rebuild either way so no approval row outlives its candidate.
-void approveAddonCandidate(uint32_t id) {
+bool approveAddonCandidate(uint32_t id) {
     plugins::ApprovalResult r = plugins::PluginManager::instance().approveCandidate(id);
     if (r.applied) {
         WriteJob job;
@@ -1537,6 +1537,7 @@ void approveAddonCandidate(uint32_t id) {
                         r.stem.c_str(), r.sha256.c_str(), Config::get().iniName());
     }
     buildPages();
+    return r.applied;
 }
 
 void buildPluginsPage(Page& p) {
@@ -2232,7 +2233,17 @@ void buildContent(MenuContent& c) {
             }
             if (e.kind == EntryKind::Approval) {
                 plugins::CandidatePlugin cand;
-                if (plugins::PluginManager::instance().candidateById(e.candidateId, &cand) && !cand.approved) {
+                if (plugins::PluginManager::instance().candidateById(e.candidateId, &cand) && cand.conflicted) {
+                    // Several files claim this name: shown so the player can find them, with no approval to give.
+                    std::string label = "[Conflict] " + cand.stem;
+                    strncpy(l.left, label.c_str(), sizeof(l.left) - 1);
+                    strncpy(l.right, "refused", sizeof(l.right) - 1);
+                    l.style = kMenuRow;
+                    if (hi) {
+                        snprintf(c.hint, sizeof(c.hint), "More than one file in plugins\\ is named '%s'; none can load. Rename or remove all but one.",
+                                 cand.stem.c_str());
+                    }
+                } else if (plugins::PluginManager::instance().candidateById(e.candidateId, &cand) && !cand.approved) {
                     std::string label = "[Approve] " + cand.stem;
                     strncpy(l.left, label.c_str(), sizeof(l.left) - 1);
                     strncpy(l.right, "approve", sizeof(l.right) - 1);
@@ -2902,8 +2913,8 @@ void activateEntry() {
     const Entry& e = p.entries[p.highlight];
     if (e.kind == EntryKind::Approval) {
         const uint32_t id = e.candidateId;   // copied: the rebuild below frees the entry
-        approveAddonCandidate(id);
-        s.lastWrite = "approved an addon";
+        const bool applied = approveAddonCandidate(id);
+        s.lastWrite = applied ? "approved an addon" : "addon not approved";
         s.contentDirty = true;
         return;
     }

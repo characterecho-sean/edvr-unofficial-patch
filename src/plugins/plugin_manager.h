@@ -15,6 +15,9 @@ struct CandidatePlugin {
     std::string stem;       // e.g. "edvr_mfd"
     std::string sha256;
     bool approved = false;
+    // Another file in plugins\ has the same canonical identity (the sanitized stem, so plugins\foo.dll, plugins\foo\plugin.dll and
+    // foo-bar.dll / foo_bar.dll all collide). Every file of such a group is refused: none loads and none can be approved.
+    bool conflicted = false;
 };
 
 struct LoadedPlugin {

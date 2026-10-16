@@ -834,6 +834,76 @@ int main(int argc, char** argv) {
         std::filesystem::remove_all(sb, ec23);
     }
 
+    // Case 24 (PR #92 review): an addon's identity is its sanitized stem. plugins\foo.dll and plugins\foo\plugin.dll both say 'foo', and
+    // foo-bar.dll / foo_bar.dll both say 'foo_bar': every file of such a group is refused before anything loads, approved hash or not, and
+    // none can be approved this session. A lone foo.dll still loads.
+    {
+        // (a) the two layouts, the same bytes, the hash approved
+        auto sb = makeSandbox(L"dupid");
+        dropFixture(sb, L"", L"foo.dll");
+        std::filesystem::create_directories(sb / L"plugins" / L"foo");
+        dropFixture(sb, L"", L"foo\\plugin.dll");
+        const std::string fsha = edvr::plugins::PluginManager::calculateSha256((sb / L"plugins" / L"foo.dll").wstring());
+        {
+            std::ofstream iniOut(sb / L"edvr.ini");
+            iniOut << "[general]\nmode = vr\n[addons]\nfoo = " << fsha << "\n";
+        }
+        edvr::Config::get().init(sb.wstring());
+        g_fakeSettings.clear();
+        g_fakeRegisteredEver = 0;
+        pm.initialize(sb.wstring());
+        size_t onFoo = 0;
+        bool anyApproved = false, allConflicted = true;
+        uint32_t firstId = 0;
+        for (const auto& c : pm.candidatesSnapshot()) {
+            if (c.stem != "foo") continue;
+            ++onFoo;
+            anyApproved = anyApproved || c.approved;
+            allConflicted = allConflicted && c.conflicted;
+            if (!firstId) firstId = c.id;
+        }
+        check(onFoo == 2 && allConflicted, "dupid: foo.dll and foo\\plugin.dll are both discovered and both marked as conflicting");
+        check(!anyApproved && pm.activePluginCount() == 0 && !pm.hasActivePlugins() && GetModuleHandleW(L"foo.dll") == nullptr &&
+              GetModuleHandleW(L"plugin.dll") == nullptr && g_fakeRegisteredEver == 0,
+              "dupid: neither copy loads although their shared hash is approved");
+        check(!pm.approveCandidate(firstId).applied && !pm.approvePlugin("foo", fsha) && pm.activePluginCount() == 0,
+              "dupid: approval of a conflicted candidate is refused");
+        pm.shutdown();
+
+        // (b) a name collision through sanitizeStem, different binaries
+        auto sb2 = makeSandbox(L"dupstem");
+        dropFixture(sb2, L"", L"foo-bar.dll");
+        dropFixture(sb2, L"b", L"foo_bar.dll");
+        pm.initialize(sb2.wstring());
+        size_t onBar = 0;
+        bool barConflicted = true;
+        for (const auto& c : pm.candidatesSnapshot()) {
+            if (c.stem != "foo_bar") continue;
+            ++onBar;
+            barConflicted = barConflicted && c.conflicted && !pm.approveCandidate(c.id).applied && !pm.approvePlugin(c.stem, c.sha256);
+        }
+        check(onBar == 2 && barConflicted && pm.activePluginCount() == 0,
+              "dupstem: foo-bar.dll and foo_bar.dll collide; neither loads and approval of either is refused");
+        pm.shutdown();
+
+        // (c) one file keeps working
+        auto sb3 = makeSandbox(L"dupone");
+        dropFixture(sb3, L"", L"foo.dll");
+        {
+            std::ofstream iniOut(sb3 / L"edvr.ini");
+            iniOut << "[general]\nmode = vr\n[addons]\nfoo = " << fsha << "\n";
+        }
+        edvr::Config::get().init(sb3.wstring());
+        pm.initialize(sb3.wstring());
+        auto one = findCandidate(pm, "foo");
+        check(one && !one->conflicted && one->approved && pm.activePluginCount() == 1, "dupone: a single foo.dll is not a conflict and loads on its approved hash");
+        pm.shutdown();
+        std::error_code ecd;
+        std::filesystem::remove_all(sb, ecd);
+        std::filesystem::remove_all(sb2, ecd);
+        std::filesystem::remove_all(sb3, ecd);
+    }
+
     // Case 21 (PR #92 review): the singleton is leaked on purpose. Leave a healthy addon loaded and initialised, with no shutdown(),
     // and let checkNoShutdownAtExit look for its onShutdown after the CRT has run its exit-time destructors.
     {
