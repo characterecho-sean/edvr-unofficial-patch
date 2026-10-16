@@ -2391,22 +2391,22 @@ int wmain(int argc, wchar_t** argv) {
                           nf::adsSightHalfIpd(true, 0.06) == 0.0315 && nf::adsSightHalfIpd(true, 0.001) == 0.0315,
                       "F63: the eye's right axis follows the body's right (a mirrored FP row is flipped); the half IPD from the right eye's offset, "
                       "3.15 cm when unknown or out of range");
-                // (4) The 12 cm clamp (the filter's clamp, nofoot::clampNorm3): 20 cm along x to 12; 5 cm untouched; (12, 16) to (7.2, 9.6);
-                // the integral driven 200 frames by a 30 cm error at gain 0.02 (5 cm a frame cap) stops at 12 cm.
-                double a[3] = {0.2, 0.0, 0.0}, b[3] = {0.03, 0.04, 0.0}, c[3] = {0.12, 0.16, 0.0}, intg[3] = {};
+                // (4) The 40 cm clamp (F70: it was 12 cm; the filter's clamp, nofoot::clampNorm3): 50 cm along x to 40; 5 cm untouched; (30, 40) to (24, 32);
+                // the F63 integral driven 200 frames by a 60 cm error at gain 0.02 (5 cm a frame cap) stops at 40 cm.
+                double a[3] = {0.5, 0.0, 0.0}, b[3] = {0.03, 0.04, 0.0}, c[3] = {0.30, 0.40, 0.0}, intg[3] = {};
                 nf::clampNorm3(a, nf::kAdsSightClampM);
                 nf::clampNorm3(b, nf::kAdsSightClampM);
                 nf::clampNorm3(c, nf::kAdsSightClampM);
                 for (int k = 0; k < 200; ++k) {
-                    const double e30[3] = {0.3, 0.0, 0.0};
+                    const double e30[3] = {0.6, 0.0, 0.0};
                     double st[3] = {0.02 * e30[0], 0.02 * e30[1], 0.02 * e30[2]};
                     const double sm = std::sqrt(st[0] * st[0] + st[1] * st[1] + st[2] * st[2]);
                     for (int i = 0; i < 3; ++i) intg[i] += st[i] * (sm > 0.05 ? 0.05 / sm : 1.0);
                     nf::clampNorm3(intg, nf::kAdsSightClampM);
                 }
-                check(nf::kAdsSightClampM == 0.12 && std::fabs(a[0] - 0.12) < 1e-12 && b[0] == 0.03 && b[1] == 0.04 && std::fabs(c[0] - 0.072) < 1e-12 &&
-                          std::fabs(c[1] - 0.096) < 1e-12 && std::fabs(intg[0] - 0.12) < 1e-12,
-                      "F63: the sight lock is clamped to 12 cm, the direction kept; the integral stops there");
+                check(nf::kAdsSightClampM == 0.40 && std::fabs(a[0] - 0.40) < 1e-12 && b[0] == 0.03 && b[1] == 0.04 && std::fabs(c[0] - 0.24) < 1e-12 &&
+                          std::fabs(c[1] - 0.32) < 1e-12 && std::fabs(intg[0] - 0.40) < 1e-12,
+                      "F63/F70: the sight lock is clamped to 40 cm (k up to 30 cm plus the perpendicular and along offsets), the direction kept; the integral stops there");
                 // (5) The guard: |e perpendicular| growing 0.5 cm every 100 ms from 3 cm trips at 0.5 s; a falling one, a steady one and one
                 // under the 2 cm floor never do.
                 nf::AdsSightGrowth grow, fall, steady, under;
@@ -3222,6 +3222,163 @@ int wmain(int argc, wchar_t** argv) {
                           "F69h: a left attach turning 2 deg a frame is one-handed within 40 cm (not steady under 5 deg over 10 frames); unarmed forgets the history; a frame "
                           "whose attaches cannot be read decides one-handed");
                 }
+            }
+            // F70: the ADS eye point (core parts): the target P14w + k f, the clearance cap, the feed-forward ramp, the body pinned to the unlocked head.
+            {
+                const double kR = nf::kIkPi / 180.0;
+                const double rowsA[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+                const float rowsAf[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+                double f[3] = {0.2, -0.1, 0.97};
+                nf::ikUnit(f, f);
+                const double p14[3] = {1.0, 1.6, 2.0};
+                // The rifle's eye: 7.3 cm AHEAD of P14 along the sight line and 5 cm / 2 cm off it (F66e's along figure).
+                double perpDir[3] = {1.0, 0.0, 0.0};
+                const double dp = perpDir[0] * f[0] + perpDir[1] * f[1] + perpDir[2] * f[2];
+                for (int i = 0; i < 3; ++i) perpDir[i] -= dp * f[i];
+                nf::ikUnit(perpDir, perpDir);
+                double perpDir2[3];
+                nf::ikCross(f, perpDir, perpDir2);
+                const double eye[3] = {p14[0] + 0.073 * f[0] + 0.05 * perpDir[0] + 0.02 * perpDir2[0], p14[1] + 0.073 * f[1] + 0.05 * perpDir[1] + 0.02 * perpDir2[1],
+                                       p14[2] + 0.073 * f[2] + 0.05 * perpDir[2] + 0.02 * perpDir2[2]};
+                nf::AdsSightErr e0, eK, eOld;
+                const bool ok0 = nf::adsSightErrorEyeK(p14, eye, f, rowsA, 0.0, e0), okK = nf::adsSightErrorEyeK(p14, eye, f, rowsA, 0.15, eK), okOld = nf::adsSightErrorEye(p14, eye, f, rowsA, eOld);
+                double reach0[3], reachK[3];
+                for (int i = 0; i < 3; ++i) {
+                    reach0[i] = eye[i] + e0.eFullW[i] - p14[i];
+                    reachK[i] = eye[i] + eK.eFullW[i] - (p14[i] + 0.15 * f[i]);
+                }
+                bool sameOld = true;
+                for (int i = 0; i < 3; ++i) sameOld = sameOld && e0.seated[i] == eOld.seated[i] && eK.eBody[i] == eOld.eBody[i] && std::fabs(e0.eFullW[i] - e0.eW[i]) < 1e-15;
+                check(ok0 && okK && okOld && sameOld && nf::ikLen(reach0) < 1e-12 && nf::ikLen(reachK) < 1e-12 && std::fabs(e0.alongFull - e0.along) < 1e-15 &&
+                          std::fabs(e0.along + 0.073) < 1e-9 && std::fabs(eK.alongFull - (e0.along + 0.15)) < 1e-12 && std::fabs(eK.perpNorm - e0.perpNorm) < 1e-15,
+                      "F70: the lock's target is P14w + k f: the eye 7.3 cm ahead of P14 is asked 7.3 cm back at k 0 (P14 itself, the animator's eye point) and 7.7 cm forward "
+                      "at k 15 cm; the perpendicular figures (the guard's input) and the old perpendicular-only outputs are unchanged");
+                // The setting: 0..30 cm, NaN reads the default 15.
+                check(nf::adsEyeDistanceClampCm(std::numeric_limits<double>::quiet_NaN()) == 15.0 && nf::adsEyeDistanceClampCm(-3.0) == 0.0 && nf::adsEyeDistanceClampCm(45.0) == 30.0 &&
+                          nf::adsEyeDistanceClampCm(12.5) == 12.5 && nf::kAdsEyeDistDefaultCm == 15.0 && nf::kAdsSightClampM == 0.40,
+                      "F70: the eye distance is 0..30 cm, default 15, and the lock's clamp is 40 cm");
+                // The clearance cap: a point on the line 20 cm ahead limits k to 14 cm; points off the line (over 6 cm), behind P14 or none leave it; one 3 cm ahead takes it to 0.
+                double onLine[1][3], offLine[1][3], behind[1][3], near3[1][3];
+                for (int i = 0; i < 3; ++i) {
+                    onLine[0][i] = p14[i] + 0.20 * f[i] + 0.02 * perpDir[i];
+                    offLine[0][i] = p14[i] + 0.20 * f[i] + 0.12 * perpDir[i];
+                    behind[0][i] = p14[i] - 0.10 * f[i];
+                    near3[0][i] = p14[i] + 0.03 * f[i];
+                }
+                const nf::AdsEyeCap c1 = nf::adsEyeDistanceCap(0.15, p14, f, onLine, 1), c2 = nf::adsEyeDistanceCap(0.15, p14, f, offLine, 1), c3 = nf::adsEyeDistanceCap(0.15, p14, f, behind, 1),
+                                    c4 = nf::adsEyeDistanceCap(0.15, p14, f, near3, 1), c5 = nf::adsEyeDistanceCap(0.15, p14, f, onLine, 0), c6 = nf::adsEyeDistanceCap(0.10, p14, f, onLine, 1);
+                check(c1.capped && c1.readable == 1 && std::fabs(c1.kM - 0.14) < 1e-9 && !c2.capped && c2.readable == 0 && c2.kM == 0.15 && !c3.capped && c3.readable == 0 &&
+                          c4.capped && c4.kM == 0.0 && !c5.capped && c5.readable == 0 && c5.kM == 0.15 && !c6.capped && c6.readable == 1 && c6.kM == 0.10,
+                      "F70: k is capped so the eye stays 6 cm behind a readable FP weapon point on the sight line (20 cm ahead: k at most 14), ignores points off the line or "
+                      "behind P14, and with none readable stands as set");
+                // The ramp: the plant is the rendered eye (the error measured on it = the target less the applied shift two frames ago, in the seated axes), w = the ADS
+                // weight (0.15 s in, 0.3 s out). Converges to the full error with no overshoot past 5%, then goes back out on release.
+                {
+                    const double target[3] = {0.07, -0.04, 0.20};
+                    double pos[3] = {}, vel[3] = {}, hist[8][3] = {};
+                    nf::AdsRamp ramp;
+                    const double dt = 1.0 / 90.0;
+                    double errAt20 = 99.0, errAt35 = 99.0, posAt25 = 0.0, overshoot = 0.0, maxNorm = 0.0;
+                    int step = 0;
+                    auto frame = [&](bool engaged) {
+                        ramp.step(engaged, dt);
+                        double meas[3];
+                        // the measured error: the target less the shift the rendered eye shows (as of two frames ago); the target stays while the weight falls
+                        for (int i = 0; i < 3; ++i) meas[i] = target[i] - hist[(step + 8 - 2) % 8][i];
+                        nf::adsEyeStep(pos, vel, meas, true, ramp.w, dt);
+                        for (int i = 0; i < 3; ++i) hist[step % 8][i] = pos[i];
+                        ++step;
+                    };
+                    for (int i = 0; i < 90; ++i) {   // one second engaged
+                        frame(true);
+                        const double err = std::sqrt((target[0] - pos[0]) * (target[0] - pos[0]) + (target[1] - pos[1]) * (target[1] - pos[1]) + (target[2] - pos[2]) * (target[2] - pos[2]));
+                        if (i == 17) errAt20 = err;   // 0.2 s
+                        if (i == 22) posAt25 = std::sqrt(pos[0] * pos[0] + pos[1] * pos[1] + pos[2] * pos[2]);
+                        if (i == 31) errAt35 = err;   // 0.35 s
+                        for (int c = 0; c < 3; ++c) overshoot = std::max(overshoot, (pos[c] - target[c]) * (target[c] >= 0 ? 1.0 : -1.0));
+                        maxNorm = std::max(maxNorm, std::sqrt(pos[0] * pos[0] + pos[1] * pos[1] + pos[2] * pos[2]));
+                    }
+                    const double tn = std::sqrt(target[0] * target[0] + target[1] * target[1] + target[2] * target[2]);
+                    const double errAt1s = std::sqrt((target[0] - pos[0]) * (target[0] - pos[0]) + (target[1] - pos[1]) * (target[1] - pos[1]) + (target[2] - pos[2]) * (target[2] - pos[2]));
+                    // Release: the weight falls over 0.3 s; the shift returns to zero.
+                    double backAt05 = 99.0, backAt1 = 99.0;
+                    for (int i = 0; i < 90; ++i) {
+                        frame(false);
+                        const double n = std::sqrt(pos[0] * pos[0] + pos[1] * pos[1] + pos[2] * pos[2]);
+                        if (i == 44) backAt05 = n;
+                        if (i == 89) backAt1 = n;
+                    }
+                    check(errAt20 < 0.30 * tn && errAt35 < 0.05 * tn && errAt1s < 0.005 && overshoot < 0.05 * tn && posAt25 > 0.7 * tn && maxNorm < nf::kAdsSightClampM &&
+                              backAt05 < 0.03 && backAt1 < 0.002,
+                          "F70: the feed-forward lock takes the eye to the target (a 23 cm shift) with a 2-frame-late measurement: within 30% at 0.2 s (90% by 0.25 s), 5% at 0.35 s, under 5 mm at "
+                          "1 s, no overshoot past 5%; on release (the weight falling over 0.3 s) the shift is under 3 cm at 0.5 s and zero at 1 s");
+                    // The clamp: a 60 cm error never takes the shift past 40 cm; w 0 returns it to zero.
+                    double pc[3] = {}, vc[3] = {};
+                    const double big[3] = {0.6, 0.0, 0.0};
+                    double worstN = 0.0;
+                    for (int i = 0; i < 180; ++i) {
+                        nf::adsEyeStep(pc, vc, big, true, 1.0, dt);
+                        worstN = std::max(worstN, std::fabs(pc[0]));
+                    }
+                    for (int i = 0; i < 90; ++i) nf::adsEyeStep(pc, vc, big, true, 0.0, dt);
+                    // No measurement this frame holds the shift at w x applied (it does not decay as the F63 integrator did on every missing frame).
+                    double ph[3] = {0.1, 0.0, 0.0}, vh[3] = {};
+                    for (int i = 0; i < 30; ++i) nf::adsEyeStep(ph, vh, big, false, 1.0, dt);
+                    check(worstN <= nf::kAdsSightClampM + 1e-12 && worstN > 0.39 && std::fabs(pc[0]) < 1e-3 && std::fabs(ph[0] - 0.1) < 1e-6,
+                          "F70: the shift is clamped to 40 cm, goes back to zero at weight 0, and holds when a frame has no measurement");
+                }
+                // The body is pinned to the unlocked head: the camera the game reports moves by the shift (-S0, -S1, +S2 in body axes, F40's plant); the pin input is the camera
+                // less that. A 90 deg turned AMC; S = (4, 2, 18) cm seated.
+                {
+                    const float rowsT[9] = {0, 0, -1, 0, 1, 0, 1, 0, 0};   // right = -z, up = y, forward = +x (world)
+                    const double S[3] = {0.04, 0.02, 0.18};
+                    const double head[3] = {3.0, 1.6, -2.0};
+                    double bodyMove[3], cm1[3];
+                    const double zero3[3] = {};
+                    nf::adsCamBodyMotion(zero3, S, bodyMove);
+                    double mbody[3];
+                    nf::adsCamShiftBody(S, mbody);
+                    for (int c = 0; c < 3; ++c) cm1[c] = bodyMove[0] * rowsT[c] + bodyMove[1] * rowsT[3 + c] + bodyMove[2] * rowsT[6 + c];
+                    const float cam[3] = {static_cast<float>(head[0] + cm1[0]), static_cast<float>(head[1] + cm1[1]), static_cast<float>(head[2] + cm1[2])};
+                    float un[3], none[3];
+                    nf::adsUnlockedCam(cam, S, rowsT, un);
+                    const double zeroS[3] = {};
+                    nf::adsUnlockedCam(cam, zeroS, rowsT, none);
+                    check(std::fabs(mbody[0] - bodyMove[0]) < 1e-15 && std::fabs(mbody[2] - bodyMove[2]) < 1e-15 && std::fabs(un[0] - head[0]) < 1e-5 && std::fabs(un[1] - head[1]) < 1e-5 &&
+                              std::fabs(un[2] - head[2]) < 1e-5 && std::fabs(cm1[0] - 0.18) < 1e-12 && std::fabs(cm1[2] - 0.04) < 1e-12 && none[0] == cam[0] && none[2] == cam[2],
+                          "F70: the pin input excludes S: the camera less the shift (-S0, -S1, +S2 in body axes through the AMC rows) is the unlocked head (a 18 cm forward shift "
+                          "moves a turned AMC's camera 18 cm along its forward and the pin gets it back); with S zero the camera is untouched");
+                }
+                // k = 0 reproduces P14: the closed-loop plant (the measured error on the eye) converges the eye onto P14w; k = 15 cm onto P14w + 0.15 f.
+                {
+                    for (int which = 0; which < 2; ++which) {
+                        const double k = which == 0 ? 0.0 : 0.15;
+                        double pos[3] = {}, vel[3] = {}, hist[8][3] = {};
+                        const double dt = 1.0 / 90.0;
+                        double eyeNow[3];
+                        for (int step = 0; step < 180; ++step) {
+                            // the rendered eye = the rest eye shifted (in the world, by the seated shift two frames ago; identity rows, so seated -> world is a sign map)
+                            const double* sh = hist[(step + 8 - 2) % 8];
+                            const double shiftWorld[3] = {-sh[0], -sh[1], sh[2]};   // body = diag(-1, -1, +1) . seated, identity rows
+                            for (int i = 0; i < 3; ++i) eyeNow[i] = eye[i] + shiftWorld[i];
+                            nf::AdsSightErr er;
+                            nf::adsSightErrorEyeK(p14, eyeNow, f, rowsA, k, er);
+                            nf::adsEyeStep(pos, vel, er.seatedFull, true, 1.0, dt);
+                            for (int i = 0; i < 3; ++i) hist[step % 8][i] = pos[i];
+                        }
+                        const double want[3] = {p14[0] + k * f[0], p14[1] + k * f[1], p14[2] + k * f[2]};
+                        double fin[3];
+                        const double* sh = hist[(180 - 1) % 8];
+                        const double shiftWorld[3] = {-sh[0], -sh[1], sh[2]};
+                        for (int i = 0; i < 3; ++i) fin[i] = eye[i] + shiftWorld[i];
+                        const double miss[3] = {fin[0] - want[0], fin[1] - want[1], fin[2] - want[2]};
+                        check(nf::ikLen(miss) < 0.001,
+                              which == 0 ? "F70: with k = 0 the closed loop puts the rendered eye on P14w itself (within 1 mm, the along part included)"
+                                         : "F70: with k = 15 cm the closed loop puts the rendered eye 15 cm forward of P14w on the sight line (within 1 mm)");
+                    }
+                }
+                (void)kR;
+                (void)rowsAf;
             }
             // F67e: the aim-jump trigger: the FP root's yaw rate over 30 deg/s while armed (the yaw step wrapped across the +-180 seam).
             {

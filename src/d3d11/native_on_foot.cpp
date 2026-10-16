@@ -96,6 +96,8 @@ std::atomic<bool> g_rotCalKey{false};   // F61 (TEMPORARY): fix.native_on_foot_r
 // queues the look input (game input units) and the update hook takes it; the processor hook publishes the game's applied deltas (cumulative,
 // the game's sign, one writer: the game thread) split into ours and the player's, and the gain it measured. Atomics only: no locks in the hooks.
 std::atomic<bool> g_adsAimKey{true};                          // the key as the frame thread last read it (default on)
+std::atomic<float> g_adsEyeDistM{0.15f};                      // F70: fix.native_on_foot_ads_eye_distance_cm in metres (0..0.30, default 0.15), live
+double g_adsEyeCmLast = -1.0;                                 // the value last logged (frame thread)
 std::atomic<int> g_adsYawSign{1}, g_adsPitchSign{1};          // the sign keys (TEMPORARY): 1, -1 or 0 (that axis off)
 std::atomic<bool> g_adsHookOn{false};                         // the update hook takes the F62b path (the frame thread: engaged or releasing)
 std::atomic<float> g_adsInYaw{0.0f}, g_adsInPitch{0.0f};      // the input queued for the next look update; the update hook takes it whole
@@ -683,6 +685,19 @@ void readKey() {
                             "head's right axis) for 1 s, rest 1 s, repeating; no loop, no guard; each step is measured"
                                                                                                     : "off -- no seated rotation (the default)");
         g_rotCalKey.store(rc, std::memory_order_relaxed);
+    }
+    // F70 (live, the Native on foot page's "ADS eye distance"): how far forward of the game's own aiming eye point (the FP animation's joint 14) the eye sits while
+    // aiming down sights: 0..30 cm, default 15. Higher brings the sights closer; the eye never goes within 6 cm of an FP weapon point it can read on the sight line.
+    {
+        const double cm = nofoot::adsEyeDistanceClampCm(
+            static_cast<double>(cfg.getFloat("fix.native_on_foot_ads_eye_distance_cm", static_cast<float>(nofoot::kAdsEyeDistDefaultCm))));
+        if (first || cm != g_adsEyeCmLast)
+            Log::get().note("native on foot ADS eye distance (F70): fix.native_on_foot_ads_eye_distance_cm = %.0f cm -- while aiming down sights your eye sits %.0f cm "
+                            "forward of the game's own aiming eye point (the sight line through the FP povCamera joint 14), %.0f cm at most 30; the sights look "
+                            "closer the larger it is; the eye never goes within 6 cm of an FP weapon point it can read on the sight line (the lock's clamp is "
+                            "%.0f cm in all)", cm, cm, cm, 100.0 * nofoot::kAdsSightClampM);
+        g_adsEyeCmLast = cm;
+        g_adsEyeDistM.store(static_cast<float>(cm / 100.0), std::memory_order_relaxed);
     }
     // F62b (TEMPORARY, live): the ADS head-aim and its two sign keys (1, -1, or 0 for that axis off; anything else positive reads 1, negative -1).
     {
@@ -6647,6 +6662,7 @@ void bodyShiftApply(uint64_t amc) noexcept {
 // from a sample 0..2 game frames old at a 90 Hz tick against a 61 Hz game; see the F67c entry in the arc doc).
 struct PinIn {
     float cam[3] = {}, m3p[16] = {};
+    float camRaw[3] = {};   // F70: the job camera as read; cam is it less the ADS shift (the unlocked head)
     uint64_t qpc = 0, ms = 0;
     uint32_t p1 = 0;   // g_f66gP1Seq at the publication: the game-frame index (its low bit is the parity the lines split by)
 };
@@ -6655,9 +6671,10 @@ PinIn g_pinIn;
 std::atomic<bool> g_pinScope{false};   // the frame thread: the pin is on (key, full-3P body mode, the arm IK on, native stereo on foot)
 std::atomic<bool> g_armedNow{false};   // the game's armed flag (g_armed, F66a), for the Animate hook
 std::atomic<uint32_t> g_heldItemSerial{0};   // F69b: bumped by the frame thread at every change of the held item (Status.json SelectedWeapon): the hook's per-item latches drop
-void pinInPublish(const float cam[3], const float m3p[16], uint64_t nowMs) noexcept {
+void pinInPublish(const float cam[3], const float camRaw[3], const float m3p[16], uint64_t nowMs) noexcept {
     g_pinInSeq.fetch_add(1, std::memory_order_acq_rel);
     std::memcpy(g_pinIn.cam, cam, sizeof(g_pinIn.cam));
+    std::memcpy(g_pinIn.camRaw, camRaw, sizeof(g_pinIn.camRaw));
     std::memcpy(g_pinIn.m3p, m3p, sizeof(g_pinIn.m3p));
     g_pinIn.qpc = f30Qpc();
     g_pinIn.ms = nowMs;
@@ -6673,6 +6690,34 @@ bool pinInRead(PinIn* out) noexcept {
         if (g_pinInSeq.load(std::memory_order_relaxed) == s1) return true;
     }
     return false;
+}
+// F70: the ADS shift S = g_adsLock + g_adsSight.applied (seated metres), published by alignTick every tick (a seqlock; the readers never wait). The camera the
+// game reports moves by (-S0, -S1, +S2) in body axes with it (F40's plant), so the body consumers take the camera less that: the body stays pinned to the
+// unlocked head and does not slide forward with the ADS eye.
+std::atomic<uint32_t> g_adsShiftSeq{0};
+double g_adsShiftS[3] = {};
+void adsShiftPublish(const double s[3]) noexcept {
+    g_adsShiftSeq.fetch_add(1, std::memory_order_acq_rel);
+    for (int i = 0; i < 3; ++i) g_adsShiftS[i] = s[i];
+    g_adsShiftSeq.fetch_add(1, std::memory_order_release);
+}
+bool adsShiftRead(double s[3]) noexcept {
+    for (int tries = 0; tries < 3; ++tries) {
+        const uint32_t s1 = g_adsShiftSeq.load(std::memory_order_acquire);
+        if (s1 & 1u) continue;
+        for (int i = 0; i < 3; ++i) s[i] = g_adsShiftS[i];
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if (g_adsShiftSeq.load(std::memory_order_relaxed) == s1) return true;
+    }
+    s[0] = s[1] = s[2] = 0.0;
+    return false;
+}
+// The job camera of a frame-thread sample less the ADS shift (the sample's AMC rows, row-major right, up, forward).
+void camUnlockedFrom(const EyeSample& smp, float out[3]) noexcept {
+    double S[3];
+    if (adsShiftRead(S)) nofoot::adsUnlockedCam(smp.cam, S, smp.rows, out);
+    else
+        for (int i = 0; i < 3; ++i) out[i] = smp.cam[i];
 }
 
 // F56: G = F_root x Tr(-d) x inv(M3P), the FP model space to the 3P model space (row vectors: FP world = model_fp x F_root; 3P
@@ -6733,7 +6778,16 @@ void ikPublishG(void* amcPtr, void* jobPtr, uint64_t now, uint32_t frame, const 
     // F67c: the pin's input (the job camera and the AMC matrix), every frame, whatever the FP root is doing.
     if (m3pOk && jobPtr) {
         float cam[3] = {};
-        if (guardedRead(reinterpret_cast<uintptr_t>(jobPtr), cam, sizeof(cam))) pinInPublish(cam, m3p, now);
+        if (guardedRead(reinterpret_cast<uintptr_t>(jobPtr), cam, sizeof(cam))) {
+            // F70: the pin takes the camera less the ADS shift: the unlocked head.
+            float camU[3] = {cam[0], cam[1], cam[2]};
+            double S[3];
+            if (adsShiftRead(S)) {
+                const float rows[9] = {m3p[0], m3p[1], m3p[2], m3p[4], m3p[5], m3p[6], m3p[8], m3p[9], m3p[10]};
+                nofoot::adsUnlockedCam(cam, S, rows, camU);
+            }
+            pinInPublish(camU, cam, m3p, now);
+        }
     }
     FpRootSnap fp{};
     bool pair = false;
@@ -6783,7 +6837,7 @@ uint64_t __fastcall bodyShiftHooked(uint64_t a1, uint64_t a2, uint64_t a3, uint6
 
 // One filter step for a run: the integral of the error, the guard, the critically damped follow, the clamp, the per-frame cap. `driving` false
 // holds the integral and lets the filter settle onto it (a decay when `decay` is set, toward zero). F63: the clamp is a parameter (the view
-// run's 0.6 m by default; the ADS sight lock's 12 cm), applied through nofoot::clampNorm3 (the rig checks it).
+// run's 0.6 m by default; the ADS sight lock's 12 cm, F70: the sight lock no longer uses this filter), applied through nofoot::clampNorm3 (the rig checks it).
 void alignFilter(AlignRun& a, const double err[3], bool driving, bool decay, double dt, uint64_t now, bool guardOn,
                  double clampM = align::kClampM) noexcept {
     const double errMag = std::sqrt(err[0] * err[0] + err[1] * err[1] + err[2] * err[2]);
@@ -6835,7 +6889,8 @@ void bodyFilter(AlignRun& a, const double target[3], double dt) noexcept {
 // ---- F63 (no key): the ADS sight lock, the frame thread's half (alignTick, before the eye alignment is published) ----------------------
 // While the F62b head-aim's weight is above 0 with a fresh FP snapshot (joint 14, the FP povCamera), F_root and AMC sample (100 ms), the right
 // eye is driven onto the sight line through P14w along the FP root's forward (nofoot::adsSightError) by the view run's filter (gain 0.02 a
-// frame, 5 cm a frame) clamped to 12 cm; otherwise the lock decays to zero (the filter's decay, about 0.3 s). The guard trips it off when
+// frame, 5 cm a frame) clamped to 12 cm; otherwise the lock decays to zero (the filter's decay, about 0.3 s). F70: it now aims at P14w + k f (k the user's
+// ADS eye distance), steps feed-forward (nofoot::adsEyeStep) and is clamped to 40 cm. The guard trips it off when
 // |e perpendicular| grows for 0.5 s, until the next ADS engage. Outside ADS (weight 0) the lock is zero: nothing drawn changes.
 struct AdsSightWin {
     uint32_t driving = 0, idle = 0, noFp = 0, noRoot = 0, noSample = 0, degenerate = 0, flipped = 0, trippedFrames = 0;
@@ -6853,6 +6908,13 @@ struct AdsSightWin {
     // before) of the frames with a sight NDC, the means of the two NDC points and the reticle's depth, the sight minus the reticle (right, up, total; deg).
     uint32_t retFrames = 0, retMiss = 0;
     double retNdc[2] = {}, sightNdc[2] = {}, retDepth = 0.0, retRight = 0.0, retUp = 0.0, retTotal = 0.0, retTotalMax = 0.0, retRightMax = 0.0, retUpMax = 0.0;
+    // F70: k as asked and after the clearance cap (sums over the driving frames), the frames a readable weapon point capped it, the points readable on the line, the
+    // along error to the target eye point (signed sum, largest |value|; metres), the 3P root's drift from where it stood at the press (now, largest this press;
+    // metres) and the sight's NDC in the right eye at 0.3, 0.5 and 10 m ahead of the target eye point.
+    double kWantedSum = 0.0, kEffSum = 0.0, alongErrSum = 0.0, alongErrAbsMax = 0.0, rootDriftNow = 0.0, rootDriftMax = 0.0, ndcD[3] = {0.3, 0.5, 10.0};
+    uint32_t capped = 0, readableMax = 0;
+    double ndc3[3][2] = {};
+    bool ndc3Have = false;
 };
 // F66e: each eye's scene rows (cb1 270..273 and row 275 of the first main-scene pass) as the render thread took them (worldDraw, g_cpuWorld),
 // published for the frame thread's sight check. A seqlock per eye; the reader never waits.
@@ -6931,6 +6993,26 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
     double err[3] = {0.0, 0.0, 0.0}, rel[3] = {}, before[3] = {};
     nofoot::AdsSightErr E;
     bool have = false;
+    nofoot::AdsEyeCap eyeCap;
+    // F70: the 3P root's world drift from where it stood when this press began (the AMC origin of the pin's input): the body must stay put while the eye moves.
+    {
+        static bool rootHave = false;
+        static double rootAnchor[3] = {}, rootMax = 0.0;
+        PinIn pi;
+        if (engaged && pinInRead(&pi)) {
+            if (!rootHave) {
+                for (int i = 0; i < 3; ++i) rootAnchor[i] = static_cast<double>(pi.m3p[12 + i]);
+                rootHave = true;
+                rootMax = 0.0;
+            }
+            const double d[3] = {pi.m3p[12] - rootAnchor[0], pi.m3p[13] - rootAnchor[1], pi.m3p[14] - rootAnchor[2]};
+            w.rootDriftNow = nofoot::ikLen(d);
+            rootMax = std::max(rootMax, w.rootDriftNow);
+            w.rootDriftMax = rootMax;
+        } else if (!engaged) {
+            rootHave = false;
+        }
+    }
     if (engaged && g_adsSightTripped) {
         ++w.trippedFrames;
     } else if (engaged) {
@@ -6951,6 +7033,17 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
             nofoot::ikXform(p14m, G.froot, p14w);
             const double f[3] = {G.froot[8], G.froot[9], G.froot[10]}, row0[3] = {G.froot[0], G.froot[1], G.froot[2]};
             const double bodyRight[3] = {s.rows[0], s.rows[1], s.rows[2]}, cam[3] = {s.cam[0], s.cam[1], s.cam[2]};
+            // F70: the target eye point P14w + k f. k is the user's setting, capped so the eye stays 6 cm behind any FP weapon point readable on the sight line:
+            // the FP attaches (51, 52) and hands (37, 44) of the snapshot, in the world through the whole F_root. Usually none lies within 6 cm of the line, and the
+            // setting's own 30 cm bound stands (the 1 s line says which).
+            double fpts[4][3], fUnit[3] = {f[0], f[1], f[2]};
+            for (int q = 0; q < 4; ++q) {
+                const float pq[3] = {m[q][12], m[q][13], m[q][14]};
+                nofoot::ikXform(pq, G.froot, fpts[q]);
+            }
+            nofoot::ikUnit(f, fUnit);
+            eyeCap = nofoot::adsEyeDistanceCap(static_cast<double>(g_adsEyeDistM.load(std::memory_order_relaxed)), p14w, fUnit, fpts, 4);
+            const double pT[3] = {p14w[0] + eyeCap.kM * fUnit[0], p14w[1] + eyeCap.kM * fUnit[1], p14w[2] + eyeCap.kM * fUnit[2]};
             double rows[9];
             for (size_t k = 0; k < 9; ++k) rows[k] = static_cast<double>(s.rows[k]);
             float ex = 0.0f;
@@ -6997,6 +7090,10 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
                 const double od[3] = {eyeO[e][0], eyeO[e][1], eyeO[e][2]};
                 w.ndcHave[e] = nofoot::sightPointNdc(eyeRows[e], od, p14w, f, 0.5, w.ndcNear[e]) &&
                                nofoot::sightPointNdc(eyeRows[e], od, p14w, f, 10.0, w.ndcFar[e]);
+                if (e == 1) {   // F70: the sight at 0.3, 0.5 and 10 m ahead of the TARGET eye point: equal NDC when the eye is on the line
+                    w.ndc3Have = true;
+                    for (int q = 0; q < 3; ++q) w.ndc3Have = nofoot::sightPointNdc(eyeRows[e], od, pT, f, w.ndcD[q], w.ndc3[q]) && w.ndc3Have;
+                }
             }
             if (eyeOk[0] && eyeOk[1]) {
                 const double d[3] = {eyeW[1][0] - eyeW[0][0], eyeW[1][1] - eyeW[0][1], eyeW[1][2] - eyeW[0][2]};
@@ -7028,10 +7125,11 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
             const bool modelOk = nofoot::adsSightRight(row0, f, bodyRight, rHat, &flipped);
             bool lockOk = false;
             bool usedSolved = false;
-            if (eyeOk[1] && nofoot::adsSightErrorEye(p14w, eyeW[1], f, rows, E)) {
+            const double modelEye[3] = {cam[0] + g_adsSightHalfIpd * rHat[0], cam[1] + g_adsSightHalfIpd * rHat[1], cam[2] + g_adsSightHalfIpd * rHat[2]};
+            if (eyeOk[1] && nofoot::adsSightErrorEyeK(p14w, eyeW[1], f, rows, eyeCap.kM, E)) {   // F70: onto P14w + k f (the perpendicular AND the along part)
                 lockOk = true;
                 usedSolved = true;
-            } else if (modelOk && nofoot::adsSightError(p14w, cam, rHat, g_adsSightHalfIpd, f, rows, E)) {
+            } else if (modelOk && nofoot::adsSightErrorEyeK(p14w, modelEye, f, rows, eyeCap.kM, E)) {
                 lockOk = true;
             }
             if (lockOk) {
@@ -7042,7 +7140,7 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
                 have = true;
                 if (flipped) ++w.flipped;
                 for (size_t i = 0; i < 3; ++i) {
-                    err[i] = E.seated[i];
+                    err[i] = E.seatedFull[i];   // F70: the full error to the target eye point, not the perpendicular part alone
                     rel[i] = (p14w[0] - cam[0]) * rows[3 * i] + (p14w[1] - cam[1]) * rows[3 * i + 1] + (p14w[2] - cam[2]) * rows[3 * i + 2];
                 }
             } else {
@@ -7050,14 +7148,25 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
             }
         }
     }
-    // Drive while engaged with the inputs; decay otherwise. No guard inside the filter (the growth guard below is the sight lock's own).
-    alignFilter(g_adsSight, err, have, !have, dt, now, false, nofoot::kAdsSightClampM);
+    // F70: feed-forward. The target shift is w x (the applied shift + the error measured on the rendered eye), followed by a critically damped filter (tau 0.05 s,
+    // about 0.25 s to 95%); the 0.02-a-frame integrator it replaces took seconds and decayed on every frame without a measurement. w is the ADS weight (0.15 s in,
+    // 0.3 s out): 0 (not engaged, or the sight lock tripped) takes the shift back to zero. The game's own ADS fraction (exe 0x51EDED8) is not read.
+    {
+        const double wEff = engaged && !g_adsSightTripped ? g_adsW : 0.0;
+        nofoot::adsEyeStep(g_adsSight.pos, g_adsSight.vel, err, have, wEff, dt);
+    }
     for (size_t i = 0; i < 3; ++i) g_adsSight.applied[i] = g_adsSight.pos[i];
     if (have) {
         // The camera moved by the lock (F40's plant at psi 0: body = diag(-1, -1, +1) . seated), so e before the lock is about e + that.
         const double lockBody[3] = {-g_adsSight.applied[0], -g_adsSight.applied[1], g_adsSight.applied[2]};
-        for (size_t i = 0; i < 3; ++i) before[i] = E.eBody[i] + lockBody[i];
+        for (size_t i = 0; i < 3; ++i) before[i] = E.eFullBody[i] + lockBody[i];
         ++w.driving;
+        w.kWantedSum += static_cast<double>(g_adsEyeDistM.load(std::memory_order_relaxed));   // F70
+        w.kEffSum += eyeCap.kM;
+        if (eyeCap.capped) ++w.capped;
+        w.readableMax = std::max(w.readableMax, static_cast<uint32_t>(eyeCap.readable));
+        w.alongErrSum += E.alongFull;
+        w.alongErrAbsMax = std::max(w.alongErrAbsMax, std::fabs(E.alongFull));
         w.perpSum += E.perpNorm;
         if (E.perpNorm > w.perpMax) w.perpMax = E.perpNorm;
         w.beforeSum += std::sqrt(before[0] * before[0] + before[1] * before[1] + before[2] * before[2]);
@@ -7099,6 +7208,40 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
                     100.0 * g_adsSight.applied[2], 100.0 * appliedNorm, 100.0 * nofoot::kAdsSightClampM, w.wSum / n, g_adsW, w.driving, w.idle,
                     w.noFp, w.noRoot, w.noSample, w.degenerate, w.flipped, w.trippedFrames,
                     w.driving ? "" : " (no frame drove the lock this second)");
+    // F70: the ADS eye point. Proof: the along error to the target 0 +-0.5 cm and the perpendicular error under 0.5 cm; the pin input camera is the job camera less
+    // the shift (-S through the AMC rows); the 3P root stays put (under 1 cm over a press); the sight's NDC equal at the three distances.
+    {
+        PinIn pi;
+        const bool pinOk = pinInRead(&pi);
+        double S[3] = {g_adsLock[0] + g_adsSight.applied[0], g_adsLock[1] + g_adsSight.applied[1], g_adsLock[2] + g_adsSight.applied[2]}, got[3] = {}, want[3] = {};
+        if (pinOk) {
+            const float rows9[9] = {pi.m3p[0], pi.m3p[1], pi.m3p[2], pi.m3p[4], pi.m3p[5], pi.m3p[6], pi.m3p[8], pi.m3p[9], pi.m3p[10]};
+            nofoot::adsCamShiftWorld(S, rows9, want);
+            for (int i = 0; i < 3; ++i) {
+                got[i] = static_cast<double>(pi.cam[i]) - pi.camRaw[i];   // the pin input minus the job camera
+                want[i] = -want[i];
+            }
+        }
+        const double dn = w.driving ? static_cast<double>(w.driving) : 1.0;
+        const double diff[3] = {got[0] - want[0], got[1] - want[1], got[2] - want[2]};
+        char ndcText[260];
+        if (w.ndc3Have)
+            std::snprintf(ndcText, sizeof(ndcText), "(%.4f, %.4f) at %.1f m, (%.4f, %.4f) at %.1f m, (%.4f, %.4f) at %.1f m", w.ndc3[0][0], w.ndc3[0][1], w.ndcD[0], w.ndc3[1][0],
+                          w.ndc3[1][1], w.ndcD[1], w.ndc3[2][0], w.ndc3[2][1], w.ndcD[2]);
+        else
+            std::snprintf(ndcText, sizeof(ndcText), "not available this second (no fresh right-eye rows, or a point behind the eye)");
+        Log::get().note("native on foot ADS eye point (F70): k %.1f cm asked, %.1f cm after the clearance cap (%s); the eye to the target eye point (P14w + k f) after the lock: "
+                        "along mean %+.2f max |%.2f| cm (target 0 +-0.5), perpendicular mean %.2f max %.2f cm (max 0.5); applied shift |%.1f| cm (clamp %.0f cm), "
+                        "ADS weight mean %.2f (now %.2f); the pin input camera minus the job camera (world, cm) %+.1f %+.1f %+.1f against -S through the AMC rows "
+                        "%+.1f %+.1f %+.1f (difference %.2f cm; |S| %.1f cm: the body is pinned to the unlocked head); the 3P root's world drift since the press: "
+                        "now %.2f cm, largest %.2f cm (max 1; a walk counts); the sight in the right eye ahead of the target eye point: %s (equal when the eye is on the line)",
+                        100.0 * w.kWantedSum / dn, 100.0 * w.kEffSum / dn,
+                        w.capped ? "a readable FP weapon point on the sight line cut it" : w.readableMax ? "points on the line, none close enough to cut it"
+                                                                                                          : "no FP weapon point readable on the line: the setting's own 30 cm bound",
+                        100.0 * w.alongErrSum / dn, 100.0 * w.alongErrAbsMax, 100.0 * w.perpSum / dn, 100.0 * w.perpMax, 100.0 * appliedNorm, 100.0 * nofoot::kAdsSightClampM,
+                        w.wSum / dn, g_adsW, 100.0 * got[0], 100.0 * got[1], 100.0 * got[2], 100.0 * want[0], 100.0 * want[1], 100.0 * want[2],
+                        100.0 * nofoot::ikLen(diff), 100.0 * nofoot::ikLen(S), 100.0 * w.rootDriftNow, 100.0 * w.rootDriftMax, ndcText);
+    }
     // F66e: the two rendered eyes against the job camera and the sight line. The eye positions are solved from each eye's scene rows (clip x, y, w
     // zero). If the job camera sat at one eye (A1) the first ADS second shows it here, before the lock moves: eye minus camera not symmetric.
     // Flight proof: IPD 6.0-6.1 cm; the right eye's distance to the sight line under 0.5 cm and the left's about 6 cm; used = solved right eye.
@@ -8419,7 +8562,9 @@ void alignTick(uint64_t now) noexcept {   // F66b: dt from QPC inside (g_alignCl
                 out[i] = acc;
             }
         };
-        const float* camUse = (mode == 2 && fpFresh) ? fp.origin : s.cam;   // F37: body mode anchors on the FP root
+        float camUnlocked[3];
+        camUnlockedFrom(s, camUnlocked);   // F70: the camera less the ADS shift (the head, not the ADS eye)
+        const float* camUse = (mode == 2 && fpFresh) ? fp.origin : camUnlocked;   // F37: body mode anchors on the FP root
         body(camUse, camB);
         body(s.pov, povB);
         // F38: the pov target, in body axes. With the neck, the neck plus the head-to-neck offset (pov minus neck) captured over the first
@@ -8468,7 +8613,7 @@ void alignTick(uint64_t now) noexcept {   // F66b: dt from QPC inside (g_alignCl
                 ++g_f65cDN;
             }
         }
-        body(s.cam, jobB);
+        body(camUnlocked, jobB);
         if (fpFresh) body(fp.origin, fpB);
         if (!g_f38Valid) {
             g_f38Valid = true;
@@ -8962,6 +9107,10 @@ void alignTick(uint64_t now) noexcept {   // F66b: dt from QPC inside (g_alignCl
             // F62b: the ADS head-aim's position lock; F63: the ADS sight lock (both zero outside ADS)
             eye[i] = g_align.applied[i] + g_adsLock[i] + g_adsSight.applied[i];
             eyeChange = std::max(eyeChange, std::fabs(eye[i] - g_eyeAlignPub[i]));
+        }
+        {   // F70: S = the ADS lock + the sight lock (seated), for the body pin and the head follow (they take the camera less its body-axes motion)
+            const double sShift[3] = {g_adsLock[0] + g_adsSight.applied[0], g_adsLock[1] + g_adsSight.applied[1], g_adsLock[2] + g_adsSight.applied[2]};
+            adsShiftPublish(sShift);
         }
         if (eyeChange > 1e-6) {
             for (size_t i = 0; i < 3; ++i) g_eyeAlignPub[i] = eye[i];
@@ -13287,10 +13436,12 @@ void f58BendFrame(uint64_t now, double dt, int mode, bool full3P, bool ads, cons
     if (want || g_f58BendBlend.w > 0.0f) g_f58RunUntilMs = now + 500;
     const bool run = now < g_f58RunUntilMs;
     if (run && sFresh && s.headOk && !pinScope) {
+        float camU[3];
+        camUnlockedFrom(s, camU);   // F70
         double t[3] = {};
         for (size_t i = 0; i < 3; ++i) {
             for (size_t j = 0; j < 3; ++j)
-                t[i] += (static_cast<double>(s.cam[j]) - s.origin[j] - g_alignBody.applied[j]) * static_cast<double>(s.rows[3 * i + j]);
+                t[i] += (static_cast<double>(camU[j]) - s.origin[j] - g_alignBody.applied[j]) * static_cast<double>(s.rows[3 * i + j]);
             t[i] += nofoot::kNeckRestOffsetFull3P[i];
         }
         bendTargetPublish(t, nofoot::kBendNeckJoint, now);
@@ -13301,8 +13452,10 @@ void f58BendFrame(uint64_t now, double dt, int mode, bool full3P, bool ads, cons
     // axes of this sample, summed per frame. Whether the census's GetModelMatrix sees the hook's bent pose is not verified (the 1 s line says so).
     if (full3P && active && sFresh && s.neckOk) {
         double eye[3], neck[3], rows[9], r[3];
+        float camU[3];
+        camUnlockedFrom(s, camU);   // F70: the head follow's eye is the unlocked head
         for (size_t j = 0; j < 3; ++j) {
-            eye[j] = static_cast<double>(s.cam[j]);
+            eye[j] = static_cast<double>(camU[j]);
             neck[j] = static_cast<double>(s.neck[j]) + g_alignBody.applied[j];
         }
         for (size_t k = 0; k < 9; ++k) rows[k] = static_cast<double>(s.rows[k]);

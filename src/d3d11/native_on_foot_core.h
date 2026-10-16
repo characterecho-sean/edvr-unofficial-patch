@@ -2095,9 +2095,10 @@ inline void adsCamBodyMotion(const double dH[3], const double s[3], double out[3
 // error e = P14w - E_R with its component along f removed (right and up of the sight only), in body axes through the AMC rows (right, up,
 // forward), then seated = seatedFromBody(e_body, 0) (diag(-1, -1, +1) . body): the eye alignment's target-minus-camera convention, so the
 // view run's filter (gain 0.02 a frame, 5 cm a frame) moves the right eye onto the sight line. The applied lock is clamped to 12 cm.
+// F70 REPLACED this: the lock aims at P14w + k f (the along part too), is feed-forward, and is clamped to 40 cm (see the F70 section below).
 constexpr double kAdsSightHalfIpdFallback = 0.0315;   // metres, when the per-eye offsets are not known
 constexpr double kAdsSightHalfIpdMin = 0.02, kAdsSightHalfIpdMax = 0.045;
-constexpr double kAdsSightClampM = 0.12;
+constexpr double kAdsSightClampM = 0.40;   // F70: was 0.12; the target eye point is k ahead of P14 (up to 30 cm) plus the perpendicular and along offsets (about 7 cm each)
 // The half IPD from the right eye's head-space x offset (native_temporal's s->eyes[1][3]); the fallback outside 2..4.5 cm or unknown.
 inline double adsSightHalfIpd(bool have, double rightEyeX) noexcept {
     const double a = std::fabs(rightEyeX);
@@ -2119,6 +2120,9 @@ inline bool adsSightRight(const double row0[3], const double f[3], const double 
 struct AdsSightErr {
     double eW[3] = {}, ePerpW[3] = {}, eBody[3] = {}, seated[3] = {};
     double along = 0.0, perpNorm = 0.0;   // e . f (metres), |e perpendicular|
+    // F70: the error to the target eye point P14w + k f: the perpendicular part AND the along part (along + k), world, body axes, seated.
+    double eFullW[3] = {}, eFullBody[3] = {}, seatedFull[3] = {};
+    double alongFull = 0.0;               // (P14w + k f - eye) . f
 };
 // rows: the AMC's 3x3 (row-major: right, up, forward, world). False on a degenerate f.
 inline bool adsSightErrorEye(const double p14w[3], const double eye[3], const double f[3], const double rows[9], AdsSightErr& out) noexcept {
@@ -2131,6 +2135,18 @@ inline bool adsSightErrorEye(const double p14w[3], const double eye[3], const do
     for (int i = 0; i < 3; ++i)
         out.eBody[i] = out.ePerpW[0] * rows[3 * i] + out.ePerpW[1] * rows[3 * i + 1] + out.ePerpW[2] * rows[3 * i + 2];
     seatedFromBody(out.eBody, 0.0, out.seated);
+    return true;
+}
+// F70: the same with the target P14w + k f: the lock moves the eye onto the sight line AND k forward of P14 along it (k = 0: onto P14 itself, the animator's eye
+// point). The perpendicular figures (perpNorm, the growth guard's input) are unchanged.
+inline bool adsSightErrorEyeK(const double p14w[3], const double eye[3], const double f[3], const double rows[9], double k, AdsSightErr& out) noexcept {
+    if (!adsSightErrorEye(p14w, eye, f, rows, out)) return false;
+    double fu[3];
+    if (!ikUnit(f, fu)) return false;
+    out.alongFull = out.along + k;
+    for (int i = 0; i < 3; ++i) out.eFullW[i] = out.ePerpW[i] + out.alongFull * fu[i];
+    for (int i = 0; i < 3; ++i) out.eFullBody[i] = out.eFullW[0] * rows[3 * i] + out.eFullW[1] * rows[3 * i + 1] + out.eFullW[2] * rows[3 * i + 2];
+    seatedFromBody(out.eFullBody, 0.0, out.seatedFull);
     return true;
 }
 // F63's model of the right eye: the job camera + half the IPD along the FP root's right.
@@ -2170,6 +2186,83 @@ struct AdsSightGrowth {
     }
     uint64_t runMs(uint64_t ms) const noexcept { return growing && ms > startMs ? ms - startMs : 0; }
 };
+
+// ---- F70: the ADS eye point (fix.native_on_foot_ads_eye_distance_cm) ------------------------------------------------------------------------
+// RE (log 152023, dumps 152230 rifle and 152353 pistol): the exe has no sight, scope or eye joint and no per-weapon ADS camera table; the ADS pose is the FP
+// animation's, with joint 14 (def_c_povCamera_joint) as the camera, still computed in VR. The line through P14 along the FP root's forward passes through the optics
+// (the rifle's lens dot within 0.6 deg, the pistol's rear sight within 1 deg): P14 is the animator's eye point. The F63 lock removed only the perpendicular part of
+// the error, so the rifle eye sat 7.3 cm AHEAD of P14 and the pistol eye 5.7 cm BEHIND it. The sights are 33.3 cm (the rifle's lens ring) and 40.8 cm (the pistol's
+// rear sight) ahead of P14; the flat game narrows the FOV to make them look bigger, which VR cannot do, so "closer" is the eye moving forward along the sight line:
+// the target eye point is P14w + k f, k the user's setting (0..30 cm, default 15: the rifle eye about 18 cm behind the lens ring, the pistol's about 26 cm behind
+// the rear sight), never closer than kAdsEyeClearanceM to any FP weapon point readable on the line.
+// The lock's step is feed-forward: the target shift is w x (the applied shift + the error measured on the rendered eye), followed by a critically damped filter
+// (tau kAdsEyeTauSec): the 0.02-a-frame integrator it replaces took seconds. w is the ADS weight (0.15 s in, 0.3 s out).
+constexpr double kAdsEyeDistDefaultCm = 15.0, kAdsEyeDistMaxCm = 30.0;
+constexpr double kAdsEyeClearanceM = 0.06;      // the eye stays this far behind any readable FP weapon point on the sight line
+constexpr double kAdsEyeOnLineM = 0.06;         // "on the line": a point within this of the sight line, ahead of P14
+constexpr double kAdsEyeTauSec = 0.05;          // 95% in about 0.25 s (tau 0.07 would take 0.33 s)
+constexpr double kAdsEyeCapPerFrameM = 0.08;    // the shift moves at most this much a frame
+inline double adsEyeDistanceClampCm(double cm) noexcept {
+    if (!(cm == cm)) return kAdsEyeDistDefaultCm;
+    return cm < 0.0 ? 0.0 : cm > kAdsEyeDistMaxCm ? kAdsEyeDistMaxCm : cm;
+}
+struct AdsEyeCap {
+    double kM = 0.0;       // k after the cap (metres)
+    bool capped = false;   // a readable point cut it
+    int readable = 0;      // how many points lay ahead of P14 within kAdsEyeOnLineM of the line
+    double limitM = 1e9;   // the tightest limit those points gave (the nearest point's along less the clearance)
+};
+// k capped so the eye (P14w + k f) stays kAdsEyeClearanceM behind every point of pts (world) that is ahead of P14 and within kAdsEyeOnLineM of the sight line.
+// With none readable the cap is the setting's own bound (the caller logs it).
+inline AdsEyeCap adsEyeDistanceCap(double kWantedM, const double p14w[3], const double f[3], const double pts[][3], int n) noexcept {
+    AdsEyeCap c;
+    c.kM = kWantedM == kWantedM ? kWantedM : 0.0;
+    double fu[3];
+    if (!ikUnit(f, fu) || n <= 0) return c;
+    for (int i = 0; i < n; ++i) {
+        const double v[3] = {pts[i][0] - p14w[0], pts[i][1] - p14w[1], pts[i][2] - p14w[2]};
+        const double along = v[0] * fu[0] + v[1] * fu[1] + v[2] * fu[2];
+        const double pv[3] = {v[0] - along * fu[0], v[1] - along * fu[1], v[2] - along * fu[2]};
+        const double perp = std::sqrt(pv[0] * pv[0] + pv[1] * pv[1] + pv[2] * pv[2]);
+        if (!(along > 0.0) || !(perp <= kAdsEyeOnLineM)) continue;
+        ++c.readable;
+        const double limit = along - kAdsEyeClearanceM;
+        if (limit < c.limitM) c.limitM = limit;
+    }
+    if (c.readable && c.kM > c.limitM) {
+        c.kM = c.limitM > 0.0 ? c.limitM : 0.0;
+        c.capped = true;
+    }
+    return c;
+}
+// One step of the lock's shift (seated, metres): the target w x (pos + e) (e: the error measured on the rendered eye, zero when it could not be measured this
+// frame), clamped to kAdsSightClampM, followed by one critically damped step at most kAdsEyeCapPerFrameM a frame. w 0 decays the shift to zero.
+inline void adsEyeStep(double pos[3], double vel[3], const double e[3], bool have, double w, double dt) noexcept {
+    const double ww = unit01(w);
+    double target[3];
+    for (int i = 0; i < 3; ++i) target[i] = ww * (pos[i] + (have ? e[i] : 0.0));
+    clampNorm3(target, kAdsSightClampM);
+    for (int i = 0; i < 3; ++i) cdStep(pos[i], vel[i], target[i], kAdsEyeTauSec, dt, kAdsEyeCapPerFrameM);
+    clampNorm3(pos, kAdsSightClampM);
+}
+// The camera's body-axes motion for a seated shift S (F40's plant at psi 0): (-S0, -S1, +S2). The body pin and the head-follow take the camera MINUS this,
+// mapped back to the world through the AMC rows (right, up, forward; row-major), so the body stays pinned to the unlocked head and does not slide with the ADS
+// eye.
+inline void adsCamShiftBody(const double S[3], double out[3]) noexcept {
+    out[0] = -S[0];
+    out[1] = -S[1];
+    out[2] = S[2];
+}
+inline void adsCamShiftWorld(const double S[3], const float rows[9], double out[3]) noexcept {
+    double m[3];
+    adsCamShiftBody(S, m);
+    for (int c = 0; c < 3; ++c) out[c] = m[0] * rows[c] + m[1] * rows[3 + c] + m[2] * rows[6 + c];
+}
+inline void adsUnlockedCam(const float cam[3], const double S[3], const float rows[9], float out[3]) noexcept {
+    double w[3];
+    adsCamShiftWorld(S, rows, w);
+    for (int c = 0; c < 3; ++c) out[c] = static_cast<float>(static_cast<double>(cam[c]) - w[c]);
+}
 
 // ---- F65a: the connection retry's gate (fix.connection_retry, was fix.training_connect_fix) -----------------------------------------------
 // A Deactivate arms the recovery only when the destroyed ConnectToServerActivity had not reached sessions (its state at the destroy,
