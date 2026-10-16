@@ -320,6 +320,7 @@ void PluginManager::shutdown() {
 }
 
 void PluginManager::unloadAll() {
+    inputGateSetPluginBlock(false);   // no addon outlives its input ownership
     for (auto& p : m_plugins) {
         if (p.callbacks.onShutdown && !p.disabled) {
             DWORD fault = 0;
@@ -421,6 +422,7 @@ void PluginManager::onUpdate(const EdvrPosef& headPose, float dtSeconds) {
             p.faultCode = fault;
             Log::get().note("plugin_manager: addon '%s' faulted onUpdate (0x%08X); disabled for session",
                             p.callbacks.pluginName ? p.callbacks.pluginName : p.stem.c_str(), fault);
+            inputGateSetPluginBlock(false);   // the faulted addon may have held input; the healthy ones re-assert next frame
         }
     }
 }
@@ -436,6 +438,7 @@ void PluginManager::onRenderEye(const EdvrEyeRenderContext& eyeCtx) {
             p.faultCode = fault;
             Log::get().note("plugin_manager: addon '%s' faulted onRenderEye (0x%08X); disabled for session",
                             p.callbacks.pluginName ? p.callbacks.pluginName : p.stem.c_str(), fault);
+            inputGateSetPluginBlock(false);   // the faulted addon may have held input; the healthy ones re-assert next frame
         }
     }
 }
@@ -458,6 +461,7 @@ bool PluginManager::onFilterInput(uint32_t deviceType, const void* rawInputData)
             p.faultCode = fault;
             Log::get().note("plugin_manager: addon '%s' faulted onFilterInput (0x%08X); disabled for session",
                             p.callbacks.pluginName ? p.callbacks.pluginName : p.stem.c_str(), fault);
+            inputGateSetPluginBlock(false);   // the faulted addon may have held input; the healthy ones re-assert next frame
         } else if (ctx.swallowInput) {
             swallowed = true;
         }

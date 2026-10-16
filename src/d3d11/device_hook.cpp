@@ -1244,6 +1244,8 @@ EDVR_BOUNDARY_TICK(tkCelestialStatus, "celestial_status");
 EDVR_BOUNDARY_TICK(tkExplorerCam, "explorer_cam");
 EDVR_BOUNDARY_TICK(tkFssModeLatch, "fss_mode_latch");
 EDVR_BOUNDARY_TICK(tkMenu, "menu");
+// A plugin's ownership of input is a lease spent here, once per Present, so it ends even when no eye is rendered (input_gate.h).
+EDVR_BOUNDARY_TICK(tkPluginInputLease, "plugin_input_lease");
 EDVR_BOUNDARY_TICK(tkBindingBoundary, "binding_boundary");
 EDVR_BOUNDARY_TICK(tkExposureBoundary, "exposure_boundary");
 EDVR_BOUNDARY_TICK(tkVscreenRest, "vscreen_rest");
@@ -1620,6 +1622,7 @@ void presentFrameBoundary() {
     // where the frame-tick chain is cut: the tick named "menu_tick" ends there,
     // "perf_monitor" is the rest of that function, and "menu" is what is left.
     tkMenu.run([] { menuTick(g_state->device); });
+    tkPluginInputLease.run([] { inputGatePluginLeaseTick(); });
     // One per-frame invalidation for both fixes, before either boundary.
     //
     // This used to be two, with opposite policies: vscreen dropped its

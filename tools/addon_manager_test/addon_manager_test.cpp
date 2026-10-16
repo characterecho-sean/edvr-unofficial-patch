@@ -23,6 +23,10 @@ struct FakeSetting { std::string owner; std::string key; };
 static std::vector<FakeSetting> g_fakeSettings;
 static int g_fakeRegisteredEver = 0;
 
+// What the input gate is told: the last answer, and how many times it was told to clear.
+static bool g_gateBlocked = false;
+static int g_gateClears = 0;
+
 namespace edvr {
 int menuRegisterPluginSetting(const char* ownerId, const EdvrPluginSettingDef* setting) {
     if (!setting) return -1;
@@ -39,7 +43,8 @@ void menuRemovePluginSettings(const char* ownerId) {
 }
 
 void inputGateSetPluginBlock(bool block) {
-    (void)block;
+    if (g_gateBlocked && !block) ++g_gateClears;
+    g_gateBlocked = block;
 }
 
 void breadcrumb(const char* stage) {
@@ -368,6 +373,43 @@ int main(int argc, char** argv) {
 
         std::error_code ec12;
         std::filesystem::remove_all(sb, ec12);
+    }
+
+    // Case 13 (PR #92 review): the last addon faulting somewhere other than onFilterInput must not strand the input block.
+    {
+        auto sb = makeSandbox(L"inputfault");
+        dropFixture(sb, L"", L"owner.dll");
+        pm.initialize(sb.wstring());
+        auto* cand = findCandidate(pm, "owner");
+        check(cand && pm.approvePlugin("owner", cand->sha256), "inputfault: the owning addon loads");
+        HMODULE h = GetModuleHandleW(L"owner.dll");
+        auto crash = h ? reinterpret_cast<PFN_SetCrashMode>(GetProcAddress(h, "fixtureSetCrashMode")) : nullptr;
+        check(crash != nullptr, "inputfault: fixture helper resolved");
+        g_gateBlocked = false;
+        check(pm.onFilterInput(1, nullptr) && g_gateBlocked, "inputfault: the addon takes input");
+        if (crash) crash(2);
+        EdvrEyeRenderContext ctx{};
+        ctx.structSize = sizeof(ctx);
+        pm.onRenderEye(ctx);
+        check(!pm.hasActivePlugins(), "inputfault: the addon is disabled by its render fault");
+        check(!g_gateBlocked, "inputfault: the gate is clear after the owning addon faults in onRenderEye");
+        pm.shutdown();
+        std::error_code ec13;
+        std::filesystem::remove_all(sb, ec13);
+    }
+
+    // Case 14 (PR #92 review): shutdown clears an input block still held by a healthy addon.
+    {
+        auto sb = makeSandbox(L"inputshutdown");
+        dropFixture(sb, L"", L"owner.dll");
+        pm.initialize(sb.wstring());
+        auto* cand = findCandidate(pm, "owner");
+        check(cand && pm.approvePlugin("owner", cand->sha256), "inputshutdown: the owning addon loads");
+        check(pm.onFilterInput(1, nullptr) && g_gateBlocked, "inputshutdown: the addon takes input");
+        pm.shutdown();
+        check(!g_gateBlocked, "inputshutdown: the gate is clear after shutdown");
+        std::error_code ec14;
+        std::filesystem::remove_all(sb, ec14);
     }
 
     // Cleanup sandbox

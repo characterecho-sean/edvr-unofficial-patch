@@ -843,6 +843,27 @@ int main() {
         check(!g_padImport.applied && !g_padInstalled.load(), "shutdown takes the controller door out");
         g_runtimeProfile = before;
     }
+    // PR #92 review: a plugin's ownership of input is a lease. Renewing it each frame keeps it; a plugin
+    // that stops renewing (no render pass, flat profile) loses it after one lease period.
+    {
+        inputGateSetPluginBlock(true);
+        check(g_pluginBlock.load(), "(a plugin takes input)");
+        for (int frame = 0; frame < kPluginLeaseFrames * 3; ++frame) {
+            inputGatePluginLeaseTick();
+            inputGateSetPluginBlock(true);   // renewed by the plugin's filter call this frame
+        }
+        check(g_pluginBlock.load(), "a plugin that renews every frame keeps input past several lease periods");
+        for (int frame = 0; frame < kPluginLeaseFrames - 1; ++frame) inputGatePluginLeaseTick();
+        check(g_pluginBlock.load(), "an unrenewed lease still holds until its period is spent");
+        inputGatePluginLeaseTick();
+        check(!g_pluginBlock.load(), "the gate is clear once a lease period passes with no renewal");
+        inputGateSetPluginBlock(true);
+        inputGateSetPluginBlock(false);
+        check(!g_pluginBlock.load(), "an explicit release clears the gate at once");
+        inputGateSetPluginBlock(true);
+        inputGateShutdown();
+        check(!g_pluginBlock.load(), "shutdown clears a block still held");
+    }
     printf("\nINPUT GATE TEST %s\n", failures ? "FAILED" : "PASSED");
     return failures ? 1 : 0;
 }

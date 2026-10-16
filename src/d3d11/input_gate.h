@@ -92,7 +92,13 @@ bool inputGatePrivate();
 // Set by the plugin manager each frame when any plugin (e.g. MFD) holds
 // input focus. Independent of the menu's private flag: plugin focus
 // suppresses input doors without affecting the menu's own state.
+// Ownership is a lease: a true call renews it, a false call (or a plugin fault, retire
+// or shutdown, which the manager reports as false) releases it, and
+// inputGatePluginLeaseTick() releases it once a few dozen frames pass unrenewed.
 void inputGateSetPluginBlock(bool block);
+
+// Once per game frame from the Present path, whether or not an eye was rendered.
+void inputGatePluginLeaseTick();
 
 // Flat-panel controller ownership, independent of the keyboard door proof.
 // Requests expire without the visible/focused panel's per-frame heartbeat.

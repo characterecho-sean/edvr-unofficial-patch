@@ -100,6 +100,12 @@ typedef BOOL(WINAPI* PFN_PeekMessageA)(LPMSG, HWND, UINT, UINT, UINT);
 // player was already in.
 std::atomic<int> g_private{0};
 std::atomic<bool> g_pluginBlock{false};
+// A plugin's ownership of input is a lease: each inputGateSetPluginBlock(true) renews it
+// and inputGatePluginLeaseTick (once per game frame, from the proxy's Present path, not
+// from eye rendering) spends one. A plugin that stops renewing -- no render pass, flat
+// profile, a fault -- loses the block instead of stranding the player's keyboard.
+std::atomic<int> g_pluginLease{0};
+constexpr int kPluginLeaseFrames = 30;
 
 // The summon key, packed so a live rebind cannot tear it: bits 0-7 the
 // virtual key, 8-15 the DirectInput scan code, 16-18 the modifier bits,
@@ -1654,8 +1660,26 @@ void inputGateSetPrivate(bool priv) {
 
 bool inputGatePrivate() { return g_private.load() != 0; }
 
+// The one place plugin ownership ends: an explicit clear, a fault or shutdown that
+// clears it for the plugin, and the lease running out all arrive here.
+static void releasePluginBlock(const char* why) {
+    g_pluginLease.store(0, std::memory_order_relaxed);
+    if (!g_pluginBlock.exchange(false, std::memory_order_relaxed)) return;
+    Log::get().note("keyboard gate: plugin input ownership released (%s).", why);
+}
+
 void inputGateSetPluginBlock(bool block) {
-    g_pluginBlock.store(block, std::memory_order_relaxed);
+    if (block) {
+        g_pluginLease.store(kPluginLeaseFrames, std::memory_order_relaxed);   // every call is a renewal
+        g_pluginBlock.store(true, std::memory_order_relaxed);
+    } else {
+        releasePluginBlock("cleared");
+    }
+}
+
+void inputGatePluginLeaseTick() {
+    if (!g_pluginBlock.load(std::memory_order_relaxed)) return;
+    if (g_pluginLease.fetch_sub(1, std::memory_order_relaxed) <= 1) releasePluginBlock("lease expired");
 }
 
 extern "C" __declspec(dllexport) void WINAPI edvrSetPluginInputBlock(int block) {
@@ -1798,6 +1822,8 @@ void inputGateShutdown() {
     g_padInstalled.store(false);
     iatHookUninstall(&g_padImport);
     g_private.store(0);
+    g_pluginBlock.store(false);
+    g_pluginLease.store(0);
     g_summon.store(0);
     g_releaseTail.store(false);
     iatHookUninstall(&g_createImport);
