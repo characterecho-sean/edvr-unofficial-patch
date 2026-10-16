@@ -1088,6 +1088,10 @@ struct SealState {
     // Built 2026-10-15: the transition hold. No request before nowMs reaches this (kTransitionHoldMs after an origin-shift or mechanism release, or an
     // origin shift while docked). An undock clears it, and a setting toggle clears the whole state. The fresh r1 edge re-seal is not held.
     uint64_t holdUntilMs = 0;
+    // The hold in force came from an origin shift (a boarding or disembark whose Status.json seat is still catching up), not from the Lift. Only a Lift
+    // hold is stepped over by the fresh r1 edge: an edge left over from an earlier release does not cancel a later origin-shift hold (review follow-up of
+    // main 4bd06f12, F2). The latest hold's source decides.
+    bool shiftHold = false;
     // This call's request was kept back by holdUntilMs (set per call; the tick logs the first such call of a hold once).
     bool holdBlocked = false;
 };
@@ -1858,7 +1862,10 @@ inline SealAction sealStep(const SealInputs& in, SealState* st, ReleaseWhy* why)
             st->camOutRun = 0;
             if (w == ReleaseWhy::kCameraLeft) st->camInRun = 0;   // the re-seal waits kCameraFrames inside the bay
             // Built 2026-10-15: the transition hold. The origin shift and the Lift keep the re-seal waiting; their Status.json seat reads a second late.
-            if (w == ReleaseWhy::kOriginShift || w == ReleaseWhy::kMechanism) st->holdUntilMs = in.nowMs + kTransitionHoldMs;
+            if (w == ReleaseWhy::kOriginShift || w == ReleaseWhy::kMechanism) {
+                st->holdUntilMs = in.nowMs + kTransitionHoldMs;
+                st->shiftHold = (w == ReleaseWhy::kOriginShift);
+            }
             *why = w;
             return SealAction::kRelease;
         }
@@ -1870,12 +1877,14 @@ inline SealAction sealStep(const SealInputs& in, SealState* st, ReleaseWhy* why)
         st->mechanism = false;
         st->poseRun = 0;
         st->holdUntilMs = 0;   // built 2026-10-15: an undock ends any transition hold
+        st->shiftHold = false;
         return SealAction::kNone;
     }
     // Built 2026-10-15: an origin shift while docked (a boarding, or the disembark before Status.json says on foot): no seal into the transition. A request
     // in flight is withdrawn with it, so the hold cannot be walked past by an engage already asked for.
     if (in.originShifted) {
         st->holdUntilMs = in.nowMs + kTransitionHoldMs;
+        st->shiftHold = true;
         clearTrigger(st);
     }
     if (!in.aboard) {   // on foot (or the seat unknown): never seal; a request in flight is withdrawn
@@ -1912,8 +1921,9 @@ inline SealAction sealStep(const SealInputs& in, SealState* st, ReleaseWhy* why)
         }
     }
     if (st->reseal == 1) return SealAction::kNone;   // in the bay but not yet out since the release: wait for the edge
-    // Built 2026-10-15: the r1 edge (out, then in) is not held: the rig's v14.24 edge check pins it at once after a Lift release. The hold covers the
-    // pose-back re-seal and the origin-shift re-seal, both of which reach here without the edge.
+    // Built 2026-10-15: the r1 edge (out, then in) is not held by a Lift hold: the rig's v14.24 edge check pins it at once after a Lift release. The hold covers the
+    // pose-back re-seal and the origin-shift re-seal, both of which reach here without the edge; and an origin-shift hold (shiftHold) is not stepped over
+    // by an edge either, even one left over from an earlier release.
     bool edge = false;
     if (st->reseal == 2) {   // out, then in: the fresh edge
         st->reseal = 0;
@@ -1923,7 +1933,7 @@ inline SealAction sealStep(const SealInputs& in, SealState* st, ReleaseWhy* why)
         clearTrigger(st);
         return SealAction::kNone;
     }
-    if (in.nowMs < st->holdUntilMs && !edge) {   // built 2026-10-15: the transition hold keeps the request back; the pose-back and camera runs above went on
+    if (in.nowMs < st->holdUntilMs && !(edge && !st->shiftHold)) {   // built 2026-10-15: the transition hold keeps the request back; the pose-back and camera runs above went on
         st->holdBlocked = !st->requested;
         return SealAction::kNone;
     }

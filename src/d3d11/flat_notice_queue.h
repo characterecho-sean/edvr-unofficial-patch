@@ -24,6 +24,12 @@ class FlatNoticeQueue {
     return &text_;
   }
   bool due() const { return due_; }
+  // A profile switch: the notice belongs to the profile that raised it (flat's F7 comparison), and the switch clears that profile's AA override, so a
+  // notice still waiting would describe a state that no longer holds when flat returns.
+  void clear() {
+    text_.clear();
+    due_ = false;
+  }
 
  private:
   std::string text_;

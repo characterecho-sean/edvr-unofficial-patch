@@ -3922,6 +3922,12 @@ void closeMenu(const char* why) {
 void menuProfileSwitch() {
     State& s = g_s;
     if (s.open) closeMenu("profile switch");
+    // The outgoing profile's flat notice, queued or on screen, goes with it: Config::switchProfile clears the AA comparison override it described.
+    s.flatNotice.clear();
+    s.flatNoticeUp = false;
+    s.flatNoticeShown = false;
+    s.flatNoticeUntilMs = 0;
+    s.flatRasterStale = false;
     inputGateSetPrivate(false);
     menuPanelFlatResize();
     s.lastDrawn = menuDrawnValue();

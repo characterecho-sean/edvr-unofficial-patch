@@ -111,6 +111,17 @@ it), or 900 s for a rig with no record. A rig still running then has its whole
 process tree killed (taskkill /T), is reported as TIMEOUT with the tail of its
 output, and fails the build like any other failing rig, rather than hanging the
 build silently under the build lock (architecture review 2026-09-29, I-5).
+A rig's recorded time may rise at most 2x per run, so one run on a loaded
+machine does not stretch its limit for the builds after it.
+A rig whose process tree is still using CPU or writing output when it reaches
+its limit is slow, not hung (2026-10-15: with eight CPU spinners running, a rig
+that normally takes 17 s used 0.8 s of CPU in 160 s), and is given 60 s more at a
+time, up to 3x its limit; it carries a NOTE saying so. A rig that used no CPU
+and wrote nothing in the last 60 s is killed at its limit. Either way the report
+of a killed rig ends with a diagnosis: STALLED (blocked: a deadlock or a wait
+with no timeout), BUSY (half a core or more: a spin) or SLOW (starved), with the
+process tree's CPU time, its last 60 s of it, and how long ago the log last grew.
+--timeout SECONDS is exact and never stretched.
 --timeout-scale (environment: EDVR_RIG_TIMEOUT_SCALE) multiplies every timeout,
 for a slow or heavily loaded machine; --timeout SECONDS (EDVR_RIG_TIMEOUT)
 replaces the rule with that one figure for every rig, and 0 turns timeouts off.
@@ -181,6 +192,21 @@ D3D11_LIB = re.compile(r"(?<![\w.-])d3d11\.lib(?![\w.-])", re.IGNORECASE)
 TIMEOUT_FLOOR = 180.0
 TIMEOUT_FACTOR = 3.0
 TIMEOUT_UNRECORDED = 900.0
+# A rig that reaches its limit while its process tree is still using CPU or
+# still printing is slow, not stuck (2026-10-15: eight CPU spinners and a WPR
+# trace left exposure_chain_test, a 2-17 s rig, 0.8 s of CPU in 160-220 s of wall
+# time, and killed two WARP rigs that were finishing). Such a rig is given
+# PROGRESS_WINDOW more seconds at a time, up to TIMEOUT_HARD_FACTOR x its limit.
+# One that used no CPU and printed nothing for a whole window is killed at its
+# limit as before, and the report says it was stalled. A spin or an infinite loop
+# is a rig that stays busy: it is killed at the hard limit, and the report says busy.
+TIMEOUT_HARD_FACTOR = 3.0
+PROGRESS_WINDOW = 60.0     # seconds of CPU and output history a rig at its limit is judged on
+PROGRESS_POLL = 5.0        # seconds between samples once a rig is within one window of its limit
+PROGRESS_MIN_RATE = 0.0005 # CPU seconds per second (0.05% of a core) below which a tree has stopped
+PROGRESS_MIN_SPAN = 0.5    # fraction of PROGRESS_WINDOW the samples must span before a quiet tree is called stalled
+BUSY_RATE = 0.5            # CPU seconds per second (half a core) from which a tree is "busy"
+RECORD_GROWTH = 2.0        # a rig's recorded time may rise at most this many times per run
 TIMEOUT_EXIT = 124         # the exit code a killed rig is recorded with (timeout(1)'s)
 TIMEOUT_TAIL_LINES = 40    # how much of a hung rig's output its report prints
 KILL_WAIT = 30             # seconds granted to taskkill, and to the tree to be gone
@@ -564,7 +590,248 @@ def kill_tree(process):
         pass
 
 
-def run_rig(title, command, cwd, env, log_path, limit):
+_CYCLES_PER_SECOND = []
+
+
+def cycles_per_second():
+    """How many CPU cycles one second of a busy core is, measured once by
+    spinning this process for ~15 ms and reading its own cycle count. Process
+    CPU time is read as cycles (QueryProcessCycleTime) and not as
+    GetProcessTimes: that one is sampled on the 15.6 ms clock tick, so a
+    process that wakes on a timer and works for a few ms between ticks is
+    charged nothing at all, and a starved rig would read as a stalled one."""
+    if not _CYCLES_PER_SECOND:
+        import ctypes
+        from ctypes import wintypes
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel.QueryProcessCycleTime.argtypes = [wintypes.HANDLE, ctypes.POINTER(ctypes.c_ulonglong)]
+        kernel.QueryProcessCycleTime.restype = wintypes.BOOL
+        me = kernel.GetCurrentProcess()
+        before, after = ctypes.c_ulonglong(), ctypes.c_ulonglong()
+        kernel.QueryProcessCycleTime(me, ctypes.byref(before))
+        began = time.perf_counter()
+        while time.perf_counter() - began < 0.015:
+            pass
+        elapsed = time.perf_counter() - began
+        kernel.QueryProcessCycleTime(me, ctypes.byref(after))
+        measured = (after.value - before.value) / elapsed
+        _CYCLES_PER_SECOND.append(measured if 5e8 < measured < 2e10 else 3e9)
+    return _CYCLES_PER_SECOND[0]
+
+
+def process_cpu_seconds(pid):
+    """CPU seconds (cycles / cycles_per_second) the live process `pid` has
+    used, or None (not Windows, not allowed, or already gone)."""
+    if os.name != "nt":
+        return None
+    import ctypes
+    from ctypes import wintypes
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel.OpenProcess.restype = wintypes.HANDLE
+    kernel.QueryProcessCycleTime.argtypes = [wintypes.HANDLE, ctypes.POINTER(ctypes.c_ulonglong)]
+    kernel.QueryProcessCycleTime.restype = wintypes.BOOL
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    handle = kernel.OpenProcess(0x1000, False, pid)      # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return None
+    try:
+        cycles = ctypes.c_ulonglong()
+        if not kernel.QueryProcessCycleTime(handle, ctypes.byref(cycles)):
+            return None
+        return cycles.value / cycles_per_second()
+    finally:
+        kernel.CloseHandle(handle)
+
+def process_parents():
+    """{pid: parent pid} for every process, from a toolhelp snapshot; None
+    where that cannot be had (not Windows, or the snapshot failed)."""
+    if os.name != "nt":
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    class ProcessEntry(ctypes.Structure):
+        _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD),
+                    ("th32ProcessID", wintypes.DWORD), ("th32DefaultHeapID", ctypes.c_size_t),
+                    ("th32ModuleID", wintypes.DWORD), ("cntThreads", wintypes.DWORD),
+                    ("th32ParentProcessID", wintypes.DWORD), ("pcPriClassBase", ctypes.c_long),
+                    ("dwFlags", wintypes.DWORD), ("szExeFile", ctypes.c_wchar * 260)]
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    kernel.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    kernel.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(ProcessEntry)]
+    kernel.Process32FirstW.restype = wintypes.BOOL
+    kernel.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(ProcessEntry)]
+    kernel.Process32NextW.restype = wintypes.BOOL
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    snapshot = kernel.CreateToolhelp32Snapshot(0x2, 0)    # TH32CS_SNAPPROCESS
+    if not snapshot or snapshot == ctypes.c_void_p(-1).value:
+        return None
+    try:
+        entry = ProcessEntry()
+        entry.dwSize = ctypes.sizeof(ProcessEntry)
+        parents = {}
+        more = kernel.Process32FirstW(snapshot, ctypes.byref(entry))
+        while more:
+            parents[entry.th32ProcessID] = entry.th32ParentProcessID
+            more = kernel.Process32NextW(snapshot, ctypes.byref(entry))
+        return parents
+    finally:
+        kernel.CloseHandle(snapshot)
+
+
+def tree_cpu_seconds(root, seen):
+    """CPU seconds `root` and all its descendants have used. `seen` ({pid:
+    seconds}, kept by the caller between calls) remembers each process's last
+    reading, so a child that has exited still counts and the total never goes
+    down. Returns (total, process count), or (None, 0) where CPU time cannot be
+    read at all."""
+    parents = process_parents()
+    if parents is None:
+        return None, 0
+    members, frontier = {root}, [root]
+    while frontier:
+        parent = frontier.pop()
+        for pid, ppid in parents.items():
+            if ppid == parent and pid not in members:
+                members.add(pid)
+                frontier.append(pid)
+    for pid in members:
+        seconds = process_cpu_seconds(pid)
+        if seconds is not None:
+            seen[pid] = max(seen.get(pid, 0.0), seconds)
+    return sum(seen.values()), len(seen)
+
+
+class Progress:
+    """What a running rig has been doing, sampled while it nears its limit:
+    the CPU its process tree has used (tree_cpu_seconds) and the size of its
+    log, each at a time since it started. `reader(seen)` is the CPU source
+    (tree_cpu_seconds for a real process; a test may pass its own)."""
+
+    def __init__(self, reader):
+        self.reader = reader
+        self.seen = {}
+        self.samples = []       # (elapsed, cpu seconds or None, log bytes)
+        self.processes = 0
+
+    def sample(self, elapsed, log_bytes):
+        cpu, self.processes = self.reader(self.seen)
+        self.samples.append((elapsed, cpu, log_bytes))
+
+    def recent(self, elapsed, window):
+        """(cpu seconds used, log bytes written, seconds spanned) over the last
+        `window` seconds of samples; cpu is None when it cannot be read, and
+        the span is 0 with fewer than two samples."""
+        if len(self.samples) < 2:
+            return None if not self.samples or self.samples[-1][1] is None else 0.0, 0, 0.0
+        last = self.samples[-1]
+        first = next((s for s in self.samples if s[0] >= elapsed - window), self.samples[0])
+        if first is last:
+            first = self.samples[-2]
+        cpu = None if last[1] is None or first[1] is None else last[1] - first[1]
+        return cpu, last[2] - first[2], last[0] - first[0]
+
+    def moving(self, elapsed, window):
+        """True when the rig used CPU or wrote output in the last `window`
+        seconds; False when it did neither; None when that cannot be told (no
+        CPU reading and no growth in the log)."""
+        cpu, written, span = self.recent(elapsed, window)
+        if written > 0:
+            return True
+        if cpu is None:
+            return None
+        if span < window * PROGRESS_MIN_SPAN:
+            return True     # too few samples to call a stall (the runner itself was starved): look again
+        return cpu / span >= PROGRESS_MIN_RATE
+
+
+def diagnose(progress, elapsed, window, log_age, last_line):
+    """The lines a killed rig's report carries to tell a stalled tree from a
+    busy one and from one that is only slow: its verdict first, then the figures
+    behind it."""
+    cpu, written, span = progress.recent(elapsed, window)
+    total = progress.samples[-1][1] if progress.samples else None
+    if cpu is None or (span < window * PROGRESS_MIN_SPAN and written <= 0):
+        verdict = ("UNKNOWN: %s, so a stall cannot be told from a starved rig"
+                   % ("CPU time could not be read" if cpu is None
+                      else "only %.1f s of samples were taken (the runner itself was starved)" % span))
+        figures = ("process tree CPU time: unavailable" if cpu is None else
+                   "process tree: %d process(es), %.1f s of CPU in %.0f s of wall time"
+                   % (progress.processes, total or 0.0, elapsed))
+    else:
+        rate = cpu / span
+        if written <= 0 and rate < PROGRESS_MIN_RATE:
+            verdict = ("STALLED: no CPU time used and nothing printed for %.0f s; the tree is blocked "
+                       "(a deadlock, or a wait with no timeout), not starved" % span)
+        elif rate >= BUSY_RATE:
+            verdict = ("BUSY: %.0f%% of a core for %.0f s, running past its limit; a spin or an "
+                       "infinite loop, unless this rig really is that long" % (rate * 100, span))
+        else:
+            verdict = ("SLOW: CPU time and output still advancing (%.2f%% of a core over %.0f s); "
+                       "starved or slow rather than blocked, but past its limit" % (rate * 100, span))
+        figures = ("process tree: %d process(es), %.1f s of CPU in %.0f s of wall time, "
+                   "+%.2f s in the last %.0f s (%.2f%% of a core), %d byte(s) written in that time"
+                   % (progress.processes, total or 0.0, elapsed, cpu, span, rate * 100, written))
+    if log_age is None:
+        seen = "no console log to date"
+    else:
+        seen = ("last console output %.0f s ago%s" % (log_age, ": " + last_line if last_line else ""))
+    return ["[edvr] TIMEOUT diagnosis: %s" % verdict,
+            "[edvr] TIMEOUT diagnosis: %s; %s (an exe that buffers its output shows none until it "
+            "exits, so judge a quiet log by the CPU figure)" % (figures, seen)]
+
+
+def wait_with_progress(process, limit, hard_limit, progress, log_path, window, poll, clock=time.monotonic):
+    """Wait for `process`, at most `limit` seconds (None: forever). At the
+    limit a process whose tree is still using CPU or writing to its log is
+    given `window` more seconds at a time, up to `hard_limit` (None: no
+    extending). Returns (exit code or None if it was not done by then, the
+    deadline that ended the wait, the extensions granted [(elapsed, text)])."""
+    if limit is None:
+        return process.wait(), None, []
+    started = clock()
+    deadline, extensions = float(limit), []
+
+    def log_bytes():
+        try:
+            return os.path.getsize(log_path)
+        except OSError:
+            return 0
+
+    sampling_from = max(0.0, limit - window)
+    if sampling_from == 0.0:
+        progress.sample(0.0, log_bytes())
+    while True:
+        elapsed = clock() - started
+        if elapsed < sampling_from:
+            nap = sampling_from - elapsed
+        else:
+            nap = min(poll, max(deadline - elapsed, 0.0))
+        try:
+            return process.wait(timeout=max(nap, 0.0)), deadline, extensions
+        except subprocess.TimeoutExpired:
+            pass
+        elapsed = clock() - started
+        if elapsed < sampling_from:
+            continue
+        progress.sample(elapsed, log_bytes())
+        if elapsed < deadline:
+            continue
+        if hard_limit is not None and deadline < hard_limit and progress.moving(elapsed, window):
+            cpu, written, span = progress.recent(elapsed, window)
+            deadline = min(float(hard_limit), elapsed + window)
+            extensions.append((elapsed, "+%.2f s CPU, %d byte(s) written in the last %.0f s"
+                               % (cpu or 0.0, written, span)))
+            continue
+        return None, deadline, extensions
+
+
+def run_rig(title, command, cwd, env, log_path, limit, hard_limit=None, window=None, poll=None,
+            reader=tree_cpu_seconds):
     """Run one job's command with its combined output streamed into log_path
     as it is written -- the child holds the file, not a pipe the runner
     reads, so partial output is on disk while it runs and a grandchild that
@@ -572,32 +839,58 @@ def run_rig(title, command, cwd, env, log_path, limit):
     temporary file stands in when log_path is None.
 
     Past `limit` seconds (None: no limit) the child's whole process tree is
-    killed. Returns (exit code, output, limit_hit): limit_hit is `limit` for a
-    rig that ran past it, whose exit code is TIMEOUT_EXIT and whose output ends
-    with a line saying so and where the whole log is; None otherwise."""
+    killed, unless its tree is still using CPU or printing and `hard_limit`
+    allows more time (wait_with_progress); a rig that ran long and then
+    finished carries a NOTE saying so. Returns (exit code, output, limit_hit):
+    limit_hit is the deadline a killed rig ran past, whose exit code is
+    TIMEOUT_EXIT and whose output ends with lines saying so, where the whole
+    log is, and whether the tree was stalled, busy or only slow; None
+    otherwise."""
+    window = PROGRESS_WINDOW if window is None else window
+    poll = PROGRESS_POLL if poll is None else poll
     scratch = log_path is None
     if scratch:
         handle, log_path = tempfile.mkstemp(prefix="edvr-rig-", suffix=".txt")
         os.close(handle)
     limit_hit = None
+    notes = []
     try:
+        started = time.monotonic()
         with open(log_path, "wb") as log:
             process = subprocess.Popen(command, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
                                        stdout=log, stderr=subprocess.STDOUT,
                                        **child_process_kwargs())
-            try:
-                code = process.wait(timeout=limit)
-            except subprocess.TimeoutExpired:
+            progress = Progress(lambda seen: reader(process.pid, seen))
+            code, deadline, extensions = wait_with_progress(process, limit, hard_limit, progress,
+                                                            log_path, window, poll)
+            if code is None:
+                # Read the tree before it is killed: the figures are the evidence.
+                progress.sample(time.monotonic() - started, os.path.getsize(log_path))
+                elapsed = time.monotonic() - started
+                try:
+                    log_age = max(0.0, time.time() - os.path.getmtime(log_path))
+                except OSError:
+                    log_age = None
                 kill_tree(process)
-                limit_hit, code = limit, TIMEOUT_EXIT
+                limit_hit, code = deadline, TIMEOUT_EXIT
         with open(log_path, "rb") as log:
             output = log.read()
+        if extensions:
+            notes.append("[edvr] NOTE: %s ran past its %d s limit with its process tree still moving "
+                         "(%s) and was given more time%s\n"
+                         % (title, limit, "; ".join("at %.0f s: %s" % item for item in extensions),
+                            "; the runner killed it at the hard limit" if limit_hit is not None
+                            else "; it finished"))
         if limit_hit is not None:
+            lines = [line for line in output.decode("utf-8", "replace").splitlines() if line.strip()]
+            last_line = lines[-1].strip()[:120] if lines else ""
             output += b"\n" if output and not output.endswith(b"\n") else b""
             output += ("[edvr] TIMEOUT: %s was still running after %d s; the runner killed its "
                        "process tree.%s\n" % (title, limit_hit,
                                               "" if scratch else " Its whole log: %s" % log_path)
                        ).encode("utf-8", "replace")
+            notes += [line + "\n" for line in diagnose(progress, elapsed, window, log_age, last_line)]
+        output += "".join(notes).encode("utf-8", "replace")
     finally:
         if scratch:
             try:
@@ -755,18 +1048,27 @@ def focus_error(findings):
             "tools\\focus_watch.py finds them again.\n" % (len(findings), ", ".join(exes), ", ".join(jobs)))
 
 
-def spawner(script, root, env, exe_dir=None, timeout_for=None, localappdata=None):
+def hard_timeout(limit):
+    """The most a rig that is still moving at `limit` seconds may be given:
+    TIMEOUT_HARD_FACTOR x its limit; None for no limit."""
+    return None if limit is None else limit * TIMEOUT_HARD_FACTOR
+
+
+def spawner(script, root, env, exe_dir=None, timeout_for=None, localappdata=None, extend=False):
     """spawn(job) for run_group: runs the job's `build.bat --rig` child and
     returns (exit code, output, limit_hit) as run_rig does, under the
-    timeout timeout_for(job) names (a function of the job; None: none). The
-    child runs under localappdata when one is given (rig_localappdata)."""
+    timeout timeout_for(job) names (a function of the job; None: none). With
+    `extend`, a rig still using CPU or printing at its timeout is given more
+    time, up to hard_timeout of it. The child runs under localappdata when one
+    is given (rig_localappdata)."""
     def spawn(job):
         if exe_dir is not None:
             # Log::open and the sentinel create one level; this is two.
             os.makedirs(log_dir(exe_dir, job), exist_ok=True)
         limit = timeout_for(job) if timeout_for is not None else None
         return run_rig(job.title, child_command(script, job.rig.label), str(root),
-                       child_env(env, job, exe_dir, localappdata), rig_log_path(exe_dir, job), limit)
+                       child_env(env, job, exe_dir, localappdata), rig_log_path(exe_dir, job), limit,
+                       hard_limit=hard_timeout(limit) if extend else None)
     return spawn
 
 
@@ -987,9 +1289,23 @@ def load_times(path):
         return {}
 
 
+def recorded_seconds(old, seconds):
+    """The time to record for a rig that took `seconds` after `old`: a rise is
+    held to RECORD_GROWTH x the old record. The record sets the rig's timeout
+    and its place in the order, and one run on a loaded machine (a 12 s rig that
+    took 183 s while eight CPU spinners ran) must not make that rig's limit
+    nine minutes for the next ten builds; a rig that really grew gets there in
+    a few runs, and a rig that got faster is recorded at once."""
+    if isinstance(old, (int, float)) and not isinstance(old, bool) and math.isfinite(old) and old > 0:
+        return min(seconds, old * RECORD_GROWTH)
+    return seconds
+
+
 def save_times(path, times, results):
     merged = dict(times)
-    merged.update({job.key: round(seconds, 2) for job, code, seconds, *_ in results if code == 0})
+    for job, code, seconds, *_ in results:
+        if code == 0:
+            merged[job.key] = round(recorded_seconds(times.get(job.key), seconds), 2)
     path.write_text(json.dumps(merged, indent=1, sort_keys=True) + "\n", encoding="utf-8")
 
 
@@ -1028,8 +1344,9 @@ def describe_timeouts(scale=1.0, override=None):
         return "rig timeouts are off" if override <= 0 else \
             "each rig is killed if it runs past %g s" % override
     return ("each rig is killed if it runs past max(%g s, %gx its last time), %g s with no "
-            "record%s" % (TIMEOUT_FLOOR, TIMEOUT_FACTOR, TIMEOUT_UNRECORDED,
-                          "" if scale == 1.0 else ", all times %g" % scale))
+            "record%s; one still using CPU or printing then gets more time, up to %gx the limit"
+            % (TIMEOUT_FLOOR, TIMEOUT_FACTOR, TIMEOUT_UNRECORDED,
+               "" if scale == 1.0 else ", all times %g" % scale, TIMEOUT_HARD_FACTOR))
 
 
 def run(script, jobs, mp, quiet, times_path, dry_run, out, spawn=None, clock=time.monotonic,
@@ -1067,9 +1384,11 @@ def run(script, jobs, mp, quiet, times_path, dry_run, out, spawn=None, clock=tim
         def timeout_for(job):
             return rig_timeout(job, times, timeout_scale, timeout_override)
 
-        spawn = spawner(script, script.parent, env, exe_dir, timeout_for, rig_root)
+        # --timeout names one figure for every rig, and is kept exactly; the rule's limits can stretch.
+        extend = timeout_override is None
+        spawn = spawner(script, script.parent, env, exe_dir, timeout_for, rig_root, extend)
         # A quiet rig has the machine to itself, so its compiles may use every core.
-        quiet_spawn = spawner(script, script.parent, dict(env, CL="/MP"), exe_dir, timeout_for, rig_root)
+        quiet_spawn = spawner(script, script.parent, dict(env, CL="/MP"), exe_dir, timeout_for, rig_root, extend)
     watch = start_focus_guard(focus, out)
     try:
         started = clock()
@@ -1795,6 +2114,140 @@ def scratch_dir(prefix):
         shutil.rmtree(path, ignore_errors=True)
 
 
+class FakeClock:
+    """A clock a test moves by hand, and a stand-in process whose wait() moves it."""
+
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+
+class FakeProcess:
+    """wait(timeout) advances `clock` by the timeout and raises TimeoutExpired,
+    until `finishes_at`, when it returns exit code 0. `on_wait` runs on each call."""
+
+    def __init__(self, clock, finishes_at=None, on_wait=None):
+        self.clock, self.finishes_at, self.on_wait = clock, finishes_at, on_wait
+
+    def wait(self, timeout=None):
+        end = self.clock.now + (timeout if timeout is not None else 1e9)
+        if self.on_wait is not None:
+            self.on_wait()
+        if self.finishes_at is not None and self.finishes_at <= end:
+            self.clock.now = max(self.clock.now, self.finishes_at)
+            return 0
+        self.clock.now = end
+        raise subprocess.TimeoutExpired("fake", timeout)
+
+
+def self_test_progress(check):
+    """The recorded-time clamp, and the wait that tells a stalled rig from a
+    busy one and from one that is only starved (2026-10-15), on a fake clock:
+    no real process and no real time pass here."""
+    # --- the record may rise 2x per run, fall at once ---------------------------
+    check(recorded_seconds(None, 183.4) == 183.4 and recorded_seconds("junk", 5.0) == 5.0
+          and recorded_seconds(0.0, 5.0) == 5.0 and recorded_seconds(True, 9.0) == 9.0,
+          "a rig with no usable record is recorded as it ran")
+    check(recorded_seconds(12.0, 183.4) == 24.0 and recorded_seconds(12.0, 20.0) == 20.0
+          and recorded_seconds(157.7, 12.0) == 12.0,
+          "a rise is held to 2x the old record; a fall and a small rise are recorded as they are")
+    with tempfile.TemporaryDirectory() as scratch:
+        path = Path(scratch) / "rig_times.json"
+        rig = Rig("alpha", 1)
+        save_times(path, {"alpha": 12.0, "beta": 7.0}, [(Job(rig), 0, 183.4, b""), (Job(Rig("beta", 1)), 1, 99.0, b"")])
+        check(load_times(path) == {"alpha": 24.0, "beta": 7.0},
+              "save_times holds a loaded run to 2x the record and keeps a failed rig's old record: %r" % load_times(path))
+
+    # --- the wait, on a fake clock: limit 100 s, hard limit 300 s, window 60 s ----
+    def wait(cpu_at, finishes_at=None, hard=300.0, limit=100.0, grow_log=False):
+        clock = FakeClock()
+        log = tempfile.NamedTemporaryFile(delete=False)
+        log.close()
+
+        def grow():
+            if grow_log:
+                with open(log.name, "ab") as handle:
+                    handle.write(b"x")
+        process = FakeProcess(clock, finishes_at, grow)
+        progress = Progress(lambda seen: (cpu_at(clock.now), 1))
+        try:
+            got = wait_with_progress(process, limit, hard, progress, log.name, 60.0, 5.0, clock)
+        finally:
+            os.unlink(log.name)
+        return got + (progress, clock.now)
+
+    code, deadline, extensions, progress, _ = wait(lambda t: 0.4)
+    check(code is None and deadline == 100.0 and extensions == [] and progress.moving(100.0, 60.0) is False,
+          "no CPU and no output in the window: killed at the limit, not extended: %r" % ((code, deadline, extensions),))
+    code, deadline, extensions, progress, _ = wait(lambda t: t)
+    check(code is None and deadline == 300.0 and len(extensions) >= 3,
+          "a rig that stays busy is extended in windows to the hard limit, then killed: %r" % ((code, deadline, len(extensions)),))
+    code, deadline, extensions, progress, _ = wait(lambda t: 0.005 * t, finishes_at=185.0)
+    check(code == 0 and extensions and deadline < 300.0,
+          "a starved rig (0.5%% of a core) that finishes after its limit is allowed to: %r" % ((code, deadline, extensions),))
+    code, deadline, extensions, progress, _ = wait(lambda t: t, hard=None)
+    check(code is None and deadline == 100.0 and extensions == [],
+          "with no hard limit (--timeout) a busy rig is killed at the limit")
+    code, deadline, extensions, progress, _ = wait(lambda t: 0.4, grow_log=True)
+    check(code is None and deadline == 300.0 and extensions,
+          "output still growing counts as moving even with no CPU: %r" % ((code, deadline),))
+    code, deadline, extensions, progress, _ = wait(lambda t: None)
+    check(code is None and deadline == 100.0 and progress.moving(100.0, 60.0) is None,
+          "CPU time that cannot be read and a silent log: not extended (the stall cannot be disproved)")
+    code, deadline, extensions, progress, _ = wait(lambda t: 0.0, finishes_at=30.0, limit=None)
+    check(code == 0 and deadline is None, "no limit at all: waits for the end")
+    code, deadline, extensions, progress, now = wait(lambda t: 0.0, limit=100.0, finishes_at=20.0)
+    check(code == 0 and extensions == [] and now == 20.0, "a rig that finishes in time is untouched")
+
+    # --- the diagnosis tells the three apart ----------------------------------------
+    def verdict(cpu_at, written_per_s=0):
+        progress = Progress(lambda seen: (cpu_at(seen["t"]), 3))
+        progress.seen["t"] = 0
+        for t in range(0, 101, 5):
+            progress.seen["t"] = t
+            progress.sample(float(t), int(t * written_per_s))
+        return "\n".join(diagnose(progress, 100.0, 60.0, 97.0, "last words"))
+
+    stalled = verdict(lambda t: 0.4)
+    check("STALLED" in stalled and "deadlock" in stalled and "last console output 97 s ago: last words" in stalled
+          and "+0.00 s in the last 60 s" in stalled and "3 process(es)" in stalled,
+          "a tree with no CPU and no output reads as STALLED, with the last line and its age: %r" % stalled)
+    busy = verdict(lambda t: 1.0 * t)
+    check("BUSY" in busy and "100% of a core" in busy and "STALLED" not in busy,
+          "a tree using a core reads as BUSY: %r" % busy)
+    slow = verdict(lambda t: 0.005 * t)
+    check("SLOW" in slow and "starved" in slow and "0.50% of a core" in slow and "STALLED" not in slow,
+          "a tree using 0.5%% of a core reads as SLOW: %r" % slow)
+    quiet_but_writing = verdict(lambda t: 0.4, written_per_s=10)
+    check("SLOW" in quiet_but_writing and "STALLED" not in quiet_but_writing,
+          "output still growing is not a stall: %r" % quiet_but_writing)
+    unknown = verdict(lambda t: None)
+    check("UNKNOWN" in unknown and "unavailable" in unknown, "unreadable CPU time is said to be unknown: %r" % unknown)
+    check("no console log to date" in "\n".join(diagnose(Progress(lambda seen: (0.0, 1)), 5.0, 60.0, None, "")),
+          "no log file is said so")
+
+    if os.name == "nt":
+        seen = {}
+        total, count = tree_cpu_seconds(os.getpid(), seen)
+        check(total is not None and total > 0 and count >= 1 and seen.get(os.getpid(), 0) > 0,
+              "the tree reader sees this process's CPU time: %r %r" % (total, count))
+        parent = subprocess.Popen([sys.executable, "-c",
+                                   "import subprocess, sys, time\n"
+                                   "c = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+                                   "time.sleep(30)\n"], **child_process_kwargs())
+        try:
+            deadline = time.monotonic() + 20
+            counts = 0
+            while time.monotonic() < deadline and counts < 2:
+                time.sleep(0.1)
+                total, counts = tree_cpu_seconds(parent.pid, {})
+            check(counts >= 2, "the tree reader finds a child's child, not only the child: %r" % counts)
+        finally:
+            kill_tree(parent)
+
+
 def self_test_timeouts(check):
     """The per-rig timeout, the rig log, the tree kill and the job object
     (architecture review 2026-09-29, I-5). Everything with a real process is
@@ -1838,6 +2291,12 @@ def self_test_timeouts(check):
     check("max(180 s, 3x its last time), 900 s with no record" in text and "all times" not in text
           and "all times 2" in describe_timeouts(2.0) and describe_timeouts(1.0, 0) == "rig timeouts are off"
           and "past 60 s" in describe_timeouts(1.0, 60), "the header line says what the timeouts are: %r" % text)
+
+    check("up to 3x the limit" in text and "more time" in text,
+          "the header line says a rig that is still moving gets more time: %r" % text)
+    check(hard_timeout(180.0) == 540.0 and hard_timeout(None) is None and hard_timeout(243.0) == 729.0,
+          "a rig that is still moving may run to 3x its limit; no limit, no hard limit")
+    self_test_progress(check)
 
     def env_of(name, value, function, *args):
         old = os.environ.get(name)
@@ -2161,6 +2620,58 @@ def self_test_timeouts(check):
             recorded = seen["recorded"]
             check("hang" not in recorded and "ok" in recorded,
                   "a killed rig records no time; the rig that passed does: %r" % recorded)
+
+            # A rig at its limit that is only starved is let finish; one that is stalled or
+            # spinning is killed, and the report says which (2026-10-15: two WARP rigs were
+            # killed at 180-243 s that finish in 3 s when the machine is free). Four toy
+            # rigs run at once, each a python child with a 1 s limit and a 3 s hard limit:
+            #   stalled  sleeps and does nothing        -> killed, STALLED
+            #   spinner  loops without end              -> killed at the hard limit, not STALLED
+            #   starved  does ~5 ms of work per 50 ms   -> finishes at ~2.2 s, allowed, with a NOTE
+            #   exact    spins, under --timeout's rule  -> killed at 1 s (no hard limit)
+            toys = {
+                "stalled": ("import time; time.sleep(60)", 1.0, 3.0),
+                "spinner": ("print('spinning', flush=True)\nwhile True: pass", 1.0, 3.0),
+                "starved": ("import time\nend = time.time() + 2.2\n"
+                            "while time.time() < end:\n    time.sleep(0.05)\n    sum(range(300000))\n"
+                            "print('starved but done', flush=True)", 1.0, 20.0),
+                "exact": ("while True: pass", 1.0, None),
+            }
+            toy_results = {}
+
+            def run_toy(name):
+                program, limit, hard = toys[name]
+                begun = time.monotonic()
+                toy_results[name] = run_rig("toy " + name, [sys.executable, "-c", program], str(root),
+                                            dict(os.environ), None, limit, hard_limit=hard,
+                                            window=0.6, poll=0.1) + (time.monotonic() - begun,)
+            toy_threads = [threading.Thread(target=run_toy, args=(name,), daemon=True) for name in toys]
+            for thread in toy_threads:
+                thread.start()
+            for thread in toy_threads:
+                thread.join(120)
+            check(len(toy_results) == len(toys), "every toy rig returned: %r" % sorted(toy_results))
+            if len(toy_results) == len(toys):
+                code, output, hit, took = toy_results["stalled"]
+                text = output.decode("utf-8", "replace")
+                check(code == TIMEOUT_EXIT and hit is not None and "TIMEOUT diagnosis: STALLED" in text
+                      and "toy stalled was still running after" in text and "last console output" in text
+                      and "+0.00 s in the last" in text,
+                      "a rig that sleeps is killed and reported STALLED, with CPU progress and its last output: %r" % text)
+                code, output, hit, took = toy_results["spinner"]
+                text = output.decode("utf-8", "replace")
+                check(code == TIMEOUT_EXIT and hit == 3.0 and "STALLED" not in text and "TIMEOUT diagnosis:" in text
+                      and "NOTE: toy spinner ran past its 1 s limit" in text and "killed it at the hard limit" in text,
+                      "a rig that spins is given more time, killed at the hard limit, and is not called stalled: %r" % text)
+                code, output, hit, took = toy_results["starved"]
+                text = output.decode("utf-8", "replace")
+                check(code == 0 and hit is None and "starved but done" in text
+                      and "NOTE: toy starved ran past its 1 s limit" in text and "it finished" in text,
+                      "a rig that is slow but moving finishes past its limit, with a NOTE: %r" % text)
+                code, output, hit, took = toy_results["exact"]
+                text = output.decode("utf-8", "replace")
+                check(code == TIMEOUT_EXIT and hit == 1.0 and "NOTE:" not in text and took < 3.0 + KILL_WAIT,
+                      "with no hard limit (--timeout) the limit is exact: %r" % text)
 
             # The stand-in runner, started above, is judged now.
             first = runner.stdout.readline().strip()

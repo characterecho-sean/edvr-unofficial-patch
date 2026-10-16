@@ -385,6 +385,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   bool seatPressLogged=false;HmdPressStatus seatPressLoggedStatus=HmdPressStatus::Unpublished;uint32_t seatPressSeq=0;
   uint64_t seatNoPressAt=0;bool seatLatePressPending=false;uint64_t seatLateAfterMs=0;     // a reset answered "no press" and a press arrived just after
   uint64_t seatLatePressAt=0;unsigned seatLatePressDrops=0;     // when the pending late press was found (its retry clock), and how many were dropped unapplied
+  uint64_t seatResetEpoch=0,seatLatePressEpoch=0,seatLatePressGeneration=0;     // seated origins set so far; the count and the geometry generation the pending press was found under
   uint64_t localHandled=0;     // LOCAL reference-space changes (referenceChanges counts each as it takes effect) the seat memory has answered
   // Declared before boundary: boundary's constructor stores its address, and
   // it must already exist to be bound (native_frame's own reset() sequence
@@ -2724,7 +2725,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       lastResetResult=XR_ERROR_LIMIT_REACHED;return false;
     }
     fillPollRing();
-    ++recenters;return true;
+    ++recenters;++seatResetEpoch;return true;
   }
   // intro_panel.cpp's one-shot ask (frame_flag.h, requestIntroRecentre):
   // recentre the seated origin to the CURRENT head pose the moment the
@@ -2817,6 +2818,21 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     nativeTracePrintf("seat_late_press,action=dropped,why=%s,age_ms=%llu,retry_ms=%llu\n",why,
         (unsigned long long)(now>=seatLatePressAt?now-seatLatePressAt:0),(unsigned long long)kLatePressRetryMs);
   }
+  // Why the pending late press no longer applies, or null while it still does. It corrects ONE reset (the one it was found after), under one
+  // geometry, in keep mode, with the player seated or on foot-as-seated; anything that changes those retires it:
+  //   superseded_by_reset  a newer origin was set (a later reset the game made, the stored seat applied, a runtime recentre): the press is that
+  //                        newer reset's business, and retrying would recentre again on a later head pose with no reset call
+  //   geometry_changed     the session restarted or the geometry was republished
+  //   game_mode            the seat memory went out of keep mode (profile switch, key off, graphics half silent): a game reset passes through
+  //   left_seat            into a menu or a load, where the game's resets pass through
+  const char* seatLatePressStale() const {
+    if(!seatLatePressPending)return nullptr;
+    if(seatResetEpoch!=seatLatePressEpoch)return "superseded_by_reset";
+    if(geometryGeneration!=seatLatePressGeneration)return "geometry_changed";
+    if(!seat.keep())return "game_mode";
+    if(!seatHolds(seat.where()))return "left_seat";
+    return nullptr;
+  }
   // Take the graphics half's word and let the memory decide. Called every WaitGetPoses and before a reset is classified, so a change this
   // frame is seen first. A transition (a window opening, an apply due) is a line of its own.
   void seatSync(uint64_t now) {
@@ -2844,10 +2860,11 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       if(pr.seq!=seatPressSeq) {
         seatPressSeq=pr.seq;
         // A press the frame poll saw just AFTER a reset it was not there for: the game's call beat the poll, and that reset was the player's.
-        if(seat.takeLatePress(now)){seatLatePressPending=true;seatLatePressAt=now;seatLateAfterMs=now-seatNoPressAt;}
+        if(seat.takeLatePress(now)){seatLatePressPending=true;seatLatePressAt=now;seatLateAfterMs=now-seatNoPressAt;seatLatePressEpoch=seatResetEpoch;seatLatePressGeneration=geometryGeneration;}
       }
     }
     if(ev.windowOpened&&seatLatePressPending)seatDropLatePress(now,"transition");     // the window's own seat replaces whatever the press was for
+    if(const char* stale=seatLatePressStale())seatDropLatePress(now,stale);
     if(ev.discardedPending) {
       seatRetroPending=true;seatRetroAgeMs=ev.discardAgeMs;
       nativeTracePrintf("seat_store,action=discard_pending,why=transition_within_%llus,age_ms=%llu,transition=%s,discarded=%.3f/%.3f/%.3f/%.1f,restored=%.3f/%.3f/%.3f/%.1f\n",
@@ -3111,8 +3128,10 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     }
     // A late press (the player's recentre the game's reset beat the poll to) stays pending until its correction is APPLIED. A poll that cannot
     // act now (a frame is open, the head will not locate, the reset is rejected) leaves it for the next one, so a transient failure does not cost
-    // the player their press. Bounded: it is dropped, with one log line, once it is older than kLatePressRetryMs (this check runs first, so an
-    // open frame cannot keep it alive either), or when a transition window opens (seatSync): that transition's own seat supersedes it.
+    // the player their press. It is bound to the reset it corrects (seatResetEpoch, geometry generation, keep mode, seat context: see
+    // seatLatePressStale) and dropped, with one log line, when any of those change, when a transition window opens (seatSync), or once it is
+    // older than kLatePressRetryMs. These checks run first, so an open frame cannot keep it alive either.
+    if(const char* stale=seatLatePressStale())seatDropLatePress(now,stale);
     if(seatLatePressPending&&now>=seatLatePressAt&&now-seatLatePressAt>kLatePressRetryMs)seatDropLatePress(now,"expired");
     if(seatLatePressPending&&!state.frameOpen()&&changes.active()) {
       XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};

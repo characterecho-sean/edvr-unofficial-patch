@@ -194,6 +194,59 @@ template<class Check> void runSeatOrderCases(Check&& check) {
     r.f.fake.locateResult=XR_SUCCESS;
     check(!h.seatPoll()&&h.seat.seat().x==1.0,"late press supersede: the dropped press is not applied afterwards");
   }
+  // The retry is bound to the reset it corrects (review follow-up of main 4bd06f12, F1; scratch repro seat_supersession_repro.cpp).
+  {   // a later SUCCESSFUL reset retires it: the next poll must not recentre again on a newer head pose
+    Rig r(true);auto& h=r.h;
+    armLatePress(r);
+    r.f.fake.locateResult=XR_ERROR_TIME_INVALID;
+    check(!h.seatPoll()&&h.seatLatePressPending,"late press supersession: pending after a failed poll");
+    r.f.fake.locateResult=XR_SUCCESS;
+    r.f.fake.head.position.x=3;
+    XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
+    head.locationFlags=launch_fixture::tracked;head.pose=r.f.fake.head;
+    h.seatTraceDecision="honour_press";
+    const bool reset=h.applySeatedReset(head,"seated_reset",true);
+    if(reset)h.seat.noteReset(SeatResetDecision::HonourPress,h.currentOrigin,GetTickCount64());
+    check(reset&&h.currentOrigin.x==3.0,"late press supersession: the later reset set the origin at the head (x=3)");
+    r.f.fake.head.position.x=4;     // the head moves on
+    const unsigned creates=r.f.fake.creates;
+    check(!h.seatPoll()&&h.currentOrigin.x==3.0&&r.f.fake.creates==creates,"late press supersession: the next poll makes no second recentre on the newer head pose");
+    check(!h.seatLatePressPending&&h.seatLatePressDrops==1,"late press supersession: the request was dropped, once");
+  }
+  {   // keep mode ends (a profile switch, the key off): the retry must not apply or save under game mode
+    Rig r(true);auto& h=r.h;
+    armLatePress(r);
+    r.f.fake.locateResult=XR_ERROR_TIME_INVALID;
+    check(!h.seatPoll()&&h.seatLatePressPending,"late press mode switch: pending after a failed poll");
+    SeatContext game{};game.published=true;game.keep=false;game.gameplay=true;game.seatedKnown=game.seated=true;
+    publishSeatContext(encodeSeatContext(game));
+    h.seatSync(GetTickCount64());
+    r.f.fake.locateResult=XR_SUCCESS;
+    const unsigned creates=r.f.fake.creates;
+    check(!h.seat.keep()&&!h.seatLatePressPending&&h.seatLatePressDrops==1,"late press mode switch: keep to game mode drops the request");
+    check(!h.seatPoll()&&h.currentOrigin.x==1.0&&h.seat.seat().x==1.0&&r.f.fake.creates==creates,"late press mode switch: no recentre and no save followed");
+  }
+  {   // the seat context leaves the cockpit (a menu or a load), where the game's resets pass through
+    Rig r(true);auto& h=r.h;
+    armLatePress(r);
+    r.f.fake.locateResult=XR_ERROR_TIME_INVALID;
+    check(!h.seatPoll()&&h.seatLatePressPending,"late press left seat: pending after a failed poll");
+    SeatContext menu{};menu.published=true;menu.keep=true;     // neither seated nor on foot
+    publishSeatContext(encodeSeatContext(menu));
+    h.seatSync(GetTickCount64());
+    r.f.fake.locateResult=XR_SUCCESS;
+    check(!h.seatLatePressPending&&h.seatLatePressDrops==1&&!h.seatPoll()&&h.seat.seat().x==1.0,"late press left seat: a menu or load drops the request, and nothing is applied");
+  }
+  {   // the geometry is republished (a session restart)
+    Rig r(true);auto& h=r.h;
+    armLatePress(r);
+    r.f.fake.locateResult=XR_ERROR_TIME_INVALID;
+    check(!h.seatPoll()&&h.seatLatePressPending,"late press geometry: pending after a failed poll");
+    ++h.geometryGeneration;
+    r.f.fake.locateResult=XR_SUCCESS;
+    const unsigned creates=r.f.fake.creates;
+    check(!h.seatPoll()&&!h.seatLatePressPending&&h.seatLatePressDrops==1&&r.f.fake.creates==creates,"late press geometry: a new geometry generation drops the request");
+  }
   publishSeatContext(0);publishHmdResetPress(0,0);     // leave the shared words as found
 
   SetEnvironmentVariableW(L"LOCALAPPDATA",hadPrevious&&hadPrevious<MAX_PATH?previous:nullptr);

@@ -290,7 +290,8 @@ constexpr uint64_t kPressWindowMs = 1000;     // a press up to this long before 
 constexpr uint64_t kLatePressMs = 300;        // a press seen up to this long AFTER a reset answered "none": the frame poll lost the race with the game
 // A late press the host has found but could not yet apply (the head would not locate, or the reset was rejected) is retried every poll for up to
 // this long, then dropped. 1 s is a few dozen frames: it rides out a transient locate or queue failure, and it is well inside kRetroMs, so a
-// retried press never lands after the retro hold on the seat it replaced has already been written off. A transition window supersedes it sooner.
+// retried press never lands after the retro hold on the seat it replaced has already been written off. It is also retired sooner by a transition
+// window, a later successful reset, a geometry change, or leaving keep mode or the cockpit (NativeRuntimeHost::seatLatePressStale).
 constexpr uint64_t kLatePressRetryMs = 1000;
 struct PressInfo {
   PressState state = PressState::Unobservable;

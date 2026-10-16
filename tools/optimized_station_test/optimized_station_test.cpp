@@ -2675,6 +2675,38 @@ int main(int argc, char** argv) {
         in.nowMs = 300;
         check(se::sealStep(in, &st, &w) == se::SealAction::kRequestEngage, "transition (h): the r1 out-then-in edge after a Lift release re-seals at once, inside the hold");
     }
+    {
+        // (i) review follow-up of main 4bd06f12, F2 (scratch repro repro_transition.cpp): a Lift release, r1 out, THEN an origin shift while unsealed, then r1 back in.
+        // The edge exemption belongs to the Lift hold; the later origin-shift hold (a boarding or a disembark whose Status.json seat still reads aboard) must still apply.
+        se::SealState st;
+        se::ReleaseWhy w = se::ReleaseWhy::kNone;
+        se::SealInputs in = inHangar(0);
+        se::sealStep(in, &st, &w);
+        in.held = true;
+        in.mechanismMoved = true;
+        in.nowMs = 100;
+        check(se::sealStep(in, &st, &w) == se::SealAction::kRelease && w == se::ReleaseWhy::kMechanism, "transition (i): the Lift release");
+        in.held = false;
+        in.mechanismMoved = false;
+        in.inHangar = false;
+        in.nowMs = 200;
+        se::sealStep(in, &st, &w);
+        check(st.reseal == 2, "transition (i): r1 out leaves the edge pending");
+        in.originShifted = true;
+        in.nowMs = 210;
+        se::sealStep(in, &st, &w);
+        check(st.holdUntilMs == 210 + se::kTransitionHoldMs, "transition (i): the origin shift starts a new hold");
+        in.originShifted = false;
+        in.inHangar = true;
+        in.nowMs = 300;
+        check(se::sealStep(in, &st, &w) == se::SealAction::kNone && st.holdBlocked && !st.requested,
+              "transition (i): r1 back in inside the origin-shift hold does NOT re-seal on the old edge");
+        in.nowMs = 210 + se::kTransitionHoldMs - 1;
+        check(se::sealStep(in, &st, &w) == se::SealAction::kNone, "transition (i): still held a millisecond before the hold ends");
+        in.nowMs = 210 + se::kTransitionHoldMs;
+        check(se::sealStep(in, &st, &w) == se::SealAction::kRequestEngage, "transition (i): the seal is requested when the origin-shift hold ends");
+    }
+
 
     // ---- Built 2026-10-15: the anomaly-armed seal trace (station_seal_trace.h): the ring, the four triggers, the dump's shape, the cap and spacing, the bound ----
     {

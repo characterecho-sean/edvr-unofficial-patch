@@ -34,6 +34,7 @@ namespace {
 
 int g_checks = 0;
 int g_failures = 0;
+constexpr ULONGLONG kStatsWaitMs = 120000;   // one pipeline-statistics query, on WARP, on a machine that may be starved
 
 void check(bool ok, const char* what) {
     ++g_checks;
@@ -571,6 +572,22 @@ struct Pipe {
         return chain.onDispatch(f, active, confirmed);
     }
 
+    // The query is polled, never waited on without a bound: this loop was `while (GetData == S_FALSE) Flush();`, which a
+    // query that does not complete (a WARP worker starved of CPU for minutes, or lost) turned into a rig that spun until
+    // the build runner killed it. It yields each pass so the WARP worker it waits for can run on a loaded machine; the
+    // deadline is long enough that starvation passes and short enough that a lost query fails here, by name.
+    bool waitForStats(D3D11_QUERY_DATA_PIPELINE_STATISTICS& s) {
+        const ULONGLONG began = GetTickCount64();
+        for (;;) {
+            const HRESULT hr = ctx->GetData(stats.Get(), &s, sizeof(s), 0);
+            if (hr == S_OK) return true;
+            if (hr != S_FALSE) return false;
+            if (GetTickCount64() - began >= kStatsWaitMs) return false;
+            ctx->Flush();
+            SwitchToThread();
+        }
+    }
+
     void frame(float l0, float l1, bool active, bool confirmed) {
         if (statsOk) ctx->Begin(stats.Get());
         float lum[2] = {l0, l1};
@@ -632,8 +649,13 @@ struct Pipe {
         if (statsOk) {
             ctx->End(stats.Get());
             D3D11_QUERY_DATA_PIPELINE_STATISTICS s{};
-            while (ctx->GetData(stats.Get(), &s, sizeof(s), 0) == S_FALSE) ctx->Flush();
-            csInvocations += s.CSInvocations;
+            if (waitForStats(s)) {
+                csInvocations += s.CSInvocations;
+            } else {
+                // Not a hang: the count is dropped (the check on it below is skipped) and the failure is named.
+                check(false, "the pipeline-statistics query completed within its deadline");
+                statsOk = false;
+            }
         }
     }
 };
