@@ -2348,6 +2348,61 @@ int wmain(int argc, wchar_t** argv) {
                           std::fabs(len3(oL) - R[0]) < 1e-6,
                       "F65a: with both shoulders out of reach the correction satisfies both; with one arm measured, its own disk");
             }
+            // F65b: stand armed: the legs' chains on the real 3P parents (the F64 log), the upper body, the leg solve, the cap and delta.
+            {
+                static const uint16_t p3[185] = {
+                    0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 7, 7, 7, 7, 7, 7, 7, 7, 9, 10, 10, 18, 17, 16, 17, 18,
+                    21, 22, 23, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 34, 35, 36, 40, 41, 39, 40, 41, 44,
+                    44, 44, 44, 42, 43, 48, 51, 52, 53, 56, 45, 46, 44, 44, 44, 44, 44, 44, 59, 58, 58, 58, 58, 58,
+                    58, 59, 59, 59, 59, 59, 62, 64, 63, 65, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 17, 17, 18, 18,
+                    94, 92, 22, 22, 22, 23, 23, 23, 94, 92, 94, 92, 40, 40, 41, 41, 45, 45, 46, 46, 111, 111, 108, 108,
+                    83, 84, 85, 86, 88, 89, 90, 91, 24, 100, 103, 45, 46, 44, 44, 44, 44, 44, 44, 44, 44, 44, 44, 44,
+                    44, 44, 44, 44, 44, 44, 44, 44, 44, 44, 44, 44, 44, 44, 44, 44, 44, 44, 44, 44, 44, 136, 150, 135,
+                    145, 141, 143, 149, 144, 148, 142, 82, 87, 120, 121, 122, 123, 124, 125, 126, 127};
+                // (1) The chains: L foot 103 -> calf 23 -> thigh 18 -> pelvis 10; R 100 -> 22 -> 17 -> 10; the pelvis under the anchor 7 (the
+                // freeze's: neck 34 and the left foot); the pair passes with the probe's feet 103 and 100 and is refused when the R foot differs.
+                const nf::IkArm lL = nf::ikLegChain(p3, 185, 103), lR = nf::ikLegChain(p3, 185, 100);
+                const nf::PfzFrozenSet fs = nf::pfzFrozenSet(p3, 185, 34, 103);
+                const uint32_t probeOk[2] = {103, 100}, probeBad[2] = {103, 99};
+                check(lL.why == 0 && lL.U == 18 && lL.F == 23 && lL.C == 10 && lL.nU == 7 && lL.nF == 4 && lL.nH == 2 && lR.why == 0 && lR.U == 17 &&
+                          lR.F == 22 && lR.C == 10 && fs.why == 0 && fs.anchor == 7 && nf::ikLegPairWhy(p3, 185, lL, lR, 7, probeOk) == 0 &&
+                          nf::ikLegPairWhy(p3, 185, lL, lR, 7, probeBad) == 8 && nf::ikLegPairWhy(p3, 185, lL, lR, 9, probeOk) == 7,
+                      "F65b: the legs' chains (L 18/23/103, R 17/22/100 under the pelvis 10, under the anchor 7); a probe foot that differs refuses");
+                // (2) The upper body: subtree(7) less both thigh subtrees (152 joints): 7, 10, 15, 34, 44 in it; no joint of either thigh's
+                // subtree (the thighs, calves, feet, toes and their helpers 19, 20, 25, 26, 92..107, 129, 130).
+                uint16_t ub[nf::kPfzMaxJoints] = {};
+                const uint32_t ubN = nf::ikUpperBody(p3, 185, 7, 18, 17, ub, nf::kPfzMaxJoints);
+                bool has[185] = {};
+                for (uint32_t k = 0; k < ubN; ++k) has[ub[k]] = true;
+                bool noLeg = true;
+                for (uint32_t j = 0; j < 185; ++j)
+                    if ((nf::ikUnder(p3, 185, j, 17) || nf::ikUnder(p3, 185, j, 18)) && has[j]) noLeg = false;
+                check(ubN == 152 && has[7] && has[10] && has[15] && has[34] && has[44] && !has[0] && noLeg && !has[19] && !has[20] && !has[103] &&
+                          !has[130],
+                      "F65b: the raise moves the upper body (subtree of 7 less both thigh subtrees, 152 joints) and never a thigh subtree joint");
+                // (3) The leg solve: a crouched leg (hip 0.80 m, knee forward at 0.45, foot at 0.05) with the hip raised 4 cm: the carried
+                // foot lands on the animated foot (under 0.001 mm), the bones keep their lengths, the knee stays forward (the pole's side),
+                // and the reach grows.
+                const double hip[3] = {0.10, 0.80, 0.00}, knee[3] = {0.10, 0.45, 0.15}, foot[3] = {0.10, 0.05, 0.00};
+                const nf::LegSolve ls = nf::legSolve(hip, knee, foot, 0.04);
+                const double se[3] = {ls.E[0] - ls.S[0], ls.E[1] - ls.S[1], ls.E[2] - ls.S[2]}, ef[3] = {foot[0] - ls.E[0], foot[1] - ls.E[1], foot[2] - ls.E[2]};
+                const double l1 = std::sqrt(0.35 * 0.35 + 0.15 * 0.15), l2 = std::sqrt(0.40 * 0.40 + 0.15 * 0.15);
+                check(ls.ok && !ls.limited && ls.footErrM < 1e-6 && std::fabs(std::sqrt(se[0] * se[0] + se[1] * se[1] + se[2] * se[2]) - l1) < 1e-9 &&
+                          std::fabs(std::sqrt(ef[0] * ef[0] + ef[1] * ef[1] + ef[2] * ef[2]) - l2) < 1e-9 && ls.E[2] > 0.0 && std::fabs(ls.S[1] - 0.84) < 1e-12 &&
+                          ls.reachAfter > ls.reachBefore && ls.kneeSolvedDeg > ls.kneeAnimDeg,
+                      "F65b: the leg solve keeps the foot exactly where it was animated, the bones' lengths and the knee forward");
+                // (4) The cap: the hip may rise at most sqrt((0.995 (l1 + l2))^2 - h^2) - v; raised by the cap the leg's reach is 0.995; a
+                // wanted 30 cm is held at the cap; and delta follows the ramp, and is 0 unarmed, with the key off or no stand height.
+                const double cap = nf::standLegCap(hip, foot, l1, l2);
+                const double capWant = std::sqrt(std::pow(0.995 * (l1 + l2), 2) - 0.0) - 0.75;
+                const nf::LegSolve atCap = nf::legSolve(hip, knee, foot, cap);
+                const double dFull = nf::standDelta(true, 1.0, true, 1.10, 0.80, cap), dHalf = nf::standDelta(true, 0.5, true, 0.85, 0.80, cap);
+                check(std::fabs(cap - capWant) < 1e-9 && cap > 0.0 && cap < 0.30 && std::fabs(atCap.reachAfter - 0.995) < 1e-9 && atCap.footErrM < 1e-6 &&
+                          std::fabs(dFull - cap) < 1e-12 && std::fabs(dHalf - 0.025) < 1e-12 && nf::standDelta(true, 0.0, true, 1.10, 0.80, cap) == 0.0 &&
+                          nf::standDelta(false, 1.0, true, 1.10, 0.80, cap) == 0.0 && nf::standDelta(true, 1.0, false, 1.10, 0.80, cap) == 0.0 &&
+                          nf::standDelta(true, 1.0, true, 0.70, 0.80, cap) == 0.0,
+                      "F65b: the raise is capped so the legs reach (0.995), follows the armed ramp, and is 0 unarmed, with the key off or no stand height");
+            }
             // The shift rule: a record at the AMC origin moves by d once; a second pass over it leaves it alone; a record elsewhere never moves.
             const float origin[3] = {10.0f, 2.0f, -3.0f}, d[3] = {0.0f, 0.231f, 0.0f};
             float rec[3] = {10.0f, 2.0f, -3.0f}, other[3] = {10.5f, 2.0f, -3.0f};

@@ -1383,6 +1383,131 @@ inline const char* ikSquareWhyText(uint32_t why) noexcept {
     }
 }
 
+// ---- F65b (TEMPORARY, fix.native_on_foot_stand_armed): keep the 3P body standing when armed, the feet planted --------------------------
+// The F64 log: a drawn weapon's 3P stance crouches the body about 21 cm (joint 7 drops; pov 1.699 -> 1.489, neck 1.543 -> 1.334) while the
+// FP view and weapon stay at standing height. The Animate post-hook raises the upper body UB (subtree(anchor 7) less both thigh subtrees) by
+// delta in model y and solves each leg from the raised hip to the animated foot (two bones, the knee bending forward as animated), leaving the
+// foot and toe exactly as animated. The legs from the RE (3P): L thigh 18, calf 23, foot 103 (def_l_foot_joint), toe 130; R 17, 22, 100,
+// 129 INFERRED by mirror: the census confirms the R foot by FindJoint("def_r_foot_joint") and refuses the legs when anything differs.
+constexpr uint32_t kLegFoot[2] = {103, 100}, kLegCalf[2] = {23, 22}, kLegThigh[2] = {18, 17};
+constexpr uint32_t kStandPov = 15, kStandHips = 7;
+constexpr double kStandLpTauSec = 0.25, kStandRampSec = 0.3, kStandReach = 0.995;
+constexpr uint64_t kStandIdleMs = 1000;   // the stand height is captured after this long unarmed and idle (no locomotion, no ADS)
+// A leg's chain from its foot: F = parents[foot] (the calf), U = parents[F] (the thigh), C = parents[U] (the pelvis); ikArmChain with H = A =
+// the foot: gU = the thigh and its helpers, gF = the calf and its helpers, gH = the foot and the toe (never written). why 2 when U is not
+// directly under C.
+inline IkArm ikLegChain(const uint16_t* parents, uint32_t joints, uint32_t foot) noexcept {
+    IkArm s;
+    if (joints == 0 || joints > kPfzMaxJoints || foot >= joints) return s;
+    const uint32_t F = parents[foot];
+    const uint32_t U = F < joints ? parents[F] : 0xFFFFu;
+    const uint32_t C = U < joints ? parents[U] : 0xFFFFu;
+    if (C >= joints) {
+        s.why = 2;
+        return s;
+    }
+    s = ikArmChain(parents, joints, C, foot, foot);
+    if (s.why == 0 && (!s.direct || s.U != U || s.F != F)) s.why = 2;
+    return s;
+}
+// The pair's verdict: 0 ok; a leg's own why (1..5); 6 the legs do not share the pelvis C; 7 parent(C) is not the anchor; 8 an index differs
+// from the RE's (the probe's foot, or the chain's calf or thigh).
+inline uint32_t ikLegPairWhy(const uint16_t* parents, uint32_t joints, const IkArm& l, const IkArm& r, uint32_t anchor, const uint32_t probeFoot[2]) noexcept {
+    if (l.why != 0) return l.why;
+    if (r.why != 0) return r.why;
+    if (l.C != r.C) return 6;
+    if (l.C >= joints || parents[l.C] != anchor) return 7;
+    const IkArm* legs[2] = {&l, &r};
+    for (int k = 0; k < 2; ++k)
+        if (probeFoot[k] != kLegFoot[k] || legs[k]->H != kLegFoot[k] || legs[k]->F != kLegCalf[k] || legs[k]->U != kLegThigh[k]) return 8;
+    return 0;
+}
+inline const char* ikLegWhyText(uint32_t why) noexcept {
+    switch (why) {
+        case 0: return "ok";
+        case 6: return "the legs do not share the pelvis";
+        case 7: return "the pelvis's parent is not the anchor (7)";
+        case 8: return "an index differs from the RE's (foot 103/100, calf 23/22, thigh 18/17)";
+        default: return ikArmWhyText(why);
+    }
+}
+// The upper body: subtree(anchor) less subtree(uL) and subtree(uR), in index order. 0 on bad input.
+inline uint32_t ikUpperBody(const uint16_t* parents, uint32_t joints, uint32_t anchor, uint32_t uL, uint32_t uR, uint16_t* out, uint32_t cap) noexcept {
+    if (joints == 0 || joints > kPfzMaxJoints || anchor >= joints || uL >= joints || uR >= joints) return 0;
+    uint32_t n = 0;
+    for (uint32_t j = 0; j < joints && n < cap; ++j)
+        if (ikUnder(parents, joints, j, anchor) && !ikUnder(parents, joints, j, uL) && !ikUnder(parents, joints, j, uR)) out[n++] = static_cast<uint16_t>(j);
+    return n;
+}
+// The cap for one leg: hip and foot (animated, model space, y up): v the vertical drop, h the horizontal distance; the hip may rise at most
+// sqrt((kStandReach (l1 + l2))^2 - h^2) - v (0 when that is negative or the reach cannot span h).
+inline double standLegCap(const double hip[3], const double foot[3], double l1, double l2) noexcept {
+    const double v = hip[1] - foot[1], dx = hip[0] - foot[0], dz = hip[2] - foot[2], h2 = dx * dx + dz * dz;
+    const double r = kStandReach * (l1 + l2), r2 = r * r - h2;
+    if (!(r2 > 0.0)) return 0.0;
+    const double c = std::sqrt(r2) - v;
+    return c > 0.0 ? c : 0.0;
+}
+// delta: clamp(standY - lpY, 0, cap) times the armed ramp; 0 with the key off, no stand height, or the ramp at 0.
+inline double standDelta(bool keyOn, double armedW, bool standHave, double standY, double lpY, double cap) noexcept {
+    if (!keyOn || !standHave || !(armedW > 0.0) || !(standY == standY) || !(lpY == lpY)) return 0.0;
+    double d = standY - lpY;
+    d = d < 0.0 ? 0.0 : d;
+    const double c = cap > 0.0 ? cap : 0.0;
+    d = d > c ? c : d;
+    return d * (armedW > 1.0 ? 1.0 : armedW);
+}
+// One leg's solve: S = hip0 raised by `raise` (model y), T = the animated foot; l1 = |knee0 - hip0|, l2 = |foot0 - knee0|. The pole is the part
+// of (knee0 - hip0) across the original hip -> foot axis, so the knee bends as animated. R1 swings the thigh (and everything under it) about S
+// from the animated knee's direction to the solved one; R2 swings the calf about the knee E so its end lands on T. footErr is the carried
+// foot's distance from T (about 0 in reach), and the knee's interior angles (degrees, 180 straight) before and after.
+struct LegSolve {
+    bool ok = false, limited = false;
+    double S[3] = {}, E[3] = {}, R1[9] = {}, R2[9] = {};
+    double l1 = 0.0, l2 = 0.0, reachBefore = 0.0, reachAfter = 0.0, kneeAnimDeg = 0.0, kneeSolvedDeg = 0.0, footErrM = 0.0;
+};
+inline void ikRowRotate(const double v[3], const double R[9], double out[3]) noexcept {
+    for (int c = 0; c < 3; ++c) out[c] = v[0] * R[c] + v[1] * R[3 + c] + v[2] * R[6 + c];
+}
+inline LegSolve legSolve(const double hip0[3], const double knee0[3], const double foot0[3], double raise) noexcept {
+    LegSolve o;
+    const double hk[3] = {knee0[0] - hip0[0], knee0[1] - hip0[1], knee0[2] - hip0[2]};
+    const double kf[3] = {foot0[0] - knee0[0], foot0[1] - knee0[1], foot0[2] - knee0[2]};
+    const double hf[3] = {foot0[0] - hip0[0], foot0[1] - hip0[1], foot0[2] - hip0[2]};
+    o.l1 = ikLen(hk);
+    o.l2 = ikLen(kf);
+    if (!(o.l1 > 1e-4) || !(o.l2 > 1e-4)) return o;
+    o.reachBefore = ikLen(hf) / (o.l1 + o.l2);
+    o.kneeAnimDeg = ikElbowInteriorDeg(o.l1, o.l2, ikLen(hf));
+    double axis[3];
+    if (!ikUnit(hf, axis)) return o;
+    const double pd = ikDot(hk, axis);
+    const double pole[3] = {hk[0] - axis[0] * pd, hk[1] - axis[1] * pd, hk[2] - axis[2] * pd};
+    for (int i = 0; i < 3; ++i) o.S[i] = hip0[i];
+    o.S[1] += raise;
+    const IkTwoBone tb = ikTwoBoneFrame(o.S, foot0, o.l1, o.l2, pole);
+    if (!tb.ok) return o;
+    tb.elbowAt(0.0, o.E);
+    o.limited = tb.limited;
+    o.reachAfter = tb.reach;
+    o.kneeSolvedDeg = ikElbowInteriorDeg(o.l1, o.l2, tb.D);
+    double u0[3], u1[3];
+    const double se[3] = {o.E[0] - o.S[0], o.E[1] - o.S[1], o.E[2] - o.S[2]};
+    if (!ikUnit(hk, u0) || !ikUnit(se, u1)) return o;
+    ikRotFromTo(u0, u1, o.R1);
+    double kfSw[3], d1[3], d2[3];
+    ikRowRotate(kf, o.R1, kfSw);   // the calf after swing 1 (the raised foot carried about S)
+    const double ft[3] = {foot0[0] - o.E[0], foot0[1] - o.E[1], foot0[2] - o.E[2]};
+    if (!ikUnit(kfSw, d1) || !ikUnit(ft, d2)) return o;
+    ikRotFromTo(d1, d2, o.R2);
+    double kfOut[3];
+    ikRowRotate(kfSw, o.R2, kfOut);
+    const double err[3] = {o.E[0] + kfOut[0] - foot0[0], o.E[1] + kfOut[1] - foot0[1], o.E[2] + kfOut[2] - foot0[2]};
+    o.footErrM = ikLen(err);
+    o.ok = true;
+    return o;
+}
+
 // ---- F58 (TEMPORARY): the spine bend toward the head (full-3P mode: hide_fp_body and body_unclip on) ------------------------------------
 // In the Animate post-hook, after the freeze and before the square-up and the arm IK. The 3P pov (the eye point) N is turned toward the eye
 // target T (the job camera less d, in the 3P model space: x right, y up, z forward) about the spine chain's root P (joint kIkSpine[0]). The

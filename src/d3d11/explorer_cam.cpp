@@ -1788,11 +1788,13 @@ uint32_t neckJointRead(uintptr_t iface, const SkSlots& sl, float out[3]) noexcep
 
 // F43: the body anchor's joints, by name, on each latched skeleton (the 3P one and the FP one). Probed once per skeleton on the census thread:
 // the probe logs every name's index (0xFFFF: none). The walk dump runs only when a side's shoulder does not answer.
-constexpr size_t kJointProbeCount = 16;
+// F65b: plus the feet (the legs' chains for stand armed; the R leg's indices are inferred by mirror and confirmed by this name).
+constexpr size_t kJointProbeCount = 18;
 constexpr const char* kJointProbeNames[kJointProbeCount] = {"def_l_shoulder_joint", "def_r_shoulder_joint", "def_l_clavicle_joint", "def_r_clavicle_joint",
     "def_l_upperArm_joint", "def_r_upperArm_joint", "def_l_arm_joint", "def_r_arm_joint", "def_c_spine03_joint", "def_l_handAttach_joint",
-    "def_r_handAttach_joint", "def_l_hand_joint", "def_r_hand_joint", "def_c_neck_joint", "def_c_head_joint", "def_c_povCamera_joint"};
-constexpr size_t kJointNameNeck = 13, kJointNamePov = 15;
+    "def_r_handAttach_joint", "def_l_hand_joint", "def_r_hand_joint", "def_c_neck_joint", "def_c_head_joint", "def_c_povCamera_joint",
+    "def_l_foot_joint", "def_r_foot_joint"};
+constexpr size_t kJointNameNeck = 13, kJointNamePov = 15, kJointNameFootL = 16, kJointNameFootR = 17;
 struct ShoulderProbe {
     uint64_t iface = 0;
     bool done = false;
@@ -1800,6 +1802,7 @@ struct ShoulderProbe {
     uint32_t neck = 0xFFFFu;
     uint32_t hl = 0xFFFFu, hr = 0xFFFFu, al = 0xFFFFu, ar = 0xFFFFu;   // F45: the hands (L, R) and the attach points (L, R)
     uint32_t pov = 0xFFFFu;                                            // F48: def_c_povCamera_joint
+    uint32_t fl = 0xFFFFu, fr = 0xFFFFu;                               // F65b: the feet (L, R)
 };
 
 // F48 (census, read only): the skeleton's parent array, once per skeleton (the probe's cache). The FP skeleton: the joint count (the u16 at
@@ -1900,6 +1903,8 @@ void shoulderProbe(uint64_t iface, const SkSlots& sl, ShoulderProbe& pr, const c
     pr.al = found[9];
     pr.ar = found[10];
     pr.pov = found[kJointNamePov];
+    pr.fl = found[kJointNameFootL];
+    pr.fr = found[kJointNameFootR];
     if (pr.l == 0xFFFFu || pr.r == 0xFFFFu) shoulderWalkDump(iface, sl, pr.neck, label);
     skeletonParentsDump(iface, sl, &pr == &g_shProbeFP, label);   // F48 (census): once per skeleton
 }
@@ -2283,6 +2288,35 @@ bool armBuildPlan(uint64_t x) noexcept {
                         static_cast<unsigned>(plan.sq.chestRoot), joints > nofoot::kIkClavL ? static_cast<unsigned>(g_pfzParents[nofoot::kIkClavL]) : 0xFFFFu,
                         joints > nofoot::kIkClavR ? static_cast<unsigned>(g_pfzParents[nofoot::kIkClavR]) : 0xFFFFu, byLevel[0], byLevel[1], byLevel[2],
                         static_cast<unsigned>(plan.sq.n));
+    }
+    // F65b: the legs for stand armed: each chain from the probe's foot (nofoot::ikLegChain), the anchor (the freeze's: the lowest common
+    // ancestor of the neck 34 and the left foot), the pair check against the RE's indices (the R foot confirmed by FindJoint), and the upper
+    // body UB. A refusal leaves the legs and the raise off; the arms are unaffected.
+    {
+        const uint32_t probeFoot[2] = {g_shProbe3P.fl, g_shProbe3P.fr};
+        for (int k = 0; k < 2; ++k) plan.leg[k] = nofoot::ikLegChain(g_pfzParents, joints, probeFoot[k]);
+        const nofoot::PfzFrozenSet fs = nofoot::pfzFrozenSet(g_pfzParents, joints, kPfzNeck, probeFoot[0]);
+        plan.legAnchor = fs.why == 0 ? fs.anchor : 0xFFFFu;
+        plan.legWhy = fs.why != 0 ? 7u : nofoot::ikLegPairWhy(g_pfzParents, joints, plan.leg[0], plan.leg[1], plan.legAnchor, probeFoot);
+        if (plan.legWhy == 0) {
+            plan.ubN = static_cast<uint16_t>(nofoot::ikUpperBody(g_pfzParents, joints, plan.legAnchor, plan.leg[0].U, plan.leg[1].U, plan.ub,
+                                                                 nofoot::kPfzMaxJoints));
+            if (plan.ubN == 0) plan.legWhy = 1;
+        }
+        plan.legOk = plan.legWhy == 0;
+        char legs[2][200] = {};
+        for (int k = 0; k < 2; ++k) {
+            const nofoot::IkArm& g = plan.leg[k];
+            std::snprintf(legs[k], sizeof(legs[k]), "%s foot (FindJoint %s) %u%s, calf %u, thigh %u, pelvis %u; gU %u gF %u gH %u", k ? "R" : "L",
+                          k ? "def_r_foot_joint" : "def_l_foot_joint", probeFoot[k],
+                          probeFoot[k] == nofoot::kLegFoot[k] ? (k ? " = the inferred 100: CONFIRMED" : " = 103") : " (NOT the RE's)",
+                          static_cast<unsigned>(g.F), static_cast<unsigned>(g.U), static_cast<unsigned>(g.C), static_cast<unsigned>(g.nU),
+                          static_cast<unsigned>(g.nF), static_cast<unsigned>(g.nH));
+        }
+        Log::get().note("native on foot stand armed (F65b): X=%016llX legs %s (%s); %s; %s; anchor %u (pelvis parent %u); upper body %u joints",
+                        static_cast<unsigned long long>(x), plan.legOk ? "ok" : "REFUSED", nofoot::ikLegWhyText(plan.legWhy), legs[0], legs[1],
+                        plan.legAnchor, plan.leg[0].C < joints ? static_cast<unsigned>(g_pfzParents[plan.leg[0].C]) : 0xFFFFu,
+                        static_cast<unsigned>(plan.ubN));
     }
     pfz::g_armSeq.fetch_add(1, std::memory_order_acq_rel);   // odd: the plan is being written
     pfz::g_armPlan = plan;

@@ -153,6 +153,9 @@ inline std::atomic<bool> g_dropWanted{false};
 // 2 nudge, 3 on; g_ikWanted (the key not off) keeps the Animate hook and the FP census running when the pose freeze key is off.
 // F57: plus the torso square-up's plan (nofoot::ikSquarePlan: the chest root, the parent of the clavicles 35 and 36, and the spine 16 subtree
 // with each member's level); sqOk false refuses the square-up alone.
+// F65b: plus the legs (stand armed): [0] L, [1] R by nofoot::ikLegChain from the joint probe's feet, legOk when nofoot::ikLegPairWhy passes
+// (shared pelvis, the pelvis under the anchor, the RE's indices with the R foot confirmed by FindJoint), and the upper body UB (subtree of the
+// anchor less both thigh subtrees) that the raise moves.
 struct ArmPlan {
     uint64_t x = 0;
     uint32_t joints = 0;
@@ -160,6 +163,11 @@ struct ArmPlan {
     nofoot::IkArm side[2];
     bool sqOk = false;
     nofoot::IkSquarePlan sq;
+    bool legOk = false;
+    uint32_t legWhy = 1, legAnchor = 0xFFFFu;
+    nofoot::IkArm leg[2];
+    uint16_t ubN = 0;
+    uint16_t ub[nofoot::kPfzMaxJoints] = {};
 };
 inline std::atomic<uint32_t> g_armSeq{0};
 inline ArmPlan g_armPlan;

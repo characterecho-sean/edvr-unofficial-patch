@@ -136,6 +136,13 @@ double g_fitLateralKeyLast = nofoot::kFitLateralDefault;
 // reader's last value.
 std::atomic<float> g_eyeHeightCm{static_cast<float>(nofoot::kEyeHeightDefaultCm)};
 double g_eyeHeightCmLast = nofoot::kEyeHeightDefaultCm;
+// F65b (TEMPORARY): fix.native_on_foot_stand_armed (on by default, hidden, live): keep the 3P body standing when armed. The frame thread's
+// published state for the Animate post-hook: the armed ramp (0.3 s; the key on, a weapon held, full-3P body mode, the arm IK on), the armed
+// flag itself (the stand height is captured only unarmed) and idle (no locomotion, no ADS).
+std::atomic<bool> g_standKeyOn{true};
+int g_standKeyLast = -1;
+std::atomic<float> g_standArmedW{0.0f};
+std::atomic<bool> g_standArmedFlag{false}, g_standIdle{false};
 std::atomic<float> g_fitBendW{0.0f};
 // F58 (TEMPORARY): the spine bend. The key (fix.native_on_foot_spine_bend, on by default; it acts only in full-3P body mode) and the amount
 // slider, the frame thread's 0.2 s ramp and run flag (the key on in full-3P body mode, or the ramp or its hold still running), read by the
@@ -847,6 +854,17 @@ void readKey() {
                                 cm, cm, cm / 100.0, nofoot::kEyeHeightRampSec);
             g_eyeHeightCmLast = cm;
             g_eyeHeightCm.store(static_cast<float>(cm), std::memory_order_relaxed);
+        }
+        // F65b (TEMPORARY, hidden, live): stand armed, on (the default) or off. Off: no raise, no leg solve.
+        {
+            const bool standOn = cfg.getString("fix.native_on_foot_stand_armed", "on") != "off";
+            if (first || (standOn ? 1 : 0) != g_standKeyLast)
+                Log::get().note("native on foot stand armed (F65b, TEMPORARY): fix.native_on_foot_stand_armed = %s -- %s", standOn ? "on" : "off",
+                                standOn ? "while a weapon is held in full-3P body mode with the arm IK on, the 3P upper body is raised back to its "
+                                          "standing height (ramped over 0.3 s) and each leg solved from the raised hip to its animated foot"
+                                        : "no raise, no leg solve");
+            g_standKeyLast = standOn ? 1 : 0;
+            g_standKeyOn.store(standOn, std::memory_order_relaxed);
         }
         // F58 (TEMPORARY, live): the spine bend toward the head: on (the default) or off. It acts only in full-3P body mode (body align = body
         // with fix.native_on_foot_hide_fp_body and fix.native_on_foot_body_unclip on); the amount slider (0..1, default 1) scales it.
@@ -7526,6 +7544,22 @@ void f65ReachLimit(uint64_t now, double dt, bool full3P, const AlignRun& a, cons
     g_f65Arm[0] = g_f65Arm[1] = F65Arm{};
 }
 
+// ---- F65b: stand armed, the frame thread's half: the armed ramp (0.3 s; the key on, a weapon held (g_f60Weapon), full-3P body mode with
+// the arm IK on; zero at once otherwise), the armed flag (the hook captures the stand height only unarmed) and idle (no locomotion, no ADS),
+// published for the Animate post-hook; the 1 s line (f65bStandLine, with the hook's statistics, defined after them).
+nofoot::IkBlend g_f65bRamp{0.0f, nofoot::kStandRampSec};
+void f65bStandLine(uint64_t now, bool scope) noexcept;
+void f65bStandTick(uint64_t now, double dt, int mode, bool full3P, bool ads, bool moving) noexcept {
+    const bool key = g_standKeyOn.load(std::memory_order_relaxed);
+    const bool scope = key && mode == 2 && full3P && pfz::g_ikMode.load(std::memory_order_relaxed) == 3 && nativeOnFootActive();
+    if (!scope) g_f65bRamp.w = 0.0f;
+    else g_f65bRamp.step(g_f60Weapon, dt);
+    g_standArmedW.store(g_f65bRamp.w, std::memory_order_relaxed);
+    g_standArmedFlag.store(g_f60Weapon, std::memory_order_relaxed);
+    g_standIdle.store(!moving && !ads, std::memory_order_relaxed);
+    f65bStandLine(now, scope);
+}
+
 void alignTick(uint64_t now) noexcept {
     static int lastMode = -1;
     const int mode = g_alignMode.load(std::memory_order_relaxed);   // 0 off, 1 view, 2 body
@@ -7612,6 +7646,7 @@ void alignTick(uint64_t now) noexcept {
     }
     if (!s.valid || (now >= s.stamp && now - s.stamp > 1500)) g_f55Loco = nofoot::PfzLocoRest{};
     const bool f55Moving = !g_f55Loco.resting;
+    f65bStandTick(now, dt, mode, f58Full3P, ads, f55Moving);   // F65b: stand armed's ramp, armed and idle flags for the hook; its 1 s line
     const char* wait = nullptr;
     if (!on) wait = "key off";
     else if (!nativeOnFootActive()) wait = "not native stereo on foot";
@@ -7626,7 +7661,7 @@ void alignTick(uint64_t now) noexcept {
         a.waitLineMs = now;
         Log::get().note("native on foot body align: %s: waiting (%s)", mode == 2 ? "body" : "view", wait);
     }
-    if (mode == 2 && ads) g_f48Stand.step(now, 0.0, 0.0, true);   // F48: ADS is never a rest; the standing window starts again after it
+    if (mode == 2 && (ads || g_f60Weapon)) g_f48Stand.step(now, 0.0, 0.0, true);   // F48: ADS (F65b: or a held weapon) is never a rest
     const int anchorMode = g_alignAnchorMode.load(std::memory_order_relaxed);   // F48: 0 neck, 1 clavicles, 2 pov
     const bool vertical = g_alignVertical.load(std::memory_order_relaxed);      // F50: off locks the body's height in body mode
     g_f58FollowSrc = -1;
@@ -7828,8 +7863,9 @@ void alignTick(uint64_t now) noexcept {
                 g_f55KindNow = kind;
             }
             const uint32_t f55CapBefore = g_f48Stand.hCaptures;
-            // F59b: ads (only ever true here in full 3P, which no longer waits on it): ADS is never a rest.
-            g_f48Stand.step(now, static_cast<double>(s.headBody[1]), srcB[1], ads, f55Moving, g_f55Raw[0], g_f55Raw[2]);
+            // F59b: ads (only ever true here in full 3P, which no longer waits on it): ADS is never a rest. F65b: nor is a held weapon (F64
+            // re-captured the armed stance's crouched 1.489 m as the standing height).
+            g_f48Stand.step(now, static_cast<double>(s.headBody[1]), srcB[1], ads || g_f60Weapon, f55Moving, g_f55Raw[0], g_f55Raw[2]);
             if (anchorMode == 2 && !shoulderAnchor && g_f48Stand.valid && vertical) {   // F50: vertical off: logged only
                 const double live[3] = {srcB[0], srcB[1], srcB[2]};
                 nofoot::standingApply(live, g_f48Stand.value, srcB);
@@ -9267,6 +9303,257 @@ inline void ikPos(const float m[16], double p[3]) noexcept {
     p[2] = m[14];
 }
 
+// ---- F65b (TEMPORARY, fix.native_on_foot_stand_armed): stage 0, stand armed (the hook's half) -------------------------------------------
+// In armIkAfterAnimate after the freeze and before the M0 fill, arm IK on, the legs' plan ok. Every call: y15 (the pov joint, animated) low-
+// passed (tau 0.25 s); the stand height is that low-pass, captured only while unarmed (the armed flag and the ramp both clear) and idle (the
+// frame thread: no locomotion, no ADS) for 1 s, held while armed. delta = clamp(stand - lp, 0, cap) x the armed ramp (nofoot::standDelta), the
+// cap the smaller leg's nofoot::standLegCap. With delta above 0.01 mm: both legs are solved from the raised hip to the animated foot
+// (nofoot::legSolve: swing the thigh group about the hip, the calf group about the knee; the helpers rolled by their share of the twist, as
+// the arm's), every matrix computed before the first write; then the upper body UB (the freeze's writes for its members when it wrote) gets
+// delta in its model y, the legs their solved matrices, in the animated copy (so the bend, the square-up and the arms build on the standing
+// pose) and in the span (all of UB, or the mesh tears). The foot and toe are never written. No allocation, logging or locks; writes under SEH.
+enum StandRefusal : uint32_t { kStandRefPlan = 0, kStandRefNoStand, kStandRefLeg, kStandRefWrite, kStandRefKinds };
+const char* const kStandRefText[kStandRefKinds] = {"the legs' plan was refused (the census line says why)",
+                                                   "no stand height captured yet (unarmed and idle for 1 s)",
+                                                   "a leg solve failed (a degenerate bone or a singular matrix)", "a span write faulted"};
+struct StandLegStats {
+    uint32_t n = 0, limited = 0;
+    double vSum = 0.0, hSum = 0.0, l1Sum = 0.0, l2Sum = 0.0, rbSum = 0.0, rbMax = 0.0, raSum = 0.0, raMax = 0.0, kaSum = 0.0, ksSum = 0.0;
+    double errMaxMm = 0.0;
+};
+struct StandStats {
+    uint64_t calls = 0, raised = 0, captures = 0, capBound = 0, refused[kStandRefKinds] = {};
+    uint32_t yN = 0, armedN = 0, capN = 0;
+    double y15Sum = 0.0, y7Sum = 0.0, lpSum = 0.0, wantSum = 0.0, wantMax = 0.0, appliedSum = 0.0, appliedMax = 0.0, capSum = 0.0, capMin = 0.0;
+    double standY = 0.0, armedWLast = 0.0;
+    bool standHave = false;
+    StandLegStats leg[2];
+};
+std::atomic<uint32_t> g_standStatSeq{0};
+StandStats g_standStats;
+std::atomic<bool> g_standStatReset{false};
+double g_standLp = 0.0, g_standY = 0.0;
+bool g_standLpHave = false, g_standYHave = false;
+uint64_t g_standLpMs = 0, g_standIdleSince = 0;
+alignas(16) float g_standOut[nofoot::kPfzMaxJoints][16];
+// Returns false only when a span write faulted (the caller stands the IK down); every other outcome lets the stages after it run.
+bool standStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t now) noexcept {
+    const uint32_t count = sp.count;
+    if (count <= nofoot::kStandPov || count <= nofoot::kStandHips) return true;
+    const bool keyOn = g_standKeyOn.load(std::memory_order_relaxed);
+    const double armedW = static_cast<double>(g_standArmedW.load(std::memory_order_relaxed));
+    const bool armed = g_standArmedFlag.load(std::memory_order_relaxed), idle = g_standIdle.load(std::memory_order_relaxed);
+    const double y15 = static_cast<double>(g_pfzAnim[nofoot::kStandPov][13]), y7 = static_cast<double>(g_pfzAnim[nofoot::kStandHips][13]);
+    const double dt = g_standLpMs && now > g_standLpMs ? std::min(0.1, static_cast<double>(now - g_standLpMs) / 1000.0) : 0.0;
+    g_standLpMs = now;
+    if (!g_standLpHave || !std::isfinite(g_standLp)) {
+        g_standLp = y15;
+        g_standLpHave = std::isfinite(y15);
+    } else if (dt > 0.0 && std::isfinite(y15)) {
+        g_standLp += (1.0 - std::exp(-dt / nofoot::kStandLpTauSec)) * (y15 - g_standLp);
+    }
+    bool captured = false;
+    if (!armed && !(armedW > 0.0) && idle && g_standLpHave) {
+        if (!g_standIdleSince) g_standIdleSince = now;
+        if (now - g_standIdleSince >= nofoot::kStandIdleMs) {
+            g_standY = g_standLp;
+            g_standYHave = true;
+            captured = true;
+        }
+    } else {
+        g_standIdleSince = 0;
+    }
+    // The cap (both legs, animated) and delta.
+    bool legsOk = pl.legOk;
+    double hip[2][3] = {}, knee[2][3] = {}, foot[2][3] = {}, cap = 0.0;
+    for (int k = 0; k < 2 && legsOk; ++k) {
+        const nofoot::IkArm& g = pl.leg[k];
+        if (g.U >= count || g.F >= count || g.H >= count) {
+            legsOk = false;
+            break;
+        }
+        for (int i = 0; i < 3; ++i) {
+            hip[k][i] = g_pfzAnim[g.U][12 + i];
+            knee[k][i] = g_pfzAnim[g.F][12 + i];
+            foot[k][i] = g_pfzAnim[g.H][12 + i];
+        }
+        const double hk[3] = {knee[k][0] - hip[k][0], knee[k][1] - hip[k][1], knee[k][2] - hip[k][2]};
+        const double kf[3] = {foot[k][0] - knee[k][0], foot[k][1] - knee[k][1], foot[k][2] - knee[k][2]};
+        const double c = nofoot::standLegCap(hip[k], foot[k], nofoot::ikLen(hk), nofoot::ikLen(kf));
+        cap = k == 0 || c < cap ? c : cap;
+    }
+    const double wanted = g_standYHave && keyOn ? std::max(0.0, g_standY - g_standLp) : 0.0;
+    const double delta = legsOk ? nofoot::standDelta(keyOn, armedW, g_standYHave, g_standY, g_standLp, cap) : 0.0;
+    nofoot::LegSolve ls[2];
+    uint32_t refusal = kStandRefKinds;
+    if (!legsOk) refusal = kStandRefPlan;
+    else if (!g_standYHave) refusal = kStandRefNoStand;
+    const bool act = refusal == kStandRefKinds && delta > 1e-5;
+    if (act) {
+        for (int k = 0; k < 2 && refusal == kStandRefKinds; ++k) {
+            ls[k] = nofoot::legSolve(hip[k], knee[k], foot[k], delta);
+            if (!ls[k].ok) refusal = kStandRefLeg;
+        }
+    }
+    bool solved = act && refusal == kStandRefKinds;
+    if (solved) {
+        // Every leg matrix, before any write: the thigh group raised and swung about S; the calf group raised, swung about S, then about E; the
+        // helpers off the chain rolled about their bone by t x the twist (the thigh's from swing 2, the calf's from the foot's kept rotation).
+        for (int k = 0; k < 2 && solved; ++k) {
+            const nofoot::IkArm& g = pl.leg[k];
+            const nofoot::LegSolve& L = ls[k];
+            const auto raised = [&](uint32_t j, float out[16]) noexcept {
+                std::memcpy(out, g_pfzAnim[j], 64);
+                out[13] = static_cast<float>(static_cast<double>(out[13]) + delta);
+            };
+            for (uint32_t m = 0; m < g.nU; ++m) {
+                float r[16];
+                raised(g.gU[m], r);
+                nofoot::ikPivot(r, L.R1, L.S, g_standOut[g.gU[m]]);
+            }
+            for (uint32_t m = 0; m < g.nF; ++m) {
+                float r[16], t1[16];
+                raised(g.gF[m], r);
+                nofoot::ikPivot(r, L.R1, L.S, t1);
+                nofoot::ikPivot(t1, L.R2, L.E, g_standOut[g.gF[m]]);
+            }
+            double ue[3], eT[3];
+            const double se[3] = {L.E[0] - L.S[0], L.E[1] - L.S[1], L.E[2] - L.S[2]}, ht[3] = {foot[k][0] - L.E[0], foot[k][1] - L.E[1], foot[k][2] - L.E[2]};
+            if (!nofoot::ikUnit(se, ue) || !nofoot::ikUnit(ht, eT)) {
+                solved = false;
+                break;
+            }
+            // The foot's rotation kept as animated against where the swings would carry it: X = inv(carried) x animated (rotation parts).
+            float fr[16], f1[16], f2[16], invF2[16];
+            raised(g.H, fr);
+            nofoot::ikPivot(fr, L.R1, L.S, f1);
+            nofoot::ikPivot(f1, L.R2, L.E, f2);
+            if (!nofoot::pfzAffineInverse(f2, invF2)) {
+                solved = false;
+                break;
+            }
+            double X[9];
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c)
+                    X[r * 3 + c] = static_cast<double>(invF2[r * 4]) * g_pfzAnim[g.H][c] + static_cast<double>(invF2[r * 4 + 1]) * g_pfzAnim[g.H][4 + c] +
+                                   static_cast<double>(invF2[r * 4 + 2]) * g_pfzAnim[g.H][8 + c];
+            const double thetaF = nofoot::ikTwistAbout(X, eT), thetaU = nofoot::ikTwistAbout(L.R2, ue);
+            const double lF2 = nofoot::ikDot(ht, ht), lU2 = nofoot::ikDot(se, se);
+            for (uint32_t m = 0; m < g.nF; ++m) {
+                const uint32_t j = g.gF[m];
+                if (j == g.F || !(lF2 > 1e-12)) continue;
+                const double rel[3] = {g_standOut[j][12] - L.E[0], g_standOut[j][13] - L.E[1], g_standOut[j][14] - L.E[2]};
+                double t = nofoot::ikDot(rel, ht) / lF2;
+                t = t < 0.0 ? 0.0 : t > 1.0 ? 1.0 : t;
+                double R[9];
+                float tmp[16];
+                nofoot::ikRotAxis(eT, t * thetaF, R);
+                std::memcpy(tmp, g_standOut[j], sizeof(tmp));
+                nofoot::ikPivot(tmp, R, L.E, g_standOut[j]);
+            }
+            for (uint32_t m = 0; m < g.nU; ++m) {
+                const uint32_t j = g.gU[m];
+                if (g.chainU[m] || !(lU2 > 1e-12)) continue;
+                const double rel[3] = {g_standOut[j][12] - L.S[0], g_standOut[j][13] - L.S[1], g_standOut[j][14] - L.S[2]};
+                double t = nofoot::ikDot(rel, se) / lU2;
+                t = t < 0.0 ? 0.0 : t > 1.0 ? 1.0 : t;
+                double R[9];
+                float tmp[16];
+                nofoot::ikRotAxis(ue, t * thetaU, R);
+                std::memcpy(tmp, g_standOut[j], sizeof(tmp));
+                nofoot::ikPivot(tmp, R, L.S, g_standOut[j]);
+            }
+            for (uint32_t m = 0; m < g.nU && solved; ++m) solved = ikMatrixSane(g_standOut[g.gU[m]]);
+            for (uint32_t m = 0; m < g.nF && solved; ++m) solved = ikMatrixSane(g_standOut[g.gF[m]]);
+        }
+        if (!solved) refusal = kStandRefLeg;
+    }
+    bool writeFault = false;
+    if (solved) {
+        // Into the animated copy (and the freeze's chain for its members): UB raised, the legs solved.
+        for (uint32_t k = 0; k < pl.ubN; ++k) {
+            const uint32_t j = pl.ub[k];
+            if (j >= count) continue;
+            g_pfzAnim[j][13] = static_cast<float>(static_cast<double>(g_pfzAnim[j][13]) + delta);
+            if (froze && g_ikFzSlot[j] != 0xFFFFu) g_pfzChain[g_ikFzSlot[j]][13] = static_cast<float>(static_cast<double>(g_pfzChain[g_ikFzSlot[j]][13]) + delta);
+        }
+        for (int k = 0; k < 2; ++k) {
+            const nofoot::IkArm& g = pl.leg[k];
+            for (uint32_t m = 0; m < g.nU; ++m) std::memcpy(g_pfzAnim[g.gU[m]], g_standOut[g.gU[m]], 64);
+            for (uint32_t m = 0; m < g.nF; ++m) std::memcpy(g_pfzAnim[g.gF[m]], g_standOut[g.gF[m]], 64);
+        }
+        // Into the span: all of UB (the freeze's member matrices where it wrote), then the legs' groups.
+        for (uint32_t k = 0; k < pl.ubN && !writeFault; ++k) {
+            const uint32_t j = pl.ub[k];
+            if (j >= count) continue;
+            const float* src = froze && g_ikFzSlot[j] != 0xFFFFu ? g_pfzChain[g_ikFzSlot[j]] : g_pfzAnim[j];
+            if (!guardedWriteFloats16(sp.buf + static_cast<uint64_t>(j) * 64u, src)) writeFault = true;
+        }
+        for (int k = 0; k < 2 && !writeFault; ++k) {
+            const nofoot::IkArm& g = pl.leg[k];
+            const uint16_t* lists[2] = {g.gU, g.gF};
+            const uint16_t counts[2] = {g.nU, g.nF};
+            for (int q = 0; q < 2 && !writeFault; ++q)
+                for (uint32_t m = 0; m < counts[q] && !writeFault; ++m)
+                    if (!guardedWriteFloats16(sp.buf + static_cast<uint64_t>(lists[q][m]) * 64u, g_pfzAnim[lists[q][m]])) writeFault = true;
+        }
+        if (writeFault) refusal = kStandRefWrite;
+    }
+    // The statistics (one writer; the frame thread reads them once a second under the sequence counter).
+    g_standStatSeq.fetch_add(1, std::memory_order_acq_rel);
+    if (g_standStatReset.exchange(false, std::memory_order_relaxed)) g_standStats = StandStats{};
+    StandStats& st = g_standStats;
+    ++st.calls;
+    if (captured) ++st.captures;
+    if (refusal != kStandRefKinds) ++st.refused[refusal];
+    st.standY = g_standY;
+    st.standHave = g_standYHave;
+    st.armedWLast = armedW;
+    if (std::isfinite(y15) && std::isfinite(y7)) {
+        const bool first = st.yN == 0;
+        ++st.yN;
+        st.y15Sum += y15;
+        st.y7Sum += y7;
+        st.lpSum += g_standLp;
+        if (legsOk) {
+            st.capSum += cap;
+            st.capMin = first || st.capN == 0 || cap < st.capMin ? cap : st.capMin;
+            ++st.capN;
+        }
+        if (armedW > 0.0) {
+            ++st.armedN;
+            st.wantSum += wanted;
+            st.wantMax = std::max(st.wantMax, wanted);
+            if (legsOk && wanted > cap) ++st.capBound;
+        }
+    }
+    if (solved && !writeFault) {
+        ++st.raised;
+        st.appliedSum += delta;
+        st.appliedMax = std::max(st.appliedMax, delta);
+        for (int k = 0; k < 2; ++k) {
+            StandLegStats& s = st.leg[k];
+            const nofoot::LegSolve& L = ls[k];
+            const double dx = hip[k][0] - foot[k][0], dz = hip[k][2] - foot[k][2];
+            ++s.n;
+            if (L.limited) ++s.limited;
+            s.vSum += hip[k][1] - foot[k][1];
+            s.hSum += std::sqrt(dx * dx + dz * dz);
+            s.l1Sum += L.l1;
+            s.l2Sum += L.l2;
+            s.rbSum += L.reachBefore;
+            s.rbMax = std::max(s.rbMax, L.reachBefore);
+            s.raSum += L.reachAfter;
+            s.raMax = std::max(s.raMax, L.reachAfter);
+            s.kaSum += L.kneeAnimDeg;
+            s.ksSum += L.kneeSolvedDeg;
+            s.errMaxMm = std::max(s.errMaxMm, L.footErrM * 1000.0);
+        }
+    }
+    g_standStatSeq.fetch_add(1, std::memory_order_release);
+    return !writeFault;
+}
+
 void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
     const int mode = pfz::g_ikMode.load(std::memory_order_relaxed);
     const bool bendRun = g_bendRun.load(std::memory_order_relaxed);   // F58: the spine bend rides this path (its plan and its writes)
@@ -9362,6 +9649,12 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         for (uint32_t j = 0; j < count; ++j) g_ikFzSlot[j] = 0xFFFFu;
         for (uint32_t k = 0; k < fpl.count && k < nofoot::kPfzMaxF; ++k)
             if (fpl.member[k] < count) g_ikFzSlot[fpl.member[k]] = static_cast<uint16_t>(k);
+    }
+    // F65b stage 0: stand armed (the arm IK on): the upper body raised to its standing height and the legs solved onto the animated feet, in
+    // the animated copy and the span, before M0 is built from them.
+    if (mode == 3 && !g_ikWriteDown.load(std::memory_order_relaxed) && !standStage0(pl, sp, froze, now)) {
+        g_ikWriteDown.store(true, std::memory_order_relaxed);
+        return ikRefuse(kIkRefWrite);
     }
     for (int side = 0; side < 2; ++side) {
         if (!pl.ok[side]) continue;
@@ -10901,6 +11194,63 @@ void f60FitStep(uint64_t now, double dt, int mode, bool full3P) noexcept {
 // F60: the 1 s line (body mode, full 3P, the arm IK not off; called after the body filter): the fit weight, d_head, d_w, the fitted target
 // and the applied d (body axes right, up, forward), the shoulder-mid error |Sd - Umid| after the fit (cm; its up part is the vertical
 // remainder, left to the bend), the last Sd and Umid, the arm length, the gate, ADS and the hook's publications.
+// F65b: stand armed's 1 s line (frame thread; in scope, or while the hook still counts calls): the hook's statistics read under their
+// sequence counter (two tries), then a reset requested. y15 and y7 as animated, the low-pass, the stand height, delta wanted and applied, the
+// cap and how often it bound; per leg v, h, l1, l2, the reach before and after, the knee's animated and solved interior angles, the carried
+// foot's error (about 0 mm when the solve held); calls raised and refused by reason; the legs' plan (with the R foot's confirmation).
+uint64_t g_f65bLineMs = 0;
+void f65bStandLine(uint64_t now, bool scope) noexcept {
+    if (g_f65bLineMs == 0) g_f65bLineMs = now;
+    if (now - g_f65bLineMs < 1000) return;
+    g_f65bLineMs = now;
+    StandStats st;
+    bool got = false;
+    for (int tries = 0; tries < 2 && !got; ++tries) {
+        const uint32_t s1 = g_standStatSeq.load(std::memory_order_acquire);
+        if (s1 & 1u) continue;
+        std::memcpy(&st, &g_standStats, sizeof(st));
+        std::atomic_thread_fence(std::memory_order_acquire);
+        got = g_standStatSeq.load(std::memory_order_relaxed) == s1;
+    }
+    g_standStatReset.store(true, std::memory_order_relaxed);
+    if (!got || (!scope && st.calls == 0)) return;
+    bool planOk = false, legOk = false;
+    uint32_t legWhy = 1, footR = 0xFFFFu;
+    for (int tries = 0; tries < 2 && !planOk; ++tries) {
+        const uint32_t s1 = pfz::g_armSeq.load(std::memory_order_acquire);
+        if (s1 & 1u) continue;
+        legOk = pfz::g_armPlan.legOk;
+        legWhy = pfz::g_armPlan.legWhy;
+        footR = pfz::g_armPlan.leg[1].H;
+        std::atomic_thread_fence(std::memory_order_acquire);
+        planOk = pfz::g_armSeq.load(std::memory_order_relaxed) == s1;
+    }
+    const double yn = st.yN ? static_cast<double>(st.yN) : 1.0, rn = st.raised ? static_cast<double>(st.raised) : 1.0;
+    const double an = st.armedN ? static_cast<double>(st.armedN) : 1.0, cn = st.capN ? static_cast<double>(st.capN) : 1.0;
+    char legs[2][360];
+    for (int k = 0; k < 2; ++k) {
+        const StandLegStats& s = st.leg[k];
+        const double n = s.n ? static_cast<double>(s.n) : 1.0;
+        std::snprintf(legs[k], sizeof(legs[k]),
+                      "%s: v %.1f h %.1f l1 %.1f l2 %.1f cm, reach before %.3f (max %.3f) after %.3f (max %.3f), knee animated %.1f solved %.1f deg, "
+                      "foot error max %.2f mm, limited %u (%u solves)",
+                      k ? "R" : "L", 100.0 * s.vSum / n, 100.0 * s.hSum / n, 100.0 * s.l1Sum / n, 100.0 * s.l2Sum / n, s.rbSum / n, s.rbMax,
+                      s.raSum / n, s.raMax, s.kaSum / n, s.ksSum / n, s.errMaxMm, s.limited, s.n);
+    }
+    Log::get().note("native on foot stand armed (F65b, key %s): ramp %.2f; y15 animated %.3f m, y7 %.3f m, low-pass %.3f m (means); stand height %s "
+                    "%.3f m (captures %llu); delta wanted %.1f cm mean (armed calls) max %.1f, applied %.1f mean max %.1f cm over %llu raised calls; cap "
+                    "%.1f cm mean, %.1f min, bound %llu; %s; %s; calls %llu, refused: plan %llu, no stand height %llu, leg %llu, write %llu; legs plan "
+                    "%s (%s; R foot %u, inferred 100)",
+                    g_standKeyOn.load(std::memory_order_relaxed) ? "on" : "off", st.armedWLast, st.y15Sum / yn, st.y7Sum / yn, st.lpSum / yn,
+                    st.standHave ? "captured" : "NOT captured", st.standY, static_cast<unsigned long long>(st.captures), 100.0 * st.wantSum / an,
+                    100.0 * st.wantMax, 100.0 * st.appliedSum / rn, 100.0 * st.appliedMax, static_cast<unsigned long long>(st.raised),
+                    100.0 * st.capSum / cn, 100.0 * st.capMin, static_cast<unsigned long long>(st.capBound), legs[0], legs[1],
+                    static_cast<unsigned long long>(st.calls), static_cast<unsigned long long>(st.refused[kStandRefPlan]),
+                    static_cast<unsigned long long>(st.refused[kStandRefNoStand]), static_cast<unsigned long long>(st.refused[kStandRefLeg]),
+                    static_cast<unsigned long long>(st.refused[kStandRefWrite]), !planOk ? "unread" : legOk ? "ok" : "REFUSED",
+                    nofoot::ikLegWhyText(legWhy), footR);
+}
+
 void f60FitLine(uint64_t now, int mode, bool full3P, bool vertical, const double dApplied[3], const EyeSample& s) noexcept {
     const int ikMode = pfz::g_ikMode.load(std::memory_order_relaxed);
     const auto reset = []() noexcept {
