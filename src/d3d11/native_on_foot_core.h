@@ -1457,6 +1457,19 @@ inline double standDelta(bool keyOn, double armedW, bool standHave, double stand
     d = d > c ? c : d;
     return d * (armedW > 1.0 ? 1.0 : armedW);
 }
+// ---- F65c: the body align's neck source ---------------------------------------------------------------------------------------------
+// The F64 log (standing unarmed): before the bend the 3P neck sat 11.4 cm left of its target and the bend rolled the torso a mean 15 deg to
+// close it. The align's neck source was the census neck, read AFTER the hook wrote the bent pose, so the align saw a neck already under the
+// eye and left d alone. The hook now publishes the neck as it stands before the bend (after stage 0); the align takes it while fresh (at
+// most kPreNeckMaxTicks frame ticks since its sequence last changed, and under kPreNeckMaxMs), else the census neck, else none.
+constexpr uint32_t kPreNeckMaxTicks = 2;
+constexpr uint64_t kPreNeckMaxMs = 100;
+enum NeckSource : int { kNeckPreBend = 0, kNeckCensus = 1, kNeckNone = 2 };
+inline int neckSourcePick(bool preHave, uint32_t ticksSince, uint64_t ageMs, bool censusOk) noexcept {
+    if (preHave && ticksSince <= kPreNeckMaxTicks && ageMs <= kPreNeckMaxMs) return kNeckPreBend;
+    return censusOk ? kNeckCensus : kNeckNone;
+}
+
 // One leg's solve: S = hip0 raised by `raise` (model y), T = the animated foot; l1 = |knee0 - hip0|, l2 = |foot0 - knee0|. The pole is the part
 // of (knee0 - hip0) across the original hip -> foot axis, so the knee bends as animated. R1 swings the thigh (and everything under it) about S
 // from the animated knee's direction to the solved one; R2 swings the calf about the knee E so its end lands on T. footErr is the carried

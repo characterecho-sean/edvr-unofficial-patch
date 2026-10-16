@@ -2403,6 +2403,41 @@ int wmain(int argc, wchar_t** argv) {
                           nf::standDelta(true, 1.0, true, 0.70, 0.80, cap) == 0.0,
                       "F65b: the raise is capped so the legs reach (0.995), follows the armed ramp, and is 0 unarmed, with the key off or no stand height");
             }
+            // F65c: the align's neck source. The F64 case: the pre-bend neck 11.4 cm left of its target (the eye at (0, 1.60, 0) in body
+            // axes, the full-3P rest offset (0, -0.155, -0.09), so the target is (0, 1.445, -0.09)).
+            {
+                // (1) The pick: the pre-bend neck while at most 2 ticks old and under 100 ms; else the census; else none.
+                check(nf::neckSourcePick(true, 0, 10, true) == nf::kNeckPreBend && nf::neckSourcePick(true, 2, 100, false) == nf::kNeckPreBend &&
+                          nf::neckSourcePick(true, 3, 10, true) == nf::kNeckCensus && nf::neckSourcePick(true, 1, 150, true) == nf::kNeckCensus &&
+                          nf::neckSourcePick(false, 0, 0, true) == nf::kNeckCensus && nf::neckSourcePick(true, 5, 10, false) == nf::kNeckNone,
+                      "F65c: the align takes the pre-bend neck while fresh (2 ticks, 100 ms), else the census neck, else none");
+                // (2) The align (the neck rest source, the F41 filter at 90 Hz, tau 0.1 s, 5 cm a frame) with the pre-bend source converges d
+                // on the animated offset (+11.4 cm right), and the bend's input error (T - (N + d), right) goes to about 0. With the census's
+                // post-bend neck (the bend has already put N + d on T) the target never moves: d stays 0 and the bend keeps the 11.4 cm.
+                const double eye[3] = {0.0, 1.60, 0.0}, N0[3] = {-0.114, 1.445, -0.09};
+                double T[3];
+                for (int i = 0; i < 3; ++i) T[i] = eye[i] + nf::kNeckRestOffsetFull3P[i];
+                double dPre[3] = {}, vPre[3] = {}, dCen[3] = {}, vCen[3] = {};
+                for (int f = 0; f < 270; ++f) {
+                    double src[3], tgt[3], post[3], srcC[3], tgtC[3];
+                    nf::neckRestSource(N0, nf::kNeckRestOffsetFull3P, src);
+                    for (int i = 0; i < 3; ++i) {
+                        tgt[i] = eye[i] - src[i];
+                        post[i] = T[i] - dCen[i];   // the census reads the neck where the bend put it: N + d on T
+                    }
+                    nf::neckRestSource(post, nf::kNeckRestOffsetFull3P, srcC);
+                    for (int i = 0; i < 3; ++i) tgtC[i] = eye[i] - srcC[i];
+                    for (int i = 0; i < 3; ++i) {
+                        nf::cdStep(dPre[i], vPre[i], tgt[i], 0.1, 1.0 / 90.0, 0.05);
+                        nf::cdStep(dCen[i], vCen[i], tgtC[i], 0.1, 1.0 / 90.0, 0.05);
+                    }
+                }
+                const double errPre = T[0] - (N0[0] + dPre[0]), errCen = T[0] - (N0[0] + dCen[0]);
+                check(std::fabs(dPre[0] - 0.114) < 1e-3 && std::fabs(errPre) < 1e-3 && std::fabs(dPre[2]) < 1e-9 && std::fabs(dCen[0]) < 1e-9 &&
+                          std::fabs(errCen - 0.114) < 1e-9,
+                      "F65c: with the pre-bend neck the align moves d 11.4 cm right and the bend's input error goes to 0; with the census's "
+                      "post-bend neck d stays 0 and the 11.4 cm stays for the bend's roll");
+            }
             // The shift rule: a record at the AMC origin moves by d once; a second pass over it leaves it alone; a record elsewhere never moves.
             const float origin[3] = {10.0f, 2.0f, -3.0f}, d[3] = {0.0f, 0.231f, 0.0f};
             float rec[3] = {10.0f, 2.0f, -3.0f}, other[3] = {10.5f, 2.0f, -3.0f};

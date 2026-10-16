@@ -7549,6 +7549,43 @@ void f65ReachLimit(uint64_t now, double dt, bool full3P, const AlignRun& a, cons
 // published for the Animate post-hook; the 1 s line (f65bStandLine, with the hook's statistics, defined after them).
 nofoot::IkBlend g_f65bRamp{0.0f, nofoot::kStandRampSec};
 void f65bStandLine(uint64_t now, bool scope) noexcept;
+// ---- F65c: the pre-bend neck (the hook publishes, the body align reads) ---------------------------------------------------------------
+// The Animate post-hook publishes the neck 34 and the head 44 (model space = body axes, as the census reads them) as they stand after stage 0
+// and before the bend, the square-up and the arm writes (the freeze's matrix where it wrote), with its sequence and ms; read with two tries.
+// The frame thread counts its ticks since the sequence last changed (nofoot::neckSourcePick takes it while at most 2 and under 100 ms).
+struct PreBendNeck {
+    float neck[3] = {}, head[3] = {};
+    uint64_t ms = 0, seq = 0;
+};
+std::atomic<uint32_t> g_preNeckSeqLock{0};
+PreBendNeck g_preNeck;
+uint64_t g_preNeckSeq = 0;   // the hook's own count (one writer)
+void preNeckPublish(const float neck[3], const float head[3], uint64_t ms) noexcept {
+    g_preNeckSeqLock.fetch_add(1, std::memory_order_acq_rel);
+    for (int i = 0; i < 3; ++i) {
+        g_preNeck.neck[i] = neck[i];
+        g_preNeck.head[i] = head[i];
+    }
+    g_preNeck.ms = ms;
+    g_preNeck.seq = ++g_preNeckSeq;
+    g_preNeckSeqLock.fetch_add(1, std::memory_order_release);
+}
+bool preNeckRead(PreBendNeck* out) noexcept {
+    for (int tries = 0; tries < 2; ++tries) {
+        const uint32_t s1 = g_preNeckSeqLock.load(std::memory_order_acquire);
+        if (s1 & 1u || s1 == 0) continue;
+        std::memcpy(out, &g_preNeck, sizeof(*out));
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if (g_preNeckSeqLock.load(std::memory_order_relaxed) == s1) return true;
+    }
+    return false;
+}
+// The frame thread's side: the last sequence seen and the ticks since it changed; the 1 s line's sums (source counts, pre-bend minus census
+// in body axes, the align's d right and forward).
+uint64_t g_f65cLastSeq = 0;
+uint32_t g_f65cTicksSince = 0xFFFFFFFFu;
+uint32_t g_f65cSrcN[3] = {}, g_f65cDiffN = 0, g_f65cDN = 0;
+double g_f65cDiffSum[3] = {}, g_f65cDSum[2] = {}, g_f65cDAbsMax[2] = {};
 void f65bStandTick(uint64_t now, double dt, int mode, bool full3P, bool ads, bool moving) noexcept {
     const bool key = g_standKeyOn.load(std::memory_order_relaxed);
     const bool scope = key && mode == 2 && full3P && pfz::g_ikMode.load(std::memory_order_relaxed) == 3 && nativeOnFootActive();
@@ -7726,7 +7763,48 @@ void alignTick(uint64_t now) noexcept {
         // second of this entry; otherwise the pov low-passed in body axes (tau 1 s), so the head's own swing drops out and the body's turns
         // do not lag. The means are frozen after the first second. The camera minus the FP root is logged, not applied.
         double neckB[3] = {}, jobB[3] = {}, fpB[3] = {};
-        if (s.neckOk) body(s.neck, neckB);
+        // F65c: the neck source: the hook's pre-bend neck while fresh (model space through this sample's matrix, as the census neck goes),
+        // else the census neck (read after the hook wrote the bent pose), else none. Counted, with the pre-bend minus census difference.
+        bool neckHave = false;
+        {
+            PreBendNeck pre;
+            const bool preRead = preNeckRead(&pre);
+            if (preRead && pre.seq != g_f65cLastSeq) {
+                g_f65cLastSeq = pre.seq;
+                g_f65cTicksSince = 0;
+            } else if (g_f65cTicksSince != 0xFFFFFFFFu) {
+                ++g_f65cTicksSince;
+            }
+            const uint64_t preAge = preRead && now >= pre.ms ? now - pre.ms : ~0ull;
+            const int src = nofoot::neckSourcePick(preRead && pre.seq != 0, g_f65cTicksSince, preAge, s.neckOk);
+            double censusB[3] = {};
+            if (s.neckOk) body(s.neck, censusB);
+            if (src == nofoot::kNeckPreBend) {
+                float w[3];
+                for (size_t j = 0; j < 3; ++j)
+                    w[j] = pre.neck[0] * s.rows[j] + pre.neck[1] * s.rows[3 + j] + pre.neck[2] * s.rows[6 + j] + s.origin[j];
+                body(w, neckB);
+                neckHave = true;
+                if (s.neckOk) {
+                    for (size_t i = 0; i < 3; ++i) g_f65cDiffSum[i] += neckB[i] - censusB[i];
+                    ++g_f65cDiffN;
+                }
+            } else if (src == nofoot::kNeckCensus) {
+                for (size_t i = 0; i < 3; ++i) neckB[i] = censusB[i];
+                neckHave = true;
+            }
+            if (mode == 2 && f58Full3P) {
+                ++g_f65cSrcN[src >= 0 && src < 3 ? src : 2];
+                double dB[3] = {};
+                for (size_t i = 0; i < 3; ++i)
+                    for (size_t j = 0; j < 3; ++j) dB[i] += a.applied[j] * static_cast<double>(s.rows[3 * i + j]);
+                g_f65cDSum[0] += dB[0];
+                g_f65cDSum[1] += dB[2];
+                g_f65cDAbsMax[0] = std::max(g_f65cDAbsMax[0], std::fabs(dB[0]));
+                g_f65cDAbsMax[1] = std::max(g_f65cDAbsMax[1], std::fabs(dB[2]));
+                ++g_f65cDN;
+            }
+        }
         body(s.cam, jobB);
         if (fpFresh) body(fp.origin, fpB);
         if (!g_f38Valid) {
@@ -7744,11 +7822,11 @@ void alignTick(uint64_t now) noexcept {
         }
         const double alpha = dt > 0.0 ? 1.0 - std::exp(-dt / 1.0) : 0.0;   // tau 1 s
         for (size_t i = 0; i < 3; ++i) g_f38Lp[i] += alpha * (povB[i] - g_f38Lp[i]);
-        if (inWin && s.neckOk) {
+        if (inWin && neckHave) {
             ++g_f38R0N;
             for (size_t i = 0; i < 3; ++i) g_f38R0[i] += ((povB[i] - neckB[i]) - g_f38R0[i]) / static_cast<double>(g_f38R0N);
         }
-        if (inWin && s.neckOk) {
+        if (inWin && neckHave) {
             ++g_f38CamNeckN;
             for (size_t i = 0; i < 3; ++i) g_f38CamNeck[i] += ((jobB[i] - neckB[i]) - g_f38CamNeck[i]) / static_cast<double>(g_f38CamNeckN);
         }
@@ -7756,7 +7834,7 @@ void alignTick(uint64_t now) noexcept {
             ++g_f38CamFpN;
             for (size_t i = 0; i < 3; ++i) g_f38CamFp[i] += ((jobB[i] - fpB[i]) - g_f38CamFp[i]) / static_cast<double>(g_f38CamFpN);
         }
-        const bool useNeck = s.neckOk && g_f38R0N > 0;
+        const bool useNeck = neckHave && g_f38R0N > 0;
         double povEqB[3] = {}, povEqW[3] = {};
         // F42/F45: the neck plus the pov-minus-neck offset captured over the first second of the entry (F38); without it, the low-passed head.
         for (size_t i = 0; i < 3; ++i) povEqB[i] = useNeck ? neckB[i] + g_f38R0[i] : g_f38Lp[i];
@@ -7830,7 +7908,8 @@ void alignTick(uint64_t now) noexcept {
                 // F62a: in full 3P the neck sits 0.155 m below and 0.09 m behind the eye (kNeckRestOffsetFull3P; 0.161 m behind put the 3P
                 // head too far back); outside full 3P the F53 offset is kept.
                 for (size_t i = 0; i < 3; ++i) anchorB[i] = camB[i];
-                if (s.neckOk) nofoot::neckRestSource(neckB, f58Full3P ? nofoot::kNeckRestOffsetFull3P : nofoot::kNeckRestOffset, srcB);
+                // F65c: neckB is the hook's pre-bend neck while fresh (else the census neck).
+                if (neckHave) nofoot::neckRestSource(neckB, f58Full3P ? nofoot::kNeckRestOffsetFull3P : nofoot::kNeckRestOffset, srcB);
                 else
                     for (size_t i = 0; i < 3; ++i) srcB[i] = povEqB[i];
             }
@@ -7851,7 +7930,7 @@ void alignTick(uint64_t now) noexcept {
             // F55: the rest point for the walking shift: the neck itself on the neck anchor (srcB = neck - kNeckRestOffset, so the offset is
             // srcB - neck), else the anchor's own source (offset 0). A kind change restarts the window, so a capture never mixes two points.
             {
-                const int kind = shoulderAnchor ? 3 : anchorMode == 2 ? (g_f48PovSrc == 0 ? 4 : 5) : (s.neckOk ? 1 : 2);
+                const int kind = shoulderAnchor ? 3 : anchorMode == 2 ? (g_f48PovSrc == 0 ? 4 : 5) : (neckHave ? 1 : 2);
                 for (size_t i = 0; i < 3; ++i) {
                     g_f55Raw[i] = kind == 1 ? neckB[i] : srcB[i];
                     g_f55Off[i] = srcB[i] - g_f55Raw[i];
@@ -9268,6 +9347,7 @@ struct BendStats {
     // (|T - N| before the bend above 0.35 m: the want is 0, the applied angles return at their cap).
     uint64_t fitLimited = 0, suspended = 0;
     uint32_t fitClampFwd = 0, fitClampBack = 0, fitClampRoll = 0;
+    double pitchAbsSum = 0.0, rollAbsSum = 0.0;   // F65c: |pitch| and |roll| applied, degrees (the success test: mean |roll| under 3 deg)
 };
 std::atomic<uint32_t> g_bendStatSeq{0};
 BendStats g_bendStats;
@@ -9655,6 +9735,13 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
     if (mode == 3 && !g_ikWriteDown.load(std::memory_order_relaxed) && !standStage0(pl, sp, froze, now)) {
         g_ikWriteDown.store(true, std::memory_order_relaxed);
         return ikRefuse(kIkRefWrite);
+    }
+    // F65c: the neck 34 and the head 44 as they stand now (after stage 0, before the bend, the square-up and the arm writes): the freeze's
+    // matrix where it wrote, else the animated copy. The body align reads it in place of the census neck (which sees the bent pose).
+    if (count > 44) {
+        const float* nk = froze && g_ikFzSlot[34] != 0xFFFFu ? g_pfzChain[g_ikFzSlot[34]] : g_pfzAnim[34];
+        const float* hd = froze && g_ikFzSlot[44] != 0xFFFFu ? g_pfzChain[g_ikFzSlot[44]] : g_pfzAnim[44];
+        if (std::isfinite(nk[12]) && std::isfinite(nk[13]) && std::isfinite(nk[14])) preNeckPublish(nk + 12, hd + 12, now);
     }
     for (int side = 0; side < 2; ++side) {
         if (!pl.ok[side]) continue;
@@ -10269,6 +10356,8 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             }
             b.pitchSum += pd;
             b.rollSum += rd;
+            b.pitchAbsSum += std::fabs(pd);
+            b.rollAbsSum += std::fabs(rd);
             b.pitchMin = first || pd < b.pitchMin ? pd : b.pitchMin;
             b.pitchMax = first || pd > b.pitchMax ? pd : b.pitchMax;
             b.rollMin = first || rd < b.rollMin ? rd : b.rollMin;
@@ -11080,6 +11169,25 @@ void f58BendFrame(uint64_t now, double dt, int mode, bool full3P, bool ads, cons
                     static_cast<unsigned long long>(ref[kBendRefTarget]), static_cast<unsigned long long>(ref[kBendRefStale]),
                     static_cast<unsigned long long>(ref[kBendRefPov]), static_cast<unsigned long long>(ref[kBendRefDegenerate]),
                     static_cast<unsigned long long>(ref[kBendRefSingular]));
+    // F65c: the align's neck source this second (full 3P body mode ticks), the pre-bend minus census neck (body axes), the align's d (right,
+    // forward), and the bend: |roll| and |pitch| mean with their ranges, the before-bend neck error (its right part is the lateral the align
+    // should now take). Success standing unarmed: before-bend lateral |error| under 2 cm and mean |roll| under 3 deg.
+    if (full3P) {
+        const double dn = g_f65cDiffN ? static_cast<double>(g_f65cDiffN) : 1.0, an = g_f65cDN ? static_cast<double>(g_f65cDN) : 1.0;
+        Log::get().note("native on foot neck source (F65c): align ticks: pre-bend %u, census %u, none %u (pre-bend fresh: at most %u ticks since its "
+                        "sequence changed, under %llu ms; %u ticks now); pre-bend minus census neck (right, up, forward) %.1f %.1f %.1f cm over %u ticks; "
+                        "align d right %.1f (|max| %.1f) forward %.1f (|max| %.1f) cm; bend |roll| mean %.1f deg (%.1f..%.1f), |pitch| mean %.1f deg "
+                        "(%.1f..%.1f); before-bend neck error right %.1f up %.1f forward %.1f cm (mean, %llu bent)",
+                        g_f65cSrcN[0], g_f65cSrcN[1], g_f65cSrcN[2], nofoot::kPreNeckMaxTicks, static_cast<unsigned long long>(nofoot::kPreNeckMaxMs),
+                        g_f65cTicksSince == 0xFFFFFFFFu ? 0u : g_f65cTicksSince, 100.0 * g_f65cDiffSum[0] / dn, 100.0 * g_f65cDiffSum[1] / dn,
+                        100.0 * g_f65cDiffSum[2] / dn, g_f65cDiffN, 100.0 * g_f65cDSum[0] / an, 100.0 * g_f65cDAbsMax[0], 100.0 * g_f65cDSum[1] / an,
+                        100.0 * g_f65cDAbsMax[1], b.rollAbsSum / n, b.rollMin, b.rollMax, b.pitchAbsSum / n, b.pitchMin, b.pitchMax, b.res0B[2] / n,
+                        b.res0B[1] / n, b.res0B[0] / n, static_cast<unsigned long long>(b.n));
+    }
+    g_f65cSrcN[0] = g_f65cSrcN[1] = g_f65cSrcN[2] = 0;
+    g_f65cDiffN = g_f65cDN = 0;
+    g_f65cDiffSum[0] = g_f65cDiffSum[1] = g_f65cDiffSum[2] = 0.0;
+    g_f65cDSum[0] = g_f65cDSum[1] = g_f65cDAbsMax[0] = g_f65cDAbsMax[1] = 0.0;
     // F59b: full 3P: the head follow's source and the eye - neck residual after the corrections, once a second.
     if (full3P) {
         static const char* const kF59bSrc[4] = {"none", "job camera", "amc matrix", "last good frame"};
