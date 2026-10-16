@@ -229,9 +229,12 @@ inline bool nativeOnFootMarkerProbeLive() {
 // Owner context only (vscreen.cpp): a buffer mapped for writing (after the real Map), a buffer about to be unmapped (before the real Unmap), and
 // a draw before its verdict (the game's bindings). F45: every draw call kind, named by `kind` ('N' DrawInstanced, 'X' DrawIndexedInstanced,
 // 'D' Draw and 'I' DrawIndexed with one instance from 0, 'Y' and 'Z' the indirect ones, whose instance range is not readable here).
+// F67d: and the draw's own range (the vertex or index count per instance, the first vertex or index, the base vertex), for the icon mesh; 0 count for
+// the indirect ones.
 void nativeOnFootMarkerProbeMap(ID3D11Resource* resource, void* data, int mapType);
 void nativeOnFootMarkerProbeUnmap(const ID3D11Resource* resource);
-void nativeOnFootMarkerProbeDraw(ID3D11DeviceContext* ctx, uint32_t instances, uint32_t startInstance, char kind);
+void nativeOnFootMarkerProbeDraw(ID3D11DeviceContext* ctx, uint32_t instances, uint32_t startInstance, char kind, uint32_t count = 0, uint32_t start = 0,
+                                 int32_t base = 0);
 // F47: the game's UpdateSubresource of a buffer (owner context, before the real call): the marker composite's b0 CPU shadow takes the write.
 // `boxed` with [left, right) the byte range the data covers; otherwise the whole buffer from data.
 void nativeOnFootMarkerProbeUpdate(const ID3D11Resource* resource, const void* data, bool boxed, uint32_t left, uint32_t right);

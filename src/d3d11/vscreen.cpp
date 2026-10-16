@@ -4752,7 +4752,7 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
     if (g_vrWorldInternal) { g_state->realDraw(self, count, start); return; }   // the world route's own draw (vr_world_route.h)
     gpuFrameCommandIfLive(self);
     // F45 (TEMPORARY instrument): a non-instanced draw reads instance stream entry 0 (the marker probe's record match); staging copies only.
-    if (nativeOnFootMarkerProbeLive() && self == g_state->ownerCtx) nativeOnFootMarkerProbeDraw(self, 1, 0, 'D');
+    if (nativeOnFootMarkerProbeLive() && self == g_state->ownerCtx) nativeOnFootMarkerProbeDraw(self, 1, 0, 'D', count, start, 0);
     if (self == g_state->ownerCtx) { temporalPassCountDraw(); if (temporalPassWantsDraw()) temporalPassNoteDraw(self); }   // tags the camera write before it / counts a mini-render's draws
     DrawClock clock;
     ++g_state->thunkHits[kHitDraw];
@@ -4828,7 +4828,7 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
     if (g_vrWorldInternal) { g_state->realDrawIndexed(self, count, startIndex, baseVertex); return; }
     gpuFrameCommandIfLive(self);
     // F45 (TEMPORARY instrument): a non-instanced draw reads instance stream entry 0 (the marker probe's record match); staging copies only.
-    if (nativeOnFootMarkerProbeLive() && self == g_state->ownerCtx) nativeOnFootMarkerProbeDraw(self, 1, 0, 'I');
+    if (nativeOnFootMarkerProbeLive() && self == g_state->ownerCtx) nativeOnFootMarkerProbeDraw(self, 1, 0, 'I', count, startIndex, baseVertex);
     if (self == g_state->ownerCtx) { temporalPassCountDraw(); if (temporalPassWantsDraw()) temporalPassNoteDraw(self); }
     DrawClock clock;
     ++g_state->thunkHits[kHitDrawIndexed];
@@ -4903,7 +4903,7 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
     if (g_vrWorldInternal) { g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance); return; }
     gpuFrameCommandIfLive(self);
     // F44 (TEMPORARY instrument): before the verdict, so the bindings read are the game's; copies into EDVR's staging only.
-    if (nativeOnFootMarkerProbeLive() && self == g_state->ownerCtx) nativeOnFootMarkerProbeDraw(self, instances, startInstance, 'N');
+    if (nativeOnFootMarkerProbeLive() && self == g_state->ownerCtx) nativeOnFootMarkerProbeDraw(self, instances, startInstance, 'N', perInstance, startVertex, 0);
     if (self == g_state->ownerCtx) { temporalPassCountDraw(); if (temporalPassWantsDraw()) temporalPassNoteDraw(self); }
     noteStaleForward(kSlotDrawInstanced, reinterpret_cast<const void*>(g_state->realDrawInstanced),
                      "DrawInstanced");
@@ -4975,7 +4975,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     if (g_vrWorldInternal) { g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex, baseVertex, startInstance); return; }
     gpuFrameCommandIfLive(self);
     // F44 (TEMPORARY instrument): before the verdict, so the bindings read are the game's; copies into EDVR's staging only.
-    if (nativeOnFootMarkerProbeLive() && self == g_state->ownerCtx) nativeOnFootMarkerProbeDraw(self, instances, startInstance, 'X');
+    if (nativeOnFootMarkerProbeLive() && self == g_state->ownerCtx) nativeOnFootMarkerProbeDraw(self, instances, startInstance, 'X', perInstance, startIndex, baseVertex);
     if (self == g_state->ownerCtx) { temporalPassCountDraw(); if (temporalPassWantsDraw()) temporalPassNoteDraw(self); }
     noteStaleForward(kSlotDrawIndexedInstanced, reinterpret_cast<const void*>(g_state->realDrawIndexedInstanced),
                      "DrawIndexedInstanced");

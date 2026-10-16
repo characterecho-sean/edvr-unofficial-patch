@@ -124,13 +124,11 @@ double g_ikAdsKeys[6] = {nofoot::kIkAdsSquareDefault, nofoot::kIkAdsElbowOutCmDe
 // reader's last value.
 std::atomic<float> g_eyeHeightCm{static_cast<float>(nofoot::kEyeHeightDefaultCm)};
 double g_eyeHeightCmLast = nofoot::kEyeHeightDefaultCm;
-// F65b (TEMPORARY): fix.native_on_foot_stand_armed (on by default, hidden, live): keep the 3P body standing when armed. The frame thread's
-// published state for the Animate post-hook: the armed ramp (0.3 s; the key on, a weapon held, full-3P body mode, the arm IK on), the armed
-// flag itself (the stand height is captured only unarmed) and idle (no locomotion, no ADS).
+// F67c (TEMPORARY): fix.native_on_foot_stand_armed (the key F65b made: hidden, live, on by default) is now the BODY PIN's switch: in full-3P body
+// mode with the arm IK on, the Animate post-hook moves the animated pose so the neck sits under the camera (F65b's captured stand height is gone). The
+// name is F65b's; the arc doc proposes renaming it at the arc's close.
 std::atomic<bool> g_standKeyOn{true};
 int g_standKeyLast = -1;
-std::atomic<float> g_standArmedW{0.0f};
-std::atomic<bool> g_standArmedFlag{false}, g_standIdle{false};
 // F66a: the armed ramp (0.3 s; the game's armed flag, journalHeldItem), published by the frame thread for the Animate hook: the bend's limits
 // (nofoot::bendLimitsArmed) and the arm IK's per-arm weight (nofoot::ikArmWeight) follow it. 0 when native stereo on foot is not active.
 std::atomic<float> g_armedW{0.0f};
@@ -692,8 +690,8 @@ void readKey() {
         if (first || on != g_adsAimKey.load(std::memory_order_relaxed))
             Log::get().note("native on foot ADS head aim (F62b, TEMPORARY): fix.native_on_foot_ads_head_aim is %s", on ? "on -- in native on foot "
                             "with the full third-person body (body align body, the FP body hidden, the body unclipped), while aiming down sights "
-                            "the headset's turn is sent as look input, the turn the game makes is cancelled in the seated space and the eye is "
-                            "held where it was at entry; nothing changes outside that" : "off -- nothing changes");
+                            "the weapon is steered onto your view (look input; F67a: no seated rotation) and the eye is held where it was at "
+                            "entry; nothing changes outside that" : "off -- nothing changes");
         g_adsAimKey.store(on, std::memory_order_relaxed);
         const auto sign = [](int v) { return v > 0 ? 1 : v < 0 ? -1 : 0; };
         const int ys = sign(cfg.getInt("fix.native_on_foot_ads_head_aim_yaw_sign", 1));
@@ -808,14 +806,15 @@ void readKey() {
             g_eyeHeightCmLast = cm;
             g_eyeHeightCm.store(static_cast<float>(cm), std::memory_order_relaxed);
         }
-        // F65b (TEMPORARY, hidden, live): stand armed, on (the default) or off. Off: no raise, no leg solve.
+        // F67c (TEMPORARY, hidden, live): the body pin (the key F65b named stand_armed), on (the default) or off. Off: the old frame-thread body offset.
         {
             const bool standOn = cfg.getString("fix.native_on_foot_stand_armed", "on") != "off";
             if (first || (standOn ? 1 : 0) != g_standKeyLast)
-                Log::get().note("native on foot stand armed (F65b, TEMPORARY): fix.native_on_foot_stand_armed = %s -- %s", standOn ? "on" : "off",
-                                standOn ? "while a weapon is held in full-3P body mode with the arm IK on, the 3P upper body is raised back to its "
-                                          "standing height (ramped over 0.3 s) and each leg solved from the raised hip to its animated foot"
-                                        : "no raise, no leg solve");
+                Log::get().note("native on foot body pin (F67c, TEMPORARY): fix.native_on_foot_stand_armed = %s -- %s", standOn ? "on" : "off",
+                                standOn ? "in full-3P body mode with the arm IK on, the 3P pose is moved in the Animate post-hook so the neck sits under the "
+                                          "camera (horizontal for the whole pose, vertical for the upper body with the legs solved or re-planted); the "
+                                          "frame thread's body offset and the submit-time shift are zero"
+                                        : "the frame thread's body offset (F35..F66) and the submit-time shift, as before");
             g_standKeyLast = standOn ? 1 : 0;
             g_standKeyOn.store(standOn, std::memory_order_relaxed);
         }
@@ -5528,30 +5527,25 @@ void lookPassiveTick(uint64_t nowMs) {
     g_lookPassAgree = g_lookPassDisagree = g_lookPassStill = 0;
 }
 
-// ---- F62b (TEMPORARY): the ADS head-aim (fix.native_on_foot_ads_head_aim), the frame thread's half -------------------------------------
+// ---- F62b (TEMPORARY) and F67a: the ADS head-aim (fix.native_on_foot_ads_head_aim), the frame thread's half ------------------------------
 // Applies in native stereo on foot with the full-3P body (body align = body, hide_fp_body and body_unclip on), the look hooks armed, look to
 // aim not engaged and the rotation calibration off. While ADS (journalAds), with the weight wA (0.15 s in, 0.3 s out):
-//  1. the headset's turn since the last frame (the LOCAL head of frame input version 3: heading and elevation) times wA is queued as look
-//     input (yaw and pitch) for the game's next look update, through the measured gain (fallback 1.0) and the sign keys;
-//  2. the turn the game actually applied for it (the processor's comp+0x5F4 / +0x5F8, our part) is added to the seated rotation in the seat
-//     convention: the yaw through the look's total (the runtime's lookPoll turns the seat about the head), the pitch through version 10's
-//     pitch overlay (adsPoll). F61 measured a seated +a moving the camera by -a, so the view follows the headset whatever share the aim took;
-//  3. the position lock: the seated offset wA (h - h_entry) (natural LOCAL) rides the eye alignment, so the eye stays where it was at entry;
-//  4. (F66: the weapon fit that pulled the body toward the grips in ADS is gone; the body follows the head's target as outside ADS.)
-// Release: the yaw is kept (a rebase, like a recentre); the pitch unwinds over 0.3 s by injecting the opposite (the cancel follows what the
-// game applies), any remainder is chased for 0.2 s and then dropped (logged); the lock and the body go with wA. Guards: more than 270 deg of
-// seated yaw in 3 s, or |camera - head| growing for 0.5 s, trip it off until the key toggles, a sign key changes or on foot re-enters. A trip,
-// or the feature not applying any more (the key off, on foot ended, not full 3P, ...), returns the seated rotation to zero, the kept yaw too.
-enum AdsState : int { kAdsIdle = 0, kAdsActive = 1, kAdsReleasing = 2, kAdsTripped = 3 };
-const char* const kAdsStateNames[4] = {"idle", "engaged", "releasing", "tripped"};
+//  1. F67a: the weapon is steered onto the view (adsAimStep, after the sight lock). Each frame the look input asked for is wA * k * (the view's
+//     direction less the weapon's, less the last three asks), k 0.3, queued for the game's next look update through the measured gain (fallback
+//     1.0) and the sign keys; the view is the right eye's solved rows, the weapon the FP root's forward. The turn the game applied for it (the
+//     processor's comp+0x5F4 / +0x5F8, our part) is logged and measures the gain; it does not enter the loop. NOTHING is published to the seated space: F62b's
+//     cancel (the seated yaw through the look's total, the pitch through version 10's overlay) and its runaway guard are gone. The F66 flight
+//     (113909) showed the game camera never takes the injected aim, so the cancel was what held the view still, and the guard latched.
+//  2. the position lock: the seated offset wA (h - h_entry) (natural LOCAL) rides the eye alignment, so the eye stays where it was at entry;
+//  3. (F66: the weapon fit that pulled the body toward the grips in ADS is gone; the body follows the head's target as outside ADS.)
+// Release: injection stops at once (the queue is dropped) and the weight ramps out over 0.3 s, taking the locks with it. Every press starts clean
+// (the in-flight account, the window, the sight lock's guard); the one hold-off left, a look value that could not be restored, lasts until the ADS
+// flag falls.
+enum AdsState : int { kAdsIdle = 0, kAdsActive = 1, kAdsReleasing = 2 };
+const char* const kAdsStateNames[3] = {"idle", "engaged", "releasing"};
 int g_adsState = kAdsIdle;            // frame thread only, as is everything in this block
 nofoot::AdsRamp g_adsRamp;
 double g_adsW = 0.0;                  // the weight this tick
-double g_adsYawSeat = 0.0;            // the seated yaw published, cumulative (seat convention); lookPublishTick adds it to the look's total
-double g_adsYawCarried = 0.0;         // its part since the last reset serial (the kept yaw included)
-double g_adsPitchSeat = 0.0;          // the seated pitch published (seat convention, +-60 deg)
-double g_adsPitchOut = 0.0;           // the pitch queued and not yet seen applied (seat convention; decays with tau 50 ms)
-float g_adsPitchPub = 0.0f;           // the value last handed to nativeFrameSetAdsPitch
 double g_adsLock[3] = {};             // the position lock's seated offset (natural LOCAL metres); alignTick adds it to the eye alignment
 bool g_adsEntryValid = false;
 double g_adsEntry[3] = {}, g_adsHeadNow[3] = {};
@@ -5563,21 +5557,36 @@ bool g_adsHavePrev = false;
 uint64_t g_adsHeadSeq = 0;
 uint32_t g_adsPrevGen = 0;
 double g_adsAppSeen[2] = {}, g_adsUserSeen[2] = {};
-double g_adsRelT = 0.0, g_adsRelP0 = 0.0;
-nofoot::AdsTurnWindow g_adsTurns;
-nofoot::AdsResidualGrowth g_adsGrowth;
-int g_adsBaseSrc = 0;                 // the residual's camera source at its base: 0 none, 1 cb1 270..273, 2 C
-nofoot::RotFrameSum g_adsCamBase, g_adsHeadBase, g_adsCamLast;
-double g_adsUserSinceBase[2] = {};    // the player's own aim turn since the base (seat convention, radians)
-double g_adsRes[2] = {}, g_adsResHead[2] = {};
-bool g_adsResHave = false;
+bool g_adsStoppedPress = false;       // F67a: a look value could not be restored: held off until the ADS flag falls (the next press starts clean)
 // F63: the ADS sight lock's trip (adsSightTick, alignTick): set by its guard, cleared at the next ADS engage.
 bool g_adsSightTripped = false;
+// F67a: the in-flight account and the window (cleared at every engage), the press's own record for the cone line (F67b).
+nofoot::AdsAimRun g_adsAim;
+struct AdsAimWin {
+    uint32_t frames = 0, asked = 0, noRows = 0, noRoot = 0, noSample = 0, degenerate = 0, cut = 0, past = 0, engages = 0;
+    double errSum[2] = {}, errAbsMax = 0.0;       // view minus weapon, degrees (yaw, pitch), before this frame's ask
+    double askSum[2] = {}, queuedSum[2] = {};     // degrees (seat) asked for; the game's input units queued
+    double offSum[2] = {}, offAbsMax = 0.0;       // the weapon's offset from the body, degrees (yaw, pitch)
+    double headYaw = 0.0, headPitch = 0.0;        // the head's turn this window (degrees, adsAimTick's samples)
+    bool viewHave = false;
+    nofoot::RotFrameSum viewFirst, viewLast;
+    // F67b: the three forwards: [0] the FP root against the view, [1] the FP root against camera C, [2] the view against C (degrees: sum, max)
+    // and the right eye's image-centre ray (NDC 0, 0) against its forward ([3]) and against the FP root's forward ([4]): on a canted-display headset
+    // the eye's forward is the lens axis, not the head's.
+    uint32_t angN = 0, angCN = 0;
+    double angSum[5] = {}, angMax[5] = {}, cYawSum = 0.0, cPitchSum = 0.0;
+};
+AdsAimWin g_adsAimWin;
+uint64_t g_adsAimLineMs = 0, g_adsPressMs = 0, g_adsRelMs = 0;
+double g_adsOffLast[2] = {};          // the weapon's offset from the body at the last measurement (degrees, yaw + pitch)
+uint64_t g_adsOffLastMs = 0;
+double g_adsPressOffMax = 0.0;        // this press: the largest |yaw offset| and the frames the cone cut
+uint32_t g_adsPressCut = 0;
+uint64_t g_adsLastCutMs = 0;
 // The 1 s line's sums.
 uint64_t g_adsLineMs = 0;
-uint32_t g_adsSteps = 0, g_adsSkips = 0, g_adsClampHits = 0, g_adsRebases = 0, g_adsWritesSeen = 0, g_adsProcSeen = 0, g_adsRefSeen = 0;
-double g_adsSumHead[2] = {}, g_adsSumIn[2] = {}, g_adsSumQueued[2] = {}, g_adsSumApplied[2] = {}, g_adsSumUser[2] = {}, g_adsSumCancel[2] = {};
-double g_adsResMax = 0.0;
+uint32_t g_adsSteps = 0, g_adsSkips = 0, g_adsWritesSeen = 0, g_adsProcSeen = 0, g_adsRefSeen = 0;
+double g_adsSumHead[2] = {}, g_adsSumApplied[2] = {}, g_adsSumUser[2] = {};
 
 void adsQueue(std::atomic<float>& q, double add, double cap) noexcept {
     float cur = q.load(std::memory_order_relaxed);
@@ -5587,50 +5596,28 @@ void adsQueue(std::atomic<float>& q, double add, double cap) noexcept {
         if (q.compare_exchange_weak(cur, static_cast<float>(next), std::memory_order_relaxed)) return;
     }
 }
-void adsPublishPitch() noexcept {
-    const float p = static_cast<float>(g_adsPitchSeat);
-    if (p != g_adsPitchPub) {
-        g_adsPitchPub = p;
-        nativeFrameSetAdsPitch(p);
-    }
-}
 void adsLineReset() noexcept {
-    g_adsSteps = g_adsSkips = g_adsClampHits = g_adsRebases = 0;
-    for (int i = 0; i < 2; ++i) g_adsSumHead[i] = g_adsSumIn[i] = g_adsSumQueued[i] = g_adsSumApplied[i] = g_adsSumUser[i] = g_adsSumCancel[i] = 0.0;
-    g_adsResMax = 0.0;
+    g_adsSteps = g_adsSkips = 0;
+    for (int i = 0; i < 2; ++i) g_adsSumHead[i] = g_adsSumApplied[i] = g_adsSumUser[i] = 0.0;
 }
-void adsResidualReset() noexcept {
-    g_adsBaseSrc = 0;
-    g_adsUserSinceBase[0] = g_adsUserSinceBase[1] = 0.0;
-    g_adsRes[0] = g_adsRes[1] = g_adsResHead[0] = g_adsResHead[1] = 0.0;
-    g_adsResHave = false;
-    g_adsGrowth = nofoot::AdsResidualGrowth{};
-}
-// Returns the seated rotation to zero (the yaw through the reset serial: the runtime turns its look compensation back to zero, the kept yaw
-// included), the pitch and the lock to zero, and stops the hook's writes. tripped: off until the key toggles, a sign key changes or on foot
-// re-enters.
-void adsStop(const char* why, bool tripped) noexcept {
-    const double carriedDeg = g_adsYawCarried / nofoot::kAdsDeg, pitchDeg = g_adsPitchSeat / nofoot::kAdsDeg;
+// Stops the feature at once: the lock goes to zero, the hook writes nothing, the queue and the in-flight account are dropped. Nothing was ever
+// published to the seated space (F67a), so there is nothing to give back. holdOff: off until the ADS flag falls (a look value could not be restored).
+void adsStop(const char* why, bool holdOff) noexcept {
     const double lockCm = 100.0 * std::sqrt(g_adsLock[0] * g_adsLock[0] + g_adsLock[1] * g_adsLock[1] + g_adsLock[2] * g_adsLock[2]);
     const int was = g_adsState;
     g_adsHookOn.store(false, std::memory_order_relaxed);
     g_adsInYaw.store(0.0f, std::memory_order_relaxed);
     g_adsInPitch.store(0.0f, std::memory_order_relaxed);
-    if (std::fabs(g_adsYawCarried) > 1e-9) g_lookResetSerial.fetch_add(1, std::memory_order_relaxed);   // F25's serial: the runtime re-bases to zero
-    g_adsYawCarried = 0.0;
-    g_adsPitchSeat = g_adsPitchOut = 0.0;
-    adsPublishPitch();
     g_adsLock[0] = g_adsLock[1] = g_adsLock[2] = 0.0;
     g_adsEntryValid = false;
     g_adsRamp = nofoot::AdsRamp{};
     g_adsW = 0.0;
-    g_adsTurns = nofoot::AdsTurnWindow{};
-    adsResidualReset();
-    g_adsState = tripped ? kAdsTripped : kAdsIdle;
-    Log::get().note("native on foot ADS head aim (F62b): %s (%s; was %s): the seated yaw (%.2f deg carried, the kept yaw included) and pitch (%.2f deg) "
-                    "return to zero, the lock (%.1f cm) is released, the hook writes nothing%s",
-                    tripped ? "RUNAWAY GUARD TRIPPED" : "stops", why, kAdsStateNames[was], carriedDeg, pitchDeg, lockCm,
-                    tripped ? "; off until the key is toggled, a sign key changes or native on foot re-enters" : "");
+    g_adsAim.reset();
+    g_adsState = kAdsIdle;
+    if (holdOff) g_adsStoppedPress = true;
+    Log::get().note("native on foot ADS head aim (F62b): stops (%s; was %s): the lock (%.1f cm) is released, the hook writes nothing, the queue and the "
+                    "in-flight account are dropped%s",
+                    why, kAdsStateNames[was], lockCm, holdOff ? "; held off until the ADS flag falls (the next press starts clean)" : "");
 }
 
 // F63: why native on foot is not the full-3P body (body align body, the FP body hidden, the body unclipped), naming the key that is not set;
@@ -5646,7 +5633,8 @@ const char* full3PWhy() noexcept {
     return nullptr;
 }
 
-// Frame thread, every frame, before lookPublishTick (which publishes the yaw) and alignTick (the eye alignment and the body).
+// Frame thread, every frame, before lookPublishTick and alignTick. The state machine, the game's applied deltas, the headset sample for the position
+// lock; the injection itself is adsAimStep's (it needs the eye rows and the FP root, which are read after this).
 void adsAimTick(uint64_t now, bool session) noexcept {
     const bool key = g_adsAimKey.load(std::memory_order_relaxed);
     const int ySign = g_adsYawSign.load(std::memory_order_relaxed), pSign = g_adsPitchSign.load(std::memory_order_relaxed);
@@ -5659,11 +5647,6 @@ void adsAimTick(uint64_t now, bool session) noexcept {
         g_adsFootLast = onFoot;
     }
     const bool signChanged = ySign != g_adsYSignLast || pSign != g_adsPSignLast;
-    if ((key != g_adsKeyLast || signChanged || (onFoot && !g_adsFootLast)) && g_adsState == kAdsTripped) {
-        g_adsState = kAdsIdle;
-        Log::get().note("native on foot ADS head aim (F62b): runaway guard cleared (%s)",
-                        signChanged ? "a sign key changed" : key != g_adsKeyLast ? "the key was toggled" : "native on foot re-entered");
-    }
     g_adsKeyLast = key;
     g_adsYSignLast = ySign;
     g_adsPSignLast = pSign;
@@ -5696,53 +5679,79 @@ void adsAimTick(uint64_t now, bool session) noexcept {
     g_adsAppSeen[1] = appG[1];
     g_adsUserSeen[0] = userG[0];
     g_adsUserSeen[1] = userG[1];
-    if (off || g_adsState == kAdsTripped) {
-        // The feature does not apply (or the guard holds it off): the seated rotation goes back to zero, the yaw kept from earlier aims too.
-        if (off && (g_adsState == kAdsActive || g_adsState == kAdsReleasing || std::fabs(g_adsYawCarried) > 1e-9)) adsStop(off, false);
+    if (!ads) g_adsStoppedPress = false;   // F67a: a hold-off lasts one press
+    if (off || g_adsStoppedPress) {
+        // The feature does not apply (or a look value could not be restored in this press): everything goes back to zero.
+        if (off && (g_adsState == kAdsActive || g_adsState == kAdsReleasing)) adsStop(off, false);
         // Aiming down sights in native on foot with the key on, but not engaged: say why, every 5 s (no line at all would read like success).
         // F63: outside full 3P too (F62's flight ran with body align off and nothing said so): the reason names the body key that is off.
         static uint64_t waitLineMs = 0;
         if (key && onFoot && ads && now - waitLineMs >= 5000) {
             waitLineMs = now;
-            Log::get().note("native on foot ADS head aim (F62b): aiming down sights but not engaged: %s", off ? off : "the runaway guard tripped earlier");
+            Log::get().note("native on foot ADS head aim (F62b): aiming down sights but not engaged: %s",
+                            off ? off : "a look value could not be restored earlier in this press (held off until the ADS flag falls)");
         }
         g_adsHookOn.store(false, std::memory_order_relaxed);
         g_adsW = 0.0;
         g_adsHavePrev = false;
         return;
     }
-    // The state: engage on ADS, release when it ends, re-engage from the release.
+    // The state: engage on ADS, release when it ends, re-engage from the release. Every engage starts clean.
     if (g_adsState == kAdsIdle && ads) {
         g_adsState = kAdsActive;
         g_adsHavePrev = false;
         g_adsEntryValid = false;
         if (g_adsSightTripped) Log::get().note("native on foot ADS sight lock (F63): guard cleared (a new ADS engage)");
         g_adsSightTripped = false;   // F63: the sight lock's guard holds it off until the next engage
-        g_adsPitchOut = 0.0;
-        g_adsTurns = nofoot::AdsTurnWindow{};
-        adsResidualReset();
+        g_adsAim.reset();
+        g_adsInYaw.store(0.0f, std::memory_order_relaxed);
+        g_adsInPitch.store(0.0f, std::memory_order_relaxed);
+        g_adsAimWin = AdsAimWin{};
+        g_adsAimWin.engages = 1;
+        g_adsAimLineMs = now;
+        g_adsPressMs = now;
+        g_adsPressOffMax = 0.0;
+        g_adsPressCut = 0;
+        g_adsLastCutMs = 0;
+        g_adsOffLastMs = 0;
         adsLineReset();
         g_adsLineMs = now;
         g_adsWritesSeen = g_adsWrites.load(std::memory_order_relaxed);
         g_adsProcSeen = g_adsProcCalls.load(std::memory_order_relaxed);
         g_adsRefSeen = g_adsRefusals.load(std::memory_order_relaxed);
-        Log::get().note("native on foot ADS head aim (F62b): engaged (ADS): the headset's turn goes to the game as look input, its applied turn is "
-                        "cancelled in the seated space; carried yaw %.2f deg (kept from earlier aims), signs yaw %d pitch %d, gain yaw %.4f pitch %.4f "
-                        "(0 = none measured yet: 1.0 is used)", g_adsYawCarried / nofoot::kAdsDeg, ySign, pSign,
-                        static_cast<double>(g_adsGainYaw.load(std::memory_order_relaxed)), static_cast<double>(g_adsGainPitch.load(std::memory_order_relaxed)));
+        Log::get().note("native on foot ADS head aim (F62b): engaged (ADS), a clean press (F67a): the weapon is steered onto the view, k %.2f per frame "
+                        "(the right eye's rows against the FP root's forward), the weapon's yaw offset from the body held to %.0f deg; no seated rotation is "
+                        "published; signs yaw %d pitch %d, gain yaw %.4f pitch %.4f (0 = none measured yet: 1.0 is used)", nofoot::kAdsAimK,
+                        nofoot::kAdsConeBoundDeg, ySign, pSign, static_cast<double>(g_adsGainYaw.load(std::memory_order_relaxed)),
+                        static_cast<double>(g_adsGainPitch.load(std::memory_order_relaxed)));
     } else if (g_adsState == kAdsActive && !ads) {
         g_adsState = kAdsReleasing;
-        g_adsRelT = 0.0;
-        g_adsRelP0 = g_adsPitchSeat + g_adsPitchOut;
-        Log::get().note("native on foot ADS head aim (F62b): release: the seated yaw is kept (%.2f deg carried), the pitch (%.2f deg, %.2f in flight) "
-                        "unwinds over 0.3 s by injecting the opposite, the lock (%.1f, %.1f, %.1f cm) and the body go with the weight (%.2f)",
-                        g_adsYawCarried / nofoot::kAdsDeg, g_adsPitchSeat / nofoot::kAdsDeg, g_adsPitchOut / nofoot::kAdsDeg, 100.0 * g_adsLock[0],
-                        100.0 * g_adsLock[1], 100.0 * g_adsLock[2], g_adsW);
+        g_adsRelMs = now;
+        g_adsHookOn.store(false, std::memory_order_relaxed);   // injection stops at once
+        g_adsInYaw.store(0.0f, std::memory_order_relaxed);
+        g_adsInPitch.store(0.0f, std::memory_order_relaxed);
+        g_adsAim.reset();
+        // F67b: the game's ADS flag fell. The weapon's yaw offset from the body at that moment is the game's cone if it was the game that dropped ADS
+        // (the player's own release reads the same, so the line says whether our bound had just cut the injection).
+        char offAge[48], cutAge[48];
+        if (g_adsOffLastMs) _snprintf_s(offAge, sizeof(offAge), _TRUNCATE, "%llu ms ago", static_cast<unsigned long long>(now - g_adsOffLastMs));
+        else _snprintf_s(offAge, sizeof(offAge), _TRUNCATE, "never measured");
+        if (g_adsLastCutMs) _snprintf_s(cutAge, sizeof(cutAge), _TRUNCATE, "%llu ms ago", static_cast<unsigned long long>(now - g_adsLastCutMs));
+        else _snprintf_s(cutAge, sizeof(cutAge), _TRUNCATE, "none");
+        Log::get().note("native on foot ADS cone (F67b): the game's ADS flag fell after %.2f s: the weapon's yaw offset from the body at the last "
+                        "measurement (%s) %+.1f deg, pitch %+.1f deg; this press's largest |yaw offset| %.1f deg; the bound in use %.0f deg (until this "
+                        "is measured), frames the bound cut this press %u, the last cut %s",
+                        static_cast<double>(now - g_adsPressMs) / 1000.0, offAge, g_adsOffLast[0], g_adsOffLast[1], g_adsPressOffMax,
+                        nofoot::kAdsConeBoundDeg, g_adsPressCut, cutAge);
+        Log::get().note("native on foot ADS head aim (F62b): release: injection stops, the queue is dropped; the weight (%.2f) ramps out over 0.3 s and "
+                        "takes the lock (%.1f, %.1f, %.1f cm) with it; nothing is kept (no seated yaw or pitch exists)", g_adsW, 100.0 * g_adsLock[0],
+                        100.0 * g_adsLock[1], 100.0 * g_adsLock[2]);
     } else if (g_adsState == kAdsReleasing && ads) {
         g_adsState = kAdsActive;
         g_adsHavePrev = false;
-        Log::get().note("native on foot ADS head aim (F62b): engaged again during the release (weight %.2f, pitch %.2f deg)", g_adsW,
-                        g_adsPitchSeat / nofoot::kAdsDeg);
+        g_adsAim.reset();
+        ++g_adsAimWin.engages;
+        Log::get().note("native on foot ADS head aim (F62b): engaged again during the release (weight %.2f); the in-flight account starts clean", g_adsW);
     }
     if (g_adsState == kAdsIdle) {
         g_adsHookOn.store(false, std::memory_order_relaxed);
@@ -5751,34 +5760,14 @@ void adsAimTick(uint64_t now, bool session) noexcept {
         g_adsHavePrev = false;
         return;
     }
-    g_adsHookOn.store(true, std::memory_order_relaxed);
+    g_adsHookOn.store(g_adsState == kAdsActive, std::memory_order_relaxed);
     g_adsRamp.step(g_adsState == kAdsActive, dt);
     g_adsW = g_adsRamp.w;
-    // 2. The cancel: what the game applied for our input goes into the seated rotation (yaw: the look's total; pitch: version 10, +-60 deg).
-    g_adsYawSeat += aY;
-    g_adsYawCarried += aY;
-    {
-        const double before = g_adsPitchSeat, want = g_adsPitchSeat + aP;
-        if (std::fabs(want) > nofoot::kAdsPitchClampRad) ++g_adsClampHits;
-        g_adsPitchSeat = nofoot::adsClampPitch(want);
-        adsPublishPitch();
-        g_adsSumCancel[1] += g_adsPitchSeat - before;
-    }
-    g_adsPitchOut = (g_adsPitchOut - aP) * (dt > 0.0 ? std::exp(-dt / 0.05) : 1.0);
+    // What the game applied for our input (F67a: logged only; the in-flight account is the window of recent asks, and nothing is cancelled).
     g_adsSumApplied[0] += aY;
     g_adsSumApplied[1] += aP;
     g_adsSumUser[0] += uY;
     g_adsSumUser[1] += uP;
-    g_adsSumCancel[0] += aY;
-    g_adsUserSinceBase[0] += uY;
-    g_adsUserSinceBase[1] += uP;
-    g_adsTurns.add(now, aY);
-    if (g_adsTurns.over(now)) {
-        char why[128];
-        _snprintf_s(why, sizeof(why), _TRUNCATE, "the seated yaw turned %.1f deg in 3 s (more than 270)", g_adsTurns.total(now) / nofoot::kAdsDeg);
-        adsStop(why, true);
-        return;
-    }
     // The headset (frame input version 3: the head in natural LOCAL, untouched by the seated space's turns).
     EdvrNativeNowPose np{};
     const bool haveLocal = nativeFrameNowPose(np) && np.localValid;
@@ -5799,7 +5788,6 @@ void adsAimTick(uint64_t now, bool session) noexcept {
                                     std::sqrt(step[0] * step[0] + step[1] * step[1] + step[2] * step[2]) > nofoot::kAdsHeadJumpM;
                 if (g_adsEntryValid && jumped)
                     for (int i = 0; i < 3; ++i) g_adsEntry[i] += step[i];
-                adsResidualReset();
             }
         }
         std::memcpy(g_adsPrevHead, np.local, sizeof(g_adsPrevHead));
@@ -5815,126 +5803,24 @@ void adsAimTick(uint64_t now, bool session) noexcept {
     if (headStep) {
         g_adsSumHead[0] += dYaw;
         g_adsSumHead[1] += dPitch;
+        g_adsAimWin.headYaw += dYaw / nofoot::kAdsDeg;
+        g_adsAimWin.headPitch += dPitch / nofoot::kAdsDeg;
     }
-    // 1. The injection (seat convention): engaged, the head's step times the weight (the pitch held inside +-60 deg with what is in flight);
-    // releasing, the pitch's unwind (the schedule, then the remainder chased for 0.2 s); the yaw is not injected in the release.
-    double inY = 0.0, inP = 0.0;
-    if (g_adsState == kAdsActive && headStep) {
-        inY = g_adsW * dYaw;
-        inP = nofoot::adsPitchLimit(g_adsPitchSeat + g_adsPitchOut, g_adsW * dPitch);
-    } else if (g_adsState == kAdsReleasing) {
-        const double tPrev = g_adsRelT;
-        g_adsRelT += dt;
-        if (tPrev < nofoot::kAdsUnwindSec) inP = nofoot::adsUnwindTarget(g_adsRelP0, g_adsRelT) - nofoot::adsUnwindTarget(g_adsRelP0, tPrev);
-        else if (std::fabs(g_adsPitchSeat + g_adsPitchOut) > 0.05 * nofoot::kAdsDeg) inP = -(g_adsPitchSeat + g_adsPitchOut);
-    }
-    if (ySign == 0) inY = 0.0;
-    if (pSign == 0) inP = 0.0;
-    if (inY != 0.0 || inP != 0.0) {
-        const double gainY = static_cast<double>(g_adsGainYaw.load(std::memory_order_relaxed));
-        const double gainP = static_cast<double>(g_adsGainPitch.load(std::memory_order_relaxed));
-        const double iY = nofoot::adsInput(nofoot::adsGameFromSeatYaw(inY, ySign), gainY);
-        const double iP = nofoot::adsInput(nofoot::adsGameFromSeatPitch(inP, pSign), gainP);
-        if (iY != 0.0) adsQueue(g_adsInYaw, iY, nofoot::kAdsPendingMaxRad / std::fabs(nofoot::adsGain(gainY)));
-        if (iP != 0.0) adsQueue(g_adsInPitch, iP, nofoot::kAdsPendingMaxRad / std::fabs(nofoot::adsGain(gainP)));
-        g_adsPitchOut += inP;
-        g_adsSumIn[0] += inY;
-        g_adsSumIn[1] += inP;
-        g_adsSumQueued[0] += iY;
-        g_adsSumQueued[1] += iP;
-    }
-    // 3. The position lock (natural LOCAL; zero until the entry is taken).
+    // The position lock (natural LOCAL; zero until the entry is taken).
     if (g_adsEntryValid) nofoot::adsLockOffset(g_adsHeadNow, g_adsEntry, g_adsW, g_adsLock);
     else g_adsLock[0] = g_adsLock[1] = g_adsLock[2] = 0.0;
-    // The camera - head residual: the camera's turn since the base (cb1 270..273 when fresh, else C; F61's sources) less the head's own turn
-    // and the player's own aim turn since then. About 0: the view follows the headset. An axis whose sign key is 0 is not measured.
-    {
-        int camSrc = 0;
-        double cr[3], cu[3], cf[3];
-        {
-            float rows6[6][4] = {};
-            uint32_t named = 0, presentNow = 0;
-            if (engineVelocityLastSourceCameraRows(rows6, &named, &presentNow) && static_cast<uint32_t>(presentNow - named) <= 2u) {
-                float rows[16];
-                std::memcpy(rows, rows6, sizeof(rows));
-                if (nofoot::rotAxesFromClip(rows, cr, cu, cf)) camSrc = 1;
-            }
-        }
-        if (!camSrc) {
-            float C[16] = {};
-            bool haveC = false;
-            {
-                F9Lock lock;
-                if (g_worldC.valid && now - g_worldCMs < 500) {
-                    std::memcpy(C, g_worldC.C, sizeof(C));
-                    haveC = true;
-                }
-            }
-            if (haveC && nofoot::rotAxesFromC(C, cr, cu, cf)) camSrc = 2;
-        }
-        double hr[3], hu[3], hf[3];
-        const bool headAxes = haveLocal && nofoot::rotAxesFromHead(np.local, hr, hu, hf);
-        if (camSrc && headAxes) {
-            nofoot::RotFrameSum cn, hn;
-            cn.add(cr, cu, cf);
-            hn.add(hr, hu, hf);
-            double sy = 0.0, sp = 0.0;
-            // A camera step over 15 deg in one tick (the source switching eyes, a cut) is not a turn: the base is taken again.
-            const bool jump = g_adsBaseSrc == camSrc && nofoot::rotFrameDelta(g_adsCamLast, cn, &sy, &sp) && std::sqrt(sy * sy + sp * sp) > 15.0;
-            if (jump) ++g_adsRebases;
-            if (g_adsBaseSrc != camSrc || jump) {
-                adsResidualReset();
-                g_adsBaseSrc = camSrc;
-                g_adsCamBase = cn;
-                g_adsHeadBase = hn;
-            } else {
-                double cy = 0.0, cp = 0.0, hy = 0.0, hp = 0.0;
-                if (nofoot::rotFrameDelta(g_adsCamBase, cn, &cy, &cp) && nofoot::rotFrameDelta(g_adsHeadBase, hn, &hy, &hp)) {
-                    double ry = cy - hy - g_adsUserSinceBase[0] / nofoot::kAdsDeg, rp = cp - hp - g_adsUserSinceBase[1] / nofoot::kAdsDeg;
-                    while (ry > 180.0) ry -= 360.0;
-                    while (ry < -180.0) ry += 360.0;
-                    if (ySign == 0) ry = 0.0;
-                    if (pSign == 0) rp = 0.0;
-                    g_adsRes[0] = ry;
-                    g_adsRes[1] = rp;
-                    g_adsResHead[0] = hy;
-                    g_adsResHead[1] = hp;
-                    g_adsResHave = true;
-                    const double absRes = std::sqrt(ry * ry + rp * rp), absHead = std::sqrt(hy * hy + hp * hp);
-                    g_adsResMax = std::max(g_adsResMax, absRes);
-                    if (g_adsGrowth.step(now, absRes, absHead)) {
-                        char why[256];
-                        _snprintf_s(why, sizeof(why), _TRUNCATE, "the camera - head residual grew for 0.5 s: yaw %+.1f pitch %+.1f deg against the "
-                                    "head's yaw %+.1f pitch %+.1f; ratio yaw %+.2f pitch %+.2f (about -2: that axis's sign is inverted; about -1: "
-                                    "the camera does not take the aim there)", ry, rp, hy, hp, nofoot::adsResidualRatio(ry, hy),
-                                    nofoot::adsResidualRatio(rp, hp));
-                        adsStop(why, true);
-                        return;
-                    }
-                }
-            }
-            g_adsCamLast = cn;
-        }
-    }
-    // The release ends when the unwind and its chase are done and the weight is 0: any pitch left is dropped (that much view jump, logged).
-    if (g_adsState == kAdsReleasing && g_adsW <= 0.0 && g_adsRelT >= nofoot::kAdsUnwindSec &&
-        (std::fabs(g_adsPitchSeat) <= 0.05 * nofoot::kAdsDeg || g_adsRelT >= nofoot::kAdsUnwindSec + nofoot::kAdsCatchUpSec)) {
-        const double left = g_adsPitchSeat;
-        g_adsPitchSeat = g_adsPitchOut = 0.0;
-        adsPublishPitch();
+    // The release ends when the weight is 0.
+    if (g_adsState == kAdsReleasing && g_adsW <= 0.0) {
         g_adsState = kAdsIdle;
         g_adsHookOn.store(false, std::memory_order_relaxed);
-        g_adsInYaw.store(0.0f, std::memory_order_relaxed);
-        g_adsInPitch.store(0.0f, std::memory_order_relaxed);
         g_adsLock[0] = g_adsLock[1] = g_adsLock[2] = 0.0;
         g_adsEntryValid = false;
-        adsResidualReset();
-        Log::get().note("native on foot ADS head aim (F62b): release complete after %.2f s: the seated yaw is kept (%.2f deg carried); the pitch %s "
-                        "(%.3f deg left)", g_adsRelT, g_adsYawCarried / nofoot::kAdsDeg,
-                        std::fabs(left) <= 0.05 * nofoot::kAdsDeg ? "unwound with the game's" : "remainder was DROPPED: the view jumped by it", left / nofoot::kAdsDeg);
+        g_adsAim.reset();
+        Log::get().note("native on foot ADS head aim (F62b): release complete after %.2f s: the weight is 0, the lock is released, nothing is kept",
+                        static_cast<double>(now - g_adsRelMs) / 1000.0);
         return;
     }
-    // The 1 s lines while engaged or releasing.
+    // The 1 s line while engaged or releasing.
     if (now - g_adsLineMs >= 1000) {
         g_adsLineMs = now;
         const double kD = 1.0 / nofoot::kAdsDeg;
@@ -5942,33 +5828,18 @@ void adsAimTick(uint64_t now, bool session) noexcept {
                        refs = g_adsRefusals.load(std::memory_order_relaxed);
         const float gY = g_adsGainYaw.load(std::memory_order_relaxed), gP = g_adsGainPitch.load(std::memory_order_relaxed);
         const char* hookWhy = g_adsHookWhy.load(std::memory_order_relaxed);
-        Log::get().note("native on foot ADS head aim (F62b): %s, weight %.2f; this second: head yaw %+.2f pitch %+.2f deg (LOCAL head %s, frame input "
-                        "version %u; %u steps, %u skipped); injected yaw %+.2f pitch %+.2f deg (seat convention; input queued %+.5f %+.5f; gain yaw %.4f %s, pitch %.4f %s); "
-                        "applied (ours) yaw %+.2f pitch %+.2f deg; the player's own yaw %+.2f pitch %+.2f deg; cancelled (seated) yaw %+.2f pitch "
-                        "%+.2f deg; seated now yaw %+.2f deg carried, pitch %+.2f deg (%.2f in flight, clamp hits %u)",
-                        kAdsStateNames[g_adsState], g_adsW, g_adsSumHead[0] * kD, g_adsSumHead[1] * kD, haveLocal ? "present" : "MISSING (a runtime older than F62b?)",
-                        haveLocal ? static_cast<unsigned>(np.inputVersion) : 0u, g_adsSteps, g_adsSkips, g_adsSumIn[0] * kD,
-                        g_adsSumIn[1] * kD, g_adsSumQueued[0], g_adsSumQueued[1], static_cast<double>(gY), gY != 0.0f ? "measured" : "(none: 1.0)",
-                        static_cast<double>(gP), gP != 0.0f ? "measured" : "(none: 1.0)", g_adsSumApplied[0] * kD, g_adsSumApplied[1] * kD,
-                        g_adsSumUser[0] * kD, g_adsSumUser[1] * kD, g_adsSumCancel[0] * kD, g_adsSumCancel[1] * kD, g_adsYawCarried * kD,
-                        g_adsPitchSeat * kD, g_adsPitchOut * kD, g_adsClampHits);
-        char res[256];
-        if (g_adsResHave)
-            _snprintf_s(res, sizeof(res), _TRUNCATE, "yaw %+.2f pitch %+.2f deg now, max |r| %.2f this second (camera %s; the head's turn since the "
-                        "base yaw %+.2f pitch %+.2f; ratio yaw %+.2f pitch %+.2f)", g_adsRes[0], g_adsRes[1], g_adsResMax,
-                        g_adsBaseSrc == 1 ? "cb1 270..273" : "C", g_adsResHead[0], g_adsResHead[1], nofoot::adsResidualRatio(g_adsRes[0], g_adsResHead[0]),
-                        nofoot::adsResidualRatio(g_adsRes[1], g_adsResHead[1]));
-        else
-            _snprintf_s(res, sizeof(res), _TRUNCATE, "not measured (camera %s, LOCAL head %s)", g_adsBaseSrc ? "base only" : "none", haveLocal ? "yes" : "no");
         const double hm[3] = {g_adsHeadNow[0] - g_adsEntry[0], g_adsHeadNow[1] - g_adsEntry[1], g_adsHeadNow[2] - g_adsEntry[2]};
-        Log::get().note("native on foot ADS head aim (F62b): camera - head residual %s (about 0: the view follows the head; -2 that axis's sign is "
-                        "inverted; -1 the camera does not take the aim there); lock (%+.1f, %+.1f, %+.1f) cm (LOCAL; the head %.1f cm from entry%s); guard "
-                        "armed: seated yaw in 3 s %.1f deg (trips over 270), residual growing %llu ms (trips at 500), camera rebases %u; hook: writes %u, "
-                        "processor calls %u, refusals %u (%s) this second; signs yaw %d pitch %d",
-                        res, 100.0 * g_adsLock[0], 100.0 * g_adsLock[1], 100.0 * g_adsLock[2],
+        Log::get().note("native on foot ADS head aim (F62b): %s, weight %.2f; this second: head yaw %+.2f pitch %+.2f deg (LOCAL head %s, frame input "
+                        "version %u; %u steps, %u skipped); applied (ours) yaw %+.2f pitch %+.2f deg; the player's own yaw %+.2f pitch %+.2f deg; "
+                        "gain yaw %.4f %s, pitch %.4f %s; in flight now yaw %+.2f pitch %+.2f deg; lock (%+.1f, %+.1f, %+.1f) cm (LOCAL; the head "
+                        "%.1f cm from entry%s); hook: writes %u, processor calls %u, refusals %u (%s) this second; signs yaw %d pitch %d",
+                        kAdsStateNames[g_adsState], g_adsW, g_adsSumHead[0] * kD, g_adsSumHead[1] * kD,
+                        haveLocal ? "present" : "MISSING (a runtime older than F62b?)", haveLocal ? static_cast<unsigned>(np.inputVersion) : 0u, g_adsSteps,
+                        g_adsSkips, g_adsSumApplied[0] * kD, g_adsSumApplied[1] * kD, g_adsSumUser[0] * kD, g_adsSumUser[1] * kD,
+                        static_cast<double>(gY), gY != 0.0f ? "measured" : "(none: 1.0)", static_cast<double>(gP), gP != 0.0f ? "measured" : "(none: 1.0)",
+                        g_adsAim.pending(0) * kD, g_adsAim.pending(1) * kD, 100.0 * g_adsLock[0], 100.0 * g_adsLock[1], 100.0 * g_adsLock[2],
                         g_adsEntryValid ? 100.0 * std::sqrt(hm[0] * hm[0] + hm[1] * hm[1] + hm[2] * hm[2]) : 0.0, g_adsEntryValid ? "" : ", no entry yet",
-                        g_adsTurns.total(now) * kD, static_cast<unsigned long long>(g_adsGrowth.runMs(now)), g_adsRebases, writes - g_adsWritesSeen,
-                        procs - g_adsProcSeen, refs - g_adsRefSeen, hookWhy ? hookWhy : "none", ySign, pSign);
+                        writes - g_adsWritesSeen, procs - g_adsProcSeen, refs - g_adsRefSeen, hookWhy ? hookWhy : "none", ySign, pSign);
         g_adsWritesSeen = writes;
         g_adsProcSeen = procs;
         g_adsRefSeen = refs;
@@ -5996,8 +5867,8 @@ void lookPublishTick() {
     const unsigned slot = (head - 1u - delay) & 1u;
     // F23: the runtime's sign (temporary): the compensation is published as the body turn times this sign.
     const double sgn = g_lookCompSign.load(std::memory_order_relaxed) < 0 ? -1.0 : 1.0;
-    // F62b: the ADS head-aim's seated yaw rides the same total (cumulative, the seat convention, not delayed); the two never run together.
-    nativeFrameSetLookYaw(static_cast<float>(sgn * ring[slot] + g_adsYawSeat), ringFrame[slot], g_lookResetSerial.load(std::memory_order_relaxed));
+    // F67a: the ADS head-aim publishes no seated yaw any more (F62b's cancel is gone): the total is the look's alone.
+    nativeFrameSetLookYaw(static_cast<float>(sgn * ring[slot]), ringFrame[slot], g_lookResetSerial.load(std::memory_order_relaxed));
 }
 
 // The HRC line's values, without the window's calls (the change key).
@@ -6302,7 +6173,7 @@ bool ikGRead(IkGData* out) noexcept {
     }
     return false;
 }
-void ikPublishG(void* amcPtr, uint64_t now) noexcept;   // defined with the FP raise's hand-off below (it reads d and r)
+void ikPublishG(void* amcPtr, void* jobPtr, uint64_t now) noexcept;   // defined with the body offset's hand-off below (it reads d)
 // ---- F66g (TEMPORARY instrument, measure only): the frame order -----------------------------------------------------------------------------
 // J5 of the F65 review: the body offset d is read three times a frame, by G at the eye probe (P1, the local 3P AMC's callback: ikPublishG), by the
 // Animate post-hook (the G it reads, and so the d that G carried) and by the submit job's post-hook (the records' shift), and the order of the three
@@ -6394,7 +6265,7 @@ uint64_t __fastcall eyeProbeHooked(void* amc, void* job) noexcept {
         bodyOffsetRead(d1);
         g_f66gP1Seq.fetch_add(1, std::memory_order_relaxed);   // F66g: the game-frame index, then the P1 event with the d G is about to carry
         f66gPost('P', d1, 0);
-        ikPublishG(amc, now);
+        ikPublishG(amc, job, now);
     }
     return original(amc, job);
 }
@@ -6611,11 +6482,45 @@ void bodyShiftApply(uint64_t amc) noexcept {
                         partsShifted, static_cast<unsigned long long>(shifted), static_cast<unsigned long long>(skipped), dz ? "zero" : "not zero");
     }
 }
+// ---- F67c: P1's input to the body pin ---------------------------------------------------------------------------------------------------------
+// The local 3P AMC's visibility job (P1, the eye probe's callback) runs once a game frame BEFORE the Animate post-hook of the same frame (F66g: P, then
+// submit, then Animate). It publishes the job camera (the LEFT eye: F66e) and the AMC matrix here, lock-free, so the hook's pin takes THIS frame's
+// camera and not a frame thread's republication of an older sample (the F66 bend's period-2 judder: the target the hook read was the frame thread's,
+// from a sample 0..2 game frames old at a 90 Hz tick against a 61 Hz game; see the F67c entry in the arc doc).
+struct PinIn {
+    float cam[3] = {}, m3p[16] = {};
+    uint64_t qpc = 0, ms = 0;
+    uint32_t p1 = 0;   // g_f66gP1Seq at the publication: the game-frame index (its low bit is the parity the lines split by)
+};
+std::atomic<uint32_t> g_pinInSeq{0};
+PinIn g_pinIn;
+std::atomic<bool> g_pinScope{false};   // the frame thread: the pin is on (key, full-3P body mode, the arm IK on, native stereo on foot)
+std::atomic<bool> g_armedNow{false};   // the game's armed flag (g_armed, F66a), for the Animate hook
+void pinInPublish(const float cam[3], const float m3p[16], uint64_t nowMs) noexcept {
+    g_pinInSeq.fetch_add(1, std::memory_order_acq_rel);
+    std::memcpy(g_pinIn.cam, cam, sizeof(g_pinIn.cam));
+    std::memcpy(g_pinIn.m3p, m3p, sizeof(g_pinIn.m3p));
+    g_pinIn.qpc = f30Qpc();
+    g_pinIn.ms = nowMs;
+    g_pinIn.p1 = g_f66gP1Seq.load(std::memory_order_relaxed);
+    g_pinInSeq.fetch_add(1, std::memory_order_release);
+}
+bool pinInRead(PinIn* out) noexcept {
+    for (int tries = 0; tries < 3; ++tries) {
+        const uint32_t s1 = g_pinInSeq.load(std::memory_order_acquire);
+        if (s1 & 1u || s1 == 0) continue;
+        std::memcpy(out, &g_pinIn, sizeof(*out));
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if (g_pinInSeq.load(std::memory_order_relaxed) == s1) return true;
+    }
+    return false;
+}
+
 // F56: G = F_root x Tr(-d) x inv(M3P), the FP model space to the 3P model space (row vectors: FP world = model_fp x F_root; 3P
 // world = model_3p x M3P, shifted by d; F66: the FP raise that put an r into it is gone). Game thread (the P1 callback, the local 3P AMC). Refused (not published) when the AMC matrix cannot be
 // read, the FP root is older than 100 ms, or M3P is singular. The FP root is the whole matrix (rows and origin); probe 5 compares it with the
 // yaw-only map the F45/F55 code uses.
-void ikPublishG(void* amcPtr, uint64_t now) noexcept {
+void ikPublishG(void* amcPtr, void* jobPtr, uint64_t now) noexcept {
     IkGData s;
     FpRootSnap fp{};
     {
@@ -6623,8 +6528,14 @@ void ikPublishG(void* amcPtr, uint64_t now) noexcept {
         fp = g_fpRoot;
     }
     float inv[16] = {};
-    if (!sehAmcMatrix(static_cast<const uint8_t*>(amcPtr), s.m3p) || !fp.ok || (now > fp.stamp ? now - fp.stamp : 0) > nofoot::kIkFreshMs ||
-        !nofoot::pfzAffineInverse(s.m3p, inv)) {
+    const bool m3pOk = sehAmcMatrix(static_cast<const uint8_t*>(amcPtr), s.m3p);
+    // F67c: the pin's input (the job camera and the AMC matrix), every frame, whatever the FP root is doing.
+    if (m3pOk && jobPtr) {
+        float cam[3] = {};
+        if (guardedRead(reinterpret_cast<uintptr_t>(jobPtr), cam, sizeof(cam))) pinInPublish(cam, s.m3p, now);
+    }
+    // F67f: the FP root may be up to nofoot::kArmedGMaxMs old (G is then a little behind the aim, not absent); the consumer decides by G's age.
+    if (!m3pOk || !fp.ok || (now > fp.stamp ? now - fp.stamp : 0) > nofoot::kArmedGMaxMs || !nofoot::pfzAffineInverse(s.m3p, inv)) {
         g_ikGRefusals.fetch_add(1, std::memory_order_relaxed);
         return;
     }
@@ -6738,11 +6649,11 @@ struct AdsSightWin {
     double relSum[3] = {};   // P14w - cam, body axes (right, up, forward)
     // F66e: the rendered eyes solved from their scene rows: frames with both eyes' rows, one eye's, none (or implausible); frames the lock used the
     // solved right eye and the F63 model; per eye the eye minus the job camera (body axes, metres), the distance to the sight line (perpendicular
-    // and along, metres), the IPD, and the last NDC of P14w and of P14w + 1 m along the sight in each eye's scene rows.
+    // and along, metres), the IPD, and (F67b) the last NDC of the points 0.5 m and 10 m along the sight from P14w in each eye's scene rows.
     uint32_t rowsBoth = 0, rowsOne = 0, rowsNone = 0, implausible = 0, usedSolved = 0, usedModel = 0;
     double eyeRel[2][3] = {}, perpEye[2] = {}, alongEye[2] = {}, ipdSum = 0.0, perpEyeMax[2] = {};
     uint32_t eyeN[2] = {}, ipdN = 0;
-    double ndcP[2][2] = {}, ndcFar[2][2] = {};
+    double ndcNear[2][2] = {}, ndcFar[2][2] = {};
     bool ndcHave[2] = {};
 };
 // F66e: each eye's scene rows (cb1 270..273 and row 275 of the first main-scene pass) as the render thread took them (worldDraw, g_cpuWorld),
@@ -6850,21 +6761,11 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
                 w.perpEyeMax[e] = std::max(w.perpEyeMax[e], perp);
                 w.alongEye[e] += along;
                 ++w.eyeN[e];
-                double fu[3];
+                // F67b: P14 itself is behind the right eye (w < 0), so the sight is sampled 0.5 m and 10 m in front of it. An eye on the sight line sees
+                // both at the same NDC; an eye beside it sees them apart by (its offset / the distance) x its focal scale.
                 const double od[3] = {eyeO[e][0], eyeO[e][1], eyeO[e][2]};
-                if (nofoot::ikUnit(f, fu)) {
-                    const double farPt[3] = {p14w[0] + fu[0], p14w[1] + fu[1], p14w[2] + fu[2]};
-                    double c0[4], c1[4];
-                    drawtag::worldClip(eyeRows[e], p14w, od, c0);
-                    drawtag::worldClip(eyeRows[e], farPt, od, c1);
-                    if (c0[3] > 1e-9 && c1[3] > 1e-9) {
-                        w.ndcP[e][0] = c0[0] / c0[3];
-                        w.ndcP[e][1] = c0[1] / c0[3];
-                        w.ndcFar[e][0] = c1[0] / c1[3];
-                        w.ndcFar[e][1] = c1[1] / c1[3];
-                        w.ndcHave[e] = true;
-                    }
-                }
+                w.ndcHave[e] = nofoot::sightPointNdc(eyeRows[e], od, p14w, f, 0.5, w.ndcNear[e]) &&
+                               nofoot::sightPointNdc(eyeRows[e], od, p14w, f, 10.0, w.ndcFar[e]);
             }
             if (eyeOk[0] && eyeOk[1]) {
                 const double d[3] = {eyeW[1][0] - eyeW[0][0], eyeW[1][1] - eyeW[0][1], eyeW[1][2] - eyeW[0][2]};
@@ -6955,16 +6856,177 @@ void adsSightTick(uint64_t now, double dt, const EyeSample& s) noexcept {
                         "from the job camera); the lock's right eye: the solved rendered eye in %u frames, the F63 model (camera + half IPD along the FP "
                         "right) in %u; eye minus job camera (body right, up, forward, cm, mean) L %.1f %.1f %.1f R %.1f %.1f %.1f; IPD %.2f cm (%u "
                         "frames); eye to the sight line (perpendicular cm mean/max, distance along to P14 cm mean) L %.1f/%.1f %.1f, R %.1f/%.1f %.1f; NDC "
-                        "of P14 and of P14 + 1 m along the sight (L: %.4f %.4f and %.4f %.4f; R: %.4f %.4f and %.4f %.4f)%s",
+                        "of the sight at 0.5 m and at 10 m from P14 (F67b; L: %.4f %.4f and %.4f %.4f; R: %.4f %.4f and %.4f %.4f; the two agree when "
+                        "the eye is on the sight line)%s",
                         w.rowsBoth, w.rowsOne, w.rowsNone, w.implausible, w.usedSolved, w.usedModel, 100.0 * w.eyeRel[0][0] / l0, 100.0 * w.eyeRel[0][1] / l0,
                         100.0 * w.eyeRel[0][2] / l0, 100.0 * w.eyeRel[1][0] / l1, 100.0 * w.eyeRel[1][1] / l1, 100.0 * w.eyeRel[1][2] / l1,
                         100.0 * w.ipdSum / ni, w.ipdN, 100.0 * w.perpEye[0] / l0, 100.0 * w.perpEyeMax[0], 100.0 * w.alongEye[0] / l0,
-                        100.0 * w.perpEye[1] / l1, 100.0 * w.perpEyeMax[1], 100.0 * w.alongEye[1] / l1, w.ndcP[0][0], w.ndcP[0][1], w.ndcFar[0][0],
-                        w.ndcFar[0][1], w.ndcP[1][0], w.ndcP[1][1], w.ndcFar[1][0], w.ndcFar[1][1],
+                        100.0 * w.perpEye[1] / l1, 100.0 * w.perpEyeMax[1], 100.0 * w.alongEye[1] / l1, w.ndcNear[0][0], w.ndcNear[0][1], w.ndcFar[0][0],
+                        w.ndcFar[0][1], w.ndcNear[1][0], w.ndcNear[1][1], w.ndcFar[1][0], w.ndcFar[1][1],
                         (w.ndcHave[0] && w.ndcHave[1]) ? "" : " (an eye had no NDC: its figures are zero)");
     }
     w = AdsSightWin{};
 }
+// ---- F67a / F67b: the weapon onto the view, and the ADS instruments (frame thread, alignTick, after the sight lock) ----------------------------
+// F67a. While ADS is engaged (the weight above 0, the hook on): the view is the right eye's solved rows (the scene rows of the first main-scene pass:
+// its forward is the clip w column, right and up the x and y columns less their part along it), the weapon is the FP root's forward (G's froot, row 2,
+// the line the sight lock uses). The turn the weapon still needs is adsAimError (view minus weapon, the seat convention); the injection is
+// AdsAimRun::ask (k 0.3 times the weight times the error less what is in flight, the weapon's yaw offset from the body held to the cone); it is
+// queued as look input through the measured gain and the sign keys. A frame without fresh right-eye rows, FP root or body sample asks for nothing
+// and is counted (the line says which). Nothing here touches the seated space: the view is the headset's.
+// F67b. Per frame, the angle between the FP root's forward, the right eye's view forward and camera C's forward (C is the left eye: F66e), and the
+// weapon's offset from the body (also the game's cone, logged when the ADS flag falls: adsAimTick).
+void adsAimStep(uint64_t now, double dt, const EyeSample& s) noexcept {
+    (void)dt;
+    AdsAimWin& w = g_adsAimWin;
+    if (g_adsState != kAdsActive || !(g_adsW > 0.0)) return;
+    ++w.frames;
+    const int ySign = g_adsYawSign.load(std::memory_order_relaxed), pSign = g_adsPitchSign.load(std::memory_order_relaxed);
+    float rows[16] = {}, o4[4] = {};
+    uint32_t rf = ~0u;
+    const bool viewOk = eyeRowsRead(1, &rf, rows, o4) && nofoot::sceneRowsFreshForLock(rf, g_f44Frame.load(std::memory_order_relaxed));
+    IkGData G;
+    const bool gOk = ikGRead(&G) && (now > G.frootMs ? now - G.frootMs : 0) <= nofoot::kIkFreshMs;
+    const bool sOk = s.valid && (now > s.stamp ? now - s.stamp : 0) <= static_cast<uint64_t>(align::kStaleMs);
+    double vr[3], vu[3], vf[3];
+    bool asked = false;
+    if (!viewOk) ++w.noRows;
+    else if (!gOk) ++w.noRoot;
+    else if (!sOk) ++w.noSample;
+    else if (!nofoot::rotAxesFromClip(rows, vr, vu, vf)) ++w.degenerate;
+    else {
+        nofoot::RotFrameSum view;
+        view.add(vr, vu, vf);
+        const double f[3] = {G.froot[8], G.froot[9], G.froot[10]};
+        double errY = 0.0, errP = 0.0;
+        if (!nofoot::adsAimError(view, f, &errY, &errP)) {
+            ++w.degenerate;
+        } else {
+            asked = true;
+            // The weapon's offset from the body's facing: the AMC's axes (right, up, forward in the world) against the FP root's forward.
+            nofoot::RotFrameSum body, weapon;
+            const double br[3] = {s.rows[0], s.rows[1], s.rows[2]}, bu[3] = {s.rows[3], s.rows[4], s.rows[5]}, bf[3] = {s.rows[6], s.rows[7], s.rows[8]};
+            const double none[3] = {};
+            body.add(br, bu, bf);
+            weapon.add(none, none, f);
+            double offY = 0.0, offP = 0.0;
+            if (!nofoot::rotFrameDelta(body, weapon, &offY, &offP)) offY = offP = 0.0;
+            const nofoot::AdsAimRun::Out out =
+                g_adsAim.ask(errY, errP, g_adsW, offY * nofoot::kAdsDeg, nofoot::kAdsConeBoundDeg * nofoot::kAdsDeg, ySign != 0, pSign != 0);
+            const double kD = 1.0 / nofoot::kAdsDeg;
+            double iY = 0.0, iP = 0.0;
+            if (out.yaw != 0.0 || out.pitch != 0.0) {
+                const double gainY = static_cast<double>(g_adsGainYaw.load(std::memory_order_relaxed));
+                const double gainP = static_cast<double>(g_adsGainPitch.load(std::memory_order_relaxed));
+                iY = nofoot::adsInput(nofoot::adsGameFromSeatYaw(out.yaw, ySign), gainY);
+                iP = nofoot::adsInput(nofoot::adsGameFromSeatPitch(out.pitch, pSign), gainP);
+                if (iY != 0.0) adsQueue(g_adsInYaw, iY, nofoot::kAdsPendingMaxRad / std::fabs(nofoot::adsGain(gainY)));
+                if (iP != 0.0) adsQueue(g_adsInPitch, iP, nofoot::kAdsPendingMaxRad / std::fabs(nofoot::adsGain(gainP)));
+                ++w.asked;
+            }
+            w.errSum[0] += errY * kD;
+            w.errSum[1] += errP * kD;
+            w.errAbsMax = std::max(w.errAbsMax, std::sqrt(errY * errY + errP * errP) * kD);
+            w.askSum[0] += out.yaw * kD;
+            w.askSum[1] += out.pitch * kD;
+            w.queuedSum[0] += iY;
+            w.queuedSum[1] += iP;
+            w.offSum[0] += offY;
+            w.offSum[1] += offP;
+            w.offAbsMax = std::max(w.offAbsMax, std::fabs(offY));
+            if (out.limited) {
+                ++w.cut;
+                ++g_adsPressCut;
+                g_adsLastCutMs = now;
+            }
+            if (out.pastBound) ++w.past;
+            g_adsOffLast[0] = offY;
+            g_adsOffLast[1] = offP;
+            g_adsOffLastMs = now;
+            g_adsPressOffMax = std::max(g_adsPressOffMax, std::fabs(offY));
+            if (!w.viewHave) {
+                w.viewFirst = view;
+                w.viewHave = true;
+            }
+            w.viewLast = view;
+            // F67b: the three forwards.
+            const double fvAng = nofoot::dirAngleDeg(f, vf);
+            if (fvAng >= 0.0) {
+                ++w.angN;
+                w.angSum[0] += fvAng;
+                w.angMax[0] = std::max(w.angMax[0], fvAng);
+                // The ray through the image centre: clip x and clip y both zero, the cross of their columns, signed to point the way the eye looks.
+                const double cxv[3] = {rows[0], rows[4], rows[8]}, cyv[3] = {rows[1], rows[5], rows[9]};
+                double ctr[3] = {cxv[1] * cyv[2] - cxv[2] * cyv[1], cxv[2] * cyv[0] - cxv[0] * cyv[2], cxv[0] * cyv[1] - cxv[1] * cyv[0]};
+                if (ctr[0] * vf[0] + ctr[1] * vf[1] + ctr[2] * vf[2] < 0.0)
+                    for (double& c : ctr) c = -c;
+                const double cvAng = nofoot::dirAngleDeg(ctr, vf), cfAng = nofoot::dirAngleDeg(ctr, f);
+                if (cvAng >= 0.0 && cfAng >= 0.0) {
+                    w.angSum[3] += cvAng;
+                    w.angMax[3] = std::max(w.angMax[3], cvAng);
+                    w.angSum[4] += cfAng;
+                    w.angMax[4] = std::max(w.angMax[4], cfAng);
+                }
+            }
+            float C[16] = {};
+            bool haveC = false;
+            {
+                F9Lock lock;
+                if (g_worldC.valid && now - g_worldCMs < 500) {
+                    std::memcpy(C, g_worldC.C, sizeof(C));
+                    haveC = true;
+                }
+            }
+            double cr[3], cu[3], cf[3];
+            if (haveC && nofoot::rotAxesFromC(C, cr, cu, cf)) {
+                nofoot::RotFrameSum cs;
+                cs.add(cr, cu, cf);
+                double cy = 0.0, cp = 0.0;
+                const double fcAng = nofoot::dirAngleDeg(f, cf), vcAng = nofoot::dirAngleDeg(vf, cf);
+                if (fcAng >= 0.0 && vcAng >= 0.0 && nofoot::rotFrameDelta(view, cs, &cy, &cp)) {
+                    ++w.angCN;
+                    w.angSum[1] += fcAng;
+                    w.angMax[1] = std::max(w.angMax[1], fcAng);
+                    w.angSum[2] += vcAng;
+                    w.angMax[2] = std::max(w.angMax[2], vcAng);
+                    w.cYawSum += cy;
+                    w.cPitchSum += cp;
+                }
+            }
+        }
+    }
+    if (!asked) g_adsAim.age();   // a frame without data asked for nothing; the window still ages
+    if (g_adsAimLineMs == 0) g_adsAimLineMs = now;
+    if (now - g_adsAimLineMs < 1000) return;
+    g_adsAimLineMs = now;
+    const double n = w.frames ? static_cast<double>(w.frames - w.noRows - w.noRoot - w.noSample - w.degenerate) : 1.0;
+    const double nn = n > 0.0 ? n : 1.0;
+    double vy = 0.0, vp = 0.0;
+    if (w.viewHave) nofoot::rotFrameDelta(w.viewFirst, w.viewLast, &vy, &vp);
+    const double kD = 1.0 / nofoot::kAdsDeg;
+    Log::get().note("native on foot ADS aim (F67a): %u frames engaged, asked on %u (no right-eye rows %u, no FP root %u, no body sample %u, degenerate %u); "
+                    "view minus weapon (the right eye's rows against the FP root's forward, before the ask) yaw %+.2f pitch %+.2f deg mean, largest %.2f; "
+                    "asked yaw %+.2f pitch %+.2f deg (seat), queued %+.5f %+.5f (game input), still in flight yaw %+.2f pitch %+.2f deg; the view turned "
+                    "yaw %+.2f pitch %+.2f deg this second against the head's %+.2f %+.2f (equal: the camera takes none of the injected aim); the "
+                    "weapon's offset from the body yaw %+.1f (largest %.1f) pitch %+.1f deg mean, bound %.0f deg, frames cut by the bound %u, past it "
+                    "%u; presses engaged this second %u",
+                    w.frames, w.asked, w.noRows, w.noRoot, w.noSample, w.degenerate, w.errSum[0] / nn, w.errSum[1] / nn, w.errAbsMax, w.askSum[0],
+                    w.askSum[1], w.queuedSum[0], w.queuedSum[1], g_adsAim.pending(0) * kD, g_adsAim.pending(1) * kD, vy, vp, w.headYaw, w.headPitch,
+                    w.offSum[0] / nn, w.offAbsMax, w.offSum[1] / nn, nofoot::kAdsConeBoundDeg, w.cut, w.past, w.engages);
+    const double an = w.angN ? static_cast<double>(w.angN) : 1.0, acn = w.angCN ? static_cast<double>(w.angCN) : 1.0;
+    Log::get().note("native on foot ADS aim (F67b): the three forwards, angle in degrees (mean / largest): FP root against the right eye's view %.2f / "
+                    "%.2f (%u frames); FP root against camera C %.2f / %.2f; the right eye's view against C %.2f / %.2f (C relative to the view: yaw "
+                    "%+.2f pitch %+.2f; %u frames with C; C is the left eye); the right eye's image-centre ray (NDC 0, 0) against its own forward %.2f / "
+                    "%.2f and against the FP root's forward %.2f / %.2f (apart on an asymmetric frustum; a canted-display headset's eye forward is the lens "
+                    "axis, not the head's)",
+                    w.angSum[0] / an, w.angMax[0], w.angN, w.angSum[1] / acn, w.angMax[1], w.angSum[2] / acn, w.angMax[2], w.cYawSum / acn,
+                    w.cPitchSum / acn, w.angCN, w.angSum[3] / an, w.angMax[3], w.angSum[4] / an, w.angMax[4]);
+    // The window restarts; the press's engage count was reported once.
+    const uint32_t keepEngages = 0;
+    w = AdsAimWin{};
+    w.engages = keepEngages;
+}
+
 // The frame thread's one call per frame. The view offset is seated metres (the runtime moves the seated origin by it); the body offset is world
 // metres (the submit job's hook moves the records by it). The other run's offset decays to zero.
 // F37: the view's head motion reference (tS0), the sign check's previous step, and the last values the 1 s lines print.
@@ -7513,11 +7575,9 @@ void f65ReachLimit(uint64_t now, double dt, bool full3P, const AlignRun& a, cons
     g_f65Arm[0] = g_f65Arm[1] = F65Arm{};
 }
 
-// ---- F65b: stand armed, the frame thread's half: the armed ramp (0.3 s; the key on, the game's armed flag (g_armed, F66a), full-3P body mode with
-// the arm IK on; zero at once otherwise), the armed flag (the hook captures the stand height only unarmed) and idle (no locomotion, no ADS),
-// published for the Animate post-hook; the 1 s line (f65bStandLine, with the hook's statistics, defined after them).
-nofoot::IkBlend g_f65bRamp{0.0f, nofoot::kStandRampSec};
-void f65bStandLine(uint64_t now, bool scope) noexcept;
+// ---- F67c: the body pin, the frame thread's half: the scope flag the Animate post-hook reads (the key on, full-3P body mode, the arm IK on,
+// native stereo on foot), the game's armed flag for the hook, and the 1 s line (f67cPinLine, with the hook's statistics, defined after them).
+void f67cPinLine(uint64_t now, bool scope) noexcept;
 // ---- F65c: the pre-bend neck (the hook publishes, the body align reads) ---------------------------------------------------------------
 // The Animate post-hook publishes the neck 34 and the head 44 (model space = body axes, as the census reads them) as they stand after stage 0
 // and before the bend, the square-up and the arm writes (the freeze's matrix where it wrote), with its sequence and ms; read with two tries.
@@ -7555,15 +7615,23 @@ uint64_t g_f65cLastSeq = 0;
 uint32_t g_f65cTicksSince = 0xFFFFFFFFu;
 uint32_t g_f65cSrcN[3] = {}, g_f65cDiffN = 0, g_f65cDN = 0;
 double g_f65cDiffSum[3] = {}, g_f65cDSum[2] = {}, g_f65cDAbsMax[2] = {};
-void f65bStandTick(uint64_t now, double dt, int mode, bool full3P, bool ads, bool moving) noexcept {
+bool f67cPinTick(uint64_t now, int mode, bool full3P) noexcept {
     const bool key = g_standKeyOn.load(std::memory_order_relaxed);
-    const bool scope = key && mode == 2 && full3P && pfz::g_ikMode.load(std::memory_order_relaxed) == 3 && nativeOnFootActive();
-    if (!scope) g_f65bRamp.w = 0.0f;
-    else g_f65bRamp.step(g_armed, dt);
-    g_standArmedW.store(g_f65bRamp.w, std::memory_order_relaxed);
-    g_standArmedFlag.store(g_armed, std::memory_order_relaxed);
-    g_standIdle.store(!moving && !ads, std::memory_order_relaxed);
-    f65bStandLine(now, scope);
+    const bool active = nativeOnFootActive();
+    const bool scope = key && mode == 2 && full3P && pfz::g_ikMode.load(std::memory_order_relaxed) == 3 && active;
+    static int lastScope = -1;
+    if ((scope ? 1 : 0) != lastScope) {
+        lastScope = scope ? 1 : 0;
+        Log::get().note("native on foot body pin (F67c): %s%s", scope ? "ON: the 3P pose follows the camera from the Animate post-hook; the frame thread's "
+                                                                       "body offset is zero" : "off: ",
+                        scope ? "" : !key ? "the key fix.native_on_foot_stand_armed is off" : !active ? "native stereo on foot is not active" :
+                                      mode != 2 ? "body align is not body" : !full3P ? "not full-3P body mode (hide_fp_body and body_unclip on)" :
+                                                                                          "the arm IK is not on (fix.native_on_foot_arm_ik = on)");
+    }
+    g_pinScope.store(scope, std::memory_order_relaxed);
+    g_armedNow.store(g_armed && active, std::memory_order_relaxed);
+    f67cPinLine(now, scope);
+    return scope;
 }
 
 // F66b: the second's frame clock line. Called once per align tick with the ms stamp and the QPC dt (0 for the very first tick only).
@@ -7753,7 +7821,7 @@ void alignTick(uint64_t now) noexcept {   // F66b: dt from QPC inside (g_alignCl
     }
     if (!s.valid || (now >= s.stamp && now - s.stamp > 1500)) g_f55Loco = nofoot::PfzLocoRest{};
     const bool f55Moving = !g_f55Loco.resting;
-    f65bStandTick(now, dt, mode, f58Full3P, ads, f55Moving);   // F65b: stand armed's ramp, armed and idle flags for the hook; its 1 s line
+    const bool pin = f67cPinTick(now, mode, f58Full3P);   // F67c: the pin's scope for the hook (and for the body offset below: zero in scope); its 1 s line
     const char* wait = nullptr;
     if (!on) wait = "key off";
     else if (!nativeOnFootActive()) wait = "not native stereo on foot";
@@ -7764,7 +7832,7 @@ void alignTick(uint64_t now) noexcept {   // F66b: dt from QPC inside (g_alignCl
     else if ((mode == 1 || mode == 3) && !haveView) wait = "no list-B view (the P2 sample is missing or over 500 ms old)";
     else if ((mode == 1 || mode == 3) && !haveFrame) wait = "no render head from the runtime";
     else if (ads && !f58Full3P) wait = "held: aiming down sights";   // F59b: full 3P keeps the head follow through ADS
-    if (wait && on && now - a.waitLineMs >= 5000) {
+    if (wait && on && !pin && now - a.waitLineMs >= 5000) {
         a.waitLineMs = now;
         Log::get().note("native on foot body align: %s: waiting (%s)", mode == 2 ? "body" : "view", wait);
     }
@@ -7816,7 +7884,9 @@ void alignTick(uint64_t now) noexcept {   // F66b: dt from QPC inside (g_alignCl
     // F43: the shoulder anchor's state for this frame (set in the !wait block; zero when the anchor is not the shoulders).
     bool shoulderAnchor = false;
     double fpShW[3] = {}, tpShW[3] = {};
-    if (!wait) {
+    // F67c: in the pin's scope the Animate post-hook places the body from this frame's camera; the frame thread's target (the F37..F66 neck, pov and
+    // walking-shift machinery) is not computed, d is zero, and the submit-time shift and G's d with it.
+    if (!wait && !pin) {
         const auto body = [&](const float p[3], double out[3]) {
             for (size_t i = 0; i < 3; ++i) {
                 double acc = 0.0;
@@ -8143,6 +8213,8 @@ void alignTick(uint64_t now) noexcept {   // F66b: dt from QPC inside (g_alignCl
     // The active run takes the filter step; the other decays to zero and publishes zero.
     if (mode == 3) {
         calibrateStep(now, camB, g_f37TSNow, !wait, a);   // F40: scheduled, no loop, no guard
+    } else if (mode == 2 && pin) {
+        for (size_t i = 0; i < 3; ++i) a.pos[i] = a.vel[i] = a.intg[i] = 0.0;   // F67c: the body offset is zero; the hook moves the pose
     } else if (mode == 2) {
         bodyFilter(a, err, dt);
         // F50: with vertical off, d keeps only its horizontal part: the body run's position and velocity lose their component along the body's
@@ -8322,10 +8394,10 @@ void alignTick(uint64_t now) noexcept {   // F66b: dt from QPC inside (g_alignCl
 
     // F65a: the reach limit's correction (body mode only; zero elsewhere): the published d is the filtered d plus it.
     double reachCorr[3] = {};
-    if (mode == 2) f65ReachLimit(now, dt, f58Full3P, a, s, reachCorr);
+    if (mode == 2 && !pin) f65ReachLimit(now, dt, f58Full3P, a, s, reachCorr);   // F67c: in the pin's scope the hook applies the reach rule
     else g_f65Ramp.w = 0.0f;
     // F66c: the second's window for the body solve line: d before (the filter's) and after (the reach-corrected) in body axes, right and forward.
-    if (mode == 2 && f58Full3P && s.valid) {
+    if (mode == 2 && f58Full3P && s.valid && !pin) {
         double dHead[3] = {}, dAfter[3] = {};
         for (size_t i = 0; i < 3; ++i)
             for (size_t j = 0; j < 3; ++j) {
@@ -8354,6 +8426,7 @@ void alignTick(uint64_t now) noexcept {   // F66b: dt from QPC inside (g_alignCl
     }
 
     adsSightTick(now, dt, sIn);   // F63: the ADS sight lock (the right eye onto the sight line; zero outside ADS)
+    adsAimStep(now, dt, sIn);     // F67a: the weapon onto the view (look input, nothing in the seated space); F67b: the three forwards
     // F64: the eye height: full-3P body mode with native stereo on foot only; ramped in over 0.3 s, times (1 - the ADS head-aim weight) so it
     // fades as ADS engages (the sight lock owns ADS); zero at once outside full 3P (nothing changes there).
     const bool f64On = f58Full3P && nativeOnFootActive();
@@ -9374,256 +9447,623 @@ inline void ikPos(const float m[16], double p[3]) noexcept {
     p[2] = m[14];
 }
 
-// ---- F65b (TEMPORARY, fix.native_on_foot_stand_armed): stage 0, stand armed (the hook's half) -------------------------------------------
-// In armIkAfterAnimate after the freeze and before the M0 fill, arm IK on, the legs' plan ok. Every call: y15 (the pov joint, animated) low-
-// passed (tau 0.25 s); the stand height is that low-pass, captured only while unarmed (the armed flag and the ramp both clear) and idle (the
-// frame thread: no locomotion, no ADS) for 1 s, held while armed. delta = clamp(stand - lp, 0, cap) x the armed ramp (nofoot::standDelta), the
-// cap the smaller leg's nofoot::standLegCap. With delta above 0.01 mm: both legs are solved from the raised hip to the animated foot
-// (nofoot::legSolve: swing the thigh group about the hip, the calf group about the knee; the helpers rolled by their share of the twist, as
-// the arm's), every matrix computed before the first write; then the upper body UB (the freeze's writes for its members when it wrote) gets
-// delta in its model y, the legs their solved matrices, in the animated copy (so the bend, the square-up and the arms build on the standing
-// pose) and in the span (all of UB, or the mesh tears). The foot and toe are never written. No allocation, logging or locks; writes under SEH.
-enum StandRefusal : uint32_t { kStandRefPlan = 0, kStandRefNoStand, kStandRefLeg, kStandRefWrite, kStandRefKinds };
-const char* const kStandRefText[kStandRefKinds] = {"the legs' plan was refused (the census line says why)",
-                                                   "no stand height captured yet (unarmed and idle for 1 s)",
-                                                   "a leg solve failed (a degenerate bone or a singular matrix)", "a span write faulted"};
-struct StandLegStats {
-    uint32_t n = 0, limited = 0;
-    double vSum = 0.0, hSum = 0.0, l1Sum = 0.0, l2Sum = 0.0, rbSum = 0.0, rbMax = 0.0, raSum = 0.0, raMax = 0.0, kaSum = 0.0, ksSum = 0.0;
-    double errMaxMm = 0.0;
+// ---- F67c (TEMPORARY key fix.native_on_foot_stand_armed, now the pin's switch): stage 0, the body pinned to the camera (the hook's half) --------------
+// Replaces F65b. In armIkAfterAnimate after the freeze and before the M0 fill, arm IK on, full-3P body mode (g_pinScope). Every call, from THIS
+// frame's P1 input (the job camera and the AMC matrix, PinIn) and the animated pose alone (nothing captured, nothing read from a previous frame):
+//  1. E = the cyclopean eye in the 3P model space (the job camera, the left eye, plus half the IPD toward the right eye from the two eyes' scene rows);
+//     T = the neck target (nofoot::pinNeckTarget: 0.155 m down and 0.09 m back along the eye's heading);
+//  2. t = T - N0, N0 the animated neck 34: the horizontal part (right, forward) moves EVERY joint, the vertical part (signed) the upper body UB
+//     (subtree(7) less both thighs) with each leg solved from the moved hip to its foot (nofoot::legPlant, legSolveTo: the foot keeps its animated
+//     height, is re-planted toward under the hip when the leg cannot reach, outward when the hip is lowered past the knee's fold, lifted only when
+//     straight below the hip is still out of reach);
+//  3. armed (F66c's rule, moved into the hook): the horizontal move is then corrected, by the armed ramp, so that each shoulder U* (the unbent pose
+//     turned by the square-up) stays within l1 + l2 - 2 cm of its grip (nofoot::reachLimitDelta); the bend then closes what is left of the neck's gap.
+// The whole pose is written to the span here, so the stages after it (the bend, the square-up, the arms) work on the pinned pose with G at d = 0.
+// No allocation, logging or locks; every write under SEH.
+enum PinRefusal : uint32_t { kPinRefNoInput = 0, kPinRefStaleInput, kPinRefMatrix, kPinRefNoLegs, kPinRefLeg, kPinRefWrite, kPinRefKinds };
+const char* const kPinRefText[kPinRefKinds] = {
+    "no P1 input yet (the local 3P AMC's visibility job has not run)", "the P1 input is older than 500 ms (the pose stays as animated)",
+    "the AMC matrix is singular", "the legs' plan was refused (the census line says why): the pose is translated, the legs are not solved",
+    "a leg solve failed (a degenerate bone or a singular matrix): the pose is translated, not raised", "a span write faulted"};
+struct PinBin {
+    uint64_t n = 0;
+    double resSum[3] = {}, resMax[3] = {};   // target - neck as written (right, up, forward), cm: the signed sum and the largest |value|
+    double enSum[3] = {}, enMax[3] = {};     // eye - neck (right, up, forward), cm
+    double res3Sum = 0.0, res3Max = 0.0;     // |target - neck| in 3D, cm: the proof's figure (the rest offset is in the target)
+    double deltaMin = 0.0, deltaSum = 0.0, deltaMax = 0.0;   // the vertical move, cm
+    double thSum[2] = {}, thAbsMax[2] = {};  // the horizontal move (right, forward), cm
 };
-struct StandStats {
-    uint64_t calls = 0, raised = 0, captures = 0, capBound = 0, refused[kStandRefKinds] = {};
-    uint32_t yN = 0, armedN = 0, capN = 0;
-    double y15Sum = 0.0, y7Sum = 0.0, lpSum = 0.0, wantSum = 0.0, wantMax = 0.0, appliedSum = 0.0, appliedMax = 0.0, capSum = 0.0, capMin = 0.0;
-    double standY = 0.0, armedWLast = 0.0;
-    bool standHave = false;
-    StandLegStats leg[2];
+struct PinStats {
+    uint64_t calls = 0, pinned = 0, refused[kPinRefKinds] = {};
+    PinBin bin[5];   // standing, walking, running, jumping, and armed (counted beside the movement bin)
+    uint32_t hClamped = 0, vClamped = 0, cycRows = 0, cycCached = 0, cycNone = 0;
+    uint32_t legSolves = 0, replanted[2] = {}, outward[2] = {}, lifted[2] = {}, notClosed[2] = {};
+    double replantSum[2] = {}, replantMax[2] = {}, outwardSum[2] = {}, outwardMax[2] = {}, liftSum[2] = {}, liftMax[2] = {};
+    double reachBeforeMax[2] = {}, reachAfterMax[2] = {}, footErrMaxMm = 0.0;
+    uint32_t reachWant = 0, reachActive = 0, reachInfeasible = 0;
+    double reachCorrSum = 0.0, reachCorrMax = 0.0, d0Sum[2] = {}, dSum[2] = {};   // the horizontal move before and after the reach correction (right, forward), cm
+    // The input: its age at the Animate call (ms, QPC), and by the P1 frame index's parity whether the input was a new publication since the last
+    // call (refresh) or the same one again (repeat). The bend's old judder was a target refreshed at the wrong moment.
+    uint32_t ageN = 0, fresh[2] = {}, repeat[2] = {};
+    double ageSum = 0.0, ageMax = 0.0, ageSumPar[2] = {}, ageMaxPar[2] = {};
+    double speedSum = 0.0, speedMax = 0.0;
 };
-std::atomic<uint32_t> g_standStatSeq{0};
-StandStats g_standStats;
-std::atomic<bool> g_standStatReset{false};
-double g_standLp = 0.0, g_standY = 0.0;
-bool g_standLpHave = false, g_standYHave = false;
-uint64_t g_standLpMs = 0, g_standIdleSince = 0;
-alignas(16) float g_standOut[nofoot::kPfzMaxJoints][16];
-// Returns false only when a span write faulted (the caller stands the IK down); every other outcome lets the stages after it run.
-bool standStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t now) noexcept {
-    const uint32_t count = sp.count;
-    if (count <= nofoot::kStandPov || count <= nofoot::kStandHips) return true;
-    const bool keyOn = g_standKeyOn.load(std::memory_order_relaxed);
-    const double armedW = static_cast<double>(g_standArmedW.load(std::memory_order_relaxed));
-    const bool armed = g_standArmedFlag.load(std::memory_order_relaxed), idle = g_standIdle.load(std::memory_order_relaxed);
-    const double y15 = static_cast<double>(g_pfzAnim[nofoot::kStandPov][13]), y7 = static_cast<double>(g_pfzAnim[nofoot::kStandHips][13]);
-    static QpcDt standClock;   // F66b (the hook thread: one writer under g_pfzBusy)
-    const double dt = standClock.step(0.1);
-    g_standLpMs = now;
-    if (!g_standLpHave || !std::isfinite(g_standLp)) {
-        g_standLp = y15;
-        g_standLpHave = std::isfinite(y15);
-    } else if (dt > 0.0 && std::isfinite(y15)) {
-        g_standLp += (1.0 - std::exp(-dt / nofoot::kStandLpTauSec)) * (y15 - g_standLp);
-    }
-    bool captured = false;
-    if (!armed && !(armedW > 0.0) && idle && g_standLpHave) {
-        if (!g_standIdleSince) g_standIdleSince = now;
-        if (now - g_standIdleSince >= nofoot::kStandIdleMs) {
-            g_standY = g_standLp;
-            g_standYHave = true;
-            captured = true;
+std::atomic<uint32_t> g_pinStatSeq{0};
+PinStats g_pinStats;
+std::atomic<bool> g_pinStatReset{false};
+// The cyclopean offset cache (the hook; one writer under g_pfzBusy): the world offset from the job camera (the left eye) to the midpoint of the eyes,
+// and the eyes' mean forward, from the two eyes' scene rows; the rows are the render thread's (a frame or two old, which moves a 3 cm offset by under
+// a millimetre).
+struct PinCyc {
+    bool ok = false;
+    double off[3] = {}, fwd[3] = {};
+    uint64_t ms = 0;
+};
+PinCyc g_pinCyc;
+enum PinCycSrc : int { kCycRows = 0, kCycCached = 1, kCycNone = 2 };
+int pinCycloUpdate(uint64_t now) noexcept {
+    float rows[2][16] = {}, o[2][4] = {};
+    uint32_t fr[2] = {~0u, ~0u};
+    double eye[2][3] = {}, fw[2][3] = {};
+    const uint32_t cur = g_f44Frame.load(std::memory_order_relaxed);
+    bool ok = true;
+    for (int e = 0; e < 2 && ok; ++e) {
+        double r[3], u[3];
+        ok = eyeRowsRead(e, &fr[e], rows[e], o[e]);
+        if (ok) {
+            const int32_t age = static_cast<int32_t>(cur - fr[e]);
+            ok = age >= 0 && age <= 8;
         }
-    } else {
-        g_standIdleSince = 0;
+        const double od[3] = {o[e][0], o[e][1], o[e][2]};
+        ok = ok && nofoot::eyeFromRows(rows[e], od, eye[e]) && nofoot::rotAxesFromClip(rows[e], r, u, fw[e]);
     }
-    // The cap (both legs, animated) and delta.
-    bool legsOk = pl.legOk;
-    double hip[2][3] = {}, knee[2][3] = {}, foot[2][3] = {}, cap = 0.0;
-    for (int k = 0; k < 2 && legsOk; ++k) {
-        const nofoot::IkArm& g = pl.leg[k];
-        if (g.U >= count || g.F >= count || g.H >= count) {
-            legsOk = false;
+    if (ok) {
+        const double d[3] = {eye[1][0] - eye[0][0], eye[1][1] - eye[0][1], eye[1][2] - eye[0][2]};
+        const double ipd = nofoot::ikLen(d);
+        const double mf[3] = {fw[0][0] + fw[1][0], fw[0][1] + fw[1][1], fw[0][2] + fw[1][2]};
+        double uf[3];
+        if (ipd > 0.05 && ipd < 0.08 && nofoot::ikUnit(mf, uf)) {
+            for (int i = 0; i < 3; ++i) {
+                g_pinCyc.off[i] = 0.5 * d[i];
+                g_pinCyc.fwd[i] = uf[i];
+            }
+            g_pinCyc.ok = true;
+            g_pinCyc.ms = now;
+            return kCycRows;
+        }
+    }
+    return g_pinCyc.ok && now - g_pinCyc.ms < 1000 ? kCycCached : kCycNone;
+}
+// One pin call's figures, filled by pinStage0 and closed by armIkAfterAnimate (the neck as finally written, after the bend).
+struct PinCall {
+    bool valid = false;
+    double E[3] = {}, T[3] = {}, N0[3] = {}, nPin[3] = {}, th[3] = {}, delta = 0.0;
+    uint32_t parity = 0;
+    int state = 0;
+    bool armed = false;
+};
+alignas(16) float g_pinOut[nofoot::kPfzMaxJoints][16];
+// The speed state of the AMC, from successive P1 inputs (the hook's; one writer): a 0.15 s low-pass of the horizontal speed, the vertical speed.
+struct PinMotion {
+    bool have = false;
+    uint32_t p1 = 0;
+    uint64_t qpc = 0;
+    double origin[3] = {}, speed = 0.0, vy = 0.0;
+};
+PinMotion g_pinMotion;
+uint32_t g_pinLastP1 = 0xFFFFFFFFu;
+// Returns false only when a span write faulted (the caller stands the IK down); every other outcome lets the stages after it run.
+bool pinStage0(const pfz::ArmPlan& pl, const PfzSpan& sp, bool froze, uint64_t now, const IkGData* G, const float (*fpm)[16], double armedW,
+               double wSqRamp, double sqAmount, PinCall& pc) noexcept {
+    const uint32_t count = sp.count;
+    if (count <= 44 || count <= nofoot::kIkSquarePivot) return true;
+    PinIn in;
+    uint32_t refusal = kPinRefKinds;
+    float invM[16] = {};
+    uint64_t ageUs = 0;
+    if (!pinInRead(&in)) {
+        refusal = kPinRefNoInput;
+    } else {
+        const uint64_t q = f30Qpc();
+        ageUs = f30QpcUs(q > in.qpc ? q - in.qpc : 0);
+        if (ageUs > 500000ull) refusal = kPinRefStaleInput;   // a stall: up to half a second the last camera is used (a pose that snaps back is worse)
+        else if (!nofoot::pfzAffineInverse(in.m3p, invM)) refusal = kPinRefMatrix;
+    }
+    const bool armed = g_armedNow.load(std::memory_order_relaxed);
+    nofoot::PinMove mv;
+    double E[3] = {}, T[3] = {}, N0[3] = {}, d0[3] = {};
+    int cycSrc = kCycNone;
+    double speed = g_pinMotion.speed, vy = g_pinMotion.vy;
+    const uint32_t parity = in.p1 & 1u;
+    bool freshIn = false;
+    if (refusal == kPinRefKinds) {
+        freshIn = in.p1 != g_pinLastP1;
+        g_pinLastP1 = in.p1;
+        // The AMC's motion between successive P1 inputs.
+        if (freshIn) {
+            if (g_pinMotion.have && in.qpc > g_pinMotion.qpc) {
+                const double dtm = static_cast<double>(f30QpcUs(in.qpc - g_pinMotion.qpc)) * 1e-6;
+                if (dtm > 1e-4 && dtm < 0.5) {
+                    const double dx = in.m3p[12] - g_pinMotion.origin[0], dy = in.m3p[13] - g_pinMotion.origin[1], dz = in.m3p[14] - g_pinMotion.origin[2];
+                    const double sp2 = std::sqrt(dx * dx + dz * dz) / dtm;
+                    const double a = 1.0 - std::exp(-dtm / 0.15);
+                    g_pinMotion.speed += a * (sp2 - g_pinMotion.speed);
+                    g_pinMotion.vy += a * (dy / dtm - g_pinMotion.vy);
+                }
+            }
+            g_pinMotion.have = true;
+            g_pinMotion.qpc = in.qpc;
+            g_pinMotion.p1 = in.p1;
+            for (int i = 0; i < 3; ++i) g_pinMotion.origin[i] = in.m3p[12 + i];
+            speed = g_pinMotion.speed;
+            vy = g_pinMotion.vy;
+        }
+        // 1. The cyclopean eye and the neck target in the model space.
+        cycSrc = pinCycloUpdate(now);
+        double eyeW[3] = {in.cam[0], in.cam[1], in.cam[2]}, fwdW[3] = {0.0, 0.0, 1.0};
+        if (cycSrc != kCycNone) {
+            for (int i = 0; i < 3; ++i) {
+                eyeW[i] += g_pinCyc.off[i];
+                fwdW[i] = g_pinCyc.fwd[i];
+            }
+        }
+        const float ew[3] = {static_cast<float>(eyeW[0]), static_cast<float>(eyeW[1]), static_cast<float>(eyeW[2])};
+        nofoot::ikXform(ew, invM, E);
+        double fwdM[3];
+        for (int i = 0; i < 3; ++i) fwdM[i] = fwdW[0] * invM[i] + fwdW[1] * invM[4 + i] + fwdW[2] * invM[8 + i];
+        if (cycSrc == kCycNone) {
+            fwdM[0] = 0.0;
+            fwdM[1] = 0.0;
+            fwdM[2] = 1.0;   // no eye rows: the body's own forward
+        }
+        nofoot::pinNeckTarget(E, fwdM, T);
+        const float* nk = froze && g_ikFzSlot[34] != 0xFFFFu ? g_pfzChain[g_ikFzSlot[34]] : g_pfzAnim[34];
+        for (int i = 0; i < 3; ++i) N0[i] = static_cast<double>(nk[12 + i]);
+        mv = nofoot::pinMove(N0, T);
+        for (int i = 0; i < 3; ++i) d0[i] = mv.th[i];
+    }
+    // 3. The reach limit (armed): each shoulder U* (the unbent pose turned by the square-up) within l1 + l2 - 2 cm of its grip, the horizontal move
+    // corrected by the armed ramp. T_A = the FP handAttach through G (at d = 0: the pose is pinned in the model space, G does not carry the move).
+    uint32_t reachWant = 0, reachActive = 0, reachInfeasible = 0;
+    double reachCorr = 0.0;
+    if (refusal == kPinRefKinds && armedW > 0.0 && G && fpm && pl.ok[0] && pl.ok[1] && pl.sqOk && pl.side[0].U < count && pl.side[1].U < count &&
+        pl.side[0].F < count && pl.side[1].F < count && pl.side[0].H < count && pl.side[1].H < count) {
+        double uPos[2][3], tA[2][3], armLen[2];
+        bool have[2] = {true, true};
+        for (int side = 0; side < 2; ++side) {
+            const nofoot::IkArm& a = pl.side[side];
+            double f0[3], h0[3];
+            const auto at = [&](uint32_t j, double out[3]) noexcept {
+                const float* m = froze && g_ikFzSlot[j] != 0xFFFFu ? g_pfzChain[g_ikFzSlot[j]] : g_pfzAnim[j];
+                out[0] = m[12];
+                out[1] = m[13];
+                out[2] = m[14];
+            };
+            at(a.U, uPos[side]);
+            at(a.F, f0);
+            at(a.H, h0);
+            const double l1v[3] = {f0[0] - uPos[side][0], f0[1] - uPos[side][1], f0[2] - uPos[side][2]}, l2v[3] = {h0[0] - f0[0], h0[1] - f0[1], h0[2] - f0[2]};
+            armLen[side] = nofoot::ikLen(l1v) + nofoot::ikLen(l2v);
+            float TA[16];
+            nofoot::pfzMul(side == 0 ? fpm[1] : fpm[0], G->g, TA);
+            for (int i = 0; i < 3; ++i) tA[side][i] = static_cast<double>(TA[12 + i]);
+            have[side] = armLen[side] > nofoot::kReachMarginM && ikMatrixSane(TA);
+        }
+        double pivot[3], phi = 0.0;
+        {
+            const float* pm = froze && g_ikFzSlot[nofoot::kIkSquarePivot] != 0xFFFFu ? g_pfzChain[g_ikFzSlot[nofoot::kIkSquarePivot]] : g_pfzAnim[nofoot::kIkSquarePivot];
+            pivot[0] = pm[12];
+            pivot[1] = pm[13];
+            pivot[2] = pm[14];
+        }
+        const double fwdG[3] = {G->g[8], G->g[9], G->g[10]};
+        const bool sqOk = nofoot::ikSquareToForward(uPos[0], uPos[1], fwdG, &phi);
+        if (have[0] && have[1] && sqOk) {
+            // The square-up as it is written when armed (F67f: phi itself); the share of the spine level the upper-arm joint sits at.
+            const double sqApplied = nofoot::squareApplied(phi, true, sqAmount, wSqRamp, nullptr);
+            double v[2][3], R[2], full[3] = {};
+            for (int side = 0; side < 2; ++side) {
+                double share = 0.0;
+                for (uint32_t k = 0; k < pl.sq.n; ++k)
+                    if (pl.sq.j[k] == pl.side[side].U) share = nofoot::kIkSpineWeight[pl.sq.level[k] < 3 ? pl.sq.level[k] : 2];
+                double us[3];
+                nofoot::turnAboutVertical(uPos[side], pivot, sqApplied * share, us);
+                v[side][0] = us[0] + d0[0] - tA[side][0];
+                v[side][1] = us[1] + mv.delta - tA[side][1];
+                v[side][2] = us[2] + d0[2] - tA[side][2];
+                R[side] = armLen[side] - nofoot::kReachMarginM;
+            }
+            bool feasible = true;
+            const bool active = nofoot::reachLimitDelta(v, R, have, full, &feasible);
+            reachWant = 1;
+            if (active) reachActive = 1;
+            if (!feasible) reachInfeasible = 1;
+            const double w = armedW > 1.0 ? 1.0 : armedW;
+            for (int i = 0; i < 3; ++i) mv.th[i] += w * full[i];
+            reachCorr = w * std::sqrt(full[0] * full[0] + full[2] * full[2]);
+        }
+    }
+    // 2. Apply: the horizontal move to every joint, then the vertical move and the legs.
+    bool writeFault = false;
+    nofoot::LegSolve ls[2];
+    nofoot::LegPlant lp[2];
+    bool legsSolved = false;
+    double footMoved[2][3] = {};
+    if (refusal == kPinRefKinds) {
+        if (mv.th[0] != 0.0 || mv.th[2] != 0.0) {
+            for (uint32_t j = 0; j < count; ++j) {
+                g_pfzAnim[j][12] = static_cast<float>(static_cast<double>(g_pfzAnim[j][12]) + mv.th[0]);
+                g_pfzAnim[j][14] = static_cast<float>(static_cast<double>(g_pfzAnim[j][14]) + mv.th[2]);
+            }
+            if (froze) {
+                const pfz::Plan& fpl = g_pfzPlanCopy;
+                for (uint32_t k = 0; k < fpl.count && k < nofoot::kPfzMaxF; ++k) {
+                    g_pfzChain[k][12] = static_cast<float>(static_cast<double>(g_pfzChain[k][12]) + mv.th[0]);
+                    g_pfzChain[k][14] = static_cast<float>(static_cast<double>(g_pfzChain[k][14]) + mv.th[2]);
+                }
+            }
+        }
+        double delta = mv.delta;
+        if (!pl.legOk) {
+            refusal = kPinRefNoLegs;
+            delta = 0.0;
+        }
+        // The legs: plant and solve both before anything is written; a failed solve drops the vertical move (the hip would leave the thigh).
+        for (int attempt = 0; attempt < 2 && pl.legOk; ++attempt) {
+            legsSolved = true;
+            for (int k = 0; k < 2 && legsSolved; ++k) {
+                const nofoot::IkArm& g = pl.leg[k];
+                if (g.U >= count || g.F >= count || g.H >= count) {
+                    legsSolved = false;
+                    break;
+                }
+                double hip0[3], knee0[3], foot0[3];
+                for (int i = 0; i < 3; ++i) {
+                    hip0[i] = g_pfzAnim[g.U][12 + i];
+                    knee0[i] = g_pfzAnim[g.F][12 + i];
+                    foot0[i] = g_pfzAnim[g.H][12 + i];
+                }
+                const double hip1[3] = {hip0[0], hip0[1] + delta, hip0[2]};
+                const double hk[3] = {knee0[0] - hip0[0], knee0[1] - hip0[1], knee0[2] - hip0[2]};
+                const double kf[3] = {foot0[0] - knee0[0], foot0[1] - knee0[1], foot0[2] - knee0[2]};
+                double fb[3] = {hk[0], 0.0, hk[2]};
+                if (!nofoot::ikUnit(fb, fb)) {
+                    fb[0] = 0.0;
+                    fb[1] = 0.0;
+                    fb[2] = 1.0;
+                }
+                const double hf0[3] = {foot0[0] - hip0[0], foot0[1] - hip0[1], foot0[2] - hip0[2]};
+                lp[k] = nofoot::legPlant(hip1, foot0, nofoot::ikLen(hk), nofoot::ikLen(kf), fb, nofoot::ikLen(hf0));
+                ls[k] = nofoot::legSolveTo(hip0, knee0, foot0, hip1, lp[k].foot);
+                if (!ls[k].ok) legsSolved = false;
+                for (int i = 0; i < 3; ++i) footMoved[k][i] = lp[k].foot[i] - foot0[i];
+            }
+            if (legsSolved) break;
+            if (attempt == 0 && delta != 0.0) {
+                delta = 0.0;   // try again without the vertical move
+                refusal = kPinRefLeg;
+                continue;
+            }
             break;
         }
-        for (int i = 0; i < 3; ++i) {
-            hip[k][i] = g_pfzAnim[g.U][12 + i];
-            knee[k][i] = g_pfzAnim[g.F][12 + i];
-            foot[k][i] = g_pfzAnim[g.H][12 + i];
+        if (!legsSolved && refusal == kPinRefKinds && pl.legOk) refusal = kPinRefLeg;
+        if (!legsSolved) delta = 0.0;
+        mv.delta = delta;
+        if (legsSolved) {
+            // Every leg matrix, before any write (the F65b construction, with the foot target): the thigh group moved with the pelvis and swung about S;
+            // the calf group moved, swung about S, then about E; the helpers off the chain rolled about their bone by t x the twist; the foot and the
+            // toe carried to the planted foot with their animated rotation.
+            for (int k = 0; k < 2 && legsSolved; ++k) {
+                const nofoot::IkArm& g = pl.leg[k];
+                const nofoot::LegSolve& L = ls[k];
+                const auto raised = [&](uint32_t j, float out[16]) noexcept {
+                    std::memcpy(out, g_pfzAnim[j], 64);
+                    out[13] = static_cast<float>(static_cast<double>(out[13]) + mv.delta);
+                };
+                for (uint32_t m = 0; m < g.nU; ++m) {
+                    float r[16];
+                    raised(g.gU[m], r);
+                    nofoot::ikPivot(r, L.R1, L.S, g_pinOut[g.gU[m]]);
+                }
+                for (uint32_t m = 0; m < g.nF; ++m) {
+                    float r[16], t1[16];
+                    raised(g.gF[m], r);
+                    nofoot::ikPivot(r, L.R1, L.S, t1);
+                    nofoot::ikPivot(t1, L.R2, L.E, g_pinOut[g.gF[m]]);
+                }
+                double ue[3], eT[3];
+                const double se[3] = {L.E[0] - L.S[0], L.E[1] - L.S[1], L.E[2] - L.S[2]};
+                const double ht[3] = {lp[k].foot[0] - L.E[0], lp[k].foot[1] - L.E[1], lp[k].foot[2] - L.E[2]};
+                if (!nofoot::ikUnit(se, ue) || !nofoot::ikUnit(ht, eT)) {
+                    legsSolved = false;
+                    break;
+                }
+                float fr[16], f1[16], f2[16], invF2[16];
+                raised(g.H, fr);
+                nofoot::ikPivot(fr, L.R1, L.S, f1);
+                nofoot::ikPivot(f1, L.R2, L.E, f2);
+                if (!nofoot::pfzAffineInverse(f2, invF2)) {
+                    legsSolved = false;
+                    break;
+                }
+                double X[9];
+                for (int r = 0; r < 3; ++r)
+                    for (int c = 0; c < 3; ++c)
+                        X[r * 3 + c] = static_cast<double>(invF2[r * 4]) * g_pfzAnim[g.H][c] + static_cast<double>(invF2[r * 4 + 1]) * g_pfzAnim[g.H][4 + c] +
+                                       static_cast<double>(invF2[r * 4 + 2]) * g_pfzAnim[g.H][8 + c];
+                const double thetaF = nofoot::ikTwistAbout(X, eT), thetaU = nofoot::ikTwistAbout(L.R2, ue);
+                const double lF2 = nofoot::ikDot(ht, ht), lU2 = nofoot::ikDot(se, se);
+                for (uint32_t m = 0; m < g.nF; ++m) {
+                    const uint32_t j = g.gF[m];
+                    if (j == g.F || !(lF2 > 1e-12)) continue;
+                    const double rel[3] = {g_pinOut[j][12] - L.E[0], g_pinOut[j][13] - L.E[1], g_pinOut[j][14] - L.E[2]};
+                    double t = nofoot::ikDot(rel, ht) / lF2;
+                    t = t < 0.0 ? 0.0 : t > 1.0 ? 1.0 : t;
+                    double R[9];
+                    float tmp[16];
+                    nofoot::ikRotAxis(eT, t * thetaF, R);
+                    std::memcpy(tmp, g_pinOut[j], sizeof(tmp));
+                    nofoot::ikPivot(tmp, R, L.E, g_pinOut[j]);
+                }
+                for (uint32_t m = 0; m < g.nU; ++m) {
+                    const uint32_t j = g.gU[m];
+                    if (g.chainU[m] || !(lU2 > 1e-12)) continue;
+                    const double rel[3] = {g_pinOut[j][12] - L.S[0], g_pinOut[j][13] - L.S[1], g_pinOut[j][14] - L.S[2]};
+                    double t = nofoot::ikDot(rel, se) / lU2;
+                    t = t < 0.0 ? 0.0 : t > 1.0 ? 1.0 : t;
+                    double R[9];
+                    float tmp[16];
+                    nofoot::ikRotAxis(ue, t * thetaU, R);
+                    std::memcpy(tmp, g_pinOut[j], sizeof(tmp));
+                    nofoot::ikPivot(tmp, R, L.S, g_pinOut[j]);
+                }
+                for (uint32_t m = 0; m < g.nH; ++m) {
+                    const uint32_t j = g.gH[m];
+                    std::memcpy(g_pinOut[j], g_pfzAnim[j], 64);
+                    for (int i = 0; i < 3; ++i) g_pinOut[j][12 + i] = static_cast<float>(static_cast<double>(g_pinOut[j][12 + i]) + footMoved[k][i]);
+                }
+                for (uint32_t m = 0; m < g.nU && legsSolved; ++m) legsSolved = ikMatrixSane(g_pinOut[g.gU[m]]);
+                for (uint32_t m = 0; m < g.nF && legsSolved; ++m) legsSolved = ikMatrixSane(g_pinOut[g.gF[m]]);
+                for (uint32_t m = 0; m < g.nH && legsSolved; ++m) legsSolved = ikMatrixSane(g_pinOut[g.gH[m]]);
+            }
+            if (!legsSolved && refusal == kPinRefKinds) refusal = kPinRefLeg;
         }
-        const double hk[3] = {knee[k][0] - hip[k][0], knee[k][1] - hip[k][1], knee[k][2] - hip[k][2]};
-        const double kf[3] = {foot[k][0] - knee[k][0], foot[k][1] - knee[k][1], foot[k][2] - knee[k][2]};
-        const double c = nofoot::standLegCap(hip[k], foot[k], nofoot::ikLen(hk), nofoot::ikLen(kf));
-        cap = k == 0 || c < cap ? c : cap;
-    }
-    const double wanted = g_standYHave && keyOn ? std::max(0.0, g_standY - g_standLp) : 0.0;
-    const double delta = legsOk ? nofoot::standDelta(keyOn, armedW, g_standYHave, g_standY, g_standLp, cap) : 0.0;
-    nofoot::LegSolve ls[2];
-    uint32_t refusal = kStandRefKinds;
-    if (!legsOk) refusal = kStandRefPlan;
-    else if (!g_standYHave) refusal = kStandRefNoStand;
-    const bool act = refusal == kStandRefKinds && delta > 1e-5;
-    if (act) {
-        for (int k = 0; k < 2 && refusal == kStandRefKinds; ++k) {
-            ls[k] = nofoot::legSolve(hip[k], knee[k], foot[k], delta);
-            if (!ls[k].ok) refusal = kStandRefLeg;
+        if (legsSolved) {
+            // The upper body moved by delta (the freeze's chain too), the legs' groups replaced by the solved matrices.
+            if (mv.delta != 0.0) {
+                for (uint32_t k = 0; k < pl.ubN; ++k) {
+                    const uint32_t j = pl.ub[k];
+                    if (j >= count) continue;
+                    g_pfzAnim[j][13] = static_cast<float>(static_cast<double>(g_pfzAnim[j][13]) + mv.delta);
+                    if (froze && g_ikFzSlot[j] != 0xFFFFu)
+                        g_pfzChain[g_ikFzSlot[j]][13] = static_cast<float>(static_cast<double>(g_pfzChain[g_ikFzSlot[j]][13]) + mv.delta);
+                }
+            }
+            for (int k = 0; k < 2; ++k) {
+                const nofoot::IkArm& g = pl.leg[k];
+                for (uint32_t m = 0; m < g.nU; ++m) std::memcpy(g_pfzAnim[g.gU[m]], g_pinOut[g.gU[m]], 64);
+                for (uint32_t m = 0; m < g.nF; ++m) std::memcpy(g_pfzAnim[g.gF[m]], g_pinOut[g.gF[m]], 64);
+                for (uint32_t m = 0; m < g.nH; ++m) std::memcpy(g_pfzAnim[g.gH[m]], g_pinOut[g.gH[m]], 64);
+            }
+        } else if (mv.delta != 0.0) {
+            mv.delta = 0.0;   // a vertical move without its legs would tear the mesh at the hips
         }
-    }
-    bool solved = act && refusal == kStandRefKinds;
-    if (solved) {
-        // Every leg matrix, before any write: the thigh group raised and swung about S; the calf group raised, swung about S, then about E; the
-        // helpers off the chain rolled about their bone by t x the twist (the thigh's from swing 2, the calf's from the foot's kept rotation).
-        for (int k = 0; k < 2 && solved; ++k) {
-            const nofoot::IkArm& g = pl.leg[k];
-            const nofoot::LegSolve& L = ls[k];
-            const auto raised = [&](uint32_t j, float out[16]) noexcept {
-                std::memcpy(out, g_pfzAnim[j], 64);
-                out[13] = static_cast<float>(static_cast<double>(out[13]) + delta);
-            };
-            for (uint32_t m = 0; m < g.nU; ++m) {
-                float r[16];
-                raised(g.gU[m], r);
-                nofoot::ikPivot(r, L.R1, L.S, g_standOut[g.gU[m]]);
-            }
-            for (uint32_t m = 0; m < g.nF; ++m) {
-                float r[16], t1[16];
-                raised(g.gF[m], r);
-                nofoot::ikPivot(r, L.R1, L.S, t1);
-                nofoot::ikPivot(t1, L.R2, L.E, g_standOut[g.gF[m]]);
-            }
-            double ue[3], eT[3];
-            const double se[3] = {L.E[0] - L.S[0], L.E[1] - L.S[1], L.E[2] - L.S[2]}, ht[3] = {foot[k][0] - L.E[0], foot[k][1] - L.E[1], foot[k][2] - L.E[2]};
-            if (!nofoot::ikUnit(se, ue) || !nofoot::ikUnit(ht, eT)) {
-                solved = false;
-                break;
-            }
-            // The foot's rotation kept as animated against where the swings would carry it: X = inv(carried) x animated (rotation parts).
-            float fr[16], f1[16], f2[16], invF2[16];
-            raised(g.H, fr);
-            nofoot::ikPivot(fr, L.R1, L.S, f1);
-            nofoot::ikPivot(f1, L.R2, L.E, f2);
-            if (!nofoot::pfzAffineInverse(f2, invF2)) {
-                solved = false;
-                break;
-            }
-            double X[9];
-            for (int r = 0; r < 3; ++r)
-                for (int c = 0; c < 3; ++c)
-                    X[r * 3 + c] = static_cast<double>(invF2[r * 4]) * g_pfzAnim[g.H][c] + static_cast<double>(invF2[r * 4 + 1]) * g_pfzAnim[g.H][4 + c] +
-                                   static_cast<double>(invF2[r * 4 + 2]) * g_pfzAnim[g.H][8 + c];
-            const double thetaF = nofoot::ikTwistAbout(X, eT), thetaU = nofoot::ikTwistAbout(L.R2, ue);
-            const double lF2 = nofoot::ikDot(ht, ht), lU2 = nofoot::ikDot(se, se);
-            for (uint32_t m = 0; m < g.nF; ++m) {
-                const uint32_t j = g.gF[m];
-                if (j == g.F || !(lF2 > 1e-12)) continue;
-                const double rel[3] = {g_standOut[j][12] - L.E[0], g_standOut[j][13] - L.E[1], g_standOut[j][14] - L.E[2]};
-                double t = nofoot::ikDot(rel, ht) / lF2;
-                t = t < 0.0 ? 0.0 : t > 1.0 ? 1.0 : t;
-                double R[9];
-                float tmp[16];
-                nofoot::ikRotAxis(eT, t * thetaF, R);
-                std::memcpy(tmp, g_standOut[j], sizeof(tmp));
-                nofoot::ikPivot(tmp, R, L.E, g_standOut[j]);
-            }
-            for (uint32_t m = 0; m < g.nU; ++m) {
-                const uint32_t j = g.gU[m];
-                if (g.chainU[m] || !(lU2 > 1e-12)) continue;
-                const double rel[3] = {g_standOut[j][12] - L.S[0], g_standOut[j][13] - L.S[1], g_standOut[j][14] - L.S[2]};
-                double t = nofoot::ikDot(rel, se) / lU2;
-                t = t < 0.0 ? 0.0 : t > 1.0 ? 1.0 : t;
-                double R[9];
-                float tmp[16];
-                nofoot::ikRotAxis(ue, t * thetaU, R);
-                std::memcpy(tmp, g_standOut[j], sizeof(tmp));
-                nofoot::ikPivot(tmp, R, L.S, g_standOut[j]);
-            }
-            for (uint32_t m = 0; m < g.nU && solved; ++m) solved = ikMatrixSane(g_standOut[g.gU[m]]);
-            for (uint32_t m = 0; m < g.nF && solved; ++m) solved = ikMatrixSane(g_standOut[g.gF[m]]);
-        }
-        if (!solved) refusal = kStandRefLeg;
-    }
-    bool writeFault = false;
-    if (solved) {
-        // Into the animated copy (and the freeze's chain for its members): UB raised, the legs solved.
-        for (uint32_t k = 0; k < pl.ubN; ++k) {
-            const uint32_t j = pl.ub[k];
-            if (j >= count) continue;
-            g_pfzAnim[j][13] = static_cast<float>(static_cast<double>(g_pfzAnim[j][13]) + delta);
-            if (froze && g_ikFzSlot[j] != 0xFFFFu) g_pfzChain[g_ikFzSlot[j]][13] = static_cast<float>(static_cast<double>(g_pfzChain[g_ikFzSlot[j]][13]) + delta);
-        }
-        for (int k = 0; k < 2; ++k) {
-            const nofoot::IkArm& g = pl.leg[k];
-            for (uint32_t m = 0; m < g.nU; ++m) std::memcpy(g_pfzAnim[g.gU[m]], g_standOut[g.gU[m]], 64);
-            for (uint32_t m = 0; m < g.nF; ++m) std::memcpy(g_pfzAnim[g.gF[m]], g_standOut[g.gF[m]], 64);
-        }
-        // Into the span: all of UB (the freeze's member matrices where it wrote), then the legs' groups.
-        for (uint32_t k = 0; k < pl.ubN && !writeFault; ++k) {
-            const uint32_t j = pl.ub[k];
-            if (j >= count) continue;
+        // The whole pose into the span: the freeze's matrices where it wrote, the animated ones elsewhere.
+        for (uint32_t j = 0; j < count && !writeFault; ++j) {
             const float* src = froze && g_ikFzSlot[j] != 0xFFFFu ? g_pfzChain[g_ikFzSlot[j]] : g_pfzAnim[j];
             if (!guardedWriteFloats16(sp.buf + static_cast<uint64_t>(j) * 64u, src)) writeFault = true;
         }
-        for (int k = 0; k < 2 && !writeFault; ++k) {
-            const nofoot::IkArm& g = pl.leg[k];
-            const uint16_t* lists[2] = {g.gU, g.gF};
-            const uint16_t counts[2] = {g.nU, g.nF};
-            for (int q = 0; q < 2 && !writeFault; ++q)
-                for (uint32_t m = 0; m < counts[q] && !writeFault; ++m)
-                    if (!guardedWriteFloats16(sp.buf + static_cast<uint64_t>(lists[q][m]) * 64u, g_pfzAnim[lists[q][m]])) writeFault = true;
+        if (writeFault) refusal = kPinRefWrite;
+    }
+    const bool moved = refusal == kPinRefKinds || refusal == kPinRefNoLegs || refusal == kPinRefLeg;   // the pose was moved (the legs may not have been)
+    if (moved) {
+        pc.valid = !writeFault;
+        for (int i = 0; i < 3; ++i) {
+            pc.E[i] = E[i];
+            pc.T[i] = T[i];
+            pc.N0[i] = N0[i];
+            pc.th[i] = mv.th[i];
         }
-        if (writeFault) refusal = kStandRefWrite;
+        pc.delta = mv.delta;
+        pc.nPin[0] = N0[0] + mv.th[0];
+        pc.nPin[1] = N0[1] + mv.delta;
+        pc.nPin[2] = N0[2] + mv.th[2];
+    }
+    pc.parity = parity;
+    pc.armed = armed;
+    {   // the state bin: the AMC's speed, vertical speed and whether both animated feet are well above the ground
+        bool feetHigh = false;
+        if (pl.legOk && pl.leg[0].H < count && pl.leg[1].H < count)
+            feetHigh = static_cast<double>(g_pfzAnim[pl.leg[0].H][13]) > nofoot::kPinFeetHighM && static_cast<double>(g_pfzAnim[pl.leg[1].H][13]) > nofoot::kPinFeetHighM;
+        pc.state = nofoot::pinState(speed, vy, feetHigh);
     }
     // The statistics (one writer; the frame thread reads them once a second under the sequence counter).
-    g_standStatSeq.fetch_add(1, std::memory_order_acq_rel);
-    if (g_standStatReset.exchange(false, std::memory_order_relaxed)) g_standStats = StandStats{};
-    StandStats& st = g_standStats;
+    g_pinStatSeq.fetch_add(1, std::memory_order_acq_rel);
+    if (g_pinStatReset.exchange(false, std::memory_order_relaxed)) g_pinStats = PinStats{};
+    PinStats& st = g_pinStats;
     ++st.calls;
-    if (captured) ++st.captures;
-    if (refusal != kStandRefKinds) ++st.refused[refusal];
-    st.standY = g_standY;
-    st.standHave = g_standYHave;
-    st.armedWLast = armedW;
-    if (std::isfinite(y15) && std::isfinite(y7)) {
-        const bool first = st.yN == 0;
-        ++st.yN;
-        st.y15Sum += y15;
-        st.y7Sum += y7;
-        st.lpSum += g_standLp;
-        if (legsOk) {
-            st.capSum += cap;
-            st.capMin = first || st.capN == 0 || cap < st.capMin ? cap : st.capMin;
-            ++st.capN;
-        }
-        if (armedW > 0.0) {
-            ++st.armedN;
-            st.wantSum += wanted;
-            st.wantMax = std::max(st.wantMax, wanted);
-            if (legsOk && wanted > cap) ++st.capBound;
+    if (refusal != kPinRefKinds) ++st.refused[refusal];
+    if (moved) {
+        ++st.pinned;
+        if (mv.hClamped) ++st.hClamped;
+        if (mv.vClamped) ++st.vClamped;
+        if (cycSrc == kCycRows) ++st.cycRows;
+        else if (cycSrc == kCycCached) ++st.cycCached;
+        else ++st.cycNone;
+        const double ageMs = static_cast<double>(ageUs) * 1e-3;
+        ++st.ageN;
+        st.ageSum += ageMs;
+        st.ageMax = std::max(st.ageMax, ageMs);
+        st.ageSumPar[parity] += ageMs;
+        st.ageMaxPar[parity] = std::max(st.ageMaxPar[parity], ageMs);
+        if (freshIn) ++st.fresh[parity];
+        else ++st.repeat[parity];
+        st.speedSum += speed;
+        st.speedMax = std::max(st.speedMax, speed);
+        st.reachWant += reachWant;
+        st.reachActive += reachActive;
+        st.reachInfeasible += reachInfeasible;
+        st.reachCorrSum += 100.0 * reachCorr;
+        st.reachCorrMax = std::max(st.reachCorrMax, 100.0 * reachCorr);
+        st.d0Sum[0] += 100.0 * d0[0];
+        st.d0Sum[1] += 100.0 * d0[2];
+        st.dSum[0] += 100.0 * mv.th[0];
+        st.dSum[1] += 100.0 * mv.th[2];
+        if (legsSolved) {
+            ++st.legSolves;
+            for (int k = 0; k < 2; ++k) {
+                const nofoot::LegPlant& p = lp[k];
+                if (p.replantM > 1e-4) {
+                    ++st.replanted[k];
+                    st.replantSum[k] += 100.0 * p.replantM;
+                    st.replantMax[k] = std::max(st.replantMax[k], 100.0 * p.replantM);
+                } else if (p.replantM < -1e-4) {
+                    ++st.outward[k];
+                    st.outwardSum[k] += -100.0 * p.replantM;
+                    st.outwardMax[k] = std::max(st.outwardMax[k], -100.0 * p.replantM);
+                }
+                if (p.liftM > 1e-4) {
+                    ++st.lifted[k];
+                    st.liftSum[k] += 100.0 * p.liftM;
+                    st.liftMax[k] = std::max(st.liftMax[k], 100.0 * p.liftM);
+                }
+                if (!p.closed) ++st.notClosed[k];
+                st.reachBeforeMax[k] = std::max(st.reachBeforeMax[k], p.reachBefore);
+                st.reachAfterMax[k] = std::max(st.reachAfterMax[k], p.reachAfter);
+                st.footErrMaxMm = std::max(st.footErrMaxMm, ls[k].footErrM * 1000.0);
+            }
         }
     }
-    if (solved && !writeFault) {
-        ++st.raised;
-        st.appliedSum += delta;
-        st.appliedMax = std::max(st.appliedMax, delta);
-        for (int k = 0; k < 2; ++k) {
-            StandLegStats& s = st.leg[k];
-            const nofoot::LegSolve& L = ls[k];
-            const double dx = hip[k][0] - foot[k][0], dz = hip[k][2] - foot[k][2];
-            ++s.n;
-            if (L.limited) ++s.limited;
-            s.vSum += hip[k][1] - foot[k][1];
-            s.hSum += std::sqrt(dx * dx + dz * dz);
-            s.l1Sum += L.l1;
-            s.l2Sum += L.l2;
-            s.rbSum += L.reachBefore;
-            s.rbMax = std::max(s.rbMax, L.reachBefore);
-            s.raSum += L.reachAfter;
-            s.raMax = std::max(s.raMax, L.reachAfter);
-            s.kaSum += L.kneeAnimDeg;
-            s.ksSum += L.kneeSolvedDeg;
-            s.errMaxMm = std::max(s.errMaxMm, L.footErrM * 1000.0);
-        }
-    }
-    g_standStatSeq.fetch_add(1, std::memory_order_release);
+    g_pinStatSeq.fetch_add(1, std::memory_order_release);
     return !writeFault;
+}
+// Closes a pin call at the end of the hook: the neck as finally written (after the bend), against the target and the eye. res = target - neck
+// (right, up, forward, metres); the eye - neck = res + (eye - target). Bins by the movement state, and "armed" beside it.
+void pinRecord(const PinCall& pc, const double resFinal[3]) noexcept {
+    if (!pc.valid) return;
+    g_pinStatSeq.fetch_add(1, std::memory_order_acq_rel);
+    PinStats& st = g_pinStats;
+    const double rest[3] = {pc.E[0] - pc.T[0], pc.E[1] - pc.T[1], pc.E[2] - pc.T[2]};
+    for (int pass = 0; pass < 2; ++pass) {
+        if (pass == 1 && !pc.armed) break;
+        PinBin& b = st.bin[pass == 0 ? (pc.state >= 0 && pc.state < 4 ? pc.state : 0) : 4];
+        const bool first = b.n == 0;
+        ++b.n;
+        double r3 = 0.0;
+        for (int i = 0; i < 3; ++i) {
+            const double rc = 100.0 * resFinal[i], ec = 100.0 * (resFinal[i] + rest[i]);
+            b.resSum[i] += rc;
+            b.resMax[i] = std::max(b.resMax[i], std::fabs(rc));
+            b.enSum[i] += ec;
+            b.enMax[i] = std::max(b.enMax[i], std::fabs(ec));
+            r3 += rc * rc;
+        }
+        r3 = std::sqrt(r3);
+        b.res3Sum += r3;
+        b.res3Max = std::max(b.res3Max, r3);
+        const double dc = 100.0 * pc.delta;
+        b.deltaMin = first || dc < b.deltaMin ? dc : b.deltaMin;
+        b.deltaMax = first || dc > b.deltaMax ? dc : b.deltaMax;
+        b.deltaSum += dc;
+        b.thSum[0] += 100.0 * pc.th[0];
+        b.thSum[1] += 100.0 * pc.th[2];
+        b.thAbsMax[0] = std::max(b.thAbsMax[0], std::fabs(100.0 * pc.th[0]));
+        b.thAbsMax[1] = std::max(b.thAbsMax[1], std::fabs(100.0 * pc.th[2]));
+    }
+    g_pinStatSeq.fetch_add(1, std::memory_order_release);
+}
+
+// ---- F67f: while armed, both hands stay on the grips on every frame -------------------------------------------------------------------------------
+// Sean's requirement. The F66 flight: the frame thread's base weight fell to 0.0-0.5 for 0.1-0.3 s whenever the FP snapshot or G was older than 100 ms
+// (the log's "held: the FP snapshot is older than 100 ms" on every stall and aim move), the hand target and the clavicle assist moved at most 5 cm a
+// call, and the torso square-up was clamped to +-50 deg through a 0.3 s ramp: each lets the game's animated hand show, or the solved hand trail. The
+// armed path now: the FP snapshot is a record in the FP root's frame, valid at any age (30 s), with this frame's G (the FP root and the AMC; at most
+// 1 s old); the solve weight is 1 once the armed ramp is; no per-call cap on the hand or the assist; the square-up angle is phi itself. Only a
+// missing plan or a fault skips the solve, and the second's line says which. This window counts the invariants (written by the hook under the
+// sequence counter, read once a second by the frame thread).
+enum F67fWhy : int { kF67fPlan = 0, kF67fNoWrite, kF67fRefused, kF67fInputs, kF67fWeight, kF67fOther, kF67fWhyKinds };
+const char* const kF67fWhyText[kF67fWhyKinds] = {"no arm plan for the side", "the IK's writes are stood down or the mode does not write", "the solve was refused (a singular matrix)",
+                                                 "the FP snapshot or G is unusable (none yet, or torn)", "the solve weight was 0", "other"};
+struct F67fWin {
+    uint64_t calls = 0, armedFull = 0, staleFp = 0, staleG = 0;
+    uint64_t solved[2] = {}, notSolved[2] = {}, why[2][kF67fWhyKinds] = {};
+    double fpAgeMax = 0.0, gAgeMax = 0.0;
+    uint64_t sqN = 0, sqOver = 0;
+    double sqAbsMaxDeg = 0.0, sqAppliedAbsMaxDeg = 0.0;
+    uint64_t shortN = 0, shortOver1 = 0;
+    double shortMax = 0.0, shortSum = 0.0;
+    uint64_t errN[2] = {};
+    double errSum[2] = {}, errMax[2] = {};
+    uint64_t wBelow1 = 0;   // armed calls (ramp complete) in which a written side's weight was below 1
+};
+std::atomic<uint32_t> g_f67fSeq{0};
+F67fWin g_f67f;
+std::atomic<bool> g_f67fReset{false};
+std::atomic<bool> g_ikGateOk{false};   // the frame thread's gate for the arm IK with the snapshot's and G's age left out (F67f)
+
+// ---- F67e (TEMPORARY instrument, no behaviour): the aim-jump record ------------------------------------------------------------------------------
+// Sean: the armed arms jump whenever he moves his aim (mouse): the 3P hand opens at the grip, "a second hand" shows for 2-4 frames, both arms rise in a
+// V by 30-120 px a frame, then everything is static again. Candidates: (i) the 3P body's yaw lags the FP aim, so the arms over-reach until the torso
+// catches up (the FP forward minus the 3P root yaw grows past the square-up's reach and the reach ratio goes over 1); (ii) the arm IK refused or held
+// for a few frames (hold/refuse states in exactly those frames); (iii) the game's own 3P aim-offset blend moves the animated arms (the animated hand
+// before the IK moves while the solved target does not). The hook posts one record per call (below); the frame thread watches the FP root's yaw rate
+// and, while armed, prints 40 frames of `aim jump (F67e)` lines from the first frame over 30 deg/s (at most 5 events a minute).
+struct AimArm {
+    uint8_t state = 0, reason = 0;   // state: 0 no side, 1 solved and written, 2 solved, not written (held), 3 refused; reason: F67fWhy + 1 (0 none)
+    float w = 0.0f, reach = 0.0f, errBefore = -1.0f, errAfter = -1.0f, shortfall = 0.0f, handMove = -1.0f;   // cm; reach: |target - S| / (l1 + l2)
+};
+struct AimRec {
+    std::atomic<uint32_t> seq{0};
+    uint64_t qpc = 0;
+    uint32_t p1 = 0;
+    float fpYaw = 0.0f, rootYaw = 0.0f, phiWant = 0.0f, phiApplied = 0.0f, dR = 0.0f, dF = 0.0f, armedW = 0.0f;   // degrees; d in cm
+    AimArm arm[2];
+    bool phiHave = false, pinHave = false;
+};
+constexpr uint32_t kAimRing = 256;
+AimRec g_aimRing[kAimRing];
+std::atomic<uint32_t> g_aimHead{0};
+void aimPost(const AimRec& r) noexcept {
+    const uint32_t i = g_aimHead.fetch_add(1, std::memory_order_relaxed);
+    AimRec& d = g_aimRing[i % kAimRing];
+    d.seq.fetch_add(1, std::memory_order_acq_rel);   // odd: a write is in progress
+    d.qpc = r.qpc;
+    d.p1 = r.p1;
+    d.fpYaw = r.fpYaw;
+    d.rootYaw = r.rootYaw;
+    d.phiWant = r.phiWant;
+    d.phiApplied = r.phiApplied;
+    d.dR = r.dR;
+    d.dF = r.dF;
+    d.armedW = r.armedW;
+    d.arm[0] = r.arm[0];
+    d.arm[1] = r.arm[1];
+    d.phiHave = r.phiHave;
+    d.pinHave = r.pinHave;
+    d.seq.fetch_add(1, std::memory_order_release);
+}
+bool aimCopy(uint32_t idx, AimRec* out) noexcept {
+    const AimRec& s = g_aimRing[idx % kAimRing];
+    for (int tries = 0; tries < 2; ++tries) {
+        const uint32_t s1 = s.seq.load(std::memory_order_acquire);
+        if (s1 & 1u || s1 == 0) continue;
+        out->qpc = s.qpc;
+        out->p1 = s.p1;
+        out->fpYaw = s.fpYaw;
+        out->rootYaw = s.rootYaw;
+        out->phiWant = s.phiWant;
+        out->phiApplied = s.phiApplied;
+        out->dR = s.dR;
+        out->dF = s.dF;
+        out->armedW = s.armedW;
+        out->arm[0] = s.arm[0];
+        out->arm[1] = s.arm[1];
+        out->phiHave = s.phiHave;
+        out->pinHave = s.pinHave;
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if (s.seq.load(std::memory_order_relaxed) == s1) return true;
+    }
+    return false;
 }
 
 void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
@@ -9654,37 +10094,60 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         return;
     }
     const uint64_t now = GetTickCount64();
-    // The arm IK's inputs (the FP snapshot and G, under 100 ms). F58: a refusal here skips the arms and the square-up but not the bend.
+    // The arm IK's inputs: the FP snapshot (a record in the FP root's frame) and G (this frame's FP root and AMC). F67f: while armed, the last snapshot is
+    // valid at any age up to 30 s and the last G up to 1 s (the rest of the time 100 ms, as before); a torn read keeps the last one. F58: a refusal here
+    // skips the arms and the square-up but not the bend; F67c: nor the pin.
+    static float s_fpm[nofoot::kIkFpSlots][16];
+    static uint64_t s_fpMs = 0;
+    static bool s_fpHave = false, s_gHave = false;
+    static IkGData s_G;
+    const bool armedNow = g_armedNow.load(std::memory_order_relaxed);
+    const bool pinWanted = mode == 3 && g_pinScope.load(std::memory_order_relaxed);
     float fpm[nofoot::kIkFpSlots][16] = {};
-    uint64_t fpMs = 0, fpAge = 0, gAge = 0;
+    uint64_t fpAge = 0, gAge = 0;
     IkGData G;
     bool armsOk = mode != 0;
+    bool fpStale = false, gStale = false;
     if (armsOk) {
         uint32_t ref = kIkRefKinds;
-        if (!ikFpRead(fpm, &fpMs)) {
-            ref = kIkRefFpTorn;
-        } else {
-            fpAge = now > fpMs ? now - fpMs : 0;
-            if (fpAge > nofoot::kIkFreshMs) {
-                ref = kIkRefFpStale;
-            } else if (!ikGRead(&G)) {
-                ref = kIkRefGTorn;
-            } else {
-                gAge = now > G.ms ? now - G.ms : 0;
-                if (gAge > nofoot::kIkFreshMs) ref = kIkRefGStale;
+        {
+            float tmp[nofoot::kIkFpSlots][16];
+            uint64_t tmpMs = 0;
+            if (ikFpRead(tmp, &tmpMs)) {
+                std::memcpy(s_fpm, tmp, sizeof(s_fpm));
+                s_fpMs = tmpMs;
+                s_fpHave = true;
+            }
+            IkGData gn;
+            if (ikGRead(&gn)) {
+                s_G = gn;
+                s_gHave = true;
             }
         }
+        fpAge = s_fpHave ? (now > s_fpMs ? now - s_fpMs : 0) : 0;
+        gAge = s_gHave ? (now > s_G.ms ? now - s_G.ms : 0) : 0;
+        fpStale = s_fpHave && fpAge > nofoot::kIkFreshMs;
+        gStale = s_gHave && gAge > nofoot::kIkFreshMs;
+        if (!nofoot::ikSnapshotUsable(s_fpHave, fpAge, armedNow)) ref = s_fpHave ? kIkRefFpStale : kIkRefFpTorn;
+        else if (!nofoot::ikGUsable(s_gHave, gAge, armedNow)) ref = s_gHave ? kIkRefGStale : kIkRefGTorn;
         if (ref != kIkRefKinds) {
             ikRefuse(ref);
-            if (!bendRun) return;
+            if (!bendRun && !pinWanted) return;
             armsOk = false;
+        } else {
+            std::memcpy(fpm, s_fpm, sizeof(fpm));
+            G = s_G;
         }
     }
     {   // F66g: the Animate event: the d the G it read carried (zero when there was none), and the span buffer this call writes
         const float zero3[3] = {};
         f66gPost('A', armsOk ? G.d : zero3, sp.buf);
     }
-    const float wBase = g_ikWeight.load(std::memory_order_relaxed);
+    const float armedW = g_armedW.load(std::memory_order_relaxed);   // F66a: the game's armed flag, ramped over 0.3 s (the frame thread)
+    const bool armedFull = armedNow && armedW >= 1.0f;               // F67f: the ramp is complete: every armed path solves at weight 1
+    // F67f: the base weight is the frame thread's blend (0 until the key is on and the gate holds, ramped over 0.2 s at the start); once armed it does
+    // not matter how that blend stands, only whether the gate (keys, plan, writes) is open.
+    const float wBase = armedFull && g_ikGateOk.load(std::memory_order_relaxed) ? 1.0f : g_ikWeight.load(std::memory_order_relaxed);
     const bool writeOk = armsOk && (mode == 2 || mode == 3) && wBase > 0.0f && !g_ikWriteDown.load(std::memory_order_relaxed);
     struct SideOut {
         bool solved = false, clamped = false, wrote = false, poleFp = false, limited = false;
@@ -9705,10 +10168,17 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         bool gripWritten = false;
         uint32_t uJ = 0xFFFFu;
     } so[2];
-    const float armedW = g_armedW.load(std::memory_order_relaxed);   // F66a: the game's armed flag, ramped over 0.3 s (the frame thread)
     uint32_t nList = 0;
     const uint32_t count = sp.count;
     if (count == 0 || count > nofoot::kPfzMaxJoints) return ikRefuse(kIkRefPlan);
+    // F67e: the animated hands (the arm plan's hand joints) as the game animated them, before the pin or anything else moved the pose.
+    double rawH[2][3] = {};
+    bool rawHave[2] = {false, false};
+    for (int side = 0; side < 2; ++side)
+        if (pl.ok[side] && pl.side[side].H < count) {
+            rawHave[side] = true;
+            for (int i = 0; i < 3; ++i) rawH[side][i] = static_cast<double>(g_pfzAnim[pl.side[side].H][12 + i]);
+        }
     // F59: the ADS weight (0.15 s on journalAds, frame thread) lerps the sliders to their ADS values.
     double adsW = static_cast<double>(g_ikAdsW.load(std::memory_order_relaxed));
     adsW = adsW < 0.0 ? 0.0 : adsW > 1.0 ? 1.0 : adsW;
@@ -9731,9 +10201,11 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         for (uint32_t k = 0; k < fpl.count && k < nofoot::kPfzMaxF; ++k)
             if (fpl.member[k] < count) g_ikFzSlot[fpl.member[k]] = static_cast<uint16_t>(k);
     }
-    // F65b stage 0: stand armed (the arm IK on): the upper body raised to its standing height and the legs solved onto the animated feet, in
-    // the animated copy and the span, before M0 is built from them.
-    if (mode == 3 && !g_ikWriteDown.load(std::memory_order_relaxed) && !standStage0(pl, sp, froze, now)) {
+    // F67c stage 0: the body pin (the arm IK on, full-3P body mode): the animated pose moved so the neck sits under this frame's camera, in the animated
+    // copy and the span, before M0 is built from it. G is at d = 0 (the frame thread's body offset is zero in the pin's scope).
+    PinCall pinCall;
+    if (pinWanted && !g_ikWriteDown.load(std::memory_order_relaxed) &&
+        !pinStage0(pl, sp, froze, now, armsOk ? &G : nullptr, armsOk ? fpm : nullptr, static_cast<double>(armedW), wSqRamp, sqAmount, pinCall)) {
         g_ikWriteDown.store(true, std::memory_order_relaxed);
         return ikRefuse(kIkRefWrite);
     }
@@ -9812,11 +10284,19 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
     uint32_t bendLevel = 0xFFu, bendPov = 0xFFFFu;
     if (bendRun) {
         BendTarget bt;
+        // F67c: in the pin's scope the target is this frame's neck target (the pin's T), from P1's camera of the same game frame, not the frame
+        // thread's republication of a sample that is 0..2 game frames old at a 90 Hz tick against a 61 Hz game (the F66 judder).
+        const bool pinT = pinCall.valid;
+        if (pinT) {
+            for (int i = 0; i < 3; ++i) bt.t[i] = static_cast<float>(pinCall.T[i]);
+            bt.pov = nofoot::kBendNeckJoint;
+            bt.ms = now;
+        }
         if (!pl.sqOk) {
             bendRefuse(kBendRefPlan);
-        } else if (!bendTargetRead(&bt)) {
+        } else if (!pinT && !bendTargetRead(&bt)) {
             bendRefuse(kBendRefTarget);
-        } else if ((now > bt.ms ? now - bt.ms : 0) > nofoot::kBendStaleMs) {
+        } else if (!pinT && (now > bt.ms ? now - bt.ms : 0) > nofoot::kBendStaleMs) {
             bendRefuse(kBendRefStale);
         } else if (bt.pov >= count || nofoot::kIkSpine[0] >= count) {
             bendRefuse(kBendRefPov);
@@ -9876,7 +10356,7 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
     // an on that is not writing) at the full ramp for the statistics; on and writing at the frame thread's ramp. Times the slider's amount.
     // F59: the reference is the FP FORWARD (G's z row on xz) and the 3P line is the upper arms' (U of the left and right plans, 40 -> 41):
     // turned square to the forward (nofoot::ikSquareToForward). The F57 clavicle reference's theta is still computed for the log only.
-    bool sqHave = false, sqClamped = false, sqOldHave = false, uaHave = false;
+    bool sqHave = false, sqClamped = false, sqOldHave = false, uaHave = false, sqOverOld = false;
     double sqTheta = 0.0, sqApplied = 0.0, sqOld = 0.0, sqAfter = 0.0, uaX[2] = {}, uaSpacing = 0.0;
     if (armsOk && pl.sqOk && mode != 2 && uaPlan && nofoot::kIkClavR < count && nofoot::kIkSquarePivot < count) {
         {
@@ -9898,9 +10378,12 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         const double fwd[3] = {G.g[8], G.g[9], G.g[10]};
         if (sqPre) {
             sqTheta = -phi;                                     // theta = yaw(U line) - 90 deg relative to the FP forward
-            const double target = nofoot::ikSquareClampRad(phi, &sqClamped);
+            nofoot::ikSquareClampRad(phi, &sqClamped);          // the old limit's verdict; the unarmed path still clamps
             const double sqW = (mode == 3 && writeOk) ? wSqRamp : 1.0;
-            sqApplied = sqAmount * sqW * target;
+            // F67f: armed (and writing), the torso turns with the weapon at once: phi itself, no clamp, no ramp, no amount.
+            const bool armedSq = armedNow && mode == 3 && writeOk;
+            sqApplied = nofoot::squareApplied(phi, armedSq, sqAmount, sqW, &sqOverOld);
+            if (armedSq) sqClamped = false;
             sqHave = true;
             if (sqApplied != 0.0) {
                 const double up[3] = {0.0, 1.0, 0.0};
@@ -9994,7 +10477,8 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         // arms, whatever the distance gate says). o.gate stays the distance gate, a logged measure.
         const float gateW = nofoot::ikArmWeight(armedW);
         // The weight this side solves at: on and writing, the per-arm weight; otherwise 1 (probe: the full solve, for the statistics only).
-        const double wArm = static_cast<double>(wBase) * gateW;
+        const double wArm = nofoot::ikArmedSolveWeight(armedNow, static_cast<double>(armedW), static_cast<double>(wBase));   // F67f: 1 once armed
+        (void)gateW;
         const bool doSolveWrite = mode == 3 && writeOk && wArm > 0.0;
         o.wArm = mode == 3 ? wArm : 0.0;
         o.gate = gate;
@@ -10016,7 +10500,8 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
         if (doSolveWrite) {
             if (now - g_ikAppliedMs[side] > 200) g_ikApplied[side][0] = g_ikApplied[side][1] = g_ikApplied[side][2] = 0.0f;
             const float want[3] = {static_cast<float>(dH[0] * wSolve), static_cast<float>(dH[1] * wSolve), static_cast<float>(dH[2] * wSolve)};
-            nofoot::ikCapToward(g_ikApplied[side], want, nofoot::kIkCapPerCallM);
+            if (nofoot::handCapApplies(armedNow)) nofoot::ikCapToward(g_ikApplied[side], want, nofoot::kIkCapPerCallM);
+            else for (int i = 0; i < 3; ++i) g_ikApplied[side][i] = want[i];   // F67f: armed, the hand goes to its grip this frame, not 5 cm of it
             g_ikAppliedMs[side] = now;
             for (int i = 0; i < 3; ++i) target[i] = H0[i] + g_ikApplied[side][i];
         } else {
@@ -10045,7 +10530,8 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             if (doSolveWrite) {
                 if (now - g_ikAssistMs[side] > 200) g_ikAssistApplied[side][0] = g_ikAssistApplied[side][1] = g_ikAssistApplied[side][2] = 0.0f;
                 const float wf[3] = {static_cast<float>(want[0]), static_cast<float>(want[1]), static_cast<float>(want[2])};
-                nofoot::ikCapToward(g_ikAssistApplied[side], wf, nofoot::kIkCapPerCallM);
+                if (nofoot::handCapApplies(armedNow)) nofoot::ikCapToward(g_ikAssistApplied[side], wf, nofoot::kIkCapPerCallM);
+                else for (int i = 0; i < 3; ++i) g_ikAssistApplied[side][i] = wf[i];   // F67f: no cap on the armed path
                 g_ikAssistMs[side] = now;
                 for (int i = 0; i < 3; ++i) disp[i] = static_cast<double>(g_ikAssistApplied[side][i]);
             } else {
@@ -10607,6 +11093,111 @@ void armIkAfterAnimate(uint64_t x, const PfzSpan& sp, bool froze) noexcept {
             }
         }
         g_f66gSeq.fetch_add(1, std::memory_order_release);
+    }
+    // F67c: the pin's call closes with the neck as finally written (after the bend): the target less the neck, right, up, forward (metres).
+    if (pinCall.valid) {
+        double res[3];
+        if (bendHave) {
+            res[0] = bendRes1[2];
+            res[1] = bendRes1[1];
+            res[2] = bendRes1[0];
+        } else {
+            for (int i = 0; i < 3; ++i) res[i] = pinCall.T[i] - pinCall.nPin[i];
+        }
+        pinRecord(pinCall, res);
+    }
+    // F67f: the armed invariants of this call, and F67e's record (the frame thread decides whether an event is running).
+    {
+        g_f67fSeq.fetch_add(1, std::memory_order_acq_rel);
+        if (g_f67fReset.exchange(false, std::memory_order_relaxed)) g_f67f = F67fWin{};
+        F67fWin& fw = g_f67f;
+        ++fw.calls;
+        if (armedNow) {
+            if (fpStale) ++fw.staleFp;
+            if (gStale) ++fw.staleG;
+            fw.fpAgeMax = std::max(fw.fpAgeMax, static_cast<double>(fpAge));
+            fw.gAgeMax = std::max(fw.gAgeMax, static_cast<double>(gAge));
+            if (sqHave) {
+                ++fw.sqN;
+                const double phiDeg = std::fabs(sqPhi0) * 180.0 / nofoot::kIkPi;
+                fw.sqAbsMaxDeg = std::max(fw.sqAbsMaxDeg, phiDeg);
+                fw.sqAppliedAbsMaxDeg = std::max(fw.sqAppliedAbsMaxDeg, std::fabs(sqApplied) * 180.0 / nofoot::kIkPi);
+                if (sqOverOld) ++fw.sqOver;
+            }
+        }
+        if (armedFull) {
+            ++fw.armedFull;
+            for (int side = 0; side < 2; ++side) {
+                if (!pl.ok[side]) {
+                    ++fw.notSolved[side];
+                    ++fw.why[side][kF67fPlan];
+                    continue;
+                }
+                const SideOut& o = so[side];
+                if (o.wrote) {
+                    ++fw.solved[side];
+                    if (o.wArm < 1.0 - 1e-6) ++fw.wBelow1;
+                    ++fw.errN[side];
+                    fw.errSum[side] += o.gripErr;
+                    fw.errMax[side] = std::max(fw.errMax[side], o.gripErr);
+                    ++fw.shortN;
+                    fw.shortSum += o.shortA;
+                    fw.shortMax = std::max(fw.shortMax, o.shortA);
+                    if (o.shortA > 1.0) ++fw.shortOver1;
+                } else {
+                    ++fw.notSolved[side];
+                    const int why = !armsOk ? kF67fInputs : (!(mode == 2 || mode == 3) || g_ikWriteDown.load(std::memory_order_relaxed)) ? kF67fNoWrite
+                                  : !o.solved ? kF67fRefused : !(o.wArm > 0.0) ? kF67fWeight : kF67fOther;
+                    ++fw.why[side][why];
+                }
+            }
+        }
+        g_f67fSeq.fetch_add(1, std::memory_order_release);
+        AimRec r;
+        r.qpc = f30Qpc();
+        r.p1 = g_f66gP1Seq.load(std::memory_order_relaxed);
+        r.armedW = armedW;
+        constexpr double kRad = 180.0 / nofoot::kIkPi;
+        if (armsOk) {
+            r.fpYaw = static_cast<float>(std::atan2(static_cast<double>(G.froot[8]), static_cast<double>(G.froot[10])) * kRad);
+            r.rootYaw = static_cast<float>(std::atan2(static_cast<double>(G.m3p[8]), static_cast<double>(G.m3p[10])) * kRad);
+        }
+        r.phiHave = sqHave;
+        r.phiWant = static_cast<float>(sqPhi0 * kRad);
+        r.phiApplied = static_cast<float>(sqApplied * kRad);
+        r.pinHave = pinCall.valid;
+        r.dR = static_cast<float>(100.0 * pinCall.th[0]);
+        r.dF = static_cast<float>(100.0 * pinCall.th[2]);
+        static double prevH[2][3] = {};
+        static bool prevHave[2] = {false, false};
+        for (int side = 0; side < 2; ++side) {
+            AimArm& a = r.arm[side];
+            const SideOut& o = so[side];
+            if (!pl.ok[side]) {
+                a.state = 0;
+                continue;
+            }
+            a.state = o.wrote ? 1 : o.solved ? 2 : 3;
+            if (!o.wrote) {
+                const int why = !armsOk ? kF67fInputs : (!(mode == 2 || mode == 3) || g_ikWriteDown.load(std::memory_order_relaxed)) ? kF67fNoWrite
+                              : !o.solved ? kF67fRefused : !(o.wArm > 0.0) ? kF67fWeight : kF67fOther;
+                a.reason = static_cast<uint8_t>(why + 1);
+            }
+            a.w = static_cast<float>(o.wArm);
+            a.reach = static_cast<float>(o.reach);
+            a.errBefore = static_cast<float>(o.dist);
+            a.errAfter = static_cast<float>(o.gripErr);
+            a.shortfall = static_cast<float>(o.shortA);
+            if (rawHave[side] && prevHave[side]) {
+                const double dm[3] = {rawH[side][0] - prevH[side][0], rawH[side][1] - prevH[side][1], rawH[side][2] - prevH[side][2]};
+                a.handMove = static_cast<float>(100.0 * nofoot::ikLen(dm));
+            }
+        }
+        for (int side = 0; side < 2; ++side) {
+            prevHave[side] = rawHave[side];
+            for (int i = 0; i < 3; ++i) prevH[side][i] = rawH[side][i];
+        }
+        aimPost(r);
     }
     // The writes, all matrices computed above: the solve's from g_ikOut (mark 4), the squared torso's from g_ikM0.
     for (uint32_t k = 0; k < nList; ++k) {
@@ -11218,6 +11809,120 @@ void f66gLine(uint64_t now) noexcept {
                     "still flips: a double-buffered pose source; alternating: ours",
                     q.callsPar[0], q.callsPar[1], bufs[0], bufs[1], vPitch, vRoll, vR, vF, vNx, vNy, vNz);
 }
+// F67e (frame thread): the aim-jump events. The hook's records (aimPost) are drained every tick; a record whose FP root yaw rate is over 30 deg/s while
+// armed starts an event (at most 5 in 60 s), and the next 40 records print one compact line each, `aim jump (F67e)`: the yaw rate, the FP forward less
+// the 3P root yaw, the square-up wanted and applied, the pin's horizontal move, and per arm the IK state, weight, reach ratio, the hand-to-grip error
+// before and after the solve, the shortfall and the animated hand's displacement since the previous call. No behaviour changes here.
+const char* aimArmState(const AimArm& a, char* buf, size_t cap) noexcept {
+    static const char* const kShort[kF67fWhyKinds] = {"plan", "nowrite", "refused", "inputs", "weight", "other"};
+    const char* why = a.reason > 0 && a.reason <= kF67fWhyKinds ? kShort[a.reason - 1] : "";
+    if (a.state == 0) std::snprintf(buf, cap, "no side");
+    else if (a.state == 1) std::snprintf(buf, cap, "solved w %.2f reach %.2f hand-grip %.1f -> %.1f cm short %.1f anim-hand %.1f", static_cast<double>(a.w), static_cast<double>(a.reach),
+                                        static_cast<double>(a.errBefore), static_cast<double>(a.errAfter), static_cast<double>(a.shortfall), static_cast<double>(a.handMove));
+    else std::snprintf(buf, cap, "%s (%s) w %.2f reach %.2f hand-grip %.1f -> %.1f cm short %.1f anim-hand %.1f", a.state == 2 ? "HELD" : "REFUSED", why, static_cast<double>(a.w),
+                       static_cast<double>(a.reach), static_cast<double>(a.errBefore), static_cast<double>(a.errAfter), static_cast<double>(a.shortfall), static_cast<double>(a.handMove));
+    return buf;
+}
+void f67eDrain(uint64_t nowMs) noexcept {
+    static uint32_t tail = 0;
+    static bool init = false, havePrev = false;
+    static double prevYaw = 0.0;
+    static uint64_t prevQpc = 0, t0Qpc = 0, starts[5] = {};
+    static int remaining = 0, evNo = 0, frameNo = 0, startN = 0;
+    const uint32_t head = g_aimHead.load(std::memory_order_acquire);
+    if (!init) {
+        init = true;
+        tail = head;
+        return;
+    }
+    if (head - tail > kAimRing - 8) tail = head - (kAimRing - 8);
+    for (; tail != head; ++tail) {
+        AimRec r;
+        if (!aimCopy(tail, &r)) continue;
+        double rate = 0.0;
+        if (havePrev && r.qpc > prevQpc) {
+            const double dtv = static_cast<double>(f30QpcUs(r.qpc - prevQpc)) * 1e-6;
+            if (dtv > 1e-4 && dtv < 0.5) rate = nofoot::yawRateDps(prevYaw, static_cast<double>(r.fpYaw), dtv);
+        }
+        prevYaw = static_cast<double>(r.fpYaw);
+        prevQpc = r.qpc;
+        havePrev = true;
+        const bool armed = r.armedW >= 0.5f;
+        if (remaining == 0 && nofoot::aimTrigger(rate, armed)) {
+            int inMinute = 0;
+            for (int i = 0; i < startN; ++i)
+                if (nowMs >= starts[i] && nowMs - starts[i] < 60000) ++inMinute;
+            if (inMinute < 5) {
+                starts[startN % 5] = nowMs;
+                ++startN;
+                ++evNo;
+                remaining = 40;
+                frameNo = 0;
+                t0Qpc = r.qpc;
+                Log::get().note("aim jump (F67e): event #%d: the FP root's yaw rate %+.0f deg/s while armed (armed ramp %.2f); 40 frames follow, one line each (state: "
+                                "solved = written on the grip; HELD = solved, not written; REFUSED = skipped; short = the shortfall after the solve; anim-hand = the "
+                                "animated hand's move since the last call); the proof of F67f: hand-grip after the solve 0.0-0.5 cm on every frame",
+                                evNo, rate, static_cast<double>(r.armedW));
+            }
+        }
+        if (remaining > 0) {
+            char l[200], rr[200];
+            double dyaw = static_cast<double>(r.fpYaw) - static_cast<double>(r.rootYaw);
+            while (dyaw > 180.0) dyaw -= 360.0;
+            while (dyaw < -180.0) dyaw += 360.0;
+            ++frameNo;
+            Log::get().note("aim jump (F67e) #%d f%02d/40 +%.0f ms: fp yaw %+.1f (%+.0f deg/s), fp fwd - 3p root %+.1f deg; phi wanted %+.1f applied %+.1f deg%s; d right %+.1f "
+                            "fwd %+.1f cm%s; L %s; R %s",
+                            evNo, frameNo, static_cast<double>(f30QpcUs(r.qpc - t0Qpc)) * 1e-3, static_cast<double>(r.fpYaw), rate, dyaw, static_cast<double>(r.phiWant),
+                            static_cast<double>(r.phiApplied), r.phiHave ? "" : " (no square-up this call)", static_cast<double>(r.dR), static_cast<double>(r.dF),
+                            r.pinHave ? "" : " (no pin this call)", aimArmState(r.arm[0], l, sizeof(l)), aimArmState(r.arm[1], rr, sizeof(rr)));
+            --remaining;
+        }
+    }
+}
+// F67f (frame thread): the armed invariants of the second. Flight proof: hand-to-grip after the solve 0.0-0.5 cm, every armed call solved on both
+// sides, no shortfall over 1 cm (a defect), the square-up at phi even over 50 deg.
+void f67fLine(uint64_t now) noexcept {
+    static uint64_t lineMs = 0;
+    if (lineMs == 0) lineMs = now;
+    if (now - lineMs < 1000) return;
+    lineMs = now;
+    F67fWin w;
+    bool got = false;
+    for (int tries = 0; tries < 2 && !got; ++tries) {
+        const uint32_t s1 = g_f67fSeq.load(std::memory_order_acquire);
+        if (s1 & 1u) continue;
+        std::memcpy(&w, &g_f67f, sizeof(w));
+        std::atomic_thread_fence(std::memory_order_acquire);
+        got = g_f67fSeq.load(std::memory_order_relaxed) == s1;
+    }
+    g_f67fReset.store(true, std::memory_order_relaxed);
+    if (!got || w.armedFull == 0) return;
+    char why[2][200], wt[2][220];
+    for (int k = 0; k < 2; ++k) {
+        why[k][0] = '\0';
+        size_t used = 0;
+        for (int q = 0; q < kF67fWhyKinds; ++q) {
+            if (!w.why[k][q]) continue;
+            const int n = std::snprintf(why[k] + used, sizeof(why[k]) - used, "%s%s %llu", used ? ", " : "", kF67fWhyText[q], static_cast<unsigned long long>(w.why[k][q]));
+            if (n > 0) used = std::min(sizeof(why[k]) - 1, used + static_cast<size_t>(n));
+        }
+        if (why[k][0]) std::snprintf(wt[k], sizeof(wt[k]), " (%s)", why[k]);
+        else wt[k][0] = '\0';
+    }
+    const double en0 = w.errN[0] ? static_cast<double>(w.errN[0]) : 1.0, en1 = w.errN[1] ? static_cast<double>(w.errN[1]) : 1.0;
+    const double sn = w.shortN ? static_cast<double>(w.shortN) : 1.0;
+    Log::get().note("native on foot armed arms (F67f): %llu armed calls (ramp complete) of %llu hook calls; L solved %llu not solved %llu%s, R solved %llu not solved %llu%s; "
+                    "hand-to-grip error after the solve (cm, the proof: 0.0-0.5) L mean %.2f max %.2f, R mean %.2f max %.2f; shortfall after the assist mean %.2f max %.2f cm, "
+                    "calls over 1 cm %llu (each a defect); calls with a written side below weight 1: %llu; square-up: %llu armed calls with a measure, phi over the old 50 deg "
+                    "limit in %llu (largest |phi| %.1f deg, largest applied %.1f deg); inputs older than 100 ms used: the FP snapshot %llu (oldest %.0f ms), G %llu (oldest %.0f ms)",
+                    static_cast<unsigned long long>(w.armedFull), static_cast<unsigned long long>(w.calls), static_cast<unsigned long long>(w.solved[0]),
+                    static_cast<unsigned long long>(w.notSolved[0]), wt[0], static_cast<unsigned long long>(w.solved[1]),
+                    static_cast<unsigned long long>(w.notSolved[1]), wt[1], w.errSum[0] / en0, w.errMax[0], w.errSum[1] / en1, w.errMax[1],
+                    w.shortSum / sn, w.shortMax, static_cast<unsigned long long>(w.shortOver1), static_cast<unsigned long long>(w.wBelow1),
+                    static_cast<unsigned long long>(w.sqN), static_cast<unsigned long long>(w.sqOver), w.sqAbsMaxDeg, w.sqAppliedAbsMaxDeg,
+                    static_cast<unsigned long long>(w.staleFp), w.fpAgeMax, static_cast<unsigned long long>(w.staleG), w.gAgeMax);
+}
 nofoot::IkBlend g_ikBlend;               // frame thread only
 nofoot::IkBlend g_ikSqBlend{0.0f, nofoot::kIkSquareRampSec};   // F57: the square-up's ramp (frame thread only)
 nofoot::IkBlend g_ikAdsBlend{0.0f, nofoot::kIkAdsRampSec};     // F59: the ADS weight's ramp (frame thread only)
@@ -11239,7 +11944,7 @@ void armIkTick(uint64_t now) noexcept {
     uint64_t fpRead = 0;
     if (ikFpRead(fpm, &fpRead)) fpMsLast = fpRead;
     const uint64_t fpMs = fpMsLast;
-    const bool fpFresh = fpMs != 0 && (now > fpMs ? now - fpMs : 0) <= nofoot::kIkFreshMs;
+    const bool fpHave = fpMs != 0;   // F67f: a snapshot of any age is a record in the FP root's frame; its age is a figure, no longer a gate
     IkGData gNow;
     if (ikGRead(&gNow)) {
         gLast = gNow;
@@ -11247,16 +11952,16 @@ void armIkTick(uint64_t now) noexcept {
     }
     const IkGData& G = gLast;
     const bool gOk = gHave;
-    const bool gFresh = gOk && (now > G.ms ? now - G.ms : 0) <= nofoot::kIkFreshMs;
     const bool active = nativeOnFootActive();
     const char* gate = !active ? "not native stereo on foot" : g_alignMode.load(std::memory_order_relaxed) != 2 ? "not body mode (body align = body)"
                      : !g_fpKeyOn.load(std::memory_order_relaxed) ? "fix.native_on_foot_hide_fp_body is off"
                      : !g_unclipKeyOn.load(std::memory_order_relaxed) ? "fix.native_on_foot_body_unclip is off"
                      : !pfz::g_armX.load(std::memory_order_relaxed) ? "no arm plan for the local X"
-                     : !fpFresh ? "the FP snapshot is older than 100 ms (or none)" : !gFresh ? "G is older than 100 ms (or none)"
+                     : !fpHave ? "no FP snapshot yet (the FP skeleton's Animate has not run)" : !gOk ? "no G yet (the local 3P AMC's visibility job has not run)"
                      : g_ikWriteDown.load(std::memory_order_relaxed) ? "the writes stood down" : nullptr;
     const bool writes = mode == 2 || mode == 3;
     const char* why = mode == 0 ? "the key is off" : mode == 1 ? "probe: nothing is written" : gate;
+    g_ikGateOk.store(gate == nullptr, std::memory_order_relaxed);   // F67f: the hook's armed path needs the gate open, not the blend
     g_ikBlend.step(why == nullptr, dt);
     if (!writes) g_ikBlend = nofoot::IkBlend{};   // every write path is behind nudge or on: off and probe write nothing at once
     g_ikWeight.store(g_ikBlend.w, std::memory_order_relaxed);
@@ -11286,6 +11991,8 @@ void armIkTick(uint64_t now) noexcept {
     }
     f66dLine(now, mode);   // F66d: the hinge line, once a second
     f66gLine(now);         // F66g: the frame order and the parity split, once a second
+    f67eDrain(now);        // F67e: aim-jump events (the hook's records; prints only inside an event)
+    f67fLine(now);         // F67f: the armed invariants, once a second
     if (mode == 0 || !active || !g_pfzArmed) return;
     if (g_ikLineMs == 0) g_ikLineMs = now;
     if (now - g_ikLineMs < 5000) return;
@@ -11416,7 +12123,8 @@ void f58BendFrame(uint64_t now, double dt, int mode, bool full3P, bool ads, cons
     // on the neck census's head sample, and stays on in ADS (the hook adds the ADS lean). Its target: the eye target less the neck's rest
     // offset, T = (job camera - d) in body axes + the rest offset; F62a: the full-3P offset kNeckRestOffsetFull3P (0, -0.155, -0.09; it was
     // -0.161 forward), the same the head follow's neck source uses in full 3P.
-    const bool want = key && full3P && active && sFresh && s.headOk;
+    const bool pinScope = g_pinScope.load(std::memory_order_relaxed);   // F67c: the hook has its own target and needs no sample from here
+    const bool want = key && full3P && active && (pinScope || (sFresh && s.headOk));
     // F63: aiming down sights with the bend key on but the bend not wanted: say why every 5 s (a switched-off body mode announces itself).
     {
         static uint64_t adsWhyMs = 0;
@@ -11431,7 +12139,7 @@ void f58BendFrame(uint64_t now, double dt, int mode, bool full3P, bool ads, cons
     g_f58BendBlend.step(want, dt);
     if (want || g_f58BendBlend.w > 0.0f) g_f58RunUntilMs = now + 500;
     const bool run = now < g_f58RunUntilMs;
-    if (run && sFresh && s.headOk) {
+    if (run && sFresh && s.headOk && !pinScope) {
         double t[3] = {};
         for (size_t i = 0; i < 3; ++i) {
             for (size_t j = 0; j < 3; ++j)
@@ -11539,10 +12247,12 @@ void f58BendFrame(uint64_t now, double dt, int mode, bool full3P, bool ads, cons
         const F66cWin& w = g_f66c;
         const double tn = w.ticks ? static_cast<double>(w.ticks) : 1.0;
         const double gl = w.gapN[0] ? static_cast<double>(w.gapN[0]) : 1.0, gr = w.gapN[1] ? static_cast<double>(w.gapN[1]) : 1.0;
-        Log::get().note("native on foot body solve (F66c): d before the reach (right, forward) %.1f %.1f cm, after %.1f %.1f cm (means over %u align ticks; "
+        Log::get().note("native on foot body solve (F66c): %sd before the reach (right, forward) %.1f %.1f cm, after %.1f %.1f cm (means over %u align ticks; "
                         "the reach correction's largest horizontal size %.1f cm); reach constraint frames: constrained %u, infeasible %u (armed ramp %.2f); "
                         "bend: %llu calls, judder count %u (roll flips %u, pitch flips %u; F65 alternated on 45 of 90), per-call |delta roll| max %.2f deg, "
                         "|delta pitch| max %.2f deg; post-bend shoulder minus U* (cm, mean/max) L %.1f/%.1f R %.1f/%.1f over %u reach publications",
+                        g_pinScope.load(std::memory_order_relaxed) ? "[F67c: d is zero here; the pin's move and its reach correction are in the body pin "
+                                                                       "(F67c) lines] " : "",
                         100.0 * w.dHeadSum[0] / tn, 100.0 * w.dHeadSum[1] / tn, 100.0 * w.dAfterSum[0] / tn, 100.0 * w.dAfterSum[1] / tn, w.ticks,
                         100.0 * w.corrMax, w.constrained, w.infeasible, static_cast<double>(g_armedBlend.w), static_cast<unsigned long long>(b.n),
                         b.flipEither, b.flipRoll, b.flipPitch, b.dRollMax, b.dPitchMax, w.gapSum[0] / gl, w.gapMax[0], w.gapSum[1] / gr, w.gapMax[1],
@@ -11601,61 +12311,74 @@ void f58BendFrame(uint64_t now, double dt, int mode, bool full3P, bool ads, cons
     }
 }
 
-// F65b: stand armed's 1 s line (frame thread; in scope, or while the hook still counts calls): the hook's statistics read under their
-// sequence counter (two tries), then a reset requested. y15 and y7 as animated, the low-pass, the stand height, delta wanted and applied, the
-// cap and how often it bound; per leg v, h, l1, l2, the reach before and after, the knee's animated and solved interior angles, the carried
-// foot's error (about 0 mm when the solve held); calls raised and refused by reason; the legs' plan (with the R foot's confirmation).
-uint64_t g_f65bLineMs = 0;
-void f65bStandLine(uint64_t now, bool scope) noexcept {
-    if (g_f65bLineMs == 0) g_f65bLineMs = now;
-    if (now - g_f65bLineMs < 1000) return;
-    g_f65bLineMs = now;
-    StandStats st;
+// F67c: the pin's 1 s line (frame thread; in scope, or while the hook still counts calls): the hook's statistics read under their sequence counter
+// (two tries), then a reset requested. One line for the input and the refusals, one per state (standing, walking, running, jumping, and armed
+// beside them) with the proof's figures: the target - neck as written (after the bend) and the eye - neck, right, up, forward, mean and largest |value|
+// in cm, the vertical move (min, mean, max) and the horizontal move; one for the legs (re-planted, outward, lifted, per foot); one for the reach limit.
+uint64_t g_f67cLineMs = 0;
+void f67cPinLine(uint64_t now, bool scope) noexcept {
+    if (g_f67cLineMs == 0) g_f67cLineMs = now;
+    if (now - g_f67cLineMs < 1000) return;
+    g_f67cLineMs = now;
+    PinStats st;
     bool got = false;
     for (int tries = 0; tries < 2 && !got; ++tries) {
-        const uint32_t s1 = g_standStatSeq.load(std::memory_order_acquire);
+        const uint32_t s1 = g_pinStatSeq.load(std::memory_order_acquire);
         if (s1 & 1u) continue;
-        std::memcpy(&st, &g_standStats, sizeof(st));
+        std::memcpy(&st, &g_pinStats, sizeof(st));
         std::atomic_thread_fence(std::memory_order_acquire);
-        got = g_standStatSeq.load(std::memory_order_relaxed) == s1;
+        got = g_pinStatSeq.load(std::memory_order_relaxed) == s1;
     }
-    g_standStatReset.store(true, std::memory_order_relaxed);
+    g_pinStatReset.store(true, std::memory_order_relaxed);
     if (!got || (!scope && st.calls == 0)) return;
-    bool planOk = false, legOk = false;
-    uint32_t legWhy = 1, footR = 0xFFFFu;
-    for (int tries = 0; tries < 2 && !planOk; ++tries) {
-        const uint32_t s1 = pfz::g_armSeq.load(std::memory_order_acquire);
-        if (s1 & 1u) continue;
-        legOk = pfz::g_armPlan.legOk;
-        legWhy = pfz::g_armPlan.legWhy;
-        footR = pfz::g_armPlan.leg[1].H;
-        std::atomic_thread_fence(std::memory_order_acquire);
-        planOk = pfz::g_armSeq.load(std::memory_order_relaxed) == s1;
+    const double an = st.ageN ? static_cast<double>(st.ageN) : 1.0;
+    const double ne = st.fresh[0] + st.repeat[0] ? static_cast<double>(st.fresh[0] + st.repeat[0]) : 1.0;
+    const double no = st.fresh[1] + st.repeat[1] ? static_cast<double>(st.fresh[1] + st.repeat[1]) : 1.0;
+    Log::get().note("native on foot body pin (F67c, key %s): %llu hook calls, %llu pinned (refused: no P1 input %llu, input over 500 ms %llu, singular matrix "
+                    "%llu; pinned without the legs' plan %llu, without a leg solve %llu, span write %llu); P1 input age at the Animate call %.1f ms mean "
+                    "(max %.1f): P1 frames even %.1f/%.1f ms (mean/max) odd %.1f/%.1f; a NEW publication since the last call: even %u of %.0f, odd %u of "
+                    "%.0f (the bend's old target refreshed on a random subset of calls); the eyes' cyclopean offset from the scene rows %u, the cached "
+                    "one %u, none (the body's forward, no IPD offset) %u; horizontal move clamped at %.1f m %u, vertical at %.1f m %u; AMC speed mean %.2f "
+                    "max %.2f m/s",
+                    g_standKeyOn.load(std::memory_order_relaxed) ? "on" : "off", static_cast<unsigned long long>(st.calls),
+                    static_cast<unsigned long long>(st.pinned), static_cast<unsigned long long>(st.refused[kPinRefNoInput]),
+                    static_cast<unsigned long long>(st.refused[kPinRefStaleInput]), static_cast<unsigned long long>(st.refused[kPinRefMatrix]),
+                    static_cast<unsigned long long>(st.refused[kPinRefNoLegs]), static_cast<unsigned long long>(st.refused[kPinRefLeg]),
+                    static_cast<unsigned long long>(st.refused[kPinRefWrite]), st.ageSum / an, st.ageMax,
+                    st.fresh[0] + st.repeat[0] ? st.ageSumPar[0] / ne : 0.0, st.ageMaxPar[0], st.fresh[1] + st.repeat[1] ? st.ageSumPar[1] / no : 0.0,
+                    st.ageMaxPar[1], st.fresh[0], ne, st.fresh[1], no, st.cycRows, st.cycCached, st.cycNone, nofoot::kPinHorizCapM, st.hClamped,
+                    nofoot::kPinVertCapM, st.vClamped, st.speedSum / an, st.speedMax);
+    static const char* const kBinNames[5] = {"standing", "walking", "running", "jumping", "armed (any movement)"};
+    for (int b = 0; b < 5; ++b) {
+        const PinBin& p = st.bin[b];
+        if (!p.n) continue;
+        const double n = static_cast<double>(p.n);
+        Log::get().note("native on foot body pin (F67c): %s, %llu calls: target - neck as written (right, up, forward; cm) mean %+.1f %+.1f %+.1f, largest "
+                        "|value| %.1f %.1f %.1f, 3D mean %.1f max %.1f (the proof: within 3 cm); eye - neck mean %+.1f %+.1f %+.1f, largest |value| %.1f "
+                        "%.1f %.1f; vertical move min %+.1f mean %+.1f max %+.1f cm; horizontal move mean right %+.1f forward %+.1f, largest |value| %.1f %.1f cm",
+                        kBinNames[b], static_cast<unsigned long long>(p.n), p.resSum[0] / n, p.resSum[1] / n, p.resSum[2] / n, p.resMax[0], p.resMax[1],
+                        p.resMax[2], p.res3Sum / n, p.res3Max, p.enSum[0] / n, p.enSum[1] / n, p.enSum[2] / n, p.enMax[0], p.enMax[1], p.enMax[2],
+                        p.deltaMin, p.deltaSum / n, p.deltaMax, p.thSum[0] / n, p.thSum[1] / n, p.thAbsMax[0], p.thAbsMax[1]);
     }
-    const double yn = st.yN ? static_cast<double>(st.yN) : 1.0, rn = st.raised ? static_cast<double>(st.raised) : 1.0;
-    const double an = st.armedN ? static_cast<double>(st.armedN) : 1.0, cn = st.capN ? static_cast<double>(st.capN) : 1.0;
-    char legs[2][360];
-    for (int k = 0; k < 2; ++k) {
-        const StandLegStats& s = st.leg[k];
-        const double n = s.n ? static_cast<double>(s.n) : 1.0;
-        std::snprintf(legs[k], sizeof(legs[k]),
-                      "%s: v %.1f h %.1f l1 %.1f l2 %.1f cm, reach before %.3f (max %.3f) after %.3f (max %.3f), knee animated %.1f solved %.1f deg, "
-                      "foot error max %.2f mm, limited %u (%u solves)",
-                      k ? "R" : "L", 100.0 * s.vSum / n, 100.0 * s.hSum / n, 100.0 * s.l1Sum / n, 100.0 * s.l2Sum / n, s.rbSum / n, s.rbMax,
-                      s.raSum / n, s.raMax, s.kaSum / n, s.ksSum / n, s.errMaxMm, s.limited, s.n);
+    if (st.legSolves) {
+        char leg[2][300];
+        for (int k = 0; k < 2; ++k)
+            std::snprintf(leg[k], sizeof(leg[k]),
+                          "%s: re-planted toward under the hip %u calls (mean %.1f max %.1f cm), outward %u (mean %.1f max %.1f cm), lifted %u (mean %.1f max "
+                          "%.1f cm), not closed %u; hip -> foot over (l1 + l2) before max %.3f after max %.3f",
+                          k ? "R" : "L", st.replanted[k], st.replanted[k] ? st.replantSum[k] / st.replanted[k] : 0.0, st.replantMax[k], st.outward[k],
+                          st.outward[k] ? st.outwardSum[k] / st.outward[k] : 0.0, st.outwardMax[k], st.lifted[k],
+                          st.lifted[k] ? st.liftSum[k] / st.lifted[k] : 0.0, st.liftMax[k], st.notClosed[k], st.reachBeforeMax[k], st.reachAfterMax[k]);
+        Log::get().note("native on foot body pin (F67c): legs, %u solves: %s; %s; foot error max %.2f mm (about 0 when the solve held)", st.legSolves, leg[0], leg[1],
+                        st.footErrMaxMm);
     }
-    Log::get().note("native on foot stand armed (F65b, key %s): ramp %.2f; y15 animated %.3f m, y7 %.3f m, low-pass %.3f m (means); stand height %s "
-                    "%.3f m (captures %llu); delta wanted %.1f cm mean (armed calls) max %.1f, applied %.1f mean max %.1f cm over %llu raised calls; cap "
-                    "%.1f cm mean, %.1f min, bound %llu; %s; %s; calls %llu, refused: plan %llu, no stand height %llu, leg %llu, write %llu; legs plan "
-                    "%s (%s; R foot %u, inferred 100)",
-                    g_standKeyOn.load(std::memory_order_relaxed) ? "on" : "off", st.armedWLast, st.y15Sum / yn, st.y7Sum / yn, st.lpSum / yn,
-                    st.standHave ? "captured" : "NOT captured", st.standY, static_cast<unsigned long long>(st.captures), 100.0 * st.wantSum / an,
-                    100.0 * st.wantMax, 100.0 * st.appliedSum / rn, 100.0 * st.appliedMax, static_cast<unsigned long long>(st.raised),
-                    100.0 * st.capSum / cn, 100.0 * st.capMin, static_cast<unsigned long long>(st.capBound), legs[0], legs[1],
-                    static_cast<unsigned long long>(st.calls), static_cast<unsigned long long>(st.refused[kStandRefPlan]),
-                    static_cast<unsigned long long>(st.refused[kStandRefNoStand]), static_cast<unsigned long long>(st.refused[kStandRefLeg]),
-                    static_cast<unsigned long long>(st.refused[kStandRefWrite]), !planOk ? "unread" : legOk ? "ok" : "REFUSED",
-                    nofoot::ikLegWhyText(legWhy), footR);
+    if (st.reachWant) {
+        const double n = static_cast<double>(st.pinned ? st.pinned : 1);
+        Log::get().note("native on foot body pin (F67c): reach limit (armed): evaluated %u of %llu calls, active %u, infeasible %u; the correction (horizontal) "
+                        "mean %.1f max %.1f cm; the horizontal move before the correction mean right %+.1f forward %+.1f, after %+.1f %+.1f cm",
+                        st.reachWant, static_cast<unsigned long long>(st.pinned), st.reachActive, st.reachInfeasible, st.reachCorrSum / n, st.reachCorrMax,
+                        st.d0Sum[0] / n, st.d0Sum[1] / n, st.dSum[0] / n, st.dSum[1] / n);
+    }
 }
 
 void installEyeProbeOnce() {
@@ -12439,6 +13162,7 @@ struct Rec {
     char eyeSrc = 0;         // 'L' the layer's redirect mapping, 'T' ui depth's frame table, 'C' remembered, 'O' the order rule
     uint8_t flags = 0;
     char kind = 0;           // the draw call (nativeOnFootMarkerProbeDraw)
+    int8_t icon = -1;        // F67d: the icon mesh (g_iconMesh) the draw's own vertex range names; -1 none
     // F47: every marker composite draw is recorded, its stream copied or not.
     uint32_t start = 0;                  // StartInstanceLocation
     uint16_t ordEye = 0, ordAll = 0;     // its place among the frame's marker composite draws of its eye, and of the frame
@@ -12451,7 +13175,11 @@ struct Rec {
     float fixCx = 0.0f, fixCy = 0.0f;    // F66f: the icon offset e the patch used (NDC)
     double fixTx = 0.0, fixTy = 0.0;     // F66f: the anchor's target in the texture (NDC)
     drawtag::MarkerAffine fixAff;        // F66f: the affine the rows were patched with
-    uint8_t fixESrc = 0;                 // F66f: where e came from (1 the mesh, 2 the baseline)
+    uint8_t fixESrc = 0;                 // F66f: where e came from (1 the mesh, 2 the baseline, 3 the constant: F67d)
+    bool fixMeshOk = false;              // F67d: e came from the mesh: the disc vertex, the record's scale and quaternion words, and P unjittered, for the read-back's disc figure
+    double fixCentre[3] = {}, fixPu[2] = {};
+    float fixScale = 0.0f;
+    uint32_t fixQ2 = 0, fixQ3 = 0;
     float fixHead = -1.0f;               // F50: the head's speed at the decision (deg/s; -1 unknown)
     int32_t patchedAt = -1;              // the private b0's rows 4..7 after the patch (staged)
     uint8_t fixRef = 0;                  // F52: the reference the patch measured against (drawtag::RefMode)
@@ -12529,6 +13257,10 @@ struct EyeStats {
     // F66f at the draw (patched draws): the affine (sigma, u, the jitter removed), the icon offset used and its source (the mesh / the head-still
     // baseline), the draws refused for no icon offset, and the affine fallbacks (the decomposition unusable or sigma outside 0.9..1.1).
     uint64_t fNoIcon = 0, aN = 0, aOk = 0, aAxis = 0, eGeo = 0, eBase = 0;
+    // F67d: e from the constant (the last fallback; no draw is refused for want of an icon), a mesh e outside the gate, and the drawn DISC against P
+    // after the patch (the decoded vertex through the patched rows, displayed), px.
+    uint64_t eConst = 0, meshGate = 0, discN = 0;
+    double discDxSum = 0.0, discDySum = 0.0, discMax = 0.0;
     double sxSum = 0.0, sySum = 0.0, uxSum = 0.0, uySum = 0.0, jxSum = 0.0, jySum = 0.0, exPxSum = 0.0, eyPxSum = 0.0, eyPxMin = 1e30, eyPxMax = -1e30,
            sigmaDevMax = 0.0;
 };
@@ -12754,6 +13486,10 @@ struct Fix {
     double tx = 0.0, ty = 0.0;                // F66f: the anchor's target in the texture (NDC) and the affine the rows were patched with
     drawtag::MarkerAffine aff;
     int eSrc = 0;
+    bool meshOk = false;                  // F67d: e came from the mesh (the fields below are then valid)
+    double centre[3] = {}, pu[2] = {};
+    float scale = 0.0f;
+    uint32_t q2 = 0, q3 = 0;
     int keySlot = -1;                     // F52: the key slot the decision was made for
     int ref = 0;                          // F52: the reference it measured against (drawtag::RefMode)
     bool fresh = false;                   // F63: this frame's find gave P and X0; F64: and the rows are this frame's (not the newest rows)
@@ -14233,102 +14969,239 @@ void refTick(int e, uint32_t frame, double W, double H) {
     }
 }
 
-// F66f: THE ICON'S MESH. The marker composite's vertices are decoded in its vertex shader from PACKEDVERTEXDATAA.xyz and placed at the record's
-// anchor by its quaternion and scale (draw_record_tag.h: iconEdrawNdc), so the icon's offset from its anchor is geometry, not a screen constant.
-// The mesh is read once from the marker composite draw's vertex buffer (the one that is not the stride-8 instance stream): a GPU copy of its first
-// 4 KB into a staging buffer, mapped two or more frames later without a wait (drawtag::StagingRing). The layout of the vertices (the input layout
-// is not visible from here) is assumed to start with PACKEDVERTEXDATAA at an offset of 0, 16, 32 or 48 bytes into a vertex of the buffer's own
-// stride, and is accepted only when every vertex decodes to a finite point within 64 units, the mesh has 3 to 64 vertices and fits the 4 KB. The
-// icon's centre is the mean of its vertices. A mesh that is not accepted is logged with its raw words and the reason, once per buffer (six tries a
-// session): the offset then comes from the head-still baseline (affine-corrected, seeded over 30 slow-head frames) or the patch is refused as
-// "no icon offset". Render thread only.
-constexpr uint32_t kIconBytes = 4096, kIconTries = 6;
-struct IconGeo {
-    const void* vb = nullptr;   // identity only: the buffer the copy was taken from
-    uint32_t stride = 0, offset = 0, byteWidth = 0, copied = 0, tries = 0, count = 0, posOffset = 0, frame = 0;
-    int state = 0;              // 0 never tried, 1 a copy in flight, 2 decoded (centre valid), 3 refused (why)
-    const char* why = "not tried";
-    double centre[3] = {}, lo[3] = {}, hi[3] = {};
+// F67d: THE ICON'S MESH, from the draw's own vertex range. The marker composite's vertices are decoded in its vertex shader from PACKEDVERTEXDATAA.xyz
+// and placed at the record's anchor by its quaternion and scale (draw_record_tag.h: iconEdrawNdc), so the icon's offset from its anchor is geometry, not
+// a screen constant. F66 copied the first 4 KB of the bound vertex buffer, which is a 130 MB pool shared by every mesh of the frame, and never found
+// the icon. Now the draw's own arguments are used: DrawIndexed(Instanced) reads IndexCount indices from the bound index buffer at its offset +
+// StartIndexLocation and vertex (BaseVertexLocation + index) of the vertex buffer at its offset; Draw(Instanced) reads vertices StartVertexLocation..
+// + count. One GPU copy per distinct draw configuration (the table below), of the index range (up to 4 KB) and a window of the vertex buffer from
+// the base (up to 12 KB), mapped two or more frames later without a wait. The indices name the vertices; PACKEDVERTEXDATAA is looked for at +0,
+// +16, +32 or +48 of a vertex (the input layout is not visible from here) and accepted when every used vertex decodes finite within 64 units. The
+// disc's centre is drawtag::discCentre (a fan's centre vertex, else the mean of a small mesh or of the far cluster). A mesh that is not read is
+// logged with its raw words and the reason. The per-frame e is iconEdrawNdc of that vertex through the draw's own rows; the draw falls back to the
+// head-still baseline and then to the constant, so no draw is ever refused for want of an icon. Render thread only.
+constexpr uint32_t kIconIdxBytes = 4096, kIconVtxBytes = 12288, kIconSlotBytes = kIconIdxBytes + kIconVtxBytes, kIconMaxVerts = 256, kIconTries = 2;
+constexpr int kIconMeshes = 6;
+struct MarkerDrawArgs {
+    uint32_t count = 0, start = 0;
+    int32_t base = 0;
 };
-IconGeo g_icon;
-drawtag::StagingRing<2, kIconBytes> g_iconRing;
+struct IconMesh {
+    const void* vb = nullptr;   // identity only
+    const void* ib = nullptr;
+    uint32_t stride = 0, vbOffset = 0, ibOffset = 0, ibFmt = 0, count = 0, start = 0, byteWidth = 0;
+    int32_t base = 0;
+    char kind = 0;
+    int state = 0;              // 0 free, 1 a copy in flight, 2 decoded (disc valid), 3 refused (why)
+    const char* why = "not tried";
+    uint32_t tries = 0, frame = 0, nIdx = 0, nVerts = 0, maxIdx = 0, posOffset = 0, discIdx = 0xFFFFFFFFu, copiedVtx = 0;
+    int discMethod = 0;
+    double disc[3] = {}, lo[3] = {}, hi[3] = {};
+};
+IconMesh g_iconMesh[kIconMeshes];
+int g_iconOwner[2] = {-1, -1};   // the staging ring's slot -> the mesh being copied
+drawtag::StagingRing<2, kIconSlotBytes> g_iconRing;
 uint64_t g_iconLost = 0;
+uint32_t g_iconIndirect = 0, g_iconNoVb = 0, g_iconTableFull = 0;
 
-void iconCapture(ID3D11DeviceContext* ctx, uint32_t frame, ID3D11Buffer* const vbs[8], const UINT strides[8], const UINT offs[8]) {
-    IconGeo& g = g_icon;
-    if (g.state == 1 || g.tries >= kIconTries) return;
+// The mesh (index into g_iconMesh) the draw reads, starting its copy the first time it is seen; -1: indirect draw, no vertex buffer, or no room.
+int iconCapture(ID3D11DeviceContext* ctx, uint32_t frame, ID3D11Buffer* const vbs[8], const UINT strides[8], const UINT offs[8], const MarkerDrawArgs& a, char kind) {
+    if (!a.count) {
+        ++g_iconIndirect;
+        return -1;
+    }
     int pick = -1;
     for (int i = 0; i < 8 && pick < 0; ++i)
         if (vbs[i] && strides[i] != drawtag::kStreamStride && strides[i] >= 12 && strides[i] <= 128) pick = i;
-    if (pick < 0) return;
-    if ((g.state == 2 || g.state == 3) && g.vb == vbs[pick]) return;   // this buffer was decoded or refused
-    D3D11_BUFFER_DESC d{};
-    vbs[pick]->GetDesc(&d);
-    const UINT bytes = std::min<UINT>(d.ByteWidth, kIconBytes) & ~3u;
-    if (!bytes) return;
-    const drawtag::CopyRegion rg{vbs[pick], 0, bytes, 0};
-    if (g_iconRing.stage(ctx, &rg, 1, frame) < 0) return;   // no free slot: the next draw tries again
-    g.vb = vbs[pick];
-    g.stride = strides[pick];
-    g.offset = offs[pick];
-    g.byteWidth = d.ByteWidth;
-    g.copied = bytes;
-    g.frame = frame;
-    g.state = 1;
-    ++g.tries;
+    if (pick < 0) {
+        ++g_iconNoVb;
+        return -1;
+    }
+    const bool indexed = kind == 'X' || kind == 'I';
+    ID3D11Buffer* ib = nullptr;
+    DXGI_FORMAT fmt = DXGI_FORMAT_UNKNOWN;
+    UINT ibOff = 0;
+    if (indexed) ctx->IAGetIndexBuffer(&ib, &fmt, &ibOff);
+    int found = -1, freeSlot = -1;
+    for (int i = 0; i < kIconMeshes; ++i) {
+        const IconMesh& m = g_iconMesh[i];
+        if (m.state == 0) {
+            if (freeSlot < 0) freeSlot = i;
+            continue;
+        }
+        if (m.vb == vbs[pick] && m.ib == static_cast<const void*>(ib) && m.stride == strides[pick] && m.vbOffset == offs[pick] && m.ibOffset == ibOff &&
+            m.ibFmt == static_cast<uint32_t>(fmt) && m.count == a.count && m.start == a.start && m.base == a.base && m.kind == kind) {
+            found = i;
+            break;
+        }
+    }
+    if (found >= 0) {
+        if (ib) ib->Release();
+        return found;
+    }
+    if (freeSlot < 0) {
+        ++g_iconTableFull;
+        if (ib) ib->Release();
+        return -1;
+    }
+    IconMesh& m = g_iconMesh[freeSlot];
+    m = IconMesh{};
+    m.vb = vbs[pick];
+    m.ib = ib;
+    m.stride = strides[pick];
+    m.vbOffset = offs[pick];
+    m.ibOffset = ibOff;
+    m.ibFmt = static_cast<uint32_t>(fmt);
+    m.count = a.count;
+    m.start = a.start;
+    m.base = a.base;
+    m.kind = kind;
+    m.frame = frame;
+    D3D11_BUFFER_DESC vd{};
+    vbs[pick]->GetDesc(&vd);
+    m.byteWidth = vd.ByteWidth;
+    const auto refuseNow = [&](const char* why) {
+        m.state = 3;
+        m.why = why;
+        Log::get().note("native on foot marker fix (F67d): icon mesh NOT read (%s): draw %c count %u start %u base %d, vertex buffer %p (%u bytes) stride %u offset %u, "
+                        "index buffer %p format %u offset %u; the offset comes from the head-still baseline or the constant %.2f px",
+                        why, kind, a.count, a.start, a.base, m.vb, m.byteWidth, m.stride, m.vbOffset, m.ib, m.ibFmt, m.ibOffset, drawtag::kIconFallbackPx);
+        if (ib) ib->Release();   // the identity pointer stays: the same draw next frame finds this entry again and is not copied again
+    };
+    const UINT isz = fmt == DXGI_FORMAT_R16_UINT ? 2u : fmt == DXGI_FORMAT_R32_UINT ? 4u : 0u;
+    if (indexed && !isz) {
+        refuseNow("the index buffer's format is neither R16_UINT nor R32_UINT");
+        return freeSlot;
+    }
+    const uint64_t idxBytes = indexed ? static_cast<uint64_t>(a.count) * isz : 0;
+    if (idxBytes > kIconIdxBytes) {
+        refuseNow("the index range is larger than 4096 bytes: not an icon");
+        return freeSlot;
+    }
+    const int64_t vtxAt = static_cast<int64_t>(m.vbOffset) + static_cast<int64_t>(indexed ? a.base : static_cast<int32_t>(a.start)) * m.stride;
+    if (vtxAt < 0 || static_cast<uint64_t>(vtxAt) + m.stride > m.byteWidth) {
+        refuseNow("the draw's first vertex lies outside its vertex buffer");
+        return freeSlot;
+    }
+    drawtag::CopyRegion rg[2];
+    uint32_t n = 0;
+    if (indexed) {
+        rg[n].src = ib;
+        rg[n].srcOffset = ibOff + a.start * isz;
+        rg[n].bytes = static_cast<UINT>((idxBytes + 3u) & ~3ull);
+        rg[n].dstOffset = 0;
+        ++n;
+    }
+    const uint64_t wantVtx = indexed ? kIconVtxBytes : std::min<uint64_t>(kIconVtxBytes, static_cast<uint64_t>(a.count) * m.stride);
+    const uint64_t haveVtx = std::min<uint64_t>(wantVtx, static_cast<uint64_t>(m.byteWidth) - static_cast<uint64_t>(vtxAt));
+    rg[n].src = vbs[pick];
+    rg[n].srcOffset = static_cast<UINT>(vtxAt);
+    rg[n].bytes = static_cast<UINT>(haveVtx & ~3ull);
+    rg[n].dstOffset = kIconIdxBytes;
+    m.copiedVtx = rg[n].bytes;
+    ++n;
+    if (indexed) {   // the index range must lie inside the index buffer (the ring checks and refuses; say why rather than loop)
+        D3D11_BUFFER_DESC id{};
+        ib->GetDesc(&id);
+        if (static_cast<uint64_t>(rg[0].srcOffset) + rg[0].bytes > id.ByteWidth) {
+            refuseNow("the index range lies outside its index buffer");
+            return freeSlot;
+        }
+    }
+    const int ringSlot = g_iconRing.stage(ctx, rg, n, frame);
+    if (ringSlot < 0) {   // no free staging slot: the next draw tries again
+        if (ib) ib->Release();
+        m = IconMesh{};
+        return -1;
+    }
+    g_iconOwner[ringSlot & 1] = freeSlot;
+    m.state = 1;
+    ++m.tries;
+    if (ib) ib->Release();   // identity only from here (m.ib)
+    return freeSlot;
 }
 
-void iconOnData(int /*slot*/, const uint8_t* data) {
-    IconGeo& g = g_icon;
-    g.state = 3;
-    g.count = g.stride ? g.copied / g.stride : 0;
+void iconOnData(int slot, const uint8_t* data) {
+    const int mi = g_iconOwner[slot & 1];
+    g_iconOwner[slot & 1] = -1;
+    if (mi < 0 || mi >= kIconMeshes) return;
+    IconMesh& m = g_iconMesh[mi];
+    m.state = 3;
     uint32_t w[12] = {};
-    std::memcpy(w, data, std::min<size_t>(sizeof(w), g.copied));
+    std::memcpy(w, data + kIconIdxBytes, sizeof(w));
+    const bool indexed = m.kind == 'X' || m.kind == 'I';
     const auto refuse = [&](const char* why) {
-        g.why = why;
-        Log::get().note("native on foot marker fix (F66f): icon geometry NOT read (%s): buffer %p, stride %u, %u bytes (%u copied, %u vertices, "
-                        "stream offset %u); first words %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X; the icon offset comes from "
-                        "the head-still baseline or the patch is refused as 'no icon offset'",
-                        why, g.vb, g.stride, g.byteWidth, g.copied, g.count, g.offset, w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7], w[8], w[9], w[10],
-                        w[11]);
+        m.why = why;
+        Log::get().note("native on foot marker fix (F67d): icon mesh NOT read (%s): draw %c count %u start %u base %d, vertex buffer %p (%u bytes) stride %u offset %u "
+                        "(%u bytes copied), %u indices, max index %u; first vertex words %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X; the offset "
+                        "comes from the head-still baseline or the constant %.2f px",
+                        why, m.kind, m.count, m.start, m.base, m.vb, m.byteWidth, m.stride, m.vbOffset, m.copiedVtx, m.nIdx, m.maxIdx, w[0], w[1], w[2], w[3], w[4], w[5],
+                        w[6], w[7], w[8], w[9], w[10], w[11], drawtag::kIconFallbackPx);
     };
-    if (g.byteWidth > kIconBytes) return refuse("the buffer is larger than the 4 KB copied: a shared mesh pool, its range needs the draw's arguments");
-    if (g.count < 3 || g.count > 64) return refuse("the vertex count is not that of an icon quad or fan");
-    for (uint32_t off = 0; off + 12 <= g.stride && off <= 48; off += 16) {
-        double sum[3] = {}, lo[3] = {1e30, 1e30, 1e30}, hi[3] = {-1e30, -1e30, -1e30};
+    static uint32_t used[kIconMaxVerts];
+    uint32_t nUsed = 0;
+    if (indexed) {
+        const uint32_t isz = m.ibFmt == static_cast<uint32_t>(DXGI_FORMAT_R16_UINT) ? 2u : 4u;
+        uint32_t nd = 0, mx = 0;
+        if (!drawtag::readIndexRange(data, m.count, isz, &mx, used, kIconMaxVerts, &nd)) return refuse("the index range could not be read");
+        m.nIdx = m.count;
+        m.maxIdx = mx;
+        if (nd > kIconMaxVerts) return refuse("more than 256 distinct vertices: not an icon quad or fan");
+        if ((static_cast<uint64_t>(mx) + 1u) * m.stride > m.copiedVtx) return refuse("an index lies beyond the 12 KB vertex window copied from the base vertex");
+        nUsed = nd;
+    } else {
+        const uint32_t cnt = std::min<uint32_t>(m.count, m.copiedVtx / m.stride);
+        if (cnt > kIconMaxVerts) return refuse("more than 256 vertices: not an icon quad or fan");
+        for (uint32_t i = 0; i < cnt; ++i) used[i] = i;
+        nUsed = cnt;
+        m.nIdx = 0;
+    }
+    if (nUsed < 3) return refuse("fewer than 3 vertices");
+    static double pos[kIconMaxVerts][3];
+    for (uint32_t off = 0; off + 12 <= m.stride && off <= 48; off += 16) {
+        double lo[3] = {1e30, 1e30, 1e30}, hi[3] = {-1e30, -1e30, -1e30};
         bool good = true;
-        for (uint32_t v = 0; v < g.count && good; ++v) {
-            uint32_t a[3];
-            std::memcpy(a, data + static_cast<size_t>(v) * g.stride + off, sizeof(a));
-            double p[3];
-            if (!drawtag::decodePackedPosition(a[0], a[1], a[2], p)) {
+        for (uint32_t v = 0; v < nUsed && good; ++v) {
+            uint32_t a3[3];
+            std::memcpy(a3, data + kIconIdxBytes + static_cast<size_t>(used[v]) * m.stride + off, sizeof(a3));
+            if (!drawtag::decodePackedPosition(a3[0], a3[1], a3[2], pos[v])) {
                 good = false;
                 break;
             }
             for (int i = 0; i < 3; ++i) {
-                if (!(std::fabs(p[i]) <= 64.0)) good = false;
-                sum[i] += p[i];
-                lo[i] = std::min(lo[i], p[i]);
-                hi[i] = std::max(hi[i], p[i]);
+                if (!(std::fabs(pos[v][i]) <= 64.0)) good = false;
+                lo[i] = std::min(lo[i], pos[v][i]);
+                hi[i] = std::max(hi[i], pos[v][i]);
             }
         }
         if (!good || !(hi[0] - lo[0] > 1e-6 || hi[1] - lo[1] > 1e-6 || hi[2] - lo[2] > 1e-6)) continue;
+        m.posOffset = off;
+        m.nVerts = nUsed;
         for (int i = 0; i < 3; ++i) {
-            g.centre[i] = sum[i] / static_cast<double>(g.count);
-            g.lo[i] = lo[i];
-            g.hi[i] = hi[i];
+            m.lo[i] = lo[i];
+            m.hi[i] = hi[i];
         }
-        g.posOffset = off;
-        g.state = 2;
-        g.why = "decoded";
-        Log::get().note("native on foot marker fix (F66f): icon geometry read: buffer %p, stride %u, %u vertices; PACKEDVERTEXDATAA at +%u; decoded "
-                        "bounding box (%.4f, %.4f, %.4f) .. (%.4f, %.4f, %.4f), centre (the mean of the vertices) (%.4f, %.4f, %.4f); first words %08X "
-                        "%08X %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X",
-                        g.vb, g.stride, g.count, off, g.lo[0], g.lo[1], g.lo[2], g.hi[0], g.hi[1], g.hi[2], g.centre[0], g.centre[1], g.centre[2], w[0],
-                        w[1], w[2], w[3], w[4], w[5], w[6], w[7], w[8], w[9], w[10], w[11]);
+        m.discMethod = drawtag::discCentre(pos, nUsed, m.disc, &m.discIdx);
+        if (m.discMethod == 0) return refuse("no disc centre could be chosen");
+        m.state = 2;
+        m.why = "decoded";
+        static const char* const kMethod[4] = {"none", "a fan's centre vertex", "the mean of a small mesh", "the mean of the far cluster (the disc, away from its stem)"};
+        char list[900];
+        size_t len = 0;
+        list[0] = '\0';
+        for (uint32_t v = 0; v < nUsed && v < 24 && len + 60 < sizeof(list); ++v) {
+            const int k = std::snprintf(list + len, sizeof(list) - len, "%sv%u (%.3f, %.3f, %.3f)", v ? ", " : "", used[v], pos[v][0], pos[v][1], pos[v][2]);
+            if (k > 0) len += static_cast<size_t>(k);
+        }
+        Log::get().note("native on foot marker fix (F67d): icon mesh read: draw %c count %u start %u base %d, vertex buffer %p stride %u offset %u, index buffer %p "
+                        "format %u offset %u; %u indices -> %u distinct vertices (max index %u); PACKEDVERTEXDATAA at +%u; bounding box (%.4f, %.4f, %.4f) .. "
+                        "(%.4f, %.4f, %.4f); the disc: %s%s%u at (%.4f, %.4f, %.4f); vertices: %s%s",
+                        m.kind, m.count, m.start, m.base, m.vb, m.stride, m.vbOffset, m.ib, m.ibFmt, m.ibOffset, m.nIdx, m.nVerts, m.maxIdx, off, m.lo[0], m.lo[1], m.lo[2],
+                        m.hi[0], m.hi[1], m.hi[2], kMethod[m.discMethod & 3], m.discIdx != 0xFFFFFFFFu ? ", vertex v" : ", ", m.discIdx != 0xFFFFFFFFu ? used[m.discIdx] : 0u,
+                        m.disc[0], m.disc[1], m.disc[2], list, nUsed > 24 ? ", ..." : "");
         return;
     }
-    refuse("no offset of 0, 16, 32 or 48 decodes to a finite mesh within 64 units");
+    refuse("no offset of 0, 16, 32 or 48 decodes every used vertex to a finite point within 64 units");
 }
 
 // F47: the correction's decision at a marker composite draw (the tee, the game's bindings): sets g_fix.pending for this draw, or counts why
@@ -14471,6 +15344,8 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
     drawtag::MarkerAffine aff;
     double eIcon[2] = {}, T[2] = {}, nM0[2] = {};
     int eSrc = 0;
+    int meshIdx = -1;      // F67d: the mesh e was taken from (-1: not the mesh)
+    double nWuSave[2] = {};   // F67d: P unjittered through the eye's scene rows (the disc's target)
     {
         const auto norm3 = [](const float* v) {
             return std::sqrt(static_cast<double>(v[0]) * v[0] + static_cast<double>(v[1]) * v[1] + static_cast<double>(v[2]) * v[2]);
@@ -14561,6 +15436,8 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
             nM0[1] = mc[1] / mc[2];
             double nWu[2], nD[2];
             drawtag::unjitter(aff, nW, nWu);
+            nWuSave[0] = nWu[0];
+            nWuSave[1] = nWu[1];
             drawtag::displayOfUi(aff, nM0, nD);
             const double lag[2] = {nD[0] - nWu[0], nD[1] - nWu[1]};   // where the anchor is SHOWN, unpatched, against the unjittered P (the lag + e)
             const bool fresh = rowsState == drawtag::kRowsFresh && L.lastFrame != frame;
@@ -14576,17 +15453,32 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
                     ++kw.resets[e];
                 }
             }
-            // The icon offset: from the mesh (the anchor and the icon's centre through the draw's own rows) when it was read and the record is
-            // rigid; else the baseline once seeded and steady; else none, and the patch is refused as "no icon offset".
-            if (g_icon.state == 2 && headOk && hW0 == 0u && hScale > 0.0f && hScale < 1.0e6f) {
+            // The icon offset (F67d: never a refusal): from the mesh (the anchor and the disc's centre vertex through the draw's own rows, per frame)
+            // when the draw's range was read, the record is rigid and e passes the gate; else the head-still baseline once seeded and steady; else the
+            // constant of F65 (36.38 px up).
+            const int mi = r.icon;
+            if (mi >= 0 && mi < kIconMeshes && g_iconMesh[mi].state == 2 && headOk && hW0 == 0u && hScale > 0.0f && hScale < 1.0e6f) {
                 const double x0rel[3] = {X0[0] - oh[0], X0[1] - oh[1], X0[2] - oh[2]};
-                if (drawtag::iconEdrawNdc(sh->rows[4], sh->rows[5], sh->rows[7], x0rel, static_cast<double>(hScale), hQ2, hQ3, g_icon.centre, eIcon))
-                    eSrc = 1;
+                double em[2];
+                if (drawtag::iconEdrawNdc(sh->rows[4], sh->rows[5], sh->rows[7], x0rel, static_cast<double>(hScale), hQ2, hQ3, g_iconMesh[mi].disc, em)) {
+                    if (drawtag::iconEgate(em, W, H)) {
+                        eIcon[0] = em[0];
+                        eIcon[1] = em[1];
+                        eSrc = 1;
+                        meshIdx = mi;
+                    } else {
+                        ++s.meshGate;
+                    }
+                }
             }
             if (!eSrc && L.b.ready(W, H, kLagStdMaxPx)) {
                 eIcon[0] = L.b.c[0];
                 eIcon[1] = L.b.c[1];
                 eSrc = 2;
+            }
+            if (!eSrc) {
+                drawtag::iconFallbackNdc(H, eIcon);
+                eSrc = 3;
             }
             if (fresh) {
                 // |m - e| by the head's speed (the lag the patch removes), and the honesty bins (every slow-head frame; reported against e).
@@ -14609,11 +15501,6 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
                         L.rollSum[rb][k] += lag[k];
                     }
                 }
-            }
-            if (!eSrc) {
-                ++s.pWhy[drawtag::kPatchNoIcon];
-                ++s.fNoIcon;
-                return;
             }
             L.eLast[0] = eIcon[0];
             L.eLast[1] = eIcon[1];
@@ -14658,7 +15545,8 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
     s.jySum += aff.jitter[1] * H * 0.5;
     s.sigmaDevMax = std::max(s.sigmaDevMax, std::max(std::fabs(aff.sigma[0] - 1.0), std::fabs(aff.sigma[1] - 1.0)));
     if (eSrc == 1) ++s.eGeo;
-    else ++s.eBase;
+    else if (eSrc == 2) ++s.eBase;
+    else ++s.eConst;
     s.exPxSum += eIcon[0] * W * 0.5;
     s.eyPxSum += eIcon[1] * H * 0.5;
     s.eyPxMin = std::min(s.eyPxMin, eIcon[1] * H * 0.5);
@@ -14670,6 +15558,15 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
     g_fix.ty = T[1];
     g_fix.aff = aff;
     g_fix.eSrc = eSrc;
+    g_fix.meshOk = meshIdx >= 0;
+    if (g_fix.meshOk) {
+        for (int k = 0; k < 3; ++k) g_fix.centre[k] = g_iconMesh[meshIdx].disc[k];
+        g_fix.scale = hScale;
+        g_fix.q2 = hQ2;
+        g_fix.q3 = hQ3;
+    }
+    g_fix.pu[0] = nWuSave[0];
+    g_fix.pu[1] = nWuSave[1];
     g_fix.fresh = !v.newest && f != nullptr;   // F63: this frame's find gave P and X0 (F64: through this frame's rows)
     g_fix.head = g_headDps;
     g_fix.keySlot = ks;
@@ -14694,7 +15591,7 @@ void fixDecide(ID3D11DeviceContext* ctx, uint32_t frame, const Rec& r, int slot,
 // F47: EVERY marker composite draw is recorded (its eye, its place in the frame, its t33 pool, watched or not) for the per-frame lines; a
 // stride-336 pool it binds that is not watched yet is learned (the Map/Unmap tees then look for the tags in it too); the CPU shadow of its b0
 // is learned and read; and, with fix.native_on_foot_marker_fix on, the correction is decided for this draw (fixDecide).
-void markerDraw(ID3D11DeviceContext* ctx, uint32_t frame, uint64_t vs, uint32_t instances, uint32_t startInstance, char kind) {
+void markerDraw(ID3D11DeviceContext* ctx, uint32_t frame, uint64_t vs, uint32_t instances, uint32_t startInstance, char kind, const MarkerDrawArgs& args) {
     ++g_win.scanMarker;
     ++g_win.b10bDraws;
     if (g_ordFrame != frame) {
@@ -14752,7 +15649,7 @@ void markerDraw(ID3D11DeviceContext* ctx, uint32_t frame, uint64_t vs, uint32_t 
                 ++eights;
                 if (pick < 0) pick = i;
             }
-        if (fixKey) iconCapture(ctx, frame, vbs, strides, offs);   // F66f: the icon's mesh, once per buffer
+        if (fixKey) r.icon = static_cast<int8_t>(iconCapture(ctx, frame, vbs, strides, offs, args, kind));   // F67d: the icon's mesh, once per draw configuration
     }
     const Find* cpuFind = nullptr;
     if (fixKey && r.watched && direct && eights == 1 && pick >= 0 && (r.eye == 0 || r.eye == 1) && offs[pick] % drawtag::kStreamStride == 0) {
@@ -14874,7 +15771,7 @@ void markerDraw(ID3D11DeviceContext* ctx, uint32_t frame, uint64_t vs, uint32_t 
 
 // The draw tee's work (render thread, the game's bindings). F46: only the on-foot HUD draws, the marker composite and the world pool draws
 // (until both eyes' world views are in for the frame) are looked at past the vertex shader hash; the time spent in them is counted.
-void draw(ID3D11DeviceContext* ctx, uint32_t frame, uint32_t instances, uint32_t startInstance, char kind) {
+void draw(ID3D11DeviceContext* ctx, uint32_t frame, uint32_t instances, uint32_t startInstance, char kind, const MarkerDrawArgs& args) {
     ++g_win.hookCalls;
     const uint64_t vs = bindingShaderHash(BindSlot::Vs);
     const bool hud = nofoot::hudIssuerIndex(vs) >= 0;
@@ -14887,7 +15784,7 @@ void draw(ID3D11DeviceContext* ctx, uint32_t frame, uint32_t instances, uint32_t
     ++g_win.scanned;
     const uint64_t t0 = f30Qpc();
     if (hud) hudDraw(ctx, frame);
-    else if (marker) markerDraw(ctx, frame, vs, instances, startInstance, kind);
+    else if (marker) markerDraw(ctx, frame, vs, instances, startInstance, kind, args);
     else worldDraw(ctx, frame, vs, census);
     g_win.drawTicks += f30Qpc() - t0;
 }
@@ -14961,7 +15858,27 @@ void f50Residual(EyeStats& s, const WorldView& w, const float patched[16], const
     const double nF[2] = {mc[0] / mc[2], mc[1] / mc[2]}, c[2] = {r.fixCx, r.fixCy};
     double disp[2];
     drawtag::displayOfUi(r.fixAff, nF, disp);
-    const double px = (disp[0] - r.fixTx) * W * 0.5, py = (disp[1] - r.fixTy) * H * 0.5;
+    const double px = (disp[0] - r.fixTx) * W * 0.5, py = (disp[1] - r.fixTy) * H * 0.5;   // the ANCHOR (the model) against its target
+    // F67d: the figure that matters is the drawn DISC: the decoded centre vertex through the patched rows (the anchor less e through them), shown
+    // through the display map, against P unjittered. The CSV's residual columns carry it when the mesh was read.
+    double dpx = px, dpy = py;
+    bool haveDisc = false;
+    if (r.fixMeshOk) {
+        const double x0rel[3] = {X0[0] - oh[0], X0[1] - oh[1], X0[2] - oh[2]};
+        double ep[2];
+        if (drawtag::iconEdrawNdc(patched, patched + 4, patched + 12, x0rel, static_cast<double>(r.fixScale), r.fixQ2, r.fixQ3, r.fixCentre, ep)) {
+            const double nDisc[2] = {nF[0] - ep[0], nF[1] - ep[1]};
+            double dd[2];
+            drawtag::displayOfUi(r.fixAff, nDisc, dd);
+            dpx = (dd[0] - r.fixPu[0]) * W * 0.5;
+            dpy = (dd[1] - r.fixPu[1]) * H * 0.5;
+            haveDisc = true;
+            ++s.discN;
+            s.discDxSum += dpx;
+            s.discDySum += dpy;
+            s.discMax = std::max(s.discMax, std::sqrt(dpx * dpx + dpy * dpy));
+        }
+    }
     // The per-frame residual against the target goes to the second's sums and the ring the waypoint series' CSV reads, with the e the patch used (px).
     if (e == 0 || e == 1) {
         const double rex = px, rey = py;
@@ -14972,8 +15889,8 @@ void f50Residual(EyeStats& s, const WorldView& w, const float patched[16], const
         if (rn > s.eMax) s.eMax = rn;
         ResCell& cell = g_resRing[e][frame % kResRing];
         cell.frame.store(~0u, std::memory_order_relaxed);
-        cell.v[0].store(static_cast<float>(rex), std::memory_order_relaxed);
-        cell.v[1].store(static_cast<float>(rey), std::memory_order_relaxed);
+        cell.v[0].store(static_cast<float>(haveDisc ? dpx : rex), std::memory_order_relaxed);   // F67d: the disc's residual when the mesh was read, else the anchor's
+        cell.v[1].store(static_cast<float>(haveDisc ? dpy : rey), std::memory_order_relaxed);
         cell.v[2].store(static_cast<float>(c[0] * W * 0.5), std::memory_order_relaxed);
         cell.v[3].store(static_cast<float>(c[1] * H * 0.5), std::memory_order_relaxed);
         cell.frame.store(frame, std::memory_order_release);
@@ -15504,19 +16421,35 @@ void report(uint64_t nowMs) {
                 // "0 patched draws" (and the F62c line says why); a run with sigma exactly 1 says the decomposition was unusable.
                 {
                     const double an = s.aN ? double(s.aN) : 1.0, rn2 = s.eN ? double(s.eN) : 1.0;
-                    static const char* const kIconState[4] = {"never tried", "a copy in flight", "decoded", "refused"};
-                    Log::get().note("native on foot marker fix (F66f): eye %d: %llu patched draws; affine rows sigma x %.5f y %.5f (means; sigma - 1 = %+.5f, "
-                                    "%+.5f; |sigma - 1| max %.5f; expect about +0.0094 and +0.0081: the dot sat about 1%% too close to the axis), t (the rows' "
-                                    "translation) x %+.5f y %+.5f NDC; affine usable in %llu draws (else the plain translation), the texture's axis known in "
-                                    "%llu (else the TAA jitter is not removed from P); jitter removed from P %+.2f, %+.2f px (mean); icon offset e from the "
-                                    "mesh in %llu draws, from the head-still baseline in %llu, patches refused for no icon offset %llu; e y %.2f px mean "
-                                    "(min %.2f, max %.2f), x %.2f px mean (F65: 36.3 px up); icon mesh %s (%s); anchor shown against its target after the patch "
-                                    "(read back): %+.2f, %+.2f px mean, max %.2f over %llu frames",
+                    static const char* const kIconState[4] = {"free", "copy in flight", "decoded", "refused"};
+                    char meshes[420];
+                    size_t ml = 0;
+                    meshes[0] = '\0';
+                    for (int i = 0; i < kIconMeshes && ml + 90 < sizeof(meshes); ++i) {
+                        const IconMesh& im = g_iconMesh[i];
+                        if (im.state == 0) continue;
+                        const int k = std::snprintf(meshes + ml, sizeof(meshes) - ml, "%s[%d] %c %u@%u base %d stride %u: %s (%u vertices, disc v%d by method %d)", ml ? "; " : "", i,
+                                                    im.kind, im.count, im.start, im.base, im.stride, kIconState[im.state & 3], im.nVerts,
+                                                    im.discIdx == 0xFFFFFFFFu ? -1 : static_cast<int>(im.discIdx), im.discMethod);
+                        if (k > 0) ml += static_cast<size_t>(k);
+                    }
+                    if (!ml) std::snprintf(meshes, sizeof(meshes), "none seen (%u indirect draws, %u without a vertex buffer, %u over the table)", g_iconIndirect, g_iconNoVb,
+                                           g_iconTableFull);
+                    Log::get().note("native on foot marker fix (F66f/F67d): eye %d: %llu patched draws; affine rows sigma x %.5f y %.5f (means; sigma - 1 = %+.5f, "
+                                    "%+.5f; |sigma - 1| max %.5f; F66 flew 1.00000: candidate B is ruled out), t (the rows' translation) x %+.5f y %+.5f NDC; "
+                                    "affine usable in %llu draws (else the plain translation), the texture's axis known in %llu (else the TAA jitter is not "
+                                    "removed from P); jitter removed from P %+.2f, %+.2f px (mean); icon offset e from the mesh in %llu draws, from the "
+                                    "head-still baseline in %llu, from the constant %.2f px in %llu (no draw is refused for want of an icon any more); mesh e "
+                                    "outside the %.0f px gate in %llu draws; head-still baseline resets/restarts this second %llu (the F50 notes stop after 8); e y %.2f px mean "
+                                    "(min %.2f, max %.2f), x %.2f px mean; icon meshes: %s; the ANCHOR "
+                                    "(the model) shown against its target after the patch (read back): %+.2f, %+.2f px mean, max %.2f over %llu frames; the "
+                                    "drawn DISC (the decoded vertex through the patched rows, displayed) against P unjittered: %+.2f, %+.2f px mean, max %.2f "
+                                    "over %llu frames",
                                     e, ull(s.aN), s.sxSum / an, s.sySum / an, s.sxSum / an - 1.0, s.sySum / an - 1.0, s.sigmaDevMax, s.uxSum / an,
-                                    s.uySum / an, ull(s.aOk), ull(s.aAxis), s.jxSum / an, s.jySum / an, ull(s.eGeo), ull(s.eBase), ull(s.fNoIcon),
-                                    s.aN ? s.eyPxSum / an : 0.0, s.aN ? s.eyPxMin : 0.0, s.aN ? s.eyPxMax : 0.0, s.aN ? s.exPxSum / an : 0.0,
-                                    kIconState[g_icon.state >= 0 && g_icon.state < 4 ? g_icon.state : 0], g_icon.why, s.exSum / rn2, s.eySum / rn2, s.eMax,
-                                    ull(s.eN));
+                                    s.uySum / an, ull(s.aOk), ull(s.aAxis), s.jxSum / an, s.jySum / an, ull(s.eGeo), ull(s.eBase), drawtag::kIconFallbackPx,
+                                    ull(s.eConst), drawtag::kIconGatePx, ull(s.meshGate), ull(s.lagResets), s.aN ? s.eyPxSum / an : 0.0, s.aN ? s.eyPxMin : 0.0,
+                                    s.aN ? s.eyPxMax : 0.0, s.aN ? s.exPxSum / an : 0.0, meshes, s.exSum / rn2, s.eySum / rn2, s.eMax, ull(s.eN),
+                                    s.discN ? s.discDxSum / double(s.discN) : 0.0, s.discN ? s.discDySum / double(s.discN) : 0.0, s.discMax, ull(s.discN));
                 }
                 // F63, per eye: where the decisions' matches came from (the CPU identification in this frame, a held match), the hold's P
                 // and X0 fallback, the contradictions (at the draw by the CPU identification, at read-back), the read-back's confirmations;
@@ -15648,7 +16581,7 @@ void report(uint64_t nowMs) {
                                 "reset): %s; spread %.2f px (limit %.1f): %s",
                                 fixOn ? "on" : "off", g_keyIdx.key[ki], e, kw.record, ull(kw.reads[e]), kw.ordMask[e],
                                 g_refEff[e] == drawtag::kRefTemporal ? "temporal" : "world_first",
-                                L.eSrc == 1 ? "the icon's mesh" : L.eSrc == 2 ? "the head-still baseline" : "nothing yet", eOff[0], eOff[1],
+                                L.eSrc == 1 ? "the icon's mesh" : L.eSrc == 2 ? "the head-still baseline" : L.eSrc == 3 ? "the constant" : "nothing yet", eOff[0], eOff[1],
                                 eOff[0] * W * 0.5, eOff[1] * H * 0.5, W, H, L.b.c[0], L.b.c[1], L.b.c[0] * W * 0.5, L.b.c[1] * H * 0.5,
                                 L.b.stdPx(W, H), L.b.ready(W, H, kLagStdMaxPx) ? "steady" : L.b.seeded ? "seeded, std too high" : "seeding", L.b.n,
                                 ull(kw.resets[e]), L.lastReset, lag, ull(kw.decided[e]), ull(kw.patched[e]), ull(kw.newest[e]), ull(kw.stale[e]),
@@ -15909,7 +16842,7 @@ bool nativeOnFootMarkerResidual(uint32_t frame, int eye, float out[4]) {
     return c.frame.load(std::memory_order_acquire) == frame;
 }
 
-void nativeOnFootMarkerProbeDraw(ID3D11DeviceContext* ctx, uint32_t instances, uint32_t startInstance, char kind) {
+void nativeOnFootMarkerProbeDraw(ID3D11DeviceContext* ctx, uint32_t instances, uint32_t startInstance, char kind, uint32_t count, uint32_t start, int32_t base) {
     if (!ctx) return;
     ++f44::g_drawSerial;   // F47: a decision is for the draw that made it (Begin checks the serial)
     if (f44::g_fix.pending) ++f44::g_win.fixNotIssued;   // decided, but Begin never ran for it (the draw was not the layer's, or skipped)
@@ -15932,7 +16865,8 @@ void nativeOnFootMarkerProbeDraw(ID3D11DeviceContext* ctx, uint32_t instances, u
         f44::g_polledFrame = frame;
         f44::frameTurn(ctx, frame);
     }
-    f44::draw(ctx, frame, instances, startInstance, kind);
+    const f44::MarkerDrawArgs args{count, start, base};
+    f44::draw(ctx, frame, instances, startInstance, kind, args);
 }
 
 void nativeOnFootMarkerProbeUpdate(const ID3D11Resource* res, const void* data, bool boxed, uint32_t left, uint32_t right) {
@@ -16071,6 +17005,13 @@ bool nativeOnFootMarkerFixBegin(ID3D11DeviceContext* ctx) {
         r.fixTy = g_fix.ty;
         r.fixAff = g_fix.aff;
         r.fixESrc = static_cast<uint8_t>(g_fix.eSrc);
+        r.fixMeshOk = g_fix.meshOk;
+        for (int k = 0; k < 3; ++k) r.fixCentre[k] = g_fix.centre[k];
+        r.fixPu[0] = g_fix.pu[0];
+        r.fixPu[1] = g_fix.pu[1];
+        r.fixScale = g_fix.scale;
+        r.fixQ2 = g_fix.q2;
+        r.fixQ3 = g_fix.q3;
         r.fixHead = static_cast<float>(g_fix.head);
         r.patchedAt = static_cast<int32_t>(at);
         r.fixRef = static_cast<uint8_t>(g_fix.ref);
@@ -16103,7 +17044,8 @@ void nativeOnFootMarkerProbeShutdown() {
     f44::g_keyIdx = drawtag::KeyIndex<f44::kKeySlots>{};
     f44::g_stream = f44::StreamShadow{};                          // F63: the stream shadow, the biases, the keys' P
     f44::g_iconRing.release();   // F66f
-    f44::g_icon = f44::IconGeo{};
+    for (f44::IconMesh& m : f44::g_iconMesh) m = f44::IconMesh{};   // F67d
+    f44::g_iconOwner[0] = f44::g_iconOwner[1] = -1;
     for (f44::KeyP& kp : f44::g_keyP) kp = f44::KeyP{};
     if (f44::g_privCb) f44::g_privCb->Release();
     if (f44::g_workBuf) f44::g_workBuf->Release();

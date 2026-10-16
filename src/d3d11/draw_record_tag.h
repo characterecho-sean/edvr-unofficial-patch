@@ -747,6 +747,108 @@ inline bool iconEdrawNdc(const float r4[4], const float r5[4], const float r7[4]
     return std::isfinite(e[0]) && std::isfinite(e[1]);
 }
 
+// ---- F67d: the icon's mesh from the draw's own range; never a draw left unpatched for want of an icon ------------------------------------------
+// F66 flight (log 113909): the mesh was never read (the vertex buffer is a 130 MB shared pool and only its first 4 KB was copied), so e came from the
+// head-still baseline, and a draw with no baseline yet (every re-acquisition, 2672 of 41880 draws, 6.4%) was REFUSED as kPatchNoIcon: the visible
+// jumps (unpatched frames slip 2.85 px mean, 13.1 max, against 0.13 mean when patched). Now: (1) a draw is never refused for want of an icon: the
+// offset falls back to the baseline and then to the constant of F65 (36.38 px up: the F66 head-still baseline's mean, F65's 36.3), (2) the mesh is
+// read from the draw's own range (StartVertexLocation or BaseVertexLocation + the indices of StartIndexLocation, IndexCount), and e is the disc
+// centre vertex through the marker's own rows minus the anchor, per frame (the static residual is the drawn stem's perspective: the disc's offset
+// from the box grows with sqrt(1 + ty^2) in y and follows the stem's lean in x: 12.5 px in x at 30 deg and 23-30 px in y at 45 deg).
+constexpr double kIconFallbackPx = 36.38;
+inline void iconFallbackNdc(double H, double e[2]) noexcept {
+    e[0] = 0.0;
+    e[1] = H > 0.0 ? 2.0 * kIconFallbackPx / H : 0.0;
+}
+// A decoded mesh's e must be believable: within this many pixels of the constant on y and of 0 on x (the largest measured static difference is
+// 30 px; a wrong disc vertex lands far outside).
+constexpr double kIconGatePx = 60.0;
+inline bool iconEgate(const double e[2], double W, double H) noexcept {
+    const double ex = e[0] * W * 0.5, ey = e[1] * H * 0.5;
+    return std::isfinite(ex) && std::isfinite(ey) && std::fabs(ex) <= kIconGatePx && std::fabs(ey - kIconFallbackPx) <= kIconGatePx;
+}
+// The disc centre of a decoded mesh (local positions, the anchor at the origin). Method 1: a fan centre: a vertex with at least 5 others at
+// (nearly) one distance from it (within 4% of their median), the one farthest from the origin when several; the disc's ring is then around it.
+// Method 2: a small mesh (up to 6 vertices: a quad or two): the mean of all. Method 3: a larger mesh without a fan centre: the mean of the
+// vertices at least 0.75 of the largest distance from the origin (the disc, away from its stem). Method 0: fewer than 3 vertices.
+inline int discCentre(const double (*pos)[3], uint32_t n, double out[3], uint32_t* idx) noexcept {
+    out[0] = out[1] = out[2] = 0.0;
+    if (idx) *idx = 0xFFFFFFFFu;
+    if (!pos || n < 3) return 0;
+    int best = -1;
+    uint32_t bestGroup = 0;
+    double bestR = -1.0;
+    for (uint32_t c = 0; c < n && n <= 256; ++c) {
+        double d[256];
+        for (uint32_t j = 0; j < n; ++j) {
+            const double v[3] = {pos[j][0] - pos[c][0], pos[j][1] - pos[c][1], pos[j][2] - pos[c][2]};
+            d[j] = j == c ? -1.0 : length3(v);
+        }
+        // the largest group of distances within 4% of one of them
+        uint32_t group = 0;
+        for (uint32_t j = 0; j < n; ++j) {
+            if (!(d[j] > 1e-9)) continue;
+            uint32_t g = 0;
+            for (uint32_t k = 0; k < n; ++k)
+                if (d[k] > 1e-9 && std::fabs(d[k] - d[j]) <= 0.04 * d[j]) ++g;
+            group = std::max(group, g);
+        }
+        const double r = length3(pos[c]);
+        if (group >= 5 && (group > bestGroup || (group == bestGroup && r > bestR))) {
+            best = static_cast<int>(c);
+            bestGroup = group;
+            bestR = r;
+        }
+    }
+    if (best >= 0) {
+        for (int i = 0; i < 3; ++i) out[i] = pos[best][i];
+        if (idx) *idx = static_cast<uint32_t>(best);
+        return 1;
+    }
+    if (n <= 6) {
+        for (uint32_t j = 0; j < n; ++j)
+            for (int i = 0; i < 3; ++i) out[i] += pos[j][i] / static_cast<double>(n);
+        return 2;
+    }
+    double rmax = 0.0;
+    for (uint32_t j = 0; j < n; ++j) rmax = std::max(rmax, length3(pos[j]));
+    uint32_t m = 0;
+    for (uint32_t j = 0; j < n; ++j)
+        if (length3(pos[j]) >= 0.75 * rmax) {
+            ++m;
+            for (int i = 0; i < 3; ++i) out[i] += pos[j][i];
+        }
+    if (!m) return 0;
+    for (int i = 0; i < 3; ++i) out[i] /= static_cast<double>(m);
+    return 3;
+}
+// The indices of an index range (16- or 32-bit, little-endian bytes): the largest, and the distinct ones (in first-seen order) into `distinct`
+// (capacity cap; *nDistinct counts them all, the array holds the first cap). False on an unknown size or an empty range.
+inline bool readIndexRange(const uint8_t* bytes, uint32_t count, uint32_t indexSize, uint32_t* maxIdx, uint32_t* distinct, uint32_t cap, uint32_t* nDistinct) noexcept {
+    if ((indexSize != 2 && indexSize != 4) || !count || !bytes) return false;
+    uint32_t mx = 0, nd = 0;
+    for (uint32_t i = 0; i < count; ++i) {
+        uint32_t v = 0;
+        if (indexSize == 2) {
+            uint16_t t;
+            std::memcpy(&t, bytes + 2u * i, 2);
+            v = t;
+        } else {
+            std::memcpy(&v, bytes + 4u * i, 4);
+        }
+        mx = std::max(mx, v);
+        bool seen = false;
+        for (uint32_t k = 0; k < nd && k < cap && !seen; ++k) seen = distinct[k] == v;
+        if (!seen) {
+            if (nd < cap) distinct[nd] = v;
+            ++nd;
+        }
+    }
+    *maxIdx = mx;
+    *nDistinct = nd;
+    return true;
+}
+
 // F62c: THE PATCH DECISION (fix.native_on_foot_marker_fix). F53's trust gate (P through the scene rows and through the temporal pass's camera
 // agreeing under 1 px) is gone: the two are not meant to agree, and it refused about 45% of frames. The target stays ndc(P through the eye's
 // scene rows) + e: the 16-frame image dump of log 034818 shows P through cb1 270..273 following the displayed world within 5..10%, and the
@@ -766,7 +868,7 @@ enum PatchWhy : int {
     kPatchNoP = 4,         // no find of the key's P
     kPatchW = 5,           // w not positive (P behind the world view or the marker behind its own)
     kPatchGate = 6,        // |dx| or |dy| not under kPatchGateNdc
-    kPatchNoIcon = 7,      // F66f: no icon offset yet (the geometry not read, the head-still baseline not seeded)
+    kPatchNoIcon = 7,      // F66f: no icon offset yet. F67d: never issued (the constant is the last fallback); kept so the counters keep their slots
     kPatchWhyCount = 8
 };
 // F64: the eye's scene rows at a marker draw: this frame's (fresh), the eye's newest at most kSceneRowsMaxAge frames older (newest), or none

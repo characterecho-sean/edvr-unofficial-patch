@@ -1342,8 +1342,7 @@ inline const char* ikSquareWhyText(uint32_t why) noexcept {
 // 129 INFERRED by mirror: the census confirms the R foot by FindJoint("def_r_foot_joint") and refuses the legs when anything differs.
 constexpr uint32_t kLegFoot[2] = {103, 100}, kLegCalf[2] = {23, 22}, kLegThigh[2] = {18, 17};
 constexpr uint32_t kStandPov = 15, kStandHips = 7;
-constexpr double kStandLpTauSec = 0.25, kStandRampSec = 0.3, kStandReach = 0.995;
-constexpr uint64_t kStandIdleMs = 1000;   // the stand height is captured after this long unarmed and idle (no locomotion, no ADS)
+constexpr double kStandReach = 0.995;   // F67c: a leg is asked to reach at most this share of l1 + l2 (the knee slightly bent)
 // A leg's chain from its foot: F = parents[foot] (the calf), U = parents[F] (the thigh), C = parents[U] (the pelvis); ikArmChain with H = A =
 // the foot: gU = the thigh and its helpers, gF = the calf and its helpers, gH = the foot and the toe (never written). why 2 when U is not
 // directly under C.
@@ -1390,24 +1389,6 @@ inline uint32_t ikUpperBody(const uint16_t* parents, uint32_t joints, uint32_t a
         if (ikUnder(parents, joints, j, anchor) && !ikUnder(parents, joints, j, uL) && !ikUnder(parents, joints, j, uR)) out[n++] = static_cast<uint16_t>(j);
     return n;
 }
-// The cap for one leg: hip and foot (animated, model space, y up): v the vertical drop, h the horizontal distance; the hip may rise at most
-// sqrt((kStandReach (l1 + l2))^2 - h^2) - v (0 when that is negative or the reach cannot span h).
-inline double standLegCap(const double hip[3], const double foot[3], double l1, double l2) noexcept {
-    const double v = hip[1] - foot[1], dx = hip[0] - foot[0], dz = hip[2] - foot[2], h2 = dx * dx + dz * dz;
-    const double r = kStandReach * (l1 + l2), r2 = r * r - h2;
-    if (!(r2 > 0.0)) return 0.0;
-    const double c = std::sqrt(r2) - v;
-    return c > 0.0 ? c : 0.0;
-}
-// delta: clamp(standY - lpY, 0, cap) times the armed ramp; 0 with the key off, no stand height, or the ramp at 0.
-inline double standDelta(bool keyOn, double armedW, bool standHave, double standY, double lpY, double cap) noexcept {
-    if (!keyOn || !standHave || !(armedW > 0.0) || !(standY == standY) || !(lpY == lpY)) return 0.0;
-    double d = standY - lpY;
-    d = d < 0.0 ? 0.0 : d;
-    const double c = cap > 0.0 ? cap : 0.0;
-    d = d > c ? c : d;
-    return d * (armedW > 1.0 ? 1.0 : armedW);
-}
 // ---- F65c: the body align's neck source ---------------------------------------------------------------------------------------------
 // The F64 log (standing unarmed): before the bend the 3P neck sat 11.4 cm left of its target and the bend rolled the torso a mean 15 deg to
 // close it. The align's neck source was the census neck, read AFTER the hook wrote the bent pose, so the align saw a neck already under the
@@ -1433,7 +1414,9 @@ struct LegSolve {
 inline void ikRowRotate(const double v[3], const double R[9], double out[3]) noexcept {
     for (int c = 0; c < 3; ++c) out[c] = v[0] * R[c] + v[1] * R[3 + c] + v[2] * R[6 + c];
 }
-inline LegSolve legSolve(const double hip0[3], const double knee0[3], const double foot0[3], double raise) noexcept {
+// F67c: the general form. S1 is where the hip is now (hip0 moved with the pelvis), T1 where the foot is to stand (the animated foot, re-planted
+// or lifted). The pole is the part of (knee0 - hip0) across the animated hip -> foot axis, so the knee bends as animated.
+inline LegSolve legSolveTo(const double hip0[3], const double knee0[3], const double foot0[3], const double S1[3], const double T1[3]) noexcept {
     LegSolve o;
     const double hk[3] = {knee0[0] - hip0[0], knee0[1] - hip0[1], knee0[2] - hip0[2]};
     const double kf[3] = {foot0[0] - knee0[0], foot0[1] - knee0[1], foot0[2] - knee0[2]};
@@ -1447,9 +1430,8 @@ inline LegSolve legSolve(const double hip0[3], const double knee0[3], const doub
     if (!ikUnit(hf, axis)) return o;
     const double pd = ikDot(hk, axis);
     const double pole[3] = {hk[0] - axis[0] * pd, hk[1] - axis[1] * pd, hk[2] - axis[2] * pd};
-    for (int i = 0; i < 3; ++i) o.S[i] = hip0[i];
-    o.S[1] += raise;
-    const IkTwoBone tb = ikTwoBoneFrame(o.S, foot0, o.l1, o.l2, pole);
+    for (int i = 0; i < 3; ++i) o.S[i] = S1[i];
+    const IkTwoBone tb = ikTwoBoneFrame(o.S, T1, o.l1, o.l2, pole);
     if (!tb.ok) return o;
     tb.elbowAt(0.0, o.E);
     o.limited = tb.limited;
@@ -1460,16 +1442,21 @@ inline LegSolve legSolve(const double hip0[3], const double knee0[3], const doub
     if (!ikUnit(hk, u0) || !ikUnit(se, u1)) return o;
     ikRotFromTo(u0, u1, o.R1);
     double kfSw[3], d1[3], d2[3];
-    ikRowRotate(kf, o.R1, kfSw);   // the calf after swing 1 (the raised foot carried about S)
-    const double ft[3] = {foot0[0] - o.E[0], foot0[1] - o.E[1], foot0[2] - o.E[2]};
+    ikRowRotate(kf, o.R1, kfSw);   // the calf after swing 1 (the moved foot carried about S)
+    const double ft[3] = {T1[0] - o.E[0], T1[1] - o.E[1], T1[2] - o.E[2]};
     if (!ikUnit(kfSw, d1) || !ikUnit(ft, d2)) return o;
     ikRotFromTo(d1, d2, o.R2);
     double kfOut[3];
     ikRowRotate(kfSw, o.R2, kfOut);
-    const double err[3] = {o.E[0] + kfOut[0] - foot0[0], o.E[1] + kfOut[1] - foot0[1], o.E[2] + kfOut[2] - foot0[2]};
+    const double err[3] = {o.E[0] + kfOut[0] - T1[0], o.E[1] + kfOut[1] - T1[1], o.E[2] + kfOut[2] - T1[2]};
     o.footErrM = ikLen(err);
     o.ok = true;
     return o;
+}
+// The old form (F65b): the hip raised by `raise` (model y), the foot where it was.
+inline LegSolve legSolve(const double hip0[3], const double knee0[3], const double foot0[3], double raise) noexcept {
+    const double S1[3] = {hip0[0], hip0[1] + raise, hip0[2]};
+    return legSolveTo(hip0, knee0, foot0, S1, foot0);
 }
 
 // ---- F58 (TEMPORARY): the spine bend toward the head (full-3P mode: hide_fp_body and body_unclip on) ------------------------------------
@@ -2025,20 +2012,11 @@ inline RotVerdict rotCalVerdict(double camDeg, double renderDeg, double cmdDeg) 
 //  - F61 (measured: gain 1.00, sign -): a seated rotation of +a moves the game camera by -a. So a seated +a cancels an aim turn of +a.
 //  - The game's yaw delta (comp+0x5F4) is positive for a turn to the RIGHT when the yaw sign is +1 (the default, ASSUMED: the mouse's +x);
 //    its pitch delta (comp+0x5F8) is positive UP when the pitch sign is +1 (the default, ASSUMED). A sign of 0 turns that axis off.
-//  - The camera's net turn = the aim's turn + the head's own turn - the seated rotation. With the cancel equal to the aim's applied turn the
-//    view follows the headset exactly, whatever share of the head's turn the aim was given (the ramp's weight).
+//  - F67a: nothing is cancelled in the seated space and no seated rotation is published. The view is the headset's whatever the aim does (the F66
+//    flight 113909: the game camera never takes the injected aim, so F62b's cancel was the only thing turning the view, and held it still).
 constexpr double kAdsPi = 3.14159265358979323846;
 constexpr double kAdsDeg = kAdsPi / 180.0;
 constexpr double kAdsRampInSec = 0.15, kAdsRampOutSec = 0.3;   // the weight's ramp into ADS and out of it
-constexpr double kAdsUnwindSec = 0.3;                          // the release's pitch unwind
-constexpr double kAdsCatchUpSec = 0.2;                         // after the unwind, the most time the remainder is chased before it is dropped
-constexpr double kAdsPitchClampRad = 60.0 * kAdsDeg;          // the seated pitch is held to +-60 deg
-constexpr double kAdsGuardTurnRad = 270.0 * kAdsDeg;          // the runaway guard: more seated yaw than this in kAdsGuardWindowMs trips it
-constexpr uint64_t kAdsGuardWindowMs = 3000;
-constexpr double kAdsResFloorDeg = 8.0;      // the residual guard: |camera - head| at least this, ...
-constexpr double kAdsResRatio = 0.5;         // ... at least this share of the head's own turn since the base, ...
-constexpr double kAdsResGrowDeg = 4.0;       // ... grown by at least this ...
-constexpr uint64_t kAdsResGrowMs = 500;      // ... over this long without falling 1 deg below its peak
 constexpr double kAdsHeadJumpRad = 30.0 * kAdsDeg;   // a head sample this far from the last is a discontinuity (a LOCAL recentre), not motion
 constexpr double kAdsHeadJumpM = 0.5;
 constexpr double kAdsGainMin = 1e-3, kAdsGainMax = 1e3;   // a measured gain outside this (or not finite) reads as the fallback 1.0
@@ -2097,22 +2075,6 @@ inline double adsGain(double measured) noexcept {
 }
 // The look input that asks the game for a delta of wantGame (radians, the game's sign).
 inline double adsInput(double wantGame, double measuredGain) noexcept { return wantGame / adsGain(measuredGain); }
-// The share of a seated pitch step that keeps the pitch inside +-60 deg (a step back toward zero always passes whole).
-inline double adsPitchLimit(double accum, double delta) noexcept {
-    const double next = accum + delta;
-    if (next > kAdsPitchClampRad) return delta > 0.0 ? (accum < kAdsPitchClampRad ? kAdsPitchClampRad - accum : 0.0) : delta;
-    if (next < -kAdsPitchClampRad) return delta < 0.0 ? (accum > -kAdsPitchClampRad ? -kAdsPitchClampRad - accum : 0.0) : delta;
-    return delta;
-}
-inline double adsClampPitch(double p) noexcept {
-    return !(p == p) ? 0.0 : p > kAdsPitchClampRad ? kAdsPitchClampRad : p < -kAdsPitchClampRad ? -kAdsPitchClampRad : p;
-}
-// The release's pitch target: p0 at the release, falling linearly to 0 over kAdsUnwindSec.
-inline double adsUnwindTarget(double p0, double elapsedSec) noexcept {
-    double u = (elapsedSec > 0.0 ? elapsedSec : 0.0) / kAdsUnwindSec;
-    u = u > 1.0 ? 1.0 : u;
-    return p0 * (1.0 - u);
-}
 // The position lock: the seated offset that holds the eye where it was at entry, w (h - hEntry), h the head in natural LOCAL. The seated origin
 // moves with the head, so the reported head (and the game's camera) stays put. In F40's body-axes terms at psi 0 this is D (-e_body), D =
 // diag(-1, -1, +1), e_body = diag(1, 1, -1) dH the eye's body motion: the camera's net body motion e_body + D s is zero (adsCamBodyMotion).
@@ -2126,56 +2088,6 @@ inline void adsCamBodyMotion(const double dH[3], const double s[3], double out[3
     out[1] = dH[1] - s[1];
     out[2] = -dH[2] + s[2];
 }
-// The runaway guard's turn window: the seated yaw's absolute steps in 50 ms buckets over the last 3 s.
-struct AdsTurnWindow {
-    static constexpr int kN = 60;
-    static constexpr uint64_t kBucketMs = kAdsGuardWindowMs / 60;
-    double sum[kN] = {};
-    uint64_t id[kN] = {};
-    void add(uint64_t ms, double a) noexcept {
-        const uint64_t b = ms / kBucketMs;
-        const int k = static_cast<int>(b % kN);
-        if (id[k] != b) {
-            id[k] = b;
-            sum[k] = 0.0;
-        }
-        sum[k] += std::fabs(a == a ? a : 0.0);
-    }
-    double total(uint64_t ms) const noexcept {
-        const uint64_t b = ms / kBucketMs;
-        double t = 0.0;
-        for (int k = 0; k < kN; ++k)
-            if (id[k] <= b && id[k] + kN > b) t += sum[k];
-        return t;
-    }
-    bool over(uint64_t ms) const noexcept { return total(ms) > kAdsGuardTurnRad; }
-};
-// The residual guard: true once |camera - head| (deg) has stayed at or above the floor and kAdsResRatio x the head's own turn since the base
-// (deg), grown by kAdsResGrowDeg from where the run started, for kAdsResGrowMs, never falling 1 deg below its peak (a fall restarts the run).
-struct AdsResidualGrowth {
-    bool growing = false;
-    uint64_t startMs = 0;
-    double startAbs = 0.0, peak = 0.0;
-    bool step(uint64_t ms, double absResDeg, double absHeadDeg) noexcept {
-        const bool over = absResDeg == absResDeg && absResDeg >= kAdsResFloorDeg && absResDeg >= kAdsResRatio * absHeadDeg;
-        if (!over) {
-            growing = false;
-            return false;
-        }
-        if (!growing || absResDeg < peak - 1.0) {
-            growing = true;
-            startMs = ms;
-            startAbs = peak = absResDeg;
-            return false;
-        }
-        if (absResDeg > peak) peak = absResDeg;
-        return ms >= startMs + kAdsResGrowMs && absResDeg - startAbs >= kAdsResGrowDeg;
-    }
-    uint64_t runMs(uint64_t ms) const noexcept { return growing && ms > startMs ? ms - startMs : 0; }
-};
-// The residual's reading per axis: about 0 the view follows the head; about -2 that axis's sign is inverted (the aim turned against the head
-// and the cancel doubled it); about -1 the camera does not take the aim on that axis (the cancel alone turned the view).
-inline double adsResidualRatio(double residual, double head) noexcept { return std::fabs(head) > 1e-9 ? residual / head : 0.0; }
 
 // ---- F63: the ADS sight lock (no key; the F62b head-aim's weight drives it) ------------------------------------------------------------
 // The sight line runs through P14w (the FP povCamera joint 14, model space through the full F_root, no minus d) along the FP root's forward f.
@@ -2234,7 +2146,7 @@ inline void clampNorm3(double v[3], double maxM) noexcept {
     if (n > maxM)
         for (int i = 0; i < 3; ++i) v[i] *= maxM / n;
 }
-// The guard, AdsResidualGrowth's pattern in metres: true once |e perpendicular| has stayed at or above the floor and grown by kAdsSightGrowM
+// The guard (F62b's residual guard, gone in F67a, had this pattern in degrees): true once |e perpendicular| has stayed at or above the floor and grown by kAdsSightGrowM
 // from where the run started over kAdsSightGrowMs, never falling kAdsSightFallM below its peak (a fall restarts the run).
 constexpr double kAdsSightFloorM = 0.02, kAdsSightGrowM = 0.01, kAdsSightFallM = 0.005;
 constexpr uint64_t kAdsSightGrowMs = 500;
@@ -2493,5 +2405,301 @@ inline void frameOrder3(uint64_t tP, uint64_t tA, uint64_t tS, char out[4]) noex
         }
     for (int i = 0; i < 3; ++i) out[i] = name[idx[i]];
 }
+// ---- F67a: ADS aim without a seated cancel ---------------------------------------------------------------------------------------------------
+// (reviews\native-onfoot-body-review-2026-10-16.md sections 5 and 6; the F66 flight edvr_gfx_20261016_113909.) F62b sent the headset's turn to the game
+// as look input and took the turn the game applied back out of the view in the seated space. The camera never takes the injected aim, so the cancel
+// was the only thing turning the view: it held the view still while the head turned (the residual ratio -1), the residual grew and the guard that
+// read the growth latched until the key was toggled. F67a deletes the cancel and the guard. The view is the headset's; the weapon is steered onto it.
+// Each frame, with the ADS weight w, the look input asked for is k * w * (the view's direction less the weapon's, less what is already in flight),
+// k 0.3: the view is the right eye's solved rows (its forward is the clip w column), the weapon is the FP root's forward. "In flight" is the sum of the
+// last kAdsAimFlightFrames asks (not the game's applied turn: that lands a frame before the animation shows it, and a loop that subtracted it on landing
+// overshot the cone by 11 deg in the model; a window of asks is stable for the game's gain 0.85 and up to two frames of lag in seeing the weapon).
+// Seat convention throughout
+// (yaw + left, pitch + up). The weapon's yaw offset from the body's facing is held inside the cone (20 deg until F67b has measured the game's);
+// injection that would take it further out stops. Every ADS press starts from AdsAimRun::reset().
+constexpr double kAdsAimK = 0.3;                    // the share of the remaining error asked for each frame
+constexpr double kAdsConeBoundDeg = 20.0;           // the weapon's yaw offset from the body, at most, until F67b's measurement replaces it
+constexpr int kAdsAimFlightFrames = 3;              // an ask counts as in flight for this many frames: queued, applied by the game's next look update, seen
+
+// The turn the weapon still needs to reach the view (view minus weapon, radians, seat convention: yaw + = the weapon must turn LEFT), from the view's
+// axes (the right eye's rows: RotFrameSum::add(right, up, forward)) and the weapon's forward. False when an axis is degenerate.
+inline bool adsAimError(const RotFrameSum& view, const double weaponForward[3], double* errYaw, double* errPitch) noexcept {
+    *errYaw = *errPitch = 0.0;
+    RotFrameSum weapon;
+    const double none[3] = {0.0, 0.0, 0.0};
+    weapon.add(none, none, weaponForward);
+    double dy = 0.0, dp = 0.0;
+    if (!rotFrameDelta(view, weapon, &dy, &dp)) return false;
+    // rotFrameDelta(view, weapon) is the weapon's turn away from the view (+ = left of it); the weapon must turn back by that.
+    *errYaw = -dy * kAdsDeg;
+    *errPitch = -dp * kAdsDeg;
+    return true;
+}
+// The cone: the injection allowed when the weapon's yaw offset from the body is off (radians, + left) and `want` more is asked for. Inside the bound
+// the offset is clamped to it; past it nothing that goes further out is allowed (a move toward the body passes whole).
+inline double adsConeLimit(double off, double want, double bound) noexcept {
+    if (!(want == want) || !(off == off) || !(bound >= 0.0)) return 0.0;
+    const double lim = std::fabs(off) > bound ? std::fabs(off) : bound;
+    double t = off + want;
+    t = t > lim ? lim : t < -lim ? -lim : t;
+    return t - off;
+}
+struct AdsAimRun {
+    double ring[kAdsAimFlightFrames][2] = {};   // the last asks (seat radians: yaw, pitch), newest first
+    void reset() noexcept {
+        for (auto& r : ring) r[0] = r[1] = 0.0;
+    }
+    double pending(int axis) const noexcept {
+        double t = 0.0;
+        for (const auto& r : ring) t += r[axis ? 1 : 0];
+        return t;
+    }
+    void push(double yaw, double pitch) noexcept {
+        for (int i = kAdsAimFlightFrames - 1; i > 0; --i) {
+            ring[i][0] = ring[i - 1][0];
+            ring[i][1] = ring[i - 1][1];
+        }
+        ring[0][0] = yaw;
+        ring[0][1] = pitch;
+    }
+    void age() noexcept { push(0.0, 0.0); }   // a frame that asked for nothing (no data) still ages the window
+    struct Out {
+        double yaw = 0.0, pitch = 0.0;   // the turn asked for this frame (radians, seat convention)
+        bool limited = false;            // the cone cut the yaw
+        bool pastBound = false;          // the weapon (with what is in flight) is already past the cone
+    };
+    // errYaw, errPitch: adsAimError; w the ADS weight; offYaw the weapon's yaw offset from the body; bound the cone (radians); an axis that is off asks 0.
+    Out ask(double errYaw, double errPitch, double w, double offYaw, double bound, bool yawOn, bool pitchOn) noexcept {
+        Out o;
+        const double wt = unit01(w);
+        const double p0 = pending(0), p1 = pending(1);
+        double wantY = kAdsAimK * wt * (errYaw - p0);
+        double wantP = kAdsAimK * wt * (errPitch - p1);
+        if (!(wantY == wantY) || !yawOn) wantY = 0.0;
+        if (!(wantP == wantP) || !pitchOn) wantP = 0.0;
+        const double offEff = offYaw + p0;
+        o.yaw = adsConeLimit(offEff, wantY, bound);
+        o.limited = o.yaw != wantY;
+        o.pastBound = std::fabs(offEff) > bound;
+        o.pitch = wantP;
+        push(o.yaw, o.pitch);
+        return o;
+    }
+};
+
+// ---- F67b: the ADS instruments ------------------------------------------------------------------------------------------------------------------
+// The angle (degrees, 0 to 180) between two directions; -1 when either is degenerate.
+inline double dirAngleDeg(const double a[3], const double b[3]) noexcept {
+    double ua[3], ub[3];
+    if (!ikUnit(a, ua) || !ikUnit(b, ub)) return -1.0;
+    double c = ikDot(ua, ub);
+    c = c > 1.0 ? 1.0 : c < -1.0 ? -1.0 : c;
+    return std::acos(c) * 180.0 / kIkPi;
+}
+// The NDC of the point p + dist * (the unit of f) in an eye's scene rows (row-vector form, clip = (p - o) . rows[0..11] + rows[12..15]). False when
+// the point is behind the eye or f is degenerate. P14 itself sits behind the right eye (F66: w < 0), so the sight is sampled in front of it.
+inline bool sightPointNdc(const float rows[16], const double o[3], const double p[3], const double f[3], double dist, double ndc[2]) noexcept {
+    double fu[3];
+    ndc[0] = ndc[1] = 0.0;
+    if (!ikUnit(f, fu)) return false;
+    const double v[3] = {p[0] + dist * fu[0] - o[0], p[1] + dist * fu[1] - o[1], p[2] + dist * fu[2] - o[2]};
+    double c[4];
+    for (int j = 0; j < 4; ++j) c[j] = v[0] * rows[j] + v[1] * rows[4 + j] + v[2] * rows[8 + j] + rows[12 + j];
+    if (!(c[3] > 1e-9) || !std::isfinite(c[3])) return false;
+    ndc[0] = c[0] / c[3];
+    ndc[1] = c[1] / c[3];
+    return std::isfinite(ndc[0]) && std::isfinite(ndc[1]);
+}
+// ---- F67c: the body pinned to the camera (option B of the F66 review: the view never moves; the body follows it in 3D) ---------------------------
+// Replaces F65b's stand height. P1 publishes the job camera and the AMC matrix every frame; the Animate post-hook (stage 0) takes the cyclopean eye
+// (the job camera, the LEFT eye, moved half the IPD toward the right eye by the two eyes' solved scene rows) into the 3P model space (= body axes:
+// right, up, forward), puts the NECK target below and behind it (0.155 m down, 0.09 m back along the eye's heading, the rest offset of the F66
+// flight: the eye sat (0, 0.155, 0.09) from the neck standing), and moves the animated pose so the neck 34 lands on the target: the horizontal part
+// (right, forward) is a translation of EVERY joint, the vertical part (up, signed) a translation of the upper body with each leg solved from the moved
+// hip to its foot. The foot keeps its animated height; when the leg cannot reach, the foot is first RE-PLANTED (moved horizontally toward under the
+// hip along hip -> foot until the leg reaches with the knee slightly bent), and lifted only when even straight below the hip is out of reach (a jump);
+// when the hip is lowered past the knee's fold limit the foot is re-planted outward. Nothing captured and nothing read from a previous frame.
+// The rest offset follows the eye's HEADING (yaw) only: a head turned 90 deg would otherwise leave the 9 cm "back" on the wrong side.
+constexpr double kPinHorizCapM = 1.5, kPinVertCapM = 0.8;   // the largest pin move (a camera farther off the animated neck is clamped; the line counts it)
+constexpr double kPinRestUpM = 0.155, kPinRestBackM = 0.09;   // = -kNeckRestOffsetFull3P[1], [2]
+constexpr double kLegKneeMinDeg = 30.0;                       // the knee folds no further than this interior angle
+// The eye's horizontal heading as a unit vector in model axes (x right, z forward); (0, 0, 1) when the eye looks within ~20 deg of vertical.
+inline void pinHeading(const double fwd[3], double out[3]) noexcept {
+    const double h = std::sqrt(fwd[0] * fwd[0] + fwd[2] * fwd[2]);
+    const double n = std::sqrt(h * h + fwd[1] * fwd[1]);
+    if (!(n > 1e-9) || !(h / n > 0.35)) {
+        out[0] = 0.0;
+        out[1] = 0.0;
+        out[2] = 1.0;
+        return;
+    }
+    out[0] = fwd[0] / h;
+    out[1] = 0.0;
+    out[2] = fwd[2] / h;
+}
+// The neck target (model axes): the eye 0.155 m down and 0.09 m back along its heading.
+inline void pinNeckTarget(const double eye[3], const double fwd[3], double out[3]) noexcept {
+    double h[3];
+    pinHeading(fwd, h);
+    out[0] = eye[0] - kPinRestBackM * h[0];
+    out[1] = eye[1] - kPinRestUpM;
+    out[2] = eye[2] - kPinRestBackM * h[2];
+}
+struct PinMove {
+    double th[3] = {};   // the horizontal translation of the whole pose (model x, 0, z)
+    double delta = 0.0;  // the signed vertical move of the upper body
+    bool hClamped = false, vClamped = false;
+};
+inline PinMove pinMove(const double neck[3], const double target[3]) noexcept {
+    PinMove m;
+    double dx = target[0] - neck[0], dz = target[2] - neck[2], dy = target[1] - neck[1];
+    if (!(dx == dx) || !(dy == dy) || !(dz == dz)) return m;
+    const double h = std::sqrt(dx * dx + dz * dz);
+    if (h > kPinHorizCapM) {
+        dx *= kPinHorizCapM / h;
+        dz *= kPinHorizCapM / h;
+        m.hClamped = true;
+    }
+    if (dy > kPinVertCapM || dy < -kPinVertCapM) {
+        dy = dy > 0.0 ? kPinVertCapM : -kPinVertCapM;
+        m.vClamped = true;
+    }
+    m.th[0] = dx;
+    m.th[2] = dz;
+    m.delta = dy;
+    return m;
+}
+// A leg's shortest hip -> foot distance: the knee at kLegKneeMinDeg.
+inline double legMinReach(double l1, double l2) noexcept {
+    const double a = kLegKneeMinDeg * kIkPi / 180.0;
+    const double d2 = l1 * l1 + l2 * l2 - 2.0 * l1 * l2 * std::cos(a);
+    return d2 > 0.0 ? std::sqrt(d2) : 0.0;
+}
+// Where a foot is to stand once the hip is at hip1: the animated foot foot0 (its height kept); out of reach (past kStandReach (l1 + l2)) it is
+// re-planted toward under the hip (the same bearing, the horizontal distance shortened until the leg reaches), or lifted when straight below the hip
+// is still out of reach; closer than the fold limit it is re-planted outward (fallbackDir, a horizontal unit, when it is under the hip). The limits are
+// the knee's, widened to the ANIMATED leg's own distance animDist (hip0 -> foot0): a leg the animation itself holds nearly straight or deeply bent is
+// not moved until the pin makes it worse.
+struct LegPlant {
+    double foot[3] = {};
+    double replantM = 0.0;   // horizontal distance moved toward under the hip (+) or outward (-)
+    double liftM = 0.0;      // the foot raised by this much (a jump)
+    double reachBefore = 0.0, reachAfter = 0.0;   // hip -> foot over (l1 + l2), the animated foot and the planned one
+    bool closed = true;      // the planned foot is inside the reach range
+};
+inline LegPlant legPlant(const double hip1[3], const double foot0[3], double l1, double l2, const double fallbackDir[3], double animDist) noexcept {
+    LegPlant o;
+    for (int i = 0; i < 3; ++i) o.foot[i] = foot0[i];
+    const double L = l1 + l2;
+    if (!(L > 1e-6)) return o;
+    double rMax = kStandReach * L, rMin = legMinReach(l1, l2);
+    if (animDist == animDist && animDist > 0.0) {
+        rMax = std::max(rMax, std::min(animDist, 0.9995 * L));
+        rMin = std::min(rMin, animDist);
+    }
+    const double v = hip1[1] - foot0[1];
+    double hx = foot0[0] - hip1[0], hz = foot0[2] - hip1[2];
+    const double h = std::sqrt(hx * hx + hz * hz);
+    const double dist = std::sqrt(h * h + v * v);
+    o.reachBefore = dist / L;
+    if (dist > rMax) {
+        if (std::fabs(v) < rMax) {
+            const double h1 = std::sqrt(rMax * rMax - v * v);
+            if (h > 1e-9) {
+                o.foot[0] = hip1[0] + hx * (h1 / h);
+                o.foot[2] = hip1[2] + hz * (h1 / h);
+            }
+            o.replantM = h - h1;
+        } else {
+            o.foot[0] = hip1[0];
+            o.foot[2] = hip1[2];
+            o.replantM = h;
+            if (v > 0.0) {
+                o.foot[1] = hip1[1] - rMax;   // straight below the hip and still out of reach: the foot is lifted
+                o.liftM = o.foot[1] - foot0[1];
+            }
+        }
+    } else if (dist < rMin) {
+        const double v2 = v * v;
+        const double h1 = rMin * rMin > v2 ? std::sqrt(rMin * rMin - v2) : 0.0;
+        double dx = hx, dz = hz;
+        if (h > 1e-6) {
+            dx /= h;
+            dz /= h;
+        } else {
+            dx = fallbackDir ? fallbackDir[0] : 0.0;
+            dz = fallbackDir ? fallbackDir[2] : 1.0;
+            const double fl = std::sqrt(dx * dx + dz * dz);
+            if (fl > 1e-9) {
+                dx /= fl;
+                dz /= fl;
+            } else {
+                dx = 0.0;
+                dz = 1.0;
+            }
+        }
+        o.foot[0] = hip1[0] + dx * h1;
+        o.foot[2] = hip1[2] + dz * h1;
+        o.replantM = h - h1;   // negative: outward
+    }
+    {
+        const double fx = o.foot[0] - hip1[0], fy = hip1[1] - o.foot[1], fz = o.foot[2] - hip1[2];
+        o.reachAfter = std::sqrt(fx * fx + fy * fy + fz * fz) / L;
+        o.closed = o.reachAfter * L <= rMax + 1e-9 && o.reachAfter * L >= rMin - 1e-9;
+    }
+    return o;
+}
+// The state bin of a pin sample: 0 standing, 1 walking, 2 running, 3 jumping (airborne). speed: the AMC's horizontal speed (m/s), vy its vertical
+// speed, feetHigh whether the animated feet are both well above the ground. (Armed is counted beside, not instead.)
+constexpr double kPinWalkMps = 0.35, kPinRunMps = 3.0, kPinAirMps = 0.8, kPinFeetHighM = 0.12;
+inline int pinState(double speed, double vy, bool feetHigh) noexcept {
+    if (std::fabs(vy) > kPinAirMps || feetHigh) return 3;
+    if (speed >= kPinRunMps) return 2;
+    if (speed >= kPinWalkMps) return 1;
+    return 0;
+}
+
+// ---- F67f: while armed, both hands stay on the grips on every frame ----------------------------------------------------------------------------
+// The F66 flight: the arm IK's base weight fell to 0.0-0.5 for 0.1-0.3 s whenever the FP snapshot or G was older than 100 ms (the log's "held:
+// the FP snapshot is older than 100 ms" and "G is older than 100 ms", on every aim move and every stall), the hand target moved at most 5 cm a call
+// and the clavicle assist likewise, and the torso square-up was clamped to +-50 deg through a 0.3 s ramp. Each let the game's animated hand show or
+// the solved hand trail. The armed path now: (1) the FP snapshot is a model-space (FP root frame) record, valid at any age, G (this frame's FP root
+// and AMC) is used while at most kArmedGMaxMs old; (2) the solve weight is 1 once the armed ramp is; (3) no per-call cap on the hand or the assist;
+// (4) the square-up angle is phi itself.
+constexpr uint64_t kArmedFpMaxMs = 30000, kArmedGMaxMs = 1000;
+inline bool ikSnapshotUsable(bool have, uint64_t ageMs, bool armed) noexcept { return have && (armed ? ageMs <= kArmedFpMaxMs : ageMs <= kIkFreshMs); }
+inline bool ikGUsable(bool have, uint64_t ageMs, bool armed) noexcept { return have && (armed ? ageMs <= kArmedGMaxMs : ageMs <= kIkFreshMs); }
+// The arm's solve weight: armed and the armed ramp complete: 1 whatever the base weight, the gate or the snapshot's age; otherwise the base weight
+// times the ramp (0 unarmed: the game's arms).
+inline double ikArmedSolveWeight(bool armed, double armedRamp, double baseWeight) noexcept {
+    const double r = unit01(armedRamp);
+    if (armed && r >= 1.0) return 1.0;
+    return unit01(baseWeight) * r;
+}
+// The square-up's applied angle (radians). Armed: phi itself (no clamp, no ramp, no amount); else amount x ramp x phi clamped to +-kIkSquareMaxDeg.
+// *over: |phi| is past the old limit.
+inline double squareApplied(double phi, bool armed, double amount, double ramp, bool* over) noexcept {
+    const double lim = kIkSquareMaxDeg * kIkPi / 180.0;
+    if (over) *over = phi == phi && std::fabs(phi) > lim;
+    if (!(phi == phi)) return 0.0;
+    if (armed) return phi;
+    bool clamped = false;
+    return amount * ramp * ikSquareClampRad(phi, &clamped);
+}
+// The hand target offset (a vector from the animated hand): armed: the whole offset times the weight (no cap); else capped toward it by the caller.
+inline bool handCapApplies(bool armed) noexcept { return !armed; }
+
+// ---- F67e: the aim-jump trigger ------------------------------------------------------------------------------------------------------------------
+// The FP root's yaw rate (deg/s, signed, the yaw step wrapped into +-180) between two records dt seconds apart; an event starts when it is over 30 deg/s
+// in size while armed.
+constexpr double kAimTriggerDps = 30.0;
+inline double yawRateDps(double prevDeg, double curDeg, double dtSec) noexcept {
+    if (!(dtSec > 0.0) || !(prevDeg == prevDeg) || !(curDeg == curDeg)) return 0.0;
+    double d = curDeg - prevDeg;
+    while (d > 180.0) d -= 360.0;
+    while (d < -180.0) d += 360.0;
+    return d / dtSec;
+}
+inline bool aimTrigger(double rateDps, bool armed) noexcept { return armed && std::fabs(rateDps) > kAimTriggerDps; }
 }  // namespace nofoot
 }  // namespace edvr
